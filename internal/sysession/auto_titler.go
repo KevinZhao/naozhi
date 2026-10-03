@@ -83,7 +83,9 @@ const (
 
 // autoTitlerHighwater records when AutoTitler last wrote a label for a
 // key and the user-turn count at that moment. In-memory only (RFC §5):
-// worst case is one redundant rename after restart.
+// an auto title this process has no entry for (restart, or evicted) is
+// seeded rather than renamed, so its first re-title after a restart
+// waits for minUserTurns new turns.
 type autoTitlerHighwater struct {
 	lastRenamedAt    time.Time
 	lastRenameAtTurn int64
@@ -249,6 +251,9 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 	}
 	candidates := make([]candidate, 0, a.batchPerTick*4)
 	earlyStop := false
+	// Highwater entries the visitor records without a rename; committed
+	// with the renames and not counted toward the candidate cap.
+	hwSeeds := make(map[string]autoTitlerHighwater)
 
 	a.router.VisitSessions(func(snap session.SessionSnapshot) bool {
 		report.Examined++
@@ -278,6 +283,13 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 		}
 		// 5. Min-rename-interval and high-water gate, read from hwSnap.
 		hw := hwSnap[snap.Key]
+		if hw.lastRenamedAt.IsZero() && snap.UserLabel != "" && snap.LabelOrigin == "auto" {
+			// An auto title with no highwater (a previous process wrote it):
+			// seed instead of renaming, or every restart re-titles them all.
+			hwSeeds[snap.Key] = autoTitlerHighwater{lastRenamedAt: now, lastRenameAtTurn: snap.MessageCount}
+			bumpSkip("restored_auto_title")
+			return true
+		}
 		if !hw.lastRenamedAt.IsZero() && now.Sub(hw.lastRenamedAt) < a.minRenameInterval {
 			bumpSkip("min_rename_interval")
 			return true
@@ -286,6 +298,12 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 		// never-titled session lastRenameAtTurn is 0 and gating here would
 		// re-impose a minUserTurns floor on the first title.
 		if !hw.lastRenamedAt.IsZero() && snap.MessageCount-hw.lastRenameAtTurn < int64(a.minUserTurns) {
+			if snap.MessageCount < hw.lastRenameAtTurn {
+				// The count went backwards (idle eviction swaps the live
+				// since-spawn count for the windowed persisted one): rebaseline
+				// so the session doesn't wait to climb back past the old value.
+				hwSeeds[snap.Key] = autoTitlerHighwater{lastRenamedAt: hw.lastRenamedAt, lastRenameAtTurn: snap.MessageCount}
+			}
 			bumpSkip("no_new_turns")
 			return true
 		}
@@ -317,9 +335,9 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 	// Phase 2: rename serially (the shared Runner serialises subprocesses
 	// anyway). EventEntriesForKey runs with the router lock released; an
 	// empty seed fails as ErrValidation, not a Runner error, so the
-	// breaker stays clean. Highwater bumps are collected and applied with
-	// one CoW Store in commitHighwater.
-	pendingWrites := make(map[string]autoTitlerHighwater, len(candidates))
+	// breaker stays clean. Highwater bumps join the visitor's hwSeeds (no
+	// key is in both) and land in one CoW Store in commitHighwater.
+	pendingWrites := hwSeeds
 	var firstErr error
 	for _, c := range candidates {
 		if err := ctx.Err(); err != nil {

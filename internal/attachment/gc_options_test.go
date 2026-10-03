@@ -406,6 +406,48 @@ func TestGCWithRefs_MissingMetaStillReaps(t *testing.T) {
 	}
 }
 
+// TestGCWithRefs_WouldRemoveBytes: the byte total covers exactly the payloads
+// WouldRemove counts — not their .meta sidecars, not kept files — in
+// dry-run, and only the payloads counted before MaxRemove stopped a live sweep.
+func TestGCWithRefs_WouldRemoveBytes(t *testing.T) {
+	now := time.Now().UTC()
+	day10 := now.AddDate(0, 0, -10).Format("2006-01-02")
+	t.Run("dry_run", func(t *testing.T) {
+		ws := t.TempDir()
+		dayDir := filepath.Join(ws, Dir, day10)
+		if err := os.MkdirAll(dayDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(dayDir, "legacy.png"), "abc") // 3 bytes, no .meta
+		fixturePersisted(t, ws, day10, "norefs", Meta{UploadedAt: now.AddDate(0, 0, -10)})
+		fixturePersisted(t, ws, day10, "fresh", Meta{UploadedAt: now}) // kept
+		writeFile(t, filepath.Join(dayDir, "fresh.png"), strings.Repeat("k", 100))
+
+		res, err := GCWithRefs(context.Background(), ws, GCOptions{
+			UploadTTL: 7 * 24 * time.Hour, RefTTL: DefaultRefTTL, Now: now, DryRun: true,
+		})
+		if err != nil {
+			t.Fatalf("GCWithRefs: %v", err)
+		}
+		if want := int64(len("abc") + len("fake")); res.WouldRemoveBytes != want {
+			t.Errorf("WouldRemoveBytes=%d, want %d (legacy 3 + norefs payload 4)", res.WouldRemoveBytes, want)
+		}
+	})
+	t.Run("live_capped", func(t *testing.T) {
+		ws := t.TempDir()
+		seedReapable(t, ws, 5, now) // 5 × "fake"
+		res, err := GCWithRefs(context.Background(), ws, GCOptions{
+			UploadTTL: 7 * 24 * time.Hour, RefTTL: DefaultRefTTL, Now: now, MaxRemove: 2,
+		})
+		if err != nil {
+			t.Fatalf("GCWithRefs: %v", err)
+		}
+		if want := int64(2 * len("fake")); res.WouldRemoveBytes != want {
+			t.Errorf("WouldRemoveBytes=%d, want %d (2 payloads before the cap)", res.WouldRemoveBytes, want)
+		}
+	})
+}
+
 func writeFile(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {

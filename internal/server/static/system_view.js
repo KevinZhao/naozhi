@@ -1,7 +1,4 @@
-// system_view.js — extracted from dashboard.js (#2558 D4).
-//
-// Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block and the export block below are the only additions.
+// system_view.js — the 系统 view (sysession daemons).
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
@@ -9,7 +6,7 @@
 // call back into dashboard (setActivityView) goes through shell.js.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList, ui } from './state.js';
-import { esc, fetchJSON, formatDurationShort, showToast } from './nz_util.js';
+import { esc, fetchJSON, formatBytes, formatDurationShort, showToast } from './nz_util.js';
 import { wireQuickAskInput } from './auth_modal.js';
 import { shell } from './shell.js';
 import { formatAbsTime, getMsgValue, mainEmptyHtml, refreshCostSummary, renderServiceOverviewHtml, timeAgo } from './utilities.js';
@@ -17,7 +14,7 @@ import { formatAbsTime, getMsgValue, mainEmptyHtml, refreshCostSummary, renderSe
 // ===== System view (sysession daemons) =====
 //
 // Read-only mirror of the 自动化 (cron) view for naozhi's built-in background
-// daemons — today just the AutoTitler (自动化改名). The backend already exposes
+// daemons (自动化改名, attachment-gc). The backend already exposes
 // everything we need at GET /api/system/daemons (a DaemonStatus[] array; empty
 // when sysession is disabled), so this view is pure presentation:
 //   - one card per daemon: 状态点 + 名称 + 启用 pill + 描述
@@ -98,21 +95,18 @@ function systemStateMeta(state) {
 }
 
 // systemTickLabel renders a Go time.Duration (JSON-marshalled as integer
-// nanoseconds) as a compact human string. Falls back to formatDurationShort
-// once we're past sub-second, reusing the existing ms formatter.
+// nanoseconds) as a compact human string via the ms formatter.
 function systemTickLabel(ns) {
   if (!ns || ns <= 0) return '—';
   return formatDurationShort(ns / 1e6);
 }
 
-// systemStatLabel maps a flattened TickReport stat key to a Chinese label.
-// The skipped_* keys are "skipped_" + the daemon's Skipped-map reason
-// (flattenTickReport in manager.go). Keys MUST match the reasons the daemon
-// actually emits — AutoTitler's bumpSkip(...) calls in auto_titler.go produce
-// reserved_namespace / group_chat / origin_user / min_first_turns /
-// min_rename_interval / no_new_turns (pinned by
-// TestDashboardJS_SystemStatLabelsMatchAutoTitlerSkipReasons).
+// systemStatLabel maps a flattened TickReport stat key (flattenTickReport in
+// manager.go) to a Chinese label. Keys MUST match what the daemons emit:
+// AutoTitler's bumpSkip(...) reasons as skipped_*, attachment-gc's gcCount*
+// Counts keys verbatim (pinned by TestDashboardJS_SystemStatLabels*).
 // Unknown reasons keep their raw suffix so a new skip-bucket still shows up.
+// A live (non-dry-run) tick's would_reap_* counted that tick's deletions.
 const SYSTEM_STAT_LABELS = {
   examined: '检查',
   acted: '执行',
@@ -122,11 +116,23 @@ const SYSTEM_STAT_LABELS = {
   skipped_min_first_turns: '跳过·轮次不足',
   skipped_no_new_turns: '跳过·无新增对话',
   skipped_min_rename_interval: '跳过·命名间隔未到',
+  skipped_restored_auto_title: '跳过·沿用已有自动标题',
+  dry_run: '演练模式',
+  would_reap_legacy_no_meta: '可回收·无meta旧文件',
+  would_reap_meta_no_refs: '可回收·无引用(高风险)',
+  would_reap_refs_expired: '可回收·引用过期',
+  would_reap_bytes: '可回收体积',
 };
-function systemStatLabel(key) {
-  if (SYSTEM_STAT_LABELS[key]) return SYSTEM_STAT_LABELS[key];
+function systemStatLabel(key, live) {
+  const label = SYSTEM_STAT_LABELS[key];
+  if (label) return live && key.indexOf('would_reap_') === 0 ? label.replace('可回收', '已回收') : label;
   if (key.indexOf('skipped_') === 0) return '跳过·' + key.slice(8);
   return key;
+}
+// systemStatValue renders a stat: *_bytes as a size, dry_run as a yes flag.
+function systemStatValue(key, v) {
+  if (key.endsWith('_bytes')) return formatBytes(v) || '0 B';
+  return key === 'dry_run' ? (v ? '是' : '否') : String(v || 0);
 }
 
 function renderSystemView() {
@@ -166,7 +172,7 @@ function renderSystemView() {
         '</div>';
       const stats = lr.stats || {};
       const chips = Object.keys(stats).map(function (k) {
-        return '<span class="sys-stat">' + esc(systemStatLabel(k)) + ' <b>' + (stats[k] || 0) + '</b></span>';
+        return '<span class="sys-stat">' + esc(systemStatLabel(k, !stats.dry_run)) + ' <b>' + esc(systemStatValue(k, stats[k])) + '</b></span>';
       });
       if (chips.length) statsBlock = '<div class="sys-stats-label">本次统计</div><div class="sys-stats">' + chips.join('') + '</div>';
     }
@@ -203,14 +209,6 @@ function renderSystemView() {
     '</div>';
 }
 
-// reconcileSelectedNode keeps `selection.node` honest now that the sidebar node
-// selector is gone (the node picker moved into the New Session modal). It no
-// longer touches any DOM — the sidebar lists every node's sessions together —
-// but `selection.node` still drives dispatch targeting and the main header, so
-// if the persisted selection points at a node that has since disappeared
-// (remote removed server-side while the dashboard is open) we snap it back to
-// 'local'. Kept as a single entry point so the many call sites (poll, session
-// switch, session create) don't each need to re-derive the same guard.
 // deselectNodeSession clears the main pane after the node hosting the
 // selected session disconnected (PurgeNodeSubscriptions → error{node, "node
 // disconnected"}). Mirrors dismissSession's deselect: the draft is kept for
@@ -229,13 +227,15 @@ function deselectNodeSession(nodeID) {
   showToast('节点 ' + nodeID + ' 已断开，已退出该节点上的会话', 'warning');
 }
 
+// reconcileSelectedNode snaps a persisted `selection.node` back to 'local'
+// when that node has disappeared: it still drives dispatch targeting and the
+// main header. One entry point for the poll / switch / create call sites.
 function reconcileSelectedNode() {
   if (selection.node && selection.node !== 'local' && !sessionList.nodesData[selection.node]) {
     selection.node = 'local';
     try { localStorage.setItem('nz_selectedNode', selection.node); } catch(_) {}
   }
 }
-
 
 export {
   deselectNodeSession,
