@@ -319,6 +319,7 @@ func TestReverseServer_Reconnect_closesOldConn(t *testing.T) {
 
 func TestReverseServer_OnDeregister_calledOnDisconnect(t *testing.T) {
 	rs := newTestReverseServer("node-1", "tok", false)
+	rs.deregisterGrace = testDeregisterGrace
 
 	deregistered := make(chan string, 1)
 	rs.OnDeregister = func(id string) { deregistered <- id }
@@ -361,6 +362,7 @@ func TestReverseServer_OnDeregister_calledOnDisconnect(t *testing.T) {
 // fire exactly once, only when the LIVE conn finally drops.
 func TestReverseServer_StaleDeregister_doesNotFireForReplacedConn(t *testing.T) {
 	rs := newTestReverseServer("node-1", "tok", false)
+	rs.deregisterGrace = testDeregisterGrace
 
 	deregistered := make(chan string, 4)
 	rs.OnDeregister = func(id string) { deregistered <- id }

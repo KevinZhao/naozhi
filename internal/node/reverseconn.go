@@ -62,6 +62,10 @@ type ReverseConn struct {
 
 	subMu sync.Mutex
 	book  subBook // guarded by subMu
+	// heir is the successor conn that adopted book (guarded by subMu); the
+	// hub may still route a call here until it learns of the successor, so
+	// subscription calls are passed on to it.
+	heir *ReverseConn
 
 	// subWG tracks the detached Subscribe history-fetch goroutines so Close()
 	// never returns while one could still SendJSON after teardown (#2294).
@@ -365,8 +369,23 @@ func (c *ReverseConn) ProxyInterruptSession(ctx context.Context, key string) (bo
 	return resp.Interrupted, nil
 }
 
+// errNodeReconnecting is the keyed error a subscribe on a dropped conn gets:
+// the dashboard clears its pending subscribe and retries once the node's
+// sessions come back.
+const errNodeReconnecting = "node reconnecting"
+
 func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 	c.subMu.Lock()
+	if h := c.heir; h != nil {
+		c.subMu.Unlock()
+		h.Subscribe(cl, key, after)
+		return
+	}
+	if c.isDone() {
+		c.subMu.Unlock()
+		c.sendReconnecting(cl, key)
+		return
+	}
 	// A same-client re-subscribe keeps one entry but still gets its
 	// `subscribed` ack + history page.
 	alreadySub := !c.book.add(cl, key, after)
@@ -402,6 +421,7 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 			c.subMu.Unlock()
 			// No history goroutine on this path; release the token.
 			c.subWG.Done()
+			c.sendReconnecting(cl, key)
 			return
 		}
 		// Also fetch persisted history: the remote's streamEvents only pushes
@@ -431,8 +451,12 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 // a racing Unsubscribe may cause a redundant subscribe the remote tolerates.
 func (c *ReverseConn) RefreshSubscription(key string) {
 	c.subMu.Lock()
-	hasSubs := c.book.has(key)
+	h, hasSubs := c.heir, c.book.has(key)
 	c.subMu.Unlock()
+	if h != nil {
+		h.RefreshSubscription(key)
+		return
+	}
 	if hasSubs {
 		if err := c.writeJSON(ReverseMsg{Type: "subscribe", Key: key}); err != nil {
 			slog.Debug("reverseconn: refresh subscribe write failed", "node", c.id, "key", key, "err", err)
@@ -442,6 +466,11 @@ func (c *ReverseConn) RefreshSubscription(key string) {
 
 func (c *ReverseConn) Unsubscribe(cl EventSink, key string) {
 	c.subMu.Lock()
+	if h := c.heir; h != nil {
+		c.subMu.Unlock()
+		h.Unsubscribe(cl, key)
+		return
+	}
 	empty := c.book.remove(cl, key)
 	c.subMu.Unlock()
 
@@ -455,6 +484,11 @@ func (c *ReverseConn) Unsubscribe(cl EventSink, key string) {
 
 func (c *ReverseConn) RemoveClient(cl EventSink) {
 	c.subMu.Lock()
+	if h := c.heir; h != nil {
+		c.subMu.Unlock()
+		h.RemoveClient(cl)
+		return
+	}
 	emptyKeys := c.book.removeAll(cl)
 	c.subMu.Unlock()
 
@@ -462,6 +496,69 @@ func (c *ReverseConn) RemoveClient(cl EventSink) {
 		if err := c.writeJSON(ReverseMsg{Type: "unsubscribe", Key: key}); err != nil {
 			slog.Debug("reverseconn: remove client unsubscribe write failed", "node", c.id, "key", key, "err", err)
 		}
+	}
+}
+
+func (c *ReverseConn) isDone() bool {
+	select {
+	case <-c.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *ReverseConn) sendReconnecting(cl EventSink, key string) {
+	cl.SendJSON(wsproto.NewError(wsproto.Error{Key: key, Node: c.id, Error: errNodeReconnecting}))
+}
+
+// adopt moves pred's subscriptions into c and makes c pred's heir. Caller
+// holds ReverseServer.mu; lock order pred.subMu → c.subMu.
+func (c *ReverseConn) adopt(pred *ReverseConn) {
+	pred.subMu.Lock()
+	c.subMu.Lock()
+	c.book.absorb(&pred.book)
+	pred.heir = c
+	c.subMu.Unlock()
+	pred.subMu.Unlock()
+}
+
+// dropSubs releases every sink once nothing will adopt them.
+func (c *ReverseConn) dropSubs() {
+	c.subMu.Lock()
+	c.book.reset()
+	c.subMu.Unlock()
+}
+
+// resubscribeAll subscribes every adopted key again, from the newest event
+// its sinks hold, and replays what they missed while the node was away: the
+// node pushes only on Append, which a session without a process never does.
+func (c *ReverseConn) resubscribeAll() {
+	c.subMu.Lock()
+	keys := c.book.resubscribeList()
+	c.subWG.Add(len(keys))
+	c.subMu.Unlock()
+	for _, r := range keys {
+		if err := c.writeJSON(ReverseMsg{Type: "subscribe", Key: r.key, After: r.after}); err != nil {
+			slog.Debug("reverseconn: resubscribe write failed", "node", c.id, "key", r.key, "err", err)
+			c.subWG.Done()
+			continue
+		}
+		go c.catchUp(r.key, r.after)
+	}
+}
+
+func (c *ReverseConn) catchUp(key string, after int64) {
+	defer c.subWG.Done()
+	ctx, cancel := context.WithTimeout(c.baseCtx, 5*time.Second)
+	defer cancel()
+	entries, err := c.FetchEvents(ctx, key, after)
+	if err != nil {
+		slog.Debug("reverseconn: resubscribe catch-up fetch failed", "node", c.id, "key", key, "err", err)
+		return
+	}
+	if len(entries) > 0 {
+		c.broadcastToSubs(key, wsproto.NewHistory(wsproto.History{Key: key, Node: c.id, Events: entries}), newestEventTime(entries), false)
 	}
 }
 
@@ -600,12 +697,8 @@ func (c *ReverseConn) markDisconnected() {
 	}
 	c.closeMu.Unlock()
 
-	// Idempotent; unwinds in-flight history fetches like Close().
+	// Idempotent; unwinds in-flight history fetches like Close(). The book
+	// stays: ReverseServer hands it to a reconnect or drops it when the
+	// grace window lapses.
 	c.baseCancel()
-
-	// Drop sink references so disconnected browsers are not kept live for the
-	// hub's 90s subscription TTL.
-	c.subMu.Lock()
-	c.book.reset()
-	c.subMu.Unlock()
 }

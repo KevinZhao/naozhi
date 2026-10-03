@@ -76,6 +76,28 @@ func (b *subBook) observe(key string, t int64) {
 	}
 }
 
+// absorb moves every key src holds into b and leaves src empty. A key both
+// already hold keeps the older watermark: replaying a few events twice is
+// harmless, a gap is not.
+func (b *subBook) absorb(src *subBook) {
+	for key, sinks := range src.subs {
+		if len(sinks) == 0 {
+			continue
+		}
+		after := src.lastEvent[key]
+		if b.has(key) {
+			after = min(after, b.lastEvent[key])
+		}
+		for _, s := range sinks {
+			if !containsSink(b.subs[key], s) {
+				b.subs[key] = append(b.subs[key], s)
+			}
+		}
+		b.lastEvent[key] = after
+	}
+	src.reset()
+}
+
 // resubscription is one key a reconnected conn must subscribe again.
 type resubscription struct {
 	key   string

@@ -50,6 +50,7 @@ func expectClosedByServer(t *testing.T, conn *websocket.Conn, label string) {
 // close never deregistered.
 func TestReverseServer_FastReconnectDuringAck_newConnWins(t *testing.T) {
 	rs := newTestReverseServer("node-1", "tok", false)
+	rs.deregisterGrace = testDeregisterGrace
 
 	registered := make(chan *ReverseConn, 4)
 	rs.OnRegister = func(_ string, rc *ReverseConn) { registered <- rc }
@@ -174,6 +175,7 @@ func TestReverseServer_AckWriteFails_rollsBackInsert(t *testing.T) {
 // conn registered.
 func TestReverseServer_AckWriteFails_afterDisplace_firesOnDeregister(t *testing.T) {
 	rs := newTestReverseServer("node-1", "tok", false)
+	rs.deregisterGrace = testDeregisterGrace
 
 	registered := make(chan struct{}, 4)
 	rs.OnRegister = func(string, *ReverseConn) { registered <- struct{}{} }
