@@ -7,7 +7,7 @@
 // OOM the tab (#398 was effectively a no-op while WS was live).
 //
 // The mock server rejects /ws to force HTTP fallback, so we can't exercise a
-// real socket here. Instead we push event frames through the exported
+// real socket here. Instead we push event and history frames through the exported
 // `wsm.onMessage` in-page after selecting a session — the exact dispatch the
 // live socket feeds per frame, so it is a faithful regression of the bug.
 const { test, expect } = require('@playwright/test');
@@ -58,6 +58,39 @@ test.describe('#1768 WS event append bounds the live DOM', () => {
     // DOM must be bounded at the cap (not 1000+). Allow exactly the cap.
     expect(result.bubbles).toBeLessThanOrEqual(result.cap);
     // Sanity: we actually filled past the cap, so trimming really happened.
+    expect(result.bubbles).toBeGreaterThan(result.cap - 50);
+
+    await ctx.close();
+  });
+
+  test('a WS backfill history frame caps #events-scroll at MAX_LIVE_DOM_EVENTS', async ({ browser }) => {
+    const ctx = await browser.newContext({ ...desktop });
+    const page = await ctx.newPage();
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    await page.click(`.session-card[data-key="${SESSION_KEY}"]`);
+    await page.waitForSelector('#events-scroll');
+
+    // One history frame without the initial flag is a backfill: it appends
+    // (appendHistoryBackfill) instead of repainting the pane.
+    const result = await page.evaluate(async () => {
+      const sk = eval('typeof selectedKey !== "undefined" ? selectedKey : null');
+      const sn = eval('typeof selectedNode !== "undefined" ? selectedNode : "local"');
+      const w = eval('typeof wsm !== "undefined" ? wsm : null');
+      const cap = eval('typeof MAX_LIVE_DOM_EVENTS !== "undefined" ? MAX_LIVE_DOM_EVENTS : null');
+      if (!w || !sk || cap == null) return { err: 'globals missing', sk, hasW: !!w, cap };
+      const base = Date.now() + 60000; // newer than anything the REST page painted
+      const events = [];
+      for (let i = 0; i < 1000; i++) {
+        events.push({ type: 'text', detail: 'backfilled chunk ' + i, time: base + i });
+      }
+      w.onMessage({ type: 'history', key: sk, node: sn, events });
+      const el = document.getElementById('events-scroll');
+      return { cap, bubbles: el.querySelectorAll(':scope > .event').length };
+    });
+
+    expect(result.err).toBeUndefined();
+    expect(result.bubbles).toBeLessThanOrEqual(result.cap);
     expect(result.bubbles).toBeGreaterThan(result.cap - 50);
 
     await ctx.close();

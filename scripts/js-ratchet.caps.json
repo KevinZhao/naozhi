@@ -1,12 +1,10 @@
 {
   "maxFnLines": {
     "default": 120,
-    "exempt": [
-      "dashboard.js"
-    ]
+    "exempt": []
   },
   "lines": {
-    "dashboard.js": 3839
+    "dashboard.js": 3087
   },
   "sideEffectLegacy": [
     "agent_view.js",

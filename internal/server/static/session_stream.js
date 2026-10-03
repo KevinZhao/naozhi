@@ -1,7 +1,7 @@
 // session_stream.js — the selected session's subscription (S18, #3024): the
 // key and node the server streams to this tab, the subscribe in flight, and
-// the event cursor a resubscribe resumes after. dashboard.js's sessionFrames
-// and its subscribed / error handlers keep it current. A leaf like
+// the event cursor a resubscribe resumes after. event_stream.js's sessionFrames
+// and session_list.js's frame handlers keep it current. A leaf like
 // ws_manager.js: it imports contract.js, state.js and ws_manager.js only (R7).
 import { NZ_CONTRACT } from './contract.js';
 import { selection, timers, transcript } from './state.js';

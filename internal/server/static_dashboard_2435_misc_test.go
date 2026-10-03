@@ -172,7 +172,7 @@ func TestDashboardJS_TurnTimer_SurvivesOwnUserEcho(t *testing.T) {
 	t.Parallel()
 	js := readDashboardJS(t)
 	for _, marker := range []string{
-		"if (ev.type === 'user') {\n          resetTurnStateForUserEcho();",
+		"if (ev.type === 'user') {\n      resetTurnStateForUserEcho();",
 		"if (h2) h2.textContent = text;\n      }\n      resetTurnStateForUserEcho();",
 	} {
 		if !strings.Contains(js, marker) {

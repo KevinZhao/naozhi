@@ -10,15 +10,26 @@
 //    cursor is reset, not carried over);
 //  - a running push for the session already subscribed does not resubscribe;
 //    a dead→running push resubscribes from an initial page, and so does a
-//    running push after a suspended subscribe;
+//    running push after a suspended subscribe, a running push after a
+//    subscription_timeout dropped the subscription, and the running push for a
+//    dead session this tab sent to (the optimistic flip already wrote running);
+//  - a backfill history frame carrying a user event locks the question card
+//    already on screen;
+//  - a turn ending on a session off screen raises its card's unread chip;
+//  - an opening frame anchors the turn timer at its last turn's first event;
+//  - a result on either frame path ends the turn this tab started (running
+//    flips to ready, the cost lands on total_cost), and a time-less user replay
+//    on either path is not painted twice;
 //  - a send_error for the session on screen undoes the send this tab made
 //    (toast, optimistic bubble, running flip); for a session sent to and then
 //    left it only rolls the running flip back; a tab that sent nothing ignores
 //    it.
+//  - a session_state carrying a reason refetches the session list past the
+//    version cache (a process state change does not bump the store version).
 // A bookkeeping write that lands on sessionFrames instead of sessionStream leaves its
 // fields stale without throwing, so each case asserts a frame the mock saw.
 const { test, expect } = require('@playwright/test');
-const { startMockServer } = require('./mock-server');
+const { startMockServer, defaultSessions } = require('./mock-server');
 
 const desktop = { viewport: { width: 1280, height: 800 } };
 const KEY_A = 'dashboard:direct:2026-01-01-120000-1:myproject';
@@ -46,6 +57,9 @@ async function open(browser, mock, ack = {}) {
   await expect.poll(() => subs(conn, KEY_A).length).toBe(1);
   conn.send({ type: 'subscribed', key: KEY_A, ...ack });
   await page.waitForFunction((key) => sessionStream.subscribedKey === key, KEY_A);
+  // Settle the connect-time sessions refetch (debounced 300 ms): landing later,
+  // its snapshot would overwrite the state a test's frames just wrote.
+  await page.evaluate(() => debouncedFetchSessions());
   return { ctx, page, conn, errors };
 }
 
@@ -165,6 +179,110 @@ test.describe('sessionFrames keep the bookkeeping on sessionStream', () => {
     await ctx.close();
   });
 
+  test('a subscription_timeout drops the subscription, so the next running push resubscribes', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    // Back to back, so no sessions poll lands between the two pushes.
+    conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'ready', reason: 'subscription_timeout' });
+    conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'running' });
+    await reSub(conn);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  test('a backfill history frame carrying a user event locks the question card already on screen', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    const T = Date.now() + 60000;
+    conn.send({ type: 'event', key: KEY_A, event: {
+      type: 'ask_question', time: T, uuid: 'ask-1',
+      ask_question: { tool_use_id: 'tu-1', items: [{ header: 'Color', question: 'Pick one', options: [{ label: 'Red' }, { label: 'Blue' }] }] },
+    } });
+    const card = page.locator('#events-scroll .event.ask_question[data-tool-use-id="tu-1"]');
+    await expect(card.locator('.ask-opt').first()).toBeEnabled();
+    // Only the user event: the frame holds no ask→user pair for the answered-set
+    // hydration to find, so the lock has to come from the user event landing.
+    conn.send({ type: 'history', key: KEY_A, events: [{ type: 'user', detail: 'answered elsewhere', time: T + 1000, uuid: 'usr-1' }] });
+    await page.waitForSelector('#events-scroll .event[data-uuid="usr-1"]');
+    await expect(card.locator('.ask-opt').first()).toBeDisabled();
+    await expect(card.locator('.ask-status')).toHaveCount(1);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  test('a turn ending on a session off screen raises its card\'s unread chip at once', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    // KEY_B is running in the mock; no sessions poll follows a reason-less push,
+    // so the chip can only come from the push's own card patch.
+    conn.send({ type: 'session_state', key: KEY_B, node: 'local', state: 'ready' });
+    // Read the chip the moment the push lands: a later sidebar repaint paints
+    // it from perSession.unread whatever the push's own patch did.
+    const seen = await (await page.waitForFunction((k) => {
+      if (sessionsData[sid(k, 'local')].state !== 'ready') return false;
+      const chip = document.querySelector(`.session-card[data-key="${k}"] .sc-unread`);
+      return { text: chip ? chip.textContent : null };
+    }, KEY_B)).jsonValue();
+    expect(seen.text, 'the push patched the chip onto the card').toBe('1');
+    conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'running' });
+    conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'ready' });
+    await expect.poll(() => running(page, KEY_A)).toBe('ready');
+    // The chip paint skips the active card whatever the count says, so leave
+    // the card and have a push that ends no turn (ready→dead) repaint its chip
+    // from the count: a turn read live must not have bumped it.
+    await page.click(`.session-card[data-key="${KEY_B}"]`);
+    await page.waitForFunction((key) => selectedKey === key, KEY_B);
+    conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'dead' });
+    await expect.poll(() => running(page, KEY_A)).toBe('dead');
+    await expect(page.locator(`.session-card[data-key="${KEY_A}"] .sc-unread`), 'the card on screen is read live').toHaveCount(0);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  test('an opening frame anchors the turn timer at the first event of its last turn', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    const T0 = Date.now() - 125000;
+    conn.send({ type: 'history', key: KEY_A, initial: true, events: [
+      { type: 'user', detail: 'go', time: T0, uuid: 'u-go' },
+      { type: 'tool_use', tool: 'Bash', summary: 'ls', time: T0 + 1000, uuid: 'u-tool' },
+    ] });
+    await page.waitForSelector('#events-scroll .event[data-uuid="u-go"]');
+    expect(await page.evaluate(() => turnState.turnStartTime), 'anchored at the turn, not at render time').toBe(T0 + 1000);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  // A result event ends the turn on either frame path: the optimistic running
+  // flips to ready (no session_state needed) and its cost bumps total_cost.
+  for (const path of ['event', 'history']) {
+    test(`a result in ${path === 'event' ? 'an event' : 'a backfill history'} frame ends the turn this tab started`, async ({ browser }) => {
+      const { ctx, page, conn, errors } = await open(browser, mock);
+      await sendText(page, conn, 'turn-' + path);
+      await expect(page.locator('#btn-stop')).toBeVisible();
+      const result = { type: 'result', summary: 'done', time: Date.now() + 60000, uuid: 'res-' + path, cost: 7.5 };
+      conn.send(path === 'event' ? { type: 'event', key: KEY_A, event: result } : { type: 'history', key: KEY_A, events: [result] });
+      await expect.poll(() => running(page, KEY_A), { message: 'the result flips running to ready' }).toBe('ready');
+      await expect(page.locator('#btn-send')).toBeVisible();
+      expect(await page.evaluate((k) => sessionsData[sid(k, 'local')].total_cost, KEY_A)).toBe(7.5);
+      expect(errors).toEqual([]);
+      await ctx.close();
+    });
+  }
+
+  // A user bubble without a time skips the cursor guards, so only its uuid
+  // keeps a replay of it from painting twice, on either frame path.
+  for (const path of ['event', 'history']) {
+    test(`a user replay in ${path === 'event' ? 'an event' : 'a backfill history'} frame is not painted twice`, async ({ browser }) => {
+      const { ctx, page, conn, errors } = await open(browser, mock);
+      const user = { type: 'user', detail: 'same message', uuid: 'usr-replay-' + path };
+      conn.send({ type: 'event', key: KEY_A, event: user });
+      await page.waitForSelector(`#events-scroll .event[data-uuid="${user.uuid}"]`);
+      conn.send(path === 'event' ? { type: 'event', key: KEY_A, event: user } : { type: 'history', key: KEY_A, events: [user] });
+      conn.send({ type: 'event', key: KEY_A, event: ev('after-' + path, Date.now() + 60000) });
+      await shown(page, 'after-' + path); // the replay ahead of it has been handled
+      await expect(page.locator(`#events-scroll .event[data-uuid="${user.uuid}"]`)).toHaveCount(1);
+      expect(errors).toEqual([]);
+      await ctx.close();
+    });
+  }
+
   test('a send_error for the session on screen undoes the send it failed', async ({ browser }) => {
     const { ctx, page, conn, errors } = await open(browser, mock);
     await sendText(page, conn, 'm1');
@@ -205,6 +323,55 @@ test.describe('sessionFrames keep the bookkeeping on sessionStream', () => {
     conn.send({ type: 'event', key: KEY_A, event: ev('n1', Date.now() + 60000) });
     await shown(page, 'n1'); // the send_error ahead of it has been handled
     await expect(page.locator('#toast')).not.toContainText('发送消息失败');
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+});
+
+test.describe('a send from this tab to a dead session', () => {
+  let mock;
+  test.beforeAll(async () => {
+    const data = defaultSessions();
+    data.sessions.find((s) => s.key === KEY_A).state = 'dead';
+    mock = await startMockServer({ ws: true, sessions: data });
+  });
+  test.afterAll(() => mock.server.close());
+
+  // The send flips the state to running before the round trip, so the running
+  // push that follows finds 'running' already there; the resubscribe must judge
+  // on the state the flip replaced.
+  test('resubscribes on the running push the revival sends', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    expect(await running(page, KEY_A)).toBe('dead');
+    await sendText(page, conn, 'wake');
+    expect(await running(page, KEY_A), 'the send flipped the state optimistically').toBe('running');
+    conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'running' });
+    await expect.poll(() => subs(conn, KEY_A).length, { message: 'running must resubscribe' }).toBe(2);
+    expect(subs(conn, KEY_A)[1].after, 'the resubscribe asks for an initial page').toBeUndefined();
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+});
+
+test.describe('a session_state carrying a reason', () => {
+  let mock;
+  let data;
+  test.beforeAll(async () => {
+    data = defaultSessions();
+    mock = await startMockServer({ ws: true, sessions: data });
+  });
+  test.afterAll(() => mock.server.close());
+
+  // The list changes without a version bump, as a process state transition
+  // leaves storeGen alone; only the refetch the reason triggers, with the
+  // version cache cleared, can paint it.
+  test('refetches the session list and repaints it past the version cache', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    const card = page.locator(`.session-card[data-key="${KEY_B}"]`);
+    await expect(card).toContainText('review this code');
+    data.sessions.find((s) => s.key === KEY_B).summary = 'refetched after the push';
+    conn.send({ type: 'session_state', key: KEY_B, node: 'local', state: 'dead', reason: 'no_output_timeout' });
+    await expect(card, 'the reason refetches and repaints the sidebar').toContainText('refetched after the push');
     expect(errors).toEqual([]);
     await ctx.close();
   });

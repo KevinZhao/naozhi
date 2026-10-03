@@ -6,22 +6,6 @@ import (
 	"testing"
 )
 
-// extractJSBlock returns the substring of js starting at the first occurrence
-// of marker and ending at the next "\n  },\n" method terminator (wsm object
-// method convention). Fails the test when the marker is missing.
-func extractJSBlock(t *testing.T, js, marker string) string {
-	t.Helper()
-	idx := strings.Index(js, marker)
-	if idx < 0 {
-		t.Fatalf("marker %q not found in dashboard.js", marker)
-	}
-	end := strings.Index(js[idx:], "\n  },")
-	if end < 0 {
-		t.Fatalf("could not bound block starting at %q", marker)
-	}
-	return js[idx : idx+end]
-}
-
 // TestDashboardJS_SubscriptionTimeoutClearsClientBookkeeping pins the fix for
 // "后端已出结果但 dashboard 不自动更新" (stale-subscription bug, part 1/2).
 //
@@ -35,7 +19,7 @@ func TestDashboardJS_SubscriptionTimeoutClearsClientBookkeeping(t *testing.T) {
 	t.Parallel()
 	js := readDashboardJS(t)
 
-	body := extractJSBlock(t, js, "onSessionState(msg) {")
+	body := jsFuncBody(t, js, "onSessionState")
 
 	if !strings.Contains(body, "'subscription_timeout'") {
 		t.Fatal("onSessionState must handle reason 'subscription_timeout' — without it the client believes a server-dropped subscription is still live and never resubscribes")
@@ -47,7 +31,7 @@ func TestDashboardJS_SubscriptionTimeoutClearsClientBookkeeping(t *testing.T) {
 	tail := body[toIdx:]
 	// Only the timeout branch itself: needSub's resubscribe further down also
 	// zeroes lastEventTimeWs and would satisfy the check on its own.
-	if end := strings.Index(tail, "\n    }\n"); end >= 0 {
+	if end := strings.Index(tail, "\n  }\n"); end >= 0 {
 		tail = tail[:end]
 	}
 	for _, want := range []string{
@@ -91,7 +75,7 @@ func TestDashboardJS_WasDeadNotMaskedByOptimisticRunning(t *testing.T) {
 		t.Error("perSession.optimisticPrevState must be stashed BEFORE `sd.state = 'running'` — stashing after records the flip itself")
 	}
 
-	body := extractJSBlock(t, js, "onSessionState(msg) {")
+	body := jsFuncBody(t, js, "onSessionState")
 
 	captureIdx := strings.Index(body, "const optimisticPrevState = perSession.optimisticPrevState[sKey]")
 	if captureIdx < 0 {
