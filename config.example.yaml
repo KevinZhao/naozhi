@@ -14,14 +14,15 @@
 #                            expanded from the environment at load time. A
 #                            placeholder whose variable is unset, or refused by
 #                            the expansion policy, stays literal, and a literal
-#                            placeholder left in a secret (dashboard_token,
-#                            platform or node tokens) fails the load.
+#                            placeholder left in dashboard_token, a platform's
+#                            primary credential, upstream.token or a
+#                            reverse_nodes token fails the load.
 #   ~/.claude/settings.json  its `env` block is copied into naozhi's own
 #                            process env. That mainly feeds transcription and
-#                            the sysession Bedrock auth, but keys the shim env
-#                            policy also allows (endpoint and proxy URLs)
-#                            reach every spawned CLI. Spawned cc sessions
-#                            read that file themselves.
+#                            the sysession Bedrock auth, but the
+#                            ANTHROPIC_BASE_URL / ANTHROPIC_BEDROCK_BASE_URL
+#                            endpoints also reach every spawned CLI. Spawned
+#                            cc sessions read that file themselves.
 #   .naozhi/project.yaml     one per project directory under projects.root.
 #                            Overrides projects.planner_defaults (model,
 #                            prompt), the default backend and the access
