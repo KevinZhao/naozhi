@@ -7,7 +7,7 @@
 
 import { NZ_CONTRACT } from './contract.js';
 import { cronStore } from './cron_state.js';
-import { getToken } from './platform.js';
+import { authHeaders } from './platform.js';
 import { esc, escAttr, fetchJSON } from './nz_util.js';
 import { showAPIError } from './utilities.js';
 
@@ -110,9 +110,7 @@ function cronFormatTime(ms) {
 // true when it stored a queue, false when it kept the last good one.
 export async function cronAttentionRefresh() {
   try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const headers = authHeaders();
     const data = await fetchJSON(NZ_CONTRACT.API.cron_attention, { headers, timeoutMs: 8000 });
     cronStore.attention = { items: (data && Array.isArray(data.items)) ? data.items : [], loaded: true };
   } catch (e) {
@@ -126,9 +124,7 @@ export async function cronAttentionRefresh() {
 // resolving true once a re-fetched queue was stored.
 export async function cronAttentionConfirm(runId) {
   try {
-    const headers = { 'Content-Type': 'application/json' };
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const headers = { 'Content-Type': 'application/json', ...authHeaders() };
     const r = await fetch(NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '/confirm', { method: 'POST', headers });
     if (!r.ok) {
       const raw = await r.text().catch(() => '');

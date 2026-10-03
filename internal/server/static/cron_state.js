@@ -5,7 +5,7 @@
 // objects and write their fields in place; no binding here is reassigned.
 
 import { NZ_CONTRACT } from './contract.js';
-import { getToken } from './platform.js';
+import { authHeaders } from './platform.js';
 import { fetchJSON } from './nz_util.js';
 import { setCronTimezoneMeta } from './cron_schedule.js';
 
@@ -161,9 +161,7 @@ export async function fetchCronJobs() {
   // 不偏晚（把新补丁误判为旧）。
   const fetchStartedAt = Date.now();
   try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const headers = authHeaders();
     // RNEW-UX-003: 8s timeout — cron list is polled periodically; a hung
     // disk/fs call must release before the next tick fires.
     //
@@ -245,9 +243,7 @@ export async function cronRefetchFullJob(id) {
   // test/e2e/cron_compact_prompt.test.js before this guard existed.
   if (!cached.prompt_truncated && !cached.prompt_refetched) return { ok: true, job: cached };
   try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const headers = authHeaders();
     // No compact param — list endpoint returns full prompts. We pull
     // the whole list here because there is no per-job GET endpoint
     // exposed; the rate limiter on the list route is shared with the

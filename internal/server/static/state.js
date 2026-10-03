@@ -122,9 +122,6 @@ export const transcript = {
 export const sessionList = {
   sessionsData: {},
   allSessionsCache: [],
-  // costSummaryCache is the ledger's last-30-day unit-bucketed total from
-  // /api/cost/summary (null until the first fetch lands); the 服务概览 花费 card
-  // prefers it over the live-session sum, which forgets deleted sessions and cron.
   // Keys (sid(key,node)) optimistically removed by dismissSession before the
   // DELETE round-trips. fetchSessions/renderSidebar skip these so an in-flight
   // poll or sessions_update WS event that still lists the session cannot
