@@ -76,11 +76,11 @@ func TestWSRelay_Close_WaitsForSendHistoryGoroutine(t *testing.T) {
 	relay := newWSRelay(node)
 
 	first := &mockSink{id: 1}
-	relay.Subscribe(first, "k", 0)
+	relay.Subscribe(first, "k", 0, 0)
 	time.Sleep(80 * time.Millisecond) // first subscriber path completes
 
 	second := newBlockingSink()
-	relay.Subscribe(second, "k", 0) // second subscriber → sendHistoryToClient goroutine
+	relay.Subscribe(second, "k", 0, 0) // second subscriber → sendHistoryToClient goroutine
 
 	// Wait until sendHistoryToClient has called SendJSON (i.e., the goroutine
 	// is parked inside our blockingSink).
@@ -123,7 +123,7 @@ func TestWSRelay_Subscribe_AfterClose_NoLeak(t *testing.T) {
 	relay.Close()
 
 	sink := &mockSink{id: 1}
-	relay.Subscribe(sink, "k", 0) // must not deadlock, panic, or dispatch
+	relay.Subscribe(sink, "k", 0, 0) // must not deadlock, panic, or dispatch
 
 	msgs := sink.JSONMsgs()
 	if len(msgs) == 0 {
@@ -183,14 +183,14 @@ func TestWSRelay_MultipleSecondSubscribers_AllTracked(t *testing.T) {
 	relay := newWSRelay(node)
 
 	first := &mockSink{id: 0}
-	relay.Subscribe(first, "k", 0)
+	relay.Subscribe(first, "k", 0, 0)
 	time.Sleep(80 * time.Millisecond)
 
 	const extra = 5
 	sinks := make([]*blockingSink, extra)
 	for i := 0; i < extra; i++ {
 		sinks[i] = newBlockingSink()
-		relay.Subscribe(sinks[i], "k", 0)
+		relay.Subscribe(sinks[i], "k", 0, 0)
 	}
 
 	// Confirm all sinks have been entered (goroutines parked).

@@ -374,11 +374,15 @@ func (c *ReverseConn) ProxyInterruptSession(ctx context.Context, key string) (bo
 // sessions come back.
 const errNodeReconnecting = "node reconnecting"
 
-func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
+// Subscribe adds cl to key. The first sink subscribes on the node: one with
+// CapSubscribeHistory answers with the opening page itself, an older one gets
+// a parallel fetch_events. Later sinks fetch their own page.
+func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64, limit int) {
+	inBand := c.meta.HasCap(CapSubscribeHistory)
 	c.subMu.Lock()
 	if h := c.heir; h != nil {
 		c.subMu.Unlock()
-		h.Subscribe(cl, key, after)
+		h.Subscribe(cl, key, after, limit)
 		return
 	}
 	if c.isDone() {
@@ -389,8 +393,11 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 	// A same-client re-subscribe keeps one entry but still gets its
 	// `subscribed` ack + history page.
 	alreadySub := !c.book.add(cl, key, after)
+	fetch := alreadySub || !inBand
 	// Add under subMu so Close()'s subWG.Wait() never races it.
-	c.subWG.Add(1)
+	if fetch {
+		c.subWG.Add(1)
+	}
 	c.subMu.Unlock()
 
 	if alreadySub {
@@ -414,20 +421,29 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 	} else {
 		// First subscriber: the sink was added above so readLoop can deliver
 		// events arriving right after the write; roll back on failure.
-		if err := c.writeJSON(ReverseMsg{Type: "subscribe", Key: key, After: after}); err != nil {
+		sub := ReverseMsg{Type: "subscribe", Key: key, After: after}
+		if inBand {
+			sub.Limit, sub.WantHistory = limit, true
+		}
+		if err := c.writeJSON(sub); err != nil {
 			slog.Warn("reverse subscribe write failed", "node", c.id, "key", key, "err", err)
 			c.subMu.Lock()
 			c.book.remove(cl, key)
 			c.subMu.Unlock()
 			// No history goroutine on this path; release the token.
-			c.subWG.Done()
+			if fetch {
+				c.subWG.Done()
+			}
 			c.sendReconnecting(cl, key)
 			return
 		}
-		// Also fetch persisted history: the remote's streamEvents only pushes
-		// on Append, which never fires for a process-less session. This frame
-		// and the remote's `subscribed` ack may arrive in either order, which
-		// is why the initial page is keyed on ServerMsg.Initial, not arrival.
+		if inBand {
+			return
+		}
+		// Legacy node: also fetch persisted history, since its streamEvents
+		// only pushes on Append, which never fires for a process-less session.
+		// This frame and the remote's `subscribed` ack may arrive in either
+		// order, which is why the initial page is keyed on ServerMsg.Initial.
 		go func() {
 			defer c.subWG.Done()
 			ctx, cancel := context.WithTimeout(c.baseCtx, 5*time.Second)
@@ -533,18 +549,26 @@ func (c *ReverseConn) dropSubs() {
 // resubscribeAll subscribes every adopted key again, from the newest event
 // its sinks hold, and replays what they missed while the node was away: the
 // node pushes only on Append, which a session without a process never does.
+// A CapSubscribeHistory node sends that replay with its subscribe answer.
 func (c *ReverseConn) resubscribeAll() {
+	inBand := c.meta.HasCap(CapSubscribeHistory)
 	c.subMu.Lock()
 	keys := c.book.resubscribeList()
-	c.subWG.Add(len(keys))
+	if !inBand {
+		c.subWG.Add(len(keys))
+	}
 	c.subMu.Unlock()
 	for _, r := range keys {
-		if err := c.writeJSON(ReverseMsg{Type: "subscribe", Key: r.key, After: r.after}); err != nil {
+		if err := c.writeJSON(ReverseMsg{Type: "subscribe", Key: r.key, After: r.after, WantHistory: inBand}); err != nil {
 			slog.Debug("reverseconn: resubscribe write failed", "node", c.id, "key", r.key, "err", err)
-			c.subWG.Done()
+			if !inBand {
+				c.subWG.Done()
+			}
 			continue
 		}
-		go c.catchUp(r.key, r.after)
+		if !inBand {
+			go c.catchUp(r.key, r.after)
+		}
 	}
 }
 
@@ -666,12 +690,18 @@ func (c *ReverseConn) readLoop() {
 			c.broadcastToSubs(msg.Key, wsproto.NewEvent(wsproto.Event{Key: msg.Key, Event: msg.Event, Node: c.id}), t, false)
 
 		case "events":
-			// Keep the tail (most recent) when capping.
-			events := msg.Events
+			// Keep the tail (most recent) when capping; a capped opening page
+			// has older history by construction. Initial/HasMore are set only
+			// on the page a want_history subscribe asked for.
+			events, hasMore := msg.Events, msg.HasMore
 			if len(events) > maxPushedHistoryEvents {
 				events = events[len(events)-maxPushedHistoryEvents:]
+				if msg.Initial {
+					older := true
+					hasMore = &older
+				}
 			}
-			c.broadcastToSubs(msg.Key, wsproto.NewHistory(wsproto.History{Key: msg.Key, Events: events, Node: c.id}), newestEventTime(events), false)
+			c.broadcastToSubs(msg.Key, wsproto.NewHistory(wsproto.History{Key: msg.Key, Events: events, Node: c.id, Initial: msg.Initial, HasMore: hasMore}), newestEventTime(events), false)
 
 		case "session_state":
 			c.broadcastToSubs(msg.Key, wsproto.NewSessionState(wsproto.SessionState{Key: msg.Key, State: msg.State, Reason: truncateLabelUTF8(msg.Reason, maxPushedNodeStringBytes), Node: c.id}), 0, false)

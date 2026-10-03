@@ -7,6 +7,11 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
+// CapSubscribeHistory is the node tag for answering a want_history subscribe
+// with its own opening page (ReverseMsg.WantHistory); a primary that sees it
+// skips the parallel fetch_events for that page.
+const CapSubscribeHistory = "subscribe-history"
+
 // knownServerCaps is the capability set this binary understands. Unknown
 // advertised caps only WARN (mixed-version signal); the node still registers.
 // Add here when a new capability is introduced on the client side.
@@ -18,6 +23,8 @@ var knownServerCaps = map[string]struct{}{
 	"askuser":          {},
 	"attach":           {},
 	"scratch":          {},
+
+	CapSubscribeHistory: {},
 }
 
 // HubCaps is what the hub advertises about itself on the registered ack.

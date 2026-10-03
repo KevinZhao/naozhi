@@ -63,8 +63,10 @@ type NodeProxy interface {
 }
 
 // NodeSubscriber manages per-client event subscriptions against a remote node.
+// Subscribe's after and limit are the browser's subscribe fields: catch-up
+// watermark, and page-size hint for the opening page when after is 0.
 type NodeSubscriber interface {
-	Subscribe(c EventSink, key string, after int64)
+	Subscribe(c EventSink, key string, after int64, limit int)
 	Unsubscribe(c EventSink, key string)
 	RefreshSubscription(key string)
 	RemoveClient(c EventSink)

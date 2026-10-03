@@ -35,10 +35,10 @@ func TestReverseConn_Subscribe_SameClientTwice_NoDuplicateSink(t *testing.T) {
 
 	const key = "feishu:group:rc-resub"
 	sink := &mockSink{id: 1}
-	rc.Subscribe(sink, key, 0)
+	rc.Subscribe(sink, key, 0, 0)
 	waitFor(t, "first subscribe frame", func() bool { return subscribes.Load() == 1 })
 
-	rc.Subscribe(sink, key, 0)
+	rc.Subscribe(sink, key, 0, 0)
 
 	rc.subMu.Lock()
 	n := len(rc.book.subs[key])

@@ -25,19 +25,11 @@ const initialHistoryDiskTimeout = 2 * time.Second
 // (ring or disk); the dashboard mounts its "load earlier" affordance off this
 // flag instead of guessing from the returned slice length.
 func (h *Hub) initialVisibleHistory(sess *session.ManagedSession, limit int) ([]clievent.EventEntry, bool) {
-	target := limit
-	if target <= 0 || target > session.DefaultVisibleTarget {
-		// The client's INITIAL_HISTORY_LIMIT (100) is a page-size hint, not a
-		// visible-bubble target; clamp the visible goal to DefaultVisibleTarget
-		// so we don't over-walk disk chasing 100 visible bubbles.
-		target = session.DefaultVisibleTarget
-	}
-	// maxTotal=0 → the reader uses its own ceiling (ring size). Passing `limit`
-	// would cap the walk at the page-size hint and strand visible bubbles
-	// beyond it under an internal flood.
+	// The client's INITIAL_HISTORY_LIMIT (100) is a page-size hint, which
+	// InitialHistoryPage clamps so the walk does not chase 100 visible bubbles.
 	ctx, cancel := context.WithTimeout(h.ctx, initialHistoryDiskTimeout)
 	defer cancel()
-	return sess.EventInitialPageCtx(ctx, target, 0)
+	return sess.InitialHistoryPage(ctx, limit)
 }
 
 // initialHasMorePtr returns a non-nil *bool only for the initial-page history
@@ -269,7 +261,7 @@ func (h *Hub) handleRemoteSubscribe(c *wsClient, msg node.ClientMsg) {
 	}
 	// Subscribe only needs the pub-sub role; narrow to node.NodeSubscriber (#435).
 	var sub node.NodeSubscriber = conn
-	sub.Subscribe(c, msg.Key, msg.After)
+	sub.Subscribe(c, msg.Key, msg.After, msg.Limit)
 }
 
 func (h *Hub) handleRemoteUnsubscribe(c *wsClient, msg node.ClientMsg) {

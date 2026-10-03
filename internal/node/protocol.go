@@ -103,4 +103,14 @@ type ReverseMsg struct {
 	Events       []clievent.EventEntry `json:"events,omitempty"`
 	State        string                `json:"state,omitempty"`
 	Reason       string                `json:"reason,omitempty"`
+
+	// Subscribe-history fields (cap CapSubscribeHistory). On `subscribe`,
+	// WantHistory asks the node to answer with the opening page itself: the
+	// catch-up after After, or else the newest page sized by Limit. That
+	// `events` frame carries Initial (After was 0) and HasMore (initial page
+	// only; nil otherwise, as on ServerMsg).
+	Limit       int   `json:"limit,omitempty"`
+	WantHistory bool  `json:"want_history,omitempty"`
+	Initial     bool  `json:"initial,omitempty"`
+	HasMore     *bool `json:"has_more,omitempty"`
 }

@@ -115,10 +115,10 @@ func TestWSRelay_Subscribe_SameClientTwice_NoDuplicateSink(t *testing.T) {
 
 	const key = "feishu:group:resub"
 	sink := &mockSink{id: 1}
-	relay.Subscribe(sink, key, 0)
+	relay.Subscribe(sink, key, 0, 0)
 	waitFor(t, "first subscribe frame", func() bool { return fake.subscribes.Load() == 1 })
 
-	relay.Subscribe(sink, key, 0)
+	relay.Subscribe(sink, key, 0, 0)
 
 	if n := relaySubCount(relay, key); n != 1 {
 		t.Fatalf("r.book.subs[%q] has %d entries after same-client re-subscribe, want 1", key, n)
@@ -141,7 +141,7 @@ func TestWSRelay_Resubscribe_AfterRemoteTimeout_ResendsSubscribe(t *testing.T) {
 
 	const key = "feishu:group:timeout"
 	sink := &mockSink{id: 1}
-	relay.Subscribe(sink, key, 0)
+	relay.Subscribe(sink, key, 0, 0)
 	waitFor(t, "first subscribe frame", func() bool { return fake.subscribes.Load() == 1 })
 
 	// Remote dropped our subscription and told us so.
@@ -156,7 +156,7 @@ func TestWSRelay_Resubscribe_AfterRemoteTimeout_ResendsSubscribe(t *testing.T) {
 	})
 
 	// Dashboard re-subscribes (after=0: it reset lastEventTimeWs).
-	relay.Subscribe(sink, key, 0)
+	relay.Subscribe(sink, key, 0, 0)
 
 	waitFor(t, "second subscribe frame after remote timeout", func() bool { return fake.subscribes.Load() == 2 })
 	if n := relaySubCount(relay, key); n != 1 {
@@ -167,7 +167,7 @@ func TestWSRelay_Resubscribe_AfterRemoteTimeout_ResendsSubscribe(t *testing.T) {
 	// Subscribe writes any `subscribe` frame synchronously, so an `unsubscribe`
 	// written afterwards on the same WS is ordered behind it — once the fake
 	// has seen the unsubscribe, every subscribe frame has been counted.
-	relay.Subscribe(sink, key, 0)
+	relay.Subscribe(sink, key, 0, 0)
 	waitFor(t, "http history for plain re-subscribe", func() bool { return fake.history.Load() >= 1 })
 	relay.Unsubscribe(sink, key)
 	waitFor(t, "unsubscribe probe frame", func() bool { return fake.unsubscribes.Load() == 1 })
@@ -190,10 +190,10 @@ func TestWSRelay_Resubscribe_WithoutTimeout_UsesHTTPHistory(t *testing.T) {
 
 	const key = "feishu:group:reclick"
 	sink := &mockSink{id: 1}
-	relay.Subscribe(sink, key, 0)
+	relay.Subscribe(sink, key, 0, 0)
 	waitFor(t, "first subscribe frame", func() bool { return fake.subscribes.Load() == 1 })
 
-	relay.Subscribe(sink, key, 0)
+	relay.Subscribe(sink, key, 0, 0)
 	waitFor(t, "http history request", func() bool { return fake.history.Load() == 1 })
 	if n := relaySubCount(relay, key); n != 1 {
 		t.Errorf("r.book.subs[%q] has %d entries, want 1", key, n)
@@ -219,8 +219,8 @@ func TestWSRelay_TimeoutMarker_IgnoredWithoutSubscribers(t *testing.T) {
 
 	const gone, live = "feishu:group:gone", "feishu:group:live"
 	sink := &mockSink{id: 1}
-	relay.Subscribe(sink, gone, 0)
-	relay.Subscribe(sink, live, 0)
+	relay.Subscribe(sink, gone, 0, 0)
+	relay.Subscribe(sink, live, 0, 0)
 	waitFor(t, "subscribe frames", func() bool { return fake.subscribes.Load() == 2 })
 	relay.Unsubscribe(sink, gone)
 

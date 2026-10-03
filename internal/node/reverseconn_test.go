@@ -288,7 +288,7 @@ func TestReverseConn_Subscribe_sendsWireMessage(t *testing.T) {
 	defer cleanup()
 
 	sink := &mockSink{id: 1}
-	rc.Subscribe(sink, "mykey", 500)
+	rc.Subscribe(sink, "mykey", 500, 0)
 
 	wsConn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	var msg ReverseMsg

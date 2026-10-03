@@ -59,7 +59,7 @@ func TestWSRelay_NoGoroutineLeakAfterClose(t *testing.T) {
 	relay := newWSRelay(node)
 
 	first := &mockSink{id: 1}
-	relay.Subscribe(first, "k", 0)
+	relay.Subscribe(first, "k", 0, 0)
 	// Allow the first-subscriber path to settle so we are not
 	// measuring the in-flight goroutine count.
 	time.Sleep(80 * time.Millisecond)

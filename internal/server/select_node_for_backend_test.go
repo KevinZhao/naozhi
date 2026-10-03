@@ -72,10 +72,10 @@ func (f *fakeCapNode) ProxyInterruptSession(_ context.Context, _ string) (bool, 
 func (f *fakeCapNode) ProxySetSessionLabel(_ context.Context, _, _ string) (bool, error) {
 	return true, nil
 }
-func (f *fakeCapNode) Subscribe(_ node.EventSink, _ string, _ int64) {}
-func (f *fakeCapNode) Unsubscribe(_ node.EventSink, _ string)        {}
-func (f *fakeCapNode) RefreshSubscription(_ string)                  {}
-func (f *fakeCapNode) RemoveClient(_ node.EventSink)                 {}
+func (f *fakeCapNode) Subscribe(_ node.EventSink, _ string, _ int64, _ int) {}
+func (f *fakeCapNode) Unsubscribe(_ node.EventSink, _ string)               {}
+func (f *fakeCapNode) RefreshSubscription(_ string)                         {}
+func (f *fakeCapNode) RemoveClient(_ node.EventSink)                        {}
 
 // mapLookup is the tiniest nodeLookup that selectNodeForBackend
 // accepts: a static id → Conn map. Avoids constructing a full Server

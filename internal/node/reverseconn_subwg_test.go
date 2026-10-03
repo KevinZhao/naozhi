@@ -79,7 +79,7 @@ func TestReverseConn_CloseWaitsForSubscribeHistoryGoroutine(t *testing.T) {
 		enter:       make(chan struct{}, 1),
 		releaseHold: make(chan struct{}),
 	}
-	rc.Subscribe(sink, "k", 0)
+	rc.Subscribe(sink, "k", 0, 0)
 
 	// Wait until the goroutine is parked inside SendJSON.
 	select {

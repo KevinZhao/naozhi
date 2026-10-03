@@ -441,14 +441,14 @@ func (n *HTTPClient) Meta() *NodeMeta {
 	}
 }
 
-func (n *HTTPClient) Subscribe(c EventSink, key string, after int64) {
+func (n *HTTPClient) Subscribe(c EventSink, key string, after int64, limit int) {
 	n.relayMu.Lock()
 	if n.relay == nil {
 		n.relay = newWSRelay(n)
 	}
 	relay := n.relay
 	n.relayMu.Unlock()
-	relay.Subscribe(c, key, after)
+	relay.Subscribe(c, key, after, limit)
 }
 
 func (n *HTTPClient) Unsubscribe(c EventSink, key string) {

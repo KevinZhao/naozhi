@@ -65,7 +65,7 @@ func TestReverseConn_TracksLastEventPerKey(t *testing.T) {
 	}
 
 	first := &mockSink{id: 1}
-	rc.Subscribe(first, key, 500)
+	rc.Subscribe(first, key, 500, 0)
 	want("first subscribe seeds", 500)
 	readNodeFrame(t, ws, "subscribe")
 	answerFetchEvents(t, ws, []clievent.EventEntry{{Time: 900}, {Time: 600}})
@@ -89,7 +89,7 @@ func TestReverseConn_TracksLastEventPerKey(t *testing.T) {
 	want("frame without an event time", 1500)
 
 	second := &mockSink{id: 2}
-	rc.Subscribe(second, key, 100)
+	rc.Subscribe(second, key, 100, 0)
 	answerFetchEvents(t, ws, []clievent.EventEntry{{Time: 1700}})
 	testhelper.Eventually(t, func() bool { return len(second.JSONMsgs()) == 2 }, 3*time.Second, "second-subscriber ack + history")
 	want("second subscriber's history, older after not adopted", 1700)

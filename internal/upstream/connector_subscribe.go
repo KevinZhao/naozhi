@@ -7,6 +7,7 @@ package upstream
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
@@ -15,19 +16,59 @@ import (
 // Same-millisecond dedup is shared with the local dashboard pusher via
 // clievent.SinceCursor (#2402); see internal/cli/since_cursor.go.
 
-// streamEvents pumps sess's events and state changes for key to the primary.
-// sess is the session the subscribe handler already acked; re-resolving it
-// here would let a Reset in between end the stream silently. Unless ctx ends
-// or a write fails, it returns only after writing one final session_state with
-// key's current router state (nil sess or closed notify; see
-// writeTerminalState), so the primary re-subscribes.
-func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error, key string, sess Session, notify <-chan struct{}) {
+// subscribeHistoryTimeout bounds the disk-tier walk behind a want_history
+// opening page, like the hub's initialHistoryDiskTimeout.
+const subscribeHistoryTimeout = 2 * time.Second
+
+// openStream returns the cursor sub's stream starts from. A want_history
+// subscribe is first answered with its page in one `events` frame (the
+// catch-up after sub.After, or else the visible-aware newest page) and the
+// cursor starts past it. A plain subscribe starts at sub.After, so the first
+// Append does not replay the whole ring the primary already fetched.
+func (c *Connector) openStream(ctx context.Context, writeJSON func(any) error, sub node.ReverseMsg, sess Session) *clievent.SinceCursor {
+	csr := clievent.NewSinceCursorAt(sub.After)
+	if !sub.WantHistory || sess == nil {
+		return csr
+	}
+	frame := node.ReverseMsg{Type: "events", Key: sub.Key}
+	var entries []clievent.EventEntry
+	if sub.After > 0 {
+		entries = sess.EventEntriesSince(clievent.SinceInclusive(sub.After))
+		// Like the hub's emptyInitialHistoryWanted: an empty catch-up only
+		// for a running session.
+		if len(entries) == 0 && sess.State() != "running" {
+			return csr
+		}
+	} else {
+		pageCtx, cancel := context.WithTimeout(ctx, subscribeHistoryTimeout)
+		var hasMore bool
+		entries, hasMore = sess.InitialHistoryPage(pageCtx, sub.Limit)
+		cancel()
+		// Sent even when empty: the dashboard leaves its blank state only on
+		// an initial frame (#2432).
+		frame.Initial, frame.HasMore = true, &hasMore
+	}
+	frame.Events = clievent.ForWire(entries)
+	if err := writeJSON(frame); err != nil {
+		slog.Debug("connector write subscribe history", "key", sub.Key, "err", err)
+		return csr
+	}
+	csr.Advance(entries)
+	return csr
+}
+
+// streamEvents pumps sess's events and state changes for key to the primary,
+// starting after csr. sess is the session the subscribe handler already
+// acked; re-resolving it here would let a Reset in between end the stream
+// silently. Unless ctx ends or a write fails, it returns only after writing
+// one final session_state with key's current router state (nil sess or
+// closed notify; see writeTerminalState), so the primary re-subscribes.
+func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error, key string, sess Session, notify <-chan struct{}, csr *clievent.SinceCursor) {
 	if sess == nil {
 		c.writeTerminalState(writeJSON, key)
 		return
 	}
 	var lastState string
-	csr := clievent.NewSinceCursor()
 	for {
 		select {
 		case _, ok := <-notify:

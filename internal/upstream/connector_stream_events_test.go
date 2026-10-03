@@ -77,7 +77,7 @@ func TestStreamEvents_NotifyClosedAfterReset_EmitsTerminalState(t *testing.T) {
 	var sc streamCapture
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	c.streamEvents(ctx, sc.writeJSON, key, sess, notify)
+	c.streamEvents(ctx, sc.writeJSON, key, sess, notify, clievent.NewSinceCursor())
 
 	assertResetTerminal(t, sc.only(t), key)
 }
@@ -94,7 +94,7 @@ func TestStreamEvents_NilSession_EmitsTerminalState(t *testing.T) {
 	var sc streamCapture
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	c.streamEvents(ctx, sc.writeJSON, key, nil, make(chan struct{}))
+	c.streamEvents(ctx, sc.writeJSON, key, nil, make(chan struct{}), clievent.NewSinceCursor())
 
 	if ctx.Err() != nil {
 		t.Fatal("streamEvents with a nil session waited for ctx instead of returning")
@@ -121,7 +121,7 @@ func TestStreamEvents_NotifyClosedSessionPresent_ReportsSnapshot(t *testing.T) {
 	var sc streamCapture
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	c.streamEvents(ctx, sc.writeJSON, key, sess, notify)
+	c.streamEvents(ctx, sc.writeJSON, key, sess, notify, clievent.NewSinceCursor())
 
 	msg := sc.only(t)
 	if msg.Type != "session_state" || msg.Key != key || msg.State != snap.State || msg.Reason != snap.DeathReason {

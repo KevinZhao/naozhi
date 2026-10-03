@@ -7,6 +7,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/node"
 )
 
 // withDefaultBackendsForTest seeds backend.RegisterDefaults exactly
@@ -27,7 +28,7 @@ func seedDefaultBackends(t *testing.T) {
 // TestDerivedCaps_FromDefaultRegistry asserts that the union over the
 // shipped Profiles produces the expected sorted slice. Today: claude
 // has no caps, kiro has "acp", codex has "codex-app-server"; the wire
-// output is the alpha-sorted ["acp", "codex-app-server"].
+// output adds the two always-advertised tags, alpha-sorted.
 //
 // If we ever add a backend with a cap, the assertion will fail
 // loudly — by design — so the operator-facing register frame change
@@ -36,7 +37,7 @@ func TestDerivedCaps_FromDefaultRegistry(t *testing.T) {
 	seedDefaultBackends(t)
 
 	got := derivedCaps()
-	want := []string{"acp", "codex-app-server", clievent.SchemaCap}
+	want := []string{"acp", "codex-app-server", clievent.SchemaCap, node.CapSubscribeHistory}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("derivedCaps() = %v; want %v", got, want)
 	}

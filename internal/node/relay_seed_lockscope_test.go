@@ -47,7 +47,7 @@ func TestWSRelay_SubscribeSeed_StaysUnderTheLock(t *testing.T) {
 	// start — otherwise every goroutine would race on the connect path instead of
 	// the map, and a failed dial would make this test pass while touching nothing.
 	warmSink := &seedTestSink{}
-	r.Subscribe(warmSink, "feishu:direct:warm:general", 1)
+	r.Subscribe(warmSink, "feishu:direct:warm:general", 1, 0)
 
 	const workers = 8
 	const iters = 40
@@ -61,7 +61,7 @@ func TestWSRelay_SubscribeSeed_StaysUnderTheLock(t *testing.T) {
 				key := fmt.Sprintf("feishu:direct:u%d-%d:general", w, i)
 				// Subscribe writes r.book.lastEvent[key]; Unsubscribe deletes it. Both
 				// must hold r.mu across the whole read-modify-write.
-				r.Subscribe(sink, key, int64(i+1))
+				r.Subscribe(sink, key, int64(i+1), 0)
 				r.Unsubscribe(sink, key)
 			}
 		}(w)

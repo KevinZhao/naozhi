@@ -642,6 +642,18 @@ func (s *ManagedSession) EventInitialPageCtx(ctx context.Context, visibleTarget,
 	return entries, s.hasOlderThanSlice(ctx, entries)
 }
 
+// InitialHistoryPage is EventInitialPageCtx for a subscribe's page-size
+// hint: limit is not a visible-bubble goal, so it is clamped to
+// DefaultVisibleTarget (<= 0 means the default), and the walk keeps the
+// reader's own total ceiling so bubbles behind an internal flood surface.
+func (s *ManagedSession) InitialHistoryPage(ctx context.Context, limit int) ([]clievent.EventEntry, bool) {
+	target := limit
+	if target <= 0 || target > DefaultVisibleTarget {
+		target = DefaultVisibleTarget
+	}
+	return s.EventInitialPageCtx(ctx, target, 0)
+}
+
 func (s *ManagedSession) eventLastNVisibleCtx(ctx context.Context, visibleTarget, maxTotal int) []clievent.EventEntry {
 	if maxTotal <= 0 {
 		maxTotal = maxVisibleTotal
