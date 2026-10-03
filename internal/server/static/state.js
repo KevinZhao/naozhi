@@ -51,18 +51,12 @@ export const composer = {
 export const transcript = {
   lastEventTime: 0,
   lastRenderedEventTime: 0,
-  // oldestFetchedEventTime tracks the earliest server event we've already
-  // requested, independent of what's currently rendered in the DOM. The
-  // "load earlier" pagination originally took its cursor from the first
-  // `.event` child in the scroller — but when a page of 100 events is
-  // entirely internal-only (tool_use / agent / task_start / task_progress /
-  // task_done / result, filtered out by INTERNAL_EVENT_TYPES), no `.event`
-  // is rendered and the pagination silently bails with no cursor. That
-  // happens in practice whenever a parallel agent team runs long enough to
-  // fill the ring buffer with tool activity; the operator sees a blank
-  // events panel and a dead "加载更早的事件" button. Keep this cursor so
-  // pagination works regardless of what got filtered out.
+  // The "load earlier" cursor: the oldest fetched event's ms, whatever got
+  // rendered (an all-internal page draws no `.event` to take a cursor from),
+  // and the identity keys of the entries already held at that ms, so the next
+  // page can re-admit the ms and keep a sibling group split by a page edge.
   oldestFetchedEventTime: 0,
+  oldestFetchedKeys: [],
   previewEventCount: 0,
   // _previewGen is bumped on every previewDiscovered() entry. The awaited
   // preview fetch and the 2s poll tick compare their captured generation
@@ -89,12 +83,8 @@ export const transcript = {
   // flag the full fetch now owns.
   fetchInFlight: false,
   fetchGen: 0,
-  // loadEarlierEvents fetches up to EARLIER_PAGE_LIMIT events older than the
-  // currently-oldest rendered bubble. Prepends the rendered output to the top
-  // of the events pane and preserves scroll position so the user's view doesn't
-  // jump when new content is injected above.
-  //
-  // Idempotent: calls bail out while a prior fetch is in flight.
+  // earlierLoading is set while loadEarlierEvents pages back from the cursor
+  // above; a second call bails out until it clears.
   earlierLoading: false,
   // _earlierGen is bumped by selectSession so a stale loadEarlierEvents (still
   // awaiting the previous session's page) can neither prepend into the new
