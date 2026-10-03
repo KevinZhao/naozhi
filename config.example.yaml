@@ -1,37 +1,64 @@
 # naozhi config.example.yaml — copy to config.yaml before first run.
 #
 # ============================================================================
-# Configuration precedence (RNEW-ARCH-405)
+# Where configuration comes from
 # ============================================================================
-# Values are resolved top-down; later sources override earlier ones when the
-# same field is set in multiple places.
+# Built-in defaults fill whatever this file leaves out. The only override of
+# a key set here is a project's own .naozhi/project.yaml, for that project's
+# sessions; the other sources feed settings this file does not have.
 #
-#   1. Built-in defaults         in internal/config/config.go (applyDefaults)
-#   2. config.yaml               this file (--config flag path)
-#   3. ~/.claude/settings.json   a subset of Claude CLI env vars (proxy, API
-#                                base URL) gets injected into os.Environ
-#                                before CLI spawn. Applied by
-#                                cmd/naozhi/main.go applyClaudeEnvSettings.
-#   4. .naozhi/<project>.yaml    per-project overrides when a CWD matches a
-#                                project entry. Only the planner_defaults
-#                                subset is respected.
-#   5. Environment variables     `${VAR}` expansion happens in *this* YAML
-#                                at load time, and a handful of runtime
-#                                knobs (NAOZHI_DASHBOARD_TOKEN,
-#                                TZ, HOME …) are read directly via
-#                                os.Getenv.
-#   6. CLI flags                 `--config`, `--log-level`, `--doctor`,
-#                                `--install`; these always win.
+#   Built-in defaults        a key left out here takes its default from
+#                            internal/config (applyDefaults).
+#   This file                `naozhi -config config.yaml` (-config is the
+#                            server's only flag). `${VAR}` placeholders are
+#                            expanded from the environment at load time. A
+#                            placeholder whose variable is unset, or refused by
+#                            the expansion policy, stays literal, and a literal
+#                            placeholder left in dashboard_token, a feishu
+#                            credential, a slack/discord bot_token, the weixin
+#                            token, upstream.url / node_id / token or a
+#                            reverse_nodes token fails the load.
+#   ~/.claude/settings.json  its `env` block, minus keys the env policy
+#                            refuses, is copied into naozhi's own process env
+#                            unless the shell already set the key. That feeds
+#                            transcription and the sysession Bedrock auth, and
+#                            every key the shim also forwards reaches each
+#                            session CLI as well: the Anthropic and AWS
+#                            credentials, AWS_REGION, ANTHROPIC_MODEL,
+#                            CLAUDE_CODE_USE_BEDROCK, ANTHROPIC_BASE_URL and
+#                            more. Proxy keys skip session CLIs (only the
+#                            sysession runner's `claude -p` gets them).
+#                            Spawned cc also reads the file itself, unless
+#                            naozhi_settings.enabled points it at an isolated
+#                            copy without `env` (the process env still flows).
+#   .naozhi/project.yaml     one per project directory under projects.root.
+#                            Overrides projects.planner_defaults (model,
+#                            prompt), the default backend and the access
+#                            profile NAME, and adds chat bindings and display
+#                            name/emoji. It never carries env values.
+#   Process environment      a few runtime knobs are read directly, e.g. TZ,
+#                            HOME, NAOZHI_ALLOW_INSECURE_WEBHOOK and
+#                            NAOZHI_ALLOW_PRIVATE_BASE_URL.
 #
-# Two-name compatibility:
-#   - `nodes:` and `reverse_nodes:` are treated as synonyms; pick one.
-#   - `workspaces:` and `projects:` map to the same Project registry.
-#   - `session.workspace` is the schema v1 spelling of `session.cwd`; a file
-#     without schema_version still loads it, and `naozhi config migrate`
-#     rewrites it.
+# Commands:
+#   `naozhi config check -config config.yaml`    validate without booting;
+#       -effective also prints each backend's final spawn argv and (masked)
+#       env, -json emits machine-readable output.
+#   `naozhi config migrate -config config.yaml`  show the schema upgrade this
+#       file needs; -write applies it in place, keeping comments.
+#   `naozhi doctor`                              health checks: binary,
+#       state dir and this file's server settings even while naozhi is down,
+#       plus /health, auth and config drift when an instance is reachable.
 #
-# When in doubt: `sudo NAOZHI_DASHBOARD_TOKEN=xxx bin/naozhi --config …
-# --doctor` prints the effective resolved config.
+# Deprecated spellings. Load still accepts them and logs a config-deprecated
+# WARN; `naozhi config migrate -write` rewrites them:
+#   - `nodes:`                                  → `workspaces:`
+#   - `session.workspace`                       → `session.cwd`
+#   - `--append-system-prompt` in agents[].args → `agents[].system_prompt`
+#   - `session.auto_chain`                      → removed, no effect
+# Not aliases: `workspace:` (this instance) and `workspaces:` (remote
+# instances) are different keys; `reverse_nodes:` (inbound node auth) and
+# `projects:` (the project root) are separate tables.
 # ============================================================================
 
 # The config schema this file is written for; `naozhi config migrate` upgrades
@@ -41,7 +68,12 @@ schema_version: 2
 server:
   addr: ":8180"
   dashboard_token: "${NAOZHI_DASHBOARD_TOKEN}"
-  trusted_proxy: true
+  # trusted_proxy: set true only when an ALB, CloudFront or nginx in front of
+  # naozhi stamps X-Forwarded-For / X-Forwarded-Proto. With true, a direct
+  # non-loopback request (LAN, no proxy) carries no X-Forwarded-For: its login
+  # is refused with 400 and the rate-limited endpoints fail closed. The client
+  # IP is the last X-Forwarded-For hop, the one that proxy appends.
+  trusted_proxy: false
   # debug_mode registers /api/debug/pprof and /api/debug/vars (default false:
   # both 404 even for loopback+auth callers, so a leaked dashboard token cannot
   # enumerate goroutine stacks or expvar counters). Turn it on only while
@@ -100,7 +132,7 @@ cli:
   # ~/.claude.json's mcpOAuth.
   # mcp_config: "~/.naozhi/mcp.json"
 
-  # Optional: multiple backends in one deployment (RNEW-DOC-421).
+  # Optional: multiple backends in one deployment.
   #
   # When to use: you want a single naozhi instance to spawn more than one
   # CLI flavor (Claude stream-json + Kiro ACP, or Claude + Gemini) so the
@@ -230,10 +262,10 @@ session:
 agents:
   code-reviewer:
     model: "sonnet"
-    args: ["--append-system-prompt", "You are a code review expert. Review code for quality, security, and maintainability."]
+    system_prompt: "You are a code review expert. Review code for quality, security, and maintainability."
   researcher:
     model: "opus"
-    args: ["--append-system-prompt", "You are a deep research expert. Decompose questions, search from multiple angles, and synthesize findings."]
+    system_prompt: "You are a deep research expert. Decompose questions, search from multiple angles, and synthesize findings."
     # Optional, claude- and kiro-backed sessions only: overrides the backend's
     # thinking-effort tier for this agent — e.g. run a cheap tier for a
     # frequently-scheduled cron agent while the default stays higher.

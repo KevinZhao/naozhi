@@ -94,8 +94,9 @@ func main() {
 		}
 	}
 	// cc loads ~/.claude/settings.json itself via `--setting-sources user`; the
-	// parent-process env injection above only feeds transcribe + sysession
-	// Runner Bedrock auth (docs/rfc/direct-user-settings.md §7.1).
+	// parent-process env injection above mainly feeds transcribe + sysession
+	// Runner Bedrock auth (docs/rfc/direct-user-settings.md §7.1); keys the
+	// shim column also allows reach spawned CLIs via baselineShimEnv.
 	slog.Info("claude settings: loading user settings directly", "mode", "user")
 
 	// boot is the wireup composition root for this process: it performs the
