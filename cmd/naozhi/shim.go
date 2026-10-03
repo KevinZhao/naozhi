@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/config"
-	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/shim"
 )
@@ -139,8 +138,7 @@ func stopShims(mgr *shim.Manager, key string, all bool, stdout, stderr io.Writer
 		handle, err := mgr.Reconnect(context.Background(), state.Key, 0)
 		if err != nil {
 			fmt.Fprintf(stderr, "connect to %s: %v\n", state.Key, err)
-			if state.ShimPID > 0 {
-				_ = osutil.SendShimReload(state.ShimPID)
+			if shim.SignalAfterFailedReconnect(state.ShimPID, err) {
 				fmt.Fprintf(stderr, "  sent SIGUSR2 to PID %d\n", state.ShimPID)
 				stopped++
 			}

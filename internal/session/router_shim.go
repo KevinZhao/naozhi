@@ -16,7 +16,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/metrics"
-	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -107,9 +106,9 @@ func classifyShimState(spawning, sessFound, hasLiveProc, wrapperNil, argsDrift b
 // shutdownShimViaReconnect briefly reconnects to an existing shim and asks it
 // to Shutdown gracefully, timeout-guarded so a hung socket cannot stall the
 // caller. With sigusr2Fallback, a failed Reconnect sends SIGUSR2 (the shim's
-// reload-and-die signal) to the shim PID; otherwise failure is silent and the
-// next discovery tick revisits. The helper owns context cancel so callers
-// cannot forget it. Fire-and-forget: returns no error.
+// reload-and-die signal) to the shim PID unless the PID failed the binary
+// identity check; otherwise failure is silent and the next tick revisits. It
+// owns context cancel so callers cannot forget it. Returns no error.
 func shutdownShimViaReconnect(
 	parentCtx context.Context,
 	wrapper *cli.Wrapper,
@@ -134,7 +133,7 @@ func shutdownShimViaReconnect(
 		return
 	}
 	if sigusr2Fallback {
-		_ = osutil.SendShimReload(state.ShimPID)
+		shim.SignalAfterFailedReconnect(state.ShimPID, connErr)
 	}
 }
 
