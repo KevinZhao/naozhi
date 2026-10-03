@@ -82,6 +82,11 @@ type Dispatcher struct {
 	// this; NewDispatcher defaults it to context.Background() (#1320).
 	stopCtx context.Context
 
+	// fallbackBannerDelay is how long an IM turn whose message got no ⏳
+	// runs before it posts a 思考中 banner; fallbackBannerDelayDefault
+	// unless a test shortens it.
+	fallbackBannerDelay time.Duration
+
 	// Operational counters exposed via /health for triaging. Incremented
 	// atomically and never reset (monotonic since process start).
 	messageCount       atomic.Int64 // all non-slash-command IM messages accepted
@@ -244,6 +249,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		watchdogNoOutputKills: cfg.WatchdogNoOutputKills,
 		watchdogTotalKills:    cfg.WatchdogTotalKills,
 		caps:                  caps,
+		fallbackBannerDelay:   fallbackBannerDelayDefault,
 	}
 	// agentCommands is immutable after construction, so this snapshot stays
 	// correct for the dispatcher's lifetime (#2148).
