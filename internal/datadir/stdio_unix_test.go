@@ -62,21 +62,28 @@ func splitMarker(t *testing.T, content []byte) (map[string]any, []byte) {
 
 // TestCapStdioKeepsTheNewestWholeLinesInPlace is the launchd case (O_RDWR |
 // O_APPEND): the file shrinks to a marker plus its newest whole lines, stays
-// the same inode, and the next write lands at the new end with no hole.
+// the same inode, and the next write lands at the new end with no hole. A
+// trailing fragment (a write still in progress) is dropped, not kept.
 func TestCapStdioKeepsTheNewestWholeLinesInPlace(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name      string
 		keepTail  int64
+		fragment  string
 		wantLines int
 	}{
-		{"window starts on a line boundary", 100, 5},
-		{"window starts mid-line", 110, 5},
-		{"window smaller than one line", 10, 0},
+		{"window starts on a line boundary", 100, "", 5},
+		{"window starts mid-line", 110, "", 5},
+		{"window smaller than one line", 10, "", 0},
+		{"file ends in a partial line", 100, "partial", 4},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f, orig := openLog(t, os.O_RDWR|os.O_APPEND, 200)
+			f, lines := openLog(t, os.O_RDWR|os.O_APPEND, 200)
+			if _, err := f.WriteString(tc.fragment); err != nil {
+				t.Fatal(err)
+			}
+			orig := append(bytes.Clone(lines), tc.fragment...)
 			before, err := os.Stat(f.Name())
 			if err != nil {
 				t.Fatal(err)
@@ -90,7 +97,7 @@ func TestCapStdioKeepsTheNewestWholeLinesInPlace(t *testing.T) {
 				t.Fatalf("result %+v, want truncated with bytes_before=%d", res, len(orig))
 			}
 			rec, tail := splitMarker(t, readAll(t, f))
-			want := orig[len(orig)-20*tc.wantLines:]
+			want := lines[len(lines)-20*tc.wantLines:]
 			if !bytes.Equal(tail, want) {
 				t.Errorf("kept tail %q, want the last %d lines %q", tail, tc.wantLines, want)
 			}
