@@ -817,21 +817,6 @@ func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 	return snapshots, version
 }
 
-// ListSessionsIfChanged is the gen-gated variant of ListSessionsWithVersion
-// for the /api/sessions REST poll path (#1886): when gen has not advanced since
-// sinceVersion it returns (nil, sinceVersion, false) WITHOUT touching
-// the session table or building snapshots, so the handler can answer
-// {version, unchanged:true} and skip the marshal. Sound because writers bump
-// gen inside their Update (see ListSessionsWithVersion); changed==true reuses
-// ListSessionsWithVersion so the (snapshots, version) pair stays atomic.
-func (r *Router) ListSessionsIfChanged(sinceVersion uint64) (snapshots []SessionSnapshot, version uint64, changed bool) {
-	if cur := r.ss.Gen(); cur == sinceVersion {
-		return nil, cur, false
-	}
-	snaps, v := r.ListSessionsWithVersion()
-	return snaps, v, true
-}
-
 // SessionFor returns the session for the given key, or nil.
 func (r *Router) SessionFor(key string) *ManagedSession {
 	return r.ss.Load(key)

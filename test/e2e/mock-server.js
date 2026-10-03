@@ -273,6 +273,10 @@ function defaultGitStates() {
  *   after this many GET /api/sessions calls have been answered (so the initial page
  *   load stays fast and only the poll/refetch traffic is held).
  *   Every GET /api/sessions, held or not, is counted in `sessionsGetCalls`.
+ * @param {boolean} [overrides.sessionsETag] - Serve GET /api/sessions with a content
+ *   ETag and answer a matching If-None-Match with a bodyless 304, as the real server
+ *   does (sessionsDelayMs does not apply). Each GET's If-None-Match ('' when absent)
+ *   is recorded in `sessionsValidators`; 304s are counted in `sessionsNotModified`.
  * @param {object} [overrides.systemUpdate] - GET /api/system/update payload (the
  *   self-update chip's poll). Default: no route, the endpoint 404s and the chip
  *   keeps its hidden cold-start default.
@@ -298,6 +302,8 @@ function startMockServer(overrides = {}) {
 
   const sessionsData = overrides.sessions || defaultSessions();
   let sessionsGetCalls = 0;
+  const sessionsValidators = [];
+  let sessionsNotModified = 0;
   const eventsData = overrides.events || defaultEvents();
   const eventsByKey = overrides.eventsByKey || {};
   const eventsTailDelayMs = overrides.eventsTailDelayMs || 0;
@@ -515,6 +521,21 @@ function startMockServer(overrides = {}) {
     if (pathname === NZ_CONTRACT.API.sessions && req.method === 'GET') {
       if (!checkAuth()) return;
       sessionsGetCalls++;
+      if (overrides.sessionsETag) {
+        const body = JSON.stringify(sessionsData);
+        const etag = 'W/"b' + crypto.createHash('sha256').update(body).digest('hex').slice(0, 32) + '"';
+        const inm = req.headers['if-none-match'] || '';
+        sessionsValidators.push(inm);
+        if (inm === etag) {
+          sessionsNotModified++;
+          res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-store' });
+          res.end();
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json', ETag: etag, 'Cache-Control': 'no-store' });
+        res.end(body);
+        return;
+      }
       if (overrides.sessionsDelayMs && sessionsGetCalls > (overrides.sessionsDelayAfterCalls || 0)) {
         setTimeout(() => {
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1175,6 +1196,8 @@ function startMockServer(overrides = {}) {
         get cronListGetCount() { return cronListGetCount; },
         get costSummaryCalls() { return costSummaryCalls; },
         get sessionsGetCalls() { return sessionsGetCalls; },
+        get sessionsValidators() { return sessionsValidators; },
+        get sessionsNotModified() { return sessionsNotModified; },
         get cronTriggerCalls() { return cronTriggerCalls; },
         get systemDaemonsGetCount() { return systemDaemonsGetCount; },
         // Replace the served cron jobs mid-test (in place - GET closes over the array).

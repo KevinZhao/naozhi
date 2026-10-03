@@ -151,7 +151,7 @@ naozhi 不该硬编码枚举白名单，存原始 string 才能透传未知新�
 
 | # | 风险 | 评估 | 缓解 |
 |---|---|---|---|
-| R1 | ETag/304 遮蔽 effort 变化 | **已排除，但理由与初稿不同**。前端**从不发送 `If-None-Match`**（`dashboard.js` 全文无该 header），304 路径对 dashboard 根本不激活，`sessionsListETag` 只服务于未来的 API 消费者 | 无需缓解 |
+| R1 | ETag/304 遮蔽 effort 变化 | **已排除**。`/api/sessions` 的 ETag 是响应体（除 uptime）的内容哈希（#3014），effort 一变 ETag 必变，304 只在响应体完全相同时返回 | 无需缓解 |
 | **R1b** | **（真实缺陷）turn 结束后 header 不重绘，chip 要切走再切回才出现** | **阻断级**。三条独立证据：① `notifyChange`（`router_core.go:1382-1386`）只调回调，**不碰 gen** —— 全部 `gen.Add(1)` 站点都在 session map 增删改路径；② 前端 `fetchSessions` 在 `dashboard.js:487` 按 `version === lastVersion` 短路；③ 即使不短路，`fetchSessions` 末尾只调 `updateHeaderCLI()`，而它（`dashboard.js:11891-11902`）**只重写 `.detail-left`**。`renderMainShell()` 的 5 个调用点（2485/2956/7566/7610/7670）全是 selectSession / rename / 新建，**无一在 turn 完成路径上**。`dashboard.js:11745-11747` 的注释直接印证："storeGen doesn't increment on process state transitions"。**推论：现有 turn-timer chip 同样有此问题**——它也只由 `renderMainShell` 生成 | **必须走挂载点 + turnCompleted 重绘**，见 §5.1。照抄 turn-timer 的内联渲染会继承同一静默失效，恰好是 R3 承诺要避免的"有数据却与无数据视觉同形" |
 | R2 | `processIface` 新方法打断三个 fake | 编译期失败，不是运行时隐患 | 同 PR 内补齐 `testutil.go:142`、`router_test.go:247`、`snapshot_normalize_test.go:117` |
 | R3 | **header 视觉预算**——R5-2 移过 backend chip、R5-7 移过 ctx-bar，理由是"低信号、争夺注意力" | effort 与被移除的两者不同。ctx-bar 的问题是"<5% 与无数据视觉同形"（图形条编码）；effort 是**离散枚举**（5 档字面量，无歧义）。**与 backend chip 的决定性区别**：R5-2 移除它的理由是 "cliLabel already names the backend — duplicate signal"（`dashboard.js:3149-3152`），而 effort 在 header 里**无任何冗余源**。归无框族（见 §5.1），不引入第三个带框 chip | 只在有值时渲染；沿用 `.model-label` 的 `--nz-fs-sm` 无框样式；除 max/xhigh 轻微强调外不加颜色 |
