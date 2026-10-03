@@ -30,6 +30,34 @@
 - **Dashboard 后台 tab 暂停 polling**（RNEW-UX-014），手机后台省电省流量
 - **触控目标 ≥ 44×44**（RNEW-UX-011），`.btn-dismiss` / `.status-reconnect` 在 `pointer:coarse` 下满足 WCAG 2.5.5
 
+### Changed
+
+- **JSON 状态快照不再跟随末端 symlink**：下列文件统一由 `osutil/jsonfile.Load` 以 `O_NOFOLLOW` 打开，文件本身是 symlink 时按"读不了、但仍在盘上"处理；读取只检查末端，路径中间目录的 symlink 照常跟随。写入不同：数据目录、以及它下面存放这些文件的目录本身不能是 symlink（`datadir.EnsureDir`、runlog、cron sandbox store 拒绝写入），只有数据目录之上的祖先目录照常跟随。此前会跟随的：`sessions.json`、`session-ids.json`、`workspace-overrides.json`、`sessions.meta.json`、uiprefs、retired sessions store、session run-history 记录、shim state、attachment `.meta`、cron sandbox 的 pending / attention / snapshot manifest。`cron_jobs.json` 一直如此，没有变化；projects index 从引入起就是这样
+  - session store 的三个主文件（`sessions.json` / `session-ids.json` / `workspace-overrides.json`）：启动照常成功，但这个文件的保存被拒，内存里的改动不落盘。信号是一条 `ERROR session store: refusing to overwrite a file naozhi could not read`、authenticated `/health` 的 `session_store.blocked`，以及 `spawn_diags` 里一条 `layer=store-unreadable`。`sessions.meta.json` 只报告（Warn）不阻塞，下次保存把链接换成普通文件，链接目标不动
+  - 旧行为其实也没真正支持过 symlink：`WriteFileAtomic` 是临时文件 + rename，第一次保存就把 symlink 本身换成普通文件，目标文件从此停在旧内容。现在只是把静默分叉变成显式拒绝
+  - 迁移：**先停 naozhi**，把真实文件 `mv` 到 symlink 所在位置，再启动 naozhi；或者把 `session.store_path`（`cron.store_path` 同理）直接指向真实位置。要用 bind mount 就挂载**目录**，不要挂载单个文件：保存是 rename 覆盖，被 bind mount 的文件不能被 rename 覆盖（Linux 上 `EBUSY`），每次保存都会失败。数据目录下的其它文件同理，挂载它们的父目录（bind mount），而不是文件本身。不要把数据目录、或直接存放状态文件的目录换成 symlink：`datadir.EnsureDir`、runlog 和 cron sandbox store 会拒绝写入这样的目录，例如 `~/.naozhi` 是 symlink 时 `sessions.json` 等的每次保存都会失败。要把状态放到别处，可行的做法只有两种：把 `store_path` 指向真实位置，或 bind mount 目录
+  - naozhi 运行中删掉 symlink，下一次保存就会解除阻塞（#2972），随后把**内存里的状态**写到这个路径。所以不要在运行中先删链接、再把真实文件放回去：只要两步之间发生一次保存，阻塞就会解除，之后的保存会用内存状态覆盖放回去的真实文件
+  - 同一改动里，解析失败的 `sessions.meta.json` 改为重命名保留成 `sessions.meta.json.corrupt.<ts>.<nonce>`，不再只记一条 Warn；sidecar 是机器写的，这类文件看过即可删除
+- **spawn 门禁告警统一为一行结构化日志，并按 key 去重**：argv、env、能力、配置各层门禁不再各打一句自己的话，统一为 `WARN spawn gate: configured input had no effect layer=… key=… action=… reason=… scope=…`
+  - `layer` 取值：`argv-denylist`、`argv-validator`（`--resume` / `--debug-file` / `--mcp-config` / `--append-system-prompt`）、`env-filter`、`caps`、`config-deprecated`、`config-unknown`、`config-invalid`、`store-unreadable`；`action` 取值：`dropped` / `ignored` / `rewritten` / `fallback` / `clamped`
+  - 旧文案对照（`scope` 为 session key 的，值就是那个会话的 key）：
+
+    | 旧日志 | layer | scope | key |
+    |---|---|---|---|
+    | `shim env: rejecting unsafe AWS profile value (credential_process injection guard)` / `… AWS credential file path (path traversal guard)` / `… endpoint base_url` / `shim env: oversized entry rejected` | `env-filter` | `shim-env`（进程环境）或 session key（单次 spawn 的 overlay） | 变量名 |
+    | `claude settings env: refusing to propagate auth-source AWS var` / `… CLAUDE_ kill-switch var` / `claude settings env: rejecting unsafe value` / `… unsafe base_url` | `env-filter` | `claude-settings` | 变量名 |
+    | `sysession: AWS profile env var rejected (unsafe value)` / `sysession: base-URL env var rejected (unsafe value)` | `env-filter` | `sysession-env` | 变量名 |
+    | `cli: --resume rejected by argv validator, spawning fresh session` | `argv-validator` | session key | `--resume` |
+    | `cli: AppendSystemPrompt rejected by argv validator, spawning without it` | `argv-validator` | session key | `--append-system-prompt` |
+    | （以前没有日志）`--debug-file` / `--mcp-config` 路径不合法被丢弃 | `argv-validator` | session key | `--debug-file` / `--mcp-config` |
+    | `config: dropped bare --append-system-prompt with no value` / `config: --append-system-prompt under args is not applied at spawn …` | `config-deprecated` | `config` | `agents[<id>].args` |
+
+  - 去重：`scope` 不是 `config` 时按 (scope, layer, key) 在进程生命周期内去重，首次是 Warn 并计入 metric 与 `/health`，重复只记 Debug、不计数。`config` scope（配置加载、store 读保护）不去重。因此同一会话同一字段反复被拒只留第一条 Warn
+  - 被拒绝的值不再写进日志（sysession 以前会打出 sanitized 的值片段），只有 reason 分类；argv-validator 的 reason 只带长度，`--resume` 另带最多 16 字符的前缀
+  - 告警建议：按 `msg="spawn gate: configured input had no effect"` 加 `layer=` 字段过滤；或者看 authenticated `/health` 的 `spawn_diags.counts`（`layer|action` → 次数）与 `spawn_diags.recent`；debug 模式下 `/api/debug/vars` 有 `naozhi_spawn_diag_total{layer,action}`。按旧文案写的 grep / metric filter 已经静默失效
+  - argv-validator 不豁免去重：shim reconcile 每 30s 会用同一 session key 重新推导 argv 并上报一次，豁免后日志和计数记录的是心跳而不是 spawn 尝试。这一层的丢弃总是 fail safe（新开会话，或不带该字段 spawn），值也不会完整回显，逐次审计的价值有限
+- **缺 history factory 的 Warn 前缀**：`cli: no history factory registered for backend; history will be empty` 改为 `history: no history factory registered for backend; history will be empty`（代码从 `internal/cli` 移到了 `internal/history`）。按整句匹配的告警请改为匹配 `no history factory registered`
+
 ### Security
 
 - **Multipart Value 字段数上限 32**（RNEW-SEC-001），阻断 padded-body DoS
