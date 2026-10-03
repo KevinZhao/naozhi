@@ -262,17 +262,22 @@ func (w *Weixin) sendWithRing(ctx context.Context, ring *tokenRing, chatID, text
 	var rejected []string
 	defer func() {
 		for _, t := range rejected {
-			ring.release(t, false, 0)
+			ring.release(t, false, 0, 0)
 		}
 	}()
 	for range tokenRingCap + 1 {
 		var l lease
 		var ok bool
 		if ring != nil {
-			l, ok = ring.take(key)
+			l, ok = ring.take(key, time.Now().UnixNano())
 		}
 		if !ok || slices.Contains(tried, l.token) {
 			break
+		}
+		if l.landed {
+			// Another message was rejected on the token this one's no-verdict
+			// send used: that send most likely landed.
+			return &maybeDeliveredError{err: errors.New("weixin send: another reply was rejected on this one's no-verdict token")}
 		}
 		tried = append(tried, l.token)
 		err := w.api.sendMessage(ctx, chatID, text, l.token)
@@ -284,15 +289,17 @@ func (w *Weixin) sendWithRing(ctx context.Context, ring *tokenRing, chatID, text
 		switch {
 		case !errors.Is(err, errUpstreamRejected):
 			if l.reserved {
-				ring.release(l.token, true, key)
+				ring.release(l.token, true, key, time.Now().UnixNano())
 			}
 			return lastErr
 		case l.retry:
 			// Most likely this message's earlier no-verdict send landed.
 			return &maybeDeliveredError{err: lastErr}
-		case l.reserved && !l.uncertain:
-			// An uncertain token rejected for another message stays spent:
-			// that message's send most likely consumed it.
+		case l.uncertain:
+			// The other message's send most likely consumed the token: it
+			// stays spent and tells that message's retry to stop.
+			ring.markLanded(l.token, l.otherKey, l.otherNs)
+		case l.reserved:
 			rejected = append(rejected, l.token)
 		}
 	}

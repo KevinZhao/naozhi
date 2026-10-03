@@ -426,8 +426,8 @@ func TestReplyWithRetry_OtherMessageSkipsUncertainToken(t *testing.T) {
 	}
 }
 
-// ringState renders each slot as token, token+"!" (spent) or token+"?"
-// (uncertain).
+// ringState renders each slot as token, token+"!" (spent), token+"?"
+// (uncertain) or token+"!?" (spent, its uncertain message most likely landed).
 func ringState(t *testing.T, w *Weixin) []string {
 	t.Helper()
 	v, _ := w.contextTokens.Load("u")
@@ -437,6 +437,8 @@ func ringState(t *testing.T, w *Weixin) []string {
 	out := make([]string, 0, len(r.slots))
 	for _, s := range r.slots {
 		switch {
+		case s.spent && s.uncertain:
+			out = append(out, s.token+"!?")
 		case s.spent:
 			out = append(out, s.token+"!")
 		case s.uncertain:
@@ -462,7 +464,7 @@ func TestReply_OtherMessageRejectedOnUncertainTokenRotates(t *testing.T) {
 	if !errors.Is(err, errUpstreamRejected) || platform.IsPermanent(err) {
 		t.Fatalf("err = %v, want a retryable upstream rejection", err)
 	}
-	if got, want := ringState(t, w), []string{"t1!"}; !slices.Equal(got, want) {
+	if got, want := ringState(t, w), []string{"t1!?"}; !slices.Equal(got, want) {
 		t.Fatalf("ring = %v, want %v (tokens sent %v)", got, want, f.seen())
 	}
 }
@@ -516,6 +518,104 @@ func TestReply_RejectionStateAfterReply(t *testing.T) {
 			}
 			if got := ringState(t, w); !slices.Equal(got, tc.want) {
 				t.Fatalf("ring = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// ageUncertain backdates every slot's uncertain stamp by d.
+func ageUncertain(t *testing.T, w *Weixin, d time.Duration) {
+	t.Helper()
+	v, _ := w.contextTokens.Load("u")
+	r := v.(*tokenRing)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.slots {
+		r.slots[i].uncertainNs -= int64(d)
+	}
+}
+
+// TestReply_StaleUncertainTokenDoesNotBindEqualText: once the affinity window
+// has passed, a fixed text sent again answers a different user message and
+// goes out on a fresh token, not onto the old uncertain one.
+func TestReply_StaleUncertainTokenDoesNotBindEqualText(t *testing.T) {
+	t.Parallel()
+	const text = "处理出错，请稍后重试"
+	var delivered atomic.Int32
+	w, f := newRingTestWeixin(t, deliverThenDrop("t1", &delivered), "t1")
+	if err := replyText(w, text); err == nil {
+		t.Fatal("reply succeeded, want the dropped connection's error")
+	}
+	ageUncertain(t, w, retryAffinityWindow+time.Second)
+	w.cacheContextToken("u", "t2", time.Now().UnixNano())
+	if err := replyText(w, text); err != nil {
+		t.Fatalf("later reply: %v (tokens sent %v)", err, f.seen())
+	}
+	if got, want := f.seen(), []string{"t1", "t2"}; !slices.Equal(got, want) {
+		t.Fatalf("tokens sent = %v, want %v", got, want)
+	}
+}
+
+// TestReply_StoppedRetryFreesItsText: a retry that stopped on its uncertain
+// token has concluded; an equal text after it is not stopped as well.
+func TestReply_StoppedRetryFreesItsText(t *testing.T) {
+	t.Parallel()
+	var delivered atomic.Int32
+	w, f := newRingTestWeixin(t, deliverThenDrop("t1", &delivered), "t1")
+	if err := reply(w); err == nil {
+		t.Fatal("reply succeeded, want the dropped connection's error")
+	}
+	if err := reply(w); !platform.IsPermanent(err) {
+		t.Fatalf("retry err = %v, want permanent", err)
+	}
+	w.cacheContextToken("u", "t2", time.Now().UnixNano())
+	if err := reply(w); err != nil {
+		t.Fatalf("equal text after the stop: %v (tokens sent %v)", err, f.seen())
+	}
+	if got, want := f.seen(), []string{"t1", "t1", "t2"}; !slices.Equal(got, want) {
+		t.Fatalf("tokens sent = %v, want %v", got, want)
+	}
+}
+
+// TestReply_RetryStopsWhenAnotherMessageWasRejectedOnItsToken: B's rejection
+// on A's uncertain token says A's send landed. A's retry must stop without
+// sending, even with a fresh token pushed meanwhile. The window counts from
+// A's no-verdict send; past it the inference is dropped.
+func TestReply_RetryStopsWhenAnotherMessageWasRejectedOnItsToken(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		age      time.Duration
+		wantStop bool
+	}{
+		{"within window", 0, true},
+		{"past window", retryAffinityWindow + time.Second, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var delivered atomic.Int32
+			w, f := newRingTestWeixin(t, deliverThenDrop("t2", &delivered), "t2")
+			if err := replyText(w, "A"); err == nil {
+				t.Fatal("A succeeded, want the dropped connection's error")
+			}
+			ageUncertain(t, w, tc.age)
+			if err := replyText(w, "B"); !errors.Is(err, errUpstreamRejected) || platform.IsPermanent(err) {
+				t.Fatalf("B err = %v, want a retryable upstream rejection", err)
+			}
+			w.cacheContextToken("u", "t3", time.Now().UnixNano())
+			err := replyText(w, "A")
+			if got := platform.IsPermanent(err); got != tc.wantStop || (!tc.wantStop && err != nil) {
+				t.Fatalf("A retry err = %v, want stop %v (tokens sent %v)", err, tc.wantStop, f.seen())
+			}
+			if tc.wantStop {
+				// The stop concludes A: an equal text after it is sent.
+				if err := replyText(w, "A"); err != nil {
+					t.Fatalf("equal text after the stop: %v (tokens sent %v)", err, f.seen())
+				}
+			}
+			// Either way one A goes out on t3; the stopped retry sends nothing.
+			if got, want := f.seen(), []string{"t2", "t2", "t3"}; !slices.Equal(got, want) {
+				t.Fatalf("tokens sent = %v, want %v", got, want)
 			}
 		})
 	}
