@@ -46,5 +46,5 @@ func TestDrainTurn_ClearsReactionsUnderCancelledCtx(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("owner loop did not return")
 	}
-	wantRemoved(t, rp, "m1", "m2")
+	wantRemoved(t, rp, "m0", "m1", "m2")
 }

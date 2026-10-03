@@ -99,13 +99,12 @@ func TestOwnerLoopCtxDone_ClearsQueuedReactions(t *testing.T) {
 
 	runIMTurn(ctx, d, reactorKey, "owner", reactorMsg("m0", "owner"), true)
 
-	wantRemoved(t, rp, "m1")
+	wantRemoved(t, rp, "m0", "m1")
 }
 
 // TestOwnerLoopPanic_ClearsQueuedReactions covers the panic-recovery path:
 // the process survives, the platform is reachable, so the reactions of the
-// messages the panic dropped must clear — and the owner's own message, which
-// never got one, is left alone.
+// messages the panic dropped must clear, and so must the owner's own.
 func TestOwnerLoopPanic_ClearsQueuedReactions(t *testing.T) {
 	var d *Dispatcher
 	sender := &testSender{}
@@ -117,7 +116,7 @@ func TestOwnerLoopPanic_ClearsQueuedReactions(t *testing.T) {
 
 	runIMTurn(context.Background(), d, reactorKey, "owner", reactorMsg("m0", "owner"), true)
 
-	wantRemoved(t, rp, "m1", "m2")
+	wantRemoved(t, rp, "m0", "m1", "m2")
 }
 
 // TestOwnerLoopDrainPanic_ClearsDrainedBatchReactions covers
@@ -144,7 +143,7 @@ func TestOwnerLoopDrainPanic_ClearsDrainedBatchReactions(t *testing.T) {
 	if calls.Load() != 2 {
 		t.Fatalf("GetOrCreate calls = %d, want 2 (first + drain)", calls.Load())
 	}
-	wantRemoved(t, rp, "m1")
+	wantRemoved(t, rp, "m0", "m1")
 }
 
 // TestDetachedTurn_ClearsItsOwnReaction pins #1946: a passthrough or /urgent

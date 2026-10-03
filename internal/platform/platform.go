@@ -93,8 +93,8 @@ func UsesSingleUseReplyToken(p Platform) bool {
 type ReactionType string
 
 const (
-	// ReactionQueued marks "received, waiting in queue" on the user's message;
-	// removed after the consuming turn completes.
+	// ReactionQueued marks "received, waiting for reply" (queued or in
+	// flight) on the user's message; removed after the answering turn replies.
 	ReactionQueued ReactionType = "queued"
 )
 
