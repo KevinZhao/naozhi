@@ -89,9 +89,9 @@ func TestDashboardJS_LoadEarlierStaleGuard(t *testing.T) {
 		}
 	}
 	// Two stale checks (after fetch, after json) must precede prependEvents.
-	prepend := strings.Index(body, "prependEvents(events);")
+	prepend := strings.Index(body, "prependEvents(page.events);")
 	if prepend < 0 {
-		t.Fatal("loadEarlierEvents must still call prependEvents(events)")
+		t.Fatal("loadEarlierEvents must still call prependEvents(page.events)")
 	}
 	if n := strings.Count(body[:prepend], "if (stale()) return;"); n < 2 {
 		t.Errorf("loadEarlierEvents needs a stale check after each await before prependEvents, found %d", n)

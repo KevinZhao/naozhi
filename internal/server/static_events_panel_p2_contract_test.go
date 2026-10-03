@@ -62,10 +62,10 @@ func TestDashboardJS_ExportPagesFullHistory(t *testing.T) {
 		// Re-admit the watermark ms: ring + disk sources are strictly `< before`,
 		// so `before = oldest` would lose same-ms siblings split by a page edge.
 		"'&before=' + (oldest + 1) + '&limit=' + EXPORT_PAGE_LIMIT",
-		"const seen = new Set(events.map(exportEventKey));", // dedup across overlapping pages
-		"if (fresh.length === 0) {",                         // progress = new entries after dedup
-		"EXPORT_MAX_PAGES",                                  // hard upper bound
-		"truncated = true",                                  // cap / malformed / stalled full page flag truncation
+		"const seen = new Set(events.map(eventIdentityKey));", // dedup across overlapping pages
+		"if (fresh.length === 0) {",                           // progress = new entries after dedup
+		"EXPORT_MAX_PAGES",                                    // hard upper bound
+		"truncated = true",                                    // cap / malformed / stalled full page flag truncation
 		"if (!Array.isArray(page)) { truncated = true; break; }",
 		// Remote relay ignores before/limit → ring-only; a ring-sized slice is
 		// probably incomplete and must not toast as a full export.
@@ -82,9 +82,9 @@ func TestDashboardJS_ExportPagesFullHistory(t *testing.T) {
 	if !strings.Contains(pager, "events = fresh.concat(events);\n    const pageOldest = (fresh[0] && fresh[0].time) || 0;\n    if (!pageOldest) break;") {
 		t.Error("fetchAllSessionEvents must concat the page before breaking on an untimed head")
 	}
-	keyFn := jsFuncBody(t, js, "exportEventKey")
+	keyFn := jsFuncBody(t, js, "eventIdentityKey")
 	if !strings.Contains(keyFn, "e.uuid") || !strings.Contains(keyFn, "e.detail") {
-		t.Error("exportEventKey must key on uuid, falling back to (time,type,detail)")
+		t.Error("eventIdentityKey must key on uuid, falling back to (time,type,detail)")
 	}
 	if !strings.Contains(js, "const EXPORT_PAGE_LIMIT = 500;") {
 		t.Error("EXPORT_PAGE_LIMIT must equal the server's maxEventsPageLimit (500)")

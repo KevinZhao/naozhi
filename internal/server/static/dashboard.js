@@ -7,7 +7,7 @@ import { composer, hooks, perSession, selection, serverInfo, sessionList, timers
 import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, registerActions, sessionExitChipHtml } from './nz_util.js';
 import { eventHtml } from './event_render.js';
 import { onAskOptionToggle, onAskSubmit } from './ask_card.js';
-import { fetchEvents, renderEvents } from './event_stream.js';
+import { eventIdentityKey, fetchEvents, renderEvents } from './event_stream.js';
 import { renderMd, runPendingAsync } from './render_md.js';
 import { fetchSessionRuns, setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderSpawnDiagChip } from './session_header.js';
 import {
@@ -930,13 +930,6 @@ function formatSessionMarkdown(meta, events) {
 const EXPORT_PAGE_LIMIT = 500;
 const EXPORT_MAX_PAGES = 40;
 
-// exportEventKey identifies an entry across overlapping pages: the backend's
-// uuid when present, else (time,type,detail) for pre-uuid synthetic entries.
-function exportEventKey(e) {
-  if (e && e.uuid) return 'u:' + e.uuid;
-  return 'k:' + ((e && e.time) || 0) + '|' + ((e && e.type) || '') + '|' + ((e && e.detail) || '');
-}
-
 // fetchAllSessionEvents returns { events, truncated } (or { status } on a
 // non-2xx first page). `truncated` is set whenever the export is known or
 // suspected to be incomplete — page cap hit, a later page failed or was
@@ -949,7 +942,7 @@ function exportEventKey(e) {
 // same-millisecond sibling group (one CLI frame's blocks) split by the ring
 // edge or a 500-entry page edge would lose its older members for good under a
 // strict cursor. Re-admitting the watermark millisecond and dropping what we
-// already hold by exportEventKey keeps every sibling; progress is measured by
+// already hold by eventIdentityKey keeps every sibling; progress is measured by
 // "new entries after dedup", not by the cursor moving.
 async function fetchAllSessionEvents(key, node, headers) {
   const remote = !!(node && node !== 'local');
@@ -962,7 +955,7 @@ async function fetchAllSessionEvents(key, node, headers) {
   if (remote) return { events, truncated: events.length >= EXPORT_PAGE_LIMIT };
   if (events.length === 0) return { events, truncated: false };
 
-  const seen = new Set(events.map(exportEventKey));
+  const seen = new Set(events.map(eventIdentityKey));
   let truncated = false;
   let oldest = (events[0] && events[0].time) || 0;
   for (let pages = 0; oldest > 0; pages++) {
@@ -973,7 +966,7 @@ async function fetchAllSessionEvents(key, node, headers) {
     if (!Array.isArray(page)) { truncated = true; break; }
     if (page.length === 0) break;
     const fresh = page.filter(e => {
-      const k = exportEventKey(e);
+      const k = eventIdentityKey(e);
       if (seen.has(k)) return false;
       seen.add(k);
       return true;
