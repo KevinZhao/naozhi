@@ -521,7 +521,7 @@ function closeCronDetail() {
   document.querySelectorAll('.cj-row.is-active').forEach(el => el.classList.remove('is-active'));
   deps.renderCronPanel();
   // Restore focus. After renderCronList's repaint the cached element may
-  // be detached from the DOM (innerHTML rebuild); look up the row by id
+  // be detached from the DOM (a changed row is replaced); look up the row by id
   // first and fall back to the cached reference if it's still connected.
   const restoreFocus = () => {
     let target = null;

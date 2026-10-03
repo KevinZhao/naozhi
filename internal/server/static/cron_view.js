@@ -63,6 +63,7 @@ import {
   formatCostUSD,
   nzBus,
   nzViews,
+  reconcileChildren,
   registerActions,
   showToast,
   trapFocus,
@@ -1679,15 +1680,15 @@ function renderCronList() {
   }
   const cmp = cronSortComparators[cronSortOrder] || cronSortComparators.created_desc;
   const sorted = [...matched].sort(cmp);
-  // Wrap rows in a .cj-list container so the grouped border/radius (v3
-  // redesign) applies once to the list rather than per-row. `.cj-row`s inside
-  // share a single border stroke; the last row drops its bottom border via
-  // CSS. Keeps paint cheap: host.innerHTML assignment unchanged, plus one
-  // constant-size outer wrap.
-  host.innerHTML = '<div class="cj-list">' + sorted.map(cronJobCardHtml).join('') + '</div>';
-  // P0 cron-run-history — start/stop the 1Hz running-tick driver based on
-  // whether any row is currently running. Cheap idle (clears the interval)
-  // when nothing's running.
+  // One .cj-list holds the rows (the v3 grouped border is the list's). Rows
+  // are reconciled by data-cron-id: a row whose markup is unchanged keeps its
+  // node, so a run frame for one job replaces only that row and focus stays.
+  let list = host.firstElementChild;
+  if (host.childElementCount !== 1 || !list.classList.contains('cj-list')) {
+    host.replaceChildren(list = Object.assign(document.createElement('div'), { className: 'cj-list' }));
+  }
+  reconcileChildren(list, sorted.map(cronJobCardHtml).join(''), el => el.getAttribute('data-cron-id'));
+  // Start/stop the 1Hz running-tick driver by whether any row is running.
   ensureCronRunningTick();
 }
 
@@ -1724,9 +1725,6 @@ function clearCronSearch() {
   cronFilterQuery = '';
   renderCronList();
 }
-
-
-
 
 // cronMissedBannerHtml — cron-v2-polish §3.3: missed banner。Count 取自
 // cronJobs 本地缓存，与 attention 计数同源。点击切到 attention filter，与 header

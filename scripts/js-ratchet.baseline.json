@@ -132,13 +132,13 @@
     "lateBindings": 0
   },
   "cron_view.js": {
-    "lines": 2608,
+    "lines": 2606,
     "maxFnLines": 103,
     "fnOver100": 1,
     "topLevelLetVar": 11,
     "configureDeps": 0,
     "deadInjections": 0,
-    "innerHTMLAssign": 12,
+    "innerHTMLAssign": 11,
     "htmlInsert": 2,
     "lateBindings": 3
   },
