@@ -24,6 +24,8 @@
 //    (toast, optimistic bubble, running flip); for a session sent to and then
 //    left it only rolls the running flip back; a tab that sent nothing ignores
 //    it.
+//  - a session_state carrying a reason refetches the session list past the
+//    version cache (a process state change does not bump the store version).
 // A bookkeeping write that lands on sessionFrames instead of sessionStream leaves its
 // fields stale without throwing, so each case asserts a frame the mock saw.
 const { test, expect } = require('@playwright/test');
@@ -336,6 +338,31 @@ test.describe('a send from this tab to a dead session', () => {
     conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'running' });
     await expect.poll(() => subs(conn, KEY_A).length, { message: 'running must resubscribe' }).toBe(2);
     expect(subs(conn, KEY_A)[1].after, 'the resubscribe asks for an initial page').toBeUndefined();
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+});
+
+test.describe('a session_state carrying a reason', () => {
+  let mock;
+  let data;
+  test.beforeAll(async () => {
+    data = defaultSessions();
+    mock = await startMockServer({ ws: true, sessions: data });
+  });
+  test.afterAll(() => mock.server.close());
+
+  // The list changes without a version bump, as a process state transition
+  // leaves storeGen alone; only the refetch the reason triggers, with the
+  // version cache cleared, can paint it.
+  test('refetches the session list and repaints it past the version cache', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    await page.evaluate(() => debouncedFetchSessions()); // the connect-time refetch has settled
+    const card = page.locator(`.session-card[data-key="${KEY_B}"]`);
+    await expect(card).toContainText('review this code');
+    data.sessions.find((s) => s.key === KEY_B).summary = 'refetched after the push';
+    conn.send({ type: 'session_state', key: KEY_B, node: 'local', state: 'dead', reason: 'no_output_timeout' });
+    await expect(card, 'the reason refetches and repaints the sidebar').toContainText('refetched after the push');
     expect(errors).toEqual([]);
     await ctx.close();
   });
