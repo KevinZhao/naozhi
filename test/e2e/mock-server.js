@@ -230,6 +230,10 @@ function defaultGitStates() {
  *   race a session switch against an in-flight poll (#2430 fetchEvents(full) gate).
  * @param {number} [overrides.eventsRingSize] - Bare `?key=` (no after/before/limit) returns only the last N
  *   events, mirroring the server's in-memory ring (EventEntries, default 500).
+ * @param {boolean} [overrides.eventsBeforeLegacy] - `before=` pages omit X-Events-Has-More, as an
+ *   older server does (the dashboard then reads a short page as exhausted).
+ * @param {number} [overrides.eventsBeforeFailCount] - The first N `before=` requests answer `[]` with
+ *   has-more "1": the server's fail-open reply to a degraded disk read or a cancelled request.
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
  *   (timezone / timezone_abbr / timezone_label ...). recent_runs_cap defaults to 5 like the backend.
@@ -303,6 +307,7 @@ function startMockServer(overrides = {}) {
   const eventsTailDelayMs = overrides.eventsTailDelayMs || 0;
   const eventsRingSize = overrides.eventsRingSize || 500;
   const eventsCalls = [];
+  let eventsBeforeFailsLeft = overrides.eventsBeforeFailCount || 0;
   const cronJobsData = overrides.cronJobs || defaultCronJobs();
   // 与后端 cronListResp 对齐：recent_runs_cap 恒为 recentRunsPerJob(5)；时区字段按需注入。
   const cronListMeta = Object.assign({ recent_runs_cap: 5 }, overrides.cronListMeta || {});
@@ -543,10 +548,12 @@ function startMockServer(overrides = {}) {
         out = all.filter(e => !e?.time || e.time > after);
         if (limit > 0 && out.length > limit) out = out.slice(-limit);
       } else if (before > 0) {
-        // handlers.go `before` branch: strictly older, newest `limit` of them,
-        // chronological.
-        out = all.filter(e => e?.time && e.time < before);
-        if (limit > 0 && out.length > limit) out = out.slice(-limit);
+        // events.go `before` branch: strictly older, newest `limit` of them,
+        // chronological, and whether the page left any of them out.
+        const older = all.filter(e => e?.time && e.time < before);
+        out = limit > 0 && older.length > limit ? older.slice(-limit) : older;
+        if (eventsBeforeFailsLeft > 0) { eventsBeforeFailsLeft--; out = []; headers['X-Events-Has-More'] = '1'; }
+        else if (!overrides.eventsBeforeLegacy) headers['X-Events-Has-More'] = older.length > out.length ? '1' : '0';
       } else if (limit > 0) {
         // handlers.go initial-page branch: tail N + authoritative has-more header.
         out = all.slice(-limit);

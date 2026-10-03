@@ -210,7 +210,7 @@
   },
   "event_stream.js": {
     "lines": 923,
-    "maxFnLines": 74,
+    "maxFnLines": 70,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0,
