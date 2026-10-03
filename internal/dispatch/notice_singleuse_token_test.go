@@ -13,16 +13,8 @@ import (
 
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
-	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/turn"
 )
-
-// fakeSingleUseInterim is a single-use, non-Reactor platform that claims
-// interim support, so the new-session notice reaches the single-use gate
-// rather than stopping at SupportsInterimMessages.
-type fakeSingleUseInterim struct{ fakeSingleUseReactorless }
-
-func (f *fakeSingleUseInterim) SupportsInterimMessages() bool { return true }
 
 // noticeSite triggers one non-answer notice for chat1 on platform name.
 // rateLimited sites spend chat1's ShouldNotify cooldown when they send.
@@ -56,13 +48,6 @@ var noticeSites = []noticeSite{
 	{name: "merged", text: "已合并到上一条回复", rateLimited: true, fire: func(_ *testing.T, d *Dispatcher, name string) {
 		d.ackMergedFollower(context.Background(), noticeMsg(name), noticeKey(name), 2, nil)
 	}},
-	{name: "new_session", text: "新会话已创建", fire: func(_ *testing.T, d *Dispatcher, name string) {
-		msg := noticeMsg(name)
-		o := d.newIMOrigin(msg, slog.Default(), noticeKey(name), "general", session.AgentOpts{}, imMessage, len(msg.Text), 0)
-		dl := &imDelivery{o: o, info: turn.TurnInfo{First: true}, p: d.platforms[name], lg: slog.Default()}
-		dl.SessionReady(context.Background(), sessionview.SessionNew)
-		dl.tracker.stop()
-	}},
 }
 
 func noticeDispatcher(site noticeSite, p platform.Platform) *Dispatcher {
@@ -84,7 +69,7 @@ func TestNotices_SingleUseTokenGate(t *testing.T) {
 	for _, site := range noticeSites {
 		t.Run(site.name+"/single_use", func(t *testing.T) {
 			t.Parallel()
-			fp := &fakeSingleUseInterim{}
+			fp := &fakeSingleUseReactorless{}
 			d := noticeDispatcher(site, fp)
 			site.fire(t, d, fp.Name())
 			if n := fp.replyCount(); n != 0 {
@@ -113,7 +98,7 @@ func TestNotices_SingleUseTokenGate(t *testing.T) {
 // message must still leave an Info line saying nobody was told.
 func TestAdmittedDropped_LogsTheDrop(t *testing.T) {
 	t.Parallel()
-	fp := &fakeSingleUseInterim{}
+	fp := &fakeSingleUseReactorless{}
 	d := newTestDispatcher(&fakePlatform{}, withQueue(turn.QueueOptions{}))
 	d.platforms = map[string]platform.Platform{fp.Name(): fp}
 	var buf bytes.Buffer
