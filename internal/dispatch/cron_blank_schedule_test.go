@@ -28,9 +28,9 @@ func TestParseCronAddArgs_EmptySchedule(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			schedule, prompt, err := ParseCronAdd(tc.args)
+			got, err := ParseCronAdd(tc.args)
 			if err == nil {
-				t.Fatalf("ParseCronAdd(%q) expected error for blank schedule, got schedule=%q prompt=%q", tc.args, schedule, prompt)
+				t.Fatalf("ParseCronAdd(%q) expected error for blank schedule, got schedule=%q prompt=%q", tc.args, got.Schedule, got.Prompt)
 			}
 			if !strings.Contains(err.Error(), "定时表达式不能为空") {
 				t.Errorf("ParseCronAdd(%q) error = %q; want '定时表达式不能为空'", tc.args, err.Error())
@@ -43,14 +43,14 @@ func TestParseCronAddArgs_EmptySchedule(t *testing.T) {
 // guard over-rejecting a legitimate schedule.
 func TestParseCronAddArgs_NonBlankScheduleStillParses(t *testing.T) {
 	t.Parallel()
-	schedule, prompt, err := ParseCronAdd(`"@every 30m" ping the team`)
+	got, err := ParseCronAdd(`"@every 30m" ping the team`)
 	if err != nil {
 		t.Fatalf("ParseCronAdd valid input errored: %v", err)
 	}
-	if schedule != "@every 30m" {
-		t.Errorf("schedule = %q, want %q", schedule, "@every 30m")
+	if got.Schedule != "@every 30m" {
+		t.Errorf("schedule = %q, want %q", got.Schedule, "@every 30m")
 	}
-	if prompt != "ping the team" {
-		t.Errorf("prompt = %q, want %q", prompt, "ping the team")
+	if got.Prompt != "ping the team" {
+		t.Errorf("prompt = %q, want %q", got.Prompt, "ping the team")
 	}
 }

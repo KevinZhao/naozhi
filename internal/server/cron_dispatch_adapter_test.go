@@ -73,14 +73,14 @@ func TestCronDispatchAdapter_ClassifyError_PreservesSentinelChain(t *testing.T) 
 	}
 }
 
-// TestCronDispatchAdapter_ProjectCronJob pins the 4-field projection and its
+// TestCronDispatchAdapter_ProjectCronJob pins the 5-field projection and its
 // nil tolerance: a handler reading a field the projection does not copy
 // would read a zero value, so adding a field to dispatch.CronJob must extend
 // projectCronJob in the same change (cron_consumer.go godoc).
 func TestCronDispatchAdapter_ProjectCronJob(t *testing.T) {
-	j := &cron.Job{ID: "id1", Schedule: "@hourly", Prompt: "p", Paused: true}
+	j := &cron.Job{ID: "id1", Schedule: "@hourly", Prompt: "p", Paused: true, FreshContext: true}
 	got := projectCronJob(j)
-	want := dispatch.CronJob{ID: "id1", Schedule: "@hourly", Prompt: "p", Paused: true}
+	want := dispatch.CronJob{ID: "id1", Schedule: "@hourly", Prompt: "p", Paused: true, FreshContext: true}
 	if got != want {
 		t.Errorf("projectCronJob = %+v, want %+v", got, want)
 	}
@@ -104,6 +104,33 @@ func newAdapterTestScheduler(t *testing.T) *cron.Scheduler {
 	}
 	t.Cleanup(func() { s.Stop() })
 	return s
+}
+
+// The request's context mode reaches the stored job in both directions, so an
+// IM job created fresh really resets its session each run.
+func TestCronDispatchAdapter_AddJobStoresContextMode(t *testing.T) {
+	a := cronDispatchAdapter{s: newAdapterTestScheduler(t)}
+	for _, fresh := range []bool{true, false} {
+		job, _, err := a.AddJob(dispatch.CronJobRequest{
+			Schedule: "@every 30m", Prompt: "p", Platform: "feishu", ChatID: "c1",
+			FreshContext: fresh,
+		})
+		if err != nil {
+			t.Fatalf("AddJob(fresh=%v): %v", fresh, err)
+		}
+		if job.FreshContext != fresh {
+			t.Errorf("AddJob(fresh=%v) projection FreshContext = %v", fresh, job.FreshContext)
+		}
+		var stored *dispatch.CronJob
+		for _, j := range a.ListJobs("feishu", "c1") {
+			if j.ID == job.ID {
+				stored = &j
+			}
+		}
+		if stored == nil || stored.FreshContext != fresh {
+			t.Errorf("stored job for fresh=%v = %+v, want FreshContext=%v", fresh, stored, fresh)
+		}
+	}
 }
 
 // TestCronDispatchAdapter_AddListResumeRoundTrip drives the adapter against

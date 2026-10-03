@@ -28,6 +28,7 @@ type fakeCronScheduler struct {
 	// classifier's CodeUnknown default for unmatched errors.
 	classifyResult string
 
+	lastAddReq     CronJobRequest
 	addJobCalls    int
 	listJobsCalls  int
 	deleteJobCalls int
@@ -38,10 +39,11 @@ type fakeCronScheduler struct {
 
 func (f *fakeCronScheduler) AddJob(req CronJobRequest) (CronJob, time.Time, error) {
 	f.addJobCalls++
+	f.lastAddReq = req
 	if f.addJobErr != nil {
 		return CronJob{}, time.Time{}, f.addJobErr
 	}
-	return CronJob{ID: "fake-id", Schedule: req.Schedule, Prompt: req.Prompt}, f.nextRunResult, nil
+	return CronJob{ID: "fake-id", Schedule: req.Schedule, Prompt: req.Prompt, FreshContext: req.FreshContext}, f.nextRunResult, nil
 }
 
 func (f *fakeCronScheduler) ListJobs(plat, chatID string) []CronJob {

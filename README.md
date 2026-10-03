@@ -140,11 +140,13 @@ cli:
 ```
 /cron add "@every 30m" 检查 staging 环境的健康状态
 /cron add "0 9 * * 1-5" /review 扫描最近的 open PRs
+/cron add --keep-context "0 18 * * *" 接着昨天的进度写日报
 /cron list
 /cron pause <id>
 ```
 
 - 标准 cron 表达式 + `@every` 语法
+- 聊天里创建的任务默认每次执行都从新会话开始；加 `--keep-context` 则延续同一会话（`/cron list` 标 `[保留上下文]`）
 - 每 chat 10 个 / 全局 50 个配额
 - 执行结果自动回推到聊天
 
@@ -348,7 +350,7 @@ Dashboard: 浏览器打开 `http://localhost:8180`
 | `/pwd` | 显示当前工作目录 |
 | `/project <name>` | 绑定到项目 |
 | `/project off` | 解绑项目 |
-| `/cron add "<schedule>" <prompt>` | 创建定时任务 |
+| `/cron add [--keep-context] "<schedule>" <prompt>` | 创建定时任务（默认每次新会话） |
 | `/cron list` | 查看定时任务 |
 | `/cron del/pause/resume <id>` | 管理定时任务 |
 | `/help` | 显示可用命令 |

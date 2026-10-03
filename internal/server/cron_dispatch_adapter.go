@@ -35,28 +35,35 @@ type cronCommandScheduler interface {
 type cronDispatchAdapter struct{ s cronCommandScheduler }
 
 // projectCronJob copies the dispatch-read fields (ID / Schedule / Prompt /
-// Paused) into the dispatch-side projection. nil maps to the zero value so
+// Paused / FreshContext) into the dispatch-side projection. nil maps to the zero value so
 // a scheduler that returns (nil, nil) cannot panic the adapter.
 func projectCronJob(j *cron.Job) dispatch.CronJob {
 	if j == nil {
 		return dispatch.CronJob{}
 	}
 	return dispatch.CronJob{
-		ID:       j.ID,
-		Schedule: j.Schedule,
-		Prompt:   j.Prompt,
-		Paused:   j.Paused,
+		ID:           j.ID,
+		Schedule:     j.Schedule,
+		Prompt:       j.Prompt,
+		Paused:       j.Paused,
+		FreshContext: j.FreshContext,
 	}
 }
 
-// AddJob constructs the concrete job via cron.NewJob (the single construction
-// choke point), registers it, and folds the follow-up NextRun into the result.
+// AddJob constructs the concrete job via cron.NewJobFull (the single
+// construction choke point), registers it, and folds the follow-up NextRun
+// into the result.
 func (a cronDispatchAdapter) AddJob(req dispatch.CronJobRequest) (dispatch.CronJob, time.Time, error) {
-	job := cron.NewJob(req.Schedule, req.Prompt, cron.JobIMContext{
-		Platform:  req.Platform,
-		ChatID:    req.ChatID,
-		ChatType:  req.ChatType,
-		CreatedBy: req.CreatedBy,
+	job := cron.NewJobFull(cron.JobInit{
+		Schedule: req.Schedule,
+		Prompt:   req.Prompt,
+		IM: cron.JobIMContext{
+			Platform:  req.Platform,
+			ChatID:    req.ChatID,
+			ChatType:  req.ChatType,
+			CreatedBy: req.CreatedBy,
+		},
+		FreshContext: req.FreshContext,
 	})
 	if err := a.s.AddJob(job); err != nil {
 		// Unwrapped: ClassifyError must still see the sentinel chain.

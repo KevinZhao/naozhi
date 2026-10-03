@@ -691,16 +691,16 @@ func TestParseCronAdd(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.args, func(t *testing.T) {
-			schedule, prompt, err := dispatch.ParseCronAdd(tt.args)
+			got, err := dispatch.ParseCronAdd(tt.args)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("parseCronAdd(%q): err=%v, wantErr=%v", tt.args, err, tt.wantErr)
 				return
 			}
-			if schedule != tt.wantSchedule {
-				t.Errorf("schedule = %q, want %q", schedule, tt.wantSchedule)
+			if got.Schedule != tt.wantSchedule {
+				t.Errorf("schedule = %q, want %q", got.Schedule, tt.wantSchedule)
 			}
-			if prompt != tt.wantPrompt {
-				t.Errorf("prompt = %q, want %q", prompt, tt.wantPrompt)
+			if got.Prompt != tt.wantPrompt {
+				t.Errorf("prompt = %q, want %q", got.Prompt, tt.wantPrompt)
 			}
 		})
 	}
