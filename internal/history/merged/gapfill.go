@@ -10,12 +10,13 @@ import (
 )
 
 // GapFill returns the fallback turns hidden behind local's persist_gap
-// records, oldest first. persist writes a gap record (no UUID, Time of the
-// next stored batch) when it dropped batches, so the lost turns sit between
-// the previous local entry and the record. A fallback row is returned when its
-// Time lies in such a window widened by the content skew bounds, it has no
-// UUID or content twin in local, and Time >= floor. local is in file order and
-// may reach below floor so a record just under the caller's cut still counts.
+// records, oldest first. persist writes a gap record (no UUID by design, see
+// persist.gapEntryJSON; Time of the next stored batch) when it dropped
+// batches, so the lost turns sit between the previous local entry and the
+// record. A fallback row is returned when its Time lies in such a window
+// widened by the content skew bounds, it has no UUID or content twin in local,
+// and Time >= floor. local is in file order and may reach below floor so a
+// record just under the caller's cut still counts.
 // Without a gap record the fallback is not read; a failed read returns nil.
 func (s *Source) GapFill(ctx context.Context, local []clievent.EventEntry, floor int64, limit int) []clievent.EventEntry {
 	if s == nil || s.Fallback == nil || limit <= 0 {

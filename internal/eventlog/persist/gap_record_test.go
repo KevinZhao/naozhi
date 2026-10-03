@@ -66,6 +66,11 @@ func TestGapRecord_DroppedBatchLeavesDurableMark(t *testing.T) {
 	if gap.Time != 1700000000000 {
 		t.Errorf("Time = %d, want the carrying batch's first timestamp — the gap spans up to that instant", gap.Time)
 	}
+	// No uuid on purpose: sharing Time with its batch, an empty UUID is what
+	// keeps the record first under merged's (Time, UUID) order (gapEntryJSON).
+	if gap.UUID != "" || bytes.Contains(gapBody, []byte(`"uuid"`)) {
+		t.Errorf("gap record carries a uuid; a hex id would sort it among its own batch:\n%s", gapBody)
+	}
 	// And the counter is consumed: a second batch must NOT repeat the gap.
 	s.accept([]Entry{
 		{TimeMS: 1700000001000, JSON: []byte(`{"time":1700000001000,"type":"text","summary":"later"}`)},

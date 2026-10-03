@@ -2,6 +2,7 @@ package merged
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -117,5 +118,43 @@ func TestMerged_LocalInteriorGap_MultipleDroppedTurns(t *testing.T) {
 	}
 	if len(got) != 5 {
 		t.Fatalf("got %d entries, want 5 — the dropped batch must be recovered from fallback: %+v", len(got), got)
+	}
+}
+
+// TestMerged_GapRecordSortsAheadOfItsBatch pins why persist's gap record has no
+// UUID: it shares Time with the batch it fronts, and only an empty UUID sorts
+// before every hex UUID, so local stays on the (Time, UUID) fast path and the
+// record reads ahead of the turns it precedes.
+func TestMerged_GapRecordSortsAheadOfItsBatch(t *testing.T) {
+	logs := captureSlog(t)
+	m := &Source{
+		Local: &stubSource{entries: []clievent.EventEntry{
+			{UUID: "l1", Time: 1000, Type: "user", Detail: "q1"},
+			{Time: 2000, Type: clievent.KindPersistGap, Detail: "dropped=3"},
+			{UUID: "00000000000000000000000000000000", Time: 2000, Type: "user", Detail: "q2"},
+			{UUID: "ffffffffffffffffffffffffffffffff", Time: 2000, Type: "text", Detail: "a2"},
+		}},
+		Fallback: &stubSource{entries: []clievent.EventEntry{
+			{UUID: "cli-1", Time: 1005, Type: "user", Detail: "q1"},
+		}},
+	}
+	got, err := m.LoadBefore(context.Background(), 0, 100)
+	if err != nil {
+		t.Fatalf("LoadBefore: %v", err)
+	}
+	if strings.Contains(logs.String(), "unsorted entries") {
+		t.Errorf("local with a UUID-less gap record left the sorted fast path:\n%s", logs)
+	}
+	gapAt := -1
+	for i, e := range got {
+		if e.Type == clievent.KindPersistGap {
+			gapAt = i
+		}
+	}
+	if gapAt < 0 {
+		t.Fatalf("gap record lost in the merge: %+v", got)
+	}
+	if gapAt < 1 || gapAt+1 >= len(got) || got[gapAt-1].Detail != "q1" || got[gapAt+1].Detail != "q2" {
+		t.Errorf("gap record at %d must sit between q1 and its batch's first turn q2: %+v", gapAt, got)
 	}
 }

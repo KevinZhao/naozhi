@@ -35,6 +35,11 @@ type sessionSink struct {
 // by hand because persist deliberately does not import clievent. Field names
 // must match clievent.EventEntry's json tags — the linkage is pinned by
 // TestGapEntryShape_MatchesEventEntry.
+//
+// It has no uuid on purpose: the record shares Time with the batch it fronts,
+// and an empty UUID sorts first under merged's (Time, UUID) order, keeping the
+// record ahead of its batch and local sorted for mergeDedup's fast path.
+// Readers exempt it from missing-UUID checks by Type.
 type gapEntryJSON struct {
 	Time    int64  `json:"time"`
 	Type    string `json:"type"`
