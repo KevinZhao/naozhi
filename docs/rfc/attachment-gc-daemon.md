@@ -324,7 +324,7 @@ GC 是不可逆删除,聚合计数器不足以定位"删错了什么"。v2 强�
 | `meta_no_refs` | 有 `.meta` 但 `ReferencingKeyHashes` 空 | 可能是真无引用,**也可能是 tracker 尚未 bump** —— 高风险桶,需结合 tracker 运行时长判断 |
 | `refs_expired` | 有引用但 `LastReferencedAt` 超 refTTL | 确实长期未引用,删除安全 |
 
-分桶计数进 `naozhi_attachment_gc_would_reap_total{reason=...}`(或三个独立 expvar)。运维看到 `meta_no_refs` 占比高时,应延长观察期让 tracker 充分 bump 后再开真删。
+分桶计数进 `naozhi_attachment_gc_would_reap_total{reason=...}`(或三个独立 expvar),同时经 `TickReport.Counts`(`would_reap_<reason>` / `would_reap_bytes` / `dry_run`)进 dashboard「系统」视图的卡片,每个有可回收项的根另打一条 `attachment-gc: sweep summary` Info 日志 —— expvar 只在 `server.debug_mode` 下可读,不能当主信号。运维看到 `meta_no_refs` 占比高时,应延长观察期让 tracker 充分 bump 后再开真删。
 
 **逐文件删除审计**:真删时对每个被删文件 `slog.Info` 记 path + 决策原因(`uploadOld` / 无 refs / refExpired),作为事后审计唯一线索。大目录可采样/限流,但不能完全静默(现状 `GCWithRefs` 只 log 失败项,成功删除静默 —— 要改)。
 

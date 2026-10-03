@@ -278,6 +278,42 @@ func TestDashboardJS_SystemStatLabelsMatchAutoTitlerSkipReasons(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_SystemStatLabelsCoverAttachmentGCCounts pins a label for
+// every Counts key attachment-gc reports (the gcCount* consts, flattened
+// verbatim into Stats), and that *_bytes keys render through formatBytes
+// instead of as a raw integer.
+func TestDashboardJS_SystemStatLabelsCoverAttachmentGCCounts(t *testing.T) {
+	t.Parallel()
+	js := readDashboardJS(t)
+	src, err := os.ReadFile(filepath.Join("..", "sysession", "attachment_gc.go"))
+	if err != nil {
+		t.Fatalf("read attachment_gc.go: %v", err)
+	}
+	keys := regexp.MustCompile(`(?m)^\s*gcCount\w+\s*=\s*"([a-z_]+)"`).FindAllStringSubmatch(string(src), -1)
+	if len(keys) < 5 {
+		t.Fatalf("found %d gcCount* keys in attachment_gc.go, want >= 5 — extraction broken", len(keys))
+	}
+	start := strings.Index(js, "const SYSTEM_STAT_LABELS = {")
+	if start < 0 {
+		t.Fatal("SYSTEM_STAT_LABELS not found")
+	}
+	table := js[start:]
+	if end := strings.Index(table, "};"); end > 0 {
+		table = table[:end]
+	}
+	for _, m := range keys {
+		if !strings.Contains(table, "\n  "+m[1]+":") {
+			t.Errorf("SYSTEM_STAT_LABELS lacks %q — attachment-gc reports it in Counts", m[1])
+		}
+	}
+	if !strings.Contains(js, "if (key.endsWith('_bytes')) return formatBytes(v) || '0 B';") {
+		t.Error("systemStatValue must render *_bytes stats through formatBytes")
+	}
+	if !strings.Contains(js, "esc(systemStatValue(k, stats[k]))") {
+		t.Error("the stats chips must render values through systemStatValue")
+	}
+}
+
 // TestDashboardJS_SidebarRelativeTimeTick pins the 60s ticker that refreshes
 // the "2m ago" labels on session cards. While WS is connected renderSidebar
 // only runs on sessions_update, so the relative time froze at whatever the

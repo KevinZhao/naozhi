@@ -352,8 +352,10 @@ sysession:
       batch_per_tick: 1
       include_group_chat: false
     # attachment-gc: 回收超 TTL 且无引用的附件文件 (docs/rfc/attachment-gc-daemon.md)。
-    # 首版默认关闭 + dry_run: 存量部署先观察 would-remove 分桶日志
-    # (naozhi_attachment_gc_would_reap_*), 确认风险后再开真删。
+    # 默认关闭; 关闭时 dry_run 也不跑。开启步骤: 先 enabled: true 且保持
+    # dry_run: true 跑几个周期, 看 dashboard「系统」视图 attachment-gc 卡片的
+    # 可回收分桶/体积 (或 `attachment-gc: sweep summary` 日志), 重点看
+    # meta_no_refs 桶; 确认风险后再改 dry_run: false 开真删。
     attachment-gc:
       enabled: false
       tick: 6h            # 低频清理; <1h 会被钉到 1h 下限

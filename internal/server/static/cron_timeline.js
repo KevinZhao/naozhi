@@ -18,6 +18,7 @@ import {
   esc,
   escAttr,
   fetchJSON,
+  formatBytes,
   formatCostUSD,
   formatRunDuration,
   runStateDot,
@@ -419,16 +420,6 @@ function cronSandboxMetaBarHtml(sb) {
     parts.push('<span class="ctr-meta-item ctr-meta-exit" title="退出码">exit ' + esc(String(sb.exit_status)) + '</span>');
   }
   return '<div class="ctr-meta-bar">' + parts.join('') + '</div>';
-}
-
-// formatBytes renders a byte count as a compact human size (MiB/GiB) for the
-// meta bar. Integer-ish display — memory peaks are coarse signals.
-function formatBytes(n) {
-  if (!n || n < 0) return '';
-  if (n >= 1 << 30) return (n / (1 << 30)).toFixed(1) + ' GiB';
-  if (n >= 1 << 20) return Math.round(n / (1 << 20)) + ' MiB';
-  if (n >= 1 << 10) return Math.round(n / (1 << 10)) + ' KiB';
-  return n + ' B';
 }
 
 // cronTimelineSelectRun — 点击 timeline 行（§16 inline-expand 回归）。

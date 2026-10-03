@@ -119,7 +119,11 @@ func (a *attachmentGC) Tick(ctx context.Context) (TickReport, error) {
 	}
 
 	now := a.now()
-	report := TickReport{Skipped: map[string]int{}}
+	report := TickReport{Skipped: map[string]int{}, Counts: map[string]int64{}}
+	if a.dryRun {
+		report.Counts[gcCountDryRun] = 1
+		report.Counts[gcCountBytes] = 0
+	}
 	start := a.cursor % len(roots)
 
 	var firstErr error
@@ -156,11 +160,11 @@ func (a *attachmentGC) Tick(ctx context.Context) (TickReport, error) {
 			}
 			// A real (non-cancel) error still counts as examined.
 			report.Examined++
-			recordWouldReap(res)
+			a.recordWouldReap(&report, root, res)
 			continue
 		}
 		report.Examined++
-		recordWouldReap(res)
+		a.recordWouldReap(&report, root, res)
 		if !a.dryRun {
 			metrics.AttachmentGCReapedTotal.Add(int64(res.Removed))
 			report.Acted += res.Removed
@@ -173,17 +177,43 @@ func (a *attachmentGC) Tick(ctx context.Context) (TickReport, error) {
 	return report, firstErr
 }
 
-// recordWouldReap fans per-reason would-remove counts out to the bucketed
-// expvar counters (RFC §6 E4), in both dry-run and live mode.
-func recordWouldReap(res attachment.GCResult) {
+// Counts keys attachment-gc reports; each has a SYSTEM_STAT_LABELS entry
+// in static/system_view.js (pinned by a server test).
+const (
+	gcCountDryRun       = "dry_run"
+	gcCountBytes        = "would_reap_bytes"
+	gcCountLegacyNoMeta = "would_reap_legacy_no_meta"
+	gcCountMetaNoRefs   = "would_reap_meta_no_refs"
+	gcCountRefsExpired  = "would_reap_refs_expired"
+)
+
+// recordWouldReap adds one root's would-remove buckets and bytes to the
+// expvar counters (RFC §6 E4) and to report.Counts, in both dry-run and live
+// mode, and logs a per-root summary when the root had anything to reap.
+func (a *attachmentGC) recordWouldReap(report *TickReport, root string, res attachment.GCResult) {
+	var files int
 	for reason, n := range res.WouldRemove {
+		files += n
 		switch reason {
 		case attachment.ReasonLegacyNoMeta:
 			metrics.AttachmentGCWouldReapLegacyTotal.Add(int64(n))
+			report.Counts[gcCountLegacyNoMeta] += int64(n)
 		case attachment.ReasonMetaNoRefs:
 			metrics.AttachmentGCWouldReapNoRefsTotal.Add(int64(n))
+			report.Counts[gcCountMetaNoRefs] += int64(n)
 		case attachment.ReasonRefsExpired:
 			metrics.AttachmentGCWouldReapExpiredTotal.Add(int64(n))
+			report.Counts[gcCountRefsExpired] += int64(n)
 		}
 	}
+	if files == 0 {
+		return
+	}
+	report.Counts[gcCountBytes] += res.WouldRemoveBytes
+	slog.Info("attachment-gc: sweep summary", "root", root, "dry_run", a.dryRun,
+		"files", files, "bytes", res.WouldRemoveBytes,
+		"legacy_no_meta", res.WouldRemove[attachment.ReasonLegacyNoMeta],
+		"meta_no_refs", res.WouldRemove[attachment.ReasonMetaNoRefs],
+		"refs_expired", res.WouldRemove[attachment.ReasonRefsExpired],
+		"removed", res.Removed, "cap_hit", res.Stopped)
 }
