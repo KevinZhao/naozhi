@@ -444,10 +444,23 @@ type fakeEventsSource struct {
 	called  int
 }
 
-// LoadBefore implements history.Source with a fixed result.
-func (f *fakeEventsSource) LoadBefore(_ context.Context, _ int64, _ int) ([]clievent.EventEntry, error) {
+// LoadBefore implements history.Source over the chronological entries: the
+// newest limit with Time < beforeMS, so the has-more probe sees a real cursor.
+func (f *fakeEventsSource) LoadBefore(_ context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	f.called++
-	return f.entries, nil
+	var out []clievent.EventEntry
+	for _, e := range f.entries {
+		if beforeMS <= 0 || e.Time < beforeMS {
+			out = append(out, e)
+		}
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+	if len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out, nil
 }
 
 // TestHandleAPISessionEvents_BeforeFallsBackToHistorySource pins the contract
@@ -488,6 +501,9 @@ func TestHandleAPISessionEvents_BeforeFallsBackToHistorySource(t *testing.T) {
 	// One page read plus the has-more probe below the page's oldest entry.
 	if src.called != 2 {
 		t.Errorf("history.Source calls = %d, want 2", src.called)
+	}
+	if got := w.Header().Get("X-Events-Has-More"); got != "0" {
+		t.Errorf("X-Events-Has-More = %q, want \"0\" (disk exhausted at the page bottom)", got)
 	}
 	if len(entries) != 2 {
 		t.Fatalf("len = %d, want 2", len(entries))
