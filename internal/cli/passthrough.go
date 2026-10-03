@@ -124,14 +124,14 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 // total budgets to the turn the CLI owes the queue (passthroughWatchdogTick),
 // so a stalled CLI is killed and every caller gets the classified timeout.
 // The bail timer is the backstop for a watchdog that failed to fire: it only
-// trips once that turn is passthroughBailGrace past totalTimeout, so a slot
+// trips once that turn is the bail grace past totalTimeout, so a slot
 // queued behind long healthy turns keeps waiting.
 func (p *Process) awaitSlot(ctx context.Context, slot *sendSlot) (*clievent.SendResult, error) {
 	noOutputDur, totalDur := p.turnBudgets()
-	checkInterval := watchdogCheckInterval(noOutputDur)
+	checkInterval := p.checkInterval(noOutputDur)
 	watchdog := time.NewTimer(checkInterval)
 	defer watchdog.Stop()
-	bailAfter := totalDur + passthroughBailGrace
+	bailAfter := totalDur + p.passthroughBailGrace()
 	bail := time.NewTimer(bailAfter)
 	defer bail.Stop()
 
@@ -197,10 +197,6 @@ func (p *Process) passthroughBailRemaining(now time.Time, bailAfter time.Duratio
 	}
 	return bailAfter - now.Sub(turnStart)
 }
-
-// passthroughBailGrace is how far past totalTimeout the turn the CLI owes the
-// queue may run before awaitSlot gives up on the watchdog. A var for tests.
-var passthroughBailGrace = 30 * time.Second
 
 // writeUserMessageUnderShimLock writes one NDJSON user-message line directly
 // to the shim via a pooled capture writer + sendLocked, bypassing

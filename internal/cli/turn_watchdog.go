@@ -7,9 +7,39 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 )
 
-// watchdogMinCheckInterval is the floor of watchdogCheckInterval. A var so
-// tests can run millisecond-scale timeouts.
-var watchdogMinCheckInterval = time.Second
+// Production defaults of the watchdogTuning knobs.
+const (
+	defaultWatchdogMinCheckInterval = time.Second
+	defaultPassthroughBailGrace     = 30 * time.Second
+)
+
+// watchdogTuning lets tests run millisecond-scale turn watchdogs; a zero
+// field means its default. Per Process, set before readLoop or any send
+// starts, so a goroutine a previous test leaked never reads a test's value.
+type watchdogTuning struct {
+	// minCheckInterval floors watchdogCheckInterval.
+	minCheckInterval time.Duration
+	// bailGrace is how far past totalTimeout the turn the CLI owes the queue
+	// may run before awaitSlot gives up on the watchdog.
+	bailGrace time.Duration
+}
+
+// checkInterval is watchdogCheckInterval under p's floor.
+func (p *Process) checkInterval(noOutputDur time.Duration) time.Duration {
+	floor := p.wdTuning.minCheckInterval
+	if floor <= 0 {
+		floor = defaultWatchdogMinCheckInterval
+	}
+	return watchdogCheckInterval(noOutputDur, floor)
+}
+
+// passthroughBailGrace is p's bail grace, defaulted.
+func (p *Process) passthroughBailGrace() time.Duration {
+	if g := p.wdTuning.bailGrace; g > 0 {
+		return g
+	}
+	return defaultPassthroughBailGrace
+}
 
 // monoBase anchors Process.lastOutputNS: storing an offset from it instead of
 // UnixNano keeps the monotonic reading, so a wall-clock jump cannot fake or
@@ -27,12 +57,12 @@ func (p *Process) lastOutputAt() time.Time {
 }
 
 // watchdogCheckInterval is how often a waiter re-checks the turn deadlines:
-// a quarter of the no-output budget, clamped to [watchdogMinCheckInterval,
-// 30s]. The interval caps timeout precision, fine for minute-scale budgets.
-func watchdogCheckInterval(noOutputDur time.Duration) time.Duration {
+// a quarter of the no-output budget, clamped to [floor, 30s]. The interval
+// caps timeout precision, fine for minute-scale budgets.
+func watchdogCheckInterval(noOutputDur, floor time.Duration) time.Duration {
 	iv := noOutputDur / 4
-	if iv < watchdogMinCheckInterval {
-		iv = watchdogMinCheckInterval
+	if iv < floor {
+		iv = floor
 	}
 	if iv > 30*time.Second {
 		iv = 30 * time.Second
