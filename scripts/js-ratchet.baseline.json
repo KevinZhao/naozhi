@@ -33,11 +33,11 @@
     "lateBindings": 2
   },
   "auth_modal.js": {
-    "lines": 1310,
+    "lines": 1309,
     "maxFnLines": 101,
     "fnOver100": 1,
     "topLevelLetVar": 1,
-    "configureDeps": 5,
+    "configureDeps": 4,
     "deadInjections": 0,
     "innerHTMLAssign": 10,
     "htmlInsert": 0,
@@ -374,7 +374,7 @@
     "lateBindings": 0
   },
   "session_ident.js": {
-    "lines": 127,
+    "lines": 144,
     "maxFnLines": 12,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -385,7 +385,7 @@
     "lateBindings": 0
   },
   "session_list.js": {
-    "lines": 1134,
+    "lines": 1110,
     "maxFnLines": 100,
     "fnOver100": 0,
     "topLevelLetVar": 0,

@@ -280,6 +280,8 @@ function defaultGitStates() {
  *   WebSocket server (auth → auth_ok, everything else recorded). Default keeps
  *   the historical behavior: no upgrade listener, so the dashboard falls back
  *   to polling and the whole existing suite keeps exercising that path.
+ * @param {boolean} [overrides.wsHoldAuth] - With ws:true, record the dashboard's
+ *   {type:'auth'} but never answer it, so wsm stays in AUTH (authenticating).
  * @returns {Promise<{server: http.Server, port: number, url: string}>}
  */
 function startMockServer(overrides = {}) {
@@ -1137,7 +1139,7 @@ function startMockServer(overrides = {}) {
           let msg;
           try { msg = JSON.parse(payload.toString('utf8')); } catch { continue; }
           conn.messages.push(msg);
-          if (msg.type === NZ_CONTRACT.WS.auth) conn.send({ type: NZ_CONTRACT.WS.auth_ok });
+          if (msg.type === NZ_CONTRACT.WS.auth && !overrides.wsHoldAuth) conn.send({ type: NZ_CONTRACT.WS.auth_ok });
         }
       });
       socket.on('error', () => {});

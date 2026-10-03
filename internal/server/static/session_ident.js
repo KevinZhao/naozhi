@@ -1,10 +1,12 @@
 // session_ident.js — how the dashboard names a session and labels it: the
 // (key, node) map key and node badge, the discovered-card key, the project,
-// node and type labels, and the event kinds kept out of the transcript. A leaf
-// (caps.leaves): it imports only contract.js, state.js and nz_util.js.
+// node and type labels, a node's connection status, and the event kinds kept
+// out of the transcript. A leaf (caps.leaves): it imports only contract.js,
+// state.js, nz_util.js and ws_manager.js.
 import { NZ_CONTRACT } from './contract.js';
 import { sessionList } from './state.js';
 import { esc } from './nz_util.js';
+import { WS_STATES, wsm } from './ws_manager.js';
 
 export function sid(key, node) { return key + '\t' + (node || 'local'); }
 
@@ -98,6 +100,21 @@ export function getNodeDisplayName(id) {
   const nd = sessionList.nodesData[id];
   if (nd && nd.display_name) return nd.display_name;
   return id;
+}
+
+// getNodeStatus returns a normalized status key (ok/connecting/offline/
+// unreachable/error) for a node. 'local' tracks the WS state machine; remotes
+// read from the server-side node health snapshot. Falls back to 'offline' when
+// the server has no record — safer than pretending the node is reachable.
+export function getNodeStatus(id) {
+  if (!id || id === 'local') {
+    if (wsm.state === WS_STATES.CONNECTED) return 'ok';
+    if (wsm.state === WS_STATES.CONNECTING || wsm.state === WS_STATES.AUTH) return 'connecting';
+    return 'offline';
+  }
+  const nd = sessionList.nodesData[id];
+  if (!nd) return 'offline';
+  return nd.status || 'offline';
 }
 
 // statusLabelForNode maps a normalized status to a short Chinese/English label
