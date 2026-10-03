@@ -552,9 +552,8 @@ func TestTurnParity27_IM_NoCronPromptAutosave(t *testing.T) {
 	}
 }
 
-// Row 28: the legacy paths are gone and session.Guard with them (#3004 E),
-// so a fallback around the queue no longer compiles; a busy IM send is
-// queued behind the owner.
+// Row 28: a busy IM send takes the queue path and waits behind the
+// owner; no path around the queue exists.
 func TestTurnParity28_IM_QueuePathNotGuard(t *testing.T) {
 	h := newParityHarness(t, parityOpts{reactor: true})
 	turns := h.session(parityKey, false)

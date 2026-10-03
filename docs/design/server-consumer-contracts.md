@@ -10,6 +10,8 @@
 
 ## 1. `wshub.MessageEnqueuer` — Hub 写路径
 
+> **已过时（#3004 E）**：`MessageEnqueuer` 与导出的 `turn.Queue` 都已不存在。队列类型 `turn.queue` 不导出，只由 `*turn.Orchestrator` 持有；server 经 `Submit/Reset/ShouldNotify/Cleanup` 四个方法使用它。本节作历史记录保留。
+
 **Consumer**: `internal/server/wshub.go` (Phase 4 后 → `internal/wshub/`)
 **Producer**: `*turn.Queue` (`internal/turn/queue.go`)
 **Source**: [internal/server/wshub_types.go](../../internal/server/wshub_types.go)

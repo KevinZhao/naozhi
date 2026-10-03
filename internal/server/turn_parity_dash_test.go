@@ -557,9 +557,8 @@ func TestTurnParity27_Dash_CronPromptAutosave(t *testing.T) {
 	}
 }
 
-// Row 28: the legacy paths are gone and session.Guard with them (#3004 E),
-// so a fallback around the queue no longer compiles; a busy dashboard send is
-// queued behind the owner.
+// Row 28: a busy dashboard send takes the queue path and waits behind the
+// owner; no path around the queue exists.
 func TestTurnParity28_Dash_QueuePathNotLegacy(t *testing.T) {
 	h := newParityHarness(t, parityOpts{})
 	turns := h.session(parityKey, false)

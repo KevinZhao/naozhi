@@ -440,7 +440,7 @@ cron → {session, platform, routing}，node → {cli, config}。routing 保持�
 |---|---|---|---|---|---|
 | 1 | `internal/node/` + 合并 reverse | -1398 | 中 (接口改名 + 类型迁移) | 无 | **已完成** |
 | 2 | `internal/dispatch/` + image 前移 + pathutil→config | -935 | 高 (方法接收者重写) | Phase 1 完成 | **已完成** |
-| 3 | sessionGuard→session | -100 | 低 | Phase 1-2 完成 | **已完成**（Guard 现居 `internal/session/guard.go`） |
+| 3 | sessionGuard→session | -100 | 低 | Phase 1-2 完成 | **已完成**（Guard 曾居 `internal/session/guard.go`；#3004 E 起已删除，并发控制归 `turn.Orchestrator`） |
 | 4 | 组装职责上移 wireup + dashboard 收尾 | 见 Phase 4 切片表 | 低-中 | Phase 1-3 完成 | 待执行 |
 
 每个 Phase 结束后 `go build ./...` 和 `go test ./...` 必须通过。
