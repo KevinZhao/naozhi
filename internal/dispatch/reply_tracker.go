@@ -40,7 +40,12 @@ type replyTracker struct {
 	// onto the banner. editLoop checks it on wake so a residual buffered editCh
 	// signal cannot repaint stale interim status over the real answer (#2291).
 	finalized atomic.Bool
-	linesMu   sync.Mutex // guards statusLines
+	// editMu is held by redrawStatus across the finalized check and its
+	// EditMessage, and by markFinalized around the store, so a redraw that
+	// already passed the check completes before the final edit is issued.
+	// Lock order: editMu before linesMu.
+	editMu  sync.Mutex
+	linesMu sync.Mutex // guards statusLines
 	// statusLines is capped at maxStatusLines by appendStatusLine (drops the
 	// head when full); joined lazily in renderStatus.
 	statusLines []string
@@ -93,9 +98,13 @@ func (t *replyTracker) releaseInitialReplySlot() {
 }
 
 // markFinalized signals that the final answer is being committed to the
-// banner; editLoop then drops pending status redraws (#2291). Idempotent.
+// banner. It waits for an in-flight status redraw to finish, and no redraw
+// starts after it returns, so the caller's final edit is the last one
+// (#2291, #3066). Idempotent.
 func (t *replyTracker) markFinalized() {
+	t.editMu.Lock()
 	t.finalized.Store(true)
+	t.editMu.Unlock()
 }
 
 // getThinkingMsgID returns the id or "" if not yet set.
@@ -409,16 +418,8 @@ func (t *replyTracker) editLoop() {
 	for {
 		select {
 		case <-t.editCh:
-			// Skip the redraw once imDelivery.reply committed the final answer; a
-			// residual buffered signal must not repaint stale status (#2291).
-			if t.finalized.Load() {
+			if t.redrawStatus() {
 				continue
-			}
-			text := t.renderStatus()
-			if msgID := t.getThinkingMsgID(); msgID != "" && text != "" {
-				if err := t.p.EditMessage(t.ctx, msgID, text); err != nil {
-					slog.Debug("status edit failed", "msg_id", msgID, "err", err)
-				}
 			}
 			rateTimer.Reset(time.Second)
 			select {
@@ -434,6 +435,27 @@ func (t *replyTracker) editLoop() {
 			return
 		}
 	}
+}
+
+// redrawStatus edits the banner with the current status unless the final
+// answer has been committed; it reports whether it skipped. editMu spans the
+// check and the edit, and the edit is bounded so markFinalized never waits
+// longer than platformReplyTimeout.
+func (t *replyTracker) redrawStatus() (skipped bool) {
+	t.editMu.Lock()
+	defer t.editMu.Unlock()
+	if t.finalized.Load() {
+		return true
+	}
+	text := t.renderStatus()
+	if msgID := t.getThinkingMsgID(); msgID != "" && text != "" {
+		ectx, cancel := context.WithTimeout(t.ctx, platformReplyTimeout)
+		defer cancel()
+		if err := t.p.EditMessage(ectx, msgID, text); err != nil {
+			slog.Debug("status edit failed", "msg_id", msgID, "err", err)
+		}
+	}
+	return false
 }
 
 func (t *replyTracker) waitReady(ctx context.Context) {

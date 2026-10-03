@@ -147,9 +147,8 @@ func TestTurnParity20_Cross_ThinkingBannerOnEveryIMReceiver(t *testing.T) {
 			t.Fatalf("first IM reply = %q, want the thinking banner", r)
 		}
 		h.waitDone(owner, "IM owner loop")
-		// Not "last": a stale editLoop redraw can still land after it (#3066).
-		if e := h.plat.allEdits(); !slices.ContainsFunc(e, func(s string) bool { return strings.HasPrefix(s, "R1") }) {
-			t.Fatalf("banner edits = %q, want the answer edited into the banner", e)
+		if e := h.plat.allEdits(); len(e) == 0 || !strings.HasPrefix(e[len(e)-1], "R1") {
+			t.Fatalf("banner edits = %q, want the answer edited into the banner last", e)
 		}
 		if r := h.plat.allReplies(); len(r) != 1 {
 			t.Fatalf("IM replies = %q, want only the banner (the answer is an edit)", r)
@@ -168,9 +167,8 @@ func TestTurnParity20_Cross_ThinkingBannerOnEveryIMReceiver(t *testing.T) {
 		if r := h.plat.allReplies(); len(r) != 1 || r[0] != "💭 思考中..." {
 			t.Fatalf("IM replies = %q, want only the thinking banner", r)
 		}
-		// Not "last": a stale editLoop redraw can still land after it (#3066).
-		if e := h.plat.allEdits(); !slices.ContainsFunc(e, func(s string) bool { return strings.HasPrefix(s, "R2") }) {
-			t.Fatalf("banner edits = %q, want the answer edited into the banner", e)
+		if e := h.plat.allEdits(); len(e) == 0 || !strings.HasPrefix(e[len(e)-1], "R2") {
+			t.Fatalf("banner edits = %q, want the answer edited into the banner last", e)
 		}
 	})
 }
