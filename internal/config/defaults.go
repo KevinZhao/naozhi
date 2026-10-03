@@ -35,3 +35,21 @@ const (
 	defaultCronJitterMax     = 2 * time.Minute
 	cronJitterMaxHardCap     = 10 * time.Minute
 )
+
+// Defaults for the values resolveFallbackValues caches; the accessors apply
+// them to a zero (unset or unusable) cached value.
+const (
+	defaultShimIdleTimeout      = 4 * time.Hour
+	defaultShimWatchdogTimeout  = 30 * time.Minute
+	defaultShimMaxBufferBytes   = 50 << 20
+	defaultSysessionTick        = 30 * time.Second
+	defaultSysessionJSONLMaxAge = 7 * 24 * time.Hour
+)
+
+// orDefault returns v, or def when v is zero.
+func orDefault[T time.Duration | int64](v, def T) T {
+	if v == 0 {
+		return def
+	}
+	return v
+}

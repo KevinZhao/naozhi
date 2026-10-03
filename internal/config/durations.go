@@ -2,7 +2,9 @@ package config
 
 // Duration parsing: every `*.ttl` / `*.timeout` / `*.interval` string in the
 // config becomes a time.Duration exactly once, at load, so no reader has to
-// parse (and mis-handle) it later. Split out of config.go (#2710 J11).
+// parse (and mis-handle) it later. Split out of config.go (#2710 J11). The
+// values here refuse the config when unusable; the ones whose consumer keeps a
+// default are parsed by resolveFallbackValues (fallbacks.go).
 
 import (
 	"fmt"

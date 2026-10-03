@@ -1,5 +1,7 @@
 package config
 
+import "time"
+
 // SysessionConfig configures the system-session daemon framework
 // (docs/rfc/system-session.md).
 type SysessionConfig struct {
@@ -54,4 +56,40 @@ type SysessionDaemonConfig struct {
 	PerRootCap int    `yaml:"per_root_cap,omitempty"`
 	DryRun     bool   `yaml:"dry_run,omitempty"`
 	RunOnStart bool   `yaml:"run_on_start,omitempty"`
+}
+
+// SysessionDaemonDurations are one daemon's parsed duration knobs. A zero
+// field was unset or unusable, and the consumer's default applies.
+type SysessionDaemonDurations struct {
+	Tick, MinRenameInterval, UploadTTL, RefTTL time.Duration
+}
+
+// sysessionDurations caches the sysession strings resolveFallbackValues parsed.
+type sysessionDurations struct {
+	tickTimeout   time.Duration
+	jsonlMaxAge   time.Duration
+	jsonlSweepOff bool
+	daemons       map[string]SysessionDaemonDurations
+}
+
+// SysessionTickTimeout is the cap on one daemon Tick (default 30s).
+func (c *Config) SysessionTickTimeout() time.Duration {
+	return orDefault(c.cachedSysession.tickTimeout, defaultSysessionTick)
+}
+
+// SysessionDaemonDurations returns daemon name's knobs with Tick defaulted to
+// 30s; the other fields stay zero when unset.
+func (c *Config) SysessionDaemonDurations(name string) SysessionDaemonDurations {
+	d := c.cachedSysession.daemons[name]
+	d.Tick = orDefault(d.Tick, defaultSysessionTick)
+	return d
+}
+
+// SysessionJSONLMaxAge is the sys-sessions/*.jsonl retention window: 7 days by
+// default, 0 when jsonl_max_age is "0" (the sweep is off).
+func (c *Config) SysessionJSONLMaxAge() time.Duration {
+	if c.cachedSysession.jsonlSweepOff {
+		return 0
+	}
+	return orDefault(c.cachedSysession.jsonlMaxAge, defaultSysessionJSONLMaxAge)
 }

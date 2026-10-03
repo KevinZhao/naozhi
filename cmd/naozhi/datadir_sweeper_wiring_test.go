@@ -162,3 +162,25 @@ func TestSweeperRegistersTheStdioCaps(t *testing.T) {
 		}
 	}
 }
+
+// TestSweeperHonoursJSONLMaxAgeZero: jsonl_max_age "0" turns the sys-sessions
+// sweep off, so a 90-day-old log survives.
+func TestSweeperHonoursJSONLMaxAgeZero(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("sysession:\n  runner:\n    jsonl_max_age: \"0\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sysDir := t.TempDir()
+	oldJSONL := plantOld(t, sysDir, "old.jsonl")
+	s := newDataDirSweeper(cfg, datadir.ForStore(filepath.Join(t.TempDir(), "sessions.json")), nil, sysDir)
+	if got := s.RunOnce()["sys-sessions"].Removed; got != 0 {
+		t.Errorf("sys-sessions removed %d with jsonl_max_age \"0\", want 0", got)
+	}
+	if _, err := os.Stat(oldJSONL); err != nil {
+		t.Errorf("the old sys-sessions JSONL is gone: %v", err)
+	}
+}

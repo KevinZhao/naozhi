@@ -1,6 +1,9 @@
 package main
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -132,5 +135,42 @@ func TestDashboardWiring_RegistersPprof(t *testing.T) {
 	src := string(data)
 	if !strings.Contains(src, "s.registerPprof()") {
 		t.Error("internal/server/routes.go must call s.registerPprof() during server startup — docs/ops/pprof.md depends on it")
+	}
+}
+
+// TestNoParseDurationInMain: config.Load parses every duration once and
+// reports an unusable one, so `config check` sees it. A time.ParseDuration
+// call here would read a config string again, behind the check's back (#3012).
+func TestNoParseDurationInMain(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	scanned := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		scanned++
+		ast.Inspect(f, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "ParseDuration" {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "time" {
+				t.Errorf("%s calls time.ParseDuration; parse the value in internal/config and read its accessor",
+					fset.Position(sel.Pos()))
+			}
+			return true
+		})
+	}
+	if scanned < 10 {
+		t.Fatalf("scanned %d files; the walk is not looking at cmd/naozhi", scanned)
 	}
 }

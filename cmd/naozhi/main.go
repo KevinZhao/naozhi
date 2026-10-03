@@ -129,10 +129,10 @@ func main() {
 	// state, so reconnect routing needs no per-backend state directories.
 	shimMgr, err := shim.NewManager(shim.ManagerConfig{
 		StateDir:        osutil.ExpandHome(cfg.Session.Shim.StateDir),
-		IdleTimeout:     parseDurationOrDefault(cfg.Session.Shim.IdleTimeout, 4*time.Hour),
-		WatchdogTimeout: parseDurationOrDefault(cfg.Session.Shim.WatchdogTimeout, 30*time.Minute),
+		IdleTimeout:     cfg.ShimIdleTimeout(),
+		WatchdogTimeout: cfg.ShimWatchdogTimeout(),
 		BufferSize:      cfg.Session.Shim.BufferSize,
-		MaxBufBytes:     parseBytesOrDefault(cfg.Session.Shim.MaxBufferBytes, 50*1024*1024),
+		MaxBufBytes:     cfg.ShimMaxBufferBytes(),
 		MaxShims:        cfg.Session.Shim.MaxShims,
 	})
 	if err != nil {

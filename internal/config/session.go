@@ -63,6 +63,21 @@ type WatchdogConfig struct {
 	TotalTimeout    string `yaml:"total_timeout"`
 }
 
+// ShimIdleTimeout is how long a shim lives without a client (default 4h).
+func (c *Config) ShimIdleTimeout() time.Duration {
+	return orDefault(c.cachedShimIdleTimeout, defaultShimIdleTimeout)
+}
+
+// ShimWatchdogTimeout is the shim's disconnect watchdog (default 30m).
+func (c *Config) ShimWatchdogTimeout() time.Duration {
+	return orDefault(c.cachedShimWatchdogTimeout, defaultShimWatchdogTimeout)
+}
+
+// ShimMaxBufferBytes is the shim ring buffer's byte cap (default 50MB).
+func (c *Config) ShimMaxBufferBytes() int64 {
+	return orDefault(c.cachedShimMaxBufferBytes, defaultShimMaxBufferBytes)
+}
+
 // ParseTTL returns the TTL duration (cached after Load).
 func (c *Config) ParseTTL() time.Duration {
 	return c.cachedTTL
