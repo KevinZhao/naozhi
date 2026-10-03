@@ -438,6 +438,20 @@ function announce(msg) {
   el._clearTid = setTimeout(() => { el.textContent = ''; }, 3000);
 }
 
+// API_ERROR_HEADS: substrings of server error messages → the Chinese head
+// localizeAPIError uses instead of the status-class one. work_dir labels
+// mirror internal/server classifyWorkspaceErr; cron labels mirror
+// internal/dashboard/cron writeAddUpdateRejection.
+const API_ERROR_HEADS = [
+  ['work_dir outside allowed root', '工作目录不在允许范围内'],
+  ['work_dir does not exist', '工作目录不存在'],
+  ['work_dir is not a directory', '路径不是目录'],
+  ['work_dir is not a valid path', '工作目录路径不合法'],
+  ['work_dir must be an absolute path', '工作目录必须是绝对路径'],
+  ['cron job quota reached', '定时任务数已达上限，请先删除不用的任务'],
+  ['schedule interval below the 5m minimum', '执行间隔不能短于 5 分钟'],
+];
+
 // localizeAPIError turns an HTTP status code + raw server message into a
 // user-facing Chinese string. Classifies by status class so operators get
 // a consistent mental model — 4xx = "你这边要改", 5xx = "服务端问题，请
@@ -457,28 +471,11 @@ function localizeAPIError(status, raw) {
   if (status === 401) {
     return '鉴权失败，请重新登录' + withTail;
   }
-  // work_dir 专项：当后端返回 classifyWorkspaceErr 标签时把通用文案换成更
-  // 精确的中文，避免 "无权限或参数越界" 把 "不存在 / 不是目录 / 越界"
-  // 三种含义不同的失败合并成一句话，操作员看到无法自助修复。
-  // 与 internal/server/server.go classifyWorkspaceErr 输出保持一致。
-  if (raw) {
-    const r = String(raw);
-    if (r.indexOf('work_dir outside allowed root') !== -1) {
-      return '工作目录不在允许范围内（' + r.slice(0, 120) + '）';
-    }
-    if (r.indexOf('work_dir does not exist') !== -1) {
-      return '工作目录不存在' + withTail;
-    }
-    if (r.indexOf('work_dir is not a directory') !== -1) {
-      return '路径不是目录' + withTail;
-    }
-    if (r.indexOf('work_dir is not a valid path') !== -1) {
-      return '工作目录路径不合法' + withTail;
-    }
-    if (r.indexOf('work_dir must be an absolute path') !== -1) {
-      return '工作目录必须是绝对路径' + withTail;
-    }
-  }
+  // 服务端自带原因的标签换成精确中文，免得状态码类的通用文案误导操作员
+  // （如配额满的 409 被说成"刷新后重试"）。表见 API_ERROR_HEADS。
+  const r = String(raw || '');
+  const known = API_ERROR_HEADS.find(([needle]) => r.indexOf(needle) !== -1);
+  if (known) return known[1] + withTail;
   if (status === 403) {
     return '无权限或参数越界' + withTail;
   }

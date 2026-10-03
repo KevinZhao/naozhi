@@ -33,7 +33,8 @@ func writeCronErr(w http.ResponseWriter, status int, msg string) {
 // writeAddUpdateRejection answers an AddJob / UpdateJob rejection that no
 // handler-specific branch claimed. A full job table and a too-frequent
 // schedule get their own status and message; anything else is a 400 with
-// fallback, never err.Error() (parser details leak field offsets).
+// fallback, never err.Error() (parser details leak field offsets). The two
+// messages are keys of static/utilities.js API_ERROR_HEADS.
 func writeAddUpdateRejection(w http.ResponseWriter, err error, fallback string) {
 	switch code := cronpkg.ClassifyError(err); code {
 	case cronpkg.CodeJobQuotaExceeded:
