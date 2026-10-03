@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/attachment"
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/sysession"
 )
 
@@ -58,13 +60,13 @@ func TestWarnIfAttachmentsOver_SumsEveryRoot(t *testing.T) {
 	roots := staticRoots{small, bare, big}
 
 	buf := captureSlog(t)
-	warnIfAttachmentsOver(roots, attachmentGCDisabled, 8001)
+	warnIfAttachmentsOver(roots, attachmentGCDisabled, 8001, osutil.StateDirSize)
 	if got := warnRecords(t, buf, "attachments large"); len(got) != 0 {
 		t.Fatalf("8000 bytes under an 8001-byte threshold warned: %v", got)
 	}
 
 	buf = captureSlog(t)
-	warnIfAttachmentsOver(roots, attachmentGCDisabled, 8000)
+	warnIfAttachmentsOver(roots, attachmentGCDisabled, 8000, osutil.StateDirSize)
 	recs := warnRecords(t, buf, "attachments large")
 	if len(recs) != 1 {
 		t.Fatalf("want one warn at the 8000-byte sum, got %d: %s", len(recs), buf)
@@ -86,7 +88,7 @@ func TestWarnIfAttachmentsOver_SumsEveryRoot(t *testing.T) {
 
 func TestWarnIfAttachmentsOver_SilentWithoutTrees(t *testing.T) {
 	buf := captureSlog(t)
-	warnIfAttachmentsOver(staticRoots{t.TempDir(), filepath.Join(t.TempDir(), "gone")}, attachmentGCDisabled, 1)
+	warnIfAttachmentsOver(staticRoots{t.TempDir(), filepath.Join(t.TempDir(), "gone")}, attachmentGCDisabled, 1, osutil.StateDirSize)
 	if got := warnRecords(t, buf, "attachments large"); len(got) != 0 {
 		t.Fatalf("roots without attachment trees warned: %v", got)
 	}
@@ -103,7 +105,7 @@ func TestWarnIfAttachmentsOver_HintFollowsGCMode(t *testing.T) {
 		attachmentGCEnabled:  "per_root_cap may be too loose",
 	} {
 		buf := captureSlog(t)
-		warnIfAttachmentsOver(staticRoots{root}, mode, 10)
+		warnIfAttachmentsOver(staticRoots{root}, mode, 10, osutil.StateDirSize)
 		recs := warnRecords(t, buf, "attachments large")
 		if len(recs) != 1 {
 			t.Fatalf("mode %s: want one warn, got %d", mode, len(recs))
@@ -148,8 +150,9 @@ func TestAttachmentGCMode(t *testing.T) {
 	}
 }
 
-// TestWarnIfStateDirOver_HintMatchesStateDir: attachments are not under the
-// state dir, so its warning must not send the operator to attachment-gc.
+// TestWarnIfStateDirOver_HintMatchesStateDir: the state-dir hint names its own
+// events and, because the default session.cwd sits under ~/.naozhi, the
+// attachments warning too.
 func TestWarnIfStateDirOver_HintMatchesStateDir(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "sessions.json"), make([]byte, 10), 0o600); err != nil {
@@ -162,7 +165,84 @@ func TestWarnIfStateDirOver_HintMatchesStateDir(t *testing.T) {
 		t.Fatalf("want one warn, got %d: %s", len(recs), buf)
 	}
 	hint, _ := recs[0]["hint"].(string)
-	if strings.Contains(hint, "attachment") || !strings.Contains(hint, "events") {
-		t.Fatalf("hint %q should point at events, not attachments", hint)
+	for _, want := range []string{"events/*.log", "session.cwd", "attachments large"} {
+		if !strings.Contains(hint, want) {
+			t.Errorf("hint %q lacks %q", hint, want)
+		}
+	}
+}
+
+// TestWarnIfAttachmentsOver_TruncatedWalkCounts: a walk cut off at its entry
+// budget still adds its partial total and marks the warn truncated, while a
+// missing tree adds nothing.
+func TestWarnIfAttachmentsOver_TruncatedWalkCounts(t *testing.T) {
+	cut, whole, gone := t.TempDir(), t.TempDir(), t.TempDir()
+	sizes := map[string]struct {
+		n   int64
+		err error
+	}{
+		filepath.Join(cut, attachment.Dir):   {300 << 20, osutil.ErrStateDirScanTruncated},
+		filepath.Join(whole, attachment.Dir): {200 << 20, nil},
+		filepath.Join(gone, attachment.Dir):  {0, fs.ErrNotExist},
+	}
+	treeSize := func(p string) (int64, error) { return sizes[p].n, sizes[p].err }
+
+	buf := captureSlog(t)
+	warnIfAttachmentsOver(staticRoots{cut, whole, gone}, attachmentGCDisabled, 500<<20, treeSize)
+	recs := warnRecords(t, buf, "attachments large")
+	if len(recs) != 1 {
+		t.Fatalf("want one warn from the 300+200 MiB sum, got %d: %s", len(recs), buf)
+	}
+	rec := recs[0]
+	if rec["total_mb"] != float64(500) || rec["truncated"] != true || rec["roots"] != float64(2) {
+		t.Errorf("total_mb=%v truncated=%v roots=%v, want 500 true 2", rec["total_mb"], rec["truncated"], rec["roots"])
+	}
+	if rec["largest_root"] != cut {
+		t.Errorf("largest_root = %v, want the truncated root %s", rec["largest_root"], cut)
+	}
+}
+
+// sparseFile sets path's apparent size to size without allocating its blocks.
+func sparseFile(t *testing.T, path string, size int64) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, size); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStartupWarnThresholds_500MiB pins both production wrappers to 500 MiB:
+// one byte short stays silent, exactly 500 MiB warns.
+func TestStartupWarnThresholds_500MiB(t *testing.T) {
+	const limit = 500 << 20
+	stateDir := t.TempDir()
+	stateFile := filepath.Join(stateDir, "sessions.json")
+	root := t.TempDir()
+	attFile := filepath.Join(root, attachment.Dir, "2026-01-01", "big.bin")
+
+	for _, tc := range []struct {
+		size  int64
+		warns int
+	}{{limit - 1, 0}, {limit, 1}} {
+		sparseFile(t, stateFile, tc.size)
+		sparseFile(t, attFile, tc.size)
+		buf := captureSlog(t)
+		warnIfStateDirLarge(stateDir)
+		warnIfAttachmentsLarge(staticRoots{root}, attachmentGCDisabled)
+		if got := len(warnRecords(t, buf, "state directory large")); got != tc.warns {
+			t.Errorf("state dir at %d bytes: %d warns, want %d", tc.size, got, tc.warns)
+		}
+		if got := len(warnRecords(t, buf, "attachments large")); got != tc.warns {
+			t.Errorf("attachments at %d bytes: %d warns, want %d", tc.size, got, tc.warns)
+		}
 	}
 }

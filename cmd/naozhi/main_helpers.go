@@ -100,7 +100,7 @@ func warnIfStateDirOver(stateDir string, thresholdBytes int64) {
 	slog.Warn("state directory large",
 		"path", stateDir, "size_mb", bytes>>20, "threshold_mb", thresholdBytes>>20,
 		"truncated", truncated,
-		"hint", "prune events/*.log of closed sessions; see docs/ops/disk-budget.md")
+		"hint", "prune events/*.log of closed sessions; a session.cwd inside this directory (the default ~/.naozhi/workspace) counts its .naozhi/attachments here too, see the attachments large warning; see docs/ops/disk-budget.md")
 }
 
 // attachmentsWarnMB is the soft ceiling for the attachment trees summed over
@@ -144,17 +144,18 @@ func attachmentsLargeHint(gcMode string) string {
 // once when the total reaches attachmentsWarnMB. A missing or unreadable tree
 // counts as 0; a truncated walk adds its partial total and sets truncated.
 func warnIfAttachmentsLarge(roots sysession.WorkspaceRootLister, gcMode string) {
-	warnIfAttachmentsOver(roots, gcMode, attachmentsWarnMB<<20)
+	warnIfAttachmentsOver(roots, gcMode, attachmentsWarnMB<<20, osutil.StateDirSize)
 }
 
-// warnIfAttachmentsOver is warnIfAttachmentsLarge with the threshold in bytes.
-func warnIfAttachmentsOver(roots sysession.WorkspaceRootLister, gcMode string, thresholdBytes int64) {
+// warnIfAttachmentsOver is warnIfAttachmentsLarge with the threshold in bytes
+// and the tree walk as a parameter, so tests can force a truncated walk.
+func warnIfAttachmentsOver(roots sysession.WorkspaceRootLister, gcMode string, thresholdBytes int64, treeSize func(string) (int64, error)) {
 	var total, largest int64
 	var largestRoot string
 	var withTree int
 	truncated := false
 	for _, root := range roots.KnownWorkspaceRoots() {
-		n, err := osutil.StateDirSize(filepath.Join(root, attachment.Dir))
+		n, err := treeSize(filepath.Join(root, attachment.Dir))
 		partial := errors.Is(err, osutil.ErrStateDirScanTruncated)
 		if err != nil && !partial {
 			continue

@@ -288,8 +288,8 @@ func main() {
 		slog.Error("init failed", "err", projErr)
 		os.Exit(1)
 	}
-	// Attachments live under each workspace root, outside the state dir checked
-	// above; walking every root must not hold up startup.
+	// Attachments live under each workspace root, usually outside the state dir
+	// checked above; walking every root must not hold up startup.
 	go warnIfAttachmentsLarge(workspaceRootLister{router: router, projectMgr: projectMgr}, attachmentGCMode(cfg))
 
 	platforms, err := initPlatforms(cfg, stt)
