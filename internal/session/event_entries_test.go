@@ -148,11 +148,11 @@ func TestEventEntriesBeforeCtx_TopsUpShortMemoryPageFromSource(t *testing.T) {
 	if fake.calls != 1 {
 		t.Fatalf("short memory page must consult Source once; got %d calls", fake.calls)
 	}
-	if fake.lastBefore != 50 {
-		t.Errorf("disk read anchored at before=%d, want 50 (earliest memory entry)", fake.lastBefore)
+	if fake.lastBefore != 51 {
+		t.Errorf("disk read anchored at before=%d, want 51 (re-admits the earliest memory millisecond)", fake.lastBefore)
 	}
-	if fake.lastLimit != 9 {
-		t.Errorf("disk read limit=%d, want 9 (page minus memory entries)", fake.lastLimit)
+	if fake.lastLimit != 10 {
+		t.Errorf("disk read limit=%d, want 10 (page minus memory entries, plus the one held at the seam)", fake.lastLimit)
 	}
 	want := []string{"disk-1", "disk-2", "mem-a"}
 	if len(got) != len(want) {
