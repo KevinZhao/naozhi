@@ -16,7 +16,9 @@
 //     drawer's open-time list refetch is held, so its repaint cannot.
 //   - Each daemon card in the 系统 view asks the ledger for its own session
 //     key (sys:<name>) and shows that figure; a daemon with no entries, or
-//     whose fetch fails, shows no cost row. Each key is asked once per 30 s.
+//     whose fetch fails, shows no cost row. Its title calls the dropped count
+//     ledger-wide (the server reports it whatever the key). Each key is asked
+//     once per 30 s.
 //
 // 跑法：cd test/e2e && npx playwright test cost_ledger_display.test.js --project=desktop-chrome
 
@@ -35,7 +37,8 @@ function ledger(q) {
     return { buckets: [{ unit: 'USD', amount: 3.25, entries: 4 }] };
   }
   switch (q.get('session_key')) {
-    case 'sys:auto-titler': return { buckets: [{ unit: 'USD', amount: 0.42, entries: 7 }], basis: { unknown: 1 } };
+    case 'sys:auto-titler': return { buckets: [{ unit: 'USD', amount: 0.42, entries: 7 }], dropped: 2, basis: { unknown: 1 } };
+    case 'sys:say"hi': return { buckets: [{ unit: 'USD', amount: 0.05, entries: 1 }] };
     case 'sys:quiet': return { buckets: [] };
     case 'sys:broken': return null;
   }
@@ -76,7 +79,8 @@ test('overview card: ledger USD, credits on their own line, trust flags and heal
     const title = await card.getAttribute('title');
     expect(title).toContain('CLI 估算口径');
     expect(title).toContain('1 条未知定价');
-    expect(title).toContain('丢弃 2 条');
+    expect(title).toContain('账本曾丢弃 2 条');
+    expect(title, 'the whole-ledger title need not call the count ledger-wide').not.toContain('整个账本');
 
     const health = page.locator('.svc-health-line');
     await expect(health.filter({ hasText: '成本账本丢弃 2 条' })).toHaveCount(1);
@@ -181,7 +185,7 @@ test('cron drawer asks the ledger for its job and shows the 30-day figure', asyn
   }
 });
 
-const daemons = ['auto-titler', 'quiet', 'broken'].map((name) => ({ name, enabled: true, tick: 30e9, runs_total: 3 }));
+const daemons = ['auto-titler', 'quiet', 'broken', 'say"hi'].map((name) => ({ name, enabled: true, tick: 30e9, runs_total: 3 }));
 
 test('daemon cards show their own 30-day figure; no entries or a failed fetch shows none', async ({ browser }) => {
   const mock = await startMockServer({ costSummary: ledger, systemDaemons: daemons });
@@ -195,10 +199,13 @@ test('daemon cards show their own 30-day figure; no entries or a failed fetch sh
     expect(title).toContain('仅 auto-titler');
     expect(title).toContain('CLI 估算口径');
     expect(title).toContain('1 条未知定价');
+    // The server's dropped count is ledger-wide whatever the session_key.
+    expect(title).toContain('整个账本曾丢弃 2 条');
+    expect(await card('say"hi').locator('.sys-cost').getAttribute('title'), 'a quote in the name stays inside the attribute').toContain('仅 say"hi');
     // The overview card keeps the whole-ledger figure: the keys do not share a snapshot.
     await expect(page.locator('.svc-stat-value').filter({ hasText: '$12.50' })).toHaveCount(1);
-    await expect.poll(() => mock.costSummaryCalls.filter((c) => c.session_key).length).toBe(3);
-    for (const name of ['auto-titler', 'quiet', 'broken']) {
+    await expect.poll(() => mock.costSummaryCalls.filter((c) => c.session_key).length).toBe(4);
+    for (const name of ['auto-titler', 'quiet', 'broken', 'say"hi']) {
       expect(mock.costSummaryCalls).toContainEqual({ group_by: 'unit', job_id: '', session_key: 'sys:' + name });
     }
     await expect(card('quiet')).toHaveCount(1);
