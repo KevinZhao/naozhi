@@ -6,6 +6,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/project"
 )
 
 // WorkspaceConfig identifies this naozhi instance.
@@ -24,6 +26,9 @@ type ProjectsConfig struct {
 	// feature. The file endpoints treat it like the __public_tmp__ pseudo-project
 	// (UID / denied-name / irregular-type / credential-name gates, audit log).
 	IncludeRoot bool `yaml:"include_root,omitempty"`
+	// Exclude lists basename globs (filepath.Match) of root subdirectories
+	// that are not projects; matched like the leading-dot rule.
+	Exclude []string `yaml:"exclude,omitempty"`
 	// PublicTmp opts the __public_tmp__ pseudo-project in (#646). Default
 	// false: that pseudo-project is a plain "project not found".
 	//
@@ -35,6 +40,17 @@ type ProjectsConfig struct {
 	// ("public_tmp file access"). Same single-operator caveat as IncludeRoot
 	// above, and the same file-endpoint gates.
 	PublicTmp bool `yaml:"public_tmp,omitempty"`
+}
+
+// validateProjects rejects malformed projects.exclude globs at load, so a
+// typo fails startup instead of silently excluding nothing.
+func validateProjects(cfg *Config) error {
+	for i, pat := range cfg.Projects.Exclude {
+		if err := project.ValidateExcludePattern(pat); err != nil {
+			return fmt.Errorf("projects.exclude[%d]: %w", i, err)
+		}
+	}
+	return nil
 }
 
 type PlannerDefaults struct {

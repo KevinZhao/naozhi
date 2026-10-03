@@ -252,6 +252,7 @@ func validateConfig(cfg *Config) error {
 		validateNotifyTargets,
 		validateArgvBearingFields,
 		validateAgentCommands,
+		validateProjects,
 	} {
 		if err := check(cfg); err != nil {
 			return err

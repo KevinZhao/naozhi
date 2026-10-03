@@ -135,6 +135,7 @@ func TestKnownKeysAreNotReported(t *testing.T) {
 projects:
   public_tmp: true
   include_root: true
+  exclude: ["tmp-*"]
 session:
   cwd: /tmp
 cli:

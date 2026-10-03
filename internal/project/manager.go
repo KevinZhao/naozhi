@@ -29,6 +29,10 @@ type Manager struct {
 	// ProjectsConfig.IncludeRoot) so files directly under root resolve to an owner.
 	includeRoot bool
 
+	// exclude holds projects.exclude: basename globs Scan skips like hidden
+	// directories. Fixed at construction.
+	exclude []string
+
 	// scanMu serialises Scan; it guards index and is never taken under mu.
 	scanMu sync.Mutex
 
@@ -80,6 +84,13 @@ func WithIncludeRoot(enabled bool) Option {
 	return func(m *Manager) { m.includeRoot = enabled }
 }
 
+// WithExclude makes Scan skip subdirectories whose basename matches any of
+// patterns (filepath.Match globs, see ValidateExcludePattern). The include_root
+// project is governed by WithIncludeRoot alone.
+func WithExclude(patterns []string) Option {
+	return func(m *Manager) { m.exclude = slices.Clone(patterns) }
+}
+
 // WithIndexPath persists naozhi's per-project bookkeeping (sidebar order) to
 // path, normally datadir.Layout.ProjectsIndexPath. Without it the order is
 // stable for the Manager's lifetime only.
@@ -108,6 +119,11 @@ func NewManager(root string, defaults PlannerDefaults, opts ...Option) (*Manager
 	}
 	for _, opt := range opts {
 		opt(m)
+	}
+	for _, pat := range m.exclude {
+		if err := ValidateExcludePattern(pat); err != nil {
+			return nil, fmt.Errorf("projects exclude: %w", err)
+		}
 	}
 	m.index = loadProjectIndex(m.indexPath)
 	return m, nil
@@ -188,16 +204,15 @@ func (m *Manager) scanDisk() (scanResult, error) {
 	}
 
 	projects := make(map[string]*Project, len(entries))
-	// listed holds every non-hidden directory, including ones skipped for a bad
-	// config, so fixing a project.yaml does not cost the project its place.
+	// listed holds every directory not hidden or excluded, including ones
+	// skipped for a bad config, so fixing a project.yaml keeps its place.
 	listed := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 		name := entry.Name()
-		// Skip hidden directories
-		if strings.HasPrefix(name, ".") {
+		if strings.HasPrefix(name, ".") || m.excluded(name) {
 			continue
 		}
 
@@ -321,6 +336,17 @@ func (m *Manager) scanDisk() (scanResult, error) {
 		m.scanDiskHook()
 	}
 	return scanResult{projects: projects, nextIndex: nextIndex}, nil
+}
+
+// excluded reports whether name matches a projects.exclude pattern; the
+// patterns were validated in NewManager, so Match cannot fail.
+func (m *Manager) excluded(name string) bool {
+	for _, pat := range m.exclude {
+		if ok, _ := filepath.Match(pat, name); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // Get returns a snapshot (copy) of the project by name, or nil if not found.

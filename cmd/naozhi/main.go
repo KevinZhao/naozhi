@@ -278,6 +278,7 @@ func main() {
 				Model:  cfg.Projects.PlannerDefaults.Model,
 				Prompt: cfg.Projects.PlannerDefaults.Prompt,
 			}, project.WithIncludeRoot(cfg.Projects.IncludeRoot),
+				project.WithExclude(cfg.Projects.Exclude),
 				project.WithIndexPath(sessionLayout.ProjectsIndexPath()))
 			if err != nil {
 				projErr = fmt.Errorf("init project manager: %w", err)

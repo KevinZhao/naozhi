@@ -3,6 +3,7 @@ package project
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -41,6 +42,30 @@ func ValidateProjectName(name string) error {
 	// it loses nothing.
 	if strings.ContainsRune(name, ':') {
 		return errors.New("project name must not contain ':'")
+	}
+	return nil
+}
+
+// ValidateExcludePattern checks one projects.exclude entry: a filepath.Match
+// glob over a subdirectory's basename, so it must be well-formed and hold no
+// path separator; control and bidi runes are refused as in project names.
+func ValidateExcludePattern(pattern string) error {
+	if pattern == "" {
+		return errors.New("exclude pattern is empty")
+	}
+	if len(pattern) > MaxProjectNameBytes {
+		return fmt.Errorf("exclude pattern exceeds %d bytes", MaxProjectNameBytes)
+	}
+	for _, r := range pattern {
+		if r < 0x20 || r == 0x7f || osutil.IsLogInjectionRune(r) {
+			return errors.New("exclude pattern contains invalid characters")
+		}
+	}
+	if strings.ContainsRune(pattern, '/') || strings.ContainsRune(pattern, filepath.Separator) {
+		return errors.New("exclude pattern must be a basename glob without a path separator")
+	}
+	if _, err := filepath.Match(pattern, ""); err != nil {
+		return fmt.Errorf("exclude pattern %q is malformed: %w", pattern, err)
 	}
 	return nil
 }
