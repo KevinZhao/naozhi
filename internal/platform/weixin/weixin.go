@@ -216,10 +216,16 @@ func (w *Weixin) cleanupTokensLoop(ctx context.Context) {
 func (w *Weixin) evictIdleTokens(cutoffNs int64) {
 	w.contextTokens.Range(func(k, v any) bool {
 		if r, ok := v.(*tokenRing); ok && r.evictIfIdle(cutoffNs) {
-			w.contextTokens.CompareAndDelete(k, r)
+			w.dropEvictedRing(k, r)
 		}
 		return true
 	})
+}
+
+// dropEvictedRing deletes user's ring only while it is still r, so a fresh
+// ring a concurrent push stored after r was evicted survives.
+func (w *Weixin) dropEvictedRing(user any, r *tokenRing) {
+	w.contextTokens.CompareAndDelete(user, r)
 }
 
 // Reply sends a text message to a WeChat user.
@@ -243,34 +249,45 @@ func (w *Weixin) Reply(ctx context.Context, msg platform.OutgoingMessage) (strin
 	return fmt.Sprintf("weixin:%s:%d", osutil.SanitizeForLog(msg.ChatID, 128), time.Now().UnixMilli()), nil
 }
 
-// sendWithRing sends via the newest unspent token and moves to the next one
-// only on a parsed upstream rejection (nothing was delivered). Any other error
-// returns at once with the token handed back: the message may have gone out,
-// and a retry on another token would deliver it twice.
+// sendWithRing sends via ring.take's token and moves to the next one only on
+// a parsed upstream rejection (nothing was delivered). Any other error returns
+// at once with the token released as uncertain: the message may have gone
+// out, and a retry on another token would deliver it twice. If every try is
+// rejected, the tokens are released: the cause was likely not the token.
 func (w *Weixin) sendWithRing(ctx context.Context, ring *tokenRing, chatID, text string) error {
 	var lastErr error
 	tried := make([]string, 0, tokenRingCap+1)
+	var rejected []string
 	for range tokenRingCap + 1 {
-		var token string
-		var reserved, ok bool
+		var l lease
+		var ok bool
 		if ring != nil {
-			token, reserved, ok = ring.take()
+			l, ok = ring.take()
 		}
-		if !ok || slices.Contains(tried, token) {
+		if !ok || slices.Contains(tried, l.token) {
 			break
 		}
-		tried = append(tried, token)
-		err := w.api.sendMessage(ctx, chatID, text, token)
+		tried = append(tried, l.token)
+		err := w.api.sendMessage(ctx, chatID, text, l.token)
 		if err == nil {
 			return nil
 		}
 		lastErr = fmt.Errorf("weixin send: %w", err)
-		if !errors.Is(err, errUpstreamRejected) {
-			if reserved {
-				ring.release(token)
+		switch {
+		case !errors.Is(err, errUpstreamRejected):
+			if l.reserved {
+				ring.release(l.token, true)
 			}
 			return lastErr
+		case l.uncertain:
+			// Most likely the earlier no-verdict send landed and spent it.
+			return &maybeDeliveredError{err: lastErr}
+		case l.reserved:
+			rejected = append(rejected, l.token)
 		}
+	}
+	for _, t := range rejected {
+		ring.release(t, false)
 	}
 	if lastErr != nil {
 		return lastErr
@@ -279,6 +296,17 @@ func (w *Weixin) sendWithRing(ctx context.Context, ring *tokenRing, chatID, text
 	return fmt.Errorf("weixin: no context_token for user %q (no inbound message yet)",
 		osutil.SanitizeForLog(chatID, 128))
 }
+
+// maybeDeliveredError is a rejection on a token whose previous send got no
+// verdict. It is permanent so ReplyWithRetry stops instead of resending the
+// message on another token.
+type maybeDeliveredError struct{ err error }
+
+func (e *maybeDeliveredError) Error() string {
+	return e.err.Error() + " (an earlier attempt may have been delivered)"
+}
+func (e *maybeDeliveredError) Unwrap() error     { return e.err }
+func (e *maybeDeliveredError) IsPermanent() bool { return true }
 
 // cacheContextToken pushes an inbound token onto the user's ring, starting a
 // fresh ring if the cleanup loop evicted the cached one mid-push.
@@ -292,7 +320,7 @@ func (w *Weixin) cacheContextToken(user, token string, nowNs int64) {
 		if r.push(token, nowNs) {
 			return
 		}
-		w.contextTokens.CompareAndDelete(user, r)
+		w.dropEvictedRing(user, r)
 	}
 }
 

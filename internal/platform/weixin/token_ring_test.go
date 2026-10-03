@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +21,27 @@ type fakeILink struct {
 	mu      sync.Mutex
 	tokens  []string
 	verdict func(token string, attempt int) string // "ok", "reject", "http500", "drop"
+}
+
+// deliverThenDrop wraps singleUse: the first send on token is accepted
+// (spending it) and then the connection drops, so the client sees no verdict.
+func deliverThenDrop(token string, delivered *atomic.Int32) func(string, int) string {
+	base := singleUse()
+	var mu sync.Mutex
+	dropped := false
+	return func(tok string, attempt int) string {
+		mu.Lock()
+		defer mu.Unlock()
+		v := base(tok, attempt)
+		if v == "ok" {
+			delivered.Add(1)
+			if tok == token && !dropped {
+				dropped = true
+				return "drop"
+			}
+		}
+		return v
+	}
 }
 
 func (f *fakeILink) seen() []string {
@@ -168,7 +190,8 @@ func TestReply_AllSpentFallsBackToNewest(t *testing.T) {
 }
 
 // TestReply_AllRejectedTriesEachTokenOnce bounds the rotation: no token is
-// resent within one Reply, and the next Reply makes a single fallback try.
+// resent within one Reply, and since upstream consumed none of them, the
+// next Reply may try them all again.
 func TestReply_AllRejectedTriesEachTokenOnce(t *testing.T) {
 	t.Parallel()
 	w, f := newRingTestWeixin(t, func(string, int) string { return "reject" }, "t1", "t2", "t3")
@@ -182,7 +205,80 @@ func TestReply_AllRejectedTriesEachTokenOnce(t *testing.T) {
 	if err := reply(w); !errors.Is(err, errUpstreamRejected) {
 		t.Fatalf("second reply err = %v, want an upstream rejection", err)
 	}
-	if got, want := f.seen(), []string{"t3", "t2", "t1", "t3"}; !slices.Equal(got, want) {
+	if got, want := f.seen(), []string{"t3", "t2", "t1", "t3", "t2", "t1"}; !slices.Equal(got, want) {
+		t.Fatalf("tokens sent = %v, want %v", got, want)
+	}
+}
+
+// TestReply_RejectedMessageDoesNotBurnTokens: a rejection that has nothing to
+// do with the token (content, rate limit) must leave the tokens for the
+// replies that follow.
+func TestReply_RejectedMessageDoesNotBurnTokens(t *testing.T) {
+	t.Parallel()
+	base := singleUse()
+	w, f := newRingTestWeixin(t, func(tok string, attempt int) string {
+		if attempt <= 2 {
+			return "reject"
+		}
+		return base(tok, attempt)
+	}, "t1", "t2")
+	if err := reply(w); !errors.Is(err, errUpstreamRejected) {
+		t.Fatalf("err = %v, want an upstream rejection", err)
+	}
+	for i := range 2 {
+		if err := reply(w); err != nil {
+			t.Fatalf("reply %d after the rejection: %v", i+1, err)
+		}
+	}
+	if got, want := f.seen(), []string{"t2", "t1", "t2", "t1"}; !slices.Equal(got, want) {
+		t.Fatalf("tokens sent = %v, want %v", got, want)
+	}
+}
+
+// TestReplyWithRetry_DeliveredThenDroppedSendsOnce: the send lands but the
+// client gets no verdict. The retry's rejection on that token must end the
+// retries, not move the message onto another token.
+func TestReplyWithRetry_DeliveredThenDroppedSendsOnce(t *testing.T) {
+	t.Parallel()
+	var delivered atomic.Int32
+	w, f := newRingTestWeixin(t, deliverThenDrop("t2", &delivered), "t1", "t2")
+	_, err := platform.ReplyWithRetry(context.Background(), w,
+		platform.OutgoingMessage{ChatID: "u", Text: "answer"}, 3)
+	if !platform.IsPermanent(err) || !errors.Is(err, errUpstreamRejected) {
+		t.Fatalf("err = %v, want a permanent upstream rejection", err)
+	}
+	if n := delivered.Load(); n != 1 {
+		t.Fatalf("delivered %d times, want 1", n)
+	}
+	if got, want := f.seen(), []string{"t2", "t2"}; !slices.Equal(got, want) {
+		t.Fatalf("tokens sent = %v, want %v", got, want)
+	}
+	if err := reply(w); err != nil {
+		t.Fatalf("next reply: %v (t1 must still be unspent)", err)
+	}
+}
+
+// TestReply_UncertainTokenIsRetriedBeforeANewerOne: a token that arrives
+// while the retry backs off must not carry a possibly delivered message
+// a second time.
+func TestReply_UncertainTokenIsRetriedBeforeANewerOne(t *testing.T) {
+	t.Parallel()
+	var delivered atomic.Int32
+	w, f := newRingTestWeixin(t, deliverThenDrop("t2", &delivered), "t1", "t2")
+	if err := reply(w); err == nil {
+		t.Fatal("reply succeeded, want the dropped connection's error")
+	}
+	w.cacheContextToken("u", "t3", time.Now().UnixNano())
+	if err := reply(w); !platform.IsPermanent(err) {
+		t.Fatalf("retry err = %v, want permanent", err)
+	}
+	if n := delivered.Load(); n != 1 {
+		t.Fatalf("delivered %d times, want 1 (tokens sent %v)", n, f.seen())
+	}
+	if err := reply(w); err != nil {
+		t.Fatalf("next reply: %v (t3 must still be unspent)", err)
+	}
+	if got, want := f.seen(), []string{"t2", "t2", "t3"}; !slices.Equal(got, want) {
 		t.Fatalf("tokens sent = %v, want %v", got, want)
 	}
 }
@@ -282,6 +378,24 @@ func TestCacheContextToken_EvictedRingIsReplaced(t *testing.T) {
 	}
 	// The sweep marked the ring but has not deleted it yet.
 	w.cacheContextToken("u", "new", 300)
+	if got, want := ringTokens(t, w, "u"), []string{"new"}; !slices.Equal(got, want) {
+		t.Fatalf("ring = %v, want %v", got, want)
+	}
+}
+
+// TestEvictIdleTokens_SweepKeepsAFreshRing covers the sweep side of the same
+// race: its delete must not drop the ring a push stored after the eviction.
+func TestEvictIdleTokens_SweepKeepsAFreshRing(t *testing.T) {
+	t.Parallel()
+	w := New(Config{Token: "tok"})
+	w.cacheContextToken("u", "old", 100)
+	v, _ := w.contextTokens.Load("u")
+	stale := v.(*tokenRing)
+	stale.evictIfIdle(200)
+	w.cacheContextToken("u", "new", 300)
+
+	w.dropEvictedRing("u", stale)
+
 	if got, want := ringTokens(t, w, "u"), []string{"new"}; !slices.Equal(got, want) {
 		t.Fatalf("ring = %v, want %v", got, want)
 	}
