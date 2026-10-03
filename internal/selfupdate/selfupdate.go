@@ -5,7 +5,7 @@
 // Flow:
 //
 //	LatestRelease()     → GitHub redirect → semver tag
-//	Download()          → binary + checksums.txt → tmp dir
+//	Download()          → binary + checksums.txt (+ .sig) → tmp dir
 //	Replace()           → backup current, rename new binary into place
 //	RestartService()    → systemctl restart / launchctl reload
 package selfupdate
@@ -49,6 +49,7 @@ type Release struct {
 	Tag      string // e.g. "v1.2.3"
 	AssetURL string // direct binary URL
 	SumURL   string // checksums.txt URL
+	SigURL   string // checksums.txt.sig URL
 }
 
 // LatestRelease resolves the latest release tag by following the
@@ -107,14 +108,15 @@ func LatestRelease(ctx context.Context) (*Release, error) {
 		Tag:      tag,
 		AssetURL: base + "/" + asset,
 		SumURL:   base + "/checksums.txt",
+		SigURL:   base + "/checksums.txt.sig",
 	}, nil
 }
 
 // pinSha256EnvVar lets an operator pin the expected SHA-256 of checksums.txt
 // itself (recorded out-of-band). The binary checksum alone is no stronger than
 // the GitHub release token — a leaked token swaps BOTH files in lock-step — so
-// the pin adds an anchor the token cannot reach. Unset = best-effort chain;
-// a signed release flow (cosign / Sigstore) is the long-term fix (#815).
+// the pin adds an anchor the token cannot reach. Unset = best-effort chain
+// unless an embedded signing key anchors it (signature.go, #815).
 const pinSha256EnvVar = "NAOZHI_UPGRADE_PIN_SHA256"
 
 // pinSha256HexRe rejects a malformed pin early (case-insensitive so uppercase
@@ -124,8 +126,8 @@ var pinSha256HexRe = regexp.MustCompile(`^[A-Fa-f0-9]{64}$`)
 // Download fetches the binary and checksums.txt into dir, verifies the SHA-256
 // and returns the binary path. The file stays 0600 (non-executable) until
 // verification succeeds so its mode never claims "ready to execute" early.
-// With NAOZHI_UPGRADE_PIN_SHA256 set, checksums.txt must match the pin before
-// it is trusted (#815).
+// Before checksums.txt is trusted it must match NAOZHI_UPGRADE_PIN_SHA256 when
+// set, and carry a valid signature when a trust set is embedded (#815).
 func Download(ctx context.Context, rel *Release, dir string) (binPath string, err error) {
 	// Strict mode with no strong-trust anchor refuses before any network I/O (#1823).
 	if err := enforceStrongTrust(); err != nil {
@@ -146,6 +148,11 @@ func Download(ctx context.Context, rel *Release, dir string) (binPath string, er
 	// verify a tampered binary.
 	if err := verifyPinnedChecksumsFile(sumPath); err != nil {
 		return "", err
+	}
+	if len(trustedSigKeys) > 0 {
+		if err := verifyReleaseSignature(ctx, rel, dir, sumPath); err != nil {
+			return "", err
+		}
 	}
 	if err := verifyChecksum(binPath, sumPath, asset); err != nil {
 		return "", err
