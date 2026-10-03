@@ -43,7 +43,7 @@ func TestStreamEvents_SendsTheWireView(t *testing.T) {
 	notify := make(chan struct{}, 1)
 	notify <- struct{}{}
 	c := &Connector{router: testRouter(r)}
-	c.streamEvents(ctx, writeJSON, key, notify)
+	c.streamEvents(ctx, writeJSON, key, c.router.SessionFor(key), notify)
 
 	mu.Lock()
 	defer mu.Unlock()
