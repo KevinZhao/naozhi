@@ -238,6 +238,16 @@ func TestVerify_EmptyTrust_Passes(t *testing.T) {
 	}
 }
 
+func TestVerify_EmptyTrust_UnreadableSigFails(t *testing.T) {
+	t.Parallel()
+	h := &harness{}
+	in, _ := release(t)
+	dir := t.TempDir()
+	if code := h.run("verify", "-in", in, "-sig", dir); code != 1 {
+		t.Fatalf("verify with an unreadable signature path = %d, want 1", code)
+	}
+}
+
 func TestRun_Usage(t *testing.T) {
 	t.Parallel()
 	for _, args := range [][]string{nil, {"bogus"}, {"sign"}, {"sign", "-in", "x"}, {"verify", "-sig", "x"}, {"sign", "-in", "x", "-out", "y", "extra"}} {

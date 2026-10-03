@@ -114,8 +114,9 @@ jobs:
   release:
     needs: [build, e2e-gate]
     runs-on: ubuntu-latest
-    # NAOZHI_RELEASE_SIGNING_KEY is an environment secret, readable by this
-    # job only.
+    # NAOZHI_RELEASE_SIGNING_KEY is a `release` environment secret. The
+    # environment has no deployment policy until the owner restricts it to
+    # v* tags; until then any pushed branch declaring it can read the secret.
     environment: release
     steps:
       # Need the repo for install.sh to ship as a release asset. install.sh
@@ -139,7 +140,8 @@ jobs:
       # One ed25519 signature over checksums.txt anchors every binary
       # (docs/rfc/selfupdate-signing.md). Both steps pass with a warning while
       # internal/selfupdate embeds no key, and fail once it does if the
-      # secret is missing or does not match: clients would refuse the release.
+      # secret is missing or not in the trust set this tag embeds. Clients
+      # still on an older trust set are not checked here.
       - name: Sign checksums
         env:
           NAOZHI_RELEASE_SIGNING_KEY: ${{ secrets.NAOZHI_RELEASE_SIGNING_KEY }}

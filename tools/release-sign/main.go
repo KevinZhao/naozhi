@@ -1,6 +1,7 @@
 // Command release-sign signs a release's checksums.txt with the ed25519
 // release key and checks the signature against the trust set embedded in
-// internal/selfupdate, the set every client verifies upgrades with (#1738).
+// internal/selfupdate at the tag being released (#1738). Clients already
+// deployed verify with the set they shipped with, which this cannot see.
 // Run from the repo root:
 //
 //	go run ./tools/release-sign keygen | gh secret set NAOZHI_RELEASE_SIGNING_KEY --env release
@@ -14,8 +15,8 @@
 //
 // While the embedded trust set is empty, clients check no signature, so sign
 // without a key and verify without a signature pass with a warning. Once a key
-// is embedded both fail instead: a release clients would refuse must not
-// publish.
+// is embedded both fail instead: a release its own trust set would refuse
+// must not publish.
 package main
 
 import (
