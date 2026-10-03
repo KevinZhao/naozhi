@@ -13,6 +13,13 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
+// thinkingLine is the banner text before the turn reports anything specific.
+const thinkingLine = "💭 思考中..."
+
+// fallbackBannerDelayDefault matches reactionAckTimeout: a chat whose message
+// got no ⏳ sees the turn running about as soon as a ⏳ would have shown.
+const fallbackBannerDelayDefault = 3 * time.Second
+
 // replyTracker manages IM status message streaming (thinking -> tool_use -> result).
 // statusLines is mutated under linesMu by onEvent (serial CLI event loop) and
 // read by editLoop; joining is deferred to the read path so events coalesced
@@ -28,7 +35,7 @@ type replyTracker struct {
 	// agentID is embedded into AskUserQuestion cards so the answer routes back
 	// to the asking agent session rather than "general" (#2148).
 	agentID string
-	// thinkingMsgID is written by the Reply goroutine spawned in onEvent and
+	// thinkingMsgID is written by the banner goroutine postBanner spawns and
 	// read by editLoop/imDelivery; on ctx cancel waitReady may return before
 	// msgIDReady closes, so the read races the write — hence atomic.
 	thinkingMsgID atomic.Pointer[string]
@@ -66,11 +73,16 @@ type replyTracker struct {
 	loopWG sync.WaitGroup
 
 	// initialReplyReservation Done's the pre-allocated loopWG slot for the
-	// initial-Reply goroutine exactly once — from that goroutine or from stop()
-	// if the turn ends before any event. Pre-allocating avoids Add(1) racing a
-	// Wait() that already returned. Unreserved when supportsInterim=false.
+	// initial-Reply goroutine exactly once — from that goroutine, or from
+	// whichever of waitReady and stop claims sent first when no banner was
+	// posted. Pre-allocating avoids Add(1) racing a Wait() that already
+	// returned. Unreserved when supportsInterim=false.
 	initialReplyReservation   sync.Once
 	initialReplyReservationOn bool
+
+	// fallbackTimer posts the banner when no event has by then; set by
+	// armFallbackBanner before the turn's events start, stopped by stop.
+	fallbackTimer *time.Timer
 
 	// supportsInterim caches platform.SupportsInterimMessages(p); it is
 	// consulted per streaming event.
@@ -286,17 +298,20 @@ func (t *replyTracker) sendTodoMessage(text string) {
 	}
 }
 
-// stop signals editLoop/todoLoop to exit and waits for them, so a loop parked
-// in a slow platform Reply cannot leak into the next turn and post a stale
-// status/checklist for the wrong session. Safe to call multiple times.
+// stop signals editLoop/todoLoop to exit and waits for them and for an
+// initial banner Reply in flight, so none of them can leak into the next turn
+// and post a stale status/checklist for the wrong session. No banner starts
+// after stop. Safe to call multiple times.
 func (t *replyTracker) stop() {
 	select {
 	case <-t.done:
 	default:
 		close(t.done)
 	}
-	// No-op if the onEvent goroutine already released the slot.
-	t.releaseInitialReplySlot()
+	if t.fallbackTimer != nil {
+		t.fallbackTimer.Stop()
+	}
+	t.claimBanner()
 	t.loopWG.Wait()
 	// Clear the mailbox after the loop exited so a final snapshot stashed just
 	// before close(t.done) doesn't stay reachable until the tracker is GC'd.
@@ -343,18 +358,44 @@ func (t *replyTracker) onEvent(ev clievent.Event) {
 
 	line := formatEventLine(ev)
 	if line == "" {
-		line = "💭 思考中..."
+		line = thinkingLine
 	}
 
 	t.linesMu.Lock()
 	t.statusLines = appendStatusLine(t.statusLines, line)
 	t.linesMu.Unlock()
 
-	// First event fires the initial Reply. Render only here; subsequent events
-	// defer rendering to editLoop's rate-limited drain.
+	// First event fires the initial Reply; subsequent events defer rendering
+	// to editLoop's rate-limited drain.
+	t.postBanner()
+
+	// Signal editLoop non-blockingly that new status is available.
+	select {
+	case t.editCh <- struct{}{}:
+	default:
+	}
+}
+
+// armFallbackBanner posts a "💭 思考中..." banner after delay unless an event
+// posted one or the turn reached its answer first; the answer is then edited
+// into it. For a request whose message got no ⏳, so the chat still sees the
+// turn running. No-op without interim messages.
+func (t *replyTracker) armFallbackBanner(delay time.Duration) {
+	if !t.supportsInterim || delay <= 0 {
+		return
+	}
+	t.fallbackTimer = time.AfterFunc(delay, t.postBanner)
+}
+
+// postBanner posts the status banner, once per turn, on the loopWG slot
+// reserved in newIMEventTracker. It is a no-op once waitReady or stop has
+// claimed sent.
+func (t *replyTracker) postBanner() {
 	t.sent.Do(func() {
 		snapshot := t.renderStatus()
-		// The loopWG slot was pre-reserved in newIMEventTracker; see releaseInitialReplySlot.
+		if snapshot == "" {
+			snapshot = thinkingLine
+		}
 		go func() {
 			defer t.releaseInitialReplySlot()
 			defer close(t.msgIDReady)
@@ -368,12 +409,15 @@ func (t *replyTracker) onEvent(ev clievent.Event) {
 			}
 		}()
 	})
+}
 
-	// Signal editLoop non-blockingly that new status is available.
-	select {
-	case t.editCh <- struct{}{}:
-	default:
-	}
+// claimBanner marks the banner as never posted for this turn if it was not
+// already, releasing the reserved slot no banner goroutine will take.
+func (t *replyTracker) claimBanner() {
+	t.sent.Do(func() {
+		close(t.msgIDReady)
+		t.releaseInitialReplySlot()
+	})
 }
 
 // renderStatus joins statusLines into a single display string. Called once per
@@ -460,9 +504,7 @@ func (t *replyTracker) redrawStatus() (skipped bool) {
 }
 
 func (t *replyTracker) waitReady(ctx context.Context) {
-	t.sent.Do(func() {
-		close(t.msgIDReady)
-	})
+	t.claimBanner()
 	select {
 	case <-t.msgIDReady:
 	case <-ctx.Done():

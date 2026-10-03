@@ -35,6 +35,9 @@ type imOrigin struct {
 	// reacted is set by Admitted when the ⏳ landed on the message, before
 	// the turn that answers it can start, so Finish knows to clear it.
 	reacted bool
+	// unacked is set by Admitted, also before the turn starts, when a request
+	// that runs at once got no ⏳; its turn posts a fallback banner instead.
+	unacked bool
 }
 
 func (d *Dispatcher) newIMOrigin(msg platform.IncomingMessage, lg *slog.Logger, key, agentID string, opts sessionview.AgentOpts, kind imKind, textLen, images int) *imOrigin {
@@ -85,6 +88,7 @@ func (o *imOrigin) Admitted(ctx context.Context, a turn.Ack) {
 	case turn.AckOwner:
 		o.lg.Info("message received", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
 		o.reacted = d.ackQueuedWithReaction(ctx, o.msg, o.lg)
+		o.unacked = !o.reacted
 	case turn.AckDetached:
 		if o.kind == imUrgent {
 			o.lg.Info("/urgent dispatched", "key", o.key, "text_len", o.textLen)
@@ -92,6 +96,7 @@ func (o *imOrigin) Admitted(ctx context.Context, a turn.Ack) {
 			o.lg.Info("message received (passthrough)", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
 		}
 		o.reacted = d.ackQueuedWithReaction(ctx, o.msg, o.lg)
+		o.unacked = !o.reacted
 	case turn.AckQueued:
 		if !d.ackQueuedWithReaction(ctx, o.msg, o.lg) {
 			d.replyNotice(ctx, o.msg, o.key, "消息已收到，待当前回复完成后一并处理。", o.lg, "queued")
@@ -135,24 +140,28 @@ type imDelivery struct {
 // the order the IM path has always had.
 func (dl *imDelivery) Blocking() bool { return true }
 
-// BeforeSession offers the chat's external session for takeover on a first
-// turn. The result is ignored: GetOrCreate resumes an adopted session and
-// spawns a fresh one otherwise.
+// BeforeSession starts the tracker that streams the turn's progress into the
+// chat, armed with a fallback banner when the request's message got no ⏳ so
+// a slow spawn is covered too. On a first turn it then offers the chat's
+// external session for takeover; the result is ignored: GetOrCreate resumes
+// an adopted session and spawns a fresh one otherwise.
 func (dl *imDelivery) BeforeSession(ctx context.Context) {
+	o := dl.o
+	dl.tracker = newIMEventTracker(ctx, dl.p, o.msg.ChatID, o.msg.ChatType, o.agentID)
+	if dl.info.Role == turn.RoleHead && o.unacked {
+		dl.tracker.armFallbackBanner(o.d.fallbackBannerDelay)
+	}
 	if !dl.info.First {
 		return
 	}
-	o := dl.o
 	_ = o.d.caps.Takeover(ctx, sessionkey.ChatKey(o.msg.Platform, o.msg.ChatType, o.msg.ChatID), o.key, o.opts)
 }
 
-// SessionReady starts the tracker that streams the turn's progress into the
-// chat. SessionNew posts no notice: it never follows lost context (a first
-// chat, a reset that already replied, a dashboard Remove, a prune of an orphan
-// that never had an ID; #3000).
+// SessionReady returns the tracker's callback for the turn's events.
+// SessionNew posts no notice: it never follows lost context (a first chat, a
+// reset that already replied, a dashboard Remove, a prune of an orphan that
+// never had an ID; #3000).
 func (dl *imDelivery) SessionReady(ctx context.Context, _ sessionview.SessionStatus) clievent.EventCallback {
-	o := dl.o
-	dl.tracker = newIMEventTracker(ctx, dl.p, o.msg.ChatID, o.msg.ChatType, o.agentID)
 	return dl.tracker.onEvent
 }
 
@@ -181,6 +190,10 @@ func (dl *imDelivery) Finish(ctx context.Context, out turn.Outcome) {
 	defer func() {
 		d.clearQueuedReactions(context.WithoutCancel(ctx), o.msg.Platform, dl.queuedIDs(), dl.lg)
 	}()
+	if out.Stage != turn.StageDone && dl.tracker != nil {
+		// Before the error text, so a fallback banner cannot post below it.
+		dl.tracker.stop()
+	}
 	switch out.Stage {
 	case turn.StageSession:
 		replyCtx, cleanup, errMsg := d.handleGetOrCreateError(ctx, out.Err, dl.lg)
