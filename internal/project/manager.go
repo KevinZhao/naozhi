@@ -29,6 +29,12 @@ type Manager struct {
 	// ProjectsConfig.IncludeRoot) so files directly under root resolve to an owner.
 	includeRoot bool
 
+	// indexPath is where index persists ("" = in memory only), fixed at
+	// construction. index holds the sidebar CreatedAt for projects whose
+	// project.yaml carries none; guarded by mu.
+	indexPath string
+	index     *projectIndex
+
 	mu       sync.RWMutex
 	projects map[string]*Project // name -> project
 
@@ -64,6 +70,13 @@ func WithIncludeRoot(enabled bool) Option {
 	return func(m *Manager) { m.includeRoot = enabled }
 }
 
+// WithIndexPath persists naozhi's per-project bookkeeping (sidebar order) to
+// path, normally datadir.Layout.ProjectsIndexPath. Without it the order is
+// stable for the Manager's lifetime only.
+func WithIndexPath(path string) Option {
+	return func(m *Manager) { m.indexPath = path }
+}
+
 // NewManager creates a project manager for the given root directory.
 func NewManager(root string, defaults PlannerDefaults, opts ...Option) (*Manager, error) {
 	absRoot, err := filepath.Abs(root)
@@ -86,6 +99,7 @@ func NewManager(root string, defaults PlannerDefaults, opts ...Option) (*Manager
 	for _, opt := range opts {
 		opt(m)
 	}
+	m.index = loadProjectIndex(m.indexPath)
 	return m, nil
 }
 
@@ -105,7 +119,8 @@ func dirModTimeMillis(entry os.DirEntry, path string) int64 {
 }
 
 // Scan discovers all subdirectories under root and loads their project configs.
-// The whole scan — disk read, CreatedAt migration, m.projects swap — runs
+// It never writes into a project directory; only the projects index is saved.
+// The whole scan — disk read, CreatedAt resolution, m.projects swap — runs
 // under the write lock so it is atomic w.r.t. the writers (BindChat /
 // SetFavorite / UpdateConfig / UnbindAllChat), which persist under the same
 // lock. Scan is periodic and mutations are rare, so IO under lock is fine.
@@ -119,6 +134,9 @@ func (m *Manager) Scan() error {
 	}
 
 	projects := make(map[string]*Project, len(entries))
+	// listed holds every non-hidden directory, including ones skipped for a bad
+	// config, so fixing a project.yaml does not cost the project its place.
+	listed := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -130,6 +148,7 @@ func (m *Manager) Scan() error {
 		}
 
 		absPath := filepath.Join(m.root, name)
+		listed = append(listed, absPath)
 
 		cfg, err := loadConfig(absPath)
 		if err != nil {
@@ -188,17 +207,32 @@ func (m *Manager) Scan() error {
 		}
 	}
 
-	// Sidebar order migration: stamp CreatedAt on projects missing one, sorted
-	// by name with 1ms spacing so the first render after upgrade keeps the old
-	// byte-name order and All() sorts stay strict. No concurrent Scan callers.
+	// Index entries of other roots survive, so switching projects.root back
+	// restores their order; entries for dirs gone from this root are dropped.
+	nextIndex := make(map[string]int64, len(m.index.createdAt))
+	for path, ms := range m.index.createdAt {
+		if filepath.Dir(path) != m.root {
+			nextIndex[path] = ms
+		}
+	}
+	for _, path := range listed {
+		if ms, ok := m.index.createdAt[path]; ok {
+			nextIndex[path] = ms
+		}
+	}
+	// Sidebar order: a non-zero created_at in project.yaml wins, then the
+	// index, then a fresh stamp in name order with 1ms spacing so first-seen
+	// projects keep byte-name order and All() sorts stay strict. The synthetic
+	// root project is ordered below and never indexed.
 	missing := make([]string, 0, len(projects))
 	for name, p := range projects {
-		// The root project is synthetic: never auto-create .naozhi/project.yaml
-		// inside the user's top-level workspace; it gets an in-memory CreatedAt.
-		if p.IsRoot {
-			continue
-		}
-		if p.Config.CreatedAt == 0 {
+		switch {
+		case p.IsRoot:
+		case p.Config.CreatedAt != 0:
+			nextIndex[p.Path] = p.Config.CreatedAt
+		case nextIndex[p.Path] != 0:
+			p.Config.CreatedAt = nextIndex[p.Path]
+		default:
 			missing = append(missing, name)
 		}
 	}
@@ -208,15 +242,10 @@ func (m *Manager) Scan() error {
 		for i, name := range missing {
 			p := projects[name]
 			p.Config.CreatedAt = base + int64(i)
-			// Best-effort persist: on failure the next boot re-stamps (order may
-			// shift once) rather than failing the whole scan.
-			cfgSnap := snapshotConfig(p)
-			if err := saveConfigToPath(p.configPath(), cfgSnap); err != nil {
-				slog.Warn("persist project CreatedAt failed",
-					"name", name, "err", err)
-			}
+			nextIndex[p.Path] = p.Config.CreatedAt
 		}
 	}
+	m.index.replace(nextIndex)
 
 	// Root project sorts strictly LAST: in-memory-only CreatedAt = max + 1,
 	// recomputed every boot. Override unconditionally so a real project.yaml
@@ -402,6 +431,11 @@ func (m *Manager) UpdateConfig(name string, cfg ProjectConfig) error {
 		// name comes from reverse-RPC frames and dashboard query strings; %q
 		// escapes bidi/C1/newline so the error cannot forge log entries.
 		return fmt.Errorf("%w: %q", ErrNotFound, name)
+	}
+	// created_at is sidebar order: a client that omits it means "unchanged",
+	// not "re-stamp at the bottom on the next Scan".
+	if cfg.CreatedAt == 0 {
+		cfg.CreatedAt = p.Config.CreatedAt
 	}
 	p.Config = cfg
 	m.rebuildBindingIndex()

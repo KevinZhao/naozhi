@@ -25,6 +25,7 @@ func TestLayoutSiblings(t *testing.T) {
 		{"sys_sessions", lay.SysSessionsRoot(), "/data/naozhi/sys-sessions"},
 		{"naozhi_settings", lay.NaozhiSettingsPath(), "/data/naozhi/naozhi-settings.json"},
 		{"ui_settings", lay.UISettingsPath(), "/data/naozhi/ui-settings.json"},
+		{"projects_index", lay.ProjectsIndexPath(), "/data/naozhi/projects-index.json"},
 		{"cron_runs", lay.RunsRoot(), "/data/naozhi/runs"},
 		{"join", lay.Join("a", "b"), "/data/naozhi/a/b"},
 	}
@@ -48,6 +49,7 @@ func TestLayoutNeverRebuildsTheStorePath(t *testing.T) {
 	for _, p := range []string{
 		lay.EventsRoot(), lay.CostRoot(), lay.SessionIDsPath(), lay.RunsRoot(),
 		lay.SessionRunsRoot(), lay.UISettingsPath(), lay.NaozhiSettingsPath(),
+		lay.ProjectsIndexPath(),
 	} {
 		if base := filepath.Base(p); base == "sessions.json" || base == "cron_jobs.json" {
 			t.Errorf("Layout produced a configured store filename (%q); it must only name siblings", p)
@@ -64,7 +66,7 @@ func TestZeroLayoutYieldsEmptyPaths(t *testing.T) {
 			lay.Root(), lay.Join("x"), lay.EventsRoot(), lay.CostRoot(), lay.RunsRoot(),
 			lay.SessionIDsPath(), lay.WorkspaceOverridesPath(), lay.SessionRunsRoot(),
 			lay.CLIDebugRoot(), lay.AccessProfileSecretsRoot(), lay.SysSessionsRoot(),
-			lay.NaozhiSettingsPath(), lay.UISettingsPath(),
+			lay.NaozhiSettingsPath(), lay.UISettingsPath(), lay.ProjectsIndexPath(),
 		} {
 			if p != "" {
 				t.Errorf("%s: got %q, want empty", name, p)
