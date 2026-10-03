@@ -17,8 +17,10 @@
 #                            placeholder left in a secret (dashboard_token,
 #                            platform or node tokens) fails the load.
 #   ~/.claude/settings.json  its `env` block is copied into naozhi's own
-#                            process env, which feeds only transcription and
-#                            the sysession Bedrock auth. Spawned cc sessions
+#                            process env. That mainly feeds transcription and
+#                            the sysession Bedrock auth, but keys the shim env
+#                            policy also allows (endpoint and proxy URLs)
+#                            reach every spawned CLI. Spawned cc sessions
 #                            read that file themselves.
 #   .naozhi/project.yaml     one per project directory under projects.root.
 #                            Overrides projects.planner_defaults (model,
