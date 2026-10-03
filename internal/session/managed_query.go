@@ -533,10 +533,11 @@ func (s *ManagedSession) EventEntriesBefore(beforeMS int64, limit int) []clieven
 
 // EventEntriesBeforeCtx is EventEntriesBefore plus the disk tier: a memory
 // page shorter than `limit` (the memory bottom, which the dashboard would
-// read as end-of-history) is topped up from the history.Source, anchored
-// strictly older than the earliest memory entry and prepended. Memory is
-// authoritative for the range it covers (LogSystemEvent never reaches disk),
-// so the tiers never overlap and need no dedup. The memory part carries its
+// read as end-of-history) is topped up from the history.Source and
+// prepended. The disk read re-admits the earliest memory entry's millisecond
+// (loadBeforeSeam), so a sibling the ring already evicted is not skipped;
+// memory is authoritative for what it holds (LogSystemEvent never reaches
+// disk), so disk copies of it are dropped. The memory part carries its
 // gap-fill turns (withGapFill), so a page may exceed `limit`.
 func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int64, limit int) []clievent.EventEntry {
 	if limit <= 0 {
@@ -551,22 +552,24 @@ func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int
 	if src == nil {
 		return filled
 	}
-	diskBefore := beforeMS
-	if len(mem) > 0 {
+	var entries []clievent.EventEntry
+	var err error
+	if len(mem) == 0 {
+		entries, err = src.LoadBefore(ctx, beforeMS, limit)
+	} else {
 		// A zero Time would read as "no upper bound" and overlap memory.
 		if mem[0].Time <= 0 {
 			return filled
 		}
-		diskBefore = mem[0].Time
+		entries, err = loadBeforeSeam(ctx, src, mem[0].Time, filled, limit-len(mem))
 	}
-	entries, err := src.LoadBefore(ctx, diskBefore, limit-len(mem))
 	if err != nil {
 		// Treat as end-of-history, matching the JSONL load sites in router.go.
 		slog.Warn("history source load failed", "key", s.key, "err", err)
 		return filled
 	}
-	sortEntriesByTimeStable(entries)
 	if len(mem) == 0 {
+		sortEntriesByTimeStable(entries)
 		return entries
 	}
 	// Fresh slice: the source may hand back a buffer it still owns.
@@ -593,28 +596,31 @@ func countVisibleEntries(entries []clievent.EventEntry) int {
 // placeholder when internal events flood the trailing window.
 //
 // Memory tier first (contiguous, so the dashboard can rebuild turnState),
-// then disk pages strictly older than the earliest in-memory Time are
-// prepended until visibleTarget or a page/total/byte ceiling is reached;
-// tiers never overlap. visibleTarget <= 0 falls back to EventLastN(maxTotal).
+// then older disk pages are prepended (loadBeforeSeam at each tier and page
+// boundary) until visibleTarget or a page/total/byte ceiling is reached.
+// visibleTarget <= 0 falls back to EventLastN(maxTotal).
 // ctx bounds disk I/O so a slow filesystem can't stall the WS first frame.
 func (s *ManagedSession) EventLastNVisibleCtx(ctx context.Context, visibleTarget, maxTotal int) []clievent.EventEntry {
 	return s.eventLastNVisibleCtx(ctx, visibleTarget, maxTotal)
 }
 
 // EventInitialPageCtx returns the dashboard's initial-history slice plus a
-// hasMore flag: whether any entry strictly older than the slice exists (ring
-// or disk). Decided server-side because the server truncates by visible
-// bubble count, which a client total-count heuristic cannot see. The probe
-// is one limit=1 reverse lookup anchored at the earliest returned entry via
-// EventEntriesBeforeCtx (so it sees disk even when the ring is short). An
-// empty slice reports hasMore=false. ctx bounds both the read and the probe.
+// hasMore flag: whether any entry the slice lacks exists at or below its
+// earliest millisecond (ring or disk). Decided server-side because the server
+// truncates by visible bubble count, which a client total-count heuristic
+// cannot see. The probe is one EventEntriesBeforeCtx lookup (so it sees disk
+// even when the ring is short) that re-admits that millisecond and ignores
+// the slice's own entries there. An empty slice reports hasMore=false. ctx
+// bounds both the read and the probe.
 func (s *ManagedSession) EventInitialPageCtx(ctx context.Context, visibleTarget, maxTotal int) ([]clievent.EventEntry, bool) {
 	entries := s.eventLastNVisibleCtx(ctx, visibleTarget, maxTotal)
 	if len(entries) == 0 {
 		return entries, false
 	}
 	oldest := entries[0].Time
-	if older := s.EventEntriesBeforeCtx(ctx, oldest, 1); len(older) > 0 {
+	held := appendAtTime(nil, entries, oldest)
+	older := s.EventEntriesBeforeCtx(ctx, oldest+1, len(held)+1)
+	if len(dropHeld(older, oldest, held)) > 0 {
 		return entries, true
 	}
 	// EventEntriesBeforeCtx swallows ctx cancellation as nil, and the walk
@@ -650,14 +656,16 @@ func (s *ManagedSession) eventLastNVisibleCtx(ctx context.Context, visibleTarget
 	}
 
 	// Disk tier: the ring couldn't satisfy the target. Page backward through
-	// the durable source, strictly older than the earliest in-memory entry.
+	// the durable source; held is what the result carries at `before`.
 	src := s.loadHistorySource()
 	if src == nil {
 		return filled
 	}
 	before := int64(0)
+	var held []clievent.EventEntry
 	if len(mem) > 0 {
 		before = mem[0].Time
+		held = appendAtTime(nil, filled, before)
 	}
 	// Pages accumulate newest-first and are concatenated in reverse after the
 	// loop, avoiding O(n²) prepends. runningOlder keeps the ceiling check O(1).
@@ -667,7 +675,14 @@ func (s *ManagedSession) eventLastNVisibleCtx(ctx context.Context, visibleTarget
 		if ctx.Err() != nil {
 			break
 		}
-		chunk, err := src.LoadBefore(ctx, before, visibleDiskPageSize)
+		var chunk []clievent.EventEntry
+		var err error
+		if before > 0 {
+			chunk, err = loadBeforeSeam(ctx, src, before, held, visibleDiskPageSize)
+		} else {
+			chunk, err = src.LoadBefore(ctx, before, visibleDiskPageSize)
+			sortEntriesByTimeStable(chunk)
+		}
 		if err != nil {
 			slog.Warn("visible history source load failed", "key", s.key, "err", err)
 			break
@@ -675,10 +690,13 @@ func (s *ManagedSession) eventLastNVisibleCtx(ctx context.Context, visibleTarget
 		if len(chunk) == 0 {
 			break // disk exhausted
 		}
-		sortEntriesByTimeStable(chunk)
 		pages = append(pages, chunk)
 		vis += countVisibleEntries(chunk)
+		if chunk[0].Time != before {
+			held = held[:0]
+		}
 		before = chunk[0].Time
+		held = appendAtTime(held, chunk, before)
 		runningOlder += len(chunk)
 		if len(mem)+runningOlder >= maxTotal {
 			break // total payload ceiling
