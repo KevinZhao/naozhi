@@ -3,6 +3,8 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -140,5 +142,23 @@ func TestSweeperSkipsShimPassWithoutAManager(t *testing.T) {
 	s := newDataDirSweeper(cfg, datadir.ForStore(filepath.Join(t.TempDir(), "sessions.json")), nil, "")
 	if _, ok := s.RunOnce()["shim-logs"]; ok {
 		t.Error("shim-logs registered despite a nil Manager")
+	}
+}
+
+// TestSweeperRegistersTheStdioCaps: an init-redirected stdout grew to 450 MB
+// because nothing capped it. Both streams must be registered by default and
+// absent when log.stdio_max_size is "0".
+func TestSweeperRegistersTheStdioCaps(t *testing.T) {
+	layout := datadir.ForStore(filepath.Join(t.TempDir(), "sessions.json"))
+	names := newDataDirSweeper(&config.Config{}, layout, nil, "").Names()
+	if !slices.Contains(names, "stdio-stdout") || !slices.Contains(names, "stdio-stderr") {
+		t.Errorf("default config registers %v, want stdio-stdout and stdio-stderr", names)
+	}
+	off := &config.Config{}
+	off.Log.StdioMaxSize = "0"
+	for _, n := range newDataDirSweeper(off, layout, nil, "").Names() {
+		if strings.HasPrefix(n, "stdio-") {
+			t.Errorf("stdio_max_size \"0\" still registers %s", n)
+		}
 	}
 }

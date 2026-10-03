@@ -78,6 +78,9 @@ func (c *Config) ImageOrientEnabled() bool {
 type LogConfig struct {
 	Level  string `yaml:"level"`
 	Format string `yaml:"format"` // "json" (default) | "text"
+	// StdioMaxSize caps the files launchd/systemd redirect stdout and stderr
+	// into, e.g. "64MB" (the default); "0" disables. See datadir.CapStdio.
+	StdioMaxSize string `yaml:"stdio_max_size"`
 }
 
 // UpdateInterval returns the parsed, clamped auto-update check interval.

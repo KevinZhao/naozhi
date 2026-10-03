@@ -369,6 +369,12 @@ platforms:
 
 log:
   level: "info"
+  # Size cap for the files launchd (StandardOutPath/StandardErrorPath) or
+  # systemd (StandardOutput=append:) redirect stdout/stderr into. Checked hourly
+  # and at startup; an oversized file is truncated in place to its newest lines
+  # (never renamed: the init system keeps writing to the fd it opened). Pipes,
+  # journald and terminals are left alone. "0" disables. Default: "64MB".
+  stdio_max_size: "64MB"
 
 transcribe:
   enabled: true

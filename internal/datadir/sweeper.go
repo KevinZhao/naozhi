@@ -42,6 +42,9 @@ import (
 // filtered by extension — so a sweep can only ever remove files naozhi itself
 // named. Deciding whether a file is still in use is the registering package's
 // job, not this one's: see Pass.Keep.
+//
+// The stdout/stderr files an init system redirects naozhi into live in no tree
+// a Pass can name; StdioTask caps those by fd and runs here via AddFunc.
 
 // Pass is one gardening pass over one directory. The zero value sweeps nothing.
 type Pass struct {
@@ -135,7 +138,14 @@ type Sweeper struct {
 
 	mu     sync.Mutex
 	passes []Pass
+	tasks  []task
 	last   map[string]Result // cumulative per pass, for reporting
+}
+
+// task is housekeeping that is not a directory sweep, e.g. StdioTask.
+type task struct {
+	name string
+	fn   func()
 }
 
 // NewSweeper returns a Sweeper that runs every pass once per interval. A
@@ -153,11 +163,36 @@ func (s *Sweeper) Add(p Pass) {
 	s.passes = append(s.passes, p)
 }
 
-// RunOnce runs every registered pass and returns what each removed this time.
+// AddFunc registers a task that runs after the passes on every sweep. It
+// reports for itself; nothing it does shows up in RunOnce's result or Totals.
+func (s *Sweeper) AddFunc(name string, fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tasks = append(s.tasks, task{name: name, fn: fn})
+}
+
+// Names lists the registered passes, then the tasks, in registration order.
+func (s *Sweeper) Names() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.passes)+len(s.tasks))
+	for _, p := range s.passes {
+		out = append(out, p.Name)
+	}
+	for _, t := range s.tasks {
+		out = append(out, t.name)
+	}
+	return out
+}
+
+// RunOnce runs every registered pass, then every task, and returns what each
+// pass removed this time.
 func (s *Sweeper) RunOnce() map[string]Result {
 	s.mu.Lock()
 	passes := make([]Pass, len(s.passes))
 	copy(passes, s.passes)
+	tasks := make([]task, len(s.tasks))
+	copy(tasks, s.tasks)
 	s.mu.Unlock()
 
 	out := make(map[string]Result, len(passes))
@@ -171,6 +206,9 @@ func (s *Sweeper) RunOnce() map[string]Result {
 				"removed", res.Removed, "bytes", res.Bytes, "max_age", p.MaxAge)
 		}
 		out[p.Name] = res
+	}
+	for _, t := range tasks {
+		t.fn()
 	}
 
 	s.mu.Lock()
