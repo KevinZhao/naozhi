@@ -102,14 +102,94 @@ func strandedStateTemp(e fs.DirEntry, now time.Time) bool {
 	return now.Sub(info.ModTime()) > strandedTempAge
 }
 
-// Discover scans the state directory for existing shim state files.
-// Returns states for shims whose PIDs are still alive.
-func (m *Manager) Discover() ([]State, error) {
-	entries, err := os.ReadDir(m.stateDir)
+// StateVerdict is how one state file classifies against the live process
+// table, in the order Discover checks: corrupt, dead PID, binary mismatch,
+// missing socket.
+type StateVerdict int
+
+const (
+	StateLive StateVerdict = iota
+	StateCorrupt
+	StateDeadPID
+	StateBinaryMismatch
+	StateSocketMissing
+)
+
+// StateEntry is one classified state file. Err carries the read error of a
+// corrupt file or the stat error of a missing socket. IdentityErr is set when
+// the binary check could not run; the verdict then comes from the socket check.
+type StateEntry struct {
+	Path        string
+	State       State
+	Verdict     StateVerdict
+	Err         error
+	IdentityErr error
+}
+
+// classifyStateFile reads and judges one state file without changing anything.
+func (m *Manager) classifyStateFile(path string) StateEntry {
+	se := StateEntry{Path: path}
+	state, err := ReadStateFile(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
+		se.Verdict, se.Err = StateCorrupt, err
+		return se
+	}
+	se.State = state
+	if !pidAlive(state.ShimPID) {
+		se.Verdict = StateDeadPID
+		return se
+	}
+	// Binary identity catches PID reuse; the linux helper strips "(deleted)"
+	// so shims from the previous build are still recognised as ours.
+	mismatch, ierr := shimPIDBinaryMismatch(state.ShimPID, m.naozhiBin)
+	if ierr != nil {
+		se.IdentityErr = ierr
+	} else if mismatch {
+		se.Verdict = StateBinaryMismatch
+		return se
+	}
+	if _, err := os.Stat(state.Socket); err != nil {
+		se.Verdict, se.Err = StateSocketMissing, err
+		return se
+	}
+	se.Verdict = StateLive
+	return se
+}
+
+// readStateDir lists the state directory; a missing directory is empty.
+func (m *Manager) readStateDir() ([]fs.DirEntry, error) {
+	entries, err := os.ReadDir(m.stateDir)
+	if err != nil && errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	return entries, err
+}
+
+// Inspect classifies every state file and never removes, renames or signals
+// anything, so a diagnostic command run from any binary leaves the directory
+// as it found it. The binary verdict is relative to the calling executable.
+func (m *Manager) Inspect() ([]StateEntry, error) {
+	entries, err := m.readStateDir()
+	if err != nil {
+		return nil, err
+	}
+	var out []StateEntry
+	for _, e := range entries {
+		if e.IsDir() || osutil.IsAtomicTempName(e.Name()) || !strings.HasSuffix(e.Name(), ".json") {
+			continue
 		}
+		out = append(out, m.classifyStateFile(filepath.Join(m.stateDir, e.Name())))
+	}
+	return out, nil
+}
+
+// Discover scans the state directory for existing shim state files and
+// returns the live ones, deleting every other state file and stranded temp
+// file and SIGTERMing socketless shims. Only the service should call it:
+// the binary check is against the caller's own executable.
+func (m *Manager) Discover() ([]State, error) {
+	entries, err := m.readStateDir()
+	if err != nil {
 		return nil, err
 	}
 
@@ -127,43 +207,36 @@ func (m *Manager) Discover() ([]State, error) {
 		if !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		path := filepath.Join(m.stateDir, e.Name())
-		state, err := ReadStateFile(path)
-		if err != nil {
-			slog.Warn("removing corrupt state file", "path", path, "err", err)
+		se := m.classifyStateFile(filepath.Join(m.stateDir, e.Name()))
+		path, state := se.Path, se.State
+		switch se.Verdict {
+		case StateCorrupt:
+			slog.Warn("removing corrupt state file", "path", path, "err", se.Err)
 			RemoveStateFile(path)
-			continue
-		}
-		if !pidAlive(state.ShimPID) {
+		case StateDeadPID:
 			slog.Info("removing stale shim state file", "path", path, "pid", state.ShimPID)
 			RemoveStateFile(path)
-			continue
-		}
-		// Binary identity catches PID reuse; the linux helper strips "(deleted)"
-		// so shims from the previous build are still recognised as ours.
-		if mismatch, ierr := shimPIDBinaryMismatch(state.ShimPID, m.naozhiBin); ierr == nil && mismatch {
+		case StateBinaryMismatch:
 			slog.Info("removing stale shim state file (binary mismatch)", "path", path, "pid", state.ShimPID)
 			RemoveStateFile(path)
-			continue
-		}
-		// Live PID + missing socket is the zombie signature: the listener fd
-		// exists but its path is gone (external rm, /run cleaner, XDG_RUNTIME_DIR
-		// rotation), so Reconnect would ENOENT forever. Skip it, let it
-		// self-terminate via SIGTERM, and purge the on-disk record.
-		if _, err := os.Stat(state.Socket); err != nil {
+		case StateSocketMissing:
+			// Live PID + missing socket is the zombie signature: the listener fd
+			// exists but its path is gone (external rm, /run cleaner, XDG_RUNTIME_DIR
+			// rotation), so Reconnect would ENOENT forever. Let it self-terminate
+			// via SIGTERM and purge the on-disk record.
 			slog.Info("removing shim state: socket missing",
 				"path", path, "pid", state.ShimPID,
-				"socket", state.Socket, "err", err)
+				"socket", state.Socket, "err", se.Err)
 			// Re-check the PID: a shim exiting gracefully unlinks its own socket,
 			// and SIGTERM to a dead PID could hit an unrelated process reusing it.
 			if pidAlive(state.ShimPID) {
 				_ = sendSIGTERM(state.ShimPID)
 			}
 			RemoveStateFile(path)
-			continue
+		default:
+			slog.Info("discovered live shim", "key", state.Key, "pid", state.ShimPID)
+			states = append(states, state)
 		}
-		slog.Info("discovered live shim", "key", state.Key, "pid", state.ShimPID)
-		states = append(states, state)
 	}
 	return states, nil
 }
