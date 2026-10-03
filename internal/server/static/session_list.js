@@ -19,6 +19,7 @@ import { _optimisticRunningTimers } from './send_message.js';
 import { fetchEvents } from './event_stream.js';
 import { discoveredKey, getNodeDisplayName, isMultiNode, matchProject, nodeColor, sessionTypeTag, sid } from './session_ident.js';
 import { ICONS } from './icons.js';
+import { registerShell } from './shell.js';
 
 // collectWorkspaceSessionIDs returns the set of Claude session UUIDs that the
 // sidebar already represents — current session_id PLUS any prev_session_ids
@@ -1094,6 +1095,10 @@ wsm.on(NZ_CONTRACT.WS.sessions_update, () => {
     if (added.length > 0) announce('新会话已创建');
   });
 });
+
+// The modules this one imports (sidebar_project, tuning, auth_modal, …) call
+// these back through the shell; a plain import would be a cycle.
+registerShell({ debouncedFetchSessions, fetchSessions, renderSidebar, updateStatusBar });
 
 export function updateMainState(state) {
   const ia = document.getElementById('input-area');

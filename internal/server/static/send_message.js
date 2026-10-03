@@ -1,15 +1,14 @@
 // send_message.js — extracted from dashboard.js (#2558 D4).
 //
 // Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block, the deps table and the export block below are the
-// only additions.
+// move; the import block and the export block below are the only additions.
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
 // module evaluates. Shared state is read from the state.js objects and helpers are
 // imported. event_stream.js and session_list.js import this module, so
-// fetchEvents and fetchSessions are injected once via configureSendMessage(),
-// called from dashboard's module body; selectSession is a shell slot.
+// fetchEvents and fetchSessions are shell slots, as is dashboard's
+// selectSession.
 import { NZ_CONTRACT } from './contract.js';
 import { composer, perSession, selection, sessionList, timers } from './state.js';
 import { interruptSession, startTurnTimer, turnState, updateSendButton } from './running_banner.js';
@@ -23,17 +22,6 @@ import { eventHtml } from './event_render.js';
 import { awaitPendingOrients, renderFilePreviews } from './composer_files.js';
 import { navSync } from './msg_nav.js';
 import { shell } from './shell.js';
-
-const deps = {
-  fetchEvents: null,
-  fetchSessions: null,
-};
-export function configureSendMessage(impl) {
-  for (const k of Object.keys(deps)) {
-    if (typeof impl[k] === 'undefined') throw new Error('send_message dep missing: ' + k);
-    deps[k] = impl[k];
-  }
-}
 
 // --- Send message ---
 
@@ -160,7 +148,7 @@ async function sendMessage() {
       for (let i = 0; i < 20; i++) {
         await new Promise(resolve => setTimeout(resolve, 500));
         sessionList.lastVersion = 0;
-        await deps.fetchSessions();
+        await shell.fetchSessions();
         if (sessionList.sessionsData[sid(takenKey, takenNode)]) { ready = true; break; }
       }
       if (!ready) {
@@ -371,10 +359,10 @@ async function finishHttpSend(r, sentSid, text, input) {
 function armFallbackEventPoll() {
   if (wsm.isConnected()) return;
   if (timers.events) clearInterval(timers.events);
-  timers.events = setInterval(() => deps.fetchEvents(false), 500);
+  timers.events = setInterval(() => shell.fetchEvents(false), 500);
   setTimeout(() => {
     if (timers.events) clearInterval(timers.events);
-    if (!wsm.isConnected()) timers.events = setInterval(() => deps.fetchEvents(false), 1000);
+    if (!wsm.isConnected()) timers.events = setInterval(() => shell.fetchEvents(false), 1000);
   }, 15000);
 }
 
@@ -516,7 +504,7 @@ function markSessionOptimisticRunning(key, node) {
   if (sd && sd.state === 'running') return; // server already said running
   // A just-created session has no sessionList.sessionsData entry until the next list
   // fetch. Still flip the button/banner below (#2405: the missing feedback on
-  // a new session's first send invited Enter mashing); deps.fetchSessions keeps the
+  // a new session's first send invited Enter mashing); shell.fetchSessions keeps the
   // flag-forced 'running' once the entry lands, onSessionState clears it.
   if (sd) {
     perSession.optimisticPrevState[sKey] = sd.state;

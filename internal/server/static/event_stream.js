@@ -17,6 +17,7 @@ import { rollbackOptimisticRunning } from './send_message.js';
 import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, MAX_LIVE_DOM_EVENTS, lastDividerTime, showAPIError, stickEventsBottom, timeDividerHtml } from './utilities.js';
 import { isInternalEvent, sid } from './session_ident.js';
 import { isCronSessionFrozen } from './cron_state.js';
+import { registerShell } from './shell.js';
 
 export async function fetchEvents(full) {
   if (!selection.key) return;
@@ -893,6 +894,8 @@ wsm.on(NZ_CONTRACT.WS.event, (msg) => sessionFrames.onEvent(msg));
 wsm.on(NZ_CONTRACT.WS.send_ack, (msg) => sessionFrames.onSendAck(msg));
 wsm.on(NZ_CONTRACT.WS.send_error, (msg) => sessionFrames.onSendError(msg));
 wsm.on(NZ_CONTRACT.WS.interrupt_ack, (msg) => sessionFrames.onInterruptAck(msg));
+// send_message (imported above) polls the transcript through the shell.
+registerShell({ fetchEvents });
 
 function flashSendBtn() {
   const btn = document.getElementById('btn-send');

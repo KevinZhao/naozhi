@@ -30,12 +30,16 @@
 //                               means "run arbitrary code in this order" is
 //                               not one a reader can hold in their head.
 //                               wsm.on / onReady / onStateChange / onAuthFail
-//                               are the one standing exception (D2, #3024
-//                               R2): the WS dispatch table's registration
-//                               calls, whose own shape check-ws-receivers.mjs
-//                               owns. The caller passes the files this rule
-//                               should skip (scripts/js-ratchet.caps.json's
-//                               sideEffectLegacy — eslint.config.mjs reads it).
+//                               are one standing exception (D2, #3024 R2):
+//                               the WS dispatch table's registration calls,
+//                               whose own shape check-ws-receivers.mjs owns.
+//                               The other is one registerShell({ … }) of
+//                               plain identifiers in a shell root (option
+//                               `shellRoots`, D-S20k-3). The caller passes the
+//                               files this rule should skip, and the roots
+//                               (scripts/js-ratchet.caps.json's
+//                               sideEffectLegacy and shellRoots —
+//                               eslint.config.mjs reads them).
 //
 // Tests: node --test scripts/eslint-plugin-nz.test.mjs
 
@@ -393,16 +397,37 @@ function isWsmRegistration(expr, sourceCode, filename) {
   return /(^|[\\/])ws_manager\.js$/.test(filename) && def.type === 'Variable' && def.parent.kind === 'const';
 }
 
+// isShellRegistration reports a top-level registerShell({ a, b }) whose
+// callee is shell.js's registerShell by binding (an import specifier from
+// './shell.js', not a local function of that name) and whose one argument is
+// an object literal of identifier values: filling the root's slots runs
+// nothing else. Whether the file is a root is the caller's check.
+function isShellRegistration(expr, sourceCode) {
+  if (expr.type !== 'CallExpression' || expr.callee.type !== 'Identifier' || expr.callee.name !== 'registerShell') return false;
+  const [arg, ...rest] = expr.arguments;
+  if (rest.length || arg?.type !== 'ObjectExpression' || arg.properties.length === 0) return false;
+  if (!arg.properties.every((p) => p.type === 'Property' && !p.computed && p.kind === 'init' && p.value.type === 'Identifier')) return false;
+  const def = findVariable(sourceCode.getScope(expr.callee), 'registerShell')?.defs[0];
+  return def?.type === 'ImportBinding' && def.node.type === 'ImportSpecifier' && def.node.imported.name === 'registerShell'
+    && /(^|\/)shell\.js$/.test(def.parent.source.value);
+}
+
 const noModuleSideEffects = {
   meta: {
     type: 'problem',
     docs: { description: 'a module may declare state at load time but may not run anything (D-S19)' },
-    schema: [],
+    schema: [{
+      type: 'object',
+      properties: { shellRoots: { type: 'array', items: { type: 'string' } } },
+      additionalProperties: false,
+    }],
     messages: {
       sideEffect: 'top-level {{what}} runs code at import time; a module may only declare functions, classes, imports/exports, and const bindings whose initialiser is a pure expression (object/array/new Set|Map|RegExp/Object.freeze|seal|create|assign).',
     },
   },
   create(context) {
+    const file = context.filename.split(/[\\/]/).pop();
+    let shellRegistration = (context.options[0]?.shellRoots ?? []).includes(file);
     // checkOne reports st (a Program-level statement, or the declaration an
     // `export` wraps — `export const y = init()` launders the same call
     // through a declaration ExportNamedDeclaration otherwise waves through).
@@ -426,6 +451,10 @@ const noModuleSideEffects = {
         }
         case 'ExpressionStatement':
           if (isWsmRegistration(st.expression, context.sourceCode, context.filename)) return;
+          if (shellRegistration && isShellRegistration(st.expression, context.sourceCode)) {
+            shellRegistration = false; // one per root
+            return;
+          }
           context.report({ node: st, messageId: 'sideEffect', data: { what: 'statement' } });
           return;
         default:

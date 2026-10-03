@@ -230,3 +230,37 @@ tester.run('no-module-side-effects', nz.rules['no-module-side-effects'], {
     { code: 'const f = Object.assign({ set x(v) { init(v); } }, { x: 1 });', errors: [{ messageId: 'sideEffect' }] },
   ],
 });
+
+// D-S20k-3: a shell root may fill its slots with one top-level
+// registerShell({ … }) of plain identifiers; anywhere else, or in any other
+// shape, it is a load-time call like any other.
+const REG = "import { registerShell } from './shell.js'; function a() {} function b() {} ";
+const ROOT = '/repo/internal/server/static/session_list.js';
+const roots = [{ shellRoots: ['session_list.js'] }];
+tester.run('no-module-side-effects: registerShell in a shell root', nz.rules['no-module-side-effects'], {
+  valid: [
+    { code: `${REG}registerShell({ a, b });`, filename: ROOT, options: roots },
+    { code: `${REG}registerShell({ a: b });`, filename: ROOT, options: roots },
+    { code: "import { registerShell } from '../static/shell.js'; function a() {} registerShell({ a });", filename: ROOT, options: roots },
+  ],
+  invalid: [
+    // Not a root: no option, or a root list without this file.
+    { code: `${REG}registerShell({ a, b });`, filename: ROOT, errors: [{ messageId: 'sideEffect' }] },
+    { code: `${REG}registerShell({ a, b });`, filename: '/repo/internal/server/static/tuning.js', options: roots, errors: [{ messageId: 'sideEffect' }] },
+    // One registration per root.
+    { code: `${REG}registerShell({ a }); registerShell({ b });`, filename: ROOT, options: roots, errors: [{ messageId: 'sideEffect' }] },
+    // The shape: one object literal of identifier values, nothing computed.
+    { code: `${REG}registerShell({ a: init() });`, filename: ROOT, options: roots, errors: [{ messageId: 'sideEffect' }] },
+    { code: `${REG}registerShell({ a: () => b() });`, filename: ROOT, options: roots, errors: [{ messageId: 'sideEffect' }] },
+    { code: `${REG}registerShell({ [k]: a });`, filename: ROOT, options: roots, errors: [{ messageId: 'sideEffect' }] },
+    { code: `${REG}registerShell({ ...a });`, filename: ROOT, options: roots, errors: [{ messageId: 'sideEffect' }] },
+    { code: `${REG}registerShell({});`, filename: ROOT, options: roots, errors: [{ messageId: 'sideEffect' }] },
+    { code: `${REG}registerShell(impl());`, filename: ROOT, options: roots, errors: [{ messageId: 'sideEffect' }] },
+    { code: `${REG}registerShell({ a }, init());`, filename: ROOT, options: roots, errors: [{ messageId: 'sideEffect' }] },
+    // The binding is shell.js's registerShell, not any function of that name.
+    { code: 'function a() {} function registerShell(t) { init(t); } registerShell({ a });', filename: ROOT, options: roots, errors: [{ messageId: 'sideEffect' }] },
+    { code: "import { other as registerShell } from './shell.js'; function a() {} registerShell({ a });", filename: ROOT, options: roots, errors: [{ messageId: 'sideEffect' }] },
+    { code: "import { registerShell } from './not_shell.js'; function a() {} registerShell({ a });", filename: ROOT, options: roots, errors: [{ messageId: 'sideEffect' }] },
+    { code: "import * as S from './shell.js'; function a() {} S.registerShell({ a });", filename: ROOT, options: roots, errors: [{ messageId: 'sideEffect' }] },
+  ],
+});

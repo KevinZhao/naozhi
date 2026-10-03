@@ -12,12 +12,20 @@ export const shell = Object.seal({
   setActivityView: null,
   openCronPanel: null,
   renderCronPanel: null,
+  debouncedFetchSessions: null,
+  fetchSessions: null,
+  renderSidebar: null,
+  updateStatusBar: null,
+  fetchEvents: null,
 });
 
-// The slots each root registers in one call: dashboard.js, then cron_view.js.
+// The slots each root registers in one call: dashboard.js, cron_view.js,
+// session_list.js, then event_stream.js.
 export const SHELL_GROUPS = [
   ['renderMainHeader', 'renderMainShell', 'selectSession', 'setActivityView'],
   ['openCronPanel', 'renderCronPanel'],
+  ['debouncedFetchSessions', 'fetchSessions', 'renderSidebar', 'updateStatusBar'],
+  ['fetchEvents'],
 ];
 
 export function registerShell(impl) {

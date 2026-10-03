@@ -1,15 +1,13 @@
 // running_banner.js — extracted from dashboard.js (#2558 D4).
 //
 // Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block, the deps table and the export block below are the
-// only additions.
+// move; the import block and the export block below are the only additions.
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects. The one
-// injected helper is session_list's debouncedFetchSessions (the turn
-// watchdog's tick): session_list imports this module, so it cannot be an
-// import, and it is not a root's own function, so it cannot be a shell slot.
+// module evaluates. Shared state is read from the state.js objects.
+// session_list imports this module, so session_list's debouncedFetchSessions
+// (the turn watchdog's tick) is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList, timers } from './state.js';
 import { escAttr, nzViews, showToast } from './nz_util.js';
@@ -18,16 +16,7 @@ import { ICONS } from './icons.js';
 import { getToken } from './platform.js';
 import { sid } from './session_ident.js';
 import { getMsgValue, setMsgValue, showNetworkError } from './utilities.js';
-
-const deps = {
-  debouncedFetchSessions: null,
-};
-export function configureRunningBanner(impl) {
-  for (const k of Object.keys(deps)) {
-    if (typeof impl[k] === 'undefined') throw new Error('running_banner dep missing: ' + k);
-    deps[k] = impl[k];
-  }
-}
+import { shell } from './shell.js';
 
 // --- Running banner: tool activity + agent tracking ---
 
@@ -459,7 +448,7 @@ function startTurnWatchdog() {
     // `if (selection.key)` and would never stop us — so retire the watchdog here
     // instead of polling /api/sessions forever for the page lifetime.
     if (!selection.key) { stopTurnWatchdog(); return; }
-    deps.debouncedFetchSessions();
+    shell.debouncedFetchSessions();
   }, TURN_WATCHDOG_INTERVAL_MS);
 }
 function stopTurnWatchdog() {

@@ -59,6 +59,29 @@ test('clicking GitHub icon on an ssh remote shows the URL toast fallback', async
   await expect(toast).toContainText('git@github.com:acme/pinned.git');
 });
 
+// toggleProjectCollapsed repaints from the last payload (shell.renderSidebar,
+// session_list's slot) with no round-trip. The hold is installed before a
+// reload and lets only the first /api/sessions through, so no response can
+// land after the click: a repaint can only come from the cached render.
+test('the collapse chevron folds and unfolds a project from the cached payload', async ({ page }) => {
+  const KEY = 'dashboard:direct:2026-01-01-120000-1:myproject';
+  let served = 0;
+  await page.route((url) => url.pathname === '/api/sessions', (route) => {
+    if (served++ === 0) return route.fallback();
+  });
+  await page.reload();
+  const chevron = () => page.locator('.section-header', { hasText: 'myproject' }).locator('.sh-btn[data-action="project-collapse"]');
+  const card = page.locator(`.session-card[data-key="${KEY}"]`);
+  await expect(card).toHaveCount(1);
+  await chevron().click();
+  await expect(card).toHaveCount(0, { timeout: 1000 });
+  await expect(chevron()).toHaveAttribute('aria-expanded', 'false');
+  expect(await page.evaluate(() => localStorage.getItem('nz_collapsedProjects'))).toContain('myproject');
+  await chevron().click();
+  await expect(card).toHaveCount(1, { timeout: 1000 });
+  await expect(chevron()).toHaveAttribute('aria-expanded', 'true');
+});
+
 test('favorite star toggles and triggers API call', async ({ page }) => {
   const header = page.locator('.section-header', { hasText: 'otherproject' });
   // The header's first .sh-btn is the collapse chevron (sh-collapse); target

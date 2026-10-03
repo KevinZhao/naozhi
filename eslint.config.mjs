@@ -234,12 +234,13 @@ export default [
   // moduleFiles — see the comment on contract.js below); dashboard.js (the
   // composition root) and sideEffectLegacy's other entries are today's real
   // violations (js-ratchet.caps.json's sideEffectLegacy, shrink-only — a
-  // file moves out once it is clean).
+  // file moves out once it is clean). A caps.shellRoots file may fill its
+  // shell slots with one top-level registerShell({ … }).
   {
     files: [...moduleFiles].filter((f) => f !== 'contract.js' && !sideEffectLegacy.has(f)).map((f) => `internal/server/static/${f}`),
     plugins: { nz },
     rules: {
-      'nz/no-module-side-effects': 'error',
+      'nz/no-module-side-effects': ['error', { shellRoots: caps.shellRoots }],
     },
   },
 ];

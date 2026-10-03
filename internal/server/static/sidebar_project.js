@@ -1,15 +1,13 @@
 // sidebar_project.js — extracted from dashboard.js (#2558 D4).
 //
 // Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block, the deps table and the export block below are the
-// only additions.
+// move; the import block and the export block below are the only additions.
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
 // module evaluates. Shared state is read from the state.js objects and helpers are
-// imported. session_list.js imports this module, so the three session_list
-// functions it calls back are injected once via configureSidebarProject(),
-// called from dashboard's module body.
+// imported. session_list.js imports this module, so the session_list functions
+// it calls back are shell slots.
 import { NZ_CONTRACT } from './contract.js';
 import { serverInfo, sessionList } from './state.js';
 import { esc, escAttr, fetchJSON, showToast, trapFocus } from './nz_util.js';
@@ -18,18 +16,7 @@ import { getToken } from './platform.js';
 import { projectDisplayLabel, projectDisplayPrefix } from './session_ident.js';
 import { showAPIError, showNetworkError } from './utilities.js';
 import { accessProfileChipInfo, fetchAccessProfiles, fetchCLIBackends, renderAccessProfilePicker, renderBackendPicker } from './backend_catalog.js';
-
-const deps = {
-  debouncedFetchSessions: null,
-  fetchSessions: null,
-  renderSidebar: null,
-};
-export function configureSidebarProject(impl) {
-  for (const k of Object.keys(deps)) {
-    if (typeof impl[k] === 'undefined') throw new Error('sidebar_project dep missing: ' + k);
-    deps[k] = impl[k];
-  }
-}
+import { shell } from './shell.js';
 
 // --- Project section header (favorite + github icons) ---
 
@@ -52,7 +39,7 @@ const CHEVRON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polyline point
 function sectionHeaderFallbackHtml(p) {
   const node = p.node || 'local';
   const workspace = p.workspace || '';
-  // Collapse key matches the group key used in deps.renderSidebar (node:name:ws)
+  // Collapse key matches the group key used in shell.renderSidebar (node:name:ws)
   // so two folders with the same basename each own their own fold state.
   const ck = node + ':' + p.name + ':' + workspace;
   const collapsed = sessionList.collapsedProjects.has(ck);
@@ -147,7 +134,7 @@ function sectionHeaderHtml(p) {
 
 // toggleProjectCollapsed flips a project section's fold state, persists
 // it, and re-renders from the last sidebar payload (no network round-trip).
-// Key format: "<node>:<name>" matching the grouping key in deps.renderSidebar.
+// Key format: "<node>:<name>" matching the grouping key in shell.renderSidebar.
 function toggleProjectCollapsed(key) {
   if (!key) return;
   if (sessionList.collapsedProjects.has(key)) sessionList.collapsedProjects.delete(key);
@@ -156,14 +143,14 @@ function toggleProjectCollapsed(key) {
     localStorage.setItem('nz_collapsedProjects', JSON.stringify([...sessionList.collapsedProjects]));
   } catch (_) {}
   if (sessionList.lastSidebarData) {
-    deps.renderSidebar(sessionList.lastSidebarData);
+    shell.renderSidebar(sessionList.lastSidebarData);
   } else {
-    deps.debouncedFetchSessions();
+    shell.debouncedFetchSessions();
   }
 }
 
 // In-flight guard against a double-click race: the star button's DOM state
-// lags behind sessionList.projectsData until the next deps.fetchSessions re-render. Without
+// lags behind sessionList.projectsData until the next shell.fetchSessions re-render. Without
 // this set, a second click inside that window would read a stale DOM hint and
 // potentially fire the same or opposite polarity. Keyed by (node, name).
 const _favInFlight = new Set();
@@ -195,13 +182,13 @@ async function toggleFavorite(name, node) {
       // Re-render from the server so the star's visual hover/click state
       // snaps back to the authoritative `sessionList.projectsData` value; otherwise the
       // user sees a phantom success.
-      deps.fetchSessions();
+      shell.fetchSessions();
       return;
     }
     // Optimistic update then refresh.
     proj.favorite = next;
     showToast(next ? '已收藏 ' + name : '已取消收藏 ' + name, 'success');
-    deps.fetchSessions();
+    shell.fetchSessions();
   } finally {
     _favInFlight.delete(key);
   }
@@ -498,7 +485,7 @@ async function saveProjectSettings(name, baseCfg, overlay) {
   showToast('项目设置已保存 · ' + name, 'success');
   // Access-profile binding change affects the next session's chip; refresh both
   // the profile registry and the sidebar so chips repaint.
-  deps.fetchSessions();
+  shell.fetchSessions();
 }
 
 function showGitRemote(url) {

@@ -33,7 +33,7 @@
     "lateBindings": 2
   },
   "auth_modal.js": {
-    "lines": 1309,
+    "lines": 1295,
     "maxFnLines": 101,
     "fnOver100": 1,
     "topLevelLetVar": 1,
@@ -176,7 +176,7 @@
     "lateBindings": 1
   },
   "dashboard.js": {
-    "lines": 2910,
+    "lines": 2888,
     "maxFnLines": 120,
     "fnOver100": 1,
     "topLevelLetVar": 0,
@@ -187,7 +187,7 @@
     "lateBindings": 5
   },
   "discovery.js": {
-    "lines": 214,
+    "lines": 205,
     "maxFnLines": 72,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -209,7 +209,7 @@
     "lateBindings": 0
   },
   "event_stream.js": {
-    "lines": 904,
+    "lines": 907,
     "maxFnLines": 74,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -330,7 +330,7 @@
     "lateBindings": 0
   },
   "running_banner.js": {
-    "lines": 520,
+    "lines": 509,
     "maxFnLines": 95,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -352,7 +352,7 @@
     "lateBindings": 0
   },
   "send_message.js": {
-    "lines": 577,
+    "lines": 565,
     "maxFnLines": 102,
     "fnOver100": 1,
     "topLevelLetVar": 1,
@@ -385,7 +385,7 @@
     "lateBindings": 0
   },
   "session_list.js": {
-    "lines": 1110,
+    "lines": 1115,
     "maxFnLines": 100,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -407,7 +407,7 @@
     "lateBindings": 0
   },
   "shell.js": {
-    "lines": 31,
+    "lines": 39,
     "maxFnLines": 9,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -418,7 +418,7 @@
     "lateBindings": 0
   },
   "sidebar_project.js": {
-    "lines": 540,
+    "lines": 527,
     "maxFnLines": 102,
     "fnOver100": 2,
     "topLevelLetVar": 0,
@@ -462,7 +462,7 @@
     "lateBindings": 0
   },
   "tuning.js": {
-    "lines": 503,
+    "lines": 490,
     "maxFnLines": 112,
     "fnOver100": 1,
     "topLevelLetVar": 1,
