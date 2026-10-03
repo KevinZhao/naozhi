@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
@@ -487,6 +489,101 @@ func TestAutoPause_OtherNoticePathsCarrySuffix(t *testing.T) {
 		got := ns.noticesAfter(s)
 		if len(got) != 1 || !strings.HasPrefix(got[0], "[Cron ping] 执行失败 · run ") || !strings.HasSuffix(got[0], suffix(id)) {
 			t.Errorf("notices = %q, want one pausing panic notice", got)
+		}
+	})
+}
+
+// TestAutoPause_FailedFillKeepsReasonAndStreak: filling the prompt of an
+// auto-paused job resumes it; when that cannot be persisted the job stays
+// auto-paused with its reason and streak.
+func TestAutoPause_FailedFillKeepsReasonAndStreak(t *testing.T) {
+	t.Parallel()
+	s, r, _, id := newAutoPauseScheduler(t, 2, "feishu")
+	r.set(nil, errStreakSend)
+	runN(s, id, 2)
+	s.editJobForTest(t, id, func(j *Job) { j.Prompt = "" })
+	withFailingMarshal(t, s)
+	if err := s.SetJobPrompt(id, "ping v2"); err == nil {
+		t.Fatal("SetJobPrompt with a failing persist succeeded")
+	}
+	j := s.jobForTest(t, id)
+	if !j.Paused || j.PausedReason != PausedReasonAutoFailures || j.ConsecutiveFailures != 2 {
+		t.Errorf("after failed fill: paused=%v reason=%q streak=%d, want auto-paused at 2", j.Paused, j.PausedReason, j.ConsecutiveFailures)
+	}
+}
+
+// TestAutoPause_BelowThresholdSkipsEntryMu: a failure that cannot pause the
+// job must not wait for entryMu, which a DeleteJob can hold for seconds.
+func TestAutoPause_BelowThresholdSkipsEntryMu(t *testing.T) {
+	t.Parallel()
+	s, r, _, id := newAutoPauseScheduler(t, 5, "feishu")
+	r.set(nil, errStreakSend)
+	s.entryMu.Lock()
+	defer s.entryMu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		s.executeOpt(id, true)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a below-threshold failure waited on entryMu")
+	}
+	if got := s.jobForTest(t, id).ConsecutiveFailures; got != 1 {
+		t.Errorf("streak = %d, want 1", got)
+	}
+}
+
+// pausingSandboxScheduler is a sandbox scheduler whose dashboard job pauses
+// on its first failure and notifies a recording sender.
+func pausingSandboxScheduler(t *testing.T, runner SandboxRunner) (*Scheduler, *recordingBroadcaster, *recordingNotifySender, *Job) {
+	t.Helper()
+	storePath := filepath.Join(t.TempDir(), "cron_jobs.json")
+	s, rec := sandboxTestScheduler(t, runner, storePath)
+	s.autoPauseAfter = 1
+	ns := &recordingNotifySender{}
+	s.configMapsPtr.Store(&cronConfigMaps{notifySender: ns})
+	j := sideEffectsJob(t, s)
+	s.editJobForTest(t, j.ID, func(j *Job) { j.NotifyPlatform, j.NotifyChatID = "feishu", "chat-1" })
+	return s, rec, ns, j
+}
+
+// TestAutoPause_SandboxClosesWithoutNoticeAnnouncePause covers the two
+// sandbox terminal paths that send no per-run notice: a panicking replay and
+// a restart-orphaned run. The close that pauses the job still announces it.
+func TestAutoPause_SandboxClosesWithoutNoticeAnnouncePause(t *testing.T) {
+	t.Parallel()
+	const suffix = "；已连续失败 1 次，任务已自动暂停，修复后在控制台恢复"
+
+	t.Run("replay panic", func(t *testing.T) {
+		t.Parallel()
+		s, rec, ns, j := pausingSandboxScheduler(t, &panicReplayRunner{})
+		s.sandboxState().WriteSnapshot(j.ID, "feedfacefeedface", "replay this prompt", "haiku", "img-v1", nil, slog.Default())
+		if _, err := s.ReplaySandboxRun(j.ID, "feedfacefeedface"); err != nil {
+			t.Fatalf("ReplaySandboxRun: %v", err)
+		}
+		waitEnded(t, rec)
+		got := ns.noticesAfter(s)
+		if len(got) != 1 || !strings.HasPrefix(got[0], "[Cron push a PR] 执行失败 · run ") || !strings.HasSuffix(got[0], suffix) {
+			t.Errorf("notices = %q, want one pausing panic notice", got)
+		}
+	})
+	t.Run("orphan", func(t *testing.T) {
+		t.Parallel()
+		s, _, ns, j := pausingSandboxScheduler(t, &fakeSandboxRunner{})
+		writePendingFixture(t, s.storePath, sandboxstore.Pending{
+			JobID: j.ID, RunID: "abcabcabc0000110",
+			RuntimeSessionID: "run-abcabcabc0000110-1234567890123456789",
+			StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
+		})
+		s.reconcileSandboxPending()
+		if !s.jobForTest(t, j.ID).Paused {
+			t.Fatal("the orphan's failure did not pause the job")
+		}
+		want := "[Cron push a PR] 云沙箱连接中断，任务状态未知，请检查执行历史 · run abcabcab" + suffix
+		if got := ns.noticesAfter(s); len(got) != 1 || got[0] != want {
+			t.Errorf("notices = %q, want [%q]", got, want)
 		}
 	})
 }

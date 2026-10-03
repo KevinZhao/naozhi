@@ -386,6 +386,16 @@ func (t *jobTable) autoPauseIfDue(id string, threshold int) (r mutationResult, d
 	return t.mutateLocked(j, mutAutoPause), true
 }
 
+// autoPauseCandidate reports whether job id is active with a failure streak
+// of at least threshold: a read-only peek that lets the common below-threshold
+// failure skip entryMu. autoPauseIfDue re-makes the decision under the lock.
+func (t *jobTable) autoPauseCandidate(id string, threshold int) bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	j, ok := t.jobs[id]
+	return ok && !j.Paused && j.ConsecutiveFailures >= threshold
+}
+
 // mutateByPrefix applies kind to the one job in (plat, chatID) whose ID starts
 // with idPrefix.
 func (t *jobTable) mutateByPrefix(idPrefix, plat, chatID string, kind mutationKind) mutationResult {

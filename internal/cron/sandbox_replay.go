@@ -211,10 +211,12 @@ func (s *Scheduler) dispatchReplay(jobID, prompt, model, origRunID string) (stri
 				// emitRunStarted fired synchronously above, so a panic before the
 				// sandbox run's own finishRun would leave the run queued forever;
 				// close it the same way (#2064).
-				s.finishRun(rc, runOutcome{
+				if paused := s.finishRun(rc, runOutcome{
 					state: RunStateFailed, errClass: ErrClassPanic,
 					errMsg: "the sandbox replay panicked", sandbox: true,
-				})
+				}); paused > 0 {
+					s.deliverFailureNotice(rc, ErrClassPanic, RunStateFailed, s.sandboxRunBudget(), paused)
+				}
 			},
 		}.run(func() {
 			s.executeSandbox(sandboxExecArgs{

@@ -85,9 +85,10 @@ func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 // autoPauseIfDue pauses job id once its failure streak has reached
 // s.autoPauseAfter and returns the streak it paused at; 0 means it did not.
 // finishRun calls it with no lock held, before the run's gate is released,
-// so no further run of the job can start in between.
+// so no further run of the job can start in between. Below the threshold it
+// returns without taking entryMu, which DeleteJob can hold for seconds.
 func (s *Scheduler) autoPauseIfDue(id string) int {
-	if s.autoPauseAfter <= 0 {
+	if s.autoPauseAfter <= 0 || !s.tbl.autoPauseCandidate(id, s.autoPauseAfter) {
 		return 0
 	}
 	s.entryMu.Lock()
