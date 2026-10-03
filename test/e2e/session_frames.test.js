@@ -15,6 +15,11 @@
 //    dead session this tab sent to (the optimistic flip already wrote running);
 //  - a backfill history frame carrying a user event locks the question card
 //    already on screen;
+//  - a turn ending on a session off screen raises its card's unread chip;
+//  - an opening frame anchors the turn timer at its last turn's first event;
+//  - a result on either frame path ends the turn this tab started (running
+//    flips to ready, the cost lands on total_cost), and a time-less user replay
+//    on either path is not painted twice;
 //  - a send_error for the session on screen undoes the send this tab made
 //    (toast, optimistic bubble, running flip); for a session sent to and then
 //    left it only rolls the running flip back; a tab that sent nothing ignores
@@ -197,6 +202,74 @@ test.describe('sessionFrames keep the bookkeeping on sessionStream', () => {
     expect(errors).toEqual([]);
     await ctx.close();
   });
+
+  test('a turn ending on a session off screen raises its card\'s unread chip at once', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    // KEY_B is running in the mock; no sessions poll follows a reason-less push,
+    // so the chip can only come from the push's own card patch.
+    conn.send({ type: 'session_state', key: KEY_B, node: 'local', state: 'ready' });
+    // Read the chip the moment the push lands: a later sidebar repaint paints
+    // it from perSession.unread whatever the push's own patch did.
+    const seen = await (await page.waitForFunction((k) => {
+      if (sessionsData[sid(k, 'local')].state !== 'ready') return false;
+      const chip = document.querySelector(`.session-card[data-key="${k}"] .sc-unread`);
+      return { text: chip ? chip.textContent : null };
+    }, KEY_B)).jsonValue();
+    expect(seen.text, 'the push patched the chip onto the card').toBe('1');
+    conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'running' });
+    conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'ready' });
+    await expect.poll(() => running(page, KEY_A)).toBe('ready');
+    await expect(page.locator(`.session-card[data-key="${KEY_A}"] .sc-unread`), 'the card on screen is read live').toHaveCount(0);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  test('an opening frame anchors the turn timer at the first event of its last turn', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    const T0 = Date.now() - 125000;
+    conn.send({ type: 'history', key: KEY_A, initial: true, events: [
+      { type: 'user', detail: 'go', time: T0, uuid: 'u-go' },
+      { type: 'tool_use', tool: 'Bash', summary: 'ls', time: T0 + 1000, uuid: 'u-tool' },
+    ] });
+    await page.waitForSelector('#events-scroll .event[data-uuid="u-go"]');
+    expect(await page.evaluate(() => turnState.turnStartTime), 'anchored at the turn, not at render time').toBe(T0 + 1000);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  // A result event ends the turn on either frame path: the optimistic running
+  // flips to ready (no session_state needed) and its cost bumps total_cost.
+  for (const path of ['event', 'history']) {
+    test(`a result in ${path === 'event' ? 'an event' : 'a backfill history'} frame ends the turn this tab started`, async ({ browser }) => {
+      const { ctx, page, conn, errors } = await open(browser, mock);
+      await sendText(page, conn, 'turn-' + path);
+      await expect(page.locator('#btn-stop')).toBeVisible();
+      const result = { type: 'result', summary: 'done', time: Date.now() + 60000, uuid: 'res-' + path, cost: 7.5 };
+      conn.send(path === 'event' ? { type: 'event', key: KEY_A, event: result } : { type: 'history', key: KEY_A, events: [result] });
+      await expect.poll(() => running(page, KEY_A), { message: 'the result flips running to ready' }).toBe('ready');
+      await expect(page.locator('#btn-send')).toBeVisible();
+      expect(await page.evaluate((k) => sessionsData[sid(k, 'local')].total_cost, KEY_A)).toBe(7.5);
+      expect(errors).toEqual([]);
+      await ctx.close();
+    });
+  }
+
+  // A user bubble without a time skips the cursor guards, so only its uuid
+  // keeps a replay of it from painting twice, on either frame path.
+  for (const path of ['event', 'history']) {
+    test(`a user replay in ${path === 'event' ? 'an event' : 'a backfill history'} frame is not painted twice`, async ({ browser }) => {
+      const { ctx, page, conn, errors } = await open(browser, mock);
+      const user = { type: 'user', detail: 'same message', uuid: 'usr-replay-' + path };
+      conn.send({ type: 'event', key: KEY_A, event: user });
+      await page.waitForSelector(`#events-scroll .event[data-uuid="${user.uuid}"]`);
+      conn.send(path === 'event' ? { type: 'event', key: KEY_A, event: user } : { type: 'history', key: KEY_A, events: [user] });
+      conn.send({ type: 'event', key: KEY_A, event: ev('after-' + path, Date.now() + 60000) });
+      await shown(page, 'after-' + path); // the replay ahead of it has been handled
+      await expect(page.locator(`#events-scroll .event[data-uuid="${user.uuid}"]`)).toHaveCount(1);
+      expect(errors).toEqual([]);
+      await ctx.close();
+    });
+  }
 
   test('a send_error for the session on screen undoes the send it failed', async ({ browser }) => {
     const { ctx, page, conn, errors } = await open(browser, mock);
