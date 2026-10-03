@@ -213,13 +213,13 @@ export function runStateLabel(state) {
   }
 }
 
-// DEATH_REASONS translates the backend's death_reason (cli/process.go
-// DeathReason*, the router's idle_timeout / evicted) into what an operator
-// reads. crashed separates a process that ended on its own from one the
-// router reclaimed on purpose; either way the next send resumes the session.
+// DEATH_REASONS translates death_reason (cli DeathReason*, session's reclaim
+// reasons) for an operator. crashed separates a process that ended on its own
+// from one reclaimed on purpose; either way the next send resumes the session.
 const DEATH_REASONS = {
   idle_timeout: { crashed: false, text: '空闲超时，进程已回收' },
   evicted: { crashed: false, text: '为腾出容量，进程已回收' },
+  released: { crashed: false, text: '本次执行结束，进程已释放' },
   cli_exited: { crashed: true, text: 'CLI 进程退出' },
   shim_eof: { crashed: true, text: '与 CLI 的连接断开' },
   shim_read_error: { crashed: true, text: '读取 CLI 输出出错' },

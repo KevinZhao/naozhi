@@ -70,7 +70,7 @@ export const NZ_CONTRACT = {
 	// kindTable columns (S13b-4). SESSION_STATE is not yet enforced against
 	// literal comparisons — see the PR for why.
 	deathReasons := append([]string{}, cliinfo.AllDeathReasons()...)
-	deathReasons = append(deathReasons, session.DeathReasonIdleTimeout, session.DeathReasonEvicted)
+	deathReasons = append(deathReasons, session.DeathReasonIdleTimeout, session.DeathReasonEvicted, session.DeathReasonReleased)
 	sort.Strings(deathReasons)
 	b.WriteString("  ENUMS: {\n")
 	writeEnum(&b, "DEATH_REASON", deathReasons)

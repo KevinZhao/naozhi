@@ -92,8 +92,10 @@ const (
 	// Sum of sub-quotas must stay ≤ maxExemptSessions (docs/design/exempt-quotas.md).
 	maxExemptSessions = 20
 
-	// maxCronExempt caps alive cron-stub exempt sessions so a noisy chat with
+	// maxCronExempt caps alive cron exempt sessions so a noisy chat with
 	// DefaultMaxJobsPerChat cron jobs cannot push planner / sys sessions out.
+	// A run releases its process when it ends (fresh: Reset; persistent:
+	// ReleaseIdleProcess), so this bounds concurrent runs, not jobs.
 	maxCronExempt = 12
 
 	// maxProjectExempt caps alive project-planner exempt sessions (one per
@@ -725,8 +727,9 @@ func (r *Router) DefaultWorkspace() string {
 }
 
 // BumpVersion forces a version increment + onChange broadcast even when no
-// session mutation occurred, for non-session state the dashboard surfaces via
-// /api/sessions (e.g. project favorite toggle): without the bump the poll-time
+// session mutation occurred, for state the dashboard surfaces via
+// /api/sessions that the table does not hold (a project favorite toggle, a
+// session's released process): without the bump the poll-time
 // version gate skips the re-render; without notifyChange the live WebSocket
 // push is skipped. It does NOT set storeDirty — UI-refresh signal only, never
 // use it when session state must be persisted.
