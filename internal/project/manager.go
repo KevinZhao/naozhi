@@ -119,7 +119,8 @@ func dirModTimeMillis(entry os.DirEntry, path string) int64 {
 }
 
 // Scan discovers all subdirectories under root and loads their project configs.
-// It never writes into a project directory; only the projects index is saved.
+// It never writes into a project directory; only the projects index is saved
+// (plus a one-shot removal of legacy stubs, see sweepLegacyStubs).
 // The whole scan — disk read, CreatedAt resolution, m.projects swap — runs
 // under the write lock so it is atomic w.r.t. the writers (BindChat /
 // SetFavorite / UpdateConfig / UnbindAllChat), which persist under the same
@@ -246,6 +247,7 @@ func (m *Manager) Scan() error {
 		}
 	}
 	m.index.replace(nextIndex)
+	m.sweepLegacyStubs(projects)
 
 	// Root project sorts strictly LAST: in-memory-only CreatedAt = max + 1,
 	// recomputed every boot. Override unconditionally so a real project.yaml

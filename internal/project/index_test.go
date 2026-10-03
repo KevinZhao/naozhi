@@ -73,14 +73,14 @@ func createdAtOf(t *testing.T, m *Manager, name string) int64 {
 	return p.Config.CreatedAt
 }
 
-// Scan is read-only on projects.root: bare dirs, git repos and existing
+// Scan is read-only on projects.root: bare dirs, git repos and user-written
 // project.yaml files (with or without created_at) stay byte-identical, and
 // the stamped order goes to the index instead.
 func TestScan_DoesNotWriteIntoProjectDirs(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	makeProjectDir(t, root, "bare", nil)
-	makeProjectDir(t, root, "stamped", &ProjectConfig{CreatedAt: 100})
+	makeProjectDir(t, root, "stamped", &ProjectConfig{CreatedAt: 100, PlannerModel: "sonnet"})
 	makeProjectDir(t, root, "unstamped", &ProjectConfig{Favorite: true})
 	makeProjectDir(t, root, "repo", nil)
 	if err := os.MkdirAll(filepath.Join(root, "repo", ".git"), 0755); err != nil {
