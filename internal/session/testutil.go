@@ -172,3 +172,7 @@ func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 // SetWorkspaceForTest stamps the session-level workspace on an injected
 // session; production sets it through the spawn / takeover paths.
 func (s *ManagedSession) SetWorkspaceForTest(ws string) { s.setWorkspace(ws) }
+
+// MarkExemptForTest flags an injected session exempt, as the spawn path does
+// for exempt-namespace keys, so it counts against the exempt caps.
+func (s *ManagedSession) MarkExemptForTest() { s.exempt = true }

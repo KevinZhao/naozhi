@@ -29,7 +29,7 @@ func TestFailureNoticeBody(t *testing.T) {
 		{"timed out state alone", ErrClassSendError, RunStateTimedOut, 90 * time.Second, "执行超时（超过 1m30s） · run 1a2b3c4d"},
 		{"send error", ErrClassSendError, RunStateFailed, 5 * time.Minute, "执行失败（CLI 发送错误） · run 1a2b3c4d"},
 		{"session error", ErrClassSessionError, RunStateFailed, 5 * time.Minute, "启动会话失败 · run 1a2b3c4d"},
-		{"session capacity", ErrClassSessionCapacity, RunStateSkipped, 5 * time.Minute, "同时运行的定时任务已达上限，本次已跳过；可错开执行时间或改为每次重置上下文 · run 1a2b3c4d"},
+		{"session capacity", ErrClassSessionCapacity, RunStateSkipped, 5 * time.Minute, "定时任务会话数已达上限，本次已跳过；可错开执行时间或改为每次重置上下文 · run 1a2b3c4d"},
 		{"workdir unreachable", ErrClassWorkDirUnreachable, RunStateFailed, 5 * time.Minute, "工作目录不可达，本次执行已跳过 · run 1a2b3c4d"},
 		{"workdir outside root", ErrClassWorkDirOutsideRoot, RunStateFailed, 5 * time.Minute, "工作目录超出允许根目录，本次执行已跳过 · run 1a2b3c4d"},
 		{"sandbox failed", ErrClassSandboxFailed, RunStateFailed, time.Hour, "云沙箱任务失败 · run 1a2b3c4d"},
@@ -132,7 +132,7 @@ func TestExecuteGetSession_CapacityIsSkipped(t *testing.T) {
 	if got := s.jobForTest(t, j.ID).LastErrorClass; got != ErrClassSessionCapacity {
 		t.Errorf("persisted LastErrorClass = %q, want session_capacity", got)
 	}
-	want := "[Cron 日报] 同时运行的定时任务已达上限，本次已跳过；可错开执行时间或改为每次重置上下文 · run 9f8e7d6c"
+	want := "[Cron 日报] 定时任务会话数已达上限，本次已跳过；可错开执行时间或改为每次重置上下文 · run 9f8e7d6c"
 	if got := ns.noticesAfter(s); len(got) != 1 || got[0] != want {
 		t.Errorf("notices = %q, want [%q]", got, want)
 	}

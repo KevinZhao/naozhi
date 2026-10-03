@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -193,22 +192,19 @@ func TestWrapCronSpawnErr_CapacityRefusals(t *testing.T) {
 	}
 }
 
-// TestCronRouterAdapter_GetOrCreateTagsCapacity drives the real router into a
-// capacity refusal (one proc slot, held by a busy session that cannot be
-// evicted) and checks the refusal crosses the adapter as ErrSessionCapacity.
+// TestCronRouterAdapter_GetOrCreateTagsCapacity drives the real router into
+// the refusal cron actually meets: every spawn is exempt, so the limit is the
+// exempt cap, filled here with live injected cron sessions well past it.
 func TestCronRouterAdapter_GetOrCreateTagsCapacity(t *testing.T) {
-	r := session.NewRouter(session.RouterConfig{MaxProcs: 1})
+	r := session.NewRouter(session.RouterConfig{})
 	t.Cleanup(r.Shutdown)
-	busy := session.NewTestProcess()
-	busy.StateVal = cli.StateRunning
-	r.InjectSession("feishu:direct:busy:general", busy)
-	// Runs before Shutdown (cleanups are LIFO) so it does not wait out the
-	// busy turn.
-	t.Cleanup(func() { busy.StateVal = cli.StateReady })
+	for i := range 64 {
+		r.InjectSession(fmt.Sprintf("cron:fill-%d", i), session.NewTestProcess()).MarkExemptForTest()
+	}
 
-	_, _, err := newCronRouterAdapter(r).GetOrCreate(context.Background(), "cron:job-cap", cron.AgentOpts{})
-	if !errors.Is(err, session.ErrMaxProcs) {
-		t.Fatalf("GetOrCreate err = %v, want the router's ErrMaxProcs (test premise)", err)
+	_, _, err := newCronRouterAdapter(r).GetOrCreate(context.Background(), "cron:job-cap", cron.AgentOpts{Exempt: true})
+	if !errors.Is(err, session.ErrMaxExemptSessions) {
+		t.Fatalf("GetOrCreate err = %v, want the router's ErrMaxExemptSessions (test premise)", err)
 	}
 	if !errors.Is(err, cron.ErrSessionCapacity) {
 		t.Errorf("GetOrCreate err = %v, want it tagged cron.ErrSessionCapacity", err)

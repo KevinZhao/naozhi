@@ -123,7 +123,7 @@ func failureNoticeBody(errClass ErrorClass, state RunState, runID string, timeou
 	case timedOut:
 		cause = "执行超时（超过 " + formatNoticeBudget(timeout) + "）"
 	case errClass == ErrClassSessionCapacity:
-		cause = "同时运行的定时任务已达上限，本次已跳过；可错开执行时间或改为每次重置上下文"
+		cause = "定时任务会话数已达上限，本次已跳过；可错开执行时间或改为每次重置上下文"
 	case errClass == ErrClassSessionError:
 		cause = "启动会话失败"
 	case errClass == ErrClassSendError:

@@ -114,7 +114,7 @@ export function cronErrorClassLabel(cls) {
     case 'workdir_unreachable': return '工作目录不可达';
     case 'workdir_outside_root': return '工作目录越界';
     case 'overlap_skipped': return '重叠跳过';
-    case 'session_capacity': return '并发上限跳过';
+    case 'session_capacity': return '会话上限跳过';
     case 'router_missing': return '路由未就绪';
     case 'paused_concurrent': return '暂停时被抢';
     case 'deleted_concurrent': return '运行中被删除';

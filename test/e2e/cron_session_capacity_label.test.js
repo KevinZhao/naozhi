@@ -46,7 +46,7 @@ test.describe('cron session_capacity 标签', () => {
   test.beforeAll(async () => { mock = await startMockServer({ cronJobs: jobs() }); });
   test.afterAll(() => mock.server.close());
 
-  test('并发上限跳过显示中文标签', async ({ browser }) => {
+  test('会话上限跳过显示中文标签', async ({ browser }) => {
     const ctx = await browser.newContext({ viewport: { width: 1600, height: 900 } });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
@@ -57,7 +57,7 @@ test.describe('cron session_capacity 标签', () => {
     await page.waitForSelector('#cron-timeline-panel .ctr');
 
     const errCls = page.locator('#cron-timeline-panel .ctr-errcls');
-    await expect(errCls).toHaveText('并发上限跳过');
+    await expect(errCls).toHaveText('会话上限跳过');
     const text = await page.locator('#cron-timeline-panel').innerText();
     expect(text, '原始枚举串不应出现在界面上').not.toContain('session_capacity');
 
