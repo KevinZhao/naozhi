@@ -26,8 +26,8 @@ const (
 // frames instead of one, so no single frame hogs the client's send buffer.
 const maxHistoryPushEntries = 50
 
-// marshalHistoryFrame produces the WS "history" frame bytes for key + entries
-// tail, coalescing the marshal across all eventPushLoop goroutines in
+// marshalHistoryFrame produces the WS "history" frame bytes for key + one
+// chunk of entries, coalescing the marshal across all eventPushLoop goroutines in
 // lock-step on the same session. The per-key fingerprint (lastTime, latest
 // Time, count, first/last UUID) forces a fresh marshal for out-of-lockstep
 // subscribers. The returned []byte may be handed to wsClient.SendRaw from

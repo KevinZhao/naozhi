@@ -1,9 +1,8 @@
 package server
 
 // wshub_eventpush_burst_test.go — #3008: a notify wave larger than one
-// history frame must reach the subscriber in full and in order. The old
-// pusher sent only the newest maxHistoryPushEntries and advanced the cursor
-// past the rest, leaving an unrecoverable hole mid-transcript.
+// history frame must reach the subscriber in full and in order, and the
+// cursor never advances past an entry that was not delivered.
 
 import (
 	"encoding/json"
