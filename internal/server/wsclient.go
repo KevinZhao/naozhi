@@ -111,9 +111,18 @@ func (c *wsClient) SendJSON(v any) {
 
 // SendRaw sends pre-marshalled bytes to the client's send channel (non-blocking).
 func (c *wsClient) SendRaw(data []byte) {
+	c.trySendRaw(data)
+}
+
+// trySendRaw is SendRaw that reports whether data was enqueued: false when
+// the client is closed or the frame was dropped on a full buffer. Cursor-driven
+// senders use it so a dropped frame is not recorded as delivered.
+func (c *wsClient) trySendRaw(data []byte) bool {
 	select {
 	case c.send <- data:
+		return true
 	case <-c.done:
+		return false
 	default:
 		// Drop when the buffer is full so a slow client cannot block the hub
 		// mutex during broadcast. Per-client and hub-wide counters both bump so
@@ -134,6 +143,7 @@ func (c *wsClient) SendRaw(data []byte) {
 				close(c.done)
 			})
 		}
+		return false
 	}
 }
 

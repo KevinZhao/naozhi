@@ -67,7 +67,7 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	c := &wsClient{
 		conn: conn,
 		// Outbound frames; 256 slots absorb brief latency spikes so slow
-		// consumers drop rather than balloon memory. History pushes are capped at
+		// consumers drop rather than balloon memory. History pushes are chunked at
 		// maxHistoryPushEntries (~10 KB/frame) → ~2.5 MB worst case per client.
 		send:        make(chan []byte, 256),
 		hub:         h,

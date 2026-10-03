@@ -4,58 +4,10 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/wsproto"
 )
-
-// TestCapHistoryBatch locks in R68-PERF-H1: eventPushLoop must truncate
-// large backlogs to the most recent maxHistoryPushEntries so a slow
-// subscriber doesn't trigger a single multi-MB push frame that starves
-// the WS send channel for all connected clients. Older entries remain
-// reachable via the paginated /api/sessions/events?before= path.
-func TestCapHistoryBatch(t *testing.T) {
-	cases := []struct {
-		name    string
-		inLen   int
-		wantLen int
-		// Head value after capping — for oversize inputs we keep the tail,
-		// so the head should equal `inLen-maxHistoryPushEntries` when
-		// inLen > maxHistoryPushEntries (entries are int64-timed here so
-		// the test uses Time as an index surrogate).
-		wantHead int64
-	}{
-		{"empty", 0, 0, 0},
-		{"at cap", maxHistoryPushEntries, maxHistoryPushEntries, 0},
-		{"under cap", maxHistoryPushEntries - 1, maxHistoryPushEntries - 1, 0},
-		{"just over cap", maxHistoryPushEntries + 1, maxHistoryPushEntries, 1},
-		{"ten times cap", 10 * maxHistoryPushEntries, maxHistoryPushEntries, int64(9 * maxHistoryPushEntries)},
-	}
-
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			in := make([]clievent.EventEntry, c.inLen)
-			for i := 0; i < c.inLen; i++ {
-				in[i] = clievent.EventEntry{Time: int64(i)}
-			}
-			got := capHistoryBatch(in)
-			if len(got) != c.wantLen {
-				t.Fatalf("len = %d, want %d", len(got), c.wantLen)
-			}
-			if c.wantLen > 0 && got[0].Time != c.wantHead {
-				t.Errorf("head Time = %d, want %d (tail should be preserved)", got[0].Time, c.wantHead)
-			}
-			// Last element must always be the most recent, regardless of cap.
-			if c.wantLen > 0 {
-				wantTail := int64(c.inLen - 1)
-				if got[len(got)-1].Time != wantTail {
-					t.Errorf("tail Time = %d, want %d", got[len(got)-1].Time, wantTail)
-				}
-			}
-		})
-	}
-}
 
 // TestValidateProjectName locks in R68-SEC-M3: project `name` query param
 // must be gated at the HTTP boundary so oversized or control-character
