@@ -146,14 +146,11 @@ func (dl *imDelivery) BeforeSession(ctx context.Context) {
 	_ = o.d.caps.Takeover(ctx, sessionkey.ChatKey(o.msg.Platform, o.msg.ChatType, o.msg.ChatID), o.key, o.opts)
 }
 
-// SessionReady posts the "new session" notice on a first turn that spawned
-// one, and starts the tracker whose callback streams the turn's progress
-// into the chat.
-func (dl *imDelivery) SessionReady(ctx context.Context, st sessionview.SessionStatus) clievent.EventCallback {
+// SessionReady starts the tracker whose callback streams the turn's progress
+// into the chat. A fresh session posts no notice: SessionNew means the chat
+// had no session or the user reset it, and a reset already replied (#3000).
+func (dl *imDelivery) SessionReady(ctx context.Context, _ sessionview.SessionStatus) clievent.EventCallback {
 	o := dl.o
-	if dl.info.First && st == sessionview.SessionNew && platform.SupportsInterimMessages(dl.p) {
-		o.d.replyNotice(ctx, o.msg, "", "新会话已创建（之前的上下文已失效）。", dl.lg, "new_session")
-	}
 	dl.tracker = newIMEventTracker(ctx, dl.p, o.msg.ChatID, o.msg.ChatType, o.agentID)
 	return dl.tracker.onEvent
 }

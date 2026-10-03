@@ -27,7 +27,6 @@ const (
 	parityQueuedText  = "消息已收到，待当前回复完成后一并处理。"
 	parityBusyText    = "正在处理上一条消息，请稍候..."
 	parityMergedReply = "已合并到上一条回复。"
-	parityNewSession  = "新会话已创建（之前的上下文已失效）。"
 	parityReviewerKey = "parity:direct:chat1:code-reviewer"
 )
 
@@ -409,7 +408,7 @@ func TestTurnParity16_IM_InterruptModeInterruptsOnce(t *testing.T) {
 	h.waitDone(owner, "owner loop")
 }
 
-func TestTurnParity17_IM_FirstTurnTakeoverAndNewSessionNotice(t *testing.T) {
+func TestTurnParity17_IM_FirstTurnTakeoverAndNoNewSessionNotice(t *testing.T) {
 	h := newParityHarness(t, parityOpts{reactor: true, interim: true})
 	turns := h.session(parityKey, false)
 	log := &orderLog{}
@@ -422,18 +421,18 @@ func TestTurnParity17_IM_FirstTurnTakeoverAndNewSessionNotice(t *testing.T) {
 		im(h.imCtx, h.imMsg("m1", "first"))
 	}()
 	turns.next(t, "owner turn")
-	if r := h.plat.waitReply(t, "new-session notice"); r != parityNewSession {
-		t.Fatalf("first reply = %q, want the new-session notice", r)
-	}
 	im(h.imCtx, h.imMsg("m2", "second"))
 	turns.answer(okTurn("R1"))
+	if r := h.plat.waitReply(t, "owner reply"); !strings.HasPrefix(r, "R1") {
+		t.Fatalf("first reply = %q, want the owner answer (a fresh session posts no notice)", r)
+	}
 	turns.turn(t, "drain turn", okTurn("R2"))
 	h.waitDone(done, "owner loop")
 	if got := log.snapshot(); len(got) != 1 || got[0] != "takeover "+parityChatKey+" "+parityKey {
 		t.Fatalf("takeover calls = %q, want exactly one, for the first turn", got)
 	}
-	if n := replyMatching(h.plat.allReplies(), parityNewSession); n != 1 {
-		t.Fatalf("new-session notices = %d, want 1 (drain turns skip it)", n)
+	if r := h.plat.allReplies(); len(r) != 2 || !strings.HasPrefix(r[1], "R2") {
+		t.Fatalf("replies = %q, want only the two answers", r)
 	}
 }
 
