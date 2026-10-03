@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -93,6 +94,23 @@ func verifySignature(payload, sig []byte, trustSet []ed25519.PublicKey) (keyInde
 		}
 	}
 	return -1, ErrNoTrustedKey
+}
+
+// TrustedSigKeys returns a deep copy of the embedded trust set, so the
+// release-sign tool checks a release against exactly what clients embed.
+func TrustedSigKeys() []ed25519.PublicKey {
+	out := make([]ed25519.PublicKey, len(trustedSigKeys))
+	for i, k := range trustedSigKeys {
+		out[i] = slices.Clone(k)
+	}
+	return out
+}
+
+// VerifyChecksumsSignature is verifySignature for callers outside the package:
+// it checks a checksums.txt signature against trustSet with the same decoding
+// and sentinels the upgrade path uses.
+func VerifyChecksumsSignature(payload, sig []byte, trustSet []ed25519.PublicKey) (keyIndex int, err error) {
+	return verifySignature(payload, sig, trustSet)
 }
 
 // readSigFile reads a signature file with a small size cap.

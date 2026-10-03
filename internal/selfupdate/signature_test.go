@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -254,5 +255,47 @@ func TestEnforceStrongTrust_StrictWithPin_Allowed(t *testing.T) {
 	t.Setenv(pinSha256EnvVar, "   ")
 	if err := enforceStrongTrust(); !errors.Is(err, ErrStrictNoStrongTrust) {
 		t.Fatalf("whitespace-only pin must not count as an anchor, got: %v", err)
+	}
+}
+
+// TestTrustedSigKeys_IsADeepCopy: the release-sign tool reads the trust set
+// through TrustedSigKeys, and nothing it does may alter what Download trusts.
+// Not parallel: it swaps the package-global trust set.
+func TestTrustedSigKeys_IsADeepCopy(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := trustedSigKeys
+	trustedSigKeys = []ed25519.PublicKey{slices.Clone(pub)}
+	t.Cleanup(func() { trustedSigKeys = orig })
+
+	got := TrustedSigKeys()
+	if len(got) != 1 || !got[0].Equal(pub) {
+		t.Fatalf("TrustedSigKeys() = %v, want the embedded key", got)
+	}
+	got[0][0] ^= 0xff
+	got[0] = nil
+	payload := []byte("checksums")
+	sig := []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(priv, payload)))
+	if idx, err := VerifyChecksumsSignature(payload, sig, trustedSigKeys); err != nil || idx != 0 {
+		t.Fatalf("mutating the copy changed the embedded set: idx=%d err=%v", idx, err)
+	}
+}
+
+func TestVerifyChecksumsSignature_SharesSentinels(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyChecksumsSignature([]byte("x"), []byte("y"), nil); !errors.Is(err, ErrEmptyTrustSet) {
+		t.Fatalf("empty trust set: got %v, want ErrEmptyTrustSet", err)
+	}
+	if _, err := VerifyChecksumsSignature([]byte("x"), []byte("!!"), []ed25519.PublicKey{pub}); !errors.Is(err, ErrMalformedSignature) {
+		t.Fatalf("malformed: got %v, want ErrMalformedSignature", err)
+	}
+	bogus := []byte(base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize)))
+	if _, err := VerifyChecksumsSignature([]byte("x"), bogus, []ed25519.PublicKey{pub}); !errors.Is(err, ErrNoTrustedKey) {
+		t.Fatalf("wrong signature: got %v, want ErrNoTrustedKey", err)
 	}
 }
