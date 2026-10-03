@@ -3,8 +3,10 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -73,21 +75,54 @@ func TestHandleHealth_TrustedProxy_ValidXFF_FirstAllowed(t *testing.T) {
 }
 
 // TestHandleDashboard_TrustedProxy_MissingXFF_FailsClosed pins R20260614-SEC-10
-// (#2120) for the unauthenticated GET /dashboard path (routes.go). Same
-// shared-bucket amplifier: an XFF-less request in trusted-proxy mode must be
-// rejected up front rather than sharing unknownIPKey across every XFF-less
-// scanner.
+// (#2120) for the unauthenticated GET /dashboard path (routes.go): an XFF-less
+// request in trusted-proxy mode is refused up front rather than sharing
+// unknownIPKey across every XFF-less scanner. The refusal is a 400 naming
+// server.trusted_proxy, not a fake 429, because the usual caller is an
+// operator opening the dashboard on the LAN (#3011).
 func TestHandleDashboard_TrustedProxy_MissingXFF_FailsClosed(t *testing.T) {
 	srv := newTestServerTrustedProxy(&mockPlatform{}, "secret")
 
-	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
-	req.RemoteAddr = "10.0.0.1:1234" // no XFF
-	w := httptest.NewRecorder()
-	srv.handleDashboard(w, req)
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+		req.RemoteAddr = "10.0.0.1:1234" // no XFF
+		w := httptest.NewRecorder()
+		srv.handleDashboard(w, req)
 
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("unauth /dashboard with trustedProxy=true and missing XFF returned %d on first request, want 429 (fail-closed)", w.Code)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("request %d: unauth /dashboard with trustedProxy=true and missing XFF returned %d, want 400 (fail-closed with the reason)", i, w.Code)
+		}
+		body := w.Body.String()
+		if body != auth.XFFRequiredReason+"\n" || !strings.Contains(body, "server.trusted_proxy") {
+			t.Fatalf("request %d: body = %q, want the constant reason naming server.trusted_proxy", i, body)
+		}
+		if strings.Contains(body, "login-form") || w.Header().Get("Content-Security-Policy") != "" {
+			t.Fatalf("request %d: the login page was served to an unresolvable client", i)
+		}
 	}
+}
+
+// TestHandleDashboard_UnauthLimiterExhausted_Is429 pins the other half of the
+// split gate: a resolvable client that burns its unauthenticated budget still
+// gets 429 with Retry-After, not the trusted_proxy reason.
+func TestHandleDashboard_UnauthLimiterExhausted_Is429(t *testing.T) {
+	srv := newTestServerTrustedProxy(&mockPlatform{}, "secret")
+
+	for i := 0; i < 1000; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+		req.RemoteAddr = "10.0.0.1:1234"
+		req.Header.Set("X-Forwarded-For", "203.0.113.7")
+		w := httptest.NewRecorder()
+		srv.handleDashboard(w, req)
+		if w.Code == http.StatusOK {
+			continue
+		}
+		if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") != "60" {
+			t.Fatalf("request %d: got %d Retry-After=%q, want 429 with Retry-After 60", i, w.Code, w.Header().Get("Retry-After"))
+		}
+		return
+	}
+	t.Fatal("1000 unauthenticated GETs from one IP never hit the limiter")
 }
 
 // TestHandleDashboard_TrustedProxy_ValidXFF_FirstServesLogin confirms the

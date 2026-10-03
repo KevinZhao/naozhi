@@ -40,6 +40,7 @@ async function saveToken() {
   const input = document.getElementById('token-input');
   const t = input && input.value.trim();
   if (!t) return;
+  document.querySelectorAll('.modal-overlay .auth-refusal').forEach((n) => n.remove());
   try {
     const r = await fetch(NZ_CONTRACT.API.auth_login, {
       method: 'POST',
@@ -54,16 +55,17 @@ async function saveToken() {
       wsm.connect();
       deps.fetchSessions();
     } else if (r.status === 429) {
-      // R110-P2 WS auth rate-limit countdown: the old catch-all else
-      // path rendered "invalid token — try again" even when the server
-      // was still locking the caller out, misleading users into retrying
-      // immediately and racking up more 429s. Read Retry-After (seconds,
-      // plain integer as set by dashboard_auth.go) and visually gate the
-      // input until the window elapses.
-      const raHeader = r.headers.get('Retry-After') || '60';
-      let retryAfter = parseInt(raHeader, 10);
+      // Rate-limited, token never compared: gate the input for Retry-After
+      // (plain integer seconds) instead of inviting more 429s.
+      let retryAfter = parseInt(r.headers.get('Retry-After') || '60', 10);
       if (!Number.isFinite(retryAfter) || retryAfter <= 0) retryAfter = 60;
       startLoginRetryCountdown(retryAfter);
+    } else if (r.status === 400) {
+      // Refused before the token compare (e.g. trusted_proxy without XFF), so the token stays.
+      const reason = await r.json().then((b) => String((b && b.error) || ''), () => '');
+      const note = Object.assign(document.createElement('div'), { className: 'auth-hint auth-refusal' });
+      note.textContent = (reason || 'login refused (HTTP 400)').slice(0, 300);
+      document.querySelector('.modal-overlay .auth-hint')?.after(note);
     } else {
       document.getElementById('token-input').value = '';
       document.getElementById('token-input').placeholder = 'invalid token — try again';
@@ -113,10 +115,8 @@ function startLoginRetryCountdown(seconds) {
 }
 
 // startWSAuthRetryCountdown arms the auth rate-limit gate and drives an
-// inline sidebar-status countdown instead of a top-of-screen toast. The
-// previous toast variant stacked on top of the header on mobile and
-// repeated every second; routing the countdown into deps.updateStatusBar keeps
-// the signal visible but out of the way. Triggered by an
+// inline sidebar-status countdown (via deps.updateStatusBar, so it stays out
+// of the way on mobile) rather than a toast. Triggered by an
 // auth_fail(Error="too many attempts") message that carries a retry_after
 // hint. On expiry the gate clears and wsm.connect() fires once so the user
 // doesn't have to click anything — matches the UX-P1 auto-recover spec.
