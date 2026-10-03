@@ -11,9 +11,9 @@ import { getToken, lsSet } from './platform.js';
 import { sid } from './session_ident.js';
 import { featureForBackend } from './features.js';
 
-// Late-bound hooks: assigned by the code below, read by other modules at event
-// time (never at load time) — the shape they had as dashboard module-scope
-// lets before this extraction.
+// costSummaryCache is the ledger's last-30-day unit-bucketed total from
+// /api/cost/summary (null until the first fetch lands); the 服务概览 花费 card
+// prefers it over the live-session sum, which forgets deleted sessions and cron.
 let costSummaryCache = null;
 
 // --- Utilities ---

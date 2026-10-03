@@ -37,13 +37,10 @@ func newFakeRouter(keys ...string) *fakeRouter {
 }
 
 func (f *fakeRouter) ListSessionsWithVersion() ([]sessionpkg.SessionSnapshot, uint64) { return nil, 0 }
-func (f *fakeRouter) ListSessionsIfChanged(uint64) ([]sessionpkg.SessionSnapshot, uint64, bool) {
-	return nil, 0, false
-}
-func (f *fakeRouter) BumpVersion()                                               {}
-func (f *fakeRouter) Stats() (int, int)                                          { return 0, len(f.knownKeys) }
-func (f *fakeRouter) SessionFor(string) *sessionpkg.ManagedSession               { return nil }
-func (f *fakeRouter) SessionRuns(string, int, time.Time) []runhistory.SessionRun { return nil }
+func (f *fakeRouter) BumpVersion()                                                    {}
+func (f *fakeRouter) Stats() (int, int)                                               { return 0, len(f.knownKeys) }
+func (f *fakeRouter) SessionFor(string) *sessionpkg.ManagedSession                    { return nil }
+func (f *fakeRouter) SessionRuns(string, int, time.Time) []runhistory.SessionRun      { return nil }
 func (f *fakeRouter) SessionRunStats(string) runhistory.SessionRunStats {
 	return runhistory.SessionRunStats{}
 }
