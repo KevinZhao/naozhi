@@ -2,7 +2,8 @@
 //
 // The 系统 view's per-run stat chips for attachment-gc: the dry-run Counts
 // keys get Chinese labels, *_bytes renders as a size (0 included), and the
-// dry_run flag reads as 是 rather than a bare 1.
+// dry_run flag reads as 是 rather than a bare 1; a live tick's buckets read
+// 已回收 instead of 可回收.
 //
 // 跑法：cd test/e2e && npx playwright test system_view_stats.test.js --project=desktop-chrome
 
@@ -54,4 +55,11 @@ test('attachment-gc dry-run chips: labelled buckets, sized bytes, mode flag', as
 test('attachment-gc dry-run with nothing to reclaim shows 0 B', async ({ browser }) => {
   const got = await chips(browser, { examined: 1, dry_run: 1, would_reap_bytes: 0 });
   expect(got).toEqual(['检查 1', '演练模式 是', '可回收体积 0 B']);
+});
+
+test('attachment-gc live tick labels the same buckets as reclaimed', async ({ browser }) => {
+  const got = await chips(browser, {
+    examined: 1, acted: 2, would_reap_refs_expired: 2, would_reap_bytes: 2048,
+  });
+  expect(got).toEqual(['检查 1', '执行 2', '已回收·引用过期 2', '已回收体积 2 KiB']);
 });

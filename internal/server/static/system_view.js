@@ -107,6 +107,7 @@ function systemTickLabel(ns) {
 // AutoTitler's bumpSkip(...) reasons as skipped_*, attachment-gc's gcCount*
 // Counts keys verbatim (pinned by TestDashboardJS_SystemStatLabels*).
 // Unknown reasons keep their raw suffix so a new skip-bucket still shows up.
+// A live (non-dry-run) tick's would_reap_* counted that tick's deletions.
 const SYSTEM_STAT_LABELS = {
   examined: '检查',
   acted: '执行',
@@ -122,8 +123,9 @@ const SYSTEM_STAT_LABELS = {
   would_reap_refs_expired: '可回收·引用过期',
   would_reap_bytes: '可回收体积',
 };
-function systemStatLabel(key) {
-  if (SYSTEM_STAT_LABELS[key]) return SYSTEM_STAT_LABELS[key];
+function systemStatLabel(key, live) {
+  const label = SYSTEM_STAT_LABELS[key];
+  if (label) return live && key.indexOf('would_reap_') === 0 ? label.replace('可回收', '已回收') : label;
   if (key.indexOf('skipped_') === 0) return '跳过·' + key.slice(8);
   return key;
 }
@@ -170,7 +172,7 @@ function renderSystemView() {
         '</div>';
       const stats = lr.stats || {};
       const chips = Object.keys(stats).map(function (k) {
-        return '<span class="sys-stat">' + esc(systemStatLabel(k)) + ' <b>' + esc(systemStatValue(k, stats[k])) + '</b></span>';
+        return '<span class="sys-stat">' + esc(systemStatLabel(k, !stats.dry_run)) + ' <b>' + esc(systemStatValue(k, stats[k])) + '</b></span>';
       });
       if (chips.length) statsBlock = '<div class="sys-stats-label">本次统计</div><div class="sys-stats">' + chips.join('') + '</div>';
     }
