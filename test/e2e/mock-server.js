@@ -245,7 +245,7 @@ function defaultGitStates() {
  *   Bodies land in `cronTriggerCalls`.
  * @param {Function} [overrides.costSummary] - (searchParams) => GET /api/cost/summary payload,
  *   or null for a 404. Without it the route is absent (404). Calls land in `costSummaryCalls`
- *   as {group_by, job_id}.
+ *   as {group_by, job_id, session_key}.
  * @param {object[]} [overrides.cronAttention] - §7.4 queue items for GET /api/cron/attention.
  *   POST /api/cron/runs/<id>/confirm records the id in `cronConfirmCalls` and drops the item;
  *   POST /api/cron/runs/<id>/replay does the same with `cronReplayCalls` (the {job_id} body).
@@ -1072,7 +1072,11 @@ function startMockServer(overrides = {}) {
     // Cost ledger summary: opt-in via overrides.costSummary.
     if (costSummary && pathname === NZ_CONTRACT.API.cost_summary && req.method === 'GET') {
       if (!checkAuth()) return;
-      costSummaryCalls.push({ group_by: url.searchParams.get('group_by') || '', job_id: url.searchParams.get('job_id') || '' });
+      costSummaryCalls.push({
+        group_by: url.searchParams.get('group_by') || '',
+        job_id: url.searchParams.get('job_id') || '',
+        session_key: url.searchParams.get('session_key') || '',
+      });
       const payload = costSummary(url.searchParams);
       res.writeHead(payload ? 200 : 404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(payload || { error: 'not found' }));

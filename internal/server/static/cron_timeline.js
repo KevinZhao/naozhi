@@ -11,9 +11,9 @@ import { NZ_CONTRACT } from './contract.js';
 import { cronDrawerState, cronJobCostCache, cronStore, fetchCronJobs } from './cron_state.js';
 import { cronErrorClassLabel, cronJobLedgerCostHtml } from './cron_format.js';
 import { cronAttentionQueueHtml } from './cron_attention.js';
-import { getToken } from './platform.js';
+import { authHeaders } from './platform.js';
 import { renderMd, runPendingAsync } from './render_md.js';
-import { formatAbsTime, showAPIError, showAuthModal, showNetworkError } from './utilities.js';
+import { fetchCostSummary, formatAbsTime, showAPIError, showAuthModal, showNetworkError } from './utilities.js';
 import {
   esc,
   escAttr,
@@ -541,9 +541,7 @@ function cssEscapeAttr(s) {
 async function cronTimelineFetchDetail(jobId, runId) {
   const st = getCronTimelineState(jobId);
   try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const headers = authHeaders();
     const url = NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '?job_id=' + encodeURIComponent(jobId);
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
     // Preserve sticky annotations (__transcript / __snapshot) across a
@@ -590,9 +588,7 @@ async function cronTimelineFetchDetail(jobId, runId) {
 async function cronTimelineFetchTranscript(jobId, runId) {
   const st = getCronTimelineState(jobId);
   try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const headers = authHeaders();
     const url = NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '/transcript?job_id=' + encodeURIComponent(jobId);
     const data = await fetchJSON(url, { headers, timeoutMs: 12000 });
     if (st.details && st.details[runId]) {
@@ -617,9 +613,7 @@ async function cronTimelineFetchTranscript(jobId, runId) {
 async function cronTimelineFetchSnapshot(jobId, runId) {
   const st = getCronTimelineState(jobId);
   try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const headers = authHeaders();
     const url = NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '/snapshot?job_id=' + encodeURIComponent(jobId);
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
     if (st.details && st.details[runId]) {
@@ -714,9 +708,7 @@ function cronTimelineLoadMore(jobId, onDone) {
   (async () => {
     let loaded = false;
     try {
-      const headers = {};
-      const t = getToken();
-      if (t) headers['Authorization'] = 'Bearer ' + t;
+      const headers = authHeaders();
       let url = NZ_CONTRACT.API.cron_runs + '?job_id=' + encodeURIComponent(jobId) + '&limit=50';
       if (st.nextBefore) url += '&before=' + st.nextBefore;
       const data = await fetchJSON(url, { headers, timeoutMs: 10000 });
@@ -809,9 +801,7 @@ async function cronTimelineRefreshHead(jobId) {
   const token = (st._refreshToken || 0) + 1;
   st._refreshToken = token;
   try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const headers = authHeaders();
     const url = NZ_CONTRACT.API.cron_runs + '?job_id=' + encodeURIComponent(jobId) + '&limit=10';
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
     // 过期请求：开始 fetch 之后又有更新一轮 refreshHead 启动了，丢弃本次结果。
@@ -905,15 +895,8 @@ function renderCronTimelineForJob(jobId) {
 export async function cronJobCostRefresh(jobId) {
   if (!jobId) return;
   try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    const to = new Date();
-    const from = new Date(to.getTime() - 30 * 24 * 3600 * 1000);
-    const resp = await fetch(NZ_CONTRACT.API.cost_summary + '?group_by=job&job_id=' + encodeURIComponent(jobId) +
-      '&from=' + encodeURIComponent(from.toISOString()) + '&to=' + encodeURIComponent(to.toISOString()), { headers });
-    if (!resp.ok) return;
-    const data = await resp.json();
+    const data = await fetchCostSummary('group_by=job&job_id=' + encodeURIComponent(jobId));
+    if (!data) return;
     let usd = 0, entries = 0;
     for (const b of (data && Array.isArray(data.buckets) ? data.buckets : [])) {
       if (b && b.unit === 'USD' && typeof b.amount === 'number') { usd += b.amount; entries += (b.entries | 0); }

@@ -14,6 +14,9 @@
 //   - A cron job's drawer asks the ledger for that job alone and shows its
 //     30-day figure. The ledger fetch repaints the timeline itself: the
 //     drawer's open-time list refetch is held, so its repaint cannot.
+//   - Each daemon card in the 系统 view asks the ledger for its own session
+//     key (sys:<name>) and shows that figure; a daemon with no entries, or
+//     whose fetch fails, shows no cost row. Each key is asked once per 30 s.
 //
 // 跑法：cd test/e2e && npx playwright test cost_ledger_display.test.js --project=desktop-chrome
 
@@ -30,6 +33,11 @@ test.beforeEach(({ }, testInfo) => {
 function ledger(q) {
   if (q.get('group_by') === 'job') {
     return { buckets: [{ unit: 'USD', amount: 3.25, entries: 4 }] };
+  }
+  switch (q.get('session_key')) {
+    case 'sys:auto-titler': return { buckets: [{ unit: 'USD', amount: 0.42, entries: 7 }], basis: { unknown: 1 } };
+    case 'sys:quiet': return { buckets: [] };
+    case 'sys:broken': return null;
   }
   return {
     buckets: [
@@ -165,7 +173,81 @@ test('cron drawer asks the ledger for its job and shows the 30-day figure', asyn
     await page.route((u) => u.pathname === '/api/cron' && u.searchParams.has('compact'), () => {});
     await row.click();
     await expect(page.locator('.ct-cost-ledger')).toHaveText('30 天 $3.25', { timeout: 5000 });
-    expect(mock.costSummaryCalls).toContainEqual({ group_by: 'job', job_id: 'cron-cost-1' });
+    expect(mock.costSummaryCalls).toContainEqual({ group_by: 'job', job_id: 'cron-cost-1', session_key: '' });
+    expect(pageErrors).toEqual([]);
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+const daemons = ['auto-titler', 'quiet', 'broken'].map((name) => ({ name, enabled: true, tick: 30e9, runs_total: 3 }));
+
+test('daemon cards show their own 30-day figure; no entries or a failed fetch shows none', async ({ browser }) => {
+  const mock = await startMockServer({ costSummary: ledger, systemDaemons: daemons });
+  const { ctx, page, pageErrors } = await open(browser, mock);
+  try {
+    await page.click('#abnav-system');
+    const card = (/** @type {string} */ name) => page.locator('.sys-card').filter({ has: page.locator('.sys-name', { hasText: name }) });
+    const cost = card('auto-titler').locator('.sys-cost');
+    await expect(cost).toHaveText('近 30 天花费 $0.42', { timeout: 8000 });
+    const title = await cost.getAttribute('title');
+    expect(title).toContain('仅 auto-titler');
+    expect(title).toContain('CLI 估算口径');
+    expect(title).toContain('1 条未知定价');
+    // The overview card keeps the whole-ledger figure: the keys do not share a snapshot.
+    await expect(page.locator('.svc-stat-value').filter({ hasText: '$12.50' })).toHaveCount(1);
+    await expect.poll(() => mock.costSummaryCalls.filter((c) => c.session_key).length).toBe(3);
+    for (const name of ['auto-titler', 'quiet', 'broken']) {
+      expect(mock.costSummaryCalls).toContainEqual({ group_by: 'unit', job_id: '', session_key: 'sys:' + name });
+    }
+    await expect(card('quiet')).toHaveCount(1);
+    await expect(card('quiet').locator('.sys-cost'), 'no entries, no cost row').toHaveCount(0);
+    await expect(card('broken').locator('.sys-cost'), 'a failed fetch shows nothing').toHaveCount(0);
+    expect(pageErrors).toEqual([]);
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+// Time is frozen and every daemon-list refetch after the load-time one is
+// held, so neither the 5 s poll nor the view's open-time refetch can repaint:
+// the cost row appearing is the ledger fetch's own repaint. Re-entries at 14 s
+// and 28 s reuse the snapshot; the one at 31 s asks again.
+test('a daemon card repaints when its ledger figure lands, and asks once per 30 s', async ({ browser }) => {
+  const failed = { ...daemons[0], last_run: { state: 'failed' } };
+  const mock = await startMockServer({ costSummary: ledger, systemDaemons: [failed] });
+  const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+  const page = await ctx.newPage();
+  /** @type {string[]} */
+  const pageErrors = [];
+  page.on('pageerror', (e) => pageErrors.push(String(e)));
+  const daemonCalls = () => mock.costSummaryCalls.filter((c) => c.session_key === 'sys:auto-titler').length;
+  try {
+    await page.clock.install();
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    // The badge lights once the load-time daemon list has landed.
+    await expect(page.locator('#abnav-system-badge')).toBeVisible();
+    await page.route('**/api/system/daemons', () => {});
+    await page.clock.pauseAt(Date.now() + 1000);
+    const cost = page.locator('.sys-card .sys-cost');
+    await page.click('#abnav-system');
+    await expect(cost, 'the fetch resolving must repaint the card').toHaveText('近 30 天花费 $0.42');
+    for (let i = 0; i < 2; i++) {
+      await page.click('#abnav-chat');
+      await page.clock.runFor(14000);
+      await page.click('#abnav-system');
+      await expect(cost).toHaveCount(1);
+    }
+    await page.evaluate(() => fetch('/api/cost/summary?group_by=probe').then((r) => r.status));
+    expect(daemonCalls(), 're-entry inside the TTL reuses the snapshot').toBe(1);
+
+    await page.click('#abnav-chat');
+    await page.clock.runFor(3000);
+    await page.click('#abnav-system');
+    await expect.poll(daemonCalls, { message: 'past the TTL the daemon key is asked again' }).toBe(2);
     expect(pageErrors).toEqual([]);
   } finally {
     await ctx.close();

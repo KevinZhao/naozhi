@@ -9,7 +9,7 @@ import { perSession, selection, sessionList, ui } from './state.js';
 import { esc, fetchJSON, formatBytes, formatDurationShort, showToast } from './nz_util.js';
 import { wireQuickAskInput } from './auth_modal.js';
 import { shell } from './shell.js';
-import { formatAbsTime, getMsgValue, mainEmptyHtml, refreshCostSummary, renderServiceOverviewHtml, timeAgo } from './utilities.js';
+import { cachedCostSummary, costCardTitle, formatAbsTime, formatHomeCost, getMsgValue, mainEmptyHtml, refreshCostSummary, renderServiceOverviewHtml, timeAgo } from './utilities.js';
 
 // ===== System view (sysession daemons) =====
 //
@@ -21,6 +21,7 @@ import { formatAbsTime, getMsgValue, mainEmptyHtml, refreshCostSummary, renderSe
 //   - last-run summary: 状态 / 触发方式 / 用时 / 多久之前
 //   - per-tick stats (examined/acted/skipped_*) as compact chips
 //   - consecutive-failure warnings when a daemon is unhealthy
+//   - its 30-day ledger cost (session key sys:<name>) once it has entries
 // No create/edit/delete: these are naozhi-owned, configured via YAML+restart
 // (RFC system-session §9.2). The view polls at 5s while active and stops on
 // leave (stopSystemPoll), matching the cron view's poll-while-visible model.
@@ -135,10 +136,26 @@ function systemStatValue(key, v) {
   return key === 'dry_run' ? (v ? '是' : '否') : String(v || 0);
 }
 
+// refreshSystemCosts asks the ledger for the overview total and each daemon's
+// own (booked under sys:<name>); a fresh snapshot repaints the view.
+function refreshSystemCosts() {
+  for (const k of [''].concat(systemDaemons.map((d) => 'sys:' + d.name))) {
+    refreshCostSummary(k).then((updated) => updated && ui.activeView === 'system' && renderSystemView()).catch(() => {});
+  }
+}
+
+// daemonCostHtml is the card's 30-day cost row; '' until the ledger holds an
+// entry for the daemon.
+function daemonCostHtml(name) {
+  const c = cachedCostSummary('sys:' + name);
+  if (!c || c.entries === 0) return '';
+  return '<span class="sys-cost" title="' + esc(costCardTitle(c, '仅 ' + name)) + '">近 30 天花费 <b>' + esc(formatHomeCost(c.usd)) + '</b></span>';
+}
+
 function renderSystemView() {
   const root = document.getElementById('system-main');
   if (!root) return;
-  refreshCostSummary().then((updated) => updated && ui.activeView === 'system' && renderSystemView()).catch(() => {});
+  refreshSystemCosts();
   const cards = systemDaemons.map(function (d) {
     const lr = d.last_run;
     const st = systemStateMeta(lr && lr.state);
@@ -147,8 +164,7 @@ function renderSystemView() {
     const enabledPill = d.enabled
       ? '<span class="sys-pill on">已启用</span>'
       : '<span class="sys-pill off">已停用</span>';
-    let metaRows = '';
-    metaRows += '<span>周期 <b>' + esc(systemTickLabel(d.tick)) + '</b></span>';
+    let metaRows = '<span>周期 <b>' + esc(systemTickLabel(d.tick)) + '</b></span>';
     metaRows += '<span>累计运行 <b>' + (d.runs_total || 0) + '</b> 次</span>';
     if (d.process_started_at) {
       const started = Date.parse(d.process_started_at);
@@ -156,6 +172,7 @@ function renderSystemView() {
         metaRows += '<span>启动于 <b title="' + esc(formatAbsTime(started)) + '">' + esc(timeAgo(started)) + '</b></span>';
       }
     }
+    metaRows += daemonCostHtml(d.name);
     let lastRunBlock = '<div class="sys-meta"><span>尚未运行</span></div>';
     let statsBlock = '';
     if (lr) {
