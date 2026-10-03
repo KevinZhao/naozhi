@@ -59,3 +59,13 @@ func TestExampleConfig_TrustedProxyOff(t *testing.T) {
 		t.Error("config.example.yaml sets server.trusted_proxy: true; the template must default to false")
 	}
 }
+
+// yamlChildScalar returns the scalar node for key, or nil.
+func yamlChildScalar(m *yaml.Node, key string) *yaml.Node {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key && m.Content[i+1].Kind == yaml.ScalarNode {
+			return m.Content[i+1]
+		}
+	}
+	return nil
+}

@@ -416,13 +416,3 @@ func yamlChildIndex(m *yaml.Node, key string) int {
 	}
 	return -1
 }
-
-// yamlChildScalar returns the scalar node for key, or nil.
-func yamlChildScalar(m *yaml.Node, key string) *yaml.Node {
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key && m.Content[i+1].Kind == yaml.ScalarNode {
-			return m.Content[i+1]
-		}
-	}
-	return nil
-}

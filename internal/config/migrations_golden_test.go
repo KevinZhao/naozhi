@@ -39,7 +39,7 @@ func migrateGolden(t *testing.T, in string) (string, []string) {
 // yamlComments returns the text of every comment in a YAML document, scanning
 // the bytes rather than parsing them so a comment the parser itself loses is
 // still counted. A '#' opens a comment at line start or after whitespace,
-// outside quotes. Fixtures keep '#' out of block scalars.
+// outside quoted scalars. Fixtures keep '#' out of block scalars.
 func yamlComments(doc string) []string {
 	var out []string
 	for _, line := range strings.Split(doc, "\n") {
@@ -47,11 +47,14 @@ func yamlComments(doc string) []string {
 		for i := 0; i < len(line); i++ {
 			c := line[i]
 			switch {
+			case quote == '"' && c == '\\',
+				quote == '\'' && c == '\'' && i+1 < len(line) && line[i+1] == '\'':
+				i++
 			case quote != 0:
 				if c == quote {
 					quote = 0
 				}
-			case c == '"' || c == '\'':
+			case (c == '"' || c == '\'') && opensScalar(line, i):
 				quote = c
 			case c == '#' && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t'):
 				out = append(out, line[i:])
@@ -60,6 +63,26 @@ func yamlComments(doc string) []string {
 		}
 	}
 	return out
+}
+
+// opensScalar reports whether the quote at line[i] starts a quoted scalar: at
+// line start or after "[", "{", ",", or ": ", "- ", "? ". An apostrophe inside
+// a plain scalar (don't) is text.
+func opensScalar(line string, i int) bool {
+	j := i
+	for j > 0 && (line[j-1] == ' ' || line[j-1] == '\t') {
+		j--
+	}
+	if j == 0 {
+		return true
+	}
+	switch line[j-1] {
+	case '[', '{', ',':
+		return true
+	case ':', '-', '?':
+		return j < i
+	}
+	return false
 }
 
 // lostComments returns the comments of in that out does not carry, counting
@@ -582,9 +605,10 @@ session:
 // The scanner behind the comment check: it must see a comment wherever YAML
 // does, and not inside a quoted scalar.
 func TestYAMLComments(t *testing.T) {
-	doc := "# a\nk: \"v # no\" # b\nl: 'x#y' #c\n  # d\nm: a#b\n"
+	doc := "# a\nk: \"v # no\" # b\nl: 'x#y' #c\n  # d\nm: a#b\n" +
+		"n: don't # e\no: \"q\\\" # no\" # f\np: ['x # no', \"y\"] # g\n- 'it''s # no' # h\nq: a-'b # i\n"
 	got := yamlComments(doc)
-	want := []string{"# a", "# b", "#c", "# d"}
+	want := []string{"# a", "# b", "#c", "# d", "# e", "# f", "# g", "# h", "# i"}
 	if !slices.Equal(got, want) {
 		t.Errorf("yamlComments = %q, want %q", got, want)
 	}
