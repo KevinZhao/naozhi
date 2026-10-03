@@ -550,7 +550,7 @@ function rollbackOptimisticRunning(key, node) {
   }
   // The flip may have been applied without a sessionList.sessionsData entry (new session's
   // first send) — restore the button either way.
-  if (key === selection.key && (node || 'local') === selection.node) updateSendButton('ready');
+  if (key === selection.key && (node || 'local') === selection.node) updateSendButton('ready', { silent: true });
 }
 
 

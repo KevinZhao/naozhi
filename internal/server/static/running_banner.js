@@ -1,7 +1,5 @@
-// running_banner.js — extracted from dashboard.js (#2558 D4).
-//
-// Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block and the export block below are the only additions.
+// running_banner.js — the running banner, the turn timer, the send/stop buttons
+// and the transcript scroll position.
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
@@ -15,7 +13,7 @@ import { wsm } from './ws_manager.js';
 import { ICONS } from './icons.js';
 import { getToken } from './platform.js';
 import { sid } from './session_ident.js';
-import { getMsgValue, setMsgValue, showNetworkError } from './utilities.js';
+import { announce, getMsgValue, setMsgValue, showNetworkError } from './utilities.js';
 import { shell } from './shell.js';
 
 // --- Running banner: tool activity + agent tracking ---
@@ -61,14 +59,20 @@ function resetTurnStateForUserEcho() {
   resetTurnState(turnState.justSent ? { keepTimer: true } : undefined);
 }
 
-// paintTurnElapsed renders turnState.turnStartTime → "m:ss" into #rb-elapsed.
+// turnElapsedText formats the time since turnState.turnStartTime as "m:ss",
+// or '' when no turn is being timed.
+function turnElapsedText() {
+  if (!turnState.turnStartTime) return '';
+  const s = Math.max(0, Math.floor((Date.now() - turnState.turnStartTime) / 1000));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+
+// paintTurnElapsed renders turnElapsedText into #rb-elapsed.
 // Shared by startTurnTimer and the history-rebuild path so both paint
 // immediately instead of waiting for the first interval tick.
 function paintTurnElapsed() {
   const el = document.getElementById('rb-elapsed');
-  if (!el || !turnState.turnStartTime) return;
-  const s = Math.max(0, Math.floor((Date.now() - turnState.turnStartTime) / 1000));
-  el.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  if (el && turnState.turnStartTime) el.textContent = turnElapsedText();
 }
 
 // startTurnTimer anchors the elapsed chip. Called from
@@ -225,13 +229,6 @@ function updateSidebarAgentBadge() {
     else { var span = document.createElement('span'); span.className = 'sc-agents'; span.innerHTML = html; meta.appendChild(span); }
   } else if (existing) { existing.remove(); }
 }
-
-// renderAgentRows / agentRowHtml / findAgentByToolUseId / findAgentByTaskId /
-// initAgentsFromSession moved to static/agent_view.js (RFC v4 agent-team-ui
-// Phase 2.5). The names remain published on window so call sites here keep
-// working unchanged; the indirection gives Phase 3 a clean module boundary
-// to grow the banner/switchAgentView/WS-agent logic without piling onto
-// this already-oversized file.
 
 function applyEventToTurnState(ev) {
   startTurnTimer();
@@ -415,20 +412,9 @@ function restoreScrollPos(key, node) {
   return true;
 }
 
-// maybeStickBottom is the conditional counterpart to stickEventsBottom:
-// it ONLY scrolls if the user is already pinned within `scrollSlackPx`
-// of the bottom. WS-pushed assistant chunks / result events go through
-// this so a user reading earlier history isn't yanked to the latest
-// reply mid-scroll. UI Round 5 R5-6.
-//
-// Trigger contract (per design doc §R5-6):
-//   - send-time optimistic bubble  → stickEventsBottom (unconditional)
-//   - selectSession                → stickEventsBottom (fresh view)
-//   - history "load earlier" page  → no scroll (preserve position)
-//   - WS push assistant_chunk      → maybeStickBottom (only if at bottom)
-//   - WS push result event         → maybeStickBottom (only if at bottom)
+// scrollSlackPx is how far above the bottom (px) still counts as pinned: a
+// live event follows the bottom only for a reader within it.
 const scrollSlackPx = 80;
-
 
 // Turn watchdog: while the selected session is "running", periodically pull
 // the authoritative REST snapshot so the banner self-heals if a terminal WS
@@ -455,7 +441,19 @@ function stopTurnWatchdog() {
   if (timers.turnWatchdog) { clearInterval(timers.turnWatchdog); timers.turnWatchdog = null; }
 }
 
-function updateSendButton(state) {
+// announceTurnEnd tells screen readers the open session's turn ended. Only its
+// running → non-running edge speaks, so the result event and the ready push
+// after it announce once between them.
+function announceTurnEnd(prev, state) {
+  if (!selection.key || !prev || prev.state !== 'running' || prev.key !== sid(selection.key, selection.node)) return;
+  const elapsed = turnElapsedText();
+  announce(state !== 'ready' ? '回合已结束' : '回复完成' + (elapsed ? '，用时 ' + elapsed : ''));
+}
+
+// updateSendButton applies a session state to the composer and banner.
+// opts.silent skips the turn-end announcement (a rolled-back send was no turn).
+function updateSendButton(state, opts) {
+  const prev = selection.lastAppliedMainState;
   if (selection.key) selection.lastAppliedMainState = { key: sid(selection.key, selection.node), state: state };
   const banner = document.getElementById('running-banner');
   const sendBtn = document.getElementById('btn-send');
@@ -470,6 +468,7 @@ function updateSendButton(state) {
     startTurnWatchdog();
   } else {
     stopTurnWatchdog();
+    if (!(opts && opts.silent)) announceTurnEnd(prev, state);
     // resetTurnState → refreshBanner will hide the banner since the session
     // is no longer "running". If background agents are still active (e.g.
     // zero-downtime restart), refreshBanner keeps the banner visible.

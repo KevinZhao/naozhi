@@ -1215,16 +1215,16 @@ function renderMainShell() {
     // populates it; :empty/[hidden] keeps it out of layout when a session has
     // no recorded runs.
     '<details class="session-runs-panel" id="session-runs-panel" hidden></details>' +
-    '<div class="events" id="events-scroll" role="log" aria-live="polite" aria-relevant="additions">' + (s.state === 'running' ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>' : '') + '</div>' +
+    '<div class="events" id="events-scroll" role="log" aria-live="off">' + (s.state === 'running' ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>' : '') + '</div>' +
     '<div class="nav-pill" id="nav-pill">' +
       '<button type="button" data-action="nav-msg" data-dir="prev" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navUp + '</button>' +
       '<span class="nav-counter" id="nav-counter" data-action="nav-show-list" title="\u70b9\u51fb\u67e5\u770b\u5168\u90e8\u7528\u6237\u6d88\u606f"></span>' +
       '<button type="button" data-action="nav-msg" data-dir="next" id="nav-next" title="\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2193)" aria-label="\u8df3\u5230\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f">' + ICONS.navDown + '</button>' +
     '</div>' +
-    '<div class="running-banner nz-hidden" id="running-banner" role="status" aria-live="polite">' +
+    '<div class="running-banner nz-hidden" id="running-banner">' +
       '<div class="rb-tool-row">' +
         '<span class="running-status"><span class="running-dot" aria-hidden="true"></span><span id="tool-activity">处理中...</span></span>' +
-        '<span class="rb-elapsed" id="rb-elapsed"></span>' +
+        '<span class="rb-elapsed" id="rb-elapsed" aria-hidden="true"></span>' +
       '</div>' +
       '<div class="rb-thinking-summary nz-hidden" id="rb-thinking-summary"></div>' +
       '<div class="rb-agents" id="rb-agents"></div>' +
