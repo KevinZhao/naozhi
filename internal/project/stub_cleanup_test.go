@@ -2,6 +2,7 @@ package project
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -90,6 +91,15 @@ func TestScan_LegacyStubLookalikesUntouched(t *testing.T) {
 	if err := os.Symlink("../target.yaml", linked); err != nil {
 		t.Fatal(err)
 	}
+	// A symlinked .naozhi/ whose target holds a byte-exact stub.
+	shared := filepath.Join(parent, "shared")
+	if err := saveConfigToPath(filepath.Join(shared, configFile), ProjectConfig{CreatedAt: 6}); err != nil {
+		t.Fatal(err)
+	}
+	makeProjectDir(t, root, "dirlinked", nil)
+	if err := os.Symlink(shared, filepath.Join(root, "dirlinked", configDir)); err != nil {
+		t.Fatal(err)
+	}
 	rootStub := filepath.Join(root, configDir, configFile)
 	if err := saveConfigToPath(rootStub, ProjectConfig{CreatedAt: 5}); err != nil {
 		t.Fatal(err)
@@ -98,12 +108,14 @@ func TestScan_LegacyStubLookalikesUntouched(t *testing.T) {
 	// An index entry equal to the root's yaml value must not make it a stub.
 	writeIndexFile(t, indexPath, map[string]int64{root: 5})
 	before := treeSnapshot(t, root)
+	maps.Copy(before, treeSnapshot(t, shared))
 
 	m, _ := NewManager(root, PlannerDefaults{}, WithIndexPath(indexPath), WithIncludeRoot(true))
 	if err := m.Scan(); err != nil {
 		t.Fatal(err)
 	}
 	after := treeSnapshot(t, root)
+	maps.Copy(after, treeSnapshot(t, shared))
 	for path, v := range before {
 		if after[path] != v {
 			t.Errorf("Scan changed %s: before %q, after %q", path, v, after[path])

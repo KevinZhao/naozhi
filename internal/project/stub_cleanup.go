@@ -30,9 +30,13 @@ func (m *Manager) sweepLegacyStubs(projects map[string]*Project) {
 }
 
 // removeLegacyStub deletes p's project.yaml, and the then-empty .naozhi/,
-// when the file is a byte-exact Scan stub; anything else is left untouched.
+// when the file is a byte-exact Scan stub in a real (non-symlink) .naozhi/;
+// anything else is left untouched.
 func removeLegacyStub(p *Project) {
 	dir := filepath.Join(p.Path, configDir)
+	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+		return
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) != 1 || entries[0].Name() != configFile {
 		return
