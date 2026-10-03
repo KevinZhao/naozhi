@@ -252,6 +252,9 @@ func decodeRecords(ctx context.Context, br *bufio.Reader, path string, out *[]cl
 	// ctx.Err() takes a mutex; checking every 32 records keeps decode throughput up.
 	const ctxCheckInterval = 32
 	var n int
+	var missing int
+	var firstSeq uint64
+	var firstTime int64
 	for {
 		n++
 		if n%ctxCheckInterval == 0 {
@@ -293,14 +296,22 @@ func decodeRecords(ctx context.Context, br *bufio.Reader, path string, out *[]cl
 				"path", path, "seq", rec.Seq, "err", err)
 			continue
 		}
-		// stampUUID runs in ring.EventLog.Append before a record reaches disk, so a
-		// missing UUID flags a producer bug or a hand-edited file. Still emit it
-		// (dropping would lose history) but warn: merged dedup cannot anchor it.
-		if entry.UUID == "" {
-			slog.Warn("naozhilog: entry missing UUID post-decode; dedup may regress",
-				"path", path, "seq", rec.Seq, "time", entry.Time)
+		// Two producers write entries: ring.EventLog's Append path, which runs
+		// stampUUID, and persist's gap record, UUID-less by design (see
+		// persist.gapEntryJSON). Any other miss flags a producer bug or a
+		// hand-edited file: keep the entry (dropping would lose history) and
+		// count it for one summary warning per decode pass.
+		if entry.UUID == "" && entry.Type != clievent.KindPersistGap {
+			if missing == 0 {
+				firstSeq, firstTime = rec.Seq, entry.Time
+			}
+			missing++
 		}
 		*out = append(*out, entry)
+	}
+	if missing > 0 {
+		slog.Warn("naozhilog: entries missing UUID post-decode; dedup may regress",
+			"path", path, "count", missing, "first_seq", firstSeq, "first_time", firstTime)
 	}
 	return nil
 }
