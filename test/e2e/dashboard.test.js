@@ -159,7 +159,7 @@ test.describe('Sidebar & session list', () => {
 
   // The '#sidebar-status' WebSocket status bar test was removed: the node was
   // deleted when the sidebar foot gave way to the session list (already absent
-  // at the history-squash commit a274e0cc; dashboard.js updateStatusBar()
+  // at the history-squash commit a274e0cc; session_list.js updateStatusBar()
   // early-returns with the comment "#sidebar-status 节点已在'底部让位给 session
   // 列表'的迭代中删除"). Local WS state now only surfaces via getNodeStatus()
   // in the New Session connection picker.

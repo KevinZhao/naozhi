@@ -536,6 +536,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/session_list.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/session_stream.js",
     "handler_type": "http.HandlerFunc"
   },

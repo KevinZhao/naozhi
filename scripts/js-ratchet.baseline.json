@@ -143,13 +143,13 @@
     "lateBindings": 3
   },
   "dashboard.js": {
-    "lines": 4770,
+    "lines": 3839,
     "maxFnLines": 209,
     "fnOver100": 4,
     "topLevelLetVar": 0,
     "configureDeps": 0,
     "deadInjections": 0,
-    "innerHTMLAssign": 21,
+    "innerHTMLAssign": 20,
     "htmlInsert": 6,
     "lateBindings": 5
   },
@@ -315,6 +315,17 @@
     "configureDeps": 5,
     "deadInjections": 2,
     "innerHTMLAssign": 7,
+    "htmlInsert": 0,
+    "lateBindings": 0
+  },
+  "session_list.js": {
+    "lines": 955,
+    "maxFnLines": 100,
+    "fnOver100": 0,
+    "topLevelLetVar": 0,
+    "configureDeps": 0,
+    "deadInjections": 0,
+    "innerHTMLAssign": 1,
     "htmlInsert": 0,
     "lateBindings": 0
   },
