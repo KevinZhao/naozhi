@@ -12,8 +12,8 @@ import (
 func TestHandleCronList_StatusTags(t *testing.T) {
 	t.Parallel()
 	d := &Dispatcher{scheduler: &fakeCronScheduler{listJobsResult: []CronJob{
-		{ID: "aaaa", Schedule: "@hourly", Prompt: "active"},
-		{ID: "bbbb", Schedule: "@hourly", Prompt: "manual", Paused: true},
+		{ID: "aaaa", Schedule: "@hourly", Prompt: "active", FreshContext: true},
+		{ID: "bbbb", Schedule: "@hourly", Prompt: "manual", FreshContext: true, Paused: true},
 		{ID: "cccc", Schedule: "@hourly", Prompt: "broken", Paused: true, AutoPaused: true},
 	}}}
 	var out string
@@ -23,7 +23,7 @@ func TestHandleCronList_StatusTags(t *testing.T) {
 	if len(lines) != 4 {
 		t.Fatalf("reply = %q, want a header and 3 rows", out)
 	}
-	for i, want := range []string{"active", "manual [暂停]", "broken [自动暂停：连续失败]"} {
+	for i, want := range []string{"active", "manual [暂停]", "broken [保留上下文] [自动暂停：连续失败]"} {
 		if !strings.HasSuffix(lines[i+1], want) {
 			t.Errorf("row %d = %q, want suffix %q", i, lines[i+1], want)
 		}
