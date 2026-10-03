@@ -19,9 +19,9 @@ const (
 	imUrgent                // /urgent <message>
 )
 
-// imOrigin is one inbound IM message as a turn.Origin: it acks admission on
-// the user's message, opens an imDelivery for every turn that answers it, and
-// clears its ⏳ (ReactionQueued) when the request is dropped.
+// imOrigin is one inbound IM message as a turn.Origin: it acks admission with
+// a ⏳ (ReactionQueued) on the user's message, opens an imDelivery for every
+// turn that answers it, and clears the ⏳ when the request is dropped.
 type imOrigin struct {
 	d       *Dispatcher
 	msg     platform.IncomingMessage
@@ -32,9 +32,9 @@ type imOrigin struct {
 	kind    imKind
 	textLen int
 	images  int
-	// detached is set by Admitted(AckDetached), which runs before the
-	// detached turn's goroutine starts; such a request carries a ⏳.
-	detached bool
+	// reacted is set by Admitted when the ⏳ landed on the message, before
+	// the turn that answers it can start, so Finish knows to clear it.
+	reacted bool
 }
 
 func (d *Dispatcher) newIMOrigin(msg platform.IncomingMessage, lg *slog.Logger, key, agentID string, opts sessionview.AgentOpts, kind imKind, textLen, images int) *imOrigin {
@@ -75,23 +75,23 @@ func (o *imOrigin) Sink() string {
 
 func (o *imOrigin) SessionOpts(string) sessionview.AgentOpts { return o.opts }
 
-// Admitted acks the message: a log line for a turn that runs now, a ⏳ (or a
-// rate-limited notice) for a queued or detached one, a rate-limited busy
-// notice and a log line when the queue is disabled. The detached ⏳ goes on
-// before the turn's goroutine can clear it (#1963).
+// Admitted acks the message with a ⏳, or a rate-limited busy notice and a
+// log line when the queue is disabled. A queued request whose ⏳ fails gets a
+// rate-limited notice instead; one that runs now or detached does not, its
+// reply is the ack. The ⏳ goes on before the turn can clear it (#1963).
 func (o *imOrigin) Admitted(ctx context.Context, a turn.Ack) {
 	d := o.d
 	switch a {
 	case turn.AckOwner:
 		o.lg.Info("message received", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
+		o.reacted = d.ackQueuedWithReaction(ctx, o.msg, o.lg)
 	case turn.AckDetached:
-		o.detached = true
 		if o.kind == imUrgent {
 			o.lg.Info("/urgent dispatched", "key", o.key, "text_len", o.textLen)
 		} else {
 			o.lg.Info("message received (passthrough)", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
 		}
-		d.ackQueuedWithReaction(ctx, o.msg, o.lg)
+		o.reacted = d.ackQueuedWithReaction(ctx, o.msg, o.lg)
 	case turn.AckQueued:
 		if !d.ackQueuedWithReaction(ctx, o.msg, o.lg) {
 			d.replyNotice(ctx, o.msg, o.key, "消息已收到，待当前回复完成后一并处理。", o.lg, "queued")
@@ -157,8 +157,9 @@ func (dl *imDelivery) SessionReady(ctx context.Context, _ sessionview.SessionSta
 }
 
 // Finish replies with the turn's outcome, then clears the ⏳ of every request
-// this delivery answers. On a panic the ⏳ go first and the reply is the
-// generic retry notice.
+// this delivery answers, also when the reply panics: the turn layer never
+// calls a panicked Finish again. On a panic outcome the ⏳ go first and the
+// reply is the generic retry notice.
 func (dl *imDelivery) Finish(ctx context.Context, out turn.Outcome) {
 	o, d := dl.o, dl.o.d
 	if dl.tracker != nil {
@@ -175,6 +176,11 @@ func (dl *imDelivery) Finish(ctx context.Context, out turn.Outcome) {
 		d.replyText(notifyCtx, o.msg, "处理异常，请稍后重试。", dl.lg)
 		return
 	}
+	// WithoutCancel: on a shutdown-during-turn race ctx is already Done and
+	// a child WithTimeout would be born cancelled (#2262).
+	defer func() {
+		d.clearQueuedReactions(context.WithoutCancel(ctx), o.msg.Platform, dl.queuedIDs(), dl.lg)
+	}()
 	switch out.Stage {
 	case turn.StageSession:
 		replyCtx, cleanup, errMsg := d.handleGetOrCreateError(ctx, out.Err, dl.lg)
@@ -190,16 +196,14 @@ func (dl *imDelivery) Finish(ctx context.Context, out turn.Outcome) {
 	if dl.tracker != nil {
 		dl.tracker.stop()
 	}
-	// WithoutCancel: on a shutdown-during-turn race ctx is already Done and
-	// a child WithTimeout would be born cancelled (#2262).
-	d.clearQueuedReactions(context.WithoutCancel(ctx), o.msg.Platform, dl.queuedIDs(), dl.lg)
 }
 
 // queuedIDs are the message IDs carrying a ⏳ that this delivery answers: the
-// Mates, and the head itself unless it is the owner's own first message.
+// Mates, and the head itself unless it is a first turn's message whose ⏳
+// never landed.
 func (dl *imDelivery) queuedIDs() []string {
 	var ids []string
-	if dl.info.Role == turn.RoleHead && (!dl.info.First || dl.o.detached) {
+	if dl.info.Role == turn.RoleHead && (!dl.info.First || dl.o.reacted) {
 		ids = append(ids, dl.o.msg.MessageID)
 	}
 	for _, m := range dl.info.Mates {

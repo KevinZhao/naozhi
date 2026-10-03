@@ -67,10 +67,10 @@ func TestSharedPlannerKey_EveryChatInTheBatchIsAnswered(t *testing.T) {
 			}()
 			<-started
 			d.submit(context.Background(), origin(msgOf("other", "chatB", "b1", "qB")), turn.Request{Key: key, Text: "qB"})
-			wantClearedA := []string{}
+			wantClearedA := []string{"a1"}
 			if tc.aQueued {
 				d.submit(context.Background(), origin(msgOf("fake", "chatA", "a2", "qA2")), turn.Request{Key: key, Text: "qA2"})
-				wantClearedA = []string{"a2"}
+				wantClearedA = []string{"a1", "a2"}
 			}
 			close(release)
 			select {
