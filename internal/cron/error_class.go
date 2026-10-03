@@ -54,6 +54,18 @@ const (
 	// HTTP 503: retrying against this instance will never succeed.
 	CodeSchedulerStopped ErrCode = "scheduler_stopped"
 
+	// CodeJobQuotaExceeded — ErrJobQuotaExceeded (global or per-chat cap).
+	// HTTP 409: the request is fine, the table is full.
+	CodeJobQuotaExceeded ErrCode = "job_quota_exceeded"
+
+	// CodeIntervalTooShort — ErrIntervalTooShort (below minCronInterval).
+	// HTTP 400.
+	CodeIntervalTooShort ErrCode = "interval_too_short"
+
+	// CodeInvalidSchedule — ErrInvalidSchedule chain (parse or char-policy
+	// failure). HTTP 400.
+	CodeInvalidSchedule ErrCode = "invalid_schedule"
+
 	// CodeUnknown — non-nil error not matching any known sentinel. HTTP 500.
 	CodeUnknown ErrCode = "unknown"
 )
@@ -65,6 +77,9 @@ const (
 // ErrPersistFailed is checked first: it can appear alongside a state
 // sentinel (mutation already applied, disk write failed) and the operator
 // action it demands must win.
+//
+// ErrIntervalTooShort precedes ErrInvalidSchedule because it is wrapped
+// inside that chain.
 func ClassifyError(err error) ErrCode {
 	if err == nil {
 		return CodeOK
@@ -90,6 +105,12 @@ func ClassifyError(err error) ErrCode {
 		return CodePromptAlreadySet
 	case errors.Is(err, ErrSchedulerStopped):
 		return CodeSchedulerStopped
+	case errors.Is(err, ErrJobQuotaExceeded):
+		return CodeJobQuotaExceeded
+	case errors.Is(err, ErrIntervalTooShort):
+		return CodeIntervalTooShort
+	case errors.Is(err, ErrInvalidSchedule):
+		return CodeInvalidSchedule
 	default:
 		return CodeUnknown
 	}
@@ -110,6 +131,9 @@ var errCodeHTTP = map[ErrCode]int{
 	CodeInvalidPrompt:    http.StatusBadRequest,
 	CodePromptAlreadySet: http.StatusConflict,
 	CodeSchedulerStopped: http.StatusServiceUnavailable,
+	CodeJobQuotaExceeded: http.StatusConflict,
+	CodeIntervalTooShort: http.StatusBadRequest,
+	CodeInvalidSchedule:  http.StatusBadRequest,
 	CodeUnknown:          http.StatusInternalServerError,
 }
 

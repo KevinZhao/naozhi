@@ -30,6 +30,21 @@ func writeCronErr(w http.ResponseWriter, status int, msg string) {
 	httputil.WriteJSONStatus(w, status, map[string]string{"error": msg})
 }
 
+// writeAddUpdateRejection answers an AddJob / UpdateJob rejection that no
+// handler-specific branch claimed. A full job table and a too-frequent
+// schedule get their own status and message; anything else is a 400 with
+// fallback, never err.Error() (parser details leak field offsets).
+func writeAddUpdateRejection(w http.ResponseWriter, err error, fallback string) {
+	switch code := cronpkg.ClassifyError(err); code {
+	case cronpkg.CodeJobQuotaExceeded:
+		writeCronErr(w, code.HTTPStatus(), "cron job quota reached")
+	case cronpkg.CodeIntervalTooShort:
+		writeCronErr(w, code.HTTPStatus(), "schedule interval below the 5m minimum")
+	default:
+		writeCronErr(w, http.StatusBadRequest, fallback)
+	}
+}
+
 // POST /api/cron — create a new cron job from dashboard.
 func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	// Per-IP rate limit: mutations write cron_jobs.json and mutate the scheduler
@@ -167,7 +182,7 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		// robfig/cron parser errors leak field offsets / parsed expressions;
 		// log the detail for operators, return a sanitized message.
 		slog.Warn("cron AddJob rejected", "err", err, "schedule", job.Schedule)
-		writeCronErr(w, http.StatusBadRequest, "invalid schedule or job fields")
+		writeAddUpdateRejection(w, err, "invalid schedule or job fields")
 		return
 	}
 

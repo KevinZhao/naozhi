@@ -45,6 +45,9 @@ func TestClassifyError_AllSentinels(t *testing.T) {
 		{"ErrInvalidPrompt", ErrInvalidPrompt, CodeInvalidPrompt, http.StatusBadRequest},
 		{"ErrPromptAlreadySet", ErrPromptAlreadySet, CodePromptAlreadySet, http.StatusConflict},
 		{"ErrSchedulerStopped", ErrSchedulerStopped, CodeSchedulerStopped, http.StatusServiceUnavailable},
+		{"ErrJobQuotaExceeded", ErrJobQuotaExceeded, CodeJobQuotaExceeded, http.StatusConflict},
+		{"ErrIntervalTooShort", ErrIntervalTooShort, CodeIntervalTooShort, http.StatusBadRequest},
+		{"ErrInvalidSchedule", ErrInvalidSchedule, CodeInvalidSchedule, http.StatusBadRequest},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -112,6 +115,9 @@ func TestErrCodeHTTP_Exhaustive(t *testing.T) {
 		CodeInvalidPrompt,
 		CodePromptAlreadySet,
 		CodeSchedulerStopped,
+		CodeJobQuotaExceeded,
+		CodeIntervalTooShort,
+		CodeInvalidSchedule,
 		CodeUnknown,
 	}
 	for _, code := range allCodes {
@@ -141,5 +147,80 @@ func TestClassifyError_RealMutationFailures(t *testing.T) {
 	}
 	if got := ClassifyError(err); got != CodeJobNotFound {
 		t.Errorf("ClassifyError(PauseJobByID-missing) = %q, want %q (err=%v)", got, CodeJobNotFound, err)
+	}
+}
+
+// TestClassifyError_AddJobRejections drives each AddJob refusal through the
+// real Scheduler, so a cap or schedule error that loses its sentinel (a bare
+// fmt.Errorf) degrades to CodeUnknown here instead of in the IM reply. The
+// interval case also stays inside the ErrInvalidSchedule chain.
+func TestClassifyError_AddJobRejections(t *testing.T) {
+	t.Parallel()
+	s := NewScheduler(SchedulerConfig{MaxJobs: 2, MaxJobsPerChat: 1, AllowNilRouter: true}, SchedulerDeps{})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+	for _, j := range []*Job{
+		{Schedule: "@every 1h", Prompt: "p", Platform: "p", ChatID: "a"},
+		{Schedule: "@every 1h", Prompt: "p", Platform: "p", ChatID: "b"},
+	} {
+		if err := s.AddJob(j); err != nil {
+			t.Fatalf("seed AddJob: %v", err)
+		}
+	}
+
+	cases := []struct {
+		name string
+		job  *Job
+		want ErrCode
+	}{
+		{"global cap", &Job{Schedule: "@every 1h", Prompt: "p", Platform: "p", ChatID: "c"}, CodeJobQuotaExceeded},
+		{"interval", &Job{Schedule: "@every 1m", Prompt: "p", Platform: "p", ChatID: "c"}, CodeIntervalTooShort},
+		{"parse", &Job{Schedule: "not a cron", Prompt: "p", Platform: "p", ChatID: "c"}, CodeInvalidSchedule},
+	}
+	for _, tc := range cases {
+		err := s.AddJob(tc.job)
+		if got := ClassifyError(err); got != tc.want {
+			t.Errorf("%s: ClassifyError = %q, want %q (err=%v)", tc.name, got, tc.want, err)
+		}
+	}
+	if err := s.AddJob(&Job{Schedule: "@every 1m", Prompt: "p", Platform: "p", ChatID: "c"}); !errors.Is(err, ErrInvalidSchedule) {
+		t.Errorf("interval rejection %v is not in the ErrInvalidSchedule chain", err)
+	}
+
+	// Per-chat cap: room globally, chat "a" already holds its one job.
+	perChat := NewScheduler(SchedulerConfig{MaxJobs: 10, MaxJobsPerChat: 1, AllowNilRouter: true}, SchedulerDeps{})
+	if err := perChat.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer perChat.Stop()
+	if err := perChat.AddJob(&Job{Schedule: "@every 1h", Prompt: "p", Platform: "p", ChatID: "a"}); err != nil {
+		t.Fatalf("seed AddJob: %v", err)
+	}
+	err := perChat.AddJob(&Job{Schedule: "@every 1h", Prompt: "p", Platform: "p", ChatID: "a"})
+	if got := ClassifyError(err); got != CodeJobQuotaExceeded {
+		t.Errorf("per-chat cap: ClassifyError = %q, want %q (err=%v)", got, CodeJobQuotaExceeded, err)
+	}
+}
+
+// TestClassifyError_UpdateJobScheduleRejections pins the same chain on the
+// UpdateJob schedule path.
+func TestClassifyError_UpdateJobScheduleRejections(t *testing.T) {
+	t.Parallel()
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, AllowNilRouter: true}, SchedulerDeps{})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+	j := &Job{Schedule: "@every 1h", Prompt: "p", Platform: "p", ChatID: "a"}
+	if err := s.AddJob(j); err != nil {
+		t.Fatalf("seed AddJob: %v", err)
+	}
+	for sched, want := range map[string]ErrCode{"@every 1m": CodeIntervalTooShort, "not a cron": CodeInvalidSchedule} {
+		_, err := s.UpdateJob(j.ID, JobUpdate{Schedule: &sched})
+		if got := ClassifyError(err); got != want {
+			t.Errorf("UpdateJob(%q): ClassifyError = %q, want %q (err=%v)", sched, got, want, err)
+		}
 	}
 }

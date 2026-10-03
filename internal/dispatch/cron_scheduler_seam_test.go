@@ -156,14 +156,11 @@ func TestFakeCronScheduler_RecordsCalls(t *testing.T) {
 	}
 }
 
-// TestHandleCronAdd_PromptVsScheduleErrorReply pins the #631-adjacent /
-// R20260531-ARCH-2 fix on the create path: handleCronAdd must not collapse a
-// prompt-policy rejection into the "请检查定时表达式格式" schedule message.
-// A user whose schedule parsed fine but whose prompt was rejected
-// (ClassifyError → CronCodeInvalidPrompt) gets a prompt-specific hint;
-// every other AddJob failure keeps the generic schedule message. Raw
-// err.Error() must never appear in the reply.
-func TestHandleCronAdd_PromptVsScheduleErrorReply(t *testing.T) {
+// handleCronAdd answers each AddJob failure class with its own reply: a
+// prompt-policy rejection, a full quota and a too-frequent schedule must not
+// be reported as a malformed expression, and an unclassified failure must not
+// blame the schedule either. Raw err.Error() must never appear in the reply.
+func TestHandleCronAdd_ErrorReplyByClass(t *testing.T) {
 	cases := []struct {
 		name       string
 		addJobErr  error
@@ -179,11 +176,32 @@ func TestHandleCronAdd_PromptVsScheduleErrorReply(t *testing.T) {
 			notSubstr:  "定时表达式",
 		},
 		{
-			name:       "capacity_or_schedule_falls_back",
-			addJobErr:  errors.New("per-chat cron limit reached (10)"),
-			classify:   "", // fake falls back to "unknown"
-			wantSubstr: "请检查定时表达式格式",
+			name:       "job_quota_exceeded",
+			addJobErr:  errors.New("cron: job quota exceeded: per-chat cron limit reached (10)"),
+			classify:   CronCodeJobQuotaExceeded,
+			wantSubstr: "定时任务数已达上限",
 			notSubstr:  "per-chat", // raw err.Error() must not leak
+		},
+		{
+			name:       "interval_too_short",
+			addJobErr:  errors.New("cron: invalid schedule: interval 1m0s"),
+			classify:   CronCodeIntervalTooShort,
+			wantSubstr: "执行间隔不能短于 5 分钟",
+			notSubstr:  "1m0s",
+		},
+		{
+			name:       "invalid_schedule",
+			addJobErr:  errors.New("cron: invalid schedule: expected 5 fields"),
+			classify:   CronCodeInvalidSchedule,
+			wantSubstr: "请检查定时表达式格式",
+			notSubstr:  "fields",
+		},
+		{
+			name:       "unknown",
+			addJobErr:  errors.New("opaque"),
+			classify:   "", // fake falls back to "unknown"
+			wantSubstr: "创建失败，请稍后再试",
+			notSubstr:  "定时表达式",
 		},
 	}
 	for _, c := range cases {
@@ -208,5 +226,36 @@ func TestHandleCronAdd_PromptVsScheduleErrorReply(t *testing.T) {
 				t.Errorf("reply = %q must NOT contain %q", got, c.notSubstr)
 			}
 		})
+	}
+}
+
+// /cron add and /cron resume print the next run with year and the
+// scheduler's zone abbreviation, since cron.timezone need not be the reader's.
+func TestCronNextRunShowsYearAndZone(t *testing.T) {
+	sh, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	next := time.Date(2026, time.October, 1, 9, 0, 0, 0, sh)
+	const want = "Next: 2026-10-01 09:00 CST"
+
+	for _, sub := range []string{"add", "resume"} {
+		d := newTestDispatcher(&fakePlatform{})
+		d.scheduler = &fakeCronScheduler{nextRunResult: next}
+		var got string
+		reply := func(s string) { got = s }
+		if sub == "add" {
+			d.handleCronAdd(incomingMsg(`/cron add "@every 30m" x`),
+				[]string{"/cron", "add", `"@every 30m" x`}, reply, slog.Default())
+		} else {
+			d.handleCronResume(incomingMsg("/cron resume abc"),
+				[]string{"/cron", "resume", "abc"}, reply, slog.Default())
+		}
+		if !strings.Contains(got, want) {
+			t.Errorf("/cron %s reply = %q, want substring %q", sub, got, want)
+		}
+	}
+	if got := formatCronNext(time.Time{}); got != "—" {
+		t.Errorf("formatCronNext(zero) = %q, want \"—\"", got)
 	}
 }

@@ -207,7 +207,7 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		default:
 			// Parser errors can leak internal field names / offsets; sanitize.
 			slog.Warn("cron UpdateJob rejected", "err", err, "id", osutil.SanitizeForLog(id, cronpkg.MaxIDLen))
-			writeCronErr(w, http.StatusBadRequest, "invalid update payload")
+			writeAddUpdateRejection(w, err, "invalid update payload")
 		}
 		return
 	}
