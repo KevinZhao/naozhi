@@ -96,7 +96,7 @@ func markStoreReadUnreadable(path, label string, err error) {
 	if path == "" || err == nil {
 		return
 	}
-	reason := fmt.Sprintf("%s could not be read (%v); the file is still on disk and naozhi holds no copy of it", label, err)
+	reason, hint := storeUnreadableText(label, err)
 	b := &storeBlock{label: label, reason: reason, since: time.Now()}
 	if prev, loaded := storeReadBlocked.LoadOrStore(path, b); loaded {
 		pb := prev.(*storeBlock)
@@ -116,13 +116,25 @@ func markStoreReadUnreadable(path, label string, err error) {
 		"path", path,
 		"label", label,
 		"err", err,
-		"hint", "fix or move the file aside; until then changes to it are not persisted")
+		"hint", hint)
 	cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
 		Layer:  "store-unreadable",
 		Key:    label,
 		Action: "ignored",
 		Reason: reason,
 	}})
+}
+
+// storeUnreadableText is the block reason and the operator hint for a blocked
+// file. A symlink gets its own wording: the file is fine, naozhi just will not
+// open it, so "fix the file" would send the operator looking for corruption.
+func storeUnreadableText(label string, err error) (reason, hint string) {
+	if errors.Is(err, jsonfile.ErrSymlink) {
+		return fmt.Sprintf("%s is a symlink; naozhi does not follow a symlinked store file and holds no copy of its target", label),
+			"replace the symlink with the real file and restart naozhi, or point session.store_path at the real location (a bind mount also works); deleting the symlink resumes saves from the in-memory state"
+	}
+	return fmt.Sprintf("%s could not be read (%v); the file is still on disk and naozhi holds no copy of it", label, err),
+		"fix or move the file aside; until then changes to it are not persisted"
 }
 
 // markStoreReadUnreadableReportOnly reports an unreadable file without blocking
@@ -133,14 +145,19 @@ func markStoreReadUnreadableReportOnly(path, label string, err error) {
 	if path == "" || err == nil {
 		return
 	}
+	reason := fmt.Sprintf("%s could not be read (%v); it will be regenerated", label, err)
+	hint := "this file is regenerated on the next save; no operator data is at risk"
+	if errors.Is(err, jsonfile.ErrSymlink) {
+		reason = fmt.Sprintf("%s is a symlink; naozhi does not follow it and the next save replaces it with a regular file", label)
+		hint = "the symlink target is left untouched; point session.store_path at the real location if the store should live there"
+	}
 	slog.Warn("session store: file could not be read",
-		"path", path, "label", label, "err", err,
-		"hint", "this file is regenerated on the next save; no operator data is at risk")
+		"path", path, "label", label, "err", err, "hint", hint)
 	cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
 		Layer:  "store-unreadable",
 		Key:    label,
 		Action: "ignored",
-		Reason: fmt.Sprintf("%s could not be read (%v); it will be regenerated", label, err),
+		Reason: reason,
 	}})
 }
 
