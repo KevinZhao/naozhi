@@ -3,12 +3,13 @@ package server
 // static_versioning.go — dashboard.html as served: every /static/ URL names
 // its asset's content hash, so the browser may keep the file for good.
 //
-// The page links its stylesheets and entry modules directly; those URLs are
-// rewritten in place. The rest of the module graph is reached through
-// `import './x.js'`, which the generated import map redirects to the hashed
-// URL, so a release re-downloads only the files whose bytes changed and the JS
-// itself is never rewritten. modulepreload links fetch the whole graph in one
-// wave instead of one round trip per import level. The page itself stays
+// Stylesheet URLs are rewritten in place. Modules are reached only through
+// specifiers (`import './x.js'`, and one inline `import "/static/x.js"` loader
+// per entry tag) that the generated import map redirects to the hashed URL, so
+// a release re-downloads only the changed files and the JS is never rewritten.
+// Without import maps every specifier stays the same unversioned URL, so each
+// file is still one module instance; a hashed entry src would make a second.
+// modulepreload links fetch the whole graph in one wave. The page itself stays
 // no-cache, so the next load after an upgrade picks up the new hashes.
 
 import (
@@ -25,6 +26,13 @@ import (
 
 // staticURLAttrRe matches a src/href attribute naming a /static/ asset.
 var staticURLAttrRe = regexp.MustCompile(`((?:src|href)=")/static/([^"?#]+)"`)
+
+// moduleEntryTagRe matches an entry module tag of the page as written.
+var moduleEntryTagRe = regexp.MustCompile(`<script type="module" src="/static/([A-Za-z0-9_./-]+\.js)"></script>`)
+
+// moduleLoaderRe matches the inline loader an entry tag is rewritten to;
+// buildDashboardCSP admits exactly these bodies by hash.
+var moduleLoaderRe = regexp.MustCompile(`<script type="module">(import "/static/[A-Za-z0-9_./-]+\.js";)</script>`)
 
 // assetURLVersion is the v= value naming an asset's current bytes: the first
 // 16 hex characters of its ETag, or "" for a malformed ETag.
@@ -69,13 +77,21 @@ func dashboardAssetVersion(assets map[string]staticAsset) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-// renderDashboardHTML returns raw with every /static/ URL versioned and, just
-// before </head>, the nz-asset-version meta, the import map and one
-// modulepreload link per module. assets holds the raw page under its own key.
-// An attribute naming an asset not in assets is an error: it would 404.
+// renderDashboardHTML returns raw with every entry module tag turned into an
+// inline loader, every other /static/ URL versioned and, just before </head>,
+// the nz-asset-version meta, the import map and one modulepreload link per
+// module. assets holds the raw page under its own key. Naming an asset not in
+// assets is an error: it would 404.
 func renderDashboardHTML(raw []byte, assets map[string]staticAsset) ([]byte, error) {
 	var missing []string
-	page := staticURLAttrRe.ReplaceAllFunc(raw, func(m []byte) []byte {
+	page := moduleEntryTagRe.ReplaceAllFunc(raw, func(m []byte) []byte {
+		key := string(moduleEntryTagRe.FindSubmatch(m)[1])
+		if _, ok := assets[key]; !ok {
+			return m // left for the pass below to report
+		}
+		return []byte(`<script type="module">import "/static/` + key + `";</script>`)
+	})
+	page = staticURLAttrRe.ReplaceAllFunc(page, func(m []byte) []byte {
 		sub := staticURLAttrRe.FindSubmatch(m)
 		key := string(sub[2])
 		a, ok := assets[key]

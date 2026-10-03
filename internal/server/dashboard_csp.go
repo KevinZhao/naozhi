@@ -13,9 +13,9 @@ import (
 // #1980: script-src carries no 'unsafe-inline' — the dashboard bundle wires
 // every handler through the nz.actions data-action delegation, and the only
 // inline scripts (the theme bootstrap, which must run before first paint, and
-// the generated import map) are allowlisted by SHA-256 hash, computed from the
-// page as served, so an edit re-derives the hash instead of silently breaking
-// the page. The jsdelivr sources are pinned to the exact versioned files the
+// the generated import map and entry loaders) are allowlisted by SHA-256 hash,
+// computed from the page as served, so an edit re-derives the hash instead of
+// silently breaking the page. The jsdelivr sources are pinned to the exact versioned files the
 // lazy loaders inject (an /npm/ prefix is an anyone-can-publish namespace,
 // i.e. an allowlist bypass); TestDashboardCSP_CDNURLsMatchBundle keeps them in
 // lockstep with dashboard.js.
@@ -45,8 +45,8 @@ func cspHash(body string) string {
 }
 
 // buildDashboardCSP derives the policy for page. The raw page carries no
-// import map, so it yields the policy without that hash, which is the one the
-// e2e mock serves next to the raw page.
+// import map or entry loaders, so it yields the policy without those hashes,
+// which is the one the e2e mock serves next to the raw page.
 func buildDashboardCSP(page []byte) string {
 	if page == nil {
 		panic("dashboard CSP self-test: dashboard.html is not embedded")
@@ -65,6 +65,9 @@ func buildDashboardCSP(page []byte) string {
 		panic(fmt.Sprintf("dashboard CSP self-test: found %d import maps in dashboard.html, want at most 1", len(maps)))
 	}
 	for _, m := range maps {
+		hashes += " " + cspHash(m[1])
+	}
+	for _, m := range moduleLoaderRe.FindAllStringSubmatch(string(page), -1) {
 		hashes += " " + cspHash(m[1])
 	}
 

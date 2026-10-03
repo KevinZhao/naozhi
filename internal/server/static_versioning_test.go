@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -13,7 +14,7 @@ import (
 var (
 	servedStaticAttrRe = regexp.MustCompile(`(?:src|href)="/static/([^"?#]+)(\?v=[^"]*)?"`)
 	modulePreloadRe    = regexp.MustCompile(`<link rel="modulepreload" href="([^"]+)">`)
-	moduleScriptRe     = regexp.MustCompile(`<script type="module" src="/static/([^"?]+)\?v=([^"]+)"></script>`)
+	moduleSrcTagRe     = regexp.MustCompile(`<script type="module" src="([^"]*)"`)
 	assetVersionMetaRe = regexp.MustCompile(`<meta name="nz-asset-version" content="([0-9a-f]{16})">`)
 )
 
@@ -56,10 +57,12 @@ func TestDashboardPage_StaticURLsVersioned(t *testing.T) {
 	t.Parallel()
 	page := servedDashboardPage(t)
 	hits := servedStaticAttrRe.FindAllStringSubmatch(page, -1)
-	rawHits := servedStaticAttrRe.FindAllStringSubmatch(string(rawDashboardHTML(t)), -1)
+	raw := string(rawDashboardHTML(t))
+	rawHits := servedStaticAttrRe.FindAllStringSubmatch(raw, -1)
+	entries := len(moduleEntryTagRe.FindAllString(raw, -1))
 	modules := len(dashboardModuleKeys(staticAssets))
-	if len(hits) != len(rawHits)+modules {
-		t.Errorf("served page links %d /static/ URLs, want the raw page's %d plus %d modulepreloads", len(hits), len(rawHits), modules)
+	if len(hits) != len(rawHits)-entries+modules {
+		t.Errorf("served page links %d /static/ URLs, want the raw page's %d minus %d entry tags plus %d modulepreloads", len(hits), len(rawHits), entries, modules)
 	}
 	for _, h := range hits {
 		want := "?v=" + assetURLVersion(staticAssets[h[1]].etag)
@@ -70,9 +73,8 @@ func TestDashboardPage_StaticURLsVersioned(t *testing.T) {
 }
 
 // The import map covers exactly the module set, each entry pointing at the
-// versioned URL; the page's own module tags use the same URLs (one module
-// instance per file, not one per URL form); the map comes before anything
-// that loads a module; modulepreload fetches exactly the map's targets.
+// versioned URL; the map comes before anything that loads a module;
+// modulepreload fetches exactly the map's targets.
 func TestDashboardPage_ImportMapAndPreload(t *testing.T) {
 	t.Parallel()
 	page := servedDashboardPage(t)
@@ -86,16 +88,6 @@ func TestDashboardPage_ImportMapAndPreload(t *testing.T) {
 		want := "/static/" + name + "?v=" + assetURLVersion(staticAssets[name].etag)
 		if got := imports["/static/"+name]; got != want {
 			t.Errorf("import map /static/%s -> %q, want %q", name, got, want)
-		}
-	}
-
-	scripts := moduleScriptRe.FindAllStringSubmatch(page, -1)
-	if len(scripts) == 0 {
-		t.Fatal("served page has no versioned module script tags")
-	}
-	for _, s := range scripts {
-		if tag := "/static/" + s[1] + "?v=" + s[2]; imports["/static/"+s[1]] != tag {
-			t.Errorf("<script src=%q> differs from the import map's %q: the module would load twice", tag, imports["/static/"+s[1]])
 		}
 	}
 
@@ -125,6 +117,35 @@ func TestDashboardPage_ImportMapAndPreload(t *testing.T) {
 		t.Error("served page carries no nz-asset-version meta")
 	} else if want := dashboardAssetVersion(rawStaticAssets(t)); m[1] != want {
 		t.Errorf("nz-asset-version = %s, want %s", m[1], want)
+	}
+}
+
+// Entry modules load through the same specifier form as deep imports, so
+// each file is one module instance with or without import-map support: a
+// module script src is never mapped, and the module map is keyed by the full
+// URL, query included. The loaders keep the raw page's entry order.
+func TestDashboardPage_EntryModulesLoadThroughSpecifiers(t *testing.T) {
+	t.Parallel()
+	page := servedDashboardPage(t)
+	if m := moduleSrcTagRe.FindAllStringSubmatch(page, -1); len(m) != 0 {
+		t.Errorf("served page loads %d modules by src (first %q); an engine without import maps would instantiate them twice", len(m), m[0][1])
+	}
+	var want []string
+	for _, m := range moduleEntryTagRe.FindAllStringSubmatch(string(rawDashboardHTML(t)), -1) {
+		want = append(want, "/static/"+m[1])
+	}
+	var got []string
+	for _, m := range moduleLoaderRe.FindAllStringSubmatch(page, -1) {
+		got = append(got, strings.TrimSuffix(strings.TrimPrefix(m[1], `import "`), `";`))
+	}
+	if len(want) == 0 || !slices.Equal(got, want) {
+		t.Fatalf("entry loaders import %v, want the raw page's entry tags %v", got, want)
+	}
+	imports := importMapOf(t, page)
+	for _, spec := range got {
+		if _, ok := imports[spec]; !ok {
+			t.Errorf("entry loader specifier %s is not an import map key: it would skip the hashed URL", spec)
+		}
 	}
 }
 
@@ -224,9 +245,9 @@ func TestStaticCacheControl_ThroughMux(t *testing.T) {
 }
 
 // The /dashboard response is the rendered page, its CSP admits the page's
-// import map by hash, and the policy the raw page derives (the e2e mock's)
-// does not carry that hash.
-func TestDashboardCSP_AdmitsServedImportMap(t *testing.T) {
+// import map and entry loaders by hash, and the policy the raw page derives
+// (the e2e mock's) carries none of those hashes.
+func TestDashboardCSP_AdmitsServedGeneratedScripts(t *testing.T) {
 	t.Parallel()
 	const token = "csp-importmap-token"
 	srv := newTestServerWithToken(&mockPlatform{}, token)
@@ -245,7 +266,14 @@ func TestDashboardCSP_AdmitsServedImportMap(t *testing.T) {
 	if m == nil {
 		t.Fatal("served /dashboard carries no import map")
 	}
-	hash := cspHash(m[1])
+	bodies := []string{m[1]}
+	loaders := moduleLoaderRe.FindAllStringSubmatch(body, -1)
+	if len(loaders) == 0 {
+		t.Fatal("served /dashboard carries no entry loaders")
+	}
+	for _, l := range loaders {
+		bodies = append(bodies, l[1])
+	}
 	csp := w.Header().Get("Content-Security-Policy")
 	var scriptSrc string
 	for _, d := range strings.Split(csp, ";") {
@@ -253,10 +281,14 @@ func TestDashboardCSP_AdmitsServedImportMap(t *testing.T) {
 			scriptSrc = d
 		}
 	}
-	if !strings.Contains(scriptSrc, hash) {
-		t.Errorf("script-src %q does not admit the served import map %s", scriptSrc, hash)
-	}
-	if raw := buildDashboardCSP(rawDashboardHTML(t)); strings.Contains(raw, hash) {
-		t.Error("the raw page's policy carries the import map hash")
+	raw := buildDashboardCSP(rawDashboardHTML(t))
+	for _, b := range bodies {
+		hash := cspHash(b)
+		if !strings.Contains(scriptSrc, hash) {
+			t.Errorf("script-src does not admit the served inline script %.40q (%s)", b, hash)
+		}
+		if strings.Contains(raw, hash) {
+			t.Errorf("the raw page's policy carries the hash of %.40q", b)
+		}
 	}
 }
