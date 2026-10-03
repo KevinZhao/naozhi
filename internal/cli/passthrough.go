@@ -419,6 +419,31 @@ func (p *Process) onTurnResult() []*sendSlot {
 	return owners
 }
 
+// endUnownedTurn ends a turn the CLI started on its own (system/init with no
+// Send behind it, e.g. a background task-notification) once its result
+// arrives unclaimed. Without it nothing moves State back to Ready: no Send
+// defer owns the turn and onTurnResult only ends turns that consumed slots.
+// A queued passthrough slot keeps it Running — its own turn follows.
+func (p *Process) endUnownedTurn() {
+	p.slots.mu.Lock()
+	pending := len(p.slots.pending)
+	p.slots.mu.Unlock()
+	if pending > 0 {
+		return
+	}
+	p.turn.mu.Lock()
+	if !p.turn.unowned {
+		p.turn.mu.Unlock()
+		return
+	}
+	_, moved := p.turn.transitionLocked(evTurnEnded)
+	cb := p.turn.onTurnDone
+	p.turn.mu.Unlock()
+	if moved && cb != nil {
+		cb()
+	}
+}
+
 // reapAbortedPreempted collects pending slots the CLI discarded when a
 // priority:"now" preempted the active turn (result.subtype ==
 // "error_during_execution"): slots not yet replayed that are not themselves

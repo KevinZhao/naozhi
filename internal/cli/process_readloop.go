@@ -508,10 +508,8 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	// They are cheap no-ops when passthrough is not in use (zero
 	// pending slots, protocol doesn't support replay).
 
-	// system/init: mark start of new turn for turn-aggregation owner tracking
-	// and watchdog baseline. Unconditional is harmless — onSystemInit only
-	// matters when pendingSlots is non-empty and a replay arrives later.
-	// isSystemInit 在这里求值一次，下方复用。
+	// system/init starts a turn: Running, and unowned until a Send or a
+	// replayed slot claims it.
 	isSystemInit := ev.Type == "system" && ev.SubType == "init"
 	if isSystemInit && p.caps.Replay {
 		p.onSystemInit()
@@ -576,6 +574,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 		// under passthrough no legacy eventCh consumer would append it.
 		if ev.SubType == "error_during_execution" {
 			p.logEventAt(ev, nowMS)
+			p.endUnownedTurn()
 			return false
 		}
 	}
@@ -599,11 +598,10 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	// reconnects to a shim that's mid-turn).
 	p.logEventAt(ev, nowMS)
 
-	// A result with no active Send() (reconnect set Running via reconnectVerdict
-	// but the CLI finished first) transitions back to Ready. Gated on
-	// reconnectedMidTurn: otherwise State=Running means Send() owns the
-	// State→Ready transition via its defer, and racing it would let a second
-	// Send() start before that defer runs. The flag is one-shot.
+	// A result no Send owns ends its turn: a reconnect's in-flight turn (the
+	// one-shot reconnectedMidTurn) or one the CLI started itself (unowned).
+	// A Send-owned turn is left to Send's defer so a second Send cannot start
+	// before the first returns.
 	if ev.Type == "result" && p.turn.reconnectedMidTurn.CompareAndSwap(true, false) {
 		// Keep the outcome for a caller that did not issue the Send: past this
 		// point the frame's text survives nowhere (the ring.EventLog entry logged
@@ -621,6 +619,13 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 			// iteration if Kill() raced this path (onTurnDone is idempotent).
 			cb()
 		}
+	} else if ev.Type == "result" && p.caps.Replay {
+		// After eventCh, so a Send claiming Ready drains this result.
+		if p.deliverEvent(ev, now, log) {
+			return true
+		}
+		p.endUnownedTurn()
+		return false
 	}
 
 	return p.deliverEvent(ev, now, log)
