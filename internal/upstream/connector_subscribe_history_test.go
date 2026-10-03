@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
@@ -128,6 +129,35 @@ func TestHandleConn_WantHistory_CatchUpAfter(t *testing.T) {
 	proc.EventLog.Append(clievent.EventEntry{Time: 3000, UUID: "c", Type: "text", Summary: "next"})
 	if got := frameUUIDs(nextFrame(t, frames, "events")); len(got) != 1 || got[0] != "c" {
 		t.Fatalf("first live frame = %v, want [c]", got)
+	}
+}
+
+// TestHandleConn_WantHistory_EmptyCatchUp: a catch-up with nothing after
+// `after` is sent, empty, only while the session is running; an idle one sends
+// nothing until the next Append.
+func TestHandleConn_WantHistory_EmptyCatchUp(t *testing.T) {
+	for _, tc := range []struct {
+		state     cli.ProcessState
+		wantEmpty bool
+	}{{cli.StateRunning, true}, {cli.StateReady, false}} {
+		t.Run(tc.state.String(), func(t *testing.T) {
+			r, proc := injectHistory(t, clievent.EventEntry{Time: 1000, UUID: "old", Type: "user", Summary: "hi"})
+			proc.StateVal = tc.state
+			// Runs after the link closes; a running session stalls Shutdown.
+			t.Cleanup(func() { proc.StateVal = cli.StateReady })
+
+			frames := subscribeLink(t, r, node.ReverseMsg{Type: "subscribe", Key: historyKey, After: 2000, WantHistory: true})
+			nextFrame(t, frames, "subscribed")
+			if tc.wantEmpty {
+				if page := nextFrame(t, frames, "events"); len(page.Events) != 0 || page.Initial || page.HasMore != nil {
+					t.Fatalf("catch-up = %+v, want an empty plain batch", page)
+				}
+			}
+			proc.EventLog.Append(clievent.EventEntry{Time: 3000, UUID: "c", Type: "text", Summary: "next"})
+			if got := frameUUIDs(nextFrame(t, frames, "events")); len(got) != 1 || got[0] != "c" {
+				t.Fatalf("next frame = %v, want the live [c]", got)
+			}
+		})
 	}
 }
 

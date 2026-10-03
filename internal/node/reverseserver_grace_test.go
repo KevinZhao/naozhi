@@ -289,7 +289,8 @@ func TestReverseConn_SubscribeOnDroppedConn_KeyedError(t *testing.T) {
 }
 
 // TestReverseConn_SubscribeWriteFails_KeyedError: the first subscribe frame
-// failing to reach the node is refused the same way.
+// failing to reach the node is refused the same way, on a legacy node and on
+// one answering the opening page in-band.
 func TestReverseConn_SubscribeWriteFails_KeyedError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil); err == nil {
@@ -297,16 +298,22 @@ func TestReverseConn_SubscribeWriteFails_KeyedError(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	ws := dialReverseNode(t, srv)
-	ws.Close()
-	rc := newReverseConnWithMeta("node-1", "", "", ws, nil, "")
-	defer rc.Close()
+	for name, caps := range map[string][]string{"legacy": nil, "in-band": historyCaps} {
+		t.Run(name, func(t *testing.T) {
+			ws := dialReverseNode(t, srv)
+			ws.Close()
+			rc := newReverseConnWithMeta("node-1", "", "", ws, caps, "")
 
-	sink := &mockSink{id: 1}
-	rc.Subscribe(sink, graceKey, 0, 0)
-	expectReconnecting(t, sink, "node-1")
-	if n := len(bookSinks(rc, graceKey)); n != 0 {
-		t.Fatalf("a failed subscribe left %d sinks behind", n)
+			sink := &mockSink{id: 1}
+			rc.Subscribe(sink, graceKey, 0, 0)
+			expectReconnecting(t, sink, "node-1")
+			if n := len(bookSinks(rc, graceKey)); n != 0 {
+				t.Fatalf("a failed subscribe left %d sinks behind", n)
+			}
+			// Not deferred: after an unbalanced subWG.Done, Close's Wait
+			// would hang instead of letting the panic surface.
+			rc.Close()
+		})
 	}
 }
 
