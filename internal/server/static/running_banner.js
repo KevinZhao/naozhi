@@ -1,7 +1,5 @@
-// running_banner.js — extracted from dashboard.js (#2558 D4).
-//
-// Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block and the export block below are the only additions.
+// running_banner.js — the running banner, the turn timer, the send/stop buttons
+// and the transcript scroll position.
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
@@ -15,17 +13,18 @@ import { wsm } from './ws_manager.js';
 import { ICONS } from './icons.js';
 import { getToken } from './platform.js';
 import { sid } from './session_ident.js';
-import { getMsgValue, setMsgValue, showNetworkError } from './utilities.js';
+import { announce, getMsgValue, setMsgValue, showNetworkError } from './utilities.js';
 import { shell } from './shell.js';
 
 // --- Running banner: tool activity + agent tracking ---
 
 // turnState is shared by reference (send_message and agent_view import it), so
-// it is reset in place and never reassigned.
+// it is reset in place and never reassigned. interruptedKey (the session the
+// user stopped) outlives resetTurnState until that turn's end is applied.
 const turnState = {
   toolCount: 0, currentTool: null, agents: [], isThinking: false,
   thinkingSummary: '', toolCounts: {}, toolOrder: [], turnStartTime: 0, isWriting: false,
-  timerId: null, justSent: false
+  timerId: null, justSent: false, interruptedKey: ''
 };
 
 // resetTurnState clears the per-turn banner state. opts.keepTimer preserves
@@ -61,14 +60,20 @@ function resetTurnStateForUserEcho() {
   resetTurnState(turnState.justSent ? { keepTimer: true } : undefined);
 }
 
-// paintTurnElapsed renders turnState.turnStartTime → "m:ss" into #rb-elapsed.
+// turnElapsedText formats the time since turnState.turnStartTime as "m:ss",
+// or '' when no turn is being timed.
+function turnElapsedText() {
+  if (!turnState.turnStartTime) return '';
+  const s = Math.max(0, Math.floor((Date.now() - turnState.turnStartTime) / 1000));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+
+// paintTurnElapsed renders turnElapsedText into #rb-elapsed.
 // Shared by startTurnTimer and the history-rebuild path so both paint
 // immediately instead of waiting for the first interval tick.
 function paintTurnElapsed() {
   const el = document.getElementById('rb-elapsed');
-  if (!el || !turnState.turnStartTime) return;
-  const s = Math.max(0, Math.floor((Date.now() - turnState.turnStartTime) / 1000));
-  el.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  if (el && turnState.turnStartTime) el.textContent = turnElapsedText();
 }
 
 // startTurnTimer anchors the elapsed chip. Called from
@@ -226,13 +231,6 @@ function updateSidebarAgentBadge() {
   } else if (existing) { existing.remove(); }
 }
 
-// renderAgentRows / agentRowHtml / findAgentByToolUseId / findAgentByTaskId /
-// initAgentsFromSession moved to static/agent_view.js (RFC v4 agent-team-ui
-// Phase 2.5). The names remain published on window so call sites here keep
-// working unchanged; the indirection gives Phase 3 a clean module boundary
-// to grow the banner/switchAgentView/WS-agent logic without piling onto
-// this already-oversized file.
-
 function applyEventToTurnState(ev) {
   startTurnTimer();
   // Any real turn event ends the optimistic "已发送，正在处理…" window — the
@@ -333,6 +331,7 @@ function interruptSession() {
   if (!selection.key) return;
   const sd = sessionList.sessionsData[sid(selection.key, selection.node || 'local')];
   if (!sd || sd.state !== 'running') return;
+  turnState.interruptedKey = sid(selection.key, selection.node);
   const targetNode = selection.node && selection.node !== 'local' ? selection.node : '';
   // Claude Code 风格：中断时把刚发的那条用户文本回填到输入框方便改写。
   // 只在输入框当前为空时回填，避免覆盖用户已经开始输入的新内容；回填后
@@ -415,29 +414,15 @@ function restoreScrollPos(key, node) {
   return true;
 }
 
-// maybeStickBottom is the conditional counterpart to stickEventsBottom:
-// it ONLY scrolls if the user is already pinned within `scrollSlackPx`
-// of the bottom. WS-pushed assistant chunks / result events go through
-// this so a user reading earlier history isn't yanked to the latest
-// reply mid-scroll. UI Round 5 R5-6.
-//
-// Trigger contract (per design doc §R5-6):
-//   - send-time optimistic bubble  → stickEventsBottom (unconditional)
-//   - selectSession                → stickEventsBottom (fresh view)
-//   - history "load earlier" page  → no scroll (preserve position)
-//   - WS push assistant_chunk      → maybeStickBottom (only if at bottom)
-//   - WS push result event         → maybeStickBottom (only if at bottom)
+// scrollSlackPx is how far above the bottom (px) still counts as pinned: a
+// live event follows the bottom only for a reader within it.
 const scrollSlackPx = 80;
 
-
 // Turn watchdog: while the selected session is "running", periodically pull
-// the authoritative REST snapshot so the banner self-heals if a terminal WS
-// signal (the 'result' event and/or the 'ready' session_state broadcast) is
-// dropped on a still-open connection. Without this the "处理中..." banner stays
-// stuck until the operator switches sessions or reconnects — the bug this fixes.
-// fetchSessions reconciles via updateMainState (see the relaxed gate in
-// fetchSessions); the watchdog just supplies the missing tick, since the
-// session poll is stopped while WS is connected.
+// the authoritative REST snapshot so the banner self-heals when a terminal WS
+// signal (the 'result' event or the 'ready' push) is dropped on an open socket.
+// fetchSessions reconciles via updateMainState; the watchdog only supplies the
+// tick, since the session poll is stopped while WS is connected.
 const TURN_WATCHDOG_INTERVAL_MS = 15000;
 function startTurnWatchdog() {
   if (timers.turnWatchdog) return;
@@ -455,7 +440,19 @@ function stopTurnWatchdog() {
   if (timers.turnWatchdog) { clearInterval(timers.turnWatchdog); timers.turnWatchdog = null; }
 }
 
-function updateSendButton(state) {
+// announceTurnEnd tells screen readers the open session's turn ended. Only its
+// running → non-running edge speaks, so the result event and the ready push
+// after it announce once between them. A turn the user stopped is not a reply.
+function announceTurnEnd(prev, state) {
+  if (!selection.key || !prev || prev.state !== 'running' || prev.key !== sid(selection.key, selection.node)) return;
+  const elapsed = turnElapsedText();
+  announce(state !== 'ready' || turnState.interruptedKey === prev.key ? '回合已结束' : '回复完成' + (elapsed ? '，用时 ' + elapsed : ''));
+}
+
+// updateSendButton applies a session state to the composer and banner.
+// opts.silent skips the turn-end announcement (a rolled-back send was no turn).
+function updateSendButton(state, opts) {
+  const prev = selection.lastAppliedMainState;
   if (selection.key) selection.lastAppliedMainState = { key: sid(selection.key, selection.node), state: state };
   const banner = document.getElementById('running-banner');
   const sendBtn = document.getElementById('btn-send');
@@ -470,6 +467,8 @@ function updateSendButton(state) {
     startTurnWatchdog();
   } else {
     stopTurnWatchdog();
+    if (!(opts && opts.silent)) announceTurnEnd(prev, state);
+    turnState.interruptedKey = '';
     // resetTurnState → refreshBanner will hide the banner since the session
     // is no longer "running". If background agents are still active (e.g.
     // zero-downtime restart), refreshBanner keeps the banner visible.

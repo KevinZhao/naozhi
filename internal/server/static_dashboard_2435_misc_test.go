@@ -72,7 +72,8 @@ const setInterval = () => ++intervals;
 const clearInterval = () => {};
 function refreshBanner() {}
 let turnState = { turnStartTime: 0, timerId: null };
-` + extractJSFunction(t, js, "paintTurnElapsed") +
+` + extractJSFunction(t, js, "turnElapsedText") +
+		extractJSFunction(t, js, "paintTurnElapsed") +
 		extractJSFunction(t, js, "startTurnTimer") +
 		extractJSFunction(t, js, "resetTurnState") + `
 const out = {};
@@ -186,7 +187,8 @@ const setInterval = () => 42;
 const clearInterval = () => { cleared++; };
 function refreshBanner() {}
 let turnState = { turnStartTime: 0, timerId: null, justSent: false, toolCount: 0 };
-` + extractJSFunction(t, js, "paintTurnElapsed") +
+` + extractJSFunction(t, js, "turnElapsedText") +
+		extractJSFunction(t, js, "paintTurnElapsed") +
 		extractJSFunction(t, js, "startTurnTimer") +
 		extractJSFunction(t, js, "resetTurnState") +
 		extractJSFunction(t, js, "resetTurnStateForUserEcho") + `

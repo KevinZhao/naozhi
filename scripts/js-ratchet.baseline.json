@@ -330,7 +330,7 @@
     "lateBindings": 0
   },
   "running_banner.js": {
-    "lines": 509,
+    "lines": 508,
     "maxFnLines": 95,
     "fnOver100": 0,
     "topLevelLetVar": 0,
