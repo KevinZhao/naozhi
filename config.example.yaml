@@ -35,8 +35,9 @@
 #       env, -json emits machine-readable output.
 #   `naozhi config migrate -config config.yaml`  show the schema upgrade this
 #       file needs; -write applies it in place, keeping comments.
-#   `naozhi doctor`                              health checks against a
-#       running instance.
+#   `naozhi doctor`                              health checks: binary,
+#       state dir and this file's server settings even while naozhi is down,
+#       plus /health, auth and config drift when an instance is reachable.
 #
 # Deprecated spellings. Load still accepts them and logs a config-deprecated
 # WARN; `naozhi config migrate -write` rewrites them:
