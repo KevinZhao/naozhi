@@ -338,11 +338,15 @@ func (m *Manager) scanDisk() (scanResult, error) {
 	return scanResult{projects: projects, nextIndex: nextIndex}, nil
 }
 
-// excluded reports whether name matches a projects.exclude pattern; the
-// patterns were validated in NewManager, so Match cannot fail.
+// excluded reports whether name matches a projects.exclude pattern. NewManager
+// validated the patterns; a Match error means ValidateExcludePattern missed one.
 func (m *Manager) excluded(name string) bool {
 	for _, pat := range m.exclude {
-		if ok, _ := filepath.Match(pat, name); ok {
+		ok, err := filepath.Match(pat, name)
+		if err != nil {
+			slog.Warn("projects.exclude pattern is malformed", "pattern", pat, "err", err)
+		}
+		if ok {
 			return true
 		}
 	}

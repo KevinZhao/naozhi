@@ -652,7 +652,7 @@ func TestLoad_ProjectsExclude(t *testing.T) {
 	if got := cfg.Projects.Exclude; len(got) != 2 || got[0] != "tmp-*" || got[1] != "archive" {
 		t.Errorf("Projects.Exclude = %q, want [tmp-* archive]", got)
 	}
-	for _, bad := range []string{`"["`, `"a/b"`, `""`} {
+	for _, bad := range []string{`"["`, `"tmp-*["`, `"a/b"`, `""`} {
 		_, err := Load(writeCfg(t, "projects:\n  root: /tmp\n  exclude: [ok, "+bad+"]\n"))
 		if err == nil || !strings.Contains(err.Error(), "projects.exclude[1]") {
 			t.Errorf("Load(exclude %s) = %v, want a projects.exclude[1] error", bad, err)

@@ -78,7 +78,7 @@ func TestScan_ExcludedSubdirFreesIncludeRootName(t *testing.T) {
 func TestNewManager_RejectsInvalidExclude(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	for _, pat := range []string{"[", "a/b", ""} {
+	for _, pat := range []string{"[", "tmp-*[", "a/b", ""} {
 		if _, err := NewManager(root, PlannerDefaults{}, WithExclude([]string{"ok", pat})); err == nil {
 			t.Errorf("NewManager(exclude %q) = nil error", pat)
 		}

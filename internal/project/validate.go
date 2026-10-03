@@ -49,6 +49,8 @@ func ValidateProjectName(name string) error {
 // ValidateExcludePattern checks one projects.exclude entry: a filepath.Match
 // glob over a subdirectory's basename, so it must be well-formed and hold no
 // path separator; control and bidi runes are refused as in project names.
+// Match stops checking syntax once a '*' runs out of name, so the probe swaps
+// each '*' for '?', which has the same syntax and is literal inside a class.
 func ValidateExcludePattern(pattern string) error {
 	if pattern == "" {
 		return errors.New("exclude pattern is empty")
@@ -64,7 +66,7 @@ func ValidateExcludePattern(pattern string) error {
 	if strings.ContainsRune(pattern, '/') || strings.ContainsRune(pattern, filepath.Separator) {
 		return errors.New("exclude pattern must be a basename glob without a path separator")
 	}
-	if _, err := filepath.Match(pattern, ""); err != nil {
+	if _, err := filepath.Match(strings.ReplaceAll(pattern, "*", "?"), ""); err != nil {
 		return fmt.Errorf("exclude pattern %q is malformed: %w", pattern, err)
 	}
 	return nil
