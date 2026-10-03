@@ -3,7 +3,12 @@
 naozhi 把所有状态放在 `~/.naozhi/` 下，不依赖外部数据库。下列 7 类路径会随
 时间膨胀，operator 需要了解它们的规模和清理方式。启动时如果整个状态目录超过
 **500 MiB**，naozhi 会打一条 `state directory large` warn log，提示阅读本文。
-（500 MiB 阈值见 `cmd/naozhi/main.go` 的 `stateDirWarnMB`。）
+附件不在状态目录里：启动后 naozhi 会在后台把各 workspace 根（`session.cwd`、
+per-chat override、已绑定 project）下的 `.naozhi/attachments/` 加总，超过
+**500 MiB** 时打一条 `attachments large` warn log，字段含 `total_mb`、
+`largest_root` 和 `attachment_gc`（`disabled` / `dry_run` / `enabled`），`hint`
+按该模式给出下一步。（两个阈值见 `cmd/naozhi/main_helpers.go` 的
+`stateDirWarnMB` / `attachmentsWarnMB`。）
 
 ## 各路径上限估算
 
