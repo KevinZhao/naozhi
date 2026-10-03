@@ -1036,7 +1036,7 @@ function pickPaletteCustom(initialValue) {
   // Re-render the access-profile + backend + connection pickers inside the
   // modal and pre-select the palette's choices, so switching to Custom
   // Workspace doesn't drop any of them. The backend picker is emitted from
-  // the per-node cache (deps.cliBackendsByNode) for the currently-selected node,
+  // the per-node cache (serverInfo.cliBackendsByNode) for the currently-selected node,
   // falling back to the local serverInfo.cliBackends for the boot window before the
   // per-node fetch resolves; refreshBackendPicker below repaints it against
   // the authoritative manifest and on every node switch (picker node-aware
