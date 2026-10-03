@@ -72,6 +72,7 @@ tester.run('shell-bindings: no new configureX export', nz.rules['shell-bindings'
     { code: 'function configureFoo() {} export { configureFoo };', filename: 'static/view.js', errors: [{ messageId: 'newConfigure' }] },
     { code: 'function wire() {} export { wire as configureFoo };', filename: 'static/view.js', errors: [{ messageId: 'newConfigure', data: { name: 'configureFoo' } }] },
     { code: 'export default function configureFoo() {}', filename: 'static/view.js', errors: [{ messageId: 'newConfigure' }] },
+    { code: 'function configureFoo() {} export default configureFoo;', filename: 'static/view.js', errors: [{ messageId: 'newConfigure', data: { name: 'configureFoo' } }] },
   ],
 });
 

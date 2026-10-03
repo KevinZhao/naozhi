@@ -78,7 +78,7 @@ function isSharedBinding(variable) {
 // exportedNames: the local and exported names an export declaration binds.
 function exportedNames(node) {
   const d = node.declaration;
-  if (node.type === 'ExportDefaultDeclaration') return d.id ? [d.id.name] : [];
+  if (node.type === 'ExportDefaultDeclaration') return d.type === 'Identifier' ? [d.name] : d.id ? [d.id.name] : [];
   if (d?.type === 'FunctionDeclaration') return [d.id.name];
   if (d?.type === 'VariableDeclaration') return d.declarations.filter((x) => x.id.type === 'Identifier').map((x) => x.id.name);
   const spec = (n) => (n.type === 'Identifier' ? n.name : String(n.value));

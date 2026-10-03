@@ -14,7 +14,7 @@ import {
 // shell roots the analysis reads from them.
 const { caps: REAL_CAPS } = loadCaps();
 // The keys every caps fixture below needs besides the one it is about.
-const ANALYSIS_KEYS = { lateBindingTables: {}, injectionAllow: [], shellRoots: [] };
+const ANALYSIS_KEYS = { lateBindingTables: {}, injectionAllow: [], injectionLegacy: [], shellRoots: [] };
 
 // body returns n lines of statements, so a function around it spans n + 2.
 const body = (n) => Array.from({ length: n }, (_, i) => `  x(${i});`).join('\n');
@@ -714,6 +714,20 @@ test('injectionLegacy: a receiver not on a list fails, whatever it is called', (
   // The same two sources anywhere else are receivers like any other.
   assert.deepEqual(receiversOf({ 'a.js': registry, 'b.js': shell }, closed).filter((p) => !p.startsWith('caps.')).map((p) => p.split(' ').slice(0, 2).join(' ')),
     ['a.js:2: registerActions', 'b.js:3: registerShell']);
+});
+
+test('injectionLegacy: a method of an exported object literal is a receiver too', () => {
+  const tail = 'export function go() { deps.a(); }';
+  for (const [src, name] of [
+    [js('const deps = { a: null };', 'export const api = { wire(d) { deps.a = d.a; } };', tail), 'api.wire'],
+    [js('const deps = { a: null };', 'export const api = { wire: (d) => { deps.a = d.a; } };', tail), 'api.wire'],
+    [js('const deps = { a: null };', 'export default { wire(d) { deps.a = d.a; } };', tail), 'default.wire'],
+  ]) {
+    const problems = receiversOf({ 'view.js': src }, NO_CAPS);
+    assert.ok(problems.some((p) => p.startsWith(`view.js:2: ${name} receives injected dependencies (deps.a)`)), `${name}: ${problems}`);
+  }
+  // An exported object of plain helpers receives nothing.
+  assert.deepEqual(receiversOf({ 'view.js': js('export const api = { fmt(x) { return String(x); } };') }, NO_CAPS), []);
 });
 
 test('injectionLegacy: an entry no receiver matches is stale', () => {

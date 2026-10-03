@@ -224,7 +224,7 @@ export default [
     files: [...moduleFiles].map((f) => `internal/server/static/${f}`),
     plugins: { nz },
     rules: {
-      'nz/shell-bindings': ['error', { legacy: caps.injectionLegacy ?? [] }],
+      'nz/shell-bindings': ['error', { legacy: caps.injectionLegacy }],
       'nz/deps-keys': 'error',
       'nz/no-exported-let': 'error',
     },
