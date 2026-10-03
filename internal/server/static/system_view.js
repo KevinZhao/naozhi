@@ -6,7 +6,7 @@
 // call back into dashboard (setActivityView) goes through shell.js.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList, ui } from './state.js';
-import { esc, fetchJSON, formatBytes, formatDurationShort, showToast } from './nz_util.js';
+import { esc, escAttr, fetchJSON, formatBytes, formatDurationShort, showToast } from './nz_util.js';
 import { wireQuickAskInput } from './auth_modal.js';
 import { shell } from './shell.js';
 import { cachedCostSummary, costCardTitle, formatAbsTime, formatHomeCost, getMsgValue, mainEmptyHtml, refreshCostSummary, renderServiceOverviewHtml, timeAgo } from './utilities.js';
@@ -149,7 +149,7 @@ function refreshSystemCosts() {
 function daemonCostHtml(name) {
   const c = cachedCostSummary('sys:' + name);
   if (!c || c.entries === 0) return '';
-  return '<span class="sys-cost" title="' + esc(costCardTitle(c, '仅 ' + name)) + '">近 30 天花费 <b>' + esc(formatHomeCost(c.usd)) + '</b></span>';
+  return '<span class="sys-cost" title="' + escAttr(costCardTitle(c, '仅 ' + name)) + '">近 30 天花费 <b>' + esc(formatHomeCost(c.usd)) + '</b></span>';
 }
 
 function renderSystemView() {
