@@ -21,6 +21,9 @@
 //     user-visible half of this: a cron notification split across four messages
 //     arrived with no "[2/4]", so a recipient could not tell whether they had the
 //     whole thing or which part they were reading.
+//   - SplitText, the code-fence-aware splitter, sits with ReserveForPageSuffix
+//     because the reservation is only sound for the splitter's minimum chunk
+//     size. platform.SplitText delegates here.
 //
 // Not here: the send loops. They differ on purpose and merging them would produce
 // one function with five policy flags —
@@ -83,17 +86,15 @@ func pageSuffixRuneWidth(total int) int {
 
 // upperBoundChunks returns a ceiling on how many chunks SplitText produces for
 // runeCount runes at splitWidth; it must never under-estimate because the
-// caller reserves the page-suffix budget from it. SplitText may break early at
-// a newline past the chunk midpoint, so the shortest chunk is ~ceil(splitWidth/2)
-// — a naive ceil(runeCount/splitWidth) can under-estimate by 2x (#2056).
+// caller reserves the page-suffix budget from it. Every chunk but the last
+// consumes more than half of a window that fence repair can shrink to
+// 3/4·splitWidth, so the shortest is ceil(3·splitWidth/8) runes — a naive
+// ceil(runeCount/splitWidth) under-estimates by more than 2x (#2056).
 func upperBoundChunks(runeCount, splitWidth int) int {
 	if splitWidth <= 0 {
 		return runeCount + 1
 	}
-	minChunk := (splitWidth + 1) / 2 // ceil(splitWidth/2), worst-case shortest chunk
-	if minChunk < 1 {
-		minChunk = 1
-	}
+	minChunk := (3*splitWidth + 7) / 8 // ceil(3·splitWidth/8), never 0 for splitWidth >= 1
 	return (runeCount + minChunk - 1) / minChunk
 }
 
@@ -103,10 +104,10 @@ func upperBoundChunks(runeCount, splitWidth int) int {
 //
 // Splitting at the raw limit and appending the suffix afterwards pushes full
 // chunks past hard API ceilings — Discord rejects >2000 outright and the retry
-// re-sends the same oversized payload (#2008). The reservation is computed in two
-// passes because the suffix width depends on the chunk count, which depends on the
-// width: assume one digit, then widen to the worst case for the resulting count.
-// Over-reserving is safe; under-reserving is not.
+// re-sends the same oversized payload (#2008). The reservation iterates because
+// the suffix width depends on the chunk count, which depends on the width: assume
+// one digit, then widen until the worst case for the count at the reserved width
+// fits. Over-reserving is safe; under-reserving is not.
 //
 // suppress is true when maxLen cannot fit even the suffix (reachable because
 // config only clamps maxLen <= 0): emitting guaranteed-oversized chunks would be
@@ -115,9 +116,16 @@ func ReserveForPageSuffix(maxLen, runeCount int) (splitLen int, suppress bool) {
 	if runeCount <= maxLen {
 		return maxLen, false
 	}
-	reserved := maxLen - pageSuffixRuneWidth(upperBoundChunks(runeCount, maxLen-pageSuffixRuneWidth(1)))
-	if reserved > 0 {
-		return reserved, false
+	width := pageSuffixRuneWidth(1)
+	for {
+		reserved := maxLen - width
+		if reserved <= 0 {
+			return maxLen, true
+		}
+		need := pageSuffixRuneWidth(upperBoundChunks(runeCount, reserved))
+		if need <= width {
+			return reserved, false
+		}
+		width = need
 	}
-	return maxLen, true
 }
