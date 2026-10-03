@@ -253,8 +253,8 @@ func TestDashboardJS_ShowGitRemoteSchemeAllowlist(t *testing.T) {
 func TestDashboardJS_RenderMdXSSContract(t *testing.T) {
 	t.Parallel()
 	// #2558 D4: the markdown renderers moved to render_md.js while some
-	// helpers they call (safeUrl / fileRefCode) stay in dashboard.js — the
-	// contract spans both, so scan the concatenation.
+	// helpers they call (safeUrl, fileRefCode) live in other modules — the
+	// contract spans them, so scan the concatenation.
 	rmd, err := renderMdJS.ReadFile("static/render_md.js")
 	if err != nil {
 		t.Fatalf("read render_md.js: %v", err)
@@ -293,10 +293,13 @@ func TestDashboardJS_RenderMdXSSContract(t *testing.T) {
 	// We pin the exact substring shape used today; a refactor that keeps
 	// the safety properties but reshapes the call site can update both
 	// the source and the test in lockstep.
-	// #2558 D4: safeUrl reaches render_md.js as an injected dep, so the call
-	// site reads deps.safeUrl(...) — the safety property is unchanged.
-	if !strings.Contains(js, "const safe = deps.safeUrl(url);") {
+	// S20e (#3026): render_md.js imports safeUrl from utilities.js, so the
+	// call site is the safeUrl pinned in (1) and not a same-named local.
+	if !strings.Contains(string(rmd), "const safe = safeUrl(url);") {
 		t.Error("inlineMd's [text](url) branch must call safeUrl(url) before emitting the anchor — without it, `[click](javascript:alert(1))` would render an executable href (R172-SEC-H1 / #436)")
+	}
+	if !regexp.MustCompile(`(?m)^import \{[^}]*\bsafeUrl\b[^}]*\} from '\./utilities\.js';$`).Match(rmd) {
+		t.Error("render_md.js must import safeUrl from ./utilities.js — the call site above is only as strict as the safeUrl it resolves to (R172-SEC-H1 / #436)")
 	}
 	if !strings.Contains(js, `'<a href="' + escAttr(safe)`) {
 		t.Error("inlineMd's [text](url) branch must wrap the safeUrl()'d href with escAttr() before splicing — a `\"` in the URL would otherwise break out of the attribute even when the scheme is benign (R172-SEC-H1 / #436)")

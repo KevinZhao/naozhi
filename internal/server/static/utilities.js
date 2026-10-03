@@ -1,13 +1,8 @@
 // utilities.js — extracted from dashboard.js (#2558 D4).
 //
-// Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block, the deps table and the export block below are the
-// only additions.
-//
-// Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects; its helpers are
-// injected once via configureUtilities(), called from dashboard's module body.
+// A leaf (caps.leaves): it imports only contract.js, state.js, nz_util.js and
+// the other leaves, so any module can import it without forming a cycle.
+// Shared state is read from the state.js objects.
 import { NZ_CONTRACT } from './contract.js';
 import { composer, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
 import { esc, escAttr, showToast, trapFocus, sessionExitChipHtml } from './nz_util.js';
@@ -15,16 +10,6 @@ import { wsm } from './ws_manager.js';
 import { getToken, lsSet } from './platform.js';
 import { sid } from './session_ident.js';
 import { featureForBackend } from './features.js';
-
-const deps = {
-  renderSystemView: null,
-};
-export function configureUtilities(impl) {
-  for (const k of Object.keys(deps)) {
-    if (typeof impl[k] === 'undefined') throw new Error('utilities dep missing: ' + k);
-    deps[k] = impl[k];
-  }
-}
 
 // Late-bound hooks: assigned by the code below, read by other modules at event
 // time (never at load time) — the shape they had as dashboard module-scope
@@ -294,15 +279,15 @@ function costCardTitle(c) {
 
 // refreshCostSummary pulls the ledger's last-30-day totals at most once per
 // 30 s (attempts, not successes, so a failing endpoint is not hammered on
-// every repaint), one fetch in flight at a time, and repaints the system
-// view when it is showing. Failures keep the previous snapshot (or the
-// session-sum fallback) — never blank the card.
+// every repaint), one fetch in flight at a time, and resolves true when the
+// cache took a new snapshot, so the caller can repaint. Failures keep the
+// previous snapshot (or the session-sum fallback) — never blank the card.
 const COST_SUMMARY_TTL_MS = 30 * 1000;
 let costSummaryLastAttempt = 0;
 let costSummaryInFlight = false;
 async function refreshCostSummary() {
   const now = Date.now();
-  if (costSummaryInFlight || (now - costSummaryLastAttempt) < COST_SUMMARY_TTL_MS) return;
+  if (costSummaryInFlight || (now - costSummaryLastAttempt) < COST_SUMMARY_TTL_MS) return false;
   costSummaryLastAttempt = now;
   costSummaryInFlight = true;
   try {
@@ -313,10 +298,11 @@ async function refreshCostSummary() {
     const from = new Date(to.getTime() - 30 * 24 * 3600 * 1000);
     const resp = await fetch(NZ_CONTRACT.API.cost_summary + '?group_by=unit&from=' + encodeURIComponent(from.toISOString()) +
       '&to=' + encodeURIComponent(to.toISOString()), { headers });
-    if (!resp.ok) return;
+    if (!resp.ok) return false;
     costSummaryCache = summarizeCostBuckets(await resp.json());
-    if (ui.activeView === 'system') deps.renderSystemView();
+    return true;
   } catch (_) {
+    return false;
   } finally {
     costSummaryInFlight = false;
   }

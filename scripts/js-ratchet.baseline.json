@@ -143,7 +143,7 @@
     "lateBindings": 3
   },
   "dashboard.js": {
-    "lines": 2982,
+    "lines": 2954,
     "maxFnLines": 120,
     "fnOver100": 1,
     "topLevelLetVar": 0,
@@ -197,12 +197,23 @@
     "htmlInsert": 0,
     "lateBindings": 0
   },
+  "file_ref_parse.js": {
+    "lines": 125,
+    "maxFnLines": 17,
+    "fnOver100": 0,
+    "topLevelLetVar": 0,
+    "configureDeps": 0,
+    "deadInjections": 0,
+    "innerHTMLAssign": 0,
+    "htmlInsert": 0,
+    "lateBindings": 0
+  },
   "file_refs.js": {
-    "lines": 862,
+    "lines": 718,
     "maxFnLines": 61,
     "fnOver100": 0,
     "topLevelLetVar": 5,
-    "configureDeps": 11,
+    "configureDeps": 0,
     "deadInjections": 0,
     "innerHTMLAssign": 9,
     "htmlInsert": 0,
@@ -275,11 +286,11 @@
     "lateBindings": 0
   },
   "render_md.js": {
-    "lines": 1050,
+    "lines": 1029,
     "maxFnLines": 97,
     "fnOver100": 0,
     "topLevelLetVar": 6,
-    "configureDeps": 7,
+    "configureDeps": 0,
     "deadInjections": 0,
     "innerHTMLAssign": 0,
     "htmlInsert": 0,
@@ -418,11 +429,11 @@
     "lateBindings": 0
   },
   "utilities.js": {
-    "lines": 1363,
+    "lines": 1349,
     "maxFnLines": 91,
     "fnOver100": 0,
     "topLevelLetVar": 4,
-    "configureDeps": 1,
+    "configureDeps": 0,
     "deadInjections": 0,
     "innerHTMLAssign": 4,
     "htmlInsert": 0,

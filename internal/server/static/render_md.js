@@ -6,34 +6,13 @@
 // untrusted text through esc()/escAttr()/safeUrl(); the sanitiser contract
 // tests (static_sanitize_test.go, static_markdown_p3_test.go) pin it.
 //
-// Layering: imports only nz_util plus the small set of dashboard helpers the
-// renderers reach for (file-reference buttons, event grouping). dashboard
-// imports this module, so it must not import dashboard back.
+// Layering: imports nz_util, the URL / entity sanitisers from utilities.js
+// and the path-shape tests from the file_ref_parse.js leaf (file-reference
+// <code> rows and link rescue). dashboard and file_refs import this module, so
+// it must import neither back.
 import { esc, escAttr } from './nz_util.js';
-
-// deps — the small set of dashboard.js helpers the renderers reach for
-// (URL/entity sanitising + the file-reference button builders, which stay
-// with the file-ref scanner they belong to). Injected rather than imported:
-// dashboard imports THIS module for renderMd, so an import back would form a
-// cycle and put dashboard's own const declarations in TDZ during
-// render_md's evaluation (measured: "Cannot access 'BLOCK_SPLIT_RE' before
-// initialization"). configureRenderMd runs from dashboard's module body, i.e.
-// before any render call.
-const deps = {
-  FILE_REF_HAS_EXT: null,
-  decodeEscEntities: null,
-  fencedPathList: null,
-  fileRefCode: null,
-  isFileRefCandidate: null,
-  safeUrl: null,
-  splitPathLine: null,
-};
-export function configureRenderMd(impl) {
-  for (const k of Object.keys(deps)) {
-    if (typeof impl[k] === 'undefined') throw new Error('render_md dep missing: ' + k);
-    deps[k] = impl[k];
-  }
-}
+import { decodeEscEntities, safeUrl } from './utilities.js';
+import { FILE_REF_HAS_EXT, fencedPathList, fileRefCode, isFileRefCandidate, splitPathLine } from './file_ref_parse.js';
 
 // KaTeX environment names we split out as block-level math. Whitelisted —
 // feeding KaTeX an environment it doesn't support just emits an error span
@@ -219,7 +198,7 @@ function renderFence(part) {
   // whole block keeps a single copy button. Requiring EVERY line to be a
   // path candidate keeps real code blocks (which always carry at least one
   // non-path line) on the verbatim path.
-  const pathLines = lang === '' ? deps.fencedPathList(code) : null;
+  const pathLines = lang === '' ? fencedPathList(code) : null;
   if (pathLines) return renderPathListFence(pathLines);
   return renderCodeFence(code, lang);
 }
@@ -257,7 +236,7 @@ function renderPathListFence(pathLines) {
     const noteHtml = p.note
       ? '<span class="md-pathnote">' + esc(p.note) + '</span>'
       : '';
-    return '<div class="md-pathline">' + deps.fileRefCode(esc(p.path), '') + noteHtml + '</div>';
+    return '<div class="md-pathline">' + fileRefCode(esc(p.path), '') + noteHtml + '</div>';
   }).join('');
   return '<div class="md-code-wrap md-pathlist">' + rows +
     '<div class="md-code-actions">' +
@@ -584,18 +563,18 @@ function inlineMd(s) {
   s = s.replace(/!(?=\[[^\]]+\]\([^)]+\))/g, '');
   s = s.replace(MD_LINK_RE, function(_, text, urlEsc, titleDq, titleSq) {
     const title = titleDq !== undefined ? titleDq : titleSq;
-    const url = deps.decodeEscEntities(urlEsc);
-    const safe = deps.safeUrl(url);
-    const titleAttr = title ? ' title="' + escAttr(deps.decodeEscEntities(title)) + '"' : '';
+    const url = decodeEscEntities(urlEsc);
+    const safe = safeUrl(url);
+    const titleAttr = title ? ' title="' + escAttr(decodeEscEntities(title)) + '"' : '';
     if (safe === '#') {
       // Local-file link rescue: `urlEsc` is tokenized, not raw text —
       // reject a `<`-bearing or \x00-bearing target before it reaches
-      // deps.fileRefCode, and require a real extension.
+      // fileRefCode, and require a real extension.
       const target = urlEsc.trim();
-      if (target.indexOf('<') === -1 && target.indexOf('\x00') === -1 && deps.isFileRefCandidate(target)) {
-        const { path: bare } = deps.splitPathLine(target);
+      if (target.indexOf('<') === -1 && target.indexOf('\x00') === -1 && isFileRefCandidate(target)) {
+        const { path: bare } = splitPathLine(target);
         const base = bare.slice(bare.lastIndexOf('/') + 1);
-        if (deps.FILE_REF_HAS_EXT.test(base)) return deps.fileRefCode(target);
+        if (FILE_REF_HAS_EXT.test(base)) return fileRefCode(target);
       }
       return text;
     }
@@ -606,7 +585,7 @@ function inlineMd(s) {
     return seg.replace(MD_AUTOLINK_RE, function(_, prefix, url) {
       var shown = url.replace(/[.,;:!?)>\]"'。，、；：！？）》」』】〉]+$/, '');
       var trail = url.slice(shown.length);
-      var clean = deps.decodeEscEntities(shown);
+      var clean = decodeEscEntities(shown);
       return prefix + '<a href="' + escAttr(clean) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + shown + '</a>' + trail;
     });
   };
@@ -620,7 +599,7 @@ function inlineMd(s) {
   }
   if (codeTokens.length > 0) {
     s = s.replace(/\x00CODE(\d+)\x00/g, function(_, idx) {
-      return deps.fileRefCode(codeTokens[+idx]);
+      return fileRefCode(codeTokens[+idx]);
     });
   }
   return s;

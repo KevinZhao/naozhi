@@ -7,14 +7,7 @@ import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, register
 import { eventHtml, renderEventsWithDividers } from './event_render.js';
 import { onAskOptionToggle, onAskSubmit } from './ask_card.js';
 import { fetchEvents, renderEvents } from './event_stream.js';
-import {
-  configureRenderMd,
-  loadKatex,
-  loadMermaid,
-  renderMd,
-  renderRich,
-  runPendingAsync,
-} from './render_md.js';
+import { renderMd, runPendingAsync } from './render_md.js';
 import {
   fetchSessionRuns,
   gitChipHtml,
@@ -75,27 +68,18 @@ import {
   startTurnTimer,
 } from './running_banner.js';
 import {
-  FILE_REF_HAS_EXT,
   closeFilePreview,
-  configureFileRefs,
-  fencedPathList,
-  fileRefCode,
-  isFileRefCandidate,
   processEventsForDisplay,
   regroupAvatars,
-  splitPathLine,
   startFileRefObserver,
 } from './file_refs.js';
 import {
-  AVATAR_GROUP_GAP_MS,
   EVENT_DIVIDER_GAP_MS,
   applyFeatureGates,
   closeHistoryPopover,
-  configureUtilities,
   confirmDialog,
   copyCodeBlock,
   copyEventContent,
-  decodeEscEntities,
   eagerBindWorkspace,
   formatAbsTime,
   getMsgValue,
@@ -111,7 +95,6 @@ import {
   removePendingSession,
   removeSidebarCard,
   renderServiceOverviewHtml,
-  safeUrl,
   setActiveSessionCard,
   setMsgValue,
   shortPath,
@@ -1630,22 +1613,11 @@ configureSidebarProject({ accessProfileChipInfo, debouncedFetchSessions, fetchAc
 configureMsgNav({ closeHistoryPopover, createNewSession, debouncedFetchSessions, escCloseVoiceOverlay, handleFiles, refreshBanner, resetTurnState, selectSession, sid });
 configureTuning({ debouncedFetchSessions, dropDiscovered, fetchSessions, findDiscovered, getToken, gitChipHtml, gitStateCache, isDiscoveredKey, mainEmptyHtml, parseDiscoveredPid, promptDialog, removePendingSession, renderMainHeader, sameDiscovered, setHeaderGitChip, showAPIError, showNetworkError, sid, stopPreviewPolling, wireQuickAskInput });
 configureDiscovery({ EVENT_DIVIDER_GAP_MS, ICONS, debouncedFetchSessions, eventHtml, getToken, isInternalEvent, lastDividerTime, mobileEnterChat, navRebuild, navSync, processEventsForDisplay, renderEventsWithDividers, sessionTypeTag, setActiveSessionCard, showAPIError, showNetworkError, stickEventsBottom, stopPreviewPolling, timeDividerHtml });
-configureUtilities({ renderSystemView });
-configureFileRefs({ AVATAR_GROUP_GAP_MS, ICONS, collapseSidebarForDrawer, getToken, isInternalEvent, loadKatex, loadMermaid, matchProject, renderRich, restoreSidebarAfterDrawer, runPendingAsync });
 configureRunningBanner({ ICONS, getMsgValue, getToken, setMsgValue, showNetworkError, sid });
 configureSystemView({ formatAbsTime, getMsgValue, mainEmptyHtml, refreshCostSummary, renderServiceOverviewHtml, setActivityView, timeAgo, wireQuickAskInput });
 initSplitWidth();
 configureMobileNav({ ICONS, dismissSession, lsGet, lsSet, renameSession, selectSession });
 configureVoice({ ICONS, getMsgValue, getToken, sendMessage, setMsgValue, sid, updateSendButton });
-configureRenderMd({
-  FILE_REF_HAS_EXT,
-  decodeEscEntities,
-  fencedPathList,
-  fileRefCode,
-  isFileRefCandidate,
-  safeUrl,
-  splitPathLine,
-});
 
 fetchCLIBackends();
 // RFC project-access-profile §8.3: fire at boot so the session-card chip has

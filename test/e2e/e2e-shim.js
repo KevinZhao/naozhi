@@ -14,7 +14,7 @@ import * as dashboard from '/static/dashboard.js';
 import * as discovery from '/static/discovery.js';
 import * as eventRender from '/static/event_render.js';
 import * as eventStream from '/static/event_stream.js';
-import * as fileRefs from '/static/file_refs.js';
+import * as fileRefParse from '/static/file_ref_parse.js';
 import * as mobileNav from '/static/mobile_nav.js';
 import * as msgNav from '/static/msg_nav.js';
 import * as nzUtil from '/static/nz_util.js';
@@ -59,7 +59,7 @@ expose(dashboard, ['maybeShowOnboarding', 'renderMainShell', 'selectSession', 's
 expose(discovery, ['scanDiscovered']);
 expose(eventRender, ['eventAlreadyRendered', 'eventHtml']);
 expose(eventStream, ['appendEvents', 'fetchEvents', 'renderEvents', 'trimEventsScroll']);
-expose(fileRefs, ['isFileRefCandidate', 'splitPathLine']);
+expose(fileRefParse, ['isFileRefCandidate', 'splitPathLine']);
 expose(mobileNav, ['mobileShowList', 'toggleSidebarCollapsed']);
 expose(msgNav, ['navDismissPopover']);
 expose(nzUtil, ['showToast']);

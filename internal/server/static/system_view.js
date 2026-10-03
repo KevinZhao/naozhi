@@ -147,7 +147,7 @@ function systemStatLabel(key) {
 function renderSystemView() {
   const root = document.getElementById('system-main');
   if (!root) return;
-  deps.refreshCostSummary().catch(() => {});
+  deps.refreshCostSummary().then((updated) => updated && ui.activeView === 'system' && renderSystemView()).catch(() => {});
   const cards = systemDaemons.map(function (d) {
     const lr = d.last_run;
     const st = systemStateMeta(lr && lr.state);
