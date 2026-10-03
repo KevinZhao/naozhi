@@ -6,6 +6,8 @@
 //    chip 绝不能出现 —— 否则每次刷新都会先闪一个「有更新」再消失，操作员被
 //    训练成无视它。
 // 2. 服务端说有更新时 chip 出现，并带上目标版本号。
+// 3. 点 chip 弹出确认框（confirmDialog 是 dashboard 注入的唯一依赖，S20c
+//    删死注入时必须留住它），取消后不发 apply。
 //
 // 原 static_update_chip_test.go 只 grep HTML 里的 `hidden` 属性；这里两个
 // 方向都行为化（同一份 markup，分别在无路由 / 有更新两种 mock 下渲染）。
@@ -52,6 +54,36 @@ test('服务端报有更新时 chip 出现并带目标版本', async ({ browser 
   await expect(chip).toBeVisible();
   await expect(page.locator('#update-tag')).toHaveText('v0.1.13');
   await expect(chip, '未在应用中，不该有 busy 态').not.toHaveClass(/is-busy/);
+  await ctx.close();
+  mock.server.close();
+});
+
+test('点 chip 弹出安装确认框，取消后不发 apply', async ({ browser }) => {
+  const mock = await startMockServer({
+    systemUpdate: {
+      action: 'update',
+      current: 'v0.1.12',
+      latest: 'v0.1.13',
+      phase: 'idle',
+      can_apply: true,
+      install_enabled: true,
+    },
+  });
+  const ctx = await browser.newContext({ viewport: { width: 1600, height: 900 } });
+  const page = await ctx.newPage();
+  const applies = [];
+  page.on('request', (req) => { if (req.method() === 'POST' && req.url().includes('/api/system/update')) applies.push(req.url()); });
+  await page.goto(mock.url + '/dashboard');
+  const chip = page.locator('#btn-update');
+  await expect(chip).toBeVisible();
+  await chip.click();
+  const dialog = page.locator('.confirm-dialog');
+  await expect(dialog, '点 chip 要经 confirmDialog 弹出确认框').toBeVisible();
+  await expect(dialog.locator('#confirm-title')).toHaveText('下载并安装新版本');
+  await expect(dialog.locator('.confirm-msg')).toContainText('v0.1.13');
+  await dialog.locator('.confirm-cancel').click();
+  await expect(dialog).toBeHidden();
+  expect(applies, '取消后不该 POST apply').toEqual([]);
   await ctx.close();
   mock.server.close();
 });

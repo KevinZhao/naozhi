@@ -12,7 +12,6 @@ const deps = {
   ICONS: null,
   formatFileSize: null,
   getToken: null,
-  sendMessage: null,
   showAuthModal: null,
 };
 export function configureComposerFiles(impl) {
@@ -179,7 +178,7 @@ async function uploadEntry(entry) {
     // persisted to the session workspace (see
     // docs/rfc/pdf-attachment.md). Only images go through the downscale
     // step. Track the transmitted byte size on `normalizedSize` for the
-    // deps.sendMessage batch-cap check below — for PDFs this equals raw size
+    // sendMessage batch-cap check below — for PDFs this equals raw size
     // but is NOT counted against the 9 MB image batch cap (PDFs travel
     // via file_ref, not inline base64).
     const file = entry.kind === 'pdf' ? entry.file : await normalizeImage(entry.file);
@@ -254,7 +253,7 @@ const ORIENT_MAX_WAIT_MS = 8000;
 // in place), so send still references the same file_id.
 //
 // Concurrency: the entry is marked `orienting` for the whole call so send()
-// can block on it (see the gate in deps.sendMessage). Without this, a user who
+// can block on it (see the gate in sendMessage). Without this, a user who
 // hits send within the ~12s vision window would TakeAll the upload BEFORE the
 // rotation lands — the server's in-place Replace then misses the consumed
 // entry and the original sideways image goes out. The flag is always cleared

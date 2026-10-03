@@ -11,12 +11,10 @@ import { splitDock } from './split_view.js';
 
 const deps = {
   ICONS: null,
-  confirmDialog: null,
   dismissSession: null,
   lsGet: null,
   lsSet: null,
   renameSession: null,
-  renderMainHeader: null,
   selectSession: null,
 };
 export function configureMobileNav(impl) {
@@ -225,7 +223,7 @@ async function copyStringToClipboard(s) {
 // existing modal-prompt pattern by selecting the session first, then
 // deferring to deps.renameSession(); copy-key writes the key to clipboard with
 // a toast confirmation; delete routes through deps.dismissSession() which
-// surfaces the existing deps.confirmDialog flow on its own.
+// surfaces the existing confirmDialog flow on its own.
 function openSessionContextMenu(card, x, y) {
   const key = card.dataset.key;
   const node = card.dataset.node || 'local';
@@ -235,7 +233,7 @@ function openSessionContextMenu(card, x, y) {
       label: '重命名', icon: deps.ICONS.edit,
       action: () => {
         // deps.renameSession() reads selection.key/selection.node and repaints only the
-        // header of the CURRENT shell (deps.renderMainHeader), so the target must
+        // header of the CURRENT shell (renderMainHeader), so the target must
         // be properly selected first — flipping the globals alone would stamp
         // this card's header onto whatever conversation is on screen.
         // deps.selectSession is a no-op re-select when the card is already open.

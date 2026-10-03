@@ -64,7 +64,7 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .settings-syslink{display:none}
 .settings-syslink-btn{background:none;border:none;padding:0;color:var(--nz-accent);font-family:inherit;font-size:var(--nz-fs-sm2);cursor:pointer}
 /* Custom arrow for appearance:none selects (picker-select-wrap wraps every
-   <select> using PICKER_SELECT_ONLY_STYLE — see dashboard.js). */
+   <select> using .nz-picker-select-only — see css/utilities.css). */
 .picker-select-wrap{position:relative;display:block}
 .picker-select-wrap::after{content:"▾";position:absolute;right:10px;top:50%;transform:translateY(-50%);color:var(--nz-text-mute);pointer-events:none;font-size:var(--nz-fs-xs)}
 .settings-theme{display:flex;gap:8px;flex-wrap:wrap}
