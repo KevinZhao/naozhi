@@ -114,11 +114,19 @@ jobs:
   release:
     needs: [build, e2e-gate]
     runs-on: ubuntu-latest
+    # NAOZHI_RELEASE_SIGNING_KEY is an environment secret, readable by this
+    # job only.
+    environment: release
     steps:
       # Need the repo for install.sh to ship as a release asset. install.sh
       # is intentionally static (no per-release substitution); it fetches
       # checksums.txt from whichever tag it targets at runtime.
       - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
 
       - uses: actions/download-artifact@v8
         with:
@@ -127,6 +135,18 @@ jobs:
 
       - name: Create checksums file
         run: cat dist/*.sha256 > dist/checksums.txt
+
+      # One ed25519 signature over checksums.txt anchors every binary
+      # (docs/rfc/selfupdate-signing.md). Both steps pass with a warning while
+      # internal/selfupdate embeds no key, and fail once it does if the
+      # secret is missing or does not match: clients would refuse the release.
+      - name: Sign checksums
+        env:
+          NAOZHI_RELEASE_SIGNING_KEY: ${{ secrets.NAOZHI_RELEASE_SIGNING_KEY }}
+        run: go run ./tools/release-sign sign -in dist/checksums.txt -out dist/checksums.txt.sig
+
+      - name: Verify signature against the embedded trust set
+        run: go run ./tools/release-sign verify -in dist/checksums.txt -sig dist/checksums.txt.sig
 
       - name: Stage install.sh
         # Copy into dist/ so it is uploaded alongside the binaries. Raw GitHub
@@ -142,4 +162,5 @@ jobs:
           files: |
             dist/naozhi-*
             dist/checksums.txt
+            dist/checksums.txt.sig
             dist/install.sh
