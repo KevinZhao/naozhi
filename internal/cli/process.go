@@ -435,10 +435,15 @@ func (p *Process) seedEffort(tier string) {
 	p.meter.SeedEffort(tier)
 }
 
-// SeedEffortFromArgs is the reconnect-path seedEffort: SpawnReconnect has no
-// SpawnOptions, so the tier is recovered from the shim-recorded spawn argv.
-func (p *Process) SeedEffortFromArgs(args []string) {
+// SeedFromSpawnArgs restores the launch-time state a reattached process cannot
+// get from SpawnOptions (SpawnReconnect has none) out of the shim-recorded
+// spawn argv: the effort tier, and for claude the settings file its model list
+// comes from. Fill-if-unset on both, so state already reported wins.
+func (p *Process) SeedFromSpawnArgs(args []string) {
 	p.seedEffort(effortFromArgs(args))
+	if s, ok := p.protocol.(interface{ seedSettingsFromArgs([]string) }); ok {
+		s.seedSettingsFromArgs(args)
+	}
 }
 
 // effortFromArgs extracts the tier from `--effort <tier>` / `--effort=<tier>`,
