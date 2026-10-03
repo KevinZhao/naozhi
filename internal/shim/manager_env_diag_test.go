@@ -2,6 +2,8 @@ package shim
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -93,8 +95,11 @@ func TestStartShimWithBackend_ReportsOverlayGateDrops(t *testing.T) {
 			shims:     map[string]*ShimHandle{},
 		}
 		overlay := map[string]string{"AWS_PROFILE": profile}
-		if _, err := m.StartShimWithBackend(context.Background(), key, "", "", nil, t.TempDir(), overlay, nil); err == nil {
-			t.Fatal("StartShimWithBackend with a missing naozhi binary succeeded")
+		_, err := m.StartShimWithBackend(context.Background(), key, "", "", nil, t.TempDir(), overlay, nil)
+		// Only a cmd.Start failure proves the spawn got past the env merge and
+		// the emit; an earlier rejection would let "no diag" pass vacuously.
+		if err == nil || !strings.Contains(err.Error(), "start shim") || !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("StartShimWithBackend err = %v, want the cmd.Start failure on the missing binary", err)
 		}
 		m.mu.Lock()
 		pending := m.pendingShims
