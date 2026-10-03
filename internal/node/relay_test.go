@@ -272,8 +272,8 @@ func TestWSRelay_RemoveClient(t *testing.T) {
 	relay.RemoveClient(sink1)
 
 	relay.mu.Lock()
-	key1 := append([]EventSink(nil), relay.subs["key1"]...)
-	_, key2Left := relay.subs["key2"]
+	key1 := append([]EventSink(nil), relay.book.subs["key1"]...)
+	_, key2Left := relay.book.subs["key2"]
 	relay.mu.Unlock()
 
 	for _, s := range key1 {

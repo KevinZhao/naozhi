@@ -100,12 +100,12 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 func relaySubCount(r *wsRelay, key string) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.subs[key])
+	return len(r.book.subs[key])
 }
 
 // TestWSRelay_Subscribe_SameClientTwice_NoDuplicateSink pins the idempotency
 // half of the #2421 review finding F1: a client that re-subscribes to a key it
-// already holds must not be appended a second time. Before the fix r.subs[key]
+// already holds must not be appended a second time. Before the fix r.book.subs[key]
 // grew to two copies of the same sink and every relayed frame was fanned out
 // twice to that one browser.
 func TestWSRelay_Subscribe_SameClientTwice_NoDuplicateSink(t *testing.T) {
@@ -121,7 +121,7 @@ func TestWSRelay_Subscribe_SameClientTwice_NoDuplicateSink(t *testing.T) {
 	relay.Subscribe(sink, key, 0)
 
 	if n := relaySubCount(relay, key); n != 1 {
-		t.Fatalf("r.subs[%q] has %d entries after same-client re-subscribe, want 1", key, n)
+		t.Fatalf("r.book.subs[%q] has %d entries after same-client re-subscribe, want 1", key, n)
 	}
 }
 
@@ -160,7 +160,7 @@ func TestWSRelay_Resubscribe_AfterRemoteTimeout_ResendsSubscribe(t *testing.T) {
 
 	waitFor(t, "second subscribe frame after remote timeout", func() bool { return fake.subscribes.Load() == 2 })
 	if n := relaySubCount(relay, key); n != 1 {
-		t.Errorf("r.subs[%q] has %d entries, want 1", key, n)
+		t.Errorf("r.book.subs[%q] has %d entries, want 1", key, n)
 	}
 	// A third subscribe without another timeout must NOT churn the remote
 	// again: the dropped marker is single-shot. Deterministic negative check:
@@ -196,7 +196,7 @@ func TestWSRelay_Resubscribe_WithoutTimeout_UsesHTTPHistory(t *testing.T) {
 	relay.Subscribe(sink, key, 0)
 	waitFor(t, "http history request", func() bool { return fake.history.Load() == 1 })
 	if n := relaySubCount(relay, key); n != 1 {
-		t.Errorf("r.subs[%q] has %d entries, want 1", key, n)
+		t.Errorf("r.book.subs[%q] has %d entries, want 1", key, n)
 	}
 	// Ordering probe instead of a sleep: Subscribe writes any `subscribe`
 	// frame synchronously before returning, and the unsubscribe below is

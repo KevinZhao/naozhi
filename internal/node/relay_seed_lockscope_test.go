@@ -59,7 +59,7 @@ func TestWSRelay_SubscribeSeed_StaysUnderTheLock(t *testing.T) {
 			sink := &seedTestSink{}
 			for i := range iters {
 				key := fmt.Sprintf("feishu:direct:u%d-%d:general", w, i)
-				// Subscribe writes r.lastEvent[key]; Unsubscribe deletes it. Both
+				// Subscribe writes r.book.lastEvent[key]; Unsubscribe deletes it. Both
 				// must hold r.mu across the whole read-modify-write.
 				r.Subscribe(sink, key, int64(i+1))
 				r.Unsubscribe(sink, key)
@@ -72,8 +72,8 @@ func TestWSRelay_SubscribeSeed_StaysUnderTheLock(t *testing.T) {
 	// r.mu section and this test would prove nothing. The warm key is still
 	// subscribed, so seeing it means the lock section really ran.
 	r.mu.Lock()
-	_, warmPresent := r.lastEvent["feishu:direct:warm:general"]
-	leftover := len(r.lastEvent)
+	_, warmPresent := r.book.lastEvent["feishu:direct:warm:general"]
+	leftover := len(r.book.lastEvent)
 	r.mu.Unlock()
 	if !warmPresent {
 		t.Fatal("the warm-up key was never seeded — Subscribe returned before its r.mu section, so this test exercised nothing")

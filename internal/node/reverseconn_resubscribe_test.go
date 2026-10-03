@@ -41,7 +41,7 @@ func TestReverseConn_Subscribe_SameClientTwice_NoDuplicateSink(t *testing.T) {
 	rc.Subscribe(sink, key, 0)
 
 	rc.subMu.Lock()
-	n := len(rc.subs[key])
+	n := len(rc.book.subs[key])
 	rc.subMu.Unlock()
 	if n != 1 {
 		t.Fatalf("c.subs[%q] has %d entries after same-client re-subscribe, want 1", key, n)

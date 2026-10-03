@@ -7,8 +7,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// R184-REL-M2 — Subscribe must seed r.lastEvent[key] with the caller's
-// `after` timestamp atomically with the r.subs[key] write, so a racing
+// R184-REL-M2 — Subscribe must seed r.book.lastEvent[key] with the caller's
+// `after` timestamp atomically with the r.book.subs[key] write, so a racing
 // reconnect() taking a snapshot moments later never sees
 // lastEvent[key]=0 for a key whose subscribers already asked for
 // after=N. Without the seed, the reconnect path resends
@@ -65,12 +65,12 @@ func TestWSRelay_Subscribe_SeedsLastEventForRaceSafeReconnect(t *testing.T) {
 	// the server yet — and reconnect() would re-emit subscribe(after=0)
 	// for this key, causing server-side full history replay.
 	r.mu.Lock()
-	got := r.lastEvent[key]
-	_, hasKey := r.subs[key]
+	got := r.book.lastEvent[key]
+	_, hasKey := r.book.subs[key]
 	r.mu.Unlock()
 
 	if !hasKey {
-		t.Fatalf("subscribe did not register sink in r.subs[%q]", key)
+		t.Fatalf("subscribe did not register sink in r.book.subs[%q]", key)
 	}
 	if got != after {
 		t.Errorf("lastEvent[%q] = %d, want %d — R184-REL-M2 seed missing; "+
@@ -116,7 +116,7 @@ func TestWSRelay_Subscribe_SeedOnlyOnFirstSubscriber(t *testing.T) {
 	r.Subscribe(&seedTestSink{}, key, laterAfter)
 
 	r.mu.Lock()
-	got := r.lastEvent[key]
+	got := r.book.lastEvent[key]
 	r.mu.Unlock()
 
 	if got != firstAfter {

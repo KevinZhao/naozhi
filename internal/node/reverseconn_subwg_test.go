@@ -72,7 +72,7 @@ func TestReverseConn_CloseWaitsForSubscribeHistoryGoroutine(t *testing.T) {
 	// only sends when there are persisted events).
 	seed := &mockSink{id: 99}
 	rc.subMu.Lock()
-	rc.subs["k"] = append(rc.subs["k"], seed)
+	rc.book.subs["k"] = append(rc.book.subs["k"], seed)
 	rc.subMu.Unlock()
 
 	sink := &holdSink{
