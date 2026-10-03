@@ -268,9 +268,11 @@ type Configurable interface {
 //   - Stop(ctx): cancel 内部 ctx，等所有 daemon 当前 Tick 跑完（hard cancel）
 //
 // 不持久化任何状态——所有 daemon 都是无状态的，重启后从干净状态开始。
-// AutoTitler 内部维护的 lastSeenTurnCount 是 in-memory，重启即丢；最坏
-// 情况是重启后第一次扫描又给已经命名过的 session 重命名一遍——这也是
-// idempotent 设计的另一个动机。
+// AutoTitler 内部维护的 lastSeenTurnCount 是 in-memory，重启即丢。重启后
+// 第一次扫到 LabelOrigin=="auto" 却没有高水位的 session 时只记下当前轮次
+// （skipped_restored_auto_title），不重命名；代价是重启后的第一次重命名要
+// 再等 MinUserTurns 个新轮次。轮次回退（idle 回收后 MessageCount 改取持久化
+// 窗口内的计数）时高水位随之下调，避免一直卡在 no_new_turns。
 type Manager struct {
     daemons   []*daemonRecord   // ← v2: 改 *daemonRecord 避免 slice 扩容失效
     cfg       Config

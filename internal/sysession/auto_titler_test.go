@@ -302,6 +302,7 @@ func TestAutoTitler_CandidateFilter(t *testing.T) {
 		runnerResp   string
 		wantBucket   string // "" means we expect Acted=1
 		includeGroup bool
+		hw           *autoTitlerHighwater // pre-seeded highwater entry
 	}{
 		{
 			name: "fresh user session is renamed",
@@ -351,6 +352,16 @@ func TestAutoTitler_CandidateFilter(t *testing.T) {
 				LastPrompt: "new content",
 			},
 			runnerResp: "新主题",
+			hw:         &autoTitlerHighwater{lastRenamedAt: now.Add(-time.Hour), lastRenameAtTurn: 2},
+		},
+		{
+			name: "auto title without highwater is seeded, not renamed",
+			snap: session.SessionSnapshot{
+				Key: "feishu:direct:u1:general", MessageCount: 10,
+				UserLabel: "Old auto", LabelOrigin: "auto",
+				LastPrompt: "new content",
+			},
+			wantBucket: "restored_auto_title",
 		},
 		{
 			name: "single-turn session is renamed (min_first_turns=1)",
@@ -392,6 +403,9 @@ func TestAutoTitler_CandidateFilter(t *testing.T) {
 				if err := a.(Configurable).Configure(DaemonConfig{"include_group_chat": true}); err != nil {
 					t.Fatalf("configure: %v", err)
 				}
+			}
+			if c.hw != nil {
+				a.(*autoTitler).highwater.Store(&map[string]autoTitlerHighwater{c.snap.Key: *c.hw})
 			}
 			rep, err := a.Tick(context.Background())
 			if err != nil {
