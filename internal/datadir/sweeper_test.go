@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -281,5 +282,28 @@ func TestSweeperTotalsIsACopy(t *testing.T) {
 	tot["logs"] = Result{Removed: 999}
 	if again := s.Totals(); again["logs"].Removed != 1 {
 		t.Errorf("Totals() is not a copy: got %+v after mutating the returned map", again["logs"])
+	}
+}
+
+// TestSweeperRunsTasksEverySweep: AddFunc tasks ride the same tick as the
+// passes — the stdio cap depends on running at startup and then hourly — and
+// they stay out of the per-pass results.
+func TestSweeperRunsTasksEverySweep(t *testing.T) {
+	t.Parallel()
+	s := NewSweeper(0)
+	s.Add(Pass{Name: "logs", Dir: t.TempDir(), Ext: ".log", MaxAge: time.Hour})
+	var runs int
+	s.AddFunc("count", func() { runs++ })
+
+	s.RunOnce()
+	got := s.RunOnce()
+	if runs != 2 {
+		t.Errorf("task ran %d times over two sweeps, want 2", runs)
+	}
+	if _, ok := got["count"]; ok {
+		t.Errorf("a task appeared in the pass results: %+v", got)
+	}
+	if names := s.Names(); !slices.Equal(names, []string{"logs", "count"}) {
+		t.Errorf("Names() = %v, want [logs count]", names)
 	}
 }

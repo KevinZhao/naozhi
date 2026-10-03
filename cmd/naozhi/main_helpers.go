@@ -472,6 +472,8 @@ func sysessionJSONLMaxAge(cfg *config.Config) time.Duration {
 //     period — a shim that just died keeps its log for a day, which is when it
 //     is worth reading.
 //   - sys-sessions/*.jsonl keeps its configured window (jsonl_max_age).
+//   - stdout/stderr, when an init system redirected them into files, are capped
+//     by size (log.stdio_max_size) rather than age; see addStdioCaps.
 func newDataDirSweeper(cfg *config.Config, layout datadir.Layout, shimMgr *shim.Manager, sysWorkDir string) *datadir.Sweeper {
 	idle := parseDurationOrDefault(cfg.Session.Shim.IdleTimeout, 4*time.Hour)
 	cliDebugMaxAge := 7 * 24 * time.Hour
@@ -514,7 +516,24 @@ func newDataDirSweeper(cfg *config.Config, layout datadir.Layout, shimMgr *shim.
 			MaxAge: sysessionJSONLMaxAge(cfg),
 		})
 	}
+	addStdioCaps(s, cfg, os.Stdout, os.Stderr)
 	return s
+}
+
+// defaultStdioMaxSize is log.stdio_max_size's default: about eleven days of
+// stdout at the INFO volume measured on a live instance.
+const defaultStdioMaxSize = 64 << 20
+
+// addStdioCaps registers the stdout and stderr size caps. Taking the files
+// lets tests hand in regular files; production passes os.Stdout and os.Stderr,
+// which the cap leaves alone unless they are O_APPEND regular files.
+func addStdioCaps(s *datadir.Sweeper, cfg *config.Config, stdout, stderr *os.File) {
+	maxSize := parseBytesOrDefault(cfg.Log.StdioMaxSize, defaultStdioMaxSize)
+	if maxSize <= 0 {
+		return
+	}
+	s.AddFunc("stdio-stdout", datadir.StdioTask(stdout, "stdout", maxSize))
+	s.AddFunc("stdio-stderr", datadir.StdioTask(stderr, "stderr", maxSize))
 }
 
 // dataDirSweepInterval is how often the shared sweeper runs. Hourly: the trees

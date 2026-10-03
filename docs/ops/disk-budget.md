@@ -54,7 +54,36 @@ sudo systemctl start naozhi
 `sessions.json` / `cron.json` / `shims/` / `run/` / `env` **不要手工删除** —
 会导致活动 session 丢失、cron 任务遗忘、shim 重连失败。
 
+## stdout / stderr 日志
+
+naozhi 的 slog 写 stdout,Go runtime 的 panic trace 写 stderr。它们落到哪里由
+init 系统决定,不在 `~/.naozhi/` 的任何受管目录里;每条 INFO 都会进去,不设上限
+时一台机器三个月可涨到几百 MB。
+
+**内建上限**:`log.stdio_max_size`(默认 `"64MB"`,`"0"` 关闭)。启动时及之后
+每小时检查一次 fd 1/2:只有当它是 **O_APPEND 打开的普通文件** 且超过上限时,原地
+`ftruncate` 到 0,再写回一条 JSON 标记行和最新的若干整行(上限的 1/8,最多
+4 MB),并打一条 INFO `stdio log truncated`(含 `stream` / `bytes_before` /
+`kept_bytes`)。管道、journald socket、终端一律不碰。
+
+**只能截断,不能改名**:这个 fd 是 launchd / systemd 打开后交给 naozhi 的,naozhi
+不会重新打开它。改名(rename)之后 naozhi 会一直往改了名的那个 inode 里写,原路径
+不再增长,磁盘也不会被释放。
+
+| 平台 | 推荐做法 |
+| --- | --- |
+| systemd(默认 unit / `deploy/naozhi.service`) | 不设 `StandardOutput=`,输出进 journald;用 `journald.conf` 的 `SystemMaxUse=` 封顶。内建上限对 socket 不生效,也不需要 |
+| systemd + `StandardOutput=append:/path` | 内建上限生效;或 logrotate 配 `copytruncate`(不要用默认的 rename 模式) |
+| systemd + `StandardOutput=file:/path` | 这个 fd 不是 O_APPEND,截断后下一次写会落在旧偏移、留下空洞,所以内建上限**跳过**它并打一次 WARN。改成 `append:` 或 journald |
+| macOS launchd(`StandardOutPath` / `StandardErrorPath`) | 用内建上限。**不要**配 newsyslog:它只会 rename、没有 copytruncate,结果就是上面说的写进旧 inode |
+
+找日志实际路径:macOS 上 `launchctl print gui/$(id -u)/com.naozhi.agent` 的
+`stdout path` / `stderr path`;Linux 上 `systemctl show naozhi -p StandardOutput`。
+
+已知取舍:截断那一刻(读尾部到 `ftruncate` 之间的微秒级窗口)写入的行会丢失;
+需要完整历史的部署把 `stdio_max_size` 设为 `"0"`,自己负责轮转。
+
 ## 跟进
 
-当前只做启动时一次性扫描 + warn。真正的配额执行 (quota)、log rotation、
-按目录类型的独立上限在 TODO `RNEW-OPS-415` 跟踪。
+当前只做启动时一次性扫描 + warn。真正的配额执行 (quota)、按目录类型的独立上限
+在 TODO `RNEW-OPS-415` 跟踪。
