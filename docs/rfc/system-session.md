@@ -205,6 +205,10 @@ type TickReport struct {
     // Skipped 记录被各种原因跳过的候选数，key 是原因（"already_user_labeled" / "min_turns" 等）。
     // 不强制 daemon 填，nil/empty 也合法。
     Skipped map[string]int
+    // Counts 是 daemon 自定义计数器，原样拷进 DaemonRun.Stats（如 attachment-gc
+    // 的 dry_run / would_reap_*）。key 不得是 "examined" / "acted" 或以
+    // "skipped_" 开头（那些名字归上面三个字段）。nil 也合法。
+    Counts map[string]int64
 }
 
 // Daemon 是 naozhi 内置后台线程的最小契约。
