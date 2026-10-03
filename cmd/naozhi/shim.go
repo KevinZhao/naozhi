@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/config"
@@ -117,37 +119,87 @@ func runShimStop(args []string) {
 		fmt.Fprintf(os.Stderr, "init shim manager: %v\n", err)
 		os.Exit(1)
 	}
-	states, err := mgr.Discover()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "discover shims: %v\n", err)
-		os.Exit(1)
+	if code := stopShims(mgr, *key, *all, os.Stdout, os.Stderr); code != 0 {
+		os.Exit(code)
 	}
+}
+
+// stopShims stops the targets planShimStop picks from a read-only Inspect, so
+// non-target state files are never touched, and returns the exit code.
+func stopShims(mgr *shim.Manager, key string, all bool, stdout, stderr io.Writer) int {
+	entries, err := mgr.Inspect()
+	if err != nil {
+		fmt.Fprintf(stderr, "inspect shims: %v\n", err)
+		return 1
+	}
+	plan := planShimStop(entries, key, all)
 
 	stopped := 0
-	for _, state := range states {
-		if !*all && state.Key != *key {
-			continue
-		}
+	for _, state := range plan.targets {
 		handle, err := mgr.Reconnect(context.Background(), state.Key, 0)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "connect to %s: %v\n", state.Key, err)
+			fmt.Fprintf(stderr, "connect to %s: %v\n", state.Key, err)
 			if state.ShimPID > 0 {
 				_ = osutil.SendShimReload(state.ShimPID)
-				fmt.Fprintf(os.Stderr, "  sent SIGUSR2 to PID %d\n", state.ShimPID)
+				fmt.Fprintf(stderr, "  sent SIGUSR2 to PID %d\n", state.ShimPID)
 				stopped++
 			}
 			continue
 		}
 		handle.Shutdown()
-		fmt.Printf("stopped shim: key=%s pid=%d\n", state.Key, state.ShimPID)
+		fmt.Fprintf(stdout, "stopped shim: key=%s pid=%d\n", state.Key, state.ShimPID)
 		stopped++
 	}
-
-	if stopped == 0 && *key != "" {
-		fmt.Fprintf(os.Stderr, "no shim found for key: %s\n", *key)
-		os.Exit(1)
+	for _, e := range plan.skipped {
+		fmt.Fprintf(stderr, "skipped %s: %s\n", e.State.Key, shimSkipReason(e))
 	}
-	fmt.Printf("%d shim(s) stopped\n", stopped)
+	if plan.stale > 0 {
+		fmt.Fprintf(stderr, "%d stale state file(s) left for the service's reconcile to clean\n", plan.stale)
+	}
+
+	if stopped == 0 && len(plan.skipped) == 0 && key != "" {
+		fmt.Fprintf(stderr, "no shim found for key: %s\n", key)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%d shim(s) stopped\n", stopped)
+	if len(plan.skipped) > 0 {
+		return 1
+	}
+	return 0
+}
+
+// shimStopPlan is what `shim stop` does with Inspect's entries. Only targets
+// whose PID is alive and confirmed to run this binary are signalled; an
+// unconfirmed PID may belong to an unrelated process that reused it.
+type shimStopPlan struct {
+	targets []shim.State
+	skipped []shim.StateEntry
+	stale   int
+}
+
+func planShimStop(entries []shim.StateEntry, key string, all bool) shimStopPlan {
+	var p shimStopPlan
+	for _, e := range entries {
+		if !all && (e.Verdict == shim.StateCorrupt || e.State.Key != key) {
+			continue
+		}
+		switch {
+		case !shimEntryLive(e):
+			p.stale++
+		case e.Verdict == shim.StateBinaryMismatch || e.IdentityErr != nil:
+			p.skipped = append(p.skipped, e)
+		default:
+			p.targets = append(p.targets, e.State)
+		}
+	}
+	return p
+}
+
+func shimSkipReason(e shim.StateEntry) string {
+	if e.Verdict == shim.StateBinaryMismatch {
+		return fmt.Sprintf("pid %d runs a different naozhi binary than this one; rerun with the service's binary, or check the PID and kill it by hand", e.State.ShimPID)
+	}
+	return fmt.Sprintf("cannot confirm pid %d is a naozhi shim (%v); check the PID and kill it by hand", e.State.ShimPID, e.IdentityErr)
 }
 
 func runShimList(args []string) {
@@ -165,40 +217,94 @@ func runShimList(args []string) {
 		fmt.Fprintf(os.Stderr, "init shim manager: %v\n", err)
 		os.Exit(1)
 	}
-	states, err := mgr.Discover()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "discover shims: %v\n", err)
-		os.Exit(1)
+	if code := listShims(mgr, *configPath, os.Stdout, os.Stderr); code != 0 {
+		os.Exit(code)
 	}
+}
 
-	if len(states) == 0 {
-		fmt.Println("no active shims")
-		return
+// listShims prints a read-only Inspect of the state dir and returns the exit code.
+func listShims(mgr *shim.Manager, configPath string, stdout, stderr io.Writer) int {
+	entries, err := mgr.Inspect()
+	if err != nil {
+		fmt.Fprintf(stderr, "inspect shims: %v\n", err)
+		return 1
 	}
 
 	// Drift against current config is best-effort: an unreadable config only
 	// disables the drift lines, it never breaks the listing.
-	cfg, cfgErr := config.Load(*configPath)
-	if cfgErr != nil {
-		fmt.Fprintf(os.Stderr, "note: config unavailable (%v); overlay drift check skipped\n", cfgErr)
+	var cfg *config.Config
+	if slices.ContainsFunc(entries, shimEntryLive) {
+		var cfgErr error
+		if cfg, cfgErr = config.Load(configPath); cfgErr != nil {
+			fmt.Fprintf(stderr, "note: config unavailable (%v); overlay drift check skipped\n", cfgErr)
+			cfg = nil
+		}
+	}
+	writeShimList(stdout, entries, cfg)
+	return 0
+}
+
+// shimEntryLive reports whether the state file's PID is alive.
+func shimEntryLive(e shim.StateEntry) bool {
+	return e.Verdict != shim.StateCorrupt && e.Verdict != shim.StateDeadPID
+}
+
+// shimListStatus is the STATUS column for a state file whose PID is alive.
+func shimListStatus(e shim.StateEntry) string {
+	switch {
+	case e.Verdict == shim.StateBinaryMismatch:
+		return "foreign-bin"
+	case e.IdentityErr != nil:
+		return "unverified"
+	case e.Verdict == shim.StateSocketMissing:
+		return "no-socket"
+	}
+	return "ok"
+}
+
+// writeShimList prints every state file whose PID is alive, then counts the
+// dead and corrupt ones. cfg nil skips the drift lines.
+func writeShimList(w io.Writer, entries []shim.StateEntry, cfg *config.Config) {
+	var live []shim.StateEntry
+	stale, foreign := 0, false
+	for _, e := range entries {
+		if !shimEntryLive(e) {
+			stale++
+			continue
+		}
+		live = append(live, e)
+		foreign = foreign || e.Verdict == shim.StateBinaryMismatch
 	}
 
-	fmt.Printf("%-6s %-6s %-5s %-40s %s\n", "SHIM", "CLI", "ALIVE", "KEY", "SESSION")
-	for _, s := range states {
-		alive := "yes"
-		if !s.CLIAlive {
-			alive = "no"
+	if len(live) == 0 {
+		fmt.Fprintln(w, "no active shims")
+	} else {
+		fmt.Fprintf(w, "%-6s %-6s %-5s %-40s %-15s %s\n", "SHIM", "CLI", "ALIVE", "KEY", "SESSION", "STATUS")
+		for _, e := range live {
+			s := e.State
+			alive := "yes"
+			if !s.CLIAlive {
+				alive = "no"
+			}
+			sid := s.SessionID
+			if len(sid) > 12 {
+				sid = sid[:12] + "..."
+			} else if sid == "" {
+				sid = "-"
+			}
+			fmt.Fprintf(w, "%-6d %-6d %-5s %-40s %-15s %s\n", s.ShimPID, s.CLIPID, alive, s.Key, sid, shimListStatus(e))
+			if cfg != nil {
+				printShimDrift(w, cfg, s)
+			}
 		}
-		sid := s.SessionID
-		if len(sid) > 12 {
-			sid = sid[:12] + "..."
-		}
-		fmt.Printf("%-6d %-6d %-5s %-40s %s\n", s.ShimPID, s.CLIPID, alive, s.Key, sid)
-		if cfg != nil {
-			printShimDrift(cfg, s)
-		}
+		fmt.Fprintf(w, "\n%d shim(s)\n", len(live))
 	}
-	fmt.Printf("\n%d shim(s)\n", len(states))
+	if foreign {
+		fmt.Fprintln(w, "foreign-bin: started by a different naozhi binary than this one; run list/stop with the service's binary")
+	}
+	if stale > 0 {
+		fmt.Fprintf(w, "%d stale state file(s) left for the service's reconcile to clean\n", stale)
+	}
 }
 
 // printShimDrift prints the overlay-drift view of one shim state against the
@@ -207,7 +313,7 @@ func runShimList(args []string) {
 // is invisible offline, so a hard DRIFT there would brand every tuned,
 // healthy session as broken (the authoritative per-field signal is
 // /api/sessions overlay_drift).
-func printShimDrift(cfg *config.Config, st shim.State) {
+func printShimDrift(w io.Writer, cfg *config.Config, st shim.State) {
 	// The router-level cli.model / cli.args are the BASE; the per-backend entry
 	// only overrides them when non-empty. Reading b.Model/b.Args directly (what
 	// this did before #2668) dropped the base, so a backend inheriting the global
@@ -232,10 +338,10 @@ func printShimDrift(cfg *config.Config, st shim.State) {
 	}
 	advisory, drift := session.ShimListDrift(bd, profileModel, st)
 	for _, d := range drift {
-		fmt.Printf("       DRIFT %s: %q -> %q — 重启会话以应用新配置\n", d.Field, d.Stored, d.Current)
+		fmt.Fprintf(w, "       DRIFT %s: %q -> %q — 重启会话以应用新配置\n", d.Field, d.Stored, d.Current)
 	}
 	for _, d := range advisory {
-		fmt.Printf("       note %s: stored %q, config now %q（不含 dashboard tuning 层，以 /api/sessions 的 overlay_drift 为准）\n", d.Field, d.Stored, d.Current)
+		fmt.Fprintf(w, "       note %s: stored %q, config now %q（不含 dashboard tuning 层，以 /api/sessions 的 overlay_drift 为准）\n", d.Field, d.Stored, d.Current)
 	}
 }
 

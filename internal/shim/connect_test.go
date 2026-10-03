@@ -482,17 +482,12 @@ func TestDiscover_RemovesStateWithMissingSocket(t *testing.T) {
 	if _, statErr := os.Stat(path); statErr == nil {
 		t.Error("zombie state file should have been removed")
 	}
-	// Drain the SIGTERM we just sent ourselves before it propagates to the
-	// rest of the test process. 100ms is well within ticker bounds on even
-	// slow CI.
+	// The zombie must also be told to exit: removing only its state file
+	// would leave the process holding its PTY and CLI child forever.
 	select {
 	case <-sigCh:
-	case <-time.After(500 * time.Millisecond):
-		// If we never got it, either F4 didn't signal (old behaviour — a
-		// real regression) or signal delivery is slow on this platform.
-		// The state-file removal assertion above is the primary check;
-		// the SIGTERM is defensive for clean-up of the real process.
-		t.Log("no SIGTERM observed; state-file check already asserted")
+	case <-time.After(2 * time.Second):
+		t.Error("zombie shim was not sent SIGTERM")
 	}
 }
 

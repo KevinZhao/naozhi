@@ -99,14 +99,28 @@ socat - UNIX-CONNECT:/tmp/naozhi-test-shim.sock
 
 输出示例：
 ```
-SHIM   CLI    ALIVE KEY                                      SESSION
-12345  23456  yes   feishu:d:alice:general                    sess_abc123...
+SHIM   CLI    ALIVE KEY                                      SESSION         STATUS
+12345  23456  yes   feishu:d:alice:general                   sess_abc123...  ok
        DRIFT append_system_prompt: "旧提示" -> "新提示" — 重启会话以应用新配置
        note model: stored "claude-opus-4.7", config now "claude-fable-5"（不含 dashboard tuning 层，以 /api/sessions 的 overlay_drift 为准）
-12346  23457  yes   feishu:d:bob:code-reviewer                sess_def456...
+12346  23457  yes   feishu:d:bob:code-reviewer               sess_def456...  foreign-bin
 
 2 shim(s)
+foreign-bin: started by a different naozhi binary than this one; run list/stop with the service's binary
+1 stale state file(s) left for the service's reconcile to clean
 ```
+
+STATUS 只对 PID 仍存活的 state file 给出：
+
+| STATUS | 含义 |
+|--------|------|
+| `ok` | PID 运行的是当前这个 naozhi 二进制，socket 在 |
+| `foreign-bin` | PID 运行的是另一个 naozhi 二进制（例如 `./bin/naozhi` 查看服务从 `~/.local/bin/naozhi` 起的 shim），也可能是 PID 被无关进程复用 |
+| `unverified` | 无法确认 PID 的二进制身份（`ps` / `readlink` 失败） |
+| `no-socket` | PID 存活但 socket 文件不见了（服务 reconcile 会 SIGTERM 它并清理） |
+
+PID 已死或 JSON 损坏的 state file 只计数在末行。`shim list` 和 `shim stop` 都**不修改** state 目录：
+不删文件、不发 SIGTERM，清理只由服务自己的 reconcile 做。
 
 ### 3.2 停止 shim
 
@@ -117,6 +131,10 @@ SHIM   CLI    ALIVE KEY                                      SESSION
 # 停止所有 shim
 ./bin/naozhi shim stop --all
 ```
+
+只有 PID 存活且身份确认为当前二进制的目标才会被停止（先连 socket 发 shutdown，连不上再发 SIGUSR2）。
+`foreign-bin` / `unverified` 的目标会被跳过并在 stderr 说明原因，退出码为 1：用服务实际运行的那个二进制
+重跑，或确认 PID 后手动 kill。非目标的 state file 不会被碰。
 
 ## 4. 端到端测试：重启不中断
 
