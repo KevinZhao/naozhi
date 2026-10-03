@@ -124,6 +124,15 @@ type SessionRouter interface {
 // ErrClassSessionCapacity, and the notice advises staggering schedules.
 var ErrSessionCapacity = errors.New("cron: session capacity reached")
 
+// ProcessReleaser is asserted on the SessionRouter, never added to it (test
+// fakes degrade to keeping the process). ReleaseProcess closes the idle CLI
+// behind key and keeps its session, so a persistent-context job holds no
+// process between ticks and its next run resumes the same conversation; true
+// means a process was closed.
+type ProcessReleaser interface {
+	ReleaseProcess(key string) bool
+}
+
 // SchedulerConfig holds the value/scalar configuration for the cron
 // scheduler; injected components live in SchedulerDeps (deps.go, #746). The
 // scheduler stays struct-config rather than functional-options (#776), and
@@ -228,7 +237,7 @@ const defaultExecTimeout = 5 * time.Minute
 
 // DefaultMaxJobsPerChat bounds how many cron jobs a single chat (platform +
 // chat_id) may own so one loud group cannot consume the global MaxJobs quota
-// nor the session.maxCronExempt sub-quota (each job holds one exempt stub).
+// nor, when its runs overlap, the session.maxCronExempt sub-quota.
 // Overridable via SchedulerConfig.MaxJobsPerChat; zero falls back here — the
 // cap cannot be disabled. See docs/rfc/cron-v2-polish.md for sizing rationale.
 const DefaultMaxJobsPerChat = 10

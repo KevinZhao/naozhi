@@ -77,6 +77,19 @@ func (a cronRouterAdapter) GetOrCreate(ctx context.Context, key string, opts cro
 	return cronSessionAdapter{sess}, cron.SessionStatus(int(st)), nil
 }
 
+var _ cron.ProcessReleaser = cronRouterAdapter{}
+
+// ReleaseProcess satisfies cron.ProcessReleaser. The version bump is what
+// moves the dashboard's row to the released state; nothing here needs saving.
+func (a cronRouterAdapter) ReleaseProcess(key string) bool {
+	s := a.r.SessionFor(key)
+	if s == nil || !s.ReleaseIdleProcess() {
+		return false
+	}
+	a.r.BumpVersion()
+	return true
+}
+
 // wrapCronSpawnErr tags the router's capacity refusals with
 // cron.ErrSessionCapacity, keeping the session sentinel in the chain.
 func wrapCronSpawnErr(err error) error {
