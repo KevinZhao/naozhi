@@ -701,6 +701,17 @@ function nodeFilteredProjects() {
   return sessionList.projectsData.filter(p => (p.node || 'local') === target);
 }
 
+// Alt+N opens a new session. Cmd/Ctrl+N is left alone so the browser's
+// "new window" still works.
+document.addEventListener('keydown', function(e) {
+  if (e.altKey && (e.key === 'n' || e.key === 'N')) {
+    const tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+    e.preventDefault();
+    createNewSession();
+  }
+});
+
 function createNewSession() {
   // Fetch backends upfront so the picker (if any) is ready when the modal
   // renders. Failure falls back to the single-backend UI — cli.backends

@@ -11,8 +11,8 @@ import { eventAlreadyRendered, eventHtml, leadingTimeDivider, removeOptimisticMs
 import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.js';
 import { runPendingAsync } from './render_md.js';
 import { processEventsForDisplay } from './file_refs.js';
-import { navRebuild, navSync, updateSendButton } from './msg_nav.js';
-import { applyEventToTurnState, paintTurnElapsed, refreshBanner, resetTurnState, resetTurnStateForUserEcho, restoreScrollPos, scrollSlackPx, turnState } from './running_banner.js';
+import { navRebuild, navSync } from './msg_nav.js';
+import { applyEventToTurnState, paintTurnElapsed, refreshBanner, resetTurnState, resetTurnStateForUserEcho, restoreScrollPos, scrollSlackPx, turnState, updateSendButton } from './running_banner.js';
 import { rollbackOptimisticRunning } from './send_message.js';
 import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, MAX_LIVE_DOM_EVENTS, lastDividerTime, showAPIError, stickEventsBottom, timeDividerHtml } from './utilities.js';
 import { isInternalEvent, sid } from './session_ident.js';
