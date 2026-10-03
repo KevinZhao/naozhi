@@ -400,3 +400,123 @@ func TestEvictIdleTokens_SweepKeepsAFreshRing(t *testing.T) {
 		t.Fatalf("ring = %v, want %v", got, want)
 	}
 }
+
+func replyText(w *Weixin, text string) error {
+	_, err := w.Reply(context.Background(), platform.OutgoingMessage{ChatID: "u", Text: text})
+	return err
+}
+
+// TestReplyWithRetry_OtherMessageSkipsUncertainToken: a token left uncertain
+// by one message's no-verdict send must not turn the next message's
+// rejection into a give-up; the next message goes out on a fresh token.
+func TestReplyWithRetry_OtherMessageSkipsUncertainToken(t *testing.T) {
+	t.Parallel()
+	var delivered atomic.Int32
+	w, f := newRingTestWeixin(t, deliverThenDrop("t1", &delivered), "t1")
+	if err := replyText(w, "help text"); err == nil {
+		t.Fatal("reply succeeded, want the dropped connection's error")
+	}
+	w.cacheContextToken("u", "t2", time.Now().UnixNano())
+	if _, err := platform.ReplyWithRetry(context.Background(), w,
+		platform.OutgoingMessage{ChatID: "u", Text: "answer to msg2"}, 3); err != nil {
+		t.Fatalf("answer: %v (tokens sent %v)", err, f.seen())
+	}
+	if got, want := f.seen(), []string{"t1", "t2"}; !slices.Equal(got, want) {
+		t.Fatalf("tokens sent = %v, want %v", got, want)
+	}
+}
+
+// ringState renders each slot as token, token+"!" (spent) or token+"?"
+// (uncertain).
+func ringState(t *testing.T, w *Weixin) []string {
+	t.Helper()
+	v, _ := w.contextTokens.Load("u")
+	r := v.(*tokenRing)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, 0, len(r.slots))
+	for _, s := range r.slots {
+		switch {
+		case s.spent:
+			out = append(out, s.token+"!")
+		case s.uncertain:
+			out = append(out, s.token+"?")
+		default:
+			out = append(out, s.token)
+		}
+	}
+	return out
+}
+
+// TestReply_OtherMessageRejectedOnUncertainTokenRotates: with no fresh token
+// left, another message's rejection on the uncertain token is an ordinary
+// rejection (retryable, not "maybe delivered"), and the token stays spent.
+func TestReply_OtherMessageRejectedOnUncertainTokenRotates(t *testing.T) {
+	t.Parallel()
+	var delivered atomic.Int32
+	w, f := newRingTestWeixin(t, deliverThenDrop("t1", &delivered), "t1")
+	if err := replyText(w, "help text"); err == nil {
+		t.Fatal("reply succeeded, want the dropped connection's error")
+	}
+	err := replyText(w, "answer")
+	if !errors.Is(err, errUpstreamRejected) || platform.IsPermanent(err) {
+		t.Fatalf("err = %v, want a retryable upstream rejection", err)
+	}
+	if got, want := ringState(t, w), []string{"t1!"}; !slices.Equal(got, want) {
+		t.Fatalf("ring = %v, want %v (tokens sent %v)", got, want, f.seen())
+	}
+}
+
+// TestReply_OtherMessageUsesUncertainTokenLast: an uncertain token is still a
+// candidate for another message once the fresh ones are gone, since the
+// no-verdict send may not have landed.
+func TestReply_OtherMessageUsesUncertainTokenLast(t *testing.T) {
+	t.Parallel()
+	w, f := newRingTestWeixin(t, func(_ string, attempt int) string {
+		if attempt == 1 {
+			return "http500"
+		}
+		return "ok"
+	}, "t1", "t2")
+	if err := replyText(w, "help text"); err == nil {
+		t.Fatal("reply succeeded, want the http 500")
+	}
+	for _, text := range []string{"answer 1", "answer 2"} {
+		if err := replyText(w, text); err != nil {
+			t.Fatalf("%s: %v", text, err)
+		}
+	}
+	if got, want := f.seen(), []string{"t2", "t1", "t2"}; !slices.Equal(got, want) {
+		t.Fatalf("tokens sent = %v, want %v", got, want)
+	}
+}
+
+// TestReply_RejectionStateAfterReply: a rejected token stays spent only when
+// a later token in the same Reply is accepted.
+func TestReply_RejectionStateAfterReply(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, second string
+		wantErr      bool
+		want         []string
+	}{
+		{"then accepted", "ok", false, []string{"t1!", "t2!"}},
+		{"then no verdict", "http500", true, []string{"t1?", "t2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w, _ := newRingTestWeixin(t, func(tok string, _ int) string {
+				if tok == "t2" {
+					return "reject"
+				}
+				return tc.second
+			}, "t1", "t2")
+			if err := reply(w); (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got := ringState(t, w); !slices.Equal(got, tc.want) {
+				t.Fatalf("ring = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

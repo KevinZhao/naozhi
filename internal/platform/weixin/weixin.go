@@ -251,18 +251,25 @@ func (w *Weixin) Reply(ctx context.Context, msg platform.OutgoingMessage) (strin
 
 // sendWithRing sends via ring.take's token and moves to the next one only on
 // a parsed upstream rejection (nothing was delivered). Any other error returns
-// at once with the token released as uncertain: the message may have gone
-// out, and a retry on another token would deliver it twice. If every try is
-// rejected, the tokens are released: the cause was likely not the token.
+// at once with the token released as uncertain for this message: it may have
+// gone out, and a retry on another token would deliver it twice. Tokens
+// rejected along the way stay spent only if a later one is accepted; on any
+// other exit they are released, since the cause was likely not the token.
 func (w *Weixin) sendWithRing(ctx context.Context, ring *tokenRing, chatID, text string) error {
+	key := messageKey(text)
 	var lastErr error
 	tried := make([]string, 0, tokenRingCap+1)
 	var rejected []string
+	defer func() {
+		for _, t := range rejected {
+			ring.release(t, false, 0)
+		}
+	}()
 	for range tokenRingCap + 1 {
 		var l lease
 		var ok bool
 		if ring != nil {
-			l, ok = ring.take()
+			l, ok = ring.take(key)
 		}
 		if !ok || slices.Contains(tried, l.token) {
 			break
@@ -270,24 +277,24 @@ func (w *Weixin) sendWithRing(ctx context.Context, ring *tokenRing, chatID, text
 		tried = append(tried, l.token)
 		err := w.api.sendMessage(ctx, chatID, text, l.token)
 		if err == nil {
+			rejected = nil // token-specific rejections: those tokens stay spent
 			return nil
 		}
 		lastErr = fmt.Errorf("weixin send: %w", err)
 		switch {
 		case !errors.Is(err, errUpstreamRejected):
 			if l.reserved {
-				ring.release(l.token, true)
+				ring.release(l.token, true, key)
 			}
 			return lastErr
-		case l.uncertain:
-			// Most likely the earlier no-verdict send landed and spent it.
+		case l.retry:
+			// Most likely this message's earlier no-verdict send landed.
 			return &maybeDeliveredError{err: lastErr}
-		case l.reserved:
+		case l.reserved && !l.uncertain:
+			// An uncertain token rejected for another message stays spent:
+			// that message's send most likely consumed it.
 			rejected = append(rejected, l.token)
 		}
-	}
-	for _, t := range rejected {
-		ring.release(t, false)
 	}
 	if lastErr != nil {
 		return lastErr
@@ -297,9 +304,9 @@ func (w *Weixin) sendWithRing(ctx context.Context, ring *tokenRing, chatID, text
 		osutil.SanitizeForLog(chatID, 128))
 }
 
-// maybeDeliveredError is a rejection on a token whose previous send got no
-// verdict. It is permanent so ReplyWithRetry stops instead of resending the
-// message on another token.
+// maybeDeliveredError is a rejection on a token whose previous send of the
+// same message got no verdict. It is permanent so ReplyWithRetry stops
+// instead of resending the message on another token.
 type maybeDeliveredError struct{ err error }
 
 func (e *maybeDeliveredError) Error() string {
