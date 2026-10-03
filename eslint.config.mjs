@@ -221,6 +221,7 @@ export default [
     plugins: { nz },
     rules: {
       'nz/configure-deps': 'error',
+      'nz/deps-keys': 'error',
       'nz/no-exported-let': 'error',
     },
   },

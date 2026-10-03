@@ -62,6 +62,17 @@ test.describe('global shortcuts', () => {
     return { ctx, page, pageErrors };
   }
 
+  // toggleHistory autofocuses the popover's search box 50 ms later (desktop),
+  // and an Esc typed into an input belongs to that input: the global listener
+  // stands down. Wait for that focus and drop it, so the key press below goes
+  // to the page however long the steps in between take.
+  async function openHistory(page) {
+    await page.evaluate(() => (/** @type {any} */ (window)).nz.test.toggleHistory());
+    await expect(page.locator('.history-popover')).toHaveCount(1);
+    await expect(page.locator('#hp-search')).toBeFocused();
+    await page.evaluate(() => /** @type {HTMLElement} */ (document.activeElement)?.blur());
+  }
+
   test('one Esc closes the voice overlay, the history popover, the nav list and the agent drill-in', async ({ browser }) => {
     const { ctx, page, pageErrors } = await openSession(browser);
     try {
@@ -71,8 +82,7 @@ test.describe('global shortcuts', () => {
       // popover).
       await page.click('#nav-counter');
       await expect(page.locator('#nav-list-popover')).toHaveCount(1);
-      await page.evaluate(() => (/** @type {any} */ (window)).nz.test.toggleHistory());
-      await expect(page.locator('.history-popover')).toHaveCount(1);
+      await openHistory(page);
       await page.evaluate(() => document.getElementById('voice-overlay')?.classList.add('show'));
       await page.evaluate((id) => (/** @type {any} */ (window)).nz.views.agent.switchTo(id), TASK_ID);
       await expect.poll(activeTask).toBe(TASK_ID);
@@ -98,8 +108,7 @@ test.describe('global shortcuts', () => {
     try {
       await page.click('#nav-counter');
       await expect(page.locator('#nav-list-popover')).toHaveCount(1);
-      await page.evaluate(() => (/** @type {any} */ (window)).nz.test.toggleHistory());
-      await expect(page.locator('.history-popover')).toHaveCount(1);
+      await openHistory(page);
       // focus, not click: a click outside the nav list closes it.
       await page.focus('#msg-input');
       await expect(page.locator('#msg-input')).toBeFocused();

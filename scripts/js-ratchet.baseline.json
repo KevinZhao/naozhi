@@ -33,13 +33,13 @@
     "lateBindings": 2
   },
   "auth_modal.js": {
-    "lines": 1383,
+    "lines": 1310,
     "maxFnLines": 101,
     "fnOver100": 1,
-    "topLevelLetVar": 2,
-    "configureDeps": 21,
+    "topLevelLetVar": 1,
+    "configureDeps": 5,
     "deadInjections": 0,
-    "innerHTMLAssign": 11,
+    "innerHTMLAssign": 10,
     "htmlInsert": 0,
     "lateBindings": 0
   },
@@ -55,7 +55,7 @@
     "lateBindings": 0
   },
   "composer_files.js": {
-    "lines": 458,
+    "lines": 457,
     "maxFnLines": 65,
     "fnOver100": 0,
     "topLevelLetVar": 2,
@@ -121,7 +121,7 @@
     "lateBindings": 0
   },
   "cron_timeline.js": {
-    "lines": 937,
+    "lines": 936,
     "maxFnLines": 70,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -154,7 +154,7 @@
     "lateBindings": 3
   },
   "dashboard.js": {
-    "lines": 2918,
+    "lines": 2910,
     "maxFnLines": 120,
     "fnOver100": 1,
     "topLevelLetVar": 0,
@@ -330,11 +330,11 @@
     "lateBindings": 0
   },
   "send_message.js": {
-    "lines": 590,
+    "lines": 577,
     "maxFnLines": 102,
     "fnOver100": 1,
     "topLevelLetVar": 1,
-    "configureDeps": 23,
+    "configureDeps": 3,
     "deadInjections": 0,
     "innerHTMLAssign": 0,
     "htmlInsert": 2,
@@ -385,7 +385,7 @@
     "lateBindings": 0
   },
   "shell.js": {
-    "lines": 22,
+    "lines": 23,
     "maxFnLines": 9,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -451,13 +451,13 @@
     "lateBindings": 0
   },
   "utilities.js": {
-    "lines": 1349,
+    "lines": 1413,
     "maxFnLines": 91,
     "fnOver100": 0,
     "topLevelLetVar": 4,
     "configureDeps": 0,
     "deadInjections": 0,
-    "innerHTMLAssign": 4,
+    "innerHTMLAssign": 5,
     "htmlInsert": 0,
     "lateBindings": 0
   },

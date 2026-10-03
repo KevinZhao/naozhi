@@ -7,10 +7,9 @@ import { NZ_CONTRACT } from './contract.js';
 import { composer } from './state.js';
 import { esc, escAttr, showToast } from './nz_util.js';
 import { featureForCurrent } from './features.js';
-import { showAuthModal } from './auth_modal.js';
 import { ICONS } from './icons.js';
 import { getToken } from './platform.js';
-import { formatFileSize } from './utilities.js';
+import { formatFileSize, showAuthModal } from './utilities.js';
 
 // --- File handling ---
 //

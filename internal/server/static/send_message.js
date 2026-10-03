@@ -6,40 +6,27 @@
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects; its helpers are
-// injected once via configureSendMessage(), called from dashboard's module body.
+// module evaluates. Shared state is read from the state.js objects and helpers are
+// imported. event_stream.js and session_list.js import this module, so
+// fetchEvents and fetchSessions are injected once via configureSendMessage(),
+// called from dashboard's module body; selectSession is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { composer, perSession, selection, sessionList, timers } from './state.js';
-import { turnState } from './running_banner.js';
+import { interruptSession, startTurnTimer, turnState, updateSendButton } from './running_banner.js';
 import { showToast, patchCardExitChip } from './nz_util.js';
 import { wsm } from './ws_manager.js';
 import { featureForCurrent } from './features.js';
-import { getMsgValue, setMsgValue } from './utilities.js';
+import { EVENT_DIVIDER_GAP_MS, getMsgValue, lastDividerTime, persistPending, removeSidebarCard, setMsgValue, showAPIError, showAuthModal, showNetworkError, stickEventsBottom, timeDividerHtml } from './utilities.js';
+import { getToken } from './platform.js';
+import { discoveredKey, dropDiscovered, sid } from './session_ident.js';
+import { eventHtml } from './event_render.js';
+import { awaitPendingOrients, renderFilePreviews } from './composer_files.js';
+import { navSync } from './msg_nav.js';
+import { shell } from './shell.js';
 
 const deps = {
-  EVENT_DIVIDER_GAP_MS: null,
-  awaitPendingOrients: null,
-  discoveredKey: null,
-  dropDiscovered: null,
-  eventHtml: null,
   fetchEvents: null,
   fetchSessions: null,
-  getToken: null,
-  interruptSession: null,
-  lastDividerTime: null,
-  navSync: null,
-  persistPending: null,
-  removeSidebarCard: null,
-  renderFilePreviews: null,
-  selectSession: null,
-  showAPIError: null,
-  showAuthModal: null,
-  showNetworkError: null,
-  sid: null,
-  startTurnTimer: null,
-  stickEventsBottom: null,
-  timeDividerHtml: null,
-  updateSendButton: null,
 };
 export function configureSendMessage(impl) {
   for (const k of Object.keys(deps)) {
@@ -56,13 +43,13 @@ let _lastEscAt = 0;
 function handleKey(e) {
   if (e.key === 'Escape') {
     e.preventDefault();
-    const sd = sessionList.sessionsData[deps.sid(selection.key, selection.node || 'local')];
+    const sd = sessionList.sessionsData[sid(selection.key, selection.node || 'local')];
     const running = sd && sd.state === 'running';
     if (!running) { _lastEscAt = 0; return; }
     const now = Date.now();
     if (now - _lastEscAt < 600) {
       _lastEscAt = 0;
-      deps.interruptSession();
+      interruptSession();
     } else {
       _lastEscAt = now;
       showToast('再按一次 Esc 发送中断', 'warning', 1000);
@@ -78,7 +65,7 @@ function clearMsg(el) { if (el) el.textContent = ''; }
 // the live composer (text-level backend feature gates, byte cap, in-flight
 // uploads). Toasts and returns false when the send must abort. sendMessage
 // calls it twice: once before closing the reentrancy gate and again after
-// `await deps.awaitPendingOrients()` — the composer stays editable during that wait,
+// `await awaitPendingOrients()` — the composer stays editable during that wait,
 // so text and attachments captured before the await can be stale (#2405).
 function validateComposerForSend(text) {
   // Multi-Backend RFC §8.3 D9 — `/urgent` requires the backend's
@@ -139,7 +126,7 @@ async function sendMessage() {
     const pd = selection.pendingDiscovered;
     try {
       const headers = {'Content-Type': 'application/json'};
-      const token = deps.getToken();
+      const token = getToken();
       if (token) headers['Authorization'] = 'Bearer ' + token;
       const r = await fetch(NZ_CONTRACT.API.discovered_takeover, {
         method: 'POST', headers,
@@ -147,7 +134,7 @@ async function sendMessage() {
       });
       if (!r.ok) {
         const errText = await r.text().catch(() => '');
-        deps.showAPIError('接管进程', r.status, errText);
+        showAPIError('接管进程', r.status, errText);
         if (input) { input.dataset.placeholder = 'send a message to take over...'; input.contentEditable = 'true'; }
         composer.sending = false;
         if (btn) btn.classList.remove('sending');
@@ -162,9 +149,9 @@ async function sendMessage() {
         return;
       }
       // Remove from discoveredItems so renderSidebar won't re-create the card
-      deps.dropDiscovered(pd.pid, pd.node);
+      dropDiscovered(pd.pid, pd.node);
       // Remove the discovered card from sidebar
-      deps.removeSidebarCard(deps.discoveredKey(pd.pid, pd.node));
+      removeSidebarCard(discoveredKey(pd.pid, pd.node));
       selection.pendingDiscovered = null;
       // Poll until the session appears in managed sessions (up to 10s)
       const takenKey = data.key;
@@ -174,7 +161,7 @@ async function sendMessage() {
         await new Promise(resolve => setTimeout(resolve, 500));
         sessionList.lastVersion = 0;
         await deps.fetchSessions();
-        if (sessionList.sessionsData[deps.sid(takenKey, takenNode)]) { ready = true; break; }
+        if (sessionList.sessionsData[sid(takenKey, takenNode)]) { ready = true; break; }
       }
       if (!ready) {
         showToast('接管超时：会话未就绪，请稍后重试', 'error');
@@ -185,14 +172,14 @@ async function sendMessage() {
       }
       // Session is ready — switch to it and send the message
       composer.sending = false;
-      deps.selectSession(takenKey, takenNode);
+      shell.selectSession(takenKey, takenNode);
       // Restore the message text and send
       const newInput = document.getElementById('msg-input');
       if (newInput) setMsgValue(newInput, text);
       await sendMessage();
       return;
     } catch (e) {
-      deps.showNetworkError('接管进程', e);
+      showNetworkError('接管进程', e);
       if (input) { input.dataset.placeholder = 'send a message to take over...'; input.contentEditable = 'true'; }
       composer.sending = false;
       if (btn) btn.classList.remove('sending');
@@ -207,7 +194,7 @@ async function sendMessage() {
   if (!validateComposerForSend(text)) return;
 
   // #2405 — close the reentrancy gate BEFORE the first await. sendComposerTurn
-  // starts with `await deps.awaitPendingOrients()`, which can block for up to
+  // starts with `await awaitPendingOrients()`, which can block for up to
   // ORIENT_MAX_WAIT_MS while the composer stays editable. With the gate set
   // only after that await, every Enter pressed during the wait spawned another
   // sendMessage that captured the same text; once orient settled, waiter #1
@@ -284,11 +271,11 @@ function trySendViaWS(text, fileIDs, input) {
   if (input) clearMsg(input);
   delete perSession.drafts[selection.key];
   clearPendingFiles();
-  if (text) perSession.lastSent[deps.sid(selection.key, selection.node)] = text;
+  if (text) perSession.lastSent[sid(selection.key, selection.node)] = text;
   // Confirmed send: workspace/node/backend were consumed above, so rewrite
   // the durable blob without this key — only on this success path, so a
   // failed send (falling through to HTTP) keeps the entry for that retry.
-  deps.persistPending();
+  persistPending();
   return true;
 }
 
@@ -340,7 +327,7 @@ async function handleSendRejected(r, sentSid, text, input) {
     showToast('附件已失效，请重新添加后再发送', 'warning');
   }
   if (r.status === 401 || r.status === 403) {
-    deps.showAuthModal();
+    showAuthModal();
     return;
   }
   if (r.status === 429) {
@@ -348,7 +335,7 @@ async function handleSendRejected(r, sentSid, text, input) {
     showToast(detail || '请求过于频繁，请稍后重试', 'warning');
     return;
   }
-  deps.showAPIError('发送消息', r.status, detail);
+  showAPIError('发送消息', r.status, detail);
 }
 
 // finishHttpSend runs the 2xx branch: clears the composer, then rolls the
@@ -367,7 +354,7 @@ async function finishHttpSend(r, sentSid, text, input) {
   clearPendingFiles();
   // Confirmed send: the pending maps were consumed in buildSendPayload;
   // rewrite the durable blob without this key, same as the WS path.
-  deps.persistPending();
+  persistPending();
   if (ackStatus === 'reset') {
     rollbackOptimisticRunning(selection.key, selection.node);
     delete perSession.lastSent[sentSid]; // no turn ran, nothing to re-fill on interrupt
@@ -400,7 +387,7 @@ async function sendComposerTurn(targetKey, targetNode) {
   // after upload; transparently wait for it to settle (capped at
   // ORIENT_MAX_WAIT_MS) so the rotated bytes land before we consume
   // file_ids. Silent by design — the user already clicked send.
-  await deps.awaitPendingOrients();
+  await awaitPendingOrients();
   if (!selection.key || selection.key !== targetKey || selection.node !== targetNode) return;
   // The composer stayed editable during the wait: re-read text/files so an
   // id-less upload dropped mid-wait doesn't silently vanish from fileIDs.
@@ -425,14 +412,14 @@ async function sendComposerTurn(targetKey, targetNode) {
   // HTTP POST fallback — JSON only; files already on server.
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const token = deps.getToken();
+    const token = getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
     const payload = buildSendPayload(text, fileIDs);
 
     // Mark this tab as the originator BEFORE the request leaves (text or
     // image-only alike): a send_error for this turn can arrive over the WS
     // any time after the server has the request.
-    const sentSid = deps.sid(selection.key, selection.node);
+    const sentSid = sid(selection.key, selection.node);
     perSession.httpSendPending.add(sentSid);
     const r = await fetch(NZ_CONTRACT.API.sessions_send, {method:'POST', headers, body: JSON.stringify(payload)});
     if (!r.ok) {
@@ -441,10 +428,10 @@ async function sendComposerTurn(targetKey, targetNode) {
     }
     await finishHttpSend(r, sentSid, text, input);
   } catch (e) {
-    perSession.httpSendPending.delete(deps.sid(selection.key, selection.node));
+    perSession.httpSendPending.delete(sid(selection.key, selection.node));
     if (input) setMsgValue(input, text);
     rollbackOptimisticRunning(selection.key, selection.node);
-    deps.showNetworkError('发送消息', e);
+    showNetworkError('发送消息', e);
   }
 }
 
@@ -461,27 +448,27 @@ function renderOptimisticUserMsg(text, sendId) {
   const el = document.getElementById('events-scroll');
   if (!el || !text) return;
   const now = Date.now();
-  const html = deps.eventHtml({type: 'user', detail: text, time: now});
+  const html = eventHtml({type: 'user', detail: text, time: now});
   if (!html) return;
-  const prevT = deps.lastDividerTime(el);
-  if (prevT === 0 || now - prevT >= deps.EVENT_DIVIDER_GAP_MS) {
-    el.insertAdjacentHTML('beforeend', deps.timeDividerHtml(now));
+  const prevT = lastDividerTime(el);
+  if (prevT === 0 || now - prevT >= EVENT_DIVIDER_GAP_MS) {
+    el.insertAdjacentHTML('beforeend', timeDividerHtml(now));
   }
   el.insertAdjacentHTML('beforeend', html);
   el.lastElementChild.classList.add('optimistic-msg');
   if (sendId) el.lastElementChild.setAttribute('data-send-id', sendId);
   // Always force-bottom after a send: the user just posted something and
   // expects to see it, even if they had scrolled up to browse earlier
-  // history. deps.stickEventsBottom handles async layout changes from input-area
+  // history. stickEventsBottom handles async layout changes from input-area
   // collapse and lazy images.
-  deps.stickEventsBottom();
-  deps.navSync();
+  stickEventsBottom();
+  navSync();
 }
 
 function clearPendingFiles() {
   composer.pendingFiles.forEach(f => { if (f.blobUrl) URL.revokeObjectURL(f.blobUrl); });
   composer.pendingFiles = [];
-  deps.renderFilePreviews();
+  renderFilePreviews();
 }
 
 // markSessionOptimisticRunning flips the selected session's local state to
@@ -518,13 +505,13 @@ function patchSidebarCardState(key, node, state) {
     const stateSpan = meta.querySelectorAll('span')[1]; // [0]=dot, [1]=state text
     if (stateSpan && !stateSpan.classList.contains('sc-node')) stateSpan.textContent = displayState;
   }
-  const sd = sessionList.sessionsData[deps.sid(key, msgNode)];
+  const sd = sessionList.sessionsData[sid(key, msgNode)];
   patchCardExitChip(card, state, sd ? sd.death_reason : '');
 }
 
 function markSessionOptimisticRunning(key, node) {
   if (!key) return;
-  const sKey = deps.sid(key, node || 'local');
+  const sKey = sid(key, node || 'local');
   const sd = sessionList.sessionsData[sKey];
   if (sd && sd.state === 'running') return; // server already said running
   // A just-created session has no sessionList.sessionsData entry until the next list
@@ -553,14 +540,14 @@ function markSessionOptimisticRunning(key, node) {
     // distinct "received, starting up" signal during CLI spawn rather than a
     // generic static "处理中…".
     turnState.justSent = true;
-    deps.startTurnTimer();
-    deps.updateSendButton('running');
+    startTurnTimer();
+    updateSendButton('running');
   }
 }
 
 function rollbackOptimisticRunning(key, node) {
   if (!key) return;
-  const sKey = deps.sid(key, node || 'local');
+  const sKey = sid(key, node || 'local');
   if (!perSession.optimisticRunning[sKey]) return;
   delete perSession.optimisticRunning[sKey];
   delete perSession.optimisticPrevState[sKey];
@@ -575,7 +562,7 @@ function rollbackOptimisticRunning(key, node) {
   }
   // The flip may have been applied without a sessionList.sessionsData entry (new session's
   // first send) — restore the button either way.
-  if (key === selection.key && (node || 'local') === selection.node) deps.updateSendButton('ready');
+  if (key === selection.key && (node || 'local') === selection.node) updateSendButton('ready');
 }
 
 

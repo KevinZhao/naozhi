@@ -11,6 +11,10 @@
 //                               bindings. A let, an object field or a literal
 //                               is copied into the callee's table once and
 //                               goes stale when the owner reassigns it.
+//   nz/deps-keys               a module's `deps = { … }` literal is the list
+//                               of what it is handed; deps.X (or a
+//                               destructured X) naming no key of it is a call
+//                               that throws only when its path runs.
 //   nz/no-exported-let         an exported let is a second sharing mechanism
 //                               (an ES live binding importers can read but
 //                               not write); export a const state object or a
@@ -103,6 +107,64 @@ const configureDeps = {
           context.report({ node: value, messageId: 'mutable', data: { name: value.name, kind, callee } });
         }
       },
+    };
+  },
+};
+
+// propKey: the static name of a non-computed (or literal-keyed) property, or
+// null.
+function propKey(p) {
+  if (p.computed && p.key.type !== 'Literal') return null;
+  if (p.key.type === 'Identifier' || p.key.type === 'PrivateIdentifier') return p.key.name;
+  return p.key.type === 'Literal' ? String(p.key.value) : null;
+}
+
+// depsKeys looks only at a top-level binding named `deps` initialised with an
+// object literal of static keys (every receiver module's convention); a
+// spread or computed key leaves the key set unknown and the rule silent. A
+// read through a shadowing `deps` (a parameter, an inner binding) is not the
+// table's and is skipped. Computed reads (deps[k] = impl[k], the receiver's
+// copy loop) have no static key to check.
+const depsKeys = {
+  meta: {
+    type: 'problem',
+    docs: { description: "deps.X must name a key of the module's deps table" },
+    schema: [],
+    messages: {
+      unknownKey: "'{{key}}' is not a key of this module's deps table ({{keys}}): declare and inject it, or import it.",
+    },
+  },
+  create(context) {
+    const sourceCode = context.sourceCode;
+    let table = null; // { variable, keys: Set }
+    const check = (node, scopeNode, key) => {
+      if (!table || findVariable(sourceCode.getScope(scopeNode), 'deps') !== table.variable) return;
+      if (key !== null && !table.keys.has(key)) context.report({ node, messageId: 'unknownKey', data: { key, keys: [...table.keys].join(', ') || 'empty' } });
+    };
+    const checkPattern = (pattern, init) => {
+      if (pattern?.type !== 'ObjectPattern' || init?.type !== 'Identifier' || init.name !== 'deps') return;
+      for (const p of pattern.properties) if (p.type === 'Property') check(p.key, init, propKey(p));
+    };
+    return {
+      Program(program) {
+        for (const st of program.body) {
+          const decl = st.type === 'ExportNamedDeclaration' ? st.declaration : st;
+          if (decl?.type !== 'VariableDeclaration') continue;
+          for (const d of decl.declarations) {
+            if (d.id.type !== 'Identifier' || d.id.name !== 'deps' || d.init?.type !== 'ObjectExpression') continue;
+            const keys = d.init.properties.map((p) => (p.type === 'Property' ? propKey(p) : null));
+            if (keys.includes(null)) return;
+            table = { variable: sourceCode.getDeclaredVariables(d)[0], keys: new Set(keys) };
+          }
+        }
+      },
+      MemberExpression(node) {
+        if (node.object.type !== 'Identifier' || node.object.name !== 'deps') return;
+        if (node.computed && node.property.type !== 'Literal') return;
+        check(node.property, node, node.computed ? String(node.property.value) : node.property.name);
+      },
+      VariableDeclarator(node) { checkPattern(node.id, node.init); },
+      AssignmentExpression(node) { checkPattern(node.left, node.right); },
     };
   },
 };
@@ -368,6 +430,7 @@ export default {
   meta: { name: 'eslint-plugin-nz' },
   rules: {
     'configure-deps': configureDeps,
+    'deps-keys': depsKeys,
     'no-exported-let': noExportedLet,
     'no-module-side-effects': noModuleSideEffects,
   },
