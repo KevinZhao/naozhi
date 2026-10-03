@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -307,6 +308,79 @@ func TestScan_IndexWrittenOnlyOnChange(t *testing.T) {
 	}
 	if readIndexFile(t, indexPath).CreatedAt[filepath.Join(root, "q")] == 0 {
 		t.Error("new project not written to the index")
+	}
+}
+
+// A failed save is retried on the next scan even when the order has not
+// changed since, so a transient failure does not leave the stamps unsaved.
+func TestScan_FailedIndexSaveRetried(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	makeProjectDir(t, root, "p", nil)
+	stateDir := filepath.Join(t.TempDir(), "state")
+	indexPath := filepath.Join(stateDir, "projects-index.json")
+	m, _ := NewManager(root, PlannerDefaults{}, WithIndexPath(indexPath))
+	// A file where the state dir should be makes the first save fail.
+	if err := os.WriteFile(stateDir, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	stamped := createdAtOf(t, m, "p")
+	if err := os.Remove(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readIndexFile(t, indexPath).CreatedAt[filepath.Join(root, "p")]; got != stamped {
+		t.Errorf("index[p] after retry = %d, want the stamped %d", got, stamped)
+	}
+}
+
+// A save that keeps failing warns once, not on every scan; a save that
+// succeeds again ends the run, so the next failure warns again.
+func TestIndexReplace_PersistentFailureWarnsOnce(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	stateDir := filepath.Join(t.TempDir(), "state")
+	idx := loadProjectIndex(filepath.Join(stateDir, "projects-index.json"))
+	if err := os.WriteFile(stateDir, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	count := func(level string) int {
+		n := 0
+		for _, line := range strings.Split(buf.String(), "\n") {
+			if strings.Contains(line, "level="+level) && strings.Contains(line, "persist projects index failed") &&
+				strings.Contains(line, stateDir) {
+				n++
+			}
+		}
+		return n
+	}
+	for i := 0; i < 3; i++ {
+		idx.replace(map[string]int64{"/p": 1})
+	}
+	if w, d := count("WARN"), count("DEBUG"); w != 1 || d != 2 {
+		t.Fatalf("3 failed saves logged %d WARN + %d DEBUG, want 1 + 2:\n%s", w, d, buf.String())
+	}
+	if err := os.Remove(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	idx.replace(map[string]int64{"/p": 1})
+	if err := os.RemoveAll(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateDir, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	idx.replace(map[string]int64{"/p": 2})
+	if w := count("WARN"); w != 2 {
+		t.Errorf("failure after a recovered save logged %d WARN in total, want 2:\n%s", w, buf.String())
 	}
 }
 

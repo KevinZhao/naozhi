@@ -1,6 +1,7 @@
 package project
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -39,6 +40,9 @@ type projectIndex struct {
 	// error, over the cap, symlink, newer version): overwriting it would
 	// destroy state this build cannot read, so order stays in memory.
 	readOnly bool
+	// saveFailing is set while saves keep failing, so a persistent failure
+	// warns once instead of on every 60s scan.
+	saveFailing bool
 }
 
 // loadProjectIndex reads path. A corrupt file is moved aside and the index
@@ -78,15 +82,25 @@ func loadProjectIndex(path string) *projectIndex {
 }
 
 // replace swaps in next and persists it when it differs from what is on
-// disk. A failed save is logged and retried on the next replace.
+// disk. A failed save is retried on the next replace; only the first failure
+// of a run is a Warn, repeats are Debug until a save succeeds again.
 func (idx *projectIndex) replace(next map[string]int64) {
 	idx.createdAt = next
 	if idx.path == "" || idx.readOnly || maps.Equal(next, idx.saved) {
 		return
 	}
 	if err := idx.save(); err != nil {
-		slog.Warn("persist projects index failed", "path", idx.path, "err", err)
+		level := slog.LevelWarn
+		if idx.saveFailing {
+			level = slog.LevelDebug
+		}
+		slog.Log(context.Background(), level, "persist projects index failed", "path", idx.path, "err", err)
+		idx.saveFailing = true
 		return
+	}
+	if idx.saveFailing {
+		slog.Info("persist projects index recovered", "path", idx.path)
+		idx.saveFailing = false
 	}
 	idx.saved = maps.Clone(next)
 }
