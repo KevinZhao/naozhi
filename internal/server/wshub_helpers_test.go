@@ -67,7 +67,7 @@ func TestWSPreMarshalledFrames(t *testing.T) {
 	}{
 		{"not authenticated", wsproto.RawErrNotAuth, node.ServerMsg{Type: "error", Error: "not authenticated"}},
 		{"rate limited", wsproto.RawErrRateLimited, node.ServerMsg{Type: "error", Error: "rate limited"}},
-		{"auth ok", wsproto.RawAuthOK, node.ServerMsg{Type: "auth_ok"}},
+		{"auth ok", wsproto.MarshalAuthOK(""), node.ServerMsg{Type: "auth_ok"}},
 		{"pong", wsproto.RawPong, node.ServerMsg{Type: "pong"}},
 		{"auth fail invalid", wsproto.RawAuthFailInvalid, node.ServerMsg{Type: "auth_fail", Error: "invalid token"}},
 	}

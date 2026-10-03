@@ -12,7 +12,6 @@ import (
 // to []byte at each send site so no shared buffer is appended to
 // concurrently.
 var (
-	RawAuthOK          = mustMarshal(NewAuthOK())
 	RawPong            = mustMarshal(NewPong())
 	RawAuthFailInvalid = mustMarshal(NewAuthFail(AuthFail{Error: "invalid token"}))
 	RawErrNotAuth      = mustMarshal(NewError(Error{Error: "not authenticated"}))
@@ -25,4 +24,10 @@ func mustMarshal(v any) string {
 		panic(fmt.Sprintf("wsproto: marshal %T: %v", v, err))
 	}
 	return string(data)
+}
+
+// MarshalAuthOK is the pre-marshaled auth_ok naming assetVersion; the hub
+// builds it once, when the served page's version is known.
+func MarshalAuthOK(assetVersion string) string {
+	return mustMarshal(NewAuthOK(AuthOK{AssetVersion: assetVersion}))
 }

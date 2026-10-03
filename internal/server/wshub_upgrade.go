@@ -19,6 +19,10 @@ import (
 // refills a token every 12s (burst=5), so 60s avoids a back-to-back 429 loop.
 const wsAuthRetryAfterSeconds = 60
 
+// rawAuthOK names the asset version the served dashboard page carries, so a
+// tab loaded from another build sees the skew on every (re)connect.
+var rawAuthOK = wsproto.MarshalAuthOK(servedAssetVersion)
+
 func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// The handshake has its own per-IP bucket, so tab-reload / mobile-wake
 	// bursts do not spend the auth-attempt budget handleAuth draws from.
@@ -135,7 +139,7 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 	// do not touch msg.Token or run the ConstantTimeCompare so the
 	// cookie-authed and token-authed paths are cleanly separated.
 	if c.authenticated.Load() {
-		c.SendRaw([]byte(wsproto.RawAuthOK))
+		c.SendRaw([]byte(rawAuthOK))
 		return
 	}
 	if !h.admit.tokenMode() || h.admit.tokenMatches(msg.Token) {
@@ -172,7 +176,7 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 		// The Store above precedes this so a broadcast that finds c in the
 		// authenticated set also sees authenticated==true.
 		h.subs.markAuthenticated(c)
-		c.SendRaw([]byte(wsproto.RawAuthOK))
+		c.SendRaw([]byte(rawAuthOK))
 	} else {
 		c.SendRaw([]byte(wsproto.RawAuthFailInvalid))
 		// The dedicated invalid-token split distinguishes credential spray from

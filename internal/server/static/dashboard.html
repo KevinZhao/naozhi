@@ -203,6 +203,9 @@
   <main class="settings-main" id="settings-main" aria-label="设置" hidden></main>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+<!-- Version-skew banner: self_update.js shows it when the server serves other
+     assets than this page booted with. No close control by design. -->
+<div class="asset-skew-banner" id="asset-skew-banner" role="alert" hidden><button type="button">naozhi 已更新，点击刷新</button></div>
 <!-- RNEW-UX-010 — dedicated polite live region for non-toast announcements
      (WS state transitions, new sessions, cron completions). Kept separate
      from #toast so toast re-paints don't interrupt in-flight announcements

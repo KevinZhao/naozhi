@@ -1,15 +1,13 @@
-// self_update.js — the dashboard's self-update chip (#2558 D4-2).
-//
-// Verbatim move out of dashboard.js (`git diff --color-moved` shows a pure
-// move; only the import/wiring lines are new). The chip owns its own poll
-// timer + apply state machine and exposes nothing back to dashboard — the
-// chip self-registers its DOMContentLoaded bootstrap.
-//
-// Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back (that cycle puts dashboard's own consts in TDZ).
+// self_update.js — the dashboard's self-update chip and its version-skew
+// reload. It owns its poll timer and apply state machine, exposes nothing and
+// self-registers its bootstrap. Like every module dashboard.js imports, it
+// must not import dashboard.js back (the cycle puts dashboard's consts in TDZ).
 import { NZ_CONTRACT } from './contract.js';
 import { showToast } from './nz_util.js';
+import { sid } from './session_ident.js';
+import { composer, selection, sessionList, ui } from './state.js';
 import { confirmDialog } from './utilities.js';
+import { wsm } from './ws_manager.js';
 
 // --- Self-Update Chip ---
 //
@@ -30,29 +28,19 @@ import { confirmDialog } from './utilities.js';
 
 let updateState = null;
 let updateTimer = null;
-// updateApplying is set the moment an apply is accepted (202) and is what keeps
-// the chip in its busy state across the gap where the server's `phase` has not
-// caught up yet — or where the process is already dying and the next poll never
-// answers. Without it the chip would flick back to "restart to apply" for the
-// last second of its own life.
+// updateApplying is set the moment an apply is accepted (202) and keeps the
+// chip busy until the server's `phase` catches up, or while the dying process
+// no longer answers the poll.
 let updateApplying = false;
 let updateApplyTimer = null;
 
 // UPDATE_APPLY_MAX_MS bounds how long the local flag may outlive the server's
-// own account of what is happening. It exists because several apply outcomes
-// deliberately leave `phase` untouched: a release lookup that fails writes only
-// check_error (selfupdate.Status.noteCheck), and ErrNothingToDo /
-// ErrInstallInProgress write nothing at all. In those cases action stays
-// 'install', phase stays 'available', and none of the terminal conditions below
-// ever fire — so without a deadline the chip would sit on "正在应用新版本" for
-// the rest of the page's life, at the 3s busy cadence, while nothing was being
-// applied. Same shape as the safety timer in markSessionOptimisticRunning.
-//
-// Generous on purpose: a slow GitHub lookup happens BEFORE doInstall writes
-// PhaseInstalling, so this window has to comfortably contain it. Expiring early
-// costs little (the chip returns to the server's truth and a second click is
-// safe — TryLock plus the staged short-circuits make a repeat apply a no-op),
-// expiring late leaves a stale-but-honest "in flight" label.
+// account. Several apply outcomes leave `phase` untouched (a failed release
+// lookup writes only check_error; ErrNothingToDo / ErrInstallInProgress write
+// nothing), so no terminal condition below fires and, without a deadline, the
+// chip would say "正在应用新版本" for the page's life. Generous because a slow
+// GitHub lookup precedes PhaseInstalling; expiring early is cheap (a repeat
+// apply is a no-op), expiring late leaves a stale-but-honest label.
 const UPDATE_APPLY_MAX_MS = 90000;
 
 // UPDATE_POLL_MS is deliberately slow. Version state changes on a 6h server
@@ -82,10 +70,8 @@ function setUpdateApplying(on) {
   updateApplyTimer = setTimeout(() => {
     updateApplyTimer = null;
     updateApplying = false;
-    // Fall back to whatever the server says rather than guessing an outcome —
-    // and no toast: the common reason we are here is an apply that never got
-    // off the ground, which the re-read will describe accurately (check_error /
-    // last_error land in the chip's detail).
+    // Fall back to the server's account, no toast: the usual cause is an apply
+    // that never started, which check_error / last_error in the detail explain.
     renderUpdateChip();
     fetchUpdateStatus();
   }, UPDATE_APPLY_MAX_MS);
@@ -108,21 +94,16 @@ async function fetchUpdateStatus() {
     setUpdatePoll(busy ? UPDATE_POLL_BUSY_MS : UPDATE_POLL_MS);
     renderUpdateChip();
   } catch (e) {
-    // Silent: a failed version poll must never produce a toast. It is
-    // background information and the chip simply keeps its previous state.
-    // During a restart this is the EXPECTED path — the server we are polling is
-    // being replaced — so updateApplying is deliberately left set, bounded by
-    // the UPDATE_APPLY_MAX_MS deadline rather than by this poll.
+    // Silent: background information, the chip keeps its state. During a
+    // restart this is the expected path, so updateApplying stays set, bounded
+    // by UPDATE_APPLY_MAX_MS rather than by this poll.
   }
 }
 
 // updateChipView maps a status payload to the chip's presentation. Pure, so a
-// contract test can cover every branch without a DOM.
-//
-// `applying` (our local flag) outranks `phase` on purpose: it is true in the
-// window where we know an apply was accepted but the server has not said so
-// yet, and it stays true when the server stops answering at all because it is
-// restarting.
+// contract test can cover every branch without a DOM. `applying` outranks
+// `phase`: it covers the window before the server reports the accepted apply,
+// and the restart, when the server does not answer at all.
 function updateChipView(st, applying) {
   if (!st || !st.action || st.action === 'none') return { show: false };
   const target = st.staged || st.latest || '';
@@ -227,15 +208,10 @@ function updateChipDetail(st) {
     return lines.join('\n');
   }
   // Cannot apply from here — hand over the exact command. Restart and install
-  // need different ones: telling someone to re-run `naozhi upgrade` when the
-  // binary is already staged is what makes them overwrite the backup.
-  //
-  // The command itself comes from the server (`manual_command`): it depends on
-  // the SERVER's OS and its real launchd label, neither of which this browser
-  // can know — the browser's platform APIs describe the operator's laptop, not
-  // the node being upgraded. Empty means there is nothing to paste (a staged
-  // binary with no managed service: blocked_reason already says to restart by
-  // hand).
+  // need different ones: re-running `naozhi upgrade` over a staged binary
+  // overwrites the backup. The server supplies it (`manual_command`) because it
+  // depends on the server's OS and launchd label, not this browser's. Empty
+  // means nothing to paste (blocked_reason already says to restart by hand).
   if (st.manual_command) {
     lines.push('');
     lines.push(st.action === 'restart' ? '手动生效：' : '手动升级：');
@@ -244,14 +220,10 @@ function updateChipDetail(st) {
   return lines.join('\n');
 }
 
-// updateApplyPrompt builds the confirmation copy. Pure and exported to the
-// contract test because the two branches must stay distinguishable: the whole
-// point of the feature is that the operator is told which of "download this" and
-// "restart to apply what is already downloaded" they are agreeing to.
-//
-// "本节点" is load bearing (RFC NG2): in a multi-node deployment this upgrades
-// only the process serving this dashboard, and copy that said "服务" alone would
-// read as all of them.
+// updateApplyPrompt builds the confirmation copy. Its branches must stay
+// distinguishable: the operator agrees either to "download this" or to "restart
+// to apply what is already downloaded". "本节点" is load bearing (RFC NG2): only
+// the process serving this dashboard upgrades, not every node.
 function updateApplyPrompt(st) {
   const isRestart = st.action === 'restart';
   if (isRestart) {
@@ -262,10 +234,8 @@ function updateApplyPrompt(st) {
     };
   }
   if (st.restart_supported === false) {
-    // Writable install dir but nothing we can restart (naozhi started by hand,
-    // not by systemd/launchd). Installing still helps — it is what `naozhi
-    // upgrade` would do — but promising a restart we cannot perform would leave
-    // the operator believing the new version is live when it is not.
+    // Writable install dir but no managed service to restart. Installing still
+    // helps (it is what `naozhi upgrade` does); promising a restart would not.
     return {
       title: '下载并安装新版本',
       message: '将下载并校验 ' + (st.latest || '') + ' 并替换 binary；本节点未检测到受管服务，安装后需手动重启进程才会生效',
@@ -361,3 +331,52 @@ function initUpdateChip() {
 
 document.addEventListener('DOMContentLoaded', initUpdateChip);
 
+// --- Asset-version skew ---
+//
+// The page's nz-asset-version meta names the assets it booted with; auth_ok
+// names those the server serves now. When they differ this tab runs another
+// build's JS: a banner with no close control offers the reload, and an idle tab
+// reloads itself. Sessions survive a reload, so idle only guards unsent input,
+// an open surface and a turn being watched. No meta (the e2e mock) disables it.
+const SKEW_IDLE_MS = 60000;
+// SKEW_BUSY matches every surface a reload would close under the operator.
+const SKEW_BUSY = '.modal-overlay, .cmd-palette-overlay, .lightbox-overlay.active, .voice-overlay.show, ' +
+  '#fv-drawer.fv-open, #aside-drawer.visible, #cron-detail-pane.is-open';
+const skew = { server: '', lastInputAt: 0 };
+
+function skewIdle() {
+  const typed = [...document.querySelectorAll('#msg-input, textarea')].some((el) => (el.value ?? el.innerText ?? '').trim());
+  if (typed || composer.pendingFiles.length || composer.sending) return false;
+  if (ui.activePopover || document.querySelector(SKEW_BUSY)) return false;
+  if (document.hidden) return true;
+  const sd = sessionList.sessionsData[sid(selection.key, selection.node)];
+  return Date.now() - skew.lastInputAt >= SKEW_IDLE_MS && !(sd && sd.state === 'running');
+}
+
+// maybeSkewReload reloads at most once per server version, so a page still
+// skewed after it (two builds behind one address) keeps the banner, not a loop.
+function maybeSkewReload() {
+  if (!skew.server || !skewIdle()) return;
+  try {
+    if (sessionStorage.getItem('nz-asset-reload') === skew.server) return;
+    sessionStorage.setItem('nz-asset-reload', skew.server);
+  } catch (e) { return; }
+  location.reload();
+}
+
+wsm.onReady((msg) => {
+  const meta = document.querySelector('meta[name="nz-asset-version"]');
+  if (!meta || !msg.asset_version || msg.asset_version === meta.content) return;
+  if (!skew.server) {
+    skew.lastInputAt = Date.now();
+    const bar = document.getElementById('asset-skew-banner');
+    bar.hidden = false;
+    bar.addEventListener('click', () => location.reload());
+    const touched = () => { skew.lastInputAt = Date.now(); };
+    for (const t of ['keydown', 'pointerdown']) document.addEventListener(t, touched, { capture: true, passive: true });
+    document.addEventListener('visibilitychange', maybeSkewReload);
+    setInterval(maybeSkewReload, 30000);
+  }
+  skew.server = msg.asset_version;
+  maybeSkewReload();
+});

@@ -286,6 +286,9 @@ function defaultGitStates() {
  *   to polling and the whole existing suite keeps exercising that path.
  * @param {boolean} [overrides.wsHoldAuth] - With ws:true, record the dashboard's
  *   {type:'auth'} but never answer it, so wsm stays in AUTH (authenticating).
+ * @param {string} [overrides.assetVersion] - Serve the page with this nz-asset-version
+ *   meta, as the Go server's rendered page carries (the raw file has none).
+ * @param {string} [overrides.wsAssetVersion] - With ws:true, auth_ok carries this asset_version.
  * @returns {Promise<{server: http.Server, port: number, url: string}>}
  */
 function startMockServer(overrides = {}) {
@@ -295,9 +298,12 @@ function startMockServer(overrides = {}) {
   // probes onto window and window.nz.test. New tests should use nz.test.*.
   // overrides.shim === false serves the page exactly as production does.
   const page = fs.readFileSync(path.join(STATIC_DIR, 'dashboard.html'), 'utf8');
+  const versioned = overrides.assetVersion
+    ? page.replace('</head>', `<meta name="nz-asset-version" content="${overrides.assetVersion}">\n</head>`)
+    : page;
   const html = overrides.shim === false
-    ? page
-    : page.replace('</body>', '<script type="module" src="/e2e-shim.js"></script>\n</body>');
+    ? versioned
+    : versioned.replace('</body>', '<script type="module" src="/e2e-shim.js"></script>\n</body>');
   const manifest = fs.readFileSync(path.join(STATIC_DIR, 'manifest.json'), 'utf8');
 
   const sessionsData = overrides.sessions || defaultSessions();
@@ -1155,7 +1161,9 @@ function startMockServer(overrides = {}) {
           let msg;
           try { msg = JSON.parse(payload.toString('utf8')); } catch { continue; }
           conn.messages.push(msg);
-          if (msg.type === NZ_CONTRACT.WS.auth && !overrides.wsHoldAuth) conn.send({ type: NZ_CONTRACT.WS.auth_ok });
+          if (msg.type === NZ_CONTRACT.WS.auth && !overrides.wsHoldAuth) {
+            conn.send({ type: NZ_CONTRACT.WS.auth_ok, ...(overrides.wsAssetVersion && { asset_version: overrides.wsAssetVersion }) });
+          }
         }
       });
       socket.on('error', () => {});

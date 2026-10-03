@@ -20,23 +20,16 @@ export const wsm = {
   // _everConnected tells the first handshake from a reconnect; setState sets
   // it after the CONNECTED listeners ran, so they see the old value.
   _everConnected: false,
-  // _authBlockUntil is a unix-ms wall-clock deadline. While Date.now() <
-  // _authBlockUntil, connect() skips dialing and scheduleReconnect() pushes
-  // the next attempt to the deadline instead of its own exponential backoff.
-  // Set by startWSAuthRetryCountdown when the server emits auth_fail with
-  // retry_after=N (rate-limit lockout). Without this gate the default
-  // reconnect loop would immediately dial a fresh WS, hit the same 429,
-  // and rack up more lockout events in the journal.
+  // _authBlockUntil is a unix-ms deadline set by startWSAuthRetryCountdown
+  // from a rate-limited auth_fail's retry_after. Until then connect() skips
+  // dialing and scheduleReconnect() waits for it, so the reconnect loop does
+  // not keep hitting the same 429 and adding lockout events.
   _authBlockUntil: 0,
-  // R110-P1 WS outage duration display: wall-clock ms when the connection
-  // first left the CONNECTED state (or 0 when connected). setState maintains
-  // this: any CONNECTED→non-CONNECTED transition writes Date.now() if the
-  // field is still 0 (first outage arm — don't stomp an earlier outage while
-  // cycling connecting → auth → connecting during backoff); CONNECTED clears
-  // it. updateStatusBar reads it to render "已断开 N 秒/分" inline hint so
-  // users distinguish "just lost the WS 2s ago" from "dead for 10 min".
+  // _disconnectedSince is the wall-clock ms the current outage began (0 while
+  // connected), maintained by setState; updateStatusBar renders it as the
+  // "已断开 N 秒/分" hint.
   _disconnectedSince: 0,
-  // Lifecycle callbacks, each run in registration order: _ready after
+  // Lifecycle callbacks, each run in registration order: _ready(msg) after
   // auth_ok's core, _stateChange(s, prev) on every setState, _authFail(msg)
   // before an auth_fail closes the socket.
   _ready: [],
@@ -90,18 +83,12 @@ export const wsm = {
 
   scheduleReconnect() {
     if (this.reconnectTimer) return;
-    // Pick the later of: the exponential-backoff delay, and the auth-block
-    // deadline. If an auth rate-limit countdown is active, we must not
-    // dial before it expires — the exponential curve would otherwise
-    // happily re-try every 1-30s and wake the 429 bucket over and over.
+    // The later of the backoff delay and the auth-block deadline: never dial
+    // into an active rate-limit lockout.
     const now = Date.now();
     const authGap = Math.max(0, this._authBlockUntil - now);
-    // RNEW-UX-001: add randomised jitter (0-500ms) on top of the computed
-    // delay. Without jitter, N tabs that all dropped together on the same
-    // server restart would redial on identical millisecond ticks, briefly
-    // saturating the upgrade limiter and causing a thundering herd. The
-    // jitter is additive (never shortens the gate) so the auth-block
-    // invariant above is preserved.
+    // 0-500ms of additive jitter, so tabs dropped by one server restart do
+    // not redial on the same tick and swamp the upgrade limiter.
     const jitter = Math.floor(Math.random() * 500);
     const delay = Math.max(this.backoff, authGap) + jitter;
     this.reconnectTimer = setTimeout(() => {
@@ -158,22 +145,16 @@ export const wsm = {
   setState(s) {
     const prev = this.state;
     this.state = s;
-    // R110-P1 outage duration timestamp maintenance. Arm on first
-    // transition OUT of CONNECTED (or from a cold OFF start that never
-    // reached CONNECTED — treat any persistent non-CONNECTED as outage).
-    // Guard with `=== 0` so a connecting→auth→connecting cycle during
-    // backoff doesn't reset the clock to zero mid-outage. Clear on
-    // entering CONNECTED so the next outage arms fresh.
+    // Arm the outage clock on leaving CONNECTED, or on the first dial of a
+    // page that never connected; `=== 0` keeps a backoff cycle from
+    // restarting it. Entering CONNECTED clears it.
     if (s === WS_STATES.CONNECTED) {
       this._disconnectedSince = 0;
     } else if (prev === WS_STATES.CONNECTED && this._disconnectedSince === 0) {
       // Just left a healthy connection — stamp the wall clock.
       this._disconnectedSince = Date.now();
     } else if (this._disconnectedSince === 0 && s !== WS_STATES.OFF) {
-      // Cold-start / never-connected case: arm from the first
-      // CONNECTING attempt so the user sees a duration even before the
-      // first successful handshake. OFF (the initial synthetic state)
-      // is excluded — pre-boot doesn't count as outage.
+      // Never connected: OFF, the synthetic initial state, is not an outage.
       this._disconnectedSince = Date.now();
     }
     this._stateChange.forEach((fn) => fn(s, prev));
@@ -183,11 +164,11 @@ export const wsm = {
   isConnected() { return this.state === WS_STATES.CONNECTED; }
 };
 
-wsm.on(NZ_CONTRACT.WS.auth_ok, () => {
+wsm.on(NZ_CONTRACT.WS.auth_ok, (msg) => {
   wsm.setState(WS_STATES.CONNECTED);
   wsm.backoff = 1000;
   wsm.startPing();
-  wsm._ready.forEach((fn) => fn());
+  wsm._ready.forEach((fn) => fn(msg));
 });
 wsm.on(NZ_CONTRACT.WS.auth_fail, (msg) => {
   wsm._authFail.forEach((fn) => fn(msg));

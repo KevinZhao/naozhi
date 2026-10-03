@@ -210,7 +210,8 @@ func precompressGzip(b []byte) []byte {
 // fast-path) to its cached bytes + ETag. Populated once at init; the
 // dashboard.html entry is the rendered page (static_versioning.go), so its
 // ETag and gzip form are those of the bytes actually served.
-var staticAssets = func() map[string]staticAsset {
+// servedAssetVersion is the nz-asset-version that page carries.
+var staticAssets, servedAssetVersion = func() (map[string]staticAsset, string) {
 	read := func(fsys embed.FS, name string, compress bool) (staticAsset, bool) {
 		b, err := fsys.ReadFile(name)
 		if err != nil {
@@ -287,14 +288,17 @@ var staticAssets = func() map[string]staticAsset {
 			out[e.key] = a
 		}
 	}
-	if raw, ok := out["dashboard.html"]; ok {
-		page, err := renderDashboardHTML(raw.bytes, out)
-		if err != nil {
-			panic("render dashboard.html: " + err.Error())
-		}
-		out["dashboard.html"] = newStaticAsset(page, true)
+	raw, ok := out["dashboard.html"]
+	if !ok {
+		return out, ""
 	}
-	return out
+	version := dashboardAssetVersion(out)
+	page, err := renderDashboardHTML(raw.bytes, out)
+	if err != nil {
+		panic("render dashboard.html: " + err.Error())
+	}
+	out["dashboard.html"] = newStaticAsset(page, true)
+	return out, version
 }()
 
 // newStaticAsset wraps b with its strong ETag (sha256, first 16 bytes, hex)
