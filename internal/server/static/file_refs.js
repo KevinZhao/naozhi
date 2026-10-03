@@ -1,39 +1,20 @@
 // file_refs.js — extracted from dashboard.js (#2558 D4).
 //
-// Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block, the deps table and the export block below are the
-// only additions.
-//
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects; its helpers are
-// injected once via configureFileRefs(), called from dashboard's module body.
+// module evaluates. Shared state is read from the state.js objects; the path
+// parsing it shares with render_md.js lives in the file_ref_parse.js leaf.
 import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList } from './state.js';
 import { esc, fetchJSON, showToast } from './nz_util.js';
 import { splitDock } from './split_view.js';
-import { sid } from './session_ident.js';
-import { formatFileSize } from './utilities.js';
-
-const deps = {
-  AVATAR_GROUP_GAP_MS: null,
-  ICONS: null,
-  collapseSidebarForDrawer: null,
-  getToken: null,
-  isInternalEvent: null,
-  loadKatex: null,
-  loadMermaid: null,
-  matchProject: null,
-  renderRich: null,
-  restoreSidebarAfterDrawer: null,
-  runPendingAsync: null,
-};
-export function configureFileRefs(impl) {
-  for (const k of Object.keys(deps)) {
-    if (typeof impl[k] === 'undefined') throw new Error('file_refs dep missing: ' + k);
-    deps[k] = impl[k];
-  }
-}
+import { isInternalEvent, matchProject, sid } from './session_ident.js';
+import { AVATAR_GROUP_GAP_MS, formatFileSize } from './utilities.js';
+import { ICONS } from './icons.js';
+import { getToken } from './platform.js';
+import { isFileRefCandidate, splitPathLine } from './file_ref_parse.js';
+import { loadKatex, loadMermaid, renderRich, runPendingAsync } from './render_md.js';
+import { collapseSidebarForDrawer, restoreSidebarAfterDrawer } from './mobile_nav.js';
 
 // Late-bound hooks: assigned by the code below, read by other modules at event
 // time (never at load time) — the shape they had as dashboard module-scope
@@ -45,94 +26,6 @@ let _pendingSnippet = null;
  * verify existence against the active project workspace, and append
  * [preview] [download] buttons inline. Remote-friendly: lazy validation,
  * batched existence checks, only fetches file content when clicked. */
-
-// Path candidate regex: accepts two shapes —
-//   (a) path with at least one `/` (with optional :line / :line-line suffix).
-//       e.g. `src/foo.go`, `./a/b.ts:42`, `manifests/ec2nodeclass.yaml:9`.
-//   (b) bare filename that MUST carry a :line suffix to disambiguate from
-//       prose. e.g. `option_install_gpu_nodegroups.sh:1838-1883`. Review
-//       output often references a single-file path without any `/` prefix;
-//       the line suffix is a strong signal it is in fact a file reference
-//       rather than an English word that happens to contain a dot.
-// Segments accept any non-whitespace, non-colon char so Unicode filenames
-// (Chinese, Japanese, …) are not silently dropped. Absolute paths are
-// resolved to project-relative form by resolveProjectForAbsPath before the
-// server call — server still rejects absolute paths for defence in depth.
-// Rejects spaces (breaks on prose) and leading URL schemes.
-// Line suffix accepts `:L`, `:L-L2` (range) and `:L:C` (go build / eslint
-// `file:line:col`); splitPathLine keeps only the line for the preview jump.
-const FILE_REF_WITH_SLASH = /^(?:\.\.?\/|\/)?(?!https?:)[^\s:]+(?:\/[^\s:]+)+(?::\d+(?:-\d+|:\d+)?)?$/;
-const FILE_REF_BARE_WITH_LINE = /^(?!https?:)[^\s:\/]+\.[A-Za-z0-9_]+:\d+(?:-\d+|:\d+)?$/;
-function isFileRefCandidate(text) {
-  return FILE_REF_WITH_SLASH.test(text) || FILE_REF_BARE_WITH_LINE.test(text);
-}
-
-// Every path-list line's basename must carry a file extension (a `.ext` tail).
-// isFileRefCandidate alone is too loose for whole-block classification:
-// dependency lists (`@angular/core`), module paths (`github.com/gin-gonic/gin`),
-// REST routes (`/api/v1/users`), and fractions/dates (`1/2`, `2024/01/02`) all
-// match the slash-shaped path regex line-for-line and would hijack a legit
-// no-language code block. Real file paths — including every case this fix
-// targets — end in an extension, so this is a cheap high-signal gate that drops
-// those false positives without losing the screenshot scenario (`.html` lists).
-// Trailing `:line` suffixes are stripped by splitPathLine before this runs.
-const FILE_REF_HAS_EXT = /\.[A-Za-z0-9]+$/;
-
-// splitPathNote separates a fenced path line into its path candidate and a
-// trailing human annotation. AI replies commonly tag path lines with inline
-// notes — `语文/...诊断.md   ← 待生成`, `bar.html  # 答案`, `foo.go (new)` —
-// where the note is set off from the path by whitespace. A real file path never
-// contains whitespace (isFileRefCandidate rejects spaces), so the first
-// whitespace-delimited token IS the path candidate and everything after the gap
-// is a note we preserve for display but exclude from the <code> body (so copy +
-// the file-ref scanner see the bare path). Returns {path, note}; note is '' when
-// the line is a lone path.
-function splitPathNote(line) {
-  const m = line.match(/^(\S+)(?:\s+(.*\S))?\s*$/);
-  if (!m) return { path: line, note: '' };
-  return { path: m[1], note: m[2] || '' };
-}
-
-// fencedPathList decides whether a language-less fenced code block is in fact
-// a plain list of file paths (one per line). AI replies frequently dump
-// generated/affected files inside a ``` fence — those paths are invisible to
-// the inline file-ref scanner because it skips <pre> content. When EVERY
-// non-empty line is a path candidate whose basename has an extension we return
-// the parsed rows ({path, note}) so the caller can render them as clickable
-// rows. Returns null otherwise, leaving the verbatim-code path untouched.
-// Requiring all lines to match keeps real code blocks out: any block with one
-// prose/code/extension-less line fails the test.
-//
-// A single path line is accepted (one generated file inside a ``` fence is a
-// very common AI shape). The isFileRefCandidate + FILE_REF_HAS_EXT double gate
-// plus the server-side existence check (a non-file that slips through resolves
-// to {exists:false} and silently gets no button) make a lone-line list safe;
-// the old "≥2 lines" guard left every single-file fence button-less.
-//
-// Trailing annotations (`foo.md   ← 待生成`) are stripped via splitPathNote so
-// the note no longer breaks isFileRefCandidate (which rejects whitespace). The
-// note is carried through for display but kept out of the path.
-//
-// Known non-goal: lines with trailing punctuation glued to the path
-// (`foo.md。`) or inline backtick wrapping are not normalized here — they'd
-// resolve to a non-existent path and silently get no button.
-function fencedPathList(code) {
-  const lines = code.split('\n');
-  const paths = [];
-  for (const raw of lines) {
-    const line = raw.trim();
-    if (line === '') continue;        // blank lines are tolerated as spacing
-    if (line.length > 512) return null;
-    const { path, note } = splitPathNote(line);
-    if (!isFileRefCandidate(path)) return null;
-    const { path: bare } = splitPathLine(path);
-    const base = bare.slice(bare.lastIndexOf('/') + 1);
-    if (!FILE_REF_HAS_EXT.test(base)) return null; // no extension → not a file list
-    paths.push({ path, note });
-  }
-  if (paths.length < 1) return null;  // empty fence: nothing to render
-  return paths;
-}
 
 // expandBraces expands a single `{a,b,c}` group in a path candidate into its
 // concrete variants so AI output like `foo-{x86,graviton}.yaml:9` resolves to
@@ -197,17 +90,9 @@ function resolveActiveProject() {
   const sKey = sid(selection.key, selection.node);
   const sd = sessionList.sessionsData[sKey];
   if (!sd) return null;
-  const name = sd.project || deps.matchProject(sd.workspace);
+  const name = sd.project || matchProject(sd.workspace);
   if (!name) return null;
   return { name, node: selection.node || 'local' };
-}
-
-// Split a candidate like "src/foo.go:42" into {path, line}. Line is optional.
-function splitPathLine(cand) {
-  // Optional trailing `:col` is dropped: the preview only scrolls to a line.
-  const m = cand.match(/^(.+?):(\d+(?:-\d+)?)(?::\d+)?$/);
-  if (m) return { path: m[1], line: m[2] };
-  return { path: cand, line: '' };
 }
 
 // resolveProjectForAbsPath maps an absolute path (e.g. `/home/.../gaokao/x.md`)
@@ -259,30 +144,6 @@ function _fileRefCacheSet(key, value) {
     _filePathCache.delete(firstKey);
   }
   _filePathCache.set(key, { v: value, t: Date.now() });
-}
-
-// fileRefCode produces the inline <code> element that the file-ref scanner
-// (scanEventForFileRefs, which walks `code, .md-code`) recognises as a path so
-// it can attach [↗ preview][↓ download] buttons. Centralising the markup here
-// keeps the three callsites (markdown-link rescue, CODE-token restore,
-// fencedPathList row) in lockstep: a future change to the tag/class/attrs (e.g.
-// adding data-file-ref) lands in one place instead of three divergent string
-// literals where missing one would silently drop that path shape's buttons.
-//
-// Escaping contract: this helper does NOT escape `inner` — every callsite is
-// responsible for its own escaping/guarding (esc(), tokenizer guards, or the
-// `<`/`\x00` rejection in the link rescue). The helper only owns the wrapper.
-//
-// className: defaults to "md-code" (the inline-code pill used by backtick spans
-// and the link rescue). fencedPathList passes "" to keep a bare <code>: the
-// `.md-pathline code` CSS deliberately omits the .md-code pill background/
-// padding/border-radius, so tagging those rows with .md-code would visibly turn
-// each clean path row into a pill. Both shapes are still caught by the scanner's
-// `code, .md-code` selector, so the buttons attach either way.
-function fileRefCode(inner, className) {
-  const cls = className === undefined ? 'md-code' : className;
-  return cls ? '<code class="' + cls + '">' + inner + '</code>'
-             : '<code>' + inner + '</code>';
 }
 
 // scanEventForFileRefs walks .event-content <code> descendants of a freshly-
@@ -393,7 +254,7 @@ async function flushFileRefBatch() {
   const paths = Array.from(batch.paths.keys());
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const t = deps.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     // RNEW-UX-003: 10s timeout — batch exists-check touches the FS for every
     // path; a stalled disk shouldn't leak pending renders forever.
@@ -450,7 +311,7 @@ function applyFileRefResult(wrapEl, entry) {
   const preview = document.createElement('button');
   preview.type = 'button';
   preview.className = 'fr-btn fr-btn-preview';
-  preview.textContent = deps.ICONS.preview; // paired with deps.ICONS.downArrow for symmetric arrow look
+  preview.textContent = ICONS.preview; // paired with ICONS.downArrow for symmetric arrow look
   preview.setAttribute('aria-label', 'Preview ' + label);
   preview.title = 'Preview ' + label;
   preview.addEventListener('click', evt => {
@@ -461,7 +322,7 @@ function applyFileRefResult(wrapEl, entry) {
   const download = document.createElement('button');
   download.type = 'button';
   download.className = 'fr-btn fr-btn-download';
-  download.textContent = deps.ICONS.downArrow;
+  download.textContent = ICONS.downArrow;
   download.setAttribute('aria-label', 'Download ' + label);
   download.title = 'Download ' + label;
   download.addEventListener('click', evt => {
@@ -564,12 +425,12 @@ function renderPreviewText(project, node, path, body, data, line) {
     parts.push('<div class="fv-truncated">file truncated at ' + formatFileSize(1024 * 1024) + ' (total ' + formatFileSize(data.size || 0) + ') — download for full content</div>');
   }
   const lang = inferLang(path, data.mime || '');
-  // Route through deps.renderRich — same renderer chat bubbles use so behaviour
+  // Route through renderRich — same renderer chat bubbles use so behaviour
   // (math, mermaid, tables, lists, file-refs) stays consistent across
   // surfaces. Source-code files keep the line-number gutter layout.
   if (lang === 'markdown' || lang === 'tex') {
     const mode = lang === 'tex' ? 'tex' : 'markdown';
-    parts.push('<div class="fv-rich">' + deps.renderRich(data.content || '', { mode: mode }) + '</div>');
+    parts.push('<div class="fv-rich">' + renderRich(data.content || '', { mode: mode }) + '</div>');
   } else {
     const raw = data.content || '';
     const lines = raw.split('\n');
@@ -578,7 +439,7 @@ function renderPreviewText(project, node, path, body, data, line) {
   }
   body.innerHTML = parts.join('');
   // Flush renderRich's KaTeX/Mermaid slots, or a first .md open shows katex-pending.
-  deps.runPendingAsync();
+  runPendingAsync();
   // Mirror chat-side file-ref chip injection so paths inside the preview
   // body also get [preview]/[download] affordances.
   body.querySelectorAll('.fv-rich').forEach(scanEventForFileRefs);
@@ -593,8 +454,8 @@ async function openFilePreview(wrapEl) {
   if (!drawer || !body || !title || !meta) return;
   // Warm-start async renderers the moment the drawer opens (idempotent once
   // ready), in parallel with the preview fetch.
-  deps.loadKatex();
-  deps.loadMermaid();
+  loadKatex();
+  loadMermaid();
   const project = wrapEl.dataset.project;
   const node = wrapEl.dataset.node;
   const path = wrapEl.dataset.path;
@@ -609,7 +470,7 @@ async function openFilePreview(wrapEl) {
   splitDock.enter();
   // Opened last → stack on top of the 追问 pane if both are docked.
   splitDock.bringToFront('preview');
-  deps.collapseSidebarForDrawer();
+  collapseSidebarForDrawer();
   drawer.dataset.project = project;
   drawer.dataset.node = node;
   drawer.dataset.path = path;
@@ -625,7 +486,7 @@ async function openFilePreview(wrapEl) {
   // Text / unknown: go through preview endpoint which returns structured JSON.
   try {
     const headers = {};
-    const t = deps.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const r = await fetch(fileApiUrl(project, node, path, 'preview'), { headers });
     if (!r.ok) {
@@ -701,7 +562,7 @@ function closeFilePreview() {
   splitDock.exit();
   // Re-expand the sidebar if the open path auto-collapsed it (no-op if the
   // 追问 drawer is still open or the user collapsed it themselves).
-  deps.restoreSidebarAfterDrawer();
+  restoreSidebarAfterDrawer();
   delete drawer.dataset.snippetMode;
   delete drawer.dataset.snippetName;
   _pendingSnippet = null;
@@ -809,7 +670,7 @@ function startFileRefObserver() {
 
 // regroupAvatars walks the rendered transcript and tags each .event bubble
 // with .nz-grouped when it continues a same-sender run within
-// deps.AVATAR_GROUP_GAP_MS — the CSS then hides the repeated avatar. Only "user"
+// AVATAR_GROUP_GAP_MS — the CSS then hides the repeated avatar. Only "user"
 // and "text" (assistant) bubbles carry avatars and participate; any other
 // visible bubble type (system/init/todo/result/…) or a sender switch or a
 // time gap ≥ threshold resets the run so the next same-sender bubble shows
@@ -834,7 +695,7 @@ function regroupAvatars(container) {
     const sender = isUser ? 'user' : 'text';
     const t = Number(node.getAttribute('data-time') || 0);
     const grouped = !!t && sender === prevSender && prevTime > 0 &&
-      (t - prevTime) < deps.AVATAR_GROUP_GAP_MS;
+      (t - prevTime) < AVATAR_GROUP_GAP_MS;
     node.classList.toggle('nz-grouped', grouped);
     prevSender = sender;
     prevTime = t; // 0 when undated → next bubble can't group against it
@@ -844,19 +705,14 @@ function regroupAvatars(container) {
 
 
 function processEventsForDisplay(events) {
-  return events.filter(e => !deps.isInternalEvent(e));
+  return events.filter(e => !isInternalEvent(e));
 }
 
 export {
-  FILE_REF_HAS_EXT,
   closeFilePreview,
-  fencedPathList,
   fileApiUrl,
-  fileRefCode,
-  isFileRefCandidate,
   processEventsForDisplay,
   regroupAvatars,
   renderSandboxedBlob,
-  splitPathLine,
   startFileRefObserver,
 };

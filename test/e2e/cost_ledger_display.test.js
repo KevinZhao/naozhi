@@ -9,7 +9,8 @@
 //     unknown pricing), and the health strip spells out dropped, unknown and
 //     partial turns.
 //   - Without the ledger the card falls back to the session-list sum and says
-//     so (累计花费, not 近 30 天花费).
+//     so (累计花费, not 近 30 天花费). The card repaints when the ledger
+//     lands, and the ledger is asked once per 30 s.
 //   - A cron job's drawer asks the ledger for that job alone and shows its
 //     30-day figure.
 //
@@ -73,6 +74,56 @@ test('overview card: ledger USD, credits on their own line, trust flags and heal
     await expect(health.filter({ hasText: '1 条未知定价' })).toHaveCount(1);
     await expect(health.filter({ hasText: '1 个进程中断的轮次' })).toHaveCount(1);
     expect(mock.costSummaryCalls.some(c => c.group_by === 'unit')).toBe(true);
+    expect(pageErrors).toEqual([]);
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+// renderSystemView repaints the card when refreshCostSummary resolves true
+// (a new snapshot); the fetch itself never paints. Time is frozen with
+// page.clock, so no poll can repaint the card, and the ledger response is held
+// until the session-sum fallback has painted: the switch can only come from
+// that repaint. Two more trips into the view at 14 s and 28 s stay inside the
+// 30 s TTL and must not ask the ledger again; the trip at 31 s must.
+test('the overview card repaints when the ledger lands, and the ledger is asked once per 30 s', async ({ browser }) => {
+  const mock = await startMockServer({ costSummary: ledger });
+  const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+  const page = await ctx.newPage();
+  /** @type {string[]} */
+  const pageErrors = [];
+  page.on('pageerror', (e) => pageErrors.push(String(e)));
+  /** @type {() => void} */
+  let release = () => {};
+  const held = new Promise((r) => { release = () => r(undefined); });
+  await page.route('**/api/cost/summary?group_by=unit*', async (route) => { await held; await route.continue(); });
+  const unitCalls = () => mock.costSummaryCalls.filter((c) => c.group_by === 'unit').length;
+  try {
+    await page.clock.install();
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    await page.clock.pauseAt(Date.now() + 1000);
+    const ledgerCard = page.locator('.svc-stat-label', { hasText: '近 30 天花费' });
+    await page.click('#abnav-system');
+    await expect(page.locator('.svc-stat-label', { hasText: '累计花费' }), 'the session-sum fallback paints first').toHaveCount(1);
+    release();
+    await expect(ledgerCard, 'the fetch resolving must repaint the card').toHaveCount(1);
+    for (let i = 0; i < 2; i++) {
+      await page.click('#abnav-chat');
+      await page.clock.runFor(14000);
+      await page.click('#abnav-system');
+      await expect(ledgerCard).toHaveCount(1);
+    }
+    // Issued after the re-entries: once it has landed at the mock, a ledger
+    // fetch either re-entry started has landed too.
+    await page.evaluate(() => fetch('/api/cost/summary?group_by=probe').then((r) => r.status));
+    expect(unitCalls(), 're-entry inside the TTL reuses the snapshot').toBe(1);
+
+    await page.click('#abnav-chat');
+    await page.clock.runFor(3000);
+    await page.click('#abnav-system');
+    await expect.poll(unitCalls, { message: 'past the TTL the ledger is asked again' }).toBe(2);
     expect(pageErrors).toEqual([]);
   } finally {
     await ctx.close();

@@ -329,8 +329,8 @@ func TestCronLiveJS_RequiresAuth_TokenMode(t *testing.T) {
 // TestWSModulesJS_RequiresAuth_TokenMode: same SEC-4 gate for the modules
 // split out of dashboard.js with the WS manager (S18d2, #3024), and for
 // features.js (S19-P, #3025), event_render.js and ask_card.js (S19-3),
-// event_stream.js (S19-E), session_list.js (S19-5), and session_ident.js and
-// icons.js (S20d, #3026).
+// event_stream.js (S19-E), session_list.js (S19-5), session_ident.js and
+// icons.js (S20d, #3026), and file_ref_parse.js (S20e).
 func TestWSModulesJS_RequiresAuth_TokenMode(t *testing.T) {
 	t.Parallel()
 	srv := newTestServerWithToken(&mockPlatform{}, "secret")
@@ -346,6 +346,7 @@ func TestWSModulesJS_RequiresAuth_TokenMode(t *testing.T) {
 		"session_list.js":   "PLATFORM_ORIGINS",
 		"session_ident.js":  "parseDiscoveredPid",
 		"icons.js":          "CLAWD_SVG",
+		"file_ref_parse.js": "fencedPathList",
 	} {
 		req := httptest.NewRequest(http.MethodGet, "/static/"+name, nil)
 		w := httptest.NewRecorder()

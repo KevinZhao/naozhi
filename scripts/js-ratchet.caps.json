@@ -4,7 +4,7 @@
     "exempt": []
   },
   "lines": {
-    "dashboard.js": 2982
+    "dashboard.js": 2954
   },
   "sideEffectLegacy": [
     "agent_view.js",
@@ -33,12 +33,14 @@
     "contract.js",
     "cron_schedule.js",
     "features.js",
+    "file_ref_parse.js",
     "icons.js",
     "nz_util.js",
     "platform.js",
     "session_ident.js",
     "session_stream.js",
     "state.js",
+    "utilities.js",
     "ws_manager.js"
   ],
   "lateBindingTables": {
