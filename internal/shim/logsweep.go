@@ -1,13 +1,16 @@
 package shim
 
 import (
+	"errors"
+	"io/fs"
 	"strconv"
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// logsweep.go — the liveness half of the shims/ retention pass (J6 of #2548).
+// logsweep.go — the liveness half of the shims/ retention pass (J6 of #2548),
+// and of the cli-debug/ pass, whose files share the state file's key hash.
 // The naming half is Run() in server.go, which writes shim-<pid>.log next to the
 // state file; keeping the parser here means the two cannot drift apart.
 
@@ -44,4 +47,39 @@ func LogFileIsLive(name string) bool {
 	// A syntactically valid pid that no longer resolves is dead whatever its
 	// magnitude, so an absurdly large one is still sweepable.
 	return osutil.PidAlive(pid)
+}
+
+// KeyHashFileIsLive reports whether name, a "<keyhash>.<ext>" file such as
+// cli-debug/<keyhash>.log, belongs to a session whose shim is still running.
+// The stem is the same KeyHash that names the shim's state file, and the shim
+// removes that file on exit, so "state file present and ShimPID alive" means a
+// CLI may still be appending. Fails safe like LogFileIsLive: a stem that is not
+// a key hash, and a state file that exists but cannot be read, are both kept.
+// Suitable as datadir.Pass.Keep.
+func (m *Manager) KeyHashFileIsLive(name string) bool {
+	stem, _, _ := strings.Cut(name, ".")
+	if !isKeyHash(stem) {
+		return true // not ours; never sweep it
+	}
+	state, err := ReadStateFile(StateFilePath(m.stateDir, stem))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		return true // corrupt or insecure state is Discover's call, not this pass's
+	}
+	return osutil.PidAlive(state.ShimPID)
+}
+
+// isKeyHash reports whether s has KeyHash's exact shape: 32 lowercase hex chars.
+func isKeyHash(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }

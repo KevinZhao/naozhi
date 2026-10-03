@@ -3,6 +3,7 @@ package shim
 import (
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -87,4 +88,56 @@ func itoa(n int) string {
 		b = append([]byte{'-'}, b...)
 	}
 	return string(b)
+}
+
+// TestKeyHashFileIsLive: a cli-debug/<keyhash>.log is kept exactly while the
+// shim state file of the same hash names a live process, and anything this
+// predicate cannot vouch for (foreign name, unreadable state) is kept too.
+func TestKeyHashFileIsLive(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	m := &Manager{stateDir: dir}
+	writeState := func(hash string, pid int) {
+		t.Helper()
+		if err := WriteStateFile(StateFilePath(dir, hash), State{Version: 1, ShimPID: pid}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plant := func(hash, body string, perm os.FileMode) {
+		t.Helper()
+		path := StateFilePath(dir, hash)
+		if err := os.WriteFile(path, []byte(body), perm); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, perm); err != nil { // umask must not hide 0644
+			t.Fatal(err)
+		}
+	}
+	live := KeyHash("live")
+	writeState(live, os.Getpid())
+	dead := KeyHash("dead")
+	writeState(dead, 999999999) // far above any pid_max
+	corrupt := KeyHash("corrupt")
+	plant(corrupt, "{not json", 0o600)
+	insecure := KeyHash("insecure")
+	plant(insecure, `{"version":1,"shim_pid":999999999}`, 0o644)
+
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{KeyHash("no-shim") + ".log", false},
+		{live + ".log", true},
+		{dead + ".log", false},
+		{corrupt + ".log", true},
+		{insecure + ".log", true},
+		{"aaaaaaaaaaaaaaaa.log", true},                       // 16 hex: not a KeyHash
+		{strings.ToUpper(KeyHash("no-shim")) + ".log", true}, // KeyHash is lowercase
+		{"session-notes.log", true},
+		{".log", true},
+	} {
+		if got := m.KeyHashFileIsLive(tc.name); got != tc.want {
+			t.Errorf("KeyHashFileIsLive(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
 }

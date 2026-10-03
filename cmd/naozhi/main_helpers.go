@@ -461,11 +461,12 @@ func sysessionJSONLMaxAge(cfg *config.Config) time.Duration {
 // accumulate. Ages are chosen so a pass can never remove a file a live process
 // is still appending to:
 //
-//   - cli-debug/<keyhash>.log is appended for a session's whole life, so the
-//     window is derived from the shim idle timeout rather than fixed: no CLI
-//     survives two idle timeouts, so a file untouched that long belongs to a
-//     session whose process is gone. Floored at 7 days so a short configured
-//     idle timeout cannot make the sweep aggressive.
+//   - cli-debug/<keyhash>.log is appended for a session's whole life, and age
+//     alone cannot prove that life is over: the shim idle timer only runs while
+//     naozhi is detached, and exempt sessions or a long session.ttl keep a CLI
+//     idle for weeks. shim.Manager.KeyHashFileIsLive keeps any file whose
+//     session still has a live shim; the max(7d, 2×idle) age is only the cheap
+//     pre-filter that decides which files are worth asking about.
 //   - shims/shim-<pid>.log is decided by liveness, not age: shim.LogFileIsLive
 //     keeps anything whose pid still resolves. The 24h age is a diagnosis grace
 //     period — a shim that just died keeps its log for a day, which is when it
@@ -479,12 +480,16 @@ func newDataDirSweeper(cfg *config.Config, layout datadir.Layout, shimMgr *shim.
 	}
 
 	s := datadir.NewSweeper(dataDirSweepInterval)
-	s.Add(datadir.Pass{
+	cliDebug := datadir.Pass{
 		Name:   "cli-debug",
 		Dir:    layout.CLIDebugRoot(),
 		Ext:    ".log",
 		MaxAge: cliDebugMaxAge,
-	})
+	}
+	if shimMgr != nil {
+		cliDebug.Keep = shimMgr.KeyHashFileIsLive
+	}
+	s.Add(cliDebug)
 	// shimMgr.StateDir(), never cfg.Session.Shim.StateDir: NewManager applies the
 	// ~/.naozhi/shims default to its own copy, so the raw config value is empty in
 	// the common case and this pass silently swept nothing. Taking the Manager
