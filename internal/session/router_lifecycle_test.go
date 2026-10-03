@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
@@ -145,4 +146,45 @@ func TestGetOrCreate_ReportsADroppedResumeTarget(t *testing.T) {
 			t.Errorf("status = %d, err = %v; want SessionNew", st, err)
 		}
 	})
+}
+
+// TestGetOrCreate_YieldedSpawnIsNotResumeLost: a resume whose transcript is
+// gone but whose spawn yields to a live session installed meanwhile returns
+// that session, which lost nothing, so the status is not SessionResumeLost.
+func TestGetOrCreate_YieldedSpawnIsNotResumeLost(t *testing.T) {
+	t.Parallel()
+	const key = "feishu:direct:alice:general"
+	r := newResumeGuardRouter(t)
+	g := newGatedSpawn()
+	r.spawn.hook = g.hook
+	dead := injectSession(r, key, newDeadProc())
+	dead.setWorkspace("/home/u/proj")
+	dead.setSessionID("sess-1")
+
+	type result struct {
+		s   *ManagedSession
+		st  SessionStatus
+		err error
+	}
+	out := make(chan result, 1)
+	go func() {
+		s, st, err := r.GetOrCreate(context.Background(), key, AgentOpts{})
+		out <- result{s, st, err}
+	}()
+	waitEntered(t, g)
+	winner := injectSession(r, key, newIdleProc())
+	close(g.release)
+
+	var got result
+	select {
+	case got = <-out:
+	case <-time.After(5 * time.Second):
+		t.Fatal("GetOrCreate did not return")
+	}
+	if got.err != nil || got.s != winner {
+		t.Fatalf("GetOrCreate = %p, %v; want the session installed meanwhile", got.s, got.err)
+	}
+	if got.st == SessionResumeLost {
+		t.Error("status = SessionResumeLost for a session this spawn did not install")
+	}
 }

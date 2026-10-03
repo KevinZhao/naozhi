@@ -149,7 +149,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 		}
 		// The resume guard dropped the transcript of a session that had one:
 		// the respawn is fresh and the conversation's context is gone.
-		if status == SessionResumed && resumedID != "" && res.resumeID == "" {
+		if status == SessionResumed && resumedID != "" && res.resumeID == "" && !res.yielded {
 			status = SessionResumeLost
 		}
 		return s, status, nil
@@ -391,6 +391,11 @@ type spawnReservation struct {
 	// in the same critical section.
 	old  *ManagedSession
 	snap respawnSnapshot
+
+	// yielded is set by completeSpawn when it returned a live session another
+	// path installed meanwhile instead of its own, so the reservation's resume
+	// facts do not describe the returned session.
+	yielded bool
 }
 
 // reserveSpawn is the first phase of a spawn, run inside the caller's
@@ -579,6 +584,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 	})
 	if winner != nil {
 		proc.Close()
+		res.yielded = true
 		return winner, nil
 	}
 
