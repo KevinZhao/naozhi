@@ -33,7 +33,7 @@ type indexFile struct {
 // projectIndex is naozhi's own per-project bookkeeping — today the sidebar
 // CreatedAt — keyed by absolute project path, so Scan can remember order
 // without writing into a project directory. An empty path keeps it in memory
-// only. Not goroutine-safe: the Manager touches it under m.mu.
+// only. Not goroutine-safe: the Manager touches it under scanMu.
 type projectIndex struct {
 	path      string
 	createdAt map[string]int64

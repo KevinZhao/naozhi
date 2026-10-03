@@ -227,7 +227,7 @@ When `projects.root` is configured, the `project.Manager` scans **every non-hidd
 
 Chat binding (`/project <name>`) routes plain messages to a planner session (`project:{name}:planner`) with the project directory as workspace. Agent commands still create per-chat sessions but use the project path. Planner sessions are exempt from TTL eviction and max_procs capacity.
 
-The project list is rescanned every 60s. Orphaned planner sessions for removed projects are cleaned up automatically.
+The project list is rescanned every 60s. Scan reads disk without the manager lock (IM routing and the dashboard never wait on it) and re-reads under the lock only when a bind/favorite/config write landed meanwhile. Orphaned planner sessions for removed projects are cleaned up automatically.
 
 ### Dashboard & WebSocket
 

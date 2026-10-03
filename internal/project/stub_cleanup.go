@@ -14,26 +14,28 @@ import (
 // sweepLegacyStubs removes, once per root, the .naozhi/project.yaml files
 // that earlier Scans wrote only to persist CreatedAt. A file counts as such a
 // stub only when it is the sole entry of .naozhi/ and its bytes equal
-// yaml.Marshal(ProjectConfig{CreatedAt: X}), and only once the index holding
-// X (yaml wins, so Scan just put it there) is on disk. Callers hold m.mu.Lock.
-func (m *Manager) sweepLegacyStubs(projects map[string]*Project) {
+// yaml.Marshal(ProjectConfig{CreatedAt: X}) for the X the index holds, and
+// only once that index is on disk. Callers hold scanMu; the sweep takes
+// m.mu.Lock itself so a writer's save cannot land between compare and remove.
+func (m *Manager) sweepLegacyStubs() {
 	if !m.index.stubCleanupPending(m.root) || !m.index.durable() {
 		return
 	}
-	for _, p := range projects {
-		if p.IsRoot || p.Config.CreatedAt == 0 {
-			continue
+	m.mu.Lock()
+	for _, p := range m.projects {
+		if ms := m.index.createdAt[p.Path]; !p.IsRoot && ms != 0 {
+			removeLegacyStub(p.Name, p.Path, ms)
 		}
-		removeLegacyStub(p)
 	}
+	m.mu.Unlock()
 	m.index.markStubCleanupDone(m.root)
 }
 
-// removeLegacyStub deletes p's project.yaml, and the then-empty .naozhi/,
-// when the file is a byte-exact Scan stub in a real (non-symlink) .naozhi/;
-// anything else is left untouched.
-func removeLegacyStub(p *Project) {
-	dir := filepath.Join(p.Path, configDir)
+// removeLegacyStub deletes projDir's .naozhi/project.yaml, and the
+// then-empty .naozhi/, when the file is a byte-exact Scan stub for createdAt
+// in a real (non-symlink) .naozhi/; anything else is left untouched.
+func removeLegacyStub(name, projDir string, createdAt int64) {
+	dir := filepath.Join(projDir, configDir)
 	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
 		return
 	}
@@ -41,7 +43,7 @@ func removeLegacyStub(p *Project) {
 	if err != nil || len(entries) != 1 || entries[0].Name() != configFile {
 		return
 	}
-	want, err := yaml.Marshal(&ProjectConfig{CreatedAt: p.Config.CreatedAt})
+	want, err := yaml.Marshal(&ProjectConfig{CreatedAt: createdAt})
 	if err != nil {
 		return
 	}
@@ -56,13 +58,13 @@ func removeLegacyStub(p *Project) {
 	}
 	if err := os.Remove(path); err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			slog.Warn("remove legacy project.yaml stub failed", "project", p.Name, "path", path, "err", err)
+			slog.Warn("remove legacy project.yaml stub failed", "project", name, "path", path, "err", err)
 		}
 		return
 	}
 	if err := os.Remove(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		slog.Debug("keep .naozhi dir after stub removal", "project", p.Name, "path", dir, "err", err)
+		slog.Debug("keep .naozhi dir after stub removal", "project", name, "path", dir, "err", err)
 	}
 	slog.Info("removed legacy project.yaml stub; sidebar order kept in the projects index",
-		"project", p.Name, "path", path, "created_at", p.Config.CreatedAt)
+		"project", name, "path", path, "created_at", createdAt)
 }
