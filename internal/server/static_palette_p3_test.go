@@ -24,15 +24,21 @@ class MockDate extends RealDate {
 globalThis.Date = MockDate;
 `
 
-// extractJSAsyncFunction is extractJSFunction for `async function name(`.
+// extractJSAsyncFunction is extractJSFunction for `async function name(`,
+// exported or not.
 func extractJSAsyncFunction(t *testing.T, js, name string) string {
 	t.Helper()
-	marker := "\nasync function " + name + "("
-	i := strings.Index(js, marker)
+	i := -1
+	for _, prefix := range []string{"\nasync function ", "\nexport async function "} {
+		if j := strings.Index(js, prefix+name+"("); j >= 0 {
+			i = j + len(prefix) - len("async function ")
+			break
+		}
+	}
 	if i < 0 {
 		t.Fatalf("dashboard.js: async function %s not found", name)
 	}
-	rest := js[i+1:]
+	rest := js[i:]
 	end := strings.Index(rest, "\n}\n")
 	if end < 0 {
 		t.Fatalf("dashboard.js: async function %s has no column-0 closing brace", name)
@@ -148,10 +154,10 @@ func TestDashboardJS_FetchCLIBackends_DoesNotCacheNullRemote(t *testing.T) {
 	script := `
 let NZ_CONTRACT;
 let cliBackends = null, cliBackendsFetchedAt = 0;
-// fetchCLIBackends lives in auth_modal.js — its dashboard collaborators
-// arrive as injected deps and the backend caches via serverInfo.
+// fetchCLIBackends lives in backend_catalog.js — it imports applyFeatureGates
+// and keeps the backend caches in serverInfo.
 const serverInfo = { cliBackends: null, cliBackendsFetchedAt: 0, cliBackendsByNode: {} };
-const deps = { applyFeatureGates: () => {}, getToken: () => '' };
+function applyFeatureGates() {}
 const good = { backends: [{ id: 'claude' }, { id: 'codex' }], default: 'claude' };
 let calls = 0;
 const responses = [null, () => { throw new Error('502'); }, good, good];

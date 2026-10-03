@@ -6,27 +6,23 @@
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects; its helpers are
-// injected once via configureSidebarProject(), called from dashboard's module body.
+// module evaluates. Shared state is read from the state.js objects and helpers are
+// imported. session_list.js imports this module, so the three session_list
+// functions it calls back are injected once via configureSidebarProject(),
+// called from dashboard's module body.
 import { NZ_CONTRACT } from './contract.js';
 import { serverInfo, sessionList } from './state.js';
 import { esc, escAttr, fetchJSON, showToast, trapFocus } from './nz_util.js';
 import { ICONS } from './icons.js';
+import { getToken } from './platform.js';
+import { projectDisplayLabel, projectDisplayPrefix } from './session_ident.js';
+import { showAPIError, showNetworkError } from './utilities.js';
+import { accessProfileChipInfo, fetchAccessProfiles, fetchCLIBackends, renderAccessProfilePicker, renderBackendPicker } from './backend_catalog.js';
 
 const deps = {
-  accessProfileChipInfo: null,
   debouncedFetchSessions: null,
-  fetchAccessProfiles: null,
-  fetchCLIBackends: null,
   fetchSessions: null,
-  getToken: null,
-  projectDisplayLabel: null,
-  projectDisplayPrefix: null,
-  renderAccessProfilePicker: null,
-  renderBackendPicker: null,
   renderSidebar: null,
-  showAPIError: null,
-  showNetworkError: null,
 };
 export function configureSidebarProject(impl) {
   for (const k of Object.keys(deps)) {
@@ -119,8 +115,8 @@ function sectionHeaderHtml(p) {
   // (if any) and use display_name when set; aria-label / title still
   // carry p.name so screen-readers + tooltips disambiguate when the
   // dirname differs from the human-friendly label.
-  const emojiPrefix = deps.projectDisplayPrefix(p);
-  const displayName = deps.projectDisplayLabel(p);
+  const emojiPrefix = projectDisplayPrefix(p);
+  const displayName = projectDisplayLabel(p);
   const labelTitle = (displayName && displayName !== p.name)
     ? p.name + ' — ' + displayName
     : p.name;
@@ -184,7 +180,7 @@ async function toggleFavorite(name, node) {
   _favInFlight.add(key);
   try {
     const headers = {};
-    const t = deps.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const qs = 'name=' + encodeURIComponent(name) + '&favorite=' + (next ? 'true' : 'false') +
       (node && node !== 'local' ? '&node=' + encodeURIComponent(node) : '');
@@ -192,9 +188,9 @@ async function toggleFavorite(name, node) {
       await fetchJSON(NZ_CONTRACT.API.projects_favorite + '?' + qs, { timeoutMs: 10000, method: 'POST', headers });
     } catch (err) {
       if (err && err.status) {
-        deps.showAPIError(next ? '收藏项目' : '取消收藏', err.status, '');
+        showAPIError(next ? '收藏项目' : '取消收藏', err.status, '');
       } else {
-        deps.showNetworkError(next ? '收藏项目' : '取消收藏', err);
+        showNetworkError(next ? '收藏项目' : '取消收藏', err);
       }
       // Re-render from the server so the star's visual hover/click state
       // snaps back to the authoritative `sessionList.projectsData` value; otherwise the
@@ -226,22 +222,22 @@ async function openProjectSettings(name) {
   let cfg;
   try {
     const headers = {};
-    const t = deps.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const [c] = await Promise.all([
       fetchJSON(NZ_CONTRACT.API.projects_config + '?name=' + encodeURIComponent(name), { timeoutMs: 10000, headers, credentials: 'same-origin' }),
-      deps.fetchCLIBackends(),
-      deps.fetchAccessProfiles(),
+      fetchCLIBackends(),
+      fetchAccessProfiles(),
     ]);
     cfg = c || {};
   } catch (err) {
-    if (err && err.status) deps.showAPIError('加载项目设置', err.status, '');
-    else deps.showNetworkError('加载项目设置', err);
+    if (err && err.status) showAPIError('加载项目设置', err.status, '');
+    else showNetworkError('加载项目设置', err);
     return;
   }
 
-  const accessProfilePicker = deps.renderAccessProfilePicker(serverInfo.accessProfiles, { selectId: 'ps-access-profile', selectedId: cfg.access_profile || '' });
-  const backendPicker = deps.renderBackendPicker(serverInfo.cliBackends, { selectId: 'ps-backend', selectedId: cfg.backend || '' });
+  const accessProfilePicker = renderAccessProfilePicker(serverInfo.accessProfiles, { selectId: 'ps-access-profile', selectedId: cfg.access_profile || '' });
+  const backendPicker = renderBackendPicker(serverInfo.cliBackends, { selectId: 'ps-backend', selectedId: cfg.backend || '' });
 
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
@@ -285,7 +281,7 @@ async function openProjectSettings(name) {
     const apID = apEl ? apEl.value : (cfg.access_profile || '');
     const pmEl = document.getElementById('ps-planner-model');
     const model = (pmEl && pmEl.value.trim()) || accessProfileDefaultModel(apID) || '（继承默认）';
-    const info = deps.accessProfileChipInfo(apID);
+    const info = accessProfileChipInfo(apID);
     const label = info ? info.label : '全局默认';
     const box = document.getElementById('ps-preview');
     if (box) box.textContent = '生效链路：' + label + ' → ' + model;
@@ -311,7 +307,7 @@ async function openProjectSettings(name) {
         if (![...sel.options].some(o => o.value === newID)) {
           const opt = document.createElement('option');
           opt.value = newID;
-          opt.textContent = deps.accessProfileChipInfo(newID)?.label || newID;
+          opt.textContent = accessProfileChipInfo(newID)?.label || newID;
           sel.appendChild(opt);
         }
         sel.value = newID;
@@ -432,7 +428,7 @@ function openCreateAccessProfile(onCreated) {
     }
     try {
       const headers = { 'Content-Type': 'application/json' };
-      const t = deps.getToken();
+      const t = getToken();
       if (t) headers['Authorization'] = 'Bearer ' + t;
       await fetchJSON(NZ_CONTRACT.API.access_profiles, {
         timeoutMs: 10000, method: 'POST', headers, credentials: 'same-origin',
@@ -441,8 +437,8 @@ function openCreateAccessProfile(onCreated) {
     } catch (err) {
       if (err && err.status === 409) showErr('该档 ID 已存在');
       else if (err && err.status === 400) showErr('配置无效：请检查各字段');
-      else if (err && err.status) deps.showAPIError('创建访问档', err.status, '');
-      else deps.showNetworkError('创建访问档', err);
+      else if (err && err.status) showAPIError('创建访问档', err.status, '');
+      else showNetworkError('创建访问档', err);
       return;
     }
     overlay.remove();
@@ -450,7 +446,7 @@ function openCreateAccessProfile(onCreated) {
     // Force a registry refresh (bypass the 60s cache) so the new profile is
     // visible immediately to pickers/chips.
     serverInfo.accessProfilesFetchedAt = 0;
-    await deps.fetchAccessProfiles();
+    await fetchAccessProfiles();
     if (typeof onCreated === 'function') onCreated(id);
   });
 }
@@ -486,7 +482,7 @@ async function saveProjectSettings(name, baseCfg, overlay) {
 
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const t = deps.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     await fetchJSON(NZ_CONTRACT.API.projects_config + '?name=' + encodeURIComponent(name), {
       timeoutMs: 10000, method: 'PUT', headers, credentials: 'same-origin',
@@ -494,8 +490,8 @@ async function saveProjectSettings(name, baseCfg, overlay) {
     });
   } catch (err) {
     if (err && err.status === 400) showErr('配置无效：请检查各字段（未知 backend / 访问档、超长 prompt 等）');
-    else if (err && err.status) deps.showAPIError('保存项目设置', err.status, '');
-    else deps.showNetworkError('保存项目设置', err);
+    else if (err && err.status) showAPIError('保存项目设置', err.status, '');
+    else showNetworkError('保存项目设置', err);
     return;
   }
   overlay.remove();

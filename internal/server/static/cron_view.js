@@ -1,9 +1,6 @@
 import { NZ_CONTRACT } from './contract.js';
 import { hooks, selection, serverInfo, sessionList, timers, ui } from './state.js';
-import {
-  fetchCLIBackends,
-  renderBackendPicker,
-} from './auth_modal.js';
+import { fetchCLIBackends, renderBackendPicker } from './backend_catalog.js';
 import { setActivityView } from './dashboard.js';
 import { eventHtml, renderEventsWithDividers } from './event_render.js';
 import { authHeaders, getToken, lsGet, lsSet } from './platform.js';

@@ -149,6 +149,9 @@ var fileRefParseJS embed.FS
 //go:embed static/shell.js
 var shellJS embed.FS
 
+//go:embed static/backend_catalog.js
+var backendCatalogJS embed.FS
+
 //go:embed static/agent_view.js
 var agentViewJS embed.FS
 
@@ -270,6 +273,7 @@ var staticAssets = func() map[string]staticAsset {
 		{"icons.js", iconsJS, "static/icons.js", true},
 		{"file_ref_parse.js", fileRefParseJS, "static/file_ref_parse.js", true},
 		{"shell.js", shellJS, "static/shell.js", true},
+		{"backend_catalog.js", backendCatalogJS, "static/backend_catalog.js", true},
 		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
 		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
 		{"files_view.js", filesViewJS, "static/files_view.js", true},

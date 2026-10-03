@@ -406,6 +406,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/backend_catalog.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/composer_files.js",
     "handler_type": "http.HandlerFunc"
   },

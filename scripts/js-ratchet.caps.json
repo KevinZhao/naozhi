@@ -4,7 +4,7 @@
     "exempt": []
   },
   "lines": {
-    "dashboard.js": 2950
+    "dashboard.js": 2918
   },
   "sideEffectLegacy": [
     "agent_view.js",
@@ -30,6 +30,7 @@
     "cron_view.js"
   ],
   "leaves": [
+    "backend_catalog.js",
     "contract.js",
     "cron_schedule.js",
     "features.js",
