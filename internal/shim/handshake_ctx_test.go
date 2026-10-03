@@ -238,3 +238,39 @@ func TestShimHandle_DrainReplay_CancelAfterDrainLeavesTheConnOpen(t *testing.T) 
 		t.Errorf("round trip after cancelling the drain ctx: %v, want the conn left to its Process", err)
 	}
 }
+
+// TestShimHandle_DrainReplay_CancelRacingTheDoneNeverReturnsAClosedConn is the
+// drain counterpart of the connect race: the cancel lands on either side of
+// replay_done, and the drain returns a ctx error or a usable conn.
+func TestShimHandle_DrainReplay_CancelRacingTheDoneNeverReturnsAClosedConn(t *testing.T) {
+	var won, lost int
+	for i := range 300 {
+		handle, server := newTestHandlePair(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			go func() {
+				for range i % 100 {
+					runtime.Gosched()
+				}
+				cancel()
+			}()
+			writeLine(t, server, ServerMsg{Type: "replay_done"})
+			servePong(server, bufio.NewReader(server))
+		}()
+		if _, err := handle.DrainReplay(ctx); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("DrainReplay err = %v, want context.Canceled", err)
+			}
+			lost++
+		} else {
+			won++
+			if err := roundTrip(handle); err != nil {
+				t.Fatalf("DrainReplay returned a handle whose conn the cancel closed: %v", err)
+			}
+		}
+		cancel()
+		handle.Close()
+		server.Close()
+	}
+	t.Logf("drain beat the cancel %d times, lost %d", won, lost)
+}
