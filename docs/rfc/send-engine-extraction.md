@@ -339,15 +339,20 @@ func (e *sendEngine) drain() {
 
 ## 4. queue 生命周期归属
 
-今天 queue 由 `HubOptions.Queue` 外部注入，`Hub` 只持引用、**从不关闭它**（`dispatch.MessageQueue` 无 Close，生命周期进程级，由 `main`/`buildServer` 持有）。**本 RFC 不改**：引擎同样只持引用。
+> **2026-10 更新（#3004 E）**：下面的 v2 原文描述的是 #3004 之前的形态，已经过时。现状如下。
 
-引擎对 queue 的三类操作在 `drain()` 之后都不再发生：`Enqueue`（`sessionSend` 同步段，`TrackSend` 之前——`shuttingDown` 时**必须**先 `queue.Discard(key)` 归还所有权再返回 `sendAckBusy`，否则 key 永久 busy）、`DoneOrDrain`/`Discard`（`ownerLoop` 内，被 `wg.Wait()` 覆盖）、`Discard`（`/clear` `/new` 同步段）。
+- 队列类型 `turn.queue` **不导出**，由 `turn.New(turn.QueueOptions, Sender)` 在 Orchestrator 内部构造，Orchestrator 是它唯一的持有者。组合根不再单独构造队列：`buildServerWithHandlers` 只把 `ServerOptions.Queue` 换算成 `turn.QueueOptions` 放进 `wiring.queue`，`buildWSStack` 用它构造唯一的 `*turn.Orchestrator`（`wiring.turns`），同时交给 dispatcher（`DispatcherConfig.Turns`）和引擎（`sendEngineOpts.Turns`）。
+- 进程级生命周期不变：队列没有 Close，随 Orchestrator 存活到进程结束。
+- 对队列的操作全部在 turn 内部：`Enqueue`、`DoneOrDrain`、`DiscardAndReturn` 由 `Submit`、owner loop 和 `Reset` 调用；router 的 `KeyRetired` 绑定到 `turns.Cleanup`。turn 之外够得着的只有 `*Orchestrator` 的四个方法 `{Submit, Reset, ShouldNotify, Cleanup}`（`internal/turn/queue_surface_test.go` 的 G-c 双向钉住）。G-b（turn 之外的 `.Enqueue(` / `.DoneOrDrain(`）现在由编译器保证，lint 规则保留为 0 值；它的第二片（`turnQueueTypeExportBaseline` = 0）扫描 turn 本身，不许任何导出声明（函数签名、导出或嵌入字段、接口方法、导出变量）交出 queue 类型。
+- 引擎不碰队列：shutdown 时 `TrackSend` 拒绝准入，Orchestrator 自己归还所有权并对排队的 origin 调 `Dropped(shutdown)`；`drain()` 的屏障语义不变。
 
-即 **queue 的所有者仍是组合根，引擎是唯一使用者**。把构造也收进引擎归 E2 #2552 之后。
+v2 原文（历史）：今天 queue 由 `HubOptions.Queue` 外部注入，`Hub` 只持引用、从不关闭它；queue 的所有者是组合根，引擎是唯一使用者。
 
 ## 5. 不变量
 
 ### 5.1 引擎不变量
+
+> **#3004 E 更新**：第 2–4 条描述的是引擎直持队列的旧形态。现状见 §4：引擎不碰队列，shutdown 时的所有权归还、`/clear` `/new` 的丢弃都在 `turn.Orchestrator`（`Submit` / `Reset`）内部完成，legacy fallback 与 `e.queue == nil` 门已删除。
 
 1. **TrackSend 契约**：每个注册到 `wg` 的 goroutine 必须经 `TrackSend()` 并尊重 `shuttingDown`；禁止直接 `wg.Add(1)`。契约注释随字段迁到 `send_engine.go`。
 2. **`sessionSend` 的 shuttingDown 分支**先 `queue.Discard(key)` 再返回 `sendAckBusy`。

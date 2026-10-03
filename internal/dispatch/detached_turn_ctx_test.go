@@ -43,7 +43,7 @@ func TestDetachedTurn_CtxOutlivesInboundAndFollowsStop(t *testing.T) {
 				},
 			}
 			d := newTestDispatcher(&fakePlatform{},
-				withQueue(turn.NewQueueWithMode(5, 0, tc.mode)), withSender(sender),
+				withQueue(turn.QueueOptions{MaxDepth: 5, Mode: tc.mode}), withSender(sender),
 				func(cfg *testDispatcherConfig) { cfg.StopCtx = stop })
 
 			inbound, cancelInbound := context.WithCancel(context.WithValue(context.Background(), inboundKey{}, "req"))

@@ -117,8 +117,7 @@ func (hs *handlerSet) checkLimiters(schedulerWired bool) {
 // later reader has to rule out (#2897 S4).
 type wiring struct {
 	dedup         *platform.Dedup
-	sessionGuard  *session.Guard
-	msgQueue      *turn.Queue
+	queue         turn.QueueOptions // buildWSStack builds turns' queue from it
 	startedAt     time.Time
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string

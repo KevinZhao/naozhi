@@ -6,22 +6,13 @@ import (
 	"testing"
 )
 
-// G-c (#2897 T3004): Queue's exported method set equals an explicit list of
-// names, not merely a count, so a rename is as visible as an addition. Both
-// directions fail: a name added or removed must come with an edit to this
-// list in the same change. Every name here has a production caller outside
-// turn; #3004-E narrows the set further. SessionRouter's half of G-c is
+// G-c (#2897 T3004): *Orchestrator's exported method set equals an explicit
+// list of names, not merely a count, so a rename is as visible as an
+// addition; both directions fail. The queue is unexported and held only by
+// the Orchestrator, so these four methods are the whole reach any entry has
+// into it. SessionRouter's and Turns' halves of G-c are
 // internal/dispatch/queue_surface_test.go.
-var queueMethodNames = []string{
-	"Cleanup",
-	"CollectDelay",
-	"Discard",
-	"DiscardAndReturn",
-	"DoneOrDrain",
-	"Enqueue",
-	"Mode",
-	"ShouldNotify",
-}
+var orchestratorMethodNames = []string{"Cleanup", "Reset", "ShouldNotify", "Submit"}
 
 func exportedMethodNames(t reflect.Type) []string {
 	names := make([]string, 0, t.NumMethod())
@@ -62,18 +53,11 @@ func assertMethodSet(t *testing.T, label string, got []string, want []string) {
 		label, got, wantSorted, extra, missing)
 }
 
-// TestQueueSurface_Ratchet pins G-c's Queue half.
-func TestQueueSurface_Ratchet(t *testing.T) {
-	t.Parallel()
-	got := exportedMethodNames(reflect.TypeFor[*Queue]())
-	assertMethodSet(t, "*Queue", got, queueMethodNames)
-}
-
 // TestOrchestratorSurface_Ratchet pins *Orchestrator's exported method set
 // at #3004's final one: entry points submit, reset, rate-limit notices and
-// clean up, and reach the Queue through nothing else.
+// clean up a retired key.
 func TestOrchestratorSurface_Ratchet(t *testing.T) {
 	t.Parallel()
 	got := exportedMethodNames(reflect.TypeFor[*Orchestrator]())
-	assertMethodSet(t, "*Orchestrator", got, []string{"Cleanup", "Reset", "ShouldNotify", "Submit"})
+	assertMethodSet(t, "*Orchestrator", got, orchestratorMethodNames)
 }

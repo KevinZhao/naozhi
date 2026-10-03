@@ -361,19 +361,19 @@ func outcomeName(o Outcome) string {
 
 var errBoom = errors.New("boom")
 
-// harness is one Orchestrator over a real Queue with recording fakes.
+// harness is one Orchestrator over a real queue with recording fakes.
 type harness struct {
 	rec *recorder
-	q   *Queue
+	q   *queue
 	s   *fakeSender
 	o   *Orchestrator
 }
 
 func newHarness(maxDepth int, mode Mode) *harness {
 	rec := newRecorder()
-	q := NewQueueWithMode(maxDepth, time.Millisecond, mode)
 	s := newSender(rec)
-	return &harness{rec: rec, q: q, s: s, o: New(q, s)}
+	o := New(QueueOptions{MaxDepth: maxDepth, CollectDelay: time.Millisecond, Mode: mode}, s)
+	return &harness{rec: rec, q: o.q, s: s, o: o}
 }
 
 // hold makes every Send block until the returned release is called once per

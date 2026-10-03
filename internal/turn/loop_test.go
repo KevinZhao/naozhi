@@ -324,9 +324,9 @@ func TestOwnerLoop_ShutdownDropsQueued(t *testing.T) {
 	t.Parallel()
 	rec := newRecorder()
 	// A collect delay that never fires, so the select can only take ctx.Done.
-	q := NewQueueWithMode(8, time.Hour, ModeCollect)
 	s := newSender(rec)
-	o := New(q, s)
+	o := New(QueueOptions{MaxDepth: 8, CollectDelay: time.Hour, Mode: ModeCollect}, s)
+	q := o.q
 	gate := make(chan struct{})
 	s.gate = gate
 	ctx, cancel := context.WithCancel(context.Background())
@@ -345,7 +345,7 @@ func TestOwnerLoop_ShutdownDropsQueued(t *testing.T) {
 	if got := b.doneCtxCalls(); len(got) != 0 {
 		t.Fatalf("shutdown told b on a cancelled ctx (%v); IM clears its reaction with it", got)
 	}
-	if isOwner, _, _, _, _ := q.Enqueue("k", Msg{Text: "next"}); !isOwner {
+	if isOwner, _, _, _ := q.enqueueTuple("k", Msg{Text: "next"}); !isOwner {
 		t.Fatal("ownership not released after shutdown")
 	}
 }
@@ -436,7 +436,7 @@ func TestOwnerLoop_PanicInFirstTurn(t *testing.T) {
 	if n := h.rec.count("after:k"); n != 0 {
 		t.Fatalf("AfterTurn ran %d times on a turn that panicked in Send", n)
 	}
-	if isOwner, _, _, _, _ := h.q.Enqueue("k", Msg{}); !isOwner {
+	if isOwner, _, _, _ := h.q.enqueueTuple("k", Msg{}); !isOwner {
 		t.Fatal("key still owned after the panic")
 	}
 }
@@ -546,10 +546,9 @@ func TestOwnerLoop_PanicInAHook(t *testing.T) {
 // so an IM origin can still clear its reactions.
 func TestOwnerLoop_PanicTellsOnADetachedCtx(t *testing.T) {
 	rec := newRecorder()
-	q := NewQueueWithMode(8, time.Hour, ModeCollect)
 	s := newSender(rec)
 	s.panicIf = func(string) bool { return true }
-	o := New(q, s)
+	o := New(QueueOptions{MaxDepth: 8, CollectDelay: time.Hour, Mode: ModeCollect}, s)
 	gate := make(chan struct{})
 	s.gate = gate
 	ctx, cancel := context.WithCancel(context.Background())

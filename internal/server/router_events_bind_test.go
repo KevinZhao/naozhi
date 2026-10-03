@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -28,16 +29,19 @@ func TestServer_BindsRouterEvents(t *testing.T) {
 	})
 
 	const key = "feishu:direct:u:general"
-	if isOwner, _, _, _, _ := hs.wiring.msgQueue.Enqueue(key, turn.Msg{Text: "first"}); !isOwner {
-		t.Fatal("precondition: first Enqueue did not become owner")
+	turns, ctx := hs.wiring.turns, context.Background()
+	if ack := turns.Submit(ctx, turn.Request{Key: key, Text: "first"}, neverRunAdmission{}); ack != turn.AckOwner {
+		t.Fatalf("precondition: first request ack %d, want AckOwner", ack)
 	}
-	if isOwner, enqueued, _, _, _ := hs.wiring.msgQueue.Enqueue(key, turn.Msg{Text: "queued"}); isOwner || !enqueued {
-		t.Fatalf("precondition: second Enqueue not queued behind owner (isOwner=%v enqueued=%v), want depth 1", isOwner, enqueued)
+	if ack := turns.Submit(ctx, turn.Request{Key: key, Text: "queued"}, neverRunAdmission{}); ack != turn.AckQueued {
+		t.Fatalf("precondition: second request ack %d, want AckQueued behind the owner", ack)
 	}
 	relay.KeyRetired(key, "sid-retired")
-	if kept := hs.wiring.msgQueue.DiscardAndReturn(key); kept != nil {
-		t.Errorf("a key retired through the relay kept %d queued messages", len(kept))
+	// The retirement reached the Orchestrator's Cleanup: the key is free.
+	if ack := turns.Submit(ctx, turn.Request{Key: key, Text: "after"}, neverRunAdmission{}); ack != turn.AckOwner {
+		t.Errorf("a key retired through the relay kept its owner: next request ack %d, want AckOwner", ack)
 	}
+	turns.Cleanup(key)
 	hs.sessionH.FlushRetiredStore()
 	store, err := buildRetiredStoreWithErr(stateDir)
 	if err != nil {

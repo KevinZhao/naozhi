@@ -20,7 +20,6 @@ import (
 // ⏳.
 func TestDrainTurn_ClearsReactionsUnderCancelledCtx(t *testing.T) {
 	t.Parallel()
-	q := turn.NewQueueWithMode(8, 0, turn.ModeCollect)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	turns := 0
@@ -29,13 +28,13 @@ func TestDrainTurn_ClearsReactionsUnderCancelledCtx(t *testing.T) {
 	sender.getOrCreate = func(context.Context, string, session.AgentOpts) (turn.Session, session.SessionStatus, error) {
 		turns++
 		if turns == 1 {
-			queueIM(d, q, "m1", "m2")
+			queueIM(t, d, "m1", "m2")
 		} else {
 			cancel() // shutdown lands mid drain turn
 		}
 		return fakeSession{}, 0, nil
 	}
-	d, rp := newReactorDispatcher(t, q, sender)
+	d, rp := newReactorDispatcher(t, turn.QueueOptions{MaxDepth: 8}, sender)
 
 	done := make(chan struct{})
 	go func() {
