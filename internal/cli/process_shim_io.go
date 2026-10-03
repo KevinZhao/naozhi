@@ -207,11 +207,14 @@ func (l *shimLink) sendLine(line []byte) error {
 	return l.w.Flush()
 }
 
-// appendJSONStringBytes appends a JSON string literal of s to dst, mirroring
-// encoding/json with SetEscapeHTML(false): only `"`, `\`, and C0 control bytes
-// are escaped; '<','>','&' pass through. U+2028 / U+2029 are escaped as
-// \u2028 / \u2029 (stdlib JS-compat behaviour). Invalid UTF-8 bytes become
-// \ufffd to keep the wire 7-bit clean.
+// appendJSONStringBytes appends a JSON string literal of s to dst. For valid
+// UTF-8 it is byte-identical to encoding/json with SetEscapeHTML(false): only
+// `"`, `\` and C0 control bytes are escaped, '<','>','&' pass through, and
+// U+2028 / U+2029 become \u2028 / \u2029. Each invalid UTF-8 byte becomes the
+// 6-byte escape \ufffd (encoding/json v1 behaviour), so invalid input never
+// puts raw non-ASCII bytes on the wire. go1.27's jsonv2-backed encoding/json
+// emits raw EF BF BD instead; this encoder deliberately does not follow, and
+// both forms decode to the same string.
 func appendJSONStringBytes(dst, s []byte) []byte {
 	dst = append(dst, '"')
 	start := 0

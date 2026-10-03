@@ -356,7 +356,7 @@ func (p *ClaudeProtocol) Capabilities() Caps {
 func (p *ClaudeProtocol) WriteInterrupt(w io.Writer, requestID string) error {
 	// appendJSONStringBytes quotes requestID straight into a stack buffer (no
 	// json.Marshal heap alloc); it escapes `"`, `\`, C0 controls and
-	// U+2028/U+2029 — identical to json.Marshal for a UUID string.
+	// U+2028/U+2029 — byte-identical to json.Marshal for valid UTF-8.
 	var buf [256]byte
 	out := buf[:0]
 	out = append(out, `{"type":"control_request","request_id":`...)
