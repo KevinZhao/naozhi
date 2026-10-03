@@ -85,6 +85,12 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 			queued = false
 			return nil
 		}
+		if len(p.slots.pending) == 0 {
+			// The CLI owes nothing yet, so its silence so far is not a stall:
+			// both turn clocks start with this message.
+			p.slots.turnStartedAt = slot.enqueueAt
+			p.markOutput(slot.enqueueAt)
+		}
 		p.slots.pending = append(p.slots.pending, slot)
 		p.slots.mu.Unlock()
 		// stdinWriter (shimWriter) would re-acquire the write lock and
@@ -111,37 +117,90 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 	// the successful write so a rejected write leaves no ghost entry.
 	p.eventLog.Append(buildUserEntry(text, images))
 
-	// Defensive bail timer: passthrough has no per-turn watchdog (CLI 本身和
-	// shim 的 heartbeat 负责探测进程级死锁；slot 级超时由 bail 兜底)，so
-	// totalTimeout + 30s still unblocks the caller if both miss.
-	total := p.totalTimeout
-	if total <= 0 {
-		total = DefaultTotalTimeout
-	}
-	bail := time.NewTimer(total + 30*time.Second)
+	return p.awaitSlot(ctx, slot)
+}
+
+// awaitSlot waits for slot's result. The watchdog applies Send's no-output and
+// total budgets to the turn the CLI owes the queue (passthroughWatchdogTick),
+// so a stalled CLI is killed and every caller gets the classified timeout.
+// The bail timer is the backstop for a watchdog that failed to fire: it only
+// trips once that turn is passthroughBailGrace past totalTimeout, so a slot
+// queued behind long healthy turns keeps waiting.
+func (p *Process) awaitSlot(ctx context.Context, slot *sendSlot) (*clievent.SendResult, error) {
+	noOutputDur, totalDur := p.turnBudgets()
+	checkInterval := watchdogCheckInterval(noOutputDur)
+	watchdog := time.NewTimer(checkInterval)
+	defer watchdog.Stop()
+	bailAfter := totalDur + passthroughBailGrace
+	bail := time.NewTimer(bailAfter)
 	defer bail.Stop()
 
-	select {
-	case res := <-slot.resultCh:
-		return res, nil
-	case err := <-slot.errCh:
-		return nil, err
-	case <-ctx.Done():
-		// Tombstone: keep the slot so FIFO positioning survives; fanout
-		// sees canceled=true and drops the late result.
-		p.slots.mu.Lock()
-		slot.canceled.Store(true)
-		p.slots.mu.Unlock()
-		return nil, ctx.Err()
-	case <-bail.C:
-		// Mark canceled so a late result does not target a gone caller.
-		p.slots.mu.Lock()
-		slot.canceled.Store(true)
-		p.slots.mu.Unlock()
-		slog.Warn("passthrough: slot orphaned", "slot_id", slot.id, "elapsed", time.Since(slot.enqueueAt))
-		return nil, clierr.ErrOrphanedSlot
+	for {
+		select {
+		case res := <-slot.resultCh:
+			return res, nil
+		case err := <-slot.errCh:
+			return nil, err
+		case <-ctx.Done():
+			// Tombstone: keep the slot so FIFO positioning survives; fanout
+			// sees canceled=true and drops the late result.
+			p.slots.mu.Lock()
+			slot.canceled.Store(true)
+			p.slots.mu.Unlock()
+			return nil, ctx.Err()
+		case <-watchdog.C:
+			if err := p.passthroughWatchdogTick(time.Now(), noOutputDur, totalDur); err != nil {
+				// A result that raced the kill still wins; the process dies
+				// either way.
+				select {
+				case res := <-slot.resultCh:
+					return res, nil
+				case <-slot.errCh:
+				case <-p.done:
+				}
+				return nil, err
+			}
+			watchdog.Reset(checkInterval)
+		case <-bail.C:
+			select {
+			case res := <-slot.resultCh:
+				return res, nil
+			case err := <-slot.errCh:
+				return nil, err
+			default:
+			}
+			if !p.Alive() {
+				return nil, clierr.ErrProcessExited
+			}
+			if wait := p.passthroughBailRemaining(time.Now(), bailAfter); wait > 0 {
+				bail.Reset(wait)
+				continue
+			}
+			// Mark canceled so a late result does not target a gone caller.
+			p.slots.mu.Lock()
+			slot.canceled.Store(true)
+			p.slots.mu.Unlock()
+			slog.Warn("passthrough: slot orphaned", "slot_id", slot.id, "elapsed", time.Since(slot.enqueueAt))
+			return nil, clierr.ErrOrphanedSlot
+		}
 	}
 }
+
+// passthroughBailRemaining is how long the turn the CLI owes the queue has
+// left before it is bailAfter old; <= 0 once it is.
+func (p *Process) passthroughBailRemaining(now time.Time, bailAfter time.Duration) time.Duration {
+	p.slots.mu.Lock()
+	turnStart := p.slots.turnStartedAt
+	p.slots.mu.Unlock()
+	if turnStart.IsZero() {
+		return 0
+	}
+	return bailAfter - now.Sub(turnStart)
+}
+
+// passthroughBailGrace is how far past totalTimeout the turn the CLI owes the
+// queue may run before awaitSlot gives up on the watchdog. A var for tests.
+var passthroughBailGrace = 30 * time.Second
 
 // writeUserMessageUnderShimLock writes one NDJSON user-message line directly
 // to the shim via a pooled capture writer + sendLocked, bypassing
@@ -360,7 +419,7 @@ func deliverSlotResult(s *sendSlot, r *clievent.SendResult) {
 // discardAllPending is used when the CLI is known dead or the session is
 // reset. All pending + currentTurn slots receive the given error; caller
 // should not touch slot state afterwards. currentTurnSlots 必须和 pendingSlots
-// 一起被通知，否则已被 replay 认领的 slot 会阻塞到 total+30s bail timer，IM
+// 一起被通知，否则已被 replay 认领的 slot 会阻塞到 watchdog / bail timer，IM
 // 用户表现为"无响应"而非明确错误。
 func (p *Process) discardAllPending(reason error) {
 	p.slots.mu.Lock()
@@ -401,13 +460,17 @@ func (p *Process) onSystemInit() {
 // onTurnResult is called when readLoop sees a result event. It snapshots the
 // turn's claimed slots, strips them from pendingSlots, and returns them for
 // out-of-lock fanout (an aborted turn's victims are handled separately by
-// reapAbortedPreempted).
+// reapAbortedPreempted). Restarts the turn clock for whatever stays queued.
 func (p *Process) onTurnResult() []*sendSlot {
 	p.slots.mu.Lock()
 	owners := p.slots.current
 	p.slots.current = nil
 	p.removeSlotsLocked(owners)
 	pendingLeft := len(p.slots.pending)
+	// Each turn gets its own total budget: the next one starts now.
+	if pendingLeft > 0 {
+		p.slots.turnStartedAt = time.Now()
+	}
 	p.slots.mu.Unlock()
 
 	// Mirror Send's State→Ready on the last passthrough turn. Only when
