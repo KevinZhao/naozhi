@@ -172,12 +172,17 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if s.dashboardToken != "" && !s.auth.IsAuthenticated(r) {
+		// In trusted-proxy mode an unresolvable client IP fails closed rather
+		// than sharing one bucket, so a direct-to-origin attacker cannot
+		// starve every XFF-less caller (#2120). The constant body says why:
+		// this is usually an operator on the LAN, not a rate limit.
+		if !requestHasResolvableClientIP(r, s.auth.TrustedProxy) {
+			http.Error(w, auth.XFFRequiredReason, http.StatusBadRequest)
+			return
+		}
 		// Rate-limit unauthenticated GETs so scanners cannot hammer the login
-		// renderer. In trusted-proxy mode an unresolvable client IP fails
-		// closed rather than sharing one bucket, so a direct-to-origin
-		// attacker cannot starve every XFF-less caller (#2120).
-		if !requestHasResolvableClientIP(r, s.auth.TrustedProxy) ||
-			!s.auth.UnauthDashAllow(clientIP(r, s.auth.TrustedProxy)) {
+		// renderer.
+		if !s.auth.UnauthDashAllow(clientIP(r, s.auth.TrustedProxy)) {
 			errRespRetry(w, http.StatusTooManyRequests, "rate_limited", "too many requests", 60)
 			return
 		}

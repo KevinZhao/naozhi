@@ -680,16 +680,24 @@ test.describe('Auth modal & login', () => {
     await page.fill('#token-input', 'secret-token');
     await page.click('.modal-btns button.primary');
 
-    const hint = page.locator('.modal-overlay .auth-hint');
-    await expect(hint).toHaveText(reason);
+    const refusal = page.locator('.modal-overlay .auth-refusal');
+    await expect(refusal).toHaveText(reason);
     // Rendered as text: the markup in the reason must not become an element.
-    await expect(hint.locator('b')).toHaveCount(0);
+    await expect(refusal.locator('b')).toHaveCount(0);
+    // The permanent hint keeps saying where the token lives.
+    await expect(page.locator('.modal-overlay .auth-hint').first()).toContainText('dashboard_token');
     const tokenInput = page.locator('#token-input');
-    await expect(tokenInput).toHaveAttribute('placeholder', /login refused/);
     await expect(tokenInput).not.toHaveAttribute('placeholder', /invalid token/);
     // The token was never compared, so it is kept for the retry.
     await expect(tokenInput).toHaveValue('secret-token');
     expect(authMock.loginCalls).toHaveLength(1);
+
+    // A later 401 clears the stale reason instead of stacking under it.
+    await page.fill('#token-input', 'wrong-token');
+    await page.click('.modal-btns button.primary');
+    await expect(tokenInput).toHaveAttribute('placeholder', /invalid token/);
+    await expect(refusal).toHaveCount(0);
+    expect(authMock.loginCalls).toHaveLength(2);
 
     await ctx.close();
     authMock.server.close();

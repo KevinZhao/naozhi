@@ -40,6 +40,7 @@ async function saveToken() {
   const input = document.getElementById('token-input');
   const t = input && input.value.trim();
   if (!t) return;
+  document.querySelectorAll('.modal-overlay .auth-refusal').forEach((n) => n.remove());
   try {
     const r = await fetch(NZ_CONTRACT.API.auth_login, {
       method: 'POST',
@@ -60,12 +61,11 @@ async function saveToken() {
       if (!Number.isFinite(retryAfter) || retryAfter <= 0) retryAfter = 60;
       startLoginRetryCountdown(retryAfter);
     } else if (r.status === 400) {
-      // Refused before the token compare (e.g. trusted_proxy without XFF).
-      let reason = '';
-      try { reason = String((await r.json()).error || ''); } catch (_) { /* non-JSON body */ }
-      const hint = document.querySelector('.modal-overlay .auth-hint');
-      if (hint) hint.textContent = (reason || 'login refused (HTTP 400)').slice(0, 300);
-      input.placeholder = 'login refused — see the note above';
+      // Refused before the token compare (e.g. trusted_proxy without XFF), so the token stays.
+      const reason = await r.json().then((b) => String((b && b.error) || ''), () => '');
+      const note = Object.assign(document.createElement('div'), { className: 'auth-hint auth-refusal' });
+      note.textContent = (reason || 'login refused (HTTP 400)').slice(0, 300);
+      document.querySelector('.modal-overlay .auth-hint')?.after(note);
     } else {
       document.getElementById('token-input').value = '';
       document.getElementById('token-input').placeholder = 'invalid token — try again';

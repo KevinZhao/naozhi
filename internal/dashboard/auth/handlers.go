@@ -366,9 +366,13 @@ const noScriptLoginHTML = `<!DOCTYPE html>
 <p><a href="/dashboard">Back to login</a></p>
 </body></html>`
 
-// xffRequiredBody names the setting and both fixes: the login UIs show it
-// verbatim, and the operator behind a LAN address is its usual reader.
-const xffRequiredBody = `{"error":"server.trusted_proxy is on but this request carries no usable X-Forwarded-For: open the dashboard through the reverse proxy, or set server.trusted_proxy: false for direct/LAN access"}`
+// XFFRequiredReason explains a trusted_proxy refusal of a request with no
+// usable X-Forwarded-For. It names the setting and both fixes because the
+// operator behind a LAN address is its usual reader; the login UIs and the
+// unauthenticated GET /dashboard show it verbatim.
+const XFFRequiredReason = "server.trusted_proxy is on but this request carries no usable X-Forwarded-For: open the dashboard through the reverse proxy, or set server.trusted_proxy: false for direct/LAN access"
+
+const xffRequiredBody = `{"error":"` + XFFRequiredReason + `"}`
 
 func (a *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	// HandleLogin sits outside RequireAuth (it GRANTS auth), so apply the
