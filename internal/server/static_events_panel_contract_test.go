@@ -143,10 +143,10 @@ func TestDashboardJS_HeaderFetchErrorPathsStaleChecked(t *testing.T) {
 	if git == "" {
 		t.Fatal("fetchGitState not found")
 	}
-	if !strings.Contains(git, "if (!resp.ok) { delete deps.gitStateCache[cacheKey]; if (selection.key !== key || selection.node !== node) return; deps.setHeaderGitChip(''); return; }") {
+	if !strings.Contains(git, "if (!resp.ok) { delete gitStateCache[cacheKey]; if (selection.key !== key || selection.node !== node) return; setHeaderGitChip(''); return; }") {
 		t.Error("fetchGitState !resp.ok branch must stale-check key+node before clearing #header-git (cache delete stays unconditional)")
 	}
-	if !strings.Contains(git, "} catch (_) {\n    delete deps.gitStateCache[cacheKey];\n    if (selection.key !== key || selection.node !== node) return;\n    deps.setHeaderGitChip('');") {
+	if !strings.Contains(git, "} catch (_) {\n    delete gitStateCache[cacheKey];\n    if (selection.key !== key || selection.node !== node) return;\n    setHeaderGitChip('');") {
 		t.Error("fetchGitState catch branch must stale-check key+node before clearing #header-git")
 	}
 }

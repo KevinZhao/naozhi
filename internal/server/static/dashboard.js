@@ -5,19 +5,11 @@ import { sessionStream } from './session_stream.js';
 import { WS_STATES, wsm } from './ws_manager.js';
 import { composer, hooks, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
 import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, registerActions, sessionExitChipHtml } from './nz_util.js';
-import { eventHtml, renderEventsWithDividers } from './event_render.js';
+import { eventHtml } from './event_render.js';
 import { onAskOptionToggle, onAskSubmit } from './ask_card.js';
 import { fetchEvents, renderEvents } from './event_stream.js';
 import { renderMd, runPendingAsync } from './render_md.js';
-import {
-  fetchSessionRuns,
-  gitChipHtml,
-  gitStateCache,
-  setHeaderEffortChip,
-  setHeaderGitChip,
-  setHeaderOverlayDriftChip,
-  setHeaderSpawnDiagChip,
-} from './session_header.js';
+import { fetchSessionRuns, setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderSpawnDiagChip } from './session_header.js';
 import {
   awaitPendingOrients,
   handleFiles,
@@ -55,12 +47,7 @@ import {
   stopSystemPoll,
 } from './system_view.js';
 import { configureRunningBanner, interruptSession, resetTurnState, saveScrollPos, startTurnTimer, updateSendButton } from './running_banner.js';
-import {
-  closeFilePreview,
-  processEventsForDisplay,
-  regroupAvatars,
-  startFileRefObserver,
-} from './file_refs.js';
+import { closeFilePreview, regroupAvatars, startFileRefObserver } from './file_refs.js';
 import {
   EVENT_DIVIDER_GAP_MS,
   applyFeatureGates,
@@ -74,12 +61,9 @@ import {
   historyDayLabel,
   isMobile,
   lastDividerTime,
-  mainEmptyHtml,
   mobileEnterChat,
   persistPending,
-  promptDialog,
   reconnectNow,
-  removePendingSession,
   removeSidebarCard,
   setActiveSessionCard,
   setMsgValue,
@@ -115,31 +99,15 @@ import {
   toggleFavorite,
   toggleProjectCollapsed,
 } from './sidebar_project.js';
-import {
-  accessProfileChipInfo,
-  backendDisplayName,
-  backendDisplayVersion,
-  configureAuthModal,
-  createNewSession,
-  dismissAuthModal,
-  doCreateSession,
-  fetchAccessProfiles,
-  fetchCLIBackends,
-  keyTailDisplay,
-  renderAccessProfilePicker,
-  renderBackendPicker,
-  saveToken,
-  showAuthModal,
-  startWSAuthRetryCountdown,
-  wireQuickAskInput,
-} from './auth_modal.js';
+import { backendDisplayName, backendDisplayVersion, configureAuthModal, createNewSession, dismissAuthModal, doCreateSession, keyTailDisplay, saveToken, showAuthModal, startWSAuthRetryCountdown } from './auth_modal.js';
+import { fetchAccessProfiles, fetchCLIBackends } from './backend_catalog.js';
 import {
   configureSendMessage,
   handleKey,
   sendMessage,
 } from './send_message.js';
 import { collectWorkspaceSessionIDs, debouncedFetchSessions, fetchSessions, getNodeStatus, onSessionsApplied, originBadgeHtml, renderSidebar, restorePending, updateCardUnreadChip, updateMainState, updateStatusBar } from './session_list.js';
-import { discoveredKey, dropDiscovered, findDiscovered, getNodeDisplayName, isDiscoveredKey, isInternalEvent, isMultiNode, matchProject, nodeColor, parseDiscoveredPid, projectDisplayLabel, projectDisplayPrefix, sameDiscovered, sessionTypeTag, sid, statusLabelForNode } from './session_ident.js';
+import { discoveredKey, dropDiscovered, findDiscovered, getNodeDisplayName, isDiscoveredKey, isMultiNode, matchProject, nodeColor, parseDiscoveredPid, projectDisplayLabel, projectDisplayPrefix, sid, statusLabelForNode } from './session_ident.js';
 import { ICONS } from './icons.js';
 // Service worker registration
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
@@ -1606,12 +1574,12 @@ function showOnboarding() {
 // Wire the markdown renderers' dashboard-side helpers (#2558 D4). Runs in
 // dashboard's module body, before any render call.
 configureSendMessage({ EVENT_DIVIDER_GAP_MS, awaitPendingOrients, discoveredKey, dropDiscovered, eventHtml, fetchEvents, fetchSessions, getToken, interruptSession, lastDividerTime, navSync, persistPending, removeSidebarCard, renderFilePreviews, selectSession, showAPIError, showAuthModal, showNetworkError, sid, startTurnTimer, stickEventsBottom, timeDividerHtml, updateSendButton });
-configureAuthModal({ applyFeatureGates, debouncedFetchSessions, eagerBindWorkspace, fetchSessions, getNodeDisplayName, getNodeStatus, isMultiNode, mobileEnterChat, navRebuild, nodeColor, persistPending, projectDisplayLabel, projectDisplayPrefix, renderMainShell, sendMessage, setActiveSessionCard, setMsgValue, shortPath, showNetworkError, statusLabelForNode, stopPreviewPolling, updateStatusBar });
-configureSidebarProject({ accessProfileChipInfo, debouncedFetchSessions, fetchAccessProfiles, fetchCLIBackends, fetchSessions, getToken, projectDisplayLabel, projectDisplayPrefix, renderAccessProfilePicker, renderBackendPicker, renderSidebar, showAPIError, showNetworkError });
-configureTuning({ debouncedFetchSessions, dropDiscovered, fetchSessions, findDiscovered, getToken, gitChipHtml, gitStateCache, isDiscoveredKey, mainEmptyHtml, parseDiscoveredPid, promptDialog, removePendingSession, renderMainHeader, sameDiscovered, setHeaderGitChip, showAPIError, showNetworkError, sid, stopPreviewPolling, wireQuickAskInput });
-configureDiscovery({ EVENT_DIVIDER_GAP_MS, ICONS, debouncedFetchSessions, eventHtml, getToken, isInternalEvent, lastDividerTime, mobileEnterChat, navRebuild, navSync, processEventsForDisplay, renderEventsWithDividers, sessionTypeTag, setActiveSessionCard, showAPIError, showNetworkError, stickEventsBottom, stopPreviewPolling, timeDividerHtml });
+configureAuthModal({ debouncedFetchSessions, eagerBindWorkspace, fetchSessions, getNodeDisplayName, getNodeStatus, isMultiNode, mobileEnterChat, navRebuild, nodeColor, persistPending, projectDisplayLabel, projectDisplayPrefix, renderMainShell, sendMessage, setActiveSessionCard, setMsgValue, shortPath, showNetworkError, statusLabelForNode, stopPreviewPolling, updateStatusBar });
+configureSidebarProject({ debouncedFetchSessions, fetchSessions, renderSidebar });
+configureTuning({ debouncedFetchSessions, fetchSessions });
+configureDiscovery({ debouncedFetchSessions });
 configureRunningBanner({ debouncedFetchSessions });
-registerShell({ selectSession, setActivityView });
+registerShell({ renderMainHeader, selectSession, setActivityView });
 initSplitWidth();
 initSidebarCollapsed();
 

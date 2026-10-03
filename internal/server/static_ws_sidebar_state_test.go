@@ -182,7 +182,7 @@ func TestDashboardJS_PreviewDiscoveredGenerationGuard(t *testing.T) {
 	if !strings.Contains(stopFn, "transcript.previewGen++;") {
 		t.Error("stopPreviewPolling() must bump transcript.previewGen so selectSession/createSession invalidate in-flight previews")
 	}
-	if !strings.Contains(fn, "deps.stopPreviewPolling();\n  const gen = transcript.previewGen;") {
+	if !strings.Contains(fn, "stopPreviewPolling();\n  const gen = transcript.previewGen;") {
 		t.Error("previewDiscovered must call stopPreviewPolling() FIRST and then capture gen = transcript.previewGen (capturing before the call would be invalidated by its own bump)")
 	}
 	if strings.Contains(fn, "++transcript.previewGen") {
@@ -213,7 +213,7 @@ func TestDashboardJS_PreviewDiscoveredGenerationGuard(t *testing.T) {
 	// must be NO stopPreviewPolling() call: it bumps _previewGen and would
 	// invalidate this very call (its tick would bail on the first fire). The
 	// prologue call already cleared any older generation's interval.
-	if strings.Contains(fn[idxGen:idxSet], "deps.stopPreviewPolling();") {
+	if strings.Contains(fn[idxGen:idxSet], "stopPreviewPolling();") {
 		t.Error("previewDiscovered must not call stopPreviewPolling() between the gen check and startPreviewPolling — it would invalidate its own generation")
 	}
 }

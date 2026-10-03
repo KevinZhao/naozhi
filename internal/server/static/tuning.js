@@ -6,35 +6,24 @@
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects; its helpers are
-// injected once via configureTuning(), called from dashboard's module body.
+// module evaluates. Shared state is read from the state.js objects and helpers are
+// imported. session_list.js imports this module, so the two session_list
+// functions it calls back are injected once via configureTuning(), called from
+// dashboard's module body; renderMainHeader is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, serverInfo, sessionList } from './state.js';
 import { esc, escAttr, fetchJSON, isCronSessionKey, showToast } from './nz_util.js';
 import { sessionStream } from './session_stream.js';
-import { removeSidebarCard } from './utilities.js';
+import { mainEmptyHtml, promptDialog, removePendingSession, removeSidebarCard, showAPIError, showNetworkError, stopPreviewPolling } from './utilities.js';
+import { getToken } from './platform.js';
+import { dropDiscovered, findDiscovered, isDiscoveredKey, parseDiscoveredPid, sameDiscovered, sid } from './session_ident.js';
+import { gitChipHtml, gitStateCache, setHeaderGitChip } from './session_header.js';
+import { wireQuickAskInput } from './auth_modal.js';
+import { shell } from './shell.js';
 
 const deps = {
   debouncedFetchSessions: null,
-  dropDiscovered: null,
   fetchSessions: null,
-  findDiscovered: null,
-  getToken: null,
-  gitChipHtml: null,
-  gitStateCache: null,
-  isDiscoveredKey: null,
-  mainEmptyHtml: null,
-  parseDiscoveredPid: null,
-  promptDialog: null,
-  removePendingSession: null,
-  renderMainHeader: null,
-  sameDiscovered: null,
-  setHeaderGitChip: null,
-  showAPIError: null,
-  showNetworkError: null,
-  sid: null,
-  stopPreviewPolling: null,
-  wireQuickAskInput: null,
 };
 export function configureTuning(impl) {
   for (const k of Object.keys(deps)) {
@@ -113,7 +102,7 @@ function openTuningPopover(kind) {
     tuningToast('远程节点会话暂不支持切换模型/档位', false);
     return;
   }
-  const s = sessionList.sessionsData[deps.sid(selection.key, selection.node)] ||
+  const s = sessionList.sessionsData[sid(selection.key, selection.node)] ||
     // Not spawned yet: show the parked pick as current so a re-open marks it.
     (perSession.pendingTuning[selection.key] || {});
   const running = s.state === 'running';
@@ -228,7 +217,7 @@ async function postTuningOverride(kind, value) {
   const restore = () => { if (chip) chip.style.opacity = ''; };
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const t = deps.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const body = { key };
     body[kind] = value;
@@ -247,7 +236,7 @@ async function postTuningOverride(kind, value) {
     const label = kind === 'model' ? '模型' : '档位';
     // No server row for this key = the session has not spawned yet; the pick
     // was parked server-side. Mirror it so the chips show it until promotion.
-    const isPending = !sessionList.sessionsData[deps.sid(key, selection.node)];
+    const isPending = !sessionList.sessionsData[sid(key, selection.node)];
     if (isPending) {
       const prev = perSession.pendingTuning[key] || {};
       const next = Object.assign({}, prev);
@@ -274,8 +263,8 @@ async function postTuningOverride(kind, value) {
 // cache. Called at the end of renderMainShell so a header rebuild triggered by
 // something unrelated (rename, model update) doesn't drop the chip.
 function repaintGitChip() {
-  if (!selection.key) { deps.setHeaderGitChip(''); return; }
-  deps.setHeaderGitChip(deps.gitChipHtml(deps.gitStateCache[deps.sid(selection.key, selection.node)]));
+  if (!selection.key) { setHeaderGitChip(''); return; }
+  setHeaderGitChip(gitChipHtml(gitStateCache[sid(selection.key, selection.node)]));
 }
 
 async function fetchGitState(key, node) {
@@ -284,25 +273,25 @@ async function fetchGitState(key, node) {
   // that node's filesystem, so resolving it here would describe the wrong
   // tree. Clear the chip so a remote session doesn't inherit the previously
   // selected local session's branch.
-  if (!key || node !== 'local') { deps.setHeaderGitChip(''); return; }
-  const cacheKey = deps.sid(key, node);
+  if (!key || node !== 'local') { setHeaderGitChip(''); return; }
+  const cacheKey = sid(key, node);
   try {
     const headers = {};
-    const t = deps.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const resp = await fetch(NZ_CONTRACT.API.sessions_git + '?key=' + encodeURIComponent(key), { headers });
     // The cache entry is per-session so dropping it is always right; the
     // header chip is only cleared when this session is still the selected one.
-    if (!resp.ok) { delete deps.gitStateCache[cacheKey]; if (selection.key !== key || selection.node !== node) return; deps.setHeaderGitChip(''); return; }
+    if (!resp.ok) { delete gitStateCache[cacheKey]; if (selection.key !== key || selection.node !== node) return; setHeaderGitChip(''); return; }
     const data = await resp.json();
-    deps.gitStateCache[cacheKey] = data;
+    gitStateCache[cacheKey] = data;
     // Guard against a stale response landing after the user switched sessions.
     if (selection.key !== key || selection.node !== node) return;
-    deps.setHeaderGitChip(deps.gitChipHtml(data));
+    setHeaderGitChip(gitChipHtml(data));
   } catch (_) {
-    delete deps.gitStateCache[cacheKey];
+    delete gitStateCache[cacheKey];
     if (selection.key !== key || selection.node !== node) return;
-    deps.setHeaderGitChip('');
+    setHeaderGitChip('');
   }
 }
 
@@ -311,7 +300,7 @@ async function fetchGitState(key, node) {
 // and on session dismissal so a recycled key cannot inherit a stale branch.
 function invalidateGitState(key, node) {
   if (!key) return;
-  delete deps.gitStateCache[deps.sid(key, node || 'local')];
+  delete gitStateCache[sid(key, node || 'local')];
   if (key === selection.key) fetchGitState(key, node || 'local');
 }
 
@@ -325,8 +314,8 @@ function clearMainIfSelected(key) {
 }
 
 function showMainEmpty() {
-  document.getElementById('main').innerHTML = deps.mainEmptyHtml();
-  deps.wireQuickAskInput();
+  document.getElementById('main').innerHTML = mainEmptyHtml();
+  wireQuickAskInput();
 }
 
 function resyncSidebar() {
@@ -337,11 +326,11 @@ function resyncSidebar() {
 // dismissDiscovered kills an external (discovered) CLI via
 // /api/discovered/close; its card goes once the server confirms.
 async function dismissDiscovered(key, node) {
-  const d = deps.findDiscovered(deps.parseDiscoveredPid(key), node);
+  const d = findDiscovered(parseDiscoveredPid(key), node);
   if (!d) { showToast('未找到该外部会话', 'warning'); return; }
   try {
     const headers = {'Content-Type': 'application/json'};
-    const token = deps.getToken();
+    const token = getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
     try {
       await fetchJSON(NZ_CONTRACT.API.discovered_close, {
@@ -350,19 +339,19 @@ async function dismissDiscovered(key, node) {
         body: JSON.stringify({pid: d.pid, session_id: d.session_id || '', cwd: d.cwd || '', proc_start_time: d.proc_start_time || 0, node: node || ''})
       });
     } catch (err) {
-      if (err && err.status) deps.showAPIError('关闭外部会话', err.status, err.message || '');
-      else deps.showNetworkError('关闭外部会话', err);
+      if (err && err.status) showAPIError('关闭外部会话', err.status, err.message || '');
+      else showNetworkError('关闭外部会话', err);
       return;
     }
-    deps.dropDiscovered(d.pid, d.node);
-    if (selection.pendingDiscovered && deps.sameDiscovered(selection.pendingDiscovered, d.pid, d.node)) {
+    dropDiscovered(d.pid, d.node);
+    if (selection.pendingDiscovered && sameDiscovered(selection.pendingDiscovered, d.pid, d.node)) {
       selection.pendingDiscovered = null;
-      deps.stopPreviewPolling();
+      stopPreviewPolling();
       showMainEmpty();
     }
     removeSidebarCard(key);
     resyncSidebar();
-  } catch (e) { deps.showNetworkError('关闭外部会话', e); }
+  } catch (e) { showNetworkError('关闭外部会话', e); }
 }
 
 // dismissManaged deletes optimistically: the card vanishes immediately rather
@@ -371,7 +360,7 @@ async function dismissDiscovered(key, node) {
 // (RemoveAsync), so 200 means "gone from the list" — but the UI does not even
 // wait for it.
 function dismissManaged(key, node) {
-  const skey = deps.sid(key, node);
+  const skey = sid(key, node);
   // Mark dismissed so an in-flight poll / sessions_update event can't
   // resurrect the card before DELETE confirms (cleared in finally below).
   sessionList.optimisticDeleteKeys.add(skey);
@@ -380,7 +369,7 @@ function dismissManaged(key, node) {
   removeSidebarCard(key);
 
   const headers = {'Content-Type': 'application/json'};
-  const token = deps.getToken();
+  const token = getToken();
   if (token) headers['Authorization'] = 'Bearer ' + token;
   const body = {key: key};
   if (node && node !== 'local') body.node = node;
@@ -392,8 +381,8 @@ function dismissManaged(key, node) {
       // so swallow it. Any other error means the delete may not have landed:
       // surface it and let the re-sync below pull the real list back.
       if (err && err.status !== 404) {
-        if (err.status) deps.showAPIError('删除会话', err.status, err.message || '');
-        else deps.showNetworkError('删除会话', err);
+        if (err.status) showAPIError('删除会话', err.status, err.message || '');
+        else showNetworkError('删除会话', err);
       }
     })
     .finally(() => {
@@ -413,10 +402,10 @@ function dismissManaged(key, node) {
 async function dismissSession(key, node, opts) {
   node = node || 'local';
   delete perSession.drafts[key];
-  delete perSession.scrollPos[deps.sid(key, node)];
+  delete perSession.scrollPos[sid(key, node)];
   // Drop the cached git state so a later key reuse can't inherit this
   // session's branch chip before its own fetch resolves.
-  delete deps.gitStateCache[deps.sid(key, node)];
+  delete gitStateCache[sid(key, node)];
   // perSession.backends is normally consumed on first sendMessage; a dismiss
   // before any send would leave a stale backend pick for a re-created key.
   delete perSession.backends[key];
@@ -435,8 +424,8 @@ async function dismissSession(key, node, opts) {
 
   // If it's a pending (never-sent) session, just remove from localStorage
   if (perSession.workspaces[key] !== undefined) {
-    deps.removePendingSession(key);
-    delete sessionList.sessionsData[deps.sid(key, node)];
+    removePendingSession(key);
+    delete sessionList.sessionsData[sid(key, node)];
     if (selection.key === key) {
       selection.key = null;
       showMainEmpty();
@@ -445,7 +434,7 @@ async function dismissSession(key, node, opts) {
     return;
   }
 
-  if (deps.isDiscoveredKey(key)) {
+  if (isDiscoveredKey(key)) {
     await dismissDiscovered(key, node);
     return;
   }
@@ -458,12 +447,12 @@ async function dismissSession(key, node, opts) {
 // the server and persists across reloads.
 async function renameSession() {
   if (!selection.key) return;
-  const s = sessionList.sessionsData[deps.sid(selection.key, selection.node)] || {};
+  const s = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
   const current = s.user_label || '';
-  // RNEW-UX-013: replaced window.prompt with themed deps.promptDialog so the
+  // RNEW-UX-013: replaced window.prompt with themed promptDialog so the
   // rename flow matches the rest of the dashboard (dark theme, trapFocus,
   // Esc/backdrop cancel) and doesn't block the event loop on mobile.
-  const input = await deps.promptDialog({
+  const input = await promptDialog({
     title: '重命名会话',
     message: '留空恢复默认标题，最多 128 字节',
     defaultValue: current,
@@ -475,7 +464,7 @@ async function renameSession() {
   const next = input.trim();
   if (next === current) return;
   const headers = {'Content-Type': 'application/json'};
-  const token = deps.getToken();
+  const token = getToken();
   if (token) headers['Authorization'] = 'Bearer ' + token;
   const body = {key: selection.key, label: next};
   if (selection.node && selection.node !== 'local') body.node = selection.node;
@@ -486,20 +475,20 @@ async function renameSession() {
       body: JSON.stringify(body),
     });
   } catch (err) {
-    if (err && err.status) deps.showAPIError('重命名', err.status, err.message || '');
-    else deps.showNetworkError('重命名', err);
+    if (err && err.status) showAPIError('重命名', err.status, err.message || '');
+    else showNetworkError('重命名', err);
     return;
   }
   // Patch local cache so the title refreshes before the next poll lands.
-  const cacheKey = deps.sid(selection.key, selection.node);
+  const cacheKey = sid(selection.key, selection.node);
   if (sessionList.sessionsData[cacheKey]) {
     sessionList.sessionsData[cacheKey].user_label = next;
   }
   sessionList.lastVersion = 0;
   deps.debouncedFetchSessions();
   // Header-only repaint: a full renderMainShell would rebuild #events-scroll
-  // empty with nothing refetching the conversation (see deps.renderMainHeader).
-  deps.renderMainHeader();
+  // empty with nothing refetching the conversation (see renderMainHeader).
+  shell.renderMainHeader();
   showToast(next ? '已重命名' : '已恢复默认标题');
 }
 

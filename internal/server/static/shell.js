@@ -6,6 +6,7 @@
 // function or const that does more than forward, and each user to a module
 // the root reaches through imports (else it should import the function).
 export const shell = Object.seal({
+  renderMainHeader: null,
   selectSession: null,
   setActivityView: null,
 });

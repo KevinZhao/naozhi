@@ -330,24 +330,26 @@ func TestCronLiveJS_RequiresAuth_TokenMode(t *testing.T) {
 // split out of dashboard.js with the WS manager (S18d2, #3024), and for
 // features.js (S19-P, #3025), event_render.js and ask_card.js (S19-3),
 // event_stream.js (S19-E), session_list.js (S19-5), session_ident.js and
-// icons.js (S20d, #3026), file_ref_parse.js (S20e) and shell.js (S20f).
+// icons.js (S20d, #3026), file_ref_parse.js (S20e), shell.js (S20f) and
+// backend_catalog.js (S20h).
 func TestWSModulesJS_RequiresAuth_TokenMode(t *testing.T) {
 	t.Parallel()
 	srv := newTestServerWithToken(&mockPlatform{}, "secret")
 
 	for name, src := range map[string]string{
-		"platform.js":       "authHeaders",
-		"ws_manager.js":     "scheduleReconnect",
-		"session_stream.js": "INITIAL_HISTORY_LIMIT",
-		"features.js":       "featureForBackend",
-		"event_render.js":   "renderEventsWithDividers",
-		"ask_card.js":       "composeAskAnswerFromGroups",
-		"event_stream.js":   "EARLIER_SKIP_MAX_PAGES",
-		"session_list.js":   "PLATFORM_ORIGINS",
-		"session_ident.js":  "parseDiscoveredPid",
-		"icons.js":          "CLAWD_SVG",
-		"file_ref_parse.js": "fencedPathList",
-		"shell.js":          "registerShell",
+		"platform.js":        "authHeaders",
+		"ws_manager.js":      "scheduleReconnect",
+		"session_stream.js":  "INITIAL_HISTORY_LIMIT",
+		"features.js":        "featureForBackend",
+		"event_render.js":    "renderEventsWithDividers",
+		"ask_card.js":        "composeAskAnswerFromGroups",
+		"event_stream.js":    "EARLIER_SKIP_MAX_PAGES",
+		"session_list.js":    "PLATFORM_ORIGINS",
+		"session_ident.js":   "parseDiscoveredPid",
+		"icons.js":           "CLAWD_SVG",
+		"file_ref_parse.js":  "fencedPathList",
+		"shell.js":           "registerShell",
+		"backend_catalog.js": "renderAccessProfilePicker",
 	} {
 		req := httptest.NewRequest(http.MethodGet, "/static/"+name, nil)
 		w := httptest.NewRecorder()
