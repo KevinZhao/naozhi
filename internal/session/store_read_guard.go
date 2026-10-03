@@ -131,7 +131,7 @@ func markStoreReadUnreadable(path, label string, err error) {
 func storeUnreadableText(label string, err error) (reason, hint string) {
 	if errors.Is(err, jsonfile.ErrSymlink) {
 		return fmt.Sprintf("%s is a symlink; naozhi does not follow a symlinked store file and holds no copy of its target", label),
-			"replace the symlink with the real file and restart naozhi, or point session.store_path at the real location (a bind mount also works); deleting the symlink resumes saves from the in-memory state"
+			"replace the symlink with the real file and restart naozhi, or point session.store_path at the real location (bind-mounting its directory also works; a bind-mounted file cannot be renamed over); deleting the symlink resumes saves from the in-memory state"
 	}
 	return fmt.Sprintf("%s could not be read (%v); the file is still on disk and naozhi holds no copy of it", label, err),
 		"fix or move the file aside; until then changes to it are not persisted"

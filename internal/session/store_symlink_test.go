@@ -84,6 +84,9 @@ func TestLoadStore_SymlinkedFileBlocksSavesWithSymlinkHint(t *testing.T) {
 	if !strings.Contains(out, "replace the symlink with the real file") {
 		t.Errorf("operator hint does not say what to do about the symlink:\n%s", out)
 	}
+	if !strings.Contains(out, "bind-mounting its directory") {
+		t.Errorf("operator hint must point at a directory bind mount (rename over a bind-mounted file fails with EBUSY):\n%s", out)
+	}
 	if strings.Contains(out, "fix or move the file aside") {
 		t.Errorf("symlink got the generic unreadable-file hint:\n%s", out)
 	}
