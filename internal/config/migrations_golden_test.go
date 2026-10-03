@@ -302,7 +302,7 @@ agents:
 	if err != nil {
 		t.Fatalf("MigrateFile: %v", err)
 	}
-	if err := WriteMigrated(path, res); err != nil {
+	if _, err := WriteMigrated(path, res); err != nil {
 		t.Fatalf("WriteMigrated: %v", err)
 	}
 	cfg, err := Load(path)
@@ -375,7 +375,7 @@ func TestMigrateFile_RefusesToProduceAnInvalidDocument(t *testing.T) {
 	if res.Changed() {
 		t.Error("a refused migration must not report a change")
 	}
-	if err := WriteMigrated(path, res); err == nil {
+	if _, err := WriteMigrated(path, res); err == nil {
 		t.Error("WriteMigrated must refuse a result with no change")
 	}
 	if got, _ := os.ReadFile(path); string(got) != before {

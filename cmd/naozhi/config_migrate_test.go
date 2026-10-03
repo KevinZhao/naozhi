@@ -41,6 +41,14 @@ func TestConfigMigrate_ExitCodes(t *testing.T) {
 		if !strings.Contains(s, "cwd:") {
 			t.Errorf("the printed document must contain the migrated key:\n%s", s)
 		}
+		// The encoder drops blank lines and comment alignment; say so before
+		// the operator agrees, and say where the original will be kept.
+		if !strings.Contains(s, "normalizes blank lines") {
+			t.Errorf("dry run must state the layout normalization:\n%s", s)
+		}
+		if !strings.Contains(s, path+".pre-migrate-v1") {
+			t.Errorf("dry run must name the backup -write keeps:\n%s", s)
+		}
 	})
 
 	t.Run("-write applies and is idempotent", func(t *testing.T) {
@@ -65,6 +73,23 @@ func TestConfigMigrate_ExitCodes(t *testing.T) {
 		}
 		if perm := fi.Mode().Perm(); perm != 0o600 {
 			t.Errorf("migrated file mode = %o, want 600", perm)
+		}
+		// A migrated file is refused by an older binary: the output must name
+		// the kept original and the exact command that restores it.
+		backup := path + ".pre-migrate-v1"
+		orig, err := os.ReadFile(backup)
+		if err != nil {
+			t.Fatalf("the original must be kept as %s: %v", backup, err)
+		}
+		if string(orig) != "schema_version: 1\nsession:\n  workspace: \"/home/u\"\n" {
+			t.Errorf("backup holds %q, want the original bytes", orig)
+		}
+		s := out.String()
+		if !strings.Contains(s, "backup of the original: "+backup) {
+			t.Errorf("output must name the backup:\n%s", s)
+		}
+		if !strings.Contains(s, "cp -p "+backup+" "+path) {
+			t.Errorf("output must print the rollback command:\n%s", s)
 		}
 
 		var out2 bytes.Buffer
@@ -103,4 +128,20 @@ func TestConfigMigrate_ExitCodes(t *testing.T) {
 			t.Error("a refused migration must not have touched the file")
 		}
 	})
+}
+
+// The rollback line is meant to be pasted: a path with spaces or quotes must
+// come out as one shell word.
+func TestShellQuote(t *testing.T) {
+	for in, want := range map[string]string{
+		"/etc/naozhi/config.yaml":                     "/etc/naozhi/config.yaml",
+		"/home/u/my config.yaml":                      "'/home/u/my config.yaml'",
+		"/home/u/it's.yaml":                           `'/home/u/it'\''s.yaml'`,
+		"/home/u/$HOME.yaml":                          "'/home/u/$HOME.yaml'",
+		"config.yaml.pre-migrate-v1.20261003T170203Z": "config.yaml.pre-migrate-v1.20261003T170203Z",
+	} {
+		if got := shellQuote(in); got != want {
+			t.Errorf("shellQuote(%q) = %s, want %s", in, got, want)
+		}
+	}
 }
