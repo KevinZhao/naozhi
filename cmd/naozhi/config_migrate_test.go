@@ -46,8 +46,22 @@ func TestConfigMigrate_ExitCodes(t *testing.T) {
 		if !strings.Contains(s, "normalizes blank lines") {
 			t.Errorf("dry run must state the layout normalization:\n%s", s)
 		}
-		if !strings.Contains(s, path+".pre-migrate-v1") {
+		if !strings.Contains(s, "kept as "+path+".pre-migrate-v1)") {
 			t.Errorf("dry run must name the backup -write keeps:\n%s", s)
+		}
+	})
+
+	t.Run("dry run says a taken backup name pushes -write to a timestamped one", func(t *testing.T) {
+		path := write(t, "schema_version: 1\nsession:\n  workspace: \"/home/u\"\n")
+		if err := os.WriteFile(path+".pre-migrate-v1", []byte("# an earlier original\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if code := configMigrate([]string{"-config", path}, &out); code != 1 {
+			t.Fatalf("exit = %d, want 1; output:\n%s", code, out.String())
+		}
+		if s := out.String(); !strings.Contains(s, "kept as a timestamped name next to "+path+".pre-migrate-v1") {
+			t.Errorf("dry run must not promise a name -write will not use:\n%s", s)
 		}
 	})
 

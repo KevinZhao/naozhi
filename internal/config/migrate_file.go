@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -161,7 +162,7 @@ const maxBackupNames = 100
 // it for a live config. An existing backup is never overwritten: one holding
 // the same bytes is reused, otherwise a UTC-timestamped name is taken.
 func writeMigrateBackup(path string, data []byte, from int, now time.Time) (string, error) {
-	base := fmt.Sprintf("%s.pre-migrate-v%d", path, from)
+	base := migrateBackupBase(path, from)
 	stamped := base + "." + now.UTC().Format("20060102T150405Z")
 	for i := 0; i < maxBackupNames; i++ {
 		name := base
@@ -185,8 +186,31 @@ func writeMigrateBackup(path string, data []byte, from int, now time.Time) (stri
 	return "", fmt.Errorf("no free backup name after %s (%d tried)", base, maxBackupNames)
 }
 
+func migrateBackupBase(path string, from int) string {
+	return fmt.Sprintf("%s.pre-migrate-v%d", path, from)
+}
+
+// MigrateBackupName is the backup name WriteMigrated tries first for res.
+// taken reports that the name already holds other bytes, so the write will
+// keep the original under a timestamped name next to it instead.
+func MigrateBackupName(path string, res MigrateResult) (name string, taken bool) {
+	name = migrateBackupBase(path, res.From)
+	if _, err := os.Lstat(name); err != nil {
+		return name, false
+	}
+	return name, !sameRegularFile(name, res.Before)
+}
+
+// backupSync and backupSyncDir indirect the fsyncs so tests can inject failures.
+var (
+	backupSync    = (*os.File).Sync
+	backupSyncDir = osutil.SyncDir
+)
+
 // createBackup writes data to a new file at name (O_EXCL, 0600), fsyncs it and
-// its directory. A failed write removes the file it created.
+// its directory. A failed write removes the file it created. A failed directory
+// fsync only degrades the entry's crash durability (Windows cannot fsync a
+// directory at all), so it is logged, as WriteFileAtomic does.
 func createBackup(name string, data []byte) error {
 	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -194,7 +218,7 @@ func createBackup(name string, data []byte) error {
 	}
 	_, err = f.Write(data)
 	if err == nil {
-		err = f.Sync()
+		err = backupSync(f)
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
@@ -203,7 +227,10 @@ func createBackup(name string, data []byte) error {
 		_ = os.Remove(name)
 		return fmt.Errorf("write %s: %w", name, err)
 	}
-	return osutil.SyncDir(filepath.Dir(name))
+	if err := backupSyncDir(filepath.Dir(name)); err != nil {
+		slog.Warn("config migrate: backup written, directory fsync failed", "path", name, "err", err)
+	}
+	return nil
 }
 
 // sameRegularFile reports whether name is a regular file (not a symlink)

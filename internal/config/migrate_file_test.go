@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -245,4 +246,84 @@ func TestWriteMigrated_BackupFailureLeavesTheConfigAlone(t *testing.T) {
 	if got := readFile(t, path); !bytes.Equal(got, res.Before) {
 		t.Errorf("config was rewritten without a backup: %q", got)
 	}
+}
+
+// A backup that failed half-way is not the original: it is removed, and the
+// config is not replaced.
+func TestWriteMigrated_FailedBackupWriteLeavesNoPartialFile(t *testing.T) {
+	// Not parallel: swaps the package-level backupSync.
+	orig := backupSync
+	t.Cleanup(func() { backupSync = orig })
+	backupSync = func(*os.File) error { return errors.New("injected fsync failure") }
+
+	path := writeMigrateFixture(t, migrateV1Config)
+	res, err := MigrateFile(path)
+	if err != nil {
+		t.Fatalf("MigrateFile: %v", err)
+	}
+	backup, err := WriteMigrated(path, res)
+	if err == nil || !strings.Contains(err.Error(), "back up config") {
+		t.Fatalf("err = %v, want a backup failure", err)
+	}
+	if backup != "" {
+		t.Errorf("backup = %q, want none", backup)
+	}
+	if names := dirNames(t, filepath.Dir(path)); !slices.Equal(names, []string{"config.yaml"}) {
+		t.Errorf("dir holds %q, want the config alone", names)
+	}
+	if got := readFile(t, path); !bytes.Equal(got, res.Before) {
+		t.Errorf("config was rewritten: %q", got)
+	}
+}
+
+// Once the backup's data is fsynced, a directory fsync failure (every one on
+// Windows) only degrades the entry's crash durability; the migration proceeds.
+func TestWriteMigrated_DirFsyncFailureIsSoft(t *testing.T) {
+	// Not parallel: swaps the package-level backupSyncDir.
+	orig := backupSyncDir
+	t.Cleanup(func() { backupSyncDir = orig })
+	backupSyncDir = func(string) error { return errors.New("injected dir fsync failure") }
+
+	path := writeMigrateFixture(t, migrateV1Config)
+	res, err := MigrateFile(path)
+	if err != nil {
+		t.Fatalf("MigrateFile: %v", err)
+	}
+	backup, err := WriteMigrated(path, res)
+	if err != nil {
+		t.Fatalf("WriteMigrated: %v", err)
+	}
+	if got := readFile(t, backup); !bytes.Equal(got, res.Before) {
+		t.Errorf("backup holds %q, want %q", got, res.Before)
+	}
+	if got := readFile(t, path); !bytes.Equal(got, res.After) {
+		t.Errorf("config holds %q, want the migrated %q", got, res.After)
+	}
+}
+
+// The dry run names the backup -write keeps, so it must know when the first
+// name is taken by other bytes and the write will fall back to a stamped one.
+func TestMigrateBackupName(t *testing.T) {
+	path := writeMigrateFixture(t, migrateV1Config)
+	res, err := MigrateFile(path)
+	if err != nil {
+		t.Fatalf("MigrateFile: %v", err)
+	}
+	base := path + ".pre-migrate-v1"
+	check := func(desc string, wantTaken bool) {
+		t.Helper()
+		name, taken := MigrateBackupName(path, res)
+		if name != base || taken != wantTaken {
+			t.Errorf("%s: MigrateBackupName = %q, %v; want %q, %v", desc, name, taken, base, wantTaken)
+		}
+	}
+	check("absent", false)
+	if err := os.WriteFile(base, res.Before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check("identical", false)
+	if err := os.WriteFile(base, []byte("# an earlier original\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check("different", true)
 }

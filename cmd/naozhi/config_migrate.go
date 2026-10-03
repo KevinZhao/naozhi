@@ -58,7 +58,11 @@ func configMigrate(args []string, stdout io.Writer) int {
 		_, _ = stdout.Write(res.After)
 		fmt.Fprintf(stdout, "--- end (%d bytes, was %d) ---\n", len(res.After), len(res.Before))
 		fmt.Fprintln(stdout, "\nnote: the rewrite normalizes blank lines, comment alignment and indentation")
-		fmt.Fprintf(stdout, "config migrate: dry run; re-run with -write to apply (the current file is kept as %s.pre-migrate-v%d)\n", *configPath, res.From)
+		kept, taken := config.MigrateBackupName(*configPath, res)
+		if taken {
+			kept = "a timestamped name next to " + kept + ", which holds other bytes"
+		}
+		fmt.Fprintf(stdout, "config migrate: dry run; re-run with -write to apply (the current file is kept as %s)\n", kept)
 		return 1
 	}
 	backup, err := config.WriteMigrated(*configPath, res)
