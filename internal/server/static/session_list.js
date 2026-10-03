@@ -806,29 +806,6 @@ export function updateStatusBar() {
   reconcileSelectedNode();
 }
 
-/* ===== Node Selector ===== */
-//
-// The node selector replaces the per-card .sc-node badge + per-node rows in
-// .sidebar-status when more than one node is connected. Clicking the trigger
-// opens a dropdown of all nodes; clicking a node switches the sidebar filter.
-// Single-node setups (local only, or one remote only) hide the whole thing —
-// there is nothing to choose between.
-
-// getNodeStatus returns a normalized status key (ok/connecting/offline/
-// unreachable/error) for a node. 'local' tracks the WS state machine; remotes
-// read from the server-side node health snapshot. Falls back to 'offline' when
-// the server has no record — safer than pretending the node is reachable.
-export function getNodeStatus(id) {
-  if (!id || id === 'local') {
-    if (wsm.state === WS_STATES.CONNECTED) return 'ok';
-    if (wsm.state === WS_STATES.CONNECTING || wsm.state === WS_STATES.AUTH) return 'connecting';
-    return 'offline';
-  }
-  const nd = sessionList.nodesData[id];
-  if (!nd) return 'offline';
-  return nd.status || 'offline';
-}
-
 /* ===== WebSocket state: status bar, fallback pollers, announcements ===== */
 
 // wsStateChanged follows wsm (ws_manager.js): every transition repaints the

@@ -98,7 +98,7 @@ import {
   handleKey,
   sendMessage,
 } from './send_message.js';
-import { collectWorkspaceSessionIDs, debouncedFetchSessions, fetchSessions, getNodeStatus, onSessionsApplied, originBadgeHtml, renderSidebar, restorePending, updateCardUnreadChip, updateMainState, updateStatusBar } from './session_list.js';
+import { collectWorkspaceSessionIDs, debouncedFetchSessions, fetchSessions, onSessionsApplied, originBadgeHtml, renderSidebar, restorePending, updateCardUnreadChip, updateMainState, updateStatusBar } from './session_list.js';
 import { findDiscovered, isDiscoveredKey, matchProject, parseDiscoveredPid, sid } from './session_ident.js';
 import { ICONS } from './icons.js';
 // Service worker registration
@@ -1566,7 +1566,7 @@ function showOnboarding() {
 // Wire the markdown renderers' dashboard-side helpers (#2558 D4). Runs in
 // dashboard's module body, before any render call.
 configureSendMessage({ fetchEvents, fetchSessions });
-configureAuthModal({ debouncedFetchSessions, fetchSessions, getNodeStatus, updateStatusBar });
+configureAuthModal({ debouncedFetchSessions, fetchSessions, updateStatusBar });
 configureSidebarProject({ debouncedFetchSessions, fetchSessions, renderSidebar });
 configureTuning({ debouncedFetchSessions, fetchSessions });
 configureDiscovery({ debouncedFetchSessions });

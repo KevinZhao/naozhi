@@ -17,7 +17,7 @@ import { sessionStream } from './session_stream.js';
 import { wsm } from './ws_manager.js';
 import { accessProfileChipInfo, fetchAccessProfiles, fetchCLIBackends, renderAccessProfilePicker, renderBackendPicker } from './backend_catalog.js';
 import { authModalCooldown, eagerBindWorkspace, mobileEnterChat, persistPending, setActiveSessionCard, setMsgValue, shortPath, showNetworkError, stopPreviewPolling } from './utilities.js';
-import { getNodeDisplayName, isMultiNode, nodeColor, projectDisplayLabel, projectDisplayPrefix, statusLabelForNode } from './session_ident.js';
+import { getNodeDisplayName, getNodeStatus, isMultiNode, nodeColor, projectDisplayLabel, projectDisplayPrefix, statusLabelForNode } from './session_ident.js';
 import { navRebuild } from './msg_nav.js';
 import { sendMessage } from './send_message.js';
 import { shell } from './shell.js';
@@ -25,7 +25,6 @@ import { shell } from './shell.js';
 const deps = {
   debouncedFetchSessions: null,
   fetchSessions: null,
-  getNodeStatus: null,
   updateStatusBar: null,
 };
 export function configureAuthModal(impl) {
@@ -256,7 +255,7 @@ function renderNodePicker() {
   const current = selection.node || 'local';
   const options = sorted.map(id => {
     const selected = id === current ? ' selected' : '';
-    const status = deps.getNodeStatus(id);
+    const status = getNodeStatus(id);
     const label = getNodeDisplayName(id) + ' · ' + statusLabelForNode(status);
     return '<option value="' + escAttr(id) + '"' + selected + '>' + esc(label) + '</option>';
   }).join('');
