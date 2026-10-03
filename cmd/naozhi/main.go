@@ -127,14 +127,7 @@ func main() {
 
 	// One shim manager for all backends — each shim records its Backend in
 	// state, so reconnect routing needs no per-backend state directories.
-	shimMgr, err := shim.NewManager(shim.ManagerConfig{
-		StateDir:        osutil.ExpandHome(cfg.Session.Shim.StateDir),
-		IdleTimeout:     parseDurationOrDefault(cfg.Session.Shim.IdleTimeout, 4*time.Hour),
-		WatchdogTimeout: parseDurationOrDefault(cfg.Session.Shim.WatchdogTimeout, 30*time.Minute),
-		BufferSize:      cfg.Session.Shim.BufferSize,
-		MaxBufBytes:     parseBytesOrDefault(cfg.Session.Shim.MaxBufferBytes, 50*1024*1024),
-		MaxShims:        cfg.Session.Shim.MaxShims,
-	})
+	shimMgr, err := shim.NewManager(shimManagerConfig(cfg))
 	if err != nil {
 		slog.Error("init shim manager", "err", err)
 		os.Exit(1)

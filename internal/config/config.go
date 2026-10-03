@@ -74,6 +74,15 @@ type Config struct {
 	cachedCollectDelay    time.Duration `yaml:"-"`
 	cachedJitterMax       time.Duration `yaml:"-"`
 	cachedInterval        time.Duration `yaml:"-"`
+
+	// Values whose consumers fall back to a default, populated once in Load by
+	// resolveFallbackValues; zero means unset or unusable.
+	cachedShimIdleTimeout     time.Duration      `yaml:"-"`
+	cachedShimWatchdogTimeout time.Duration      `yaml:"-"`
+	cachedShimMaxBufferBytes  int64              `yaml:"-"`
+	cachedStdioMaxSize        int64              `yaml:"-"`
+	stdioCapOff               bool               `yaml:"-"`
+	cachedSysession           sysessionDurations `yaml:"-"`
 }
 
 // Fingerprint identifies WHICH config file bytes a process loaded: sha256 of
@@ -167,7 +176,7 @@ func Load(path string) (*Config, error) {
 	if err := parseDurations(&cfg); err != nil {
 		return nil, err
 	}
-	reportUnusableValues(&cfg)
+	resolveFallbackValues(&cfg)
 	if err := validateConfig(&cfg); err != nil {
 		return nil, err
 	}

@@ -1,13 +1,19 @@
 package main
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/shim"
+	"github.com/naozhi/naozhi/internal/sysession"
 )
 
 // TestSysSessionsWorkDir pins the resolution order the image-orient vision
@@ -132,5 +138,80 @@ func TestDashboardWiring_RegistersPprof(t *testing.T) {
 	src := string(data)
 	if !strings.Contains(src, "s.registerPprof()") {
 		t.Error("internal/server/routes.go must call s.registerPprof() during server startup — docs/ops/pprof.md depends on it")
+	}
+}
+
+// TestNoParseDurationInMain: config.Load parses every duration once and
+// reports an unusable one, so `config check` sees it. A time.ParseDuration
+// call here would read a config string again, behind the check's back (#3012).
+func TestNoParseDurationInMain(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	scanned := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		scanned++
+		ast.Inspect(f, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "ParseDuration" {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "time" {
+				t.Errorf("%s calls time.ParseDuration; parse the value in internal/config and read its accessor",
+					fset.Position(sel.Pos()))
+			}
+			return true
+		})
+	}
+	if scanned < 10 {
+		t.Fatalf("scanned %d files; the walk is not looking at cmd/naozhi", scanned)
+	}
+}
+
+// TestShimManagerConfig pins which config value feeds each shim.Manager field;
+// every value differs from its default so a swapped or dropped accessor shows.
+func TestShimManagerConfig(t *testing.T) {
+	stateDir := t.TempDir()
+	cfg := loadConfigBody(t, "session:\n  shim:\n    state_dir: "+stateDir+"\n    idle_timeout: 2h\n"+
+		"    disconnect_watchdog: 45m\n    buffer_size: 123\n    max_buffer_bytes: 1gb\n    max_shims: 3\n")
+	want := shim.ManagerConfig{
+		StateDir: stateDir, IdleTimeout: 2 * time.Hour, WatchdogTimeout: 45 * time.Minute,
+		BufferSize: 123, MaxBufBytes: 1 << 30, MaxShims: 3,
+	}
+	if got := shimManagerConfig(cfg); !reflect.DeepEqual(got, want) {
+		t.Errorf("shimManagerConfig = %+v, want %+v", got, want)
+	}
+}
+
+// TestSysessionDaemons pins which parsed duration feeds each daemon knob.
+func TestSysessionDaemons(t *testing.T) {
+	cfg := loadConfigBody(t, "sysession:\n  daemons:\n"+
+		"    auto-titler:\n      tick: 1m\n      min_rename_interval: 10m\n"+
+		"    attachment-gc:\n      tick: 2h\n      upload_ttl: 36h\n      ref_ttl: 720h\n")
+	got := sysessionDaemons(cfg)
+	at, gc := got[sysession.DaemonAutoTitler], got[sysession.DaemonAttachmentGC]
+	for _, c := range []struct {
+		name      string
+		got, want any
+	}{
+		{"auto-titler tick", at.Tick, time.Minute},
+		{"auto-titler min_rename_interval", at.Specific["min_rename_interval"], 10 * time.Minute},
+		{"attachment-gc tick", gc.Tick, 2 * time.Hour},
+		{"attachment-gc upload_ttl", gc.Specific["upload_ttl"], 36 * time.Hour},
+		{"attachment-gc ref_ttl", gc.Specific["ref_ttl"], 720 * time.Hour},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+		}
 	}
 }

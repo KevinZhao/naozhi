@@ -154,11 +154,44 @@ func TestSweeperRegistersTheStdioCaps(t *testing.T) {
 	if !slices.Contains(names, "stdio-stdout") || !slices.Contains(names, "stdio-stderr") {
 		t.Errorf("default config registers %v, want stdio-stdout and stdio-stderr", names)
 	}
-	off := &config.Config{}
-	off.Log.StdioMaxSize = "0"
+	off := loadConfigBody(t, "log:\n  stdio_max_size: \"0\"\n")
 	for _, n := range newDataDirSweeper(off, layout, nil, "").Names() {
 		if strings.HasPrefix(n, "stdio-") {
 			t.Errorf("stdio_max_size \"0\" still registers %s", n)
+		}
+	}
+}
+
+// loadConfigBody runs config.Load on body written to a 0600 file.
+func loadConfigBody(t *testing.T, body string) *config.Config {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+// TestSweeperHonoursJSONLMaxAge: jsonl_max_age "0" turns the sys-sessions sweep
+// off, so a 90-day-old log survives; a configured window still removes it.
+func TestSweeperHonoursJSONLMaxAge(t *testing.T) {
+	for _, c := range []struct {
+		maxAge      string
+		wantRemoved int
+	}{{`"0"`, 0}, {"168h", 1}} {
+		cfg := loadConfigBody(t, "sysession:\n  runner:\n    jsonl_max_age: "+c.maxAge+"\n")
+		sysDir := t.TempDir()
+		oldJSONL := plantOld(t, sysDir, "old.jsonl")
+		s := newDataDirSweeper(cfg, datadir.ForStore(filepath.Join(t.TempDir(), "sessions.json")), nil, sysDir)
+		if got := s.RunOnce()["sys-sessions"].Removed; got != c.wantRemoved {
+			t.Errorf("jsonl_max_age %s: sys-sessions removed %d, want %d", c.maxAge, got, c.wantRemoved)
+		}
+		if _, err := os.Stat(oldJSONL); (err == nil) != (c.wantRemoved == 0) {
+			t.Errorf("jsonl_max_age %s: stat of the old JSONL after the sweep: %v", c.maxAge, err)
 		}
 	}
 }

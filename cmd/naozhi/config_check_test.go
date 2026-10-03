@@ -196,18 +196,22 @@ func TestConfigCheck_RegisteredSubcommand(t *testing.T) {
 // A value naozhi replaces with a default is configured input that has no
 // effect, so check exits 1 on it rather than printing OK (#2897 C4).
 func TestConfigCheck_ReplacedValuesExit1(t *testing.T) {
-	for name, body := range map[string]string{
-		"timezone":     "cron:\n  timezone: Mars/Olympus\n",
-		"update mode":  "update:\n  mode: dowload\n",
-		"tick timeout": "sysession:\n  tick_timeout: 5 minutes\n",
+	for name, tc := range map[string]struct{ body, key string }{
+		"timezone":          {"cron:\n  timezone: Mars/Olympus\n", "cron.timezone"},
+		"update mode":       {"update:\n  mode: dowload\n", "update.mode"},
+		"tick timeout":      {"sysession:\n  tick_timeout: 5 minutes\n", "sysession.tick_timeout"},
+		"shim idle timeout": {"session:\n  shim:\n    idle_timeout: 4 hours\n", "session.shim.idle_timeout"},
+		"shim buffer size":  {"session:\n  shim:\n    max_buffer_bytes: 50 megs\n", "session.shim.max_buffer_bytes"},
+		"jsonl max age":     {"sysession:\n  runner:\n    jsonl_max_age: 7d\n", "sysession.runner.jsonl_max_age"},
+		"stdio max size":    {"log:\n  stdio_max_size: 64 megs\n", "log.stdio_max_size"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var out bytes.Buffer
-			if code := configCheck([]string{"-config", writeCheckConfig(t, cleanCheckConfig+body)}, &out); code != 1 {
+			if code := configCheck([]string{"-config", writeCheckConfig(t, cleanCheckConfig+tc.body)}, &out); code != 1 {
 				t.Errorf("exit %d, want 1\n%s", code, out.String())
 			}
-			if !strings.Contains(out.String(), "config-invalid") {
-				t.Errorf("output does not name the replaced value:\n%s", out.String())
+			if !strings.Contains(out.String(), "config-invalid") || !strings.Contains(out.String(), tc.key) {
+				t.Errorf("output does not name the replaced value %s:\n%s", tc.key, out.String())
 			}
 		})
 	}

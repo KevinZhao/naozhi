@@ -37,6 +37,10 @@ func TestStdioCapsUseTheConfiguredSize(t *testing.T) {
 		return info.Size()
 	}
 
+	const defaultStdioMaxSize = 64 << 20
+	if got := (&config.Config{}).LogStdioMaxSize(); got != defaultStdioMaxSize {
+		t.Fatalf("LogStdioMaxSize default = %d, want 64MB", got)
+	}
 	under, over := newLog(defaultStdioMaxSize-100), newLog(defaultStdioMaxSize)
 	s := datadir.NewSweeper(0)
 	addStdioCaps(s, &config.Config{}, under, over)
@@ -49,8 +53,7 @@ func TestStdioCapsUseTheConfiguredSize(t *testing.T) {
 	}
 
 	small := newLog(2 << 20)
-	cfg := &config.Config{}
-	cfg.Log.StdioMaxSize = "1MB"
+	cfg := loadConfigBody(t, "log:\n  stdio_max_size: 1MB\n")
 	s = datadir.NewSweeper(0)
 	addStdioCaps(s, cfg, small, small)
 	s.RunOnce()

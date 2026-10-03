@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -70,49 +69,6 @@ func initPlatforms(cfg *config.Config, stt transcribe.Service) (map[string]platf
 		platforms["weixin"] = wx
 	}
 	return platforms, nil
-}
-
-// parseDurationOrDefault parses a duration string, returning def on empty or error.
-func parseDurationOrDefault(s string, def time.Duration) time.Duration {
-	if s == "" {
-		return def
-	}
-	d, err := time.ParseDuration(s)
-	if err != nil {
-		return def
-	}
-	return d
-}
-
-// parseBytesOrDefault parses a human-readable byte size string (e.g. "50MB", "1GB").
-// Returns def on empty or unrecognized format.
-func parseBytesOrDefault(s string, def int64) int64 {
-	if s == "" {
-		return def
-	}
-	s = strings.TrimSpace(s)
-	s = strings.ToUpper(s)
-
-	multiplier := int64(1)
-	switch {
-	case strings.HasSuffix(s, "GB"):
-		multiplier = 1024 * 1024 * 1024
-		s = strings.TrimSuffix(s, "GB")
-	case strings.HasSuffix(s, "MB"):
-		multiplier = 1024 * 1024
-		s = strings.TrimSuffix(s, "MB")
-	case strings.HasSuffix(s, "KB"):
-		multiplier = 1024
-		s = strings.TrimSuffix(s, "KB")
-	case strings.HasSuffix(s, "B"):
-		s = strings.TrimSuffix(s, "B")
-	}
-
-	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
-	if err != nil {
-		return def
-	}
-	return n * multiplier
 }
 
 // stateDirWarnMB is the soft ceiling for ~/.naozhi/ total size; see
@@ -240,6 +196,18 @@ func sysSessionsWorkDir(cfg *config.Config, storePath string) string {
 	return lay.SysSessionsRoot()
 }
 
+// shimManagerConfig is the shim.Manager configuration main starts with.
+func shimManagerConfig(cfg *config.Config) shim.ManagerConfig {
+	return shim.ManagerConfig{
+		StateDir:        osutil.ExpandHome(cfg.Session.Shim.StateDir),
+		IdleTimeout:     cfg.ShimIdleTimeout(),
+		WatchdogTimeout: cfg.ShimWatchdogTimeout(),
+		BufferSize:      cfg.Session.Shim.BufferSize,
+		MaxBufBytes:     cfg.ShimMaxBufferBytes(),
+		MaxShims:        cfg.Session.Shim.MaxShims,
+	}
+}
+
 // buildSysessionManager wires sysession.Manager from cfg.Sysession. Returns
 // (nil, "", nil) when disabled so the caller's nil guard stays meaningful, and
 // (nil, "", err) when enabled but unusable — the caller logs and continues
@@ -280,22 +248,29 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		return nil, "", fmt.Errorf("new runner: %w", err)
 	}
 
-	tickTimeout := 30 * time.Second
-	if v := cfg.Sysession.TickTimeout; v != "" {
-		// An unparsable value keeps the default; config.Load reported it.
-		if parsed, err := time.ParseDuration(v); err == nil {
-			tickTimeout = parsed
-		}
+	mgr, err := sysession.NewManager(sysession.Config{
+		Enabled:     true,
+		TickTimeout: cfg.SysessionTickTimeout(),
+		Runner:      runner,
+		Router:      router,
+		Daemons:     sysessionDaemons(cfg),
+		// attachment-gc sweeps these roots; nil-safe inside the lister.
+		WorkspaceRoots: workspaceRootLister{router: router, projectMgr: projectMgr},
+		Telemetry:      telemetry,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("new manager: %w", err)
 	}
+	return mgr, resolvedWorkDir, nil
+}
 
+// sysessionDaemons builds each daemon's runtime config from cfg.Sysession.Daemons
+// and the durations config.Load parsed for it.
+func sysessionDaemons(cfg *config.Config) map[string]sysession.DaemonRuntimeConfig {
 	daemons := make(map[string]sysession.DaemonRuntimeConfig, len(cfg.Sysession.Daemons))
 	for name, dcfg := range cfg.Sysession.Daemons {
-		tick := 30 * time.Second
-		if dcfg.Tick != "" {
-			if parsed, err := time.ParseDuration(dcfg.Tick); err == nil {
-				tick = parsed
-			}
-		}
+		durations := cfg.SysessionDaemonDurations(name)
+		tick := durations.Tick
 		specific := sysession.DaemonConfig{}
 		if name == sysession.DaemonAutoTitler {
 			if dcfg.MinFirstTurns > 0 {
@@ -304,14 +279,8 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 			if dcfg.MinUserTurns > 0 {
 				specific["min_user_turns"] = dcfg.MinUserTurns
 			}
-			if dcfg.MinRenameInterval != "" {
-				parsed, err := time.ParseDuration(dcfg.MinRenameInterval)
-				if err != nil {
-					slog.Warn("sysession: bad min_rename_interval",
-						"daemon", name, "err", err, "value", dcfg.MinRenameInterval)
-				} else {
-					specific["min_rename_interval"] = parsed
-				}
+			if durations.MinRenameInterval > 0 {
+				specific["min_rename_interval"] = durations.MinRenameInterval
 			}
 			if dcfg.BatchPerTick > 0 {
 				specific["batch_per_tick"] = dcfg.BatchPerTick
@@ -320,21 +289,11 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		}
 
 		// attachment-gc knobs (docs/rfc/attachment-gc-daemon.md §5).
-		if dcfg.UploadTTL != "" {
-			if d, err := time.ParseDuration(dcfg.UploadTTL); err != nil {
-				slog.Warn("sysession: bad attachment-gc upload_ttl; using daemon default",
-					"daemon", name, "err", err, "value", dcfg.UploadTTL)
-			} else {
-				specific["upload_ttl"] = d
-			}
+		if durations.UploadTTL > 0 {
+			specific["upload_ttl"] = durations.UploadTTL
 		}
-		if dcfg.RefTTL != "" {
-			if d, err := time.ParseDuration(dcfg.RefTTL); err != nil {
-				slog.Warn("sysession: bad attachment-gc ref_ttl; using daemon default",
-					"daemon", name, "err", err, "value", dcfg.RefTTL)
-			} else {
-				specific["ref_ttl"] = d
-			}
+		if durations.RefTTL > 0 {
+			specific["ref_ttl"] = durations.RefTTL
 		}
 		if dcfg.PerRootCap > 0 {
 			specific["per_root_cap"] = dcfg.PerRootCap
@@ -357,21 +316,7 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 			Specific:   specific,
 		}
 	}
-
-	mgr, err := sysession.NewManager(sysession.Config{
-		Enabled:     true,
-		TickTimeout: tickTimeout,
-		Runner:      runner,
-		Router:      router,
-		Daemons:     daemons,
-		// attachment-gc sweeps these roots; nil-safe inside the lister.
-		WorkspaceRoots: workspaceRootLister{router: router, projectMgr: projectMgr},
-		Telemetry:      telemetry,
-	})
-	if err != nil {
-		return nil, "", fmt.Errorf("new manager: %w", err)
-	}
-	return mgr, resolvedWorkDir, nil
+	return daemons
 }
 
 // absConfigPath resolves the -config flag to an absolute path so the
@@ -440,23 +385,6 @@ func backendHistoryDirs() map[string]string {
 	return out
 }
 
-// sysessionJSONLMaxAge is the retention window for dataDir/sys-sessions/*.jsonl.
-// Default 7 days when unset; "0" disables the sweep (datadir.Pass treats a
-// non-positive MaxAge as "do nothing").
-func sysessionJSONLMaxAge(cfg *config.Config) time.Duration {
-	const def = 7 * 24 * time.Hour
-	v := cfg.Sysession.Runner.JSONLMaxAge
-	if v == "" {
-		return def
-	}
-	parsed, err := time.ParseDuration(v)
-	if err != nil {
-		slog.Warn("sysession: bad jsonl_max_age; using default 7d", "err", err, "value", v)
-		return def
-	}
-	return parsed
-}
-
 // newDataDirSweeper registers the retention passes for the trees that only
 // accumulate. Ages are chosen so a pass can never remove a file a live process
 // is still appending to:
@@ -475,7 +403,7 @@ func sysessionJSONLMaxAge(cfg *config.Config) time.Duration {
 //   - stdout/stderr, when an init system redirected them into files, are capped
 //     by size (log.stdio_max_size) rather than age; see addStdioCaps.
 func newDataDirSweeper(cfg *config.Config, layout datadir.Layout, shimMgr *shim.Manager, sysWorkDir string) *datadir.Sweeper {
-	idle := parseDurationOrDefault(cfg.Session.Shim.IdleTimeout, 4*time.Hour)
+	idle := cfg.ShimIdleTimeout()
 	cliDebugMaxAge := 7 * 24 * time.Hour
 	if two := 2 * idle; two > cliDebugMaxAge {
 		cliDebugMaxAge = two
@@ -513,22 +441,18 @@ func newDataDirSweeper(cfg *config.Config, layout datadir.Layout, shimMgr *shim.
 			Name:   "sys-sessions",
 			Dir:    sysWorkDir,
 			Ext:    ".jsonl",
-			MaxAge: sysessionJSONLMaxAge(cfg),
+			MaxAge: cfg.SysessionJSONLMaxAge(),
 		})
 	}
 	addStdioCaps(s, cfg, os.Stdout, os.Stderr)
 	return s
 }
 
-// defaultStdioMaxSize is log.stdio_max_size's default: about eleven days of
-// stdout at the INFO volume measured on a live instance.
-const defaultStdioMaxSize = 64 << 20
-
 // addStdioCaps registers the stdout and stderr size caps. Taking the files
 // lets tests hand in regular files; production passes os.Stdout and os.Stderr,
 // which the cap leaves alone unless they are O_APPEND regular files.
 func addStdioCaps(s *datadir.Sweeper, cfg *config.Config, stdout, stderr *os.File) {
-	maxSize := parseBytesOrDefault(cfg.Log.StdioMaxSize, defaultStdioMaxSize)
+	maxSize := cfg.LogStdioMaxSize()
 	if maxSize <= 0 {
 		return
 	}
