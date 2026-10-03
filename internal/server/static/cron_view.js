@@ -2446,10 +2446,7 @@ async function doEditCronJob(id) {
 // script boundary (dashboard-cron-view-extraction RFC §2.6 B1). The optional
 // call (nz.views.cron && …escClose()) degrades gracefully if cron_view.js
 // fails to load, instead of throwing `cronExpandedRunId is not defined`.
-configureCronTrigger({
-  cronJobs: () => cronJobs,
-  fetchCronJobs,
-});
+configureCronTrigger({ cronJobs: () => cronJobs });
 configureCronDrawer({
   cronAttentionRefresh,
   cronJobCostRefresh,
@@ -2474,7 +2471,6 @@ configureCronTimeline({
   cronJobs: () => cronJobs,
   cronRecentRunsCap: () => cronRecentRunsCap,
   fetchCronJobs,
-  renderCronPanel,
 });
 nzViews.cron = { escClose: cronEscClose };
 

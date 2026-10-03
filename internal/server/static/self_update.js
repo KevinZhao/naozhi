@@ -6,14 +6,13 @@
 // chip self-registers its DOMContentLoaded bootstrap.
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back (that cycle puts dashboard's own consts in TDZ). The two dashboard
-// helpers this chip calls are injected once via configureSelfUpdate().
+// back (that cycle puts dashboard's own consts in TDZ). The one dashboard
+// helper this chip calls is injected once via configureSelfUpdate().
 import { NZ_CONTRACT } from './contract.js';
 import { showToast } from './nz_util.js';
 
 const deps = {
   confirmDialog: null,
-  markSessionOptimisticRunning: null,
 };
 export function configureSelfUpdate(impl) {
   for (const k of Object.keys(deps)) {
@@ -57,7 +56,7 @@ let updateApplyTimer = null;
 // 'install', phase stays 'available', and none of the terminal conditions below
 // ever fire — so without a deadline the chip would sit on "正在应用新版本" for
 // the rest of the page's life, at the 3s busy cadence, while nothing was being
-// applied. Same shape as the safety timer in deps.markSessionOptimisticRunning.
+// applied. Same shape as the safety timer in markSessionOptimisticRunning.
 //
 // Generous on purpose: a slow GitHub lookup happens BEFORE doInstall writes
 // PhaseInstalling, so this window has to comfortably contain it. Expiring early

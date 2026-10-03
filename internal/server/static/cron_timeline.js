@@ -31,7 +31,6 @@ const deps = {
   cronJobs: null, // () => Job[] — the live jobs array
   cronRecentRunsCap: null, // () => number — server-side recent_runs cap
   fetchCronJobs: null,
-  renderCronPanel: null,
 };
 export function configureCronTimeline(impl) {
   for (const k of Object.keys(deps)) {
@@ -814,8 +813,8 @@ function cronTimelineRefreshHeadDebounced(jobId) {
 
 // cronTimelineRefreshHead — WS run_ended（cron）触发。如果当前 drawer 打开
 // 的就是该 job（deps.cronDetailJobId() === jobId），fetch /api/cron/runs?limit=10
-// 替换头 10 条；否则只刷新列表 stats（已有逻辑：deps.fetchCronJobs +
-// deps.renderCronPanel）。
+// 替换头 10 条；否则直接返回——列表 stats 由 cron_view 的 run_ended handler
+// 刷新（fetchCronJobs + renderCronPanel）。
 //
 // cron-panel-consolidation RFC §4.6: 路由门由 selectedKey 切到
 // deps.cronDetailJobId() — cron 面板下 selectedKey 始终为 null（openCronPanel 已

@@ -13,8 +13,6 @@ import { serverInfo, sessionList } from './state.js';
 import { esc, escAttr, fetchJSON, showToast, trapFocus } from './nz_util.js';
 
 const deps = {
-  PICKER_SELECT_ONLY_STYLE: null,
-  PICKER_SELECT_STYLE: null,
   accessProfileChipInfo: null,
   debouncedFetchSessions: null,
   fetchAccessProfiles: null,

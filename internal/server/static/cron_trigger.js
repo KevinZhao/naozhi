@@ -16,7 +16,6 @@ import { cronDrawerState, renderCronDrawer } from './cron_drawer.js';
 
 const deps = {
   cronJobs: null, // () => Job[]
-  fetchCronJobs: null,
 };
 export function configureCronTrigger(impl) {
   for (const k of Object.keys(deps)) {

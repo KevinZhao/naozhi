@@ -169,8 +169,6 @@ import {
   toggleProjectCollapsed,
 } from './sidebar_project.js';
 import {
-  PICKER_SELECT_ONLY_STYLE,
-  PICKER_SELECT_STYLE,
   accessProfileChipInfo,
   backendDisplayName,
   backendDisplayVersion,
@@ -193,7 +191,6 @@ import {
   configureSendMessage,
   getMsgValue,
   handleKey,
-  markSessionOptimisticRunning,
   rollbackOptimisticRunning,
   sendMessage,
   setMsgValue,
@@ -2480,7 +2477,7 @@ function showOnboarding() {
 // dashboard's module body, before any render call.
 configureSendMessage({ EVENT_DIVIDER_GAP_MS, awaitPendingOrients, discoveredKey, dropDiscovered, eventHtml, fetchEvents, fetchSessions, getToken, interruptSession, lastDividerTime, navSync, persistPending, removeSidebarCard, renderFilePreviews, selectSession, showAPIError, showAuthModal, showNetworkError, sid, startTurnTimer, stickEventsBottom, timeDividerHtml, updateSendButton });
 configureAuthModal({ applyFeatureGates, debouncedFetchSessions, eagerBindWorkspace, fetchSessions, getNodeDisplayName, getNodeStatus, isMultiNode, mobileEnterChat, navRebuild, nodeColor, persistPending, projectDisplayLabel, projectDisplayPrefix, renderMainShell, sendMessage, setActiveSessionCard, setMsgValue, shortPath, showNetworkError, statusLabelForNode, stopPreviewPolling, updateStatusBar });
-configureSidebarProject({ PICKER_SELECT_ONLY_STYLE, PICKER_SELECT_STYLE, accessProfileChipInfo, debouncedFetchSessions, fetchAccessProfiles, fetchCLIBackends, fetchSessions, getToken, projectDisplayLabel, projectDisplayPrefix, renderAccessProfilePicker, renderBackendPicker, renderSidebar, showAPIError, showNetworkError });
+configureSidebarProject({ accessProfileChipInfo, debouncedFetchSessions, fetchAccessProfiles, fetchCLIBackends, fetchSessions, getToken, projectDisplayLabel, projectDisplayPrefix, renderAccessProfilePicker, renderBackendPicker, renderSidebar, showAPIError, showNetworkError });
 configureMsgNav({ closeHistoryPopover, createNewSession, debouncedFetchSessions, escCloseVoiceOverlay, handleFiles, refreshBanner, resetTurnState, selectSession, sid });
 configureTuning({ debouncedFetchSessions, dropDiscovered, fetchSessions, findDiscovered, getToken, gitChipHtml, gitStateCache, isDiscoveredKey, mainEmptyHtml, parseDiscoveredPid, promptDialog, removePendingSession, renderMainHeader, sameDiscovered, setHeaderGitChip, showAPIError, showNetworkError, sid, stopPreviewPolling, wireQuickAskInput });
 configureDiscovery({ EVENT_DIVIDER_GAP_MS, ICONS, debouncedFetchSessions, eventHtml, getToken, isInternalEvent, lastDividerTime, mobileEnterChat, navRebuild, navSync, processEventsForDisplay, renderEventsWithDividers, sessionTypeTag, setActiveSessionCard, showAPIError, showNetworkError, stickEventsBottom, stopPreviewPolling, timeDividerHtml });
@@ -2489,10 +2486,10 @@ configureFileRefs({ AVATAR_GROUP_GAP_MS, ICONS, collapseSidebarForDrawer, getTok
 configureRunningBanner({ ICONS, getMsgValue, getToken, setMsgValue, showNetworkError, sid });
 configureSystemView({ formatAbsTime, getMsgValue, mainEmptyHtml, refreshCostSummary, renderServiceOverviewHtml, setActivityView, timeAgo, wireQuickAskInput });
 configureSplitView({ lsGet, lsRemove, lsSet, stickEventsBottom });
-configureSelfUpdate({ confirmDialog, markSessionOptimisticRunning });
-configureSessionHeader({ fetchSessions, formatAbsTime, getToken, renderMainShell, sid });
-configureComposerFiles({ ICONS, formatFileSize, getToken, sendMessage, showAuthModal });
-configureMobileNav({ ICONS, confirmDialog, dismissSession, lsGet, lsSet, renameSession, renderMainHeader, selectSession });
+configureSelfUpdate({ confirmDialog });
+configureSessionHeader({ formatAbsTime, getToken, sid });
+configureComposerFiles({ ICONS, formatFileSize, getToken, showAuthModal });
+configureMobileNav({ ICONS, dismissSession, lsGet, lsSet, renameSession, selectSession });
 configureVoice({ ICONS, getMsgValue, getToken, sendMessage, setMsgValue, sid, updateSendButton });
 configureRenderMd({
   FILE_REF_HAS_EXT,

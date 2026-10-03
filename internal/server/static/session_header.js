@@ -14,10 +14,8 @@ import { perSession, selection, sessionList } from './state.js';
 import { esc, escAttr, formatCostUSD, formatDurationShort, formatRunDuration, runStateDot, runStateLabel } from './nz_util.js';
 
 const deps = {
-  fetchSessions: null,
   formatAbsTime: null,
   getToken: null,
-  renderMainShell: null,
   sid: null,
 };
 export function configureSessionHeader(impl) {
@@ -115,7 +113,7 @@ function sessionRunRowHtml(r) {
 // sit inside the panel <summary>; they were promoted to the header so the
 // per-session "N 轮 · 均 X · 最长 X" overview is always visible without
 // expanding the (collapsed-by-default) timeline. The header node is built
-// empty by deps.renderMainShell, so absence = no-op rather than throw.
+// empty by renderMainShell, so absence = no-op rather than throw.
 function setHeaderRunStats(html) {
   const el = document.getElementById('header-runstats');
   if (el) el.innerHTML = html || '';
@@ -236,13 +234,13 @@ function gitChipHtml(g) {
 }
 
 // gitStateCache holds the last resolved payload per deps.sid(key, node). The header
-// is rebuilt from scratch by deps.renderMainShell on every rename / re-select, which
+// is rebuilt from scratch by renderMainShell on every rename / re-select, which
 // wipes the chip node; repainting from cache keeps the chip from flickering
 // out and back on each rebuild, and avoids a redundant fetch per repaint.
 const gitStateCache = {};
 
 // setHeaderGitChip writes (or clears) the header chip node. The node is built
-// empty by deps.renderMainShell, so absence = no-op rather than throw (mirrors
+// empty by renderMainShell, so absence = no-op rather than throw (mirrors
 // setHeaderRunStats).
 function setHeaderGitChip(html) {
   const el = document.getElementById('header-git');
@@ -298,9 +296,9 @@ function effortTagHtml(effort) {
 // setHeaderEffortChip repaints the header effort tag for the selected session.
 //
 // Called from two places, for two different reasons:
-//   - deps.renderMainShell tail: the header was just rebuilt, emptying the mount.
+//   - renderMainShell's tail: the header was just rebuilt, emptying the mount.
 //     No argument — read the cached sessionList.sessionsData.
-//   - deps.fetchSessions, BEFORE its version short-circuit: a tier change does not
+//   - fetchSessions, BEFORE its version short-circuit: a tier change does not
 //     advance stats.version, so this is the only path that gets a new tier onto
 //     the screen. sessionList.sessionsData hasn't been updated at that point, hence the
 //     optional `sessions` argument carrying the fresh response rows.

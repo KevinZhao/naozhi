@@ -33,7 +33,7 @@
     "lateBindings": 2
   },
   "auth_modal.js": {
-    "lines": 1573,
+    "lines": 1561,
     "maxFnLines": 101,
     "fnOver100": 1,
     "topLevelLetVar": 2,
@@ -44,12 +44,12 @@
     "lateBindings": 0
   },
   "composer_files.js": {
-    "lines": 468,
+    "lines": 467,
     "maxFnLines": 65,
     "fnOver100": 0,
     "topLevelLetVar": 2,
-    "configureDeps": 5,
-    "deadInjections": 1,
+    "configureDeps": 4,
+    "deadInjections": 0,
     "innerHTMLAssign": 1,
     "htmlInsert": 0,
     "lateBindings": 0
@@ -110,29 +110,29 @@
     "lateBindings": 0
   },
   "cron_timeline.js": {
-    "lines": 938,
+    "lines": 937,
     "maxFnLines": 70,
     "fnOver100": 0,
     "topLevelLetVar": 0,
-    "configureDeps": 8,
-    "deadInjections": 1,
+    "configureDeps": 7,
+    "deadInjections": 0,
     "innerHTMLAssign": 4,
     "htmlInsert": 0,
     "lateBindings": 0
   },
   "cron_trigger.js": {
-    "lines": 179,
+    "lines": 178,
     "maxFnLines": 38,
     "fnOver100": 0,
     "topLevelLetVar": 1,
-    "configureDeps": 2,
-    "deadInjections": 1,
+    "configureDeps": 1,
+    "deadInjections": 0,
     "innerHTMLAssign": 0,
     "htmlInsert": 0,
     "lateBindings": 0
   },
   "cron_view.js": {
-    "lines": 2606,
+    "lines": 2602,
     "maxFnLines": 103,
     "fnOver100": 1,
     "topLevelLetVar": 11,
@@ -143,7 +143,7 @@
     "lateBindings": 3
   },
   "dashboard.js": {
-    "lines": 3839,
+    "lines": 3836,
     "maxFnLines": 209,
     "fnOver100": 4,
     "topLevelLetVar": 0,
@@ -220,12 +220,12 @@
     "lateBindings": 2
   },
   "mobile_nav.js": {
-    "lines": 572,
+    "lines": 570,
     "maxFnLines": 118,
     "fnOver100": 1,
     "topLevelLetVar": 3,
-    "configureDeps": 8,
-    "deadInjections": 2,
+    "configureDeps": 6,
+    "deadInjections": 0,
     "innerHTMLAssign": 1,
     "htmlInsert": 0,
     "lateBindings": 0
@@ -286,12 +286,12 @@
     "lateBindings": 0
   },
   "self_update.js": {
-    "lines": 374,
+    "lines": 373,
     "maxFnLines": 61,
     "fnOver100": 0,
     "topLevelLetVar": 5,
-    "configureDeps": 2,
-    "deadInjections": 1,
+    "configureDeps": 1,
+    "deadInjections": 0,
     "innerHTMLAssign": 1,
     "htmlInsert": 0,
     "lateBindings": 0
@@ -308,12 +308,12 @@
     "lateBindings": 0
   },
   "session_header.js": {
-    "lines": 412,
+    "lines": 410,
     "maxFnLines": 33,
     "fnOver100": 0,
     "topLevelLetVar": 0,
-    "configureDeps": 5,
-    "deadInjections": 2,
+    "configureDeps": 3,
+    "deadInjections": 0,
     "innerHTMLAssign": 7,
     "htmlInsert": 0,
     "lateBindings": 0
@@ -341,12 +341,12 @@
     "lateBindings": 0
   },
   "sidebar_project.js": {
-    "lines": 598,
+    "lines": 596,
     "maxFnLines": 102,
     "fnOver100": 2,
     "topLevelLetVar": 0,
-    "configureDeps": 15,
-    "deadInjections": 2,
+    "configureDeps": 13,
+    "deadInjections": 0,
     "innerHTMLAssign": 2,
     "htmlInsert": 0,
     "lateBindings": 0

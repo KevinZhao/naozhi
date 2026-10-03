@@ -413,16 +413,6 @@ function accessProfileChipHtml(profileID) {
 //     a saved Job.Backend choice. Falls through to default when the
 //     value doesn't match any enabled backend (e.g. operator removed
 //     that backend from config.yaml).
-// PICKER_SELECT_STYLE is the shared inline style for the modal backend/agent
-// <select> controls (full-width, design-token surface). Defined once so the
-// backend and agent pickers can't drift apart (R20260610-UI-5).
-const PICKER_SELECT_STYLE = 'width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px';
-// Selects opt out of the native OS chrome (ui-polish-light-theme D6): the
-// system-drawn control clashed with the tokenised palette/modal surfaces.
-// appearance:none removes the native arrow too, so every <select> using this
-// style MUST be wrapped in <span class="picker-select-wrap"> which paints a
-// CSS arrow (pointer-events:none, keyboard/AT behaviour untouched).
-const PICKER_SELECT_ONLY_STYLE = PICKER_SELECT_STYLE + ';appearance:none;-webkit-appearance:none;padding-right:26px;cursor:pointer;font:inherit;font-size:var(--nz-fs-sm2)';
 
 function renderBackendPicker(backendsData, opts) {
   if (!backendsData || !Array.isArray(backendsData.backends)) return '';
@@ -1545,8 +1535,6 @@ if (document.readyState === 'loading') {
 
 
 export {
-  PICKER_SELECT_ONLY_STYLE,
-  PICKER_SELECT_STYLE,
   accessProfileChipHtml,
   accessProfileChipInfo,
   backendDisplayName,
