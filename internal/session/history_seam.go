@@ -53,23 +53,30 @@ func dropHeld(entries []clievent.EventEntry, seamMS int64, held []clievent.Event
 // caller already holds part of: Time < seamMS, plus the entries at seamMS
 // that held (any superset of the caller's seamMS entries) lacks. A strict
 // LoadBefore(seamMS) would skip a same-millisecond sibling the caller does
-// not have. The read asks for limit plus the held seamMS count, so at most
-// that many results are dropped and a short page still means exhausted.
+// not have. The read asks for limit plus the held seamMS count and widens by
+// the drop count while a full read still comes up short, so a short page
+// means exhausted even when several disk entries share one held key.
 func loadBeforeSeam(ctx context.Context, src history.Source, seamMS int64, held []clievent.EventEntry, limit int) ([]clievent.EventEntry, error) {
-	reserve := 0
+	n := limit
 	for _, e := range held {
 		if e.Time == seamMS {
-			reserve++
+			n++
 		}
 	}
-	entries, err := src.LoadBefore(ctx, seamMS+1, limit+reserve)
-	if err != nil {
-		return nil, err
+	for {
+		entries, err := src.LoadBefore(ctx, seamMS+1, n)
+		if err != nil {
+			return nil, err
+		}
+		sortEntriesByTimeStable(entries)
+		fresh := dropHeld(entries, seamMS, held)
+		if len(fresh) > limit {
+			fresh = fresh[len(fresh)-limit:]
+		}
+		// limit+drops > n whenever fresh is short, so n strictly grows.
+		if len(fresh) == limit || len(entries) < n {
+			return fresh, nil
+		}
+		n = limit + len(entries) - len(fresh)
 	}
-	sortEntriesByTimeStable(entries)
-	fresh := dropHeld(entries, seamMS, held)
-	if len(fresh) > limit {
-		fresh = fresh[len(fresh)-limit:]
-	}
-	return fresh, nil
 }

@@ -201,3 +201,52 @@ func TestEventInitialPageCtx_HasMoreAtSameMS(t *testing.T) {
 		})
 	}
 }
+
+// A memory-only entry at the seam (LogSystemEvent never reaches disk) leaves
+// the read with nothing to drop, so the over-read is trimmed; the trim must
+// keep the newest entries below the seam, not the oldest.
+func TestEventEntriesBeforeCtx_SeamTrimKeepsNewest(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []clievent.EventEntry{sameMSEntry(100, "m")}
+	s.SetHistorySource(&pagingHistorySource{all: []clievent.EventEntry{
+		sameMSEntry(1, "x1"), sameMSEntry(2, "x2"), sameMSEntry(3, "x3"),
+		sameMSEntry(4, "x4"), sameMSEntry(5, "x5"),
+	}})
+
+	got := s.EventEntriesBeforeCtx(context.Background(), 0, 3)
+	if list := uuidList(got); list != "4:x4 5:x5 100:m" {
+		t.Errorf("page = %s, want 4:x4 5:x5 100:m", list)
+	}
+}
+
+// Two disk entries can share one held key (a UUID spooled twice, identical
+// uuid-less records). Each held entry then costs two slots of the over-read;
+// the page must still fill up, or the dashboard reads it as end of history.
+func TestEventEntriesBeforeCtx_SeamDupKeysOnDiskStillFillPage(t *testing.T) {
+	t.Parallel()
+	gap := clievent.EventEntry{Time: 100, Type: "persist_gap", Summary: "gap"}
+	cases := []struct {
+		name string
+		held clievent.EventEntry
+	}{
+		{"uuid spooled twice", sameMSEntry(100, "b")},
+		{"identical uuid-less records", gap},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := &ManagedSession{key: "k"}
+			s.persistedHistory = []clievent.EventEntry{tc.held}
+			s.SetHistorySource(&pagingHistorySource{all: []clievent.EventEntry{
+				sameMSEntry(1, "x1"), sameMSEntry(2, "x2"), sameMSEntry(3, "x3"),
+				tc.held, tc.held,
+			}})
+
+			got := s.EventEntriesBeforeCtx(context.Background(), 0, 3)
+			if len(got) != 3 || got[0].UUID != "x2" || got[1].UUID != "x3" || got[2].Time != 100 {
+				t.Errorf("page = %s, want 2:x2 3:x3 and the held entry", uuidList(got))
+			}
+		})
+	}
+}
