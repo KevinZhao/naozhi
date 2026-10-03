@@ -54,8 +54,14 @@ func TestAutoTitler_RestoredAutoTitleSeededNotRenamed(t *testing.T) {
 		t.Fatalf("Skipped = %v, want restored_auto_title=1", rep.Skipped)
 	}
 	hw, ok := (*a.highwater.Load())[restartTestKey]
-	if !ok || hw.lastRenameAtTurn != 50 || hw.lastRenamedAt.IsZero() {
-		t.Fatalf("highwater = %+v (present=%v), want seeded at turn 50", hw, ok)
+	if !ok || hw.lastRenameAtTurn != 50 || time.Since(hw.lastRenamedAt).Abs() > time.Second {
+		t.Fatalf("highwater = %+v (present=%v), want seeded now at turn 50", hw, ok)
+	}
+
+	// The seed starts the rename interval: enough new turns, still throttled.
+	router.snaps[0].MessageCount = 53
+	if rep := tickOK(t, a); rep.Acted != 0 || rep.Skipped["min_rename_interval"] != 1 {
+		t.Fatalf("53 turns inside interval: report=%+v, want min_rename_interval", rep)
 	}
 
 	// Past the interval with two new turns: still throttled.
