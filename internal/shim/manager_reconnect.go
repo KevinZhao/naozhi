@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -29,6 +30,21 @@ func (m *Manager) reconnectKey(key string) *sync.Mutex {
 		m.reconnectKM[key] = mu
 	}
 	return mu
+}
+
+// ErrBinaryMismatch is wrapped by Reconnect's error when the state file's PID
+// does not run this naozhi binary; that PID may belong to an unrelated process.
+var ErrBinaryMismatch = errors.New("binary mismatch")
+
+// SignalAfterFailedReconnect is the SIGUSR2 fallback for a failed Reconnect.
+// It skips a non-positive PID and an ErrBinaryMismatch failure, whose PID is
+// not confirmed to be a shim, and reports whether it sent the signal.
+func SignalAfterFailedReconnect(pid int, reconnectErr error) bool {
+	if pid <= 0 || errors.Is(reconnectErr, ErrBinaryMismatch) {
+		return false
+	}
+	_ = osutil.SendShimReload(pid)
+	return true
 }
 
 // Reconnect connects to an existing shim identified by its state file; lastSeq
@@ -62,12 +78,12 @@ func (m *Manager) Reconnect(ctx context.Context, key string, lastSeq int64) (*Sh
 
 	// Binary identity: Linux reads /proc/PID/exe (strips "(deleted)" after a
 	// rebuild); Darwin falls back to ps -o comm= — weaker, but still catches
-	// PID reuse by an unrelated process. A mismatched PID is never signalled
-	// (same rule as isOurShimPID): it is either an unrelated process or a shim
-	// from another naozhi binary, which exits on its own idle timeout.
+	// PID reuse by an unrelated process. Neither this nor SignalAfterFailedReconnect
+	// signals a mismatched PID (same rule as isOurShimPID): it is an unrelated
+	// process or a shim from another naozhi binary, which exits on idle timeout.
 	if mismatch, err := shimPIDBinaryMismatch(state.ShimPID, m.naozhiBin); err == nil && mismatch {
 		RemoveStateFile(stateFile)
-		return nil, fmt.Errorf("shim PID %d binary mismatch", state.ShimPID)
+		return nil, fmt.Errorf("shim PID %d %w", state.ShimPID, ErrBinaryMismatch)
 	} else if err != nil {
 		slog.Warn("binary identity check skipped", "pid", state.ShimPID, "err", err)
 	}
