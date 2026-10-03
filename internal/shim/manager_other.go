@@ -29,7 +29,6 @@ func notifyUSR2(_ chan<- os.Signal)   {}
 func setSetsid(_ *exec.Cmd)           {}
 func pidAlive(_ int) bool             { return false }
 func sendSIGTERM(_ int) error         { return errors.New("signals not supported on this platform") }
-func sendSIGUSR2(_ int) error         { return errors.New("signals not supported on this platform") }
 func sendProcGroupSIGINT(_ int) error { return errors.New("signals not supported on this platform") }
 func sendProcGroupSIGKILL(_ int) error {
 	return errors.New("signals not supported on this platform")

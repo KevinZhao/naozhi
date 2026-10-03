@@ -62,9 +62,10 @@ func (m *Manager) Reconnect(ctx context.Context, key string, lastSeq int64) (*Sh
 
 	// Binary identity: Linux reads /proc/PID/exe (strips "(deleted)" after a
 	// rebuild); Darwin falls back to ps -o comm= — weaker, but still catches
-	// PID reuse by an unrelated process.
+	// PID reuse by an unrelated process. A mismatched PID is never signalled
+	// (same rule as isOurShimPID): it is either an unrelated process or a shim
+	// from another naozhi binary, which exits on its own idle timeout.
 	if mismatch, err := shimPIDBinaryMismatch(state.ShimPID, m.naozhiBin); err == nil && mismatch {
-		sendSIGUSR2(state.ShimPID) //nolint:errcheck
 		RemoveStateFile(stateFile)
 		return nil, fmt.Errorf("shim PID %d binary mismatch", state.ShimPID)
 	} else if err != nil {
