@@ -71,17 +71,17 @@ async function openSession(browser, events) {
 }
 
 /**
- * 520 live bubbles through appendEvents (the poll path) take a 100-bubble pane
- * to 620, so trimEventsScroll evicts its 20 oldest.
- * @param {import('@playwright/test').Page} page
+ * n live bubbles through appendEvents (the poll path) on a 100-bubble pane;
+ * past the 600 cap trimEventsScroll evicts the oldest (520 evicts 20).
+ * @param {import('@playwright/test').Page} page @param {number} [n]
  */
-async function pushLiveToTrim(page) {
-  await page.evaluate((base) => {
+async function pushLiveToTrim(page, n = 520) {
+  await page.evaluate(([base, n]) => {
     const w = /** @type {any} */ (window);
-    w.appendEvents(Array.from({ length: 520 }, (_, i) => ({
+    w.appendEvents(Array.from({ length: n }, (_, i) => ({
       type: 'text', detail: `[live${i}]`, time: base + 1000 + i, uuid: 'live-' + i,
     })));
-  }, BASE);
+  }, [BASE, n]);
   await expect(page.locator('#events-scroll > .event')).toHaveCount(600);
 }
 
@@ -130,6 +130,22 @@ test.describe('加载更早的事件：页边界切在同一毫秒内', () => {
     }
   });
 
+  test('DOM 上限只裁掉一条：头部仍停在游标那一毫秒，被裁的那条回来一次', async ({ browser }) => {
+    // The initial page is e201..e300; one live bubble past the cap evicts e201
+    // and leaves e202, e203 at the cursor's ms. The cursor keeps that ms with
+    // the survivors' keys only, so e201 comes back.
+    const { page, cleanup } = await openSession(browser, sameMsHistory(301));
+    try {
+      await pushLiveToTrim(page, 501);
+      expect((await renderedIndexes(page))[0]).toBe(202);
+      await page.locator('#earlier-events-btn').click();
+      await expect(page.locator('#events-scroll > .event')).toHaveCount(700);
+      expectEachOnce(await renderedIndexes(page), 102, 300);
+    } finally {
+      await cleanup();
+    }
+  });
+
   test('裁剪后的头部气泡没有 uuid：该毫秒整体视为已持有，不重复渲染', async ({ browser }) => {
     // Same trim as above, but e620 has no uuid, so the DOM cannot key it: the
     // cursor steps past its ms rather than risk painting it twice.
@@ -143,6 +159,32 @@ test.describe('加载更早的事件：页边界切在同一毫秒内', () => {
       expect(Number(earlier[0].get('before')) - BASE, 'strict at e620\'s ms').toBe(Math.floor(620 / GROUP));
     } finally {
       await cleanup();
+    }
+  });
+
+  test('WS 首帧边界切开同毫秒组：加载更早时首帧已有的那条不重复', async ({ browser }) => {
+    // The opening page arrives as the subscribe's initial history frame, not
+    // over HTTP: e152..e251, whose head e152 is the last of {e150,e151,e152}.
+    const history = sameMsHistory(252);
+    const mock = await startMockServer({ ws: true, eventsByKey: { [KEY]: history } });
+    const ctx = await browser.newContext({ ...desktop });
+    const page = await ctx.newPage();
+    try {
+      await page.goto(mock.url + '/dashboard');
+      await page.waitForSelector('.session-card');
+      // @ts-ignore — wsm / WS_STATES are mirrored onto window by the e2e shim.
+      await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+      await page.click(`.session-card[data-key="${KEY}"]`);
+      const conn = mock.wsConnections[mock.wsConnections.length - 1];
+      await expect.poll(() => conn.messages.some((/** @type {any} */ m) => m.type === 'subscribe' && m.key === KEY)).toBe(true);
+      conn.send({ type: 'history', key: KEY, initial: true, has_more: true, events: history.slice(-100) });
+      await expect(page.locator('#events-scroll > .event')).toHaveCount(100);
+      await page.locator('#earlier-events-btn').click();
+      await expect(page.locator('#events-scroll > .event')).toHaveCount(200);
+      expectEachOnce(await renderedIndexes(page), 52, 251);
+    } finally {
+      await ctx.close();
+      mock.server.close();
     }
   });
 
