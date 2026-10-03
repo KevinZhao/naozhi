@@ -1,0 +1,100 @@
+// coststate.go — the CLI's persisted running cost, which `claude --resume`
+// restores (#3096).
+package claudefs
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+)
+
+// CostState is a transcript's `"type":"cost-state"` line: the CLI's running
+// total for the session, written to the JSONL from time to time. On
+// `--resume` the CLI restores the last one, so the first result of the
+// resumed process reports this total plus the new turn — not the new turn
+// alone. A process that is killed writes none, so several resumes in a row
+// can restore the same, older line.
+type CostState struct {
+	SessionID    string  `json:"sessionId"`
+	TotalCostUSD float64 `json:"totalCostUSD"`
+	// ModelUsage keeps the per-model rows undecoded: their shape is the
+	// result frame's modelUsage, which this leaf package does not import.
+	ModelUsage json.RawMessage `json:"modelUsage"`
+}
+
+// costStateMarker pre-filters lines before any JSON decode; the decode then
+// confirms the type, so a message that merely mentions the word is skipped.
+var costStateMarker = []byte(`"cost-state"`)
+
+// maxCostStateLine bounds the lines decoded: a cost-state line is a few KiB,
+// while transcripts carry multi-megabyte tool results that are skipped
+// unread.
+const maxCostStateLine = 1 << 20
+
+// LastCostState returns the last cost-state line of the transcript at path
+// that belongs to sessionID (a line without a sessionId is accepted). found
+// is false when the transcript has none, which is also what the CLI restores
+// then: nothing. A missing file is an error, not "none": the caller asked
+// about a transcript it is about to resume.
+func LastCostState(path, sessionID string) (st CostState, found bool, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return CostState{}, false, err
+	}
+	defer f.Close()
+	br := bufio.NewReaderSize(f, 64<<10)
+	// A line longer than the reader's buffer arrives in pieces: gather it in
+	// long while it could still be a cost-state line, skip the rest once it
+	// cannot.
+	var long []byte
+	skipping := false
+	for {
+		chunk, rerr := br.ReadSlice('\n')
+		if errors.Is(rerr, bufio.ErrBufferFull) {
+			if !skipping {
+				long = append(long, chunk...)
+				if len(long) > maxCostStateLine {
+					skipping, long = true, long[:0]
+				}
+			}
+			continue
+		}
+		if rerr != nil && !errors.Is(rerr, io.EOF) {
+			return CostState{}, false, rerr
+		}
+		if skipping {
+			skipping = false
+		} else {
+			if len(long) > 0 {
+				chunk = append(long, chunk...)
+			}
+			if s, ok := decodeCostState(chunk, sessionID); ok {
+				st, found = s, true
+			}
+		}
+		long = long[:0]
+		if rerr != nil {
+			return st, found, nil
+		}
+	}
+}
+
+func decodeCostState(line []byte, sessionID string) (CostState, bool) {
+	if !bytes.Contains(line, costStateMarker) {
+		return CostState{}, false
+	}
+	var v struct {
+		Type string `json:"type"`
+		CostState
+	}
+	if json.Unmarshal(line, &v) != nil || v.Type != "cost-state" {
+		return CostState{}, false
+	}
+	if v.SessionID != "" && v.SessionID != sessionID {
+		return CostState{}, false
+	}
+	return v.CostState, true
+}

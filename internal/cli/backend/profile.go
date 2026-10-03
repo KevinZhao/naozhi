@@ -14,6 +14,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/assets"
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // Profile is the complete capability description of a single CLI backend.
@@ -63,6 +64,13 @@ type Profile struct {
 	// resolves its per-project layout from claudeDir and workspace. nil = no
 	// probe for this backend.
 	ResumeTarget func(dir, claudeDir, workspace, sessionID string) string
+
+	// ResumedCost reports the running cost the CLI restores when it resumes
+	// sessionID from target (the ResumeTarget path): a resumed process's first
+	// cumulative reading includes it, so the session's cost baseline must
+	// start there rather than at 0 (#3096). found=false means the CLI
+	// restores nothing. nil = this backend restores no cost on resume.
+	ResumedCost func(target, sessionID string) (usd float64, models map[string]clievent.ModelUsage, found bool, err error)
 
 	// TerminalLabel names a session of this backend found running in a
 	// terminal, for the dashboard's type chip ("Claude CLI"); entrypoint is
