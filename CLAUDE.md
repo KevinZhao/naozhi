@@ -218,7 +218,7 @@ Command routing: `/review xxx` -> `code-reviewer` agent, `/research xxx` -> `res
 Naozhi supports aggregating sessions from multiple machines into a single dashboard:
 
 - **Primary node** (`nodes` config): Polls remote nodes via HTTP REST every 10s, caches results in `node.CacheManager` (`internal/node/cache.go`). Never blocks dashboard API on unreachable nodes.
-- **Reverse-connect** (`upstream` config): Nodes behind NAT dial into the primary via WebSocket (`/ws-node`). The `internal/upstream` Connector handles reconnection with jittered exponential backoff (1s -> 30s, plus a circuit breaker). The `node.ReverseServer` validates tokens with constant-time comparison.
+- **Reverse-connect** (`upstream` config): Nodes behind NAT dial into the primary via WebSocket (`/ws-node`). The `internal/upstream` Connector handles reconnection with jittered exponential backoff (1s -> 30s, plus a circuit breaker). The `node.ReverseServer` validates tokens with constant-time comparison. A dropped node stays registered for a 60s grace window: browser subscriptions are parked and handed to the node's next registration, which resubscribes each key from its newest seen event; only a node that stays away longer is deregistered (dashboard gets `node disconnected`).
 - **Protocol** (`node.ReverseMsg`, `internal/node/protocol.go`): JSON over WebSocket -- `register/registered`, `request/response` (fetch_sessions, fetch_projects, send), `subscribe/event` (real-time streaming), `ping/pong`.
 
 ### Project Management

@@ -4,9 +4,10 @@ import "github.com/naozhi/naozhi/internal/node"
 
 // attachReverseNodeServer wires the reverse-connection server's node lifecycle
 // into this server's node registry, node cache and hub: a node that registers
-// becomes known and gets its sessions fetched; one that deregisters is purged
-// from the registry, the cache and every subscription, and the dashboard is
-// told its session list changed. nil (no reverse server configured) is a no-op.
+// becomes known and gets its sessions fetched; one that deregisters (only
+// once the reverse server's reconnect grace window lapses) is purged from the
+// registry, the cache and every subscription, and the dashboard is told its
+// session list changed. nil (no reverse server configured) is a no-op.
 func (s *Server) attachReverseNodeServer(rs *node.ReverseServer) {
 	if rs == nil {
 		return

@@ -158,12 +158,29 @@ func isLoopbackHost(host string) bool {
 	return ok && k.Has(envpolicy.IPLoopback)
 }
 
+// defaultDeregisterGrace is how long a dropped reverse node stays registered,
+// its browser subscriptions parked, waiting for the node to dial back. It
+// covers the upstream connector's jittered 30s backoff ceiling; a node that
+// stays away longer is a real outage and goes through OnDeregister.
+const defaultDeregisterGrace = 60 * time.Second
+
 // ReverseServer accepts /ws-node connections from remote naozhi nodes.
 // Remote nodes dial in (reverse connect) to traverse NAT.
 type ReverseServer struct {
 	mu    sync.RWMutex
 	names map[string]string       // node_id → configured display_name
 	conns map[string]*ReverseConn // node_id → active connection
+	// lingering holds the dropped conn per node_id whose subscriptions the
+	// next registration adopts; guarded by mu.
+	lingering map[string]*lingerEntry
+
+	// lifecycleMu serializes OnRegister/OnDeregister with the ownership check
+	// that decides each, so a deregister decided before a newer register
+	// cannot land after it. Lock order: lifecycleMu → mu.
+	lifecycleMu sync.Mutex
+
+	// deregisterGrace is defaultDeregisterGrace; tests shorten it.
+	deregisterGrace time.Duration
 
 	// authHash holds sha256(expected token) per node_id, precomputed so the
 	// auth path hashes only the inbound probe. Empty-token entries are omitted.
@@ -215,9 +232,11 @@ func NewReverseServer(auth map[string]ReverseNodeAuth, trustedProxy bool) *Rever
 		seen[e.Token] = id
 	}
 	return &ReverseServer{
-		names:    names,
-		authHash: hashes,
-		conns:    make(map[string]*ReverseConn),
+		names:           names,
+		authHash:        hashes,
+		conns:           make(map[string]*ReverseConn),
+		lingering:       make(map[string]*lingerEntry),
+		deregisterGrace: defaultDeregisterGrace,
 		wsLimiter: ratelimit.New(ratelimit.Config{
 			Rate:    rate.Every(5 * time.Second), // 1 per 5s sustained
 			Burst:   10,                          // 10 burst
@@ -344,30 +363,28 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// be overwritten by the stale handler ("online but invisible", #2458).
 	// Invariant: s.conns[id] is the conn that most recently reached this point;
 	// it closes the previous owner, whose deregister/rollback paths see
-	// owns == false and touch nothing. Lock order: s.mu → ReverseConn.closeMu;
-	// no callback runs under s.mu.
+	// owns == false and touch nothing, and parks it so rc can adopt its
+	// subscriptions. Lock order: s.mu → ReverseConn.closeMu / subMu; no
+	// callback runs under s.mu.
 	s.mu.Lock()
-	old, displaced := s.conns[msg.NodeID]
-	if displaced {
+	if old, displaced := s.conns[msg.NodeID]; displaced {
 		old.Close()
+		s.lingerLocked(msg.NodeID, old)
 	}
+	s.claimLingerLocked(msg.NodeID)
 	s.conns[msg.NodeID] = rc
 	s.mu.Unlock()
 
 	// abortAck rolls the insert back (identity-checked: a newer conn may own
-	// the id). If we displaced an old conn, its own deregister was suppressed
-	// by that check, so emit OnDeregister on its behalf.
+	// the id) and restarts the grace window of whatever rc meant to adopt.
 	abortAck := func() {
 		s.mu.Lock()
-		owns := s.conns[msg.NodeID] == rc
-		if owns {
+		if s.conns[msg.NodeID] == rc {
 			delete(s.conns, msg.NodeID)
+			s.rearmLingerLocked(msg.NodeID)
 		}
 		s.mu.Unlock()
 		rc.Close()
-		if owns && displaced && s.OnDeregister != nil {
-			s.OnDeregister(msg.NodeID)
-		}
 	}
 
 	if s.testHookBeforeAck != nil {
@@ -404,9 +421,11 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	logUnknownCaps(safeNodeID, msg.Capabilities)
 
 	// A newer conn that displaced us already owns OnRegister and closed rc.
-	s.mu.RLock()
+	s.lifecycleMu.Lock()
+	s.mu.Lock()
 	stillOwns := s.conns[msg.NodeID] == rc
-	s.mu.RUnlock()
+	adopted := stillOwns && s.adoptLingerLocked(msg.NodeID, rc)
+	s.mu.Unlock()
 	if !stillOwns {
 		slog.Debug("reverse node superseded before register", "node_id", safeNodeID, "ip", ip)
 	} else {
@@ -421,8 +440,12 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// OnDeregister must pass the same value.
 		s.OnRegister(msg.NodeID, rc)
 	}
+	s.lifecycleMu.Unlock()
 
 	go rc.readLoop()
+	if adopted {
+		rc.resubscribeAll()
+	}
 
 	go func() {
 		<-rc.done
@@ -433,13 +456,87 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		owns := s.conns[msg.NodeID] == rc
 		if owns {
 			delete(s.conns, msg.NodeID)
+			s.lingerLocked(msg.NodeID, rc)
 		}
 		s.mu.Unlock()
-		slog.Info("reverse node disconnected", "node_id", safeNodeID)
-		if owns && s.OnDeregister != nil {
-			s.OnDeregister(msg.NodeID)
-		}
+		slog.Info("reverse node disconnected", "node_id", safeNodeID, "deregister_after", s.deregisterGrace)
 	}()
+}
+
+// lingerEntry parks a dropped conn for its node_id. A nil timer means a
+// successor is mid-handshake and will either adopt rc's subscriptions or
+// re-arm the window; each arming uses a fresh entry, so a timer that fires
+// after its entry was replaced finds a mismatch and does nothing.
+type lingerEntry struct {
+	rc    *ReverseConn
+	timer *time.Timer
+}
+
+// lingerLocked parks rc for id; a conn already parked there absorbs rc's
+// subscriptions so a successor finds them in one place. Caller holds s.mu.
+func (s *ReverseServer) lingerLocked(id string, rc *ReverseConn) {
+	if e := s.lingering[id]; e != nil {
+		e.rc.adopt(rc)
+		return
+	}
+	s.armLingerLocked(id, rc)
+}
+
+func (s *ReverseServer) armLingerLocked(id string, rc *ReverseConn) {
+	e := &lingerEntry{rc: rc}
+	e.timer = time.AfterFunc(s.deregisterGrace, func() { s.expireLinger(id, e) })
+	s.lingering[id] = e
+}
+
+// claimLingerLocked stops id's grace timer for a successor mid-handshake.
+func (s *ReverseServer) claimLingerLocked(id string) {
+	if e := s.lingering[id]; e != nil && e.timer != nil {
+		e.timer.Stop()
+		s.lingering[id] = &lingerEntry{rc: e.rc}
+	}
+}
+
+// rearmLingerLocked restarts id's grace window after its successor failed.
+func (s *ReverseServer) rearmLingerLocked(id string) {
+	if e := s.lingering[id]; e != nil && e.timer == nil {
+		s.armLingerLocked(id, e.rc)
+	}
+}
+
+// adoptLingerLocked hands id's parked subscriptions to rc and reports
+// whether there were any to hand over.
+func (s *ReverseServer) adoptLingerLocked(id string, rc *ReverseConn) bool {
+	e := s.lingering[id]
+	if e == nil {
+		return false
+	}
+	if e.timer != nil {
+		e.timer.Stop()
+	}
+	delete(s.lingering, id)
+	rc.adopt(e.rc)
+	return true
+}
+
+// expireLinger ends a grace window nobody came back for: the parked sinks
+// are released and the node is deregistered.
+func (s *ReverseServer) expireLinger(id string, e *lingerEntry) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	s.mu.Lock()
+	live := s.lingering[id] == e
+	if live {
+		delete(s.lingering, id)
+	}
+	s.mu.Unlock()
+	if !live {
+		return
+	}
+	e.rc.dropSubs()
+	slog.Info("reverse node deregistered", "node_id", truncateLabelUTF8(id, 64))
+	if s.OnDeregister != nil {
+		s.OnDeregister(id)
+	}
 }
 
 // AllNodes returns all configured node IDs mapped to their display names.

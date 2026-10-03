@@ -128,6 +128,31 @@ func TestSubBook_ResubscribeListCarriesWatermarks(t *testing.T) {
 	}
 }
 
+func TestSubBook_AbsorbMovesKeysAndKeepsOlderWatermark(t *testing.T) {
+	t.Parallel()
+	dst, src := newSubBook(), newSubBook()
+	s1, s2, s3 := &mockSink{id: 1}, &mockSink{id: 2}, &mockSink{id: 3}
+	dst.add(s1, "shared", 900)
+	src.add(s1, "shared", 400)
+	src.add(s2, "shared", 0)
+	src.add(s3, "moved", 700)
+
+	dst.absorb(&src)
+
+	if got := dst.subs["shared"]; len(got) != 2 || got[0] != s1 || got[1] != s2 {
+		t.Fatalf("shared sinks = %v, want [s1 s2] with s1 once", got)
+	}
+	if got := dst.lastEvent["shared"]; got != 400 {
+		t.Fatalf("shared watermark = %d, want the older 400", got)
+	}
+	if got := dst.subs["moved"]; len(got) != 1 || got[0] != s3 || dst.lastEvent["moved"] != 700 {
+		t.Fatalf("moved key = %v @%d, want [s3] @700", got, dst.lastEvent["moved"])
+	}
+	if len(src.subs) != 0 || len(src.lastEvent) != 0 {
+		t.Fatalf("absorb left src with subs=%d lastEvent=%d", len(src.subs), len(src.lastEvent))
+	}
+}
+
 func TestSubBook_SnapshotIsDetachedAndReleaseClearsPointers(t *testing.T) {
 	t.Parallel()
 	b := newSubBook()
