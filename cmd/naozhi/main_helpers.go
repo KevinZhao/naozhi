@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/attachment"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/config"
@@ -79,6 +80,12 @@ const stateDirWarnMB = 500
 // bytes exceed stateDirWarnMB. First-run / permission errors are silent;
 // a truncated scan still warns using the partial total as a lower bound.
 func warnIfStateDirLarge(stateDir string) {
+	warnIfStateDirOver(stateDir, stateDirWarnMB<<20)
+}
+
+// warnIfStateDirOver is warnIfStateDirLarge with the threshold in bytes, so
+// tests can cross it without writing 500 MiB.
+func warnIfStateDirOver(stateDir string, thresholdBytes int64) {
 	if stateDir == "" || stateDir == "." {
 		return
 	}
@@ -87,14 +94,87 @@ func warnIfStateDirLarge(stateDir string) {
 	if err != nil && !truncated {
 		return
 	}
-	sizeMB := bytes / (1024 * 1024)
-	if sizeMB < stateDirWarnMB {
+	if bytes < thresholdBytes {
 		return
 	}
 	slog.Warn("state directory large",
-		"path", stateDir, "size_mb", sizeMB, "threshold_mb", stateDirWarnMB,
+		"path", stateDir, "size_mb", bytes>>20, "threshold_mb", thresholdBytes>>20,
 		"truncated", truncated,
-		"hint", "enable the attachment-gc daemon to reclaim old attachments; prune events; see docs/ops/disk-budget.md")
+		"hint", "prune events/*.log of closed sessions; a session.cwd inside this directory (the default ~/.naozhi/workspace) counts its .naozhi/attachments here too, see the attachments large warning; see docs/ops/disk-budget.md")
+}
+
+// attachmentsWarnMB is the soft ceiling for the attachment trees summed over
+// every known workspace root; see docs/ops/disk-budget.md.
+const attachmentsWarnMB = 500
+
+// Values of attachmentGCMode, logged as the attachment_gc field.
+const (
+	attachmentGCDisabled = "disabled"
+	attachmentGCDryRun   = "dry_run"
+	attachmentGCEnabled  = "enabled"
+)
+
+// attachmentGCMode reports how cfg runs the attachment-gc daemon. It is
+// disabled when sysession is off or the daemon is absent or not enabled.
+func attachmentGCMode(cfg *config.Config) string {
+	d, ok := cfg.Sysession.Daemons[sysession.DaemonAttachmentGC]
+	switch {
+	case !cfg.Sysession.Enabled || !ok || !d.Enabled:
+		return attachmentGCDisabled
+	case d.DryRun:
+		return attachmentGCDryRun
+	default:
+		return attachmentGCEnabled
+	}
+}
+
+// attachmentsLargeHint tells the operator the next step for gcMode.
+func attachmentsLargeHint(gcMode string) string {
+	switch gcMode {
+	case attachmentGCDryRun:
+		return "attachment-gc runs with dry_run: true and removes nothing; review its would-remove results, then set dry_run: false; see docs/ops/disk-budget.md"
+	case attachmentGCEnabled:
+		return "attachment-gc is on; upload_ttl, ref_ttl or per_root_cap may be too loose for this upload rate; see docs/ops/disk-budget.md"
+	default:
+		return "attachment-gc is not running; set sysession.enabled and sysession.daemons.attachment-gc.enabled with dry_run: true, review, then set dry_run: false; see docs/ops/disk-budget.md"
+	}
+}
+
+// warnIfAttachmentsLarge sums <root>/.naozhi/attachments over roots and warns
+// once when the total reaches attachmentsWarnMB. A missing or unreadable tree
+// counts as 0; a truncated walk adds its partial total and sets truncated.
+func warnIfAttachmentsLarge(roots sysession.WorkspaceRootLister, gcMode string) {
+	warnIfAttachmentsOver(roots, gcMode, attachmentsWarnMB<<20, osutil.StateDirSize)
+}
+
+// warnIfAttachmentsOver is warnIfAttachmentsLarge with the threshold in bytes
+// and the tree walk as a parameter, so tests can force a truncated walk.
+func warnIfAttachmentsOver(roots sysession.WorkspaceRootLister, gcMode string, thresholdBytes int64, treeSize func(string) (int64, error)) {
+	var total, largest int64
+	var largestRoot string
+	var withTree int
+	truncated := false
+	for _, root := range roots.KnownWorkspaceRoots() {
+		n, err := treeSize(filepath.Join(root, attachment.Dir))
+		partial := errors.Is(err, osutil.ErrStateDirScanTruncated)
+		if err != nil && !partial {
+			continue
+		}
+		withTree++
+		truncated = truncated || partial
+		total += n
+		if n > largest {
+			largest, largestRoot = n, root
+		}
+	}
+	if total < thresholdBytes {
+		return
+	}
+	slog.Warn("attachments large",
+		"total_mb", total>>20, "threshold_mb", thresholdBytes>>20,
+		"roots", withTree, "largest_root", largestRoot, "largest_mb", largest>>20,
+		"truncated", truncated, "attachment_gc", gcMode,
+		"hint", attachmentsLargeHint(gcMode))
 }
 
 // chatIDSuffix returns the last 8 characters of a chat ID for logging,
