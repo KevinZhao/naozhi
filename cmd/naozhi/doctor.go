@@ -147,6 +147,9 @@ type doctor struct {
 	// sibling's pooled connection mid-RoundTrip (#2473).
 	client *http.Client
 
+	// health memoises the run's single GET /health; see fetchHealth.
+	health *healthReply
+
 	hasFail  bool
 	findings []finding
 }
@@ -165,6 +168,7 @@ func (d *doctor) run() {
 	d.checkSystemd()
 	d.checkHealth()
 	d.checkAuth()
+	d.checkServerState()
 	d.checkConfigDrift()
 	d.checkPprof()
 	d.checkExpvar()

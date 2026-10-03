@@ -32,11 +32,18 @@ naozhi doctor --timeout 2s
 | `binary` | 能解析自身路径 | 路径不可读 | - |
 | `codesign` | 非 darwin；或签名身份固定（leaf / Developer ID），升级后 macOS 授权保留 | ad-hoc 签名，每次升级都会重新弹文件夹授权（见 [macos-codesign.md](macos-codesign.md)）/ 读不到签名 | - |
 | `systemd` | `systemctl is-active = active` | 非 Linux 或 systemctl 不存在 | 服务不活跃 |
-| `http /health` | 返回 200 + JSON | - | 不可达 / 非 200 |
+| `http /health` | 返回 200（有 token 时摘要 status/uptime/version） | - | 不可达 / 非 200 |
 | `auth` | token 通过 `/api/sessions` 200 | 无 token / 响应码意外 | token 被 401/403 |
+| `cli runtime` | 服务端找得到默认 CLI 二进制（`cli_available=true`，仅 stat） | - | `cli_available=false`，新会话起不来 |
+| `platforms` | 列出已注册的 IM 平台（只是注册，不代表已连上） | 没有任何平台（dashboard-only） | - |
+| `eventlog writer` | `writer_alive=true`；或该子系统未启用（skipped） | - | `writer_alive=false`，事件没落盘 |
+| `attachment tracker` | 同上 | - | `writer_alive=false`，附件元数据没记录 |
+| `dispatch` | 有成功回复（显示多久前）/ 还没消息或刚启动 | 自启动起只有失败没有成功；或配了平台、启动超 10 分钟仍零条 IM 入站（平台可能没连上） | - |
 | `pprof` | `/api/debug/pprof/` 200 | 403（远端调用 / hardening 生效）或意外码 | - |
 | `state dir` | `~/.naozhi` 可写 | 目录不存在（首次运行） | 存在但不可写 / 非目录 |
 | `zero-downtime` | `naozhi-shim-*.scope` 有 ≥1 | 0 个 scope（sudoers hardening 未生效） | systemctl list-units 失败 |
+
+`cli runtime` 到 `dispatch` 五项和 `config-drift` 读的是同一次带 token 的 `GET /health`（整次 doctor 只发一次）。没有 token、token 被拒或 `/health` 不可达时，这五项各输出一行 `skipped (…)`，不计 fail。`/health` 的 `platforms` 只是启动时注册的名字，没有连接状态，所以「平台没连上」只能从 `dispatch` 的入站计数推断。
 
 ## 退出码
 
@@ -52,8 +59,13 @@ naozhi doctor --timeout 2s
 $ naozhi doctor
 ✓ binary                 /home/ec2-user/naozhi/bin/naozhi · version=v0.0.3-31-g8b832fa · linux/arm64
 ✓ systemd                active · MainPID=2730834 · NRestarts=0 · ActiveEnterTimestamp=Wed 2026-04-29 19:32:51 UTC
-✓ http /health           {"status":"ok","uptime":"1h3m28s","version":"v0.0.3-31-g8b832fa-dirty"}
+✓ http /health           status=ok uptime=1h3m28s version=v0.0.3-31-g8b832fa-dirty
 ✓ auth                   token accepted (/api/sessions 200)
+✓ cli runtime            the server finds its default CLI binary (cli_available=true)
+✓ platforms              registered: feishu (registration only, not a connection state)
+✓ eventlog writer        writer alive (queue 0/1024, dropped 0)
+✓ attachment tracker     writer alive (queue 0/256, dropped 0)
+✓ dispatch               last successful reply 4m12s ago · messages=37 reply_errors=0 send_fails=0
 ✓ pprof                  reachable at http://127.0.0.1:8180/api/debug/pprof/
 ✓ state dir              /home/ec2-user/.naozhi writable
 ✓ zero-downtime          2 shim scope(s) active (sudoers hardening is working)
@@ -79,7 +91,7 @@ $ naozhi doctor
 3. `DASHBOARD_TOKEN` 环境变量（legacy 别名）
 4. `~/.naozhi/env` 文件扫描 `NAOZHI_DASHBOARD_TOKEN=` 或 `DASHBOARD_TOKEN=` 行
 
-都没有 → `auth` / `pprof` 检查降级为 warn（不算 fail）。
+都没有 → `auth` / `pprof` 检查降级为 warn，`cli runtime` 等鉴权段检查输出 skipped（都不算 fail）。
 
 ## 非零停机场景的 `zero-downtime` 解读
 
