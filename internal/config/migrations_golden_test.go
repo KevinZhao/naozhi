@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -11,10 +12,14 @@ import (
 
 // Golden tests for the v1 → v2 migration. They are byte-exact on purpose: the
 // whole reason migrations operate on a yaml.Node document instead of
-// round-tripping through Config is to keep the operator's comments, key order
-// and formatting. A test that only checked "the key is gone" would pass for an
-// implementation that reformatted the entire file and dropped every comment.
+// round-tripping through Config is to keep the operator's comments and key
+// order. A test that only checked "the key is gone" would pass for an
+// implementation that dropped every comment. Fixtures carry no blank lines and
+// single-space comment alignment: the yaml.v3 encoder normalizes both
+// (TestMigrate_NormalizesLayout).
 
+// migrateGolden migrates in and fails the test if any comment of in is missing
+// from the result, so every golden fixture is also a comment-loss check.
 func migrateGolden(t *testing.T, in string) (string, []string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -25,7 +30,77 @@ func migrateGolden(t *testing.T, in string) (string, []string) {
 	if err != nil {
 		t.Fatalf("MigrateFile: %v", err)
 	}
+	if lost := lostComments(in, string(res.After)); len(lost) > 0 {
+		t.Errorf("migration dropped comments %q\n--- in ---\n%s\n--- out ---\n%s", lost, in, res.After)
+	}
 	return string(res.After), res.Applied
+}
+
+// yamlComments returns the text of every comment in a YAML document, scanning
+// the bytes rather than parsing them so a comment the parser itself loses is
+// still counted. A '#' opens a comment at line start or after whitespace,
+// outside quoted scalars. Fixtures keep '#' out of block scalars.
+func yamlComments(doc string) []string {
+	var out []string
+	for _, line := range strings.Split(doc, "\n") {
+		var quote byte
+		for i := 0; i < len(line); i++ {
+			c := line[i]
+			switch {
+			case quote == '"' && c == '\\',
+				quote == '\'' && c == '\'' && i+1 < len(line) && line[i+1] == '\'':
+				i++
+			case quote != 0:
+				if c == quote {
+					quote = 0
+				}
+			case (c == '"' || c == '\'') && opensScalar(line, i):
+				quote = c
+			case c == '#' && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t'):
+				out = append(out, line[i:])
+				i = len(line)
+			}
+		}
+	}
+	return out
+}
+
+// opensScalar reports whether the quote at line[i] starts a quoted scalar: at
+// line start or after "[", "{", ",", or ": ", "- ", "? ". An apostrophe inside
+// a plain scalar (don't) is text.
+func opensScalar(line string, i int) bool {
+	j := i
+	for j > 0 && (line[j-1] == ' ' || line[j-1] == '\t') {
+		j--
+	}
+	if j == 0 {
+		return true
+	}
+	switch line[j-1] {
+	case '[', '{', ',':
+		return true
+	case ':', '-', '?':
+		return j < i
+	}
+	return false
+}
+
+// lostComments returns the comments of in that out does not carry, counting
+// duplicates.
+func lostComments(in, out string) []string {
+	have := map[string]int{}
+	for _, c := range yamlComments(out) {
+		have[c]++
+	}
+	var lost []string
+	for _, c := range yamlComments(in) {
+		if have[c] == 0 {
+			lost = append(lost, c)
+			continue
+		}
+		have[c]--
+	}
+	return lost
 }
 
 func TestMigrateV1ToV2_RenamesAndKeepsComments(t *testing.T) {
@@ -352,5 +427,216 @@ func TestMigrateFile_ZeroVersionMigratesFromV1(t *testing.T) {
 	got, _ := migrateGolden(t, "schema_version: 0\nsession:\n  workspace: \"/w\"\n")
 	if !strings.Contains(got, "cwd:") || !strings.Contains(got, "schema_version: 2") {
 		t.Errorf("schema_version 0 was not migrated from v1:\n%s", got)
+	}
+}
+
+// The fixture from #2992: a comment on an args item that stays keeps its node
+// (and its quoting: 3 stays unquoted), and the lifted value's comment follows
+// the text to system_prompt.
+func TestMigrateV1ToV2_LiftKeepsItemComments(t *testing.T) {
+	in := `# top comment
+cli:
+  path: "/bin/true" # cli path
+agents:
+  rev:
+    model: "sonnet" # keep me model
+    args:
+      - "--max-turns" # keep me a
+      - 3
+      - "--append-system-prompt"
+      - "You are a reviewer" # keep me b
+`
+	want := `schema_version: 2
+# top comment
+cli:
+  path: "/bin/true" # cli path
+agents:
+  rev:
+    model: "sonnet" # keep me model
+    args:
+      - "--max-turns" # keep me a
+      - 3
+    system_prompt: "You are a reviewer" # keep me b
+`
+	got, _ := migrateGolden(t, in)
+	if got != want {
+		t.Errorf("migrated document mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// system_prompt already holds the lifted text: the removed nodes' comments are
+// appended to it, never overwriting the operator's own.
+func TestMigrateV1ToV2_LiftOntoExistingSystemPromptAppendsComments(t *testing.T) {
+	in := `agents:
+  rev:
+    # the real prompt
+    system_prompt: "P" # sp line
+    # args head
+    args:
+      - "--append-system-prompt" # flag line
+      - "P" # value line
+`
+	want := `schema_version: 2
+agents:
+  rev:
+    # the real prompt
+    # args head
+    # flag line
+    # value line
+    system_prompt: "P" # sp line
+`
+	got, _ := migrateGolden(t, in)
+	if got != want {
+		t.Errorf("migrated document mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// A bare flag lifts nothing and removes args entirely, so there is no
+// system_prompt to carry its comments: they stay where args stood, on the
+// neighbouring key, or on the agent's own key once its mapping is empty.
+func TestMigrateV1ToV2_BareFlagCommentsStayInPlace(t *testing.T) {
+	in := `agents:
+  first:
+    # about the flag
+    args: ["--append-system-prompt"] # first note
+    model: "x"
+  last:
+    model: "y"
+    args:
+      - "--append-system-prompt" # last note
+  only:
+    args: ["--append-system-prompt"] # only note
+  kept:
+    args:
+      - "--verbose"
+      - "--append-system-prompt" # kept note
+`
+	want := `schema_version: 2
+agents:
+  first:
+    # about the flag
+    # first note
+    model: "x"
+  last:
+    model: "y"
+    # last note
+  # only note
+  only: {}
+  kept:
+    # kept note
+    args:
+      - "--verbose"
+`
+	got, _ := migrateGolden(t, in)
+	if got != want {
+		t.Errorf("migrated document mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// Flow-style args with the `=` form: the kept items stay in the flow sequence
+// with its line comment, and a '#' inside a quoted value is text, not a comment.
+func TestMigrateV1ToV2_FlowArgsEqualsForm(t *testing.T) {
+	in := `agents:
+  rev:
+    args: ["--verbose", "--append-system-prompt=P # not a comment", "3"] # flow note
+`
+	want := `schema_version: 2
+agents:
+  rev:
+    args: ["--verbose", "3"] # flow note
+    system_prompt: "P # not a comment"
+`
+	got, _ := migrateGolden(t, in)
+	if got != want {
+		t.Errorf("migrated document mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// Every path that removes a node re-homes its comments: the dead auto_chain
+// block, the deprecated spelling dropped for the modern one, and the lift.
+// migrateGolden fails on any comment missing from the output.
+func TestMigrate_NeverDropsAComment(t *testing.T) {
+	fixtures := map[string]string{
+		"auto_chain block": `session:
+  cwd: "/w"
+  # dead block
+  auto_chain: # ac line
+    # inner head
+    enabled: true # enabled line
+    window_hours: 6
+  # session foot
+`,
+		"auto_chain empties session": `session:
+  auto_chain: # the only key
+    enabled: true
+`,
+		"both spellings": `# file head
+nodes: # old spelling
+  a: # a line
+    url: "https://a.example"
+workspaces:
+  b:
+    url: "https://b.example"
+session:
+  cwd: "/new"
+  workspace: "/old" # old cwd
+`,
+		"lift with foot comments": `agents:
+  rev:
+    args:
+      - "--append-system-prompt"
+      - "P"
+      # foot of the sequence
+    # foot of the agent
+`,
+	}
+	for name, in := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			if len(yamlComments(in)) == 0 {
+				t.Fatal("fixture has no comments; the check would be vacuous")
+			}
+			if _, applied := migrateGolden(t, in); len(applied) < 2 {
+				t.Errorf("applied = %v, want a rewrite besides the version bump", applied)
+			}
+		})
+	}
+}
+
+// The scanner behind the comment check: it must see a comment wherever YAML
+// does, and not inside a quoted scalar.
+func TestYAMLComments(t *testing.T) {
+	doc := "# a\nk: \"v # no\" # b\nl: 'x#y' #c\n  # d\nm: a#b\n" +
+		"n: don't # e\no: \"q\\\" # no\" # f\np: ['x # no', \"y\"] # g\n- 'it''s # no' # h\nq: a-'b # i\n"
+	got := yamlComments(doc)
+	want := []string{"# a", "# b", "#c", "# d", "# e", "# f", "# g", "# h", "# i"}
+	if !slices.Equal(got, want) {
+		t.Errorf("yamlComments = %q, want %q", got, want)
+	}
+	if lost := lostComments("# a\n# a\n", "# a\n"); !slices.Equal(lost, []string{"# a"}) {
+		t.Errorf("lostComments = %q, want the duplicate counted", lost)
+	}
+}
+
+// The encoder normalizes layout: blank lines and comment column alignment do
+// not survive a migration. Pinned so the package comment cannot promise more
+// than the code does.
+func TestMigrate_NormalizesLayout(t *testing.T) {
+	in := `session:
+  workspace: "/w"     # aligned
+
+agents:
+  rev:
+    model: "x"
+`
+	want := `schema_version: 2
+session:
+  cwd: "/w" # aligned
+agents:
+  rev:
+    model: "x"
+`
+	got, _ := migrateGolden(t, in)
+	if got != want {
+		t.Errorf("migrated document mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }

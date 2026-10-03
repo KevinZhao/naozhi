@@ -63,35 +63,38 @@ func TestValidateConfig_AgentSystemPrompt(t *testing.T) {
 	}
 }
 
-// TestSplitLegacySystemPromptArgs covers both flag shapes and the aliasing
-// contract of the no-op path.
+// TestSplitLegacySystemPromptArgs covers both flag shapes. The indices are the
+// contract: the migration keeps the nodes at keptIdx and re-homes the comments
+// of those at liftedIdx, so every item must land in exactly one of them.
 func TestSplitLegacySystemPromptArgs(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name      string
-		in        []string
-		wantKept  []string
-		wantLift  string
-		wantFound bool
+		name       string
+		in         []string
+		wantKept   []int
+		wantLifted []int
+		wantLift   string
+		wantFound  bool
 	}{
-		{"absent", []string{"--keep", "x"}, []string{"--keep", "x"}, "", false},
-		{"bare form", []string{"--append-system-prompt", "P", "--keep"}, []string{"--keep"}, "P", true},
-		{"equals form", []string{"--keep", "--append-system-prompt=P"}, []string{"--keep"}, "P", true},
-		{"both forms join in order", []string{"--append-system-prompt", "A", "--append-system-prompt=B"}, nil, "A\n\nB", true},
-		{"trailing bare flag no value", []string{"--keep", "--append-system-prompt"}, []string{"--keep"}, "", true},
-		{"next token is a flag so no value", []string{"--append-system-prompt", "--keep"}, []string{"--keep"}, "", true},
-		{"only the flag leaves nil args", []string{"--append-system-prompt", "P"}, nil, "P", true},
+		{"absent", []string{"--keep", "x"}, []int{0, 1}, nil, "", false},
+		{"bare form", []string{"--append-system-prompt", "P", "--keep"}, []int{2}, []int{0, 1}, "P", true},
+		{"equals form", []string{"--keep", "--append-system-prompt=P"}, []int{0}, []int{1}, "P", true},
+		{"both forms join in order", []string{"--append-system-prompt", "A", "--append-system-prompt=B"}, nil, []int{0, 1, 2}, "A\n\nB", true},
+		{"trailing bare flag no value", []string{"--keep", "--append-system-prompt"}, []int{0}, []int{1}, "", true},
+		{"next token is a flag so no value", []string{"--append-system-prompt", "--keep"}, []int{1}, []int{0}, "", true},
+		{"only the flag leaves nothing kept", []string{"--append-system-prompt", "P"}, nil, []int{0, 1}, "P", true},
+		{"value-looking item after the value is kept", []string{"--append-system-prompt", "P", "3"}, []int{2}, []int{0, 1}, "P", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			kept, lifted, found := splitLegacySystemPromptArgs(tc.in)
-			if found != tc.wantFound || lifted != tc.wantLift || !slices.Equal(kept, tc.wantKept) {
-				t.Fatalf("got (kept=%q lifted=%q found=%v), want (kept=%q lifted=%q found=%v)",
-					kept, lifted, found, tc.wantKept, tc.wantLift, tc.wantFound)
+			kept, liftedIdx, lifted, found := splitLegacySystemPromptArgs(tc.in)
+			if found != tc.wantFound || lifted != tc.wantLift || !slices.Equal(kept, tc.wantKept) || !slices.Equal(liftedIdx, tc.wantLifted) {
+				t.Fatalf("got (kept=%v liftedIdx=%v lifted=%q found=%v), want (kept=%v liftedIdx=%v lifted=%q found=%v)",
+					kept, liftedIdx, lifted, found, tc.wantKept, tc.wantLifted, tc.wantLift, tc.wantFound)
 			}
-			if !found && len(tc.in) > 0 && &kept[0] != &tc.in[0] {
-				t.Error("no-op path must return the input slice itself")
+			if len(kept)+len(liftedIdx) != len(tc.in) {
+				t.Errorf("%d kept + %d lifted indices for %d args: every item must be accounted for once", len(kept), len(liftedIdx), len(tc.in))
 			}
 		})
 	}
