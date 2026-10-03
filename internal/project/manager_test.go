@@ -331,15 +331,16 @@ func TestAll_Sorted(t *testing.T) {
 
 // TestScan_StampsCreatedAtOnFirstScan locks the migration contract: a freshly
 // scanned project tree without any CreatedAt values gets monotonically
-// increasing timestamps in lexical order, persisted back to project.yaml so
-// subsequent boots are idempotent (no reshuffling).
+// increasing timestamps in lexical order, persisted to the projects index so
+// subsequent boots are idempotent (no reshuffling) — and never to project.yaml.
 func TestScan_StampsCreatedAtOnFirstScan(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	for _, name := range []string{"zeta", "alpha", "mu"} {
 		makeProjectDir(t, root, name, nil)
 	}
-	m, _ := NewManager(root, PlannerDefaults{})
+	indexPath := filepath.Join(t.TempDir(), "projects-index.json")
+	m, _ := NewManager(root, PlannerDefaults{}, WithIndexPath(indexPath))
 	if err := m.Scan(); err != nil {
 		t.Fatalf("first Scan: %v", err)
 	}
@@ -363,9 +364,15 @@ func TestScan_StampsCreatedAtOnFirstScan(t *testing.T) {
 			all[0].Config.CreatedAt, all[1].Config.CreatedAt, all[2].Config.CreatedAt)
 	}
 
-	// On-disk: subsequent Scan reads stamped values rather than restamping.
+	for _, name := range []string{"zeta", "alpha", "mu"} {
+		if _, err := os.Stat(filepath.Join(root, name, ".naozhi")); !os.IsNotExist(err) {
+			t.Errorf("Scan created %s/.naozhi (stat err = %v); order belongs in the index", name, err)
+		}
+	}
+
+	// Index: a later boot reads the stamped values rather than restamping.
 	first := []int64{all[0].Config.CreatedAt, all[1].Config.CreatedAt, all[2].Config.CreatedAt}
-	m2, _ := NewManager(root, PlannerDefaults{})
+	m2, _ := NewManager(root, PlannerDefaults{}, WithIndexPath(indexPath))
 	if err := m2.Scan(); err != nil {
 		t.Fatalf("second Scan: %v", err)
 	}

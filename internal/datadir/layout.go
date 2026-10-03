@@ -116,6 +116,12 @@ func (l Layout) NaozhiSettingsPath() string { return l.Join("naozhi-settings.jso
 // instance (docs note in internal/uiprefs).
 func (l Layout) UISettingsPath() string { return l.Join("ui-settings.json") }
 
+// ProjectsIndexPath is naozhi's per-project bookkeeping for projects.root
+// (<root>/projects-index.json): the sidebar order of projects whose
+// .naozhi/project.yaml carries none, so discovery never writes into a
+// project directory.
+func (l Layout) ProjectsIndexPath() string { return l.Join("projects-index.json") }
+
 // Cron-store siblings.
 
 // RunsRoot is the cron run-record root (<root>/runs), with per-job

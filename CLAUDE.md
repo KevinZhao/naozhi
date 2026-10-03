@@ -223,7 +223,7 @@ Naozhi supports aggregating sessions from multiple machines into a single dashbo
 
 ### Project Management
 
-When `projects.root` is configured, the `project.Manager` scans **every non-hidden subdirectory** (`os.ReadDir` + skip names starting with `.`). There is NO marker-file requirement — a bare directory is a valid project, pinned by `TestScan_PicksUpDirsWithoutCLAUDEMd`. Each project stores config in `.naozhi/project.yaml` (planner model, prompt, chat bindings); a project with no `.naozhi/project.yaml` simply uses defaults.
+When `projects.root` is configured, the `project.Manager` scans **every non-hidden subdirectory** (`os.ReadDir` + skip names starting with `.`). There is NO marker-file requirement — a bare directory is a valid project, pinned by `TestScan_PicksUpDirsWithoutCLAUDEMd`. Each project stores config in `.naozhi/project.yaml` (planner model, prompt, chat bindings); a project with no `.naozhi/project.yaml` simply uses defaults. Scan never writes into a project directory: `project.yaml` is created only by an explicit bind, favorite or config edit, and the sidebar order (`CreatedAt`) of projects whose yaml carries none lives in `<session state root>/projects-index.json` (`internal/project/index.go`), keyed by absolute path.
 
 Chat binding (`/project <name>`) routes plain messages to a planner session (`project:{name}:planner`) with the project directory as workspace. Agent commands still create per-chat sessions but use the project path. Planner sessions are exempt from TTL eviction and max_procs capacity.
 

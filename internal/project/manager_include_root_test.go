@@ -132,9 +132,7 @@ func TestResolveWorkspaces_IncludeRoot_LongestPrefixWins(t *testing.T) {
 }
 
 // The root project must NOT cause Scan to write a .naozhi/project.yaml into the
-// user's top-level workspace directory. The CreatedAt migration persists config
-// for every other zero-CreatedAt project, but the synthetic root project is
-// skipped (its CreatedAt is in-memory-only).
+// user's top-level workspace directory; its CreatedAt is in-memory-only.
 func TestScan_IncludeRoot_DoesNotWriteRootConfig(t *testing.T) {
 	t.Parallel()
 	parent := t.TempDir()
@@ -156,11 +154,10 @@ func TestScan_IncludeRoot_DoesNotWriteRootConfig(t *testing.T) {
 		t.Fatalf("unexpected stat error: %v", statErr)
 	}
 
-	// The subdirectory project's config IS expected to be written by the
-	// migration (it had no project.yaml → CreatedAt==0 → stamped+persisted).
-	subCfg := filepath.Join(root, "alpha", ".naozhi", "project.yaml")
-	if _, statErr := os.Stat(subCfg); statErr != nil {
-		t.Errorf("expected migration to persist alpha config at %s: %v", subCfg, statErr)
+	// Nor into a subdirectory project: its stamped CreatedAt stays in the index.
+	subCfg := filepath.Join(root, "alpha", ".naozhi")
+	if _, statErr := os.Stat(subCfg); !os.IsNotExist(statErr) {
+		t.Errorf("Scan created %s (stat err = %v); a project dir is never written by Scan", subCfg, statErr)
 	}
 
 	// Root must still carry an in-memory CreatedAt so sidebar sorting is stable.

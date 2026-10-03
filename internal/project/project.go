@@ -43,7 +43,8 @@ type ProjectConfig struct {
 	MemoryFile string `yaml:"memory_file,omitempty" json:"memory_file,omitempty"`
 
 	// CreatedAt (unix ms) anchors sidebar order: ascending, so new folders land
-	// at the bottom of their tier. Scan synthesises and persists it when missing.
+	// at the bottom of their tier. When missing, Scan synthesises it and keeps
+	// it in naozhi's projects index; Scan never writes this file.
 	CreatedAt int64 `yaml:"created_at,omitempty" json:"created_at,omitempty"`
 
 	PlannerModel  string `yaml:"planner_model,omitempty" json:"planner_model,omitempty"`
