@@ -431,12 +431,22 @@
   },
   {
     "method": "GET",
+    "path": "/static/cron_format.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/cron_live.js",
     "handler_type": "http.HandlerFunc"
   },
   {
     "method": "GET",
     "path": "/static/cron_schedule.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/cron_state.js",
     "handler_type": "http.HandlerFunc"
   },
   {

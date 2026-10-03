@@ -330,8 +330,8 @@ func TestCronLiveJS_RequiresAuth_TokenMode(t *testing.T) {
 // split out of dashboard.js with the WS manager (S18d2, #3024), and for
 // features.js (S19-P, #3025), event_render.js and ask_card.js (S19-3),
 // event_stream.js (S19-E), session_list.js (S19-5), session_ident.js and
-// icons.js (S20d, #3026), file_ref_parse.js (S20e), shell.js (S20f) and
-// backend_catalog.js (S20h).
+// icons.js (S20d, #3026), file_ref_parse.js (S20e), shell.js (S20f),
+// backend_catalog.js (S20h), and cron_state.js and cron_format.js (S20j).
 func TestWSModulesJS_RequiresAuth_TokenMode(t *testing.T) {
 	t.Parallel()
 	srv := newTestServerWithToken(&mockPlatform{}, "secret")
@@ -350,6 +350,8 @@ func TestWSModulesJS_RequiresAuth_TokenMode(t *testing.T) {
 		"file_ref_parse.js":  "fencedPathList",
 		"shell.js":           "registerShell",
 		"backend_catalog.js": "renderAccessProfilePicker",
+		"cron_state.js":      "cronRefetchFullJob",
+		"cron_format.js":     "formatWhenColloquial",
 	} {
 		req := httptest.NewRequest(http.MethodGet, "/static/"+name, nil)
 		w := httptest.NewRecorder()

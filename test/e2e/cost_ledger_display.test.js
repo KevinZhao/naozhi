@@ -12,7 +12,8 @@
 //     so (累计花费, not 近 30 天花费). The card repaints when the ledger
 //     lands, and the ledger is asked once per 30 s.
 //   - A cron job's drawer asks the ledger for that job alone and shows its
-//     30-day figure.
+//     30-day figure. The ledger fetch repaints the timeline itself: the
+//     drawer's open-time list refetch is held, so its repaint cannot.
 //
 // 跑法：cd test/e2e && npx playwright test cost_ledger_display.test.js --project=desktop-chrome
 
@@ -158,8 +159,12 @@ test('cron drawer asks the ledger for its job and shows the 30-day figure', asyn
   const { ctx, page, pageErrors } = await open(browser, mock);
   try {
     await page.click('#abnav-cron');
-    await page.locator('.cj-row[data-cron-id="cron-cost-1"]').click();
-    await expect(page.locator('.ct-cost-ledger')).toHaveText('30 天 $3.25', { timeout: 8000 });
+    const row = page.locator('.cj-row[data-cron-id="cron-cost-1"]');
+    await row.waitFor();
+    // Hold every later list refetch past its 8 s timeout.
+    await page.route((u) => u.pathname === '/api/cron' && u.searchParams.has('compact'), () => {});
+    await row.click();
+    await expect(page.locator('.ct-cost-ledger')).toHaveText('30 天 $3.25', { timeout: 5000 });
     expect(mock.costSummaryCalls).toContainEqual({ group_by: 'job', job_id: 'cron-cost-1' });
     expect(pageErrors).toEqual([]);
   } finally {

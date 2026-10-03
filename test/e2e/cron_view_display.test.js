@@ -3,9 +3,12 @@
 // cron 面板展示 bug 回归（fix/cron-view-display）：
 //   #1 执行历史：后端每 job 只嵌 5 条 recent_runs，前端不得因 `< 10` 误判
 //      "已到结尾"；首次「加载更多」必须真的请求 /api/cron/runs。
+//      反过来，少于 recent_runs_cap（列表响应下发）条即是全部历史：直接
+//      "已到结尾"，不再翻页请求。
 //   #2 行内详情：点 .ctr-detail 内部不得把行折叠。
 //   #3 时区：浏览器时区 ≠ 服务端时区时 schedule chip 带 (CST) 标注；相同则不带。
 //   #6 需关注 chip：rail 红点有 N，面板内必须有可点的「需关注 N」chip。
+//   #7 新建弹窗的「完成后通知我」提示列表响应下发的默认通知目标。
 //
 // 跑法：cd test/e2e && npx playwright test cron_view_display.test.js --project=desktop-chrome
 
@@ -234,5 +237,49 @@ test('行的 when 列与子行图标、面板的错过横幅 / 汇总 / 筛选�
   } finally {
     await ctx.close();
     mock.server.close();
+  }
+});
+
+test('#1 少于 recent_runs_cap 条 recent_runs 即全部历史：「已到结尾」，不请求 /api/cron/runs', async ({ browser }) => {
+  // No stats.total, so only the list response's recent_runs_cap (5) can tell
+  // that 3 embedded runs are the whole history.
+  const job = Object.assign(jobs()[0], { recent_runs: fiveRuns().slice(0, 3), stats: undefined });
+  const mock = await startMockServer({ cronJobs: [job] });
+  const ctx = await browser.newContext({ viewport: { width: 1600, height: 900 } });
+  const page = await ctx.newPage();
+  /** @type {string[]} */
+  const pages = [];
+  page.on('request', (r) => { if (/\/api\/cron\/runs\?job_id=/.test(r.url())) pages.push(r.url()); });
+  try {
+    await openCronDrawer(page, mock.url);
+    await expect(page.locator('#cron-timeline-panel .ctr')).toHaveCount(3);
+    await expect(page.locator('#cron-timeline-panel .ct-more-btn')).toHaveText('已到结尾');
+    await expect(page.locator('#cron-timeline-panel .ct-more-btn')).toBeDisabled();
+    expect(pages).toEqual([]);
+  } finally {
+    await ctx.close();
+    mock.server.close();
+  }
+});
+
+test('#7 新建弹窗提示列表响应里的默认通知目标，未配置时提示去配置', async ({ browser }) => {
+  for (const [meta, want] of [
+    [{ notify_default: { platform: 'feishu', chat_id: 'oc_***abcd' } }, '→ feishu (oc_***abcd)'],
+    [{}, /^未配置默认通知目标/],
+  ]) {
+    const mock = await startMockServer({ cronJobs: jobs(), cronListMeta: meta });
+    const ctx = await browser.newContext({ viewport: { width: 1600, height: 900 } });
+    const page = await ctx.newPage();
+    try {
+      await page.goto(mock.url + '/dashboard');
+      await page.waitForSelector('.session-card');
+      await page.click('#abnav-cron');
+      await page.waitForSelector('.cj-row');
+      await page.click('.cron-new-btn');
+      await expect(page.locator('.cron-modal #cron-notify-default-hint')).toHaveText(want);
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
   }
 });

@@ -5,7 +5,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { getToken } from './platform.js';
 import { INITIAL_HISTORY_LIMIT, sessionStream } from './session_stream.js';
 import { wsm } from './ws_manager.js';
-import { hooks, perSession, selection, sessionList, transcript } from './state.js';
+import { perSession, selection, sessionList, transcript } from './state.js';
 import { fetchJSON, nzViews, showToast } from './nz_util.js';
 import { eventAlreadyRendered, eventHtml, leadingTimeDivider, removeOptimisticMsg, renderEventsWithDividers } from './event_render.js';
 import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.js';
@@ -16,6 +16,7 @@ import { applyEventToTurnState, paintTurnElapsed, refreshBanner, resetTurnState,
 import { rollbackOptimisticRunning } from './send_message.js';
 import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, MAX_LIVE_DOM_EVENTS, lastDividerTime, showAPIError, stickEventsBottom, timeDividerHtml } from './utilities.js';
 import { isInternalEvent, sid } from './session_ident.js';
+import { isCronSessionFrozen } from './cron_state.js';
 
 export async function fetchEvents(full) {
   if (!selection.key) return;
@@ -745,7 +746,7 @@ const sessionFrames = {
     // Cron timed_out / failed 终态后丢弃后续 ghost 事件（CLI 子进程
     // 在 deadline 命中后还会再吐 result，但 cron run 已记录为终态，
     // 继续追加只会让用户看到"超时但还在工作"的分裂视觉）。
-    if (hooks.isCronSessionFrozen && hooks.isCronSessionFrozen(msg.key)) return;
+    if (isCronSessionFrozen(msg.key)) return;
     const ev = msg.event;
     if (!ev) return;
     if (ev.time > sessionStream.lastEventTimeWs) sessionStream.lastEventTimeWs = ev.time;

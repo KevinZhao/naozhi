@@ -77,10 +77,10 @@
     "lateBindings": 0
   },
   "cron_attention.js": {
-    "lines": 146,
+    "lines": 143,
     "maxFnLines": 23,
     "fnOver100": 0,
-    "topLevelLetVar": 1,
+    "topLevelLetVar": 0,
     "configureDeps": 0,
     "deadInjections": 0,
     "innerHTMLAssign": 0,
@@ -88,25 +88,36 @@
     "lateBindings": 0
   },
   "cron_drawer.js": {
-    "lines": 561,
+    "lines": 525,
     "maxFnLines": 70,
     "fnOver100": 0,
     "topLevelLetVar": 1,
-    "configureDeps": 14,
+    "configureDeps": 2,
     "deadInjections": 0,
     "innerHTMLAssign": 3,
     "htmlInsert": 0,
     "lateBindings": 0
   },
-  "cron_live.js": {
-    "lines": 195,
-    "maxFnLines": 24,
+  "cron_format.js": {
+    "lines": 146,
+    "maxFnLines": 29,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0,
     "deadInjections": 0,
     "innerHTMLAssign": 0,
     "htmlInsert": 0,
+    "lateBindings": 0
+  },
+  "cron_live.js": {
+    "lines": 322,
+    "maxFnLines": 24,
+    "fnOver100": 0,
+    "topLevelLetVar": 0,
+    "configureDeps": 0,
+    "deadInjections": 0,
+    "innerHTMLAssign": 5,
+    "htmlInsert": 2,
     "lateBindings": 0
   },
   "cron_schedule.js": {
@@ -120,38 +131,49 @@
     "htmlInsert": 0,
     "lateBindings": 0
   },
+  "cron_state.js": {
+    "lines": 270,
+    "maxFnLines": 64,
+    "fnOver100": 0,
+    "topLevelLetVar": 0,
+    "configureDeps": 0,
+    "deadInjections": 0,
+    "innerHTMLAssign": 0,
+    "htmlInsert": 0,
+    "lateBindings": 0
+  },
   "cron_timeline.js": {
-    "lines": 936,
+    "lines": 952,
     "maxFnLines": 70,
     "fnOver100": 0,
     "topLevelLetVar": 0,
-    "configureDeps": 7,
+    "configureDeps": 0,
     "deadInjections": 0,
     "innerHTMLAssign": 4,
     "htmlInsert": 0,
     "lateBindings": 0
   },
   "cron_trigger.js": {
-    "lines": 178,
+    "lines": 145,
     "maxFnLines": 38,
     "fnOver100": 0,
     "topLevelLetVar": 1,
-    "configureDeps": 1,
+    "configureDeps": 0,
     "deadInjections": 0,
     "innerHTMLAssign": 0,
     "htmlInsert": 0,
     "lateBindings": 0
   },
   "cron_view.js": {
-    "lines": 2601,
+    "lines": 2043,
     "maxFnLines": 103,
     "fnOver100": 1,
-    "topLevelLetVar": 11,
+    "topLevelLetVar": 8,
     "configureDeps": 0,
     "deadInjections": 0,
-    "innerHTMLAssign": 11,
-    "htmlInsert": 2,
-    "lateBindings": 3
+    "innerHTMLAssign": 6,
+    "htmlInsert": 0,
+    "lateBindings": 1
   },
   "dashboard.js": {
     "lines": 2910,
@@ -187,7 +209,7 @@
     "lateBindings": 0
   },
   "event_stream.js": {
-    "lines": 903,
+    "lines": 904,
     "maxFnLines": 74,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -385,8 +407,8 @@
     "lateBindings": 0
   },
   "shell.js": {
-    "lines": 23,
-    "maxFnLines": 9,
+    "lines": 30,
+    "maxFnLines": 8,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0,
@@ -418,7 +440,7 @@
     "lateBindings": 0
   },
   "state.js": {
-    "lines": 274,
+    "lines": 270,
     "maxFnLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -485,7 +507,7 @@
   },
   "_global": {
     "htmlSinks": 175,
-    "importCycles": 1,
+    "importCycles": 0,
     "unresolvedImports": 0,
     "reexports": 0,
     "leafImports": 0,

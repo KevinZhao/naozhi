@@ -22,17 +22,13 @@
     "split_view.js",
     "voice.js"
   ],
-  "cycleLegacy": [
-    "cron_attention.js",
-    "cron_drawer.js",
-    "cron_live.js",
-    "cron_trigger.js",
-    "cron_view.js"
-  ],
+  "cycleLegacy": [],
   "leaves": [
     "backend_catalog.js",
     "contract.js",
+    "cron_format.js",
     "cron_schedule.js",
+    "cron_state.js",
     "features.js",
     "file_ref_parse.js",
     "icons.js",

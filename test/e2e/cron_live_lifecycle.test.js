@@ -1,7 +1,8 @@
 // @ts-check
 // The cron-live channel's claims on subscribed / session_state / error, its
-// reset when the drawer switches jobs, and its resume after a reconnect (S18,
-// #3024). Pins the behaviour cron_live.js took over from wsm. A handler that
+// reset when the drawer switches jobs, its resume after a reconnect (S18,
+// #3024), and the freeze after a failed run (cron_state's frozen-run set,
+// S20j #3026). Pins the behaviour cron_live.js took over from wsm. A handler that
 // throws on a socket frame is caught by onmessage and logged as 'ws parse
 // error', not raised as a pageerror, so both are collected.
 const { test, expect } = require('@playwright/test');
@@ -139,6 +140,41 @@ test('a reconnect resumes the live stream of a running job and leaves a finished
   expect(subs(conn, 'cron:cron-001'), 'a finished job is not re-subscribed').toBe(0);
   await expect(status).toHaveText('已停止');
   await expect.poll(live).toEqual(['one-1', 'one-2']);
+  expect(pageErrors).toEqual([]);
+  await ctx.close();
+  mock.server.close();
+});
+
+test('a run that ends failed freezes its live stream until the next run starts', async ({ browser }) => {
+  const idle = { ...job('cron-002'), current_run: null };
+  const mock = await startMockServer({ ws: true, cronJobs: [job('cron-001'), idle] });
+  const ctx = await browser.newContext({ viewport: { width: 1600, height: 900 } });
+  const page = await ctx.newPage();
+  const pageErrors = collectErrors(page);
+  await page.goto(mock.url + '/dashboard');
+  await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+  await page.click('#abnav-cron');
+  await page.click('.cj-row[data-cron-id="cron-001"]');
+  await page.waitForSelector('#cron-live-events');
+  const conn = mock.wsConnections[mock.wsConnections.length - 1];
+  await expect.poll(() => subs(conn, 'cron:cron-001')).toBe(1);
+  const live = () => page.locator('#cron-live-events .event').evaluateAll((els) => els.map((e) => (e.textContent || '').trim()));
+  conn.send({ type: 'subscribed', key: 'cron:cron-001' });
+  conn.send({ type: 'history', key: 'cron:cron-001', events: [ev('one-1', T)] });
+  await expect.poll(live).toEqual(['one-1']);
+
+  mock.setCronJobs([{ ...job('cron-001'), current_run: null }, idle]);
+  conn.send({ type: 'run_ended', subsystem: 'cron', owner_id: 'cron-001', run_id: 'run-cron-001', state: 'failed', error_class: 'session_error', ended_at: Date.now() });
+  conn.send({ type: 'event', key: 'cron:cron-001', event: ev('ghost', T + 1) });
+  // Frames are handled in order: once cron-002's row runs, the ghost event
+  // before it has been handled too.
+  conn.send({ type: 'run_started', subsystem: 'cron', owner_id: 'cron-002', run_id: 'run-b', started_at: Date.now() });
+  await expect(page.locator('.cj-row.is-running[data-cron-id="cron-002"]')).toHaveCount(1);
+  await expect.poll(live, { message: 'a failed run drops the events its CLI still emits' }).toEqual(['one-1']);
+
+  conn.send({ type: 'run_started', subsystem: 'cron', owner_id: 'cron-001', run_id: 'run-2', started_at: Date.now() });
+  conn.send({ type: 'event', key: 'cron:cron-001', event: ev('two-1', T + 2) });
+  await expect.poll(live, { message: 'the next run of the job streams again' }).toEqual(['two-1']);
   expect(pageErrors).toEqual([]);
   await ctx.close();
   mock.server.close();
