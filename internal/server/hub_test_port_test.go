@@ -33,7 +33,7 @@ func newHubForTest(t testing.TB, opts HubOptions, eo sendEngineOpts) *Hub {
 	if opts.Scheduler != nil {
 		prompts = opts.Scheduler
 	}
-	eo.Turns = turn.New(turn.NewQueueWithMode(5, 0, turn.ModeCollect), turnSender{router: router, notify: bcast, prompts: prompts})
+	eo.Turns = turn.New(turn.QueueOptions{MaxDepth: 5}, turnSender{router: router, notify: bcast, prompts: prompts})
 	eo.Router = opts.Router
 	eo.Resolver = opts.Resolver
 	eo.AllowedRoot = opts.AllowedRoot
@@ -82,7 +82,7 @@ func TestNewHubForTest_RejectsMisplacedDeps(t *testing.T) {
 		"allowedRoot in eo":   {eo: sendEngineOpts{AllowedRoot: "/tmp/nz-root"}},
 		"ctx in eo":           {eo: sendEngineOpts{Ctx: context.Background()}},
 		"notify in eo":        {eo: sendEngineOpts{Notify: nopNotifier{}}},
-		"turns in eo":         {eo: sendEngineOpts{Turns: turn.New(turn.NewQueueWithMode(1, 0, turn.ModeCollect), turnSender{})}},
+		"turns in eo":         {eo: sendEngineOpts{Turns: turn.New(turn.QueueOptions{MaxDepth: 1}, turnSender{})}},
 	}
 	for name, c := range cases {
 		func() {

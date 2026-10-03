@@ -89,7 +89,7 @@ func (s *Server) buildWSStack(w *wiring) *Hub {
 	if s.router != nil {
 		router = s.router
 	}
-	w.turns = turn.New(w.msgQueue, turnSender{router: router, notify: w.bcast, prompts: w.scheduler})
+	w.turns = turn.New(w.queue, turnSender{router: router, notify: w.bcast, prompts: w.scheduler})
 	w.engine = newSendEngine(sendEngineOpts{
 		Turns:       w.turns,
 		Ctx:         s.appCtx,

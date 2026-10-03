@@ -24,11 +24,11 @@ import (
 const reactorKey = "fake:direct:chat1:general"
 
 // newReactorDispatcher wires a fakeReactorPlatform into a Dispatcher whose
-// Turns run on q through sender.
-func newReactorDispatcher(t *testing.T, q *turn.Queue, sender *testSender) (*Dispatcher, *fakeReactorPlatform) {
+// Turns run on a queue built from qo, through sender.
+func newReactorDispatcher(t *testing.T, qo turn.QueueOptions, sender *testSender) (*Dispatcher, *fakeReactorPlatform) {
 	t.Helper()
 	rp := &fakeReactorPlatform{}
-	d := newTestDispatcher(&fakePlatform{}, withQueue(q), withSender(sender))
+	d := newTestDispatcher(&fakePlatform{}, withQueue(qo), withSender(sender))
 	d.platforms = map[string]platform.Platform{"fake": rp}
 	return d, rp
 }
@@ -41,12 +41,15 @@ func reactorMsg(id, text string) platform.IncomingMessage {
 	return m
 }
 
-// queueIM parks one IM request per id behind whoever owns reactorKey, each
-// with its own imOrigin, as Submit would for a message that arrived busy.
-func queueIM(d *Dispatcher, q *turn.Queue, ids ...string) {
+// queueIM submits one IM request per id behind whoever owns reactorKey, each
+// with its own imOrigin, so each is queued and gets its ⏳ on admission.
+func queueIM(t *testing.T, d *Dispatcher, ids ...string) {
+	t.Helper()
 	for _, id := range ids {
 		o := d.newIMOrigin(reactorMsg(id, id), slog.Default(), reactorKey, "general", session.AgentOpts{}, imMessage, len(id), 0)
-		q.Enqueue(reactorKey, turn.Msg{Text: id, MessageID: id, Origin: o})
+		if ack := d.turns.Submit(context.Background(), turn.Request{Key: reactorKey, Text: id, Origin: o}, parkedAdmission{}); ack != turn.AckQueued {
+			t.Errorf("queueIM %s: ack %d, want AckQueued (nothing owns %s)", id, ack, reactorKey)
+		}
 	}
 }
 
@@ -70,10 +73,9 @@ func wantRemoved(t *testing.T, rp *fakeReactorPlatform, want ...string) {
 
 // TestReset_ClearsQueuedReactions covers the /new + /clear path.
 func TestReset_ClearsQueuedReactions(t *testing.T) {
-	q := turn.NewQueueWithMode(8, 0, turn.ModeCollect)
-	d, rp := newReactorDispatcher(t, q, &testSender{})
-	q.Enqueue(reactorKey, turn.Msg{Text: "owner"}) // the running owner
-	queueIM(d, q, "m1", "m2")
+	d, rp := newReactorDispatcher(t, turn.QueueOptions{MaxDepth: 8}, &testSender{})
+	holdKey(t, d, reactorKey) // the running owner
+	queueIM(t, d, "m1", "m2")
 
 	d.BuildHandler()(context.Background(), reactorMsg("m3", "/new"))
 
@@ -84,17 +86,16 @@ func TestReset_ClearsQueuedReactions(t *testing.T) {
 // path: the turn ctx is cancelled while a follow-up sits in the queue. The
 // hour-long collect delay leaves ctx.Done as the loop's only way out.
 func TestOwnerLoopCtxDone_ClearsQueuedReactions(t *testing.T) {
-	q := turn.NewQueueWithMode(8, time.Hour, turn.ModeCollect)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var d *Dispatcher
 	sender := &testSender{}
 	sender.getOrCreate = func(context.Context, string, session.AgentOpts) (turn.Session, session.SessionStatus, error) {
-		queueIM(d, q, "m1")
+		queueIM(t, d, "m1")
 		cancel()
 		return nil, 0, errors.New("first turn fails cleanly")
 	}
-	d, rp := newReactorDispatcher(t, q, sender)
+	d, rp := newReactorDispatcher(t, turn.QueueOptions{MaxDepth: 8, CollectDelay: time.Hour}, sender)
 
 	runIMTurn(ctx, d, reactorKey, "owner", reactorMsg("m0", "owner"), true)
 
@@ -106,14 +107,13 @@ func TestOwnerLoopCtxDone_ClearsQueuedReactions(t *testing.T) {
 // messages the panic dropped must clear — and the owner's own message, which
 // never got one, is left alone.
 func TestOwnerLoopPanic_ClearsQueuedReactions(t *testing.T) {
-	q := turn.NewQueueWithMode(8, 0, turn.ModeCollect)
 	var d *Dispatcher
 	sender := &testSender{}
 	sender.getOrCreate = func(context.Context, string, session.AgentOpts) (turn.Session, session.SessionStatus, error) {
-		queueIM(d, q, "m1", "m2")
+		queueIM(t, d, "m1", "m2")
 		panic("boom")
 	}
-	d, rp := newReactorDispatcher(t, q, sender)
+	d, rp := newReactorDispatcher(t, turn.QueueOptions{MaxDepth: 8}, sender)
 
 	runIMTurn(context.Background(), d, reactorKey, "owner", reactorMsg("m0", "owner"), true)
 
@@ -127,18 +127,17 @@ func TestOwnerLoopPanic_ClearsQueuedReactions(t *testing.T) {
 // reaction-cache TTL (feishu: 12h). The first turn fails cleanly; the drain
 // turn's GetOrCreate panics.
 func TestOwnerLoopDrainPanic_ClearsDrainedBatchReactions(t *testing.T) {
-	q := turn.NewQueueWithMode(8, 0, turn.ModeCollect)
 	var d *Dispatcher
 	var calls atomic.Int64
 	sender := &testSender{}
 	sender.getOrCreate = func(context.Context, string, session.AgentOpts) (turn.Session, session.SessionStatus, error) {
 		if calls.Add(1) == 1 {
-			queueIM(d, q, "m1")
+			queueIM(t, d, "m1")
 			return nil, 0, errors.New("first turn fails cleanly")
 		}
 		panic("boom during drained turn")
 	}
-	d, rp := newReactorDispatcher(t, q, sender)
+	d, rp := newReactorDispatcher(t, turn.QueueOptions{MaxDepth: 8}, sender)
 
 	runIMTurn(context.Background(), d, reactorKey, "owner", reactorMsg("m0", "owner"), true)
 
@@ -152,8 +151,7 @@ func TestOwnerLoopDrainPanic_ClearsDrainedBatchReactions(t *testing.T) {
 // turn never enters a drain batch, so its delivery clears the ⏳ its
 // admission put on the message.
 func TestDetachedTurn_ClearsItsOwnReaction(t *testing.T) {
-	q := turn.NewQueueWithMode(8, 0, turn.ModePassthrough)
-	d, rp := newReactorDispatcher(t, q, &testSender{
+	d, rp := newReactorDispatcher(t, turn.QueueOptions{MaxDepth: 8, Mode: turn.ModePassthrough}, &testSender{
 		send: func(context.Context, string, turn.Session, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
 			return nil, errors.New("fast fail")
 		},
@@ -182,28 +180,3 @@ func TestDetachedTurn_ClearsItsOwnReaction(t *testing.T) {
 type fakeSession struct{}
 
 func (fakeSession) Backend() string { return "claude" }
-
-// TestDiscardAndReturn_ReturnsQueuedFIFO pins the queue-level contract that
-// powers the fix: DiscardAndReturn surfaces the dropped messages in FIFO
-// order while still tearing the queue down (ring emptied, ownership released).
-func TestDiscardAndReturn_ReturnsQueuedFIFO(t *testing.T) {
-	q := turn.NewQueueWithMode(8, 0, turn.ModeCollect)
-	const key = "k"
-	q.Enqueue(key, turn.Msg{Text: "owner", MessageID: "m0"})
-	q.Enqueue(key, turn.Msg{Text: "a", MessageID: "m1"})
-	q.Enqueue(key, turn.Msg{Text: "b", MessageID: "m2"})
-
-	dropped := q.DiscardAndReturn(key)
-	if len(dropped) != 2 || dropped[0].MessageID != "m1" || dropped[1].MessageID != "m2" {
-		t.Fatalf("DiscardAndReturn FIFO contract broken: %+v", dropped)
-	}
-	// A subsequent DiscardAndReturn on the now-empty queue returns nil.
-	if again := q.DiscardAndReturn(key); again != nil {
-		t.Errorf("expected nil on empty queue, got %+v", again)
-	}
-	// Ownership was released: the next Enqueue becomes owner instead of
-	// queueing behind the discarded turn.
-	if isOwner, _, _, _, _ := q.Enqueue(key, turn.Msg{Text: "next"}); !isOwner {
-		t.Error("DiscardAndReturn did not release ownership: next Enqueue did not become owner")
-	}
-}

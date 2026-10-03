@@ -92,12 +92,12 @@ func (f *fakePlatform) allReplies() []string {
 // ---------------------------------------------------------------------------
 
 // testDispatcherConfig is what a dispatcherTestOption edits: the
-// DispatcherConfig plus the queue and Sender newTestDispatcher builds the
-// dispatcher's turn.Orchestrator from, so every test runs IM turns through
-// the real orchestrator.
+// DispatcherConfig plus the queue options and Sender newTestDispatcher builds
+// the dispatcher's turn.Orchestrator from, so every test runs IM turns
+// through the real orchestrator.
 type testDispatcherConfig struct {
 	DispatcherConfig
-	queue  *turn.Queue
+	queue  turn.QueueOptions
 	sender *testSender
 }
 
@@ -108,9 +108,9 @@ func withSendFn(fn func(context.Context, string, turn.Session, string, []clieven
 	return func(cfg *testDispatcherConfig) { cfg.sender.send = fn }
 }
 
-// withQueue replaces the default collect-mode queue.
-func withQueue(q *turn.Queue) dispatcherTestOption {
-	return func(cfg *testDispatcherConfig) { cfg.queue = q }
+// withQueue replaces the default collect-mode queue options.
+func withQueue(qo turn.QueueOptions) dispatcherTestOption {
+	return func(cfg *testDispatcherConfig) { cfg.queue = qo }
 }
 
 // withRouter makes r both the dispatcher's SessionRouter and the router the
@@ -144,7 +144,7 @@ func newTestDispatcher(fp *fakePlatform, opts ...dispatcherTestOption) *Dispatch
 			NoOutputTimeout:       5 * time.Second,
 			TotalTimeout:          30 * time.Second,
 		},
-		queue:  turn.NewQueueWithMode(5, 0, turn.ModeCollect),
+		queue:  turn.QueueOptions{MaxDepth: 5},
 		sender: &testSender{router: router},
 	}
 	for _, opt := range opts {
@@ -162,7 +162,24 @@ func newTestDispatcher(fp *fakePlatform, opts ...dispatcherTestOption) *Dispatch
 
 // testTurns is a Turns for construction-only tests that never run a turn.
 func testTurns() Turns {
-	return turn.New(turn.NewQueueWithMode(5, 0, turn.ModeCollect), &testSender{})
+	return turn.New(turn.QueueOptions{MaxDepth: 5}, &testSender{})
+}
+
+// holdKey makes key look mid-turn: it takes the owner slot with a turn that
+// never runs, so the next message for key queues behind it (or, with the
+// queue disabled, is dropped).
+func holdKey(t testing.TB, d *Dispatcher, key string) {
+	t.Helper()
+	if ack := d.turns.Submit(context.Background(), turn.Request{Key: key, Text: "running"}, parkedAdmission{}); ack != turn.AckOwner {
+		t.Fatalf("holdKey: %q already has an owner (ack %d)", key, ack)
+	}
+}
+
+// parkedAdmission admits a run and never starts it.
+type parkedAdmission struct{}
+
+func (parkedAdmission) Admit(turn.RunKind) (func(fn func(context.Context)), bool) {
+	return func(func(context.Context)) {}, true
 }
 
 // inlineAdmission runs every turn on the caller's goroutine, so a test that
@@ -545,12 +562,11 @@ func TestBuildHandler_PathSlash_NotUnknown(t *testing.T) {
 // an ack reply, not the disabled-queue "正在处理" text.
 func TestBuildHandler_QueueBusy_SecondMessageQueued(t *testing.T) {
 	fp := &fakePlatform{}
-	q := turn.NewQueueWithMode(5, 0, turn.ModeCollect)
-	d := newTestDispatcher(fp, withQueue(q))
+	d := newTestDispatcher(fp)
 	key := session.SessionKey("fake", "direct", "chat1", "general")
 	// Pre-acquire ownership of key, as if a first message's owner loop were
 	// already running.
-	q.Enqueue(key, turn.Msg{Text: "first", EnqueueAt: time.Now()})
+	holdKey(t, d, key)
 	d.BuildHandler()(context.Background(), incomingMsg("hello"))
 	if !strings.Contains(fp.lastReply(), "消息已收到") {
 		t.Errorf("expected queued ack, got %q", fp.lastReply())
@@ -563,11 +579,10 @@ func TestBuildHandler_QueueBusy_SecondMessageQueued(t *testing.T) {
 
 func TestBuildHandler_QueueDrop_Notify(t *testing.T) {
 	fp := &fakePlatform{}
-	q := turn.NewQueueWithMode(0, 0, turn.ModeCollect)
-	d := newTestDispatcher(fp, withQueue(q))
+	d := newTestDispatcher(fp, withQueue(turn.QueueOptions{}))
 	// Mark session busy
 	key := session.SessionKey("fake", "direct", "chat1", "general")
-	q.Enqueue(key, turn.Msg{Text: "busy", EnqueueAt: time.Now()})
+	holdKey(t, d, key)
 	d.BuildHandler()(context.Background(), platform.IncomingMessage{
 		Platform: "fake", EventID: "e2", UserID: "u1",
 		ChatID: "chat1", ChatType: "direct", Text: "second",
@@ -778,16 +793,6 @@ func TestReplyTracker_WaitReady_CtxCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("waitReady should return on context cancel")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// CollectDelay
-// ---------------------------------------------------------------------------
-
-func TestCollectDelay(t *testing.T) {
-	if got := turn.NewQueueWithMode(5, 200*time.Millisecond, turn.ModeCollect).CollectDelay(); got != 200*time.Millisecond {
-		t.Errorf("CollectDelay = %v, want 200ms", got)
 	}
 }
 

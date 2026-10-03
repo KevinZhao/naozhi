@@ -58,7 +58,7 @@ cmd/naozhi/main.go
   -> session      Session router、并发控制、TTL、持久化恢复；子包 agentlink/api/backendstore/runhistory/sessiontable/sessionview/spawnpool/workspacestore/knownids
   -> routerrelay  Router 通知与 cost-run 归属的一次性绑定转发器（断开 router↔hub/scheduler 构造环）
   -> dispatch     IM 消息处理 + slash 命令；每条消息经 Turns 端口交给 turn.Orchestrator（IM origin/delivery 在 im_origin.go）
-  -> turn         per-session 消息队列 + 合并（Queue/Msg/Mode/ParseMode/Coalesce）+ Orchestrator（Submit/Reset：owner loop、按 Sink 去重投递、detached 轮、panic 恢复；端口 Origin/Delivery/Sender/Admission）+ /new /clear /urgent 解析（Parse）；dispatch 和 server 的 dashboard 发送（dash_origin.go 的 wsOrigin/httpOrigin）共用同一个 Orchestrator 与 Queue 实例；server 的 turnSender 实现 Sender；不 import dispatch/server/platform/session
+  -> turn         Orchestrator（Submit/Reset/ShouldNotify/Cleanup：owner loop、按 Sink 去重投递、detached 轮、panic 恢复；端口 Origin/Delivery/Sender/Admission）+ 它独占的 per-session 消息队列（非导出，`turn.New` 按 QueueOptions 构造；Msg/Mode/ParseMode/Coalesce）+ /new /clear /urgent 解析（Parse）；dispatch 和 server 的 dashboard 发送（dash_origin.go 的 wsOrigin/httpOrigin）共用同一个 Orchestrator；server 的 turnSender 实现 Sender；不 import dispatch/server/platform/session
   -> platform     Platform 接口 + feishu/slack/discord/weixin 子包
   -> server       HTTP server、路由注册、WebSocket hub、REST API
   -> dashboard    dashboard handler 子包群（auth/cron/cronview/discovery/project/session/ext/*；httputil 叶子）
@@ -211,7 +211,7 @@ Each session is independent: owns one long-lived CLI process, maintains separate
 
 Command routing: `/review xxx` -> `code-reviewer` agent, `/research xxx` -> `researcher` agent, plain messages -> `general` agent (or planner if chat is project-bound). `/new` resets general; `/new review` resets code-reviewer. `/cd <path>` changes working directory for all sessions in a chat. `/project <name>` binds a chat to a project.
 
-**Session guard**: Only one message is processed per session at a time (`sessionGuard` with `sync.Map`). Duplicate messages are rejected; busy sessions reply "please wait" with 3s rate-limiting.
+**One turn per session**: `turn.Orchestrator` runs one owner loop per session key; a message for a busy key is queued (and merged into the next turn) rather than rejected, and the IM "message received" notice is rate-limited to once per 3s (`ShouldNotify`). Duplicate deliveries are dropped by `platform.Dedup`.
 
 ### Multi-Node Architecture
 
@@ -332,7 +332,7 @@ Config describes schema v2 only. The v1 keys (`nodes`, `session.workspace`, `ses
 
 - **The session table** (`internal/session/sessiontable`: sessions + chat / key-hash / session-ID indices) owns its lock, which also guards the router state that changes atomically with it (spawn bookkeeping, workspace overrides, picks). The only way in is a transaction — `r.ss.View` / `r.ss.Update`, plus `Load` / `Count` and the lock-free `Active` / `Gen` — and a `Tx` used after its callback panics. Slow work inside a transaction runs in `tx.Unlocked` (closing a process, waiting for a socket); a spawn reserves in the caller's transaction (`reserveSpawn`) and finishes outside it (`completeSpawn`, one commit transaction). Shutdown waits with `tx.Wait`.
 - **ManagedSession.sendMu** serializes Send() calls and protects session_id capture.
-- **sessionGuard** (`sync.Map`) prevents goroutine accumulation -- one message per session at a time.
+- **turn's queue** (`internal/turn`, one `sync.RWMutex`) gives each session key one owner loop; everything else for the key queues behind it, so goroutines do not pile up per session.
 - **Hub.mu** protects WebSocket client set and subscriptions. `nodesMu` (shared with Server) protects the nodes map.
 - Node cache is a separate `nodeCacheMu` to avoid blocking dashboard API.
 - Process Close() is always called outside router lock to prevent deadlock.

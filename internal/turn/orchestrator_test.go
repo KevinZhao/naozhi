@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
@@ -158,7 +159,7 @@ func TestReset_DropsThenDiscardsPendingThenResets(t *testing.T) {
 	h.o.Reset(context.Background(), "k", true)
 
 	h.rec.assertOrder(t, "dropped:b:reset", "dropped:c:reset", "discardPending:k:session reset", "reset:k:true")
-	if isOwner, _, _, _, _ := h.q.Enqueue("k", Msg{}); !isOwner {
+	if isOwner, _, _, _ := h.q.enqueueTuple("k", Msg{}); !isOwner {
 		t.Fatal("key still owned after Reset")
 	}
 }
@@ -178,16 +179,26 @@ func TestReset_PanickingDroppedStillTellsTheRest(t *testing.T) {
 	h.rec.assertOrder(t, "dropped:b:reset", "dropped:c:reset", "reset:k:false")
 }
 
-// TestShouldNotifyAndCleanup: both delegate to the Queue.
+// TestNew_QueueFromOptions: New builds the queue from every QueueOptions
+// field, so the composition root's config reaches the drain loop.
+func TestNew_QueueFromOptions(t *testing.T) {
+	t.Parallel()
+	o := New(QueueOptions{MaxDepth: 3, CollectDelay: 200 * time.Millisecond, Mode: ModeInterrupt}, nil)
+	if o.q.maxDepth != 3 || o.q.collectDelay != 200*time.Millisecond || o.q.mode != ModeInterrupt {
+		t.Fatalf("queue = maxDepth %d, collectDelay %v, mode %d; want 3, 200ms, ModeInterrupt", o.q.maxDepth, o.q.collectDelay, o.q.mode)
+	}
+}
+
+// TestShouldNotifyAndCleanup: both delegate to the queue.
 func TestShouldNotifyAndCleanup(t *testing.T) {
 	t.Parallel()
 	h := newHarness(8, ModeCollect)
 	if !h.o.ShouldNotify("k") || h.o.ShouldNotify("k") {
-		t.Fatal("ShouldNotify is not the Queue's 3s cooldown")
+		t.Fatal("ShouldNotify is not the queue's 3s cooldown")
 	}
 	h.q.Enqueue("k", Msg{Text: "running"})
 	h.o.Cleanup("k")
-	if isOwner, _, _, gen, _ := h.q.Enqueue("k", Msg{}); !isOwner || gen != 0 {
+	if isOwner, _, _, gen := h.q.enqueueTuple("k", Msg{}); !isOwner || gen != 0 {
 		t.Fatalf("after Cleanup Enqueue = owner %v gen %d, want a fresh entry", isOwner, gen)
 	}
 }
@@ -246,7 +257,7 @@ func TestOrchestrator_ConcurrentSubmits(t *testing.T) {
 			}
 		}
 	}
-	if isOwner, _, _, _, _ := h.q.Enqueue("k", Msg{}); !isOwner {
+	if isOwner, _, _, _ := h.q.enqueueTuple("k", Msg{}); !isOwner {
 		t.Fatal("key still owned after every owner loop returned")
 	}
 }

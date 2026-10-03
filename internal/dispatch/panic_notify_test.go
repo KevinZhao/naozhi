@@ -8,10 +8,11 @@ package dispatch
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/turn"
@@ -53,21 +54,38 @@ func TestTurnPanic_SendsReplyToUser(t *testing.T) {
 func TestTurnPanic_DiscardsQueue(t *testing.T) {
 	t.Parallel()
 	fp := &fakePlatform{}
-	q := turn.NewQueueWithMode(5, 0, turn.ModeCollect)
 	key := session.SessionKey("fake", "direct", "chat-panic", "general")
-	d := newTestDispatcher(fp, withQueue(q), withSender(panickingSender(func() {
-		if _, enqueued, _, _, _ := q.Enqueue(key, turn.Msg{Text: "m2", EnqueueAt: time.Now()}); !enqueued {
-			t.Error("setup: m2 was not queued behind the owner")
-		}
-	})))
-
-	runIMTurn(context.Background(), d, key, "m1", testIncomingMsg(), true)
-
-	if dropped := q.DiscardAndReturn(key); dropped != nil {
-		t.Errorf("queue after panic recover still holds %d messages, want 0 (Discard not invoked)", len(dropped))
+	ctx := context.Background()
+	var d *Dispatcher
+	var panicked bool
+	var sent []string // the texts of the turns after the panic
+	sender := &testSender{
+		getOrCreate: func(context.Context, string, session.AgentOpts) (turn.Session, session.SessionStatus, error) {
+			if !panicked {
+				panicked = true
+				if ack := d.turns.Submit(ctx, turn.Request{Key: key, Text: "m2"}, parkedAdmission{}); ack != turn.AckQueued {
+					t.Errorf("setup: m2 ack %d, want queued behind the owner", ack)
+				}
+				panic("synthetic test panic")
+			}
+			return fakeSession{}, session.SessionExisting, nil
+		},
+		send: func(_ context.Context, _ string, _ turn.Session, text string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+			sent = append(sent, text)
+			return &clievent.SendResult{Text: "ok"}, nil
+		},
 	}
-	if isOwner, _, _, _, _ := q.Enqueue(key, turn.Msg{Text: "next"}); !isOwner {
-		t.Error("the panicked owner still holds the key: next Enqueue did not become owner")
+	d = newTestDispatcher(fp, withSender(sender))
+
+	runIMTurn(ctx, d, key, "m1", testIncomingMsg(), true)
+
+	// The panicked owner released the key, so the next message owns it; and
+	// the recovery discarded m2, so no drain turn after it carries m2.
+	if ack := d.turns.Submit(ctx, turn.Request{Key: key, Text: "next"}, inlineAdmission{ctx}); ack != turn.AckOwner {
+		t.Fatalf("next message ack %d after the panic, want AckOwner (the panicked owner still holds the key)", ack)
+	}
+	if !slices.Equal(sent, []string{"next"}) {
+		t.Errorf("turns after the panic sent %q, want only [next] (m2 was not discarded)", sent)
 	}
 }
 

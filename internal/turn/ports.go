@@ -15,7 +15,7 @@ const (
 	// ModePassthrough) handed to the CLI's own command queue.
 	PriorityNormal Priority = iota
 	// PriorityNow is /urgent: the CLI aborts the in-flight turn and runs this
-	// message next. It never enters the Queue.
+	// message next. It never enters the queue.
 	PriorityNow
 )
 
@@ -37,13 +37,13 @@ const (
 	// AckOwner: the session was idle; this request runs now and its caller's
 	// Admission carries the owner loop that drains whatever queues behind it.
 	AckOwner Ack = iota
-	// AckQueued: the session was busy; the request waits in the Queue and
+	// AckQueued: the session was busy; the request waits in the queue and
 	// joins the next merged turn.
 	AckQueued
 	// AckDetached: the request runs as its own turn outside the owner loop
 	// (ModePassthrough, or PriorityNow).
 	AckDetached
-	// AckDropped: the session was busy and the Queue is disabled (MaxDepth<=0).
+	// AckDropped: the session was busy and the queue is disabled (MaxDepth<=0).
 	AckDropped
 	// AckShuttingDown: the Admission declined the turn.
 	AckShuttingDown

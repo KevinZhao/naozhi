@@ -64,7 +64,7 @@ func pickTakeoverCandidate(discovered []discovery.DiscoveredSession, workspace s
 
 // tryAutoTakeover looks for an external Claude CLI session whose CWD matches the
 // chat's effective workspace and transparently adopts it under naozhi management.
-// Must be called inside the sessionGuard critical section (after TryAcquire).
+// Called before an IM turn's session lookup on a first turn (imDelivery).
 // Returns true when a session was successfully taken over.
 func (s *Server) tryAutoTakeover(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool {
 	if s.claudeDir == "" {

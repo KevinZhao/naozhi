@@ -4,7 +4,7 @@ import "context"
 
 // runDetached runs r as its own turn outside the owner loop: a passthrough
 // send the CLI's command queue orders, or a PriorityNow preemption. It never
-// touches the Queue except on panic, where — like an owner-loop panic — it
+// touches the queue except on panic, where — like an owner-loop panic — it
 // discards key's queue, and it does not call NotifyIdle, since it never held
 // the key.
 func (o *Orchestrator) runDetached(ctx context.Context, r Request) {

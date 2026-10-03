@@ -211,14 +211,27 @@ func TestTurnParity09_Dash_DetachedTurnPanicIsRecovered(t *testing.T) {
 	}
 }
 
-// rebuiltEngine builds a second send engine over h's queue, router and
-// broadcaster, its turns on a fresh Orchestrator over that queue with sender
-// in front.
+// keyIsFree reports whether parityKey has no owner: a probe request takes the
+// owner slot (released again) instead of queueing behind one. In passthrough
+// mode every request is detached and no owner exists to leak, so it is free.
+func (h *parityHarness) keyIsFree(t *testing.T) bool {
+	t.Helper()
+	turns := h.hs.wiring.turns
+	ack := turns.Submit(context.Background(), turn.Request{Key: parityKey, Text: "probe"}, neverRunAdmission{})
+	if ack == turn.AckOwner {
+		turns.Cleanup(parityKey)
+	}
+	return ack == turn.AckOwner || ack == turn.AckDetached
+}
+
+// rebuiltEngine builds a second send engine over h's router and broadcaster,
+// its turns on a fresh Orchestrator, with h's queue options, with sender in
+// front.
 func (h *parityHarness) rebuiltEngine(t *testing.T, sender turn.Sender) *sendEngine {
 	t.Helper()
 	w := h.hs.wiring
 	e := newSendEngine(sendEngineOpts{
-		Turns:    turn.New(w.msgQueue, sender),
+		Turns:    turn.New(w.queue, sender),
 		Ctx:      h.srv.appCtx,
 		Router:   h.router,
 		Resolver: w.resolver,
@@ -331,11 +344,9 @@ func TestTurnParity13_Dash_ShutdownDrainDiscardsQueue(t *testing.T) {
 	turns.answer(okTurn("R1"))
 	h.waitEngineIdle()
 	turns.noMoreTurns(t)
-	q := h.hs.wiring.msgQueue
-	if isOwner, _, _, _, _ := q.Enqueue(parityKey, turn.Msg{Text: "probe"}); !isOwner {
+	if !h.keyIsFree(t) {
 		t.Fatal("dashboard owner exiting on ctx cancel left the key owned")
 	}
-	q.Discard(parityKey)
 	if acks := ws.errorAcks(); len(acks) != 0 {
 		t.Fatalf("discarded dashboard message got error acks %+v, want none", acks)
 	}
@@ -492,11 +503,9 @@ func TestTurnParity25_Dash_ShutdownAdmissionBusy(t *testing.T) {
 				t.Fatalf("ack during shutdown = %q, want busy", s)
 			}
 			turns.noMoreTurns(t)
-			q := h.hs.wiring.msgQueue
-			if isOwner, _, _, _, _ := q.Enqueue(parityKey, turn.Msg{Text: "probe"}); !isOwner {
+			if !h.keyIsFree(t) {
 				t.Fatal("a send refused during shutdown left the key owned")
 			}
-			q.Discard(parityKey)
 		})
 	}
 }
@@ -548,16 +557,15 @@ func TestTurnParity27_Dash_CronPromptAutosave(t *testing.T) {
 	}
 }
 
+// Row 28: the legacy paths are gone and session.Guard with them (#3004 E),
+// so a fallback around the queue no longer compiles; a busy dashboard send is
+// queued behind the owner.
 func TestTurnParity28_Dash_QueuePathNotLegacy(t *testing.T) {
 	h := newParityHarness(t, parityOpts{})
 	turns := h.session(parityKey, false)
 	ws := h.ws()
 	ws.send("w1", "first")
 	turns.next(t, "owner turn")
-	if !h.hs.wiring.sessionGuard.TryAcquire(parityKey) {
-		t.Fatal("session.Guard is held during a dashboard owner turn: the legacy path is in use")
-	}
-	h.hs.wiring.sessionGuard.Release(parityKey)
 	if s := h.httpSend(t, "second"); s != "queued" {
 		t.Fatalf("HTTP send while busy = %q, want queued", s)
 	}

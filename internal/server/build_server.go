@@ -84,13 +84,12 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	// Dependencies only the build steps below read: they reach the dispatcher,
 	// the Hub and the handlers through hs.wiring and are not kept on Server.
 	w := &wiring{
-		dedup:        platform.NewDedup(defaultDedupCapacity),
-		sessionGuard: session.NewGuard(),
-		msgQueue: turn.NewQueueWithMode(
-			opts.Queue.MaxDepth,
-			opts.Queue.CollectDelay,
-			turn.ParseMode(opts.Queue.Mode),
-		),
+		dedup: platform.NewDedup(defaultDedupCapacity),
+		queue: turn.QueueOptions{
+			MaxDepth:     opts.Queue.MaxDepth,
+			CollectDelay: opts.Queue.CollectDelay,
+			Mode:         turn.ParseMode(opts.Queue.Mode),
+		},
 		startedAt:     time.Now(),
 		agents:        agents,
 		agentCommands: agentCommands,
@@ -288,11 +287,11 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 	sessionH.WarmHistoryCache()
 	// Router.Reset/Remove hook (LRU eviction deliberately does not fire it),
 	// registered once AFTER sessionH exists so the fan-out is never
-	// half-wired while WarmHistoryCache runs: msgQueue.Cleanup frees the
+	// half-wired while WarmHistoryCache runs: turns.Cleanup frees the
 	// per-session FIFO entry; RecordRetired stamps the session and makes it
 	// visible to the history popover within one poll.
 	if opts.Relays.Router != nil {
-		msgCleanup := w.msgQueue.Cleanup
+		msgCleanup := w.turns.Cleanup
 		opts.Relays.Router.BindKeyRetired(func(key, sessionID string) {
 			msgCleanup(key)
 			sessionH.RecordRetired(sessionID)

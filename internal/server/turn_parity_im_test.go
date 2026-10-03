@@ -254,8 +254,9 @@ func (h *parityHarness) turnSender() turnSender {
 	return turnSender{router: h.router, notify: h.hs.wiring.bcast}
 }
 
-// rebuiltIM builds a second dispatcher over h's Server state, its turns on
-// the Server's queue, with sender and caps swapped in.
+// rebuiltIM builds a second dispatcher over h's Server state, its turns on a
+// fresh Orchestrator with the Server's queue options, sender and caps
+// swapped in.
 func (h *parityHarness) rebuiltIM(t *testing.T, sender turn.Sender, caps dispatch.Capabilities) platform.MessageHandler {
 	t.Helper()
 	w := h.hs.wiring
@@ -264,7 +265,7 @@ func (h *parityHarness) rebuiltIM(t *testing.T, sender turn.Sender, caps dispatc
 		Platforms:    h.srv.platforms,
 		Agents:       w.agents,
 		Resolver:     w.resolver,
-		Turns:        turn.New(w.msgQueue, sender),
+		Turns:        turn.New(w.queue, sender),
 		Dedup:        platform.NewDedup(64),
 		Capabilities: caps,
 		StopCtx:      h.srv.appCtx,
@@ -551,16 +552,14 @@ func TestTurnParity27_IM_NoCronPromptAutosave(t *testing.T) {
 	}
 }
 
+// Row 28: the legacy paths are gone and session.Guard with them (#3004 E),
+// so a fallback around the queue no longer compiles; a busy IM send is
+// queued behind the owner.
 func TestTurnParity28_IM_QueuePathNotGuard(t *testing.T) {
 	h := newParityHarness(t, parityOpts{reactor: true})
 	turns := h.session(parityKey, false)
 	owner := h.imAsync("m1", "first")
 	turns.next(t, "owner turn")
-	guard := h.hs.wiring.sessionGuard
-	if !guard.TryAcquire(parityKey) {
-		t.Fatal("session.Guard is held during an IM owner turn: the Guard fallback is in use")
-	}
-	guard.Release(parityKey)
 	h.imSend("m2", "second")
 	if h.plat.addedFor("m2") != 1 || replyMatching(h.plat.allReplies(), parityBusyText) != 0 {
 		t.Fatal("busy IM message did not take the queue path")

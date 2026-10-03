@@ -153,7 +153,7 @@ type RelayOptions struct {
 
 // QueueOptions are the turn-queue knobs. Grouped out of the flat
 // ServerOptions in #2553: they are set together from one config block and read
-// only by the turn.Queue constructor.
+// only into turn.QueueOptions, which turn.New builds the queue from.
 type QueueOptions struct {
 	MaxDepth     int
 	CollectDelay time.Duration

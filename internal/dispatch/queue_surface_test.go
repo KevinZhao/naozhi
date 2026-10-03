@@ -10,7 +10,7 @@ import (
 // list of names, not merely a count, so a rename is as visible as an
 // addition. Both directions fail: a name added or removed must come with an
 // edit to this list in the same change. #3004 has the plan that shrinks it.
-// The Queue half of G-c is internal/turn/queue_surface_test.go.
+// The *turn.Orchestrator half of G-c is internal/turn/queue_surface_test.go.
 var sessionRouterMethodNames = []string{
 	"InterruptSessionViaControl",
 	"ResetChatAndSetWorkspace",

@@ -81,7 +81,7 @@ func TestMsgRing_ResetClearsRefs(t *testing.T) {
 	t.Parallel()
 	var r msgRing
 	canary := []byte{1, 2, 3}
-	r.push(Msg{Text: "X", Images: nil, MessageID: "m"}, 4)
+	r.push(Msg{Text: "X", Images: nil, Origin: newOrigin(newRecorder(), "a", "ws:a")}, 4)
 	// Place a large-ish payload via Images so we can detect retention.
 	r.push(Msg{Text: "Y"}, 4)
 	r.reset()
@@ -91,7 +91,7 @@ func TestMsgRing_ResetClearsRefs(t *testing.T) {
 	// The backing buf must be fully zeroed across the previously-live
 	// indices.
 	for i := 0; i < cap(r.buf); i++ {
-		if r.buf[i].Text != "" || r.buf[i].MessageID != "" {
+		if r.buf[i].Text != "" || r.buf[i].Origin != nil {
 			t.Fatalf("post-reset buf[%d] not zeroed: %#v", i, r.buf[i])
 		}
 	}
@@ -160,11 +160,11 @@ func TestMsgRing_DrainInto_EmptyReturnsNil(t *testing.T) {
 func TestMsgRing_DrainInto_ZeroesConsumedSlots(t *testing.T) {
 	t.Parallel()
 	var r msgRing
-	r.push(Msg{Text: "X", MessageID: "m1"}, 4)
-	r.push(Msg{Text: "Y", MessageID: "m2"}, 4)
+	r.push(Msg{Text: "X", Origin: newOrigin(newRecorder(), "a", "ws:a")}, 4)
+	r.push(Msg{Text: "Y", Origin: newOrigin(newRecorder(), "b", "ws:b")}, 4)
 	_ = r.drainInto(nil)
 	for i := 0; i < cap(r.buf); i++ {
-		if r.buf[i].Text != "" || r.buf[i].MessageID != "" {
+		if r.buf[i].Text != "" || r.buf[i].Origin != nil {
 			t.Fatalf("post-drain buf[%d] not zeroed: %#v", i, r.buf[i])
 		}
 	}
@@ -176,8 +176,8 @@ func TestMsgRing_DrainInto_ZeroesConsumedSlots(t *testing.T) {
 // drain -> consume -> enqueue more -> drain again. R20260606-PERF-3 (#1827).
 func TestQueue_DoneOrDrain_ScratchReuseAcrossTurns(t *testing.T) {
 	t.Parallel()
-	q := NewQueue(8, 0)
-	_, _, _, gen, _ := q.Enqueue("k", Msg{Text: "owner"})
+	q := newTestQueue(8, 0)
+	_, _, _, gen := q.enqueueTuple("k", Msg{Text: "owner"})
 
 	// Turn 1 follow-ups.
 	q.Enqueue("k", Msg{Text: "a1"})
@@ -208,8 +208,8 @@ func TestQueue_DoneOrDrain_ScratchReuseAcrossTurns(t *testing.T) {
 // coalesced-turn drain no longer allocates a backing slice per turn once the
 // scratch is warmed.
 func TestQueue_DoneOrDrain_ScratchReuse_NoAlloc(t *testing.T) {
-	q := NewQueue(8, 0)
-	_, _, _, gen, _ := q.Enqueue("k", Msg{Text: "owner"})
+	q := newTestQueue(8, 0)
+	_, _, _, gen := q.enqueueTuple("k", Msg{Text: "owner"})
 	// Warm the scratch.
 	q.Enqueue("k", Msg{Text: "w1"})
 	q.Enqueue("k", Msg{Text: "w2"})
@@ -233,8 +233,8 @@ func TestQueue_DoneOrDrain_ScratchReuse_NoAlloc(t *testing.T) {
 // genuinely wraps several times.
 func TestQueue_Enqueue_RingPath_FullEvictsAndDrains(t *testing.T) {
 	t.Parallel()
-	q := NewQueue(3, 0)
-	_, _, _, gen, _ := q.Enqueue("k", Msg{Text: "owner"}) // owner
+	q := newTestQueue(3, 0)
+	_, _, _, gen := q.enqueueTuple("k", Msg{Text: "owner"}) // owner
 
 	for i := 0; i < 10; i++ {
 		q.Enqueue("k", Msg{Text: string(rune('0' + i)), EnqueueAt: time.Now()})

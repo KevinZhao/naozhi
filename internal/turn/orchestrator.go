@@ -10,17 +10,18 @@ import (
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
-// Orchestrator runs every turn on the keys of one Queue: it admits requests,
+// Orchestrator runs every turn on the keys of its queue: it admits requests,
 // owns the drain loop, and delivers each turn's outcome to the origins whose
-// requests it carried. It holds no state of its own beyond the Queue.
+// requests it carried. The queue is its only state, and nothing outside turn
+// reaches it: every entry submits here.
 type Orchestrator struct {
-	q *Queue
+	q *queue
 	s Sender
 }
 
-// New returns an Orchestrator over q, sending through s.
-func New(q *Queue, s Sender) *Orchestrator {
-	return &Orchestrator{q: q, s: s}
+// New returns an Orchestrator over a queue built from qo, sending through s.
+func New(qo QueueOptions, s Sender) *Orchestrator {
+	return &Orchestrator{q: newQueue(qo), s: s}
 }
 
 // Submit admits r. A PriorityNow request, or any request in ModePassthrough,
@@ -40,7 +41,7 @@ func (o *Orchestrator) Submit(ctx context.Context, r Request, a Admission) Ack {
 	}
 
 	m := Msg{Text: r.Text, Images: r.Images, EnqueueAt: time.Now(), Origin: r.Origin}
-	res := o.q.enqueue(r.Key, m)
+	res := o.q.Enqueue(r.Key, m)
 	if !res.isOwner {
 		if res.evicted {
 			dropped(ctx, r.Key, res.dropped, DropEvicted)
@@ -99,12 +100,12 @@ func (o *Orchestrator) Reset(ctx context.Context, key string, discardOverride bo
 }
 
 // ShouldNotify reports whether key's 3s "message received" cooldown has
-// elapsed (Queue.ShouldNotify).
+// elapsed (queue.ShouldNotify).
 func (o *Orchestrator) ShouldNotify(key string) bool {
 	return o.q.ShouldNotify(key)
 }
 
-// Cleanup forgets key's queue state; see Queue.Cleanup for the caller's
+// Cleanup forgets key's queue state; see queue.Cleanup for the caller's
 // obligations.
 func (o *Orchestrator) Cleanup(key string) {
 	o.q.Cleanup(key)

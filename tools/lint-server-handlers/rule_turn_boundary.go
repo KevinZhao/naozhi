@@ -21,9 +21,9 @@
 // the third turn entry (#3004 decision 6, deferred to its own issue): the
 // most likely place for a new caller to bypass the port unseen.
 //
-// G-c (turn.Queue's and dispatch.SessionRouter's exported method sets) lives
-// in the queue_surface_test.go files of internal/turn and internal/dispatch:
-// it reads no source, so it runs under `go test`.
+// G-c (the exported method sets of *turn.Orchestrator, dispatch.SessionRouter
+// and dispatch.Turns) lives in the queue_surface_test.go files of internal/turn
+// and internal/dispatch: it reads no source, so it runs under `go test`.
 //
 // dispatch, server and turn are required: an unreadable one is reported, so
 // a misconfigured -server-pkg cannot narrow the scope. upstream is scanned
@@ -52,7 +52,7 @@ const turnCtxMarkerBaseline = 0
 const turnCtxWithValueBaseline = 0
 
 // turnQueueEscapeBaseline is G-b: .Enqueue(/.DoneOrDrain( call sites outside
-// turn. 0: every entry's turns run on turn.Orchestrator.
+// turn. 0: the queue type is unexported and only turn.Orchestrator holds one.
 const turnQueueEscapeBaseline = 0
 
 // turnSlashLiteralBaseline is G-d: slash-command literal occurrences in
