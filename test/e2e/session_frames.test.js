@@ -57,6 +57,9 @@ async function open(browser, mock, ack = {}) {
   await expect.poll(() => subs(conn, KEY_A).length).toBe(1);
   conn.send({ type: 'subscribed', key: KEY_A, ...ack });
   await page.waitForFunction((key) => sessionStream.subscribedKey === key, KEY_A);
+  // Settle the connect-time sessions refetch (debounced 300 ms): landing later,
+  // its snapshot would overwrite the state a test's frames just wrote.
+  await page.evaluate(() => debouncedFetchSessions());
   return { ctx, page, conn, errors };
 }
 
@@ -221,6 +224,13 @@ test.describe('sessionFrames keep the bookkeeping on sessionStream', () => {
     conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'running' });
     conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'ready' });
     await expect.poll(() => running(page, KEY_A)).toBe('ready');
+    // The chip paint skips the active card whatever the count says, so leave
+    // the card and have a push that ends no turn (ready→dead) repaint its chip
+    // from the count: a turn read live must not have bumped it.
+    await page.click(`.session-card[data-key="${KEY_B}"]`);
+    await page.waitForFunction((key) => selectedKey === key, KEY_B);
+    conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'dead' });
+    await expect.poll(() => running(page, KEY_A)).toBe('dead');
     await expect(page.locator(`.session-card[data-key="${KEY_A}"] .sc-unread`), 'the card on screen is read live').toHaveCount(0);
     expect(errors).toEqual([]);
     await ctx.close();
@@ -357,7 +367,6 @@ test.describe('a session_state carrying a reason', () => {
   // version cache cleared, can paint it.
   test('refetches the session list and repaints it past the version cache', async ({ browser }) => {
     const { ctx, page, conn, errors } = await open(browser, mock);
-    await page.evaluate(() => debouncedFetchSessions()); // the connect-time refetch has settled
     const card = page.locator(`.session-card[data-key="${KEY_B}"]`);
     await expect(card).toContainText('review this code');
     data.sessions.find((s) => s.key === KEY_B).summary = 'refetched after the push';
