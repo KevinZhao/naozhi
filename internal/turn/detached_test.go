@@ -36,8 +36,8 @@ func TestDetached_PassthroughModeRunsEachRequestAlone(t *testing.T) {
 	}
 	for _, o := range []*fakeOrigin{a, b} {
 		infos := o.turnInfos()
-		if len(infos) != 1 || !infos[0].First || infos[0].Role != RoleHead || infos[0].Merged != 1 || len(infos[0].Mates) != 0 {
-			t.Fatalf("%s TurnInfo = %+v, want a lone First head", o.name, infos)
+		if len(infos) != 1 || !infos[0].First || infos[0].Role != RoleHead || infos[0].Merged != 1 || len(infos[0].Mates) != 0 || !infos[0].Primary {
+			t.Fatalf("%s TurnInfo = %+v, want a lone First Primary head", o.name, infos)
 		}
 		if got := o.finished(); len(got) != 1 || got[0].Stage != StageDone {
 			t.Fatalf("%s outcomes = %+v", o.name, got)

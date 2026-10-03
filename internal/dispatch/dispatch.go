@@ -469,6 +469,8 @@ func (d *Dispatcher) handleGetOrCreateError(
 // handleSendError maps a failed send (turn.StageSend) into the user-facing error
 // reply, watchdog counter bumps, and metrics increments (#624). It does NOT
 // report whether the error reply landed — that failure is only logged at Warn.
+// Only the turn's primary delivery counts, so a turn answered in two chats
+// counts once.
 func (d *Dispatcher) handleSendError(
 	ctx context.Context,
 	err error,
@@ -476,23 +478,26 @@ func (d *Dispatcher) handleSendError(
 	msg platform.IncomingMessage,
 	p platform.Platform,
 	lg *slog.Logger,
+	primary bool,
 ) {
 	// ErrSessionReset is a user control-flow signal (/new, /clear), not an
 	// error: no extra reply and no /health error-counter bump.
 	if errors.Is(err, clierr.ErrSessionReset) {
 		return
 	}
-	d.replyErrorCount.Add(1)
-	dispatchReplyErrorTotal.Add(1)
 	lg.Error("send to claude", "err", err)
 	// usermsg.UserMessage renders the configured timeout durations in
 	// Chinese (dashboard uses the generic ForSendError). Watchdog counters
 	// stay here because the IM side owns that configuration.
-	switch {
-	case errors.Is(err, clierr.ErrNoOutputTimeout):
-		d.watchdogNoOutputKills.Add(1)
-	case errors.Is(err, clierr.ErrTotalTimeout):
-		d.watchdogTotalKills.Add(1)
+	if primary {
+		d.replyErrorCount.Add(1)
+		dispatchReplyErrorTotal.Add(1)
+		switch {
+		case errors.Is(err, clierr.ErrNoOutputTimeout):
+			d.watchdogNoOutputKills.Add(1)
+		case errors.Is(err, clierr.ErrTotalTimeout):
+			d.watchdogTotalKills.Add(1)
+		}
 	}
 	errMsg := usermsg.UserMessage(err, key, d.noOutputTimeout, d.totalTimeout)
 	// IM-only emoji decoration for the timeout cases. Other surfaces

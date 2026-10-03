@@ -10,7 +10,7 @@ import "context"
 func (o *Orchestrator) runDetached(ctx context.Context, r Request) {
 	t := &inflight{first: r.Priority == PriorityNormal}
 	if r.Origin != nil {
-		t.receivers = []*receiver{{origin: r.Origin, info: TurnInfo{Role: RoleHead, First: t.first, Merged: 1}}}
+		t.receivers = []*receiver{{origin: r.Origin, info: TurnInfo{Role: RoleHead, First: t.first, Merged: 1, Primary: true}}}
 	}
 	defer func() {
 		if rec := recover(); rec != nil {

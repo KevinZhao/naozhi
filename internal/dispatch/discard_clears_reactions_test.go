@@ -171,6 +171,10 @@ func TestDetachedTurn_ClearsItsOwnReaction(t *testing.T) {
 		t.Fatalf("detached admission added %d reactions, want 1", added)
 	}
 	wantRemoved(t, rp, "m1")
+	// The detached turn is its own Primary, so its failed Send is counted.
+	if n := d.replyErrorCount.Load(); n != 1 {
+		t.Errorf("replyErrorCount = %d, want 1", n)
+	}
 }
 
 // fakeSession is a turn.Session for tests whose Sender never reaches a real

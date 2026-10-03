@@ -113,7 +113,7 @@ func (o *imOrigin) Dropped(ctx context.Context, _ turn.DropReason) {
 
 // Begin opens the reply to o's chat. An Observer is answered like a Head:
 // the owner's chat gets the reply to whatever the owner loop drained
-// (#3004 分叉 19a).
+// (#3004 分叉 19a), and so does every other chat with a request in the batch.
 func (o *imOrigin) Begin(_ context.Context, t turn.TurnInfo) turn.Delivery {
 	p := o.d.platforms[o.msg.Platform]
 	if p == nil {
@@ -186,7 +186,7 @@ func (dl *imDelivery) Finish(ctx context.Context, out turn.Outcome) {
 			cleanup()
 		}
 	case turn.StageSend:
-		d.handleSendError(ctx, out.Err, o.key, o.msg, dl.p, dl.lg)
+		d.handleSendError(ctx, out.Err, o.key, o.msg, dl.p, dl.lg, dl.info.Primary)
 	default:
 		dl.reply(ctx, out.Result, out.Sess)
 	}

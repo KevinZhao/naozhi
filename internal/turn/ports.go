@@ -103,6 +103,10 @@ type TurnInfo struct {
 	Mates []Origin
 	// Merged is the number of requests coalesced into the turn.
 	Merged int
+	// Primary marks the one receiver that answers for the turn as a whole:
+	// the owner's sink in an owner-loop turn, the request in a detached one.
+	// A per-turn side effect (a /health counter) belongs to it alone.
+	Primary bool
 }
 
 // Delivery is one receiver's view of one turn, in call order: BeforeSession,
