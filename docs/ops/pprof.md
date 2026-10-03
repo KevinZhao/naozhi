@@ -307,7 +307,7 @@ ssh ec2-user@prod-host 'curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1
 | `naozhi_session_active_by_backend` | gauge | `backend` | per-backend 活动 session 数 | 与 `_active` 总和应相等；不等 = 簿记漂移（`reconcileSessionActiveByBackendLocked` 兜底） |
 | `naozhi_protocol_rpc_error_total` | counter | `backend, method, code` | JSON-RPC 错误（仅 ACP 协议；stream-json 不上报） | 单 (backend, code) 突增 = agent 端某类 RPC 出问题；method=`""` 表示 ReadEvent 路径无法关联请求 |
 | `naozhi_acp_cancel_total` | counter | `backend` | `ACPProtocol.WriteInterrupt` 成功送出 `session/cancel` notification（pre-handshake 失败不计） | 与 `naozhi_interrupt_*` 一族 cross-check：`acp_cancel_total ≈ interrupt_sent_total` 中 ACP 部分；不等 = 路由 fallback SIGINT |
-| `naozhi_spawn_diag_total` | counter | `layer, action` | spawn 门禁拒绝/忽略了配置输入（`cli.EmitSpawnDiags`，按 scope+layer+key 去重后首个才计数） | 非零 = 有配置"看起来生效实际被剥掉"（#2412/#2493 形态），按 layer 定位是 argv denylist / caps / deprecated 字段 |
+| `naozhi_spawn_diag_total` | counter | `layer, action` | spawn 门禁拒绝/忽略了配置输入（`spawndiag.Emit` / `cli.EmitSpawnDiags`）。layer ∈ `argv-denylist` / `argv-validator` / `env-filter` / `caps` / `config-deprecated` / `config-unknown` / `config-invalid` / `store-unreadable`；action ∈ `dropped` / `ignored` / `rewritten` / `fallback` / `clamped`。按 (scope, layer, key) 在进程生命周期内去重：首次 Warn 并计数，重复只记 Debug、不计数；scope 为 `config`（配置加载、store 读保护）的不去重。所以它读作"观察到的不同失效配置数"，不是 spawn 次数 | 非零 = 有配置"看起来生效实际被剥掉"（#2412/#2493 形态），按 layer 定位门禁；key 在日志行 `spawn gate: configured input had no effect` 与 `naozhi config check` 里，authenticated `/health` 的 `spawn_diags` 有同样的计数和最近 32 条 |
 | `naozhi_metrics_label_overflow_total` | counter | — | label tuple 长度超过 `maxLabelKeyLen=256` 折叠到 `_overflow_` 桶的累计次数 | **必须稳态 0**；非零 = 某 caller 未做 label sanitize（agent 注入的 method/code 字符串过长） |
 
 ### 拉取示例

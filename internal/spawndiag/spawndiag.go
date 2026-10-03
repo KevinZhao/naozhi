@@ -22,12 +22,15 @@ import (
 // Diag is one gate decision that altered or ignored configured input.
 type Diag struct {
 	// Layer names the gate: "argv-denylist" | "argv-validator" | "env-filter" |
-	// "caps" | "config-deprecated" | "config-unknown".
+	// "caps" | "config-deprecated" | "config-unknown" | "config-invalid" |
+	// "store-unreadable", plus "access-profile" which only `naozhi config
+	// check` reports.
 	Layer string `json:"layer"`
 	// Key is the configured thing that did not take effect ("--effort",
 	// "session.workspace", "AWS_PROFILE").
 	Key string `json:"key"`
-	// Action is what the gate did: "dropped" | "ignored" | "rewritten".
+	// Action is what the gate did: "dropped" | "ignored" | "rewritten" |
+	// "fallback" | "clamped".
 	Action string `json:"action"`
 	// Reason is one human-readable sentence.
 	Reason string `json:"reason"`
