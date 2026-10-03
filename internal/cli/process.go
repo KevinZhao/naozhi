@@ -29,8 +29,8 @@ const (
 )
 
 const (
-	DefaultNoOutputTimeout = 2 * time.Minute
-	DefaultTotalTimeout    = 5 * time.Minute
+	DefaultNoOutputTimeout = cliinfo.DefaultNoOutputTimeout
+	DefaultTotalTimeout    = cliinfo.DefaultTotalTimeout
 	// maxScannerBufBytes caps a single NDJSON line read from the shim's stdout.
 	// Kept 6 MiB below the shim's own 16 MiB per-line cap (internal/shim/server.go
 	// maxServerLineBytes) so a shim-side allocator decision never makes this

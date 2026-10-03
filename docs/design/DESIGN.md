@@ -207,7 +207,7 @@ claude CLI 子进程的状态机：
 状态说明（`cli.ProcessState` 进程级 4 态枚举，权威定义见 `internal/cli/process.go::ProcessState`）：
 - **Spawning**: 进程启动中，等待 init 事件。超时 10s 未收到 init 则 kill
 - **Ready**: 进程空闲，可接受新消息
-- **Running**: 正在处理消息，等待 result。启用 Watchdog: 无输出超时 120s（配置默认值）+ 总超时 300s（配置默认值）。任何一个超时触发即杀死进程
+- **Running**: 正在处理消息，等待 result。启用 Watchdog: 无输出超时 15min（配置默认值）+ 总超时 2h（配置默认值）。任何一个超时触发即杀死进程
 - **Dead**: 进程已退出。有 session_id 的保留供 resume；无 session_id 的在 Cleanup 时清除
 
 > 上述是 `cli.Process` 的进程级状态机；`session.ManagedSession` 上层另有若干**语义标签**（不是状态枚举），用来表达跨进程生命周期的 session 角色：
@@ -236,8 +236,9 @@ naozhi 同时管理三个层次的"状态"，常被混淆，这里列出权威�
 下游修改注意：改 ProcessState 枚举要同步 `process_test.go` + Watchdog；改语义标签需考虑 dashboard 渲染 + saveStore 持久化；改 chat 隐式状态机需考虑 Reset 调用面 + sessions.json schema。R230B-ARCH-27 跟踪建立独立状态图为后续 RFC 工作。
 
 Watchdog 机制：
-- `no_output_timeout`（默认 2min）：若连续无输出事件，杀死进程
-- `total_timeout`（默认 5min）：本轮总耗时超限，杀死进程
+- `no_output_timeout`（默认 15min）：若连续无输出事件，杀死进程。工具运行期间 Claude CLI 每 30s 发一帧 `tool_progress` heartbeat，所以长工具不会触发它；它拦的是模型长时间静默（超长 thinking、超大 Write 输入）或 CLI 卡死
+- `total_timeout`（默认 2h）：本轮总耗时超限，杀死进程
+- 两个默认值只在 `internal/cliinfo/watchdog.go` 定义一次，`cli` 与 `config` 引用它
 - 两个定时器任意一个触发则认为挂起，立即终止进程
 - 有新事件时重置 no_output_timeout（但不重置 total_timeout）
 
@@ -745,8 +746,8 @@ session:
   max_procs: 3                   # 最大并发 claude 进程数 (每进程 ~350MB)
   ttl: "30m"                     # 空闲 session 回收超时 (回收后保留 session_id, resume 恢复)
   watchdog:
-    no_output_timeout: "120s"    # 无输出超时 (kill 进程), 默认 2min
-    total_timeout: "300s"        # 单轮总超时, 默认 5min
+    no_output_timeout: "15m"     # 无输出超时 (kill 进程), 默认 15min
+    total_timeout: "2h"          # 单轮总超时, 默认 2h
   store_path: "~/.naozhi/sessions.json"  # session 持久化路径
 
 # Workspace 身份

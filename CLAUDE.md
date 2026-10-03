@@ -120,7 +120,7 @@ cmd/naozhi/main.go
   -> ctxutil      context.Context helpers
   -> leakguard    "leaked tool" 检测的单一真相源
   -> spawndiag    spawn 门禁拒绝的上报（metrics + 日志 + observer）；位于 cli 之下，envpolicy 才能上报
-  -> cliinfo      CLI 词汇的零依赖叶子（进程状态 / death reason / backend 与 model 行 / argv denylist），cli 重导出；只命名这些词汇的包 import 它而不是 cli
+  -> cliinfo      CLI 词汇的零依赖叶子（进程状态 / death reason / watchdog 默认值 / backend 与 model 行 / argv denylist），cli 重导出；只命名这些词汇的包 import 它而不是 cli
   -> imageorient  无 EXIF 图片的自动转正（视觉模型询问 + 解析 + JPEG 旋转），叶子
   -> leakcheck    测试用泄漏断言 helper
   -> testhelper   共享测试工具
@@ -144,8 +144,9 @@ Protocol.Init() runs after spawn but before readLoop, handling any handshake (no
 Process states: `Spawning -> Ready <-> Running -> Dead`. Dead processes with a SessionID can be resumed via `--resume` (Claude) or `session/load` (ACP).
 
 **Watchdog**: During Running state, two timers enforce limits:
-- `no_output_timeout` (default 2min): Reset on any event; if triggered, kill process
-- `total_timeout` (default 5min): Single shot; if triggered, kill process
+- `no_output_timeout` (default 15min): Reset on any event; if triggered, kill process. A running tool keeps it fed through the Claude CLI's `tool_progress` heartbeat (every 30s), so it only catches silent model generation or a hung CLI
+- `total_timeout` (default 2h): Single shot; if triggered, kill process
+- Both defaults live in `cliinfo` (`DefaultNoOutputTimeout` / `DefaultTotalTimeout`); `cli` and `config` alias them
 
 ### Protocol Interface
 
