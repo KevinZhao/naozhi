@@ -1,20 +1,24 @@
 // session_list.js — the sidebar's session list: the /api/sessions poll and its
-// merge with pending (not yet sent) sessions, the sidebar and its cards and
-// badges, the status bar and the node-status helpers.
+// merge with pending (not yet sent) sessions, the cards and badges, the status
+// bar, the node helpers, and the WS state, subscription and session_state frames.
 import { NZ_CONTRACT } from './contract.js';
 import { getToken, lsGet, lsSet } from './platform.js';
+import { sessionStream } from './session_stream.js';
 import { WS_STATES, wsm } from './ws_manager.js';
-import { perSession, selection, serverInfo, sessionList, timers } from './state.js';
-import { esc, escAttr, fetchJSON, reconcileChildren, sessionExitChipHtml } from './nz_util.js';
+import { perSession, selection, serverInfo, sessionList, timers, transcript } from './state.js';
+import { esc, escAttr, fetchJSON, patchCardExitChip, reconcileChildren, sessionExitChipHtml } from './nz_util.js';
 import { setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderSpawnDiagChip } from './session_header.js';
-import { reconcileSelectedNode } from './system_view.js';
+import { deselectNodeSession, reconcileSelectedNode } from './system_view.js';
 import { turnState } from './running_banner.js';
 import { isMultiNode, nodeColor, setActiveSessionCard, sid } from './file_refs.js';
-import { formatAbsTime, renderRecentSessionsPanel, timeAgo } from './utilities.js';
-import { discoveredKey } from './discovery.js';
+import { announce, formatAbsTime, renderRecentSessionsPanel, timeAgo } from './utilities.js';
+import { discoveredKey, scanDiscovered } from './discovery.js';
 import { invalidateGitState } from './tuning.js';
 import { ICONS, sectionHeaderFallbackHtml, sectionHeaderHtml } from './sidebar_project.js';
 import { accessProfileChipHtml, backendDisplayName, backendDisplayVersion, showAuthModal } from './auth_modal.js';
+import { updateSendButton } from './msg_nav.js';
+import { _optimisticRunningTimers } from './send_message.js';
+import { fetchEvents } from './event_stream.js';
 
 // collectWorkspaceSessionIDs returns the set of Claude session UUIDs that the
 // sidebar already represents — current session_id PLUS any prev_session_ids
@@ -952,4 +956,308 @@ export function statusLabelForNode(status) {
     error: 'error', disconnected: 'disconnected',
   };
   return m[status] || status;
+}
+
+/* ===== WebSocket state: status bar, fallback pollers, announcements ===== */
+
+// wsStateChanged follows wsm (ws_manager.js): every transition repaints the
+// status bar; CONNECTED stops the REST fallback pollers, DISCONNECTED arms them.
+function wsStateChanged(s, prev) {
+  updateStatusBar();
+  if (s === WS_STATES.CONNECTED) {
+    // RNEW-UX-010 — sighted users see the dot flip; AT users get the
+    // transition announced politely. Only announce when it's a real
+    // transition (prev !== CONNECTED) to avoid re-announcing on no-op
+    // state refreshes.
+    if (prev !== WS_STATES.CONNECTED) announce(wsm._everConnected ? '已重新连接' : '已连接');
+    // WS connected: stop session polling, rely on push
+    if (timers.sessionPoll) { clearInterval(timers.sessionPoll); timers.sessionPoll = null; }
+    // Reduce discovered scan frequency
+    if (timers.discoveredPoll) { clearInterval(timers.discoveredPoll); timers.discoveredPoll = null; }
+    // #2431: a hidden tab has had its pollers suspended by stopPollers;
+    // re-arming here would undo that. startPollers re-arms on return.
+    if (!document.hidden) timers.discoveredPoll = setInterval(scanDiscovered, 30000);
+    // Pull fresh node/session state immediately to clear stale data
+    debouncedFetchSessions();
+  } else if (s === WS_STATES.DISCONNECTED) {
+    // RNEW-UX-010 — announce only on real transitions from connected, so
+    // initial cold boot (OFF→CONNECTING→DISCONNECTED retry) stays silent.
+    if (prev === WS_STATES.CONNECTED) announce('连接已断开，正在重试');
+    // WS lost: start fallback polling — unless the tab is hidden (#2431):
+    // stopPollers already suspended everything and startPollers re-arms on
+    // visibilitychange from the then-current WS state.
+    const visible = !document.hidden;
+    if (visible && !timers.sessionPoll) timers.sessionPoll = setInterval(fetchSessions, 5000);
+    if (timers.discoveredPoll) { clearInterval(timers.discoveredPoll); timers.discoveredPoll = null; }
+    if (visible) timers.discoveredPoll = setInterval(scanDiscovered, 5000);
+    if (selection.key && !timers.events) {
+      transcript.lastEventTime = sessionStream.lastEventTimeWs;
+      if (visible) timers.events = setInterval(() => fetchEvents(false), 1000);
+    }
+  }
+}
+wsm.onStateChange(wsStateChanged);
+
+// onSessionState applies a pushed process state to the session: the optimistic
+// flip it settles, its bookkeeping, its card, the header and the subscription.
+function onSessionState(msg) {
+  const msgNode = msg.node || 'local';
+  const sKey = sid(msg.key, msgNode);
+  // Real state arrived — the optimistic flip has served its purpose, regardless
+  // of whether the server says running/ready/dead. Clear the flag so future
+  // turns don't short-circuit the running→ready rollback logic. Capture it
+  // FIRST: the wasDead computation below needs to know whether prev.state
+  // is a real server-reported 'running' or just the pre-send optimistic flip.
+  const wasOptimisticRunning = !!perSession.optimisticRunning[sKey];
+  const optimisticPrevState = perSession.optimisticPrevState[sKey];
+  delete perSession.optimisticRunning[sKey];
+  delete perSession.optimisticPrevState[sKey];
+  if (_optimisticRunningTimers[sKey]) {
+    clearTimeout(_optimisticRunningTimers[sKey]);
+    delete _optimisticRunningTimers[sKey];
+  }
+  // 服务端 resubscribeEvents 60s 超时后已经丢弃了本连接对该 key 的订阅
+  // (wshub_eventpush.go)，此后这条订阅不会再有任何事件帧。必须同步清掉
+  // 本地订阅簿记 —— 否则客户端永远"以为自己订阅着"：下一次 running 广播
+  // 到达时 needSub 的 case 1 (subscribedKey mismatch) 不成立、case 3
+  // (_subscriptionSuspended) 也不成立，整轮 turn 的事件全部推空，
+  // dashboard 静止直到手动重新点击会话（bug: 出结果后不自动更新）。
+  // 清掉之后，下一次 running 广播经 case 1 重新订阅，拿到完整初始帧。
+  if (msg.reason === 'subscription_timeout' &&
+      sessionStream.subscribedKey === msg.key &&
+      (sessionStream.subscribedNode || 'local') === msgNode) {
+    sessionStream.subscribedKey = null;
+    sessionStream.subscribedNode = null;
+    sessionStream._subscriptionSuspended = false;
+    sessionStream.lastEventTimeWs = 0;
+  }
+  const prev = sessionList.sessionsData[sKey] || {};
+  const prevState = prev.state;   // capture before mutation
+  // wasDead 判定必须穿透乐观 running 翻转：markSessionOptimisticRunning 在
+  // 网络往返之前就把 sessionsData.state 写成 'running'，所以对所有
+  // dashboard 本页发起的 send，服务端真正的 running 广播到达时 prevState
+  // 恒为 'running' —— 若直接读它，dead→running 的重订阅 (case 2) 对本页发送
+  // 永远是死代码，恰好漏掉"进程被回收后从本页发消息"这个最常见的失联场景。
+  // 用翻转前记录的真实状态还原判据。
+  const effectivePrevState = wasOptimisticRunning ? optimisticPrevState : prevState;
+  // 判据是 state==='dead' 本身，而不是 death_reason 是否非空。二者不等价：
+  // death_reason 由 mapSendError 在 no_output_timeout / total_timeout 时写入
+  // (internal/session/managed_send.go)，进程未必被回收，会话随后回到 ready
+  // 却留着这个陈旧标记。按 death_reason 判会让此后每一次普通发送都命中
+  // case 2，强制 lastEventTimeWs=0 全量重订阅 —— 而全量重渲染
+  // (el.innerHTML = html) 会抹掉刚发出、服务端还没回显的 .optimistic-msg
+  // 气泡，正是 case 3 旁边那句注释警告过的危害。sessionsData.state 保留后端
+  // 真实状态（UI 层才把 dead 显示成 ready，见下方 displayState），所以
+  // 'dead' 是可靠且精确的判据，对齐 case 2 注释本身的表述
+  // ("subscribed but process was dead → revived")。
+  const wasDead = effectivePrevState === 'dead';
+  settleTurnBoundary(msg, msgNode, sKey, prevState);
+  if (sessionList.sessionsData[sKey]) {
+    sessionList.sessionsData[sKey].state = msg.state;
+    if (msg.reason) {
+      sessionList.sessionsData[sKey].death_reason = msg.reason;
+    } else if (msg.state === 'running') {
+      // Process revived: clear stale death_reason
+      delete sessionList.sessionsData[sKey].death_reason;
+    }
+  }
+  paintSessionCardState(msg, msgNode, sKey);
+  if (msg.key === selection.key && msgNode === selection.node) updateMainState(msg.state);
+  resubscribeOnRunning(msg, msgNode, wasDead);
+  // State changed: force next fetchSessions to re-render sidebar.
+  // storeGen doesn't increment on process state transitions (only session
+  // mutations), so the version cache would otherwise skip the re-render.
+  sessionList.lastVersion = 0;
+  if (msg.reason) debouncedFetchSessions();
+}
+
+// settleTurnBoundary is what a session_state owes the turn it ends: the unread
+// count, the sent-text cache, the HTTP send mark and the git chip.
+function settleTurnBoundary(msg, msgNode, sKey, prevState) {
+  // Chat-style unread: a running→ready (or dead) transition means the model
+  // just produced a reply. Bump the unread counter unless the operator is
+  // already looking at that card — in which case they're reading it live.
+  const turnCompleted = prevState === 'running' && (msg.state === 'ready' || msg.state === 'dead');
+  const isActive = msg.key === selection.key && msgNode === selection.node;
+  if (turnCompleted && !isActive) {
+    perSession.unread[sKey] = (perSession.unread[sKey] || 0) + 1;
+  }
+  // Turn 自然跑完后清掉上一次发出的文本缓存，否则下一轮刚进 running
+  // 就中断会把陈旧文本回填上来。中断路径不会走到这里被清掉，因为
+  // interruptSession 会先消费 lastSent 再发中断。
+  if (turnCompleted) delete perSession.lastSent[sKey];
+  // The HTTP send reached a terminal state (or never became a turn): the
+  // originator mark is no longer needed — drop it so it cannot linger and
+  // let a much later send_error for someone else's send slip through.
+  if (msg.state === 'ready' || msg.state === 'dead') perSession.httpSendPending.delete(sKey);
+  // 一轮对话里 agent 很可能切了分支（git checkout / 新建 worktree 分支）。
+  // 这不改 workspace 路径，所以 workspace-diff 那条失效路径不会触发，chip
+  // 会一直停在选中会话那一刻的分支上。turn 边界是重新解析的自然时机：
+  // 频率低（每轮一次而非定时轮询），且恰好覆盖"agent 干完活"这个分支最可能
+  // 已变的时刻。invalidateGitState 内部只在该会话仍被选中时才真正发请求。
+  if (turnCompleted) invalidateGitState(msg.key, msgNode);
+}
+
+// paintSessionCardState patches the session's sidebar card in place: badge,
+// dot, state text, exit chip and unread chip.
+function paintSessionCardState(msg, msgNode, sKey) {
+  let card = null;
+  document.querySelectorAll('.session-card').forEach(c => {
+    if (c.dataset.key === msg.key && (c.dataset.node || 'local') === msgNode) card = c;
+  });
+  if (!card) return;
+  // Surface dead sessions as "ready" in the UI — the backend state is
+  // retained on sessionsData so the resubscribe logic below still fires
+  // when a dead→running transition occurs.
+  const displayState = msg.state === 'dead' ? 'ready' : msg.state;
+  const badge = card.querySelector('.badge');
+  if (badge) { badge.className = 'badge ' + displayState; badge.textContent = displayState; }
+  // Sidebar cards carry .sc-dot (dot-running/dot-ready/dot-new) and the state
+  // text, not .badge; patch both so the card follows the push immediately.
+  const dot = card.querySelector('.sc-dot');
+  if (dot) {
+    dot.className = 'sc-dot ' + (displayState === 'running' ? 'dot-running' : (displayState === 'ready' ? 'dot-ready' : 'dot-new'));
+  }
+  const meta = card.querySelector('.sc-meta');
+  if (meta) {
+    const stateSpan = meta.querySelectorAll('span')[1]; // [0]=dot, [1]=state text
+    if (stateSpan && !stateSpan.classList.contains('sc-node')) stateSpan.textContent = displayState;
+  }
+  patchCardExitChip(card, msg.state, msg.reason);
+  // Sync the unread chip in place. fetchSessions re-renders from template
+  // and reads sessionUnread directly; this path keeps the bubble fresh
+  // between polls (WS state arrives faster than the sessions poll tick).
+  updateCardUnreadChip(card, perSession.unread[sKey] || 0);
+}
+
+// resubscribeOnRunning re-subscribes the session on screen when it turns
+// "running" and needs a live event stream. Covers: (1) not subscribed yet (new session, subscribedKey mismatch)
+//         (2) subscribed but process was dead → revived
+//         (3) subscribed without eventPushLoop (no-process subscribe → process available)
+//            — detected by the "suspended" reason the server sends for no-process subscribes.
+// Case 3 must NOT fire on normal ready→running transitions for already-subscribed
+// sessions — that would cause full re-render and wipe the optimistic user message.
+function resubscribeOnRunning(msg, msgNode, wasDead) {
+  if (msg.key === selection.key && msgNode === selection.node && msg.state === 'running') {
+    const needSub = (
+      (sessionStream.subscribedKey !== msg.key && sessionStream._pendingSubscribeKey !== msg.key) || // case 1: not subscribed and no pending subscribe
+      (wasDead && !msg.reason) ||                                   // case 2
+      (sessionStream.subscribedKey === msg.key && sessionStream._subscriptionSuspended) // case 3
+    );
+    if (needSub) {
+      sessionStream.lastEventTimeWs = 0;
+      sessionStream.subscribe(msg.key, selection.node);
+    }
+  }
+}
+
+/* ===== Session frames: subscription acks, errors, state pushes, list updates ===== */
+
+wsm.on(NZ_CONTRACT.WS.subscribed, (msg) => {
+  // Server confirmed subscription — apply authoritative state
+  sessionStream.subscribedKey = sessionStream._pendingSubscribeKey || msg.key;
+  // 非 pending 时以帧自带的 node 为准，不退到 'local'：relay 重建远端订阅
+  // (remoteDropped) 或 reconnect 后，远端 subscribed 经 relay 扇出给该 key
+  // 下所有 tab（relay 每帧注入 node，reverseconn 也带 Node）。非 pending 的
+  // tab 若被改写成 'local'，之后 subscription_timeout 处理要求 node 匹配就
+  // 不再清簿记 → 不重订阅，原 bug 复现。
+  sessionStream.subscribedNode = sessionStream._pendingSubscribeNode || msg.node || 'local';
+  sessionStream._pendingSubscribeKey = null;
+  sessionStream._pendingSubscribeNode = null;
+  // Track whether the server started an eventPushLoop for this subscription.
+  // "suspended" means the session had no process — no live events will arrive
+  // until the process starts, at which point onSessionState triggers re-subscribe.
+  sessionStream._subscriptionSuspended = (msg.reason === 'suspended');
+  if (msg.state && msg.key === selection.key && sessionStream.subscribedNode === selection.node) {
+    const subSKey = sid(msg.key, sessionStream.subscribedNode);
+    if (sessionList.sessionsData[subSKey]) {
+      sessionList.sessionsData[subSKey].state = msg.state;
+      updateMainState(msg.state);
+    }
+  }
+});
+// Server ack for an explicit unsubscribe (wshub_subscribe.go, three
+// emit sites incl. the relayed remote ack). sessionStream.unsubscribe() already
+// cleared subscribedKey/Node synchronously and a relayed ack may name
+// a key this tab no longer tracks — nothing to reconcile. Registered so
+// the frame is a documented no-op rather than an unhandled type.
+wsm.on(NZ_CONTRACT.WS.unsubscribed, () => {});
+wsm.on(NZ_CONTRACT.WS.error, (msg) => {
+  // PurgeNodeSubscriptions broadcast: error{node, "node disconnected"}
+  // reaches every tab regardless of what it is subscribed to. Drop only
+  // the bookkeeping that points at the dead node, snap selectedNode back
+  // to local via the existing reconcile path, and re-fetch so the
+  // sidebar reflects the node's sessions going away.
+  if (!msg.key && msg.node && msg.error === 'node disconnected') {
+    if (sessionStream.subscribedNode === msg.node) {
+      sessionStream.subscribedKey = null;
+      sessionStream.subscribedNode = null;
+    }
+    if (sessionStream._pendingSubscribeNode === msg.node) {
+      sessionStream._pendingSubscribeKey = null;
+      sessionStream._pendingSubscribeNode = null;
+    }
+    // The selected session lived on the dead node: no pushes can reach
+    // it any more and its key means nothing under the `local` node
+    // reconcileSelectedNode snaps to, so deselect it (the backend's
+    // "deselect stale sessions" contract) before selectedNode moves.
+    // Ownership comes from the session store, NOT from selectedNode:
+    // that global is the dispatch target and wireNodePicker rewrites
+    // it the moment the new-session picker changes node, so a local
+    // session with the picker on n1 must survive n1 going away.
+    // Pending (never-sent) sessions are only a draft target — they stay
+    // selected and are neither cleared nor deleted here.
+    if (selection.key && perSession.workspaces[selection.key] === undefined &&
+        (sessionList.sessionsData[sid(selection.key, msg.node)] || perSession.nodes[selection.key] === msg.node)) {
+      deselectNodeSession(msg.node);
+    }
+    sessionList.nodesData = Object.fromEntries(Object.entries(sessionList.nodesData).filter(([id]) => id !== msg.node));
+    reconcileSelectedNode();
+    sessionList.lastVersion = 0;
+    debouncedFetchSessions();
+    return;
+  }
+  // Subscribe failed (e.g. session not found yet) — reset pending, but
+  // only when the frame is about THIS subscribe: a keyed error for a
+  // different key (or an agent_subscribe validation error, which also
+  // arrives as a bare `error`) must not wipe an unrelated in-flight
+  // subscribe. Keyless frames without a node are the legacy shape of a
+  // subscribe rejection and still clear pending.
+  if (!msg.key || msg.key === sessionStream._pendingSubscribeKey) {
+    sessionStream._pendingSubscribeKey = null;
+    sessionStream._pendingSubscribeNode = null;
+  }
+});
+wsm.on(NZ_CONTRACT.WS.session_state, (msg) => onSessionState(msg));
+wsm.on(NZ_CONTRACT.WS.sessions_update, () => {
+  // RNEW-UX-010 — snapshot pre-update session-key set so we can spot
+  // a newly-added key after the fetch completes. Comparing sizes is
+  // not enough (delete+create at the same tick would net to zero).
+  const prevSessKeys = new Set(Object.keys(sessionList.sessionsData || {}));
+  debouncedFetchSessions().then(() => {
+    // Auto-subscribe to newly created session if we don't have an active
+    // subscription. _pendingSubscribeKey is intentionally not checked:
+    // a no-process subscribe returns "subscribed" + persisted history but
+    // no live eventPushLoop, so subscribedKey may not be set while the
+    // pending flag was already cleared. This ensures recovery.
+    if (selection.key && !sessionStream.subscribedKey && sessionList.sessionsData[sid(selection.key, selection.node)]) {
+      sessionStream.subscribe(selection.key, selection.node);
+    }
+    const added = Object.keys(sessionList.sessionsData || {}).filter(k => !prevSessKeys.has(k));
+    if (added.length > 0) announce('新会话已创建');
+  });
+});
+
+export function updateMainState(state) {
+  const ia = document.getElementById('input-area');
+  if (ia) ia.classList.toggle('disabled', false);
+  updateSendButton(state);
+  // The header's exit chip reads the session's own death_reason: the reason a
+  // caller has in hand may be a subscription status ('suspended'), not a death.
+  const exitEl = document.getElementById('header-exit');
+  if (exitEl) {
+    const sd = sessionList.sessionsData[sid(selection.key, selection.node)];
+    const html = sessionExitChipHtml(state, sd ? sd.death_reason : '');
+    if (exitEl.innerHTML !== html) exitEl.innerHTML = html;
+  }
 }

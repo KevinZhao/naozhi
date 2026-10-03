@@ -143,14 +143,14 @@
     "lateBindings": 3
   },
   "dashboard.js": {
-    "lines": 3834,
+    "lines": 3087,
     "maxFnLines": 120,
     "fnOver100": 1,
     "topLevelLetVar": 0,
     "configureDeps": 0,
     "deadInjections": 0,
-    "innerHTMLAssign": 20,
-    "htmlInsert": 6,
+    "innerHTMLAssign": 16,
+    "htmlInsert": 2,
     "lateBindings": 5
   },
   "discovery.js": {
@@ -176,14 +176,14 @@
     "lateBindings": 0
   },
   "event_stream.js": {
-    "lines": 462,
+    "lines": 902,
     "maxFnLines": 74,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0,
     "deadInjections": 0,
-    "innerHTMLAssign": 4,
-    "htmlInsert": 2,
+    "innerHTMLAssign": 7,
+    "htmlInsert": 6,
     "lateBindings": 0
   },
   "features.js": {
@@ -319,13 +319,13 @@
     "lateBindings": 0
   },
   "session_list.js": {
-    "lines": 955,
+    "lines": 1263,
     "maxFnLines": 100,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0,
     "deadInjections": 0,
-    "innerHTMLAssign": 1,
+    "innerHTMLAssign": 2,
     "htmlInsert": 0,
     "lateBindings": 0
   },

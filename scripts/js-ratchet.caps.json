@@ -4,7 +4,7 @@
     "exempt": []
   },
   "lines": {
-    "dashboard.js": 3834
+    "dashboard.js": 3087
   },
   "sideEffectLegacy": [
     "agent_view.js",
