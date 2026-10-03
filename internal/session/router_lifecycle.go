@@ -51,7 +51,8 @@ func (r *Router) publishSession(tx sessTx, key string, s *ManagedSession, alread
 }
 
 // GetOrCreate returns an existing session or creates a new one.
-// AgentOpts overrides the router defaults for model and args.
+// AgentOpts overrides the router defaults for model and args. A dead session
+// whose resume target is gone comes back as SessionResumeLost.
 func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, SessionStatus, error) {
 	// Flag-injection guard: opts.Model originates from dashboard WS, upstream
 	// RPC, or planner config and must be validated at the router boundary.
@@ -145,6 +146,11 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 				return nil, 0, fmt.Errorf("session %s: %w: %w", key, ErrShimStuck, err)
 			}
 			return nil, 0, fmt.Errorf("session %s: %w", key, err)
+		}
+		// The resume guard dropped the transcript of a session that had one:
+		// the respawn is fresh and the conversation's context is gone.
+		if status == SessionResumed && resumedID != "" && res.resumeID == "" {
+			status = SessionResumeLost
 		}
 		return s, status, nil
 	}

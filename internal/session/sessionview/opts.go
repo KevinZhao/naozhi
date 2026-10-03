@@ -37,4 +37,8 @@ const (
 	SessionExisting SessionStatus = iota // reused a live session
 	SessionResumed                       // resumed a suspended session
 	SessionNew                           // created a brand new session
+	// SessionResumeLost: a suspended session with a session ID whose resume
+	// target was missing or invalid, so it was spawned fresh and the
+	// conversation's context is gone.
+	SessionResumeLost
 )
