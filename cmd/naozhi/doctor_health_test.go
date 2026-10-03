@@ -97,7 +97,7 @@ func TestDoctor_ServerState(t *testing.T) {
 			"dispatch": "warn|only failures · messages=3 reply_errors=2 send_fails=1",
 		}},
 		{"quiet since start", body("true", feishu, alive, alive, quiet, old), map[string]string{
-			"dispatch": "warn|no inbound IM messages since start at " + old + " — platform may not be connected",
+			"dispatch": "warn|no inbound IM messages (slash commands not counted) since start at " + old + " — platform may not be connected",
 		}},
 		{"quiet just started", body("true", feishu, alive, alive, quiet, recent), map[string]string{
 			"dispatch": "pass|no inbound IM messages yet",
