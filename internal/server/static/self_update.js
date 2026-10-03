@@ -5,7 +5,7 @@
 import { NZ_CONTRACT } from './contract.js';
 import { showToast } from './nz_util.js';
 import { sid } from './session_ident.js';
-import { composer, selection, sessionList, ui } from './state.js';
+import { composer, perSession, selection, sessionList, ui } from './state.js';
 import { confirmDialog } from './utilities.js';
 import { wsm } from './ws_manager.js';
 
@@ -333,11 +333,10 @@ document.addEventListener('DOMContentLoaded', initUpdateChip);
 
 // --- Asset-version skew ---
 //
-// The page's nz-asset-version meta names the assets it booted with; auth_ok
-// names those the server serves now. When they differ this tab runs another
-// build's JS: a banner with no close control offers the reload, and an idle tab
-// reloads itself. Sessions survive a reload, so idle only guards unsent input,
-// an open surface and a turn being watched. No meta (the e2e mock) disables it.
+// nz-asset-version names the assets this page booted with, auth_ok those served
+// now. On a difference a banner with no close control offers the reload and an
+// idle tab reloads itself. Sessions survive it, so idle guards only unsent input
+// (memory-only drafts of other sessions too), an open surface and a watched turn.
 const SKEW_IDLE_MS = 60000;
 // SKEW_BUSY matches every surface a reload would close under the operator.
 const SKEW_BUSY = '.modal-overlay, .cmd-palette-overlay, .lightbox-overlay.active, .voice-overlay.show, ' +
@@ -345,9 +344,9 @@ const SKEW_BUSY = '.modal-overlay, .cmd-palette-overlay, .lightbox-overlay.activ
 const skew = { server: '', lastInputAt: 0 };
 
 function skewIdle() {
-  const typed = [...document.querySelectorAll('#msg-input, textarea')].some((el) => (el.value ?? el.innerText ?? '').trim());
-  if (typed || composer.pendingFiles.length || composer.sending) return false;
-  if (ui.activePopover || document.querySelector(SKEW_BUSY)) return false;
+  const texts = [...document.querySelectorAll('#msg-input, textarea')].map((el) => el.value ?? el.innerText);
+  if (texts.concat(Object.values(perSession.drafts)).some((t) => (t || '').trim()) || composer.sending) return false;
+  if (composer.pendingFiles.length || ui.activePopover || document.querySelector(SKEW_BUSY)) return false;
   if (document.hidden) return true;
   const sd = sessionList.sessionsData[sid(selection.key, selection.node)];
   return Date.now() - skew.lastInputAt >= SKEW_IDLE_MS && !(sd && sd.state === 'running');
@@ -373,7 +372,7 @@ wsm.onReady((msg) => {
     bar.hidden = false;
     bar.addEventListener('click', () => location.reload());
     const touched = () => { skew.lastInputAt = Date.now(); };
-    for (const t of ['keydown', 'pointerdown']) document.addEventListener(t, touched, { capture: true, passive: true });
+    for (const t of ['keydown', 'pointerdown', 'wheel']) document.addEventListener(t, touched, { capture: true, passive: true });
     document.addEventListener('visibilitychange', maybeSkewReload);
     setInterval(maybeSkewReload, 30000);
   }

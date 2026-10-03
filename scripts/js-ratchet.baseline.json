@@ -341,7 +341,7 @@
     "lateBindings": 0
   },
   "self_update.js": {
-    "lines": 382,
+    "lines": 381,
     "maxFnLines": 56,
     "fnOver100": 0,
     "topLevelLetVar": 5,

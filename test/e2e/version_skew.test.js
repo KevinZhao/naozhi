@@ -41,9 +41,13 @@ async function openDashboard(browser, overrides, { hidden = false, clock = false
 }
 
 const banner = (page) => page.locator('#asset-skew-banner');
-// noReload: a reload is a /dashboard request within a second; the decision
-// was taken synchronously before, so a second is ample to see one start.
-const noReload = (page) => expect(page.waitForRequest((r) => new URL(r.url()).pathname === '/dashboard', { timeout: 1000 })).rejects.toThrow();
+// noReload: no reload has started (loads still holds only the first load) and
+// none starts within a second; the decision is taken synchronously, so a
+// second is ample, and the count catches one that started before the wait.
+const noReload = async (page, loads) => {
+  await expect(page.waitForRequest((r) => new URL(r.url()).pathname === '/dashboard', { timeout: 1000 })).rejects.toThrow();
+  expect(loads).toHaveLength(1);
+};
 const connected = (page) => page.waitForFunction(() => !!window.wsm && window.wsm.state === window.WS_STATES.CONNECTED);
 
 test('a skewed visible tab shows a banner with no close control; clicking it reloads', async ({ browser }) => {
@@ -52,7 +56,7 @@ test('a skewed visible tab shows a banner with no close control; clicking it rel
   await expect(banner(page)).toBeVisible();
   await expect(banner(page).locator('button')).toHaveCount(1);
   await expect(banner(page)).toHaveText('naozhi 已更新，点击刷新');
-  await noReload(page); // fresh input on a visible tab holds it
+  await noReload(page, loads); // fresh input on a visible tab holds it
   await banner(page).click();
   await expect.poll(() => loads.length).toBe(2);
   await close();
@@ -85,6 +89,17 @@ test('a hidden idle tab reloads once; still skewed after it, it keeps the banner
 for (const [name, hold, release] of [
   ['typed composer text', (page) => page.locator('#msg-input').fill('draft'), (page) => page.locator('#msg-input').fill('')],
   ['an open dialog', (page) => page.evaluate(() => { window.promptDialog({ title: 'x' }); }), (page) => page.click('.prompt-cancel')],
+  // A switch parks the composer text in memory only; the composer itself is empty.
+  ['a draft parked on another session', async (page) => {
+    await page.locator('#msg-input').fill('draft');
+    await page.click(`.session-card[data-key="${RUNNING_KEY}"]`);
+    await expect(page.locator('#msg-input')).toHaveText('');
+  }, async (page) => {
+    await page.click(`.session-card[data-key="${READY_KEY}"]`);
+    await expect(page.locator('#msg-input')).toHaveText('draft');
+    await page.locator('#msg-input').fill('');
+    await page.click(`.session-card[data-key="${RUNNING_KEY}"]`);
+  }],
 ]) {
   test(`${name} holds the reload of a hidden tab until it goes`, async ({ browser }) => {
     const { mock, page, loads, close } = await openDashboard(browser, { assetVersion: 'aaaa', wsHoldAuth: true });
@@ -93,7 +108,7 @@ for (const [name, hold, release] of [
     await page.evaluate(hide);
     mock.wsConnections[mock.wsConnections.length - 1].send({ type: 'auth_ok', asset_version: 'bbbb' });
     await expect(banner(page)).toBeVisible();
-    await noReload(page);
+    await noReload(page, loads);
     await release(page);
     await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
     await expect.poll(() => loads.length).toBe(2);
@@ -107,8 +122,27 @@ test('a visible tab reloads after a minute without input, but not while its sess
   mock.wsConnections[mock.wsConnections.length - 1].send({ type: 'auth_ok', asset_version: 'bbbb' });
   await expect(banner(page)).toBeVisible();
   await page.clock.runFor(91000);
-  await noReload(page); // the running turn holds it
+  await noReload(page, loads); // the running turn holds it
   await page.click(`.session-card[data-key="${READY_KEY}"]`);
+  await page.clock.runFor(91000);
+  await expect.poll(() => loads.length).toBe(2);
+  await close();
+});
+
+test('wheel scrolling on a visible tab counts as input', async ({ browser }) => {
+  const { mock, page, loads, close } = await openDashboard(browser, { assetVersion: 'aaaa', wsHoldAuth: true }, { clock: true });
+  await page.click(`.session-card[data-key="${READY_KEY}"]`);
+  mock.wsConnections[mock.wsConnections.length - 1].send({ type: 'auth_ok', asset_version: 'bbbb' });
+  await expect(banner(page)).toBeVisible();
+  // Wheel reaches the page asynchronously; wait for each before moving the clock.
+  await page.evaluate(() => { window.__wheels = 0; document.addEventListener('wheel', () => { window.__wheels++; }, { passive: true }); });
+  await page.mouse.move(640, 400);
+  for (let i = 1; i <= 3; i++) {
+    await page.clock.runFor(50000);
+    await page.mouse.wheel(0, -200);
+    await expect.poll(() => page.evaluate(() => window.__wheels)).toBe(i);
+  }
+  await noReload(page, loads); // 150s on the clock, never 60s without a wheel
   await page.clock.runFor(91000);
   await expect.poll(() => loads.length).toBe(2);
   await close();
