@@ -131,8 +131,9 @@ func (s *Scheduler) rewriteRunInflightMarker(path string, m runInflightMarker) b
 // is removed either way — a marker that cannot be turned into a record must
 // still not be reconciled again on every boot.
 //
-// Runs are appended through appendRun, the same path a live finish uses, so
-// retention and the orphan re-check apply identically.
+// Runs end through finishRun, the same path a live finish uses, so the job
+// card, retention and the orphan re-check apply identically; with the run
+// store disabled, everything but the history row still happens.
 func (s *Scheduler) reconcileRunInflight() {
 	s.settleRunInflight(s.claimRunInflight())
 }
@@ -175,8 +176,12 @@ type inflightAdoption struct {
 // Needs the job table loaded: jobStillExists on an empty table would treat
 // every marker as an orphan.
 func (s *Scheduler) claimRunInflight() inflightSettlement {
+	// The writer's condition, not the run store's: settling a marker is the job
+	// card, run_ended, metrics and adoption, none of which need run history,
+	// and finishRun gates its own append. A stricter gate here strands every
+	// marker a store-disabled boot writes, shutdown-cancel ones included.
 	dir := s.runInflightDir()
-	if dir == "" || !s.runStoreEnabled() {
+	if dir == "" {
 		return inflightSettlement{}
 	}
 	entries, err := os.ReadDir(dir)
