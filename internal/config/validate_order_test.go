@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// validateConfig was one 240-line function; it is now five per-section
-// validators called in a fixed order. Each returns on its FIRST problem, so the
+// validateConfig was one 240-line function; it is now one validator per
+// section, called in a fixed order. Each returns on its FIRST problem, so the
 // order decides which of several bad values an operator is told about — and a
 // refactor that reshuffles the calls silently changes the error an operator sees
 // on a config with two mistakes. This pins the order by feeding configs that are
@@ -76,6 +76,29 @@ cli:
   model: "bad model with spaces"
 `,
 			want: "notify",
+		},
+		{
+			// a short token is a server-section error, so it also beats notify
+			name: "short dashboard token beats notify platform",
+			body: `
+server:
+  dashboard_token: "short"
+cron:
+  notify_default:
+    platform: "nosuchplatform"
+`,
+			want: "dashboard_token is too short",
+		},
+		{
+			// argv-bearing fields before agent_commands
+			name: "bad model beats undefined agent command",
+			body: `
+cli:
+  model: "bad model with spaces"
+agent_commands:
+  /x: ghost
+`,
+			want: "model",
 		},
 	}
 	for _, tc := range cases {

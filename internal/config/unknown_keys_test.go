@@ -131,7 +131,7 @@ func TestUnknownKeysReported(t *testing.T) {
 func TestKnownKeysAreNotReported(t *testing.T) {
 	body := `server:
   debug_mode: true
-  dashboard_token: "t"
+  dashboard_token: "unknown-keys-test-token"
 projects:
   public_tmp: true
   include_root: true
@@ -183,7 +183,7 @@ func TestExampleConfigHasNoUnknownKeys(t *testing.T) {
 // config with an unknown key must decode to exactly the same Config as the same
 // file without it. Reported, never acted on.
 func TestUnknownKeyDoesNotChangeLoadResult(t *testing.T) {
-	clean := "server:\n  dashboard_token: \"t\"\nsession:\n  cwd: /tmp\n"
+	clean := "server:\n  dashboard_token: \"unknown-keys-test-token\"\nsession:\n  cwd: /tmp\n"
 	dirty := clean + "server_typo_block:\n  nope: 1\n"
 
 	a, err := Load(writeCfg(t, clean))

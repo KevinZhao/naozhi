@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -137,4 +139,22 @@ func applyWorkspaceDefaults(cfg *Config) {
 		}
 		cfg.AgentCommands = normalized
 	}
+}
+
+// validateAgentCommands refuses an agent_commands entry whose target is not a
+// key of agents. Runs after applyWorkspaceDefaults has lowercased the command
+// keys; they are checked in sorted order so the error names the same entry on
+// every run.
+func validateAgentCommands(cfg *Config) error {
+	cmds := make([]string, 0, len(cfg.AgentCommands))
+	for cmd := range cfg.AgentCommands {
+		cmds = append(cmds, cmd)
+	}
+	sort.Strings(cmds)
+	for _, cmd := range cmds {
+		if _, ok := cfg.Agents[cfg.AgentCommands[cmd]]; !ok {
+			return fmt.Errorf("agent_commands[%q] references undefined agent %q", cmd, cfg.AgentCommands[cmd])
+		}
+	}
+	return nil
 }

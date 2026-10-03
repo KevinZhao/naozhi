@@ -84,18 +84,32 @@ type LogConfig struct {
 // Valid only when Update.Enabled; returns 0 otherwise.
 func (c *Config) UpdateInterval() time.Duration { return c.cachedInterval }
 
+// minDashboardTokenLen is the shortest dashboard_token Load accepts;
+// tokens under weakDashboardTokenLen load with a warning.
+const (
+	minDashboardTokenLen  = 8
+	weakDashboardTokenLen = 16
+)
+
 // validateServer checks the dashboard token: empty is legal but logged as a
-// SECURITY warning, while an unexpanded ${VAR} is refused — it would be compared
-// literally and any caller could guess it. Split out of validateConfig (#2710).
+// SECURITY warning, an unexpanded ${VAR} is refused — it would be compared
+// literally and any caller could guess it — and so is one shorter than
+// minDashboardTokenLen. Split out of validateConfig (#2710).
 func validateServer(cfg *Config) error {
-	if cfg.Server.DashboardToken == "" {
+	token := cfg.Server.DashboardToken
+	switch {
+	case token == "":
 		slog.Warn("SECURITY: dashboard_token is empty — all dashboard API endpoints are accessible without authentication",
 			"hint", "set NAOZHI_DASHBOARD_TOKEN or dashboard_token in config")
-	} else if containsEnvPlaceholder(cfg.Server.DashboardToken) {
+	case containsEnvPlaceholder(token):
 		// Refuse to start with a literal "${VAR}" string as the dashboard
 		// credential: the placeholder is readable in the repository, so
 		// anyone who ever sees the config knows the login token.
 		return fmt.Errorf("server.dashboard_token contains unexpanded ${VAR} — check environment variables (refusing to run with a guessable token)")
+	case len(token) < minDashboardTokenLen:
+		return fmt.Errorf("server.dashboard_token is too short — use at least %d characters", minDashboardTokenLen)
+	case len(token) < weakDashboardTokenLen:
+		slog.Warn("dashboard_token is short — consider using 16+ random characters for stronger security")
 	}
 	return nil
 }

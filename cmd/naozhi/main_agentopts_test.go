@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/config"
-	"github.com/naozhi/naozhi/internal/session"
 )
 
 // TestBuildAgentOpts covers the cfg.Agents → session/cron map translation
@@ -74,34 +73,5 @@ func TestBuildAgentOpts(t *testing.T) {
 	}
 	if len(emptyAgents) != 0 || len(emptyCron) != 0 {
 		t.Errorf("buildAgentOpts(empty) = %d/%d entries, want 0/0", len(emptyAgents), len(emptyCron))
-	}
-}
-
-// TestFirstUndefinedAgentCommand verifies the agent_commands cross-reference
-// check extracted from main() (#590): all-resolve returns ok=true with an
-// empty command; a dangling reference returns ok=false naming the command.
-func TestFirstUndefinedAgentCommand(t *testing.T) {
-	t.Parallel()
-
-	agents := map[string]session.AgentOpts{"general": {}, "planner": {}}
-
-	// All commands resolve.
-	cmd, ok := firstUndefinedAgentCommand(map[string]string{
-		"/ask":  "general",
-		"/plan": "planner",
-	}, agents)
-	if !ok || cmd != "" {
-		t.Fatalf("all-resolve: got (%q, %v), want (\"\", true)", cmd, ok)
-	}
-
-	// Nil / empty command map resolves trivially.
-	if cmd, ok := firstUndefinedAgentCommand(nil, agents); !ok || cmd != "" {
-		t.Fatalf("nil commands: got (%q, %v), want (\"\", true)", cmd, ok)
-	}
-
-	// Dangling reference surfaces the offending command.
-	cmd, ok = firstUndefinedAgentCommand(map[string]string{"/x": "ghost"}, agents)
-	if ok || cmd != "/x" {
-		t.Fatalf("dangling: got (%q, %v), want (\"/x\", false)", cmd, ok)
 	}
 }

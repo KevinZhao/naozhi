@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"os"
-	"sort"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -135,23 +134,6 @@ func buildAgentOpts(cfg *config.Config) (map[string]session.AgentOpts, map[strin
 		cronAgents[id] = toCronAgentOpts(a)
 	}
 	return agents, cronAgents
-}
-
-// firstUndefinedAgentCommand reports the first agent_commands entry whose
-// target agent id is not in agents; ok=true means every command resolves.
-// Keys are sorted so the reported command is deterministic across runs.
-func firstUndefinedAgentCommand(agentCommands map[string]string, agents map[string]session.AgentOpts) (string, bool) {
-	cmds := make([]string, 0, len(agentCommands))
-	for cmd := range agentCommands {
-		cmds = append(cmds, cmd)
-	}
-	sort.Strings(cmds)
-	for _, cmd := range cmds {
-		if _, ok := agents[agentCommands[cmd]]; !ok {
-			return cmd, false
-		}
-	}
-	return "", true
 }
 
 // logConfigValidationDiagnostics logs every config.Validate() finding at its
