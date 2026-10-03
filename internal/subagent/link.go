@@ -182,20 +182,19 @@ func NewLinker() *Linker {
 	}
 }
 
-// SetContext installs the on-disk lookup root. Must be called before Resolve
-// can succeed. Project dir is derived from the process cwd (ProjectDir);
-// sessionID comes from the first system.init event.
 // ParentSessionID returns the session ID Resolve matches transcripts against,
-// or "" before SetContext has supplied one. Read under the Linker's own lock:
-// the caller (cli.Process.SetCwdForLinker, deciding whether to seed it from the
-// shim handshake) used to reach into l.parentSessionID directly, which stopped
-// being possible when this package moved out of internal/cli (#2649 G1-f).
+// or "" before SetContext has supplied one. Read under the Linker's own lock;
+// cli.Process.SetCwdForLinker uses it to decide whether to seed the ID from
+// the shim handshake.
 func (l *Linker) ParentSessionID() string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.parentSessionID
 }
 
+// SetContext installs the on-disk lookup root. Must be called before Resolve
+// can succeed. Project dir is derived from the process cwd (ProjectDir);
+// sessionID comes from the first system.init event.
 func (l *Linker) SetContext(projectDir, parentSessionID string) {
 	l.mu.Lock()
 	prev := l.projectDir != "" && l.parentSessionID != ""

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"sync"
 	"time"
 )
 
@@ -31,20 +30,16 @@ func (p *Persister) flushAllLocked() error {
 	if len(dirtyWs) == 0 {
 		return nil
 	}
-	// Parallel flush; same independence argument as shutdownAll. firstErr
-	// is recorded under p.scratch.allErrMu (a field to avoid a heap escape).
-	var firstErr error
-	p.parallelFsync(dirtyKeys, dirtyWs, func(k string, w *perKeyWriter) {
+	// Parallel flush; same independence argument as shutdownAll. Each worker
+	// writes only its own writer's flushErr; firstErr is picked after the join.
+	p.parallelFsync(dirtyKeys, dirtyWs, func(_ string, w *perKeyWriter) {
 		w.flushErr = w.flush(p)
-		if w.flushErr != nil {
-			p.scratch.allErrMu.Lock()
-			if firstErr == nil {
-				firstErr = fmt.Errorf("flush %s: %w", k, w.flushErr)
-			}
-			p.scratch.allErrMu.Unlock()
-		}
 	})
+	var firstErr error
 	for i, w := range dirtyWs {
+		if firstErr == nil && w.flushErr != nil {
+			firstErr = fmt.Errorf("flush %s: %w", dirtyKeys[i], w.flushErr)
+		}
 		p.settleFlush(dirtyKeys[i], w, "flush", w.flushErr)
 		w.flushErr = nil
 	}
@@ -53,9 +48,6 @@ func (p *Persister) flushAllLocked() error {
 	return firstErr
 }
 
-// flushCandidate gives tickFlush a stable oldest-first flush order:
-// sorting by firstDirtyAt bounds worst-case flush latency to N tick
-// intervals regardless of map-iteration randomness.
 // flushScratch is the set of buffers the run goroutine reuses across flushes.
 // It is its own type so the Persister's fields divide structurally rather than by
 // a comment repeated seven times: everything outside scratch may be touched by
@@ -75,12 +67,11 @@ type flushScratch struct {
 	// tickFlush pair so the two paths never alias.
 	allKeys []string
 	allWs   []*perKeyWriter
-	// allErrMu serialises firstErr in flushAllLocked's parallelFsync closure; a
-	// field rather than a local to avoid the heap escape from capturing a local
-	// mutex's address.
-	allErrMu sync.Mutex
 }
 
+// flushCandidate gives tickFlush a stable oldest-first flush order:
+// sorting by firstDirtyAt bounds worst-case flush latency to N tick
+// intervals regardless of map-iteration randomness.
 type flushCandidate struct {
 	key string
 	w   *perKeyWriter
