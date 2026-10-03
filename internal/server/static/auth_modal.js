@@ -701,8 +701,8 @@ function nodeFilteredProjects() {
   return sessionList.projectsData.filter(p => (p.node || 'local') === target);
 }
 
-// Keyboard shortcut: Alt+N for new session (moved here from msg_nav.js).
-// Cmd/Ctrl+N is left alone so the browser's "new window" still works.
+// Alt+N opens a new session. Cmd/Ctrl+N is left alone so the browser's
+// "new window" still works.
 document.addEventListener('keydown', function(e) {
   if (e.altKey && (e.key === 'n' || e.key === 'N')) {
     const tag = (e.target.tagName || '').toLowerCase();

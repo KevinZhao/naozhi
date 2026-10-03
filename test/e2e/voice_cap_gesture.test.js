@@ -165,8 +165,7 @@ test('normal hold: up-swipe still cancels while recording', async ({ browser }) 
   await ctx.close();
 });
 
-// toggleInputMode re-runs updateSendButton (an import from running_banner.js
-// since S20g). Its inline display is what hides the send button in voice
+// toggleInputMode re-runs running_banner.js's updateSendButton. Its inline display is what hides the send button in voice
 // mode: the stylesheet's `.voice-mode .btn-send{display:none}` loses to the
 // inline `display:flex` the last updateSendButton left on the button.
 test('voice mode hides the send button and keyboard mode brings it back', async ({ browser }) => {

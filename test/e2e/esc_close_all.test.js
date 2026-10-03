@@ -1,12 +1,14 @@
 // @ts-check
-// The two global shortcuts S20g moved out of msg_nav.js.
+// The two global shortcuts, Esc and Alt+N.
 //
-// 1. Esc (now in dashboard.js) closes the voice overlay, the history
+// 1. Esc (dashboard.js) closes the voice overlay, the history
 //    popover and the message-nav list with four independent ifs, not an
 //    else-if chain, and agent_view's own Esc listener leaves the drill-in on
 //    the same key press. One Esc with all four open must close all four: an
-//    else-if, or a branch that went missing in the move, leaves one behind.
-// 2. Alt+N (now in auth_modal.js, next to createNewSession) opens the
+//    else-if, or a missing branch, leaves one behind. Esc while the composer
+//    has focus belongs to the composer (its double-Esc interrupt), so the
+//    global listener must leave everything open then.
+// 2. Alt+N (auth_modal.js, next to createNewSession) opens the
 //    new-session modal, but not while the user is typing in the composer.
 //
 // 跑法：cd test/e2e && npx playwright test esc_close_all.test.js --project=desktop-chrome
@@ -85,6 +87,33 @@ test.describe('global shortcuts', () => {
       await expect(page.locator('.history-popover')).toHaveCount(0);
       await expect(page.locator('#nav-list-popover')).toHaveCount(0);
       await expect.poll(activeTask).toBeFalsy();
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('Esc in the composer leaves the history popover and the nav list open', async ({ browser }) => {
+    const { ctx, page, pageErrors } = await openSession(browser);
+    try {
+      await page.click('#nav-counter');
+      await expect(page.locator('#nav-list-popover')).toHaveCount(1);
+      await page.evaluate(() => (/** @type {any} */ (window)).nz.test.toggleHistory());
+      await expect(page.locator('.history-popover')).toHaveCount(1);
+      // focus, not click: a click outside the nav list closes it.
+      await page.focus('#msg-input');
+      await expect(page.locator('#msg-input')).toBeFocused();
+
+      await page.keyboard.press('Escape');
+
+      await expect(page.locator('.history-popover')).toHaveCount(1);
+      await expect(page.locator('#nav-list-popover')).toHaveCount(1);
+      // The same key with focus elsewhere closes both, so the open state above
+      // is the composer guard and not a listener that never ran.
+      await page.evaluate(() => /** @type {HTMLElement} */ (document.activeElement)?.blur());
+      await page.keyboard.press('Escape');
+      await expect(page.locator('.history-popover')).toHaveCount(0);
+      await expect(page.locator('#nav-list-popover')).toHaveCount(0);
       expect(pageErrors).toEqual([]);
     } finally {
       await ctx.close();

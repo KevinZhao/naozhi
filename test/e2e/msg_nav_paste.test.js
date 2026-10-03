@@ -1,8 +1,8 @@
 // @ts-check
 // msg_nav.js's composer paste handler. An image on the clipboard goes to
-// composer_files' handleFiles (an import since S20g, an injected dep before),
-// so it becomes a pending attachment instead of an <img> pasted into the
-// contenteditable. No other spec pastes into the composer.
+// composer_files' handleFiles, so it becomes a pending attachment instead of
+// an <img> pasted into the contenteditable. No other spec pastes into the
+// composer.
 //
 // 跑法：cd test/e2e && npx playwright test msg_nav_paste.test.js --project=desktop-chrome
 const { test, expect } = require('@playwright/test');

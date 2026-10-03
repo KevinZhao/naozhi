@@ -764,9 +764,8 @@ document.addEventListener('keydown', function(e) {
   createNewSession();
 });
 
-// Global Esc (moved from msg_nav.js): close the voice overlay, the history
-// popover, the nav list and cron's inline expand / drawer when no modal or
-// input has focus. Four independent ifs, not else-if: one Esc closes every one
+// Global Esc: close the voice overlay, the history popover, the nav list and
+// cron's inline expand / drawer when no modal or input has focus. Four independent ifs, not else-if: one Esc closes every one
 // that is open. cron goes through nzViews.cron, absent when cron_view.js is not
 // loaded (dashboard-cron-view-extraction §2.6 B1); its own priority (expanded
 // row before drawer) lives in cron_view.js's cronEscClose.

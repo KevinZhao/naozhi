@@ -70,7 +70,7 @@ test.describe('掉了终态信号的 turn 自愈', () => {
   });
 });
 
-// updateSendButton (running_banner.js since S20g) owns the other two halves of
+// running_banner.js's updateSendButton owns the other two halves of
 // that chain. 'running' arms the turn watchdog, a 15 s interval that pulls
 // /api/sessions while the open session runs, because the 5 s poll is off while
 // the socket is up. Any other state replaces a stale loading indicator, left
