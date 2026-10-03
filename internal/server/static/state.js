@@ -190,10 +190,6 @@ export const serverInfo = {
 
 // timers: the dashboard's polling and debounce timer handles.
 export const timers = {
-  // activeCard.el (utilities.js) caches the currently-.active session card element so the
-  // selector switch doesn't have to O(N) scan every card each time. Stays in
-  // sync via setActiveSessionCard(); after renderSidebar rebuilds the list the
-  // cached node becomes detached — the helper's isConnected guard recovers.
   events: null,
   sessionPoll: null,
   discoveredPoll: null,

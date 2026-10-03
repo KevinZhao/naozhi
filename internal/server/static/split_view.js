@@ -1,8 +1,5 @@
 // split_view.js — extracted from dashboard.js (#2558 D4).
 //
-// Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block and the export block below are the only additions.
-//
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
 // module evaluates. Shared state is read from the state.js objects; its helpers are

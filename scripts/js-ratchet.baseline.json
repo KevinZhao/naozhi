@@ -374,7 +374,7 @@
     "lateBindings": 0
   },
   "split_view.js": {
-    "lines": 193,
+    "lines": 190,
     "maxFnLines": 43,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -385,7 +385,7 @@
     "lateBindings": 0
   },
   "state.js": {
-    "lines": 276,
+    "lines": 272,
     "maxFnLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 0,
