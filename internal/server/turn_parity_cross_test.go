@@ -269,7 +269,9 @@ func TestTurnParity22_Cross_HTTPFailureBroadcastOncePerTurn(t *testing.T) {
 		turns := h.session(parityKey, true)
 		a, b := h.ws(), h.ws()
 
-		h.httpSend(t, "first")
+		if s := h.httpSend(t, "first"); s != "accepted" {
+			t.Fatalf("passthrough HTTP status = %q, want accepted", s)
+		}
 		turns.turn(t, "failing turn", parityOutcome{Err: errParityBoom})
 		a.waitFor(t, "send_error on a", isSendError)
 		b.waitFor(t, "send_error on b", isSendError)

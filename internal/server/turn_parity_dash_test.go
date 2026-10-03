@@ -106,6 +106,8 @@ func TestTurnParity03_Dash_ResetOnlyOnExactCommand(t *testing.T) {
 	turns.noMoreTurns(t)
 }
 
+// Row 4: a dashboard /new drops the workspace override and refreshes every
+// tab's session list.
 func TestTurnParity04_Dash_ResetDiscardsWorkspaceOverride(t *testing.T) {
 	h := newParityHarness(t, parityOpts{})
 	h.session(parityKey, false)
@@ -116,6 +118,7 @@ func TestTurnParity04_Dash_ResetDiscardsWorkspaceOverride(t *testing.T) {
 	if got := h.router.Workspace(parityChatKey); got != "" {
 		t.Fatalf("workspace override after dashboard /new = %q, want it discarded", got)
 	}
+	ws.waitFor(t, "sessions_update after /new", func(f parityFrame) bool { return f.Type == "sessions_update" })
 }
 
 // Row 6 flipped in D: /urgent is recognised in every mode, case-insensitively,
@@ -127,7 +130,11 @@ func TestTurnParity06_Dash_UrgentAnyModeCaseInsensitive(t *testing.T) {
 			turns := h.session(parityKey, true)
 			ws := h.ws()
 			for i, in := range []string{"/urgent hi", "/URGENT  hi"} {
-				ws.send("w"+string(rune('0'+i)), in)
+				id := "w" + string(rune('0'+i))
+				ws.send(id, in)
+				if s := ws.ack(t, id); s != "accepted" {
+					t.Fatalf("%q ack = %q, want accepted (a detached turn runs now)", in, s)
+				}
 				c := turns.turn(t, in, okTurn("R"))
 				if c.Text != "hi" || c.Priority != "now" || !c.Passthrough {
 					t.Errorf("%q: turn = %+v, want text hi, priority now, via SendPassthrough", in, c)
@@ -191,6 +198,9 @@ func TestTurnParity09_Dash_DetachedTurnPanicIsRecovered(t *testing.T) {
 			turns := h.session(parityKey, true)
 			ws := h.ws()
 			ws.send("w1", tc.text)
+			if s := ws.ack(t, "w1"); s != "accepted" {
+				t.Fatalf("detached send ack = %q, want accepted", s)
+			}
 			turns.turn(t, "detached turn", parityOutcome{Panic: "parity: detached turn panic"})
 			h.waitEngineIdle()
 			onlyErrorAck(t, ws.errorAcks(), "w1", parityPanicReply)
@@ -331,24 +341,48 @@ func TestTurnParity13_Dash_ShutdownDrainDiscardsQueue(t *testing.T) {
 	}
 }
 
-// Row 14 flipped in D: a send pushed out of a full queue is told.
+// Row 14 flipped in D: a WS send pushed out of a full queue is told. An HTTP
+// one is not: it has no per-request channel, and a send_error would reach
+// every tab on the key.
 func TestTurnParity14_Dash_EvictedSendIsTold(t *testing.T) {
-	h := newParityHarness(t, parityOpts{maxDepth: 1})
-	turns := h.session(parityKey, false)
-	ws := h.ws()
-	ws.send("w1", "first")
-	turns.next(t, "owner turn")
-	ws.send("w2", "second")
-	ws.send("w3", "third")
-	if a, b := ws.ack(t, "w2"), ws.ack(t, "w3"); a != "queued" || b != "queued" {
-		t.Fatalf("acks = %q, %q", a, b)
-	}
-	turns.answer(okTurn("R1"))
-	if c := turns.turn(t, "drain turn", okTurn("R2")); c.Text != "third" {
-		t.Fatalf("drain turn = %q, want only the surviving message", c.Text)
-	}
-	h.waitEngineIdle()
-	onlyErrorAck(t, ws.errorAcks(), "w2", evictedSendMsg)
+	t.Run("ws", func(t *testing.T) {
+		h := newParityHarness(t, parityOpts{maxDepth: 1})
+		turns := h.session(parityKey, false)
+		ws := h.ws()
+		ws.send("w1", "first")
+		turns.next(t, "owner turn")
+		ws.send("w2", "second")
+		ws.send("w3", "third")
+		if a, b := ws.ack(t, "w2"), ws.ack(t, "w3"); a != "queued" || b != "queued" {
+			t.Fatalf("acks = %q, %q", a, b)
+		}
+		turns.answer(okTurn("R1"))
+		if c := turns.turn(t, "drain turn", okTurn("R2")); c.Text != "third" {
+			t.Fatalf("drain turn = %q, want only the surviving message", c.Text)
+		}
+		h.waitEngineIdle()
+		onlyErrorAck(t, ws.errorAcks(), "w2", evictedSendMsg)
+	})
+	t.Run("http is silent", func(t *testing.T) {
+		h := newParityHarness(t, parityOpts{maxDepth: 1})
+		turns := h.session(parityKey, false)
+		ws := h.ws()
+		h.httpSend(t, "first")
+		turns.next(t, "owner turn")
+		for _, text := range []string{"second", "third"} {
+			if s := h.httpSend(t, text); s != "queued" {
+				t.Fatalf("HTTP %s status = %q", text, s)
+			}
+		}
+		turns.answer(okTurn("R1"))
+		if c := turns.turn(t, "drain turn", okTurn("R2")); c.Text != "third" {
+			t.Fatalf("drain turn = %q, want only the surviving message", c.Text)
+		}
+		h.waitEngineIdle()
+		if errs := ws.framesOfType("send_error"); len(errs) != 0 {
+			t.Fatalf("evicted HTTP send: send_error frames %+v, want none", errs)
+		}
+	})
 }
 
 func TestTurnParity15_Dash_DrainTimerRearms(t *testing.T) {

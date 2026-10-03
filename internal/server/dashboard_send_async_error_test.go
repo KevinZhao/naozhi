@@ -161,3 +161,26 @@ func TestHTTPOrigin_SkipsInformationalErrors(t *testing.T) {
 		t.Fatalf("a successful turn must not fan out, got %+v", m)
 	}
 }
+
+// TestWSOrigin_ReportsInformationalErrors is the WS side of the rule above:
+// the error ack reaches the sending tab alone, so an informational outcome
+// still clears that send's bubble.
+func TestWSOrigin_ReportsInformationalErrors(t *testing.T) {
+	const key = "feishu:p2p:alice"
+	hub, _ := newTestHub(t, "tok")
+	t.Cleanup(hub.Shutdown)
+	c, out := newCapturedClient(t, hub)
+
+	d := hub.engine.wsOrigin(c, "w1", key).Begin(context.Background(), turn.TurnInfo{Role: turn.RoleHead})
+	for _, e := range []error{
+		clierr.ErrAbortedByUrgent,
+		fmt.Errorf("passthrough: %w", clierr.ErrSessionReset),
+		clierr.ErrReconnectedUnknown,
+	} {
+		d.Finish(context.Background(), turn.Outcome{Stage: turn.StageSend, Err: e})
+		m, ok := recvMsg(t, out)
+		if !ok || m.Type != "send_ack" || m.ID != "w1" || m.Status != "error" || m.Error != asyncErrorMessage(e) {
+			t.Fatalf("%v: got ok=%v %+v, want an error ack for w1", e, ok, m)
+		}
+	}
+}
