@@ -14,15 +14,22 @@
 #                            expanded from the environment at load time. A
 #                            placeholder whose variable is unset, or refused by
 #                            the expansion policy, stays literal, and a literal
-#                            placeholder left in dashboard_token, a platform's
-#                            primary credential, upstream.token or a
+#                            placeholder left in dashboard_token, a feishu
+#                            credential, a slack/discord bot_token, the weixin
+#                            token, upstream.url / node_id / token or a
 #                            reverse_nodes token fails the load.
-#   ~/.claude/settings.json  its `env` block is copied into naozhi's own
-#                            process env. That mainly feeds transcription and
-#                            the sysession Bedrock auth, but the
-#                            ANTHROPIC_BASE_URL / ANTHROPIC_BEDROCK_BASE_URL
-#                            endpoints also reach every spawned CLI. Spawned
-#                            cc sessions read that file themselves.
+#   ~/.claude/settings.json  its `env` block, minus keys the env policy
+#                            refuses, is copied into naozhi's own process env
+#                            unless the shell already set the key. That feeds
+#                            transcription and the sysession Bedrock auth, and
+#                            every key the shim also forwards reaches each
+#                            spawned CLI as well: the Anthropic and AWS
+#                            credentials, AWS_REGION, ANTHROPIC_MODEL,
+#                            CLAUDE_CODE_USE_BEDROCK, ANTHROPIC_BASE_URL and
+#                            more. Proxy keys stay in naozhi's own process.
+#                            Spawned cc also reads the file itself, unless
+#                            naozhi_settings.enabled points it at an isolated
+#                            copy without `env` (the process env still flows).
 #   .naozhi/project.yaml     one per project directory under projects.root.
 #                            Overrides projects.planner_defaults (model,
 #                            prompt), the default backend and the access

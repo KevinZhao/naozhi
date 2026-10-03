@@ -145,8 +145,8 @@ var Table = []Rule{
 	// ── Claude CLI / Anthropic ─────────────────────────────────────────────
 	// Explicit keys for shim/overlay, never the whole namespace: a future or
 	// namespace-sharing variable would otherwise be readable via the Bash
-	// tool. settings.json gets the namespaces (its values only enter the
-	// naozhi parent process, not CLI children).
+	// tool. settings.json gets the namespaces; once in the parent env, a key
+	// an exact shim rule allows still reaches CLI children.
 	{Pattern: "ANTHROPIC_*", Specified: SourceSettings | SourceExpansion, Allowed: SourceSettings},
 	{Pattern: "CLAUDE_*", Specified: SourceSettings | SourceExpansion, Allowed: SourceSettings},
 	{Pattern: "ANTHROPIC_API_KEY", Specified: SourceShim | SourceOverlay | SourceSysession, Allowed: SourceShim | SourceOverlay, Cred: credAnthropic},
