@@ -211,9 +211,9 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 				slog.Debug("connector write subscribed", "key", key, "err", err)
 			}
 			wg.Add(1)
-			go func(k string, n <-chan struct{}, g uint64) {
+			go func(k string, s Session, n <-chan struct{}, g uint64) {
 				defer wg.Done()
-				c.streamEvents(connCtx, writeJSON, k, n)
+				c.streamEvents(connCtx, writeJSON, k, s, n)
 				// Signal exit so the main loop drops activeSubs[k]. A dropped note
 				// only delays cleanup until the next subscribe/unsubscribe for k.
 				select {
@@ -221,7 +221,7 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 				default:
 					slog.Warn("connector: subExited channel full, activeSubs cleanup delayed", "key", k)
 				}
-			}(key, notify, myGen)
+			}(key, sess, notify, myGen)
 
 		case "unsubscribe":
 			key := msg.Key

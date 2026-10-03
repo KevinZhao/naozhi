@@ -15,9 +15,15 @@ import (
 // Same-millisecond dedup is shared with the local dashboard pusher via
 // clievent.SinceCursor (#2402); see internal/cli/since_cursor.go.
 
-func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error, key string, notify <-chan struct{}) {
-	sess := c.router.SessionFor(key)
+// streamEvents pumps sess's events and state changes for key to the primary.
+// sess is the session the subscribe handler already acked; re-resolving it
+// here would let a Reset in between end the stream silently. Unless ctx ends
+// or a write fails, it returns only after writing one final session_state with
+// key's current router state (nil sess or closed notify; see
+// writeTerminalState), so the primary re-subscribes.
+func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error, key string, sess Session, notify <-chan struct{}) {
 	if sess == nil {
+		c.writeTerminalState(writeJSON, key)
 		return
 	}
 	var lastState string
@@ -26,20 +32,8 @@ func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error,
 		select {
 		case _, ok := <-notify:
 			if !ok {
-				// Session was reset/replaced (notify closed). Always emit a
-				// terminal session_state — even if Reset already removed the
-				// session from the router — so the primary learns the key has
-				// no live stream and re-subscribes on the next send.
-				s := c.router.SessionFor(key)
-				msg := node.ReverseMsg{Type: "session_state", Key: key, State: "dead", Reason: reasonSessionReset}
-				if s != nil {
-					snap := s.Snapshot()
-					msg.State = snap.State
-					msg.Reason = snap.DeathReason
-				}
-				if err := writeJSON(msg); err != nil {
-					slog.Debug("connector write final session_state", "key", key, "err", err)
-				}
+				// Session was reset/replaced (notify closed).
+				c.writeTerminalState(writeJSON, key)
 				return
 			}
 			// Re-fetch in case the session was replaced (e.g. /new): the fresh
@@ -74,5 +68,19 @@ func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error,
 		case <-ctx.Done():
 			return
 		}
+	}
+}
+
+// writeTerminalState reports key's current router state, or dead/session_reset
+// when Reset already removed it, so a replaced session reports its own state.
+func (c *Connector) writeTerminalState(writeJSON func(any) error, key string) {
+	msg := node.ReverseMsg{Type: "session_state", Key: key, State: "dead", Reason: reasonSessionReset}
+	if s := c.router.SessionFor(key); s != nil {
+		snap := s.Snapshot()
+		msg.State = snap.State
+		msg.Reason = snap.DeathReason
+	}
+	if err := writeJSON(msg); err != nil {
+		slog.Debug("connector write final session_state", "key", key, "err", err)
 	}
 }
