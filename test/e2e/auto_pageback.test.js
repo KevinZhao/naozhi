@@ -1,6 +1,6 @@
 // @ts-check
 // The initial history page is the newest INITIAL_HISTORY_LIMIT (100) entries.
-// The transcript hides the INTERNAL_EVENT_TYPES (event_render.js's
+// The transcript hides the INTERNAL_EVENT_TYPES (session_ident.js's
 // isInternalEvent), so a session whose last 100 entries are all internal (a
 // parallel agent team's tool_use / task_progress churn) renders a blank
 // transcript and strands the operator on the
@@ -19,7 +19,7 @@
 // blank page ever recovers or that the recovery ever stops.
 //
 // The JS/Go internal-kind parity that file's first test checked is
-// structural: event_render.js builds INTERNAL_EVENT_TYPES from
+// structural: session_ident.js builds INTERNAL_EVENT_TYPES from
 // NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL, which contractjs generates from the
 // clievent kindTable column IsInternalEventType reads.
 //

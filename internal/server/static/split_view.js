@@ -1,30 +1,14 @@
 // split_view.js — extracted from dashboard.js (#2558 D4).
 //
 // Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block, the deps table and the export block below are the
-// only additions.
+// move; the import block and the export block below are the only additions.
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
 // module evaluates. Shared state is read from the state.js objects; its helpers are
-// injected once via configureSplitView(), called from dashboard's module body.
-
-const deps = {
-  lsGet: null,
-  lsRemove: null,
-  lsSet: null,
-  stickEventsBottom: null,
-};
-
-export function configureSplitView(impl) {
-  for (const k of Object.keys(deps)) {
-    if (typeof impl[k] === 'undefined') throw new Error('split_view dep missing: ' + k);
-    deps[k] = impl[k];
-  }
-  // Deps are live now — run the load-time bootstrap that needs them.
-  initSplitWidth();
-}
-
+// imported. dashboard's module body runs initSplitWidth().
+import { lsGet, lsRemove, lsSet } from './platform.js';
+import { stickEventsBottom } from './utilities.js';
 
 /* ===== Split-view docking (desktop only) =====
    The preview (#fv-drawer) and 追问 (#aside-drawer) panes used to overlay the
@@ -49,8 +33,7 @@ const MIN_W = 320;
 const MIN_LEFT = 420;
 // dock.hasCustomW: the user has dragged the seam, so we stop auto-tracking the
 // half-width on resize and honour their saved value instead. Seeded by
-// initSplitWidth() once the deps are wired (#2558 D4-4): reading localStorage
-// at module evaluation would run before configureSplitView.
+// initSplitWidth(), which dashboard's module body runs (#2558 D4-4).
 const dock = { hasCustomW: false };
 
 function isMobileVp() {
@@ -73,8 +56,8 @@ function currentW() {
   return parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--nz-split-w'));
 }
 // Cold-load: a persisted custom width wins; otherwise default to half.
-function initSplitWidth() {
-  const savedW = parseFloat(deps.lsGet(LS_SPLIT_W, 0));
+export function initSplitWidth() {
+  const savedW = parseFloat(lsGet(LS_SPLIT_W, 0));
   dock.hasCustomW = savedW >= MIN_W;
   applyW(savedW >= MIN_W ? savedW : splitDefaultW());
 }
@@ -97,7 +80,7 @@ function eventsAtBottom() {
 function preserveBottom(wasBottom) {
   if (!wasBottom) return;
   requestAnimationFrame(() => {
-    deps.stickEventsBottom();
+    stickEventsBottom();
   });
 }
 
@@ -157,7 +140,7 @@ function wireResizer(resizer) {
     const cur = currentW();
     // A manual drag opts out of half-width auto-tracking and persists the
     // chosen width.
-    if (cur >= MIN_W) { deps.lsSet(LS_SPLIT_W, Math.round(cur)); dock.hasCustomW = true; }
+    if (cur >= MIN_W) { lsSet(LS_SPLIT_W, Math.round(cur)); dock.hasCustomW = true; }
   }
   resizer.addEventListener('mousedown', function(e) {
     e.preventDefault();
@@ -173,7 +156,7 @@ function wireResizer(resizer) {
   resizer.addEventListener('dblclick', function() {
     const wasBottom = eventsAtBottom();
     applyW(splitDefaultW());
-    deps.lsRemove(LS_SPLIT_W);
+    lsRemove(LS_SPLIT_W);
     dock.hasCustomW = false;
     preserveBottom(wasBottom);
   });

@@ -9,12 +9,14 @@
 // module evaluates. Shared state is read from the state.js objects; its helpers are
 // injected once via configureUtilities(), called from dashboard's module body.
 import { NZ_CONTRACT } from './contract.js';
-import { selection, serverInfo, sessionList, ui } from './state.js';
+import { composer, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
 import { esc, escAttr, showToast, trapFocus, sessionExitChipHtml } from './nz_util.js';
 import { wsm } from './ws_manager.js';
+import { getToken, lsSet } from './platform.js';
+import { sid } from './session_ident.js';
+import { featureForBackend } from './features.js';
 
 const deps = {
-  getToken: null,
   renderSystemView: null,
 };
 export function configureUtilities(impl) {
@@ -305,7 +307,7 @@ async function refreshCostSummary() {
   costSummaryInFlight = true;
   try {
     const headers = {};
-    const t = deps.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const to = new Date();
     const from = new Date(to.getTime() - 30 * 24 * 3600 * 1000);
@@ -1054,6 +1056,280 @@ function decodeEscEntities(s) {
 }
 
 
+
+// formatFileSize renders a byte count as a short human label (e.g. "1.2 MB").
+// Single declaration on purpose: a second hoisted `function formatFileSize`
+// used to shadow this one silently. Promotion checks the *rounded* value so
+// 1048575 B renders "1.0 MB" rather than "1024.0 KB".
+export function formatFileSize(bytes) {
+  if (!bytes || bytes <= 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = bytes, i = 0;
+  while (i < units.length - 1 && (i === 0 ? v >= 1024 : Number(v.toFixed(1)) >= 1024)) {
+    v /= 1024;
+    i++;
+  }
+  return i === 0 ? v + ' B' : v.toFixed(1) + ' ' + units[i];
+}
+
+// setActiveSessionCard flips the .active class on at most one session card.
+// Replaces the old O(N) querySelectorAll('.session-card').forEach pattern
+// with a cached reference (activeCard.el). key===null drops selection
+// altogether (used by openCronPanel / previewDiscovered clear paths). Node
+// defaults to 'local' to match data-node attribute emission. A subsequent
+// card with the same key but a different node counts as "different" — the
+// data-key + data-node pair is the identity.
+const activeCard = { el: null };
+export function setActiveSessionCard(key, node) {
+  const n = node || 'local';
+  // Drop stale cached ref if the previous card was detached by a sidebar
+  // rebuild (renderSidebar replaces list.innerHTML wholesale).
+  if (activeCard.el && !activeCard.el.isConnected) activeCard.el = null;
+  if (activeCard.el) activeCard.el.classList.remove('active');
+  activeCard.el = null;
+  if (key === null || key === undefined) return null;
+  const next = document.querySelector(
+    '.session-card[data-key="' + (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]'
+    + '[data-node="' + (window.CSS && CSS.escape ? CSS.escape(n) : n) + '"]'
+  );
+  if (next) {
+    next.classList.add('active');
+    activeCard.el = next;
+  }
+  return next;
+}
+
+export function getMsgValue(el) { return (el ? el.innerText : '').trim(); }
+export function setMsgValue(el, v) { if (el) el.innerText = v; }
+
+// stickEventsBottom forces the events pane to the last bubble and keeps it there
+// across the async layout tail — lazy-loaded images, mermaid diagrams, katex
+// formulas, and the "load earlier" button that inserts at the top after the
+// initial scrollTop assignment all change scrollHeight after the first paint.
+// Used by session-open flows where losing the bottom anchor would hide the
+// newest messages (the whole point of opening the session).
+export function stickEventsBottom() {
+  const el = document.getElementById('events-scroll');
+  if (!el) return;
+  el.scrollTop = el.scrollHeight;
+  requestAnimationFrame(() => {
+    el.scrollTop = el.scrollHeight;
+    requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+  });
+  // Re-stick after each lazy-loaded image, but only while the user hasn't
+  // scrolled away from the bottom. Without this guard, a session opened
+  // seconds ago whose images are still loading will yank the viewport back
+  // to the bottom the moment any image finishes — even if the user has
+  // since scrolled up to read history (common on mobile/slow networks).
+  el.querySelectorAll('img').forEach(img => {
+    if (img.complete) return;
+    const restick = () => {
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 30) {
+        el.scrollTop = el.scrollHeight;
+      }
+    };
+    img.addEventListener('load', restick, { once: true });
+    img.addEventListener('error', restick, { once: true });
+  });
+}
+
+// Read the data-time of the last event-time-divider in the scroll container so
+// incremental appenders can decide whether a new divider is needed.
+export function lastDividerTime(el) {
+  if (!el) return 0;
+  // Walk the last few children back to find the most recent divider or bubble.
+  const kids = el.children;
+  for (let i = kids.length - 1; i >= 0; i--) {
+    const c = kids[i];
+    if (c.classList && (c.classList.contains('event') || c.classList.contains('event-time-divider'))) {
+      const t = Number(c.getAttribute('data-time') || 0);
+      if (t) return t;
+    }
+  }
+  return 0;
+}
+
+export function closeHistoryPopover() {
+  if (ui.activePopoverBackdrop) { ui.activePopoverBackdrop.remove(); ui.activePopoverBackdrop = null; }
+  if (ui.activePopover) { ui.activePopover.remove(); ui.activePopover = null; }
+}
+
+export function stopPreviewPolling() {
+  if (timers.preview) { clearInterval(timers.preview); timers.preview = null; }
+  transcript.previewEventCount = 0;
+  // Invalidate any in-flight previewDiscovered(): every caller of this
+  // function (selectSession, the createSession paths, a newer preview) is
+  // moving the operator off the discovered panel, so a preview fetch that
+  // resolves afterwards must neither paint into the now-managed
+  // #events-scroll nor re-arm previewTimer.
+  transcript.previewGen++;
+}
+
+// mobileQuery is the phone breakpoint, created on first use: a module-scope
+// matchMedia call would run at import time.
+const mobileMQ = { list: null };
+export function mobileQuery() { return mobileMQ.list || (mobileMQ.list = window.matchMedia('(max-width:768px)')); }
+export function isMobile() { return mobileQuery().matches; }
+
+export function mobileEnterChat() {
+  if (!isMobile()) return;
+  // #2431: switching sessions while already in chat view must not stack
+  // another entry — replace ours so a single back press leaves chat.
+  if (history.state && history.state.view === 'chat') history.replaceState({ view: 'chat' }, '');
+  else history.pushState({ view: 'chat' }, '');
+  document.body.classList.remove('mobile-list-view');
+  document.body.classList.add('mobile-chat-view');
+}
+
+// removeSidebarCard drops a session card from the DOM without waiting for
+// the next renderSidebar. The next render reconciles against the DOM, so a
+// card whose removal the server refused (a failed DELETE re-fetches the list)
+// comes back.
+export function removeSidebarCard(key) {
+  // Escape like setActiveSessionCard: discovered keys embed the node name, so
+  // a `"` or `\` would otherwise make querySelector throw mid-takeover/dismiss.
+  const card = document.querySelector('.session-card[data-key="' + (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]');
+  if (card) card.remove();
+}
+
+// Pending-session persistence (#cwd-fallback fix). The three pending maps
+// (sessionWorkspaces/sessionNodes/sessionBackends) used to live ONLY in JS
+// memory, so a page reload before the first send dropped the chosen workspace.
+// The next send then carried no `workspace`, the backend never wrote a
+// per-chat override (send.go gates SetWorkspace on a non-empty workspace), and
+// the spawn fell through to defaultCWD = workspace root — the session landed in
+// the wrong directory. We mirror the maps into localStorage so a reload (or
+// even a never-sent session) rehydrates the workspace and the first send still
+// carries it. This only re-hydrates state the user authored in THIS browser —
+// no fuzzy cross-session guessing (the semantics #1567 deliberately removed).
+export const PENDING_LS_KEY = 'pending_sessions';
+const PENDING_LS_MAX = 64; // bound localStorage size — far above realistic un-sent backlog
+
+// persistPending snapshots the in-memory pending maps to localStorage. Called
+// after every mutation of the three maps. lsSet swallows quota/disabled errors.
+export function persistPending() {
+  const keys = Object.keys(perSession.workspaces).slice(0, PENDING_LS_MAX);
+  const obj = {};
+  for (const k of keys) {
+    const entry = { ws: perSession.workspaces[k] };
+    if (perSession.nodes[k] && perSession.nodes[k] !== 'local') entry.node = perSession.nodes[k];
+    if (perSession.backends[k]) entry.backend = perSession.backends[k];
+    if (perSession.accessProfiles[k]) entry.access_profile = perSession.accessProfiles[k];
+    obj[k] = entry;
+  }
+  lsSet(PENDING_LS_KEY, obj);
+}
+
+// eagerBindWorkspace tells the backend the chosen workspace the moment a
+// session is created, instead of waiting for the first send to carry it. This
+// writes the per-chat override eagerly (server-side validateWorkspace +
+// SetWorkspace), so even a session opened in another browser/device — or one
+// reloaded before its first send — spawns into the right directory. Local
+// nodes only: remote sessions resolve their workspace on their own node.
+// Fire-and-forget — never blocks or fails the creation flow: localStorage /
+// network errors are swallowed rather than aborting session creation.
+export function eagerBindWorkspace(key, workspace, node) {
+  if (!key || !workspace) return;
+  const nd = node || 'local';
+  if (nd !== 'local') return;
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const token = getToken();
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    fetch(NZ_CONTRACT.API.sessions_bind, {
+      method: 'POST', headers,
+      body: JSON.stringify({ key: key, node: nd, workspace: workspace }),
+    }).catch(() => {});
+  } catch (_) { /* never break creation over a bind */ }
+}
+
+export function removePendingSession(key) {
+  delete perSession.workspaces[key];
+  delete perSession.nodes[key];
+  delete perSession.backends[key];
+  delete perSession.accessProfiles[key];
+  persistPending();
+}
+
+// applyFeatureGates updates the input-area controls to reflect the
+// active session's backend features. Called after every renderMainShell
+// / selectSession / cliBackends fetch — cheap, just toggles aria + class.
+// Multi-Backend RFC §8.3 D9 / D11-D15.
+//
+// Important: NEVER silently disable. Per RFC §8.7: "all gated controls
+// must have a hover/aria tooltip explaining why" — the title attribute
+// carries the operator-readable reason.
+export function applyFeatureGates() {
+  if (!serverInfo.cliBackends || !Array.isArray(serverInfo.cliBackends.backends)) return;
+  if (serverInfo.cliBackends.backends.length <= 1) return; // single-backend mode
+
+  const sess = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
+  const backendID = sess.backend || serverInfo.cliBackends.default || '';
+  const backendName = (() => {
+    const e = serverInfo.cliBackends.backends.find(b => b && b.id === backendID);
+    return (e && (e.display_name || e.id)) || backendID || 'this backend';
+  })();
+
+  // D14 image_input: file picker accepts both images + PDF; if image is
+  // disabled but PDF still works, leave the button enabled — most kiro
+  // deployments support image so this branch rarely hits in practice.
+  // Audio is governed separately (D15) by the voice button.
+  const imageOK = featureForBackend(backendID, 'image_input');
+  const filePickBtn = document.querySelector('button[data-action="file-picker"]');
+  if (filePickBtn) {
+    if (!imageOK) {
+      filePickBtn.classList.add('feat-disabled');
+      filePickBtn.title = '当前后端 (' + backendName + ') 不支持图片上传';
+      filePickBtn.setAttribute('aria-disabled', 'true');
+      // Review #118 HIGH-1: rely on the native disabled property as the
+      // hard gate, not just CSS — `cursor:not-allowed` is cosmetic and
+      // a keyboard activation (Enter/Space on focus) would still fire
+      // onclick. Browsers skip click events on disabled buttons entirely,
+      // and `applyFeatureGates` is the single re-entry point so the
+      // pair stays in sync.
+      filePickBtn.disabled = true;
+    } else {
+      filePickBtn.classList.remove('feat-disabled');
+      filePickBtn.title = '上传图片或 PDF';
+      filePickBtn.removeAttribute('aria-disabled');
+      filePickBtn.disabled = false;
+    }
+  }
+
+  // D15 audio_input: kiro acp 申报 audio:false 但 naozhi 后端会先转写
+  // 再喂 prompt — 所以这里**不真正 disable**，只把 tooltip 改成提示性
+  // 文案，让用户知道音频会经过转写阶段。
+  const audioOK = featureForBackend(backendID, 'audio_input');
+  const micBtn = document.getElementById('btn-mic');
+  const holdBtn = document.getElementById('btn-hold-talk');
+  // Review #118 HIGH-2: when audio is supported again (e.g. user switches
+  // from kiro back to claude in the same browser session), we MUST reset
+  // titles to their template defaults — otherwise the kiro-era hint
+  // ("会先转写为文字") sticks forever. Default titles mirror
+  // renderMainShell template (line ~2152 / ~2154).
+  const micDefaultTitle = composer.voiceInputMode ? '切换键盘' : '切换语音';
+  const holdDefaultTitle = '按住说话改录音';
+  if (!audioOK) {
+    const audioHint = '当前后端 (' + backendName + ') 不直接接收音频，naozhi 会先转写为文字再发送';
+    if (micBtn) {
+      micBtn.classList.add('feat-degraded');
+      micBtn.title = audioHint;
+    }
+    if (holdBtn) {
+      holdBtn.classList.add('feat-degraded');
+      holdBtn.title = audioHint;
+    }
+  } else {
+    if (micBtn) {
+      micBtn.classList.remove('feat-degraded');
+      micBtn.title = micDefaultTitle;
+    }
+    if (holdBtn) {
+      holdBtn.classList.remove('feat-degraded');
+      holdBtn.title = holdDefaultTitle;
+    }
+  }
+}
 
 export {
   AVATAR_GROUP_GAP_MS,

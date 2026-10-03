@@ -5,24 +5,10 @@ import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, serverInfo, sessionList } from './state.js';
 import { esc, escAttr } from './nz_util.js';
 import { renderMd } from './render_md.js';
-import { CLAWD_SVG, ICONS } from './sidebar_project.js';
-import { sid } from './file_refs.js';
 import { EVENT_DIVIDER_GAP_MS, formatTimeFull, timeDividerHtml } from './utilities.js';
 import { renderAskQuestionCard } from './ask_card.js';
-
-// Kinds kept out of the transcript (clievent kindTable's Internal column says why).
-const INTERNAL_EVENT_TYPES = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL);
-// Unified backend behaviour (supersedes Multi-Backend RFC §8.3 D17): both
-// Claude (stream-json) and Kiro (ACP) tool_use events are filtered out of
-// the main transcript so the chat reads cleanly. Transient tool activity
-// is still surfaced via the running banner (applyEventToTurnState below)
-// while the turn is in flight, and the subagent panel still renders the
-// rich tool_call progress row via eventHtml(includeInternal=true) so
-// operators can drill into per-agent tool runs when needed.
-export function isInternalEvent(/** @type {EventEntry} */ e) {
-  if (!e || !INTERNAL_EVENT_TYPES.has(e.type)) return false;
-  return true;
-}
+import { CLAWD_SVG, ICONS } from './icons.js';
+import { isInternalEvent, sid } from './session_ident.js';
 
 // renderTodoList parses the JSON todos payload stored on EventEntry.detail and
 // emits a checklist block. Falls back to the summary line when detail is
@@ -371,22 +357,6 @@ export function renderEventsWithDividers(events, prevTime, opts) {
     if (t) lastTime = t;
   }
   return out;
-}
-
-// Read the data-time of the last event-time-divider in the scroll container so
-// incremental appenders can decide whether a new divider is needed.
-export function lastDividerTime(el) {
-  if (!el) return 0;
-  // Walk the last few children back to find the most recent divider or bubble.
-  const kids = el.children;
-  for (let i = kids.length - 1; i >= 0; i--) {
-    const c = kids[i];
-    if (c.classList && (c.classList.contains('event') || c.classList.contains('event-time-divider'))) {
-      const t = Number(c.getAttribute('data-time') || 0);
-      if (t) return t;
-    }
-  }
-  return 0;
 }
 
 // leadingTimeDivider returns the scroller's first time divider when it

@@ -491,6 +491,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/icons.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/mobile_nav.js",
     "handler_type": "http.HandlerFunc"
   },
@@ -532,6 +537,11 @@
   {
     "method": "GET",
     "path": "/static/session_header.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/session_ident.js",
     "handler_type": "http.HandlerFunc"
   },
   {

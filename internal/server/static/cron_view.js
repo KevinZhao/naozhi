@@ -5,14 +5,13 @@ import {
   renderBackendPicker,
 } from './auth_modal.js';
 import { setActivityView } from './dashboard.js';
-import { eventHtml, isInternalEvent, lastDividerTime, renderEventsWithDividers } from './event_render.js';
+import { eventHtml, renderEventsWithDividers } from './event_render.js';
 import { authHeaders, getToken, lsGet, lsSet } from './platform.js';
 import { sessionStream } from './session_stream.js';
 import { wsm } from './ws_manager.js';
 import {
   processEventsForDisplay,
   regroupAvatars,
-  setActiveSessionCard,
 } from './file_refs.js';
 import {
   mobileBack,
@@ -79,11 +78,14 @@ import {
   announce,
   confirmDialog,
   formatAbsTime,
+  lastDividerTime,
+  setActiveSessionCard,
   shortPath,
   showAPIError,
   showNetworkError,
   timeDividerHtml,
 } from './utilities.js';
+import { isInternalEvent } from './session_ident.js';
 // cron_view.js — Cron (定时任务) dashboard view.
 //
 // RFC docs/rfc/dashboard-cron-view-extraction.md (PR-1). Extracted verbatim

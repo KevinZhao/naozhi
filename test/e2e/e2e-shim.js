@@ -22,6 +22,7 @@ import * as renderMd from '/static/render_md.js';
 import * as runningBanner from '/static/running_banner.js';
 import * as sendMessage from '/static/send_message.js';
 import * as sessionListModule from '/static/session_list.js';
+import * as sessionIdent from '/static/session_ident.js';
 import { sessionStream } from '/static/session_stream.js';
 import * as sessionHeader from '/static/session_header.js';
 import * as sidebarProject from '/static/sidebar_project.js';
@@ -54,23 +55,24 @@ function stateField(name, obj, key) {
 
 expose(authModal, ['createNewSession', 'doCreateInProject', 'getSelectedNode', 'highlight', 'openProjectPalette', 'pickPaletteCustom', 'renderNodePicker', 'wireNodePicker']);
 expose(composerFiles, ['ORIENT_MAX_WAIT_MS', 'awaitPendingOrients', 'handleFiles', 'maybeAutoOrient', 'openFilePicker', 'removeFile', 'renderFilePreviews', 'retryUpload']);
-expose(dashboard, ['applyFeatureGates', 'closeHistoryPopover', 'maybeShowOnboarding', 'renderMainShell', 'selectSession', 'sessionCardKey', 'setActivityView', 'toggleHistory', 'updateHeaderCLI']);
+expose(dashboard, ['maybeShowOnboarding', 'renderMainShell', 'selectSession', 'sessionCardKey', 'setActivityView', 'toggleHistory', 'updateHeaderCLI']);
 expose(discovery, ['scanDiscovered']);
 expose(eventRender, ['eventAlreadyRendered', 'eventHtml']);
 expose(eventStream, ['appendEvents', 'fetchEvents', 'renderEvents', 'trimEventsScroll']);
-expose(fileRefs, ['isFileRefCandidate', 'sid', 'splitPathLine']);
-expose(mobileNav, ['isMobile', 'mobileEnterChat', 'mobileShowList', 'toggleSidebarCollapsed']);
+expose(fileRefs, ['isFileRefCandidate', 'splitPathLine']);
+expose(mobileNav, ['mobileShowList', 'toggleSidebarCollapsed']);
 expose(msgNav, ['navDismissPopover']);
 expose(nzUtil, ['showToast']);
 expose(renderMd, ['BLOCK_SPLIT_RE', 'LIST_ITEM_RE', 'LIST_SHAPE_RE', 'MAX_LIST_DEPTH', '_mdCache', 'isMathDisplay', 'isMathInline', 'katexPending', 'parseListItem', 'renderKatex', 'renderMd', 'renderTable']);
 expose(runningBanner, ['fmtDuration', 'interruptSession', 'scrollSlackPx', 'turnState']);
-expose(sendMessage, ['clearPendingFiles', 'getMsgValue', 'markSessionOptimisticRunning', 'renderOptimisticUserMsg', 'sendMessage', 'setMsgValue']);
+expose(sendMessage, ['clearPendingFiles', 'markSessionOptimisticRunning', 'renderOptimisticUserMsg', 'sendMessage']);
+expose(sessionIdent, ['sid']);
 expose(sessionHeader, ['renderSessionRunsPanel', 'setHeaderRunStats']);
 expose(sessionListModule, ['debouncedFetchSessions', 'fetchSessions', 'getNodeStatus', 'renderSidebar', 'restorePending', 'updateStatusBar']);
 expose(sidebarProject, ['showGitRemote', 'toggleProjectCollapsed']);
 expose(systemView, ['reconcileSelectedNode']);
-expose(tuning, ['dismissSession', 'removeSidebarCard', 'renameSession']);
-expose(utilities, ['MAX_LIVE_DOM_EVENTS', 'promptDialog']);
+expose(tuning, ['dismissSession', 'renameSession']);
+expose(utilities, ['MAX_LIVE_DOM_EVENTS', 'applyFeatureGates', 'closeHistoryPopover', 'getMsgValue', 'isMobile', 'mobileEnterChat', 'promptDialog', 'removeSidebarCard', 'setMsgValue']);
 expose(voice, ['MAX_REC_SECS', 'updateVoiceTimer']);
 expose(wsManager, ['WS_STATES']);
 

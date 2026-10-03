@@ -25,12 +25,11 @@ import (
 
 // extractJSFunctionOpt is extractJSFunction that returns "" when name is absent.
 func extractJSFunctionOpt(js, name string) string {
-	marker := "\nfunction " + name + "("
-	i := strings.Index(js, marker)
+	i := jsFunctionStart(js, name)
 	if i < 0 {
 		return ""
 	}
-	rest := js[i+1:]
+	rest := js[i:]
 	end := strings.Index(rest, "\n}\n")
 	if end < 0 {
 		return ""

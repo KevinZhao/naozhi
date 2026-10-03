@@ -12,6 +12,8 @@ import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList } from './state.js';
 import { esc, fetchJSON, showToast } from './nz_util.js';
 import { splitDock } from './split_view.js';
+import { sid } from './session_ident.js';
+import { formatFileSize } from './utilities.js';
 
 const deps = {
   AVATAR_GROUP_GAP_MS: null,
@@ -36,7 +38,6 @@ export function configureFileRefs(impl) {
 // Late-bound hooks: assigned by the code below, read by other modules at event
 // time (never at load time) — the shape they had as dashboard module-scope
 // lets before this extraction.
-let _activeCardEl = null;
 let _pendingSnippet = null;
 
 /* ===== File reference buttons ========================================= */
@@ -682,21 +683,6 @@ function scrollToPreviewLine(body, line) {
   pre.parentElement.scrollTop = Math.max(0, (line - 3) * 18);
 }
 
-// formatFileSize renders a byte count as a short human label (e.g. "1.2 MB").
-// Single declaration on purpose: a second hoisted `function formatFileSize`
-// used to shadow this one silently. Promotion checks the *rounded* value so
-// 1048575 B renders "1.0 MB" rather than "1024.0 KB".
-function formatFileSize(bytes) {
-  if (!bytes || bytes <= 0) return '';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let v = bytes, i = 0;
-  while (i < units.length - 1 && (i === 0 ? v >= 1024 : Number(v.toFixed(1)) >= 1024)) {
-    v /= 1024;
-    i++;
-  }
-  return i === 0 ? v + ' B' : v.toFixed(1) + ' ' + units[i];
-}
-
 function inferLang(path, mime) {
   const ext = (path.split('.').pop() || '').toLowerCase();
   if (ext === 'md' || ext === 'markdown') return 'markdown';
@@ -861,62 +847,16 @@ function processEventsForDisplay(events) {
   return events.filter(e => !deps.isInternalEvent(e));
 }
 
-function sid(key, node) { return key + '\t' + (node || 'local'); }
-
-// setActiveSessionCard flips the .active class on at most one session card.
-// Replaces the old O(N) querySelectorAll('.session-card').forEach pattern
-// with a cached reference (_activeCardEl). key===null drops selection
-// altogether (used by openCronPanel / previewDiscovered clear paths). Node
-// defaults to 'local' to match data-node attribute emission. A subsequent
-// card with the same key but a different node counts as "different" — the
-// data-key + data-node pair is the identity.
-function setActiveSessionCard(key, node) {
-  const n = node || 'local';
-  // Drop stale cached ref if the previous card was detached by a sidebar
-  // rebuild (renderSidebar replaces list.innerHTML wholesale).
-  if (_activeCardEl && !_activeCardEl.isConnected) _activeCardEl = null;
-  if (_activeCardEl) _activeCardEl.classList.remove('active');
-  _activeCardEl = null;
-  if (key === null || key === undefined) return null;
-  const next = document.querySelector(
-    '.session-card[data-key="' + (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]'
-    + '[data-node="' + (window.CSS && CSS.escape ? CSS.escape(n) : n) + '"]'
-  );
-  if (next) {
-    next.classList.add('active');
-    _activeCardEl = next;
-  }
-  return next;
-}
-
-function isMultiNode() {
-  const keys = Object.keys(sessionList.nodesData);
-  return keys.length > 1 || (keys.length === 1 && keys[0] !== 'local');
-}
-
-const NODE_BADGE_COLORS = ['#1f6feb','#0550ae','#1a7f37','#6e40c9','#9a6700','#cf222e'];
-function nodeColor(id) {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  return NODE_BADGE_COLORS[h % NODE_BADGE_COLORS.length];
-}
-
-
 export {
   FILE_REF_HAS_EXT,
   closeFilePreview,
   fencedPathList,
   fileApiUrl,
   fileRefCode,
-  formatFileSize,
   isFileRefCandidate,
-  isMultiNode,
-  nodeColor,
   processEventsForDisplay,
   regroupAvatars,
   renderSandboxedBlob,
-  setActiveSessionCard,
-  sid,
   splitPathLine,
   startFileRefObserver,
 };

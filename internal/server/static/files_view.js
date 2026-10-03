@@ -15,7 +15,8 @@
 // the click handler navigated to the wrong path.
 import { NZ_CONTRACT } from './contract.js';
 import { esc, escAttr, showToast, fetchJSON, nzViews } from './nz_util.js';
-import { fileApiUrl, formatFileSize, renderSandboxedBlob } from './file_refs.js';
+import { fileApiUrl, renderSandboxedBlob } from './file_refs.js';
+import { formatFileSize } from './utilities.js';
 
 (function () {
   'use strict';

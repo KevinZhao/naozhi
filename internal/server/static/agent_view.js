@@ -16,13 +16,11 @@ import { fetchEvents } from './event_stream.js';
 import { eventHtml, renderEventsWithDividers } from './event_render.js';
 import { wsm } from './ws_manager.js';
 import {
-  sid,
-} from './file_refs.js';
-import {
   fmtDuration,
   refreshBanner,
   turnState,
 } from './running_banner.js';
+import { sid } from './session_ident.js';
 
 (function () {
   'use strict';

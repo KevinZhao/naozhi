@@ -14,6 +14,7 @@ import { turnState } from './running_banner.js';
 import { showToast, patchCardExitChip } from './nz_util.js';
 import { wsm } from './ws_manager.js';
 import { featureForCurrent } from './features.js';
+import { getMsgValue, setMsgValue } from './utilities.js';
 
 const deps = {
   EVENT_DIVIDER_GAP_MS: null,
@@ -71,8 +72,6 @@ function handleKey(e) {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && Date.now() - composer.lastCompositionEnd > 30) { e.preventDefault(); sendMessage(); }
 }
 
-function getMsgValue(el) { return (el ? el.innerText : '').trim(); }
-function setMsgValue(el, v) { if (el) el.innerText = v; }
 function clearMsg(el) { if (el) el.textContent = ''; }
 
 // validateComposerForSend runs the synchronous pre-send checks that depend on
@@ -583,11 +582,9 @@ function rollbackOptimisticRunning(key, node) {
 export {
   _optimisticRunningTimers,
   clearPendingFiles,
-  getMsgValue,
   handleKey,
   markSessionOptimisticRunning,
   renderOptimisticUserMsg,
   rollbackOptimisticRunning,
   sendMessage,
-  setMsgValue,
 };

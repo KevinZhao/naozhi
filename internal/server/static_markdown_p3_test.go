@@ -35,7 +35,7 @@ func extractJSConstLine(t *testing.T, js, name string) string {
 
 func TestMarkdownP3_FormatFileSizeDeclaredOnce(t *testing.T) {
 	js := readDashboardJS(t)
-	if n := strings.Count(js, "\nfunction formatFileSize("); n != 1 {
+	if n := strings.Count(js, "\nfunction formatFileSize(") + strings.Count(js, "\nexport function formatFileSize("); n != 1 {
 		t.Fatalf("formatFileSize declared %d times; want exactly 1 (hoisting makes the last win, the rest dead code)", n)
 	}
 }

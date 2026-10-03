@@ -11,6 +11,7 @@
 import { NZ_CONTRACT } from './contract.js';
 import { serverInfo, sessionList } from './state.js';
 import { esc, escAttr, fetchJSON, showToast, trapFocus } from './nz_util.js';
+import { ICONS } from './icons.js';
 
 const deps = {
   accessProfileChipInfo: null,
@@ -40,61 +41,10 @@ export function configureSidebarProject(impl) {
 // controls the visual fill. A single constant avoids the misleading dead ternary
 // that previously implied a per-state SVG difference.
 const STAR_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26"/></svg>';
-// "Clawd" pixel mascot for claude-backend assistant turns. Sourced from
-// the Custom Brand Icons set, icon `cbi:claude-clawd`
-// (https://github.com/elax46/custom-brand-icons), licensed CC BY-NC-SA
-// 4.0. Naozhi ships under BSL 1.1 (non-commercial Additional Use Grant
-// through 2030-03-21), so the NC clause is compatible for the current
-// licensed term — see ATTRIBUTIONS.md. Fill flows from currentColor so
-// the rust hex lives once in dashboard.html as --nz-clawd-rust (CSS sets
-// .cc-clawd { color: var(--nz-clawd-rust) }) — no inline hex in JS.
-const CLAWD_SVG = '<svg class="cc-clawd" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="currentColor" d="M4.5 6h15v5H22v2h-2.5v3h-1v2H17v-2h-1v2h-1.5v-2h-5v2H8v-2H7v2H5.5v-2h-1v-3H2v-2h2.5ZM7 8v3h1V8Zm9 0v3h1V8Z"/></svg>';
 const GITHUB_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>';
 // Chevron: points down when expanded (`▾`-like), rotated 90deg via CSS
 // when collapsed so the same glyph serves both states.
 const CHEVRON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
-
-// ICONS — single source of truth for the non-SVG glyph set (#2027). Before
-// this map the dashboard carried four parallel icon notations (SVG consts,
-// `&#x..;` / `&#..;` HTML entities, bare Unicode glyphs like `✎ ⎘`, and raw
-// `\u{..}` escapes) with the same semantic icon spelled differently at each
-// call site. Centralising here means one icon → one definition → one notation.
-//
-// Notation rule: literal Unicode glyph characters (one form, no mixing decimal
-// `&#128277;` with hex `&#x2328;`, no mixing `\u{1f464}` lowercase with
-// `\u{1F916}` uppercase). Literal glyphs are the only notation that renders
-// correctly in BOTH consumption contexts used here: dropped raw into innerHTML
-// / template strings, and passed through esc() (which would HTML-escape an
-// entity's `&` into `&amp;` and show it verbatim). SVG-backed icons
-// (star/github/chevron/clawd) keep their dedicated *_SVG consts above.
-const ICONS = {
-  close:    '×', // dismiss / close affordance
-  back:     '←', // mobile back
-  navUp:    '▲', // previous user message
-  navDown:  '▼', // next user message
-  edit:     '✎', // rename / edit
-  copy:     '⎘', // copy key
-  trash:    '🗑', // delete
-  attach:   '📎', // attach file
-  mic:      '🎤', // voice input
-  keyboard: '⌨', // keyboard input
-  send:     '➤', // send message
-  stop:     '■', // interrupt turn
-  download: '⬇', // download
-  downArrow:'↓', // file-row download (thinner, paired with ↗)
-  preview:  '↗', // preview / ask-aside
-  gear:     '⚙', // init / system event
-  user:     '&gt;_', // user event — brand ">_" terminal prompt mark (rust mono, see .event.user .event-icon)
-  spark:    '✦', // assistant text event (non-claude backends)
-  todo:     '☰', // todo event
-  robot:    '🤖', // subagent badge / agent count
-  galleryPrev:  '‹', // lightbox previous image
-  galleryNext:  '›', // lightbox next image
-  zoomOut:      '−', // lightbox zoom out
-  zoomIn:       '+', // lightbox zoom in
-  rotateLeft:   '↺', // lightbox rotate left
-  rotateRight:  '↻', // lightbox rotate right
-};
 
 // sectionHeaderFallbackHtml renders the minimal header for ad-hoc workspace
 // groups (p.fallback === true). The group's "project name" is just the
@@ -585,8 +535,6 @@ function showGitRemote(url) {
 
 
 export {
-  CLAWD_SVG,
-  ICONS,
   openProjectSettings,
   sectionHeaderFallbackHtml,
   sectionHeaderHtml,
