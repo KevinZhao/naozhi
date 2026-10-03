@@ -34,6 +34,10 @@ type turnState struct {
 	// reconnectedMidTurn: SpawnReconnect found a turn in flight, so a result
 	// with no active Send ends that turn (one-shot, CAS-consumed).
 	reconnectedMidTurn atomic.Bool
+	// unowned: the current Running turn was entered by evTurnStarted, so no
+	// Send's defer will end it (e.g. the CLI waking itself for a background
+	// task-notification).
+	unowned bool
 }
 
 // transition applies ev and reports the state before it and whether the state
@@ -50,6 +54,7 @@ func (t *turnState) transitionLocked(ev stateEvent) (prev ProcessState, moved bo
 	next, moved := nextState(prev, ev)
 	if moved {
 		t.state = next
+		t.unowned = ev == evTurnStarted
 	}
 	return prev, moved
 }
