@@ -375,8 +375,10 @@ func TestBookUnownedResults_BooksCLIStartedTurnsOnce(t *testing.T) {
 	proc := &TestProcess{AliveVal: true, SendFunc: scripted(
 		&clievent.SendResult{Text: "owned", CostUSD: 3.5})}
 	s, ledger := newLedgerSession(t, "dashboard:direct:host:general", proc)
-	hook := &unownedHook{}
-	bookUnownedResults(s, hook)
+	hooked := &hookedTestProcess{TestProcess: proc}
+	s.storeProcess(hooked)
+	hook := &hooked.unownedHook
+	bookUnownedResults(s, hooked)
 	if hook.fn == nil {
 		t.Fatal("bookUnownedResults did not bind the hook")
 	}
@@ -428,5 +430,58 @@ func TestSpawn_BindsUnownedResultBooking(t *testing.T) {
 	proc.fn(clievent.SendResult{CostUSD: 2})
 	if got := loadTotalCost(&s.costSpent); !approxEq(got, 2) {
 		t.Fatalf("costSpent = %v, want 2 booked on the spawned session", got)
+	}
+}
+
+// A rename moves the process to a fresh session. The hook bound to the old
+// session must stop booking (or its readings would be charged under the old
+// key AND again by the fresh session, whose baseline did not see them), and
+// the fresh session must book the CLI-started turns from then on.
+func TestBookUnownedResults_RenameMovesBookingWithTheProcess(t *testing.T) {
+	r := NewRouter(RouterConfig{Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
+	t.Cleanup(r.Shutdown)
+	ledger := costledger.NewStore(t.TempDir(), costledger.Options{})
+	t.Cleanup(ledger.Close)
+	r.runs.cost = newCostAccounting(ledger, nil)
+	proc := &hookedTestProcess{TestProcess: &TestProcess{AliveVal: true, SendFunc: scripted(
+		&clievent.SendResult{Text: "owned", CostUSD: 4})}}
+	r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) { return proc, nil }
+	const oldKey, newKey = "dashboard:direct:scratch-1:general", "dashboard:direct:promoted:general"
+	if _, _, err := r.GetOrCreate(context.Background(), oldKey, AgentOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	proc.fn(clievent.SendResult{CostUSD: 1}) // booked on the old session, before the rename
+	oldHook := proc.fn
+
+	if !r.RenameSession(oldKey, newKey) {
+		t.Fatal("rename failed")
+	}
+	oldHook(clievent.SendResult{CostUSD: 2.5}) // a stale call on the old session's hook
+	proc.fn(clievent.SendResult{CostUSD: 2.5}) // the same reading through the rebound hook
+	fresh, ok := lookupT(r, newKey)
+	if !ok {
+		t.Fatal("renamed session missing")
+	}
+	// Booked now, not only when a later owned result catches up — the process
+	// may die before one arrives.
+	if got := loadTotalCost(&fresh.costSpent); !approxEq(got, 2.5) {
+		t.Fatalf("fresh costSpent after the rebound hook = %v, want 2.5 (1 carried + 1.5)", got)
+	}
+	if _, err := fresh.Send(context.Background(), "hi", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := loadTotalCost(&fresh.costSpent); !approxEq(got, 4) {
+		t.Fatalf("fresh costSpent = %v, want 4 (1 + 1.5 + 1.5, each reading once)", got)
+	}
+	var total float64
+	for _, e := range allEntries(t, ledger) {
+		total += e.Amount
+		if e.SessionKey == oldKey && e.Amount != 1 {
+			t.Errorf("entry %+v booked under the old key after the rename", e)
+		}
+	}
+	if !approxEq(total, 4) {
+		t.Fatalf("ledger total = %v, want 4", total)
 	}
 }

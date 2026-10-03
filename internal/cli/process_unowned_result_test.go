@@ -123,3 +123,29 @@ func TestUnownedTurn_ReconnectMidTurnIsLeftToTheAdoptedPath(t *testing.T) {
 		t.Errorf("state %v, onTurnDone %d; want the adopted path's Ready and exactly 1", got, f.done)
 	}
 }
+
+// The turn may end only once its result is queued on eventCh: a legacy Send
+// claiming the Ready process in between would find the channel empty in
+// drainStaleEvents, then take this background turn's result as its own reply
+// (and its finishRun would book nothing, the hook having booked it).
+func TestUnownedTurn_ResultIsQueuedBeforeTheTurnIsClaimable(t *testing.T) {
+	f := newUnownedFixture()
+	queuedAtEnd := false
+	f.p.SetOnTurnDone(func() {
+		for {
+			select {
+			case ev := <-f.p.eventCh:
+				if ev.Type == "result" {
+					queuedAtEnd = true
+				}
+				continue
+			default:
+			}
+			break
+		}
+	})
+	f.feed(initEv, resultEv)
+	if !queuedAtEnd {
+		t.Fatal("the turn ended (process claimable) before its result was queued on eventCh")
+	}
+}

@@ -419,25 +419,28 @@ func (p *Process) onTurnResult() []*sendSlot {
 	return owners
 }
 
-// endUnownedTurn handles a result no passthrough slot claimed, on a replay
-// backend, outside a reconnect's in-flight turn. When no Send owns it either,
-// it is the result of a turn the CLI started itself (a background-task
-// notification): onSystemInit moved the process to Running for it, and
-// nothing else moves it back, so the process sat Running until Cleanup's
-// stuck check killed it (#3096). End that turn here unless passthrough
-// messages are still queued for the next one, and hand the result to the
-// session so the turn's cost is booked now rather than lost if the process
-// dies before the next owned result.
+// turnSendOwned reports whether a Send claimed the current turn.
+func (p *Process) turnSendOwned() bool {
+	p.turn.mu.RLock()
+	defer p.turn.mu.RUnlock()
+	return p.turn.sendOwned
+}
+
+// endUnownedTurn ends a turn the CLI started itself (a background-task
+// notification) at its result, which no slot and no Send owns: onSystemInit
+// moved the process to Running and nothing moved it back, so Cleanup's stuck
+// check killed it later (#3096). It stays Running if passthrough messages are
+// queued for the next turn, and hands the result to the session to book now.
+// Ownership is decided before deliverEvent and this runs after it: ending the
+// turn first would let a Send claim the process and take this result as its
+// reply; deciding after would let a Send that just got its own result look
+// unowned and have its cost booked here under another run.
 func (p *Process) endUnownedTurn(ev clievent.Event) {
 	p.slots.mu.Lock()
 	pending := len(p.slots.pending)
 	p.slots.mu.Unlock()
 
 	p.turn.mu.Lock()
-	if p.turn.sendOwned {
-		p.turn.mu.Unlock()
-		return
-	}
 	ended := false
 	if pending == 0 {
 		_, ended = p.turn.transitionLocked(evTurnEnded)

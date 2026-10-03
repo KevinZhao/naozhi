@@ -547,6 +547,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	// result under passthrough: fan-out to claimed slots and skip
 	// legacy eventCh delivery. We still log to ring.EventLog so dashboard
 	// sees the turn-complete event.
+	unowned := false
 	if ev.Type == "result" && p.caps.Replay {
 		// error_during_execution signals the CLI aborted the turn —
 		// e.g. a priority:"now" preempted it. Any older pending slot
@@ -578,9 +579,8 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 			p.logEventAt(ev, nowMS)
 			return false
 		}
-		if !p.turn.reconnectedMidTurn.Load() {
-			p.endUnownedTurn(ev)
-		}
+		// Decided now, acted on after deliverEvent: see endUnownedTurn.
+		unowned = !p.turn.reconnectedMidTurn.Load() && !p.turnSendOwned()
 	}
 
 	// claude advertises the resolved model + binary version in system/init.
@@ -626,7 +626,11 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 		}
 	}
 
-	return p.deliverEvent(ev, now, log)
+	killed := p.deliverEvent(ev, now, log)
+	if unowned && !killed {
+		p.endUnownedTurn(ev)
+	}
+	return killed
 }
 
 // notifyLinker forwards system/init context and system/task_started events to
