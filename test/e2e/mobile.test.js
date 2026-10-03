@@ -32,6 +32,20 @@ test.describe('Mobile dashboard', () => {
     return { ctx, page };
   }
 
+  // mobile_nav.js re-derives the list/chat classes when the viewport crosses
+  // the 768px breakpoint (utilities.js's mobileQuery 'change' listener); a
+  // desktop load sets neither class, so only that listener can add one.
+  test('crossing the 768px breakpoint re-derives the list/chat view', async ({ browser }) => {
+    const { ctx, page } = await open(browser, desktop);
+    const body = page.locator('body');
+    await expect(body).not.toHaveClass(/mobile-list-view/);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(body).toHaveClass(/mobile-list-view/);
+    await page.setViewportSize(desktop.viewport);
+    await expect(body).not.toHaveClass(/mobile-list-view/);
+    await ctx.close();
+  });
+
   test('on mobile: sidebar starts visible (list view)', async ({ browser }) => {
     const { ctx, page } = await open(browser, iPhone);
 
