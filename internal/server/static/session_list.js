@@ -730,10 +730,9 @@ export function updateStatusBar() {
   // selectedNode 拨回 local，否则 dispatch / 头部会指向一个消失的连接。
   if (!container) { reconcileSelectedNode(); return; }
   const wsUp = wsm.state === WS_STATES.CONNECTED;
-  // When multiple nodes are connected, the #node-selector widget already
-  // surfaces per-node status; the sidebar-status bar collapses to "current
-  // node only" to reclaim vertical space. Single-node setups keep the legacy
-  // behavior (local row always shown) so nothing regresses for the common case.
+  // With multiple nodes the bar collapses to "current node only" to reclaim
+  // vertical space (the New Session connection picker lists every node's
+  // status). Single-node setups always show the local row.
   const multi = isMultiNode();
   const currentIsLocal = !multi || selection.node === 'local';
 

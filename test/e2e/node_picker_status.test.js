@@ -2,9 +2,9 @@
 //
 // The New Session connection picker (#new-node, auth_modal.js renderNodePicker)
 // labels every node with getNodeStatus (session_ident.js): 'local' follows the
-// WebSocket state machine, a remote reports the status the server's node
-// snapshot carries, and a remote with no status reads as offline rather than
-// reachable.
+// WebSocket state machine (connected, still authenticating, or no socket at
+// all), a remote reports the status the server's node snapshot carries, and a
+// remote with no status reads as offline rather than reachable.
 //
 // 跑法：cd test/e2e && npx playwright test node_picker_status.test.js --project=desktop-chrome
 
@@ -19,25 +19,59 @@ test.beforeEach(({ }, testInfo) => {
   }
 });
 
-/** @type {Awaited<ReturnType<typeof startMockServer>>} */
-let mock;
-test.beforeAll(async () => {
+function multiNodeSessions() {
   const sessions = defaultSessions();
   sessions.nodes = {
     local: { display_name: 'Local', status: 'ok' },
     mac: { display_name: 'Mac', status: 'unreachable' },
     pi: { display_name: 'Pi' },
   };
-  mock = await startMockServer({ ws: true, sessions });
-});
-test.afterAll(async () => { await new Promise((r) => mock.server.close(r)); });
+  return sessions;
+}
 
-test('each connection option carries its node status', async ({ page }) => {
-  await page.goto(mock.url + '/dashboard');
+/** @type {Awaited<ReturnType<typeof startMockServer>> | null} */
+let mock = null;
+// The page holds the WebSocket open, and server.close() waits for it.
+test.afterEach(async ({ page }) => {
+  await page.close();
+  if (mock) mock.server.close();
+  mock = null;
+});
+
+/**
+ * @param {import('@playwright/test').Page} page
+ * @param {string} wsState - the WS_STATES value to wait for before opening the picker
+ * @param {{reload?: boolean}} [opts] - reload:false keeps the already-loaded page
+ */
+async function pickerLabels(page, wsState, opts = {}) {
+  if (!mock) throw new Error('mock not started');
+  if (opts.reload !== false) await page.goto(mock.url + '/dashboard');
   await page.waitForSelector('.session-card');
-  await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+  await page.waitForFunction((s) => wsm.state === s, wsState);
   await page.click('.hdr-btn[title="New Session"]');
   await page.waitForSelector('#new-node');
-  const labels = await page.locator('#new-node option').allTextContents();
+  return page.locator('#new-node option').allTextContents();
+}
+
+test('each connection option carries its node status', async ({ page }) => {
+  mock = await startMockServer({ ws: true, sessions: multiNodeSessions() });
+  const labels = await pickerLabels(page, 'connected');
   expect(labels).toEqual(['本地 · connected', 'Mac · unreachable', 'Pi · offline']);
+});
+
+test('local reads connecting while the socket waits for auth_ok', async ({ page }) => {
+  mock = await startMockServer({ ws: true, wsHoldAuth: true, sessions: multiNodeSessions() });
+  const labels = await pickerLabels(page, 'authenticating');
+  expect(labels[0]).toBe('本地 · connecting');
+});
+
+// Without ws:true the mock drops every /ws upgrade and wsm keeps redialling.
+// Waiting for backoff >= 4000 means the pending redial is at least 2s away, so
+// the picker cannot render during a brief CONNECTING window.
+test('local reads offline when there is no socket', async ({ page }) => {
+  mock = await startMockServer({ sessions: multiNodeSessions() });
+  await page.goto(mock.url + '/dashboard');
+  await page.waitForFunction(() => wsm.state === WS_STATES.DISCONNECTED && wsm.backoff >= 4000);
+  const labels = await pickerLabels(page, 'disconnected', { reload: false });
+  expect(labels[0]).toBe('本地 · offline');
 });

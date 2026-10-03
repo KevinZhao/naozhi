@@ -385,7 +385,7 @@
     "lateBindings": 0
   },
   "session_list.js": {
-    "lines": 1111,
+    "lines": 1110,
     "maxFnLines": 100,
     "fnOver100": 0,
     "topLevelLetVar": 0,
