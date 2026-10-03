@@ -1,8 +1,12 @@
 package session
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"maps"
 	"net/http"
-	"strconv"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,54 +19,21 @@ import (
 // HandleList serves GET /api/sessions. It orchestrates focused helpers —
 // filterAndCountSnapshots, fillProjectAndSummary, buildSessionStats,
 // buildLocalResp / buildMultiNodeResp — each of which documents its own
-// mutation contract (#736).
+// mutation contract (#736). Every response carries a content ETag
+// (sessionsBodyETag); an If-None-Match naming it gets a bodyless 304.
 func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
-	// Conditional GET (#1916): the ETag folds in storeGen plus a history
-	// fingerprint (cache epoch + length) — every input that can change the
-	// SINGLE-NODE body. Multi-node responses also depend on live node status
-	// with no version hook, so they always rebuild. Clients that omit
-	// If-None-Match always get a full 200 with the ETag set.
 	knownNodes := h.deps.NodeAccess.KnownNodes()
-	singleNode := len(knownNodes) == 0
-
-	// sinceVersion is the storeGen the client last rendered; 0 (absent or
-	// unparseable) forces a full build.
-	clientETag := r.Header.Get("If-None-Match")
-	sinceVersion := parseETagVersion(clientETag)
-
-	snapshots, version, changed := h.deps.Router.ListSessionsIfChanged(sinceVersion)
-
-	var etag string
-	if singleNode {
-		// Warm the history cache BEFORE fingerprinting so the ETag reflects the
-		// exact history slice buildLocalResp embeds (its own historySessions()
-		// call then hits the same epoch). Steady state is a wait-free TTL hit.
-		h.historySessions()
-		etag = h.sessionsListETag(version)
-		// Snapshots unchanged AND full validator matches → nothing in the
-		// single-node body moved; 304 and skip the rebuild.
-		if !changed && clientETag != "" && clientETag == etag {
-			w.Header().Set("ETag", etag)
-			w.Header().Set("Cache-Control", "no-store")
-			w.WriteHeader(http.StatusNotModified)
-			return
-		}
-	}
-
-	// changed==false with no 304 (multi-node, first poll, or history moved
-	// while storeGen held) still needs a body. ListSessionsWithVersion keeps
-	// (snapshots, version) in one r.mu.RLock epoch (#726).
-	if !changed {
-		snapshots, version = h.deps.Router.ListSessionsWithVersion()
-		if singleNode {
-			etag = h.sessionsListETag(version)
-		}
-	}
+	// ListSessionsWithVersion keeps (snapshots, version) in one r.mu.RLock
+	// epoch (#726).
+	snapshots, version := h.deps.Router.ListSessionsWithVersion()
 
 	// Captured once so cutoff / uptime bucket share a single vDSO call.
 	now := time.Now()
 
 	snapshots, running, ready := filterAndCountSnapshots(snapshots, now)
+	// The table hands sessions out in map order; a fixed order is what lets
+	// two polls of an unchanged table hash alike.
+	slices.SortFunc(snapshots, func(a, b sessionpkg.SessionSnapshot) int { return strings.Compare(a.Key, b.Key) })
 
 	// Overlay tailer-side agent metrics; no-op when no Hub is wired (tests).
 	if h.deps.SnapshotEnricher != nil {
@@ -76,52 +47,55 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	stats := h.buildSessionStats(now, version, running, ready)
 
 	// KnownNodes was sampled once at the top (immutable snapshot, no lock).
-	// Stamp the ETag so the next poll's If-None-Match can 304.
-	if singleNode {
+	// The hashed copy has uptime blanked; the body keeps it.
+	var resp, hashed any
+	if len(knownNodes) == 0 {
+		local := h.buildLocalResp(snapshots, stats)
+		resp = local
+		local.Stats.Uptime = ""
+		hashed = local
+	} else {
+		multi := h.buildMultiNodeResp(snapshots, stats, knownNodes)
+		resp = multi
+		multi.Stats.Uptime = ""
+		hashed = multi
+	}
+	if etag := sessionsBodyETag(hashed); etag != "" {
 		w.Header().Set("ETag", etag)
-		httputil.WriteJSON(w, h.buildLocalResp(snapshots, stats))
-		return
+		if etagListMatches(r.Header.Get("If-None-Match"), etag) {
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
 	}
-
-	httputil.WriteJSON(w, h.buildMultiNodeResp(snapshots, stats, knownNodes))
+	httputil.WriteJSON(w, resp)
 }
 
-// parseETagVersion extracts the storeGen version from a sessionsListETag
-// validator (`"v<N>-h<E>-n<L>"`). Lenient: anything unparseable (weak
-// validator, future format, absent header) yields 0, forcing a rebuild. The
-// history suffix only participates in the full-string equality check.
-func parseETagVersion(etag string) uint64 {
+// sessionsBodyETag is the validator for a /api/sessions body: the first 128
+// bits of the SHA-256 of its JSON encoding. The caller blanks stats.uptime,
+// the one field that moves every second, so a 304 may leave the uptime display
+// stale; every other field is covered. Weak, because bodies that differ in
+// uptime share it. "" when v does not encode (WriteJSON then serves the 500).
+func sessionsBodyETag(v any) string {
+	sum := sha256.New()
+	if err := json.NewEncoder(sum).Encode(v); err != nil {
+		return ""
+	}
+	var b [sha256.Size]byte
+	return `W/"b` + hex.EncodeToString(sum.Sum(b[:0])[:16]) + `"`
+}
+
+// etagListMatches applies RFC 9110 §13.1.2 If-None-Match: `*`, or any entry
+// of the comma list equal to etag under weak comparison (W/ ignored).
+func etagListMatches(header, etag string) bool {
 	etag = strings.TrimPrefix(etag, "W/")
-	etag = strings.Trim(etag, `"`)
-	if !strings.HasPrefix(etag, "v") {
-		return 0
+	for _, tag := range strings.Split(header, ",") {
+		tag = strings.TrimSpace(tag)
+		if tag == "*" || strings.TrimPrefix(tag, "W/") == etag {
+			return true
+		}
 	}
-	rest := etag[1:]
-	if i := strings.IndexByte(rest, '-'); i >= 0 {
-		rest = rest[:i]
-	}
-	v, err := strconv.ParseUint(rest, 10, 64)
-	if err != nil {
-		return 0
-	}
-	return v
-}
-
-// sessionsListETag derives the single-node /api/sessions validator from the
-// storeGen version plus the history cache fingerprint (epoch nanos + length) —
-// exactly the inputs that vary the body. Stats fields are static or derived
-// from the same snapshots/version; projects/uptime move at coarser resolution.
-// A re-scan yielding identical history still bumps the epoch: a harmless
-// missed optimisation, never a stale read.
-func (h *Handlers) sessionsListETag(version uint64) string {
-	historyEpoch := h.historyCacheTimeUnixNano.Load()
-	h.historyCacheMu.RLock()
-	historyLen := len(h.historyCache)
-	h.historyCacheMu.RUnlock()
-	// Quoted opaque validator per RFC 7232 §2.3.
-	return `"v` + strconv.FormatUint(version, 10) +
-		`-h` + strconv.FormatInt(historyEpoch, 10) +
-		`-n` + strconv.Itoa(historyLen) + `"`
+	return false
 }
 
 // filterAndCountSnapshots walks the router snapshot once: it counts running /
@@ -311,7 +285,10 @@ func (h *Handlers) buildMultiNodeResp(snapshots []sessionpkg.SessionSnapshot, st
 	nodeStatus["local"] = nodeStatusEntry{DisplayName: localName, Status: "ok"}
 
 	cachedSessions, cachedStatus := h.deps.NodeCache.Sessions()
-	for id, nc := range nodesSnapshot {
+	// Node order fixes where each node's sessions land, so it must not vary
+	// between polls (sessionsBodyETag).
+	for _, id := range slices.Sorted(maps.Keys(nodesSnapshot)) {
+		nc := nodesSnapshot[id]
 		status := cachedStatus[id]
 		if status == "" {
 			status = "ok"

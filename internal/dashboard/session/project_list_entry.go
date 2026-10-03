@@ -6,6 +6,8 @@ package session
 
 import (
 	"encoding/json"
+	"maps"
+	"slices"
 	"time"
 
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
@@ -116,8 +118,9 @@ func (h *Handlers) buildProjectList(now time.Time) []projectListEntry {
 		copy(merged, projectList)
 		projectList = merged
 	}
-	for _, items := range cachedProjects {
-		for _, item := range items {
+	// Node order must not vary between polls: sessionsBodyETag hashes this list.
+	for _, id := range slices.Sorted(maps.Keys(cachedProjects)) {
+		for _, item := range cachedProjects[id] {
 			name := strOrFallback(item, "name", "Name")
 			path := strOrFallback(item, "path", "Path")
 			nd, _ := item["node"].(string)

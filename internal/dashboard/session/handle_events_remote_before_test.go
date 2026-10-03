@@ -106,7 +106,7 @@ func equalTimes(a, b []int64) bool {
 // knows when to stop.
 func TestHandleEvents_RemoteBefore_FiltersAndPaginates(t *testing.T) {
 	conn := &fakeEventsConn{entries: remoteEventsFixture(10)}
-	h := newIfChangedTestHandlers(t, fakeEventsNodeAccessor{conn: conn})
+	h := newETagTestHandlers(t, newFakeRouter(), fakeEventsNodeAccessor{conn: conn})
 
 	rec, got := doRemoteEvents(t, h, "&before=6&limit=2")
 	if want := []int64{4, 5}; !equalTimes(times(got), want) {
@@ -132,7 +132,7 @@ func TestHandleEvents_RemoteBefore_FiltersAndPaginates(t *testing.T) {
 // maps that to "done") and has-more=0 — never the newest page again.
 func TestHandleEvents_RemoteBefore_ExhaustedReturnsEmpty(t *testing.T) {
 	conn := &fakeEventsConn{entries: remoteEventsFixture(10)}
-	h := newIfChangedTestHandlers(t, fakeEventsNodeAccessor{conn: conn})
+	h := newETagTestHandlers(t, newFakeRouter(), fakeEventsNodeAccessor{conn: conn})
 
 	rec, got := doRemoteEvents(t, h, "&before=1&limit=100")
 	if len(got) != 0 {
@@ -149,7 +149,7 @@ func TestHandleEvents_RemoteBefore_ExhaustedReturnsEmpty(t *testing.T) {
 // `before` with no limit uses the same page cap as the local branch.
 func TestHandleEvents_RemoteBefore_NoLimitUsesPageCap(t *testing.T) {
 	conn := &fakeEventsConn{entries: remoteEventsFixture(maxEventsPageLimit + 5)}
-	h := newIfChangedTestHandlers(t, fakeEventsNodeAccessor{conn: conn})
+	h := newETagTestHandlers(t, newFakeRouter(), fakeEventsNodeAccessor{conn: conn})
 
 	rec, got := doRemoteEvents(t, h, "&before=1000000")
 	if len(got) != maxEventsPageLimit {
@@ -169,7 +169,7 @@ func TestHandleEvents_RemoteBefore_NoLimitUsesPageCap(t *testing.T) {
 // documented precedence.
 func TestHandleEvents_RemoteInitialAndAfter_Unchanged(t *testing.T) {
 	conn := &fakeEventsConn{entries: remoteEventsFixture(10)}
-	h := newIfChangedTestHandlers(t, fakeEventsNodeAccessor{conn: conn})
+	h := newETagTestHandlers(t, newFakeRouter(), fakeEventsNodeAccessor{conn: conn})
 
 	rec, got := doRemoteEvents(t, h, "&limit=3")
 	if want := []int64{8, 9, 10}; !equalTimes(times(got), want) {

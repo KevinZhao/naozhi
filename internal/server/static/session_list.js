@@ -2,7 +2,7 @@
 // merge with pending (not yet sent) sessions, the cards and badges, the status
 // bar, the node helpers, and the WS state, subscription and session_state frames.
 import { NZ_CONTRACT } from './contract.js';
-import { getToken, lsGet } from './platform.js';
+import { authHeaders, lsGet } from './platform.js';
 import { sessionStream } from './session_stream.js';
 import { WS_STATES, wsm } from './ws_manager.js';
 import { perSession, selection, serverInfo, sessionList, timers, transcript } from './state.js';
@@ -63,21 +63,27 @@ export function restorePending() {
   }
 }
 
-// fetchSessionsPayload GETs /api/sessions. null is a failed poll the caller
-// reports as false (an auth failure, after prompting for a token, or an HTTP
-// error); a network error throws. The 8 s timeout releases a hung response
-// before the next 5 s poll tick (RNEW-UX-003).
+// fetchSessionsPayload GETs /api/sessions: {data, validator}, NOT_MODIFIED on a
+// 304 (the body last fetched, uptime aside), or null for a failed poll the
+// caller reports as false (an auth failure, after prompting for a token, or an
+// HTTP error); a network error throws. If-None-Match goes out only while
+// lastVersion > 0 (the sites that need a repaint zero it) and for the selection
+// whose header chips the last body painted. The 8 s timeout releases a hung
+// response (RNEW-UX-003).
+const NOT_MODIFIED = Object.freeze({});
+const chipSelection = () => (selection.key || '') + '\n' + (selection.node || '');
 async function fetchSessionsPayload() {
-  const headers = {};
-  const t = getToken();
-  if (t) headers['Authorization'] = 'Bearer ' + t;
+  const headers = authHeaders();
+  const v = sessionList.lastETag;
+  if (v && v.sel === chipSelection() && sessionList.lastVersion > 0) headers['If-None-Match'] = v.etag;
+  let etag = '';
   try {
-    return await fetchJSON(NZ_CONTRACT.API.sessions, { headers, timeoutMs: 8000 });
+    const data = await fetchJSON(NZ_CONTRACT.API.sessions, { headers, timeoutMs: 8000, onResponse: r => { etag = r.headers.get('ETag') || ''; } });
+    return data && { data, validator: etag && { etag, sel: chipSelection() } };
   } catch (err) {
-    if (err.status === 401 || err.status === 403) {
-      showAuthModal({ auto: true }); // background poll: respects de-dupe + cooldown
-      return null;
-    }
+    if (err.status === 304) return NOT_MODIFIED;
+    // A background poll's prompt respects the auth modal's de-dupe + cooldown.
+    if (err.status === 401 || err.status === 403) showAuthModal({ auto: true });
     if (err.status) return null;
     throw err;
   }
@@ -86,12 +92,10 @@ async function fetchSessionsPayload() {
 // sessionsUnchanged reports whether the poll carries nothing new, and
 // otherwise records it as the last one seen. stats.version changes on session
 // add/remove/rename/reset; nodes and history have no version and compare as
-// JSON. Process state flips (running↔ready, last_response) never advance the
-// version, which over a live socket the session_state push covers; under
-// WS-fallback polling REST is the only state source, so the short-circuit
-// would freeze the sidebar and it applies only while connected (#2431).
-// renderSidebar is idempotent, so the 5 s fallback repaint is the intended
-// cost.
+// JSON. Process state flips (running↔ready, last_response) never advance it:
+// over a live socket the session_state push covers them, but under WS-fallback
+// polling REST is the only state source, so the short-circuit applies only
+// while connected (#2431) and the idempotent renderSidebar runs every 5 s.
 function sessionsUnchanged(data, wsConnected) {
   const version = (data.stats && data.stats.version) || 0;
   const nodesHash = JSON.stringify(data.nodes || {});
@@ -234,8 +238,10 @@ export function onSessionsApplied(fn) {
 
 export async function fetchSessions() {
   try {
-    let data = await fetchSessionsPayload();
-    if (!data) return false;
+    const got = await fetchSessionsPayload();
+    if (got === NOT_MODIFIED) return;
+    if (!got) return false;
+    let data = got.data;
     // The effort tier, spawn diagnosis and overlay drift change at turn
     // boundaries, which do not advance stats.version, and renderMainShell does
     // not run on turn completion: they repaint here, before the short-circuit.
@@ -244,6 +250,7 @@ export async function fetchSessions() {
     if (selection.key) setHeaderSpawnDiagChip(data.sessions);
     if (selection.key) setHeaderOverlayDriftChip(data.sessions);
     const wsConnected = wsm.state === WS_STATES.CONNECTED;
+    sessionList.lastETag = got.validator;
     if (sessionsUnchanged(data, wsConnected)) return;
     applySessionsStats(data);
     const backendKeys = new Set();
@@ -713,16 +720,6 @@ function formatOutageDuration(elapsedMs) {
   const remM = m - h * 60;
   return remM > 0 ? '已断开 ' + h + ' 小时 ' + remM + ' 分' : '已断开 ' + h + ' 小时';
 }
-
-// (Removed) _statusTickTimer / _updateStatusTick previously drove a 1s
-// setInterval(updateStatusBar) loop while WS was disconnected so the
-// "已断开 N 秒" label inside #sidebar-status could tick forward between
-// state transitions. That DOM was deleted when the sidebar gave its bottom
-// real estate to the session list, after which updateStatusBar early-
-// returns when the container is missing — its only remaining side-effect
-// is reconcileSelectedNode(), which setState already invokes on every WS
-// state change via updateStatusBar(). The 1s tick therefore had no
-// user-visible effect and was a periodic no-op repaint. Issue #434.
 
 export function updateStatusBar() {
   const container = document.getElementById('sidebar-status');

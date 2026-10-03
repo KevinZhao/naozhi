@@ -132,6 +132,9 @@ export const sessionList = {
   collapsedProjects: null,
   nodesData: {},
   lastVersion: 0,
+  // lastETag is {etag, sel}: the last /api/sessions body's validator and the
+  // selection whose header chips it painted; null sends no If-None-Match.
+  lastETag: null,
   lastNodesJSON: '',
   lastHistoryJSON: '',
   // _lastSidebarData caches the most recent /api/sessions payload so the
@@ -154,11 +157,8 @@ export const serverInfo = {
   defaultWorkspace: '',
   defaultCLIName: '',
   defaultCLIVersion: '',
-  // R110-P1 Home panel health strip (Round 148) — cached snapshot of the
-  // /api/sessions `stats` object so renderRecentSessionsPanel can surface
-  // service health (active / running / ready / uptime / watchdog kills / cli
-  // version) without an extra fetch. Refreshed by fetchSessions on every
-  // successful poll. Nil-safe consumer: absence = show nothing, never throw.
+  // The last /api/sessions `stats` fetchSessions handled, read by the Home
+  // health strip and the settings 关于 rows; null until the first poll.
   lastStatsSnapshot: null,
   // cached LOCAL /api/cli/backends response: {backends, default, detected}
   cliBackends: null,
