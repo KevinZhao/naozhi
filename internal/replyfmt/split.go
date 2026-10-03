@@ -112,8 +112,9 @@ func splitFenced(text string, maxRunes int) []splitPart {
 }
 
 // cutFenced picks the cut for a chunk with w runes left after the reopen line,
-// reserving room for the closing line when the cut lands inside a fence. It
-// returns end -1 when that closing line would exceed maxTail runes.
+// reserving room for the closing line when the cut lands inside a fence. A cut
+// just before the input's own closing line moves past it when that fits. It
+// returns end -1 when the synthesized closing line would exceed maxTail runes.
 func cutFenced(text string, open *fence, w, maxTail int) (end int, tail string) {
 	reserve := 0
 	for {
@@ -132,6 +133,15 @@ func cutFenced(text string, open *fence, w, maxTail int) (end int, tail string) 
 			start := strings.LastIndexByte(text[:end-1], '\n') + 1
 			if start > 0 && scanFences(text[:start], open) == nil && utf8.RuneCountInString(text[:start]) > (w-maxTail)/2 {
 				return start, ""
+			}
+			// A closing line just past the cut would open the next chunk with
+			// an empty reopened block; take it into this chunk when it fits.
+			if line, _, _ := strings.Cut(text[end:], "\n"); stepFence(line, f) == nil {
+				for _, e := range []int{end + len(line) + 1, end + len(line)} {
+					if e <= len(text) && utf8.RuneCountInString(text[:e]) <= w {
+						return e, ""
+					}
+				}
 			}
 		}
 		tail = f.closer()
