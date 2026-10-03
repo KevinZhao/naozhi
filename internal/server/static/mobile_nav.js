@@ -3,29 +3,17 @@
 // sidebar fully-collapse helpers that share its drawer bookkeeping
 // (#2558 D4-3).
 //
-// Verbatim move out of dashboard.js; only the import + dep-wiring lines are
-// new. Layering (D4-1 rule): never import dashboard back.
+// Verbatim move out of dashboard.js; only the import lines are new.
+// Layering (D4-1 rule): never import dashboard back — selectSession is
+// reached through shell.js.
 import { selection } from './state.js';
 import { esc, showToast } from './nz_util.js';
+import { ICONS } from './icons.js';
+import { lsGet, lsSet } from './platform.js';
+import { shell } from './shell.js';
 import { splitDock } from './split_view.js';
+import { dismissSession, renameSession } from './tuning.js';
 import { isMobile, mobileQuery } from './utilities.js';
-
-const deps = {
-  ICONS: null,
-  dismissSession: null,
-  lsGet: null,
-  lsSet: null,
-  renameSession: null,
-  selectSession: null,
-};
-export function configureMobileNav(impl) {
-  for (const k of Object.keys(deps)) {
-    if (typeof impl[k] === 'undefined') throw new Error('mobile_nav dep missing: ' + k);
-    deps[k] = impl[k];
-  }
-  // Deps are live now — run the load-time bootstrap that needs them.
-  initSidebarCollapsed();
-}
 
 /* ===== Mobile Navigation ===== */
 
@@ -209,8 +197,8 @@ async function copyStringToClipboard(s) {
 // openSessionContextMenu assembles the items for a given session card and
 // opens the menu anchored near the touch coordinates. Rename reuses the
 // existing modal-prompt pattern by selecting the session first, then
-// deferring to deps.renameSession(); copy-key writes the key to clipboard with
-// a toast confirmation; delete routes through deps.dismissSession() which
+// deferring to renameSession(); copy-key writes the key to clipboard with
+// a toast confirmation; delete routes through dismissSession() which
 // surfaces the existing confirmDialog flow on its own.
 function openSessionContextMenu(card, x, y) {
   const key = card.dataset.key;
@@ -218,27 +206,27 @@ function openSessionContextMenu(card, x, y) {
   if (!key) return;
   showSessionContextMenu(x, y, [
     {
-      label: '重命名', icon: deps.ICONS.edit,
+      label: '重命名', icon: ICONS.edit,
       action: () => {
-        // deps.renameSession() reads selection.key/selection.node and repaints only the
+        // renameSession() reads selection.key/selection.node and repaints only the
         // header of the CURRENT shell (renderMainHeader), so the target must
         // be properly selected first — flipping the globals alone would stamp
         // this card's header onto whatever conversation is on screen.
-        // deps.selectSession is a no-op re-select when the card is already open.
-        deps.selectSession(key, node);
-        deps.renameSession();
+        // selectSession is a no-op re-select when the card is already open.
+        shell.selectSession(key, node);
+        renameSession();
       },
     },
     {
-      label: '复制 key', icon: deps.ICONS.copy,
+      label: '复制 key', icon: ICONS.copy,
       action: async () => {
         const ok = await copyStringToClipboard(key);
         showToast(ok ? '已复制 key' : '复制失败', ok ? 'success' : 'warning');
       },
     },
     {
-      label: '删除', icon: deps.ICONS.trash, danger: true,
-      action: () => { deps.dismissSession(key, node); },
+      label: '删除', icon: ICONS.trash, danger: true,
+      action: () => { dismissSession(key, node); },
     },
   ]);
 }
@@ -320,7 +308,7 @@ function initSwipeDelete() {
       // Swipe past the threshold is an explicit gesture — skip the modal
       // confirm here so the user doesn't have to re-confirm after already
       // dragging 40% of the card width. Button-click path still confirms.
-      setTimeout(() => deps.dismissSession(c.dataset.key, c.dataset.node || 'local', { skipConfirm: true }), 180);
+      setTimeout(() => dismissSession(c.dataset.key, c.dataset.node || 'local', { skipConfirm: true }), 180);
     } else {
       c.style.transition = 'transform .2s ease, background .2s ease';
       c.style.transform = '';
@@ -341,7 +329,7 @@ function initSwipeDelete() {
     card = null; tracking = false;
   }, {passive:true});
   // Click bubbles up after touchend. If a long-press just fired we have
-  // already null'd `card`, but the underlying anchor click (deps.selectSession
+  // already null'd `card`, but the underlying anchor click (selectSession
   // via onclick) still fires. Swallow it when _longPressFired is set.
   list.addEventListener('click', e => {
     if (_longPressFired) {
@@ -411,7 +399,7 @@ function initSwipeBack() {
 
 /* ===== Sidebar fully-collapse (PC only) =====
    Toggle body.sidebar-collapsed so .main occupies the full viewport. State is
-   persisted via deps.lsSet so a refresh keeps the user's preference. The mobile
+   persisted via lsSet so a refresh keeps the user's preference. The mobile
    layout (≤768px) already treats the sidebar as a fixed drawer overlay, so
    the toggle is a no-op there: we suppress the click and let mobile's own
    list/chat-view classes drive visibility. Keyboard shortcut: `[` (mirroring
@@ -451,7 +439,7 @@ function toggleSidebarCollapsed() {
   _sidebarAutoCollapsed = false;
   const next = !document.body.classList.contains('sidebar-collapsed');
   applySidebarCollapsed(next, true);
-  deps.lsSet(LS_SIDEBAR_COLLAPSED, next ? 1 : 0);
+  lsSet(LS_SIDEBAR_COLLAPSED, next ? 1 : 0);
 }
 
 // _sidebarAutoCollapsed tracks whether the CURRENT collapse was applied by
@@ -493,11 +481,10 @@ function restoreSidebarAfterDrawer() {
 // initSidebarCollapsed honors the persisted preference on cold-load. Skip on
 // mobile so a previously collapsed PC session doesn't black-box the drawer
 // when the user pops the dashboard open on a phone (different viewport,
-// different mental model). Called from configureMobileNav — it reads an
-// injected dep, so it must not run at module-evaluation time (#2558 D4-3).
+// different mental model). dashboard.js calls it once from its boot sequence.
 function initSidebarCollapsed() {
   if (isMobileViewport()) return;
-  if (deps.lsGet(LS_SIDEBAR_COLLAPSED, 0)) {
+  if (lsGet(LS_SIDEBAR_COLLAPSED, 0)) {
     applySidebarCollapsed(true, false);
   }
 }
@@ -515,7 +502,7 @@ if (window.matchMedia) {
     if (e.matches) {
       document.body.classList.remove('sidebar-collapsed');
     } else {
-      applySidebarCollapsed(!!deps.lsGet(LS_SIDEBAR_COLLAPSED, 0), false);
+      applySidebarCollapsed(!!lsGet(LS_SIDEBAR_COLLAPSED, 0), false);
     }
   };
   if (typeof mql.addEventListener === 'function') {
@@ -545,6 +532,7 @@ document.addEventListener('keydown', function(e) {
 export {
   collapseSidebarForDrawer,
   initMobile,
+  initSidebarCollapsed,
   initSwipeBack,
   initSwipeDelete,
   initViewportTracking,

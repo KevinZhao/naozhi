@@ -561,6 +561,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/shell.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/sidebar_project.js",
     "handler_type": "http.HandlerFunc"
   },

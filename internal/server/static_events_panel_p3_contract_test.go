@@ -107,13 +107,13 @@ func TestDashboardJS_NodeDisconnectDeselectsStaleSession(t *testing.T) {
 		t.Error("node-disconnected branch must call deselectNodeSession")
 	}
 	fn := jsFuncBody(t, js, "deselectNodeSession")
-	// #2558 D4-4: deselectNodeSession moved to system_view.js, where dashboard
-	// state is read from the state.js objects and helpers are injected deps.
+	// deselectNodeSession lives in system_view.js, which reads dashboard state
+	// from the state.js objects and imports its helpers.
 	for _, want := range []string{
 		"if (draft) perSession.drafts[selection.key] = draft;", // keep the operator's text
 		"selection.key = null;",
-		"main.innerHTML = deps.mainEmptyHtml();",
-		"deps.wireQuickAskInput();",
+		"main.innerHTML = mainEmptyHtml();",
+		"wireQuickAskInput();",
 		"已断开",
 	} {
 		if !strings.Contains(fn, want) {

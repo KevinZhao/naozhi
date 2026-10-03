@@ -105,12 +105,12 @@ func TestDashboardJS_LoadEarlierStaleGuard(t *testing.T) {
 
 	// Mobile long-press rename must go through selectSession so renderMainHeader
 	// repaints the shell that actually belongs to the renamed session.
-	// #2558 D4-3: the long-press action moved to mobile_nav.js, where the
-	// dashboard entry points are injected deps.
-	if strings.Contains(js, "selection.key = key;\n        selection.node = node;\n        deps.renameSession();") {
+	// The long-press action lives in mobile_nav.js, which reaches dashboard's
+	// selectSession through shell.js and imports renameSession from tuning.js.
+	if strings.Contains(js, "selection.key = key;\n        selection.node = node;\n        renameSession();") {
 		t.Error("long-press rename must not flip selection.key/selection.node directly before renameSession()")
 	}
-	if !strings.Contains(js, "        deps.selectSession(key, node);\n        deps.renameSession();") {
+	if !strings.Contains(js, "        shell.selectSession(key, node);\n        renameSession();") {
 		t.Error("long-press rename must call selectSession(key, node) before renameSession()")
 	}
 
