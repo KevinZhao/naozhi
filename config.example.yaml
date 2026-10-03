@@ -327,8 +327,12 @@ sysession:
   enabled: true
   tick_timeout: 30s
   runner:
-    # 留空让 claude CLI 用本部署默认 backend 的模型 (不硬编码 vendor 字符串)。
-    model: ""
+    # daemon 的调用都是短小的提炼任务 (如 auto-titler 起标题), 推荐 haiku:
+    # 这个别名在 Anthropic API 与 Bedrock 上都能解析。留空则不传 --model,
+    # claude CLI 用它的内置默认, 通常是贵得多的主力模型 —— runner 以
+    # --setting-sources "" 启动, 不读 settings 文件里的 model。部署凭证
+    # 无权调用 haiku 时每个 tick 都会失败, 改成留空或其它可用模型。
+    model: haiku
     # 派生的 transient system session 的工作目录; 留空默认 <dataDir>/sys-sessions/。
     work_dir: ""
     jsonl_max_age: 168h  # 启动 sweep 保留窗口; "0" 关闭 sweep。
