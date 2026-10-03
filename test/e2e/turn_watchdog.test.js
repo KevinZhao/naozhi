@@ -69,3 +69,63 @@ test.describe('掉了终态信号的 turn 自愈', () => {
     await ctx.close();
   });
 });
+
+// updateSendButton (running_banner.js since S20g) owns the other two halves of
+// that chain. 'running' arms the turn watchdog, a 15 s interval that pulls
+// /api/sessions while the open session runs, because the 5 s poll is off while
+// the socket is up. Any other state replaces a stale loading indicator, left
+// over from a turn that ended before its events arrived, with 暂无事件.
+test.describe('updateSendButton 的 watchdog 与 loading indicator', () => {
+  const RUNNING = 'dashboard:direct:2026-01-01-120001-2:otherproject';
+  /** @type {Awaited<ReturnType<typeof startMockServer>> | undefined} */
+  let mock;
+  test.beforeEach(async () => { mock = await startMockServer({ ws: true, eventsByKey: { [RUNNING]: [] } }); });
+  // The file-level beforeEach skips before this describe's beforeEach runs.
+  test.afterEach(() => { mock?.server.close(); mock = undefined; });
+
+  /** @param {import('@playwright/test').Browser} browser */
+  async function openRunning(browser) {
+    const ctx = await browser.newContext({ viewport: { width: 1600, height: 900 } });
+    const page = await ctx.newPage();
+    /** @type {string[]} */
+    const pageErrors = [];
+    page.on('pageerror', (e) => pageErrors.push(String(e)));
+    await page.clock.install();
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    await expect.poll(() => mock.wsConnections.length, { timeout: 5000 }).toBeGreaterThan(0);
+    await page.click(`.session-card[data-key="${RUNNING}"]`);
+    await expect(page.locator('#btn-stop')).toBeVisible();
+    return { ctx, page, pageErrors };
+  }
+
+  test('running 时 watchdog 每 15s 拉一次 /api/sessions', async ({ browser }) => {
+    const { ctx, page, pageErrors } = await openRunning(browser);
+    try {
+      // Let the load-time fetches settle, then count only what the clock drives.
+      await page.clock.runFor(2000);
+      const before = mock.sessionsGetCalls;
+      await page.clock.runFor(16000); // one 15 s tick + the 300 ms debounce
+      await expect.poll(() => mock.sessionsGetCalls, { timeout: 3000 }).toBeGreaterThan(before);
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('turn 在事件到达前结束：loading indicator 换成「暂无事件」', async ({ browser }) => {
+    const { ctx, page, pageErrors } = await openRunning(browser);
+    try {
+      const indicator = page.locator('#events-scroll .loading-indicator');
+      await expect(indicator).toHaveCount(1);
+      await expect(indicator).not.toHaveText('暂无事件');
+      const conn = mock.wsConnections[mock.wsConnections.length - 1];
+      conn.send({ type: 'session_state', key: RUNNING, state: 'ready' });
+      await expect(page.locator('#btn-send')).toBeVisible();
+      await expect(indicator).toHaveText('暂无事件');
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await ctx.close();
+    }
+  });
+});

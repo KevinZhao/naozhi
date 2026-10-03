@@ -33,7 +33,7 @@
     "lateBindings": 2
   },
   "auth_modal.js": {
-    "lines": 1561,
+    "lines": 1572,
     "maxFnLines": 101,
     "fnOver100": 1,
     "topLevelLetVar": 2,
@@ -143,7 +143,7 @@
     "lateBindings": 3
   },
   "dashboard.js": {
-    "lines": 2952,
+    "lines": 2951,
     "maxFnLines": 120,
     "fnOver100": 1,
     "topLevelLetVar": 0,
@@ -253,13 +253,13 @@
     "lateBindings": 0
   },
   "msg_nav.js": {
-    "lines": 463,
+    "lines": 350,
     "maxFnLines": 48,
     "fnOver100": 0,
-    "topLevelLetVar": 2,
-    "configureDeps": 9,
+    "topLevelLetVar": 1,
+    "configureDeps": 1,
     "deadInjections": 0,
-    "innerHTMLAssign": 2,
+    "innerHTMLAssign": 1,
     "htmlInsert": 0,
     "lateBindings": 0
   },
@@ -297,11 +297,11 @@
     "lateBindings": 0
   },
   "running_banner.js": {
-    "lines": 457,
+    "lines": 520,
     "maxFnLines": 95,
     "fnOver100": 0,
     "topLevelLetVar": 0,
-    "configureDeps": 6,
+    "configureDeps": 1,
     "deadInjections": 0,
     "innerHTMLAssign": 3,
     "htmlInsert": 0,
@@ -352,7 +352,7 @@
     "lateBindings": 0
   },
   "session_list.js": {
-    "lines": 1135,
+    "lines": 1134,
     "maxFnLines": 100,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -407,7 +407,7 @@
     "lateBindings": 0
   },
   "state.js": {
-    "lines": 272,
+    "lines": 274,
     "maxFnLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -451,11 +451,11 @@
     "lateBindings": 0
   },
   "voice.js": {
-    "lines": 478,
+    "lines": 467,
     "maxFnLines": 73,
     "fnOver100": 0,
     "topLevelLetVar": 7,
-    "configureDeps": 7,
+    "configureDeps": 0,
     "deadInjections": 0,
     "innerHTMLAssign": 1,
     "htmlInsert": 0,
@@ -473,7 +473,7 @@
     "lateBindings": 0
   },
   "_global": {
-    "htmlSinks": 176,
+    "htmlSinks": 175,
     "importCycles": 1,
     "unresolvedImports": 0,
     "reexports": 0,

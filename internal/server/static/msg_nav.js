@@ -1,33 +1,16 @@
 // msg_nav.js — extracted from dashboard.js (#2558 D4).
 //
 // Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block, the deps table and the export block below are the
-// only additions.
+// move; the import block and the export block below are the only additions.
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects; its helpers are
-// injected once via configureMsgNav(), called from dashboard's module body.
-import { selection, sessionList, ui } from './state.js';
-import { esc, nzViews } from './nz_util.js';
-
-const deps = {
-  closeHistoryPopover: null,
-  createNewSession: null,
-  debouncedFetchSessions: null,
-  escCloseVoiceOverlay: null,
-  handleFiles: null,
-  refreshBanner: null,
-  resetTurnState: null,
-  selectSession: null,
-  sid: null,
-};
-export function configureMsgNav(impl) {
-  for (const k of Object.keys(deps)) {
-    if (typeof impl[k] === 'undefined') throw new Error('msg_nav dep missing: ' + k);
-    deps[k] = impl[k];
-  }
-}
+// module evaluates. Shared state is read from the state.js objects; dashboard's
+// selectSession is reached through shell.js.
+import { selection, sessionList } from './state.js';
+import { esc } from './nz_util.js';
+import { shell } from './shell.js';
+import { handleFiles } from './composer_files.js';
 
 // --- Message navigation ---
 let navPopoverCloseHandler = null;
@@ -226,7 +209,7 @@ function navShowList() {
 
 // Paste handler for #msg-input:
 //   1. Image files on the clipboard (screenshot Cmd/Ctrl+V, "copy image" from
-//      another app) are routed to deps.handleFiles so they land in pendingFiles and
+//      another app) are routed to handleFiles so they land in pendingFiles and
 //      ride the same upload / file_ids path as the paperclip button. Without
 //      this branch the browser's default paste embeds the image as
 //      `<img src="data:...">` inside the contenteditable — `innerText.trim()`
@@ -260,7 +243,7 @@ document.addEventListener('paste', function(e) {
   }
   if (imageFiles.length > 0) {
     e.preventDefault();
-    deps.handleFiles(imageFiles);
+    handleFiles(imageFiles);
     return;
   }
 
@@ -283,44 +266,10 @@ document.addEventListener('paste', function(e) {
   sel.addRange(range);
 });
 
-// Keyboard shortcut: Alt+Up/Down for message nav, Alt+N for new session.
-// Cmd/Ctrl+N is left alone so the browser's "new window" still works.
+// Keyboard shortcut: Alt+Up/Down for message nav (Alt+N lives in auth_modal.js).
 document.addEventListener('keydown', function(e) {
   if (e.altKey && e.key === 'ArrowUp') { e.preventDefault(); navMsg('prev'); }
   if (e.altKey && e.key === 'ArrowDown') { e.preventDefault(); navMsg('next'); }
-  if (e.altKey && (e.key === 'n' || e.key === 'N')) {
-    const tag = (e.target.tagName || '').toLowerCase();
-    if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
-    e.preventDefault();
-    deps.createNewSession();
-  }
-});
-
-// Global Esc: close open popovers (history / nav list) when no modal/input has focus.
-document.addEventListener('keydown', function(e) {
-  if (e.key !== 'Escape') return;
-  // Overlays with their own Esc trapFocus handling take precedence.
-  if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
-  const tag = (e.target.tagName || '').toLowerCase();
-  if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
-  let closed = false;
-  // voice-overlay (R20260610-UI-3): the recording overlay had no Esc handler,
-  // so a stuck recording could only be dismissed by clicking it. Mirror the
-  // click escape-hatch (see #voice-overlay click listener) on Esc for parity
-  // with every other overlay.
-  if (deps.escCloseVoiceOverlay()) closed = true;
-  if (ui.activePopover) { deps.closeHistoryPopover(); closed = true; }
-  if (document.getElementById('nav-list-popover')) { navDismissPopover(); closed = true; }
-  // §16 inline-expand 回归 + cron-panel-consolidation RFC §6.4: Esc 关 cron 的
-  // 行内展开 / drawer。优先级（行展开先于 drawer）与关闭逻辑都收在 cron_view.js
-  // 的 cronEscClose 里，dashboard.js 仅经委托——绝不跨脚本裸引用 cron 内部状态
-  // （cronExpandedRunId / cronDetailJobId），否则 cron_view.js 未加载时这里会抛
-  // `cronExpandedRunId is not defined`（dashboard-cron-view-extraction §2.6 B1）。
-  // nz.views.cron 缺席（cron_view.js 没加载）时优雅降级，不影响其它 Esc 分支。
-  // 独立 if（非 else if）：忠实保留迁移前语义——cron 分支独立于上方 popover 分支，
-  // 即便同一次 Esc 已关掉 history/nav-list popover，仍会继续关 cron 展开/drawer。
-  if (nzViews.cron && nzViews.cron.escClose()) { closed = true; }
-  if (closed) e.preventDefault();
 });
 
 // §16 inline-expand 回归: ↑↓ 切上一条 / 下一条 run 的全局快捷键已随 cron 状态一并
@@ -345,7 +294,7 @@ document.addEventListener('keydown', function(e) {
     const group = currentProjectSessions();
     if (digit <= group.length) {
       const s = group[digit - 1];
-      deps.selectSession(s.key, s.node || 'local');
+      shell.selectSession(s.key, s.node || 'local');
     }
     return;
   }
@@ -365,7 +314,7 @@ document.addEventListener('keydown', function(e) {
       if (next >= group.length) next = 0;
     }
     const s = group[next];
-    deps.selectSession(s.key, s.node || 'local');
+    shell.selectSession(s.key, s.node || 'local');
     return;
   }
 });
@@ -390,67 +339,6 @@ function currentProjectSessions() {
   });
 }
 
-// Turn watchdog: while the selected session is "running", periodically pull
-// the authoritative REST snapshot so the banner self-heals if a terminal WS
-// signal (the 'result' event and/or the 'ready' session_state broadcast) is
-// dropped on a still-open connection. Without this the "处理中..." banner stays
-// stuck until the operator switches sessions or reconnects — the bug this fixes.
-// fetchSessions reconciles via updateMainState (see the relaxed gate in
-// fetchSessions); the watchdog just supplies the missing tick, since the
-// session poll is stopped while WS is connected.
-let _turnWatchdogTimer = null;
-const TURN_WATCHDOG_INTERVAL_MS = 15000;
-function startTurnWatchdog() {
-  if (_turnWatchdogTimer) return;
-  _turnWatchdogTimer = setInterval(() => {
-    // Self-heal: if the selected session was cleared without routing through
-    // updateSendButton (dismissSession nulls selection.key + swaps to the empty
-    // shell in three branches), the fetchSessions reconcile is gated on
-    // `if (selection.key)` and would never stop us — so retire the watchdog here
-    // instead of polling /api/sessions forever for the page lifetime.
-    if (!selection.key) { stopTurnWatchdog(); return; }
-    deps.debouncedFetchSessions();
-  }, TURN_WATCHDOG_INTERVAL_MS);
-}
-function stopTurnWatchdog() {
-  if (_turnWatchdogTimer) { clearInterval(_turnWatchdogTimer); _turnWatchdogTimer = null; }
-}
-
-function updateSendButton(state) {
-  if (selection.key) selection.lastAppliedMainState = { key: deps.sid(selection.key, selection.node), state: state };
-  const banner = document.getElementById('running-banner');
-  const sendBtn = document.getElementById('btn-send');
-  const stopBtn = document.getElementById('btn-stop');
-  const inVoiceMode = document.getElementById('input-area')?.classList.contains('voice-mode');
-  if (state === 'running') {
-    if (banner) banner.classList.remove('nz-hidden');
-    if (sendBtn) sendBtn.style.display = 'none';
-    if (stopBtn) stopBtn.style.display = 'flex';
-    if (nzViews.agent) nzViews.agent.initFromSession();
-    deps.refreshBanner();
-    startTurnWatchdog();
-  } else {
-    stopTurnWatchdog();
-    // deps.resetTurnState → deps.refreshBanner will hide the banner since the session
-    // is no longer "running". If background agents are still active (e.g.
-    // zero-downtime restart), deps.refreshBanner keeps the banner visible.
-    if (sendBtn) sendBtn.style.display = inVoiceMode ? 'none' : 'flex';
-    if (stopBtn) stopBtn.style.display = 'none';
-    deps.resetTurnState();
-    // Replace stale loading indicator if session stopped before events arrived.
-    const evEl2 = document.getElementById('events-scroll');
-    const loadingEl = evEl2 && evEl2.querySelector('.loading-indicator');
-    if (loadingEl) loadingEl.innerHTML = '暂无事件';
-  }
-  // Banner show/hide changes .events height — keep latest message visible.
-  // Only auto-scroll if the user is already near the bottom; otherwise
-  // respect their scroll position (e.g. reading history).
-  const evEl = document.getElementById('events-scroll');
-  if (evEl && evEl.scrollTop + evEl.clientHeight >= evEl.scrollHeight - 50) {
-    evEl.scrollTop = evEl.scrollHeight;
-  }
-}
-
 
 export {
   navDismissPopover,
@@ -459,5 +347,4 @@ export {
   navShowList,
   navSync,
   navUpdatePill,
-  updateSendButton,
 };

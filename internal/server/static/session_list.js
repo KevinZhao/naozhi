@@ -9,13 +9,12 @@ import { perSession, selection, serverInfo, sessionList, timers, transcript } fr
 import { esc, escAttr, fetchJSON, patchCardExitChip, reconcileChildren, sessionExitChipHtml } from './nz_util.js';
 import { setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderSpawnDiagChip } from './session_header.js';
 import { deselectNodeSession, reconcileSelectedNode } from './system_view.js';
-import { turnState } from './running_banner.js';
+import { turnState, updateSendButton } from './running_banner.js';
 import { PENDING_LS_KEY, announce, formatAbsTime, persistPending, renderRecentSessionsPanel, setActiveSessionCard, timeAgo } from './utilities.js';
 import { scanDiscovered } from './discovery.js';
 import { invalidateGitState } from './tuning.js';
 import { sectionHeaderFallbackHtml, sectionHeaderHtml } from './sidebar_project.js';
 import { accessProfileChipHtml, backendDisplayName, backendDisplayVersion, showAuthModal } from './auth_modal.js';
-import { updateSendButton } from './msg_nav.js';
 import { _optimisticRunningTimers } from './send_message.js';
 import { fetchEvents } from './event_stream.js';
 import { discoveredKey, getNodeDisplayName, isMultiNode, matchProject, nodeColor, sessionTypeTag, sid } from './session_ident.js';

@@ -42,13 +42,8 @@ import {
   mobileBack,
   restoreSidebarAfterDrawer,
   toggleSidebarCollapsed,
-} from './mobile_nav.js';import {
-  configureVoice,
-  escCloseVoiceOverlay,
-  toggleInputMode,
-  voiceMouseDown,
-  voiceTouchStart,
-} from './voice.js';
+} from './mobile_nav.js';
+import { escCloseVoiceOverlay, toggleInputMode, voiceMouseDown, voiceTouchStart } from './voice.js';
 import {
   initSplitWidth,
   splitDock,
@@ -59,14 +54,7 @@ import {
   renderSystemView,
   stopSystemPoll,
 } from './system_view.js';
-import {
-  configureRunningBanner,
-  interruptSession,
-  refreshBanner,
-  resetTurnState,
-  saveScrollPos,
-  startTurnTimer,
-} from './running_banner.js';
+import { configureRunningBanner, interruptSession, resetTurnState, saveScrollPos, startTurnTimer, updateSendButton } from './running_banner.js';
 import {
   closeFilePreview,
   processEventsForDisplay,
@@ -119,14 +107,7 @@ import {
   renameSession,
   repaintGitChip,
 } from './tuning.js';
-import {
-  configureMsgNav,
-  navMsg,
-  navRebuild,
-  navShowList,
-  navSync,
-  updateSendButton,
-} from './msg_nav.js';
+import { navDismissPopover, navMsg, navRebuild, navShowList, navSync } from './msg_nav.js';
 import {
   configureSidebarProject,
   openProjectSettings,
@@ -781,6 +762,26 @@ document.addEventListener('keydown', function(e) {
   if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
   e.preventDefault();
   createNewSession();
+});
+
+// Global Esc (moved from msg_nav.js): close the voice overlay, the history
+// popover, the nav list and cron's inline expand / drawer when no modal or
+// input has focus. Four independent ifs, not else-if: one Esc closes every one
+// that is open. cron goes through nzViews.cron, absent when cron_view.js is not
+// loaded (dashboard-cron-view-extraction §2.6 B1); its own priority (expanded
+// row before drawer) lives in cron_view.js's cronEscClose.
+document.addEventListener('keydown', function(e) {
+  if (e.key !== 'Escape') return;
+  // Overlays with their own Esc trapFocus handling take precedence.
+  if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
+  const tag = (e.target.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+  let closed = false;
+  if (escCloseVoiceOverlay()) closed = true;
+  if (ui.activePopover) { closeHistoryPopover(); closed = true; }
+  if (document.getElementById('nav-list-popover')) { navDismissPopover(); closed = true; }
+  if (nzViews.cron && nzViews.cron.escClose()) { closed = true; }
+  if (closed) e.preventDefault();
 });
 
 function selectSession(key, node) {
@@ -1608,14 +1609,12 @@ function showOnboarding() {
 configureSendMessage({ EVENT_DIVIDER_GAP_MS, awaitPendingOrients, discoveredKey, dropDiscovered, eventHtml, fetchEvents, fetchSessions, getToken, interruptSession, lastDividerTime, navSync, persistPending, removeSidebarCard, renderFilePreviews, selectSession, showAPIError, showAuthModal, showNetworkError, sid, startTurnTimer, stickEventsBottom, timeDividerHtml, updateSendButton });
 configureAuthModal({ applyFeatureGates, debouncedFetchSessions, eagerBindWorkspace, fetchSessions, getNodeDisplayName, getNodeStatus, isMultiNode, mobileEnterChat, navRebuild, nodeColor, persistPending, projectDisplayLabel, projectDisplayPrefix, renderMainShell, sendMessage, setActiveSessionCard, setMsgValue, shortPath, showNetworkError, statusLabelForNode, stopPreviewPolling, updateStatusBar });
 configureSidebarProject({ accessProfileChipInfo, debouncedFetchSessions, fetchAccessProfiles, fetchCLIBackends, fetchSessions, getToken, projectDisplayLabel, projectDisplayPrefix, renderAccessProfilePicker, renderBackendPicker, renderSidebar, showAPIError, showNetworkError });
-configureMsgNav({ closeHistoryPopover, createNewSession, debouncedFetchSessions, escCloseVoiceOverlay, handleFiles, refreshBanner, resetTurnState, selectSession, sid });
 configureTuning({ debouncedFetchSessions, dropDiscovered, fetchSessions, findDiscovered, getToken, gitChipHtml, gitStateCache, isDiscoveredKey, mainEmptyHtml, parseDiscoveredPid, promptDialog, removePendingSession, renderMainHeader, sameDiscovered, setHeaderGitChip, showAPIError, showNetworkError, sid, stopPreviewPolling, wireQuickAskInput });
 configureDiscovery({ EVENT_DIVIDER_GAP_MS, ICONS, debouncedFetchSessions, eventHtml, getToken, isInternalEvent, lastDividerTime, mobileEnterChat, navRebuild, navSync, processEventsForDisplay, renderEventsWithDividers, sessionTypeTag, setActiveSessionCard, showAPIError, showNetworkError, stickEventsBottom, stopPreviewPolling, timeDividerHtml });
-configureRunningBanner({ ICONS, getMsgValue, getToken, setMsgValue, showNetworkError, sid });
+configureRunningBanner({ debouncedFetchSessions });
 registerShell({ selectSession, setActivityView });
 initSplitWidth();
 initSidebarCollapsed();
-configureVoice({ ICONS, getMsgValue, getToken, sendMessage, setMsgValue, sid, updateSendButton });
 
 fetchCLIBackends();
 // RFC project-access-profile §8.3: fire at boot so the session-card chip has

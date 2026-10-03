@@ -1,33 +1,22 @@
 // voice.js — hold-to-talk voice input (#2558 D4-2).
 //
 // Verbatim move out of dashboard.js (`git diff --color-moved` shows a pure
-// move; the import/dep-wiring lines and escCloseVoiceOverlay are the only
+// move; the import lines and escCloseVoiceOverlay are the only
 // additions). Owns the MediaRecorder lifecycle, the persistent mic stream,
 // the touch/mouse hold gesture, the 30 s cap timer and the transcription
 // round-trip.
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back. Shared state is read from the state.js objects; its helpers are
-// injected once via configureVoice().
+// back. Shared state is read from the state.js objects.
 import { NZ_CONTRACT } from './contract.js';
 import { composer, selection, sessionList } from './state.js';
 import { showToast } from './nz_util.js';
-
-const deps = {
-  ICONS: null,
-  getMsgValue: null,
-  getToken: null,
-  sendMessage: null,
-  setMsgValue: null,
-  sid: null,
-  updateSendButton: null,
-};
-export function configureVoice(impl) {
-  for (const k of Object.keys(deps)) {
-    if (typeof impl[k] === 'undefined') throw new Error('voice dep missing: ' + k);
-    deps[k] = impl[k];
-  }
-}
+import { ICONS } from './icons.js';
+import { getToken } from './platform.js';
+import { sid } from './session_ident.js';
+import { getMsgValue, setMsgValue } from './utilities.js';
+import { updateSendButton } from './running_banner.js';
+import { sendMessage } from './send_message.js';
 
 // --- Voice recording (WeChat-style hold-to-talk) ---
 
@@ -98,7 +87,7 @@ function toggleInputMode() {
   if (ia) ia.classList.toggle('voice-mode', composer.voiceInputMode);
   const btn = document.getElementById('btn-mic');
   if (btn) {
-    btn.innerHTML = composer.voiceInputMode ? deps.ICONS.keyboard : deps.ICONS.mic;
+    btn.innerHTML = composer.voiceInputMode ? ICONS.keyboard : ICONS.mic;
     btn.title = composer.voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3';
   }
   if (composer.voiceInputMode) {
@@ -108,8 +97,8 @@ function toggleInputMode() {
     releaseMicStream();
   }
   // Sync send/stop button visibility after mode toggle
-  const sd = sessionList.sessionsData[deps.sid(selection.key, selection.node || 'local')];
-  deps.updateSendButton(sd ? sd.state || '' : '');
+  const sd = sessionList.sessionsData[sid(selection.key, selection.node || 'local')];
+  updateSendButton(sd ? sd.state || '' : '');
 }
 
 // --- Touch handlers for hold-to-talk ---
@@ -365,7 +354,7 @@ function transcribeAudio(blob, autoSend) {
   const fd = new FormData();
   fd.append('audio', blob, 'recording.' + (blob.type.includes('webm') ? 'webm' : blob.type.includes('ogg') ? 'ogg' : 'mp4'));
   const headers = {};
-  const token = deps.getToken();
+  const token = getToken();
   if (token) headers['Authorization'] = 'Bearer ' + token;
   const ac = new AbortController();
   const timeoutId = setTimeout(() => ac.abort(), TRANSCRIBE_TIMEOUT_MS);
@@ -392,10 +381,10 @@ function transcribeAudio(blob, autoSend) {
       // Append to (never replace) whatever is in the composer: in voice mode
       // the textarea is hidden, so an auto-sent transcript used to silently
       // overwrite a typed draft (#2435).
-      const cur = deps.getMsgValue(input);
-      deps.setMsgValue(input, cur ? cur + ' ' + data.text : data.text);
+      const cur = getMsgValue(input);
+      setMsgValue(input, cur ? cur + ' ' + data.text : data.text);
       if (autoSend) {
-        deps.sendMessage();
+        sendMessage();
       } else {
         input.focus();
         showToast('\u8f6c\u5199: ' + data.text.substring(0, 50) + (data.text.length > 50 ? '...' : ''), 'success', 5000);

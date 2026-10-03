@@ -6,20 +6,21 @@
 //
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects; its helpers are
-// injected once via configureRunningBanner(), called from dashboard's module body.
+// module evaluates. Shared state is read from the state.js objects. The one
+// injected helper is session_list's debouncedFetchSessions (the turn
+// watchdog's tick): session_list imports this module, so it cannot be an
+// import, and it is not a root's own function, so it cannot be a shell slot.
 import { NZ_CONTRACT } from './contract.js';
-import { perSession, selection, sessionList } from './state.js';
+import { perSession, selection, sessionList, timers } from './state.js';
 import { escAttr, nzViews, showToast } from './nz_util.js';
 import { wsm } from './ws_manager.js';
+import { ICONS } from './icons.js';
+import { getToken } from './platform.js';
+import { sid } from './session_ident.js';
+import { getMsgValue, setMsgValue, showNetworkError } from './utilities.js';
 
 const deps = {
-  ICONS: null,
-  getMsgValue: null,
-  getToken: null,
-  setMsgValue: null,
-  showNetworkError: null,
-  sid: null,
+  debouncedFetchSessions: null,
 };
 export function configureRunningBanner(impl) {
   for (const k of Object.keys(deps)) {
@@ -206,7 +207,7 @@ function refreshBanner() {
   const banner = document.getElementById('running-banner');
   if (banner) {
     const hasContent = turnState.currentTool || turnState.isThinking || turnState.isWriting || turnState.agents.length > 0 || turnState.toolOrder.length > 0;
-    const sKey = deps.sid(selection.key, selection.node);
+    const sKey = sid(selection.key, selection.node);
     const sess = sessionList.sessionsData[sKey];
     const isRunning = sess && sess.state === 'running';
     const hasActiveAgents = turnState.agents.some(function(a) { return a.status !== 'completed' && a.status !== 'error'; });
@@ -230,7 +231,7 @@ function updateSidebarAgentBadge() {
   var count = turnState.agents.length;
   var existing = meta.querySelector('.sc-agents');
   if (count > 0) {
-    var html = deps.ICONS.robot + '\u00D7' + count;
+    var html = ICONS.robot + '\u00D7' + count;
     if (existing) { existing.innerHTML = html; }
     else { var span = document.createElement('span'); span.className = 'sc-agents'; span.innerHTML = html; meta.appendChild(span); }
   } else if (existing) { existing.remove(); }
@@ -341,18 +342,18 @@ function applyEventToTurnState(ev) {
 
 function interruptSession() {
   if (!selection.key) return;
-  const sd = sessionList.sessionsData[deps.sid(selection.key, selection.node || 'local')];
+  const sd = sessionList.sessionsData[sid(selection.key, selection.node || 'local')];
   if (!sd || sd.state !== 'running') return;
   const targetNode = selection.node && selection.node !== 'local' ? selection.node : '';
   // Claude Code 风格：中断时把刚发的那条用户文本回填到输入框方便改写。
   // 只在输入框当前为空时回填，避免覆盖用户已经开始输入的新内容；回填后
   // 把光标挪到末尾、聚焦、滚进视口。回填完成即消费掉 lastSent，防止同一条
   // 文本在后续多次中断里反复回填。
-  const lastText = perSession.lastSent[deps.sid(selection.key, selection.node)];
+  const lastText = perSession.lastSent[sid(selection.key, selection.node)];
   if (lastText) {
     const input = document.getElementById('msg-input');
-    if (input && !deps.getMsgValue(input)) {
-      deps.setMsgValue(input, lastText);
+    if (input && !getMsgValue(input)) {
+      setMsgValue(input, lastText);
       try {
         input.focus();
         const range = document.createRange();
@@ -362,7 +363,7 @@ function interruptSession() {
         if (sel) { sel.removeAllRanges(); sel.addRange(range); }
       } catch (_) {}
       perSession.drafts[selection.key] = lastText;
-      delete perSession.lastSent[deps.sid(selection.key, selection.node)];
+      delete perSession.lastSent[sid(selection.key, selection.node)];
     }
   }
   if (wsm.isConnected()) {
@@ -373,7 +374,7 @@ function interruptSession() {
   } else {
     // HTTP fallback when WebSocket is disconnected
     const headers = {'Content-Type': 'application/json'};
-    const t = deps.getToken();
+    const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const body = { key: selection.key };
     if (targetNode) body.node = targetNode;
@@ -383,7 +384,7 @@ function interruptSession() {
       body: JSON.stringify(body)
     }).then(r => r.json()).then(d => {
       showToast(d.status === 'ok' ? '已发送中断' : '会话未在运行', 'warning');
-    }).catch((e) => deps.showNetworkError('中断会话', e));
+    }).catch((e) => showNetworkError('中断会话', e));
   }
 }
 
@@ -401,7 +402,7 @@ function saveScrollPos(key, node) {
   if (el.clientHeight === 0) return;
   const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
   const atBottom = fromBottom <= 30;
-  perSession.scrollPos[deps.sid(key, node || 'local')] = { fromBottom, atBottom };
+  perSession.scrollPos[sid(key, node || 'local')] = { fromBottom, atBottom };
 }
 
 // restoreScrollPos: 如果有保存的位置且不是贴底，则恢复并返回 true；
@@ -409,7 +410,7 @@ function saveScrollPos(key, node) {
 function restoreScrollPos(key, node) {
   const el = document.getElementById('events-scroll');
   if (!el || !key) return false;
-  const pos = perSession.scrollPos[deps.sid(key, node || 'local')];
+  const pos = perSession.scrollPos[sid(key, node || 'local')];
   if (!pos || pos.atBottom) return false;
   const apply = () => {
     const target = Math.max(0, el.scrollHeight - el.clientHeight - pos.fromBottom);
@@ -440,6 +441,67 @@ function restoreScrollPos(key, node) {
 const scrollSlackPx = 80;
 
 
+// Turn watchdog: while the selected session is "running", periodically pull
+// the authoritative REST snapshot so the banner self-heals if a terminal WS
+// signal (the 'result' event and/or the 'ready' session_state broadcast) is
+// dropped on a still-open connection. Without this the "处理中..." banner stays
+// stuck until the operator switches sessions or reconnects — the bug this fixes.
+// fetchSessions reconciles via updateMainState (see the relaxed gate in
+// fetchSessions); the watchdog just supplies the missing tick, since the
+// session poll is stopped while WS is connected.
+const TURN_WATCHDOG_INTERVAL_MS = 15000;
+function startTurnWatchdog() {
+  if (timers.turnWatchdog) return;
+  timers.turnWatchdog = setInterval(() => {
+    // Self-heal: if the selected session was cleared without routing through
+    // updateSendButton (dismissSession nulls selection.key + swaps to the empty
+    // shell in three branches), the fetchSessions reconcile is gated on
+    // `if (selection.key)` and would never stop us — so retire the watchdog here
+    // instead of polling /api/sessions forever for the page lifetime.
+    if (!selection.key) { stopTurnWatchdog(); return; }
+    deps.debouncedFetchSessions();
+  }, TURN_WATCHDOG_INTERVAL_MS);
+}
+function stopTurnWatchdog() {
+  if (timers.turnWatchdog) { clearInterval(timers.turnWatchdog); timers.turnWatchdog = null; }
+}
+
+function updateSendButton(state) {
+  if (selection.key) selection.lastAppliedMainState = { key: sid(selection.key, selection.node), state: state };
+  const banner = document.getElementById('running-banner');
+  const sendBtn = document.getElementById('btn-send');
+  const stopBtn = document.getElementById('btn-stop');
+  const inVoiceMode = document.getElementById('input-area')?.classList.contains('voice-mode');
+  if (state === 'running') {
+    if (banner) banner.classList.remove('nz-hidden');
+    if (sendBtn) sendBtn.style.display = 'none';
+    if (stopBtn) stopBtn.style.display = 'flex';
+    if (nzViews.agent) nzViews.agent.initFromSession();
+    refreshBanner();
+    startTurnWatchdog();
+  } else {
+    stopTurnWatchdog();
+    // resetTurnState → refreshBanner will hide the banner since the session
+    // is no longer "running". If background agents are still active (e.g.
+    // zero-downtime restart), refreshBanner keeps the banner visible.
+    if (sendBtn) sendBtn.style.display = inVoiceMode ? 'none' : 'flex';
+    if (stopBtn) stopBtn.style.display = 'none';
+    resetTurnState();
+    // Replace stale loading indicator if session stopped before events arrived.
+    const evEl2 = document.getElementById('events-scroll');
+    const loadingEl = evEl2 && evEl2.querySelector('.loading-indicator');
+    if (loadingEl) loadingEl.textContent = '暂无事件';
+  }
+  // Banner show/hide changes .events height — keep latest message visible.
+  // Only auto-scroll if the user is already near the bottom; otherwise
+  // respect their scroll position (e.g. reading history).
+  const evEl = document.getElementById('events-scroll');
+  if (evEl && evEl.scrollTop + evEl.clientHeight >= evEl.scrollHeight - 50) {
+    evEl.scrollTop = evEl.scrollHeight;
+  }
+}
+
+
 export {
   applyEventToTurnState,
   fmtDuration,
@@ -453,5 +515,6 @@ export {
   scrollSlackPx,
   startTurnTimer,
   turnState,
+  updateSendButton,
 };
 

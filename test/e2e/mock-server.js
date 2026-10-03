@@ -271,6 +271,7 @@ function defaultGitStates() {
  * @param {number} [overrides.sessionsDelayAfterCalls] - Apply sessionsDelayMs only
  *   after this many GET /api/sessions calls have been answered (so the initial page
  *   load stays fast and only the poll/refetch traffic is held).
+ *   Every GET /api/sessions, held or not, is counted in `sessionsGetCalls`.
  * @param {object} [overrides.systemUpdate] - GET /api/system/update payload (the
  *   self-update chip's poll). Default: no route, the endpoint 404s and the chip
  *   keeps its hidden cold-start default.
@@ -1143,6 +1144,7 @@ function startMockServer(overrides = {}) {
         get fullCronListCalls() { return fullCronListCalls; },
         get cronListGetCount() { return cronListGetCount; },
         get costSummaryCalls() { return costSummaryCalls; },
+        get sessionsGetCalls() { return sessionsGetCalls; },
         get cronTriggerCalls() { return cronTriggerCalls; },
         get systemDaemonsGetCount() { return systemDaemonsGetCount; },
         // Replace the served cron jobs mid-test (in place - GET closes over the array).

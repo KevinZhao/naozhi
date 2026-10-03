@@ -198,6 +198,8 @@ export const timers = {
   // Returns a Promise that resolves after the actual fetch completes.
   fetchDebounce: null,
   fetchDebounceResolvers: [],
+  // running_banner's turn watchdog interval, set only while the open session runs.
+  turnWatchdog: null,
 };
 
 // hooks: functions assigned at load by the drawers and lightbox that own them, for callers that load earlier.
