@@ -207,22 +207,16 @@ func precompressGzip(b []byte) []byte {
 }
 
 // staticAssets maps the asset key (basename used by handlers and the 304
-// fast-path) to its cached bytes + ETag. Populated once at init.
+// fast-path) to its cached bytes + ETag. Populated once at init; the
+// dashboard.html entry is the rendered page (static_versioning.go), so its
+// ETag and gzip form are those of the bytes actually served.
 var staticAssets = func() map[string]staticAsset {
-	hash := func(b []byte) string {
-		s := sha256.Sum256(b)
-		return `"` + hex.EncodeToString(s[:16]) + `"`
-	}
 	read := func(fsys embed.FS, name string, compress bool) (staticAsset, bool) {
 		b, err := fsys.ReadFile(name)
 		if err != nil {
 			return staticAsset{}, false
 		}
-		a := staticAsset{bytes: b, etag: hash(b)}
-		if compress {
-			a.gz = precompressGzip(b)
-		}
-		return a, true
+		return newStaticAsset(b, compress), true
 	}
 	out := map[string]staticAsset{}
 	for _, e := range []struct {
@@ -293,8 +287,26 @@ var staticAssets = func() map[string]staticAsset {
 			out[e.key] = a
 		}
 	}
+	if raw, ok := out["dashboard.html"]; ok {
+		page, err := renderDashboardHTML(raw.bytes, out)
+		if err != nil {
+			panic("render dashboard.html: " + err.Error())
+		}
+		out["dashboard.html"] = newStaticAsset(page, true)
+	}
 	return out
 }()
+
+// newStaticAsset wraps b with its strong ETag (sha256, first 16 bytes, hex)
+// and, when compress is set, its precompressed gzip form.
+func newStaticAsset(b []byte, compress bool) staticAsset {
+	sum := sha256.Sum256(b)
+	a := staticAsset{bytes: b, etag: `"` + hex.EncodeToString(sum[:16]) + `"`}
+	if compress {
+		a.gz = precompressGzip(b)
+	}
+	return a
+}
 
 // staticAssetETags is the map[key]ETag view for callers/tests that only need
 // the ETag; derived from staticAssets. Combined with `Cache-Control: no-cache,

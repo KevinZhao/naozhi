@@ -104,10 +104,10 @@ func TestDashboardCSP_CDNURLsMatchBundle(t *testing.T) {
 }
 
 // TestDashboardCSP_MockServerHeaderInSync compares the Playwright mock
-// server's hard-coded CSP literal against the runtime header so the e2e
-// suite always exercises the dashboard under the production policy. The
-// literal lives in test/e2e/mock-server.js (MOCK_DASHBOARD_CSP); this test
-// is the drift alarm the mock comment points at.
+// server's hard-coded CSP literal against the policy the server derives for
+// the page the mock serves, so the e2e suite always exercises the dashboard
+// under the production policy. The literal lives in test/e2e/mock-server.js
+// (MOCK_DASHBOARD_CSP); this test is the drift alarm the mock comment points at.
 func TestDashboardCSP_MockServerHeaderInSync(t *testing.T) {
 	t.Parallel()
 	data, err := os.ReadFile(filepath.Join("..", "..", "test", "e2e", "mock-server.js"))
@@ -118,7 +118,7 @@ func TestDashboardCSP_MockServerHeaderInSync(t *testing.T) {
 	if m == nil {
 		t.Fatal("mock-server.js: MOCK_DASHBOARD_CSP literal not found (regex drift?)")
 	}
-	if got := string(m[1]); got != dashboardCSP {
-		t.Errorf("mock-server.js MOCK_DASHBOARD_CSP is out of sync with the runtime header\nmock: %s\ngo:   %s", got, dashboardCSP)
+	if want := buildDashboardCSP(rawDashboardHTML(t)); string(m[1]) != want {
+		t.Errorf("mock-server.js MOCK_DASHBOARD_CSP is out of sync with the runtime header\nmock: %s\ngo:   %s", m[1], want)
 	}
 }
