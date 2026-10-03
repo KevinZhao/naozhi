@@ -14,7 +14,7 @@ import (
 // AddJob validates, registers, and persists a new cron job.
 func (s *Scheduler) AddJob(j *Job) error {
 	if err := validateSchedule(j.Schedule, s.previewLocation()); err != nil {
-		return fmt.Errorf("invalid schedule %q: %w", j.Schedule, err)
+		return fmt.Errorf("%w %q: %w", ErrInvalidSchedule, j.Schedule, err)
 	}
 	// Title 长度校验在 scheduler 层兜底，避免绕过 dashboard handler（例如
 	// store 直接加载被篡改的 cron_jobs.json）把超长字符串持久化进内存。
@@ -181,7 +181,7 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 			return nil, fmt.Errorf("schedule must not be empty")
 		}
 		if err := validateSchedule(*upd.Schedule, s.previewLocation()); err != nil {
-			return nil, fmt.Errorf("invalid schedule %q: %w", *upd.Schedule, err)
+			return nil, fmt.Errorf("%w %q: %w", ErrInvalidSchedule, *upd.Schedule, err)
 		}
 		// A schedule change swaps this job's robfig entry, and that swap spans the
 		// window between the table edit and the commit, where s.tbl.mu is released

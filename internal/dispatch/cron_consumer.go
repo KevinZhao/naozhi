@@ -39,6 +39,9 @@ const (
 	CronCodeJobAlreadyPaused = "job_already_paused"
 	CronCodeJobNotPaused     = "job_not_paused"
 	CronCodeInvalidPrompt    = "invalid_prompt"
+	CronCodeJobQuotaExceeded = "job_quota_exceeded"
+	CronCodeIntervalTooShort = "interval_too_short"
+	CronCodeInvalidSchedule  = "invalid_schedule"
 )
 
 // CronCommands is the consumer-side seam dispatch's /cron slash-command

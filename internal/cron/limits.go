@@ -21,7 +21,8 @@ func ValidatePromptStrict(prompt string) error {
 }
 
 // ErrInvalidSchedule is returned by ValidateScheduleChars when a schedule
-// expression fails the shared char policy. Alias of the textutil sentinel.
+// expression fails the shared char policy, and wraps every schedule rejection
+// from AddJob / UpdateJob. Alias of the textutil sentinel.
 var ErrInvalidSchedule = textutil.ErrInvalidCronSchedule
 
 // ValidateScheduleChars enforces the shared cron-schedule size + character

@@ -39,8 +39,8 @@ func TestJobTableInsert_Refusals(t *testing.T) {
 		maxJobs, perCht int
 		want            string
 	}{
-		{"global cap", &Job{Schedule: "@every 5m", Platform: "p", ChatID: "new"}, 2, 10, "max cron jobs reached (2)"},
-		{"per-chat cap", &Job{Schedule: "@every 5m", Platform: "p", ChatID: "c"}, 10, 2, "per-chat cron limit reached (2)"},
+		{"global cap", &Job{Schedule: "@every 5m", Platform: "p", ChatID: "new"}, 2, 10, "cron: job quota exceeded: max cron jobs reached (2)"},
+		{"per-chat cap", &Job{Schedule: "@every 5m", Platform: "p", ChatID: "c"}, 10, 2, "cron: job quota exceeded: per-chat cron limit reached (2)"},
 		{"bad schedule", &Job{Schedule: "never", Platform: "p", ChatID: "new"}, 10, 10, ""},
 	} {
 		if _, err := tbl.insert(tc.j, tc.maxJobs, tc.perCht); err == nil || (tc.want != "" && err.Error() != tc.want) {

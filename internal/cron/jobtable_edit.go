@@ -40,12 +40,12 @@ func (t *jobTable) insert(j *Job, maxJobs, maxPerChat int) (insertResult, error)
 	defer t.mu.Unlock()
 
 	if len(t.jobs) >= maxJobs {
-		return insertResult{}, fmt.Errorf("max cron jobs reached (%d)", maxJobs)
+		return insertResult{}, fmt.Errorf("%w: max cron jobs reached (%d)", ErrJobQuotaExceeded, maxJobs)
 	}
 	// Per-chat limit so one chat cannot exhaust the global quota. O(1) via
 	// chatJobCount, kept in lock-step with jobs by indexLocked / deleteLocked (#661).
 	if t.chatJobCount[chatKeyFor(j.Platform, j.ChatID)] >= maxPerChat {
-		return insertResult{}, fmt.Errorf("per-chat cron limit reached (%d)", maxPerChat)
+		return insertResult{}, fmt.Errorf("%w: per-chat cron limit reached (%d)", ErrJobQuotaExceeded, maxPerChat)
 	}
 	id, err := t.freshIDLocked()
 	if err != nil {

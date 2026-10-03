@@ -35,6 +35,9 @@ func TestCronDispatchAdapter_WireCodesMatchCron(t *testing.T) {
 		{"job_already_paused", dispatch.CronCodeJobAlreadyPaused, cron.CodeJobAlreadyPaused},
 		{"job_not_paused", dispatch.CronCodeJobNotPaused, cron.CodeJobNotPaused},
 		{"invalid_prompt", dispatch.CronCodeInvalidPrompt, cron.CodeInvalidPrompt},
+		{"job_quota_exceeded", dispatch.CronCodeJobQuotaExceeded, cron.CodeJobQuotaExceeded},
+		{"interval_too_short", dispatch.CronCodeIntervalTooShort, cron.CodeIntervalTooShort},
+		{"invalid_schedule", dispatch.CronCodeInvalidSchedule, cron.CodeInvalidSchedule},
 	}
 	for _, p := range pairs {
 		if p.dispatch != string(p.cron) {
@@ -58,6 +61,9 @@ func TestCronDispatchAdapter_ClassifyError_PreservesSentinelChain(t *testing.T) 
 		{cron.ErrJobAlreadyPaused, dispatch.CronCodeJobAlreadyPaused},
 		{cron.ErrJobNotPaused, dispatch.CronCodeJobNotPaused},
 		{cron.ErrInvalidPrompt, dispatch.CronCodeInvalidPrompt},
+		{cron.ErrJobQuotaExceeded, dispatch.CronCodeJobQuotaExceeded},
+		{cron.ErrIntervalTooShort, dispatch.CronCodeIntervalTooShort},
+		{cron.ErrInvalidSchedule, dispatch.CronCodeInvalidSchedule},
 		{errors.New("opaque"), string(cron.CodeUnknown)},
 	}
 	for _, c := range cases {
@@ -162,5 +168,49 @@ func TestCronDispatchAdapter_MutationErrorsClassify(t *testing.T) {
 	}
 	if got := a.ClassifyError(err); got != dispatch.CronCodeJobNotFound {
 		t.Errorf("ClassifyError = %q, want %q", got, dispatch.CronCodeJobNotFound)
+	}
+}
+
+// TestCronDispatchAdapter_AddJobErrorsClassify drives /cron add refusals
+// through the adapter and a real scheduler: a full per-chat quota, a
+// sub-minimum interval and an unparsable schedule each reach dispatch as
+// their own wire code, which is what selects the user-facing reply. The
+// global cap sits well above the per-chat one, so the per-chat check is
+// the one that refuses (another chat still adds afterwards).
+func TestCronDispatchAdapter_AddJobErrorsClassify(t *testing.T) {
+	s := cron.NewScheduler(cron.SchedulerConfig{
+		StorePath: filepath.Join(t.TempDir(), "cron_jobs.json"),
+		MaxJobs:   5 * cron.DefaultMaxJobsPerChat,
+	}, cron.SchedulerDeps{})
+	if err := s.Start(); err != nil {
+		t.Fatalf("scheduler start: %v", err)
+	}
+	t.Cleanup(func() { s.Stop() })
+	a := cronDispatchAdapter{s: s}
+	req := func(schedule string) dispatch.CronJobRequest {
+		return dispatch.CronJobRequest{Schedule: schedule, Prompt: "p", Platform: "feishu", ChatID: "c1"}
+	}
+	for _, c := range []struct{ schedule, want string }{
+		{"@every 1m", dispatch.CronCodeIntervalTooShort},
+		{"not a cron", dispatch.CronCodeInvalidSchedule},
+	} {
+		_, _, err := a.AddJob(req(c.schedule))
+		if got := a.ClassifyError(err); got != c.want {
+			t.Errorf("AddJob(%q): ClassifyError = %q, want %q (err=%v)", c.schedule, got, c.want, err)
+		}
+	}
+	for i := 0; i < cron.DefaultMaxJobsPerChat; i++ {
+		if _, _, err := a.AddJob(req("@every 1h")); err != nil {
+			t.Fatalf("seed AddJob %d: %v", i, err)
+		}
+	}
+	_, _, err := a.AddJob(req("@every 1h"))
+	if got := a.ClassifyError(err); got != dispatch.CronCodeJobQuotaExceeded {
+		t.Errorf("AddJob over quota: ClassifyError = %q, want %q (err=%v)", got, dispatch.CronCodeJobQuotaExceeded, err)
+	}
+	other := req("@every 1h")
+	other.ChatID = "c2"
+	if _, _, err := a.AddJob(other); err != nil {
+		t.Errorf("AddJob for another chat: %v; the refusal above must come from the per-chat cap, not the global one", err)
 	}
 }

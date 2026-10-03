@@ -553,7 +553,7 @@ func validateSchedule(schedule string, loc *time.Location) error {
 	// No `interval > 0` guard: minCronInterval is positive, so this also rejects
 	// zero / negative intervals.
 	if interval := second.Sub(first); interval < minCronInterval {
-		return fmt.Errorf("interval %v is too short, minimum is %v", interval, minCronInterval)
+		return fmt.Errorf("%w: interval %v, minimum is %v", ErrIntervalTooShort, interval, minCronInterval)
 	}
 	return nil
 }

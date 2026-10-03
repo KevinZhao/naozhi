@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -354,25 +355,48 @@ func (d *Dispatcher) handleCronAdd(msg platform.IncomingMessage, parts []string,
 	if err != nil {
 		// Never echo err.Error(): it leaks the normalized schedule and parser
 		// internals. Log (sanitized — ParseCronAdd only gates ASCII C0/DEL) for
-		// operators, reply generically. ErrInvalidPrompt is the one sentinel
-		// AddJob surfaces, so steer it to a prompt-specific hint rather than
-		// misleading the user about the schedule.
+		// operators, reply by error class.
 		log.Warn("cron AddJob rejected", "err", err,
 			"schedule", osutil.SanitizeForLog(schedule, 256))
-		if d.scheduler.ClassifyError(err) == CronCodeInvalidPrompt {
-			reply("创建失败：任务内容不合法（为空、过长或含控制字符）")
-			return
-		}
-		reply("创建失败：请检查定时表达式格式")
+		reply(cronAddErrReply(d.scheduler.ClassifyError(err)))
 		return
 	}
 	// Defence-in-depth against future parser relaxations.
 	reply(fmt.Sprintf("Job %s 已创建。Schedule: %s, Next: %s",
 		job.ID,
 		osutil.SanitizeForLog(job.Schedule, 256),
-		next.Format("01/02 15:04")))
+		formatCronNext(next)))
 	log.Info("cron job created", "id", job.ID,
 		"schedule", osutil.SanitizeForLog(job.Schedule, 256))
+}
+
+// cronAddErrReply maps a /cron add failure's wire code (from
+// CronCommands.ClassifyError) to its user-facing reply, so a full quota or a
+// too-frequent schedule is not reported as a malformed expression. The
+// interval floor mirrors cron's minCronInterval.
+func cronAddErrReply(code string) string {
+	switch code {
+	case CronCodeInvalidPrompt:
+		return "创建失败：任务内容不合法（为空、过长或含控制字符）"
+	case CronCodeJobQuotaExceeded:
+		return "创建失败：定时任务数已达上限，请先用 /cron del 删除不用的任务"
+	case CronCodeIntervalTooShort:
+		return "创建失败：执行间隔不能短于 5 分钟"
+	case CronCodeInvalidSchedule:
+		return "创建失败：请检查定时表达式格式"
+	default:
+		return "创建失败，请稍后再试"
+	}
+}
+
+// formatCronNext renders a next-run time with year and zone abbreviation.
+// The time arrives in the scheduler's cron.timezone, which need not be the
+// reader's own zone. A zero time (no live entry) renders as "—".
+func formatCronNext(t time.Time) string {
+	if t.IsZero() {
+		return "—"
+	}
+	return t.Format("2006-01-02 15:04 MST")
 }
 
 // sanitizeCronDisplay prepares a cron job field (Schedule or Prompt) for IM
@@ -483,7 +507,7 @@ func (d *Dispatcher) handleCronResume(msg platform.IncomingMessage, parts []stri
 		reply(cronMutationErrReply("恢复", d.scheduler.ClassifyError(err)))
 		return
 	}
-	reply(fmt.Sprintf("Job %s 已恢复。Next: %s", j.ID, next.Format("01/02 15:04")))
+	reply(fmt.Sprintf("Job %s 已恢复。Next: %s", j.ID, formatCronNext(next)))
 	log.Info("cron job resumed", "id", j.ID)
 }
 

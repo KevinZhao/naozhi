@@ -79,6 +79,15 @@ var ErrSandboxUnavailable = errors.New("cron: sandbox placement not configured")
 // run in flight (the per-job CAS slot is taken); the dashboard maps it to 409.
 var ErrReplayInFlight = errors.New("cron: job already has a run in flight; cannot replay now")
 
+// ErrJobQuotaExceeded is returned by AddJob when the global or per-chat job
+// cap is full; the IM and dashboard edges answer with a quota hint rather
+// than a schedule-format one.
+var ErrJobQuotaExceeded = errors.New("cron: job quota exceeded")
+
+// ErrIntervalTooShort is returned (inside the ErrInvalidSchedule chain) when a
+// schedule parses but fires more often than minCronInterval.
+var ErrIntervalTooShort = errors.New("cron: schedule interval too short")
+
 // ErrSchedulerStopped is returned by Start() when the scheduler has already
 // been Stop()'d: the instance is single-shot (Stop intentionally leaks wrapper
 // goroutines on budget-exceed), so reviving it would accumulate orphans across
