@@ -3,6 +3,7 @@ package cli
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // turnState is the process's turn: its state machine, the CLI session ID, the
@@ -115,4 +116,9 @@ type sendSlots struct {
 	pending []*sendSlot // FIFO by stdin write order
 	current []*sendSlot // slots claimed by the in-flight turn
 	idGen   atomic.Uint64
+	// turnStartedAt is when the turn the CLI owes the head of pending began,
+	// the passthrough total_timeout clock: set when a slot enters an empty
+	// queue, reset by a result that leaves slots pending. Stale while pending
+	// is empty.
+	turnStartedAt time.Time
 }

@@ -767,62 +767,28 @@ Dispatch 层映射：
 
 **v2.1 设计有 bug**：按 slot enqueueAt 计时，合并场景下 follower slot 的 enqueueAt 比 turn 启动晚，但按 turn 启动前堆积规则它们属于同一个 turn；如果 turn 合理跑 200s，follower 已经被误判 timeout。
 
-**v2.2 修正**：watchdog 按 **turnStartedAt** 计时，不是 slot enqueueAt：
+**v2.2 修正**：watchdog 按 **turnStartedAt** 计时，不是 slot enqueueAt。
 
-```go
-// Watchdog loop（Process 级别，不是 slot 级别）
-func (p *Process) watchdogLoop() {
-    ticker := time.NewTicker(checkInterval)
-    defer ticker.Stop()
-    for {
-        select {
-        case <-ticker.C:
-            p.slotsMu.Lock()
-            if !p.inTurn {
-                p.slotsMu.Unlock()
-                continue
-            }
-            elapsed := time.Since(p.turnStartedAt)
-            exceededTotal := elapsed >= p.totalTimeout
+**实现（#2997）**：没有常驻的 Process 级 `watchdogLoop` goroutine，而是由正在等待的 `SendPassthrough` 调用方驱动（`awaitSlot`，`internal/cli/passthrough.go` + `turn_watchdog.go`），与 `Send` 的 watchdog 同一套判定：
 
-            // noOutputTimeout 仍按最后一次 stdout event 时间
-            noOutput := time.Since(p.lastStdoutAt) >= p.noOutputTimeout
-            p.slotsMu.Unlock()
+- **两个时钟**
+  - `Process.lastOutputNS`：readLoop 在 `dispatchProtocolEvent` 入口对**每一帧** CLI stdout（含 replay、metadata、assistant 增量）打点；存为相对进程级单调基准的偏移，墙钟跳变不影响判定。
+  - `sendSlots.turnStartedAt`（`slots.mu` 保护）：slot 进入**空队列**时置为 enqueueAt，同时把 lastOutput 也打到此刻（空闲 CLI 之前没有输出不算卡死）；每个 result 之后若仍有 slot 排队，重置为 now，下一个 turn 拿到完整的 totalTimeout。
+- **检查**：每个等待方一个可重置的 `time.NewTimer(watchdogCheckInterval(noOutput))`（noOutput/4，夹在 1s–30s）。到点后在 `slots.mu` 下快照 turnStartedAt 与"队列是否非空"——canceled tombstone 也算，因为 CLI 仍欠它一个 result——再调用与 `Send.handleWatchdogTick` 共用的 `turnDeadlineVerdict`（no-output 优先于 total）。
+- **超时处理** `watchdogKillPassthrough`，顺序固定：
+  1. `setDeathReason(no_output_timeout | total_timeout)`，先于 Kill，readLoop 的 EOF 分类无法覆盖；
+  2. `discardAllPending(分类错误)`：所有 pending + current slot（包括其他调用方）拿到同一个 `ErrNoOutputTimeout` / `ErrTotalTimeout`，抢在 readLoop 死亡路径的 `ErrProcessExited` 之前；
+  3. `Kill()`、`clearInflightFlags()`。
 
-            if exceededTotal {
-                p.killAndFanout(ErrTotalTimeout)
-                return
-            }
-            if noOutput {
-                p.killAndFanout(ErrNoOutputTimeout)
-                return
-            }
-        case <-p.done:
-            return
-        }
-    }
-}
-```
+  每一步幂等；之后再 tick 的等待方看到队列已清空，不会重复 kill。调用方随后照常读自己的 errCh，dispatch 的 watchdog 计数与 "⏱️ 处理超时" 文案与 Send 路径一致。
+- **为什么由调用方驱动**：不给每个 Process（包括非 passthrough 的）加 goroutine / ticker；需要被解除阻塞的恰好就是正在等待的调用方。所有调用方都已离开（只剩 tombstone）时没人检查，下一个 `SendPassthrough` 进来时 lastOutput 已陈旧，一个检查周期内即 kill——CLI 确实欠着 result，这是期望行为。
 
-对 slot 来说，`Send` 里的 select 也要有个兜底 timeout（`totalTimeout + 30s` 防 watchdog 自己 stuck）：
+对 slot 来说仍保留兜底 bail timer（防 watchdog 自己 stuck），但它也按**本 turn** 计时：
 
-```go
-// Send select 加一个 timer 兜底
-bailout := time.NewTimer(p.totalTimeout + 30*time.Second)
-defer bailout.Stop()
-
-select {
-case res := <-slot.resultCh: return res, nil
-case err := <-slot.errCh:    return nil, err
-case <-ctx.Done():           /* ... tombstone ... */
-case <-bailout.C:
-    // Watchdog 没触发，这是纯防御
-    p.slotsMu.Lock()
-    slot.canceled = true
-    p.slotsMu.Unlock()
-    return nil, ErrOrphanedSlot
-}
-```
+- 到点时先非阻塞读 resultCh / errCh，已送达的结果或错误优先返回，watchdog kill 之后不会双重上报；
+- 进程已死 → `ErrProcessExited`；
+- 当前 turn 起点距今不足 `totalTimeout` + 30s 宽限 → 按剩余时间重新上膛，排在长 turn 后面的 slot 不会被误判 orphan；
+- 否则 tombstone + `ErrOrphanedSlot`——此时 watchdog 早该触发，真正只在 bug 时出现。
 
 ### 6.5 背压
 
@@ -1010,7 +976,7 @@ naozhi passthrough **做不到**的：
 | `ErrTooManyPending` | pendingSlots >= maxPendingSlots | "会话队列已满 (N/N)，请等候或 /stop" | 仅当前 slot 不入队 |
 | `ErrTotalTimeout` | watchdog: `now - turnStartedAt >= totalTimeout` | "⏱️ 处理超时，请拆分任务" | kill + fan-out 所有 |
 | `ErrNoOutputTimeout` | watchdog: `now - lastStdoutAt >= noOutputTimeout` | "⏱️ 无输出超时" | kill + fan-out 所有 |
-| `ErrOrphanedSlot` | Send 兜底 timer（理论不应触发） | "内部错误" | 仅当前 slot canceled |
+| `ErrOrphanedSlot` | SendPassthrough 兜底 timer：本 turn 超过 totalTimeout+30s 仍无结果（理论不应触发） | "内部错误" | 仅当前 slot canceled |
 | `ErrMessageTooLarge` | Write 时超过 shim 单行上限 | "消息过大，请缩短或拆分" | 仅当前 slot 拒 |
 | `ErrInterruptUnsupported` | ACP 等不支持 priority 的协议走 /urgent | 走降级路径（不报错，退化为 interrupt+send） | - |
 
