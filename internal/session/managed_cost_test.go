@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
@@ -359,5 +360,128 @@ func TestAccountTurnCost_NewSessionStillChargesItsFirstTurn(t *testing.T) {
 	}
 	if got := loadTotalCost(&s.costSpent); !approxEq(got, 0.7) {
 		t.Fatalf("costSpent = %v, want 0.7 — a new session's first report is its increment", got)
+	}
+}
+
+// unownedHook is a process offering only the unowned-result hook.
+type unownedHook struct{ fn func(clievent.SendResult) }
+
+func (h *unownedHook) SetOnUnownedResult(fn func(clievent.SendResult)) { h.fn = fn }
+
+// #3096: a turn the CLI starts itself is booked when its result arrives, and
+// the next owned turn then charges only its own increment — the cumulative
+// differencing keeps the two from counting the same spend twice.
+func TestBookUnownedResults_BooksCLIStartedTurnsOnce(t *testing.T) {
+	proc := &TestProcess{AliveVal: true, SendFunc: scripted(
+		&clievent.SendResult{Text: "owned", CostUSD: 3.5})}
+	s, ledger := newLedgerSession(t, "dashboard:direct:host:general", proc)
+	hooked := &hookedTestProcess{TestProcess: proc}
+	s.storeProcess(hooked)
+	hook := &hooked.unownedHook
+	bookUnownedResults(s, hooked)
+	if hook.fn == nil {
+		t.Fatal("bookUnownedResults did not bind the hook")
+	}
+
+	hook.fn(clievent.SendResult{CostUSD: 1.25}) // a background-task notification turn
+	hook.fn(clievent.SendResult{CostUSD: 3.0})  // another one
+	if got := loadTotalCost(&s.costSpent); !approxEq(got, 3.0) {
+		t.Fatalf("costSpent after two CLI-started turns = %v, want 3.0", got)
+	}
+	if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadTotalCost(&s.costSpent); !approxEq(got, 3.5) {
+		t.Fatalf("costSpent after the owned turn = %v, want 3.5 (only its 0.5 is new)", got)
+	}
+	var amounts []float64
+	for _, e := range allEntries(t, ledger) {
+		amounts = append(amounts, e.Amount)
+	}
+	if len(amounts) != 3 || !approxEq(amounts[0]+amounts[1]+amounts[2], 3.5) {
+		t.Fatalf("ledger amounts = %v, want three entries summing to 3.5", amounts)
+	}
+}
+
+// The production process must offer the hook, or bookUnownedResults is a
+// silent no-op and the CLI-started turns go unbooked again.
+var _ unownedResultNotifier = (*cli.Process)(nil)
+
+type hookedTestProcess struct {
+	*TestProcess
+	unownedHook
+}
+
+// A spawned session binds the hook to itself, so its CLI-started turns land
+// on its own ledger.
+func TestSpawn_BindsUnownedResultBooking(t *testing.T) {
+	r := NewRouter(RouterConfig{Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
+	t.Cleanup(r.Shutdown)
+	proc := &hookedTestProcess{TestProcess: &TestProcess{AliveVal: true}}
+	r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) { return proc, nil }
+
+	s, _, err := r.GetOrCreate(context.Background(), "dashboard:direct:hooked:general", AgentOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proc.fn == nil {
+		t.Fatal("spawn did not bind the unowned-result hook")
+	}
+	proc.fn(clievent.SendResult{CostUSD: 2})
+	if got := loadTotalCost(&s.costSpent); !approxEq(got, 2) {
+		t.Fatalf("costSpent = %v, want 2 booked on the spawned session", got)
+	}
+}
+
+// A rename moves the process to a fresh session. The hook bound to the old
+// session must stop booking (or its readings would be charged under the old
+// key AND again by the fresh session, whose baseline did not see them), and
+// the fresh session must book the CLI-started turns from then on.
+func TestBookUnownedResults_RenameMovesBookingWithTheProcess(t *testing.T) {
+	r := NewRouter(RouterConfig{Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
+	t.Cleanup(r.Shutdown)
+	ledger := costledger.NewStore(t.TempDir(), costledger.Options{})
+	t.Cleanup(ledger.Close)
+	r.runs.cost = newCostAccounting(ledger, nil)
+	proc := &hookedTestProcess{TestProcess: &TestProcess{AliveVal: true, SendFunc: scripted(
+		&clievent.SendResult{Text: "owned", CostUSD: 4})}}
+	r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) { return proc, nil }
+	const oldKey, newKey = "dashboard:direct:scratch-1:general", "dashboard:direct:promoted:general"
+	if _, _, err := r.GetOrCreate(context.Background(), oldKey, AgentOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	proc.fn(clievent.SendResult{CostUSD: 1}) // booked on the old session, before the rename
+	oldHook := proc.fn
+
+	if !r.RenameSession(oldKey, newKey) {
+		t.Fatal("rename failed")
+	}
+	oldHook(clievent.SendResult{CostUSD: 2.5}) // a stale call on the old session's hook
+	proc.fn(clievent.SendResult{CostUSD: 2.5}) // the same reading through the rebound hook
+	fresh, ok := lookupT(r, newKey)
+	if !ok {
+		t.Fatal("renamed session missing")
+	}
+	// Booked now, not only when a later owned result catches up — the process
+	// may die before one arrives.
+	if got := loadTotalCost(&fresh.costSpent); !approxEq(got, 2.5) {
+		t.Fatalf("fresh costSpent after the rebound hook = %v, want 2.5 (1 carried + 1.5)", got)
+	}
+	if _, err := fresh.Send(context.Background(), "hi", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := loadTotalCost(&fresh.costSpent); !approxEq(got, 4) {
+		t.Fatalf("fresh costSpent = %v, want 4 (1 + 1.5 + 1.5, each reading once)", got)
+	}
+	var total float64
+	for _, e := range allEntries(t, ledger) {
+		total += e.Amount
+		if e.SessionKey == oldKey && e.Amount != 1 {
+			t.Errorf("entry %+v booked under the old key after the rename", e)
+		}
+	}
+	if !approxEq(total, 4) {
+		t.Fatalf("ledger total = %v, want 4", total)
 	}
 }

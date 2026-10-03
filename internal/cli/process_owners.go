@@ -3,6 +3,8 @@ package cli
 import (
 	"sync"
 	"sync/atomic"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // turnState is the process's turn: its state machine, the CLI session ID, the
@@ -28,6 +30,15 @@ type turnState struct {
 	// reconnectedMidTurn CAS path followed by <-killCh, plus cli_exited, the
 	// fall-out Dead path and the panic defer.
 	onTurnDone func()
+	// onUnownedResult receives the result of a turn no Send owns — one the
+	// CLI started itself (a background-task notification) — so the session
+	// can book its cost; such a result never reaches a Send's finishRun.
+	// Assign via SetOnUnownedResult; read under mu, invoked after release.
+	onUnownedResult func(clievent.SendResult)
+	// sendOwned: a Send claimed the current turn (evSendBegin moved) and has
+	// not returned, so a result belongs to it even when no passthrough slot
+	// claimed it. Written only in transitionLocked.
+	sendOwned bool
 
 	interrupted    atomic.Bool // set by Interrupt(), cleared by next Send()
 	interruptedRun atomic.Bool // true when Interrupt() was called while Running
@@ -50,6 +61,12 @@ func (t *turnState) transitionLocked(ev stateEvent) (prev ProcessState, moved bo
 	next, moved := nextState(prev, ev)
 	if moved {
 		t.state = next
+	}
+	switch {
+	case ev == evSendBegin && moved:
+		t.sendOwned = true
+	case ev == evSendEnd || ev == evDied:
+		t.sendOwned = false
 	}
 	return prev, moved
 }

@@ -62,9 +62,6 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 			fresh.persistedUserTurns.Store(oldUserTurns)
 		}
 		storeTotalCost(&fresh.totalCost, loadTotalCost(&old.totalCost))
-		// Rename keeps the SAME live process, so the delta baseline carries over
-		// too — resetting it would double-count the next turn.
-		copyCostBaseline(fresh, old)
 		fresh.setWorkspace(old.Workspace())
 		// Atomic fields: plain Load/Store round-trips are race-safe; the table lock blocks
 		// all concurrent writers except the Send hot path (lastPrompt /
@@ -104,10 +101,18 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		// matching fresh.persistedHistory, so persistedSeededLen must mirror its
 		// length (adoptProcessAlreadySeeded does that under historyMu) and a later
 		// InjectHistory forwards only newly-arrived tail.
-		if proc := old.loadProcess(); proc != nil {
+		proc := old.loadProcess()
+		if proc != nil {
 			fresh.adoptProcessAlreadySeeded(proc)
 		}
 		old.storeProcess(nil)
+		// Rename keeps the SAME live process, so the delta baseline carries over
+		// (a reset would double-count the next turn). Copied after the move, so a
+		// CLI-started turn's reading is in the copy or dropped by old (accountCost).
+		copyCostBaseline(fresh, old)
+		if proc != nil {
+			bookUnownedResults(fresh, proc)
+		}
 
 		// Rebind the history source (the old Source reads the orphaned struct);
 		// oldKey's map entry and index slot are removed next so the rename is

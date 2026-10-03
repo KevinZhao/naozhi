@@ -369,6 +369,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		// SpawnReconnect, and a result event hitting the nil-callback path
 		// leaves the dashboard stuck on a "running" spinner.
 		proc.SetOnTurnDone(func() { r.notifyChange() })
+		bookUnownedResults(sess, proc)
 
 		// SpawnReconnect has no SpawnOptions, so the spawn-pinned effort tier is
 		// recovered from the argv the shim recorded. Fill-if-unset: a metadata
