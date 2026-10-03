@@ -447,6 +447,7 @@ session events 面板里多次 cron 触发的 user 消息混在一起。在 cron
 | executeOpt allowedRoot 失败 | "work_dir outside allowed_root" | `workdir_outside_root` (failed) |
 | GetOrCreate err is Canceled | (无；不 record)  | `canceled` (canceled) |
 | GetOrCreate err is DeadlineExceeded | "session error: ..." | `deadline_exceeded` (timed_out) |
+| GetOrCreate err wraps ErrSessionCapacity | "session error: ..." | `session_capacity` (skipped) |
 | GetOrCreate other | "session error: ..." | `session_error` (failed) |
 | Send err is Canceled | (无) | `canceled` (canceled) |
 | Send err is DeadlineExceeded | "send error: ..." | `deadline_exceeded` (timed_out) |

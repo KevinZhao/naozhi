@@ -9,6 +9,9 @@
 package wireup
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cron"
@@ -164,5 +167,46 @@ func TestSessionStatus_Cast(t *testing.T) {
 	if int(cron.SessionNew) != int(session.SessionNew) {
 		t.Errorf("SessionNew ordinal: cron=%d, session=%d",
 			cron.SessionNew, session.SessionNew)
+	}
+}
+
+// TestWrapCronSpawnErr_CapacityRefusals: the router's capacity refusals, in the
+// wrapped forms reserveSpawn returns, reach cron as ErrSessionCapacity with
+// the session sentinel still in the chain; any other spawn error passes
+// through untouched so it stays a session_error.
+func TestWrapCronSpawnErr_CapacityRefusals(t *testing.T) {
+	t.Parallel()
+	for _, sentinel := range []error{session.ErrMaxExemptSessions, session.ErrMaxProcs} {
+		routerErr := fmt.Errorf("%w: cron namespace (12)", sentinel)
+		got := wrapCronSpawnErr(routerErr)
+		if !errors.Is(got, cron.ErrSessionCapacity) {
+			t.Errorf("%v: errors.Is(ErrSessionCapacity) = false", routerErr)
+		}
+		if !errors.Is(got, sentinel) {
+			t.Errorf("%v: session sentinel lost from the chain", routerErr)
+		}
+	}
+	other := errors.New("spawn boom")
+	if got := wrapCronSpawnErr(other); got != other {
+		t.Errorf("non-capacity error rewrapped: got %v", got)
+	}
+}
+
+// TestCronRouterAdapter_GetOrCreateTagsCapacity drives the real router into
+// the refusal cron actually meets: every spawn is exempt, so the limit is the
+// exempt cap, filled here with live injected cron sessions well past it.
+func TestCronRouterAdapter_GetOrCreateTagsCapacity(t *testing.T) {
+	r := session.NewRouter(session.RouterConfig{})
+	t.Cleanup(r.Shutdown)
+	for i := range 64 {
+		r.InjectSession(fmt.Sprintf("cron:fill-%d", i), session.NewTestProcess()).MarkExemptForTest()
+	}
+
+	_, _, err := newCronRouterAdapter(r).GetOrCreate(context.Background(), "cron:job-cap", cron.AgentOpts{Exempt: true})
+	if !errors.Is(err, session.ErrMaxExemptSessions) {
+		t.Fatalf("GetOrCreate err = %v, want the router's ErrMaxExemptSessions (test premise)", err)
+	}
+	if !errors.Is(err, cron.ErrSessionCapacity) {
+		t.Errorf("GetOrCreate err = %v, want it tagged cron.ErrSessionCapacity", err)
 	}
 }

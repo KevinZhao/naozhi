@@ -55,6 +55,9 @@ const (
 	ErrClassCronWorkDirUnreachable ErrorClass = "workdir_unreachable"
 	ErrClassCronWorkDirOutsideRoot ErrorClass = "workdir_outside_root"
 	ErrClassCronOverlapSkipped     ErrorClass = "overlap_skipped"
+	// ErrClassCronSessionCapacity: GetOrCreate refused at the router's session
+	// caps. RunState is "skipped" — contention, not a job fault.
+	ErrClassCronSessionCapacity ErrorClass = "session_capacity"
 	// ErrClassCronInterrupted marks a run that was still executing when the
 	// process went away — a graceful shutdown that outran the drain budget, or a
 	// hard kill. RunState stays "canceled" (it did not complete) and the class
