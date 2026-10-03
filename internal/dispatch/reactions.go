@@ -52,29 +52,41 @@ func (d *Dispatcher) ackQueuedWithReaction(ctx context.Context, msg platform.Inc
 
 // ackMergedFollower signals that this user message was merged into another
 // message's reply (passthrough head/follower fan-out): a reaction when the
-// platform supports it, else a short text reply rate-limited via
+// platform supports it, else a short text notice rate-limited via
 // ShouldNotify. key must be the resolved session key so the cooldown shares
 // the bucket the rest of the dispatch path rate-limits on (#1784).
 func (d *Dispatcher) ackMergedFollower(ctx context.Context, msg platform.IncomingMessage, key string, mergedCount int, lg *slog.Logger) {
 	if d.ackQueuedWithReaction(ctx, msg, lg) {
 		return
 	}
-	// Single-use reply-token platforms (WeChat/iLink) have already spent the
-	// cached token on the head slot's reply; a text fallback would be dropped
-	// upstream and race the real answer, so rely on the reaction only (#2260).
-	if p := d.platforms[msg.Platform]; p != nil && platform.UsesSingleUseReplyToken(p) {
+	_ = mergedCount // reserved for future reaction variant showing count
+	d.replyNotice(ctx, msg, key, "已合并到上一条回复。", lg, "merged")
+}
+
+// replyNotice sends text, a notice that is not the turn's answer, to msg's
+// chat and reports whether it reached Reply. A single-use reply-token platform
+// (WeChat/iLink) gets nothing: the notice would spend the token the turn's
+// real answer needs (#2136, #2260, #3003). A non-empty rateKey rate-limits
+// the notice via ShouldNotify, consulted after that gate so a skipped notice
+// leaves the cooldown bucket alone. Every caller has a row in
+// TestNotices_SingleUseTokenGate.
+func (d *Dispatcher) replyNotice(ctx context.Context, msg platform.IncomingMessage, rateKey, text string, lg *slog.Logger, site string) bool {
+	p := d.platforms[msg.Platform]
+	if p == nil {
+		return false
+	}
+	if platform.UsesSingleUseReplyToken(p) {
 		useLg := lg
 		if useLg == nil {
 			useLg = slog.Default()
 		}
-		useLg.Debug("merge follower text fallback skipped", "reason", "single_use_token", "platform", msg.Platform)
-		return
+		useLg.Debug("notice skipped", "reason", "single_use_token", "site", site, "platform", msg.Platform)
+		return false
 	}
-	if !d.turns.ShouldNotify(key) {
-		return
+	if rateKey != "" && !d.turns.ShouldNotify(rateKey) {
+		return false
 	}
-	_ = mergedCount // reserved for future reaction variant showing count
-	d.replyText(ctx, msg, "已合并到上一条回复。", lg)
+	return d.replyText(ctx, msg, text, lg)
 }
 
 // clearQueuedReaction removes the "queued" (HOURGLASS) reaction from one

@@ -76,9 +76,9 @@ func (o *imOrigin) Sink() string {
 func (o *imOrigin) SessionOpts(string) sessionview.AgentOpts { return o.opts }
 
 // Admitted acks the message: a log line for a turn that runs now, a ⏳ (or a
-// rate-limited text) for a queued or detached one, a rate-limited busy notice
-// when the queue is disabled. The detached ⏳ goes on before the turn's
-// goroutine can clear it (#1963).
+// rate-limited notice) for a queued or detached one, a rate-limited busy
+// notice and a log line when the queue is disabled. The detached ⏳ goes on
+// before the turn's goroutine can clear it (#1963).
 func (o *imOrigin) Admitted(ctx context.Context, a turn.Ack) {
 	d := o.d
 	switch a {
@@ -93,13 +93,12 @@ func (o *imOrigin) Admitted(ctx context.Context, a turn.Ack) {
 		}
 		d.ackQueuedWithReaction(ctx, o.msg, o.lg)
 	case turn.AckQueued:
-		if !d.ackQueuedWithReaction(ctx, o.msg, o.lg) && d.turns.ShouldNotify(o.key) {
-			d.replyText(ctx, o.msg, "消息已收到，待当前回复完成后一并处理。", o.lg)
+		if !d.ackQueuedWithReaction(ctx, o.msg, o.lg) {
+			d.replyNotice(ctx, o.msg, o.key, "消息已收到，待当前回复完成后一并处理。", o.lg, "queued")
 		}
 	case turn.AckDropped:
-		if d.turns.ShouldNotify(o.key) {
-			d.replyText(ctx, o.msg, "正在处理上一条消息，请稍候...", o.lg)
-		}
+		notified := d.replyNotice(ctx, o.msg, o.key, "正在处理上一条消息，请稍候...", o.lg, "busy")
+		o.lg.Info("message dropped: session busy", "key", o.key, "notified", notified)
 	case turn.AckShuttingDown:
 		o.lg.Warn("message declined: shutting down", "key", o.key)
 	}
@@ -153,7 +152,7 @@ func (dl *imDelivery) BeforeSession(ctx context.Context) {
 func (dl *imDelivery) SessionReady(ctx context.Context, st sessionview.SessionStatus) clievent.EventCallback {
 	o := dl.o
 	if dl.info.First && st == sessionview.SessionNew && platform.SupportsInterimMessages(dl.p) {
-		o.d.replyText(ctx, o.msg, "新会话已创建（之前的上下文已失效）。", dl.lg)
+		o.d.replyNotice(ctx, o.msg, "", "新会话已创建（之前的上下文已失效）。", dl.lg, "new_session")
 	}
 	dl.tracker = newIMEventTracker(ctx, dl.p, o.msg.ChatID, o.msg.ChatType, o.agentID)
 	return dl.tracker.onEvent
