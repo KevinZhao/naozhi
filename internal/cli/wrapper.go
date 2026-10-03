@@ -500,7 +500,7 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 	}
 
 	// Drain replay messages (for fresh shim this is empty)
-	_, err = handle.DrainReplay()
+	_, err = handle.DrainReplay(ctx)
 	if err != nil {
 		handle.Close()
 		return nil, fmt.Errorf("drain replay: %w", err)
@@ -597,7 +597,7 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 	}
 
 	// Drain replay
-	replays, err := handle.DrainReplay()
+	replays, err := handle.DrainReplay(ctx)
 	if err != nil {
 		handle.Close()
 		return nil, nil, fmt.Errorf("drain replay: %w", err)

@@ -99,7 +99,7 @@ func (m *Manager) Reconnect(ctx context.Context, key string, lastSeq int64) (*Sh
 		return nil, fmt.Errorf("decode token: %w", err)
 	}
 
-	handle, err := m.connect(state.Socket, tokenRaw, lastSeq)
+	handle, err := m.connect(ctx, state.Socket, tokenRaw, lastSeq)
 	if err != nil {
 		return nil, err
 	}
@@ -117,14 +117,43 @@ func (m *Manager) Reconnect(ctx context.Context, key string, lastSeq int64) (*Sh
 	return handle, nil
 }
 
-// connect establishes an authenticated connection to a shim socket.
-func (m *Manager) connect(socketPath string, token []byte, lastSeq int64) (*ShimHandle, error) {
-	conn, err := net.DialTimeout("unix", socketPath, 10*time.Second)
+// connect establishes an authenticated connection to a shim socket. The fixed
+// 10s dial, attach and hello limits stay the upper bound; ctx can only shorten
+// them, by closing the conn, which unblocks whichever step is in flight.
+func (m *Manager) connect(ctx context.Context, socketPath string, token []byte, lastSeq int64) (*ShimHandle, error) {
+	dialer := net.Dialer{Timeout: 10 * time.Second}
+	conn, err := dialer.DialContext(ctx, "unix", socketPath)
 	if err != nil {
 		// Include the socket path so operators can check it straight from the log.
-		return nil, fmt.Errorf("dial shim at %s: %w", socketPath, err)
+		return nil, withCtxErr(ctx, fmt.Errorf("dial shim at %s: %w", socketPath, err))
 	}
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	handle, err := handshake(conn, token, lastSeq)
+	// stop() false after a good handshake: the cancel callback has closed or is
+	// closing conn, so it must not reach a Process as a live connection.
+	if !stop() && err == nil {
+		err = errors.New("handshake interrupted")
+	}
+	if err != nil {
+		_ = conn.Close()
+		return nil, withCtxErr(ctx, err)
+	}
+	return handle, nil
+}
 
+// withCtxErr wraps err with ctx's error once ctx is done, so a handshake cut
+// short by cancellation matches context.Canceled / DeadlineExceeded even when
+// the I/O error itself only says the conn was closed.
+func withCtxErr(ctx context.Context, err error) error {
+	if cerr := ctx.Err(); cerr != nil && !errors.Is(err, cerr) {
+		return fmt.Errorf("%w (%w)", err, cerr)
+	}
+	return err
+}
+
+// handshake sends attach and reads the hello on conn; the caller owns conn and
+// closes it on error.
+func handshake(conn net.Conn, token []byte, lastSeq int64) (*ShimHandle, error) {
 	reader := bufio.NewReaderSize(conn, 256*1024) // 256KB buffer (bufio grows as needed for large lines)
 	writer := bufio.NewWriter(conn)
 
@@ -137,13 +166,11 @@ func (m *Manager) connect(socketPath string, token []byte, lastSeq int64) (*Shim
 	// If SetWriteDeadline fails (peer closed between Dial and here) bail with the
 	// real cause rather than letting Flush block without a deadline.
 	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		conn.Close()
 		return nil, fmt.Errorf("set attach write deadline: %w", err)
 	}
 	writer.Write(data)         //nolint:errcheck
 	writer.Write([]byte{'\n'}) //nolint:errcheck
 	if err := writer.Flush(); err != nil {
-		conn.Close()
 		return nil, fmt.Errorf("write attach: %w", err)
 	}
 	_ = conn.SetWriteDeadline(time.Time{})
@@ -152,7 +179,6 @@ func (m *Manager) connect(socketPath string, token []byte, lastSeq int64) (*Shim
 	// state) with a 64 KB hard cap: bufio.ReadBytes has no upper bound and a
 	// malicious shim could force unbounded buffering before authentication.
 	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		conn.Close()
 		return nil, fmt.Errorf("set hello read deadline: %w", err)
 	}
 	const maxHelloBytes = 64 * 1024
@@ -161,7 +187,6 @@ func (m *Manager) connect(socketPath string, token []byte, lastSeq int64) (*Shim
 	for len(helloLine) < maxHelloBytes {
 		b, err := reader.ReadByte()
 		if err != nil {
-			conn.Close()
 			return nil, fmt.Errorf("read hello: %w", err)
 		}
 		helloLine = append(helloLine, b)
@@ -170,22 +195,18 @@ func (m *Manager) connect(socketPath string, token []byte, lastSeq int64) (*Shim
 		}
 	}
 	if len(helloLine) == 0 || helloLine[len(helloLine)-1] != '\n' {
-		conn.Close()
 		return nil, fmt.Errorf("hello exceeds %d-byte cap without newline", maxHelloBytes)
 	}
 	conn.SetReadDeadline(time.Time{}) //nolint:errcheck
 
 	var hello ServerMsg
 	if err := json.Unmarshal(helloLine, &hello); err != nil {
-		conn.Close()
 		return nil, fmt.Errorf("parse hello: %w", err)
 	}
 	if hello.Type == "auth_failed" {
-		conn.Close()
 		return nil, fmt.Errorf("shim auth failed: %s", osutil.SanitizeForLog(hello.Msg, 128))
 	}
 	if hello.Type != "hello" {
-		conn.Close()
 		return nil, fmt.Errorf("unexpected message type: %s", osutil.SanitizeForLog(hello.Type, 64))
 	}
 	// Reject hellos outside [MinSupportedProtocolVersion, ProtocolVersion] so
@@ -196,7 +217,6 @@ func (m *Manager) connect(socketPath string, token []byte, lastSeq int64) (*Shim
 		helloVer = 1
 	}
 	if helloVer < MinSupportedProtocolVersion || helloVer > ProtocolVersion {
-		conn.Close()
 		return nil, fmt.Errorf("shim protocol_version %d outside supported [%d,%d]; check naozhi/shim binary skew",
 			helloVer, MinSupportedProtocolVersion, ProtocolVersion)
 	}

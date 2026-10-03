@@ -412,7 +412,7 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 		return nil, fmt.Errorf("decode shim token: %w", err)
 	}
 
-	handle, err := m.connect(socketPath, tokenRaw, 0)
+	handle, err := m.connect(ctx, socketPath, tokenRaw, 0)
 	if err != nil {
 		killAndUnblock()
 		return nil, fmt.Errorf("connect to new shim: %w", err)
@@ -518,11 +518,26 @@ const drainReplayTimeout = 20 * time.Second
 // DrainReplay reads and returns all replay messages until replay_done.
 // Must be called immediately after connect, before starting the live read loop.
 // Applies a total deadline to the conn so a wedged shim cannot block forever;
-// the deadline is cleared before returning on success.
-func (h *ShimHandle) DrainReplay() ([]ServerMsg, error) {
+// the deadline is cleared before returning on success. Cancelling ctx closes
+// the handle, so ctx can only cut the drainReplayTimeout wait short.
+func (h *ShimHandle) DrainReplay(ctx context.Context) ([]ServerMsg, error) {
 	_ = h.Conn.SetReadDeadline(time.Now().Add(drainReplayTimeout))
 	defer func() { _ = h.Conn.SetReadDeadline(time.Time{}) }()
 
+	stop := context.AfterFunc(ctx, h.Close)
+	replays, err := h.drainReplay()
+	// Same guard as connect: a drain that finishes just as ctx is cancelled
+	// leaves a handle the callback has closed, so it counts as failed.
+	if !stop() && err == nil {
+		err = errors.New("drain replay interrupted")
+	}
+	if err != nil {
+		return replays, withCtxErr(ctx, err)
+	}
+	return replays, nil
+}
+
+func (h *ShimHandle) drainReplay() ([]ServerMsg, error) {
 	var replays []ServerMsg
 	for {
 		msg, err := h.ReadMsg()
