@@ -578,6 +578,9 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 			p.logEventAt(ev, nowMS)
 			return false
 		}
+		if !p.turn.reconnectedMidTurn.Load() {
+			p.endUnownedTurn(ev)
+		}
 	}
 
 	// claude advertises the resolved model + binary version in system/init.

@@ -1059,11 +1059,12 @@ func TestProcess_ResultDoesNotFlipStateWithoutReconnect(t *testing.T) {
 		}
 	})
 
-	// Simulate Send() acquiring the turn: Ready → Running, but do NOT arm
+	// Claim the turn the way Send() does (Ready → Running through
+	// evSendBegin, which also marks it Send-owned), but do NOT arm
 	// reconnectedMidTurn. This is the normal path.
-	p.turn.mu.Lock()
-	p.turn.state = StateRunning
-	p.turn.mu.Unlock()
+	if _, claimed := p.transition(evSendBegin); !claimed {
+		t.Fatalf("setup: Send claim failed from state %v", p.State())
+	}
 
 	srv.SendStdout(`{"type":"result","result":"done","session_id":"s1"}`)
 

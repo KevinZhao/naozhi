@@ -134,6 +134,17 @@ func (s *ManagedSession) accountTurnCost(result *clievent.SendResult, runID stri
 	return inc.USD
 }
 
+// bookUnownedResults books the cost of the turns proc's CLI starts on its own
+// (background-task notifications): their results reach no Send, so without
+// this their spend waited for the next owned result's cumulative and was lost
+// when the process died first (#3096). The cumulative differencing makes a
+// reading booked here and again by a later Send harmless.
+func bookUnownedResults(s *ManagedSession, proc any) {
+	if n, ok := proc.(unownedResultNotifier); ok {
+		n.SetOnUnownedResult(func(res clievent.SendResult) { s.accountTurnCost(&res, newRunID()) })
+	}
+}
+
 // shadowUsageTaker is the optional process capability behind partial-turn
 // accounting; *cli.Process implements it, test stubs may not.
 type shadowUsageTaker interface {

@@ -419,6 +419,40 @@ func (p *Process) onTurnResult() []*sendSlot {
 	return owners
 }
 
+// endUnownedTurn handles a result no passthrough slot claimed, on a replay
+// backend, outside a reconnect's in-flight turn. When no Send owns it either,
+// it is the result of a turn the CLI started itself (a background-task
+// notification): onSystemInit moved the process to Running for it, and
+// nothing else moves it back, so the process sat Running until Cleanup's
+// stuck check killed it (#3096). End that turn here unless passthrough
+// messages are still queued for the next one, and hand the result to the
+// session so the turn's cost is booked now rather than lost if the process
+// dies before the next owned result.
+func (p *Process) endUnownedTurn(ev clievent.Event) {
+	p.slots.mu.Lock()
+	pending := len(p.slots.pending)
+	p.slots.mu.Unlock()
+
+	p.turn.mu.Lock()
+	if p.turn.sendOwned {
+		p.turn.mu.Unlock()
+		return
+	}
+	ended := false
+	if pending == 0 {
+		_, ended = p.turn.transitionLocked(evTurnEnded)
+	}
+	onDone, onResult := p.turn.onTurnDone, p.turn.onUnownedResult
+	p.turn.mu.Unlock()
+
+	if onResult != nil {
+		onResult(resultFromEvent(ev))
+	}
+	if ended && onDone != nil {
+		onDone()
+	}
+}
+
 // reapAbortedPreempted collects pending slots the CLI discarded when a
 // priority:"now" preempted the active turn (result.subtype ==
 // "error_during_execution"): slots not yet replayed that are not themselves
