@@ -51,9 +51,9 @@ type RunnerConfig struct {
 	// Model overrides --model. Empty leaves --model off and the CLI uses its
 	// built-in default, usually the main (far costlier) model: the
 	// `--setting-sources ""` in runnerImplBaseArgs keeps it from reading a
-	// settings-file model. config.example.yaml recommends "haiku"; the code
-	// default stays empty so a deployment without haiku access does not
-	// start failing every tick after an upgrade.
+	// user/project/local settings model (managed policy still applies).
+	// config.example.yaml recommends "haiku"; the code default stays empty
+	// so a deployment without haiku access is not broken by an upgrade.
 	Model string
 
 	// BackendID names the backend BinPath belongs to ("claude" | "kiro" | …).
