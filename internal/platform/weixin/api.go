@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -286,6 +287,10 @@ type sendMessageReq struct {
 	BaseInfo baseInfo      `json:"base_info"`
 }
 
+// errUpstreamRejected marks a parsed ret!=0 sendMessage verdict: iLink
+// answered and delivered nothing, so another context_token may be tried.
+var errUpstreamRejected = errors.New("rejected upstream")
+
 func (c *apiClient) sendMessage(ctx context.Context, to, text, contextToken string) error {
 	req := sendMessageReq{
 		Msg: weixinMessage{
@@ -314,7 +319,7 @@ func (c *apiClient) sendMessage(ctx context.Context, to, text, contextToken stri
 		return fmt.Errorf("unmarshal sendMessage response: %w", err)
 	}
 	if resp.Ret != 0 {
-		return fmt.Errorf("sendMessage failed: ret=%d errcode=%d errmsg=%q", resp.Ret, resp.ErrCode, osutil.SanitizeForLog(resp.ErrMsg, 256))
+		return fmt.Errorf("sendMessage failed: %w: ret=%d errcode=%d errmsg=%q", errUpstreamRejected, resp.Ret, resp.ErrCode, osutil.SanitizeForLog(resp.ErrMsg, 256))
 	}
 	slog.Debug("weixin sendMessage ok")
 	return nil

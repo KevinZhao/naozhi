@@ -215,7 +215,7 @@ func TestReply_WithContextToken(t *testing.T) {
 
 	w := New(Config{Token: "tok", BaseURL: srv.URL})
 	// Pre-cache a context token
-	w.contextTokens.Store("user123", &tokenEntry{token: "ctx-tok-abc", updatedNs: time.Now().UnixNano()})
+	w.cacheContextToken("user123", "ctx-tok-abc", time.Now().UnixNano())
 
 	msgID, err := w.Reply(context.Background(), platform.OutgoingMessage{
 		ChatID: "user123",
@@ -310,8 +310,8 @@ func TestPollLoop_ReceivesMessages(t *testing.T) {
 	if !ok {
 		t.Fatalf("context_token not cached")
 	}
-	entry, isEntry := ct.(*tokenEntry)
-	if !isEntry || entry.token != "ctx-1" {
+	ring, isRing := ct.(*tokenRing)
+	if !isRing || len(ring.slots) != 1 || ring.slots[0].token != "ctx-1" {
 		t.Errorf("context_token not cached, got %v", ct)
 	}
 }

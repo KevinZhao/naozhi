@@ -11,11 +11,13 @@ package weixin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,14 +49,9 @@ type Weixin struct {
 	// dispatch bounds concurrent handler goroutines and lets Stop() drain them.
 	dispatch platform.BoundedDispatch
 
-	// contextTokens caches the latest context_token per user for reply, with
+	// contextTokens caches each user's recent context_tokens for reply, with
 	// an update stamp so one-off users are evicted instead of accumulating.
-	contextTokens sync.Map // map[userID]*tokenEntry
-}
-
-type tokenEntry struct {
-	token     string
-	updatedNs int64 // time.Now().UnixNano() at Store
+	contextTokens sync.Map // map[userID]*tokenRing
 }
 
 // tokenTTL is the idle time after which a cached context_token is evicted;
@@ -210,15 +207,25 @@ func (w *Weixin) cleanupTokensLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			cutoff := time.Now().Add(-tokenTTL).UnixNano()
-			w.contextTokens.Range(func(k, v any) bool {
-				if e, ok := v.(*tokenEntry); ok && e.updatedNs < cutoff {
-					w.contextTokens.Delete(k)
-				}
-				return true
-			})
+			w.evictIdleTokens(time.Now().Add(-tokenTTL).UnixNano())
 		}
 	}
+}
+
+// evictIdleTokens drops every ring whose newest token predates cutoffNs.
+func (w *Weixin) evictIdleTokens(cutoffNs int64) {
+	w.contextTokens.Range(func(k, v any) bool {
+		if r, ok := v.(*tokenRing); ok && r.evictIfIdle(cutoffNs) {
+			w.dropEvictedRing(k, r)
+		}
+		return true
+	})
+}
+
+// dropEvictedRing deletes user's ring only while it is still r, so a fresh
+// ring a concurrent push stored after r was evicted survives.
+func (w *Weixin) dropEvictedRing(user any, r *tokenRing) {
+	w.contextTokens.CompareAndDelete(user, r)
 }
 
 // Reply sends a text message to a WeChat user.
@@ -233,23 +240,102 @@ func (w *Weixin) Reply(ctx context.Context, msg platform.OutgoingMessage) (strin
 		return "", nil
 	}
 
-	ct, _ := w.contextTokens.Load(msg.ChatID)
-	entry, _ := ct.(*tokenEntry)
-	var contextToken string
-	if entry != nil {
-		contextToken = entry.token
-	}
-	if contextToken == "" {
-		// ChatID comes from the relay; sanitize before it reaches err.Error().
-		return "", fmt.Errorf("weixin: no context_token for user %q (no inbound message yet)",
-			osutil.SanitizeForLog(msg.ChatID, 128))
-	}
-
-	if err := w.api.sendMessage(ctx, msg.ChatID, msg.Text, contextToken); err != nil {
-		return "", fmt.Errorf("weixin send: %w", err)
+	v, _ := w.contextTokens.Load(msg.ChatID)
+	ring, _ := v.(*tokenRing)
+	if err := w.sendWithRing(ctx, ring, msg.ChatID, msg.Text); err != nil {
+		return "", err
 	}
 	// Sanitized ChatID: downstream slog/IM surfaces print the id verbatim.
 	return fmt.Sprintf("weixin:%s:%d", osutil.SanitizeForLog(msg.ChatID, 128), time.Now().UnixMilli()), nil
+}
+
+// sendWithRing sends via ring.take's token and moves to the next one only on
+// a parsed upstream rejection (nothing was delivered). Any other error returns
+// at once with the token released as uncertain for this message: it may have
+// gone out, and a retry on another token would deliver it twice. Tokens
+// rejected along the way stay spent only if a later one is accepted; on any
+// other exit they are released, since the cause was likely not the token.
+func (w *Weixin) sendWithRing(ctx context.Context, ring *tokenRing, chatID, text string) error {
+	key := messageKey(text)
+	var lastErr error
+	tried := make([]string, 0, tokenRingCap+1)
+	var rejected []string
+	defer func() {
+		for _, t := range rejected {
+			ring.release(t, false, 0, 0)
+		}
+	}()
+	for range tokenRingCap + 1 {
+		var l lease
+		var ok bool
+		if ring != nil {
+			l, ok = ring.take(key, time.Now().UnixNano())
+		}
+		if !ok || slices.Contains(tried, l.token) {
+			break
+		}
+		if l.landed {
+			// Another message was rejected on the token this one's no-verdict
+			// send used: that send most likely landed.
+			return &maybeDeliveredError{err: errors.New("weixin send: another reply was rejected on this one's no-verdict token")}
+		}
+		tried = append(tried, l.token)
+		err := w.api.sendMessage(ctx, chatID, text, l.token)
+		if err == nil {
+			rejected = nil // token-specific rejections: those tokens stay spent
+			return nil
+		}
+		lastErr = fmt.Errorf("weixin send: %w", err)
+		switch {
+		case !errors.Is(err, errUpstreamRejected):
+			if l.reserved {
+				ring.release(l.token, true, key, time.Now().UnixNano())
+			}
+			return lastErr
+		case l.retry:
+			// Most likely this message's earlier no-verdict send landed.
+			return &maybeDeliveredError{err: lastErr}
+		case l.uncertain:
+			// The other message's send most likely consumed the token: it
+			// stays spent and tells that message's retry to stop.
+			ring.markLanded(l.token, l.otherKey, l.otherNs)
+		case l.reserved:
+			rejected = append(rejected, l.token)
+		}
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	// ChatID comes from the relay; sanitize before it reaches err.Error().
+	return fmt.Errorf("weixin: no context_token for user %q (no inbound message yet)",
+		osutil.SanitizeForLog(chatID, 128))
+}
+
+// maybeDeliveredError is a rejection on a token whose previous send of the
+// same message got no verdict. It is permanent so ReplyWithRetry stops
+// instead of resending the message on another token.
+type maybeDeliveredError struct{ err error }
+
+func (e *maybeDeliveredError) Error() string {
+	return e.err.Error() + " (an earlier attempt may have been delivered)"
+}
+func (e *maybeDeliveredError) Unwrap() error     { return e.err }
+func (e *maybeDeliveredError) IsPermanent() bool { return true }
+
+// cacheContextToken pushes an inbound token onto the user's ring, starting a
+// fresh ring if the cleanup loop evicted the cached one mid-push.
+func (w *Weixin) cacheContextToken(user, token string, nowNs int64) {
+	for {
+		v, ok := w.contextTokens.Load(user)
+		if !ok {
+			v, _ = w.contextTokens.LoadOrStore(user, &tokenRing{updatedNs: nowNs})
+		}
+		r := v.(*tokenRing)
+		if r.push(token, nowNs) {
+			return
+		}
+		w.dropEvictedRing(user, r)
+	}
 }
 
 // EditMessage is not supported by WeChat iLink Bot API.
@@ -355,10 +441,7 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 			// memory per user for the TTL window; real tokens are UUID-scale.
 			const maxContextTokenLen = 512
 			if msg.ContextToken != "" && len(msg.ContextToken) <= maxContextTokenLen {
-				w.contextTokens.Store(from, &tokenEntry{
-					token:     msg.ContextToken,
-					updatedNs: time.Now().UnixNano(),
-				})
+				w.cacheContextToken(from, msg.ContextToken, time.Now().UnixNano())
 			} else if len(msg.ContextToken) > maxContextTokenLen {
 				// Replies to this user will fail; log the length only, never the token.
 				slog.Warn("weixin context_token exceeds cap, dropping (replies to this user will fail)",
