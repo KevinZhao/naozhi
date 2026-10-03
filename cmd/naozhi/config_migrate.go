@@ -11,11 +11,15 @@ package main
 // Dry by default. `-write` commits exactly the bytes the dry run printed, after
 // the produced document has been re-parsed and re-validated (internal/config
 // MigrateFile does that check, so a surgery bug cannot land a file the loader
-// would refuse).
+// would refuse). It first keeps the original as <config>.pre-migrate-v<N> and
+// prints the cp command that restores it: a migrated file declares a
+// schema_version an older naozhi refuses to load.
 
 import (
 	"fmt"
 	"io"
+	"regexp"
+	"strings"
 
 	"github.com/naozhi/naozhi/internal/config"
 )
@@ -25,7 +29,7 @@ import (
 // can gate on it), 0 = already current, or written.
 func configMigrate(args []string, stdout io.Writer) int {
 	fs, configPath := newSubFlagSet("config migrate", "config.yaml")
-	write := fs.Bool("write", false, "apply the migration to the file (atomic, 0600)")
+	write := fs.Bool("write", false, "apply the migration to the file (atomic, 0600; the original is kept as <config>.pre-migrate-v<N>)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -53,13 +57,35 @@ func configMigrate(args []string, stdout io.Writer) int {
 		fmt.Fprintln(stdout, "\n--- would write ---")
 		_, _ = stdout.Write(res.After)
 		fmt.Fprintf(stdout, "--- end (%d bytes, was %d) ---\n", len(res.After), len(res.Before))
-		fmt.Fprintln(stdout, "\nconfig migrate: dry run; re-run with -write to apply")
+		fmt.Fprintln(stdout, "\nnote: the rewrite normalizes blank lines, comment alignment and indentation")
+		kept, taken := config.MigrateBackupName(*configPath, res)
+		if taken {
+			kept = "a timestamped name next to " + kept + ", which holds other bytes"
+		}
+		fmt.Fprintf(stdout, "config migrate: dry run; re-run with -write to apply (the current file is kept as %s)\n", kept)
 		return 1
 	}
-	if err := config.WriteMigrated(*configPath, res); err != nil {
+	backup, err := config.WriteMigrated(*configPath, res)
+	if backup != "" {
+		fmt.Fprintf(stdout, "\nconfig migrate: backup of the original: %s\n", backup)
+	}
+	if err != nil {
 		fmt.Fprintf(stdout, "FATAL: %s\n", err)
 		return 2
 	}
-	fmt.Fprintf(stdout, "\nconfig migrate: wrote %s (%d bytes)\n", *configPath, len(res.After))
+	fmt.Fprintf(stdout, "config migrate: wrote %s (%d bytes)\n", *configPath, len(res.After))
+	fmt.Fprintf(stdout, "to roll back (e.g. before downgrading naozhi, which refuses schema_version %d): cp -p %s %s\n",
+		config.CurrentSchemaVersion, shellQuote(backup), shellQuote(*configPath))
 	return 0
+}
+
+var shellSafe = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
+
+// shellQuote makes s one POSIX shell word, so the printed rollback command can
+// be pasted as is.
+func shellQuote(s string) string {
+	if shellSafe.MatchString(s) {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
