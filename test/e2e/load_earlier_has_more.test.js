@@ -1,9 +1,10 @@
 // @ts-check
 // "加载更早的事件" decides "no more history" from the server's X-Events-Has-More
 // header on every `before=` page (#3029). The server fails it open ("1") when
-// its disk read errors or the request is cancelled, so an empty page carrying
-// "1" is a failed read the operator can retry, not the end of history. Only
-// without the header (an older server) is a short page read as exhausted.
+// its disk read errors or the request is cancelled, so a short page carrying
+// "1" and nothing new is a failed read the operator can retry, not the end of
+// history. Only without the header (an older server) is a short page read as
+// exhausted.
 //
 // 跑法：cd test/e2e && npx playwright test load_earlier_has_more.test.js --project=desktop-chrome
 
@@ -60,6 +61,31 @@ test.describe('加载更早的事件：以 X-Events-Has-More 判定到头', () =
       await expect(btn).toHaveText('没有更早的事件');
       await expect(page.locator('#events-scroll > .event').first()).toContainText('[e0]');
       expect(earlierCalls()).toBe(2);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test('读失败（只回放游标毫秒的已持有事件 + has-more=1）也显示重试', async ({ browser }) => {
+    const { page, earlierCalls, cleanup } = await openSession(browser, 150);
+    try {
+      // A degraded read returns what it filled: the held cursor-ms entry only.
+      let first = true;
+      await page.route(u => u.pathname === '/api/sessions/events' && u.searchParams.has('before'), async route => {
+        if (!first) return route.fallback();
+        first = false;
+        const body = JSON.stringify(history(150).slice(50, 51));
+        await route.fulfill({ contentType: 'application/json', headers: { 'X-Events-Has-More': '1' }, body });
+      });
+      const btn = page.locator('#earlier-events-btn');
+      await btn.click();
+      await expect(btn).toHaveText('加载失败 — 点击重试');
+      await expect(btn).toBeEnabled();
+      await expect(page.locator('#events-scroll > .event')).toHaveCount(100);
+      await btn.click();
+      await expect(page.locator('#events-scroll > .event')).toHaveCount(150);
+      await expect(btn).toHaveText('没有更早的事件');
+      expect(earlierCalls()).toBe(1); // the routed page never reached the mock
     } finally {
       await cleanup();
     }
