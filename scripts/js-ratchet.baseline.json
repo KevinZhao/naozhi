@@ -143,9 +143,9 @@
     "lateBindings": 3
   },
   "dashboard.js": {
-    "lines": 3836,
-    "maxFnLines": 209,
-    "fnOver100": 4,
+    "lines": 3834,
+    "maxFnLines": 120,
+    "fnOver100": 1,
     "topLevelLetVar": 0,
     "configureDeps": 0,
     "deadInjections": 0,

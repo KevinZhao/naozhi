@@ -1568,6 +1568,241 @@ function wsStateChanged(s, prev) {
 }
 wsm.onStateChange(wsStateChanged);
 
+// renderInitialHistory paints a subscribe's opening frame over the whole pane:
+// the placeholder for an empty or all-internal page, the paging cursor and
+// "load earlier", then the scroll position.
+function renderInitialHistory(el, msg, events, display) {
+  // Full render replaces everything — remove any optimistic messages
+  const html = renderEventsWithDividers(display, 0);
+  // Decide "load earlier" BEFORE the all-internal placeholder so its copy never
+  // invites a click on a button that won't appear. The server's has_more knows
+  // the frame was cut by visible-bubble count (DefaultVisibleTarget); the length
+  // heuristic is only for servers / relayed nodes that omit it.
+  const wsHasMore = (typeof msg.has_more === 'boolean') ? msg.has_more : null;
+  const showEarlier = (wsHasMore === true) ||
+    (wsHasMore == null && events.length >= INITIAL_HISTORY_LIMIT);
+  // Only show "no events yet" when the server returned zero events and the session
+  // is idle. For running sessions, show "loading events..." since eventPushLoop will
+  // deliver events shortly (fixes blank-then-"no events yet" flash on click).
+  if (html) {
+    el.innerHTML = html;
+  } else if (events.length === 0) {
+    const sd = sessionList.sessionsData[sid(selection.key, selection.node)];
+    el.innerHTML = (sd && sd.state === 'running')
+      ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>'
+      : '<div class="empty-state">\u6682\u65e0\u4e8b\u4ef6</div>';
+  } else {
+    // Server returned events but every one was internal-filtered
+    // (parallel agent team tail). Placeholder keeps the pane from
+    // looking broken. Invite "click below" only when the button will
+    // mount; otherwise the whole history is internal activity with nothing
+    // older to reach, so promise nothing.
+    el.innerHTML = showEarlier
+      ? '<div class="empty-state">\u8be5\u4f1a\u8bdd\u6700\u8fd1\u4ec5\u6709 agent \u6d3b\u52a8\uff0c\u70b9\u51fb\u4e0b\u65b9\u52a0\u8f7d\u66f4\u65e9\u7684\u6d88\u606f</div>'
+      : '<div class="empty-state">\u8be5\u4f1a\u8bdd\u4ec5\u6709 agent \u6d3b\u52a8\uff0c\u6682\u65e0\u5bf9\u8bdd\u6d88\u606f</div>';
+  }
+  // Reset dedup tracker on full render and anchor the pagination
+  // cursor to the earliest event we received, independent of DOM
+  // contents so loadEarlierEvents still works after a fully-filtered
+  // page.
+  //
+  // 水位无条件重置：整页替换后 lastRenderedEventTime 只能描述"这一页渲染了
+  // 什么"。空 Initial 帧（running 会话刚起进程，completeSubscribe 的空帧臂）
+  // 也必须把水位归零 —— 否则被顶替订阅的 stale 增量帧先到把水位推高、空
+  // Initial 帧把面板重置成加载占位符但水位没动，新 pushLoop 推同批事件时
+  // 全部撞上 `e.time <= lastRenderedEventTime` 被整批丢弃。
+  transcript.lastRenderedEventTime = events.length ? (events[events.length - 1].time || 0) : 0;
+  // Full replace: the cursor restarts at this frame's head (see renderEvents).
+  if (events.length > 0 && events[0].time) transcript.oldestFetchedEventTime = events[0].time;
+  if (showEarlier) {
+    ensureEarlierButton();
+  }
+  runPendingAsync();
+  navRebuild();
+  // 若有上次切走时保存的滚动位置且不在底部，恢复它；否则照旧贴底。
+  if (!restoreScrollPos(selection.key, selection.node)) {
+    stickEventsBottom();
+  }
+  // Safety net: blank page despite events existing → page back to real
+  // messages (bounded). Twin of renderEvents' maybeAutoPageBack call;
+  // covers remote nodes whose subscribe predates the visible-aware read.
+  if (!html && events.length > 0) maybeAutoPageBack();
+}
+
+// appendHistoryBackfill appends a frame that is not the opening one, skipping
+// what an earlier frame already painted.
+function appendHistoryBackfill(el, display) {
+  const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+  // Remove stale "no events yet" before processing incremental events
+  const emptyEl = el.querySelector('.empty-state');
+  if (emptyEl) emptyEl.remove();
+  let prevT = lastDividerTime(el);
+  // Force-bottom when a "user" event arrives: either the local operator
+  // just hit send, or a teammate posted through the IM channel — in both
+  // cases the message must be visible even if the viewport was scrolled up.
+  let sawUser = false;
+  display.forEach(e => {
+    // Strictly-older events were rendered by an earlier frame. Same-ms
+    // events must NOT be dropped on time alone: one CLI frame's blocks
+    // (thinking + text, process_event_format.go) and ACP's trailing
+    // thinking/text/result share one millisecond, and eventHtml(thinking)
+    // renders nothing while the cursor below still advances — so `<=`
+    // swallowed the text bubble that followed. Same-ms replays (the backend
+    // re-admits the watermark ms, #2402) are dropped by uuid instead: a
+    // same-time same-uuid pair is always the same entry (RFC dashboard-
+    // event-uuid-idempotent-render §3). Newer-time events keep their
+    // append behaviour untouched, so streaming text is never frozen.
+    if (e.time && e.time < transcript.lastRenderedEventTime) return;
+    if (e.time && e.time === transcript.lastRenderedEventTime && eventAlreadyRendered(el, e.uuid)) return;
+    if (e.type === 'user') {
+      // uuid idempotency for user bubbles: the time-cursor guard above
+      // misses the bug case (onEvent rendered the real user event but a
+      // restart re-subscribe replays it before the cursor advanced), so
+      // dedup on the authoritative uuid as the backstop. User-only by
+      // design — streaming text re-emits the same uuid (RFC §3).
+      if (eventAlreadyRendered(el, e.uuid)) {
+        if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
+        return;
+      }
+      const opt = el.querySelector('.optimistic-msg');
+      if (opt) opt.remove();
+      sawUser = true;
+      lockRenderedAskCards(el);
+    }
+    const h = eventHtml(e);
+    if (h) {
+      const t = e.time || 0;
+      if (t && (prevT === 0 || t - prevT >= EVENT_DIVIDER_GAP_MS)) {
+        el.insertAdjacentHTML('beforeend', timeDividerHtml(t));
+      }
+      el.insertAdjacentHTML('beforeend', h);
+      if (t) prevT = t;
+    }
+    if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
+  });
+  // Bound the live DOM on the incremental WS history path too (#398);
+  // mirror appendEvents — trim before the scrollHeight reads below.
+  trimEventsScroll(el);
+  if (sawUser) stickEventsBottom();
+  else if (wasBottom) el.scrollTop = el.scrollHeight;
+  runPendingAsync();
+  navSync();
+}
+
+// rebuildTurnFromHistory replays the opening frame's last turn into turnState.
+function rebuildTurnFromHistory(events) {
+  // Full rebuild: scan backward to find the last turn boundary
+  resetTurnState();
+  let turnStart = events.length;
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].type === 'user' || events[i].type === 'result') { turnStart = i + 1; break; }
+    if (i === 0) turnStart = 0;
+  }
+  // Anchor timer to the actual turn start time, not Date.now()
+  if (turnStart < events.length && events[turnStart].time) {
+    turnState.turnStartTime = events[turnStart].time;
+    paintTurnElapsed();
+    turnState.timerId = setInterval(paintTurnElapsed, 1000);
+  }
+  for (let i = turnStart; i < events.length; i++) {
+    applyEventToTurnState(events[i]);
+  }
+}
+
+// applyBackfillToTurn feeds a backfill frame into turnState additively; user
+// and result events are the turn boundaries.
+function applyBackfillToTurn(events) {
+  for (let i = 0; i < events.length; i++) {
+    const ev = events[i];
+    if (ev.type === 'user') {
+      resetTurnStateForUserEcho();
+      const text = ev.detail || ev.summary || '';
+      if (text) {
+        const h2 = document.querySelector('.main-header h2');
+        if (h2) h2.textContent = text;
+      }
+      continue;
+    }
+    if (ev.type === 'result') {
+      applyTurnResult(ev);
+      continue;
+    }
+    applyEventToTurnState(ev);
+  }
+}
+
+// applyTurnResult ends the turn a result event closes, on either frame path.
+function applyTurnResult(ev) {
+  if (ev.cost) {
+    const sKey = sid(selection.key, selection.node);
+    // ev.cost is the CLI's per-incarnation cumulative total, which RESETS on
+    // resume. The authoritative session total is the monotonic delta-sum the
+    // server ships as total_cost on the next snapshot poll; never let this
+    // optimistic bump regress below it (post-resume ev.cost is lower than the
+    // carried-over total).
+    if (sessionList.sessionsData[sKey] && ev.cost > (sessionList.sessionsData[sKey].total_cost || 0)) {
+      sessionList.sessionsData[sKey].total_cost = ev.cost;
+    }
+  }
+  // Optimistic: result means the turn is done. Update state to "ready"
+  // immediately so the banner hides without waiting for session_state WS msg.
+  const rsKey = sid(selection.key, selection.node);
+  if (sessionList.sessionsData[rsKey] && sessionList.sessionsData[rsKey].state === 'running') {
+    sessionList.sessionsData[rsKey].state = 'ready';
+    updateSendButton('ready');
+  } else {
+    resetTurnState();
+  }
+}
+
+// appendLiveEvent appends a pushed event's bubble: a user replay is dropped by
+// uuid, then the time divider, the cursor, the DOM cap and the scroll stick.
+function appendLiveEvent(ev) {
+  const html = eventHtml(ev);
+  if (!html) return;
+  const el = document.getElementById('events-scroll');
+  if (!el) return;
+  const empty = el.querySelector('.empty-state');
+  if (empty) empty.remove();
+  const isUser = ev.type === 'user';
+  if (isUser) {
+    // uuid idempotency (user bubbles only): a duplicate push or a re-subscribe
+    // replay must not paint the same user message twice; advance the cursor so
+    // the time-gated onHistory path stays consistent. User-only by design:
+    // streaming text re-emits the same uuid many times (RFC §3).
+    if (eventAlreadyRendered(el, ev.uuid)) {
+      const t = ev.time || 0;
+      if (t && t > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = t;
+      return;
+    }
+    // First arrival of the real user event: drop the optimistic placeholder.
+    const opt = el.querySelector('.optimistic-msg');
+    if (opt) opt.remove();
+  }
+  // An 80px slack band so a small natural scroll doesn't leave auto-stick.
+  // User events always pin; AI chunks / result events only stick when the
+  // user is in the band, so reading earlier history keeps its position.
+  const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - scrollSlackPx;
+  const prevT = lastDividerTime(el);
+  const evT = ev.time || 0;
+  if (evT && (prevT === 0 || evT - prevT >= EVENT_DIVIDER_GAP_MS)) {
+    el.insertAdjacentHTML('beforeend', timeDividerHtml(evT));
+  }
+  el.insertAdjacentHTML('beforeend', html);
+  // Advance the cursor on first render too, like appendEvents and onHistory: a
+  // uuid-less entry this push painted is otherwise admitted again (#2063).
+  if (evT && evT > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = evT;
+  // Bound the live DOM so a long streaming session over the WS push path
+  // can't grow #events-scroll without limit and OOM the tab (#398). Must run
+  // before the scrollHeight reads below, matching appendEvents.
+  trimEventsScroll(el);
+  // User events always force-bottom; AI output only sticks when already at bottom.
+  if (isUser) stickEventsBottom();
+  else if (wasBottom) el.scrollTop = el.scrollHeight;
+  runPendingAsync();
+  if (ev.type === 'user') navSync();
+}
+
 // Session-stream frame handlers; the subscription bookkeeping is sessionStream.
 const sessionFrames = {
   onHistory(msg) {
@@ -1578,16 +1813,12 @@ const sessionFrames = {
     // 初始帧判别以服务端的 initial 标记为准（ServerMsg.Initial），不看到达
     // 顺序，也不看 'subscribed' ack 是否已回来 —— 两者都不可靠：
     //   * reverseconn 首订阅路径的 history 由本地 FetchEvents goroutine 发出，
-    //     ack 却要经远端 readLoop 绕回来，该调用点明确写了两者顺序不定；
+    //     ack 却要经远端 readLoop 绕回来，两者顺序不定；
     //   * 被顶替订阅的 eventPushLoop 是独立 goroutine，unsub() 不排空在途的
     //     backfill，它的帧可以落在新 ack 的前面或后面。
-    // 旧逻辑"第一个到达的 history 帧就是初始帧"因此会把零星几条增量事件当整页
-    // 渲染，并把 lastRenderedEventTime 推到最新，随后真正的初始帧走增量路径被
-    // 时间戳守卫整批丢弃 —— 即"运行中重复点击会话后消息丢失/顺序错乱"。
-    // backfill 帧不带 initial 标记，所以无论何时落地都只走增量 append，
-    // _initialSubscribe 留给真正的初始帧消费。
+    // backfill 帧不带 initial 标记，无论何时落地都只走增量 append；标记只在
+    // 真正消费了初始帧时才清，留给真正的初始帧。
     const isInitial = sessionStream._initialSubscribe && msg.initial === true;
-    // 只有真正消费了初始帧才清标记（旧代码无条件清，是上述丢帧的直接原因）。
     if (isInitial) sessionStream._initialSubscribe = false;
 
     // Rebuild the answered-set from history BEFORE rendering so card
@@ -1598,185 +1829,16 @@ const sessionFrames = {
 
     const display = processEventsForDisplay(events);
 
-    if (isInitial) {
-      // Full render replaces everything — remove any optimistic messages
-      const html = renderEventsWithDividers(display, 0);
-      // Decide "load earlier" mounting BEFORE the all-internal placeholder so
-      // its copy never invites a click on a button that won't appear. Mount off
-      // the server's has_more flag \u2014 it knows the frame was truncated by
-      // visible-bubble count (DefaultVisibleTarget), catching the case the old
-      // length heuristic missed: more visible bubbles than the target but fewer
-      // total events than INITIAL_HISTORY_LIMIT. Fall back to the length
-      // heuristic only for older servers / relayed nodes that don't set
-      // has_more (the field is absent \u2192 undefined).
-      const wsHasMore = (typeof msg.has_more === 'boolean') ? msg.has_more : null;
-      const showEarlier = (wsHasMore === true) ||
-        (wsHasMore == null && events.length >= INITIAL_HISTORY_LIMIT);
-      // Only show "no events yet" when the server returned zero events and the session
-      // is idle. For running sessions, show "loading events..." since eventPushLoop will
-      // deliver events shortly (fixes blank-then-"no events yet" flash on click).
-      if (html) {
-        el.innerHTML = html;
-      } else if (events.length === 0) {
-        const sd = sessionList.sessionsData[sid(selection.key, selection.node)];
-        el.innerHTML = (sd && sd.state === 'running')
-          ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>'
-          : '<div class="empty-state">\u6682\u65e0\u4e8b\u4ef6</div>';
-      } else {
-        // Server returned events but every one was internal-filtered
-        // (parallel agent team tail). Placeholder keeps the pane from
-        // looking broken. Invite "click below" only when the button will
-        // mount; otherwise the whole history is internal activity with nothing
-        // older to reach, so promise nothing.
-        el.innerHTML = showEarlier
-          ? '<div class="empty-state">\u8be5\u4f1a\u8bdd\u6700\u8fd1\u4ec5\u6709 agent \u6d3b\u52a8\uff0c\u70b9\u51fb\u4e0b\u65b9\u52a0\u8f7d\u66f4\u65e9\u7684\u6d88\u606f</div>'
-          : '<div class="empty-state">\u8be5\u4f1a\u8bdd\u4ec5\u6709 agent \u6d3b\u52a8\uff0c\u6682\u65e0\u5bf9\u8bdd\u6d88\u606f</div>';
-      }
-      // Reset dedup tracker on full render and anchor the pagination
-      // cursor to the earliest event we received, independent of DOM
-      // contents so loadEarlierEvents still works after a fully-filtered
-      // page.
-      //
-      // 水位无条件重置：整页替换后 lastRenderedEventTime 只能描述"这一页渲染了
-      // 什么"。空 Initial 帧（running 会话刚起进程，completeSubscribe 的空帧臂）
-      // 也必须把水位归零 —— 否则被顶替订阅的 stale 增量帧先到把水位推高、空
-      // Initial 帧把面板重置成加载占位符但水位没动，新 pushLoop 推同批事件时
-      // 全部撞上 `e.time <= lastRenderedEventTime` 被整批丢弃。
-      transcript.lastRenderedEventTime = events.length ? (events[events.length - 1].time || 0) : 0;
-      // Full replace: the cursor restarts at this frame's head (see renderEvents).
-      if (events.length > 0 && events[0].time) transcript.oldestFetchedEventTime = events[0].time;
-      if (showEarlier) {
-        ensureEarlierButton();
-      }
-      runPendingAsync();
-      navRebuild();
-      // 若有上次切走时保存的滚动位置且不在底部，恢复它；否则照旧贴底。
-      if (!restoreScrollPos(selection.key, selection.node)) {
-        stickEventsBottom();
-      }
-      // Safety net: blank page despite events existing → page back to real
-      // messages (bounded). Twin of renderEvents' maybeAutoPageBack call;
-      // covers remote nodes whose subscribe predates the visible-aware read.
-      if (!html && events.length > 0) maybeAutoPageBack();
-    } else {
-      const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
-      // Remove stale "no events yet" before processing incremental events
-      const emptyEl = el.querySelector('.empty-state');
-      if (emptyEl) emptyEl.remove();
-      let prevT = lastDividerTime(el);
-      // Force-bottom when a "user" event arrives: either the local operator
-      // just hit send, or a teammate posted through the IM channel — in both
-      // cases the message must be visible even if the viewport was scrolled up.
-      let sawUser = false;
-      display.forEach(e => {
-        // Strictly-older events were rendered by an earlier frame. Same-ms
-        // events must NOT be dropped on time alone: one CLI frame's blocks
-        // (thinking + text, process_event_format.go) and ACP's trailing
-        // thinking/text/result share one millisecond, and eventHtml(thinking)
-        // renders nothing while the cursor below still advances — so `<=`
-        // swallowed the text bubble that followed. Same-ms replays (the backend
-        // re-admits the watermark ms, #2402) are dropped by uuid instead: a
-        // same-time same-uuid pair is always the same entry (RFC dashboard-
-        // event-uuid-idempotent-render §3). Newer-time events keep their
-        // append behaviour untouched, so streaming text is never frozen.
-        if (e.time && e.time < transcript.lastRenderedEventTime) return;
-        if (e.time && e.time === transcript.lastRenderedEventTime && eventAlreadyRendered(el, e.uuid)) return;
-        if (e.type === 'user') {
-          // uuid idempotency for user bubbles: the time-cursor guard above
-          // misses the bug case (onEvent rendered the real user event but a
-          // restart re-subscribe replays it before the cursor advanced), so
-          // dedup on the authoritative uuid as the backstop. User-only by
-          // design — streaming text re-emits the same uuid (RFC §3).
-          if (eventAlreadyRendered(el, e.uuid)) {
-            if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
-            return;
-          }
-          const opt = el.querySelector('.optimistic-msg');
-          if (opt) opt.remove();
-          sawUser = true;
-          lockRenderedAskCards(el);
-        }
-        const h = eventHtml(e);
-        if (h) {
-          const t = e.time || 0;
-          if (t && (prevT === 0 || t - prevT >= EVENT_DIVIDER_GAP_MS)) {
-            el.insertAdjacentHTML('beforeend', timeDividerHtml(t));
-          }
-          el.insertAdjacentHTML('beforeend', h);
-          if (t) prevT = t;
-        }
-        if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
-      });
-      // Bound the live DOM on the incremental WS history path too (#398);
-      // mirror appendEvents — trim before the scrollHeight reads below.
-      trimEventsScroll(el);
-      if (sawUser) stickEventsBottom();
-      else if (wasBottom) el.scrollTop = el.scrollHeight;
-      runPendingAsync();
-      navSync();
-    }
+    if (isInitial) renderInitialHistory(el, msg, events, display);
+    else appendHistoryBackfill(el, display);
 
     if (events.length > 0) {
       const last = events[events.length - 1];
       if (last.time > sessionStream.lastEventTimeWs) sessionStream.lastEventTimeWs = last.time;
     }
     // Build turnState from events
-    if (isInitial) {
-      // Full rebuild: scan backward to find the last turn boundary
-      resetTurnState();
-      let turnStart = events.length;
-      for (let i = events.length - 1; i >= 0; i--) {
-        if (events[i].type === 'user' || events[i].type === 'result') { turnStart = i + 1; break; }
-        if (i === 0) turnStart = 0;
-      }
-      // Anchor timer to the actual turn start time, not Date.now()
-      if (turnStart < events.length && events[turnStart].time) {
-        turnState.turnStartTime = events[turnStart].time;
-        paintTurnElapsed();
-        turnState.timerId = setInterval(paintTurnElapsed, 1000);
-      }
-      for (let i = turnStart; i < events.length; i++) {
-        applyEventToTurnState(events[i]);
-      }
-    } else {
-      // Incremental: accumulate additively, reset only on turn boundaries
-      for (let i = 0; i < events.length; i++) {
-        const ev = events[i];
-        if (ev.type === 'user') {
-          resetTurnStateForUserEcho();
-          const text = ev.detail || ev.summary || '';
-          if (text) {
-            const h2 = document.querySelector('.main-header h2');
-            if (h2) h2.textContent = text;
-          }
-          continue;
-        }
-        if (ev.type === 'result') {
-          if (ev.cost) {
-            const sKey = sid(selection.key, selection.node);
-            // ev.cost is the CLI's per-incarnation cumulative total, which
-            // RESETS on resume. The authoritative session total is the
-            // monotonic delta-sum the server ships as total_cost on the next
-            // snapshot poll; never let this optimistic bump regress below it
-            // (post-resume ev.cost is lower than the carried-over total).
-            if (sessionList.sessionsData[sKey] && ev.cost > (sessionList.sessionsData[sKey].total_cost || 0)) {
-              sessionList.sessionsData[sKey].total_cost = ev.cost;
-            }
-          }
-          // Optimistic: result means the turn is done. Update state to "ready"
-          // immediately so the banner hides without waiting for session_state WS msg.
-          const rsKey = sid(selection.key, selection.node);
-          if (sessionList.sessionsData[rsKey] && sessionList.sessionsData[rsKey].state === 'running') {
-            sessionList.sessionsData[rsKey].state = 'ready';
-            updateSendButton('ready');
-          } else {
-            resetTurnState();
-          }
-          continue;
-        }
-        applyEventToTurnState(ev);
-      }
-    }
+    if (isInitial) rebuildTurnFromHistory(events);
+    else applyBackfillToTurn(events);
     refreshBanner();
   },
 
@@ -1801,28 +1863,7 @@ const sessionFrames = {
       // surface — lock the card before the bubble lands (#2430).
       lockRenderedAskCards(document.getElementById('events-scroll'));
     } else if (ev.type === 'result') {
-      if (ev.cost) {
-        const sKey = sid(selection.key, selection.node);
-        // total_cost still feeds the Home/recent-sessions aggregate; the header
-        // cost chip itself was removed (see renderMainShell).
-        //
-        // ev.cost is the CLI's per-incarnation cumulative total, which RESETS
-        // on resume. The authoritative session total is the monotonic
-        // delta-sum the server ships as total_cost; never let this optimistic
-        // bump regress below it (post-resume ev.cost is lower than the carried
-        // total). In-process the two agree (deltas sum to the cumulative).
-        if (sessionList.sessionsData[sKey] && ev.cost > (sessionList.sessionsData[sKey].total_cost || 0)) {
-          sessionList.sessionsData[sKey].total_cost = ev.cost;
-        }
-      }
-      // Optimistic: result means the turn is done.
-      const reKey = sid(selection.key, selection.node);
-      if (sessionList.sessionsData[reKey] && sessionList.sessionsData[reKey].state === 'running') {
-        sessionList.sessionsData[reKey].state = 'ready';
-        updateSendButton('ready');
-      } else {
-        resetTurnState();
-      }
+      applyTurnResult(ev);
     } else {
       applyEventToTurnState(ev);
       refreshBanner();
@@ -1833,62 +1874,7 @@ const sessionFrames = {
     // still feed into turnState / banner (handled above) but must not
     // land in the DOM until the user returns.
     if (nzViews.agent && nzViews.agent.activeTaskID()) return;
-    const html = eventHtml(ev);
-    if (!html) return;
-    const el = document.getElementById('events-scroll');
-    if (!el) return;
-    const empty = el.querySelector('.empty-state');
-    if (empty) empty.remove();
-    const isUser = ev.type === 'user';
-    if (isUser) {
-      // uuid idempotency (user bubbles only): a duplicate push or a
-      // post-restart re-subscribe history replay must not paint the same user
-      // message twice. The real bubble appended below carries data-uuid
-      // (eventHtml), so once it is on screen any later replay of the same uuid
-      // is caught here; advance the event-time cursor so the time-gated
-      // onHistory path stays consistent, then bail before re-appending.
-      // Scope is user-only by design: streaming text re-emits the same uuid
-      // many times (RFC §3 — 586 dup uuids measured), so text/tool events must
-      // keep their existing append behaviour and never dedup by uuid here.
-      if (eventAlreadyRendered(el, ev.uuid)) {
-        const t = ev.time || 0;
-        if (t && t > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = t;
-        return;
-      }
-      // First arrival of the real user event: drop the optimistic placeholder.
-      const opt = el.querySelector('.optimistic-msg');
-      if (opt) opt.remove();
-    }
-    // UI Round 5 R5-6: 80px slack (was 30) so a small natural scroll
-    // doesn't take the user out of the auto-stick band. User events
-    // always pin (operator just sent / IM thread refresh); AI chunks
-    // / result events only stick if user is in the band — preserves
-    // scroll position when the user is reading earlier history.
-    const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - scrollSlackPx;
-    const prevT = lastDividerTime(el);
-    const evT = ev.time || 0;
-    if (evT && (prevT === 0 || evT - prevT >= EVENT_DIVIDER_GAP_MS)) {
-      el.insertAdjacentHTML('beforeend', timeDividerHtml(evT));
-    }
-    el.insertAdjacentHTML('beforeend', html);
-    // Advance the event-time cursor on first render too, like appendEvents and
-    // onHistory: otherwise a synthetic CLI history entry with no uuid (pre-uuid
-    // events) leaves the cursor behind once this push renders it, the later
-    // time-gated onHistory replay (e.time <= lastRenderedEventTime) admits it
-    // again and the uuid fallback never fires → duplicate bubble (#2063).
-    if (evT && evT > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = evT;
-    // Bound the live DOM before scroll/scan so a long streaming session over
-    // the WS push path (the default real-time channel) can't grow
-    // #events-scroll without limit and OOM the tab (#398). Without this the
-    // MAX_LIVE_DOM_EVENTS cap only fired on the HTTP-poll fallback
-    // (appendEvents), so #398 was effectively a no-op while WS was live.
-    // Must run before the scrollHeight reads below, matching appendEvents.
-    trimEventsScroll(el);
-    // User events always force-bottom; AI output only sticks when already at bottom.
-    if (isUser) stickEventsBottom();
-    else if (wasBottom) el.scrollTop = el.scrollHeight;
-    runPendingAsync();
-    if (ev.type === 'user') navSync();
+    appendLiveEvent(ev);
   },
 
   onSendAck(msg) {
@@ -1920,9 +1906,6 @@ const sessionFrames = {
       }
       // Subscribe to the session we just sent to, unless we're already
       // subscribed or a subscribe is already pending for this exact key.
-      // The old check (!subscribedKey && !_pendingSubscribeKey) failed when
-      // the user was previously viewing a different session — subscribedKey
-      // was set to the old key, blocking the subscribe for the new one.
       const ackKey = msg.key || selection.key;
       if (ackKey && sessionStream.subscribedKey !== ackKey && sessionStream._pendingSubscribeKey !== ackKey) {
         sessionStream.lastEventTimeWs = 0;
@@ -2004,145 +1987,160 @@ const sessionFrames = {
     rollbackOptimisticRunning(msg.key, node);
     delete perSession.lastSent[sKey];
   },
-
-  onSessionState(msg) {
-    const msgNode = msg.node || 'local';
-    const sKey = sid(msg.key, msgNode);
-    // Real state arrived — the optimistic flip has served its purpose, regardless
-    // of whether the server says running/ready/dead. Clear the flag so future
-    // turns don't short-circuit the running→ready rollback logic. Capture it
-    // FIRST: the wasDead computation below needs to know whether prev.state
-    // is a real server-reported 'running' or just the pre-send optimistic flip.
-    const wasOptimisticRunning = !!perSession.optimisticRunning[sKey];
-    const optimisticPrevState = perSession.optimisticPrevState[sKey];
-    delete perSession.optimisticRunning[sKey];
-    delete perSession.optimisticPrevState[sKey];
-    if (_optimisticRunningTimers[sKey]) {
-      clearTimeout(_optimisticRunningTimers[sKey]);
-      delete _optimisticRunningTimers[sKey];
-    }
-    // 服务端 resubscribeEvents 60s 超时后已经丢弃了本连接对该 key 的订阅
-    // (wshub_eventpush.go)，此后这条订阅不会再有任何事件帧。必须同步清掉
-    // 本地订阅簿记 —— 否则客户端永远"以为自己订阅着"：下一次 running 广播
-    // 到达时 needSub 的 case 1 (subscribedKey mismatch) 不成立、case 3
-    // (_subscriptionSuspended) 也不成立，整轮 turn 的事件全部推空，
-    // dashboard 静止直到手动重新点击会话（bug: 出结果后不自动更新）。
-    // 清掉之后，下一次 running 广播经 case 1 重新订阅，拿到完整初始帧。
-    if (msg.reason === 'subscription_timeout' &&
-        sessionStream.subscribedKey === msg.key &&
-        (sessionStream.subscribedNode || 'local') === msgNode) {
-      sessionStream.subscribedKey = null;
-      sessionStream.subscribedNode = null;
-      sessionStream._subscriptionSuspended = false;
-      sessionStream.lastEventTimeWs = 0;
-    }
-    const prev = sessionList.sessionsData[sKey] || {};
-    const prevState = prev.state;   // capture before mutation
-    // wasDead 判定必须穿透乐观 running 翻转：markSessionOptimisticRunning 在
-    // 网络往返之前就把 sessionsData.state 写成 'running'，所以对所有
-    // dashboard 本页发起的 send，服务端真正的 running 广播到达时 prevState
-    // 恒为 'running' —— 若直接读它，dead→running 的重订阅 (case 2) 对本页发送
-    // 永远是死代码，恰好漏掉"进程被回收后从本页发消息"这个最常见的失联场景。
-    // 用翻转前记录的真实状态还原判据。
-    const effectivePrevState = wasOptimisticRunning ? optimisticPrevState : prevState;
-    // 判据是 state==='dead' 本身，而不是 death_reason 是否非空。二者不等价：
-    // death_reason 由 mapSendError 在 no_output_timeout / total_timeout 时写入
-    // (internal/session/managed_send.go)，进程未必被回收，会话随后回到 ready
-    // 却留着这个陈旧标记。按 death_reason 判会让此后每一次普通发送都命中
-    // case 2，强制 lastEventTimeWs=0 全量重订阅 —— 而全量重渲染
-    // (el.innerHTML = html) 会抹掉刚发出、服务端还没回显的 .optimistic-msg
-    // 气泡，正是 case 3 旁边那句注释警告过的危害。sessionsData.state 保留后端
-    // 真实状态（UI 层才把 dead 显示成 ready，见下方 displayState），所以
-    // 'dead' 是可靠且精确的判据，对齐 case 2 注释本身的表述
-    // ("subscribed but process was dead → revived")。
-    const wasDead = effectivePrevState === 'dead';
-    // Chat-style unread: a running→ready (or dead) transition means the model
-    // just produced a reply. Bump the unread counter unless the operator is
-    // already looking at that card — in which case they're reading it live.
-    const turnCompleted = prevState === 'running' && (msg.state === 'ready' || msg.state === 'dead');
-    const isActive = msg.key === selection.key && msgNode === selection.node;
-    if (turnCompleted && !isActive) {
-      perSession.unread[sKey] = (perSession.unread[sKey] || 0) + 1;
-    }
-    // Turn 自然跑完后清掉上一次发出的文本缓存，否则下一轮刚进 running
-    // 就中断会把陈旧文本回填上来。中断路径不会走到这里被清掉，因为
-    // interruptSession 会先消费 lastSent 再发中断。
-    if (turnCompleted) delete perSession.lastSent[sKey];
-    // The HTTP send reached a terminal state (or never became a turn): the
-    // originator mark is no longer needed — drop it so it cannot linger and
-    // let a much later send_error for someone else's send slip through.
-    if (msg.state === 'ready' || msg.state === 'dead') perSession.httpSendPending.delete(sKey);
-    // 一轮对话里 agent 很可能切了分支（git checkout / 新建 worktree 分支）。
-    // 这不改 workspace 路径，所以 workspace-diff 那条失效路径不会触发，chip
-    // 会一直停在选中会话那一刻的分支上。turn 边界是重新解析的自然时机：
-    // 频率低（每轮一次而非定时轮询），且恰好覆盖"agent 干完活"这个分支最可能
-    // 已变的时刻。invalidateGitState 内部只在该会话仍被选中时才真正发请求。
-    if (turnCompleted) invalidateGitState(msg.key, msgNode);
-    if (sessionList.sessionsData[sKey]) {
-      sessionList.sessionsData[sKey].state = msg.state;
-      if (msg.reason) {
-        sessionList.sessionsData[sKey].death_reason = msg.reason;
-      } else if (msg.state === 'running') {
-        // Process revived: clear stale death_reason
-        delete sessionList.sessionsData[sKey].death_reason;
-      }
-    }
-    let card = null;
-    document.querySelectorAll('.session-card').forEach(c => {
-      if (c.dataset.key === msg.key && (c.dataset.node || 'local') === msgNode) card = c;
-    });
-    if (card) {
-      // Surface dead sessions as "ready" in the UI — the backend state is
-      // retained on sessionsData so the resubscribe logic below still fires
-      // when a dead→running transition occurs.
-      const displayState = msg.state === 'dead' ? 'ready' : msg.state;
-      const badge = card.querySelector('.badge');
-      if (badge) { badge.className = 'badge ' + displayState; badge.textContent = displayState; }
-      // Update sidebar dot and state text to reflect new state immediately.
-      // sessionCardHtml renders .sc-dot with dot-running/dot-ready/dot-new,
-      // but onSessionState previously only patched .badge (which doesn't exist
-      // in sidebar cards), leaving the dot stale.
-      const dot = card.querySelector('.sc-dot');
-      if (dot) {
-        dot.className = 'sc-dot ' + (displayState === 'running' ? 'dot-running' : (displayState === 'ready' ? 'dot-ready' : 'dot-new'));
-      }
-      const meta = card.querySelector('.sc-meta');
-      if (meta) {
-        const stateSpan = meta.querySelectorAll('span')[1]; // [0]=dot, [1]=state text
-        if (stateSpan && !stateSpan.classList.contains('sc-node')) stateSpan.textContent = displayState;
-      }
-      patchCardExitChip(card, msg.state, msg.reason);
-      // Sync the unread chip in place. fetchSessions re-renders from template
-      // and reads sessionUnread directly; this path keeps the bubble fresh
-      // between polls (WS state arrives faster than the sessions poll tick).
-      updateCardUnreadChip(card, perSession.unread[sKey] || 0);
-    }
-    if (msg.key === selection.key && msgNode === selection.node) updateMainState(msg.state);
-    // Re-subscribe when session transitions to "running" and we need a live event stream.
-    // Covers: (1) not subscribed yet (new session, subscribedKey mismatch)
-    //         (2) subscribed but process was dead → revived
-    //         (3) subscribed without eventPushLoop (no-process subscribe → process available)
-    //            — detected by the "suspended" reason the server sends for no-process subscribes.
-    // Case 3 must NOT fire on normal ready→running transitions for already-subscribed
-    // sessions — that would cause full re-render and wipe the optimistic user message.
-    if (msg.key === selection.key && msgNode === selection.node && msg.state === 'running') {
-      const needSub = (
-        (sessionStream.subscribedKey !== msg.key && sessionStream._pendingSubscribeKey !== msg.key) || // case 1: not subscribed and no pending subscribe
-        (wasDead && !msg.reason) ||                                   // case 2
-        (sessionStream.subscribedKey === msg.key && sessionStream._subscriptionSuspended) // case 3
-      );
-      if (needSub) {
-        sessionStream.lastEventTimeWs = 0;
-        sessionStream.subscribe(msg.key, selection.node);
-      }
-    }
-    // State changed: force next fetchSessions to re-render sidebar.
-    // storeGen doesn't increment on process state transitions (only session
-    // mutations), so the version cache would otherwise skip the re-render.
-    sessionList.lastVersion = 0;
-    if (msg.reason) debouncedFetchSessions();
-  },
 };
+
+// onSessionState applies a pushed process state to the session: the optimistic
+// flip it settles, its bookkeeping, its card, the header and the subscription.
+function onSessionState(msg) {
+  const msgNode = msg.node || 'local';
+  const sKey = sid(msg.key, msgNode);
+  // Real state arrived — the optimistic flip has served its purpose, regardless
+  // of whether the server says running/ready/dead. Clear the flag so future
+  // turns don't short-circuit the running→ready rollback logic. Capture it
+  // FIRST: the wasDead computation below needs to know whether prev.state
+  // is a real server-reported 'running' or just the pre-send optimistic flip.
+  const wasOptimisticRunning = !!perSession.optimisticRunning[sKey];
+  const optimisticPrevState = perSession.optimisticPrevState[sKey];
+  delete perSession.optimisticRunning[sKey];
+  delete perSession.optimisticPrevState[sKey];
+  if (_optimisticRunningTimers[sKey]) {
+    clearTimeout(_optimisticRunningTimers[sKey]);
+    delete _optimisticRunningTimers[sKey];
+  }
+  // 服务端 resubscribeEvents 60s 超时后已经丢弃了本连接对该 key 的订阅
+  // (wshub_eventpush.go)，此后这条订阅不会再有任何事件帧。必须同步清掉
+  // 本地订阅簿记 —— 否则客户端永远"以为自己订阅着"：下一次 running 广播
+  // 到达时 needSub 的 case 1 (subscribedKey mismatch) 不成立、case 3
+  // (_subscriptionSuspended) 也不成立，整轮 turn 的事件全部推空，
+  // dashboard 静止直到手动重新点击会话（bug: 出结果后不自动更新）。
+  // 清掉之后，下一次 running 广播经 case 1 重新订阅，拿到完整初始帧。
+  if (msg.reason === 'subscription_timeout' &&
+      sessionStream.subscribedKey === msg.key &&
+      (sessionStream.subscribedNode || 'local') === msgNode) {
+    sessionStream.subscribedKey = null;
+    sessionStream.subscribedNode = null;
+    sessionStream._subscriptionSuspended = false;
+    sessionStream.lastEventTimeWs = 0;
+  }
+  const prev = sessionList.sessionsData[sKey] || {};
+  const prevState = prev.state;   // capture before mutation
+  // wasDead 判定必须穿透乐观 running 翻转：markSessionOptimisticRunning 在
+  // 网络往返之前就把 sessionsData.state 写成 'running'，所以对所有
+  // dashboard 本页发起的 send，服务端真正的 running 广播到达时 prevState
+  // 恒为 'running' —— 若直接读它，dead→running 的重订阅 (case 2) 对本页发送
+  // 永远是死代码，恰好漏掉"进程被回收后从本页发消息"这个最常见的失联场景。
+  // 用翻转前记录的真实状态还原判据。
+  const effectivePrevState = wasOptimisticRunning ? optimisticPrevState : prevState;
+  // 判据是 state==='dead' 本身，而不是 death_reason 是否非空。二者不等价：
+  // death_reason 由 mapSendError 在 no_output_timeout / total_timeout 时写入
+  // (internal/session/managed_send.go)，进程未必被回收，会话随后回到 ready
+  // 却留着这个陈旧标记。按 death_reason 判会让此后每一次普通发送都命中
+  // case 2，强制 lastEventTimeWs=0 全量重订阅 —— 而全量重渲染
+  // (el.innerHTML = html) 会抹掉刚发出、服务端还没回显的 .optimistic-msg
+  // 气泡，正是 case 3 旁边那句注释警告过的危害。sessionsData.state 保留后端
+  // 真实状态（UI 层才把 dead 显示成 ready，见下方 displayState），所以
+  // 'dead' 是可靠且精确的判据，对齐 case 2 注释本身的表述
+  // ("subscribed but process was dead → revived")。
+  const wasDead = effectivePrevState === 'dead';
+  settleTurnBoundary(msg, msgNode, sKey, prevState);
+  if (sessionList.sessionsData[sKey]) {
+    sessionList.sessionsData[sKey].state = msg.state;
+    if (msg.reason) {
+      sessionList.sessionsData[sKey].death_reason = msg.reason;
+    } else if (msg.state === 'running') {
+      // Process revived: clear stale death_reason
+      delete sessionList.sessionsData[sKey].death_reason;
+    }
+  }
+  paintSessionCardState(msg, msgNode, sKey);
+  if (msg.key === selection.key && msgNode === selection.node) updateMainState(msg.state);
+  resubscribeOnRunning(msg, msgNode, wasDead);
+  // State changed: force next fetchSessions to re-render sidebar.
+  // storeGen doesn't increment on process state transitions (only session
+  // mutations), so the version cache would otherwise skip the re-render.
+  sessionList.lastVersion = 0;
+  if (msg.reason) debouncedFetchSessions();
+}
+
+// settleTurnBoundary is what a session_state owes the turn it ends: the unread
+// count, the sent-text cache, the HTTP send mark and the git chip.
+function settleTurnBoundary(msg, msgNode, sKey, prevState) {
+  // Chat-style unread: a running→ready (or dead) transition means the model
+  // just produced a reply. Bump the unread counter unless the operator is
+  // already looking at that card — in which case they're reading it live.
+  const turnCompleted = prevState === 'running' && (msg.state === 'ready' || msg.state === 'dead');
+  const isActive = msg.key === selection.key && msgNode === selection.node;
+  if (turnCompleted && !isActive) {
+    perSession.unread[sKey] = (perSession.unread[sKey] || 0) + 1;
+  }
+  // Turn 自然跑完后清掉上一次发出的文本缓存，否则下一轮刚进 running
+  // 就中断会把陈旧文本回填上来。中断路径不会走到这里被清掉，因为
+  // interruptSession 会先消费 lastSent 再发中断。
+  if (turnCompleted) delete perSession.lastSent[sKey];
+  // The HTTP send reached a terminal state (or never became a turn): the
+  // originator mark is no longer needed — drop it so it cannot linger and
+  // let a much later send_error for someone else's send slip through.
+  if (msg.state === 'ready' || msg.state === 'dead') perSession.httpSendPending.delete(sKey);
+  // 一轮对话里 agent 很可能切了分支（git checkout / 新建 worktree 分支）。
+  // 这不改 workspace 路径，所以 workspace-diff 那条失效路径不会触发，chip
+  // 会一直停在选中会话那一刻的分支上。turn 边界是重新解析的自然时机：
+  // 频率低（每轮一次而非定时轮询），且恰好覆盖"agent 干完活"这个分支最可能
+  // 已变的时刻。invalidateGitState 内部只在该会话仍被选中时才真正发请求。
+  if (turnCompleted) invalidateGitState(msg.key, msgNode);
+}
+
+// paintSessionCardState patches the session's sidebar card in place: badge,
+// dot, state text, exit chip and unread chip.
+function paintSessionCardState(msg, msgNode, sKey) {
+  let card = null;
+  document.querySelectorAll('.session-card').forEach(c => {
+    if (c.dataset.key === msg.key && (c.dataset.node || 'local') === msgNode) card = c;
+  });
+  if (!card) return;
+  // Surface dead sessions as "ready" in the UI — the backend state is
+  // retained on sessionsData so the resubscribe logic below still fires
+  // when a dead→running transition occurs.
+  const displayState = msg.state === 'dead' ? 'ready' : msg.state;
+  const badge = card.querySelector('.badge');
+  if (badge) { badge.className = 'badge ' + displayState; badge.textContent = displayState; }
+  // Sidebar cards carry .sc-dot (dot-running/dot-ready/dot-new) and the state
+  // text, not .badge; patch both so the card follows the push immediately.
+  const dot = card.querySelector('.sc-dot');
+  if (dot) {
+    dot.className = 'sc-dot ' + (displayState === 'running' ? 'dot-running' : (displayState === 'ready' ? 'dot-ready' : 'dot-new'));
+  }
+  const meta = card.querySelector('.sc-meta');
+  if (meta) {
+    const stateSpan = meta.querySelectorAll('span')[1]; // [0]=dot, [1]=state text
+    if (stateSpan && !stateSpan.classList.contains('sc-node')) stateSpan.textContent = displayState;
+  }
+  patchCardExitChip(card, msg.state, msg.reason);
+  // Sync the unread chip in place. fetchSessions re-renders from template
+  // and reads sessionUnread directly; this path keeps the bubble fresh
+  // between polls (WS state arrives faster than the sessions poll tick).
+  updateCardUnreadChip(card, perSession.unread[sKey] || 0);
+}
+
+// resubscribeOnRunning re-subscribes the session on screen when it turns
+// "running" and needs a live event stream. Covers: (1) not subscribed yet (new session, subscribedKey mismatch)
+//         (2) subscribed but process was dead → revived
+//         (3) subscribed without eventPushLoop (no-process subscribe → process available)
+//            — detected by the "suspended" reason the server sends for no-process subscribes.
+// Case 3 must NOT fire on normal ready→running transitions for already-subscribed
+// sessions — that would cause full re-render and wipe the optimistic user message.
+function resubscribeOnRunning(msg, msgNode, wasDead) {
+  if (msg.key === selection.key && msgNode === selection.node && msg.state === 'running') {
+    const needSub = (
+      (sessionStream.subscribedKey !== msg.key && sessionStream._pendingSubscribeKey !== msg.key) || // case 1: not subscribed and no pending subscribe
+      (wasDead && !msg.reason) ||                                   // case 2
+      (sessionStream.subscribedKey === msg.key && sessionStream._subscriptionSuspended) // case 3
+    );
+    if (needSub) {
+      sessionStream.lastEventTimeWs = 0;
+      sessionStream.subscribe(msg.key, selection.node);
+    }
+  }
+}
 
 /* ===== WS receive table: one registration per outbound frame type ===== */
 
@@ -2246,7 +2244,7 @@ wsm.on(NZ_CONTRACT.WS.event, (msg) => sessionFrames.onEvent(msg));
 wsm.on(NZ_CONTRACT.WS.send_ack, (msg) => sessionFrames.onSendAck(msg));
 wsm.on(NZ_CONTRACT.WS.send_error, (msg) => sessionFrames.onSendError(msg));
 wsm.on(NZ_CONTRACT.WS.interrupt_ack, (msg) => sessionFrames.onInterruptAck(msg));
-wsm.on(NZ_CONTRACT.WS.session_state, (msg) => sessionFrames.onSessionState(msg));
+wsm.on(NZ_CONTRACT.WS.session_state, (msg) => onSessionState(msg));
 wsm.on(NZ_CONTRACT.WS.sessions_update, () => {
   // RNEW-UX-010 — snapshot pre-update session-key set so we can spot
   // a newly-added key after the fetch completes. Comparing sizes is

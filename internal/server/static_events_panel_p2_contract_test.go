@@ -141,8 +141,8 @@ func TestDashboardJS_AskCardLocksOnIncrementalUserEvent(t *testing.T) {
 		t.Error("sessionFrames.onEvent must lock rendered AskUserQuestion cards when a `user` event lands")
 	}
 	// WS backfill (non-initial history frame) path.
-	if !strings.Contains(jsMethodBody(t, js, "onHistory"), "lockRenderedAskCards(el);") {
-		t.Error("sessionFrames.onHistory incremental branch must lock rendered AskUserQuestion cards on a `user` event")
+	if !strings.Contains(jsFuncBody(t, js, "appendHistoryBackfill"), "lockRenderedAskCards(el);") {
+		t.Error("appendHistoryBackfill (onHistory's incremental branch) must lock rendered AskUserQuestion cards on a `user` event")
 	}
 	// Poll fallback paths.
 	if !strings.Contains(jsFuncBody(t, js, "appendEvents"), "lockRenderedAskCards(el);") {
