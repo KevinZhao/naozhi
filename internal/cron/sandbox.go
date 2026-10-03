@@ -351,25 +351,22 @@ func (s *Scheduler) finishSandboxRunWith(a sandboxExecArgs, state RunState, errC
 	// No metrics here: finishRun → bumpRunStateMetrics(state, sandbox=true) is the
 	// single owner of every per-state counter, and the state already encodes the
 	// TimedOut-vs-Failed split so a timed-out run is never counted twice (#2173).
-	s.finishRun(a.runCtx, runOutcome{
+	paused := s.finishRun(a.runCtx, runOutcome{
 		state: state, errClass: errClass, errMsg: errMsg, result: result,
 		skipPersist: skipPersist,
 		sandboxMeta: meta,
 		replayOf:    a.replayOf,
 		sandbox:     true,
 	})
-	// A shutdown-cancel is not a user-visible failure — no notice, mirroring the
-	// local path (#2059).
-	if state == RunStateCanceled {
-		return
-	}
-	var notice string
-	if state == RunStateSucceeded {
+	switch state {
+	case RunStateCanceled:
+		// A shutdown-cancel is not a user-visible failure — no notice, mirroring
+		// the local path (#2059).
+	case RunStateSucceeded:
 		// Same pipeline as the local success path: sanitise then localize API-error
 		// envelopes before anything reaches IM.
-		notice = localizeNotice(result)
-	} else {
-		notice = failureNoticeBody(errClass, state, a.runID, s.sandboxRunBudget())
+		s.deliverNotice(a.notifyTo, formatCronNotice(a.snap.labelOrID(), localizeNotice(result)))
+	default:
+		s.deliverFailureNotice(a.runCtx, errClass, state, s.sandboxRunBudget(), paused)
 	}
-	s.deliverNotice(a.notifyTo, formatCronNotice(a.snap.labelOrID(), notice))
 }

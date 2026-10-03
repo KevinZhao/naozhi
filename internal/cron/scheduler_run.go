@@ -94,12 +94,11 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 	if !s.workDirReachableCached(snap.workDir) {
 		lg.Warn("cron fresh spawn aborted: work_dir unreachable",
 			"work_dir", snap.workDir)
-		s.finishRun(args.runCtx, runOutcome{
+		paused := s.finishRun(args.runCtx, runOutcome{
 			state: RunStateFailed, errClass: ErrClassWorkDirUnreachable,
 			errMsg: "work_dir unreachable",
 		})
-		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(),
-			failureNoticeBody(ErrClassWorkDirUnreachable, RunStateFailed, args.runID, s.execTimeout)))
+		s.deliverFailureNotice(args.runCtx, ErrClassWorkDirUnreachable, RunStateFailed, s.execTimeout, paused)
 		return noopRefresh, false
 	}
 	// Containment re-check BEFORE the destructive Reset: resolveCronWorkspace
@@ -111,12 +110,11 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 		!workDirUnderRoot(snap.workDir, s.allowedRoot, s.allowedRootResolved) {
 		lg.Warn("cron fresh spawn aborted: work_dir outside allowed root",
 			"work_dir", snap.workDir)
-		s.finishRun(args.runCtx, runOutcome{
+		paused := s.finishRun(args.runCtx, runOutcome{
 			state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
 			errMsg: "work_dir outside allowed root",
 		})
-		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(),
-			failureNoticeBody(ErrClassWorkDirOutsideRoot, RunStateFailed, args.runID, s.execTimeout)))
+		s.deliverFailureNotice(args.runCtx, ErrClassWorkDirOutsideRoot, RunStateFailed, s.execTimeout, paused)
 		return noopRefresh, false
 	}
 	// Fresh-context atomicity (#401): Reset here and the caller's later
@@ -230,10 +228,13 @@ func (s *Scheduler) resolveCronWorkspace(rc runCtx) (workDirForCLI string, abort
 	failOutsideRoot := func(why string) (string, bool) {
 		lg.Warn("cron job work_dir outside allowed root"+why+"; aborting run",
 			"work_dir", snap.workDir)
-		s.finishRun(rc, runOutcome{
+		// This branch sends no per-run notice; only a pause is worth one.
+		if paused := s.finishRun(rc, runOutcome{
 			state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
 			errMsg: "work_dir outside allowed root",
-		})
+		}); paused > 0 {
+			s.deliverFailureNotice(rc, ErrClassWorkDirOutsideRoot, RunStateFailed, s.execTimeout, paused)
+		}
 		return "", true
 	}
 	if s.allowedRoot != "" {
@@ -301,8 +302,11 @@ func (s *Scheduler) executeOpt(jobID string, viaTriggerNow bool) {
 	// nothing was announced, so there is nothing to close.
 	started := &runStarted{}
 	runScaffold{finalizer: finalizer, jobID: jobID, onPanic: func(any) {
-		if started.rc != nil {
-			s.finishRun(*started.rc, runOutcome{state: RunStateFailed, errClass: ErrClassPanic, errMsg: "the run panicked"})
+		if started.rc == nil {
+			return
+		}
+		if paused := s.finishRun(*started.rc, runOutcome{state: RunStateFailed, errClass: ErrClassPanic, errMsg: "the run panicked"}); paused > 0 {
+			s.deliverFailureNotice(*started.rc, ErrClassPanic, RunStateFailed, s.execTimeout, paused)
 		}
 	}}.run(func() {
 		s.executeAcquired(jobID, viaTriggerNow, inflight, finalizer, started)
@@ -703,7 +707,7 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 	// Only what this function still reads directly; the identity fields it used to
 	// unpack are now spelled once, as finishRun(a.runCtx, ...).
 	snap, key := a.snap, a.key
-	lg, notifyTo, stubRefresh := a.lg, a.notifyTo, a.stubRefresh
+	lg, stubRefresh := a.lg, a.stubRefresh
 	if errors.Is(err, context.Canceled) {
 		// Suppress the operator-facing notice so shutdown races don't look like
 		// real failures. As on the deadline path, a watchdog that fired without
@@ -776,13 +780,12 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 	// Stub re-register BEFORE finishRun releases the gate (see the cancel
 	// branch); deliverNotice (IM, stub-independent) stays after finishRun.
 	stubRefresh.run()
-	s.finishRun(a.runCtx, runOutcome{
+	paused := s.finishRun(a.runCtx, runOutcome{
 		state: state, errClass: errClass,
 		errMsg:  "send error: " + sanitiseRunErrMsg(err.Error()), // strip IP:port/paths, mirrors lg.Error above
 		costInc: costInc,
 	})
-	s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(),
-		failureNoticeBody(errClass, state, a.runID, a.jobTimeout)))
+	s.deliverFailureNotice(a.runCtx, errClass, state, a.jobTimeout, paused)
 }
 
 // execFinishSuccess records a successful run: latency observability, the
@@ -964,12 +967,11 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 		// Stub re-register BEFORE finishRun releases the gate — see execSendError;
 		// deliverNotice (IM, stub-independent) stays after finishRun.
 		a.stubRefresh.run()
-		s.finishRun(a.runCtx, runOutcome{
+		paused := s.finishRun(a.runCtx, runOutcome{
 			state: state, errClass: errClass,
 			errMsg: "session error: " + sanitiseRunErrMsg(err.Error()), // mirrors send-error path
 		})
-		s.deliverNotice(a.notifyTo, formatCronNotice(a.snap.labelOrID(),
-			failureNoticeBody(errClass, state, a.runID, s.execTimeout)))
+		s.deliverFailureNotice(a.runCtx, errClass, state, s.execTimeout, paused)
 		return nil, spawnStart, true
 	}
 	// GetOrCreate consumed ctx and nothing below references it (Send uses

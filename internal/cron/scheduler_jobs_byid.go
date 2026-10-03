@@ -6,6 +6,12 @@
 
 package cron
 
+import (
+	"log/slog"
+
+	"github.com/naozhi/naozhi/internal/metrics"
+)
+
 // finishMutation runs the side effects of a mutation the table already made,
 // after its lock is released, and writes the snapshot. Error precedence:
 // lookup → the transition does not apply → persist. A pause or resume whose
@@ -24,7 +30,7 @@ func (s *Scheduler) finishMutation(r mutationResult, kind mutationKind) (*Job, e
 	switch kind {
 	case mutDelete:
 		s.deleteJobPostCleanup(r.job.ID, r.removeEntry)
-	case mutPause:
+	case mutPause, mutAutoPause:
 		if r.removeEntry != 0 {
 			s.cron.Remove(r.removeEntry)
 		}
@@ -74,4 +80,28 @@ func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 	s.entryMu.Lock()
 	defer s.entryMu.Unlock()
 	return s.finishMutation(s.tbl.mutateByID(id, mutResume), mutResume)
+}
+
+// autoPauseIfDue pauses job id once its failure streak has reached
+// s.autoPauseAfter and returns the streak it paused at; 0 means it did not.
+// finishRun calls it with no lock held, before the run's gate is released,
+// so no further run of the job can start in between.
+func (s *Scheduler) autoPauseIfDue(id string) int {
+	if s.autoPauseAfter <= 0 {
+		return 0
+	}
+	s.entryMu.Lock()
+	defer s.entryMu.Unlock()
+	r, due := s.tbl.autoPauseIfDue(id, s.autoPauseAfter)
+	if !due {
+		return 0
+	}
+	if _, err := s.finishMutation(r, mutAutoPause); err != nil {
+		slog.Warn("cron: auto-pause not persisted; job stays active", "job_id", id, "err", err)
+		return 0
+	}
+	metrics.CronAutoPausedTotal.Add(1)
+	slog.Warn("cron job auto-paused after consecutive failures",
+		"job_id", id, "consecutive_failures", r.job.ConsecutiveFailures)
+	return r.job.ConsecutiveFailures
 }

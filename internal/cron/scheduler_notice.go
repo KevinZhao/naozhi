@@ -148,6 +148,29 @@ func failureNoticeBody(errClass ErrorClass, state RunState, runID string, timeou
 	return cause + " · run " + runID
 }
 
+// autoPauseNoticeSuffix is appended to a failure notice when that run's
+// failure auto-paused the job; pausedAfter is finishRun's result (0 = not
+// paused). It says where to resume: an IM job by /cron resume in its chat,
+// a dashboard job from the dashboard.
+func autoPauseNoticeSuffix(snap jobSnapshot, pausedAfter int) string {
+	if pausedAfter <= 0 {
+		return ""
+	}
+	how := "修复后发送 /cron resume " + snap.jobID + " 恢复"
+	if snap.platName == "dashboard" {
+		how = "修复后在控制台恢复"
+	}
+	return "；已连续失败 " + strconv.Itoa(pausedAfter) + " 次，任务已自动暂停，" + how
+}
+
+// deliverFailureNotice sends the IM notice for a run of rc that did not
+// succeed: failureNoticeBody plus, when pausedAfter > 0, the auto-pause
+// sentence.
+func (s *Scheduler) deliverFailureNotice(rc runCtx, errClass ErrorClass, state RunState, timeout time.Duration, pausedAfter int) {
+	s.deliverNotice(rc.notifyTo, formatCronNotice(rc.snap.labelOrID(),
+		failureNoticeBody(errClass, state, rc.runID, timeout)+autoPauseNoticeSuffix(rc.snap, pausedAfter)))
+}
+
 // formatNoticeBudget renders d without Duration.String's zero tails
 // ("5m", "1h", "1m30s" rather than "5m0s", "1h0m0s").
 func formatNoticeBudget(d time.Duration) string {

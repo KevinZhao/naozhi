@@ -111,13 +111,14 @@ func (t *jobTable) pauseLocked(j *Job) (removeEntryID cronEntryID, err error) {
 	captured := j.entryID
 	j.entryID = 0
 	j.Paused = true
+	j.PausedReason = ""
 	return captured, nil
 }
 
 // resumeLocked transitions a paused job back to active under t.mu and
 // returns the cron-entry plan the caller must commit AFTER releasing the lock
-// (commitAndApplyCronEntry). Returns ErrJobNotPaused, or a parse error, both
-// without mutation.
+// (commitAndApplyCronEntry). Resuming starts a fresh failure streak. Returns
+// ErrJobNotPaused, or a parse error, both without mutation.
 //
 // Registration is deferred past persist on purpose: a persist failure then
 // happens BEFORE any entry exists, so the rollback is one field write (no
@@ -133,6 +134,8 @@ func (t *jobTable) resumeLocked(j *Job) (cronEntryPlan, error) {
 		return cronEntryPlan{}, err
 	}
 	j.Paused = false
+	j.PausedReason = ""
+	j.ConsecutiveFailures = 0
 	return p, nil
 }
 
@@ -331,6 +334,8 @@ const (
 	mutDelete mutationKind = iota + 1
 	mutPause
 	mutResume
+	// mutAutoPause is mutPause stamped with PausedReasonAutoFailures.
+	mutAutoPause
 )
 
 // mutationResult is what a mutation did, as data. The caller runs the robfig
@@ -367,6 +372,20 @@ func (t *jobTable) mutateByID(id string, kind mutationKind) mutationResult {
 	return t.mutateLocked(j, kind)
 }
 
+// autoPauseIfDue pauses job id when it is active and its failure streak has
+// reached threshold. due is false, and nothing changed, otherwise: the decision
+// and the pause share one hold, so a resume racing the failing run's finish
+// (which resets the streak) cannot be undone by a stale verdict.
+func (t *jobTable) autoPauseIfDue(id string, threshold int) (r mutationResult, due bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	j, ok := t.jobs[id]
+	if !ok || j.Paused || j.ConsecutiveFailures < threshold {
+		return mutationResult{}, false
+	}
+	return t.mutateLocked(j, mutAutoPause), true
+}
+
 // mutateByPrefix applies kind to the one job in (plat, chatID) whose ID starts
 // with idPrefix.
 func (t *jobTable) mutateByPrefix(idPrefix, plat, chatID string, kind mutationKind) mutationResult {
@@ -384,15 +403,19 @@ func (t *jobTable) mutateByPrefix(idPrefix, plat, chatID string, kind mutationKi
 // (#1272).
 func (t *jobTable) mutateLocked(j *Job, kind mutationKind) (r mutationResult) {
 	prevEntry, prevPaused := j.entryID, j.Paused
+	prevReason, prevStreak := j.PausedReason, j.ConsecutiveFailures
 	switch kind {
 	case mutDelete:
 		r.removeEntry = t.deleteLocked(j)
-	case mutPause:
+	case mutPause, mutAutoPause:
 		e, err := t.pauseLocked(j)
 		if err != nil {
 			return mutationResult{opErr: err}
 		}
 		r.removeEntry = e
+		if kind == mutAutoPause {
+			j.PausedReason = PausedReasonAutoFailures
+		}
 	case mutResume:
 		p, err := t.resumeLocked(j)
 		if err != nil {
@@ -403,6 +426,7 @@ func (t *jobTable) mutateLocked(j *Job, kind mutationKind) (r mutationResult) {
 	r.snap, r.persistErr = t.persistLocked()
 	if r.persistErr != nil && kind != mutDelete {
 		j.entryID, j.Paused = prevEntry, prevPaused
+		j.PausedReason, j.ConsecutiveFailures = prevReason, prevStreak
 		r.removeEntry, r.plan = 0, nil
 	}
 	r.job = *j

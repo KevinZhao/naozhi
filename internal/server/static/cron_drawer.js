@@ -295,7 +295,7 @@ function cronDrawerSpecHtml(j) {
   // 什么时候 — schedule line + relative + absolute next-run.
   let nextLine;
   if (j.paused) {
-    nextLine = '<span class="css-when-paused">已暂停 · 恢复后排期</span>';
+    nextLine = '<span class="css-when-paused">' + (j.paused_reason === 'auto_failures' ? '连续失败 ' + (j.consecutive_failures || 0) + ' 次，已自动暂停' : '已暂停') + ' · 恢复后排期</span>';
   } else if (nextMs) {
     const w = formatWhenColloquial(nextMs);
     const rel = w && w.label ? w.label : formatAgoColloquial(nextMs);

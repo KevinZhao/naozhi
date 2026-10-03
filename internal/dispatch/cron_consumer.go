@@ -16,6 +16,8 @@ type CronJob struct {
 	Prompt       string
 	Paused       bool
 	FreshContext bool
+	// AutoPaused marks a job the scheduler paused after consecutive failures.
+	AutoPaused bool
 }
 
 // CronJobRequest carries the creation parameters for /cron add; the host

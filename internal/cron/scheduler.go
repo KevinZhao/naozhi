@@ -57,6 +57,9 @@ type Scheduler struct {
 	// MaxJobsPerChat when > 0, otherwise DefaultMaxJobsPerChat. Immutable
 	// after NewScheduler returns, so AddJob can read it lock-free.
 	maxJobsPerChat int
+	// autoPauseAfter is the failure streak that auto-pauses a job; 0 disables
+	// it (a negative SchedulerConfig value, or a hand-built Scheduler).
+	autoPauseAfter int
 	execTimeout    time.Duration
 	// stopBudget is the per-instance Stop() budget seeded from
 	// defaultStopBudget. Per-instance (not a package var) so t.Parallel tests
@@ -273,6 +276,7 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		storePath:      cfg.StorePath,
 		maxJobs:        cfg.MaxJobs,
 		maxJobsPerChat: maxPerChat,
+		autoPauseAfter: max(cfg.AutoPauseAfterFailures, 0),
 		execTimeout:    cfg.ExecTimeout,
 		sandbox:        deps.Sandbox,
 		// Seeded from the const; tests override per-instance via

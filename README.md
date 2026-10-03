@@ -149,6 +149,7 @@ cli:
 - 聊天里创建的任务默认每次执行都从新会话开始；加 `--keep-context` 则延续同一会话（`/cron list` 标 `[保留上下文]`）
 - 每 chat 10 个 / 全局 50 个配额
 - 执行结果自动回推到聊天
+- 连续失败 5 次自动暂停（`cron.auto_pause_after_failures` 可调），修复后 `/cron resume <id>`
 
 ### 语音转文字
 
@@ -419,6 +420,7 @@ cron:
   execution_timeout: "8h"
   timezone: "Asia/Shanghai"               # IANA 时区，解释 cron 表达式
   jitter_max: "2m"                        # 调度抖动上限，拍平并发峰值
+  auto_pause_after_failures: 5            # 连续失败 N 次自动暂停；负数关闭
 
 sysession:                                # 后台守护进程框架
   enabled: true
