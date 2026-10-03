@@ -41,22 +41,22 @@ import (
 	"strings"
 )
 
-// turnCtxMarkerBaseline is G-a's first slice: ctx marker call sites. 0 since
-// every turn carries turn.SendSpec and the markers are deleted (#3004 D); the
-// check stays so a new marker cannot creep back.
+// turnCtxMarkerBaseline is G-a's first slice: ctx marker call sites. 0:
+// every turn carries turn.SendSpec, and the check keeps a marker from
+// creeping back.
 const turnCtxMarkerBaseline = 0
 
 // turnCtxWithValueBaseline is G-a's second slice: context.WithValue( call
-// sites in dispatch, server and turn. 0 since dispatch/passthrough_ctx.go is
-// deleted (#3004 D).
+// sites in dispatch, server and turn. 0: send options travel in
+// turn.SendSpec, not in the ctx.
 const turnCtxWithValueBaseline = 0
 
 // turnQueueEscapeBaseline is G-b: .Enqueue(/.DoneOrDrain( call sites outside
-// turn. 0 since every entry's turns run on turn.Orchestrator (#3004 D).
+// turn. 0: every entry's turns run on turn.Orchestrator.
 const turnQueueEscapeBaseline = 0
 
 // turnSlashLiteralBaseline is G-d: slash-command literal occurrences in
-// dispatch/server. 0 since both parse with turn.Parse (#3004 D).
+// dispatch/server. 0: both parse with turn.Parse.
 const turnSlashLiteralBaseline = 0
 
 // ctxMarkerCallNames are G-a's first slice: the four ctx marker functions
