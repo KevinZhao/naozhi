@@ -16,7 +16,7 @@ import (
 // (fmt.Errorf("%w: %w", ErrShimStuck, spawnErr)) used inside GetOrCreate /
 // ResetAndRecreate must surface ErrShimStuck through the standard chain
 // walker — without this the cron classifier falls back to the generic
-// session_error class and the operator sees "执行跳过，请稍后重试。"
+// session_error class and the operator sees the generic "启动会话失败"
 // instead of an actionable diagnosis. (#1324)
 func TestErrShimStuck_WrapWalksChain(t *testing.T) {
 	t.Parallel()

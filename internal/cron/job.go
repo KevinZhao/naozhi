@@ -225,6 +225,9 @@ const (
 	ErrClassWorkDirUnreachable ErrorClass = "workdir_unreachable"
 	ErrClassWorkDirOutsideRoot ErrorClass = "workdir_outside_root"
 	ErrClassOverlapSkipped     ErrorClass = "overlap_skipped"
+	// ErrClassSessionCapacity marks a run skipped because GetOrCreate hit the
+	// router's session caps (ErrSessionCapacity): contention, not a job fault.
+	ErrClassSessionCapacity ErrorClass = "session_capacity"
 	// ErrClassRouterMissing fires when executeOpt short-circuits on a nil router
 	// (test fixtures or a misconfigured scheduler); a started→ended pair is still
 	// emitted so dashboard "running" counters stay consistent (#1323).

@@ -1,12 +1,14 @@
 // scheduler_notice.go: cron IM-notice formatting (notice-prefix consts +
-// formatCronNotice + escapeCronMarkdownPunct) and the jobSnapshot that feeds
-// notice labels. None read s.stopCtx; methods stay on *Scheduler / jobSnapshot
+// formatCronNotice + escapeCronMarkdownPunct + failureNoticeBody) and the
+// jobSnapshot that feeds notice labels. None read s.stopCtx; methods stay on *Scheduler / jobSnapshot
 // so private fields remain accessible without exporting.
 
 package cron
 
 import (
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -104,6 +106,60 @@ func formatCronNotice(label, body string) string {
 // implementation in internal/textutil, shared with IM dispatch (#1707).
 func escapeCronMarkdownPunct(s string) string {
 	return textutil.EscapeCronMarkdownPunct(s)
+}
+
+// failureNoticeBody is the IM body for a run that did not succeed: the cause
+// named from errClass/state, then the run id's first 8 hex chars (the same
+// short form the dashboard history shows). timeout is the run's wall-clock
+// budget, printed on the timed-out bodies. Never carries the raw error text.
+func failureNoticeBody(errClass ErrorClass, state RunState, runID string, timeout time.Duration) string {
+	timedOut := state == RunStateTimedOut || errClass == ErrClassDeadlineExceeded
+	var cause string
+	switch {
+	case errClass == ErrClassSandboxTransport && timedOut:
+		cause = "云沙箱运行超时（超过 " + formatNoticeBudget(timeout) + "），任务状态未知，请检查执行历史"
+	case errClass == ErrClassSandboxTransport:
+		cause = "云沙箱连接中断，任务状态未知，请检查执行历史"
+	case timedOut:
+		cause = "执行超时（超过 " + formatNoticeBudget(timeout) + "）"
+	case errClass == ErrClassSessionCapacity:
+		cause = "同时运行的定时任务已达上限，本次已跳过；可错开执行时间或改为每次重置上下文"
+	case errClass == ErrClassSessionError:
+		cause = "启动会话失败"
+	case errClass == ErrClassSendError:
+		cause = "执行失败（CLI 发送错误）"
+	case errClass == ErrClassWorkDirUnreachable:
+		cause = "工作目录不可达，本次执行已跳过"
+	case errClass == ErrClassWorkDirOutsideRoot:
+		cause = "工作目录超出允许根目录，本次执行已跳过"
+	case errClass == ErrClassSandboxFailed:
+		cause = "云沙箱任务失败"
+	case errClass == ErrClassSandboxUnavailable:
+		cause = "云沙箱未配置，任务无法执行"
+	default:
+		cause = "执行失败"
+	}
+	if len(runID) > 8 {
+		runID = runID[:8]
+	}
+	if runID == "" {
+		return cause
+	}
+	return cause + " · run " + runID
+}
+
+// formatNoticeBudget renders d without Duration.String's zero tails
+// ("5m", "1h", "1m30s" rather than "5m0s", "1h0m0s").
+func formatNoticeBudget(d time.Duration) string {
+	d = d.Round(time.Second)
+	switch {
+	case d >= time.Hour && d%time.Hour == 0:
+		return strconv.FormatInt(int64(d/time.Hour), 10) + "h"
+	case d >= time.Minute && d%time.Minute == 0:
+		return strconv.FormatInt(int64(d/time.Minute), 10) + "m"
+	default:
+		return d.String()
+	}
 }
 
 // labelOrID returns the IM-notice display label: snap.label when populated,

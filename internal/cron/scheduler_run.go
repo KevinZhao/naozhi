@@ -98,7 +98,8 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 			state: RunStateFailed, errClass: ErrClassWorkDirUnreachable,
 			errMsg: "work_dir unreachable",
 		})
-		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(), "工作目录不可达，本次执行已跳过。"))
+		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(),
+			failureNoticeBody(ErrClassWorkDirUnreachable, RunStateFailed, args.runID, s.execTimeout)))
 		return noopRefresh, false
 	}
 	// Containment re-check BEFORE the destructive Reset: resolveCronWorkspace
@@ -114,7 +115,8 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 			state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
 			errMsg: "work_dir outside allowed root",
 		})
-		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(), "工作目录超出允许根目录，本次执行已跳过。"))
+		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(),
+			failureNoticeBody(ErrClassWorkDirOutsideRoot, RunStateFailed, args.runID, s.execTimeout)))
 		return noopRefresh, false
 	}
 	// Fresh-context atomicity (#401): Reset here and the caller's later
@@ -779,7 +781,8 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 		errMsg:  "send error: " + sanitiseRunErrMsg(err.Error()), // strip IP:port/paths, mirrors lg.Error above
 		costInc: costInc,
 	})
-	s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行失败，请稍后重试。"))
+	s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(),
+		failureNoticeBody(errClass, state, a.runID, a.jobTimeout)))
 }
 
 // execFinishSuccess records a successful run: latency observability, the
@@ -937,9 +940,17 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 			return nil, spawnStart, true
 		}
 		state, errClass := classifyExecError(err, ErrClassSessionError)
-		if errClass == ErrClassDeadlineExceeded {
+		if errors.Is(err, ErrSessionCapacity) {
+			// Contention, not a job fault: skipped keeps it out of the failure
+			// counters, and the notice can say what to change.
+			state, errClass = RunStateSkipped, ErrClassSessionCapacity
+		}
+		switch errClass {
+		case ErrClassDeadlineExceeded:
 			a.lg.Info("cron session deadline exceeded", "err", err)
-		} else {
+		case ErrClassSessionCapacity:
+			a.lg.Warn("cron session refused: router at capacity", "err", sanitiseRunErrMsg(err.Error()))
+		default:
 			// sanitise before logging to strip IP:port / paths.
 			a.lg.Error("cron session error", "err", sanitiseRunErrMsg(err.Error()))
 		}
@@ -957,7 +968,8 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 			state: state, errClass: errClass,
 			errMsg: "session error: " + sanitiseRunErrMsg(err.Error()), // mirrors send-error path
 		})
-		s.deliverNotice(a.notifyTo, formatCronNotice(a.snap.labelOrID(), "执行跳过，请稍后重试。"))
+		s.deliverNotice(a.notifyTo, formatCronNotice(a.snap.labelOrID(),
+			failureNoticeBody(errClass, state, a.runID, s.execTimeout)))
 		return nil, spawnStart, true
 	}
 	// GetOrCreate consumed ctx and nothing below references it (Send uses

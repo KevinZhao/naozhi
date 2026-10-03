@@ -6,8 +6,10 @@ package wireup
 
 import (
 	"context"
-	"github.com/naozhi/naozhi/internal/cli"
+	"errors"
+	"fmt"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/session"
@@ -70,9 +72,18 @@ func (a cronRouterAdapter) Reset(key string) { a.r.Reset(key) }
 func (a cronRouterAdapter) GetOrCreate(ctx context.Context, key string, opts cron.AgentOpts) (cron.Session, cron.SessionStatus, error) {
 	sess, st, err := a.r.GetOrCreate(ctx, key, toSessionAgentOpts(opts))
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, wrapCronSpawnErr(err)
 	}
 	return cronSessionAdapter{sess}, cron.SessionStatus(int(st)), nil
+}
+
+// wrapCronSpawnErr tags the router's capacity refusals with
+// cron.ErrSessionCapacity, keeping the session sentinel in the chain.
+func wrapCronSpawnErr(err error) error {
+	if errors.Is(err, session.ErrMaxExemptSessions) || errors.Is(err, session.ErrMaxProcs) {
+		return fmt.Errorf("%w: %w", cron.ErrSessionCapacity, err)
+	}
+	return err
 }
 
 // toSessionAgentOpts copies cron.AgentOpts → session.AgentOpts. ExtraArgs is

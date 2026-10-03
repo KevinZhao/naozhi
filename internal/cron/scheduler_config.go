@@ -114,9 +114,15 @@ type SessionRouter interface {
 	// notifyChange that re-enters scheduler state and would deadlock.
 	Reset(key string)
 	// GetOrCreate returns an existing session or spawns a new one at
-	// execute time, as cron-local Session / SessionStatus types.
+	// execute time, as cron-local Session / SessionStatus types. A refusal
+	// because the router is at capacity MUST wrap ErrSessionCapacity.
 	GetOrCreate(ctx context.Context, key string, opts AgentOpts) (Session, SessionStatus, error)
 }
+
+// ErrSessionCapacity marks a GetOrCreate refusal caused by the router's
+// session caps rather than by the job: the run is recorded as skipped with
+// ErrClassSessionCapacity, and the notice advises staggering schedules.
+var ErrSessionCapacity = errors.New("cron: session capacity reached")
 
 // SchedulerConfig holds the value/scalar configuration for the cron
 // scheduler; injected components live in SchedulerDeps (deps.go, #746). The

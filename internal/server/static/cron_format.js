@@ -114,13 +114,13 @@ export function cronErrorClassLabel(cls) {
     case 'workdir_unreachable': return '工作目录不可达';
     case 'workdir_outside_root': return '工作目录越界';
     case 'overlap_skipped': return '重叠跳过';
+    case 'session_capacity': return '并发上限跳过';
     case 'router_missing': return '路由未就绪';
     case 'paused_concurrent': return '暂停时被抢';
     case 'deleted_concurrent': return '运行中被删除';
     case 'panic': return '内部异常';
-    // interrupted 与 canceled 同为 RunState=canceled，区别是谁中止的：进程
-    // 自己没了（drain 超预算或被硬杀）。措辞必须与"已取消"分开，否则操作员
-    // 会把一次被杀的运行读成自己点过取消。
+    // interrupted 与 canceled 同为 RunState=canceled，区别是谁中止的：进程自己没了
+    // （drain 超预算或被硬杀）。措辞须与"已取消"分开，免得把被杀的运行读成自己点过取消。
     case 'interrupted': return '进程中断（未跑完）';
     // 重启存活的 CLI 被启动时的 argv 漂移检查关掉：是操作员自己的配置修改
     // 结束了这次 run，不是重启本身 —— 与 interrupted 分开命名，操作员才

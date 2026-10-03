@@ -125,6 +125,15 @@ type SandboxRunner interface {
 // cannot outlive a cut stream. Effective budget is min(execTimeout, this).
 const sandboxMaxRunDuration = 60 * time.Minute
 
+// sandboxRunBudget is a sandbox run's wall-clock budget: execTimeout capped at
+// sandboxMaxRunDuration.
+func (s *Scheduler) sandboxRunBudget() time.Duration {
+	if s.execTimeout <= 0 || s.execTimeout > sandboxMaxRunDuration {
+		return sandboxMaxRunDuration
+	}
+	return s.execTimeout
+}
+
 // sandboxExecArgs carries the executeOpt-owned state into the sandbox branch.
 // The run's identity comes from the embedded runCtx (Epic H #2546); what stays
 // here is what only this branch needs.
@@ -168,11 +177,7 @@ func (s *Scheduler) executeSandbox(a sandboxExecArgs) {
 
 	a.inflight.setPhase(PhaseSending)
 
-	budget := s.execTimeout
-	if budget <= 0 || budget > sandboxMaxRunDuration {
-		budget = sandboxMaxRunDuration
-	}
-	ctx, cancel := context.WithTimeout(s.stopCtx, budget)
+	ctx, cancel := context.WithTimeout(s.stopCtx, s.sandboxRunBudget())
 	defer cancel()
 
 	// Pending record persisted BEFORE the invoke so a restart mid-hold can Stop the
@@ -358,13 +363,13 @@ func (s *Scheduler) finishSandboxRunWith(a sandboxExecArgs, state RunState, errC
 	if state == RunStateCanceled {
 		return
 	}
-	notice := "执行失败，请稍后重试。"
+	var notice string
 	if state == RunStateSucceeded {
 		// Same pipeline as the local success path: sanitise then localize API-error
 		// envelopes before anything reaches IM.
 		notice = localizeNotice(result)
-	} else if errClass == ErrClassSandboxTransport {
-		notice = "云沙箱连接中断，任务状态未知，请检查执行历史。"
+	} else {
+		notice = failureNoticeBody(errClass, state, a.runID, s.sandboxRunBudget())
 	}
 	s.deliverNotice(a.notifyTo, formatCronNotice(a.snap.labelOrID(), notice))
 }

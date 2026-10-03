@@ -9,8 +9,12 @@
 package wireup
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -164,5 +168,49 @@ func TestSessionStatus_Cast(t *testing.T) {
 	if int(cron.SessionNew) != int(session.SessionNew) {
 		t.Errorf("SessionNew ordinal: cron=%d, session=%d",
 			cron.SessionNew, session.SessionNew)
+	}
+}
+
+// TestWrapCronSpawnErr_CapacityRefusals: the router's capacity refusals, in the
+// wrapped forms reserveSpawn returns, reach cron as ErrSessionCapacity with
+// the session sentinel still in the chain; any other spawn error passes
+// through untouched so it stays a session_error.
+func TestWrapCronSpawnErr_CapacityRefusals(t *testing.T) {
+	t.Parallel()
+	for _, sentinel := range []error{session.ErrMaxExemptSessions, session.ErrMaxProcs} {
+		routerErr := fmt.Errorf("%w: cron namespace (12)", sentinel)
+		got := wrapCronSpawnErr(routerErr)
+		if !errors.Is(got, cron.ErrSessionCapacity) {
+			t.Errorf("%v: errors.Is(ErrSessionCapacity) = false", routerErr)
+		}
+		if !errors.Is(got, sentinel) {
+			t.Errorf("%v: session sentinel lost from the chain", routerErr)
+		}
+	}
+	other := errors.New("spawn boom")
+	if got := wrapCronSpawnErr(other); got != other {
+		t.Errorf("non-capacity error rewrapped: got %v", got)
+	}
+}
+
+// TestCronRouterAdapter_GetOrCreateTagsCapacity drives the real router into a
+// capacity refusal (one proc slot, held by a busy session that cannot be
+// evicted) and checks the refusal crosses the adapter as ErrSessionCapacity.
+func TestCronRouterAdapter_GetOrCreateTagsCapacity(t *testing.T) {
+	r := session.NewRouter(session.RouterConfig{MaxProcs: 1})
+	t.Cleanup(r.Shutdown)
+	busy := session.NewTestProcess()
+	busy.StateVal = cli.StateRunning
+	r.InjectSession("feishu:direct:busy:general", busy)
+	// Runs before Shutdown (cleanups are LIFO) so it does not wait out the
+	// busy turn.
+	t.Cleanup(func() { busy.StateVal = cli.StateReady })
+
+	_, _, err := newCronRouterAdapter(r).GetOrCreate(context.Background(), "cron:job-cap", cron.AgentOpts{})
+	if !errors.Is(err, session.ErrMaxProcs) {
+		t.Fatalf("GetOrCreate err = %v, want the router's ErrMaxProcs (test premise)", err)
+	}
+	if !errors.Is(err, cron.ErrSessionCapacity) {
+		t.Errorf("GetOrCreate err = %v, want it tagged cron.ErrSessionCapacity", err)
 	}
 }
