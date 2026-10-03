@@ -36,9 +36,10 @@ type replyTracker struct {
 	sent          sync.Once
 	editCh        chan struct{} // buffered(1), signals editLoop to redraw
 	done          chan struct{} // closed when the owning turn completes; exits editLoop
-	// finalized is set by imDelivery.reply just before it writes the final answer
-	// onto the banner. editLoop checks it on wake so a residual buffered editCh
-	// signal cannot repaint stale interim status over the real answer (#2291).
+	// finalized is set by markFinalized just before imDelivery writes the final
+	// answer onto the banner. redrawStatus checks it under editMu so neither a
+	// residual buffered editCh signal nor an in-flight redraw can repaint stale
+	// interim status over the real answer (#2291, #3066).
 	finalized atomic.Bool
 	// editMu is held by redrawStatus across the finalized check and its
 	// EditMessage, and by markFinalized around the store, so a redraw that

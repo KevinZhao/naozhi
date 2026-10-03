@@ -6,11 +6,15 @@ package dispatch
 
 import (
 	"context"
+	"fmt"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // TestEditLoop_SkipsRedrawAfterFinalized verifies the #2291 fix: after
@@ -150,5 +154,55 @@ func TestMarkFinalized_WaitsForInFlightRedraw(t *testing.T) {
 	}
 	if dl.IsZero() || dl.After(start.Add(platformReplyTimeout+time.Second)) {
 		t.Errorf("status redraw deadline = %v, want one within platformReplyTimeout of %v", dl, start)
+	}
+}
+
+// redrawBlockedOnEditMu reports whether tracker's redrawStatus goroutine is
+// parked acquiring a mutex. The receiver pointer in the frame tells this
+// tracker apart from those of parallel tests.
+func redrawBlockedOnEditMu(tracker *replyTracker) bool {
+	buf := make([]byte, 1<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+	frame := fmt.Sprintf("(*replyTracker).redrawStatus(%p", tracker)
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(g, frame) && strings.Contains(g, "Mutex).Lock") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRedrawStatus_ChecksFinalizedUnderEditMu pins the other half of #3066:
+// a redraw that reaches redrawStatus while markFinalized holds editMu must
+// read finalized only after acquiring the lock, so it sees the store and
+// skips. Checking before locking would let it repaint over the final answer.
+func TestRedrawStatus_ChecksFinalizedUnderEditMu(t *testing.T) {
+	t.Parallel()
+
+	fp := &fakePlatform{supportsInterim: true}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tracker := newIMEventTracker(ctx, fp, "chat1", "direct", "")
+
+	id := "banner-1"
+	tracker.thinkingMsgID.Store(&id)
+	tracker.linesMu.Lock()
+	tracker.statusLines = appendStatusLine(tracker.statusLines, "💭 思考中…")
+	tracker.linesMu.Unlock()
+	tracker.editCh <- struct{}{}
+
+	// Hold editMu as markFinalized does, so the redraw parks on it.
+	tracker.editMu.Lock()
+	tracker.waitReady(ctx)
+	testhelper.Eventually(t, func() bool { return redrawBlockedOnEditMu(tracker) },
+		3*time.Second, "redrawStatus never blocked on editMu")
+	tracker.finalized.Store(true)
+	tracker.editMu.Unlock()
+	tracker.stop()
+
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	if len(fp.edits) != 0 {
+		t.Errorf("redraw repainted after finalize: %+v", fp.edits)
 	}
 }
