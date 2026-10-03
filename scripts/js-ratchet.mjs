@@ -546,6 +546,11 @@ function findInjections(program, facts, exportedLocal, defaultFn, allow) {
   // const { x, y: { z } } = t, ({ x } = t). Calling through the local calls
   // through root, and reading the local reads the path.
   const aliases = [];
+  // elementCalled: the lists an element of which is called directly (X[i](),
+  // X.find(f)(), X.forEach((h) => h()), for (const h of X) h(), const f =
+  // X[i]; f()); elementAliases: [local, list] for const f = X[i] / X.find(f).
+  const elementCalled = new Set();
+  const elementAliases = [];
   const alias = (pattern, path, root) => {
     if (pattern.type === 'AssignmentPattern') return alias(pattern.left, path, root);
     if (pattern.type === 'Identifier') { aliases.push([pattern.name, path, root]); return; }
@@ -568,12 +573,23 @@ function findInjections(program, facts, exportedLocal, defaultFn, allow) {
       const root = rootIdent(bind[1]);
       if (root) alias(bind[0], memberPath(bind[1]), root);
     }
+    const list = bind?.[0].type === 'Identifier' && bind[1] ? elementOf(bind[1]) : null;
+    if (list) elementAliases.push([bind[0].name, list]);
+    if (n.type === 'ForOfStatement' && memberPath(n.right)) {
+      const names = n.left.type === 'VariableDeclaration' ? n.left.declarations.flatMap((d) => patternNames(d.id)) : patternNames(n.left);
+      if (callsDirectly(n.body, names)) elementCalled.add(memberPath(n.right));
+    }
     if (isReference(n, parent, key) && !(parent?.type === 'AssignmentExpression' && key === 'left') &&
         !(parent?.type === 'VariableDeclarator' && key === 'id')) reads.add(n.name);
     if (n.type === 'CallExpression') {
       const path = memberPath(n.callee);
       if (path) calledPaths.add(path);
       if (n.callee.type === 'MemberExpression') calledRoots.add(rootIdent(n.callee));
+      const direct = n.callee.type === 'MemberExpression' && ['call', 'apply'].includes(propName(n.callee)) ? n.callee.object : n.callee;
+      const list = elementOf(direct);
+      if (list) elementCalled.add(list);
+      const on = n.callee.type === 'MemberExpression' ? memberPath(n.callee.object) : null;
+      if (on && n.arguments.some((a) => isFn(a) && callsDirectly(a.body, a.params.flatMap((q) => patternNames(q))))) elementCalled.add(on);
     }
   });
   // Resolve the aliases to a fixed point (an alias of an alias).
@@ -584,6 +600,7 @@ function findInjections(program, facts, exportedLocal, defaultFn, allow) {
     for (const [l, path, root] of aliases) {
       if (l === root) continue;
       if (calledRoots.has(l)) add(calledRoots, root);
+      if (path !== null && elementCalled.has(l)) add(elementCalled, path);
       const called = under(calledPaths, l);
       if (called.length) add(calledRoots, root);
       if (path === null) continue;
@@ -591,6 +608,16 @@ function findInjections(program, facts, exportedLocal, defaultFn, allow) {
       for (const rest of under(reads, l)) add(reads, path + rest);
     }
   }
+  for (const [l, list] of elementAliases) if (['', '.call', '.apply'].some((s) => calledPaths.has(l + s))) elementCalled.add(list);
+  // listOfData: base is a list the module initialises as an array literal,
+  // calls nothing through but the list's own methods (jobs.find, jobs.filter),
+  // and never calls an element of. A runtime-keyed write into one is an
+  // element of data (jobs[i] = job), not an injected table.
+  const listOfData = (base) => {
+    const p = memberPath(base);
+    return isListLiteral(facts, base) && !elementCalled.has(p) &&
+      [...calledPaths].every((c) => !(c === p || c.startsWith(p + '.')) || ARRAY_METHODS.has(c.slice(p.length + 1)));
+  };
   const tableKeys = (t) => {
     const d = facts.top.get(t);
     const literal = d?.type === 'VariableDeclarator' && d.init?.type === 'ObjectExpression'
@@ -668,12 +695,12 @@ function findInjections(program, facts, exportedLocal, defaultFn, allow) {
     // through it. A copy to a static target (slot = x.f, deps.a = x.a) lands
     // its path; a whole binding (deps = x, deps = { ...x }) the whole table,
     // when a function is called straight off it (deps.f(), not el.classList.add()).
-    // A runtime-keyed write into a list the module initialises as an array
-    // literal (jobs[i] = job, store.jobs[i] = job) is an element of data.
+    // A runtime-keyed write into a list of data (listOfData: jobs[i] = job,
+    // store.jobs[i] = job) is an element, not the table landing.
     const land = (target) => {
       const t = rootIdent(target);
       if (!moduleBinding(t)) return;
-      if (target.type === 'MemberExpression' && propName(target) === null) { if (calledRoots.has(t) && !isListLiteral(facts, target.object)) whole(t); return; }
+      if (target.type === 'MemberExpression' && propName(target) === null) { if ((calledRoots.has(t) || elementCalled.has(memberPath(target.object))) && !listOfData(target.object)) whole(t); return; }
       const path = memberPath(target);
       if (path && calledPaths.has(path)) keys.push(path);
       else if (target.type === 'Identifier' && [...calledPaths].some((c) => c.startsWith(path + '.') && !c.slice(path.length + 1).includes('.'))) whole(t);
@@ -709,6 +736,28 @@ function findInjections(program, facts, exportedLocal, defaultFn, allow) {
   }
   // A registry (T.*) is read by runtime key; it has no static key to miss.
   for (const k of facts.injections.keys()) if (!k.endsWith('.*') && !reads.has(k)) facts.deadInjections.push(k);
+}
+
+const ARRAY_METHODS = new Set(Object.getOwnPropertyNames(Array.prototype).filter((k) => k !== 'constructor' && typeof Array.prototype[k] === 'function'));
+
+// elementOf: the list path an expression takes an element of, by a runtime
+// key or a call on the list: X[i], S.hs[i], X.find(f), X.at(0). A static
+// index (X[0]) is a member path, which listOfData's method check rejects.
+function elementOf(n) {
+  if (n.type === 'MemberExpression' && propName(n) === null) return memberPath(n.object);
+  if (n.type === 'CallExpression' && n.callee.type === 'MemberExpression') return memberPath(n.callee.object);
+  return null;
+}
+
+// callsDirectly: body calls one of names (h(), h.call(), h.apply()).
+function callsDirectly(body, names) {
+  let hit = false;
+  visit(body, (n) => {
+    if (hit || n.type !== 'CallExpression') return;
+    const c = n.callee.type === 'MemberExpression' && ['call', 'apply'].includes(propName(n.callee)) ? n.callee.object : n.callee;
+    if (c.type === 'Identifier' && names.includes(c.name)) hit = true;
+  });
+  return hit;
 }
 
 // isListLiteral: n is a module binding, or a static member path into one,
