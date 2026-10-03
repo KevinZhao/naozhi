@@ -81,8 +81,11 @@ func TestLoadStore_SymlinkedFileBlocksSavesWithSymlinkHint(t *testing.T) {
 	assertSymlinkIntact(t, path, target, body)
 
 	out := logs.String()
-	if !strings.Contains(out, "replace the symlink with the real file") {
-		t.Errorf("operator hint does not say what to do about the symlink:\n%s", out)
+	if !strings.Contains(out, "stop naozhi, mv the real file over the symlink, then start naozhi") {
+		t.Errorf("operator hint must have the replace done with naozhi stopped (a save tick between rm and mv lifts the block and overwrites the real file):\n%s", out)
+	}
+	if !strings.Contains(out, "without stopping naozhi first") {
+		t.Errorf("operator hint must warn that deleting the link while running resumes saves over that path:\n%s", out)
 	}
 	if !strings.Contains(out, "bind-mounting its directory") {
 		t.Errorf("operator hint must point at a directory bind mount (rename over a bind-mounted file fails with EBUSY):\n%s", out)
@@ -147,11 +150,12 @@ func TestLoadStore_SymlinkReplacedLiftsOnlyWhenNothingToClobber(t *testing.T) {
 			}
 			return os.WriteFile(p, nil, 0o600)
 		}, wantLifts: true},
-		{name: "real file moved into place", replace: func(p string) error {
-			if err := os.Remove(p); err != nil {
+		{name: "real file renamed over the link", replace: func(p string) error {
+			staged := p + ".real"
+			if err := os.WriteFile(staged, []byte(`[]`), 0o600); err != nil {
 				return err
 			}
-			return os.WriteFile(p, []byte(`[]`), 0o600)
+			return os.Rename(staged, p)
 		}, wantLifts: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -207,7 +211,11 @@ func TestStoreMeta_SymlinkedIsReportedNotBlocked(t *testing.T) {
 	if got, _ := os.ReadFile(target); !bytes.Equal(got, body) {
 		t.Errorf("save wrote through the symlink to its target: %s", got)
 	}
-	if out := logs.String(); !strings.Contains(out, "symlink target is left untouched") {
+	out := logs.String()
+	if !strings.Contains(out, "symlink target is left untouched") {
 		t.Errorf("report-only warning does not explain the symlink:\n%s", out)
+	}
+	if !strings.Contains(out, "is a symlink; naozhi does not follow it and the next save replaces it with a regular file") {
+		t.Errorf("spawn diag reason does not name the symlink:\n%s", out)
 	}
 }
