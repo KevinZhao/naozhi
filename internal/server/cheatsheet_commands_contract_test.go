@@ -4,29 +4,26 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-
-	"github.com/naozhi/naozhi/internal/turn"
 )
 
 // TestCheatsheetDashboardSlashCommandsAreRecognised pins the help panel's
-// '斜杠命令' section to what sessionSend handles: every command listed there
-// must be one turn.Parse recognises as bare input, and none of the IM-only
-// commands (served by internal/dispatch/commands.go) may appear in it. This is
-// a JS-to-Go contract the Playwright mock-server cannot check, because it
-// never runs turn.Parse.
+// '斜杠命令' section to what sessionSend handles: every command listed there,
+// sent from the dashboard, must reset or be rejected rather than reach the CLI
+// as a prompt, and none of the IM-only commands (served by
+// internal/dispatch/commands.go) may be listed. This is a JS-to-Go contract the
+// Playwright mock-server cannot check, because it never parses commands.
 func TestCheatsheetDashboardSlashCommandsAreRecognised(t *testing.T) {
 	js := readStaticAsset(t, "dashboard.js")
-	const head = "{ section: '斜杠命令' },"
-	start := strings.Index(js, head)
-	if start < 0 {
-		t.Fatalf("dashboard.js: %q not found in CHEATSHEET_ENTRIES", head)
+	head := regexp.MustCompile(`section:\s*['"]斜杠命令['"]`).FindStringIndex(js)
+	if head == nil {
+		t.Fatal("dashboard.js: section '斜杠命令' not found in CHEATSHEET_ENTRIES")
 	}
-	section := js[start+len(head):]
-	if end := strings.Index(section, "{ section:"); end >= 0 {
-		section = section[:end]
+	section := js[head[1]:]
+	if end := regexp.MustCompile(`section:\s*['"]`).FindStringIndex(section); end != nil {
+		section = section[:end[0]]
 	}
 
-	keyRe := regexp.MustCompile(`keys: \['([^']+)'\]`)
+	keyRe := regexp.MustCompile(`keys:\s*\[\s*['"]([^'"]+)['"]`)
 	var cmds []string
 	for _, m := range keyRe.FindAllStringSubmatch(section, -1) {
 		cmds = append(cmds, m[1])
@@ -35,15 +32,24 @@ func TestCheatsheetDashboardSlashCommandsAreRecognised(t *testing.T) {
 		t.Fatalf("dashboard slash-command section lists %d commands %q, want at least 3", len(cmds), cmds)
 	}
 	for _, c := range cmds {
-		cmd := turn.Parse(c)
-		handled := (cmd.Kind == turn.CmdReset && cmd.Arg == "") || cmd.Kind == turn.CmdUrgentUsage || cmd.Kind == turn.CmdUrgent
-		if !handled {
-			t.Errorf("cheatsheet lists %q under '斜杠命令', but sessionSend sends it to the CLI as plain text", c)
+		name := strings.Fields(c)[0]
+		for _, imOnly := range []string{"/cd", "/pwd", "/project", "/cron", "/help", "/stop"} {
+			if strings.EqualFold(name, imOnly) {
+				t.Errorf("IM-only command %s is listed under the dashboard '斜杠命令' section", c)
+			}
 		}
 	}
-	for _, imOnly := range []string{"/cd", "/pwd", "/project", "/cron", "/help", "/stop"} {
-		if strings.Contains(section, "keys: ['"+imOnly) {
-			t.Errorf("IM-only command %s is listed under the dashboard '斜杠命令' section", imOnly)
+
+	h := newParityHarness(t, parityOpts{})
+	turns := h.session(parityKey, false)
+	ws := h.ws()
+	for i, c := range cmds {
+		id := "c" + string(rune('a'+i))
+		ws.send(id, c)
+		if s := ws.ack(t, id); s != "reset" && s != "error" {
+			t.Errorf("cheatsheet lists %q under '斜杠命令', but the dashboard send was %s: it reached the CLI as plain text", c, s)
 		}
+		h.waitEngineIdle()
 	}
+	turns.noMoreTurns(t)
 }
