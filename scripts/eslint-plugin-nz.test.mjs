@@ -52,6 +52,31 @@ tester.run('configure-deps', nz.rules['configure-deps'], {
   ],
 });
 
+tester.run('deps-keys', nz.rules['deps-keys'], {
+  valid: [
+    // Declared keys, read every way the receivers spell them.
+    "const deps = { a: null, 'b-c': null }; deps.a(); deps['b-c'](); const { a } = deps; let x; ({ a: x } = deps);",
+    // The receiver's copy loop is computed: no static key to check.
+    'const deps = { a: null }; export function configureX(impl) { for (const k of Object.keys(deps)) deps[k] = impl[k]; }',
+    // A shadowing deps is not the table.
+    'const deps = { a: null }; function f(deps) { deps.b(); } const g = () => { const deps = {}; deps.c(); };',
+    // No literal of static keys: the key set is unknown, the rule is silent.
+    'const extra = {}; const deps = { a: null, ...extra }; deps.z();',
+    'const deps = makeDeps(); deps.z();',
+    'deps.z();',
+  ],
+  invalid: [
+    { code: 'const deps = { a: null }; deps.shortPath();', errors: [{ messageId: 'unknownKey', data: { key: 'shortPath', keys: 'a' } }] },
+    { code: "const deps = { a: null }; deps['b']();", errors: [{ messageId: 'unknownKey', data: { key: 'b', keys: 'a' } }] },
+    { code: 'const deps = { a: null }; function f() { const { a, b } = deps; return a + b; }', errors: [{ messageId: 'unknownKey', data: { key: 'b', keys: 'a' } }] },
+    { code: 'const deps = { a: null }; let b; ({ b } = deps);', errors: [{ messageId: 'unknownKey', data: { key: 'b', keys: 'a' } }] },
+    // A write to an undeclared key is not a slot either.
+    { code: 'const deps = {}; deps.a = 1;', errors: [{ messageId: 'unknownKey', data: { key: 'a', keys: 'empty' } }] },
+    // Inside a nested function, the module's deps is still the table.
+    { code: 'const deps = { a: null }; export function f() { return () => deps.c(); }', errors: [{ messageId: 'unknownKey', data: { key: 'c', keys: 'a' } }] },
+  ],
+});
+
 tester.run('no-exported-let', nz.rules['no-exported-let'], {
   valid: [
     'export const state = { n: 0 };',
