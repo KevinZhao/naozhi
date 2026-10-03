@@ -1,7 +1,9 @@
 package session
 
 import (
+	"cmp"
 	"context"
+	"slices"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/discovery"
@@ -136,9 +138,10 @@ func (h *Handlers) WaitWarmHistory() {
 // InvalidateHistoryCache forces the next poll to repopulate historyCache from
 // disk. Wired into the router observer's KeyRetired so a just-retired session's jsonl
 // appears in the history popover within one poll instead of up to 120s later.
+// Only the timestamp is cleared: the slice stays as the base a cut-short rescan
+// merges into, so a retirement under load does not empty the list (#3141).
 func (h *Handlers) InvalidateHistoryCache() {
 	h.historyCacheMu.Lock()
-	h.historyCache = nil
 	h.historyCacheTime = time.Time{}
 	// Keep the atomic mirror in lockstep (Store=0 ⇔ time.Time{}) so wait-free
 	// readers see the invalidation immediately.
@@ -204,7 +207,24 @@ func (h *Handlers) lookupSummariesCached(snapshots []sessionpkg.SessionSnapshot)
 	}
 	return nil
 }
+
+// historyLimit and historyMaxAge bound what the history popover lists.
+const (
+	historyLimit  = 200
+	historyMaxAge = 7 * 24 * time.Hour
+)
+
 func (h *Handlers) loadHistorySessions() []discovery.RecentSession {
+	// Cap the walk so a slow/hung home (NFS, FUSE) can't pin the flight leader (#2134).
+	ctx, cancel := context.WithTimeout(context.Background(), historyScanTimeout)
+	defer cancel()
+	return h.loadHistorySessionsCtx(ctx)
+}
+
+// loadHistorySessionsCtx scans under ctx and installs the result as the
+// history cache. A scan ctx cut short is a partial view, so it is merged into
+// the previous cache rather than replacing it (#3141).
+func (h *Handlers) loadHistorySessionsCtx(ctx context.Context) []discovery.RecentSession {
 	excludeIDs := h.deps.Router.DiscoveryExcludeIDs()
 
 	// Hide cron-spawned and sys-session JSONLs (both have their own UI; the sys
@@ -214,10 +234,14 @@ func (h *Handlers) loadHistorySessions() []discovery.RecentSession {
 	if h.deps.CronSessions != nil {
 		filter.skipSessions = h.deps.CronSessions.KnownSessionIDs()
 	}
-	// Cap the walk so a slow/hung home (NFS, FUSE) can't pin the flight leader (#2134).
-	ctx, cancel := context.WithTimeout(context.Background(), historyScanTimeout)
-	defer cancel()
-	all := discovery.RecentSessionsCtx(ctx, h.deps.ClaudeDir, 200, 7*24*time.Hour, excludeIDs, filter)
+	all := discovery.RecentSessionsCtx(ctx, h.deps.ClaudeDir, historyLimit, historyMaxAge, excludeIDs, filter)
+	if ctx.Err() != nil {
+		h.historyCacheMu.RLock()
+		prev := h.historyCache
+		h.historyCacheMu.RUnlock()
+		cutoff := time.Now().Add(-historyMaxAge).UnixMilli()
+		all = mergePartialHistory(all, prev, excludeIDs, filter, cutoff, historyLimit)
+	}
 
 	// Resolve project names in batch using the pooled scratch slice (#616).
 	if h.deps.ProjectMgr != nil && len(all) > 0 {
@@ -266,4 +290,44 @@ func (h *Handlers) callSystemInfo() map[string]any {
 		return map[string]any{}
 	}
 	return h.deps.SystemInfoFn()
+}
+
+// mergePartialHistory folds a scan the deadline cut short into the previous
+// cache, so a slow host shrinks nothing: the walk only reached some project
+// directories. partial wins for each session it holds, borrowing the cached
+// prompt when its own read was cancelled; a cached entry partial lacks stays
+// while still in the age window and not excluded or filtered. A deleted
+// session lingers until the next complete scan replaces the cache. Returns a
+// fresh slice: prev is aliased by cache readers and never written.
+func mergePartialHistory(partial, prev []discovery.RecentSession, exclude map[string]bool, filter historyFilter, cutoff int64, limit int) []discovery.RecentSession {
+	prevByID := make(map[string]discovery.RecentSession, len(prev))
+	for _, rs := range prev {
+		prevByID[rs.SessionID] = rs
+	}
+	merged := make([]discovery.RecentSession, 0, len(partial)+len(prev))
+	seen := make(map[string]struct{}, len(partial))
+	for _, rs := range partial {
+		seen[rs.SessionID] = struct{}{}
+		if old, ok := prevByID[rs.SessionID]; ok && rs.LastPrompt == "" && rs.Summary == "" {
+			rs.LastPrompt = old.LastPrompt
+		}
+		merged = append(merged, rs)
+	}
+	for _, rs := range prev {
+		if _, ok := seen[rs.SessionID]; ok {
+			continue
+		}
+		if rs.LastActive < cutoff || exclude[rs.SessionID] ||
+			filter.SkipSessionID(rs.SessionID) || filter.SkipWorkspace(rs.Workspace) {
+			continue
+		}
+		merged = append(merged, rs)
+	}
+	slices.SortFunc(merged, func(a, b discovery.RecentSession) int {
+		return cmp.Compare(b.LastActive, a.LastActive)
+	})
+	if limit > 0 && len(merged) > limit {
+		merged = merged[:limit]
+	}
+	return merged
 }

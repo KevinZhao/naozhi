@@ -1096,3 +1096,60 @@ func TestRecentSessionsCtx_BackgroundCtxEquivalent(t *testing.T) {
 		t.Errorf("background ctx must behave like RecentSessions; session missing: %s", sid)
 	}
 }
+
+// errAfterCtx is a context whose Err stays nil for the first n calls and then
+// reports a deadline, so a test can land the cancellation between the walk
+// and the prompt extraction that follows it.
+type errAfterCtx struct {
+	context.Context
+	n int
+}
+
+func (c *errAfterCtx) Err() error {
+	if c.n > 0 {
+		c.n--
+		return nil
+	}
+	return context.DeadlineExceeded
+}
+
+// TestRecentSessionsCtx_CancelledDuringExtractionKeepsSessions pins #3141: a
+// deadline that hits after the walk found its sessions must stop the prompt
+// reads, not drop the sessions. The old loop broke out on the first ctx.Err()
+// and returned nothing, which emptied the dashboard's history under load.
+func TestRecentSessionsCtx_CancelledDuringExtractionKeepsSessions(t *testing.T) {
+	t.Parallel()
+	root, claudeDir, _, encodedDir := makeWorkspace(t)
+
+	projDir := filepath.Join(claudeDir, "projects", encodedDir)
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	msg, _ := json.Marshal(struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}{Role: "user", Content: "a prompt that needs a read"})
+	line := fmt.Sprintf(`{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":%s}`, string(msg))
+	sids := []string{
+		"dddddddd-0001-0001-0001-000000000003",
+		"dddddddd-0001-0001-0001-000000000004",
+	}
+	for _, sid := range sids {
+		writeJSONLFile(t, filepath.Join(projDir, sid+".jsonl"), []string{line})
+	}
+	dirFilesCache.Delete(projDir)
+	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
+
+	// One nil for the walk's single project directory; the deadline then
+	// lands on the first extraction check.
+	ctx := &errAfterCtx{Context: context.Background(), n: 1}
+	got := recentSessionsUnder(ctx, root, claudeDir, 10, 365*24*time.Hour, nil, nil)
+	if len(got) != len(sids) {
+		t.Fatalf("a deadline during extraction must keep the walked sessions: got %d, want %d (%+v)", len(got), len(sids), got)
+	}
+	for _, s := range got {
+		if s.LastPrompt != "" {
+			t.Errorf("session %s: LastPrompt = %q, want empty once extraction is cancelled", s.SessionID, s.LastPrompt)
+		}
+	}
+}
