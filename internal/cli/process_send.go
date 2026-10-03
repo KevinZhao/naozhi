@@ -127,25 +127,11 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 	// no ghost entry; passthrough.go orders the same way.
 	p.eventLog.Append(buildUserEntry(text, images))
 
-	noOutputDur := p.noOutputTimeout
-	if noOutputDur <= 0 {
-		noOutputDur = DefaultNoOutputTimeout
-	}
-	totalDur := p.totalTimeout
-	if totalDur <= 0 {
-		totalDur = DefaultTotalTimeout
-	}
+	noOutputDur, totalDur := p.turnBudgets()
 
-	// Watchdog: one periodic timer instead of per-event Stop/drain/Reset. The
-	// interval caps timeout precision, fine for minute-scale timeouts. Re-armed
-	// after each fire; Stop()+drain on early return via defer.
-	checkInterval := noOutputDur / 4
-	if checkInterval < time.Second {
-		checkInterval = time.Second
-	}
-	if checkInterval > 30*time.Second {
-		checkInterval = 30 * time.Second
-	}
+	// Watchdog: one periodic timer instead of per-event Stop/drain/Reset,
+	// re-armed after each fire; Stop()+drain on early return via defer.
+	checkInterval := watchdogCheckInterval(noOutputDur)
 	turnStart := time.Now()
 	lastOutput := turnStart
 	watchdog := time.NewTimer(checkInterval)
@@ -254,32 +240,23 @@ func (p *Process) handleWatchdogTick(
 	turnStartMS int64,
 	noOutputDur, totalDur time.Duration,
 ) (*clievent.SendResult, error) {
-	if now.Sub(lastOutput) >= noOutputDur {
-		if sr := p.findResultSince(turnStartMS); sr != nil {
-			return sr, nil
-		}
-		// Set death reason BEFORE Kill so readLoop's shim_eof/shim_read_error
-		// classification (triggered by shimConn.Close) cannot overwrite the true
-		// root cause; setDeathReason is first-writer-wins.
-		p.setDeathReason(DeathReasonNoOutputTimeout)
-		p.slogger().Error("watchdog: no output timeout", "timeout", noOutputDur)
-		p.Kill()
-		// Clear inflight settle flags so drainStaleEvents' 500ms wait cannot
-		// fire against a watchdog-killed process (#770; see clearInflightFlags).
-		p.clearInflightFlags()
-		return nil, fmt.Errorf("%w (%s)", clierr.ErrNoOutputTimeout, noOutputDur)
+	reason, err := turnDeadlineVerdict(now, turnStart, lastOutput, noOutputDur, totalDur)
+	if err == nil {
+		return nil, nil
 	}
-	if now.Sub(turnStart) >= totalDur {
-		if sr := p.findResultSince(turnStartMS); sr != nil {
-			return sr, nil
-		}
-		p.setDeathReason(DeathReasonTotalTimeout)
-		p.slogger().Error("watchdog: total timeout", "timeout", totalDur)
-		p.Kill()
-		p.clearInflightFlags()
-		return nil, fmt.Errorf("%w (%s)", clierr.ErrTotalTimeout, totalDur)
+	if sr := p.findResultSince(turnStartMS); sr != nil {
+		return sr, nil
 	}
-	return nil, nil
+	// Set death reason BEFORE Kill so readLoop's shim_eof/shim_read_error
+	// classification (triggered by shimConn.Close) cannot overwrite the true
+	// root cause; setDeathReason is first-writer-wins.
+	p.setDeathReason(reason)
+	p.logWatchdogKill(reason, noOutputDur, totalDur, "send")
+	p.Kill()
+	// Clear inflight settle flags so drainStaleEvents' 500ms wait cannot
+	// fire against a watchdog-killed process (#770; see clearInflightFlags).
+	p.clearInflightFlags()
+	return nil, err
 }
 
 // Interrupt sends SIGINT to the CLI process via shim.

@@ -85,6 +85,10 @@ type Process struct {
 
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
+	// lastOutputNS is when readLoop last dispatched a CLI stdout frame, as
+	// nanoseconds since monoBase (see lastOutputAt); the passthrough watchdog's
+	// no-output clock.
+	lastOutputNS atomic.Int64
 
 	// acks matches control_request acks (SetModel) to their waiters.
 	acks controlAcks
