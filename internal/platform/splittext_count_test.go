@@ -23,6 +23,7 @@ func TestSplitTextWithCount_MatchesSplitText(t *testing.T) {
 		{"over_with_newline", "line1\nline2\nline3\nline4\n", 12},
 		{"cjk", strings.Repeat("中文", 30), 10},
 		{"tiny_max", strings.Repeat("x", 50), 1},
+		{"fenced", "```go\n" + strings.Repeat("x := 1\n", 30) + "```\n", 40},
 	}
 	for _, c := range cases {
 		c := c

@@ -124,6 +124,66 @@ func TestSendSplitReply_NewlineDenseRespectsHardLimit(t *testing.T) {
 	}
 }
 
+// TestSendSplitReply_FencedReplyStaysBalanced: a code block longer than one
+// message is closed at the end of each chunk and reopened at the start of the
+// next, so every message renders as code, and the close/reopen lines plus the
+// page suffix still fit the hard limit.
+func TestSendSplitReply_FencedReplyStaysBalanced(t *testing.T) {
+	const limit = 2000
+	hp := &hardLimitPlatform{limit: limit}
+	d := &Dispatcher{}
+
+	var b strings.Builder
+	b.WriteString("Here is the file:\n```go\n")
+	for i := 0; b.Len() < 6000; i++ {
+		b.WriteString("\tfmt.Println(\"line ")
+		b.WriteString(strings.Repeat("x", i%40))
+		b.WriteString("\")\n")
+	}
+	b.WriteString("```\nDone.\n")
+	text := b.String()
+
+	d.SendSplitReply(context.Background(), hp, "chat-1", text)
+
+	hp.mu.Lock()
+	defer hp.mu.Unlock()
+	if len(hp.rejected) != 0 {
+		t.Fatalf("platform rejected %d oversized chunk(s); want 0", len(hp.rejected))
+	}
+	if len(hp.accepted) < 3 {
+		t.Fatalf("expected >=3 chunks, got %d", len(hp.accepted))
+	}
+	var content []string
+	for i, c := range hp.accepted {
+		if idx := lastPageSuffixIndex(c); idx >= 0 {
+			c = c[:idx]
+		}
+		fences := 0
+		for _, line := range strings.Split(c, "\n") {
+			if strings.HasPrefix(line, "```") {
+				fences++
+			} else if line != "" {
+				content = append(content, line)
+			}
+		}
+		if fences%2 != 0 {
+			t.Errorf("chunk %d has %d fence lines, leaving a code block open:\n%s", i+1, fences, c)
+		}
+		if i > 0 && i < len(hp.accepted)-1 && !strings.HasPrefix(c, "```go\n") {
+			t.Errorf("chunk %d does not reopen the go fence: %.40q", i+1, c)
+		}
+	}
+	var want []string
+	for _, line := range strings.Split(text, "\n") {
+		if !strings.HasPrefix(line, "```") && line != "" {
+			want = append(want, line)
+		}
+	}
+	if strings.Join(content, "\n") != strings.Join(want, "\n") {
+		t.Errorf("chunk lines minus fence lines differ from the reply's: a line was cut, lost or duplicated")
+	}
+}
+
 // TestSendSplitReply_TinyMaxLenSuppressesSuffix reproduces #2057: a platform
 // (mis)configured with maxLen smaller than the page suffix width leaves no
 // room to reserve for "[i/N]". The old code fell back to splitLen=maxLen but

@@ -97,6 +97,34 @@ func TestNotifyTarget_ChunkPlusSuffixStaysWithinMaxLen(t *testing.T) {
 	}
 }
 
+// TestNotifyTarget_FencedResultStaysBalanced: a job result that is one long code
+// block arrives as messages that each close the block they open, within maxLen
+// once the page suffix is on.
+func TestNotifyTarget_FencedResultStaysBalanced(t *testing.T) {
+	t.Parallel()
+	const maxLen = 120
+	fp := &fakePartialPlatform{failAt: 1000, maxLen: maxLen}
+	s := &Scheduler{}
+	storeFakeNotifySender(s, map[string]platform.Platform{"fake-notify": fp})
+
+	text := "```\n" + strings.Repeat("2026-10-04 job ok\n", 20) + "```\n"
+	s.notifyTarget("fake-notify", "chat-x", text)
+
+	sent := fp.sentChunks()
+	if len(sent) < 3 || len(sent) > cronNotifyMaxChunks {
+		t.Fatalf("fixture gave %d chunks; want 3..%d", len(sent), cronNotifyMaxChunks)
+	}
+	for i, chunk := range sent {
+		if n := utf8.RuneCountInString(chunk); n > maxLen {
+			t.Errorf("chunk %d is %d runes, over %d", i+1, n, maxLen)
+		}
+		body := pageSuffixRe.ReplaceAllString(chunk, "")
+		if !strings.HasPrefix(body, "```\n") || !strings.HasSuffix(strings.TrimSuffix(body, "\n"), "\n```") {
+			t.Errorf("chunk %d is not a closed code block:\n%s", i+1, body)
+		}
+	}
+}
+
 // TestNotifyTarget_CapDroppedTailKeepsOriginalTotal: when the chunk-count cap
 // (#568) drops a tail, the surviving chunks must still report the ORIGINAL total.
 // Renumbering to the delivered subset would tell the recipient they have all of it.

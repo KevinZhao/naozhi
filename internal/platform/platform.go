@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/replyfmt"
 )
 
 // MessageHandler is the callback invoked when a platform receives a message.
@@ -189,40 +190,17 @@ type RunnablePlatform interface {
 	Stop() error
 }
 
-// SplitText splits text into chunks of at most maxRunes runes, preferring
-// newline boundaries in the second half of each chunk when possible.
+// SplitText splits text into chunks of at most maxRunes runes; see
+// replyfmt.SplitText for the newline and code-fence rules.
 func SplitText(text string, maxRunes int) []string {
-	return SplitTextWithCount(text, maxRunes, utf8.RuneCountInString(text))
+	return replyfmt.SplitText(text, maxRunes, utf8.RuneCountInString(text))
 }
 
 // SplitTextWithCount is SplitText for callers that already computed
 // utf8.RuneCountInString(text), avoiding a second O(n) scan. A wrong
 // runeCount only affects the single-chunk fast path, never chunk boundaries.
 func SplitTextWithCount(text string, maxRunes, runeCount int) []string {
-	if runeCount <= maxRunes {
-		return []string{text}
-	}
-	var chunks []string
-	for text != "" {
-		// Advance up to maxRunes runes to find the byte boundary.
-		end, count := 0, 0
-		for count < maxRunes && end < len(text) {
-			_, size := utf8.DecodeRuneInString(text[end:])
-			end += size
-			count++
-		}
-		if end == len(text) {
-			chunks = append(chunks, text)
-			break
-		}
-		// Prefer splitting at a newline in the second half.
-		if idx := strings.LastIndex(text[:end], "\n"); idx > end/2 {
-			end = idx + 1
-		}
-		chunks = append(chunks, text[:end])
-		text = text[end:]
-	}
-	return chunks
+	return replyfmt.SplitText(text, maxRunes, runeCount)
 }
 
 // ImageExt returns a file extension (with leading dot) for the given MIME type.
