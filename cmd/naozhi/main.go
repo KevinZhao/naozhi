@@ -586,11 +586,15 @@ func main() {
 	// Operators copy these URLs into the IM console; WS-only platforms omitted.
 	logWebhookEndpoints(cfg, platforms)
 
+	// config.Load already logged this, but before setupLogging installed the
+	// configured handler, so it went to stderr rather than the service log.
+	config.WarnDashboardToken(cfg.Server.DashboardToken)
+
 	// Both of these widen what an authenticated dashboard user can read, and
 	// both were unreachable until their config keys were wired, so an operator
 	// turning one on for the first time should see it in the log rather than
-	// discover it from an audit trail later. The dashboard token is the barrier
-	// for both.
+	// discover it from an audit trail later. Logged next to the token warnings
+	// because the token IS the barrier for both.
 	if cfg.Server.DebugMode {
 		slog.Warn("server.debug_mode is ON — /api/debug/pprof and /api/debug/vars are registered; goroutine stacks carry file paths and queue contents",
 			"gates", "requireAuth + loopback-only + refused entirely when dashboard_token is empty",

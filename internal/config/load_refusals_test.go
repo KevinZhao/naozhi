@@ -100,3 +100,35 @@ agents:
 		}
 	})
 }
+
+// Accepted tokens that are empty or under weakDashboardTokenLen warn; 16 and
+// up are silent. Load logs the same warning through validateServer.
+func TestWarnDashboardToken(t *testing.T) {
+	cases := []struct {
+		name, token, want string
+	}{
+		{"empty", "", "SECURITY: dashboard_token is empty"},
+		{"eight chars", "12345678", "dashboard_token is short"},
+		{"fifteen chars", "0123456789abcde", "dashboard_token is short"},
+		{"sixteen chars", "0123456789abcdef", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			direct := captureSlog(t, func() { WarnDashboardToken(tc.token) })
+			viaLoad := captureSlog(t, func() {
+				if _, err := Load(writeCfg(t, "server:\n  dashboard_token: \""+tc.token+"\"\n")); err != nil {
+					t.Fatalf("Load: %v", err)
+				}
+			})
+			for src, out := range map[string]string{"WarnDashboardToken": direct, "Load": viaLoad} {
+				if tc.want == "" {
+					if strings.Contains(out, "dashboard_token") {
+						t.Errorf("%s logged %q for a %d-char token, want no token warning", src, out, len(tc.token))
+					}
+				} else if !strings.Contains(out, tc.want) {
+					t.Errorf("%s logged %q, want it to contain %q", src, out, tc.want)
+				}
+			}
+		})
+	}
+}

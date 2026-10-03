@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -81,4 +82,20 @@ func TestStartWatchdogLoop_StopsOnCtxCancel(t *testing.T) {
 	startWatchdogLoop(ctx2, nil)
 	cancel2()
 	time.Sleep(20 * time.Millisecond)
+}
+
+// config.Load logs the dashboard-token warning under Go's default stderr
+// handler; main must log it again once setupLogging has installed the
+// configured one, or the service log never carries it.
+func TestMain_WarnsDashboardTokenAfterSetupLogging(t *testing.T) {
+	t.Parallel()
+	src := readSrc(t, "main.go")
+	setup := strings.Index(src, "\tsetupLogging(cfg)\n")
+	warn := strings.Index(src, "config.WarnDashboardToken(cfg.Server.DashboardToken)")
+	if setup < 0 {
+		t.Fatal("main.go: setupLogging(cfg) call not found")
+	}
+	if warn < setup {
+		t.Errorf("main.go: config.WarnDashboardToken must be called after setupLogging(cfg) (setup at %d, warn at %d)", setup, warn)
+	}
 }
