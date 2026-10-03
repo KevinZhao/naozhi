@@ -29,14 +29,24 @@ type Manager struct {
 	// ProjectsConfig.IncludeRoot) so files directly under root resolve to an owner.
 	includeRoot bool
 
+	// scanMu serialises Scan; it guards index and is never taken under mu.
+	scanMu sync.Mutex
+
 	// indexPath is where index persists ("" = in memory only), fixed at
 	// construction. index holds the sidebar CreatedAt for projects whose
-	// project.yaml carries none; guarded by mu.
+	// project.yaml carries none; guarded by scanMu.
 	indexPath string
 	index     *projectIndex
 
+	// scanDiskHook, when set (tests only), runs at the end of every scanDisk.
+	scanDiskHook func()
+
 	mu       sync.RWMutex
 	projects map[string]*Project // name -> project
+
+	// mutGen is bumped under mu.Lock by every writer that changes a project's
+	// config, so a Scan whose lock-free disk read overlapped one can tell.
+	mutGen uint64
 
 	// bindingIndex: "platform:chatType:chatID" -> project name (built from all ChatBindings)
 	bindingIndex map[string]string
@@ -120,18 +130,61 @@ func dirModTimeMillis(entry os.DirEntry, path string) int64 {
 
 // Scan discovers all subdirectories under root and loads their project configs.
 // It never writes into a project directory; only the projects index is saved
-// (plus a one-shot removal of legacy stubs, see sweepLegacyStubs).
-// The whole scan — disk read, CreatedAt resolution, m.projects swap — runs
-// under the write lock so it is atomic w.r.t. the writers (BindChat /
-// SetFavorite / UpdateConfig / UnbindAllChat), which persist under the same
-// lock. Scan is periodic and mutations are rare, so IO under lock is fine.
+// (plus a one-shot removal of legacy stubs, see sweepLegacyStubs). The disk
+// reads run without m.mu, so ProjectForChat and ResolveWorkspaces never wait
+// on them; only the map swap takes the write lock. A writer that persisted
+// meanwhile (mutGen moved) may postdate those reads, so Scan then re-reads
+// under the lock: a swap never drops a binding, favorite or config edit.
 func (m *Manager) Scan() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.scanMu.Lock()
+	defer m.scanMu.Unlock()
 
+	m.mu.RLock()
+	gen := m.mutGen
+	m.mu.RUnlock()
+
+	res, err := m.scanDisk()
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	if m.mutGen != gen {
+		if res, err = m.scanDisk(); err != nil {
+			m.mu.Unlock()
+			return err
+		}
+	}
+	m.projects = res.projects
+	m.rebuildBindingIndex()
+	// Drop the inode-walk memo (keyed to the replaced project set) and bump the
+	// generation under the same write lock, so no reader sees fresh projects
+	// with a stale cache and no lock-free fallback keeps a stale Store (#2228).
+	m.resolveCache.Clear()
+	m.resolveGen.Add(1)
+	m.mu.Unlock()
+
+	m.index.replace(res.nextIndex)
+	m.sweepLegacyStubs()
+
+	slog.Info("scanned projects", "root", m.root, "count", len(res.projects))
+	return nil
+}
+
+// scanResult is one scanDisk pass: the project set to publish and the
+// CreatedAt index that goes with it.
+type scanResult struct {
+	projects  map[string]*Project
+	nextIndex map[string]int64
+}
+
+// scanDisk reads root and every project's config, git remote and mtime, and
+// resolves CreatedAt. It touches no m.mu-guarded state (m.index is scanMu's),
+// so it is safe both lock-free and under m.mu.Lock.
+func (m *Manager) scanDisk() (scanResult, error) {
 	entries, err := os.ReadDir(m.root)
 	if err != nil {
-		return fmt.Errorf("scan projects root: %w", err)
+		return scanResult{}, fmt.Errorf("scan projects root: %w", err)
 	}
 
 	projects := make(map[string]*Project, len(entries))
@@ -246,9 +299,6 @@ func (m *Manager) Scan() error {
 			nextIndex[p.Path] = p.Config.CreatedAt
 		}
 	}
-	m.index.replace(nextIndex)
-	m.sweepLegacyStubs(projects)
-
 	// Root project sorts strictly LAST: in-memory-only CreatedAt = max + 1,
 	// recomputed every boot. Override unconditionally so a real project.yaml
 	// dropped at the workspace root cannot place root mid-list.
@@ -267,16 +317,10 @@ func (m *Manager) Scan() error {
 		}
 	}
 
-	m.projects = projects
-	m.rebuildBindingIndex()
-	// Drop the inode-walk memo (keyed to the replaced project set) and bump the
-	// generation under the same write lock, so no reader sees fresh projects
-	// with a stale cache and no lock-free fallback keeps a stale Store (#2228).
-	m.resolveCache.Clear()
-	m.resolveGen.Add(1)
-
-	slog.Info("scanned projects", "root", m.root, "count", len(projects))
-	return nil
+	if m.scanDiskHook != nil {
+		m.scanDiskHook()
+	}
+	return scanResult{projects: projects, nextIndex: nextIndex}, nil
 }
 
 // Get returns a snapshot (copy) of the project by name, or nil if not found.
@@ -333,9 +377,10 @@ func (m *Manager) BindChat(projectName, platform, chatType, chatID string) error
 	if err := validateBindingField(platform, chatType, chatID); err != nil {
 		return fmt.Errorf("%w: BindChat: %s", ErrInvalidConfig, err.Error())
 	}
-	// Hold the write lock across saveConfigToPath: the periodic Scan() takes the
-	// same lock and reloads m.projects from disk, so a save after Unlock would
-	// let a Scan clobber the in-memory binding. saveConfigToPath never re-enters m.mu.
+	// Hold the write lock across saveConfigToPath: Scan swaps m.projects under
+	// the same lock, re-reading disk when mutGen moved, so a save after Unlock
+	// could miss that re-read and let Scan clobber the in-memory binding.
+	// saveConfigToPath never re-enters m.mu.
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p, ok := m.projects[projectName]
@@ -354,6 +399,7 @@ func (m *Manager) BindChat(projectName, platform, chatType, chatID string) error
 	}
 
 	p.Config.ChatBindings = append(p.Config.ChatBindings, binding)
+	m.mutGen++
 	m.rebuildBindingIndex()
 	return saveConfigToPath(p.configPath(), snapshotConfig(p))
 }
@@ -392,6 +438,7 @@ func (m *Manager) UnbindAllChat(platform, chatType, chatID string) error {
 		saves = append(saves, pendingSave{path: p.configPath(), cfg: snapshotConfig(p)})
 	}
 	if changed {
+		m.mutGen++
 		m.rebuildBindingIndex()
 	}
 
@@ -419,6 +466,7 @@ func (m *Manager) SetFavorite(name string, favorite bool) error {
 		return nil
 	}
 	p.Config.Favorite = favorite
+	m.mutGen++
 	return saveConfigToPath(p.configPath(), snapshotConfig(p))
 }
 
@@ -440,6 +488,7 @@ func (m *Manager) UpdateConfig(name string, cfg ProjectConfig) error {
 		cfg.CreatedAt = p.Config.CreatedAt
 	}
 	p.Config = cfg
+	m.mutGen++
 	m.rebuildBindingIndex()
 	return saveConfigToPath(p.configPath(), snapshotConfig(p))
 }
