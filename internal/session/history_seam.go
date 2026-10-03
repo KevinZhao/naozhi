@@ -80,3 +80,18 @@ func loadBeforeSeam(ctx context.Context, src history.Source, seamMS int64, held 
 		n = limit + len(entries) - len(fresh)
 	}
 }
+
+// hasOlderThanSlice reports whether an entry the chronological slice lacks
+// exists at or below its earliest millisecond (ring or disk): one probe that
+// re-admits that millisecond and ignores the slice's own entries there. It
+// fails OPEN when the probe degraded: a "load earlier" button on exhausted
+// history is a benign no-op, a wrongly hidden one is unrecoverable.
+func (s *ManagedSession) hasOlderThanSlice(ctx context.Context, entries []clievent.EventEntry) bool {
+	oldest := entries[0].Time
+	held := appendAtTime(nil, entries, oldest)
+	older, degraded := s.eventEntriesBeforeCtx(ctx, oldest+1, len(held)+1)
+	if len(dropHeld(older, oldest, held)) > 0 {
+		return true
+	}
+	return degraded
+}

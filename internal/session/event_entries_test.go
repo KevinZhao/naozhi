@@ -210,10 +210,10 @@ func TestEventEntriesBeforeCtx_NilSourceReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestEventEntriesBeforeCtx_SourceErrorTreatedAsEnd(t *testing.T) {
-	// A Source error must not propagate as "partial result" — the handler
-	// treats it as end-of-history so the dashboard stops retrying. We log
-	// the error for the operator but return nil to the caller.
+func TestEventEntriesBeforeCtx_SourceErrorReturnsMemoryPart(t *testing.T) {
+	// A Source error does not propagate: the reader logs it and returns what
+	// memory held (nothing here). EventPageBeforeCtx is the caller that turns
+	// it into a fail-open hasMore.
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
 	fake := &fakeHistorySource{err: errors.New("disk read failed")}

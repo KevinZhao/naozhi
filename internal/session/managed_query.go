@@ -540,17 +540,27 @@ func (s *ManagedSession) EventEntriesBefore(beforeMS int64, limit int) []clieven
 // disk), so disk copies of it are dropped. The memory part carries its
 // gap-fill turns (withGapFill), so a page may exceed `limit`.
 func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int64, limit int) []clievent.EventEntry {
+	entries, _ := s.eventEntriesBeforeCtx(ctx, beforeMS, limit)
+	return entries
+}
+
+// eventEntriesBeforeCtx is EventEntriesBeforeCtx plus a degraded flag: the
+// disk tier was needed but not fully read (a source error, a ctx done after
+// the read since sources swallow cancellation as a clean short page, or a
+// zero-Time memory anchor), so a short page does not mean end-of-history.
+// A nil source is not degraded: there is no disk tier below memory.
+func (s *ManagedSession) eventEntriesBeforeCtx(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, bool) {
 	if limit <= 0 {
-		return nil
+		return nil, false
 	}
 	mem := s.EventEntriesBefore(beforeMS, limit)
 	filled := s.withGapFill(mem, beforeMS)
 	if len(mem) >= limit {
-		return filled
+		return filled, false
 	}
 	src := s.loadHistorySource()
 	if src == nil {
-		return filled
+		return filled, false
 	}
 	var entries []clievent.EventEntry
 	var err error
@@ -559,23 +569,38 @@ func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int
 	} else {
 		// A zero Time would read as "no upper bound" and overlap memory.
 		if mem[0].Time <= 0 {
-			return filled
+			return filled, true
 		}
 		entries, err = loadBeforeSeam(ctx, src, mem[0].Time, filled, limit-len(mem))
 	}
 	if err != nil {
-		// Treat as end-of-history, matching the JSONL load sites in router.go.
 		slog.Warn("history source load failed", "key", s.key, "err", err)
-		return filled
+		return filled, true
 	}
+	degraded := ctx.Err() != nil
 	if len(mem) == 0 {
 		sortEntriesByTimeStable(entries)
-		return entries
+		return entries, degraded
 	}
 	// Fresh slice: the source may hand back a buffer it still owns.
 	out := make([]clievent.EventEntry, 0, len(entries)+len(filled))
 	out = append(out, entries...)
-	return append(out, filled...)
+	return append(out, filled...), degraded
+}
+
+// EventPageBeforeCtx is the dashboard's "load earlier" page:
+// EventEntriesBeforeCtx plus an authoritative hasMore, so the client need
+// not read a short page as exhausted. It fails OPEN on a degraded read;
+// otherwise hasMore is hasOlderThanSlice of the page.
+func (s *ManagedSession) EventPageBeforeCtx(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, bool) {
+	entries, degraded := s.eventEntriesBeforeCtx(ctx, beforeMS, limit)
+	if degraded {
+		return entries, true
+	}
+	if len(entries) == 0 {
+		return entries, false
+	}
+	return entries, s.hasOlderThanSlice(ctx, entries)
 }
 
 // countVisibleEntries returns how many entries the dashboard would render as
@@ -605,33 +630,16 @@ func (s *ManagedSession) EventLastNVisibleCtx(ctx context.Context, visibleTarget
 }
 
 // EventInitialPageCtx returns the dashboard's initial-history slice plus a
-// hasMore flag: whether any entry the slice lacks exists at or below its
-// earliest millisecond (ring or disk). Decided server-side because the server
+// hasMore flag (hasOlderThanSlice). Decided server-side because the server
 // truncates by visible bubble count, which a client total-count heuristic
-// cannot see. The probe is one EventEntriesBeforeCtx lookup (so it sees disk
-// even when the ring is short) that re-admits that millisecond and ignores
-// the slice's own entries there. An empty slice reports hasMore=false. ctx
-// bounds both the read and the probe.
+// cannot see. An empty slice reports hasMore=false. ctx bounds both the read
+// and the probe, so a walk that drains the budget leaves hasMore fail-open.
 func (s *ManagedSession) EventInitialPageCtx(ctx context.Context, visibleTarget, maxTotal int) ([]clievent.EventEntry, bool) {
 	entries := s.eventLastNVisibleCtx(ctx, visibleTarget, maxTotal)
 	if len(entries) == 0 {
 		return entries, false
 	}
-	oldest := entries[0].Time
-	held := appendAtTime(nil, entries, oldest)
-	older := s.EventEntriesBeforeCtx(ctx, oldest+1, len(held)+1)
-	if len(dropHeld(older, oldest, held)) > 0 {
-		return entries, true
-	}
-	// EventEntriesBeforeCtx swallows ctx cancellation as nil, and the walk
-	// above shares the ctx budget, so a starved probe looks like end-of-
-	// history. Fail OPEN: a "load earlier" button on exhausted history is a
-	// benign no-op, a wrongly hidden one is unrecoverable. Only a clean
-	// (non-cancelled) empty probe means "no more".
-	if ctx.Err() != nil {
-		return entries, true
-	}
-	return entries, false
+	return entries, s.hasOlderThanSlice(ctx, entries)
 }
 
 func (s *ManagedSession) eventLastNVisibleCtx(ctx context.Context, visibleTarget, maxTotal int) []clievent.EventEntry {

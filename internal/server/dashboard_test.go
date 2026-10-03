@@ -335,22 +335,28 @@ func TestHandleAPISessionEvents_InitialPageNoHasMoreHeader(t *testing.T) {
 	}
 }
 
-// TestHandleAPISessionEvents_BeforePageNoHasMoreHeader: the pagination path
-// (before>0) must not emit the header — it's an initial-page-only signal.
-func TestHandleAPISessionEvents_BeforePageNoHasMoreHeader(t *testing.T) {
+// TestHandleAPISessionEvents_BeforePageSetsHasMoreHeader: the pagination
+// path (before>0) always emits the header, so the client need not read a
+// short page as exhausted.
+func TestHandleAPISessionEvents_BeforePageSetsHasMoreHeader(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 	key := seedEventSession(t, srv, 1000, 2000, 3000, 4000, 5000)
 
-	req := httptest.NewRequest(http.MethodGet,
-		"/api/sessions/events?key="+key+"&before=3500&limit=10", nil)
-	w := httptest.NewRecorder()
-	srv.sessionH.HandleEvents(w, req)
+	for _, tc := range []struct{ query, want string }{
+		{"&before=3500&limit=10", "0"},
+		{"&before=3500&limit=2", "1"},
+	} {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/sessions/events?key="+key+tc.query, nil)
+		w := httptest.NewRecorder()
+		srv.sessionH.HandleEvents(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
-	}
-	if got := w.Header().Get("X-Events-Has-More"); got != "" {
-		t.Errorf("X-Events-Has-More = %q, want \"\" (header is initial-page only)", got)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200", tc.query, w.Code)
+		}
+		if got := w.Header().Get("X-Events-Has-More"); got != tc.want {
+			t.Errorf("%s: X-Events-Has-More = %q, want %q", tc.query, got, tc.want)
+		}
 	}
 }
 
@@ -479,8 +485,9 @@ func TestHandleAPISessionEvents_BeforeFallsBackToHistorySource(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if src.called != 1 {
-		t.Errorf("history.Source calls = %d, want 1", src.called)
+	// One page read plus the has-more probe below the page's oldest entry.
+	if src.called != 2 {
+		t.Errorf("history.Source calls = %d, want 2", src.called)
 	}
 	if len(entries) != 2 {
 		t.Fatalf("len = %d, want 2", len(entries))
@@ -493,12 +500,13 @@ func TestHandleAPISessionEvents_BeforeFallsBackToHistorySource(t *testing.T) {
 // TestHandleAPISessionEvents_BeforeSkipsSourceWhenMemoryCovers pins the
 // inverse: when memory fills the whole page, the Source must not be
 // consulted. Preserves the hot-path invariant that the first N pages of
-// "load earlier" don't incur disk I/O. (A short memory page is the memory
-// bottom and is topped up from the Source — see
+// "load earlier" don't incur disk I/O: memory also answers the has-more
+// probe while it holds an entry below the page. (A short memory page is the
+// memory bottom and is topped up from the Source — see
 // TestEventEntriesBeforeCtx_TopsUpShortMemoryPageFromSource.)
 func TestHandleAPISessionEvents_BeforeSkipsSourceWhenMemoryCovers(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
-	key := seedEventSession(t, srv, 1000, 2000, 3000)
+	key := seedEventSession(t, srv, 500, 1000, 2000, 3000)
 	sess := srv.router.SessionFor(key)
 	if sess == nil {
 		t.Fatalf("session %q not registered", key)
@@ -517,6 +525,9 @@ func TestHandleAPISessionEvents_BeforeSkipsSourceWhenMemoryCovers(t *testing.T) 
 	}
 	if src.called != 0 {
 		t.Errorf("memory hit must not consult Source, got %d calls", src.called)
+	}
+	if got := w.Header().Get("X-Events-Has-More"); got != "1" {
+		t.Errorf("X-Events-Has-More = %q, want \"1\" (500 is below the page)", got)
 	}
 }
 
