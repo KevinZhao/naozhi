@@ -81,8 +81,8 @@ test('overview card: ledger USD, credits on their own line, trust flags and heal
   }
 });
 
-// renderSystemView repaints when refreshCostSummary reports a new snapshot
-// (S20e: the fetch no longer repaints the view itself). Time is frozen with
+// renderSystemView repaints the card when refreshCostSummary resolves true
+// (a new snapshot); the fetch itself never paints. Time is frozen with
 // page.clock, so no poll can repaint the card, and the ledger response is held
 // until the session-sum fallback has painted: the switch can only come from
 // that repaint. Two more trips into the view at 14 s and 28 s stay inside the

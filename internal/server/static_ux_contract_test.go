@@ -265,22 +265,34 @@ func TestDashboardJS_RenderMdXSSContract(t *testing.T) {
 	// a fragment-only `#...`. The current allowlist regex is the
 	// load-bearing line — pin it so a future "let me add mailto:" or
 	// "let me allow `/foo`" patch fails this assertion. RNEW-SEC-007.
-	if !strings.Contains(js, "if (/^(https?:|#)/i.test(trimmed)) return trimmed;") {
-		t.Error("safeUrl must keep its strict (https?:|#) allowlist — relaxing it (e.g. allowing mailto:, /, ?) would let a malicious markdown link sneak past the scheme gate (R172-SEC-H1 / #436)")
+	// render_md.js imports safeUrl from utilities.js (pinned in (2)), so
+	// the definition is read from that file alone and must be its only one:
+	// a strict copy elsewhere in the module set cannot vouch for it.
+	util := string(staticAssetBytes("utilities.js"))
+	if util == "" {
+		t.Fatal("static/utilities.js is not in the embedded asset table (static_assets.go)")
 	}
-	// safeUrl's fall-through must return a literal '#' so a rejected
-	// URL emits a no-op anchor instead of the original payload.
-	safeUrlIdx := strings.Index(js, "function safeUrl(u)")
+	if n := strings.Count(util, "function safeUrl("); n != 1 {
+		t.Fatalf("utilities.js defines safeUrl %d times, want exactly 1", n)
+	}
+	safeUrlIdx := strings.Index(util, "function safeUrl(u)")
 	if safeUrlIdx < 0 {
-		t.Fatal("safeUrl function not found in dashboard.js")
+		t.Fatal("safeUrl(u) function not found in utilities.js")
 	}
-	rest := js[safeUrlIdx:]
+	rest := util[safeUrlIdx:]
 	end := strings.Index(rest[1:], "\nfunction ")
 	if end < 0 {
 		end = len(rest)
 	}
 	body := rest[:end]
-	if !strings.Contains(body, "return '#';") {
+	if !strings.Contains(body, "if (/^(https?:|#)/i.test(trimmed)) return trimmed;") {
+		t.Error("safeUrl must keep its strict (https?:|#) allowlist — relaxing it (e.g. allowing mailto:, /, ?) would let a malicious markdown link sneak past the scheme gate (R172-SEC-H1 / #436)")
+	}
+	// safeUrl's fall-through must return a literal '#' so a rejected
+	// URL emits a no-op anchor instead of the original payload. Pin the
+	// closing statement: the `if (!u) return '#';` guard also contains
+	// the bare substring and would satisfy a looser match.
+	if !strings.Contains(body, "\n  return '#';\n}") {
 		t.Error("safeUrl must fall through to `return '#';` for any unsafe scheme (javascript:, data:, vbscript:, …) so renderMd anchors emit a no-op href instead of the raw payload (R172-SEC-H1 / #436)")
 	}
 
@@ -293,8 +305,8 @@ func TestDashboardJS_RenderMdXSSContract(t *testing.T) {
 	// We pin the exact substring shape used today; a refactor that keeps
 	// the safety properties but reshapes the call site can update both
 	// the source and the test in lockstep.
-	// S20e (#3026): render_md.js imports safeUrl from utilities.js, so the
-	// call site is the safeUrl pinned in (1) and not a same-named local.
+	// render_md.js imports safeUrl from utilities.js, so the call site
+	// resolves to the definition pinned in (1) and not a same-named local.
 	if !strings.Contains(string(rmd), "const safe = safeUrl(url);") {
 		t.Error("inlineMd's [text](url) branch must call safeUrl(url) before emitting the anchor — without it, `[click](javascript:alert(1))` would render an executable href (R172-SEC-H1 / #436)")
 	}
