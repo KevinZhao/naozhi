@@ -313,11 +313,6 @@ func main() {
 
 	agents, cronAgents := buildAgentOpts(cfg)
 
-	if cmd, ok := firstUndefinedAgentCommand(cfg.AgentCommands, agents); !ok {
-		slog.Error("agent_commands references undefined agent",
-			"command", cmd, "agent", cfg.AgentCommands[cmd])
-		os.Exit(1)
-	}
 	metrics.StartupPhasePlatformsMs.Set(time.Since(t0).Milliseconds())
 
 	// Cron + sysession orchestration lives in wireup.WireSchedulers; main keeps
@@ -591,14 +586,9 @@ func main() {
 	// Operators copy these URLs into the IM console; WS-only platforms omitted.
 	logWebhookEndpoints(cfg, platforms)
 
-	if cfg.Server.DashboardToken == "" {
-		slog.Warn("dashboard_token is not set — dashboard and WebSocket API are accessible without authentication. Set server.dashboard_token in config.yaml for production use.")
-	} else if len(cfg.Server.DashboardToken) < 8 {
-		slog.Error("dashboard_token is too short — use at least 8 characters")
-		os.Exit(1)
-	} else if len(cfg.Server.DashboardToken) < 16 {
-		slog.Warn("dashboard_token is short — consider using 16+ random characters for stronger security")
-	}
+	// config.Load already logged this, but before setupLogging installed the
+	// configured handler, so it went to stderr rather than the service log.
+	config.WarnDashboardToken(cfg.Server.DashboardToken)
 
 	// Both of these widen what an authenticated dashboard user can read, and
 	// both were unreachable until their config keys were wired, so an operator

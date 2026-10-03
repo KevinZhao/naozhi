@@ -212,3 +212,36 @@ func TestConfigCheck_ReplacedValuesExit1(t *testing.T) {
 		})
 	}
 }
+
+// TestConfigCheck_StartupRefusalsAreFatal: an agent_commands entry naming an
+// undefined agent and a dashboard_token under 8 characters are configs the
+// server refuses to run, so `config check` must report them as Fatal (exit 2)
+// rather than OK.
+func TestConfigCheck_StartupRefusalsAreFatal(t *testing.T) {
+	cases := []struct {
+		name, body, want string
+	}{
+		{"undefined agent command", cleanCheckConfig + "agent_commands:\n  /x: ghost\n",
+			`agent_commands["/x"] references undefined agent "ghost"`},
+		{"short dashboard token", cleanCheckConfig + "server:\n  dashboard_token: \"short\"\n",
+			"server.dashboard_token is too short"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			code := configCheck([]string{"-config", writeCheckConfig(t, tc.body), "-json"}, &out)
+			if code != 2 {
+				t.Fatalf("exit = %d, want 2; output:\n%s", code, out.String())
+			}
+			var doc struct {
+				Fatal []string `json:"fatal"`
+			}
+			if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+				t.Fatalf("-json output not parsable: %v\n%s", err, out.String())
+			}
+			if len(doc.Fatal) != 1 || !strings.Contains(doc.Fatal[0], tc.want) {
+				t.Errorf("fatal = %q, want one entry containing %q", doc.Fatal, tc.want)
+			}
+		})
+	}
+}
