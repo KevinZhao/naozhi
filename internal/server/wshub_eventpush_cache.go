@@ -28,10 +28,10 @@ var marshalCacheEntryPool = sync.Pool{
 
 // historyMarshalCache is the per-session marshal coalescer: when N dashboard
 // tabs subscribe to one session, a notify wave wakes N pushLoops that would
-// each marshal the identical (key, entries-tail) payload. One slot per key
+// each marshal the identical (key, entries-chunk) payload. One slot per key
 // holds the fingerprint (lastTime, latestEntryTime, count, firstUUID,
 // lastUUID) plus the bytes. The UUID pair distinguishes two DIFFERENT
-// same-millisecond tails (#2432); entries are a chronological tail of one
+// same-millisecond chunks (#2432); entries are a contiguous run of one
 // append-only log, so equal (first, last) UUIDs + count imply an identical
 // slice. Entries live in a sync.Map so cache hits do not serialise behind a
 // global mutex; the per-key e.mu serialises marshal-once + fingerprint update
@@ -67,7 +67,7 @@ func (c *historyMarshalCache) slot(key string) *marshalCacheEntry {
 	return e.(*marshalCacheEntry)
 }
 
-// getOrMarshal returns the marshaled bytes for the given (key, entries) tail.
+// getOrMarshal returns the marshaled bytes for the given (key, entries) chunk.
 // On a fingerprint hit the cached bytes are returned and `marshal` is NOT
 // called. On miss `marshal` is invoked exactly once under the per-key mutex
 // and its result is cached for the rest of the fan-out wave. Returns
@@ -82,7 +82,7 @@ func (c *historyMarshalCache) getOrMarshal(
 	marshal func() ([]byte, error),
 ) (data []byte, fromCache bool, err error) {
 	if len(entries) == 0 {
-		// No fingerprint for an empty tail; skip the cache (callers already
+		// No fingerprint for an empty chunk; skip the cache (callers already
 		// short-circuit this, the guard keeps the helper honest).
 		data, err = marshal()
 		return data, false, err

@@ -21,21 +21,13 @@ const (
 	defaultResubscribeInterval = 5 * time.Second
 )
 
-// maxHistoryPushEntries caps a single WS "history" push so a full-ring
-// catch-up (500 entries, ~100 KB) cannot fan out to every connection at once.
-// 50 matches the dashboard's paginated /api/sessions/events tail fetch;
-// older entries stay reachable via `before=`.
+// maxHistoryPushEntries is the per-frame chunk size of a WS "history" push:
+// a full-ring catch-up (500 entries, ~100 KB) goes out as several ordered
+// frames instead of one, so no single frame hogs the client's send buffer.
 const maxHistoryPushEntries = 50
 
-func capHistoryBatch(entries []clievent.EventEntry) []clievent.EventEntry {
-	if len(entries) <= maxHistoryPushEntries {
-		return entries
-	}
-	return entries[len(entries)-maxHistoryPushEntries:]
-}
-
-// marshalHistoryFrame produces the WS "history" frame bytes for key + entries
-// tail, coalescing the marshal across all eventPushLoop goroutines in
+// marshalHistoryFrame produces the WS "history" frame bytes for key + one
+// chunk of entries, coalescing the marshal across all eventPushLoop goroutines in
 // lock-step on the same session. The per-key fingerprint (lastTime, latest
 // Time, count, first/last UUID) forces a fresh marshal for out-of-lockstep
 // subscribers. The returned []byte may be handed to wsClient.SendRaw from
@@ -135,15 +127,15 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 }
 
 // backfillSubscriberEvents drains new entries for sess through the caller's
-// SinceCursor, marshals the batched "history" frame via the coalesced cache,
-// and writes it to c. Returns (alive, buf) — the caller must exit when alive
+// SinceCursor and writes them to c, in order, as "history" frames of at most
+// maxHistoryPushEntries. Returns (alive, buf) — the caller must exit when alive
 // is false (the client closed mid-drain) and retain buf for the next wave.
 //
-// clievent.SinceCursor (inclusive watermark query + UUID dedup at the trailing
-// millisecond) is what keeps same-millisecond entries landing in a LATER
-// notify wave from being dropped (#2402); redeliveries that reach the client
-// are absorbed by the dashboard's UUID dedup. On marshal error the cursor is
-// not advanced, so the same entries are retried on the next notify.
+// The cursor advances per frame and only once the frame is enqueued: a marshal
+// error or a send dropped on a full buffer stops the wave with the rest still
+// above the watermark, so the next notify retries from there (#3008). The
+// inclusive watermark query + UUID dedup keep same-millisecond entries split
+// across waves or frames from being lost or resent (#2402).
 func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.ManagedSession, csr *clievent.SinceCursor, buf []clievent.EventEntry) (bool, []clievent.EventEntry) {
 	// buf[:0] lets both the dead-session and live-process paths reuse capacity
 	// across notify waves (#1740); entries are consumed synchronously below and
@@ -152,25 +144,27 @@ func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.Ma
 	entries := sess.EventEntriesSinceAppend(buf[:0], csr.QueryAfter())
 	fetched := entries
 	entries = csr.Filter(entries)
-	if len(entries) == 0 {
-		return true, fetched
+	// Chunks are sub-slices of entries, but `fetched` is what is returned so
+	// the buffer keeps its full capacity across waves.
+	for len(entries) > 0 {
+		select {
+		case <-c.done:
+			return false, fetched
+		default:
+		}
+		chunk := entries[:min(len(entries), maxHistoryPushEntries)]
+		// The marshal-cache fingerprint keys on the pre-advance watermark, so
+		// lock-step tabs still coalesce onto one marshal per chunk.
+		data, err := h.marshalHistoryFrame(key, csr.Watermark(), chunk)
+		if err != nil {
+			return true, fetched
+		}
+		if !c.trySendRaw(data) {
+			return true, fetched
+		}
+		csr.Advance(chunk)
+		entries = entries[len(chunk):]
 	}
-	select {
-	case <-c.done:
-		return false, fetched
-	default:
-	}
-	// Marshal/advance from the capped tail view but return the full `fetched`
-	// slice so its capacity is preserved (a tail slice shrinks cap every call).
-	capped := capHistoryBatch(entries)
-	// The marshal-cache fingerprint keys on the pre-advance watermark, so
-	// lock-step tabs still coalesce onto one marshal.
-	data, err := h.marshalHistoryFrame(key, csr.Watermark(), capped)
-	if err != nil {
-		return true, fetched
-	}
-	c.SendRaw(data)
-	csr.Advance(capped)
 	return true, fetched
 }
 
