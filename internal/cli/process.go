@@ -101,6 +101,13 @@ type Process struct {
 	// meter is what the process has reported about itself (cost, context
 	// usage, effort, model, binary version, metering, shadow usage).
 	meter procmeter.Meter
+	// startedAt is when naozhi attached to the process; endHook delivers
+	// its ProcessEnd; detached is set by Detach before it lets go, closing
+	// by Close before it asks the shim to shut down.
+	startedAt time.Time
+	endHook   endHook
+	detached  atomic.Bool
+	closing   atomic.Bool
 	// spawnDiags is the gate decisions of this spawn (SpawnDiagsFor), set once
 	// by Wrapper.Spawn before readLoop; runtime observation only, never
 	// persisted. nil = none.
@@ -280,6 +287,7 @@ func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
 		noOutputTimeout: noOutputTimeout,
 		totalTimeout:    totalTimeout,
 		eventLog:        ring.NewEventLog(0),
+		startedAt:       time.Now(),
 	}
 	p.link.init(conn, reader, writer, cliPID, shimPID)
 	return p
@@ -348,6 +356,7 @@ func (p *Process) Kill() {
 // "close_stdin" leaves the shim listening for up to 30s and trips "refusing to
 // clobber" on fast Reset+Recreate. To keep the shim alive, use Detach().
 func (p *Process) Close() {
+	p.closing.Store(true)
 	// Short write deadline: a live shim with a full TCP buffer would otherwise
 	// pin the write lock until OS keepalive (minutes), stalling
 	// heartbeat/interrupt and Router shutdown past SIGTERM grace.
@@ -371,6 +380,7 @@ func (p *Process) Close() {
 // shutdown). A short write deadline keeps Router.Shutdown's wg.Wait() from
 // being pinned for minutes by a dead/slow socket during SIGTERM handling.
 func (p *Process) Detach() {
+	p.detached.Store(true)
 	if err := p.link.sendFinal(shimClientMsg{Type: "detach"}, 2*time.Second, true); err != nil {
 		slog.Debug("detach: shim detach send failed", "err", err)
 	}

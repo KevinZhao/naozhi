@@ -99,13 +99,13 @@ type releasedKey struct {
 
 // releaseKeys finishes resets outside any transaction. It closes each live
 // process and waits for its key's shim socket to go, so a same-key StartShim
-// does not hit the dial-first "refusing to clobber" guard; proc may be nil or
-// dead with the socket still bound (CLI crash, stale pointer), so the wait
-// runs regardless. A socket still bound after the bounded wait flags its key
-// shim-stuck, and the next GetOrCreate wraps its spawn error with
-// ErrShimStuck (#1324). Several keys are released concurrently, so a chat
-// reset waits one window rather than one per key. The Broadcast at the end
-// wakes a Shutdown waiting on one of the processes.
+// does not hit the dial-first "refusing to clobber" guard. A key whose proc is
+// nil or dead may still have its shim bound (CLI crash, stale pointer): that
+// shim is offered a dead-CLI retire, and the wait runs unless it took effect.
+// A socket still bound after the bounded wait flags its key shim-stuck, and
+// the next GetOrCreate wraps its spawn error with ErrShimStuck (#1324). Keys
+// are released concurrently, so a chat reset waits one window rather than one
+// per key. The Broadcast at the end wakes a Shutdown waiting on a process.
 func (r *Router) releaseKeys(keys []releasedKey) {
 	if len(keys) == 0 {
 		return
@@ -115,6 +115,8 @@ func (r *Router) releaseKeys(keys []releasedKey) {
 		k := keys[i]
 		if k.proc != nil && k.proc.Alive() {
 			k.proc.Close()
+		} else if r.backends.retireDeadShim(k.key) {
+			return
 		}
 		stuck[i] = !waitSocketGoneForKey(k.key, 2*time.Second)
 	}

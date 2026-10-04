@@ -68,6 +68,27 @@ func (b *BackendRegistry) shimManagers() []*shim.Manager {
 	return out
 }
 
+// resetRetireBudget bounds one manager's dead-CLI retire probe on a reset.
+const resetRetireBudget = 3 * time.Second
+
+// retireDeadShim offers key's shim a retire from each shim manager (see
+// shim.Manager.RetireDeadShim, which acts only on a shim whose own hello says
+// its CLI is dead) and reports whether one of them took its socket down.
+func (b *BackendRegistry) retireDeadShim(key string) bool {
+	for _, mgr := range b.shimManagers() {
+		ctx, cancel := context.WithTimeout(context.Background(), resetRetireBudget)
+		retired, err := mgr.RetireDeadShim(ctx, key)
+		cancel()
+		if retired {
+			return true
+		}
+		if err != nil {
+			slog.Debug("reset: dead-CLI shim retire did not apply", "key", key, "err", err)
+		}
+	}
+	return false
+}
+
 // shimState classifies how ReconnectShimsCtx should dispatch a discovered shim.
 // The zero value (shimStateSkip) is the safe no-op, so a new bool flag that
 // defaults false cannot silently reroute an existing case.
@@ -340,6 +361,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		// Timeout-bounded so a stuck shim handshake cannot stall NewRouter
 		// indefinitely; on timeout we log and keep iterating.
 		lastSeq := int64(0) // full replay on restart
+		mark := markTranscript(r.hist.claudeDir, r.hist.backendDirs, recBackendID, sess.Workspace(), state.SessionID)
 		spawnCtx, spawnCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
 		proc, replays, err := recWrapper.SpawnReconnect(
 			spawnCtx, state.Key, lastSeq, recWrapper.Protocol,
@@ -459,6 +481,10 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 				"key", state.Key)
 			continue
 		}
+		// Bound once sess holds proc: an abandoned reattach above closes proc
+		// for a session that never held it.
+		sess.setEndMark(mark)
+		bookProcessEnd(sess, proc, r.hist.claudeDir)
 
 		// Persist sink goes last so the history inject + shim replay above land
 		// with sinkReady=false and are dropped rather than written back to disk
