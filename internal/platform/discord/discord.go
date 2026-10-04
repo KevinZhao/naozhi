@@ -31,6 +31,11 @@ type Config struct {
 // traffic while botID is unknown cannot hammer the REST API (#2009).
 const discordBotHealCooldown = time.Minute
 
+// discordCloseTimeout bounds how long Stop waits for the gateway close. A
+// reconnect blocked on a handshake holds the session lock with no read
+// deadline, and Close waits on that lock.
+const discordCloseTimeout = 5 * time.Second
+
 // Discord implements Platform and RunnablePlatform via WebSocket gateway.
 type Discord struct {
 	cfg     Config
@@ -55,6 +60,8 @@ type Discord struct {
 	connState platform.ConnTracker
 	// restTransport replaces the REST client's transport; nil in production.
 	restTransport http.RoundTripper
+	// closeTimeout overrides discordCloseTimeout when non-zero.
+	closeTimeout time.Duration
 }
 
 // New creates a Discord platform adapter.
@@ -245,7 +252,7 @@ func (d *Discord) Stop() error {
 		d.stopCancel()
 	}
 	if d.session != nil {
-		if err := d.session.Close(); err != nil {
+		if err := d.closeSession(); err != nil {
 			return fmt.Errorf("close discord session: %w", err)
 		}
 	}
@@ -259,6 +266,27 @@ func (d *Discord) Stop() error {
 		slog.Warn("discord: timed out waiting for handler goroutines")
 	}
 	return nil
+}
+
+// closeSession closes the gateway session, giving up after closeTimeout so a
+// handshake stuck inside discordgo cannot hold up shutdown. The abandoned
+// Close finishes on its own if the handshake ever ends.
+func (d *Discord) closeSession() error {
+	timeout := d.closeTimeout
+	if timeout <= 0 {
+		timeout = discordCloseTimeout
+	}
+	errc := make(chan error, 1)
+	go func() { errc <- d.session.Close() }()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-errc:
+		return err
+	case <-timer.C:
+		slog.Warn("discord: gateway close timed out; continuing shutdown", "timeout", timeout)
+		return nil
+	}
 }
 
 // Reply sends a message to a Discord channel. Handles text and/or images.
