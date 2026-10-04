@@ -37,7 +37,7 @@ func driftFinding(t *testing.T, d *doctor) finding {
 
 // TestCheckConfigDrift covers the #2538 doctor matrix: hash match → pass,
 // mismatch → warn "restart required", no token → skip (pass), old process
-// without a fingerprint → warn.
+// without a fingerprint → warn, malformed fingerprint → warn.
 func TestCheckConfigDrift(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -123,6 +123,58 @@ func TestCheckConfigDrift(t *testing.T) {
 		}
 	})
 
+	// /health is outside input: a fingerprint that is not sha256 hex warns
+	// instead of panicking on the [:12] slice, and is sanitised on the way out.
+	t.Run("malformed_short_fingerprint_warns", func(t *testing.T) {
+		srv := healthWith("x")
+		defer srv.Close()
+		d := driftDoctor(t, srv, "tok", cfgPath)
+		d.checkConfigDrift()
+		f := driftFinding(t, d)
+		if f.Level != "warn" || !strings.Contains(f.Detail, "malformed") {
+			t.Errorf("finding = %+v, want warn/malformed", f)
+		}
+	})
+
+	t.Run("malformed_nonhex_fingerprint_warns", func(t *testing.T) {
+		srv := healthWith(`\u001b[31m` + strings.Repeat("0", 59))
+		defer srv.Close()
+		d := driftDoctor(t, srv, "tok", cfgPath)
+		d.checkConfigDrift()
+		f := driftFinding(t, d)
+		if f.Level != "warn" || !strings.Contains(f.Detail, "malformed") {
+			t.Errorf("finding = %+v, want warn/malformed", f)
+		}
+		if strings.Contains(f.Detail, "\x1b") {
+			t.Errorf("detail carries a raw escape byte: %q", f.Detail)
+		}
+	})
+
+	t.Run("malformed_long_fingerprint_capped", func(t *testing.T) {
+		srv := healthWith(strings.Repeat("z", 4096))
+		defer srv.Close()
+		d := driftDoctor(t, srv, "tok", cfgPath)
+		d.checkConfigDrift()
+		f := driftFinding(t, d)
+		if f.Level != "warn" || len(f.Detail) > 200 {
+			t.Errorf("finding = %d-byte %s, want a capped warn", len(f.Detail), f.Level)
+		}
+	})
+
+	t.Run("loaded_at_sanitised", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"status":"ok","cli_available":true,"config_sha256":"` + diskSum +
+				`","config_loaded_at":"\u001b]0;pwned\u0007"}`))
+		}))
+		defer srv.Close()
+		d := driftDoctor(t, srv, "tok", cfgPath)
+		d.checkConfigDrift()
+		f := driftFinding(t, d)
+		if f.Level != "pass" || strings.ContainsAny(f.Detail, "\x1b\x07") {
+			t.Errorf("finding = %+v, want pass with no control bytes", f)
+		}
+	})
+
 	t.Run("no_fingerprint_warns", func(t *testing.T) {
 		srv := healthWith("")
 		defer srv.Close()
@@ -133,4 +185,28 @@ func TestCheckConfigDrift(t *testing.T) {
 			t.Errorf("finding = %+v, want warn/no fingerprint", f)
 		}
 	})
+}
+
+func TestIsSHA256Hex(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{fmt.Sprintf("%x", sha256.Sum256([]byte("a"))), true},
+		{strings.Repeat("f", 64), true},
+		{"", false},
+		{"x", false},
+		{strings.Repeat("0", 63), false},
+		{strings.Repeat("0", 65), false},
+		{strings.Repeat("A", 64), false},
+		{strings.Repeat("0", 63) + "g", false},
+		{strings.Repeat("0", 63) + "/", false},
+		{strings.Repeat("0", 63) + ":", false},
+		{strings.Repeat("0", 63) + "`", false},
+	} {
+		if got := isSHA256Hex(tc.in); got != tc.want {
+			t.Errorf("isSHA256Hex(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
 }
