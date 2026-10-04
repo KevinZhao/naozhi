@@ -17,8 +17,9 @@
 //       define (a handler left on wsm after a move) or to an imported binding
 //       is refused. check-ws-contract's
 //       field check only reads `msg.<field>`, so a renamed parameter would
-//       drop that handler's reads out of it without a sound. A wsm.onAuthFail
-//       callback is held to the same rule: it reads auth_fail's fields.
+//       drop that handler's reads out of it without a sound. wsm.onAuthFail
+//       and wsm.onReady callbacks are held to the same rule: they read
+//       auth_fail's and auth_ok's fields.
 //   R5  wsm, sessionStream and cronLive are managed objects, each a literal in
 //       its owner file (MANAGED):
 //       (a) outside the owner the name appears only as `name.<key>` or in an
@@ -158,9 +159,9 @@ export function checkSource(file, src, outbound) {
       regs.push({ file, line: n.loc.start.line, key, claim: n.arguments.length === 3 });
     }
     if (n.type === 'CallExpression' && n.callee.type === 'MemberExpression' && !n.callee.computed &&
-        n.callee.object.type === 'Identifier' && n.callee.object.name === 'wsm' && n.callee.property.name === 'onAuthFail' &&
+        n.callee.object.type === 'Identifier' && n.callee.object.name === 'wsm' && /^(onAuthFail|onReady)$/.test(n.callee.property.name) &&
         isFn(n.arguments[0])) {
-      firstParamMsg(n.arguments[0], 'onAuthFail callback', n);
+      firstParamMsg(n.arguments[0], n.callee.property.name + ' callback', n);
       checkForwards(n.arguments[0], n);
     }
   });

@@ -62,20 +62,20 @@ test('an unregistered type, or one no handler takes, is dropped', async () => {
   assert.doesNotThrow(() => wsm.onMessage({ type: 'event' }));
 });
 
-test('auth_ok: CONNECTED, backoff reset and ping before the onReady callbacks, which run in order', async () => {
+test('auth_ok: CONNECTED, backoff reset and ping before the onReady callbacks, which run in order and see the frame', async () => {
   const { wsm, WS_STATES } = await fresh();
   open(wsm);
   wsm.backoff = 16000;
   const got = [];
   wsm.onStateChange((s, prev) => got.push(`state ${prev}->${s} ever=${wsm._everConnected}`));
   wsm.onReady(() => got.push(`ready1 ${wsm.state} backoff=${wsm.backoff} ping=${wsm.pingTimer !== null}`));
-  wsm.onReady(() => got.push('ready2'));
+  wsm.onReady((msg) => got.push('ready2 ' + msg.asset_version));
   try {
-    wsm.onMessage({ type: 'auth_ok' });
+    wsm.onMessage({ type: 'auth_ok', asset_version: 'v1' });
   } finally {
     wsm.cleanup(); // the ping interval would keep node alive past a failure
   }
-  assert.deepEqual(got, ['state off->connected ever=false', 'ready1 connected backoff=1000 ping=true', 'ready2']);
+  assert.deepEqual(got, ['state off->connected ever=false', 'ready1 connected backoff=1000 ping=true', 'ready2 v1']);
   assert.equal(wsm.state, WS_STATES.CONNECTED);
   assert.equal(wsm._everConnected, true, 'set after the CONNECTED listeners ran');
 });

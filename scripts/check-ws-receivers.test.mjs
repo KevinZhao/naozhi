@@ -133,6 +133,13 @@ test('R6: a wsm.onAuthFail callback names its parameter msg', () => {
   assert.deepEqual(problemsOf(CLEAN + 'wsm.onAuthFail((msg) => msg.error);'), []);
 });
 
+test('R6: a wsm.onReady callback that takes the auth_ok frame names it msg', () => {
+  const p = problemsOf(CLEAN + 'wsm.onReady((frame) => frame.asset_version);');
+  assert.ok(p.some((x) => /onReady callback must name its frame parameter msg/.test(x)), p.join('\n'));
+  assert.deepEqual(problemsOf(CLEAN + 'wsm.onReady((msg) => msg.asset_version);'), []);
+  assert.deepEqual(problemsOf(CLEAN + 'wsm.onReady(() => f());'), []);
+});
+
 // R5 / R7 fixtures: a two-object world with its own owners, core set and leaf.
 const CFG = { managed: { wsm: 'ws.js', stream: 'stream.js' }, core: { wsm: ['conn', 'on', 'send'] }, leaves: { 'ws.js': ['./contract.js'] } };
 const WORLD = {

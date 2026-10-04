@@ -117,6 +117,9 @@
     },
     "auth_ok": {
       "properties": {
+        "asset_version": {
+          "type": "string"
+        },
         "type": {
           "type": "string"
         }

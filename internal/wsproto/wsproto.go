@@ -72,11 +72,14 @@ type AgentMetaPatch struct {
 // Callers go through New*; writing a frame literal without it leaves Type
 // empty and the frame registry test red.
 
+// AuthOK carries the asset version of the dashboard page the hub's server
+// serves; a tab whose page names another version runs other assets.
 type AuthOK struct {
-	Type MsgType `json:"type"`
+	Type         MsgType `json:"type"`
+	AssetVersion string  `json:"asset_version,omitempty"`
 }
 
-func NewAuthOK() AuthOK { return AuthOK{Type: TypeAuthOK} }
+func NewAuthOK(f AuthOK) AuthOK { f.Type = TypeAuthOK; return f }
 
 type AuthFail struct {
 	Type  MsgType `json:"type"`

@@ -8,7 +8,7 @@ import "github.com/naozhi/naozhi/internal/cli/clievent"
 // wire shape — one registry, both consumers, so neither can drift from the
 // structs.
 var Frames = map[MsgType]any{
-	TypeAuthOK:   NewAuthOK(),
+	TypeAuthOK:   NewAuthOK(AuthOK{AssetVersion: "v"}),
 	TypeAuthFail: NewAuthFail(AuthFail{Error: "e", RetryAfter: 1}),
 	TypePong:     NewPong(),
 	TypeError:    NewError(Error{Key: "k", Error: "e", Node: "n"}),

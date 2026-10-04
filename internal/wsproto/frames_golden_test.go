@@ -34,7 +34,7 @@ func TestFrames_ByteIdenticalToLegacyServerMsg(t *testing.T) {
 		frame  any
 		legacy node.ServerMsg
 	}{
-		{"auth_ok", wsproto.NewAuthOK(), node.ServerMsg{Type: "auth_ok"}},
+		{"auth_ok", wsproto.NewAuthOK(wsproto.AuthOK{}), node.ServerMsg{Type: "auth_ok"}},
 		{"auth_fail_rate_limited",
 			wsproto.NewAuthFail(wsproto.AuthFail{Error: "rate limited", RetryAfter: 60}),
 			node.ServerMsg{Type: "auth_fail", Error: "rate limited", RetryAfter: 60}},
@@ -98,7 +98,8 @@ func TestFrames_ByteIdenticalToLegacyServerMsg(t *testing.T) {
 func TestRawFrames_MatchRetiredConstants(t *testing.T) {
 	t.Parallel()
 	cases := []struct{ got, want string }{
-		{wsproto.RawAuthOK, `{"type":"auth_ok"}`},
+		{wsproto.MarshalAuthOK(""), `{"type":"auth_ok"}`},
+		{wsproto.MarshalAuthOK("0123456789abcdef"), `{"type":"auth_ok","asset_version":"0123456789abcdef"}`},
 		{wsproto.RawPong, `{"type":"pong"}`},
 		{wsproto.RawAuthFailInvalid, `{"type":"auth_fail","error":"invalid token"}`},
 		{wsproto.RawErrNotAuth, `{"type":"error","error":"not authenticated"}`},

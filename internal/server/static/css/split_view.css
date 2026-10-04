@@ -137,6 +137,10 @@
    (--nz-z-toast) and has no click handler, so taps must fall through to the
    lightbox toolbar / voice overlay underneath instead of being swallowed. */
 .toast.show{opacity:1}
+/* Version-skew banner (self_update.js): persistent, so it sits one step above
+   the modal tier and stays reachable while a dialog is open. */
+.asset-skew-banner{position:fixed;top:max(12px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);z-index:calc(var(--nz-z-modal) + 1)}
+.asset-skew-banner button{padding:8px 16px;border:none;border-radius:var(--nz-radius-pill);background:var(--nz-blue);color:#fff;font-size:var(--nz-fs-base);cursor:pointer;box-shadow:var(--nz-shadow-2)}
 /* RNEW-UX-010 — visually hidden live region for assistive tech. Uses the
    standard "sr-only" recipe: in flow but clipped to 1x1, so screen readers
    pick it up but sighted users never see it. Display:none would suppress

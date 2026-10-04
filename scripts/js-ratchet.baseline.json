@@ -341,8 +341,8 @@
     "lateBindings": 0
   },
   "self_update.js": {
-    "lines": 363,
-    "maxFnLines": 61,
+    "lines": 381,
+    "maxFnLines": 56,
     "fnOver100": 0,
     "topLevelLetVar": 5,
     "configureDeps": 0,
@@ -495,7 +495,7 @@
     "lateBindings": 0
   },
   "ws_manager.js": {
-    "lines": 196,
+    "lines": 177,
     "maxFnLines": 33,
     "fnOver100": 0,
     "topLevelLetVar": 0,
