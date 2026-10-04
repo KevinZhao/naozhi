@@ -326,9 +326,9 @@ func buildSessionOpts(key string, resolver *session.KeyResolver, agents map[stri
 // "this one route missed the auth wrapper" is not a mistake that can be made
 // here — which is why the api_route_owner lint rule that used to reconstruct
 // this boundary from ASTs could go (#2554). handle_decl stays: it guards a
-// different edge — that *Server itself grows no handlers beyond the static
-// shell — which the server-owned s.mux.HandleFunc calls in registerDashboard
-// can still violate (#2636).
+// different edge — that this package declares no HTTP handler outside its
+// baseline — which the server-owned s.mux.HandleFunc calls in
+// registerDashboard can still violate (#2636).
 func (s *Server) mountRoutes(routes []httputil.Route) {
 	chain := s.apiChain()
 	for _, rt := range routes {

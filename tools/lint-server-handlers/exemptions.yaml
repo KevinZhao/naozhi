@@ -98,9 +98,25 @@ file_size:
     # moved to internal/dashboard/auth/handlers.go. Closes-exemption trailer
     # in commit message satisfies rule 5.
 
-# rule 1 (handle_decl) 的唯一豁免。归属规则见 internal/server/doc.go：
-# internal/server 只拥有 HTTP 管道（mux/routes、middleware、WS hub、health、
-# 静态壳与资源、平台 webhook 注册、send/upload 管线）；其余 /api/* handler
-# 一律放 internal/dashboard/<sub> 子包并经 Deps 结构体注入。
+# rule 1 (handle_decl) 的基线：internal/server 里每个 HTTP handler 声明（按签名
+# 识别，任意接收者、自由函数、handler 工厂都算）都必须登记在此，且每条都必须
+# 仍对应一个声明。归属规则见 internal/server/doc.go：internal/server 只拥有
+# HTTP 管道（mux/routes、middleware、WS hub、health、静态壳与资源、平台 webhook
+# 注册、send/upload 管线）；其余 /api/* handler 一律放 internal/dashboard/<sub>
+# 子包并经 Deps 结构体注入。新增一条就是一次归属评审。
 handle_baseline:
-    - Server.handleDashboard    # 静态壳 GET /dashboard = server 自有
+    - HealthHandler.handleHealth          # health：GET /health
+    - HealthHandler.handleLivez           # health：GET /livez
+    - HealthHandler.handleReadyz          # health：GET /readyz
+    - Hub.HandleUpgrade                   # WS hub：GET /ws 升级
+    - SendHandler.handleAttachment        # send/upload 管线（随 Phase 3f/4c 迁出）
+    - SendHandler.handleBind              # send/upload 管线（随 Phase 3f/4c 迁出）
+    - SendHandler.handleOrient            # send/upload 管线（随 Phase 3f/4c 迁出）
+    - SendHandler.handleSend              # send/upload 管线（随 Phase 3f/4c 迁出）
+    - SendHandler.handleUpload            # send/upload 管线（随 Phase 3f/4c 迁出）
+    - Server.handleDashboard              # 静态壳 GET /dashboard
+    - handleDashboardCSS                  # 静态资源：GET /static/css/{file}
+    - handleFavicon                       # 静态资源：GET /favicon.ico、/favicon.svg
+    - handleManifest                      # 静态资源：GET /manifest.json
+    - handleSW                            # 静态资源：GET /sw.js
+    - serveStaticJS                       # 静态资源：GET /static/*.js（工厂）

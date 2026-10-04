@@ -10,10 +10,10 @@
 //
 // Every other /api/* route handler lives in an internal/dashboard/<sub>
 // package, receives its collaborators through a Deps struct, and is
-// registered here as `auth(s.<sub>H.HandleX)`. A `(s *Server) handle*`
-// method is therefore forbidden except the static shell (handleDashboard).
+// registered here as `auth(s.<sub>H.HandleX)`. An HTTP handler declared in
+// this package is therefore one of the pipe pieces above.
 //
-// Enforced by tools/lint-server-handlers rule 1 (handle_decl: no Server
-// handle* method outside exemptions.yaml handle_baseline) and rule 6
-// (api_route_owner: no /api/* route registered on a Server method).
+// Enforced by tools/lint-server-handlers rule 1 (handle_decl: no HTTP handler
+// declaration in this package, on any receiver or none, outside
+// exemptions.yaml handle_baseline).
 package server
