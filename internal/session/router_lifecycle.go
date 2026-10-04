@@ -51,6 +51,11 @@ func (r *Router) publishSession(tx sessTx, key string, s *ManagedSession, alread
 	if prev := tx.Get(key); prev != nil && prev != s && s.gapFill.Load() == nil {
 		s.gapFill.Store(prev.gapFillCell())
 	}
+	// A live session ends key's run of failed spawns, or the run would pause
+	// that session's respawn once it dies.
+	if s.isAlive() {
+		tx.Ext().spawns.ClearStartupFailure(key)
+	}
 	tx.Put(key, s)
 }
 

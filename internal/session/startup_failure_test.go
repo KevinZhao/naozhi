@@ -420,6 +420,63 @@ func TestGetOrCreate_SpawnInitPauseLiftedByReset(t *testing.T) {
 	}
 }
 
+// Removing a dead entry for good, from the dashboard or by /cd, lifts the
+// pause of the key's run along with it.
+func TestGetOrCreate_SpawnInitPauseLiftedByRemoval(t *testing.T) {
+	t.Parallel()
+	removals := map[string]func(r *Router){
+		"Remove":                   func(r *Router) { r.Remove(sfKey) },
+		"ResetChatAndSetWorkspace": func(r *Router) { r.ResetChatAndSetWorkspace("feishu:direct:alice", t.TempDir()) },
+	}
+	for name, remove := range removals {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r, spawnErr, spawns := newSpawnFailRouter(t)
+			injectSession(r, sfKey, newDeadProc())
+			for range 2 {
+				_, _, _ = r.GetOrCreate(context.Background(), sfKey, AgentOpts{})
+			}
+			if _, _, err := r.GetOrCreate(context.Background(), sfKey, AgentOpts{}); !errors.Is(err, ErrCLIStartupFailed) || *spawns != 2 {
+				t.Fatalf("setup: err = %v after %d spawns; want a paused dead entry", err, *spawns)
+			}
+			remove(r)
+			if f, ok := spawnRun(r, sfKey); ok {
+				t.Errorf("run after %s = %+v, want none", name, f)
+			}
+			*spawnErr = nil
+			if _, _, err := r.GetOrCreate(context.Background(), sfKey, AgentOpts{}); err != nil || *spawns != 3 {
+				t.Errorf("after %s: err = %v after %d spawns; want a third spawn", name, err, *spawns)
+			}
+		})
+	}
+}
+
+// A live session renamed onto a key ends that key's run, so its own death
+// later respawns instead of pausing on failures that were never its own.
+func TestRenameSession_LiveSessionEndsTheTargetsRun(t *testing.T) {
+	t.Parallel()
+	const from = "feishu:direct:alice:scratch"
+	r, spawnErr, spawns := newSpawnFailRouter(t)
+	for range 2 {
+		_, _, _ = r.GetOrCreate(context.Background(), sfKey, AgentOpts{})
+	}
+	proc := newIdleProc()
+	injectSession(r, from, proc)
+	if !r.RenameSession(from, sfKey) {
+		t.Fatal("RenameSession refused")
+	}
+	if f, ok := spawnRun(r, sfKey); ok {
+		t.Errorf("run after the rename = %+v, want none", f)
+	}
+	proc.mu.Lock()
+	proc.isAlive = false
+	proc.mu.Unlock()
+	*spawnErr = nil
+	if _, _, err := r.GetOrCreate(context.Background(), sfKey, AgentOpts{}); err != nil || *spawns != 3 {
+		t.Errorf("after the renamed session died: err = %v after %d spawns; want a respawn", err, *spawns)
+	}
+}
+
 // Only a failed Init handshake on a live call counts: a rejected resume is
 // retried fresh, and that retry's failure is the one counted; an abandoned
 // call, a key another path brought up meanwhile, or a failure before the CLI
