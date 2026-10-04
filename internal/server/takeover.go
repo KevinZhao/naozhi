@@ -62,12 +62,20 @@ func pickTakeoverCandidate(discovered []discovery.DiscoveredSession, workspace s
 	return best
 }
 
+// takeoverResumesOnClaude reports whether Takeover would resume a discovered
+// Claude transcript on claude. On an agent pinned to another backend, or with
+// no claude backend, the takeover could only start an unrelated fresh session,
+// so killing the user's terminal CLI for it is not worth it.
+func takeoverResumesOnClaude(backends *session.BackendRegistry, pinned string) bool {
+	return (pinned == "" || pinned == "claude") && backends.BackendWrapper("claude") != nil
+}
+
 // tryAutoTakeover looks for an external Claude CLI session whose CWD matches the
 // chat's effective workspace and transparently adopts it under naozhi management.
 // Called before an IM turn's session lookup on a first turn (imDelivery).
 // Returns true when a session was successfully taken over.
 func (s *Server) tryAutoTakeover(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool {
-	if s.claudeDir == "" {
+	if s.claudeDir == "" || !takeoverResumesOnClaude(s.router.Backends(), opts.Backend) {
 		return false
 	}
 	// Skip when a managed session already exists for this key.
