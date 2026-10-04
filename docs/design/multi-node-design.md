@@ -181,7 +181,11 @@ Primary → Remote: {"type":"unsubscribe","key":"..."}
 ```
 
 Subscribe failures are explicit: if the session does not exist on the remote, it responds with
-`subscribe_error`. Primary handles this and notifies subscribed browser clients.
+`subscribe_error`. Primary handles this and notifies subscribed browser clients. The exception is
+a key the primary already holds on that connection whose session went away (a `/new` or `/clear`
+reset): the remote stays silent, and the primary keeps the key's browser clients on a
+`subscribe_error` for a key the remote had acked, so the subscribe after the next send reaches
+them.
 
 **Control:**
 

@@ -347,8 +347,11 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 			c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: capturedID, Status: status, Key: capturedKey, Node: nodeID}))
 			// Refresh the remote subscription so the connector re-creates
 			// its streamEvents goroutine if the previous one exited (e.g.
-			// process died between the last subscribe and this send).
-			nc.RefreshSubscription(capturedKey)
+			// process died between the last subscribe and this send). A
+			// reset key has no session to subscribe to until the next send.
+			if status != string(sendAckReset) {
+				nc.RefreshSubscription(capturedKey)
+			}
 		}
 		h.bcast.BroadcastSessionsUpdate()
 	}()

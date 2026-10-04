@@ -43,7 +43,7 @@ func (e *sendEngine) relaySend(ctx context.Context, key, text, workspace string)
 		return "", err
 	}
 	if reset {
-		return "reset", nil
+		return string(sendAckReset), nil
 	}
 	if _, _, err := e.router.GetOrCreate(ctx, key, e.sessionOptsFor(key)); err != nil {
 		return "", fmt.Errorf("get session: %w", err)
