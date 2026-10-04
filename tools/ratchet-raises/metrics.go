@@ -3,7 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"maps"
+	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,18 +35,80 @@ type metric struct {
 
 type metrics map[string]metric
 
-// goBaselineConst matches an integer constant whose name says it is a
-// baseline, alone or inside a const block.
-var goBaselineConst = regexp.MustCompile(`(?m)^\s*(?:const\s+)?(\w*[Bb]aseline\w*)\s*=\s*(\d+)\s*$`)
+// goBaselineName is the name of a baseline constant.
+var goBaselineName = regexp.MustCompile(`[Bb]aseline`)
 
-// goConsts reads every baseline constant in files (path → source).
-func goConsts(files map[string]string, into metrics) {
-	for path, src := range files {
-		for _, m := range goBaselineConst.FindAllStringSubmatch(src, -1) {
-			v, _ := strconv.ParseInt(m[2], 10, 64)
-			into["go:"+path+"#"+m[1]] = metric{value: v}
+// goConsts reads every baseline constant in files (path → source), package
+// level or local, into go:<dir>#<name>: moving one between files of a
+// package is not a change, and losing one (renamed, made a var, moved to
+// another package, its file deleted) is a raise to -1. It returns one
+// problem per constant whose value is not a plain integer literal (left
+// unread) and per name repeated within a directory (read as the largest).
+func goConsts(files map[string]string, into metrics) ([]string, error) {
+	var problems []string
+	fset := token.NewFileSet()
+	for _, p := range slices.Sorted(maps.Keys(files)) {
+		if skipGoPath(p) {
+			continue
+		}
+		f, err := parser.ParseFile(fset, p, files[p], parser.SkipObjectResolution)
+		if err != nil {
+			return nil, err
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			d, ok := n.(*ast.GenDecl)
+			if !ok || d.Tok != token.CONST {
+				return true
+			}
+			for _, spec := range d.Specs {
+				vs := spec.(*ast.ValueSpec)
+				for i, id := range vs.Names {
+					if !goBaselineName.MatchString(id.Name) {
+						continue
+					}
+					at := fset.Position(id.Pos())
+					v, ok := intLiteral(vs, i)
+					key := "go:" + path.Dir(p) + "#" + id.Name
+					if !ok {
+						problems = append(problems, fmt.Sprintf("%s:%d: baseline constant %s must be a plain integer literal", p, at.Line, id.Name))
+						continue
+					}
+					if prev, dup := into[key]; dup {
+						problems = append(problems, fmt.Sprintf("%s:%d: baseline constant %s is declared twice in %s", p, at.Line, id.Name, path.Dir(p)))
+						v = max(v, prev.value)
+					}
+					into[key] = metric{value: v, goneIsRaise: true}
+				}
+			}
+			return false
+		})
+	}
+	return problems, nil
+}
+
+// intLiteral is the value of the i-th name of vs when it is written as an
+// integer literal (any base, digit separators allowed).
+func intLiteral(vs *ast.ValueSpec, i int) (int64, bool) {
+	if len(vs.Values) != len(vs.Names) {
+		return 0, false
+	}
+	lit, ok := vs.Values[i].(*ast.BasicLit)
+	if !ok || lit.Kind != token.INT {
+		return 0, false
+	}
+	v, err := strconv.ParseInt(lit.Value, 0, 64)
+	return v, err == nil
+}
+
+// skipGoPath reports whether p is in a testdata or vendor tree, which holds
+// fixtures and dependencies, not ratchets.
+func skipGoPath(p string) bool {
+	for _, part := range strings.Split(p, "/") {
+		if part == "testdata" || part == "vendor" {
+			return true
 		}
 	}
+	return false
 }
 
 // jsRatchet reads scripts/js-ratchet.baseline.json. lines, configureDeps,

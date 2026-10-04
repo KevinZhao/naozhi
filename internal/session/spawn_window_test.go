@@ -365,3 +365,129 @@ func TestGetOrCreate_PanicInsideTheReserveLeavesNothingHeld(t *testing.T) {
 		t.Fatal("the next GetOrCreate parked on a marker the panic left behind")
 	}
 }
+
+// TestSpawnSession_LabelAndTuningWrittenInWindowSurvive: a label and a
+// model/effort pick written to the dead session while its respawn is outside
+// the lock are carried onto the new session, not dropped for the reserve-time
+// values.
+func TestSpawnSession_LabelAndTuningWrittenInWindowSurvive(t *testing.T) {
+	g := newGatedSpawn()
+	r := spawnRouter(t, 4, g.hook)
+	const key = "feishu:direct:spawn-label:general"
+	old := injectSession(r, key, newDeadProc())
+	old.SetUserLabel("before")
+	old.setLabelOrigin("user")
+
+	res := spawnAsync(r, key)
+	waitEntered(t, g)
+	if !r.SetUserLabel(key, "after") {
+		t.Fatal("SetUserLabel found no session")
+	}
+	model, effort := "claude-opus-5", "high"
+	mode, err := r.SetSessionTuning(context.Background(), key, &model, &effort)
+	if err != nil || mode != TuningAppliedDeferred {
+		t.Fatalf("SetSessionTuning = %q, %v; want %q", mode, err, TuningAppliedDeferred)
+	}
+	close(g.release)
+
+	got := waitResult(t, res)
+	if got.err != nil {
+		t.Fatalf("GetOrCreate: %v", got.err)
+	}
+	if r.SessionFor(key) != got.s {
+		t.Fatal("the respawned session is not in the table")
+	}
+	if l, o := got.s.UserLabel(), got.s.LabelOrigin(); l != "after" || o != "user" {
+		t.Errorf("label = %q (origin %q), want \"after\" (user)", l, o)
+	}
+	if m := got.s.TuningModel(); m != model {
+		t.Errorf("tuning model = %q, want the pick made during the spawn %q", m, model)
+	}
+	if e := got.s.TuningEffort(); e != effort {
+		t.Errorf("tuning effort = %q, want the pick made during the spawn %q", e, effort)
+	}
+}
+
+// TestSpawnSession_LabelClearedInWindowStaysCleared: a label cleared while the
+// respawn is outside the lock stays cleared, so AutoTitler can retake it.
+func TestSpawnSession_LabelClearedInWindowStaysCleared(t *testing.T) {
+	g := newGatedSpawn()
+	r := spawnRouter(t, 4, g.hook)
+	const key = "feishu:direct:spawn-label-clear:general"
+	old := injectSession(r, key, newDeadProc())
+	old.SetUserLabel("pinned")
+	old.setLabelOrigin("user")
+
+	res := spawnAsync(r, key)
+	waitEntered(t, g)
+	if !r.ClearUserLabelOrigin(key) {
+		t.Fatal("ClearUserLabelOrigin found no session")
+	}
+	close(g.release)
+
+	got := waitResult(t, res)
+	if got.err != nil {
+		t.Fatalf("GetOrCreate: %v", got.err)
+	}
+	if l, o := got.s.UserLabel(), got.s.LabelOrigin(); l != "" || o != "" {
+		t.Errorf("label = %q (origin %q), want both cleared", l, o)
+	}
+}
+
+// TestSpawnSession_ChainRefreshedInWindowSurvives: a cron stub whose chain is
+// refreshed while its first spawn is outside the lock starts with the
+// refreshed chain.
+func TestSpawnSession_ChainRefreshedInWindowSurvives(t *testing.T) {
+	g := newGatedSpawn()
+	r := spawnRouter(t, 4, g.hook)
+	const key = "cron:spawn-chain"
+	ws := t.TempDir()
+	r.RegisterCronStubWithChain(key, ws, "", []string{"a"})
+
+	out := make(chan spawnResult, 1)
+	go func() {
+		s, _, err := r.GetOrCreate(context.Background(), key, AgentOpts{Exempt: true})
+		out <- spawnResult{s, err}
+	}()
+	waitEntered(t, g)
+	r.RegisterCronStubWithChain(key, ws, "", []string{"a", "b"})
+	close(g.release)
+
+	got := waitResult(t, out)
+	if got.err != nil {
+		t.Fatalf("GetOrCreate: %v", got.err)
+	}
+	if ids := got.s.SnapshotPrevSessionIDs(); !slices.Equal(ids, []string{"a", "b"}) {
+		t.Errorf("chain = %v, want the refreshed [a b]", ids)
+	}
+}
+
+func TestRespawnChain(t *testing.T) {
+	long := make([]string, maxPrevSessionIDs)
+	for i := range long {
+		long[i] = "p" + string(rune('A'+i%26)) + string(rune('a'+i/26))
+	}
+	cases := []struct {
+		name            string
+		prev            []string
+		oldID, resumeID string
+		want            []string
+	}{
+		{"appends a rotated ID", []string{"a"}, "b", "", []string{"a", "b"}},
+		{"same-ID resume does not append", []string{"a"}, "b", "b", []string{"a"}},
+		{"empty old ID does not append", []string{"a"}, "", "", []string{"a"}},
+		{"empty chain", nil, "", "", nil},
+		{"capped to the most recent", long, "new", "", append(slices.Clone(long[1:]), "new")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := respawnChain(tc.prev, tc.oldID, tc.resumeID)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("respawnChain = %v, want %v", got, tc.want)
+			}
+			if len(got) > 0 && len(tc.prev) > 0 && &got[0] == &tc.prev[0] {
+				t.Error("respawnChain aliases its input")
+			}
+		})
+	}
+}

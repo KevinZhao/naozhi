@@ -27,11 +27,7 @@
 // C1, C2, C5 and C7 are ratchets (their own *Baseline constant, both
 // directions checked); C3, C4, C6 and C8 are strict zero — nothing earns them
 // a baseline because D7 already settled that no instance of them is correct.
-// Each baseline constant's line carries no trailing comment on purpose:
-// tools/ratchet-raises/metrics.go's goBaselineConst regex stops matching the
-// moment one is added, which would make a raise invisible to the ledger
-// check (#2897 S5 risk 5) — the reasoning for a value lives in the comment
-// ABOVE its const line instead.
+// The reasoning for each baseline value lives in the comment above its const.
 //
 // Residual gap (documented, not caught): this is AST-only, so a shadowed `w`
 // (`w := s.hub` inside a function that also takes `w *wiring`), an adapter

@@ -21,9 +21,12 @@ package platform
 //   - Interfaces that are pure method sets (Reactor, QuestionCardSender,
 //     RunnablePlatform) are a type assertion, because implementing them IS the
 //     capability.
+//   - ConnStateReporter is a type assertion too: the matrix says whether the
+//     adapter CAN report its connection, and /health serves the live answer.
 
 // Capabilities is the answer for one platform. Field order matches the
-// declaration order of the optional interfaces in platform.go.
+// declaration order of the optional interfaces in platform.go, then
+// connstate.go.
 type Capabilities struct {
 	// InterimMessages: can deliver a "thinking…" message before the final reply.
 	// Runtime answer (weixin implements the interface and declines).
@@ -40,6 +43,9 @@ type Capabilities struct {
 	QuestionCards bool `json:"question_cards"`
 	// Runnable: needs background goroutines started (Start/Stop). Type assertion.
 	Runnable bool `json:"runnable"`
+	// ConnState: reports its live connection state (ConnStateReporter). An
+	// adapter may still decline per mode, e.g. feishu over webhook. Type assertion.
+	ConnState bool `json:"conn_state"`
 	// MaxReplyLength is the platform's per-message rune cap. Reported because it
 	// is what decides whether a reply is chunked at all; 0 means unset, which for
 	// a configured adapter means "no cap applied".
@@ -56,12 +62,14 @@ func CapabilitiesOf(p Platform) Capabilities {
 	_, reactions := AsCapability[Reactor](p)
 	_, cards := AsCapability[QuestionCardSender](p)
 	_, runnable := AsCapability[RunnablePlatform](p)
+	_, connState := AsCapability[ConnStateReporter](p)
 	return Capabilities{
 		InterimMessages:     SupportsInterimMessages(p),
 		SingleUseReplyToken: UsesSingleUseReplyToken(p),
 		Reactions:           reactions,
 		QuestionCards:       cards,
 		Runnable:            runnable,
+		ConnState:           connState,
 		MaxReplyLength:      p.MaxReplyLength(),
 	}
 }

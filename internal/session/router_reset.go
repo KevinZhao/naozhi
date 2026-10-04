@@ -19,15 +19,16 @@ import (
 //
 //   - Reset / ResetAndDiscardOverride: one key; every pick is dropped; the
 //     key is retired (notifyKeyRetired → the message queue's Cleanup, the
-//     history cache, retired_at). Cleanup requires that no in-flight queue
-//     owner can arrive on the key afterwards, which is why callers discard
-//     the key's queue first (dispatch /new, server /clear).
+//     history cache, retired_at). Cleanup drops the key's queued messages
+//     without telling their origins, which is why callers discard the key's
+//     queue first (dispatch /new, server /clear).
 //   - ResetChatAndSetWorkspace: every agent key of a chat; only the backend
 //     pick is dropped (pendingPicks.dropBackend); the keys are NOT retired —
 //     /cd does not discard their queues, and queued messages are meant to run
 //     in the new workspace.
 //   - ResetAndRecreate: one key, re-spawned in the same transaction; picks
-//     are kept for that spawn; not retired, for the same Cleanup reason.
+//     are kept for that spawn; not retired, since Cleanup would silently
+//     drop the messages queued for the recreated session.
 
 // ResetChatAndSetWorkspace atomically resets all sessions belonging to a chat
 // (all agents) and installs a new workspace override for it in one
