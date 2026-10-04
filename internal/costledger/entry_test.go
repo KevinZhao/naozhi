@@ -31,6 +31,27 @@ func TestNormalize_RejectsInvalidEnumsAndEmpty(t *testing.T) {
 	}
 }
 
+// An adjust entry is the one kind allowed to take money back: its negative
+// Amount survives, while any other kind's is clamped or rejected.
+func TestNormalize_OnlyAdjustKeepsANegativeAmount(t *testing.T) {
+	adj := validEntry()
+	adj.Kind, adj.Amount = KindAdjust, -929.98
+	if ok := adj.normalize(); !ok || adj.Amount != -929.98 {
+		t.Fatalf("adjust: accepted=%v amount=%v, want -929.98 kept", ok, adj.Amount)
+	}
+	zero := validEntry()
+	zero.Kind, zero.Amount = KindAdjust, 0
+	if zero.normalize() {
+		t.Error("an adjust of nothing must be rejected")
+	}
+	turn := validEntry()
+	turn.Amount = -5
+	turn.Models = []ModelDelta{{Model: "m", Tokens: Tokens{Input: 1}}}
+	if !turn.normalize() || turn.Amount != 0 {
+		t.Errorf("turn with rows: amount = %v, want clamped to 0", turn.Amount)
+	}
+}
+
 func TestNormalize_BasisAndIdentSanitized(t *testing.T) {
 	e := validEntry()
 	e.Basis = "contract"

@@ -2,6 +2,7 @@ package claudefs
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -138,5 +139,62 @@ func TestSessionUsage_SymlinksNotFollowed(t *testing.T) {
 	got, _, err := SessionUsage(proj, usageSID, UsageWindow{Since: usageT0, Until: usageT0.Add(time.Minute)})
 	if err != nil || !reflect.DeepEqual(got, []ModelTokens{{Model: "m", Input: 1, Output: 2}}) {
 		t.Fatalf("usage = %+v err=%v, want the main transcript's line only", got, err)
+	}
+}
+
+// The whole history splits per UTC day of each message's first line, across
+// the main and workflow transcripts; a message another session already
+// counted (a fork's copy of its parent's lines) is skipped, and this
+// session's ids join the counted set.
+func TestSessionDailyUsage_SplitsPerDayAndSkipsCountedMessages(t *testing.T) {
+	proj := t.TempDir()
+	sub := SubagentsDir(proj, usageSID)
+	day := 24 * 60 * 60
+	writeLines(t, TranscriptIn(proj, usageSID), usageT0,
+		usageLine(0, "msg_parent", "m", 500, 500, 0, 0), // copied from the parent
+		usageLine(1, "msg_a", "m", 1, 2, 3, 4),
+		usageLine(day, "msg_a", "m", 1, 9, 3, 4), // a later block of the same message: day one
+		usageLine(day+1, "msg_b", "m", 10, 0, 0, 0))
+	writeLines(t, filepath.Join(sub, "workflows", "wf_1", "agent-w.jsonl"), usageT0,
+		usageLine(day+2, "msg_w", "n", 0, 7, 0, 0))
+
+	counted := map[string]bool{"msg_parent": true}
+	got, found, err := SessionDailyUsage(proj, usageSID, counted)
+	if err != nil || !found || got.Truncated {
+		t.Fatalf("found=%v truncated=%v err=%v", found, got.Truncated, err)
+	}
+	want := map[string][]ModelTokens{
+		"2026-10-03": {{Model: "m", Input: 1, Output: 9, CacheRead: 3, CacheWrite: 4}},
+		"2026-10-04": {{Model: "m", Input: 10}, {Model: "n", Output: 7}},
+	}
+	if !reflect.DeepEqual(got.Days, want) {
+		t.Fatalf("days = %+v\nwant   %+v", got.Days, want)
+	}
+	for _, id := range []string{"msg_a", "msg_b", "msg_w"} {
+		if !counted[id] {
+			t.Errorf("%s not added to the counted set", id)
+		}
+	}
+	again, _, _ := SessionDailyUsage(proj, usageSID, counted)
+	if len(again.Days) != 0 {
+		t.Errorf("a second session holding the same messages counted %+v, want nothing", again.Days)
+	}
+}
+
+// Past maxUsageFiles agent transcripts the rest go unread, and the result
+// says so: it is a lower bound.
+func TestSessionDailyUsage_ReportsTruncation(t *testing.T) {
+	proj := t.TempDir()
+	sub := SubagentsDir(proj, usageSID)
+	writeLines(t, TranscriptIn(proj, usageSID), usageT0, usageLine(1, "msg_main", "m", 1, 0, 0, 0))
+	for i := range maxUsageFiles + 1 {
+		writeLines(t, SubagentJSONL(sub, fmt.Sprintf("a%d", i)), usageT0, usageLine(2, fmt.Sprintf("msg_%d", i), "m", 1, 0, 0, 0))
+	}
+	got, _, err := SessionDailyUsage(proj, usageSID, map[string]bool{})
+	if err != nil || !got.Truncated {
+		t.Fatalf("truncated=%v err=%v, want truncated", got.Truncated, err)
+	}
+	if n := got.Days["2026-10-03"][0].Input; n != maxUsageFiles+1 {
+		t.Errorf("input = %d, want the main line plus %d agent files", n, maxUsageFiles)
 	}
 }

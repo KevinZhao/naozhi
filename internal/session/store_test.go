@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -546,5 +547,33 @@ func TestWorkspaceOverrides_ClearRemoveFailurePropagates(t *testing.T) {
 	os.Chmod(dir, 0o700) // re-grant so Stat can traverse
 	if _, statErr := os.Stat(ovPath); statErr != nil {
 		t.Fatalf("overrides file unexpectedly gone (stat err = %v); test did not exercise the failure path", statErr)
+	}
+}
+
+// StoredSessionIDs lists each key's id chain, current id last, and reads a
+// corrupt store without moving it aside: `naozhi cost reconcile` runs beside
+// a live naozhi that owns the file.
+func TestStoredSessionIDs_ChainAndReadOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	raw, _ := json.Marshal([]storeEntry{
+		{Key: "k1", SessionID: "s3", PrevSessionIDs: []string{"s1", "s2"}},
+		{Key: "k2", SessionID: "s9"},
+		{Key: "k3"},
+	})
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := StoredSessionIDs(path)
+	if len(got) != 2 || !slices.Equal(got["k1"], []string{"s1", "s2", "s3"}) || !slices.Equal(got["k2"], []string{"s9"}) {
+		t.Fatalf("ids = %v", got)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := StoredSessionIDs(path); got != nil {
+		t.Errorf("corrupt store: ids = %v, want nil", got)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "{not json" {
+		t.Errorf("corrupt store was moved or rewritten: %q", b)
 	}
 }
