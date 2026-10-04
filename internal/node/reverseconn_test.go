@@ -163,8 +163,12 @@ func TestReverseConn_Send(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	if err := rc.Send(ctx, "key", "hello", ""); err != nil {
+	status, err := rc.Send(ctx, "key", "hello", "")
+	if err != nil {
 		t.Fatalf("Send: %v", err)
+	}
+	if status != "accepted" {
+		t.Errorf("a response with no result is a node that took the send: status = %q, want accepted", status)
 	}
 }
 

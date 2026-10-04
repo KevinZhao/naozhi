@@ -224,8 +224,12 @@ func TestHTTPClient_Send_ok(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestHTTPClient(t, srv, "")
-	if err := c.Send(context.Background(), "feishu:group:123", "hi", ""); err != nil {
+	status, err := c.Send(context.Background(), "feishu:group:123", "hi", "")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if status != "accepted" {
+		t.Errorf("a 200 with no body is a node that took the send: status = %q, want accepted", status)
 	}
 }
 
@@ -242,7 +246,7 @@ func TestHTTPClient_Send_withWorkspace(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestHTTPClient(t, srv, "")
-	if err := c.Send(context.Background(), "k", "text", "/home/user/project"); err != nil {
+	if _, err := c.Send(context.Background(), "k", "text", "/home/user/project"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -254,7 +258,7 @@ func TestHTTPClient_Send_errorStatus(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestHTTPClient(t, srv, "")
-	if err := c.Send(context.Background(), "k", "t", ""); err == nil {
+	if _, err := c.Send(context.Background(), "k", "t", ""); err == nil {
 		t.Fatal("expected error on non-2xx")
 	}
 }

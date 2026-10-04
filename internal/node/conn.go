@@ -30,7 +30,7 @@ type NodeInfo interface {
 }
 
 // NodeFetcher pulls read-only snapshots (sessions / projects / discovered /
-// events / backends) plus the fire-once Send from a remote node.
+// events / backends) from a remote node, plus Send.
 type NodeFetcher interface {
 	FetchSessions(ctx context.Context) ([]map[string]any, error)
 	FetchProjects(ctx context.Context) ([]map[string]any, error)
@@ -44,7 +44,32 @@ type NodeFetcher interface {
 	// raw JSON so the primary need not track a newer peer's manifest shape;
 	// peers predating the RPC error and the picker collapses to single-backend.
 	FetchBackends(ctx context.Context) (json.RawMessage, error)
-	Send(ctx context.Context, key, text, workspace string) error
+	// Send returns how the node took the message: "accepted", "queued",
+	// "reset" or "busy" (see sendStatus).
+	Send(ctx context.Context, key, text, workspace string) (string, error)
+}
+
+// sendStatus is the admission status a node answered a send with, limited to
+// the values the dashboard's send_ack understands. A peer that answers
+// nothing or something else took the message the only way older nodes
+// could, so it reads as "accepted".
+func sendStatus(answer string) string {
+	switch answer {
+	case "queued", "reset", "busy":
+		return answer
+	default:
+		return "accepted"
+	}
+}
+
+// sendStatusFrom decodes a node's {"status": …} send answer; a body that is
+// absent or does not decode reads as "accepted".
+func sendStatusFrom(body []byte) string {
+	var v struct {
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal(body, &v)
+	return sendStatus(v.Status)
 }
 
 // EventsQuery selects a history page: Before > 0 asks for the newest Limit

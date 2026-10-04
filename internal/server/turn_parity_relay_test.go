@@ -229,8 +229,8 @@ func TestRelay_BusyWithTheQueueDisabledIsAnError(t *testing.T) {
 	turns := h.session(parityKey, false)
 	h.relay(t, "first")
 	turns.next(t, "owner turn")
-	if _, err := h.srv.SubmitRelayed(context.Background(), parityKey, "second", ""); !errors.Is(err, errRelayBusy) {
-		t.Fatalf("err = %v, want errRelayBusy", err)
+	if _, err := h.srv.SubmitRelayed(context.Background(), parityKey, "second", ""); !errors.Is(err, errSendBusy) {
+		t.Fatalf("err = %v, want errSendBusy", err)
 	}
 	turns.answer(okTurn("R1"))
 	h.waitEngineIdle()

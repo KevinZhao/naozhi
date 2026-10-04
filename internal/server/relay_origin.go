@@ -20,7 +20,7 @@ import (
 const relayFailPrefix = "发送失败："
 
 var (
-	errRelayBusy         = errors.New("会话正忙，消息未送达，请稍后重试")
+	errSendBusy          = errors.New("会话正忙，消息未送达，请稍后重试")
 	errRelayShuttingDown = errors.New("节点正在关闭，消息未送达")
 )
 
@@ -55,7 +55,7 @@ func (e *sendEngine) relaySend(ctx context.Context, key, text, workspace string)
 	case turn.AckQueued:
 		return string(sendAckQueued), nil
 	case turn.AckDropped:
-		return "", errRelayBusy
+		return "", errSendBusy
 	default:
 		return "", errRelayShuttingDown
 	}

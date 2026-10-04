@@ -328,7 +328,8 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		}()
 		ctx, cancel := context.WithTimeout(h.ctx, remoteNodeProxyTimeout)
 		defer cancel()
-		if err := nc.Send(ctx, capturedKey, msg.Text, msg.Workspace); err != nil {
+		status, err := nc.Send(ctx, capturedKey, msg.Text, msg.Workspace)
+		if err != nil {
 			// err originates from the remote transport and may carry control
 			// bytes / bidi overrides; sanitise before logging (#641).
 			slog.Error("remote ws send failed", "node", nodeID, "key", capturedKey, "err", osutil.SanitizeForLog(err.Error(), 512))
@@ -341,7 +342,9 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 			// lives on the node). Summary is re-sanitised: broadcast verbatim (#433).
 			h.bcast.broadcastSessionSystemEvent(capturedKey, "发送失败："+osutil.SanitizeForLog(err.Error(), 512))
 		} else {
-			c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: capturedID, Status: "accepted", Key: capturedKey, Node: nodeID}))
+			// The node's own status, so a remote /new rolls the tab back
+			// and a busy node is a toast, as they are for a local send.
+			c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: capturedID, Status: status, Key: capturedKey, Node: nodeID}))
 			// Refresh the remote subscription so the connector re-creates
 			// its streamEvents goroutine if the previous one exited (e.g.
 			// process died between the last subscribe and this send).

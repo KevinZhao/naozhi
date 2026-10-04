@@ -179,26 +179,27 @@ func (n *HTTPClient) getEvents(ctx context.Context, path string) ([]clievent.Eve
 }
 
 // Send sends a message to a session on the remote node via POST /api/sessions/send.
-func (n *HTTPClient) Send(ctx context.Context, key, text, workspace string) error {
+func (n *HTTPClient) Send(ctx context.Context, key, text, workspace string) (string, error) {
 	payload := map[string]string{"key": key, "text": text}
 	if workspace != "" {
 		payload["workspace"] = workspace
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal send payload: %w", err)
+		return "", fmt.Errorf("marshal send payload: %w", err)
 	}
 	resp, err := n.doRequest(ctx, http.MethodPost, "/api/sessions/send", bytes.NewReader(data))
 	if err != nil {
-		return fmt.Errorf("send to %s: %w", n.ID, err)
+		return "", fmt.Errorf("send to %s: %w", n.ID, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
-		return fmt.Errorf("send to %s: status %d", n.ID, resp.StatusCode)
+		return "", fmt.Errorf("send to %s: status %d", n.ID, resp.StatusCode)
 	}
-	return nil
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	return sendStatusFrom(body), nil
 }
 
 // FetchProjects fetches projects from the remote node via GET /api/projects.
