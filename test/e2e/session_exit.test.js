@@ -73,6 +73,10 @@ test.describe('dead session exit chip', () => {
         alive: sessionExit('ready', 'cli_exited'),
         proto: sessionExit('dead', 'toString'),
         detail: sessionExit('dead', 'cli_exited_code_1', 'Error: Invalid API key'),
+        killed: sessionExit('dead', 'cli_exited_code_-1'),
+        signal: sessionExit('dead', 'cli_exited_signal_SIGKILL'),
+        notCode: sessionExit('dead', 'cli_exited_code_x'),
+        bareSignal: sessionExit('dead', 'cli_exited_signal_'),
       };
     });
     expect(got.unknown).toEqual({ crashed: true, text: '进程已退出（weird_reason）', title: '进程已退出（weird_reason），下次发送时自动恢复' });
@@ -83,7 +87,14 @@ test.describe('dead session exit chip', () => {
     expect(got.alive).toBeNull();
     // An inherited Object property is not a known reason.
     expect(got.proto.text).toBe('进程已退出（toString）');
-    expect(got.detail.title).toBe('进程已退出（cli_exited_code_1），下次发送时自动恢复\nError: Invalid API key');
+    // A cli_exited reason names the exit code or the signal; the shim reports
+    // a CLI a signal killed as exit code -1.
+    expect(got.detail).toEqual({ crashed: true, text: 'CLI 进程异常退出（退出码 1）', title: 'CLI 进程异常退出（退出码 1），下次发送时自动恢复\nError: Invalid API key' });
+    expect(got.killed).toEqual({ crashed: true, text: 'CLI 进程被信号终止', title: 'CLI 进程被信号终止，下次发送时自动恢复' });
+    expect(got.signal.text).toBe('CLI 进程被信号 SIGKILL 终止');
+    // A suffix that is neither shape stays the raw value.
+    expect(got.notCode.text).toBe('进程已退出（cli_exited_code_x）');
+    expect(got.bareSignal.text).toBe('进程已退出（cli_exited_signal_）');
     mock.server.close();
   });
 
