@@ -20,6 +20,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -384,12 +385,12 @@ func (p *Process) handleShimCLIExited(msg shimMsg, log *slog.Logger) {
 	reason := DeathReasonCLIExited
 	if code != 0 {
 		log.Warn("CLI exited with error", "code", code, "stderr_tail", tail)
-		reason = DeathReasonCLIExited + "_code_" + strconv.FormatInt(code, 10)
+		reason = cliinfo.DeathReasonCLIExitedCodePrefix + strconv.FormatInt(code, 10)
 	} else if msg.Signal != "" {
 		// msg.Signal comes from a separate, tamperable process and flows into
 		// slog attrs and /api/sessions JSON → HTML, so sanitize it; the numeric
 		// branch is safe via FormatInt.
-		reason = DeathReasonCLIExited + "_signal_" + osutil.SanitizeForLog(msg.Signal, 32)
+		reason = cliinfo.DeathReasonCLIExitedSignalPrefix + osutil.SanitizeForLog(msg.Signal, 32)
 	}
 	p.setDeathReason(reason)
 	p.transitionToDead()
