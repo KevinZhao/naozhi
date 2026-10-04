@@ -387,6 +387,8 @@
 .ctr-detail .ctr-sid-chip:hover{background:rgba(31,111,235,.12);border-color:var(--nz-accent)}
 .ctr-detail .ctr-meta-row{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-top:4px}
 .ctr-detail .ctr-meta-row code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-xs);padding:0 4px}
+.ctr-detail .ctr-session-row{margin-top:10px}
+.ctr-detail .ctr-session-row code{user-select:all;-webkit-user-select:all;word-break:break-all}
 /* 最终输出单屏视图：error → result → 兜底 assistant 文本（cronTimelineDetailHtml 决策链）*/
 /* §7.3 run-detail meta bar (sandbox receipt) + §7.5 cost小字. */
 .ctr-detail .ctr-meta-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--nz-border)}

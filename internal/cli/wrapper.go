@@ -556,18 +556,14 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 	proc.SetOnLiveVersion(w.ObserveLiveVersion)
 
 	// Protocol init handshake (stream-json: no-op; ACP: initialize + session/new)
-	rw := &JSONRW{
-		W: proc.link.stdinWriter(),
-		R: &shimLineReader{proc: proc},
-	}
-	sessionID, err := proto.Init(rw, opts.ResumeID, opts.WorkingDir)
+	sessionID, err := initHandshake(proto, proc, opts.ResumeID, opts.WorkingDir)
 	if err != nil {
 		// proc.Kill() signals the shim but does NOT close the net connection owned by
 		// handle (readLoop hasn't started, so nobody notices killCh). Close it so the
 		// socket fd is freed now instead of at the shim's idle timeout (default 4h).
 		proc.Kill()
 		handle.Close()
-		return nil, fmt.Errorf("protocol init: %w", err)
+		return nil, err
 	}
 	if sessionID != "" {
 		proc.turn.sessionID = sessionID
@@ -793,18 +789,55 @@ func (r *shimLineReader) ReadLine() ([]byte, bool, error) {
 // errInitCLIExited is the cause of an Init handshake the CLI exited during.
 var errInitCLIExited = errors.New("cli exited during init")
 
-// initExitError is the Init handshake's error for a CLI that exited before
-// answering, quoting the first stderr line so spawn errors carry the cause.
-func initExitError(msg shimMsg, tail []string) error {
-	var code int64
-	if msg.Code.Present {
-		code = msg.Code.Value
-	}
-	if cause := stderrTailSummary(tail); cause != "" {
-		return fmt.Errorf("%w (code %d): %s", errInitCLIExited, code, cause)
-	}
-	return fmt.Errorf("%w (code %d)", errInitCLIExited, code)
+// initExitedError is the Init handshake's error for a CLI that exited before
+// answering. It matches errInitCLIExited and clierr.ErrProcessExited; for a
+// non-zero code errors.As yields a *clierr.ProcessExitedError with the class
+// the stderr names. The CLI is still starting, so output it wrote to the
+// handshake does not void the class. Error() quotes the first stderr line.
+type initExitedError struct {
+	code  int64
+	exit  error // *clierr.ProcessExitedError, or the bare sentinel for code <= 0
+	cause string
 }
+
+func (e *initExitedError) Error() string {
+	if e.cause != "" {
+		return fmt.Sprintf("%s (code %d): %s", errInitCLIExited, e.code, e.cause)
+	}
+	return fmt.Sprintf("%s (code %d)", errInitCLIExited, e.code)
+}
+
+func (e *initExitedError) Unwrap() []error { return []error{errInitCLIExited, e.exit} }
+
+// initExitError is the initExitedError for the cli_exited frame msg.
+func initExitError(msg shimMsg, tail []string) error {
+	e := &initExitedError{exit: clierr.ErrProcessExited, cause: stderrTailSummary(tail)}
+	if msg.Code.Present {
+		e.code = msg.Code.Value
+	}
+	if e.code > 0 {
+		e.exit = &clierr.ProcessExitedError{Code: e.code, Class: classifyStderr(tail)}
+	}
+	return e
+}
+
+// initHandshake runs proto's Init handshake over proc's shim link, before
+// readLoop owns it; a failure is a *spawnInitError.
+func initHandshake(proto Protocol, proc *Process, resumeID, cwd string) (string, error) {
+	rw := &JSONRW{W: proc.link.stdinWriter(), R: &shimLineReader{proc: proc}}
+	sessionID, err := proto.Init(rw, resumeID, cwd)
+	if err != nil {
+		return "", &spawnInitError{err}
+	}
+	return sessionID, nil
+}
+
+// spawnInitError is Spawn's error for a failed Init handshake: it reads
+// "protocol init: <cause>" and matches clierr.ErrSpawnInit and the cause.
+type spawnInitError struct{ err error }
+
+func (e *spawnInitError) Error() string   { return "protocol init: " + e.err.Error() }
+func (e *spawnInitError) Unwrap() []error { return []error{clierr.ErrSpawnInit, e.err} }
 
 // resumeRejected marks err, from the resume step of an Init handshake, as
 // clierr.ErrResumeRejected when the backend answered it with an RPC error or

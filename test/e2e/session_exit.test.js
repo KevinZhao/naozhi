@@ -8,8 +8,9 @@
 //  - a live session never shows one, even with a death_reason left over from
 //    a timeout;
 //  - the chip follows session_state pushes, and an optimistic send clears it;
-//  - the tooltip ends with death_detail, the stderr line naming the cause, and
-//    a push drops it until the next poll brings the current one.
+//  - the tooltip ends with death_detail, the stderr line naming the cause; a
+//    push drops it and the poll it triggers brings the current one to the
+//    card and the header alike.
 //
 // Run: cd test/e2e && npx playwright test session_exit.test.js --project=desktop-chrome
 
@@ -137,6 +138,36 @@ test.describe('dead session exit chip', () => {
     expect(await first.jsonValue()).toBe('读取循环崩溃，下次发送时自动恢复');
     await expect(header).toHaveAttribute('title', '读取循环崩溃，下次发送时自动恢复');
     await expect(card(page, CRASHED).locator('.sc-exit')).toHaveAttribute('title', '读取循环崩溃，下次发送时自动恢复');
+    mock.server.close();
+  });
+
+  test('the header chip takes the detail the poll brings after a dead push', async ({ page }) => {
+    const data = exitSessions();
+    const mock = await startMockServer({ sessions: data, ws: true });
+    const crashed = data.sessions.find((x) => x.key === CRASHED);
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector(`.session-card[data-key="${CRASHED}"]`);
+    // @ts-ignore — wsm / WS_STATES are mirrored onto window by the e2e shim.
+    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    await card(page, CRASHED).click();
+    const header = page.locator('#header-exit .sc-exit');
+    await expect(header).toHaveAttribute('title', 'CLI 进程退出，下次发送时自动恢复\n' + DETAIL);
+
+    await expect.poll(() => mock.wsConnections.length).toBeGreaterThan(0);
+    const conn = mock.wsConnections[mock.wsConnections.length - 1];
+    Object.assign(crashed, { state: 'running', death_reason: '' });
+    delete crashed.death_detail;
+    conn.send({ type: 'session_state', key: CRASHED, state: 'running' });
+    await expect(header).toHaveCount(0);
+
+    // A push carries no detail; the poll it triggers does, and the header,
+    // already showing 'dead', must still repaint with it like the card does.
+    const detail2 = 'Error: Invalid API key';
+    Object.assign(crashed, { state: 'dead', death_reason: 'cli_exited', death_detail: detail2 });
+    conn.send({ type: 'session_state', key: CRASHED, state: 'dead', reason: 'cli_exited' });
+    const want = 'CLI 进程退出，下次发送时自动恢复\n' + detail2;
+    await expect(card(page, CRASHED).locator('.sc-exit')).toHaveAttribute('title', want);
+    await expect(header).toHaveAttribute('title', want);
     mock.server.close();
   });
 
