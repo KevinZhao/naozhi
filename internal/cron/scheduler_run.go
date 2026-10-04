@@ -305,7 +305,10 @@ func (s *Scheduler) executeOpt(jobID string, viaTriggerNow bool) {
 		if started.rc == nil {
 			return
 		}
-		if paused := s.finishRun(*started.rc, runOutcome{state: RunStateFailed, errClass: ErrClassPanic, errMsg: "the run panicked"}); paused > 0 {
+		// A sandbox-placement run is closed as one, like the replay recover, so
+		// the sandbox buckets stay a subset of the run totals (#2173).
+		sandbox := placementIsSandbox(started.rc.snap.placement)
+		if paused := s.finishRun(*started.rc, runOutcome{state: RunStateFailed, errClass: ErrClassPanic, errMsg: "the run panicked", sandbox: sandbox}); paused > 0 {
 			s.deliverFailureNotice(*started.rc, ErrClassPanic, RunStateFailed, s.execTimeout, paused)
 		}
 	}}.run(func() {
@@ -564,11 +567,8 @@ func (s *Scheduler) execSnapshotAndEmit(jobID string, viaTriggerNow bool, runID 
 // job releases the spawn-phase timer up front and hands the in-flight handle to
 // the run-once microVM path, which never touches the session router.
 func (s *Scheduler) execPrepareSpawn(rc runCtx, spawnCancel context.CancelFunc) (opts AgentOpts, key, cleanText string, stubRefresh stubRefresher, ok bool) {
-	// The ten values this used to take positionally are the run's identity block;
-	// rc is that block, built once by executeAcquired (Epic H #2546). Locals keep
-	// the body below unchanged.
-	jobID, snap, runID, startedAt, trigger := rc.jobID, rc.snap, rc.runID, rc.startedAt, rc.trigger
-	lg, notifyTo, finalizer, inflight := rc.lg, rc.notifyTo, rc.finalizer, rc.inflight
+	// rc is the run's identity block, built once by executeAcquired (Epic H #2546).
+	snap := rc.snap
 	// agentCommands/agents are published once at construction and read
 	// lock-free via configMaps(); a future hot-reload Store()s a fresh
 	// *cronConfigMaps. Load once so both reads see the same generation.
@@ -592,8 +592,11 @@ func (s *Scheduler) execPrepareSpawn(rc runCtx, spawnCancel context.CancelFunc) 
 		// Release the spawn-phase timer now: the sandbox path derives its own
 		// budget, and keeping this ctx alive would hand later code a misleading one.
 		spawnCancel()
+		// rc itself, not a re-listed copy: the sandbox finish and the scaffold's
+		// recover must claim the same run guard, or a panic after the sandbox
+		// finish closes the run a second time.
 		s.executeSandbox(sandboxExecArgs{
-			runCtx: runCtx{jobID: jobID, snap: snap, runID: runID, startedAt: startedAt, trigger: trigger, notifyTo: notifyTo, inflight: inflight, finalizer: finalizer, lg: lg},
+			runCtx: rc,
 			prompt: cleanText,
 			model:  opts.Model,
 		})
