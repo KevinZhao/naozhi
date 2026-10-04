@@ -304,7 +304,6 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 // /readyz). The dispatcher exists by now, so its metrics closure is a
 // constructor argument (#2633).
 func buildHealthHandler(opts ServerOptions, s *Server, w *wiring) *HealthHandler {
-	platNames := platformNameSet(s.platforms)
 	return &HealthHandler{
 		dispatcherMetrics:  s.dispatcher.Metrics,
 		router:             s.router,
@@ -323,8 +322,7 @@ func buildHealthHandler(opts ServerOptions, s *Server, w *wiring) *HealthHandler
 		configSHA256:       opts.Config.SHA256,
 		configLoadedAt:     opts.Config.LoadedAt,
 		configPath:         opts.Config.Path,
-		platforms:          platNames,
-		platformsStatus:    platformStatusMap(platNames),
+		platforms:          s.platforms,
 		platformCaps:       platform.CapabilityMatrix(s.platforms),
 		hubDropped:         s.hub.DroppedMessages,
 		// A method value on a nil *cron.Scheduler is fine: RunStoreHealth

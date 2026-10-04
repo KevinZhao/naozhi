@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
@@ -152,35 +153,119 @@ func TestHandleHealth_WSDropped_ZeroEmitted(t *testing.T) {
 	}
 }
 
-// assertHealthPlatforms pins the platform map shape. The prior code built
-// `map[string]string` per-probe; the struct keeps that exact type so
-// platform.Platform names passed into New() marshal as-is.
-func TestHandleHealth_PlatformsShape(t *testing.T) {
-	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
-	// inject a second platform so we exercise the multi-entry path.
-	// R20260616-PERF-002: the served `platforms` map is now pre-built once at
-	// construction (platformsStatus) rather than rebuilt from `platforms` per
-	// request, so override the pre-built map directly here.
-	hs.healthH.platforms = map[string]struct{}{"feishu": {}, "slack": {}}
-	hs.healthH.platformsStatus = map[string]string{"feishu": "registered", "slack": "registered"}
+// connReportingPlatform is a mockPlatform that answers ConnStateReporter.
+type connReportingPlatform struct {
+	mockPlatform
+	state platform.ConnState
+	ok    bool
+}
 
+func (c *connReportingPlatform) ConnState() (platform.ConnState, bool) { return c.state, c.ok }
+
+// healthBody GETs an authenticated /health and decodes it.
+func healthBody(t *testing.T, hs *handlerSet) map[string]any {
+	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
 	hs.healthH.handleHealth(w, req)
-
 	var body map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+	return body
+}
+
+// TestHandleHealth_PlatformsShape: `platforms` stays a name -> string map (the
+// shape doctor decodes), "registered" for adapters that cannot observe their
+// connection, and with no reporter at all platform_conn is omitted.
+func TestHandleHealth_PlatformsShape(t *testing.T) {
+	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
+	hs.healthH.platforms = map[string]platform.Platform{
+		"feishu": &mockPlatform{},
+		"slack":  &connReportingPlatform{ok: false},
+	}
+
+	body := healthBody(t, hs)
 	p, ok := body["platforms"].(map[string]any)
 	if !ok {
 		t.Fatalf("platforms wrong type: %T", body["platforms"])
+	}
+	if len(p) != 2 {
+		t.Errorf("platforms = %v, want both registered names", p)
 	}
 	for _, name := range []string{"feishu", "slack"} {
 		if v := p[name]; v != "registered" {
 			t.Errorf("platforms[%s] = %v, want \"registered\"", name, v)
 		}
+	}
+	if v, present := body["platform_conn"]; present {
+		t.Errorf("platform_conn = %v, want omitted when no platform reports a state", v)
+	}
+}
+
+// TestHandleHealth_PlatformsEmptyIsObject: with no platform configured the
+// field is still `{}`, never null, which is what the doctor contract fixture
+// and any `platforms | keys` consumer expect.
+func TestHandleHealth_PlatformsEmptyIsObject(t *testing.T) {
+	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
+	hs.healthH.platforms = nil
+
+	p, ok := healthBody(t, hs)["platforms"].(map[string]any)
+	if !ok || len(p) != 0 {
+		t.Errorf("platforms = %#v, want an empty object", p)
+	}
+}
+
+// TestHandleHealth_PlatformsServeLiveConnState: a reporting adapter's state is
+// read per request, not frozen at construction, and its detail lands in
+// platform_conn next to the non-reporting "registered" entry.
+func TestHandleHealth_PlatformsServeLiveConnState(t *testing.T) {
+	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
+	since := time.Now().Add(-90 * time.Second)
+	errAt := time.Now().Add(-30 * time.Second)
+	slack := &connReportingPlatform{ok: true, state: platform.ConnState{
+		State: platform.ConnDisconnected, Since: since,
+		LastError: "read tcp: connection reset", LastErrorAt: errAt,
+	}}
+	hs.healthH.platforms = map[string]platform.Platform{
+		"feishu": &mockPlatform{},
+		"slack":  slack,
+	}
+
+	body := healthBody(t, hs)
+	p, _ := body["platforms"].(map[string]any)
+	if p["slack"] != "disconnected" || p["feishu"] != "registered" {
+		t.Fatalf("platforms = %v, want slack=disconnected feishu=registered", p)
+	}
+	conn, _ := body["platform_conn"].(map[string]any)
+	if _, has := conn["feishu"]; has || len(conn) != 1 {
+		t.Fatalf("platform_conn = %v, want only the reporting platform", conn)
+	}
+	got, _ := conn["slack"].(map[string]any)
+	want := map[string]any{
+		"state":         "disconnected",
+		"since":         since.UTC().Format(time.RFC3339),
+		"last_error":    "read tcp: connection reset",
+		"last_error_at": errAt.UTC().Format(time.RFC3339),
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("platform_conn.slack.%s = %v, want %v", k, got[k], v)
+		}
+	}
+	if ago, _ := got["since_ago"].(string); ago != "1m30s" && ago != "1m31s" {
+		t.Errorf("since_ago = %q, want ~1m30s", ago)
+	}
+
+	slack.state = platform.ConnState{State: platform.ConnConnected, Since: time.Now()}
+	body = healthBody(t, hs)
+	if p, _ := body["platforms"].(map[string]any); p["slack"] != "connected" {
+		t.Errorf("after reconnect platforms.slack = %v, want connected (state must be read per request)", p["slack"])
+	}
+	conn, _ = body["platform_conn"].(map[string]any)
+	if got, _ := conn["slack"].(map[string]any); got["last_error"] != nil || got["last_error_at"] != nil {
+		t.Errorf("platform_conn.slack = %v, want no error fields when none recorded", got)
 	}
 }
 
