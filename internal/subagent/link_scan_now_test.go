@@ -66,6 +66,7 @@ func TestScanMetaFiles_NowReuse(t *testing.T) {
 	const sessionID = "abcdef01-2345-6789-abcd-ef0123456789"
 	l, subagentDir := newLinkerForTest(t, sessionID)
 	l.cacheTTL = 200 * time.Millisecond
+	clock := installStepClock(l)
 
 	var scanCount int
 	l.scanHook = func() { scanCount++ }
@@ -92,5 +93,12 @@ func TestScanMetaFiles_NowReuse(t *testing.T) {
 	}
 	if scanCount != 1 {
 		t.Errorf("expected still 1 scan (cache warm), got %d", scanCount)
+	}
+
+	// Once the TTL has elapsed the next scan misses.
+	clock.advance(l.cacheTTL)
+	l.scanMetaFiles(subagentDir)
+	if scanCount != 2 {
+		t.Errorf("expected 2 scans after TTL, got %d", scanCount)
 	}
 }
