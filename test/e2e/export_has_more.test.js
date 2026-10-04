@@ -5,13 +5,14 @@
 // is cancelled, so a page that brings nothing new but says has-more is a cut
 // export the toast must warn about. has-more=0 ends the walk without an extra
 // empty request; only without the header (an older server) does the pager
-// fall back to the full-page heuristic.
+// fall back to the full-page heuristic. A remote session walks the same
+// pager: its node serves the `before=` pages through the relay.
 //
 // 跑法：cd test/e2e && npx playwright test export_has_more.test.js --project=desktop-chrome
 
 const { test, expect } = require('@playwright/test');
 const fs = require('fs');
-const { startMockServer } = require('./mock-server');
+const { startMockServer, defaultSessions } = require('./mock-server');
 
 const desktop = { viewport: { width: 1280, height: 800 } };
 const KEY = 'dashboard:direct:2026-01-01-120000-1:myproject';
@@ -23,9 +24,17 @@ function history(n) {
   return Array.from({ length: n }, (_, i) => ({ type: 'text', detail: `[e${i}]`, time: BASE + i, uuid: 'xh-' + i }));
 }
 
+/** The default sessions with KEY moved to node `remote1`. */
+function remoteSessions() {
+  const s = defaultSessions();
+  s.sessions[0].node = 'remote1';
+  s.nodes = { local: { display_name: 'Local', status: 'ok' }, remote1: { display_name: 'Remote 1', status: 'ok' } };
+  return s;
+}
+
 /**
  * Opens the session, clicks export and returns the downloaded markdown, the
- * toast text and how many `before=` requests the export sent.
+ * toast text and the queries of the `before=` requests the export sent.
  * @param {import('@playwright/test').Browser} browser
  * @param {number} n
  * @param {object} [opts] extra startMockServer overrides
@@ -33,15 +42,16 @@ function history(n) {
  */
 async function exportSession(browser, n, opts = {}, setup) {
   const mock = await startMockServer({ eventsByKey: { [KEY]: history(n) }, eventsRingSize: 500, ...opts });
+  const node = opts.sessions ? opts.sessions.sessions[0].node : 'local';
   const ctx = await browser.newContext({ ...desktop, acceptDownloads: true });
   try {
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
-    await page.click(`.session-card[data-key="${KEY}"]`);
+    await page.click(`.session-card[data-key="${KEY}"][data-node="${node}"]`);
     await page.waitForSelector('#events-scroll .event');
-    const beforeCalls = () => mock.eventsCalls.filter(q => new URLSearchParams(q).has('before')).length;
-    const callsAtClick = beforeCalls();
+    const beforeCalls = () => mock.eventsCalls.filter(q => new URLSearchParams(q).has('before'));
+    const callsAtClick = beforeCalls().length;
     if (setup) await setup(page);
     const dl = page.waitForEvent('download');
     await page.click('.btn-download');
@@ -52,7 +62,7 @@ async function exportSession(browser, n, opts = {}, setup) {
       exported: (md.match(/^## /gm) || []).length,
       md,
       toast: (await toast.textContent()) || '',
-      exportBeforeCalls: beforeCalls() - callsAtClick,
+      exportBefore: beforeCalls().slice(callsAtClick),
     };
   } finally {
     await ctx.close();
@@ -104,7 +114,7 @@ test.describe('导出会话：以 X-Events-Has-More 判定历史是否完整', (
     expect(r.exported).toBe(999);
     expect(r.md).toContain('[e0]');
     expect(r.toast).not.toContain(TRUNCATED);
-    expect(r.exportBeforeCalls).toBe(1);
+    expect(r.exportBefore).toHaveLength(1);
   });
 
   test('短会话（空页 + has-more=0）：导出完整，不提示截断', async ({ browser }) => {
@@ -132,7 +142,22 @@ test.describe('导出会话：以 X-Events-Has-More 判定历史是否完整', (
     expect(r.exported).toBe(700);
     expect(r.toast).not.toContain(TRUNCATED);
     // 200 older entries, then the held cursor-ms entry alone: short, nothing new.
-    expect(r.exportBeforeCalls).toBe(2);
+    expect(r.exportBefore).toHaveLength(2);
+  });
+
+  test('远端会话：经节点逐页翻到最早，导出完整', async ({ browser }) => {
+    const r = await exportSession(browser, 999, { sessions: remoteSessions() });
+    expect(r.exported).toBe(999);
+    expect(r.md).toContain('[e0]');
+    expect(r.toast).not.toContain(TRUNCATED);
+    expect(r.exportBefore).toHaveLength(1);
+    expect(new URLSearchParams(r.exportBefore[0]).get('node')).toBe('remote1');
+  });
+
+  test('远端会话降级读（空页 + has-more=1）：提示已截断', async ({ browser }) => {
+    const r = await exportSession(browser, 700, { sessions: remoteSessions(), eventsBeforeFailCount: 1 });
+    expect(r.exported).toBe(500);
+    expect(r.toast).toContain(TRUNCATED);
   });
 
   test('服务端不带 header（旧版本）：满页全是已持有事件仍提示已截断', async ({ browser }) => {

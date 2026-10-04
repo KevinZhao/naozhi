@@ -70,6 +70,24 @@ func TestHandleEvents_RemoteBefore_BoundedPeerWithoutHasMore(t *testing.T) {
 	}
 }
 
+// A bounded peer caps the page at maxEventsPageLimit itself, so a full-size
+// request (the session export's) must keep the extra entry under that cap or
+// a page with older history left reads as the last one.
+func TestHandleEvents_RemoteBefore_BoundedPeerFullPageKeepsHasMore(t *testing.T) {
+	conn := &fakeEventsConn{entries: remoteEventsFixture(2 * maxEventsPageLimit), bounded: true}
+	h := newETagTestHandlers(t, newFakeRouter(), fakeEventsNodeAccessor{conn: conn})
+
+	for _, limit := range []string{"", "&limit=500"} {
+		rec, got := doRemoteEvents(t, h, "&before=1001"+limit)
+		if len(got) != maxEventsPageLimit-1 || got[len(got)-1].Time != 1000 {
+			t.Fatalf("limit %q: got %d entries ending %v, want the newest %d", limit, len(got), times(got[len(got)-1:]), maxEventsPageLimit-1)
+		}
+		if hm := rec.Header().Get("X-Events-Has-More"); hm != "1" {
+			t.Errorf("limit %q: X-Events-Has-More=%q want 1 (entries 1..501 remain older)", limit, hm)
+		}
+	}
+}
+
 // The initial page (limit only) is the node's own visible-aware page with
 // its has-more, instead of a tail cut from the whole remote log.
 func TestHandleEvents_RemoteInitial_PagingNodeAnswersItself(t *testing.T) {
