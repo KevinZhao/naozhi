@@ -276,26 +276,82 @@ func TestTrustedSigKeys_IsADeepCopy(t *testing.T) {
 	}
 	got[0][0] ^= 0xff
 	got[0] = nil
-	payload := []byte("checksums")
-	sig := []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(priv, payload)))
-	if idx, err := VerifyChecksumsSignature(payload, sig, trustedSigKeys); err != nil || idx != 0 {
+	sums := []byte("checksums")
+	payload, err := SignedPayload("v1", sums)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx, err := VerifyReleaseSignature("v1", sums, signB64(priv, payload), trustedSigKeys); err != nil || idx != 0 {
 		t.Fatalf("mutating the copy changed the embedded set: idx=%d err=%v", idx, err)
 	}
 }
 
-func TestVerifyChecksumsSignature_SharesSentinels(t *testing.T) {
+func TestVerifyReleaseSignature_SharesSentinels(t *testing.T) {
 	pub, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyChecksumsSignature([]byte("x"), []byte("y"), nil); !errors.Is(err, ErrEmptyTrustSet) {
+	if _, err := VerifyReleaseSignature("v1", []byte("x"), []byte("y"), nil); !errors.Is(err, ErrEmptyTrustSet) {
 		t.Fatalf("empty trust set: got %v, want ErrEmptyTrustSet", err)
 	}
-	if _, err := VerifyChecksumsSignature([]byte("x"), []byte("!!"), []ed25519.PublicKey{pub}); !errors.Is(err, ErrMalformedSignature) {
+	if _, err := VerifyReleaseSignature("v1", []byte("x"), []byte("!!"), []ed25519.PublicKey{pub}); !errors.Is(err, ErrMalformedSignature) {
 		t.Fatalf("malformed: got %v, want ErrMalformedSignature", err)
 	}
 	bogus := []byte(base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize)))
-	if _, err := VerifyChecksumsSignature([]byte("x"), bogus, []ed25519.PublicKey{pub}); !errors.Is(err, ErrNoTrustedKey) {
+	if _, err := VerifyReleaseSignature("v1", []byte("x"), bogus, []ed25519.PublicKey{pub}); !errors.Is(err, ErrNoTrustedKey) {
 		t.Fatalf("wrong signature: got %v, want ErrNoTrustedKey", err)
+	}
+}
+
+// TestSignedPayload_Format pins the signed bytes exactly: deployed clients
+// verify this layout, and install.sh is to rebuild it with printf + cat.
+func TestSignedPayload_Format(t *testing.T) {
+	sums := []byte(strings.Repeat("a", 64) + "  naozhi-linux-amd64\n" + strings.Repeat("b", 64) + "  naozhi-darwin-arm64\n")
+	got, err := SignedPayload("v0.0.83", sums)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "naozhi-release-v1\ntag v0.0.83\n" + string(sums)
+	if string(got) != want {
+		t.Fatalf("SignedPayload = %q, want %q", got, want)
+	}
+	if got, _ := SignedPayload("v1", nil); string(got) != "naozhi-release-v1\ntag v1\n" {
+		t.Fatalf("empty checksums must leave only the header, got %q", got)
+	}
+}
+
+func TestSignedPayload_RejectsBadTag(t *testing.T) {
+	for _, tag := range []string{"", "v1\n", "v1/x", "v1 x", "v1\ntag v2", strings.Repeat("v", 65)} {
+		if p, err := SignedPayload(tag, []byte("sums")); err == nil {
+			t.Errorf("SignedPayload(%q) = %q, want an error", tag, p)
+		}
+		if _, err := VerifyReleaseSignature(tag, []byte("sums"), []byte("sig"), nil); err == nil || errors.Is(err, ErrEmptyTrustSet) {
+			t.Errorf("VerifyReleaseSignature(%q) = %v, want the tag rejected first", tag, err)
+		}
+	}
+	if _, err := SignedPayload(strings.Repeat("v", 64), nil); err != nil {
+		t.Errorf("a 64-character tag is valid: %v", err)
+	}
+}
+
+// TestVerifyReleaseSignature_BindsTag: a signature made for one tag, or over
+// the bare checksums.txt, does not verify for another tag.
+func TestVerifyReleaseSignature_BindsTag(t *testing.T) {
+	pub, priv := genKey(t)
+	trust := []ed25519.PublicKey{pub}
+	sums := []byte(strings.Repeat("a", 64) + "  naozhi-linux-amd64\n")
+	payload, err := SignedPayload("v1.2.3", sums)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := signB64(priv, payload)
+	if _, err := VerifyReleaseSignature("v1.2.3", sums, sig, trust); err != nil {
+		t.Fatalf("own tag: %v", err)
+	}
+	if _, err := VerifyReleaseSignature("v1.2.4", sums, sig, trust); !errors.Is(err, ErrNoTrustedKey) {
+		t.Fatalf("other tag: got %v, want ErrNoTrustedKey", err)
+	}
+	if _, err := VerifyReleaseSignature("v1.2.3", sums, signB64(priv, sums), trust); !errors.Is(err, ErrNoTrustedKey) {
+		t.Fatalf("signature over bare checksums: got %v, want ErrNoTrustedKey", err)
 	}
 }

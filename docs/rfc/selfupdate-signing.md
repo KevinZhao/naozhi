@@ -109,6 +109,25 @@
 - **优点**：单签名覆盖所有平台 asset（一个 .sig 守一个清单）；客户端改动最小——只在 `verifyPinnedChecksumsFile`（:167）之后、`verifyChecksum`（:170）之前插一步 `verifySignature(sumPath, sigPath)`；信任链 `sig → checksums.txt → binary SHA-256` 清晰，且复用全部现有 `verifyChecksum` 加固（duplicate-entry 等）。
 - **缺点**：二进制本身不带签名（带外验证者需先拿 checksums.txt）。对我们场景无影响。
 
+#### B1 的签名载荷（字节级定义）
+
+`.sig` 签的不是 `checksums.txt` 裸字节，而是 `selfupdate.SignedPayload(tag, checksums)` 拼出的载荷（release-sign 与客户端共用这一个函数，格式只在此一处定义）：
+
+```
+naozhi-release-v1
+tag <tag>
+<checksums.txt 原样字节>
+```
+
+前两行各以单个 LF 结尾，其后紧跟 `checksums.txt` 的原样字节（不做任何规范化）。
+
+- `<tag>` 必须匹配 `tagAllowedRe`（`^[A-Za-z0-9._-]{1,64}$`），因此不可能携带换行篡改载荷结构；release-sign 的 `-tag` 与客户端从 `/releases/latest` 重定向解析出的 tag 用同一校验。
+- **为什么绑 tag**：asset 名不含版本，若只签 `checksums.txt`，旧版本的一整套（二进制 + checksums.txt + .sig）原样挂到最新 tag 下仍能验签通过；客户端重启后版本号回落、又会判定"有新版"，陷入反复回滚。绑 tag 后旧签名只对旧 tag 成立。
+- **为什么加域前缀**：`naozhi-release-v1` 让这把 key 的签名不能被挪作他用（也不能把别处的签名当 release 签名），并为将来 v2 格式留位。
+- 发布的 `checksums.txt` 本身不变；`verifyChecksum` 与 pin 校验仍读原文件。
+- install.sh 将来验签时可用一行重建载荷：`{ printf 'naozhi-release-v1\ntag %s\n' "$tag"; cat checksums.txt; }`。
+- 绑 tag 防不住"把一个更旧但签名真实的 release 标成 latest"（旧 tag 自己的载荷合法），这要靠客户端的"仅升不降"检查兜底。
+
 #### B2. 签每个二进制 asset
 
 - 每个 `naozhi-os-arch` 配一个 `.sig`。

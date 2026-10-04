@@ -109,17 +109,43 @@ func TrustedSigKeys() []ed25519.PublicKey {
 	return out
 }
 
-// VerifyChecksumsSignature is verifySignature for callers outside the package:
-// it checks a checksums.txt signature against trustSet with the same decoding
-// and sentinels the upgrade path uses.
-func VerifyChecksumsSignature(payload, sig []byte, trustSet []ed25519.PublicKey) (keyIndex int, err error) {
+// signedPayloadDomain opens every signed payload; it keeps the release key's
+// signatures from meaning anything else and leaves room for a v2 format.
+const signedPayloadDomain = "naozhi-release-v1\n"
+
+// SignedPayload is the one definition of the bytes a release signature covers:
+// the domain line, "tag <tag>\n", then checksums.txt as published. Binding the
+// tag stops an older signed release being replayed under a newer tag. A tag
+// outside tagAllowedRe is rejected, so the signer and the client accept the
+// same tags and a tag can never carry a newline into the payload.
+func SignedPayload(tag string, checksums []byte) ([]byte, error) {
+	if !tagAllowedRe.MatchString(tag) {
+		return nil, fmt.Errorf("selfupdate: release tag %q is not a valid tag", tag)
+	}
+	out := make([]byte, 0, len(signedPayloadDomain)+len("tag \n")+len(tag)+len(checksums))
+	out = append(out, signedPayloadDomain...)
+	out = append(out, "tag "...)
+	out = append(out, tag...)
+	out = append(out, '\n')
+	return append(out, checksums...), nil
+}
+
+// VerifyReleaseSignature checks sig over SignedPayload(tag, checksums) against
+// trustSet with the same decoding and sentinels the upgrade path uses, so the
+// release-sign tool cannot check different bytes than deployed clients do.
+func VerifyReleaseSignature(tag string, checksums, sig []byte, trustSet []ed25519.PublicKey) (keyIndex int, err error) {
+	payload, err := SignedPayload(tag, checksums)
+	if err != nil {
+		return -1, err
+	}
 	return verifySignature(payload, sig, trustSet)
 }
 
 // verifyReleaseSignature fetches rel.SigURL through fetchFile's guards and
-// requires it to verify checksums.txt against the embedded trust set. Every
-// failure is fatal, a missing .sig included: a fallback to the unsigned chain
-// would let an attacker downgrade the check by deleting the asset.
+// requires it to verify SignedPayload(rel.Tag, checksums.txt) against the
+// embedded trust set. Every failure is fatal, a missing .sig included: a
+// fallback to the unsigned chain would let an attacker downgrade the check by
+// deleting the asset.
 func verifyReleaseSignature(ctx context.Context, rel *Release, dir, sumPath string) error {
 	if rel.SigURL == "" {
 		return fmt.Errorf("verify signature: release %s has no signature URL", rel.Tag)
@@ -132,11 +158,11 @@ func verifyReleaseSignature(ctx context.Context, rel *Release, dir, sumPath stri
 	if err != nil {
 		return fmt.Errorf("verify signature: %w", err)
 	}
-	payload, err := os.ReadFile(sumPath)
+	sums, err := os.ReadFile(sumPath)
 	if err != nil {
 		return fmt.Errorf("verify signature: read checksums: %w", err)
 	}
-	idx, err := verifySignature(payload, sig, trustedSigKeys)
+	idx, err := VerifyReleaseSignature(rel.Tag, sums, sig, trustedSigKeys)
 	if err != nil {
 		return fmt.Errorf("verify signature: %w", err)
 	}
