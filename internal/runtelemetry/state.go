@@ -58,6 +58,9 @@ const (
 	// ErrClassCronSessionCapacity: GetOrCreate refused at the router's session
 	// caps. RunState is "skipped" — contention, not a job fault.
 	ErrClassCronSessionCapacity ErrorClass = "session_capacity"
+	// ErrClassCronTurnFailed: Send returned a result the backend flagged as
+	// an error (max turns, an RPC rejection). RunState is "failed".
+	ErrClassCronTurnFailed ErrorClass = "turn_failed"
 	// ErrClassCronInterrupted marks a run that was still executing when the
 	// process went away — a graceful shutdown that outran the drain budget, or a
 	// hard kill. RunState stays "canceled" (it did not complete) and the class

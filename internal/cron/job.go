@@ -262,6 +262,10 @@ const (
 	// ErrClassSessionCapacity marks a run skipped because GetOrCreate hit the
 	// router's session caps (ErrSessionCapacity): contention, not a job fault.
 	ErrClassSessionCapacity ErrorClass = "session_capacity"
+	// ErrClassTurnFailed marks a run whose Send returned a result the backend
+	// flagged as an error (ErrTurnFailed): max turns, an RPC rejection, a
+	// failed codex turn. The CLI ran; the turn did not succeed.
+	ErrClassTurnFailed ErrorClass = "turn_failed"
 	// ErrClassRouterMissing fires when executeOpt short-circuits on a nil router
 	// (test fixtures or a misconfigured scheduler); a started→ended pair is still
 	// emitted so dashboard "running" counters stay consistent (#1323).

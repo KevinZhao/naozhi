@@ -128,6 +128,8 @@ func failureNoticeBody(errClass ErrorClass, state RunState, runID string, timeou
 		cause = "启动会话失败"
 	case errClass == ErrClassSendError:
 		cause = "执行失败（CLI 发送错误）"
+	case errClass == ErrClassTurnFailed:
+		cause = "执行失败（后端报告本轮出错），请检查执行历史"
 	case errClass == ErrClassWorkDirUnreachable:
 		cause = "工作目录不可达，本次执行已跳过"
 	case errClass == ErrClassWorkDirOutsideRoot:

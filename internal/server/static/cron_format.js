@@ -59,8 +59,7 @@ export function formatWhenColloquial(ms) {
   if (d < 60 * 60 * 1000) return { label: Math.floor(d / 60000) + ' 分钟后', imminent: false };
   const dayDelta = calendarDayDelta(now, ms);
   const tgt = new Date(ms);
-  const pad = n => (n < 10 ? '0' + n : '' + n);
-  const hhmm = pad(tgt.getHours()) + ':' + pad(tgt.getMinutes());
+  const hhmm = String(tgt.getHours()).padStart(2, '0') + ':' + String(tgt.getMinutes()).padStart(2, '0');
   if (dayDelta === 0) {
     return { label: '约 ' + Math.floor(d / 3600000) + ' 小时后', imminent: false };
   }
@@ -105,34 +104,35 @@ export function formatRunningElapsed(startedAt) {
 
 // cronErrorClassLabel —— 后端 ErrorClass 枚举的中文友好名。RFC §9 错误分类映射。
 // 未知值原样返回，方便排查（不应发生但容错）。
+const CRON_ERROR_CLASS_LABELS = Object.freeze({
+  session_error: '会话错误',
+  send_error: '发送失败',
+  turn_failed: '后端报错',
+  deadline_exceeded: '超时',
+  canceled: '已取消',
+  workdir_unreachable: '工作目录不可达',
+  workdir_outside_root: '工作目录越界',
+  overlap_skipped: '重叠跳过',
+  session_capacity: '会话上限跳过',
+  router_missing: '路由未就绪',
+  paused_concurrent: '暂停时被抢',
+  deleted_concurrent: '运行中被删除',
+  panic: '内部异常',
+  // interrupted 与 canceled 同为 RunState=canceled，区别是谁中止的：进程自己没了
+  // （drain 超预算或被硬杀）。措辞须与"已取消"分开，免得把被杀的运行读成自己点过取消。
+  interrupted: '进程中断（未跑完）',
+  // 重启存活的 CLI 被启动时的 argv 漂移检查关掉：是操作员自己的配置修改
+  // 结束了这次 run，不是重启本身 —— 与 interrupted 分开命名，操作员才
+  // 知道该看的是自己改了什么，而不是找一个不存在的崩溃（#2749 语义）。
+  config_drift: '配置变更中止（升级时改了模型/参数）',
+  // 云沙箱三态（agentcore-cloud-sandbox RFC §6.1/§7.2）。transport 是
+  // §6.2 双跑风险态：流断了但 microVM 状态未知，徽标走红色 + ⚠。
+  sandbox_failed: '云沙箱任务失败',
+  sandbox_transport: '云沙箱断流（状态未知）',
+  sandbox_unavailable: '云沙箱未配置',
+});
 export function cronErrorClassLabel(cls) {
-  switch (cls) {
-    case 'session_error': return '会话错误';
-    case 'send_error': return '发送失败';
-    case 'deadline_exceeded': return '超时';
-    case 'canceled': return '已取消';
-    case 'workdir_unreachable': return '工作目录不可达';
-    case 'workdir_outside_root': return '工作目录越界';
-    case 'overlap_skipped': return '重叠跳过';
-    case 'session_capacity': return '会话上限跳过';
-    case 'router_missing': return '路由未就绪';
-    case 'paused_concurrent': return '暂停时被抢';
-    case 'deleted_concurrent': return '运行中被删除';
-    case 'panic': return '内部异常';
-    // interrupted 与 canceled 同为 RunState=canceled，区别是谁中止的：进程自己没了
-    // （drain 超预算或被硬杀）。措辞须与"已取消"分开，免得把被杀的运行读成自己点过取消。
-    case 'interrupted': return '进程中断（未跑完）';
-    // 重启存活的 CLI 被启动时的 argv 漂移检查关掉：是操作员自己的配置修改
-    // 结束了这次 run，不是重启本身 —— 与 interrupted 分开命名，操作员才
-    // 知道该看的是自己改了什么，而不是找一个不存在的崩溃（#2749 语义）。
-    case 'config_drift': return '配置变更中止（升级时改了模型/参数）';
-    // 云沙箱三态（agentcore-cloud-sandbox RFC §6.1/§7.2）。transport 是
-    // §6.2 双跑风险态：流断了但 microVM 状态未知，徽标走红色 + ⚠。
-    case 'sandbox_failed': return '云沙箱任务失败';
-    case 'sandbox_transport': return '云沙箱断流（状态未知）';
-    case 'sandbox_unavailable': return '云沙箱未配置';
-    default: return cls || '';
-  }
+  return Object.hasOwn(CRON_ERROR_CLASS_LABELS, cls) ? CRON_ERROR_CLASS_LABELS[cls] : (cls || '');
 }
 
 // cronJobLedgerCostHtml renders the job's 30-day ledger figure (all runs,

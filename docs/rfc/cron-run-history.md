@@ -451,6 +451,7 @@ session events 面板里多次 cron 触发的 user 消息混在一起。在 cron
 | GetOrCreate other | "session error: ..." | `session_error` (failed) |
 | Send err is Canceled | (无) | `canceled` (canceled) |
 | Send err is DeadlineExceeded | "send error: ..." | `deadline_exceeded` (timed_out) |
+| Send ok but result is_error (not an own abort) | "send error: cron: turn failed (...)" | `turn_failed` (failed) |
 | Send other | "send error: ..." | `send_error` (failed) |
 | paused 抢跑（registerJob 闭包分支）| (无) | `paused_concurrent` (skipped) |
 | 兜底 panic recover | (cron lib 处理) | `panic` (failed) |

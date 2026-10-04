@@ -18,6 +18,7 @@ func TestSandboxErrClass_WireEquivalence(t *testing.T) {
 		ErrClassSandboxUnavailable: runtelemetry.ErrClassCronSandboxUnavailable,
 		ErrClassInterrupted:        runtelemetry.ErrClassCronInterrupted,
 		ErrClassSessionCapacity:    runtelemetry.ErrClassCronSessionCapacity,
+		ErrClassTurnFailed:         runtelemetry.ErrClassCronTurnFailed,
 	}
 	for c, r := range pairs {
 		if string(c) != string(r) {

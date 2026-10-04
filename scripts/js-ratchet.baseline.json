@@ -100,7 +100,7 @@
   },
   "cron_format.js": {
     "lines": 146,
-    "maxFnLines": 29,
+    "maxFnLines": 20,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0,
