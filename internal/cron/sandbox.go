@@ -367,6 +367,6 @@ func (s *Scheduler) finishSandboxRunWith(a sandboxExecArgs, state RunState, errC
 		// envelopes before anything reaches IM.
 		s.deliverNotice(a.notifyTo, formatCronNotice(a.snap.labelOrID(), localizeNotice(result)))
 	default:
-		s.deliverFailureNotice(a.runCtx, errClass, state, s.sandboxRunBudget(), paused)
+		s.deliverFailureNotice(a.runCtx, errClass, TurnCauseUnknown, state, s.sandboxRunBudget(), paused)
 	}
 }

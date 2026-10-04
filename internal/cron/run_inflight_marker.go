@@ -377,6 +377,6 @@ func (s *Scheduler) finishRestartedRun(m runInflightMarker, finalizer *runFinali
 		snap:      jobSnapshot{prompt: m.Prompt, workDir: m.WorkDir, fresh: m.Fresh},
 	}
 	if paused := s.finishRun(rc, out); paused > 0 {
-		s.deliverPauseNotice(rc, out.errClass, out.state, adoptionWaitBudget, paused)
+		s.deliverPauseNotice(rc, out.errClass, out.turnCause, out.state, adoptionWaitBudget, paused)
 	}
 }
