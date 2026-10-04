@@ -79,11 +79,11 @@ func TestBuildSessionOpts_PlannerKeySimpleName(t *testing.T) {
 	}
 }
 
-// The inline fallback starts from agents["general"], but a planner's account
-// is its project's pin only, as session.KeyResolver.ResolveForPlannerKey and
-// AccessProfileForKey decide it. A resolver miss (project gone) or a project
-// without a pin must not put the planner on general's profile.
-func TestBuildSessionOpts_PlannerIgnoresGeneralAccessProfile(t *testing.T) {
+// The inline fallback starts from agents["general"], but only an IM agent key
+// spawns on an agent's profile, as session.KeyResolver.AccessProfileForKey
+// decides it. A planner's account is its project's pin only; cron:, scratch:
+// and malformed keys get none, so the session never records general's profile.
+func TestBuildSessionOpts_NonAgentKeysIgnoreGeneralAccessProfile(t *testing.T) {
 	root := t.TempDir()
 	for _, n := range []string{"unpinned", "pinned"} {
 		if err := os.MkdirAll(filepath.Join(root, n), 0o755); err != nil {
@@ -115,6 +115,11 @@ func TestBuildSessionOpts_PlannerIgnoresGeneralAccessProfile(t *testing.T) {
 		{"project without a pin", project.PlannerKeyFor("unpinned"), nil, ""},
 		{"project pin", project.PlannerKeyFor("pinned"), missing, "personal"},
 		{"chat key keeps the agent profile", "feishu:direct:alice:general", nil, "company"},
+		{"cron key, resolver miss", "cron:job1", missing, ""},
+		{"cron key, no resolver", "cron:job1", nil, ""},
+		{"scratch key, resolver miss", "scratch:abc", missing, ""},
+		{"four-segment cron key", "cron:job1:x:general", nil, ""},
+		{"malformed key", "feishu:direct", nil, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

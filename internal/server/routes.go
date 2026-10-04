@@ -296,10 +296,13 @@ func buildSessionOpts(key string, resolver *session.KeyResolver, agents map[stri
 	}
 
 	opts := agents[agentID]
+	// Only an IM agent key spawns on its agent's profile, as in
+	// AccessProfileForKey; a planner's account is its project pin only.
+	if len(parts) != 4 || session.IsReservedNamespace(key) {
+		opts.AccessProfile = ""
+	}
 	if project.IsPlannerKey(key) {
 		opts.Exempt = true // planner sessions are always exempt, regardless of project config
-		// The account is the project pin only, as in ResolveForPlannerKey.
-		opts.AccessProfile = ""
 		// Inverse of PlannerKeyFor; splitting on ':' would truncate names
 		// containing ':'.
 		name := strings.TrimSuffix(strings.TrimPrefix(key, "project:"), ":planner")
