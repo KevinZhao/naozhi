@@ -284,17 +284,15 @@ function effortTagHtml(effort) {
 }
 
 // setHeaderEffortChip repaints the header effort tag for the selected session.
-//
 // Called from two places, for two different reasons:
-//   - renderMainShell's tail: the header was just rebuilt, emptying the mount.
-//     No argument — read the cached sessionList.sessionsData.
-//   - fetchSessions, BEFORE its version short-circuit: a tier change does not
-//     advance stats.version, so this is the only path that gets a new tier onto
-//     the screen. sessionList.sessionsData hasn't been updated at that point, hence the
-//     optional `sessions` argument carrying the fresh response rows.
-//
+//   - after a header rebuild emptied the mount, with no argument: it reads the
+//     cached sessionList.sessionsData, which a short-circuited poll leaves
+//     stale, so the next fetch must bring a body rather than a 304;
+//   - fetchSessions, BEFORE its version short-circuit (a tier change does not
+//     advance stats.version), with the fresh response rows.
 // docs/rfc/kiro-effort-visibility.md §5.1
 function setHeaderEffortChip(sessions) {
+  if (!sessions) sessionList.lastETag = null;
   const el = document.getElementById('header-effort');
   if (!el) return;
   let effort = '';

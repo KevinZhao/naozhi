@@ -64,22 +64,22 @@ export function restorePending() {
 }
 
 // fetchSessionsPayload GETs /api/sessions: {data, validator}, NOT_MODIFIED on a
-// 304 (the body last fetched, uptime aside), or null for a failed poll the
+// 304 (the body last handled, uptime aside), or null for a failed poll the
 // caller reports as false (an auth failure, after prompting for a token, or an
 // HTTP error); a network error throws. If-None-Match goes out only while
-// lastVersion > 0 (the sites that need a repaint zero it) and for the selection
-// whose header chips the last body painted. The 8 s timeout releases a hung
-// response (RNEW-UX-003).
+// lastVersion > 0 (the sites that need a repaint zero it) and, for a body the
+// sidebar has not painted, only over a live socket. A header rebuild, which
+// paints the chips from cache, drops the validator (setHeaderEffortChip).
+// 8 s timeout: RNEW-UX-003.
 const NOT_MODIFIED = Object.freeze({});
-const chipSelection = () => (selection.key || '') + '\n' + (selection.node || '');
 async function fetchSessionsPayload() {
   const headers = authHeaders();
   const v = sessionList.lastETag;
-  if (v && v.sel === chipSelection() && sessionList.lastVersion > 0) headers['If-None-Match'] = v.etag;
+  if (v && sessionList.lastVersion > 0 && (!v.unpainted || wsm.state === WS_STATES.CONNECTED)) headers['If-None-Match'] = v.etag;
   let etag = '';
   try {
     const data = await fetchJSON(NZ_CONTRACT.API.sessions, { headers, timeoutMs: 8000, onResponse: r => { etag = r.headers.get('ETag') || ''; } });
-    return data && { data, validator: etag && { etag, sel: chipSelection() } };
+    return data && { data, validator: etag && { etag, unpainted: true } };
   } catch (err) {
     if (err.status === 304) return NOT_MODIFIED;
     // A background poll's prompt respects the auth modal's de-dupe + cooldown.
@@ -258,9 +258,9 @@ export async function fetchSessions() {
     reconcilePending(backendKeys);
     appendPendingCards(data.sessions, backendKeys);
     renderSidebar(data);
-    // The sidebar search re-renders from this payload rather than polling the
-    // server on every keystroke.
+    // The sidebar search re-renders from this payload, not a fetch per key.
     sessionList.lastSidebarData = data;
+    if (got.validator) got.validator.unpainted = false;
     for (const fn of sessionsAppliedHooks) fn(wsConnected);
     return true;
   } catch (e) {

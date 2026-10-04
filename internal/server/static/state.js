@@ -132,8 +132,8 @@ export const sessionList = {
   collapsedProjects: null,
   nodesData: {},
   lastVersion: 0,
-  // lastETag is {etag, sel}: the last /api/sessions body's validator and the
-  // selection whose header chips it painted; null sends no If-None-Match.
+  // lastETag is {etag, unpainted} for the last /api/sessions body handled
+  // (see fetchSessionsPayload); null sends no If-None-Match.
   lastETag: null,
   lastNodesJSON: '',
   lastHistoryJSON: '',

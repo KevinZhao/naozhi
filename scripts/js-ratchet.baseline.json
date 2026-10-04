@@ -363,7 +363,7 @@
     "lateBindings": 0
   },
   "session_header.js": {
-    "lines": 400,
+    "lines": 398,
     "maxFnLines": 33,
     "fnOver100": 0,
     "topLevelLetVar": 0,

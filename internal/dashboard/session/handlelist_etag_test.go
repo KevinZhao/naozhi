@@ -156,20 +156,24 @@ func TestHandleList_VersionBumpRebuilds(t *testing.T) {
 }
 
 // TestHandleList_UptimeAloneKeeps304: the one per-second field is left out of
-// the validator, and the 200 body still carries it.
+// the validator, single-node and multi-node, and the 200 body still carries it.
 func TestHandleList_UptimeAloneKeeps304(t *testing.T) {
-	h := newETagTestHandlers(t, newListRouter("feishu:direct:a:general"), noNodeAccessor{})
-	first := doList(h, "")
-	etag := first.Header().Get("ETag")
-	h.deps.StartedAt = h.deps.StartedAt.Add(-2 * time.Hour)
-	wantNotModified(t, doList(h, etag), etag)
+	for name, na := range map[string]NodeAccessor{"single-node": noNodeAccessor{}, "multi-node": multiNodeAccessor{}} {
+		t.Run(name, func(t *testing.T) {
+			h := newETagTestHandlers(t, newListRouter("feishu:direct:a:general"), na)
+			first := doList(h, "")
+			etag := first.Header().Get("ETag")
+			h.deps.StartedAt = h.deps.StartedAt.Add(-2 * time.Hour)
+			wantNotModified(t, doList(h, etag), etag)
 
-	second := doList(h, "")
-	if got := second.Header().Get("ETag"); got != etag {
-		t.Fatalf("ETag moved with uptime alone: %q -> %q", etag, got)
-	}
-	if uptimeOf(t, first) == uptimeOf(t, second) {
-		t.Fatalf("uptime did not move (%q); the test proves nothing", uptimeOf(t, first))
+			second := doList(h, "")
+			if got := second.Header().Get("ETag"); got != etag {
+				t.Fatalf("ETag moved with uptime alone: %q -> %q", etag, got)
+			}
+			if uptimeOf(t, first) == uptimeOf(t, second) {
+				t.Fatalf("uptime did not move (%q); the test proves nothing", uptimeOf(t, first))
+			}
+		})
 	}
 }
 

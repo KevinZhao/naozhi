@@ -4,8 +4,10 @@
 //  - over a live socket, a sessions_update refetch revalidates, gets a 304 and
 //    leaves the sidebar and the header as they were;
 //  - a session_state frame (which zeroes lastVersion to force a repaint) and a
-//    selection change (the header chips were painted for another session)
-//    each make the next fetch unconditional;
+//    selection change (the header chips were repainted from cache) each make
+//    the next fetch unconditional;
+//  - a body the connected short-circuit skipped is fetched again once the
+//    socket drops, or once a header rebuild painted the chips from cache;
 //  - under WS-fallback polling a 304 is "unchanged", not a failed poll, and a
 //    changed body still repaints.
 // Both projects run it: a page-set If-None-Match must reach script as a 304
@@ -33,30 +35,30 @@ function pageErrors(page) {
 // the n-th ('' for an unconditional one).
 const validatorsSince = (mock, n) => mock.sessionsValidators.slice(n);
 
+// open selects KEY_A over a connected socket and settles the connect-time
+// refetches, so the next fetch has a validator to send.
+async function open(browser, mock) {
+  const ctx = await browser.newContext({ ...desktop });
+  const page = await ctx.newPage();
+  const errors = pageErrors(page);
+  await page.goto(mock.url + '/dashboard');
+  await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+  await page.click(`.session-card[data-key="${KEY_A}"]`);
+  const conn = mock.wsConnections[mock.wsConnections.length - 1];
+  await expect.poll(() => conn.messages.some((m) => m.type === 'subscribe' && m.key === KEY_A)).toBe(true);
+  conn.send({ type: 'subscribed', key: KEY_A });
+  await page.evaluate(() => debouncedFetchSessions());
+  await page.evaluate(() => fetchSessions());
+  return { ctx, page, conn, errors };
+}
+
 test.describe('over a live socket', () => {
   let mock;
   test.beforeAll(async () => { mock = await startMockServer({ ws: true, sessionsETag: true }); });
   test.afterAll(() => mock.server.close());
 
-  // open selects KEY_A over a connected socket and settles the connect-time
-  // refetches, so the next fetch has a validator to send.
-  async function open(browser) {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    const errors = pageErrors(page);
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
-    await page.click(`.session-card[data-key="${KEY_A}"]`);
-    const conn = mock.wsConnections[mock.wsConnections.length - 1];
-    await expect.poll(() => conn.messages.some((m) => m.type === 'subscribe' && m.key === KEY_A)).toBe(true);
-    conn.send({ type: 'subscribed', key: KEY_A });
-    await page.evaluate(() => debouncedFetchSessions());
-    await page.evaluate(() => fetchSessions());
-    return { ctx, page, conn, errors };
-  }
-
   test('a sessions_update refetch revalidates and a 304 leaves the page as it was', async ({ browser }) => {
-    const { ctx, page, conn, errors } = await open(browser);
+    const { ctx, page, conn, errors } = await open(browser, mock);
     const header = await page.locator('#main .main-header h2').textContent();
     const cards = await page.locator('.session-card').count();
     const n = mock.sessionsValidators.length;
@@ -76,7 +78,7 @@ test.describe('over a live socket', () => {
   });
 
   test('a session_state frame makes the next fetch unconditional', async ({ browser }) => {
-    const { ctx, page, conn, errors } = await open(browser);
+    const { ctx, page, conn, errors } = await open(browser, mock);
     conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'ready' });
     await page.waitForFunction(() => lastVersion === 0);
     const n = mock.sessionsValidators.length;
@@ -90,13 +92,64 @@ test.describe('over a live socket', () => {
   });
 
   test('selecting another session makes the next fetch unconditional', async ({ browser }) => {
-    const { ctx, page, errors } = await open(browser);
+    const { ctx, page, errors } = await open(browser, mock);
     const n = mock.sessionsValidators.length;
     await page.click(`.session-card[data-key="${KEY_B}"]`);
     await page.evaluate(() => fetchSessions());
-    expect(validatorsSince(mock, n)[0], 'the chips were painted for the other session').toBe('');
+    expect(validatorsSince(mock, n)[0], 'the header rebuild painted the chips from cache').toBe('');
     expect(errors).toEqual([]);
     await ctx.close();
+  });
+});
+
+// The version short-circuit skips a same-version body over a live socket and
+// paints only the header chips from it, so its validator must not survive
+// the socket or a header repainted from the stale cache.
+test.describe('a body the short-circuit skipped', () => {
+  test('is fetched again once the socket drops', async ({ browser }) => {
+    const mock = await startMockServer({ ws: true, sessionsETag: true });
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    try {
+      mock.setSessionStateWithoutVersionBump(KEY_A, 'running');
+      const n = mock.sessionsValidators.length;
+      conn.send({ type: 'sessions_update' });
+      await expect.poll(() => mock.sessionsValidators.length).toBe(n + 1);
+      await page.evaluate(() => new Promise((r) => setTimeout(r, 300)));
+      await expect(cardDot(page, KEY_A), 'connected: the push owns state').toHaveClass(/dot-ready/);
+
+      await page.evaluate(() => { wsm.connect = () => {}; });
+      conn.close();
+      await page.waitForFunction(() => wsm.state === WS_STATES.DISCONNECTED);
+      const m = mock.sessionsValidators.length;
+      expect(await page.evaluate(() => fetchSessions()), 'the fallback poll applied a body').toBe(true);
+      expect(validatorsSince(mock, m)[0], 'no validator for an unpainted body').toBe('');
+      await expect(cardDot(page, KEY_A)).toHaveClass(/dot-running/);
+      expect(errors).toEqual([]);
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
+  });
+
+  test('is fetched again after a header rebuild painted the chips from cache', async ({ browser }) => {
+    const mock = await startMockServer({ ws: true, sessionsETag: true });
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    const chip = page.locator('.main-header #header-effort');
+    try {
+      mock.setSessionEffortWithoutVersionBump(KEY_A, 'max');
+      conn.send({ type: 'sessions_update' });
+      await expect(chip).toContainText('max');
+      // Away and back before any fetch: the selection matches the stored one,
+      // but the chip now comes from the cache the short-circuit left stale.
+      await page.evaluate(([a, b]) => { selectSession(b, 'local'); selectSession(a, 'local'); }, [KEY_A, KEY_B]);
+      await expect(chip).not.toContainText('max');
+      await page.evaluate(() => fetchSessions());
+      await expect(chip).toContainText('max');
+      expect(errors).toEqual([]);
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
   });
 });
 
