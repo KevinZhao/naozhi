@@ -30,6 +30,14 @@ test('the mock\'s /api/sessions is a shape the backend can produce', () => withM
   assert.deepEqual(schemaViolations(body, shape, schema.defs, 'sessions'), []);
 }));
 
+test('the mock\'s /api/sessions/history is a shape the backend can produce, under the tag /api/sessions names', () => withMock({}, async (mock) => {
+  const body = await (await fetch(mock.url + '/api/sessions/history')).json();
+  assert.ok(body.history_sessions.length > 0, 'the mock returned no history to check');
+  assert.deepEqual(schemaViolations(body, schema.responses.sessions_history, schema.defs, 'sessions_history', { strict: true }), []);
+  const sessions = await (await fetch(mock.url + '/api/sessions')).json();
+  assert.equal(sessions.stats.history_tag, body.history_tag);
+}));
+
 test('the mock\'s default events are EventEntries the backend can send', () => withMock({}, async (mock) => {
   const res = await fetch(mock.url + '/api/sessions/events?key=k');
   assert.equal(res.status, 200);

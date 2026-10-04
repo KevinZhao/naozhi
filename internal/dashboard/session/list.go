@@ -247,19 +247,16 @@ func (h *Handlers) buildSessionStats(now time.Time, version uint64, running, rea
 		stats.CLIVersion = live
 	}
 	stats.Projects = h.buildProjectList(now)
+	_, stats.HistoryTag = h.historyWithTag()
 	return stats
 }
 
 // buildLocalResp constructs the single-node /api/sessions JSON shape.
 func (h *Handlers) buildLocalResp(snapshots []sessionpkg.SessionSnapshot, stats sessionStats) sessionListLocalResp {
-	resp := sessionListLocalResp{
+	return sessionListLocalResp{
 		Sessions: snapshots,
 		Stats:    stats,
 	}
-	if history := h.historySessions(); len(history) > 0 {
-		resp.HistorySessions = history
-	}
-	return resp
 }
 
 // buildMultiNodeResp constructs the multi-node /api/sessions JSON shape: local
@@ -313,13 +310,9 @@ func (h *Handlers) buildMultiNodeResp(snapshots []sessionpkg.SessionSnapshot, st
 		}
 	}
 
-	resp := sessionListMultiResp{
+	return sessionListMultiResp{
 		Sessions: allSessions,
 		Stats:    stats,
 		Nodes:    nodeStatus,
 	}
-	if history := h.historySessions(); len(history) > 0 {
-		resp.HistorySessions = history
-	}
-	return resp
 }

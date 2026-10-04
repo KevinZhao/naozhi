@@ -15,6 +15,7 @@ import "github.com/naozhi/naozhi/internal/dashboard/httputil"
 func (h *Handlers) Routes() []httputil.Route {
 	return []httputil.Route{
 		{Pattern: "GET /api/sessions", Handler: h.HandleList},
+		{Pattern: "GET /api/sessions/history", Handler: h.HandleHistory},
 		{Pattern: "GET /api/sessions/events", Handler: h.HandleEvents},
 		{Pattern: "GET /api/sessions/runs", Handler: h.HandleRuns},
 		{Pattern: "GET /api/sessions/git", Handler: h.HandleGit},

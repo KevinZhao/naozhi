@@ -223,7 +223,14 @@ function defaultGitStates() {
  * Start a mock HTTP server.
  * @param {object} [overrides] - Override specific route handlers.
  * @param {boolean} [overrides.shim] - false serves dashboard.html without the e2e shim, as production does.
- * @param {object} [overrides.sessions] - Custom sessions response.
+ * @param {object} [overrides.sessions] - Custom sessions response. A `history_sessions` key
+ *   in it is not served there: like the backend, /api/sessions carries stats.history_tag and
+ *   GET /api/sessions/history serves the list (unless overrides.historySessions is given).
+ * @param {object[]} [overrides.historySessions] - GET /api/sessions/history's list. Requests
+ *   are counted in `historyGetCalls`; `setHistorySessions(list)` replaces it mid-test and
+ *   `failNextHistory(n)` answers the next n requests with a 500; `staleNextHistory(list)`
+ *   answers the next request with that list instead, as an older fetch resolving last would.
+ *   `historyTag` is the tag of the current list.
  * @param {object[]} [overrides.events] - Custom events response.
  * @param {object} [overrides.eventsByKey] - session key → events array; keys not listed fall back to `events`.
  * @param {number} [overrides.eventsTailDelayMs] - Hold `after=` (tail poll) responses this long so a test can
@@ -311,6 +318,19 @@ function startMockServer(overrides = {}) {
   const manifest = fs.readFileSync(path.join(STATIC_DIR, 'manifest.json'), 'utf8');
 
   const sessionsData = overrides.sessions || defaultSessions();
+  let historyData = overrides.historySessions || sessionsData.history_sessions || [];
+  let historyGetCalls = 0;
+  let historyFailsLeft = 0;
+  let historyStaleNext = null;
+  // historyTag mirrors historyContentTag: the list's content hash, '' for none.
+  const tagOf = list => list.length ? crypto.createHash('sha256').update(JSON.stringify(list)).digest('hex').slice(0, 32) : '';
+  const historyTag = () => tagOf(historyData);
+  // sessionsBody is the /api/sessions body the backend would send for sessionsData.
+  const sessionsBody = () => {
+    const { history_sessions: _legacy, ...body } = sessionsData;
+    const tag = historyTag();
+    return tag && body.stats ? { ...body, stats: { ...body.stats, history_tag: tag } } : body;
+  };
   let sessionsGetCalls = 0;
   const sessionsValidators = [];
   let sessionsNotModified = 0;
@@ -533,7 +553,7 @@ function startMockServer(overrides = {}) {
       if (!checkAuth()) return;
       sessionsGetCalls++;
       if (overrides.sessionsETag) {
-        const body = JSON.stringify(sessionsData);
+        const body = JSON.stringify(sessionsBody());
         const etag = 'W/"b' + crypto.createHash('sha256').update(body).digest('hex').slice(0, 32) + '"';
         const inm = req.headers['if-none-match'] || '';
         sessionsValidators.push(inm);
@@ -550,12 +570,38 @@ function startMockServer(overrides = {}) {
       if (overrides.sessionsDelayMs && sessionsGetCalls > (overrides.sessionsDelayAfterCalls || 0)) {
         setTimeout(() => {
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(sessionsData));
+          res.end(JSON.stringify(sessionsBody()));
         }, overrides.sessionsDelayMs);
         return;
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(sessionsData));
+      res.end(JSON.stringify(sessionsBody()));
+      return;
+    }
+
+    if (pathname === NZ_CONTRACT.API.sessions_history && req.method === 'GET') {
+      if (!checkAuth()) return;
+      historyGetCalls++;
+      if (historyFailsLeft > 0) {
+        historyFailsLeft--;
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'history scan failed' }));
+        return;
+      }
+      const list = historyStaleNext || historyData;
+      historyStaleNext = null;
+      const tag = tagOf(list);
+      const headers = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' };
+      if (tag) {
+        headers.ETag = '"h' + tag + '"';
+        if ((req.headers['if-none-match'] || '') === headers.ETag) {
+          res.writeHead(304, { ETag: headers.ETag, 'Cache-Control': 'no-store' });
+          res.end();
+          return;
+        }
+      }
+      res.writeHead(200, headers);
+      res.end(JSON.stringify(tag ? { history_sessions: list, history_tag: tag } : { history_sessions: [] }));
       return;
     }
 
@@ -1217,6 +1263,11 @@ function startMockServer(overrides = {}) {
         get sessionsGetCalls() { return sessionsGetCalls; },
         get sessionsValidators() { return sessionsValidators; },
         get sessionsNotModified() { return sessionsNotModified; },
+        get historyGetCalls() { return historyGetCalls; },
+        setHistorySessions(list) { historyData = list; },
+        failNextHistory(n) { historyFailsLeft = n; },
+        staleNextHistory(list) { historyStaleNext = list; },
+        get historyTag() { return historyTag(); },
         get cronTriggerCalls() { return cronTriggerCalls; },
         get systemDaemonsGetCount() { return systemDaemonsGetCount; },
         // Replace the served cron jobs mid-test (in place - GET closes over the array).

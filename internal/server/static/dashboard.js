@@ -375,29 +375,18 @@ function toggleHistory() {
     .map(r => ({
       key: '_history:' + r.session_id, node: 'local', source: 'recent',
       session_id: r.session_id, last_active: r.last_active || 0,
-      // retired_at is the unix-ms instant the session left the live sidebar
-      // (Router.Reset / Router.Remove). When present it overrides last_active
-      // for sort ordering so the most recently closed panel sits on top —
-      // last_active reflects the JSONL's last-message timestamp, which can
-      // be days older than when the operator actually closed the session.
       retired_at: r.retired_at || 0,
       prompt: r.last_prompt || r.summary || '',
       project: r.project || matchProject(r.workspace), tool: '',
     }));
-  // Sort key: retired_at when known, else last_active (back-compat for
-  // sessions retired before this naozhi process started — their UUID is
-  // not in the in-memory store and last_active is the only signal we have).
+  // Newest first by when the session left the sidebar (retired_at, unix ms);
+  // one this process never saw retire sorts by its transcript's last write.
   merged.sort((a, b) => (b.retired_at || b.last_active) - (a.retired_at || a.last_active));
 
   const popover = document.createElement('div');
   popover.className = isMobile() ? 'history-sheet' : 'history-popover';
-  // R110-P1 history-drawer search: the header grows a count chip and a
-  // filter input. Submitting or typing into the input triggers
-  // applyHistoryFilter(merged, query) — a pure function over `merged` that
-  // re-renders the items list and updates the count chip. Keeping `merged`
-  // on the closure means each keystroke is an O(N) scan against the same
-  // dataset — at ~200 entries that's trivial and avoids re-reading
-  // historySessionsData on every keypress.
+  // The header's count chip and filter input re-render the items through
+  // applyHistoryFilter(merged, query): an O(N) scan of ≤200 entries per key.
   popover.innerHTML =
     '<div class="history-popover-header">' +
       '<span>历史 <span class="hp-count" id="hp-count">(' + merged.length + ')</span></span>' +

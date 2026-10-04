@@ -106,6 +106,7 @@ stateField('_lastSidebarData', sessionList, 'lastSidebarData');
 stateField('activeView', ui, 'activeView');
 stateField('discoveredItems', sessionList, 'discoveredItems');
 stateField('discoveredPollTimer', timers, 'discoveredPoll');
+stateField('historyTag', sessionList, 'historyTag');
 stateField('lastEventTime', transcript, 'lastEventTime');
 stateField('lastRenderedEventTime', transcript, 'lastRenderedEventTime');
 stateField('lastVersion', sessionList, 'lastVersion');

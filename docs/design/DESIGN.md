@@ -1683,7 +1683,7 @@ File:   .naozhi/MEMORY.md   (14.2 KB)
 **数据源**（两个彼此隔离）：
 
 1. **侧边栏** (`/api/sessions` 的 `sessions` 字段) — 只读自 `Router.sessions`，其持久化源是 `sessions.json`。
-2. **历史面板** (`/api/sessions` 的 `history_sessions` 字段) — 实时扫 `~/.claude` 目录，与侧边栏互不干扰。
+2. **历史面板** (`GET /api/sessions/history` 的 `history_sessions` 字段) — 实时扫 `~/.claude` 目录（缓存 120s），与侧边栏互不干扰。`/api/sessions` 只带 `stats.history_tag`（列表的内容哈希），前端在 tag 变化时才重新拉取列表。
 
 **进入侧边栏的三条路径**（全部由显式行为触发）：
 
