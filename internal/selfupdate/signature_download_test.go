@@ -39,12 +39,24 @@ func checksumsFor(bin []byte) []byte {
 	return fmt.Appendf(nil, "%s  %s\n", hex.EncodeToString(h[:]), assetName())
 }
 
+// fakeReleaseTag is the tag start serves; newFakeRelease signs for it.
+const fakeReleaseTag = "v1.0.0"
+
 // newFakeRelease returns a release whose checksums.txt matches bin, signed by
-// priv (no .sig asset when priv is nil).
+// priv for fakeReleaseTag (no .sig asset when priv is nil).
 func newFakeRelease(bin []byte, priv ed25519.PrivateKey) *fakeRelease {
+	return newFakeReleaseSignedFor(fakeReleaseTag, bin, priv)
+}
+
+// newFakeReleaseSignedFor is newFakeRelease with the signature bound to tag.
+func newFakeReleaseSignedFor(tag string, bin []byte, priv ed25519.PrivateKey) *fakeRelease {
 	r := &fakeRelease{bin: bin, sums: checksumsFor(bin)}
 	if priv != nil {
-		r.sig = signB64(priv, r.sums)
+		payload, err := SignedPayload(tag, r.sums)
+		if err != nil {
+			panic(err)
+		}
+		r.sig = signB64(priv, payload)
 	}
 	return r
 }
@@ -72,7 +84,7 @@ func (r *fakeRelease) start(t *testing.T) *Release {
 	t.Cleanup(srv.Close)
 	installTestTLSTransport(t, srv)
 	return &Release{
-		Tag:      "v1.0.0",
+		Tag:      fakeReleaseTag,
 		AssetURL: srv.URL + "/v1/" + assetName(),
 		SumURL:   srv.URL + "/v1/checksums.txt",
 		SigURL:   srv.URL + "/v1/checksums.txt.sig",
@@ -123,6 +135,37 @@ func TestDownload_ValidSignature_OK(t *testing.T) {
 			t.Errorf("verified binary has mode %o, want 0755", mode)
 		}
 	}
+}
+
+// TestDownload_ReplayedUnderNewerTag_Refused: genuinely signed files of an
+// older release, served under the newest tag, must not install.
+func TestDownload_ReplayedUnderNewerTag_Refused(t *testing.T) {
+	pub, priv := genKey(t)
+	withTrustSet(t, pub)
+	r := newFakeReleaseSignedFor("v0.9.0", []byte("old signed binary"), priv)
+	dir := t.TempDir()
+
+	_, err := Download(context.Background(), r.start(t), dir)
+	if !errors.Is(err, ErrNoTrustedKey) {
+		t.Fatalf("Download = %v, want ErrNoTrustedKey", err)
+	}
+	assertRefusedUnexecutable(t, err, dir)
+}
+
+// TestDownload_SignatureOverBareChecksums_Refused: a signature over
+// checksums.txt alone, without the domain and tag lines, is refused.
+func TestDownload_SignatureOverBareChecksums_Refused(t *testing.T) {
+	pub, priv := genKey(t)
+	withTrustSet(t, pub)
+	r := newFakeRelease([]byte("binary"), nil)
+	r.sig = signB64(priv, r.sums)
+	dir := t.TempDir()
+
+	_, err := Download(context.Background(), r.start(t), dir)
+	if !errors.Is(err, ErrNoTrustedKey) {
+		t.Fatalf("Download = %v, want ErrNoTrustedKey", err)
+	}
+	assertRefusedUnexecutable(t, err, dir)
 }
 
 // TestDownload_SecondTrustedKey_OK: a release signed by any key of the set
