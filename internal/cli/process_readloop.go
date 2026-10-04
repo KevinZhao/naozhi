@@ -159,7 +159,7 @@ func (p *Process) readLoop() {
 			p.die()
 			// Unblock SendPassthrough callers parked on slot.resultCh/errCh;
 			// they don't consume eventCh, so the deferred close(eventCh) alone
-			// would leave them blocked until the totalTimeout+30s tripwire.
+			// would leave them blocked until a watchdog or bail timer fires.
 			// discardAllPending is idempotent.
 			p.discardAllPending(clierr.ErrProcessExited)
 		}
@@ -489,6 +489,12 @@ func passthroughShouldFanOut(ev clievent.Event) bool {
 // non-blocking handoff to Send via eventCh. Returns true if a kill signal was
 // observed during dispatch and the caller should unwind the read loop.
 func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) bool {
+	// One time.Now() shared between the watchdog's no-output clock (every
+	// frame counts, replay and metadata included), ev.RecvAt (for
+	// drainStaleEvents) and the EventEntry.Time values from logEventAt.
+	now := time.Now()
+	p.markOutput(now)
+
 	// Type:"metadata" is a normalize-channel status frame (kiro _kiro.dev/
 	// metadata), not assistant output: apply to atomic state and skip
 	// eventCh / ring.EventLog. See docs/rfc/multi-backend.md §8.8.
@@ -496,11 +502,6 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 		p.applyMetadata(ev.Metadata)
 		return false
 	}
-
-	// One time.Now() shared between ev.RecvAt (for drainStaleEvents) and the
-	// EventEntry.Time values from logEventAt; UnixMilli cached for the up-to-4
-	// uses below.
-	now := time.Now()
 	nowMS := now.UnixMilli()
 
 	// ---- Passthrough mode hooks ----

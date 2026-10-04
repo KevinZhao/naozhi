@@ -54,8 +54,9 @@ var (
 	// pending; the message is rejected up front (dispatcher: sendAckBusy).
 	ErrTooManyPending = errors.New("too many pending messages")
 
-	// ErrOrphanedSlot is a defensive fallback: Send's totalTimeout+30s tripwire in
-	// case watchdog and readLoop both miss delivering a result. Fires only on bugs.
+	// ErrOrphanedSlot is SendPassthrough's backstop: the turn the CLI owes the
+	// queue ran 30s past totalTimeout and neither the watchdog nor readLoop
+	// delivered an outcome. Fires only on bugs.
 	ErrOrphanedSlot = errors.New("slot orphaned: no result or error received")
 )
 
