@@ -414,6 +414,12 @@ func (r *Router) ManagedExcludeSets() (pids map[int]bool, sessionIDs map[string]
 	return pids, sessionIDs, cwds
 }
 
+// errTakeoverRaced reports a live session that reached key while Takeover had
+// released the lock, so the takeover does not hand back someone else's session.
+func errTakeoverRaced(key string) error {
+	return fmt.Errorf("concurrent session created for key %s during takeover", key)
+}
+
 // Takeover creates a managed session to replace an external Claude CLI session.
 // It uses --resume to preserve the conversation context, and loads JSONL history
 // for dashboard display; a backend that rejects the resume gets a fresh session
@@ -495,7 +501,7 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 		err = r.reserveSpawn(tx, &res, key, sessionID, opts)
 	})
 	if aborted {
-		return nil, fmt.Errorf("concurrent session created for key %s during takeover", key)
+		return nil, errTakeoverRaced(key)
 	}
 	if err != nil {
 		return nil, err
@@ -512,14 +518,28 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 	stuck := !waitSocketGoneForKey(key, 2*time.Second)
 	opts.Backend = cmp.Or(res.backendID, opts.Backend)
 	opts.AccessProfile = cmp.Or(res.accessProfileID, opts.AccessProfile)
-	// A GetOrCreate parked on the first spawn may own the key by now; then
-	// reserveSpawn refuses with ErrSpawnInFlight and its session fills the key.
-	var fresh spawnReservation
-	r.ss.Update(func(tx sessTx) { err = r.reserveSpawn(tx, &fresh, key, "", opts) })
-	if err == nil {
-		fresh.rejectedResumeID = sessionID
-		s, err = r.completeSpawn(ctx, &fresh)
+	// A GetOrCreate parked on the first spawn may own the key by now: one
+	// still spawning makes reserveSpawn refuse with ErrSpawnInFlight, and a
+	// session it already installed is not displaced (nor its shim's socket).
+	var (
+		fresh spawnReservation
+		raced bool
+	)
+	r.ss.Update(func(tx sessTx) {
+		if cur := tx.Get(key); cur != nil && cur.isAlive() {
+			raced = true
+			return
+		}
+		err = r.reserveSpawn(tx, &fresh, key, "", opts)
+	})
+	if raced {
+		return nil, errTakeoverRaced(key)
 	}
+	if err != nil {
+		return nil, err
+	}
+	fresh.rejectedResumeID = sessionID
+	s, err = r.completeSpawn(ctx, &fresh)
 	if err != nil && stuck {
 		return nil, fmt.Errorf("%w: %w", ErrShimStuck, err)
 	}

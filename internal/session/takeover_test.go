@@ -422,6 +422,80 @@ func TestTakeover_RetriesARejectedResumeFresh(t *testing.T) {
 			t.Errorf("retry ran on backend %q, profile %q, env %v; want the picked codex / work", s.Backend(), s.AccessProfile(), spawns[1].EnvOverlay)
 		}
 	})
+	t.Run("cancelled caller is not retried", func(t *testing.T) {
+		r, _, _ := newStartupFailRouter(t, newDeadProc())
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var spawns []cli.SpawnOptions
+		reject := rejectingResumes(&spawns, func() (processIface, error) { return newIdleProc(), nil })
+		r.spawn.hook = func(ctx context.Context, opts cli.SpawnOptions) (processIface, error) {
+			cancel()
+			return reject(ctx, opts)
+		}
+		_, err := r.Takeover(ctx, takeoverKey, sfSID, sfWS, AgentOpts{})
+		if !errors.Is(err, clierr.ErrResumeRejected) || len(spawns) != 1 {
+			t.Fatalf("Takeover err = %v after %d spawns, want the rejection with no retry", err, len(spawns))
+		}
+	})
+	t.Run("spawn in flight meanwhile", func(t *testing.T) {
+		r, _, _ := newStartupFailRouter(t, newDeadProc())
+		sock := shim.SocketPath(shim.KeyHash(takeoverKey))
+		var spawns []cli.SpawnOptions
+		reject := rejectingResumes(&spawns, func() (processIface, error) { return newIdleProc(), nil })
+		marker := make(chan chan struct{}, 1)
+		// The socket holds the retry back until, once the refused spawn ends
+		// its marker, another spawn owns the key.
+		r.spawn.hook = func(ctx context.Context, opts cli.SpawnOptions) (processIface, error) {
+			if err := os.WriteFile(sock, nil, 0o600); err != nil {
+				t.Error(err)
+			}
+			var first chan struct{}
+			r.ss.View(func(v sessView) { first, _ = v.Ext().spawns.SpawnInFlight(takeoverKey) })
+			go func() {
+				<-first
+				var ch chan struct{}
+				r.ss.Update(func(tx sessTx) { ch, _ = tx.Ext().spawns.BeginSpawn(takeoverKey) })
+				marker <- ch
+				os.Remove(sock)
+			}()
+			return reject(ctx, opts)
+		}
+		_, err := r.Takeover(context.Background(), takeoverKey, sfSID, sfWS, AgentOpts{})
+		ch := <-marker
+		r.ss.Update(func(tx sessTx) { tx.Ext().spawns.EndSpawn(takeoverKey, ch) })
+		if !errors.Is(err, ErrSpawnInFlight) || errors.Is(err, ErrShimStuck) || len(spawns) != 1 {
+			t.Fatalf("Takeover err = %v after %d spawns, want ErrSpawnInFlight with no retry spawn", err, len(spawns))
+		}
+	})
+	// A GetOrCreate woken by the refused spawn can install its session before
+	// the retry reserves; the retry leaves it, and every other session, alone.
+	t.Run("session installed meanwhile", func(t *testing.T) {
+		r, _, _ := newStartupFailRouter(t, newDeadProc())
+		bystander := injectSession(r, "feishu:direct:carol:general", newIdleProc())
+		r.maxProcs = 2
+		var spawns []cli.SpawnOptions
+		var winner *ManagedSession
+		reject := rejectingResumes(&spawns, func() (processIface, error) { return newIdleProc(), nil })
+		r.spawn.hook = func(ctx context.Context, opts cli.SpawnOptions) (processIface, error) {
+			if opts.ResumeID != "" {
+				winner = injectSession(r, takeoverKey, newIdleProc())
+			}
+			return reject(ctx, opts)
+		}
+		_, err := r.Takeover(context.Background(), takeoverKey, sfSID, sfWS, AgentOpts{})
+		if err == nil || !strings.Contains(err.Error(), "concurrent session created") || errors.Is(err, ErrShimStuck) {
+			t.Errorf("Takeover err = %v, want the concurrent-session refusal", err)
+		}
+		if len(spawns) != 1 {
+			t.Errorf("spawn resumes = %q, want no retry spawn", resumeIDs(spawns))
+		}
+		if cur, ok := lookupT(r, takeoverKey); !ok || cur != winner || !winner.isAlive() {
+			t.Error("the session installed meanwhile was displaced")
+		}
+		if cur, ok := lookupT(r, bystander.key); !ok || cur != bystander || !bystander.isAlive() {
+			t.Error("the retry evicted an unrelated idle session")
+		}
+	})
 }
 
 // Only a refused resume is retried: any other spawn error is the takeover's.
