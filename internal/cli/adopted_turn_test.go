@@ -22,7 +22,7 @@ func armReconnectMidTurn(p *Process) {
 	p.turn.state = StateRunning
 	p.turn.mu.Unlock()
 	p.turn.reconnectedMidTurn.Store(true)
-	p.adopted.arm()
+	p.adopted.arm(true)
 }
 
 // TestApplyReconnectVerdict_ArmsOnlyWhatTheBacklogJustifies covers the wiring
@@ -52,6 +52,9 @@ func TestApplyReconnectVerdict_ArmsOnlyWhatTheBacklogJustifies(t *testing.T) {
 		if !p.AdoptedTurnPending() {
 			t.Error("latch not pending for a mid-turn backlog")
 		}
+		if !p.AdoptedMidTurn() {
+			t.Error("AdoptedMidTurn false for a mid-turn backlog")
+		}
 	})
 
 	t.Run("finished turn latches the replayed result", func(t *testing.T) {
@@ -64,6 +67,10 @@ func TestApplyReconnectVerdict_ArmsOnlyWhatTheBacklogJustifies(t *testing.T) {
 		}
 		if p.AdoptedTurnPending() {
 			t.Error("latch still pending; the replayed result was not stored")
+		}
+		if p.AdoptedMidTurn() {
+			t.Error("AdoptedMidTurn true for a latch armed from the replay; " +
+				"a full replay can end in the previous turn's result")
 		}
 		out, err := p.AdoptedOutcome(newCtx(t))
 		if err != nil {
@@ -79,6 +86,9 @@ func TestApplyReconnectVerdict_ArmsOnlyWhatTheBacklogJustifies(t *testing.T) {
 		p.applyReconnectVerdict(false, nil)
 		if p.turn.reconnectedMidTurn.Load() {
 			t.Error("reconnectedMidTurn armed with nothing in flight")
+		}
+		if p.AdoptedMidTurn() {
+			t.Error("AdoptedMidTurn true with nothing in flight")
 		}
 		if _, err := p.AdoptedOutcome(newCtx(t)); !errors.Is(err, ErrNoAdoptableTurn) {
 			t.Errorf("err = %v, want ErrNoAdoptableTurn", err)
@@ -138,6 +148,36 @@ func TestAdoptedTurn_LatchKeepsTheResultTextTheEventLogDrops(t *testing.T) {
 	}
 	if !sawResult {
 		t.Error("no result entry in the event log; the fixture did not reach readLoop")
+	}
+}
+
+// TestAdoptedTurn_MidTurnOutlivesTheLatchedResult: AdoptedMidTurn is the
+// adoption gate, and the late result may land before the adopter asks. Once it
+// has, Pending is false but the turn is still the one to adopt.
+func TestAdoptedTurn_MidTurnOutlivesTheLatchedResult(t *testing.T) {
+	p, srv := shimTestPair(&ClaudeProtocol{})
+	startServerDrain(srv)
+	defer p.Kill()
+
+	armReconnectMidTurn(p)
+	p.startReadLoop()
+	srv.SendStdout(`{"type":"result","subtype":"success","result":"early","session_id":"s1"}`)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := p.AdoptedOutcome(ctx)
+	if err != nil {
+		t.Fatalf("AdoptedOutcome: %v", err)
+	}
+	if out.Result.Text != "early" {
+		t.Errorf("Text = %q, want early", out.Result.Text)
+	}
+	if p.AdoptedTurnPending() {
+		t.Error("still pending after the result was latched")
+	}
+	if !p.AdoptedMidTurn() {
+		t.Error("AdoptedMidTurn false once the result was latched; an adopter asking after the " +
+			"result landed would record a finished run as interrupted")
 	}
 }
 

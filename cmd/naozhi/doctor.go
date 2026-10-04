@@ -151,6 +151,8 @@ type doctor struct {
 	health *healthReply
 	// config memoises the run's single config.Load; see loadConfig.
 	config *doctorConfig
+	// backends memoises the run's backend --version probes; see probeBackends.
+	backends *[]backendProbe
 
 	// awsCredentials and ffmpegPath default to the transcribe package's
 	// checks; tests inject stubs.
@@ -228,30 +230,35 @@ func (d *doctor) renderBackendsSection() {
 	// Idempotent sync.Once bootstrap; safe whether or not main registered.
 	backend.EnsureDefaults()
 
-	// Missing/malformed config falls back to "what the binary CAN drive" so
-	// a fresh install still gets a useful section.
+	// A loaded config shows the startup probe of each configured backend, the
+	// one checkCLIBackends grades. Missing/malformed config falls back to
+	// "what the binary CAN drive" from $PATH so a fresh install still gets a
+	// useful section.
 	cfg, cfgErr := d.loadConfig()
 	defaultBackend := "claude"
-	var cfgBackends []config.CLIBackendConfig
+	var rows []backendProbe
 	var cfgReverseNodes map[string]config.ReverseNodeEntry
 	if cfgErr == nil {
 		defaultBackend = cfg.DefaultBackendID()
-		cfgBackends = cfg.EnabledBackends()
+		rows = d.probeBackends(cfg)
 		cfgReverseNodes = cfg.ReverseNodes
 	} else {
-		// One synthesised entry per registered Profile, in registration order.
-		for _, p := range backend.All() {
-			cfgBackends = append(cfgBackends, config.CLIBackendConfig{ID: p.ID})
+		// Short context so a hung --version cannot freeze doctor.
+		ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
+		defer cancel()
+		probeByID := make(map[string]cli.BackendInfo)
+		for _, p := range cli.DetectBackendsCtx(ctx) {
+			probeByID[p.ID] = p
 		}
-	}
-
-	// Short context so a hung --version cannot freeze doctor.
-	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
-	defer cancel()
-	probes := cli.DetectBackendsCtx(ctx)
-	probeByID := make(map[string]cli.BackendInfo, len(probes))
-	for _, p := range probes {
-		probeByID[p.ID] = p
+		// One row per registered Profile, in registration order.
+		for _, p := range backend.All() {
+			probe := probeByID[p.ID]
+			path := probe.Path
+			if path == "" {
+				path = p.DefaultBinary + " (not found on $PATH)"
+			}
+			rows = append(rows, backendProbe{id: p.ID, path: path, version: probe.Version, known: true})
+		}
 	}
 
 	profileByID := make(map[string]backend.Profile, len(backend.All()))
@@ -267,18 +274,14 @@ func (d *doctor) renderBackendsSection() {
 	}
 	fmt.Fprintf(d.out, "Default: %s\n\n", defaultBackend)
 
-	for _, b := range cfgBackends {
-		id := b.ID
-		if id == "" {
-			id = defaultBackend
-		}
+	for _, r := range rows {
+		id := r.id
 		profile, profileOK := profileByID[id]
-		probe := probeByID[id]
 		displayName := id
 		if profileOK {
 			displayName = profile.DisplayName
 		}
-		version := probe.Version
+		version := r.version
 		if version == "" {
 			version = "unknown"
 		}
@@ -292,16 +295,19 @@ func (d *doctor) renderBackendsSection() {
 		}
 		fmt.Fprintf(d.out, "[%s] %s %s  proto=%s  caps=%s\n",
 			id, displayName, version, protoName, capsStr)
-		// Prefer the probe (walks $PATH), else show the configured override.
-		path := probe.Path
-		if path == "" {
-			path = b.Path
-		}
-		if path == "" && profileOK {
-			path = profile.DefaultBinary + " (not found on $PATH)"
+		path := r.path
+		switch {
+		case path != "":
+		case r.known:
+			path = noBackendPath
+		default:
+			path = "(none)"
 		}
 		fmt.Fprintf(d.out, "  path:    %s\n", path)
-		if !probe.Available {
+		switch {
+		case !r.known:
+			fmt.Fprintf(d.out, "  status:  unavailable (not a registered backend id; startup skips it)\n")
+		case r.version == "":
 			fmt.Fprintf(d.out, "  status:  unavailable (--version probe failed)\n")
 		}
 		fmt.Fprintf(d.out, "  history: %s\n", historyDirForBackend(id))
