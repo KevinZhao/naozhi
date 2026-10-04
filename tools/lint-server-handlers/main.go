@@ -1,16 +1,14 @@
 // Command lint-server-handlers enforces naozhi's server-package contracts
 // (docs/design/server-split-phase4-design.md §六.2 / §九.2):
 //
-//   - handle_decl: no `func (s *Server) handle*` method outside the
-//     exemptions.yaml handle_baseline (ownership rule: internal/server/doc.go).
-//     Kept after #2554 deleted api_route_owner on purpose: that rule asked
-//     "is this /api/ route owned by a sub-package?", which httputil.Route made
-//     a compile-time fact. This one asks "does *Server grow HTTP handlers of
-//     ANY kind?" — a Server method can still be mounted on a non-/api/ path
-//     (s.mux.HandleFunc in routes.go), and the answer the type system gives
-//     there is nothing. Its one live subject is handleDashboard (the static
-//     shell); a second name in the baseline is the review conversation this
-//     rule exists to force (#2636).
+//   - handle_decl: every HTTP handler declared in internal/server — matched by
+//     signature on any receiver, free functions, handler factories and
+//     package-level handler vars included — is listed once in exemptions.yaml
+//     handle_baseline, and every entry there still names one
+//     (rule_handle_decl.go; ownership: internal/server/doc.go).
+//     A new name in the baseline is the review conversation this rule exists to
+//     force (#2636). Func literals registered inline are not declarations and
+//     are not scanned.
 //   - file_size: internal/server/ ≤ 500 lines, internal/dashboard/*/ ≤ 800
 //     (non-test); exemptions.yaml entries may not grow past their baseline,
 //     and a baseline more than baselineSlack lines ABOVE the file is itself a
@@ -64,11 +62,8 @@ import (
 	"flag"
 	"fmt"
 	"go/ast"
-	"go/parser"
-	"go/token"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -125,14 +120,16 @@ type exemption struct {
 
 type exemptions struct {
 	FileSize       []exemption `yaml:"file_size"`
-	HandleBaseline []string    `yaml:"handle_baseline"` // pkg-qualified handler names exempted from rule 1
+	HandleBaseline []string    `yaml:"handle_baseline"` // handler keys (Recv.name or name) exempted from rule 1
+
+	path string // file loadExemptions read; violations about an entry point at it
 }
 
 func main() {
 	var (
 		runMode      = flag.String("mode", "warn", "warn | fail")
 		sarif        = flag.Bool("sarif", false, "emit SARIF on stdout")
-		exemptPath   = flag.String("exemptions", "tools/lint-server-handlers/exemptions.yaml", "path to exemptions.yaml")
+		exemptPath   = flag.String("exemptions", defaultExemptionsPath, "path to exemptions.yaml")
 		genBaseline  = flag.Bool("gen-baseline", false, "(re)generate handle_baseline section of exemptions.yaml from current source and exit")
 		serverPkg    = flag.String("server-pkg", "internal/server", "server package directory")
 		dashboardPkg = flag.String("dashboard-pkg", "internal/dashboard", "dashboard package directory (may not exist yet)")
@@ -154,17 +151,18 @@ func main() {
 	}
 
 	if *genBaseline {
-		names, err := scanHandleHandlers(*serverPkg)
+		decls, err := scanHandlerDecls(*serverPkg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "gen-baseline: %v\n", err)
 			os.Exit(2)
 		}
+		names := handlerKeys(decls)
 		exempts.HandleBaseline = names
 		if err := saveExemptions(*exemptPath, exempts); err != nil {
 			fmt.Fprintf(os.Stderr, "save: %v\n", err)
 			os.Exit(2)
 		}
-		fmt.Fprintf(os.Stderr, "baseline: %d Server.handle* methods recorded\n", len(names))
+		fmt.Fprintf(os.Stderr, "baseline: %d HTTP handler declarations recorded\n", len(names))
 		return
 	}
 
@@ -200,24 +198,11 @@ func collectViolations(serverPkg, dashboardPkg string, exempts *exemptions, now 
 	var vs []Violation
 
 	// Rule 1: handle_decl
-	currentHandlers, err := scanHandleHandlers(serverPkg)
+	handlers, err := scanHandleDecl(serverPkg, exempts.HandleBaseline, exempts.path)
 	if err != nil {
 		return nil, err
 	}
-	baseline := make(map[string]struct{}, len(exempts.HandleBaseline))
-	for _, n := range exempts.HandleBaseline {
-		baseline[n] = struct{}{}
-	}
-	for _, h := range currentHandlers {
-		if _, ok := baseline[h]; ok {
-			continue
-		}
-		vs = append(vs, Violation{
-			Rule:    "handle_decl",
-			File:    serverPkg + "/server.go",
-			Message: fmt.Sprintf("%q is a Server handler: internal/server owns only the HTTP pipe, every /api/* handler lives in an internal/dashboard/<sub> package behind a Deps struct (internal/server/doc.go); only the static shell is exempt via exemptions.yaml handle_baseline", h),
-		})
-	}
+	vs = append(vs, handlers...)
 
 	// Rule 2: file_size
 	exemptFiles := make(map[string]exemption, len(exempts.FileSize))
@@ -268,48 +253,6 @@ func collectViolations(serverPkg, dashboardPkg string, exempts *exemptions, now 
 	// Rule 5: stale_exemption
 	vs = append(vs, scanStaleExemption(exempts, now)...)
 	return vs, nil
-}
-
-// scanHandleHandlers returns "Server.handleX" for every method in pkgDir
-// with receiver *Server / Server and a name starting with handle / Handle.
-func scanHandleHandlers(pkgDir string) ([]string, error) {
-	var out []string
-	fset := token.NewFileSet()
-	entries, err := os.ReadDir(pkgDir)
-	if err != nil {
-		return nil, err
-	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
-			continue
-		}
-		if strings.HasSuffix(e.Name(), "_test.go") {
-			continue
-		}
-		path := filepath.Join(pkgDir, e.Name())
-		f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-		if err != nil {
-			return nil, fmt.Errorf("parse %s: %w", path, err)
-		}
-		for _, decl := range f.Decls {
-			fd, ok := decl.(*ast.FuncDecl)
-			if !ok || fd.Recv == nil || len(fd.Recv.List) != 1 {
-				continue
-			}
-			recv := fd.Recv.List[0]
-			recvName := recvTypeName(recv.Type)
-			if recvName != "Server" {
-				continue
-			}
-			name := fd.Name.Name
-			if !strings.HasPrefix(name, "handle") && !strings.HasPrefix(name, "Handle") {
-				continue
-			}
-			out = append(out, "Server."+name)
-		}
-	}
-	sort.Strings(out)
-	return out, nil
 }
 
 func recvTypeName(e ast.Expr) string {
@@ -410,11 +353,11 @@ func loadExemptions(path string) (*exemptions, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &exemptions{}, nil
+			return &exemptions{path: path}, nil
 		}
 		return nil, err
 	}
-	var e exemptions
+	e := exemptions{path: path}
 	if err := yaml.Unmarshal(data, &e); err != nil {
 		return nil, err
 	}
