@@ -67,6 +67,12 @@ func TestDashboardJS_ExportPagesFullHistory(t *testing.T) {
 		"EXPORT_MAX_PAGES",                                    // hard upper bound
 		"truncated = true",                                    // cap / malformed / stalled full page flag truncation
 		"if (!Array.isArray(page)) { truncated = true; break; }",
+		// X-Events-Has-More decides: a page with nothing new is truncation when
+		// the server says has-more (degraded read fails open), the length
+		// heuristic is only for an older server, and has-more=0 ends the walk.
+		"const hm = hasMoreHeader(pr);",
+		"truncated = hm === null ? page.length >= EXPORT_PAGE_LIMIT : hm;",
+		"if (hm === false) break;",
 		// Remote relay ignores before/limit → ring-only; a ring-sized slice is
 		// probably incomplete and must not toast as a full export.
 		"if (remote) return { events, truncated: events.length >= EXPORT_PAGE_LIMIT };",
@@ -74,6 +80,9 @@ func TestDashboardJS_ExportPagesFullHistory(t *testing.T) {
 		if !strings.Contains(pager, want) {
 			t.Errorf("fetchAllSessionEvents missing %q", want)
 		}
+	}
+	if strings.Contains(pager, "if (page.length === 0) break;") {
+		t.Error("fetchAllSessionEvents ends on an empty page without consulting X-Events-Has-More — a degraded read exports as complete")
 	}
 	if strings.Contains(pager, "'&before=' + oldest + '&limit='") {
 		t.Error("fetchAllSessionEvents still uses the strict `before = oldest` cursor — same-ms siblings at a page edge are lost")
