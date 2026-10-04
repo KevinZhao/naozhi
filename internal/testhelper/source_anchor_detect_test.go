@@ -182,8 +182,8 @@ func TestReadsGoSource(t *testing.T) {
 
 // TestSourceAnchorWalk_CheckoutNamedNaozhi: CI checks out into …/naozhi/naozhi
 // and the owner's worktree is ~/workspace/naozhi. The walk has to count a tree
-// whose own directory is called naozhi, skip only the old clone nested inside
-// it, and skip vendored and fixture trees.
+// whose own directory is called naozhi, skip the old clone nested inside it,
+// agent worktrees and other nested checkouts, and vendored and fixture trees.
 func TestSourceAnchorWalk_CheckoutNamedNaozhi(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "naozhi")
@@ -194,6 +194,9 @@ func TestSourceAnchorWalk_CheckoutNamedNaozhi(t *testing.T) {
 		"naozhi/internal/server/send_test.go",
 		"test/e2e/node_modules/x/x_test.go",
 		"internal/server/testdata/fixture_test.go",
+		".claude/worktrees/agent-x/internal/server/send_test.go",
+		"wt/.git",
+		"wt/internal/server/send_test.go",
 	} {
 		full := filepath.Join(root, p)
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
