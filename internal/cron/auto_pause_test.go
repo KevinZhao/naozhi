@@ -85,10 +85,29 @@ func newAutoPauseScheduler(t *testing.T, threshold int, platform string) (*Sched
 }
 
 // runN drives n complete runs through executeOpt (TriggerNow path, no jitter).
+// Each run's notice goes out on its own goroutine; waiting for it before the
+// next run keeps the recorded notices in run order.
 func runN(s *Scheduler, id string, n int) {
 	for range n {
 		s.executeOpt(id, true)
+		s.triggerWG.Wait()
 	}
+}
+
+// pausingNotice returns the last notice and fails unless it is the only one
+// that announces the auto-pause.
+func pausingNotice(t *testing.T, notices []string) string {
+	t.Helper()
+	var pauses []int
+	for i, n := range notices {
+		if strings.Contains(n, "自动暂停") {
+			pauses = append(pauses, i)
+		}
+	}
+	if len(pauses) != 1 || pauses[0] != len(notices)-1 {
+		t.Fatalf("pause announced at notice indexes %v of %d, want only the last: %q", pauses, len(notices), notices)
+	}
+	return notices[len(notices)-1]
 }
 
 // persistedJob reloads job id from the store file the way Start does.
@@ -157,8 +176,7 @@ func TestAutoPause_DefaultThresholdPausesOnFifthFailure(t *testing.T) {
 	if got := metrics.CronAutoPausedTotal.Value() - before; got != 1 {
 		t.Errorf("CronAutoPausedTotal delta = %d, want 1", got)
 	}
-	notices := ns.noticesAfter(s)
-	last := notices[len(notices)-1]
+	last := pausingNotice(t, ns.noticesAfter(s))
 	wantSuffix := "；已连续失败 5 次，任务已自动暂停，修复后发送 /cron resume " + id + " 恢复"
 	if !strings.HasPrefix(last, "[Cron ping] 执行失败（CLI 发送错误） · run ") || !strings.HasSuffix(last, wantSuffix) {
 		t.Errorf("pausing notice = %q, want the send-error body ending %q", last, wantSuffix)
@@ -199,8 +217,7 @@ func TestAutoPause_SuccessResetsAndSkipsDoNotCount(t *testing.T) {
 	if j := s.jobForTest(t, id); !j.Paused || j.PausedReason != PausedReasonAutoFailures {
 		t.Fatalf("third counted failure (spawn error) did not pause: paused=%v reason=%q", j.Paused, j.PausedReason)
 	}
-	notices := ns.noticesAfter(s)
-	if last := notices[len(notices)-1]; !strings.HasPrefix(last, "[Cron ping] 启动会话失败 · run ") ||
+	if last := pausingNotice(t, ns.noticesAfter(s)); !strings.HasPrefix(last, "[Cron ping] 启动会话失败 · run ") ||
 		!strings.HasSuffix(last, "；已连续失败 3 次，任务已自动暂停，修复后发送 /cron resume "+id+" 恢复") {
 		t.Errorf("pausing spawn-error notice = %q", last)
 	}
