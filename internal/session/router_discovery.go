@@ -6,14 +6,18 @@
 package session
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // SetUserLabel is the human-driven label setter (dashboard rename, IM /label,
@@ -412,8 +416,9 @@ func (r *Router) ManagedExcludeSets() (pids map[int]bool, sessionIDs map[string]
 
 // Takeover creates a managed session to replace an external Claude CLI session.
 // It uses --resume to preserve the conversation context, and loads JSONL history
-// for dashboard display. The caller must ensure the original process has been
-// terminated before calling.
+// for dashboard display; a backend that rejects the resume gets a fresh session
+// chained to that transcript instead. The caller must ensure the original
+// process has been terminated before calling.
 func (r *Router) Takeover(ctx context.Context, key string, sessionID string, workspace string, opts AgentOpts) (*ManagedSession, error) {
 	// Same flag-injection guard as GetOrCreate: AgentOpts is caller-supplied.
 	if err := validateModel(opts.Model); err != nil {
@@ -495,5 +500,28 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 	if err != nil {
 		return nil, err
 	}
-	return r.completeSpawn(ctx, &res)
+	s, err := r.completeSpawn(ctx, &res)
+	// The external CLI is already gone and nothing was sent yet, so a resume
+	// the backend refused (codex, ACP) is retried fresh once, chained to the
+	// transcript. Its one-shot picks were consumed: pin what they resolved.
+	if sessionID == "" || !errors.Is(err, clierr.ErrResumeRejected) || ctx.Err() != nil {
+		return s, err
+	}
+	slog.Warn("resume rejected; takeover started fresh", "key", osutil.SanitizeForLog(key, 64),
+		"session_id", sessionID, "backend", res.backendID, "err", err)
+	stuck := !waitSocketGoneForKey(key, 2*time.Second)
+	opts.Backend = cmp.Or(res.backendID, opts.Backend)
+	opts.AccessProfile = cmp.Or(res.accessProfileID, opts.AccessProfile)
+	// A GetOrCreate parked on the first spawn may own the key by now; then
+	// reserveSpawn refuses with ErrSpawnInFlight and its session fills the key.
+	var fresh spawnReservation
+	r.ss.Update(func(tx sessTx) { err = r.reserveSpawn(tx, &fresh, key, "", opts) })
+	if err == nil {
+		fresh.rejectedResumeID = sessionID
+		s, err = r.completeSpawn(ctx, &fresh)
+	}
+	if err != nil && stuck {
+		return nil, fmt.Errorf("%w: %w", ErrShimStuck, err)
+	}
+	return s, err
 }

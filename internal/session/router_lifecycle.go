@@ -10,6 +10,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -443,6 +444,9 @@ type spawnReservation struct {
 	// socket outlived the wait; the caller's retry wraps its spawn error as
 	// ErrShimStuck.
 	socketBound bool
+	// rejectedResumeID is the transcript a Takeover's refused resume would
+	// have continued; the fresh spawn chains it and loads its history.
+	rejectedResumeID string
 }
 
 // errSpawnStale is completeSpawn's answer for a resumesOld spawn whose entry
@@ -636,7 +640,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 		oldHistory, prevIDs = hist.entries, hist.prevIDs
 		s = r.installFreshSession(tx,
 			key, proc, res.workspace, res.backendID, res.accessProfileID, res.wrapper, res.resumeID,
-			oldHistory, prevIDs, snap.cost, snap.costSpent, snap.createdAt, res.opts.Exempt, snap.sid,
+			oldHistory, respawnChain(prevIDs, res.rejectedResumeID, ""), snap.cost, snap.costSpent, snap.createdAt, res.opts.Exempt, snap.sid,
 			hist.userTurns, overrides,
 		)
 		s.startupFails.Store(snap.startupFails)
@@ -664,7 +668,8 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 			"key", osutil.SanitizeForLog(key, 64))
 	}
 
-	r.hist.bindNewSessionHistory(ctx, s, proc, key, res.resumeID, res.workspace, prevIDs, oldHistory)
+	// The loader appends its resume ID to prevIDs itself.
+	r.hist.bindNewSessionHistory(ctx, s, proc, key, cmp.Or(res.resumeID, res.rejectedResumeID), res.workspace, prevIDs, oldHistory)
 	r.notifyChange()
 	return s, nil
 }
