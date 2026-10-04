@@ -18,11 +18,10 @@ import (
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
-// Session is the part of a session the connector drives: it sends into the
-// session, follows its events and reports its state. A router method finds no
-// session by returning a nil Session.
+// Session is the part of a session the connector reads: it follows the
+// session's events and reports its state. A router method finds no session by
+// returning a nil Session.
 type Session interface {
-	Send(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error)
 	SubscribeEvents() (<-chan struct{}, func())
 	EventEntriesSince(afterMS int64) []clievent.EventEntry
 	// InitialHistoryPage is the opening page a want_history subscribe gets:
@@ -32,7 +31,6 @@ type Session interface {
 	// EventPageBeforeCtx is a "load earlier" page: the newest limit entries
 	// older than beforeMS, and whether older history exists.
 	EventPageBeforeCtx(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, bool)
-	LogSystemEvent(summary string)
 	Snapshot() sessionview.SessionSnapshot
 	State() string
 	DeathReason() string
@@ -45,7 +43,7 @@ type PlannerResolver interface {
 }
 
 // SessionLookup is the read-only lookup sub-capability used by hot RPC paths
-// (subscribe stream filter, ListSessions response, SessionFor before send).
+// (subscribe stream filter, ListSessions response).
 type SessionLookup interface {
 	SessionFor(key string) Session
 	ListSessions() []sessionview.SessionSnapshot
@@ -54,7 +52,6 @@ type SessionLookup interface {
 // SessionLifecycle is the create/recreate/remove sub-capability used by RPC
 // handlers that allocate or tear down sessions.
 type SessionLifecycle interface {
-	GetOrCreate(ctx context.Context, key string, opts sessionview.AgentOpts) (Session, sessionview.SessionStatus, error)
 	ResetAndRecreate(ctx context.Context, key string, opts sessionview.AgentOpts) (Session, error)
 	Takeover(ctx context.Context, key string, sessionID string, workspace string, opts sessionview.AgentOpts) (Session, error)
 	Remove(key string) bool
@@ -83,4 +80,12 @@ type SessionRouter interface {
 	SessionLifecycle
 	SessionMutator
 	SessionBackends
+}
+
+// TurnSubmitter runs a send the primary relayed: on the node's
+// turn.Orchestrator, like an IM or dashboard send, so slash commands, the
+// queue and agent options apply. It creates the session before returning;
+// status is "accepted", "queued" or "reset". server.Server implements it.
+type TurnSubmitter interface {
+	SubmitRelayed(ctx context.Context, key, text, workspace string) (status string, err error)
 }

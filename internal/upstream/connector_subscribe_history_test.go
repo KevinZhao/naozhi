@@ -35,7 +35,7 @@ func subscribeLink(t *testing.T, r *session.Router, sub node.ReverseMsg) <-chan 
 			frames <- msg
 		}
 	})
-	c := New(&Config{URL: wsURL(srv), NodeID: "n", Token: "t"}, testRouter(r), nil, nil, Discovery{})
+	c := New(&Config{URL: wsURL(srv), NodeID: "n", Token: "t"}, testRouter(r), nil, nil, Discovery{}, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {

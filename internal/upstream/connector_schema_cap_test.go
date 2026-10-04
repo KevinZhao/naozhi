@@ -40,7 +40,7 @@ func TestRunOnce_RejectsForeignHubEventSchema(t *testing.T) {
 	srv := ackWith(t, []string{"evententry.v99"})
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "tok"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -73,7 +73,7 @@ func TestRunOnce_AcceptsCompatibleHubCaps(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := ackWith(t, tc.caps)
 			cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "tok"}
-			c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+			c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()

@@ -56,24 +56,43 @@ var errUrgentUsage = sendUsageError("用法：/urgent <紧急消息>")
 // "accepted" (the turn runs now), "queued" (it joins the next merged turn)
 // or "busy" (queue disabled or shutting down; not buffered).
 func (e *sendEngine) sessionSend(p sendParams, origin turn.Origin) (bool, sendAckStatus, error) {
+	cmd, reset, err := e.prepareSend(p)
+	if reset || err != nil {
+		return reset, "", err
+	}
+	switch e.submit(p, cmd, origin) {
+	case turn.AckOwner, turn.AckDetached:
+		return false, sendAckAccepted, nil
+	case turn.AckQueued:
+		return false, sendAckQueued, nil
+	default: // AckDropped (queue disabled, session busy), AckShuttingDown
+		return false, sendAckBusy, nil
+	}
+}
+
+// prepareSend is the part of a send every entry shares before Submit: it
+// validates p, runs a bare /clear or /new (reset=true) and records p's
+// workspace, backend, access-profile and resume overrides. A reset or an
+// error means there is nothing to submit.
+func (e *sendEngine) prepareSend(p sendParams) (cmd turn.Cmd, reset bool, err error) {
 	key := p.Key
 	// ValidateSessionKey rejects C0/C1 controls, bidi overrides, non-UTF-8 and
 	// over-long keys: no log-injection primitive via slog / sessions.json.
 	if err := session.ValidateSessionKey(key); err != nil {
-		return false, "", fmt.Errorf("invalid key")
+		return cmd, false, fmt.Errorf("invalid key")
 	}
 
 	// /clear and /new without an argument reset (the CLI built-in does not
 	// work in stream-json); "/new <arg>" is sent as text. The workspace
 	// override goes too: the dashboard re-sends it with the next send.
-	cmd := turn.Parse(p.Text)
+	cmd = turn.Parse(p.Text)
 	if cmd.Kind == turn.CmdReset && cmd.Arg == "" {
 		e.turns.Reset(e.ctx, key, true)
 		e.notify.BroadcastSessionsUpdate()
-		return true, "", nil
+		return cmd, true, nil
 	}
 	if cmd.Kind == turn.CmdUrgentUsage {
-		return false, "", errUrgentUsage
+		return cmd, false, errUrgentUsage
 	}
 
 	var validatedWorkspace string
@@ -85,7 +104,7 @@ func (e *sendEngine) sessionSend(p sendParams, origin turn.Origin) (bool, sendAc
 			// p.Workspace is attacker-influenced, so SanitizeForLog (200-byte
 			// cap, same as other attacker-influenced fields).
 			slog.Warn("workspace validation failed", "err", err, "workspace", osutil.SanitizeForLog(p.Workspace, 200))
-			return false, "", fmt.Errorf("invalid workspace")
+			return cmd, false, fmt.Errorf("invalid workspace")
 		}
 		validatedWorkspace = wsPath
 		// Refuse an empty chat-key prefix (":agentID"): it would persist "" as
@@ -103,10 +122,10 @@ func (e *sendEngine) sessionSend(p sendParams, origin turn.Origin) (bool, sendAc
 		// node selection accept the same IDs; error text aligned with
 		// dashboard_cron.validateCronBackend for dashboard JS substring matching.
 		if len(p.Backend) > maxBackendIDLen {
-			return false, "", fmt.Errorf("backend exceeds %d-byte limit", maxBackendIDLen)
+			return cmd, false, fmt.Errorf("backend exceeds %d-byte limit", maxBackendIDLen)
 		}
 		if !isValidBackendID(p.Backend) {
-			return false, "", fmt.Errorf("invalid backend identifier")
+			return cmd, false, fmt.Errorf("invalid backend identifier")
 		}
 		e.router.SetSessionBackend(key, p.Backend)
 	}
@@ -116,7 +135,7 @@ func (e *sendEngine) sessionSend(p sendParams, origin turn.Origin) (bool, sendAc
 	// global default in resolveSpawnParamsLocked; only hostile input is rejected.
 	if p.AccessProfile != "" {
 		if len(p.AccessProfile) > maxBackendIDLen || !isValidBackendID(p.AccessProfile) {
-			return false, "", fmt.Errorf("invalid access_profile identifier")
+			return cmd, false, fmt.Errorf("invalid access_profile identifier")
 		}
 		e.router.SetSessionAccessProfile(key, p.AccessProfile)
 	}
@@ -124,7 +143,7 @@ func (e *sendEngine) sessionSend(p sendParams, origin turn.Origin) (bool, sendAc
 	// Bound resume_id length before the regex scan (UUIDs are 36 chars; 64
 	// leaves headroom) so a hostile multi-MB value costs nothing.
 	if len(p.ResumeID) > 64 {
-		return false, "", fmt.Errorf("invalid resume_id length")
+		return cmd, false, fmt.Errorf("invalid resume_id length")
 	}
 	if p.ResumeID != "" && claudefs.IsValidSessionID(p.ResumeID) {
 		ws := validatedWorkspace
@@ -134,18 +153,17 @@ func (e *sendEngine) sessionSend(p sendParams, origin turn.Origin) (bool, sendAc
 		e.router.RegisterForResume(key, p.ResumeID, ws, "")
 	}
 
-	r := turn.Request{Key: key, Text: p.Text, Images: p.Images, Origin: origin}
+	return cmd, false, nil
+}
+
+// submit hands a prepared send to the Orchestrator on the engine's ctx and
+// TrackSend; /urgent's text loses its prefix and preempts.
+func (e *sendEngine) submit(p sendParams, cmd turn.Cmd, origin turn.Origin) turn.Ack {
+	r := turn.Request{Key: p.Key, Text: p.Text, Images: p.Images, Origin: origin}
 	if cmd.Kind == turn.CmdUrgent {
 		r.Text, r.Priority = cmd.Arg, turn.PriorityNow
 	}
-	switch e.turns.Submit(e.ctx, r, dashAdmission{track: e.TrackSend, ctx: e.ctx}) {
-	case turn.AckOwner, turn.AckDetached:
-		return false, sendAckAccepted, nil
-	case turn.AckQueued:
-		return false, sendAckQueued, nil
-	default: // AckDropped (queue disabled, session busy), AckShuttingDown
-		return false, sendAckBusy, nil
-	}
+	return e.turns.Submit(e.ctx, r, dashAdmission{track: e.TrackSend, ctx: e.ctx})
 }
 
 // sessionOptsFor returns the AgentOpts to use when spawning (or resuming)

@@ -19,14 +19,14 @@ func TestUpstreamRouter_AMissingSessionIsANilInterface(t *testing.T) {
 	if s := u.SessionFor("feishu:direct:absent:general"); s != nil {
 		t.Errorf("SessionFor(absent) = %#v, want a nil interface", s)
 	}
-	// No CLI wrapper is configured, so GetOrCreate fails and hands back no
-	// session: that too must be a nil interface.
-	s, _, err := u.GetOrCreate(context.Background(), "feishu:direct:nowrapper:general", sessionview.AgentOpts{})
+	// No CLI wrapper is configured, so ResetAndRecreate fails and hands back
+	// no session: that too must be a nil interface.
+	s, err := u.ResetAndRecreate(context.Background(), "feishu:direct:nowrapper:general", sessionview.AgentOpts{})
 	if err == nil {
-		t.Fatal("GetOrCreate without a CLI wrapper succeeded (test premise)")
+		t.Fatal("ResetAndRecreate without a CLI wrapper succeeded (test premise)")
 	}
 	if s != nil {
-		t.Errorf("GetOrCreate on failure = %#v, want a nil interface", s)
+		t.Errorf("ResetAndRecreate on failure = %#v, want a nil interface", s)
 	}
 }
 

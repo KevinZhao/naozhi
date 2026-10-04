@@ -14,16 +14,16 @@
 //
 //	A. None of sendEngine, SendHandler, wsBroadcaster (the engine's
 //	   notifier, #2897 S5), turnSender (turn.Orchestrator's session side,
-//	   #3004) and the dashboard's turn origins wsOrigin / httpOrigin (#3004)
-//	   may declare a field of type *Hub. That is the core boundary RFC §2.1
+//	   #3004), the dashboard's turn origins wsOrigin / httpOrigin (#3004)
+//	   and the relay's relayOrigin (#3032) may declare a field of type *Hub. That is the core boundary RFC §2.1
 //	   draws — the engine, its notifier, the turn sender, the origins and the
 //	   HTTP handler depend on the send pipeline, not on the WebSocket layer — and
 //	   the regression most likely to be added back "just for one call". #2551
 //	   shipped this as a six-name blocklist (queue/guard/wg/...) on Hub, which
 //	   a rename could walk around and which said nothing about SendHandler;
 //	   #2632 replaced it with the type check.
-//	B. send.go / send_engine.go / turn_sender.go / dash_origin.go carry no
-//	   *Hub receivers: a *Hub method there is a piece of the pipeline written
+//	B. send.go / send_engine.go / turn_sender.go / dash_origin.go /
+//	   relay_origin.go carry no *Hub receivers: a *Hub method there is a piece of the pipeline written
 //	   back onto the Hub.
 //	C. SendHandler methods (whichever file holds them) may CALL engine
 //	   methods but never READ an engine field. `h.engine.sessionSend(...)` is fine; `h.engine.allowedRoot` is
@@ -44,7 +44,7 @@ import (
 // sendPipelineFiles hold the pipeline methods. They must carry *sendEngine
 // receivers only: a *Hub method here means a piece of the pipeline was written
 // back onto the Hub.
-var sendPipelineFiles = []string{"send.go", "send_engine.go", "turn_sender.go", "dash_origin.go"}
+var sendPipelineFiles = []string{"send.go", "send_engine.go", "turn_sender.go", "dash_origin.go", "relay_origin.go"}
 
 // sendHandlerFile is where SendHandler is declared. Check C reads every
 // *SendHandler method wherever it lives (upload and attachment handlers sit in
@@ -60,6 +60,7 @@ var sendBoundaryTypes = map[string]string{
 	"turnSender":    "turn_sender.go",
 	"wsOrigin":      "dash_origin.go",
 	"httpOrigin":    "dash_origin.go",
+	"relayOrigin":   "relay_origin.go",
 }
 
 // scanSendEngineOwnership implements rule 3b-send.

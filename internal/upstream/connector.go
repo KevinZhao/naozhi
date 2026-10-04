@@ -24,10 +24,10 @@ import (
 )
 
 // handleConnDrainBudget bounds the deferred wg.Wait() at the end of
-// handleConn. Workers honour connCtx; the budget covers a downstream call
-// (e.g. sess.Send blocked until the watchdog total_timeout, default 2h) that
-// refuses to unblock — the stuck goroutine leaks to process teardown rather
-// than pinning the reconnect loop. Package-level var so tests can shorten it.
+// handleConn. Workers honour their ctx; the budget covers a downstream call
+// that refuses to unblock — the stuck goroutine leaks to process teardown
+// rather than pinning the reconnect loop. Package-level var so tests can
+// shorten it.
 var handleConnDrainBudget = 15 * time.Second
 
 // circuitBreakerThreshold is the number of consecutive runOnce failures
@@ -86,11 +86,14 @@ type Connector struct {
 	hostname         string
 	defaultWorkspace string // used as allowedRoot for incoming workspace overrides
 	discovery        Discovery
+	// turns runs the "send" RPC; nil refuses every send.
+	turns TurnSubmitter
 }
 
 // New creates a Connector. projMgr may be nil if projects are not configured;
-// resolver may be nil (restart_planner then uses the inline AgentOpts path).
-func New(cfg *Config, router SessionRouter, projMgr *project.Manager, resolver PlannerResolver, discovery Discovery) *Connector {
+// resolver may be nil (restart_planner then uses the inline AgentOpts path);
+// turns may be nil only where nothing sends.
+func New(cfg *Config, router SessionRouter, projMgr *project.Manager, resolver PlannerResolver, discovery Discovery, turns TurnSubmitter) *Connector {
 	claudeDir := ""
 	if home, err := os.UserHomeDir(); err == nil {
 		claudeDir = filepath.Join(home, ".claude")
@@ -109,6 +112,7 @@ func New(cfg *Config, router SessionRouter, projMgr *project.Manager, resolver P
 		hostname:         hostname,
 		defaultWorkspace: router.DefaultWorkspace(),
 		discovery:        discovery,
+		turns:            turns,
 	}
 }
 
