@@ -112,6 +112,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		copyCostBaseline(fresh, old)
 		if proc != nil {
 			bookUnownedResults(fresh, proc)
+			bookProcessEnd(fresh, proc, r.hist.claudeDir)
 		}
 
 		// Rebind the history source (the old Source reads the orphaned struct);

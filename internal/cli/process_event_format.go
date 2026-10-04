@@ -215,11 +215,6 @@ func (p *Process) logEventAt(ev clievent.Event, nowMS int64) {
 	p.eventLog.AppendBatch(entries)
 }
 
-// TakeShadowUsage returns and clears the tokens consumed since the last
-// result frame. Callers use it when a turn ends without a result and the
-// process will not produce one (death / timeout kill).
-func (p *Process) TakeShadowUsage() clievent.ShadowUsage { return p.meter.TakeShadow() }
-
 // LastResultAt is when the read loop received the process's last result
 // frame; zero before one.
 func (p *Process) LastResultAt() time.Time { return p.meter.LastResultAt() }

@@ -108,8 +108,9 @@ func writeDriftedShim(t *testing.T, dir string, r *Router, w *cli.Wrapper, sess 
 
 // writeLiveShim serves a fake shim for sess on a unix socket under dir (which
 // must be short, see shortTempDir) and records its state, so ReconnectShimsCtx
-// reattaches sess to it.
-func writeLiveShim(t *testing.T, dir string, r *Router, w *cli.Wrapper, sess *ManagedSession) {
+// reattaches sess to it. With last set, the shim sends those frames after the
+// handshake and then hangs up, as when its CLI dies.
+func writeLiveShim(t *testing.T, dir string, r *Router, w *cli.Wrapper, sess *ManagedSession, last ...string) {
 	t.Helper()
 	t.Setenv("XDG_RUNTIME_DIR", dir)
 	socket := shim.SocketPath(shim.KeyHash(sess.key))
@@ -137,6 +138,13 @@ func writeLiveShim(t *testing.T, dir string, r *Router, w *cli.Wrapper, sess *Ma
 			return
 		}
 		fmt.Fprintf(conn, "{\"type\":\"hello\",\"protocol_version\":%d}\n{\"type\":\"replay_done\"}\n", shim.ProtocolVersion)
+		if len(last) > 0 {
+			for _, l := range last {
+				io.WriteString(conn, l) //nolint:errcheck
+			}
+			conn.Close()
+			return
+		}
 		io.Copy(io.Discard, rd) //nolint:errcheck // never answer
 	}()
 	writeShimStateFor(t, dir, shim.State{

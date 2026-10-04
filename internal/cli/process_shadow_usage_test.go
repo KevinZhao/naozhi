@@ -41,7 +41,7 @@ func TestProcess_ShadowThroughReadLoop(t *testing.T) {
 	srv.SendStdout(frame("b", 224))
 	testhelper.Eventually(t, func() bool { return len(p.eventLog.EntriesSince(0)) >= 2 }, 2*time.Second, "assistant frames not logged")
 	want := []clievent.ShadowModel{{Model: "opus", Input: 3, Output: 224, CacheWrite: 21584}}
-	if got := p.TakeShadowUsage().Models; !reflect.DeepEqual(got, want) {
+	if got := p.meter.TakeShadow().Models; !reflect.DeepEqual(got, want) {
 		t.Fatalf("shadow = %+v, want %+v", got, want)
 	}
 
