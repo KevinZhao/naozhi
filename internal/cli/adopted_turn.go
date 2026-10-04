@@ -58,18 +58,24 @@ type adoptedTurn struct {
 	// midTurn: armed by a mid-turn reconnect, not by a replayed result. Set
 	// before armed and never cleared, so it outlives the outcome being latched.
 	midTurn atomic.Bool
-	done    chan struct{}
-	settle  sync.Once
+	// resultSeq is the shim seq of the replayed result (0 for a mid-turn
+	// latch). Written before armed and never again, so readers that saw armed
+	// need no lock.
+	resultSeq int64
+	done      chan struct{}
+	settle    sync.Once
 
 	mu  sync.Mutex
 	out AdoptedOutcome
 }
 
 // arm marks this process as carrying an adoptable turn; midTurn says the turn
-// was still running at reconnect. Called from SpawnReconnect only, before
-// startReadLoop: arming later would race the very frame it exists to catch.
-func (a *adoptedTurn) arm(midTurn bool) {
+// was still running at reconnect, resultSeq where a replayed result sat. Called
+// from SpawnReconnect only, before startReadLoop: arming later would race the
+// very frame it exists to catch.
+func (a *adoptedTurn) arm(midTurn bool, resultSeq int64) {
 	a.done = make(chan struct{})
+	a.resultSeq = resultSeq
 	a.midTurn.Store(midTurn)
 	a.armed.Store(true)
 }
@@ -84,13 +90,13 @@ func (a *adoptedTurn) arm(midTurn bool) {
 // unarmed is what lets a caller tell "no turn to adopt" apart from "a turn that
 // answered nothing". In all three the CLI ran before this naozhi attached, so
 // a later exit is not a startup failure (sawOutput).
-func (p *Process) applyReconnectVerdict(midTurn bool, finished *clievent.Event) {
+func (p *Process) applyReconnectVerdict(midTurn bool, finished *clievent.Event, finishedSeq int64) {
 	p.sawOutput.Store(true)
 	switch {
 	case midTurn:
 		p.transition(evReconnectMidTurn)
 		p.turn.reconnectedMidTurn.Store(true)
-		p.adopted.arm(true)
+		p.adopted.arm(true, 0)
 	case finished != nil:
 		// The turn ended while naozhi was down: its result is in the backlog just
 		// drained, and this is the only moment it exists in memory — DrainReplay is
@@ -98,7 +104,7 @@ func (p *Process) applyReconnectVerdict(midTurn bool, finished *clievent.Event) 
 		// walk it for linker hints. Latch it now or lose it. State is deliberately
 		// left alone: the turn is over, so this is not a mid-turn reconnect and
 		// startReadLoop's Ready default is correct.
-		p.adopted.arm(false)
+		p.adopted.arm(false, finishedSeq)
 		p.adopted.resolveResult(*finished)
 	}
 }
@@ -174,6 +180,20 @@ func (p *Process) AdoptedTurnPending() bool {
 // whole backlog, so that result may be the previous turn's, already delivered.
 func (p *Process) AdoptedMidTurn() bool {
 	return p.adopted.armed.Load() && p.adopted.midTurn.Load()
+}
+
+// AdoptableAfter reports whether the latched turn is the one a Send issued at
+// watermark w started (known=false: none was recorded). A mid-turn latch always
+// is. A replayed result is only when it sits past w on the same shim, or came
+// from a shim started since w; with no watermark it may be the previous turn's.
+func (p *Process) AdoptableAfter(w TurnWatermark, known bool) bool {
+	if p.AdoptedMidTurn() {
+		return true
+	}
+	if !known || !p.adopted.armed.Load() || p.link.shimPID <= 0 {
+		return false
+	}
+	return w.ShimPID != p.link.shimPID || p.adopted.resultSeq > w.Seq
 }
 
 // AdoptedOutcome hands over the outcome of the turn that was in flight at

@@ -637,6 +637,10 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 	// reason: startReadLoop can deliver the late result before this function even
 	// returns, so nothing may be attached to that turn after this point.
 	proc.applyReconnectVerdict(reconnectVerdict(replays, proto))
+	// The replayed frames were received too, and readLoop stores live seqs from
+	// here on: seed it now, or LastSeq reads 0 until the first live frame and a
+	// TurnWatermark taken then places every replayed result after it.
+	proc.link.lastSeq.Store(max(lastSeq, lastReplayedSeq(replays)))
 
 	proc.startReadLoop()
 
@@ -662,7 +666,7 @@ func WaitSocketGoneForKey(key string, maxWait time.Duration) bool {
 // was in flight when this process reconnected:
 //
 //	midTurn true             the CLI is still working; the result has not arrived
-//	finished != nil          the turn ended while naozhi was down; that is the result
+//	finished != nil          the backlog ends in a result, at shim seq finishedSeq
 //	both zero                no meaningful backlog — nothing was in flight
 //
 // midTurn and finished are mutually exclusive by construction. Both come out of
@@ -670,7 +674,7 @@ func WaitSocketGoneForKey(key string, maxWait time.Duration) bool {
 // meaningful event is a result" is holding that result when it decides, and the
 // caller needs it (adopted_turn.go — the backlog is drained once per Reconnect,
 // so a second pass to recover it later is not available).
-func reconnectVerdict(replays []shim.ServerMsg, proto Protocol) (midTurn bool, finished *clievent.Event) {
+func reconnectVerdict(replays []shim.ServerMsg, proto Protocol) (midTurn bool, finished *clievent.Event, finishedSeq int64) {
 	for i := len(replays) - 1; i >= 0; i-- {
 		if replays[i].Type != "replay" {
 			continue
@@ -689,12 +693,23 @@ func reconnectVerdict(replays []shim.ServerMsg, proto Protocol) (midTurn bool, f
 				continue
 			}
 			if ev.Type == "result" {
-				return false, &ev
+				return false, &ev, replays[i].Seq
 			}
-			return true, nil
+			return true, nil, 0
 		}
 	}
-	return false, nil
+	return false, nil, 0
+}
+
+// lastReplayedSeq is the highest shim seq among the replayed frames.
+func lastReplayedSeq(replays []shim.ServerMsg) int64 {
+	var last int64
+	for i := range replays {
+		if replays[i].Type == "replay" && replays[i].Seq > last {
+			last = replays[i].Seq
+		}
+	}
+	return last
 }
 
 // isTurnNeutralEventType reports whether an clievent.Event type carries no turn state

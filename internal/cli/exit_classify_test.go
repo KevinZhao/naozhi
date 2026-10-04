@@ -201,7 +201,7 @@ func TestShimLineReader_InitStdoutCountsAsOutput(t *testing.T) {
 func TestApplyReconnectVerdict_PastStartup(t *testing.T) {
 	t.Parallel()
 	p := &Process{}
-	p.applyReconnectVerdict(false, nil)
+	p.applyReconnectVerdict(false, nil, 0)
 	p.recordExit(1, []string{"No conversation found with session ID: abc"})
 	var pe *clierr.ProcessExitedError
 	if !errors.As(p.exitErr(), &pe) || pe.Class != clierr.ExitUnknown {

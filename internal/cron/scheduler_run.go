@@ -353,15 +353,7 @@ func (s *Scheduler) executeAcquired(jobID string, viaTriggerNow bool, inflight *
 		// sandboxpending/<runID>.json, and only its reconciler stops the
 		// microVM and classifies the orphan. A second marker here let the
 		// local reconcile settle the run first, or finish it twice (#2970).
-		s.writeRunInflightMarker(runInflightMarker{
-			JobID:       jobID,
-			RunID:       runID,
-			Trigger:     trigger,
-			StartedAtMS: startedAt.UnixMilli(),
-			Prompt:      snap.prompt,
-			WorkDir:     snap.workDir,
-			Fresh:       snap.fresh,
-		}, lg)
+		rc.markerPath = s.writeRunInflightMarker(rc.inflightMarker(), lg)
 	}
 
 	// Per-job timeout is always s.execTimeout: robfig/cron's SkipIfStillRunning
@@ -678,6 +670,9 @@ func (s *Scheduler) execSend(a execSendArgs) (result SendResult, costInc costled
 			"warn_ratio", spawnElapsedWarnRatio)
 	}
 	a.inflight.setPhase(PhaseSending)
+	// Immediately before the turn: the watermark must follow every frame an
+	// earlier turn wrote, and precede everything this one writes.
+	s.stampSendWatermark(a.runCtx, a.sess)
 
 	// sendWithWatchdog localises the watchdog ↔ Send ordering contract (drain
 	// abortCh AFTER cancelling sendCtx) so a refactor here cannot let the next

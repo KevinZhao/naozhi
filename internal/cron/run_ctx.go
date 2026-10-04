@@ -57,6 +57,9 @@ type runCtx struct {
 	jobID string
 	// lg is the per-run logger, already tagged with jobID/runID.
 	lg *slog.Logger
+	// markerPath is the path writeRunInflightMarker returned at admission;
+	// "" when none was written, so later rewrites have nothing to update.
+	markerPath string
 	// finalizer releases the inflight CAS gate. finishRun calls it before the
 	// terminal broadcast so CurrentRun and the broadcast agree; the caller's
 	// defer calls it again as a backstop, and its done flag makes that

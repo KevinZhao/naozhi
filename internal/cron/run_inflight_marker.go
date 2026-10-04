@@ -56,6 +56,24 @@ type runInflightMarker struct {
 	// cost at most one extra boot — never the unbounded crash loop Phase 0's
 	// remove-before-record was protecting against (#2751).
 	Attempts int `json:"attempts,omitempty"`
+	// SendWatermark is the session's SendWatermarker value just before Send
+	// (#3104): it lets adoption accept a result that was already in the
+	// replayed backlog. Absent on markers from older binaries and on runs
+	// that never reached Send, which then adopt only a turn still running.
+	SendWatermark string `json:"adopt_after,omitempty"`
+}
+
+// inflightMarker is the marker for the run rc identifies.
+func (rc runCtx) inflightMarker() runInflightMarker {
+	return runInflightMarker{
+		JobID:       rc.jobID,
+		RunID:       rc.runID,
+		Trigger:     rc.trigger,
+		StartedAtMS: rc.startedAt.UnixMilli(),
+		Prompt:      rc.snap.prompt,
+		WorkDir:     rc.snap.workDir,
+		Fresh:       rc.snap.fresh,
+	}
 }
 
 // runInflightDir resolves the marker directory ("" when persistence is disabled,
@@ -107,6 +125,24 @@ func (s *Scheduler) removeRunInflightMarker(runID string) {
 	if err := os.Remove(filepath.Join(dir, runID+".json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		slog.Warn("cron: run-inflight marker remove failed", "run_id", runID, "err", err)
 	}
+}
+
+// stampSendWatermark records sess's watermark in rc's marker, just before the
+// run's Send. Best-effort: a session without one, or a failed rewrite, leaves
+// the marker as written, and adoption then falls back to recording interrupted.
+// Only a marker admission wrote is updated: one it refused stays absent.
+func (s *Scheduler) stampSendWatermark(rc runCtx, sess Session) {
+	wm, ok := sess.(SendWatermarker)
+	if !ok || rc.markerPath == "" {
+		return
+	}
+	after := wm.SendWatermark()
+	if after == "" {
+		return
+	}
+	m := rc.inflightMarker()
+	m.SendWatermark = after
+	s.rewriteRunInflightMarker(rc.markerPath, m)
 }
 
 // rewriteRunInflightMarker persists an updated marker in place (adoption bumps
@@ -223,12 +259,12 @@ func (s *Scheduler) claimRunInflight() inflightSettlement {
 				"job_id", m.JobID, "run_id", m.RunID)
 			continue
 		}
-		// The adoption verdict, before anything is deleted: a live mid-turn CLI
-		// behind this job's shim means the run may still complete (#2712).
+		// The adoption verdict, before anything is deleted: a live CLI behind
+		// this job's shim may still complete the run, or has already (#2712).
 		verdict := AdoptNone
 		var run InFlightRun
 		if adopter != nil && s.jobStillExists(m.JobID) && m.Attempts < maxAdoptAttempts {
-			run, verdict = adopter.AdoptInFlight(sessionkey.CronKey(m.JobID))
+			run, verdict = adopter.AdoptInFlight(sessionkey.CronKey(m.JobID), m.SendWatermark)
 		}
 		if verdict == AdoptLive {
 			// The marker survives into the attempt — it is the only durable
