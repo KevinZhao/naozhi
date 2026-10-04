@@ -116,23 +116,39 @@ test.describe('renderMd GFM P3 (#2428)', () => {
     expect(await render('__all__ = []')).toContain('<strong>all</strong> = []');
   });
 
+  // 这是复杂度回归闸门（防 inlineMd 去掉 `{1,300}` 正文上限后退化成二次扫描），
+  // 不是性能预算：N=40000 时带上限的实现空闲约 40ms、满载并行下到过 650ms，
+  // 去掉任一上限是 7s 以上。别收紧阈值，否则负载抖动会误报。
   test('__ 最坏输入不二次扫描（F2）', async () => {
-    const ms = await page.evaluate(() => {
+    test.setTimeout(60000);
+    const CEILING_MS = 1000;
+    const ms = await page.evaluate((ceiling) => {
       const w = /** @type {any} */ (window);
-      const inputs = [' __a'.repeat(10000), ' __a__b'.repeat(10000), ' ~~a'.repeat(10000)];
+      const N = 40000;
+      const inputs = [' __a'.repeat(N), ' __a__b'.repeat(N), ' ~~a'.repeat(N)];
+      // 预热：JIT 升层与首次 GC 不计入计时；用 N/10 免得回归时预热本身就耗掉几秒。
+      w.renderMd(' __a ~~a');
+      w.renderMd(' __a ~~a'.repeat(N / 10));
       let worst = 0;
       for (const src of inputs) {
         let best = Infinity;
         for (let k = 0; k < 3; k++) {
           const t0 = performance.now();
-          w.renderMd(src + String(k)); // vary input to defeat the render cache
-          best = Math.min(best, performance.now() - t0);
+          // 超过 _MD_CACHE_INPUT_MAX 的输入本就不进缓存，后缀只是保险。
+          w.renderMd(src + String(k));
+          const dt = performance.now() - t0;
+          best = Math.min(best, dt);
+          // 一次低于阈值即可证明不是二次扫描；单次超 4 倍阈值已是定论。两者都提前
+          // 结束，回归时一次渲染就失败而不是撞用例超时。
+          if (best < ceiling || dt >= 4 * ceiling) break;
         }
+        if (best >= ceiling) return best;
         worst = Math.max(worst, best);
       }
       return worst;
-    });
-    expect(ms).toBeLessThan(50);
+    }, CEILING_MS);
+    expect(ms, 'slowest input best render ' + ms.toFixed(1) + 'ms; a quadratic __/~~ scan is seconds at this size')
+      .toBeLessThan(CEILING_MS);
   });
 
   // ===== 5c. ~~del~~ =====
