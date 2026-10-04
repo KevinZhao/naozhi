@@ -14,7 +14,7 @@ func (o *Orchestrator) runDetached(ctx context.Context, r Request) {
 	}
 	defer func() {
 		if rec := recover(); rec != nil {
-			o.recovered(ctx, r.Key, r.Origin, t, rec)
+			o.recovered(ctx, r.Key, r.Origin, t, rec, detachedGen)
 		}
 	}()
 	o.runTurn(ctx, r.Key, t, sessionOpts(r.Origin, r.Key), r.Text, r.Images, SendSpec{Passthrough: true, Priority: r.Priority})

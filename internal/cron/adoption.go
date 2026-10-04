@@ -18,6 +18,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // AdoptVerdict mirrors session.AdoptState value-for-value and
@@ -100,9 +102,40 @@ func (s *Scheduler) adoptRun(m runInflightMarker, run InFlightRun, inflight *run
 			out.errClass = ErrClassInterrupted
 			out.errMsg = "naozhi restarted mid-run; the adopted CLI turn did not complete"
 		}
+		// DO NOT REORDER: the release runs while the adoption still holds the
+		// job's gate, like every local finish (#1911).
+		s.releaseAdoptedSession(m, out)
 		s.finishRestartedRun(m, finalizer, out)
 		slog.Info("cron: adopted run settled",
 			"job_id", m.JobID, "run_id", m.RunID, "state", out.state,
 			"spanned_restart", true)
 	})
+}
+
+// releaseAdoptedSession frees the adopted run's CLI the way the local finish
+// paths do: cron sessions are exempt from TTL cleanup, so without it the CLI
+// holds memory and a maxCronExempt slot until the job's next tick. The mode
+// is the marker's — the one the session was created under. Fresh: Reset, and
+// re-register the stub chained to the run's session (the job's previous one
+// when no result frame named it). Persistent: release the idle process; a
+// still-running turn is left alone. Skipped on shutdown: Router.Shutdown owns
+// teardown, and the shim is meant to outlive this process.
+func (s *Scheduler) releaseAdoptedSession(m runInflightMarker, out runOutcome) {
+	if s.stopCtx.Err() != nil {
+		return
+	}
+	key := sessionkey.CronKey(m.JobID)
+	lg := slog.With("job_id", m.JobID, "run_id", m.RunID, "adopted", true)
+	if !m.Fresh {
+		s.releasePersistentProcess(key, lg)
+		return
+	}
+	s.router.Reset(key)
+	lastSessionID := out.sessionID
+	if lastSessionID == "" {
+		lastSessionID, _ = s.tbl.lastSessionID(m.JobID)
+	}
+	stubRefresher{s: s, jobID: m.JobID, workDir: m.WorkDir, prompt: m.Prompt,
+		lastSessionID: lastSessionID, active: true}.run()
+	lg.Info("cron fresh context: adopted run's session released", "state", out.state, "session_id", lastSessionID)
 }
