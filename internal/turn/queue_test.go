@@ -737,3 +737,36 @@ func TestShouldNotify_DropPath_BackPointerConsistent(t *testing.T) {
 	}
 	q.mu.Unlock()
 }
+
+// TestQueue_DiscardOwnedLeavesALaterOwnersQueue: a stale owner's discard (its
+// panic or shutdown) after Reset must not drop the next owner's queue or
+// release its key; the owner holding the current gen still discards.
+func TestQueue_DiscardOwnedLeavesALaterOwnersQueue(t *testing.T) {
+	t.Parallel()
+	for _, retire := range []bool{false, true} {
+		q := newTestQueue(10, 0)
+		_, _, _, genA := q.enqueueTuple("k", Msg{Text: "A"})
+		q.DiscardAndReturn("k")
+		if retire {
+			q.Cleanup("k")
+		}
+		_, _, _, genB := q.enqueueTuple("k", Msg{Text: "B"})
+		q.Enqueue("k", Msg{Text: "C"})
+		if dropped := q.DiscardOwned("k", genA); dropped != nil {
+			t.Fatalf("retire=%v: stale owner discarded %v", retire, dropped)
+		}
+		if isOwner, enqueued, _, _ := q.enqueueTuple("k", Msg{Text: "D"}); isOwner || !enqueued {
+			t.Fatalf("retire=%v: D isOwner=%v enqueued=%v; want queued behind B", retire, isOwner, enqueued)
+		}
+		dropped := q.DiscardOwned("k", genB)
+		if len(dropped) != 2 || dropped[0].Text != "C" || dropped[1].Text != "D" {
+			t.Fatalf("retire=%v: owner B discarded %v, want [C D]", retire, dropped)
+		}
+		if isOwner, _, _, _ := q.enqueueTuple("k", Msg{Text: "E"}); !isOwner {
+			t.Fatalf("retire=%v: key still owned after B's discard", retire)
+		}
+	}
+	if dropped := newTestQueue(10, 0).DiscardOwned("never-seen", 1); dropped != nil {
+		t.Fatalf("discard of an unknown key returned %v", dropped)
+	}
+}

@@ -80,7 +80,7 @@ func (o *Orchestrator) ownerLoop(ctx context.Context, key string, gen uint64, fi
 	cur := &inflight{batch: []Msg{first}, first: true}
 	defer func() {
 		if r := recover(); r != nil {
-			o.recovered(ctx, key, owner, cur, r)
+			o.recovered(ctx, key, owner, cur, r, gen)
 		}
 	}()
 
@@ -92,7 +92,7 @@ func (o *Orchestrator) ownerLoop(ctx context.Context, key string, gen uint64, fi
 		cur = nil
 		select {
 		case <-ctx.Done():
-			o.dropQueued(context.WithoutCancel(ctx), key, DropShutdown)
+			o.dropOwned(context.WithoutCancel(ctx), key, gen, DropShutdown)
 			return
 		case <-timer.C:
 		}
@@ -206,17 +206,23 @@ func joinCallbacks(cbs []clievent.EventCallback) clievent.EventCallback {
 }
 
 // recovered handles a panic in a turn on key: it counts and logs it,
-// discards the queue (each dropped origin sees DropPanic), then delivers the
+// discards the queue (each dropped origin sees DropPanic; an owner's gen
+// must still match, so a stale owner leaves a later one's queue alone, while
+// a detached turn passes detachedGen and always discards), then delivers the
 // in-flight turn t's outcome so far (nil between turns), with Panic set, to
 // every receiver not yet finished, running a still-owed AfterTurn in its
 // usual place. A receiver whose Begin was never reached is begun here; one
 // whose Begin or Finish panicked is not called again.
-func (o *Orchestrator) recovered(ctx context.Context, key string, owner Origin, t *inflight, r any) {
+func (o *Orchestrator) recovered(ctx context.Context, key string, owner Origin, t *inflight, r any, gen uint64) {
 	metrics.PanicRecoveredTotal.Add(1)
 	slog.Error("turn: panic recovered", "key", key, "panic", r, "stack", string(debug.Stack()))
 	// The turn's ctx may already be Done (shutdown racing the panic).
 	ctx = context.WithoutCancel(ctx)
-	o.dropQueued(ctx, key, DropPanic)
+	if gen == detachedGen {
+		o.dropQueued(ctx, key, DropPanic)
+	} else {
+		o.dropOwned(ctx, key, gen, DropPanic)
+	}
 	if t == nil {
 		return
 	}

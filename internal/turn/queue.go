@@ -285,6 +285,9 @@ func (q *queue) getOrCreate(key string) *sessionQueue {
 	return sq
 }
 
+// detachedGen is the gen of a turn that holds no key: nextGen never returns it.
+const detachedGen uint64 = 0
+
 // nextGen returns a generation no sessionQueue has held. Caller must hold mu.
 func (q *queue) nextGen() uint64 {
 	q.genSeq++
@@ -394,15 +397,34 @@ func (q *queue) DoneOrDrain(key string, gen uint64) []Msg {
 
 // DiscardAndReturn clears key's queued messages and releases ownership,
 // giving the entry a fresh generation so a stale owner loop stops on its next
-// DoneOrDrain (/new, /clear, panic, shutdown). The entry is kept so the next
-// Enqueue reuses its ring; deleting it would be equally safe. The discarded
-// messages come back FIFO so each origin can be told (#2013); nil when
-// nothing was queued.
+// DoneOrDrain (/new, /clear, a detached turn's panic). The entry is kept so
+// the next Enqueue reuses its ring; deleting it would be equally safe. The
+// discarded messages come back FIFO so each origin can be told (#2013); nil
+// when nothing was queued.
 func (q *queue) DiscardAndReturn(key string) []Msg {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	return q.discardLocked(key, q.queues[key])
+}
+
+// DiscardOwned is DiscardAndReturn on behalf of the owner holding gen. It
+// does nothing once key's entry is gone or has another gen: that entry
+// belongs to a later owner, whose queue a stale owner must not discard.
+func (q *queue) DiscardOwned(key string, gen uint64) []Msg {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	sq := q.queues[key]
+	if sq == nil || sq.gen != gen {
+		return nil
+	}
+	return q.discardLocked(key, sq)
+}
+
+// discardLocked is DiscardAndReturn's body; sq is key's entry, nil if
+// none. Caller must hold mu.
+func (q *queue) discardLocked(key string, sq *sessionQueue) []Msg {
 	var dropped []Msg
-	if sq := q.queues[key]; sq != nil {
+	if sq != nil {
 		sq.gen = q.nextGen()
 		dropped = sq.ring.drainAll()
 		sq.busy = false

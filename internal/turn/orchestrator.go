@@ -113,7 +113,17 @@ func (o *Orchestrator) Cleanup(key string) {
 
 // dropQueued discards key's queue and tells each dropped origin why.
 func (o *Orchestrator) dropQueued(ctx context.Context, key string, why DropReason) {
-	for _, m := range o.q.DiscardAndReturn(key) {
+	tellDropped(ctx, key, o.q.DiscardAndReturn(key), why)
+}
+
+// dropOwned is dropQueued for the owner holding gen; it leaves a later
+// owner's queue alone (queue.DiscardOwned).
+func (o *Orchestrator) dropOwned(ctx context.Context, key string, gen uint64, why DropReason) {
+	tellDropped(ctx, key, o.q.DiscardOwned(key, gen), why)
+}
+
+func tellDropped(ctx context.Context, key string, msgs []Msg, why DropReason) {
+	for _, m := range msgs {
 		dropped(ctx, key, m, why)
 	}
 }
