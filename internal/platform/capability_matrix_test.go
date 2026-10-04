@@ -45,7 +45,7 @@ func TestCapabilityMatrixIsPinned(t *testing.T) {
 		"weixin": {
 			InterimMessages: false, SingleUseReplyToken: true,
 			Reactions: false, QuestionCards: false, Runnable: true,
-			ConnState: false,
+			ConnState: true,
 		},
 	}
 	got := platform.CapabilityMatrix(map[string]platform.Platform{
