@@ -126,9 +126,9 @@ func (n *HTTPClient) doRequestHdr(ctx context.Context, method, path string, body
 }
 
 // FetchSessions fetches sessions from the remote node via GET /api/sessions.
-// Once a 200 carried an ETag it asks with If-None-Match and answers a 304
-// from that body; any failure drops the cache so the next poll fetches in
-// full. The returned maps are fresh at the top level and the caller may set
+// Once a 200 carried a content ETag it asks with If-None-Match and answers
+// a 304 from that body; any failure drops the cache so the next poll fetches
+// in full. The returned maps are fresh at the top level and the caller may set
 // keys on them; nested values are shared with the cache and must not be mutated.
 func (n *HTTPClient) FetchSessions(ctx context.Context) ([]map[string]any, error) {
 	n.sessMu.Lock()
@@ -173,11 +173,22 @@ func (n *HTTPClient) fetchSessions(ctx context.Context, hdr http.Header, cached 
 	return result.Sessions, nil
 }
 
-// storeSessions keeps sessions only under a validator; a body without an
-// ETag is never answered by a 304, so there is nothing to keep it for.
+// SessionsContentETagPrefix opens every /api/sessions ETag that hashes the
+// whole body (dashboard sessionsBodyETag). Older nodes send a version ETag
+// that holds still while session state changes, so only this shape is
+// trusted for If-None-Match.
+const SessionsContentETagPrefix = `W/"b`
+
+// isSessionsContentETag reports whether etag is a body-hash validator.
+func isSessionsContentETag(etag string) bool {
+	return strings.HasPrefix(etag, SessionsContentETagPrefix)
+}
+
+// storeSessions keeps sessions only under a content validator; any other
+// body is fetched unconditionally next time, so there is nothing to keep.
 func (n *HTTPClient) storeSessions(etag string, sessions []map[string]any) {
-	if etag == "" {
-		sessions = nil
+	if !isSessionsContentETag(etag) {
+		etag, sessions = "", nil
 	}
 	n.sessMu.Lock()
 	n.sessETag, n.sessCache = etag, sessions
