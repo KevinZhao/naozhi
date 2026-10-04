@@ -500,7 +500,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	nowMS := now.UnixMilli()
 	p.tools.observe(ev, now)
 	if ev.Type == "result" {
-		ev.Aborted = p.turn.abortRequested.Swap(false)
+		ev.Aborted = p.turn.abortRequested.take()
 	}
 
 	// ---- Passthrough mode hooks ----

@@ -136,6 +136,12 @@ func TestAbortMarker_StampsTheAbortedTurnOnly(t *testing.T) {
 		abort func(*testing.T, *passthroughShim) error
 	}{
 		{"Interrupt", func(_ *testing.T, sh *passthroughShim) error { sh.proc.Interrupt(); return nil }},
+		// A second Stop on the same turn still yields one result.
+		{"Interrupt twice", func(_ *testing.T, sh *passthroughShim) error {
+			sh.proc.Interrupt()
+			sh.proc.Interrupt()
+			return nil
+		}},
 		{"InterruptViaControl", func(t *testing.T, sh *passthroughShim) error {
 			err := sh.proc.InterruptViaControl()
 			// The control_request is a stdin write; take it so the next
@@ -199,13 +205,53 @@ func TestAbortMarker_PriorityNowWhenIdleArmsNothing(t *testing.T) {
 	go sh.proc.readLoop()
 
 	urgent, uuid := startTurn(t, sh, "hello", "now")
-	if sh.proc.turn.abortRequested.Load() {
+	if sh.proc.turn.abortRequested.armed() {
 		t.Error("an idle priority:\"now\" send armed the abort marker")
 	}
 	playTurnStart(t, sh, uuid, "hello")
 	sh.srv.SendStdout(abortedResult)
 	if r := recvResult(t, urgent); r.Aborted {
 		t.Error("a turn nobody aborted is marked Aborted")
+	}
+}
+
+// An Interrupt outside a running turn aborts nothing: while spawning it is
+// never sent, and when idle there is no turn for it to stop.
+func TestAbortMarker_InterruptOutsideATurnArmsNothing(t *testing.T) {
+	for _, st := range []ProcessState{StateSpawning, StateReady} {
+		t.Run(st.String(), func(t *testing.T) {
+			p, srv := shimTestPair(&ClaudeProtocol{})
+			startServerDrain(srv)
+			p.turn.mu.Lock()
+			p.turn.state = st
+			p.turn.mu.Unlock()
+
+			p.Interrupt()
+			if p.turn.abortRequested.armed() {
+				t.Errorf("Interrupt in %v armed the abort marker", st)
+			}
+		})
+	}
+}
+
+// Each arm has its own rollback, so one abort's failed send cannot disarm
+// another that reached the CLI; a result takes every pending arm at once.
+func TestAbortMarker_Counts(t *testing.T) {
+	t.Parallel()
+	var m abortMarker
+	m.arm()
+	m.arm()
+	m.disarm()
+	if !m.take() {
+		t.Error("a rolled-back arm disarmed a concurrent one that was sent")
+	}
+	if m.take() {
+		t.Error("a result left arms behind for the next result")
+	}
+	m.disarm()
+	m.arm()
+	if !m.take() {
+		t.Error("a rollback after the result took the arm went below zero and swallowed the next arm")
 	}
 }
 
@@ -228,7 +274,7 @@ func TestAbortMarker_LegacyBackendCarriesItOnEventCh(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("no result reached eventCh")
 	}
-	if p.turn.abortRequested.Load() {
+	if p.turn.abortRequested.armed() {
 		t.Error("the marker outlived the result it was stamped on")
 	}
 }
@@ -241,7 +287,7 @@ func TestAbortMarker_FailedInterruptRollsBack(t *testing.T) {
 	srv.conn.Close()
 
 	p.Interrupt()
-	if p.turn.abortRequested.Load() {
+	if p.turn.abortRequested.armed() {
 		t.Error("Interrupt whose send failed left abortRequested set")
 	}
 }
@@ -255,7 +301,7 @@ func TestAbortMarker_FailedPriorityNowWriteRollsBack(t *testing.T) {
 	if _, err := p.SendPassthrough(context.Background(), "stop", nil, nil, "now"); err == nil {
 		t.Fatal("SendPassthrough over a closed shim succeeded")
 	}
-	if p.turn.abortRequested.Load() {
+	if p.turn.abortRequested.armed() {
 		t.Error("a priority:\"now\" write that failed left abortRequested set")
 	}
 }
@@ -287,7 +333,7 @@ func TestAbortMarker_PriorityNowArmsForEveryTurnInFlight(t *testing.T) {
 			// Never answered: the shim closes under it, so its error is expected.
 			go func() { _, _ = sh.proc.SendPassthrough(context.Background(), "stop that", nil, nil, "now") }()
 			sh.expectWrite(t, 2*time.Second)
-			if !sh.proc.turn.abortRequested.Load() {
+			if !sh.proc.turn.abortRequested.armed() {
 				t.Error("a priority:\"now\" send with a turn in flight did not arm the abort marker")
 			}
 		})

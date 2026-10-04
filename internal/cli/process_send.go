@@ -227,7 +227,7 @@ func (p *Process) clearInflightFlags() {
 	p.turn.mu.Lock()
 	p.turn.interrupted.Store(false)
 	p.turn.interruptedRun.Store(false)
-	p.turn.abortRequested.Store(false)
+	p.turn.abortRequested.clear()
 	p.turn.mu.Unlock()
 }
 
@@ -275,7 +275,8 @@ func (p *Process) Interrupt() {
 	if state == StateRunning {
 		p.turn.interruptedRun.Store(true)
 		// Before the send, so the abort's result cannot be read ahead of it.
-		aSet = p.turn.abortRequested.CompareAndSwap(false, true)
+		p.turn.abortRequested.arm()
+		aSet = true
 	}
 	p.turn.mu.Unlock()
 	// While spawning the CLI's REPL isn't up and silently drops SIGINT: skip the
@@ -287,7 +288,7 @@ func (p *Process) Interrupt() {
 	if err := p.link.send(shimClientMsg{Type: "interrupt"}); err != nil {
 		slog.Warn("interrupt failed", "err", err)
 		if aSet {
-			p.turn.abortRequested.Store(false)
+			p.turn.abortRequested.disarm()
 		}
 	}
 }
@@ -313,7 +314,8 @@ func (p *Process) InterruptViaControl() error {
 	if state == StateRunning {
 		iSet = p.turn.interrupted.CompareAndSwap(false, true)
 		rSet = p.turn.interruptedRun.CompareAndSwap(false, true)
-		aSet = p.turn.abortRequested.CompareAndSwap(false, true)
+		p.turn.abortRequested.arm()
+		aSet = true
 	}
 	p.turn.mu.Unlock()
 	// Do NOT write the control_request when idle: the CLI would buffer it for
@@ -335,7 +337,7 @@ func (p *Process) InterruptViaControl() error {
 			p.turn.interruptedRun.Store(false)
 		}
 		if aSet {
-			p.turn.abortRequested.Store(false)
+			p.turn.abortRequested.disarm()
 		}
 		p.turn.mu.Unlock()
 		return fmt.Errorf("write interrupt control_request: %w", err)

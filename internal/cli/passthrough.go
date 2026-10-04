@@ -94,7 +94,8 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 		}
 		// "now" aborts the turn in flight, if any: one is Running or still owed.
 		if priority == "now" && (running || len(p.slots.pending) > 0) {
-			aborts = p.turn.abortRequested.CompareAndSwap(false, true)
+			p.turn.abortRequested.arm()
+			aborts = true
 		}
 		p.slots.pending = append(p.slots.pending, slot)
 		p.slots.mu.Unlock()
@@ -112,7 +113,7 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 		// between the Alive() check and the write.
 		p.removeSlotByID(slot.id)
 		if aborts {
-			p.turn.abortRequested.Store(false)
+			p.turn.abortRequested.disarm()
 		}
 		if !p.Alive() {
 			return nil, clierr.ErrProcessExited

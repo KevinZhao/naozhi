@@ -40,10 +40,10 @@ type turnState struct {
 	interrupted    atomic.Bool // set by Interrupt(), cleared by next Send()
 	interruptedRun atomic.Bool // true when Interrupt() was called while Running
 	// abortRequested: naozhi asked the in-flight turn to stop (Interrupt,
-	// InterruptViaControl, a priority:"now" passthrough send). readLoop swaps
+	// InterruptViaControl, a priority:"now" passthrough send). readLoop takes
 	// it onto the next result as Event.Aborted, so a consumer can tell that
 	// abort's error_during_execution from a real failure.
-	abortRequested atomic.Bool
+	abortRequested abortMarker
 	// reconnectedMidTurn: SpawnReconnect found a turn in flight, so a result
 	// with no active Send ends that turn (one-shot, CAS-consumed).
 	reconnectedMidTurn atomic.Bool
@@ -134,3 +134,27 @@ type sendSlots struct {
 	// is empty.
 	turnStartedAt time.Time
 }
+
+// abortMarker counts abort requests not yet matched by a result. Each arm has
+// its own disarm, so a failed send rolls back only itself. A result takes the
+// whole count: repeated aborts of one turn yield one result, and a leftover
+// count would mark a later real failure Aborted. Hence at most one result per
+// read is marked: if a second abort lands before the first abort's result is
+// read, the second aborted turn's result is not marked.
+type abortMarker struct{ n atomic.Int32 }
+
+func (m *abortMarker) arm() { m.n.Add(1) }
+
+// disarm undoes one arm, never below zero: a result may already have taken it.
+func (m *abortMarker) disarm() {
+	for {
+		n := m.n.Load()
+		if n <= 0 || m.n.CompareAndSwap(n, n-1) {
+			return
+		}
+	}
+}
+
+func (m *abortMarker) take() bool  { return m.n.Swap(0) > 0 }
+func (m *abortMarker) clear()      { m.n.Store(0) }
+func (m *abortMarker) armed() bool { return m.n.Load() > 0 }
