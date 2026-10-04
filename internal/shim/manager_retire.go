@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -19,6 +20,9 @@ const (
 	retireDialBudget = 3 * time.Second
 	// retireSocketWait is how long a retired shim gets to unlink its socket.
 	retireSocketWait = 2 * time.Second
+	// retireLockPoll is the retry interval while a Reconnect of the same key
+	// holds the per-key mutex.
+	retireLockPoll = 10 * time.Millisecond
 )
 
 // RetireDeadShim shuts down the shim bound to key's socket when that shim's
@@ -27,7 +31,9 @@ const (
 // alive (or does not say) is only probed and left running.
 func (m *Manager) RetireDeadShim(ctx context.Context, key string) (bool, error) {
 	rmu := m.reconnectKey(key)
-	rmu.Lock()
+	if err := lockWithContext(ctx, rmu); err != nil {
+		return false, fmt.Errorf("wait for reconnect of the same key: %w", err)
+	}
 	defer rmu.Unlock()
 
 	// MaxInt64: the buffer is never replayed, the probe only needs the hello.
@@ -46,6 +52,27 @@ func (m *Manager) RetireDeadShim(ctx context.Context, key string) (bool, error) 
 		return false, fmt.Errorf("socket %s still bound %v after shutdown", handle.State.Socket, retireSocketWait)
 	}
 	return true, nil
+}
+
+// lockWithContext acquires mu or gives up once ctx ends, so a Reconnect of the
+// same key (bounded only by its own dial and hello limits) cannot stretch the
+// retire past ctx's budget.
+func lockWithContext(ctx context.Context, mu *sync.Mutex) error {
+	if mu.TryLock() {
+		return nil
+	}
+	t := time.NewTicker(retireLockPoll)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+			if mu.TryLock() {
+				return nil
+			}
+		}
+	}
 }
 
 // prepareSocketForSpawn is StartShim's pre-bind step. When the socket file

@@ -282,6 +282,72 @@ func TestRetireDeadShim_SocketNeverUnlinked(t *testing.T) {
 	}
 }
 
+func TestRetireDeadShim_GivesUpWhileSameKeyReconnectHoldsLock(t *testing.T) {
+	const key = "feishu:direct:retire-locked:general"
+	f := newRetireFake(t, key, boolPtr(false))
+	f.serve()
+	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
+	writeRetireState(t, m, key, f, f.token, 0)
+
+	rmu := m.reconnectKey(key)
+	rmu.Lock()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	type result struct {
+		retired bool
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		retired, err := m.RetireDeadShim(ctx, key)
+		done <- result{retired, err}
+	}()
+	var got result
+	select {
+	case got = <-done:
+		rmu.Unlock()
+	case <-time.After(2 * time.Second):
+		rmu.Unlock()
+		<-done
+		t.Fatal("RetireDeadShim waited past its ctx for the per-key reconnect mutex")
+	}
+	if got.retired || !errors.Is(got.err, context.DeadlineExceeded) {
+		t.Fatalf("RetireDeadShim = (%v, %v), want (false, DeadlineExceeded)", got.retired, got.err)
+	}
+	if msgs := f.messages(); len(msgs) != 0 {
+		t.Errorf("fake received %+v while the key was locked, want nothing", msgs)
+	}
+}
+
+func TestListenShimSocket_CloseKeepsSuccessorSocket(t *testing.T) {
+	path := filepath.Join(shortSocketDir(t), "s.sock")
+	old, err := listenShimSocket(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Run's teardown order: remove the path, then close the listener. A
+	// respawned shim may bind the path in between.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	next, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer next.Close()
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("successor socket gone after the old listener closed: %v", err)
+	}
+	conn, err := net.DialTimeout("unix", path, time.Second)
+	if err != nil {
+		t.Fatalf("dial successor: %v", err)
+	}
+	conn.Close()
+}
+
 func TestPrepareSocketForSpawn(t *testing.T) {
 	t.Run("dead CLI is retired", func(t *testing.T) {
 		const key = "feishu:direct:prepare-dead:general"
@@ -409,7 +475,7 @@ func TestRetireDeadShim_RealShimServerAfterCLIExit(t *testing.T) {
 				t.Fatalf("startCLI: %v", err)
 			}
 			cli.wait() //nolint:errcheck
-			ln, err := net.Listen("unix", socketPath)
+			ln, err := listenShimSocket(socketPath)
 			if err != nil {
 				t.Fatal(err)
 			}

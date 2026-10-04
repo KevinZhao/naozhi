@@ -98,7 +98,7 @@ func Run(cfg Config) error {
 
 	// umask 0177 so the socket file is created 0600 atomically.
 	oldUmask := setUmask(0177)
-	listener, err := net.Listen("unix", cfg.SocketPath)
+	listener, err := listenShimSocket(cfg.SocketPath)
 	setUmask(oldUmask)
 	if err != nil {
 		cli.kill()
