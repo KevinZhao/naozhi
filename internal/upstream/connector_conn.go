@@ -49,6 +49,10 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	}
 	activeSubs := map[string]func(){} // key → cancel func
 	subGen := map[string]uint64{}     // key → generation counter
+	// served holds the keys the primary subscribed here and has not
+	// unsubscribed. A served key whose session is gone (a reset) gets no
+	// subscribe_error: a primary drops the key's browsers on one.
+	served := map[string]struct{}{}
 	// 256 slots absorb hub-wide resets (Router Cleanup sweeping many sessions
 	// while ReadJSON is blocked) without dropping exit notes.
 	subExited := make(chan subExitNote, 256)
@@ -198,6 +202,10 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 			}
 			sess := c.router.SessionFor(key)
 			if sess == nil {
+				if _, ok := served[key]; ok {
+					slog.Debug("connector subscribe: served key has no session, awaiting the next subscribe", "key", key)
+					break
+				}
 				if err := writeJSON(node.ReverseMsg{Type: "subscribe_error", Key: key, Error: "session not found"}); err != nil {
 					slog.Debug("connector write subscribe_error", "key", key, "err", err)
 				}
@@ -205,6 +213,7 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 			}
 			notify, cancel := sess.SubscribeEvents()
 			activeSubs[key] = cancel
+			served[key] = struct{}{}
 			subGen[key]++
 			myGen := subGen[key]
 			if err := writeJSON(node.ReverseMsg{Type: "subscribed", Key: key}); err != nil {
@@ -236,6 +245,7 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 				cancel()
 				delete(activeSubs, key)
 			}
+			delete(served, key)
 			if err := writeJSON(node.ReverseMsg{Type: "unsubscribed", Key: key}); err != nil {
 				slog.Debug("connector write unsubscribed", "key", key, "err", err)
 			}

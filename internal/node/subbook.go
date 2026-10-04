@@ -5,16 +5,19 @@ import "sync"
 // subBook is the subscription ledger shared by wsRelay and ReverseConn: the
 // local sinks holding each remote session key, and the newest event time
 // seen per key (the `after` a resubscribe sends so the remote does not replay
-// full history). Not goroutine-safe; the owning conn's lock guards it.
+// full history), and the keys the remote has acked a subscribe for. Not
+// goroutine-safe; the owning conn's lock guards it.
 type subBook struct {
 	subs      map[string][]EventSink // remote session key -> local sinks
 	lastEvent map[string]int64       // remote session key -> newest event unix ms
+	confirmed map[string]struct{}    // keys the remote has answered `subscribed` for
 }
 
 func newSubBook() subBook {
 	return subBook{
 		subs:      make(map[string][]EventSink),
 		lastEvent: make(map[string]int64),
+		confirmed: make(map[string]struct{}),
 	}
 }
 
@@ -42,7 +45,7 @@ func (b *subBook) add(c EventSink, key string, after int64) (first bool) {
 func (b *subBook) remove(c EventSink, key string) (empty bool) {
 	empty = removeSub(b.subs, key, c)
 	if empty {
-		delete(b.lastEvent, key)
+		b.forget(key)
 	}
 	return empty
 }
@@ -51,7 +54,7 @@ func (b *subBook) remove(c EventSink, key string) (empty bool) {
 func (b *subBook) removeAll(c EventSink) []string {
 	emptyKeys := removeSubAll(b.subs, c)
 	for _, key := range emptyKeys {
-		delete(b.lastEvent, key)
+		b.forget(key)
 	}
 	return emptyKeys
 }
@@ -59,13 +62,37 @@ func (b *subBook) removeAll(c EventSink) []string {
 // drop forgets key entirely, sinks and watermark.
 func (b *subBook) drop(key string) {
 	delete(b.subs, key)
+	b.forget(key)
+}
+
+// forget clears what the book keeps about key besides its sinks.
+func (b *subBook) forget(key string) {
 	delete(b.lastEvent, key)
+	delete(b.confirmed, key)
+}
+
+// confirm records that the remote acked a subscribe for a held key.
+func (b *subBook) confirm(key string) {
+	if b.has(key) {
+		b.confirmed[key] = struct{}{}
+	}
+}
+
+// subscribeFailed handles a remote's subscribe_error: a key it never acked
+// is dropped, so the next sink subscribes on the remote again. A confirmed
+// key keeps its sinks: its session went away (a reset), and the subscribe
+// after the next send brings the new one to them.
+func (b *subBook) subscribeFailed(key string) {
+	if _, ok := b.confirmed[key]; !ok {
+		b.drop(key)
+	}
 }
 
 // reset forgets every key.
 func (b *subBook) reset() {
 	clear(b.subs)
 	clear(b.lastEvent)
+	clear(b.confirmed)
 }
 
 // observe advances key's watermark to t when t is newer. Keys without a sink
@@ -87,6 +114,9 @@ func (b *subBook) absorb(src *subBook) {
 		after := src.lastEvent[key]
 		if b.has(key) {
 			after = min(after, b.lastEvent[key])
+		}
+		if _, ok := src.confirmed[key]; ok {
+			b.confirmed[key] = struct{}{}
 		}
 		for _, s := range sinks {
 			if !containsSink(b.subs[key], s) {

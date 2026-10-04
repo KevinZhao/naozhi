@@ -44,6 +44,9 @@ const (
 	// server shutting down, so the message was not buffered — the client
 	// should retry.
 	sendAckBusy sendAckStatus = "busy"
+	// sendAckReset: the text was a bare /new or /clear; the key has no
+	// session until the next send.
+	sendAckReset sendAckStatus = "reset"
 )
 
 // errUrgentUsage rejects a bare /urgent (#3004 分叉 6); asyncErrorMessage
