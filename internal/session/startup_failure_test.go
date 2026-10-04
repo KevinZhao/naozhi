@@ -10,12 +10,14 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/session/spawnpool"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -282,5 +284,250 @@ func TestGetOrCreate_StartupBreakerLogsNoResume(t *testing.T) {
 	}
 	if out := buf.String(); strings.Contains(out, "resuming") || !strings.Contains(out, "respawn paused") {
 		t.Errorf("log = %q; want the pause and no resuming line", out)
+	}
+}
+
+// errInitAuth is a spawn whose CLI failed the Init handshake, as Spawn
+// returns it.
+var errInitAuth = fmt.Errorf("%w: %w", clierr.ErrSpawnInit, &clierr.ProcessExitedError{Code: 1, Class: clierr.ExitAuth})
+
+// spawnRun reads key's run of failed spawns.
+func spawnRun(r *Router, key string) (f spawnpool.StartupFailure, ok bool) {
+	r.ss.Update(func(tx sessTx) { f, ok = tx.Ext().spawns.StartupFailure(key) })
+	return f, ok
+}
+
+// ageSpawnRun moves key's run of failed spawns d into the past.
+func ageSpawnRun(r *Router, key string, d time.Duration) {
+	r.ss.Update(func(tx sessTx) {
+		f, _ := tx.Ext().spawns.StartupFailure(key)
+		f.At = f.At.Add(-d)
+		tx.Ext().spawns.NoteStartupFailure(key, f)
+	})
+}
+
+// newSpawnFailRouter is a router whose spawns fail the Init handshake with
+// *spawnErr until it is set to nil; spawns are counted.
+func newSpawnFailRouter(t *testing.T) (r *Router, spawnErr *error, spawns *int) {
+	t.Helper()
+	r = newResumeGuardRouter(t)
+	spawnErr, spawns = new(error), new(int)
+	*spawnErr = errInitAuth
+	r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) {
+		*spawns++
+		if *spawnErr != nil {
+			return nil, *spawnErr
+		}
+		return newIdleProc(), nil
+	}
+	return r, spawnErr, spawns
+}
+
+// A key whose spawns keep failing the Init handshake pauses like one whose
+// CLI dies at startup, with no session in the table to carry the streak; the
+// session that finally starts inherits it.
+func TestGetOrCreate_SpawnInitFailuresPauseANewKey(t *testing.T) {
+	t.Parallel()
+	r, spawnErr, spawns := newSpawnFailRouter(t)
+	get := func() error {
+		_, _, err := r.GetOrCreate(context.Background(), sfKey, AgentOpts{})
+		return err
+	}
+	for i := 1; i <= 2; i++ {
+		if err := get(); !errors.Is(err, clierr.ErrSpawnInit) || *spawns != i {
+			t.Fatalf("failure %d: err = %v after %d spawns; want the spawn's error", i, err, *spawns)
+		}
+	}
+	if err := get(); !errors.Is(err, ErrCLIStartupFailed) || *spawns != 2 {
+		t.Fatalf("after two failures: err = %v after %d spawns; want ErrCLIStartupFailed without a spawn", err, *spawns)
+	}
+	ageSpawnRun(r, sfKey, 31*time.Second)
+	if err := get(); !errors.Is(err, clierr.ErrSpawnInit) || *spawns != 3 {
+		t.Fatalf("after the cooldown: err = %v after %d spawns; want one more spawn", err, *spawns)
+	}
+	ageSpawnRun(r, sfKey, 31*time.Second)
+	if err := get(); !errors.Is(err, ErrCLIStartupFailed) || !strings.Contains(err.Error(), "3 in a row") || *spawns != 3 {
+		t.Fatalf("third failure 31s ago: err = %v after %d spawns; want a longer pause", err, *spawns)
+	}
+	ageSpawnRun(r, sfKey, 30*time.Second)
+	*spawnErr = nil
+	s, _, err := r.GetOrCreate(context.Background(), sfKey, AgentOpts{})
+	if err != nil || *spawns != 4 {
+		t.Fatalf("after the longer cooldown: err = %v after %d spawns; want a session", err, *spawns)
+	}
+	if got := s.startupFails.Load(); got != 3 {
+		t.Errorf("session startupFails = %d, want the run's 3", got)
+	}
+	if f, ok := spawnRun(r, sfKey); ok {
+		t.Errorf("run after a started session = %+v, want none", f)
+	}
+}
+
+// A failed spawn continues the streak of the dead entry's process, so a CLI
+// alternating between dying at startup and failing Init keeps backing off.
+func TestGetOrCreate_SpawnInitFailureContinuesTheEntrysStreak(t *testing.T) {
+	t.Parallel()
+	r, dead, _ := newStartupFailRouter(t, newStartupFailedProc(clierr.ExitAuth, time.Now().Add(-31*time.Second)))
+	dead.startupFails.Store(1)
+	spawns := 0
+	r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) {
+		spawns++
+		return nil, errInitAuth
+	}
+	if _, _, err := r.GetOrCreate(context.Background(), sfKey, AgentOpts{}); !errors.Is(err, clierr.ErrSpawnInit) {
+		t.Fatalf("GetOrCreate err = %v, want the spawn's error", err)
+	}
+	_, _, err := r.GetOrCreate(context.Background(), sfKey, AgentOpts{})
+	if !errors.Is(err, ErrCLIStartupFailed) || !strings.Contains(err.Error(), "3 in a row") || spawns != 1 {
+		t.Fatalf("GetOrCreate err = %v after %d spawns; want a pause 3 in a row after one spawn", err, spawns)
+	}
+	if cur := r.ss.Load(sfKey); cur != dead {
+		t.Errorf("the key holds %p, want the dead entry %p kept", cur, dead)
+	}
+}
+
+// /new lifts the pause at once, on a key with no session too.
+func TestGetOrCreate_SpawnInitPauseLiftedByReset(t *testing.T) {
+	t.Parallel()
+	get := func(r *Router) (*ManagedSession, error) {
+		s, _, err := r.GetOrCreate(context.Background(), sfKey, AgentOpts{})
+		return s, err
+	}
+	// Each reset returns the session the next message gets.
+	resets := map[string]func(r *Router) (*ManagedSession, error){
+		"Reset":                   func(r *Router) (*ManagedSession, error) { r.Reset(sfKey); return get(r) },
+		"ResetAndDiscardOverride": func(r *Router) (*ManagedSession, error) { r.ResetAndDiscardOverride(sfKey); return get(r) },
+		"ResetAndRecreate": func(r *Router) (*ManagedSession, error) {
+			return r.ResetAndRecreate(context.Background(), sfKey, AgentOpts{})
+		},
+	}
+	for name, reset := range resets {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r, spawnErr, spawns := newSpawnFailRouter(t)
+			for range 2 {
+				_, _ = get(r)
+			}
+			if _, ok := spawnRun(r, sfKey); !ok || r.ss.Load(sfKey) != nil {
+				t.Fatal("setup: want a run of failed spawns and no session")
+			}
+			*spawnErr = nil
+			s, err := reset(r)
+			if err != nil || *spawns != 3 || s.startupFails.Load() != 0 {
+				t.Fatalf("after %s: err = %v after %d spawns; want a third spawn and a session with no streak", name, err, *spawns)
+			}
+		})
+	}
+}
+
+// Only a failed Init handshake on a live call counts: a rejected resume is
+// retried fresh, and that retry's failure is the one counted; an abandoned
+// call, a key another path brought up meanwhile, or a failure before the CLI
+// runs says nothing about the CLI.
+func TestGetOrCreate_SpawnFailuresThatDoNotCount(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // the rejected resume's retry waits on the key's socket
+	t.Run("rejected resume", func(t *testing.T) {
+		r, _, resumes := newStartupFailRouter(t, newDeadProc())
+		rejected := fmt.Errorf("%w: %w", clierr.ErrSpawnInit, clierr.ErrResumeRejected)
+		r.spawn.hook = func(_ context.Context, opts cli.SpawnOptions) (processIface, error) {
+			*resumes = append(*resumes, opts.ResumeID)
+			if opts.ResumeID != "" {
+				return nil, rejected
+			}
+			return nil, errInitAuth
+		}
+		_, _, _ = r.GetOrCreate(context.Background(), sfKey, AgentOpts{})
+		if f, _ := spawnRun(r, sfKey); f.Streak != 1 || !slices.Equal(*resumes, []string{sfSID, ""}) {
+			t.Errorf("run streak = %d after spawns %q; want 1, for the fresh retry only", f.Streak, *resumes)
+		}
+	})
+	t.Run("cancelled call", func(t *testing.T) {
+		r, _, _ := newSpawnFailRouter(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) {
+			cancel()
+			return nil, errInitAuth
+		}
+		_, _, _ = r.GetOrCreate(ctx, sfKey, AgentOpts{})
+		if f, ok := spawnRun(r, sfKey); ok {
+			t.Errorf("run = %+v, want none", f)
+		}
+	})
+	t.Run("a live session installed meanwhile", func(t *testing.T) {
+		r, _, _ := newSpawnFailRouter(t)
+		r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) {
+			injectSession(r, sfKey, newIdleProc())
+			return nil, errInitAuth
+		}
+		_, _, _ = r.GetOrCreate(context.Background(), sfKey, AgentOpts{})
+		if f, ok := spawnRun(r, sfKey); ok {
+			t.Errorf("run = %+v, want none", f)
+		}
+	})
+	t.Run("shim start failure", func(t *testing.T) {
+		r, spawnErr, _ := newSpawnFailRouter(t)
+		*spawnErr = errors.New("start shim: shim already listening: refusing to clobber")
+		_, _, _ = r.GetOrCreate(context.Background(), sfKey, AgentOpts{})
+		if f, ok := spawnRun(r, sfKey); ok {
+			t.Errorf("run = %+v, want none", f)
+		}
+	})
+}
+
+// Callers parked on a failing spawn wake to the pause it recorded instead of
+// each spawning again.
+func TestGetOrCreate_SpawnInitFailurePausesItsWaiters(t *testing.T) {
+	t.Parallel()
+	r := newResumeGuardRouter(t)
+	r.ss.Update(func(tx sessTx) {
+		tx.Ext().spawns.NoteStartupFailure(sfKey, spawnpool.StartupFailure{Streak: 1, At: time.Now()})
+	})
+	started, release := make(chan struct{}), make(chan struct{})
+	var spawns atomic.Int32
+	r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) {
+		if spawns.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return nil, errInitAuth
+	}
+	const n = 8
+	errs := make(chan error, n)
+	get := func() {
+		_, _, err := r.GetOrCreate(context.Background(), sfKey, AgentOpts{})
+		errs <- err
+	}
+	go get()
+	<-started
+	for range n - 1 {
+		go get()
+	}
+	close(release)
+	paused := 0
+	for range n {
+		if errors.Is(<-errs, ErrCLIStartupFailed) {
+			paused++
+		}
+	}
+	if spawns.Load() != 1 || paused != n-1 {
+		t.Errorf("%d spawns, %d of %d callers paused; want one spawn and every other caller paused", spawns.Load(), paused, n)
+	}
+}
+
+// Cleanup drops the run of a key that was not retried for two maximum
+// cooldowns.
+func TestCleanup_PrunesStaleSpawnRuns(t *testing.T) {
+	t.Parallel()
+	r := newResumeGuardRouter(t)
+	r.ss.Update(func(tx sessTx) {
+		tx.Ext().spawns.NoteStartupFailure("stale", spawnpool.StartupFailure{Streak: 9, At: time.Now().Add(-2*startupCooldownMax - time.Minute)})
+		tx.Ext().spawns.NoteStartupFailure("recent", spawnpool.StartupFailure{Streak: 9, At: time.Now().Add(-startupCooldownMax)})
+	})
+	r.Cleanup()
+	if _, ok := spawnRun(r, "stale"); ok {
+		t.Error("stale run survived Cleanup")
+	}
+	if _, ok := spawnRun(r, "recent"); !ok {
+		t.Error("Cleanup pruned a run still within two maximum cooldowns")
 	}
 }

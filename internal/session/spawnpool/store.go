@@ -3,16 +3,20 @@
 // maxProcs capacity check, the per-key in-flight spawn done-channels that
 // coalesce concurrent GetOrCreate callers and stop ReconnectShims from
 // treating a half-spawned shim as an orphan, the per-key shim-stuck flags
-// that classify the next spawn failure as ErrShimStuck. Fields are private so the
-// compiler enforces access through the method surface (#2495).
+// that classify the next spawn failure as ErrShimStuck, and the per-key runs
+// of failed Init handshakes the startup breaker reads. Fields are private so
+// the compiler enforces access through the method surface (#2495).
 //
 // Lock contract: Store carries NO lock. The router keeps it in its session
 // table's extension state, so every method runs inside a table transaction:
 // the pending count is added to the live-session count inside the capacity
 // check, in-flight keys are checked against the live session index by
-// reconnect and by GetOrCreate's wait loop, and the stuck flag is consumed
-// in the critical section that enters spawnSession.
+// reconnect and by GetOrCreate's wait loop, the stuck flag is consumed in
+// the critical section that enters spawnSession, and a failed spawn's record
+// is written before its done-channel closes, so a woken waiter sees it.
 package spawnpool
+
+import "time"
 
 // Store is the spawn-concurrency container; the zero value is ready to use.
 type Store struct {
@@ -26,6 +30,17 @@ type Store struct {
 	// shimStuck marks keys whose last Reset / ResetAndRecreate saw the shim
 	// socket outlive its wait; consumed by the next spawn for that key.
 	shimStuck map[string]bool
+	// failures maps a key whose last spawns failed their Init handshake to
+	// that run; a spawn that gets past Init and every reset clear it.
+	failures map[string]StartupFailure
+}
+
+// StartupFailure is a key's run of spawns whose CLI failed the Init
+// handshake: Streak in a row, the last at At, Detail naming its cause.
+type StartupFailure struct {
+	Streak int32
+	At     time.Time
+	Detail string
 }
 
 // PendingSpawns returns the number of spawns holding a slot.
@@ -101,3 +116,30 @@ func (s *Store) ShimStuck(key string) bool { return s.shimStuck[key] }
 // ClearShimStuck drops the flag for key; terminal removals call it so a
 // never-respawned key cannot pin an entry for the process lifetime.
 func (s *Store) ClearShimStuck(key string) { delete(s.shimStuck, key) }
+
+// NoteStartupFailure stores f as key's run of failed Init handshakes.
+func (s *Store) NoteStartupFailure(key string, f StartupFailure) {
+	if s.failures == nil {
+		s.failures = make(map[string]StartupFailure)
+	}
+	s.failures[key] = f
+}
+
+// StartupFailure returns key's run of failed Init handshakes.
+func (s *Store) StartupFailure(key string) (StartupFailure, bool) {
+	f, ok := s.failures[key]
+	return f, ok
+}
+
+// ClearStartupFailure drops key's run.
+func (s *Store) ClearStartupFailure(key string) { delete(s.failures, key) }
+
+// PruneStartupFailures drops the runs whose last failure is before cutoff,
+// so a key that is never retried cannot pin an entry.
+func (s *Store) PruneStartupFailures(cutoff time.Time) {
+	for key, f := range s.failures {
+		if f.At.Before(cutoff) {
+			delete(s.failures, key)
+		}
+	}
+}
