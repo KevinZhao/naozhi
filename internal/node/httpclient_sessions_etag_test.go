@@ -272,3 +272,41 @@ func TestCacheManager_HTTPNode304KeepsSessions(t *testing.T) {
 		t.Fatalf("sessions after a 304 poll = %v", sessions["n1"])
 	}
 }
+
+// A v0.1.41 node tags /api/sessions with "v<storeGen>-h<epoch>-n<len>", which
+// stays put while a session flips running -> ready, and answers it with 304.
+// The primary must not send it back, or it keeps showing the stale state.
+func TestHTTPClient_FetchSessions_versionETagNodeStaysUnconditional(t *testing.T) {
+	running := []map[string]any{{"key": "a", "state": "running"}}
+	ready := []map[string]any{{"key": "a", "state": "ready"}}
+	es := &etagSessionsServer{
+		bodies: [][]map[string]any{running, ready},
+		etags:  []string{`"v7-h0-n0"`, `"v7-h0-n0"`},
+	}
+	srv := httptest.NewServer(es)
+	defer srv.Close()
+	c := newTestHTTPClient(t, srv, "")
+
+	fetchOK(t, c)
+	if got := fetchOK(t, c); !reflect.DeepEqual(got, ready) {
+		t.Fatalf("second fetch = %v, want the old node's new state %v", got, ready)
+	}
+	if got := es.sentINM(); !reflect.DeepEqual(got, []string{"", ""}) {
+		t.Fatalf("If-None-Match sent = %q, want none to a version-ETag node", got)
+	}
+}
+
+func TestIsSessionsContentETag(t *testing.T) {
+	for etag, want := range map[string]bool{
+		`W/"b0123456789abcdef0123456789abcdef"`: true,
+		`W/"bX"`:                                true,
+		`"v7-h0-n0"`:                            false,
+		`W/"v7-h0-n0"`:                          false,
+		`"b0123"`:                               false,
+		"":                                      false,
+	} {
+		if got := isSessionsContentETag(etag); got != want {
+			t.Errorf("isSessionsContentETag(%q) = %v, want %v", etag, got, want)
+		}
+	}
+}

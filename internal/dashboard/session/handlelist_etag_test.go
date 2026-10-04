@@ -316,3 +316,43 @@ func TestHandleList_PeerOrderDoesNotMoveETag(t *testing.T) {
 		wantNotModified(t, doList(h, etag), etag)
 	}
 }
+
+// TestHandleList_PrimaryReusesBodyOn304 polls this handler as a primary does:
+// node.HTTPClient trusts only content ETags, so the second poll must be
+// conditional, and its 304 must still yield the sessions.
+func TestHandleList_PrimaryReusesBodyOn304(t *testing.T) {
+	h := newETagTestHandlers(t, newListRouter("feishu:direct:a:general"), noNodeAccessor{})
+	var conditional, notModified atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "" {
+			conditional.Add(1)
+		}
+		sw := &statusWriter{ResponseWriter: w}
+		h.HandleList(sw, r)
+		if sw.code == http.StatusNotModified {
+			notModified.Add(1)
+		}
+	}))
+	defer srv.Close()
+	c := node.NewHTTPClient("peer", srv.URL, "", "Peer")
+
+	for i := range 2 {
+		got, err := c.FetchSessions(context.Background())
+		if err != nil || len(got) != 1 || got[0]["key"] != "feishu:direct:a:general" {
+			t.Fatalf("poll %d = %v, %v; want the one session", i, got, err)
+		}
+	}
+	if c, n := conditional.Load(), notModified.Load(); c != 1 || n != 1 {
+		t.Fatalf("conditional polls = %d, 304s = %d; want the second poll answered by 304", c, n)
+	}
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	code int
+}
+
+func (s *statusWriter) WriteHeader(code int) {
+	s.code = code
+	s.ResponseWriter.WriteHeader(code)
+}
