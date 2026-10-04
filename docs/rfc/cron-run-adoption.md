@@ -93,8 +93,8 @@ cron 收养的闸门（`Router.AdoptInFlight`）只认第一行，且不论闩�
 
 ```go
 if ev.Type == "result" && p.reconnectedMidTurn.CompareAndSwap(true, false) {
-	p.adopted.resolveResult(ev)   // 新增一行；下面的状态转换与 onTurnDone 原样
-	…
+	…                             // 状态转换与 onTurnDone 原样
+	p.adopted.resolveResult(ev)   // 新增一行；放在转换之后，被闩唤醒的人看到的进程已是 Ready
 }
 ```
 

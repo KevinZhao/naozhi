@@ -173,6 +173,8 @@ type Feishu struct {
 	dispatch platform.BoundedDispatch
 	startMu  sync.Mutex
 	started  bool
+	// connState is fed by the websocket transport's lifecycle hooks.
+	connState platform.ConnTracker
 
 	// cleanupWg tracks the cleanupNonces goroutine so Stop() can wait it out.
 	cleanupWg sync.WaitGroup
@@ -241,6 +243,15 @@ func (f *Feishu) Name() string { return "feishu" }
 func (f *Feishu) MaxReplyLength() int { return f.cfg.MaxReplyLen }
 
 func (f *Feishu) SupportsInterimMessages() bool { return true }
+
+// ConnState implements platform.ConnStateReporter. Only the websocket
+// transport holds a connection; webhook mode reports not-observable.
+func (f *Feishu) ConnState() (platform.ConnState, bool) {
+	if f.mode != "websocket" {
+		return platform.ConnState{}, false
+	}
+	return f.connState.Snapshot()
+}
 
 // RegisterRoutes registers webhook routes (only in webhook mode).
 func (f *Feishu) RegisterRoutes(mux *http.ServeMux, handler platform.MessageHandler) {

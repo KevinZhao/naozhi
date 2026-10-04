@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -304,6 +305,58 @@ func TestAdoptedTurn_CLIExitResolvesInsteadOfHanging(t *testing.T) {
 	}
 	if p.AdoptedTurnPending() {
 		t.Error("still pending after the outcome was latched")
+	}
+}
+
+// TestAdoptedTurn_LatchedOnlyOnceTheTurnHasEnded: the caller the latch wakes may
+// act on the process at once — cron adoption releases an idle CLI, and the
+// release skips one still Running. So the outcome must not become readable until
+// the turn is over: State Ready and onTurnDone fired. onTurnDone holds readLoop
+// here so the check sees the gap itself instead of racing past it.
+func TestAdoptedTurn_LatchedOnlyOnceTheTurnHasEnded(t *testing.T) {
+	p, srv := shimTestPair(&ClaudeProtocol{})
+	startServerDrain(srv)
+	defer p.Kill()
+
+	type seen struct {
+		pending bool
+		state   ProcessState
+	}
+	atTurnDone := make(chan seen, 1)
+	release := make(chan struct{})
+	var first, unblock sync.Once
+	defer unblock.Do(func() { close(release) })
+	p.SetOnTurnDone(func() {
+		first.Do(func() {
+			atTurnDone <- seen{pending: p.AdoptedTurnPending(), state: p.State()}
+			<-release
+		})
+	})
+
+	armReconnectMidTurn(p)
+	p.startReadLoop()
+	srv.SendStdout(`{"type":"result","subtype":"success","result":"done","session_id":"s1"}`)
+
+	select {
+	case got := <-atTurnDone:
+		if !got.pending {
+			t.Error("outcome latched before onTurnDone fired; a caller woken by it can find the turn not yet ended")
+		}
+		if got.state != StateReady {
+			t.Errorf("State at onTurnDone = %v, want StateReady", got.state)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("onTurnDone not called for the adopted turn's result")
+	}
+	unblock.Do(func() { close(release) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := p.AdoptedOutcome(ctx); err != nil {
+		t.Fatalf("AdoptedOutcome: %v", err)
+	}
+	if p.IsRunning() {
+		t.Error("process still Running once the adopted outcome is readable")
 	}
 }
 

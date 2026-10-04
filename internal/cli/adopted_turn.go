@@ -116,12 +116,14 @@ func (p *Process) applyReconnectVerdict(midTurn bool, finished *clievent.Event) 
 //     never reaches here. SendPassthrough has no busy gate — this check is all
 //     that separates them.
 //   - legacy backends (acp, codex): Send refuses to start while State is Running
-//     (process_send.go, ErrProcessBusy), and State is Running for exactly as long
-//     as this latch is armed and empty. So the two cannot overlap in the first
-//     place.
+//     (process_send.go, ErrProcessBusy), and a mid-turn reconnect stays Running
+//     until this very result. A Send that starts once it ends owns the next turn:
+//     the CAS has already disarmed the branch, so its result cannot land here.
 //
 // Moving this call up into deliverEvent would defeat the first; letting a
 // mid-turn reconnect leave State anything but Running would defeat the second.
+// It also runs after the turn has ended and onTurnDone has fired: a waiter the
+// latch wakes may release the process at once, which skips a Running one.
 func (a *adoptedTurn) resolveResult(ev clievent.Event) {
 	a.resolve(AdoptedOutcome{
 		End:    AdoptedEndResult,
