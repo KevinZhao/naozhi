@@ -69,3 +69,24 @@ func yamlChildScalar(m *yaml.Node, key string) *yaml.Node {
 	}
 	return nil
 }
+
+// TestExampleConfig_RunnerModelHaiku: daemons are short extraction calls, and
+// an empty sysession.runner.model runs every one on the CLI's built-in default
+// (the main model), so the template a new deployment copies names haiku.
+func TestExampleConfig_RunnerModelHaiku(t *testing.T) {
+	sys := yamlChildMap(readExampleRoot(t), "sysession")
+	if sys == nil {
+		t.Fatal("config.example.yaml has no sysession block")
+	}
+	runner := yamlChildMap(sys, "runner")
+	if runner == nil {
+		t.Fatal("config.example.yaml has no sysession.runner block")
+	}
+	model := yamlChildScalar(runner, "model")
+	if model == nil {
+		t.Fatal("config.example.yaml must document sysession.runner.model")
+	}
+	if model.Value != "haiku" {
+		t.Errorf("sysession.runner.model = %q, want haiku", model.Value)
+	}
+}

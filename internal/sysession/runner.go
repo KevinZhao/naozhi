@@ -48,8 +48,12 @@ type RunnerConfig struct {
 	// workspaces (RFC §6.5): <dataDir>/sys-sessions/ chmod 0700.
 	WorkDir string
 
-	// Model overrides --model.  Empty leaves --model off so the binary
-	// uses its own default.
+	// Model overrides --model. Empty leaves --model off and the CLI uses its
+	// built-in default, usually the main (far costlier) model: the
+	// `--setting-sources ""` in runnerImplBaseArgs keeps it from reading a
+	// user/project/local settings model (managed policy still applies).
+	// config.example.yaml recommends "haiku"; the code default stays empty
+	// so a deployment without haiku access is not broken by an upgrade.
 	Model string
 
 	// BackendID names the backend BinPath belongs to ("claude" | "kiro" | …).
