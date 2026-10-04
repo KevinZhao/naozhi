@@ -123,10 +123,11 @@ func buildAgentOpts(cfg *config.Config) (map[string]session.AgentOpts, map[strin
 	agents := make(map[string]session.AgentOpts, len(cfg.Agents))
 	for id, ac := range cfg.Agents {
 		agents[id] = session.AgentOpts{
-			Model:        ac.Model,
-			ExtraArgs:    ac.Args,
-			Effort:       ac.Effort,
-			SystemPrompt: ac.SystemPrompt,
+			Model:         ac.Model,
+			ExtraArgs:     ac.Args,
+			Effort:        ac.Effort,
+			SystemPrompt:  ac.SystemPrompt,
+			AccessProfile: ac.AccessProfile,
 		}
 	}
 	cronAgents := make(map[string]cron.AgentOpts, len(agents))
