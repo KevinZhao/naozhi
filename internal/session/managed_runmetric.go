@@ -51,7 +51,7 @@ func (s *ManagedSession) finishRun(rt *runTimer, proc processIface, result *clie
 	if result == nil && err != nil {
 		// proc is the process that ran the turn: passthrough holds no sendMu,
 		// so loadProcess() here could already be a replacement.
-		s.bookPartialTurn(proc, err, runID)
+		delta += s.bookPartialTurn(proc, err, runID)
 	}
 	if rt == nil || s.runStore == nil || runID == "" {
 		return

@@ -53,7 +53,7 @@ func benchSubscribe(h *Hub, c *wsClient, key string) {
 }
 
 func benchUnsubscribe(h *Hub, c *wsClient, key string) {
-	h.subs.release(c, key)
+	h.subs.release(c, key, 0)
 }
 
 // benchHub builds a Hub with benchClients authenticated clients, the first
