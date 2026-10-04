@@ -78,3 +78,52 @@ func TestBuildSessionOpts_PlannerKeySimpleName(t *testing.T) {
 		t.Errorf("planner Workspace = %q, want %q", opts.Workspace, want)
 	}
 }
+
+// The inline fallback starts from agents["general"], but a planner's account
+// is its project's pin only, as session.KeyResolver.ResolveForPlannerKey and
+// AccessProfileForKey decide it. A resolver miss (project gone) or a project
+// without a pin must not put the planner on general's profile.
+func TestBuildSessionOpts_PlannerIgnoresGeneralAccessProfile(t *testing.T) {
+	root := t.TempDir()
+	for _, n := range []string{"unpinned", "pinned"} {
+		if err := os.MkdirAll(filepath.Join(root, n), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	mgr, err := project.NewManager(root, project.PlannerDefaults{})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := mgr.Scan(); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if err := mgr.UpdateConfig("pinned", project.ProjectConfig{AccessProfile: "personal"}); err != nil {
+		t.Fatalf("UpdateConfig: %v", err)
+	}
+	agents := map[string]session.AgentOpts{"general": {AccessProfile: "company"}}
+	// A resolver with no project data misses every planner key (ok=false).
+	missing := session.NewKeyResolver(agents, nil)
+
+	cases := []struct {
+		name     string
+		key      string
+		resolver *session.KeyResolver
+		want     string
+	}{
+		{"project gone, resolver miss", project.PlannerKeyFor("gone"), missing, ""},
+		{"project gone, no resolver", project.PlannerKeyFor("gone"), nil, ""},
+		{"project without a pin", project.PlannerKeyFor("unpinned"), nil, ""},
+		{"project pin", project.PlannerKeyFor("pinned"), missing, "personal"},
+		{"chat key keeps the agent profile", "feishu:direct:alice:general", nil, "company"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := buildSessionOpts(tc.key, tc.resolver, agents, mgr).AccessProfile; got != tc.want {
+				t.Errorf("AccessProfile = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if agents["general"].AccessProfile != "company" {
+		t.Errorf("agents map mutated: %+v", agents["general"])
+	}
+}

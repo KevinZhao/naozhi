@@ -298,12 +298,15 @@ func buildSessionOpts(key string, resolver *session.KeyResolver, agents map[stri
 	opts := agents[agentID]
 	if project.IsPlannerKey(key) {
 		opts.Exempt = true // planner sessions are always exempt, regardless of project config
+		// The account is the project pin only, as in ResolveForPlannerKey.
+		opts.AccessProfile = ""
 		// Inverse of PlannerKeyFor; splitting on ':' would truncate names
 		// containing ':'.
 		name := strings.TrimSuffix(strings.TrimPrefix(key, "project:"), ":planner")
 		if projectMgr != nil {
 			if p := projectMgr.Get(name); p != nil {
 				opts.Workspace = p.Path
+				opts.AccessProfile = p.Config.AccessProfile
 				if m := projectMgr.EffectivePlannerModel(p); m != "" {
 					opts.Model = m
 				}
