@@ -243,8 +243,8 @@ jobs:
   # Playwright mock-server suite (test/e2e). Offline and deterministic: the
   # mock server stubs every API endpoint, and the live multibackend.* specs
   # self-skip without NAOZHI_LIVE_E2E=1. This is the layer that catches real
-  # dashboard behaviour regressions in a browser; chromium only — the
-  # mobile-safari project stays a local/release concern.
+  # dashboard behaviour regressions in a browser. The iPhone-13 project runs
+  # in e2e-mobile-safari below.
   # No workflow-level paths filter: a required check must report a status on
   # every PR, and a paths-filtered job stays "expected" forever on PRs that
   # don't touch the dashboard, blocking the merge.
@@ -275,7 +275,9 @@ jobs:
           retention-days: 7
 
   # The iPhone-13 project (webkit). Phone-only paths (visual-viewport drawers,
-  # voice gestures, mobile nav) otherwise ship without a CI run.
+  # voice gestures, mobile nav) otherwise ship without a CI run. Deliberately
+  # not a required check (#3109): a red here does not block a merge, but
+  # flaky-report still waits for it and files its master failures.
   e2e-mobile-safari:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -370,6 +372,12 @@ jobs:
       - name: Test the session stream
         run: node --test scripts/session-stream.test.mjs
 
+      # cron_state.js is a leaf too: the merge of a GET /api/cron response
+      # with the optimistic run_started / run_ended patches runs against a
+      # held fetch and a test-driven clock.
+      - name: Test the cron list merge
+        run: node --test scripts/cron-state.test.mjs
+
       # shell.js (S20f, #3026) is the upcall table; registerShell refusing a
       # missing or undeclared slot is what makes a forgotten registration
       # fail at boot instead of at the first click.
@@ -453,9 +461,11 @@ jobs:
 
   # master red → auto-file a [flaky] issue per failing test (#2537): the last
   # 40 master runs had 4 reds, all flaky, none registered. Reads the failed
-  # jobs' logs and dedupes by issue title.
+  # jobs' logs and dedupes by issue title. Every job that runs tests must be
+  # in needs, directly or through an aggregate; check-flaky-report-parse.mjs
+  # enforces it.
   flaky-report:
-    needs: [test, test-macos, e2e, probe-fail]
+    needs: [test, test-macos, e2e, e2e-mobile-safari, probe-fail]
     if: always() && contains(join(needs.*.result, ','), 'failure') && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     timeout-minutes: 5

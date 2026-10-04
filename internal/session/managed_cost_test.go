@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -272,10 +273,13 @@ func TestCopyCostBaseline_RenameKeepsDeltaBaseline(t *testing.T) {
 }
 
 // A turn the process died on books its assistant-frame tokens as a partial
-// entry (no amount); a failure with the process alive books nothing, since
-// the next result's cumulative modelUsage will carry those tokens.
+// entry (no amount, one row per model); a failure with the process alive
+// books nothing, since the next result's cumulative modelUsage will carry
+// those tokens.
 func TestBookPartialTurn_OnProcessDeathOnly(t *testing.T) {
-	dead := &TestProcess{AliveVal: true, ShadowVal: clievent.ShadowUsage{Model: "m[1m]", Input: 40, Output: 8}}
+	dead := &TestProcess{AliveVal: true, ShadowVal: clievent.ShadowUsage{Models: []clievent.ShadowModel{
+		{Model: "m[1m]", Input: 40, Output: 8}, {Model: "", CacheRead: 3}, {Model: "zero"}, {Model: "h", Output: 2},
+	}}}
 	dead.SendFunc = func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
 		return nil, clierr.ErrProcessExited
 	}
@@ -284,12 +288,19 @@ func TestBookPartialTurn_OnProcessDeathOnly(t *testing.T) {
 		t.Fatal("expected error")
 	}
 	ents := allEntries(t, ledger)
-	if len(ents) != 1 || ents[0].Kind != costledger.KindPartial || ents[0].Amount != 0 ||
-		len(ents[0].Models) != 1 || ents[0].Models[0].Input != 40 || ents[0].Models[0].Model != "m" || ents[0].Models[0].RawModel != "m[1m]" {
+	if len(ents) != 1 || ents[0].Kind != costledger.KindPartial || ents[0].Amount != 0 {
 		t.Fatalf("partial entry = %+v", ents)
 	}
+	want := []costledger.ModelDelta{
+		{Model: "m", RawModel: "m[1m]", Tokens: costledger.Tokens{Input: 40, Output: 8}},
+		{Model: "unknown", Tokens: costledger.Tokens{CacheRead: 3}},
+		{Model: "h", RawModel: "h", Tokens: costledger.Tokens{Output: 2}},
+	}
+	if !reflect.DeepEqual(ents[0].Models, want) {
+		t.Fatalf("partial rows = %+v, want %+v", ents[0].Models, want)
+	}
 
-	alive := &TestProcess{AliveVal: true, ShadowVal: clievent.ShadowUsage{Input: 40}}
+	alive := &TestProcess{AliveVal: true, ShadowVal: clievent.ShadowUsage{Models: []clievent.ShadowModel{{Input: 40}}}}
 	alive.SendFunc = func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
 		return nil, errors.New("transient")
 	}
@@ -298,7 +309,7 @@ func TestBookPartialTurn_OnProcessDeathOnly(t *testing.T) {
 	if ents := allEntries(t, ledger2); len(ents) != 0 {
 		t.Fatalf("alive failure must not book partial: %+v", ents)
 	}
-	if alive.ShadowVal.Input != 40 {
+	if alive.ShadowVal.IsZero() {
 		t.Fatal("shadow account must be left for the next result to supersede")
 	}
 }

@@ -25,16 +25,19 @@ func TestCapabilityMatrixIsPinned(t *testing.T) {
 		"discord": {
 			InterimMessages: true, SingleUseReplyToken: false,
 			Reactions: true, QuestionCards: false, Runnable: true,
+			ConnState: false,
 		},
 		// Feishu is the only platform with native AskUserQuestion cards;
 		// everywhere else dispatch falls back to a plain-text option list.
 		"feishu": {
 			InterimMessages: true, SingleUseReplyToken: false,
 			Reactions: true, QuestionCards: true, Runnable: true,
+			ConnState: false,
 		},
 		"slack": {
 			InterimMessages: true, SingleUseReplyToken: false,
 			Reactions: true, QuestionCards: false, Runnable: true,
+			ConnState: false,
 		},
 		// Weixin is the single-use-reply-token platform (#2136) and the only one
 		// without reactions. It also IMPLEMENTS InterimMessageCapable while
@@ -42,6 +45,7 @@ func TestCapabilityMatrixIsPinned(t *testing.T) {
 		"weixin": {
 			InterimMessages: false, SingleUseReplyToken: true,
 			Reactions: false, QuestionCards: false, Runnable: true,
+			ConnState: false,
 		},
 	}
 	got := platform.CapabilityMatrix(map[string]platform.Platform{

@@ -85,19 +85,7 @@ func (c *Config) knownBackendIDs() map[string]bool {
 // if set, else the single cli.backend (default "claude"). The default backend is
 // always at position 0; duplicate IDs collapse to the first occurrence.
 func (c *Config) EnabledBackends() []CLIBackendConfig {
-	// Must resolve identically to DefaultBackendID so [0].ID agrees with it.
-	defaultID := c.CLI.Backend
-	if defaultID == "" {
-		for _, b := range c.CLI.Backends {
-			if b.ID != "" {
-				defaultID = b.ID
-				break
-			}
-		}
-	}
-	if defaultID == "" {
-		defaultID = "claude"
-	}
+	defaultID := c.DefaultBackendID()
 
 	if len(c.CLI.Backends) == 0 {
 		return []CLIBackendConfig{{
@@ -150,13 +138,16 @@ func (c *Config) EnabledBackends() []CLIBackendConfig {
 }
 
 // DefaultBackendID reports the backend ID to use when a request does not
-// specify one.
+// specify one: cli.backend, else the first cli.backends entry with an id,
+// else "claude". EnabledBackends floats this id to position 0.
 func (c *Config) DefaultBackendID() string {
 	if id := c.CLI.Backend; id != "" {
 		return id
 	}
-	if len(c.CLI.Backends) > 0 && c.CLI.Backends[0].ID != "" {
-		return c.CLI.Backends[0].ID
+	for _, b := range c.CLI.Backends {
+		if b.ID != "" {
+			return b.ID
+		}
 	}
 	return "claude"
 }
