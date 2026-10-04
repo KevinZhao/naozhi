@@ -1,18 +1,22 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/shim"
 )
 
 // startupFailedProc is a dead process whose CLI failed at startup.
@@ -188,10 +192,9 @@ func TestStartupFailure_CooldownLeft(t *testing.T) {
 // A resume the backend refuses during the spawn handshake is retried fresh in
 // the same call, once: the user's message has not been sent yet.
 func TestGetOrCreate_RetriesARejectedResumeFresh(t *testing.T) {
-	t.Parallel()
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // the retry waits on the key's shim socket
 	rejected := fmt.Errorf("protocol init: acp session/load: %w", clierr.ErrResumeRejected)
 	t.Run("fresh spawn succeeds", func(t *testing.T) {
-		t.Parallel()
 		r, _, resumes := newStartupFailRouter(t, newDeadProc())
 		r.spawn.hook = func(_ context.Context, opts cli.SpawnOptions) (processIface, error) {
 			*resumes = append(*resumes, opts.ResumeID)
@@ -209,7 +212,6 @@ func TestGetOrCreate_RetriesARejectedResumeFresh(t *testing.T) {
 		}
 	})
 	t.Run("fresh spawn fails too", func(t *testing.T) {
-		t.Parallel()
 		r, _, resumes := newStartupFailRouter(t, newDeadProc())
 		r.spawn.hook = func(_ context.Context, opts cli.SpawnOptions) (processIface, error) {
 			*resumes = append(*resumes, opts.ResumeID)
@@ -222,4 +224,63 @@ func TestGetOrCreate_RetriesARejectedResumeFresh(t *testing.T) {
 			t.Errorf("spawn resumes = %q, want one resume then one fresh retry", *resumes)
 		}
 	})
+}
+
+// The fresh retry of a rejected resume waits for the failed spawn's shim to
+// release the key's socket, as a real StartShim refuses to clobber a bound
+// one; a socket that outlives the wait makes a failed retry ErrShimStuck.
+func TestGetOrCreate_RejectedResumeRetryWaitsForTheSocket(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: waits out the 2s socket-gone timeout")
+	}
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	sock := shim.SocketPath(shim.KeyHash(sfKey))
+	rejected := fmt.Errorf("protocol init: acp session/load: %w", clierr.ErrResumeRejected)
+	errClobber := errors.New("start shim: shim already listening: refusing to clobber")
+	for _, released := range []bool{true, false} {
+		if err := os.WriteFile(sock, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r, _, resumes := newStartupFailRouter(t, newDeadProc())
+		r.spawn.hook = func(_ context.Context, opts cli.SpawnOptions) (processIface, error) {
+			*resumes = append(*resumes, opts.ResumeID)
+			if opts.ResumeID != "" {
+				if released {
+					time.AfterFunc(100*time.Millisecond, func() { os.Remove(sock) })
+				}
+				return nil, rejected
+			}
+			if _, err := os.Stat(sock); err == nil {
+				return nil, errClobber
+			}
+			return newIdleProc(), nil
+		}
+		_, st, err := r.GetOrCreate(context.Background(), sfKey, AgentOpts{})
+		if !slices.Equal(*resumes, []string{sfSID, ""}) {
+			t.Fatalf("released=%v: spawn resumes = %q, want one resume then one fresh retry", released, *resumes)
+		}
+		if released && (err != nil || st != SessionResumeLost) {
+			t.Errorf("socket released: GetOrCreate err = %v, status %d; want the fresh retry to succeed", err, st)
+		}
+		if !released && (!errors.Is(err, ErrShimStuck) || !errors.Is(err, errClobber)) {
+			t.Errorf("socket stays bound: GetOrCreate err = %v; want ErrShimStuck wrapping the retry's error", err)
+		}
+		os.Remove(sock)
+	}
+}
+
+// A key the breaker pauses logs the pause, not a resume that never runs.
+func TestGetOrCreate_StartupBreakerLogsNoResume(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	r, dead, _ := newStartupFailRouter(t, newStartupFailedProc(clierr.ExitAuth, time.Now()))
+	dead.startupFails.Store(1)
+	if _, _, err := r.GetOrCreate(context.Background(), sfKey, AgentOpts{}); !errors.Is(err, ErrCLIStartupFailed) {
+		t.Fatalf("GetOrCreate err = %v, want ErrCLIStartupFailed", err)
+	}
+	if out := buf.String(); strings.Contains(out, "resuming") || !strings.Contains(out, "respawn paused") {
+		t.Errorf("log = %q; want the pause and no resuming line", out)
+	}
 }

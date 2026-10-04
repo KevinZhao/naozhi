@@ -86,7 +86,7 @@ func TestForSendError_ContractTable(t *testing.T) {
 		{
 			name:     "stale resume id",
 			err:      &clierr.ProcessExitedError{Code: 1, Class: clierr.ExitResumeNotFound},
-			wantSubs: []string{"无法恢复", "重新发送", "新会话"},
+			wantSubs: []string{"无法恢复", "一分钟后重新发送", "新会话"},
 			notSubs:  []string{"自动重启"},
 		},
 		{

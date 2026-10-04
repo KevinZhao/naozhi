@@ -81,6 +81,9 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 	// a spawn of our own — so the decision to spawn and the in-flight marker
 	// cannot be split by another caller.
 	var staleSocketBound bool
+	// retryStuck: the shim socket outlived the wait before a rejected
+	// resume's fresh retry.
+	var retryStuck bool
 	for {
 		// Only the round right after a stale one inherits its bound socket; a
 		// round that waits on another caller's spawn consumes it.
@@ -143,15 +146,15 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 			}
 			continue
 		}
-		if status == SessionResumed {
-			slog.Info("session process exited, resuming", "key", key, "session_id", resumedID)
-		} else {
-			// Debug, not Info: completeSpawn logs "session spawned" at Info
-			// moments later.
-			slog.Debug("creating new session", "key", key)
-		}
 		var s *ManagedSession
 		if err == nil {
+			if status == SessionResumed {
+				slog.Info("session process exited, resuming", "key", key, "session_id", resumedID)
+			} else {
+				// Debug, not Info: completeSpawn logs "session spawned" at Info
+				// moments later.
+				slog.Debug("creating new session", "key", key)
+			}
 			s, err = r.completeSpawn(ctx, &res)
 		}
 		if errors.Is(err, errSpawnStale) {
@@ -165,11 +168,14 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 		}
 		// Nothing was sent yet, so a resume the backend refused is retried
 		// fresh at once; resolveSpawnParams drops it for the flagged session.
+		// The failed spawn's shim is still releasing the key's socket, and the
+		// retry's StartShim would refuse to clobber it.
 		if errors.Is(err, clierr.ErrResumeRejected) && res.old != nil && !res.old.resumeRejected.Swap(true) {
+			retryStuck = !waitSocketGoneForKey(key, 2*time.Second)
 			continue
 		}
 		if err != nil {
-			if stuck || wrapStale {
+			if stuck || wrapStale || retryStuck {
 				// errors.Is chain lets callers pin on ErrShimStuck.
 				return nil, 0, fmt.Errorf("session %s: %w: %w", key, ErrShimStuck, err)
 			}
