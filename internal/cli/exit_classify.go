@@ -10,6 +10,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cliinfo"
 )
 
 // classifyStderr reads what a CLI's stderr tail says made it exit. Matching
@@ -84,7 +85,7 @@ func (p *Process) recordExit(code int64, tail []string) {
 func (p *Process) StartupFailure() (class clierr.ExitClass, at time.Time, ok bool) {
 	e := p.exited.Load()
 	if e == nil || e.Code <= 0 || p.sawOutput.Load() ||
-		p.DeathReason() != DeathReasonCLIExited+"_code_"+strconv.FormatInt(e.Code, 10) {
+		p.DeathReason() != cliinfo.DeathReasonCLIExitedCodePrefix+strconv.FormatInt(e.Code, 10) {
 		return clierr.ExitUnknown, time.Time{}, false
 	}
 	return e.Class, time.Unix(0, p.exitedAt.Load()), true

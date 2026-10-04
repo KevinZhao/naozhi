@@ -14,6 +14,15 @@ const (
 	DeathReasonTotalTimeout        = "total_timeout"
 )
 
+// A CLI that exits on its own records DeathReasonCLIExited, or the code prefix
+// plus its non-zero exit code (-1 when a signal killed it), or the signal
+// prefix plus the signal name a shim reported with a zero code. contractjs
+// emits both prefixes so the dashboard can name the code or signal.
+const (
+	DeathReasonCLIExitedCodePrefix   = DeathReasonCLIExited + "_code_"
+	DeathReasonCLIExitedSignalPrefix = DeathReasonCLIExited + "_signal_"
+)
+
 // AllDeathReasons lists every DeathReason* constant's value, so contractjs can
 // enumerate the wire vocabulary instead of restating it as JS string literals.
 // death_test.go keeps it in step with the const block above.
