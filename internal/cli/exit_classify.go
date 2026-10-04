@@ -30,7 +30,7 @@ func classifyStderr(tail []string) clierr.ExitClass {
 		return clierr.ExitResumeNotFound
 	case anyLine(lines, "mcp", "config", "invalid", "failed"):
 		return clierr.ExitMCPConfig
-	case anyLine(lines, "", "invalid api key", "please run /login", "authentication", "oauth token has expired", "401 unauthorized"):
+	case anyLine(lines, "", "invalid api key", "please run /login", "authentication", "oauth token has expired", "401 unauthorized", "not logged in", "login required"):
 		return clierr.ExitAuth
 	case anyLine(lines, "", "enoent", "no such file or directory", "command not found", "cannot find module"):
 		return clierr.ExitMissingRuntime

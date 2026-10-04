@@ -265,3 +265,37 @@ func TestLocalizeError(t *testing.T) {
 		})
 	}
 }
+
+// TestClassifyError: the category agrees with LocalizeError on the same
+// inputs, ok=false exactly where LocalizeError passes the text through.
+func TestClassifyError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		input  string
+		want   apierr.Kind
+		wantOK bool
+	}{
+		{"Prompt is too long", apierr.KindContextLength, true},
+		{"Credit balance is too low", apierr.KindQuota, true},
+		{"Overloaded", apierr.KindOverloaded, true},
+		{"Rate limit reached for requests", apierr.KindRateLimit, true},
+		{"API Error: authentication_error: invalid x-api-key", apierr.KindAuth, true},
+		{"API Error: permission_error: forbidden", apierr.KindPermission, true},
+		{"API Error: 500 teapot", apierr.KindUnrecognized, true},
+		{"API Error: Request timed out", apierr.KindTimeout, true},
+		{"API Error: connection reset", apierr.KindNetwork, true},
+		{"Bash tool timed out after 120s", apierr.KindUnrecognized, false},
+		{"MCP server connection refused", apierr.KindUnrecognized, false},
+		{"Execution error", apierr.KindUnrecognized, false},
+		{"  ", apierr.KindUnrecognized, false},
+	}
+	for _, tt := range tests {
+		got, ok := apierr.ClassifyError(tt.input)
+		if got != tt.want || ok != tt.wantOK {
+			t.Errorf("ClassifyError(%q) = %v, %v; want %v, %v", tt.input, got, ok, tt.want, tt.wantOK)
+		}
+		if _, lok := apierr.LocalizeError(tt.input); lok != ok {
+			t.Errorf("ClassifyError(%q) ok=%v but LocalizeError ok=%v", tt.input, ok, lok)
+		}
+	}
+}

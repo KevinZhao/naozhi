@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 )
 
 // newStderrTestProcess is a Process whose cli_exited handling can run: a live
@@ -134,15 +137,17 @@ func TestHandleShimCLIExited_StderrTail(t *testing.T) {
 
 func TestShimLineReader_InitExitCarriesStderrCause(t *testing.T) {
 	cases := []struct {
-		name   string
-		frames string
-		want   string
+		name      string
+		frames    string
+		want      string
+		wantClass clierr.ExitClass
 	}{
 		{
 			name: "stderr frames before exit",
 			frames: `{"type":"stderr","line":"Error: --mcp-config is invalid"}` + "\n" +
 				`{"type":"cli_exited","code":1}` + "\n",
-			want: "cli exited during init (code 1): Error: --mcp-config is invalid",
+			want:      "cli exited during init (code 1): Error: --mcp-config is invalid",
+			wantClass: clierr.ExitMCPConfig,
 		},
 		{
 			name:   "tail on the exit frame",
@@ -153,7 +158,8 @@ func TestShimLineReader_InitExitCarriesStderrCause(t *testing.T) {
 			name: "error line is quoted over the lines before it",
 			frames: `{"type":"cli_exited","code":1,"stderr_tail":["node:internal/modules/cjs/loader:1228",` +
 				`"  throw err;","Error: Cannot find module 'x'","    at Module._load (loader:1:1)"]}` + "\n",
-			want: "cli exited during init (code 1): Error: Cannot find module 'x'",
+			want:      "cli exited during init (code 1): Error: Cannot find module 'x'",
+			wantClass: clierr.ExitMissingRuntime,
 		},
 		{
 			name:   "no stderr",
@@ -176,6 +182,10 @@ func TestShimLineReader_InitExitCarriesStderrCause(t *testing.T) {
 			}
 			if err.Error() != tc.want {
 				t.Errorf("err = %q, want %q", err.Error(), tc.want)
+			}
+			var pe *clierr.ProcessExitedError
+			if !errors.As(err, &pe) || pe.Class != tc.wantClass {
+				t.Errorf("err = %v (%+v), want a ProcessExitedError of class %d", err, pe, tc.wantClass)
 			}
 		})
 	}

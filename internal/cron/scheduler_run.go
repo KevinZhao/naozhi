@@ -98,7 +98,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 			state: RunStateFailed, errClass: ErrClassWorkDirUnreachable,
 			errMsg: "work_dir unreachable",
 		})
-		s.deliverFailureNotice(args.runCtx, ErrClassWorkDirUnreachable, RunStateFailed, s.execTimeout, paused)
+		s.deliverFailureNotice(args.runCtx, ErrClassWorkDirUnreachable, TurnCauseUnknown, RunStateFailed, s.execTimeout, paused)
 		return noopRefresh, false
 	}
 	// Containment re-check BEFORE the destructive Reset: resolveCronWorkspace
@@ -114,7 +114,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 			state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
 			errMsg: "work_dir outside allowed root",
 		})
-		s.deliverFailureNotice(args.runCtx, ErrClassWorkDirOutsideRoot, RunStateFailed, s.execTimeout, paused)
+		s.deliverFailureNotice(args.runCtx, ErrClassWorkDirOutsideRoot, TurnCauseUnknown, RunStateFailed, s.execTimeout, paused)
 		return noopRefresh, false
 	}
 	// Fresh-context atomicity (#401): Reset here and the caller's later
@@ -233,7 +233,7 @@ func (s *Scheduler) resolveCronWorkspace(rc runCtx) (workDirForCLI string, abort
 			state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
 			errMsg: "work_dir outside allowed root",
 		}); paused > 0 {
-			s.deliverFailureNotice(rc, ErrClassWorkDirOutsideRoot, RunStateFailed, s.execTimeout, paused)
+			s.deliverFailureNotice(rc, ErrClassWorkDirOutsideRoot, TurnCauseUnknown, RunStateFailed, s.execTimeout, paused)
 		}
 		return "", true
 	}
@@ -309,7 +309,7 @@ func (s *Scheduler) executeOpt(jobID string, viaTriggerNow bool) {
 		// the sandbox buckets stay a subset of the run totals (#2173).
 		sandbox := placementIsSandbox(started.rc.snap.placement)
 		if paused := s.finishRun(*started.rc, runOutcome{state: RunStateFailed, errClass: ErrClassPanic, errMsg: "the run panicked", sandbox: sandbox}); paused > 0 {
-			s.deliverFailureNotice(*started.rc, ErrClassPanic, RunStateFailed, s.execTimeout, paused)
+			s.deliverFailureNotice(*started.rc, ErrClassPanic, TurnCauseUnknown, RunStateFailed, s.execTimeout, paused)
 		}
 	}}.run(func() {
 		s.executeAcquired(jobID, viaTriggerNow, inflight, finalizer, started)
@@ -792,7 +792,7 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 		errMsg:    "send error: " + sanitiseRunErrMsg(err.Error()), // strip IP:port/paths, mirrors lg.Error above
 		sessionID: sid, costInc: costInc,
 	})
-	s.deliverFailureNotice(a.runCtx, errClass, state, a.jobTimeout, paused)
+	s.deliverFailureNotice(a.runCtx, errClass, turnCauseOf(err), state, a.jobTimeout, paused)
 }
 
 // execFinishSuccess records a successful run: latency observability, the
@@ -995,7 +995,7 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 			state: state, errClass: errClass,
 			errMsg: "session error: " + sanitiseRunErrMsg(err.Error()), // mirrors send-error path
 		})
-		s.deliverFailureNotice(a.runCtx, errClass, state, s.execTimeout, paused)
+		s.deliverFailureNotice(a.runCtx, errClass, turnCauseOf(err), state, s.execTimeout, paused)
 		return nil, spawnStart, true
 	}
 	// GetOrCreate consumed ctx and nothing below references it (Send uses

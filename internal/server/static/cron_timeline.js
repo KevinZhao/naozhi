@@ -224,8 +224,8 @@ function cronTimelineRowHtml(jobId, r, st) {
   const dotCls = runStateDot(state);
   const stateLbl = runStateLabel(state);
 
-  // 副行：trigger / error_class（session_id 短 ID 已移除——对最终用户无意义；
-  // 展开 inline 详情即可看到完整 session_id）
+  // 副行：trigger / error_class。session_id 不上行（对最终用户无意义），
+  // 完整值在展开详情底部（cronRunSessionRowHtml）。
   const subParts = [];
   if (r.trigger) subParts.push('<span class="ctr-trigger">' + esc(r.trigger) + '</span>');
   if (errCls) {
@@ -282,15 +282,10 @@ function formatCronTimelineShort(ms) {
 
 // cronTimelineDetailHtml — 展开行内的详情面板。
 //
-// 现在收敛为单屏「最终输出」视图：错误优先 → result（markdown） → 回退到
-// transcript 最后一条 assistant 文本。提示词、工具调用记录、原始 JSONL 一律
-// 不展示——这些对绝大多数用户都是噪声，需要时仍能通过 transcript / detail
-// 端点拿到。
-//
-// 历史：v2 期间用过 4-tab 容器（对话 / 工具 / 提示词 / 原始日志），
-// 字面量 tabBtn('chat') / tabBtn('tools') / tabBtn('prompt') / tabBtn('raw')
-// 被契约测试 (TestDashboardJS_TranscriptTabs) 钉死，下方 dead-code 块保留
-// 这些字面量出现以维持 grep 兼容；真正的渲染走 finalBody。
+// 单屏「最终输出」视图：错误优先 → result（markdown） → 回退到 transcript
+// 最后一条 assistant 文本。提示词、工具调用记录、原始 JSONL 一律不展示——
+// 这些对绝大多数用户都是噪声，需要时仍能通过 transcript / detail 端点拿到。
+// 底部附本次 run 的 session_id（有才渲染）。
 function cronTimelineDetailHtml(jobId, runId, summary, detail) {
   if (!detail) {
     return '<div class="ctr-loading">加载详情中…</div>';
@@ -302,13 +297,6 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
   // §7.3 元信息条：云沙箱 run 顶部展示 镜像 · 时长 · 内存峰值 · 成本。
   // 本机 run 的 detail.sandbox 为空 → 整条不渲染（零增量）。
   const metaBar = cronSandboxMetaBarHtml(detail.sandbox);
-
-  // 历史 4-tab UI 标记（已收敛为单屏「最终输出」，见下方）：
-  //   tabBtn('chat', '对话')
-  //   tabBtn('tools', '工具')
-  //   tabBtn('prompt', '提示词')
-  //   tabBtn('raw', '原始日志')
-  // 上述字面量仅作契约测试 grep 锚点；UI 不再渲染 tab。
 
   const transcript = detail.__transcript || null;
   const hasTurns = transcript && Array.isArray(transcript.turns) && transcript.turns.length > 0;
@@ -359,7 +347,15 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
     // transcript 字段未定义 = fetch 还在飞，给加载态。
     body = '<div class="ctr-empty-detail">正在加载最终输出…</div>';
   }
-  return metaBar + replayBar + body + snapshotPanel;
+  const sid = detail.session_id || (summary && summary.session_id) || '';
+  return metaBar + replayBar + body + snapshotPanel + cronRunSessionRowHtml(sid);
+}
+
+// cronRunSessionRowHtml — 详情底部的 session_id 行。给全长值（终端
+// claude --resume 要的就是它），点一下整段选中。无值返回 ''。
+function cronRunSessionRowHtml(sid) {
+  if (!sid) return '';
+  return '<div class="ctr-meta-row ctr-session-row">会话 ID <code>' + esc(sid) + '</code></div>';
 }
 
 // cronReplayBarHtml renders the §7.3 replay action row for a sandbox run.

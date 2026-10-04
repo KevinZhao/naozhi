@@ -9,11 +9,13 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/usermsg"
 )
 
 // Compile-time ordinal pins. The adapters below cast between cron.* and
@@ -137,22 +139,65 @@ func (c cronSessionAdapter) Send(ctx context.Context, text string) (cron.SendRes
 	return cron.SendResult{Text: r.Text, SessionID: r.SessionID}, err
 }
 
-// turnFailure wraps cron.ErrTurnFailed around a result the backend flagged as
-// an error, so the run is recorded as failed rather than succeeding with empty
-// or raw-error text; nil for a healthy turn. error_during_execution after an
-// abort naozhi requested (the cron watchdog's interrupt) is that abort, not a
-// failure. The detail is for run history; the IM notice never shows it.
+// turnFailure wraps a cron.TurnFailedError (matching cron.ErrTurnFailed)
+// around a result the backend flagged as an error, so the run is recorded as
+// failed rather than succeeding with empty or raw-error text; nil for a
+// healthy turn. error_during_execution after an abort naozhi requested (the
+// cron watchdog's interrupt) is that abort, not a failure. The detail is for
+// run history; the IM notice only ever shows the cause.
 func turnFailure(r *clievent.SendResult) error {
 	if !r.IsError || (r.Aborted && r.SubType == "error_during_execution") {
 		return nil
 	}
+	tf := &cron.TurnFailedError{Cause: turnCause(r)}
 	if be := r.BackendError; be != nil {
-		return fmt.Errorf("%w (%s): %s rpc code %d: %s", cron.ErrTurnFailed, r.SubType, be.Backend, be.Code, be.Message)
+		return fmt.Errorf("%w (%s): %s rpc code %d: %s", tf, r.SubType, be.Backend, be.Code, be.Message)
 	}
 	if r.Text != "" {
-		return fmt.Errorf("%w (%s): %s", cron.ErrTurnFailed, r.SubType, r.Text)
+		return fmt.Errorf("%w (%s): %s", tf, r.SubType, r.Text)
 	}
-	return fmt.Errorf("%w (%s)", cron.ErrTurnFailed, r.SubType)
+	return fmt.Errorf("%w (%s)", tf, r.SubType)
+}
+
+// turnCause sorts a failed result the way an IM reply does: usermsg's turn
+// class first, then, for claude's error text it leaves alone, apierr's
+// category. Anything neither names is TurnCauseUnknown.
+func turnCause(r *clievent.SendResult) cron.TurnCause {
+	if _, class := usermsg.ForTurnResult(r); class != "" {
+		return turnCauseByClass[class]
+	}
+	if r.Text == "" {
+		return cron.TurnCauseUnknown
+	}
+	if k, ok := apierr.ClassifyError(r.Text); ok {
+		return turnCauseByKind[k]
+	}
+	return cron.TurnCauseUnknown
+}
+
+// turnCauseByClass maps usermsg.ForTurnResult's class labels; turn_failed and
+// backend_rejected name no cause, so they are absent (TurnCauseUnknown).
+var turnCauseByClass = map[string]cron.TurnCause{
+	"max_turns":               cron.TurnCauseMaxTurns,
+	"max_budget":              cron.TurnCauseBudget,
+	"refused":                 cron.TurnCauseRefused,
+	"truncated":               cron.TurnCauseTruncated,
+	"backend_overloaded":      cron.TurnCauseBackendOverloaded,
+	"backend_rate_limited":    cron.TurnCauseBackendRateLimited,
+	"backend_auth":            cron.TurnCauseBackendAuth,
+	"backend_invalid_request": cron.TurnCauseBackendInvalid,
+}
+
+// turnCauseByKind maps apierr's categories; KindUnrecognized is absent.
+var turnCauseByKind = map[apierr.Kind]cron.TurnCause{
+	apierr.KindRateLimit:     cron.TurnCauseBackendRateLimited,
+	apierr.KindOverloaded:    cron.TurnCauseBackendOverloaded,
+	apierr.KindAuth:          cron.TurnCauseBackendAuth,
+	apierr.KindQuota:         cron.TurnCauseQuota,
+	apierr.KindContextLength: cron.TurnCauseContextTooLong,
+	apierr.KindPermission:    cron.TurnCausePermission,
+	apierr.KindTimeout:       cron.TurnCauseBackendUnreachable,
+	apierr.KindNetwork:       cron.TurnCauseBackendUnreachable,
 }
 
 // CostTotals satisfies cron.CostReporter: cron differences two snapshots

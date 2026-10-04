@@ -461,7 +461,7 @@ func (s *Scheduler) finishOrphanRun(p sandboxstore.Pending, js orphanJobSnapshot
 		sandbox: true,
 	})
 	if paused > 0 {
-		s.deliverPauseNotice(rc, orphanTerminalErrClass, orphanTerminalState, s.sandboxRunBudget(), paused)
+		s.deliverPauseNotice(rc, orphanTerminalErrClass, TurnCauseUnknown, orphanTerminalState, s.sandboxRunBudget(), paused)
 	}
 }
 
