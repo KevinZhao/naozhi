@@ -6,38 +6,18 @@ import (
 	"time"
 )
 
-// TestRunState_WireStable freezes the wire string for every RunState.
-// Changing a value here without coordinating with dashboard.js + cron
-// runs/<id>.json on disk + sysession runRing JSON breaks the contract.
-//
-// Adding a new RunState: extend this map; the duplicate-detector at the
-// bottom of the test guards against accidental wire collisions.
-func TestRunState_WireStable(t *testing.T) {
-	t.Parallel()
-	want := map[RunState]string{
+// The frozen wire string of every enum constant, one map per type.
+// TestEnumWireFreezeComplete pins that each map covers exactly the constants
+// state.go declares.
+var (
+	wireRunStates = map[RunState]string{
 		RunStateSucceeded: "succeeded",
 		RunStateFailed:    "failed",
 		RunStateSkipped:   "skipped",
 		RunStateTimedOut:  "timed_out",
 		RunStateCanceled:  "canceled",
 	}
-	for c, w := range want {
-		if string(c) != w {
-			t.Errorf("RunState %q wire = %q, want %q", c, string(c), w)
-		}
-	}
-	assertNoDuplicateWireValues(t, "RunState", stringValuesRunState(want))
-}
-
-// TestErrorClass_WireStable freezes wire strings for every ErrorClass.
-// Cross-subsystem (canceled / deadline_exceeded / panic / "") and
-// subsystem-specific values are both pinned. The duplicate-detector
-// catches a future "ErrClassCronUpstream = upstream" addition that
-// would silently collide with ErrClassSysessionUpstream.
-func TestErrorClass_WireStable(t *testing.T) {
-	t.Parallel()
-	want := map[ErrorClass]string{
-		ErrClassCronInterrupted:  "interrupted",
+	wireErrorClasses = map[ErrorClass]string{
 		ErrClassNone:             "",
 		ErrClassDeadlineExceeded: "deadline_exceeded",
 		ErrClassCanceled:         "canceled",
@@ -50,6 +30,7 @@ func TestErrorClass_WireStable(t *testing.T) {
 		ErrClassCronOverlapSkipped:     "overlap_skipped",
 		ErrClassCronSessionCapacity:    "session_capacity",
 		ErrClassCronTurnFailed:         "turn_failed",
+		ErrClassCronInterrupted:        "interrupted",
 		ErrClassCronSandboxFailed:      "sandbox_failed",
 		ErrClassCronSandboxTransport:   "sandbox_transport",
 		ErrClassCronSandboxUnavailable: "sandbox_unavailable",
@@ -57,44 +38,69 @@ func TestErrorClass_WireStable(t *testing.T) {
 		ErrClassSysessionUpstream:   "upstream",
 		ErrClassSysessionValidation: "validation",
 	}
-	for c, w := range want {
+	wireTriggerKinds = map[TriggerKind]string{
+		TriggerScheduled: "scheduled",
+		TriggerManual:    "manual",
+		TriggerCatchup:   "catchup",
+	}
+	wireSubsystems = map[Subsystem]string{
+		SubsystemCron:      "cron",
+		SubsystemSysession: "sysession",
+		SubsystemSession:   "session",
+	}
+)
+
+// TestRunState_WireStable freezes the wire string for every RunState.
+// Changing a value here without coordinating with dashboard.js + cron
+// runs/<id>.json on disk + sysession runRing JSON breaks the contract.
+//
+// Adding a new RunState: extend wireRunStates; the duplicate-detector at
+// the bottom of the test guards against accidental wire collisions.
+func TestRunState_WireStable(t *testing.T) {
+	t.Parallel()
+	for c, w := range wireRunStates {
+		if string(c) != w {
+			t.Errorf("RunState %q wire = %q, want %q", c, string(c), w)
+		}
+	}
+	assertNoDuplicateWireValues(t, "RunState", stringValuesRunState(wireRunStates))
+}
+
+// TestErrorClass_WireStable freezes wire strings for every ErrorClass.
+// Cross-subsystem (canceled / deadline_exceeded / panic / "") and
+// subsystem-specific values are both pinned. The duplicate-detector
+// catches a future "ErrClassCronUpstream = upstream" addition that
+// would silently collide with ErrClassSysessionUpstream.
+func TestErrorClass_WireStable(t *testing.T) {
+	t.Parallel()
+	for c, w := range wireErrorClasses {
 		if string(c) != w {
 			t.Errorf("ErrorClass %q wire = %q, want %q", c, string(c), w)
 		}
 	}
-	assertNoDuplicateWireValues(t, "ErrorClass", stringValuesErrorClass(want))
+	assertNoDuplicateWireValues(t, "ErrorClass", stringValuesErrorClass(wireErrorClasses))
 }
 
 // TestTriggerKind_WireStable freezes wire strings for every TriggerKind.
 func TestTriggerKind_WireStable(t *testing.T) {
 	t.Parallel()
-	want := map[TriggerKind]string{
-		TriggerScheduled: "scheduled",
-		TriggerManual:    "manual",
-		TriggerCatchup:   "catchup",
-	}
-	for c, w := range want {
+	for c, w := range wireTriggerKinds {
 		if string(c) != w {
 			t.Errorf("TriggerKind %q wire = %q, want %q", c, string(c), w)
 		}
 	}
-	assertNoDuplicateWireValues(t, "TriggerKind", stringValuesTriggerKind(want))
+	assertNoDuplicateWireValues(t, "TriggerKind", stringValuesTriggerKind(wireTriggerKinds))
 }
 
 // TestSubsystem_WireStable freezes wire strings for every Subsystem.
 func TestSubsystem_WireStable(t *testing.T) {
 	t.Parallel()
-	want := map[Subsystem]string{
-		SubsystemCron:      "cron",
-		SubsystemSysession: "sysession",
-		SubsystemSession:   "session",
-	}
-	for c, w := range want {
+	for c, w := range wireSubsystems {
 		if string(c) != w {
 			t.Errorf("Subsystem %q wire = %q, want %q", c, string(c), w)
 		}
 	}
-	assertNoDuplicateWireValues(t, "Subsystem", stringValuesSubsystem(want))
+	assertNoDuplicateWireValues(t, "Subsystem", stringValuesSubsystem(wireSubsystems))
 }
 
 // assertNoDuplicateWireValues guards against two named constants of the

@@ -1,104 +1,59 @@
 package runtelemetry
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
-// These tests freeze the *count* of constants per enum type so that
-// adding a new constant without updating wire_stability_test.go fails
-// loudly here instead of silently shipping an un-frozen wire value.
-//
-// Why count rather than reflect-walk: Go's reflect cannot enumerate
-// package-level constants, and parsing source with go/ast just to count
-// them is overkill for a freeze test. The expected counts mirror the
-// const blocks in state.go; bumping them is a deliberate one-line edit
-// that forces the developer to look at wire_stability_test.go in the
-// same PR.
-//
-// Process to add a new constant:
-//   1. Add const in state.go
-//   2. Add wire string entry in wire_stability_test.go
-//   3. Bump want count here
-
-func TestRunStateCount(t *testing.T) {
-	const want = 5 // Succeeded / Failed / Skipped / TimedOut / Canceled
-	got := len(allRunStates())
-	if got != want {
-		t.Errorf("RunState count = %d, want %d (update wire_stability_test.go and this test together)", got, want)
+// TestEnumWireFreezeComplete pins that the wire maps in wire_stability_test.go
+// cover exactly the enum constants the package declares, read from its source
+// by declaredEnums: a constant added without a frozen wire string, a frozen
+// entry whose constant is gone, or a new string enum type with no map fails
+// here. Adding a constant needs only its wire map entry.
+func TestEnumWireFreezeComplete(t *testing.T) {
+	t.Parallel()
+	frozen := map[string][]string{
+		"RunState":    wireKeys(wireRunStates),
+		"ErrorClass":  wireKeys(wireErrorClasses),
+		"TriggerKind": wireKeys(wireTriggerKinds),
+		"Subsystem":   wireKeys(wireSubsystems),
+	}
+	declared := declaredEnums(t)
+	for typ := range declared {
+		if _, ok := frozen[typ]; !ok {
+			t.Errorf("string type %s has no wire freeze map in wire_stability_test.go", typ)
+		}
+	}
+	for typ, wire := range frozen {
+		consts, ok := declared[typ]
+		if !ok || len(consts) == 0 {
+			t.Errorf("source scan found no %s constants; it has gone blind or the type moved", typ)
+			continue
+		}
+		missing, extra := 0, 0
+		for _, v := range consts {
+			if !slices.Contains(wire, v) {
+				missing++
+				t.Errorf("%s constant %q has no frozen wire string in wire_stability_test.go", typ, v)
+			}
+		}
+		for _, v := range wire {
+			if !slices.Contains(consts, v) {
+				extra++
+				t.Errorf("%s wire entry %q matches no declared constant", typ, v)
+			}
+		}
+		// A constant sharing an existing literal passes both set checks above.
+		if missing == 0 && extra == 0 && len(consts) != len(wire) {
+			t.Errorf("%s: %d constants declared, %d frozen — a constant duplicates another's wire string", typ, len(consts), len(wire))
+		}
 	}
 }
 
-func TestErrorClassCount(t *testing.T) {
-	const want = 16 // None + 3 shared + 10 cron (7 local + 3 sandbox) + 2 sysession
-	got := len(allErrorClasses())
-	if got != want {
-		t.Errorf("ErrorClass count = %d, want %d (update wire_stability_test.go and this test together)", got, want)
+func wireKeys[K ~string](m map[K]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, string(k))
 	}
-}
-
-func TestTriggerKindCount(t *testing.T) {
-	const want = 3 // Scheduled / Manual / Catchup
-	got := len(allTriggerKinds())
-	if got != want {
-		t.Errorf("TriggerKind count = %d, want %d (update wire_stability_test.go and this test together)", got, want)
-	}
-}
-
-func TestSubsystemCount(t *testing.T) {
-	const want = 3 // Cron / Sysession / Session
-	got := len(allSubsystems())
-	if got != want {
-		t.Errorf("Subsystem count = %d, want %d (update wire_stability_test.go and this test together)", got, want)
-	}
-}
-
-// Mirror lists. Each must be kept in sync with the const block of the
-// same type in state.go. Using a list (not a map) so the test fails on
-// duplicate entries here too — a mistake adding the same constant twice
-// would inflate the count to match.
-func allRunStates() []RunState {
-	return []RunState{
-		RunStateSucceeded,
-		RunStateFailed,
-		RunStateSkipped,
-		RunStateTimedOut,
-		RunStateCanceled,
-	}
-}
-
-func allErrorClasses() []ErrorClass {
-	return []ErrorClass{
-		ErrClassNone,
-		ErrClassDeadlineExceeded,
-		ErrClassCanceled,
-		ErrClassPanic,
-
-		ErrClassCronSessionError,
-		ErrClassCronSendError,
-		ErrClassCronWorkDirUnreachable,
-		ErrClassCronWorkDirOutsideRoot,
-		ErrClassCronOverlapSkipped,
-		ErrClassCronSessionCapacity,
-		ErrClassCronTurnFailed,
-		ErrClassCronSandboxFailed,
-		ErrClassCronSandboxTransport,
-		ErrClassCronSandboxUnavailable,
-
-		ErrClassSysessionUpstream,
-		ErrClassSysessionValidation,
-	}
-}
-
-func allTriggerKinds() []TriggerKind {
-	return []TriggerKind{
-		TriggerScheduled,
-		TriggerManual,
-		TriggerCatchup,
-	}
-}
-
-func allSubsystems() []Subsystem {
-	return []Subsystem{
-		SubsystemCron,
-		SubsystemSysession,
-		SubsystemSession,
-	}
+	return out
 }
