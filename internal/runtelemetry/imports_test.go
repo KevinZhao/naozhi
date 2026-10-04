@@ -67,9 +67,11 @@ func parseProductionFiles(t *testing.T) (*token.FileSet, map[string]*ast.File) {
 }
 
 // declaredEnums returns, for every `type X string` the package declares, the
-// wire literal of each constant of that type. A constant the scan cannot read
-// as `Name X = "literal"` fails the test instead of being skipped, since a
-// skipped constant is one the wire freeze never sees.
+// wire literal of each constant of that type. An enum-typed constant must read
+// `Name X = "literal"`, and any other const whose value mentions an enum type
+// or constant fails the test, so no const spelling yields a wire value the
+// freeze never sees. Runtime conversions are not constants and stay out of
+// scope.
 func declaredEnums(t *testing.T) map[string][]string {
 	t.Helper()
 	fset, files := parseProductionFiles(t)
@@ -85,11 +87,13 @@ func declaredEnums(t *testing.T) map[string][]string {
 			}
 		}
 	}
+	enumConsts := map[string]bool{}
+	var others []*ast.ValueSpec
 	for _, f := range files {
-		for _, d := range f.Decls {
-			gd, ok := d.(*ast.GenDecl)
+		ast.Inspect(f, func(n ast.Node) bool {
+			gd, ok := n.(*ast.GenDecl)
 			if !ok || gd.Tok != token.CONST {
-				continue
+				return true
 			}
 			prevEnum := false // an untyped spec with no values repeats the previous one
 			for _, s := range gd.Specs {
@@ -100,12 +104,7 @@ func declaredEnums(t *testing.T) map[string][]string {
 						t.Fatalf("%s: const %s repeats the previous enum spec; spell out its type and literal",
 							fset.Position(vs.Pos()), vs.Names[0].Name)
 					}
-					for _, v := range vs.Values {
-						if c, ok := v.(*ast.CallExpr); ok && enums[identName(c.Fun)] != nil {
-							t.Fatalf("%s: const %s converts to %s; declare it as `Name %s = \"...\"` so the enum freeze sees it",
-								fset.Position(vs.Pos()), vs.Names[0].Name, identName(c.Fun), identName(c.Fun))
-						}
-					}
+					others = append(others, vs)
 					prevEnum = false
 					continue
 				}
@@ -122,9 +121,22 @@ func declaredEnums(t *testing.T) map[string][]string {
 					if err != nil {
 						t.Fatalf("%s: unquote %s: %v", fset.Position(v.Pos()), lit.Value, err)
 					}
+					enumConsts[vs.Names[i].Name] = true
 					enums[typ] = append(enums[typ], val)
 				}
 			}
+			return false
+		})
+	}
+	for _, vs := range others {
+		for _, v := range vs.Values {
+			ast.Inspect(v, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok && (enums[id.Name] != nil || enumConsts[id.Name]) {
+					t.Fatalf("%s: const %s derives from %s; declare it as `Name T = \"...\"` so the enum freeze sees it",
+						fset.Position(vs.Pos()), vs.Names[0].Name, id.Name)
+				}
+				return true
+			})
 		}
 	}
 	return enums
