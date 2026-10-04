@@ -271,6 +271,94 @@ func TestSpawnSession_StaleSpawnFlagsAShimSocketThatOutlivesTheWait(t *testing.T
 	if !errors.Is(got.err, ErrShimStuck) || !errors.Is(got.err, boom) {
 		t.Errorf("GetOrCreate = %v, want ErrShimStuck wrapping the retry's spawn error", got.err)
 	}
+	if shimStuckLeft(r, key) {
+		t.Error("the key is still flagged shim-stuck after the call")
+	}
+}
+
+func shimStuckLeft(r *Router, key string) bool {
+	var stuck bool
+	r.ss.Update(func(tx sessTx) { stuck = tx.Ext().spawns.ShimStuck(key) })
+	return stuck
+}
+
+// TestSpawnSession_StaleSpawnReplacedWithABoundSocketWrapsTheRetry: the
+// retry after a replacement resumes the replacement, and its spawn error is
+// still wrapped as ErrShimStuck without leaving the key flagged for a later
+// call.
+func TestSpawnSession_StaleSpawnReplacedWithABoundSocketWrapsTheRetry(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	const key = "feishu:direct:spawn-stale-replaced-stuck:general"
+	if err := os.WriteFile(shim.SocketPath(shim.KeyHash(key)), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := newGatedSpawn()
+	boom := errors.New("spawn failed")
+	r := spawnRouter(t, 4, func(ctx context.Context, opts cli.SpawnOptions) (processIface, error) {
+		if opts.ResumeID == "sid-second" {
+			return nil, boom
+		}
+		return g.hook(ctx, opts)
+	})
+	injectSession(r, key, newDeadProc()).setSessionID("sid-first")
+
+	res := spawnAsync(r, key)
+	waitEntered(t, g)
+	second := &ManagedSession{key: key}
+	second.storeProcess(newDeadProc())
+	second.setSessionID("sid-second")
+	r.ss.Update(func(tx sessTx) { tx.Put(key, second) })
+	close(g.release)
+
+	got := waitResult(t, res) // waits out the 2s socket-gone window
+	if !errors.Is(got.err, ErrShimStuck) || !errors.Is(got.err, boom) {
+		t.Errorf("GetOrCreate = %v, want ErrShimStuck wrapping the retry's spawn error", got.err)
+	}
+	if shimStuckLeft(r, key) {
+		t.Error("the key is still flagged shim-stuck after the call")
+	}
+}
+
+// TestGetOrCreate_CancelledDuringAStaleSpawnDoesNotRetry: a caller whose ctx
+// ends while its spawn goes stale gets ctx's error instead of another spawn,
+// and leaves no shim-stuck flag behind for the removed key.
+func TestGetOrCreate_CancelledDuringAStaleSpawnDoesNotRetry(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	const key = "feishu:direct:spawn-stale-cancelled:general"
+	if err := os.WriteFile(shim.SocketPath(shim.KeyHash(key)), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := newGatedSpawn()
+	// The spawn ignores ctx, so the cancel lands on the retry decision.
+	r := spawnRouter(t, 4, func(_ context.Context, opts cli.SpawnOptions) (processIface, error) {
+		return g.hook(context.Background(), opts)
+	})
+	injectSession(r, key, newDeadProc()).setSessionID("sid-old")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := make(chan spawnResult, 1)
+	go func() {
+		s, st, err := r.GetOrCreate(ctx, key, AgentOpts{})
+		out <- spawnResult{s, st, err}
+	}()
+	waitEntered(t, g)
+	cancel()
+	if !r.Remove(key) {
+		t.Fatal("Remove found no session")
+	}
+	close(g.release)
+
+	got := waitResult(t, out) // waits out the 2s socket-gone window
+	if !errors.Is(got.err, context.Canceled) {
+		t.Errorf("GetOrCreate = %v, %v, want context.Canceled", got.s, got.err)
+	}
+	if ids, _ := g.calls(); len(ids) != 1 {
+		t.Errorf("spawn calls = %q, want only the stale one", ids)
+	}
+	if shimStuckLeft(r, key) {
+		t.Error("the removed key is left flagged shim-stuck")
+	}
 }
 
 // TestSpawnSession_ReplacedMeanwhileResumesTheReplacement: when the key's

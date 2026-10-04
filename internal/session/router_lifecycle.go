@@ -79,6 +79,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 	// already in flight (outside the lock, then another round), or reserving
 	// a spawn of our own — so the decision to spawn and the in-flight marker
 	// cannot be split by another caller.
+	var staleSocketBound bool
 	for {
 		var (
 			live      *ManagedSession
@@ -151,10 +152,11 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 			if err := ctx.Err(); err != nil {
 				return nil, 0, err
 			}
+			staleSocketBound = res.socketBound
 			continue
 		}
 		if err != nil {
-			if stuck {
+			if stuck || staleSocketBound {
 				// errors.Is chain lets callers pin on ErrShimStuck.
 				return nil, 0, fmt.Errorf("session %s: %w: %w", key, ErrShimStuck, err)
 			}
@@ -413,6 +415,10 @@ type spawnReservation struct {
 	// resume branch). Such a spawn is stale once old is no longer the key's
 	// entry; a takeover resumes an ID its caller supplied and is never stale.
 	resumesOld bool
+	// socketBound comes with errSpawnStale when the discarded process's shim
+	// socket outlived the wait; the caller's retry wraps its spawn error as
+	// ErrShimStuck.
+	socketBound bool
 }
 
 // errSpawnStale is completeSpawn's answer for a resumesOld spawn whose entry
@@ -584,8 +590,9 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 			// The key's entry was removed or replaced by a dead one meanwhile.
 			// A process resuming the old entry's conversation would bring a
 			// reset session back, so it is discarded. Otherwise the process is
-			// fresh: it continues the entry there now, so a removed session is
-			// not resurrected into this one.
+			// not tied to the old entry (fresh, or a caller-supplied resume):
+			// it continues the entry there now, so a removed session is not
+			// resurrected into this one.
 			if res.resumesOld {
 				stale = true
 				return
@@ -621,9 +628,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 	if stale {
 		// The in-flight marker is still held here, so other callers for key
 		// stay parked until the socket is gone.
-		if !discardStaleSpawn(key, res.resumeID, proc) {
-			r.ss.Update(func(tx sessTx) { tx.Ext().spawns.MarkShimStuck(key) })
-		}
+		res.socketBound = !discardStaleSpawn(key, res.resumeID, proc)
 		return nil, errSpawnStale
 	}
 	// The argv was built from the reserve-time tuning; SetSessionTuning
@@ -641,8 +646,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 
 // discardStaleSpawn closes a stale spawn's process and waits for its shim
 // socket to go, so the next spawn for key does not hit the "refusing to
-// clobber" guard. False means the socket is still bound and the caller flags
-// the key shim-stuck, as a Reset does.
+// clobber" guard. False means the socket is still bound.
 func discardStaleSpawn(key, resumeID string, proc processIface) bool {
 	slog.Info("resumed session left the table during the spawn; spawning again",
 		"key", osutil.SanitizeForLog(key, 64), "resume_id", resumeID)
@@ -650,7 +654,7 @@ func discardStaleSpawn(key, resumeID string, proc processIface) bool {
 	if waitSocketGoneForKey(key, 2*time.Second) {
 		return true
 	}
-	slog.Warn("shim socket still bound after discarding a stale spawn — flagging key for ErrShimStuck wrap on next GetOrCreate",
+	slog.Warn("shim socket still bound after discarding a stale spawn — the retry's spawn error will be wrapped as ErrShimStuck",
 		"key", osutil.SanitizeForLog(key, 64))
 	return false
 }
