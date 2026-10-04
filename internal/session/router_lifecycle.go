@@ -51,6 +51,11 @@ func (r *Router) publishSession(tx sessTx, key string, s *ManagedSession, alread
 	if prev := tx.Get(key); prev != nil && prev != s && s.gapFill.Load() == nil {
 		s.gapFill.Store(prev.gapFillCell())
 	}
+	// A live session ends key's run of failed spawns, or the run would pause
+	// that session's respawn once it dies.
+	if s.isAlive() {
+		tx.Ext().spawns.ClearStartupFailure(key)
+	}
 	tx.Put(key, s)
 }
 
@@ -115,7 +120,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 					return
 				}
 				resumedID, status = s.getSessionID(), SessionResumed
-				if err = startupBreaker(key, s, time.Now()); err != nil {
+				if err = startupBreaker(tx, key, time.Now()); err != nil {
 					return
 				}
 				err = r.reserveSpawn(tx, &res, key, resumedID, opts)
@@ -126,6 +131,9 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 			}
 			if ch, inflight := tx.Ext().spawns.SpawnInFlight(key); inflight {
 				wait = ch
+				return
+			}
+			if err = startupBreaker(tx, key, time.Now()); err != nil {
 				return
 			}
 			// Consume the per-key shim-stuck flag (set by a Reset whose
@@ -561,14 +569,18 @@ func (r *Router) reserveSpawn(tx sessTx, res *spawnReservation, key, resumeID st
 // previous-history copy, then a commit transaction that re-checks the key and
 // installs. The in-flight marker and the pending slot are released however it
 // returns.
-func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*ManagedSession, error) {
+func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (_ *ManagedSession, err error) {
 	key := res.key
 	// One transaction on the way out ends the spawn marker and, when the
 	// commit did not already, releases the slot. Panic-safe: a panicking
 	// Spawn must still decrement pendingSpawns or the router permanently
-	// refuses new sessions with ErrMaxProcs.
+	// refuses new sessions with ErrMaxProcs. A failed Init handshake is
+	// recorded before the marker ends, so the waiters it wakes are paused.
 	defer r.ss.Update(func(tx sessTx) {
 		res.slot.releaseIn(tx)
+		if countsAsStartupFailure(ctx, err) {
+			noteSpawnFailure(tx, key, err, time.Now())
+		}
 		tx.Ext().spawns.EndSpawn(key, res.doneCh)
 	})
 
@@ -605,6 +617,10 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 	var stale bool
 	r.ss.Update(func(tx sessTx) {
 		res.slot.releaseIn(tx)
+		// The CLI got past Init: the key's run of failed spawns ends here and
+		// carries on in the new session's startupFails.
+		failedSpawns, _ := tx.Ext().spawns.StartupFailure(key)
+		tx.Ext().spawns.ClearStartupFailure(key)
 		for {
 			// A concurrent spawn may have installed a live session for this
 			// key while we were unlocked; if so it wins and ours is closed.
@@ -644,7 +660,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 			oldHistory, respawnChain(prevIDs, res.rejectedResumeID, ""), snap.cost, snap.costSpent, snap.createdAt, res.opts.Exempt, snap.sid,
 			hist.userTurns, overrides,
 		)
-		s.startupFails.Store(snap.startupFails)
+		s.startupFails.Store(max(snap.startupFails, failedSpawns.Streak))
 		s.costMu.Lock()
 		s.spent = snap.spent
 		costBase.applyLocked(s)
@@ -835,5 +851,6 @@ func (r *Router) unregisterSession(tx sessTx, key string, s *ManagedSession, kee
 		// The shim-stuck flag is only consumed by GetOrCreate, so terminal
 		// removals must clear it or the entry lives for the process lifetime.
 		tx.Ext().spawns.ClearShimStuck(key)
+		tx.Ext().spawns.ClearStartupFailure(key)
 	}
 }

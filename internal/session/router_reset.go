@@ -82,6 +82,7 @@ func (r *Router) resetChatEntry(tx sessTx, key string, released []releasedKey, c
 		tx.ClearID(id)
 	}
 	tx.Delete(key)
+	tx.Ext().spawns.ClearStartupFailure(key)
 	// Backend pick only: the chat returns to the default backend, while the
 	// two consumed-on-spawn picks still apply to this key. dropBackend's doc
 	// records that the omission is deliberate.
@@ -165,6 +166,8 @@ func (r *Router) releaseKeys(keys []releasedKey) {
 // the key's table entry is unregistered here, so callers cannot recover the
 // UUID once the transaction ends), and the success flag.
 func (r *Router) resetEntry(tx sessTx, key string) (processIface, string, bool) {
+	// /new lifts a startup-failure pause at once, on a key with no entry too.
+	tx.Ext().spawns.ClearStartupFailure(key)
 	s, ok := tx.Lookup(key)
 	if !ok {
 		return nil, "", false
@@ -271,6 +274,7 @@ func (r *Router) resetAndRecreateOnce(ctx context.Context, key string, opts Agen
 			wait = ch
 			return
 		}
+		tx.Ext().spawns.ClearStartupFailure(key)
 		// Delete old session if present
 		if s, ok := tx.Lookup(key); ok {
 			hadOld = true

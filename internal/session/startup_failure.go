@@ -2,9 +2,11 @@ package session
 
 // startup_failure.go — what a respawn does after a CLI that failed at
 // startup: drop the resume id the failure may be about, and stop respawning a
-// key whose fresh processes keep failing too.
+// key whose fresh processes keep failing too, whether they died after the
+// spawn or failed it in the Init handshake.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,6 +14,8 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/session/spawnpool"
 )
 
 // ErrCLIStartupFailed is returned by GetOrCreate without spawning while a
@@ -80,17 +84,44 @@ func (f startupFailure) cooldownLeft(now time.Time) time.Duration {
 	return max(f.at.Add(wait).Sub(now), 0)
 }
 
-// startupBreaker is GetOrCreate's verdict on respawning dead session s: an
-// ErrCLIStartupFailed while its cooldown runs, else nil.
-func startupBreaker(key string, s *ManagedSession, now time.Time) error {
-	f := startupFailureOf(s)
+// startupBreaker is GetOrCreate's verdict on spawning key, whose entry is
+// dead or absent: an ErrCLIStartupFailed while the cooldown of its latest
+// startup failure runs, else nil. The latest is the entry's process or the
+// key's run of failed spawns, whichever failed last.
+func startupBreaker(tx sessTx, key string, now time.Time) error {
+	f := startupFailureOf(tx.Get(key))
+	if rec, ok := tx.Ext().spawns.StartupFailure(key); ok && rec.At.After(f.at) {
+		f = startupFailure{streak: rec.Streak, at: rec.At, detail: rec.Detail}
+	}
 	left := f.cooldownLeft(now).Round(time.Second)
 	if left <= 0 {
 		return nil
 	}
 	slog.Warn("CLI keeps failing at startup; respawn paused",
-		"key", key, "failures", f.streak, "retry_in", left, "stderr", f.detail)
+		"key", key, "failures", f.streak, "retry_in", left, "cause", f.detail)
 	return fmt.Errorf("%w (%d in a row, retry in %s)", ErrCLIStartupFailed, f.streak, left)
+}
+
+// countsAsStartupFailure reports whether a spawn's err says its CLI fails at
+// startup: the Init handshake failed while ctx was live. A rejected resume is
+// about the session id, and GetOrCreate retries it fresh.
+func countsAsStartupFailure(ctx context.Context, err error) bool {
+	return errors.Is(err, clierr.ErrSpawnInit) && !errors.Is(err, clierr.ErrResumeRejected) && ctx.Err() == nil
+}
+
+// noteSpawnFailure records err as key's latest failed spawn, continuing the
+// streak of the key's run or of its dead entry's process.
+func noteSpawnFailure(tx sessTx, key string, err error, now time.Time) {
+	cur := tx.Get(key)
+	if cur != nil && cur.isAlive() {
+		return // another path installed a live session: nothing to pause
+	}
+	rec, _ := tx.Ext().spawns.StartupFailure(key)
+	tx.Ext().spawns.NoteStartupFailure(key, spawnpool.StartupFailure{
+		Streak: max(rec.Streak, startupFailureOf(cur).streak) + 1,
+		At:     now,
+		Detail: osutil.SanitizeForLog(err.Error(), 200),
+	})
 }
 
 // resumeDropReason is why a respawn of old must not resume its session id,
