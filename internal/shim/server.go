@@ -98,7 +98,7 @@ func Run(cfg Config) error {
 
 	// umask 0177 so the socket file is created 0600 atomically.
 	oldUmask := setUmask(0177)
-	listener, err := net.Listen("unix", cfg.SocketPath)
+	listener, err := listenShimSocket(cfg.SocketPath)
 	setUmask(oldUmask)
 	if err != nil {
 		cli.kill()
@@ -290,8 +290,9 @@ func Run(cfg Config) error {
 // waitForReattach keeps the socket open for postExitReattachWindow after the
 // CLI died so a reconnecting naozhi client can pick up the dead-CLI signal;
 // if one connects it is handed to spawnClient and a second window covers the
-// operator handoff. Returns once the window elapses or s.done fires. reason
-// keeps the cli_exited and watchdog paths distinguishable in logs (#707).
+// operator handoff, still serving later clients so a respawn can retire this
+// shim. Returns once the window elapses or s.done fires. reason keeps the
+// cli_exited and watchdog paths distinguishable in logs (#707).
 func (s *shimServer) waitForReattach(acceptCh <-chan net.Conn, spawnClient func(net.Conn), reason string) {
 	exitTimer := time.NewTimer(postExitReattachWindow)
 	select {
@@ -299,13 +300,19 @@ func (s *shimServer) waitForReattach(acceptCh <-chan net.Conn, spawnClient func(
 		exitTimer.Stop()
 		spawnClient(conn)
 		reconnectTimer := time.NewTimer(postExitReattachWindow)
-		select {
-		case <-s.done:
-			reconnectTimer.Stop()
-			slog.Info("exiting: done after " + reason + " + reconnect")
-		case <-reconnectTimer.C:
-			slog.Info("exiting: post-exit reattach window expired after "+reason+" + reconnect",
-				"window", postExitReattachWindow)
+		defer reconnectTimer.Stop()
+		for {
+			select {
+			case conn := <-acceptCh:
+				spawnClient(conn)
+				continue
+			case <-s.done:
+				slog.Info("exiting: done after " + reason + " + reconnect")
+			case <-reconnectTimer.C:
+				slog.Info("exiting: post-exit reattach window expired after "+reason+" + reconnect",
+					"window", postExitReattachWindow)
+			}
+			return
 		}
 	case <-s.done:
 		exitTimer.Stop()

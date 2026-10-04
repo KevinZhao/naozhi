@@ -350,8 +350,9 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 
 	// Remove a stale socket left by a previous shim — but only after verifying
 	// nothing is listening: unlinking a live socket turns the peer shim into an
-	// unreachable zombie (listener fd with no filesystem entry). Fail loud.
-	if err := ensureSocketFreeForReuse(socketPath); err != nil {
+	// unreachable zombie (listener fd with no filesystem entry). A listener
+	// whose CLI is dead is retired first; any other one fails loud.
+	if err := m.prepareSocketForSpawn(ctx, key, socketPath); err != nil {
 		return nil, err
 	}
 
