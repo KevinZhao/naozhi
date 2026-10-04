@@ -379,6 +379,42 @@ func TestOwnerLoop_ResetStopsTheStaleOwner(t *testing.T) {
 	}
 }
 
+// TestOwnerLoop_ResetThenRetireStopsTheStaleOwner: Reset followed by the
+// router's KeyRetired Cleanup, as /new runs it. The stale owner finishing its
+// turn must not release the new owner's key, so a later request queues
+// behind the new owner instead of starting a second one (#3113).
+func TestOwnerLoop_ResetThenRetireStopsTheStaleOwner(t *testing.T) {
+	t.Parallel()
+	h := newHarness(8, ModeCollect)
+	releaseStale := h.hold()
+	adm := &fakeAdmission{rec: h.rec, async: true}
+
+	h.submit("m1", newOrigin(h.rec, "a", "ws:a"), adm)
+	h.rec.waitFor(t, "send:k:m1", 1)
+	h.o.Reset(context.Background(), "k", false)
+	h.o.Cleanup("k")
+	// A second gate, so releaseStale lets through m1's turn and not m3's.
+	releaseNew := h.hold()
+	if ack := h.submit("m3", newOrigin(h.rec, "c", "ws:c"), adm); ack != AckOwner {
+		t.Fatalf("Submit after Reset = %v, want AckOwner", ack)
+	}
+	h.rec.waitFor(t, "send:k:m3", 1)
+	releaseStale()
+	h.rec.waitFor(t, "idle", 1)
+	if ack := h.submit("m4", newOrigin(h.rec, "d", "ws:d"), adm); ack != AckQueued {
+		t.Fatalf("Submit while m3 runs = %v, want AckQueued (the stale owner released m3's key)", ack)
+	}
+	releaseNew()
+	h.rec.waitFor(t, "send:k:m4", 1)
+	releaseNew()
+	h.rec.waitFor(t, "idle", 2)
+	adm.wg.Wait()
+
+	if got, want := h.s.texts(), []string{"m1", "m3", "m4"}; !slices.Equal(got, want) {
+		t.Fatalf("sent %v, want %v", got, want)
+	}
+}
+
 // TestOwnerLoop_NilOriginIsSilent: requests with no Origin (enqueued straight
 // into the Queue, or submitted without one) take part in turns but receive
 // nothing, and nothing panics.

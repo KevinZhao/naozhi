@@ -105,8 +105,8 @@ func (o *Orchestrator) ShouldNotify(key string) bool {
 	return o.q.ShouldNotify(key)
 }
 
-// Cleanup forgets key's queue state; see queue.Cleanup for the caller's
-// obligations.
+// Cleanup forgets key's queue state; queued messages are dropped silently
+// and an owner still running on key stops at its next drain (queue.Cleanup).
 func (o *Orchestrator) Cleanup(key string) {
 	o.q.Cleanup(key)
 }

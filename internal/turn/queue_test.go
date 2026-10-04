@@ -151,7 +151,7 @@ func TestDiscard_ClearsQueueAndReleasesOwnership(t *testing.T) {
 func TestDiscard_InvalidatesStaleOwner(t *testing.T) {
 	t.Parallel()
 	q := newTestQueue(10, 0)
-	_, _, _, gen := q.enqueueTuple("k1", Msg{Text: "A"}) // gen=0
+	_, _, _, gen := q.enqueueTuple("k1", Msg{Text: "A"})
 	q.Enqueue("k1", Msg{Text: "B"})
 
 	// Simulate /new: discard bumps generation.
@@ -443,11 +443,8 @@ func TestEnqueue_InterruptMode_ReleaseOwnership_ResetsInterruptFlag(t *testing.T
 	// Turn 2: new owner arrives (fresh session/chat activity). A follow-up
 	// during turn 2 must again be able to trigger an interrupt, proving the
 	// release path reset interruptRequested.
-	_, _, _, gen2 := q.enqueueTuple("k1", Msg{Text: "A2"})
-	if gen2 == gen {
-		// Not strictly required (release path does not bump gen), but document
-		// the assumption: same sessionQueue key, ownership cycled.
-		_ = gen2
+	if _, _, _, gen2 := q.enqueueTuple("k1", Msg{Text: "A2"}); gen2 == gen {
+		t.Fatalf("owner after a release reuses gen %d", gen)
 	}
 	if _, _, shouldInterrupt, _ := q.enqueueTuple("k1", Msg{Text: "B2"}); !shouldInterrupt {
 		t.Fatal("turn 2 follow-up after ownership release must request interrupt")
@@ -489,17 +486,17 @@ func TestQueue_CleanupLeavesNothingToDiscard(t *testing.T) {
 }
 
 // TestQueue_Cleanup_RemovesMapEntry verifies Cleanup drops the entry Discard
-// retains for gen-monotonicity, and the next Enqueue starts at gen=0.
+// retains, and the next Enqueue owns a fresh entry with a gen never used.
 func TestQueue_Cleanup_RemovesMapEntry(t *testing.T) {
 	t.Parallel()
 	q := newTestQueue(10, 0)
-	q.Enqueue("k1", Msg{Text: "A"})
+	_, _, _, genA := q.enqueueTuple("k1", Msg{Text: "A"})
 	q.Enqueue("k2", Msg{Text: "A"})
-	q.DiscardAndReturn("k1") // retains the map entry with bumped gen
+	q.DiscardAndReturn("k1") // retains the map entry with a fresh gen
 
 	q.mu.Lock()
 	before := len(q.queues)
-	_, retained := q.queues["k1"]
+	discarded, retained := q.queues["k1"]
 	q.mu.Unlock()
 	if !retained {
 		t.Fatal("Discard should retain the map entry")
@@ -520,8 +517,111 @@ func TestQueue_Cleanup_RemovesMapEntry(t *testing.T) {
 	}
 
 	isOwner, _, _, gen := q.enqueueTuple("k1", Msg{Text: "fresh"})
-	if !isOwner || gen != 0 {
-		t.Fatalf("post-Cleanup: isOwner=%v, gen=%d; want true, 0", isOwner, gen)
+	if !isOwner || gen == genA || gen == discarded.gen {
+		t.Fatalf("post-Cleanup: isOwner=%v, gen=%d; want a fresh owner, gen not %d or %d",
+			isOwner, gen, genA, discarded.gen)
+	}
+}
+
+// TestQueue_CleanupDoesNotRecycleGen: /new discards then the router retires
+// the key (Cleanup). The stale owner's DoneOrDrain must neither release nor
+// drain the entry the next request creates (#3113).
+func TestQueue_CleanupDoesNotRecycleGen(t *testing.T) {
+	t.Parallel()
+	q := newTestQueue(10, 0)
+	_, _, _, genA := q.enqueueTuple("k", Msg{Text: "A"})
+	q.DiscardAndReturn("k")
+	q.Cleanup("k")
+	isOwner, _, _, genB := q.enqueueTuple("k", Msg{Text: "B"})
+	if !isOwner {
+		t.Fatal("B after Cleanup is not the owner")
+	}
+	if msgs := q.DoneOrDrain("k", genA); msgs != nil {
+		t.Fatalf("stale owner drained %v", msgs)
+	}
+	if isOwner, enqueued, _, _ := q.enqueueTuple("k", Msg{Text: "C"}); isOwner || !enqueued {
+		t.Fatalf("C: isOwner=%v enqueued=%v; want queued behind B (stale owner released B's key)", isOwner, enqueued)
+	}
+	if msgs := q.DoneOrDrain("k", genB); len(msgs) != 1 || msgs[0].Text != "C" {
+		t.Fatalf("B drained %v, want [C]", msgs)
+	}
+}
+
+// TestQueue_ReleaseDeleteDoesNotRecycleGen: after a discard, the new owner's
+// release deletes the entry; a stale owner from before the discard must not
+// match the entry created after that (#3113).
+func TestQueue_ReleaseDeleteDoesNotRecycleGen(t *testing.T) {
+	t.Parallel()
+	q := newTestQueue(10, 0)
+	_, _, _, genA := q.enqueueTuple("k", Msg{Text: "A"})
+	q.DiscardAndReturn("k")
+	_, _, _, genB := q.enqueueTuple("k", Msg{Text: "B"})
+	if msgs := q.DoneOrDrain("k", genB); msgs != nil {
+		t.Fatalf("B released with %v", msgs)
+	}
+	isOwner, _, _, genC := q.enqueueTuple("k", Msg{Text: "C"})
+	if !isOwner {
+		t.Fatal("C after B's release is not the owner")
+	}
+	q.Enqueue("k", Msg{Text: "D"})
+	if msgs := q.DoneOrDrain("k", genA); msgs != nil {
+		t.Fatalf("stale owner A drained %v, C's queue", msgs)
+	}
+	if msgs := q.DoneOrDrain("k", genC); len(msgs) != 1 || msgs[0].Text != "D" {
+		t.Fatalf("C drained %v, want [D]", msgs)
+	}
+}
+
+// TestQueue_OwnerGensAreNeverReissued: every owner across discards, releases
+// and Cleanups gets a gen no earlier owner held, so no stale owner can match.
+func TestQueue_OwnerGensAreNeverReissued(t *testing.T) {
+	t.Parallel()
+	q := newTestQueue(10, 0)
+	seen := map[uint64]int{}
+	own := func(step int) uint64 {
+		isOwner, _, _, gen := q.enqueueTuple("k", Msg{Text: "x"})
+		if !isOwner {
+			t.Fatalf("step %d: not the owner", step)
+		}
+		if prev, dup := seen[gen]; dup {
+			t.Fatalf("step %d: gen %d already held by the owner of step %d", step, gen, prev)
+		}
+		seen[gen] = step
+		return gen
+	}
+	for step := 0; step < 4; step++ {
+		gen := own(step)
+		switch step {
+		case 0, 1:
+			q.DiscardAndReturn("k")
+		case 2:
+			q.DiscardAndReturn("k")
+			q.Cleanup("k")
+		case 3:
+			q.DoneOrDrain("k", gen)
+		}
+	}
+	own(4)
+}
+
+// TestQueue_CleanupWithoutDiscardStopsLiveOwner: Router.Remove retires a key
+// with no discard first. The owner still running stops at its next
+// DoneOrDrain and leaves the next owner's queue alone (#3113).
+func TestQueue_CleanupWithoutDiscardStopsLiveOwner(t *testing.T) {
+	t.Parallel()
+	q := newTestQueue(10, 0)
+	_, _, _, genA := q.enqueueTuple("k", Msg{Text: "A"})
+	q.Cleanup("k")
+	isOwner, _, _, genB := q.enqueueTuple("k", Msg{Text: "B"})
+	if !isOwner {
+		t.Fatal("B after Cleanup is not the owner")
+	}
+	q.Enqueue("k", Msg{Text: "C"})
+	if msgs := q.DoneOrDrain("k", genA); msgs != nil {
+		t.Fatalf("removed owner A drained %v, B's queue", msgs)
+	}
+	if msgs := q.DoneOrDrain("k", genB); len(msgs) != 1 || msgs[0].Text != "C" {
+		t.Fatalf("B drained %v, want [C]", msgs)
 	}
 }
 

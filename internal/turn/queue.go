@@ -62,7 +62,9 @@ func ParseMode(s string) Mode {
 // sessionQueue tracks per-session busy state and queued messages.
 type sessionQueue struct {
 	busy bool
-	gen  uint64 // incremented by DiscardAndReturn to invalidate stale owners
+	// gen is drawn from queue.genSeq, so it is unique across every entry the
+	// queue ever creates: an old owner's gen never matches a later entry.
+	gen uint64
 	// ring holds queued messages in a fixed-capacity FIFO ring buffer (#570).
 	ring         msgRing
 	lastNotifyNs int64 // unix nanoseconds of last ShouldNotify call
@@ -179,6 +181,8 @@ type queue struct {
 	maxDepth     int
 	collectDelay time.Duration
 	mode         Mode
+	// genSeq is the last generation handed to a sessionQueue.
+	genSeq uint64
 
 	// dropNotifyLRU/dropNotifyIndex form a bounded per-key cooldown LRU for
 	// notifies when no sessionQueue exists (maxDepth<=0 drop path, or between
@@ -270,15 +274,21 @@ func (q *queue) Mode() Mode {
 	return q.mode
 }
 
-// getOrCreate returns the sessionQueue for key, creating one if needed.
-// Caller must hold mu.
+// getOrCreate returns the sessionQueue for key, creating one with a fresh
+// generation if needed. Caller must hold mu.
 func (q *queue) getOrCreate(key string) *sessionQueue {
 	sq := q.queues[key]
 	if sq == nil {
-		sq = &sessionQueue{}
+		sq = &sessionQueue{gen: q.nextGen()}
 		q.queues[key] = sq
 	}
 	return sq
+}
+
+// nextGen returns a generation no sessionQueue has held. Caller must hold mu.
+func (q *queue) nextGen() uint64 {
+	q.genSeq++
+	return q.genSeq
 }
 
 // enqueueResult is Enqueue's answer:
@@ -383,18 +393,17 @@ func (q *queue) DoneOrDrain(key string, gen uint64) []Msg {
 }
 
 // DiscardAndReturn clears key's queued messages and releases ownership,
-// bumping the generation so a stale owner loop stops on its next DoneOrDrain
-// (/new, /clear, panic, shutdown). The bumped gen MUST persist in the map so
-// a concurrent Enqueue that becomes the new owner picks up gen+1 rather than
-// colliding with the stale owner's check — hence the entry is kept. The
-// discarded messages come back FIFO so each origin can be told (#2013); nil
-// when nothing was queued.
+// giving the entry a fresh generation so a stale owner loop stops on its next
+// DoneOrDrain (/new, /clear, panic, shutdown). The entry is kept so the next
+// Enqueue reuses its ring; deleting it would be equally safe. The discarded
+// messages come back FIFO so each origin can be told (#2013); nil when
+// nothing was queued.
 func (q *queue) DiscardAndReturn(key string) []Msg {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	var dropped []Msg
 	if sq := q.queues[key]; sq != nil {
-		sq.gen++
+		sq.gen = q.nextGen()
 		dropped = sq.ring.drainAll()
 		sq.busy = false
 		sq.lastNotifyNs = 0
@@ -410,11 +419,10 @@ func (q *queue) DiscardAndReturn(key string) []Msg {
 	return dropped
 }
 
-// Cleanup UNCONDITIONALLY deletes the map entry for key — the only
-// method allowed to break gen-monotonicity. Callers MUST ensure no in-flight
-// owner can arrive on this key afterwards (a stale owner with gen 0 could
-// drain a newly-enqueued batch). Its one caller is Orchestrator.Cleanup, on a
-// key the router retired after a discard signalled any racing owner.
+// Cleanup deletes the map entry for key, dropping its queued messages without
+// telling their origins. An owner still running on key finds no entry, or a
+// later entry with a different gen, on its next DoneOrDrain and stops. Its one
+// caller is Orchestrator.Cleanup, on a key the router retired.
 func (q *queue) Cleanup(key string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
