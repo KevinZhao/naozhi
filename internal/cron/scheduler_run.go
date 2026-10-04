@@ -679,12 +679,14 @@ func (s *Scheduler) execSend(a execSendArgs) (result SendResult, costInc costled
 	// Reset race the in-flight interrupt write; see its godoc.
 	result, abort, err := s.sendWithWatchdog(sendCtx, sendCancel, a.sess, a.cleanText)
 	costInc = costTotalsOf(a.sess).Sub(before)
-	if err != nil {
-		s.execSendError(a, abort, err, costInc)
-		return SendResult{}, costledger.Increment{}, false
-	}
+	// A failed turn whose result frame named its session (turn_failed) keeps
+	// that id, so the run record and sidebar stub reach the failed JSONL.
 	if result.SessionID != "" {
 		a.inflight.setSessionID(result.SessionID)
+	}
+	if err != nil {
+		s.execSendError(a, abort, err, costInc, result.SessionID)
+		return SendResult{}, costledger.Increment{}, false
 	}
 	return result, costInc, true
 }
@@ -700,12 +702,17 @@ func costTotalsOf(sess Session) costledger.Totals {
 
 // execSendError terminates a run whose Send failed: classify, log, reap the
 // fresh session while the CAS gate is held, finishRun, notify, and refresh
-// the sidebar stub.
-func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, costInc costledger.Increment) {
+// the sidebar stub. sid is the session the failed turn's result frame named,
+// "" when no result arrived; when known it is recorded on the run and the
+// fresh stub chains to it instead of the previous run's session.
+func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, costInc costledger.Increment, sid string) {
 	// Only what this function still reads directly; the identity fields it used to
 	// unpack are now spelled once, as finishRun(a.runCtx, ...).
 	snap, key := a.snap, a.key
 	lg, stubRefresh := a.lg, a.stubRefresh
+	if sid != "" {
+		stubRefresh.lastSessionID = sid
+	}
 	if errors.Is(err, context.Canceled) {
 		// Suppress the operator-facing notice so shutdown races don't look like
 		// real failures. As on the deadline path, a watchdog that fired without
@@ -736,7 +743,7 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 		stubRefresh.run()
 		s.finishRun(a.runCtx, runOutcome{
 			state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
-			skipPersist: true, costInc: costInc,
+			sessionID: sid, skipPersist: true, costInc: costInc,
 			// Keep the restart marker only when the cancel came from the process
 			// shutting down (stopCtx) and no operator interrupt landed: the CLI
 			// is still mid-turn behind its shim, and the next process's adoption
@@ -782,8 +789,8 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 	stubRefresh.run()
 	paused := s.finishRun(a.runCtx, runOutcome{
 		state: state, errClass: errClass,
-		errMsg:  "send error: " + sanitiseRunErrMsg(err.Error()), // strip IP:port/paths, mirrors lg.Error above
-		costInc: costInc,
+		errMsg:    "send error: " + sanitiseRunErrMsg(err.Error()), // strip IP:port/paths, mirrors lg.Error above
+		sessionID: sid, costInc: costInc,
 	})
 	s.deliverFailureNotice(a.runCtx, errClass, state, a.jobTimeout, paused)
 }

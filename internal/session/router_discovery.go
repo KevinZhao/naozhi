@@ -273,7 +273,7 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 // it. A non-cron key panics rather than leaving a dangling no-op stub (RFC v2.1 §8.1).
 //
 // chainIDs 是注入的 session-ID 链：stub 没有自己的 sessionID，但 historySource
-// 查 JSONL 要用 chain（cron 即上一次成功执行的 cron.Job.LastSessionID），否则
+// 查 JSONL 要用 chain（cron 即 cron.Job.LastSessionID，最近一次执行留下的 session），否则
 // fresh_context=true 每次 Reset 后 dashboard 只能看到空白事件面板。nil 表示没有链。
 func (r *Router) RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string) {
 	if !IsCronKey(key) {

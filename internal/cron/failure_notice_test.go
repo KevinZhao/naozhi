@@ -177,7 +177,7 @@ func TestExecSendError_NoticeNamesCause(t *testing.T) {
 			j := &Job{ID: "job-send-" + strings.ReplaceAll(tc.name, " ", "-"), Schedule: "@every 5m"}
 			s.putJobForTest(j)
 			ga := withNotify(newGetSessionArgs(t, s, j), "日报")
-			s.execSendError(execSendArgs{runCtx: ga.runCtx, jobTimeout: s.execTimeout}, abortResult{}, tc.err, costledger.Increment{})
+			s.execSendError(execSendArgs{runCtx: ga.runCtx, jobTimeout: s.execTimeout}, abortResult{}, tc.err, costledger.Increment{}, "")
 			if got := ns.noticesAfter(s); len(got) != 1 || got[0] != tc.want {
 				t.Errorf("notices = %q, want [%q]", got, tc.want)
 			}
