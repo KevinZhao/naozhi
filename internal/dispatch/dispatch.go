@@ -21,7 +21,6 @@ import (
 	"github.com/naozhi/naozhi/internal/replyfmt"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/sessionkey"
-	"github.com/naozhi/naozhi/internal/textutil"
 	"github.com/naozhi/naozhi/internal/turn"
 	"github.com/naozhi/naozhi/internal/usermsg"
 )
@@ -574,12 +573,10 @@ func (d *Dispatcher) readTurnImages(replyText string) ([]platform.Image, string)
 }
 
 // decorateReplyText post-processes the raw CLI result text for IM delivery:
-// redacts secrets, localises API errors, appends the merge-group chip and the
+// turnReplyText's answer or failure notice, then the merge-group chip and the
 // per-session ReplyFooter. Returns "" when nothing should be sent (#656).
 func (d *Dispatcher) decorateReplyText(result *clievent.SendResult, sess turn.Session) string {
-	// Redact credential shapes (sk-ant-, ghp_, AKIA, …) BEFORE localising so
-	// an echoed plaintext token never reaches the IM channel (#1571).
-	replyText := localizeAPIError(textutil.RedactSecrets(result.Text))
+	replyText := turnReplyText(result)
 	// Head slot of a merge group: append a small chip so the user knows the
 	// single bot bubble covers N messages.
 	if result.MergedCount > 1 && replyText != "" {

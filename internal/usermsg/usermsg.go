@@ -4,8 +4,9 @@
 // point for a new sentinel; callers needing path-specific phrasing wrap it.
 //
 // Sentinel→Code matching lives in classify.go (the ONLY file importing
-// internal/cli + internal/session); the Code→text table here has no such
-// dependency so it can move to internal/i18n (#631).
+// internal/cli + internal/session) and turn-result matching in turn.go; the
+// Code→text table here has no such dependency so it can move to
+// internal/i18n (#631).
 package usermsg
 
 import (
@@ -33,6 +34,18 @@ var codeText = map[Code]string{
 	CodeProcessBusy:        "当前会话正在处理上一条消息，请稍候再发。",
 	CodeMessageTooLarge:    "消息内容过大，请缩短后重试。",
 	CodeRestarting:         "系统正在重启，请稍后重试。",
+
+	CodeTurnFailed:    "本轮处理中途出错，未产生回复。可重新发送，或发送 /new 重置会话。",
+	CodeTurnMaxTurns:  "本轮已达到最大执行步数，任务未完成。回复「继续」可接着处理，或 /new 重新开始。",
+	CodeTurnBudget:    "本轮已达到费用上限，任务未完成。回复「继续」可接着处理，或联系管理员调整上限。",
+	CodeTurnRefused:   "模型拒绝了本次请求，请调整内容后重试。",
+	CodeTurnTruncated: "回复超出模型单次输出上限，未能完成。可要求分段回答，或发送 /new 重新开始。",
+	// Backend rows follow the backend's name ("kiro 服务当前负载较高…").
+	CodeBackendOverloaded:     "服务当前负载较高，请稍后重试。",
+	CodeBackendRateLimited:    "调用过于频繁，请稍候一分钟再试。",
+	CodeBackendAuth:           "认证失败或凭证已过期，请联系管理员检查配置。",
+	CodeBackendInvalidRequest: "无法处理本次请求（请求格式无效），可重新发送，或发送 /new 重置会话。",
+	CodeBackendRejected:       "未能完成本轮请求，可重新发送，或发送 /new 重置会话。",
 }
 
 // genericRetryHint is the text for CodeUnknown and any unmapped Code.

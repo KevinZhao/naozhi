@@ -22,4 +22,9 @@ var (
 	// adapter Reply / EditMessage returned an error): replies are not
 	// reaching the IM channel.
 	dispatchSendFailTotal = expvar.NewInt("naozhi_dispatch_send_fail_total")
+
+	// dispatchTurnErrorResultTotal counts IM turns whose result was a
+	// failure, keyed by usermsg's turn class ("error_text" for an is_error
+	// answer that has text). Delivery still counts as a reply success.
+	dispatchTurnErrorResultTotal = expvar.NewMap("naozhi_dispatch_turn_error_result_total")
 )

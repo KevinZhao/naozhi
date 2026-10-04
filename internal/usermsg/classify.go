@@ -36,6 +36,21 @@ const (
 	CodeProcessBusy
 	CodeMessageTooLarge
 	CodeRestarting
+
+	// Turn outcomes: a result that arrived but is not the answer (turn.go).
+	CodeTurnFailed
+	CodeTurnMaxTurns
+	CodeTurnBudget
+	CodeTurnRefused
+	CodeTurnTruncated
+	CodeBackendOverloaded
+	CodeBackendRateLimited
+	CodeBackendAuth
+	CodeBackendInvalidRequest
+	CodeBackendRejected
+
+	// codeEnd is one past the last Code; keep it last.
+	codeEnd
 )
 
 // classify maps err onto a Code using errors.Is so wrapped sentinels still

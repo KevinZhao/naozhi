@@ -231,9 +231,10 @@ func (dl *imDelivery) queuedIDs() []string {
 	return ids
 }
 
-// reply delivers a successful turn: the merge hint for a passthrough merge
-// follower, else the decorated answer (edited into the progress banner when
-// there is one) and its images.
+// reply delivers a turn that ended with a result: the merge hint for a
+// passthrough merge follower, else the decorated answer or failure notice
+// (edited into the progress banner when there is one) and its images. An
+// aborted turn with nothing to say only marks the banner.
 func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, sess turn.Session) {
 	o, d, p, tracker := dl.o, dl.o.d, dl.p, dl.tracker
 	dl.lg.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD,
@@ -255,8 +256,8 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 		return
 	}
 
-	// Record success regardless of text length: an empty result (tool-only
-	// turn) is still a healthy roundtrip for /health's lastReplySuccess.
+	// Record success regardless of text length or outcome: an empty or failed
+	// result is still a healthy roundtrip for /health's lastReplySuccess.
 	d.markReplySuccess()
 
 	replyText := d.decorateReplyText(result, sess)
@@ -292,6 +293,14 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 		} else {
 			d.SendSplitReply(ctx, p, o.msg.ChatID, replyText)
 		}
+	} else if result.Aborted {
+		// naozhi stopped the turn (/stop, interrupt, /urgent), which already
+		// said so; only the banner's last tool status needs replacing.
+		if msgID := tracker.getThinkingMsgID(); msgID != "" {
+			if err := p.EditMessage(ctx, msgID, bannerAborted); err != nil {
+				slog.Debug("aborted turn banner edit failed", "msg_id", msgID, "err", err)
+			}
+		}
 	}
 
 	// outImages derive from replyText; when the card suppresses the text,
@@ -304,6 +313,9 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 // bannerAnsweredBelow replaces the progress banner when the answer could not
 // be edited into it and went out as new messages instead.
 const bannerAnsweredBelow = "✅ 已回复，见下方"
+
+// bannerAborted replaces the progress banner of a turn naozhi aborted.
+const bannerAborted = "已中断。"
 
 // replyIntoBanner edits the first reply chunk into the progress banner and
 // sends the rest as new messages, so the edit obeys MaxReplyLength like any

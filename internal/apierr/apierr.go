@@ -50,52 +50,79 @@ const envelopePrefixScanBytes = 64
 // may contain proxy URLs, request IDs or leaked credentials.
 func Localize(text string) string {
 	trimmed := strings.TrimSpace(text)
-	if trimmed == "" {
+	if trimmed == "" || !isEnvelope(trimmed) {
 		return text
 	}
+	friendly, _ := classify(strings.ToLower(trimmed), true)
+	logLocalized(friendly, len(trimmed))
+	return friendly
+}
 
-	// Lowercase only the leading prefix; replies can be tens of KB.
+// LocalizeError is Localize for text the caller already knows is an error
+// (claude's is_error result), so it also rewrites a bare "Prompt is too long"
+// or "Credit balance is too low" without the envelope prefix. Without the
+// prefix only the unambiguous categories match; ok=false returns text as is.
+func LocalizeError(text string) (localized string, ok bool) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return text, false
+	}
+	friendly, ok := classify(strings.ToLower(trimmed), isEnvelope(trimmed))
+	if !ok {
+		return text, false
+	}
+	logLocalized(friendly, len(trimmed))
+	return friendly, true
+}
+
+// isEnvelope reports whether trimmed starts with an API-error prefix.
+// Lowercases only the leading bytes; replies can be tens of KB.
+func isEnvelope(trimmed string) bool {
 	prefix := trimmed
 	if len(prefix) > envelopePrefixScanBytes {
 		prefix = prefix[:envelopePrefixScanBytes]
 	}
 	lowerPrefix := strings.ToLower(prefix)
-	isEnvelope := strings.HasPrefix(lowerPrefix, "api error") ||
+	return strings.HasPrefix(lowerPrefix, "api error") ||
 		strings.HasPrefix(lowerPrefix, "anthropic api error")
-	if !isEnvelope {
-		return text
-	}
+}
 
-	lower := strings.ToLower(trimmed)
-
-	var friendly string
+// classify picks the friendly text for a lowercased error. An envelope always
+// gets one (the unrecognised fallback included); bare text skips the timeout
+// and network categories, whose words are common in ordinary tool errors, and
+// returns ok=false when nothing matched.
+func classify(lower string, envelope bool) (friendly string, ok bool) {
 	switch {
 	case strings.Contains(lower, "rate_limit") || strings.Contains(lower, "rate limit"):
-		friendly = "⏱️ Claude API 调用过于频繁，请稍候一分钟再试。"
+		return "⏱️ Claude API 调用过于频繁，请稍候一分钟再试。", true
 	case strings.Contains(lower, "overloaded"):
-		friendly = "🌊 Claude 服务当前负载较高，请稍后重试。"
+		return "🌊 Claude 服务当前负载较高，请稍后重试。", true
 	case strings.Contains(lower, "invalid_api_key") || strings.Contains(lower, "authentication_error"):
-		friendly = "🔑 Claude API 密钥无效或已过期，请联系管理员检查配置。"
+		return "🔑 Claude API 密钥无效或已过期，请联系管理员检查配置。", true
 	case strings.Contains(lower, "insufficient_quota") || strings.Contains(lower, "credit balance") || strings.Contains(lower, "billing"):
-		friendly = "💳 Claude API 额度已用尽，请联系管理员充值后重试。"
+		return "💳 Claude API 额度已用尽，请联系管理员充值后重试。", true
 	case strings.Contains(lower, "context_length") || strings.Contains(lower, "prompt is too long") || strings.Contains(lower, "maximum context"):
-		friendly = "📏 对话上下文已超出模型上限，请发送 /new 开启新会话。"
+		return "📏 对话上下文已超出模型上限，请发送 /new 开启新会话。", true
 	// Require canonical Anthropic codes so tool output like
 	// `git push: forbidden` does not land in the permission branch.
 	case strings.Contains(lower, "permission_error") || strings.Contains(lower, "permission_denied") || strings.Contains(lower, "request_forbidden"):
-		friendly = "🚫 Claude 拒绝了本次请求（权限或内容策略），请调整后重试。"
+		return "🚫 Claude 拒绝了本次请求（权限或内容策略），请调整后重试。", true
+	case !envelope:
+		return "", false
 	case strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out"):
-		friendly = "⏱️ 连接 Claude API 超时，请稍后重试。"
+		return "⏱️ 连接 Claude API 超时，请稍后重试。", true
 	case strings.Contains(lower, "network") || strings.Contains(lower, "connection"):
-		friendly = "🌐 与 Claude API 的网络连接出现问题，请稍后重试。"
+		return "🌐 与 Claude API 的网络连接出现问题，请稍后重试。", true
 	default:
-		friendly = "⚠️ Claude API 返回了一个未识别的错误，已记录日志，请联系管理员。"
+		return "⚠️ Claude API 返回了一个未识别的错误，已记录日志，请联系管理员。", true
 	}
+}
 
-	// Raw envelope deliberately not logged (may contain keys/request_ids).
+// logLocalized records a localization by category only; the raw error may
+// contain keys or request_ids.
+func logLocalized(friendly string, rawLen int) {
 	slog.Warn("claude api error envelope localized",
 		"category", envelopeCategory(friendly),
-		"envelope_len", len(trimmed),
+		"envelope_len", rawLen,
 	)
-	return friendly
 }

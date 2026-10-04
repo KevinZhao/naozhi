@@ -65,9 +65,9 @@ func TestCodeText_NoUnknownRow(t *testing.T) {
 		t.Errorf("textForCode(CodeUnknown) = %q, want generic hint %q", got, genericRetryHint)
 	}
 
-	// All real codes (everything after CodeUnknown up to CodeRestarting) must
-	// map to a non-empty, non-generic label.
-	for c := CodeUnknown + 1; c <= CodeRestarting; c++ {
+	// All real codes (everything after CodeUnknown) must map to a non-empty,
+	// non-generic label.
+	for c := CodeUnknown + 1; c < codeEnd; c++ {
 		txt, ok := codeText[c]
 		if !ok {
 			t.Errorf("Code %d has no codeText row — every real classification must map to text", int(c))
