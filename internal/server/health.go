@@ -32,10 +32,9 @@ type HealthHandler struct {
 	watchdogNoOut      *atomic.Int64
 	watchdogTotal      *atomic.Int64
 	nodeAccess         NodeAccessor
-	platforms          map[string]struct{} // platform names (read-only after init)
-	// platformsStatus is the pre-built {name: "registered"} map served as the
-	// /health `platforms` sub-object. Read-only after init; never mutated.
-	platformsStatus map[string]string
+	// platforms is the registry (read-only after init); platformConnProbe asks
+	// each entry for its live connection state per request.
+	platforms map[string]platform.Platform
 	// platformCaps is the pre-built capability matrix served as the /health
 	// `platform_capabilities` sub-object (J10 of #2548). Read-only after init.
 	// Without it, "AskUserQuestion renders as a card on Feishu and a text list
@@ -102,7 +101,12 @@ type healthAuthSection struct {
 	ConfigLoadedAt string            `json:"config_loaded_at,omitempty"`
 	ConfigPath     string            `json:"config_path,omitempty"`
 	Nodes          map[string]string `json:"nodes,omitempty"`
-	Platforms      map[string]string `json:"platforms"`
+	// Platforms maps each registered platform to its connection state name, or
+	// "registered" when the adapter cannot observe its connection.
+	Platforms map[string]string `json:"platforms"`
+	// PlatformConn is the detail behind Platforms, only for the platforms that
+	// report a state; omitted when none do.
+	PlatformConn map[string]healthPlatformConn `json:"platform_conn,omitempty"`
 	// PlatformCapabilities is which optional capability each registered platform
 	// actually has, so a feature degrading silently on one platform is visible
 	// without reading its adapter. Auth-only, like the rest of this struct.
@@ -123,6 +127,17 @@ type healthAuthSection struct {
 	// the values. Without it an env var the filter refused shows up only in
 	// the log. Omitted while there are none.
 	SpawnDiags *spawndiag.Summary `json:"spawn_diags,omitempty"`
+}
+
+// healthPlatformConn is one /health "platform_conn" entry. since_ago is
+// relative to the response, so a reader need not trust its own clock; both
+// are omitted when the reporter gave no Since.
+type healthPlatformConn struct {
+	State       string `json:"state"`
+	Since       string `json:"since,omitempty"`
+	SinceAgo    string `json:"since_ago,omitempty"`
+	LastError   string `json:"last_error,omitempty"`
+	LastErrorAt string `json:"last_error_at,omitempty"`
 }
 
 // healthSessionStore is the /health "session_store" sub-object.
@@ -279,10 +294,9 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if nodeStatus := h.nodeAccess.NodesStatus(); len(nodeStatus) > 0 {
 		auth.Nodes = nodeStatus
 	}
-	auth.Platforms = h.platformsStatus
 	auth.PlatformCapabilities = h.platformCaps
 
-	// Per-subsystem fields (ws_dropped, dispatch, eventlog, attachment_tracker)
+	// Per-subsystem fields (platforms, ws_dropped, dispatch, eventlog, ...)
 	// come from the HealthProbe factories in health_probe.go.
 	for _, probe := range h.subsystemProbes() {
 		probe(auth)

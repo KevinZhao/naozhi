@@ -404,6 +404,31 @@ func TestEnabledBackends(t *testing.T) {
 			wantIDs:       []string{"kiro", "claude"},
 			wantDefaultID: "kiro",
 		},
+		{
+			// An entry without an id is skipped by EnabledBackends, so the
+			// default must skip it too rather than collapse to "claude".
+			name: "leading empty-id entry is skipped when picking the default",
+			cfg: Config{CLI: CLIConfig{
+				Backends: []CLIBackendConfig{
+					{ID: ""},
+					{ID: "kiro"},
+				},
+			}},
+			wantIDs:       []string{"kiro"},
+			wantDefaultID: "kiro",
+		},
+		{
+			name: "leading empty-id entry does not promote a later claude",
+			cfg: Config{CLI: CLIConfig{
+				Backends: []CLIBackendConfig{
+					{ID: ""},
+					{ID: "kiro"},
+					{ID: "claude"},
+				},
+			}},
+			wantIDs:       []string{"kiro", "claude"},
+			wantDefaultID: "kiro",
+		},
 	}
 
 	for _, tt := range tests {

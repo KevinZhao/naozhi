@@ -196,10 +196,10 @@ func TestShouldNotifyAndCleanup(t *testing.T) {
 	if !h.o.ShouldNotify("k") || h.o.ShouldNotify("k") {
 		t.Fatal("ShouldNotify is not the queue's 3s cooldown")
 	}
-	h.q.Enqueue("k", Msg{Text: "running"})
+	_, _, _, running := h.q.enqueueTuple("k", Msg{Text: "running"})
 	h.o.Cleanup("k")
-	if isOwner, _, _, gen := h.q.enqueueTuple("k", Msg{}); !isOwner || gen != 0 {
-		t.Fatalf("after Cleanup Enqueue = owner %v gen %d, want a fresh entry", isOwner, gen)
+	if isOwner, _, _, gen := h.q.enqueueTuple("k", Msg{}); !isOwner || gen == running {
+		t.Fatalf("after Cleanup Enqueue = owner %v gen %d, want a fresh entry (not gen %d)", isOwner, gen, running)
 	}
 }
 

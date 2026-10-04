@@ -105,15 +105,25 @@ func (o *Orchestrator) ShouldNotify(key string) bool {
 	return o.q.ShouldNotify(key)
 }
 
-// Cleanup forgets key's queue state; see queue.Cleanup for the caller's
-// obligations.
+// Cleanup forgets key's queue state; queued messages are dropped silently
+// and an owner still running on key stops at its next drain (queue.Cleanup).
 func (o *Orchestrator) Cleanup(key string) {
 	o.q.Cleanup(key)
 }
 
 // dropQueued discards key's queue and tells each dropped origin why.
 func (o *Orchestrator) dropQueued(ctx context.Context, key string, why DropReason) {
-	for _, m := range o.q.DiscardAndReturn(key) {
+	tellDropped(ctx, key, o.q.DiscardAndReturn(key), why)
+}
+
+// dropOwned is dropQueued for the owner holding gen; it leaves a later
+// owner's queue alone (queue.DiscardOwned).
+func (o *Orchestrator) dropOwned(ctx context.Context, key string, gen uint64, why DropReason) {
+	tellDropped(ctx, key, o.q.DiscardOwned(key, gen), why)
+}
+
+func tellDropped(ctx context.Context, key string, msgs []Msg, why DropReason) {
+	for _, m := range msgs {
 		dropped(ctx, key, m, why)
 	}
 }
