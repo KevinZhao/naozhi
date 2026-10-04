@@ -2,6 +2,8 @@ package usermsg
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
@@ -83,5 +85,35 @@ func TestCodeText_NoUnknownRow(t *testing.T) {
 		if txt == "" || txt == genericRetryHint {
 			t.Errorf("Code %d maps to %q, want a distinct non-empty label", int(c), txt)
 		}
+	}
+}
+
+// A spawn whose CLI exited during the Init handshake reaches the text its
+// stderr class names through the session and spawn wrapping, and through the
+// ErrResumeRejected a refused session/load adds when its fresh retry is not run.
+func TestForSendError_InitHandshakeExit(t *testing.T) {
+	t.Parallel()
+	initExit := func(exit error) error {
+		return fmt.Errorf("session k: spawn process: %w",
+			fmt.Errorf("%w: acp initialize: read ACP response: %w", clierr.ErrSpawnInit, exit))
+	}
+	auth := &clierr.ProcessExitedError{Code: 1, Class: clierr.ExitAuth}
+	tests := []struct {
+		name string
+		err  error
+		want Code
+	}{
+		{"auth exit", initExit(auth), CodeCLIAuthFailed},
+		{"auth exit on a refused resume", initExit(fmt.Errorf("%w: %w", clierr.ErrResumeRejected, auth)), CodeCLIAuthFailed},
+		{"exit 0", initExit(clierr.ErrProcessExited), CodeProcessExited},
+		{"rpc error", initExit(errors.New("acp rpc error -32600: invalid request")), CodeUnknown},
+	}
+	for _, tt := range tests {
+		if got := classify(tt.err, ""); got != tt.want {
+			t.Errorf("%s: classify(%v) = %d, want %d", tt.name, tt.err, got, tt.want)
+		}
+	}
+	if got := ForSendError(initExit(auth), ""); got != codeText[CodeCLIAuthFailed] {
+		t.Errorf("ForSendError = %q, want %q", got, codeText[CodeCLIAuthFailed])
 	}
 }
