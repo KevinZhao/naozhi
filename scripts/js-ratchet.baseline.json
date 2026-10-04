@@ -132,8 +132,8 @@
     "lateBindings": 0
   },
   "cron_state.js": {
-    "lines": 266,
-    "maxFnLines": 62,
+    "lines": 265,
+    "maxFnLines": 48,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0,

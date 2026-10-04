@@ -922,7 +922,7 @@ function cronApplyRunEnded(msg) {
   const j = list.find(x => x && x.id === msg.job_id);
   if (!j) return;
   j.current_run = null;
-  cronRunClearedAtLocal.set(msg.job_id, Date.now());
+  cronRunClearedAtLocal.set(msg.job_id, { at: Date.now(), runId: msg.run_id || '' });
   // Provisional last_error_class / last_run_at so the row repaints with
   // the new state before fetchCronJobs returns. Backend remains source
   // of truth for the persisted snapshot.

@@ -55,10 +55,10 @@ export const cronJobCostCache = {};
 // 这里是第二道防线，让 dashboard 视觉上立即冻结。
 export const cronFrozenRuns = new Set();
 
-// cronRunClearedAtLocal: jobId → 本地清除 current_run 的时刻。与
-// current_run.applied_at_local 互为镜像，挡住反方向的同一竞态：一个生成于
-// run_ended 帧之前、落地于其后的 list 响应仍带 current_run，会让刚熄灭的
-// 运行中徽章复活一拍。
+// cronRunClearedAtLocal: jobId → {at, runId}，本地清除 current_run 的时刻
+// 和被清掉的那次 run。与 current_run.applied_at_local 互为镜像，挡住反方向
+// 的同一竞态：一个生成于 run_ended 帧之前、落地于其后的 list 响应仍带
+// current_run，会让刚熄灭的运行中徽章复活一拍。runId 为空时按任意 run 处理。
 export const cronRunClearedAtLocal = new Map();
 
 // isCronSessionFrozen 判断当前 selectedKey 是否是被冻结的 cron session。
@@ -155,6 +155,19 @@ function keepRefetchedPrompts(prev, fresh) {
   });
 }
 
+// reconcileCurrentRun picks the current_run a refetched row carries. A local
+// patch newer than the fetch beats a response that lacks it or names another
+// run; one naming the same run wins but keeps applied_at_local, so an older
+// response still in flight cannot blank it. A local clear newer than the fetch
+// nulls a response still reporting the cleared run (any run if runId is '').
+export function reconcileCurrentRun(prevRun, freshRun, fetchStartedAt, cleared) {
+  if (prevRun && prevRun.applied_at_local > fetchStartedAt) {
+    return freshRun && freshRun.run_id === prevRun.run_id ? Object.assign({}, freshRun, { applied_at_local: prevRun.applied_at_local }) : prevRun;
+  }
+  const resurrects = !prevRun && freshRun && cleared && cleared.at > fetchStartedAt && (!cleared.runId || cleared.runId === freshRun.run_id);
+  return resurrects ? null : freshRun;
+}
+
 export async function fetchCronJobs() {
   // 响应新旧的判据：比这个时刻更新的本地乐观补丁不被本响应覆盖（下方
   // stale-clobber 保护）。取在请求发出前，宁可偏早（多保留补丁一拍）也
@@ -165,13 +178,10 @@ export async function fetchCronJobs() {
     // RNEW-UX-003: 8s timeout — cron list is polled periodically; a hung
     // disk/fs call must release before the next tick fires.
     //
-    // R236-SEC-08 (#494): poll path opts into compact mode so the wire
-    // shape carries `prompt` clipped to 256 UTF-8 bytes per job instead
-    // of the legacy full prompt (which scaled to 8 KiB × N jobs every
-    // tick). Each list row sets `prompt_truncated:true` for jobs whose
-    // full body was clipped — the editor open path (cronEditFetchFull)
-    // re-fetches a single job without compact when the user actually
-    // needs the bytes.
+    // R236-SEC-08 (#494): the poll asks for compact rows, `prompt` clipped to
+    // 256 UTF-8 bytes per job (full prompts scale to 8 KiB × N every tick) and
+    // `prompt_truncated:true` where clipped. The editor and drawer refetch the
+    // full job (cronRefetchFullJob) when they need the bytes.
     let data;
     try {
       data = await fetchJSON(NZ_CONTRACT.API.cron + '?compact=1', { headers, timeoutMs: 8000 });
@@ -181,22 +191,11 @@ export async function fetchCronJobs() {
     }
     const freshJobs = keepRefetchedPrompts(cronStore.jobs, data.jobs || []);
     // Stale-clobber 保护：这个响应可能生成于一个 WS run_started / run_ended
-    // 帧之前、却落地于其后（本地 e2e 用 compactCronListDelayMs 稳定复现；
-    // 真实后端在 list 事务较长时同样可能）。整体替换 cronStore.jobs 会让旧响应
-    // 冲掉更新的乐观补丁 —— 运行中徽章闪没，或反向复活一拍。规则：只信
-    // 比本次 fetch 发起时刻更新的本地补丁，其余以服务端为准。
+    // 帧之前、却落地于其后（e2e 用 compactCronListDelayMs 稳定复现）。整体替换
+    // 会让它冲掉更新的乐观补丁，逐行按 run 身份合并，见 reconcileCurrentRun。
     for (const nj of freshJobs) {
-      if (!nj || !nj.id) continue;
-      const prev = (Array.isArray(cronStore.jobs) ? cronStore.jobs : []).find(o => o && o.id === nj.id);
-      if (!prev) continue;
-      const appliedAt = prev.current_run && prev.current_run.applied_at_local;
-      if (prev.current_run && !nj.current_run && appliedAt && appliedAt > fetchStartedAt) {
-        nj.current_run = prev.current_run;
-      }
-      const clearedAt = cronRunClearedAtLocal.get(nj.id);
-      if (nj.current_run && !prev.current_run && clearedAt && clearedAt > fetchStartedAt) {
-        nj.current_run = null;
-      }
+      const prev = nj && nj.id && (Array.isArray(cronStore.jobs) ? cronStore.jobs : []).find(o => o && o.id === nj.id);
+      if (prev) nj.current_run = reconcileCurrentRun(prev.current_run, nj.current_run, fetchStartedAt, cronRunClearedAtLocal.get(nj.id));
     }
     cronStore.jobs = freshJobs;
     cronStore.notifyDefault = data.notify_default || null;
