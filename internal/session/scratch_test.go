@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
@@ -563,5 +564,154 @@ func TestStripArgvControlBytes_CleanInputReturnsSameString(t *testing.T) {
 	got := stripArgvControlBytes(in)
 	if got != in {
 		t.Errorf("clean input mutated: got %q, want %q", got, in)
+	}
+}
+
+// newSweepFixture opens one scratch on a pool backed by a test router whose
+// lastUsed is already ttl*3 stale.
+func newSweepFixture(t *testing.T, ttl time.Duration) (*Router, *ScratchPool, *Scratch) {
+	t.Helper()
+	r := newTestRouter(10)
+	p := NewScratchPool(r, 5, ttl)
+	sc, err := p.Open(OpenOptions{SourceKey: "k:direct:u:general", Quote: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc.lastUsed.Store(time.Now().Add(-3 * ttl).UnixNano())
+	return r, p, sc
+}
+
+func TestScratchPool_SweepSkipsRunningTurn(t *testing.T) {
+	const ttl = time.Minute
+	r, p, sc := newSweepFixture(t, ttl)
+	proc := NewTestProcess()
+	proc.StateVal = cli.StateRunning
+	s := r.InjectSession(sc.Key, proc)
+	s.lastActive.Store(time.Now().Add(-3 * ttl).UnixNano())
+
+	now := time.Now()
+	p.sweep(now)
+	if p.Get(sc.ID) == nil || r.SessionFor(sc.Key) == nil || !proc.AliveVal {
+		t.Fatal("sweep evicted a scratch whose turn is still running")
+	}
+	if !sc.LastUsed().Equal(now) {
+		t.Errorf("lastUsed = %v, want the sweep time %v", sc.LastUsed(), now)
+	}
+
+	// Once the turn ends the idle clock runs from the last sweep that saw it.
+	proc.StateVal = cli.StateReady
+	p.sweep(now.Add(ttl / 2))
+	if p.Get(sc.ID) == nil {
+		t.Fatal("scratch evicted within ttl of its turn")
+	}
+	p.sweep(now.Add(2 * ttl))
+	if p.Get(sc.ID) != nil || r.SessionFor(sc.Key) != nil || proc.AliveVal {
+		t.Error("idle scratch survived ttl after its turn ended")
+	}
+}
+
+func TestScratchPool_SweepSkipsAQueuedSend(t *testing.T) {
+	const ttl = time.Minute
+	r, p, sc := newSweepFixture(t, ttl)
+	s := r.InjectSession(sc.Key, NewTestProcess())
+	s.lastActive.Store(time.Now().Add(-3 * ttl).UnixNano())
+	s.turnWaiters.Add(1)
+
+	p.sweep(time.Now())
+	if p.Get(sc.ID) == nil || r.SessionFor(sc.Key) == nil {
+		t.Fatal("sweep evicted a scratch with a send queued on sendMu")
+	}
+}
+
+func TestScratchPool_SweepCountsIdleFromLastEvent(t *testing.T) {
+	const ttl = time.Minute
+	r, p, sc := newSweepFixture(t, ttl)
+	proc := NewTestProcess()
+	s := r.InjectSession(sc.Key, proc)
+	s.lastActive.Store(time.Now().Add(-3 * ttl).UnixNano())
+	proc.EventLog.Append(clievent.EventEntry{Type: clievent.KindResult, Summary: "done"})
+	lastEvent := proc.LastEventAt()
+
+	p.sweep(time.Now())
+	if p.Get(sc.ID) == nil || r.SessionFor(sc.Key) == nil {
+		t.Fatal("sweep evicted a scratch whose CLI streamed an event within ttl")
+	}
+	if !sc.LastUsed().Equal(lastEvent) {
+		t.Errorf("lastUsed = %v, want the last event %v", sc.LastUsed(), lastEvent)
+	}
+
+	p.sweep(lastEvent.Add(2 * ttl))
+	if p.Get(sc.ID) != nil || r.SessionFor(sc.Key) != nil || proc.AliveVal {
+		t.Error("scratch idle for 2*ttl after its last event survived the sweep")
+	}
+}
+
+func TestScratchPool_SweepEvictsIdleRouterSession(t *testing.T) {
+	const ttl = time.Minute
+	r, p, sc := newSweepFixture(t, ttl)
+	proc := NewTestProcess()
+	s := r.InjectSession(sc.Key, proc)
+	s.lastActive.Store(time.Now().Add(-3 * ttl).UnixNano())
+
+	p.sweep(time.Now())
+	if p.Get(sc.ID) != nil {
+		t.Error("idle scratch survived the sweep")
+	}
+	if r.SessionFor(sc.Key) != nil || proc.AliveVal {
+		t.Error("sweep did not remove the idle scratch's router session")
+	}
+}
+
+// sweepHookProc runs onLastEventAt while the sweeper reads the session's
+// activity, i.e. between choosing a candidate and the re-check under p.mu.
+type sweepHookProc struct {
+	*TestProcess
+	onLastEventAt func()
+}
+
+func (h *sweepHookProc) LastEventAt() time.Time {
+	h.onLastEventAt()
+	return time.Time{}
+}
+
+func TestScratchPool_SweepRechecksAfterTheLookup(t *testing.T) {
+	const ttl = time.Minute
+	for _, tc := range []struct {
+		name string
+		race func(p *ScratchPool, sc *Scratch)
+		kept bool // scratch still in the pool afterwards
+	}{
+		{"a send touches it", func(p *ScratchPool, sc *Scratch) { p.OptsForKey(sc.Key) }, true},
+		{"promote detaches it", func(p *ScratchPool, sc *Scratch) { _, _ = p.Detach(sc.ID) }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, p, sc := newSweepFixture(t, ttl)
+			proc := &sweepHookProc{TestProcess: NewTestProcess()}
+			proc.onLastEventAt = func() { tc.race(p, sc) }
+			s := injectSession(r, sc.Key, proc)
+			s.lastActive.Store(time.Now().Add(-3 * ttl).UnixNano())
+
+			p.sweep(time.Now())
+			if got := p.Get(sc.ID) != nil; got != tc.kept {
+				t.Errorf("scratch in pool = %v, want %v", got, tc.kept)
+			}
+			if r.SessionFor(sc.Key) == nil || !proc.AliveVal {
+				t.Error("sweep removed a router session it no longer owned as idle")
+			}
+		})
+	}
+}
+
+func TestScratch_TouchAtNeverMovesBack(t *testing.T) {
+	var sc Scratch
+	now := time.Now()
+	sc.touchAt(now)
+	sc.touchAt(now.Add(-time.Minute))
+	if !sc.LastUsed().Equal(now) {
+		t.Errorf("lastUsed = %v after an older touch, want %v", sc.LastUsed(), now)
+	}
+	sc.touchAt(now.Add(time.Second))
+	if !sc.LastUsed().Equal(now.Add(time.Second)) {
+		t.Errorf("lastUsed = %v, want it advanced to %v", sc.LastUsed(), now.Add(time.Second))
 	}
 }
