@@ -22,22 +22,46 @@ test.describe('#1770 polling / keep-alive', () => {
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
 
+    // lastVersion is shared with the fallback pollers (fetchSessions writes the
+    // server's version back on every response), so a sentinel value races them
+    // (#3251). Observe scanDiscovered's own side effects instead: its call to
+    // the shell.debouncedFetchSessions slot and its lastVersion=0 write.
     const result = await page.evaluate(async () => {
-      const run = () => window.scanDiscovered();
-      // Prime: first scan records the hash and (because the hash changed from
-      // the initial '') sets lastVersion=0 once.
-      await run();
-      // Now set a sentinel lastVersion and scan again with the SAME data
-      // (mock returns [] every time). The unchanged-hash guard must leave
-      // lastVersion untouched.
-      window.lastVersion = 12345;
-      await run();
-      const after = window.lastVersion;
-      return { after };
+      const { shell } = await import('/static/shell.js');
+      const { sessionList } = await import('/static/state.js');
+      const { scanDiscovered } = await import('/static/discovery.js');
+      const counts = { fetches: 0, zeroes: 0 };
+      const origFetch = shell.debouncedFetchSessions;
+      let version = sessionList.lastVersion;
+      shell.debouncedFetchSessions = () => { counts.fetches++; origFetch(); };
+      Object.defineProperty(sessionList, 'lastVersion', {
+        configurable: true,
+        enumerable: true,
+        get: () => version,
+        set: (v) => { if (v === 0) counts.zeroes++; version = v; },
+      });
+      const scan = async () => {
+        const before = { ...counts };
+        await scanDiscovered();
+        return { fetches: counts.fetches - before.fetches, zeroes: counts.zeroes - before.zeroes };
+      };
+      try {
+        // Prime: the hash is recorded by this scan or the boot scan.
+        await scan();
+        const unchanged = await scan();
+        // Positive control: a forgotten hash must force exactly one re-render.
+        sessionList.lastDiscoveredJSON = '';
+        const changed = await scan();
+        return { unchanged, changed };
+      } finally {
+        shell.debouncedFetchSessions = origFetch;
+        delete sessionList.lastVersion;
+        sessionList.lastVersion = version;
+      }
     });
 
-    // Unchanged discovered set → lastVersion preserved (NOT reset to 0).
-    expect(result.after).toBe(12345);
+    expect(result.unchanged).toEqual({ fetches: 0, zeroes: 0 });
+    expect(result.changed).toEqual({ fetches: 1, zeroes: 1 });
     await ctx.close();
   });
 
