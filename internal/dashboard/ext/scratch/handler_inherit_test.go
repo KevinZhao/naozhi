@@ -116,7 +116,7 @@ func TestHandleOpen_AccessProfileFollowsSourceNotAgent(t *testing.T) {
 // profile IDs carry ':' and '/' and must still be inherited.
 func TestInheritSourceTuning_GatesUnsafeValues(t *testing.T) {
 	t.Parallel()
-	base := session.AgentOpts{Model: "reg-model", Effort: "low", AccessProfile: "reg-profile", ExtraArgs: []string{"--x"}}
+	base := session.AgentOpts{Model: "reg-model", Effort: "low", AccessProfile: "reg-profile", DefaultBackend: "kiro", ExtraArgs: []string{"--x"}}
 	// The profile is never a registry default: a source on the global
 	// default ("") keeps the aside there.
 	keep := base
@@ -170,6 +170,11 @@ func TestInheritSourceTuning_GatesUnsafeValues(t *testing.T) {
 			}
 			if len(got.ExtraArgs) != 1 || got.ExtraArgs[0] != "--x" {
 				t.Errorf("ExtraArgs must pass through unchanged, got %v", got.ExtraArgs)
+			}
+			// The aside's backend is its source's (OpenOptions.Backend), never
+			// the agent's.
+			if got.DefaultBackend != "" {
+				t.Errorf("DefaultBackend = %q, want \"\"", got.DefaultBackend)
 			}
 		})
 	}

@@ -296,10 +296,11 @@ func buildSessionOpts(key string, resolver *session.KeyResolver, agents map[stri
 	}
 
 	opts := agents[agentID]
-	// Only an IM agent key spawns on its agent's profile, as in
+	// Only an IM agent key spawns on its agent's profile and backend, as in
 	// AccessProfileForKey; a planner's account is its project pin only.
 	if len(parts) != 4 || session.IsReservedNamespace(key) {
 		opts.AccessProfile = ""
+		opts.DefaultBackend = ""
 	}
 	if project.IsPlannerKey(key) {
 		opts.Exempt = true // planner sessions are always exempt, regardless of project config

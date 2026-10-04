@@ -94,10 +94,11 @@ func (r *KeyResolver) ResolveForChat(platform, chatType, chatID, agentID string)
 	if b.Backend != "" {
 		base.Backend = b.Backend
 	}
-	// The planner's account comes from the project alone, never from
-	// defaults["general"]: ResolveForPlannerKey (restart, resume) cannot see
-	// general's profile, and one key must not change account by spawn path.
+	// The planner's account and backend come from the project alone, never
+	// from defaults["general"]: ResolveForPlannerKey (restart, resume) cannot
+	// see general's, and one key must not change either by spawn path.
 	base.AccessProfile = b.AccessProfile
+	base.DefaultBackend = ""
 	if b.PlannerModel != "" {
 		base.Model = b.PlannerModel
 	}

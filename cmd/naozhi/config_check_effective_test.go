@@ -162,6 +162,35 @@ access_profiles:
 	}
 }
 
+// An agent pinned to a backend spawns there, so listing it under every
+// backend would report argv for spawns that only a dashboard pick can make.
+func TestConfigCheckEffective_PinnedAgentOnlyUnderItsBackend(t *testing.T) {
+	cfg := cleanCheckConfig + `
+cli:
+  backends:
+    - id: claude
+      path: /usr/bin/true
+    - id: codex
+      path: /usr/bin/true
+agents:
+  general:
+    model: sonnet
+  coder:
+    backend: codex
+`
+	got, raw := effectiveOf(t, cfg)
+	for backendID, want := range map[string][]string{"claude": {"general"}, "codex": {"coder", "general"}} {
+		eff, ok := got.Effective[backendID]
+		if !ok {
+			t.Fatalf("no effective entry for %s:\n%s", backendID, raw)
+		}
+		ids := sortedKeys(eff.Agents)
+		if !slices.Equal(ids, want) {
+			t.Errorf("Effective[%s].Agents = %v, want %v", backendID, ids, want)
+		}
+	}
+}
+
 func TestConfigCheckEffective_NonAllowlistedOverlayKeyIsFatal(t *testing.T) {
 	cfg := cleanCheckConfig + `
 cli:
