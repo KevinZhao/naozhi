@@ -16,15 +16,17 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/costledger"
 )
 
 // maxMeteringUnits bounds the metering rows so a buggy upstream inventing a
 // unit per frame cannot grow them without limit.
 const maxMeteringUnits = 16
 
-// maxShadowModels bounds the shadow account's model rows; usage of any
-// further model folds into one row with no model name.
-const maxShadowModels = 16
+// maxShadowModels bounds the shadow account's named model rows; usage of any
+// further model folds into one row with no model name. The named rows plus
+// that row fit in one ledger entry, which keeps costledger.MaxModels rows.
+const maxShadowModels = costledger.MaxModels - 1
 
 // maxShadowMessages bounds the message ids the shadow account remembers for
 // de-duplication. Past it the memory restarts: only a message whose frames

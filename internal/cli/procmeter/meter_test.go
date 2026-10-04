@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/costledger"
 )
 
 // TestMeter_MeteringFastPath: with no metering rows, Metering answers from the
@@ -122,7 +123,7 @@ func TestMeter_ShadowPerModel(t *testing.T) {
 }
 
 // TestMeter_ShadowBounds: models past maxShadowModels share one unnamed row,
-// and message ids past maxShadowMessages restart the memory without losing
+// all rows fit one ledger entry, and message ids past maxShadowMessages restart the memory without losing
 // usage.
 func TestMeter_ShadowBounds(t *testing.T) {
 	t.Parallel()
@@ -133,6 +134,9 @@ func TestMeter_ShadowBounds(t *testing.T) {
 	rows := m.TakeShadow().Models
 	if len(rows) != maxShadowModels+1 || rows[maxShadowModels] != (clievent.ShadowModel{Input: 3}) {
 		t.Fatalf("rows = %d, overflow row = %+v", len(rows), rows[len(rows)-1])
+	}
+	if len(rows) > costledger.MaxModels {
+		t.Fatalf("rows = %d, a ledger entry keeps %d: the overflow row would be cut", len(rows), costledger.MaxModels)
 	}
 	for i := range maxShadowMessages + 5 {
 		m.TrackShadow(asstFrame(fmt.Sprint("msg_", i), "m", 1, 0, 0), 1)
