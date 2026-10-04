@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -24,13 +27,13 @@ func (f fakeTree) baselineGoFiles() ([]string, error) {
 func TestRun_EveryBaselineSourceIsRead(t *testing.T) {
 	t.Parallel()
 	base := fakeTree{
-		"internal/testhelper/sleep_ratchet_test.go": "const bareSleepBaseline = 138\n",
+		"internal/testhelper/sleep_ratchet_test.go": "package testhelper\nconst bareSleepBaseline = 138\n",
 		jsRatchetPath:  `{"a.js":{"lines":10,"maxFnLines":3}}`,
 		jsDepsPath:     `{"matrix":{},"tdz":{},"typeofGuards":{},"bridgeRefs":{}}`,
 		exemptionsPath: "file_size: []\nhandle_baseline: []\n",
 	}
 	head := fakeTree{
-		"internal/testhelper/sleep_ratchet_test.go": "const bareSleepBaseline = 139\n",
+		"internal/testhelper/sleep_ratchet_test.go": "package testhelper\nconst bareSleepBaseline = 139\n",
 		jsRatchetPath:  `{"a.js":{"lines":11,"maxFnLines":3}}`,
 		jsDepsPath:     `{"matrix":{"a.js":{"b.js":["x"]}},"tdz":{},"typeofGuards":{},"bridgeRefs":{}}`,
 		exemptionsPath: "file_size:\n  - path: s.go\n    current: 600\n    limit: 500\n    until: \"2027-03-31\"\nhandle_baseline: []\n",
@@ -41,7 +44,7 @@ func TestRun_EveryBaselineSourceIsRead(t *testing.T) {
 	}
 	want := []string{
 		"exemptions:file_size:s.go",
-		"go:internal/testhelper/sleep_ratchet_test.go#bareSleepBaseline",
+		"go:internal/testhelper#bareSleepBaseline",
 		"js-deps:matrix:a.js>b.js:x",
 		"js-ratchet:TOTAL.lines",
 	}
@@ -184,6 +187,130 @@ func TestRun_GoldenPins_AddedPinRaisesOnlyOnceBaseHasPins(t *testing.T) {
 			t.Fatalf("raises = %v, want %v", got, want)
 		}
 	})
+}
+
+// Every way of writing, moving or losing a Go baseline constant either
+// shows as a raise or fails the run (#3108): none leaves the ledger with
+// nothing to check.
+func TestRun_GoBaselineSpellings(t *testing.T) {
+	t.Parallel()
+	const (
+		sleepFile = "internal/testhelper/sleep_ratchet_test.go"
+		key       = "go:internal/testhelper#bareSleepBaseline"
+	)
+	src := func(body string) string { return "package testhelper\n\n" + body + "\n" }
+	base := fakeTree{sleepFile: src("const bareSleepBaseline = 135")}
+	gone := []raise{{key, 135, -1}}
+	for _, tc := range []struct {
+		name     string
+		base     fakeTree // nil: base above
+		head     fakeTree
+		want     []raise
+		literals int // "must be a plain integer literal" / "declared twice" problems
+	}{
+		{name: "raised in place", head: fakeTree{sleepFile: src("const bareSleepBaseline = 500")}, want: []raise{{key, 135, 500}}},
+		{name: "trailing comment", head: fakeTree{sleepFile: src("const bareSleepBaseline = 500 // raised")}, want: []raise{{key, 135, 500}}},
+		{name: "typed", head: fakeTree{sleepFile: src("const bareSleepBaseline int = 500")}, want: []raise{{key, 135, 500}}},
+		{name: "hex", head: fakeTree{sleepFile: src("const bareSleepBaseline = 0x1f4")}, want: []raise{{key, 135, 500}}},
+		{name: "digit separator", head: fakeTree{sleepFile: src("const bareSleepBaseline = 5_00")}, want: []raise{{key, 135, 500}}},
+		{name: "in a const block", head: fakeTree{sleepFile: src("const (\n\tother = 1\n\tbareSleepBaseline = 500\n)")}, want: []raise{{key, 135, 500}}},
+		{name: "function-local", head: fakeTree{sleepFile: src("func f() {\n\tconst bareSleepBaseline = 500\n\t_ = bareSleepBaseline\n}")}, want: []raise{{key, 135, 500}}},
+		{name: "arithmetic", head: fakeTree{sleepFile: src("const bareSleepBaseline = 400 + 100")}, want: gone, literals: 1},
+		{name: "another constant", head: fakeTree{sleepFile: src("const n = 500\nconst bareSleepBaseline = n")}, want: gone, literals: 1},
+		{name: "negative", head: fakeTree{sleepFile: src("const bareSleepBaseline = -1")}, want: gone, literals: 1},
+		{name: "a string", head: fakeTree{sleepFile: src("const bareSleepBaseline = \"500\"")}, want: gone, literals: 1},
+		{name: "implicit repetition", head: fakeTree{sleepFile: src("const (\n\taBaseline = 3\n\tbareSleepBaseline\n)")}, want: gone, literals: 1},
+		{name: "iota", head: fakeTree{sleepFile: src("const bareSleepBaseline = iota + 500")}, want: gone, literals: 1},
+		{name: "declared twice in the package", head: fakeTree{
+			sleepFile:                           src("const bareSleepBaseline = 135"),
+			"internal/testhelper/other_test.go": src("func f() {\n\tconst bareSleepBaseline = 900\n\t_ = bareSleepBaseline\n}"),
+		}, want: []raise{{key, 135, 900}}, literals: 1},
+		{name: "renamed", head: fakeTree{sleepFile: src("const bareSleepBaseline2 = 500")}, want: gone},
+		{name: "made a var", head: fakeTree{sleepFile: src("var bareSleepBaseline = 135")}, want: gone},
+		{name: "file deleted", head: fakeTree{}, want: gone},
+		{name: "file renamed in its package", head: fakeTree{"internal/testhelper/sleep_test.go": src("const bareSleepBaseline = 135")}},
+		{name: "file renamed in its package and raised", head: fakeTree{"internal/testhelper/sleep_test.go": src("const bareSleepBaseline = 136")}, want: []raise{{key, 135, 136}}},
+		{name: "moved to another package", head: fakeTree{"internal/other/sleep_test.go": src("const bareSleepBaseline = 135")}, want: gone},
+		{name: "lowered", head: fakeTree{sleepFile: src("const bareSleepBaseline = 134")}},
+		{name: "a new baseline", head: fakeTree{sleepFile: src("const bareSleepBaseline = 135\nconst newBaseline = 7")}},
+		{name: "a non-literal only in base", base: fakeTree{sleepFile: src("const bareSleepBaseline = 135\nconst oldBaseline = `x`")},
+			head: fakeTree{sleepFile: src("const bareSleepBaseline = 135")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := tc.base
+			if b == nil {
+				b = base
+			}
+			problems, rs, err := run(b, tc.head, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(rs, tc.want) {
+				t.Errorf("raises = %v, want %v", rs, tc.want)
+			}
+			literals := 0
+			for _, p := range problems {
+				if strings.Contains(p, "plain integer literal") || strings.Contains(p, "declared twice") {
+					literals++
+				}
+			}
+			if literals != tc.literals || len(problems) != literals+len(tc.want) {
+				t.Errorf("problems = %q, want %d about the constant and one per raise", problems, tc.literals)
+			}
+		})
+	}
+}
+
+// Retiring a baseline is a raise to -1 like any other; its ledger entry
+// clears it.
+func TestRun_DeletedGoBaselineWithLedgerEntry(t *testing.T) {
+	t.Parallel()
+	base := fakeTree{"internal/testhelper/sleep_ratchet_test.go": "package testhelper\nconst bareSleepBaseline = 0\n"}
+	head := fakeTree{ledgerPath: `{"gate":"go:internal/testhelper#bareSleepBaseline","from":0,"to":-1,"issue":1,"reason":"replaced by a hard ban"}` + "\n"}
+	problems, rs, err := run(base, head, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rs) != 1 || len(problems) != 0 {
+		t.Errorf("raises = %v, problems = %q; want one raise, cleared", rs, problems)
+	}
+}
+
+// The preselect is a fixed string every baseline name contains, so no
+// spelling of the declaration keeps its file from being parsed.
+func TestGitGrepArgs_FindsEverySpelling(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	files := map[string]string{
+		"typed.go":     "package a\nconst xBaseline int = 1\n",
+		"comment.go":   "package a\nconst yBaseline = 1 // c\n",
+		"sum.go":       "package a\nconst zBaseline = 1 + 1\n",
+		"block.go":     "package a\nconst (\n\tvBaseline = 1\n\twBaseline\n)\n",
+		"unrelated.go": "package a\nconst budget = 1\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range [][]string{{"init", "-q"}, {"add", "."}} {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	cmd := gitGrepArgs("")
+	got, err := grepBaselineFiles(append([]string{cmd[0], "-C", dir}, cmd[1:]...)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(got)
+	if want := []string{"block.go", "comment.go", "sum.go", "typed.go"}; !slices.Equal(got, want) {
+		t.Errorf("files = %v, want %v", got, want)
+	}
 }
 
 func TestGrepPaths(t *testing.T) {

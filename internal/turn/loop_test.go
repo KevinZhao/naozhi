@@ -379,6 +379,131 @@ func TestOwnerLoop_ResetStopsTheStaleOwner(t *testing.T) {
 	}
 }
 
+// TestOwnerLoop_ResetThenRetireStopsTheStaleOwner: Reset followed by the
+// router's KeyRetired Cleanup, as /new runs it. The stale owner finishing its
+// turn must not release the new owner's key, so a later request queues
+// behind the new owner instead of starting a second one (#3113).
+func TestOwnerLoop_ResetThenRetireStopsTheStaleOwner(t *testing.T) {
+	t.Parallel()
+	h := newHarness(8, ModeCollect)
+	releaseStale := h.hold()
+	adm := &fakeAdmission{rec: h.rec, async: true}
+
+	h.submit("m1", newOrigin(h.rec, "a", "ws:a"), adm)
+	h.rec.waitFor(t, "send:k:m1", 1)
+	h.o.Reset(context.Background(), "k", false)
+	h.o.Cleanup("k")
+	// A second gate, so releaseStale lets through m1's turn and not m3's.
+	releaseNew := h.hold()
+	if ack := h.submit("m3", newOrigin(h.rec, "c", "ws:c"), adm); ack != AckOwner {
+		t.Fatalf("Submit after Reset = %v, want AckOwner", ack)
+	}
+	h.rec.waitFor(t, "send:k:m3", 1)
+	releaseStale()
+	h.rec.waitFor(t, "idle", 1)
+	if ack := h.submit("m4", newOrigin(h.rec, "d", "ws:d"), adm); ack != AckQueued {
+		t.Fatalf("Submit while m3 runs = %v, want AckQueued (the stale owner released m3's key)", ack)
+	}
+	releaseNew()
+	h.rec.waitFor(t, "send:k:m4", 1)
+	releaseNew()
+	h.rec.waitFor(t, "idle", 2)
+	adm.wg.Wait()
+
+	if got, want := h.s.texts(), []string{"m1", "m3", "m4"}; !slices.Equal(got, want) {
+		t.Fatalf("sent %v, want %v", got, want)
+	}
+}
+
+// TestOwnerLoop_StalePanicLeavesTheNewOwner: the stale owner's turn panics
+// after Reset. Its recovery must not drop what is queued behind the new owner
+// or release the new owner's key (#3113).
+func TestOwnerLoop_StalePanicLeavesTheNewOwner(t *testing.T) {
+	t.Parallel()
+	h := newHarness(8, ModeCollect)
+	h.s.panicIf = func(text string) bool { return text == "m1" }
+	releaseStale := h.hold()
+	adm := &fakeAdmission{rec: h.rec, async: true}
+
+	h.submit("m1", newOrigin(h.rec, "a", "ws:a"), adm)
+	h.rec.waitFor(t, "send:k:m1", 1)
+	h.o.Reset(context.Background(), "k", false)
+	releaseNew := h.hold()
+	if ack := h.submit("m3", newOrigin(h.rec, "c", "ws:c"), adm); ack != AckOwner {
+		t.Fatalf("Submit after Reset = %v, want AckOwner", ack)
+	}
+	h.rec.waitFor(t, "send:k:m3", 1)
+	h.submit("m4", newOrigin(h.rec, "d", "ws:d"), adm)
+	releaseStale()
+	h.rec.waitFor(t, "idle", 1)
+	if ack := h.submit("m5", newOrigin(h.rec, "e", "ws:e"), adm); ack != AckQueued {
+		t.Fatalf("Submit while m3 runs = %v, want AckQueued (the stale panic released m3's key)", ack)
+	}
+	releaseNew()
+	releaseNew() // waits for the drain turn's Send
+	h.rec.waitFor(t, "idle", 2)
+	adm.wg.Wait()
+
+	if n := h.rec.count("dropped:d:panic") + h.rec.count("dropped:e:panic"); n != 0 {
+		t.Fatalf("the stale panic dropped %d of the new owner's queued messages: %v", n, h.rec.snapshot())
+	}
+	got := h.s.texts()
+	if len(got) != 3 || got[1] != "m3" || !strings.Contains(got[2], "m4") || !strings.Contains(got[2], "m5") {
+		t.Fatalf("sent %v, want m1, m3, then m4 and m5 merged", got)
+	}
+}
+
+// TestOwnerLoop_StaleShutdownLeavesTheNewOwner: the stale owner's ctx ends
+// after Reset. Its shutdown drop must not drop what is queued behind the new
+// owner or release the new owner's key; the new owner's own shutdown does.
+func TestOwnerLoop_StaleShutdownLeavesTheNewOwner(t *testing.T) {
+	t.Parallel()
+	rec := newRecorder()
+	s := newSender(rec)
+	// A collect delay that never fires, so each loop's select can only take ctx.Done.
+	o := New(QueueOptions{MaxDepth: 8, CollectDelay: time.Hour, Mode: ModeCollect}, s)
+	staleGate, newGate := make(chan struct{}), make(chan struct{})
+	s.gate = staleGate
+	staleCtx, cancelStale := context.WithCancel(context.Background())
+	newCtx, cancelNew := context.WithCancel(context.Background())
+	staleAdm := &fakeAdmission{rec: rec, async: true, ctx: staleCtx}
+	newAdm := &fakeAdmission{rec: rec, async: true, ctx: newCtx}
+	submit := func(text, name string, a Admission) Ack {
+		return o.Submit(context.Background(), Request{Key: "k", Text: text, Origin: newOrigin(rec, name, "ws:"+name)}, a)
+	}
+
+	submit("m1", "a", staleAdm)
+	rec.waitFor(t, "send:k:m1", 1)
+	o.Reset(context.Background(), "k", false)
+	s.mu.Lock()
+	s.gate = newGate
+	s.mu.Unlock()
+	if ack := submit("m3", "c", newAdm); ack != AckOwner {
+		t.Fatalf("Submit after Reset = %v, want AckOwner", ack)
+	}
+	rec.waitFor(t, "send:k:m3", 1)
+	submit("m4", "d", newAdm)
+	cancelStale()
+	staleGate <- struct{}{}
+	rec.waitFor(t, "idle", 1)
+	if ack := submit("m5", "e", newAdm); ack != AckQueued {
+		t.Fatalf("Submit while the new owner runs = %v, want AckQueued (the stale shutdown released its key)", ack)
+	}
+	if n := rec.count("dropped:d:shutdown"); n != 0 {
+		t.Fatalf("the stale shutdown dropped the new owner's queue: %v", rec.snapshot())
+	}
+	cancelNew()
+	newGate <- struct{}{}
+	rec.waitFor(t, "idle", 2)
+	staleAdm.wg.Wait()
+	newAdm.wg.Wait()
+	for _, ev := range []string{"dropped:d:shutdown", "dropped:e:shutdown"} {
+		if rec.count(ev) != 1 {
+			t.Fatalf("the new owner's shutdown did not tell %s: %v", ev, rec.snapshot())
+		}
+	}
+}
+
 // TestOwnerLoop_NilOriginIsSilent: requests with no Origin (enqueued straight
 // into the Queue, or submitted without one) take part in turns but receive
 // nothing, and nothing panics.

@@ -80,6 +80,26 @@ func TestSemverGreater(t *testing.T) {
 	}
 }
 
+// IsNewer is the exported form of semverGreater that `naozhi upgrade` gates on.
+func TestIsNewer(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"v0.0.83", "v0.0.82", true},
+		{"v0.0.82", "v0.0.82", false},
+		{"v0.0.81", "v0.0.82", false},
+		{"v0.0.82", "v0.0.82-3-gabc1234", false},
+		{"v0.0.82", "dev", false},
+		{"dev", "v0.0.82", false},
+	}
+	for _, tc := range cases {
+		if got := IsNewer(tc.a, tc.b); got != tc.want {
+			t.Errorf("IsNewer(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
 // Downgrade attempt: remote reports an older tag → no action.
 func TestCheckOnce_NoDowngrade(t *testing.T) {
 	withStubbedLatest(t, func(context.Context) (*Release, error) {
