@@ -130,19 +130,19 @@ func (s *Scheduler) removeRunInflightMarker(runID string) {
 // stampSendWatermark records sess's watermark in rc's marker, just before the
 // run's Send. Best-effort: a session without one, or a failed rewrite, leaves
 // the marker as written, and adoption then falls back to recording interrupted.
+// Only a marker admission wrote is updated: one it refused stays absent.
 func (s *Scheduler) stampSendWatermark(rc runCtx, sess Session) {
 	wm, ok := sess.(SendWatermarker)
-	if !ok {
+	if !ok || rc.markerPath == "" {
 		return
 	}
 	after := wm.SendWatermark()
-	dir := s.runInflightDir()
-	if after == "" || dir == "" || rc.runID == "" {
+	if after == "" {
 		return
 	}
 	m := rc.inflightMarker()
 	m.SendWatermark = after
-	s.rewriteRunInflightMarker(filepath.Join(dir, rc.runID+".json"), m)
+	s.rewriteRunInflightMarker(rc.markerPath, m)
 }
 
 // rewriteRunInflightMarker persists an updated marker in place (adoption bumps

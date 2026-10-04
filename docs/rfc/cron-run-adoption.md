@@ -89,12 +89,16 @@ cron 收养的闸门（`Router.AdoptInFlight` → `Process.AdoptableAfter`）对
 
 第二行要有证据才收养。重连是全量 replay（`lastSeq=0`），空闲 shim 的 backlog 同样以 result 结尾，那是上一轮、旧进程已经交付过的答案；记成本次 run 的成功比记成 interrupted 更糟。证据是**发送水位**（`cli.TurnWatermark{ShimPID, Seq}`，#3104）：
 
-- cron 在 `execSend` 里、Send 之前一刻，经可选能力 `cron.SendWatermarker` 取会话当前的 `<shimPID>:<seq>`，重写进 run-inflight 标记（JSON `adopt_after`，omitempty）。
+- cron 在 `execSend` 里、Send 之前一刻，经可选能力 `cron.SendWatermarker` 取会话当前的 `<shimPID>:<seq>`，重写进 run-inflight 标记（JSON `adopt_after`，omitempty）。只重写准入时真正写下的那个标记（路径存在 `runCtx.markerPath`）；准入拒写（如 `runinflight` 是被植入的符号链接，#2166）就不补写。
+- 会话忙时不给水位（`ManagedSession.TurnWatermark` 用 `ReleaseIdleProcess` 的空闲判据：进程 Running、有 Send 持有或排队 `sendMu`、passthrough 还欠 result）。cron 的 Send 会排在那个 turn 后面，它的 result 落在水位之后，会被当成本次 run 收养；没有水位则走 interrupted。
 - `reconnectVerdict` 同时给出 replay 里那个 result 的 seq，闩把它记作 `resultSeq`。
 - `SpawnReconnect` 用 replay 的最大 seq 给 `LastSeq` 打底；否则刚重连、还没收到 live 帧的进程水位是 0，所有 replay 出来的 result 都会显得"更晚"。
-- 判定：同一 shim 上 `resultSeq > Seq` 才收养；shim PID 不同说明 shim 是水位之后才起的，整段 backlog 都晚于 Send，收养；标记里没有水位（旧版本写的标记、会话无此能力、重写失败）一律不收养，维持旧行为。
+- 判定：同一 shim 上 `resultSeq > Seq` 才收养；shim PID 不同说明 shim 是水位之后才起的，整段 backlog 都晚于 Send，收养；标记里没有水位（旧版本写的标记、会话无此能力、Send 前会话忙、重写失败）一律不收养，维持旧行为。
 
-已接受的边界：水位之后 CLI 自己发起的 turn（unowned）的 result 会被算到本次 run 上。
+已接受的边界，都会把别的 turn 的 result 算到本次 run 上：
+
+- 水位之后 CLI 自己发起的 turn（unowned）。
+- 空闲判定与 cron 拿到 `sendMu` 之间的窗口里插进来的另一次 Send（仪表盘对 cron 会话发消息、passthrough）。
 
 ### 3.3 填充点：复用现有 CAS，不新增语义
 

@@ -85,10 +85,12 @@ func (r *Router) AdoptInFlight(key string, after cli.TurnWatermark, known bool) 
 
 // TurnWatermark is where the session's shim stream stands now, for a caller
 // about to Send that may need to recognise this turn's result after a restart.
-// ok=false without a live shim-backed process.
+// ok=false without a live shim-backed process, and while any turn is
+// outstanding (the ReleaseIdleProcess predicate): the caller's Send would queue
+// behind that turn, whose result would then land past the watermark.
 func (s *ManagedSession) TurnWatermark() (cli.TurnWatermark, bool) {
 	p, ok := s.loadProcess().(*cli.Process)
-	if !ok || p == nil {
+	if !ok || p == nil || p.IsRunning() || s.turnWaiters.Load() != 0 || p.PassthroughDepth() != 0 {
 		return cli.TurnWatermark{}, false
 	}
 	return p.TurnWatermark()

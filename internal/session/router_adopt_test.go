@@ -230,3 +230,76 @@ func TestAdoptInFlight_WatermarkAfterReconnectRejectsTheReplayedResult(t *testin
 		t.Errorf("AdoptInFlight = (%p, %v), want (nil, AdoptNone) for the result the watermark already covers", p, state)
 	}
 }
+
+// TestTurnWatermark_NoneWhileATurnIsRunning: a Send issued now would queue
+// behind the running turn, and that turn's result lands past any watermark
+// taken now. A restart before it arrives would then adopt that result as the
+// caller's run, so there is no watermark until the session is idle again.
+func TestTurnWatermark_NoneWhileATurnIsRunning(t *testing.T) {
+	const key = "cron:3f8a1d6c07b2e954"
+	r, proc, emit := reconnectToFakeShim(t, key, 1, []string{adoptAssistantLine})
+	sess := r.ss.Load(key)
+
+	if !proc.IsRunning() {
+		t.Fatal("a backlog ending mid-turn did not leave the process running")
+	}
+	if w, ok := sess.TurnWatermark(); ok {
+		t.Errorf("TurnWatermark mid-turn = (%+v, true), want none", w)
+	}
+
+	emit(`{"type":"result","subtype":"success","result":"done","session_id":"s1"}`)
+	testhelper.Eventually(t, func() bool { return !proc.IsRunning() },
+		5*time.Second, "the live result never ended the turn")
+	if w, ok := sess.TurnWatermark(); !ok || w != (cli.TurnWatermark{ShimPID: fakeShimPID, Seq: 2}) {
+		t.Errorf("TurnWatermark once idle = (%+v, %v), want ({%d 2}, true)", w, ok, fakeShimPID)
+	}
+}
+
+// TestTurnWatermark_NoneWhileASendIsQueued: a Send waiting on (or holding)
+// sendMu runs before the caller's, with the same effect as a running turn.
+func TestTurnWatermark_NoneWhileASendIsQueued(t *testing.T) {
+	const key = "cron:a90c5e27d14b3f68"
+	r, _, _ := reconnectToFakeShim(t, key, 1, []string{
+		adoptAssistantLine,
+		`{"type":"result","subtype":"success","result":"previous run","session_id":"s1"}`,
+	})
+	sess := r.ss.Load(key)
+
+	sess.turnWaiters.Add(1)
+	if w, ok := sess.TurnWatermark(); ok {
+		t.Errorf("TurnWatermark with a Send queued = (%+v, true), want none", w)
+	}
+	sess.turnWaiters.Add(-1)
+	if _, ok := sess.TurnWatermark(); !ok {
+		t.Error("TurnWatermark on an idle session = none, want one")
+	}
+}
+
+// TestTurnWatermark_NoneWhilePassthroughOwesAResult: a passthrough message
+// already written to the CLI is a turn it will run before the caller's, though
+// the process is not marked running until the CLI picks it up.
+func TestTurnWatermark_NoneWhilePassthroughOwesAResult(t *testing.T) {
+	const key = "cron:6be27d903a1f5c48"
+	r, proc, _ := reconnectToFakeShim(t, key, 1, []string{
+		adoptAssistantLine,
+		`{"type":"result","subtype":"success","result":"previous run","session_id":"s1"}`,
+	})
+	sess := r.ss.Load(key)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		proc.SendPassthrough(ctx, "queued", nil, nil, "") //nolint:errcheck // canceled below
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+	testhelper.Eventually(t, func() bool { return proc.PassthroughDepth() == 1 },
+		5*time.Second, "the passthrough message was never queued")
+
+	if proc.IsRunning() {
+		t.Fatal("the process is running; this test needs a queued, not-yet-started turn")
+	}
+	if w, ok := sess.TurnWatermark(); ok {
+		t.Errorf("TurnWatermark with a passthrough result owed = (%+v, true), want none", w)
+	}
+}

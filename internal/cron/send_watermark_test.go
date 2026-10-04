@@ -41,6 +41,22 @@ func (r *watermarkRouter) GetOrCreate(_ context.Context, _ string, _ AgentOpts) 
 func runAndReadMarker(t *testing.T, sess Session, gate *gatedSendSession) (runInflightMarker, *Job) {
 	t.Helper()
 	s, _ := newSchedulerWithStore(t)
+	j := startBlockedRun(t, s, sess, gate)
+	names := markerFiles(t, s)
+	if len(names) != 1 {
+		t.Fatalf("markers while in flight = %v, want exactly 1", names)
+	}
+	m, ok := s.readRunInflightMarker(filepath.Join(s.runInflightDir(), names[0]))
+	if !ok {
+		t.Fatal("marker unreadable while in flight")
+	}
+	return m, j
+}
+
+// startBlockedRun starts one local run of a new job on s and returns once the
+// run is inside sess's Send, where it stays until the test ends.
+func startBlockedRun(t *testing.T, s *Scheduler, sess Session, gate *gatedSendSession) *Job {
+	t.Helper()
 	s.router = &watermarkRouter{sess: sess}
 	j := &Job{ID: mustGenerateID(), Schedule: "@every 5m", Prompt: "do thing", WorkDir: "/tmp/wd"}
 	s.putJobForTest(j)
@@ -60,15 +76,7 @@ func runAndReadMarker(t *testing.T, sess Session, gate *gatedSendSession) (runIn
 	case <-time.After(5 * time.Second):
 		t.Fatal("Send was never entered")
 	}
-	names := markerFiles(t, s)
-	if len(names) != 1 {
-		t.Fatalf("markers while in flight = %v, want exactly 1", names)
-	}
-	m, ok := s.readRunInflightMarker(filepath.Join(s.runInflightDir(), names[0]))
-	if !ok {
-		t.Fatal("marker unreadable while in flight")
-	}
-	return m, j
+	return j
 }
 
 // TestExecSend_StampsTheWatermarkBeforeSend: the watermark is what lets the
@@ -100,6 +108,32 @@ func TestExecSend_NoWatermarkCapabilityLeavesTheMarkerAlone(t *testing.T) {
 	}
 	if m.JobID != j.ID {
 		t.Errorf("JobID = %q, want %q", m.JobID, j.ID)
+	}
+}
+
+// TestExecSend_NoWatermarkWhereAdmissionWroteNoMarker: admission refuses a
+// planted runinflight symlink (#2166). The stamp must not then write the marker
+// through it, to a place the next boot was meant never to read.
+func TestExecSend_NoWatermarkWhereAdmissionWroteNoMarker(t *testing.T) {
+	t.Parallel()
+	s, _ := newSchedulerWithStore(t)
+	elsewhere := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(s.runInflightDir()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, s.runInflightDir()); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	gate := &gatedSendSession{entered: make(chan struct{}), release: make(chan struct{})}
+	startBlockedRun(t, s, &watermarkSession{gatedSendSession: gate, mark: "4242:9"}, gate)
+
+	entries, err := os.ReadDir(elsewhere)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("symlink target holds %d entries after Send began, want none: the stamp wrote "+
+			"a marker admission refused", len(entries))
 	}
 }
 
