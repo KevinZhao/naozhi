@@ -68,6 +68,27 @@ func (b *BackendRegistry) shimManagers() []*shim.Manager {
 	return out
 }
 
+// resetRetireBudget bounds one manager's dead-CLI retire probe on a reset.
+const resetRetireBudget = 3 * time.Second
+
+// retireDeadShim offers key's shim a retire from each shim manager (see
+// shim.Manager.RetireDeadShim, which acts only on a shim whose own hello says
+// its CLI is dead) and reports whether one of them took its socket down.
+func (b *BackendRegistry) retireDeadShim(key string) bool {
+	for _, mgr := range b.shimManagers() {
+		ctx, cancel := context.WithTimeout(context.Background(), resetRetireBudget)
+		retired, err := mgr.RetireDeadShim(ctx, key)
+		cancel()
+		if retired {
+			return true
+		}
+		if err != nil {
+			slog.Debug("reset: dead-CLI shim retire did not apply", "key", key, "err", err)
+		}
+	}
+	return false
+}
+
 // shimState classifies how ReconnectShimsCtx should dispatch a discovered shim.
 // The zero value (shimStateSkip) is the safe no-op, so a new bool flag that
 // defaults false cannot silently reroute an existing case.
