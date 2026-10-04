@@ -97,7 +97,7 @@ graph LR
     style RESUME fill:#fff3cd,stroke:#d4a017
 ```
 
-- **Watchdog 双超时**: 无输出超时 (默认 2min) + 总耗时超时 (默认 5min)，防止进程挂起
+- **Watchdog 双超时**: 无输出超时 (默认 15min，工具运行时 Claude CLI 的 heartbeat 算作输出) + 总耗时超时 (默认 2h)，防止进程挂起
 - **容量管理**: 可配置最大并发进程数 (默认 3)，满载时自动驱逐最久空闲会话
 - **中断恢复**: 用户发送新消息时自动中断正在运行的 turn（软中断 control_request，ACP 回退 SIGINT）
 - **会话自动串联**: 同一项目的会话通过**项目级稳定 session key** 精确接续，Dashboard "load earlier" 可跨 session 边界回溯（`session.project_stable_key`，默认开启）。早期基于 "同 workspace + 时间窗" 猜测的 `session.auto_chain` 已下线 —— 它会把主题无关的 one-off 会话误串成历史上下文，详见 [`docs/rfc/project-stable-session-key.md`](docs/rfc/project-stable-session-key.md)

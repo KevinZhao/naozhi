@@ -55,7 +55,7 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 
 	var wg sync.WaitGroup
 	// Bound the drain on handleConnDrainBudget so a worker stuck in sess.Send
-	// (up to the CLI watchdog ≈5 min) cannot pin reconnect. connCancel must
+	// (up to the watchdog total_timeout) cannot pin reconnect. connCancel must
 	// run FIRST here: the top-level `defer connCancel()` runs after this
 	// defer, so without it the ping goroutine would stay parked for the whole
 	// budget on a plain ReadJSON-error disconnect (#2222).
