@@ -6,8 +6,12 @@ type AgentConfig struct {
 	// Backend pins the default CLI backend ("claude" | "kiro" | …) for this
 	// agent's sessions. Empty = router default.
 	Backend string `yaml:"backend,omitempty"`
-	// AccessProfile names the default access profile for this agent's
-	// sessions. Empty = global default.
+	// AccessProfile names the access profile for this agent's sessions.
+	// Precedence at spawn: resume lock > dashboard pick > project pin > this >
+	// default_access_profile. The project pin outranking the agent deviates
+	// from RFC project-access-profile §3, matching how project model/backend
+	// pins already layer. Empty = default_access_profile. Such a session is
+	// never dispatched to a remote node.
 	AccessProfile string `yaml:"access_profile,omitempty"`
 	// Effort overrides the thinking-effort tier for this agent's sessions.
 	// Empty = inherit cli.backends[].effort, then cli.effort.

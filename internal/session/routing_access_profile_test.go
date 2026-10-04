@@ -60,3 +60,88 @@ func TestAccessProfileForKey(t *testing.T) {
 		t.Errorf("cron key: AccessProfileForKey = %q, want \"\"", got)
 	}
 }
+
+// agents[].access_profile (#3106) is the tier below a project pin: it reaches
+// every resolver path that builds on defaults[agentID], and a project that
+// pins its own profile still wins.
+func TestResolveForChat_AgentAccessProfile(t *testing.T) {
+	ds := &fakeDataSource{
+		byChat: map[string]ProjectBinding{
+			"feishu:group:pinned":   {Bound: true, Name: "p1", WorkspaceDir: "/w/p1", AccessProfile: "1p-fable"},
+			"feishu:group:unpinned": {Bound: true, Name: "p2", WorkspaceDir: "/w/p2"},
+		},
+	}
+	defaults := map[string]AgentOpts{"general": {AccessProfile: "company"}, "reviewer": {AccessProfile: "personal"}}
+	r := NewKeyResolver(defaults, ds)
+
+	cases := []struct {
+		name, chatID, agentID, want string
+	}{
+		{"unbound chat gets the agent's profile", "oc_free", "reviewer", "personal"},
+		{"bound project without a pin keeps the agent's profile", "unpinned", "reviewer", "personal"},
+		{"bound project pin overrides the agent", "pinned", "reviewer", "1p-fable"},
+		{"planner without a pin keeps general's profile", "unpinned", "general", "company"},
+		{"planner pin overrides general's profile", "pinned", "general", "1p-fable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, opts := r.ResolveForChat("feishu", "group", tc.chatID, tc.agentID)
+			if opts.AccessProfile != tc.want {
+				t.Errorf("ResolveForChat AccessProfile = %q, want %q", opts.AccessProfile, tc.want)
+			}
+		})
+	}
+
+	if opts, ok := r.ResolveForKey("dashboard:direct:1700000000-x:reviewer"); !ok || opts.AccessProfile != "personal" {
+		t.Errorf("ResolveForKey(dashboard key) = %+v ok=%v, want the agent's profile", opts, ok)
+	}
+	if defaults["reviewer"].AccessProfile != "personal" {
+		t.Error("resolver mutated its defaults map")
+	}
+}
+
+// The remote-dispatch gate must see every profile a key's session can spawn
+// on; an agent-level one is as host-local as a project pin.
+func TestAccessProfileForKey_AgentTier(t *testing.T) {
+	ds := &fakeDataSource{
+		byChat: map[string]ProjectBinding{
+			"feishu:group:pinned":   {Bound: true, Name: "p1", AccessProfile: "1p-fable"},
+			"feishu:group:unpinned": {Bound: true, Name: "p2"},
+		},
+		byName: map[string]ProjectBinding{
+			"p1": {Bound: true, Name: "p1", AccessProfile: "1p-fable"},
+			"p2": {Bound: true, Name: "p2"},
+		},
+	}
+	defaults := map[string]AgentOpts{"general": {AccessProfile: "company"}, "reviewer": {AccessProfile: "personal"}, "coder": {}}
+
+	cases := []struct {
+		name, key, want string
+	}{
+		{"unbound IM key", "feishu:user:bob:reviewer", "personal"},
+		{"dashboard key", "dashboard:direct:1700000000-x:reviewer", "personal"},
+		{"bound project without a pin", "feishu:group:unpinned:reviewer", "personal"},
+		{"bound project pin wins", "feishu:group:pinned:reviewer", "1p-fable"},
+		{"agent without a profile", "feishu:user:bob:coder", ""},
+		{"planner without a pin", "project:p2:planner", "company"},
+		{"planner pin wins", "project:p1:planner", "1p-fable"},
+		{"planner of an unknown project", "project:gone:planner", ""},
+		{"reserved namespace", "cron:job1:x:reviewer", ""},
+		{"malformed", "reviewer", ""},
+	}
+	r := NewKeyResolver(defaults, ds)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := r.AccessProfileForKey(tc.key); got != tc.want {
+				t.Errorf("AccessProfileForKey(%q) = %q, want %q", tc.key, got, tc.want)
+			}
+		})
+	}
+
+	t.Run("no project data source", func(t *testing.T) {
+		r := NewKeyResolver(defaults, nil)
+		if got := r.AccessProfileForKey("feishu:user:bob:reviewer"); got != "personal" {
+			t.Errorf("AccessProfileForKey = %q, want personal without a data source", got)
+		}
+	})
+}
