@@ -1,10 +1,6 @@
 package metrics
 
 import (
-	"os"
-	"path/filepath"
-	"regexp"
-	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -23,6 +19,7 @@ func TestName_BuildsConventionCompliant(t *testing.T) {
 		{SubsystemCron, "run", KindGaugeInflight, "naozhi_cron_run_inflight"},
 		{SubsystemStartup, "phase_config", KindGaugeMillis, "naozhi_startup_phase_config_ms"},
 		{SubsystemAutoChain, "spawn_attach", KindCounter, "naozhi_auto_chain_spawn_attach_total"},
+		{SubsystemUpstream, "reqsem", KindGaugeInflight, "naozhi_upstream_reqsem_inflight"},
 	}
 	for _, c := range cases {
 		got, err := Name(c.sub, c.name, c.kind)
@@ -75,51 +72,37 @@ func TestValidName_RejectsNonConforming(t *testing.T) {
 	}
 }
 
-// TestRegisteredMetricsConformToConvention scans every metric name declared
-// in the package source and asserts it passes ValidName. This is the
-// regression guard for R247-ARCH-6 / #622: it pins the current name set to
-// the codified convention so a new metric with a stray prefix or missing
-// suffix fails the build instead of quietly adding a ninth ad-hoc shape.
+// legacyNonConforming lists registered names that predate the convention and
+// stay as they are: /debug/vars scrapes and docs pin them. Each entry must
+// still be registered and still fail ValidName, so the list cannot go stale.
+var legacyNonConforming = map[string]string{
+	"naozhi_upstream_connector_backoff_millis":         "_millis suffix; named in docs/rfc/node-pairing.md",
+	"naozhi_cron_watchdog_parked_interrupt_goroutines": "_goroutines suffix; pairs with naozhi_cron_watchdog_interrupt_timeout_total",
+}
+
+// TestRegisteredMetricsConformToConvention asserts every naozhi_* metric
+// registered anywhere in the repo passes ValidName (#622), so a new metric
+// with an unknown subsystem or a stray suffix fails the build.
 func TestRegisteredMetricsConformToConvention(t *testing.T) {
 	t.Parallel()
 
-	_, self, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller(0) failed")
-	}
-	metricsDir := filepath.Dir(self)
-
-	declRE := regexp.MustCompile(`(?:expvar\.NewInt|expvar\.NewMap|NewLabeledCounter|NewLabeledGauge)\("(naozhi_[a-z0-9_]+)"\)`)
-
-	entries, err := os.ReadDir(metricsDir)
-	if err != nil {
-		t.Fatalf("read dir %s: %v", metricsDir, err)
-	}
-	names := map[string]struct{}{}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(filepath.Join(metricsDir, e.Name()))
-		if err != nil {
-			t.Fatalf("read %s: %v", e.Name(), err)
-		}
-		for _, m := range declRE.FindAllSubmatch(src, -1) {
-			names[string(m[1])] = struct{}{}
-		}
-	}
-	if len(names) == 0 {
-		t.Fatal("no metric declarations matched — regex out of sync with source?")
-	}
-
+	decls := declaredMetricNames(t)
 	var nonConforming []string
-	for n := range names {
-		if !ValidName(n) {
-			nonConforming = append(nonConforming, n)
+	for name, file := range decls {
+		if _, legacy := legacyNonConforming[name]; !legacy && !ValidName(name) {
+			nonConforming = append(nonConforming, name+" ("+file+")")
 		}
 	}
 	sort.Strings(nonConforming)
 	if len(nonConforming) > 0 {
 		t.Errorf("metric names violating the naozhi_<subsystem>_<name>_<suffix> convention:\n  %s\nadd the subsystem to KnownSubsystems or fix the suffix.", strings.Join(nonConforming, "\n  "))
+	}
+
+	for name := range legacyNonConforming {
+		if _, ok := decls[name]; !ok {
+			t.Errorf("legacyNonConforming lists %s, which is registered nowhere; delete the entry", name)
+		} else if ValidName(name) {
+			t.Errorf("legacyNonConforming lists %s, which already passes ValidName; delete the entry", name)
+		}
 	}
 }

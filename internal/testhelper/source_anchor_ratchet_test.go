@@ -35,11 +35,11 @@ import (
 // write a behavioural test, or when the anchor genuinely is the right tool
 // (import bans, lock-shape pins with documented reasons), add it WITH an
 // anchor-keep line and argue the baseline bump in review.
-const anchorFileBaseline = 96
+const anchorFileBaseline = 95
 
 // unjustifiedAnchorBaseline counts anchor files lacking an `// anchor-keep:`
 // justification line. The triage pass drives this to zero file by file.
-const unjustifiedAnchorBaseline = 43
+const unjustifiedAnchorBaseline = 42
 
 // anchorKeep matches a justification line: `// anchor-keep: <reason>` at the
 // start of a line. A mention of the marker inside other prose does not count.
