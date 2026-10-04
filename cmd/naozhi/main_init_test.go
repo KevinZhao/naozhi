@@ -232,6 +232,45 @@ func TestBackendsHaveHealthySibling(t *testing.T) {
 	}
 }
 
+// TestStartupDefaultBackendID_MatchesInitBackendWrappers: `config check`
+// predicts the default wrapper startup binds without building any; if the two
+// selections drift, the sysession/orient diag judges the wrong backend.
+func TestStartupDefaultBackendID_MatchesInitBackendWrappers(t *testing.T) {
+	t.Parallel()
+	backend.EnsureDefaults()
+	cases := []struct {
+		name     string
+		backend  string
+		backends []string
+	}{
+		{name: "single default", backend: ""},
+		{name: "single kiro", backend: "kiro"},
+		{name: "kiro first, no cli.backend", backends: []string{"kiro", "claude"}},
+		{name: "claude first, no cli.backend", backends: []string{"claude", "kiro"}},
+		{name: "explicit claude listed second", backend: "claude", backends: []string{"kiro", "claude"}},
+		{name: "cli.backend absent from cli.backends", backend: "claude", backends: []string{"kiro"}},
+		{name: "cli.backend unknown", backend: "definitely-not-a-backend", backends: []string{"kiro", "claude"}},
+		{name: "unknown id first", backends: []string{"definitely-not-a-backend", "kiro"}},
+		{name: "leading empty id", backends: []string{"", "kiro", "claude"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &config.Config{CLI: config.CLIConfig{Backend: c.backend, Path: "/nonexistent/default"}}
+			for _, id := range c.backends {
+				cfg.CLI.Backends = append(cfg.CLI.Backends, config.CLIBackendConfig{ID: id, Path: "/nonexistent/" + id})
+			}
+			bws, _ := initBackendWrappers(context.Background(), cfg, nil)
+			if bws.Default == nil {
+				t.Fatalf("initBackendWrappers bound no default wrapper; runtimes=%v", bws.Runtimes)
+			}
+			if got := startupDefaultBackendID(cfg); got != bws.Default.BackendID {
+				t.Errorf("startupDefaultBackendID = %q, initBackendWrappers default wrapper = %q", got, bws.Default.BackendID)
+			}
+		})
+	}
+}
+
 // TestInitBackendWrappers_DefaultIDPropagated locks the contract that the
 // helper's DefaultID matches cfg.DefaultBackendID(). A regression here
 // would cause router.Wrappers / router.DefaultBackend to disagree, and
