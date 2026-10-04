@@ -39,6 +39,6 @@ func TestStartBackgroundHistoryLoaders_NoOpOnEmptyRouter(t *testing.T) {
 	// historyWg.Wait() below pins the "no goroutines spawned"
 	// invariant: an accidentally-launched goroutine that blocks
 	// indefinitely would deadlock this test.
-	r.startBackgroundHistoryLoaders()
+	r.startBackgroundHistoryLoaders(shimReconnectGraceDelay)
 	r.hist.wg.Wait()
 }

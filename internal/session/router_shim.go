@@ -317,30 +317,18 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 			// verdict (router_adopt.go) can say config_drift instead of the
 			// generic interrupted (#2749).
 			r.drift.mark(state.Key)
-			// The session is now suspended until the next user message. NewRouter's
-			// JSONL loader skipped this key (shimManagedKeys claimed it), but its
-			// naozhi event-log loader did not, and a later reconcile tick finds
-			// history already loaded. So backfill only an empty persistedHistory
-			// (proc-nil safe), or the panel stays blank until the user sends.
-			if r.hist.claudeDir != "" && state.SessionID != "" && !sess.hasInjectedHistory() {
-				ids := make([]string, 0, len(sessPrevIDs)+1)
-				ids = append(ids, sessPrevIDs...)
-				ids = append(ids, state.SessionID)
-				// IIFE so a panic inside InjectHistoryIfEmpty / extractLastPromptFromProcess
+			// The session is now suspended until the next user message, so
+			// backfill an empty history (proc-nil safe) or the panel stays blank
+			// until the user sends. A startup loader or an earlier tick may have
+			// filled it already; the pre-check only skips the read.
+			if !sess.hasInjectedHistory() {
+				// IIFE so a panic inside the inject / extractLastPromptFromProcess
 				// still releases the context's timer.
 				func() {
 					histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
 					defer histCancel()
-					histEntries := r.hist.loader.LoadHistoryChainTail(
-						histCtx, r.hist.claudeDir, ids, sess.Workspace(), maxPersistedHistory,
-					)
-					// The pre-check above only skips the read; a startup loader
-					// can fill history while it runs, so the inject itself must be
-					// the atomic one (#1812).
-					if len(histEntries) > 0 && sess.InjectHistoryIfEmpty(histEntries) {
+					if r.hist.injectRestoredHistory(histCtx, sess, shimChainIDs(sessPrevIDs, state.SessionID), restoreViaShimDrift) {
 						sess.extractLastPromptFromProcess()
-						slog.Info("drifted shim: backfilled JSONL history",
-							"key", state.Key, "entries", len(histEntries))
 					}
 				}()
 			}
@@ -443,32 +431,19 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 			}
 		}
 
-		// Restore dashboard history from JSONL only: replay events lack native
-		// timestamps and would break ordering against JSONL user entries. Fill
-		// only an empty persistedHistory (ReattachProcessNoCallback snapshots it
-		// into proc), atomically: the pre-check just skips the read, and
-		// NewRouter's startup loaders may fill it meanwhile (#1812).
-		if r.hist.claudeDir != "" && !sess.hasInjectedHistory() {
-			ids := make([]string, 0, len(sessPrevIDs)+1)
-			ids = append(ids, sessPrevIDs...)
-			if state.SessionID != "" {
-				ids = append(ids, state.SessionID)
-			}
+		// Restore dashboard history from the event log or JSONL, not from the
+		// replay: replay events lack native timestamps and would break ordering
+		// against user entries. Fill only an empty persistedHistory
+		// (ReattachProcessNoCallback seeds proc from it exactly once); the
+		// pre-check just skips the read, as startup loaders may fill it meanwhile.
+		if !sess.hasInjectedHistory() {
 			// parentCtx, not r.hist.ctx: that is cancelled as Shutdown's
 			// FIRST action, so a reconcile tick during the drain window would
 			// load zero entries and leave the panel empty. maxPersistedHistory +
 			// shimReconnectTimeout still bound hung storage.
 			histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
-			histEntries := r.hist.loader.LoadHistoryChainTail(
-				histCtx, r.hist.claudeDir, ids, sess.Workspace(), maxPersistedHistory,
-			)
+			r.hist.injectRestoredHistory(histCtx, sess, shimChainIDs(sessPrevIDs, state.SessionID), restoreViaShimReconnect)
 			histCancel()
-			if len(histEntries) > 0 {
-				// proc is not yet attached, so the inject only touches
-				// persistedHistory; ReattachProcessNoCallback below seeds proc
-				// from it exactly once.
-				sess.InjectHistoryIfEmpty(histEntries)
-			}
 		}
 
 		// Re-check and attach in one transaction; see commitShimReattach.
@@ -485,7 +460,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 			continue
 		}
 
-		// Persist sink goes last so the InjectHistory + shim replay above land
+		// Persist sink goes last so the history inject + shim replay above land
 		// with sinkReady=false and are dropped rather than written back to disk
 		// (RFC §3.2.2).
 		r.hist.installPersistSink(proc, state.Key)
@@ -515,6 +490,17 @@ func (r *Router) settleReconnected(n int) {
 	r.notifyChange()
 	slog.Info("shim reconnect complete", "count", n)
 	r.ss.Update(func(tx sessTx) { r.countActive(tx) })
+}
+
+// shimChainIDs is the resume chain whose JSONL a shim's session restores
+// from: the session's previous IDs, then the shim's own when it has one.
+func shimChainIDs(prevIDs []string, sessionID string) []string {
+	ids := make([]string, 0, len(prevIDs)+1)
+	ids = append(ids, prevIDs...)
+	if sessionID != "" {
+		ids = append(ids, sessionID)
+	}
+	return ids
 }
 
 // shimTarget is what ReconnectShimsCtx knows about the session a shim belongs
