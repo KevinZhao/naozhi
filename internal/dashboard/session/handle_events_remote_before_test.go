@@ -22,8 +22,8 @@ type fakeEventsConn struct {
 	gotQuery node.EventsQuery
 	// page, when set, is a paging node's answer to every page request.
 	page *node.EventsPage
-	// bounded makes the legacy answer honour before/limit (a peer that pages
-	// but reports no has-more).
+	// bounded makes the legacy answer honour before/limit under the peer's
+	// own page cap (a peer that pages but reports no has-more).
 	bounded bool
 }
 
@@ -41,8 +41,8 @@ func (c *fakeEventsConn) FetchEventsPage(_ context.Context, _ string, q node.Eve
 		return node.EventsPage{Events: c.entries}, nil
 	}
 	older := eventsBefore(c.entries, q.Before)
-	if len(older) > q.Limit {
-		older = older[len(older)-q.Limit:]
+	if limit := min(q.Limit, maxEventsPageLimit); len(older) > limit {
+		older = older[len(older)-limit:]
 	}
 	return node.EventsPage{Events: older}, nil
 }
@@ -146,14 +146,15 @@ func TestHandleEvents_RemoteBefore_ExhaustedReturnsEmpty(t *testing.T) {
 	}
 }
 
-// `before` with no limit uses the same page cap as the local branch.
+// `before` with no limit is bounded by the page cap, one entry short of it so
+// the has-more probe fits under a bounded peer's cap.
 func TestHandleEvents_RemoteBefore_NoLimitUsesPageCap(t *testing.T) {
 	conn := &fakeEventsConn{entries: remoteEventsFixture(maxEventsPageLimit + 5)}
 	h := newETagTestHandlers(t, newFakeRouter(), fakeEventsNodeAccessor{conn: conn})
 
 	rec, got := doRemoteEvents(t, h, "&before=1000000")
-	if len(got) != maxEventsPageLimit {
-		t.Fatalf("before w/o limit: got %d entries want %d", len(got), maxEventsPageLimit)
+	if len(got) != maxEventsPageLimit-1 {
+		t.Fatalf("before w/o limit: got %d entries want %d", len(got), maxEventsPageLimit-1)
 	}
 	if got[len(got)-1].Time != int64(maxEventsPageLimit+5) {
 		t.Errorf("tail must keep the newest of the filtered set; last time=%d", got[len(got)-1].Time)

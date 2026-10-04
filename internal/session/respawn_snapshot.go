@@ -73,6 +73,8 @@ type respawnSnapshot struct {
 	// spent is the monotonic metering total, which follows the logical
 	// session across process replacement like costSpent.
 	spent costledger.Totals
+	// startupFails is the startup-failure streak the replacement inherits.
+	startupFails int32
 }
 
 func snapshotRespawn(v sessView, old *ManagedSession) respawnSnapshot {
@@ -81,6 +83,7 @@ func snapshotRespawn(v sessView, old *ManagedSession) respawnSnapshot {
 	if old != nil {
 		snap.sid = old.getSessionID()
 		snap.spent = old.CostTotals()
+		snap.startupFails = startupFailureOf(old).streak
 	}
 	return snap
 }

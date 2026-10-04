@@ -132,3 +132,20 @@ func TestToCronAdoptedOutcome(t *testing.T) {
 		}
 	}
 }
+
+// TestCronSessionAdapter_NoWatermarkWithoutAShimProcess: a session whose
+// process is not a shim-backed *cli.Process has no stream position to offer,
+// and must report none rather than a zero position every replayed result
+// would sit past.
+func TestCronSessionAdapter_NoWatermarkWithoutAShimProcess(t *testing.T) {
+	t.Parallel()
+	r := session.NewRouter(session.RouterConfig{})
+	t.Cleanup(r.Shutdown)
+	a := cronSessionAdapter{s: r.InjectSession("cron:job-no-watermark", session.NewTestProcess())}
+	if got := a.SendWatermark(); got != "" {
+		t.Errorf("SendWatermark = %q, want empty", got)
+	}
+	if run, v := (cronRouterAdapter{r: r}).AdoptInFlight("cron:job-no-watermark", "not-a-watermark"); v != cron.AdoptNone || run != nil {
+		t.Errorf("AdoptInFlight = (%v, %v), want (nil, AdoptNone)", run, v)
+	}
+}

@@ -4,7 +4,9 @@ package cli
 // what the CLI's stderr says caused it.
 
 import (
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -71,7 +73,21 @@ func (p *Process) recordExit(code int64, tail []string) {
 	if !p.sawOutput.Load() {
 		e.Class = classifyStderr(tail)
 	}
+	p.exitedAt.Store(time.Now().UnixNano())
 	p.exited.Store(e)
+}
+
+// StartupFailure reports a CLI that exited with a non-zero status of its own
+// before it got past startup: the class its stderr names and when it exited.
+// ok is false while it runs, after output or a reattach, and for an exit 0,
+// a signal (code -1) or a death naozhi caused first (DeathReason).
+func (p *Process) StartupFailure() (class clierr.ExitClass, at time.Time, ok bool) {
+	e := p.exited.Load()
+	if e == nil || e.Code <= 0 || p.sawOutput.Load() ||
+		p.DeathReason() != DeathReasonCLIExited+"_code_"+strconv.FormatInt(e.Code, 10) {
+		return clierr.ExitUnknown, time.Time{}, false
+	}
+	return e.Class, time.Unix(0, p.exitedAt.Load()), true
 }
 
 // exitErr is the error for a send that found the process dead: the

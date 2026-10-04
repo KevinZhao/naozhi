@@ -161,6 +161,18 @@ func (c cronSessionAdapter) CostTotals() costledger.Totals { return c.s.CostTota
 
 var _ cron.CostReporter = cronSessionAdapter{}
 
+// SendWatermark satisfies cron.SendWatermarker with the session's shim
+// watermark, encoded for cronRouterAdapter.AdoptInFlight to parse back.
+func (c cronSessionAdapter) SendWatermark() string {
+	w, ok := c.s.TurnWatermark()
+	if !ok {
+		return ""
+	}
+	return w.String()
+}
+
+var _ cron.SendWatermarker = cronSessionAdapter{}
+
 // SessionID lets the cron inflight broadcast fill in the CLI session id
 // mid-Send. Assumes c.s is non-nil (always constructed with a live session).
 func (c cronSessionAdapter) SessionID() string {
@@ -188,8 +200,10 @@ var _ cron.InFlightAdopter = cronRouterAdapter{}
 // AdoptInFlight bridges the capability: the router answers with the live
 // *cli.Process (or a verdict explaining why not), and the adapter wraps it in
 // cron's narrow InFlightRun so cron keeps importing neither session nor cli.
-func (a cronRouterAdapter) AdoptInFlight(key string) (cron.InFlightRun, cron.AdoptVerdict) {
-	proc, state := a.r.AdoptInFlight(key)
+// after is SendWatermark's encoding; one that does not parse counts as none.
+func (a cronRouterAdapter) AdoptInFlight(key, after string) (cron.InFlightRun, cron.AdoptVerdict) {
+	w, known := cli.ParseTurnWatermark(after)
+	proc, state := a.r.AdoptInFlight(key, w, known)
 	if state != session.AdoptLive || proc == nil {
 		return nil, cron.AdoptVerdict(int(state))
 	}

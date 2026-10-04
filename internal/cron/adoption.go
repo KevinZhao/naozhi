@@ -53,9 +53,10 @@ type InFlightRun interface {
 	AwaitAdopted(ctx context.Context) (AdoptedRunOutcome, error)
 }
 
-// InFlightAdopter is asserted on the SessionRouter, never added to it.
+// InFlightAdopter is asserted on the SessionRouter, never added to it. after
+// is the run's SendWatermarker value from its marker ("" when none was taken).
 type InFlightAdopter interface {
-	AdoptInFlight(key string) (InFlightRun, AdoptVerdict)
+	AdoptInFlight(key, after string) (InFlightRun, AdoptVerdict)
 }
 
 // maxAdoptAttempts bounds how many boots may try to adopt one marker. Phase 0

@@ -7,7 +7,7 @@ import { composer, hooks, perSession, selection, serverInfo, sessionList, timers
 import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, registerActions, sessionExitChipHtml } from './nz_util.js';
 import { eventHtml } from './event_render.js';
 import { onAskOptionToggle, onAskSubmit } from './ask_card.js';
-import { eventIdentityKey, fetchEvents, renderEvents } from './event_stream.js';
+import { eventIdentityKey, fetchEvents, hasMoreHeader, renderEvents } from './event_stream.js';
 import { renderMd, runPendingAsync } from './render_md.js';
 import { fetchSessionRuns, setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderSpawnDiagChip } from './session_header.js';
 import {
@@ -919,9 +919,9 @@ const EXPORT_MAX_PAGES = 40;
 // fetchAllSessionEvents returns { events, truncated } (or { status } on a
 // non-2xx first page). `truncated` is set whenever the export is known or
 // suspected to be incomplete — page cap hit, a later page failed or was
-// malformed, a full page yielded nothing new, or a remote node (whose relay
-// ignores before/limit and so can only ever serve the ring) returned a
-// ring-sized slice — so the caller must warn rather than claim a full export.
+// malformed, or a page with nothing new said has-more — so the caller must
+// warn rather than claim a full export. A remote session pages the same way:
+// its node serves the `before=` pages through the relay.
 //
 // Cursor: `before = oldest + 1`, NOT `before = oldest`. Both the ring
 // (EntriesBefore) and the disk sources filter strictly `Time < before`, so a
@@ -938,7 +938,6 @@ async function fetchAllSessionEvents(key, node, headers) {
   if (!r.ok) return { status: r.status };
   let events = await r.json();
   if (!Array.isArray(events)) events = [];
-  if (remote) return { events, truncated: events.length >= EXPORT_PAGE_LIMIT };
   if (events.length === 0) return { events, truncated: false };
 
   const seen = new Set(events.map(eventIdentityKey));
@@ -950,7 +949,7 @@ async function fetchAllSessionEvents(key, node, headers) {
     if (!pr.ok) { truncated = true; break; }
     const page = await pr.json();
     if (!Array.isArray(page)) { truncated = true; break; }
-    if (page.length === 0) break;
+    const hm = hasMoreHeader(pr);
     const fresh = page.filter(e => {
       const k = eventIdentityKey(e);
       if (seen.has(k)) return false;
@@ -958,15 +957,15 @@ async function fetchAllSessionEvents(key, node, headers) {
       return true;
     });
     if (fresh.length === 0) {
-      // A full page of entries we already hold can't be told apart from a
-      // same-ms flood wider than one page — stop and warn. A short page of
-      // known entries just means the history is exhausted.
-      if (page.length >= EXPORT_PAGE_LIMIT) truncated = true;
+      // has-more=1 here is a degraded read or a same-ms flood wider than a
+      // page; an older server sends no header, so only a full page is suspect.
+      truncated = hm === null ? page.length >= EXPORT_PAGE_LIMIT : hm;
       break;
     }
     events = fresh.concat(events);
     const pageOldest = (fresh[0] && fresh[0].time) || 0;
     if (!pageOldest) break; // untimed head reached; nothing older to cursor on
+    if (hm === false) break;
     oldest = pageOldest;
   }
   return { events, truncated };

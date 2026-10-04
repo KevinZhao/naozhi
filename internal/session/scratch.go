@@ -38,8 +38,10 @@ const DefaultScratchContextTurns = 5
 // would discard anyway.
 const MaxScratchContextTurns = 20
 
-// DefaultScratchTTL is how long an idle scratch lives before the sweeper kills
-// it. Shorter than Router.DefaultTTL: a forgotten tab must not hold a CLI slot.
+// DefaultScratchTTL is how long an idle scratch (no send and no CLI event)
+// lives before the sweeper kills it. Shorter than Router.DefaultTTL: a
+// forgotten tab must not hold a CLI slot. A turn still outstanding is bounded
+// by the turn watchdog and Router.Cleanup's stuck detector, not by this TTL.
 const DefaultScratchTTL = 10 * time.Minute
 
 // DefaultScratchMax is the global concurrent-scratch cap. Each scratch owns a
@@ -84,6 +86,17 @@ func (s *Scratch) LastUsed() time.Time {
 // used scratch as fresh.
 func (s *Scratch) Touch() {
 	s.lastUsed.Store(time.Now().UnixNano())
+}
+
+// touchAt advances lastUsed to t; an older t never moves it back.
+func (s *Scratch) touchAt(t time.Time) {
+	ns := t.UnixNano()
+	for {
+		cur := s.lastUsed.Load()
+		if ns <= cur || s.lastUsed.CompareAndSwap(cur, ns) {
+			return
+		}
+	}
 }
 
 // ScratchPool manages the set of live ephemeral scratch sessions. It does NOT
@@ -150,17 +163,41 @@ func (p *ScratchPool) Stop() {
 	p.sweepWG.Wait()
 }
 
-// sweep removes scratches idle past TTL. Router.Remove() runs outside the pool
-// lock so slow process teardown never holds p.mu. The O(N) walk is fine while
-// the pool is capped at DefaultScratchMax.
+// sweep removes scratches idle past TTL. Router state is read and
+// Router.Remove() runs outside the pool lock, so neither a session lookup nor
+// slow process teardown ever holds p.mu. A candidate whose router session is
+// still active is kept and its lastUsed advanced; the rest are re-checked
+// under the lock, since a send, Close or Promote may have raced the lookup.
+// The O(N) walk is fine while the pool is capped at DefaultScratchMax.
 func (p *ScratchPool) sweep(now time.Time) {
-	cutoff := now.Add(-p.ttl).UnixNano()
+	cutoff := now.Add(-p.ttl)
+	var candidates []*Scratch
+	p.mu.Lock()
+	for _, sc := range p.items {
+		if sc.lastUsed.Load() < cutoff.UnixNano() {
+			candidates = append(candidates, sc)
+		}
+	}
+	p.mu.Unlock()
+	if len(candidates) == 0 {
+		return
+	}
+
+	idle := candidates[:0]
+	for _, sc := range candidates {
+		if last := p.lastActivity(sc.Key, now); last.After(cutoff) {
+			sc.touchAt(last)
+			continue
+		}
+		idle = append(idle, sc)
+	}
+
 	var expired []*Scratch
 	p.mu.Lock()
-	for id, sc := range p.items {
-		if sc.lastUsed.Load() < cutoff {
+	for _, sc := range idle {
+		if p.items[sc.ID] == sc && sc.lastUsed.Load() < cutoff.UnixNano() {
 			expired = append(expired, sc)
-			delete(p.items, id)
+			delete(p.items, sc.ID)
 			delete(p.byKey, sc.Key)
 		}
 	}
@@ -170,6 +207,29 @@ func (p *ScratchPool) sweep(now time.Time) {
 			p.router.Remove(sc.Key)
 		}
 	}
+}
+
+// lastActivity is when the router session under key was last active: now
+// while a turn is outstanding, else the later of its last send and last CLI
+// event. Zero when there is no router or no session (a scratch never sent to).
+func (p *ScratchPool) lastActivity(key string, now time.Time) time.Time {
+	if p.router == nil {
+		return time.Time{}
+	}
+	s := p.router.SessionFor(key)
+	if s == nil {
+		return time.Time{}
+	}
+	last := s.LastActive()
+	if proc := s.loadProcess(); proc != nil {
+		if proc.Alive() && s.turnOutstanding(proc) {
+			return now
+		}
+		if le := proc.LastEventAt(); le.After(last) {
+			last = le
+		}
+	}
+	return last
 }
 
 // OpenOptions configures a new scratch session.

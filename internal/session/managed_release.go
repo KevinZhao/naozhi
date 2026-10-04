@@ -17,7 +17,7 @@ func (s *ManagedSession) ReleaseIdleProcess() bool {
 		return false
 	}
 	proc := s.loadProcess()
-	if proc == nil || !proc.Alive() || proc.IsRunning() || s.turnWaiters.Load() != 0 || proc.PassthroughDepth() != 0 {
+	if proc == nil || !proc.Alive() || s.turnOutstanding(proc) {
 		s.sendMu.Unlock()
 		return false
 	}
@@ -29,4 +29,10 @@ func (s *ManagedSession) ReleaseIdleProcess() bool {
 	}
 	logSessionLifecycle("released", s.key)
 	return true
+}
+
+// turnOutstanding reports whether proc has a turn running, a Send holding or
+// queued on sendMu, or a passthrough send still pending.
+func (s *ManagedSession) turnOutstanding(proc processIface) bool {
+	return proc.IsRunning() || s.turnWaiters.Load() != 0 || proc.PassthroughDepth() != 0
 }
