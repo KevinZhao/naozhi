@@ -39,8 +39,17 @@ func requireNonZero(t *testing.T, path string, v reflect.Value) {
 		if f.Kind() == reflect.Pointer {
 			f = f.Elem()
 		}
-		if f.Kind() == reflect.Struct {
+		switch {
+		case f.Kind() == reflect.Struct:
 			requireNonZero(t, at, f)
+		case f.Kind() == reflect.Map && f.Type().Elem().Kind() == reflect.Struct:
+			if f.Len() == 0 {
+				t.Errorf("%s has no entry: the contract needs one to check its keys", at)
+			}
+			iter := f.MapRange()
+			for iter.Next() {
+				requireNonZero(t, at+"["+iter.Key().String()+"]", iter.Value())
+			}
 		}
 	}
 }
