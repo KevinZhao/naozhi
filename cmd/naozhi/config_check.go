@@ -55,8 +55,9 @@ type backendDiag struct {
 type effectiveSpawn struct {
 	Argv []string `json:"argv"`
 	Env  []string `json:"env"`
-	// Agents holds the argv for each configured agent, whose system_prompt and
-	// args are session-scoped and therefore absent from Argv above.
+	// Agents holds the argv for each agent that spawns on this backend (all of
+	// them unless agents[].backend pins one), whose system_prompt and args are
+	// session-scoped and therefore absent from Argv above.
 	Agents map[string][]string `json:"agents,omitempty"`
 	// Profiles holds the masked env each access profile's overlay produces on
 	// top of Env. Overlay values face the same allowlist + guards, so a
@@ -192,6 +193,11 @@ func configCheck(args []string, stdout io.Writer) int {
 				Env:  maskEnvValues(filteredEnv),
 			}
 			for agentID, ac := range cfg.Agents {
+				// An agent pinned to a backend spawns there unless the dashboard
+				// picks another, so it is listed only under that backend.
+				if ac.Backend != "" && ac.Backend != id {
+					continue
+				}
 				// An agent's own access_profile outranks default_access_profile at
 				// spawn, so its default_model is the one that reaches argv.
 				profileID := cfg.DefaultAccessProfile

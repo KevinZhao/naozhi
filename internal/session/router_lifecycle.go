@@ -233,8 +233,8 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 	// One registry snapshot for the whole resolution: the overlay env and the
 	// profile default model must come from the same map.
 	profiles := r.backends.profiles()
-	// Backend precedence: opts.Backend > one-shot backendOverrides[key]
-	// (consumed here) > existing session's Backend (resume continuity) >
+	// Backend precedence: opts.Backend > one-shot pick (consumed here) >
+	// existing session's Backend (resume continuity) > opts.DefaultBackend >
 	// defaultBackend. Without the existing-session tier a dead kiro session
 	// would respawn on the default backend, fail the resume probe, and
 	// silently downgrade to a fresh claude session.
@@ -251,6 +251,9 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 				reqBackend = b
 			}
 		}
+	}
+	if reqBackend == "" {
+		reqBackend = opts.DefaultBackend
 	}
 	wrapper, backendID := r.backends.wrapperFor(reqBackend)
 

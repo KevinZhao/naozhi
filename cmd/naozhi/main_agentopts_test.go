@@ -22,7 +22,7 @@ func TestBuildAgentOpts(t *testing.T) {
 			// direction breaks that comparison.
 			"planner": {Model: "opus", Effort: "max"},
 			// #2493: agents[].system_prompt must survive both hops too.
-			"reviewer": {Model: "sonnet", SystemPrompt: "You are a code review expert.", AccessProfile: "personal"},
+			"reviewer": {Model: "sonnet", SystemPrompt: "You are a code review expert.", AccessProfile: "personal", Backend: "kiro"},
 		},
 	}
 	agents, cronAgents := buildAgentOpts(cfg)
@@ -34,6 +34,16 @@ func TestBuildAgentOpts(t *testing.T) {
 	}
 	if got := agents["general"].AccessProfile; got != "" {
 		t.Errorf("agents[general].AccessProfile = %q, want empty (unset in config)", got)
+	}
+
+	// agents[].backend is the agent tier, not the explicit one: as Backend it
+	// would outrank the dashboard pick and resume continuity. Cron has no
+	// picker, so there it becomes the job's backend.
+	if got := agents["reviewer"]; got.DefaultBackend != "kiro" || got.Backend != "" {
+		t.Errorf("agents[reviewer] Backend=%q DefaultBackend=%q, want \"\"/kiro", got.Backend, got.DefaultBackend)
+	}
+	if got := cronAgents["reviewer"].Backend; got != "kiro" {
+		t.Errorf("cronAgents[reviewer].Backend = %q, want kiro", got)
 	}
 
 	if got := agents["reviewer"].SystemPrompt; got != "You are a code review expert." {
