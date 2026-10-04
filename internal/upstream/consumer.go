@@ -43,7 +43,7 @@ type PlannerResolver interface {
 }
 
 // SessionLookup is the read-only lookup sub-capability used by hot RPC paths
-// (subscribe stream filter, ListSessions response, SessionFor before send).
+// (subscribe stream filter, ListSessions response).
 type SessionLookup interface {
 	SessionFor(key string) Session
 	ListSessions() []sessionview.SessionSnapshot
@@ -52,7 +52,6 @@ type SessionLookup interface {
 // SessionLifecycle is the create/recreate/remove sub-capability used by RPC
 // handlers that allocate or tear down sessions.
 type SessionLifecycle interface {
-	GetOrCreate(ctx context.Context, key string, opts sessionview.AgentOpts) (Session, sessionview.SessionStatus, error)
 	ResetAndRecreate(ctx context.Context, key string, opts sessionview.AgentOpts) (Session, error)
 	Takeover(ctx context.Context, key string, sessionID string, workspace string, opts sessionview.AgentOpts) (Session, error)
 	Remove(key string) bool

@@ -18,11 +18,6 @@ func (a testRouterAdapter) SessionFor(key string) Session {
 	return testSession(a.Router.SessionFor(key))
 }
 
-func (a testRouterAdapter) GetOrCreate(ctx context.Context, key string, opts sessionview.AgentOpts) (Session, sessionview.SessionStatus, error) {
-	s, st, err := a.Router.GetOrCreate(ctx, key, opts)
-	return testSession(s), st, err
-}
-
 func (a testRouterAdapter) ResetAndRecreate(ctx context.Context, key string, opts sessionview.AgentOpts) (Session, error) {
 	s, err := a.Router.ResetAndRecreate(ctx, key, opts)
 	return testSession(s), err

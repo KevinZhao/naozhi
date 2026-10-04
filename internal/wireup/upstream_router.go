@@ -22,18 +22,13 @@ var (
 // UpstreamRouter wraps a live *session.Router as an upstream.SessionRouter.
 func UpstreamRouter(r *session.Router) upstream.SessionRouter { return upstreamRouter{r} }
 
-// upstreamRouter forwards every method; the four that hand back a session
+// upstreamRouter forwards every method; the three that hand back a session
 // convert it with asUpstreamSession. The rest are promoted from the embedded
 // router unchanged, since their signatures speak sessionview's types already.
 type upstreamRouter struct{ *session.Router }
 
 func (u upstreamRouter) SessionFor(key string) upstream.Session {
 	return asUpstreamSession(u.Router.SessionFor(key))
-}
-
-func (u upstreamRouter) GetOrCreate(ctx context.Context, key string, opts sessionview.AgentOpts) (upstream.Session, sessionview.SessionStatus, error) {
-	s, status, err := u.Router.GetOrCreate(ctx, key, opts)
-	return asUpstreamSession(s), status, err
 }
 
 func (u upstreamRouter) ResetAndRecreate(ctx context.Context, key string, opts sessionview.AgentOpts) (upstream.Session, error) {

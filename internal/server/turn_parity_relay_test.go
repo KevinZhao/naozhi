@@ -15,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 func (h *parityHarness) relay(t *testing.T, text string) string {
@@ -68,6 +69,9 @@ func TestRelay_ResetWithArgumentIsText(t *testing.T) {
 		t.Fatalf("turn text = %q, want the literal command", c.Text)
 	}
 	h.waitEngineIdle()
+	if got := h.systemEvents(parityKey); len(got) != 0 {
+		t.Fatalf("system events after a turn that succeeded = %q, want none", got)
+	}
 }
 
 // Sends relayed while a turn runs are queued and merged into one turn.
@@ -150,6 +154,46 @@ func TestRelay_TurnPanicIsASystemEvent(t *testing.T) {
 	}
 }
 
+// A turn the node's shutdown cuts short is not reported: the shim may carry
+// it through the restart.
+func TestRelay_TurnCutShortByShutdownIsSilent(t *testing.T) {
+	h := newParityHarness(t, parityOpts{})
+	turns := h.session(parityKey, false)
+	h.relay(t, "hi")
+	turns.next(t, "turn")
+	drained := make(chan struct{})
+	go func() {
+		h.engine().drain()
+		close(drained)
+	}()
+	<-h.engine().ctx.Done()
+	turns.answer(parityOutcome{Err: context.Canceled})
+	h.waitDone(drained, "engine drain")
+	if got := h.systemEvents(parityKey); len(got) != 0 {
+		t.Fatalf("system events = %q, want none", got)
+	}
+}
+
+// A relayed owner observing a drain turn of other entries' messages does not
+// report that turn's failure: those entries answer for their own.
+func TestRelay_OwnerObservingAnotherEntrysTurnIsSilent(t *testing.T) {
+	h := newParityHarness(t, parityOpts{})
+	turns := h.session(parityKey, false)
+	h.relay(t, "first")
+	turns.next(t, "owner turn")
+	h.imSend("m1", "from im")
+	turns.answer(okTurn("R1"))
+	if c := turns.turn(t, "drain turn", parityOutcome{Err: errParityBoom}); c.Text != "from im" {
+		t.Fatalf("drain turn text = %q, want the IM message", c.Text)
+	}
+	h.waitEngineIdle()
+	for _, e := range h.systemEvents(parityKey) {
+		if strings.HasPrefix(e, relayFailPrefix) {
+			t.Fatalf("system events = %q, want no relay failure for a turn it only observed", h.systemEvents(parityKey))
+		}
+	}
+}
+
 // An outcome the user already knows about (their reset, their /urgent) is not
 // reported.
 func TestRelay_InformationalFailureIsSilent(t *testing.T) {
@@ -224,6 +268,47 @@ func TestRelay_SpawnFailureIsTheError(t *testing.T) {
 		h.waitEngineIdle()
 		turns.noMoreTurns(t)
 	})
+}
+
+// ctxRecordingRouter records the ctx GetOrCreate is called with.
+type ctxRecordingRouter struct {
+	*session.Router
+	got chan context.Context
+}
+
+func (r ctxRecordingRouter) GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error) {
+	r.got <- ctx
+	return r.Router.GetOrCreate(ctx, key, opts)
+}
+
+type relayCtxKey struct{}
+
+// The preflight spawn runs on the caller's ctx, so a dropped link abandons a
+// spawn nobody will hear about.
+func TestRelay_PreflightRunsOnTheCallersCtx(t *testing.T) {
+	h := newParityHarness(t, parityOpts{})
+	turns := h.session(parityKey, false)
+	w := h.hs.wiring
+	rec := ctxRecordingRouter{Router: h.router, got: make(chan context.Context, 4)}
+	e := newSendEngine(sendEngineOpts{
+		Turns:    turn.New(w.queue, h.turnSender()),
+		Ctx:      h.srv.appCtx,
+		Router:   rec,
+		Resolver: w.resolver,
+		Agents:   w.agents,
+		Notify:   w.bcast,
+	})
+	t.Cleanup(e.drain)
+	ctx := context.WithValue(context.Background(), relayCtxKey{}, "conn")
+	if _, err := e.relaySend(ctx, parityKey, "hi", ""); err != nil {
+		t.Fatal(err)
+	}
+	preflight := <-rec.got
+	turns.turn(t, "turn", okTurn("R"))
+	waitEngineIdle(t, e)
+	if preflight.Value(relayCtxKey{}) != "conn" {
+		t.Fatal("the preflight GetOrCreate did not run on the caller's ctx")
+	}
 }
 
 // A relayed workspace is the chat's override, as a dashboard send's is.

@@ -64,7 +64,9 @@ func (e *sendEngine) relaySend(ctx context.Context, key, text, workspace string)
 // relayOrigin is a relayed send. Like httpOrigin, one receiver speaks for
 // every relayed send on the key in the batch, and informational outcomes are
 // dropped. A failure goes into the session's EventLog: the primary's tabs
-// follow this node's sessions through it, and so do this node's own.
+// follow this node's sessions through it, and so do this node's own. A turn
+// cut short by the node shutting down is not reported: the shim may carry
+// it through the restart, and a persisted "retry" would invite a resend.
 type relayOrigin struct {
 	dashOrigin
 	sessions interface {
@@ -81,8 +83,9 @@ func (o *relayOrigin) Begin(_ context.Context, t turn.TurnInfo) turn.Delivery {
 	return o
 }
 
-func (o *relayOrigin) Finish(_ context.Context, out turn.Outcome) {
-	if msg, failed, err := o.failure(out); failed && !informationalSendErr(err) {
+func (o *relayOrigin) Finish(ctx context.Context, out turn.Outcome) {
+	// ctx is the engine's, cancelled by drain only.
+	if msg, failed, err := o.failure(out); failed && !informationalSendErr(err) && ctx.Err() == nil {
 		o.report(msg)
 	}
 }
