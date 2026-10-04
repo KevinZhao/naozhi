@@ -81,6 +81,10 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 	// cannot be split by another caller.
 	var staleSocketBound bool
 	for {
+		// Only the round right after a stale one inherits its bound socket; a
+		// round that waits on another caller's spawn consumes it.
+		wrapStale := staleSocketBound
+		staleSocketBound = false
 		var (
 			live      *ManagedSession
 			wait      chan struct{}
@@ -156,7 +160,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 			continue
 		}
 		if err != nil {
-			if stuck || staleSocketBound {
+			if stuck || wrapStale {
 				// errors.Is chain lets callers pin on ErrShimStuck.
 				return nil, 0, fmt.Errorf("session %s: %w: %w", key, ErrShimStuck, err)
 			}

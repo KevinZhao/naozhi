@@ -6,6 +6,7 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -316,6 +317,100 @@ func TestSpawnSession_StaleSpawnReplacedWithABoundSocketWrapsTheRetry(t *testing
 	}
 	if shimStuckLeft(r, key) {
 		t.Error("the key is still flagged shim-stuck after the call")
+	}
+}
+
+// retryGateCtx holds GetOrCreate at its post-stale ctx check once armed,
+// then reports the next Done call: the round that parks on a spawn.
+type retryGateCtx struct {
+	context.Context
+	armed   atomic.Bool
+	held    chan struct{}
+	resume  chan struct{}
+	waiting chan struct{}
+	passed  atomic.Bool
+}
+
+func (c *retryGateCtx) Err() error {
+	if c.armed.CompareAndSwap(true, false) {
+		close(c.held)
+		<-c.resume
+		c.passed.Store(true)
+	}
+	return c.Context.Err()
+}
+
+func (c *retryGateCtx) Done() <-chan struct{} {
+	if c.passed.CompareAndSwap(true, false) {
+		close(c.waiting)
+	}
+	return c.Context.Done()
+}
+
+// TestGetOrCreate_BoundStaleSocketWrapsOnlyTheNextRound: a round that parks
+// on another caller's spawn consumes the stale round's bound socket, so a
+// later spawn failure is not reported as ErrShimStuck.
+func TestGetOrCreate_BoundStaleSocketWrapsOnlyTheNextRound(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	const key = "feishu:direct:spawn-stale-then-wait:general"
+	if err := os.WriteFile(shim.SocketPath(shim.KeyHash(key)), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := newGatedSpawn()
+	boom := errors.New("spawn failed")
+	otherEntered, otherRelease := make(chan struct{}), make(chan struct{})
+	var fresh atomic.Int32
+	r := spawnRouter(t, 4, func(ctx context.Context, opts cli.SpawnOptions) (processIface, error) {
+		if opts.ResumeID != "" {
+			return g.hook(ctx, opts)
+		}
+		if fresh.Add(1) == 1 {
+			close(otherEntered)
+			<-otherRelease
+		}
+		return nil, boom
+	})
+	injectSession(r, key, newDeadProc()).setSessionID("sid-old")
+
+	ctx := &retryGateCtx{Context: context.Background(), held: make(chan struct{}),
+		resume: make(chan struct{}), waiting: make(chan struct{})}
+	out := make(chan spawnResult, 1)
+	go func() {
+		s, st, err := r.GetOrCreate(ctx, key, AgentOpts{})
+		out <- spawnResult{s, st, err}
+	}()
+	waitEntered(t, g)
+	if !r.Remove(key) {
+		t.Fatal("Remove found no session")
+	}
+	ctx.armed.Store(true)
+	close(g.release)
+	waitClosed(t, ctx.held, "the stale round never reached its ctx check") // after the 2s socket-gone window
+
+	other := spawnAsync(r, key)
+	waitClosed(t, otherEntered, "the other caller never spawned")
+	close(ctx.resume)
+	waitClosed(t, ctx.waiting, "the retry never parked on the other spawn")
+	close(otherRelease)
+
+	if got := waitResult(t, other); !errors.Is(got.err, boom) {
+		t.Fatalf("other GetOrCreate = %v, want its spawn error", got.err)
+	}
+	got := waitResult(t, out)
+	if !errors.Is(got.err, boom) || errors.Is(got.err, ErrShimStuck) {
+		t.Errorf("GetOrCreate = %v, want the spawn error without ErrShimStuck", got.err)
+	}
+	if n := fresh.Load(); n != 2 {
+		t.Errorf("fresh spawns = %d, want the other caller's and the parked caller's", n)
+	}
+}
+
+func waitClosed(t *testing.T, ch <-chan struct{}, msg string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal(msg)
 	}
 }
 
