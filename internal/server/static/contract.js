@@ -80,6 +80,7 @@ export const NZ_CONTRACT = {
     sessions_bind: '/api/sessions/bind',
     sessions_events: '/api/sessions/events',
     sessions_git: '/api/sessions/git',
+    sessions_history: '/api/sessions/history',
     sessions_interrupt: '/api/sessions/interrupt',
     sessions_label: '/api/sessions/label',
     sessions_orient: '/api/sessions/orient',

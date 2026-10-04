@@ -117,6 +117,9 @@ type sessionStats struct {
 	VersionTag string        `json:"version_tag,omitempty"`
 	Uptime     string        `json:"uptime"`
 	Watchdog   watchdogStats `json:"watchdog"`
+	// HistoryTag names the list GET /api/sessions/history serves
+	// (historyContentTag); omitted when there is no history.
+	HistoryTag string `json:"history_tag,omitempty"`
 	// Projects has NO omitempty: after the last project is removed the
 	// dashboard must receive `projects: []` to clear its stale list.
 	Projects []projectListEntry `json:"projects"`
@@ -131,12 +134,10 @@ type nodeStatusEntry struct {
 }
 
 // sessionListLocalResp is the /api/sessions response shape for single-node
-// deployments. history_sessions is omitempty so deployments without JSONL
-// history serialize the same 2-key object.
+// deployments.
 type sessionListLocalResp struct {
-	Sessions        []sessionpkg.SessionSnapshot `json:"sessions"`
-	Stats           sessionStats                 `json:"stats"`
-	HistorySessions []discovery.RecentSession    `json:"history_sessions,omitempty"`
+	Sessions []sessionpkg.SessionSnapshot `json:"sessions"`
+	Stats    sessionStats                 `json:"stats"`
 }
 
 // sessionListMultiResp is the /api/sessions response shape when >=1 remote node
@@ -144,10 +145,9 @@ type sessionListLocalResp struct {
 // merged with remote entries decoded as map[string]any. Nodes has no omitempty:
 // this struct is only used when the node map is populated.
 type sessionListMultiResp struct {
-	Sessions        []any                      `json:"sessions"`
-	Stats           sessionStats               `json:"stats"`
-	Nodes           map[string]nodeStatusEntry `json:"nodes"`
-	HistorySessions []discovery.RecentSession  `json:"history_sessions,omitempty"`
+	Sessions []any                      `json:"sessions"`
+	Stats    sessionStats               `json:"stats"`
+	Nodes    map[string]nodeStatusEntry `json:"nodes"`
 }
 
 // CronView is the narrow consumer interface this package needs from
@@ -221,7 +221,9 @@ type Handlers struct {
 	// assigns a freshly allocated slice to h.historyCache and never appends
 	// in place on a header already handed out. Shallow copy before any such
 	// mutation.
-	historyCache     []discovery.RecentSession
+	historyCache []discovery.RecentSession
+	// historyTag is historyContentTag(historyCache), written with it.
+	historyTag       string
 	historyCacheTime time.Time
 	// historyCacheTimeUnixNano mirrors historyCacheTime.UnixNano() so the
 	// hot-path TTL check is wait-free (#1404). Writers MUST update it under

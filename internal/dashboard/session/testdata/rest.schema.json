@@ -2,13 +2,6 @@
   "responses": {
     "sessions": {
       "properties": {
-        "history_sessions": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "$ref": "discovery.RecentSession"
-          }
-        },
         "sessions": {
           "type": "array",
           "items": {
@@ -26,7 +19,7 @@
         "stats"
       ]
     },
-    "sessions_multi": {
+    "sessions_history": {
       "properties": {
         "history_sessions": {
           "type": "array",
@@ -35,6 +28,16 @@
             "$ref": "discovery.RecentSession"
           }
         },
+        "history_tag": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "history_sessions"
+      ]
+    },
+    "sessions_multi": {
+      "properties": {
         "nodes": {
           "type": "object"
         },
@@ -275,6 +278,9 @@
           "type": "string"
         },
         "default_workspace": {
+          "type": "string"
+        },
+        "history_tag": {
           "type": "string"
         },
         "max_procs": {

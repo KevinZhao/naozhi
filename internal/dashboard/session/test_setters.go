@@ -30,6 +30,7 @@ func (h *Handlers) SetCronSessionsForTest(c CronView) { h.deps.CronSessions = c 
 func (h *Handlers) ResetHistoryCacheForTest() {
 	h.historyCacheMu.Lock()
 	h.historyCache = nil
+	h.historyTag = ""
 	h.historyCacheTime = time.Time{}
 	h.historyCacheTimeUnixNano.Store(0)
 	h.historyCacheMu.Unlock()
@@ -52,10 +53,12 @@ func (h *Handlers) HistorySessionsForTest() []discovery.RecentSession {
 // while assigning through SetCachedHistoryForTest.
 func (h *Handlers) HistoryCacheLockForTest() *sync.RWMutex { return &h.historyCacheMu }
 
-// SetCachedHistoryForTest atomically replaces the cached slice + timestamp.
+// SetCachedHistoryForTest atomically replaces the cached slice, its tag and
+// the timestamp.
 // Caller MUST hold HistoryCacheLockForTest().
 func (h *Handlers) SetCachedHistoryForTest(slice []discovery.RecentSession, t time.Time) {
 	h.historyCache = slice
+	h.historyTag = historyContentTag(slice)
 	h.historyCacheTime = t
 	h.historyCacheTimeUnixNano.Store(t.UnixNano())
 }

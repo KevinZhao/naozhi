@@ -3,6 +3,9 @@ package session
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"slices"
 	"time"
 
@@ -55,6 +58,29 @@ func (h *Handlers) historySessions() []discovery.RecentSession {
 		return res
 	}
 	return nil
+}
+
+// historyWithTag returns the history list and its content tag as one cache
+// epoch, rescanning first when the TTL has passed. The tag is "" for an empty
+// list.
+func (h *Handlers) historyWithTag() ([]discovery.RecentSession, string) {
+	h.historySessions()
+	h.historyCacheMu.RLock()
+	defer h.historyCacheMu.RUnlock()
+	return h.historyCache, h.historyTag
+}
+
+// historyContentTag names a history list by content: the first 128 bits of the
+// SHA-256 of its JSON encoding, in hex. A rescan that finds the same sessions
+// yields the same tag, so the dashboard refetches the list only when it moved.
+func historyContentTag(list []discovery.RecentSession) string {
+	if len(list) == 0 {
+		return ""
+	}
+	sum := sha256.New()
+	_ = json.NewEncoder(sum).Encode(list) // plain fields into a hash: cannot fail
+	var b [sha256.Size]byte
+	return hex.EncodeToString(sum.Sum(b[:0])[:16])
 }
 
 // uptimeSnapshot is the value cached by uptimeCache: Bucket is whole seconds
@@ -271,9 +297,11 @@ func (h *Handlers) loadHistorySessionsCtx(ctx context.Context) []discovery.Recen
 		}
 	}
 
+	tag := historyContentTag(all)
 	now := time.Now() // outside the lock to keep vDSO off the critical section
 	h.historyCacheMu.Lock()
 	h.historyCache = all
+	h.historyTag = tag
 	h.historyCacheTime = now
 	// Mirror update under the lock so wait-free readers never see atomic-fresh
 	// while h.historyCache still points at the old slice.

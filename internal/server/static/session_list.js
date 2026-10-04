@@ -91,20 +91,30 @@ async function fetchSessionsPayload() {
 
 // sessionsUnchanged reports whether the poll carries nothing new, and
 // otherwise records it as the last one seen. stats.version changes on session
-// add/remove/rename/reset; nodes and history have no version and compare as
-// JSON. Process state flips (running↔ready, last_response) never advance it:
-// over a live socket the session_state push covers them, but under WS-fallback
-// polling REST is the only state source, so the short-circuit applies only
-// while connected (#2431) and the idempotent renderSidebar runs every 5 s.
+// add/remove/rename/reset; nodes have no version and compare as JSON. Process
+// state flips (running↔ready, last_response) never advance it: over a live
+// socket the session_state push covers them, but under WS-fallback polling
+// REST is the only state source, so the short-circuit applies only while
+// connected (#2431) and the idempotent renderSidebar runs every 5 s.
 function sessionsUnchanged(data, wsConnected) {
   const version = (data.stats && data.stats.version) || 0;
   const nodesHash = JSON.stringify(data.nodes || {});
-  const historyHash = JSON.stringify(data.history_sessions || []);
-  if (wsConnected && version === sessionList.lastVersion && version > 0 && nodesHash === sessionList.lastNodesJSON && historyHash === sessionList.lastHistoryJSON) return true;
+  if (wsConnected && version === sessionList.lastVersion && version > 0 && nodesHash === sessionList.lastNodesJSON) return true;
   sessionList.lastVersion = version;
   sessionList.lastNodesJSON = nodesHash;
-  sessionList.lastHistoryJSON = historyHash;
   return false;
+}
+
+// syncHistory keeps historySessionsData on the list stats.history_tag names,
+// fetched only when the tag moves; nothing waits on it. A failed fetch drops
+// the sessions validator, so the next poll brings the tag back and retries.
+function syncHistory(tag) {
+  if (tag === sessionList.historyTag) return;
+  const load = tag ? fetchJSON(NZ_CONTRACT.API.sessions_history, { headers: authHeaders(), timeoutMs: 8000 }) : Promise.resolve(null);
+  load.then(h => {
+    sessionList.historySessionsData = (h && h.history_sessions) || [];
+    sessionList.historyTag = (h && h.history_tag) || '';
+  }, () => { sessionList.lastETag = null; });
 }
 
 function applySessionsStats(data) {
@@ -116,7 +126,6 @@ function applySessionsStats(data) {
   // The Home panel's health strip reads uptime / watchdog / active-count off
   // the full stats object without a second fetch.
   serverInfo.lastStatsSnapshot = data.stats;
-  sessionList.historySessionsData = data.history_sessions || [];
 }
 
 // mergeBackendSessions folds the polled sessions into sessionsData, adds each
@@ -251,6 +260,7 @@ export async function fetchSessions() {
     if (selection.key) setHeaderOverlayDriftChip(data.sessions);
     const wsConnected = wsm.state === WS_STATES.CONNECTED;
     sessionList.lastETag = got.validator;
+    syncHistory((data.stats && data.stats.history_tag) || '');
     if (sessionsUnchanged(data, wsConnected)) return;
     applySessionsStats(data);
     const backendKeys = new Set();
@@ -313,11 +323,6 @@ export function renderSidebar(data) {
     // selector switches stay O(1) on the next click.
     setActiveSessionCard(selection.key, selection.node);
   }
-
-  // The history button's count is an archive size, not an unread count, and
-  // stays hidden; the popover header shows it (ui-polish-light-theme D10).
-  const hBadge = document.getElementById('history-badge');
-  if (hBadge) hBadge.style.display = 'none';
 
   // The Home panel's 最近会话 list mirrors every repaint (R110-P1).
   renderRecentSessionsPanel();
@@ -608,16 +613,11 @@ function sessionCardHtml(/** @type {SessionSnapshot} */ s) {
   // IM threads vs dashboard-local conversations. originBadgeHtml returns ''
   // for non-IM prefixes so the meta line stays clean for those.
   const originBadge = originBadgeHtml(s.key);
-  // UI Round 5 R5-2: backend chip removed from session cards. The cli icon
-  // (cliIcon, kiro-ghost vs claude-logomark) already disambiguates backend
-  // visually, so the chip was redundant. backendChipHtml() helper kept for
-  // doctor panel where listing backends needs an explicit text label.
-  //
-  // Access-profile chip IS shown (RFC project-access-profile §8.3): unlike
-  // backend it has no icon, and it carries a billing/account dimension an
-  // operator must be able to eyeball ("is this card on the personal 1P or the
-  // company Bedrock account?"). Empty for single-auth mode / global default so
-  // deployments that don't use profiles see no change.
+  // Access-profile chip (RFC project-access-profile §8.3): unlike the backend,
+  // which the cli icon shows, it has no icon, and it carries a billing/account
+  // dimension an operator must be able to eyeball ("is this card on the
+  // personal 1P or the company Bedrock account?"). Empty for single-auth mode /
+  // global default so deployments that don't use profiles see no change.
   const accessProfileChip = accessProfileChipHtml(s.access_profile);
   // ui-polish-light-theme D4: the cli icon rides inside the meta line at
   // 18px instead of a dedicated 36px column — at 36px every card led with

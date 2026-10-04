@@ -66,7 +66,7 @@
     "lateBindings": 0
   },
   "contract.js": {
-    "lines": 107,
+    "lines": 108,
     "maxFnLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -176,7 +176,7 @@
     "lateBindings": 1
   },
   "dashboard.js": {
-    "lines": 2878,
+    "lines": 2867,
     "maxFnLines": 120,
     "fnOver100": 1,
     "topLevelLetVar": 0,
@@ -386,7 +386,7 @@
   },
   "session_list.js": {
     "lines": 1112,
-    "maxFnLines": 100,
+    "maxFnLines": 95,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0,

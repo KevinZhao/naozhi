@@ -18,8 +18,9 @@ var updateRESTSchema = flag.Bool("update-rest-schema", false, "rewrite testdata/
 // rendering; scripts/check-rest-contract.mjs holds the dashboard's typed reads
 // and the e2e mock's responses to it (#2909).
 var restResponses = map[string]any{
-	"sessions":       sessionListLocalResp{},
-	"sessions_multi": sessionListMultiResp{},
+	"sessions":         sessionListLocalResp{},
+	"sessions_multi":   sessionListMultiResp{},
+	"sessions_history": historyListResp{},
 }
 
 func restSchemaJSON() ([]byte, error) {
