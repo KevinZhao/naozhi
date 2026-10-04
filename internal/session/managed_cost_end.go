@@ -95,8 +95,22 @@ func (c *costAccounting) onProcessEnd(s *ManagedSession, end cli.ProcessEnd, cla
 		}()
 		c.endSem <- struct{}{}
 		defer func() { <-c.endSem }()
-		s.bookPartialUsage(s.endUsage(end, claudeDir), newRunID())
+		sid := end.SessionID
+		if sid == "" { // a passthrough process never learns it; it runs the session's
+			sid = s.getSessionID()
+		}
+		s.bookPartialUsage(s.endUsage(end, sid, claudeDir), endRunID(sid))
 	}()
+}
+
+// endRunID is a process-end partial's run id. No run record shares it, so it
+// carries the CLI session id the spend belongs to: "end:<sid>:<id>".
+func endRunID(sid string) string {
+	id := newRunID()
+	if sid == "" || id == "" {
+		return id
+	}
+	return "end:" + sid + ":" + id
 }
 
 // waitEnds waits up to d for running process-end bookings.
@@ -147,19 +161,15 @@ func (f *inflight) wait(d time.Duration) bool {
 	}
 }
 
-// endUsage is what end's process spent after its last result frame (or after
-// naozhi attached to it): from the session's transcripts when the backend
-// reads them, which include sub-agents and workflow agents, else the main
-// loop's frames. The window closes at the end, so a respawn appending to the
-// same transcript is not counted.
-func (s *ManagedSession) endUsage(end cli.ProcessEnd, claudeDir string) clievent.ShadowUsage {
+// endUsage is what end's process, running CLI session sid, spent after its
+// last result frame (or after naozhi attached to it): from the session's
+// transcripts when the backend reads them, which include sub-agents and
+// workflow agents, else the main loop's frames. The window closes at the end,
+// so a respawn appending to the same transcript is not counted.
+func (s *ManagedSession) endUsage(end cli.ProcessEnd, sid, claudeDir string) clievent.ShadowUsage {
 	since := end.StartedAt
 	if end.LastResultAt.After(since) {
 		since = end.LastResultAt
-	}
-	sid := end.SessionID
-	if sid == "" {
-		sid = s.getSessionID()
 	}
 	id := s.Backend()
 	if id == "" {

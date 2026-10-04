@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -172,6 +173,31 @@ func TestProcessEnd_StuckRunningKillBooksTranscriptSpend(t *testing.T) {
 	}
 	if got := loadTotalCost(&s.costSpent); !approxEq(got, ents[0].Amount) {
 		t.Fatalf("costSpent = %v, want the partial amount", got)
+	}
+}
+
+// A passthrough process never learns its CLI session id, so its end carries
+// none: the end reads the transcripts of the session id the session holds,
+// not the main-loop shadow, and the partial's run id names that session id,
+// since no run record shares it.
+func TestProcessEnd_PassthroughEndReadsTheSessionsTranscripts(t *testing.T) {
+	f := newEndFixture(t, nil)
+	appendFile(t, f.mainPath(), f.line(20, "msg_main", "claude-opus-5-5", 200))
+	appendFile(t, f.workflowPath(), f.line(30, "msg_wf", "claude-haiku-4-5", 400))
+	e := f.end()
+	e.SessionID = ""
+	proc := newEndingProcess(cli.StateRunning, e)
+	proc.PassthroughVal = true
+	f.inject("dashboard:direct:passthrough:general", proc)
+
+	proc.Kill()
+
+	ents := f.entries(t)
+	if len(ents) != 1 || !approxEq(ents[0].Amount, 600*5e-6) {
+		t.Fatalf("entries = %+v, want one partial of the transcripts' 600 tokens", ents)
+	}
+	if want := "end:" + endSID + ":"; !strings.HasPrefix(ents[0].RunID, want) || len(ents[0].RunID) == len(want) {
+		t.Fatalf("run id = %q, want %s<id>", ents[0].RunID, want)
 	}
 }
 
