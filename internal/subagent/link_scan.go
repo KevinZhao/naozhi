@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -88,7 +87,7 @@ func claudeProjectsRoot() string {
 // in one turn share a scan. Cache hits return the cached slice by reference
 // (callers must not mutate) under RLock so they run concurrently.
 func (l *Linker) scanMetaFiles(dir string) []metaEntry {
-	now := time.Now()
+	now := l.now()
 	l.mu.RLock()
 	if !l.dirCache.at.IsZero() && now.Sub(l.dirCache.at) < l.cacheTTL {
 		entries := l.dirCache.entries
@@ -101,7 +100,7 @@ func (l *Linker) scanMetaFiles(dir string) []metaEntry {
 	// would stall every concurrent fast-path RLock), then publish under the
 	// write lock. scannedAt is captured BEFORE the scan so a later-started
 	// scan wins the "freshest snapshot" comparison (#1595).
-	scannedAt := time.Now()
+	scannedAt := l.now()
 	if l.scanHook != nil {
 		l.scanHook()
 	}

@@ -111,6 +111,20 @@ func newLinkerForTest(t *testing.T, sessionID string) (*Linker, string) {
 	return l, subagentDir
 }
 
+// stepClock drives Linker.nowFn so dirCache TTL tests move time explicitly
+// instead of racing wall time under load.
+type stepClock struct{ ns atomic.Int64 }
+
+func installStepClock(l *Linker) *stepClock {
+	c := &stepClock{}
+	c.ns.Store(time.Now().UnixNano())
+	l.nowFn = c.now
+	return c
+}
+
+func (c *stepClock) now() time.Time          { return time.Unix(0, c.ns.Load()) }
+func (c *stepClock) advance(d time.Duration) { c.ns.Add(int64(d)) }
+
 func TestLinker_Resolve_SingleCandidate(t *testing.T) {
 	t.Parallel()
 	const sessionID = "11111111-2222-3333-4444-555555555555"
@@ -255,6 +269,7 @@ func TestLinker_Resolve_DirCacheTTL(t *testing.T) {
 	const sessionID = "11111111-2222-3333-4444-cccccccccccc"
 	l, subagentDir := newLinkerForTest(t, sessionID)
 	l.cacheTTL = 50 * time.Millisecond
+	clock := installStepClock(l)
 
 	// Install a counting scan hook to observe cache hits vs misses.
 	var scans atomic.Int32
@@ -276,11 +291,19 @@ func TestLinker_Resolve_DirCacheTTL(t *testing.T) {
 		t.Errorf("scans within TTL = %d, want 1", got)
 	}
 
-	// Wait past TTL, write a third and Resolve — expect a fresh scan.
-	time.Sleep(70 * time.Millisecond)
+	// One nanosecond short of the TTL the cache still serves.
+	clock.advance(l.cacheTTL - time.Nanosecond)
+	l.scanMetaFiles(subagentDir)
+	if got := scans.Load(); got != 1 {
+		t.Errorf("scans at TTL-1ns = %d, want 1", got)
+	}
+
+	// At exactly the TTL the cache is stale: a new file is picked up by a fresh scan.
+	clock.advance(time.Nanosecond)
 	writeAgentFiles(t, subagentDir, "66666666666666666", "a3", sessionID, "p3", time.Now())
-	if _, ok := l.Resolve(context.Background(), "t_a3", "toolu_A3", "a3", "", time.Now().UnixMilli()); !ok {
-		t.Fatalf("Resolve a3 failed")
+	info, ok := l.Resolve(context.Background(), "t_a3", "toolu_A3", "a3", "", time.Now().UnixMilli())
+	if !ok || info.InternalAgentID != "agent-66666666666666666" {
+		t.Fatalf("Resolve a3 = %+v, %v; want agent-66666666666666666", info, ok)
 	}
 	if got := scans.Load(); got != 2 {
 		t.Errorf("post-TTL scans = %d, want 2", got)
@@ -334,6 +357,7 @@ func TestLinker_SameName_PromptIDDivergence_Keeps_Original(t *testing.T) {
 	t.Parallel()
 	const sessionID = "11111111-2222-3333-4444-dddddddddddd"
 	l, subagentDir := newLinkerForTest(t, sessionID)
+	clock := installStepClock(l)
 
 	now := time.Now()
 	writeAgentFiles(t, subagentDir, "88888888888888888", "dup", sessionID, "p_first", now.Add(-5*time.Second))
@@ -347,7 +371,7 @@ func TestLinker_SameName_PromptIDDivergence_Keeps_Original(t *testing.T) {
 	// promptId and later mtime.
 	writeAgentFiles(t, subagentDir, "99999999999999999", "dup", sessionID, "p_second", now)
 	// Expire dirCache so the second Resolve actually sees the new file.
-	time.Sleep(l.cacheTTL + 5*time.Millisecond)
+	clock.advance(l.cacheTTL)
 	info2, ok := l.Resolve(context.Background(), "t2", "toolu_B", "dup", "", now.Add(-100*time.Millisecond).UnixMilli())
 	if !ok {
 		t.Fatalf("second resolve failed")
