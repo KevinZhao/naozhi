@@ -254,3 +254,25 @@ func TestInitBackendWrappers_DefaultIDPropagated(t *testing.T) {
 			bws.DefaultID, cfg.DefaultBackendID())
 	}
 }
+
+// TestInitBackendWrappers_LeadingEmptyIDDefaultHasRuntime: an id-less leading
+// cli.backends entry must not leave the router default ("claude") pointing at
+// a backend with no runtime while the default wrapper is the kiro entry.
+func TestInitBackendWrappers_LeadingEmptyIDDefaultHasRuntime(t *testing.T) {
+	t.Parallel()
+	backend.EnsureDefaults()
+	cfg := &config.Config{CLI: config.CLIConfig{Backends: []config.CLIBackendConfig{
+		{Path: "/nonexistent/claude"},
+		{ID: "kiro", Path: "/nonexistent/kiro"},
+	}}}
+	bws, _ := initBackendWrappers(context.Background(), cfg, nil)
+	if bws.Default == nil || bws.Default.BackendID != "kiro" {
+		t.Fatalf("Default wrapper = %+v, want kiro", bws.Default)
+	}
+	if bws.DefaultID != bws.Default.BackendID {
+		t.Errorf("DefaultID = %q, default wrapper = %q", bws.DefaultID, bws.Default.BackendID)
+	}
+	if _, ok := bws.Runtimes[bws.DefaultID]; !ok {
+		t.Errorf("DefaultID %q has no runtime; runtimes=%v", bws.DefaultID, bws.Runtimes)
+	}
+}
