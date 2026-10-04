@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -191,9 +192,10 @@ func TestProcessEnd_ResetBooksTheUnfinishedTurn(t *testing.T) {
 	}
 }
 
-// Ends that owe nothing book nothing: a detached CLI keeps running and
-// reports its own spend; a graceful close after an idle result has no lines
-// past it; a cron-owned key is the cron run's to account.
+// Ends that owe nothing book nothing: a detached CLI, or one whose shim
+// outlived the socket, keeps running and reports its own spend; a graceful
+// close after an idle result has no lines past it; a cron-owned key is the
+// cron run's to account.
 func TestProcessEnd_BooksNothingWhenNothingIsOwed(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -201,6 +203,7 @@ func TestProcessEnd_BooksNothingWhenNothingIsOwed(t *testing.T) {
 		owned bool
 	}{
 		{"detached", func(f *endFixture) *cli.ProcessEnd { e := f.end(); e.Detached = true; return e }, false},
+		{"shim outlived the socket", func(f *endFixture) *cli.ProcessEnd { e := f.end(); e.ShimLive = true; return e }, false},
 		{"idle close after the last result", func(f *endFixture) *cli.ProcessEnd {
 			e := f.end()
 			e.LastResultAt, e.Shadow = f.t0.Add(25*time.Second), clievent.ShadowUsage{}
@@ -218,6 +221,48 @@ func TestProcessEnd_BooksNothingWhenNothingIsOwed(t *testing.T) {
 				t.Fatalf("entries = %+v, want none", ents)
 			}
 		})
+	}
+}
+
+// Cron ownership is decided once, when the process ends: a cron run that
+// takes the key while the transcripts are read does not drop the booking.
+func TestProcessEnd_CronGateDecidedAtTheEnd(t *testing.T) {
+	var checks atomic.Int32
+	f := newEndFixture(t, func(string) bool { return checks.Add(1) > 1 })
+	appendFile(t, f.mainPath(), f.line(20, "msg_main", "claude-opus-5-5", 100))
+	proc := newEndingProcess(cli.StateRunning, f.end())
+	f.inject("cron:job-1", proc)
+
+	proc.Kill()
+
+	if ents := f.entries(t); len(ents) != 1 || !approxEq(ents[0].Amount, 100*5e-6) {
+		t.Fatalf("entries = %+v, want the partial the end found unowned", ents)
+	}
+}
+
+// Shutdown waits for a booking still running before it closes the ledger,
+// so the partial is in the ledger once Close returns.
+func TestRunLedgerClose_WaitsForRunningBookings(t *testing.T) {
+	f := newEndFixture(t, nil)
+	appendFile(t, f.mainPath(), f.line(20, "msg_main", "claude-opus-5-5", 100))
+	proc := newEndingProcess(cli.StateRunning, f.end())
+	f.inject("dashboard:direct:shutdown:general", proc)
+	sem := f.r.runs.cost.endSem
+	for range cap(sem) {
+		sem <- struct{}{} // hold every slot: the booking queues behind them
+	}
+	proc.Kill()
+	release := time.AfterFunc(100*time.Millisecond, func() {
+		for range cap(sem) {
+			<-sem
+		}
+	})
+	defer release.Stop()
+
+	f.r.runs.Close()
+
+	if ents := allEntries(t, f.ledger); len(ents) != 1 || !approxEq(ents[0].Amount, 100*5e-6) {
+		t.Fatalf("entries after Close = %+v, want the booking that was running", ents)
 	}
 }
 
@@ -294,7 +339,8 @@ func TestReconnectShims_ReattachedProcessBooksItsEnd(t *testing.T) {
 	sess := injectSession(r, key, nil)
 	sess.costAcct = r.runs.cost
 	writeLiveShim(t, dir, r, w, sess, `{"type":"stdout","seq":1,"line":`+
-		strconv.Quote(`{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5-5","usage":{"output_tokens":300}}}`)+"}\n")
+		strconv.Quote(`{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5-5","usage":{"output_tokens":300}}}`)+"}\n",
+		`{"type":"cli_exited","code":1}`+"\n")
 
 	r.ReconnectShimsCtx(context.Background())
 

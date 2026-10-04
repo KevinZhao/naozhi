@@ -71,11 +71,17 @@ func bookProcessEnd(s *ManagedSession, proc processIface, claudeDir string) {
 	}
 }
 
-// onProcessEnd books end's spend off the read loop. A detached CLI is still
-// running and will report its spend itself; a cron-owned key is the cron
-// run's to account.
+// onProcessEnd books end's spend off the read loop. A detached CLI, or one
+// whose shim outlived the socket, is still running and will report its spend
+// itself; a key a cron run owns when the process ends is that run's to
+// account.
 func (c *costAccounting) onProcessEnd(s *ManagedSession, end cli.ProcessEnd, claudeDir string) {
 	if c == nil || end.Detached || !c.ledger.Enabled() || c.owned(s.key) {
+		return
+	}
+	if end.ShimLive {
+		slog.Info("cost: shim socket lost with the shim alive; the reattached CLI reports this turn's spend",
+			"session", osutil.SanitizeForLog(s.key, 128))
 		return
 	}
 	c.ends.add()

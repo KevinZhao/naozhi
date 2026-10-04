@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -108,5 +109,34 @@ func TestSessionUsage_MissingTranscriptNotFound(t *testing.T) {
 		if got, found, err := SessionUsage(proj, sid, UsageWindow{}); found || err != nil || got != nil {
 			t.Fatalf("sid %q: usage=%v found=%v err=%v", sid, got, found, err)
 		}
+	}
+}
+
+// A symlinked agent transcript or workflow directory is not followed, though
+// what it points at holds in-window usage.
+func TestSessionUsage_SymlinksNotFollowed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on windows")
+	}
+	proj := t.TempDir()
+	sub := SubagentsDir(proj, usageSID)
+	recent := usageT0.Add(time.Hour)
+	writeLines(t, TranscriptIn(proj, usageSID), recent, usageLine(6, "msg_main", "m", 1, 2, 0, 0))
+	outside := t.TempDir()
+	target := filepath.Join(outside, "agent-real.jsonl")
+	writeLines(t, target, recent, usageLine(7, "msg_link", "m", 1000, 1000, 0, 0))
+	if err := os.MkdirAll(filepath.Join(sub, "workflows"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, SubagentJSONL(sub, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(sub, "workflows", "wf_link")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := SessionUsage(proj, usageSID, UsageWindow{Since: usageT0, Until: usageT0.Add(time.Minute)})
+	if err != nil || !reflect.DeepEqual(got, []ModelTokens{{Model: "m", Input: 1, Output: 2}}) {
+		t.Fatalf("usage = %+v err=%v, want the main transcript's line only", got, err)
 	}
 }

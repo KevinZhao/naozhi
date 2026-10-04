@@ -173,13 +173,13 @@ func bookUnownedResults(s *ManagedSession, proc processIface) {
 }
 
 // bookPartialUsage records a Kind=partial entry for u, spend a process
-// reported in no result frame (bookProcessEnd), one row per model priced at
-// the rates the ledger learned from the CLI's own results, and adds its
-// amount to the session's spend. A model with no learned rate books tokens
-// only and no basis: BasisUnknown means the CLI guessed a rate, and here
-// nothing priced it.
+// reported in no result frame (bookProcessEnd, which has already applied the
+// cron-ownership gate), one row per model priced at the rates the ledger
+// learned from the CLI's own results, and adds its amount to the session's
+// spend. A model with no learned rate books tokens only and no basis:
+// BasisUnknown means the CLI guessed a rate, and here nothing priced it.
 func (s *ManagedSession) bookPartialUsage(u clievent.ShadowUsage, runID string) {
-	if s.costAcct == nil || !s.costAcct.ledger.Enabled() || u.IsZero() || s.costAcct.owned(s.key) {
+	if s.costAcct == nil || !s.costAcct.ledger.Enabled() || u.IsZero() {
 		return
 	}
 	e := costledger.Entry{

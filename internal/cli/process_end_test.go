@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"bufio"
+	"os/exec"
 	"reflect"
+	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,4 +109,79 @@ func TestProcess_EndDeliveredToHookSetAfterIt(t *testing.T) {
 	rec.one(t)
 	p.SetOnEnd(rec.fn)
 	rec.none(t)
+}
+
+// childPID starts a process standing in for the shim and returns its PID;
+// with exited set it is already reaped, so the PID is dead.
+func childPID(t *testing.T, exited bool) int {
+	t.Helper()
+	cmd := exec.Command("sleep", "60")
+	if exited {
+		cmd = exec.Command("true")
+	}
+	if err := cmd.Start(); err != nil {
+		t.Skipf("no child process: %v", err)
+	}
+	if exited {
+		_ = cmd.Wait()
+		return cmd.Process.Pid
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	return cmd.Process.Pid
+}
+
+// Only a socket that breaks under a shim still running is ShimLive: the
+// reconcile loop reattaches that CLI, which then reports the spend itself.
+// The CLI's exit, naozhi's Kill or Close, and a dead shim all end the CLI.
+func TestProcess_EndShimLiveOnlyWhenTheShimOutlivesTheSocket(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a POSIX child process for the shim PID")
+	}
+	for _, tc := range []struct {
+		name     string
+		deadShim bool
+		readsOwn bool // the end reads the shim side itself
+		end      func(p *Process, srv *shimTestServer)
+		want     bool
+	}{
+		{"socket broke, shim alive", false, false, func(_ *Process, srv *shimTestServer) { srv.Close() }, true},
+		{"socket broke, shim dead", true, false, func(_ *Process, srv *shimTestServer) { srv.Close() }, false},
+		{"cli exited", false, false, func(_ *Process, srv *shimTestServer) { srv.SendCLIExited(1); srv.Close() }, false},
+		{"killed", false, false, func(p *Process, _ *shimTestServer) { p.Kill() }, false},
+		{"closed", false, true, func(p *Process, srv *shimTestServer) {
+			// The shim answers shutdown by hanging up without cli_exited.
+			go func() {
+				rd := bufio.NewReader(srv.conn)
+				for {
+					line, err := rd.ReadString('\n')
+					if err != nil {
+						return
+					}
+					if strings.Contains(line, `"shutdown"`) {
+						srv.Close()
+						return
+					}
+				}
+			}()
+			p.Close()
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, srv := shimTestPair(&ClaudeProtocol{})
+			p.link.shimPID = childPID(t, tc.deadShim)
+			if !tc.readsOwn {
+				startServerDrain(srv)
+			}
+			rec := newEndRecorder()
+			p.SetOnEnd(rec.fn)
+			p.startReadLoop()
+			srv.SendStdout(endTestFrame("msg_1", 5))
+			testhelper.Eventually(t, func() bool { return len(p.eventLog.EntriesSince(0)) >= 1 }, 2*time.Second, "frame not logged")
+
+			tc.end(p, srv)
+			if e := rec.one(t); e.ShimLive != tc.want {
+				t.Fatalf("ShimLive = %v, want %v (death reason %q)", e.ShimLive, tc.want, p.DeathReason())
+			}
+		})
+	}
 }
