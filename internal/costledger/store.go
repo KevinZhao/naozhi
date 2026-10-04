@@ -24,6 +24,9 @@ const (
 	flushEvery   = time.Second
 	dropLogEvery = time.Minute
 
+	// rateSeedDays is how far back the rate book learns from at open.
+	rateSeedDays = 30
+
 	DefaultRetentionDays = 400
 	MaxRetentionDays     = 3650
 )
@@ -54,6 +57,7 @@ type Store struct {
 	lastDrop  atomic.Int64 // unix nanos of the last drop warn
 
 	rollup *rollup
+	rates  *RateBook
 
 	// cur is the open day file; owned by the worker goroutine.
 	cur    *os.File
@@ -79,6 +83,7 @@ func NewStore(dir string, opts Options) *Store {
 		now:       now,
 		ch:        make(chan Entry, queueDepth),
 		rollup:    newRollup(),
+		rates:     NewRateBook(),
 	}
 	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		slog.Error("costledger: mkdir failed; ledger disabled", "dir", dir, "err", err)
@@ -111,6 +116,15 @@ func clampDays(retention, rollup int) (int, int) {
 		rollup = retention
 	}
 	return retention, rollup
+}
+
+// Rates is the per-model price book, seeded from the recent CLI-priced turn
+// rows at open; nil when the store is disabled.
+func (s *Store) Rates() *RateBook {
+	if s == nil || s.disabled {
+		return nil
+	}
+	return s.rates
 }
 
 // Enabled reports whether entries are persisted.
@@ -313,19 +327,30 @@ func (s *Store) sweep() {
 	}
 }
 
-// warmRollup folds the last RollupDays of day files into memory. It runs
-// synchronously at open so the first summary is complete; a slow warm (many
-// large day files) is logged so operators can lower rollup_days.
+// warmRollup folds the last RollupDays of day files into memory and seeds
+// the rate book from the last rateSeedDays of them. It runs synchronously at
+// open so the first summary is complete; a slow warm (many large day files)
+// is logged so operators can lower rollup_days.
 func (s *Store) warmRollup() {
 	start := time.Now()
 	since := s.now().UTC().Add(-s.rollupWin).Format(dayLayout)
+	seedFrom := s.now().UTC().Add(-rateSeedDays * 24 * time.Hour).Format(dayLayout)
 	n := 0
 	for _, d := range s.dayFiles() {
 		if d < since {
 			continue
 		}
 		n++
-		s.scanDay(d, func(e Entry) bool { s.rollup.add(e); return true })
+		seed := d >= seedFrom
+		s.scanDay(d, func(e Entry) bool {
+			s.rollup.add(e)
+			if seed && e.Kind == KindTurn && e.Unit == UnitUSD {
+				for _, m := range e.Models {
+					s.rates.Observe(m)
+				}
+			}
+			return true
+		})
 	}
 	if took := time.Since(start); took > time.Second {
 		slog.Info("costledger: rollup warm took a while; consider a smaller cost.rollup_days", "days", n, "took", took)
