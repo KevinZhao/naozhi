@@ -112,12 +112,13 @@ func newLinkerForTest(t *testing.T, sessionID string) (*Linker, string) {
 }
 
 // stepClock drives Linker.nowFn so dirCache TTL tests move time explicitly
-// instead of racing wall time under load.
+// instead of racing wall time under load. It starts years before wall time,
+// so a TTL path that mixes in time.Now() misses the cache on every call.
 type stepClock struct{ ns atomic.Int64 }
 
 func installStepClock(l *Linker) *stepClock {
 	c := &stepClock{}
-	c.ns.Store(time.Now().UnixNano())
+	c.ns.Store(time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano())
 	l.nowFn = c.now
 	return c
 }
