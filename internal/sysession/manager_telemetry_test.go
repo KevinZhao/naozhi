@@ -185,11 +185,18 @@ func TestManager_RunCountersBumpBroadcastIndependent(t *testing.T) {
 	m.Start(ctx)
 	defer m.Stop(context.Background())
 
-	// Wait for the internal run record (recordRun runs even with nil
-	// broadcaster); by then both emit helpers have fired.
-	testhelper.Eventually(t, func() bool { return lastRunRecorded(m) }, 2*time.Second,
-		"no run recorded")
+	// recordRun appends the run before emitRunEnded, so a visible LastRun
+	// does not mean the ended counter has moved: wait on the counter itself.
+	testhelper.Eventually(t, func() bool {
+		return metrics.SysessionRunEndedTotal.Value()-endBefore >= 1
+	}, 2*time.Second, "run_ended counter never bumped")
+	// Stop waits for the loop goroutine to return, so no further bump can
+	// land after this point and the exact-1 checks below catch a double bump.
+	m.Stop(context.Background())
 
+	if !lastRunRecorded(m) {
+		t.Error("no run recorded")
+	}
 	if got := metrics.SysessionRunStartedTotal.Value() - startBefore; got != 1 {
 		t.Errorf("SysessionRunStartedTotal delta = %d, want 1 (must bump with nil broadcaster)", got)
 	}
