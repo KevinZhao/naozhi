@@ -29,7 +29,11 @@ type AgentOpts struct {
 	// SystemPrompt mirrors session.AgentOpts.SystemPrompt so a cron job
 	// inherits agents[<id>].system_prompt (#2493). Cron adds no layer of its own.
 	SystemPrompt string
-	Exempt       bool
+	// AccessProfile mirrors session.AgentOpts.AccessProfile so a cron job runs
+	// on agents[<id>].access_profile rather than the default account (#3106).
+	// Jobs have no profile of their own; the router's resume lock still applies.
+	AccessProfile string
+	Exempt        bool
 }
 
 // SessionStatus mirrors session.SessionStatus value-for-value; the adapter

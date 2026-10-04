@@ -35,6 +35,11 @@ func TestBuildAgentOpts(t *testing.T) {
 	if got := agents["general"].AccessProfile; got != "" {
 		t.Errorf("agents[general].AccessProfile = %q, want empty (unset in config)", got)
 	}
+	// Cron runs the agent's jobs on the same account (the cron → session half
+	// lives in internal/wireup/cron_router_adapter_test.go).
+	if got := cronAgents["reviewer"].AccessProfile; got != "personal" {
+		t.Errorf("cronAgents[reviewer].AccessProfile = %q, want personal", got)
+	}
 
 	// agents[].backend is the agent tier, not the explicit one: as Backend it
 	// would outrank the dashboard pick and resume continuity. Cron has no

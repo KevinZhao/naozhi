@@ -9,12 +9,13 @@ type AgentConfig struct {
 	// existing session (resume continuity) outrank it; it outranks
 	// cli.backend. A project planner ignores it. Empty = cli.backend.
 	Backend string `yaml:"backend,omitempty"`
-	// AccessProfile names the access profile for this agent's sessions.
-	// Precedence at spawn: resume lock > dashboard pick > project pin > this >
-	// default_access_profile. The project pin outranking the agent deviates
-	// from RFC project-access-profile §3, matching how project model/backend
-	// pins already layer. A project planner uses only the project pin. Empty =
-	// default_access_profile. Such a session is never dispatched to a remote node.
+	// AccessProfile names the access profile for this agent's sessions and cron
+	// jobs. Precedence at spawn: resume lock > dashboard pick > project pin >
+	// this > default_access_profile. The project pin outranking the agent
+	// deviates from RFC project-access-profile §3, matching how project
+	// model/backend pins already layer. A project planner uses only the project
+	// pin. Empty = default_access_profile. Such a session is never dispatched to
+	// a remote node.
 	AccessProfile string `yaml:"access_profile,omitempty"`
 	// Effort overrides the thinking-effort tier for this agent's sessions.
 	// Empty = inherit cli.backends[].effort, then cli.effort.

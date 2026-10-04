@@ -107,16 +107,16 @@ func wrapCronSpawnErr(err error) error {
 // toSessionAgentOpts copies cron.AgentOpts → session.AgentOpts. ExtraArgs is
 // cloned: the router treats AgentOpts.ExtraArgs as exclusively owned.
 func toSessionAgentOpts(o cron.AgentOpts) session.AgentOpts {
-	// AccessProfile is intentionally NOT propagated: cron.Job has no profile
-	// field and resume-lock would freeze a first-run profile with no cron-side
-	// UI to change it, risking a mis-charge (RFC project-access-profile P1-b).
+	// AccessProfile is the agent's config-owned profile; dropping it would run
+	// the job on the default account (#3106).
 	out := session.AgentOpts{
-		Model:        o.Model,
-		Workspace:    o.Workspace,
-		Backend:      o.Backend,
-		Effort:       o.Effort,
-		SystemPrompt: o.SystemPrompt,
-		Exempt:       o.Exempt,
+		Model:         o.Model,
+		Workspace:     o.Workspace,
+		Backend:       o.Backend,
+		Effort:        o.Effort,
+		SystemPrompt:  o.SystemPrompt,
+		AccessProfile: o.AccessProfile,
+		Exempt:        o.Exempt,
 	}
 	if len(o.ExtraArgs) > 0 {
 		out.ExtraArgs = append([]string(nil), o.ExtraArgs...)
