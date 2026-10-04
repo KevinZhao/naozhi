@@ -158,6 +158,7 @@ func TestLoad_MigrationErrors(t *testing.T) {
 		{"schema version not an integer", "schema_version: s3cr3t\n", "not an integer", "s3cr3t"},
 		{"args not strings", "agents:\n  r:\n    args: [{k: v}, \"--append-system-prompt\"]\n", "agents[r].args", ""},
 		{"conflicting system prompt", "agents:\n  r:\n    system_prompt: explicit\n    args: [\"--append-system-prompt\", \"legacy\"]\n", "agents[r]", ""},
+		{"quoted null is a string", "agents:\n  r:\n    system_prompt: \"null\"\n    args: [\"--append-system-prompt\", \"legacy\"]\n", "agents[r]", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Load(writeCfg(t, tc.body))
@@ -181,6 +182,27 @@ func TestLoad_EqualSystemPromptIsNotAConflict(t *testing.T) {
 	}
 	if a := cfg.Agents["r"]; a.SystemPrompt != "same" || len(a.Args) != 0 {
 		t.Errorf("agent = %+v, want the prompt kept and the flag gone", a)
+	}
+}
+
+// A YAML null system_prompt is an empty placeholder: the flag's text lifts
+// into it instead of counting as a conflict or leaving a !!null node that
+// cannot decode into a string.
+func TestLoad_NullSystemPromptTakesTheLiftedFlag(t *testing.T) {
+	for _, null := range []string{"", " ~", " null", " Null", " !!null"} {
+		t.Run(null, func(t *testing.T) {
+			body := "platforms:\n  weixin:\n    token: \"x\"\nagents:\n  planner:\n    system_prompt:" + null + "\n    args: [\"--append-system-prompt\", \"hello\"]\n"
+			diags, cfg, err := collectLoadDiags(t, writeCfg(t, body))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if a := cfg.Agents["planner"]; a.SystemPrompt != "hello" || len(a.Args) != 0 {
+				t.Errorf("agent = %+v, want the flag lifted into system_prompt", a)
+			}
+			if got, want := deprecatedDiags(diags), []string{"agents[planner].args=rewritten"}; !slices.Equal(got, want) {
+				t.Errorf("deprecated diags = %v, want %v", got, want)
+			}
+		})
 	}
 }
 

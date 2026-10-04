@@ -13,13 +13,25 @@ import (
 	"math"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/costledger"
 )
 
 // maxMeteringUnits bounds the metering rows so a buggy upstream inventing a
 // unit per frame cannot grow them without limit.
 const maxMeteringUnits = 16
+
+// maxShadowModels bounds the shadow account's named model rows; usage of any
+// further model folds into one row with no model name. The named rows plus
+// that row fit in one ledger entry, which keeps costledger.MaxModels rows.
+const maxShadowModels = costledger.MaxModels - 1
+
+// maxShadowMessages bounds the message ids the shadow account remembers for
+// de-duplication. Past it the memory restarts: only a message whose frames
+// straddle the restart can be counted twice.
+const maxShadowMessages = 1024
 
 // Meter is a process's self-reported state. The zero value is ready to use.
 type Meter struct {
@@ -31,7 +43,13 @@ type Meter struct {
 	liveVersion         atomic.Pointer[string]
 
 	shadowMu sync.Mutex
-	shadow   clievent.ShadowUsage
+	shadow   []clievent.ShadowModel
+	// shadowMsgs is the usage last seen per API message id this turn.
+	shadowMsgs      map[string]shadowMsg
+	shadowLastModel string
+	// lastResultMS is the read-loop receive time (unix ms) of the last
+	// result frame; 0 before one.
+	lastResultMS atomic.Int64
 
 	meteringMu sync.RWMutex
 	metering   []clievent.MeteringEntry
@@ -201,39 +219,112 @@ func (m *Meter) MeteringGen() uint64 {
 	return m.meteringGen.Load()
 }
 
+// shadowMsg is one API message's usage as its latest frame reported it.
+type shadowMsg struct {
+	model string
+	tok   clievent.ShadowModel
+}
+
 // TrackShadow folds an assistant frame's usage into the shadow account and
-// clears it on the result frame, whose modelUsage supersedes it.
-func (m *Meter) TrackShadow(ev clievent.Event) {
+// clears it on the result frame, whose modelUsage supersedes it; nowMS is the
+// read loop's receive time, kept as LastResultAt for a result. Frames sharing
+// a message id count once, at the largest value each field reached.
+func (m *Meter) TrackShadow(ev clievent.Event, nowMS int64) {
 	switch ev.Type {
 	case "assistant":
 		if ev.Message == nil || ev.Message.Usage == nil {
 			return
 		}
 		u := ev.Message.Usage
+		tok := clievent.ShadowModel{Input: u.InputTokens, Output: u.OutputTokens,
+			CacheRead: u.CacheReadInputTokens, CacheWrite: u.CacheCreationInputTokens}
 		m.shadowMu.Lock()
-		m.shadow.Input += u.InputTokens
-		m.shadow.Output += u.OutputTokens
-		m.shadow.CacheRead += u.CacheReadInputTokens
-		m.shadow.CacheWrite += u.CacheCreationInputTokens
-		if ev.Message.Model != "" {
-			m.shadow.Model = ev.Message.Model
+		defer m.shadowMu.Unlock()
+		model := ev.Message.Model
+		if model == "" {
+			model = m.shadowLastModel
+		} else {
+			m.shadowLastModel = model
 		}
-		m.shadowMu.Unlock()
+		if id := ev.Message.ID; id != "" {
+			if prev, ok := m.shadowMsgs[id]; ok {
+				next := maxTokens(prev.tok, tok)
+				m.addShadow(prev.model, subTokens(next, prev.tok))
+				m.shadowMsgs[id] = shadowMsg{model: prev.model, tok: next}
+				return
+			}
+			if m.shadowMsgs == nil || len(m.shadowMsgs) >= maxShadowMessages {
+				m.shadowMsgs = make(map[string]shadowMsg)
+			}
+			m.shadowMsgs[id] = shadowMsg{model: model, tok: tok}
+		}
+		m.addShadow(model, tok)
 	case "result":
+		m.lastResultMS.Store(nowMS)
 		m.shadowMu.Lock()
-		m.shadow = clievent.ShadowUsage{}
+		m.resetShadowLocked()
 		m.shadowMu.Unlock()
 	}
+}
+
+// addShadow adds tok to model's row. Caller holds shadowMu.
+func (m *Meter) addShadow(model string, tok clievent.ShadowModel) {
+	r := m.shadowRow(model)
+	r.Input += tok.Input
+	r.Output += tok.Output
+	r.CacheRead += tok.CacheRead
+	r.CacheWrite += tok.CacheWrite
+}
+
+// shadowRow returns model's row, adding it while under maxShadowModels and
+// using the unnamed row past it. Caller holds shadowMu.
+func (m *Meter) shadowRow(model string) *clievent.ShadowModel {
+	for i := range m.shadow {
+		if m.shadow[i].Model == model {
+			return &m.shadow[i]
+		}
+	}
+	if model != "" && len(m.shadow) >= maxShadowModels {
+		return m.shadowRow("")
+	}
+	m.shadow = append(m.shadow, clievent.ShadowModel{Model: model})
+	return &m.shadow[len(m.shadow)-1]
+}
+
+// resetShadowLocked empties the account. Caller holds shadowMu.
+func (m *Meter) resetShadowLocked() {
+	m.shadow = nil
+	m.shadowMsgs = nil
+	m.shadowLastModel = ""
+}
+
+func maxTokens(a, b clievent.ShadowModel) clievent.ShadowModel {
+	return clievent.ShadowModel{Input: max(a.Input, b.Input), Output: max(a.Output, b.Output),
+		CacheRead: max(a.CacheRead, b.CacheRead), CacheWrite: max(a.CacheWrite, b.CacheWrite)}
+}
+
+func subTokens(a, b clievent.ShadowModel) clievent.ShadowModel {
+	return clievent.ShadowModel{Input: a.Input - b.Input, Output: a.Output - b.Output,
+		CacheRead: a.CacheRead - b.CacheRead, CacheWrite: a.CacheWrite - b.CacheWrite}
 }
 
 // TakeShadow returns and clears the tokens consumed since the last result
 // frame, for a turn that ends without one (death / timeout kill).
 func (m *Meter) TakeShadow() clievent.ShadowUsage {
 	m.shadowMu.Lock()
-	u := m.shadow
-	m.shadow = clievent.ShadowUsage{}
+	u := clievent.ShadowUsage{Models: m.shadow}
+	m.resetShadowLocked()
 	m.shadowMu.Unlock()
 	return u
+}
+
+// LastResultAt is when the read loop received the last result frame; zero
+// before one. Lock-free.
+func (m *Meter) LastResultAt() time.Time {
+	if ms := m.lastResultMS.Load(); ms != 0 {
+		return time.UnixMilli(ms)
+	}
+	return time.Time{}
 }
 
 func loadString(p *atomic.Pointer[string]) string {

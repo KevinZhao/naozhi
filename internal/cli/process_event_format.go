@@ -6,6 +6,7 @@ package cli
 import (
 	"encoding/json"
 	"log/slog"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -201,7 +202,7 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 // logEventAt converts an clievent.Event to one or more EventEntry values and appends them to the event log.
 // readLoop passes the same time.Now() value that stamps ev.RecvAt so timestamps match.
 func (p *Process) logEventAt(ev clievent.Event, nowMS int64) {
-	p.meter.TrackShadow(ev)
+	p.meter.TrackShadow(ev, nowMS)
 	entries := EventEntriesFromEventAt(ev, nowMS)
 	if len(entries) == 0 {
 		return
@@ -218,6 +219,10 @@ func (p *Process) logEventAt(ev clievent.Event, nowMS int64) {
 // result frame. Callers use it when a turn ends without a result and the
 // process will not produce one (death / timeout kill).
 func (p *Process) TakeShadowUsage() clievent.ShadowUsage { return p.meter.TakeShadow() }
+
+// LastResultAt is when the read loop received the process's last result
+// frame; zero before one.
+func (p *Process) LastResultAt() time.Time { return p.meter.LastResultAt() }
 
 // agentInput holds the parsed fields from an Agent tool call input.
 type agentInput struct {
