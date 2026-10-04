@@ -77,7 +77,8 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 	// pendingSlots order equals the order lines hit the shim socket;
 	// otherwise two concurrent sends could invert them and break FIFO
 	// turn-result attribution.
-	queued := true
+	queued, aborts := true, false
+	running := priority == "now" && p.State() == StateRunning
 	writeErr := p.link.withWriteLock(func() error {
 		p.slots.mu.Lock()
 		if len(p.slots.pending) >= maxPendingSlots {
@@ -90,6 +91,10 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 			// both turn clocks start with this message.
 			p.slots.turnStartedAt = slot.enqueueAt
 			p.markOutput(slot.enqueueAt)
+		}
+		// "now" aborts the turn in flight, if any: one is Running or still owed.
+		if priority == "now" && (running || len(p.slots.pending) > 0) {
+			aborts = p.turn.abortRequested.CompareAndSwap(false, true)
 		}
 		p.slots.pending = append(p.slots.pending, slot)
 		p.slots.mu.Unlock()
@@ -106,6 +111,9 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 		// written. Surface the canonical clierr.ErrProcessExited if the process died
 		// between the Alive() check and the write.
 		p.removeSlotByID(slot.id)
+		if aborts {
+			p.turn.abortRequested.Store(false)
+		}
 		if !p.Alive() {
 			return nil, clierr.ErrProcessExited
 		}

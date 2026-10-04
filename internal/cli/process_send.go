@@ -227,6 +227,7 @@ func (p *Process) clearInflightFlags() {
 	p.turn.mu.Lock()
 	p.turn.interrupted.Store(false)
 	p.turn.interruptedRun.Store(false)
+	p.turn.abortRequested.Store(false)
 	p.turn.mu.Unlock()
 }
 
@@ -270,8 +271,11 @@ func (p *Process) Interrupt() {
 	p.turn.mu.Lock()
 	state := p.turn.state
 	p.turn.interrupted.Store(true)
+	aSet := false
 	if state == StateRunning {
 		p.turn.interruptedRun.Store(true)
+		// Before the send, so the abort's result cannot be read ahead of it.
+		aSet = p.turn.abortRequested.CompareAndSwap(false, true)
 	}
 	p.turn.mu.Unlock()
 	// While spawning the CLI's REPL isn't up and silently drops SIGINT: skip the
@@ -282,6 +286,9 @@ func (p *Process) Interrupt() {
 	}
 	if err := p.link.send(shimClientMsg{Type: "interrupt"}); err != nil {
 		slog.Warn("interrupt failed", "err", err)
+		if aSet {
+			p.turn.abortRequested.Store(false)
+		}
 	}
 }
 
@@ -300,12 +307,13 @@ func (p *Process) InterruptViaControl() error {
 	// flipping State to Running cannot race us into "wrote control_request but
 	// skipped the settle flags". CompareAndSwap records which flags WE set, so a
 	// write-failure rollback cannot clobber a concurrent Interrupt()'s flags.
-	var iSet, rSet bool
+	var iSet, rSet, aSet bool
 	p.turn.mu.Lock()
 	state := p.turn.state
 	if state == StateRunning {
 		iSet = p.turn.interrupted.CompareAndSwap(false, true)
 		rSet = p.turn.interruptedRun.CompareAndSwap(false, true)
+		aSet = p.turn.abortRequested.CompareAndSwap(false, true)
 	}
 	p.turn.mu.Unlock()
 	// Do NOT write the control_request when idle: the CLI would buffer it for
@@ -325,6 +333,9 @@ func (p *Process) InterruptViaControl() error {
 		}
 		if rSet {
 			p.turn.interruptedRun.Store(false)
+		}
+		if aSet {
+			p.turn.abortRequested.Store(false)
 		}
 		p.turn.mu.Unlock()
 		return fmt.Errorf("write interrupt control_request: %w", err)

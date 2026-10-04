@@ -112,8 +112,8 @@ func TestAdoptedTurn_LatchKeepsTheResultTextTheEventLogDrops(t *testing.T) {
 	if out.Result.Text != "the answer" {
 		t.Errorf("Text = %q, want %q — the late result's text was not kept", out.Result.Text, "the answer")
 	}
-	if out.SubType != "success" {
-		t.Errorf("SubType = %q, want success", out.SubType)
+	if out.Result.SubType != "success" {
+		t.Errorf("SubType = %q, want success", out.Result.SubType)
 	}
 	if out.Result.SessionID != "s1" {
 		t.Errorf("SessionID = %q, want s1", out.Result.SessionID)
@@ -162,7 +162,7 @@ func TestAdoptedTurn_ReadableTwice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second AdoptedOutcome: %v", err)
 	}
-	if first.End != second.End || first.SubType != second.SubType ||
+	if first.End != second.End || first.Result.SubType != second.Result.SubType ||
 		first.Result.Text != second.Result.Text || first.Result.CostUSD != second.Result.CostUSD {
 		t.Errorf("second read differs: %+v vs %+v", first, second)
 	}

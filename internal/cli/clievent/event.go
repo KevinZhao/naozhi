@@ -27,7 +27,13 @@ type Event struct {
 	// per-incarnation running-total semantics as CostUSD). nil on every
 	// other frame and on ACP/codex. See docs/rfc/cost-ledger.md §5.1.
 	ModelUsage map[string]ModelUsage `json:"modelUsage,omitempty"`
-	Message    *AssistantMessage     `json:"message,omitempty"`
+	// IsError is claude's result-frame failure flag; protocols that synthesize
+	// a failed result set it too. Aborted is stamped by readLoop on the first
+	// result after naozhi itself asked the turn to stop.
+	IsError      bool              `json:"is_error,omitempty"`
+	Aborted      bool              `json:"-"`
+	BackendError *BackendError     `json:"-"`
+	Message      *AssistantMessage `json:"message,omitempty"`
 	// Model is the resolved model id the claude CLI advertises on system/init
 	// (claude resolves env/CLI defaults internally, so it is only known after
 	// init). readLoop forwards it to Process.setModel for the live dashboard
@@ -550,10 +556,31 @@ type SendResult struct {
 	// Cumulative like CostUSD: consumers difference it, never sum it.
 	ModelUsage map[string]ModelUsage
 
+	// Turn outcome, copied from the result frame. SubType is the backend's raw
+	// subtype (claude's success / error_during_execution / error_max_turns …,
+	// an ACP stopReason, "error" for a synthesized failure). error_during_execution
+	// is also what an abort naozhi requested produces, so a consumer checks
+	// Aborted before treating it as a failure. BackendError is set when the
+	// backend rejected the turn over JSON-RPC or reported it failed.
+	SubType      string
+	IsError      bool
+	Aborted      bool
+	BackendError *BackendError
+
 	// Merge metadata. Zero means "single-slot result, no merge".
 	MergedCount    int    // total slots sharing this result (>=2 in a merge)
 	MergedWithHead uint64 // 0 for head; for follower the id of the head sendSlot
 	HeadText       string // follower mirror of Text (optional, for UI association)
+}
+
+// BackendError is a turn failure an ACP or codex backend reported: a JSON-RPC
+// error reply (Code non-zero) or a codex turn that completed as failed (Code 0).
+// Message was sanitized by the protocol but is the backend's raw wording, so it
+// is for logs, not for an end user.
+type BackendError struct {
+	Backend string
+	Code    int
+	Message string
 }
 
 // EventCallback is called for each intermediate event during Send.

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // TestRPCErrorTurnEnd pins the readLoop's recognition of a rejected turn:
@@ -63,12 +65,12 @@ func TestRPCErrorTurnEnd(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tag, ok := rpcErrorTurnEnd(tc.err)
+			rejected, ok := rpcErrorTurnEnd(tc.err)
 			if ok != tc.wantOK {
 				t.Fatalf("rpcErrorTurnEnd(%v) ok = %v, want %v", tc.err, ok, tc.wantOK)
 			}
-			if ok && tag != tc.wantTag {
-				t.Errorf("tag = %q, want %q", tag, tc.wantTag)
+			if ok && rejected.resultPrefix() != tc.wantTag {
+				t.Errorf("tag = %q, want %q", rejected.resultPrefix(), tc.wantTag)
 			}
 		})
 	}
@@ -100,14 +102,46 @@ func TestProtocols_TagTheRejectionWithTheirBackend(t *testing.T) {
 		name  string
 		proto Protocol
 		frame string
+		code  int
 	}{
-		{"acp", &ACPProtocol{BackendID: "other-acp"}, `{"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"no"}}`},
-		{"codex", &CodexProtocol{BackendID: "other-codex"}, `{"jsonrpc":"2.0","id":3,"error":{"code":-32001,"message":"no"}}`},
+		{"acp", &ACPProtocol{BackendID: "other-acp"}, `{"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"no\u0007"}}`, -32000},
+		{"codex", &CodexProtocol{BackendID: "other-codex"}, `{"jsonrpc":"2.0","id":3,"error":{"code":-32001,"message":"no\u0007"}}`, -32001},
 	} {
 		_, _, err := tc.proto.ReadEvent(tc.frame)
-		tag, ok := rpcErrorTurnEnd(err)
-		if want := "[other-" + tc.name + "] "; !ok || tag != want {
-			t.Errorf("%s rejection: rpcErrorTurnEnd = (%q, %v), want (%q, true)", tc.name, tag, ok, want)
+		rejected, ok := rpcErrorTurnEnd(err)
+		if !ok {
+			t.Fatalf("%s rejection: rpcErrorTurnEnd(%v) ok = false", tc.name, err)
 		}
+		if want := "[other-" + tc.name + "] "; rejected.resultPrefix() != want {
+			t.Errorf("%s rejection: tag = %q, want %q", tc.name, rejected.resultPrefix(), want)
+		}
+		// The code survives as a number and the message sanitized, so a
+		// consumer classifies the rejection without parsing Error().
+		if rejected.Code != tc.code || rejected.Message != "no_" {
+			t.Errorf("%s rejection: Code, Message = %d, %q; want %d, %q", tc.name, rejected.Code, rejected.Message, tc.code, "no_")
+		}
+	}
+}
+
+// TestTurnRejectedError_ResultEventIsAStructuredFailure: the result the
+// readLoop closes a rejected turn with keeps today's text, and also says it
+// failed and why, for consumers that must not parse that text.
+func TestTurnRejectedError_ResultEventIsAStructuredFailure(t *testing.T) {
+	t.Parallel()
+	rejected := &TurnRejectedError{Backend: "kiro", Code: -32000, Message: "model overloaded",
+		Err: fmt.Errorf("%w -32000: model overloaded", ErrACPRPC)}
+	ev := rejected.resultEvent()
+	if ev.Type != "result" || ev.SubType != "error" || !ev.IsError {
+		t.Errorf("Type, SubType, IsError = %q, %q, %v; want result, error, true", ev.Type, ev.SubType, ev.IsError)
+	}
+	if want := "[kiro] acp rpc error -32000: model overloaded"; ev.Result != want {
+		t.Errorf("Result = %q, want %q", ev.Result, want)
+	}
+	want := clievent.BackendError{Backend: "kiro", Code: -32000, Message: "model overloaded"}
+	if ev.BackendError == nil || *ev.BackendError != want {
+		t.Errorf("BackendError = %+v, want %+v", ev.BackendError, want)
+	}
+	if got := resultFromEvent(ev); got.BackendError != ev.BackendError || !got.IsError || got.SubType != "error" {
+		t.Errorf("SendResult = %+v, lost the failure", got)
 	}
 }

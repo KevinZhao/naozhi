@@ -183,9 +183,9 @@ func (ar adoptedRunAdapter) AwaitAdopted(ctx context.Context) (cron.AdoptedRunOu
 		return cron.AdoptedRunOutcome{}, err
 	}
 	return cron.AdoptedRunOutcome{
-		Completed: out.End == cli.AdoptedEndResult && out.SubType != "error_during_execution",
+		Completed: out.End == cli.AdoptedEndResult && out.Result.SubType != "error_during_execution",
 		Text:      out.Result.Text,
-		SubType:   out.SubType,
+		SubType:   out.Result.SubType,
 		SessionID: out.Result.SessionID,
 	}, nil
 }

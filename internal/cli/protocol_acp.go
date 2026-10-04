@@ -623,8 +623,9 @@ func (p *ACPProtocol) ReadEvent(line string) ([]clievent.Event, bool, error) {
 			// done=true: an error response to session/prompt closes that turn from
 			// kiro's POV; done=false would leave the session stuck in state=running.
 			// readLoop turns the TurnRejectedError into a synthetic result event.
-			return nil, true, &TurnRejectedError{Backend: p.BackendID, Err: fmt.Errorf("%w %d: %s", ErrACPRPC,
-				msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))}
+			msgText := osutil.SanitizeForLog(msg.Error.Message, 256)
+			return nil, true, &TurnRejectedError{Backend: p.BackendID, Code: msg.Error.Code, Message: msgText,
+				Err: fmt.Errorf("%w %d: %s", ErrACPRPC, msg.Error.Code, msgText)}
 		}
 
 		// Decode the optional stopReason ("end_turn", "cancelled", "max_tokens",

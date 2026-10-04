@@ -688,6 +688,9 @@ func TestProcess_InterruptViaControl_WriteFailure_RollsBackFlags(t *testing.T) {
 	if p.turn.interruptedRun.Load() {
 		t.Error("interruptedRun must be rolled back after write failure")
 	}
+	if p.turn.abortRequested.Load() {
+		t.Error("abortRequested must be rolled back after write failure")
+	}
 }
 
 func TestProcess_InterruptViaControl_DeadProcess(t *testing.T) {

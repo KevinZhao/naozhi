@@ -39,6 +39,11 @@ func resultFromEvent(ev clievent.Event) clievent.SendResult {
 		SessionID:  ev.SessionID,
 		CostUSD:    ev.CostUSD,
 		ModelUsage: ev.ModelUsage,
+
+		SubType:      ev.SubType,
+		IsError:      ev.IsError,
+		Aborted:      ev.Aborted,
+		BackendError: ev.BackendError,
 	}
 }
 
