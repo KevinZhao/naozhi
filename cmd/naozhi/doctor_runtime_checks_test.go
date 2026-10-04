@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -24,6 +25,9 @@ func writeFakeCLI(t *testing.T, dir, name, out string, code int) string {
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Exec once untimed: a fresh executable's first launch can be slow on a
+	// loaded macOS host, and the probe under test caps --version at 5s.
+	_ = exec.Command(p).Run()
 	return p
 }
 
