@@ -356,11 +356,16 @@ test.describe('Events panel #2430 P3 / #2432 protocol', () => {
       const result = await page.evaluate((key) => {
         // eslint-disable-next-line no-eval
         const ws = eval('wsm');
+        // eslint-disable-next-line no-eval
+        const ss = eval('sessionStream');
         const sent = [];
         ws.send = (m) => { sent.push(m); return true; };
         const el = /** @type {HTMLElement} */ (document.getElementById('events-scroll'));
-        // The opening page never came: the pane still shows its placeholder.
+        // The opening page never came: the pane still shows its placeholder,
+        // and a live event advanced the cursor meanwhile.
         el.innerHTML = '<div class="empty-state loading-indicator">x</div>';
+        ss._initialSubscribe = true;
+        ss.lastEventTimeWs = 12345;
         // Another session's failure, or the same key on another node, is not ours.
         ws.onMessage({ type: 'error', key: 'other:key', node: 'n1', error: 'history unavailable' });
         ws.onMessage({ type: 'error', key, node: 'n2', error: 'history unavailable' });
@@ -374,12 +379,21 @@ test.describe('Events panel #2430 P3 / #2432 protocol', () => {
           placeholder: !!el.querySelector('.loading-indicator'),
         };
         /** @type {HTMLElement} */ (btns[0]).click();
-        return { foreign, shown, sent, gone: !document.getElementById('history-retry-btn') };
+        const gone = !document.getElementById('history-retry-btn');
+        // A failed catch-up after the opening page resumes after the cursor.
+        ss._initialSubscribe = false;
+        ss.lastEventTimeWs = 23456;
+        ws.onMessage({ type: 'error', key, node: 'n1', error: 'history unavailable' });
+        /** @type {HTMLElement} */ (document.getElementById('history-retry-btn')).click();
+        return { foreign, shown, sent, gone };
       }, KEY_N);
 
       expect(result.foreign).toBe(false);
       expect(result.shown).toEqual({ count: 1, text: '历史记录加载失败 — 点击重试', placeholder: false });
-      expect(result.sent).toEqual([expect.objectContaining({ type: 'subscribe', key: KEY_N, node: 'n1' })]);
+      expect(result.sent).toEqual([
+        { type: 'subscribe', key: KEY_N, node: 'n1', limit: expect.any(Number) },
+        { type: 'subscribe', key: KEY_N, node: 'n1', after: 23456 },
+      ]);
       expect(result.gone).toBe(true);
       expect(errors).toEqual([]);
       await ctx.close();

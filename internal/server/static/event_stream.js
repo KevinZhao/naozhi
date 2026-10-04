@@ -311,12 +311,8 @@ function paneButton(id, onclick) {
   if (!el) return null;
   let btn = document.getElementById(id);
   if (!btn) {
-    btn = document.createElement('button');
-    btn.id = id;
-    btn.type = 'button';
-    btn.className = 'earlier-events-btn';
+    btn = Object.assign(document.createElement('button'), { id, type: 'button', className: 'earlier-events-btn', onclick });
     btn.style.cssText = 'display:block;margin:8px auto;padding:6px 14px;background:var(--nz-bg-2);border:1px solid var(--nz-border);color:var(--nz-text);border-radius:6px;cursor:pointer;font-size:12px';
-    btn.onclick = onclick;
   }
   if (el.firstChild !== btn) el.insertBefore(btn, el.firstChild);
   return btn;
@@ -329,11 +325,15 @@ export function ensureEarlierButton() {
 }
 
 // showHistoryRetry answers error 'history unavailable' (a remote node failed
-// to serve the history) with a retry where the opening page should be.
+// to serve the history) with a retry where the opening page should be; one
+// still owed that page drops the cursor live events may have advanced.
 export function showHistoryRetry() {
   const el = document.getElementById('events-scroll');
   if (el && !el.querySelector('.event')) el.replaceChildren();
-  const btn = paneButton('history-retry-btn', () => { btn.remove(); sessionStream.subscribe(selection.key, selection.node); });
+  const btn = paneButton('history-retry-btn', () => {
+    if (sessionStream._initialSubscribe) sessionStream.lastEventTimeWs = 0;
+    btn.remove(); sessionStream.subscribe(selection.key, selection.node);
+  });
   if (btn) btn.textContent = '历史记录加载失败 — 点击重试';
 }
 

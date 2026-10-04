@@ -140,7 +140,9 @@ func TestDashboardJS_HistoryUnavailableOffersRetry(t *testing.T) {
 	fn := jsFuncBody(t, js, "showHistoryRetry")
 	for _, want := range []string{
 		"if (el && !el.querySelector('.event')) el.replaceChildren();", // a blank or placeholder pane shows only the retry
-		"btn.remove(); sessionStream.subscribe(selection.key, selection.node);",
+		"btn.remove();",
+		"if (sessionStream._initialSubscribe) sessionStream.lastEventTimeWs = 0;", // a retry before the opening page asks for it again
+		"sessionStream.subscribe(selection.key, selection.node);",
 		"历史记录加载失败",
 	} {
 		if !strings.Contains(fn, want) {

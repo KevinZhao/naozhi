@@ -177,6 +177,45 @@ func TestReverseConn_HistoryFetchCutByDrop_Reconnecting(t *testing.T) {
 	}
 }
 
+// closeDoneOnly is the first half of markDisconnected: done closes while
+// baseCtx is still live.
+func closeDoneOnly(rc *ReverseConn) {
+	rc.closeMu.Lock()
+	rc.closed = true
+	close(rc.done)
+	rc.closeMu.Unlock()
+}
+
+// A fetch the drop cuts between done closing and baseCtx's cancel still reads
+// as a reconnect.
+func TestReverseConn_HistoryFetchCutBeforeCancel_Reconnecting(t *testing.T) {
+	f := newGraceFixture(t, 5*time.Second)
+	ws, rc := f.dial(t)
+	sink := &mockSink{id: 1}
+	rc.Subscribe(sink, graceKey, 0, 50)
+	readNodeFrame(t, ws, "subscribe")
+	readFetchEvents(t, ws)
+	closeDoneOnly(rc)
+	testhelper.Eventually(t, func() bool { return sink.JSONMsgCount() == 1 }, 3*time.Second, "keyed error")
+	if got := jsonFrames(sink)[0]; got.Type != "error" || got.Error != errNodeReconnecting {
+		t.Fatalf("frame = %+v, want error %q", got, errNodeReconnecting)
+	}
+}
+
+// A catch-up cut the same way stays quiet: the next adoption catches up.
+func TestReverseConn_CatchUpCutBeforeCancel_NoError(t *testing.T) {
+	f := newGraceFixture(t, 5*time.Second)
+	ws, rc := f.dial(t)
+	sink := &mockSink{id: 1}
+	subscribeOnLink(t, rc, ws, sink, 300)
+	closeDoneOnly(rc)
+	rc.subWG.Add(1)
+	rc.catchUp(graceKey, 300)
+	if n := sink.RawMsgCount(); n != 0 {
+		t.Fatalf("sink got %d raw frames, want none: %+v", n, rawFrames(t, sink))
+	}
+}
+
 // A failed catch-up after a redial leaves a gap in every sink's pane, so each
 // is told the history is unavailable.
 func TestReverseServer_CatchUpFails_KeyedError(t *testing.T) {

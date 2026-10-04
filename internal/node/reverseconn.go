@@ -543,6 +543,13 @@ func (c *ReverseConn) isDone() bool {
 	}
 }
 
+// tornDown reports a conn on its way out. markDisconnected closes done before
+// it cancels baseCtx, and an rpc cut by the drop fails as soon as done closes,
+// so either signal counts.
+func (c *ReverseConn) tornDown() bool {
+	return c.isDone() || c.baseCtx.Err() != nil
+}
+
 func (c *ReverseConn) sendReconnecting(cl EventSink, key string) {
 	cl.SendJSON(wsproto.NewError(wsproto.Error{Key: key, Node: c.id, Error: errNodeReconnecting}))
 }
@@ -551,7 +558,7 @@ func (c *ReverseConn) sendReconnecting(cl EventSink, key string) {
 // teardown cut short reads as a reconnect; any other failure is logged and
 // offered to the dashboard as a retry.
 func (c *ReverseConn) historyFailed(cl EventSink, key string, err error) {
-	if c.baseCtx.Err() != nil {
+	if c.tornDown() {
 		c.sendReconnecting(cl, key)
 		return
 	}
@@ -610,7 +617,7 @@ func (c *ReverseConn) catchUp(key string, after int64) {
 	entries, err := c.FetchEvents(ctx, key, after)
 	if err != nil {
 		// A teardown cut it short: the next adoption catches up again.
-		if c.baseCtx.Err() == nil {
+		if !c.tornDown() {
 			slog.Warn("reverseconn: resubscribe catch-up fetch failed", "node", c.id, "key", key, "err", err)
 			c.broadcastToSubs(key, historyUnavailable(c.id, key), 0, false)
 		}
