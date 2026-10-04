@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"os"
 	"slices"
 	"sync"
 	"testing"
@@ -10,27 +11,31 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/costledger"
+	"github.com/naozhi/naozhi/internal/shim"
 )
 
 // gatedSpawn is a spawn.hook the test controls: each call signals entered,
-// then waits for release before handing back its process.
+// then waits for release before handing back a process of its own. It
+// records every call's resume ID and process, in call order.
 type gatedSpawn struct {
 	entered chan struct{}
 	release chan struct{}
-	proc    *fakeProcess
 	err     error
 
-	mu    sync.Mutex
-	calls int
+	mu        sync.Mutex
+	resumeIDs []string
+	procs     []*fakeProcess
 }
 
 func newGatedSpawn() *gatedSpawn {
-	return &gatedSpawn{entered: make(chan struct{}, 4), release: make(chan struct{}), proc: newIdleProc()}
+	return &gatedSpawn{entered: make(chan struct{}, 4), release: make(chan struct{})}
 }
 
-func (g *gatedSpawn) hook(ctx context.Context, _ cli.SpawnOptions) (processIface, error) {
+func (g *gatedSpawn) hook(ctx context.Context, opts cli.SpawnOptions) (processIface, error) {
+	proc := newIdleProc()
 	g.mu.Lock()
-	g.calls++
+	g.resumeIDs = append(g.resumeIDs, opts.ResumeID)
+	g.procs = append(g.procs, proc)
 	g.mu.Unlock()
 	g.entered <- struct{}{}
 	select {
@@ -41,7 +46,14 @@ func (g *gatedSpawn) hook(ctx context.Context, _ cli.SpawnOptions) (processIface
 	if g.err != nil {
 		return nil, g.err
 	}
-	return g.proc, nil
+	return proc, nil
+}
+
+// calls returns the resume ID and process of every call so far.
+func (g *gatedSpawn) calls() ([]string, []*fakeProcess) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return slices.Clone(g.resumeIDs), slices.Clone(g.procs)
 }
 
 // spawnRouter is a real Router whose spawns go through the hook.
@@ -57,14 +69,15 @@ func spawnRouter(t *testing.T, maxProcs int, hook func(context.Context, cli.Spaw
 
 type spawnResult struct {
 	s   *ManagedSession
+	st  SessionStatus
 	err error
 }
 
 func spawnAsync(r *Router, key string) <-chan spawnResult {
 	out := make(chan spawnResult, 1)
 	go func() {
-		s, _, err := r.GetOrCreate(context.Background(), key, AgentOpts{})
-		out <- spawnResult{s, err}
+		s, st, err := r.GetOrCreate(context.Background(), key, AgentOpts{})
+		out <- spawnResult{s, st, err}
 	}()
 	return out
 }
@@ -154,21 +167,168 @@ func TestSpawnSession_LiveSessionInstalledMeanwhileWins(t *testing.T) {
 	if got.s != winner || r.SessionFor(key) != winner {
 		t.Fatal("the spawn replaced the live session installed meanwhile")
 	}
-	if g.proc.Alive() {
-		t.Error("the losing spawn's process was left running")
+	if _, procs := g.calls(); len(procs) != 1 || procs[0].Alive() {
+		t.Errorf("the losing spawn's process was left running (%d spawns)", len(procs))
 	}
 }
 
-// TestSpawnSession_RemovedMeanwhileStartsFresh: a session removed while the
-// spawn is outside the lock is not resurrected into the new one — the new
-// session does not continue its session-ID chain or its cost.
+// idResolves reports whether sid still routes to a key.
+func idResolves(r *Router, sid string) bool {
+	var ok bool
+	r.ss.View(func(v sessView) { _, ok = v.KeyForID(sid) })
+	return ok
+}
+
+// TestSpawnSession_RemovedMeanwhileStartsFresh: a dead session removed or
+// reset (/new) while its resume spawn is outside the lock is not brought
+// back. The process started with --resume of its ID is closed and a fresh
+// one installed: not its ID, its idToKey entry, its chain or its cost.
 func TestSpawnSession_RemovedMeanwhileStartsFresh(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		retire func(r *Router, key string)
+	}{
+		{"Remove", func(r *Router, key string) {
+			if !r.Remove(key) {
+				t.Fatal("Remove found no session")
+			}
+		}},
+		{"Reset", func(r *Router, key string) { r.Reset(key) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newGatedSpawn()
+			r := spawnRouter(t, 4, g.hook)
+			const key = "feishu:direct:spawn-removed:general"
+			old := injectSession(r, key, newDeadProc())
+			old.setSessionID("sid-old")
+			storeTotalCost(&old.costSpent, 3.5)
+
+			res := spawnAsync(r, key)
+			waitEntered(t, g)
+			tc.retire(r, key)
+			close(g.release)
+
+			got := waitResult(t, res)
+			if got.err != nil {
+				t.Fatalf("GetOrCreate: %v", got.err)
+			}
+			ids, procs := g.calls()
+			if !slices.Equal(ids, []string{"sid-old", ""}) {
+				t.Fatalf("spawn resume IDs = %q, want the stale resume then a fresh spawn", ids)
+			}
+			if procs[0].Alive() {
+				t.Error("the process resuming the retired session was left running")
+			}
+			if got.s.loadProcess() != procs[1] || r.SessionFor(key) != got.s {
+				t.Error("the installed session does not hold the fresh spawn's process")
+			}
+			if got.st != SessionNew {
+				t.Errorf("status = %d, want SessionNew", got.st)
+			}
+			if sid := got.s.SessionID(); sid == "sid-old" {
+				t.Error("the new session carries the retired session's ID")
+			}
+			if idResolves(r, "sid-old") {
+				t.Error("the retired session's ID routes to the key again")
+			}
+			if ids := got.s.SnapshotPrevSessionIDs(); slices.Contains(ids, "sid-old") {
+				t.Errorf("the new session continues the retired one's chain: %v", ids)
+			}
+			if c := loadTotalCost(&got.s.costSpent); c != 0 {
+				t.Errorf("the new session inherited the retired one's spend: %v", c)
+			}
+		})
+	}
+}
+
+// TestSpawnSession_StaleSpawnFlagsAShimSocketThatOutlivesTheWait: when the
+// discarded spawn's shim socket is still there after the bounded wait, the
+// retry's spawn error is wrapped as ErrShimStuck, as after a Reset.
+func TestSpawnSession_StaleSpawnFlagsAShimSocketThatOutlivesTheWait(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	const key = "feishu:direct:spawn-stale-stuck:general"
+	if err := os.WriteFile(shim.SocketPath(shim.KeyHash(key)), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := newGatedSpawn()
+	boom := errors.New("spawn failed")
+	r := spawnRouter(t, 4, func(ctx context.Context, opts cli.SpawnOptions) (processIface, error) {
+		if opts.ResumeID == "" {
+			return nil, boom
+		}
+		return g.hook(ctx, opts)
+	})
+	injectSession(r, key, newDeadProc()).setSessionID("sid-old")
+
+	res := spawnAsync(r, key)
+	waitEntered(t, g)
+	if !r.Remove(key) {
+		t.Fatal("Remove found no session")
+	}
+	close(g.release)
+
+	got := waitResult(t, res) // waits out the 2s socket-gone window
+	if !errors.Is(got.err, ErrShimStuck) || !errors.Is(got.err, boom) {
+		t.Errorf("GetOrCreate = %v, want ErrShimStuck wrapping the retry's spawn error", got.err)
+	}
+}
+
+// TestSpawnSession_ReplacedMeanwhileResumesTheReplacement: when the key's
+// dead session is replaced by another dead one during its resume spawn, the
+// process resuming the first is closed and the replacement is resumed, so
+// the conversation, ID and chain all describe the session in the table.
+func TestSpawnSession_ReplacedMeanwhileResumesTheReplacement(t *testing.T) {
 	g := newGatedSpawn()
 	r := spawnRouter(t, 4, g.hook)
-	const key = "feishu:direct:spawn-removed:general"
+	const key = "feishu:direct:spawn-replaced:general"
+	first := injectSession(r, key, newDeadProc())
+	first.setSessionID("sid-first")
+
+	res := spawnAsync(r, key)
+	waitEntered(t, g)
+	second := &ManagedSession{key: key}
+	second.storeProcess(newDeadProc())
+	second.setSessionID("sid-second")
+	second.prevSessionIDs = []string{"sid-zero"}
+	r.ss.Update(func(tx sessTx) {
+		tx.Put(key, second)
+	})
+	close(g.release)
+
+	got := waitResult(t, res)
+	if got.err != nil {
+		t.Fatalf("GetOrCreate: %v", got.err)
+	}
+	ids, procs := g.calls()
+	if !slices.Equal(ids, []string{"sid-first", "sid-second"}) {
+		t.Fatalf("spawn resume IDs = %q, want the stale resume then the replacement's", ids)
+	}
+	if procs[0].Alive() {
+		t.Error("the process resuming the replaced session was left running")
+	}
+	if got.s.loadProcess() != procs[1] {
+		t.Error("the installed session does not hold the second spawn's process")
+	}
+	if sid := got.s.SessionID(); sid != "sid-second" {
+		t.Errorf("session ID = %q, want the replacement's sid-second", sid)
+	}
+	if idResolves(r, "sid-first") {
+		t.Error("the replaced session's ID routes to the key")
+	}
+	if chain := got.s.SnapshotPrevSessionIDs(); !slices.Equal(chain, []string{"sid-zero"}) {
+		t.Errorf("chain = %v, want the replacement's own [sid-zero]", chain)
+	}
+}
+
+// TestSpawnSession_DroppedResumeRemovedMeanwhileInstalls: a resume the
+// resume guard already turned into a fresh spawn is not tied to the entry it
+// came from, so removing that entry during the spawn does not respawn.
+func TestSpawnSession_DroppedResumeRemovedMeanwhileInstalls(t *testing.T) {
+	g := newGatedSpawn()
+	r := spawnRouter(t, 4, g.hook)
+	const key = "feishu:direct:spawn-dropped:general"
 	old := injectSession(r, key, newDeadProc())
-	old.setSessionID("sid-old")
-	storeTotalCost(&old.costSpent, 3.5)
+	old.setSessionID("malformed/id") // the resume guard drops it
 
 	res := spawnAsync(r, key)
 	waitEntered(t, g)
@@ -181,44 +341,52 @@ func TestSpawnSession_RemovedMeanwhileStartsFresh(t *testing.T) {
 	if got.err != nil {
 		t.Fatalf("GetOrCreate: %v", got.err)
 	}
-	if ids := got.s.SnapshotPrevSessionIDs(); slices.Contains(ids, "sid-old") {
-		t.Errorf("the new session continues the removed one's chain: %v", ids)
+	ids, procs := g.calls()
+	if !slices.Equal(ids, []string{""}) {
+		t.Fatalf("spawn resume IDs = %q, want one fresh spawn", ids)
 	}
-	if c := loadTotalCost(&got.s.costSpent); c != 0 {
-		t.Errorf("the new session inherited the removed one's spend: %v", c)
+	if got.s.loadProcess() != procs[0] || !procs[0].Alive() {
+		t.Error("the fresh spawn's process was not installed")
 	}
 }
 
-// TestSpawnSession_ReplacedMeanwhileContinuesTheReplacement: when the key's
-// dead session is replaced by another dead one during the spawn, the new
-// session continues the one that is in the table at install time.
-func TestSpawnSession_ReplacedMeanwhileContinuesTheReplacement(t *testing.T) {
+// TestSpawnSession_TakeoverIsNotRespawned: a takeover resumes the ID its
+// caller supplied, not one read from the key's entry, so an entry appearing
+// for the key during its spawn neither fails nor respawns it.
+func TestSpawnSession_TakeoverIsNotRespawned(t *testing.T) {
 	g := newGatedSpawn()
 	r := spawnRouter(t, 4, g.hook)
-	const key = "feishu:direct:spawn-replaced:general"
-	first := injectSession(r, key, newDeadProc())
-	first.setSessionID("sid-first")
+	const key = "feishu:direct:spawn-takeover:general"
 
-	res := spawnAsync(r, key)
+	type result struct {
+		s   *ManagedSession
+		err error
+	}
+	out := make(chan result, 1)
+	go func() {
+		s, err := r.Takeover(context.Background(), key, "sid-external", t.TempDir(), AgentOpts{})
+		out <- result{s, err}
+	}()
 	waitEntered(t, g)
-	second := &ManagedSession{key: key}
-	second.storeProcess(newDeadProc())
-	second.setSessionID("sid-second")
-	r.ss.Update(func(tx sessTx) {
-		tx.Put(key, second)
-	})
+	other := injectSession(r, key, newDeadProc())
+	other.setSessionID("sid-other")
 	close(g.release)
 
-	got := waitResult(t, res)
+	var got result
+	select {
+	case got = <-out:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Takeover did not return")
+	}
 	if got.err != nil {
-		t.Fatalf("GetOrCreate: %v", got.err)
+		t.Fatalf("Takeover: %v", got.err)
 	}
-	ids := got.s.SnapshotPrevSessionIDs()
-	if !slices.Contains(ids, "sid-second") {
-		t.Errorf("the new session does not continue the session in the table (%v)", ids)
+	ids, procs := g.calls()
+	if !slices.Equal(ids, []string{"sid-external"}) {
+		t.Fatalf("spawn resume IDs = %q, want the one takeover spawn", ids)
 	}
-	if slices.Contains(ids, "sid-first") {
-		t.Errorf("the new session continues a session that was no longer in the table (%v)", ids)
+	if got.s.loadProcess() != procs[0] || got.s.SessionID() != "sid-external" {
+		t.Errorf("takeover installed %q, want sid-external on its own process", got.s.SessionID())
 	}
 }
 
@@ -446,8 +614,8 @@ func TestSpawnSession_ChainRefreshedInWindowSurvives(t *testing.T) {
 
 	out := make(chan spawnResult, 1)
 	go func() {
-		s, _, err := r.GetOrCreate(context.Background(), key, AgentOpts{Exempt: true})
-		out <- spawnResult{s, err}
+		s, st, err := r.GetOrCreate(context.Background(), key, AgentOpts{Exempt: true})
+		out <- spawnResult{s, st, err}
 	}()
 	waitEntered(t, g)
 	r.RegisterCronStubWithChain(key, ws, "", []string{"a", "b"})

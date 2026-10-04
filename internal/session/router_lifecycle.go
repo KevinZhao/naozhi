@@ -11,9 +11,11 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -104,6 +106,9 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 				}
 				resumedID, status = s.getSessionID(), SessionResumed
 				err = r.reserveSpawn(tx, &res, key, resumedID, opts)
+				// A resume the guard kept continues this entry's conversation,
+				// so it is only valid while this entry is still the key's.
+				res.resumesOld = err == nil && res.resumeID != ""
 				return
 			}
 			if ch, inflight := tx.Ext().spawns.SpawnInFlight(key); inflight {
@@ -139,6 +144,14 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 		var s *ManagedSession
 		if err == nil {
 			s, err = r.completeSpawn(ctx, &res)
+		}
+		if errors.Is(err, errSpawnStale) {
+			// The resumed entry was reset, removed or replaced meanwhile:
+			// decide again against the table as it is now.
+			if err := ctx.Err(); err != nil {
+				return nil, 0, err
+			}
+			continue
 		}
 		if err != nil {
 			if stuck {
@@ -396,7 +409,16 @@ type spawnReservation struct {
 	// path installed meanwhile instead of its own, so the reservation's resume
 	// facts do not describe the returned session.
 	yielded bool
+	// resumesOld marks a spawn resuming old's own session ID (GetOrCreate's
+	// resume branch). Such a spawn is stale once old is no longer the key's
+	// entry; a takeover resumes an ID its caller supplied and is never stale.
+	resumesOld bool
 }
+
+// errSpawnStale is completeSpawn's answer for a resumesOld spawn whose entry
+// was reset, removed or replaced before the commit: the process, started on
+// that entry's conversation, was closed and nothing was installed.
+var errSpawnStale = errors.New("the resumed session left the table during the spawn")
 
 // reserveSpawn is the first phase of a spawn, run inside the caller's
 // transaction so the decision to spawn and the in-flight marker are one
@@ -545,6 +567,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 	var s, winner *ManagedSession
 	var prevIDs []string
 	var oldHistory []clievent.EventEntry
+	var stale bool
 	r.ss.Update(func(tx sessTx) {
 		res.slot.releaseIn(tx)
 		for {
@@ -558,10 +581,15 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 			if cur == old {
 				break
 			}
-			// The key's entry was removed or replaced by a dead one meanwhile:
-			// the snapshot describes a session no longer in the table.
-			// Continue the one that is there now instead, so a removed session
-			// is not resurrected into this one.
+			// The key's entry was removed or replaced by a dead one meanwhile.
+			// A process resuming the old entry's conversation would bring a
+			// reset session back, so it is discarded. Otherwise the process is
+			// fresh: it continues the entry there now, so a removed session is
+			// not resurrected into this one.
+			if res.resumesOld {
+				stale = true
+				return
+			}
 			old = cur
 			snap = snapshotRespawn(tx.View, old)
 			tx.Unlocked(func() { hist = collectRespawnHistory(old, snap, res.resumeID) })
@@ -590,6 +618,14 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 		res.yielded = true
 		return winner, nil
 	}
+	if stale {
+		// The in-flight marker is still held here, so other callers for key
+		// stay parked until the socket is gone.
+		if !discardStaleSpawn(key, res.resumeID, proc) {
+			r.ss.Update(func(tx sessTx) { tx.Ext().spawns.MarkShimStuck(key) })
+		}
+		return nil, errSpawnStale
+	}
 	// The argv was built from the reserve-time tuning; SetSessionTuning
 	// already told the caller a pick made meanwhile is deferred.
 	if old != nil && (snap.overrides.tuningModel != res.snap.overrides.tuningModel ||
@@ -601,6 +637,22 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 	r.hist.bindNewSessionHistory(ctx, s, proc, key, res.resumeID, res.workspace, prevIDs, oldHistory)
 	r.notifyChange()
 	return s, nil
+}
+
+// discardStaleSpawn closes a stale spawn's process and waits for its shim
+// socket to go, so the next spawn for key does not hit the "refusing to
+// clobber" guard. False means the socket is still bound and the caller flags
+// the key shim-stuck, as a Reset does.
+func discardStaleSpawn(key, resumeID string, proc processIface) bool {
+	slog.Info("resumed session left the table during the spawn; spawning again",
+		"key", osutil.SanitizeForLog(key, 64), "resume_id", resumeID)
+	proc.Close()
+	if waitSocketGoneForKey(key, 2*time.Second) {
+		return true
+	}
+	slog.Warn("shim socket still bound after discarding a stale spawn — flagging key for ErrShimStuck wrap on next GetOrCreate",
+		"key", osutil.SanitizeForLog(key, 64))
+	return false
 }
 
 // installFreshSession attaches a freshly-spawned process to the router
