@@ -623,6 +623,22 @@ func TestScratchPool_SweepSkipsAQueuedSend(t *testing.T) {
 	}
 }
 
+func TestScratchPool_SweepEvictsDeadProcessStuckBusy(t *testing.T) {
+	const ttl = time.Minute
+	r, p, sc := newSweepFixture(t, ttl)
+	proc := NewTestProcess()
+	proc.StateVal = cli.StateRunning
+	proc.AliveVal = false
+	s := r.InjectSession(sc.Key, proc)
+	s.lastActive.Store(time.Now().Add(-3 * ttl).UnixNano())
+	s.turnWaiters.Add(1)
+
+	p.sweep(time.Now())
+	if p.Get(sc.ID) != nil || r.SessionFor(sc.Key) != nil {
+		t.Error("sweep kept a stale scratch whose dead process still reports a turn")
+	}
+}
+
 func TestScratchPool_SweepCountsIdleFromLastEvent(t *testing.T) {
 	const ttl = time.Minute
 	r, p, sc := newSweepFixture(t, ttl)
