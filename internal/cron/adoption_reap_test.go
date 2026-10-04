@@ -25,7 +25,7 @@ type adoptReapRouter struct {
 	gateFreeAt []string // cleanup calls that found the gate already released
 }
 
-func (r *adoptReapRouter) AdoptInFlight(key string) (InFlightRun, AdoptVerdict) {
+func (r *adoptReapRouter) AdoptInFlight(key, _ string) (InFlightRun, AdoptVerdict) {
 	return r.run, AdoptLive
 }
 

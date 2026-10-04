@@ -72,6 +72,15 @@ type CostReporter interface {
 	CostTotals() costledger.Totals
 }
 
+// SendWatermarker is the optional Session capability that lets a restart tell
+// this run's result from an earlier one: cron stores the opaque watermark in
+// the run-inflight marker just before Send and hands it back to
+// InFlightAdopter. "" means none; sessions without it are never adopted from a
+// replayed result.
+type SendWatermarker interface {
+	SendWatermark() string
+}
+
 // InterruptOutcome mirrors session.InterruptOutcome value-for-value AND
 // ordinal-for-ordinal: the adapter does a numeric cast
 // cron.InterruptOutcome(c.s.InterruptViaControl()), so the ordinals must

@@ -169,7 +169,7 @@ func TestIsMidTurn(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got, _ := reconnectVerdict(tt.replays, proto); got != tt.want {
+			if got, _, _ := reconnectVerdict(tt.replays, proto); got != tt.want {
 				t.Errorf("reconnectVerdict() = %v, want %v", got, tt.want)
 			}
 		})
@@ -201,7 +201,7 @@ func TestIsMidTurn_IgnoresAdvisoryDone(t *testing.T) {
 	replays := []shim.ServerMsg{
 		{Type: "replay", Line: `{"ignored":"the stub ignores the line"}`},
 	}
-	if got, _ := reconnectVerdict(replays, proto); !got {
+	if got, _, _ := reconnectVerdict(replays, proto); !got {
 		t.Errorf("reconnectVerdict = false; want true — done=true must NOT settle a turn that emitted no result clievent.Event (#2303)")
 	}
 }
@@ -258,7 +258,7 @@ func TestIsMidTurn_SkipsControlAck(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got, _ := reconnectVerdict(tt.replays, proto); got != tt.want {
+			if got, _, _ := reconnectVerdict(tt.replays, proto); got != tt.want {
 				t.Errorf("reconnectVerdict() = %v, want %v", got, tt.want)
 			}
 		})
