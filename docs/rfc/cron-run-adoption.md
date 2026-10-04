@@ -85,14 +85,16 @@ func reconnectVerdict(replays []shim.ServerMsg, proto Protocol) (midTurn bool, f
 
 第二行就是 v1 的分支 2，成本从"新增一条 replay 保留路径"降到"少丢一个已经在手上的值"。
 
+cron 收养的闸门（`Router.AdoptInFlight`）只认第一行，且不论闩是否已填：迟到的 result 可能在 `ReconnectShimsCtx` 之后、cron reconcile 之前就落进闩，那仍是该收养的 turn（`AdoptedMidTurn`，不是 `AdoptedTurnPending`）。第二行暂不收养：重连是全量 replay，空闲 shim 的 backlog 同样以 result 结尾，那是上一轮、旧进程已经交付过的答案；没有证据表明它晚于本次 run 的 Send，记成成功比记成 interrupted 更糟（#3104）。
+
 ### 3.3 填充点：复用现有 CAS，不新增语义
 
 `process_readloop.go:620` 的 `reconnectedMidTurn.CompareAndSwap(true, false)` **一字不改**——它负责的 Running→Ready 状态转换必须保持一次性，那是 #1778 的修复。闩在同一个分支里被填充：
 
 ```go
 if ev.Type == "result" && p.reconnectedMidTurn.CompareAndSwap(true, false) {
-	p.adopted.resolveResult(ev)   // 新增一行；下面的状态转换与 onTurnDone 原样
-	…
+	…                             // 状态转换与 onTurnDone 原样
+	p.adopted.resolveResult(ev)   // 新增一行；放在转换之后，被闩唤醒的人看到的进程已是 Ready
 }
 ```
 

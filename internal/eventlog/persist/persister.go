@@ -115,6 +115,11 @@ type Persister struct {
 	// warning throttle in failure.go. Run-goroutine only.
 	failing map[string]*failureState
 
+	// runGap holds, per key, the events dropped on the run goroutine (and the
+	// counts carried by batches it dropped) that no gap record marks yet
+	// (gap.go). Run-goroutine only.
+	runGap map[string]gapTally
+
 	// fs is the filesystem classification captured at startup; never
 	// mutated after NewPersister returns.
 	fs FSDetection
@@ -139,20 +144,26 @@ type Persister struct {
 // session key; Entries are schema-marshalled bodies. arena owns the backing
 // bytes of every Entry.JSON when accept() copied borrowed bytes (#1524);
 // nil when the producer supplied owned bytes (putEntryArena tolerates nil).
+// gapN is the sink's channel-full drop count handed over with this batch.
 type batchJob struct {
 	Key     string
 	Stem    string
 	Entries []Entry
 	arena   *batchArena
+	gapN    int64
 }
 
 // dropState is the per-stem bookkeeping for an in-flight async unlink:
 // the completion channel (closed by the removeKeyFiles goroutine) plus a
 // FIFO of batchJobs that arrived mid-drop, each still holding its pooled
-// arena until replayed. Mutated only on the run goroutine (#1774, #1848).
+// arena until replayed. gap tallies the batches dropped past the FIFO cap;
+// it joins gapKey's gap after the replay. Mutated only on the run goroutine
+// (#1774, #1848).
 type dropState struct {
 	done    chan struct{}
 	pending []batchJob
+	gapKey  string
+	gap     gapTally
 }
 
 // droppingPendingMaxBatches caps how many batches one dropping stem may
@@ -225,6 +236,7 @@ func NewPersister(opts Options) (*Persister, error) {
 		writers:  make(map[string]*perKeyWriter),
 		dropping: make(map[string]*dropState),
 		failing:  make(map[string]*failureState),
+		runGap:   make(map[string]gapTally),
 		fs:       DetectFS(opts.Dir),
 	}
 	if !p.fs.Supported {

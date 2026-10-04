@@ -54,19 +54,23 @@ type AdoptedOutcome struct {
 type adoptedTurn struct {
 	// armed is read without the mutex by AdoptedOutcome's fast path, and is set
 	// before startReadLoop so no resolve can observe it false.
-	armed  atomic.Bool
-	done   chan struct{}
-	settle sync.Once
+	armed atomic.Bool
+	// midTurn: armed by a mid-turn reconnect, not by a replayed result. Set
+	// before armed and never cleared, so it outlives the outcome being latched.
+	midTurn atomic.Bool
+	done    chan struct{}
+	settle  sync.Once
 
 	mu  sync.Mutex
 	out AdoptedOutcome
 }
 
-// arm marks this process as carrying an adoptable turn. Called from
-// SpawnReconnect only, before startReadLoop: arming later would race the very
-// frame it exists to catch.
-func (a *adoptedTurn) arm() {
+// arm marks this process as carrying an adoptable turn; midTurn says the turn
+// was still running at reconnect. Called from SpawnReconnect only, before
+// startReadLoop: arming later would race the very frame it exists to catch.
+func (a *adoptedTurn) arm(midTurn bool) {
 	a.done = make(chan struct{})
+	a.midTurn.Store(midTurn)
 	a.armed.Store(true)
 }
 
@@ -86,7 +90,7 @@ func (p *Process) applyReconnectVerdict(midTurn bool, finished *clievent.Event) 
 	case midTurn:
 		p.transition(evReconnectMidTurn)
 		p.turn.reconnectedMidTurn.Store(true)
-		p.adopted.arm()
+		p.adopted.arm(true)
 	case finished != nil:
 		// The turn ended while naozhi was down: its result is in the backlog just
 		// drained, and this is the only moment it exists in memory — DrainReplay is
@@ -94,7 +98,7 @@ func (p *Process) applyReconnectVerdict(midTurn bool, finished *clievent.Event) 
 		// walk it for linker hints. Latch it now or lose it. State is deliberately
 		// left alone: the turn is over, so this is not a mid-turn reconnect and
 		// startReadLoop's Ready default is correct.
-		p.adopted.arm()
+		p.adopted.arm(false)
 		p.adopted.resolveResult(*finished)
 	}
 }
@@ -112,12 +116,14 @@ func (p *Process) applyReconnectVerdict(midTurn bool, finished *clievent.Event) 
 //     never reaches here. SendPassthrough has no busy gate — this check is all
 //     that separates them.
 //   - legacy backends (acp, codex): Send refuses to start while State is Running
-//     (process_send.go, ErrProcessBusy), and State is Running for exactly as long
-//     as this latch is armed and empty. So the two cannot overlap in the first
-//     place.
+//     (process_send.go, ErrProcessBusy), and a mid-turn reconnect stays Running
+//     until this very result. A Send that starts once it ends owns the next turn:
+//     the CAS has already disarmed the branch, so its result cannot land here.
 //
 // Moving this call up into deliverEvent would defeat the first; letting a
 // mid-turn reconnect leave State anything but Running would defeat the second.
+// It also runs after the turn has ended and onTurnDone has fired: a waiter the
+// latch wakes may release the process at once, which skips a Running one.
 func (a *adoptedTurn) resolveResult(ev clievent.Event) {
 	a.resolve(AdoptedOutcome{
 		End:    AdoptedEndResult,
@@ -147,8 +153,9 @@ func (a *adoptedTurn) resolve(out AdoptedOutcome) {
 }
 
 // AdoptedTurnPending reports whether this process reconnected mid-turn and its
-// outcome has not been latched yet. Advisory: a caller uses it to skip setting
-// up an adoption at all, and must still handle ErrNoAdoptableTurn.
+// outcome has not been latched yet. Not an adoption gate: the late result can
+// land before the adopter asks, and that turn is still the one to adopt — gate
+// on AdoptedMidTurn instead.
 func (p *Process) AdoptedTurnPending() bool {
 	if !p.adopted.armed.Load() {
 		return false
@@ -159,6 +166,14 @@ func (p *Process) AdoptedTurnPending() bool {
 	default:
 		return true
 	}
+}
+
+// AdoptedMidTurn reports whether this process reconnected to a turn that was
+// still running, whether or not its outcome has been latched since. A latch
+// armed from a replayed result is excluded: a reconnect replays the shim's
+// whole backlog, so that result may be the previous turn's, already delivered.
+func (p *Process) AdoptedMidTurn() bool {
+	return p.adopted.armed.Load() && p.adopted.midTurn.Load()
 }
 
 // AdoptedOutcome hands over the outcome of the turn that was in flight at

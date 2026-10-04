@@ -23,7 +23,7 @@ const (
 	// or the session was never reconnected mid-turn. The caller records the
 	// interrupted run exactly as before adoption existed.
 	AdoptNone AdoptState = iota
-	// AdoptLive: the session holds a process whose adopted-turn latch is armed;
+	// AdoptLive: the session holds a process that reconnected mid-turn;
 	// AwaitAdopted on it answers how the in-flight turn ended.
 	AdoptLive
 	// AdoptDriftShutdown: startup shut this key's surviving shim down because
@@ -63,12 +63,16 @@ func (d *driftShutdowns) has(key string) bool {
 // live process when it does. The verdict order matters: a live latch wins over
 // a recorded drift shutdown, because a key could in principle be drift-shut
 // and then respawned mid-turn — the live turn is the newer fact.
+//
+// The gate is a mid-turn reconnect, latched or not: the late result may land
+// before cron gets to ask. A latch armed from a replayed result stays
+// AdoptNone, since nothing here shows that result came after the run's Send.
 func (r *Router) AdoptInFlight(key string) (*cli.Process, AdoptState) {
 	if sess := r.ss.Load(key); sess != nil {
 		// loadProcess returns the processIface tests stub; the adopted-turn
 		// latch lives on the concrete *cli.Process only, so a stubbed process
 		// simply reports nothing to adopt.
-		if p, ok := sess.loadProcess().(*cli.Process); ok && p != nil && p.AdoptedTurnPending() {
+		if p, ok := sess.loadProcess().(*cli.Process); ok && p != nil && p.AdoptedMidTurn() {
 			return p, AdoptLive
 		}
 	}

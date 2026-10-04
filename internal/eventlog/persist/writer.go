@@ -25,6 +25,7 @@ func (p *Persister) dropInMemoryLocked(key string) {
 		delete(p.writers, key)
 	}
 	delete(p.failing, key)
+	delete(p.runGap, key)
 }
 
 // removeKeyFiles unlinks the log + idx for stem. Runs on a goroutine
@@ -168,6 +169,12 @@ type perKeyWriter struct {
 	// flushErr carries a flush result from a parallelFsync worker back to
 	// the run goroutine; settled and cleared right after the fan-out.
 	flushErr error
+
+	// carriedGap is the tally of the gap records in pendingIdx, and
+	// carriedGapRecs their number: cleared once a flush makes them durable,
+	// handed back to Persister.runGap if the writer is retired first.
+	carriedGap     gapTally
+	carriedGapRecs int
 }
 
 // flush writes pending idx entries with strict log→idx ordering, fsyncs
@@ -231,6 +238,7 @@ func (w *perKeyWriter) flush(p *Persister) error {
 		// Durability confirmed — safe to discard the retry buffer and advance
 		// the stride cursor (mod stride keeps successive batches aligned).
 		w.entriesSinceIdxWrite = (w.entriesSinceIdxWrite + len(w.pendingIdx)) % p.opts.IdxStride
+		w.carriedGap, w.carriedGapRecs = gapTally{}, 0
 		// Shrink if a one-off large batch (e.g. a 500-entry InjectHistory
 		// replay) bloated cap far past the steady-state IdxStride*2, else the
 		// writer pins the peak capacity for its lifetime. idxScratch grows the

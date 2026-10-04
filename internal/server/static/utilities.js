@@ -258,7 +258,7 @@ function buildCostHealthLines(c) {
     lines.push({ text: '成本账本含 ' + c.unknown + ' 条未知定价（模型不在 CLI 价表）', kind: 'warn' });
   }
   if (c.partial > 0) {
-    lines.push({ text: '成本账本含 ' + c.partial + ' 个进程中断的轮次（只记 token，未计价）', kind: 'info' });
+    lines.push({ text: '成本账本含 ' + c.partial + ' 个进程中断的轮次（按 CLI 实测单价估算）', kind: 'info' });
   }
   return lines;
 }
