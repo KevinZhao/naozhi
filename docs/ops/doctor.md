@@ -35,10 +35,10 @@ naozhi doctor --timeout 2s
 | `http /health` | 返回 200（有 token 时摘要 status/uptime/version） | - | 不可达 / 非 200 |
 | `auth` | token 通过 `/api/sessions` 200 | 无 token / 响应码意外 | token 被 401/403 |
 | `cli runtime` | 服务端找得到默认 CLI 二进制（`cli_available=true`，仅 stat） | - | `cli_available=false`，新会话起不来 |
-| `platforms` | 列出已注册的 IM 平台（只是注册，不代表已连上） | 没有任何平台（dashboard-only） | - |
+| `platforms` | 每个能上报连接状态的平台都是 `connected`；不能上报的（如 feishu webhook 模式）列为 `registered`，只是注册，不代表已连上 | 没有任何平台（dashboard-only）；某平台 `connecting` / `disconnected` 不足 5 分钟（重连中，或服务端没给出持续时长）；未知状态 | 某平台 `connecting` / `disconnected` 已满 5 分钟；或 `failed`（适配器已放弃重连，需修好原因后重启） |
 | `eventlog writer` | `writer_alive=true`；或该子系统未启用（skipped） | - | `writer_alive=false`，事件没落盘 |
 | `attachment tracker` | 同上 | - | `writer_alive=false`，附件元数据没记录 |
-| `dispatch` | 有成功回复（显示多久前）/ 还没消息或刚启动 | 自启动起只有失败没有成功；或配了平台、启动超 10 分钟仍零条 IM 入站（平台可能没连上） | - |
+| `dispatch` | 有成功回复（显示多久前）/ 还没消息或刚启动 | 自启动起只有失败没有成功；或有只报 `registered` 的平台、启动超 10 分钟仍零条 IM 入站（这些平台可能没连上） | - |
 | `pprof` | `/api/debug/pprof/` 200 | 403（远端调用 / hardening 生效）或意外码 | - |
 | `state dir` | `~/.naozhi` 可写 | 目录不存在（首次运行） | 存在但不可写 / 非目录 |
 | `cli backend <id>` | 配置的路径 `--version` 成功（显示版本与路径） | 非默认 backend 探测失败；或非默认 id 未注册（启动时跳过）；或默认 id 没有可用 runtime（未注册或不在 `cli.backends` 里），默认路由的会话改落到第一个已注册的 backend 且它探测成功 | 默认 backend 探测失败（没有健康的兄弟 backend 时启动直接拒绝；有则默认路由的会话起不来）；默认 id 没有可用 runtime，且没有任何已注册 backend 探测成功（启动拒绝），或兜底的那个 backend 探测失败 |
@@ -46,7 +46,7 @@ naozhi doctor --timeout 2s
 | `transcribe ffmpeg` | 找得到 ffmpeg（`NAOZHI_FFMPEG_PATH` 优先，其次 `$PATH`）；未启用则 skipped | 找不到，ogg/flac/pcm 以外的语音格式转不了 | - |
 | `zero-downtime` | `naozhi-shim-*.scope` 有 ≥1 | 0 个 scope（sudoers hardening 未生效） | systemctl list-units 失败 |
 
-`cli runtime` 到 `dispatch` 五项和 `config-drift` 读的是同一次带 token 的 `GET /health`（整次 doctor 只发一次）。没有 token、token 被拒或 `/health` 不可达时，这五项各输出一行 `skipped (…)`，不计 fail。`/health` 的 `platforms` 只是启动时注册的名字，没有连接状态，所以「平台没连上」只能从 `dispatch` 的入站计数推断：这个计数不含斜杠命令，只收到 `/help` 之类命令（或确实没人发消息）的安静 bot 启动 10 分钟后也会报这条 warn（不影响退出码）；启动时长按本机时钟对比服务端的 `config_loaded_at` 计算，`--addr` 指向远端时两边时钟偏差会让判断提前或推后。
+`cli runtime` 到 `dispatch` 五项和 `config-drift` 读的是同一次带 token 的 `GET /health`（整次 doctor 只发一次）。没有 token、token 被拒或 `/health` 不可达时，这五项各输出一行 `skipped (…)`，不计 fail。`platforms` 一行读 `/health` 的 `platforms`（每个平台的状态名）和 `platform_conn`（状态起始时间 `since`、最近一次错误）：整行取最差那个平台的级别，每个平台一段，最近错误只在未连上时显示，超过 120 字节截断并以 `...` 结尾（每段单独截断，一个平台的长错误不会挤掉其他平台）。状态持续时长按 `/health` 响应的 `Date` 头（服务端时钟）减 `since` 计算，不受两边时钟偏差影响；响应没有 `Date` 头时才退回本机时钟。5 分钟的宽限覆盖 feishu 长连接默认 2 分钟的重连间隔加抖动和 weixin 的 30 秒退避。只报 `registered` 的平台（适配器观察不到连接，或服务端早于连接状态上报）没有连接状态，「平台没连上」只能从 `dispatch` 的入站计数推断，所有平台都能上报时 `dispatch` 不再做这条推断：这个计数不含斜杠命令，只收到 `/help` 之类命令（或确实没人发消息）的安静 bot 启动 10 分钟后也会报这条 warn（不影响退出码）；启动时长同样按 `Date` 头减服务端的 `config_loaded_at` 计算，没有 `Date` 头时才退回本机时钟。
 
 `cli backend <id>` 对 `cli.backends`（或单 backend 的 `cli.path`）里每一项跑一遍启动时同款 `--version` 探测，读的是配置里的路径（没配路径时按启动的解析顺序找），不是 `$PATH` 上的默认二进制。下方 `=== CLI Backends ===` 段直接复用这次探测的结果，每个 backend 一次运行只探测一次；只有配置读不出时，这一段才改为列出 `$PATH` 上能找到的 backend。`cli backend`、`transcribe creds`、`transcribe ffmpeg` 都按**运行 doctor 的用户**解析：路径里的 `~`、`$PATH`、AWS 凭证链都可能和 launchd / systemd 下的服务用户不同。`transcribe creds` 和启动时一样，先把 `~/.claude/settings.json` 的 `env`（同一套过滤）补进环境里再查凭证链；但 systemd 的 `Environment=` 和 launchd plist 的 `EnvironmentVariables` 不在 doctor 的环境里。准确结论要以服务用户身份、带着服务的环境变量跑 doctor。配置读不出时这几项输出 `skipped (config not loaded)`，由 `naozhi config check` 负责报错。整次 doctor 只读一次配置。
 
@@ -67,7 +67,7 @@ $ naozhi doctor
 ✓ http /health           status=ok uptime=1h3m28s version=v0.0.3-31-g8b832fa-dirty
 ✓ auth                   token accepted (/api/sessions 200)
 ✓ cli runtime            the server finds its default CLI binary (cli_available=true)
-✓ platforms              registered: feishu (registration only, not a connection state)
+✓ platforms              feishu connected for 1h3m20s
 ✓ eventlog writer        writer alive (queue 0/1024, dropped 0)
 ✓ attachment tracker     writer alive (queue 0/256, dropped 0)
 ✓ dispatch               last successful reply 4m12s ago · messages=37 reply_errors=0 send_fails=0
