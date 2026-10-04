@@ -919,9 +919,9 @@ const EXPORT_MAX_PAGES = 40;
 // fetchAllSessionEvents returns { events, truncated } (or { status } on a
 // non-2xx first page). `truncated` is set whenever the export is known or
 // suspected to be incomplete — page cap hit, a later page failed or was
-// malformed, a page with nothing new said has-more, or a remote node (whose relay
-// ignores before/limit and so can only ever serve the ring) returned a
-// ring-sized slice — so the caller must warn rather than claim a full export.
+// malformed, or a page with nothing new said has-more — so the caller must
+// warn rather than claim a full export. A remote session pages the same way:
+// its node serves the `before=` pages through the relay.
 //
 // Cursor: `before = oldest + 1`, NOT `before = oldest`. Both the ring
 // (EntriesBefore) and the disk sources filter strictly `Time < before`, so a
@@ -938,7 +938,6 @@ async function fetchAllSessionEvents(key, node, headers) {
   if (!r.ok) return { status: r.status };
   let events = await r.json();
   if (!Array.isArray(events)) events = [];
-  if (remote) return { events, truncated: events.length >= EXPORT_PAGE_LIMIT };
   if (events.length === 0) return { events, truncated: false };
 
   const seen = new Set(events.map(eventIdentityKey));

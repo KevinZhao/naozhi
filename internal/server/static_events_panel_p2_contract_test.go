@@ -73,13 +73,16 @@ func TestDashboardJS_ExportPagesFullHistory(t *testing.T) {
 		"const hm = hasMoreHeader(pr);",
 		"truncated = hm === null ? page.length >= EXPORT_PAGE_LIMIT : hm;",
 		"if (hm === false) break;",
-		// Remote relay ignores before/limit → ring-only; a ring-sized slice is
-		// probably incomplete and must not toast as a full export.
-		"if (remote) return { events, truncated: events.length >= EXPORT_PAGE_LIMIT };",
+		// A remote session's node serves the before= pages, so it walks this
+		// pager too; its cursor requests must keep carrying &node=.
+		"(remote ? '&node=' + encodeURIComponent(node) : '')",
 	} {
 		if !strings.Contains(pager, want) {
 			t.Errorf("fetchAllSessionEvents missing %q", want)
 		}
+	}
+	if strings.Contains(pager, "if (remote) return") {
+		t.Error("fetchAllSessionEvents returns a remote session's ring without paging — its node serves before= pages, so older history is dropped")
 	}
 	if strings.Contains(pager, "if (page.length === 0) break;") {
 		t.Error("fetchAllSessionEvents ends on an empty page without consulting X-Events-Has-More — a degraded read exports as complete")
