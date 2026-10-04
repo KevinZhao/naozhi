@@ -529,6 +529,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 	// only replaced.
 	old, snap := res.old, res.snap
 	hist := collectRespawnHistory(old, snap, res.resumeID)
+	costBase := resumedCostBaseline(r.hist.claudeDir, r.hist.backendDirs, res)
 
 	var s, winner *ManagedSession
 	var prevIDs []string
@@ -569,6 +570,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 		)
 		s.costMu.Lock()
 		s.spent = snap.spent
+		costBase.applyLocked(s)
 		s.costMu.Unlock()
 	})
 	if winner != nil {
@@ -625,8 +627,8 @@ func (r *Router) installFreshSession(tx sessTx,
 		s.persistedUserTurns.Store(oldUserTurns)
 	}
 	storeTotalCost(&s.totalCost, oldTotalCost)
-	// lastCumulativeCost stays 0 on purpose: the new CLI incarnation re-counts
-	// from scratch, so the first post-spawn reading is itself the delta.
+	// lastCumulativeCost starts at 0 here; a resumed CLI does not count from
+	// 0, so completeSpawn then installs the cost it restores (resumed_cost.go).
 	storeTotalCost(&s.costSpent, oldCostSpent)
 	// Sidebar order anchor: inherit oldCreatedAt when replacing a prior incarnation.
 	if oldCreatedAt != 0 {
