@@ -275,7 +275,7 @@ func TestCopyCostBaseline_RenameKeepsDeltaBaseline(t *testing.T) {
 
 // A turn the process died on books its assistant-frame tokens as a partial
 // entry, one row per model; with no rate learned yet the rows carry tokens
-// only, Basis=unknown. A failure with the process alive books nothing, since
+// only and no basis. A failure with the process alive books nothing, since
 // the next result's cumulative modelUsage will carry those tokens.
 func TestBookPartialTurn_OnProcessDeathOnly(t *testing.T) {
 	dead := &TestProcess{AliveVal: true, ShadowVal: clievent.ShadowUsage{Models: []clievent.ShadowModel{
@@ -289,14 +289,13 @@ func TestBookPartialTurn_OnProcessDeathOnly(t *testing.T) {
 		t.Fatal("expected error")
 	}
 	ents := allEntries(t, ledger)
-	if len(ents) != 1 || ents[0].Kind != costledger.KindPartial || ents[0].Amount != 0 || ents[0].Basis != costledger.BasisUnknown {
+	if len(ents) != 1 || ents[0].Kind != costledger.KindPartial || ents[0].Amount != 0 || ents[0].Basis != costledger.BasisNone {
 		t.Fatalf("partial entry = %+v", ents)
 	}
-	unk := costledger.BasisUnknown
 	want := []costledger.ModelDelta{
-		{Model: "m", RawModel: "m[1m]", Basis: unk, Tokens: costledger.Tokens{Input: 40, Output: 8}},
-		{Model: "unknown", Basis: unk, Tokens: costledger.Tokens{CacheRead: 3}},
-		{Model: "h", RawModel: "h", Basis: unk, Tokens: costledger.Tokens{Output: 2}},
+		{Model: "m", RawModel: "m[1m]", Tokens: costledger.Tokens{Input: 40, Output: 8}},
+		{Model: "unknown", Tokens: costledger.Tokens{CacheRead: 3}},
+		{Model: "h", RawModel: "h", Tokens: costledger.Tokens{Output: 2}},
 	}
 	if !reflect.DeepEqual(ents[0].Models, want) {
 		t.Fatalf("partial rows = %+v, want %+v", ents[0].Models, want)
@@ -319,7 +318,8 @@ func TestBookPartialTurn_OnProcessDeathOnly(t *testing.T) {
 // A partial turn is priced at the rates the CLI's own results taught the
 // ledger: the canonical model of a result row matches the raw model id an
 // assistant frame names. The amount lands on the entry, its rows, the
-// session's spend and the run record; a model never priced stays tokens-only.
+// session's spend and the run record; a model never priced stays tokens-only
+// and does not mark the entry as unknown-priced.
 func TestBookPartialTurn_PricedAtLearnedRates(t *testing.T) {
 	const in, out, cr, cw = 4e-6, 20e-6, 0.2e-6, 5e-6
 	turn := costledger.Tokens{Input: 6, Output: 400, CacheRead: 90_000, CacheWrite: 3000}
@@ -372,8 +372,8 @@ func TestBookPartialTurn_PricedAtLearnedRates(t *testing.T) {
 	if !approxEq(p.Amount, want) || !approxEq(p.Models[1].CostUSD, want) || p.Models[1].Basis != costledger.BasisList {
 		t.Fatalf("priced row = %+v amount %v, want %v at basis list", p.Models[1], p.Amount, want)
 	}
-	if p.Models[0].CostUSD != 0 || p.Models[0].Basis != costledger.BasisUnknown || p.Basis != costledger.BasisUnknown {
-		t.Fatalf("unpriced row = %+v, entry basis %q: want tokens only and basis unknown", p.Models[0], p.Basis)
+	if p.Models[0].CostUSD != 0 || p.Models[0].Basis != costledger.BasisNone || p.Basis != costledger.BasisList {
+		t.Fatalf("unpriced row = %+v, entry basis %q: want a tokens-only row with no basis, entry list", p.Models[0], p.Basis)
 	}
 	if got := s.CostTotals().USD; !approxEq(got, turnUSD+want) {
 		t.Fatalf("session spend = %v, want the turn plus the partial estimate %v", got, turnUSD+want)
@@ -382,6 +382,24 @@ func TestBookPartialTurn_PricedAtLearnedRates(t *testing.T) {
 	recs := runs.Recent(s.key, 0)
 	if len(recs) != 2 || !approxEq(recs[0].CostUSD+recs[1].CostUSD, turnUSD+want) {
 		t.Fatalf("run records = %+v, want the killed run to carry the estimate", recs)
+	}
+}
+
+// Rates learned from rows the CLI reported without a costBasis price a
+// partial with no basis either; the entry is promoted to list, as a priced
+// turn entry is, while its rows keep what the observations reported.
+func TestBookPartialTurn_UnreportedBasisPromotedToList(t *testing.T) {
+	proc := &TestProcess{AliveVal: true, ShadowVal: clievent.ShadowUsage{Models: []clievent.ShadowModel{
+		{Model: "claude-opus-5-5", Output: 100},
+	}}}
+	s, ledger := newLedgerSession(t, "feishu:p2p:nobasis", proc)
+	ledger.Rates().Observe(costledger.ModelDelta{Model: "claude-opus-5-5", CostUSD: 0.01, Tokens: costledger.Tokens{Output: 1000}})
+	if got := s.bookPartialTurn(proc, clierr.ErrProcessExited, "run-1"); !approxEq(got, 0.001) {
+		t.Fatalf("booked %v, want 0.001", got)
+	}
+	ents := allEntries(t, ledger)
+	if len(ents) != 1 || ents[0].Basis != costledger.BasisList || len(ents[0].Models) != 1 || ents[0].Models[0].Basis != costledger.BasisNone {
+		t.Fatalf("partial entry = %+v, want entry basis list over a row with no basis", ents)
 	}
 }
 

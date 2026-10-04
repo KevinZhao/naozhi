@@ -184,7 +184,8 @@ func isProcessDeathErr(err error) bool {
 // bookPartialTurn records a Kind=partial entry (one row per model, priced at
 // the rates the ledger learned from the CLI's own results) for a turn the
 // process died on, and adds its amount to the session's spend. A model with
-// no learned rate books tokens only, Basis=unknown. Turns that fail with the
+// no learned rate books tokens only and no basis: BasisUnknown means the CLI
+// guessed a rate, and here nothing priced it. Turns that fail with the
 // process still alive are skipped: their tokens surface in the next result's
 // cumulative modelUsage. Returns the USD booked.
 func (s *ManagedSession) bookPartialTurn(proc processIface, err error, runID string) float64 {
@@ -219,12 +220,9 @@ func (s *ManagedSession) bookPartialTurn(proc processIface, err error, runID str
 			d.Model = "unknown"
 		}
 		usd, basis, priced := rates.Estimate(d.Model, t)
-		if !priced {
-			basis = costledger.BasisUnknown
-			if s.costAcct.firstWarn("partial:" + d.Model) {
-				slog.Warn("cost: no learned rate for a partial turn's model; booked tokens only",
-					"model", osutil.SanitizeForLog(d.Model, 128), "session", osutil.SanitizeForLog(s.key, 128))
-			}
+		if !priced && s.costAcct.firstWarn("partial:"+d.Model) {
+			slog.Warn("cost: no learned rate for a partial turn's model; booked tokens only",
+				"model", osutil.SanitizeForLog(d.Model, 128), "session", osutil.SanitizeForLog(s.key, 128))
 		}
 		d.CostUSD, d.Basis = usd, basis
 		e.Amount += usd

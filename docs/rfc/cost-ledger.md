@@ -192,8 +192,8 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 - `cli.Process` 在每个 assistant 帧的 `message.usage`（`model` 一并记录）上累计"影子 token 账"（`ShadowUsage`），result 帧到达即清零（其 `modelUsage` 覆盖同一批 token）。
 - `finishRun` 在 `result==nil` 且错误属于进程死亡类（`ErrProcessExited` / `ErrNoOutputTimeout` / `ErrTotalTimeout`，即 mapSendError 记 deathReason 的同一集合）时 `TakeShadowUsage()`，写一条 `Kind=partial`、每个模型一行 `Models[]` 的 entry（金额按下一条估算）；进程仍活着的失败不写（token 会并入下一 result 的累计）。cron 归属门同样生效。
-- 金额按 CLI 实测单价估算（#3210，取代原"不估算、`Amount` 保持 0"）：naozhi 不维护价表，`costledger.RateBook` 从 CLI 自己定价过的 `Kind=turn` 行（`Models[].cost_usd` 对其 token）按模型学习单价。模型键去掉 provider 前缀（`global.`/`us.`/`anthropic.` 等）、`[1m]` 后缀、Bedrock `-vN:M`、Vertex `@日期` 与 `-YYYYMMDD`。同一模型累计 ≥8 行时对 input / output / cache_read / cache_write 四列做最小二乘，四个单价都非负且拟合总额与实测总额相差 ≤5% 才采用（CLI 的 costUSD 是 token 的线性函数，拟合能还原价表；opus-5-5 的 cache_read 是 input 的 0.05×，固定比例会偏 ~17%）；否则按固定比例 1 / 5 / 0.1 / 1.25 把实测总额摊到 token 上。启动时从最近 30 天的日分片播种，此后每个 turn 的 `inc.Models` 实时喂入；`Kind=partial` 行自身的估算不回灌。
-- partial entry 的 `Amount` 与每行 `cost_usd` 取估算值，`basis` 取学习样本里最差的那个；从未见过的模型只记 token、`basis=unknown`，并按模型 warn 一次。估算额计入会话 `costSpent` 与该 run 的 run-history `CostUSD`（`lastCumulative` 不动：死进程不会再报这批 token）。UI 的 `kinds.partial` 计数提示"进程中断的轮次（按 CLI 实测单价估算）"。
+- 金额按 CLI 实测单价估算（#3210，取代原"不估算、`Amount` 保持 0"）：naozhi 不维护价表，`costledger.RateBook` 从 CLI 自己定价过的 `Kind=turn` 行（`Models[].cost_usd` 对其 token）按模型学习单价。模型键去掉 provider 前缀（`global.`/`us.`/`anthropic.` 等）、`[1m]` 后缀、Bedrock `-vN:M`、Vertex `@日期` 与 `-YYYYMMDD`。同一模型累计 ≥8 行时对 input / output / cache_read / cache_write 四列做最小二乘，四个单价都非负且拟合总额与实测总额相差 ≤5% 才采用（CLI 的 costUSD 是 token 的线性函数，拟合能还原价表；opus-5-5 的 cache_read 是 input 的 0.05×，固定比例会偏 ~17%）；否则按固定比例 1 / 5 / 0.1 / 1.25 把实测总额摊到 token 上。启动时从最近 30 天（`cost.rollup_days` 更小时取其值：播种复用 rollup 预热的扫描）的日分片播种，此后每个 turn 的 `inc.Models` 实时喂入；`Kind=partial` 行自身的估算不回灌。
+- partial entry 的 `Amount` 与每行 `cost_usd` 取估算值，`basis` 取学习样本里最差的那个；从未见过的模型只记 token、`basis` 留空（`unknown` 专指"CLI 按默认模型猜价"，这里没有任何定价），并按模型 warn 一次。估算额计入会话 `costSpent` 与该 run 的 run-history `CostUSD`（`lastCumulative` 不动：死进程不会再报这批 token）。UI 的 `kinds.partial` 计数提示"进程中断的轮次（按 CLI 实测单价估算）"。
 
 ## 6. 存储与聚合
 

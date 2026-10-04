@@ -24,7 +24,8 @@ const (
 	flushEvery   = time.Second
 	dropLogEvery = time.Minute
 
-	// rateSeedDays is how far back the rate book learns from at open.
+	// rateSeedDays is how far back the rate book learns from at open, capped
+	// by the rollup window (warmRollup reads no older day file).
 	rateSeedDays = 30
 
 	DefaultRetentionDays = 400
@@ -328,9 +329,9 @@ func (s *Store) sweep() {
 }
 
 // warmRollup folds the last RollupDays of day files into memory and seeds
-// the rate book from the last rateSeedDays of them. It runs synchronously at
-// open so the first summary is complete; a slow warm (many large day files)
-// is logged so operators can lower rollup_days.
+// the rate book from the last min(rateSeedDays, RollupDays) of them. It runs
+// synchronously at open so the first summary is complete; a slow warm (many
+// large day files) is logged so operators can lower rollup_days.
 func (s *Store) warmRollup() {
 	start := time.Now()
 	since := s.now().UTC().Add(-s.rollupWin).Format(dayLayout)
