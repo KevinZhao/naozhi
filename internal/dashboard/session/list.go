@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
 	sessionpkg "github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -82,7 +83,7 @@ func sessionsBodyETag(v any) string {
 		return ""
 	}
 	var b [sha256.Size]byte
-	return `W/"b` + hex.EncodeToString(sum.Sum(b[:0])[:16]) + `"`
+	return node.SessionsContentETagPrefix + hex.EncodeToString(sum.Sum(b[:0])[:16]) + `"`
 }
 
 // etagListMatches applies RFC 9110 §13.1.2 If-None-Match: `*`, or any entry
