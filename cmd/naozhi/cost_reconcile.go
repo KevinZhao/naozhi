@@ -18,6 +18,7 @@ import (
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/costledger/cliusage"
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/runlog"
@@ -66,6 +67,7 @@ func runCostReconcile(args []string) {
 	rep, err := reconcileLedger(reconcileOpts{
 		SessionStorePath: osutil.ExpandHome(cfg.Session.StorePath),
 		ClaudeDir:        *claudeDir,
+		CronStorePath:    osutil.ExpandHome(cfg.Cron.StorePath),
 		Cost:             cfg.Cost,
 		Session:          *sid,
 		Until:            untilDay,
@@ -87,6 +89,7 @@ func runCostReconcile(args []string) {
 type reconcileOpts struct {
 	SessionStorePath string
 	ClaudeDir        string
+	CronStorePath    string // its run records name the CLI sessions cron ran
 	Cost             config.CostConfig
 	Session          string    // one CLI session id; "" settles every one
 	Until            time.Time // UTC midnight: entries and days from here on are left alone
@@ -111,6 +114,9 @@ type sessionSettlement struct {
 	FlaggedN, ResidualDays        int
 	UnpricedDays, AlreadyFlaggedN int
 	HeldDays                      int    // days an unattributed entry shared a key with
+	OpenDays                      int    // days whose spend another day's entry books, or none yet
+	ForeignDays                   int    // days holding a cron run's turns or lines of unknown origin
+	TerminalN                     int    // interactive-terminal messages left out
 	Skipped                       string // why nothing was settled; "" when settled
 }
 
@@ -126,8 +132,9 @@ type flaggedEntry struct {
 // charged the cost-state total its process restored on --resume gets a
 // negative Kind=adjust of that total. Then each UTC day whose ledger sum is
 // off the priced transcript usage by more than max($1, 5%) gets the
-// difference as one Kind=adjust. Adjust run ids make a second run append
-// nothing. Without o.Write nothing is opened for writing.
+// difference as one Kind=adjust, unless settleSession holds the day. Adjust
+// run ids make a second run append nothing. Without o.Write nothing is opened
+// for writing.
 func reconcileLedger(o reconcileOpts, out io.Writer) (reconcileReport, error) {
 	var rep reconcileReport
 	if o.SessionStorePath == "" {
@@ -162,32 +169,36 @@ func reconcileLedger(o reconcileOpts, out io.Writer) (reconcileReport, error) {
 	if err != nil {
 		return rep, err
 	}
-	rep.Unattributed = l.attribute(sessionAttribution(o.SessionStorePath))
+	byRun, byKey, started := sessionAttribution(o.SessionStorePath)
+	rep.Unattributed = l.attribute(byRun, byKey)
+	l.runStart = started
 
-	order := l.order()
-	if o.Session != "" {
-		if len(l.bySID[o.Session]) == 0 {
-			return rep, fmt.Errorf("no ledger entries attributed to session %s", o.Session)
-		}
-		order = []string{o.Session}
+	if o.Session != "" && len(l.bySID[o.Session]) == 0 {
+		return rep, fmt.Errorf("no ledger entries attributed to session %s", o.Session)
 	}
+	order := l.order()
 	settled := make([]*sessionInputs, 0, len(order))
 	counted := map[string]bool{}
 	for _, sid := range order {
+		// Every session is read, in order, so -session settles one exactly as
+		// a full run would: an earlier session claims what a fork copied.
 		in := readSessionInputs(o.ClaudeDir, sid, counted)
 		for _, m := range in.marks {
 			for _, d := range costStateRows(m) {
 				l.rates.Observe(d)
 			}
 		}
-		settled = append(settled, in)
+		if o.Session == "" || sid == o.Session {
+			settled = append(settled, in)
+		}
 	}
+	cronRuns := cronSessionRuns(o.CronStorePath, now)
 	firstDay := l.first.UTC().Truncate(24 * time.Hour)
 	if c := cutoff.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour); c.After(firstDay) {
 		firstDay = c // the oldest day file may be half swept
 	}
 	for _, in := range settled {
-		st := settleSession(in, l.bySID[in.sid], l, firstDay, o.Until, &rep)
+		st := settleSession(in, l.bySID[in.sid], l, cronRuns[in.sid], firstDay, o.Until, &rep)
 		rep.Sessions = append(rep.Sessions, st)
 	}
 
@@ -217,7 +228,8 @@ type ledgerSessions struct {
 	unassigned map[keyDay]bool
 	runIDs     map[string]bool
 	rates      *costledger.RateBook
-	first      time.Time // oldest entry of any source
+	first      time.Time            // oldest entry of any source
+	runStart   map[string]time.Time // run id -> when its session-runs record says it started
 }
 
 // keyDay is a session key on a UTC day (YYYY-MM-DD).
@@ -309,12 +321,12 @@ func (l *ledgerSessions) order() []string {
 	return out
 }
 
-// sessionAttribution maps run id to CLI session id from the session-runs
-// records, and each session key to the one CLI session it ever held. A key
-// whose records and sessions.json chain together name more than one session
-// is ambiguous and left out.
-func sessionAttribution(storePath string) (byRun, byKey map[string]string) {
-	byRun = map[string]string{}
+// sessionAttribution maps run id to CLI session id and to start time from the
+// session-runs records, and each session key to the one CLI session it ever
+// held. A key whose records and sessions.json chain together name more than
+// one session is ambiguous and left out.
+func sessionAttribution(storePath string) (byRun, byKey map[string]string, started map[string]time.Time) {
+	byRun, started = map[string]string{}, map[string]time.Time{}
 	held := map[string]map[string]bool{}
 	hold := func(key, sid string) {
 		if held[key] == nil {
@@ -329,6 +341,9 @@ func sessionAttribution(storePath string) (byRun, byKey map[string]string) {
 		}
 		if r.RunID != "" {
 			byRun[r.RunID] = r.SessionID
+			if !r.StartedAt.IsZero() {
+				started[r.RunID] = r.StartedAt
+			}
 		}
 		if r.SessionKey != "" {
 			hold(r.SessionKey, r.SessionID)
@@ -347,14 +362,38 @@ func sessionAttribution(storePath string) (byRun, byKey map[string]string) {
 			}
 		}
 	}
-	return byRun, byKey
+	return byRun, byKey, started
 }
+
+// cronSessionRuns maps each CLI session a cron run used to the spans of
+// those runs; a run with no end yet spans to now.
+func cronSessionRuns(cronStorePath string, now time.Time) map[string][]timeSpan {
+	out := map[string][]timeSpan{}
+	if cronStorePath == "" {
+		return out
+	}
+	runlog.WalkRecords(datadir.ForStore(cronStorePath).RunsRoot(), func(string, error) {}, func(rec runlog.Record) {
+		var r cron.CronRun
+		if json.Unmarshal(rec.Raw, &r) != nil || r.SessionID == "" || r.StartedAt.IsZero() {
+			return
+		}
+		end := r.EndedAt
+		if end.IsZero() {
+			end = now
+		}
+		out[r.SessionID] = append(out[r.SessionID], timeSpan{r.StartedAt, end})
+	})
+	return out
+}
+
+// timeSpan is [from, to].
+type timeSpan struct{ from, to time.Time }
 
 // sessionInputs is what a session's transcripts say.
 type sessionInputs struct {
 	sid     string
 	marks   []claudefs.CostStateMark
-	usage   claudefs.DailyUsage
+	usage   claudefs.SessionMessages
 	skipped string
 }
 
@@ -370,7 +409,7 @@ func readSessionInputs(claudeDir, sid string, counted map[string]bool) *sessionI
 		in.skipped = "读 transcript 失败: " + err.Error()
 		return in
 	}
-	u, found, err := claudefs.SessionDailyUsage(filepath.Dir(path), sid, counted)
+	u, found, err := claudefs.SessionMessageUsage(filepath.Dir(path), sid, counted)
 	switch {
 	case err != nil:
 		in.skipped = "读 transcript 失败: " + err.Error()
@@ -489,10 +528,14 @@ func tokenSum(rows []costledger.ModelDelta) int64 {
 }
 
 // settleSession plans one session's adjustments into rep and returns its row.
-// A day on which an entry no session could be named for shares a key with
-// this session's entries gets no residual: its spend may be in this
-// transcript and is already in the ledger.
-func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessions, firstDay, until time.Time, rep *reconcileReport) sessionSettlement {
+// Interactive-terminal messages are not naozhi's spend and are left out. A
+// day gets no residual when any of its spend may be booked elsewhere or not
+// be naozhi's: an entry no session could be named for shares a key with this
+// session's entries that day; a message has no entry of the session after it
+// that same day (the entry that books it, if any, is on another day, which is
+// held too) or predates the run of the session's first entry; a cron run of
+// the session touched it; or a message's origin is unknown.
+func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessions, cronRuns []timeSpan, firstDay, until time.Time, rep *reconcileReport) sessionSettlement {
 	st := sessionSettlement{SessionID: in.sid, Entries: len(entries), Skipped: in.skipped}
 	settles := func(t time.Time) bool { return !t.Before(firstDay) && t.Before(until) }
 	ledger := map[string]*dayFigures{}
@@ -538,11 +581,12 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 		st.FlaggedUSD += adj.Amount
 	}
 
-	days := make([]string, 0, len(ledger)+len(in.usage.Days))
+	usage, open, foreign := classifyMessages(in.usage.Messages, entries, l.runStart, cronRuns, &st)
+	days := make([]string, 0, len(ledger)+len(usage))
 	for d := range ledger {
 		days = append(days, d)
 	}
-	for d := range in.usage.Days {
+	for d := range usage {
 		if ledger[d] == nil {
 			days = append(days, d)
 		}
@@ -553,7 +597,7 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 		if !settles(start) {
 			continue
 		}
-		t, ok := priceDay(in.usage.Days[d], l.rates)
+		t, ok := priceDay(usage[d], l.rates)
 		if !ok {
 			st.UnpricedDays++
 			continue
@@ -564,8 +608,15 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 		if math.Abs(diff) <= max(residualFloor, residualShare*t.usd) {
 			continue
 		}
-		if held[d] {
+		switch {
+		case held[d]:
 			st.HeldDays++
+			continue
+		case foreign[d]:
+			st.ForeignDays++
+			continue
+		case open[d]:
+			st.OpenDays++
 			continue
 		}
 		adj := adjustOf(lastBefore(entries, start.Add(24*time.Hour)), reconcilePrefix+in.sid+":day:"+d, diff)
@@ -577,6 +628,59 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 	}
 	st.After = st.Before + st.FlaggedUSD + st.ResidualUSD
 	return st
+}
+
+// classifyMessages sums the messages naozhi may have run per UTC day and
+// marks the days settleSession holds as open or foreign (see there).
+// entries are time-ordered; a first entry with no run start known holds
+// every message before it.
+func classifyMessages(msgs []claudefs.MessageUsage, entries []costledger.Entry, runStart map[string]time.Time,
+	cronRuns []timeSpan, st *sessionSettlement) (usage map[string][]claudefs.ModelTokens, open, foreign map[string]bool) {
+	var booked []time.Time
+	var since time.Time
+	for _, e := range entries {
+		if e.Kind == costledger.KindAdjust {
+			continue
+		}
+		if booked == nil {
+			since = e.TS
+			if t, ok := runStart[e.RunID]; ok && t.Before(e.TS) {
+				since = t
+			}
+		}
+		booked = append(booked, e.TS)
+	}
+	open, foreign = map[string]bool{}, map[string]bool{}
+	kept := make([]claudefs.MessageUsage, 0, len(msgs))
+	for _, m := range msgs {
+		d := m.At.UTC().Format(time.DateOnly)
+		switch m.Entrypoint {
+		case "cli", "claude-vscode":
+			st.TerminalN++
+			continue
+		case "sdk-cli":
+		default:
+			foreign[d] = true
+		}
+		kept = append(kept, m)
+		if m.At.Before(since) {
+			open[d] = true
+		}
+		i := sort.Search(len(booked), func(i int) bool { return !booked[i].Before(m.At) })
+		if i < len(booked) && booked[i].Before(m.At.UTC().Truncate(24*time.Hour).Add(24*time.Hour)) {
+			continue
+		}
+		open[d] = true
+		if i < len(booked) {
+			open[booked[i].UTC().Format(time.DateOnly)] = true
+		}
+	}
+	for _, r := range cronRuns {
+		for t := r.from.UTC().Truncate(24 * time.Hour); !t.After(r.to); t = t.Add(24 * time.Hour) {
+			foreign[t.Format(time.DateOnly)] = true
+		}
+	}
+	return claudefs.DayTotals(kept), open, foreign
 }
 
 // adjustOf is a Kind=adjust entry booked like e (same time, key, workspace).
@@ -710,6 +814,15 @@ func printReconcile(out io.Writer, rep reconcileReport, write bool) {
 			}
 			if s.HeldDays > 0 {
 				note += fmt.Sprintf("；%d 天有同 key 的未归属条目，残差未记", s.HeldDays)
+			}
+			if s.OpenDays > 0 {
+				note += fmt.Sprintf("；%d 天的用量记在别的日子或尚未记账（跨零点/-until 的轮次、首条记账前的历史），残差未记", s.OpenDays)
+			}
+			if s.ForeignDays > 0 {
+				note += fmt.Sprintf("；%d 天含 cron run 或来源不明的用量，残差未记", s.ForeignDays)
+			}
+			if s.TerminalN > 0 {
+				note += fmt.Sprintf("；%d 条终端交互消息不计入", s.TerminalN)
 			}
 			if s.UnpricedDays > 0 {
 				note += fmt.Sprintf("；%d 天含未学到单价的模型，未比对", s.UnpricedDays)
