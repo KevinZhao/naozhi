@@ -1,6 +1,8 @@
 package session
 
 import (
+	"slices"
+
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
 )
@@ -38,18 +40,25 @@ func snapshotOldSession(_ sessView, old *ManagedSession) ([]string, float64, flo
 	// still in flight on the OLD process lands its delta on the orphaned struct;
 	// cost is advisory, not billing-authoritative (#2284).
 	oldCostSpent := loadTotalCost(&old.costSpent)
-	// Overrides are snapshotted HERE, in the same transaction, from the same
-	// object as history/cost/createdAt. installFreshSession must not re-read
-	// the key's entry: it may be swapped or removed during the history copy
-	// outside the transaction, pairing one session's history with another's
-	// tuning.
-	ov := sessionOverrides{
+	// Overrides come from the same object as history/cost/createdAt. They are
+	// never re-read through the key's entry, which may be swapped or removed
+	// during the unlocked part of a spawn, pairing one session's history with
+	// another's tuning; completeSpawn re-reads them from old itself.
+	return oldPrevIDs, oldTotalCost, oldCostSpent, oldCreatedAt, snapshotOverrides(old)
+}
+
+// snapshotOverrides reads old's operator-owned overrides. Nil-safe; call it
+// inside a transaction.
+func snapshotOverrides(old *ManagedSession) sessionOverrides {
+	if old == nil {
+		return sessionOverrides{}
+	}
+	return sessionOverrides{
 		tuningModel:  old.TuningModel(),
 		tuningEffort: old.TuningEffort(),
 		userLabel:    old.UserLabel(),
 		labelOrigin:  old.LabelOrigin(),
 	}
-	return oldPrevIDs, oldTotalCost, oldCostSpent, oldCreatedAt, ov
 }
 
 // respawnSnapshot is what a respawn carries over from the session it
@@ -74,6 +83,22 @@ func snapshotRespawn(v sessView, old *ManagedSession) respawnSnapshot {
 		snap.spent = old.CostTotals()
 	}
 	return snap
+}
+
+// rereadSameEntry refreshes snap and hist from old, still the key's entry at
+// commit, with what operator writes may have changed on it while the spawn
+// ran unlocked: the overrides and the session-ID chain. History and cost are
+// written only by old's own, dead, process. Call it inside the commit
+// transaction; nil-safe.
+func rereadSameEntry(old *ManagedSession, snap *respawnSnapshot, hist *respawnHistory, resumeID string) {
+	if old == nil {
+		return
+	}
+	snap.overrides = snapshotOverrides(old)
+	if !slices.Equal(old.prevSessionIDs, snap.prevIDs) {
+		snap.prevIDs = slices.Clone(old.prevSessionIDs)
+		hist.prevIDs = respawnChain(snap.prevIDs, old.getSessionID(), resumeID)
+	}
 }
 
 // respawnHistory is the replaced session's history, copied outside the table lock.
@@ -123,25 +148,25 @@ func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resume
 		entries = persistedSnapshot
 	}
 
-	// Append the old session ID to the chain only when it differs from
-	// resumeID (a new CLI session replaces the old one, not a same-ID resume).
-	var prevIDs []string
-	if oldID := oldSess.getSessionID(); oldID != "" && oldID != resumeID {
-		prevIDs = make([]string, len(oldPrevIDs), len(oldPrevIDs)+1)
-		copy(prevIDs, oldPrevIDs)
-		prevIDs = append(prevIDs, oldID)
-	} else {
-		prevIDs = oldPrevIDs
-	}
-	// Cap the chain to bound sessions.json size and JSONL load time; the
-	// retained tail carries the most recent context.
-	if len(prevIDs) > maxPrevSessionIDs {
-		prevIDs = prevIDs[len(prevIDs)-maxPrevSessionIDs:]
-	}
 	if userTurns < 0 {
 		userTurns = countUserTurns(entries)
 	}
-	return entries, prevIDs, userTurns
+	return entries, respawnChain(oldPrevIDs, oldSess.getSessionID(), resumeID), userTurns
+}
+
+// respawnChain is the session-ID chain a respawn carries: oldPrevIDs plus
+// oldID when it differs from resumeID (a new CLI session replaces the old
+// one, not a same-ID resume), capped to the most recent maxPrevSessionIDs to
+// bound sessions.json size and JSONL load time. Never aliases oldPrevIDs.
+func respawnChain(oldPrevIDs []string, oldID, resumeID string) []string {
+	prevIDs := slices.Clone(oldPrevIDs)
+	if oldID != "" && oldID != resumeID {
+		prevIDs = append(prevIDs, oldID)
+	}
+	if len(prevIDs) > maxPrevSessionIDs {
+		prevIDs = prevIDs[len(prevIDs)-maxPrevSessionIDs:]
+	}
+	return prevIDs
 }
 
 // countUserTurns returns the number of Type=="user" entries in entries; the

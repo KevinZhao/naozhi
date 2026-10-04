@@ -69,8 +69,10 @@ type runCtx struct {
 	// inflight is the per-run gate slot; phases stamp progress on it.
 	inflight *runInflight
 	// term is claimed by the first finishRun for this run; a second call is
-	// dropped, so a run is closed exactly once however its paths overlap. nil
-	// in hand-built contexts, which then skip the check.
+	// dropped, so a run is closed exactly once however its paths overlap. Only
+	// single-finish contexts (restart settle, orphan reconcile, synthetic skip)
+	// leave it nil and skip the check; an executing run passes executeAcquired's
+	// rc along whole, so every finish of that run shares this guard.
 	term *runTerm
 }
 
