@@ -211,8 +211,8 @@ var (
 	// the daemon sees an error instead of a garbage reply.
 	SysessionRunnerParseFailTotal = expvar.NewInt("naozhi_sysession_runner_parse_fail_total")
 
-	// CronRunInflight gauges currently executing cron runs. No `_total`
-	// suffix so the doc-sync regex treats it as a gauge.
+	// CronRunInflight gauges currently executing cron runs; no `_total`
+	// suffix because it is a gauge.
 	CronRunInflight = expvar.NewInt("naozhi_cron_run_inflight")
 
 	// CronWatchdogInterruptTimeoutTotal counts deadline-watchdog timeouts where
@@ -225,8 +225,7 @@ var (
 	// Startup phase gauges: milliseconds from process start (t0 in main) to
 	// the end of each phase, Set exactly once per process. Values are
 	// cumulative, so per-phase duration is the difference between adjacent
-	// rows. `_ms` suffix (not `_total`) marks them as gauges for dashboards
-	// and the doc-sync regex.
+	// rows. `_ms` suffix (not `_total`) marks them as gauges for dashboards.
 
 	// StartupPhaseConfigMs is set after config.Load returns.
 	StartupPhaseConfigMs = expvar.NewInt("naozhi_startup_phase_config_ms")
