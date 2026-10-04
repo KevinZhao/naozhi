@@ -7,7 +7,7 @@ import "testing"
 // cron-local SessionStatus mirrors session.SessionStatus value-for-value; the
 // ordinals are panic-pinned against session.* at boot by
 // internal/wireup/cron_router_adapter.go init() (R260528-GO-18). This test is the
-// cheap in-package counterpart: it freezes the count (3) and the iota order so
+// cheap in-package counterpart: it freezes the count (4) and the iota order so
 // that anyone adding/reordering a value here is forced to look at the pin and
 // the session-side definition.
 //
@@ -17,8 +17,8 @@ import "testing"
 func TestSessionStatusOrdinalParity(t *testing.T) {
 	t.Parallel()
 
-	const wantSessionStatusCount = 3
-	got := []SessionStatus{SessionExisting, SessionResumed, SessionNew}
+	const wantSessionStatusCount = 4
+	got := []SessionStatus{SessionExisting, SessionResumed, SessionNew, SessionResumeLost}
 	if len(got) != wantSessionStatusCount {
 		t.Fatalf("SessionStatus count = %d, want %d", len(got), wantSessionStatusCount)
 	}

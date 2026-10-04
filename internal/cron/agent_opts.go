@@ -42,6 +42,7 @@ const (
 	SessionExisting SessionStatus = iota
 	SessionResumed
 	SessionNew
+	SessionResumeLost
 )
 
 // Session is the minimum surface cron needs from a live router-spawned

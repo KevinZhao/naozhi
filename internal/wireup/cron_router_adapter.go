@@ -40,13 +40,15 @@ const (
 	_ = uint(int(session.InterruptUnsupported) - int(cron.InterruptUnsupported))
 	_ = uint(int(cron.InterruptError) - int(session.InterruptError))
 	_ = uint(int(session.InterruptError) - int(cron.InterruptError))
-	// SessionStatus (3 values)
+	// SessionStatus (4 values)
 	_ = uint(int(cron.SessionExisting) - int(session.SessionExisting))
 	_ = uint(int(session.SessionExisting) - int(cron.SessionExisting))
 	_ = uint(int(cron.SessionResumed) - int(session.SessionResumed))
 	_ = uint(int(session.SessionResumed) - int(cron.SessionResumed))
 	_ = uint(int(cron.SessionNew) - int(session.SessionNew))
 	_ = uint(int(session.SessionNew) - int(cron.SessionNew))
+	_ = uint(int(cron.SessionResumeLost) - int(session.SessionResumeLost))
+	_ = uint(int(session.SessionResumeLost) - int(cron.SessionResumeLost))
 )
 
 // cronRouterAdapter implements cron.SessionRouter against *session.Router,

@@ -157,11 +157,15 @@ func (dl *imDelivery) BeforeSession(ctx context.Context) {
 	_ = o.d.caps.Takeover(ctx, sessionkey.ChatKey(o.msg.Platform, o.msg.ChatType, o.msg.ChatID), o.key, o.opts)
 }
 
-// SessionReady returns the tracker's callback for the turn's events.
-// SessionNew posts no notice: it never follows lost context (a first chat, a
-// reset that already replied, a dashboard Remove, a prune of an orphan that
-// never had an ID; #3000).
-func (dl *imDelivery) SessionReady(ctx context.Context, _ sessionview.SessionStatus) clievent.EventCallback {
+// SessionReady tells the chat when its session came back without its
+// context and returns the tracker's callback for the turn's events. Only
+// SessionResumeLost gets the notice: SessionNew never follows lost context (a
+// first chat, a reset that already replied, a dashboard Remove, a prune of an
+// orphan that never had an ID; #3000).
+func (dl *imDelivery) SessionReady(ctx context.Context, st sessionview.SessionStatus) clievent.EventCallback {
+	if st == sessionview.SessionResumeLost && platform.SupportsInterimMessages(dl.p) {
+		dl.o.d.replyNotice(ctx, dl.o.msg, "", "之前的会话记录已丢失，已开始新会话。", dl.lg, "resume_lost")
+	}
 	return dl.tracker.onEvent
 }
 

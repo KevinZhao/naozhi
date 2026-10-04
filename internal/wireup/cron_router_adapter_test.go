@@ -152,9 +152,10 @@ func TestInterruptOutcome_CountDrift(t *testing.T) {
 }
 
 // TestSessionStatus_Cast verifies cron.SessionStatus(int(...)) round-trip
-// preserves the three known states. cron does not branch on SessionStatus
+// preserves the four known states. cron does not branch on SessionStatus
 // today, but a future caller comparing against SessionExisting /
-// SessionResumed / SessionNew relies on the cast staying identity.
+// SessionResumed / SessionNew / SessionResumeLost relies on the cast staying
+// identity.
 func TestSessionStatus_Cast(t *testing.T) {
 	t.Parallel()
 	if int(cron.SessionExisting) != int(session.SessionExisting) {
@@ -168,6 +169,10 @@ func TestSessionStatus_Cast(t *testing.T) {
 	if int(cron.SessionNew) != int(session.SessionNew) {
 		t.Errorf("SessionNew ordinal: cron=%d, session=%d",
 			cron.SessionNew, session.SessionNew)
+	}
+	if int(cron.SessionResumeLost) != int(session.SessionResumeLost) {
+		t.Errorf("SessionResumeLost ordinal: cron=%d, session=%d",
+			cron.SessionResumeLost, session.SessionResumeLost)
 	}
 }
 
