@@ -29,6 +29,10 @@ func semverGreater(a, b string) bool {
 	return pa[2] > pb[2]
 }
 
+// IsNewer reports whether release tag a is strictly newer than b, by the same
+// rule the background checker uses; unparseable input is never newer.
+func IsNewer(a, b string) bool { return semverGreater(a, b) }
+
 // parseSemver parses "vX.Y.Z" (with an optional leading "v") into [3]int.
 // Returns (zero, false) on any parse failure.
 func parseSemver(s string) ([3]int, bool) {

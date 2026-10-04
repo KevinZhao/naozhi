@@ -32,6 +32,7 @@ allowed-tools: Bash
 - 输出 `Running a dev build. Use --force...` → **当前是本地编译产物**,需要先讨论:
   - 用户确认要替换为 release → 步骤 2 加 `--force`
   - 否则停止报告
+- 输出 `Latest release vA is not newer than running vB; use --force...` → 运行中的版本比 latest release 还新(或版本号无法解析),**停止并报告用户**;只有用户明确要回滚到该 release 时才加 `--force`
 
 ### 2. 执行升级
 
