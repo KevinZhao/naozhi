@@ -234,21 +234,21 @@ func TestCronRouterAdapter_ReleaseProcess(t *testing.T) {
 	running := session.NewTestProcess()
 	running.StateVal = cli.StateRunning
 	r.InjectSession(key, running).MarkExemptForTest()
-	_, v0, _ := r.ListSessionsIfChanged(0)
+	_, v0 := r.ListSessionsWithVersion()
 	if a.ReleaseProcess(key) {
 		t.Fatal("ReleaseProcess = true while the turn is running")
 	}
 	if !running.Alive() {
 		t.Fatal("a refused release closed the running process")
 	}
-	if _, _, changed := r.ListSessionsIfChanged(v0); changed {
+	if _, v := r.ListSessionsWithVersion(); v != v0 {
 		t.Error("a refused release bumped the list version")
 	}
 
 	idle := session.NewTestProcess()
 	s := r.InjectSession(key, idle)
 	s.MarkExemptForTest()
-	_, v1, _ := r.ListSessionsIfChanged(0)
+	_, v1 := r.ListSessionsWithVersion()
 	if !a.ReleaseProcess(key) {
 		t.Fatal("ReleaseProcess refused an idle exempt cron session")
 	}
@@ -258,7 +258,7 @@ func TestCronRouterAdapter_ReleaseProcess(t *testing.T) {
 	if r.SessionFor(key) != s {
 		t.Error("release dropped the session")
 	}
-	if _, _, changed := r.ListSessionsIfChanged(v1); !changed {
+	if _, v := r.ListSessionsWithVersion(); v == v1 {
 		t.Error("release did not bump the list version; the dashboard keeps showing the process alive")
 	}
 }

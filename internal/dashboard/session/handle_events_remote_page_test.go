@@ -31,7 +31,7 @@ func TestHandleEvents_RemoteBefore_PagingNodeAnswersItself(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			conn := pagedConn(tc.hasMore, 3, 4, 5)
-			h := newIfChangedTestHandlers(t, fakeEventsNodeAccessor{conn: conn})
+			h := newETagTestHandlers(t, newFakeRouter(), fakeEventsNodeAccessor{conn: conn})
 
 			rec, got := doRemoteEvents(t, h, "&before=6&limit=2")
 			if want := (node.EventsQuery{Before: 6, Limit: 3}); conn.gotQuery != want {
@@ -51,7 +51,7 @@ func TestHandleEvents_RemoteBefore_PagingNodeAnswersItself(t *testing.T) {
 // it returned the extra entry asked for.
 func TestHandleEvents_RemoteBefore_BoundedPeerWithoutHasMore(t *testing.T) {
 	conn := &fakeEventsConn{entries: remoteEventsFixture(10), bounded: true}
-	h := newIfChangedTestHandlers(t, fakeEventsNodeAccessor{conn: conn})
+	h := newETagTestHandlers(t, newFakeRouter(), fakeEventsNodeAccessor{conn: conn})
 
 	rec, got := doRemoteEvents(t, h, "&before=6&limit=2")
 	if want := []int64{4, 5}; !equalTimes(times(got), want) {
@@ -74,7 +74,7 @@ func TestHandleEvents_RemoteBefore_BoundedPeerWithoutHasMore(t *testing.T) {
 // its has-more, instead of a tail cut from the whole remote log.
 func TestHandleEvents_RemoteInitial_PagingNodeAnswersItself(t *testing.T) {
 	conn := pagedConn(true, 7, 8, 9, 10)
-	h := newIfChangedTestHandlers(t, fakeEventsNodeAccessor{conn: conn})
+	h := newETagTestHandlers(t, newFakeRouter(), fakeEventsNodeAccessor{conn: conn})
 
 	rec, got := doRemoteEvents(t, h, "&limit=3")
 	if want := (node.EventsQuery{Limit: 3}); conn.gotQuery != want {
