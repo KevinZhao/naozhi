@@ -167,8 +167,14 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_session_toolcall_leak_detected_total` | 一轮 result 文本命中"泄漏工具调用"检测（模型把 `<invoke>` XML 当正文输出、未真正执行、turn 停顿）的累计次数。无论是否开启自动恢复都计（`internal/leakguard`） | 量化底层模型回归率；模型默认切换后（如 PR#2050 sonnet→settings.json）需重点观察；持续升高 = 当前模型/上下文更易泄漏 |
 | `naozhi_session_toolcall_leak_recovered_total` | 泄漏轮经自动续跑（注入 `<system-reminder>` 提示 + 重发一次）得到干净后续结果的累计次数——用户无需手动"继续" | 始终 ≤ `naozhi_session_toolcall_leak_detected_total`；差额 = 恢复失败 + kill switch 关闭时的跳过 |
 | `naozhi_session_toolcall_leak_recovery_failed_total` | 泄漏轮执行了恢复但未得到干净结果的累计次数：进程恢复中途死亡，或模型在唯一一次重试（cap=1）里再次泄漏（返回文本已 Strip 掉 XML） | 持续升高 = continue-prompt 未能把模型从泄漏状态拉回；结合 detected/recovered 三者比值评估 prompt 有效性 |
+| `naozhi_dispatch_message_total` | `BuildHandler` 收下的非斜杠 IM 消息数（进程级，多个 Dispatcher 累加到同一个值；定义在 `internal/dispatch`） | IM 有流量但它不涨 = 消息入口卡住（webhook / 平台 adapter / BuildHandler 前置过滤） |
+| `naozhi_dispatch_reply_error_total` | IM 轮次在 Claude 侧失败的次数（`handleSendError`：Send 报错、超时、`ErrSessionReset`）；平台回复路径本身正常 | 看它与 `naozhi_dispatch_message_total` 的比值；比值抬升 = backend / session 退化，对照 slog 的 send error 日志 |
+| `naozhi_dispatch_send_fail_total` | 平台 adapter `Reply` / `EditMessage` 返回错误的次数：回复**没送到** IM 频道 | 持续非零即告警；查平台 adapter 日志与 webhook / bot 凭证 |
+| `naozhi_dispatch_turn_error_result_total` | expvar.Map，按 turn class 分键：IM 轮次的 result 是失败（回复照常送达，所以投递仍算成功）。键为 `error_text`（带正文的 is_error 回答）或 usermsg 的 class：`turn_failed` / `max_turns` / `max_budget` / `refused` / `truncated` / `backend_overloaded` / `backend_rate_limited` / `backend_auth` / `backend_invalid_request` / `backend_rejected` | 按键看：`backend_rate_limited` / `backend_overloaded` 涨 = 配额或容量问题；`backend_auth` 非零 = 凭证失效。取单键：`jq '.naozhi_dispatch_turn_error_result_total.backend_rate_limited'` |
+| `naozhi_node_insecure_reverse_upgrade_total` | 反向节点经明文 HTTP、从非 loopback 地址完成升级的次数（首帧的 bearer token 走明文；#1026） | **稳态应为 0**；非零 = 该节点链路需要上 TLS |
+| `naozhi_upstream_reqsem_wait_total` | 节点侧反向 RPC 请求没抢到非阻塞 reqSem、只能阻塞等待的次数 | 它占请求总数的比例就是饱和度；持续几个百分点 = 调大容量，或找慢的 handleRequest（常见是 send 现场 spawn 会话） |
 
-这个表的"完整性"由 `internal/metrics/metrics_doc_sync_test.go` 锁定：metrics.go 新增 counter 但未同步文档会在 CI 红。
+本文档的"完整性"由 `internal/metrics/metrics_doc_sync_test.go` 锁定：它扫描全仓非测试 `.go` 文件里注册的每个 `naozhi_*` 指标（counter 和 gauge 都算，不限于 `internal/metrics`），与本文档中反引号引用的 `naozhi_*` 名字双向比对。任何包新增指标而没补文档行、或文档留着已删除的名字，CI 都会红，报错里带声明它的文件。
 
 ### 启动阶段 gauge（RNEW-OPS-414）
 
@@ -199,20 +205,26 @@ curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1:8180/api/debug/vars | j
 }'
 ```
 
-`metrics_doc_sync_test.go` 的正则只匹配 `*_total`，所以新增 gauge 不会强制文档同步；但保持本表跟 `metrics.go` 齐整对操作员仍然有价值。
+这些 gauge 同样受 `metrics_doc_sync_test.go` 约束：新增阶段 gauge 必须同时补一行。
 
 ### 运行时 gauge（R208-OBS1）
 
 | 名称 | 语义 | 什么时候值得警觉 |
 |---|---|---|
 | `goroutines` | `runtime.NumGoroutine()` 在 scrape 时刻的实时值（`expvar.Func` 动态求值，无后台采样） | 稳态取决于 session 并发数（每 session ~2-4 goroutine）。突增且不回落 = wsclient / wshub / dispatch / shim readLoop 某处泄漏，对照 `/api/debug/pprof/goroutine?debug=2` stack dump 定位 |
+| `naozhi_cron_run_inflight` | 当前在跑的 cron run 数（run scaffold 进入时 +1，defer 里 -1） | 长期不回 0 而没有 job 在跑 = 某个 run 卡死；与 `naozhi_cron_run_started_total` − `naozhi_cron_run_ended_total` 对照 |
+| `naozhi_cron_execution_duration_ms_bucket` | expvar.Map，cron 成功路径耗时的累积直方图：键为桶上界（ms：100 / 500 / 1000 / 5000 / 15000 / 30000 / 60000 / 120000 / 300000）加 `+Inf`，每个桶计 `<=` 上界的次数；`+Inf` 等于总观测数 | 高桶占比上升 = job 整体变慢；30000 桶对应 `naozhi_cron_execution_slow_total` 的阈值 |
+| `naozhi_cron_execution_duration_ms_sum` | 上述直方图观测值（ms）的累加和 | 均值 = `sum` / bucket 的 `"+Inf"` 键 |
+| `naozhi_cron_watchdog_parked_interrupt_goroutines` | **实时**数：watchdog 的 interrupt 调用超时后仍卡在 wedged stdin 写入上的 goroutine（#1632）；返回时 -1 | 持续非零 = 当前仍有泄漏（常见于不走 `session.Reset` 的持久 job）；与累计的 `naozhi_cron_watchdog_interrupt_timeout_total` 对照区分"触发过但已回收"和"现在还漏着" |
+| `naozhi_upstream_reqsem_inflight` | 节点侧当前占着 reqSem 槽位的反向 RPC 请求数（容量 16） | 持续接近 16 = primary 派发快于 handleRequest 收尾；配合 `naozhi_upstream_reqsem_wait_total` 看 |
+| `naozhi_upstream_connector_backoff_millis` | 节点 connector 当前的重连退避（ms，Set 而非 Add；每进程一个 Connector） | 稳定在 1000 = 重连健康；钉在 `circuitBreakerBackoff`（5 分钟）= 熔断已触发，查与 primary 的链路 |
 
 拉取：
 ```bash
 curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1:8180/api/debug/vars | jq '.goroutines'
 ```
 
-注意：键名不带 `naozhi_` 前缀，因为这是进程级 runtime 指标，不是业务 counter；跟 stdlib 的 `cmdline` / `memstats` 同层。
+注意：`goroutines` 键名不带 `naozhi_` 前缀，因为这是进程级 runtime 指标，不是业务 counter；跟 stdlib 的 `cmdline` / `memstats` 同层。
 
 ### 拉取
 
@@ -242,6 +254,9 @@ ssh ec2-user@prod-host 'curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1
   attachment_ref_meta_error: .naozhi_attachment_ref_meta_error_total,
   attachment_ref_drop: .naozhi_attachment_ref_drop_total,
   cron_execution_slow: .naozhi_cron_execution_slow_total,
+  dispatch_message: .naozhi_dispatch_message_total,
+  dispatch_reply_error: .naozhi_dispatch_reply_error_total,
+  dispatch_send_fail: .naozhi_dispatch_send_fail_total,
   uptime: .memstats.uptime
 }'
 ```
@@ -266,7 +281,7 @@ ssh ec2-user@prod-host 'curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1
 ### 回归契约
 
 - `internal/metrics/metrics_test.go`: 锁 expvar 名 / Add 语义 / JSON shape
-- `internal/metrics/metrics_doc_sync_test.go`: 对比 `docs/ops/pprof.md` 表中的 counter 名与 `metrics.go` 中 `expvar.NewInt` 的实际集合，漏/多均失败
+- `internal/metrics/metrics_doc_sync_test.go`: 对比 `docs/ops/pprof.md` 中的 `naozhi_*` 名与全仓非测试代码注册的集合（`expvar.NewInt` / `NewMap` / `NewFloat` / `NewLabeledCounter` / `NewLabeledGauge`），漏/多均失败；同名重复注册也失败
 - `internal/metrics/counter_wiring_contract_test.go`: source-grep 锁 call site + WSAuthFail 两分支 ≥2 次
 - `internal/server/debug_expvar_test.go`: 锁 auth 401 / 非 loopback 403 / loopback+auth 返 JSON 含已注册 counter + stdlib memstats
 - `cmd/naozhi/doctor_test.go`: `checkExpvar` 覆盖 pass/fail/warn/no-token 4 档
