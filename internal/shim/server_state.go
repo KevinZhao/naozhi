@@ -16,6 +16,14 @@ func (s *shimServer) saveStateCLIDead() {
 }
 
 func (s *shimServer) saveState() {
+	// Once shutdown began the state file is Run's to remove; a departing
+	// client's late write would outlive this shim and could clobber the
+	// state file of the shim respawned on the same key.
+	select {
+	case <-s.done:
+		return
+	default:
+	}
 	s.mu.Lock()
 	st := s.state
 	st.BufferCount = s.buffer.Count()

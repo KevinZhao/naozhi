@@ -53,6 +53,18 @@ func (s *shimServer) watchSocketFile(socketPath string, interval time.Duration) 
 	}
 }
 
+// listenShimSocket binds socketPath with Go's unlink-on-Close turned off. Run
+// removes the path itself before closing the listener; a second unlink inside
+// Close could delete the socket a respawned shim on the same key has just bound.
+func listenShimSocket(socketPath string) (*net.UnixListener, error) {
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		return nil, err
+	}
+	ln.SetUnlinkOnClose(false)
+	return ln, nil
+}
+
 func socketDir(socketPath string) string {
 	dir := filepath.Dir(socketPath)
 	if dir == "." || dir == "/" {

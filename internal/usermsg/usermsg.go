@@ -34,7 +34,7 @@ var codeText = map[Code]string{
 	CodeProcessBusy:        "当前会话正在处理上一条消息，请稍候再发。",
 	CodeMessageTooLarge:    "消息内容过大，请缩短后重试。",
 	CodeRestarting:         "系统正在重启，请稍后重试。",
-	CodeResumeUnavailable:  "上次会话无法恢复，请约一分钟后重新发送消息，将开启新会话。",
+	CodeResumeUnavailable:  "上次会话无法恢复，请重新发送消息，将开启新会话。",
 	CodeCLIAuthFailed:      "后端认证失败，请联系管理员。",
 	CodeCLIConfigError:     "CLI 配置错误导致启动失败，请联系管理员。",
 	CodeCLIMissingRuntime:  "CLI 运行环境缺失，请联系管理员。",

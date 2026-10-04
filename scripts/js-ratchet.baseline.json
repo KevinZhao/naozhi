@@ -143,8 +143,8 @@
     "lateBindings": 0
   },
   "cron_timeline.js": {
-    "lines": 926,
-    "maxFnLines": 70,
+    "lines": 922,
+    "maxFnLines": 64,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0,
