@@ -190,7 +190,7 @@ func (e *sendEngine) remoteSend(nc node.Conn, nodeID, key, text, workspace strin
 			e.notify.broadcastSendError(key, asyncErrorMessage(err))
 		} else if status == string(sendAckBusy) {
 			e.notify.broadcastSendError(key, errSendBusy.Error())
-		} else {
+		} else if status != string(sendAckReset) {
 			nc.RefreshSubscription(key)
 		}
 		e.notify.BroadcastSessionsUpdate()

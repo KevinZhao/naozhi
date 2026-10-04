@@ -192,3 +192,41 @@ func TestWSRelay_ForwardEventAdvancesOnlyHeldKeys(t *testing.T) {
 		t.Fatal("an event for a key nobody holds created a watermark")
 	}
 }
+
+// TestSubBook_SubscribeFailedKeepsOnlyConfirmedKeys: a subscribe_error drops
+// a key the remote never acked and keeps a confirmed one with its sinks;
+// absorb carries the confirmation and the last sink's removal forgets it.
+func TestSubBook_SubscribeFailedKeepsOnlyConfirmedKeys(t *testing.T) {
+	t.Parallel()
+	b := newSubBook()
+	s := &mockSink{id: 1}
+	b.add(s, "acked", 0)
+	b.add(s, "never", 0)
+	b.confirm("acked")
+	b.confirm("unheld")
+
+	b.subscribeFailed("never")
+	b.subscribeFailed("acked")
+	if b.has("never") {
+		t.Error("subscribe_error kept a key the remote never acked")
+	}
+	if !b.has("acked") {
+		t.Error("subscribe_error dropped the sinks of a key the remote had acked")
+	}
+	if _, ok := b.confirmed["unheld"]; ok {
+		t.Error("confirm recorded a key no sink holds")
+	}
+
+	dst := newSubBook()
+	dst.absorb(&b)
+	dst.subscribeFailed("acked")
+	if !dst.has("acked") {
+		t.Error("absorb lost the confirmation, so the adopted sinks were dropped")
+	}
+	dst.remove(s, "acked")
+	dst.add(s, "acked", 0)
+	dst.subscribeFailed("acked")
+	if dst.has("acked") {
+		t.Error("a key subscribed again after its last sink left kept an old confirmation")
+	}
+}

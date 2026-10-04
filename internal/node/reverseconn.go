@@ -650,13 +650,13 @@ func newestEventTime(entries []clievent.EventEntry) int64 {
 
 // broadcastToSubs snapshots subscribers for key, marshals out, and sends to
 // all. eventTime > 0 advances key's watermark in the same critical section;
-// deleteKey forgets the key.
-func (c *ReverseConn) broadcastToSubs(key string, out any, eventTime int64, deleteKey bool) {
+// subscribeFailed applies the remote's subscribe_error to the book.
+func (c *ReverseConn) broadcastToSubs(key string, out any, eventTime int64, subscribeFailed bool) {
 	c.subMu.Lock()
 	c.book.observe(key, eventTime)
 	snap := c.book.snapshot(key)
-	if deleteKey {
-		c.book.drop(key)
+	if subscribeFailed {
+		c.book.subscribeFailed(key)
 	}
 	c.subMu.Unlock()
 
@@ -752,6 +752,9 @@ func (c *ReverseConn) readLoop() {
 			c.broadcastToSubs(msg.Key, wsproto.NewSessionState(wsproto.SessionState{Key: msg.Key, State: msg.State, Reason: truncateLabelUTF8(msg.Reason, maxPushedNodeStringBytes), Node: c.id}), 0, false)
 
 		case "subscribed":
+			c.subMu.Lock()
+			c.book.confirm(msg.Key)
+			c.subMu.Unlock()
 			c.broadcastToSubs(msg.Key, wsproto.NewSubscribed(wsproto.Subscribed{Key: msg.Key, Node: c.id}), 0, false)
 
 		case "subscribe_error":

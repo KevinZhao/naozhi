@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -104,6 +105,54 @@ func TestRemoteSend_ABusyNodeIsASendError(t *testing.T) {
 			}
 			if !strings.HasSuffix(got, "sessions") {
 				t.Errorf("notifier calls = %q, want a sessions update last", got)
+			}
+		})
+	}
+}
+
+// refreshCountingNode is a statusNode that counts RefreshSubscription calls.
+type refreshCountingNode struct {
+	statusNode
+	refreshes atomic.Int32
+}
+
+func (n *refreshCountingNode) RefreshSubscription(string) { n.refreshes.Add(1) }
+
+// TestRemoteSend_NoRefreshAfterAReset: both remote send paths refresh the
+// key's subscription after an admitted send, but not after a reset: the key
+// has no session on the node until the next send, and a reverse node answers
+// that subscribe with an error that drops the key's browsers.
+func TestRemoteSend_NoRefreshAfterAReset(t *testing.T) {
+	const key = "test:d:u:general"
+	for _, tc := range []struct {
+		status string
+		want   int32
+	}{{"reset", 0}, {"accepted", 1}, {"queued", 1}} {
+		t.Run("ws/"+tc.status, func(t *testing.T) {
+			nc := &refreshCountingNode{statusNode: statusNode{fakeCapNode: fakeCapNode{id: "remote"}, status: tc.status}}
+			router := session.NewRouter(session.RouterConfig{})
+			hub := newHubForTest(t, HubOptions{Router: router, Nodes: newNodeRegistry(map[string]node.Conn{"remote": nc})}, sendEngineOpts{})
+			defer hub.Shutdown()
+
+			client := newTestWSClient()
+			hub.handleSend(client, node.ClientMsg{Type: "send", Key: key, Text: "/new", Node: "remote", ID: "r1"})
+			readClientMsg(t, client, 2*time.Second)
+			hub.engine.wg.Wait()
+			if got := nc.refreshes.Load(); got != tc.want {
+				t.Errorf("RefreshSubscription calls = %d, want %d", got, tc.want)
+			}
+		})
+		t.Run("http/"+tc.status, func(t *testing.T) {
+			nc := &refreshCountingNode{statusNode: statusNode{fakeCapNode: fakeCapNode{id: "remote"}, status: tc.status}}
+			e := newSendEngine(sendEngineOpts{Notify: &recordingNotifier{}})
+			defer e.drain()
+
+			if !e.remoteSend(nc, "remote", key, "/new", "") {
+				t.Fatal("remoteSend refused a send on a live engine")
+			}
+			e.wg.Wait()
+			if got := nc.refreshes.Load(); got != tc.want {
+				t.Errorf("RefreshSubscription calls = %d, want %d", got, tc.want)
 			}
 		})
 	}

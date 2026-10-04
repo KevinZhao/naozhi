@@ -840,6 +840,30 @@ func TestReverseConn_ReadLoop_subscribeError(t *testing.T) {
 	}
 }
 
+// TestReverseConn_SubscribeErrorAfterSubscribed_KeepsSinks: a node that acked
+// a key and then answers a refresh with subscribe_error (its session was
+// reset) leaves the browsers on the key, so the next session's events reach
+// them.
+func TestReverseConn_SubscribeErrorAfterSubscribed_KeepsSinks(t *testing.T) {
+	rc, wsConn, cleanup := setupReverseConnPair(t)
+	defer cleanup()
+
+	sink := &mockSink{id: 1}
+	rc.subMu.Lock()
+	rc.book.subs["k"] = []EventSink{sink}
+	rc.subMu.Unlock()
+
+	wsConn.WriteJSON(ReverseMsg{Type: "subscribed", Key: "k"})
+	wsConn.WriteJSON(ReverseMsg{Type: "subscribe_error", Key: "k", Error: "session not found"})
+	wsConn.WriteJSON(ReverseMsg{Type: "event", Key: "k", Event: &clievent.EventEntry{Time: 1, Type: "text", Summary: "next"}})
+
+	testhelper.Eventually(t, func() bool { return sink.RawMsgCount() == 3 }, 2*time.Second,
+		"the event after the subscribe_error never reached the sink")
+	if !strings.Contains(string(sink.RawMsgs()[1]), "session not found") {
+		t.Errorf("second frame = %s, want the subscribe_error passed on", sink.RawMsgs()[1])
+	}
+}
+
 // rawGateSink blocks inside SendRaw until released, so a test can park the
 // readLoop in the window between broadcastToSubs deleting the sub key (under
 // subMu) and the actual fan-out to sinks (after subMu is released).
