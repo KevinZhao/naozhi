@@ -75,6 +75,44 @@ default_access_profile: work
 	}
 }
 
+// An agent's own access_profile outranks default_access_profile at spawn
+// (#3106), so its argv carries that profile's default_model.
+func TestConfigCheckEffective_AgentAccessProfileModel(t *testing.T) {
+	cfg := cleanCheckConfig + `
+cli:
+  path: /usr/bin/true
+  model: sonnet
+agents:
+  rev:
+    access_profile: personal
+  plain:
+    args: ["--max-turns", "3"]
+  pinned:
+    access_profile: personal
+    model: haiku
+access_profiles:
+  work:
+    default_model: opus
+  personal:
+    default_model: fable
+default_access_profile: work
+`
+	got, raw := effectiveOf(t, cfg)
+	eff, ok := got.Effective["claude"]
+	if !ok {
+		t.Fatalf("no effective entry for claude:\n%s", raw)
+	}
+	if !argvPair(eff.Agents["rev"], "--model", "fable") {
+		t.Errorf("agent pinned to personal must show personal's default_model: %v", eff.Agents["rev"])
+	}
+	if !argvPair(eff.Agents["plain"], "--model", "opus") {
+		t.Errorf("agent without a profile keeps default_access_profile's model: %v", eff.Agents["plain"])
+	}
+	if !argvPair(eff.Agents["pinned"], "--model", "haiku") {
+		t.Errorf("an agent's own model outranks its profile's default: %v", eff.Agents["pinned"])
+	}
+}
+
 func TestConfigCheckEffective_ProfileFileSecretIsShownNotDropped(t *testing.T) {
 	tok := filepath.Join(t.TempDir(), "tok")
 	if err := os.WriteFile(tok, []byte("sk-ant-secret\n"), 0o600); err != nil {

@@ -382,7 +382,7 @@ type Broadcaster interface {
 #### 测试
 
 - `wire_stability_test.go`：枚举字符串黄金值表，新增重复 wire 即编译失败
-- `enum_complete_test.go`：reflect 列举常量数量，新增常量必须改测试
+- `enum_complete_test.go`：从源码解析出全部枚举常量，与 wire 黄金值表做集合比对；新增常量只需补 wire 表条目
 
 ### 3.2 新包 `internal/sessionkey`
 

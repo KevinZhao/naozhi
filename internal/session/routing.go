@@ -94,9 +94,10 @@ func (r *KeyResolver) ResolveForChat(platform, chatType, chatID, agentID string)
 	if b.Backend != "" {
 		base.Backend = b.Backend
 	}
-	if b.AccessProfile != "" {
-		base.AccessProfile = b.AccessProfile
-	}
+	// The planner's account comes from the project alone, never from
+	// defaults["general"]: ResolveForPlannerKey (restart, resume) cannot see
+	// general's profile, and one key must not change account by spawn path.
+	base.AccessProfile = b.AccessProfile
 	if b.PlannerModel != "" {
 		base.Model = b.PlannerModel
 	}
@@ -169,29 +170,33 @@ func (r *KeyResolver) ResolveForKey(key string) (opts AgentOpts, ok bool) {
 // non-default profile MUST NOT be dispatched to a remote node, because the env
 // overlay (and any *_FILE secret) is host-local and never crosses the
 // reverse-RPC wire — the remote would silently spawn on the wrong account (RFC
-// project-access-profile §4.5). Returns "" for reserved namespaces / malformed
-// keys / no data source, which the gate treats as "remote OK".
+// project-access-profile §4.5). The result covers every profile ResolveForChat
+// or ResolveForKey can put in opts.AccessProfile: a project pin, else the
+// agent's own (defaults[agentID]; a planner has only the project pin). Returns
+// "" for reserved namespaces / malformed keys, which the gate treats as "remote OK".
 func (r *KeyResolver) AccessProfileForKey(key string) string {
 	if r == nil {
 		return ""
 	}
-	// Planner key: the profile rides in ResolveForPlannerKey's opts.
 	if isPlannerKey(key) {
-		if _, opts, ok := r.ResolveForPlannerKey(plannerNameFromKey(key)); ok {
-			return opts.AccessProfile
-		}
+		_, opts, _ := r.ResolveForPlannerKey(plannerNameFromKey(key))
+		return opts.AccessProfile
+	}
+	if IsReservedNamespace(key) {
+		return ""
+	}
+	parts := strings.SplitN(key, ":", 4)
+	if len(parts) != 4 {
 		return ""
 	}
 	// ResolveForKey deliberately skips the project binding (§4.5), so read it
 	// directly: a non-general project-bound session still carries the profile.
 	if r.data != nil {
-		if parts := strings.SplitN(key, ":", 4); len(parts) == 4 {
-			if b := r.data.ProjectBinding(parts[0], parts[1], parts[2]); b.Bound {
-				return b.AccessProfile
-			}
+		if b := r.data.ProjectBinding(parts[0], parts[1], parts[2]); b.Bound && b.AccessProfile != "" {
+			return b.AccessProfile
 		}
 	}
-	return ""
+	return r.defaults[parts[3]].AccessProfile
 }
 
 // KeyForChat is the key-only variant for callers that do not need opts (e.g.
