@@ -47,7 +47,6 @@ type pkgFile struct {
 //     (that is middleware), or
 //   - a package-level var whose type is a handler type, or whose value is a
 //     handler or factory func literal or a conversion to a handler type.
-//
 // Known gaps: func literals registered inline, a factory taking a handler it
 // never wraps, and an untyped var initialised by calling a factory.
 func scanHandlerDecls(pkgDir string) ([]handlerDecl, error) {
