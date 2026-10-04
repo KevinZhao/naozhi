@@ -1,10 +1,13 @@
 package cron
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // errTurnFailedRPC is what the wireup adapter returns for a turn the backend
@@ -28,15 +31,25 @@ func TestClassifyExecError_TurnFailed(t *testing.T) {
 
 // TestExecuteOpt_TurnFailedIsAFailedRun drives a whole run whose Send reports
 // a failed turn: the record is failed/turn_failed with the detail in its error
-// message, the failure streak advances, and the IM notice names the cause
-// without the raw backend text or RPC code.
+// message and the session its result frame named, the failure streak advances,
+// and the IM notice names the cause without the raw backend text or RPC code.
 func TestExecuteOpt_TurnFailedIsAFailedRun(t *testing.T) {
 	s, r, ns, id := newAutoPauseScheduler(t, 0, "feishu")
+	rec := &recordingBroadcaster{}
+	s.telemetry = rec
 	r.set(nil, errTurnFailedRPC)
+	r.sendRes = SendResult{SessionID: "sess-fail"}
 
 	runN(s, id, 1)
 
 	j := s.jobForTest(t, id)
+	assertRunSession(t, s, rec, id, "sess-fail")
+	if j.LastSessionID != "sess-fail" {
+		t.Errorf("LastSessionID = %q, want the failed turn's session", j.LastSessionID)
+	}
+	if _, ok := s.KnownSessionIDs()["sess-fail"]; !ok {
+		t.Error("KnownSessionIDs misses the failed turn's session; its JSONL leaks into recent sessions")
+	}
 	if j.LastErrorClass != ErrClassTurnFailed {
 		t.Errorf("LastErrorClass = %q, want turn_failed", j.LastErrorClass)
 	}
@@ -61,6 +74,113 @@ func TestExecuteOpt_TurnFailedIsAFailedRun(t *testing.T) {
 		if strings.Contains(n, raw) {
 			t.Errorf("notice %q leaks raw failure text %q", n, raw)
 		}
+	}
+}
+
+// assertRunSession checks the one run of jobID carries sid both in runs/
+// history and on its run-ended frame.
+func assertRunSession(t *testing.T, s *Scheduler, rec *recordingBroadcaster, jobID, sid string) {
+	t.Helper()
+	runs := s.ListRuns(jobID, 10, time.Time{})
+	if len(runs) != 1 || runs[0].SessionID != sid {
+		t.Errorf("runs = %+v, want one run with SessionID %q", runs, sid)
+	}
+	if rec.endedCount() != 1 {
+		t.Fatalf("ended events = %d, want 1", rec.endedCount())
+	}
+	if got := rec.endedAtCron(0).SessionID; got != sid {
+		t.Errorf("RunEndedEvent.SessionID = %q, want %q", got, sid)
+	}
+}
+
+// failingReapRouter is reapRouter whose session's Send fails with err,
+// returning res alongside it. Each Reset also records the session id
+// CurrentRun reports at that moment.
+type failingReapRouter struct {
+	reapRouter
+	err      error
+	res      SendResult
+	s        *Scheduler
+	jobID    string
+	liveSIDs []string
+}
+
+func (r *failingReapRouter) Reset(key string) {
+	r.reapRouter.Reset(key)
+	view, _ := r.s.CurrentRun(r.jobID)
+	r.mu.Lock()
+	r.liveSIDs = append(r.liveSIDs, view.SessionID)
+	r.mu.Unlock()
+}
+
+func (r *failingReapRouter) GetOrCreate(context.Context, string, AgentOpts) (Session, SessionStatus, error) {
+	return streakSession{err: r.err, res: r.res}, SessionExisting, nil
+}
+
+// runFreshFailure runs one fresh-context job whose previous run left
+// sess-prev and whose send fails as router scripts, and returns the chain of
+// the last stub registered for it.
+func runFreshFailure(t *testing.T, router *failingReapRouter) (*Scheduler, *recordingBroadcaster, string, []string) {
+	t.Helper()
+	rec := &recordingBroadcaster{}
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: filepath.Join(t.TempDir(), "cron_jobs.json")},
+		SchedulerDeps{Router: router, Telemetry: rec})
+	j := &Job{ID: mustGenerateID(), Schedule: "@every 5m", Prompt: "ping", FreshContext: true, LastSessionID: "sess-prev"}
+	s.putJobForTest(j)
+	router.s, router.jobID = s, j.ID
+
+	s.executeOpt(j.ID, true)
+	s.triggerWG.Wait()
+
+	resets, regs := router.snapshot()
+	if len(resets) < 2 {
+		t.Errorf("resets = %v, want the preflight Reset and the failure reap", resets)
+	}
+	if len(regs) == 0 {
+		t.Fatal("no stub registered")
+	}
+	return s, rec, j.ID, regs[len(regs)-1].chainIDs
+}
+
+// TestExecuteOpt_FreshTurnFailedChainsStubToFailedSession: after a fresh
+// turn_failed the sidebar stub and LastSessionID point at the failed turn's
+// JSONL, not the previous run's, and CurrentRun already names it while the
+// failure is being finished.
+func TestExecuteOpt_FreshTurnFailedChainsStubToFailedSession(t *testing.T) {
+	t.Parallel()
+	router := &failingReapRouter{err: errTurnFailedRPC, res: SendResult{SessionID: "sess-fail"}}
+	s, rec, id, chain := runFreshFailure(t, router)
+
+	if len(chain) != 1 || chain[0] != "sess-fail" {
+		t.Errorf("stub chain = %v, want [sess-fail]", chain)
+	}
+	if live := router.liveSIDs; len(live) == 0 || live[len(live)-1] != "sess-fail" {
+		t.Errorf("CurrentRun session at each Reset = %q, want sess-fail at the failure reap", live)
+	}
+	assertRunSession(t, s, rec, id, "sess-fail")
+	if got := s.jobForTest(t, id).LastSessionID; got != "sess-fail" {
+		t.Errorf("LastSessionID = %q, want sess-fail", got)
+	}
+	if _, ok := s.KnownSessionIDs()["sess-fail"]; !ok {
+		t.Error("KnownSessionIDs misses the failed turn's session")
+	}
+}
+
+// TestExecuteOpt_SendErrorWithoutResultKeepsSessionEmpty: a send error with
+// no result frame records no session, keeps LastSessionID, and the fresh stub
+// falls back to the previous run's chain. The session's own SessionID() is
+// not borrowed.
+func TestExecuteOpt_SendErrorWithoutResultKeepsSessionEmpty(t *testing.T) {
+	t.Parallel()
+	router := &failingReapRouter{err: errStreakSend}
+	s, rec, id, chain := runFreshFailure(t, router)
+
+	if len(chain) != 1 || chain[0] != "sess-prev" {
+		t.Errorf("stub chain = %v, want [sess-prev]", chain)
+	}
+	assertRunSession(t, s, rec, id, "")
+	if got := s.jobForTest(t, id).LastSessionID; got != "sess-prev" {
+		t.Errorf("LastSessionID = %q, want sess-prev kept", got)
 	}
 }
 
