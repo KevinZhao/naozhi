@@ -296,8 +296,12 @@ func (d *doctor) renderBackendsSection() {
 		fmt.Fprintf(d.out, "[%s] %s %s  proto=%s  caps=%s\n",
 			id, displayName, version, protoName, capsStr)
 		path := r.path
-		if path == "" {
+		switch {
+		case path != "":
+		case r.known:
 			path = noBackendPath
+		default:
+			path = "(none)"
 		}
 		fmt.Fprintf(d.out, "  path:    %s\n", path)
 		switch {

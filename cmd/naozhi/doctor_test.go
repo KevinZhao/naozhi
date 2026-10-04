@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -557,8 +558,11 @@ func TestDoctor_BackendsSection_UsesConfiguredPath(t *testing.T) {
 			t.Errorf("kiro block missing %q:\n%s", want, k)
 		}
 	}
-	if u := backendBlock(t, got, "kiroo"); !strings.Contains(u, "status:  unavailable (not a registered backend id") {
-		t.Errorf("unknown-id block missing its status:\n%s", u)
+	u := backendBlock(t, got, "kiroo")
+	for _, want := range []string{"path:    (none)\n", "status:  unavailable (not a registered backend id"} {
+		if !strings.Contains(u, want) {
+			t.Errorf("unknown-id block missing %q:\n%s", want, u)
+		}
 	}
 	if strings.Contains(got, "2.27.1") {
 		t.Errorf("section reports the $PATH kiro-cli instead of the configured path:\n%s", got)
@@ -600,6 +604,8 @@ func TestDoctor_BackendsSection_SharesProbeWithChecks(t *testing.T) {
 		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
+		// Untimed warm-up launch without --version, so the counter stays 0.
+		_ = exec.Command(path).Run()
 		return path, counter
 	}
 	claude, claudeCalls := counted("claude")
