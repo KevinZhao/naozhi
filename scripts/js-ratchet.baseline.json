@@ -165,7 +165,7 @@
     "lateBindings": 0
   },
   "cron_view.js": {
-    "lines": 2043,
+    "lines": 2035,
     "maxFnLines": 103,
     "fnOver100": 1,
     "topLevelLetVar": 8,

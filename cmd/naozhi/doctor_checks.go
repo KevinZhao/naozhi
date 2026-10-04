@@ -358,8 +358,14 @@ func (d *doctor) checkConfigDrift() {
 		d.add("config-drift", "warn", "process reports no config fingerprint (predates #2538); upgrade to compare")
 		return
 	}
+	if !isSHA256Hex(health.ConfigSHA256) {
+		d.add("config-drift", "warn", fmt.Sprintf("process reports a malformed config fingerprint (%q); cannot compare",
+			osutil.SanitizeForLog(health.ConfigSHA256, 64)))
+		return
+	}
+	loadedAt := osutil.SanitizeForLog(health.ConfigLoadedAt, 64)
 	if health.ConfigSHA256 == diskSum {
-		d.add("config-drift", "pass", "config_sha256 match ("+diskSum[:12]+"…), loaded_at="+health.ConfigLoadedAt)
+		d.add("config-drift", "pass", "config_sha256 match ("+diskSum[:12]+"…), loaded_at="+loadedAt)
 		return
 	}
 	mtime := ""
@@ -368,5 +374,19 @@ func (d *doctor) checkConfigDrift() {
 	}
 	d.add("config-drift", "warn", fmt.Sprintf(
 		"restart required: config.yaml changed at %s after process loaded at %s (disk %s… vs process %s…)",
-		mtime, health.ConfigLoadedAt, diskSum[:12], health.ConfigSHA256[:12]))
+		mtime, loadedAt, diskSum[:12], health.ConfigSHA256[:12]))
+}
+
+// isSHA256Hex reports whether s is the 64-char lowercase hex the server writes
+// for config_sha256; anything else came from a proxy, an impostor or corruption.
+func isSHA256Hex(s string) bool {
+	if len(s) != sha256.Size*2 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }

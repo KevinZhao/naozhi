@@ -41,20 +41,24 @@ func (c *costAccounting) owned(key string) bool {
 // warnUnknownBasis logs once per model whose price the CLI had to guess.
 func (c *costAccounting) warnUnknownBasis(key string, models []costledger.ModelDelta) {
 	for _, m := range models {
-		if m.Basis != costledger.BasisUnknown {
-			continue
-		}
-		c.warnMu.Lock()
-		_, seen := c.warnedModel[m.Model]
-		if !seen && len(c.warnedModel) < maxWarnedModels {
-			c.warnedModel[m.Model] = struct{}{}
-		}
-		c.warnMu.Unlock()
-		if !seen {
+		if m.Basis == costledger.BasisUnknown && c.firstWarn(m.Model) {
 			slog.Warn("cost: model priced at costBasis=unknown; CLI guessed the default model's rate",
 				"model", osutil.SanitizeForLog(m.Model, 128), "session", osutil.SanitizeForLog(key, 128))
 		}
 	}
+}
+
+// firstWarn reports whether tag is warned about for the first time.
+func (c *costAccounting) firstWarn(tag string) bool {
+	c.warnMu.Lock()
+	defer c.warnMu.Unlock()
+	if _, seen := c.warnedModel[tag]; seen {
+		return false
+	}
+	if len(c.warnedModel) < maxWarnedModels {
+		c.warnedModel[tag] = struct{}{}
+	}
+	return true
 }
 
 // cumulativeFromResult builds the process incarnation's running total from a
@@ -138,6 +142,12 @@ func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, 
 	s.spent = s.spent.Accumulate(inc)
 	s.costMu.Unlock()
 
+	if s.costAcct != nil {
+		rates := s.costAcct.ledger.Rates()
+		for _, m := range inc.Models {
+			rates.Observe(m)
+		}
+	}
 	if s.costAcct != nil && s.costAcct.ledger.Enabled() && !s.costAcct.owned(s.key) {
 		s.costAcct.warnUnknownBasis(s.key, inc.Models)
 		for _, e := range s.ledgerEntries(inc, runID) {
@@ -171,31 +181,35 @@ func isProcessDeathErr(err error) bool {
 	return errors.Is(err, clierr.ErrProcessExited) || errors.Is(err, clierr.ErrNoOutputTimeout) || errors.Is(err, clierr.ErrTotalTimeout)
 }
 
-// bookPartialTurn records a Kind=partial entry (tokens only, no amount, one
-// row per model) for a turn the process died on. Turns that fail with the
+// bookPartialTurn records a Kind=partial entry (one row per model, priced at
+// the rates the ledger learned from the CLI's own results) for a turn the
+// process died on, and adds its amount to the session's spend. A model with
+// no learned rate books tokens only and no basis: BasisUnknown means the CLI
+// guessed a rate, and here nothing priced it. Turns that fail with the
 // process still alive are skipped: their tokens surface in the next result's
-// cumulative modelUsage.
-func (s *ManagedSession) bookPartialTurn(proc processIface, err error, runID string) {
+// cumulative modelUsage. Returns the USD booked.
+func (s *ManagedSession) bookPartialTurn(proc processIface, err error, runID string) float64 {
 	if !isProcessDeathErr(err) || s.costAcct == nil || !s.costAcct.ledger.Enabled() {
-		return
+		return 0
 	}
 	taker, ok := proc.(shadowUsageTaker)
 	if !ok {
-		return
+		return 0
 	}
 	u := taker.TakeShadowUsage()
 	if u.IsZero() || s.costAcct.owned(s.key) {
-		return
+		return 0
 	}
 	e := costledger.Entry{
 		Source: costledger.SourceSession, Kind: costledger.KindPartial,
 		SessionKey: s.key, RunID: runID, Workspace: filepath.Base(s.Workspace()), Backend: s.Backend(),
-		Unit: costledger.UnitUSD, Amount: 0,
+		Unit:   costledger.UnitUSD,
 		Models: make([]costledger.ModelDelta, 0, len(u.Models)),
 	}
 	if e.Backend == "" {
 		e.Backend = "claude"
 	}
+	rates := s.costAcct.ledger.Rates()
 	for _, m := range u.Models {
 		t := costledger.Tokens{Input: m.Input, Output: m.Output, CacheRead: m.CacheRead, CacheWrite: m.CacheWrite}
 		if t == (costledger.Tokens{}) {
@@ -205,9 +219,26 @@ func (s *ManagedSession) bookPartialTurn(proc processIface, err error, runID str
 		if d.Model == "" {
 			d.Model = "unknown"
 		}
+		usd, basis, priced := rates.Estimate(d.Model, t)
+		if !priced && s.costAcct.firstWarn("partial:"+d.Model) {
+			slog.Warn("cost: no learned rate for a partial turn's model; booked tokens only",
+				"model", osutil.SanitizeForLog(d.Model, 128), "session", osutil.SanitizeForLog(s.key, 128))
+		}
+		d.CostUSD, d.Basis = usd, basis
+		e.Amount += usd
+		e.Basis = costledger.WorseBasis(e.Basis, basis)
 		e.Models = append(e.Models, d)
 	}
+	if e.Basis == costledger.BasisNone && e.Amount > 0 {
+		e.Basis = costledger.BasisList
+	}
+	if e.Amount > 0 {
+		s.costMu.Lock()
+		storeTotalCost(&s.costSpent, loadTotalCost(&s.costSpent)+e.Amount)
+		s.costMu.Unlock()
+	}
 	s.costAcct.ledger.Append(e)
+	return e.Amount
 }
 
 // ledgerEntries renders an Increment as ledger rows: one USD row carrying the

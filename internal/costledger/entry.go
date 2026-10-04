@@ -134,9 +134,9 @@ func normalizeBasis(b Basis) Basis {
 	return BasisUnknown
 }
 
-// worseBasis orders unknown > managed > list > "" so a mixed turn reports the
+// WorseBasis orders unknown > managed > list > "" so a mixed turn reports the
 // least trustworthy basis.
-func worseBasis(a, b Basis) Basis {
+func WorseBasis(a, b Basis) Basis {
 	rank := func(x Basis) int {
 		switch x {
 		case BasisUnknown:

@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -508,6 +510,127 @@ reverse_nodes:
 	// claude (no cap required) AND kiro (acp required).
 	if !strings.Contains(got, "claude: no special cap required") {
 		t.Errorf("reverse-node block missing claude no-cap line; got %q", got)
+	}
+}
+
+// backendBlock returns the section's "[id] ..." block, up to the blank line.
+func backendBlock(t *testing.T, out, id string) string {
+	t.Helper()
+	i := strings.Index(out, "["+id+"] ")
+	if i < 0 {
+		t.Fatalf("no [%s] block; output:\n%s", id, out)
+	}
+	block, _, _ := strings.Cut(out[i:], "\n\n")
+	return block
+}
+
+// TestDoctor_BackendsSection_UsesConfiguredPath pins that a loaded config's
+// section reports the configured backend path, as startup and the cli backend
+// findings do, not whatever $PATH holds (#3199). HOME and PATH are pinned so
+// the host's own CLIs cannot satisfy the $PATH probe.
+func TestDoctor_BackendsSection_UsesConfiguredPath(t *testing.T) {
+	bin := t.TempDir()
+	writeFakeCLI(t, bin, "kiro-cli", "kiro-cli 2.27.1", 0)
+	t.Setenv("PATH", bin)
+	t.Setenv("HOME", t.TempDir())
+	claude := writeFakeCLI(t, t.TempDir(), "claude", "9.9.9 (Claude Code)", 0)
+	missing := filepath.Join(t.TempDir(), "missing-kiro")
+	cfgPath := writeDoctorConfig(t, "cli:\n  backend: claude\n  backends:\n    - id: claude\n      path: "+claude+
+		"\n    - id: kiro\n      path: "+missing+"\n    - id: kiroo\n")
+
+	var buf bytes.Buffer
+	d := &doctor{out: &buf, timeout: 5 * time.Second, configPath: cfgPath}
+	d.renderBackendsSection()
+	got := buf.String()
+
+	c := backendBlock(t, got, "claude")
+	for _, want := range []string{"claude-code 9.9.9", "path:    " + claude} {
+		if !strings.Contains(c, want) {
+			t.Errorf("claude block missing %q:\n%s", want, c)
+		}
+	}
+	if strings.Contains(c, "status:") {
+		t.Errorf("healthy claude block reports a status line:\n%s", c)
+	}
+	k := backendBlock(t, got, "kiro")
+	for _, want := range []string{"kiro unknown", "path:    " + missing, "status:  unavailable (--version probe failed)"} {
+		if !strings.Contains(k, want) {
+			t.Errorf("kiro block missing %q:\n%s", want, k)
+		}
+	}
+	u := backendBlock(t, got, "kiroo")
+	for _, want := range []string{"path:    (none)\n", "status:  unavailable (not a registered backend id"} {
+		if !strings.Contains(u, want) {
+			t.Errorf("unknown-id block missing %q:\n%s", want, u)
+		}
+	}
+	if strings.Contains(got, "2.27.1") {
+		t.Errorf("section reports the $PATH kiro-cli instead of the configured path:\n%s", got)
+	}
+}
+
+// TestDoctor_BackendsSection_UnconfiguredPathResolves pins that an entry with
+// no path shows the binary startup resolves for it, not an empty path.
+func TestDoctor_BackendsSection_UnconfiguredPathResolves(t *testing.T) {
+	bin := t.TempDir()
+	writeFakeCLI(t, bin, "kiro-cli", "kiro-cli 2.27.1", 0)
+	t.Setenv("PATH", bin)
+	t.Setenv("HOME", t.TempDir())
+	cfgPath := writeDoctorConfig(t, "cli:\n  backend: kiro\n  backends:\n    - id: kiro\n")
+
+	var buf bytes.Buffer
+	d := &doctor{out: &buf, timeout: 5 * time.Second, configPath: cfgPath}
+	d.renderBackendsSection()
+	k := backendBlock(t, buf.String(), "kiro")
+	if strings.Contains(k, noBackendPath) || !strings.Contains(k, string(filepath.Separator)+"kiro-cli\n") {
+		t.Errorf("kiro block does not show the resolved kiro-cli path:\n%s", k)
+	}
+}
+
+// TestDoctor_BackendsSection_SharesProbeWithChecks pins one --version probe
+// per backend per run: the section reuses checkCLIBackends' probe rather than
+// running its own, so the two report the same binary and pay the cost once.
+func TestDoctor_BackendsSection_SharesProbeWithChecks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake CLI needs a POSIX shell")
+	}
+	bin := t.TempDir()
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+"/usr/bin:/bin")
+	t.Setenv("HOME", t.TempDir())
+	counted := func(name string) (path, counter string) {
+		path = filepath.Join(bin, name)
+		counter = path + ".calls"
+		script := "#!/bin/sh\n[ \"$1\" = --version ] && echo x >> '" + counter + "'\necho '3.3.3 (fake)'\n"
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Untimed warm-up launch without --version, so the counter stays 0.
+		_ = exec.Command(path).Run()
+		return path, counter
+	}
+	claude, claudeCalls := counted("claude")
+	kiro, kiroCalls := counted("kiro-cli")
+	cfgPath := writeDoctorConfig(t, "cli:\n  backend: claude\n  backends:\n    - id: claude\n      path: "+claude+
+		"\n    - id: kiro\n      path: "+kiro+"\n")
+
+	var buf bytes.Buffer
+	d := &doctor{out: &buf, timeout: 5 * time.Second, configPath: cfgPath}
+	d.checkCLIBackends()
+	d.renderBackendsSection()
+
+	for _, counter := range []string{claudeCalls, kiroCalls} {
+		data, err := os.ReadFile(counter)
+		if err != nil {
+			t.Fatalf("%s: %v", filepath.Base(counter), err)
+		}
+		if n := strings.Count(string(data), "x"); n != 1 {
+			t.Errorf("%s: %d --version probes, want 1", filepath.Base(counter), n)
+		}
+	}
+	for _, id := range []string{"claude", "kiro"} {
+		if b := backendBlock(t, buf.String(), id); !strings.Contains(b, " 3.3.3 ") {
+			t.Errorf("[%s] block missing the probed version:\n%s", id, b)
+		}
 	}
 }
 

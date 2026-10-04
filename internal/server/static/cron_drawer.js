@@ -42,8 +42,8 @@ let _cronDrawerLastActiveRow = null;
 // RFC §4.4 / §4.5). Idempotent and called from:
 //   - shell.renderCronPanel (shell-preserving repaint and initial mount)
 //   - openCronDetail (operator click / freshly-created job)
-//   - ensureCronRunningTick (1Hz running-timer rerender path, indirect via
-//     shell.renderCronPanel)
+// The 1Hz running tick never rebuilds the drawer; cronRunningTickPaintScoped
+// only rewrites the banner's .cdr-clock text.
 //
 // Behaviour:
 //   - cronDrawerState.jobId === null      → drawer hidden (no .is-open class)
@@ -151,8 +151,8 @@ function cronDrawerActionsHtml(j, id, isPaused) {
 }
 
 // cronDrawerRunningHtml is the high-contrast running banner that replaces the
-// spec sections while a run is in flight (cron-dashboard-redesign P1 §4.3),
-// so the live elapsed clock becomes the focal point.
+// spec sections while a run is in flight (cron-dashboard-redesign P1 §4.3).
+// Only .cdr-state is a live region: the clock ticks every second.
 function cronDrawerRunningHtml(cr, id) {
   const elapsed = formatRunningElapsed(cr.started_at);
   const phase = cr.phase ? cronPhaseLabel(cr.phase) : '执行中…';
@@ -160,10 +160,10 @@ function cronDrawerRunningHtml(cr, id) {
   const runShort = (cr.run_id || '').slice(0, 8);
   const sessShort = (cr.session_id || '').slice(0, 8);
   const sessChip = sessShort ? ' \u00B7 session ' + esc(sessShort) : '';
-  return '<section class="cron-drawer-running" role="status" aria-live="polite" data-job-id="' + escAttr(id) + '">' +
+  return '<section class="cron-drawer-running" data-job-id="' + escAttr(id) + '">' +
     '<div class="cdr-clock">' + esc(elapsed) + '</div>' +
     '<div class="cdr-info">' +
-      '<div class="cdr-state">正在执行 · ' + esc(phase) + '</div>' +
+      '<div class="cdr-state" role="status" aria-live="polite">正在执行 · ' + esc(phase) + '</div>' +
       '<div class="cdr-detail">' +
         (triggerKind ? '触发 ' + esc(triggerKind) + ' · ' : '') +
         'run ' + esc(runShort) + esc(sessChip) +

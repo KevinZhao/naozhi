@@ -213,6 +213,23 @@ test('运行中的 job：抽屉换成运行横幅 + 实时输出容器，暂停�
     await expect(pane.locator('.cron-drawer-actions [data-action="cron-pause"]')).toHaveCount(1);
     await expect(pane.locator('.cron-drawer-actions [data-action="cron-delete"]')).toHaveCount(1);
 
+    // 1Hz tick 也推进抽屉的大时钟；时钟不在 live region 里，读屏不会每秒播报，
+    // 阶段文案 .cdr-state 仍是 status。
+    const clock = banner.locator('.cdr-clock');
+    const first = await clock.textContent();
+    expect(first).toMatch(/^运行中 \d+s$/);
+    await expect.poll(() => clock.textContent(), { timeout: 2500, message: '抽屉时钟随 1Hz tick 走秒' })
+      .not.toBe(first);
+    await expect(banner.locator('.cdr-state')).toHaveAttribute('role', 'status');
+    expect(await clock.evaluate(el => el.closest('[aria-live],[role="status"]') === null)).toBe(true);
+    // 运行中的行被「需关注」筛掉后，列表里没有 running 行，抽屉时钟照样走。
+    await page.click('.cron-status-chip[data-status="attention"]');
+    await expect(page.locator('.cj-row[data-cron-id="cron-life-1"]')).toHaveCount(0);
+    await expect(banner).toHaveCount(1);
+    const filtered = await clock.textContent();
+    await expect.poll(() => clock.textContent(), { timeout: 2500, message: '行被筛掉后抽屉时钟仍走秒' })
+      .not.toBe(filtered);
+
     // 暂停的 job：没有横幅和实时输出，spec 区回来，动作行给恢复。
     await page.click('.cj-row[data-cron-id="cron-life-2"]');
     await expect(pane.locator('.cron-drawer-header')).toContainText('second job prompt');
