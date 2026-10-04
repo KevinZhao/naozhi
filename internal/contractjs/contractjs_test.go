@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cliinfo"
 )
 
 // TestContractJS_Current rebuilds contract.js and byte-compares it against
@@ -76,5 +77,20 @@ func TestContractJS_EventTypeEnums(t *testing.T) {
 		if !strings.Contains(out, line) {
 			t.Errorf("contract.js lacks %q", line)
 		}
+	}
+}
+
+// TestContractJS_DeathReasonPrefix pins DEATH_REASON_PREFIX to the cliinfo
+// constants the cli package builds suffixed cli_exited reasons from.
+func TestContractJS_DeathReasonPrefix(t *testing.T) {
+	t.Parallel()
+	out, err := Build(filepath.Join("..", "..", "internal", "server", "testdata", "routes.golden.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "  DEATH_REASON_PREFIX: { CODE: '" + cliinfo.DeathReasonCLIExitedCodePrefix +
+		"', SIGNAL: '" + cliinfo.DeathReasonCLIExitedSignalPrefix + "' },\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("contract.js lacks %q", want)
 	}
 }

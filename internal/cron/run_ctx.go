@@ -92,8 +92,9 @@ type runOutcome struct {
 	// rune cap + truncation suffix + control-character filter) where the path
 	// produces one.
 	result string
-	// sessionID is the CLI session_id; empty on fresh-context and failure
-	// paths, which hides the dashboard's open-session button.
+	// sessionID is the CLI session_id this run's result frame named; empty
+	// when no result arrived (spawn/preflight failure, transport error, or a
+	// deadline/cancel before the result).
 	sessionID string
 	// skipPersist keeps a transient terminal (canceled / overlap / deleted
 	// mid-execute) out of Job state and runs/ history. Metrics and the WS

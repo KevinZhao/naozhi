@@ -13,7 +13,7 @@ import (
 // state. Takes values, not *Job, so a locked caller cannot leak a pointer that
 // a concurrent UpdateJob mutates; snapshot fields first.
 //
-// 当 lastSessionID 非空（最近一次成功执行的 session_id），会作为单元素
+// 当 lastSessionID 非空（最近一次执行留下的 session_id），会作为单元素
 // chain 传给 stub，这样 dashboard 点击 cron 侧边栏时能按该 ID 从 claude
 // 项目目录找到 JSONL 历史；否则 fresh_context=true 的任务每次 Reset 都会清空 chain。
 func (s *Scheduler) registerStubByValue(id, workDir, prompt, lastSessionID string) bool {
