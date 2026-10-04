@@ -274,10 +274,11 @@ func (r *subscriberRegistry) reserve(c *wsClient, key string) reserveResult {
 	return reserveOK
 }
 
-// release gives back c's slot for key without an unsubscribe to run: the
-// subscribe did not complete. A key installed before may have a push loop
-// parked by reserve's old(), so its generation advances as in dropLocked; a
-// key never installed has no loop and gets no generation.
+// release gives back c's slot for key: the subscribe did not complete. A key
+// installed before may have a push loop parked by reserve's old(), so its
+// generation advances as in dropLocked; a key never installed has no loop and
+// gets no generation. The held closure runs under mu: the parked loop's swap
+// may have put a live subscription in place of the placeholder.
 func (r *subscriberRegistry) release(c *wsClient, key string, nowNanos int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -285,9 +286,11 @@ func (r *subscriberRegistry) release(c *wsClient, key string, nowNanos int64) {
 	if !ok {
 		return
 	}
-	if _, held := cs.unsubs[key]; !held {
+	held, ok := cs.unsubs[key]
+	if !ok {
 		return
 	}
+	held()
 	if _, installed := cs.gen[key]; installed {
 		r.dropLocked(c, cs, key, nowNanos)
 		return
@@ -299,21 +302,25 @@ func (r *subscriberRegistry) release(c *wsClient, key string, nowNanos int64) {
 // install completes a subscription: unsub replaces the placeholder and the
 // key's generation advances. admit runs under mu and may decline (the Hub is
 // shutting down), in which case the slot is released instead; the caller then
-// runs unsub itself. It returns the new generation.
+// runs unsub itself. The replaced closure runs under mu, as in release. It
+// returns the new generation.
 func (r *subscriberRegistry) install(c *wsClient, key string, unsub func(), admit func() bool) (uint64, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cs, ok := r.clients[c]
 	if !ok || !admit() {
 		if ok {
-			if _, held := cs.unsubs[key]; held {
+			if held, ok := cs.unsubs[key]; ok {
+				held()
 				delete(cs.unsubs, key)
 				r.leaveLocked(c, key)
 			}
 		}
 		return 0, false
 	}
-	if _, held := cs.unsubs[key]; !held {
+	if held, ok := cs.unsubs[key]; ok {
+		held()
+	} else {
 		r.joinLocked(c, key)
 	}
 	cs.unsubs[key] = unsub

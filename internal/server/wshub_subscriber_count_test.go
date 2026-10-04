@@ -129,6 +129,43 @@ func TestRegistry_ReleaseAdvancesOnlyAnInstalledGeneration(t *testing.T) {
 	}
 }
 
+// TestRegistry_SwapInTheReserveWindowIsUnsubscribed: re-subscribing parks the
+// old push loop, whose swap can put a live subscription in place of the
+// placeholder before the subscribe settles. However it settles, that
+// subscription is ended, so the loop's notify closes and it sees the newer
+// generation instead of pushing on untracked.
+func TestRegistry_SwapInTheReserveWindowIsUnsubscribed(t *testing.T) {
+	cases := []struct {
+		name   string
+		settle func(h *Hub, c *wsClient)
+	}{
+		{"release", func(h *Hub, c *wsClient) { h.subs.release(c, "k", 1) }},
+		{"install", func(h *Hub, c *wsClient) {
+			h.subs.install(c, "k", func() {}, func() bool { return true })
+		}},
+		{"install declined", func(h *Hub, c *wsClient) {
+			h.subs.install(c, "k", func() {}, func() bool { return false })
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &Hub{subs: newSubscriberRegistry()}
+			c := &wsClient{done: make(chan struct{})}
+			registerSub(h, c, "")
+			loopGen := subscribeTest(h, c, "k", func() {})
+			h.subs.reserve(c, "k")
+			swapped := false
+			if _, ok := h.subs.swap(c, "k", loopGen, func() { swapped = true }); !ok {
+				t.Fatal("swap refused inside the reserve window")
+			}
+			tc.settle(h, c)
+			if !swapped {
+				t.Error("the subscription the parked loop swapped in was dropped without being ended")
+			}
+		})
+	}
+}
+
 // TestHandleSubscribe_AfterDrainIsIgnored: a subscribe racing Shutdown finds
 // its client drained and takes no slot.
 func TestHandleSubscribe_AfterDrainIsIgnored(t *testing.T) {
