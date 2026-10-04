@@ -345,6 +345,9 @@ func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOu
 			return shimDispatchContinue
 		}
 	}
+	if len(events) > 0 {
+		p.sawOutput.Store(true)
+	}
 	// The only multi-event frame today is ACP's stopReason response (assistant
 	// text, result); iterating preserves single-event claude semantics.
 	for _, ev := range events {
@@ -378,6 +381,7 @@ func (p *Process) handleShimCLIExited(msg shimMsg, log *slog.Logger) {
 		code = msg.Code.Value
 	}
 	tail := p.adoptExitStderrTail(msg.StderrTail)
+	p.recordExit(code, tail)
 	log.Info("CLI exited via shim", "code", code)
 	reason := DeathReasonCLIExited
 	if code != 0 {
@@ -408,9 +412,9 @@ func (p *Process) handleShimCLIExited(msg shimMsg, log *slog.Logger) {
 func (p *Process) transitionToDead() {
 	p.die()
 	// Passthrough slot cleanup: every pending slot's caller is blocked inside
-	// SendPassthrough waiting on resultCh/errCh. Fire clierr.ErrProcessExited so they
+	// SendPassthrough waiting on resultCh/errCh. Fire exitErr so they
 	// unblock with a clear error.
-	p.discardAllPending(clierr.ErrProcessExited)
+	p.discardAllPending(p.exitErr())
 }
 
 // readShimLine reads one complete shim message line from r, accumulating

@@ -98,7 +98,7 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 	switch prev, claimed := p.transition(evSendBegin); {
 	case claimed:
 	case prev == StateDead:
-		return nil, fmt.Errorf("process dead: %w", clierr.ErrProcessExited)
+		return nil, fmt.Errorf("process dead: %w", p.exitErr())
 	default:
 		return nil, fmt.Errorf("process busy (state=%s): %w", prev, clierr.ErrProcessBusy)
 	}
@@ -159,7 +159,7 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 				if sr := p.findResultSince(turnStartMS); sr != nil {
 					return sr, nil
 				}
-				return nil, clierr.ErrProcessExited
+				return nil, p.exitErr()
 			}
 
 			lastOutput = time.Now()

@@ -494,7 +494,7 @@ function patchSidebarCardState(key, node, state) {
     if (stateSpan && !stateSpan.classList.contains('sc-node')) stateSpan.textContent = displayState;
   }
   const sd = sessionList.sessionsData[sid(key, msgNode)];
-  patchCardExitChip(card, state, sd ? sd.death_reason : '');
+  patchCardExitChip(card, state, sd ? sd.death_reason : '', sd ? sd.death_detail : '');
 }
 
 function markSessionOptimisticRunning(key, node) {

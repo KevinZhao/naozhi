@@ -59,6 +59,35 @@ func (e *NoOutputTimeoutError) Unwrap() error { return ErrNoOutputTimeout }
 // producing a result; callers react by spawning a new process next turn.
 var ErrProcessExited = errors.New("process exited during send")
 
+// ExitClass is what a CLI's stderr says made it exit with a non-zero code
+// before producing any output; ExitUnknown when it says nothing recognisable.
+type ExitClass int
+
+const (
+	ExitUnknown ExitClass = iota
+	ExitResumeNotFound
+	ExitAuth
+	ExitMCPConfig
+	ExitInvalidSettings
+	ExitMissingRuntime
+)
+
+// ProcessExitedError is ErrProcessExited for a CLI that exited with a
+// non-zero code. It matches ErrProcessExited under errors.Is; errors.As adds
+// the exit code and the class of its stderr. Error() leaves the stderr text
+// out: send errors can reach IM replies.
+type ProcessExitedError struct {
+	Code  int64
+	Class ExitClass
+}
+
+func (e *ProcessExitedError) Error() string {
+	return fmt.Sprintf("%s (code %d)", ErrProcessExited, e.Code)
+}
+
+// Unwrap exposes ErrProcessExited, so every errors.Is classifier keeps working.
+func (e *ProcessExitedError) Unwrap() error { return ErrProcessExited }
+
 // ErrProcessBusy is returned by Send when the legacy (non-passthrough) state
 // machine is already StateRunning; dispatch maps it to "正在处理中".
 var ErrProcessBusy = errors.New("process busy")

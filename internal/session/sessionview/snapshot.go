@@ -36,6 +36,7 @@ type SessionSnapshot struct {
 	TotalCost    float64 `json:"total_cost"`
 	Workspace    string  `json:"workspace,omitempty"`
 	DeathReason  string  `json:"death_reason,omitempty"`
+	DeathDetail  string  `json:"death_detail,omitempty"` // stderr line naming a non-zero exit's cause
 	ChatType     string  `json:"chat_type,omitempty"`
 	ChatID       string  `json:"chat_id,omitempty"`
 	Node         string  `json:"node,omitempty"`
