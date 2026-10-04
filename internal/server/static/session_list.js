@@ -885,21 +885,15 @@ function onSessionState(msg) {
   // 永远是死代码，恰好漏掉"进程被回收后从本页发消息"这个最常见的失联场景。
   // 用翻转前记录的真实状态还原判据。
   const effectivePrevState = wasOptimisticRunning ? optimisticPrevState : prevState;
-  // 判据是 state==='dead' 本身，而不是 death_reason 是否非空。二者不等价：
-  // death_reason 由 mapSendError 在 no_output_timeout / total_timeout 时写入
-  // (internal/session/managed_send.go)，进程未必被回收，会话随后回到 ready
-  // 却留着这个陈旧标记。按 death_reason 判会让此后每一次普通发送都命中
-  // case 2，强制 lastEventTimeWs=0 全量重订阅 —— 而全量重渲染
-  // (el.innerHTML = html) 会抹掉刚发出、服务端还没回显的 .optimistic-msg
-  // 气泡，正是 case 3 旁边那句注释警告过的危害。sessionsData.state 保留后端
-  // 真实状态（UI 层才把 dead 显示成 ready，见下方 displayState），所以
-  // 'dead' 是可靠且精确的判据，对齐 case 2 注释本身的表述
-  // ("subscribed but process was dead → revived")。
+  // 判据是 state==='dead' 本身，而非 death_reason 非空：mapSendError 在
+  // no_output_timeout / total_timeout 时也写 death_reason（managed_send.go），
+  // 会话随后回到 ready 却留着它；按它判会让此后每次发送都走 case 2 全量重订阅，
+  // 重渲染抹掉尚未回显的 .optimistic-msg。sessionsData.state 保留后端真实状态。
   const wasDead = effectivePrevState === 'dead';
   settleTurnBoundary(msg, msgNode, sKey, prevState);
   if (sessionList.sessionsData[sKey]) {
     sessionList.sessionsData[sKey].state = msg.state;
-    delete sessionList.sessionsData[sKey].death_detail; // a push carries none; the next poll refills it
+    delete sessionList.sessionsData[sKey].death_detail; // a push carries none; the poll below refills it
     if (msg.reason) {
       sessionList.sessionsData[sKey].death_reason = msg.reason;
     } else if (msg.state === 'running') {
@@ -1101,12 +1095,16 @@ export function updateMainState(state) {
   const ia = document.getElementById('input-area');
   if (ia) ia.classList.toggle('disabled', false);
   updateSendButton(state);
-  // The header's exit chip reads the session's own death_reason: the reason a
-  // caller has in hand may be a subscription status ('suspended'), not a death.
+  refreshHeaderExitChip(state);
+}
+
+// refreshHeaderExitChip repaints only the header's exit chip, from the
+// session's own death_reason and death_detail: the reason a caller has in
+// hand may be a subscription status ('suspended'), not a death.
+export function refreshHeaderExitChip(state) {
   const exitEl = document.getElementById('header-exit');
-  if (exitEl) {
-    const sd = sessionList.sessionsData[sid(selection.key, selection.node)];
-    const html = sessionExitChipHtml(state, sd ? sd.death_reason : '', sd ? sd.death_detail : '');
-    if (exitEl.innerHTML !== html) exitEl.innerHTML = html;
-  }
+  if (!exitEl) return;
+  const sd = sessionList.sessionsData[sid(selection.key, selection.node)];
+  const html = sessionExitChipHtml(state, sd ? sd.death_reason : '', sd ? sd.death_detail : '');
+  if (exitEl.innerHTML !== html) exitEl.innerHTML = html;
 }

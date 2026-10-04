@@ -32,6 +32,8 @@ func TestClassifyStderr(t *testing.T) {
 		{"invalid api key", []string{"Invalid API key · Please run /login"}, clierr.ExitAuth},
 		{"expired oauth token", []string{"OAuth token has expired. Please obtain a new token or refresh your existing token."}, clierr.ExitAuth},
 		{"api 401", []string{`API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`}, clierr.ExitAuth},
+		{"acp backend not logged in", []string{"Error: You are not logged in, please log in with kiro-cli login"}, clierr.ExitAuth},
+		{"login required", []string{"Error: login required: run `codex login`"}, clierr.ExitAuth},
 		{"node missing", []string{"env: node: No such file or directory"}, clierr.ExitMissingRuntime},
 		{"broken install", []string{"node:internal/modules/cjs/loader:1228", "  throw err;", "Error: Cannot find module '/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js'"}, clierr.ExitMissingRuntime},
 		{"binary missing", []string{"/bin/sh: 1: claude: command not found"}, clierr.ExitMissingRuntime},

@@ -176,7 +176,7 @@
     "lateBindings": 1
   },
   "dashboard.js": {
-    "lines": 2866,
+    "lines": 2858,
     "maxFnLines": 120,
     "fnOver100": 1,
     "topLevelLetVar": 0,
@@ -385,7 +385,7 @@
     "lateBindings": 0
   },
   "session_list.js": {
-    "lines": 1112,
+    "lines": 1110,
     "maxFnLines": 95,
     "fnOver100": 0,
     "topLevelLetVar": 0,
