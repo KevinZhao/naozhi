@@ -52,7 +52,7 @@ func (t *jobTable) load(restored []*Job, maxJobs, maxPerChat int) loadResult {
 		}
 		t.jobs[j.ID] = j
 		t.indexLocked(j)
-		// lastSessionID 一起快照，重启后恢复的 cron stub 才能带上上次成功执行的
+		// lastSessionID 一起快照，重启后恢复的 cron stub 才能带上最近一次执行留下的
 		// session_id，historySource 才能从 JSONL 把历史读回来给 dashboard 显示。
 		r.stubs = append(r.stubs, jobStubFields{id: j.ID, workDir: j.WorkDir, prompt: j.Prompt, lastSessionID: j.LastSessionID})
 	}

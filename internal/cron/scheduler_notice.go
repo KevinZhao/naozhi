@@ -38,7 +38,8 @@ type jobSnapshot struct {
 	backend    string // "" = router default
 	// lastSessionID 是 snapshot 时刻 Job.LastSessionID 的拷贝，供 fresh-preflight
 	// 的 stub-refresh 闭包直接调 registerStubByValue，不再回头加 s.tbl.mu 读。失败
-	// 路径用 snap-time chain anchor，后续新成功 run 由其 finishRun 路径再覆写。
+	// 路径在没有 result 帧时用 snap-time chain anchor；后续产生 result 帧的 run
+	// （成功或 turn_failed）由 finishRun 再覆写。
 	lastSessionID string
 	notify        *bool // nil = unset
 	fresh         bool

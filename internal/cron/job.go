@@ -151,10 +151,10 @@ type Job struct {
 	LastRunAt  time.Time `json:"last_run_at"`
 	LastError  string    `json:"last_error,omitempty"`
 
-	// LastSessionID 是最近一次成功执行产生的 Claude session_id。registerStub
-	// 把它注入 cron stub 的 prevSessionIDs，让 dashboard 侧边栏能按此 ID 加载
-	// JSONL 历史；否则 fresh_context=true 下每次 Reset 后 stub 事件面板永远为空。
-	// 仅 Send 成功路径写入；错误路径保留上一次的值。
+	// LastSessionID 是最近一次产生了 result 帧的执行（成功或 turn_failed）的
+	// Claude session_id。registerStub 把它注入 cron stub 的 prevSessionIDs，让
+	// dashboard 侧边栏能按此 ID 加载 JSONL 历史；否则 fresh_context=true 下每次
+	// Reset 后 stub 事件面板永远为空。没有 result 帧的失败保留上一次的值。
 	LastSessionID string `json:"last_session_id,omitempty"`
 
 	// LastErrorClass 是 LastError 的机器可读分类（见 ErrorClass 常量），与
