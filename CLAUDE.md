@@ -193,6 +193,8 @@ Platforms implement `Platform` interface and register their own webhook routes v
 
 Platforms needing background goroutines implement `RunnablePlatform` with `Start()/Stop()`. Platforms that cannot send interim messages (e.g. WeChat iLink's single-use reply tokens) implement `SupportsInterimMessages() bool` returning false.
 
+Platforms that can observe their own connection implement `ConnStateReporter` (`internal/platform/connstate.go`), fed from SDK lifecycle hooks through a `ConnTracker`; `/health` serves the live state in `platforms` / `platform_conn`, and adapters without it read as `registered`.
+
 | Platform | Transport | Interface |
 |----------|-----------|-----------|
 | Feishu   | WebSocket (default) or HTTP webhook | `RunnablePlatform` |

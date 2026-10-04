@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/spawndiag"
 )
@@ -50,6 +51,7 @@ func EventLogHealthProbe(router *session.Router) HealthProbe {
 // not affect the JSON; every probe is nil-safe for harnesses without a router.
 func (h *HealthHandler) subsystemProbes() []HealthProbe {
 	return []HealthProbe{
+		platformConnProbe(h.platforms),
 		wsDroppedHealthProbe(h.hubDropped),
 		dispatchHealthProbe(h.dispatcherMetrics),
 		EventLogHealthProbe(h.router),
@@ -58,6 +60,47 @@ func (h *HealthHandler) subsystemProbes() []HealthProbe {
 		sessionStoreHealthProbe(h.router),
 		spawnDiagsHealthProbe,
 	}
+}
+
+// platformConnProbe populates platforms and platform_conn from each adapter's
+// live ConnState. platforms always carries every registered name (an empty
+// object with none), falling back to "registered" for an adapter that cannot
+// observe its connection; platform_conn holds only the ones that can.
+func platformConnProbe(platforms map[string]platform.Platform) HealthProbe {
+	return func(auth *healthAuthSection) {
+		if auth == nil {
+			return
+		}
+		auth.Platforms = make(map[string]string, len(platforms))
+		for name := range platforms {
+			auth.Platforms[name] = "registered"
+		}
+		states := platform.ConnStatesOf(platforms)
+		if states == nil {
+			return
+		}
+		now := time.Now()
+		auth.PlatformConn = make(map[string]healthPlatformConn, len(states))
+		for name, cs := range states {
+			auth.Platforms[name] = string(cs.State)
+			auth.PlatformConn[name] = healthPlatformConnOf(cs, now)
+		}
+	}
+}
+
+func healthPlatformConnOf(cs platform.ConnState, now time.Time) healthPlatformConn {
+	out := healthPlatformConn{
+		State:     string(cs.State),
+		LastError: cs.LastError,
+	}
+	if !cs.Since.IsZero() {
+		out.Since = cs.Since.UTC().Format(time.RFC3339)
+		out.SinceAgo = now.Sub(cs.Since).Round(time.Second).String()
+	}
+	if !cs.LastErrorAt.IsZero() {
+		out.LastErrorAt = cs.LastErrorAt.UTC().Format(time.RFC3339)
+	}
+	return out
 }
 
 // sessionStoreHealthProbe populates session_store with the store files whose
