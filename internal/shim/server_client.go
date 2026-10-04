@@ -72,8 +72,6 @@ func (s *shimServer) performHandshake(conn net.Conn) (ClientMsg, bool) {
 }
 
 // handleClient manages one naozhi connection. Runs in its own goroutine.
-
-// handleClient manages one naozhi connection. Runs in its own goroutine.
 func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	defer conn.Close()
 
@@ -248,17 +246,6 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 //
 // Returns sendCliExited=true (plus exit code) when the live CLI died, so
 // handleClient delivers cli_exited synchronously after the writer drains (#1783).
-
-// runCommandLoop is the post-auth, post-replay client dispatch loop; any
-// return unwinds the calling handleClient's defers.
-//
-//   - reader / postAuthLR: bounded line reader; postAuthLR.N is reset per line.
-//   - clientDone: closed by setClient teardown; the producer goroutine watches
-//     it to avoid leaking.
-//   - cliWasAlive: cli.alive() at attach time; drives cli_exited dedup.
-//
-// Returns sendCliExited=true (plus exit code) when the live CLI died, so
-// handleClient delivers cli_exited synchronously after the writer drains (#1783).
 func (s *shimServer) runCommandLoop(
 	reader *bufio.Reader,
 	postAuthLR *io.LimitedReader,
@@ -342,10 +329,6 @@ func (s *shimServer) runCommandLoop(
 // handleClientCommand dispatches one ClientMsg. Returns true when the caller
 // must disconnect the client (oversize write, stdin EPIPE, shutdown, detach,
 // refused-shutdown guard).
-
-// handleClientCommand dispatches one ClientMsg. Returns true when the caller
-// must disconnect the client (oversize write, stdin EPIPE, shutdown, detach,
-// refused-shutdown guard).
 func (s *shimServer) handleClientCommand(msg ClientMsg) (disconnect bool) {
 	switch msg.Type {
 	case "write":
@@ -406,9 +389,6 @@ func (s *shimServer) handleClientCommand(msg ClientMsg) (disconnect bool) {
 
 // writeMsg writes a ServerMsg directly to conn (auth/replay phase, before the
 // async writer exists) under writeRaw's 10s write deadline.
-
-// writeMsg writes a ServerMsg directly to conn (auth/replay phase, before the
-// async writer exists) under writeRaw's 10s write deadline.
 func writeMsg(conn net.Conn, msg ServerMsg) {
 	data, err := msg.MarshalLine()
 	if err != nil {
@@ -416,10 +396,6 @@ func writeMsg(conn net.Conn, msg ServerMsg) {
 	}
 	writeRaw(conn, data)
 }
-
-// writeRaw writes a pre-marshaled NDJSON frame under a 10s write deadline so a
-// stalled client cannot pin a semaphore slot indefinitely. Split out so the
-// replay loop can feed MarshalReplayLine's zero-copy output.
 
 // writeRaw writes a pre-marshaled NDJSON frame under a 10s write deadline so a
 // stalled client cannot pin a semaphore slot indefinitely. Split out so the
