@@ -15,6 +15,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
@@ -987,8 +988,11 @@ func TestProcess_Accessors(t *testing.T) {
 	if pid := p.PID(); pid != 0 {
 		t.Errorf("PID() = %d, want 0", pid)
 	}
-	if tt := p.TotalTimeout(); tt != DefaultTotalTimeout {
-		t.Errorf("TotalTimeout() = %v, want %v", tt, DefaultTotalTimeout)
+	if tt := p.TotalTimeout(); tt != cliinfo.DefaultTotalTimeout {
+		t.Errorf("TotalTimeout() = %v, want the shared default %v", tt, cliinfo.DefaultTotalTimeout)
+	}
+	if DefaultNoOutputTimeout != cliinfo.DefaultNoOutputTimeout {
+		t.Errorf("DefaultNoOutputTimeout = %v, want the shared default %v", DefaultNoOutputTimeout, cliinfo.DefaultNoOutputTimeout)
 	}
 	if seq := p.LastSeq(); seq != 0 {
 		t.Errorf("LastSeq() = %d, want 0", seq)

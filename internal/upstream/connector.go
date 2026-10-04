@@ -25,9 +25,9 @@ import (
 
 // handleConnDrainBudget bounds the deferred wg.Wait() at the end of
 // handleConn. Workers honour connCtx; the budget covers a downstream call
-// (e.g. sess.Send blocked on the CLI watchdog, ≈5 min) that refuses to
-// unblock — the stuck goroutine leaks to process teardown rather than
-// pinning the reconnect loop. Package-level var so tests can shorten it.
+// (e.g. sess.Send blocked until the watchdog total_timeout, default 2h) that
+// refuses to unblock — the stuck goroutine leaks to process teardown rather
+// than pinning the reconnect loop. Package-level var so tests can shorten it.
 var handleConnDrainBudget = 15 * time.Second
 
 // circuitBreakerThreshold is the number of consecutive runOnce failures

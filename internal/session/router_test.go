@@ -822,7 +822,7 @@ func TestCleanupExpiredSession(t *testing.T) {
 // TestCleanupRunningSession_LiveEventsBlockStuckKill verifies the fix for
 // "running sessions disappear from the sidebar during long turns": lastActive
 // is only touched at Send entry, so a 20-minute code analysis would age past
-// the 2×DefaultTotalTimeout stuck threshold and be Kill()'d mid-turn. The
+// the 2×totalTimeout stuck threshold and be Kill()'d mid-turn. The
 // fix folds EventLog.LastEventAt() into the activity calculation so any
 // streamed tool_use / thinking / assistant event proves the turn is alive.
 func TestCleanupRunningSession_LiveEventsBlockStuckKill(t *testing.T) {
@@ -890,7 +890,7 @@ func TestCleanupSkipsRunningSession(t *testing.T) {
 	proc := newRunningProc()
 	s := injectSession(r, "key1", proc)
 	// Exceeds 1min TTL but stays well below the stuck-running threshold
-	// (2 × DefaultTotalTimeout = 10min) so the session is eligible for idle
+	// (2 × cli.DefaultTotalTimeout) so the session is eligible for idle
 	// expiry but protected by the IsRunning() guard.
 	s.lastActive.Store(time.Now().Add(-2 * time.Minute).UnixNano())
 

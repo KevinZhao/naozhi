@@ -226,8 +226,14 @@ session:
   prune_ttl: "72h"
   cwd: "/path/to/your/workspace"
   watchdog:
-    no_output_timeout: "1800s"
-    total_timeout: "14400s"
+    # Defaults. With the Claude backend a running tool does not trip
+    # no_output_timeout (the CLI emits a tool_progress heartbeat every 30s), so
+    # this only catches a model that stays silent (a long thinking block, a huge
+    # Write) or a hung CLI. Other backends have no heartbeat: a silent tool
+    # there must finish within the 15m budget.
+    # Workflows whose turns run for hours can raise both, e.g. "1800s"/"14400s".
+    no_output_timeout: "15m"
+    total_timeout: "2h"
   store_path: "~/.naozhi/sessions.json"
   # auto_chain — REMOVED (schema v2). It joined sessions in the same
   # workspace by guessing that "same slug + 7d window" meant one conversation,

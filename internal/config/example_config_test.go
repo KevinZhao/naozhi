@@ -3,8 +3,13 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/naozhi/naozhi/internal/cliinfo"
 	"gopkg.in/yaml.v3"
 )
 
@@ -57,6 +62,71 @@ func TestExampleConfig_TrustedProxyOff(t *testing.T) {
 	}
 	if on {
 		t.Error("config.example.yaml sets server.trusted_proxy: true; the template must default to false")
+	}
+}
+
+// TestExampleConfig_WatchdogShowsDefaults: the template's watchdog values are
+// what an operator reads as the defaults, so they must be the cliinfo ones.
+func TestExampleConfig_WatchdogShowsDefaults(t *testing.T) {
+	session := yamlChildMap(readExampleRoot(t), "session")
+	if session == nil {
+		t.Fatal("config.example.yaml has no session block")
+	}
+	wd := yamlChildMap(session, "watchdog")
+	if wd == nil {
+		t.Fatal("config.example.yaml has no session.watchdog block")
+	}
+	for _, tc := range []struct {
+		key  string
+		want time.Duration
+	}{
+		{"no_output_timeout", cliinfo.DefaultNoOutputTimeout},
+		{"total_timeout", cliinfo.DefaultTotalTimeout},
+	} {
+		n := yamlChildScalar(wd, tc.key)
+		if n == nil {
+			t.Errorf("session.watchdog.%s missing", tc.key)
+			continue
+		}
+		if got, err := time.ParseDuration(n.Value); err != nil || got != tc.want {
+			t.Errorf("session.watchdog.%s = %q, want %v (err %v)", tc.key, n.Value, tc.want, err)
+		}
+	}
+}
+
+// watchdogDocRe matches a watchdog budget name followed closely by a duration,
+// e.g. `无输出超时 (默认 15min`, `no_output_timeout: "15m"`, `总超时 2h`.
+var watchdogDocRe = regexp.MustCompile(`(no_output_timeout|无输出超时|total_timeout|总耗时超时|总超时)[^0-9\n]{0,12}?(\d+)\s*(min|m|h)\b`)
+
+// TestDocs_WatchdogShowsDefaults: every watchdog duration the operator docs
+// quote next to a budget name must be the cliinfo default.
+func TestDocs_WatchdogShowsDefaults(t *testing.T) {
+	for _, doc := range []string{"README.md", "CLAUDE.md", filepath.Join("docs", "design", "DESIGN.md")} {
+		data, err := os.ReadFile(filepath.Join("..", "..", doc))
+		if err != nil {
+			t.Fatalf("read %s: %v", doc, err)
+		}
+		found := 0
+		for i, line := range strings.Split(string(data), "\n") {
+			for _, m := range watchdogDocRe.FindAllStringSubmatch(line, -1) {
+				found++
+				n, _ := strconv.Atoi(m[2])
+				got := time.Duration(n) * time.Minute
+				if m[3] == "h" {
+					got = time.Duration(n) * time.Hour
+				}
+				want := cliinfo.DefaultTotalTimeout
+				if m[1] == "no_output_timeout" || m[1] == "无输出超时" {
+					want = cliinfo.DefaultNoOutputTimeout
+				}
+				if got != want {
+					t.Errorf("%s:%d: %q says %v, default is %v", doc, i+1, m[0], got, want)
+				}
+			}
+		}
+		if found == 0 {
+			t.Errorf("%s quotes no watchdog default; the pattern no longer matches the doc", doc)
+		}
 	}
 }
 
