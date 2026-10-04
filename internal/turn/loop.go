@@ -71,7 +71,8 @@ func sessionOpts(owner Origin, key string) sessionview.AgentOpts {
 
 // ownerLoop runs the owner's first turn, then after each turn waits the
 // collect delay and drains the queue into one merged turn, until the queue
-// is empty or a Discard (Reset) bumps gen. Its one recover tells the
+// is empty or its entry is discarded, removed or recreated (gen no longer
+// matches). Its one recover tells the
 // in-flight turn's receivers and the queued origins, and NotifyIdle runs
 // only after that: the session must not read idle mid-recovery.
 func (o *Orchestrator) ownerLoop(ctx context.Context, key string, gen uint64, first Msg) {

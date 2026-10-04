@@ -633,31 +633,65 @@ func TestConcurrent_EnqueueDrain(t *testing.T) {
 	const msgsPerGoroutine = 100
 
 	var wg sync.WaitGroup
+	// ownerGen is the gen of a recent Enqueue that took ownership; drainers
+	// act as that owner, so each release makes the next Enqueue recreate the
+	// entry with a fresh gen while other enqueuers race it.
+	var ownerGen, drains atomic.Uint64
 
-	// Spawn goroutines that enqueue messages.
 	for i := 0; i < goroutines; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for j := 0; j < msgsPerGoroutine; j++ {
-				q.Enqueue("shared", Msg{Text: "msg"})
+				if res := q.Enqueue("shared", Msg{Text: "msg"}); res.isOwner {
+					ownerGen.Store(res.gen)
+				}
 			}
 		}()
 	}
 
-	// Spawn goroutines that drain.
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for j := 0; j < msgsPerGoroutine; j++ {
-				q.DoneOrDrain("shared", 0) // gen=0 matches initial
+				q.mu.RLock()
+				_, present := q.queues["shared"]
+				q.mu.RUnlock()
+				q.DoneOrDrain("shared", ownerGen.Load())
+				q.mu.RLock()
+				_, after := q.queues["shared"]
+				q.mu.RUnlock()
+				if present && !after {
+					drains.Add(1)
+				}
 				q.depth("shared")
 			}
 		}()
 	}
 
 	wg.Wait()
+	if drains.Load() == 0 {
+		t.Fatal("no drainer ever released the key: the drain side never ran")
+	}
+	// Whichever entry is left, the owner holding its gen drains and releases it.
+	q.mu.RLock()
+	sq := q.queues["shared"]
+	var gen uint64
+	if sq != nil {
+		gen = sq.gen
+	}
+	q.mu.RUnlock()
+	if sq != nil {
+		for q.DoneOrDrain("shared", gen) != nil {
+		}
+		q.mu.RLock()
+		_, present := q.queues["shared"]
+		q.mu.RUnlock()
+		if present {
+			t.Fatal("entry still present after its owner released it")
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -766,7 +800,12 @@ func TestQueue_DiscardOwnedLeavesALaterOwnersQueue(t *testing.T) {
 			t.Fatalf("retire=%v: key still owned after B's discard", retire)
 		}
 	}
-	if dropped := newTestQueue(10, 0).DiscardOwned("never-seen", 1); dropped != nil {
+	q := newTestQueue(10, 0)
+	q.ShouldNotify("never-seen")
+	if dropped := q.DiscardOwned("never-seen", 1); dropped != nil {
 		t.Fatalf("discard of an unknown key returned %v", dropped)
+	}
+	if !q.ShouldNotify("never-seen") {
+		t.Fatal("discard with no entry left the drop-path cooldown in place")
 	}
 }

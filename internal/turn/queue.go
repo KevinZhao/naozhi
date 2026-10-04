@@ -349,10 +349,11 @@ func (q *queue) Enqueue(key string, msg Msg) enqueueResult {
 }
 
 // DoneOrDrain is called by the owner goroutine after processing a message.
-// gen must match the generation returned by Enqueue; a mismatch means a discard
-// ran (e.g. /new) and a new owner may have started — the stale owner must stop.
-// If the queue is empty (or gen mismatches) ownership is released and nil is
-// returned; otherwise all messages are drained and returned and ownership kept.
+// gen must match the generation returned by Enqueue; a missing entry or a
+// mismatch means the entry was discarded or recreated since, and a later owner
+// may hold it — the stale owner must stop. nil is returned then, and on an
+// empty queue (which releases ownership); otherwise all messages are drained
+// and returned and ownership kept.
 // The check-and-release MUST happen under one lock so a message cannot be
 // enqueued between check and release and be stranded without an owner.
 func (q *queue) DoneOrDrain(key string, gen uint64) []Msg {
@@ -397,7 +398,8 @@ func (q *queue) DoneOrDrain(key string, gen uint64) []Msg {
 
 // DiscardAndReturn clears key's queued messages and releases ownership,
 // giving the entry a fresh generation so a stale owner loop stops on its next
-// DoneOrDrain (/new, /clear, a detached turn's panic). The entry is kept so
+// DoneOrDrain (/new, /clear, a detached turn's panic, Submit's shutdown
+// drop when Admit fails). The entry is kept so
 // the next Enqueue reuses its ring; deleting it would be equally safe. The
 // discarded messages come back FIFO so each origin can be told (#2013); nil
 // when nothing was queued.
@@ -407,14 +409,15 @@ func (q *queue) DiscardAndReturn(key string) []Msg {
 	return q.discardLocked(key, q.queues[key])
 }
 
-// DiscardOwned is DiscardAndReturn on behalf of the owner holding gen. It
-// does nothing once key's entry is gone or has another gen: that entry
-// belongs to a later owner, whose queue a stale owner must not discard.
+// DiscardOwned is DiscardAndReturn on behalf of the owner holding gen. An
+// entry with another gen belongs to a later owner, whose queue a stale owner
+// must not discard: it is left alone. With no entry only the drop-path
+// cooldown is purged, as DiscardAndReturn would.
 func (q *queue) DiscardOwned(key string, gen uint64) []Msg {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	sq := q.queues[key]
-	if sq == nil || sq.gen != gen {
+	if sq != nil && sq.gen != gen {
 		return nil
 	}
 	return q.discardLocked(key, sq)
