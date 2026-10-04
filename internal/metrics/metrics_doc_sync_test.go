@@ -14,10 +14,11 @@ import (
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
-// TestCountersDocSyncedWithPprofMd pins that the backtick-quoted naozhi_*
-// names in docs/ops/pprof.md match, one to one, the metrics registered by
-// non-test code in any package (counters and gauges alike). A new metric
-// must ship with a doc row and a rename must update the doc.
+// TestCountersDocSyncedWithPprofMd pins docs/ops/pprof.md to the metrics
+// registered by non-test code in any package (counters and gauges alike).
+// Every registered metric needs a table row of its own, keyed by its first
+// column; every backticked naozhi_* name anywhere in the doc must still be
+// registered, so a rename cannot leave a stale mention behind.
 func TestCountersDocSyncedWithPprofMd(t *testing.T) {
 	t.Parallel()
 
@@ -27,7 +28,13 @@ func TestCountersDocSyncedWithPprofMd(t *testing.T) {
 		t.Fatalf("read %s: %v", pprofMd, err)
 	}
 
-	// Table rows and in-text mentions both count; the set collapses repeats.
+	// rowSet holds first-column names only: a mention in another metric's
+	// alert cue is not documentation. docSet holds every mention.
+	rowName := regexp.MustCompile("(?m)^\\|\\s*`(naozhi_[a-z0-9_]+)`\\s*\\|")
+	rowSet := make(map[string]struct{})
+	for _, m := range rowName.FindAllSubmatch(body, -1) {
+		rowSet[string(m[1])] = struct{}{}
+	}
 	docName := regexp.MustCompile("`(naozhi_[a-z0-9_]+)`")
 	docSet := make(map[string]struct{})
 	for _, m := range docName.FindAllSubmatch(body, -1) {
@@ -43,7 +50,7 @@ func TestCountersDocSyncedWithPprofMd(t *testing.T) {
 
 	var missingInDoc, extraInDoc []string
 	for name, file := range codeSet {
-		if _, ok := docSet[name]; !ok {
+		if _, ok := rowSet[name]; !ok {
 			missingInDoc = append(missingInDoc, name+" ("+file+")")
 		}
 	}
@@ -56,7 +63,7 @@ func TestCountersDocSyncedWithPprofMd(t *testing.T) {
 	sort.Strings(extraInDoc)
 
 	if len(missingInDoc) > 0 {
-		t.Errorf("metrics registered in code but missing from docs/ops/pprof.md:\n  %s\nadd a row (semantics + alert cue) to the counter or gauge table.", strings.Join(missingInDoc, "\n  "))
+		t.Errorf("metrics registered in code without a table row in docs/ops/pprof.md:\n  %s\nadd a row (semantics + alert cue) to the counter or gauge table.", strings.Join(missingInDoc, "\n  "))
 	}
 	if len(extraInDoc) > 0 {
 		t.Errorf("metrics in docs/ops/pprof.md but registered nowhere in code:\n  %s\ndelete the rows of renamed/removed metrics or restore the code.", strings.Join(extraInDoc, "\n  "))

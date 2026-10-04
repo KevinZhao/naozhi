@@ -174,7 +174,7 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_node_insecure_reverse_upgrade_total` | 反向节点经明文 HTTP、从非 loopback 地址完成升级的次数（首帧的 bearer token 走明文；#1026） | **稳态应为 0**；非零 = 该节点链路需要上 TLS |
 | `naozhi_upstream_reqsem_wait_total` | 节点侧反向 RPC 请求没抢到非阻塞 reqSem、只能阻塞等待的次数 | 它占请求总数的比例就是饱和度；持续几个百分点 = 调大容量，或找慢的 handleRequest（常见是 send 现场 spawn 会话） |
 
-本文档的"完整性"由 `internal/metrics/metrics_doc_sync_test.go` 锁定：它扫描全仓非测试 `.go` 文件里注册的每个 `naozhi_*` 指标（counter 和 gauge 都算，不限于 `internal/metrics`），与本文档中反引号引用的 `naozhi_*` 名字双向比对。任何包新增指标而没补文档行、或文档留着已删除的名字，CI 都会红，报错里带声明它的文件。
+本文档的"完整性"由 `internal/metrics/metrics_doc_sync_test.go` 锁定：它扫描全仓非测试 `.go` 文件里注册的每个 `naozhi_*` 指标（counter 和 gauge 都算，不限于 `internal/metrics`），双向比对：每个注册的指标必须有一行以它为首列的表格行（只出现在别的指标的告警线索里不算），本文档里任何位置反引号引用的 `naozhi_*` 名字都必须仍在代码里注册。任何包新增指标而没补文档行、或文档留着已删除的名字，CI 都会红，报错里带声明它的文件。
 
 ### 启动阶段 gauge（RNEW-OPS-414）
 
@@ -281,7 +281,7 @@ ssh ec2-user@prod-host 'curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1
 ### 回归契约
 
 - `internal/metrics/metrics_test.go`: 锁 expvar 名 / Add 语义 / JSON shape
-- `internal/metrics/metrics_doc_sync_test.go`: 对比 `docs/ops/pprof.md` 中的 `naozhi_*` 名与全仓非测试代码注册的集合（`expvar.NewInt` / `NewMap` / `NewFloat` / `NewLabeledCounter` / `NewLabeledGauge`），漏/多均失败；同名重复注册也失败
+- `internal/metrics/metrics_doc_sync_test.go`: 对比 `docs/ops/pprof.md` 表格首列的 `naozhi_*` 名（代码→文档方向）及全文反引号引用（文档→代码方向）与全仓非测试代码注册的集合（`expvar.NewInt` / `NewMap` / `NewFloat` / `NewLabeledCounter` / `NewLabeledGauge`），漏/多均失败；同名重复注册也失败
 - `internal/metrics/counter_wiring_contract_test.go`: source-grep 锁 call site + WSAuthFail 两分支 ≥2 次
 - `internal/server/debug_expvar_test.go`: 锁 auth 401 / 非 loopback 403 / loopback+auth 返 JSON 含已注册 counter + stdlib memstats
 - `cmd/naozhi/doctor_test.go`: `checkExpvar` 覆盖 pass/fail/warn/no-token 4 档
