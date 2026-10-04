@@ -173,6 +173,19 @@ func (s *Scheduler) deliverFailureNotice(rc runCtx, errClass ErrorClass, state R
 		failureNoticeBody(errClass, state, rc.runID, timeout)+autoPauseNoticeSuffix(rc.snap, pausedAfter)))
 }
 
+// deliverPauseNotice announces that the failure of a run with no per-run
+// notice (a restart-orphaned sandbox run, an adopted turn) auto-paused its job.
+// The target is resolved from a fresh snapshot of the now-paused job.
+func (s *Scheduler) deliverPauseNotice(rc runCtx, errClass ErrorClass, state RunState, timeout time.Duration, paused int) {
+	snap, ok := s.tbl.runSnapshot(rc.jobID)
+	if !ok {
+		return
+	}
+	rc.snap = snap
+	rc.notifyTo = s.resolveNotifyTarget(snap.platName, snap.chatID, snap.notifyPlat, snap.notifyChat, snap.notify)
+	s.deliverFailureNotice(rc, errClass, state, timeout, paused)
+}
+
 // formatNoticeBudget renders d without Duration.String's zero tails
 // ("5m", "1h", "1m30s" rather than "5m0s", "1h0m0s").
 func formatNoticeBudget(d time.Duration) string {

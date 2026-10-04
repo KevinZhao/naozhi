@@ -461,21 +461,8 @@ func (s *Scheduler) finishOrphanRun(p sandboxstore.Pending, js orphanJobSnapshot
 		sandbox: true,
 	})
 	if paused > 0 {
-		s.deliverOrphanPauseNotice(rc, paused)
+		s.deliverPauseNotice(rc, orphanTerminalErrClass, orphanTerminalState, s.sandboxRunBudget(), paused)
 	}
-}
-
-// deliverOrphanPauseNotice announces that a reconciled orphan's failure
-// auto-paused its job. Orphans send no per-run notice, so the notice target
-// is resolved here from a fresh snapshot of the now-paused job.
-func (s *Scheduler) deliverOrphanPauseNotice(rc runCtx, paused int) {
-	snap, ok := s.tbl.runSnapshot(rc.jobID)
-	if !ok {
-		return
-	}
-	rc.snap = snap
-	rc.notifyTo = s.resolveNotifyTarget(snap.platName, snap.chatID, snap.notifyPlat, snap.notifyChat, snap.notify)
-	s.deliverFailureNotice(rc, orphanTerminalErrClass, orphanTerminalState, s.sandboxRunBudget(), paused)
 }
 
 // removeReconciledPending drops the pending file once reconcile has

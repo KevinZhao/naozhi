@@ -324,23 +324,23 @@ func (s *Scheduler) readRunInflightMarker(path string) (runInflightMarker, bool)
 // finishRestartedRun ends a run the previous process started, through the same
 // finishRun every live run ends in: Job.LastRunAt / LastResult / counters,
 // the run_ended frame, the per-state metrics, the sanitised history record and
-// the marker removal all happen exactly as for a local finish (#2799). Before
-// this, both restart paths appended a CronRun directly, so the job card kept
-// showing the run from before the restart while the history already had a
-// newer one.
+// the marker removal all happen exactly as for a local finish (#2799).
 //
 // The run has no execution context in this process, so rc carries only its
-// identity, which is all a runCtx holds of its job anyway: recordTerminalResult
-// resolves the table's own object by that ID.
+// identity: recordTerminalResult resolves the table's own object by that ID.
 // finalizer is the adoption's gate holder, or nil for an interrupted run,
-// which never claimed one.
+// which never claimed one. Such a run sends no per-run notice, but a failure
+// that auto-pauses the job still announces the pause.
 func (s *Scheduler) finishRestartedRun(m runInflightMarker, finalizer *runFinalizer, out runOutcome) {
-	s.finishRun(runCtx{
+	rc := runCtx{
 		jobID:     m.JobID,
 		runID:     m.RunID,
 		startedAt: time.UnixMilli(m.StartedAtMS),
 		trigger:   m.Trigger,
 		finalizer: finalizer,
 		snap:      jobSnapshot{prompt: m.Prompt, workDir: m.WorkDir, fresh: m.Fresh},
-	}, out)
+	}
+	if paused := s.finishRun(rc, out); paused > 0 {
+		s.deliverPauseNotice(rc, out.errClass, out.state, adoptionWaitBudget, paused)
+	}
 }

@@ -89,7 +89,7 @@ func (s *Scheduler) adoptRun(m runInflightMarker, run InFlightRun, inflight *run
 		case err == nil && adopted.Completed && adopted.TurnErr != nil:
 			out.state = RunStateFailed
 			out.errClass = ErrClassTurnFailed
-			out.errMsg = sanitiseRunErrMsg(adopted.TurnErr.Error())
+			out.errMsg = "send error: " + sanitiseRunErrMsg(adopted.TurnErr.Error())
 		case err == nil && adopted.Completed:
 			out.state = RunStateSucceeded
 			out.result = adopted.Text

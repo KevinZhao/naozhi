@@ -88,8 +88,44 @@ func TestAdoption_FailedTurnRecordsTurnFailed(t *testing.T) {
 	if got.State != RunStateFailed || got.ErrorClass != ErrClassTurnFailed {
 		t.Errorf("got (%s, %s), want (failed, turn_failed)", got.State, got.ErrorClass)
 	}
-	if !strings.Contains(got.ErrorMsg, "error_max_turns") {
-		t.Errorf("ErrorMsg = %q, want the failure detail", got.ErrorMsg)
+	if !strings.HasPrefix(got.ErrorMsg, "send error: cron: turn failed") || !strings.Contains(got.ErrorMsg, "error_max_turns") {
+		t.Errorf("ErrorMsg = %q, want the local path's shape with the failure detail", got.ErrorMsg)
 	}
 	s.gcWG.Wait()
+}
+
+// TestAdoption_FailedTurnThatPausesAnnouncesIt: an adopted run sends no
+// per-run notice, but when its failed turn auto-pauses the job the pause is
+// still announced to the job's notify target.
+func TestAdoption_FailedTurnThatPausesAnnouncesIt(t *testing.T) {
+	t.Parallel()
+	router := &adoptingRouter{verdicts: map[string]AdoptVerdict{}, runs: map[string]*fakeInFlightRun{}}
+	s, jobID, runID, _ := seedMarkedRun(t, router, 0)
+	s.autoPauseAfter = 1
+	ns := &recordingNotifySender{}
+	s.configMapsPtr.Store(&cronConfigMaps{notifySender: ns})
+	s.editJobForTest(t, jobID, func(j *Job) { j.NotifyPlatform, j.NotifyChatID = "feishu", "chat-1" })
+	key := "cron:" + jobID
+	run := &fakeInFlightRun{
+		outcome: AdoptedRunOutcome{
+			Completed: true, SubType: "error_max_turns",
+			TurnErr: fmt.Errorf("%w (error_max_turns)", ErrTurnFailed),
+		},
+		ready: make(chan struct{}),
+	}
+	router.verdicts[key] = AdoptLive
+	router.runs[key] = run
+
+	s.reconcileRunInflight()
+	close(run.ready)
+	waitRun(t, s, jobID, runID)
+	s.gcWG.Wait()
+
+	if !s.jobForTest(t, jobID).Paused {
+		t.Fatal("the adopted failure did not pause the job")
+	}
+	want := "执行失败（后端报告本轮出错），请检查执行历史 · run " + runID[:8] + "；已连续失败 1 次，任务已自动暂停"
+	if got := ns.noticesAfter(s); len(got) != 1 || !strings.Contains(got[0], want) {
+		t.Errorf("notices = %q, want one containing %q", got, want)
+	}
 }
