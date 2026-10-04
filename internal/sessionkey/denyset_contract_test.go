@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // denySetLiteral matches the invisible-class codepoints of the session-key
@@ -53,7 +55,7 @@ func TestDenySetLiteralsLiveOnlyInSessionkey(t *testing.T) {
 		}
 		name := d.Name()
 		if d.IsDir() {
-			if path != root && (strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" || name == "testdata") {
+			if testhelper.SkipRepoDir(root, path, d) {
 				return filepath.SkipDir
 			}
 			return nil

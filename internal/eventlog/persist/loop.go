@@ -99,11 +99,8 @@ func (p *Persister) run() {
 						// Unlink finished during shutdown: replay its deferred batches
 						// so a clean Stop does not lose them. Match-and-delete as live.
 						if cur, ok := p.dropping[o.stem]; ok && cur.done == o.ch {
-							pending := cur.pending
 							delete(p.dropping, o.stem)
-							for _, job := range pending {
-								p.handleBatch(job, p.opts.Clock())
-							}
+							p.replayDeferred(cur)
 						}
 						continue
 					}
@@ -134,22 +131,23 @@ func (p *Persister) replayDroppingPending() {
 	// Snapshot, then delete every dropping entry BEFORE replaying: handleBatch
 	// gates on p.dropping[stem] and would otherwise re-defer into the same
 	// dropState. A late opDropDone then finds no entry and is a no-op.
-	type stemPending struct {
-		stem    string
-		pending []batchJob
-	}
-	snapshot := make([]stemPending, 0, len(p.dropping))
+	snapshot := make([]*dropState, 0, len(p.dropping))
 	for stem, ds := range p.dropping {
-		snapshot = append(snapshot, stemPending{stem: stem, pending: ds.pending})
+		snapshot = append(snapshot, ds)
+		delete(p.dropping, stem)
 	}
-	for _, sp := range snapshot {
-		delete(p.dropping, sp.stem)
+	for _, ds := range snapshot {
+		p.replayDeferred(ds)
 	}
-	for _, sp := range snapshot {
-		for _, job := range sp.pending {
-			p.handleBatch(job, p.opts.Clock())
-		}
+}
+
+// replayDeferred replays the batches deferred behind ds's unlink, then holds
+// the tally of those dropped past its cap, which arrived after all of them.
+func (p *Persister) replayDeferred(ds *dropState) {
+	for _, job := range ds.pending {
+		p.handleBatch(job, p.opts.Clock())
 	}
+	p.holdGap(ds.gapKey, ds.gap)
 }
 
 // shutdownAll flushes then closes every writer so a clean Stop loses no
@@ -284,12 +282,9 @@ func (p *Persister) handleOp(o op) {
 		}
 		// Delete BEFORE replaying so the replayed writerFor opens the
 		// recreated file instead of re-deferring into the retired dropState.
-		pending := cur.pending
 		delete(p.dropping, o.stem)
-		for _, job := range pending {
-			p.handleBatch(job, p.opts.Clock())
-		}
-		if len(pending) > 0 {
+		p.replayDeferred(cur)
+		if len(cur.pending) > 0 {
 			p.lastDrainNS.Store(p.opts.Clock().UnixNano())
 		}
 		return
