@@ -4,6 +4,8 @@ package cli
 // frames, replaced by the shim's own tail when cli_exited carries one.
 
 import (
+	"strings"
+
 	"github.com/naozhi/naozhi/internal/shim"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -38,18 +40,31 @@ func (p *Process) adoptExitStderrTail(frameTail []string) []string {
 }
 
 // stderrTailSummary is the first error line of tail (shim.IsStderrErrorLine),
-// else its first line, capped at stderrSummaryRunes for one-line error text;
-// "" when tail is empty.
+// else its first line that is not a warning, else its first line, capped at
+// stderrSummaryRunes for one-line error text; "" when tail is empty.
 func stderrTailSummary(tail []string) string {
 	if len(tail) == 0 {
 		return ""
 	}
-	line := tail[0]
+	line := ""
 	for _, l := range tail {
 		if shim.IsStderrErrorLine(l) {
 			line = l
 			break
 		}
+		if line == "" && !isStderrWarningLine(l) {
+			line = l
+		}
+	}
+	if line == "" {
+		line = tail[0]
 	}
 	return textutil.TruncateRunes(line, stderrSummaryRunes)
+}
+
+// isStderrWarningLine reports whether line is a warning the CLI or node
+// printed and ran on past, e.g. "claude: warning: failed to merge user
+// --settings: ..." or node's "(node:42) DeprecationWarning: ...".
+func isStderrWarningLine(line string) bool {
+	return strings.Contains(strings.ToLower(line), "warning:")
 }

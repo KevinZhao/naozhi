@@ -126,9 +126,10 @@ type Process struct {
 	deathReason atomic.Pointer[string]
 	// stderrTail is the CLI's last stderr lines (see process_stderr.go).
 	stderrTail shim.StderrTail
-	// sawOutput is set once the CLI writes stdout (an event, or an Init
-	// handshake line); exited is the error for a non-zero cli_exited
-	// (exit_classify.go).
+	// sawOutput is set once the CLI is past startup: it wrote stdout (an
+	// event, or an Init handshake line), or naozhi reattached to it
+	// (applyReconnectVerdict); exited is the error for a non-zero
+	// cli_exited (exit_classify.go).
 	sawOutput atomic.Bool
 	exited    atomic.Pointer[clierr.ProcessExitedError]
 

@@ -7,24 +7,26 @@ import (
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // classifyStderr reads what a CLI's stderr tail says made it exit. Matching
 // is on substrings of the CLI's English messages, case-insensitive; a pair of
 // terms must share a line, and a class earlier in the switch wins when lines
-// match several.
+// match several. Warning lines are skipped: the CLI prints them and runs on
+// (a broken --settings file is one), so they name no exit cause.
 func classifyStderr(tail []string) clierr.ExitClass {
-	lines := make([]string, len(tail))
-	for i, l := range tail {
-		lines[i] = strings.ToLower(l)
+	lines := make([]string, 0, len(tail))
+	for _, l := range tail {
+		if !isStderrWarningLine(l) {
+			lines = append(lines, strings.ToLower(l))
+		}
 	}
 	switch {
 	case anyLine(lines, "", "no conversation found"):
 		return clierr.ExitResumeNotFound
 	case anyLine(lines, "mcp", "config", "invalid", "failed"):
 		return clierr.ExitMCPConfig
-	case anyLine(lines, "settings", "invalid", "parse", "not found"):
-		return clierr.ExitInvalidSettings
 	case anyLine(lines, "", "invalid api key", "please run /login", "authentication", "oauth token has expired", "401 unauthorized"):
 		return clierr.ExitAuth
 	case anyLine(lines, "", "enoent", "no such file or directory", "command not found", "cannot find module"):
@@ -46,6 +48,15 @@ func anyLine(lines []string, need string, oneOf ...string) bool {
 		}
 	}
 	return false
+}
+
+// noteOutput marks the CLI past startup on its first stdout event, except
+// the error_during_execution result claude writes just before exiting when it
+// cannot start (a stale --resume id): that frame is the startup failure.
+func (p *Process) noteOutput(ev clievent.Event) {
+	if ev.Type != "result" || ev.SubType != "error_during_execution" {
+		p.sawOutput.Store(true)
+	}
 }
 
 // recordExit keeps the error sends get for a CLI that exited with code;

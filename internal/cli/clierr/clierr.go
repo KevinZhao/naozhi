@@ -68,7 +68,6 @@ const (
 	ExitResumeNotFound
 	ExitAuth
 	ExitMCPConfig
-	ExitInvalidSettings
 	ExitMissingRuntime
 )
 

@@ -117,7 +117,7 @@ func exitCode(err error) Code {
 		return CodeResumeUnavailable
 	case clierr.ExitAuth:
 		return CodeCLIAuthFailed
-	case clierr.ExitMCPConfig, clierr.ExitInvalidSettings:
+	case clierr.ExitMCPConfig:
 		return CodeCLIConfigError
 	case clierr.ExitMissingRuntime:
 		return CodeCLIMissingRuntime

@@ -78,8 +78,10 @@ func (a *adoptedTurn) arm() {
 //
 // Three cases, and "nothing was in flight" is one of them: leaving the latch
 // unarmed is what lets a caller tell "no turn to adopt" apart from "a turn that
-// answered nothing".
+// answered nothing". In all three the CLI ran before this naozhi attached, so
+// a later exit is not a startup failure (sawOutput).
 func (p *Process) applyReconnectVerdict(midTurn bool, finished *clievent.Event) {
+	p.sawOutput.Store(true)
 	switch {
 	case midTurn:
 		p.transition(evReconnectMidTurn)

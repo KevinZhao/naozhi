@@ -345,15 +345,13 @@ func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOu
 			return shimDispatchContinue
 		}
 	}
-	if len(events) > 0 {
-		p.sawOutput.Store(true)
-	}
 	// The only multi-event frame today is ACP's stopReason response (assistant
 	// text, result); iterating preserves single-event claude semantics.
 	for _, ev := range events {
 		if ev.Type == "" {
 			continue
 		}
+		p.noteOutput(ev)
 		// control_ack resolves a pending SetModel waiter and must never reach
 		// HandleEvent / ring.EventLog / the dashboard — it is an RPC ack, not
 		// conversation content (docs/rfc/dashboard-model-effort-control.md §4.4).
@@ -557,11 +555,11 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	// legacy eventCh delivery. We still log to ring.EventLog so dashboard
 	// sees the turn-complete event.
 	if ev.Type == "result" && p.caps.Replay {
-		// error_during_execution signals the CLI aborted the turn —
-		// e.g. a priority:"now" preempted it. Any older pending slot
-		// written before `now` that was never replayed was dropped
-		// by the CLI; fire clierr.ErrAbortedByUrgent for those.
-		if ev.SubType == "error_during_execution" {
+		// error_during_execution signals the CLI aborted the turn, e.g. a
+		// priority:"now" preempted it: pending slots it never replayed were
+		// dropped, so their callers get clierr.ErrAbortedByUrgent. Before any
+		// output it is a CLI failing to start, and cli_exited answers them.
+		if ev.SubType == "error_during_execution" && p.sawOutput.Load() {
 			victims := p.reapAbortedPreempted()
 			fireAbortErrors(victims)
 		}
