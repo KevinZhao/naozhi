@@ -85,7 +85,7 @@ test('overview card: ledger USD, credits on their own line, trust flags and heal
     const health = page.locator('.svc-health-line');
     await expect(health.filter({ hasText: '成本账本丢弃 2 条' })).toHaveCount(1);
     await expect(health.filter({ hasText: '1 条未知定价' })).toHaveCount(1);
-    await expect(health.filter({ hasText: '1 个进程中断的轮次' })).toHaveCount(1);
+    await expect(health.filter({ hasText: '1 个进程中断的轮次（按 CLI 实测单价估算）' })).toHaveCount(1);
     expect(mock.costSummaryCalls.some(c => c.group_by === 'unit')).toBe(true);
     expect(pageErrors).toEqual([]);
   } finally {

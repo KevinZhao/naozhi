@@ -114,21 +114,45 @@ func (f *Feishu) startWebSocket() error {
 		return &callback.CardActionTriggerResponse{}, nil
 	})
 
-	cli := larkws.NewClient(f.cfg.AppID, f.cfg.AppSecret,
+	opts := append([]larkws.ClientOption{
 		larkws.WithEventHandler(eventHandler),
 		larkws.WithLogLevel(larkcore.LogLevelInfo),
-	)
+		larkws.WithDomain(f.baseURL),
+	}, wsConnStateOptions(&f.connState)...)
+	cli := larkws.NewClient(f.cfg.AppID, f.cfg.AppSecret, opts...)
 
+	f.connState.Set(platform.ConnConnecting)
 	go func() {
 		defer close(f.done)
 		slog.Info("feishu websocket starting", "app_id", f.cfg.AppID)
-		if err := cli.Start(ctx); err != nil && ctx.Err() == nil {
-			slog.Error("feishu websocket error", "err", err)
+		err := cli.Start(ctx)
+		// With ctx still live, Start returning means the SDK gave up (a
+		// non-retryable error or its reconnect budget ran out): nothing
+		// reconnects until a restart.
+		if ctx.Err() == nil {
+			if err != nil {
+				slog.Error("feishu websocket error", "err", err)
+			}
+			f.connState.Fail(platform.ConnFailed, err)
 		}
 		slog.Info("feishu websocket stopped")
 	}()
 
 	return nil
+}
+
+// wsConnStateOptions feeds t from the larkws lifecycle hooks. OnError reports
+// both a failed reconnect attempt and the final give-up, so it records the
+// error without moving the state; the give-up itself surfaces as Start's return.
+func wsConnStateOptions(t *platform.ConnTracker) []larkws.ClientOption {
+	connected := func() { t.Set(platform.ConnConnected) }
+	return []larkws.ClientOption{
+		larkws.WithOnReady(connected),
+		larkws.WithOnReconnected(connected),
+		larkws.WithOnDisconnected(func() { t.Set(platform.ConnDisconnected) }),
+		larkws.WithOnReconnecting(func() { t.Set(platform.ConnConnecting) }),
+		larkws.WithOnError(t.NoteError),
+	}
 }
 
 // dispatchCardActionTracked runs dispatchCardAction under f.dispatch.TryRun —

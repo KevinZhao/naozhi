@@ -21,7 +21,9 @@ Ratchets only go down: the baselines in `*Baseline*` test constants,
 them, so lower them in the same PR. Raising one needs a line appended to
 `scripts/ratchet-raises.jsonl` citing an issue labelled
 `ratchet-raise-approved`; `go run ./tools/ratchet-raises -base origin/master`
-prints the lines a change needs.
+prints the lines a change needs. A `*Baseline*` constant must be a plain
+integer literal; renaming or deleting one, or moving it to another package,
+is a raise to -1 that needs a ledger line too.
 
 `config.yaml` is gitignored (environment-specific). Use `config.example.yaml`
 as the template: `cp config.example.yaml config.yaml` then fill in real values.
@@ -94,7 +96,7 @@ cmd/naozhi/main.go
   -> i18n         Locale 解析与消息渲染
   -> metrics      进程级计数器（expvar）
   -> runtelemetry 跨子系统 run 生命周期事件类型
-  -> costledger   统一 cost 账本叶子包（按天 JSONL append-only + rollup + 累计差分）
+  -> costledger   统一 cost 账本叶子包（按天 JSONL append-only + rollup + 累计差分 + 按模型学习 CLI 单价）
   -> naozhisettings  naozhi 托管的 Claude settings 文件
   -> uiprefs      Dashboard 展示偏好持久化
   -> registry     插件 / 扩展注册表的 canonical home
@@ -192,6 +194,8 @@ type Protocol interface {
 Platforms implement `Platform` interface and register their own webhook routes via `RegisterRoutes(mux, handler)`. The platform calls `handler(ctx, msg)` when a message arrives -- the server never parses platform-specific formats.
 
 Platforms needing background goroutines implement `RunnablePlatform` with `Start()/Stop()`. Platforms that cannot send interim messages (e.g. WeChat iLink's single-use reply tokens) implement `SupportsInterimMessages() bool` returning false.
+
+Platforms that can observe their own connection implement `ConnStateReporter` (`internal/platform/connstate.go`), fed from SDK lifecycle hooks through a `ConnTracker`; `/health` serves the live state in `platforms` / `platform_conn`, and adapters without it read as `registered`.
 
 | Platform | Transport | Interface |
 |----------|-----------|-----------|

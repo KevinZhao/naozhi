@@ -15,7 +15,6 @@ import (
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
-	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 	"golang.org/x/time/rate"
 )
@@ -230,28 +229,6 @@ func agentIDList(agents map[string]session.AgentOpts) []string {
 		ids = append(ids, id)
 	}
 	return ids
-}
-
-// platformNameSet returns the set of platform names registered with the
-// server. HealthHandler exposes this as a static `platforms` field on
-// /health so probes don't need to walk the live map.
-func platformNameSet(platforms map[string]platform.Platform) map[string]struct{} {
-	out := make(map[string]struct{}, len(platforms))
-	for name := range platforms {
-		out[name] = struct{}{}
-	}
-	return out
-}
-
-// platformStatusMap pre-builds the {name: "registered"} map HealthHandler
-// serves as the /health `platforms` sub-object (registration is fixed at
-// construction).
-func platformStatusMap(names map[string]struct{}) map[string]string {
-	out := make(map[string]string, len(names))
-	for name := range names {
-		out[name] = "registered"
-	}
-	return out
 }
 
 // buildSystemHandlers constructs the /api/system/* group. A nil

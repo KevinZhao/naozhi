@@ -2,6 +2,7 @@ package persist
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/schema"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
@@ -87,9 +89,10 @@ func flushOrFail(t *testing.T, p *Persister) error {
 }
 
 // assertRecoveredLog stops p and checks the on-disk pair is clean (Recover
-// has nothing to repair) and holds exactly wantUUIDs after the header, with
-// strictly increasing seqs.
-func assertRecoveredLog(t *testing.T, p *Persister, dir, key string, wantUUIDs ...string) {
+// has nothing to repair) and holds exactly want after the header, with
+// strictly increasing seqs. A want of "gap:<detail>" is a gap record with
+// that Detail; any other want is an entry's uuid.
+func assertRecoveredLog(t *testing.T, p *Persister, dir, key string, want ...string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 	defer cancel()
@@ -116,12 +119,19 @@ func assertRecoveredLog(t *testing.T, p *Persister, dir, key string, wantUUIDs .
 		}
 		got = append(got, string(r.Entry))
 	}
-	if len(got) != len(wantUUIDs) {
-		t.Fatalf("log holds %d entries, want %d (%v)", len(got), len(wantUUIDs), wantUUIDs)
+	if len(got) != len(want) {
+		t.Fatalf("log holds %d entries, want %d (%v)", len(got), len(want), want)
 	}
-	for i, u := range wantUUIDs {
-		if !strings.Contains(got[i], `"`+u+`"`) {
-			t.Errorf("entry %d = %s, want uuid %s", i, got[i], u)
+	for i, w := range want {
+		if detail, ok := strings.CutPrefix(w, "gap:"); ok {
+			var e clievent.EventEntry
+			if err := json.Unmarshal([]byte(got[i]), &e); err != nil || e.Type != gapEntryType || e.Detail != detail {
+				t.Errorf("entry %d = %s, want a gap record with detail %q", i, got[i], detail)
+			}
+			continue
+		}
+		if !strings.Contains(got[i], `"`+w+`"`) {
+			t.Errorf("entry %d = %s, want uuid %s", i, got[i], w)
 		}
 	}
 }
@@ -156,7 +166,7 @@ func TestPersister_ResumesAfterDiskFull_Flush(t *testing.T) {
 	if got := p.Stats().Dropped; got < 1 {
 		t.Errorf("Stats().Dropped = %d, want >= 1 for the event lost to the outage", got)
 	}
-	assertRecoveredLog(t, p, dir, key, "before", "after")
+	assertRecoveredLog(t, p, dir, key, "before", "gap:dropped=1 reason=persist_write_failed", "after")
 }
 
 // TestPersister_ResumesAfterDiskFull_MidBatch: a batch bigger than the log
@@ -202,7 +212,7 @@ func TestPersister_ResumesAfterDiskFull_MidBatch(t *testing.T) {
 	if got := p.Stats().Dropped; got < int64(len(batch)) {
 		t.Errorf("Stats().Dropped = %d, want >= %d for the batch lost to the outage", got, len(batch))
 	}
-	assertRecoveredLog(t, p, dir, key, "before", "after")
+	assertRecoveredLog(t, p, dir, key, "before", "gap:dropped=4 reason=persist_write_failed", "after")
 }
 
 // TestPersister_ResumesAfterDiskFull_Tick: the production path — nobody
@@ -225,7 +235,7 @@ func TestPersister_ResumesAfterDiskFull_Tick(t *testing.T) {
 
 	full.Store(false)
 	sink([]Entry{entry(t, 1700000003000, "after")}, false)
-	assertRecoveredLog(t, p, dir, key, "before", "after")
+	assertRecoveredLog(t, p, dir, key, "before", "gap:dropped=1 reason=persist_write_failed", "after")
 }
 
 // TestNoteFailure_Throttles: a disk that stays full must not log every

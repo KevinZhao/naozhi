@@ -35,7 +35,7 @@ test.beforeEach(async ({ page }) => {
   // The mock server has no /api/sessions/orient route; answer it here with a
   // deliberate delay so `entry.orienting` stays true for ORIENT_DELAY_MS.
   await page.route('**/api/sessions/orient', async (route) => {
-    await new Promise(r => setTimeout(r, ORIENT_DELAY_MS));
+    await new Promise(r => setTimeout(r, ORIENT_DELAY_MS)); // wait-ok: holds orient pending
     await route.fulfill({
       status: 200,
       contentType: 'application/json',

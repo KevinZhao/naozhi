@@ -91,7 +91,7 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 
-	h.subs.release(c, key)
+	h.subs.release(c, key, time.Now().UnixNano())
 
 	c.SendJSON(wsproto.NewError(wsproto.Error{Key: key, Error: "session not found"}))
 }
@@ -103,7 +103,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		// "subscribed" so the client clears _pendingSubscribeKey and can
 		// re-subscribe when a process appears. Release the reserved slot since
 		// there is no real unsub to install.
-		h.subs.release(c, key)
+		h.subs.release(c, key, time.Now().UnixNano())
 
 		snap := sess.Snapshot()
 		c.SendJSON(wsproto.NewSubscribed(wsproto.Subscribed{Key: key, State: snap.State, Reason: "suspended"}))
@@ -130,7 +130,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	// Fast-fail if Shutdown already fired: SubscribeEvents would register on an
 	// EventLog being torn down and the unsub may never run.
 	if h.ctx.Err() != nil {
-		h.subs.release(c, key)
+		h.subs.release(c, key, time.Now().UnixNano())
 		return
 	}
 	// Idempotent: the Linker's OnResolve list accumulates per re-subscribe, but

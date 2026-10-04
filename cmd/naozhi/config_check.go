@@ -349,27 +349,27 @@ func sortedKeys(m map[string][]string) []string {
 // use. Both the daemon framework and image auto-orient shell out with Claude's
 // one-shot argv (`-p --output-format json --setting-sources ""`), so a non-claude
 // default leaves them spawning a binary that cannot parse it — kiro speaks ACP
-// and rejects that argv outright. Before this check the operator learned about it
-// from a per-tick failure mentioning argv, never from anything naming the cause,
-// and the daemon's cost was still booked to "claude".
+// and rejects that argv outright. The backend judged is the one startup binds
+// (startupDefaultBackendID), not cli.backend: with `backends: [kiro, claude]`
+// and no cli.backend, serve hands both features kiro.
 //
 // Static: it reads only cfg, so `naozhi config check` catches it without
-// starting a server. sysession.NewRunner refuses the same combination at
-// construction as defence in depth.
+// starting a server. sysession.NewRunner refuses the same combination too.
 func sysessionBackendDiags(cfg *config.Config) []backendDiag {
-	id := cfg.CLI.Backend
-	if id == "" {
-		id = sysession.BackendClaude
-	}
+	id := startupDefaultBackendID(cfg)
 	if id == sysession.BackendClaude {
 		return nil
+	}
+	why := ""
+	if want := cfg.DefaultBackendID(); want != id {
+		why = fmt.Sprintf(" (default %q is not an enabled, registered cli.backends entry, so startup falls back to %q)", want, id)
 	}
 	var out []backendDiag
 	add := func(key, what string) {
 		out = append(out, backendDiag{Backend: id, SpawnDiag: cli.SpawnDiag{
 			Layer: "caps", Key: key, Action: "ignored",
-			Reason: fmt.Sprintf("%s needs the %q backend's one-shot argv; %q cannot parse it, so %s never runs",
-				what, sysession.BackendClaude, id, what),
+			Reason: fmt.Sprintf("%s needs the %q backend's one-shot argv; %q cannot parse it, so %s never runs%s",
+				what, sysession.BackendClaude, id, what, why),
 		}})
 	}
 	if cfg.Sysession.Enabled {
@@ -379,6 +379,32 @@ func sysessionBackendDiags(cfg *config.Config) []backendDiag {
 		add("image_orient.enabled", "image auto-orient")
 	}
 	return out
+}
+
+// startupDefaultBackendID is the BackendID of the wrapper initBackendWrappers
+// selects as Default: DefaultBackendID when it is an enabled entry with a
+// registered profile, else the first enabled entry that has one (EnabledBackends
+// never yields an empty id). With nothing registered startup fails anyway, and
+// DefaultBackendID is returned.
+// TestStartupDefaultBackendID_MatchesInitBackendWrappers pins the two together.
+func startupDefaultBackendID(cfg *config.Config) string {
+	want := cfg.DefaultBackendID()
+	fallback := ""
+	for _, b := range cfg.EnabledBackends() {
+		if _, ok := backend.Get(b.ID); !ok {
+			continue // startup skips unknown ids
+		}
+		if b.ID == want {
+			return b.ID
+		}
+		if fallback == "" {
+			fallback = b.ID
+		}
+	}
+	if fallback == "" {
+		return want
+	}
+	return fallback
 }
 
 // effectiveProfileEnv is the masked env an access profile's overlay produces
