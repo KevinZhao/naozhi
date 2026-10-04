@@ -70,6 +70,60 @@ test.describe('乐观补丁 vs 迟到的旧 list 响应', () => {
   });
 });
 
+test.describe('迟到的旧响应不得把新 run 换回刚结束的那次', () => {
+  // #3116：list 响应生成于 run_ended(old) / run_started(new) 之前、落地于其后，
+  // 带着 old 的 current_run。两边都有 current_run，只比"有无"的保护会放行，
+  // 抽屉的 run id、运行时长和 live 订阅的 after= 都回到 old。mock 的 list
+  // 故意停在 old 不更新，模拟一个慢 list 事务。
+  /** @type {Awaited<ReturnType<typeof startMockServer>>} */
+  let mock;
+  const JOBS3 = jobs();
+  JOBS3[0].current_run = { run_id: 'run-old', started_at: Date.now() - 3600000, phase: 'running', trigger: 'cron' };
+  test.beforeAll(async () => {
+    mock = await startMockServer({ ws: true, cronJobs: JOBS3, compactCronListDelayMs: 400 });
+  });
+  test.afterAll(() => mock.server.close());
+
+  test('run_ended(old) 后的重拉带回 old 时保留 new', async ({ browser }) => {
+    const ctx = await browser.newContext({ ...desktop });
+    const page = await ctx.newPage();
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    await page.click('#abnav-cron');
+    const row = page.locator('.cj-row[data-cron-id="cron-wire-1"]');
+    await expect(row).toHaveClass(/is-running/);
+
+    const conn = mock.wsConnections[mock.wsConnections.length - 1];
+    const listsBefore = mock.cronListGetCount;
+    // 只有此后发出的 list 请求带这个 prompt：页面上看到它就是旧响应已合并。
+    JOBS3[0].prompt = 'stale list marker';
+    conn.send({
+      type: 'run_ended', subsystem: 'cron', owner_id: 'cron-wire-1',
+      run_id: 'run-old', state: 'succeeded', started_at: JOBS3[0].current_run.started_at,
+      ended_at: Date.now(), duration_ms: 3600000, trigger: 'cron',
+    });
+    // run_ended 的重拉已发出（body 在请求时定格为 old），再推 new。
+    await expect.poll(() => mock.cronListGetCount).toBeGreaterThan(listsBefore);
+    const newStartedAt = Date.now();
+    conn.send({
+      type: 'run_started', subsystem: 'cron', owner_id: 'cron-wire-1',
+      run_id: 'run-new', started_at: newStartedAt, trigger: 'cron', session_id: 'sess-new',
+    });
+    const state = () => page.evaluate(async () => {
+      const m = await import('/static/cron_state.js');
+      const j = m.cronStore.jobs.find(x => x.id === 'cron-wire-1');
+      return { prompt: j && j.prompt, run: j && j.current_run, cleared: m.cronRunClearedAtLocal.get('cron-wire-1') };
+    });
+    await expect.poll(async () => (await state()).prompt, { message: 'run_ended 的重拉应已落地' }).toBe('stale list marker');
+    const merged = await state();
+    expect(merged.run && merged.run.run_id, '旧响应把 new 换回了 old').toBe('run-new');
+    expect(merged.run.started_at).toBe(newStartedAt);
+    expect(merged.cleared && merged.cleared.map(c => c.runId), 'run_ended 应记下被清掉的 run').toEqual(['run-old']);
+    await expect(row).toHaveClass(/is-running/);
+    await ctx.close();
+  });
+});
+
 test.describe('统一 run 帧的 WS 分发', () => {
   /** @type {Awaited<ReturnType<typeof startMockServer>>} */
   let mock;
