@@ -33,8 +33,7 @@ func buildCronLatencyBucketKeys() []string {
 
 var (
 	// CronExecutionDurationBucket is the cumulative bucket map for cron
-	// success-path latency. No `_total` suffix so the docs/ops/pprof.md
-	// doc-sync contract does not demand a per-bucket row.
+	// success-path latency; no `_total` suffix because it is not a counter.
 	CronExecutionDurationBucket = expvar.NewMap("naozhi_cron_execution_duration_ms_bucket")
 
 	// CronExecutionDurationSum accumulates observed milliseconds; divide by

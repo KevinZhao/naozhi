@@ -1,7 +1,10 @@
 package shim
 
 import (
+	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -74,5 +77,58 @@ func TestWaitForReattach_ReconnectThenDone(t *testing.T) {
 	}
 	if got := spawnCalls.Load(); got != 1 {
 		t.Fatalf("spawnClient called %d times; want 1 (single accept)", got)
+	}
+}
+
+// TestWaitForReattach_ServesClientsDuringReconnectWindow: once a reattaching
+// client has taken the first window, a later client (the respawn's retire
+// probe) must still be served, or its dial would hang until the window ends.
+func TestWaitForReattach_ServesClientsDuringReconnectWindow(t *testing.T) {
+	s := &shimServer{done: make(chan struct{})}
+	acceptCh := make(chan net.Conn, 2)
+	var spawnCalls atomic.Int32
+	spawn := func(net.Conn) { spawnCalls.Add(1) }
+
+	for range 2 {
+		left, right := net.Pipe()
+		defer left.Close()
+		defer right.Close()
+		acceptCh <- left
+	}
+
+	doneCh := make(chan struct{})
+	go func() {
+		s.waitForReattach(acceptCh, spawn, "test")
+		close(doneCh)
+	}()
+
+	testhelper.Eventually(t, func() bool {
+		return spawnCalls.Load() == 2
+	}, 2*time.Second, "the second client in the reconnect window was never served")
+	close(s.done)
+
+	select {
+	case <-doneCh:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("waitForReattach did not return after s.done close")
+	}
+}
+
+// TestSaveState_SkippedAfterShutdown: once s.done is closed Run removes the
+// state file, and a departing client's late saveState must not recreate it.
+func TestSaveState_SkippedAfterShutdown(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+	s := &shimServer{
+		cli:       &cliProc{},
+		buffer:    NewRingBuffer(10, 1024),
+		stateFile: stateFile,
+		done:      make(chan struct{}),
+	}
+	close(s.done)
+
+	s.saveState()
+
+	if _, err := os.Stat(stateFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("state file after a post-shutdown saveState: stat err = %v, want ErrNotExist", err)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -40,6 +41,12 @@ type HTTPClient struct {
 
 	relayMu sync.Mutex
 	relay   *wsRelay
+
+	// sessETag and sessCache are the last 200 /api/sessions validator ("" for
+	// none) and its decoded sessions, replaced together, never mutated in place.
+	sessMu    sync.Mutex
+	sessETag  string
+	sessCache []map[string]any
 }
 
 // maxLocalPeerBodyBytes caps request bodies to loopback/private peers; real
@@ -87,6 +94,11 @@ func NewHTTPClient(id, rawURL, token, displayName string) *HTTPClient {
 }
 
 func (n *HTTPClient) doRequest(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
+	return n.doRequestHdr(ctx, method, path, body, nil)
+}
+
+// doRequestHdr is doRequest with extra request headers; hdr may be nil.
+func (n *HTTPClient) doRequestHdr(ctx context.Context, method, path string, body io.Reader, hdr http.Header) (*http.Response, error) {
 	if n.urlErr != nil {
 		return nil, fmt.Errorf("node %s: refusing request to unvalidated peer URL: %w", n.ID, n.urlErr)
 	}
@@ -105,17 +117,47 @@ func (n *HTTPClient) doRequest(ctx context.Context, method, path string, body io
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	for k, vs := range hdr {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
 	return n.httpClient.Do(req)
 }
 
 // FetchSessions fetches sessions from the remote node via GET /api/sessions.
+// Once a 200 carried an ETag it asks with If-None-Match and answers a 304
+// from that body; any failure drops the cache so the next poll fetches in
+// full. The returned maps are fresh at the top level and the caller may set
+// keys on them; nested values are shared with the cache and must not be mutated.
 func (n *HTTPClient) FetchSessions(ctx context.Context) ([]map[string]any, error) {
-	resp, err := n.doRequest(ctx, http.MethodGet, "/api/sessions", nil)
+	n.sessMu.Lock()
+	etag, cached := n.sessETag, n.sessCache
+	n.sessMu.Unlock()
+	var hdr http.Header
+	if etag != "" {
+		hdr = http.Header{"If-None-Match": {etag}}
+	}
+	sessions, err := n.fetchSessions(ctx, hdr, cached)
+	if err != nil {
+		n.storeSessions("", nil)
+		return nil, err
+	}
+	return cloneSessions(sessions), nil
+}
+
+// fetchSessions sends one GET /api/sessions. A 304 returns cached, the body
+// the sent If-None-Match validates; a 304 to an unconditional GET is an error.
+func (n *HTTPClient) fetchSessions(ctx context.Context, hdr http.Header, cached []map[string]any) ([]map[string]any, error) {
+	resp, err := n.doRequestHdr(ctx, http.MethodGet, "/api/sessions", nil, hdr)
 	if err != nil {
 		return nil, fmt.Errorf("fetch sessions from %s: %w", n.ID, err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotModified && hdr != nil {
+		return cached, nil
+	}
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 		return nil, fmt.Errorf("fetch sessions from %s: status %d", n.ID, resp.StatusCode)
@@ -127,7 +169,31 @@ func (n *HTTPClient) FetchSessions(ctx context.Context) ([]map[string]any, error
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode sessions from %s: %w", n.ID, err)
 	}
+	n.storeSessions(resp.Header.Get("ETag"), result.Sessions)
 	return result.Sessions, nil
+}
+
+// storeSessions keeps sessions only under a validator; a body without an
+// ETag is never answered by a 304, so there is nothing to keep it for.
+func (n *HTTPClient) storeSessions(etag string, sessions []map[string]any) {
+	if etag == "" {
+		sessions = nil
+	}
+	n.sessMu.Lock()
+	n.sessETag, n.sessCache = etag, sessions
+	n.sessMu.Unlock()
+}
+
+// cloneSessions copies the slice and each map's top level.
+func cloneSessions(src []map[string]any) []map[string]any {
+	if src == nil {
+		return nil
+	}
+	out := make([]map[string]any, len(src))
+	for i, m := range src {
+		out[i] = maps.Clone(m)
+	}
+	return out
 }
 
 // FetchEvents fetches event entries from the remote node via GET /api/sessions/events.
