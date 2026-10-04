@@ -63,6 +63,27 @@ func (m *Manager) Reconnect(ctx context.Context, key string, lastSeq int64) (*Sh
 	rmu.Lock()
 	defer rmu.Unlock()
 
+	handle, err := m.dialFromStateFile(ctx, key, lastSeq)
+	if err != nil {
+		return nil, err
+	}
+
+	m.mu.Lock()
+	// Same invariant as StartShim: close a raced-in prior handle, never leak it.
+	oldHandle := m.shims[key]
+	m.shims[key] = handle
+	m.mu.Unlock()
+	if oldHandle != nil {
+		oldHandle.Close()
+	}
+
+	return handle, nil
+}
+
+// dialFromStateFile validates key's state file (PID alive, binary identity,
+// socket path) and opens an authenticated connection with its token, replaying
+// from lastSeq. It leaves m.shims alone; the caller holds reconnectKM[key].
+func (m *Manager) dialFromStateFile(ctx context.Context, key string, lastSeq int64) (*ShimHandle, error) {
 	keyHash := KeyHash(key)
 	stateFile := StateFilePath(m.stateDir, keyHash)
 
@@ -104,16 +125,6 @@ func (m *Manager) Reconnect(ctx context.Context, key string, lastSeq int64) (*Sh
 		return nil, err
 	}
 	handle.State = state
-
-	m.mu.Lock()
-	// Same invariant as StartShim: close a raced-in prior handle, never leak it.
-	oldHandle := m.shims[key]
-	m.shims[key] = handle
-	m.mu.Unlock()
-	if oldHandle != nil {
-		oldHandle.Close()
-	}
-
 	return handle, nil
 }
 
