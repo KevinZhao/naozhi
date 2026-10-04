@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -75,12 +76,29 @@ func watchdogCheckInterval(noOutputDur, floor time.Duration) time.Duration {
 // neither has. No-output wins when both have.
 func turnDeadlineVerdict(now, turnStart, lastOutput time.Time, noOutputDur, totalDur time.Duration) (string, error) {
 	if now.Sub(lastOutput) >= noOutputDur {
-		return DeathReasonNoOutputTimeout, fmt.Errorf("%w (%s)", clierr.ErrNoOutputTimeout, noOutputDur)
+		return DeathReasonNoOutputTimeout, &clierr.NoOutputTimeoutError{Timeout: noOutputDur}
 	}
 	if now.Sub(turnStart) >= totalDur {
 		return DeathReasonTotalTimeout, fmt.Errorf("%w (%s)", clierr.ErrTotalTimeout, totalDur)
 	}
 	return "", nil
+}
+
+// turnDeadline is turnDeadlineVerdict whose no-output error also names what
+// went silent: the oldest tool still in flight, or nobody (the model).
+func (p *Process) turnDeadline(now, turnStart, lastOutput time.Time, noOutputDur, totalDur time.Duration) (string, error) {
+	reason, err := turnDeadlineVerdict(now, turnStart, lastOutput, noOutputDur, totalDur)
+	var nt *clierr.NoOutputTimeoutError
+	if errors.As(err, &nt) {
+		if tool, ok := p.tools.oldest(); ok {
+			nt.Tool = tool.name
+			if nt.Tool == "" {
+				nt.Tool = "unknown"
+			}
+			nt.ToolElapsed = now.Sub(tool.started)
+		}
+	}
+	return reason, err
 }
 
 // turnBudgets returns the configured no-output and total budgets, defaulted.
@@ -108,18 +126,21 @@ func (p *Process) passthroughWatchdogTick(now time.Time, noOutputDur, totalDur t
 	if !queued || turnStart.IsZero() {
 		return nil
 	}
-	reason, err := turnDeadlineVerdict(now, turnStart, p.lastOutputAt(), noOutputDur, totalDur)
+	reason, err := p.turnDeadline(now, turnStart, p.lastOutputAt(), noOutputDur, totalDur)
 	if err != nil {
-		p.logWatchdogKill(reason, noOutputDur, totalDur, "passthrough")
+		p.logWatchdogKill(err, noOutputDur, totalDur, "passthrough")
 		p.watchdogKillPassthrough(reason, err)
 	}
 	return err
 }
 
-// logWatchdogKill logs a watchdog kill under the message for its reason.
-func (p *Process) logWatchdogKill(reason string, noOutputDur, totalDur time.Duration, mode string) {
-	if reason == DeathReasonNoOutputTimeout {
-		p.slogger().Error("watchdog: no output timeout", "timeout", noOutputDur, "mode", mode)
+// logWatchdogKill logs a turnDeadline kill under the message for its kind; a
+// no-output kill also logs the in-flight tool err names.
+func (p *Process) logWatchdogKill(err error, noOutputDur, totalDur time.Duration, mode string) {
+	var nt *clierr.NoOutputTimeoutError
+	if errors.As(err, &nt) {
+		p.slogger().Error("watchdog: no output timeout", "timeout", noOutputDur, "mode", mode,
+			"inflight_tool", nt.Tool, "tool_elapsed", nt.ToolElapsed.Round(time.Second))
 		return
 	}
 	p.slogger().Error("watchdog: total timeout", "timeout", totalDur, "mode", mode)

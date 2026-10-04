@@ -19,7 +19,11 @@
 // react to" without giving any caller anything.
 package clierr
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"time"
+)
 
 // ErrMessageTooLarge is returned when a user message (after JSON encoding) would
 // exceed the shim's per-line limit; callers should shrink the payload first.
@@ -30,6 +34,26 @@ var (
 	ErrNoOutputTimeout = errors.New("no output timeout")
 	ErrTotalTimeout    = errors.New("total timeout")
 )
+
+// NoOutputTimeoutError is the error a no-output watchdog kill returns. It
+// matches ErrNoOutputTimeout under errors.Is; errors.As adds what was silent:
+// Tool names the oldest tool still running at the kill (empty when none was,
+// i.e. the model itself went quiet) and ToolElapsed how long it had run.
+type NoOutputTimeoutError struct {
+	Timeout     time.Duration
+	Tool        string
+	ToolElapsed time.Duration
+}
+
+func (e *NoOutputTimeoutError) Error() string {
+	if e.Tool == "" {
+		return fmt.Sprintf("%s (%s)", ErrNoOutputTimeout, e.Timeout)
+	}
+	return fmt.Sprintf("%s (%s, tool %q running %s)", ErrNoOutputTimeout, e.Timeout, e.Tool, e.ToolElapsed.Round(time.Second))
+}
+
+// Unwrap exposes ErrNoOutputTimeout, so every errors.Is classifier keeps working.
+func (e *NoOutputTimeoutError) Unwrap() error { return ErrNoOutputTimeout }
 
 // ErrProcessExited is returned by Send when the CLI subprocess exits before
 // producing a result; callers react by spawning a new process next turn.

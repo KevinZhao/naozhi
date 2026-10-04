@@ -240,7 +240,7 @@ func (p *Process) handleWatchdogTick(
 	turnStartMS int64,
 	noOutputDur, totalDur time.Duration,
 ) (*clievent.SendResult, error) {
-	reason, err := turnDeadlineVerdict(now, turnStart, lastOutput, noOutputDur, totalDur)
+	reason, err := p.turnDeadline(now, turnStart, lastOutput, noOutputDur, totalDur)
 	if err == nil {
 		return nil, nil
 	}
@@ -251,7 +251,7 @@ func (p *Process) handleWatchdogTick(
 	// classification (triggered by shimConn.Close) cannot overwrite the true
 	// root cause; setDeathReason is first-writer-wins.
 	p.setDeathReason(reason)
-	p.logWatchdogKill(reason, noOutputDur, totalDur, "send")
+	p.logWatchdogKill(err, noOutputDur, totalDur, "send")
 	p.Kill()
 	// Clear inflight settle flags so drainStaleEvents' 500ms wait cannot
 	// fire against a watchdog-killed process (#770; see clearInflightFlags).

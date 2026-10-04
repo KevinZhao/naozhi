@@ -8,6 +8,7 @@ package usermsg
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/session"
@@ -87,3 +88,15 @@ func classify(err error, key string) Code {
 // specialises with a concrete duration; kept here next to classify.
 func isNoOutputTimeout(err error) bool { return errors.Is(err, clierr.ErrNoOutputTimeout) }
 func isTotalTimeout(err error) bool    { return errors.Is(err, clierr.ErrTotalTimeout) }
+
+// silentTool reads what a no-output kill found running from a
+// clierr.NoOutputTimeoutError: the tool and how long it had run (empty when the
+// model itself went quiet), plus the budget that applied (0 when err is the
+// bare sentinel).
+func silentTool(err error) (tool string, elapsed, applied time.Duration) {
+	var e *clierr.NoOutputTimeoutError
+	if errors.As(err, &e) {
+		return e.Tool, e.ToolElapsed, e.Timeout
+	}
+	return "", 0, 0
+}
