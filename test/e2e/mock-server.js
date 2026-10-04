@@ -348,6 +348,10 @@ function startMockServer(overrides = {}) {
   // runSnapshots: run_id -> §7.3 input-snapshot payload. Absent ids answer
   // {available:false}, which is what a local (non-sandbox) run really returns.
   const runSnapshots = overrides.runSnapshots || {};
+  // runDetailPatch: run_id -> fields merged over the synthesized run detail,
+  // for detail payloads that disagree with their summary. An undefined value
+  // drops the field from the JSON.
+  const runDetailPatch = overrides.runDetailPatch || {};
   const costSummary = overrides.costSummary || null;
   const cronTrigger = overrides.cronTrigger || null;
   const systemDaemons = overrides.systemDaemons || null;
@@ -1004,6 +1008,7 @@ function startMockServer(overrides = {}) {
       } else if (summary.state === 'skipped') {
         detail.error_msg = 'previous run still in progress';
       }
+      Object.assign(detail, runDetailPatch[runId] || {});
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(detail));
       return;
