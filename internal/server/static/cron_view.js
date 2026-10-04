@@ -949,42 +949,23 @@ function cronApplyRunEnded(msg) {
   renderCronPanel();
 }
 
-// Polling timer that re-renders cron rows so "运行中 Xs" advances each
-// second while at least one job is running. Idle when no jobs are running.
+// Polling timer that advances the "运行中 Xs" labels each second while at
+// least one job is running. Idle when no jobs are running.
 let cronRunningTickTimer = null;
 
-// R243-PERF-8 / #813: per-tick scoped text update.
-//
-// Pre-fix behaviour: ensureCronRunningTick fired renderCronPanel() every
-// second, which rebuilt the *entire* cron list innerHTML (N rows × full
-// HTML strings + onclick wiring) just to advance the elapsed-time text
-// on the running rows. With 50 jobs and any one of them running, that
-// was 50× full-row reflow per second — a measurable jank hot path on
-// modest hardware.
-//
-// Post-fix: the tick walks only `.cj-row.is-running` elements and
-// updates the two text nodes that carry the elapsed label
-// (`.cj-when.running` desktop, `.cj-when-inline.is-running` mobile).
-// Everything else — schedule chip, stats badge, action buttons — is
-// untouched, so the layout never reflows past the elapsed label.
-//
-// Fallback: if no running rows are mounted (the panel was closed between
-// the timer firing and this callback) we DON'T fall back to a full
-// renderCronPanel — the timer's own three-condition guard above already
-// catches that case and clears the interval, so the no-op is correct.
-//
-// Job churn (a row finishes / a new row starts running) is handled by
-// the WS run_started / run_ended (cron) fan-out which calls
-// cronApplyRunStarted / cronApplyRunEnded → renderCronPanel; that path
-// already updates row classes (`is-running` on/off) and is the right
-// place to add/remove rows. The 1Hz tick is therefore *only* responsible
-// for advancing the elapsed text on rows that are already classed
-// is-running, which is exactly the scope of this targeted update.
+// cronRunningTickPaintScoped is the 1Hz tick body (#813). A full
+// renderCronPanel per second rebuilt every row just to advance one label, so
+// the tick only rewrites elapsed text: the running rows' .cj-when.running /
+// .cj-when-inline and the open drawer's .cdr-clock. Rows gaining or losing
+// is-running, and the banner itself appearing or going, stay with
+// run_started / run_ended → renderCronPanel. The drawer can show a running
+// job whose row a filter has hidden, so no running rows is not an early exit.
 function cronRunningTickPaintScoped() {
   const host = document.getElementById('cron-list-items');
   if (!host) return;
   const rows = host.querySelectorAll('.cj-row.is-running');
-  if (!rows.length) return;
+  const banner = document.querySelector('#cron-detail-pane .cron-drawer-running[data-job-id]');
+  if (!rows.length && !banner) return;
   // Build a quick lookup so we don't O(N) scan cronStore.jobs once per row.
   const byId = new Map();
   if (Array.isArray(cronStore.jobs)) {
@@ -1006,6 +987,17 @@ function cronRunningTickPaintScoped() {
     const inlineEl = row.querySelector('.cj-when-inline');
     if (inlineEl && inlineEl.textContent !== label) inlineEl.textContent = label;
   }
+  if (banner) paintCronDrawerClock(banner, byId);
+}
+
+// paintCronDrawerClock advances the drawer banner's .cdr-clock. It keys on the
+// banner's own data-job-id, so the clock ticks the job it was rendered for.
+function paintCronDrawerClock(banner, byId) {
+  const job = byId.get(banner.getAttribute('data-job-id'));
+  const clock = banner.querySelector('.cdr-clock');
+  if (!clock || !job || !job.current_run || !job.current_run.started_at) return;
+  const label = formatRunningElapsed(job.current_run.started_at);
+  if (clock.textContent !== label) clock.textContent = label;
 }
 
 function ensureCronRunningTick() {

@@ -57,7 +57,7 @@ func Delta(raw, prev Cumulative) (Increment, Cumulative) {
 				d.Provider = cur.Provider
 				d.Basis = cur.Basis
 				inc.Models = append(inc.Models, d)
-				inc.Basis = worseBasis(inc.Basis, cur.Basis)
+				inc.Basis = WorseBasis(inc.Basis, cur.Basis)
 			}
 			nb.Canonical, nb.Provider, nb.Basis = cur.Canonical, cur.Provider, cur.Basis
 			next.Models[k] = nb
@@ -166,7 +166,7 @@ func (a Totals) Sub(b Totals) Increment {
 			d.Model = canonicalOr(cur.Canonical, k)
 			d.Provider, d.Basis = cur.Provider, cur.Basis
 			inc.Models = append(inc.Models, d)
-			inc.Basis = worseBasis(inc.Basis, cur.Basis)
+			inc.Basis = WorseBasis(inc.Basis, cur.Basis)
 		}
 	}
 	return inc

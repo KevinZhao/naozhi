@@ -83,7 +83,7 @@ test('30s cap: trailing swipe/lift cannot cancel, hide the overlay or re-toast; 
   await page.addInitScript(stubMedia);
   mock.resetCalls();
   await page.route('**/api/transcribe', async (route) => {
-    await new Promise(r => setTimeout(r, TRANSCRIBE_DELAY_MS));
+    await new Promise(r => setTimeout(r, TRANSCRIBE_DELAY_MS)); // wait-ok: simulated transcribe latency
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ text: '语音内容' }) });
   });
 
