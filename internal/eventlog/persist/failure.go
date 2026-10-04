@@ -77,17 +77,26 @@ func (p *Persister) settleFlush(key string, w *perKeyWriter, stage string, err e
 	}
 }
 
+// dropRestAndRetire handles an I/O error on the ingest path: the batch's
+// remaining rest events are dropped and the poisoned writer retired.
+func (p *Persister) dropRestAndRetire(key string, w *perKeyWriter, rest int, stage string, err error) {
+	p.noteRunDrop(key, rest, gapWriteFailed)
+	w.poisoned = true
+	p.noteFailure(key, stage, err)
+	p.retireWriter(key, w)
+}
+
 // retireWriter closes a poisoned writer and forgets it so the next batch
-// reopens the pair through Recover. Every record still in pendingIdx is
+// reopens the pair through Recover. Every event still in pendingIdx is
 // counted as dropped: Recover truncates the log to the idx edge, so they are
 // lost unless their idx entries reached the file. That makes the count an
 // upper bound: a torn idx append may have landed a few, and after an idx
-// fsync failure the appended entries usually all survive.
+// fsync failure the appended entries usually all survive. Gap records among
+// them are not events; their tallies go back to key's next gap record.
 func (p *Persister) retireWriter(key string, w *perKeyWriter) {
-	if lost := len(w.pendingIdx); lost > 0 {
-		p.droppedCnt.Add(int64(lost))
-		p.opts.Observer.OnDrop(lost)
-	}
+	p.holdGap(key, w.carriedGap)
+	p.noteRunDrop(key, len(w.pendingIdx)-w.carriedGapRecs, gapWriteFailed)
+	w.carriedGap, w.carriedGapRecs = gapTally{}, 0
 	// close() re-reports the latched error; the fds are released regardless.
 	_ = w.close()
 	if p.writers[key] == w {

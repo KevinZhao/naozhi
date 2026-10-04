@@ -285,7 +285,7 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, err
 		// envelope on load as on new, so resume refreshes the manifest cache too.
 		resp, err := p.sendAndWaitResponseMsg(rw, loadReq)
 		if err != nil {
-			return "", fmt.Errorf("acp session/load: %w", err)
+			return "", fmt.Errorf("acp session/load: %w", resumeRejected(err))
 		}
 		p.captureModels(resp.Result)
 		p.storeSessionID(resumeID)

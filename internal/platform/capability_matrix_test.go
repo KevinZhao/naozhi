@@ -37,7 +37,7 @@ func TestCapabilityMatrixIsPinned(t *testing.T) {
 		"slack": {
 			InterimMessages: true, SingleUseReplyToken: false,
 			Reactions: true, QuestionCards: false, Runnable: true,
-			ConnState: false,
+			ConnState: true,
 		},
 		// Weixin is the single-use-reply-token platform (#2136) and the only one
 		// without reactions. It also IMPLEMENTS InterimMessageCapable while

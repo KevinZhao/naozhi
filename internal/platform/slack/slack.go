@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +48,8 @@ type Slack struct {
 	// dispatch bounds concurrent handler goroutines (a noisy workspace could
 	// otherwise OOM naozhi) and lets Stop() drain them.
 	dispatch platform.BoundedDispatch
+	// connState is fed by the socket mode client's lifecycle events.
+	connState platform.ConnTracker
 }
 
 // slackHTTPClient is shared by all Slack adapters. The 10s Timeout matters
@@ -82,6 +86,9 @@ func (s *Slack) MaxReplyLength() int { return s.cfg.MaxReplyLen }
 
 func (s *Slack) SupportsInterimMessages() bool { return true }
 
+// ConnState implements platform.ConnStateReporter; ok=false until Start.
+func (s *Slack) ConnState() (platform.ConnState, bool) { return s.connState.Snapshot() }
+
 // RegisterRoutes is a no-op for Socket Mode (no inbound HTTP needed).
 func (s *Slack) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
 
@@ -109,6 +116,7 @@ func (s *Slack) Start(handler platform.MessageHandler) error {
 	s.done = make(chan struct{})
 	s.handler = handler
 	s.startMu.Unlock()
+	s.connState.Set(platform.ConnConnecting)
 
 	authResp, err := s.api.AuthTest()
 	if err != nil {
@@ -123,6 +131,7 @@ func (s *Slack) Start(handler platform.MessageHandler) error {
 	}
 
 	client := socketmode.New(s.api)
+	runErr := make(chan error, 1)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -130,15 +139,13 @@ func (s *Slack) Start(handler platform.MessageHandler) error {
 	go func() {
 		defer wg.Done()
 		slog.Info("slack socket mode starting")
-		s.eventLoop(ctx, client)
+		s.eventLoop(ctx, client, runErr)
 		slog.Info("slack socket mode stopped")
 	}()
 
 	go func() {
 		defer wg.Done()
-		if err := client.RunContext(ctx); err != nil && ctx.Err() == nil {
-			slog.Error("slack socket mode error", "err", err)
-		}
+		runErr <- client.RunContext(ctx)
 	}()
 
 	go func() {
@@ -290,11 +297,32 @@ func isSlackErrCode(err error, code string) bool {
 	return strings.Contains(err.Error(), code)
 }
 
-func (s *Slack) eventLoop(ctx context.Context, client *socketmode.Client) {
+// eventLoop handles client events until ctx ends. runErr delivers
+// RunContext's return, which is recorded only after the events it had already
+// buffered, so a stale "connecting" cannot land on top of "failed".
+func (s *Slack) eventLoop(ctx context.Context, client *socketmode.Client, runErr <-chan error) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case err := <-runErr:
+			runErr = nil
+			for drained := false; !drained; {
+				select {
+				case evt := <-client.Events:
+					s.handleSocketEvent(ctx, client, evt)
+				default:
+					drained = true
+				}
+			}
+			// RunContext retries every recoverable error itself, so
+			// returning while ctx is live means it gave up (revoked or
+			// invalid token).
+			if err != nil && ctx.Err() == nil {
+				err = redactURLQuery(err)
+				slog.Error("slack socket mode error", "err", err)
+				s.connState.Fail(platform.ConnFailed, err)
+			}
 		case evt, ok := <-client.Events:
 			if !ok {
 				return
@@ -304,8 +332,26 @@ func (s *Slack) eventLoop(ctx context.Context, client *socketmode.Client) {
 	}
 }
 
+// errSlackInvalidAuth stands in for the InvalidAuth event, which carries no error.
+var errSlackInvalidAuth = errors.New("invalid_auth")
+
 func (s *Slack) handleSocketEvent(_ context.Context, client *socketmode.Client, evt socketmode.Event) {
 	switch evt.Type {
+	case socketmode.EventTypeConnecting:
+		s.connState.Set(platform.ConnConnecting)
+	case socketmode.EventTypeConnected, socketmode.EventTypeHello:
+		s.connState.Set(platform.ConnConnected)
+	case socketmode.EventTypeConnectionError:
+		// The client retries after a backoff. Staying "connecting" rather
+		// than alternating with "disconnected" keeps Since at the start of
+		// the outage, which is what a reconnect grace period measures.
+		s.connState.Fail(platform.ConnConnecting, socketEventErr(evt.Data))
+	case socketmode.EventTypeIncomingError:
+		// A read error; when it ends the link the reconnect shows up as
+		// the next Connecting event.
+		s.connState.NoteError(socketEventErr(evt.Data))
+	case socketmode.EventTypeInvalidAuth:
+		s.connState.Fail(platform.ConnFailed, errSlackInvalidAuth)
 	case socketmode.EventTypeEventsAPI:
 		eventsAPI, ok := evt.Data.(slackevents.EventsAPIEvent)
 		if !ok {
@@ -318,6 +364,34 @@ func (s *Slack) handleSocketEvent(_ context.Context, client *socketmode.Client, 
 			s.handleMessage(ev)
 		}
 	}
+}
+
+// socketEventErr extracts the error a socket mode lifecycle event carries.
+func socketEventErr(data any) error {
+	switch d := data.(type) {
+	case *slack.ConnectionErrorEvent:
+		return redactURLQuery(d.ErrorObj)
+	case *slack.IncomingEventError:
+		return redactURLQuery(d.ErrorObj)
+	}
+	return nil
+}
+
+// redactURLQuery drops the query of a URL quoted by a *url.Error in err. The
+// socket mode wss URL carries a connection ticket in its query, and a
+// *url.Error (a malformed URL, say) quotes the URL verbatim.
+func redactURLQuery(err error) error {
+	var ue *url.Error
+	if err == nil || !errors.As(err, &ue) {
+		return err
+	}
+	i := strings.IndexByte(ue.URL, '?')
+	if i < 0 {
+		return err
+	}
+	redacted := ue.URL[:i] + "?<redacted>"
+	msg := strings.ReplaceAll(err.Error(), strconv.Quote(ue.URL), strconv.Quote(redacted))
+	return errors.New(strings.ReplaceAll(msg, ue.URL, redacted))
 }
 
 // slackBotHealCooldown rate-limits the AuthTest self-heal while botID is unknown (#1947).

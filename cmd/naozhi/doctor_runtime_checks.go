@@ -30,49 +30,72 @@ func (d *doctor) loadConfig() (*config.Config, error) {
 	return d.config.cfg, d.config.err
 }
 
-// checkCLIBackends runs the `<path> --version` probe startup runs on every
-// configured backend. A failed default is a fail (startup exits when no
-// sibling answers; otherwise every default-bound spawn errors), a failed
-// sibling is a warn. A default id with no runtime is graded on the entry
-// startup falls back to (the first registered one). Paths resolve as the
-// invoking user, not the service user.
-func (d *doctor) checkCLIBackends() {
-	cfg, err := d.loadConfig()
-	if err != nil {
-		d.add("cli backend", "pass", "skipped (config not loaded; see `naozhi config check`)")
-		return
+// backendProbe is one enabled backend's startup --version probe; known is
+// false for an id with no registered Profile, which startup skips unprobed.
+type backendProbe struct {
+	id, path, version string
+	known             bool
+}
+
+// probeBackends runs the startup --version probe on cfg's enabled backends
+// once per run: checkCLIBackends grades the results and renderBackendsSection
+// prints them, so the two cannot disagree. path is the resolved CLI path.
+func (d *doctor) probeBackends(cfg *config.Config) []backendProbe {
+	if d.backends != nil {
+		return *d.backends
 	}
 	backend.EnsureDefaults()
-	defaultID := cfg.DefaultBackendID()
-	type result struct {
-		id, path, version string
-		known             bool
-	}
-	var results []result
-	anyHealthy, defaultKnown := false, false
-	fallback := -1
+	var results []backendProbe
 	for _, b := range cfg.EnabledBackends() {
 		profile, ok := backend.Get(b.ID)
 		if !ok {
-			results = append(results, result{id: b.ID, path: b.Path})
+			results = append(results, backendProbe{id: b.ID, path: b.Path})
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 		w := cli.NewWrapperLazy(b.Path, profile.NewProtocol(backend.ProtocolDeps{}), b.ID)
 		v := w.Probe(ctx)
 		cancel()
-		anyHealthy = anyHealthy || v != ""
-		defaultKnown = defaultKnown || b.ID == defaultID
-		if fallback < 0 {
-			fallback = len(results)
+		results = append(results, backendProbe{id: b.ID, path: w.CLIPath, version: v, known: true})
+	}
+	d.backends = &results
+	return results
+}
+
+// noBackendPath stands in for an empty resolved CLI path.
+const noBackendPath = "(no path configured and none found on the install paths / $PATH)"
+
+// checkCLIBackends grades the startup --version probe of every configured
+// backend. A failed default is a fail (startup exits when no sibling answers;
+// otherwise every default-bound spawn errors), a failed sibling is a warn. A
+// default id with no runtime is graded on the entry startup falls back to
+// (the first registered one). Paths resolve as the invoking user, not the
+// service user.
+func (d *doctor) checkCLIBackends() {
+	cfg, err := d.loadConfig()
+	if err != nil {
+		d.add("cli backend", "pass", "skipped (config not loaded; see `naozhi config check`)")
+		return
+	}
+	defaultID := cfg.DefaultBackendID()
+	results := d.probeBackends(cfg)
+	anyHealthy, defaultKnown := false, false
+	fallback := -1
+	for i, r := range results {
+		if !r.known {
+			continue
 		}
-		results = append(results, result{id: b.ID, path: w.CLIPath, version: v, known: true})
+		anyHealthy = anyHealthy || r.version != ""
+		defaultKnown = defaultKnown || r.id == defaultID
+		if fallback < 0 {
+			fallback = i
+		}
 	}
 	for _, r := range results {
 		category := "cli backend " + r.id
 		path := r.path
 		if path == "" {
-			path = "(no path configured and none found on the install paths / $PATH)"
+			path = noBackendPath
 		}
 		switch {
 		case !r.known && r.id == defaultID:

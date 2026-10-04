@@ -24,33 +24,13 @@ type sessionSink struct {
 	// pendingGap counts entries this sink dropped since its last successful
 	// hand-off. The drop site cannot leave a durable mark itself — the channel
 	// is full, and pushing a marker into the same channel would drop with the
-	// batch — so the NEXT batch that does get through carries a gap record in
-	// front (#2664). Reading events/<key> then distinguishes "no messages in
-	// this span" from "a batch was dropped here", which droppedCnt (process
-	// memory, reset on restart) and one Warn line (log retention) never could.
+	// batch — so the NEXT batch that does get through carries the count, and
+	// handleBatch writes a gap record in front of it (gap.go). Reading
+	// events/<key> then distinguishes "no messages in this span" from "a batch
+	// was dropped here", which droppedCnt (process memory, reset on restart)
+	// and one Warn line (log retention) never could.
 	pendingGap atomic.Int64
 }
-
-// gapEntryJSON is the persisted gap record's body: EventEntry-shaped JSON built
-// by hand because persist deliberately does not import clievent. Field names
-// must match clievent.EventEntry's json tags — the linkage is pinned by
-// TestGapEntryShape_MatchesEventEntry.
-//
-// It has no uuid on purpose: the record shares Time with the batch it fronts,
-// and an empty UUID sorts first under merged's (Time, UUID) order, keeping the
-// record ahead of its batch and local sorted for mergeDedup's fast path.
-// Readers exempt it from missing-UUID checks by Type.
-type gapEntryJSON struct {
-	Time    int64  `json:"time"`
-	Type    string `json:"type"`
-	Summary string `json:"summary,omitempty"`
-	Detail  string `json:"detail,omitempty"`
-}
-
-// gapEntryType is the EventEntry.Type of a persistence-gap record, owned by
-// schema so readers share it. Additive: consumers that do not know it render
-// the summary text through their default branch (event_render.js eventHtml).
-const gapEntryType = schema.GapEntryType
 
 func (s *sessionSink) accept(entries []Entry, replayPhase bool) {
 	p := s.p
@@ -70,32 +50,17 @@ func (s *sessionSink) accept(entries []Entry, replayPhase bool) {
 	if len(entries) == 0 {
 		return
 	}
+	// Swap-and-restore: if THIS batch also drops, the count goes back (plus
+	// the batch) rather than vanishing.
+	gapN := s.pendingGap.Swap(0)
+
 	// Entry.JSON and the entries slice are borrowed — the producer may reuse
 	// them as soon as accept returns — so copy every body into one pooled
 	// arena and materialise our own headers (#1524). Two passes: append all
 	// bytes first (the buffer may grow and move), then resolve sub-slices.
 	// owned/spans come from the same arena rather than make() (#1630).
-	// A pending gap from earlier drops rides in front of this batch: its
-	// timestamp is this batch's first entry, so the gap reads as "between the
-	// previous persisted record and this one" — the granularity a reader needs.
-	// Swap-and-restore: if THIS batch also drops, the count goes back (plus the
-	// batch) rather than vanishing.
-	gapN := s.pendingGap.Swap(0)
-	var gapJSON []byte
-	if gapN > 0 {
-		gapJSON, _ = json.Marshal(gapEntryJSON{
-			Time:    entries[0].TimeMS,
-			Type:    gapEntryType,
-			Summary: fmt.Sprintf("事件缺口：持久化过载，此前丢弃 %d 条事件", gapN),
-			Detail:  fmt.Sprintf("dropped=%d reason=persist_channel_full", gapN),
-		})
-	}
-
 	arena := entryArenaPool.Get().(*batchArena)
 	n := len(entries)
-	if gapJSON != nil {
-		n++
-	}
 	owned := arena.owned
 	if cap(owned) >= n {
 		owned = owned[:n]
@@ -110,24 +75,17 @@ func (s *sessionSink) accept(entries []Entry, replayPhase bool) {
 	}
 	arena.owned = owned
 	arena.spans = spans
-	off := 0
-	if gapJSON != nil {
-		arena.buf.Write(gapJSON)
-		spans[0] = arenaSpan{start: 0, end: arena.buf.Len()}
-		owned[0] = Entry{TimeMS: entries[0].TimeMS}
-		off = 1
-	}
 	for i, e := range entries {
 		start := arena.buf.Len()
 		arena.buf.Write(e.JSON)
-		spans[i+off] = arenaSpan{start: start, end: arena.buf.Len()}
-		owned[i+off] = Entry{TimeMS: e.TimeMS}
+		spans[i] = arenaSpan{start: start, end: arena.buf.Len()}
+		owned[i] = Entry{TimeMS: e.TimeMS}
 	}
 	all := arena.buf.Bytes()
 	for i := range owned {
 		owned[i].JSON = all[spans[i].start:spans[i].end]
 	}
-	job := batchJob{Key: s.key, Stem: s.stem, Entries: owned, arena: arena}
+	job := batchJob{Key: s.key, Stem: s.stem, Entries: owned, arena: arena, gapN: gapN}
 	select {
 	case p.in <- job:
 	default:
@@ -157,13 +115,7 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 	// takes the channel-full drop path (#1848).
 	if ds, ok := p.dropping[job.Stem]; ok {
 		if len(ds.pending) >= droppingPendingMaxBatches {
-			putEntryArena(job.arena)
-			n := len(job.Entries)
-			p.droppedCnt.Add(int64(n))
-			p.opts.Observer.OnDrop(n)
-			slog.Warn("event log persist: dropping-stem pending cap reached; dropping batch",
-				"key", job.Key, "stem", job.Stem, "count", n,
-				"pending", len(ds.pending))
+			p.dropDeferral(ds, job)
 			return
 		}
 		ds.pending = append(ds.pending, job)
@@ -175,9 +127,8 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 	defer putEntryArena(job.arena)
 	w, err := p.writerFor(job.Key, job.Stem)
 	if err != nil {
-		n := len(job.Entries)
-		p.droppedCnt.Add(int64(n))
-		p.opts.Observer.OnDrop(n)
+		p.holdGap(job.Key, gapTally{n: job.gapN, cause: gapChannelFull})
+		p.noteRunDrop(job.Key, len(job.Entries), gapWriteFailed)
 		p.noteFailure(job.Key, "open writer", err)
 		return
 	}
@@ -185,63 +136,36 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 	// One pooled buffer for the whole batch amortises json's encodeState alloc.
 	encBuf := recordBufPool.Get().(*bytes.Buffer)
 	defer putRecordBuf(encBuf)
-	var written int
-	// One stack Record reused per entry: MarshalRecordInto only reads it
+	// One Record reused per entry: MarshalRecordInto only reads it
 	// synchronously and never retains the pointer (#2088).
 	var rec schema.Record
+	if err := p.writeGapRecord(job, w, encBuf, &rec); err != nil {
+		p.dropRestAndRetire(job.Key, w, len(job.Entries), "write gap record", err)
+		return
+	}
+	var written int
 	for i, e := range job.Entries {
-		rec.V = schema.WireVersion
-		rec.Seq = w.nextSeq
-		rec.Type = schema.TypeEntry
-		rec.Entry = json.RawMessage(e.JSON)
-		encBuf.Reset()
-		body, err := schema.MarshalRecordInto(encBuf, &rec)
-		if err != nil {
+		err := p.appendRecord(w, encBuf, &rec, e)
+		switch {
+		case err == nil:
+			written++
+		case errors.Is(err, errMarshalRecord):
 			// Over-size / malformed — count and drop just this entry.
 			p.malformedCnt.Add(1)
 			p.opts.Observer.OnMalformed()
 			slog.Warn("event log persist: marshal entry failed",
 				"key", job.Key, "seq", w.nextSeq, "err", err)
-			continue
-		}
-		// Always write through logBuf, never WriteRecordRaw(logFile, ...):
-		// bytes written straight to the fd would land out of order relative
-		// to anything still pending in the bufio buffer.
-		n, err := WriteRecordRaw(w.logBuf, body)
-		if err != nil {
-			if errors.Is(err, ErrEmptyBody) || errors.Is(err, schema.ErrRecordTooLarge) {
-				// Rejected before any byte reached logBuf: drop just this record.
-				p.droppedCnt.Add(1)
-				p.opts.Observer.OnDrop(1)
-				slog.Warn("event log persist: write entry failed",
-					"key", job.Key, "seq", w.nextSeq, "err", err)
-				continue
-			}
+		case recordRejected(err):
+			p.droppedCnt.Add(1)
+			p.opts.Observer.OnDrop(1)
+			slog.Warn("event log persist: write entry failed",
+				"key", job.Key, "seq", w.nextSeq, "err", err)
+		default:
 			// An I/O error is latched in logBuf, so the rest of the batch would
 			// fail the same way: drop it and retire the writer (failure.go).
-			rest := len(job.Entries) - i
-			p.droppedCnt.Add(int64(rest))
-			p.opts.Observer.OnDrop(rest)
-			w.poisoned = true
-			p.noteFailure(job.Key, "write entry", err)
-			p.retireWriter(job.Key, w)
+			p.dropRestAndRetire(job.Key, w, len(job.Entries)-i, "write entry", err)
 			return
 		}
-		// Pending idx entry — we hold it until fsync time to keep
-		// log-before-idx ordering (see recovery.go).
-		w.pendingIdx = append(w.pendingIdx, schema.IdxEntry{
-			Seq:     w.nextSeq,
-			ByteOff: w.bytes,
-			Len:     int32(n),
-			TimeMS:  e.TimeMS,
-		})
-		w.bytes += n
-		w.nextSeq++
-		// entriesSinceIdxWrite is NOT advanced here: it is the stride-cycle
-		// phase of pendingIdx[0], read by flush() as selectForIdx's start and
-		// advanced by len(pendingIdx) mod stride only after a durable idx
-		// sync. Advancing per entry would double-count and break alignment.
-		written++
 	}
 	if written > 0 {
 		p.writtenCnt.Add(int64(written))
@@ -263,6 +187,95 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 				"key", job.Key, "err", err)
 		}
 	}
+}
+
+// errMarshalRecord marks an entry appendRecord could not frame, as opposed to
+// one whose framed bytes could not be written.
+var errMarshalRecord = errors.New("frame entry")
+
+// recordRejected reports a write error that refused one record before any
+// byte reached logBuf, leaving the writer usable.
+func recordRejected(err error) bool {
+	return errors.Is(err, ErrEmptyBody) || errors.Is(err, schema.ErrRecordTooLarge)
+}
+
+// appendRecord frames e as w's next record and writes it into w.logBuf. It
+// always writes through logBuf, never straight to logFile: bytes written to
+// the fd would land out of order relative to anything still buffered. The idx
+// entry is held in pendingIdx until fsync time to keep log-before-idx
+// ordering (see recovery.go).
+func (p *Persister) appendRecord(w *perKeyWriter, encBuf *bytes.Buffer, rec *schema.Record, e Entry) error {
+	rec.V = schema.WireVersion
+	rec.Seq = w.nextSeq
+	rec.Type = schema.TypeEntry
+	rec.Entry = json.RawMessage(e.JSON)
+	encBuf.Reset()
+	body, err := schema.MarshalRecordInto(encBuf, rec)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errMarshalRecord, err)
+	}
+	n, err := WriteRecordRaw(w.logBuf, body)
+	if err != nil {
+		return err
+	}
+	// entriesSinceIdxWrite is NOT advanced here: it is the stride-cycle phase
+	// of pendingIdx[0], advanced by flush() only after a durable idx sync.
+	w.pendingIdx = append(w.pendingIdx, schema.IdxEntry{
+		Seq:     w.nextSeq,
+		ByteOff: w.bytes,
+		Len:     int32(n),
+		TimeMS:  e.TimeMS,
+	})
+	w.bytes += n
+	w.nextSeq++
+	return nil
+}
+
+// writeGapRecord writes key's pending gap, if any, as the record in front of
+// job's entries, and moves the tally onto w until a flush makes it durable.
+// Only an I/O error is returned; on any failure the tally stays pending.
+func (p *Persister) writeGapRecord(job batchJob, w *perKeyWriter, encBuf *bytes.Buffer, rec *schema.Record) error {
+	t := p.runGap[job.Key]
+	t.add(gapTally{n: job.gapN, cause: gapChannelFull})
+	if t.n == 0 {
+		return nil
+	}
+	if len(job.Entries) == 0 {
+		p.runGap[job.Key] = t
+		return nil
+	}
+	body, err := gapRecordJSON(t, job.Entries[0].TimeMS)
+	if err == nil {
+		err = p.appendRecord(w, encBuf, rec, Entry{TimeMS: job.Entries[0].TimeMS, JSON: body})
+	}
+	if err != nil {
+		p.runGap[job.Key] = t
+		if errors.Is(err, errMarshalRecord) || recordRejected(err) {
+			slog.Warn("event log persist: gap record rejected",
+				"key", job.Key, "dropped", t.n, "err", err)
+			return nil
+		}
+		return err
+	}
+	delete(p.runGap, job.Key)
+	w.carriedGap.add(t)
+	w.carriedGapRecs++
+	return nil
+}
+
+// dropDeferral drops a batch for a stem whose deferral FIFO is full. The
+// lost events come after every deferred batch, so the tally waits on ds and
+// joins key's gap only once those batches are replayed.
+func (p *Persister) dropDeferral(ds *dropState, job batchJob) {
+	putEntryArena(job.arena)
+	n := len(job.Entries)
+	p.droppedCnt.Add(int64(n))
+	p.opts.Observer.OnDrop(n)
+	ds.gapKey = job.Key
+	ds.gap.add(gapTally{n: job.gapN + int64(n), cause: gapChannelFull})
+	slog.Warn("event log persist: dropping-stem pending cap reached; dropping batch",
+		"key", job.Key, "stem", job.Stem, "count", n,
+		"pending", len(ds.pending))
 }
 
 // writerFor returns an open perKeyWriter for key, creating or

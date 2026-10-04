@@ -48,7 +48,7 @@ naozhi doctor --timeout 2s
 
 `cli runtime` 到 `dispatch` 五项和 `config-drift` 读的是同一次带 token 的 `GET /health`（整次 doctor 只发一次）。没有 token、token 被拒或 `/health` 不可达时，这五项各输出一行 `skipped (…)`，不计 fail。`/health` 的 `platforms` 只是启动时注册的名字，没有连接状态，所以「平台没连上」只能从 `dispatch` 的入站计数推断：这个计数不含斜杠命令，只收到 `/help` 之类命令（或确实没人发消息）的安静 bot 启动 10 分钟后也会报这条 warn（不影响退出码）；启动时长按本机时钟对比服务端的 `config_loaded_at` 计算，`--addr` 指向远端时两边时钟偏差会让判断提前或推后。
 
-`cli backend <id>` 对 `cli.backends`（或单 backend 的 `cli.path`）里每一项跑一遍启动时同款 `--version` 探测，读的是配置里的路径，不是 `$PATH` 上的默认二进制（后者是下方 `=== CLI Backends ===` 段的内容）。`cli backend`、`transcribe creds`、`transcribe ffmpeg` 都按**运行 doctor 的用户**解析：路径里的 `~`、`$PATH`、AWS 凭证链都可能和 launchd / systemd 下的服务用户不同。`transcribe creds` 和启动时一样，先把 `~/.claude/settings.json` 的 `env`（同一套过滤）补进环境里再查凭证链；但 systemd 的 `Environment=` 和 launchd plist 的 `EnvironmentVariables` 不在 doctor 的环境里。准确结论要以服务用户身份、带着服务的环境变量跑 doctor。配置读不出时这几项输出 `skipped (config not loaded)`，由 `naozhi config check` 负责报错。整次 doctor 只读一次配置。
+`cli backend <id>` 对 `cli.backends`（或单 backend 的 `cli.path`）里每一项跑一遍启动时同款 `--version` 探测，读的是配置里的路径（没配路径时按启动的解析顺序找），不是 `$PATH` 上的默认二进制。下方 `=== CLI Backends ===` 段直接复用这次探测的结果，每个 backend 一次运行只探测一次；只有配置读不出时，这一段才改为列出 `$PATH` 上能找到的 backend。`cli backend`、`transcribe creds`、`transcribe ffmpeg` 都按**运行 doctor 的用户**解析：路径里的 `~`、`$PATH`、AWS 凭证链都可能和 launchd / systemd 下的服务用户不同。`transcribe creds` 和启动时一样，先把 `~/.claude/settings.json` 的 `env`（同一套过滤）补进环境里再查凭证链；但 systemd 的 `Environment=` 和 launchd plist 的 `EnvironmentVariables` 不在 doctor 的环境里。准确结论要以服务用户身份、带着服务的环境变量跑 doctor。配置读不出时这几项输出 `skipped (config not loaded)`，由 `naozhi config check` 负责报错。整次 doctor 只读一次配置。
 
 ## 退出码
 

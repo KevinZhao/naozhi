@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // Counts is the comment budget of a tree: how many comments break each of
@@ -41,17 +43,12 @@ var (
 // count walks root's non-test, non-generated Go files.
 func count(root string) (Counts, error) {
 	c := Counts{Offenders: map[string][]string{}}
-	nested := filepath.Join(root, "naozhi") // an old clone kept inside the main worktree
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			switch d.Name() {
-			case "node_modules", ".git", "testdata", "vendor":
-				return filepath.SkipDir
-			}
-			if path == nested {
+			if testhelper.SkipRepoDir(root, path, d) {
 				return filepath.SkipDir
 			}
 			return nil

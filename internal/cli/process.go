@@ -129,9 +129,10 @@ type Process struct {
 	// sawOutput is set once the CLI is past startup: it wrote stdout (an
 	// event, or an Init handshake line), or naozhi reattached to it
 	// (applyReconnectVerdict); exited is the error for a non-zero
-	// cli_exited (exit_classify.go).
+	// cli_exited and exitedAt its UnixNano time (exit_classify.go).
 	sawOutput atomic.Bool
 	exited    atomic.Pointer[clierr.ProcessExitedError]
+	exitedAt  atomic.Int64
 
 	// log is a pre-bound logger carrying the "session" attribute; set once by
 	// SetSlogKey before the reader goroutines start, so reads are lock-free.
