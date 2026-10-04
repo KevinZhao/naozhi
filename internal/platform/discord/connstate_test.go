@@ -79,11 +79,11 @@ func TestOnReady_StillBackfillsBotID(t *testing.T) {
 	}
 }
 
-// TestConfigureSession_LifecycleHandlersRunInEmissionOrder pins SyncEvents:
+// TestConfigureSession_SyncEvents pins the setting, not the ordering itself:
 // with discordgo's default goroutine per event, the Disconnect of a drop and
 // the Connect of its reconnect race, and a late Disconnect leaves the state
 // "disconnected" on a live link.
-func TestConfigureSession_LifecycleHandlersRunInEmissionOrder(t *testing.T) {
+func TestConfigureSession_SyncEvents(t *testing.T) {
 	t.Parallel()
 	sess, err := discordgo.New("Bot test-token")
 	if err != nil {
