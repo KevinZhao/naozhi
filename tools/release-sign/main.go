@@ -1,12 +1,15 @@
-// Command release-sign signs a release's checksums.txt with the ed25519
-// release key and checks the signature against the trust set embedded in
-// internal/selfupdate at the tag being released (#1738). Clients already
+// Command release-sign signs a release's tag and checksums.txt with the
+// ed25519 release key and checks the signature against the trust set embedded
+// in internal/selfupdate at the tag being released (#1738). Clients already
 // deployed verify with the set they shipped with, which this cannot see.
 // Run from the repo root:
 //
 //	go run ./tools/release-sign keygen | gh secret set NAOZHI_RELEASE_SIGNING_KEY --env release
-//	go run ./tools/release-sign sign -in dist/checksums.txt -out dist/checksums.txt.sig
-//	go run ./tools/release-sign verify -in dist/checksums.txt -sig dist/checksums.txt.sig
+//	go run ./tools/release-sign sign -tag v1.2.3 -in dist/checksums.txt -out dist/checksums.txt.sig
+//	go run ./tools/release-sign verify -tag v1.2.3 -in dist/checksums.txt -sig dist/checksums.txt.sig
+//
+// The signed bytes are selfupdate.SignedPayload(tag, checksums.txt), so a
+// signature only verifies for the tag it was made for.
 //
 // keygen writes the base64 seed to stdout (refusing a terminal, so the seed
 // lands only in the pipe) and the base64 public key to stderr. sign reads the
@@ -63,7 +66,7 @@ func isTerminal(f *os.File) bool {
 
 func run(args []string, e env) int {
 	if len(args) == 0 {
-		fmt.Fprintln(e.stderr, "usage: release-sign keygen | sign -in FILE -out SIG | verify -in FILE -sig SIG")
+		fmt.Fprintln(e.stderr, "usage: release-sign keygen | sign -tag TAG -in FILE -out SIG | verify -tag TAG -in FILE -sig SIG")
 		return 2
 	}
 	switch args[0] {
@@ -97,24 +100,29 @@ func keygen(e env) int {
 	return 0
 }
 
-// pathFlags parses the two required path flags of sign and verify.
-func pathFlags(name string, args []string, e env, a, b string) (string, string, bool) {
+// releaseFlags parses the required -tag and two path flags of sign and verify.
+func releaseFlags(name string, args []string, e env, a, b string) (tag, av, bv string, ok bool) {
 	fl := flag.NewFlagSet(name, flag.ContinueOnError)
 	fl.SetOutput(e.stderr)
-	av := fl.String(a, "", "path")
-	bv := fl.String(b, "", "path")
+	fl.StringVar(&tag, "tag", "", "release tag the signature is bound to")
+	fl.StringVar(&av, a, "", "path")
+	fl.StringVar(&bv, b, "", "path")
 	if err := fl.Parse(args); err != nil {
-		return "", "", false
+		return "", "", "", false
 	}
-	if *av == "" || *bv == "" || fl.NArg() != 0 {
-		fmt.Fprintf(e.stderr, "release-sign: %s needs -%s and -%s\n", name, a, b)
-		return "", "", false
+	if tag == "" || av == "" || bv == "" || fl.NArg() != 0 {
+		fmt.Fprintf(e.stderr, "release-sign: %s needs -tag, -%s and -%s\n", name, a, b)
+		return "", "", "", false
 	}
-	return *av, *bv, true
+	if _, err := selfupdate.SignedPayload(tag, nil); err != nil {
+		fmt.Fprintf(e.stderr, "release-sign: %s: %v\n", name, err)
+		return "", "", "", false
+	}
+	return tag, av, bv, true
 }
 
 func sign(args []string, e env) int {
-	in, out, ok := pathFlags("sign", args, e, "in", "out")
+	tag, in, out, ok := releaseFlags("sign", args, e, "in", "out")
 	if !ok {
 		return 2
 	}
@@ -138,7 +146,12 @@ func sign(args []string, e env) int {
 		fmt.Fprintf(e.stdout, "::error::the key in %s is not in the embedded trust set; clients would refuse its signature\n", signingKeyEnv)
 		return 1
 	}
-	payload, err := os.ReadFile(in)
+	sums, err := os.ReadFile(in)
+	if err != nil {
+		fmt.Fprintln(e.stderr, "release-sign:", err)
+		return 1
+	}
+	payload, err := selfupdate.SignedPayload(tag, sums)
 	if err != nil {
 		fmt.Fprintln(e.stderr, "release-sign:", err)
 		return 1
@@ -148,7 +161,7 @@ func sign(args []string, e env) int {
 		fmt.Fprintln(e.stderr, "release-sign:", err)
 		return 1
 	}
-	fmt.Fprintf(e.stdout, "release-sign: signed %s -> %s\n", in, out)
+	fmt.Fprintf(e.stdout, "release-sign: signed %s for %s -> %s\n", in, tag, out)
 	return 0
 }
 
@@ -162,7 +175,7 @@ func trusted(pub ed25519.PublicKey, set []ed25519.PublicKey) bool {
 }
 
 func verify(args []string, e env) int {
-	in, sigPath, ok := pathFlags("verify", args, e, "in", "sig")
+	tag, in, sigPath, ok := releaseFlags("verify", args, e, "in", "sig")
 	if !ok {
 		return 2
 	}
@@ -183,16 +196,16 @@ func verify(args []string, e env) int {
 		fmt.Fprintf(e.stdout, "::error::clients embed %d trusted key(s) and refuse a release without a valid signature: %v\n", len(e.trust), sigErr)
 		return 1
 	}
-	payload, err := os.ReadFile(in)
+	sums, err := os.ReadFile(in)
 	if err != nil {
 		fmt.Fprintln(e.stderr, "release-sign:", err)
 		return 1
 	}
-	idx, err := selfupdate.VerifyChecksumsSignature(payload, sig, e.trust)
+	idx, err := selfupdate.VerifyReleaseSignature(tag, sums, sig, e.trust)
 	if err != nil {
-		fmt.Fprintf(e.stdout, "::error::%s does not verify against the embedded trust set: %v\n", sigPath, err)
+		fmt.Fprintf(e.stdout, "::error::%s does not verify for %s against the embedded trust set: %v\n", sigPath, tag, err)
 		return 1
 	}
-	fmt.Fprintf(e.stdout, "release-sign: %s verified by trusted key %d\n", sigPath, idx)
+	fmt.Fprintf(e.stdout, "release-sign: %s verified for %s by trusted key %d\n", sigPath, tag, idx)
 	return 0
 }

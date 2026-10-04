@@ -137,7 +137,8 @@ jobs:
       - name: Create checksums file
         run: cat dist/*.sha256 > dist/checksums.txt
 
-      # One ed25519 signature over checksums.txt anchors every binary
+      # One ed25519 signature over a domain line, the tag and checksums.txt
+      # anchors every binary, and only for this tag
       # (docs/rfc/selfupdate-signing.md). Both steps pass with a warning while
       # internal/selfupdate embeds no key, and fail once it does if the
       # secret is missing or not in the trust set this tag embeds. Clients
@@ -145,10 +146,13 @@ jobs:
       - name: Sign checksums
         env:
           NAOZHI_RELEASE_SIGNING_KEY: ${{ secrets.NAOZHI_RELEASE_SIGNING_KEY }}
-        run: go run ./tools/release-sign sign -in dist/checksums.txt -out dist/checksums.txt.sig
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: go run ./tools/release-sign sign -tag "$RELEASE_TAG" -in dist/checksums.txt -out dist/checksums.txt.sig
 
       - name: Verify signature against the embedded trust set
-        run: go run ./tools/release-sign verify -in dist/checksums.txt -sig dist/checksums.txt.sig
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: go run ./tools/release-sign verify -tag "$RELEASE_TAG" -in dist/checksums.txt -sig dist/checksums.txt.sig
 
       - name: Stage install.sh
         # Copy into dist/ so it is uploaded alongside the binaries. Raw GitHub

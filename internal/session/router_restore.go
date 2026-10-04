@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"log/slog"
 	"time"
 
@@ -123,17 +124,14 @@ func (r *Router) restoreSessionFromEntry(tx sessTx, key string, entry *storeEntr
 	tx.SetID(entry.SessionID, key)
 }
 
-// startBackgroundHistoryLoaders launches the tier 1 / tier 2 history-load
-// goroutines for every restored session. Tier 1 (naozhilog, when
-// r.hist.persister is set) preserves Images / AskQuestion / agent-team
-// linkage Claude JSONL cannot represent. Tier 2 (Claude CLI JSONL) skips
-// sessions tier 1 filled; shim-managed sessions wait shimReconnectGraceDelay
-// so ReconnectShims can inject first, then backfill only if still empty. One
-// historyLoadSem bounds total history I/O across both tiers. Both finish
-// BEFORE the process's PersistSink is installed, so replayed entries are
-// tagged replayPhase=true and dropped. Tier 1 reads persist_gap fill after it
-// injects (fillPersistGaps). NewRouter-only.
-func (r *Router) startBackgroundHistoryLoaders() {
+// startBackgroundHistoryLoaders starts one history-load goroutine per restored
+// session: the naozhi event log first, then the Claude JSONL only when the log
+// has no rows for it (see injectRestoredHistory). A shim-managed session waits
+// shimGrace (shimReconnectGraceDelay in NewRouter) before its JSONL read so
+// ReconnectShims can fill it first. One historyLoadSem bounds all history I/O
+// and is not held during the grace wait. The loads finish BEFORE the process's PersistSink is installed,
+// so replayed entries are tagged replayPhase=true and dropped. NewRouter-only.
+func (r *Router) startBackgroundHistoryLoaders(shimGrace time.Duration) {
 	historyLoadSem := make(chan struct{}, historyLoadConcurrency)
 	var sessions []*ManagedSession
 	r.ss.View(func(v sessView) {
@@ -142,113 +140,136 @@ func (r *Router) startBackgroundHistoryLoaders() {
 			sessions = append(sessions, s)
 		}
 	})
-
-	// Tier 1: naozhilog (in-process per-session log).
-	if r.hist.persister != nil {
-		sem := historyLoadSem
-		for _, s := range sessions {
-			r.hist.wg.Add(1)
-			go func() {
-				defer r.hist.wg.Done()
-				select {
-				case sem <- struct{}{}:
-				case <-r.hist.ctx.Done():
-					return
-				}
-				defer func() { <-sem }()
-				src := newEventLogLocalSource(r.hist.eventLogDir, s.key)
-				all, err := src.LoadLatest(r.hist.ctx, 2*maxPersistedHistory)
-				if err != nil || len(all) == 0 {
-					return
-				}
-				// The extra look-back lets a gap record just below the cut count.
-				entries := all[max(0, len(all)-maxPersistedHistory):]
-				// InjectHistoryIfEmpty atomically guards against a concurrent
-				// ReconnectShims / Tier 2 loader having already filled the
-				// session; a separate check-then-inject would double-inject (#1812).
-				if !s.InjectHistoryIfEmpty(entries) {
-					return
-				}
-				slog.Info("loaded session history from naozhi event log",
-					"key", s.key, "entries", len(entries))
-				r.notifyChange()
-				s.fillPersistGaps(r.hist.ctx, all, entries[0].Time)
-			}()
-		}
+	var shimKeys map[string]bool
+	if r.hist.claudeDir != "" {
+		shimKeys = r.backends.shimManagedKeys()
 	}
-
-	// Tier 2: Claude CLI JSONL.
-	if r.hist.claudeDir == "" {
-		return
-	}
-	shimKeys := r.backends.shimManagedKeys()
-	sem := historyLoadSem
 	for _, s := range sessions {
-		if s.getSessionID() == "" {
+		jsonl := r.hist.claudeDir != "" && s.getSessionID() != ""
+		if r.hist.persister == nil && !jsonl {
 			continue
 		}
-		deferred := shimKeys[s.key]
+		var grace time.Duration
+		if jsonl && shimKeys[s.key] {
+			grace = shimGrace
+		}
 		r.hist.wg.Add(1)
 		go func() {
 			defer r.hist.wg.Done()
-			if deferred {
-				// Wait for ReconnectShims' first pass; the history ctx cancel aborts.
-				// NewTimer + Stop (not time.After) so a fast shutdown does not
-				// leak a timer per goroutine for the whole grace window.
-				graceTimer := time.NewTimer(shimReconnectGraceDelay)
-				select {
-				case <-graceTimer.C:
-					// Fired — no Stop needed, channel already drained.
-				case <-r.hist.ctx.Done():
-					if !graceTimer.Stop() {
-						<-graceTimer.C
-					}
-					return
-				}
-				if s.hasInjectedHistory() {
-					return
-				}
-				// Counter sits AFTER the hasInjectedHistory short-circuit so
-				// only the fallback branch (short-lived-shim race) increments.
-				metrics.ShimReconnectGraceBackfillTotal.Add(1)
-				slog.Info("shim-managed session missing history after reconnect grace, falling back to JSONL load",
-					"key", s.key)
+			if r.hist.loadStartupHistory(s, historyLoadSem, jsonl, grace) {
+				r.notifyChange()
 			}
-			select {
-			case sem <- struct{}{}:
-			case <-r.hist.ctx.Done():
-				return
-			}
-			defer func() { <-sem }()
-
-			// Skip when tier 1 already filled the session — otherwise a deploy
-			// with both sources would double-inject the first ~500 entries.
-			if s.hasInjectedHistory() {
-				return
-			}
-
-			// Ordered chain (prev + current) via SnapshotChainIDs() — a clone
-			// under historyMu — because this goroutine holds neither the table lock nor
-			// historyMu while a concurrent cron stub refresh may reassign the
-			// slice header under the table lock (#2055). LoadHistoryChainTail walks
-			// newest→oldest and stops at maxPersistedHistory entries.
-			ids := s.SnapshotChainIDs()
-
-			allEntries := r.hist.loader.LoadHistoryChainTail(
-				r.hist.ctx, r.hist.claudeDir, ids, s.Workspace(), maxPersistedHistory,
-			)
-			if len(allEntries) == 0 {
-				return
-			}
-			// The hasInjectedHistory() checks above only skip the expensive
-			// read; the inject itself must be atomic, so InjectHistoryIfEmpty
-			// does the final "still empty?" check and the append under one
-			// historyMu hold (#1812).
-			if !s.InjectHistoryIfEmpty(allEntries) {
-				return
-			}
-			slog.Info("loaded session history on startup", "key", s.key, "entries", len(allEntries), "chain", len(ids), "deferred", deferred)
-			r.notifyChange()
 		}()
 	}
+}
+
+// loadStartupHistory is one session's startup load: the event log under sem,
+// then, if it had no rows and jsonl is set, the JSONL tail under sem again,
+// after a wait of grace when it is non-zero. Reports whether it injected.
+func (h *HistoryIO) loadStartupHistory(s *ManagedSession, sem chan struct{}, jsonl bool, grace time.Duration) (injected bool) {
+	ctx := h.ctx
+	found := false
+	if !withHistorySem(ctx, sem, func() {
+		found, injected = h.injectEventLogHistory(ctx, s, restoreViaStartup)
+	}) || found || !jsonl {
+		return injected
+	}
+	if grace > 0 {
+		// NewTimer + Stop (not time.After) so a fast shutdown does not leak a
+		// timer per goroutine for the whole grace window.
+		graceTimer := time.NewTimer(grace)
+		select {
+		case <-graceTimer.C:
+		case <-ctx.Done():
+			graceTimer.Stop()
+			return false
+		}
+		if s.hasInjectedHistory() {
+			return false
+		}
+		// Counted after the short-circuit so only the fallback branch
+		// (short-lived-shim race) increments.
+		metrics.ShimReconnectGraceBackfillTotal.Add(1)
+		slog.Info("shim-managed session missing history after reconnect grace, falling back to JSONL load",
+			"key", s.key)
+	}
+	withHistorySem(ctx, sem, func() {
+		if !s.hasInjectedHistory() {
+			// SnapshotChainIDs clones under historyMu: a cron stub refresh may
+			// reassign the slice header under the table lock (#2055).
+			injected = h.injectJSONLHistory(ctx, s, s.SnapshotChainIDs(), restoreViaStartup)
+		}
+	})
+	return injected
+}
+
+// withHistorySem runs fn holding a sem slot, or reports false when ctx is
+// cancelled first.
+func withHistorySem(ctx context.Context, sem chan struct{}, fn func()) bool {
+	select {
+	case sem <- struct{}{}:
+	case <-ctx.Done():
+		return false
+	}
+	defer func() { <-sem }()
+	fn()
+	return true
+}
+
+// Callers of injectRestoredHistory, logged as "via".
+const (
+	restoreViaStartup       = "startup"
+	restoreViaShimReconnect = "shim_reconnect"
+	restoreViaShimDrift     = "shim_drift"
+)
+
+// injectRestoredHistory fills an empty s with its restored history and
+// reports whether this call's inject won. The naozhi event log comes first: it
+// keeps images, AskQuestion and tool turns the Claude JSONL tail over ids
+// cannot represent, and once it has rows the JSONL is never read. Every
+// startup and shim inject goes through here and through InjectHistoryIfEmpty
+// (#1812), so whichever caller wins injects the same view, and nothing is
+// appended under the gap fill the event-log winner computed.
+func (h *HistoryIO) injectRestoredHistory(ctx context.Context, s *ManagedSession, ids []string, via string) bool {
+	if found, injected := h.injectEventLogHistory(ctx, s, via); found {
+		return injected
+	}
+	return h.injectJSONLHistory(ctx, s, ids, via)
+}
+
+// injectEventLogHistory injects the event-log tail into an empty s, then reads
+// the persist_gap fill for it. found reports the log had rows; the inject may
+// still lose to another reader of the same log.
+func (h *HistoryIO) injectEventLogHistory(ctx context.Context, s *ManagedSession, via string) (found, injected bool) {
+	if h.persister == nil {
+		return false, false
+	}
+	all, err := newEventLogLocalSource(h.eventLogDir, s.key).LoadLatest(ctx, 2*maxPersistedHistory)
+	if err != nil || len(all) == 0 {
+		return false, false
+	}
+	// The extra look-back lets a gap record just below the cut count.
+	entries := all[max(0, len(all)-maxPersistedHistory):]
+	if !s.InjectHistoryIfEmpty(entries) {
+		return true, false
+	}
+	slog.Info("loaded session history from naozhi event log",
+		"key", s.key, "entries", len(entries), "via", via)
+	s.fillPersistGaps(ctx, all, entries[0].Time)
+	return true, true
+}
+
+// injectJSONLHistory injects the Claude JSONL tail of the ids chain into an
+// empty s. No-op without a claudeDir or ids.
+func (h *HistoryIO) injectJSONLHistory(ctx context.Context, s *ManagedSession, ids []string, via string) bool {
+	if h.claudeDir == "" || len(ids) == 0 {
+		return false
+	}
+	entries := h.loader.LoadHistoryChainTail(ctx, h.claudeDir, ids, s.Workspace(), maxPersistedHistory)
+	if len(entries) == 0 || !s.InjectHistoryIfEmpty(entries) {
+		return false
+	}
+	slog.Info("loaded session history from Claude JSONL",
+		"key", s.key, "entries", len(entries), "chain", len(ids), "via", via)
+	return true
 }
