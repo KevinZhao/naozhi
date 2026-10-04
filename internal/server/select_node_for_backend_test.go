@@ -54,7 +54,7 @@ func (f *fakeCapNode) FetchEventsPage(_ context.Context, _ string, _ node.Events
 func (f *fakeCapNode) FetchBackends(_ context.Context) (json.RawMessage, error) {
 	return nil, nil
 }
-func (f *fakeCapNode) Send(_ context.Context, _, _, _ string) error { return nil }
+func (f *fakeCapNode) Send(_ context.Context, _, _, _ string) (string, error) { return "accepted", nil }
 func (f *fakeCapNode) ProxyTakeover(_ context.Context, _ int, _, _ string, _ uint64) (string, error) {
 	return "", nil
 }

@@ -171,7 +171,8 @@ const remoteSendTimeout = 60 * time.Second
 // process lifetime. There is no ack channel on the HTTP path, so a transport
 // error fans out to the key's subscribers via broadcastSendError (F1);
 // remote transport errors are never informational, so unlike httpOrigin
-// nothing is filtered.
+// nothing is filtered. Neither is a node that answers busy: the message was
+// not buffered.
 func (e *sendEngine) remoteSend(nc node.Conn, nodeID, key, text, workspace string) (accepted bool) {
 	release, shuttingDown := e.TrackSend()
 	if shuttingDown {
@@ -181,11 +182,14 @@ func (e *sendEngine) remoteSend(nc node.Conn, nodeID, key, text, workspace strin
 		defer release()
 		ctx, cancel := context.WithTimeout(e.ctx, remoteSendTimeout)
 		defer cancel()
-		if err := nc.Send(ctx, key, text, workspace); err != nil {
+		status, err := nc.Send(ctx, key, text, workspace)
+		if err != nil {
 			slog.Error("remote send",
 				"node", osutil.SanitizeForLog(nodeID, 128),
 				"key", session.SanitizeLogAttr(key), "err", err)
 			e.notify.broadcastSendError(key, asyncErrorMessage(err))
+		} else if status == string(sendAckBusy) {
+			e.notify.broadcastSendError(key, errSendBusy.Error())
 		} else {
 			nc.RefreshSubscription(key)
 		}

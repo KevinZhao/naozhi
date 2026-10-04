@@ -294,13 +294,16 @@ func (c *ReverseConn) FetchBackends(ctx context.Context) (json.RawMessage, error
 	return c.rpc(ctx, "fetch_backends", nil)
 }
 
-func (c *ReverseConn) Send(ctx context.Context, key, text, workspace string) error {
+func (c *ReverseConn) Send(ctx context.Context, key, text, workspace string) (string, error) {
 	params := map[string]string{"key": key, "text": text}
 	if workspace != "" {
 		params["workspace"] = workspace
 	}
-	_, err := c.rpc(ctx, "send", params)
-	return err
+	raw, err := c.rpc(ctx, "send", params)
+	if err != nil {
+		return "", err
+	}
+	return sendStatusFrom(raw), nil
 }
 
 func (c *ReverseConn) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStart uint64) (string, error) {
