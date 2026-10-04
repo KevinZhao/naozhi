@@ -71,11 +71,7 @@ func newReconcileFixture(t *testing.T) reconcileFixture {
 	writeJSON(t, filepath.Join(runs, "abcd", "7777777777777777.json"), runhistory.SessionRun{RunID: "7777777777777777", SessionKey: "dashboard:direct:lost:general", SessionID: rcLost})
 	writeJSON(t, filepath.Join(runs, "abcd", "8888888888888888.json"), runhistory.SessionRun{RunID: "8888888888888888", SessionKey: rcRenamed, SessionID: rcSID})
 
-	turn := func(ts time.Time, runID string, usd float64) costledger.Entry {
-		return costledger.Entry{TS: ts, Source: costledger.SourceSession, Kind: costledger.KindTurn, SessionKey: rcKey,
-			RunID: runID, Workspace: "naozhi", Backend: "claude", Unit: costledger.UnitUSD, Amount: usd, Basis: costledger.BasisList,
-			Models: []costledger.ModelDelta{{Model: rcModel, RawModel: rcModel + "[1m]", Basis: costledger.BasisList, CostUSD: usd, Tokens: costledger.Tokens{CacheRead: int64(math.Round(usd * 1000))}}}}
-	}
+	turn := func(ts time.Time, runID string, usd float64) costledger.Entry { return rcTurn(ts, rcKey, runID, usd) }
 	e1 := turn(at(f.d1, 10).Add(time.Minute), "1111111111111111", 929.98)
 	f.e2 = turn(at(f.d2, 9).Add(2*time.Minute), "2222222222222222", 959.98) // no run record: the key holds only this session
 	f.e3 = turn(at(f.d2, 15).Add(2*time.Minute), "3333333333333333", 949.98)
@@ -94,9 +90,21 @@ func newReconcileFixture(t *testing.T) reconcileFixture {
 	return f
 }
 
+// rcTurn is a CLI-priced turn under key at $1 per 1000 cache-read tokens.
+func rcTurn(ts time.Time, key, runID string, usd float64) costledger.Entry {
+	return costledger.Entry{TS: ts, Source: costledger.SourceSession, Kind: costledger.KindTurn, SessionKey: key,
+		RunID: runID, Workspace: "naozhi", Backend: "claude", Unit: costledger.UnitUSD, Amount: usd, Basis: costledger.BasisList,
+		Models: []costledger.ModelDelta{{Model: rcModel, RawModel: rcModel + "[1m]", Basis: costledger.BasisList, CostUSD: usd, Tokens: costledger.Tokens{CacheRead: int64(math.Round(usd * 1000))}}}}
+}
+
 func (f reconcileFixture) seed(t *testing.T, entries ...costledger.Entry) {
 	t.Helper()
-	store := costledger.NewStore(datadir.ForStore(f.opts.SessionStorePath).CostRoot(), costledger.Options{})
+	seedLedger(t, f.opts.SessionStorePath, entries...)
+}
+
+func seedLedger(t *testing.T, storePath string, entries ...costledger.Entry) {
+	t.Helper()
+	store := costledger.NewStore(datadir.ForStore(storePath).CostRoot(), costledger.Options{})
 	defer store.Close()
 	for _, e := range entries {
 		if !store.Append(e) {
@@ -106,7 +114,7 @@ func (f reconcileFixture) seed(t *testing.T, entries ...costledger.Entry) {
 }
 
 func rcLine(typ string, ts time.Time, id string, cacheRead int64, model ...string) string {
-	v := map[string]any{"type": typ, "timestamp": ts.Format(time.RFC3339Nano), "sessionId": rcSID}
+	v := map[string]any{"type": typ, "timestamp": ts.Format(time.RFC3339Nano), "sessionId": rcSID, "entrypoint": "sdk-cli"}
 	if typ == "assistant" {
 		m := rcModel
 		if len(model) > 0 {

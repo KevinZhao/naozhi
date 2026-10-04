@@ -58,31 +58,43 @@ func SessionUsage(projectDir, sessionID string, w UsageWindow) (usage []ModelTok
 	return acc.totals(), true, nil
 }
 
-// DailyUsage is a session's transcript usage split per UTC day.
-type DailyUsage struct {
-	// Days maps a UTC day (2006-01-02) to its per-model rows, in first-seen
-	// model order; a message counts on the day of its first line.
-	Days map[string][]ModelTokens
+// MessageUsage is one API message's usage, timed and tagged by its first line.
+type MessageUsage struct {
+	ModelTokens
+	At time.Time
+	// Entrypoint is the line's "entrypoint": "cli" for an interactive
+	// terminal, "sdk-cli" for a headless (-p) process, "" when absent.
+	Entrypoint string
+}
+
+// SessionMessages is a session's transcript usage message by message.
+type SessionMessages struct {
+	// Messages come in first-seen order; messages with no tokens are left out.
+	Messages []MessageUsage
 	// Truncated is set when the session has more agent transcripts than one
 	// call reads, so the figures are a lower bound.
 	Truncated bool
 }
 
-// SessionDailyUsage is SessionUsage over a session's whole history, per UTC
-// day. A message whose id is in counted was already counted for another
+// SessionMessageUsage is SessionUsage over a session's whole history, per
+// message. A message whose id is in counted was already counted for another
 // session (a fork copies its parent's lines) and is skipped; the ids counted
 // here are added to counted.
-func SessionDailyUsage(projectDir, sessionID string, counted map[string]bool) (u DailyUsage, found bool, err error) {
+func SessionMessageUsage(projectDir, sessionID string, counted map[string]bool) (u SessionMessages, found bool, err error) {
 	acc := newUsageAcc(UsageWindow{})
 	acc.skip = counted
 	found, u.Truncated, err = readSessionUsage(projectDir, sessionID, UsageWindow{}, acc)
 	if err != nil || !found {
-		return DailyUsage{}, found, err
+		return SessionMessages{}, found, err
 	}
 	for id := range acc.msgs {
 		counted[id] = true
 	}
-	u.Days = acc.dailyTotals()
+	for _, r := range acc.rows {
+		if r.Input != 0 || r.Output != 0 || r.CacheRead != 0 || r.CacheWrite != 0 {
+			u.Messages = append(u.Messages, MessageUsage{ModelTokens: r.ModelTokens, At: time.UnixMilli(r.ms).UTC(), Entrypoint: r.entrypoint})
+		}
+	}
 	return u, true, nil
 }
 
@@ -176,10 +188,12 @@ type usageAcc struct {
 	skip             map[string]bool // message ids counted elsewhere
 }
 
-// usageRow is one message's usage and the time of its first line.
+// usageRow is one message's usage and the time and entrypoint of its first
+// line.
 type usageRow struct {
 	ModelTokens
-	ms int64
+	ms         int64
+	entrypoint string
 }
 
 func newUsageAcc(w UsageWindow) *usageAcc {
@@ -196,9 +210,10 @@ func (a *usageAcc) line(b []byte) {
 		return
 	}
 	var v struct {
-		Type      string `json:"type"`
-		Timestamp string `json:"timestamp"`
-		Message   struct {
+		Type       string `json:"type"`
+		Timestamp  string `json:"timestamp"`
+		Entrypoint string `json:"entrypoint"`
+		Message    struct {
 			ID    string `json:"id"`
 			Model string `json:"model"`
 			Usage *struct {
@@ -230,7 +245,7 @@ func (a *usageAcc) line(b []byte) {
 	if v.Message.ID != "" {
 		a.msgs[v.Message.ID] = len(a.rows)
 	}
-	a.rows = append(a.rows, usageRow{ModelTokens: t, ms: ts})
+	a.rows = append(a.rows, usageRow{ModelTokens: t, ms: ts, entrypoint: v.Entrypoint})
 }
 
 // totals sums the messages per model.
@@ -243,16 +258,17 @@ func (a *usageAcc) totals() []ModelTokens {
 	return out
 }
 
-// dailyTotals sums the messages per UTC day and model.
-func (a *usageAcc) dailyTotals() map[string][]ModelTokens {
+// DayTotals sums msgs per UTC day (2006-01-02) and model, in first-seen
+// model order.
+func DayTotals(msgs []MessageUsage) map[string][]ModelTokens {
 	out := make(map[string][]ModelTokens)
 	idx := make(map[string]map[string]int)
-	for _, r := range a.rows {
-		day := time.UnixMilli(r.ms).UTC().Format(time.DateOnly)
+	for _, m := range msgs {
+		day := m.At.UTC().Format(time.DateOnly)
 		if idx[day] == nil {
 			idx[day] = make(map[string]int)
 		}
-		if rows := addTokens(out[day], idx[day], r.ModelTokens); len(rows) > 0 {
+		if rows := addTokens(out[day], idx[day], m.ModelTokens); len(rows) > 0 {
 			out[day] = rows
 		}
 	}
