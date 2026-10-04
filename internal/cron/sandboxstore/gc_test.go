@@ -210,6 +210,68 @@ func TestWriteBlob_RewritesWhenBlobVanished(t *testing.T) {
 	}
 }
 
+// TestWriteBlob_ReplacesSymlinkedBlob: a symlink at the blob path is not a
+// dedup hit — the reader refuses it — so the write replaces the link with the
+// real blob instead of touching whatever the link points to.
+func TestWriteBlob_ReplacesSymlinkedBlob(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	root := st.snapshotDir()
+	hash, err := st.writeBlob(root, "linked prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "blobs", hash)
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.WriteFile(target, []byte("linked prompt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(target, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	if _, err := st.writeBlob(root, "linked prompt"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := st.SnapshotPrompt(hash); err != nil || got != "linked prompt" {
+		t.Errorf("SnapshotPrompt after rewrite = (%q, %v); the link was left in place", got, err)
+	}
+	if fi, err := os.Stat(target); err != nil || time.Since(fi.ModTime()) < 24*time.Hour {
+		t.Errorf("link target touched: %v", err)
+	}
+}
+
+// TestWriteBlob_DirectoryAtBlobPathFails: when the rename cannot replace what
+// sits at the blob path, a non-regular file there is not "another writer's
+// identical blob" — the write reports failure instead of a replay that can
+// never be read.
+func TestWriteBlob_DirectoryAtBlobPathFails(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	root := st.snapshotDir()
+	hash, err := st.writeBlob(root, "dir prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "blobs", hash)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.writeBlob(root, "dir prompt"); err == nil {
+		t.Error("writeBlob reported success with a directory at the blob path")
+	}
+}
+
 // TestBlobGC_DedupHitAfterMarkSurvives is the issue's sequence: the mark sees
 // an old blob with no references, then a run reuses its prompt and lands a
 // manifest before the sweep. The sweep must not delete the blob under it.

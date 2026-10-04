@@ -107,8 +107,9 @@ func (st Store) WriteSnapshot(jobID, runID, prompt, model, imageVersion string, 
 // returns its SHA-256 hex hash. Idempotent: an existing blob (same hash) is
 // kept (dedup, §5.2) but its mtime is refreshed, because the blob GC spares
 // only young unreferenced blobs and this run's manifest has not landed yet.
-// A blob the touch cannot reach is rewritten. Empty content returns "" with
-// no write. Callers hold blobMu shared.
+// Anything else at the path (missing, a symlink, untouchable) is rewritten;
+// the rename replaces a symlink rather than writing through it. Empty content
+// returns "" with no write. Callers hold blobMu shared.
 func (st Store) writeBlob(root, content string) (string, error) {
 	if content == "" {
 		return "", nil
@@ -120,8 +121,10 @@ func (st Store) writeBlob(root, content string) (string, error) {
 		return "", fmt.Errorf("mkdir blob dir: %w", err)
 	}
 	path := filepath.Join(blobDir, hash)
-	if now := time.Now(); os.Chtimes(path, now, now) == nil {
-		return hash, nil // dedup: blob already present, now young again
+	if isRegularFile(path) {
+		if now := time.Now(); os.Chtimes(path, now, now) == nil {
+			return hash, nil // dedup: blob already present, now young again
+		}
 	}
 	// Unique temp file + rename: a reader never sees a half-written blob, and two
 	// writers racing the SAME hash cannot collide on one tmp path (a shared tmp
@@ -150,7 +153,7 @@ func (st Store) writeBlob(root, content string) (string, error) {
 		// Another writer may have committed the identical blob between our
 		// Chtimes and Rename — if the target now exists, our content is already
 		// there (same hash), so treat it as success and drop our tmp.
-		if _, statErr := os.Stat(path); statErr == nil {
+		if isRegularFile(path) {
 			_ = os.Remove(tmp)
 			return hash, nil
 		}
@@ -238,6 +241,13 @@ func (st Store) SnapshotPrompt(blobHash string) (string, error) {
 		return "", fmt.Errorf("cron sandbox: snapshot blob does not match its hash")
 	}
 	return string(b), nil
+}
+
+// isRegularFile reports whether path itself (not a symlink target) is a
+// regular file — the only shape readRegularBounded accepts.
+func isRegularFile(path string) bool {
+	fi, err := os.Lstat(path)
+	return err == nil && fi.Mode().IsRegular()
 }
 
 // errNotRegular reports a path that is a symlink or not a regular file.
