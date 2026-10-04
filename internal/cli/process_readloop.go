@@ -144,7 +144,9 @@ func (p *Process) readLoop() {
 	// It is a no-op unless the latch was armed and is still empty, and it is what
 	// keeps a waiter from sitting out its whole context after the CLI is gone —
 	// readLoop's unwind is the one point every exit passes through, including the
-	// panic recover below.
+	// panic recover below. fireEnd runs after it, once the teardown is
+	// complete.
+	defer p.fireEnd()
 	defer p.adopted.resolveExit()
 	defer close(p.eventCh)
 	defer close(p.done)

@@ -45,14 +45,9 @@ func (s *ManagedSession) instrumentRun(onEvent clievent.EventCallback) (*runTime
 // instrumented (non-nil timer / store), enqueues the run record for async
 // persistence. Its work is cheap and the enqueue is NON-BLOCKING, so calling
 // it while sendMu is still held (the Send path) does not extend the lock window.
-func (s *ManagedSession) finishRun(rt *runTimer, proc processIface, result *clievent.SendResult, err error) {
+func (s *ManagedSession) finishRun(rt *runTimer, result *clievent.SendResult, err error) {
 	runID := newRunID()
 	delta := s.accountTurnCost(result, runID)
-	if result == nil && err != nil {
-		// proc is the process that ran the turn: passthrough holds no sendMu,
-		// so loadProcess() here could already be a replacement.
-		delta += s.bookPartialTurn(proc, err, runID)
-	}
 	if rt == nil || s.runStore == nil || runID == "" {
 		return
 	}

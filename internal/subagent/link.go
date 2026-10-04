@@ -140,6 +140,11 @@ type Linker struct {
 	retryLimit    int
 	cacheTTL      time.Duration
 
+	// nowFn is the dirCache TTL clock (test-only; nil → time.Now). A frozen
+	// clock also freezes rescans across Resolve retries. Staleness checks and
+	// retry sleeps stay on the real clock.
+	nowFn func() time.Time
+
 	// scanHook fires after every rawScan (test-only cache hit/miss counting).
 	scanHook func()
 
@@ -227,6 +232,13 @@ func (l *Linker) Query(taskID string) (LinkInfo, bool) {
 	defer l.mu.RUnlock()
 	info, ok := l.byTaskID[taskID]
 	return info, ok
+}
+
+func (l *Linker) now() time.Time {
+	if l.nowFn != nil {
+		return l.nowFn()
+	}
+	return time.Now()
 }
 
 // ConfigureForTest overrides the grace/poll/cache timings so cross-package

@@ -45,10 +45,23 @@ func LastCostState(path, sessionID string) (st CostState, found bool, err error)
 		return CostState{}, false, err
 	}
 	defer f.Close()
-	br := bufio.NewReaderSize(f, 64<<10)
-	// A line longer than the reader's buffer arrives in pieces: gather it in
-	// long while it could still be a cost-state line, skip the rest once it
-	// cannot.
+	err = eachLine(f, maxCostStateLine, func(line []byte) {
+		if s, ok := decodeCostState(line, sessionID); ok {
+			st, found = s, true
+		}
+	})
+	if err != nil {
+		return CostState{}, false, err
+	}
+	return st, found, nil
+}
+
+// eachLine calls fn with every line of r up to maxLine bytes, newline
+// included; longer lines are skipped unread. A line longer than the reader's
+// buffer arrives in pieces: it is gathered while it could still fit and
+// skipped once it cannot.
+func eachLine(r io.Reader, maxLine int, fn func(line []byte)) error {
+	br := bufio.NewReaderSize(r, 64<<10)
 	var long []byte
 	skipping := false
 	for {
@@ -56,14 +69,14 @@ func LastCostState(path, sessionID string) (st CostState, found bool, err error)
 		if errors.Is(rerr, bufio.ErrBufferFull) {
 			if !skipping {
 				long = append(long, chunk...)
-				if len(long) > maxCostStateLine {
+				if len(long) > maxLine {
 					skipping, long = true, long[:0]
 				}
 			}
 			continue
 		}
 		if rerr != nil && !errors.Is(rerr, io.EOF) {
-			return CostState{}, false, rerr
+			return rerr
 		}
 		if skipping {
 			skipping = false
@@ -71,13 +84,11 @@ func LastCostState(path, sessionID string) (st CostState, found bool, err error)
 			if len(long) > 0 {
 				chunk = append(long, chunk...)
 			}
-			if s, ok := decodeCostState(chunk, sessionID); ok {
-				st, found = s, true
-			}
+			fn(chunk)
 		}
 		long = long[:0]
 		if rerr != nil {
-			return st, found, nil
+			return nil
 		}
 	}
 }

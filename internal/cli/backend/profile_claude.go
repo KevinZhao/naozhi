@@ -41,6 +41,8 @@ func claudeProfile() Profile {
 		},
 		// claude --resume restores the transcript's last cost-state line.
 		ResumedCost: claudeResumedCost,
+		// Usage per API message in the main, sub-agent and workflow transcripts.
+		TranscriptUsage: claudeTranscriptUsage,
 		TerminalLabel: func(entrypoint string) string {
 			if entrypoint == "claude-vscode" {
 				return "Claude VS Extension"
@@ -75,4 +77,17 @@ func claudeResumedCost(target, sessionID string) (float64, map[string]clievent.M
 		}
 	}
 	return st.TotalCostUSD, models, true, nil
+}
+
+// claudeTranscriptUsage reads the session's transcripts under claudeDir.
+func claudeTranscriptUsage(claudeDir, workspace, sessionID string, w claudefs.UsageWindow) (clievent.ShadowUsage, bool, error) {
+	if claudeDir == "" || workspace == "" {
+		return clievent.ShadowUsage{}, false, nil
+	}
+	rows, found, err := claudefs.SessionUsage(claudefs.ProjectDir(claudeDir, workspace), sessionID, w)
+	u := clievent.ShadowUsage{Models: make([]clievent.ShadowModel, 0, len(rows))}
+	for _, r := range rows {
+		u.Models = append(u.Models, clievent.ShadowModel{Model: r.Model, Input: r.Input, Output: r.Output, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite})
+	}
+	return u, found, err
 }

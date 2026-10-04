@@ -140,6 +140,12 @@ type unownedResultNotifier interface {
 	SetOnUnownedResult(fn func(clievent.SendResult))
 }
 
+// processEndNotifier is the optional hook a process offers for its own end;
+// see bookProcessEnd.
+type processEndNotifier interface {
+	SetOnEnd(fn func(cli.ProcessEnd))
+}
+
 type processIface interface {
 	ProcessSender
 	ProcessLifecycle
@@ -377,6 +383,9 @@ type ManagedSession struct {
 	// increment — which is why this cannot be derived from a zero baseline and
 	// has to be set by the adopt path.
 	costBaselineUnknown bool
+	// endMark is where the process's end starts reading its main transcript
+	// (managed_cost_end.go); under costMu.
+	endMark transcriptMark
 	// costAcct is the router-wide ledger sink; nil in tests that don't wire one.
 	costAcct *costAccounting
 

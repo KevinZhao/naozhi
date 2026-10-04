@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/naozhi/naozhi/internal/assets"
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
@@ -71,6 +72,12 @@ type Profile struct {
 	// start there rather than at 0 (#3096). found=false means the CLI
 	// restores nothing. nil = this backend restores no cost on resume.
 	ResumedCost func(target, sessionID string) (usd float64, models map[string]clievent.ModelUsage, found bool, err error)
+
+	// TranscriptUsage reports the tokens sessionID's transcripts record in w,
+	// main loop and every sub-agent and workflow agent: the spend of a process
+	// that ended before a result reported it. found=false means there is no
+	// transcript to read. nil = this backend writes none naozhi can read.
+	TranscriptUsage func(claudeDir, workspace, sessionID string, w claudefs.UsageWindow) (u clievent.ShadowUsage, found bool, err error)
 
 	// TerminalLabel names a session of this backend found running in a
 	// terminal, for the dashboard's type chip ("Claude CLI"); entrypoint is

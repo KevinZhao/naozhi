@@ -22,7 +22,9 @@
 // know what they want out of it: there is exactly ONE reverse reader in the tree
 // (discovery/history_tail.go) and consolidating it was explicitly ruled out of
 // F2, as were the kiro transcript reader and naozhi's own event-log index, which
-// are different formats that happen to also be JSONL.
+// are different formats that happen to also be JSONL. The exception is spend:
+// the cost-state line and per-message usage are read here (coststate.go,
+// usage.go), since what they mean is CLI behaviour, not one consumer's view.
 package claudefs
 
 import (
