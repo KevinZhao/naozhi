@@ -423,8 +423,9 @@ func errTakeoverRaced(key string) error {
 // Takeover creates a managed session to replace an external Claude CLI session.
 // It uses --resume to preserve the conversation context, and loads JSONL history
 // for dashboard display; a backend that rejects the resume gets a fresh session
-// chained to that transcript instead. The caller must ensure the original
-// process has been terminated before calling.
+// chained to that transcript instead. It runs on the claude backend when one is
+// registered, unless opts.Backend or a backend pick names another. The caller
+// must ensure the original process has been terminated before calling.
 func (r *Router) Takeover(ctx context.Context, key string, sessionID string, workspace string, opts AgentOpts) (*ManagedSession, error) {
 	// Same flag-injection guard as GetOrCreate: AgentOpts is caller-supplied.
 	if err := validateModel(opts.Model); err != nil {
@@ -500,6 +501,12 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 		// another flush.
 		if chatKey := chatKeyFor(key); chatKey != key {
 			tx.Ext().workspaces.Adopt(chatKey, workspace)
+		}
+		// Discovery lists Claude transcripts only: with no explicit backend or
+		// pick, resume on claude, not a default (kiro, codex) that refuses it.
+		// Without a claude row wrapperFor keeps the default.
+		if opts.Backend == "" && tx.Ext().picks.backend[key] == "" {
+			opts.Backend = "claude"
 		}
 		err = r.reserveSpawn(tx, &res, key, sessionID, opts)
 	})

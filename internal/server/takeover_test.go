@@ -1,9 +1,17 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
+
+	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/session"
 )
 
 // TestVerifyProcOwnedByEuid_Self confirms that the helper accepts a process
@@ -46,5 +54,66 @@ func TestVerifyProcOwnedByEuid_NonLinux(t *testing.T) {
 	}
 	if err := verifyProcOwnedByEuid(os.Getpid()); err != nil {
 		t.Errorf("verifyProcOwnedByEuid on non-linux should be no-op, got %v", err)
+	}
+}
+
+// Auto-takeover kills the terminal CLI only when the adopted Claude transcript
+// can resume on claude: an IM agent pinned to another backend, or a deployment
+// without claude, would trade the user's live session for an unrelated fresh one.
+func TestTryAutoTakeover_KillsOnlyForAClaudeResume(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("discovery is POSIX-only")
+	}
+	cases := []struct {
+		name, backend, agentBackend string
+		wantKill                    bool
+	}{
+		{name: "claude resume", backend: "claude", wantKill: true},
+		{name: "chat pinned to claude", backend: "claude", agentBackend: "claude", wantKill: true},
+		{name: "chat pinned to kiro", backend: "claude", agentBackend: "kiro"},
+		{name: "no claude backend", backend: "kiro"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command("sleep", "30")
+			if err := cmd.Start(); err != nil {
+				t.Skipf("cannot start child: %v", err)
+			}
+			exited := make(chan struct{})
+			go func() { _ = cmd.Wait(); close(exited) }()
+			t.Cleanup(func() { _ = cmd.Process.Kill(); <-exited })
+
+			claudeDir, ws := t.TempDir(), t.TempDir()
+			live, _ := json.Marshal(map[string]any{
+				"pid": cmd.Process.Pid, "sessionId": "0b8f3c2e-5d7a-4e1b-9c6f-2a4d8e1f3b5c",
+				"cwd": ws, "startedAt": time.Now().UnixMilli(), "entrypoint": "cli",
+			})
+			if err := os.MkdirAll(filepath.Join(claudeDir, "sessions"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(claudeDir, "sessions", "1.json"), live, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			w := cli.NewWrapperLazy("/nonexistent/"+tc.backend, &cli.ClaudeProtocol{}, tc.backend)
+			router := session.NewRouter(session.RouterConfig{Wrapper: w, MaxProcs: 1})
+			t.Cleanup(router.Shutdown)
+			s := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: tc.backend})
+			s.claudeDir = claudeDir
+
+			opts := session.AgentOpts{Workspace: ws, Backend: tc.agentBackend}
+			if s.tryAutoTakeover(context.Background(), "test:direct:u1:general", "test:direct:u1:general", opts) {
+				t.Fatal("the takeover reported success with a CLI that cannot spawn")
+			}
+			select {
+			case <-exited:
+				if !tc.wantKill {
+					t.Error("the terminal CLI was killed for a takeover that cannot resume it")
+				}
+			case <-time.After(200 * time.Millisecond):
+				if tc.wantKill {
+					t.Error("the terminal CLI survived a takeover that resumes it on claude")
+				}
+			}
+		})
 	}
 }

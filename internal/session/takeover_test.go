@@ -31,6 +31,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/session/backendstore"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -548,5 +549,42 @@ func TestTakeover_RejectedResumeRetryWaitsForTheSocket(t *testing.T) {
 			t.Errorf("socket stays bound: Takeover err = %v; want ErrShimStuck wrapping the retry's error", err)
 		}
 		os.Remove(sock)
+	}
+}
+
+// Discovered sessions are Claude transcripts, so a takeover with no explicit
+// backend or pick resumes on claude rather than a default that refuses the ID.
+func TestTakeover_ResumesOnTheClaudeBackend(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	all := []string{"claude", "kiro", "codex"}
+	cases := []struct {
+		name, pick, optsBackend, want string
+		backends                      []string
+	}{
+		{name: "default is not claude", backends: all, want: "claude"},
+		{name: "a pick wins", backends: all, pick: "codex", want: "codex"},
+		{name: "opts.Backend wins", backends: all, optsBackend: "codex", want: "codex"},
+		{name: "no claude backend keeps the default", backends: []string{"kiro", "codex"}, want: "kiro"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _, _ := newStartupFailRouter(t, newDeadProc())
+			wrappers := map[string]*cli.Wrapper{}
+			for _, id := range tc.backends {
+				wrappers[id] = cli.NewWrapperLazy("/nonexistent/"+id, &cli.ClaudeProtocol{}, id)
+			}
+			r.setWrappersForTest(wrappers)
+			r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "kiro" })
+			if tc.pick != "" {
+				stateOf(r).picks.backend[takeoverKey] = tc.pick
+			}
+			s, err := r.Takeover(context.Background(), takeoverKey, sfSID, sfWS, AgentOpts{Backend: tc.optsBackend})
+			if err != nil {
+				t.Fatalf("Takeover: %v", err)
+			}
+			if s.Backend() != tc.want {
+				t.Errorf("takeover ran on backend %q, want %q", s.Backend(), tc.want)
+			}
+		})
 	}
 }
