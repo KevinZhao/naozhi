@@ -156,6 +156,7 @@ func TestDoctor_PlatformConn(t *testing.T) {
 	one := func(state, sinceAgo, lastError string) string {
 		return body(`{"slack":"`+state+`"}`, `{"slack":`+entry(state, sinceAgo, lastError)+`}`)
 	}
+	long := strings.Repeat("x", 300)
 
 	tests := []struct {
 		name     string
@@ -178,6 +179,15 @@ func TestDoctor_PlatformConn(t *testing.T) {
 			"slack failed for 1s (last error: invalid_auth) — the adapter gave up; fix the cause and restart", ""},
 		{"no since", body(`{"slack":"disconnected"}`, `{}`), "warn",
 			"slack disconnected — retrying", ""},
+		{"since after the server clock", one("disconnected", "-3s", ""), "warn",
+			"slack disconnected for 0s — retrying", ""},
+		{"long errors keep every platform", body(`{"discord":"disconnected","slack":"failed","weixin":"connecting"}`,
+			`{"discord":`+entry("disconnected", "1m0s", long)+`,"slack":`+entry("failed", "1s", long)+`,"weixin":`+entry("connecting", "2s", long)+`}`), "fail",
+			"discord disconnected for 1m0s (last error: " + long[:117] + "...) — retrying; " +
+				"slack failed for 1s (last error: " + long[:117] + "...) — the adapter gave up; fix the cause and restart; " +
+				"weixin connecting for 2s (last error: " + long[:117] + "...) — retrying", ""},
+		{"long name capped", body(`{"`+long+`":"connected"}`, `{"`+long+`":`+entry("connected", "1m0s", "")+`}`), "pass",
+			long[:253] + "...", ""},
 		{"unknown state", one("suspended", "1m0s", ""), "warn",
 			"slack suspended for 1m0s — unknown state (doctor older than the server?)", ""},
 		{"mixed with registered", body(`{"slack":"connected","feishu":"registered","weixin":"registered"}`, `{"slack":`+entry("connected", "3m0s", "")+`}`), "pass",
@@ -211,6 +221,38 @@ func TestDoctor_PlatformConn(t *testing.T) {
 			level, sub, _ := strings.Cut(tc.dispatch, "|")
 			if f := got["dispatch"]; f.Level != level || !strings.Contains(f.Detail, sub) {
 				t.Errorf("dispatch = %+v, want level %s with %q", f, level, sub)
+			}
+		})
+	}
+}
+
+// TestDoctor_DispatchQuietServerClock: the dispatch quiet heuristic measures
+// time since start on the reply's Date header, not the local clock.
+func TestDoctor_DispatchQuietServerClock(t *testing.T) {
+	t.Parallel()
+	serverNow := time.Date(2021, 6, 1, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		ago   time.Duration
+		level string
+	}{
+		{"just started", time.Minute, "pass"},
+		{"quiet past the threshold", dispatchQuietWarnAfter + time.Minute, "warn"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			loadedAt := serverNow.Add(-tc.ago).Format(time.RFC3339)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Date", serverNow.Format(http.TimeFormat))
+				_, _ = w.Write([]byte(`{"status":"ok","cli_available":true,"platforms":{"feishu":"registered"},` +
+					`"dispatch":{"message_count":0,"reply_error_count":0,"send_fail_count":0},"config_loaded_at":"` + loadedAt + `"}`))
+			}))
+			t.Cleanup(srv.Close)
+			d := &doctor{addr: srv.URL, client: srv.Client(), token: "tok", timeout: 2 * time.Second}
+			d.checkServerState()
+			if f := findingsByCategory(d)["dispatch"]; f.Level != tc.level {
+				t.Errorf("dispatch = %+v, want level %s", f, tc.level)
 			}
 		})
 	}

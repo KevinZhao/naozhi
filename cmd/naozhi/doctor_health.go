@@ -28,6 +28,14 @@ const dispatchQuietWarnAfter = 10 * time.Minute
 // interval plus jitter and weixin's 30s back-off with room to spare.
 const platformReconnectGrace = 5 * time.Minute
 
+// platformErrorCap and platformSegmentCap bound each platform's part of the
+// platforms line, so one long error cannot crowd out another platform's
+// name and verdict.
+const (
+	platformErrorCap   = 120
+	platformSegmentCap = 256
+)
+
 // healthReply is the one GET /health a doctor run makes.
 type healthReply struct {
 	err       error // request could not be built or sent
@@ -179,7 +187,7 @@ func (d *doctor) checkServerState() {
 	unobserved := d.platformsFinding(p, now)
 	d.writerFinding("eventlog writer", p.EventLog, "events are not reaching disk")
 	d.writerFinding("attachment tracker", p.AttachmentTracker, "attachment metadata is not being recorded")
-	d.dispatchFinding(p, unobserved)
+	d.dispatchFinding(p, unobserved, now)
 }
 
 // levelRank orders finding levels so the platforms line can take the worst.
@@ -189,7 +197,8 @@ var levelRank = map[string]int{"pass": 0, "warn": 1, "fail": 2}
 // line at the worst platform's level, and returns the platforms that report
 // only "registered" (no observable connection), sorted. A server predating
 // connection state reports every platform that way. now is the server's
-// clock, so a state's age does not depend on the two clocks agreeing.
+// clock, so a state's age does not depend on the two clocks agreeing. Each
+// segment is sanitized and capped on its own rather than the joined line.
 func (d *doctor) platformsFinding(p healthPayload, now time.Time) (unobserved []string) {
 	if len(p.Platforms) == 0 {
 		d.add("platforms", "warn", "no IM platform registered — dashboard-only mode")
@@ -214,16 +223,16 @@ func (d *doctor) platformsFinding(p healthPayload, now time.Time) (unobserved []
 		if err == nil {
 			age = max(now.Sub(since), 0)
 		}
-		l, detail := gradePlatformConn(state, age, err == nil, conn.LastError)
+		l, detail := gradePlatformConn(state, age, err == nil, capRemote(conn.LastError, platformErrorCap))
 		if levelRank[l] > levelRank[level] {
 			level = l
 		}
-		parts = append(parts, name+" "+detail)
+		parts = append(parts, capRemote(name+" "+detail, platformSegmentCap))
 	}
 	if len(unobserved) > 0 {
-		parts = append(parts, "registered: "+strings.Join(unobserved, ", ")+" (registration only, not a connection state)")
+		parts = append(parts, capRemote("registered: "+strings.Join(unobserved, ", ")+" (registration only, not a connection state)", platformSegmentCap))
 	}
-	d.addRemote("platforms", level, strings.Join(parts, "; "))
+	d.add("platforms", level, strings.Join(parts, "; "))
 	return unobserved
 }
 
@@ -272,7 +281,8 @@ func (d *doctor) writerFinding(category string, w *healthWriterStats, consequenc
 // dispatchFinding reports IM reply health. For the unobserved platforms
 // (those without a connection state) a long quiet stretch is the only hint
 // that one never connected; observable ones are graded on the platforms line.
-func (d *doctor) dispatchFinding(p healthPayload, unobserved []string) {
+// now is the server's clock, as for platformsFinding.
+func (d *doctor) dispatchFinding(p healthPayload, unobserved []string, now time.Time) {
 	ds := p.Dispatch
 	if ds == nil {
 		d.add("dispatch", "pass", "skipped (process reports no dispatch stats)")
@@ -291,7 +301,7 @@ func (d *doctor) dispatchFinding(p healthPayload, unobserved []string) {
 	default:
 		// config is loaded once at startup, so its load time is the start time.
 		loadedAt, err := time.Parse(time.RFC3339, p.ConfigLoadedAt)
-		if err == nil && time.Since(loadedAt) > dispatchQuietWarnAfter {
+		if err == nil && now.Sub(loadedAt) > dispatchQuietWarnAfter {
 			d.addRemote("dispatch", "warn", "no inbound IM messages (slash commands not counted) since start at "+p.ConfigLoadedAt+" — "+strings.Join(unobserved, ", ")+" may not be connected (inferred: no connection state reported)")
 			return
 		}
@@ -302,4 +312,14 @@ func (d *doctor) dispatchFinding(p healthPayload, unobserved []string) {
 // addRemote adds a finding whose detail carries server-supplied text.
 func (d *doctor) addRemote(category, level, detail string) {
 	d.add(category, level, osutil.SanitizeForLog(detail, 512))
+}
+
+// capRemote sanitizes server-supplied text and caps it at maxLen bytes,
+// marking a cut with "...".
+func capRemote(s string, maxLen int) string {
+	s = osutil.SanitizeForLog(s, 0)
+	if len(s) <= maxLen {
+		return s
+	}
+	return osutil.SanitizeForLog(s, maxLen-3) + "..."
 }
