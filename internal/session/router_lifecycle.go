@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/metrics"
@@ -80,6 +81,9 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 	// a spawn of our own — so the decision to spawn and the in-flight marker
 	// cannot be split by another caller.
 	var staleSocketBound bool
+	// retryStuck: the shim socket outlived the wait before a rejected
+	// resume's fresh retry.
+	var retryStuck bool
 	for {
 		// Only the round right after a stale one inherits its bound socket; a
 		// round that waits on another caller's spawn consumes it.
@@ -110,6 +114,9 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 					return
 				}
 				resumedID, status = s.getSessionID(), SessionResumed
+				if err = startupBreaker(key, s, time.Now()); err != nil {
+					return
+				}
 				err = r.reserveSpawn(tx, &res, key, resumedID, opts)
 				// A resume the guard kept continues this entry's conversation,
 				// so it is only valid while this entry is still the key's.
@@ -139,15 +146,15 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 			}
 			continue
 		}
-		if status == SessionResumed {
-			slog.Info("session process exited, resuming", "key", key, "session_id", resumedID)
-		} else {
-			// Debug, not Info: completeSpawn logs "session spawned" at Info
-			// moments later.
-			slog.Debug("creating new session", "key", key)
-		}
 		var s *ManagedSession
 		if err == nil {
+			if status == SessionResumed {
+				slog.Info("session process exited, resuming", "key", key, "session_id", resumedID)
+			} else {
+				// Debug, not Info: completeSpawn logs "session spawned" at Info
+				// moments later.
+				slog.Debug("creating new session", "key", key)
+			}
 			s, err = r.completeSpawn(ctx, &res)
 		}
 		if errors.Is(err, errSpawnStale) {
@@ -159,8 +166,16 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 			staleSocketBound = res.socketBound
 			continue
 		}
+		// Nothing was sent yet, so a resume the backend refused is retried
+		// fresh at once; resolveSpawnParams drops it for the flagged session.
+		// The failed spawn's shim is still releasing the key's socket, and the
+		// retry's StartShim would refuse to clobber it.
+		if errors.Is(err, clierr.ErrResumeRejected) && res.old != nil && !res.old.resumeRejected.Swap(true) {
+			retryStuck = !waitSocketGoneForKey(key, 2*time.Second)
+			continue
+		}
 		if err != nil {
-			if stuck || wrapStale {
+			if stuck || wrapStale || retryStuck {
 				// errors.Is chain lets callers pin on ErrShimStuck.
 				return nil, 0, fmt.Errorf("session %s: %w: %w", key, ErrShimStuck, err)
 			}
@@ -333,6 +348,11 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 	// so the spawn falls through to a fresh session instead of failing on
 	// "No conversation found". The probe is backend-aware (see resolveResumeID).
 	resumeID = resolveResumeID(backendID, r.hist.claudeDir, r.hist.backendDirs, workspace, key, resumeID)
+	if why, detail := resumeDropReason(tx.Get(key)); resumeID != "" && why != "" {
+		slog.Warn("resume failed; starting fresh session", "key", key, "session_id", resumeID,
+			"reason", why, "stderr", detail)
+		resumeID = ""
+	}
 
 	// Canonicalize on-disk case for fresh spawns: on case-insensitive APFS a
 	// differently-cased spelling forks two project identities for one tree.
@@ -619,6 +639,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 			oldHistory, prevIDs, snap.cost, snap.costSpent, snap.createdAt, res.opts.Exempt, snap.sid,
 			hist.userTurns, overrides,
 		)
+		s.startupFails.Store(snap.startupFails)
 		s.costMu.Lock()
 		s.spent = snap.spent
 		costBase.applyLocked(s)

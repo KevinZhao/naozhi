@@ -15,19 +15,21 @@ func waitPassthroughState(t *testing.T, p *Process, want ProcessState) {
 		"process state never reached "+want.String())
 }
 
-// awaitUnclaimedResult blocks until readLoop delivers an unclaimed result to
-// eventCh, which happens after the turn-end bookkeeping for that result.
-func awaitUnclaimedResult(t *testing.T, p *Process) {
+// awaitUnclaimedEvent blocks until readLoop delivers an unclaimed event of
+// type typ to eventCh. An unowned result reaches eventCh before
+// endUnownedTurn runs, so a state that follows from it must be polled, or
+// read only after a later frame has been awaited (readLoop is sequential).
+func awaitUnclaimedEvent(t *testing.T, p *Process, typ string) {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
 	for {
 		select {
 		case ev := <-p.eventCh:
-			if ev.Type == "result" {
+			if ev.Type == typ {
 				return
 			}
 		case <-deadline:
-			t.Fatal("unclaimed result never reached eventCh")
+			t.Fatal("unclaimed " + typ + " never reached eventCh")
 		}
 	}
 }
@@ -84,10 +86,8 @@ func TestPassthrough_CLIInitiatedTurnReturnsToReady(t *testing.T) {
 	waitPassthroughState(t, sh.proc, StateRunning)
 	sh.emitAssistantText("background done")
 	sh.emitResult("s1", "background done")
-	awaitUnclaimedResult(t, sh.proc)
-	if got := sh.proc.State(); got != StateReady {
-		t.Fatalf("after CLI-initiated result state = %v, want Ready", got)
-	}
+	awaitUnclaimedEvent(t, sh.proc, "result")
+	waitPassthroughState(t, sh.proc, StateReady)
 }
 
 // A message queued during a CLI-initiated turn keeps the process Running past
@@ -105,7 +105,9 @@ func TestPassthrough_SendQueuedDuringCLIInitiatedTurn(t *testing.T) {
 	in := sh.expectWrite(t, 2*time.Second)
 
 	sh.emitResult("s1", "background done")
-	awaitUnclaimedResult(t, sh.proc)
+	awaitUnclaimedEvent(t, sh.proc, "result")
+	sh.emitAssistantText("barrier")
+	awaitUnclaimedEvent(t, sh.proc, "assistant")
 	if got := sh.proc.State(); got != StateRunning {
 		t.Fatalf("state with queued message = %v, want Running", got)
 	}

@@ -145,7 +145,7 @@ export function dedupEarlierPage(events, cursorMS, seenKeys) {
 
 // hasMoreHeader reads X-Events-Has-More; null when absent (an older server
 // or relay), which leaves the caller its length heuristic.
-function hasMoreHeader(resp) {
+export function hasMoreHeader(resp) {
   const v = resp && resp.headers ? resp.headers.get('X-Events-Has-More') : null;
   return v == null ? null : v === '1' || v === 'true';
 }

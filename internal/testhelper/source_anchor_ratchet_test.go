@@ -53,16 +53,12 @@ const anchorFloor = 40
 // sourceAnchorFiles walks root and returns the test files that read Go source,
 // and those among them without an anchor-keep line, as root-relative paths.
 func sourceAnchorFiles(root string) (anchors, unjustified []string, err error) {
-	nested := filepath.Join(root, "naozhi") // an old clone kept inside the main worktree
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			switch {
-			case path == root:
-				return nil
-			case path == nested, d.Name() == "node_modules", d.Name() == ".git", d.Name() == "testdata":
+			if SkipRepoDir(root, path, d) {
 				return filepath.SkipDir
 			}
 			return nil
