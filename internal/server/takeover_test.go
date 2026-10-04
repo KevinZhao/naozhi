@@ -69,7 +69,8 @@ func TestTryAutoTakeover_KillsOnlyForAClaudeResume(t *testing.T) {
 		wantKill                    bool
 	}{
 		{name: "claude resume", backend: "claude", wantKill: true},
-		{name: "agent pinned to kiro", backend: "claude", agentBackend: "kiro"},
+		{name: "chat pinned to claude", backend: "claude", agentBackend: "claude", wantKill: true},
+		{name: "chat pinned to kiro", backend: "claude", agentBackend: "kiro"},
 		{name: "no claude backend", backend: "kiro"},
 	}
 	for _, tc := range cases {

@@ -63,7 +63,7 @@ func pickTakeoverCandidate(discovered []discovery.DiscoveredSession, workspace s
 }
 
 // takeoverResumesOnClaude reports whether Takeover would resume a discovered
-// Claude transcript on claude. On an agent pinned to another backend, or with
+// Claude transcript on claude. On a chat pinned to another backend, or with
 // no claude backend, the takeover could only start an unrelated fresh session,
 // so killing the user's terminal CLI for it is not worth it.
 func takeoverResumesOnClaude(backends *session.BackendRegistry, pinned string) bool {
