@@ -22,11 +22,9 @@ import { registerShell } from './shell.js';
 export async function fetchEvents(full) {
   if (!selection.key) return;
   if (!full && transcript.fetchInFlight) return;
-  // Capture session identity at dispatch time so a mid-flight switch doesn't
-  // apply stale events to the new session's DOM. `selectedKey` can flip
-  // synchronously from `pickSession`/`dismiss` callbacks while `await`
-  // suspends us; applying `appendEvents` after that point would graft the
-  // prior session's tail into the newly-opened session's scroller.
+  // Capture session identity at dispatch time: `pickSession`/`dismiss` can
+  // flip selectedKey while `await` suspends us, and appending after that
+  // would graft the prior session's tail into the newly-opened scroller.
   const dispatchKey = selection.key;
   const dispatchNode = selection.node;
   if (full) transcript.fetchGen++;
@@ -83,7 +81,6 @@ export async function fetchEvents(full) {
     if (gen === transcript.fetchGen) transcript.fetchInFlight = false;
   }
 }
-
 
 const AUTO_PAGEBACK_MAX = 3;
 
@@ -307,54 +304,57 @@ function prependEvents(events) {
   return !!html;
 }
 
-// ensureEarlierButton injects/refreshes the "load earlier" affordance at the
-// top of the scroller. Button state is stored in data-state on the element.
-export function ensureEarlierButton() {
+// paneButton returns the scroller's button `id`, created on first use and
+// kept at the top of the scroller; null without a scroller.
+function paneButton(id, onclick) {
   const el = document.getElementById('events-scroll');
-  if (!el) return;
-  let btn = document.getElementById('earlier-events-btn');
+  if (!el) return null;
+  let btn = document.getElementById(id);
   if (!btn) {
     btn = document.createElement('button');
-    btn.id = 'earlier-events-btn';
+    btn.id = id;
     btn.type = 'button';
     btn.className = 'earlier-events-btn';
     btn.style.cssText = 'display:block;margin:8px auto;padding:6px 14px;background:var(--nz-bg-2);border:1px solid var(--nz-border);color:var(--nz-text);border-radius:6px;cursor:pointer;font-size:12px';
-    btn.textContent = '加载更早的事件';
-    btn.onclick = () => loadEarlierEvents();
-    el.insertBefore(btn, el.firstChild);
-  } else if (el.firstChild !== btn) {
-    el.insertBefore(btn, el.firstChild);
+    btn.onclick = onclick;
   }
-  updateEarlierButton('ready');
+  if (el.firstChild !== btn) el.insertBefore(btn, el.firstChild);
+  return btn;
 }
+
+// ensureEarlierButton injects/refreshes the "load earlier" affordance at the
+// top of the scroller. Button state is stored in data-state on the element.
+export function ensureEarlierButton() {
+  if (paneButton('earlier-events-btn', () => loadEarlierEvents())) updateEarlierButton('ready');
+}
+
+// showHistoryRetry answers error 'history unavailable' (a remote node failed
+// to serve the history) with a retry where the opening page should be.
+export function showHistoryRetry() {
+  const el = document.getElementById('events-scroll');
+  if (el && !el.querySelector('.event')) el.replaceChildren();
+  const btn = paneButton('history-retry-btn', () => { btn.remove(); sessionStream.subscribe(selection.key, selection.node); });
+  if (btn) btn.textContent = '历史记录加载失败 — 点击重试';
+}
+
+// [label, disabled] per button state; any other state is 'ready'.
+const EARLIER_BUTTON_STATES = {
+  loading: ['加载中…', true],
+  done: ['没有更早的事件', true],
+  error: ['加载失败 — 点击重试', false],
+};
 
 function updateEarlierButton(state) {
   const btn = document.getElementById('earlier-events-btn');
   if (!btn) return;
   btn.dataset.state = state;
-  switch (state) {
-    case 'loading':
-      btn.textContent = '加载中…';
-      btn.disabled = true;
-      break;
-    case 'done':
-      btn.textContent = '没有更早的事件';
-      btn.disabled = true;
-      break;
-    case 'error':
-      btn.textContent = '加载失败 — 点击重试';
-      btn.disabled = false;
-      break;
-    default:
-      btn.textContent = '加载更早的事件';
-      btn.disabled = false;
-  }
+  [btn.textContent, btn.disabled] = EARLIER_BUTTON_STATES[state] || ['加载更早的事件', false];
 }
 
 // renderEvents replaces the whole events pane on the initial / full-fetch path.
 // hasMore (when not null) is the server's authoritative "older history exists"
 // signal from the X-Events-Has-More header; null means the header was absent
-// (legacy server or remote node) and we fall back to the length heuristic.
+// (legacy server or node) and we fall back to the length heuristic.
 export function renderEvents(events, hasMore) {
   const el = document.getElementById('events-scroll');
   if (!el) return;

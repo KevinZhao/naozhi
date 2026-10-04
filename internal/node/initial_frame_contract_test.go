@@ -29,23 +29,10 @@ func TestRemoteHistoryFrames_MarkOpeningPage(t *testing.T) {
 		fn          string
 		wantInitial bool
 	}{
-		{file: "reverseconn.go", fn: "func (c *ReverseConn) Subscribe(", wantInitial: true},
-		{file: "relay.go", fn: "func (r *wsRelay) sendHistoryToClient(", wantInitial: true},
+		{file: "conn.go", fn: "func sendHistoryPage(", wantInitial: true},
 		{file: "reverseconn.go", fn: "func (c *ReverseConn) readLoop(", wantInitial: false},
 	} {
-		src, err := os.ReadFile(tc.file)
-		if err != nil {
-			t.Fatalf("read %s: %v", tc.file, err)
-		}
-		start := strings.Index(string(src), tc.fn)
-		if start < 0 {
-			t.Fatalf("%s: function %q not found", tc.file, tc.fn)
-		}
-		// Bound at the next top-level func so we only inspect this one.
-		body := string(src)[start+len(tc.fn):]
-		if end := strings.Index(body, "\nfunc "); end > 0 {
-			body = body[:end]
-		}
+		body := funcSource(t, tc.file, tc.fn)
 		found := false
 		for _, line := range strings.Split(body, "\n") {
 			if !strings.Contains(line, "wsproto.NewHistory(") {
@@ -61,4 +48,34 @@ func TestRemoteHistoryFrames_MarkOpeningPage(t *testing.T) {
 			t.Errorf("%s %s: expected at least one history frame to pin, found none — did the emitter move?", tc.file, tc.fn)
 		}
 	}
+
+	// Every opening frame a sink fetches for itself goes out through
+	// sendHistoryPage, so the pin above covers them all.
+	for _, tc := range []struct{ file, fn string }{
+		{"reverseconn.go", "func (c *ReverseConn) Subscribe("},
+		{"relay.go", "func (r *wsRelay) sendHistoryToClient("},
+	} {
+		body := funcSource(t, tc.file, tc.fn)
+		if !strings.Contains(body, "sendHistoryPage(") || strings.Contains(body, "wsproto.NewHistory(") {
+			t.Errorf("%s %s: opening frames must go out through sendHistoryPage", tc.file, tc.fn)
+		}
+	}
+}
+
+// funcSource returns fn's source in file, bounded at the next top-level func.
+func funcSource(t *testing.T, file, fn string) string {
+	t.Helper()
+	src, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("read %s: %v", file, err)
+	}
+	start := strings.Index(string(src), fn)
+	if start < 0 {
+		t.Fatalf("%s: function %q not found", file, fn)
+	}
+	body := string(src)[start+len(fn):]
+	if end := strings.Index(body, "\nfunc "); end > 0 {
+		body = body[:end]
+	}
+	return body
 }

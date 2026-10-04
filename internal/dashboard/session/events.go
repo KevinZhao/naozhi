@@ -9,6 +9,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	"github.com/naozhi/naozhi/internal/node"
 )
 
 // eventsBefore returns the entries strictly older than the `before` cursor
@@ -92,35 +93,23 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 		limit = v
 	}
 
-	// Remote node proxy — the node RPC only carries `after`, so `before` /
-	// `limit` pagination is emulated locally; older peers keep working.
+	// Remote node proxy. The initial and `before` pages are asked of the node
+	// as pages; an older peer answers with its whole log (no has-more), which
+	// is paginated here as the local branch would.
 	nodeID := q.Get("node")
 	if nodeID != "" && nodeID != "local" {
 		nc, ok := h.deps.NodeAccess.LookupNode(w, nodeID)
 		if !ok {
 			return
 		}
+		if afterStr == "" && (beforeStr != "" || limit > 0) {
+			h.remoteEventsPage(w, r, nc, nodeID, key, before, limit, beforeStr != "")
+			return
+		}
 		entries, err := nc.FetchEvents(r.Context(), key, after)
 		if err != nil {
 			slog.Warn("remote fetch events failed", "node", nodeID, "key", key, "err", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
-			return
-		}
-		if beforeStr != "" && afterStr == "" {
-			// "Load earlier" page (#2433): strictly older than the cursor, newest
-			// `limit` of those, plus an authoritative has-more flag. An empty page
-			// is the client's stop signal, so it must be [] with has-more=0.
-			pageLimit := limit
-			if pageLimit == 0 {
-				pageLimit = maxEventsPageLimit
-			}
-			page := eventsBefore(entries, before)
-			hasMore := len(page) > pageLimit
-			if hasMore {
-				page = page[len(page)-pageLimit:]
-			}
-			setHasMore(w, hasMore)
-			httputil.WriteJSON(w, clievent.ForWire(page))
 			return
 		}
 		// Page cap so legacy peers still yield a consistent-size payload.
@@ -186,5 +175,48 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 		entries = sess.EventEntries()
 	}
 
+	httputil.WriteJSON(w, clievent.ForWire(entries))
+}
+
+// remoteEventsPage serves a node's initial or "load earlier" page. A node
+// that reports has-more is passed through as-is. Otherwise the answer is
+// paginated here: a `before` page asks for one entry more than it returns,
+// so a peer that bounds the page without a has-more flag still yields one.
+func (h *Handlers) remoteEventsPage(w http.ResponseWriter, r *http.Request, nc node.Conn, nodeID, key string, before int64, limit int, isBefore bool) {
+	q := node.EventsQuery{Limit: limit}
+	if isBefore {
+		if q.Limit == 0 {
+			q.Limit = maxEventsPageLimit
+		}
+		q.Before, q.Limit = before, q.Limit+1
+	}
+	page, err := nc.FetchEventsPage(r.Context(), key, q)
+	if err != nil {
+		slog.Warn("remote fetch events failed", "node", nodeID, "key", key, "err", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	entries := page.Events
+	switch {
+	case page.HasMore != nil:
+		setHasMore(w, *page.HasMore)
+	case isBefore:
+		// "Load earlier" page (#2433): strictly older than the cursor, newest
+		// `limit` of those, plus an authoritative has-more flag. An empty page
+		// is the client's stop signal, so it must be [] with has-more=0.
+		pageLimit := q.Limit - 1
+		entries = eventsBefore(entries, before)
+		hasMore := len(entries) > pageLimit
+		if hasMore {
+			entries = entries[len(entries)-pageLimit:]
+		}
+		setHasMore(w, hasMore)
+	case len(entries) > limit:
+		// Page cap so legacy peers still yield a consistent-size payload.
+		entries = entries[len(entries)-limit:]
+	}
+	if entries == nil {
+		entries = []clievent.EventEntry{}
+	}
 	httputil.WriteJSON(w, clievent.ForWire(entries))
 }

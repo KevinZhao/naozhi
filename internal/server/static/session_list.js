@@ -16,7 +16,7 @@ import { invalidateGitState } from './tuning.js';
 import { sectionHeaderFallbackHtml, sectionHeaderHtml } from './sidebar_project.js';
 import { accessProfileChipHtml, backendDisplayName, backendDisplayVersion } from './auth_modal.js';
 import { _optimisticRunningTimers } from './send_message.js';
-import { fetchEvents } from './event_stream.js';
+import { fetchEvents, showHistoryRetry } from './event_stream.js';
 import { discoveredKey, getNodeDisplayName, isMultiNode, matchProject, nodeColor, sessionTypeTag, sid } from './session_ident.js';
 import { ICONS } from './icons.js';
 import { registerShell } from './shell.js';
@@ -1065,12 +1065,12 @@ wsm.on(NZ_CONTRACT.WS.error, (msg) => {
     debouncedFetchSessions();
     return;
   }
-  // Subscribe failed (e.g. session not found yet) — reset pending, but
-  // only when the frame is about THIS subscribe: a keyed error for a
-  // different key (or an agent_subscribe validation error, which also
-  // arrives as a bare `error`) must not wipe an unrelated in-flight
-  // subscribe. Keyless frames without a node are the legacy shape of a
-  // subscribe rejection and still clear pending.
+  if (msg.error === 'history unavailable' && msg.key === selection.key && msg.node === selection.node) showHistoryRetry();
+  // Subscribe failed (e.g. session not found yet): reset pending only when
+  // the frame is about THIS subscribe. A keyed error for another key (or an
+  // agent_subscribe validation error, also a bare `error`) must not wipe an
+  // unrelated in-flight subscribe; keyless frames without a node are the
+  // legacy shape of a subscribe rejection and still clear pending.
   if (!msg.key || msg.key === sessionStream._pendingSubscribeKey) {
     sessionStream._pendingSubscribeKey = null;
     sessionStream._pendingSubscribeNode = null;

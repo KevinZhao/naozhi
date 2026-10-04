@@ -29,6 +29,9 @@ type Session interface {
 	// the visible-aware newest slice for a page-size hint, and whether older
 	// history exists.
 	InitialHistoryPage(ctx context.Context, limit int) ([]clievent.EventEntry, bool)
+	// EventPageBeforeCtx is a "load earlier" page: the newest limit entries
+	// older than beforeMS, and whether older history exists.
+	EventPageBeforeCtx(ctx context.Context, beforeMS int64, limit int) ([]clievent.EventEntry, bool)
 	LogSystemEvent(summary string)
 	Snapshot() sessionview.SessionSnapshot
 	State() string

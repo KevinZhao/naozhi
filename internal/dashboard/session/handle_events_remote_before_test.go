@@ -11,17 +11,40 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 )
 
-// fakeEventsConn is a node.Conn whose only live method is FetchEvents; the
-// embedded nil interface covers the rest (never called by HandleEvents).
+// fakeEventsConn is a node.Conn whose only live methods are the two event
+// fetches; the embedded nil interface covers the rest (never called by
+// HandleEvents). By default it is a peer predating paged fetch_events: every
+// page request gets the whole log and no has-more.
 type fakeEventsConn struct {
 	node.Conn
 	entries  []clievent.EventEntry
 	gotAfter int64
+	gotQuery node.EventsQuery
+	// page, when set, is a paging node's answer to every page request.
+	page *node.EventsPage
+	// bounded makes the legacy answer honour before/limit (a peer that pages
+	// but reports no has-more).
+	bounded bool
 }
 
 func (c *fakeEventsConn) FetchEvents(_ context.Context, _ string, after int64) ([]clievent.EventEntry, error) {
 	c.gotAfter = after
 	return c.entries, nil
+}
+
+func (c *fakeEventsConn) FetchEventsPage(_ context.Context, _ string, q node.EventsQuery) (node.EventsPage, error) {
+	c.gotQuery = q
+	if c.page != nil {
+		return *c.page, nil
+	}
+	if !c.bounded {
+		return node.EventsPage{Events: c.entries}, nil
+	}
+	older := eventsBefore(c.entries, q.Before)
+	if len(older) > q.Limit {
+		older = older[len(older)-q.Limit:]
+	}
+	return node.EventsPage{Events: older}, nil
 }
 
 type fakeEventsNodeAccessor struct {
@@ -76,11 +99,11 @@ func equalTimes(a, b []int64) bool {
 	return true
 }
 
-// #2433 P2: the node RPC only carries `after`, so the remote proxy branch used
-// to ignore `before` and always return the NEWEST `limit` entries. The
-// dashboard's "load earlier" then prepended the same page forever. The proxy
-// must filter Time < before locally, take the tail `limit`, and report
-// X-Events-Has-More so the client knows when to stop.
+// #2433 P2: a peer predating paged fetch_events ignores `before` and answers
+// with its whole log; returning its NEWEST `limit` entries made "load
+// earlier" prepend the same page forever. The proxy must filter Time < before
+// locally, take the tail `limit`, and report X-Events-Has-More so the client
+// knows when to stop.
 func TestHandleEvents_RemoteBefore_FiltersAndPaginates(t *testing.T) {
 	conn := &fakeEventsConn{entries: remoteEventsFixture(10)}
 	h := newIfChangedTestHandlers(t, fakeEventsNodeAccessor{conn: conn})
@@ -140,10 +163,10 @@ func TestHandleEvents_RemoteBefore_NoLimitUsesPageCap(t *testing.T) {
 	}
 }
 
-// Regression guard for the untouched paths: initial fetch (limit only) still
-// tails the newest entries without a has-more header (client falls back to
-// its length heuristic for remote nodes), and `after` still wins over
-// `before` per the documented precedence.
+// Against a peer predating paged fetch_events, the initial fetch (limit only)
+// still tails the newest entries without a has-more header (client falls back
+// to its length heuristic), and `after` still wins over `before` per the
+// documented precedence.
 func TestHandleEvents_RemoteInitialAndAfter_Unchanged(t *testing.T) {
 	conn := &fakeEventsConn{entries: remoteEventsFixture(10)}
 	h := newIfChangedTestHandlers(t, fakeEventsNodeAccessor{conn: conn})

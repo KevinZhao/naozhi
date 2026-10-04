@@ -48,6 +48,9 @@ func (s *stubConn) FetchDiscoveredPreview(_ context.Context, _ string) ([]clieve
 func (s *stubConn) FetchEvents(_ context.Context, _ string, _ int64) ([]clievent.EventEntry, error) {
 	return nil, nil
 }
+func (s *stubConn) FetchEventsPage(_ context.Context, _ string, _ EventsQuery) (EventsPage, error) {
+	return EventsPage{}, nil
+}
 func (s *stubConn) FetchBackends(_ context.Context) (json.RawMessage, error) {
 	return nil, nil
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
 // EventSink can receive JSON event messages pushed from a remote session.
@@ -36,11 +37,59 @@ type NodeFetcher interface {
 	FetchDiscovered(ctx context.Context) ([]map[string]any, error)
 	FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]clievent.EventEntry, error)
 	FetchEvents(ctx context.Context, key string, after int64) ([]clievent.EventEntry, error)
+	// FetchEventsPage reads one bounded page; a peer predating it answers
+	// with its whole log and a nil HasMore.
+	FetchEventsPage(ctx context.Context, key string, q EventsQuery) (EventsPage, error)
 	// FetchBackends returns the remote /api/cli/backends payload verbatim as
 	// raw JSON so the primary need not track a newer peer's manifest shape;
 	// peers predating the RPC error and the picker collapses to single-backend.
 	FetchBackends(ctx context.Context) (json.RawMessage, error)
 	Send(ctx context.Context, key, text, workspace string) error
+}
+
+// EventsQuery selects a history page: Before > 0 asks for the newest Limit
+// entries strictly older than Before, otherwise the opening page sized by
+// Limit (a page-size hint, as on subscribe).
+type EventsQuery struct {
+	Before int64
+	Limit  int
+}
+
+// EventsPage is a history page and whether older history exists; HasMore is
+// nil when the node cannot tell.
+type EventsPage struct {
+	Events  []clievent.EventEntry
+	HasMore *bool
+}
+
+// errHistoryUnavailable is the keyed error a sink gets when its history
+// fetch fails, so the dashboard offers a retry instead of a blank pane.
+const errHistoryUnavailable = "history unavailable"
+
+func historyUnavailable(nodeID, key string) wsproto.Error {
+	return wsproto.NewError(wsproto.Error{Key: key, Node: nodeID, Error: errHistoryUnavailable})
+}
+
+// fetchHistory reads a sink's own history: the catch-up from after, else the
+// opening page sized by limit (<= 0 means the largest page).
+func fetchHistory(ctx context.Context, f NodeFetcher, key string, after int64, limit int) (EventsPage, error) {
+	if after > 0 {
+		entries, err := f.FetchEvents(ctx, key, after)
+		return EventsPage{Events: entries}, err
+	}
+	if limit <= 0 || limit > maxPushedHistoryEvents {
+		limit = maxPushedHistoryEvents
+	}
+	return f.FetchEventsPage(ctx, key, EventsQuery{Limit: limit})
+}
+
+// sendHistoryPage hands cl its own page as an Initial frame. A page that
+// knows HasMore goes out even when empty, as the local hub's does; an empty
+// legacy answer sends nothing.
+func sendHistoryPage(cl EventSink, nodeID, key string, p EventsPage) {
+	if len(p.Events) > 0 || p.HasMore != nil {
+		cl.SendJSON(wsproto.NewHistory(wsproto.History{Key: key, Node: nodeID, Events: p.Events, Initial: true, HasMore: p.HasMore}))
+	}
 }
 
 // NodeProxy forwards state-mutating dashboard RPCs (takeover / close /

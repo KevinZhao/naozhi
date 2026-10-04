@@ -97,7 +97,7 @@ func (r *wsRelay) Subscribe(c EventSink, key string, after int64, limit int) {
 	r.mu.Unlock()
 
 	if historyOnly {
-		go r.sendHistoryToClient(c, key, after)
+		go r.sendHistoryToClient(c, key, after, limit)
 		return
 	}
 
@@ -481,7 +481,7 @@ func (r *wsRelay) reconnect() {
 
 // sendHistoryToClient serves the second-subscriber path; the caller does
 // wg.Add(1) and this function owns the matching Done.
-func (r *wsRelay) sendHistoryToClient(c EventSink, key string, after int64) {
+func (r *wsRelay) sendHistoryToClient(c EventSink, key string, after int64, limit int) {
 	defer r.wg.Done()
 
 	c.SendJSON(wsproto.NewSubscribed(wsproto.Subscribed{Key: key, Node: r.node.ID}))
@@ -490,14 +490,17 @@ func (r *wsRelay) sendHistoryToClient(c EventSink, key string, after int64) {
 	ctx, cancel := context.WithTimeout(r.baseCtx, 5*time.Second)
 	defer cancel()
 
-	entries, err := r.node.FetchEvents(ctx, key, after)
+	page, err := fetchHistory(ctx, r.node, key, after, limit)
 	if err != nil {
+		// Close() cancelled it: the relay is going away, nothing to retry.
+		if r.baseCtx.Err() != nil {
+			return
+		}
 		slog.Warn("relay fetch history", "node", r.node.ID, "key", key, "err", err)
+		c.SendJSON(historyUnavailable(r.node.ID, key))
 		return
 	}
-	if len(entries) > 0 {
-		c.SendJSON(wsproto.NewHistory(wsproto.History{Key: key, Node: r.node.ID, Events: entries, Initial: true}))
-	}
+	sendHistoryPage(c, r.node.ID, key, page)
 }
 
 // writeJSON sends a JSON message via the relay websocket.
