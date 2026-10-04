@@ -39,14 +39,14 @@ type pkgFile struct {
 	typ  handlerTyper
 }
 
-// scanHandlerDecls returns every handler declaration in pkgDir's non-test Go
-// files, sorted by key. A declaration is a handler when it is
+// scanHandlerDecls returns pkgDir's non-test handler declarations, sorted by key:
 //   - a function or method of exactly (http.ResponseWriter, *http.Request)
 //     with no results (ServeHTTP included),
 //   - a factory: its single result is a handler type and no parameter is one
 //     (that is middleware), or
 //   - a package-level var whose type is a handler type, or whose value is a
 //     handler or factory func literal or a conversion to a handler type.
+//
 // Known gaps: func literals registered inline, a factory taking a handler it
 // never wraps, and an untyped var initialised by calling a factory.
 func scanHandlerDecls(pkgDir string) ([]handlerDecl, error) {
