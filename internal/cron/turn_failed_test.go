@@ -11,9 +11,37 @@ import (
 )
 
 // errTurnFailedRPC is what the wireup adapter returns for a turn the backend
-// rejected over JSON-RPC: the sentinel plus run-history detail that must never
+// rejected over JSON-RPC: the cause plus run-history detail that must never
 // reach the IM notice.
-var errTurnFailedRPC = fmt.Errorf("%w (error): kiro rpc code -32001: upstream overloaded", ErrTurnFailed)
+var errTurnFailedRPC = fmt.Errorf("%w (error): kiro rpc code -32001: upstream overloaded",
+	&TurnFailedError{Cause: TurnCauseBackendOverloaded})
+
+// TestTurnFailedError: it matches ErrTurnFailed and reads like it, wrapped or
+// not, and turnCauseOf finds its cause through the wrapping; a bare sentinel
+// or another error has none.
+func TestTurnFailedError(t *testing.T) {
+	t.Parallel()
+	if !errors.Is(errTurnFailedRPC, ErrTurnFailed) {
+		t.Fatalf("%v does not match ErrTurnFailed", errTurnFailedRPC)
+	}
+	if got := (&TurnFailedError{Cause: TurnCauseMaxTurns}).Error(); got != ErrTurnFailed.Error() {
+		t.Errorf("Error() = %q, want %q", got, ErrTurnFailed.Error())
+	}
+	if got := errTurnFailedRPC.Error(); got != "cron: turn failed (error): kiro rpc code -32001: upstream overloaded" {
+		t.Errorf("wrapped Error() = %q", got)
+	}
+	if got := turnCauseOf(errTurnFailedRPC); got != TurnCauseBackendOverloaded {
+		t.Errorf("turnCauseOf(wrapped) = %q, want backend_overloaded", got)
+	}
+	for _, err := range []error{fmt.Errorf("%w (error)", ErrTurnFailed), errors.New("broken pipe"), nil} {
+		if got := turnCauseOf(err); got != TurnCauseUnknown {
+			t.Errorf("turnCauseOf(%v) = %q, want unknown", err, got)
+		}
+	}
+	if errors.Is(&TurnFailedError{}, ErrSessionCapacity) {
+		t.Error("TurnFailedError matches an unrelated sentinel")
+	}
+}
 
 // TestClassifyExecError_TurnFailed: ErrTurnFailed is a failed run with its own
 // class on both the send and spawn defaults; other errors keep the default.
@@ -32,7 +60,8 @@ func TestClassifyExecError_TurnFailed(t *testing.T) {
 // TestExecuteOpt_TurnFailedIsAFailedRun drives a whole run whose Send reports
 // a failed turn: the record is failed/turn_failed with the detail in its error
 // message and the session its result frame named, the failure streak advances,
-// and the IM notice names the cause without the raw backend text or RPC code.
+// and the IM notice names the cause the error carries without the raw backend
+// text or RPC code.
 func TestExecuteOpt_TurnFailedIsAFailedRun(t *testing.T) {
 	s, r, ns, id := newAutoPauseScheduler(t, 0, "feishu")
 	rec := &recordingBroadcaster{}
@@ -67,8 +96,8 @@ func TestExecuteOpt_TurnFailedIsAFailedRun(t *testing.T) {
 		t.Fatalf("notices = %q, want exactly one", notices)
 	}
 	n := notices[0]
-	if !strings.Contains(n, "执行失败（后端报告本轮出错），请检查执行历史") {
-		t.Errorf("notice %q does not name the failed turn", n)
+	if !strings.Contains(n, "执行失败（后端服务负载较高），请检查执行历史") {
+		t.Errorf("notice %q does not name the failed turn's cause", n)
 	}
 	for _, raw := range []string{"-32001", "rpc", "overloaded", "turn failed"} {
 		if strings.Contains(n, raw) {
@@ -184,6 +213,23 @@ func TestExecuteOpt_SendErrorWithoutResultKeepsSessionEmpty(t *testing.T) {
 	}
 }
 
+// TestExecuteOpt_TurnFailedWithoutCause: a bare ErrTurnFailed (no cause
+// found) still gets the generic turn_failed sentence.
+func TestExecuteOpt_TurnFailedWithoutCause(t *testing.T) {
+	s, r, ns, id := newAutoPauseScheduler(t, 0, "feishu")
+	r.set(nil, fmt.Errorf("%w (error_during_execution)", ErrTurnFailed))
+
+	runN(s, id, 1)
+
+	if j := s.jobForTest(t, id); j.LastErrorClass != ErrClassTurnFailed {
+		t.Errorf("LastErrorClass = %q, want turn_failed", j.LastErrorClass)
+	}
+	notices := ns.noticesAfter(s)
+	if len(notices) != 1 || !strings.Contains(notices[0], "执行失败（后端报告本轮出错），请检查执行历史") {
+		t.Errorf("notices = %q, want one with the generic turn_failed sentence", notices)
+	}
+}
+
 // TestAdoption_FailedTurnRecordsTurnFailed: an adopted turn whose late result
 // reported a failure is recorded failed/turn_failed, not succeeded.
 func TestAdoption_FailedTurnRecordsTurnFailed(t *testing.T) {
@@ -216,7 +262,7 @@ func TestAdoption_FailedTurnRecordsTurnFailed(t *testing.T) {
 
 // TestAdoption_FailedTurnThatPausesAnnouncesIt: an adopted run sends no
 // per-run notice, but when its failed turn auto-pauses the job the pause is
-// still announced to the job's notify target.
+// still announced to the job's notify target, naming the turn's cause.
 func TestAdoption_FailedTurnThatPausesAnnouncesIt(t *testing.T) {
 	t.Parallel()
 	router := &adoptingRouter{verdicts: map[string]AdoptVerdict{}, runs: map[string]*fakeInFlightRun{}}
@@ -229,7 +275,7 @@ func TestAdoption_FailedTurnThatPausesAnnouncesIt(t *testing.T) {
 	run := &fakeInFlightRun{
 		outcome: AdoptedRunOutcome{
 			Completed: true, SubType: "error_max_turns",
-			TurnErr: fmt.Errorf("%w (error_max_turns)", ErrTurnFailed),
+			TurnErr: fmt.Errorf("%w (error_max_turns)", &TurnFailedError{Cause: TurnCauseMaxTurns}),
 		},
 		ready: make(chan struct{}),
 	}
@@ -244,7 +290,7 @@ func TestAdoption_FailedTurnThatPausesAnnouncesIt(t *testing.T) {
 	if !s.jobForTest(t, jobID).Paused {
 		t.Fatal("the adopted failure did not pause the job")
 	}
-	want := "执行失败（后端报告本轮出错），请检查执行历史 · run " + runID[:8] + "；已连续失败 1 次，任务已自动暂停"
+	want := "执行未完成（已达到最大执行步数），请检查执行历史 · run " + runID[:8] + "；已连续失败 1 次，任务已自动暂停"
 	if got := ns.noticesAfter(s); len(got) != 1 || !strings.Contains(got[0], want) {
 		t.Errorf("notices = %q, want one containing %q", got, want)
 	}

@@ -13,8 +13,9 @@ import (
 )
 
 // TestTurnFailure: a result the backend flagged as an error becomes
-// cron.ErrTurnFailed with run-history detail; a healthy turn and an abort
-// naozhi asked for (error_during_execution + Aborted) stay nil.
+// cron.ErrTurnFailed with run-history detail and the cause the notice words;
+// a healthy turn and an abort naozhi asked for (error_during_execution +
+// Aborted) stay nil.
 func TestTurnFailure(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -22,6 +23,7 @@ func TestTurnFailure(t *testing.T) {
 		r      clievent.SendResult
 		failed bool
 		detail []string
+		cause  cron.TurnCause
 	}{
 		{name: "success", r: clievent.SendResult{Text: "done", SubType: "success"}},
 		{name: "error subtype without is_error", r: clievent.SendResult{SubType: "error_max_turns"}},
@@ -29,22 +31,42 @@ func TestTurnFailure(t *testing.T) {
 		{
 			name:   "max turns, empty text",
 			r:      clievent.SendResult{SubType: "error_max_turns", IsError: true},
-			failed: true, detail: []string{"error_max_turns"},
+			failed: true, detail: []string{"error_max_turns"}, cause: cron.TurnCauseMaxTurns,
+		},
+		{
+			name:   "budget, empty text",
+			r:      clievent.SendResult{SubType: "error_max_budget_usd", IsError: true},
+			failed: true, detail: []string{"error_max_budget_usd"}, cause: cron.TurnCauseBudget,
 		},
 		{
 			name:   "unrequested error_during_execution",
 			r:      clievent.SendResult{SubType: "error_during_execution", IsError: true},
-			failed: true, detail: []string{"error_during_execution"},
+			failed: true, detail: []string{"error_during_execution"}, cause: cron.TurnCauseUnknown,
 		},
 		{
 			name:   "abort flag does not mute a different failure",
 			r:      clievent.SendResult{SubType: "error_max_turns", IsError: true, Aborted: true},
-			failed: true, detail: []string{"error_max_turns"},
+			failed: true, detail: []string{"error_max_turns"}, cause: cron.TurnCauseMaxTurns,
 		},
 		{
 			name:   "claude error text",
 			r:      clievent.SendResult{SubType: "success", IsError: true, Text: "Prompt is too long"},
-			failed: true, detail: []string{"Prompt is too long"},
+			failed: true, detail: []string{"Prompt is too long"}, cause: cron.TurnCauseContextTooLong,
+		},
+		{
+			name:   "claude api envelope",
+			r:      clievent.SendResult{SubType: "success", IsError: true, Text: "API Error: 529 overloaded"},
+			failed: true, detail: []string{"529 overloaded"}, cause: cron.TurnCauseBackendOverloaded,
+		},
+		{
+			name:   "claude api envelope, connection",
+			r:      clievent.SendResult{SubType: "success", IsError: true, Text: "API Error: connection reset"},
+			failed: true, detail: []string{"connection reset"}, cause: cron.TurnCauseBackendUnreachable,
+		},
+		{
+			name:   "claude error text nobody recognises",
+			r:      clievent.SendResult{SubType: "success", IsError: true, Text: "Execution error"},
+			failed: true, detail: []string{"Execution error"}, cause: cron.TurnCauseUnknown,
 		},
 		{
 			name: "backend rpc rejection",
@@ -52,7 +74,23 @@ func TestTurnFailure(t *testing.T) {
 				SubType: "error", IsError: true, Text: "[kiro] acp rpc error -32001: overloaded",
 				BackendError: &clievent.BackendError{Backend: "kiro", Code: -32001, Message: "overloaded"},
 			},
-			failed: true, detail: []string{"kiro", "-32001", "overloaded"},
+			failed: true, detail: []string{"kiro", "-32001", "overloaded"}, cause: cron.TurnCauseBackendOverloaded,
+		},
+		{
+			name: "backend invalid params",
+			r: clievent.SendResult{
+				SubType: "error", IsError: true, Text: "[codex] rpc error -32602: invalid params",
+				BackendError: &clievent.BackendError{Backend: "codex", Code: -32602, Message: "invalid params"},
+			},
+			failed: true, detail: []string{"-32602"}, cause: cron.TurnCauseBackendInvalid,
+		},
+		{
+			name: "backend rejection with an unmatched message",
+			r: clievent.SendResult{
+				SubType: "error", IsError: true, Text: "[kiro] acp rpc error -32000: something odd",
+				BackendError: &clievent.BackendError{Backend: "kiro", Code: -32000, Message: "something odd"},
+			},
+			failed: true, detail: []string{"something odd"}, cause: cron.TurnCauseUnknown,
 		},
 	}
 	for _, tc := range cases {
@@ -69,10 +107,20 @@ func TestTurnFailure(t *testing.T) {
 			if !errors.Is(err, cron.ErrTurnFailed) {
 				t.Fatalf("turnFailure = %v, want it to wrap cron.ErrTurnFailed", err)
 			}
+			if !strings.HasPrefix(err.Error(), "cron: turn failed (") {
+				t.Errorf("error %q lost the run-history shape", err)
+			}
 			for _, d := range tc.detail {
 				if !strings.Contains(err.Error(), d) {
 					t.Errorf("error %q lacks detail %q", err, d)
 				}
+			}
+			var tf *cron.TurnFailedError
+			if !errors.As(err, &tf) {
+				t.Fatalf("turnFailure = %v, want a cron.TurnFailedError in the chain", err)
+			}
+			if tf.Cause != tc.cause {
+				t.Errorf("cause = %q, want %q", tf.Cause, tc.cause)
 			}
 		})
 	}
@@ -118,6 +166,10 @@ func TestToCronAdoptedOutcome(t *testing.T) {
 	}})
 	if !failed.Completed || !errors.Is(failed.TurnErr, cron.ErrTurnFailed) || failed.SessionID != "sess-a" {
 		t.Errorf("failed turn = %+v, want Completed with TurnErr wrapping ErrTurnFailed", failed)
+	}
+	var tf *cron.TurnFailedError
+	if !errors.As(failed.TurnErr, &tf) || tf.Cause != cron.TurnCauseMaxTurns {
+		t.Errorf("failed turn TurnErr = %v, want it to carry TurnCauseMaxTurns", failed.TurnErr)
 	}
 	ok := toCronAdoptedOutcome(cli.AdoptedOutcome{End: cli.AdoptedEndResult, Result: clievent.SendResult{Text: "hi", SubType: "success"}})
 	if !ok.Completed || ok.TurnErr != nil || ok.Text != "hi" {

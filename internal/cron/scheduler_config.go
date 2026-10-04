@@ -130,6 +130,43 @@ var ErrSessionCapacity = errors.New("cron: session capacity reached")
 // empty or raw-error result.
 var ErrTurnFailed = errors.New("cron: turn failed")
 
+// TurnCause is why a turn failed, as far as the backend's result says; the
+// failure notice words each one. The zero value is a cause nobody named.
+type TurnCause string
+
+const (
+	TurnCauseUnknown            TurnCause = ""
+	TurnCauseMaxTurns           TurnCause = "max_turns"
+	TurnCauseBudget             TurnCause = "max_budget"
+	TurnCauseRefused            TurnCause = "refused"
+	TurnCauseTruncated          TurnCause = "truncated"
+	TurnCauseContextTooLong     TurnCause = "context_too_long"
+	TurnCauseQuota              TurnCause = "quota"
+	TurnCauseBackendOverloaded  TurnCause = "backend_overloaded"
+	TurnCauseBackendRateLimited TurnCause = "backend_rate_limited"
+	TurnCauseBackendAuth        TurnCause = "backend_auth"
+	TurnCauseBackendInvalid     TurnCause = "backend_invalid_request"
+	TurnCauseBackendUnreachable TurnCause = "backend_unreachable"
+)
+
+// TurnFailedError is ErrTurnFailed with the cause the session side found;
+// it matches ErrTurnFailed under errors.Is and reads the same.
+type TurnFailedError struct{ Cause TurnCause }
+
+func (e *TurnFailedError) Error() string { return ErrTurnFailed.Error() }
+
+func (e *TurnFailedError) Is(target error) bool { return target == ErrTurnFailed }
+
+// turnCauseOf is the cause err carries; TurnCauseUnknown for a bare
+// ErrTurnFailed or any other error.
+func turnCauseOf(err error) TurnCause {
+	var tf *TurnFailedError
+	if errors.As(err, &tf) {
+		return tf.Cause
+	}
+	return TurnCauseUnknown
+}
+
 // ProcessReleaser is asserted on the SessionRouter, never added to it (test
 // fakes degrade to keeping the process). ReleaseProcess closes the idle CLI
 // behind key and keeps its session, so a persistent-context job holds no

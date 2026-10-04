@@ -110,10 +110,11 @@ func escapeCronMarkdownPunct(s string) string {
 }
 
 // failureNoticeBody is the IM body for a run that did not succeed: the cause
-// named from errClass/state, then the run id's first 8 hex chars (the same
-// short form the dashboard history shows). timeout is the run's wall-clock
-// budget, printed on the timed-out bodies. Never carries the raw error text.
-func failureNoticeBody(errClass ErrorClass, state RunState, runID string, timeout time.Duration) string {
+// named from errClass/state (and turnCause for a failed turn), then the run
+// id's first 8 hex chars (the same short form the dashboard history shows).
+// timeout is the run's wall-clock budget, printed on the timed-out bodies.
+// Never carries the raw error text.
+func failureNoticeBody(errClass ErrorClass, turnCause TurnCause, state RunState, runID string, timeout time.Duration) string {
 	timedOut := state == RunStateTimedOut || errClass == ErrClassDeadlineExceeded
 	var cause string
 	switch {
@@ -130,7 +131,7 @@ func failureNoticeBody(errClass ErrorClass, state RunState, runID string, timeou
 	case errClass == ErrClassSendError:
 		cause = "执行失败（CLI 发送错误）"
 	case errClass == ErrClassTurnFailed:
-		cause = "执行失败（后端报告本轮出错），请检查执行历史"
+		cause = turnFailedNotice(turnCause)
 	case errClass == ErrClassWorkDirUnreachable:
 		cause = "工作目录不可达，本次执行已跳过"
 	case errClass == ErrClassWorkDirOutsideRoot:
@@ -151,6 +152,32 @@ func failureNoticeBody(errClass ErrorClass, state RunState, runID string, timeou
 	return cause + " · run " + runID
 }
 
+// turnFailedNotices words each TurnCause for a cron notice. Unlike the chat
+// replies for the same causes they never suggest 继续 or /new: in the notify
+// chat those would act on that chat's session, not on the job's.
+var turnFailedNotices = map[TurnCause]string{
+	TurnCauseMaxTurns:           "执行未完成（已达到最大执行步数），请检查执行历史",
+	TurnCauseBudget:             "执行未完成（已达到费用上限），请检查执行历史",
+	TurnCauseRefused:            "执行失败（模型拒绝了本次请求），请检查执行历史",
+	TurnCauseTruncated:          "执行未完成（回复超出模型单次输出上限），请检查执行历史",
+	TurnCauseContextTooLong:     "执行失败（对话上下文已超出模型上限），请检查执行历史",
+	TurnCauseQuota:              "执行失败（API 额度已用尽），请联系管理员",
+	TurnCauseBackendOverloaded:  "执行失败（后端服务负载较高），请检查执行历史",
+	TurnCauseBackendRateLimited: "执行失败（后端调用过于频繁），请检查执行历史",
+	TurnCauseBackendAuth:        "执行失败（后端认证失败或凭证已过期），请联系管理员",
+	TurnCauseBackendInvalid:     "执行失败（后端无法处理本次请求），请检查执行历史",
+	TurnCauseBackendUnreachable: "执行失败（连接模型服务超时或网络异常），请检查执行历史",
+}
+
+// turnFailedNotice is the notice cause for a failed turn; a cause nobody
+// named gets the generic sentence.
+func turnFailedNotice(c TurnCause) string {
+	if s, ok := turnFailedNotices[c]; ok {
+		return s
+	}
+	return "执行失败（后端报告本轮出错），请检查执行历史"
+}
+
 // autoPauseNoticeSuffix is appended to a failure notice when that run's
 // failure auto-paused the job; pausedAfter is finishRun's result (0 = not
 // paused). It says where to resume: an IM job by /cron resume in its chat,
@@ -169,22 +196,22 @@ func autoPauseNoticeSuffix(snap jobSnapshot, pausedAfter int) string {
 // deliverFailureNotice sends the IM notice for a run of rc that did not
 // succeed: failureNoticeBody plus, when pausedAfter > 0, the auto-pause
 // sentence.
-func (s *Scheduler) deliverFailureNotice(rc runCtx, errClass ErrorClass, state RunState, timeout time.Duration, pausedAfter int) {
+func (s *Scheduler) deliverFailureNotice(rc runCtx, errClass ErrorClass, turnCause TurnCause, state RunState, timeout time.Duration, pausedAfter int) {
 	s.deliverNotice(rc.notifyTo, formatCronNotice(rc.snap.labelOrID(),
-		failureNoticeBody(errClass, state, rc.runID, timeout)+autoPauseNoticeSuffix(rc.snap, pausedAfter)))
+		failureNoticeBody(errClass, turnCause, state, rc.runID, timeout)+autoPauseNoticeSuffix(rc.snap, pausedAfter)))
 }
 
 // deliverPauseNotice announces that the failure of a run with no per-run
 // notice (a restart-orphaned sandbox run, an adopted turn) auto-paused its job.
 // The target is resolved from a fresh snapshot of the now-paused job.
-func (s *Scheduler) deliverPauseNotice(rc runCtx, errClass ErrorClass, state RunState, timeout time.Duration, paused int) {
+func (s *Scheduler) deliverPauseNotice(rc runCtx, errClass ErrorClass, turnCause TurnCause, state RunState, timeout time.Duration, paused int) {
 	snap, ok := s.tbl.runSnapshot(rc.jobID)
 	if !ok {
 		return
 	}
 	rc.snap = snap
 	rc.notifyTo = s.resolveNotifyTarget(snap.platName, snap.chatID, snap.notifyPlat, snap.notifyChat, snap.notify)
-	s.deliverFailureNotice(rc, errClass, state, timeout, paused)
+	s.deliverFailureNotice(rc, errClass, turnCause, state, timeout, paused)
 }
 
 // formatNoticeBudget renders d without Duration.String's zero tails

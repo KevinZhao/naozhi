@@ -458,6 +458,8 @@ session events 面板里多次 cron 触发的 user 消息混在一起。在 cron
 
 `ErrorMsg` 仍存原文；`ErrorClass` 是机器可读分类。
 
+`turn_failed` 不再细分 `ErrorClass`（持久化值、dashboard 文案不变）。细分原因由 wireup 从结果帧算成 `cron.TurnCause`（先看 `usermsg.ForTurnResult` 的 turn class，claude 的报错文本再看 `apierr.ClassifyError` 的类别），挂在仍匹配 `ErrTurnFailed` 的 `cron.TurnFailedError` 上；IM 通知按原因选一句 cron 自己的措辞（如「执行未完成（已达到最大执行步数）」），不带后端原文，也不建议「继续」或 /new（在通知会话里发它们作用的是那个会话，不是任务的）。认不出的原因仍是「执行失败（后端报告本轮出错）」。
+
 ## 10. Metrics
 
 新增 expvar/指标：
