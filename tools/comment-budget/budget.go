@@ -28,6 +28,9 @@ type Counts struct {
 	ReviewAnchors int
 	// HistoryPhrases counts phrases that narrate what the code used to do.
 	HistoryPhrases int
+	// DuplicateComments counts adjacent comment blocks with identical text,
+	// separated by exactly one blank line (a stray copy left by a split).
+	DuplicateComments int
 	// IssueRefs counts #NNNN references.
 	IssueRefs int
 	// Offenders maps each counter to its file:line hits, for the report.
@@ -83,6 +86,8 @@ func countFile(c *Counts, rel string, src []byte) error {
 	lines := func(g *ast.CommentGroup) int {
 		return fset.Position(g.End()).Line - fset.Position(g.Pos()).Line + 1
 	}
+	srcLines := strings.Split(string(src), "\n")
+	blankLine := func(n int) bool { return n >= 1 && n <= len(srcLines) && strings.TrimSpace(srcLines[n-1]) == "" }
 
 	docs := map[*ast.CommentGroup]bool{}
 	if f.Doc != nil {
@@ -156,7 +161,42 @@ func countFile(c *Counts, rel string, src []byte) error {
 			c.IssueRefs += len(issueRefRe.FindAllString(text, -1))
 		}
 	}
+	for i := 0; i+1 < len(f.Comments); i++ {
+		prev, next := f.Comments[i], f.Comments[i+1]
+		gapLine := fset.Position(prev.End()).Line + 1
+		if fset.Position(next.Pos()).Line != gapLine+1 || !blankLine(gapLine) {
+			continue
+		}
+		if isGoDirective(prev) || isGoDirective(next) || !sameCommentText(prev, next) {
+			continue
+		}
+		c.DuplicateComments++
+		hit("DuplicateComments", prev.Pos())
+	}
 	return nil
+}
+
+// isGoDirective reports whether every line of g is a //go: directive.
+func isGoDirective(g *ast.CommentGroup) bool {
+	for _, cm := range g.List {
+		if !strings.HasPrefix(cm.Text, "//go:") {
+			return false
+		}
+	}
+	return true
+}
+
+// sameCommentText reports whether a and b hold the same lines, in order.
+func sameCommentText(a, b *ast.CommentGroup) bool {
+	if len(a.List) != len(b.List) {
+		return false
+	}
+	for i, cm := range a.List {
+		if cm.Text != b.List[i].Text {
+			return false
+		}
+	}
+	return true
 }
 
 func itoa(n int) string {

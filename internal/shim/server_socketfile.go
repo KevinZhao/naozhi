@@ -90,12 +90,6 @@ func CleanStaleSocket(path string) error {
 // into an unreachable zombie (fd still held by the kernel). 500ms is generous
 // for a unix connect; slower is already diagnostic. Separate from
 // CleanStaleSocket, whose shim-side bind path expects a different error surface.
-
-// ensureSocketFreeForReuse is the StartShim-side pre-bind check: refuse to
-// clobber a live listener, since removing its filesystem entry turns the peer
-// into an unreachable zombie (fd still held by the kernel). 500ms is generous
-// for a unix connect; slower is already diagnostic. Separate from
-// CleanStaleSocket, whose shim-side bind path expects a different error surface.
 func ensureSocketFreeForReuse(socketPath string) error {
 	if conn, err := net.DialTimeout("unix", socketPath, 500*time.Millisecond); err == nil {
 		_ = conn.Close()
@@ -104,14 +98,6 @@ func ensureSocketFreeForReuse(socketPath string) error {
 	_ = os.Remove(socketPath)
 	return nil
 }
-
-// WaitSocketGone polls the socket path until it disappears or maxWait
-// elapses. Returns true when the socket is gone; false on timeout.
-//
-// Used by callers that just asked a shim to shut down and will spawn a fresh
-// one on the same key: observing the unlink avoids the dial-first "refusing
-// to clobber" guard. Polls by stat (not dial) so no connection state is
-// re-established with a lingering accept goroutine.
 
 // WaitSocketGone polls the socket path until it disappears or maxWait
 // elapses. Returns true when the socket is gone; false on timeout.
