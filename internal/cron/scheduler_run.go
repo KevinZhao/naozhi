@@ -770,12 +770,14 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 		// sanitise before logging to strip IP:port / paths.
 		lg.Error("cron send error", "err", sanitiseRunErrMsg(err.Error()))
 	}
-	// Reset must run while the inflight CAS gate is still held, i.e. BEFORE
-	// finishRun releases it (#1956): a late Reset would let a
-	// concurrent TriggerNow win the CAS and then blindly delete run-B's fresh
-	// session (resetLocked has no owner check).
+	// Reset (and the persistent release) must run while the inflight CAS gate
+	// is still held, i.e. BEFORE finishRun releases it (#1956): a late Reset
+	// would let a concurrent TriggerNow win the CAS and then blindly delete
+	// run-B's fresh session (resetLocked has no owner check).
 	if snap.fresh {
 		s.router.Reset(key)
+	} else {
+		s.releasePersistentProcess(key, lg)
 	}
 	// Stub re-register BEFORE finishRun releases the gate (see the cancel
 	// branch); deliverNotice (IM, stub-independent) stays after finishRun.
@@ -799,13 +801,14 @@ func (s *Scheduler) execFinishSuccess(rc runCtx, result SendResult, costInc cost
 	// the same reading (step-based test clocks stay deterministic).
 	successEndedAt := s.now()
 	s.observeSuccessLatency(successEndedAt.Sub(rc.startedAt), result, snap, lg)
-	// Release the fresh-context session now that the run succeeded (#1829):
-	// cron sessions are Exempt from TTL cleanup, so without this the finished
-	// CLI (+ MCP subprocesses, ~1.6 GB) would idle until the next tick's Reset.
-	// Persistent-mode sessions are reused across ticks by design. The reap MUST
-	// precede finishRun (CAS release) — see reapFreshSessionLocked (#1911).
+	// Cron sessions are Exempt from TTL cleanup, so the finished CLI (+ MCP,
+	// ~1.6 GB) is released here (#1829): fresh drops the session, persistent
+	// keeps it for the next tick to resume. MUST precede finishRun (CAS
+	// release) — see reapFreshSessionLocked (#1911).
 	if snap.fresh {
 		s.reapFreshSessionLocked(key, snap, result.SessionID, lg)
+	} else {
+		s.releasePersistentProcess(key, lg)
 	}
 	// 把本次产生的 Claude session_id 也记下来：fresh_context=true 的
 	// 路径下一次 Reset 会清掉 stub 的 chain，不保留这个 ID 的话
@@ -853,6 +856,22 @@ func (s *Scheduler) reapFreshSessionLocked(key string, snap jobSnapshot, session
 	} else {
 		lg.Info("cron fresh context: session released; job deleted mid-run, skipping stub re-register",
 			"session_id", sessionID)
+	}
+}
+
+// releasePersistentProcess closes a persistent-context run's idle CLI so it
+// is not resident until the next tick, which resumes the session instead.
+// Same ordering contract as reapFreshSessionLocked: call it before finishRun
+// releases the CAS gate, or the release could close the process a concurrent
+// TriggerNow has just fetched. A turn still running (an interrupt that did not
+// land) is left alone.
+func (s *Scheduler) releasePersistentProcess(key string, lg *slog.Logger) {
+	rel, ok := s.router.(ProcessReleaser)
+	if !ok {
+		return
+	}
+	if rel.ReleaseProcess(key) {
+		lg.Info("cron persistent context: process released after run; the next run resumes the session")
 	}
 }
 

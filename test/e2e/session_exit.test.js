@@ -3,7 +3,7 @@
 // A dead session tells the operator why it has no process. The backend sends
 // state + death_reason; the dashboard shows it wherever the session appears:
 //  - an abnormal exit (cli_exited, readloop_panic, …) is a warning chip;
-//  - a reclaim the router did on purpose (idle_timeout, evicted) is a muted
+//  - a reclaim done on purpose (idle_timeout, evicted, released) is a muted
 //    note;
 //  - a live session never shows one, even with a death_reason left over from
 //    a timeout;
@@ -66,6 +66,7 @@ test.describe('dead session exit chip', () => {
         unknown: sessionExit('dead', 'weird_reason'),
         empty: sessionExit('dead', ''),
         evicted: sessionExit('dead', 'evicted'),
+        released: sessionExit('dead', 'released'),
         alive: sessionExit('ready', 'cli_exited'),
         proto: sessionExit('dead', 'toString'),
       };
@@ -73,6 +74,8 @@ test.describe('dead session exit chip', () => {
     expect(got.unknown).toEqual({ crashed: true, text: '进程已退出（weird_reason）', title: '进程已退出（weird_reason），下次发送时自动恢复' });
     expect(got.empty.text).toBe('进程已退出');
     expect(got.evicted.crashed).toBe(false);
+    // A cron run's process closed after the run is a reclaim, not a crash.
+    expect(got.released).toEqual({ crashed: false, text: '本次执行结束，进程已释放', title: '本次执行结束，进程已释放，下次发送时自动恢复' });
     expect(got.alive).toBeNull();
     // An inherited Object property is not a known reason.
     expect(got.proto.text).toBe('进程已退出（toString）');
