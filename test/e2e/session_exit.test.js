@@ -8,9 +8,12 @@
 //  - a live session never shows one, even with a death_reason left over from
 //    a timeout;
 //  - the chip follows session_state pushes, and an optimistic send clears it;
+//  - the tooltip says what the next send does (startup_failure): wait out
+//    the startup breaker's pause, start a new conversation, need an
+//    operator's fix, or just resume;
 //  - the tooltip ends with death_detail, the stderr line naming the cause; a
-//    push drops it and the poll it triggers brings the current one to the
-//    card and the header alike.
+//    push drops it and startup_failure, and the poll it triggers brings the
+//    current ones to the card and the header alike.
 //
 // Run: cd test/e2e && npx playwright test session_exit.test.js --project=desktop-chrome
 
@@ -96,6 +99,92 @@ test.describe('dead session exit chip', () => {
     // A suffix that is neither shape stays the raw value.
     expect(got.notCode.text).toBe('进程已退出（cli_exited_code_x）');
     expect(got.bareSignal.text).toBe('进程已退出（cli_exited_signal_）');
+    mock.server.close();
+  });
+
+  test('the tooltip says what the next send does about startup failures', async ({ page }) => {
+    const mock = await startMockServer();
+    await page.goto(mock.url + '/dashboard');
+    const got = await page.evaluate(async () => {
+      const { sessionExit, patchCardExitChip } = await import('/static/nz_util.js');
+      const { NZ_CONTRACT } = await import('/static/contract.js');
+      const card = document.createElement('div');
+      card.innerHTML = '<div class="sc-meta"><span></span><span>ready</span></div>';
+      patchCardExitChip(card, 'dead', 'cli_exited', '', { class: 'mcp_config', streak: 1 });
+      const title = (/** @type {any} */ f) => sessionExit('dead', 'cli_exited', '', f).title;
+      const retryAt = Date.now() + 90_000;
+      return {
+        clock: new Date(retryAt).toLocaleTimeString('en-GB', { hour12: false }),
+        paused: title({ class: 'auth', streak: 3, retry_at: retryAt, new_session: true }),
+        pauseOver: title({ class: 'unknown', streak: 2, retry_at: Date.now() - 1000, new_session: true }),
+        pauseOverAuth: title({ class: 'auth', streak: 2, retry_at: Date.now() - 1000 }),
+        newSession: title({ class: 'auth', streak: 1, new_session: true }),
+        onlyNewSession: title({ new_session: true }),
+        byClass: Object.fromEntries(NZ_CONTRACT.ENUMS.STARTUP_FAILURE_CLASS.map((c) => [c, title({ class: c, streak: 1 })])),
+        proto: title({ class: 'toString', streak: 1 }),
+        none: title(undefined),
+        withDetail: sessionExit('dead', 'cli_exited_code_1', 'Error: Invalid API key', { class: 'auth', streak: 1 }).title,
+        patched: card.querySelector('.sc-exit')?.getAttribute('title'),
+      };
+    });
+    expect(got.paused).toBe('CLI 进程退出，CLI 连续启动失败（3 次），已暂停自动重试；' + got.clock + ' 后可重试，或发送 /new 立即重试');
+    // A pause that is over leaves what the next send then does.
+    expect(got.pauseOver).toBe('CLI 进程退出，下次发送将开启新会话（上次会话无法恢复）');
+    expect(got.pauseOverAuth).toBe('CLI 进程退出，后端认证失败，需管理员修复后重试');
+    // A refused resume can come with an operator's class: the new session wins.
+    expect(got.newSession).toBe('CLI 进程退出，下次发送将开启新会话（上次会话无法恢复）');
+    expect(got.onlyNewSession).toBe(got.newSession);
+    expect(got.byClass).toEqual({
+      unknown: 'CLI 进程退出，下次发送时自动恢复',
+      resume_not_found: 'CLI 进程退出，下次发送时自动恢复',
+      auth: 'CLI 进程退出，后端认证失败，需管理员修复后重试',
+      mcp_config: 'CLI 进程退出，CLI 配置错误，需管理员修复后重试',
+      missing_runtime: 'CLI 进程退出，CLI 运行环境缺失，需管理员修复后重试',
+    });
+    expect(got.proto).toBe('CLI 进程退出，下次发送时自动恢复');
+    expect(got.none).toBe('CLI 进程退出，下次发送时自动恢复');
+    expect(got.patched).toBe('CLI 进程退出，CLI 配置错误，需管理员修复后重试');
+    expect(got.withDetail).toBe('CLI 进程异常退出（退出码 1），后端认证失败，需管理员修复后重试\nError: Invalid API key');
+    mock.server.close();
+  });
+
+  test('a paused key shows on the card and the header until a push replaces it', async ({ page }) => {
+    const data = exitSessions();
+    const crashed = data.sessions.find((x) => x.key === CRASHED);
+    const retryAt = Date.now() + 10 * 60_000;
+    crashed.startup_failure = { class: 'unknown', streak: 2, retry_at: retryAt, new_session: true };
+    const mock = await startMockServer({ sessions: data, ws: true });
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector(`.session-card[data-key="${CRASHED}"]`);
+    // @ts-ignore — wsm / WS_STATES are mirrored onto window by the e2e shim.
+    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    const clock = await page.evaluate((t) => new Date(t).toLocaleTimeString('en-GB', { hour12: false }), retryAt);
+    const paused = 'CLI 进程退出，CLI 连续启动失败（2 次），已暂停自动重试；' + clock + ' 后可重试，或发送 /new 立即重试\n' + DETAIL;
+    await expect(card(page, CRASHED).locator('.sc-exit')).toHaveAttribute('title', paused);
+    await expect(page.locator(`#recent-sessions-panel .recent-row[data-key="${CRASHED}"] .sc-exit`)).toHaveAttribute('title', paused);
+    await card(page, CRASHED).click();
+    const header = page.locator('#header-exit .sc-exit');
+    await expect(header).toHaveAttribute('title', paused);
+
+    await expect.poll(() => mock.wsConnections.length).toBeGreaterThan(0);
+    const conn = mock.wsConnections[mock.wsConnections.length - 1];
+    // A poll's repaint of the header keeps the pause.
+    crashed.death_detail = 'Error: Invalid API key';
+    data.stats.version++;
+    conn.send({ type: 'sessions_update' });
+    await expect(header).toHaveAttribute('title', paused.replace(DETAIL, crashed.death_detail));
+    Object.assign(crashed, { death_reason: 'readloop_panic' });
+    delete crashed.startup_failure;
+    delete crashed.death_detail;
+    conn.send({ type: 'session_state', key: CRASHED, state: 'dead', reason: 'readloop_panic' });
+    // The push repaints before its debounced poll; the first paint must not
+    // keep the previous death's pause.
+    const first = await page.waitForFunction(() => {
+      const el = document.querySelector('#header-exit .sc-exit');
+      return el && el.getAttribute('title').startsWith('读取循环崩溃') ? el.getAttribute('title') : false;
+    });
+    expect(await first.jsonValue()).toBe('读取循环崩溃，下次发送时自动恢复');
+    await expect(card(page, CRASHED).locator('.sc-exit')).toHaveAttribute('title', '读取循环崩溃，下次发送时自动恢复');
     mock.server.close();
   });
 

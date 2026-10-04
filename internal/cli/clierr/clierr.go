@@ -22,6 +22,7 @@ package clierr
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -70,6 +71,26 @@ const (
 	ExitMCPConfig
 	ExitMissingRuntime
 )
+
+// exitClassWires are the ExitClass names the dashboard reads, by value.
+var exitClassWires = [...]string{
+	ExitUnknown:        "unknown",
+	ExitResumeNotFound: "resume_not_found",
+	ExitAuth:           "auth",
+	ExitMCPConfig:      "mcp_config",
+	ExitMissingRuntime: "missing_runtime",
+}
+
+// Wire is c's name in the dashboard API; "unknown" for a value out of range.
+func (c ExitClass) Wire() string {
+	if c < 0 || int(c) >= len(exitClassWires) {
+		return exitClassWires[ExitUnknown]
+	}
+	return exitClassWires[c]
+}
+
+// AllExitClassWires lists every Wire name, in ExitClass order.
+func AllExitClassWires() []string { return slices.Clone(exitClassWires[:]) }
 
 // ProcessExitedError is ErrProcessExited for a CLI that exited with a
 // non-zero code. It matches ErrProcessExited under errors.Is; errors.As adds

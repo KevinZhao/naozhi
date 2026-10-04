@@ -323,6 +323,7 @@ type routerStateView struct {
 	}
 	spawns interface {
 		SpawnInFlight(key string) (chan struct{}, bool)
+		StartupFailure(key string) (spawnpool.StartupFailure, bool)
 	}
 	picks interface {
 		pickedBackend(key string) string
@@ -364,6 +365,11 @@ func (v routerStateView) PickedAccessProfile(key string) string {
 // SpawnInFlight reports whether a spawn for key is in progress.
 func (v routerStateView) SpawnInFlight(key string) (chan struct{}, bool) {
 	return v.spawns.SpawnInFlight(key)
+}
+
+// StartupFailure is key's run of spawns that failed their Init handshake.
+func (v routerStateView) StartupFailure(key string) (spawnpool.StartupFailure, bool) {
+	return v.spawns.StartupFailure(key)
 }
 
 // chatKeyFor strips the last ":agentID" segment from a session key to get the chat key.
@@ -788,11 +794,14 @@ func (r *Router) ListSessions() []SessionSnapshot {
 // the version that produced it (separate ss.Gen() + ListSessions() reads could
 // publish a stale version, #726). Writers bump gen inside their Update, so the
 // pair is atomic. BumpVersion's render-only bumps advance the same gen, so a
-// changed version can come with unchanged sessions.
+// changed version can come with unchanged sessions. A key's run of failed
+// spawns, which a session's own Snapshot cannot see, joins its
+// StartupFailure here.
 func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 	refsPtr := listRefsPool.Get().(*[]*ManagedSession)
 	refs := (*refsPtr)[:0]
 	var version uint64
+	var runs map[int]spawnpool.StartupFailure // by refs index; nil while no key has one
 	r.ss.View(func(v sessView) {
 		if cap(refs) < v.Len() {
 			// Grow once to the new max instead of the append growth path;
@@ -800,7 +809,13 @@ func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 			// (regression guard: listrefspool_grow_test.go).
 			refs = make([]*ManagedSession, 0, v.Len())
 		}
-		for _, s := range v.All() {
+		for key, s := range v.All() {
+			if run, ok := v.Ext().StartupFailure(key); ok {
+				if runs == nil {
+					runs = make(map[int]spawnpool.StartupFailure)
+				}
+				runs[len(refs)] = run
+			}
 			refs = append(refs, s)
 		}
 		version = v.Gen()
@@ -809,6 +824,9 @@ func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 	snapshots := make([]SessionSnapshot, len(refs))
 	for i, s := range refs {
 		snapshots[i] = s.Snapshot()
+		if run, ok := runs[i]; ok {
+			snapshots[i].StartupFailure = startupFailureView(s, run, true)
+		}
 	}
 	// Clear pointers before returning to pool so a stuck pool entry does
 	// not pin Sessions past their last legitimate use.

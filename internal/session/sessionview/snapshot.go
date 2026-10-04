@@ -82,6 +82,9 @@ type SessionSnapshot struct {
 	// dashboard hides the tag. Not persisted, so it resets across restarts
 	// (docs/rfc/kiro-effort-visibility.md).
 	Effort string `json:"effort,omitempty"`
+	// StartupFailure is what the next send to a dead session will do about
+	// its CLI's failures at startup; nil when it just resumes.
+	StartupFailure *StartupFailureView `json:"startup_failure,omitempty"`
 	// SpawnDiags is what the spawn gates dropped/ignored for the live process
 	// (#2532). Always serialised — an empty array, not undefined, so the
 	// dashboard can index it unconditionally. Runtime observation like
@@ -92,6 +95,20 @@ type SessionSnapshot struct {
 	// remedy is restarting the session. Same always-an-array contract as
 	// SpawnDiags.
 	OverlayDrift []OverlayFieldDrift `json:"overlay_drift"`
+}
+
+// StartupFailureView is a dead session's run of CLI startup failures, for the
+// dashboard's exit chip.
+type StartupFailureView struct {
+	// Class is the latest failure's clierr.ExitClass wire name, Streak the
+	// failures in a row; both empty when only NewSession is set.
+	Class  string `json:"class,omitempty"`
+	Streak int32  `json:"streak,omitempty"`
+	// RetryAt is when the startup breaker lets the next spawn run (unix ms);
+	// 0 when it does not pause the key.
+	RetryAt int64 `json:"retry_at,omitempty"`
+	// NewSession: the next send starts a new conversation, not the resume.
+	NewSession bool `json:"new_session,omitempty"`
 }
 
 // OverlayFieldDrift is one argv-bearing field whose live value (the argv the

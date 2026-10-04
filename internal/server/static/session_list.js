@@ -625,7 +625,7 @@ function sessionCardHtml(/** @type {SessionSnapshot} */ s) {
   // only carries one low-entropy bit (which backend). Title owns line 1.
   const metaHtml = icon +
     '<span class="sc-dot ' + dotCls + '"></span>' +
-    '<span>' + esc(displayState) + '</span>' + sessionExitChipHtml(s.state, s.death_reason, s.death_detail) +
+    '<span>' + esc(displayState) + '</span>' + sessionExitChipHtml(s.state, s.death_reason, s.death_detail, s.startup_failure) +
     nodeBadge +
     originBadge +
     accessProfileChip +
@@ -893,7 +893,7 @@ function onSessionState(msg) {
   settleTurnBoundary(msg, msgNode, sKey, prevState);
   if (sessionList.sessionsData[sKey]) {
     sessionList.sessionsData[sKey].state = msg.state;
-    delete sessionList.sessionsData[sKey].death_detail; // a push carries none; the poll below refills it
+    for (const f of ['death_detail', 'startup_failure']) delete sessionList.sessionsData[sKey][f]; // a push carries neither; the poll below refills them
     if (msg.reason) {
       sessionList.sessionsData[sKey].death_reason = msg.reason;
     } else if (msg.state === 'running') {
@@ -1099,12 +1099,12 @@ export function updateMainState(state) {
 }
 
 // refreshHeaderExitChip repaints only the header's exit chip, from the
-// session's own death_reason and death_detail: the reason a caller has in
-// hand may be a subscription status ('suspended'), not a death.
+// session's own death_reason, death_detail and startup_failure: the reason a
+// caller has in hand may be a subscription status ('suspended'), not a death.
 export function refreshHeaderExitChip(state) {
   const exitEl = document.getElementById('header-exit');
   if (!exitEl) return;
   const sd = sessionList.sessionsData[sid(selection.key, selection.node)];
-  const html = sessionExitChipHtml(state, sd ? sd.death_reason : '', sd ? sd.death_detail : '');
+  const html = sessionExitChipHtml(state, sd ? sd.death_reason : '', sd ? sd.death_detail : '', sd ? sd.startup_failure : null);
   if (exitEl.innerHTML !== html) exitEl.innerHTML = html;
 }

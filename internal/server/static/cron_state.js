@@ -212,8 +212,7 @@ export async function fetchCronJobs() {
     // in-view 需关注 filter / header chip still include paused for context.
     const attention = cronStore.jobs.filter(j => j.last_error || j.missed).length;
     // Surface the attention dot on the rail's 自动化 icon so the alert is
-    // visible from any view. (The legacy header cron-badge was removed once
-    // the sidebar 定时任务 quick-button folded into the rail's 自动化 entry.)
+    // visible from any view.
     const railBadge = document.getElementById('abnav-cron-badge');
     if (railBadge) {
       railBadge.hidden = attention === 0;
