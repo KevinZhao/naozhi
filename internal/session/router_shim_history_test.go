@@ -77,6 +77,75 @@ func writeShimStateFor(t *testing.T, dir string, state shim.State) {
 	}
 }
 
+// shortTempDir is a temp dir short enough for a unix socket path: t.TempDir()
+// on darwin overflows the 104-byte sun_path limit.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "nz-reconn-hist-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
+// writeDriftedShim records, under the shim state dir dir, a shim for sess
+// whose argv no longer matches r's, so ReconnectShimsCtx shuts it down as
+// drifted.
+func writeDriftedShim(t *testing.T, dir string, r *Router, w *cli.Wrapper, sess *ManagedSession) {
+	t.Helper()
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	socket := shim.SocketPath(shim.KeyHash(sess.key))
+	if err := os.WriteFile(socket, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stored := driftArgsFor(r).driftCompareArgs(w, "claude", sess.key, sess, &shim.SpawnOverlay{})
+	writeShimStateFor(t, dir, shim.State{
+		ShimPID: os.Getpid(), Socket: socket, Key: sess.key, Backend: "claude", SessionID: "sid-1",
+		CLIArgs: append(stored, "--extra-flag"), SpawnOverlay: &shim.SpawnOverlay{},
+	})
+}
+
+// writeLiveShim serves a fake shim for sess on a unix socket under dir (which
+// must be short, see shortTempDir) and records its state, so ReconnectShimsCtx
+// reattaches sess to it.
+func writeLiveShim(t *testing.T, dir string, r *Router, w *cli.Wrapper, sess *ManagedSession) {
+	t.Helper()
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	socket := shim.SocketPath(shim.KeyHash(sess.key))
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := make(chan net.Conn, 1)
+	t.Cleanup(func() {
+		ln.Close()
+		select {
+		case conn := <-accepted:
+			conn.Close()
+		default:
+		}
+	})
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		accepted <- conn
+		rd := bufio.NewReader(conn)
+		if _, err := rd.ReadBytes('\n'); err != nil { // attach
+			return
+		}
+		fmt.Fprintf(conn, "{\"type\":\"hello\",\"protocol_version\":%d}\n{\"type\":\"replay_done\"}\n", shim.ProtocolVersion)
+		io.Copy(io.Discard, rd) //nolint:errcheck // never answer
+	}()
+	writeShimStateFor(t, dir, shim.State{
+		ShimPID: os.Getpid(), Socket: socket, Key: sess.key, Backend: "claude", SessionID: "sid-1",
+		CLIArgs:      driftArgsFor(r).driftCompareArgs(w, "claude", sess.key, sess, &shim.SpawnOverlay{}),
+		SpawnOverlay: &shim.SpawnOverlay{},
+	})
+}
+
 // TestReconnectShims_DriftBackfillOnlyFillsEmptyHistory drives a drifted shim
 // through ReconnectShimsCtx. The JSONL backfill fills an empty session, skips
 // the read for one whose history is already loaded (a startup loader or an
@@ -119,16 +188,7 @@ func TestReconnectShims_DriftBackfillOnlyFillsEmptyHistory(t *testing.T) {
 			if tc.duringRead {
 				loader.duringRead = func() { sess.InjectHistory(loaded) }
 			}
-			t.Setenv("XDG_RUNTIME_DIR", dir)
-			socket := shim.SocketPath(shim.KeyHash(key))
-			if err := os.WriteFile(socket, nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			stored := driftArgsFor(r).driftCompareArgs(w, "claude", key, sess, &shim.SpawnOverlay{})
-			writeShimStateFor(t, dir, shim.State{
-				ShimPID: os.Getpid(), Socket: socket, Key: key, Backend: "claude", SessionID: "sid-1",
-				CLIArgs: append(stored, "--extra-flag"), SpawnOverlay: &shim.SpawnOverlay{},
-			})
+			writeDriftedShim(t, dir, r, w, sess)
 
 			r.ReconnectShimsCtx(context.Background())
 
@@ -153,12 +213,7 @@ func TestReconnectShims_ReconnectKeepsHistoryLoadedDuringRead(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shim discovery needs unix PID liveness and unix sockets")
 	}
-	// t.TempDir() on darwin overflows the 104-byte sun_path limit.
-	dir, err := os.MkdirTemp("/tmp", "nz-reconn-hist-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	dir := shortTempDir(t)
 	mgr, err := shim.NewManager(shim.ManagerConfig{StateDir: dir})
 	if err != nil {
 		t.Fatal(err)
@@ -174,39 +229,7 @@ func TestReconnectShims_ReconnectKeepsHistoryLoadedDuringRead(t *testing.T) {
 	loaded := historyEntries("loaded", 2)
 	loader.duringRead = func() { sess.InjectHistory(loaded) }
 
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-	socket := shim.SocketPath(shim.KeyHash(key))
-	ln, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	accepted := make(chan net.Conn, 1)
-	t.Cleanup(func() {
-		ln.Close()
-		select {
-		case conn := <-accepted:
-			conn.Close()
-		default:
-		}
-	})
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		accepted <- conn
-		rd := bufio.NewReader(conn)
-		if _, err := rd.ReadBytes('\n'); err != nil { // attach
-			return
-		}
-		fmt.Fprintf(conn, "{\"type\":\"hello\",\"protocol_version\":%d}\n{\"type\":\"replay_done\"}\n", shim.ProtocolVersion)
-		io.Copy(io.Discard, rd) //nolint:errcheck // never answer
-	}()
-	writeShimStateFor(t, dir, shim.State{
-		ShimPID: os.Getpid(), Socket: socket, Key: key, Backend: "claude", SessionID: "sid-1",
-		CLIArgs:      driftArgsFor(r).driftCompareArgs(w, "claude", key, sess, &shim.SpawnOverlay{}),
-		SpawnOverlay: &shim.SpawnOverlay{},
-	})
+	writeLiveShim(t, dir, r, w, sess)
 
 	r.ReconnectShimsCtx(context.Background())
 

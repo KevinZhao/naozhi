@@ -1,4 +1,4 @@
-// anchor-keep: pins that shim reconnect and drift backfill inject history atomically rather than appending; the double-inject reproduces only under the startup-loader race.
+// anchor-keep: pins that every startup and shim history inject goes event log first and inject-if-empty; the double-inject and Claude-only view reproduce only under the startup-loader race.
 package session
 
 import (
@@ -9,67 +9,57 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-// TestShimReconnect_NoDoubleInjectContract pins the JSONL-load blocks in
-// router_shim.go (shim reconnect and drift backfill). NewRouter's startup
-// loaders inject into the same session concurrently with ReconnectShimsCtx,
-// so every block must pre-check !sess.hasInjectedHistory() to skip the read
-// and inject through sess.InjectHistoryIfEmpty, the atomic check-then-act
-// (#1812, #3028). A bare sess.InjectHistory or a direct proc.InjectHistory
-// appends a second copy of the conversation onto a filled history.
+// TestShimReconnect_NoDoubleInjectContract pins how restored history reaches
+// a session. NewRouter's startup loaders inject concurrently with
+// ReconnectShimsCtx, so router_shim.go's two sites (reconnect and drift
+// backfill) pre-check !sess.hasInjectedHistory() to skip the read and go
+// through injectRestoredHistory, and router_restore.go reads each source once
+// and injects only through InjectHistoryIfEmpty (#1812, #3028). A plain
+// InjectHistory appends a second copy onto a filled history; a direct JSONL
+// read beside the helper can win the race with the Claude-only view.
 func TestShimReconnect_NoDoubleInjectContract(t *testing.T) {
 	t.Parallel()
-	src, err := os.ReadFile("router_shim.go")
-	if err != nil {
-		t.Fatalf("read router_shim.go: %v", err)
+	read := func(name string) string {
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return string(src)
 	}
-	routerStr := string(src)
-
-	if strings.Contains(routerStr, "sess.InjectHistory(") {
-		t.Error("router_shim.go calls sess.InjectHistory, which appends onto " +
-			"history a startup loader may already have filled; use " +
-			"sess.InjectHistoryIfEmpty")
+	shimSrc := read("router_shim.go")
+	for _, banned := range []string{".InjectHistory", ".LoadHistoryChainTail(", ".LoadLatest("} {
+		if strings.Contains(shimSrc, banned) {
+			t.Errorf("router_shim.go names %s; restore history through "+
+				"r.hist.injectRestoredHistory so the event log is tried first "+
+				"and the inject stays atomic", banned)
+		}
 	}
-
-	// Each block is a claudeDir guard followed within 1500 bytes by the
-	// injected r.hist.loader.LoadHistoryChainTail call.
-	const guard = "if r.hist.claudeDir != \"\""
-	idx := 0
-	checked := 0
-	for {
-		off := strings.Index(routerStr[idx:], guard)
-		if off < 0 {
-			break
-		}
-		blockStart := idx + off
-		windowEnd := min(blockStart+1500, len(routerStr))
-		block := routerStr[blockStart:windowEnd]
-		idx = blockStart + len(guard)
-		if !strings.Contains(block, "LoadHistoryChainTail") {
-			continue
-		}
-		checked++
-		if !strings.Contains(block, "!sess.hasInjectedHistory()") {
-			t.Errorf("JSONL-load block %q lacks the !sess.hasInjectedHistory() "+
-				"pre-check, so it re-reads JSONL for a session whose history "+
-				"is already loaded", firstLine(block))
-		}
-		if !strings.Contains(block, "sess.InjectHistoryIfEmpty(histEntries)") {
-			t.Errorf("JSONL-load block %q does not inject through "+
-				"sess.InjectHistoryIfEmpty; a startup loader that fills history "+
-				"during the read gets a second copy appended", firstLine(block))
-		}
-		if strings.Contains(block, "proc.InjectHistory(histEntries)") {
-			t.Errorf("JSONL-load block %q calls proc.InjectHistory directly; "+
-				"ReattachProcessNoCallback's snapshot then double-fills "+
-				"proc.EventLog", firstLine(block))
+	const call = "r.hist.injectRestoredHistory("
+	sites := strings.Split(shimSrc, call)
+	if len(sites)-1 != 2 {
+		t.Fatalf("router_shim.go calls injectRestoredHistory %d times, want 2 "+
+			"(reconnect and drift backfill); if a site moved, update this test",
+			len(sites)-1)
+	}
+	for i, before := range sites[:len(sites)-1] {
+		if !strings.Contains(before[max(0, len(before)-600):], "if !sess.hasInjectedHistory() {") {
+			t.Errorf("injectRestoredHistory site %d lacks the !sess.hasInjectedHistory() "+
+				"pre-check, so it re-reads history a session already holds", i+1)
 		}
 	}
 
-	if checked != 2 {
-		t.Fatalf("router_shim.go has %d JSONL-load blocks of the "+
-			"`if r.hist.claudeDir != \"\"` + LoadHistoryChainTail shape, want 2 "+
-			"(reconnect and drift backfill); if a load site moved, update this "+
-			"contract test to find its new shape", checked)
+	restoreSrc := read("router_restore.go")
+	for name, want := range map[string]int{
+		"InjectHistoryIfEmpty(": 2,
+		"LoadLatest(":           1,
+		"LoadHistoryChainTail(": 1,
+		"InjectHistory(":        0,
+	} {
+		if got := strings.Count(restoreSrc, name); got != want {
+			t.Errorf("router_restore.go has %d %s, want %d: the event-log and "+
+				"JSONL helpers are the only readers and inject only if empty",
+				got, name, want)
+		}
 	}
 }
 
@@ -123,11 +113,4 @@ func TestShimReconnect_HasInjectedHistorySkipsLoad(t *testing.T) {
 				"R231-CQ-1 invariant: each entry exactly once", sum, n)
 		}
 	}
-}
-
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
-	}
-	return s
 }
