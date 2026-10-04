@@ -53,6 +53,8 @@ type ProcessIntrospect interface {
 	ProtocolName() string
 	// Model returns the model identifier reported by the backend.
 	Model() string
+	// StderrTail returns the CLI's last stderr lines, oldest first.
+	StderrTail() []string
 }
 
 // Compile-time guarantees that *Process satisfies each facet (#902).

@@ -49,12 +49,17 @@ func (s *shimServer) readStdout() {
 		}
 	}
 
+	// cmd.Wait closes the stderr pipe, so reaping before readStderr reaches
+	// EOF can drop the CLI's final lines, which are the error message. The
+	// wait is bounded: a grandchild holding the stderr fd must not stall it.
+	s.cli.awaitStderrEOF(stderrDrainTimeout)
 	s.cli.wait()
 	slog.Info("CLI stdout EOF")
 }
 
-// tryExtractSessionID search keys, hoisted to avoid a per-line []byte alloc.
-// snake = claude stream-json frames, camel = ACP/kiro frames.
+// stderrDrainTimeout bounds how long readStdout waits for stderr EOF after
+// stdout EOF before reaping the CLI.
+const stderrDrainTimeout = 500 * time.Millisecond
 
 // tryExtractSessionID search keys, hoisted to avoid a per-line []byte alloc.
 // snake = claude stream-json frames, camel = ACP/kiro frames.
@@ -134,10 +139,13 @@ func (s *shimServer) tryExtractSessionID(line []byte) {
 	}
 }
 
-// readStderr reads CLI stderr and forwards to client.
-
-// readStderr reads CLI stderr and forwards to client.
+// readStderr reads CLI stderr into the stderr tail and forwards each line to
+// the client. The tail is kept whether or not a client is attached, so a CLI
+// that fails before naozhi attaches still reports why on cli_exited.
 func (s *shimServer) readStderr() {
+	if done := s.cli.stderrDone; done != nil {
+		defer close(done)
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("shim readStderr panic recovered",
@@ -148,6 +156,7 @@ func (s *shimServer) readStderr() {
 	scanner.Buffer(make([]byte, 4*1024), 10*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
+		s.stderrTail.Push(line)
 		safeLine := osutil.SanitizeForLog(line, 512)
 		slog.Debug("cli stderr", "line", safeLine)
 
@@ -162,19 +171,19 @@ func (s *shimServer) readStderr() {
 	}
 }
 
-// saveStateCLIDead persists the CLI-dead state to the state file.
-
 // --- CLI process management ---
 
 type cliProc struct {
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	stdout   *bufio.Scanner
-	stderrR  io.ReadCloser
-	exited   chan struct{}
-	exitCode int
-	exitOnce sync.Once
-	killOnce sync.Once
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	stdout  *bufio.Scanner
+	stderrR io.ReadCloser
+	// stderrDone is closed by readStderr at stderr EOF.
+	stderrDone chan struct{}
+	exited     chan struct{}
+	exitCode   int
+	exitOnce   sync.Once
+	killOnce   sync.Once
 }
 
 func startCLI(cliPath string, args []string, cwd string) (*cliProc, error) {
@@ -209,12 +218,23 @@ func startCLI(cliPath string, args []string, cwd string) (*cliProc, error) {
 	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 
 	return &cliProc{
-		cmd:     cmd,
-		stdin:   stdin,
-		stdout:  scanner,
-		stderrR: stderrPipe,
-		exited:  make(chan struct{}),
+		cmd:        cmd,
+		stdin:      stdin,
+		stdout:     scanner,
+		stderrR:    stderrPipe,
+		stderrDone: make(chan struct{}),
+		exited:     make(chan struct{}),
 	}, nil
+}
+
+// awaitStderrEOF waits until readStderr has drained stderr or timeout elapses.
+func (c *cliProc) awaitStderrEOF(timeout time.Duration) {
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case <-c.stderrDone:
+	case <-t.C:
+	}
 }
 
 func (c *cliProc) pid() int {

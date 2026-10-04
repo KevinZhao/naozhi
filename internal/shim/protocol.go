@@ -36,6 +36,9 @@ type ServerMsg struct {
 	// cli_exited fields
 	Code   *int   `json:"code,omitempty"` // pointer: distinguishes 0 from absent
 	Signal string `json:"signal,omitempty"`
+	// StderrTail is the CLI's last stderr lines (see StderrTail), including any
+	// written before a client attached. Optional: older shims omit it.
+	StderrTail []string `json:"stderr_tail,omitempty"`
 
 	// pong fields
 	Buffered int `json:"buffered,omitempty"`

@@ -15,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/shim"
 	"github.com/naozhi/naozhi/internal/subagent"
 )
 
@@ -122,6 +123,8 @@ type Process struct {
 	// deathReason records why the process died; written once (first-writer-wins
 	// CAS) by the path that transitions State→Dead. nil until stored.
 	deathReason atomic.Pointer[string]
+	// stderrTail is the CLI's last stderr lines (see process_stderr.go).
+	stderrTail shim.StderrTail
 
 	// log is a pre-bound logger carrying the "session" attribute; set once by
 	// SetSlogKey before the reader goroutines start, so reads are lock-free.
