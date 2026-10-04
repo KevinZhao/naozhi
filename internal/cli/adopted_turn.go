@@ -44,11 +44,9 @@ const (
 // a caller deciding between "success" and "interrupted" must not have to infer
 // it from an empty Text.
 type AdoptedOutcome struct {
-	End    AdoptedEnd
+	End AdoptedEnd
+	// Result is zero when End is AdoptedEndCLIExited.
 	Result clievent.SendResult
-	// SubType is the result frame's subtype ("success", "error_during_execution",
-	// …); empty when End is AdoptedEndCLIExited.
-	SubType string
 }
 
 // adoptedTurn latches one turn outcome. Armed at reconnect, resolved exactly
@@ -120,9 +118,8 @@ func (p *Process) applyReconnectVerdict(midTurn bool, finished *clievent.Event) 
 // mid-turn reconnect leave State anything but Running would defeat the second.
 func (a *adoptedTurn) resolveResult(ev clievent.Event) {
 	a.resolve(AdoptedOutcome{
-		End:     AdoptedEndResult,
-		Result:  resultFromEvent(ev),
-		SubType: ev.SubType,
+		End:    AdoptedEndResult,
+		Result: resultFromEvent(ev),
 	})
 }
 

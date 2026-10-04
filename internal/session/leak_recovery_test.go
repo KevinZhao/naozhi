@@ -75,6 +75,29 @@ func TestRecover_LeakThenClean_FiresOnce(t *testing.T) {
 	}
 }
 
+// The recovered result is the turn's answer, so its outcome travels with its
+// text: a failed retry must not be handed on as a clean success.
+func TestRecover_RecoveredResultKeepsItsOutcome(t *testing.T) {
+	t.Setenv(leakRecoveryEnvVar, "1")
+	s, proc := newLeakSession(nil)
+	orig := &clievent.SendResult{Text: leakSample, SessionID: "sess-1", SubType: "success"}
+	be := &clievent.BackendError{Backend: "kiro", Code: -32000, Message: "overloaded"}
+	rec := &clievent.SendResult{Text: "Prompt is too long", SubType: "error_max_turns",
+		IsError: true, Aborted: true, BackendError: be, MergedCount: 2}
+
+	var calls int
+	var nudge string
+	got := s.recoverLeakedToolcall(context.Background(), proc, orig,
+		resendOnce(&calls, &nudge, []*clievent.SendResult{rec}, nil))
+	if got.SubType != "error_max_turns" || !got.IsError || !got.Aborted || got.BackendError != be {
+		t.Errorf("outcome = %q/%v/%v/%v, want the retry's error_max_turns/true/true/%v",
+			got.SubType, got.IsError, got.Aborted, got.BackendError, be)
+	}
+	if got.SessionID != "sess-1" || got.MergedCount != 2 {
+		t.Errorf("SessionID, MergedCount = %q, %d; want the original's sess-1 and the retry's 2", got.SessionID, got.MergedCount)
+	}
+}
+
 func TestRecover_LeakThenLeak_NoLoop(t *testing.T) {
 	t.Setenv(leakRecoveryEnvVar, "1")
 	s, proc := newLeakSession(nil)

@@ -101,18 +101,14 @@ func (s *ManagedSession) recoverLeakedToolcall(
 
 	metrics.ToolCallLeakRecoveredTotal.Add(1)
 	slog.Info("leak-recovery: recovered", "key", s.key)
-	return &clievent.SendResult{
-		Text:      rec.Text,
-		SessionID: firstNonEmpty(rec.SessionID, result.SessionID),
-		// Cumulative total already includes the leaked turn; never sum (#2355).
-		// ModelUsage carries the same cumulative semantics and MUST travel with
-		// it, otherwise the recovered turn's per-model delta is lost. Sharing
-		// the map is safe: ReadEvent copies the Event out of its pool before
-		// returning, so nothing else mutates it.
-		CostUSD:     rec.CostUSD,
-		ModelUsage:  rec.ModelUsage,
-		MergedCount: rec.MergedCount,
-	}
+	// The retry's result is the turn's answer, every field of it: its CostUSD
+	// and ModelUsage are cumulative and already include the leaked turn, so
+	// never sum (#2355), and its outcome fields describe the turn that answered.
+	// Sharing the ModelUsage map is safe: ReadEvent copies the Event out of its
+	// pool before returning, so nothing else mutates it.
+	out := *rec
+	out.SessionID = firstNonEmpty(rec.SessionID, result.SessionID)
+	return &out
 }
 
 // strippedResult returns a copy of r with the leaked tool-call XML removed from

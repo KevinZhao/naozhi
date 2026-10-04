@@ -294,15 +294,14 @@ func (p *Process) handleShimMessage(msg shimMsg, log *slog.Logger) shimDispatchO
 }
 
 // rpcErrorTurnEnd reports whether err is a TurnRejectedError, the backend
-// telling ReadEvent it rejected the turn. When it is, ok=true and tag is the
-// backend prefix for the synthesized result text. Any other error (e.g. an
-// unparseable frame) returns ok=false so the readLoop skips it.
-func rpcErrorTurnEnd(err error) (tag string, ok bool) {
-	var rejected *TurnRejectedError
+// telling ReadEvent it rejected the turn; the readLoop then closes the turn
+// with its resultEvent. Any other error (e.g. an unparseable frame) returns
+// ok=false so the readLoop skips it.
+func rpcErrorTurnEnd(err error) (rejected *TurnRejectedError, ok bool) {
 	if errors.As(err, &rejected) {
-		return rejected.resultPrefix(), true
+		return rejected, true
 	}
-	return "", false
+	return nil, false
 }
 
 // handleShimStdout decodes a stdout frame into one or more protocol Events
@@ -331,12 +330,8 @@ func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOu
 		// backend's POV, so synthesize a visible "result" and let the active
 		// Send() unblock — otherwise state stays "running" forever. The
 		// protocol says so by returning a TurnRejectedError.
-		if tag, ok := rpcErrorTurnEnd(err); ok {
-			events = []clievent.Event{{
-				Type:    "result",
-				SubType: "error",
-				Result:  tag + err.Error(),
-			}}
+		if rejected, ok := rpcErrorTurnEnd(err); ok {
+			events = []clievent.Event{rejected.resultEvent()}
 			log.Warn("readLoop: backend returned RPC error; surfacing as failed turn",
 				"err", err, "seq", msg.Seq)
 			// Fall through into the normal turn-end dispatch path
@@ -504,6 +499,9 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	}
 	nowMS := now.UnixMilli()
 	p.tools.observe(ev, now)
+	if ev.Type == "result" {
+		ev.Aborted = p.turn.abortRequested.take()
+	}
 
 	// ---- Passthrough mode hooks ----
 	// These run before the legacy eventCh / ring.EventLog delivery paths.

@@ -330,8 +330,9 @@ func (p *CodexProtocol) ReadEvent(line string) ([]clievent.Event, bool, error) {
 		p.mu.Lock()
 		p.textBuf.Reset()
 		p.mu.Unlock()
-		return nil, true, &TurnRejectedError{Backend: p.BackendID, Err: fmt.Errorf("%w %d: %s", ErrCodexRPC,
-			msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))}
+		msgText := osutil.SanitizeForLog(msg.Error.Message, 256)
+		return nil, true, &TurnRejectedError{Backend: p.BackendID, Code: msg.Error.Code, Message: msgText,
+			Err: fmt.Errorf("%w %d: %s", ErrCodexRPC, msg.Error.Code, msgText)}
 	}
 	return nil, false, nil
 }
@@ -439,6 +440,8 @@ func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]clievent.Event, bo
 			// Failure reason goes in the result; the assistant frame keeps partial text.
 			result.SubType = "error"
 			result.Result = osutil.SanitizeForLog(c.Turn.Error.Message, 1024)
+			result.IsError = true
+			result.BackendError = &clievent.BackendError{Backend: p.BackendID, Message: result.Result}
 		}
 		events = append(events, result)
 		return events, true, nil

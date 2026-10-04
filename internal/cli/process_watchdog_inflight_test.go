@@ -11,6 +11,8 @@ func TestProcess_clearInflightFlags(t *testing.T) {
 	p := &Process{}
 	p.turn.interrupted.Store(true)
 	p.turn.interruptedRun.Store(true)
+	p.turn.abortRequested.arm()
+	p.turn.abortRequested.arm()
 
 	p.clearInflightFlags()
 
@@ -19,6 +21,9 @@ func TestProcess_clearInflightFlags(t *testing.T) {
 	}
 	if p.turn.interruptedRun.Load() {
 		t.Error("interruptedRun should be false after clearInflightFlags")
+	}
+	if p.turn.abortRequested.armed() {
+		t.Error("abortRequested should be false after clearInflightFlags: a killed turn produces no result to carry it")
 	}
 
 	// Idempotent: a second call on already-cleared flags must not panic

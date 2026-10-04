@@ -11,6 +11,7 @@ import (
 // rejects the in-flight turn over RPC, or the reason it has no such frame.
 type turnRejectFixture struct {
 	frame string
+	code  int
 	none  string
 }
 
@@ -20,8 +21,8 @@ type turnRejectFixture struct {
 // comes back as a cli.TurnRejectedError, or say why it has none.
 var turnRejectFixtures = map[string]turnRejectFixture{
 	"claude": {none: "stream-json reports a failed turn as a result event; there is no RPC reply to reject a turn"},
-	"kiro":   {frame: `{"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"model overloaded"}}`},
-	"codex":  {frame: `{"jsonrpc":"2.0","id":3,"error":{"code":-32001,"message":"Server overloaded"}}`},
+	"kiro":   {frame: `{"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"model overloaded"}}`, code: -32000},
+	"codex":  {frame: `{"jsonrpc":"2.0","id":3,"error":{"code":-32001,"message":"Server overloaded"}}`, code: -32001},
 }
 
 // TestAll_TurnRejectionClosesTheTurn: every registered backend either turns
@@ -47,6 +48,9 @@ func TestAll_TurnRejectionClosesTheTurn(t *testing.T) {
 			}
 			if rejected.Backend != p.ID {
 				t.Errorf("backend %q: rejection tagged %q, want its own ID", p.ID, rejected.Backend)
+			}
+			if rejected.Code != fx.code {
+				t.Errorf("backend %q: rejection Code = %d, want the frame's %d", p.ID, rejected.Code, fx.code)
 			}
 		}
 	})
