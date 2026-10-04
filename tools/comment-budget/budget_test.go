@@ -14,7 +14,7 @@ import (
 // comment lowers the baseline. Raising one needs an approved ledger entry
 // (scripts/ratchet-raises.jsonl).
 const (
-	inFuncBlocksOver5Baseline = 31
+	inFuncBlocksOver5Baseline = 30
 	docOver10Baseline         = 38
 	packageDocOver60Baseline  = 1
 	reviewAnchorsBaseline     = 0
@@ -134,7 +134,8 @@ func TestCountFile(t *testing.T) {
 
 // TestCount_Walk: the walk counts non-test Go files under a root named naozhi
 // (CI's checkout, the owner's worktree) and skips the old clone nested in it,
-// test files, testdata and vendored trees.
+// agent worktrees and other nested checkouts, test files, testdata and
+// vendored trees.
 func TestCount_Walk(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "naozhi")
@@ -146,6 +147,9 @@ func TestCount_Walk(t *testing.T) {
 		"internal/a/a_test.go",
 		"internal/a/testdata/x.go",
 		"test/e2e/node_modules/x/x.go",
+		".claude/worktrees/agent-x/internal/a/a.go",
+		"wt/.git",
+		"wt/internal/a/a.go",
 	} {
 		full := filepath.Join(root, p)
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {

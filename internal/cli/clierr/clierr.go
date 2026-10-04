@@ -1,7 +1,7 @@
 // Package clierr holds the sentinel errors that cross internal/cli's boundary.
 // G1 (#2545 direction 1).
 //
-// These fourteen values are matched with errors.Is by internal/usermsg,
+// These fifteen values are matched with errors.Is by internal/usermsg,
 // internal/dispatch, internal/session, internal/server and internal/dashboard to
 // decide what to tell the user. Before this package they lived in
 // internal/cli/process.go and protocol.go, so a package that only needed to
@@ -86,6 +86,11 @@ func (e *ProcessExitedError) Error() string {
 
 // Unwrap exposes ErrProcessExited, so every errors.Is classifier keeps working.
 func (e *ProcessExitedError) Unwrap() error { return ErrProcessExited }
+
+// ErrResumeRejected is returned by Spawn when the backend refused the session
+// it was asked to resume during the Init handshake (an RPC error, or the CLI
+// exiting); the session is unusable, so callers spawn fresh instead.
+var ErrResumeRejected = errors.New("backend rejected the resumed session")
 
 // ErrProcessBusy is returned by Send when the legacy (non-passthrough) state
 // machine is already StateRunning; dispatch maps it to "正在处理中".
