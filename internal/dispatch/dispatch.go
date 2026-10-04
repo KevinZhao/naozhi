@@ -601,6 +601,13 @@ func (d *Dispatcher) decorateReplyText(result *clievent.SendResult, sess turn.Se
 
 // SendSplitReply sends a reply, splitting into multiple messages if too long.
 func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, chatID, text string) {
+	d.sendChunks(ctx, p, chatID, replyChunks(p, text))
+}
+
+// replyChunks returns the messages p gets for text: one when it fits
+// p.MaxReplyLength, else the split chunks with their "[i/N]" suffix. The
+// banner edit uses it too, so both paths honour the same limit.
+func replyChunks(p platform.Platform, text string) []string {
 	maxLen := p.MaxReplyLength()
 	if maxLen <= 0 {
 		maxLen = platform.DefaultMaxReplyLen
@@ -613,27 +620,13 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 		if utf8.RuneCountInString(text) > maxLen {
 			text = replyfmt.TruncateForSingleReply(text, maxLen)
 		}
-		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: text}, limits.PlatformReplyMaxAttempts); err != nil {
-			d.sendFailCount.Add(1)
-			dispatchSendFailTotal.Add(1)
-			slog.Error("single-reply send failed after retries", "chat", chatID, "err", err)
-		} else {
-			d.markReplySuccess()
-		}
-		return
+		return []string{text}
 	}
 
 	// Byte-length fast path: len(text) is an upper bound on the rune count,
 	// so len(text) <= maxLen means no split is needed; skip the rune scan.
 	if len(text) <= maxLen {
-		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: text}, limits.PlatformReplyMaxAttempts); err != nil {
-			d.sendFailCount.Add(1)
-			dispatchSendFailTotal.Add(1)
-			slog.Error("reply chunk failed after retries", "chat", chatID, "chunk", 1, "err", err)
-		} else {
-			d.markReplySuccess()
-		}
-		return
+		return []string{text}
 	}
 
 	// When splitting, each chunk gets a "\n— [i/N]" suffix; splitting at the
@@ -648,11 +641,17 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 	splitLen, suppressSuffix := replyfmt.ReserveForPageSuffix(maxLen, runeCount)
 
 	chunks := platform.SplitTextWithCount(text, splitLen, runeCount)
-	total := len(chunks)
-	for i, chunk := range chunks {
-		if total > 1 && !suppressSuffix {
-			chunk += replyfmt.PageSuffix(i+1, total)
+	if total := len(chunks); total > 1 && !suppressSuffix {
+		for i := range chunks {
+			chunks[i] += replyfmt.PageSuffix(i+1, total)
 		}
+	}
+	return chunks
+}
+
+// sendChunks sends each chunk as its own message, counting failures per chunk.
+func (d *Dispatcher) sendChunks(ctx context.Context, p platform.Platform, chatID string, chunks []string) {
+	for i, chunk := range chunks {
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: chunk}, limits.PlatformReplyMaxAttempts); err != nil {
 			d.sendFailCount.Add(1)
 			dispatchSendFailTotal.Add(1)

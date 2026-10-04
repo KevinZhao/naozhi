@@ -284,10 +284,7 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 		dl.lg.Info("ask_question suppressed redundant reply", "result_len", len(result.Text))
 	} else if replyText != "" {
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
-			if err := p.EditMessage(ctx, msgID, replyText); err != nil {
-				slog.Warn("edit message failed, sending new", "err", err)
-				d.SendSplitReply(ctx, p, o.msg.ChatID, replyText)
-			}
+			d.replyIntoBanner(ctx, p, o.msg.ChatID, msgID, replyText)
 		} else {
 			d.SendSplitReply(ctx, p, o.msg.ChatID, replyText)
 		}
@@ -298,4 +295,25 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 	if !tracker.askQuestionFired.Load() {
 		d.sendOutboundImages(ctx, p, o.msg.ChatID, outImages)
 	}
+}
+
+// bannerAnsweredBelow replaces the progress banner when the answer could not
+// be edited into it and went out as new messages instead.
+const bannerAnsweredBelow = "✅ 已回复，见下方"
+
+// replyIntoBanner edits the first reply chunk into the progress banner and
+// sends the rest as new messages, so the edit obeys MaxReplyLength like any
+// send. If that edit fails, every chunk is sent and the banner is replaced by
+// bannerAnsweredBelow so it does not keep showing the last tool status.
+func (d *Dispatcher) replyIntoBanner(ctx context.Context, p platform.Platform, chatID, msgID, text string) {
+	chunks := replyChunks(p, text)
+	if err := p.EditMessage(ctx, msgID, chunks[0]); err != nil {
+		slog.Warn("edit message failed, sending new", "err", err, "chunks", len(chunks))
+		d.sendChunks(ctx, p, chatID, chunks)
+		if err := p.EditMessage(ctx, msgID, bannerAnsweredBelow); err != nil {
+			slog.Debug("banner answered-below edit failed", "msg_id", msgID, "err", err)
+		}
+		return
+	}
+	d.sendChunks(ctx, p, chatID, chunks[1:])
 }
