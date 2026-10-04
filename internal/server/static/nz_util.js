@@ -1,16 +1,6 @@
-// nz_util.js — shared zero-dependency utility layer.
-//
-// RFC docs/rfc/dashboard-cron-view-extraction.md (PR-0a). These helpers were
-// previously top-level functions in dashboard.js; they are pure functions /
-// pure-DOM helpers with no dependency on any other dashboard.js global, so
-// they form the bottom layer that every view (chat / cron / agent / asset)
-// can consume.
-//
-// ES module (RFC docs/rfc/dashboard-es-modules.md, D3 PR-A). Loaded via
-// <script type="module"> — parser-inserted modules share the deferred
-// execution queue with the classic <script defer> files and run in tag order,
-// so this still executes before dashboard.js (dashboard.html order is frozen
-// during the migration; see the comment there).
+// nz_util.js — the shared utility layer every view (chat / cron / agent /
+// asset) consumes: pure functions and pure-DOM helpers. Its only import is
+// contract.js, so it stays a leaf of the module graph.
 //
 // Exports: real ES exports for the view modules, plus the single
 // window.nz namespace (util / state / actions / bus / views / test).
@@ -20,6 +10,8 @@
 // escapers drift and reintroduce XSS. Always reuse this layer. (escJs was
 // deleted with the last JS-string-literal sink, #1980 — inline handlers are
 // gone; do not resurrect it without resurrecting the review that guarded it.)
+
+import { NZ_CONTRACT } from './contract.js';
 
 // esc() escapes the three structural HTML characters only. We deliberately
 // do NOT escape quote characters here: escAttr (below) layers quote-escaping
@@ -116,9 +108,8 @@ export function trapFocus(overlay) {
 const nz = (window.nz = window.nz || {});
 nz.util = { esc, escAttr, fetchJSON, showToast, trapFocus };
 
-// Cross-module utility formatters/predicates (moved verbatim from cron_view,
-// #2557 PR-E1 — both dashboard and cron consume them, and hosting them here
-// keeps the module graph acyclic: dashboard must never import a view).
+// Formatters / predicates dashboard and cron both use; hosting them here
+// keeps the module graph acyclic (dashboard must never import a view).
 
 // formatCostUSD renders a per-run cost. Sub-cent runs show 4 decimals so a
 // $0.0044 run is not rounded to $0.00; larger runs show cents.
@@ -214,8 +205,7 @@ export function runStateLabel(state) {
 }
 
 // DEATH_REASONS translates death_reason (cli DeathReason*, session's reclaim
-// reasons) for an operator. crashed separates a process that ended on its own
-// from one reclaimed on purpose; either way the next send resumes the session.
+// reasons); crashed: the process ended on its own, not reclaimed on purpose.
 const DEATH_REASONS = {
   idle_timeout: { crashed: false, text: '空闲超时，进程已回收' },
   evicted: { crashed: false, text: '为腾出容量，进程已回收' },
@@ -233,13 +223,23 @@ const DEATH_REASONS = {
 
 // sessionExit describes why a session has no process, or null when it is not
 // dead. Only state==='dead' counts: a timeout can leave death_reason on a
-// session whose process is still alive. An unknown or missing reason is an
-// abnormal exit carrying the raw value; detail (death_detail) ends the title.
+// session whose process is still alive. detail (death_detail) ends the title.
 export function sessionExit(state, reason, detail) {
   if (state !== 'dead') return null;
-  const known = Object.prototype.hasOwnProperty.call(DEATH_REASONS, reason) ? DEATH_REASONS[reason] : null;
-  const info = known || { crashed: true, text: reason ? '进程已退出（' + reason + '）' : '进程已退出' };
+  const info = deathReasonInfo(reason);
   return { crashed: info.crashed, text: info.text, title: info.text + '，下次发送时自动恢复' + (detail ? '\n' + detail : '') };
+}
+
+// deathReasonInfo is DEATH_REASONS' entry for reason, else the wording for a
+// cli_exited reason that carries an exit code (-1: a signal killed the CLI)
+// or a signal name, else an abnormal exit naming the raw value.
+const { CODE: EXIT_CODE, SIGNAL: EXIT_SIGNAL } = NZ_CONTRACT.DEATH_REASON_PREFIX;
+function deathReasonInfo(reason) {
+  if (Object.prototype.hasOwnProperty.call(DEATH_REASONS, reason)) return DEATH_REASONS[reason];
+  const r = String(reason || ''), code = r.startsWith(EXIT_CODE) ? r.slice(EXIT_CODE.length) : '';
+  if (/^-?\d+$/.test(code)) return { crashed: true, text: code === '-1' ? 'CLI 进程被信号终止' : 'CLI 进程异常退出（退出码 ' + code + '）' };
+  if (r.startsWith(EXIT_SIGNAL) && r.length > EXIT_SIGNAL.length) return { crashed: true, text: 'CLI 进程被信号 ' + r.slice(EXIT_SIGNAL.length) + ' 终止' };
+  return { crashed: true, text: reason ? '进程已退出（' + reason + '）' : '进程已退出' };
 }
 
 // sessionExitChipHtml is the chip sidebar cards and the session header show

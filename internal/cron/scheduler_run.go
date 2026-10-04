@@ -98,7 +98,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 			state: RunStateFailed, errClass: ErrClassWorkDirUnreachable,
 			errMsg: "work_dir unreachable",
 		})
-		s.deliverFailureNotice(args.runCtx, ErrClassWorkDirUnreachable, RunStateFailed, s.execTimeout, paused)
+		s.deliverFailureNotice(args.runCtx, ErrClassWorkDirUnreachable, TurnCauseUnknown, RunStateFailed, s.execTimeout, paused)
 		return noopRefresh, false
 	}
 	// Containment re-check BEFORE the destructive Reset: resolveCronWorkspace
@@ -114,7 +114,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 			state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
 			errMsg: "work_dir outside allowed root",
 		})
-		s.deliverFailureNotice(args.runCtx, ErrClassWorkDirOutsideRoot, RunStateFailed, s.execTimeout, paused)
+		s.deliverFailureNotice(args.runCtx, ErrClassWorkDirOutsideRoot, TurnCauseUnknown, RunStateFailed, s.execTimeout, paused)
 		return noopRefresh, false
 	}
 	// Fresh-context atomicity (#401): Reset here and the caller's later
@@ -233,7 +233,7 @@ func (s *Scheduler) resolveCronWorkspace(rc runCtx) (workDirForCLI string, abort
 			state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
 			errMsg: "work_dir outside allowed root",
 		}); paused > 0 {
-			s.deliverFailureNotice(rc, ErrClassWorkDirOutsideRoot, RunStateFailed, s.execTimeout, paused)
+			s.deliverFailureNotice(rc, ErrClassWorkDirOutsideRoot, TurnCauseUnknown, RunStateFailed, s.execTimeout, paused)
 		}
 		return "", true
 	}
@@ -309,7 +309,7 @@ func (s *Scheduler) executeOpt(jobID string, viaTriggerNow bool) {
 		// the sandbox buckets stay a subset of the run totals (#2173).
 		sandbox := placementIsSandbox(started.rc.snap.placement)
 		if paused := s.finishRun(*started.rc, runOutcome{state: RunStateFailed, errClass: ErrClassPanic, errMsg: "the run panicked", sandbox: sandbox}); paused > 0 {
-			s.deliverFailureNotice(*started.rc, ErrClassPanic, RunStateFailed, s.execTimeout, paused)
+			s.deliverFailureNotice(*started.rc, ErrClassPanic, TurnCauseUnknown, RunStateFailed, s.execTimeout, paused)
 		}
 	}}.run(func() {
 		s.executeAcquired(jobID, viaTriggerNow, inflight, finalizer, started)
@@ -679,12 +679,14 @@ func (s *Scheduler) execSend(a execSendArgs) (result SendResult, costInc costled
 	// Reset race the in-flight interrupt write; see its godoc.
 	result, abort, err := s.sendWithWatchdog(sendCtx, sendCancel, a.sess, a.cleanText)
 	costInc = costTotalsOf(a.sess).Sub(before)
-	if err != nil {
-		s.execSendError(a, abort, err, costInc)
-		return SendResult{}, costledger.Increment{}, false
-	}
+	// A failed turn whose result frame named its session (turn_failed) keeps
+	// that id, so the run record and sidebar stub reach the failed JSONL.
 	if result.SessionID != "" {
 		a.inflight.setSessionID(result.SessionID)
+	}
+	if err != nil {
+		s.execSendError(a, abort, err, costInc, result.SessionID)
+		return SendResult{}, costledger.Increment{}, false
 	}
 	return result, costInc, true
 }
@@ -700,12 +702,17 @@ func costTotalsOf(sess Session) costledger.Totals {
 
 // execSendError terminates a run whose Send failed: classify, log, reap the
 // fresh session while the CAS gate is held, finishRun, notify, and refresh
-// the sidebar stub.
-func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, costInc costledger.Increment) {
+// the sidebar stub. sid is the session the failed turn's result frame named,
+// "" when no result arrived; when known it is recorded on the run and the
+// fresh stub chains to it instead of the previous run's session.
+func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, costInc costledger.Increment, sid string) {
 	// Only what this function still reads directly; the identity fields it used to
 	// unpack are now spelled once, as finishRun(a.runCtx, ...).
 	snap, key := a.snap, a.key
 	lg, stubRefresh := a.lg, a.stubRefresh
+	if sid != "" {
+		stubRefresh.lastSessionID = sid
+	}
 	if errors.Is(err, context.Canceled) {
 		// Suppress the operator-facing notice so shutdown races don't look like
 		// real failures. As on the deadline path, a watchdog that fired without
@@ -736,7 +743,7 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 		stubRefresh.run()
 		s.finishRun(a.runCtx, runOutcome{
 			state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
-			skipPersist: true, costInc: costInc,
+			sessionID: sid, skipPersist: true, costInc: costInc,
 			// Keep the restart marker only when the cancel came from the process
 			// shutting down (stopCtx) and no operator interrupt landed: the CLI
 			// is still mid-turn behind its shim, and the next process's adoption
@@ -782,10 +789,10 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 	stubRefresh.run()
 	paused := s.finishRun(a.runCtx, runOutcome{
 		state: state, errClass: errClass,
-		errMsg:  "send error: " + sanitiseRunErrMsg(err.Error()), // strip IP:port/paths, mirrors lg.Error above
-		costInc: costInc,
+		errMsg:    "send error: " + sanitiseRunErrMsg(err.Error()), // strip IP:port/paths, mirrors lg.Error above
+		sessionID: sid, costInc: costInc,
 	})
-	s.deliverFailureNotice(a.runCtx, errClass, state, a.jobTimeout, paused)
+	s.deliverFailureNotice(a.runCtx, errClass, turnCauseOf(err), state, a.jobTimeout, paused)
 }
 
 // execFinishSuccess records a successful run: latency observability, the
@@ -988,7 +995,7 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 			state: state, errClass: errClass,
 			errMsg: "session error: " + sanitiseRunErrMsg(err.Error()), // mirrors send-error path
 		})
-		s.deliverFailureNotice(a.runCtx, errClass, state, s.execTimeout, paused)
+		s.deliverFailureNotice(a.runCtx, errClass, turnCauseOf(err), state, s.execTimeout, paused)
 		return nil, spawnStart, true
 	}
 	// GetOrCreate consumed ctx and nothing below references it (Send uses

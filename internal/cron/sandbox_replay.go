@@ -215,7 +215,7 @@ func (s *Scheduler) dispatchReplay(jobID, prompt, model, origRunID string) (stri
 					state: RunStateFailed, errClass: ErrClassPanic,
 					errMsg: "the sandbox replay panicked", sandbox: true,
 				}); paused > 0 {
-					s.deliverFailureNotice(rc, ErrClassPanic, RunStateFailed, s.sandboxRunBudget(), paused)
+					s.deliverFailureNotice(rc, ErrClassPanic, TurnCauseUnknown, RunStateFailed, s.sandboxRunBudget(), paused)
 				}
 			},
 		}.run(func() {

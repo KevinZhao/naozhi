@@ -180,3 +180,25 @@ func TestShimLineReader_InitExitCarriesStderrCause(t *testing.T) {
 		})
 	}
 }
+
+// The death reason a cli_exited frame leaves names a non-zero code, else a
+// signal the shim reported; the dashboard parses both shapes out of it.
+func TestHandleShimCLIExited_DeathReason(t *testing.T) {
+	cases := []struct {
+		frame string
+		want  string
+	}{
+		{`{"type":"cli_exited","code":1}`, "cli_exited_code_1"},
+		{`{"type":"cli_exited","code":-1}`, "cli_exited_code_-1"},
+		{`{"type":"cli_exited","code":0,"signal":"SIGKILL"}`, "cli_exited_signal_SIGKILL"},
+		{`{"type":"cli_exited","code":2,"signal":"SIGTERM"}`, "cli_exited_code_2"},
+		{`{"type":"cli_exited","code":0}`, "cli_exited"},
+	}
+	for _, tc := range cases {
+		p := newStderrTestProcess(t)
+		feedShim(t, p, slog.New(slog.DiscardHandler), tc.frame)
+		if got := p.DeathReason(); got != tc.want {
+			t.Errorf("%s: DeathReason() = %q, want %q", tc.frame, got, tc.want)
+		}
+	}
+}

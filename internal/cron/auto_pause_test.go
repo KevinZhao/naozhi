@@ -17,11 +17,12 @@ import (
 )
 
 // streakRouter scripts how the next run ends: a spawn refusal (getErr), a
-// failed send (sendErr), or a success when both are nil.
+// failed send (sendErr, returned with sendRes), or a success when both are nil.
 type streakRouter struct {
 	mu      sync.Mutex
 	getErr  error
 	sendErr error
+	sendRes SendResult
 	panics  bool
 }
 
@@ -42,14 +43,17 @@ func (r *streakRouter) GetOrCreate(context.Context, string, AgentOpts) (Session,
 	if r.getErr != nil {
 		return nil, SessionExisting, r.getErr
 	}
-	return streakSession{err: r.sendErr}, SessionExisting, nil
+	return streakSession{err: r.sendErr, res: r.sendRes}, SessionExisting, nil
 }
 
-type streakSession struct{ err error }
+type streakSession struct {
+	err error
+	res SendResult
+}
 
 func (s streakSession) Send(context.Context, string) (SendResult, error) {
 	if s.err != nil {
-		return SendResult{}, s.err
+		return s.res, s.err
 	}
 	return SendResult{Text: "ok", SessionID: "sess-ok"}, nil
 }

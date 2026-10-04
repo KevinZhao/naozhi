@@ -42,7 +42,7 @@ func TestFailureNoticeBody(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := failureNoticeBody(tc.class, tc.state, runID, tc.timeout)
+			got := failureNoticeBody(tc.class, TurnCauseUnknown, tc.state, runID, tc.timeout)
 			if got != tc.want {
 				t.Errorf("failureNoticeBody(%q, %q) = %q, want %q", tc.class, tc.state, got, tc.want)
 			}
@@ -53,12 +53,85 @@ func TestFailureNoticeBody(t *testing.T) {
 	}
 }
 
+// allTurnCauses lists every named TurnCause; TestTurnFailedNotices_EveryCause
+// holds it to the notice table.
+var allTurnCauses = []TurnCause{
+	TurnCauseMaxTurns, TurnCauseBudget, TurnCauseRefused, TurnCauseTruncated,
+	TurnCauseContextTooLong, TurnCauseQuota, TurnCausePermission, TurnCauseBackendOverloaded,
+	TurnCauseBackendRateLimited, TurnCauseBackendAuth, TurnCauseBackendInvalid,
+	TurnCauseBackendUnreachable,
+}
+
+// TestFailureNoticeBody_TurnCause pins the turn_failed body per cause: each
+// names what happened, none advises 继续 or /new (which in the notify chat
+// would act on the wrong session), and an unnamed cause keeps the generic
+// sentence.
+func TestFailureNoticeBody_TurnCause(t *testing.T) {
+	t.Parallel()
+	const runID = "1a2b3c4d5e6f7a8b"
+	cases := []struct {
+		cause TurnCause
+		want  string
+	}{
+		{TurnCauseUnknown, "执行失败（后端报告本轮出错），请检查执行历史 · run 1a2b3c4d"},
+		{TurnCauseMaxTurns, "执行未完成（已达到最大执行步数），请检查执行历史 · run 1a2b3c4d"},
+		{TurnCauseBudget, "执行未完成（已达到费用上限），请检查执行历史 · run 1a2b3c4d"},
+		{TurnCauseRefused, "执行失败（模型拒绝了本次请求），请检查执行历史 · run 1a2b3c4d"},
+		{TurnCauseTruncated, "执行未完成（回复超出模型单次输出上限），请检查执行历史 · run 1a2b3c4d"},
+		{TurnCauseContextTooLong, "执行失败（对话上下文已超出模型上限），请检查执行历史 · run 1a2b3c4d"},
+		{TurnCauseQuota, "执行失败（API 额度已用尽），请联系管理员 · run 1a2b3c4d"},
+		{TurnCausePermission, "执行失败（请求被拒绝：权限或内容策略），请联系管理员 · run 1a2b3c4d"},
+		{TurnCauseBackendOverloaded, "执行失败（后端服务负载较高），请检查执行历史 · run 1a2b3c4d"},
+		{TurnCauseBackendRateLimited, "执行失败（后端调用过于频繁），请检查执行历史 · run 1a2b3c4d"},
+		{TurnCauseBackendAuth, "执行失败（后端认证失败或凭证已过期），请联系管理员 · run 1a2b3c4d"},
+		{TurnCauseBackendInvalid, "执行失败（后端无法处理本次请求），请检查执行历史 · run 1a2b3c4d"},
+		{TurnCauseBackendUnreachable, "执行失败（连接模型服务超时或网络异常），请检查执行历史 · run 1a2b3c4d"},
+		{TurnCause("from_a_newer_binary"), "执行失败（后端报告本轮出错），请检查执行历史 · run 1a2b3c4d"},
+	}
+	for _, tc := range cases {
+		got := failureNoticeBody(ErrClassTurnFailed, tc.cause, RunStateFailed, runID, 5*time.Minute)
+		if got != tc.want {
+			t.Errorf("cause %q: body = %q, want %q", tc.cause, got, tc.want)
+		}
+		for _, chatAdvice := range []string{"继续", "/new"} {
+			if strings.Contains(got, chatAdvice) {
+				t.Errorf("cause %q: body %q advises %q", tc.cause, got, chatAdvice)
+			}
+		}
+	}
+	// The cause only words a turn_failed run; any other class ignores it.
+	if got := failureNoticeBody(ErrClassSendError, TurnCauseMaxTurns, RunStateFailed, runID, time.Minute); got != "执行失败（CLI 发送错误） · run 1a2b3c4d" {
+		t.Errorf("send error with a cause: body = %q", got)
+	}
+}
+
+// TestTurnFailedNotices_EveryCause: every named cause has its own sentence,
+// distinct from the generic one and from every other cause's.
+func TestTurnFailedNotices_EveryCause(t *testing.T) {
+	t.Parallel()
+	generic := turnFailedNotice(TurnCauseUnknown)
+	seen := map[string]TurnCause{}
+	for _, c := range allTurnCauses {
+		s := turnFailedNotice(c)
+		if s == generic {
+			t.Errorf("cause %q falls back to the generic sentence", c)
+		}
+		if prev, dup := seen[s]; dup {
+			t.Errorf("causes %q and %q share the sentence %q", prev, c, s)
+		}
+		seen[s] = c
+	}
+	if len(turnFailedNotices) != len(allTurnCauses) {
+		t.Errorf("turnFailedNotices has %d entries, allTurnCauses %d: keep the two in step", len(turnFailedNotices), len(allTurnCauses))
+	}
+}
+
 func TestFailureNoticeBody_ShortAndMissingRunID(t *testing.T) {
 	t.Parallel()
-	if got := failureNoticeBody(ErrClassSessionError, RunStateFailed, "abc", time.Minute); got != "启动会话失败 · run abc" {
+	if got := failureNoticeBody(ErrClassSessionError, TurnCauseUnknown, RunStateFailed, "abc", time.Minute); got != "启动会话失败 · run abc" {
 		t.Errorf("short run id: got %q", got)
 	}
-	if got := failureNoticeBody(ErrClassSessionError, RunStateFailed, "", time.Minute); got != "启动会话失败" {
+	if got := failureNoticeBody(ErrClassSessionError, TurnCauseUnknown, RunStateFailed, "", time.Minute); got != "启动会话失败" {
 		t.Errorf("empty run id must drop the run suffix: got %q", got)
 	}
 }
@@ -177,7 +250,7 @@ func TestExecSendError_NoticeNamesCause(t *testing.T) {
 			j := &Job{ID: "job-send-" + strings.ReplaceAll(tc.name, " ", "-"), Schedule: "@every 5m"}
 			s.putJobForTest(j)
 			ga := withNotify(newGetSessionArgs(t, s, j), "日报")
-			s.execSendError(execSendArgs{runCtx: ga.runCtx, jobTimeout: s.execTimeout}, abortResult{}, tc.err, costledger.Increment{})
+			s.execSendError(execSendArgs{runCtx: ga.runCtx, jobTimeout: s.execTimeout}, abortResult{}, tc.err, costledger.Increment{}, "")
 			if got := ns.noticesAfter(s); len(got) != 1 || got[0] != tc.want {
 				t.Errorf("notices = %q, want [%q]", got, tc.want)
 			}

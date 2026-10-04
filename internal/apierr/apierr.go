@@ -11,30 +11,35 @@ import (
 	"strings"
 )
 
-// envelopeCategory returns a short, non-sensitive label for the friendly
-// message, used as the slog "category" field so logs never carry the raw
-// error text (sk-ant- keys, request_ids, internal hostnames).
-func envelopeCategory(friendly string) string {
-	switch {
-	case strings.HasPrefix(friendly, "⏱️ Claude API 调用过于频繁"):
-		return "rate_limit"
-	case strings.HasPrefix(friendly, "🌊"):
-		return "overloaded"
-	case strings.HasPrefix(friendly, "🔑"):
-		return "invalid_api_key"
-	case strings.HasPrefix(friendly, "💳"):
-		return "insufficient_quota"
-	case strings.HasPrefix(friendly, "📏"):
-		return "context_length"
-	case strings.HasPrefix(friendly, "🚫"):
-		return "permission_error"
-	case strings.HasPrefix(friendly, "⏱️ 连接"):
-		return "timeout"
-	case strings.HasPrefix(friendly, "🌐"):
-		return "network"
-	default:
-		return "unknown"
-	}
+// Kind is the category of an API error, independent of its wording.
+type Kind int
+
+const (
+	// KindUnrecognized is an envelope that matched no category.
+	KindUnrecognized Kind = iota
+	KindRateLimit
+	KindOverloaded
+	KindAuth
+	KindQuota
+	KindContextLength
+	KindPermission
+	KindTimeout
+	KindNetwork
+)
+
+// kinds holds each Kind's friendly text and its slog "category" label, a
+// short non-sensitive name so logs never carry the raw error text (sk-ant-
+// keys, request_ids, internal hostnames).
+var kinds = [...]struct{ friendly, category string }{
+	KindUnrecognized:  {"⚠️ Claude API 返回了一个未识别的错误，已记录日志，请联系管理员。", "unknown"},
+	KindRateLimit:     {"⏱️ Claude API 调用过于频繁，请稍候一分钟再试。", "rate_limit"},
+	KindOverloaded:    {"🌊 Claude 服务当前负载较高，请稍后重试。", "overloaded"},
+	KindAuth:          {"🔑 Claude API 密钥无效或已过期，请联系管理员检查配置。", "invalid_api_key"},
+	KindQuota:         {"💳 Claude API 额度已用尽，请联系管理员充值后重试。", "insufficient_quota"},
+	KindContextLength: {"📏 对话上下文已超出模型上限，请发送 /new 开启新会话。", "context_length"},
+	KindPermission:    {"🚫 Claude 拒绝了本次请求（权限或内容策略），请调整后重试。", "permission_error"},
+	KindTimeout:       {"⏱️ 连接 Claude API 超时，请稍后重试。", "timeout"},
+	KindNetwork:       {"🌐 与 Claude API 的网络连接出现问题，请稍后重试。", "network"},
 }
 
 // envelopePrefixScanBytes bounds how many leading bytes are lowercased when
@@ -53,9 +58,9 @@ func Localize(text string) string {
 	if trimmed == "" || !isEnvelope(trimmed) {
 		return text
 	}
-	friendly, _ := classify(strings.ToLower(trimmed), true)
-	logLocalized(friendly, len(trimmed))
-	return friendly
+	k, _ := classify(strings.ToLower(trimmed), true)
+	logLocalized(k, len(trimmed))
+	return kinds[k].friendly
 }
 
 // LocalizeError is Localize for text the caller already knows is an error
@@ -67,12 +72,23 @@ func LocalizeError(text string) (localized string, ok bool) {
 	if trimmed == "" {
 		return text, false
 	}
-	friendly, ok := classify(strings.ToLower(trimmed), isEnvelope(trimmed))
+	k, ok := ClassifyError(trimmed)
 	if !ok {
 		return text, false
 	}
-	logLocalized(friendly, len(trimmed))
-	return friendly, true
+	logLocalized(k, len(trimmed))
+	return kinds[k].friendly, true
+}
+
+// ClassifyError is LocalizeError's category without its text, for a caller
+// that words the error itself; ok=false where LocalizeError would pass the
+// text through.
+func ClassifyError(text string) (Kind, bool) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return KindUnrecognized, false
+	}
+	return classify(strings.ToLower(trimmed), isEnvelope(trimmed))
 }
 
 // isEnvelope reports whether trimmed starts with an API-error prefix.
@@ -87,42 +103,42 @@ func isEnvelope(trimmed string) bool {
 		strings.HasPrefix(lowerPrefix, "anthropic api error")
 }
 
-// classify picks the friendly text for a lowercased error. An envelope always
-// gets one (the unrecognised fallback included); bare text skips the timeout
-// and network categories, whose words are common in ordinary tool errors, and
-// returns ok=false when nothing matched.
-func classify(lower string, envelope bool) (friendly string, ok bool) {
+// classify picks the Kind of a lowercased error. An envelope always gets one
+// (KindUnrecognized included); bare text skips the timeout and network
+// categories, whose words are common in ordinary tool errors, and returns
+// ok=false when nothing matched.
+func classify(lower string, envelope bool) (Kind, bool) {
 	switch {
 	case strings.Contains(lower, "rate_limit") || strings.Contains(lower, "rate limit"):
-		return "⏱️ Claude API 调用过于频繁，请稍候一分钟再试。", true
+		return KindRateLimit, true
 	case strings.Contains(lower, "overloaded"):
-		return "🌊 Claude 服务当前负载较高，请稍后重试。", true
+		return KindOverloaded, true
 	case strings.Contains(lower, "invalid_api_key") || strings.Contains(lower, "authentication_error"):
-		return "🔑 Claude API 密钥无效或已过期，请联系管理员检查配置。", true
+		return KindAuth, true
 	case strings.Contains(lower, "insufficient_quota") || strings.Contains(lower, "credit balance") || strings.Contains(lower, "billing"):
-		return "💳 Claude API 额度已用尽，请联系管理员充值后重试。", true
+		return KindQuota, true
 	case strings.Contains(lower, "context_length") || strings.Contains(lower, "prompt is too long") || strings.Contains(lower, "maximum context"):
-		return "📏 对话上下文已超出模型上限，请发送 /new 开启新会话。", true
+		return KindContextLength, true
 	// Require canonical Anthropic codes so tool output like
 	// `git push: forbidden` does not land in the permission branch.
 	case strings.Contains(lower, "permission_error") || strings.Contains(lower, "permission_denied") || strings.Contains(lower, "request_forbidden"):
-		return "🚫 Claude 拒绝了本次请求（权限或内容策略），请调整后重试。", true
+		return KindPermission, true
 	case !envelope:
-		return "", false
+		return KindUnrecognized, false
 	case strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out"):
-		return "⏱️ 连接 Claude API 超时，请稍后重试。", true
+		return KindTimeout, true
 	case strings.Contains(lower, "network") || strings.Contains(lower, "connection"):
-		return "🌐 与 Claude API 的网络连接出现问题，请稍后重试。", true
+		return KindNetwork, true
 	default:
-		return "⚠️ Claude API 返回了一个未识别的错误，已记录日志，请联系管理员。", true
+		return KindUnrecognized, true
 	}
 }
 
 // logLocalized records a localization by category only; the raw error may
 // contain keys or request_ids.
-func logLocalized(friendly string, rawLen int) {
+func logLocalized(k Kind, rawLen int) {
 	slog.Warn("claude api error envelope localized",
-		"category", envelopeCategory(friendly),
+		"category", kinds[k].category,
 		"envelope_len", rawLen,
 	)
 }

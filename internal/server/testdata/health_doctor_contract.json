@@ -4,6 +4,13 @@
   "version": "v0.0.0-contract",
   "cli_available": true,
   "platforms": {},
+  "platform_conn": {
+    "x": {
+      "state": "connected",
+      "since": "2026-01-02T03:04:05Z",
+      "last_error": "boom"
+    }
+  },
   "eventlog": {
     "writer_alive": true,
     "channel_depth": 1,
