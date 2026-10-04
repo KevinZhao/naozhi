@@ -96,6 +96,39 @@ func TestHandleSubscribe_NotFoundReleasesTheReservation(t *testing.T) {
 	}
 }
 
+// TestRegistry_ReleaseAdvancesOnlyAnInstalledGeneration: giving back a slot
+// for a key that was installed before advances its generation, so a push loop
+// parked on it ends; a key never installed has no loop to end and leaves no
+// generation behind, so subscribes to missing keys do not grow the maps.
+func TestRegistry_ReleaseAdvancesOnlyAnInstalledGeneration(t *testing.T) {
+	h := &Hub{subs: newSubscriberRegistry()}
+	c := &wsClient{done: make(chan struct{})}
+	registerSub(h, c, "")
+	cs := h.subs.clients[c]
+
+	h.subs.reserve(c, "never")
+	h.subs.release(c, "never", 1)
+	if _, ok := cs.gen["never"]; ok {
+		t.Error("release of a never-installed key created a generation")
+	}
+	if _, ok := cs.releaseAt["never"]; ok {
+		t.Error("release of a never-installed key scheduled a reclamation")
+	}
+
+	gen := subscribeTest(h, c, "k", func() {})
+	h.subs.reserve(c, "k")
+	h.subs.release(c, "k", 1)
+	if got, _ := h.subs.generation(c, "k"); got == gen {
+		t.Errorf("release left generation %d in place for a parked loop to resume on", got)
+	}
+	if _, ok := cs.releaseAt["k"]; !ok {
+		t.Error("release advanced the generation without scheduling its reclamation")
+	}
+	if isSubscribed(h, c, "k") || subscriberCountOf(h, "k") != 0 {
+		t.Error("release left the slot held")
+	}
+}
+
 // TestHandleSubscribe_AfterDrainIsIgnored: a subscribe racing Shutdown finds
 // its client drained and takes no slot.
 func TestHandleSubscribe_AfterDrainIsIgnored(t *testing.T) {
