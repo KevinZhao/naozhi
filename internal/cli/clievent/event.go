@@ -173,9 +173,11 @@ type TaskUsage struct {
 type AssistantMessage struct {
 	Role    string         `json:"role"`
 	Content []ContentBlock `json:"content"`
-	// Model / Usage are the API message's model id and per-call token usage
-	// (claude stream-json only); they feed the shadow usage account that
-	// survives a turn that ends without a result frame.
+	// ID / Model / Usage are the API message's id, model id and per-call
+	// token usage (claude stream-json only); they feed the shadow usage
+	// account that survives a turn that ends without a result frame. The CLI
+	// writes one frame per content block, each repeating the message's id.
+	ID    string        `json:"id,omitempty"`
 	Model string        `json:"model,omitempty"`
 	Usage *MessageUsage `json:"usage,omitempty"`
 }
@@ -188,17 +190,29 @@ type MessageUsage struct {
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 }
 
-// ShadowUsage is the token total of the assistant frames seen since the last
-// result frame: what an unfinished turn (process died, timeout) consumed but
-// never reported through total_cost_usd / modelUsage.
+// ShadowUsage is the token total of the API messages seen since the last
+// result frame, per model in first-seen order: what an unfinished turn
+// (process died, timeout) consumed but never reported through
+// total_cost_usd / modelUsage.
 type ShadowUsage struct {
+	Models []ShadowModel
+}
+
+// ShadowModel is one model's share of a ShadowUsage; Model is the raw id the
+// assistant frames carried, "" when none named one.
+type ShadowModel struct {
 	Model                                string
 	Input, Output, CacheRead, CacheWrite int64
 }
 
 // IsZero reports whether nothing was consumed.
 func (u ShadowUsage) IsZero() bool {
-	return u.Input == 0 && u.Output == 0 && u.CacheRead == 0 && u.CacheWrite == 0
+	for _, m := range u.Models {
+		if m.Input != 0 || m.Output != 0 || m.CacheRead != 0 || m.CacheWrite != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 type ContentBlock struct {
@@ -273,13 +287,14 @@ func (m *AssistantMessage) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
+		ID      string          `json:"id"`
 		Model   string          `json:"model"`
 		Usage   *MessageUsage   `json:"usage"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	m.Role, m.Model, m.Usage = raw.Role, raw.Model, raw.Usage
+	m.Role, m.ID, m.Model, m.Usage = raw.Role, raw.ID, raw.Model, raw.Usage
 	if len(raw.Content) == 0 {
 		m.Content = nil
 		return nil
