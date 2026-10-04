@@ -72,11 +72,11 @@ func (p *Process) fireEnd() {
 	h := &p.endHook
 	h.mu.Lock()
 	h.end = &end
-	end, deliver := h.takeLocked()
+	out, deliver := h.takeLocked()
 	fn := h.fn
 	h.mu.Unlock()
 	if deliver {
-		fn(end)
+		fn(out)
 	}
 }
 

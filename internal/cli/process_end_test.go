@@ -96,17 +96,23 @@ func TestProcess_DetachEndCarriesNoUsage(t *testing.T) {
 	}
 }
 
-// A hook bound after the process already ended still receives the end, once.
+// A hook bound after the process already ended still receives the end, as
+// the process recorded it, once.
 func TestProcess_EndDeliveredToHookSetAfterIt(t *testing.T) {
 	p, srv := shimTestPair(&ClaudeProtocol{})
 	startServerDrain(srv)
 	p.startReadLoop()
+	srv.SendStdout(endTestFrame("msg_1", 5))
+	testhelper.Eventually(t, func() bool { return len(p.eventLog.EntriesSince(0)) >= 1 }, 2*time.Second, "frame not logged")
 	srv.Close()
 	testhelper.Eventually(t, func() bool { return !p.Alive() }, 2*time.Second, "read loop did not exit")
 
 	rec := newEndRecorder()
 	p.SetOnEnd(rec.fn)
-	rec.one(t)
+	e := rec.one(t)
+	if e.StartedAt.IsZero() || e.EndedAt.IsZero() || len(e.Shadow.Models) != 1 || e.Shadow.Models[0].Output != 5 {
+		t.Fatalf("end = %+v, want the recorded end with the frame's usage", e)
+	}
 	p.SetOnEnd(rec.fn)
 	rec.none(t)
 }
