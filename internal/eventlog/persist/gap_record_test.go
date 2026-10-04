@@ -4,10 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/eventlog/schema"
 )
 
 // TestGapRecord_DroppedBatchLeavesDurableMark is #2664's core claim: after a
@@ -153,4 +160,235 @@ func TestGapEntryType_IsRegisteredKind(t *testing.T) {
 	if !clievent.IsKnownKind(gapEntryType) || gapEntryType != clievent.KindPersistGap {
 		t.Errorf("gapEntryType = %q, want the registered clievent.KindPersistGap (%q)", gapEntryType, clievent.KindPersistGap)
 	}
+}
+
+// blockOpen makes writerFor fail for key until the returned func runs: a
+// directory where the log file belongs fails Recover's truncate and the open.
+func blockOpen(t *testing.T, dir, key string) (unblock func()) {
+	t.Helper()
+	path := LogPath(dir, key)
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("mkdir over the log path: %v", err)
+	}
+	return func() {
+		t.Helper()
+		if err := os.Remove(path); err != nil {
+			t.Fatalf("remove the directory over the log path: %v", err)
+		}
+	}
+}
+
+// TestGapRecord_OpenWriterFailureCarriesGap: a batch the run goroutine drops
+// because the key's files will not open must leave a gap record once they do,
+// and so must the channel-full count that batch was carrying.
+func TestGapRecord_OpenWriterFailureCarriesGap(t *testing.T) {
+	t.Parallel()
+	p, dir := newTestPersister(t)
+	const key = "feishu:p2p:gap-open-fail"
+	s := &sessionSink{p: p, key: key, stem: KeyHash(key)}
+	unblock := blockOpen(t, dir, key)
+
+	s.pendingGap.Add(5)
+	s.accept([]Entry{entry(t, 1700000001000, "lost1"), entry(t, 1700000001001, "lost2")}, false)
+	if err := flushOrFail(t, p); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if got := p.Stats().Dropped; got != 2 {
+		t.Fatalf("Stats().Dropped = %d, want 2 for the batch whose writer would not open", got)
+	}
+
+	unblock()
+	s.accept([]Entry{entry(t, 1700000002000, "after")}, false)
+	if err := flushOrFail(t, p); err != nil {
+		t.Fatalf("Flush after the open succeeds: %v", err)
+	}
+	assertRecoveredLog(t, p, dir, key,
+		"gap:dropped=7 reason=persist_channel_full+persist_write_failed", "after")
+}
+
+// TestGapRecord_RetiredGapRecordIsRestored: a gap record that reached the log
+// buffer is not yet on disk. When the flush fails and the writer is retired,
+// its count must come back for the next gap record, and the record itself
+// must not be counted as a dropped event.
+func TestGapRecord_RetiredGapRecordIsRestored(t *testing.T) {
+	p, dir := newTestPersister(t, func(o *Options) { o.FlushInterval = time.Hour })
+	full := installFullDisk(t, dir)
+	const key = "feishu:p2p:gap-retired"
+	s := &sessionSink{p: p, key: key, stem: KeyHash(key)}
+
+	s.accept([]Entry{entry(t, 1700000001000, "before")}, false)
+	if err := flushOrFail(t, p); err != nil {
+		t.Fatalf("Flush before the outage: %v", err)
+	}
+
+	full.Store(true)
+	s.pendingGap.Add(3)
+	s.accept([]Entry{entry(t, 1700000002000, "during")}, false)
+	if err := flushOrFail(t, p); !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("Flush on a full disk: err=%v, want ENOSPC", err)
+	}
+	if got := p.Stats().Dropped; got != 1 {
+		t.Errorf("Stats().Dropped = %d, want 1: the lost gap record is bookkeeping, not an event", got)
+	}
+
+	full.Store(false)
+	s.accept([]Entry{entry(t, 1700000003000, "after")}, false)
+	if err := flushOrFail(t, p); err != nil {
+		t.Fatalf("Flush after the disk freed up: %v", err)
+	}
+	assertRecoveredLog(t, p, dir, key,
+		"before", "gap:dropped=4 reason=persist_channel_full+persist_write_failed", "after")
+}
+
+// TestGapRecord_DroppingStemCapCountsGap: a batch dropped because its stem's
+// deferral FIFO is full leaves a gap record behind the batches that were
+// deferred ahead of it, not in front of them.
+func TestGapRecord_DroppingStemCapCountsGap(t *testing.T) {
+	release, started := blockingRemoveHook(t)
+	p, dir := newTestPersister(t, func(o *Options) { o.ChannelBuffer = 2 * droppingPendingMaxBatches })
+	const key = "feishu:p2p:gap-dropping-cap"
+	sink := p.SinkFor(key)
+	sink([]Entry{entry(t, 1700000000000, "seed")}, false)
+	if err := flushOrFail(t, p); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
+	defer cancel()
+	dropErr := make(chan error, 1)
+	go func() { dropErr <- p.DropKey(ctx, key) }()
+	<-started
+	want := make([]string, 0, droppingPendingMaxBatches+2)
+	for i := 0; i < droppingPendingMaxBatches; i++ {
+		u := fmt.Sprintf("deferred-%d", i)
+		sink([]Entry{entry(t, 1700000001000+int64(i), u)}, false)
+		want = append(want, u)
+	}
+	sink([]Entry{entry(t, 1700000002000, "lost1"), entry(t, 1700000002001, "lost2"), entry(t, 1700000002002, "lost3")}, false)
+	if err := flushOrFail(t, p); err != nil {
+		t.Fatalf("Flush while the stem is dropping: %v", err)
+	}
+	if got := p.Stats().Dropped; got != 3 {
+		t.Fatalf("Stats().Dropped = %d, want 3 for the batch past the deferral cap", got)
+	}
+	close(release)
+	if err := <-dropErr; err != nil {
+		t.Fatalf("DropKey: %v", err)
+	}
+	// opCh is FIFO: this Flush lands after opDropDone, so the deferred batches
+	// are on disk before "after" is sent.
+	if err := flushOrFail(t, p); err != nil {
+		t.Fatalf("Flush after the drop: %v", err)
+	}
+	sink([]Entry{entry(t, 1700000003000, "after")}, false)
+	if err := flushOrFail(t, p); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	want = append(want, "gap:dropped=3 reason=persist_channel_full", "after")
+	assertRecoveredLog(t, p, dir, key, want...)
+}
+
+// TestGapRecord_DropKeyClearsRunGap: DropKey removes the files a pending gap
+// would have marked, so a recreated log must not open with a stale gap.
+func TestGapRecord_DropKeyClearsRunGap(t *testing.T) {
+	t.Parallel()
+	p, dir := newTestPersister(t)
+	const key = "feishu:p2p:gap-dropkey"
+	sink := p.SinkFor(key)
+	blockOpen(t, dir, key)
+	sink([]Entry{entry(t, 1700000001000, "lost")}, false)
+	if err := flushOrFail(t, p); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
+	defer cancel()
+	// removeKeyFiles takes the empty directory over the log path with it.
+	if err := p.DropKey(ctx, key); err != nil {
+		t.Fatalf("DropKey: %v", err)
+	}
+	if err := flushOrFail(t, p); err != nil {
+		t.Fatalf("Flush after the drop: %v", err)
+	}
+	sink([]Entry{entry(t, 1700000002000, "fresh")}, false)
+	if err := flushOrFail(t, p); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	assertRecoveredLog(t, p, dir, key, "fresh")
+}
+
+// TestGapRecord_FlushedGapIsNotRepeated: once a flush makes a gap record
+// durable its count is spent; a later outage must report only its own loss.
+func TestGapRecord_FlushedGapIsNotRepeated(t *testing.T) {
+	p, dir := newTestPersister(t, func(o *Options) { o.FlushInterval = time.Hour })
+	full := installFullDisk(t, dir)
+	const key = "feishu:p2p:gap-flushed"
+	s := &sessionSink{p: p, key: key, stem: KeyHash(key)}
+
+	s.pendingGap.Add(2)
+	s.accept([]Entry{entry(t, 1700000001000, "first")}, false)
+	if err := flushOrFail(t, p); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	full.Store(true)
+	s.accept([]Entry{entry(t, 1700000002000, "during")}, false)
+	if err := flushOrFail(t, p); !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("Flush on a full disk: err=%v, want ENOSPC", err)
+	}
+	full.Store(false)
+	s.accept([]Entry{entry(t, 1700000003000, "after")}, false)
+	assertRecoveredLog(t, p, dir, key,
+		"gap:dropped=2 reason=persist_channel_full", "first",
+		"gap:dropped=1 reason=persist_write_failed", "after")
+}
+
+// TestGapRecord_GapWriteFailureKeepsTally: when writing the gap record itself
+// hits the full disk, its count must survive along with the batch it fronted.
+func TestGapRecord_GapWriteFailureKeepsTally(t *testing.T) {
+	p, dir := newTestPersister(t, func(o *Options) { o.FlushInterval = time.Hour })
+	full := installFullDisk(t, dir)
+	const key = "feishu:p2p:gap-write-fail"
+	s := &sessionSink{p: p, key: key, stem: KeyHash(key)}
+	s.accept([]Entry{entry(t, 1700000001000, "before")}, false)
+	if err := flushOrFail(t, p); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	// A filler record (seq 2) that leaves 4 bytes of the log buffer free: it
+	// stays buffered, and the gap record written next has to spill.
+	framed := func(pad int) (Entry, int64) {
+		e := Entry{TimeMS: 1700000002000, JSON: []byte(`{"uuid":"filler","summary":"` + strings.Repeat("x", pad) + `"}`)}
+		body, err := schema.MarshalRecordInto(new(bytes.Buffer), &schema.Record{V: schema.WireVersion, Seq: 2, Type: schema.TypeEntry, Entry: e.JSON})
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, err := WriteRecordRaw(io.Discard, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e, n
+	}
+	// Two steps: the frame's length prefix gains digits as the body grows.
+	const target = logWriteBufSize - 4
+	_, n := framed(0)
+	pad := target - int(n)
+	_, n = framed(pad)
+	filler, n := framed(pad - (int(n) - target))
+	if n != target {
+		t.Fatalf("filler frames to %d bytes, want %d", n, target)
+	}
+
+	full.Store(true)
+	s.accept([]Entry{filler}, false)
+	s.pendingGap.Add(2)
+	s.accept([]Entry{entry(t, 1700000003000, "fronted")}, false)
+	if err := flushOrFail(t, p); err != nil {
+		t.Fatalf("Flush: %v, want nil (the ingest path already retired the writer)", err)
+	}
+	if got := p.Stats().Dropped; got != 2 {
+		t.Errorf("Stats().Dropped = %d, want 2 (filler and fronted)", got)
+	}
+	full.Store(false)
+	s.accept([]Entry{entry(t, 1700000004000, "after")}, false)
+	assertRecoveredLog(t, p, dir, key,
+		"before", "gap:dropped=4 reason=persist_channel_full+persist_write_failed", "after")
 }
