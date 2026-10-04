@@ -120,29 +120,30 @@ func TestConnState_LongPollLifecycle(t *testing.T) {
 
 // TestConnState_FailedPollDisconnects: a transport failure and an iLink API
 // error both mark the link disconnected with the reason as LastError.
+var failedPollReplies = []struct {
+	name    string
+	reply   func(http.ResponseWriter)
+	wantErr string
+}{
+	{
+		name: "http status",
+		reply: func(w http.ResponseWriter) {
+			http.Error(w, "relay down", http.StatusBadGateway)
+		},
+		wantErr: "http 502: relay down",
+	},
+	{
+		name: "api error",
+		reply: func(w http.ResponseWriter) {
+			_ = json.NewEncoder(w).Encode(getUpdatesResp{Ret: -14, ErrCode: -14, ErrMsg: "session\x1b[31m timeout"})
+		},
+		wantErr: "getUpdates ret=-14 errcode=-14: session",
+	},
+}
+
 func TestConnState_FailedPollDisconnects(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name    string
-		reply   func(http.ResponseWriter)
-		wantErr string
-	}{
-		{
-			name: "http status",
-			reply: func(w http.ResponseWriter) {
-				http.Error(w, "relay down", http.StatusBadGateway)
-			},
-			wantErr: "http 502: relay down",
-		},
-		{
-			name: "api error",
-			reply: func(w http.ResponseWriter) {
-				_ = json.NewEncoder(w).Encode(getUpdatesResp{Ret: -14, ErrCode: -14, ErrMsg: "session\x1b[31m timeout"})
-			},
-			wantErr: "getUpdates ret=-14 errcode=-14: session",
-		},
-	}
-	for _, tc := range cases {
+	for _, tc := range failedPollReplies {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			rl := newScriptedRelay(t)
@@ -199,5 +200,38 @@ func TestConnState_RecoversAfterFailedPoll(t *testing.T) {
 	}
 	if !strings.Contains(s.LastError, "http 502") {
 		t.Errorf("recovery dropped LastError: %q", s.LastError)
+	}
+}
+
+// TestConnState_RepeatedFailureKeepsSince: a relay that keeps failing stays
+// disconnected with Since at the first failure, so the outage ages (doctor's
+// reconnect grace relies on it), while LastErrorAt follows each failure.
+func TestConnState_RepeatedFailureKeepsSince(t *testing.T) {
+	t.Parallel()
+	for _, tc := range failedPollReplies {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rl := newScriptedRelay(t)
+			w := startScripted(t, rl)
+
+			rl.awaitPoll(t)
+			rl.script <- tc.reply
+			rl.awaitPoll(t) // arrives after the retry delay
+			first := mustConnState(t, w)
+			if first.State != platform.ConnDisconnected {
+				t.Fatalf("after one failed poll: state %q, want disconnected", first.State)
+			}
+
+			rl.script <- tc.reply
+			testhelper.Eventually(t, func() bool {
+				s, _ := w.ConnState()
+				return s.LastErrorAt.After(first.LastErrorAt)
+			}, connStateTestTimeout, "the second failed poll was never recorded")
+
+			second := mustConnState(t, w)
+			if second.State != platform.ConnDisconnected || !second.Since.Equal(first.Since) {
+				t.Errorf("after a second failed poll: %+v, want disconnected since %v", second, first.Since)
+			}
+		})
 	}
 }
