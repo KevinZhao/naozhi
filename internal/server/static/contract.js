@@ -103,6 +103,7 @@ export const NZ_CONTRACT = {
     EVENT_TYPE_INTERNAL: ['tool_use', 'agent', 'task_start', 'task_progress', 'task_done', 'result'],
     EVENT_TYPE_NO_BUBBLE: ['thinking'],
     EVENT_TYPE_MD_IGNORE: ['thinking', 'tool_use', 'agent', 'ask_question', 'task_start', 'task_progress', 'task_done', 'result'],
+    STARTUP_FAILURE_CLASS: ['unknown', 'resume_not_found', 'auth', 'mcp_config', 'missing_runtime'],
   },
   DEATH_REASON_PREFIX: { CODE: 'cli_exited_code_', SIGNAL: 'cli_exited_signal_' },
 };

@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/session"
@@ -78,6 +79,7 @@ export const NZ_CONTRACT = {
 	writeEnum(&b, "EVENT_TYPE_INTERNAL", clievent.InternalKinds())
 	writeEnum(&b, "EVENT_TYPE_NO_BUBBLE", clievent.NoBubbleKinds())
 	writeEnum(&b, "EVENT_TYPE_MD_IGNORE", clievent.MarkdownIgnoreKinds())
+	writeEnum(&b, "STARTUP_FAILURE_CLASS", clierr.AllExitClassWires())
 	b.WriteString("  },\n")
 
 	// DEATH_REASON_PREFIX: the shapes of a cli_exited reason that carries an

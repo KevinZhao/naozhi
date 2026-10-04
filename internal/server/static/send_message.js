@@ -463,11 +463,10 @@ function clearPendingFiles() {
 // 'running' immediately after send succeeds so the running-banner shows
 // without waiting for the server's session_state broadcast. The server can
 // take 100ms–several seconds to emit BroadcastSessionReady when GetOrCreate
-// has to spawn a new CLI subprocess, during which the dashboard previously
-// looked idle even though the turn was already queued. Rolled back by
-// onSendAck on 'busy'/'error' so a rejected send doesn't leave a stuck banner.
-// Tracked with a 20s safety timer so a lost session_state push can't keep
-// the banner stuck forever.
+// has to spawn a new CLI subprocess, while the turn is already queued.
+// Rolled back by onSendAck on 'busy'/'error' so a rejected send doesn't leave
+// a stuck banner; a 20s safety timer stops a lost session_state push from
+// keeping the banner stuck forever.
 const _optimisticRunningTimers = {};
 
 // patchSidebarCardState updates the sidebar card's status dot + label text in
@@ -494,7 +493,7 @@ function patchSidebarCardState(key, node, state) {
     if (stateSpan && !stateSpan.classList.contains('sc-node')) stateSpan.textContent = displayState;
   }
   const sd = sessionList.sessionsData[sid(key, msgNode)];
-  patchCardExitChip(card, state, sd ? sd.death_reason : '', sd ? sd.death_detail : '');
+  patchCardExitChip(card, state, sd ? sd.death_reason : '', sd ? sd.death_detail : '', sd ? sd.startup_failure : null);
 }
 
 function markSessionOptimisticRunning(key, node) {

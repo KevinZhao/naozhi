@@ -75,14 +75,8 @@ import { sid } from './session_ident.js';
     var label = a.name || a.description || 'agent';
     // Phase 3: clickable when we have a task_id. Pre-task_start agents
     // ("spawned" status without TaskID) have no internal view yet, so skip
-    // the data-task to avoid a dead tap.
-    //
-    // R247-SEC-4: previously this emitted an inline `onclick` that
-    // interpolated `escAttr(a.taskId)` into a JavaScript string literal —
-    // wrong sink (HTML-attr escape, not JS-string escape). Even though the
-    // server validates taskId via `agentTaskIDRe ^[a-z0-9]{1,32}$`, the
-    // layered escape made the wrong defense visible. We now rely on the
-    // delegated `click` listener below + dataset.taskId — no JS-in-attr.
+    // the data-task to avoid a dead tap. No inline handler: the delegated
+    // click listener below reads the task id from the attribute.
     var clickable = !!a.taskId;
     var parts = '<div class="' + cls + '" data-task="' + escAttr(a.taskId || '') + '"' +
       (clickable ? ' role="button" tabindex="0"' : '') + '>';

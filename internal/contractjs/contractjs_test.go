@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cliinfo"
 )
@@ -90,6 +91,20 @@ func TestContractJS_DeathReasonPrefix(t *testing.T) {
 	}
 	want := "  DEATH_REASON_PREFIX: { CODE: '" + cliinfo.DeathReasonCLIExitedCodePrefix +
 		"', SIGNAL: '" + cliinfo.DeathReasonCLIExitedSignalPrefix + "' },\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("contract.js lacks %q", want)
+	}
+}
+
+// TestContractJS_StartupFailureClass pins STARTUP_FAILURE_CLASS to the wire
+// names snapshots carry in startup_failure.class.
+func TestContractJS_StartupFailureClass(t *testing.T) {
+	t.Parallel()
+	out, err := Build(filepath.Join("..", "..", "internal", "server", "testdata", "routes.golden.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "    STARTUP_FAILURE_CLASS: ['" + strings.Join(clierr.AllExitClassWires(), "', '") + "'],\n"
 	if !strings.Contains(out, want) {
 		t.Errorf("contract.js lacks %q", want)
 	}

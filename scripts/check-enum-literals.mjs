@@ -7,7 +7,8 @@
 //   1. nz_util.js's DEATH_REASONS table has exactly the keys
 //      NZ_CONTRACT.ENUMS.DEATH_REASON lists — neither a reason the backend
 //      declares and the table forgot, nor one the table still has after the
-//      backend dropped it.
+//      backend dropped it. Its STARTUP_FAILURE_TEXT table likewise has
+//      exactly the keys ENUMS.STARTUP_FAILURE_CLASS lists.
 //   2. No OTHER static/*.js file hardcodes one of those reason strings: the
 //      literal that matters is quoted whole (`'idle_timeout'`), not a
 //      substring, so this cannot flag prose that merely mentions a reason.
@@ -82,7 +83,13 @@ const espree = createRequire(path.join(ROOT, 'test', 'e2e', 'package.json'))('es
 // deathReasonKeys extracts the DEATH_REASONS object's own top-level keys from
 // nz_util.js's source (not evaluated: the file is a browser ES module).
 export function deathReasonKeys(nzUtilSrc) {
-  const start = nzUtilSrc.indexOf('const DEATH_REASONS = {');
+  return tableKeys(nzUtilSrc, 'DEATH_REASONS');
+}
+
+// tableKeys is deathReasonKeys for nz_util.js's `const <name> = {...}`; null
+// when there is none.
+export function tableKeys(nzUtilSrc, name) {
+  const start = nzUtilSrc.indexOf('const ' + name + ' = {');
   if (start < 0) return null;
   const open = nzUtilSrc.indexOf('{', start);
   let depth = 0, end = open;
@@ -126,6 +133,17 @@ export function run(files, contractReasons) {
   for (const hit of literalHits(files, contractReasons)) {
     problems.push(`${hit.file}: hardcodes death_reason literal(s) ${hit.reasons.join(', ')} instead of reading NZ_CONTRACT.ENUMS.DEATH_REASON`);
   }
+  return problems;
+}
+
+// startupClassProblems checks that nz_util.js's STARTUP_FAILURE_TEXT has
+// exactly the keys classes (ENUMS.STARTUP_FAILURE_CLASS) lists.
+export function startupClassProblems(nzUtilSrc, classes) {
+  const keys = tableKeys(nzUtilSrc || '', 'STARTUP_FAILURE_TEXT');
+  if (!keys) return ['nz_util.js: no `const STARTUP_FAILURE_TEXT = {...}` found — the golden check has gone blind'];
+  const want = new Set(classes), got = new Set(keys), problems = [];
+  for (const k of got) if (!want.has(k)) problems.push(`nz_util.js: STARTUP_FAILURE_TEXT has ${JSON.stringify(k)}, which NZ_CONTRACT.ENUMS.STARTUP_FAILURE_CLASS does not list`);
+  for (const w of want) if (!got.has(w)) problems.push(`nz_util.js: STARTUP_FAILURE_TEXT is missing ${JSON.stringify(w)}, which NZ_CONTRACT.ENUMS.STARTUP_FAILURE_CLASS lists`);
   return problems;
 }
 
@@ -406,6 +424,7 @@ export function checkAll(files, contract, other = OTHER_TYPES, sentinels = KIND_
   const kind = kindProblems(files, contract, other, sentinels, anchors);
   const problems = [
     ...run(files, contract.ENUMS?.DEATH_REASON || []),
+    ...startupClassProblems(files['nz_util.js'], contract.ENUMS?.STARTUP_FAILURE_CLASS || []),
     ...contractKindProblems(contract.ENUMS),
     ...kind.problems,
     ...eventTableProblems(files, contract),
@@ -427,6 +446,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     process.exit(1);
   }
   const { kindComparisons, otherComparisons, lookups } = counts;
-  console.log(`check-enum-literals: OK (${contract.ENUMS.DEATH_REASON.length} death reasons, ${contract.ENUMS.EVENT_TYPE.length} kinds; ` +
+  console.log(`check-enum-literals: OK (${contract.ENUMS.DEATH_REASON.length} death reasons, ${contract.ENUMS.STARTUP_FAILURE_CLASS.length} startup failure classes, ${contract.ENUMS.EVENT_TYPE.length} kinds; ` +
     `${kindComparisons} kind and ${otherComparisons} other .type comparisons, ${lookups} [.type] table(s); ${Object.keys(files).length - 1} files scanned for kinds, ${Object.keys(files).length - 2} for death-reason literals)`);
 }

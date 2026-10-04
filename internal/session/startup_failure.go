@@ -15,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/session/spawnpool"
 )
 
@@ -71,17 +72,34 @@ func (f startupFailure) dropsResume() bool {
 	return f.streak > 0 && (f.class == clierr.ExitResumeNotFound || f.class == clierr.ExitUnknown)
 }
 
-// cooldownLeft is how long a respawn must still wait at now; 0 when it may run.
-func (f startupFailure) cooldownLeft(now time.Time) time.Duration {
+// retryAt is when the cooldown after f ends; zero when f starts none.
+func (f startupFailure) retryAt() time.Time {
 	if f.streak < 2 {
-		return 0
+		return time.Time{}
 	}
 	wait := startupCooldownBase
 	for n := f.streak; n > 2 && wait < startupCooldownMax; n-- {
 		wait *= 2
 	}
-	wait = min(wait, startupCooldownMax)
-	return max(f.at.Add(wait).Sub(now), 0)
+	return f.at.Add(min(wait, startupCooldownMax))
+}
+
+// cooldownLeft is how long a respawn must still wait at now; 0 when it may run.
+func (f startupFailure) cooldownLeft(now time.Time) time.Duration {
+	t := f.retryAt()
+	if t.IsZero() {
+		return 0
+	}
+	return max(t.Sub(now), 0)
+}
+
+// orRun is the later of f and run, a key's run of failed spawns (ok: the key
+// has one).
+func (f startupFailure) orRun(run spawnpool.StartupFailure, ok bool) startupFailure {
+	if ok && run.At.After(f.at) {
+		return startupFailure{streak: run.Streak, at: run.At, detail: run.Detail}
+	}
+	return f
 }
 
 // startupBreaker is GetOrCreate's verdict on spawning key, whose entry is
@@ -89,10 +107,7 @@ func (f startupFailure) cooldownLeft(now time.Time) time.Duration {
 // startup failure runs, else nil. The latest is the entry's process or the
 // key's run of failed spawns, whichever failed last.
 func startupBreaker(tx sessTx, key string, now time.Time) error {
-	f := startupFailureOf(tx.Get(key))
-	if rec, ok := tx.Ext().spawns.StartupFailure(key); ok && rec.At.After(f.at) {
-		f = startupFailure{streak: rec.Streak, at: rec.At, detail: rec.Detail}
-	}
+	f := startupFailureOf(tx.Get(key)).orRun(tx.Ext().spawns.StartupFailure(key))
 	left := f.cooldownLeft(now).Round(time.Second)
 	if left <= 0 {
 		return nil
@@ -139,4 +154,27 @@ func resumeDropReason(old *ManagedSession) (reason, detail string) {
 		return "CLI failed at startup", f.detail
 	}
 	return "", ""
+}
+
+// startupFailureView is what the dashboard shows of s's startup failures:
+// the later of its process's and run (its key's failed spawns, ok: the key
+// has one), and whether the next send drops the resume. nil when s is alive
+// or there is neither to show.
+func startupFailureView(s *ManagedSession, run spawnpool.StartupFailure, ok bool) *sessionview.StartupFailureView {
+	if s.isAlive() {
+		return nil
+	}
+	f := startupFailureOf(s).orRun(run, ok)
+	drop, _ := resumeDropReason(s)
+	if f.streak == 0 && drop == "" {
+		return nil
+	}
+	v := &sessionview.StartupFailureView{Streak: f.streak, NewSession: drop != ""}
+	if f.streak > 0 {
+		v.Class = f.class.Wire()
+	}
+	if t := f.retryAt(); !t.IsZero() {
+		v.RetryAt = t.UnixMilli()
+	}
+	return v
 }

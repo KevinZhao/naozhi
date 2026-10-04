@@ -1,7 +1,7 @@
 // node --test scripts/check-enum-literals.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ANCHORS, checkAll, contractKindProblems, deathReasonKeys, eventTableProblems, kindProblems, literalHits, run } from './check-enum-literals.mjs';
+import { ANCHORS, checkAll, contractKindProblems, deathReasonKeys, eventTableProblems, kindProblems, literalHits, run, startupClassProblems } from './check-enum-literals.mjs';
 
 const nzUtil = `
 const OTHER = { a: 1 };
@@ -9,6 +9,10 @@ const DEATH_REASONS = {
   idle_timeout: { crashed: false, text: 'x' },
   evicted: { crashed: false, text: 'y' },
   cli_exited: { crashed: true, text: 'z' },
+};
+const STARTUP_FAILURE_TEXT = {
+  unknown: '',
+  auth: 'a',
 };
 function sessionExit() {}
 `;
@@ -52,6 +56,17 @@ test('run flags a missing key, an extra key, and a stray literal, and passes a c
 test('run reports a blind check when nz_util.js has no DEATH_REASONS block', () => {
   const problems = run({ 'nz_util.js': 'const X = 1;' }, ['idle_timeout']);
   assert.ok(problems.some((p) => /gone blind/.test(p)));
+});
+
+test('startupClassProblems flags a missing or an extra class, and a missing table', () => {
+  assert.deepEqual(startupClassProblems(nzUtil, ['unknown', 'auth']), []);
+  assert.deepEqual(startupClassProblems(nzUtil, ['unknown', 'auth', 'mcp_config']), [
+    'nz_util.js: STARTUP_FAILURE_TEXT is missing "mcp_config", which NZ_CONTRACT.ENUMS.STARTUP_FAILURE_CLASS lists',
+  ]);
+  assert.deepEqual(startupClassProblems(nzUtil, ['unknown']), [
+    'nz_util.js: STARTUP_FAILURE_TEXT has "auth", which NZ_CONTRACT.ENUMS.STARTUP_FAILURE_CLASS does not list',
+  ]);
+  assert.ok(startupClassProblems('const X = 1;', ['unknown'])[0].includes('gone blind'));
 });
 
 // --- EventEntry kinds (S13b-4) ---
@@ -293,16 +308,17 @@ test('eventTableProblems goes blind loudly when a table is declared nowhere, or 
   ]);
 });
 
-test('checkAll reports every check, death_reason and kinds alike, over one tree', () => {
-  const full = { ...contract, ENUMS: { ...contract.ENUMS, DEATH_REASON: ['idle_timeout', 'evicted', 'cli_exited'] } };
+test('checkAll reports every check, death_reason, startup classes and kinds alike, over one tree', () => {
+  const full = { ...contract, ENUMS: { ...contract.ENUMS, DEATH_REASON: ['idle_timeout', 'evicted', 'cli_exited'], STARTUP_FAILURE_CLASS: ['unknown', 'auth'] } };
   const tree = { ...clean, 'nz_util.js': nzUtil };
   assert.deepEqual(checkAll(tree, full, other, ['a.js', 'b.js'], anchors).problems, []);
   const bad = {
     ...tree,
     'a.js': clean['a.js'].replace("['result', 4]", '') + "if (e.type === 'txt' || r === 'evicted') {}",
   };
-  const { problems } = checkAll(bad, { ...full, ENUMS: { ...full.ENUMS, EVENT_TYPE_MD_IGNORE: [] } }, other, ['a.js', 'b.js'], anchors);
+  const { problems } = checkAll(bad, { ...full, ENUMS: { ...full.ENUMS, EVENT_TYPE_MD_IGNORE: [], STARTUP_FAILURE_CLASS: ['unknown'] } }, other, ['a.js', 'b.js'], anchors);
   for (const want of [
+    /STARTUP_FAILURE_TEXT has "auth"/,
     /a\.js: hardcodes death_reason literal\(s\) evicted/,
     /EVENT_TYPE_MD_IGNORE is missing or empty/,
     /a\.js:\d+: \.type compared with "txt"/,

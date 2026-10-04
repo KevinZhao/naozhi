@@ -484,6 +484,10 @@
             "$ref": "spawndiag.Diag"
           }
         },
+        "startup_failure": {
+          "type": "object",
+          "$ref": "sessionview.StartupFailureView"
+        },
         "state": {
           "type": "string"
         },
@@ -522,6 +526,23 @@
         "state",
         "total_cost"
       ]
+    },
+    "sessionview.StartupFailureView": {
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "new_session": {
+          "type": "boolean"
+        },
+        "retry_at": {
+          "type": "integer"
+        },
+        "streak": {
+          "type": "integer"
+        }
+      },
+      "required": []
     },
     "spawndiag.Diag": {
       "properties": {

@@ -187,12 +187,6 @@ function buildHomeHealthLines(stats) {
 // innerHTML so the cold-start minimal CTA stays unchanged. Callers must
 // guard by selection.key == null (active-session main shell wins).
 //
-// ui-polish-light-theme D3: the R110-P1 stats strip / health strip / doctor
-// panel used to render here too — version tags and subprocess counts are ops
-// info, not "ask something" material, and they buried the one clickable
-// affordance. They now live in the 系统 view (renderServiceOverviewHtml) and
-// the settings 关于 section; Home keeps only the recent-session list.
-//
 // Pure-rendering: writes to the DOM by id rather than returning HTML, because
 // the cold-start HTML already carries the placeholder div and we don't want
 // to fight the order of initial paint.
@@ -216,7 +210,7 @@ function renderRecentSessionsPanel() {
       'data-action="session-select">' +
       '<span class="recent-dot ' + dotCls + '" aria-hidden="true"></span>' +
       '<span class="recent-label" title="' + escAttr(label) + '">' + esc(label) + '</span>' +
-      sessionExitChipHtml(s.state, s.death_reason, s.death_detail) +
+      sessionExitChipHtml(s.state, s.death_reason, s.death_detail, s.startup_failure) +
       (ago ? '<span class="recent-time">' + esc(ago) + '</span>' : '') +
       '</button>';
   }).join('');
@@ -1104,12 +1098,9 @@ function decodeEscEntities(s) {
   });
 }
 
-
-
 // formatFileSize renders a byte count as a short human label (e.g. "1.2 MB").
-// Single declaration on purpose: a second hoisted `function formatFileSize`
-// used to shadow this one silently. Promotion checks the *rounded* value so
-// 1048575 B renders "1.0 MB" rather than "1024.0 KB".
+// Promotion checks the *rounded* value so 1048575 B renders "1.0 MB" rather
+// than "1024.0 KB".
 export function formatFileSize(bytes) {
   if (!bytes || bytes <= 0) return '';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -1121,9 +1112,8 @@ export function formatFileSize(bytes) {
   return i === 0 ? v + ' B' : v.toFixed(1) + ' ' + units[i];
 }
 
-// setActiveSessionCard flips the .active class on at most one session card.
-// Replaces the old O(N) querySelectorAll('.session-card').forEach pattern
-// with a cached reference (activeCard.el). key===null drops selection
+// setActiveSessionCard flips the .active class on at most one session card,
+// kept in a cached reference (activeCard.el). key===null drops selection
 // altogether (used by openCronPanel / previewDiscovered clear paths). Node
 // defaults to 'local' to match data-node attribute emission. A subsequent
 // card with the same key but a different node counts as "different" — the

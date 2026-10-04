@@ -164,8 +164,7 @@ export function isCronSessionKey(key) {
 // dispatches cron-view commands here (WS frames reach the cron modules
 // through their own wsm.on registrations) — the reverse dashboard→view edge
 // must not become an import (a dashboard→cron import would invert module
-// execution order and break cron's load-time init). dispatchEvent is
-// synchronous, so ordering matches the old direct calls.
+// execution order and break cron's load-time init). dispatchEvent is synchronous.
 export const nzBus = new EventTarget();
 nz.bus = nzBus;
 
@@ -222,12 +221,29 @@ const DEATH_REASONS = {
 };
 
 // sessionExit describes why a session has no process, or null when it is not
-// dead. Only state==='dead' counts: a timeout can leave death_reason on a
-// session whose process is still alive. detail (death_detail) ends the title.
-export function sessionExit(state, reason, detail) {
+// dead (a timeout can leave death_reason on a live session). The title adds
+// what the next send does (startup: startup_failure) and detail (death_detail).
+export function sessionExit(state, reason, detail, startup) {
   if (state !== 'dead') return null;
   const info = deathReasonInfo(reason);
-  return { crashed: info.crashed, text: info.text, title: info.text + '，下次发送时自动恢复' + (detail ? '\n' + detail : '') };
+  return { crashed: info.crashed, text: info.text, title: info.text + '，' + nextSendText(startup) + (detail ? '\n' + detail : '') };
+}
+
+// STARTUP_FAILURE_TEXT names the startup_failure classes an operator must fix.
+const STARTUP_FAILURE_TEXT = {
+  unknown: '',
+  resume_not_found: '',
+  auth: '后端认证失败',
+  mcp_config: 'CLI 配置错误',
+  missing_runtime: 'CLI 运行环境缺失',
+};
+
+// nextSendText is what the next send to a dead session does, by its startup_failure f.
+function nextSendText(f) {
+  if (f && f.retry_at > Date.now()) return 'CLI 连续启动失败（' + f.streak + ' 次），已暂停自动重试；' + new Date(f.retry_at).toTimeString().slice(0, 8) + ' 后可重试，或发送 /new 立即重试';
+  if (f && f.new_session) return '下次发送将开启新会话（上次会话无法恢复）';
+  const cause = f && Object.prototype.hasOwnProperty.call(STARTUP_FAILURE_TEXT, f.class) && STARTUP_FAILURE_TEXT[f.class];
+  return cause ? cause + '，需管理员修复后重试' : '下次发送时自动恢复';
 }
 
 // deathReasonInfo is DEATH_REASONS' entry for reason, else the wording for a
@@ -245,8 +261,8 @@ function deathReasonInfo(reason) {
 // sessionExitChipHtml is the chip sidebar cards and the session header show
 // for a dead session: a warning for an abnormal exit, a muted note for a
 // reclaim. '' when the session is not dead.
-export function sessionExitChipHtml(state, reason, detail) {
-  const x = sessionExit(state, reason, detail);
+export function sessionExitChipHtml(state, reason, detail, startup) {
+  const x = sessionExit(state, reason, detail, startup);
   if (!x) return '';
   const cls = x.crashed ? 'sc-exit sc-exit-crashed' : 'sc-exit sc-exit-reclaimed';
   const label = x.crashed ? '⚠ 异常退出' : '已回收';
@@ -256,12 +272,12 @@ export function sessionExitChipHtml(state, reason, detail) {
 // patchCardExitChip brings a rendered session card's exit chip in line with
 // state / reason, for the paths that patch a card in place between renders;
 // it produces the markup sessionCardHtml renders, right after the state text.
-export function patchCardExitChip(card, state, reason, detail) {
+export function patchCardExitChip(card, state, reason, detail, startup) {
   const meta = card && card.querySelector('.sc-meta');
   if (!meta) return;
   const old = meta.querySelector('.sc-exit');
   if (old) old.remove();
-  const html = sessionExitChipHtml(state, reason, detail);
+  const html = sessionExitChipHtml(state, reason, detail, startup);
   if (!html) return;
   const stateSpan = meta.querySelectorAll('span')[1]; // [0]=dot, [1]=state text
   if (stateSpan) stateSpan.insertAdjacentHTML('afterend', html);

@@ -13,6 +13,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
+	"github.com/naozhi/naozhi/internal/session/spawnpool"
 	"github.com/naozhi/naozhi/internal/subagent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -171,6 +172,7 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 		snap.State = proc.State().String()
 		snap.Protocol = proc.ProtocolName()
 		snap.DeathDetail = proc.DeathDetail()
+		snap.StartupFailure = startupFailureView(s, spawnpool.StartupFailure{}, false)
 		// Model priority: live proc.Model() over persisted s.Model(). A
 		// differing live value is mirrored back so the next saveStore
 		// captures it; empty live keeps persisted. Compare before storing:
