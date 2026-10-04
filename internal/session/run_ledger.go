@@ -1,6 +1,7 @@
 package session
 
 import (
+	"log/slog"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/costledger"
@@ -100,11 +101,15 @@ func (r *RunLedger) Invalidate(key string) {
 }
 
 // Close flushes the run-history write worker and the cost ledger's day-file
-// writer, blocking on the bounded queues draining. Shutdown's teardown step;
-// a nil run-history store or disabled cost ledger make their half a no-op.
+// writer, blocking on the bounded queues draining; process-end bookings still
+// running get endBookingsDrain to land first. Shutdown's teardown step; a nil
+// run-history store or disabled cost ledger make their half a no-op.
 func (r *RunLedger) Close() {
 	r.runs.Close()
 	if r.cost != nil {
+		if !r.cost.waitEnds(endBookingsDrain) {
+			slog.Warn("shutdown: process-end cost bookings still running; their partial entries are lost")
+		}
 		r.cost.ledger.Close()
 	}
 }

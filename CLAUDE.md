@@ -79,7 +79,7 @@ cmd/naozhi/main.go
   -> attachment   附件持久化 + refcount tracker 子包
   -> runlog       per-owner run 记录的磁盘布局层（根校验/目录守卫/原子写/owner 锁），cron 与 session/runhistory 共用
   -> discovery    扫描 Claude CLI 磁盘工件（外部进程发现 / takeover）
-  -> claudefs     Claude CLI 磁盘布局单一真相源（projects slug 编码 / transcript 路径 / session id 校验）
+  -> claudefs     Claude CLI 磁盘布局单一真相源（projects slug 编码 / transcript 路径 / session id 校验 / cost-state 与按消息 usage 读取）
   -> subagent     Task 工具子代理 ↔ JSONL transcript 的关联与读取（linker + reader）
 
   辅助域

@@ -1,12 +1,10 @@
 package session
 
 import (
-	"errors"
 	"log/slog"
 	"path/filepath"
 	"sync"
 
-	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/costledger/cliusage"
@@ -25,13 +23,19 @@ type costAccounting struct {
 
 	warnMu      sync.Mutex
 	warnedModel map[string]struct{}
+
+	// ends counts the process-end bookings in flight; endSem bounds how many
+	// run at once (managed_cost_end.go).
+	ends   inflight
+	endSem chan struct{}
 }
 
 // maxWarnedModels bounds the unknown-basis dedup set.
 const maxWarnedModels = 64
 
 func newCostAccounting(ledger *costledger.Store, ownedByRun func(key string) bool) *costAccounting {
-	return &costAccounting{ledger: ledger, ownedByRun: ownedByRun, warnedModel: make(map[string]struct{})}
+	return &costAccounting{ledger: ledger, ownedByRun: ownedByRun, warnedModel: make(map[string]struct{}),
+		endSem: make(chan struct{}, maxEndBookings)}
 }
 
 func (c *costAccounting) owned(key string) bool {
@@ -168,37 +172,15 @@ func bookUnownedResults(s *ManagedSession, proc processIface) {
 	}
 }
 
-// shadowUsageTaker is the optional process capability behind partial-turn
-// accounting; *cli.Process implements it, test stubs may not.
-type shadowUsageTaker interface {
-	TakeShadowUsage() clievent.ShadowUsage
-}
-
-// isProcessDeathErr reports whether err means the process will not deliver
-// the turn's result (it exited or is being killed), so the tokens its
-// assistant frames reported would otherwise be lost.
-func isProcessDeathErr(err error) bool {
-	return errors.Is(err, clierr.ErrProcessExited) || errors.Is(err, clierr.ErrNoOutputTimeout) || errors.Is(err, clierr.ErrTotalTimeout)
-}
-
-// bookPartialTurn records a Kind=partial entry (one row per model, priced at
-// the rates the ledger learned from the CLI's own results) for a turn the
-// process died on, and adds its amount to the session's spend. A model with
-// no learned rate books tokens only and no basis: BasisUnknown means the CLI
-// guessed a rate, and here nothing priced it. Turns that fail with the
-// process still alive are skipped: their tokens surface in the next result's
-// cumulative modelUsage. Returns the USD booked.
-func (s *ManagedSession) bookPartialTurn(proc processIface, err error, runID string) float64 {
-	if !isProcessDeathErr(err) || s.costAcct == nil || !s.costAcct.ledger.Enabled() {
-		return 0
-	}
-	taker, ok := proc.(shadowUsageTaker)
-	if !ok {
-		return 0
-	}
-	u := taker.TakeShadowUsage()
-	if u.IsZero() || s.costAcct.owned(s.key) {
-		return 0
+// bookPartialUsage records a Kind=partial entry for u, spend a process
+// reported in no result frame (bookProcessEnd, which has already applied the
+// cron-ownership gate), one row per model priced at the rates the ledger
+// learned from the CLI's own results, and adds its amount to the session's
+// spend. A model with no learned rate books tokens only and no basis:
+// BasisUnknown means the CLI guessed a rate, and here nothing priced it.
+func (s *ManagedSession) bookPartialUsage(u clievent.ShadowUsage, runID string) {
+	if s.costAcct == nil || !s.costAcct.ledger.Enabled() || u.IsZero() {
+		return
 	}
 	e := costledger.Entry{
 		Source: costledger.SourceSession, Kind: costledger.KindPartial,
@@ -238,7 +220,6 @@ func (s *ManagedSession) bookPartialTurn(proc processIface, err error, runID str
 		s.costMu.Unlock()
 	}
 	s.costAcct.ledger.Append(e)
-	return e.Amount
 }
 
 // ledgerEntries renders an Increment as ledger rows: one USD row carrying the
@@ -306,6 +287,7 @@ func copyCostBaseline(fresh, old *ManagedSession) {
 	fresh.spent = old.spent.Accumulate(costledger.Increment{})
 	fresh.modelsBaselineUnknown = old.modelsBaselineUnknown
 	fresh.costBaselineUnknown = old.costBaselineUnknown
+	fresh.endMark = old.endMark
 	old.costMu.Unlock()
 	storeTotalCost(&fresh.costSpent, loadTotalCost(&old.costSpent))
 	storeTotalCost(&fresh.lastCumulativeCost, loadTotalCost(&old.lastCumulativeCost))

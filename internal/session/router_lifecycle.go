@@ -586,6 +586,8 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 		}
 		res.spawnOpts.EnvOverlay = overlay
 	}
+	// Before the spawn, so every line the new process writes lies past it.
+	mark := markTranscript(r.hist.claudeDir, r.hist.backendDirs, res.backendID, res.workspace, res.resumeID)
 	proc, err := r.spawn.spawnProcess(ctx, res.wrapper, res.spawnOpts, key, res.backendID)
 	if err != nil {
 		return nil, fmt.Errorf("spawn process: %w", err)
@@ -647,6 +649,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 		s.costMu.Lock()
 		s.spent = snap.spent
 		costBase.applyLocked(s)
+		s.endMark = mark
 		s.costMu.Unlock()
 	})
 	if winner != nil {
@@ -767,6 +770,7 @@ func (r *Router) installFreshSession(tx sessTx,
 		n.SetOnTurnDone(func() { r.notifyChange() })
 	}
 	bookUnownedResults(s, proc)
+	bookProcessEnd(s, proc, r.hist.claudeDir)
 	if len(snapshot) > 0 {
 		proc.InjectHistory(snapshot)
 	}
