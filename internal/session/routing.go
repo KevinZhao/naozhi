@@ -13,6 +13,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/projectapi"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // SanitisePlannerPromptForSpawn re-validates a planner prompt at the spawn
@@ -37,14 +38,24 @@ type ProjectBinding = projectapi.ProjectBinding
 //
 // The zero value is not usable; construct via NewKeyResolver.
 type KeyResolver struct {
-	defaults map[string]AgentOpts // agentID -> base opts
-	data     PlannerDataSource    // nil → project feature disabled
+	defaults    map[string]AgentOpts      // agentID -> base opts
+	data        PlannerDataSource         // nil → project feature disabled
+	cronProfile func(jobID string) string // nil → cron keys resolve to ""
 }
 
 // NewKeyResolver constructs a resolver. data may be nil to disable
 // project-aware routing (no chat is ever project-bound).
 func NewKeyResolver(defaults map[string]AgentOpts, data PlannerDataSource) *KeyResolver {
 	return &KeyResolver{defaults: defaults, data: data}
+}
+
+// WithCronAccessProfile returns a copy of r whose AccessProfileForKey asks fn
+// for a cron key's profile (job ID → the profile its runs spawn with). r is
+// left unchanged, so a resolver already shared stays immutable.
+func (r *KeyResolver) WithCronAccessProfile(fn func(jobID string) string) *KeyResolver {
+	cp := *r
+	cp.cronProfile = fn
+	return &cp
 }
 
 // ResolveForChat is the "chat-view" path: given IM chat coordinates and
@@ -173,8 +184,9 @@ func (r *KeyResolver) ResolveForKey(key string) (opts AgentOpts, ok bool) {
 // reverse-RPC wire — the remote would silently spawn on the wrong account (RFC
 // project-access-profile §4.5). The result covers every profile ResolveForChat
 // or ResolveForKey can put in opts.AccessProfile: a project pin, else the
-// agent's own (defaults[agentID]; a planner has only the project pin). Returns
-// "" for reserved namespaces / malformed keys, which the gate treats as "remote OK".
+// agent's own (defaults[agentID]; a planner has only the project pin). A cron
+// key resolves through WithCronAccessProfile's lookup. Returns "" for other
+// reserved namespaces / malformed keys, which the gate treats as "remote OK".
 func (r *KeyResolver) AccessProfileForKey(key string) string {
 	if r == nil {
 		return ""
@@ -182,6 +194,12 @@ func (r *KeyResolver) AccessProfileForKey(key string) string {
 	if isPlannerKey(key) {
 		_, opts, _ := r.ResolveForPlannerKey(plannerNameFromKey(key))
 		return opts.AccessProfile
+	}
+	if IsCronKey(key) {
+		if r.cronProfile == nil {
+			return ""
+		}
+		return r.cronProfile(sessionkey.CronJobIDFromKey(key))
 	}
 	if IsReservedNamespace(key) {
 		return ""

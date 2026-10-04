@@ -73,6 +73,21 @@ func TestToSessionAgentOpts_Effort(t *testing.T) {
 	}
 }
 
+// TestToSessionAgentOpts_AccessProfile closes the cron → session half of the
+// agent access-profile hop (#3106): without it a job for an agent pinned to a
+// profile spawns on the default account. The config → cron half is asserted in
+// cmd/naozhi's TestBuildAgentOpts.
+func TestToSessionAgentOpts_AccessProfile(t *testing.T) {
+	t.Parallel()
+	if got := toSessionAgentOpts(cron.AgentOpts{Backend: "claude", AccessProfile: "personal"}).AccessProfile; got != "personal" {
+		t.Errorf("AccessProfile = %q, want personal", got)
+	}
+	// Unset stays unset so the router's default_access_profile tier applies.
+	if got := toSessionAgentOpts(cron.AgentOpts{Backend: "claude"}).AccessProfile; got != "" {
+		t.Errorf("AccessProfile = %q, want empty when the cron opts carry none", got)
+	}
+}
+
 // TestInterruptOutcome_Ordinals duplicates the init() panic check at test time
 // so a divergence is caught by `go test` in CI even before the binary is
 // booted. Without this, a refactor that reorders session.InterruptOutcome

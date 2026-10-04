@@ -65,3 +65,15 @@ func TestToCronAgentOpts_DefaultBackend(t *testing.T) {
 		}
 	}
 }
+
+// The agent's access profile reaches cron so a job runs on the agent's account
+// (#3106); unset stays unset so default_access_profile applies.
+func TestToCronAgentOpts_AccessProfile(t *testing.T) {
+	t.Parallel()
+	if got := toCronAgentOpts(session.AgentOpts{AccessProfile: "personal"}).AccessProfile; got != "personal" {
+		t.Errorf("AccessProfile = %q, want personal", got)
+	}
+	if got := toCronAgentOpts(session.AgentOpts{}).AccessProfile; got != "" {
+		t.Errorf("AccessProfile = %q, want empty", got)
+	}
+}

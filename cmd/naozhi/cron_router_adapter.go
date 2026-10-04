@@ -18,12 +18,13 @@ func toCronAgentOpts(o session.AgentOpts) cron.AgentOpts {
 		backend = o.DefaultBackend
 	}
 	out := cron.AgentOpts{
-		Model:        o.Model,
-		Workspace:    o.Workspace,
-		Backend:      backend,
-		Effort:       o.Effort,
-		SystemPrompt: o.SystemPrompt,
-		Exempt:       o.Exempt,
+		Model:         o.Model,
+		Workspace:     o.Workspace,
+		Backend:       backend,
+		Effort:        o.Effort,
+		SystemPrompt:  o.SystemPrompt,
+		AccessProfile: o.AccessProfile,
+		Exempt:        o.Exempt,
 	}
 	if len(o.ExtraArgs) > 0 {
 		out.ExtraArgs = append([]string(nil), o.ExtraArgs...)

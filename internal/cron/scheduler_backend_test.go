@@ -125,3 +125,63 @@ func TestScheduler_RunJobPropagatesBackendToAgentOpts(t *testing.T) {
 		})
 	}
 }
+
+// TestScheduler_RunJobCarriesAgentAccessProfile: a job routed to an agent runs
+// on that agent's access profile, and a per-job backend does not drop it
+// (#3106). A prompt for an agent without one leaves it empty for the router's
+// default_access_profile tier.
+func TestScheduler_RunJobCarriesAgentAccessProfile(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, prompt, jobBackend, want string
+	}{
+		{name: "agent_profile", prompt: "/review the diff", want: "personal"},
+		{name: "job_backend_keeps_profile", prompt: "/review the diff", jobBackend: "kiro", want: "personal"},
+		{name: "agent_without_profile", prompt: "hello", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			router := &backendCapturingRouter{}
+			s := NewScheduler(SchedulerConfig{
+				StorePath: t.TempDir() + "/cron.json",
+				MaxJobs:   10,
+			}, SchedulerDeps{
+				Router: router,
+				Agents: map[string]AgentOpts{
+					"general":  {Model: "sonnet"},
+					"reviewer": {Model: "opus", AccessProfile: "personal"},
+				},
+				AgentCommands: map[string]string{"review": "reviewer"},
+			})
+			if err := s.Start(); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			t.Cleanup(func() { s.Stop() })
+
+			j := &Job{ID: "test-profile-prop", Schedule: "@every 30m", Prompt: tc.prompt, Backend: tc.jobBackend}
+			s.putJobForTest(j)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				s.executeOpt(j.ID, true)
+			}()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("executeOpt blocked >2s; should have bailed on context.Canceled")
+			}
+
+			captured := router.snapshot()
+			if len(captured) != 1 {
+				t.Fatalf("GetOrCreate calls = %d, want 1", len(captured))
+			}
+			if got := captured[0].AccessProfile; got != tc.want {
+				t.Errorf("AgentOpts.AccessProfile = %q, want %q", got, tc.want)
+			}
+			if tc.jobBackend != "" && captured[0].Backend != tc.jobBackend {
+				t.Errorf("AgentOpts.Backend = %q, want the job's %q", captured[0].Backend, tc.jobBackend)
+			}
+		})
+	}
+}

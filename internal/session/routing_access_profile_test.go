@@ -1,6 +1,9 @@
 package session
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestResolveForChat_InheritsBackendAndAccessProfile(t *testing.T) {
 	ds := &fakeDataSource{
@@ -144,6 +147,38 @@ func TestAccessProfileForKey_AgentTier(t *testing.T) {
 			t.Errorf("AccessProfileForKey = %q, want personal without a data source", got)
 		}
 	})
+}
+
+// A cron key carries no agent segment, so its profile comes from the cron
+// lookup WithCronAccessProfile installs (#3106); without one it stays "".
+func TestAccessProfileForKey_CronLookup(t *testing.T) {
+	base := NewKeyResolver(map[string]AgentOpts{"general": {AccessProfile: "company"}}, nil)
+	var asked []string
+	r := base.WithCronAccessProfile(func(jobID string) string {
+		asked = append(asked, jobID)
+		if jobID == "job1" {
+			return "personal"
+		}
+		return ""
+	})
+	if got := r.AccessProfileForKey("cron:job1"); got != "personal" {
+		t.Errorf("pinned cron key: AccessProfileForKey = %q, want personal", got)
+	}
+	if got := r.AccessProfileForKey("cron:job2"); got != "" {
+		t.Errorf("unpinned cron key: AccessProfileForKey = %q, want \"\"", got)
+	}
+	if got := r.AccessProfileForKey("scratch:abc"); got != "" {
+		t.Errorf("scratch key: AccessProfileForKey = %q, want \"\"", got)
+	}
+	if want := []string{"job1", "job2"}; !slices.Equal(asked, want) {
+		t.Errorf("lookup asked for %q, want %q", asked, want)
+	}
+	if got := r.AccessProfileForKey("feishu:user:bob:general"); got != "company" {
+		t.Errorf("IM key through the copy: AccessProfileForKey = %q, want company", got)
+	}
+	if got := base.AccessProfileForKey("cron:job1"); got != "" {
+		t.Errorf("original resolver: AccessProfileForKey = %q, want \"\" (WithCronAccessProfile must copy)", got)
+	}
 }
 
 // A planner key must land on one account however it is spawned: IM chat

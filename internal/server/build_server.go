@@ -80,6 +80,18 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	// One KeyResolver shared by dispatcher, hub and ProjectHandlers;
 	// NewDataSource returns untyped nil when projectMgr is nil.
 	resolver := session.NewKeyResolver(agents, project.NewDataSource(opts.ProjectManager))
+	if sched := opts.Scheduler; sched != nil {
+		// A cron run spawns on the profile of the agent its prompt routes to
+		// (the scheduler was built from these same maps); the remote gate must see it.
+		resolver = resolver.WithCronAccessProfile(func(jobID string) string {
+			j, ok := sched.GetJob(jobID)
+			if !ok {
+				return ""
+			}
+			agentID, _ := session.ResolveAgent(j.Prompt, agentCommands)
+			return agents[agentID].AccessProfile
+		})
+	}
 
 	// Dependencies only the build steps below read: they reach the dispatcher,
 	// the Hub and the handlers through hs.wiring and are not kept on Server.
