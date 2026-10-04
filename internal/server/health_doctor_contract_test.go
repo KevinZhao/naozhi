@@ -57,7 +57,9 @@ func fillNonZero(v reflect.Value, depth int) {
 
 // TestHealthResp_CoversDoctorContract: every key doctor reads must exist in
 // the authenticated /health encoding with the same JSON kind. An empty object
-// in the contract stands for a map whose keys are data.
+// in the contract stands for a map whose keys are data; one whose only key is
+// "x" (the key fillNonZero gives every map) stands for one entry of such a
+// map, so the keys inside the entry are checked too.
 func TestHealthResp_CoversDoctorContract(t *testing.T) {
 	// The embed is unexported, so the walk cannot allocate it.
 	resp := healthResp{healthAuthSection: &healthAuthSection{}}

@@ -23,6 +23,19 @@ const healthBodyLimit = 64 << 10
 // message before doctor suspects the platform never connected.
 const dispatchQuietWarnAfter = 10 * time.Minute
 
+// platformReconnectGrace is how long a platform may sit connecting or
+// disconnected before doctor fails it; it covers larkws's 2m reconnect
+// interval plus jitter and weixin's 30s back-off with room to spare.
+const platformReconnectGrace = 5 * time.Minute
+
+// platformErrorCap and platformSegmentCap bound each platform's part of the
+// platforms line, so one long error cannot crowd out another platform's
+// name and verdict.
+const (
+	platformErrorCap   = 120
+	platformSegmentCap = 256
+)
+
 // healthReply is the one GET /health a doctor run makes.
 type healthReply struct {
 	err       error // request could not be built or sent
@@ -30,6 +43,9 @@ type healthReply struct {
 	body      []byte
 	payload   healthPayload
 	decodeErr error
+	// date is the reply's Date header, the server's clock for ages computed
+	// from its timestamps; zero when absent or unparsable.
+	date time.Time
 }
 
 // authenticated reports whether the reply carries the authenticated section;
@@ -47,6 +63,7 @@ type healthPayload struct {
 	Version           string             `json:"version"`
 	CLIAvailable      *bool              `json:"cli_available"`
 	Platforms         map[string]string  `json:"platforms"`
+	PlatformConn      platformConnMap    `json:"platform_conn"`
 	EventLog          *healthWriterStats `json:"eventlog"`
 	AttachmentTracker *healthWriterStats `json:"attachment_tracker"`
 	Dispatch          *struct {
@@ -57,6 +74,14 @@ type healthPayload struct {
 	} `json:"dispatch"`
 	ConfigSHA256   string `json:"config_sha256"`
 	ConfigLoadedAt string `json:"config_loaded_at"`
+}
+
+// platformConnMap is /health "platform_conn": the detail behind the
+// platforms entries that report a connection state.
+type platformConnMap map[string]struct {
+	State     string `json:"state"`
+	Since     string `json:"since"`
+	LastError string `json:"last_error"`
 }
 
 // healthWriterStats covers the eventlog and attachment_tracker sections.
@@ -92,6 +117,7 @@ func (d *doctor) fetchHealth() *healthReply {
 	}
 	defer resp.Body.Close()
 	h.status = resp.StatusCode
+	h.date, _ = http.ParseTime(resp.Header.Get("Date"))
 	h.body, _ = io.ReadAll(io.LimitReader(resp.Body, healthBodyLimit))
 	h.decodeErr = json.Unmarshal(h.body, &h.payload)
 	return h
@@ -154,20 +180,87 @@ func (d *doctor) checkServerState() {
 		d.add("cli runtime", "fail", "the server cannot find its default CLI binary (cli_available=false) — new sessions cannot start; check cli.path / cli.backends")
 	}
 
+	now := h.date
+	if now.IsZero() {
+		now = time.Now()
+	}
+	unobserved := d.platformsFinding(p, now)
+	d.writerFinding("eventlog writer", p.EventLog, "events are not reaching disk")
+	d.writerFinding("attachment tracker", p.AttachmentTracker, "attachment metadata is not being recorded")
+	d.dispatchFinding(p, unobserved, now)
+}
+
+// levelRank orders finding levels so the platforms line can take the worst.
+var levelRank = map[string]int{"pass": 0, "warn": 1, "fail": 2}
+
+// platformsFinding grades every platform's live connection state into one
+// line at the worst platform's level, and returns the platforms that report
+// only "registered" (no observable connection), sorted. A server predating
+// connection state reports every platform that way. now is the server's
+// clock, so a state's age does not depend on the two clocks agreeing. Each
+// segment is sanitized and capped on its own rather than the joined line.
+func (d *doctor) platformsFinding(p healthPayload, now time.Time) (unobserved []string) {
+	if len(p.Platforms) == 0 {
+		d.add("platforms", "warn", "no IM platform registered — dashboard-only mode")
+		return nil
+	}
 	names := make([]string, 0, len(p.Platforms))
 	for name := range p.Platforms {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	if len(names) == 0 {
-		d.add("platforms", "warn", "no IM platform registered — dashboard-only mode")
-	} else {
-		d.addRemote("platforms", "pass", "registered: "+strings.Join(names, ", ")+" (registration only, not a connection state)")
+	level := "pass"
+	var parts []string
+	for _, name := range names {
+		state := p.Platforms[name]
+		if state == "registered" {
+			unobserved = append(unobserved, name)
+			continue
+		}
+		conn := p.PlatformConn[name]
+		var age time.Duration
+		since, err := time.Parse(time.RFC3339, conn.Since)
+		if err == nil {
+			age = max(now.Sub(since), 0)
+		}
+		l, detail := gradePlatformConn(state, age, err == nil, capRemote(conn.LastError, platformErrorCap))
+		if levelRank[l] > levelRank[level] {
+			level = l
+		}
+		parts = append(parts, capRemote(name+" "+detail, platformSegmentCap))
 	}
+	if len(unobserved) > 0 {
+		parts = append(parts, capRemote("registered: "+strings.Join(unobserved, ", ")+" (registration only, not a connection state)", platformSegmentCap))
+	}
+	d.add("platforms", level, strings.Join(parts, "; "))
+	return unobserved
+}
 
-	d.writerFinding("eventlog writer", p.EventLog, "events are not reaching disk")
-	d.writerFinding("attachment tracker", p.AttachmentTracker, "attachment metadata is not being recorded")
-	d.dispatchFinding(p, len(names) > 0)
+// gradePlatformConn grades one observable platform. connecting and
+// disconnected are retries in progress, so they warn inside
+// platformReconnectGrace (or when the age is unknown) and fail beyond it;
+// failed means the adapter gave up and fails at once.
+func gradePlatformConn(state string, age time.Duration, ageKnown bool, lastError string) (level, detail string) {
+	detail = state
+	if ageKnown {
+		detail += " for " + age.Round(time.Second).String()
+	}
+	if lastError != "" && state != "connected" {
+		detail += " (last error: " + lastError + ")"
+	}
+	switch state {
+	case "connected":
+		return "pass", detail
+	case "failed":
+		return "fail", detail + " — the adapter gave up; fix the cause and restart"
+	case "connecting", "disconnected":
+		if ageKnown && age >= platformReconnectGrace {
+			return "fail", detail + " — still not connected after " + platformReconnectGrace.String()
+		}
+		return "warn", detail + " — retrying"
+	default:
+		return "warn", detail + " — unknown state (doctor older than the server?)"
+	}
 }
 
 // writerFinding reports one writer_alive section; an absent section means the
@@ -185,10 +278,11 @@ func (d *doctor) writerFinding(category string, w *healthWriterStats, consequenc
 	d.add(category, "fail", "writer stalled or closed ("+queue+") — "+consequence)
 }
 
-// dispatchFinding reports IM reply health. /health has no per-platform
-// connection state, so a long quiet stretch is the only hint that a platform
-// never connected.
-func (d *doctor) dispatchFinding(p healthPayload, hasPlatforms bool) {
+// dispatchFinding reports IM reply health. For the unobserved platforms
+// (those without a connection state) a long quiet stretch is the only hint
+// that one never connected; observable ones are graded on the platforms line.
+// now is the server's clock, as for platformsFinding.
+func (d *doctor) dispatchFinding(p healthPayload, unobserved []string, now time.Time) {
 	ds := p.Dispatch
 	if ds == nil {
 		d.add("dispatch", "pass", "skipped (process reports no dispatch stats)")
@@ -200,13 +294,15 @@ func (d *doctor) dispatchFinding(p healthPayload, hasPlatforms bool) {
 		d.addRemote("dispatch", "pass", "last successful reply "+ds.LastReplySuccessAgo+" ago · "+counts)
 	case ds.ReplyErrorCount+ds.SendFailCount > 0:
 		d.add("dispatch", "warn", "no successful reply since start, only failures · "+counts)
-	case ds.MessageCount > 0 || !hasPlatforms:
+	case ds.MessageCount > 0 || len(p.Platforms) == 0:
 		d.add("dispatch", "pass", "no reply sent yet · "+counts)
+	case len(unobserved) == 0:
+		d.add("dispatch", "pass", "no inbound IM messages yet · "+counts)
 	default:
 		// config is loaded once at startup, so its load time is the start time.
 		loadedAt, err := time.Parse(time.RFC3339, p.ConfigLoadedAt)
-		if err == nil && time.Since(loadedAt) > dispatchQuietWarnAfter {
-			d.addRemote("dispatch", "warn", "no inbound IM messages (slash commands not counted) since start at "+p.ConfigLoadedAt+" — platform may not be connected")
+		if err == nil && now.Sub(loadedAt) > dispatchQuietWarnAfter {
+			d.addRemote("dispatch", "warn", "no inbound IM messages (slash commands not counted) since start at "+p.ConfigLoadedAt+" — "+strings.Join(unobserved, ", ")+" may not be connected (inferred: no connection state reported)")
 			return
 		}
 		d.add("dispatch", "pass", "no inbound IM messages yet · "+counts)
@@ -216,4 +312,14 @@ func (d *doctor) dispatchFinding(p healthPayload, hasPlatforms bool) {
 // addRemote adds a finding whose detail carries server-supplied text.
 func (d *doctor) addRemote(category, level, detail string) {
 	d.add(category, level, osutil.SanitizeForLog(detail, 512))
+}
+
+// capRemote sanitizes server-supplied text and caps it at maxLen bytes,
+// marking a cut with "...".
+func capRemote(s string, maxLen int) string {
+	s = osutil.SanitizeForLog(s, 0)
+	if len(s) <= maxLen {
+		return s
+	}
+	return osutil.SanitizeForLog(s, maxLen-3) + "..."
 }
