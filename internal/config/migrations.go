@@ -343,7 +343,10 @@ func liftAgentSystemPrompts(root *yaml.Node) ([]change, error) {
 		if j := yamlChildIndex(agent, "system_prompt"); j >= 0 && agent.Content[j+1].Kind == yaml.ScalarNode {
 			spKey, existing = agent.Content[j], agent.Content[j+1]
 		}
-		if lifted != "" && existing != nil && existing.Value != "" && existing.Value != lifted {
+		// A YAML null (bare, ~, null) is an empty placeholder, not a value
+		// that could conflict; a quoted "null" is a string and still can.
+		unset := existing == nil || existing.ShortTag() == "!!null" || existing.Value == ""
+		if lifted != "" && !unset && existing.Value != lifted {
 			return changes, fmt.Errorf("agents[%s]: both system_prompt and %s in args are set to different values; resolve it by hand", id, legacySystemPromptFlag)
 		}
 		// Rewrite args, or drop the key when nothing is left. The items that
@@ -372,6 +375,9 @@ func liftAgentSystemPrompts(root *yaml.Node) ([]change, error) {
 				style = yaml.LiteralStyle
 			}
 			if existing != nil {
+				// Retag: a !!null node cannot decode into a string, and an
+				// explicit tag like !!float would encode as `!!float "42"`.
+				existing.Tag = "!!str"
 				existing.Value = lifted
 				existing.Style = style
 				takeComments(spKey, existing, gone...)

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
@@ -66,6 +67,11 @@ func (st Store) WriteSnapshot(jobID, runID, prompt, model, imageVersion string, 
 		lg.Warn("cron sandbox: snapshot write rejected non-hex id", "job_id", jobID, "run_id", runID)
 		return
 	}
+	// Shared hold from the blob write to the manifest write: the blob GC's
+	// sweep takes blobMu exclusively, so it cannot remove the blob between
+	// this run's touch and the manifest that references it.
+	blobMu.RLock()
+	defer blobMu.RUnlock()
 	promptHash, err := st.writeBlob(root, prompt)
 	if err != nil {
 		lg.Warn("cron sandbox: snapshot blob write failed; replay unavailable for this run", "err", err)
@@ -99,7 +105,11 @@ func (st Store) WriteSnapshot(jobID, runID, prompt, model, imageVersion string, 
 
 // writeBlob writes content to the content-addressed blob store and
 // returns its SHA-256 hex hash. Idempotent: an existing blob (same hash) is
-// left untouched (dedup, §5.2). Empty content returns "" with no write.
+// kept (dedup, §5.2) but its mtime is refreshed, because the blob GC spares
+// only young unreferenced blobs and this run's manifest has not landed yet.
+// Anything else at the path (missing, a symlink, untouchable) is rewritten;
+// the rename replaces a symlink rather than writing through it. Empty content
+// returns "" with no write. Callers hold blobMu shared.
 func (st Store) writeBlob(root, content string) (string, error) {
 	if content == "" {
 		return "", nil
@@ -111,8 +121,10 @@ func (st Store) writeBlob(root, content string) (string, error) {
 		return "", fmt.Errorf("mkdir blob dir: %w", err)
 	}
 	path := filepath.Join(blobDir, hash)
-	if _, err := os.Stat(path); err == nil {
-		return hash, nil // dedup: blob already present
+	if isRegularFile(path) {
+		if now := time.Now(); os.Chtimes(path, now, now) == nil {
+			return hash, nil // dedup: blob already present, now young again
+		}
 	}
 	// Unique temp file + rename: a reader never sees a half-written blob, and two
 	// writers racing the SAME hash cannot collide on one tmp path (a shared tmp
@@ -139,9 +151,9 @@ func (st Store) writeBlob(root, content string) (string, error) {
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		// Another writer may have committed the identical blob between our
-		// Stat and Rename — if the target now exists, our content is already
+		// Chtimes and Rename — if the target now exists, our content is already
 		// there (same hash), so treat it as success and drop our tmp.
-		if _, statErr := os.Stat(path); statErr == nil {
+		if isRegularFile(path) {
 			_ = os.Remove(tmp)
 			return hash, nil
 		}
@@ -218,7 +230,8 @@ func (st Store) SnapshotPrompt(blobHash string) (string, error) {
 	b, err := readRegularBounded(path, textutil.MaxCronPromptBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", nil // blob GC'd or never written
+			slog.Warn("cron sandbox: snapshot manifest references a missing blob; replay unavailable", "blob", blobHash)
+			return "", nil
 		}
 		return "", fmt.Errorf("cron sandbox: read snapshot blob: %w", err)
 	}
@@ -228,6 +241,13 @@ func (st Store) SnapshotPrompt(blobHash string) (string, error) {
 		return "", fmt.Errorf("cron sandbox: snapshot blob does not match its hash")
 	}
 	return string(b), nil
+}
+
+// isRegularFile reports whether path itself (not a symlink target) is a
+// regular file — the only shape readRegularBounded accepts.
+func isRegularFile(path string) bool {
+	fi, err := os.Lstat(path)
+	return err == nil && fi.Mode().IsRegular()
 }
 
 // errNotRegular reports a path that is a symlink or not a regular file.

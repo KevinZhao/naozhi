@@ -13,7 +13,7 @@ func runUpgrade(args []string) {
 	fs := newFlagSet("upgrade")
 	checkOnly := fs.Bool("check-only", false, "check for a newer version without downloading")
 	noRestart := fs.Bool("no-restart", false, "skip service restart after upgrade")
-	force := fs.Bool("force", false, "allow upgrading from a dev build to a release")
+	force := fs.Bool("force", false, "install the latest release even if it is not newer than the running build (dev builds included)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `Usage: naozhi upgrade [flags]
 
@@ -39,20 +39,16 @@ Flags:
 	}
 
 	// 2. Compare with running version.
-	if rel.Tag == version {
-		fmt.Printf("Already at the latest version (%s).\n", version)
+	action, msg := upgradeDecision(rel.Tag, version, *force)
+	switch action {
+	case upgradeAlreadyLatest:
+		fmt.Print(msg)
 		return
+	case upgradeRefuse:
+		fmt.Fprint(os.Stderr, msg)
+		os.Exit(1)
 	}
-
-	if version == "dev" {
-		if !*force {
-			fmt.Fprintf(os.Stderr, "Running a dev build. Use --force to replace it with release %s.\n", rel.Tag)
-			os.Exit(1)
-		}
-		fmt.Printf("dev build — upgrading to %s (--force)\n", rel.Tag)
-	} else {
-		fmt.Printf("New version available: %s → %s\n", version, rel.Tag)
-	}
+	fmt.Print(msg)
 
 	if *checkOnly {
 		return
@@ -118,5 +114,34 @@ Flags:
 
 	if *noRestart || !serviceWasRunning {
 		fmt.Printf("  Restart the service manually to apply the new binary.\n")
+	}
+}
+
+type upgradeAction int
+
+const (
+	upgradeProceed upgradeAction = iota
+	upgradeAlreadyLatest
+	upgradeRefuse
+)
+
+// upgradeDecision decides whether to install latest over the running build
+// and returns the line to print. Only a strictly newer release proceeds on its
+// own, the same rule the background checker applies, so a release marked
+// "latest" that is older than the running build is not a silent downgrade.
+func upgradeDecision(latest, current string, force bool) (upgradeAction, string) {
+	switch {
+	case latest == current:
+		return upgradeAlreadyLatest, fmt.Sprintf("Already at the latest version (%s).\n", current)
+	case current == "dev" && force:
+		return upgradeProceed, fmt.Sprintf("dev build — upgrading to %s (--force)\n", latest)
+	case current == "dev":
+		return upgradeRefuse, fmt.Sprintf("Running a dev build. Use --force to replace it with release %s.\n", latest)
+	case selfupdate.IsNewer(latest, current):
+		return upgradeProceed, fmt.Sprintf("New version available: %s → %s\n", current, latest)
+	case force:
+		return upgradeProceed, fmt.Sprintf("Latest release %s is not newer than running %s — installing it anyway (--force)\n", latest, current)
+	default:
+		return upgradeRefuse, fmt.Sprintf("Latest release %s is not newer than running %s; use --force to install it anyway.\n", latest, current)
 	}
 }

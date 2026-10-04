@@ -1,6 +1,7 @@
 package main
 
 import (
+	"maps"
 	"slices"
 	"testing"
 )
@@ -16,14 +17,45 @@ func gates(rs []raise) []string {
 func TestRaises_GoConstants(t *testing.T) {
 	t.Parallel()
 	base, head := metrics{}, metrics{}
-	goConsts(map[string]string{"a_test.go": "const bareSleepBaseline = 138\nconst (\n\tfooBaseline = 5\n\tbarBaseline = 2\n)\n"}, base)
-	goConsts(map[string]string{"a_test.go": "const bareSleepBaseline = 139\nconst (\n\tfooBaseline = 4\n\tbarBaseline = 3\n)\nconst newBaseline = 9\n"}, head)
+	const p = "internal/x/a_test.go"
+	if _, err := goConsts(map[string]string{p: "package x\nconst bareSleepBaseline = 138\nconst (\n\tfooBaseline = 5\n\tbarBaseline = 2\n)\n"}, base); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := goConsts(map[string]string{p: "package x\nconst bareSleepBaseline = 139\nconst (\n\tfooBaseline = 4\n\tbarBaseline = 3\n)\nconst newBaseline = 9\n"}, head); err != nil {
+		t.Fatal(err)
+	}
 	rs := raises(base, head)
-	if want := []string{"go:a_test.go#barBaseline", "go:a_test.go#bareSleepBaseline"}; !slices.Equal(gates(rs), want) {
+	if want := []string{"go:internal/x#barBaseline", "go:internal/x#bareSleepBaseline"}; !slices.Equal(gates(rs), want) {
 		t.Fatalf("raises = %v, want %v (a lowered one and a new ratchet are not raises)", rs, want)
 	}
 	if rs[1].From != 138 || rs[1].To != 139 {
 		t.Errorf("raise = %+v", rs[1])
+	}
+}
+
+// A file that does not parse cannot be shown to hold no baseline: the run
+// stops rather than reading it as empty.
+func TestGoConsts_UnparsableFileIsAnError(t *testing.T) {
+	t.Parallel()
+	if _, err := goConsts(map[string]string{"internal/x/a_test.go": "package x\nconst aBaseline = \n"}, metrics{}); err == nil {
+		t.Fatal("want a parse error")
+	}
+}
+
+// testdata and vendor trees hold fixtures, not ratchets.
+func TestGoConsts_SkipsTestdataAndVendor(t *testing.T) {
+	t.Parallel()
+	m := metrics{}
+	problems, err := goConsts(map[string]string{
+		"tools/x/testdata/a.go": "package a\nconst aBaseline = 1 + 1\n",
+		"vendor/y/b.go":         "not go at all",
+		"tools/x/c.go":          "package x\nconst cBaseline = 2\n",
+	}, m)
+	if err != nil || len(problems) != 0 {
+		t.Fatalf("problems = %q, err = %v", problems, err)
+	}
+	if got, want := slices.Sorted(maps.Keys(m)), []string{"go:tools/x#cBaseline"}; !slices.Equal(got, want) {
+		t.Errorf("keys = %v, want %v", got, want)
 	}
 }
 

@@ -566,6 +566,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 			snap = snapshotRespawn(tx.View, old)
 			tx.Unlocked(func() { hist = collectRespawnHistory(old, snap, res.resumeID) })
 		}
+		rereadSameEntry(old, &snap, &hist, res.resumeID)
 		// A key with no session yet takes its pre-spawn tuning pick now, once
 		// the spawn has succeeded, so a failed spawn leaves the pick for the
 		// retry.
@@ -588,6 +589,13 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 		proc.Close()
 		res.yielded = true
 		return winner, nil
+	}
+	// The argv was built from the reserve-time tuning; SetSessionTuning
+	// already told the caller a pick made meanwhile is deferred.
+	if old != nil && (snap.overrides.tuningModel != res.snap.overrides.tuningModel ||
+		snap.overrides.tuningEffort != res.snap.overrides.tuningEffort) {
+		slog.Info("session tuning picked during the spawn applies on the next spawn",
+			"key", osutil.SanitizeForLog(key, 64))
 	}
 
 	r.hist.bindNewSessionHistory(ctx, s, proc, key, res.resumeID, res.workspace, prevIDs, oldHistory)
@@ -657,8 +665,8 @@ func (r *Router) installFreshSession(tx sessTx,
 	// Operator-owned state must outlive the process: this spawn's argv was
 	// built from the OLD entry's tuning, and without carrying it the next TTL
 	// recycle drops back to config default and a restart reads the shim as
-	// arg-drift. Values come from the snapshotOldSession capture, never
-	// from a re-read of tx.Get(key).
+	// arg-drift. Values come from the commit-time read of the entry this
+	// session replaces, never from a re-read of tx.Get(key).
 	s.SetTuningModel(overrides.tuningModel)
 	s.SetTuningEffort(overrides.tuningEffort)
 	s.SetUserLabel(overrides.userLabel)

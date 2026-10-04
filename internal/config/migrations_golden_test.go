@@ -233,6 +233,41 @@ agents:
 	}
 }
 
+// A null system_prompt placeholder takes the lifted text as a plain string,
+// keeping its comment, and the result is a no-op for a second run.
+func TestMigrateV1ToV2_LiftsIntoNullSystemPrompt(t *testing.T) {
+	in := `schema_version: 1
+agents:
+  planner:
+    system_prompt: # placeholder comment
+    args: ["--append-system-prompt", "hello"]
+`
+	want := `schema_version: 2
+agents:
+  planner:
+    system_prompt: "hello" # placeholder comment
+`
+	got, _ := migrateGolden(t, in)
+	if got != want {
+		t.Errorf("migrated document mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	if again, applied := migrateGolden(t, got); again != got || len(applied) != 0 {
+		t.Errorf("second run changed the document: applied=%v\n%s", applied, again)
+	}
+}
+
+// A system_prompt equal to the flag's text agrees whatever its tag; the
+// migrated node must be a plain string, not `!!float "42"`.
+func TestMigrateV1ToV2_EqualNonStringSystemPromptIsRetagged(t *testing.T) {
+	want := "schema_version: 2\nagents:\n  r:\n    system_prompt: \"42\"\n"
+	for _, sp := range []string{"42", "!!float 42"} {
+		in := "schema_version: 1\nagents:\n  r:\n    system_prompt: " + sp + "\n    args: [\"--append-system-prompt\", \"42\"]\n"
+		if got, _ := migrateGolden(t, in); got != want {
+			t.Errorf("system_prompt: %s migrated to\n%s\nwant\n%s", sp, got, want)
+		}
+	}
+}
+
 // An unversioned file is treated as current by the load path, so the migration
 // must not silently rewrite it for a migration it was never written for.
 func TestMigrateFile_UnversionedMigratesFromV1(t *testing.T) {
