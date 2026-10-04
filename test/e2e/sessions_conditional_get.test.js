@@ -21,10 +21,11 @@ const cardDot = (page, key) => page.locator(`.session-card[data-key="${key}"] .s
 
 // pageErrors collects uncaught errors and the console errors a mishandled 304
 // would log (fetchSessions' catch, or the browser reporting the response).
+// \b304\b, so a mock port such as 33049 in a WS reconnect error is not one.
 function pageErrors(page) {
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
-  page.on('console', (m) => { if (m.type() === 'error' && /fetchSessions|304/.test(m.text())) errors.push(m.text()); });
+  page.on('console', (m) => { if (m.type() === 'error' && /fetchSessions|\b304\b/.test(m.text())) errors.push(m.text()); });
   return errors;
 }
 
