@@ -124,6 +124,12 @@ type SessionRouter interface {
 // ErrClassSessionCapacity, and the notice advises staggering schedules.
 var ErrSessionCapacity = errors.New("cron: session capacity reached")
 
+// ErrTurnFailed marks a Send whose result frame reported the turn failed (the
+// backend's is_error) rather than an abort naozhi asked for. The run is
+// recorded as failed with ErrClassTurnFailed instead of succeeding with an
+// empty or raw-error result.
+var ErrTurnFailed = errors.New("cron: turn failed")
+
 // ProcessReleaser is asserted on the SessionRouter, never added to it (test
 // fakes degrade to keeping the process). ReleaseProcess closes the idle CLI
 // behind key and keeps its session, so a persistent-context job holds no

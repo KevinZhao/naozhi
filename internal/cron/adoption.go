@@ -40,6 +40,9 @@ type AdoptedRunOutcome struct {
 	Text      string
 	SubType   string
 	SessionID string
+	// TurnErr is non-nil when the result frame reported the turn failed; it
+	// wraps ErrTurnFailed, as the local Send path's error does.
+	TurnErr error
 }
 
 // InFlightRun is the narrow handle an adoption holds while it waits.
@@ -83,6 +86,10 @@ func (s *Scheduler) adoptRun(m runInflightMarker, run InFlightRun, inflight *run
 		// none (#2750).
 		out := runOutcome{sessionID: adopted.SessionID}
 		switch {
+		case err == nil && adopted.Completed && adopted.TurnErr != nil:
+			out.state = RunStateFailed
+			out.errClass = ErrClassTurnFailed
+			out.errMsg = "send error: " + sanitiseRunErrMsg(adopted.TurnErr.Error())
 		case err == nil && adopted.Completed:
 			out.state = RunStateSucceeded
 			out.result = adopted.Text

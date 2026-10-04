@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/session"
@@ -130,7 +131,28 @@ func (c cronSessionAdapter) Send(ctx context.Context, text string) (cron.SendRes
 	if r == nil {
 		return cron.SendResult{}, err
 	}
+	if err == nil {
+		err = turnFailure(r)
+	}
 	return cron.SendResult{Text: r.Text, SessionID: r.SessionID}, err
+}
+
+// turnFailure wraps cron.ErrTurnFailed around a result the backend flagged as
+// an error, so the run is recorded as failed rather than succeeding with empty
+// or raw-error text; nil for a healthy turn. error_during_execution after an
+// abort naozhi requested (the cron watchdog's interrupt) is that abort, not a
+// failure. The detail is for run history; the IM notice never shows it.
+func turnFailure(r *clievent.SendResult) error {
+	if !r.IsError || (r.Aborted && r.SubType == "error_during_execution") {
+		return nil
+	}
+	if be := r.BackendError; be != nil {
+		return fmt.Errorf("%w (%s): %s rpc code %d: %s", cron.ErrTurnFailed, r.SubType, be.Backend, be.Code, be.Message)
+	}
+	if r.Text != "" {
+		return fmt.Errorf("%w (%s): %s", cron.ErrTurnFailed, r.SubType, r.Text)
+	}
+	return fmt.Errorf("%w (%s)", cron.ErrTurnFailed, r.SubType)
 }
 
 // CostTotals satisfies cron.CostReporter: cron differences two snapshots
@@ -182,10 +204,21 @@ func (ar adoptedRunAdapter) AwaitAdopted(ctx context.Context) (cron.AdoptedRunOu
 	if err != nil {
 		return cron.AdoptedRunOutcome{}, err
 	}
-	return cron.AdoptedRunOutcome{
-		Completed: out.End == cli.AdoptedEndResult && out.Result.SubType != "error_during_execution",
+	return toCronAdoptedOutcome(out), nil
+}
+
+// toCronAdoptedOutcome maps the latched turn onto cron's view. A completed
+// turn the backend flagged as an error carries TurnErr.
+func toCronAdoptedOutcome(out cli.AdoptedOutcome) cron.AdoptedRunOutcome {
+	completed := out.End == cli.AdoptedEndResult && out.Result.SubType != "error_during_execution"
+	res := cron.AdoptedRunOutcome{
+		Completed: completed,
 		Text:      out.Result.Text,
 		SubType:   out.Result.SubType,
 		SessionID: out.Result.SessionID,
-	}, nil
+	}
+	if completed {
+		res.TurnErr = turnFailure(&out.Result)
+	}
+	return res
 }

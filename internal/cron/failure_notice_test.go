@@ -28,6 +28,7 @@ func TestFailureNoticeBody(t *testing.T) {
 		{"send deadline", ErrClassDeadlineExceeded, RunStateTimedOut, 5 * time.Minute, "执行超时（超过 5m） · run 1a2b3c4d"},
 		{"timed out state alone", ErrClassSendError, RunStateTimedOut, 90 * time.Second, "执行超时（超过 1m30s） · run 1a2b3c4d"},
 		{"send error", ErrClassSendError, RunStateFailed, 5 * time.Minute, "执行失败（CLI 发送错误） · run 1a2b3c4d"},
+		{"turn failed", ErrClassTurnFailed, RunStateFailed, 5 * time.Minute, "执行失败（后端报告本轮出错），请检查执行历史 · run 1a2b3c4d"},
 		{"session error", ErrClassSessionError, RunStateFailed, 5 * time.Minute, "启动会话失败 · run 1a2b3c4d"},
 		{"session capacity", ErrClassSessionCapacity, RunStateSkipped, 5 * time.Minute, "定时任务会话数已达上限，本次已跳过；可错开执行时间或改为每次重置上下文 · run 1a2b3c4d"},
 		{"workdir unreachable", ErrClassWorkDirUnreachable, RunStateFailed, 5 * time.Minute, "工作目录不可达，本次执行已跳过 · run 1a2b3c4d"},

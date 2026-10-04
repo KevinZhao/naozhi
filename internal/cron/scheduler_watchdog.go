@@ -233,12 +233,12 @@ func (s *Scheduler) sendWithWatchdog(sendCtx context.Context, sendCancel context
 }
 
 // classifyExecError maps a GetOrCreate / Send error to (RunState, ErrorClass)
-// for finishRun. defaultClass distinguishes the spawn path
-// (ErrClassSessionError) from the send path (ErrClassSendError); the two
-// context sentinels are always remapped:
+// for finishRun; defaultClass (ErrClassSessionError on the spawn path,
+// ErrClassSendError on the send path) covers everything not remapped:
 //
 //   - context.DeadlineExceeded → (RunStateTimedOut, ErrClassDeadlineExceeded)
 //   - context.Canceled         → (RunStateCanceled, ErrClassCanceled)
+//   - ErrTurnFailed            → (RunStateFailed, ErrClassTurnFailed)
 //
 // Order matters: a parent cancel racing DeadlineExceeded can make Send return
 // Canceled, so DeadlineExceeded is checked first (deadline WINS on shutdown).
@@ -248,6 +248,9 @@ func classifyExecError(err error, defaultClass ErrorClass) (RunState, ErrorClass
 	}
 	if errors.Is(err, context.Canceled) {
 		return RunStateCanceled, ErrClassCanceled
+	}
+	if errors.Is(err, ErrTurnFailed) {
+		return RunStateFailed, ErrClassTurnFailed
 	}
 	return RunStateFailed, defaultClass
 }

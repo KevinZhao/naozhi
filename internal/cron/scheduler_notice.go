@@ -128,6 +128,8 @@ func failureNoticeBody(errClass ErrorClass, state RunState, runID string, timeou
 		cause = "启动会话失败"
 	case errClass == ErrClassSendError:
 		cause = "执行失败（CLI 发送错误）"
+	case errClass == ErrClassTurnFailed:
+		cause = "执行失败（后端报告本轮出错），请检查执行历史"
 	case errClass == ErrClassWorkDirUnreachable:
 		cause = "工作目录不可达，本次执行已跳过"
 	case errClass == ErrClassWorkDirOutsideRoot:
@@ -169,6 +171,19 @@ func autoPauseNoticeSuffix(snap jobSnapshot, pausedAfter int) string {
 func (s *Scheduler) deliverFailureNotice(rc runCtx, errClass ErrorClass, state RunState, timeout time.Duration, pausedAfter int) {
 	s.deliverNotice(rc.notifyTo, formatCronNotice(rc.snap.labelOrID(),
 		failureNoticeBody(errClass, state, rc.runID, timeout)+autoPauseNoticeSuffix(rc.snap, pausedAfter)))
+}
+
+// deliverPauseNotice announces that the failure of a run with no per-run
+// notice (a restart-orphaned sandbox run, an adopted turn) auto-paused its job.
+// The target is resolved from a fresh snapshot of the now-paused job.
+func (s *Scheduler) deliverPauseNotice(rc runCtx, errClass ErrorClass, state RunState, timeout time.Duration, paused int) {
+	snap, ok := s.tbl.runSnapshot(rc.jobID)
+	if !ok {
+		return
+	}
+	rc.snap = snap
+	rc.notifyTo = s.resolveNotifyTarget(snap.platName, snap.chatID, snap.notifyPlat, snap.notifyChat, snap.notify)
+	s.deliverFailureNotice(rc, errClass, state, timeout, paused)
 }
 
 // formatNoticeBudget renders d without Duration.String's zero tails
