@@ -576,7 +576,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 		// under passthrough no legacy eventCh consumer would append it.
 		if ev.SubType == "error_during_execution" {
 			p.logEventAt(ev, nowMS)
-			p.endUnownedTurn()
+			p.endUnownedTurn(ev)
 			return false
 		}
 	}
@@ -626,7 +626,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 		if p.deliverEvent(ev, now, log) {
 			return true
 		}
-		p.endUnownedTurn()
+		p.endUnownedTurn(ev)
 		return false
 	}
 

@@ -4,6 +4,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // turnState is the process's turn: its state machine, the CLI session ID, the
@@ -29,6 +31,11 @@ type turnState struct {
 	// reconnectedMidTurn CAS path followed by <-killCh, plus cli_exited, the
 	// fall-out Dead path and the panic defer.
 	onTurnDone func()
+	// onUnownedResult receives the result of a turn no Send owns — one the
+	// CLI started itself (a background-task notification) — so the session
+	// can book its cost; such a result never reaches a Send's finishRun.
+	// Assign via SetOnUnownedResult; read under mu, invoked after release.
+	onUnownedResult func(clievent.SendResult)
 
 	interrupted    atomic.Bool // set by Interrupt(), cleared by next Send()
 	interruptedRun atomic.Bool // true when Interrupt() was called while Running

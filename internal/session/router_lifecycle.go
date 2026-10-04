@@ -658,6 +658,7 @@ func (r *Router) installFreshSession(tx sessTx,
 	if n, ok := proc.(turnDoneNotifier); ok {
 		n.SetOnTurnDone(func() { r.notifyChange() })
 	}
+	bookUnownedResults(s, proc)
 	if len(snapshot) > 0 {
 		proc.InjectHistory(snapshot)
 	}
