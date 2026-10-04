@@ -112,20 +112,22 @@ const cases = [
 ];
 
 // jobs() maps each job key under `jobs:` to its body. Comment lines are
-// dropped: a comment sits above the job it describes, so it would otherwise be
-// read as the end of the previous job's body.
+// dropped before anything else: a comment sits above the job it describes, so
+// it would otherwise be read into the previous job's body or, at column 0, as
+// the end of `jobs:`.
 function jobs(text) {
   const head = text.match(/^jobs:\n/m);
   const out = new Map();
   if (!head) return out;
   let name = null;
   for (const line of text.slice(head.index + head[0].length).split('\n')) {
+    if (/^\s*#/.test(line)) continue;
     if (/^\S/.test(line)) break;
     const m = line.match(/^  ([\w-]+):\s*$/);
     if (m) {
       name = m[1];
       out.set(name, '');
-    } else if (name && !/^\s*#/.test(line)) {
+    } else if (name) {
       out.set(name, out.get(name) + line + '\n');
     }
   }
@@ -163,6 +165,12 @@ const needsCases = [
     yml: 'on: push\njobs:\n  lint:\n    runs-on: x\n  # the go test suite\n  unit:\n    steps:\n      - run: go test ./...\n'
       + '  flaky-report:\n    needs: [unit]\n',
     want: [],
+  },
+  {
+    what: 'a column-0 comment between jobs does not end the job list',
+    yml: 'on: push\njobs:\n  flaky-report:\n    needs: [lint]\n  lint:\n    runs-on: x\n# the browser suite\n'
+      + '  e2e:\n    steps:\n      - run: npx playwright test\n',
+    want: ['e2e'],
   },
   {
     what: 'an aggregate that does not check the result does not cover its needs',
