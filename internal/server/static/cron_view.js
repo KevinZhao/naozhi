@@ -19,7 +19,7 @@ import {
 } from './cron_schedule.js';
 import { cronAttentionConfirm, cronAttentionRefresh } from './cron_attention.js';
 import { cronLive, ensureCronLiveSubscription, setCronLiveStatus } from './cron_live.js';
-import { cronDrawerState, cronFrozenRuns, cronRefetchFullJob, cronRunClearedAtLocal, cronStore, cronTriggerCooldownClear, fetchCronJobs } from './cron_state.js';
+import { cronDrawerState, cronFrozenRuns, cronRefetchFullJob, cronStore, cronTriggerCooldownClear, fetchCronJobs, noteCronRunCleared } from './cron_state.js';
 import { cronErrorClassLabel, firstNonEmptyLine, formatAgoColloquial, formatRunningElapsed, formatWhenColloquial } from './cron_format.js';
 import { registerShell } from './shell.js';
 import {
@@ -922,7 +922,7 @@ function cronApplyRunEnded(msg) {
   const j = list.find(x => x && x.id === msg.job_id);
   if (!j) return;
   j.current_run = null;
-  cronRunClearedAtLocal.set(msg.job_id, { at: Date.now(), runId: msg.run_id || '' });
+  noteCronRunCleared(msg.job_id, msg.run_id);
   // Provisional last_error_class / last_run_at so the row repaints with
   // the new state before fetchCronJobs returns. Backend remains source
   // of truth for the persisted snapshot.

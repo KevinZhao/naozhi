@@ -11,7 +11,7 @@ globalThis.window = globalThis;
 globalThis.MutationObserver = class { observe() {} disconnect() {} };
 globalThis.document = { documentElement: {}, addEventListener() {}, getElementById: () => null };
 
-const { cronStore, cronRunClearedAtLocal, fetchCronJobs, reconcileCurrentRun } = await import('../internal/server/static/cron_state.js');
+const { cronStore, cronRunClearedAtLocal, fetchCronJobs, noteCronRunCleared, reconcileCurrentRun } = await import('../internal/server/static/cron_state.js');
 
 const realNow = Date.now;
 const realFetch = globalThis.fetch;
@@ -50,7 +50,7 @@ function patchStarted(job, runId, startedAt) {
 }
 function patchEnded(job, runId) {
   job.current_run = null;
-  cronRunClearedAtLocal.set(job.id, { at: Date.now(), runId });
+  noteCronRunCleared(job.id, runId);
 }
 const row = () => cronStore.jobs.find(j => j.id === 'j1');
 
@@ -100,6 +100,29 @@ test('a response still reporting the run cleared after the fetch started does no
   assert.equal(row().current_run, null);
 });
 
+test('two runs ending during one fetch both stay hidden from its response', async () => {
+  cronStore.jobs = [{ id: 'j1', current_run: { run_id: 'old', started_at: 1 } }];
+  const deliver = startFetch();
+  clock += 5;
+  patchEnded(row(), 'old');
+  clock += 1;
+  patchStarted(row(), 'skip', 1006);
+  patchEnded(row(), 'skip');
+  await deliver([{ id: 'j1', current_run: { run_id: 'old', started_at: 1 } }]);
+  assert.equal(row().current_run, null);
+});
+
+test('clears older than the keep window are dropped on the next clear', () => {
+  noteCronRunCleared('j1', 'a');
+  clock += 30000;
+  noteCronRunCleared('j1', 'b');
+  clock += 30001;
+  noteCronRunCleared('j1', 'c');
+  assert.deepEqual(cronRunClearedAtLocal.get('j1'), [{ at: 31000, runId: 'b' }, { at: 61001, runId: 'c' }]);
+  noteCronRunCleared('j2', undefined);
+  assert.deepEqual(cronRunClearedAtLocal.get('j2'), [{ at: 61001, runId: '' }]);
+});
+
 test('a response reporting a different run than the cleared one shows it', async () => {
   cronStore.jobs = [{ id: 'j1', current_run: { run_id: 'old', started_at: 1 } }];
   const deliver = startFetch();
@@ -138,10 +161,13 @@ test('reconcileCurrentRun branches', () => {
   assert.equal(reconcileCurrentRun(stalePatch, b, t0, undefined), b);
   assert.equal(reconcileCurrentRun({ ...patched, applied_at_local: t0 }, undefined, t0, undefined), undefined);
 
-  assert.equal(reconcileCurrentRun(null, fromServer('a'), t0, { at: 101, runId: 'a' }), null);
-  assert.equal(reconcileCurrentRun(null, fromServer('a'), t0, { at: 101, runId: '' }), null);
-  assert.equal(reconcileCurrentRun(null, b, t0, { at: 101, runId: 'a' }), b);
-  assert.equal(reconcileCurrentRun(null, b, t0, { at: 100, runId: 'b' }), b);
+  assert.equal(reconcileCurrentRun(null, fromServer('a'), t0, [{ at: 101, runId: 'a' }]), null);
+  assert.equal(reconcileCurrentRun(null, fromServer('a'), t0, [{ at: 101, runId: '' }]), null);
+  assert.equal(reconcileCurrentRun(null, b, t0, [{ at: 101, runId: 'a' }]), b);
+  assert.equal(reconcileCurrentRun(null, b, t0, [{ at: 100, runId: 'b' }]), b);
+  // Any clear inside the window counts, not only the latest.
+  assert.equal(reconcileCurrentRun(null, b, t0, [{ at: 101, runId: 'b' }, { at: 102, runId: 'c' }]), null);
+  assert.equal(reconcileCurrentRun(null, b, t0, [{ at: 90, runId: 'b' }, { at: 102, runId: 'c' }]), b);
   assert.equal(reconcileCurrentRun(null, b, t0, undefined), b);
-  assert.equal(reconcileCurrentRun(null, undefined, t0, { at: 101, runId: 'a' }), undefined);
+  assert.equal(reconcileCurrentRun(null, undefined, t0, [{ at: 101, runId: 'a' }]), undefined);
 });

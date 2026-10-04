@@ -133,7 +133,7 @@
   },
   "cron_state.js": {
     "lines": 265,
-    "maxFnLines": 48,
+    "maxFnLines": 47,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0,

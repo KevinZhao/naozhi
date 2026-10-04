@@ -118,7 +118,7 @@ test.describe('迟到的旧响应不得把新 run 换回刚结束的那次', () 
     const merged = await state();
     expect(merged.run && merged.run.run_id, '旧响应把 new 换回了 old').toBe('run-new');
     expect(merged.run.started_at).toBe(newStartedAt);
-    expect(merged.cleared && merged.cleared.runId, 'run_ended 应记下被清掉的 run').toBe('run-old');
+    expect(merged.cleared && merged.cleared.map(c => c.runId), 'run_ended 应记下被清掉的 run').toEqual(['run-old']);
     await expect(row).toHaveClass(/is-running/);
     await ctx.close();
   });

@@ -55,11 +55,16 @@ export const cronJobCostCache = {};
 // 这里是第二道防线，让 dashboard 视觉上立即冻结。
 export const cronFrozenRuns = new Set();
 
-// cronRunClearedAtLocal: jobId → {at, runId}，本地清除 current_run 的时刻
-// 和被清掉的那次 run。与 current_run.applied_at_local 互为镜像，挡住反方向
-// 的同一竞态：一个生成于 run_ended 帧之前、落地于其后的 list 响应仍带
-// current_run，会让刚熄灭的运行中徽章复活一拍。runId 为空时按任意 run 处理。
+// cronRunClearedAtLocal: jobId → [{at, runId}]，最近一分钟内 run_ended 的每次
+// 本地清除。与 current_run.applied_at_local 互为镜像，挡住反方向的同一竞态：
+// 生成于 run_ended 之前、落地于其后的 list 响应仍带被清掉的 run，徽章会复活。
+// 一次 fetch 期间可能结束多个 run（跳过的 run 成对发帧），故全部保留；runId 为空按任意 run。
 export const cronRunClearedAtLocal = new Map();
+const CRON_CLEAR_KEEP_MS = 60000;
+export function noteCronRunCleared(jobId, runId) {
+  const at = Date.now(), keep = c => c.at > at - CRON_CLEAR_KEEP_MS;
+  cronRunClearedAtLocal.set(jobId, [...(cronRunClearedAtLocal.get(jobId) || []).filter(keep), { at, runId: runId || '' }]);
+}
 
 // isCronSessionFrozen 判断当前 selectedKey 是否是被冻结的 cron session。
 // cron session key 的形态是 "cron:" + jobID（见 session.CronKey）；只有
@@ -158,13 +163,13 @@ function keepRefetchedPrompts(prev, fresh) {
 // reconcileCurrentRun picks the current_run a refetched row carries. A local
 // patch newer than the fetch beats a response that lacks it or names another
 // run; one naming the same run wins but keeps applied_at_local, so an older
-// response still in flight cannot blank it. A local clear newer than the fetch
-// nulls a response still reporting the cleared run (any run if runId is '').
+// response still in flight cannot blank it. Any local clear newer than the
+// fetch nulls a response still reporting the run it cleared (any run if '').
 export function reconcileCurrentRun(prevRun, freshRun, fetchStartedAt, cleared) {
   if (prevRun && prevRun.applied_at_local > fetchStartedAt) {
     return freshRun && freshRun.run_id === prevRun.run_id ? Object.assign({}, freshRun, { applied_at_local: prevRun.applied_at_local }) : prevRun;
   }
-  const resurrects = !prevRun && freshRun && cleared && cleared.at > fetchStartedAt && (!cleared.runId || cleared.runId === freshRun.run_id);
+  const resurrects = !prevRun && freshRun && (cleared || []).some(c => c.at > fetchStartedAt && (!c.runId || c.runId === freshRun.run_id));
   return resurrects ? null : freshRun;
 }
 
@@ -175,8 +180,7 @@ export async function fetchCronJobs() {
   const fetchStartedAt = Date.now();
   try {
     const headers = authHeaders();
-    // RNEW-UX-003: 8s timeout — cron list is polled periodically; a hung
-    // disk/fs call must release before the next tick fires.
+    // RNEW-UX-003: 8s timeout, so a hung disk/fs call releases before the next fetch.
     //
     // R236-SEC-08 (#494): the poll asks for compact rows, `prompt` clipped to
     // 256 UTF-8 bytes per job (full prompts scale to 8 KiB × N every tick) and
@@ -243,18 +247,14 @@ export async function cronRefetchFullJob(id) {
   if (!cached.prompt_truncated && !cached.prompt_refetched) return { ok: true, job: cached };
   try {
     const headers = authHeaders();
-    // No compact param — list endpoint returns full prompts. We pull
-    // the whole list here because there is no per-job GET endpoint
-    // exposed; the rate limiter on the list route is shared with the
-    // poll, and an editor open is a once-per-user-action event so the
-    // extra body is not a hot path.
+    // No compact param: there is no per-job GET, so the full list is pulled.
+    // It shares the list route's rate limiter with the poll, but an editor
+    // open is once per user action, not a hot path.
     const data = await fetchJSON(NZ_CONTRACT.API.cron, { headers, timeoutMs: 8000 });
     const jobs = (data && data.jobs) || [];
     const fresh = jobs.find(j => j.id === id);
     if (fresh && !fresh.prompt_truncated) {
-      // Splice the full-prompt copy back into the cache so subsequent
-      // editor opens / drawer renders see the full body without another
-      // network round trip.
+      // Splice the full copy back so later opens / renders skip the round trip.
       const idx = cronStore.jobs.findIndex(j => j.id === id);
       const spliced = Object.assign({}, fresh, { prompt_refetched: true });
       if (idx >= 0) cronStore.jobs[idx] = spliced;
