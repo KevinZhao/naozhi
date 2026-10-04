@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -391,4 +392,66 @@ func TestGapRecord_GapWriteFailureKeepsTally(t *testing.T) {
 	s.accept([]Entry{entry(t, 1700000004000, "after")}, false)
 	assertRecoveredLog(t, p, dir, key,
 		"before", "gap:dropped=4 reason=persist_channel_full+persist_write_failed", "after")
+}
+
+// TestGapRecord_IdxSyncFailureRestoresGap: a gap record is durable only once
+// the idx fsync succeeds. When that fsync fails the carried count must not be
+// spent: retiring the writer hands it back for key's next gap record.
+func TestGapRecord_IdxSyncFailureRestoresGap(t *testing.T) {
+	p, dir := newTestPersister(t, func(o *Options) { o.IdxStride = 1 })
+	const key = "feishu:p2p:gap-idx-sync"
+	sink := p.SinkFor(key)
+	sink([]Entry{entry(t, 1700000001000, "before")}, false)
+	if err := flushOrFail(t, p); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
+	defer cancel()
+	if err := p.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	// The run goroutine is gone, so the test owns a hand-built writer.
+	logPath := LogPath(dir, key)
+	idxPath := filepath.Join(dir, KeyHash(key)+idxExt)
+	rec, err := Recover(logPath, idxPath)
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	logFile, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+	idxW, err := NewIdxWriter(idxPath, 0o600)
+	if err != nil {
+		t.Fatalf("open idx: %v", err)
+	}
+	w := &perKeyWriter{
+		key: key, stem: KeyHash(key),
+		logFile: logFile, logBuf: acquireLogBuf(logFile), idxWriter: idxW,
+		logPath: logPath, idxPath: idxPath,
+		nextSeq: rec.NextSeq, bytes: rec.LogSize,
+	}
+	t.Cleanup(func() { _ = w.close() })
+
+	p.runGap[key] = gapTally{n: 3, cause: gapChannelFull}
+	job := batchJob{Key: key, Stem: KeyHash(key), Entries: []Entry{entry(t, 1700000002000, "fronted")}}
+	if err := p.writeGapRecord(job, w, new(bytes.Buffer), new(schema.Record)); err != nil {
+		t.Fatalf("writeGapRecord: %v", err)
+	}
+	if err := p.appendRecord(w, new(bytes.Buffer), new(schema.Record), job.Entries[0]); err != nil {
+		t.Fatalf("appendRecord: %v", err)
+	}
+	w.dirty = true
+
+	idxW.syncFailHook = func() error { return errors.New("injected idx fsync EIO") }
+	err = w.flush(p)
+	if err == nil || !w.poisoned {
+		t.Fatalf("flush: err=%v poisoned=%v, want the injected idx fsync error and a poisoned writer", err, w.poisoned)
+	}
+	p.settleFlush(key, w, "flush", err)
+	got := p.runGap[key]
+	if got.n != 4 || got.cause != gapChannelFull|gapWriteFailed {
+		t.Errorf("runGap[%q] = %+v, want n=4 (3 carried + fronted) with both causes", key, got)
+	}
 }
