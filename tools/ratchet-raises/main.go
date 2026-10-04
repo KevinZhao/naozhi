@@ -54,16 +54,19 @@ func main() {
 // tree reads files at one revision.
 type tree interface {
 	read(path string) (string, error)
-	// baselineGoFiles lists the .go files that declare a baseline constant.
+	// baselineGoFiles lists the .go files that may declare a baseline
+	// constant: every one whose text contains ratchetConstMarker.
 	baselineGoFiles() ([]string, error)
 }
 
 func run(base, head tree, labels labelSource) ([]string, []raise, error) {
-	bm, err := collect(base)
+	// Base already passed this gate: a baseline constant it cannot read was
+	// written before the integer-literal rule, and head is held to it.
+	bm, _, err := collect(base)
 	if err != nil {
 		return nil, nil, fmt.Errorf("base: %w", err)
 	}
-	hm, err := collect(head)
+	hm, headProblems, err := collect(head)
 	if err != nil {
 		return nil, nil, fmt.Errorf("head: %w", err)
 	}
@@ -107,37 +110,42 @@ func run(base, head tree, labels labelSource) ([]string, []raise, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return checkLedger(rs, bl, hl, labels), rs, nil
+	return append(headProblems, checkLedger(rs, bl, hl, labels)...), rs, nil
 }
 
-func collect(t tree) (metrics, error) {
+// collect reads every ratchet at one revision, with the baseline constants
+// goConsts could not read.
+func collect(t tree) (metrics, []string, error) {
 	m := metrics{}
 	paths, err := t.baselineGoFiles()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	files := map[string]string{}
 	for _, p := range paths {
 		src, err := t.read(p)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		files[p] = src
 	}
-	goConsts(files, m)
+	problems, err := goConsts(files, m)
+	if err != nil {
+		return nil, nil, err
+	}
 	for path, parse := range map[string]func(string, metrics) error{
 		jsRatchetPath: jsRatchet, jsCapsPath: jsCaps, jsDepsPath: jsDeps,
 		goldenPinsPath: goldenPins, exemptionsPath: exemptions,
 	} {
 		raw, err := t.read(path)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := parse(raw, m); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return m, nil
+	return m, problems, nil
 }
 
 // markNewIsRaise sets newIsRaise on every metric whose key starts with prefix.
@@ -176,7 +184,7 @@ func (g gitTree) read(path string) (string, error) {
 }
 
 func (g gitTree) baselineGoFiles() ([]string, error) {
-	return grepBaselineFiles("git", "grep", "-l", "-E", baselineGrep, g.rev, "--", "*.go")
+	return grepBaselineFiles(gitGrepArgs(g.rev)...)
 }
 
 // workTree reads the checkout.
@@ -191,13 +199,25 @@ func (workTree) read(path string) (string, error) {
 }
 
 func (workTree) baselineGoFiles() ([]string, error) {
-	return grepBaselineFiles("git", "grep", "-l", "-E", baselineGrep, "--", "*.go")
+	return grepBaselineFiles(gitGrepArgs("")...)
 }
 
-// baselineGrep preselects the files goBaselineConst then parses.
-const baselineGrep = `aseline[A-Za-z0-9_]* *= *[0-9]`
+// ratchetConstMarker is text every baseline constant's name contains, so no
+// way of writing the declaration keeps its file from goConsts.
+const ratchetConstMarker = "aseline"
 
-func grepBaselineFiles(name string, args ...string) ([]string, error) {
+// gitGrepArgs lists the .go files containing ratchetConstMarker at rev, or
+// in the working tree when rev is empty.
+func gitGrepArgs(rev string) []string {
+	args := []string{"git", "grep", "-l", "-F", ratchetConstMarker}
+	if rev != "" {
+		args = append(args, rev)
+	}
+	return append(args, "--", "*.go")
+}
+
+func grepBaselineFiles(cmd ...string) ([]string, error) {
+	name, args := cmd[0], cmd[1:]
 	out, err := exec.Command(name, args...).Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
