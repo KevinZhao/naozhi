@@ -130,6 +130,9 @@ type Process struct {
 	// slots is the passthrough slot machinery (SendPassthrough).
 	slots sendSlots
 
+	// tools tracks the backend's in-flight tool calls for the watchdog.
+	tools inflightTools
+
 	// linker maps parallel-agent task_ids to transcript jsonl paths for the
 	// dashboard's agent_events endpoint. Set by InitLinker; nil in test fakes.
 	linker *subagent.Linker

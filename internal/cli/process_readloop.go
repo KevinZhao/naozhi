@@ -503,6 +503,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 		return false
 	}
 	nowMS := now.UnixMilli()
+	p.tools.observe(ev, now)
 
 	// ---- Passthrough mode hooks ----
 	// These run before the legacy eventCh / ring.EventLog delivery paths.

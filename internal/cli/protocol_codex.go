@@ -365,9 +365,13 @@ func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]clievent.Event, bo
 		}
 		switch n.Item.Type {
 		case "commandExecution", "fileChange", "mcpToolCall", "webSearch", "dynamicToolCall":
-			subType := "tool_use"
+			subType, status := "tool_use", n.Item.Status
 			if msg.Method == "item/completed" {
 				subType = "tool_result"
+				// webSearch items carry no status; item/completed is still terminal.
+				if status == "" {
+					status = "completed"
+				}
 			}
 			return []clievent.Event{{
 				Type:      "assistant",
@@ -378,7 +382,7 @@ func (p *CodexProtocol) handleNotification(msg RPCMessage) ([]clievent.Event, bo
 					ID:     n.Item.ID,
 					Title:  sanitizeToolCallLabel(n.Item.Title),
 					Kind:   sanitizeToolCallLabel(n.Item.Type),
-					Status: sanitizeToolCallLabel(n.Item.Status),
+					Status: sanitizeToolCallLabel(status),
 				},
 				Message: &clievent.AssistantMessage{
 					Content: []clievent.ContentBlock{{Type: "tool_use", Name: sanitizeToolCallLabel(n.Item.Type)}},

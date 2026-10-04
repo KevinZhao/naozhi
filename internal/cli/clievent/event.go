@@ -48,6 +48,12 @@ type Event struct {
 	Status       string     `json:"status,omitempty"`
 	LastToolName string     `json:"last_tool_name,omitempty"`
 	Usage        *TaskUsage `json:"usage,omitempty"`
+	// ToolName and ParentToolUseID name the tool a claude tool_progress frame
+	// reports on; its own ToolUseID is a per-heartbeat "<id>-heartbeat-N". The
+	// CLI sends one every 30s while a main-thread tool runs, as a liveness
+	// signal with no transcript content.
+	ToolName        string `json:"tool_name,omitempty"`
+	ParentToolUseID string `json:"parent_tool_use_id,omitempty"`
 
 	// Passthrough fields (stream-json only). UUID is the Claude CLI uuid
 	// round-tripped on replay events (see --replay-user-messages). IsReplay
@@ -195,6 +201,8 @@ type ContentBlock struct {
 	Text  string          `json:"text,omitempty"`
 	Name  string          `json:"name,omitempty"`  // tool_use name
 	Input json.RawMessage `json:"input,omitempty"` // tool_use input
+	// ToolUseID is the tool_use a tool_result block (in a user event) answers.
+	ToolUseID string `json:"tool_use_id,omitempty"`
 }
 
 // MaxAssistantMessageContentBytes caps the total content-block bytes of an

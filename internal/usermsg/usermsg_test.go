@@ -3,6 +3,7 @@ package usermsg
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -36,9 +37,28 @@ func TestUserMessage_TimeoutSpecialisation(t *testing.T) {
 			notSubstrs:  []string{"⏱️"}, // emoji is caller-decorated, not in helper.
 		},
 		{
-			name:        "total timeout renders configured duration",
+			name: "silent tool is named with its runtime and the config key",
+			err: fmt.Errorf("send: %w", &clierr.NoOutputTimeoutError{
+				Timeout: 15 * time.Minute, Tool: "Bash", ToolElapsed: 16 * time.Minute}),
+			wantSubstrs: []string{"工具 Bash", "已运行 16 分钟", "15 分钟", "session.watchdog.no_output_timeout"},
+			notSubstrs:  []string{"1 分钟 30 秒", "简化任务", "模型"},
+		},
+		{
+			name:        "silent model is told apart from a silent tool",
+			err:         &clierr.NoOutputTimeoutError{Timeout: 15 * time.Minute},
+			wantSubstrs: []string{"模型", "15 分钟", "session.watchdog.no_output_timeout"},
+			notSubstrs:  []string{"工具", "简化任务"},
+		},
+		{
+			name:        "long tool title is truncated",
+			err:         &clierr.NoOutputTimeoutError{Timeout: time.Minute, Tool: strings.Repeat("x", 200), ToolElapsed: time.Minute},
+			wantSubstrs: []string{strings.Repeat("x", 60) + "..."},
+			notSubstrs:  []string{strings.Repeat("x", 61)},
+		},
+		{
+			name:        "total timeout renders configured duration and the config key",
 			err:         clierr.ErrTotalTimeout,
-			wantSubstrs: []string{"总耗时超过", "5 分钟"},
+			wantSubstrs: []string{"总耗时超过", "5 分钟", "session.watchdog.total_timeout"},
 			notSubstrs:  []string{"⏱️"},
 		},
 		{
