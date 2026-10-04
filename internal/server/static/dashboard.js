@@ -94,7 +94,7 @@ import {
   handleKey,
   sendMessage,
 } from './send_message.js';
-import { collectWorkspaceSessionIDs, fetchSessions, onSessionsApplied, originBadgeHtml, restorePending, updateCardUnreadChip, updateMainState } from './session_list.js';
+import { collectWorkspaceSessionIDs, fetchSessions, onSessionsApplied, originBadgeHtml, refreshHeaderExitChip, restorePending, updateCardUnreadChip, updateMainState } from './session_list.js';
 import { findDiscovered, isDiscoveredKey, matchProject, parseDiscoveredPid, sid } from './session_ident.js';
 import { ICONS } from './icons.js';
 // Service worker registration
@@ -309,18 +309,6 @@ function setActivityView(view) {
   else if (view === 'settings') { renderSettingsView(); }
 }
 
-// RNEW-UX-003: fetchJSON wraps fetch with an AbortController + timeout.
-// NAT-dropped TCP connections can leave the browser in a "pending" state
-// for minutes with no visible signal — fetchJSON guarantees the Promise
-// resolves/rejects within `timeoutMs` (default 10s) so spinners and
-// error paths fire deterministically. Returns parsed JSON on 2xx, throws
-// with the response body on non-2xx. Partial migration: the highest-risk
-// polling + scan sites (sessions, cli/backends, events, cron, discovered,
-// discovered/preview, projects/files/exists) use this helper today; the
-// remaining fetch() sites migrate in later rounds.
-// fetchJSON moved to nz_util.js (PR-0a). Available as window.nz.util.fetchJSON
-// and the top-level alias window.fetchJSON, loaded before this file.
-
 // reconcileMainStateAfterPoll brings the open session's banner and send/stop
 // buttons to the REST state when a session_state push was missed. With the
 // socket down REST is the only source and always wins. Over a live socket
@@ -336,9 +324,13 @@ function reconcileMainStateAfterPoll(wsConnected) {
     // updateSendButton is not idempotent ('running' re-seeds agent rows,
     // 'ready' resets turn state and scroll) and this runs every 5 s under
     // fallback: re-apply only what differs from the last applied state (#2431).
+    // The exit chip is idempotent and the poll may bring the death_detail a
+    // 'dead' push left out, so it repaints either way.
     const applied = selection.lastAppliedMainState;
     if (!(applied && applied.key === sKey && applied.state === sd.state)) {
       updateMainState(sd.state);
+    } else {
+      refreshHeaderExitChip(sd.state);
     }
   } else if (sd && wsConnected && sd.state === 'running') {
     // A dropped 'running' push: the sidebar paints running from REST while
