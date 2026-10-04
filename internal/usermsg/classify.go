@@ -42,6 +42,8 @@ const (
 	CodeCLIAuthFailed
 	CodeCLIConfigError
 	CodeCLIMissingRuntime
+	// The CLI kept exiting at startup, so respawns are paused for a while.
+	CodeCLIStartupFailed
 
 	// Turn outcomes: a result that arrived but is not the answer (turn.go).
 	CodeTurnFailed
@@ -70,6 +72,8 @@ func classify(err error, key string) Code {
 		return CodeMaxExemptSessions
 	case errors.Is(err, session.ErrNoCLIWrapper):
 		return CodeNoCLIWrapper
+	case errors.Is(err, session.ErrCLIStartupFailed):
+		return CodeCLIStartupFailed
 	case errors.Is(err, session.ErrNoActiveProcess):
 		if sessionkey.IsCronKey(key) {
 			return CodeCronAsleep

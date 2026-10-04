@@ -149,7 +149,7 @@ func (p *CodexProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, e
 		}
 		resp, err := p.sendAndWaitResponse(rw, resumeReq)
 		if err != nil {
-			return "", fmt.Errorf("codex thread/resume: %w", err)
+			return "", fmt.Errorf("codex thread/resume: %w", resumeRejected(err))
 		}
 		tid := resumeID
 		if resp != nil && len(resp.Result) > 0 {

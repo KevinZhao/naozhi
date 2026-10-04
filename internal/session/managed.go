@@ -309,6 +309,12 @@ type ManagedSession struct {
 	// updateCLIIdentity (CAS loop) so single-field setters compose safely.
 	cliIdentity atomic.Pointer[cliIdentityBox]
 	deathReason atomic.Pointer[string] // why process died, empty if alive
+	// startupFails counts the incarnations before this one that failed at
+	// CLI startup in a row (startup_failure.go); set before publish.
+	startupFails atomic.Int32
+	// resumeRejected is set when a spawn resuming this session's id was
+	// refused by the backend (clierr.ErrResumeRejected).
+	resumeRejected atomic.Bool
 	// overlayDrift is the reconcile-computed per-field diff between the live
 	// shim's argv and a fresh spawn under current config (#2543). Written by
 	// ReconnectShimsCtx outside the table lock, read lock-free by snapshot(); nil = none.

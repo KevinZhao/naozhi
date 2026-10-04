@@ -17,6 +17,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cliinfo"
 
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -774,6 +775,9 @@ func (r *shimLineReader) ReadLine() ([]byte, bool, error) {
 	}
 }
 
+// errInitCLIExited is the cause of an Init handshake the CLI exited during.
+var errInitCLIExited = errors.New("cli exited during init")
+
 // initExitError is the Init handshake's error for a CLI that exited before
 // answering, quoting the first stderr line so spawn errors carry the cause.
 func initExitError(msg shimMsg, tail []string) error {
@@ -782,7 +786,17 @@ func initExitError(msg shimMsg, tail []string) error {
 		code = msg.Code.Value
 	}
 	if cause := stderrTailSummary(tail); cause != "" {
-		return fmt.Errorf("cli exited during init (code %d): %s", code, cause)
+		return fmt.Errorf("%w (code %d): %s", errInitCLIExited, code, cause)
 	}
-	return fmt.Errorf("cli exited during init (code %d)", code)
+	return fmt.Errorf("%w (code %d)", errInitCLIExited, code)
+}
+
+// resumeRejected marks err, from the resume step of an Init handshake, as
+// clierr.ErrResumeRejected when the backend answered it with an RPC error or
+// exited; a timeout or a broken connection says nothing about the session.
+func resumeRejected(err error) error {
+	if errors.Is(err, ErrACPRPC) || errors.Is(err, ErrCodexRPC) || errors.Is(err, errInitCLIExited) {
+		return fmt.Errorf("%w: %w", clierr.ErrResumeRejected, err)
+	}
+	return err
 }
