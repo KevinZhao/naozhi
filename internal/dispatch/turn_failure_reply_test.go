@@ -161,3 +161,25 @@ func TestIMDeliveryReply_AbortedTurnMarksBanner(t *testing.T) {
 		t.Errorf("sent %q besides the banner, want nothing", replies)
 	}
 }
+
+// TestIMDeliveryReply_FailedMergeHeadGetsNotice: the head of a merged turn
+// (MergedWithHead 0) that failed or was aborted with no text is not a merge
+// follower; it gets the notice or the aborted banner, never the merge hint.
+func TestIMDeliveryReply_FailedMergeHeadGetsNotice(t *testing.T) {
+	t.Parallel()
+	edits, replies := deliverWithBanner(t, &clievent.SendResult{SubType: "error_max_turns", IsError: true, MergedCount: 2})
+	if len(edits) == 0 || !strings.Contains(edits[len(edits)-1], "最大执行步数") {
+		t.Errorf("failed head: banner edits = %q, want the last one to be the max-turns notice", edits)
+	}
+	if len(replies) != 0 {
+		t.Errorf("failed head: sent %q besides the banner, want nothing", replies)
+	}
+
+	edits, replies = deliverWithBanner(t, &clievent.SendResult{SubType: "error_during_execution", IsError: true, Aborted: true, MergedCount: 3})
+	if len(edits) == 0 || edits[len(edits)-1] != bannerAborted {
+		t.Errorf("aborted head: banner edits = %q, want the last one %q", edits, bannerAborted)
+	}
+	if len(replies) != 0 {
+		t.Errorf("aborted head: sent %q besides the banner, want nothing", replies)
+	}
+}

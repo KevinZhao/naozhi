@@ -35,6 +35,7 @@ func TestForTurnResult(t *testing.T) {
 		{"bare is_error", &clievent.SendResult{IsError: true}, "turn_failed", nil},
 		{"acp refusal", &clievent.SendResult{SubType: "refusal"}, "refused", []string{"拒绝"}},
 		{"acp max_tokens", &clievent.SendResult{SubType: "max_tokens"}, "truncated", []string{"输出上限"}},
+		{"acp max_turn_requests", &clievent.SendResult{SubType: "max_turn_requests"}, "max_turns", []string{"最大执行步数"}},
 		{"acp tool_use_failure", &clievent.SendResult{SubType: "tool_use_failure"}, "turn_failed", nil},
 		{"acp max_tokens with text is delivered", &clievent.SendResult{Text: "partial", SubType: "max_tokens"}, "", nil},
 		{"acp cancelled", &clievent.SendResult{SubType: "cancelled", Aborted: true}, "", nil},

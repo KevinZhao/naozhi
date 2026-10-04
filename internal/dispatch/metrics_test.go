@@ -28,6 +28,10 @@ func TestDispatchMetrics_Registered(t *testing.T) {
 			t.Errorf("expvar.Get(%q) = %T, want *expvar.Int", name, v)
 		}
 	}
+	const turnErrors = "naozhi_dispatch_turn_error_result_total"
+	if v, ok := expvar.Get(turnErrors).(*expvar.Map); !ok {
+		t.Errorf("expvar.Get(%q) = %T, want *expvar.Map", turnErrors, v)
+	}
 }
 
 // TestDispatchMetrics_AddCallable pins that the package-level mirror

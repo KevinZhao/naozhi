@@ -240,10 +240,11 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 	dl.lg.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD,
 		"merged_count", result.MergedCount, "merged_with_head", result.MergedWithHead)
 
-	// A merge follower (MergedCount>1, empty Text) collapses any "💭思考中…"
-	// banner into the merge hint (#2290), finalized first so a late editLoop
-	// redraw does not overwrite it (#2338).
-	if result.MergedCount > 1 && result.Text == "" {
+	// A merge follower (MergedWithHead set; the head slot is 0 and may carry
+	// an empty failed result) collapses any "💭思考中…" banner into the merge
+	// hint (#2290), finalized first so a late editLoop redraw does not
+	// overwrite it (#2338).
+	if result.MergedWithHead != 0 && result.Text == "" {
 		tracker.waitReady(ctx)
 		tracker.markFinalized()
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {

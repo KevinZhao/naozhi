@@ -451,7 +451,7 @@ func TestTurnParity18_Dash_MergeFollowerIsSilent(t *testing.T) {
 	turns := h.session(parityKey, true)
 	ws := h.ws()
 	ws.send("w1", "follower")
-	turns.turn(t, "follower turn", parityOutcome{Result: &clievent.SendResult{MergedCount: 2}})
+	turns.turn(t, "follower turn", parityOutcome{Result: &clievent.SendResult{MergedCount: 2, MergedWithHead: 1}})
 	h.waitEngineIdle()
 	if acks := ws.errorAcks(); len(acks) != 0 || len(h.plat.allReplies()) != 0 {
 		t.Fatalf("merge follower: error acks %+v, IM replies %q; want neither", acks, h.plat.allReplies())

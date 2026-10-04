@@ -440,7 +440,7 @@ func TestTurnParity18_IM_MergeFollowerHint(t *testing.T) {
 	h := newParityHarness(t, parityOpts{mode: "passthrough"})
 	turns := h.session(parityKey, true)
 	h.imSend("m1", "follower")
-	turns.turn(t, "follower turn", parityOutcome{Result: &clievent.SendResult{MergedCount: 2}})
+	turns.turn(t, "follower turn", parityOutcome{Result: &clievent.SendResult{MergedCount: 2, MergedWithHead: 1}})
 	if r := h.plat.waitReply(t, "merge hint"); r != parityMergedReply {
 		t.Fatalf("merge follower reply = %q, want %q", r, parityMergedReply)
 	}

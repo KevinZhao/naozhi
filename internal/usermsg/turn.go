@@ -62,7 +62,7 @@ func classifyTurnSubType(r *clievent.SendResult) (Code, bool) {
 			return CodeUnknown, false
 		}
 		return CodeTurnFailed, true
-	case "error_max_turns":
+	case "error_max_turns", "max_turn_requests": // the latter an ACP stopReason
 		return CodeTurnMaxTurns, true
 	case "error_max_budget_usd":
 		return CodeTurnBudget, true

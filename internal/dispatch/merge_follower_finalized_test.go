@@ -90,7 +90,7 @@ func (p *residualEditPlatform) texts() []string {
 }
 
 // TestMergeFollower_ResidualEditDoesNotRepaintStaleBanner drives the REAL
-// IM delivery follower path (a MergedCount>1 result with Text=="") and injects
+// IM delivery follower path (a MergedWithHead result with Text=="") and injects
 // a residual interim event while that path is collapsing the banner. With the
 // #2338 fix, dispatch.go has called markFinalized() before the merge-hint edit,
 // so editLoop's `if t.finalized.Load() { continue }` guard drops the residual
@@ -147,9 +147,9 @@ func TestMergeFollower_ResidualEditDoesNotRepaintStaleBanner(t *testing.T) {
 		// merge hint is then genuinely attributable to the residual signal.
 		waitForEdit(t, fp, fp.replyMsgID)
 
-		// The merge then collapses the turn: the follower result carries
-		// MergedCount>1 with an empty Text — the early-return branch under test.
-		return &clievent.SendResult{Text: "", MergedCount: 2}, nil
+		// The merge then collapses the turn: the follower result points at its
+		// head with an empty Text — the early-return branch under test.
+		return &clievent.SendResult{Text: "", MergedCount: 2, MergedWithHead: 1}, nil
 	}
 
 	probe.onCue = func() {
