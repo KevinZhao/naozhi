@@ -318,14 +318,15 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 			// generic interrupted (#2749).
 			r.drift.mark(state.Key)
 			// The session is now suspended until the next user message. NewRouter's
-			// async JSONL load skipped this key (shimManagedKeys claimed it), so
-			// backfill persistedHistory here (InjectHistory is proc-nil safe) or
-			// the dashboard panel stays blank until the user sends something.
-			if r.hist.claudeDir != "" && state.SessionID != "" {
+			// JSONL loader skipped this key (shimManagedKeys claimed it), but its
+			// naozhi event-log loader did not, and a later reconcile tick finds
+			// history already loaded. So backfill only an empty persistedHistory
+			// (proc-nil safe), or the panel stays blank until the user sends.
+			if r.hist.claudeDir != "" && state.SessionID != "" && !sess.hasInjectedHistory() {
 				ids := make([]string, 0, len(sessPrevIDs)+1)
 				ids = append(ids, sessPrevIDs...)
 				ids = append(ids, state.SessionID)
-				// IIFE so a panic inside InjectHistory / extractLastPromptFromProcess
+				// IIFE so a panic inside InjectHistoryIfEmpty / extractLastPromptFromProcess
 				// still releases the context's timer.
 				func() {
 					histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
@@ -333,8 +334,10 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 					histEntries := r.hist.loader.LoadHistoryChainTail(
 						histCtx, r.hist.claudeDir, ids, sess.Workspace(), maxPersistedHistory,
 					)
-					if len(histEntries) > 0 {
-						sess.InjectHistory(histEntries)
+					// The pre-check above only skips the read; a startup loader
+					// can fill history while it runs, so the inject itself must be
+					// the atomic one (#1812).
+					if len(histEntries) > 0 && sess.InjectHistoryIfEmpty(histEntries) {
 						sess.extractLastPromptFromProcess()
 						slog.Info("drifted shim: backfilled JSONL history",
 							"key", state.Key, "entries", len(histEntries))
@@ -440,11 +443,11 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 			}
 		}
 
-		// Restore dashboard history from JSONL only. Replay events are NOT
-		// injected into persistedHistory: they lack native timestamps and would
-		// break ordering against JSONL user entries. Only load when
-		// persistedHistory is empty — ReattachProcessNoCallback below snapshots
-		// it into the fresh proc, so re-injecting would double-fill proc.EventLog.
+		// Restore dashboard history from JSONL only: replay events lack native
+		// timestamps and would break ordering against JSONL user entries. Fill
+		// only an empty persistedHistory (ReattachProcessNoCallback snapshots it
+		// into proc), atomically: the pre-check just skips the read, and
+		// NewRouter's startup loaders may fill it meanwhile (#1812).
 		if r.hist.claudeDir != "" && !sess.hasInjectedHistory() {
 			ids := make([]string, 0, len(sessPrevIDs)+1)
 			ids = append(ids, sessPrevIDs...)
@@ -461,10 +464,10 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 			)
 			histCancel()
 			if len(histEntries) > 0 {
-				// proc is not yet attached, so InjectHistory only appends to
+				// proc is not yet attached, so the inject only touches
 				// persistedHistory; ReattachProcessNoCallback below seeds proc
 				// from it exactly once.
-				sess.InjectHistory(histEntries)
+				sess.InjectHistoryIfEmpty(histEntries)
 			}
 		}
 

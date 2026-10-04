@@ -1,4 +1,4 @@
-// anchor-keep: pins that shim-reconnect routes history through the dedupe seam rather than proc.InjectHistory; the double-inject reproduces only under the tier1/tier2 startup race.
+// anchor-keep: pins that shim reconnect and drift backfill inject history atomically rather than appending; the double-inject reproduces only under the startup-loader race.
 package session
 
 import (
@@ -9,22 +9,13 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-// TestShimReconnect_NoDoubleInjectContract pins the R231-CQ-1 fix at source
-// level. The bug: the shim-reconnect path used to call
-// `proc.InjectHistory(histEntries)` directly while persistedHistory may have
-// already been populated by tier1 (NewRouter startup goroutine via
-// s.InjectHistory). The subsequent ReattachProcessNoCallback's
-// attachProcessAndSnapshotPersisted then snapshotted persistedHistory and
-// fed it to proc again — every overlapping entry landed in proc.EventLog
-// twice and EventLog persisted both copies.
-//
-// The fix routes JSONL load through sess.InjectHistory and gates it behind
-// !sess.hasInjectedHistory() so persistedHistory remains the single source
-// of truth and seededLen accounting prevents duplicate forwarding.
-//
-// This test asserts the source pattern at the load site so a future
-// refactor that reverts to the direct proc.InjectHistory call (or drops
-// the hasInjectedHistory gate) fails the contract.
+// TestShimReconnect_NoDoubleInjectContract pins the JSONL-load blocks in
+// router_shim.go (shim reconnect and drift backfill). NewRouter's startup
+// loaders inject into the same session concurrently with ReconnectShimsCtx,
+// so every block must pre-check !sess.hasInjectedHistory() to skip the read
+// and inject through sess.InjectHistoryIfEmpty, the atomic check-then-act
+// (#1812, #3028). A bare sess.InjectHistory or a direct proc.InjectHistory
+// appends a second copy of the conversation onto a filled history.
 func TestShimReconnect_NoDoubleInjectContract(t *testing.T) {
 	t.Parallel()
 	src, err := os.ReadFile("router_shim.go")
@@ -33,12 +24,14 @@ func TestShimReconnect_NoDoubleInjectContract(t *testing.T) {
 	}
 	routerStr := string(src)
 
-	// Locate the JSONL-load block: the load site is uniquely identified by
-	// the LoadHistoryChainTail + claudeDir guard pair. Walk every guard
-	// in the file and verify the fix invariants near each one. Since #458
-	// the load goes through the injected r.hist.loader.LoadHistoryChainTail
-	// rather than discovery.LoadHistoryChainTailCtx; matching the shorter
-	// "LoadHistoryChainTail" substring keeps the pin stable across both.
+	if strings.Contains(routerStr, "sess.InjectHistory(") {
+		t.Error("router_shim.go calls sess.InjectHistory, which appends onto " +
+			"history a startup loader may already have filled; use " +
+			"sess.InjectHistoryIfEmpty")
+	}
+
+	// Each block is a claudeDir guard followed within 1500 bytes by the
+	// injected r.hist.loader.LoadHistoryChainTail call.
 	const guard = "if r.hist.claudeDir != \"\""
 	idx := 0
 	checked := 0
@@ -48,62 +41,35 @@ func TestShimReconnect_NoDoubleInjectContract(t *testing.T) {
 			break
 		}
 		blockStart := idx + off
-		// Scan forward at most 1500 bytes for the matching LoadHistoryChainTail
-		// — this is the JSONL-load shape we care about.
-		windowEnd := blockStart + 1500
-		if windowEnd > len(routerStr) {
-			windowEnd = len(routerStr)
-		}
+		windowEnd := min(blockStart+1500, len(routerStr))
 		block := routerStr[blockStart:windowEnd]
+		idx = blockStart + len(guard)
 		if !strings.Contains(block, "LoadHistoryChainTail") {
-			idx = blockStart + len(guard)
 			continue
 		}
 		checked++
-
-		// Invariant 1: the load is gated by !sess.hasInjectedHistory() (or
-		// equivalent skip when persistedHistory is non-empty). Without
-		// this gate, tier1 + JSONL stack and persistedHistory grows
-		// duplicates internally.
-		if !strings.Contains(block, "hasInjectedHistory()") {
-			// Drift branch (line ~283) is allowed without the gate ONLY
-			// because it runs BEFORE any tier1 fires for that key (the
-			// shimManagedKeys claim suppresses NewRouter's deferred load).
-			// Identify the drift branch by its distinctive
-			// "drifted shim: backfilled JSONL history" log key.
-			if strings.Contains(block, "drifted shim") {
-				idx = blockStart + len(guard)
-				continue
-			}
-			t.Errorf("R231-CQ-1: JSONL-load block at offset %d lacks "+
-				"!sess.hasInjectedHistory() gate. Without it tier1 "+
-				"(NewRouter startup) and the shim-reconnect path race "+
-				"to populate persistedHistory and produce duplicate "+
-				"entries after the post-Reattach snapshot copies the "+
-				"already-injected prefix into proc.EventLog a second "+
-				"time. Block: %q", blockStart, firstLine(block))
+		if !strings.Contains(block, "!sess.hasInjectedHistory()") {
+			t.Errorf("JSONL-load block %q lacks the !sess.hasInjectedHistory() "+
+				"pre-check, so it re-reads JSONL for a session whose history "+
+				"is already loaded", firstLine(block))
 		}
-
-		// Invariant 2: the load result must be funnelled through
-		// sess.InjectHistory (NOT proc.InjectHistory). The direct
-		// proc.InjectHistory call bypasses persistedHistory and
-		// guarantees a duplicate when ReattachProcessNoCallback fires
-		// the snapshot copy below.
+		if !strings.Contains(block, "sess.InjectHistoryIfEmpty(histEntries)") {
+			t.Errorf("JSONL-load block %q does not inject through "+
+				"sess.InjectHistoryIfEmpty; a startup loader that fills history "+
+				"during the read gets a second copy appended", firstLine(block))
+		}
 		if strings.Contains(block, "proc.InjectHistory(histEntries)") {
-			t.Errorf("R231-CQ-1: JSONL-load block at offset %d still "+
-				"calls proc.InjectHistory(histEntries) directly. Route "+
-				"through sess.InjectHistory so persistedHistory tracks "+
-				"the load and the upcoming ReattachProcessNoCallback "+
-				"snapshot does not double-fill proc.EventLog.", blockStart)
+			t.Errorf("JSONL-load block %q calls proc.InjectHistory directly; "+
+				"ReattachProcessNoCallback's snapshot then double-fills "+
+				"proc.EventLog", firstLine(block))
 		}
-		idx = blockStart + len(guard)
 	}
 
-	if checked == 0 {
-		t.Fatal("router_shim.go has no JSONL-load block matching the " +
-			"`if r.hist.claudeDir != \"\"` + LoadHistoryChainTail shape. " +
-			"If the load site moved, update this contract test to find " +
-			"its new shape.")
+	if checked != 2 {
+		t.Fatalf("router_shim.go has %d JSONL-load blocks of the "+
+			"`if r.hist.claudeDir != \"\"` + LoadHistoryChainTail shape, want 2 "+
+			"(reconnect and drift backfill); if a load site moved, update this "+
+			"contract test to find its new shape", checked)
 	}
 }
 
