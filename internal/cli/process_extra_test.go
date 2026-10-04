@@ -991,6 +991,9 @@ func TestProcess_Accessors(t *testing.T) {
 	if tt := p.TotalTimeout(); tt != cliinfo.DefaultTotalTimeout {
 		t.Errorf("TotalTimeout() = %v, want the shared default %v", tt, cliinfo.DefaultTotalTimeout)
 	}
+	if DefaultNoOutputTimeout != cliinfo.DefaultNoOutputTimeout {
+		t.Errorf("DefaultNoOutputTimeout = %v, want the shared default %v", DefaultNoOutputTimeout, cliinfo.DefaultNoOutputTimeout)
+	}
 	if seq := p.LastSeq(); seq != 0 {
 		t.Errorf("LastSeq() = %d, want 0", seq)
 	}
