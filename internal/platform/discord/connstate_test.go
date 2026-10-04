@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -98,9 +100,13 @@ func TestConfigureSession_SyncEvents(t *testing.T) {
 // fakeGateway serves Discord's REST gateway lookup and a websocket gateway
 // that answers Hello / Identify / Resume. Each websocket handshake waits for
 // one value on hello, so a test can observe the state while Open is blocked.
+// A connection is published on conns only after the client's first
+// heartbeat, so closing it cannot fail that heartbeat and start a second
+// reconnect.
 type fakeGateway struct {
 	srv        *httptest.Server
 	restStatus int // non-zero: the gateway lookup fails with this status
+	dials      atomic.Int32
 	hello      chan struct{}
 	conns      chan *websocket.Conn
 	done       chan struct{}
@@ -135,6 +141,7 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	g.dials.Add(1)
 	select {
 	case <-g.hello:
 	case <-g.done:
@@ -158,6 +165,17 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	if conn.WriteJSON(reply) != nil {
 		return
+	}
+	for {
+		var msg struct {
+			Op int `json:"op"`
+		}
+		if conn.ReadJSON(&msg) != nil {
+			return
+		}
+		if msg.Op == 1 { // Heartbeat
+			break
+		}
 	}
 	g.conns <- conn
 	for {
@@ -239,6 +257,54 @@ func TestConnState_GatewayLifecycle(t *testing.T) {
 	}
 	if st, _ := d.ConnState(); st.State != platform.ConnConnected || !st.Since.Equal(back.Since) {
 		t.Fatalf("after Stop state = %+v, want connected since %v", st, back.Since)
+	}
+	if n := g.dials.Load(); n != 2 {
+		t.Fatalf("gateway saw %d connections, want 2 (one drop, one reconnect)", n)
+	}
+}
+
+// TestStop_BoundedWhileHandshakeHoldsLock: discordgo's Open holds the
+// session lock until Hello arrives, with no read deadline, so a gateway that
+// stalls a reconnect handshake leaves Close waiting on that lock. Holding the
+// lock here stands in for the stalled Open; Stop must still return.
+func TestStop_BoundedWhileHandshakeHoldsLock(t *testing.T) {
+	t.Parallel()
+	g := newFakeGateway(t, 0)
+	d := newGatewayAdapter(t, g)
+	d.closeTimeout = 100 * time.Millisecond
+	g.hello <- struct{}{}
+	if err := d.Start(func(context.Context, platform.IncomingMessage) {}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	<-g.conns
+	closed := make(chan struct{})
+	var closeOnce sync.Once
+	d.session.AddHandler(func(*discordgo.Session, *discordgo.Disconnect) {
+		closeOnce.Do(func() { close(closed) })
+	})
+
+	d.session.Lock()
+	var unlock sync.Once
+	release := func() { unlock.Do(d.session.Unlock) }
+	t.Cleanup(release)
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- d.Stop() }()
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	case <-time.After(connStateTestTimeout):
+		t.Fatal("Stop blocked behind the held session lock")
+	}
+
+	// The abandoned Close completes once the lock is free.
+	release()
+	select {
+	case <-closed:
+	case <-time.After(connStateTestTimeout):
+		t.Fatal("abandoned Close never finished")
 	}
 }
 
