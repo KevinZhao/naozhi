@@ -25,7 +25,7 @@ func TestCapabilityMatrixIsPinned(t *testing.T) {
 		"discord": {
 			InterimMessages: true, SingleUseReplyToken: false,
 			Reactions: true, QuestionCards: false, Runnable: true,
-			ConnState: false,
+			ConnState: true,
 		},
 		// Feishu is the only platform with native AskUserQuestion cards;
 		// everywhere else dispatch falls back to a plain-text option list.

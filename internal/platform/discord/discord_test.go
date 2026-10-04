@@ -421,13 +421,7 @@ func TestRESTSession_NoRedirect_SEC2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discordgo.New: %v", err)
 	}
-	// Mirror exactly what Start() does.
-	sess.Client = &http.Client{
-		Timeout: 20 * time.Second,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	New(Config{BotToken: "test-token"}).configureSession(sess)
 	if sess.Client == nil {
 		t.Fatal("sess.Client must not be nil after injection")
 	}

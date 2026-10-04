@@ -51,6 +51,10 @@ type Discord struct {
 	// dispatch bounds concurrent handler goroutines — each may download up to
 	// maxDiscordAttachmentsPerMessage × 10 MB — and tracks the self-heal for Stop().
 	dispatch platform.BoundedDispatch
+	// connState is fed by the gateway's Connect/Ready/Resumed/Disconnect events.
+	connState platform.ConnTracker
+	// restTransport replaces the REST client's transport; nil in production.
+	restTransport http.RoundTripper
 }
 
 // New creates a Discord platform adapter.
@@ -115,6 +119,9 @@ func (d *Discord) MaxReplyLength() int { return d.cfg.MaxReplyLen }
 
 func (d *Discord) SupportsInterimMessages() bool { return true }
 
+// ConnState implements platform.ConnStateReporter; ok=false until Start.
+func (d *Discord) ConnState() (platform.ConnState, bool) { return d.connState.Snapshot() }
+
 // RegisterRoutes is a no-op for Discord (WebSocket gateway, no inbound HTTP).
 func (d *Discord) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
 
@@ -141,36 +148,16 @@ func (d *Discord) Start(handler platform.MessageHandler) error {
 		return fmt.Errorf("create discord session: %w", err)
 	}
 
-	// discordgo's default client follows 3xx while keeping the Authorization
-	// header — SSRF / token leakage via a hostile redirect. Stop at hop one.
-	sess.Client = &http.Client{
-		Timeout: 20 * time.Second,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-
-	sess.Identify.Intents = discordgo.IntentsGuildMessages |
-		discordgo.IntentsDirectMessages |
-		discordgo.IntentMessageContent
-
-	sess.AddHandler(d.onMessageCreate)
-	// Open() can return before READY (Op 9 / Op 1 first packets), leaving
-	// State.User nil; backfill botID when READY arrives (#2009).
-	sess.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) {
-		if r != nil && r.User != nil {
-			d.setBotID(r.User.ID)
-			slog.Info("discord ready: bot identity set",
-				"bot_id", r.User.ID,
-				"bot_name", osutil.SanitizeForLog(r.User.Username, 128))
-		}
-	})
+	d.configureSession(sess)
 
 	// Assigned BEFORE Open() so handlers never see a nil d.session.
 	d.session = sess
 
+	d.connState.Set(platform.ConnConnecting)
 	if err := sess.Open(); err != nil {
 		d.session = nil
+		// The server refuses to start without the gateway, so nothing retries.
+		d.connState.Fail(platform.ConnFailed, err)
 		return fmt.Errorf("open discord gateway: %w", err)
 	}
 
@@ -185,6 +172,71 @@ func (d *Discord) Start(handler platform.MessageHandler) error {
 	}
 
 	return nil
+}
+
+// configureSession applies the REST client policy, intents and event handlers
+// Start gives every gateway session.
+func (d *Discord) configureSession(sess *discordgo.Session) {
+	// discordgo's default client follows 3xx while keeping the Authorization
+	// header — SSRF / token leakage via a hostile redirect. Stop at hop one.
+	sess.Client = &http.Client{
+		Timeout:   20 * time.Second,
+		Transport: d.restTransport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	sess.Identify.Intents = discordgo.IntentsGuildMessages |
+		discordgo.IntentsDirectMessages |
+		discordgo.IntentMessageContent
+
+	// Inline handlers see a drop's Disconnect before its reconnect's Connect;
+	// with a goroutine per event a late Disconnect could overwrite
+	// "connected". Connect and the first Ready fire inside Open under the
+	// session lock, so no handler may call back into sess. Messages keep
+	// their own goroutine.
+	sess.SyncEvents = true
+	sess.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
+		go d.onMessageCreate(s, m)
+	})
+	sess.AddHandler(d.onReady)
+	sess.AddHandler(d.onConnect)
+	sess.AddHandler(d.onResumed)
+	sess.AddHandler(d.onDisconnect)
+}
+
+// onReady marks the gateway connected and backfills botID: Open() can return
+// before READY (Op 9 / Op 1 first packets), leaving State.User nil (#2009).
+func (d *Discord) onReady(_ *discordgo.Session, r *discordgo.Ready) {
+	d.connState.Set(platform.ConnConnected)
+	if r != nil && r.User != nil {
+		d.setBotID(r.User.ID)
+		slog.Info("discord ready: bot identity set",
+			"bot_id", r.User.ID,
+			"bot_name", osutil.SanitizeForLog(r.User.Username, 128))
+	}
+}
+
+// onConnect: discordgo emits Connect once READY or RESUMED has arrived, at
+// the end of a successful Open (the first one and every reconnect).
+func (d *Discord) onConnect(_ *discordgo.Session, _ *discordgo.Connect) {
+	d.connState.Set(platform.ConnConnected)
+}
+
+func (d *Discord) onResumed(_ *discordgo.Session, _ *discordgo.Resumed) {
+	d.connState.Set(platform.ConnConnected)
+}
+
+// onDisconnect: discordgo emits Disconnect when it closes the websocket and,
+// unless Stop closed it, retries Open with backoff until one succeeds. Failed
+// attempts emit nothing, so Since stays at the drop. Stop leaves the state as
+// it was.
+func (d *Discord) onDisconnect(_ *discordgo.Session, _ *discordgo.Disconnect) {
+	if d.stopCtx != nil && d.stopCtx.Err() != nil {
+		return
+	}
+	d.connState.Set(platform.ConnDisconnected)
 }
 
 // Stop implements RunnablePlatform. Closes Discord WebSocket gateway.
