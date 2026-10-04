@@ -110,6 +110,7 @@ type sessionSettlement struct {
 	FlaggedUSD, ResidualUSD       float64
 	FlaggedN, ResidualDays        int
 	UnpricedDays, AlreadyFlaggedN int
+	HeldDays                      int    // days an unattributed entry shared a key with
 	Skipped                       string // why nothing was settled; "" when settled
 }
 
@@ -161,7 +162,7 @@ func reconcileLedger(o reconcileOpts, out io.Writer) (reconcileReport, error) {
 	if err != nil {
 		return rep, err
 	}
-	rep.Unattributed = l.attribute(sessionRunIDs(o.SessionStorePath), soleSessionIDs(o.SessionStorePath))
+	rep.Unattributed = l.attribute(sessionAttribution(o.SessionStorePath))
 
 	order := l.order()
 	if o.Session != "" {
@@ -186,7 +187,7 @@ func reconcileLedger(o reconcileOpts, out io.Writer) (reconcileReport, error) {
 		firstDay = c // the oldest day file may be half swept
 	}
 	for _, in := range settled {
-		st := settleSession(in, l.bySID[in.sid], l.runIDs, l.rates, firstDay, o.Until, &rep)
+		st := settleSession(in, l.bySID[in.sid], l, firstDay, o.Until, &rep)
 		rep.Sessions = append(rep.Sessions, st)
 	}
 
@@ -207,18 +208,28 @@ func reconcileLedger(o reconcileOpts, out io.Writer) (reconcileReport, error) {
 }
 
 // ledgerSessions is the ledger read once: session entries grouped by the CLI
-// session they were charged for, every run id seen, and a rate book learned
-// from every CLI-priced turn row.
+// session they were charged for, the key-days of those no session could be
+// named for, every run id seen, and a rate book learned from every
+// CLI-priced turn row.
 type ledgerSessions struct {
-	entries []costledger.Entry // session-source claude USD entries, not yet attributed
-	bySID   map[string][]costledger.Entry
-	runIDs  map[string]bool
-	rates   *costledger.RateBook
-	first   time.Time // oldest entry of any source
+	entries    []costledger.Entry // session-source claude USD entries, not yet attributed
+	bySID      map[string][]costledger.Entry
+	unassigned map[keyDay]bool
+	runIDs     map[string]bool
+	rates      *costledger.RateBook
+	first      time.Time // oldest entry of any source
+}
+
+// keyDay is a session key on a UTC day (YYYY-MM-DD).
+type keyDay struct{ key, day string }
+
+func keyDayOf(e costledger.Entry) keyDay {
+	return keyDay{e.SessionKey, e.TS.UTC().Format(time.DateOnly)}
 }
 
 func loadLedgerSessions(store *costledger.Store, from, now time.Time) (*ledgerSessions, error) {
-	l := &ledgerSessions{bySID: map[string][]costledger.Entry{}, runIDs: map[string]bool{}, rates: costledger.NewRateBook()}
+	l := &ledgerSessions{bySID: map[string][]costledger.Entry{}, unassigned: map[keyDay]bool{},
+		runIDs: map[string]bool{}, rates: costledger.NewRateBook()}
 	err := store.Scan(costledger.Query{From: from, To: now.Add(24 * time.Hour), AllowFullRange: true}, func(e costledger.Entry) bool {
 		if l.first.IsZero() || e.TS.Before(l.first) {
 			l.first = e.TS
@@ -248,7 +259,7 @@ func loadLedgerSessions(store *costledger.Store, from, now time.Time) (*ledgerSe
 // attribute names each entry's CLI session: from its own run id (process-end
 // partials and reconcile adjustments carry it), from the session-runs record
 // sharing its run id, or from a key that only ever held one session. It
-// returns how many entries none of these placed.
+// returns how many entries none of these placed and records their key-days.
 func (l *ledgerSessions) attribute(runSID, keySID map[string]string) (unattributed int) {
 	for _, e := range l.entries {
 		sid := runIDSession(e.RunID)
@@ -260,6 +271,7 @@ func (l *ledgerSessions) attribute(runSID, keySID map[string]string) (unattribut
 		}
 		if !claudefs.IsValidSessionID(sid) {
 			unattributed++
+			l.unassigned[keyDayOf(e)] = true
 			continue
 		}
 		l.bySID[sid] = append(l.bySID[sid], e)
@@ -297,28 +309,45 @@ func (l *ledgerSessions) order() []string {
 	return out
 }
 
-// sessionRunIDs maps run id to CLI session id from the session-runs records.
-func sessionRunIDs(storePath string) map[string]string {
-	m := map[string]string{}
+// sessionAttribution maps run id to CLI session id from the session-runs
+// records, and each session key to the one CLI session it ever held. A key
+// whose records and sessions.json chain together name more than one session
+// is ambiguous and left out.
+func sessionAttribution(storePath string) (byRun, byKey map[string]string) {
+	byRun = map[string]string{}
+	held := map[string]map[string]bool{}
+	hold := func(key, sid string) {
+		if held[key] == nil {
+			held[key] = map[string]bool{}
+		}
+		held[key][sid] = true
+	}
 	runlog.WalkRecords(datadir.ForStore(storePath).SessionRunsRoot(), func(string, error) {}, func(rec runlog.Record) {
 		var r runhistory.SessionRun
-		if json.Unmarshal(rec.Raw, &r) == nil && r.RunID != "" && r.SessionID != "" {
-			m[r.RunID] = r.SessionID
+		if json.Unmarshal(rec.Raw, &r) != nil || r.SessionID == "" {
+			return
+		}
+		if r.RunID != "" {
+			byRun[r.RunID] = r.SessionID
+		}
+		if r.SessionKey != "" {
+			hold(r.SessionKey, r.SessionID)
 		}
 	})
-	return m
-}
-
-// soleSessionIDs maps the session keys that only ever held one CLI session
-// to it; a key with a chain is ambiguous and left out.
-func soleSessionIDs(storePath string) map[string]string {
-	m := map[string]string{}
 	for key, ids := range session.StoredSessionIDs(storePath) {
-		if len(ids) == 1 {
-			m[key] = ids[0]
+		for _, id := range ids {
+			hold(key, id)
 		}
 	}
-	return m
+	byKey = map[string]string{}
+	for key, ids := range held {
+		if len(ids) == 1 {
+			for id := range ids {
+				byKey[key] = id
+			}
+		}
+	}
+	return byRun, byKey
 }
 
 // sessionInputs is what a session's transcripts say.
@@ -395,6 +424,48 @@ func restoredBy(marks []claudefs.CostStateMark, ts time.Time) (claudefs.CostStat
 	return best, found
 }
 
+// restoreRows negates, row by row of e, the share of m's usage that row
+// carried, so a flag lands in e's own model buckets and never takes one
+// below what e added to it. An entry without rows gets none.
+func restoreRows(e costledger.Entry, m claudefs.CostStateMark) []costledger.ModelDelta {
+	left := map[string]*costledger.ModelDelta{}
+	for _, d := range costStateRows(m) {
+		k := costledger.RateKey(d.Model)
+		if left[k] == nil {
+			left[k] = &costledger.ModelDelta{}
+		}
+		addRow(left[k], d)
+	}
+	var out []costledger.ModelDelta
+	for _, r := range e.Models {
+		l := left[costledger.RateKey(r.Model)]
+		if l == nil {
+			continue
+		}
+		take := r
+		take.CostUSD = min(r.CostUSD, l.CostUSD)
+		take.Input, take.Output = min(r.Input, l.Input), min(r.Output, l.Output)
+		take.CacheRead, take.CacheWrite = min(r.CacheRead, l.CacheRead), min(r.CacheWrite, l.CacheWrite)
+		take.Thinking, take.WebSearch = min(r.Thinking, l.Thinking), min(r.WebSearch, l.WebSearch)
+		addRow(l, negate(take))
+		if take.CostUSD > 0 || take.Tokens != (costledger.Tokens{}) {
+			out = append(out, negate(take))
+		}
+	}
+	return out
+}
+
+// addRow adds d's cost and tokens to r.
+func addRow(r *costledger.ModelDelta, d costledger.ModelDelta) {
+	r.CostUSD += d.CostUSD
+	r.Input += d.Input
+	r.Output += d.Output
+	r.CacheRead += d.CacheRead
+	r.CacheWrite += d.CacheWrite
+	r.Thinking += d.Thinking
+	r.WebSearch += d.WebSearch
+}
+
 // chargesRestore reports whether e charged m's total on top of its own turn.
 // A turn differenced from a baseline of 0 also carries every restored token
 // in its model rows, which a correctly baselined turn after a large restore
@@ -418,10 +489,14 @@ func tokenSum(rows []costledger.ModelDelta) int64 {
 }
 
 // settleSession plans one session's adjustments into rep and returns its row.
-func settleSession(in *sessionInputs, entries []costledger.Entry, runIDs map[string]bool, rates *costledger.RateBook, firstDay, until time.Time, rep *reconcileReport) sessionSettlement {
+// A day on which an entry no session could be named for shares a key with
+// this session's entries gets no residual: its spend may be in this
+// transcript and is already in the ledger.
+func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessions, firstDay, until time.Time, rep *reconcileReport) sessionSettlement {
 	st := sessionSettlement{SessionID: in.sid, Entries: len(entries), Skipped: in.skipped}
 	settles := func(t time.Time) bool { return !t.Before(firstDay) && t.Before(until) }
 	ledger := map[string]*dayFigures{}
+	held := map[string]bool{}
 	day := func(d string) *dayFigures {
 		if ledger[d] == nil {
 			ledger[d] = &dayFigures{models: map[string]*costledger.ModelDelta{}}
@@ -430,7 +505,9 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, runIDs map[str
 	}
 	for _, e := range entries {
 		if settles(e.TS) {
-			day(e.TS.UTC().Format(time.DateOnly)).add(e)
+			kd := keyDayOf(e)
+			day(kd.day).add(e)
+			held[kd.day] = held[kd.day] || l.unassigned[kd]
 			st.Before += e.Amount
 		}
 	}
@@ -448,14 +525,12 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, runIDs map[str
 			continue
 		}
 		runID := reconcilePrefix + in.sid + ":run:" + e.RunID
-		if runIDs[runID] {
+		if l.runIDs[runID] {
 			st.AlreadyFlaggedN++
 			continue
 		}
 		adj := adjustOf(e, runID, -m.TotalCostUSD)
-		for _, d := range costStateRows(m) {
-			adj.Models = append(adj.Models, negate(d))
-		}
+		adj.Models = restoreRows(e, m)
 		rep.Flagged = append(rep.Flagged, flaggedEntry{SessionID: in.sid, Entry: e, Restored: m.TotalCostUSD})
 		rep.Planned = append(rep.Planned, adj)
 		day(e.TS.UTC().Format(time.DateOnly)).add(adj)
@@ -478,7 +553,7 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, runIDs map[str
 		if !settles(start) {
 			continue
 		}
-		t, ok := priceDay(in.usage.Days[d], rates)
+		t, ok := priceDay(in.usage.Days[d], l.rates)
 		if !ok {
 			st.UnpricedDays++
 			continue
@@ -487,6 +562,10 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, runIDs map[str
 		lf := day(d)
 		diff := t.usd - lf.usd
 		if math.Abs(diff) <= max(residualFloor, residualShare*t.usd) {
+			continue
+		}
+		if held[d] {
+			st.HeldDays++
 			continue
 		}
 		adj := adjustOf(lastBefore(entries, start.Add(24*time.Hour)), reconcilePrefix+in.sid+":day:"+d, diff)
@@ -508,7 +587,8 @@ func adjustOf(e costledger.Entry, runID string, amount float64) costledger.Entry
 }
 
 // lastBefore returns the last of the (time-ordered) entries before t, or the
-// first entry when none is.
+// first entry when none is. A day's residual is booked under that entry's
+// key alone, even when the day's spend ran under several.
 func lastBefore(entries []costledger.Entry, t time.Time) costledger.Entry {
 	last := entries[0]
 	for _, e := range entries {
@@ -542,11 +622,7 @@ func (f *dayFigures) add(e costledger.Entry) {
 			r = &costledger.ModelDelta{Model: m.Model}
 			f.models[k] = r
 		}
-		r.CostUSD += m.CostUSD
-		r.Input += m.Input
-		r.Output += m.Output
-		r.CacheRead += m.CacheRead
-		r.CacheWrite += m.CacheWrite
+		addRow(r, m)
 	}
 }
 
@@ -632,6 +708,9 @@ func printReconcile(out io.Writer, rep reconcileReport, write bool) {
 			if s.AlreadyFlaggedN > 0 {
 				note += fmt.Sprintf("；已修正过 %d 条", s.AlreadyFlaggedN)
 			}
+			if s.HeldDays > 0 {
+				note += fmt.Sprintf("；%d 天有同 key 的未归属条目，残差未记", s.HeldDays)
+			}
 			if s.UnpricedDays > 0 {
 				note += fmt.Sprintf("；%d 天含未学到单价的模型，未比对", s.UnpricedDays)
 			}
@@ -641,7 +720,7 @@ func printReconcile(out io.Writer, rep reconcileReport, write bool) {
 	}
 	fmt.Fprintf(out, "%-8s %5s %11.2f %11.2f %11.2f %+11.2f\n", "合计", "", before, after, transcript, after-before)
 	if rep.Unattributed > 0 {
-		fmt.Fprintf(out, "%d 条会话条目归不到 CLI session（无 run 记录，key 也对应多个 session），未参与对账\n", rep.Unattributed)
+		fmt.Fprintf(out, "%d 条会话条目归不到 CLI session（无 run 记录，key 也对应多个 session），未参与对账；同 key 同日的残差不记\n", rep.Unattributed)
 	}
 	if len(rep.Flagged) > 0 {
 		fmt.Fprintln(out, "\n计入了 --resume 恢复总额的条目：")

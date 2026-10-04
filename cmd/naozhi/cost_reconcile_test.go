@@ -29,8 +29,9 @@ const (
 // over-charge: a first day of genuine spend that ends in a cost-state of
 // $929.98, then two resumed processes on the next day that each charged that
 // total again on top of their own turn ($30 and $20), plus a workflow agent's
-// $50 no result ever booked. Prices are $1 per 1000 cache-read tokens, which
-// every CLI-priced row in the ledger teaches.
+// $50 no result ever booked and a $5 turn no Send owned, booked under a key
+// renamed away with no run record of its own. Prices are $1 per 1000
+// cache-read tokens, which every CLI-priced row in the ledger teaches.
 type reconcileFixture struct {
 	opts            reconcileOpts
 	d1, d2, d3      time.Time
@@ -54,6 +55,7 @@ func newReconcileFixture(t *testing.T) reconcileFixture {
 		rcLine("assistant", at(f.d2, 9).Add(time.Minute), "msg_2", 30000),
 		rcLine("queue-operation", at(f.d2, 15), "", 0),
 		rcLine("assistant", at(f.d2, 15).Add(time.Minute), "msg_3", 20000),
+		rcLine("assistant", at(f.d2, 16).Add(time.Minute), "msg_5", 5000),
 		rcLine("assistant", at(f.d3, 10), "msg_x", 5000, "claude-mystery-9"), // a model no row priced
 	)
 	writeRaw(t, filepath.Join(claudefs.SubagentsDir(proj, rcSID), "workflows", "wf_1", "agent-a1.jsonl"),
@@ -67,6 +69,7 @@ func newReconcileFixture(t *testing.T) reconcileFixture {
 	writeJSON(t, filepath.Join(runs, "abcd", "1111111111111111.json"), runhistory.SessionRun{RunID: "1111111111111111", SessionKey: rcKey, SessionID: rcSID})
 	writeJSON(t, filepath.Join(runs, "abcd", "3333333333333333.json"), runhistory.SessionRun{RunID: "3333333333333333", SessionKey: rcKey, SessionID: rcSID})
 	writeJSON(t, filepath.Join(runs, "abcd", "7777777777777777.json"), runhistory.SessionRun{RunID: "7777777777777777", SessionKey: "dashboard:direct:lost:general", SessionID: rcLost})
+	writeJSON(t, filepath.Join(runs, "abcd", "8888888888888888.json"), runhistory.SessionRun{RunID: "8888888888888888", SessionKey: rcRenamed, SessionID: rcSID})
 
 	turn := func(ts time.Time, runID string, usd float64) costledger.Entry {
 		return costledger.Entry{TS: ts, Source: costledger.SourceSession, Kind: costledger.KindTurn, SessionKey: rcKey,
@@ -80,19 +83,26 @@ func newReconcileFixture(t *testing.T) reconcileFixture {
 	f.partial = costledger.Entry{TS: at(f.d2, 17), Source: costledger.SourceSession, Kind: costledger.KindPartial, SessionKey: rcRenamed,
 		RunID: "end:" + rcSID + ":p1", Backend: "claude", Unit: costledger.UnitUSD, Amount: 10,
 		Models: []costledger.ModelDelta{{Model: rcModel, CostUSD: 10, Tokens: costledger.Tokens{CacheRead: 10000}}}}
-	today := turn(until.Add(time.Hour), "4444444444444444", 929.98) // today: left alone
-	chained := turn(at(f.d2, 1), "5555555555555555", 3)             // key held two sessions: unattributed
-	cron := turn(at(f.d2, 2), "6666666666666666", 929.98)           // cron books its own
-	lost := turn(at(f.d2, 3), "7777777777777777", 2)                // its transcript is gone
+	today := turn(until.Add(time.Hour), "4444444444444444", 929.98)         // today: left alone
+	chained := turn(at(f.d2, 1), "5555555555555555", 3)                     // key held two sessions: unattributed
+	cron := turn(at(f.d2, 2), "6666666666666666", 929.98)                   // cron books its own
+	lost := turn(at(f.d2, 3), "7777777777777777", 2)                        // its transcript is gone
+	unowned := turn(at(f.d2, 16).Add(2*time.Minute), "9999999999999999", 5) // only its key's run records name the session
 	chained.SessionKey, cron.SessionKey, lost.SessionKey = "dashboard:direct:chained:general", "cron:0123456789abcdef", "dashboard:direct:lost:general"
+	unowned.SessionKey = rcRenamed
+	f.seed(t, e1, f.e2, f.e3, f.partial, today, chained, cron, lost, unowned)
+	return f
+}
+
+func (f reconcileFixture) seed(t *testing.T, entries ...costledger.Entry) {
+	t.Helper()
 	store := costledger.NewStore(datadir.ForStore(f.opts.SessionStorePath).CostRoot(), costledger.Options{})
-	for _, e := range []costledger.Entry{e1, f.e2, f.e3, f.partial, today, chained, cron, lost} {
+	defer store.Close()
+	for _, e := range entries {
 		if !store.Append(e) {
 			t.Fatalf("seed %s rejected", e.RunID)
 		}
 	}
-	store.Close()
-	return f
 }
 
 func rcLine(typ string, ts time.Time, id string, cacheRead int64, model ...string) string {
@@ -111,7 +121,7 @@ func rcLine(typ string, ts time.Time, id string, cacheRead int64, model ...strin
 
 func rcCostState(usd float64, cacheRead int64) string {
 	b, _ := json.Marshal(map[string]any{"type": "cost-state", "sessionId": rcSID, "totalCostUSD": usd,
-		"modelUsage": map[string]any{rcModel + "[1m]": map[string]any{"cacheReadInputTokens": cacheRead, "costUSD": usd}}})
+		"modelUsage": map[string]any{"global.anthropic." + rcModel + "[1m]": map[string]any{"cacheReadInputTokens": cacheRead, "costUSD": usd}}})
 	return string(b)
 }
 
@@ -185,14 +195,18 @@ func TestReconcile_DryRunPlansTheDoubleRestoreAndWritesNothing(t *testing.T) {
 			t.Errorf("flag adjust %d = %+v", i, adj)
 		}
 		if len(adj.Models) != 1 || adj.Models[0].Model != rcModel || adj.Models[0].CacheRead != -929980 || !near(adj.Models[0].CostUSD, -929.98) {
-			t.Errorf("flag adjust %d rows = %+v, want the restored row negated", i, adj.Models)
+			t.Errorf("flag adjust %d rows = %+v, want the restored row negated under the entry's model", i, adj.Models)
 		}
 	}
-	// Day two: transcript 30+20+50 = 100 against 959.98+949.98+10 booked,
-	// less the two restores: 60 booked, so 40 is missing.
+	// Day two: transcript 30+20+5+50 = 105 against 959.98+949.98+5+10
+	// booked, less the two restores: 65 booked, so 40 is missing. It is
+	// booked under the day's last key, not the session's first.
 	res := rep.Planned[2]
 	if !near(res.Amount, 40) || res.RunID != "reconcile:"+rcSID+":day:"+f.d2.Format(time.DateOnly) || res.TS.Format(time.DateOnly) != f.d2.Format(time.DateOnly) {
 		t.Errorf("residual = %+v, want +40 on day two", res)
+	}
+	if res.SessionKey != rcRenamed {
+		t.Errorf("residual booked under %q, want the day's last key %q", res.SessionKey, rcRenamed)
 	}
 	if len(res.Models) != 1 || math.Abs(res.Models[0].CostUSD-40) > 1e-6 || res.Models[0].CacheRead != 40000 {
 		t.Errorf("residual rows = %+v, want +40 / 40000 cache-read", res.Models)
@@ -206,8 +220,8 @@ func TestReconcile_DryRunPlansTheDoubleRestoreAndWritesNothing(t *testing.T) {
 			t.Errorf("session without a transcript was settled: %+v", st)
 		}
 	}
-	if s.UnpricedDays != 1 || !near(s.Transcript, 1029.98) || !near(s.After, 1029.98) {
-		t.Errorf("settlement = %+v, want after = transcript = 1029.98 and day three unpriced", s)
+	if s.UnpricedDays != 1 || !near(s.Transcript, 1034.98) || !near(s.After, 1034.98) {
+		t.Errorf("settlement = %+v, want after = transcript = 1034.98 and day three unpriced", s)
 	}
 	if rep.Unattributed != 1 {
 		t.Errorf("unattributed = %d, want 1 (the key with a session chain)", rep.Unattributed)
@@ -223,8 +237,28 @@ func TestReconcile_WriteSettlesAndASecondRunAppendsNothing(t *testing.T) {
 	if err != nil || rep.Appended != 3 {
 		t.Fatalf("appended %d err=%v, want 3", rep.Appended, err)
 	}
-	if got := sessionTotal(t, f.opts.SessionStorePath, f.d1, f.opts.Until); !near(got, 1029.98) {
-		t.Errorf("ledger total for the settled days = %v, want the transcript's 1029.98", got)
+	if got := sessionTotal(t, f.opts.SessionStorePath, f.d1, f.opts.Until); !near(got, 1034.98) {
+		t.Errorf("ledger total for the settled days = %v, want the transcript's 1034.98", got)
+	}
+	// The drill-down nets out to the transcript under the model the turns
+	// were booked as, with no bucket named after the cost-state's key.
+	ro := costledger.OpenReadOnly(datadir.ForStore(f.opts.SessionStorePath).CostRoot(), costledger.Options{})
+	defer ro.Close()
+	models := map[string]costledger.Bucket{}
+	for _, key := range []string{rcKey, rcRenamed} {
+		sum, err := ro.Summarize(costledger.Query{From: f.d1, To: f.opts.Until, SessionKey: key, GroupBy: costledger.GroupByModel})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, b := range sum.Buckets {
+			m := models[b.Key]
+			m.Amount += b.Amount
+			m.Tokens.CacheRead += b.Tokens.CacheRead
+			models[b.Key] = m
+		}
+	}
+	if m := models[rcModel]; len(models) != 1 || !near(m.Amount, 1034.98) || m.Tokens.CacheRead != 1034980 {
+		t.Errorf("model buckets %+v, want only %s at the transcript's 1034.98 / 1034980 cache-read", models, rcModel)
 	}
 	if got := sessionTotal(t, f.opts.SessionStorePath, f.opts.Until, f.opts.Until.Add(24*time.Hour)); !near(got, 929.98) {
 		t.Errorf("today's total = %v, want it untouched", got)
@@ -237,6 +271,50 @@ func TestReconcile_WriteSettlesAndASecondRunAppendsNothing(t *testing.T) {
 	}
 	if !mapsEqual(ledgerSnapshot(t, f.opts.SessionStorePath), before) {
 		t.Error("second run changed the ledger")
+	}
+}
+
+// A day on which an entry no session could be named for shares a key with
+// the session's own entries gets no residual: that entry's spend may be in
+// the session's transcript and is already in the ledger.
+func TestReconcile_HoldsADayAnUnattributedEntryMayBelongTo(t *testing.T) {
+	f := newReconcileFixture(t)
+	const chained = "dashboard:direct:chained:general"
+	writeJSON(t, filepath.Join(datadir.ForStore(f.opts.SessionStorePath).SessionRunsRoot(), "abcd", "aaaaaaaaaaaaaaaa.json"),
+		runhistory.SessionRun{RunID: "aaaaaaaaaaaaaaaa", SessionKey: chained, SessionID: rcSID})
+	f.seed(t, costledger.Entry{TS: f.d2.Add(4 * time.Hour), Source: costledger.SourceSession, Kind: costledger.KindTurn, SessionKey: chained,
+		RunID: "aaaaaaaaaaaaaaaa", Backend: "claude", Unit: costledger.UnitUSD, Amount: 1})
+	var out bytes.Buffer
+	rep, err := reconcileLedger(f.opts, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Flagged) != 2 || len(rep.Planned) != 2 {
+		t.Fatalf("flagged %d planned %d, want the two flags and no residual\n%s", len(rep.Flagged), len(rep.Planned), out.String())
+	}
+	for _, st := range rep.Sessions {
+		if st.SessionID == rcSID && st.HeldDays != 1 {
+			t.Errorf("held days = %d, want 1\n%s", st.HeldDays, out.String())
+		}
+	}
+}
+
+// A flag's rows land in the flagged entry's own model buckets, whatever the
+// cost-state calls the model, take no more than the entry's row carried, and
+// an entry booked without rows gets none.
+func TestRestoreRows(t *testing.T) {
+	m := claudefs.CostStateMark{CostState: claudefs.CostState{TotalCostUSD: 584.17, ModelUsage: json.RawMessage(
+		`{"global.anthropic.claude-opus-5[1m]":{"cacheReadInputTokens":584170,"outputTokens":900,"costUSD":584.17}}`)}}
+	e := costledger.Entry{Amount: 600, Models: []costledger.ModelDelta{{Model: "claude-opus-5", RawModel: "global.anthropic.claude-opus-5[1m]",
+		Provider: "bedrock", Basis: costledger.BasisList, CostUSD: 600, Tokens: costledger.Tokens{CacheRead: 600000, Output: 500}}}}
+	got := restoreRows(e, m)
+	want := costledger.ModelDelta{Model: "claude-opus-5", RawModel: "global.anthropic.claude-opus-5[1m]", Provider: "bedrock",
+		Basis: costledger.BasisList, CostUSD: -584.17, Tokens: costledger.Tokens{CacheRead: -584170, Output: -500}}
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("restoreRows = %+v, want [%+v]", got, want)
+	}
+	if got := restoreRows(costledger.Entry{Amount: 600}, m); got != nil {
+		t.Errorf("row-less entry got rows %+v", got)
 	}
 }
 
