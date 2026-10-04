@@ -74,10 +74,10 @@ func TestHandleShimCLIExited_StderrTail(t *testing.T) {
 			frames: []string{
 				`{"type":"stderr","line":"loading"}`,
 				`{"type":"stderr","line":"   "}`,
-				`{"type":"stderr","line":"Error: Invalid MCP configuration"}`,
+				`{"type":"stderr","line":"Error: Invalid API key sk-ant-abcdefghijklmnop"}`,
 				`{"type":"cli_exited","code":1}`,
 			},
-			wantTail: []string{"loading", "Error: Invalid MCP configuration"},
+			wantTail: []string{"loading", "Error: Invalid API key [REDACTED]"},
 			wantWarn: true,
 		},
 		{
@@ -148,6 +148,12 @@ func TestShimLineReader_InitExitCarriesStderrCause(t *testing.T) {
 			name:   "tail on the exit frame",
 			frames: `{"type":"cli_exited","code":3,"stderr_tail":["node: not found","more"]}` + "\n",
 			want:   "cli exited during init (code 3): node: not found",
+		},
+		{
+			name: "error line is quoted over the lines before it",
+			frames: `{"type":"cli_exited","code":1,"stderr_tail":["node:internal/modules/cjs/loader:1228",` +
+				`"  throw err;","Error: Cannot find module 'x'","    at Module._load (loader:1:1)"]}` + "\n",
+			want: "cli exited during init (code 1): Error: Cannot find module 'x'",
 		},
 		{
 			name:   "no stderr",

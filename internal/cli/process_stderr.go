@@ -37,11 +37,19 @@ func (p *Process) adoptExitStderrTail(frameTail []string) []string {
 	return p.stderrTail.Lines()
 }
 
-// stderrTailSummary is the first tail line capped at stderrSummaryRunes, for
-// one-line error text; "" when tail is empty.
+// stderrTailSummary is the first error line of tail (shim.IsStderrErrorLine),
+// else its first line, capped at stderrSummaryRunes for one-line error text;
+// "" when tail is empty.
 func stderrTailSummary(tail []string) string {
 	if len(tail) == 0 {
 		return ""
 	}
-	return textutil.TruncateRunes(tail[0], stderrSummaryRunes)
+	line := tail[0]
+	for _, l := range tail {
+		if shim.IsStderrErrorLine(l) {
+			line = l
+			break
+		}
+	}
+	return textutil.TruncateRunes(line, stderrSummaryRunes)
 }

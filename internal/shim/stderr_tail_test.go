@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 func TestStderrTail_KeepsLastLines(t *testing.T) {
@@ -55,6 +56,102 @@ func TestStderrTail_CapsLineOnRuneBoundary(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "é") {
 		t.Fatalf("line cut mid-rune: tail %q", got[len(got)-4:])
+	}
+}
+
+func TestStderrTail_CappedLineDoesNotPinInput(t *testing.T) {
+	t.Parallel()
+	var tail StderrTail
+	long := strings.Repeat("x", 1<<20)
+	tail.Push(long)
+	got := tail.Lines()[0]
+	if len(got) != StderrTailLineBytes {
+		t.Fatalf("kept line is %d bytes, want %d", len(got), StderrTailLineBytes)
+	}
+	if unsafe.StringData(got) == unsafe.StringData(long) {
+		t.Fatal("capped line shares the input's backing array")
+	}
+}
+
+// nodeCrashStderr is an uncaught node exception: the cause line is followed by
+// more than StderrTailLines lines of stack and trailer.
+var nodeCrashStderr = []string{
+	"node:internal/modules/cjs/loader:1228",
+	"  throw err;",
+	"  ^",
+	"",
+	"Error: Cannot find module '/opt/claude/cli.js'",
+	"    at Module._resolveFilename (node:internal/modules/cjs/loader:1225:15)",
+	"    at Module._load (node:internal/modules/cjs/loader:1051:27)",
+	"    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:142:12)",
+	"    at node:internal/main/run_main_module:28:49 {",
+	"  code: 'MODULE_NOT_FOUND',",
+	"  requireStack: []",
+	"}",
+	"",
+	"Node.js v20.10.0",
+}
+
+func TestStderrTail_KeepsFirstErrorLine(t *testing.T) {
+	t.Parallel()
+	var tail StderrTail
+	for _, l := range nodeCrashStderr {
+		tail.Push(l)
+	}
+	// The cause takes the oldest slot, so the tail stays StderrTailLines long.
+	want := []string{
+		"Error: Cannot find module '/opt/claude/cli.js'",
+		"    at Module._load (node:internal/modules/cjs/loader:1051:27)",
+		"    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:142:12)",
+		"    at node:internal/main/run_main_module:28:49 {",
+		"  code: 'MODULE_NOT_FOUND',",
+		"  requireStack: []",
+		"}",
+		"Node.js v20.10.0",
+	}
+	if got := tail.Lines(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Lines() = %q,\nwant %q", got, want)
+	}
+
+	// While the cause is still in the window nothing is moved, and Replace
+	// forgets the old cause.
+	tail.Replace([]string{"TypeError: x is not a function", "    at f (a.js:1:1)"})
+	if got := tail.Lines(); !reflect.DeepEqual(got, []string{"TypeError: x is not a function", "    at f (a.js:1:1)"}) {
+		t.Fatalf("after Replace Lines() = %q", got)
+	}
+	var frames []string
+	for i := 1; i <= StderrTailLines+4; i++ {
+		frames = append(frames, fmt.Sprintf("    at f%d (a.js:1:1)", i))
+	}
+	tail.Replace(frames)
+	if got := tail.Lines(); got[0] != frames[4] {
+		t.Fatalf("Replace kept a stale cause: Lines()[0] = %q, want %q", got[0], frames[4])
+	}
+
+	// The first error line is the cause, not a later one.
+	tail.Replace(append(append([]string{"Error: first"}, frames...), "Error: second"))
+	if got := tail.Lines(); got[0] != "Error: first" {
+		t.Fatalf("Lines()[0] = %q, want the first error line", got[0])
+	}
+}
+
+func TestIsStderrErrorLine(t *testing.T) {
+	t.Parallel()
+	for line, want := range map[string]bool{
+		"Error: No conversation found with session ID: abc":   true,
+		"TypeError: Cannot read properties of undefined":      true,
+		"  Error [ERR_MODULE_NOT_FOUND]: Cannot find package": true,
+		"error: Cannot find module 'x' from '/b'":             true,
+		"node:internal/modules/cjs/loader:1228":               false,
+		"    at Module._load (node:internal/loader:1051:27)":  false,
+		"Some Error: spaced label":                            false,
+		"Errors: 3":                                           false,
+		"no colon Error":                                      false,
+		": Error":                                             false,
+	} {
+		if got := IsStderrErrorLine(line); got != want {
+			t.Errorf("IsStderrErrorLine(%q) = %v, want %v", line, got, want)
+		}
 	}
 }
 
