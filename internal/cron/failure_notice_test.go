@@ -57,7 +57,7 @@ func TestFailureNoticeBody(t *testing.T) {
 // holds it to the notice table.
 var allTurnCauses = []TurnCause{
 	TurnCauseMaxTurns, TurnCauseBudget, TurnCauseRefused, TurnCauseTruncated,
-	TurnCauseContextTooLong, TurnCauseQuota, TurnCauseBackendOverloaded,
+	TurnCauseContextTooLong, TurnCauseQuota, TurnCausePermission, TurnCauseBackendOverloaded,
 	TurnCauseBackendRateLimited, TurnCauseBackendAuth, TurnCauseBackendInvalid,
 	TurnCauseBackendUnreachable,
 }
@@ -80,6 +80,7 @@ func TestFailureNoticeBody_TurnCause(t *testing.T) {
 		{TurnCauseTruncated, "执行未完成（回复超出模型单次输出上限），请检查执行历史 · run 1a2b3c4d"},
 		{TurnCauseContextTooLong, "执行失败（对话上下文已超出模型上限），请检查执行历史 · run 1a2b3c4d"},
 		{TurnCauseQuota, "执行失败（API 额度已用尽），请联系管理员 · run 1a2b3c4d"},
+		{TurnCausePermission, "执行失败（请求被拒绝：权限或内容策略），请联系管理员 · run 1a2b3c4d"},
 		{TurnCauseBackendOverloaded, "执行失败（后端服务负载较高），请检查执行历史 · run 1a2b3c4d"},
 		{TurnCauseBackendRateLimited, "执行失败（后端调用过于频繁），请检查执行历史 · run 1a2b3c4d"},
 		{TurnCauseBackendAuth, "执行失败（后端认证失败或凭证已过期），请联系管理员 · run 1a2b3c4d"},

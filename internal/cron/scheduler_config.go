@@ -142,6 +142,7 @@ const (
 	TurnCauseTruncated          TurnCause = "truncated"
 	TurnCauseContextTooLong     TurnCause = "context_too_long"
 	TurnCauseQuota              TurnCause = "quota"
+	TurnCausePermission         TurnCause = "permission_denied"
 	TurnCauseBackendOverloaded  TurnCause = "backend_overloaded"
 	TurnCauseBackendRateLimited TurnCause = "backend_rate_limited"
 	TurnCauseBackendAuth        TurnCause = "backend_auth"

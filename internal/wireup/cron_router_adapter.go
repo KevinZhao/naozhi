@@ -195,7 +195,7 @@ var turnCauseByKind = map[apierr.Kind]cron.TurnCause{
 	apierr.KindAuth:          cron.TurnCauseBackendAuth,
 	apierr.KindQuota:         cron.TurnCauseQuota,
 	apierr.KindContextLength: cron.TurnCauseContextTooLong,
-	apierr.KindPermission:    cron.TurnCauseRefused,
+	apierr.KindPermission:    cron.TurnCausePermission,
 	apierr.KindTimeout:       cron.TurnCauseBackendUnreachable,
 	apierr.KindNetwork:       cron.TurnCauseBackendUnreachable,
 }

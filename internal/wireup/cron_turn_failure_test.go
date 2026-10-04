@@ -64,6 +64,31 @@ func TestTurnFailure(t *testing.T) {
 			failed: true, detail: []string{"connection reset"}, cause: cron.TurnCauseBackendUnreachable,
 		},
 		{
+			name:   "claude error text, quota",
+			r:      clievent.SendResult{SubType: "success", IsError: true, Text: "Credit balance is too low"},
+			failed: true, detail: []string{"Credit balance"}, cause: cron.TurnCauseQuota,
+		},
+		{
+			name:   "claude api envelope, auth",
+			r:      clievent.SendResult{SubType: "success", IsError: true, Text: "API Error: 401 authentication_error"},
+			failed: true, detail: []string{"authentication_error"}, cause: cron.TurnCauseBackendAuth,
+		},
+		{
+			name:   "claude api envelope, rate limit",
+			r:      clievent.SendResult{SubType: "success", IsError: true, Text: "API Error: 429 rate_limit_error"},
+			failed: true, detail: []string{"rate_limit_error"}, cause: cron.TurnCauseBackendRateLimited,
+		},
+		{
+			name:   "claude api envelope, permission",
+			r:      clievent.SendResult{SubType: "success", IsError: true, Text: "API Error: 403 permission_error"},
+			failed: true, detail: []string{"permission_error"}, cause: cron.TurnCausePermission,
+		},
+		{
+			name:   "claude api envelope, timeout",
+			r:      clievent.SendResult{SubType: "success", IsError: true, Text: "API Error: request timed out"},
+			failed: true, detail: []string{"timed out"}, cause: cron.TurnCauseBackendUnreachable,
+		},
+		{
 			name:   "claude error text nobody recognises",
 			r:      clievent.SendResult{SubType: "success", IsError: true, Text: "Execution error"},
 			failed: true, detail: []string{"Execution error"}, cause: cron.TurnCauseUnknown,
