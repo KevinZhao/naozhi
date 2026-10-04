@@ -182,13 +182,14 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 // that reports has-more is passed through as-is. Otherwise the answer is
 // paginated here: a `before` page asks for one entry more than it returns,
 // so a peer that bounds the page without a has-more flag still yields one.
+// The probe stays within the peer's own page cap, which would swallow it.
 func (h *Handlers) remoteEventsPage(w http.ResponseWriter, r *http.Request, nc node.Conn, nodeID, key string, before int64, limit int, isBefore bool) {
 	q := node.EventsQuery{Limit: limit}
 	if isBefore {
 		if q.Limit == 0 {
 			q.Limit = maxEventsPageLimit
 		}
-		q.Before, q.Limit = before, q.Limit+1
+		q.Before, q.Limit = before, min(q.Limit, maxEventsPageLimit-1)+1
 	}
 	page, err := nc.FetchEventsPage(r.Context(), key, q)
 	if err != nil {
