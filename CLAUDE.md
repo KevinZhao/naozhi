@@ -21,7 +21,9 @@ Ratchets only go down: the baselines in `*Baseline*` test constants,
 them, so lower them in the same PR. Raising one needs a line appended to
 `scripts/ratchet-raises.jsonl` citing an issue labelled
 `ratchet-raise-approved`; `go run ./tools/ratchet-raises -base origin/master`
-prints the lines a change needs.
+prints the lines a change needs. A `*Baseline*` constant must be a plain
+integer literal; renaming or deleting one, or moving it to another package,
+is a raise to -1 that needs a ledger line too.
 
 `config.yaml` is gitignored (environment-specific). Use `config.example.yaml`
 as the template: `cp config.example.yaml config.yaml` then fill in real values.
