@@ -2,6 +2,7 @@ package shim
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -200,7 +201,7 @@ func TestShimHandle_DrainReplay_Normal(t *testing.T) {
 		writeLine(t, server, ServerMsg{Type: "replay_done", Count: 3})
 	}()
 
-	replays, err := handle.DrainReplay()
+	replays, err := handle.DrainReplay(context.Background())
 	if err != nil {
 		t.Fatalf("DrainReplay: %v", err)
 	}
@@ -223,7 +224,7 @@ func TestShimHandle_DrainReplay_EmptyBuffer(t *testing.T) {
 		writeLine(t, server, ServerMsg{Type: "replay_done", Count: 0})
 	}()
 
-	replays, err := handle.DrainReplay()
+	replays, err := handle.DrainReplay(context.Background())
 	if err != nil {
 		t.Fatalf("DrainReplay: %v", err)
 	}
@@ -243,7 +244,7 @@ func TestShimHandle_DrainReplay_CLIExitedDuringReplay(t *testing.T) {
 		writeLine(t, server, ServerMsg{Type: "cli_exited", Code: &code})
 	}()
 
-	replays, err := handle.DrainReplay()
+	replays, err := handle.DrainReplay(context.Background())
 	if err != nil {
 		t.Fatalf("DrainReplay: %v", err)
 	}
@@ -268,7 +269,7 @@ func TestShimHandle_DrainReplay_Timeout(t *testing.T) {
 		server.Close()
 	}()
 
-	_, err := handle.DrainReplay()
+	_, err := handle.DrainReplay(context.Background())
 	if err == nil {
 		t.Error("expected error when server closes without replay_done, got nil")
 	}
@@ -285,7 +286,7 @@ func TestShimHandle_DrainReplay_SkipsUnknownMessages(t *testing.T) {
 		writeLine(t, server, ServerMsg{Type: "replay_done", Count: 1})
 	}()
 
-	replays, err := handle.DrainReplay()
+	replays, err := handle.DrainReplay(context.Background())
 	if err != nil {
 		t.Fatalf("DrainReplay: %v", err)
 	}
