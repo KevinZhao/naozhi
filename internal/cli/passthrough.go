@@ -482,24 +482,30 @@ func (p *Process) onTurnResult() []*sendSlot {
 // Send behind it, e.g. a background task-notification) once its result
 // arrives unclaimed. Without it nothing moves State back to Ready: no Send
 // defer owns the turn and onTurnResult only ends turns that consumed slots.
-// A queued passthrough slot keeps it Running — its own turn follows.
-func (p *Process) endUnownedTurn() {
+// A queued passthrough slot keeps it Running — its own turn follows. Either
+// way the result goes to onUnownedResult so the session books the turn's cost
+// now: no Send's finishRun ever sees it, and the next owned result's
+// cumulative difference is lost if the process dies first (#3096).
+func (p *Process) endUnownedTurn(ev clievent.Event) {
 	p.slots.mu.Lock()
 	pending := len(p.slots.pending)
 	p.slots.mu.Unlock()
-	if pending > 0 {
-		return
-	}
 	p.turn.mu.Lock()
 	if !p.turn.unowned {
 		p.turn.mu.Unlock()
 		return
 	}
-	_, moved := p.turn.transitionLocked(evTurnEnded)
-	cb := p.turn.onTurnDone
+	ended := false
+	if pending == 0 {
+		_, ended = p.turn.transitionLocked(evTurnEnded)
+	}
+	onDone, onResult := p.turn.onTurnDone, p.turn.onUnownedResult
 	p.turn.mu.Unlock()
-	if moved && cb != nil {
-		cb()
+	if onResult != nil {
+		onResult(resultFromEvent(ev))
+	}
+	if ended && onDone != nil {
+		onDone()
 	}
 }
 

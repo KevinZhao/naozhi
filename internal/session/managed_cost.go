@@ -92,6 +92,15 @@ func meteringUnit(u string) (costledger.Unit, bool) {
 // completed turn regardless of run-history persistence. costMu is a leaf
 // lock: nothing inside it calls out. Returns the turn's USD increment.
 func (s *ManagedSession) accountTurnCost(result *clievent.SendResult, runID string) float64 {
+	return s.accountCost(result, runID, nil)
+}
+
+// accountCost is accountTurnCost for a reading that counts only while onlyFor
+// is still s's process (nil: always). Checked under costMu, so it is atomic
+// with RenameSession, which moves the process before copying the baseline: a
+// reading lands on the old session before the copy, or is dropped and picked
+// up by the new session's next one — never booked on both.
+func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, onlyFor processIface) float64 {
 	if result == nil {
 		return 0
 	}
@@ -102,6 +111,10 @@ func (s *ManagedSession) accountTurnCost(result *clievent.SendResult, runID stri
 	raw := cumulativeFromResult(result, metering)
 
 	s.costMu.Lock()
+	if onlyFor != nil && s.loadProcess() != onlyFor {
+		s.costMu.Unlock()
+		return 0
+	}
 	if s.costBaselineUnknown {
 		// Adopt whatever the CLI has counted so far as the baseline, so this turn
 		// reports a zero increment and every later turn differences correctly
@@ -132,6 +145,17 @@ func (s *ManagedSession) accountTurnCost(result *clievent.SendResult, runID stri
 		}
 	}
 	return inc.USD
+}
+
+// bookUnownedResults books the cost of the turns proc's CLI starts on its own
+// (background-task notifications): their results reach no Send, so without
+// this their spend waited for the next owned result's cumulative and was lost
+// when the process died first (#3096). The cumulative differencing makes a
+// reading booked here and again by a later Send harmless.
+func bookUnownedResults(s *ManagedSession, proc processIface) {
+	if n, ok := proc.(unownedResultNotifier); ok {
+		n.SetOnUnownedResult(func(res clievent.SendResult) { s.accountCost(&res, newRunID(), proc) })
+	}
 }
 
 // shadowUsageTaker is the optional process capability behind partial-turn
