@@ -228,7 +228,9 @@ function defaultGitStates() {
  *   GET /api/sessions/history serves the list (unless overrides.historySessions is given).
  * @param {object[]} [overrides.historySessions] - GET /api/sessions/history's list. Requests
  *   are counted in `historyGetCalls`; `setHistorySessions(list)` replaces it mid-test and
- *   `failNextHistory(n)` answers the next n requests with a 500.
+ *   `failNextHistory(n)` answers the next n requests with a 500; `staleNextHistory(list)`
+ *   answers the next request with that list instead, as an older fetch resolving last would.
+ *   `historyTag` is the tag of the current list.
  * @param {object[]} [overrides.events] - Custom events response.
  * @param {object} [overrides.eventsByKey] - session key → events array; keys not listed fall back to `events`.
  * @param {number} [overrides.eventsTailDelayMs] - Hold `after=` (tail poll) responses this long so a test can
@@ -319,8 +321,10 @@ function startMockServer(overrides = {}) {
   let historyData = overrides.historySessions || sessionsData.history_sessions || [];
   let historyGetCalls = 0;
   let historyFailsLeft = 0;
+  let historyStaleNext = null;
   // historyTag mirrors historyContentTag: the list's content hash, '' for none.
-  const historyTag = () => historyData.length ? crypto.createHash('sha256').update(JSON.stringify(historyData)).digest('hex').slice(0, 32) : '';
+  const tagOf = list => list.length ? crypto.createHash('sha256').update(JSON.stringify(list)).digest('hex').slice(0, 32) : '';
+  const historyTag = () => tagOf(historyData);
   // sessionsBody is the /api/sessions body the backend would send for sessionsData.
   const sessionsBody = () => {
     const { history_sessions: _legacy, ...body } = sessionsData;
@@ -584,8 +588,10 @@ function startMockServer(overrides = {}) {
         res.end(JSON.stringify({ error: 'history scan failed' }));
         return;
       }
-      const tag = historyTag();
-      const headers = { 'Content-Type': 'application/json' };
+      const list = historyStaleNext || historyData;
+      historyStaleNext = null;
+      const tag = tagOf(list);
+      const headers = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' };
       if (tag) {
         headers.ETag = '"h' + tag + '"';
         if ((req.headers['if-none-match'] || '') === headers.ETag) {
@@ -595,7 +601,7 @@ function startMockServer(overrides = {}) {
         }
       }
       res.writeHead(200, headers);
-      res.end(JSON.stringify(tag ? { history_sessions: historyData, history_tag: tag } : { history_sessions: [] }));
+      res.end(JSON.stringify(tag ? { history_sessions: list, history_tag: tag } : { history_sessions: [] }));
       return;
     }
 
@@ -1260,6 +1266,8 @@ function startMockServer(overrides = {}) {
         get historyGetCalls() { return historyGetCalls; },
         setHistorySessions(list) { historyData = list; },
         failNextHistory(n) { historyFailsLeft = n; },
+        staleNextHistory(list) { historyStaleNext = list; },
+        get historyTag() { return historyTag(); },
         get cronTriggerCalls() { return cronTriggerCalls; },
         get systemDaemonsGetCount() { return systemDaemonsGetCount; },
         // Replace the served cron jobs mid-test (in place - GET closes over the array).

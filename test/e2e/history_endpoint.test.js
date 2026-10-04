@@ -4,8 +4,8 @@
 //  - the popover fills from the endpoint;
 //  - a poll whose tag is unchanged makes no history request, and one whose tag
 //    moved refetches the list;
-//  - a failed history fetch drops the sessions validator, so a 304 cannot
-//    keep the next poll from retrying it.
+//  - a failed history fetch, or an older one resolving last, drops the
+//    sessions validator, so a 304 cannot keep the next poll from retrying it.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
 
@@ -85,6 +85,35 @@ test('a failed history fetch is retried by the next poll despite the sessions va
   }).toBe(calls + 2);
   expect(mock.sessionsValidators.slice(n), 'no poll after the failure was unconditional').toContain('');
   await expect.poll(() => popoverText(page)).toContain('closed an hour ago');
+  await ctx.close();
+  mock.server.close();
+});
+
+// Chrome serialises concurrent GETs of one URL behind its cache lock, so the
+// mock stands in for the race: the poll names the latest list, the history
+// response carries the one before it.
+test('an older history fetch resolving last is corrected by the next poll despite the sessions validator', async ({ browser }) => {
+  const MID = { ...NEW, session_id: 'hist-003', last_prompt: 'superseded list' };
+  const mock = await startMockServer({ ws: true, sessionsETag: true, historySessions: [OLD] });
+  const { ctx, page } = await open(browser, mock);
+  await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+
+  mock.setHistorySessions([MID, OLD]);
+  const stale = mock.historyTag;
+  mock.setHistorySessions([NEW, OLD]);
+  const latest = mock.historyTag;
+  mock.staleNextHistory([MID, OLD]);
+  await page.evaluate(() => fetchSessions());
+  await page.waitForFunction(t => historyTag === t, stale);
+
+  // Had the validator survived, every poll would get a 304 and the stale list stick.
+  await expect.poll(async () => {
+    await page.evaluate(() => fetchSessions());
+    return page.evaluate(() => historyTag);
+  }).toBe(latest);
+  const text = await popoverText(page);
+  expect(text).toContain('closed an hour ago');
+  expect(text).not.toContain('superseded list');
   await ctx.close();
   mock.server.close();
 });

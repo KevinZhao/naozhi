@@ -8,6 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/project"
 )
 
 // writeHistorySession puts a transcript under claudeDir/projects for a
@@ -83,6 +87,49 @@ func TestHistoryTag_FollowsContentAcrossRescans(t *testing.T) {
 	h.InvalidateHistoryCache()
 	if list, moved := h.historyWithTag(); len(list) != 2 || moved == tag || moved == "" {
 		t.Errorf("rescan with a new session: %d sessions, tag %q (was %q); want 2 under a new tag", len(list), moved, tag)
+	}
+}
+
+// projectNames is a ProjectSource that resolves every workspace to name.
+type projectNames struct{ name string }
+
+func (projectNames) All() []*project.Project { return nil }
+func (p *projectNames) ResolveWorkspaces(paths []string) map[string]string {
+	m := make(map[string]string, len(paths))
+	for _, path := range paths {
+		m[path] = p.name
+	}
+	return m
+}
+
+// The tag covers the fields stamped after the scan: a rescan of the same
+// transcripts that resolves a new project name or retired_at moves it.
+func TestHistoryTag_CoversStampedFields(t *testing.T) {
+	h, _, _ := newHistoryTestHandlers(t)
+	names := &projectNames{name: "alpha"}
+	h.deps.ProjectMgr = names
+	retired, err := discovery.NewRetiredStore(filepath.Join(t.TempDir(), "retired.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.deps.RetiredStore = retired
+	list, tag := h.historyWithTag()
+	if len(list) != 1 || list[0].Project != "alpha" || list[0].RetiredAt != 0 {
+		t.Fatalf("first scan = %+v; want one session in project alpha, not retired", list)
+	}
+
+	names.name = "beta"
+	h.InvalidateHistoryCache()
+	list, renamed := h.historyWithTag()
+	if list[0].Project != "beta" || renamed == tag {
+		t.Errorf("project renamed: project %q, tag %q (was %q); want beta under a new tag", list[0].Project, renamed, tag)
+	}
+
+	retired.MarkRetired(histSessA, time.Now())
+	h.InvalidateHistoryCache()
+	list, marked := h.historyWithTag()
+	if list[0].RetiredAt == 0 || marked == renamed {
+		t.Errorf("session retired: retired_at %d, tag %q (was %q); want a stamp under a new tag", list[0].RetiredAt, marked, renamed)
 	}
 }
 

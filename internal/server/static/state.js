@@ -136,9 +136,8 @@ export const sessionList = {
   // (see fetchSessionsPayload); null sends no If-None-Match.
   lastETag: null,
   lastNodesJSON: '',
-  // _lastSidebarData caches the most recent /api/sessions payload so the
-  // sidebar can re-render locally without re-hitting the server. Set by
-  // fetchSessions after a successful render.
+  // The most recent /api/sessions payload, so the sidebar can re-render
+  // locally without re-hitting the server; set by fetchSessions after a render.
   lastSidebarData: null,
   // discovered sessions, merged into sidebar
   discoveredItems: [],
@@ -147,9 +146,10 @@ export const sessionList = {
   sessionCounter: 0,
   // [{name, path, node}] from API
   projectsData: [],
-  // GET /api/sessions/history's list and the history_tag it carries (syncHistory)
+  // syncHistory's state: the history list, its tag, and the latest poll's tag
   historySessionsData: [],
   historyTag: '',
+  historyPollTag: '',
 };
 
 // serverInfo: server-side facts cached by the dashboard.

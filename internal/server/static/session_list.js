@@ -21,12 +21,10 @@ import { discoveredKey, getNodeDisplayName, isMultiNode, matchProject, nodeColor
 import { ICONS } from './icons.js';
 import { registerShell } from './shell.js';
 
-// collectWorkspaceSessionIDs returns the set of Claude session UUIDs that the
-// sidebar already represents — current session_id PLUS any prev_session_ids
-// from auto-chain history. Used to deduplicate the history popover/badge so
-// links in an active chain aren't surfaced twice (once in workspace, once in
-// history). Skips empty strings defensively in case the API ever returns
-// nulls inside prev_session_ids.
+// collectWorkspaceSessionIDs returns the Claude session UUIDs the sidebar
+// already represents — each session_id plus its auto-chain prev_session_ids —
+// so the history popover does not list a chain's links a second time. Empty
+// strings are skipped in case the API ever returns nulls in prev_session_ids.
 export function collectWorkspaceSessionIDs(sessions) {
   const ids = new Set();
   for (const s of sessions || []) {
@@ -40,7 +38,6 @@ export function collectWorkspaceSessionIDs(sessions) {
   }
   return ids;
 }
-
 
 // restorePending rehydrates the in-memory pending maps from localStorage at
 // boot, BEFORE the first fetchSessions/send. Idempotent via _pendingRestored
@@ -106,14 +103,17 @@ function sessionsUnchanged(data, wsConnected) {
 }
 
 // syncHistory keeps historySessionsData on the list stats.history_tag names,
-// fetched only when the tag moves; nothing waits on it. A failed fetch drops
-// the sessions validator, so the next poll brings the tag back and retries.
+// fetched only when the tag moves; nothing waits on it. A fetch that fails, or
+// lands on a tag other than the latest poll's (an older one resolving last),
+// drops the sessions validator, so the next poll brings the tag back.
 function syncHistory(tag) {
+  sessionList.historyPollTag = tag;
   if (tag === sessionList.historyTag) return;
   const load = tag ? fetchJSON(NZ_CONTRACT.API.sessions_history, { headers: authHeaders(), timeoutMs: 8000 }) : Promise.resolve(null);
   load.then(h => {
     sessionList.historySessionsData = (h && h.history_sessions) || [];
     sessionList.historyTag = (h && h.history_tag) || '';
+    if (sessionList.historyTag !== sessionList.historyPollTag) sessionList.lastETag = null;
   }, () => { sessionList.lastETag = null; });
 }
 
