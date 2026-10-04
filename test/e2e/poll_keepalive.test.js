@@ -33,7 +33,7 @@ test.describe('#1770 polling / keep-alive', () => {
       const counts = { fetches: 0, zeroes: 0 };
       const origFetch = shell.debouncedFetchSessions;
       let version = sessionList.lastVersion;
-      shell.debouncedFetchSessions = () => { counts.fetches++; origFetch(); };
+      shell.debouncedFetchSessions = () => { counts.fetches++; return origFetch(); };
       Object.defineProperty(sessionList, 'lastVersion', {
         configurable: true,
         enumerable: true,
