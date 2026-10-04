@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -266,6 +267,27 @@ func (c *ReverseConn) FetchEvents(ctx context.Context, key string, after int64) 
 	return result, json.Unmarshal(raw, &result)
 }
 
+// FetchEventsPage asks fetch_events for one page. A node that serves pages
+// answers {events, has_more}; an older one ignores before/limit and answers
+// with its whole log as a bare array.
+func (c *ReverseConn) FetchEventsPage(ctx context.Context, key string, q EventsQuery) (EventsPage, error) {
+	raw, err := c.rpc(ctx, "fetch_events", map[string]any{"key": key, "before": q.Before, "limit": q.Limit})
+	if err != nil {
+		return EventsPage{}, err
+	}
+	if trimmed := bytes.TrimLeft(raw, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '{' {
+		var page struct {
+			Events  []clievent.EventEntry `json:"events"`
+			HasMore *bool                 `json:"has_more"`
+		}
+		err := json.Unmarshal(raw, &page)
+		return EventsPage{Events: page.Events, HasMore: page.HasMore}, err
+	}
+	var entries []clievent.EventEntry
+	err = json.Unmarshal(raw, &entries)
+	return EventsPage{Events: entries}, err
+}
+
 // FetchBackends relays the remote node's CLI backend manifest as raw JSON (see
 // NodeFetcher.FetchBackends); an older peer replies "unknown method".
 func (c *ReverseConn) FetchBackends(ctx context.Context) (json.RawMessage, error) {
@@ -408,15 +430,14 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64, limit int
 			ctx, cancel := context.WithTimeout(c.baseCtx, 5*time.Second)
 			defer cancel()
 
-			entries, err := c.FetchEvents(ctx, key, after)
+			page, err := fetchHistory(ctx, c, key, after, limit)
 			if err != nil {
+				c.historyFailed(cl, key, err)
 				return
 			}
-			c.observeEntries(key, entries)
+			c.observeEntries(key, page.Events)
 			cl.SendJSON(wsproto.NewSubscribed(wsproto.Subscribed{Key: key, Node: c.id}))
-			if len(entries) > 0 {
-				cl.SendJSON(wsproto.NewHistory(wsproto.History{Key: key, Node: c.id, Events: entries, Initial: true}))
-			}
+			sendHistoryPage(cl, c.id, key, page)
 		}()
 	} else {
 		// First subscriber: the sink was added above so readLoop can deliver
@@ -449,15 +470,13 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64, limit int
 			ctx, cancel := context.WithTimeout(c.baseCtx, 5*time.Second)
 			defer cancel()
 
-			entries, err := c.FetchEvents(ctx, key, after)
+			page, err := fetchHistory(ctx, c, key, after, limit)
 			if err != nil {
-				slog.Debug("reverse first-subscribe fetch events failed", "node", c.id, "key", key, "err", err)
+				c.historyFailed(cl, key, err)
 				return
 			}
-			c.observeEntries(key, entries)
-			if len(entries) > 0 {
-				cl.SendJSON(wsproto.NewHistory(wsproto.History{Key: key, Node: c.id, Events: entries, Initial: true}))
-			}
+			c.observeEntries(key, page.Events)
+			sendHistoryPage(cl, c.id, key, page)
 		}()
 	}
 }
@@ -524,8 +543,27 @@ func (c *ReverseConn) isDone() bool {
 	}
 }
 
+// tornDown reports a conn on its way out. markDisconnected closes done before
+// it cancels baseCtx, and an rpc cut by the drop fails as soon as done closes,
+// so either signal counts.
+func (c *ReverseConn) tornDown() bool {
+	return c.isDone() || c.baseCtx.Err() != nil
+}
+
 func (c *ReverseConn) sendReconnecting(cl EventSink, key string) {
 	cl.SendJSON(wsproto.NewError(wsproto.Error{Key: key, Node: c.id, Error: errNodeReconnecting}))
+}
+
+// historyFailed answers a sink whose history fetch failed. A fetch the conn's
+// teardown cut short reads as a reconnect; any other failure is logged and
+// offered to the dashboard as a retry.
+func (c *ReverseConn) historyFailed(cl EventSink, key string, err error) {
+	if c.tornDown() {
+		c.sendReconnecting(cl, key)
+		return
+	}
+	slog.Warn("reverse history fetch failed", "node", c.id, "key", key, "err", err)
+	cl.SendJSON(historyUnavailable(c.id, key))
 }
 
 // adopt moves pred's subscriptions into c and makes c pred's heir. Caller
@@ -578,7 +616,11 @@ func (c *ReverseConn) catchUp(key string, after int64) {
 	defer cancel()
 	entries, err := c.FetchEvents(ctx, key, after)
 	if err != nil {
-		slog.Debug("reverseconn: resubscribe catch-up fetch failed", "node", c.id, "key", key, "err", err)
+		// A teardown cut it short: the next adoption catches up again.
+		if !c.tornDown() {
+			slog.Warn("reverseconn: resubscribe catch-up fetch failed", "node", c.id, "key", key, "err", err)
+			c.broadcastToSubs(key, historyUnavailable(c.id, key), 0, false)
+		}
 		return
 	}
 	if len(entries) > 0 {

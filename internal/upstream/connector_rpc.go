@@ -71,8 +71,10 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 
 	case "fetch_events":
 		var p struct {
-			Key   string `json:"key"`
-			After int64  `json:"after"`
+			Key    string `json:"key"`
+			After  int64  `json:"after"`
+			Before int64  `json:"before"`
+			Limit  int    `json:"limit"`
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("fetch_events params: %w", err)
@@ -85,6 +87,10 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			// %q escapes bidi/C1/newline bytes that would otherwise reach slog
 			// on the opposite node via err.Error().
 			return nil, fmt.Errorf("session not found: %q", p.Key)
+		}
+		if p.After <= 0 && (p.Before > 0 || p.Limit > 0) {
+			entries, hasMore := eventsPage(connCtx, sess, p.Before, p.Limit)
+			return marshalResult(eventsPageResult{Events: clievent.ForWire(entries), HasMore: hasMore})
 		}
 		// #2456: re-admit the watermark ms (same rule as the WS subscribe
 		// catch-up) so a same-ms sibling is not lost across the relay.
@@ -472,4 +478,36 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		// escaped before the remote logs the error string.
 		return nil, fmt.Errorf("unknown method: %q", req.Method)
 	}
+}
+
+// maxEventsPageLimit caps a paged fetch_events, matching the dashboard
+// events endpoint's own page cap.
+const maxEventsPageLimit = 500
+
+// eventsPageResult is fetch_events' answer when the primary asks for a page.
+type eventsPageResult struct {
+	Events  []clievent.EventEntry `json:"events"`
+	HasMore bool                  `json:"has_more"`
+}
+
+// eventsPage reads the pages the dashboard's events endpoint serves locally:
+// before > 0 is a "load earlier" page, else the opening page for a page-size
+// hint (bounded like a want_history subscribe's). Entries are never nil.
+func eventsPage(ctx context.Context, sess Session, before int64, limit int) ([]clievent.EventEntry, bool) {
+	if limit <= 0 || limit > maxEventsPageLimit {
+		limit = maxEventsPageLimit
+	}
+	var entries []clievent.EventEntry
+	var hasMore bool
+	if before > 0 {
+		entries, hasMore = sess.EventPageBeforeCtx(ctx, before, limit)
+	} else {
+		pageCtx, cancel := context.WithTimeout(ctx, subscribeHistoryTimeout)
+		entries, hasMore = sess.InitialHistoryPage(pageCtx, limit)
+		cancel()
+	}
+	if entries == nil {
+		entries = []clievent.EventEntry{}
+	}
+	return entries, hasMore
 }

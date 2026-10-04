@@ -136,22 +136,46 @@ func (n *HTTPClient) FetchEvents(ctx context.Context, key string, after int64) (
 	if after > 0 {
 		path += "&after=" + strconv.FormatInt(after, 10)
 	}
+	entries, _, err := n.getEvents(ctx, path)
+	return entries, err
+}
+
+// FetchEventsPage asks the remote's events endpoint for one page; its
+// X-Events-Has-More header, when the remote sets one, is the page's HasMore.
+func (n *HTTPClient) FetchEventsPage(ctx context.Context, key string, q EventsQuery) (EventsPage, error) {
+	path := "/api/sessions/events?key=" + url.QueryEscape(key) + "&limit=" + strconv.Itoa(q.Limit)
+	if q.Before > 0 {
+		path += "&before=" + strconv.FormatInt(q.Before, 10)
+	}
+	entries, hdr, err := n.getEvents(ctx, path)
+	if err != nil {
+		return EventsPage{}, err
+	}
+	page := EventsPage{Events: entries}
+	if v := hdr.Get("X-Events-Has-More"); v == "1" || v == "0" {
+		hasMore := v == "1"
+		page.HasMore = &hasMore
+	}
+	return page, nil
+}
+
+func (n *HTTPClient) getEvents(ctx context.Context, path string) ([]clievent.EventEntry, http.Header, error) {
 	resp, err := n.doRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
-		return nil, fmt.Errorf("fetch events from %s: %w", n.ID, err)
+		return nil, nil, fmt.Errorf("fetch events from %s: %w", n.ID, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
-		return nil, fmt.Errorf("fetch events from %s: status %d", n.ID, resp.StatusCode)
+		return nil, nil, fmt.Errorf("fetch events from %s: status %d", n.ID, resp.StatusCode)
 	}
 
 	var entries []clievent.EventEntry
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&entries); err != nil {
-		return nil, fmt.Errorf("decode events from %s: %w", n.ID, err)
+		return nil, nil, fmt.Errorf("decode events from %s: %w", n.ID, err)
 	}
-	return entries, nil
+	return entries, resp.Header, nil
 }
 
 // Send sends a message to a session on the remote node via POST /api/sessions/send.

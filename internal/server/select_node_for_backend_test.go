@@ -48,6 +48,9 @@ func (f *fakeCapNode) FetchDiscoveredPreview(_ context.Context, _ string) ([]cli
 func (f *fakeCapNode) FetchEvents(_ context.Context, _ string, _ int64) ([]clievent.EventEntry, error) {
 	return nil, nil
 }
+func (f *fakeCapNode) FetchEventsPage(_ context.Context, _ string, _ node.EventsQuery) (node.EventsPage, error) {
+	return node.EventsPage{}, nil
+}
 func (f *fakeCapNode) FetchBackends(_ context.Context) (json.RawMessage, error) {
 	return nil, nil
 }

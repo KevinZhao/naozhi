@@ -15,6 +15,8 @@
 //     .optimistic-msg in the DOM.
 //     B. `unsubscribed` is an explicit no-op case; the node-disconnect broadcast
 //     deselects the selected session when it lived on the dead node.
+//     C. a keyed "history unavailable" error for the selected remote session
+//     mounts a retry that subscribes again (#3005).
 package server
 
 import (
@@ -123,6 +125,28 @@ func TestDashboardJS_NodeDisconnectDeselectsStaleSession(t *testing.T) {
 	for _, forbid := range []string{"removePendingSession", "delete perSession.workspaces", "fetch(", "DELETE"} {
 		if strings.Contains(fn, forbid) {
 			t.Errorf("deselectNodeSession must not touch pending sessions or the backend (%q)", forbid)
+		}
+	}
+}
+
+func TestDashboardJS_HistoryUnavailableOffersRetry(t *testing.T) {
+	t.Parallel()
+	js := readDashboardJS(t)
+	body := wsOnHandler(t, js, "error", false)
+	// Only the selected session's own failure: same key AND same node.
+	if !strings.Contains(body, "if (msg.error === 'history unavailable' && msg.key === selection.key && msg.node === selection.node) showHistoryRetry();") {
+		t.Error("error handler must mount the history retry for the selected session's keyed 'history unavailable'")
+	}
+	fn := jsFuncBody(t, js, "showHistoryRetry")
+	for _, want := range []string{
+		"if (el && !el.querySelector('.event')) el.replaceChildren();", // a blank or placeholder pane shows only the retry
+		"btn.remove();",
+		"if (sessionStream._initialSubscribe) sessionStream.lastEventTimeWs = 0;", // a retry before the opening page asks for it again
+		"sessionStream.subscribe(selection.key, selection.node);",
+		"历史记录加载失败",
+	} {
+		if !strings.Contains(fn, want) {
+			t.Errorf("showHistoryRetry missing %q", want)
 		}
 	}
 }
