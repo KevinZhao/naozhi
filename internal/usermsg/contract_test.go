@@ -3,6 +3,7 @@ package usermsg
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -85,7 +86,7 @@ func TestForSendError_ContractTable(t *testing.T) {
 		{
 			name:     "stale resume id",
 			err:      &clierr.ProcessExitedError{Code: 1, Class: clierr.ExitResumeNotFound},
-			wantSubs: []string{"无法恢复", "/new"},
+			wantSubs: []string{"无法恢复", "重新发送", "新会话"},
 			notSubs:  []string{"自动重启"},
 		},
 		{
@@ -102,6 +103,11 @@ func TestForSendError_ContractTable(t *testing.T) {
 			name:     "CLI runtime missing",
 			err:      &clierr.ProcessExitedError{Code: 1, Class: clierr.ExitMissingRuntime},
 			wantSubs: []string{"运行环境缺失", "管理员"},
+		},
+		{
+			name:     "CLI keeps failing at startup",
+			err:      fmt.Errorf("session k: %w (2 in a row, retry in 30s)", session.ErrCLIStartupFailed),
+			wantSubs: []string{"连续启动失败", "/new"},
 		},
 		{
 			name:     "exit with no named cause",

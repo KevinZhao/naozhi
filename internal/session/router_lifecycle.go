@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/metrics"
@@ -110,6 +111,9 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 					return
 				}
 				resumedID, status = s.getSessionID(), SessionResumed
+				if err = startupBreaker(key, s, time.Now()); err != nil {
+					return
+				}
 				err = r.reserveSpawn(tx, &res, key, resumedID, opts)
 				// A resume the guard kept continues this entry's conversation,
 				// so it is only valid while this entry is still the key's.
@@ -157,6 +161,11 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 				return nil, 0, err
 			}
 			staleSocketBound = res.socketBound
+			continue
+		}
+		// Nothing was sent yet, so a resume the backend refused is retried
+		// fresh at once; resolveSpawnParams drops it for the flagged session.
+		if errors.Is(err, clierr.ErrResumeRejected) && res.old != nil && !res.old.resumeRejected.Swap(true) {
 			continue
 		}
 		if err != nil {
@@ -333,6 +342,11 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 	// so the spawn falls through to a fresh session instead of failing on
 	// "No conversation found". The probe is backend-aware (see resolveResumeID).
 	resumeID = resolveResumeID(backendID, r.hist.claudeDir, r.hist.backendDirs, workspace, key, resumeID)
+	if why, detail := resumeDropReason(tx.Get(key)); resumeID != "" && why != "" {
+		slog.Warn("resume failed; starting fresh session", "key", key, "session_id", resumeID,
+			"reason", why, "stderr", detail)
+		resumeID = ""
+	}
 
 	// Canonicalize on-disk case for fresh spawns: on case-insensitive APFS a
 	// differently-cased spelling forks two project identities for one tree.
@@ -619,6 +633,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (*Man
 			oldHistory, prevIDs, snap.cost, snap.costSpent, snap.createdAt, res.opts.Exempt, snap.sid,
 			hist.userTurns, overrides,
 		)
+		s.startupFails.Store(snap.startupFails)
 		s.costMu.Lock()
 		s.spent = snap.spent
 		costBase.applyLocked(s)
