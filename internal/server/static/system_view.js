@@ -95,8 +95,7 @@ function systemStateMeta(state) {
 }
 
 // systemTickLabel renders a Go time.Duration (JSON-marshalled as integer
-// nanoseconds) as a compact human string. Falls back to formatDurationShort
-// once we're past sub-second, reusing the existing ms formatter.
+// nanoseconds) as a compact human string via the ms formatter.
 function systemTickLabel(ns) {
   if (!ns || ns <= 0) return '—';
   return formatDurationShort(ns / 1e6);
@@ -117,6 +116,7 @@ const SYSTEM_STAT_LABELS = {
   skipped_min_first_turns: '跳过·轮次不足',
   skipped_no_new_turns: '跳过·无新增对话',
   skipped_min_rename_interval: '跳过·命名间隔未到',
+  skipped_restored_auto_title: '跳过·沿用已有自动标题',
   dry_run: '演练模式',
   would_reap_legacy_no_meta: '可回收·无meta旧文件',
   would_reap_meta_no_refs: '可回收·无引用(高风险)',
