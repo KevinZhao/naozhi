@@ -54,8 +54,8 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	subExited := make(chan subExitNote, 256)
 
 	var wg sync.WaitGroup
-	// Bound the drain on handleConnDrainBudget so a worker stuck in sess.Send
-	// (up to the watchdog total_timeout) cannot pin reconnect. connCancel must
+	// Bound the drain on handleConnDrainBudget so a stuck worker cannot pin
+	// reconnect. connCancel must
 	// run FIRST here: the top-level `defer connCancel()` runs after this
 	// defer, so without it the ping goroutine would stay parked for the whole
 	// budget on a plain ReadJSON-error disconnect (#2222).

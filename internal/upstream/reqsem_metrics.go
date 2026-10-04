@@ -15,7 +15,7 @@ var reqSemReqInflight = expvar.NewInt("naozhi_upstream_reqsem_inflight")
 // reqSemReqWaitTotal counts reverse-RPC requests that missed the non-blocking
 // reqSem acquire and had to block. Its rate relative to total requests is the
 // saturation ratio; a sustained few percent means raise capacity or find the
-// slow handleRequest path (typically sess.Send blocked on the CLI watchdog).
+// slow handleRequest path (typically a send spawning its session).
 var reqSemReqWaitTotal = expvar.NewInt("naozhi_upstream_reqsem_wait_total")
 
 // connectorBackoffMillis is a gauge (Set, not Add) of the connector's current

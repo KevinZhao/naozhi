@@ -9,17 +9,17 @@ import (
 )
 
 // RNEW-008 (#424): handleRequest accepts both appCtx and connCtx with
-// different cancellation contracts per RPC branch — send honours connCtx
-// ("dies with the WS"), takeover honours appCtx ("survives reconnect").
-// The rule lives in a godoc matrix on handleRequest, but doc drifts from
-// code silently. A future RPC author copy-pasting the send goroutine into
-// a takeover-shaped branch (or vice versa) reintroduces the orphan-goroutine
-// risk the issue flags. These guards fail the build when the wiring no
-// longer matches the documented contract.
+// different cancellation contracts per RPC branch — takeover honours appCtx
+// ("survives reconnect"), send hands its turn to the node's Orchestrator and
+// keeps connCtx only for the session spawn before it answers. The rule lives
+// in a godoc matrix on handleRequest, but doc drifts from code silently. A
+// future RPC author copy-pasting a goroutine into the wrong branch
+// reintroduces the orphan-goroutine risk the issue flags. These guards fail
+// the build when the wiring no longer matches the documented contract.
 //
 // We inspect source text rather than running a live session because the
-// send/takeover goroutines call into real CLI-backed *ManagedSession work
-// that cannot be exercised without spawning a claude child process. The
+// takeover goroutine calls into real CLI-backed *ManagedSession work that
+// cannot be exercised without spawning a claude child process. The
 // circuit-breaker tests in this package already rely on the same
 // source-inspection technique (connector_circuit_breaker_test.go).
 
@@ -51,18 +51,22 @@ func caseBody(t *testing.T, src, method string) string {
 	return rest
 }
 
-// TestHandleRequest_CtxMatrix_SendUsesConnCtx asserts the async `send`
-// goroutine is wired to connCtx (so a relay disconnect cancels in-flight
-// sends) and never reaches for appCtx — the documented "dies with the WS"
-// contract.
-func TestHandleRequest_CtxMatrix_SendUsesConnCtx(t *testing.T) {
+// TestHandleRequest_CtxMatrix_SendSubmitsOnConnCtx asserts the `send`
+// branch hands the message to the turn pipeline on connCtx and starts no
+// turn of its own: no goroutine, no direct session send, no appCtx.
+func TestHandleRequest_CtxMatrix_SendSubmitsOnConnCtx(t *testing.T) {
 	body := caseBody(t, rpcSrc(t), "send")
-	if !strings.Contains(body, "sess.Send(connCtx") {
-		t.Error(`send branch must call sess.Send(connCtx, ...) — send is connection-scoped per the RNEW-008 matrix`)
+	if !strings.Contains(body, "c.turns.SubmitRelayed(connCtx") {
+		t.Error(`send branch must call c.turns.SubmitRelayed(connCtx, ...) — the turn runs on the node's Orchestrator`)
+	}
+	for _, banned := range []string{"go func", ".Send(", "wg.Add"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("send branch contains %q — it must not run a turn of its own", banned)
+		}
 	}
 	// Ban appCtx as a call argument (doc mentions are fine).
 	if regexp.MustCompile(`\(appCtx[,)]`).MatchString(body) {
-		t.Error(`send branch must NOT pass appCtx into any call — sends must die with the WS connection, not outlive it (orphan-goroutine risk)`)
+		t.Error(`send branch must NOT pass appCtx into any call — the spawn before the answer is connection-scoped`)
 	}
 }
 

@@ -29,11 +29,12 @@ import (
 //
 // Context rule: connCtx is cancelled when handleConn returns (WS drop, ping
 // timeout, shutdown) — use it for work that is meaningless once this
-// connection ends (send, fetch_events, GetOrCreate, restart_planner) so
+// connection ends (send's session spawn, fetch_events, restart_planner) so
 // reconnects do not leak goroutines. appCtx is cancelled only when the
 // Connector shuts down — takeover and close_discovered use it because the
 // CLI child must survive a reconnect while WaitAndCleanup / Takeover run.
-// New branches default to connCtx.
+// A sent turn uses neither: it runs on the node's Orchestrator. New branches
+// default to connCtx.
 func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.ReverseMsg, wg *sync.WaitGroup) (json.RawMessage, error) {
 	switch req.Method {
 	case "fetch_sessions":
@@ -122,7 +123,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if n := len(p.Text); n > limits.MaxCoalescedText {
 			return nil, fmt.Errorf("send text too long: %d bytes", n)
 		}
-		opts := sessionview.AgentOpts{}
+		ws := ""
 		if p.Workspace != "" {
 			// Syntactic pre-check before Clean/EvalSymlinks: Clean folds
 			// `/home/../etc` into `/etc`, defeating a post-Clean prefix check.
@@ -135,40 +136,24 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			if c.defaultWorkspace == "" {
 				return nil, fmt.Errorf("workspace overrides disabled: no allowed root configured on this node")
 			}
-			ws, err := c.sanitizeWorkspacePath(p.Workspace, "workspace", false)
+			clean, err := c.sanitizeWorkspacePath(p.Workspace, "workspace", false)
 			if err != nil {
 				return nil, err
 			}
-			opts.Workspace = ws
+			ws = clean
 		}
-		sess, _, err := c.router.GetOrCreate(connCtx, p.Key, opts)
+		// The turn runs on the node's own Orchestrator, not on connCtx: it may
+		// drain IM or dashboard messages queued behind it, so a link drop must
+		// not cancel it. connCtx bounds only the session spawn SubmitRelayed
+		// does before it answers.
+		if c.turns == nil {
+			return nil, errors.New("send unavailable: turn pipeline not wired")
+		}
+		status, err := c.turns.SubmitRelayed(connCtx, p.Key, p.Text, ws)
 		if err != nil {
-			return nil, fmt.Errorf("get session: %w", err)
+			return nil, err
 		}
-		// Send is async: the primary subscribed before sending, so events arrive
-		// via streamEvents. connCtx lets a relay disconnect cancel in-flight
-		// sends; wg makes a dropped connection wait for them before teardown.
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					slog.Error("connector send panic", "key", p.Key, "panic", r, "stack", string(debug.Stack()))
-				}
-			}()
-			if _, err := sess.Send(connCtx, p.Text, nil, nil); err != nil {
-				if connCtx.Err() == nil {
-					slog.Warn("connector send failed", "key", p.Key, "err", err)
-					// The RPC already returned "accepted", so surface the failure
-					// into this session's EventLog for subscribed dashboards. The
-					// error text comes from a remote transport stack and is
-					// broadcast to WS clients + persisted, so sanitize it (log
-					// injection) and cap at 512 bytes; full detail is in slog above.
-					sess.LogSystemEvent("发送失败：" + osutil.SanitizeForLog(err.Error(), 512))
-				}
-			}
-		}()
-		return marshalResult(map[string]string{"status": "accepted"})
+		return marshalResult(map[string]string{"status": status})
 
 	case "takeover":
 		var p struct {

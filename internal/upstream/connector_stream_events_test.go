@@ -161,7 +161,7 @@ func TestHandleConn_Subscribe_StreamsTheSubscribedSession(t *testing.T) {
 	})
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(r), nil, nil, Discovery{})
+	c := New(cfg, testRouter(r), nil, nil, Discovery{}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	done := make(chan struct{})

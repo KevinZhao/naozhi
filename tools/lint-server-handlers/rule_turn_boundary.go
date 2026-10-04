@@ -21,8 +21,9 @@
 //	   excluded: turn/parse.go is their one sanctioned home.
 //
 // upstream is scanned by G-a's marker slice and G-b because its send RPC is
-// the third turn entry (#3004 decision 6, deferred to its own issue): the
-// most likely place for a new caller to bypass the port unseen.
+// the third turn entry (#3004 decision 6; it submits through
+// server.SubmitRelayed since #3032): the most likely place for a new caller
+// to bypass the port unseen.
 //
 // G-c (the exported method sets of *turn.Orchestrator, dispatch.SessionRouter
 // and dispatch.Turns) lives in the queue_surface_test.go files of internal/turn

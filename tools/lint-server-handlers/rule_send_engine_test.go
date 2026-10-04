@@ -10,7 +10,7 @@ import (
 // sendEnginePkg is the set of files rule 3b-send reads. A "" value writes
 // nothing so a missing-file case can be exercised.
 type sendEnginePkg struct {
-	hub, engine, send, origins, handler, bcast, sender string
+	hub, engine, send, origins, relay, handler, bcast, sender string
 }
 
 func writeSendEnginePkg(t *testing.T, p sendEnginePkg) string {
@@ -21,6 +21,7 @@ func writeSendEnginePkg(t *testing.T, p sendEnginePkg) string {
 		"send_engine.go":     p.engine,
 		"send.go":            p.send,
 		"dash_origin.go":     p.origins,
+		"relay_origin.go":    p.relay,
 		"dashboard_send.go":  p.handler,
 		"wshub_broadcast.go": p.bcast,
 		"turn_sender.go":     p.sender,
@@ -72,6 +73,7 @@ func cleanPkg() sendEnginePkg {
 		engine:  engineOK,
 		send:    "package server\nfunc (e *sendEngine) sessionOptsFor() {}\n",
 		origins: originsOK,
+		relay:   relayOK,
 		handler: handlerOK,
 		bcast:   bcastOK,
 		sender:  senderOK,
@@ -81,6 +83,9 @@ func cleanPkg() sendEnginePkg {
 // originsOK is the dashboard's two turn origins, holding the client, the
 // notifier and the engine's opts lookup, never the Hub.
 const originsOK = "package server\ntype wsOrigin struct {\n\tdashOrigin\n\tc *wsClient\n}\ntype httpOrigin struct {\n\tdashOrigin\n\tnotify sendNotifier\n}\nfunc (e *sendEngine) wsOrigin() {}\n"
+
+// relayOK is the relay's origin, holding a session lookup only.
+const relayOK = "package server\ntype relayOrigin struct {\n\tdashOrigin\n\tsessions sessionLookup\n}\nfunc (e *sendEngine) relaySend() {}\n"
 
 // senderOK is the turn sender holding the router and the broadcaster only.
 const senderOK = "package server\ntype turnSender struct {\n\trouter turnRouter\n\tnotify sendNotifier\n}\nfunc (s turnSender) NotifyIdle() {}\n"
@@ -181,6 +186,27 @@ func TestSendEngineOwnership_FlagsMissingOrigins(t *testing.T) {
 	vs = scanSendEngineOwnership(writeSendEnginePkg(t, p))
 	if len(vs) != 1 || !strings.Contains(vs[0].Message, "deliver has a *Hub receiver") {
 		t.Fatalf("want 1 *Hub-receiver violation in dash_origin.go, got %d:\n%s", len(vs), msgs(vs))
+	}
+}
+
+// TestSendEngineOwnership_RelayOrigin: relayOrigin holding a *Hub, going
+// missing, or relay_origin.go growing a *Hub method is loud.
+func TestSendEngineOwnership_RelayOrigin(t *testing.T) {
+	p := cleanPkg()
+	p.relay = strings.Replace(relayOK, "type relayOrigin struct {\n", "type relayOrigin struct {\n\thub *Hub\n", 1)
+	vs := scanSendEngineOwnership(writeSendEnginePkg(t, p))
+	if len(vs) != 1 || !strings.Contains(vs[0].Message, `relayOrigin declares field "hub" of type *Hub`) {
+		t.Fatalf("want 1 relayOrigin *Hub-field violation, got %d:\n%s", len(vs), msgs(vs))
+	}
+	p.relay = ""
+	vs = scanSendEngineOwnership(writeSendEnginePkg(t, p))
+	if !strings.Contains(msgs(vs), "type relayOrigin not found") {
+		t.Fatalf("want a 'relayOrigin not found' violation, got %d:\n%s", len(vs), msgs(vs))
+	}
+	p.relay = relayOK + "func (h *Hub) submitRelayed() {}\n"
+	vs = scanSendEngineOwnership(writeSendEnginePkg(t, p))
+	if len(vs) != 1 || !strings.Contains(vs[0].Message, "submitRelayed has a *Hub receiver") {
+		t.Fatalf("want 1 *Hub-receiver violation in relay_origin.go, got %d:\n%s", len(vs), msgs(vs))
 	}
 }
 

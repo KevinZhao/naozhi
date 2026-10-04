@@ -24,7 +24,7 @@ func pagedConnector(t *testing.T, times ...int64) *Connector {
 		proc.EventLog.Append(clievent.EventEntry{Time: ts, UUID: strconv.FormatInt(ts, 10), Type: "text", Summary: "x"})
 	}
 	router.InjectSession(pageKey, proc)
-	return New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(router), nil, nil, Discovery{})
+	return New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(router), nil, nil, Discovery{}, nil)
 }
 
 func fetchEventsRaw(t *testing.T, c *Connector, params map[string]any) json.RawMessage {

@@ -1,6 +1,7 @@
 // This file reaches the send pipeline only through h.engine's methods
-// (TrackSend / sessionSend); tools/lint-server-handlers rule_send_engine.go
-// checks that no code outside send_engine.go touches its fields.
+// (TrackSend / sessionSend / relaySend); tools/lint-server-handlers
+// rule_send_engine.go checks that no code outside send_engine.go touches its
+// fields.
 package server
 
 import (
@@ -348,4 +349,10 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		}
 		h.bcast.BroadcastSessionsUpdate()
 	}()
+}
+
+// submitRelayed is how Server.SubmitRelayed reaches the engine: the Hub holds
+// it at run time, and the engine stays off Server (send_engine_sibling C2/C4).
+func (h *Hub) submitRelayed(ctx context.Context, key, text, workspace string) (string, error) {
+	return h.engine.relaySend(ctx, key, text, workspace)
 }

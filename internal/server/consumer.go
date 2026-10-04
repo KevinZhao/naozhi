@@ -37,10 +37,11 @@ type HubRouter interface {
 	NotifyIdle()
 }
 
-// sendEngineRouter is the *sendEngine-only subset of *session.Router: the 7
-// methods the send pipeline calls to validate and record a send's overrides.
-// Sessions themselves are reached through turnSender (turnRouter), the one
-// turn.Sender every entry's turns go through. Deliberately not HubRouter — that
+// sendEngineRouter is the *sendEngine-only subset of *session.Router: the
+// methods the send pipeline calls to validate and record a send's overrides,
+// plus GetOrCreate for a relayed send's preflight (relay_origin.go). Turns
+// reach sessions through turnSender (turnRouter), the one turn.Sender every
+// entry's turns go through. Deliberately not HubRouter — that
 // one is at 15 methods (the consumer-interfaces.md §7.2 rethink threshold) and
 // its godoc admits it carries the transits *SendHandler borrows, so handing it
 // to the engine would just move the borrowing debt to a new holder.
@@ -54,6 +55,7 @@ type sendEngineRouter interface {
 	SetSessionAccessProfile(key, profile string)
 	DefaultWorkspace() string
 	RegisterForResume(key, sessionID, workspace, lastPrompt string) (effectiveKey string)
+	GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
 }
 
 // sendNotifier is *sendEngine's only way out to the dashboard, and the

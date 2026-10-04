@@ -193,7 +193,7 @@ func TestNew_CreatesConnector(t *testing.T) {
 		Token:  "secret",
 	}
 	router := testRouter(makeRouter())
-	c := New(cfg, router, nil, nil, Discovery{})
+	c := New(cfg, router, nil, nil, Discovery{}, nil)
 	if c == nil {
 		t.Fatal("New() = nil")
 	}
@@ -218,7 +218,7 @@ func TestRunOnce_AuthFailure(t *testing.T) {
 	})
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "badtoken"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -236,7 +236,7 @@ func TestRunOnce_AuthFailure(t *testing.T) {
 
 func TestRunOnce_DialFailure(t *testing.T) {
 	cfg := &Config{URL: "ws://127.0.0.1:1", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -254,7 +254,7 @@ func TestRunOnce_DialFailure(t *testing.T) {
 
 func TestHandleRequest_FetchSessions(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	req := node.ReverseMsg{
 		Type:   "request",
@@ -275,7 +275,7 @@ func TestHandleRequest_FetchSessions(t *testing.T) {
 
 func TestHandleRequest_FetchProjects_NilMgr(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}) // projMgr = nil
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil) // projMgr = nil
 
 	req := node.ReverseMsg{Method: "fetch_projects"}
 	result, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
@@ -293,7 +293,7 @@ func TestHandleRequest_FetchProjects_NilMgr(t *testing.T) {
 
 func TestHandleRequest_FetchDiscovered_NoFunc(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	req := node.ReverseMsg{Method: "fetch_discovered"}
 	result, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
@@ -313,7 +313,7 @@ func TestHandleRequest_FetchDiscovered_WithFunc(t *testing.T) {
 		Sessions: func() (json.RawMessage, error) {
 			return json.RawMessage(`[{"session_id":"abc"}]`), nil
 		},
-	})
+	}, nil)
 
 	req := node.ReverseMsg{Method: "fetch_discovered"}
 	result, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
@@ -329,7 +329,7 @@ func TestHandleRequest_FetchDiscovered_WithFunc(t *testing.T) {
 
 func TestHandleRequest_FetchDiscoveredPreview_BadParams(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	req := node.ReverseMsg{Method: "fetch_discovered_preview", Params: json.RawMessage(`not-json`)}
 	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
@@ -344,7 +344,7 @@ func TestHandleRequest_FetchDiscoveredPreview_WithFunc(t *testing.T) {
 		Preview: func(sid string) (json.RawMessage, error) {
 			return json.RawMessage(`[{"session_id":"` + sid + `"}]`), nil
 		},
-	})
+	}, nil)
 
 	// Valid UUID format — R65-SEC-M-1 added a boundary check so the input
 	// must satisfy discovery.IsValidSessionID.
@@ -365,7 +365,7 @@ func TestHandleRequest_FetchDiscoveredPreview_WithFunc(t *testing.T) {
 // the preview func. R65-SEC-M-1.
 func TestHandleRequest_FetchDiscoveredPreview_InvalidSessionID(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 	var called bool
 	c.discovery.Preview = func(sid string) (json.RawMessage, error) {
 		called = true
@@ -387,7 +387,7 @@ func TestHandleRequest_FetchDiscoveredPreview_InvalidSessionID(t *testing.T) {
 
 func TestHandleRequest_FetchEvents_BadParams(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	req := node.ReverseMsg{Method: "fetch_events", Params: json.RawMessage(`not-json`)}
 	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
@@ -398,7 +398,7 @@ func TestHandleRequest_FetchEvents_BadParams(t *testing.T) {
 
 func TestHandleRequest_FetchEvents_SessionNotFound(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	params, _ := json.Marshal(map[string]interface{}{"key": "no:such:key", "after": 0})
 	req := node.ReverseMsg{Method: "fetch_events", Params: params}
@@ -420,7 +420,7 @@ func TestHandleRequest_FetchBackends(t *testing.T) {
 	w := cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
 	w.CLIVersion = "2.1.100"
 	router := session.NewRouter(session.RouterConfig{Wrapper: w})
-	c := New(cfg, testRouter(router), nil, nil, Discovery{})
+	c := New(cfg, testRouter(router), nil, nil, Discovery{}, nil)
 
 	req := node.ReverseMsg{Type: "request", Method: "fetch_backends"}
 	result, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
@@ -452,7 +452,7 @@ func TestHandleRequest_FetchBackends(t *testing.T) {
 
 func TestHandleRequest_Send_BadParams(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	req := node.ReverseMsg{Method: "send", Params: json.RawMessage(`not-json`)}
 	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
@@ -468,7 +468,7 @@ func TestHandleRequest_Send_BadParams(t *testing.T) {
 // backstop. R68-SEC-H1.
 func TestHandleRequest_Send_TextTooLong(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	// 5 MB > maxCoalescedTextBytes (4 MB). Valid JSON that would otherwise
 	// pass through to sess.Send on an accepting router.
@@ -497,7 +497,7 @@ func TestHandleRequest_Send_TextTooLong(t *testing.T) {
 // else by submitting `/home/../etc`.
 func TestHandleRequest_Send_RejectsTraversalOnEmptyDefaultWorkspace(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 	if c.defaultWorkspace != "" {
 		t.Fatalf("precondition: defaultWorkspace must be empty, got %q", c.defaultWorkspace)
 	}
@@ -518,7 +518,7 @@ func TestHandleRequest_Send_RejectsTraversalOnEmptyDefaultWorkspace(t *testing.T
 
 func TestHandleRequest_Send_RejectsControlByteInWorkspace(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 	params, _ := json.Marshal(map[string]string{
 		"key":       "feishu:direct:alice:general",
 		"text":      "hi",
@@ -541,7 +541,7 @@ func TestHandleRequest_Send_RejectsControlByteInWorkspace(t *testing.T) {
 // arbitrary CLI-session rooting. R68-SEC-M2.
 func TestHandleRequest_Send_EmptyDefaultWorkspace_RejectsOverride(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 	if c.defaultWorkspace != "" {
 		t.Fatalf("precondition: defaultWorkspace must be empty, got %q", c.defaultWorkspace)
 	}
@@ -584,7 +584,7 @@ func TestValidateRemoteWorkspacePath_SharedByConnector(t *testing.T) {
 
 func TestHandleRequest_UnknownMethod(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	req := node.ReverseMsg{Method: "totally_unknown"}
 	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
@@ -600,7 +600,7 @@ func TestHandleRequest_UnknownMethod(t *testing.T) {
 
 func TestHandleRequest_RestartPlanner_NilMgr(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	params, _ := json.Marshal(map[string]string{"project_name": "myproj"})
 	req := node.ReverseMsg{Method: "restart_planner", Params: params}
@@ -612,7 +612,7 @@ func TestHandleRequest_RestartPlanner_NilMgr(t *testing.T) {
 
 func TestHandleRequest_RestartPlanner_BadParams(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	req := node.ReverseMsg{Method: "restart_planner", Params: json.RawMessage(`not-json`)}
 	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
@@ -625,7 +625,7 @@ func TestHandleRequest_RestartPlanner_BadParams(t *testing.T) {
 
 func TestHandleRequest_UpdateConfig_NilMgr(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"project_name": "proj",
@@ -640,7 +640,7 @@ func TestHandleRequest_UpdateConfig_NilMgr(t *testing.T) {
 
 func TestHandleRequest_UpdateConfig_BadParams(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	req := node.ReverseMsg{Method: "update_config", Params: json.RawMessage(`not-json`)}
 	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
@@ -653,7 +653,7 @@ func TestHandleRequest_UpdateConfig_BadParams(t *testing.T) {
 
 func TestHandleRequest_Takeover_BadParams(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	req := node.ReverseMsg{Method: "takeover", Params: json.RawMessage(`not-json`)}
 	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
@@ -664,7 +664,7 @@ func TestHandleRequest_Takeover_BadParams(t *testing.T) {
 
 func TestHandleRequest_Takeover_MissingPID(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	params, _ := json.Marshal(map[string]interface{}{"pid": 0, "session_id": "sess-abc"})
 	req := node.ReverseMsg{Method: "takeover", Params: params}
@@ -676,7 +676,7 @@ func TestHandleRequest_Takeover_MissingPID(t *testing.T) {
 
 func TestHandleRequest_CloseDiscovered_BadParams(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	req := node.ReverseMsg{Method: "close_discovered", Params: json.RawMessage(`not-json`)}
 	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
@@ -687,7 +687,7 @@ func TestHandleRequest_CloseDiscovered_BadParams(t *testing.T) {
 
 func TestHandleRequest_CloseDiscovered_MissingPID(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	params, _ := json.Marshal(map[string]interface{}{"pid": 0})
 	req := node.ReverseMsg{Method: "close_discovered", Params: params}
@@ -699,7 +699,7 @@ func TestHandleRequest_CloseDiscovered_MissingPID(t *testing.T) {
 
 func TestHandleRequest_CloseDiscovered_MissingProcStartTime(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	params, _ := json.Marshal(map[string]interface{}{"pid": 12345, "proc_start_time": 0})
 	req := node.ReverseMsg{Method: "close_discovered", Params: params}
@@ -740,7 +740,7 @@ func TestHandleConn_PingPong(t *testing.T) {
 	})
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "tok"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -790,7 +790,7 @@ func TestHandleConn_RequestFetchSessions(t *testing.T) {
 	})
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "tok"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -826,7 +826,7 @@ func TestRun_CancelContext(t *testing.T) {
 	})
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -866,7 +866,7 @@ func TestRunOnce_RegisterPayload(t *testing.T) {
 		Token:       "my-token",
 		DisplayName: "Test Node",
 	}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -910,7 +910,7 @@ func TestHandleConn_Subscribe_SessionNotFound(t *testing.T) {
 	})
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -957,7 +957,7 @@ func TestRun_BackoffLogic_DialsOnFailure(t *testing.T) {
 	})
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
@@ -996,7 +996,7 @@ func TestRun_BackoffGauge_TracksReconnectState(t *testing.T) {
 	})
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
@@ -1061,7 +1061,7 @@ func TestHandleRequest_UpdateConfig_WithMgr(t *testing.T) {
 	}
 
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), mgr, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), mgr, nil, Discovery{}, nil)
 
 	newCfg := project.ProjectConfig{GitSync: true, GitRemote: "upstream"}
 	cfgJSON, _ := json.Marshal(newCfg)
@@ -1087,7 +1087,7 @@ func TestHandleRequest_UpdateConfig_ProjectNotFound(t *testing.T) {
 	mgr.Scan()
 
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), mgr, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), mgr, nil, Discovery{}, nil)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"project_name": "ghost",
@@ -1108,7 +1108,7 @@ func TestHandleRequest_RestartPlanner_ProjectNotFound(t *testing.T) {
 	mgr.Scan()
 
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), mgr, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), mgr, nil, Discovery{}, nil)
 
 	params, _ := json.Marshal(map[string]string{"project_name": "ghost"})
 	req := node.ReverseMsg{Method: "restart_planner", Params: params}
@@ -1130,7 +1130,7 @@ func TestHandleRequest_FetchProjects_WithMgr(t *testing.T) {
 	mgr.Scan()
 
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), mgr, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), mgr, nil, Discovery{}, nil)
 
 	req := node.ReverseMsg{Method: "fetch_projects"}
 	result, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
@@ -1148,7 +1148,7 @@ func TestHandleRequest_FetchProjects_WithMgr(t *testing.T) {
 
 func TestHandleRequest_Takeover_InvalidSessionID(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	// Valid-looking PID but invalid session ID format
 	params, _ := json.Marshal(map[string]interface{}{
@@ -1165,7 +1165,7 @@ func TestHandleRequest_Takeover_InvalidSessionID(t *testing.T) {
 
 func TestHandleRequest_Takeover_MissingProcStartTime(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"pid":             12345,
@@ -1183,7 +1183,7 @@ func TestHandleRequest_Takeover_MissingProcStartTime(t *testing.T) {
 
 func TestHandleRequest_CloseDiscovered_InvalidSessionID(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"pid":             12345,
@@ -1219,7 +1219,7 @@ func TestHandleConn_Unsubscribe(t *testing.T) {
 	})
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1251,7 +1251,7 @@ func TestHandleRequest_FetchEvents_ExistingSession(t *testing.T) {
 	router.RegisterForResume("feishu:group:chat1:general", "sess-abc123", "/tmp", "test prompt")
 
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(router), nil, nil, Discovery{})
+	c := New(cfg, testRouter(router), nil, nil, Discovery{}, nil)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"key":   "feishu:group:chat1:general",
@@ -1293,7 +1293,7 @@ func TestHandleConn_RequestErrorResponse(t *testing.T) {
 	})
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1340,7 +1340,7 @@ func TestHandleConn_WSPingPong(t *testing.T) {
 	})
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1368,7 +1368,7 @@ func TestHandleRequest_SetSessionLabel_Updates(t *testing.T) {
 	// Seed a session so the dispatch path has something to mutate.
 	proc := session.NewTestProcess()
 	router.InjectSession("feishu:direct:alice:general", proc)
-	c := New(cfg, testRouter(router), nil, nil, Discovery{})
+	c := New(cfg, testRouter(router), nil, nil, Discovery{}, nil)
 
 	req := node.ReverseMsg{
 		Method: "set_session_label",
@@ -1392,7 +1392,7 @@ func TestHandleRequest_SetSessionLabel_Updates(t *testing.T) {
 
 func TestHandleRequest_SetSessionLabel_UnknownKey(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	req := node.ReverseMsg{
 		Method: "set_session_label",
@@ -1413,7 +1413,7 @@ func TestHandleRequest_SetSessionLabel_UnknownKey(t *testing.T) {
 
 func TestHandleRequest_SetSessionLabel_MissingKey(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	req := node.ReverseMsg{
 		Method: "set_session_label",
@@ -1426,7 +1426,7 @@ func TestHandleRequest_SetSessionLabel_MissingKey(t *testing.T) {
 
 func TestHandleRequest_SetSessionLabel_TooLong(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{})
+	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
 
 	label := strings.Repeat("a", 129)
 	req := node.ReverseMsg{

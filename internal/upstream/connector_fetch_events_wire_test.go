@@ -27,7 +27,7 @@ func TestHandleRequest_FetchEvents_SendsTheWireView(t *testing.T) {
 		TaskType: "local_agent", InternalAgentID: "agent-abc", JSONLPath: "/home/u/.claude/projects/p/s/subagents/agent-abc.jsonl", FirstPromptID: "fp",
 	})
 	router.InjectSession(key, proc)
-	c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(router), nil, nil, Discovery{})
+	c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(router), nil, nil, Discovery{}, nil)
 
 	// The catch-up array, the opening page and a "load earlier" page.
 	for _, p := range []map[string]any{

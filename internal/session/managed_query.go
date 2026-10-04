@@ -783,7 +783,7 @@ func (s *ManagedSession) SubscribeEvents() (<-chan struct{}, func()) {
 
 // LogSystemEvent appends a single "system"-typed EventEntry with the given
 // summary to this session's event log and notifies subscribers, so
-// off-main-path writers (e.g. the connector's async Send goroutine) surface
+// off-main-path writers (e.g. a relayed send's failed turn) surface
 // errors in the UI instead of only in logs. The dashboard renders system
 // events escaped, so arbitrary error text is safe. With a live proc it goes
 // to the EventLog (WS subscribers wake); without one it lands in
