@@ -366,9 +366,10 @@ func TestGetOrCreate_PanicInsideTheReserveLeavesNothingHeld(t *testing.T) {
 	}
 }
 
-// TestSpawnSession_LabelAndTuningWrittenInWindowSurvive: a label and a tuning
-// pick written to the dead session while its respawn is outside the lock are
-// carried onto the new session, not dropped for the reserve-time values.
+// TestSpawnSession_LabelAndTuningWrittenInWindowSurvive: a label and a
+// model/effort pick written to the dead session while its respawn is outside
+// the lock are carried onto the new session, not dropped for the reserve-time
+// values.
 func TestSpawnSession_LabelAndTuningWrittenInWindowSurvive(t *testing.T) {
 	g := newGatedSpawn()
 	r := spawnRouter(t, 4, g.hook)
@@ -382,8 +383,8 @@ func TestSpawnSession_LabelAndTuningWrittenInWindowSurvive(t *testing.T) {
 	if !r.SetUserLabel(key, "after") {
 		t.Fatal("SetUserLabel found no session")
 	}
-	model := "claude-opus-5"
-	mode, err := r.SetSessionTuning(context.Background(), key, &model, nil)
+	model, effort := "claude-opus-5", "high"
+	mode, err := r.SetSessionTuning(context.Background(), key, &model, &effort)
 	if err != nil || mode != TuningAppliedDeferred {
 		t.Fatalf("SetSessionTuning = %q, %v; want %q", mode, err, TuningAppliedDeferred)
 	}
@@ -401,6 +402,9 @@ func TestSpawnSession_LabelAndTuningWrittenInWindowSurvive(t *testing.T) {
 	}
 	if m := got.s.TuningModel(); m != model {
 		t.Errorf("tuning model = %q, want the pick made during the spawn %q", m, model)
+	}
+	if e := got.s.TuningEffort(); e != effort {
+		t.Errorf("tuning effort = %q, want the pick made during the spawn %q", e, effort)
 	}
 }
 
