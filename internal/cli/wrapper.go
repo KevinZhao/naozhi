@@ -759,12 +759,29 @@ func (r *shimLineReader) ReadLine() ([]byte, bool, error) {
 			return []byte(msg.Line), false, nil
 		}
 		if msg.Type == "cli_exited" {
-			return nil, true, fmt.Errorf("cli exited during init")
+			return nil, true, initExitError(msg, r.proc.adoptExitStderrTail(msg.StderrTail))
 		}
-		// Skip other frame types (stderr, pong, ...) but bound the loop.
+		if msg.Type == "stderr" {
+			r.proc.recordStderrLine(sanitizeStderrLine(msg.Line))
+		}
+		// Skip other frame types (stderr, kept for the tail above; pong, ...)
+		// but bound the loop.
 		skipped++
 		if skipped > shimLineReaderMaxSkips {
 			return nil, true, fmt.Errorf("shim sent %d non-stdout frames during init without stdout (last type=%q)", skipped, msg.Type)
 		}
 	}
+}
+
+// initExitError is the Init handshake's error for a CLI that exited before
+// answering, quoting the first stderr line so spawn errors carry the cause.
+func initExitError(msg shimMsg, tail []string) error {
+	var code int64
+	if msg.Code.Present {
+		code = msg.Code.Value
+	}
+	if cause := stderrTailSummary(tail); cause != "" {
+		return fmt.Errorf("cli exited during init (code %d): %s", code, cause)
+	}
+	return fmt.Errorf("cli exited during init (code %d)", code)
 }

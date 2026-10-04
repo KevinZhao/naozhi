@@ -122,7 +122,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	// to avoid sending cli_exited twice (closed channel is always selectable).
 	cliWasAlive := cliAlive
 	if !cliAlive {
-		writeMsg(conn, ServerMsg{Type: "cli_exited", Code: intPtr(s.cli.exitCode)})
+		writeMsg(conn, ServerMsg{Type: "cli_exited", Code: intPtr(s.cli.exitCode), StderrTail: s.stderrTail.Lines()})
 	}
 
 	// Reject a new client while the CLI is alive and another client is
@@ -213,7 +213,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 		<-writerDone
 		// conn is now exclusively ours: deliver cli_exited synchronously.
 		if sendCliExited {
-			resp := ServerMsg{Type: "cli_exited", Code: intPtr(cliExitCode)}
+			resp := ServerMsg{Type: "cli_exited", Code: intPtr(cliExitCode), StderrTail: s.stderrTail.Lines()}
 			if data, err := resp.MarshalLine(); err == nil {
 				writeRaw(conn, data)
 			}

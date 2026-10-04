@@ -211,6 +211,8 @@ func shimFrameSamples() []shimFrameSample {
 		// Signal is declared on the wire contract and consumed by
 		// handleShimCLIExited even though today's shim only sets Code.
 		{name: "cli_exited/signal", msg: shim.ServerMsg{Type: "cli_exited", Signal: "SIGKILL"}},
+		{name: "cli_exited/stderr-tail", msg: shim.ServerMsg{Type: "cli_exited", Code: intPtr(1),
+			StderrTail: []string{"Error: No conversation found", "héllo \"quoted\""}}},
 		{name: "pong", msg: shim.ServerMsg{Type: "pong", CLIAlive: boolPtr(false), Buffered: 12}},
 		{name: "auth_failed", msg: shim.ServerMsg{Type: "auth_failed", Msg: "invalid token"}},
 		{name: "error", msg: shim.ServerMsg{Type: "error", Msg: "another client is connected"}},

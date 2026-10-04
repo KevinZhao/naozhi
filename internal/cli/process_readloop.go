@@ -34,6 +34,8 @@ type shimMsg struct {
 	Msg    string      `json:"msg,omitempty"`
 	Code   shimMsgCode `json:"code,omitempty"`
 	Signal string      `json:"signal,omitempty"`
+	// StderrTail is set on cli_exited by shims that keep a stderr tail.
+	StderrTail []string `json:"stderr_tail,omitempty"`
 }
 
 // shimMsgCode wraps an int64 so json.Unmarshal can distinguish absent from
@@ -266,7 +268,9 @@ func (p *Process) handleShimMessage(msg shimMsg, log *slog.Logger) shimDispatchO
 		return p.handleShimStdout(msg, log)
 
 	case "stderr":
-		log.Debug("cli stderr", "line", sanitizeStderrLine(msg.Line))
+		line := sanitizeStderrLine(msg.Line)
+		log.Debug("cli stderr", "line", line)
+		p.recordStderrLine(line)
 
 	case "cli_exited":
 		p.handleShimCLIExited(msg, log)
@@ -364,17 +368,20 @@ func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOu
 	return shimDispatchContinue
 }
 
-// handleShimCLIExited finalises a cli_exited terminal frame: stamps
-// deathReason (sanitising any shim-supplied signal name), transitions State to
-// Dead, and closes the shim socket so heartbeatLoop stops pinging a dead fd.
+// handleShimCLIExited finalises a cli_exited terminal frame: keeps the stderr
+// tail (logged at Warn on a non-zero exit), stamps deathReason (sanitising any
+// shim-supplied signal name), transitions State to Dead, and closes the shim
+// socket so heartbeatLoop stops pinging a dead fd.
 func (p *Process) handleShimCLIExited(msg shimMsg, log *slog.Logger) {
 	var code int64
 	if msg.Code.Present {
 		code = msg.Code.Value
 	}
+	tail := p.adoptExitStderrTail(msg.StderrTail)
 	log.Info("CLI exited via shim", "code", code)
 	reason := DeathReasonCLIExited
 	if code != 0 {
+		log.Warn("CLI exited with error", "code", code, "stderr_tail", tail)
 		reason = DeathReasonCLIExited + "_code_" + strconv.FormatInt(code, 10)
 	} else if msg.Signal != "" {
 		// msg.Signal comes from a separate, tamperable process and flows into

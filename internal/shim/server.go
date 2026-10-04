@@ -345,6 +345,9 @@ type shimServer struct {
 	idleTimer      *time.Timer
 	done           chan struct{} // closed on shutdown
 	doneOnce       sync.Once
+
+	// stderrTail is the CLI's last stderr lines, sent on cli_exited.
+	stderrTail StderrTail
 }
 
 func (s *shimServer) initiateShutdown() {
