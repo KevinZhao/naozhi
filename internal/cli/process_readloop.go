@@ -612,13 +612,6 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	// A Send-owned turn is left to Send's defer so a second Send cannot start
 	// before the first returns.
 	if ev.Type == "result" && p.turn.reconnectedMidTurn.CompareAndSwap(true, false) {
-		// Keep the outcome for a caller that did not issue the Send: past this
-		// point the frame's text survives nowhere (the ring.EventLog entry logged
-		// above is turn-boundary metadata only). This belongs HERE and not in
-		// deliverEvent — the passthrough fan-out already returned if a live Send
-		// claimed the result. See resolveResult for why that placement is what
-		// keeps Send and the latch from both owning one result.
-		p.adopted.resolveResult(ev)
 		p.turn.mu.Lock()
 		_, wasRunning := p.turn.transitionLocked(evTurnEnded)
 		cb := p.turn.onTurnDone
@@ -628,6 +621,13 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 			// iteration if Kill() raced this path (onTurnDone is idempotent).
 			cb()
 		}
+		// Keep the outcome for a caller that did not issue the Send: past this
+		// point the frame's text survives nowhere (the ring.EventLog entry logged
+		// above is turn-boundary metadata only). This belongs HERE and not in
+		// deliverEvent — the passthrough fan-out already returned if a live Send
+		// claimed the result — and AFTER the turn ends, so whoever the latch wakes
+		// finds the process Ready. See resolveResult for both rules.
+		p.adopted.resolveResult(ev)
 	} else if ev.Type == "result" && p.caps.Replay {
 		// After eventCh, so a Send claiming Ready drains this result.
 		if p.deliverEvent(ev, now, log) {
