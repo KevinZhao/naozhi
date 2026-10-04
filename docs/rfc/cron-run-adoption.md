@@ -85,7 +85,16 @@ func reconnectVerdict(replays []shim.ServerMsg, proto Protocol) (midTurn bool, f
 
 第二行就是 v1 的分支 2，成本从"新增一条 replay 保留路径"降到"少丢一个已经在手上的值"。
 
-cron 收养的闸门（`Router.AdoptInFlight`）只认第一行，且不论闩是否已填：迟到的 result 可能在 `ReconnectShimsCtx` 之后、cron reconcile 之前就落进闩，那仍是该收养的 turn（`AdoptedMidTurn`，不是 `AdoptedTurnPending`）。第二行暂不收养：重连是全量 replay，空闲 shim 的 backlog 同样以 result 结尾，那是上一轮、旧进程已经交付过的答案；没有证据表明它晚于本次 run 的 Send，记成成功比记成 interrupted 更糟（#3104）。
+cron 收养的闸门（`Router.AdoptInFlight` → `Process.AdoptableAfter`）对第一行无条件收养，且不论闩是否已填：迟到的 result 可能在 `ReconnectShimsCtx` 之后、cron reconcile 之前就落进闩，那仍是该收养的 turn（`AdoptedMidTurn`，不是 `AdoptedTurnPending`）。
+
+第二行要有证据才收养。重连是全量 replay（`lastSeq=0`），空闲 shim 的 backlog 同样以 result 结尾，那是上一轮、旧进程已经交付过的答案；记成本次 run 的成功比记成 interrupted 更糟。证据是**发送水位**（`cli.TurnWatermark{ShimPID, Seq}`，#3104）：
+
+- cron 在 `execSend` 里、Send 之前一刻，经可选能力 `cron.SendWatermarker` 取会话当前的 `<shimPID>:<seq>`，重写进 run-inflight 标记（JSON `adopt_after`，omitempty）。
+- `reconnectVerdict` 同时给出 replay 里那个 result 的 seq，闩把它记作 `resultSeq`。
+- `SpawnReconnect` 用 replay 的最大 seq 给 `LastSeq` 打底；否则刚重连、还没收到 live 帧的进程水位是 0，所有 replay 出来的 result 都会显得"更晚"。
+- 判定：同一 shim 上 `resultSeq > Seq` 才收养；shim PID 不同说明 shim 是水位之后才起的，整段 backlog 都晚于 Send，收养；标记里没有水位（旧版本写的标记、会话无此能力、重写失败）一律不收养，维持旧行为。
+
+已接受的边界：水位之后 CLI 自己发起的 turn（unowned）的 result 会被算到本次 run 上。
 
 ### 3.3 填充点：复用现有 CAS，不新增语义
 

@@ -17,10 +17,15 @@ import (
 
 const adoptAssistantLine = `{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]},"session_id":"s1"}`
 
+// fakeShimPID is what the fake shim's hello reports. No process can have it,
+// so Kill's SIGUSR2 to the shim reaches nothing instead of the test binary.
+const fakeShimPID = 1 << 30
+
 // reconnectToFakeShim runs ReconnectShimsCtx against a fake shim for key that
-// replays backlog, and returns the reattached process plus a func that sends a
-// live stdout line on the same connection — the late result of the turn.
-func reconnectToFakeShim(t *testing.T, key string, backlog []string) (*Router, *cli.Process, func(line string)) {
+// replays backlog, numbered from firstSeq, and returns the reattached process
+// plus a func that sends a live stdout line on the same connection — the late
+// result of the turn.
+func reconnectToFakeShim(t *testing.T, key string, firstSeq int64, backlog []string) (*Router, *cli.Process, func(line string)) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("shim discovery needs unix PID liveness and unix sockets")
@@ -58,9 +63,9 @@ func reconnectToFakeShim(t *testing.T, key string, backlog []string) (*Router, *
 		if _, err := rd.ReadBytes('\n'); err != nil { // attach
 			return
 		}
-		frames := []shim.ServerMsg{{Type: "hello", ProtocolVersion: shim.ProtocolVersion}}
+		frames := []shim.ServerMsg{{Type: "hello", ProtocolVersion: shim.ProtocolVersion, ShimPID: fakeShimPID}}
 		for i, line := range backlog {
-			frames = append(frames, shim.ServerMsg{Type: "replay", Seq: int64(i + 1), Line: line})
+			frames = append(frames, shim.ServerMsg{Type: "replay", Seq: firstSeq + int64(i), Line: line})
 		}
 		frames = append(frames, shim.ServerMsg{Type: "replay_done", Count: len(backlog)})
 		for i := range frames {
@@ -103,7 +108,7 @@ func reconnectToFakeShim(t *testing.T, key string, backlog []string) (*Router, *
 	}
 	emit := func(line string) {
 		t.Helper()
-		data, err := (&shim.ServerMsg{Type: "stdout", Seq: int64(len(backlog) + 1), Line: line}).MarshalLine()
+		data, err := (&shim.ServerMsg{Type: "stdout", Seq: firstSeq + int64(len(backlog)), Line: line}).MarshalLine()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -121,12 +126,14 @@ func reconnectToFakeShim(t *testing.T, key string, backlog []string) (*Router, *
 // finished is recorded as interrupted and its answer is dropped.
 func TestAdoptInFlight_MidTurnLatchStaysAdoptableOnceResolved(t *testing.T) {
 	const key = "cron:09a61c45ad4c76ba"
-	r, proc, emit := reconnectToFakeShim(t, key, []string{adoptAssistantLine})
+	r, proc, emit := reconnectToFakeShim(t, key, 1, []string{adoptAssistantLine})
 
 	if !proc.AdoptedTurnPending() {
 		t.Fatal("a backlog ending mid-turn did not arm a pending latch")
 	}
-	if p, state := r.AdoptInFlight(key); state != AdoptLive || p != proc {
+	// No watermark: a run the old binary started, or one that never took one.
+	// A mid-turn latch is adopted without it.
+	if p, state := r.AdoptInFlight(key, cli.TurnWatermark{}, false); state != AdoptLive || p != proc {
 		t.Fatalf("before the result: AdoptInFlight = (%p, %v), want (%p, AdoptLive)", p, state, proc)
 	}
 
@@ -134,7 +141,7 @@ func TestAdoptInFlight_MidTurnLatchStaysAdoptableOnceResolved(t *testing.T) {
 	testhelper.Eventually(t, func() bool { return !proc.AdoptedTurnPending() },
 		5*time.Second, "the live result never reached the latch")
 
-	p, state := r.AdoptInFlight(key)
+	p, state := r.AdoptInFlight(key, cli.TurnWatermark{}, false)
 	if state != AdoptLive || p != proc {
 		t.Fatalf("after the result: AdoptInFlight = (%p, %v), want (%p, AdoptLive); "+
 			"a turn that finished before cron asked must still be adopted", p, state, proc)
@@ -153,11 +160,12 @@ func TestAdoptInFlight_MidTurnLatchStaysAdoptableOnceResolved(t *testing.T) {
 // TestAdoptInFlight_ReplayedResultIsNotAdopted is the boundary of the gate. A
 // reconnect replays the shim's whole backlog, so one that ends in a result arms
 // a latch on every idle reconnect — with the previous turn's answer, which the
-// old process already delivered. Nothing shows it came after this run's Send,
-// so it must stay AdoptNone rather than be recorded as this run's success.
+// old process already delivered. With no watermark nothing shows it came after
+// this run's Send, so it must stay AdoptNone rather than be recorded as this
+// run's success.
 func TestAdoptInFlight_ReplayedResultIsNotAdopted(t *testing.T) {
 	const key = "cron:5d1e0c2b7a9f4e83"
-	r, proc, _ := reconnectToFakeShim(t, key, []string{
+	r, proc, _ := reconnectToFakeShim(t, key, 1, []string{
 		adoptAssistantLine,
 		`{"type":"result","subtype":"success","result":"previous run","session_id":"s1"}`,
 	})
@@ -169,7 +177,56 @@ func TestAdoptInFlight_ReplayedResultIsNotAdopted(t *testing.T) {
 	if out, err := proc.AdoptedOutcome(ctx); err != nil || out.Result.Text != "previous run" {
 		t.Fatalf("AdoptedOutcome = (%+v, %v), want the replayed result latched", out, err)
 	}
-	if p, state := r.AdoptInFlight(key); state != AdoptNone || p != nil {
+	if p, state := r.AdoptInFlight(key, cli.TurnWatermark{}, false); state != AdoptNone || p != nil {
 		t.Errorf("AdoptInFlight = (%p, %v), want (nil, AdoptNone) for a latch armed from the replay", p, state)
+	}
+}
+
+// TestAdoptInFlight_ResultAfterTheSendWatermarkIsAdopted is the turn that ended
+// while naozhi was down: the run took its watermark at seq 5, right after the
+// previous turn's result, and its own result is the backlog's last frame. That
+// one is adopted, and the latch holds it rather than the earlier result.
+func TestAdoptInFlight_ResultAfterTheSendWatermarkIsAdopted(t *testing.T) {
+	const key = "cron:7c2e94d01b5a6f38"
+	r, proc, _ := reconnectToFakeShim(t, key, 5, []string{
+		`{"type":"result","subtype":"success","result":"previous run","session_id":"s1"}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"do thing"}]},"session_id":"s1"}`,
+		adoptAssistantLine,
+		`{"type":"result","subtype":"success","result":"this run","session_id":"s1"}`,
+	})
+
+	p, state := r.AdoptInFlight(key, cli.TurnWatermark{ShimPID: fakeShimPID, Seq: 5}, true)
+	if state != AdoptLive || p != proc {
+		t.Fatalf("AdoptInFlight = (%p, %v), want (%p, AdoptLive) for a result past the watermark", p, state, proc)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := p.AdoptedOutcome(ctx)
+	if err != nil {
+		t.Fatalf("AdoptedOutcome: %v", err)
+	}
+	if out.End != cli.AdoptedEndResult || out.Result.Text != "this run" {
+		t.Errorf("outcome = %+v, want the result at seq 8", out)
+	}
+}
+
+// TestAdoptInFlight_WatermarkAfterReconnectRejectsTheReplayedResult: a run
+// started on a process that reattached to an idle shim takes its watermark
+// before any live frame arrives. It must already sit past the replayed result,
+// or a restart before this run's own result would adopt the previous turn's.
+func TestAdoptInFlight_WatermarkAfterReconnectRejectsTheReplayedResult(t *testing.T) {
+	const key = "cron:e41b07c9d26a5f83"
+	r, _, _ := reconnectToFakeShim(t, key, 1, []string{
+		adoptAssistantLine,
+		`{"type":"result","subtype":"success","result":"previous run","session_id":"s1"}`,
+	})
+
+	w, ok := r.ss.Load(key).TurnWatermark()
+	if !ok || w != (cli.TurnWatermark{ShimPID: fakeShimPID, Seq: 2}) {
+		t.Fatalf("TurnWatermark = (%+v, %v), want ({%d 2}, true): the replayed frames were received",
+			w, ok, fakeShimPID)
+	}
+	if p, state := r.AdoptInFlight(key, w, true); state != AdoptNone || p != nil {
+		t.Errorf("AdoptInFlight = (%p, %v), want (nil, AdoptNone) for the result the watermark already covers", p, state)
 	}
 }

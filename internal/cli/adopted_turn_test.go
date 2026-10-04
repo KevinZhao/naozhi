@@ -22,7 +22,7 @@ func armReconnectMidTurn(p *Process) {
 	p.turn.state = StateRunning
 	p.turn.mu.Unlock()
 	p.turn.reconnectedMidTurn.Store(true)
-	p.adopted.arm(true)
+	p.adopted.arm(true, 0)
 }
 
 // TestApplyReconnectVerdict_ArmsOnlyWhatTheBacklogJustifies covers the wiring
@@ -42,7 +42,7 @@ func TestApplyReconnectVerdict_ArmsOnlyWhatTheBacklogJustifies(t *testing.T) {
 	}
 	t.Run("mid turn arms and waits", func(t *testing.T) {
 		p := &Process{}
-		p.applyReconnectVerdict(true, nil)
+		p.applyReconnectVerdict(true, nil, 0)
 		if !p.turn.reconnectedMidTurn.Load() {
 			t.Error("reconnectedMidTurn not armed for a mid-turn backlog")
 		}
@@ -61,7 +61,7 @@ func TestApplyReconnectVerdict_ArmsOnlyWhatTheBacklogJustifies(t *testing.T) {
 		p := &Process{}
 		p.applyReconnectVerdict(false, &clievent.Event{
 			Type: "result", SubType: "success", Result: "from the backlog", SessionID: "s1",
-		})
+		}, 7)
 		if p.turn.reconnectedMidTurn.Load() {
 			t.Error("reconnectedMidTurn armed for a turn that already ended")
 		}
@@ -83,7 +83,7 @@ func TestApplyReconnectVerdict_ArmsOnlyWhatTheBacklogJustifies(t *testing.T) {
 
 	t.Run("nothing in flight leaves the latch unarmed", func(t *testing.T) {
 		p := &Process{}
-		p.applyReconnectVerdict(false, nil)
+		p.applyReconnectVerdict(false, nil, 0)
 		if p.turn.reconnectedMidTurn.Load() {
 			t.Error("reconnectedMidTurn armed with nothing in flight")
 		}
@@ -415,10 +415,11 @@ func TestAdoptedTurn_LiveSendKeepsItsOwnResult(t *testing.T) {
 func TestReconnectVerdict_HandsBackTheFinishedResult(t *testing.T) {
 	proto := &ClaudeProtocol{}
 	replays := []shim.ServerMsg{
-		{Type: "replay", Line: `{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]},"session_id":"s1"}`},
-		{Type: "replay", Line: `{"type":"result","subtype":"success","result":"finished while down","session_id":"s1"}`},
+		{Type: "replay", Seq: 11, Line: `{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]},"session_id":"s1"}`},
+		{Type: "replay", Seq: 12, Line: `{"type":"result","subtype":"success","result":"finished while down","session_id":"s1"}`},
+		{Type: "replay", Seq: 13, Line: `{"type":"control_response","response":{"subtype":"success","request_id":"naozhi-setmodel-1"}}`},
 	}
-	midTurn, finished := reconnectVerdict(replays, proto)
+	midTurn, finished, finishedSeq := reconnectVerdict(replays, proto)
 	if midTurn {
 		t.Error("midTurn = true for a backlog ending in a result")
 	}
@@ -430,6 +431,11 @@ func TestReconnectVerdict_HandsBackTheFinishedResult(t *testing.T) {
 	}
 	if finished.SubType != "success" {
 		t.Errorf("SubType = %q, want success", finished.SubType)
+	}
+	// The result's own frame, not the backlog's last: a send watermark is
+	// compared against where the result sits (AdoptableAfter).
+	if finishedSeq != 12 {
+		t.Errorf("finishedSeq = %d, want 12", finishedSeq)
 	}
 }
 
@@ -455,7 +461,7 @@ func TestReconnectVerdict_MidTurnAndFinishedAreExclusive(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			midTurn, finished := reconnectVerdict(tc.replays, proto)
+			midTurn, finished, _ := reconnectVerdict(tc.replays, proto)
 			if midTurn && finished != nil {
 				t.Errorf("both set: midTurn=%v finished=%+v", midTurn, finished)
 			}

@@ -20,11 +20,11 @@ type AdoptState int
 
 const (
 	// AdoptNone: no live adoptable turn — the shim died with the old process,
-	// or the session was never reconnected mid-turn. The caller records the
+	// or its reconnect latched no turn of this run. The caller records the
 	// interrupted run exactly as before adoption existed.
 	AdoptNone AdoptState = iota
-	// AdoptLive: the session holds a process that reconnected mid-turn;
-	// AwaitAdopted on it answers how the in-flight turn ended.
+	// AdoptLive: the session holds a process whose reconnect latched this
+	// run's turn; AwaitAdopted on it answers how that turn ended.
 	AdoptLive
 	// AdoptDriftShutdown: startup shut this key's surviving shim down because
 	// its argv no longer matched config (#2749). The run did not fail and was
@@ -64,15 +64,16 @@ func (d *driftShutdowns) has(key string) bool {
 // a recorded drift shutdown, because a key could in principle be drift-shut
 // and then respawned mid-turn — the live turn is the newer fact.
 //
-// The gate is a mid-turn reconnect, latched or not: the late result may land
-// before cron gets to ask. A latch armed from a replayed result stays
-// AdoptNone, since nothing here shows that result came after the run's Send.
-func (r *Router) AdoptInFlight(key string) (*cli.Process, AdoptState) {
+// after is the watermark the run took just before its Send (known=false: it
+// recorded none). A mid-turn reconnect is adopted latched or not, as the late
+// result may land before cron asks; a replayed result only when it came after
+// the Send (cli.Process.AdoptableAfter).
+func (r *Router) AdoptInFlight(key string, after cli.TurnWatermark, known bool) (*cli.Process, AdoptState) {
 	if sess := r.ss.Load(key); sess != nil {
 		// loadProcess returns the processIface tests stub; the adopted-turn
 		// latch lives on the concrete *cli.Process only, so a stubbed process
 		// simply reports nothing to adopt.
-		if p, ok := sess.loadProcess().(*cli.Process); ok && p != nil && p.AdoptedMidTurn() {
+		if p, ok := sess.loadProcess().(*cli.Process); ok && p != nil && p.AdoptableAfter(after, known) {
 			return p, AdoptLive
 		}
 	}
@@ -80,4 +81,15 @@ func (r *Router) AdoptInFlight(key string) (*cli.Process, AdoptState) {
 		return nil, AdoptDriftShutdown
 	}
 	return nil, AdoptNone
+}
+
+// TurnWatermark is where the session's shim stream stands now, for a caller
+// about to Send that may need to recognise this turn's result after a restart.
+// ok=false without a live shim-backed process.
+func (s *ManagedSession) TurnWatermark() (cli.TurnWatermark, bool) {
+	p, ok := s.loadProcess().(*cli.Process)
+	if !ok || p == nil {
+		return cli.TurnWatermark{}, false
+	}
+	return p.TurnWatermark()
 }

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,9 +19,18 @@ type adoptingRouter struct {
 	fakeRouter
 	verdicts map[string]AdoptVerdict
 	runs     map[string]*fakeInFlightRun
+
+	afterMu sync.Mutex
+	after   map[string]string // the watermark each key was asked with
 }
 
-func (a *adoptingRouter) AdoptInFlight(key string) (InFlightRun, AdoptVerdict) {
+func (a *adoptingRouter) AdoptInFlight(key, after string) (InFlightRun, AdoptVerdict) {
+	a.afterMu.Lock()
+	if a.after == nil {
+		a.after = map[string]string{}
+	}
+	a.after[key] = after
+	a.afterMu.Unlock()
 	v := a.verdicts[key]
 	if v == AdoptLive {
 		return a.runs[key], AdoptLive
