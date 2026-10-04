@@ -2,9 +2,10 @@
 // (docs/design/server-split-phase4-design.md §六.2 / §九.2):
 //
 //   - handle_decl: every HTTP handler declared in internal/server — matched by
-//     signature on any receiver, free functions and handler factories included
-//     — is listed in exemptions.yaml handle_baseline, and every entry there
-//     still names one (rule_handle_decl.go; ownership: internal/server/doc.go).
+//     signature on any receiver, free functions, handler factories and
+//     package-level handler vars included — is listed once in exemptions.yaml
+//     handle_baseline, and every entry there still names one
+//     (rule_handle_decl.go; ownership: internal/server/doc.go).
 //     A new name in the baseline is the review conversation this rule exists to
 //     force (#2636). Func literals registered inline are not declarations and
 //     are not scanned.
@@ -120,6 +121,8 @@ type exemption struct {
 type exemptions struct {
 	FileSize       []exemption `yaml:"file_size"`
 	HandleBaseline []string    `yaml:"handle_baseline"` // handler keys (Recv.name or name) exempted from rule 1
+
+	path string // file loadExemptions read; violations about an entry point at it
 }
 
 func main() {
@@ -195,7 +198,7 @@ func collectViolations(serverPkg, dashboardPkg string, exempts *exemptions, now 
 	var vs []Violation
 
 	// Rule 1: handle_decl
-	handlers, err := scanHandleDecl(serverPkg, exempts.HandleBaseline)
+	handlers, err := scanHandleDecl(serverPkg, exempts.HandleBaseline, exempts.path)
 	if err != nil {
 		return nil, err
 	}
@@ -350,11 +353,11 @@ func loadExemptions(path string) (*exemptions, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &exemptions{}, nil
+			return &exemptions{path: path}, nil
 		}
 		return nil, err
 	}
-	var e exemptions
+	e := exemptions{path: path}
 	if err := yaml.Unmarshal(data, &e); err != nil {
 		return nil, err
 	}
