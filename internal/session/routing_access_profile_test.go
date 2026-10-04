@@ -80,8 +80,8 @@ func TestResolveForChat_AgentAccessProfile(t *testing.T) {
 		{"unbound chat gets the agent's profile", "oc_free", "reviewer", "personal"},
 		{"bound project without a pin keeps the agent's profile", "unpinned", "reviewer", "personal"},
 		{"bound project pin overrides the agent", "pinned", "reviewer", "1p-fable"},
-		{"planner without a pin keeps general's profile", "unpinned", "general", "company"},
-		{"planner pin overrides general's profile", "pinned", "general", "1p-fable"},
+		{"planner without a pin ignores general's profile", "unpinned", "general", ""},
+		{"planner takes the project pin", "pinned", "general", "1p-fable"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -123,7 +123,7 @@ func TestAccessProfileForKey_AgentTier(t *testing.T) {
 		{"bound project without a pin", "feishu:group:unpinned:reviewer", "personal"},
 		{"bound project pin wins", "feishu:group:pinned:reviewer", "1p-fable"},
 		{"agent without a profile", "feishu:user:bob:coder", ""},
-		{"planner without a pin", "project:p2:planner", "company"},
+		{"planner without a pin", "project:p2:planner", ""},
 		{"planner pin wins", "project:p1:planner", "1p-fable"},
 		{"planner of an unknown project", "project:gone:planner", ""},
 		{"reserved namespace", "cron:job1:x:reviewer", ""},
@@ -144,4 +144,49 @@ func TestAccessProfileForKey_AgentTier(t *testing.T) {
 			t.Errorf("AccessProfileForKey = %q, want personal without a data source", got)
 		}
 	})
+}
+
+// A planner key must land on one account however it is spawned: IM chat
+// (ResolveForChat), admin restart (ResolveForPlannerKey), dashboard resume
+// (ResolveForKey), and the remote gate must report that same account.
+func TestPlannerAccessProfile_SameOnEveryPath(t *testing.T) {
+	ds := &fakeDataSource{
+		byChat: map[string]ProjectBinding{
+			"feishu:group:pinned":   {Bound: true, Name: "p1", WorkspaceDir: "/w/p1", AccessProfile: "1p-fable"},
+			"feishu:group:unpinned": {Bound: true, Name: "p2", WorkspaceDir: "/w/p2"},
+		},
+		byName: map[string]ProjectBinding{
+			"p1": {Bound: true, Name: "p1", WorkspaceDir: "/w/p1", AccessProfile: "1p-fable"},
+			"p2": {Bound: true, Name: "p2", WorkspaceDir: "/w/p2"},
+		},
+	}
+	r := NewKeyResolver(map[string]AgentOpts{"general": {AccessProfile: "company"}}, ds)
+
+	for _, tc := range []struct{ chatID, want string }{{"pinned", "1p-fable"}, {"unpinned", ""}} {
+		t.Run(tc.chatID, func(t *testing.T) {
+			key, chat := r.ResolveForChat("feishu", "group", tc.chatID, "general")
+			if !isPlannerKey(key) {
+				t.Fatalf("ResolveForChat key = %q, want a planner key", key)
+			}
+			_, restart, ok := r.ResolveForPlannerKey(plannerNameFromKey(key))
+			if !ok {
+				t.Fatalf("ResolveForPlannerKey(%q) not found", plannerNameFromKey(key))
+			}
+			resume, ok := r.ResolveForKey(key)
+			if !ok {
+				t.Fatalf("ResolveForKey(%q) not found", key)
+			}
+			got := map[string]string{
+				"ResolveForChat":       chat.AccessProfile,
+				"ResolveForPlannerKey": restart.AccessProfile,
+				"ResolveForKey":        resume.AccessProfile,
+				"AccessProfileForKey":  r.AccessProfileForKey(key),
+			}
+			for path, ap := range got {
+				if ap != tc.want {
+					t.Errorf("%s AccessProfile = %q, want %q", path, ap, tc.want)
+				}
+			}
+		})
+	}
 }

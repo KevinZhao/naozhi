@@ -94,9 +94,10 @@ func (r *KeyResolver) ResolveForChat(platform, chatType, chatID, agentID string)
 	if b.Backend != "" {
 		base.Backend = b.Backend
 	}
-	if b.AccessProfile != "" {
-		base.AccessProfile = b.AccessProfile
-	}
+	// The planner's account comes from the project alone, never from
+	// defaults["general"]: ResolveForPlannerKey (restart, resume) cannot see
+	// general's profile, and one key must not change account by spawn path.
+	base.AccessProfile = b.AccessProfile
 	if b.PlannerModel != "" {
 		base.Model = b.PlannerModel
 	}
@@ -171,22 +172,15 @@ func (r *KeyResolver) ResolveForKey(key string) (opts AgentOpts, ok bool) {
 // reverse-RPC wire — the remote would silently spawn on the wrong account (RFC
 // project-access-profile §4.5). The result covers every profile ResolveForChat
 // or ResolveForKey can put in opts.AccessProfile: a project pin, else the
-// agent's own (defaults[agentID]; "general" for a planner). Returns "" for
-// reserved namespaces / malformed keys, which the gate treats as "remote OK".
+// agent's own (defaults[agentID]; a planner has only the project pin). Returns
+// "" for reserved namespaces / malformed keys, which the gate treats as "remote OK".
 func (r *KeyResolver) AccessProfileForKey(key string) string {
 	if r == nil {
 		return ""
 	}
 	if isPlannerKey(key) {
-		_, opts, ok := r.ResolveForPlannerKey(plannerNameFromKey(key))
-		if !ok {
-			return ""
-		}
-		if opts.AccessProfile != "" {
-			return opts.AccessProfile
-		}
-		// ResolveForChat builds a chat-view planner on defaults["general"].
-		return r.defaults["general"].AccessProfile
+		_, opts, _ := r.ResolveForPlannerKey(plannerNameFromKey(key))
+		return opts.AccessProfile
 	}
 	if IsReservedNamespace(key) {
 		return ""
