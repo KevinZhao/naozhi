@@ -52,6 +52,9 @@ type Weixin struct {
 	// contextTokens caches each user's recent context_tokens for reply, with
 	// an update stamp so one-off users are evicted instead of accumulating.
 	contextTokens sync.Map // map[userID]*tokenRing
+
+	// connState is fed by each getUpdates round's outcome.
+	connState platform.ConnTracker
 }
 
 // tokenTTL is the idle time after which a cached context_token is evicted;
@@ -132,6 +135,13 @@ func (w *Weixin) SupportsInterimMessages() bool { return false }
 // first Reply, so the dispatcher must collapse long replies (#2136).
 func (w *Weixin) UsesSingleUseReplyToken() bool { return true }
 
+// ConnState implements platform.ConnStateReporter: connected after a
+// successful getUpdates, disconnected (still retrying) after a failed one.
+// Not observable until Start.
+func (w *Weixin) ConnState() (platform.ConnState, bool) {
+	return w.connState.Snapshot()
+}
+
 // RegisterRoutes is a no-op (long-poll, no inbound HTTP).
 func (w *Weixin) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
 
@@ -161,6 +171,7 @@ func (w *Weixin) Start(handler platform.MessageHandler) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	w.cancel = cancel
 	w.handler = handler
+	w.connState.Set(platform.ConnConnecting)
 	w.pollWg.Add(1)
 	w.cleanupWg.Add(1)
 	w.startMu.Unlock()
@@ -366,6 +377,7 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 				return
 			}
 			consecutiveFailures++
+			w.connState.Fail(platform.ConnDisconnected, err)
 			slog.Error("weixin getUpdates error",
 				"err", err,
 				"failures", fmt.Sprintf("%d/%d", consecutiveFailures, maxFailures),
@@ -381,6 +393,7 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 
 		if resp.Ret != 0 || resp.ErrCode != 0 {
 			consecutiveFailures++
+			w.connState.Fail(platform.ConnDisconnected, getUpdatesAPIError(resp))
 			slog.Error("weixin getUpdates API error",
 				"ret", resp.Ret,
 				"errcode", resp.ErrCode,
@@ -397,6 +410,7 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 		}
 
 		consecutiveFailures = 0
+		w.connState.Set(platform.ConnConnected)
 
 		if resp.GetUpdatesBuf != "" {
 			cursor = resp.GetUpdatesBuf
@@ -479,6 +493,12 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 				"user", osutil.SanitizeForLog(from, 128))
 		}
 	}
+}
+
+// getUpdatesAPIError describes a getUpdates reply that iLink answered with a
+// non-zero ret/errcode. ConnTracker sanitises and bounds the relay's errmsg.
+func getUpdatesAPIError(resp *getUpdatesResp) error {
+	return fmt.Errorf("getUpdates ret=%d errcode=%d: %s", resp.Ret, resp.ErrCode, resp.ErrMsg)
 }
 
 // extractText returns the concatenated text from a message's item_list.
