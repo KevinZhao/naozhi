@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	osuser "os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -36,37 +37,46 @@ func TestServiceUserSudo(t *testing.T) {
 }
 
 // TestServiceUserSudo_ResolvesRealUser exercises the os/user.Lookup
-// success branch by setting SUDO_USER to whatever the test process is
-// running as — that user must resolve via the runtime's nsswitch
-// machinery, returning a HomeDir that matches os.UserHomeDir(). #391
-// replaced the `exec.Command("getent", "passwd", su)` shellout with
-// user.Lookup; this test locks in the success path so a future
-// regression that re-introduces the shellout (or breaks the Lookup
-// call) is caught.
+// success branch (#391) by setting SUDO_USER to the user running the test.
+// The expected home comes from the same account-record Lookup, not $HOME:
+// HOME is pinned to a temp dir so a sudo branch that drifts to reading
+// $HOME fails on every host. Where Lookup cannot resolve the user (minimal
+// containers) the expectation is the /home/<user> fallback.
 func TestServiceUserSudo_ResolvesRealUser(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("SUDO_USER path is POSIX-only; skip on windows")
 	}
-	want, err := os.UserHomeDir()
-	if err != nil || want == "" {
-		t.Skipf("UserHomeDir unavailable in test env: %v", err)
-	}
 	currentUser := os.Getenv("USER")
 	if currentUser == "" {
-		t.Skip("$USER not set; cannot derive a known-resolvable name")
+		cur, err := osuser.Current()
+		if err != nil || cur.Username == "" {
+			t.Skipf("neither $USER nor user.Current available: %v", err)
+		}
+		currentUser = cur.Username
 	}
+	// serviceUser fatalf-exits on names outside [A-Za-z0-9_-], which would
+	// take the whole test binary down.
+	if strings.IndexFunc(currentUser, func(c rune) bool {
+		return !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-')
+	}) >= 0 {
+		t.Skipf("user name %q is outside the SUDO_USER charset", currentUser)
+	}
+	want := filepath.Join("/home", currentUser)
+	resolved := false
+	if u, err := osuser.Lookup(currentUser); err == nil && u.HomeDir != "" {
+		want, resolved = u.HomeDir, true
+	}
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("SUDO_USER", currentUser)
 	user, home := serviceUser()
 	if user != currentUser {
 		t.Errorf("user = %q, want %q", user, currentUser)
 	}
-	// On hosts where the current user resolves through os/user.Lookup,
-	// `home` must come from the Lookup (matching os.UserHomeDir()).
-	// On minimal containers where Lookup falls through to the
-	// /home/<su> fallback, the home will instead be /home/<currentUser>;
-	// accept either to keep the test portable across CI runners.
-	if home != want && home != filepath.Join("/home", currentUser) {
-		t.Errorf("home = %q, want %q or %q", home, want, filepath.Join("/home", currentUser))
+	if home != want {
+		t.Errorf("home = %q, want %q (account record resolved: %v)", home, want, resolved)
+	}
+	if home == os.Getenv("HOME") {
+		t.Errorf("home = %q came from $HOME, want the account record", home)
 	}
 }
 
