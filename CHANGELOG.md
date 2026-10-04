@@ -83,3 +83,138 @@
 在 2026-05-07 之前，所有变更记录在已删除的 `docs/TODO.md` 的 `Round NN` 小节里，
 不回填到本文件；这些历史条目可通过 `git log -S` 在仓库历史中检索。后续版本发布时，
 将抽取对用户可感知的条目归档到这里。
+
+## [0.1.42] - 2026-10-05
+
+### 升级须知
+
+- **几类配置现在在加载阶段就失败，`naozhi config check` 的退出码随之变化**（#3148、#3157、#3155、#3227）
+  - `agent_commands` 指向未定义的 agent（`agent_commands["/x"] references undefined agent "ghost"`），或 `server.dashboard_token` 非空但短于 8 个字符（`server.dashboard_token is too short — use at least 8 characters`）：改由 `config.Load` 拒绝。`config check` 对这两种配置以前退出 0，现在退出 2。`config migrate`、`shim list`、`models sync`、`cost` 也会拒绝。服务端以前就会拒绝它们（只是启动到一半才 `os.Exit`），所以能跑起来的部署不受影响
+  - 新增的 `projects.exclude` 里写了不合法的 glob：加载失败
+  - 以下 key 的值解析不了：`session.shim.idle_timeout`、`disconnect_watchdog`、`max_buffer_bytes`；sysession 的 `tick_timeout`、各 daemon 的 `tick`、`min_rename_interval`、`upload_ttl`、`ref_ttl`、`jsonl_max_age`；`log.stdio_max_size`。以前这类值静默回落到默认值，或只打一条日志。现在会报 `config-invalid` diag：启动时打 Warn，`config check` 退出 1。运行时仍然用默认值
+  - 负数的 `jsonl_max_age` 以前等于关掉 sweep，现在回落到 7d 并报告。负数的 `stdio_max_size` 保留 64MB 上限。要关闭请写 `"0"`
+  - `config check` 对 sysession / image_orient 默认 backend 的诊断，改为按启动时的实际绑定方式推导。部分以前漏报的配置现在会退出 1
+- **多节点集群的升级顺序：先升级 primary，再升级 node**
+  - 先升级 node 时，旧 primary 每次节点（重）注册都会打一条 WARN `reverse node advertised unknown capabilities`（新 node 多声明了 subscribe-history 能力，#3171）。注册本身正常，会回落到旧路径
+  - 新 primary 轮询 v0.1.41 的 HTTP node 时不发 If-None-Match（旧 node 的 ETag 不随会话状态变化），新 node 才走 304（#3333）
+- **升级前打开的 dashboard 标签页请刷新一次**：旧页面的历史弹层会显示为空（见下文 `/api/sessions` 一条），而且旧 JS 里没有版本提示横幅
+- **升级重启时恰好退出了 CLI 的会话**：旧版本 shim 在 CLI 退出后还会占用 socket 约 60s，这期间同一会话重建可能失败一次，稍后重发即可（新版本 shim 会被主动回收，#3275）
+- **未配置时 turn watchdog 的默认值放宽为无输出 15m / 总时长 2h**（#3194）：没写 `session.watchdog` 的部署从 2m / 5m 变为 15m / 2h；`Router.Cleanup` 的卡死判定（2 倍总时长）从 10m 变为 4h。显式配置的值不变
+  - Claude backend 运行工具时每 30s 发一次 `tool_progress` 心跳，不会触发无输出超时。ACP / codex 没有心跳，不出声的工具必须在 15m 内完成
+  - passthrough 模式的 turn 现在也受同一个 watchdog 约束（#3191），以前不受
+- **`agents[].access_profile` 和 `agents[].backend` 开始真正生效**（#3247、#3279、#3292）：这两个字段以前能通过校验，但从没传到 spawn。已经配置了它们的部署，升级后行为会变：
+  - 设了 `access_profile` 的 agent，它的新会话和 cron job 改用该 profile 的凭证和 `default_model`。旧会话如果当时记录的是全局默认（空值；没配 `default_access_profile` 时所有会话都是这样），下次 spawn 会在 agent 的 profile 上 `--resume`。若该 profile 指向另一个 config 目录，就找不到 transcript，会话会作为新会话起来，丢失上下文。已经记录了非空 profile 的会话保持原 profile
+  - 这类 key（包括 `cron:<id>`）发往远端 node 的请求一律拒绝（`ErrAccessProfileRemote`）。dashboard 新建的会话 key 都以 `:general` 结尾，所以**给 `agents.general.access_profile` 设值后，dashboard 上除 planner 以外的会话都不能用远端 node**。planner 的 profile 仍只取项目 pin，没有 pin 时取 `default_access_profile`
+  - 设了 `backend` 的 agent，新的 IM 会话和 cron run 落到该 backend。持久上下文的 cron 会在下一次运行时切换 backend，transcript 在新 backend 上 resume 不了就开新会话。dashboard 历史面板的 resume、带 `resume_id` 的发送仍走 router 默认 backend
+- **默认 backend 的推导规则改了**（#3224）：只影响 `cli.backends` 第一项没写 `id`、又没设 `cli.backend` 的配置。这类配置的默认 backend 从 `claude` 改为第一个有 id 的条目
+  - 例如 `[{path}, kiro, claude]` 会改成默认 kiro。sysession 和 image_orient 只接受 claude，于是启动时会被关掉，Warn 为 `sysession manager unavailable; daemons disabled`
+  - 修法：显式写 `cli.backend: claude`
+- **cron 行为变化**（#3145、#3172、#3192、#3203、#3158）
+  - IM 里 `/cron add` 新建的 job 默认每次从新会话开始。要延续上下文，创建时加 `--keep-context`（或 `--keep`）。已有 job 保持原设置，`/cron list` 会给持久上下文的 job 标 `[保留上下文]`。dashboard 的创建入口不变
+  - 新增 `cron.auto_pause_after_failures`（默认 5，负数关闭）：连续失败（failed / timed_out）达到这个次数，job 会自动暂停并发一条通知。skipped 和 canceled 不计入；成功、resume、任何一次编辑都会清零。存量 job 从 0 开始计，升级当下不会有 job 被暂停
+  - backend 标了 `is_error` 的 turn（如达到 max turns、上下文超限）以前算成功，现在记为 `failed / turn_failed`，计入自动暂停。会话容量不足导致的拒绝改记为 `skipped / session_capacity`，不再算失败。失败通知会写明原因，末尾带 `· run <8 位 id>`
+  - 持久上下文的 job 每次运行完就释放 CLI，下次 tick 用 `--resume` 重新启动，每次多几秒 spawn。12 个 cron 豁免名额现在只限制正在运行的 run。释放 CLI 会一并结束本次 run 留下的后台工作（`run_in_background` 的 Bash、后台 Task agent）；依赖这类后台工作的 job 请改用 fresh context。两次运行之间，dashboard 上这类会话显示为 `dead` + `已回收`
+- **stdout/stderr 日志文件现在会被原地截断**（#3154）：启动时检查一次，之后每小时一次。条件是 fd 为 O_APPEND 打开的普通文件（launchd 的 `StandardOutPath`、systemd 的 `StandardOutput=append:`），且超过新配置 `log.stdio_max_size`（默认 `"64MB"`）
+  - 截断时保留最新的若干整行（上限的 1/8，最多 4MB），并打一条 INFO `stdio log truncated`。升级后第一次检查就会执行
+  - 管道、journald 和终端不处理
+  - 要保留完整历史，设 `"0"` 自己轮转。macOS 上不要配 newsyslog：它只 rename，naozhi 会继续写进旧 inode
+  - systemd 的 `StandardOutput=file:` 不是 O_APPEND，会跳过，只打一次 Warn
+  - 详见 `docs/ops/disk-budget.md`
+- **一次性清理自动生成的 `.naozhi/project.yaml` 桩文件**（#3138）：旧版本往 `projects.root` 下每个项目里写过只含 `created_at` 的 `.naozhi/project.yaml`，结果每个 git 仓库都多出一个未跟踪的 `.naozhi/`
+  - 升级后第一次 Scan 会删除这类文件。只删同时满足以下条件的：内容与自动生成的逐字节一致、是 `.naozhi/` 里唯一的文件、不是 symlink。删完后目录若已空，一并删除；每次删除打一条 Info
+  - 每个 root 只清理一次，记录在 `projects-index.json` 的 `stub_cleanup_done` 里
+  - 如果曾把这类桩文件 commit 进仓库，git 里会看到一次删除
+  - 降级到 v0.1.40 之前的版本会丢失这些项目的排序
+- **`/health` 平台字段改为上报实时连接状态**（#3218、#3228、#3239、#3244、#3250）：feishu（websocket 模式）、slack（socket mode）、discord、weixin 的 `platforms.<name>` 以前恒为 `registered`，现在是 `connecting` / `connected` / `disconnected` / `failed`。新增的 `platform_conn.<name>` 带 `since` 和 `last_error`。feishu webhook 模式仍是 `registered`。按 `registered` 写的监控需要改
+- **`/api/sessions` 不再返回 `history_sessions`**（#3208）：历史列表移到新接口 `GET /api/sessions/history`（带 ETag，可返回 304），`/api/sessions` 只在 `stats.history_tag` 里带一个版本标记。自己写脚本读这个字段的需要改。升级前打开的旧标签页在刷新之前看到的历史列表是空的
+- **`naozhi doctor` 检查更多，退出 1 的条件也更多**（#3175、#3184、#3240、#3276）：用 dashboard token 读一次带鉴权的 `/health`，新增 `cli runtime`、`platforms`、`eventlog writer`、`attachment tracker`、`dispatch` 几项；对每个配置的 backend 跑一次 `<cli> --version`；启用 transcribe 时检查 AWS 凭证链和 ffmpeg
+  - 以下情况现在会退出 1：`cli_available=false`；writer 停摆；默认 backend 的 `--version` 失败；默认 id 没有可用 runtime；某个平台 `connecting` / `disconnected` 已满 5 分钟，或已是 `failed`
+  - 跑 doctor 的用户和服务用户的环境可能不同，结论以服务用户身份运行为准
+  - 详见 `docs/ops/doctor.md`
+- **`naozhi upgrade` 拒绝安装不比当前版本新的 release**（#3223）：latest 比当前版本旧时，以前会静默降级，现在拒绝并退出 1（`Latest release vX is not newer than running vY; use --force to install it anyway.`）。`make` 出来的 `vX-N-gabc` 构建、版本号解析不了的构建也一样拒绝。确实要回滚就加 `--force`
+- **`naozhi config migrate -write` 会在原文件旁留一份备份**（#3170）：备份名为 `<config>.pre-migrate-v<N>`，权限 0600，**和配置一样含密钥**，不会自动删除。写完会打印回滚用的 `cp -p` 命令，降级前用它恢复（旧版本不认 `schema_version: 2`）。备份写不了，或者配置在 dry run 之后被改过，`-write` 会失败（退出 2），原文件不动
+- **新命令 `naozhi cost reconcile`，修正 cost ledger 里历史的重复计费**（#3293，配合 #3097）：#3097 之前，每次 `--resume` 重启都会把恢复出来的 cost-state 累计额记到第一个 turn 上，实测有会话账面达到实际花费的 4 倍。#3097 修好了此后的记账，但已写入的条目还在
+  - 用法：`naozhi cost reconcile [-config] [-session <cli-session-id>] [-until YYYY-MM-DD] [-claude-dir] [-write]`
+  - 默认只打印对账表；加 `-write` 才写入。写入的是 `Kind=adjust` 修正条目（可以为负），不改已有行
+  - 只处理 `-until`（默认今天，UTC）之前的日期；重复运行不会重复追加
+  - 写入后要**重启 naozhi**，内存里的汇总才会包含这些修正
+  - 只为能证明是 naozhi 自己跑、且没有被别处记过的花费补记（#3335）：跨过午夜或 `-until` 的轮次、resume 之前的历史、终端里跑的（接管前的）轮次、cron 已记的轮次所在的日期一律跳过，并在对账表里列出
+- **日志与指标的变化**：按旧文案写的告警规则可能需要调整
+  - 稳定状态下的 reconcile tick 不再打 INFO `discovered live shim` / `shim discovery complete`，项目扫描日志也一样（#3189），改为 DEBUG
+  - `loaded session history on startup` 改为 `loaded session history from Claude JSONL`，并带 `via` 字段（#3211）
+  - CLI 每次非零退出都会打一条带 stderr 尾部的 Warn（#3201）
+  - 因会话忙丢弃的消息会打 Info `message dropped: session busy`（#3139）
+  - 启动熔断日志的属性名从 `stderr` 改为 `cause`（#3288）
+  - `/health` 的 `ws_dropped` 现在统计每一次失败的发送尝试，包括之后重试成功的（#3142）
+  - dashboard_token 为空时的告警文案改为 `SECURITY: dashboard_token is empty …`，加载阶段的配置告警输出到 stderr（#3148、#3157）
+- **`config.example.yaml` 里的 `trusted_proxy` 改为 `false`**（#3121）：只影响新拷贝模板的部署，已有 config.yaml 不受影响。前面有 ALB / CloudFront / nginx 的部署需要自己改成 `true`
+
+### Added
+
+- **CLI 启动失败会写明原因，反复失败会暂停重试**（#3201、#3207、#3221、#3274、#3288）
+  - shim 会保留 CLI 的 stderr 尾部，并按原因分类：认证失败、配置错误、缺少运行时、resume 不可用。IM 回复和 dashboard 显示分类后的中文提示，原始 stderr 不会发到 IM
+  - 因 transcript 失效（或原因不明）导致启动失败时，下一条消息不再带 `--resume`，直接开新会话（同一 workspace，历史通过 `prev_session_ids` 关联），IM 用户会收到「之前的会话记录已丢失，已开始新会话。」
+  - 第二次连续启动失败起，同一个 key 在冷却期内（30s 起，每次翻倍，最长 10m）不再 spawn，回复「CLI 连续启动失败，已暂停自动重试；请联系管理员，或发送 /new 立即重试。」
+- **`projects.exclude`**（#3155）：用文件名 glob（如 `["tmp-*", "archive"]`）把 `projects.root` 下的子目录排除出项目发现
+- **dashboard 会发现标签页与服务端版本不一致**（#3186、#3187）：`/static` 资源改为带内容哈希的 URL，缓存头为 `private, max-age=31536000, immutable`，再次打开时不再发任何 static 请求。升级后仍开着的旧标签页会显示一条关不掉的刷新提示，空闲时自动刷新（每个服务端版本最多自动一次）
+- **dashboard 补充显示的信息**
+  - 「系统」视图：每个 daemon 卡片显示近 30 天的 ledger 花费（#3183）；attachment-gc 在 dry run 下显示可回收的条数和体积（#3169），这是开启真删之前的观察依据
+  - cron 执行详情显示该次 run 的 `session_id`（#3281）
+  - 退出状态 chip 写明退出码或信号、启动失败原因，以及下一步会发生什么（新开会话、需要管理员处理、暂停到某个时间）（#3270、#3284、#3295）
+- **attachment 总量超过 500 MiB 时打启动告警**（#3162）：把各 workspace 下的 `.naozhi/attachments/` 加总，超过 500 MiB 时打 Warn `attachments large`，`hint` 会按 attachment-gc 当前的模式给出下一步建议
+- **IM 收到消息后立即给反馈**（#3160、#3166）：发往空闲会话的消息马上加 ⏳（Slack 上是 👀），回复发出后移除。reaction 没加上时，3 秒后补发一条「💭 思考中...」banner，最终答复编辑进这条 banner
+- **watchdog 超时的提示会写出正在运行的工具**（#3196）：能区分是模型不出声还是工具一直没返回
+- **远端 node 发送的回执带上节点的处理结果**（#3209）：`reset`、`queued`、`busy` 都会反映到 dashboard；HTTP 节点忙时报发送失败，以前会静默丢弃
+
+### Changed
+
+- **reverse node 短暂断线不再影响浏览器订阅**（#3163）：断开 60 秒内不注销，期间浏览器订阅保留，重连后补齐中间的事件。超过 60 秒按原流程注销，只是比以前晚 60 秒
+- **转发来的消息走正常的 turn 流程**（#3204）：node 上转发来的消息和 IM、dashboard 消息共用同一个 key 的队列，可以合并成一个 turn，`/new` 会清掉它们，agent 配置也会生效
+- **IM 提示调整**
+  - 新会话不再提示「新会话已创建（之前的上下文已失效）」（#3156）
+  - 失败的 turn 一定会回一条分类后的中文提示，不再沉默，也不再贴原始 RPC 文本（#3202）
+  - weixin 在未开启队列时不再发「会话忙」提示（#3139），以免占用一次性 reply token；同时加了每个用户的 context_token 环，连续回复不会再撞上已用过的 token（#3143）
+- **长回复按代码块拆分**（#3179、#3185）：IM 和 cron 的长回复拆成多条时，不再从代码块中间切开；先编辑进进度 banner 的答复也会先拆分，不再因超长被平台拒绝
+- **`trusted_proxy: true` 下直连访问会说明原因**（#3140）：直连或局域网访问被拒时，登录接口返回明确原因，不再显示 "invalid token"；`/dashboard` 返回 400 加说明，不再是误导性的 429
+- **cli-debug 日志的保留规则**（#3146）：shim 仍存活的会话，其调试日志不会被按年龄清理；文件名不是 key hash 的文件一律不清理
+- **auto-titler 重启后不再重新起标题**（#3176）：以前重启后所有自动起过标题的会话都会被重新起一遍
+
+### Fixed
+
+- **cost 记账**（#3097、#3126、#3220、#3235、#3265）
+  - `--resume` 后的成本基线从恢复出来的 cost-state 开始算，不再把整段历史花费记到第一个 turn 上
+  - CLI 自己发起的 turn（后台任务通知、workflow）在它的 result 处结算并记账
+  - 进程结束时，从主 transcript、subagent 和 workflow transcript 补记还没报告的花费
+  - 中断 turn 的 partial 条目按 CLI 实际观测到的各模型单价估算金额，按 message 去重；这类金额不再计入 run 记录的 `CostUSD`
+- **会话生命周期中的竞态**
+  - resume spawn 期间执行的 Reset / Remove 不会再被撤销（#3231）
+  - spawn 窗口内写入的标签、tuning 和会话链不会被覆盖（#3214）
+  - 旧 owner 不会拿到新 owner 的队列（#3213）
+  - Reset 崩溃的会话时，直接让已死的 shim 退出，不再干等它超时（#3275、#3287）
+  - shim 的握手会遵守 ctx 取消（#3190）
+- **scratch（aside）会话**（#3248）：sweeper 不再回收还在跑 turn 的 aside；空闲时间从最后一个 CLI 事件起算
+- **会话接管**（#3272、#3289）：从终端接管 Claude 会话时一律走 claude backend；resume 被拒时退为新会话，并关联被接管的 transcript
+- **历史恢复与分页**
+  - 各个注入点都先读 naozhi event log，再读 Claude JSONL；shim 重连只在历史为空时注入（#3205、#3211）
+  - 「加载更早」和会话导出信任服务端的 `X-Events-Has-More`，并按 uuid 去重同一毫秒的边界条目（#3133、#3149、#3168、#3177、#3241）
+  - 推送大批事件时按每帧最多 50 条全部送达，丢掉的帧会重试（#3131、#3142）
+  - 远端会话的「加载更早」和导出在 node 上分页，加载失败时显示重试，不再是空白面板（#3171、#3200、#3245）
+- **cron**
+  - naozhi 停机期间完成的 run 会按结果收养（#3246）
+  - 收养来的 run 像本地 run 一样释放 CLI（#3222、#3237）
+  - 失败的 run 也记录它的 session id（#3273）
+  - sandbox run 在结束后 panic，不会再被结束两次（#3217）
+  - sandbox blob 去重与 GC 并发时不会误删（#3225）
+  - `/cron add` 和 dashboard 创建时，会写明是配额满了还是间隔太短（#3132）
+- **配置迁移**（#3164、#3212）：迁移会保留所有注释；`system_prompt` 写成 null 占位时，迁移不再导致 Load 失败
+- **dashboard**：后到的 cron 列表响应不再覆盖新 run 的状态（#3219）；打开的 cron 抽屉里运行计时会每秒更新（#3230）；屏幕阅读器不再逐字朗读流式输出，turn 结束时只播报一次（#3173）
+- **多节点**：在反向连接的 node 上 `/new` 或 `/clear` 之后，已打开的标签页不会再收不到新对话的事件（#3334）；新 primary 不再把 v0.1.41 HTTP node 的 304 当真（#3333）
+- **discord**：`Stop` 加了超时，gateway 迟迟不回 hello 时不会再拖住关停（#3336）
+- **doctor**（#3240）：`/health` 里的配置指纹格式不对时只给警告，不再 panic；CLI Backends 一节显示的是配置的路径，而不是 `$PATH` 上找到的那个
+
+### Security
+
+- **release 签名绑定 tag**（#3215、#3134）：签名覆盖 `naozhi-release-v1\ntag <tag>\n` 加 `checksums.txt` 的内容，旧版本的签名产物不能挂到新 tag 下冒充。内置了信任密钥时，`Download` 在 chmod 之前验证 `checksums.txt.sig`，任何失败都直接终止。当前内置密钥为空，对现有 release 没有影响
+- **防止通过 "latest" 降级**（#3223）：见升级须知
+- **远端调度的 access profile 闸门覆盖 agent 和 cron key**（#3247、#3292）：钉了 profile 的 agent 或 cron key 不会再被派到远端 node，用对方的凭证运行
+- **shim 不再给身份不符的 PID 发 SIGUSR2**（#3135）：Reconnect 遇到二进制路径不符的 shim PID 时不再发信号；PID ≤ 0 时也不再调用 kill（以前会把信号发给整个进程组）
