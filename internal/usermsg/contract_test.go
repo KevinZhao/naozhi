@@ -83,6 +83,32 @@ func TestForSendError_ContractTable(t *testing.T) {
 			wantSubs: []string{"进程意外退出"},
 		},
 		{
+			name:     "stale resume id",
+			err:      &clierr.ProcessExitedError{Code: 1, Class: clierr.ExitResumeNotFound},
+			wantSubs: []string{"无法恢复", "/new"},
+			notSubs:  []string{"自动重启"},
+		},
+		{
+			name:     "CLI auth failure",
+			err:      &clierr.ProcessExitedError{Code: 1, Class: clierr.ExitAuth},
+			wantSubs: []string{"认证失败", "管理员"},
+		},
+		{
+			name:     "CLI config error",
+			err:      &clierr.ProcessExitedError{Code: 1, Class: clierr.ExitMCPConfig},
+			wantSubs: []string{"配置错误", "管理员"},
+		},
+		{
+			name:     "CLI runtime missing",
+			err:      &clierr.ProcessExitedError{Code: 1, Class: clierr.ExitMissingRuntime},
+			wantSubs: []string{"运行环境缺失", "管理员"},
+		},
+		{
+			name:     "exit with no named cause",
+			err:      &clierr.ProcessExitedError{Code: 1},
+			wantSubs: []string{"进程意外退出"},
+		},
+		{
 			name:     "ErrAbortedByUrgent",
 			err:      clierr.ErrAbortedByUrgent,
 			wantSubs: []string{"/urgent", "打断"},

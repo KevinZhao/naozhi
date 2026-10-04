@@ -756,6 +756,7 @@ func (r *shimLineReader) ReadLine() ([]byte, bool, error) {
 			continue
 		}
 		if msg.Type == "stdout" {
+			r.proc.sawOutput.Store(true)
 			return []byte(msg.Line), false, nil
 		}
 		if msg.Type == "cli_exited" {

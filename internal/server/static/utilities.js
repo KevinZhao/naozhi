@@ -216,7 +216,7 @@ function renderRecentSessionsPanel() {
       'data-action="session-select">' +
       '<span class="recent-dot ' + dotCls + '" aria-hidden="true"></span>' +
       '<span class="recent-label" title="' + escAttr(label) + '">' + esc(label) + '</span>' +
-      sessionExitChipHtml(s.state, s.death_reason) +
+      sessionExitChipHtml(s.state, s.death_reason, s.death_detail) +
       (ago ? '<span class="recent-time">' + esc(ago) + '</span>' : '') +
       '</button>';
   }).join('');

@@ -151,6 +151,9 @@ type processIface interface {
 	// shim-backed CLI exited (passive death). Empty while alive or when the
 	// reason has not been classified yet.
 	DeathReason() string
+	// DeathDetail returns the stderr line naming why the CLI exited
+	// non-zero; "" otherwise.
+	DeathDetail() string
 	TotalCost() float64
 	EventEntries() []clievent.EventEntry
 	EventLastN(n int) []clievent.EventEntry

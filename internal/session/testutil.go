@@ -26,6 +26,7 @@ type TestProcess struct {
 	StateVal       cli.ProcessState
 	AliveVal       bool
 	DeathReasonVal string
+	DeathDetailVal string
 	// ModelVal lets snapshot tests drive proc.Model() without subclassing.
 	ModelVal string
 	// LiveVersionVal lets snapshot tests drive proc.LiveVersion() — the
@@ -103,6 +104,7 @@ func (p *TestProcess) SupportsPassthrough() bool { return p.PassthroughVal }
 func (p *TestProcess) SessionID() string                      { return "" }
 func (p *TestProcess) State() cli.ProcessState                { return p.StateVal }
 func (p *TestProcess) DeathReason() string                    { return p.DeathReasonVal }
+func (p *TestProcess) DeathDetail() string                    { return p.DeathDetailVal }
 func (p *TestProcess) TotalCost() float64                     { return 0 }
 func (p *TestProcess) EventEntries() []clievent.EventEntry    { return p.EventLog.Entries() }
 func (p *TestProcess) EventLastN(n int) []clievent.EventEntry { return p.EventLog.LastN(n) }

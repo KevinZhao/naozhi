@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cli/procmeter"
 	"github.com/naozhi/naozhi/internal/cliinfo"
@@ -125,6 +126,12 @@ type Process struct {
 	deathReason atomic.Pointer[string]
 	// stderrTail is the CLI's last stderr lines (see process_stderr.go).
 	stderrTail shim.StderrTail
+	// sawOutput is set once the CLI is past startup: it wrote stdout (an
+	// event, or an Init handshake line), or naozhi reattached to it
+	// (applyReconnectVerdict); exited is the error for a non-zero
+	// cli_exited (exit_classify.go).
+	sawOutput atomic.Bool
+	exited    atomic.Pointer[clierr.ProcessExitedError]
 
 	// log is a pre-bound logger carrying the "session" attribute; set once by
 	// SetSlogKey before the reader goroutines start, so reads are lock-free.

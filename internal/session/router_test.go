@@ -113,6 +113,7 @@ func (f *fakeProcess) TotalCost() float64 {
 }
 
 func (f *fakeProcess) DeathReason() string { return "" }
+func (f *fakeProcess) DeathDetail() string { return "" }
 func (f *fakeProcess) EventEntries() []clievent.EventEntry {
 	f.mu.Lock()
 	defer f.mu.Unlock()

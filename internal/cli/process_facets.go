@@ -55,6 +55,8 @@ type ProcessIntrospect interface {
 	Model() string
 	// StderrTail returns the CLI's last stderr lines, oldest first.
 	StderrTail() []string
+	// DeathDetail returns the stderr line naming a non-zero exit's cause.
+	DeathDetail() string
 }
 
 // Compile-time guarantees that *Process satisfies each facet (#902).

@@ -54,7 +54,7 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 
 	// Fast reject: dead process won't produce a result.
 	if !p.Alive() {
-		return nil, clierr.ErrProcessExited
+		return nil, p.exitErr()
 	}
 
 	// Shrink oversized inline images once before the write (mirrors Send) so
@@ -109,14 +109,14 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 
 	if writeErr != nil {
 		// CLI never saw this message; FIFO is intact because nothing was
-		// written. Surface the canonical clierr.ErrProcessExited if the process died
+		// written. Surface the canonical exitErr if the process died
 		// between the Alive() check and the write.
 		p.removeSlotByID(slot.id)
 		if aborts {
 			p.turn.abortRequested.disarm()
 		}
 		if !p.Alive() {
-			return nil, clierr.ErrProcessExited
+			return nil, p.exitErr()
 		}
 		return nil, fmt.Errorf("passthrough write: %w", writeErr)
 	}
@@ -179,7 +179,7 @@ func (p *Process) awaitSlot(ctx context.Context, slot *sendSlot) (*clievent.Send
 			default:
 			}
 			if !p.Alive() {
-				return nil, clierr.ErrProcessExited
+				return nil, p.exitErr()
 			}
 			if wait := p.passthroughBailRemaining(time.Now(), bailAfter); wait > 0 {
 				bail.Reset(wait)

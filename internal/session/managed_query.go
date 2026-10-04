@@ -164,13 +164,13 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 	if proc == nil {
 		snap.TotalCost = spent
 		snap.State = "ready"
-		// No proc to report UserTurnCount: count persisted "user" entries
-		// so AutoTitler's minUserTurns gate still sees idle-evicted
-		// sessions (#1644).
+		// No proc to report UserTurnCount: count persisted "user" entries so
+		// AutoTitler's minUserTurns gate still sees idle-evicted sessions (#1644).
 		snap.MessageCount = s.persistedUserTurns.Load()
 	} else {
 		snap.State = proc.State().String()
 		snap.Protocol = proc.ProtocolName()
+		snap.DeathDetail = proc.DeathDetail()
 		// Model priority: live proc.Model() over persisted s.Model(). A
 		// differing live value is mirrored back so the next saveStore
 		// captures it; empty live keeps persisted. Compare before storing:

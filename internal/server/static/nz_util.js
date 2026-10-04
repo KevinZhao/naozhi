@@ -233,20 +233,20 @@ const DEATH_REASONS = {
 
 // sessionExit describes why a session has no process, or null when it is not
 // dead. Only state==='dead' counts: a timeout can leave death_reason on a
-// session whose process is still alive. An unrecognised or missing reason is
-// shown as an abnormal exit, carrying the raw value.
-export function sessionExit(state, reason) {
+// session whose process is still alive. An unknown or missing reason is an
+// abnormal exit carrying the raw value; detail (death_detail) ends the title.
+export function sessionExit(state, reason, detail) {
   if (state !== 'dead') return null;
   const known = Object.prototype.hasOwnProperty.call(DEATH_REASONS, reason) ? DEATH_REASONS[reason] : null;
   const info = known || { crashed: true, text: reason ? '进程已退出（' + reason + '）' : '进程已退出' };
-  return { crashed: info.crashed, text: info.text, title: info.text + '，下次发送时自动恢复' };
+  return { crashed: info.crashed, text: info.text, title: info.text + '，下次发送时自动恢复' + (detail ? '\n' + detail : '') };
 }
 
 // sessionExitChipHtml is the chip sidebar cards and the session header show
 // for a dead session: a warning for an abnormal exit, a muted note for a
 // reclaim. '' when the session is not dead.
-export function sessionExitChipHtml(state, reason) {
-  const x = sessionExit(state, reason);
+export function sessionExitChipHtml(state, reason, detail) {
+  const x = sessionExit(state, reason, detail);
   if (!x) return '';
   const cls = x.crashed ? 'sc-exit sc-exit-crashed' : 'sc-exit sc-exit-reclaimed';
   const label = x.crashed ? '⚠ 异常退出' : '已回收';
@@ -256,12 +256,12 @@ export function sessionExitChipHtml(state, reason) {
 // patchCardExitChip brings a rendered session card's exit chip in line with
 // state / reason, for the paths that patch a card in place between renders;
 // it produces the markup sessionCardHtml renders, right after the state text.
-export function patchCardExitChip(card, state, reason) {
+export function patchCardExitChip(card, state, reason, detail) {
   const meta = card && card.querySelector('.sc-meta');
   if (!meta) return;
   const old = meta.querySelector('.sc-exit');
   if (old) old.remove();
-  const html = sessionExitChipHtml(state, reason);
+  const html = sessionExitChipHtml(state, reason, detail);
   if (!html) return;
   const stateSpan = meta.querySelectorAll('span')[1]; // [0]=dot, [1]=state text
   if (stateSpan) stateSpan.insertAdjacentHTML('afterend', html);

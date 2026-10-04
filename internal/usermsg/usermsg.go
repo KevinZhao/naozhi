@@ -34,6 +34,10 @@ var codeText = map[Code]string{
 	CodeProcessBusy:        "当前会话正在处理上一条消息，请稍候再发。",
 	CodeMessageTooLarge:    "消息内容过大，请缩短后重试。",
 	CodeRestarting:         "系统正在重启，请稍后重试。",
+	CodeResumeUnavailable:  "上次会话无法恢复，请发送 /new 开启新会话。",
+	CodeCLIAuthFailed:      "后端认证失败，请联系管理员。",
+	CodeCLIConfigError:     "CLI 配置错误导致启动失败，请联系管理员。",
+	CodeCLIMissingRuntime:  "CLI 运行环境缺失，请联系管理员。",
 
 	CodeTurnFailed:    "本轮处理中途出错，未产生回复。可重新发送，或发送 /new 重置会话。",
 	CodeTurnMaxTurns:  "本轮已达到最大执行步数，任务未完成。回复「继续」可接着处理，或 /new 重新开始。",

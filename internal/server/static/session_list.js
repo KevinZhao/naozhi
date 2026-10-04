@@ -625,7 +625,7 @@ function sessionCardHtml(/** @type {SessionSnapshot} */ s) {
   // only carries one low-entropy bit (which backend). Title owns line 1.
   const metaHtml = icon +
     '<span class="sc-dot ' + dotCls + '"></span>' +
-    '<span>' + esc(displayState) + '</span>' + sessionExitChipHtml(s.state, s.death_reason) +
+    '<span>' + esc(displayState) + '</span>' + sessionExitChipHtml(s.state, s.death_reason, s.death_detail) +
     nodeBadge +
     originBadge +
     accessProfileChip +
@@ -899,10 +899,10 @@ function onSessionState(msg) {
   settleTurnBoundary(msg, msgNode, sKey, prevState);
   if (sessionList.sessionsData[sKey]) {
     sessionList.sessionsData[sKey].state = msg.state;
+    delete sessionList.sessionsData[sKey].death_detail; // a push carries none; the next poll refills it
     if (msg.reason) {
       sessionList.sessionsData[sKey].death_reason = msg.reason;
     } else if (msg.state === 'running') {
-      // Process revived: clear stale death_reason
       delete sessionList.sessionsData[sKey].death_reason;
     }
   }
@@ -1106,7 +1106,7 @@ export function updateMainState(state) {
   const exitEl = document.getElementById('header-exit');
   if (exitEl) {
     const sd = sessionList.sessionsData[sid(selection.key, selection.node)];
-    const html = sessionExitChipHtml(state, sd ? sd.death_reason : '');
+    const html = sessionExitChipHtml(state, sd ? sd.death_reason : '', sd ? sd.death_detail : '');
     if (exitEl.innerHTML !== html) exitEl.innerHTML = html;
   }
 }

@@ -7,7 +7,9 @@
 //    note;
 //  - a live session never shows one, even with a death_reason left over from
 //    a timeout;
-//  - the chip follows session_state pushes, and an optimistic send clears it.
+//  - the chip follows session_state pushes, and an optimistic send clears it;
+//  - the tooltip ends with death_detail, the stderr line naming the cause, and
+//    a push drops it until the next poll brings the current one.
 //
 // Run: cd test/e2e && npx playwright test session_exit.test.js --project=desktop-chrome
 
@@ -17,11 +19,12 @@ const { startMockServer, defaultSessions } = require('./mock-server');
 const CRASHED = 'dashboard:direct:2026-01-01-120000-1:myproject';
 const STALE = 'dashboard:direct:2026-01-01-120001-2:otherproject';
 const RECLAIMED = 'dashboard:direct:2026-01-01-120002-3:myproject';
+const DETAIL = 'No conversation found with session ID: abc';
 
 function exitSessions() {
   const p = defaultSessions();
   const by = (/** @type {string} */ k) => p.sessions.find((s) => s.key === k);
-  Object.assign(by(CRASHED), { state: 'dead', death_reason: 'cli_exited' });
+  Object.assign(by(CRASHED), { state: 'dead', death_reason: 'cli_exited', death_detail: DETAIL });
   Object.assign(by(RECLAIMED), { state: 'dead', death_reason: 'idle_timeout' });
   // Alive, with the reason a no-output timeout left behind.
   Object.assign(by(STALE), { state: 'ready', death_reason: 'no_output_timeout' });
@@ -44,7 +47,7 @@ test.describe('dead session exit chip', () => {
     const crashed = card(page, CRASHED).locator('.sc-exit');
     await expect(crashed).toHaveClass(/sc-exit-crashed/);
     await expect(crashed).toHaveText('⚠ 异常退出');
-    await expect(crashed).toHaveAttribute('title', 'CLI 进程退出，下次发送时自动恢复');
+    await expect(crashed).toHaveAttribute('title', 'CLI 进程退出，下次发送时自动恢复\n' + DETAIL);
     // The state stays "ready": sending resumes it.
     await expect(card(page, CRASHED).locator('.sc-meta')).toContainText('ready');
 
@@ -69,6 +72,7 @@ test.describe('dead session exit chip', () => {
         released: sessionExit('dead', 'released'),
         alive: sessionExit('ready', 'cli_exited'),
         proto: sessionExit('dead', 'toString'),
+        detail: sessionExit('dead', 'cli_exited_code_1', 'Error: Invalid API key'),
       };
     });
     expect(got.unknown).toEqual({ crashed: true, text: '进程已退出（weird_reason）', title: '进程已退出（weird_reason），下次发送时自动恢复' });
@@ -79,6 +83,7 @@ test.describe('dead session exit chip', () => {
     expect(got.alive).toBeNull();
     // An inherited Object property is not a known reason.
     expect(got.proto.text).toBe('进程已退出（toString）');
+    expect(got.detail.title).toBe('进程已退出（cli_exited_code_1），下次发送时自动恢复\nError: Invalid API key');
     mock.server.close();
   });
 
@@ -92,6 +97,7 @@ test.describe('dead session exit chip', () => {
       const s = data.sessions.find((x) => x.key === CRASHED);
       s.state = state;
       s.death_reason = reason || '';
+      delete s.death_detail;
     };
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector(`.session-card[data-key="${CRASHED}"]`);
@@ -100,6 +106,7 @@ test.describe('dead session exit chip', () => {
     await card(page, CRASHED).click();
     const header = page.locator('#header-exit .sc-exit');
     await expect(header).toHaveClass(/sc-exit-crashed/);
+    await expect(header).toHaveAttribute('title', 'CLI 进程退出，下次发送时自动恢复\n' + DETAIL);
 
     await expect.poll(() => mock.wsConnections.length).toBeGreaterThan(0);
     const conn = mock.wsConnections[mock.wsConnections.length - 1];
@@ -110,6 +117,13 @@ test.describe('dead session exit chip', () => {
 
     setState('dead', 'readloop_panic');
     conn.send({ type: 'session_state', key: CRASHED, state: 'dead', reason: 'readloop_panic' });
+    // The push repaints before its debounced poll; the first paint must not
+    // carry the previous death's detail.
+    const first = await page.waitForFunction(() => {
+      const el = document.querySelector('#header-exit .sc-exit');
+      return el && el.getAttribute('title').startsWith('读取循环崩溃') ? el.getAttribute('title') : false;
+    });
+    expect(await first.jsonValue()).toBe('读取循环崩溃，下次发送时自动恢复');
     await expect(header).toHaveAttribute('title', '读取循环崩溃，下次发送时自动恢复');
     await expect(card(page, CRASHED).locator('.sc-exit')).toHaveAttribute('title', '读取循环崩溃，下次发送时自动恢复');
     mock.server.close();

@@ -409,6 +409,9 @@
         "created_at": {
           "type": "integer"
         },
+        "death_detail": {
+          "type": "string"
+        },
         "death_reason": {
           "type": "string"
         },

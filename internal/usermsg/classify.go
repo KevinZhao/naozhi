@@ -37,6 +37,12 @@ const (
 	CodeMessageTooLarge
 	CodeRestarting
 
+	// The CLI exited non-zero before any output and its stderr said why.
+	CodeResumeUnavailable
+	CodeCLIAuthFailed
+	CodeCLIConfigError
+	CodeCLIMissingRuntime
+
 	// Turn outcomes: a result that arrived but is not the answer (turn.go).
 	CodeTurnFailed
 	CodeTurnMaxTurns
@@ -72,7 +78,7 @@ func classify(err error, key string) Code {
 	case errors.Is(err, clierr.ErrNoOutputTimeout), errors.Is(err, clierr.ErrTotalTimeout):
 		return CodeTimeout
 	case errors.Is(err, clierr.ErrProcessExited):
-		return CodeProcessExited
+		return exitCode(err)
 	case errors.Is(err, clierr.ErrAbortedByUrgent):
 		return CodeAbortedByUrgent
 	case errors.Is(err, clierr.ErrReconnectedUnknown):
@@ -97,6 +103,26 @@ func classify(err error, key string) Code {
 	default:
 		return CodeUnknown
 	}
+}
+
+// exitCode is the Code for an ErrProcessExited whose
+// *clierr.ProcessExitedError names a cause; CodeProcessExited otherwise.
+func exitCode(err error) Code {
+	var e *clierr.ProcessExitedError
+	if !errors.As(err, &e) {
+		return CodeProcessExited
+	}
+	switch e.Class {
+	case clierr.ExitResumeNotFound:
+		return CodeResumeUnavailable
+	case clierr.ExitAuth:
+		return CodeCLIAuthFailed
+	case clierr.ExitMCPConfig:
+		return CodeCLIConfigError
+	case clierr.ExitMissingRuntime:
+		return CodeCLIMissingRuntime
+	}
+	return CodeProcessExited
 }
 
 // isNoOutputTimeout / isTotalTimeout are the timeout sentinels UserMessage
