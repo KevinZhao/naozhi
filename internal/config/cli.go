@@ -3,8 +3,11 @@ package config
 type AgentConfig struct {
 	Model string   `yaml:"model"`
 	Args  []string `yaml:"args"`
-	// Backend pins the default CLI backend ("claude" | "kiro" | …) for this
-	// agent's sessions. Empty = router default.
+	// Backend is the default CLI backend ("claude" | "kiro" | …) for this
+	// agent's sessions and cron jobs. It applies only to a key with no session
+	// yet: a project pin, a cron job's own backend, the dashboard pick and an
+	// existing session (resume continuity) outrank it; it outranks
+	// cli.backend. A project planner ignores it. Empty = cli.backend.
 	Backend string `yaml:"backend,omitempty"`
 	// AccessProfile names the access profile for this agent's sessions.
 	// Precedence at spawn: resume lock > dashboard pick > project pin > this >

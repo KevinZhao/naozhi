@@ -186,6 +186,8 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 func inheritSourceTuning(base sessionview.AgentOpts, snap sessionview.SessionSnapshot) sessionview.AgentOpts {
 	out := base
 	out.AccessProfile = snap.AccessProfile
+	// The backend is the source's alone (OpenOptions.Backend), never the agent's.
+	out.DefaultBackend = ""
 	if snap.Model != "" {
 		if err := session.ValidateModelID(snap.Model); err != nil {
 			slog.Info("scratch: not inheriting source model",

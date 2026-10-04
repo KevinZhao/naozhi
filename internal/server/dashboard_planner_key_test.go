@@ -80,10 +80,10 @@ func TestBuildSessionOpts_PlannerKeySimpleName(t *testing.T) {
 }
 
 // The inline fallback starts from agents["general"], but only an IM agent key
-// spawns on an agent's profile, as session.KeyResolver.AccessProfileForKey
-// decides it. A planner's account is its project's pin only; cron:, scratch:
-// and malformed keys get none, so the session never records general's profile.
-func TestBuildSessionOpts_NonAgentKeysIgnoreGeneralAccessProfile(t *testing.T) {
+// spawns on an agent's profile and backend, as session.KeyResolver decides it.
+// A planner's account is its project's pin only; cron:, scratch: and malformed
+// keys get neither, so the session never records general's.
+func TestBuildSessionOpts_NonAgentKeysIgnoreGeneralAgentTier(t *testing.T) {
 	root := t.TempDir()
 	for _, n := range []string{"unpinned", "pinned"} {
 		if err := os.MkdirAll(filepath.Join(root, n), 0o755); err != nil {
@@ -100,7 +100,7 @@ func TestBuildSessionOpts_NonAgentKeysIgnoreGeneralAccessProfile(t *testing.T) {
 	if err := mgr.UpdateConfig("pinned", project.ProjectConfig{AccessProfile: "personal"}); err != nil {
 		t.Fatalf("UpdateConfig: %v", err)
 	}
-	agents := map[string]session.AgentOpts{"general": {AccessProfile: "company"}}
+	agents := map[string]session.AgentOpts{"general": {AccessProfile: "company", DefaultBackend: "kiro"}}
 	// A resolver with no project data misses every planner key (ok=false).
 	missing := session.NewKeyResolver(agents, nil)
 
@@ -123,8 +123,16 @@ func TestBuildSessionOpts_NonAgentKeysIgnoreGeneralAccessProfile(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := buildSessionOpts(tc.key, tc.resolver, agents, mgr).AccessProfile; got != tc.want {
-				t.Errorf("AccessProfile = %q, want %q", got, tc.want)
+			opts := buildSessionOpts(tc.key, tc.resolver, agents, mgr)
+			if opts.AccessProfile != tc.want {
+				t.Errorf("AccessProfile = %q, want %q", opts.AccessProfile, tc.want)
+			}
+			wantBackend := ""
+			if tc.key == "feishu:direct:alice:general" {
+				wantBackend = "kiro"
+			}
+			if opts.DefaultBackend != wantBackend {
+				t.Errorf("DefaultBackend = %q, want %q", opts.DefaultBackend, wantBackend)
 			}
 		})
 	}
