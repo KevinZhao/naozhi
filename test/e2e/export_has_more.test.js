@@ -107,6 +107,19 @@ test.describe('导出会话：以 X-Events-Has-More 判定历史是否完整', (
     expect(r.exportBeforeCalls).toBe(1);
   });
 
+  test('短会话（空页 + has-more=0）：导出完整，不提示截断', async ({ browser }) => {
+    const r = await exportSession(browser, 30);
+    expect(r.exported).toBe(30);
+    expect(r.toast).not.toContain(TRUNCATED);
+  });
+
+  test('满页全是已持有事件但 has-more=0：导出完整，不提示截断', async ({ browser }) => {
+    // A same-ms flood wider than a page is complete once the server says so.
+    const r = await exportSession(browser, 700, {}, routeFirstBeforePage(history(700).slice(200), '0'));
+    expect(r.exported).toBe(500);
+    expect(r.toast).not.toContain(TRUNCATED);
+  });
+
   test('短页但 has-more=1（部分页）：继续翻页直到完整', async ({ browser }) => {
     const r = await exportSession(browser, 700, {}, routeFirstBeforePage(history(700).slice(190, 200), '1'));
     expect(r.exported).toBe(700);
