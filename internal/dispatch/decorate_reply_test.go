@@ -63,9 +63,9 @@ func TestDispatcher_DecorateReplyText_Components(t *testing.T) {
 	})
 
 	t.Run("empty text returns empty sentinel despite footer", func(t *testing.T) {
-		// #1985: a healthy empty-result turn (e.g. error_max_turns /
-		// error_during_execution, where the CLI result.Text is "" and
-		// MergedCount<=1) must return the empty "nothing to send" sentinel.
+		// #1985: a healthy empty-result turn (a tool-only turn, where the CLI
+		// result.Text is "" and MergedCount<=1) must return the empty "nothing
+		// to send" sentinel. Failed empty turns are TestDecorateReplyText_TurnFailure.
 		// With a default footer ("cc") the old unconditional append produced
 		// "\n\n— cc", which punched through the sentinel and made callers
 		// (gating on replyText != "") emit a lone "— cc" bubble to the IM
@@ -77,6 +77,7 @@ func TestDispatcher_DecorateReplyText_Components(t *testing.T) {
 		}{
 			{"empty text, single backend", &clievent.SendResult{Text: ""}},
 			{"empty text, merge head count 1", &clievent.SendResult{Text: "", MergedCount: 1}},
+			{"empty text, success subtype", &clievent.SendResult{SubType: "success"}},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {

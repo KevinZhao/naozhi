@@ -228,3 +228,40 @@ func TestLocalizeDoesNotLogRawSecret(t *testing.T) {
 		}
 	}
 }
+
+// TestLocalizeError: text already known to be an error is localized without
+// the "API Error" prefix for the unambiguous categories; timeout/network words
+// and unrecognised text pass through with ok=false.
+func TestLocalizeError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		input      string
+		wantPrefix string // "" = must pass through unchanged with ok=false
+	}{
+		{"prompt too long", "Prompt is too long", "📏 对话上下文已超出模型上限"},
+		{"credit balance", "Credit balance is too low", "💳 Claude API 额度已用尽"},
+		{"overloaded", "Overloaded", "🌊 Claude 服务当前负载较高"},
+		{"rate limit", "Rate limit reached for requests", "⏱️ Claude API 调用过于频繁"},
+		{"envelope keeps unrecognised fallback", "API Error: 500 teapot", "⚠️ Claude API 返回了一个未识别的错误"},
+		{"envelope timeout", "API Error: Request timed out", "⏱️ 连接 Claude API 超时"},
+		{"bare timeout passes", "Bash tool timed out after 120s", ""},
+		{"bare connection passes", "MCP server connection refused", ""},
+		{"unrecognised passes", "Execution error", ""},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := apierr.LocalizeError(tt.input)
+			if tt.wantPrefix == "" {
+				if ok || got != tt.input {
+					t.Errorf("LocalizeError(%q) = %q, %v; want input unchanged, false", tt.input, got, ok)
+				}
+				return
+			}
+			if !ok || !strings.HasPrefix(got, tt.wantPrefix) {
+				t.Errorf("LocalizeError(%q) = %q, %v; want prefix %q, true", tt.input, got, ok, tt.wantPrefix)
+			}
+		})
+	}
+}
