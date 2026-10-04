@@ -5,6 +5,7 @@ package shim
 // (#2713 B6).
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -64,6 +65,11 @@ type Manager struct {
 	// on it (bounded by ctx) so shutdown does not return while reapers may
 	// still touch captured locals (#565).
 	reaperWG sync.WaitGroup
+
+	// liveMu guards live, the key → shim PID set the last Discover returned
+	// (nil before the first), which keeps a steady reconcile tick quiet.
+	liveMu sync.Mutex
+	live   map[string]int
 }
 
 // checkStateDirQuota returns ErrStateDirQuotaExceeded when StateDirSize(stateDir)
@@ -185,15 +191,16 @@ func (m *Manager) Inspect() ([]StateEntry, error) {
 
 // Discover scans the state directory for existing shim state files and
 // returns the live ones, deleting every other state file and stranded temp
-// file and SIGTERMing socketless shims. Only the service should call it:
-// the binary check is against the caller's own executable.
-func (m *Manager) Discover() ([]State, error) {
+// file and SIGTERMing socketless shims. changed reports whether the live set
+// differs from the previous Discover's (always true on the first). Only the
+// service should call it: the binary check is against the caller's own
+// executable.
+func (m *Manager) Discover() (states []State, changed bool, err error) {
 	entries, err := m.readStateDir()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	var states []State
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -234,9 +241,31 @@ func (m *Manager) Discover() ([]State, error) {
 			}
 			RemoveStateFile(path)
 		default:
-			slog.Info("discovered live shim", "key", state.Key, "pid", state.ShimPID)
 			states = append(states, state)
 		}
 	}
-	return states, nil
+	return states, m.noteLive(states), nil
+}
+
+// noteLive records states as the live set and reports whether it differs from
+// the previous one. A shim new to the set, or back under another PID, logs at
+// INFO; one already known logs at DEBUG.
+func (m *Manager) noteLive(states []State) bool {
+	next := make(map[string]int, len(states))
+	m.liveMu.Lock()
+	defer m.liveMu.Unlock()
+	changed := m.live == nil
+	for _, s := range states {
+		next[s.Key] = s.ShimPID
+		level := slog.LevelDebug
+		if pid, ok := m.live[s.Key]; !ok || pid != s.ShimPID {
+			level, changed = slog.LevelInfo, true
+		}
+		slog.Log(context.Background(), level, "discovered live shim", "key", s.Key, "pid", s.ShimPID)
+	}
+	if len(next) != len(m.live) {
+		changed = true
+	}
+	m.live = next
+	return changed
 }
