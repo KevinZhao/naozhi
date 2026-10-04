@@ -115,7 +115,10 @@ func TestCountFile(t *testing.T) {
 		"func g() {}\n\n" +
 		"// h is annotated twice.\n\n// h is annotated twice.\nfunc h() {}\n\n" + // an exact duplicate: counts once
 		"// i has one note.\n\n// i has a different note.\nfunc i() {}\n\n" + // different text: not a duplicate
-		"// j is noted once.\nvar sep = 1\n\n// j is noted once.\nfunc j() {}\n" // same text but split by code: not adjacent
+		"// j is noted once.\nvar sep = 1\n\n// j is noted once.\nfunc j() {}\n\n" + // same text but split by code: not adjacent
+		"var k1 = 1 // trailing note\nvar k2 = 2\nvar k3 = 3 // trailing note\n\n" + // two lines apart, but code between: not a duplicate
+		"//go:noinline\n\n//go:noinline\nfunc l() {}\n\n" + // directive-only groups: exempt
+		"// m is spaced out.\n\n\n// m is spaced out.\nfunc m() {}\n" // two blank lines apart: not adjacent
 	var c Counts
 	c.Offenders = map[string][]string{}
 	if err := countFile(&c, "p.go", []byte(src)); err != nil {
