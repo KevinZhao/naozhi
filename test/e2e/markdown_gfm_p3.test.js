@@ -117,11 +117,12 @@ test.describe('renderMd GFM P3 (#2428)', () => {
   });
 
   // 这是复杂度回归闸门（防 inlineMd 去掉 `{1,300}` 正文上限后退化成二次扫描），
-  // 不是性能预算：N=40000 时带上限的实现空闲约 40ms、满载并行下到过 650ms，
-  // 去掉任一上限是 7s 以上。别收紧阈值，否则负载抖动会误报。
+  // 不是性能预算：N=40000 时带上限的实现空闲约 40ms、满载下到过约 550ms，
+  // 本机 10 路并发极端负载下近 1s；去掉任一上限空闲也要约 5s。别收紧阈值，
+  // 否则负载抖动会误报。
   test('__ 最坏输入不二次扫描（F2）', async () => {
-    test.setTimeout(60000);
-    const CEILING_MS = 1000;
+    test.setTimeout(120000);
+    const CEILING_MS = 2000;
     const ms = await page.evaluate((ceiling) => {
       const w = /** @type {any} */ (window);
       const N = 40000;
