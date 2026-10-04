@@ -130,11 +130,12 @@ type healthAuthSection struct {
 }
 
 // healthPlatformConn is one /health "platform_conn" entry. since_ago is
-// relative to the response, so a reader need not trust its own clock.
+// relative to the response, so a reader need not trust its own clock; both
+// are omitted when the reporter gave no Since.
 type healthPlatformConn struct {
 	State       string `json:"state"`
-	Since       string `json:"since"`
-	SinceAgo    string `json:"since_ago"`
+	Since       string `json:"since,omitempty"`
+	SinceAgo    string `json:"since_ago,omitempty"`
 	LastError   string `json:"last_error,omitempty"`
 	LastErrorAt string `json:"last_error_at,omitempty"`
 }

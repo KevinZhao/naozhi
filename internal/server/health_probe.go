@@ -91,9 +91,11 @@ func platformConnProbe(platforms map[string]platform.Platform) HealthProbe {
 func healthPlatformConnOf(cs platform.ConnState, now time.Time) healthPlatformConn {
 	out := healthPlatformConn{
 		State:     string(cs.State),
-		Since:     cs.Since.UTC().Format(time.RFC3339),
-		SinceAgo:  now.Sub(cs.Since).Round(time.Second).String(),
 		LastError: cs.LastError,
+	}
+	if !cs.Since.IsZero() {
+		out.Since = cs.Since.UTC().Format(time.RFC3339)
+		out.SinceAgo = now.Sub(cs.Since).Round(time.Second).String()
 	}
 	if !cs.LastErrorAt.IsZero() {
 		out.LastErrorAt = cs.LastErrorAt.UTC().Format(time.RFC3339)

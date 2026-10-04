@@ -267,6 +267,13 @@ func TestHandleHealth_PlatformsServeLiveConnState(t *testing.T) {
 	if got, _ := conn["slack"].(map[string]any); got["last_error"] != nil || got["last_error_at"] != nil {
 		t.Errorf("platform_conn.slack = %v, want no error fields when none recorded", got)
 	}
+
+	slack.state = platform.ConnState{State: platform.ConnConnecting}
+	conn, _ = healthBody(t, hs)["platform_conn"].(map[string]any)
+	got, _ = conn["slack"].(map[string]any)
+	if _, has := got["since"]; has || got["since_ago"] != nil || got["state"] != "connecting" {
+		t.Errorf("platform_conn.slack = %v, want state and no since fields for a zero Since", got)
+	}
 }
 
 // TestHealthEndpoints_SecurityHeaders pins the R20260616-SEC-3 fix: /livez,

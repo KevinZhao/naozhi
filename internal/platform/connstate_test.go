@@ -145,6 +145,7 @@ func TestConnStateOf(t *testing.T) {
 		{"no reporter", fakePlat{}, ConnState{}, false},
 		{"reporter declines", connPlat{s: up, ok: false}, up, false},
 		{"reporter answers", connPlat{s: up, ok: true}, up, true},
+		{"reporter answers without a state", connPlat{ok: true}, ConnState{}, false},
 	}
 	for _, c := range cases {
 		got, ok := ConnStateOf(c.p)

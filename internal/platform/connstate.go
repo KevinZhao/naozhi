@@ -42,7 +42,8 @@ type ConnStateReporter interface {
 }
 
 // ConnStateOf asks p for its connection state; ok=false when p is nil, does
-// not implement ConnStateReporter, or declines to answer.
+// not implement ConnStateReporter, declines to answer, or answers without a
+// State (there is nothing to serve in place of "registered").
 func ConnStateOf(p Platform) (ConnState, bool) {
 	if p == nil {
 		return ConnState{}, false
@@ -51,7 +52,11 @@ func ConnStateOf(p Platform) (ConnState, bool) {
 	if !ok {
 		return ConnState{}, false
 	}
-	return r.ConnState()
+	s, ok := r.ConnState()
+	if !ok || s.State == "" {
+		return ConnState{}, false
+	}
+	return s, true
 }
 
 // ConnStatesOf reports the observable connection state of every named
