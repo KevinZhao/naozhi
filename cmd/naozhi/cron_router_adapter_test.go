@@ -47,3 +47,21 @@ func TestToCronAgentOpts_NilExtraArgs(t *testing.T) {
 		t.Errorf("empty ExtraArgs: got %#v, want nil", out.ExtraArgs)
 	}
 }
+
+// The agent's DefaultBackend fills cron's Backend only when no explicit
+// backend is set; the job's own backend still overrides both at run time.
+func TestToCronAgentOpts_DefaultBackend(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		in   session.AgentOpts
+		want string
+	}{
+		{session.AgentOpts{DefaultBackend: "kiro"}, "kiro"},
+		{session.AgentOpts{Backend: "claude", DefaultBackend: "kiro"}, "claude"},
+		{session.AgentOpts{}, ""},
+	} {
+		if got := toCronAgentOpts(tc.in).Backend; got != tc.want {
+			t.Errorf("toCronAgentOpts(%+v).Backend = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

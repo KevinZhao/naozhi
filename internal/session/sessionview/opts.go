@@ -11,6 +11,11 @@ type AgentOpts struct {
 	ExtraArgs []string
 	Workspace string // override workspace (empty = use default/chat override)
 	Backend   string // backend ID ("claude" / "kiro" / …); empty = router default
+	// DefaultBackend is the agent-config backend (agents[].backend). It ranks
+	// below Backend and the dashboard pick, applies only when the key has no
+	// session, and ranks above the router default, so it neither overrides
+	// the picker nor moves a resumable session onto another CLI.
+	DefaultBackend string
 	// AccessProfile names the access profile (auth/upstream env overlay +
 	// default model) to spawn under. Empty = global default. Resume
 	// continuity takes precedence over the caller's value: a dead session

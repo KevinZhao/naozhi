@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestZeroValue_ReadsAreSafe(t *testing.T) {
@@ -19,6 +20,11 @@ func TestZeroValue_ReadsAreSafe(t *testing.T) {
 		t.Error("zero Store must not report a stuck key")
 	}
 	s.ClearShimStuck("k")
+	if _, ok := s.StartupFailure("k"); ok {
+		t.Error("zero Store must not report a startup failure")
+	}
+	s.ClearStartupFailure("k")
+	s.PruneStartupFailures(time.Now())
 }
 
 func TestSpawnSlots_CountAcquireAndRelease(t *testing.T) {
@@ -163,4 +169,28 @@ func TestShimStuck_ConsumeClearsFlag(t *testing.T) {
 		t.Error("ClearShimStuck must drop the flag")
 	}
 	s.ClearShimStuck("missing")
+}
+
+func TestStartupFailure_NoteClearPrune(t *testing.T) {
+	var s Store
+	now := time.Unix(1_000_000, 0)
+	old := StartupFailure{Streak: 3, At: now.Add(-time.Hour), Detail: "old"}
+	recent := StartupFailure{Streak: 1, At: now, Detail: "recent"}
+	s.NoteStartupFailure("old", old)
+	s.NoteStartupFailure("recent", recent)
+	s.NoteStartupFailure("cleared", recent)
+	if got, ok := s.StartupFailure("old"); !ok || got != old {
+		t.Fatalf("StartupFailure(old) = %+v,%v; want %+v", got, ok, old)
+	}
+	s.ClearStartupFailure("cleared")
+	s.PruneStartupFailures(now.Add(-time.Minute))
+	if _, ok := s.StartupFailure("cleared"); ok {
+		t.Error("ClearStartupFailure must drop the run")
+	}
+	if _, ok := s.StartupFailure("old"); ok {
+		t.Error("a run older than the cutoff must be pruned")
+	}
+	if got, ok := s.StartupFailure("recent"); !ok || got != recent {
+		t.Errorf("StartupFailure(recent) = %+v,%v; want it kept", got, ok)
+	}
 }

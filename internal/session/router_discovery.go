@@ -433,6 +433,9 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 	if err := validateBackend(opts.Backend); err != nil {
 		return nil, err
 	}
+	// The adopted process is a Claude CLI; the agent's backend must not move
+	// its --resume onto another CLI.
+	opts.DefaultBackend = ""
 	var (
 		res     spawnReservation
 		err     error

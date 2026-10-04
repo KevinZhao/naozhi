@@ -332,6 +332,8 @@ func (r *Router) Cleanup() {
 			r.unregisterSession(tx, key, s, false)
 			pruned++
 		}
+		// The run of a key that is never retried outlives any cooldown.
+		tx.Ext().spawns.PruneStartupFailures(now.Add(-2 * startupCooldownMax))
 		// Recompute the per-backend gauge and the alive total in one reconcile
 		// walk; skip the O(N) walk when nothing changed.
 		var aliveTotal int64
