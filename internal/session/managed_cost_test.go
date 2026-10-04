@@ -11,6 +11,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
+	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
 
 // newLedgerSession wires a ManagedSession (no run-history store) to a real
@@ -273,9 +274,9 @@ func TestCopyCostBaseline_RenameKeepsDeltaBaseline(t *testing.T) {
 }
 
 // A turn the process died on books its assistant-frame tokens as a partial
-// entry (no amount, one row per model); a failure with the process alive
-// books nothing, since the next result's cumulative modelUsage will carry
-// those tokens.
+// entry, one row per model; with no rate learned yet the rows carry tokens
+// only and no basis. A failure with the process alive books nothing, since
+// the next result's cumulative modelUsage will carry those tokens.
 func TestBookPartialTurn_OnProcessDeathOnly(t *testing.T) {
 	dead := &TestProcess{AliveVal: true, ShadowVal: clievent.ShadowUsage{Models: []clievent.ShadowModel{
 		{Model: "m[1m]", Input: 40, Output: 8}, {Model: "", CacheRead: 3}, {Model: "zero"}, {Model: "h", Output: 2},
@@ -288,7 +289,7 @@ func TestBookPartialTurn_OnProcessDeathOnly(t *testing.T) {
 		t.Fatal("expected error")
 	}
 	ents := allEntries(t, ledger)
-	if len(ents) != 1 || ents[0].Kind != costledger.KindPartial || ents[0].Amount != 0 {
+	if len(ents) != 1 || ents[0].Kind != costledger.KindPartial || ents[0].Amount != 0 || ents[0].Basis != costledger.BasisNone {
 		t.Fatalf("partial entry = %+v", ents)
 	}
 	want := []costledger.ModelDelta{
@@ -311,6 +312,94 @@ func TestBookPartialTurn_OnProcessDeathOnly(t *testing.T) {
 	}
 	if alive.ShadowVal.IsZero() {
 		t.Fatal("shadow account must be left for the next result to supersede")
+	}
+}
+
+// A partial turn is priced at the rates the CLI's own results taught the
+// ledger: the canonical model of a result row matches the raw model id an
+// assistant frame names. The amount lands on the entry, its rows, the
+// session's spend and the run record; a model never priced stays tokens-only
+// and does not mark the entry as unknown-priced.
+func TestBookPartialTurn_PricedAtLearnedRates(t *testing.T) {
+	const in, out, cr, cw = 4e-6, 20e-6, 0.2e-6, 5e-6
+	turn := costledger.Tokens{Input: 6, Output: 400, CacheRead: 90_000, CacheWrite: 3000}
+	turnUSD := in*6 + out*400 + cr*90_000 + cw*3000
+	proc := &TestProcess{AliveVal: true, ShadowVal: clievent.ShadowUsage{Models: []clievent.ShadowModel{
+		{Model: "claude-never-priced", Output: 50},
+		{Model: "claude-opus-5-5", Input: 3, Output: 1200, CacheRead: 45_000, CacheWrite: 6000},
+	}}}
+	results := []*clievent.SendResult{{Text: "a", CostUSD: turnUSD, ModelUsage: map[string]clievent.ModelUsage{
+		"global.anthropic.claude-opus-5-5[1m]": {
+			InputTokens: turn.Input, OutputTokens: turn.Output, CacheReadInputTokens: turn.CacheRead,
+			CacheCreationInputTokens: turn.CacheWrite, CostUSD: turnUSD, CanonicalModel: "claude-opus-5-5", CostBasis: "list"},
+	}}, nil}
+	proc.SendFunc = func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
+		r := results[0]
+		results = results[1:]
+		if r == nil {
+			return nil, clierr.ErrNoOutputTimeout
+		}
+		return r, nil
+	}
+	s, ledger := newLedgerSession(t, "feishu:p2p:killed", proc)
+	runs := runhistory.NewStore(t.TempDir(), 0, 0)
+	t.Cleanup(runs.Close)
+	s.runStore = runs
+	if _, err := s.Send(context.Background(), "priced", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Send(context.Background(), "killed", nil, nil); err == nil {
+		t.Fatal("expected the watchdog error")
+	}
+
+	// One observation: the learned rate scales the observed cost by the
+	// fallback weights, which the partial's own mix then reuses.
+	w := func(t costledger.Tokens) float64 {
+		return float64(t.Input) + 5*float64(t.Output) + 0.1*float64(t.CacheRead) + 1.25*float64(t.CacheWrite)
+	}
+	partialTok := costledger.Tokens{Input: 3, Output: 1200, CacheRead: 45_000, CacheWrite: 6000}
+	want := turnUSD / w(turn) * w(partialTok)
+	ents := allEntries(t, ledger)
+	var p *costledger.Entry
+	for i := range ents {
+		if ents[i].Kind == costledger.KindPartial {
+			p = &ents[i]
+		}
+	}
+	if p == nil || len(p.Models) != 2 {
+		t.Fatalf("partial entry = %+v", ents)
+	}
+	if !approxEq(p.Amount, want) || !approxEq(p.Models[1].CostUSD, want) || p.Models[1].Basis != costledger.BasisList {
+		t.Fatalf("priced row = %+v amount %v, want %v at basis list", p.Models[1], p.Amount, want)
+	}
+	if p.Models[0].CostUSD != 0 || p.Models[0].Basis != costledger.BasisNone || p.Basis != costledger.BasisList {
+		t.Fatalf("unpriced row = %+v, entry basis %q: want a tokens-only row with no basis, entry list", p.Models[0], p.Basis)
+	}
+	if got := s.CostTotals().USD; !approxEq(got, turnUSD+want) {
+		t.Fatalf("session spend = %v, want the turn plus the partial estimate %v", got, turnUSD+want)
+	}
+	runs.Close()
+	recs := runs.Recent(s.key, 0)
+	if len(recs) != 2 || !approxEq(recs[0].CostUSD+recs[1].CostUSD, turnUSD+want) {
+		t.Fatalf("run records = %+v, want the killed run to carry the estimate", recs)
+	}
+}
+
+// Rates learned from rows the CLI reported without a costBasis price a
+// partial with no basis either; the entry is promoted to list, as a priced
+// turn entry is, while its rows keep what the observations reported.
+func TestBookPartialTurn_UnreportedBasisPromotedToList(t *testing.T) {
+	proc := &TestProcess{AliveVal: true, ShadowVal: clievent.ShadowUsage{Models: []clievent.ShadowModel{
+		{Model: "claude-opus-5-5", Output: 100},
+	}}}
+	s, ledger := newLedgerSession(t, "feishu:p2p:nobasis", proc)
+	ledger.Rates().Observe(costledger.ModelDelta{Model: "claude-opus-5-5", CostUSD: 0.01, Tokens: costledger.Tokens{Output: 1000}})
+	if got := s.bookPartialTurn(proc, clierr.ErrProcessExited, "run-1"); !approxEq(got, 0.001) {
+		t.Fatalf("booked %v, want 0.001", got)
+	}
+	ents := allEntries(t, ledger)
+	if len(ents) != 1 || ents[0].Basis != costledger.BasisList || len(ents[0].Models) != 1 || ents[0].Models[0].Basis != costledger.BasisNone {
+		t.Fatalf("partial entry = %+v, want entry basis list over a row with no basis", ents)
 	}
 }
 
