@@ -62,6 +62,51 @@ func TestHandleOpen_InheritsAccessProfileAndModel(t *testing.T) {
 	}
 }
 
+// An aside runs on its source's account, not on the agent's access profile.
+// A planner key resolves to agent "general", whose profile never applies to
+// planners; a source recorded on the global default ("") must keep the
+// aside there too, or quoted turns land in a session on another account.
+func TestHandleOpen_AccessProfileFollowsSourceNotAgent(t *testing.T) {
+	cases := []struct {
+		name, key, recorded string
+	}{
+		{"planner on the global default", "project:p:planner", ""},
+		{"planner on its project pin", "project:p:planner", "personal"},
+		{"chat recorded on the global default", "feishu:direct:alice:general", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := session.NewRouter(session.RouterConfig{MaxProcs: 3})
+			r.InjectSession(tc.key, nil).SetAccessProfile(tc.recorded)
+			pool := session.NewScratchPool(r, 4, time.Minute)
+			h := New(Deps{
+				Router: sourceRouter{r},
+				Pool:   pool,
+				Agents: map[string]session.AgentOpts{"general": {AccessProfile: "company"}},
+			})
+			body := strings.NewReader(`{"source_key":"` + tc.key + `","quote":"why?"}`)
+			req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", body)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			h.HandleOpen(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			var resp openResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			sc := pool.Get(resp.ScratchID)
+			if sc == nil {
+				t.Fatalf("scratch %q not in pool", resp.ScratchID)
+			}
+			if sc.BaseOpts.AccessProfile != tc.recorded {
+				t.Errorf("BaseOpts.AccessProfile=%q want %q (the source's account, not agent general's)", sc.BaseOpts.AccessProfile, tc.recorded)
+			}
+		})
+	}
+}
+
 // inheritSourceTuning is the pure merge behind HandleOpen. Snapshot values
 // are CLI-reported, so anything that would fail the router's argv-injection
 // gate (e.g. a flag-shaped value or an out-of-set effort tier) must be skipped — falling back to the
@@ -72,6 +117,10 @@ func TestHandleOpen_InheritsAccessProfileAndModel(t *testing.T) {
 func TestInheritSourceTuning_GatesUnsafeValues(t *testing.T) {
 	t.Parallel()
 	base := session.AgentOpts{Model: "reg-model", Effort: "low", AccessProfile: "reg-profile", ExtraArgs: []string{"--x"}}
+	// The profile is never a registry default: a source on the global
+	// default ("") keeps the aside there.
+	keep := base
+	keep.AccessProfile = ""
 
 	cases := []struct {
 		name string
@@ -79,9 +128,9 @@ func TestInheritSourceTuning_GatesUnsafeValues(t *testing.T) {
 		want session.AgentOpts
 	}{
 		{
-			name: "empty snapshot keeps registry defaults",
+			name: "empty snapshot keeps registry tuning but not the registry profile",
 			snap: session.SessionSnapshot{},
-			want: base,
+			want: keep,
 		},
 		{
 			name: "valid values override",
@@ -91,7 +140,7 @@ func TestInheritSourceTuning_GatesUnsafeValues(t *testing.T) {
 		{
 			name: "Bedrock ARN / inference-profile model (':' '/') passes the router gate and is inherited",
 			snap: session.SessionSnapshot{Model: "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"},
-			want: session.AgentOpts{Model: "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0", Effort: "low", AccessProfile: "reg-profile", ExtraArgs: []string{"--x"}},
+			want: session.AgentOpts{Model: "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0", Effort: "low", ExtraArgs: []string{"--x"}},
 		},
 		{
 			// claude's init frame echoes the context-window suffix; the
@@ -104,12 +153,12 @@ func TestInheritSourceTuning_GatesUnsafeValues(t *testing.T) {
 		{
 			name: "flag-shaped model is skipped",
 			snap: session.SessionSnapshot{Model: "--dangerously-skip-permissions"},
-			want: base,
+			want: keep,
 		},
 		{
 			name: "unknown effort tier is skipped",
 			snap: session.SessionSnapshot{Effort: "ultra"},
-			want: base,
+			want: keep,
 		},
 	}
 	for _, tc := range cases {
