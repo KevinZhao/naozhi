@@ -181,13 +181,11 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 // echo a context-window suffix ("…[1m]") the router's model gate rejects, so
 // Model is pre-flighted with session.ValidateModelID (the same gate
 // GetOrCreate applies) and Effort with tuningspec. A failing value is
-// skipped at Info and the registry default kept. AccessProfile needs no
-// gate: an unknown ID degrades to the global default at spawn.
+// skipped at Info and the registry default kept. AccessProfile is copied
+// as-is ("" = global default) so the aside stays on its source's account.
 func inheritSourceTuning(base sessionview.AgentOpts, snap sessionview.SessionSnapshot) sessionview.AgentOpts {
 	out := base
-	if snap.AccessProfile != "" {
-		out.AccessProfile = snap.AccessProfile
-	}
+	out.AccessProfile = snap.AccessProfile
 	if snap.Model != "" {
 		if err := session.ValidateModelID(snap.Model); err != nil {
 			slog.Info("scratch: not inheriting source model",

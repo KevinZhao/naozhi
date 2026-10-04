@@ -353,6 +353,8 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 			ExtraArgs: agentOpts.ExtraArgs,
 			// Carry the agent's standing system prompt (#2493).
 			SystemPrompt: agentOpts.SystemPrompt,
+			// No AccessProfile: the external process never ran on the
+			// agent's pin, so the takeover stays on default_access_profile.
 		})
 		if err != nil {
 			slog.Error("session takeover failed", "key", key, "session_id", sessionID, "pid", pid, "err", err)

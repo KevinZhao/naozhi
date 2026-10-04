@@ -2593,6 +2593,46 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 		}
 	})
 
+	// #3106: agents[].access_profile rides defaults[agentID] through the
+	// KeyResolver into opts.AccessProfile, so it outranks the default profile
+	// and still loses to a dashboard pick and the resume lock.
+	t.Run("agent profile from the resolver reaches spawn", func(t *testing.T) {
+		kr := NewKeyResolver(map[string]AgentOpts{"reviewer": {AccessProfile: "1p-fable"}}, nil)
+		imKey, imOpts := kr.ResolveForChat("feishu", "user", "bob", "reviewer")
+		dashKey := "dashboard:direct:1700000000-x:reviewer"
+		dashOpts, _ := kr.ResolveForKey(dashKey)
+		for _, tc := range []struct {
+			key  string
+			opts AgentOpts
+		}{{imKey, imOpts}, {dashKey, dashOpts}} {
+			r := mkRouter()
+			r.backends.defaultAccessProfile = "bedrock-opus"
+			sp := resolveT(r, tc.key, "", tc.opts)
+			if sp.AccessProfileID != "1p-fable" {
+				t.Errorf("%s: AccessProfileID = %q, want the agent's 1p-fable over the default", tc.key, sp.AccessProfileID)
+			}
+			if sp.AccessProfileEnv["ANTHROPIC_BASE_URL"] != "https://api.anthropic.com" {
+				t.Errorf("%s: agent profile env not carried: %v", tc.key, sp.AccessProfileEnv)
+			}
+			if sp.Model != "claude-fable-5" {
+				t.Errorf("%s: Model = %q, want the agent profile's default claude-fable-5", tc.key, sp.Model)
+			}
+		}
+
+		r := mkRouter()
+		stateOf(r).picks.accessProfile[dashKey] = "bedrock-opus"
+		if sp := resolveT(r, dashKey, "", dashOpts); sp.AccessProfileID != "bedrock-opus" {
+			t.Errorf("AccessProfileID = %q, want the dashboard pick over the agent profile", sp.AccessProfileID)
+		}
+		r = mkRouter()
+		old := &ManagedSession{key: dashKey}
+		old.SetAccessProfile("bedrock-opus")
+		putT(r, dashKey, old)
+		if sp := resolveT(r, dashKey, "", dashOpts); sp.AccessProfileID != "bedrock-opus" {
+			t.Errorf("AccessProfileID = %q, want the resume lock over the agent profile", sp.AccessProfileID)
+		}
+	})
+
 	t.Run("unknown default profile falls back to global baseline", func(t *testing.T) {
 		r := mkRouter()
 		r.backends.defaultAccessProfile = "ghost-profile"

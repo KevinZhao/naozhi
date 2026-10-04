@@ -22,10 +22,19 @@ func TestBuildAgentOpts(t *testing.T) {
 			// direction breaks that comparison.
 			"planner": {Model: "opus", Effort: "max"},
 			// #2493: agents[].system_prompt must survive both hops too.
-			"reviewer": {Model: "sonnet", SystemPrompt: "You are a code review expert."},
+			"reviewer": {Model: "sonnet", SystemPrompt: "You are a code review expert.", AccessProfile: "personal"},
 		},
 	}
 	agents, cronAgents := buildAgentOpts(cfg)
+
+	// #3106: without this hop the agent's sessions spawn on the default
+	// account while config check reports the pinned one.
+	if got := agents["reviewer"].AccessProfile; got != "personal" {
+		t.Errorf("agents[reviewer].AccessProfile = %q, want personal", got)
+	}
+	if got := agents["general"].AccessProfile; got != "" {
+		t.Errorf("agents[general].AccessProfile = %q, want empty (unset in config)", got)
+	}
 
 	if got := agents["reviewer"].SystemPrompt; got != "You are a code review expert." {
 		t.Errorf("agents[reviewer].SystemPrompt = %q, want the configured prompt", got)
