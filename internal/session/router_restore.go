@@ -127,11 +127,11 @@ func (r *Router) restoreSessionFromEntry(tx sessTx, key string, entry *storeEntr
 // startBackgroundHistoryLoaders starts one history-load goroutine per restored
 // session: the naozhi event log first, then the Claude JSONL only when the log
 // has no rows for it (see injectRestoredHistory). A shim-managed session waits
-// shimReconnectGraceDelay before its JSONL read so ReconnectShims can fill it
-// first. One historyLoadSem bounds all history I/O and is not held during the
-// grace wait. The loads finish BEFORE the process's PersistSink is installed,
+// shimGrace (shimReconnectGraceDelay in NewRouter) before its JSONL read so
+// ReconnectShims can fill it first. One historyLoadSem bounds all history I/O
+// and is not held during the grace wait. The loads finish BEFORE the process's PersistSink is installed,
 // so replayed entries are tagged replayPhase=true and dropped. NewRouter-only.
-func (r *Router) startBackgroundHistoryLoaders() {
+func (r *Router) startBackgroundHistoryLoaders(shimGrace time.Duration) {
 	historyLoadSem := make(chan struct{}, historyLoadConcurrency)
 	var sessions []*ManagedSession
 	r.ss.View(func(v sessView) {
@@ -149,11 +149,14 @@ func (r *Router) startBackgroundHistoryLoaders() {
 		if r.hist.persister == nil && !jsonl {
 			continue
 		}
-		deferred := jsonl && shimKeys[s.key]
+		var grace time.Duration
+		if jsonl && shimKeys[s.key] {
+			grace = shimGrace
+		}
 		r.hist.wg.Add(1)
 		go func() {
 			defer r.hist.wg.Done()
-			if r.hist.loadStartupHistory(s, historyLoadSem, jsonl, deferred) {
+			if r.hist.loadStartupHistory(s, historyLoadSem, jsonl, grace) {
 				r.notifyChange()
 			}
 		}()
@@ -161,9 +164,9 @@ func (r *Router) startBackgroundHistoryLoaders() {
 }
 
 // loadStartupHistory is one session's startup load: the event log under sem,
-// then, if it had no rows and jsonl is set, the JSONL tail under sem again.
-// Reports whether it injected.
-func (h *HistoryIO) loadStartupHistory(s *ManagedSession, sem chan struct{}, jsonl, deferred bool) (injected bool) {
+// then, if it had no rows and jsonl is set, the JSONL tail under sem again,
+// after a wait of grace when it is non-zero. Reports whether it injected.
+func (h *HistoryIO) loadStartupHistory(s *ManagedSession, sem chan struct{}, jsonl bool, grace time.Duration) (injected bool) {
 	ctx := h.ctx
 	found := false
 	if !withHistorySem(ctx, sem, func() {
@@ -171,10 +174,10 @@ func (h *HistoryIO) loadStartupHistory(s *ManagedSession, sem chan struct{}, jso
 	}) || found || !jsonl {
 		return injected
 	}
-	if deferred {
+	if grace > 0 {
 		// NewTimer + Stop (not time.After) so a fast shutdown does not leak a
 		// timer per goroutine for the whole grace window.
-		graceTimer := time.NewTimer(shimReconnectGraceDelay)
+		graceTimer := time.NewTimer(grace)
 		select {
 		case <-graceTimer.C:
 		case <-ctx.Done():

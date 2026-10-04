@@ -648,7 +648,7 @@ func NewRouter(cfg RouterConfig) *Router {
 
 	// Async-load history for all restored sessions so the dashboard shows
 	// conversation history without waiting for the next message.
-	r.startBackgroundHistoryLoaders()
+	r.startBackgroundHistoryLoaders(shimReconnectGraceDelay)
 
 	// Orphan sweep + attachment tracker are background side effects funnelled
 	// through startBackgroundLifecycle (startOnce-guarded).

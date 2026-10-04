@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -140,7 +142,7 @@ func TestStartupHistory_EventLogBeforeJSONL(t *testing.T) {
 		}
 	}
 
-	r.startBackgroundHistoryLoaders()
+	r.startBackgroundHistoryLoaders(shimReconnectGraceDelay)
 	r.hist.wg.Wait()
 
 	if got := loader.calls.Load(); got != withoutLog {
@@ -160,6 +162,96 @@ func TestStartupHistory_EventLogBeforeJSONL(t *testing.T) {
 		if got, want := persistedSummaries(t, s), summariesOf(historyEntries("shim", 2)); fmt.Sprint(got) != fmt.Sprint(want) {
 			t.Errorf("%s: persistedHistory = %v, want the history it held %v", s.key, got, want)
 		}
+	}
+}
+
+// timedHistoryLoader serves jsonl and records, per session id chain, when it
+// was read relative to start.
+type timedHistoryLoader struct {
+	jsonl []clievent.EventEntry
+	start time.Time
+	mu    sync.Mutex
+	at    map[string]time.Duration
+}
+
+func (l *timedHistoryLoader) LoadHistoryChainTail(_ context.Context, _ string, ids []string, _ string, _ int) []clievent.EventEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.at[fmt.Sprint(ids)] = time.Since(l.start)
+	return l.jsonl
+}
+
+// TestStartupHistory_ShimGraceWait: a shim-managed session with no event-log
+// rows reads its JSONL only after the grace wait and only if nothing filled it
+// meanwhile, and the grace backfill counter counts that read alone; a session
+// no shim manages reads without the wait.
+func TestStartupHistory_ShimGraceWait(t *testing.T) {
+	// Not parallel: reads a process-global expvar counter.
+	if runtime.GOOS == "windows" {
+		t.Skip("shim discovery needs unix PID liveness")
+	}
+	const grace = time.Second
+	for _, tc := range []struct {
+		name      string
+		fill      bool
+		wantGrace int64
+	}{
+		{"still empty after the wait", false, 1},
+		{"filled during the wait", true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := shortTempDir(t)
+			mgr, err := shim.NewManager(shim.ManagerConfig{StateDir: dir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
+			w.ShimManager = mgr
+			loader := &timedHistoryLoader{jsonl: historyEntries("jsonl", 3), at: map[string]time.Duration{}}
+			r := historyOrderRouter(t, dir, w, loader)
+
+			shimmed := injectSession(r, "feishu:direct:alice:general", nil)
+			shimmed.setSessionID("sid-shim")
+			plain := injectSession(r, "feishu:direct:bob:general", nil)
+			plain.setSessionID("sid-plain")
+			socket := filepath.Join(dir, "shim.sock")
+			if err := os.WriteFile(socket, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			writeShimStateFor(t, dir, shim.State{ShimPID: os.Getpid(), Socket: socket, Key: shimmed.key, Backend: "claude", SessionID: "sid-shim"})
+			if !r.backends.shimManagedKeys()[shimmed.key] {
+				t.Fatal("precondition: the shim state is not live")
+			}
+			before := metrics.ShimReconnectGraceBackfillTotal.Value()
+
+			loader.start = time.Now()
+			r.startBackgroundHistoryLoaders(grace)
+			if tc.fill {
+				shimmed.InjectHistory(historyEntries("shim", 2))
+			}
+			r.hist.wg.Wait()
+
+			plainAt, plainRead := loader.at[fmt.Sprint(plain.SnapshotChainIDs())]
+			shimAt, shimRead := loader.at[fmt.Sprint(shimmed.SnapshotChainIDs())]
+			if !plainRead || plainAt >= grace {
+				t.Errorf("unmanaged session JSONL read = %v at %v, want a read before the %v grace", plainRead, plainAt, grace)
+			}
+			if got := metrics.ShimReconnectGraceBackfillTotal.Value() - before; got != tc.wantGrace {
+				t.Errorf("grace backfills = %d, want %d", got, tc.wantGrace)
+			}
+			want := loader.jsonl
+			if tc.fill {
+				want = historyEntries("shim", 2)
+				if shimRead {
+					t.Errorf("shim-managed session read its JSONL at %v, want no read: it was filled during the wait", shimAt)
+				}
+			} else if !shimRead || shimAt < grace {
+				t.Errorf("shim-managed session JSONL read = %v at %v, want a read after the %v grace", shimRead, shimAt, grace)
+			}
+			if got := persistedSummaries(t, shimmed); fmt.Sprint(got) != fmt.Sprint(summariesOf(want)) {
+				t.Errorf("persistedHistory = %v, want %v", got, summariesOf(want))
+			}
+		})
 	}
 }
 
@@ -187,7 +279,7 @@ func TestRestoredHistory_ConcurrentInjectorsInjectOnce(t *testing.T) {
 			}
 		})
 	}
-	r.startBackgroundHistoryLoaders()
+	r.startBackgroundHistoryLoaders(shimReconnectGraceDelay)
 	close(start)
 	wg.Wait()
 	r.hist.wg.Wait()

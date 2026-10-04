@@ -401,7 +401,7 @@ func TestPersistGapFill_InjectDoesNotWait(t *testing.T) {
 		}
 	}
 	t.Cleanup(release)
-	r.startBackgroundHistoryLoaders()
+	r.startBackgroundHistoryLoaders(shimReconnectGraceDelay)
 	testhelper.Eventually(t, s.hasInjectedHistory, 5*time.Second,
 		"tier 1 did not inject while the fallback read was blocked")
 	release()
@@ -448,7 +448,7 @@ func TestPersistGapFill_GapRecordBelowCut(t *testing.T) {
 	}}
 	close(fb.release)
 	r, s := gapLoaderRouter(t, key, records, times, fb)
-	r.startBackgroundHistoryLoaders()
+	r.startBackgroundHistoryLoaders(shimReconnectGraceDelay)
 	r.hist.wg.Wait()
 
 	mem := s.SnapshotPersistedHistory()
