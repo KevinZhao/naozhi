@@ -234,10 +234,9 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 	// profile default model must come from the same map.
 	profiles := r.backends.profiles()
 	// Backend precedence: opts.Backend > one-shot pick (consumed here) >
-	// existing session's Backend (resume continuity) > opts.DefaultBackend >
-	// defaultBackend. Without the existing-session tier a dead kiro session
-	// would respawn on the default backend, fail the resume probe, and
-	// silently downgrade to a fresh claude session.
+	// existing session's Backend, even "" (resume continuity: a dead kiro
+	// session or a RegisterForResume placeholder must not --resume on another
+	// CLI) > opts.DefaultBackend (no session on key) > defaultBackend.
 	reqBackend := opts.Backend
 	if len(tx.Ext().picks.backend) > 0 {
 		if reqBackend == "" {
@@ -247,13 +246,10 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 	}
 	if reqBackend == "" {
 		if old := tx.Get(key); old != nil {
-			if b := old.Backend(); b != "" {
-				reqBackend = b
-			}
+			reqBackend = old.Backend()
+		} else {
+			reqBackend = opts.DefaultBackend
 		}
-	}
-	if reqBackend == "" {
-		reqBackend = opts.DefaultBackend
 	}
 	wrapper, backendID := r.backends.wrapperFor(reqBackend)
 

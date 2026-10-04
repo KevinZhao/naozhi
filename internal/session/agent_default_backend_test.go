@@ -42,7 +42,7 @@ func TestResolveSpawnParams_AgentDefaultBackend(t *testing.T) {
 		{name: "explicit backend wins", opts: AgentOpts{Backend: "claude", DefaultBackend: "kiro"}, want: "claude"},
 		{name: "dashboard pick wins", opts: AgentOpts{DefaultBackend: "kiro"}, pick: "claude", want: "claude"},
 		{name: "resume continuity wins", opts: AgentOpts{DefaultBackend: "kiro"}, hasOld: true, oldBackend: "claude", want: "claude"},
-		{name: "old session without backend", opts: AgentOpts{DefaultBackend: "kiro"}, hasOld: true, want: "kiro"},
+		{name: "old session without backend", opts: AgentOpts{DefaultBackend: "kiro"}, hasOld: true, want: "claude"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -63,9 +63,9 @@ func TestResolveSpawnParams_AgentDefaultBackend(t *testing.T) {
 	}
 }
 
-// End to end through GetOrCreate and Takeover: a new session of a kiro-pinned
-// agent runs on kiro, but a takeover adopts an external Claude CLI and must
-// not --resume it on the agent's backend.
+// End to end through GetOrCreate, Takeover and RegisterForResume: a new
+// session of a kiro-pinned agent runs on kiro, but neither an adopted external
+// Claude CLI nor a history-pane resume may --resume on the agent's backend.
 func TestAgentDefaultBackend_SpawnAndTakeover(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	r := NewRouter(RouterConfig{
@@ -94,6 +94,16 @@ func TestAgentDefaultBackend_SpawnAndTakeover(t *testing.T) {
 	}
 	if got := took.Backend(); got != "claude" {
 		t.Errorf("Takeover backend = %q, want claude (the external CLI's)", got)
+	}
+
+	const resumeKey = "dashboard:direct:rabc:general"
+	r.RegisterForResume(resumeKey, "11111111-2222-3333-4444-555555555555", t.TempDir(), "")
+	resumed, _, err := r.GetOrCreate(context.Background(), resumeKey, opts)
+	if err != nil {
+		t.Fatalf("GetOrCreate after RegisterForResume: %v", err)
+	}
+	if got := resumed.Backend(); got != "claude" {
+		t.Errorf("history resume backend = %q, want claude (the router default)", got)
 	}
 }
 
