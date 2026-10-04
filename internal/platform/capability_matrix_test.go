@@ -32,7 +32,7 @@ func TestCapabilityMatrixIsPinned(t *testing.T) {
 		"feishu": {
 			InterimMessages: true, SingleUseReplyToken: false,
 			Reactions: true, QuestionCards: true, Runnable: true,
-			ConnState: false,
+			ConnState: true,
 		},
 		"slack": {
 			InterimMessages: true, SingleUseReplyToken: false,
