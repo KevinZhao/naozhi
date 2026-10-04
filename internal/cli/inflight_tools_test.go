@@ -98,3 +98,25 @@ func TestInflightTools_Bounded(t *testing.T) {
 		t.Errorf("tracked %d tools, want the %d cap", n, maxInflightTools)
 	}
 }
+
+// A codex webSearch item has no status field, so its item/completed frame
+// must still close the tool; otherwise a later silent model is blamed on it.
+func TestInflightTools_CodexStatuslessItemCloses(t *testing.T) {
+	p := &CodexProtocol{}
+	var tr inflightTools
+	for _, step := range []struct {
+		method   string
+		inFlight bool
+	}{{"item/started", true}, {"item/completed", false}} {
+		line := `{"jsonrpc":"2.0","method":"` + step.method +
+			`","params":{"threadId":"t","item":{"type":"webSearch","id":"ws1","query":"go"}}}`
+		evs, _, err := p.ReadEvent(line)
+		if err != nil || len(evs) != 1 {
+			t.Fatalf("ReadEvent(%s) = %+v, %v; want one event", step.method, evs, err)
+		}
+		tr.observe(evs[0], time.Unix(1000, 0))
+		if got, ok := tr.oldest(); ok != step.inFlight || (ok && got.name != "webSearch") {
+			t.Errorf("after %s: oldest() = %+v, %v; want in flight = %v", step.method, got, ok, step.inFlight)
+		}
+	}
+}
