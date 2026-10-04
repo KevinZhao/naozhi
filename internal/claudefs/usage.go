@@ -50,23 +50,62 @@ var (
 // w.Since are not opened. found is false when the main transcript does not
 // exist; rows come in first-seen model order.
 func SessionUsage(projectDir, sessionID string, w UsageWindow) (usage []ModelTokens, found bool, err error) {
-	if projectDir == "" || !IsValidSessionID(sessionID) {
-		return nil, false, nil
-	}
 	acc := newUsageAcc(w)
+	found, _, err = readSessionUsage(projectDir, sessionID, w, acc)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	return acc.totals(), true, nil
+}
+
+// DailyUsage is a session's transcript usage split per UTC day.
+type DailyUsage struct {
+	// Days maps a UTC day (2006-01-02) to its per-model rows, in first-seen
+	// model order; a message counts on the day of its first line.
+	Days map[string][]ModelTokens
+	// Truncated is set when the session has more agent transcripts than one
+	// call reads, so the figures are a lower bound.
+	Truncated bool
+}
+
+// SessionDailyUsage is SessionUsage over a session's whole history, per UTC
+// day. A message whose id is in counted was already counted for another
+// session (a fork copies its parent's lines) and is skipped; the ids counted
+// here are added to counted.
+func SessionDailyUsage(projectDir, sessionID string, counted map[string]bool) (u DailyUsage, found bool, err error) {
+	acc := newUsageAcc(UsageWindow{})
+	acc.skip = counted
+	found, u.Truncated, err = readSessionUsage(projectDir, sessionID, UsageWindow{}, acc)
+	if err != nil || !found {
+		return DailyUsage{}, found, err
+	}
+	for id := range acc.msgs {
+		counted[id] = true
+	}
+	u.Days = acc.dailyTotals()
+	return u, true, nil
+}
+
+// readSessionUsage feeds the session's main transcript and its agent
+// transcripts to acc. truncated reports agent transcripts left unread.
+func readSessionUsage(projectDir, sessionID string, w UsageWindow, acc *usageAcc) (found, truncated bool, err error) {
+	if projectDir == "" || !IsValidSessionID(sessionID) {
+		return false, false, nil
+	}
 	f, err := os.Open(TranscriptIn(projectDir, sessionID))
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, false, nil
+		return false, false, nil
 	}
 	if err != nil {
-		return nil, false, err
+		return false, false, err
 	}
 	err = readUsageFrom(f, w.MainOffset, acc)
 	f.Close()
 	if err != nil {
-		return nil, true, err
+		return true, false, err
 	}
-	for _, p := range agentTranscripts(SubagentsDir(projectDir, sessionID), w.Since) {
+	paths, truncated := agentTranscripts(SubagentsDir(projectDir, sessionID), w.Since)
+	for _, p := range paths {
 		f, err := os.Open(p)
 		if err != nil {
 			continue // removed meanwhile, or unreadable: its usage is lost, the rest still counts
@@ -74,10 +113,10 @@ func SessionUsage(projectDir, sessionID string, w UsageWindow) (usage []ModelTok
 		err = readUsageFrom(f, 0, acc)
 		f.Close()
 		if err != nil {
-			return nil, true, err
+			return true, truncated, err
 		}
 	}
-	return acc.totals(), true, nil
+	return true, truncated, nil
 }
 
 // readUsageFrom feeds f's lines from offset on to acc; an offset past the end
@@ -95,23 +134,28 @@ func readUsageFrom(f *os.File, offset int64, acc *usageAcc) error {
 }
 
 // agentTranscripts lists the sub-agent and workflow-agent transcripts under
-// dir modified at or after since, at most maxUsageFiles of them. Only regular
-// files count, so a symlink planted in the tree is never followed.
-func agentTranscripts(dir string, since time.Time) []string {
+// dir modified at or after since, at most maxUsageFiles of them; truncated
+// reports that more qualified. Only regular files count, so a symlink planted
+// in the tree is never followed.
+func agentTranscripts(dir string, since time.Time) (out []string, truncated bool) {
 	if dir == "" {
-		return nil
+		return nil, false
 	}
-	var out []string
 	add := func(d string) {
 		ents, _ := os.ReadDir(d)
 		for _, e := range ents {
 			name := e.Name()
-			if len(out) >= maxUsageFiles || !e.Type().IsRegular() || !strings.HasPrefix(name, "agent-") || !strings.HasSuffix(name, ".jsonl") {
+			if !e.Type().IsRegular() || !strings.HasPrefix(name, "agent-") || !strings.HasSuffix(name, ".jsonl") {
 				continue
 			}
-			if info, err := e.Info(); err == nil && !info.ModTime().Before(since) {
-				out = append(out, filepath.Join(d, name))
+			if info, err := e.Info(); err != nil || info.ModTime().Before(since) {
+				continue
 			}
+			if len(out) >= maxUsageFiles {
+				truncated = true
+				return
+			}
+			out = append(out, filepath.Join(d, name))
 		}
 	}
 	add(dir)
@@ -121,14 +165,21 @@ func agentTranscripts(dir string, since time.Time) []string {
 			add(filepath.Join(dir, "workflows", wf.Name()))
 		}
 	}
-	return out
+	return out, truncated
 }
 
 // usageAcc keeps the usage last seen per API message in the window.
 type usageAcc struct {
 	sinceMS, untilMS int64
 	msgs             map[string]int // message id -> index in rows
-	rows             []ModelTokens
+	rows             []usageRow
+	skip             map[string]bool // message ids counted elsewhere
+}
+
+// usageRow is one message's usage and the time of its first line.
+type usageRow struct {
+	ModelTokens
+	ms int64
 }
 
 func newUsageAcc(w UsageWindow) *usageAcc {
@@ -165,6 +216,9 @@ func (a *usageAcc) line(b []byte) {
 	if ts == 0 || ts <= a.sinceMS || (a.untilMS != 0 && ts > a.untilMS) {
 		return
 	}
+	if v.Message.ID != "" && a.skip[v.Message.ID] {
+		return
+	}
 	u := v.Message.Usage
 	t := ModelTokens{Model: v.Message.Model, Input: u.Input, Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite}
 	if i, ok := a.msgs[v.Message.ID]; ok && v.Message.ID != "" {
@@ -176,7 +230,7 @@ func (a *usageAcc) line(b []byte) {
 	if v.Message.ID != "" {
 		a.msgs[v.Message.ID] = len(a.rows)
 	}
-	a.rows = append(a.rows, t)
+	a.rows = append(a.rows, usageRow{ModelTokens: t, ms: ts})
 }
 
 // totals sums the messages per model.
@@ -184,20 +238,43 @@ func (a *usageAcc) totals() []ModelTokens {
 	var out []ModelTokens
 	idx := make(map[string]int)
 	for _, r := range a.rows {
-		if r.Input == 0 && r.Output == 0 && r.CacheRead == 0 && r.CacheWrite == 0 {
-			continue
-		}
-		i, ok := idx[r.Model]
-		if !ok {
-			i = len(out)
-			idx[r.Model] = i
-			out = append(out, ModelTokens{Model: r.Model})
-		}
-		o := &out[i]
-		o.Input += r.Input
-		o.Output += r.Output
-		o.CacheRead += r.CacheRead
-		o.CacheWrite += r.CacheWrite
+		out = addTokens(out, idx, r.ModelTokens)
 	}
+	return out
+}
+
+// dailyTotals sums the messages per UTC day and model.
+func (a *usageAcc) dailyTotals() map[string][]ModelTokens {
+	out := make(map[string][]ModelTokens)
+	idx := make(map[string]map[string]int)
+	for _, r := range a.rows {
+		day := time.UnixMilli(r.ms).UTC().Format(time.DateOnly)
+		if idx[day] == nil {
+			idx[day] = make(map[string]int)
+		}
+		if rows := addTokens(out[day], idx[day], r.ModelTokens); len(rows) > 0 {
+			out[day] = rows
+		}
+	}
+	return out
+}
+
+// addTokens folds t into its model's row of out (idx: model -> index);
+// a message with no tokens adds nothing.
+func addTokens(out []ModelTokens, idx map[string]int, t ModelTokens) []ModelTokens {
+	if t.Input == 0 && t.Output == 0 && t.CacheRead == 0 && t.CacheWrite == 0 {
+		return out
+	}
+	i, ok := idx[t.Model]
+	if !ok {
+		i = len(out)
+		idx[t.Model] = i
+		out = append(out, ModelTokens{Model: t.Model})
+	}
+	o := &out[i]
+	o.Input += t.Input
+	o.Output += t.Output
+	o.CacheRead += t.CacheRead
+	o.CacheWrite += t.CacheWrite
 	return out
 }

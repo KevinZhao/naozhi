@@ -85,7 +85,7 @@
 // internal/costledger/entry.go —— 叶子包：不 import 任何 internal/*（照抄 runtelemetry/imports_test.go 的 TestPackageIsLeaf）
 type Source string // "session" | "cron_local" | "cron_sandbox" | "sysession"
 type Unit   string // "USD" | "credits" | "tokens"
-type Kind   string // 采集方式："turn"(CLI 累计差分) | "receipt"(sandbox 回执) | "metering"(kiro/codex) | "backfill" | "partial"
+type Kind   string // 采集方式："turn"(CLI 累计差分) | "receipt"(sandbox 回执) | "metering"(kiro/codex) | "backfill" | "partial" | "adjust"(对账修正，可为负)
 type Basis  string // CLI 定价口径："list" | "managed" | "unknown" | ""(非 claude)
 
 type Entry struct {
@@ -123,7 +123,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 约束（全部有单测）：
 
-- `Amount` 是 **delta**，永不为累计值；`Amount<=0 && len(Models)==0` 的 entry 被 `Append` 拒绝（返回 false，不计 dropped）。
+- `Amount` 是 **delta**，永不为累计值；`Amount<=0 && len(Models)==0` 的 entry 被 `Append` 拒绝（返回 false，不计 dropped）。唯一例外是 `Kind=adjust`：它的 `Amount` 与 `Models[]` 各字段可以为负（`Amount==0` 且无 `Models` 仍拒绝），其余 kind 的负 `Amount` 归 0。rollup 与汇总直接相加，修正自然抵消。
 - `Amount` 是唯一权威；`Models[].CostUSD` 之和与 `Amount` 的偏差 > max(1%, $0.001) 时 warn（每模型去重）而**不是**断言——`total_cost_usd` 与 `modelUsage.costUSD` 是 CLI 两个独立累加器。
 - `Source/Kind/Unit/Basis` 为类型化枚举；写入时校验，非法 `Basis` → `unknown`，非法 `Source/Kind/Unit` → 拒绝 + dropped 计数。
 - `Model/RawModel/Provider`：来自 CLI 输出，视为不可信：长度 ≤128、合法 UTF-8、禁 C0/DEL、禁换行；违规替换为 `<invalid>` 并 warn（每 raw 值去重）。
@@ -242,6 +242,12 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
     rollup_days: 400     # [1, retention_days]，默认 = retention_days；启动同步加载，慢于 1s 会打 Info 日志
   ```
 - 历史回填 `naozhi cost backfill [-config] [-dry-run]`：从 `session-runs/` 与 cron `runs/` 导入 `Kind=backfill`（TS=StartedAt，以 run_id 去重，超出保留期跳过）；persistent 模式 cron 旧记录是累计值，**跳过不导**；导入落在过去日期文件，需重启 naozhi 刷新内存 rollup。
+- 对账 `naozhi cost reconcile [-config] [-session <cli-session-id>] [-until YYYY-MM-DD] [-claude-dir] [-write]`（#3210）：修 #3097 之前每次 `--resume` 把恢复的 cost-state 总额记进首个 turn 的历史条目，并补上从未入账的花费。**默认只打印**，`-write` 才追加；只追加 `Kind=adjust`，不改已有行，与运行中的 naozhi 并存的理由同 backfill。
+  - 归属：只看 `Source=session`、claude、USD、非 cron key 的条目。CLI session 依次取 `RunID` 自带的（`end:<sid>:…` / `reconcile:<sid>:…`）、同 `RunID` 的 session-runs 记录、只对应过一个 session id 的 key（session-runs 记录与 sessions.json 的 `prev_session_ids` 链合并后仍只有一个）；都不成立的计数后跳过，并记下它所在的 (key, 日)。
+  - 恢复额：cost-state 行没有时间戳，取它后面第一条带时间戳的行作为"之后的进程才能恢复它"的时刻。条目之前最后一个满足此条件的 cost-state 总额记为 r。条目满足 `Amount ≥ 0.98·r`、`r ≥ $0.5`，且它的 `Models[]` token 合计 ≥ r 的 token 合计的 98%（基线为 0 的差分把恢复的 token 也带进来，修好基线后同样大的 turn 不会），就追加一条 `Amount=−r`、TS 与 key 同原条目的修正，`RunID=reconcile:<sid>:run:<原 run_id>`，已存在则跳过。`Models[]` 按 `costledger.RateKey` 把 r 的每个模型行与原条目的模型行配对取负，每行最多取到原条目该行的量；原条目没有 `Models[]` 时修正也不带（按金额单独判断的那一条）。
+  - 按天残差：对每个 UTC 日（不含 `-until` 当天及以后，默认今天；不早于账本最早一天），transcript 花费 T 取主 JSONL、`subagents/agent-*.jsonl` 与 `subagents/workflows/*/agent-*.jsonl` 按 `message.id` 去重后的用量，按 §5.6 的 RateBook 定价（样本为账本里所有 `Kind=turn` 行加各 session 的 cost-state 行）。账本同日合计（含上一步的修正）记为 L。`|T−L| > max($1, 5%·T)` 时追加一条 `Amount=T−L`、`RunID=reconcile:<sid>:day:<日期>`、TS 为当日 12:00 UTC 的修正，`Models[]` 是逐模型的 transcript 减账本。重跑时 L 已含上次的修正，所以不再追加。那一天若有归不到任何 session 的条目落在这个 session 已持有的某个 key 上（即前一步归属失败并记下的 (key, 日)），当天残差整个跳过不记——它的花费可能已经在这份 transcript 里，又已经在账本里，残差会把它再记一次。
+  - 跳过：找不到 transcript、子 agent 文件超过单次读取上限（用量不全）、当天有没学到单价的模型（只跳过那一天）。同一条消息只算给最早出现的 session（fork 会复制父 session 的行）。
+  - 修正落在过去日期文件，需重启 naozhi 刷新内存 rollup；会话侧的 `costSpent` 不跟着改。
 
 ## 10. 可观测性
 
@@ -281,6 +287,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 | 1 | PR-4 | sysession json runner + 写入（Runner 经 ctx `RunInfo` 归属到 Manager 的 runID） | P3 |
 | 2 | PR-5 | `naozhi cost backfill`；rollup 覆盖整个保留期（取代月度 rollup 文件）；agentcore 回执带 modelUsage；服务概览健康条 dropped/unknown 告警 | — |
 | 3 | PR-6 | 5.6 影子 token 账（进程死亡的 turn 记 `Kind=partial` entry，按 CLI 实测单价估算金额；服务概览健康条提示 partial 计数） | P5 |
+| 3 | PR-7 | `naozhi cost reconcile`：`Kind=adjust`（可为负）冲回 `--resume` 恢复额，按天补齐 transcript 与账本的残差（§9） | — |
 
 每个 PR 可独立合并与回滚：PR-1 纯新增；PR-2a 纯新增写入；PR-2b 改 cron 口径（回滚回到累计值，ledger 仍为权威）；PR-3 纯读。
 

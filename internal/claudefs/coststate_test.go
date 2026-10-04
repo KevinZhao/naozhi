@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeTranscript(t *testing.T, lines ...string) string {
@@ -79,5 +80,50 @@ func TestLastCostState_MissingFileIsAnError(t *testing.T) {
 	_, found, err := LastCostState(filepath.Join(t.TempDir(), "gone.jsonl"), "sid")
 	if !errors.Is(err, fs.ErrNotExist) || found {
 		t.Fatalf("found %v, err %v; want ErrNotExist", found, err)
+	}
+}
+
+// Each cost-state is placed between the timestamps around it: lines of other
+// sessions and lines without a timestamp move neither bound, and the last
+// cost-state of a file has no After.
+func TestCostStates_BracketedByNeighbourTimestamps(t *testing.T) {
+	ts := func(s string) string { return `{"type":"user","timestamp":"2026-09-28T` + s + `Z"}` }
+	p := writeTranscript(t,
+		costLine("sid", 0.25), // nothing before it yet
+		ts("03:08:56.207"),
+		costLine("sid", 584.17),
+		costLine("other-session", 9),
+		`{"type":"summary","summary":"no timestamp"}`,
+		ts("03:15:35.151"),
+		ts("04:33:46.691"),
+		costLine("sid", 614.54),
+	)
+	got, err := CostStates(p, "sid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := func(s string) time.Time {
+		v, _ := time.Parse(time.RFC3339Nano, "2026-09-28T"+s+"Z")
+		return v
+	}
+	want := []struct {
+		usd           float64
+		before, after time.Time
+	}{
+		{0.25, time.Time{}, at("03:08:56.207")},
+		{584.17, at("03:08:56.207"), at("03:15:35.151")},
+		{614.54, at("04:33:46.691"), time.Time{}},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d marks, want %d: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		g := got[i]
+		if g.TotalCostUSD != w.usd || !g.Before.Equal(w.before) || !g.After.Equal(w.after) {
+			t.Errorf("mark %d = %v [%v, %v], want %v [%v, %v]", i, g.TotalCostUSD, g.Before, g.After, w.usd, w.before, w.after)
+		}
+	}
+	if _, err := CostStates(filepath.Join(t.TempDir(), "missing.jsonl"), "sid"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("missing transcript: err = %v, want not-exist", err)
 	}
 }

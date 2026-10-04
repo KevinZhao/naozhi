@@ -97,6 +97,31 @@ func NewStore(dir string, opts Options) *Store {
 	return s
 }
 
+// OpenReadOnly opens the ledger at dir for Scan, Entries and Summarize
+// without creating, sweeping or writing anything: Append always returns
+// false. Summaries stream the day files, as no rollup is warmed.
+func OpenReadOnly(dir string, opts Options) *Store {
+	if dir == "" {
+		return &Store{disabled: true}
+	}
+	rd, ru := clampDays(opts.RetentionDays, opts.RollupDays)
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
+	s := &Store{
+		dir:       dir,
+		retention: time.Duration(rd) * 24 * time.Hour,
+		rollupWin: time.Duration(ru) * 24 * time.Hour,
+		now:       now,
+		ch:        make(chan Entry),
+		rollup:    newRollup(),
+		rates:     NewRateBook(),
+	}
+	s.closed.Store(true)
+	return s
+}
+
 // clampDays applies the documented ranges: retention [1, MaxRetentionDays],
 // rollup [1, retention] defaulting to the whole retention window (the
 // per-day low-cardinality aggregates are tiny, so a full-window summary

@@ -464,6 +464,25 @@ func loadStore(path string) map[string]*storeEntry {
 	return m
 }
 
+// StoredSessionIDs maps each key in the session store at path to the CLI
+// session ids it has held, oldest first and the current one last. It only
+// reads: a missing, unreadable or corrupt store yields nil and stays put.
+func StoredSessionIDs(path string) map[string][]string {
+	entries, out, err := jsonfile.Load[[]storeEntry](path, jsonfile.Options{
+		MaxBytes: maxStoreFileBytes, Label: "session store", Corrupt: jsonfile.LeaveCorrupt,
+	})
+	if err != nil || out != jsonfile.Parsed {
+		return nil
+	}
+	m := make(map[string][]string, len(entries))
+	for _, e := range entries {
+		if e.Key != "" && e.SessionID != "" {
+			m[e.Key] = append(slices.Clone(e.PrevSessionIDs), e.SessionID)
+		}
+	}
+	return m
+}
+
 // knownIDsPath derives the known session IDs path (sessions.json → session-ids.json).
 func knownIDsPath(storePath string) string {
 	if storePath == "" {

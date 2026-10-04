@@ -20,8 +20,13 @@ import (
 
 // runCost dispatches `naozhi cost <subcommand>`.
 func runCost(args []string) {
+	if len(args) > 0 && args[0] == "reconcile" {
+		runCostReconcile(args[1:])
+		return
+	}
 	if len(args) == 0 || args[0] != "backfill" {
 		fmt.Fprintln(os.Stderr, "usage: naozhi cost backfill [-config config.yaml] [-dry-run]")
+		fmt.Fprintln(os.Stderr, "       naozhi cost reconcile [-config config.yaml] [-session <cli-session-id>] [-until YYYY-MM-DD] [-claude-dir dir] [-write]")
 		os.Exit(2)
 	}
 	fs, configPath := newSubFlagSet("cost backfill", "config.yaml")

@@ -38,6 +38,7 @@ const (
 	KindMetering Kind = "metering" // backend metering rows (kiro/codex)
 	KindBackfill Kind = "backfill"
 	KindPartial  Kind = "partial" // turn ended without a result frame
+	KindAdjust   Kind = "adjust"  // reconcile correction; may be negative
 
 	BasisList    Basis = "list"
 	BasisManaged Basis = "managed"
@@ -118,7 +119,7 @@ func (u Unit) valid() bool {
 
 func (k Kind) valid() bool {
 	switch k {
-	case KindTurn, KindReceipt, KindMetering, KindBackfill, KindPartial:
+	case KindTurn, KindReceipt, KindMetering, KindBackfill, KindPartial, KindAdjust:
 		return true
 	}
 	return false
@@ -173,15 +174,17 @@ func sanitizeIdent(s string) string {
 // normalize validates enums, sanitizes CLI-sourced strings and caps Models.
 // It returns false when the entry must be rejected outright: invalid
 // Source/Unit/Kind, empty Backend, or nothing to record (Amount <= 0 and no
-// Models).
+// Models). Only a KindAdjust entry keeps a negative Amount; any other kind's
+// is clamped to 0.
 func (e *Entry) normalize() bool {
 	if !e.Source.valid() || !e.Unit.valid() || !e.Kind.valid() || e.Backend == "" {
 		return false
 	}
-	if !(e.Amount > 0) && len(e.Models) == 0 {
+	recorded := e.Amount > 0 || (e.Kind == KindAdjust && e.Amount < 0)
+	if !recorded && len(e.Models) == 0 {
 		return false
 	}
-	if e.Amount < 0 {
+	if e.Amount < 0 && e.Kind != KindAdjust {
 		e.Amount = 0
 	}
 	e.Basis = normalizeBasis(e.Basis)

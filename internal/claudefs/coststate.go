@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"time"
 )
 
 // CostState is a transcript's `"type":"cost-state"` line: the CLI's running
@@ -54,6 +55,58 @@ func LastCostState(path, sessionID string) (st CostState, found bool, err error)
 		return CostState{}, false, err
 	}
 	return st, found, nil
+}
+
+// CostStateMark is a cost-state line placed in time. The line carries no
+// timestamp of its own, so it is bracketed by its neighbours: Before is the
+// last timestamp ahead of it, After the first one past it (zero when no
+// timestamped line follows).
+type CostStateMark struct {
+	CostState
+	Before, After time.Time
+}
+
+// timestampMarker pre-filters the lines whose timestamp CostStates decodes.
+var timestampMarker = []byte(`"timestamp"`)
+
+// CostStates lists the transcript's cost-state lines that belong to
+// sessionID (or name none), in file order.
+func CostStates(path, sessionID string) ([]CostStateMark, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var out []CostStateMark
+	var last time.Time
+	open := 0 // out[open:] still wait for their After
+	err = eachLine(f, maxCostStateLine, func(line []byte) {
+		if s, ok := decodeCostState(line, sessionID); ok {
+			out = append(out, CostStateMark{CostState: s, Before: last})
+			return
+		}
+		if !bytes.Contains(line, timestampMarker) {
+			return
+		}
+		var v struct {
+			Timestamp string `json:"timestamp"`
+		}
+		if json.Unmarshal(line, &v) != nil {
+			return
+		}
+		ms := TimestampMillis(v.Timestamp)
+		if ms == 0 {
+			return
+		}
+		last = time.UnixMilli(ms).UTC()
+		for ; open < len(out); open++ {
+			out[open].After = last
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // eachLine calls fn with every line of r up to maxLine bytes, newline
