@@ -13,25 +13,58 @@ import (
 
 // adoptReapRouter records the session cleanup an adoption performs: Reset and
 // stub registration through reapRouter, ReleaseProcess here, all into one
-// shared order with the run-ended event.
+// shared order with the run-ended event. Each cleanup call also probes the
+// job's gate, so a test can assert it ran before finishRun released it.
 type adoptReapRouter struct {
 	reapRouter
-	run *fakeInFlightRun
+	run      *fakeInFlightRun
+	gateHeld func() bool
 
-	relMu    sync.Mutex
-	released []string
+	relMu      sync.Mutex
+	released   []string
+	gateFreeAt []string // cleanup calls that found the gate already released
 }
 
 func (r *adoptReapRouter) AdoptInFlight(key string) (InFlightRun, AdoptVerdict) {
 	return r.run, AdoptLive
 }
 
+func (r *adoptReapRouter) probeGate(event string) {
+	if r.gateHeld() {
+		return
+	}
+	r.relMu.Lock()
+	defer r.relMu.Unlock()
+	r.gateFreeAt = append(r.gateFreeAt, event)
+}
+
+func (r *adoptReapRouter) Reset(key string) {
+	r.probeGate("reset")
+	r.reapRouter.Reset(key)
+}
+
+func (r *adoptReapRouter) RegisterCronStubWithChain(key, workspace, prompt string, chainIDs []string) {
+	r.probeGate("register-stub")
+	r.reapRouter.RegisterCronStubWithChain(key, workspace, prompt, chainIDs)
+}
+
 func (r *adoptReapRouter) ReleaseProcess(key string) bool {
+	r.probeGate("release")
 	r.order.record("release")
 	r.relMu.Lock()
 	defer r.relMu.Unlock()
 	r.released = append(r.released, key)
 	return true
+}
+
+// assertGateHeld fails if any cleanup call ran after the job's gate was freed.
+func (r *adoptReapRouter) assertGateHeld(t *testing.T) {
+	t.Helper()
+	r.relMu.Lock()
+	defer r.relMu.Unlock()
+	if len(r.gateFreeAt) != 0 {
+		t.Errorf("cleanup ran after the gate was released: %v", r.gateFreeAt)
+	}
 }
 
 func (r *adoptReapRouter) releasedKeys() []string {
@@ -69,6 +102,7 @@ func startAdoption(t *testing.T, fresh bool, outcome AdoptedRunOutcome) adoptRea
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath},
 		SchedulerDeps{Router: router, Telemetry: rec})
 	jobID := mustGenerateID()
+	router.gateHeld = func() bool { _, ok := s.CurrentRun(jobID); return ok }
 	s.putJobForTest(&Job{ID: jobID, Schedule: "@every 5m", Prompt: "do thing",
 		WorkDir: "/tmp/wd", FreshContext: fresh, LastSessionID: "sess-prev"})
 	if path := s.writeRunInflightMarker(runInflightMarker{
@@ -94,9 +128,8 @@ func (c adoptReapCase) settle(t *testing.T) {
 
 // A fresh-context run adopted across a restart is reaped like a local one: its
 // CLI is Reset and the sidebar stub re-registered with a chain to the run's
-// session, both while the adoption still holds the gate (run-ended is emitted
-// by the finishRun that releases it). Without the reap the exempt session
-// stays resident until the job's next tick (#3103).
+// session, both while the adoption still holds the job's gate. Without the
+// reap the exempt session stays resident until the job's next tick (#3103).
 func TestAdoption_FreshSuccessReapsSessionWhileGateHeld(t *testing.T) {
 	t.Parallel()
 	c := startAdoption(t, true, AdoptedRunOutcome{Completed: true, Text: "ok", SessionID: "sess-a1"})
@@ -106,9 +139,11 @@ func TestAdoption_FreshSuccessReapsSessionWhileGateHeld(t *testing.T) {
 	if !reflect.DeepEqual(resets, []string{c.key}) {
 		t.Fatalf("Reset calls = %v, want exactly [%s]", resets, c.key)
 	}
-	if len(regs) != 1 || regs[0].key != c.key || !reflect.DeepEqual(regs[0].chainIDs, []string{"sess-a1"}) {
-		t.Fatalf("stub registrations = %+v, want one on %s chained to [sess-a1]", regs, c.key)
+	if len(regs) != 1 || regs[0].key != c.key || regs[0].workspace != "/tmp/wd" ||
+		regs[0].prompt != "do thing" || !reflect.DeepEqual(regs[0].chainIDs, []string{"sess-a1"}) {
+		t.Fatalf("stub registrations = %+v, want one on %s in /tmp/wd for \"do thing\" chained to [sess-a1]", regs, c.key)
 	}
+	c.router.assertGateHeld(t)
 	c.ord.assertCountBefore(t, "reset", 1, "run-ended", "the adopted fresh session must be reset while the gate is held")
 	c.ord.assertCountBefore(t, "register-stub", 1, "run-ended", "the stub must be re-registered while the gate is held")
 	if got := c.router.releasedKeys(); len(got) != 0 {
@@ -144,6 +179,7 @@ func TestAdoption_FreshUnsuccessfulResetsAndRefreshesStub(t *testing.T) {
 			}
 			c.ord.assertCountBefore(t, "reset", 1, "run-ended", "the reset must land while the gate is held")
 			c.ord.assertCountBefore(t, "register-stub", 1, "run-ended", "the stub must be re-registered while the gate is held")
+			c.router.assertGateHeld(t)
 		})
 	}
 }
@@ -167,6 +203,7 @@ func TestAdoption_PersistentReleasesProcessWhileGateHeld(t *testing.T) {
 				t.Fatalf("ReleaseProcess calls = %v, want exactly [%s]", got, c.key)
 			}
 			c.ord.assertCountBefore(t, "release", 1, "run-ended", "the persistent release must land while the gate is held")
+			c.router.assertGateHeld(t)
 			if resets, regs := c.router.snapshot(); len(resets) != 0 || len(regs) != 0 {
 				t.Errorf("persistent run must keep its session; got Reset %v, stubs %+v", resets, regs)
 			}
