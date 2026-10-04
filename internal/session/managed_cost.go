@@ -171,9 +171,10 @@ func isProcessDeathErr(err error) bool {
 	return errors.Is(err, clierr.ErrProcessExited) || errors.Is(err, clierr.ErrNoOutputTimeout) || errors.Is(err, clierr.ErrTotalTimeout)
 }
 
-// bookPartialTurn records a Kind=partial entry (tokens only, no amount) for
-// a turn the process died on. Turns that fail with the process still alive
-// are skipped: their tokens surface in the next result's cumulative modelUsage.
+// bookPartialTurn records a Kind=partial entry (tokens only, no amount, one
+// row per model) for a turn the process died on. Turns that fail with the
+// process still alive are skipped: their tokens surface in the next result's
+// cumulative modelUsage.
 func (s *ManagedSession) bookPartialTurn(proc processIface, err error, runID string) {
 	if !isProcessDeathErr(err) || s.costAcct == nil || !s.costAcct.ledger.Enabled() {
 		return
@@ -190,16 +191,21 @@ func (s *ManagedSession) bookPartialTurn(proc processIface, err error, runID str
 		Source: costledger.SourceSession, Kind: costledger.KindPartial,
 		SessionKey: s.key, RunID: runID, Workspace: filepath.Base(s.Workspace()), Backend: s.Backend(),
 		Unit: costledger.UnitUSD, Amount: 0,
-		Models: []costledger.ModelDelta{{
-			Model: costledger.CanonicalModel("", u.Model), RawModel: u.Model,
-			Tokens: costledger.Tokens{Input: u.Input, Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite},
-		}},
+		Models: make([]costledger.ModelDelta, 0, len(u.Models)),
 	}
 	if e.Backend == "" {
 		e.Backend = "claude"
 	}
-	if e.Models[0].Model == "" {
-		e.Models[0].Model = "unknown"
+	for _, m := range u.Models {
+		t := costledger.Tokens{Input: m.Input, Output: m.Output, CacheRead: m.CacheRead, CacheWrite: m.CacheWrite}
+		if t == (costledger.Tokens{}) {
+			continue
+		}
+		d := costledger.ModelDelta{Model: costledger.CanonicalModel("", m.Model), RawModel: m.Model, Tokens: t}
+		if d.Model == "" {
+			d.Model = "unknown"
+		}
+		e.Models = append(e.Models, d)
 	}
 	s.costAcct.ledger.Append(e)
 }
