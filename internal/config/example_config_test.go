@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -128,6 +130,36 @@ func TestDocs_WatchdogShowsDefaults(t *testing.T) {
 			t.Errorf("%s quotes no watchdog default; the pattern no longer matches the doc", doc)
 		}
 	}
+}
+
+// readmeBackendEnumRe matches the README config sample's `backend:` line and
+// captures its trailing comment, the operator-facing list of valid IDs.
+var readmeBackendEnumRe = regexp.MustCompile(`^\s+backend:\s*\S+\s+#(.*)$`)
+
+// TestDocs_READMEListsAllBackends: the README `cli.backend` comment names
+// exactly the registered backend IDs, so a new backend cannot ship undocumented.
+func TestDocs_READMEListsAllBackends(t *testing.T) {
+	withRegisteredBackends(t, func() {
+		data, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+		if err != nil {
+			t.Fatalf("read README.md: %v", err)
+		}
+		var got []string
+		for _, line := range strings.Split(string(data), "\n") {
+			if m := readmeBackendEnumRe.FindStringSubmatch(line); m != nil {
+				for _, q := range regexp.MustCompile(`"([a-z0-9_-]+)"`).FindAllStringSubmatch(m[1], -1) {
+					got = append(got, q[1])
+				}
+			}
+		}
+		if len(got) == 0 {
+			t.Fatal("README.md has no `backend: <id>  # \"a\" | \"b\"` line; the pattern no longer matches the doc")
+		}
+		sort.Strings(got)
+		if want := knownBackendIDs(); !slices.Equal(got, want) {
+			t.Errorf("README cli.backend comment lists %v, registered backends are %v", got, want)
+		}
+	})
 }
 
 // yamlChildScalar returns the scalar node for key, or nil.

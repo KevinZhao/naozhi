@@ -156,8 +156,8 @@ cli:
   #   - Omitted => cli.backend (or first entry in `backends:`)
   #
   # Per-backend path/model/args are optional and fall back to cli.* above.
-  # ACP protocol is auto-selected for id="kiro"; stream-json for everything
-  # else — no extra flag needed.
+  # The protocol follows the id — stream-json for "claude", ACP for "kiro",
+  # codex app-server for "codex" — no extra flag needed.
   #
   #backend: "claude"
   #backends:
@@ -215,6 +215,10 @@ cli:
   #    # surfaces its rejection).
   #    # docs/rfc/dashboard-model-effort-control.md §4.2.
   #    models: ["sonnet", "opus", "haiku"]
+  #  - id: "codex"
+  #    path: "codex"
+  #    # Reasoning effort rides on args, not `effort` (see above).
+  #    args: ["-c", "model_reasoning_effort=high"]
   #
   # A top-level cli.effort works as an inheritable default for every backend
   # that supports one, exactly like cli.model:
