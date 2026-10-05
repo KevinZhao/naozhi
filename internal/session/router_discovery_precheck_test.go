@@ -72,6 +72,17 @@ func TestTakeoverPrecheck(t *testing.T) {
 			injectSession(r, "a", newIdleProc())
 			r.ss.Update(func(tx sessTx) { tx.Ext().spawns.AcquireSpawnSlot() })
 		}, nil},
+		{"pending spawn plus an idle session to evict, one eviction is not enough", 2, func(r *Router) {
+			injectSession(r, "a", newIdleProc())
+			injectSession(r, "b", newRunningProc())
+			r.ss.Update(func(tx sessTx) { tx.Ext().spawns.AcquireSpawnSlot() })
+		}, ErrMaxProcs},
+		{"an active count below the table, the key's slot freed on top", 2, func(r *Router) {
+			injectSession(r, "a", newRunningProc())
+			injectSession(r, "b", newRunningProc())
+			injectSession(r, key, newRunningProc())
+			r.ss.Update(func(tx sessTx) { tx.AddActive(-1) })
+		}, nil},
 		{"an active count below the table admits", 2, func(r *Router) {
 			injectSession(r, "a", newRunningProc())
 			injectSession(r, "b", newRunningProc())

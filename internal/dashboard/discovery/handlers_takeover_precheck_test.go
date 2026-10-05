@@ -12,10 +12,10 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/discovery"
-	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -96,8 +96,15 @@ func TestHandleTakeover_PrecheckRefusalKeepsCLIAlive(t *testing.T) {
 			if rec.Code != tc.wantCode || !strings.Contains(rec.Body.String(), tc.wantBody) {
 				t.Fatalf("HandleTakeover = %d %q, want %d containing %q", rec.Code, rec.Body.String(), tc.wantCode, tc.wantBody)
 			}
-			if !osutil.PidAlive(pid) {
-				t.Fatal("refused takeover still killed the external CLI")
+			// A zombie still passes kill(pid, 0), so read how the child died:
+			// by this SIGKILL, not by a SIGTERM from the handler.
+			_ = cmd.Process.Kill()
+			st, err := cmd.Process.Wait()
+			if err != nil {
+				t.Fatalf("reap child: %v", err)
+			}
+			if ws, ok := st.Sys().(syscall.WaitStatus); !ok || ws.Signal() != syscall.SIGKILL {
+				t.Fatalf("refused takeover still killed the external CLI: %v", st)
 			}
 			if n := startTimeReads.Load(); n != 0 {
 				t.Fatalf("identity read %d times: the SIGTERM path ran", n)
