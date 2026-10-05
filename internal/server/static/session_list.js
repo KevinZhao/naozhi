@@ -7,7 +7,7 @@ import { sessionStream } from './session_stream.js';
 import { WS_STATES, wsm } from './ws_manager.js';
 import { perSession, selection, serverInfo, sessionList, timers, transcript } from './state.js';
 import { esc, escAttr, fetchJSON, patchCardExitChip, reconcileChildren, sessionExitChipHtml } from './nz_util.js';
-import { setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderSpawnDiagChip } from './session_header.js';
+import { setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderPRChip, setHeaderSpawnDiagChip } from './session_header.js';
 import { deselectNodeSession, reconcileSelectedNode } from './system_view.js';
 import { turnState, updateSendButton } from './running_banner.js';
 import { PENDING_LS_KEY, announce, formatAbsTime, persistPending, renderRecentSessionsPanel, setActiveSessionCard, showAuthModal, timeAgo } from './utilities.js';
@@ -258,6 +258,7 @@ export async function fetchSessions() {
     if (selection.key) setHeaderEffortChip(data.sessions);
     if (selection.key) setHeaderSpawnDiagChip(data.sessions);
     if (selection.key) setHeaderOverlayDriftChip(data.sessions);
+    if (selection.key) setHeaderPRChip(data.sessions);
     const wsConnected = wsm.state === WS_STATES.CONNECTED;
     sessionList.lastETag = got.validator;
     syncHistory((data.stats && data.stats.history_tag) || '');

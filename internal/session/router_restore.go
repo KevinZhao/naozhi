@@ -102,6 +102,7 @@ func (r *Router) restoreSessionFromEntry(tx sessTx, key string, entry *storeEntr
 			s.SetTuningEffort(entry.TuningEffort)
 		}
 	}
+	s.setCodeChanges(restoredCodeChanges(entry.Key, entry.CodeChanges))
 	s.setSessionID(entry.SessionID)
 	if entry.LastActive != 0 {
 		s.lastActive.Store(entry.LastActive)
