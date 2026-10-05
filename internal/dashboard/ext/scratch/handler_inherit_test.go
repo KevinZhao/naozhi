@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -104,6 +105,48 @@ func TestHandleOpen_AccessProfileFollowsSourceNotAgent(t *testing.T) {
 				t.Errorf("BaseOpts.AccessProfile=%q want %q (the source's account, not agent general's)", sc.BaseOpts.AccessProfile, tc.recorded)
 			}
 		})
+	}
+}
+
+// A source that never spawned has no backend and resumes on the router
+// default; its aside must run there too, not on the inherited profile's
+// default_backend, and the response reports that backend.
+func TestHandleOpen_UnspawnedSourceBackendIsRouterDefault(t *testing.T) {
+	r := session.NewRouter(session.RouterConfig{
+		MaxProcs: 3,
+		BackendRuntimes: map[string]session.BackendRuntime{
+			"claude": {Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")},
+			"kiro":   {Wrapper: cli.NewWrapper("/nonexistent/kiro", &cli.ClaudeProtocol{}, "kiro")},
+		},
+		DefaultBackend: "claude",
+		AccessProfiles: map[string]session.AccessProfile{"viakiro": {DefaultBackend: "kiro"}},
+	})
+	const srcKey = "feishu:direct:alice:general"
+	r.InjectSession(srcKey, nil).SetAccessProfile("viakiro")
+	pool := session.NewScratchPool(r, 4, time.Minute)
+	h := New(Deps{Router: sourceRouter{r}, Pool: pool})
+
+	body := strings.NewReader(`{"source_key":"` + srcKey + `","quote":"why?"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.HandleOpen(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp openResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Backend != "claude" {
+		t.Errorf("response backend = %q, want claude (the router default)", resp.Backend)
+	}
+	sc := pool.Get(resp.ScratchID)
+	if sc == nil {
+		t.Fatalf("scratch %q not in pool", resp.ScratchID)
+	}
+	if sc.BaseOpts.Backend != "claude" {
+		t.Errorf("BaseOpts.Backend = %q, want claude", sc.BaseOpts.Backend)
 	}
 }
 

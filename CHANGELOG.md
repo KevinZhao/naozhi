@@ -71,6 +71,7 @@
 - `/urgent` 之后，在它之前已排队的消息现在会拿到自己的真实回答，不再收到"上一条消息已被 /urgent 打断，请在当前任务完成后重发"：真实 CLI 实测（claude 2.1.288）表明 `priority:"now"` 抢占不丢弃队列，紧急消息先跑、排队消息随后各自成轮（`docs/rfc/passthrough-mode-validation.md` V10，#3394）
 - `spawnSession` panic recover 错误消息不再双前缀 `"spawn process: spawn process:"`（RNEW-009）
 - IM 首轮自动接管不再在 naozhi 会拒绝接管时（max_procs 已满 / 该 key 正在 spawn / 正在关停 / planner 的 exempt 配额已满 / agent 的 model 或 backend 非法）先 SIGTERM 掉终端里的 Claude CLI；接管前改为先跑 `Router.TakeoverPrecheck`（#3395）
+- 从未 spawn 过的源会话（历史面板 resume 占位 / backend 为空的旧持久化条目）上打开的 scratch 现在跑在源会话 resume 时会用的 CLI（router 默认 backend）上，不再落到 access profile 的 `default_backend`；`/api/scratch/open` 响应里的 `backend` 也改为报告实际解析出的 backend（#3420）
 
 ### Documentation
 
