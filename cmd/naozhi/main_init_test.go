@@ -264,8 +264,8 @@ func TestStartupDefaultBackendID_MatchesInitBackendWrappers(t *testing.T) {
 			if bws.Default == nil {
 				t.Fatalf("initBackendWrappers bound no default wrapper; runtimes=%v", bws.Runtimes)
 			}
-			if got := startupDefaultBackendID(cfg); got != bws.Default.BackendID {
-				t.Errorf("startupDefaultBackendID = %q, initBackendWrappers default wrapper = %q", got, bws.Default.BackendID)
+			if got := cfg.StartupDefaultBackendID(); got != bws.Default.BackendID {
+				t.Errorf("StartupDefaultBackendID = %q, initBackendWrappers default wrapper = %q", got, bws.Default.BackendID)
 			}
 		})
 	}

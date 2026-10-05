@@ -218,9 +218,9 @@ func TestConfigCheck_ReplacedValuesExit1(t *testing.T) {
 }
 
 // TestConfigCheck_StartupRefusalsAreFatal: an agent_commands entry naming an
-// undefined agent and a dashboard_token under 8 characters are configs the
-// server refuses to run, so `config check` must report them as Fatal (exit 2)
-// rather than OK.
+// undefined agent, a dashboard_token under 8 characters and a config with no
+// registered backend id are configs the server refuses to run, so `config
+// check` must report them as Fatal (exit 2) rather than OK.
 func TestConfigCheck_StartupRefusalsAreFatal(t *testing.T) {
 	cases := []struct {
 		name, body, want string
@@ -229,6 +229,10 @@ func TestConfigCheck_StartupRefusalsAreFatal(t *testing.T) {
 			`agent_commands["/x"] references undefined agent "ghost"`},
 		{"short dashboard token", cleanCheckConfig + "server:\n  dashboard_token: \"short\"\n",
 			"server.dashboard_token is too short"},
+		{"single unknown backend", cleanCheckConfig + "cli:\n  backend: nope\n",
+			"no usable cli backend configured"},
+		{"every listed backend unknown", cleanCheckConfig + "cli:\n  backends:\n    - id: nope\n    - id: nada\n",
+			"no usable cli backend configured"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -247,5 +251,42 @@ func TestConfigCheck_StartupRefusalsAreFatal(t *testing.T) {
 				t.Errorf("fatal = %q, want one entry containing %q", doc.Fatal, tc.want)
 			}
 		})
+	}
+}
+
+// TestConfigCheck_ReportsValidateFindings: what startup logs through
+// cfg.Validate() reaches the report, each finding once — a cli.backend that
+// is not listed (startup silently binds kiro, #3298) and an unknown entry,
+// which the per-backend loop also skips but must not report again.
+func TestConfigCheck_ReportsValidateFindings(t *testing.T) {
+	cfg := cleanCheckConfig + `
+cli:
+  backend: claude
+  backends:
+    - id: kiro
+      path: /nonexistent/kiro
+    - id: definitely-not-a-backend
+      path: /nonexistent/x
+`
+	var out bytes.Buffer
+	code := configCheck([]string{"-json", "-config", writeCheckConfig(t, cfg)}, &out)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; output:\n%s", code, out.String())
+	}
+	var res checkResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out.String())
+	}
+	byKey := map[string][]backendDiag{}
+	for _, d := range res.Diags {
+		byKey[d.Key] = append(byKey[d.Key], d)
+	}
+	def := byKey["cli.backend"]
+	if len(def) != 1 || def[0].Layer != "config-validate" || def[0].Action != "warn" ||
+		!strings.Contains(def[0].Reason, `falls back to "kiro"`) {
+		t.Errorf("cli.backend diags = %+v, want one config-validate warn naming the kiro fallback", def)
+	}
+	if got := byKey["cli.backends[definitely-not-a-backend]"]; len(got) != 1 || got[0].Action != "error" {
+		t.Errorf("unknown entry diags = %+v, want exactly one error", got)
 	}
 }

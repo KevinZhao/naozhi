@@ -16,7 +16,7 @@ func boolPtr(b bool) *bool { return &b }
 // have to infer the cause from per-tick argv failures.
 func TestSysessionBackendDiags(t *testing.T) {
 	t.Parallel()
-	backend.EnsureDefaults() // startupDefaultBackendID consults the registry
+	backend.EnsureDefaults() // StartupDefaultBackendID consults the registry
 	cases := []struct {
 		name      string
 		backend   string

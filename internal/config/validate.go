@@ -29,24 +29,57 @@ type ValidationDiag struct {
 }
 
 // Validate reports non-fatal config mistakes that must not block startup but
-// the operator needs to see — currently cli.backends IDs missing from the
-// backend.Profile registry. MUST be called after backend.RegisterDefaults()
-// or every backend is flagged unknown.
+// the operator needs to see: cli.backends IDs missing from the backend.Profile
+// registry, and a cli.backend that startup cannot bind as the default. MUST be
+// called after backend.RegisterDefaults() or every backend is flagged unknown.
 func (c *Config) Validate() []ValidationDiag {
 	var diags []ValidationDiag
 
-	backends := c.EnabledBackends()
-	for _, b := range backends {
+	// Without an id-bearing cli.backends entry, EnabledBackends synthesises
+	// the single entry from cli.backend, so that is the key to blame.
+	listed := false
+	for _, b := range c.CLI.Backends {
+		listed = listed || b.ID != ""
+	}
+	var usable []string
+	for _, b := range c.EnabledBackends() {
 		if b.ID == "" {
 			// Single-backend fallback placeholder; main resolves it to claude.
 			continue
 		}
-		if _, ok := backend.Get(b.ID); !ok {
+		if _, ok := backend.Get(b.ID); ok {
+			usable = append(usable, b.ID)
+		} else {
+			field, msg := fmt.Sprintf("cli.backends[%s]", b.ID), "unknown backend id; will be skipped at runtime"
+			if !listed {
+				field, msg = "cli.backend", "unknown backend id; startup will refuse to run"
+			}
 			diags = append(diags, ValidationDiag{
 				Level: "error",
-				Field: fmt.Sprintf("cli.backends[%s]", b.ID),
-				Msg:   "unknown backend id; will be skipped at runtime",
+				Field: field,
+				Msg:   msg,
 				Hint:  "valid ids: " + strings.Join(knownBackendIDs(), ", "),
+			})
+		}
+	}
+
+	// An unset cli.backend defaults to the first listed id, so an unknown
+	// first entry moves the default as surely as a wrong cli.backend does.
+	if want := c.DefaultBackendID(); listed {
+		if got := c.StartupDefaultBackendID(); got != want {
+			why, hint := "is not listed in cli.backends", fmt.Sprintf("add a cli.backends entry for %q, or set", want)
+			if _, ok := backend.Get(want); !ok {
+				why, hint = "is not a registered backend id", "set"
+			}
+			subject := fmt.Sprintf("%q", want)
+			if c.CLI.Backend == "" {
+				subject = fmt.Sprintf("unset, and the first cli.backends entry %q", want)
+			}
+			diags = append(diags, ValidationDiag{
+				Level: "warn",
+				Field: "cli.backend",
+				Msg:   fmt.Sprintf("%s %s; startup falls back to %q", subject, why, got),
+				Hint:  hint + " cli.backend to one of: " + strings.Join(usable, ", "),
 			})
 		}
 	}

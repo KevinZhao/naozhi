@@ -23,8 +23,8 @@ import (
 type Diag struct {
 	// Layer names the gate: "argv-denylist" | "argv-validator" | "env-filter" |
 	// "caps" | "config-deprecated" | "config-unknown" | "config-invalid" |
-	// "store-unreadable", plus "access-profile" which only `naozhi config
-	// check` reports.
+	// "store-unreadable", plus "access-profile" and "config-validate" (Action
+	// is the Config.Validate level) which only `naozhi config check` reports.
 	Layer string `json:"layer"`
 	// Key is the configured thing that did not take effect ("--effort",
 	// "session.workspace", "AWS_PROFILE").

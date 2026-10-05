@@ -39,6 +39,8 @@ func TestConfig_Validate(t *testing.T) {
 			// wantContain is matched against each diag (Field+Msg+Hint joined)
 			// for at least one diag. Empty means "no diag content check".
 			wantContain []string
+			// wantLevel, when set, is the Level every diag must carry.
+			wantLevel string
 		}{
 			{
 				// Legacy single-backend (no cli.backends, no cli.backend) —
@@ -120,6 +122,73 @@ func TestConfig_Validate(t *testing.T) {
 				}},
 				wantDiags: 0,
 			},
+			{
+				// cli.backend names a registered backend that is not listed:
+				// startup binds kiro instead (#3298).
+				name: "default_not_listed",
+				cfg: Config{CLI: CLIConfig{
+					Backend:  "claude",
+					Backends: []CLIBackendConfig{{ID: "kiro"}},
+				}},
+				wantDiags:   1,
+				wantContain: []string{"cli.backend | ", "not listed in cli.backends", `falls back to "kiro"`, "kiro"},
+				wantLevel:   "warn",
+			},
+			{
+				// The unregistered cli.backend is no cli.backends entry, so
+				// the per-entry loop has nothing to flag; only this warn does.
+				name: "default_unregistered",
+				cfg: Config{CLI: CLIConfig{
+					Backend:  "nope",
+					Backends: []CLIBackendConfig{{ID: "kiro"}, {ID: "claude"}},
+				}},
+				wantDiags:   1,
+				wantContain: []string{"cli.backend | ", "not a registered backend id", `falls back to "kiro"`, "kiro, claude"},
+				wantLevel:   "warn",
+			},
+			{
+				name: "default_listed_second",
+				cfg: Config{CLI: CLIConfig{
+					Backend:  "claude",
+					Backends: []CLIBackendConfig{{ID: "kiro"}, {ID: "claude"}},
+				}},
+				wantDiags: 0,
+			},
+			{
+				// Single-backend mode: the synthesised entry comes from
+				// cli.backend, so the error names that key, not cli.backends.
+				name:        "single_backend_unknown",
+				cfg:         Config{CLI: CLIConfig{Backend: "nope"}},
+				wantDiags:   1,
+				wantContain: []string{"cli.backend | ", "refuse to run"},
+				wantLevel:   "error",
+			},
+			{
+				// Entries without an id are single-backend mode too, so the
+				// error still names cli.backend, not cli.backends[nope].
+				name: "single_backend_unknown_empty_id_entries",
+				cfg: Config{CLI: CLIConfig{
+					Backend:  "nope",
+					Backends: []CLIBackendConfig{{ID: ""}},
+				}},
+				wantDiags:   1,
+				wantContain: []string{"cli.backend | ", "refuse to run"},
+				wantLevel:   "error",
+			},
+			{
+				// No cli.backend: the default is the first entry, unknown
+				// here, so startup binds kiro. The entry error alone does not
+				// say the default moved.
+				name: "implicit_default_unregistered",
+				cfg: Config{CLI: CLIConfig{
+					Backends: []CLIBackendConfig{{ID: "nope"}, {ID: "kiro"}},
+				}},
+				wantDiags: 2,
+				wantContain: []string{
+					"cli.backends[nope] | unknown backend id",
+					`cli.backend | unset, and the first cli.backends entry "nope" is not a registered backend id; startup falls back to "kiro"`,
+				},
+			},
 		}
 
 		for _, tt := range tests {
@@ -151,6 +220,9 @@ func TestConfig_Validate(t *testing.T) {
 					}
 					if d.Level != "warn" && d.Level != "error" {
 						t.Errorf("diag.Level = %q, want warn|error", d.Level)
+					}
+					if tt.wantLevel != "" && d.Level != tt.wantLevel {
+						t.Errorf("diag.Level = %q, want %q", d.Level, tt.wantLevel)
 					}
 				}
 			})
