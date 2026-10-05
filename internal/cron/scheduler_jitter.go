@@ -62,17 +62,13 @@ func jitterWindow(period, jitterMax time.Duration) time.Duration {
 // that respects ctx.
 func jitterSleep(ctx context.Context, period, jitterMax time.Duration) {
 	window := jitterWindow(period, jitterMax)
+	// mrand.Int64N panics on n <= 0; a buggy custom Schedule with
+	// non-monotonic Next could clamp period to a non-positive value, so guard
+	// rather than fall into robfig/cron's recover path.
 	if window <= 0 {
 		return
 	}
-	// mrand.Int64N panics on n <= 0; a buggy custom Schedule with
-	// non-monotonic Next could clamp period to a non-positive int64, so guard
-	// rather than fall into robfig/cron's recover path.
-	n := int64(window)
-	if n <= 0 {
-		return
-	}
-	d := time.Duration(mrand.Int64N(n))
+	d := time.Duration(mrand.Int64N(int64(window)))
 	if d <= 0 {
 		return
 	}
