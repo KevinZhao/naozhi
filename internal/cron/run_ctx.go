@@ -44,6 +44,10 @@ type runCtx struct {
 	notifyTo NotifyTarget
 	// key is the router session key (`cron:<jobID>`).
 	key string
+	// backend is the backend the run's session runs on, set once the session
+	// is obtained; "" before that and on sandbox runs, where the ledger falls
+	// back to snap.backend.
+	backend string
 	// runID pairs the terminal event with the started event already broadcast;
 	// the dashboard hub matches started→ended frames on it.
 	runID string

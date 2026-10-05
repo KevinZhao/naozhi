@@ -9,7 +9,8 @@ import (
 // appendLedger writes the run's cost entries: a sandbox run contributes its
 // receipt, a local run the session-side increment (one USD row with the
 // per-model drill-down plus one row per backend metering unit). cron is the
-// run owner for both, so the session layer does not also write them.
+// run owner for both, so the session layer does not also write them. Rows
+// carry the backend the session ran on, else the job's own, else "claude".
 func (s *Scheduler) appendLedger(rc runCtx, out runOutcome) {
 	if s.ledger == nil || !s.ledger.Enabled() {
 		return
@@ -18,7 +19,10 @@ func (s *Scheduler) appendLedger(rc runCtx, out runOutcome) {
 		JobID:     rc.jobID,
 		RunID:     rc.runID,
 		Workspace: workspaceLabel(rc.snap.workDir),
-		Backend:   rc.snap.backend,
+		Backend:   rc.backend,
+	}
+	if base.Backend == "" {
+		base.Backend = rc.snap.backend
 	}
 	if base.Backend == "" {
 		base.Backend = "claude"
@@ -47,6 +51,18 @@ func (s *Scheduler) appendLedger(rc runCtx, out runOutcome) {
 		e.Source, e.Kind, e.Unit, e.Amount = costledger.SourceCronLocal, costledger.KindMetering, u, v
 		s.ledger.Append(e)
 	}
+}
+
+// effectiveBackend is the backend a local run's session runs on: what the
+// session reports, else the resolved spawn option (job override or agent
+// default). "" leaves the choice to appendLedger's fallbacks.
+func effectiveBackend(opts AgentOpts, sess Session) string {
+	if br, ok := sess.(BackendReporter); ok {
+		if b := br.Backend(); b != "" {
+			return b
+		}
+	}
+	return opts.Backend
 }
 
 // workspaceLabel keeps only the directory name so ledger rows carry no

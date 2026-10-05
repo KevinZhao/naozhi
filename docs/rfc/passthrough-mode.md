@@ -188,8 +188,9 @@ func (p *Process) SendWithPriority(ctx context.Context, text string, images []Im
         // 原因：如果移除，CLI 的第 K 个 result 本该给 slot K，
         //       移除后 pop 会给到 K+1，破坏 FIFO 对齐。
         // 做法：标记 canceled=true；replay/result 事件仍会匹配它，
-        //       但 fan-out 时发现 canceled 就丢弃这份 result（内部 drop），
+        //       但 fan-out 时发现 canceled 就不投递这份 result，
         //       不会把过期的 result 返回给已经退出的 Send。
+        //       head 的 result 改经 onUnownedResult 记账而非丢弃（#3322）。
         p.slotsMu.Lock()
         slot.canceled = true
         p.slotsMu.Unlock()
@@ -663,7 +664,8 @@ func fanoutResult(owners []*sendSlot, ev Event) {
 }
 
 func deliverToSlot(s *sendSlot, r *SendResult) {
-    // Canceled slot: drop result，避免向已离开的 Send 发
+    // Canceled slot: 不投递，避免向已离开的 Send 发；head 的 result
+    // 由 fan-out 经 onUnownedResult 记账（#3322）
     // canceled 需要在 slotsMu 下读，但本函数已在 slotsMu 外运行 → 重读一次
     if s.isCanceled() {
         return

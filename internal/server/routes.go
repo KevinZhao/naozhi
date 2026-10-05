@@ -38,11 +38,6 @@ func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 // errEmptyJSONBody re-exports httputil.ErrEmptyJSONBody for errors.Is call sites.
 var errEmptyJSONBody = httputil.ErrEmptyJSONBody
 
-// registerDashboard registers the dashboard's routes. Construction moved to
-// buildDashboard in #2552 and the goroutine starts moved to
-// startDashboardLoops in #2553, so this function is registration only —
-// nothing here may build a dependency or start a goroutine. That is what lets
-// buildServer call it with a local handlerSet that then goes out of scope.
 // startDashboardLoops starts the dashboard's background goroutines. Separate
 // from registerDashboard since #2553: registration runs at construction (so the
 // handlerSet can be a local), but a goroutine started at construction would
@@ -58,6 +53,11 @@ func (s *Server) startDashboardLoops() {
 	}
 }
 
+// registerDashboard registers the dashboard's routes. Construction moved to
+// buildDashboard in #2552 and the goroutine starts moved to
+// startDashboardLoops in #2553, so this function is registration only —
+// nothing here may build a dependency or start a goroutine. That is what lets
+// buildServer call it with a local handlerSet that then goes out of scope.
 func (s *Server) registerDashboard(hs *handlerSet) {
 	// Authenticated API routes. Every dashboard sub-package declares its own
 	// patterns (its routes.go) and mountRoutes applies the API chain, so this

@@ -25,6 +25,9 @@ func IsAtomicTempName(name string) bool {
 	return strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".tmp")
 }
 
+// syncDirFn indirects the directory fsync so tests can inject a failure.
+var syncDirFn = SyncDir
+
 // WriteFileAtomic writes data to path via write-tmp → fsync → close → rename.
 // The temp file is created in path's directory with mode perm and removed on
 // any failure; errors are wrapped with the path. The parent directory is
@@ -34,9 +37,6 @@ func IsAtomicTempName(name string) bool {
 //
 // Callers own mkdir of the parent directory. os.CreateTemp makes concurrent
 // calls on the same destination safe without a caller mutex.
-// syncDirFn indirects the directory fsync so tests can inject a failure.
-var syncDirFn = SyncDir
-
 func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
