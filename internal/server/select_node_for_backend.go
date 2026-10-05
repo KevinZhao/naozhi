@@ -13,6 +13,7 @@ import (
 	"github.com/naozhi/naozhi/internal/backendid"
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // maxBackendIDLen / isValidBackendID alias the shared backendid leaf package
@@ -89,6 +90,12 @@ func selectNodeForBackend(lookup nodeLookup, targetNode, backendID string) (node
 // wrong account; fail loud instead (RFC project-access-profile §4.5).
 var ErrAccessProfileRemote = errors.New("access-profile session cannot be dispatched to a remote node (local-dispatch only)")
 
+// ErrLocalOnlySession is returned when a scratch: key is dispatched to a
+// remote node. A scratch session exists only in the pool of the host that
+// opened it, and its inherited access profile is invisible to the
+// KeyResolver, so the profile gate below cannot vet it.
+var ErrLocalOnlySession = errors.New("scratch sessions are local-only")
+
 // accessProfileResolver is the minimal surface the remote-dispatch gate needs:
 // resolve a session key to its access-profile ID. *session.KeyResolver
 // satisfies it via AccessProfileForKey.
@@ -96,12 +103,19 @@ type accessProfileResolver interface {
 	AccessProfileForKey(key string) string
 }
 
-// gateRemoteAccessProfile refuses remote dispatch for a key whose session
-// resolves to a non-default access profile. targetNode == "" / "local" is
-// always allowed (local dispatch is where the overlay works). A nil resolver
-// (test harnesses without project wiring) or an empty profile is a no-op.
+// gateRemoteAccessProfile refuses remote dispatch for a scratch: key and for
+// a key whose session resolves to a non-default access profile. targetNode ==
+// "" / "local" is always allowed (local dispatch is where the overlay works).
+// The scratch refusal needs no resolver; otherwise a nil resolver (test
+// harnesses without project wiring) or an empty profile is a no-op.
 func gateRemoteAccessProfile(resolver accessProfileResolver, targetNode, key string) error {
-	if targetNode == "" || targetNode == "local" || resolver == nil {
+	if targetNode == "" || targetNode == "local" {
+		return nil
+	}
+	if sessionkey.IsScratchKey(key) {
+		return fmt.Errorf("%w: node %q", ErrLocalOnlySession, targetNode)
+	}
+	if resolver == nil {
 		return nil
 	}
 	if ap := resolver.AccessProfileForKey(key); ap != "" {

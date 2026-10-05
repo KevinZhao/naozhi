@@ -198,10 +198,10 @@ func (e *sendEngine) remoteSend(nc node.Conn, nodeID, key, text, workspace strin
 	return true
 }
 
-// gateRemoteAccess refuses remote dispatch for a key whose session resolves to
-// a non-default access profile; the env overlay is host-local and never
-// crosses the wire (RFC project-access-profile P1-a). Thin over
-// gateRemoteAccessProfile so the handler does not need the resolver.
+// gateRemoteAccess refuses remote dispatch for a scratch: key or a key whose
+// session resolves to a non-default access profile; the env overlay is
+// host-local and never crosses the wire (RFC project-access-profile P1-a).
+// Thin over gateRemoteAccessProfile so the handler needs no resolver.
 func (e *sendEngine) gateRemoteAccess(targetNode, key string) error {
 	return gateRemoteAccessProfile(e.resolver, targetNode, key)
 }
