@@ -297,11 +297,11 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 	})
 	sessionH.InitStaticStats()
 	sessionH.WarmHistoryCache()
-	// Router.Reset/Remove hook (LRU eviction deliberately does not fire it),
-	// registered once AFTER sessionH exists so the fan-out is never half-wired
-	// while WarmHistoryCache runs: turns.Retire frees the per-session FIFO and
-	// tells its queued senders; RecordRetired stamps the session and makes it
-	// visible to the history popover within one poll.
+	// Router.Reset/Remove hook, fired on the caller's goroutine as the key
+	// leaves the table (LRU eviction does not), registered once sessionH exists
+	// so the fan-out is never half-wired during WarmHistoryCache: turns.Retire
+	// frees the FIFO and tells its senders off-goroutine; RecordRetired stamps
+	// the session and makes it visible to the history popover within one poll.
 	if opts.Relays.Router != nil {
 		retire, appCtx := w.turns.Retire, s.appCtx
 		opts.Relays.Router.BindKeyRetired(func(key, sessionID string) {
