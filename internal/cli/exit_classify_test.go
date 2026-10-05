@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 const settingsMissingWarning = "claude: warning: failed to merge user --settings: failed to read /nonexistent/s.json: No such file or directory (os error 2); applying managed settings only"
@@ -100,7 +101,11 @@ func TestSend_ExitErrorCarriesStderrClass(t *testing.T) {
 			wantTyped: true, wantClass: clierr.ExitResumeNotFound, wantDetail: "No conversation found with session ID: abc"},
 		// The real CLI writes an error result to stdout before it exits on a
 		// stale --resume id; that result is the failure, not output.
-		{name: "startup failure as claude reports it", passthrough: true, frames: []string{
+		{name: "startup failure as claude reports it, passthrough", passthrough: true, frames: []string{
+			stdoutFrame(1, startupRejectResult),
+			`{"type":"cli_exited","code":1,"stderr_tail":["` + settingsMissingWarning + `","No conversation found with session ID: abc"]}`,
+		}, wantTyped: true, wantClass: clierr.ExitResumeNotFound, wantDetail: "No conversation found with session ID: abc"},
+		{name: "startup failure as claude reports it, legacy send", frames: []string{
 			stdoutFrame(1, startupRejectResult),
 			`{"type":"cli_exited","code":1,"stderr_tail":["` + settingsMissingWarning + `","No conversation found with session ID: abc"]}`,
 		}, wantTyped: true, wantClass: clierr.ExitResumeNotFound, wantDetail: "No conversation found with session ID: abc"},
@@ -178,6 +183,69 @@ const startupRejectResult = `{"type":"result","subtype":"error_during_execution"
 func stdoutFrame(seq int, line string) string {
 	b, _ := json.Marshal(map[string]any{"type": "stdout", "seq": seq, "line": line})
 	return string(b)
+}
+
+// A legacy Send returns claude's startup-reject result itself when no
+// startup-failure exit follows it, and at once when it is no startup reject.
+func TestSend_StartupRejectResultWithoutStartupExit(t *testing.T) {
+	cases := []struct {
+		name        string
+		grace       time.Duration
+		abort       bool
+		frames      []string
+		wantAborted bool
+	}{
+		{name: "no exit within the grace", grace: 50 * time.Millisecond,
+			frames: []string{stdoutFrame(1, startupRejectResult)}},
+		{name: "clean exit", grace: time.Minute, frames: []string{
+			stdoutFrame(1, startupRejectResult),
+			`{"type":"cli_exited","code":0,"stderr_tail":["No conversation found with session ID: abc"]}`,
+		}},
+		{name: "after init", grace: time.Minute, frames: []string{
+			stdoutFrame(1, `{"type":"system","subtype":"init","session_id":"abc"}`),
+			stdoutFrame(2, startupRejectResult),
+		}},
+		{name: "aborted", grace: time.Minute, abort: true,
+			frames: []string{stdoutFrame(1, startupRejectResult)}, wantAborted: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := startupExitGrace
+			startupExitGrace = tc.grace
+			t.Cleanup(func() { startupExitGrace = prev })
+			sh := newPassthroughShim(t)
+			defer sh.close()
+			go sh.proc.readLoop()
+
+			type sent struct {
+				sr  *clievent.SendResult
+				err error
+			}
+			done := make(chan sent, 1)
+			go func() {
+				sr, err := sh.proc.Send(context.Background(), "hi", nil, nil)
+				done <- sent{sr, err}
+			}()
+			_ = sh.expectWrite(t, 2*time.Second)
+			if tc.abort {
+				sh.proc.turn.abortRequested.arm()
+			}
+			for _, f := range tc.frames {
+				sh.srv.SendFrame(f)
+			}
+			select {
+			case got := <-done:
+				if got.err != nil || got.sr == nil {
+					t.Fatalf("Send = (%v, %v), want the result", got.sr, got.err)
+				}
+				if got.sr.SubType != "error_during_execution" || !got.sr.IsError || got.sr.Aborted != tc.wantAborted {
+					t.Errorf("Send result = %+v, want the error_during_execution result, aborted=%v", *got.sr, tc.wantAborted)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("Send did not return the result")
+			}
+		})
+	}
 }
 
 // An error_during_execution result after the CLI is running, with no
