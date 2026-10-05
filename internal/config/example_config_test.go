@@ -328,4 +328,16 @@ func TestExampleConfig_AccessProfilesExampleIsValid(t *testing.T) {
 	if err := envpolicy.ValidateOverlayEntry("AWS_PROFILE", "default"); err == nil {
 		t.Error("AWS_PROFILE is accepted in an access-profile env; the template says it fails the load")
 	}
+	// Every key the allowlist prose names must be overlay-allowed.
+	prose := strings.Join(strings.Fields(strings.ReplaceAll(src, "\n#", " ")), " ")
+	_, list, ok := strings.Cut(prose, "Only the overlay allowlist is accepted: ")
+	list, _, ok2 := strings.Cut(list, " and the Anthropic credentials.")
+	if !ok || !ok2 {
+		t.Fatal("config.example.yaml lost the overlay allowlist sentence")
+	}
+	for _, k := range strings.Split(list, ", ") {
+		if _, allowed := envpolicy.Allowed(k, envpolicy.SourceOverlay); !allowed {
+			t.Errorf("template names %q in the overlay allowlist; the overlay refuses it", k)
+		}
+	}
 }
