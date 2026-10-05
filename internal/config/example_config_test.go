@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cliinfo"
+	"github.com/naozhi/naozhi/internal/envpolicy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -244,5 +246,86 @@ func TestExampleConfig_RunnerModelHaiku(t *testing.T) {
 	}
 	if model.Value != "haiku" {
 		t.Errorf("sysession.runner.model = %q, want haiku", model.Value)
+	}
+}
+
+// uncommentExampleBlock returns the commented-out YAML that starts at the line
+// "<indent>#<key>:" in src, with the one '#' after the indent removed. The
+// block runs until a line that is not "<indent>#" plus text.
+func uncommentExampleBlock(t *testing.T, src, key string) string {
+	t.Helper()
+	lines := strings.Split(src, "\n")
+	for i, l := range lines {
+		trimmed := strings.TrimLeft(l, " ")
+		if !strings.HasPrefix(trimmed, "#"+key+":") {
+			continue
+		}
+		prefix := l[:len(l)-len(trimmed)] + "#"
+		var out []string
+		for _, b := range lines[i:] {
+			if !strings.HasPrefix(b, prefix) || len(b) == len(prefix) {
+				break
+			}
+			out = append(out, l[:len(l)-len(trimmed)]+b[len(prefix):])
+		}
+		return strings.Join(out, "\n") + "\n"
+	}
+	t.Fatalf("config.example.yaml has no commented %q block", key)
+	return ""
+}
+
+// TestExampleConfig_AccessProfilesExampleIsValid: the template's commented
+// access_profiles block, the multi-backend cli block and the researcher pins,
+// uncommented together, must decode with no unknown key and pass the load-time
+// access-profile checks, so an operator who uncomments them gets a config
+// that loads.
+func TestExampleConfig_AccessProfilesExampleIsValid(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "config.example.yaml"))
+	if err != nil {
+		t.Fatalf("read config.example.yaml: %v", err)
+	}
+	src := string(data)
+	doc := uncommentExampleBlock(t, src, "default_access_profile") +
+		"cli:\n" + uncommentExampleBlock(t, src, "backend") +
+		"agents:\n  researcher:\n" + uncommentExampleBlock(t, src, "access_profile")
+
+	var cfg Config
+	dec := yaml.NewDecoder(strings.NewReader(doc))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil {
+		t.Fatalf("decode uncommented example:\n%s\nerr: %v", doc, err)
+	}
+	withRegisteredBackends(t, func() {
+		if err := validateAccessProfiles(&cfg); err != nil {
+			t.Fatalf("validateAccessProfiles: %v", err)
+		}
+		var withEnv, withModel, withBackend bool
+		for name, ap := range cfg.AccessProfiles {
+			withEnv = withEnv || len(ap.Env) > 0
+			withModel = withModel || ap.DefaultModel != ""
+			if ap.DefaultBackend != "" {
+				withBackend = true
+				if _, ok := backend.Get(ap.DefaultBackend); !ok {
+					t.Errorf("access_profiles[%s].default_backend %q is not a registered backend", name, ap.DefaultBackend)
+				}
+			}
+		}
+		if !withEnv || !withModel || !withBackend {
+			t.Errorf("example profiles must show env (%v), default_model (%v) and default_backend (%v)", withEnv, withModel, withBackend)
+		}
+		if cfg.DefaultAccessProfile == "" {
+			t.Error("example does not show default_access_profile")
+		}
+		r := cfg.Agents["researcher"]
+		if r.AccessProfile == "" || r.Backend == "" {
+			t.Errorf("researcher example pins access_profile %q backend %q; want both", r.AccessProfile, r.Backend)
+		}
+		if _, ok := backend.Get(r.Backend); !ok {
+			t.Errorf("researcher backend %q is not a registered backend", r.Backend)
+		}
+	})
+	// The template says AWS_PROFILE is refused in a profile's env.
+	if err := envpolicy.ValidateOverlayEntry("AWS_PROFILE", "default"); err == nil {
+		t.Error("AWS_PROFILE is accepted in an access-profile env; the template says it fails the load")
 	}
 }
