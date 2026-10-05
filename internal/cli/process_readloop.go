@@ -577,7 +577,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 					owner.onEvent(ev)
 				}
 			}
-			fanoutTurnResult(owners, ev)
+			p.fanoutTurnResult(owners, ev)
 			return false
 		}
 		// No owner claimed this result, aborted or not: fall through so the

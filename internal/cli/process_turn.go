@@ -327,13 +327,17 @@ func sanitizeStderrLine(line string) string {
 // through again harmlessly (the session books cumulative differences). One
 // such result is still lost if the process dies before the next Send drains.
 func (p *Process) bookDroppedResult(ev clievent.Event) {
-	if ev.Type != "result" {
-		return
+	if ev.Type == "result" {
+		p.bookUnclaimed(resultFromEvent(ev))
 	}
+}
+
+// bookUnclaimed hands res, a result no caller will read, to onUnownedResult.
+func (p *Process) bookUnclaimed(res clievent.SendResult) {
 	p.turn.mu.RLock()
 	fn := p.turn.onUnownedResult
 	p.turn.mu.RUnlock()
 	if fn != nil {
-		fn(resultFromEvent(ev))
+		fn(res)
 	}
 }
