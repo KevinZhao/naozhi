@@ -96,6 +96,24 @@ var workflowIdentityFields = map[string]bool{
 	"type": true, "index": true, "phaseIndex": true, "agentId": true, "state": true,
 }
 
+// workflowItemIdentity decodes only the identity fields of an item.
+type workflowItemIdentity struct {
+	Type       string `json:"type"`
+	Index      int    `json:"index"`
+	PhaseIndex int    `json:"phaseIndex"`
+	AgentID    string `json:"agentId"`
+	State      string `json:"state"`
+}
+
+// WorkflowIdentityDecodes reports whether every item of a raw
+// workflow_progress array decodes its identity fields without a type error.
+// A Partial grade rests on the first error only; this finds an identity
+// error behind it (e.g. a numeric agentId after a numeric label).
+func WorkflowIdentityDecodes(raw []byte) bool {
+	var ids []workflowItemIdentity
+	return json.Unmarshal(raw, &ids) == nil
+}
+
 // WorkflowDecodeFromError classifies a json.Unmarshal error of a frame whose
 // Event declares WorkflowProgress. ok is false when the error is not a type
 // error under workflow_progress, i.e. the frame is as broken as before the

@@ -90,6 +90,25 @@ func TestWorkflowItemsValid(t *testing.T) { // not parallel: AllocsPerRun
 	}
 }
 
+func TestWorkflowIdentityDecodes(t *testing.T) {
+	t.Parallel()
+	for raw, want := range map[string]bool{
+		`[]`: true,
+		`[{"type":"workflow_agent","index":1,"label":5,"tokens":"x","error":{}}]`: true,
+		`[{"type":"workflow_agent","index":1},null]`:                              true,
+		`[{"type":5}]`:         false,
+		`[{"index":"1"}]`:      false,
+		`[{"phaseIndex":"1"}]`: false,
+		`[{"agentId":7}]`:      false,
+		`[{"state":2}]`:        false,
+		`[{"label":5},1]`:      false,
+	} {
+		if got := WorkflowIdentityDecodes([]byte(raw)); got != want {
+			t.Errorf("WorkflowIdentityDecodes(%s) = %v, want %v", raw, got, want)
+		}
+	}
+}
+
 func TestWorkflowDecodeString(t *testing.T) {
 	t.Parallel()
 	for d, want := range map[WorkflowDecode]string{

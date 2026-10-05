@@ -191,6 +191,11 @@ func TestReadEvent_WorkflowDecodeTolerance(t *testing.T) {
 		// encoding/json reports only the first error: the tokens error hides
 		// the index one, so the identity re-check must catch it.
 		{"identity error behind a partial one", snapshotFrame(`[{"type":"workflow_agent","index":1,"tokens":"x"},{"type":"workflow_agent","index":"3"}]`, ""), false, -1, failed},
+		// The same, with an identity field WorkflowItemsValid cannot see:
+		// a zeroed agentId, state or phaseIndex looks legitimate.
+		{"agentId error behind a partial one", snapshotFrame(`[{"type":"workflow_agent","index":1,"label":5,"agentId":7}]`, ""), false, -1, failed},
+		{"state error behind a partial one", snapshotFrame(`[{"type":"workflow_agent","index":1,"tokens":"x"},{"type":"workflow_agent","index":2,"state":2}]`, ""), false, -1, failed},
+		{"phaseIndex error behind a partial one", snapshotFrame(`[{"type":"workflow_agent","index":1,"label":5,"phaseIndex":"1"}]`, ""), false, -1, failed},
 		{"null item", snapshotFrame(`[{"type":"workflow_agent","index":1},null]`, ""), false, -1, failed},
 		{"duplicate agent index", snapshotFrame(`[{"type":"workflow_agent","index":1},{"type":"workflow_agent","index":1}]`, ""), false, -1, failed},
 		// A type error outside the snapshot rejects the frame in either key

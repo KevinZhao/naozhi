@@ -930,6 +930,9 @@ type WorkflowDecode uint8 // WorkflowDecodeOK | WorkflowDecodePartial | Workflow
      不过即置 nil + Failed，Event 上不会出现不合格的快照；两类 index 都升序时零分配）：每项 `Type` 非空；`workflow_agent` 的 `Index ≥ 1` 且互不重复
      （CC 的 index 从 1 起连续编号，实测 309 项为 1..309）；`workflow_phase` 的 `Index` 互不重复。不通过即降为 Failed。
      （这项校验对 OK 帧同样执行，代价可忽略。）
+     这项语义校验看不见被遮住的 `agentId` / `state` / `phaseIndex` 类型错（置零后的 `""` / `0` 也是合法值，如
+     `{"label":5,"agentId":7}` 只报 label）。所以 Partial 帧另把规则 5 第二遍拿到的 workflow_progress 原始字节解进只含
+     五个身份字段的切片（`clievent.WorkflowIdentityDecodes`），出错即降为 Failed；只在出错路径上发生。
 4. 其他错误（语法错、类型错不在 workflow_progress 下）→ 维持今天的行为（返回 err）。
 5. **被遮住的其他字段错误**：同样因为只报第一个错误，`{"workflow_progress":[{"tokens":"x"}],"status":5}` 只报
    `workflow_progress.0.tokens`，`Status` 被静默置空；键序反过来则报 `status`、按规则 4 返回 err——是否拒收取决于键序。
@@ -1416,6 +1419,9 @@ Tracker 当前版、CoW 期间的旧版、board 盖过 Rev 的上一发布版（
 规则：只认 `index` / `phaseIndex` / `agentId` 做身份，不以 title 做键；所有字段视为可选；
 只有 `WorkflowProgress != nil && WorkflowDecode != Failed` 才替换 agent 行（键缺失或 `null` 不
 清空；身份类错误按 Failed，§4.1.1）；未知 status/state 透传原值不报错（截 32 runes）。
+类型容错只覆盖 `workflow_progress`：Event 新声明的顶层键 `summary` / `patch` / `subagent_type` / `workflow_name` 与既有字段一样
+严格，任一帧里类型变了都按规则 4 整帧丢弃（日志 `skip unparseable event`）。CC 2.1.288 的 stdout 帧构造里这四个键类型一致，
+故不另加容错；CC 升级刷新 fixture 时一并核对。
 
 ### 5.8 Session 层：Board、快照、持久化、保活
 

@@ -526,7 +526,8 @@ func (p *ClaudeProtocol) ReadEventInto(line string, buf []clievent.Event) ([]cli
 // the frame is kept with the snapshot graded Partial or Failed. Because
 // encoding/json reports only its first type error, a tolerated one is followed
 // by a second pass with workflow_progress shadowed as raw bytes, so an error
-// elsewhere in the frame is still returned whatever the key order.
+// elsewhere in the frame is still returned whatever the key order, and a
+// Partial snapshot's identity fields are re-decoded from those bytes.
 func decodeClaudeEvent(data []byte, ev *clievent.Event) error {
 	if err := json.Unmarshal(data, ev); err != nil {
 		grade, ok := clievent.WorkflowDecodeFromError(err)
@@ -540,6 +541,10 @@ func decodeClaudeEvent(data []byte, ev *clievent.Event) error {
 		var shadow eventWorkflowShadowed
 		if err := json.Unmarshal(data, &shadow); err != nil {
 			return err
+		}
+		if grade == clievent.WorkflowDecodePartial &&
+			!clievent.WorkflowIdentityDecodes(shadow.WorkflowProgress) {
+			items, grade = nil, clievent.WorkflowDecodeFailed
 		}
 		*ev = shadow.Event
 		ev.WorkflowProgress, ev.WorkflowDecode = items, grade
