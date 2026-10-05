@@ -332,7 +332,7 @@ func TestLogProfileDefaultBackends_Levels(t *testing.T) {
 	logProfileDefaultBackends(cfg, "claude")
 
 	type line struct {
-		Level, Msg, DefaultBackend, RouterDefault string
+		Level, Msg, DefaultBackend, RouterDefault, Scope string
 	}
 	var got []line
 	for _, raw := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
@@ -341,6 +341,7 @@ func TestLogProfileDefaultBackends_Levels(t *testing.T) {
 			Msg            string `json:"msg"`
 			DefaultBackend string `json:"default_backend"`
 			RouterDefault  string `json:"router_default"`
+			Scope          string `json:"scope"`
 		}
 		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
 			t.Fatalf("unmarshal %q: %v", raw, err)
@@ -348,11 +349,13 @@ func TestLogProfileDefaultBackends_Levels(t *testing.T) {
 		if !strings.HasPrefix(rec.Msg, "access_profiles[") {
 			continue // another goroutine's line
 		}
-		got = append(got, line{rec.Level, rec.Msg, rec.DefaultBackend, rec.RouterDefault})
+		got = append(got, line{rec.Level, rec.Msg, rec.DefaultBackend, rec.RouterDefault, rec.Scope})
 	}
 	want := []line{
-		{"INFO", "access_profiles[team].default_backend applies to new sessions under this profile", "codex", "claude"},
-		{"WARN", "access_profiles[viakiro].default_backend applies to every new session (it is default_access_profile)", "kiro", "claude"},
+		{"INFO", "access_profiles[team].default_backend applies to new sessions under this profile", "codex", "claude",
+			"new sessions on keys resolved to this profile"},
+		{"WARN", "access_profiles[viakiro].default_backend applies to every new session with no other access profile (it is default_access_profile)", "kiro", "claude",
+			"new sessions with no other access_profile and no agent, project or dashboard backend pin"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("log lines:\n got %+v\nwant %+v\nraw=%s", got, want, buf.String())

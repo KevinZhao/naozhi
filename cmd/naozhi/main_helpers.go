@@ -462,14 +462,15 @@ func profileDefaultBackendNotices(profiles map[string]config.AccessProfile, defa
 
 // logProfileDefaultBackends tells the operator at boot which access profiles
 // route new sessions off the router default. It is a Warn for
-// default_access_profile, which reaches every new session without a pin.
+// default_access_profile, which reaches every new session that resolves to no
+// other profile and has no backend pin.
 func logProfileDefaultBackends(cfg *config.Config, routerDefault string) {
 	const hint = "existing sessions keep their recorded backend; agents[].backend and a project backend override it; see `naozhi config check --effective`"
 	for _, n := range profileDefaultBackendNotices(cfg.AccessProfiles, cfg.DefaultAccessProfile, routerDefault) {
 		if n.IsDefault {
-			slog.Warn("access_profiles["+n.Profile+"].default_backend applies to every new session (it is default_access_profile)",
+			slog.Warn("access_profiles["+n.Profile+"].default_backend applies to every new session with no other access profile (it is default_access_profile)",
 				"default_backend", n.DefaultBackend, "router_default", n.RouterDefault,
-				"scope", "all new sessions without an agent, project or dashboard backend pin", "hint", hint)
+				"scope", "new sessions with no other access_profile and no agent, project or dashboard backend pin", "hint", hint)
 			continue
 		}
 		slog.Info("access_profiles["+n.Profile+"].default_backend applies to new sessions under this profile",
