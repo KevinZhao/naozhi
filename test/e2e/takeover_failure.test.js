@@ -3,11 +3,12 @@
 // A takeover accepted with 202 can still fail in the background, after the
 // external CLI was terminated. A local takeover's 202 carries a takeover_id;
 // the composer polls GET /api/discovered/takeover/status alongside the session
-// list and stops at the first "failed", naming the cause; in_progress (another
-// attempt holds the key and may still produce the session) keeps polling. The
-// poll is bounded by a 10s deadline however slow its reads are. Without a
-// takeover_id (a remote node, an older build) it keeps the session-list poll
-// and its timeout says the external CLI is gone.
+// list, sends only once that status says ready and the key is listed, and stops
+// at the first "failed" of any class, naming the cause. A session another actor
+// put on the key is never sent into. An expired outcome ("unknown") falls back
+// to the key being listed. The poll is bounded by a 10s deadline however slow
+// its reads are. Without a takeover_id (a remote node, an older build) it keeps
+// the session-list poll and its timeout says the external CLI is gone.
 //
 // 跑法：cd test/e2e && npx playwright test takeover_failure.test.js --project=desktop-chrome
 
@@ -90,39 +91,78 @@ for (const c of [
   });
 }
 
-// in_progress: a competing attempt for the same key may still produce the
-// session, so the poll goes on and sends once that session is listed.
-test('an in_progress failure keeps polling and sends once the competing session is listed', async ({ page }) => {
-  const key = 'local:takeover:bgproj';
-  const calls = await routeTakeover(page, { status: 'accepted', key, takeover_id: TAKEOVER_ID },
-    { state: 'failed', class: 'in_progress' });
+/**
+ * Lists `key` on `node` in every /api/sessions answer once `when()` is true.
+ * @param {import('@playwright/test').Page} page
+ * @param {string} key
+ * @param {() => boolean} when
+ * @param {string} [node]
+ */
+async function listKeyWhen(page, key, when, node = 'local') {
   await page.route((url) => url.pathname === '/api/sessions', async (route) => {
     const res = await route.fetch();
     const body = await res.json();
-    if (calls.status >= 3) {
+    if (when()) {
       body.sessions = [...(body.sessions || []), { key, state: 'ready', platform: 'dashboard', agent: 'general', cli_name: 'claude',
-        workspace: '/home/user/workspace/bgproj', last_active: Date.now(), node: 'local', project: 'bgproj' }];
+        workspace: '/home/user/workspace/bgproj', last_active: Date.now(), node, project: 'bgproj' }];
     }
     return route.fulfill({ response: res, json: body });
   });
+}
+
+/** @param {number} from */
+function sentKeys(from) {
+  return mock.sendCalls.slice(from).map((b) => JSON.parse(b).key);
+}
+
+// in_progress: another actor holds the key, so the session listed there is not
+// this attempt's and the text must not go into it.
+test('an in_progress failure stops the poll at once and does not send into the key\'s session', async ({ page }) => {
+  const key = 'local:takeover:bgproj';
+  const calls = await routeTakeover(page, { status: 'accepted', key, takeover_id: TAKEOVER_ID },
+    { state: 'failed', class: 'in_progress' });
+  await listKeyWhen(page, key, () => calls.takeover > 0);
   const sendsBefore = mock.sendCalls.length;
   await sendOnDiscovered(page);
 
-  await expect.poll(() => mock.sendCalls.slice(sendsBefore).map((b) => JSON.parse(b).key), { timeout: 8000 }).toContain(key);
-  expect(calls.status).toBeGreaterThanOrEqual(3);
-  await expect(page.locator('.toast')).not.toContainText('接管失败');
+  await expect(page.locator('.toast')).toContainText(
+    '接管失败：该会话正被另一次接管占用，外部 CLI 已终止；请稍后从历史记录重新打开该会话（对话记录仍在）', { timeout: 2500 });
+  expect(calls.statusIDs).toEqual([TAKEOVER_ID, TAKEOVER_ID]);
+  await expect(page.locator('#msg-input')).toHaveAttribute('contenteditable', 'true');
+  expect(sentKeys(sendsBefore)).not.toContain(key);
 });
 
-test('an in_progress failure whose session never appears names the cause at the deadline', async ({ page }) => {
-  test.setTimeout(30000);
-  const calls = await routeTakeover(page, { status: 'accepted', key: 'local:takeover:bgproj', takeover_id: TAKEOVER_ID },
-    { state: 'failed', class: 'in_progress' });
+// The key is listed from the first round, but the attempt's own status only
+// says ready on the fourth read: the send waits for it, and the poll then ends.
+test('a listed key does not send while the attempt is still pending', async ({ page }) => {
+  const key = 'local:takeover:bgproj';
+  let statusReads = 0;
+  await page.route((url) => url.pathname === '/api/discovered/takeover', (route) => route.fulfill({ status: 202,
+    contentType: 'application/json', body: JSON.stringify({ status: 'accepted', key, takeover_id: TAKEOVER_ID }) }));
+  await page.route((url) => url.pathname === '/api/discovered/takeover/status', (route) => {
+    statusReads++;
+    return route.fulfill({ status: 200, contentType: 'application/json',
+      body: JSON.stringify({ state: statusReads < 4 ? 'pending' : 'ready' }) });
+  });
+  await listKeyWhen(page, key, () => true);
+  const sendsBefore = mock.sendCalls.length;
   await sendOnDiscovered(page);
 
-  await expect(page.locator('.toast')).toContainText(
-    '接管失败：该会话正被另一次接管占用，外部 CLI 已终止；请稍后从历史记录重新打开该会话（对话记录仍在）', { timeout: 15000 });
-  expect(calls.status).toBeGreaterThan(2);
-  await expect(page.locator('#msg-input')).toHaveAttribute('contenteditable', 'true');
+  await expect.poll(() => sentKeys(sendsBefore), { timeout: 8000 }).toContain(key);
+  expect(statusReads).toBe(4);
+  await expect(page.locator('.toast')).not.toContainText('接管');
+});
+
+// The outcome expired (or naozhi restarted): the key being listed is enough.
+test('an unknown outcome falls back to the key being listed', async ({ page }) => {
+  const key = 'local:takeover:bgproj';
+  const calls = await routeTakeover(page, { status: 'accepted', key, takeover_id: TAKEOVER_ID }, { state: 'unknown' });
+  await listKeyWhen(page, key, () => calls.status >= 2);
+  const sendsBefore = mock.sendCalls.length;
+  await sendOnDiscovered(page);
+
+  await expect.poll(() => sentKeys(sendsBefore), { timeout: 8000 }).toContain(key);
+  await expect(page.locator('.toast')).not.toContainText('接管');
 });
 
 // A status read may take its full 2s timeout; the poll still ends near 10s
@@ -140,6 +180,28 @@ test('a stalled status route does not stretch the poll past its deadline', async
     '接管超时：外部 CLI 已终止，但新会话未就绪。对话记录仍在，可稍后从历史记录重新打开', { timeout: 15000 });
   expect(statusReads).toBeGreaterThanOrEqual(2);
   expect(statusReads).toBeLessThanOrEqual(6);
+});
+
+// A failed status read is no evidence of this attempt's outcome: with the key
+// listed from round 1 and every read failing, the poll times out unsent.
+test('a failing status route never sends into a listed key', async ({ page }) => {
+  test.setTimeout(30000);
+  const key = 'local:takeover:bgproj';
+  let statusReads = 0;
+  await page.route((url) => url.pathname === '/api/discovered/takeover', (route) => route.fulfill({ status: 202,
+    contentType: 'application/json', body: JSON.stringify({ status: 'accepted', key, takeover_id: TAKEOVER_ID }) }));
+  await page.route((url) => url.pathname === '/api/discovered/takeover/status', (route) => {
+    statusReads++;
+    return route.fulfill({ status: 500, contentType: 'text/plain', body: 'boom' });
+  });
+  await listKeyWhen(page, key, () => true);
+  const sendsBefore = mock.sendCalls.length;
+  await sendOnDiscovered(page);
+
+  await expect(page.locator('.toast')).toContainText(
+    '接管超时：外部 CLI 已终止，但新会话未就绪。对话记录仍在，可稍后从历史记录重新打开', { timeout: 15000 });
+  expect(statusReads).toBeGreaterThanOrEqual(10);
+  expect(sentKeys(sendsBefore)).not.toContain(key);
 });
 
 test('without a takeover_id the poll runs to its timeout, which says the external CLI is gone', async ({ page }) => {
@@ -164,5 +226,19 @@ test('a takeover on a remote node never queries the local status route', async (
   // status alongside it; three session reads cover at least two rounds.
   const sessionsAtTakeover = mock.sessionsGetCalls;
   await expect.poll(() => mock.sessionsGetCalls).toBeGreaterThanOrEqual(sessionsAtTakeover + 3);
+  expect(calls.status).toBe(0);
+});
+
+// A remote node has no status route, so its key being listed is what it sends on.
+test('a takeover on a remote node sends once its key is listed there', async ({ page }) => {
+  const key = 'local:takeover:remoteproj';
+  const calls = await routeTakeover(page, { status: 'accepted', key, node: 'remote1', takeover_id: TAKEOVER_ID },
+    { state: 'failed', class: 'max_procs' });
+  let reads = 0;
+  await listKeyWhen(page, key, () => calls.takeover > 0 && ++reads >= 2, 'remote1');
+  const sendsBefore = mock.sendCalls.length;
+  await sendOnDiscovered(page, 780);
+
+  await expect.poll(() => sentKeys(sendsBefore), { timeout: 8000 }).toContain(key);
   expect(calls.status).toBe(0);
 });
