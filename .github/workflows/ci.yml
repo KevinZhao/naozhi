@@ -420,6 +420,11 @@ jobs:
       - name: Check the e2e mock's REST shapes
         run: node --test scripts/check-mock-rest.test.mjs
 
+      # The release gate fails on these /static load rules, but only runs on a
+      # tag; a rule that stops matching would let a broken page ship green.
+      - name: Test the release gate's /static load rules
+        run: node --test scripts/release-gate-static.test.mjs
+
       - name: Check death_reason and the kinds are read from the generated contract
         run: node scripts/check-enum-literals.mjs
 
