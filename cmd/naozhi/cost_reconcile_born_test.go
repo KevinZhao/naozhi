@@ -96,6 +96,14 @@ func TestReconcile_PlacesAnUnnamedFirstTurnByTranscriptBirth(t *testing.T) {
 			seedLedger(t, x.s.opts.SessionStorePath, rcTurn(next.Add(time.Minute), bornKey, "bbbbbbbbbbbbbbb2", 1))
 			return rcTurn(x.end, bornKey, bornRun, 2)
 		}, 1, 0, 1},
+		{"a key whose named records hold one session", func(t *testing.T, x setup) costledger.Entry {
+			// bornX began before the run, so only the key can place it.
+			x.s.knownIDs(t, bornX)
+			x.s.transcript(t, bornX, bornLines(x.start.Add(-10*time.Minute), "sdk-cli", "msg_x", 5)...)
+			later := x.start.Add(time.Hour)
+			x.s.sessionRun(t, runhistory.SessionRun{RunID: "bbbbbbbbbbbbbbb2", SessionKey: bornKey, SessionID: bornX, StartedAt: later, EndedAt: later.Add(time.Minute)})
+			return rcTurn(x.end, bornKey, bornRun, 2)
+		}, 1, 0, 0},
 		{"a second session begun in the run", func(t *testing.T, x setup) costledger.Entry {
 			x.s.knownIDs(t, bornX, bornY)
 			x.s.transcript(t, bornX, bornLines(x.start.Add(time.Second), "sdk-cli", "msg_x", 5)...)
