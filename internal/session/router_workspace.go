@@ -49,7 +49,7 @@ func (r *Router) putWorkspaceOverride(tx sessTx, chatKey, path string) bool {
 	return tx.Ext().workspaces.SetBounded(chatKey, path, maxWorkspaceOverrides, isLive)
 }
 
-// GetWorkspace returns the effective workspace for a chat key.
+// Workspace returns the effective workspace for a chat key.
 func (r *Router) Workspace(chatKey string) string {
 	var ws string
 	r.ss.View(func(v sessView) { ws = r.resolveWorkspace(v, chatKey) })

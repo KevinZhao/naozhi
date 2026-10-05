@@ -33,9 +33,3 @@ func (s *shimServer) saveState() {
 		slog.Warn("failed to write state file", "err", err)
 	}
 }
-
-// performHandshake runs the pre-active-client auth phase: peer-UID check,
-// attach-message read under shimAuthReadDeadline + a LimitedReader (caps
-// pre-auth memory), constant-time token compare, then clears the read
-// deadline so the post-auth loop is not capped. On token failure it sends
-// "auth_failed" so the client can surface the reason (#657).
