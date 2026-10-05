@@ -76,6 +76,14 @@ type CostReporter interface {
 	CostTotals() costledger.Totals
 }
 
+// BackendReporter is the optional Session capability that names the backend
+// the session actually runs on, including the router default and a reused
+// session spawned under another backend. "" means unknown; cron then falls
+// back to the resolved AgentOpts.Backend.
+type BackendReporter interface {
+	Backend() string
+}
+
 // SendWatermarker is the optional Session capability that lets a restart tell
 // this run's result from an earlier one: cron stores the opaque watermark in
 // the run-inflight marker just before Send and hands it back to
