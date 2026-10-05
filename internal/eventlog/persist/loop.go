@@ -13,6 +13,7 @@ import (
 // on the single run goroutine, which is what lets the scratch buffers in
 // flushScratch be reused without synchronisation.
 
+// Errors callers can match with errors.Is.
 var (
 	ErrPersisterClosed = errors.New("persist: persister closed")
 )

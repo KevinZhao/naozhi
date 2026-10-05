@@ -428,5 +428,3 @@ func (p *Persister) WriterAlive() bool {
 	drainedRecently := lastAgo > 0 && lastAgo < 5*time.Second
 	return drainedRecently && notFull
 }
-
-// Errors callers can match with errors.Is.

@@ -108,9 +108,11 @@ func (s *sessionSink) accept(entries []Entry, replayPhase bool) {
 }
 
 // handleBatch is the hot path: find-or-open the writer, append every
-// entry, mark dirty for debounce. It NEVER fsyncs — the debounce ticker
-// owns fsync so a 500-entry batch does not cause 500 fsyncs. `now` is
-// captured by the caller so one clock read also covers lastDrainNS.
+// entry, mark dirty for debounce. It does not fsync per entry — the
+// debounce ticker owns fsync so a 500-entry batch does not cause 500
+// fsyncs; only a size-triggered rotate flushes (and fsyncs) once before
+// switching files. `now` is captured by the caller so one clock read also
+// covers lastDrainNS.
 func (p *Persister) handleBatch(job batchJob, now time.Time) {
 	// Stem mid-removal: defer into the per-stem FIFO instead of blocking on
 	// the unlink. The deferred job keeps its arena (the replaying handleBatch
