@@ -125,6 +125,8 @@ func (p *Process) applyReconnectVerdict(midTurn bool, finished *clievent.Event, 
 //     (process_send.go, ErrProcessBusy), and a mid-turn reconnect stays Running
 //     until this very result. A Send that starts once it ends owns the next turn:
 //     the CAS has already disarmed the branch, so its result cannot land here.
+//     This result still reaches eventCh after Ready; Send drops it as received
+//     before its claim.
 //
 // Moving this call up into deliverEvent would defeat the first; letting a
 // mid-turn reconnect leave State anything but Running would defeat the second.
