@@ -53,11 +53,17 @@ func (s *ManagedSession) finishRun(rt *runTimer, result *clievent.SendResult, er
 	}
 	ended := time.Now()
 	oc, cls := runhistory.Classify(err)
+	// A new session captures its ID only after this returns, so its first
+	// run would otherwise be recorded without the CLI session it ran in.
+	sid := s.getSessionID()
+	if sid == "" && result != nil {
+		sid = result.SessionID
+	}
 
 	rec := runhistory.SessionRun{
 		RunID:      runID,
 		SessionKey: s.key,
-		SessionID:  s.getSessionID(),
+		SessionID:  sid,
 		StartedAt:  rt.started,
 		EndedAt:    ended,
 		DurationMS: ended.Sub(rt.started).Milliseconds(),

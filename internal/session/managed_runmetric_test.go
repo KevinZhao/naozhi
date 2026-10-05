@@ -278,3 +278,51 @@ func TestSend_DurationMonotonic(t *testing.T) {
 		t.Errorf("duration should reflect the ~5ms sleep, got %+v", runs)
 	}
 }
+
+// TestSend_FirstRunRecordNamesItsSession: a new session learns its ID from
+// the first result, after finishRun, so the record must take it from the
+// result; an already-captured ID wins, an error turn without a result records
+// none, and an error turn with a partial result is named but not captured.
+func TestSend_FirstRunRecordNamesItsSession(t *testing.T) {
+	tests := []struct {
+		name        string
+		passthrough bool
+		known       string
+		result      *clievent.SendResult
+		err         error
+		want        string
+		captured    string
+	}{
+		{"send first turn", false, "", &clievent.SendResult{Text: "ok", SessionID: "S"}, nil, "S", "S"},
+		{"passthrough first turn", true, "", &clievent.SendResult{Text: "ok", SessionID: "S"}, nil, "S", "S"},
+		{"captured id wins", false, "OLD", &clievent.SendResult{Text: "ok", SessionID: "S"}, nil, "OLD", "OLD"},
+		{"error turn", false, "", nil, errors.New("boom"), "", ""},
+		{"error turn with partial result", false, "", &clievent.SendResult{SessionID: "S"}, errors.New("boom"), "S", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, store := newInstrumentedSession(t, func(ctx context.Context, text string, imgs []clievent.Attachment, on clievent.EventCallback) (*clievent.SendResult, error) {
+				return tt.result, tt.err
+			})
+			if tt.known != "" {
+				s.setSessionID(tt.known)
+			}
+			if tt.passthrough {
+				_, _ = s.SendPassthrough(context.Background(), "hi", nil, nil, "")
+			} else {
+				_, _ = s.Send(context.Background(), "hi", nil, nil)
+			}
+			store.Close()
+			runs := store.Recent(s.key, 0)
+			if len(runs) != 1 {
+				t.Fatalf("want 1 run, got %d", len(runs))
+			}
+			if runs[0].SessionID != tt.want {
+				t.Errorf("record SessionID = %q, want %q", runs[0].SessionID, tt.want)
+			}
+			if got := s.getSessionID(); got != tt.captured {
+				t.Errorf("captured SessionID = %q, want %q", got, tt.captured)
+			}
+		})
+	}
+}
