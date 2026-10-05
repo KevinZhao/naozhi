@@ -11,6 +11,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/cron"
@@ -130,6 +131,9 @@ type cronSessionAdapter struct{ s *session.ManagedSession }
 
 func (c cronSessionAdapter) Send(ctx context.Context, text string) (cron.SendResult, error) {
 	r, err := c.s.Send(ctx, text, nil, nil)
+	if err != nil {
+		err = exitFailure(err)
+	}
 	if r == nil {
 		return cron.SendResult{}, err
 	}
@@ -137,6 +141,18 @@ func (c cronSessionAdapter) Send(ctx context.Context, text string) (cron.SendRes
 		err = turnFailure(r)
 	}
 	return cron.SendResult{Text: r.Text, SessionID: r.SessionID}, err
+}
+
+// exitFailure wraps a cron.TurnFailedError around a CLI exit claude made
+// because it could not resume the session, keeping err in the chain for run
+// history; any other error is returned as is. The respawn drops that resume,
+// which is what the notice for the cause tells the user.
+func exitFailure(err error) error {
+	var pe *clierr.ProcessExitedError
+	if errors.As(err, &pe) && pe.Class == clierr.ExitResumeNotFound {
+		return fmt.Errorf("%w: %w", &cron.TurnFailedError{Cause: cron.TurnCauseResumeUnavailable}, err)
+	}
+	return err
 }
 
 // turnFailure wraps a cron.TurnFailedError (matching cron.ErrTurnFailed)

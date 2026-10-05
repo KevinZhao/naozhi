@@ -59,7 +59,7 @@ var allTurnCauses = []TurnCause{
 	TurnCauseMaxTurns, TurnCauseBudget, TurnCauseRefused, TurnCauseTruncated,
 	TurnCauseContextTooLong, TurnCauseQuota, TurnCausePermission, TurnCauseBackendOverloaded,
 	TurnCauseBackendRateLimited, TurnCauseBackendAuth, TurnCauseBackendInvalid,
-	TurnCauseBackendUnreachable,
+	TurnCauseBackendUnreachable, TurnCauseResumeUnavailable,
 }
 
 // TestFailureNoticeBody_TurnCause pins the turn_failed body per cause for a
@@ -86,6 +86,7 @@ func TestFailureNoticeBody_TurnCause(t *testing.T) {
 		{TurnCauseBackendAuth, "执行失败（后端认证失败或凭证已过期），请联系管理员 · run 1a2b3c4d"},
 		{TurnCauseBackendInvalid, "执行失败（后端无法处理本次请求），请检查执行历史 · run 1a2b3c4d"},
 		{TurnCauseBackendUnreachable, "执行失败（连接模型服务超时或网络异常），请检查执行历史 · run 1a2b3c4d"},
+		{TurnCauseResumeUnavailable, "执行失败（上次会话无法恢复），下次执行将开启新会话 · run 1a2b3c4d"},
 		{TurnCause("from_a_newer_binary"), "执行失败（后端报告本轮出错），请检查执行历史 · run 1a2b3c4d"},
 	}
 	for _, tc := range cases {
