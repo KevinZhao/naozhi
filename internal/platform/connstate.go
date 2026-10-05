@@ -116,13 +116,30 @@ func (t *ConnTracker) Set(kind ConnStateKind) {
 // A nil err is a plain Set.
 func (t *ConnTracker) Fail(kind ConnStateKind, err error) {
 	t.mu.Lock()
+	t.failLocked(kind, err)
+	t.mu.Unlock()
+}
+
+func (t *ConnTracker) failLocked(kind ConnStateKind, err error) {
 	now := t.clock()
 	t.setLocked(kind, now)
 	if err != nil {
 		t.s.LastError = osutil.SanitizeForLog(err.Error(), connErrorMax)
 		t.s.LastErrorAt = now
 	}
-	t.mu.Unlock()
+}
+
+// FailIf is Fail applied only while the state is still from, so a background
+// probe's verdict cannot overwrite a recovery that landed while it ran.
+// Reports whether it applied.
+func (t *ConnTracker) FailIf(from, kind ConnStateKind, err error) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.s.State != from {
+		return false
+	}
+	t.failLocked(kind, err)
+	return true
 }
 
 // NoteError records err without changing the state, for SDK hooks that report
