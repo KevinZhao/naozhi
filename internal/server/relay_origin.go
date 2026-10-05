@@ -19,14 +19,11 @@ import (
 // session's EventLog.
 const relayFailPrefix = "发送失败："
 
-var (
-	errSendBusy          = errors.New("会话正忙，消息未送达，请稍后重试")
-	errRelayShuttingDown = errors.New("节点正在关闭，消息未送达")
-)
+var errRelayShuttingDown = errors.New("节点正在关闭，消息未送达")
 
 // SubmitRelayed runs a send a primary relayed over the reverse link; it is
 // the upstream connector's TurnSubmitter. workspace has already passed the
-// connector's own checks. Returns "reset", "accepted" or "queued".
+// connector's own checks. Returns "reset", "accepted", "queued" or "busy".
 func (s *Server) SubmitRelayed(ctx context.Context, key, text, workspace string) (string, error) {
 	return s.hub.submitRelayed(ctx, key, text, workspace)
 }
@@ -34,8 +31,9 @@ func (s *Server) SubmitRelayed(ctx context.Context, key, text, workspace string)
 // relaySend is sessionSend for a relayed send. The session is created on ctx
 // before Submit, so it exists when the RPC answers and the primary's
 // follow-up subscribe finds it; a spawn failure is the RPC's error. A send
-// that was not buffered is an error too: it is the only answer the primary
-// passes on.
+// the queue cannot take answers "busy", as sessionSend does: the primary
+// forwards the status, so the tab shows the busy toast and rolls back. A
+// send during shutdown is an error, which tells the user the node is going.
 func (e *sendEngine) relaySend(ctx context.Context, key, text, workspace string) (string, error) {
 	p := sendParams{Key: key, Text: text, Workspace: workspace}
 	cmd, reset, err := e.prepareSend(p)
@@ -55,7 +53,7 @@ func (e *sendEngine) relaySend(ctx context.Context, key, text, workspace string)
 	case turn.AckQueued:
 		return string(sendAckQueued), nil
 	case turn.AckDropped:
-		return "", errSendBusy
+		return string(sendAckBusy), nil
 	default:
 		return "", errRelayShuttingDown
 	}
