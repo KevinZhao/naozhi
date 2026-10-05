@@ -311,11 +311,11 @@ function setActivityView(view) {
 
 // reconcileMainStateAfterPoll brings the open session's banner and send/stop
 // buttons to the REST state when a session_state push was missed. With the
-// socket down REST is the only source and always wins. Over a live socket
-// only the finished direction applies (the turn is over and no optimistic
-// running window is open: a terminal 'result' or 'ready' push was dropped),
-// since reconciling toward running is the push side's job and a lagging
-// snapshot would flicker the banner.
+// socket down REST is the only source and always wins. Over a live socket only
+// the finished direction applies (no optimistic running window is open: a
+// terminal 'result' or 'ready' push was dropped), as running is the push side's
+// job; a poll sent before the key's latest push keeps the pushed state
+// (mergeBackendSessions), so only a later poll heals a dropped push.
 function reconcileMainStateAfterPoll(wsConnected) {
   if (!selection.key) return;
   const sKey = sid(selection.key, selection.node);
