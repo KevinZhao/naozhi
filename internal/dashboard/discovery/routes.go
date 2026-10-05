@@ -17,6 +17,7 @@ func (h *Handlers) Routes() []httputil.Route {
 		{Pattern: "GET /api/discovered", Handler: h.HandleList},
 		{Pattern: "GET /api/discovered/preview", Handler: h.HandlePreview},
 		{Pattern: "POST /api/discovered/takeover", Handler: h.HandleTakeover},
+		{Pattern: "GET /api/discovered/takeover/status", Handler: h.HandleTakeoverStatus},
 		{Pattern: "POST /api/discovered/close", Handler: h.HandleClose},
 	}
 }
