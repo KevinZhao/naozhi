@@ -318,35 +318,45 @@ func runIDSession(runID string) string {
 // last message may be stamped.
 const turnStampSlack = 5 * time.Second
 
-// sessionActivity holds the times of each read session's messages naozhi may
-// have run, ascending; a session whose transcript could not be read in full
-// is absent.
-type sessionActivity map[string][]time.Time
+// sessionActivity holds what was read of each session's transcript, so a
+// session is read at most once whatever the outcome.
+type sessionActivity map[string]sessionTimes
 
-// read adds the sessions of sids not read yet. Each is read on its own, so a
-// fork keeps the lines it copied from its parent.
+// sessionTimes are the times of a session's messages naozhi may have run,
+// ascending; ok is false when its transcript could not be read in full.
+type sessionTimes struct {
+	times []time.Time
+	ok    bool
+}
+
+// read adds the sessions of sids not tried yet.
 func (a sessionActivity) read(claudeDir string, sids []string) {
 	for _, sid := range sids {
-		if _, done := a[sid]; done {
-			continue
+		if _, tried := a[sid]; !tried {
+			a[sid] = readSessionTimes(claudeDir, sid)
 		}
-		path := locateTranscript(claudeDir, sid)
-		if path == "" {
-			continue
-		}
-		u, found, err := claudefs.SessionMessageUsage(filepath.Dir(path), sid, map[string]bool{})
-		if err != nil || !found || u.Truncated {
-			continue
-		}
-		times := []time.Time{}
-		for _, m := range u.Messages {
-			if m.Entrypoint != "cli" && m.Entrypoint != "claude-vscode" {
-				times = append(times, m.At)
-			}
-		}
-		sort.Slice(times, func(i, j int) bool { return times[i].Before(times[j]) })
-		a[sid] = times
 	}
+}
+
+// readSessionTimes reads sid's transcript on its own, so a fork keeps the
+// lines it copied from its parent.
+func readSessionTimes(claudeDir, sid string) sessionTimes {
+	path := locateTranscript(claudeDir, sid)
+	if path == "" {
+		return sessionTimes{}
+	}
+	u, found, err := claudefs.SessionMessageUsage(filepath.Dir(path), sid, map[string]bool{})
+	if err != nil || !found || u.Truncated {
+		return sessionTimes{}
+	}
+	var times []time.Time
+	for _, m := range u.Messages {
+		if m.Entrypoint != "cli" && m.Entrypoint != "claude-vscode" {
+			times = append(times, m.At)
+		}
+	}
+	sort.Slice(times, func(i, j int) bool { return times[i].Before(times[j]) })
+	return sessionTimes{times: times, ok: true}
 }
 
 // activeAt names the session of sids, all held by one key, whose last message
@@ -358,10 +368,11 @@ func (a sessionActivity) activeAt(sids []string, t time.Time) string {
 	var bestAt time.Time
 	tie := false
 	for _, sid := range sids {
-		times, ok := a[sid]
-		if !ok {
+		st := a[sid]
+		if !st.ok {
 			return ""
 		}
+		times := st.times
 		i := sort.Search(len(times), func(i int) bool { return times[i].After(t) })
 		if i == 0 {
 			continue

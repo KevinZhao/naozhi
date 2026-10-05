@@ -648,3 +648,67 @@ func TestReconcile_PlacesAChainedKeysTurnByTranscriptTime(t *testing.T) {
 		})
 	}
 }
+
+// A session whose transcript could not be read is not read again for the
+// next entry of its key: a truncated transcript would be read in full per
+// entry.
+func TestSessionActivity_ReadsASessionOnce(t *testing.T) {
+	const (
+		a = "44444444-5555-6666-7777-888888888888"
+		b = "55555555-6666-7777-8888-999999999999"
+	)
+	s := newReconcileScope(t)
+	s.transcript(t, b, scopeMsg(s.day(-1, 14, 0), "msg_b", 2, "sdk-cli"))
+	act := sessionActivity{}
+	act.read(s.opts.ClaudeDir, []string{a, b})
+	s.transcript(t, a, scopeMsg(s.day(-1, 9, 0), "msg_a", 5, "sdk-cli"))
+	act.read(s.opts.ClaudeDir, []string{a, b})
+	if got := act.activeAt([]string{a, b}, s.day(-1, 14, 1)); got != "" {
+		t.Fatalf("activeAt = %.8s, want none: %.8s was read again", got, a)
+	}
+}
+
+// A turn placed by transcript time lets its key's day settle: the residual
+// of the session it went to is booked. Left unattributed, the same turn
+// holds the day.
+func TestReconcile_APlacedChainedTurnSettlesItsDay(t *testing.T) {
+	const (
+		key = "dashboard:direct:chain:general"
+		a   = "44444444-5555-6666-7777-888888888888"
+		b   = "55555555-6666-7777-8888-999999999999"
+		c   = "66666666-7777-8888-9999-aaaaaaaaaaaa" // no transcript
+	)
+	for _, tc := range []struct {
+		name    string
+		chain   []string // oldest first
+		planned float64
+		held    int
+	}{
+		{"placed", []string{a, b}, 8, 0},
+		{"unattributed", []string{a, c, b}, 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newReconcileScope(t)
+			last := len(tc.chain) - 1
+			writeJSON(t, s.opts.SessionStorePath, []map[string]any{
+				{"key": rcKey, "session_id": rcSID}, {"key": key, "session_id": tc.chain[last], "prev_session_ids": tc.chain[:last]},
+			})
+			s.transcript(t, a, scopeMsg(s.day(-1, 9, 0), "msg_a", 1, "sdk-cli"))
+			s.transcript(t, b, scopeMsg(s.day(-2, 10, 0), "msg_b0", 1, "sdk-cli"),
+				scopeMsg(s.day(-1, 10, 0), "msg_b1", 1, "sdk-cli"), scopeMsg(s.day(-1, 14, 0), "msg_b2", 10, "sdk-cli"))
+			seedLedger(t, s.opts.SessionStorePath, rcTurn(s.day(-2, 10, 1), key, "unowned:"+b+":u0", 1),
+				rcTurn(s.day(-1, 10, 1), key, "unowned:"+b+":u1", 1), rcTurn(s.day(-1, 14, 1), key, "aaaaaaaaaaaaaaa1", 2))
+			rep, out := s.run(t)
+			var planned float64
+			for _, e := range rep.Planned {
+				planned += e.Amount
+			}
+			if !near(planned, tc.planned) || len(rep.Planned) > 1 {
+				t.Errorf("planned %+v, want %v\n%s", rep.Planned, tc.planned, out)
+			}
+			if got := settlementOf(rep, b).HeldDays; got != tc.held {
+				t.Errorf("held days = %d, want %d\n%s", got, tc.held, out)
+			}
+		})
+	}
+}
