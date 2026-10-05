@@ -162,8 +162,11 @@ type backendWrappers struct {
 	// Protocol accepts one; others are warned and dropped. ConfiguredModels is
 	// the operator-declared manifest (cli.backends[].models); agent-reported
 	// manifests win at request time.
-	Runtimes  map[string]session.BackendRuntime
-	Default   *cli.Wrapper
+	Runtimes map[string]session.BackendRuntime
+	Default  *cli.Wrapper
+	// DefaultID is Default.BackendID, the router's backend for sessions that
+	// name none. It differs from cfg.DefaultBackendID when that id is unlisted
+	// or unregistered; Validate warns about that fallback.
 	DefaultID string
 }
 
@@ -192,8 +195,7 @@ func initBackendWrappers(
 	defaultBackend := cfg.DefaultBackendID()
 
 	out := backendWrappers{
-		Runtimes:  make(map[string]session.BackendRuntime, len(backendsCfg)),
-		DefaultID: defaultBackend,
+		Runtimes: make(map[string]session.BackendRuntime, len(backendsCfg)),
 	}
 
 	for _, b := range backendsCfg {
@@ -264,6 +266,7 @@ func initBackendWrappers(
 	if out.Default == nil {
 		return out, false
 	}
+	out.DefaultID = out.Default.BackendID
 	// Default probe failed but a sibling is healthy: continue with a Warn so
 	// explicit-backend sessions (e.g. sysession) stay usable; fast-fail only
 	// when EVERY backend is unreachable (#903).

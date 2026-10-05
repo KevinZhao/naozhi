@@ -142,7 +142,7 @@ func main() {
 			// the config field instead of "spawn failed" on the first message.
 			slog.Error("default cli backend is unavailable",
 				"id", bws.Default.BackendID, "path", bws.Default.CLIPath,
-				"hint", "fix the binary path in cli.backends or set cli.default to an available backend")
+				"hint", "fix the binary path in cli.backends or set cli.backend to an available backend")
 		}
 		os.Exit(1)
 	}
