@@ -114,6 +114,17 @@ func configCheck(args []string, stdout io.Writer) int {
 	if *effective {
 		result.Effective = map[string]effectiveSpawn{}
 	}
+	// The findings startup logs (logConfigValidationDiagnostics), so each
+	// Validate rule reaches this report without a copy here.
+	for _, d := range cfg.Validate() {
+		reason := d.Msg
+		if d.Hint != "" {
+			reason += " (" + d.Hint + ")"
+		}
+		result.Diags = append(result.Diags, backendDiag{SpawnDiag: cli.SpawnDiag{
+			Layer: "config-validate", Key: d.Field, Action: d.Level, Reason: reason,
+		}})
+	}
 	result.Diags = append(result.Diags, sysessionBackendDiags(cfg)...)
 
 	// The shim env gate is a spawn gate like the argv one: a var the operator
@@ -158,11 +169,7 @@ func configCheck(args []string, stdout io.Writer) int {
 			profile, ok = backend.Get(id)
 		}
 		if !ok {
-			result.Diags = append(result.Diags, backendDiag{Backend: b.ID, SpawnDiag: cli.SpawnDiag{
-				Layer: "caps", Key: "cli.backends[" + b.ID + "]", Action: "ignored",
-				Reason: "unknown backend id; the startup path skips this entry",
-			}})
-			continue
+			continue // reported by Validate above; the startup path skips it
 		}
 		proto := profile.NewProtocol(backend.ProtocolDeps{})
 		caps := cli.ProtocolCaps(proto)
@@ -362,13 +369,13 @@ func sortedKeys(m map[string][]string) []string {
 // one-shot argv (`-p --output-format json --setting-sources ""`), so a non-claude
 // default leaves them spawning a binary that cannot parse it — kiro speaks ACP
 // and rejects that argv outright. The backend judged is the one startup binds
-// (startupDefaultBackendID), not cli.backend: with `backends: [kiro, claude]`
+// (Config.StartupDefaultBackendID), not cli.backend: with `backends: [kiro, claude]`
 // and no cli.backend, serve hands both features kiro.
 //
 // Static: it reads only cfg, so `naozhi config check` catches it without
 // starting a server. sysession.NewRunner refuses the same combination too.
 func sysessionBackendDiags(cfg *config.Config) []backendDiag {
-	id := startupDefaultBackendID(cfg)
+	id := cfg.StartupDefaultBackendID()
 	if id == sysession.BackendClaude {
 		return nil
 	}
@@ -391,32 +398,6 @@ func sysessionBackendDiags(cfg *config.Config) []backendDiag {
 		add("image_orient.enabled", "image auto-orient")
 	}
 	return out
-}
-
-// startupDefaultBackendID is the BackendID of the wrapper initBackendWrappers
-// selects as Default: DefaultBackendID when it is an enabled entry with a
-// registered profile, else the first enabled entry that has one (EnabledBackends
-// never yields an empty id). With nothing registered startup fails anyway, and
-// DefaultBackendID is returned.
-// TestStartupDefaultBackendID_MatchesInitBackendWrappers pins the two together.
-func startupDefaultBackendID(cfg *config.Config) string {
-	want := cfg.DefaultBackendID()
-	fallback := ""
-	for _, b := range cfg.EnabledBackends() {
-		if _, ok := backend.Get(b.ID); !ok {
-			continue // startup skips unknown ids
-		}
-		if b.ID == want {
-			return b.ID
-		}
-		if fallback == "" {
-			fallback = b.ID
-		}
-	}
-	if fallback == "" {
-		return want
-	}
-	return fallback
 }
 
 // effectiveProfileEnv is the masked env an access profile's overlay produces

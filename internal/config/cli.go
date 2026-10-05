@@ -1,5 +1,7 @@
 package config
 
+import "github.com/naozhi/naozhi/internal/cli/backend"
+
 type AgentConfig struct {
 	Model string   `yaml:"model"`
 	Args  []string `yaml:"args"`
@@ -158,4 +160,29 @@ func (c *Config) DefaultBackendID() string {
 		}
 	}
 	return "claude"
+}
+
+// StartupDefaultBackendID is the BackendID of the wrapper startup binds as the
+// default: DefaultBackendID when it is an enabled entry with a registered
+// profile, else the first enabled entry that has one (EnabledBackends never
+// yields an empty id). With nothing registered startup fails anyway, and
+// DefaultBackendID is returned. Like Validate, it needs the backend registry.
+func (c *Config) StartupDefaultBackendID() string {
+	want := c.DefaultBackendID()
+	fallback := ""
+	for _, b := range c.EnabledBackends() {
+		if _, ok := backend.Get(b.ID); !ok {
+			continue // startup skips unknown ids
+		}
+		if b.ID == want {
+			return b.ID
+		}
+		if fallback == "" {
+			fallback = b.ID
+		}
+	}
+	if fallback == "" {
+		return want
+	}
+	return fallback
 }
