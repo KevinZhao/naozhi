@@ -224,13 +224,19 @@ func TestRelay_EvictedSendIsASystemEvent(t *testing.T) {
 	h.waitEngineIdle()
 }
 
-func TestRelay_BusyWithTheQueueDisabledIsAnError(t *testing.T) {
+// A send the disabled queue cannot take answers "busy", as a dashboard send
+// does, and leaves no failure in the EventLog: the primary's ack reports it.
+func TestRelay_BusyWithTheQueueDisabledAnswersBusy(t *testing.T) {
 	h := newParityHarness(t, parityOpts{maxDepth: -1})
 	turns := h.session(parityKey, false)
 	h.relay(t, "first")
 	turns.next(t, "owner turn")
-	if _, err := h.srv.SubmitRelayed(context.Background(), parityKey, "second", ""); !errors.Is(err, errSendBusy) {
-		t.Fatalf("err = %v, want errSendBusy", err)
+	status, err := h.srv.SubmitRelayed(context.Background(), parityKey, "second", "")
+	if err != nil || status != string(sendAckBusy) {
+		t.Fatalf("SubmitRelayed = (%q, %v), want (busy, nil)", status, err)
+	}
+	if got := h.systemEvents(parityKey); len(got) != 0 {
+		t.Fatalf("system events = %q, want none", got)
 	}
 	turns.answer(okTurn("R1"))
 	h.waitEngineIdle()

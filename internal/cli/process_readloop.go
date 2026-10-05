@@ -577,7 +577,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 					owner.onEvent(ev)
 				}
 			}
-			fanoutTurnResult(owners, ev)
+			p.fanoutTurnResult(owners, ev)
 			return false
 		}
 		// No owner claimed this result, aborted or not: fall through so the
@@ -612,7 +612,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	// A result no Send owns ends its turn: a reconnect's in-flight turn (the
 	// one-shot reconnectedMidTurn) or one the CLI started itself (unowned).
 	// A Send-owned turn is left to Send's defer so a second Send cannot start
-	// before the first returns.
+	// before the first returns; a result its Send gave up on is only booked.
 	if ev.Type == "result" && p.turn.reconnectedMidTurn.CompareAndSwap(true, false) {
 		p.turn.mu.Lock()
 		_, wasRunning := p.turn.transitionLocked(evTurnEnded)
@@ -631,12 +631,15 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 		// finds the process Ready. See resolveResult for both rules.
 		p.adopted.resolveResult(ev)
 		// Queued after Ready: a Send that claims in between drops it by RecvAt.
-	} else if ev.Type == "result" && p.caps.Replay {
-		// After eventCh, so a Send claiming Ready drains this result.
+	} else if ev.Type == "result" {
+		// noLiveSend is read before the handoff: once the result is on eventCh
+		// its Send may take it and turn Ready first. Settled after it, so a
+		// Send claiming Ready drains this result.
+		noLiveSend := p.turn.noLiveSend()
 		if p.deliverEvent(ev, now, log) {
 			return true
 		}
-		p.endUnownedTurn(ev)
+		p.settleUnclaimedResult(ev, noLiveSend)
 		return false
 	}
 

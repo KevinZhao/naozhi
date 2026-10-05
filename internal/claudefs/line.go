@@ -63,7 +63,7 @@ func ParseTimestamp(s string) (time.Time, bool) {
 // hide) now buy ~5ns per transcript line, i.e. ~2.5us on a 500-line transcript.
 // Whether that trade still holds is worth asking on its own.
 
-// parseISO8601MS converts an RFC 3339 / ISO 8601 timestamp into unix ms.
+// TimestampMillis converts an RFC 3339 / ISO 8601 timestamp into unix ms.
 // Returns 0 when the input is empty or unparseable so callers can use it as a
 // "skip filter" sentinel. time.RFC3339Nano is a strict superset of RFC3339
 // (the fractional part is optional), so no second layout is needed.
@@ -87,7 +87,7 @@ func TimestampMillis(s string) int64 {
 	return t.UnixMilli()
 }
 
-// parseISO8601MSFast hand-parses the canonical UTC RFC 3339 shape the Claude
+// timestampMillisFast hand-parses the canonical UTC RFC 3339 shape the Claude
 // CLI emits and returns (unixMillis, true) on success:
 //
 //	YYYY-MM-DDTHH:MM:SS(.fffffffff)?Z

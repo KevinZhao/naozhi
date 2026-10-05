@@ -15,6 +15,8 @@ import (
 // the bounded eviction that keeps a flood from growing it without limit.
 // Extracted from feishu.go (J10 of #2548).
 
+// nonceTTL matches verifyTimestamp's 5-minute freshness window; older
+// requests are rejected by timestamp anyway, so longer retention only bloats the map.
 const nonceTTL = 5 * time.Minute
 
 // maxSeenNonces caps the replay map (~3.6 MB at 50k entries) so a flood of

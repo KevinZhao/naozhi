@@ -277,56 +277,57 @@ const (
 // 设计取舍：state 只表达终态（succeeded/failed/skipped/timed_out/canceled），
 // ErrorClass 表达"为什么 not succeeded"。例如 timed_out 都是 deadline_exceeded，
 // canceled 都是 context.Canceled——两者强相关，但分开存便于将来加新 class
-// 不动 state 枚举。
-type ErrorClass string
+// 不动 state 枚举。runtelemetry.ErrorClass 的 type alias；新 class 加在
+// runtelemetry/state.go 单一来源处，那里冻结 wire string。
+type ErrorClass = runtelemetry.ErrorClass
 
 const (
-	ErrClassNone               ErrorClass = ""
-	ErrClassSessionError       ErrorClass = "session_error"
-	ErrClassSendError          ErrorClass = "send_error"
-	ErrClassDeadlineExceeded   ErrorClass = "deadline_exceeded"
-	ErrClassCanceled           ErrorClass = "canceled"
-	ErrClassWorkDirUnreachable ErrorClass = "workdir_unreachable"
-	ErrClassWorkDirOutsideRoot ErrorClass = "workdir_outside_root"
-	ErrClassOverlapSkipped     ErrorClass = "overlap_skipped"
+	ErrClassNone               = runtelemetry.ErrClassNone
+	ErrClassSessionError       = runtelemetry.ErrClassCronSessionError
+	ErrClassSendError          = runtelemetry.ErrClassCronSendError
+	ErrClassDeadlineExceeded   = runtelemetry.ErrClassDeadlineExceeded
+	ErrClassCanceled           = runtelemetry.ErrClassCanceled
+	ErrClassWorkDirUnreachable = runtelemetry.ErrClassCronWorkDirUnreachable
+	ErrClassWorkDirOutsideRoot = runtelemetry.ErrClassCronWorkDirOutsideRoot
+	ErrClassOverlapSkipped     = runtelemetry.ErrClassCronOverlapSkipped
 	// ErrClassSessionCapacity marks a run skipped because GetOrCreate hit the
 	// router's session caps (ErrSessionCapacity): contention, not a job fault.
-	ErrClassSessionCapacity ErrorClass = "session_capacity"
+	ErrClassSessionCapacity = runtelemetry.ErrClassCronSessionCapacity
 	// ErrClassTurnFailed marks a run whose Send returned a result the backend
 	// flagged as an error (ErrTurnFailed): max turns, an RPC rejection, a
 	// failed codex turn. The CLI ran; the turn did not succeed.
-	ErrClassTurnFailed ErrorClass = "turn_failed"
+	ErrClassTurnFailed = runtelemetry.ErrClassCronTurnFailed
 	// ErrClassRouterMissing fires when executeOpt short-circuits on a nil router
 	// (test fixtures or a misconfigured scheduler); a started→ended pair is still
 	// emitted so dashboard "running" counters stay consistent (#1323).
-	ErrClassRouterMissing ErrorClass = "router_missing"
+	ErrClassRouterMissing = runtelemetry.ErrClassCronRouterMissing
 	// ErrClassPausedConcurrent fires when the post-CAS recheck sees the job
 	// switched to Paused between the dispatch lookup and the inflight CAS; a
 	// synthetic started→ended pair keeps subscriber timelines gap-free (#1410).
-	ErrClassPausedConcurrent ErrorClass = "paused_concurrent"
+	ErrClassPausedConcurrent = runtelemetry.ErrClassCronPausedConcurrent
 	// ErrClassDeletedConcurrent fires when the post-CAS recheck sees the job
 	// removed from s.tbl.jobs in the same cross-lock window (#1410).
-	ErrClassDeletedConcurrent ErrorClass = "deleted_concurrent"
+	ErrClassDeletedConcurrent = runtelemetry.ErrClassCronDeletedConcurrent
 	// ErrClassPanic marks a run whose body panicked after it started; the run
 	// scaffold closes it through finishRun (runStarted).
-	ErrClassPanic ErrorClass = "panic"
-	// Sandbox placement classes; wire values mirror runtelemetry.ErrClassCronSandbox*.
-	// Transport is the double-run-risk state (microVM fate unknown).
-	ErrClassSandboxFailed      ErrorClass = "sandbox_failed"
-	ErrClassSandboxTransport   ErrorClass = "sandbox_transport"
-	ErrClassSandboxUnavailable ErrorClass = "sandbox_unavailable"
+	ErrClassPanic = runtelemetry.ErrClassPanic
+	// Sandbox placement classes. Transport is the double-run-risk state
+	// (microVM fate unknown).
+	ErrClassSandboxFailed      = runtelemetry.ErrClassCronSandboxFailed
+	ErrClassSandboxTransport   = runtelemetry.ErrClassCronSandboxTransport
+	ErrClassSandboxUnavailable = runtelemetry.ErrClassCronSandboxUnavailable
 	// ErrClassInterrupted marks a run still executing when the process went away
 	// — a graceful shutdown that outran the drain budget, or a hard kill. The
 	// RunState stays canceled; this class is what distinguishes it from an
-	// operator cancel. Wire value mirrors runtelemetry.ErrClassCronInterrupted
-	// (Epic H #2546). Written only by reconcileRunInflight, at startup.
-	ErrClassInterrupted ErrorClass = "interrupted"
+	// operator cancel (Epic H #2546). Written only by reconcileRunInflight, at
+	// startup.
+	ErrClassInterrupted = runtelemetry.ErrClassCronInterrupted
 	// ErrClassConfigDrift marks a run whose surviving shim was shut down at
 	// startup because its argv no longer matched config (a model/effort/
 	// extra_args change rode the upgrade). The run was healthy; the operator's
 	// own edit ended it — a different fact from "the process went away", and
 	// the dashboard label says so (#2749).
-	ErrClassConfigDrift ErrorClass = "config_drift"
+	ErrClassConfigDrift = runtelemetry.ErrClassCronConfigDrift
 )
 
 // hexIDEntropyBytes 是所有 cron 内部 ID（jobID / runID）的熵字节数（不是
