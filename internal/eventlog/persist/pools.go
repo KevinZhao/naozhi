@@ -13,6 +13,9 @@ import (
 // belong to neither, so keeping them at the top of the run loop's file put the
 // least session-specific code first.
 
+// recordBufPool reuses the bytes.Buffer schema.MarshalRecordInto writes
+// into so handleBatch avoids json's per-call encodeState alloc. Reset
+// before Put; capped by recordBufMaxCap on return.
 var recordBufPool = sync.Pool{
 	New: func() any {
 		// 4 KiB covers typical EventEntry JSON.

@@ -17,6 +17,8 @@ import (
 // persister.go (J9 of #2548); accept and handleBatch are the two halves of one
 // story and were 640 lines apart.
 
+// sessionSink binds (persister, key, stem) for the PersistSink method
+// value returned by SinkFor.
 type sessionSink struct {
 	p    *Persister
 	key  string
@@ -105,9 +107,8 @@ func (s *sessionSink) accept(entries []Entry, replayPhase bool) {
 	}
 }
 
-// DropKey closes any open writer for key, then removes its log + idx
-// files. Safe from any goroutine; waits for the writer goroutine to
-// acknowledge the drop.
+// handleBatch writes one batchJob as records on its session's perKeyWriter;
+// run goroutine only. A job for a stem that is mid-drop is deferred instead.
 func (p *Persister) handleBatch(job batchJob, now time.Time) {
 	// Stem mid-removal: defer into the per-stem FIFO instead of blocking on
 	// the unlink. The deferred job keeps its arena (the replaying handleBatch

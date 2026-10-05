@@ -11,9 +11,8 @@ import (
 	"time"
 )
 
-// recordBufPool reuses the bytes.Buffer schema.MarshalRecordInto writes
-// into so handleBatch avoids json's per-call encodeState alloc. Reset
-// before Put; capped by recordBufMaxCap on return.
+// Observer receives the persister's write/drop/fsync counter ticks;
+// a nil Options.Observer means noopObserver.
 type Observer interface {
 	// OnWrite is called once per EventEntry that reaches disk.
 	OnWrite(n int)
@@ -291,8 +290,9 @@ func (p *Persister) SinkFor(key string) PersistSink {
 	return (&sessionSink{p: p, key: key, stem: KeyHash(key)}).accept
 }
 
-// sessionSink binds (persister, key, stem) for the PersistSink method
-// value returned by SinkFor.
+// DropKey closes any open writer for key, then removes its log + idx
+// files. Safe from any goroutine; waits for the writer goroutine to
+// acknowledge the drop.
 func (p *Persister) DropKey(ctx context.Context, key string) error {
 	if p.closed.Load() {
 		return ErrPersisterClosed
