@@ -237,15 +237,20 @@ func TestTryAutoTakeover_HoldsTheKeyWhileTheCLIExits(t *testing.T) {
 		t.Skip("discovery is POSIX-only")
 	}
 	const key = "test:direct:u1:general"
-	termed := filepath.Join(t.TempDir(), "termed")
+	dir := t.TempDir()
+	termed, trapped := filepath.Join(dir, "termed"), filepath.Join(dir, "trapped")
 	// Survives SIGTERM, recording it, so the exit wait lasts until ctx ends.
-	cmd := exec.Command("sh", "-c", `trap 'echo > "$0"' TERM; while :; do sleep 0.05; done`, termed)
+	cmd := exec.Command("sh", "-c", `trap 'echo > "$0"' TERM; echo > "$1"; while :; do sleep 0.05; done`, termed, trapped)
 	if err := cmd.Start(); err != nil {
 		t.Skipf("cannot start child: %v", err)
 	}
 	exited := make(chan struct{})
 	go func() { _ = cmd.Wait(); close(exited) }()
 	t.Cleanup(func() { _ = cmd.Process.Kill(); <-exited })
+	testhelper.Eventually(t, func() bool {
+		_, err := os.Stat(trapped)
+		return err == nil
+	}, 5*time.Second, "the child never installed its SIGTERM trap")
 
 	claudeDir, ws := t.TempDir(), t.TempDir()
 	live, _ := json.Marshal(map[string]any{

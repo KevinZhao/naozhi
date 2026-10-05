@@ -202,12 +202,9 @@ func TestTakeover_ConcurrentCreationAborts(t *testing.T) {
 		t.Error("interloper's fakeProcess should not have been Close()'d by Takeover")
 	}
 	// The abort ends Takeover's lease: a marker left behind would park every
-	// later GetOrCreate for the key forever.
-	r.ss.Update(func(tx sessTx) {
-		if _, inflight := tx.Ext().spawns.SpawnInFlight(key); inflight {
-			t.Error("aborted Takeover left its spawn marker")
-		}
-	})
+	// later GetOrCreate for the key forever, a pending slot count against
+	// max_procs until restart.
+	assertNothingHeld(t, r, key)
 }
 
 // A GetOrCreate that lands while Takeover has the lock released to close the

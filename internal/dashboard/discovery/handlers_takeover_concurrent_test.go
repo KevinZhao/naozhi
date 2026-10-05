@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -16,38 +17,31 @@ import (
 
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
-// gatedRouter adapts a real *session.Router the way the server's adapter
-// does, except that a lease's Takeover reports on arrived and then waits for
-// gate, holding open the window in which the CLI is still exiting.
-type gatedRouter struct {
-	r       *session.Router
-	arrived chan struct{}
-	gate    chan struct{}
-}
+// leaseRouter adapts a real *session.Router the way the server's adapter does.
+type leaseRouter struct{ r *session.Router }
 
-func (g gatedRouter) ReserveTakeover(key string, opts session.AgentOpts) (TakeoverLease, error) {
-	lease, err := g.r.ReserveTakeover(key, opts)
+func (a leaseRouter) ReserveTakeover(key string, opts session.AgentOpts) (TakeoverLease, error) {
+	lease, err := a.r.ReserveTakeover(key, opts)
 	if err != nil {
 		return nil, err
 	}
-	return gatedLease{g, lease}, nil
+	return routerLease{a.r, lease}, nil
 }
 
-type gatedLease struct {
-	g     gatedRouter
+type routerLease struct {
+	r     *session.Router
 	lease *session.TakeoverLease
 }
 
-func (l gatedLease) Takeover(ctx context.Context, sessionID, cwd string) error {
-	l.g.arrived <- struct{}{}
-	<-l.g.gate
-	_, err := l.g.r.Takeover(ctx, l.lease, sessionID, cwd)
+func (l routerLease) Takeover(ctx context.Context, sessionID, cwd string) error {
+	_, err := l.r.Takeover(ctx, l.lease, sessionID, cwd)
 	return err
 }
 
-func (l gatedLease) Release() { l.lease.Release() }
+func (l routerLease) Release() { l.lease.Release() }
 
 // startSleeper starts a child that only a signal ends; the returned func
 // kills and reaps it and reports the signal it died of, the first one when
@@ -86,17 +80,31 @@ func postDiscoveredTakeover(h *Handlers, pid int, sessionID, cwd string) *httpte
 
 // TestHandleTakeover_SecondTakeoverOfKeyKeepsItsCLI pins #3417: two external
 // CLIs in one cwd map to one key, and the first takeover holds that key from
-// before its SIGTERM until its spawn, so the second, arriving after the first
-// CLI has exited but before the spawn, is refused and its CLI never signalled.
+// before its SIGTERM until its spawn, so the second, arriving while the first
+// CLI is still exiting, is refused and its CLI never signalled.
 func TestHandleTakeover_SecondTakeoverOfKeyKeepsItsCLI(t *testing.T) {
 	const sid1, sid2 = "aaaaaaaa-bbbb-cccc-dddd-000000000001", "aaaaaaaa-bbbb-cccc-dddd-000000000002"
-	cmd1, reap1 := startSleeper(t)
+	dir := t.TempDir()
+	termed, trapped := filepath.Join(dir, "termed"), filepath.Join(dir, "trapped")
+	// Survives SIGTERM, recording it, so the exit wait lasts until appCtx ends.
+	cmd1 := exec.Command("sh", "-c", `trap 'echo > "$0"' TERM; echo > "$1"; while :; do sleep 0.05; done`, termed, trapped)
+	if err := cmd1.Start(); err != nil {
+		t.Skipf("cannot start child: %v", err)
+	}
+	exited1 := make(chan struct{})
+	go func() { _ = cmd1.Wait(); close(exited1) }()
+	t.Cleanup(func() { _ = cmd1.Process.Kill(); <-exited1 })
+	testhelper.Eventually(t, func() bool {
+		_, err := os.Stat(trapped)
+		return err == nil
+	}, 5*time.Second, "the child never installed its SIGTERM trap")
 	cmd2, reap2 := startSleeper(t)
 	cwd := t.TempDir()
 	key := session.TakeoverKey(session.SanitizeCWDKey(cwd))
 
 	router := session.NewRouter(session.RouterConfig{MaxProcs: 3})
-	arrived, gate := make(chan struct{}, 1), make(chan struct{})
+	appCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	h := New(Deps{
 		Cache: &fakeCache{snapshot: []discovery.DiscoveredSession{
 			{PID: cmd1.Process.Pid, SessionID: sid1, CWD: cwd, ProcStartTime: 100},
@@ -104,33 +112,35 @@ func TestHandleTakeover_SecondTakeoverOfKeyKeepsItsCLI(t *testing.T) {
 		}},
 		NodeAccess:    fakeNodeAccess{},
 		ClaudeDir:     t.TempDir(),
-		Router:        gatedRouter{router, arrived, gate},
+		Router:        leaseRouter{router},
 		ProcStartTime: func(int) (uint64, error) { return 100, nil },
-		AppCtx:        context.Background(),
+		AppCtx:        appCtx,
 	})
 
 	if rec := postDiscoveredTakeover(h, cmd1.Process.Pid, sid1, cwd); rec.Code != http.StatusAccepted {
 		t.Fatalf("first takeover = %d %q, want 202", rec.Code, rec.Body.String())
 	}
-	select {
-	case <-arrived:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the first takeover never got past its exit wait")
-	}
+	testhelper.Eventually(t, func() bool {
+		_, err := os.Stat(termed)
+		return err == nil
+	}, 5*time.Second, "the first takeover's CLI never got its SIGTERM")
 	rec := postDiscoveredTakeover(h, cmd2.Process.Pid, sid2, cwd)
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "takeover already in progress") {
-		t.Fatalf("second takeover of the key = %d %q, want 409 takeover already in progress", rec.Code, rec.Body.String())
+		t.Fatalf("second takeover during the exit wait = %d %q, want 409 takeover already in progress", rec.Code, rec.Body.String())
 	}
 	if sig := reap2(); sig != syscall.SIGKILL {
 		t.Fatalf("the refused takeover's CLI died of %v, not the test's SIGKILL", sig)
 	}
-
-	close(gate)
-	h.Wait()
-	if sig := reap1(); sig != syscall.SIGTERM {
-		t.Errorf("the accepted takeover's CLI died of %v, want its SIGTERM", sig)
+	select {
+	case <-exited1:
+		t.Fatal("the first takeover's CLI exited before the exit wait ended")
+	default:
 	}
-	// The first takeover failed to spawn (no CLI here) and gave the key back.
+
+	// Ends the exit wait; the takeover then fails to spawn (no CLI here) and
+	// gives the key back.
+	cancel()
+	h.Wait()
 	lease, err := router.ReserveTakeover(key, session.AgentOpts{})
 	if err != nil {
 		t.Fatalf("ReserveTakeover after the takeover finished: %v", err)
@@ -151,7 +161,7 @@ func TestHandleTakeover_PidReuseReleasesTheKey(t *testing.T) {
 		}},
 		NodeAccess: fakeNodeAccess{},
 		ClaudeDir:  t.TempDir(),
-		Router:     gatedRouter{r: router},
+		Router:     leaseRouter{router},
 		// Not the request's start time: the PID was reused.
 		ProcStartTime: func(int) (uint64, error) { return 999, nil },
 		AppCtx:        context.Background(),
@@ -193,7 +203,7 @@ func TestHandleTakeover_TermFailureReleasesTheKey(t *testing.T) {
 		}},
 		NodeAccess:    fakeNodeAccess{},
 		ClaudeDir:     t.TempDir(),
-		Router:        gatedRouter{r: router},
+		Router:        leaseRouter{router},
 		ProcStartTime: func(int) (uint64, error) { return 100, nil },
 		AppCtx:        context.Background(),
 	})
