@@ -22,6 +22,8 @@ type fakeCronScheduler struct {
 	deleteJobErr   error
 	pauseJobErr    error
 	resumeJobErr   error
+	setFreshErr    error
+	setFreshPaused bool
 	nextRunResult  time.Time
 	// classifyResult is the wire code ClassifyError returns for any
 	// non-nil error; "" falls back to "unknown" mirroring the real
@@ -34,7 +36,12 @@ type fakeCronScheduler struct {
 	deleteJobCalls int
 	pauseJobCalls  int
 	resumeJobCalls int
-	classifyCalls  int
+	setFreshCalls  int
+	lastSetFresh   struct {
+		idPrefix, plat, chatID string
+		fresh                  bool
+	}
+	classifyCalls int
 }
 
 func (f *fakeCronScheduler) AddJob(req CronJobRequest) (CronJob, time.Time, error) {
@@ -73,6 +80,16 @@ func (f *fakeCronScheduler) ResumeJob(idPrefix, plat, chatID string) (CronJob, t
 		return CronJob{}, time.Time{}, f.resumeJobErr
 	}
 	return CronJob{ID: idPrefix}, f.nextRunResult, nil
+}
+
+func (f *fakeCronScheduler) SetFreshContext(idPrefix, plat, chatID string, fresh bool) (CronJob, error) {
+	f.setFreshCalls++
+	f.lastSetFresh.idPrefix, f.lastSetFresh.plat, f.lastSetFresh.chatID = idPrefix, plat, chatID
+	f.lastSetFresh.fresh = fresh
+	if f.setFreshErr != nil {
+		return CronJob{}, f.setFreshErr
+	}
+	return CronJob{ID: idPrefix, FreshContext: fresh, Paused: f.setFreshPaused}, nil
 }
 
 func (f *fakeCronScheduler) ClassifyError(err error) string {
