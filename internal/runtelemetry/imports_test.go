@@ -2,11 +2,16 @@
 package runtelemetry
 
 import (
+	"fmt"
 	"go/ast"
+	"go/build"
+	"go/constant"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -150,15 +155,42 @@ var cronEnums = map[string]string{"ErrorClass": "ErrClass", "RunState": "RunStat
 
 // TestCronEnumsReexportRuntelemetry pins that cron mints no run enum value of
 // its own: the wire freeze sees only this package's constants, so a cron-local
-// type, literal or conversion would put an unfrozen string on the wire, on
-// disk and over REST. Each enum type must alias this package's, each constant
-// with an enum prefix must re-export one of ours, and cron's production code
-// must not convert into an enum type.
+// value would put an unfrozen string on the wire, on disk and over REST. Each
+// enum type must alias this package's, each top-level enum const must re-export
+// one of ours, cron must not convert into an enum type, and every constant
+// expression of an enum type must name a typed enum constant, so an untyped
+// literal assigned to an enum field, variable or argument fails too. The zero
+// value "" is exempt: a bare `var` declaration yields it without a literal.
 func TestCronEnumsReexportRuntelemetry(t *testing.T) {
 	t.Parallel()
 	fset, files := parseProductionFiles(t, filepath.Join("..", "cron"))
+	info := typeCheckCron(t, fset, files)
 	aliases, reexports := 0, 0
 	for _, f := range files {
+		for _, d := range f.Decls {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			for _, s := range gd.Specs {
+				vs := s.(*ast.ValueSpec)
+				if !isCronEnumConst(vs, info) {
+					continue
+				}
+				reexports++
+				if vs.Type != nil {
+					t.Errorf("%s: const %s names a type; re-export the runtelemetry constant untyped", fset.Position(vs.Pos()), vs.Names[0].Name)
+				}
+				if len(vs.Values) != len(vs.Names) {
+					t.Errorf("%s: const %s has no value of its own; re-export a runtelemetry constant", fset.Position(vs.Pos()), vs.Names[0].Name)
+				}
+				for _, v := range vs.Values {
+					if !namesEnumConst(info, v) {
+						t.Errorf("%s: const %s must name a runtelemetry constant, not a local value", fset.Position(v.Pos()), vs.Names[0].Name)
+					}
+				}
+			}
+		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.TypeSpec:
@@ -168,22 +200,6 @@ func TestCronEnumsReexportRuntelemetry(t *testing.T) {
 				aliases++
 				if n.Assign == 0 || !isRuntelemetrySel(n.Type, n.Name.Name) {
 					t.Errorf("%s: type %s must be `= runtelemetry.%s`", fset.Position(n.Pos()), n.Name.Name, n.Name.Name)
-				}
-			case *ast.ValueSpec:
-				if !isCronEnumConst(n) {
-					return true
-				}
-				reexports++
-				if n.Type != nil {
-					t.Errorf("%s: const %s names a type; re-export the runtelemetry constant untyped", fset.Position(n.Pos()), n.Names[0].Name)
-				}
-				if len(n.Values) != len(n.Names) {
-					t.Errorf("%s: const %s has no value of its own; re-export a runtelemetry constant", fset.Position(n.Pos()), n.Names[0].Name)
-				}
-				for _, v := range n.Values {
-					if !isRuntelemetrySel(v, "") {
-						t.Errorf("%s: const %s must be a runtelemetry constant, not a local value", fset.Position(v.Pos()), n.Names[0].Name)
-					}
 				}
 			case *ast.CallExpr:
 				if name, ok := cronEnumType(n.Fun); ok {
@@ -199,15 +215,120 @@ func TestCronEnumsReexportRuntelemetry(t *testing.T) {
 	if reexports < 20 {
 		t.Errorf("found only %d cron run enum constants: the scan has gone blind", reexports)
 	}
+	var bad []string
+	uses := 0
+	for e, tv := range info.Types {
+		if tv.Value == nil || cronEnumOf(tv.Type) == "" || constant.StringVal(tv.Value) == "" {
+			continue
+		}
+		uses++
+		if !namesEnumConst(info, e) {
+			bad = append(bad, fmt.Sprintf("%s: constant %s of type %s is not a runtelemetry constant", fset.Position(e.Pos()), tv.Value, cronEnumOf(tv.Type)))
+		}
+	}
+	sort.Strings(bad)
+	for _, b := range bad {
+		t.Error(b)
+	}
+	if uses < 50 {
+		t.Errorf("found only %d enum-typed constant expressions in cron: the type check has gone blind", uses)
+	}
 }
 
-// isCronEnumConst reports whether a value spec declares a run enum value: it
-// names an enum type, or one of its names carries an enum's constant prefix.
-func isCronEnumConst(vs *ast.ValueSpec) bool {
+// typeCheckCron type-checks cron's files for this GOOS against this package's
+// own source. Every other import fails and becomes a fake package, so types
+// are known only where they need nothing beyond cron, runtelemetry and
+// builtins; the resulting type errors are expected and ignored.
+func typeCheckCron(t *testing.T, fset *token.FileSet, cron map[string]*ast.File) *types.Info {
+	t.Helper()
+	noImports := importerFunc(func(path string) (*types.Package, error) { return nil, fmt.Errorf("not loaded: %s", path) })
+	ignore := func(error) {}
+	ownFset, own := parseProductionFiles(t, ".")
+	conf := types.Config{Importer: noImports, Error: ignore}
+	rt, _ := conf.Check("github.com/naozhi/naozhi/internal/runtelemetry", ownFset, buildFiles(t, ".", own), nil)
+	conf.Importer = importerFunc(func(path string) (*types.Package, error) {
+		if path == rt.Path() {
+			return rt, nil
+		}
+		return noImports(path)
+	})
+	info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Defs: map[*ast.Ident]types.Object{}, Uses: map[*ast.Ident]types.Object{}}
+	_, _ = conf.Check("github.com/naozhi/naozhi/internal/cron", fset, buildFiles(t, filepath.Join("..", "cron"), cron), info)
+	return info
+}
+
+type importerFunc func(path string) (*types.Package, error)
+
+func (f importerFunc) Import(path string) (*types.Package, error) { return f(path) }
+
+// buildFiles returns the files the current build context compiles, in name
+// order.
+func buildFiles(t *testing.T, dir string, files map[string]*ast.File) []*ast.File {
+	t.Helper()
+	var names []string
+	for name := range files {
+		ok, err := build.Default.MatchFile(dir, name)
+		if err != nil {
+			t.Fatalf("match %s: %v", name, err)
+		}
+		if ok {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	out := make([]*ast.File, len(names))
+	for i, name := range names {
+		out[i] = files[name]
+	}
+	return out
+}
+
+// cronEnumOf returns the name of the run enum typ is, or "".
+func cronEnumOf(typ types.Type) string {
+	n, ok := types.Unalias(typ).(*types.Named)
+	if !ok || n.Obj().Pkg() == nil || n.Obj().Pkg().Path() != "github.com/naozhi/naozhi/internal/runtelemetry" {
+		return ""
+	}
+	if _, ok := cronEnums[n.Obj().Name()]; !ok {
+		return ""
+	}
+	return n.Obj().Name()
+}
+
+// namesEnumConst reports whether e is a reference to a constant declared with
+// a run enum type, which cron's own const check pins to runtelemetry's.
+func namesEnumConst(info *types.Info, e ast.Expr) bool {
+	e = ast.Unparen(e)
+	if s, ok := e.(*ast.SelectorExpr); ok {
+		e = s.Sel
+	}
+	id, ok := e.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	c, ok := info.Uses[id].(*types.Const)
+	return ok && cronEnumOf(c.Type()) != ""
+}
+
+// isCronEnumConst reports whether a top-level const spec declares a run enum
+// value: it is enum-typed, or a name carries an enum's constant prefix and its
+// type is a string. A const whose type derives from an unloaded package is
+// unknown and not counted.
+func isCronEnumConst(vs *ast.ValueSpec, info *types.Info) bool {
 	if _, ok := cronEnumType(vs.Type); ok {
 		return true
 	}
 	for _, name := range vs.Names {
+		obj := info.Defs[name]
+		if obj == nil {
+			continue
+		}
+		if cronEnumOf(obj.Type()) != "" {
+			return true
+		}
+		if b, ok := obj.Type().Underlying().(*types.Basic); !ok || b.Info()&types.IsString == 0 {
+			continue
+		}
 		for _, prefix := range cronEnums {
 			if strings.HasPrefix(name.Name, prefix) {
 				return true
