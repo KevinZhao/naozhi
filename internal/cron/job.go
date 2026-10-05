@@ -215,8 +215,8 @@ var transientTurnCauses = map[TurnCause]bool{
 // streakEffect is how the run moves the failure streak. A success resets it.
 // Failures the job did not cause leave it alone: a run the restart reconciler
 // closed as an orphan, and a turn failed by a transient backend cause. So do
-// skipped and canceled runs. A live lost sandbox connection counts: a microVM
-// that crashes on every run is the job's problem.
+// skipped and canceled runs. A live lost sandbox connection counts whichever
+// end dropped it: a microVM that crashes on every run is the job's problem.
 func (o runOutcome) streakEffect() streakEffect {
 	switch o.state {
 	case RunStateSucceeded:
