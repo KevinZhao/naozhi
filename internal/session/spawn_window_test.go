@@ -547,7 +547,7 @@ func TestSpawnSession_TakeoverIsNotRespawned(t *testing.T) {
 	}
 	out := make(chan result, 1)
 	go func() {
-		s, err := r.Takeover(context.Background(), key, "sid-external", t.TempDir(), AgentOpts{})
+		s, err := reserveAndTakeover(context.Background(), r, key, "sid-external", t.TempDir(), AgentOpts{})
 		out <- result{s, err}
 	}()
 	waitEntered(t, g)

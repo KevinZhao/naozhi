@@ -149,13 +149,15 @@ cli:
 /cron add --keep-context "0 18 * * *" 接着昨天的进度写日报
 /cron list
 /cron pause <id>
+/cron mode <id> fresh
 ```
 
 - 标准 cron 表达式 + `@every` 语法
 - 聊天里创建的任务默认每次执行都从新会话开始；加 `--keep-context` 则延续同一会话（`/cron list` 标 `[保留上下文]`）。两种任务在两次执行之间都不常驻 CLI 进程，保留上下文的任务下次执行时恢复同一会话
+- 创建后可在创建该任务的会话发送 `/cron mode <id> fresh|keep` 切换，下次执行生效（正在执行的那次不受影响），连续失败计数清零
 - 每 chat 10 个 / 全局 50 个配额
 - 执行结果自动回推到聊天
-- 连续失败 5 次自动暂停（`cron.auto_pause_after_failures` 可调；后端瞬时故障和重启后收尾的孤儿云沙箱 run 不计），修复后在创建该任务的会话发送 `/cron resume <id>`，或在控制台恢复
+- 连续失败 5 次自动暂停（`cron.auto_pause_after_failures` 可调；重启后收尾的孤儿云沙箱 run 不计，后端瞬时故障也不计，但同样次数的瞬时故障持续满 6 小时也会暂停），修复后在创建该任务的会话发送 `/cron resume <id>`，或在控制台恢复
 
 ### 语音转文字
 
@@ -360,6 +362,7 @@ Dashboard: 浏览器打开 `http://localhost:8180`
 | `/cron add [--keep-context] "<schedule>" <prompt>` | 创建定时任务（默认每次新会话） |
 | `/cron list` | 查看定时任务 |
 | `/cron del/pause/resume <id>` | 管理定时任务 |
+| `/cron mode <id> fresh\|keep` | 切换定时任务是否每次从新会话开始 |
 | `/help` | 显示可用命令 |
 
 Agent 命令通过 `agent_commands` 配置映射，可自定义。

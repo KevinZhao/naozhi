@@ -467,7 +467,7 @@ func TestAutoPause_PersistFailureLeavesJobActive(t *testing.T) {
 	s, _, ns, id := newAutoPauseScheduler(t, 1, "feishu")
 	s.editJobForTest(t, id, func(j *Job) { j.ConsecutiveFailures = 1 })
 	withFailingMarshal(t, s)
-	if got := s.autoPauseIfDue(id); got != 0 {
+	if got := s.autoPauseIfDue(id, false); got != 0 {
 		t.Fatalf("autoPauseIfDue with a failing persist = %d, want 0", got)
 	}
 	j := s.jobForTest(t, id)

@@ -1212,6 +1212,8 @@ running（5），否则探针行 6 的 B（`state:"start"`，只有 queuedAt）�
    CC 若改键序，前缀不命中，帧落到 :475 的结构性兜底，只是变慢。兜底里的
    `if ev.Type == "control_response" { return nil }`（:478）改为同样调用 `parseControlAck`
    （或直接用已解出的 ev 构造 ack），否则键序变化会让 `SetModel` 等 ack 的调用阻塞，而不只是变慢。
+   兜底的 hook 判断同时由 `hook_started` / `hook_response` 放宽为 `strings.HasPrefix(ev.SubType, "hook_")`，
+   与快路径的通配（R250531-PERF-9）一致；否则键序变化时 `hook_progress` 这类帧会漏给消费方，而键序正常时被丢。
 4. **Workflow tool_use 的 Detail**：`clievent/tool_input.go` `FormatToolInput` 增
    `case "Workflow":`，只解 `scriptPath`（取 basename）——输出 `Workflow <basename>` 或单独
    `Workflow`；**永不**读取 `script` / `args`。pin 测试：input 含 `script` / `args` 时 Detail 中
@@ -2234,8 +2236,10 @@ claudeDir 来源"不成立。但 v2 说"由 router 注入的 claudeDir 求出一
 
 - 新导出 `claudefs.ResolvedProjectsRoot(claudeDir string) string`：`ProjectsRoot(claudeDir)` 后 `EvalSymlinks`，失败（首次运行）回落词法路径——
   即把 `agentevents.claudeProjectsAllowedRoot` 的逻辑搬进 claudefs。
-- **server 侧**在构造时由 `resolveClaudeDir()` 的结果调用一次，传给 `agentevents.Deps.ProjectsRoot`（新字段；为空时回落旧逻辑，
-  测试不受影响）、workflows handler 的 Deps，以及 `HubOptions.AllowedRoot`（复用既有槽位，见 §8.3、PR-4）。
+- **server 侧**在构造时由 `resolveClaudeDir()` 的结果调用一次，存进未导出的 `wiring.projectsRoot`（`handler_set.go`），再传给
+  `agentevents.Deps.ProjectsRoot`（新字段；**不回落**：为空即 fail closed，否则漏接线时 agentevents 会从同一个 `$HOME` 再推一个根，
+  测试分不出来；`claudeProjectsAllowedRoot` 只留在测试里）、workflows handler 的 Deps，以及 `HubOptions.AllowedRoot`（复用既有槽位，
+  经 `tailerAllowedRoot` 填入，见 §8.3、PR-4）。`agentevents.Handler.ProjectsRoot()` getter 让 server 包的测试能断言两边拿到同一个根。
 - **session 侧**在 `NewRouter` 里由 `RouterConfig.ClaudeDir` 调用一次，存进 `HistoryIO.projectsRoot`（与 `claudeDir` 同处，
   `history_io.go:24-27`；**不**加 Router 字段，`routerFieldBaseline = 18`；PR-8 落地，因为 PR-8 的 `newWorkflowBoard(r.hist.projectsRoot)` 就要用）。
   board 的路径解析、§5.6 的结果文件读取、sweeper、R3 都只用它。测试经 `RouterConfig.ClaudeDir` 注入。
@@ -2281,7 +2285,8 @@ type WorkflowRun struct {
   `rel` 为该祖先**之下**的分量。`PathContainedInRoot` 改为 `_, ok := RelUnderRoot(...)` 的薄包装，行为不变。
 - **为什么要重拼**：inode 兜底放行的恰是大小写与 root 不同的路径，而下游的门全按字节前缀判断——agentevents 的 `jsonlPathUnderAllowedRoot`
   （`handler.go:309-346`，§8.2 原样复用）与结构检查都会把它判为越界，于是"已过 containment 的 run dir"在 drill-in 时 404。重拼之后 RunDir 的前缀与
-  projectsRoot 逐字节相同，下游无需各自处理大小写；PR-4 另把 agentevents 的最终比较也换成 `PathContainedInRoot`（与 tailer registry 一致），作为纵深。
+  projectsRoot 逐字节相同，下游无需各自处理大小写；PR-4 另把 agentevents 的最终比较也换成 `PathContainedInRoot(filepath.Dir(abs), root)`
+  （与 tailer registry 一致：问的是父目录，即严格在 root 之下；root 本身换个大小写也按 inode 命中，直接问 `abs` 会把它放行），作为纵深。
   实际只有来源 1（CLI 给出的 transcriptDir）可能与 root 大小写不同；来源 2、3 由 projectsRoot 拼出。
 
 结果写进 board 的 `resolve[task]`、随 Published 发布为 `Workflow.RunDir`（board 是唯一写者），所有读者——session 层的结果文件读取、
@@ -2330,7 +2335,7 @@ remote-node 分支（:121-140）**之后**、`linkerForSession` / `linker == nil
 
 - `TranscriptPending`：命中且有 agentId（当前或历史 attempt），但 board 的 RunDir 尚未解析完成（§5.8"RunDir 解析"）→ **202 `{"status":"pending"}`**（同下面"未落盘"）。
 - `TranscriptReady` → `jsonlPath = SubagentJSONL(runDir, agentID)`（runDir 来自 board、已按 projectsRoot 拼写重拼，§8.1），过既有
-  `jsonlPathUnderAllowedRoot`（:165；PR-4 起最终比较用 `PathContainedInRoot`；opener 本身已 root 锚定，这一步是纵深）：
+  `jsonlPathUnderAllowedRoot`（:165；PR-4 起最终比较用 `PathContainedInRoot(filepath.Dir(abs), root)`，严格在 root 之下；opener 本身已 root 锚定，这一步是纵深）：
   - 经 `AgentTranscript.Open()`（root 锚定的 `osutil.OpenRegularIn(root, rel, 0)`，§10）打开：不存在或文件为空 → **202 `{"status":"pending"}`**（agentId 先于 transcript 落盘；复用
     `agent_view.js:236-258` 的有界重试，而不是 404 触发 toast + `switchTo(null)`，:259-262）；
   - 存在但不是 regular file（含 FIFO、symlink）→ 404；
@@ -2394,9 +2399,13 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
   `claudefs.ResolvedProjectsRoot(claudeDir)` 放进 **既有的 `HubOptions.AllowedRoot`**——在 `internal/server` 里它只被
   `wshub.go:156 newTailerRegistry(opts.AllowedRoot)` 读取，换掉值不影响别处；`build_handlers.go` / `build_dispatch.go` 用的是各自
   struct 的 `AllowedRoot`（`w.allowedRoot`，operator workspace），不动。这样不加 HubOptions 字段（`hubOptionsFieldBaseline = 16`，
-  `-mode fail`），也不给 Router 加访问器（Router 方法预算）。registry 与 agentevents 的 `jsonlPathUnderAllowedRoot`
-  （`handler.go:309-346`）的最终比较都改用 `osutil.PathContainedInRoot(resolved, root)`（候选在前），两处对大小写不敏感文件系统的判定一致。
-  `wshub_wired_linkers_test.go:89-92` 钉的 `tailers.allowedRoot == HubOptions.AllowedRoot` 仍成立，只是断言的值改为 projects root。
+  `-mode fail`），也不给 Router 加访问器（Router 方法预算）。root 由 `buildServer` 求一次、经未导出的 `wiring.projectsRoot` 带到
+  `buildWSStack`；为空（`os.UserHomeDir` 失败）时 `tailerAllowedRoot` 换成相对路径哨兵 `unresolvedProjectsRoot`——registry 的空 root
+  表示不限制，而相对 root 什么都不包含（`jsonlPathUnderAllowedRoot` 拒绝非绝对 root），与 agentevents 的空 root 同样 fail closed。
+  registry 与 agentevents 的 `jsonlPathUnderAllowedRoot`（`handler.go:309-346`）的最终比较都改用
+  `osutil.PathContainedInRoot(filepath.Dir(abs), root)`（候选在前；问父目录才能在 inode 兜底下仍拒绝 root 本身），两处对大小写不敏感文件系统的判定一致。
+  原 `wshub_wired_linkers_test.go:89-92` 与 `TestBuildServer_SharesOneWSStack` 钉的 `engine.allowedRoot == tailers.allowedRoot` 恰是该 bug，
+  改为分别断言 engine = workspace、tailer = projects root；生产配置用例 `TestBuildServer_TailerRootIsProjectsRoot`。
 - **按需、不自动**：workflow agent 不注册 OnResolve，不自动起 tailer；50 上限
   （`agent_tailer.go:33`）与普通 Agent 共享，超出走既有 capacity → HTTP poll 降级。
 - **agent_done**：workflow agent 不会收到 per-agent `task_notification`（parent 的通知携带的是
@@ -2613,7 +2622,7 @@ workflowPushLoop 与 board 发布、generation 变化并发。
 | R6 | 保活改动让 session 永不过期 | `workflowPinMax=6h` 无观测后放开；scratch 按观测时间老化；驱逐有回退 |
 | R7 | shim idle timer 不随 stdout 刷新，naozhi 断开 > 4h 仍杀 CLI | 既有行为，记录；另开 issue |
 | R8 | js-ratchet / 前端闸门多 | 预先申请覆盖全特性的 ratchet-raise issue；逐 PR 台账；DOM API 构建零新增 sink |
-| R9 | hook / control_response 改为行首锚定后，CC 改键序时快路径失效 | 结构性兜底已存在（`protocol_claude.go:475`）且 control_response 兜底改走 `parseControlAck`；fixture 断言前缀形态 |
+| R9 | hook / control_response 改为行首锚定后，CC 改键序时快路径失效 | 结构性兜底已存在（`protocol_claude.go:475`）且 control_response 兜底改走 `parseControlAck`、hook 兜底按 `hook_*` 通配，键序变化只变慢；前缀形态按 CC 2.1.288 bundle 的帧构造（`{type:"system",subtype:"hook_…"}`、`{type:"control_response",response:…}`）核对，快路径测试以该形态的 fixture 断言不经 unmarshal；stream-sample 不含这两类帧，真实抓帧的 golden 留待 PR-5 刷新 fixture 时补 |
 | R10 | 修 tailer allowedRoot 改变既有行为（更多 tailer 真正起来，触及 50 上限） | 50 上限与 capacity 降级本已存在；PR 描述记录 |
 | R11 | CC 状态 / 词表再变（新 state、新 status） | 规范化表单点实现 + unknown 透传 + 手写 fixture 随升级刷新 |
 | R12 | 计数型 sessions_update（`BumpVersion`，推进 `stats.version`）让每个 tab 每 30s 重拉一次 `/api/sessions`、整块重绘 sidebar 并重跑 main-state reconcile 等 applied hooks | 仅限有 running workflow 的 session、每 session 至多 1/30s；trailing edge 合并；不置 dirty、不写 sessions.json；代价写明（§5.8） |
@@ -2633,10 +2642,11 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
 ### PR-1 fix(cli): hook/control_response 快速跳过改为行首锚定
 
 - 范围：§5.1(3)。
-- 文件：`internal/cli/protocol_claude.go`（:451、:454、:478 兜底）、`internal/cli/protocol_claude_test.go`。
+- 文件：`internal/cli/protocol_claude.go`（:451、:454、:472-481 兜底）、`internal/cli/protocol_claude_skipfastpath_test.go`、
+  `internal/cli/protocol_claude_hook_wildcard_test.go`（既有快路径测试文件；`protocol_claude_test.go` 不存在）。
 - 测试：`"label":"hook_tests"` 快照帧不再被丢；assistant tool_use `input` 含 `{"subtype":"hook_started"}` /
   `{"type":"control_response"}` 的帧照常交付（旧代码失败）；真实 hook / control_response 帧仍走快路径；
-  键序不同的 control_response 经兜底仍得到 ack。
+  键序不同的 control_response 经兜底仍得到 ack，键序不同的 `hook_*` 帧经兜底仍被丢。
 - 验收：现有 hook skip 测试全绿；新回归测试在 master 上失败、在本 PR 上通过。
 - 依赖：无。
 
@@ -2673,15 +2683,16 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   而 PR-9 依赖 PR-8）。
 - 文件：新导出 `internal/claudefs` 的 `ResolvedProjectsRoot`、`internal/claudefs/path.go` 的 `IsValidWorkflowRunID` + test；
   `internal/dashboard/ext/agentevents/handler.go`
-  （`Deps.ProjectsRoot` 新字段，`New` 优先用它、为空回落；`claudeProjectsAllowedRoot` 改调 claudefs helper；`jsonlPathUnderAllowedRoot`
-  的最终比较改用 `osutil.PathContainedInRoot(resolved, root)`，候选在前）；
-  `internal/server/build_server.go`（:66 的 claudeDir 求一次 root，:192 传给 `agentevents.New`）；`build_dashboard.go`（:113
-  **`HubOptions.AllowedRoot` 改填 projects root**——它在 server 包里只被 `wshub.go:156` 读，不加字段，`hubOptionsFieldBaseline = 16`）；
-  `agent_tailer_registry.go`（:49、:186-191 改用 `osutil.PathContainedInRoot`）、`agent_tailer_pathcheck.go`；
-  `wshub_wired_linkers_test.go`（:89-92 断言值改为 projects root）；测试。
+  （`Deps.ProjectsRoot` 新字段，`New` 只用它、为空 fail closed、不回落；`claudeProjectsAllowedRoot` 移进测试；新 getter
+  `Handler.ProjectsRoot()`；`jsonlPathUnderAllowedRoot` 的最终比较改用 `osutil.PathContainedInRoot(filepath.Dir(abs), root)`，候选在前）；
+  `internal/server/build_server.go`（:66 的 claudeDir 求一次 root 存进 `wiring.projectsRoot`（`handler_set.go`），传给 `agentevents.New`）；
+  `build_dashboard.go`（:113 **`HubOptions.AllowedRoot` 改填 `tailerAllowedRoot(w.projectsRoot)`**——它在 server 包里只被 `wshub.go:156` 读，
+  不加字段，`hubOptionsFieldBaseline = 16`）；`agent_tailer_registry.go`（:49、:186-191 注释）、`agent_tailer_pathcheck.go`（`PathContainedInRoot`、
+  拒绝相对 root、`tailerAllowedRoot` / `unresolvedProjectsRoot`）；`wshub_wired_linkers_test.go`、`hub_test_port_test.go`、
+  `send_engine_contract_test.go`（engine 与 tailer 不再共用 root）；测试。
 - 测试：生产配置（workspace ≠ projects root）下 ensureTailer 接受 transcript、拒绝 projects 外路径；
   非对称 symlink 仍拒（#1533 用例保留）；agentevents 与 tailer 拿到同一个 root；`IsValidWorkflowRunID` 的正反例（`..`、`/`、`wf_`、超长）；
-  darwin 上 root 与路径大小写不同时 agentevents 与 tailer 判定一致。
+  darwin 上 root 与路径大小写不同时 agentevents 与 tailer 判定一致（root 本身换大小写仍拒）；home 不可解析时 agentevents 与 tailer 都 fail closed。
 - 验收：本地 Agent drill-in 走 WS 实时而非 3s poll（devtools 可见 agent_event 帧）；`lint-server-handlers -mode fail` 不抬基线。
 - 依赖：无。
 

@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -431,6 +433,50 @@ func buildAccessProfiles(in map[string]config.AccessProfile) map[string]session.
 		}
 	}
 	return out
+}
+
+// profileBackendNotice is one access profile whose default_backend sends new
+// sessions somewhere other than the router default.
+type profileBackendNotice struct {
+	Profile        string
+	DefaultBackend string
+	RouterDefault  string
+	IsDefault      bool // the profile is default_access_profile
+}
+
+// profileDefaultBackendNotices lists, sorted by profile id, the profiles whose
+// default_backend is set and differs from routerDefault (the backend startup
+// actually bound, not cli.backend). An equal value changes nothing and is
+// skipped.
+func profileDefaultBackendNotices(profiles map[string]config.AccessProfile, defaultProfile, routerDefault string) []profileBackendNotice {
+	var out []profileBackendNotice
+	for _, id := range slices.Sorted(maps.Keys(profiles)) {
+		be := profiles[id].DefaultBackend
+		if be == "" || be == routerDefault {
+			continue
+		}
+		out = append(out, profileBackendNotice{Profile: id, DefaultBackend: be, RouterDefault: routerDefault, IsDefault: id == defaultProfile})
+	}
+	return out
+}
+
+// logProfileDefaultBackends tells the operator at boot which access profiles
+// route new sessions off the router default. It is a Warn for
+// default_access_profile, which reaches every new session that resolves to no
+// other profile and has no backend pin.
+func logProfileDefaultBackends(cfg *config.Config, routerDefault string) {
+	const hint = "existing sessions keep their recorded backend; agents[].backend and a project backend override it; see `naozhi config check --effective`"
+	for _, n := range profileDefaultBackendNotices(cfg.AccessProfiles, cfg.DefaultAccessProfile, routerDefault) {
+		if n.IsDefault {
+			slog.Warn("access_profiles["+n.Profile+"].default_backend applies to every new session with no other access profile (it is default_access_profile)",
+				"default_backend", n.DefaultBackend, "router_default", n.RouterDefault,
+				"scope", "new sessions with no other access_profile and no agent, project or dashboard backend pin", "hint", hint)
+			continue
+		}
+		slog.Info("access_profiles["+n.Profile+"].default_backend applies to new sessions under this profile",
+			"default_backend", n.DefaultBackend, "router_default", n.RouterDefault,
+			"scope", "new sessions on keys resolved to this profile", "hint", hint)
+	}
 }
 
 // backendHistoryDir returns the expanded transcript directory a backend keeps its

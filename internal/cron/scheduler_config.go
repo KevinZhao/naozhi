@@ -125,13 +125,14 @@ type SessionRouter interface {
 var ErrSessionCapacity = errors.New("cron: session capacity reached")
 
 // ErrTurnFailed marks a Send whose result frame reported the turn failed (the
-// backend's is_error) rather than an abort naozhi asked for. The run is
-// recorded as failed with ErrClassTurnFailed instead of succeeding with an
-// empty or raw-error result.
+// backend's is_error) rather than an abort naozhi asked for, or whose CLI
+// exited because it could not resume the session. The run is recorded as
+// failed with ErrClassTurnFailed instead of succeeding with an empty or
+// raw-error result.
 var ErrTurnFailed = errors.New("cron: turn failed")
 
-// TurnCause is why a turn failed, as far as the backend's result says; the
-// failure notice words each one. The zero value is a cause nobody named.
+// TurnCause is why a turn failed, as far as the backend's result or the CLI's
+// exit says; the failure notice words each one. The zero value is a cause nobody named.
 type TurnCause string
 
 const (
@@ -148,6 +149,7 @@ const (
 	TurnCauseBackendAuth        TurnCause = "backend_auth"
 	TurnCauseBackendInvalid     TurnCause = "backend_invalid_request"
 	TurnCauseBackendUnreachable TurnCause = "backend_unreachable"
+	TurnCauseResumeUnavailable  TurnCause = "resume_unavailable"
 )
 
 // TurnFailedError is ErrTurnFailed with the cause the session side found;
@@ -238,7 +240,8 @@ type SchedulerConfig struct {
 	SlowThreshold time.Duration
 	// AutoPauseAfterFailures pauses a job after this many consecutive failed
 	// or timed-out runs, so a broken job stops notifying every tick; a sandbox
-	// run orphaned by a restart and a transient backend failure do not count.
+	// run orphaned by a restart and a transient backend failure do not count,
+	// though this many transient ones spanning transientAutoPauseWindow do.
 	// Zero means defaultAutoPauseAfterFailures; negative disables auto-pause.
 	AutoPauseAfterFailures int
 	// AllowNilRouter opts the constructor out of the boot-time "router

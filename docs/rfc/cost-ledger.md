@@ -159,7 +159,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 - 生命周期与 `lastCumulativeCost` 逐点对齐：
   - respawn：`installFreshSessionLocked`（`router_lifecycle.go:859`, `:900-902`）置零 `lastCumulative`，承接 `costSpent`；
   - 同进程迁移：`RenameSession`（`router_lifecycle.go:1283`, `:1335-1336`）同时拷贝 `costSpent` 与 `lastCumulative`；
-  - 被替换的会话之后还会记账（异步的进程结束 partial、迟到的 result）。respawn 提交与 rename 拷贝时，在旧会话的同一段 `costMu` 内把它链到新会话（`successor`），并把快照之后记在旧会话上的花费补给新会话；此后旧会话上的 `costSpent` / `spent` 增量沿链转给链尾的活会话（`addSpent`，逐个加锁、不嵌套）。respawn 的旧进程基线仍留在旧会话上差分；rename 的新会话跑的是同一进程，旧会话收到的读数整个交给新会话差分，不会被新会话的下一轮重算一次。账本行：respawn 前后是同一个 key，旧会话记的行仍写在这个 key 下；rename 后旧会话收到的读数由新会话记账，行写在新 key 下（只写一次）。
+  - 被替换的会话之后还会记账（异步的进程结束 partial、迟到的 result）。respawn 提交与 rename 拷贝时，在旧会话的同一段 `costMu` 内把它链到新会话（`successor`），并把快照之后记在旧会话上的花费补给新会话；此后旧会话上的 `costSpent` / `spent` 增量沿链转给链尾的活会话（`addSpent`，逐个加锁、不嵌套）。respawn 的旧进程基线仍留在旧会话上差分；rename 的新会话跑的是同一进程，旧会话收到的读数整个交给新会话差分，不会被新会话的下一轮重算一次。账本行：旧会话自己记的行写在链尾活会话的 key 下（`ledgerKey`，同样逐个加锁），`job_id` 仍取旧会话自己的 key；respawn 前后是同一个 key，所以只有 respawn 之后新会话又被 rename 时才有区别：旧会话迟到的 partial / result 记在 rename 后的新 key 下，不会落在已消失的 scratch key 上。rename 后旧会话收到的读数由新会话记账，行写在新 key 下（只写一次）。
   - 重启恢复（shim reconnect，`router_shim.go:68-77`：CLI 是**同一 incarnation** 继续累计，这正是 `LastCumulativeCost` 要持久化的原因）：`router_core.go:825-833` 只恢复 USD 分量。`Metered` 基线 0 是正确的（`Process.meteringUsage` 是 naozhi 侧累加器，新 Process 对象归零）；`Models` 基线未知，若全额记入首 turn 会虚高，故 **restore 后首个 turn 的 `Models` 置空且跳过偏差 warn**（`Amount` 仍由 USD 差分保证正确），从第二 turn 起正常。不额外持久化 Models 基线。
 - `costMu` 保持叶子锁：其内只做差分与原子存储，**不得调用任何外部方法**（`ledger.Append`、slog 均在锁外）。
 - `finishRun` 拆为两段：

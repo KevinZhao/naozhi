@@ -423,8 +423,8 @@ type spawnReservation struct {
 	opts     AgentOpts
 	doneCh   chan struct{}
 	// guard is the in-flight marker the caller installed before reserving
-	// (ResetAndRecreate, across its unlocked close); reserveSpawn takes it
-	// over. Nil when the reservation installs its own.
+	// (ResetAndRecreate across its unlocked close, a takeover lease);
+	// reserveSpawn takes it over. Nil when the reservation installs its own.
 	guard     chan struct{}
 	slot      pendingSpawnSlot
 	spawnOpts cli.SpawnOptions
@@ -472,15 +472,17 @@ var errSpawnStale = errors.New("the resumed session left the table during the sp
 func (r *Router) reserveSpawn(tx sessTx, res *spawnReservation, key, resumeID string, opts AgentOpts) error {
 	// Shutdown gate (#1822): r.stopped is set in the same transaction as
 	// Shutdown's snapshot, so gate and snapshot are mutually exclusive and a
-	// late spawn cannot install a shim+CLI the snapshot missed.
+	// late spawn cannot install a shim+CLI the snapshot missed. A guard the
+	// caller installed is ended too, so nothing is left reserved.
 	if r.stopped.Load() {
+		tx.Ext().spawns.EndSpawn(key, res.guard)
 		return ErrRouterStopped
 	}
 
 	// Mark this key as spawning so ReconnectShims does not treat the fresh
 	// shim's state file as an orphan, and concurrent GetOrCreates park on the
 	// done-channel instead of spawning too. A guard the caller pre-installed
-	// (res.guard, ResetAndRecreate) is reused so the marker stays continuous
+	// (res.guard: ResetAndRecreate, a TakeoverLease) is reused so the marker stays continuous
 	// (#775); anyone else's in-flight spawn is refused, not joined — joining
 	// runs two spawns for one key and ends the guard twice. From here on any
 	// failure, error or panic, ends the marker so no waiter is left parked.

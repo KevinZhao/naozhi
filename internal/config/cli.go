@@ -1,6 +1,10 @@
 package config
 
-import "github.com/naozhi/naozhi/internal/cli/backend"
+import (
+	"fmt"
+
+	"github.com/naozhi/naozhi/internal/cli/backend"
+)
 
 type AgentConfig struct {
 	Model string   `yaml:"model"`
@@ -185,4 +189,23 @@ func (c *Config) StartupDefaultBackendID() string {
 		return want
 	}
 	return fallback
+}
+
+// DefaultBackendFallback explains why StartupDefaultBackendID differs from
+// DefaultBackendID, naming both ids, or returns "" when they agree. Validate
+// and doctor share it so the two report the fallback in the same words.
+func (c *Config) DefaultBackendFallback() string {
+	want, got := c.DefaultBackendID(), c.StartupDefaultBackendID()
+	if want == got {
+		return ""
+	}
+	why := "is not listed in cli.backends"
+	if _, ok := backend.Get(want); !ok {
+		why = "is not a registered backend id"
+	}
+	subject := fmt.Sprintf("%q", want)
+	if c.CLI.Backend == "" {
+		subject = fmt.Sprintf("unset, and the first cli.backends entry %q", want)
+	}
+	return fmt.Sprintf("%s %s; startup falls back to %q", subject, why, got)
 }

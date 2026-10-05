@@ -13,6 +13,7 @@ package session
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -22,7 +23,12 @@ import (
 
 // TestProcess is a mock processIface for use in tests outside the session package.
 type TestProcess struct {
-	EventLog       *ring.EventLog
+	// mu guards StateVal and AliveVal: Close/Kill write them from the
+	// router while stream and sweep goroutines read State/Alive.
+	mu       sync.RWMutex
+	EventLog *ring.EventLog
+	// StateVal and AliveVal are initial values. Set them before the process
+	// reaches a session; afterwards use SetState/SetAlive and State/Alive.
 	StateVal       cli.ProcessState
 	AliveVal       bool
 	DeathReasonVal string
@@ -59,11 +65,43 @@ func NewTestProcess() *TestProcess {
 	}
 }
 
-func (p *TestProcess) Alive() bool     { return p.AliveVal }
-func (p *TestProcess) IsRunning() bool { return p.StateVal == cli.StateRunning }
-func (p *TestProcess) Close()          { p.AliveVal = false; p.StateVal = cli.StateDead }
-func (p *TestProcess) Kill()           { p.AliveVal = false; p.StateVal = cli.StateDead }
+func (p *TestProcess) Alive() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.AliveVal
+}
+
+func (p *TestProcess) IsRunning() bool { return p.State() == cli.StateRunning }
+func (p *TestProcess) Close()          { p.markDead() }
+func (p *TestProcess) Kill()           { p.markDead() }
 func (p *TestProcess) Interrupt()      {}
+
+func (p *TestProcess) markDead() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.AliveVal = false
+	p.StateVal = cli.StateDead
+}
+
+// SetState changes the reported state of a process a session may already hold.
+func (p *TestProcess) SetState(st cli.ProcessState) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.StateVal = st
+}
+
+// SetAlive changes the reported liveness of a process a session may already hold.
+func (p *TestProcess) SetAlive(alive bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.AliveVal = alive
+}
+
+func (p *TestProcess) State() cli.ProcessState {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.StateVal
+}
 
 func (p *TestProcess) InterruptViaControl() error {
 	if p.InterruptViaControlFunc != nil {
@@ -100,7 +138,6 @@ func (p *TestProcess) PassthroughDepth() int { return 0 }
 func (p *TestProcess) SupportsPassthrough() bool { return p.PassthroughVal }
 
 func (p *TestProcess) SessionID() string                      { return "" }
-func (p *TestProcess) State() cli.ProcessState                { return p.StateVal }
 func (p *TestProcess) DeathReason() string                    { return p.DeathReasonVal }
 func (p *TestProcess) DeathDetail() string                    { return p.DeathDetailVal }
 func (p *TestProcess) TotalCost() float64                     { return 0 }

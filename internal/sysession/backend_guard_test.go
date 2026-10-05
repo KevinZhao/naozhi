@@ -5,12 +5,11 @@ import (
 	"testing"
 )
 
-// TestNewRunner_RefusesNonClaudeBackend: runnerImplBaseArgs is Claude's one-shot
-// argv. Before this guard, a deployment with cli.default = kiro handed kiro's
-// binary `-p --output-format json --setting-sources ""` — which kiro rejects,
-// since it speaks ACP — so every daemon tick failed with a message about argv
-// while the cost was still booked to "claude". The failure is now at
-// construction, naming the backend choice.
+// TestNewRunner_RefusesNonClaudeBackend: NewRunner refuses a non-claude backend
+// (cli.backend: kiro) at construction, naming the backend choice.
+// runnerImplBaseArgs is Claude's one-shot argv, which kiro rejects since it
+// speaks ACP; running it anyway would fail every daemon tick on argv while the
+// cost was still booked to "claude".
 func TestNewRunner_RefusesNonClaudeBackend(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

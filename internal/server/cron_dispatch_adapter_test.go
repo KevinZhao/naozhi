@@ -250,3 +250,35 @@ func TestCronDispatchAdapter_AddJobErrorsClassify(t *testing.T) {
 		t.Errorf("AddJob for another chat: %v; the refusal above must come from the per-chat cap, not the global one", err)
 	}
 }
+
+// SetFreshContext crosses the adapter both ways: the projection carries the
+// new mode, and a refusal keeps its sentinel so ClassifyError still tells a
+// foreign job from an ambiguous prefix.
+func TestCronDispatchAdapter_SetFreshContext(t *testing.T) {
+	a := cronDispatchAdapter{s: newAdapterTestScheduler(t)}
+	req := dispatch.CronJobRequest{Schedule: "@every 30m", Prompt: "p", Platform: "feishu", ChatID: "c1"}
+	job, _, err := a.AddJob(req)
+	if err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	for _, fresh := range []bool{true, false} {
+		got, err := a.SetFreshContext(job.ID, "feishu", "c1", fresh)
+		if err != nil || got.ID != job.ID || got.FreshContext != fresh {
+			t.Fatalf("SetFreshContext(%v) = (%+v, %v), want the job with FreshContext=%v", fresh, got, err, fresh)
+		}
+		if listed := a.ListJobs("feishu", "c1"); len(listed) != 1 || listed[0].FreshContext != fresh {
+			t.Errorf("ListJobs after SetFreshContext(%v) = %+v", fresh, listed)
+		}
+	}
+	_, err = a.SetFreshContext(job.ID, "feishu", "c2", true)
+	if got := a.ClassifyError(err); got != dispatch.CronCodeJobNotFound {
+		t.Errorf("other chat: ClassifyError = %q, want %q (err=%v)", got, dispatch.CronCodeJobNotFound, err)
+	}
+	if _, _, err := a.AddJob(req); err != nil {
+		t.Fatalf("second AddJob: %v", err)
+	}
+	_, err = a.SetFreshContext("", "feishu", "c1", true)
+	if got := a.ClassifyError(err); got != dispatch.CronCodeAmbiguousPrefix {
+		t.Errorf("shared prefix: ClassifyError = %q, want %q (err=%v)", got, dispatch.CronCodeAmbiguousPrefix, err)
+	}
+}
