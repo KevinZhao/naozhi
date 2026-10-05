@@ -68,6 +68,7 @@
 
 ### Fixed
 
+- `naozhi doctor` 的 CLI Backends 段 `Default:` 现在显示启动时实际绑定的默认 backend：`cli.backend` 未在 `cli.backends` 中列出、不是已注册的 backend id，或未设置且 `cli.backends` 首项无效时，此前打印的是配置值（例如 `Default: bogus`），而启动实际跑的是回退后的 backend。现在打印回退目标，并在括号里附上与启动告警相同措辞的原因（#3409）
 - `/urgent` 之后，在它之前已排队的消息现在会拿到自己的真实回答，不再收到"上一条消息已被 /urgent 打断，请在当前任务完成后重发"：真实 CLI 实测（claude 2.1.288）表明 `priority:"now"` 抢占不丢弃队列，紧急消息先跑、排队消息随后各自成轮（`docs/rfc/passthrough-mode-validation.md` V10，#3394）
 - `spawnSession` panic recover 错误消息不再双前缀 `"spawn process: spawn process:"`（RNEW-009）
 

@@ -131,7 +131,7 @@ func TestConfig_Validate(t *testing.T) {
 					Backends: []CLIBackendConfig{{ID: "kiro"}},
 				}},
 				wantDiags:   1,
-				wantContain: []string{"cli.backend | ", "not listed in cli.backends", `falls back to "kiro"`, "kiro"},
+				wantContain: []string{"cli.backend | ", "not listed in cli.backends", `falls back to "kiro"`, `| add a cli.backends entry for "claude", or set cli.backend to one of: kiro`},
 				wantLevel:   "warn",
 			},
 			{
@@ -143,7 +143,7 @@ func TestConfig_Validate(t *testing.T) {
 					Backends: []CLIBackendConfig{{ID: "kiro"}, {ID: "claude"}},
 				}},
 				wantDiags:   1,
-				wantContain: []string{"cli.backend | ", "not a registered backend id", `falls back to "kiro"`, "kiro, claude"},
+				wantContain: []string{"cli.backend | ", "not a registered backend id", `falls back to "kiro"`, "| set cli.backend to one of: kiro, claude"},
 				wantLevel:   "warn",
 			},
 			{
