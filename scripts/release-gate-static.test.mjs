@@ -53,6 +53,11 @@ test('an entry tag left unrewritten is an unversioned URL with no loader', () =>
   ]);
 });
 
+test('a module the page names under two versions fails', () => {
+  const named = { ...rendered(), urls: [...rendered().urls, '/static/state.js?v=zzzz'] };
+  assert.deepEqual(staticLoadProblems(named, loaded()), ['page names /static/state.js as v=bbbb and v=zzzz']);
+});
+
 test('a stylesheet the page names without a version fails', () => {
   const named = { ...rendered(), urls: [...rendered().urls, '/static/css/new.css'] };
   const rec = loaded(['/static/css/views.css?v=cccc', '/static/css/new.css', '/static/dashboard.js?v=aaaa', '/static/state.js?v=bbbb']);
@@ -101,10 +106,12 @@ test('a versioned response without the immutable policy fails', () => {
 test('a non-200 or failed /static request fails', () => {
   const rec = loaded();
   rec.responses[1].status = 404;
+  rec.responses[2].status = 304;
   rec.failed.push(BASE + '/static/state.js?v=bbbb');
   assert.deepEqual(staticLoadProblems(rendered(), rec), [
     'request failed: /static/state.js',
     '404 for /static/dashboard.js?v=aaaa',
+    '304 for /static/state.js?v=bbbb',
   ]);
 });
 
