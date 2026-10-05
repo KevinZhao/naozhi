@@ -169,7 +169,7 @@ type Job struct {
 
 	// ConsecutiveFailures counts failed and timed-out runs since the last
 	// success, resume or edit; runs that fail for reasons outside the job
-	// leave it alone (failureStreakEffect), as do skipped and canceled runs.
+	// leave it alone (runOutcome.streakEffect), as do skipped and canceled runs.
 	// Reaching the scheduler's auto-pause threshold pauses the job.
 	ConsecutiveFailures int `json:"consecutive_failures,omitempty"`
 
@@ -212,20 +212,19 @@ var transientTurnCauses = map[TurnCause]bool{
 	TurnCauseBackendUnreachable: true,
 }
 
-// failureStreakEffect is how a run that ended in state with errClass (and
-// cause, for a failed turn) moves the failure streak. A success resets it.
-// Failures the job did not cause leave it alone: a lost sandbox connection
-// (the restart reconciler's orphans included) and a turn failed by a
-// transient backend cause. So do skipped and canceled runs.
-func failureStreakEffect(state RunState, errClass ErrorClass, cause TurnCause) streakEffect {
-	switch state {
+// streakEffect is how the run moves the failure streak. A success resets it.
+// Failures the job did not cause leave it alone: a run the restart reconciler
+// closed as an orphan, and a turn failed by a transient backend cause. So do
+// skipped and canceled runs. A live lost sandbox connection counts whichever
+// end dropped it: a microVM that crashes on every run is the job's problem.
+func (o runOutcome) streakEffect() streakEffect {
+	switch o.state {
 	case RunStateSucceeded:
 		return streakReset
 	case RunStateTimedOut:
 		return streakExtend
 	case RunStateFailed:
-		if errClass == ErrClassSandboxTransport ||
-			(errClass == ErrClassTurnFailed && transientTurnCauses[cause]) {
+		if o.restartOrphan || (o.errClass == ErrClassTurnFailed && transientTurnCauses[o.turnCause]) {
 			return streakKeep
 		}
 		return streakExtend
@@ -233,9 +232,9 @@ func failureStreakEffect(state RunState, errClass ErrorClass, cause TurnCause) s
 	return streakKeep
 }
 
-// nextFailureStreak is ConsecutiveFailures after a run, per failureStreakEffect.
-func nextFailureStreak(streak int, state RunState, errClass ErrorClass, cause TurnCause) int {
-	switch failureStreakEffect(state, errClass, cause) {
+// nextFailureStreak is ConsecutiveFailures after a run with effect e.
+func nextFailureStreak(streak int, e streakEffect) int {
+	switch e {
 	case streakExtend:
 		return streak + 1
 	case streakReset:
