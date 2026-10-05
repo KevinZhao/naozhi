@@ -178,6 +178,43 @@ func TestNoParseDurationInMain(t *testing.T) {
 	}
 }
 
+// TestNoRawCLIBackendInMain: cli.backend is only a request; startup may bind
+// another backend (#3298). The router, server footer tag and startup log must
+// all name the bound one (bws.DefaultID), so nothing here reads the raw field.
+func TestNoRawCLIBackendInMain(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	scanned := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		scanned++
+		ast.Inspect(f, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Backend" {
+				return true
+			}
+			if inner, ok := sel.X.(*ast.SelectorExpr); ok && inner.Sel.Name == "CLI" {
+				t.Errorf("%s reads cfg.CLI.Backend; use bws.DefaultID (what startup bound) or cfg.DefaultBackendID()",
+					fset.Position(sel.Pos()))
+			}
+			return true
+		})
+	}
+	if scanned < 10 {
+		t.Fatalf("scanned %d files; the walk is not looking at cmd/naozhi", scanned)
+	}
+}
+
 // TestShimManagerConfig pins which config value feeds each shim.Manager field;
 // every value differs from its default so a swapped or dropped accessor shows.
 func TestShimManagerConfig(t *testing.T) {

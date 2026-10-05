@@ -234,7 +234,9 @@ func TestBackendsHaveHealthySibling(t *testing.T) {
 
 // TestStartupDefaultBackendID_MatchesInitBackendWrappers: `config check`
 // predicts the default wrapper startup binds without building any; if the two
-// selections drift, the sysession/orient diag judges the wrong backend.
+// selections drift, the sysession/orient diag judges the wrong backend. The
+// router default (DefaultID) must name that same wrapper and have a runtime
+// row, or default sessions are filed and looked up under a missing backend.
 func TestStartupDefaultBackendID_MatchesInitBackendWrappers(t *testing.T) {
 	t.Parallel()
 	backend.EnsureDefaults()
@@ -267,15 +269,19 @@ func TestStartupDefaultBackendID_MatchesInitBackendWrappers(t *testing.T) {
 			if got := cfg.StartupDefaultBackendID(); got != bws.Default.BackendID {
 				t.Errorf("StartupDefaultBackendID = %q, initBackendWrappers default wrapper = %q", got, bws.Default.BackendID)
 			}
+			if bws.DefaultID != bws.Default.BackendID {
+				t.Errorf("DefaultID = %q, default wrapper = %q", bws.DefaultID, bws.Default.BackendID)
+			}
+			if _, ok := bws.Runtimes[bws.DefaultID]; !ok {
+				t.Errorf("DefaultID %q has no runtime; runtimes=%v", bws.DefaultID, bws.Runtimes)
+			}
 		})
 	}
 }
 
-// TestInitBackendWrappers_DefaultIDPropagated locks the contract that the
-// helper's DefaultID matches cfg.DefaultBackendID(). A regression here
-// would cause router.Wrappers / router.DefaultBackend to disagree, and
-// session keys without an explicit backend would route to a wrapper that
-// session-resolution code does not expect.
+// TestInitBackendWrappers_DefaultIDPropagated: when cli.backend names a
+// listed, registered backend, DefaultID keeps that configured id. Fallback
+// configs are covered by TestStartupDefaultBackendID_MatchesInitBackendWrappers.
 func TestInitBackendWrappers_DefaultIDPropagated(t *testing.T) {
 	t.Parallel()
 	backend.EnsureDefaults() // idempotent across parallel tests
