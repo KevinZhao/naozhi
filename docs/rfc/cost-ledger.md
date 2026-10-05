@@ -128,6 +128,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 - `Source/Kind/Unit/Basis` 为类型化枚举；写入时校验，非法 `Basis` → `unknown`，非法 `Source/Kind/Unit` → 拒绝 + dropped 计数。
 - `Model/RawModel/Provider`：来自 CLI 输出，视为不可信：长度 ≤128、合法 UTF-8、禁 C0/DEL、禁换行；违规替换为 `<invalid>` 并 warn（每 raw 值去重）。
 - `Models` 上限 16 条（`cli/process.go maxMeteringUnits` 同款防御）：超出时第 16 条起合并成一条 `model="other"` 的行（`cost_usd` 与 token 相加，`basis` 取最差），分模型之和不因截断变小；`Amount` 不动（`costledger.CapModels`，sandbox 回执写 run 记录前同样合并）。
+- `Source=session` 的行在 cron key（`cron:<job_id>`）上带 `JobID`（`sessionkey.CronJobIDFromKey`，其余 key 为空）：cron 窗口关闭后由会话记账的迟到 result、partial 仍计入该 job 的 `group_by=job` 与 `job_id=` 视图（#3401）；`RunID` 仍是 `unowned:` / `end:`，不并入已落盘的 run 记录（§5.3）。
 - 一条 entry ≈ 350 B。
 
 ## 5. 精度修正设计
@@ -164,7 +165,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 - `finishRun` 拆为两段：
   - `accountTurnCost(result *cli.SendResult) (deltaUSD float64)`：**无 `rt==nil || runStore==nil` 门控**（修 P4）。在 `costMu` 内：构造 `raw := Cumulative{USD: result.CostUSD, Models: result.ModelUsage, Metered: proc.MeteringUsage() 按 Unit}`，`d, next := costledger.Delta(raw, s.lastCumulative)`，累进 `costSpent`，存 `next`；锁外若这次读数不在 cost window 内（§5.0）则 `ledger.Append(entryFrom(d))`。`Models` 上限 16，超出截断 + warn。
   - `persistRun(rt, result, err, deltaUSD)`：原 runhistory 逻辑，保留门控，`SessionRun.CostUSD = deltaUSD`（兼容）。
-  - 没有存活调用方消费的 result 经 `SetOnUnownedResult` 同样差分记一条 `Kind=turn`：CLI 自己发起的 turn（后台任务通知，#3096），以及 Send 先放弃（ctx 取消、cron deadline）后才到达的 result（#3322；落在 cron 窗口关闭之后，所以 cron key 上也由会话记账，#3401；readLoop 在 Ready 或 Send 已放弃时记，下一次 Send 丢弃的陈旧 result 也记；passthrough 的 head slot 已取消或 orphan 时由 fan-out 记，取消前已投递未读的由 awaitSlot 收回后记；重复记账因累计差分无害）。没有 run 记录与它共用 `RunID`，所以写成 `unowned:<cli-session-id>:<id>`（取 result 帧的 session id，缺省取会话持有的；都没有时为裸 id），reconcile 据此归属。
+  - 没有存活调用方消费的 result 经 `SetOnUnownedResult` 同样差分记一条 `Kind=turn`：CLI 自己发起的 turn（后台任务通知，#3096），以及 Send 先放弃（ctx 取消、cron deadline）后才到达的 result（#3322；落在 cron 窗口关闭之后，所以 cron key 上也由会话记账，行带该 job 的 `JobID`（§4），#3401；readLoop 在 Ready 或 Send 已放弃时记，下一次 Send 丢弃的陈旧 result 也记；passthrough 的 head slot 已取消或 orphan 时由 fan-out 记，取消前已投递未读的由 awaitSlot 收回后记；重复记账因累计差分无害）。没有 run 记录与它共用 `RunID`，所以写成 `unowned:<cli-session-id>:<id>`（取 result 帧的 session id，缺省取会话持有的；都没有时为裸 id），reconcile 据此归属。
 - Unit 选择：claude → `USD`，Kind=`turn`；kiro/codex → 按 `Metered` 中有增量的 Unit 各出一条 entry（`credits` / `tokens`），Kind=`metering`。**`proc.MeteringUsage()` 是进程级累计视图**（`cli/process.go:668-691`），必须差分，不能直接取值。
 - Basis：本 turn 有增量的 model 的 `costBasis` 取最差档（unknown > managed > list），缺省 `list`；首次遇到 `unknown` 的 model 名 warn 一次（内存去重 map，上限 64）。
 - 新增 `ManagedSession.CostTotals() costledger.Totals`：返回 `{USD: costSpent, Metered: 各 Unit 累计, Models: 各模型累计 delta 和}`（monotonic，跨 incarnation）。
