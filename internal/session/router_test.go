@@ -2778,16 +2778,16 @@ func TestCollectPreviousHistory(t *testing.T) {
 // plain function so it works without a Router).
 func TestSnapshotOldSessionLocked(t *testing.T) {
 	t.Run("nil returns zero values", func(t *testing.T) {
-		prev, cost, spent, created, ov := snapshotOldSession(sessView{}, nil)
-		if prev != nil || cost != 0 || spent != 0 || created != 0 || ov != (sessionOverrides{}) {
-			t.Errorf("snapshotOldSession(nil) = (%v, %v, %v, %v, %+v), want zero values",
-				prev, cost, spent, created, ov)
+		prev, cost, created, ov := snapshotOldSession(sessView{}, nil)
+		if prev != nil || cost != 0 || created != 0 || ov != (sessionOverrides{}) {
+			t.Errorf("snapshotOldSession(nil) = (%v, %v, %v, %+v), want zero values",
+				prev, cost, created, ov)
 		}
 	})
 
 	t.Run("prevSessionIDs defensive copy", func(t *testing.T) {
 		s := &ManagedSession{prevSessionIDs: []string{"id-a", "id-b"}}
-		prev, _, _, _, _ := snapshotOldSession(sessView{}, s)
+		prev, _, _, _ := snapshotOldSession(sessView{}, s)
 		if len(prev) != 2 || prev[0] != "id-a" || prev[1] != "id-b" {
 			t.Fatalf("prev = %v, want [id-a id-b]", prev)
 		}
@@ -2801,7 +2801,7 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 	t.Run("totalCost falls back to store when no proc", func(t *testing.T) {
 		s := &ManagedSession{}
 		storeTotalCost(&s.totalCost, 1.234)
-		_, cost, _, _, _ := snapshotOldSession(sessView{}, s)
+		_, cost, _, _ := snapshotOldSession(sessView{}, s)
 		if cost != 1.234 {
 			t.Errorf("cost = %v, want 1.234 (from store, proc=nil)", cost)
 		}
@@ -2810,7 +2810,7 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 	t.Run("costSpent carries the genuine monotonic total", func(t *testing.T) {
 		s := &ManagedSession{}
 		storeTotalCost(&s.costSpent, 7.5)
-		_, _, spent, _, _ := snapshotOldSession(sessView{}, s)
+		spent := snapshotRespawn(sessView{}, s).spent.USD
 		if spent != 7.5 {
 			t.Errorf("spent = %v, want 7.5 (carried across spawn)", spent)
 		}
@@ -2819,7 +2819,7 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 	t.Run("createdAt round-trips", func(t *testing.T) {
 		s := &ManagedSession{}
 		s.createdAt.Store(123456789)
-		_, _, _, created, _ := snapshotOldSession(sessView{}, s)
+		_, _, created, _ := snapshotOldSession(sessView{}, s)
 		if created != 123456789 {
 			t.Errorf("created = %v, want 123456789", created)
 		}
@@ -2827,7 +2827,7 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 
 	t.Run("empty prevSessionIDs yields nil (no zero-len alloc)", func(t *testing.T) {
 		s := &ManagedSession{}
-		prev, _, _, _, _ := snapshotOldSession(sessView{}, s)
+		prev, _, _, _ := snapshotOldSession(sessView{}, s)
 		if prev != nil {
 			t.Errorf("prev = %v, want nil for empty source", prev)
 		}
@@ -2839,7 +2839,7 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 		s.SetTuningEffort("low")
 		s.SetUserLabel("my label")
 		s.setLabelOrigin("auto")
-		_, _, _, _, ov := snapshotOldSession(sessView{}, s)
+		_, _, _, ov := snapshotOldSession(sessView{}, s)
 		want := sessionOverrides{tuningModel: "claude-haiku-4.5", tuningEffort: "low", userLabel: "my label", labelOrigin: "auto"}
 		if ov != want {
 			t.Errorf("overrides = %+v, want %+v", ov, want)
@@ -2857,14 +2857,12 @@ func TestSnapshotOldSessionLocked(t *testing.T) {
 // than tick-polling. The test simulates the in-flight window by manually
 // installing a doneCh via stateOf(r).spawns.BeginSpawn (mirroring the spawn's reserve),
 // launches N concurrent GetOrCreate callers, and then performs the failure-
-// path defer (close + delete under the table lock) by hand. Every waiter must return
-// within 100ms (the historical poll interval was 20ms; instantaneous wakeup
-// targets <1ms in practice but 100ms gives ample margin for race-detector
-// scheduling on slow CI).
+// path defer (close + delete under the table lock) by hand. Every waiter must
+// wake, retry the loop and come back with its own spawn error; a missed close
+// leaves them parked until the drain bound fails the test.
 //
-// The test runs with -race to catch any forgotten lock around the
-// spawningKeys mutation; under -race the goroutines also exercise the
-// release-and-reacquire mu pattern in the GetOrCreate retry loop.
+// Under -race the goroutines also exercise the release-and-reacquire pattern
+// in the GetOrCreate retry loop.
 func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 	r := newTestRouter(5)
 	key := "feishu:direct:wakeup-waiters:general"
@@ -2880,13 +2878,15 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 	const N = 10
 	var wg sync.WaitGroup
 	wg.Add(N)
+	sessions := make([]*ManagedSession, N)
+	errs := make([]error, N)
 	for i := 0; i < N; i++ {
 		go func() {
 			defer wg.Done()
 			// All N parked on the same key. Each will see the marker on
 			// the first iteration of GetOrCreate's loop, release the table lock,
 			// and select on doneCh.
-			_, _, _ = r.GetOrCreate(context.Background(), key, AgentOpts{})
+			sessions[i], _, errs[i] = r.GetOrCreate(context.Background(), key, AgentOpts{})
 		}()
 	}
 
@@ -2897,15 +2897,15 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 
 	// Simulate the spawn's failure-path defer: close BEFORE delete (the
 	// order is itself part of the contract — see TEST-3(b) below).
-	start := time.Now()
 	r.ss.Update(func(tx sessTx) {
 		tx.Ext().spawns.EndSpawn(key, doneCh)
 	})
 
 	// All waiters should observe the close + retry the loop. With
-	// newTestRouter the second-iteration spawn also fails (binary
-	// missing), so each goroutine returns its own error after a fast
-	// failed Spawn. The wakeup itself is what we're timing.
+	// newTestRouter the retried spawn also fails (no shim manager); the
+	// woken waiters serialize behind each other's failed spawns, so the
+	// drain time is N spawn attempts, not the wakeup. The drain bound and
+	// the per-waiter result check below are the correctness signals.
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -2913,15 +2913,16 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 	}()
 	select {
 	case <-done:
-		elapsed := time.Since(start)
-		// 100ms is generous; observed wakeup is sub-millisecond. A regression
-		// to the old 20ms tick-poll would still pass here, so the assertion's
-		// real value is catching a deadlock or a missed close.
-		if elapsed > 100*time.Millisecond {
-			t.Errorf("waiters took %v to drain after close+delete; want <100ms", elapsed)
+	case <-time.After(10 * time.Second):
+		t.Fatal("waiters did not drain within 10s — close(doneCh) likely failed to wake them")
+	}
+	// The "session <key>: spawn process:" wrap is only applied after a
+	// waiter's own completeSpawn, so it proves each one retried and spawned.
+	spawnErr := "session " + key + ": spawn process: "
+	for i := range N {
+		if errs[i] == nil || sessions[i] != nil || !strings.HasPrefix(errs[i].Error(), spawnErr) {
+			t.Errorf("waiter %d: GetOrCreate = (%v, %v), want its own %q error after the retry", i, sessions[i], errs[i], spawnErr)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("waiters did not drain within 2s — close(doneCh) likely failed to wake them")
 	}
 }
 

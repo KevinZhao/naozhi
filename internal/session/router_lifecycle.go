@@ -239,28 +239,8 @@ type spawnParams struct {
 // bounded stat/ReadDir probes; consumes the one-shot dashboard backend pick.
 func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentOpts) spawnParams {
 	// One registry snapshot for the whole resolution: the overlay env and the
-	// profile default model must come from the same map.
+	// profile default model and backend must come from the same map.
 	profiles := r.backends.profiles()
-	// Backend precedence: opts.Backend > one-shot pick (consumed here) >
-	// existing session's Backend, even "" (resume continuity: a dead kiro
-	// session or a RegisterForResume placeholder must not --resume on another
-	// CLI) > opts.DefaultBackend (no session on key) > defaultBackend.
-	reqBackend := opts.Backend
-	if len(tx.Ext().picks.backend) > 0 {
-		if reqBackend == "" {
-			reqBackend = tx.Ext().picks.backend[key]
-		}
-		delete(tx.Ext().picks.backend, key)
-	}
-	if reqBackend == "" {
-		if old := tx.Get(key); old != nil {
-			reqBackend = old.Backend()
-		} else {
-			reqBackend = opts.DefaultBackend
-		}
-	}
-	wrapper, backendID := r.backends.wrapperFor(reqBackend)
-
 	// Access-profile precedence (RFC project-access-profile §2/§7): existing
 	// session's recorded profile (RESUME LOCK — a dead session must resume on
 	// the SAME auth chain; re-resolving would cross accounts) > one-shot
@@ -293,6 +273,27 @@ func (r *Router) resolveSpawnParams(tx sessTx, key, resumeID string, opts AgentO
 			accessProfileID = ""
 		}
 	}
+
+	// Backend precedence: opts.Backend > one-shot pick (consumed here) >
+	// existing session's Backend, even "" (resume continuity: a dead kiro
+	// session or a RegisterForResume placeholder must not --resume on another
+	// CLI) > for a key with no session, opts.DefaultBackend > the resolved
+	// access profile's default_backend > defaultBackend.
+	reqBackend := opts.Backend
+	if len(tx.Ext().picks.backend) > 0 {
+		if reqBackend == "" {
+			reqBackend = tx.Ext().picks.backend[key]
+		}
+		delete(tx.Ext().picks.backend, key)
+	}
+	if reqBackend == "" {
+		if old := tx.Get(key); old != nil {
+			reqBackend = old.Backend()
+		} else {
+			reqBackend = EffectiveDefaultBackend(opts.DefaultBackend, profiles, accessProfileID)
+		}
+	}
+	wrapper, backendID := r.backends.wrapperFor(reqBackend)
 
 	// Per-request overlay the shim persists for the drift re-merge (#2494).
 	// AccessProfile is the RESOLVED id so the drift side resolves default_model
@@ -663,7 +664,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (_ *M
 		oldHistory, prevIDs = hist.entries, hist.prevIDs
 		s = r.installFreshSession(tx,
 			key, proc, res.workspace, res.backendID, res.accessProfileID, res.wrapper, res.resumeID,
-			oldHistory, respawnChain(prevIDs, res.rejectedResumeID, ""), snap.cost, snap.costSpent, snap.createdAt, res.opts.Exempt, snap.sid,
+			oldHistory, respawnChain(prevIDs, res.rejectedResumeID, ""), snap.cost, snap.spent.USD, snap.createdAt, res.opts.Exempt, snap.sid,
 			hist.userTurns, overrides,
 		)
 		s.startupFails.Store(max(snap.startupFails, failedSpawns.Streak))
@@ -673,6 +674,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (_ *M
 		costBase.applyLocked(s)
 		s.endMark = mark
 		s.costMu.Unlock()
+		linkSuccessor(old, s, snap.spent)
 	})
 	if winner != nil {
 		proc.Close()

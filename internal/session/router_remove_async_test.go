@@ -11,19 +11,22 @@ import (
 // gone from the map) BEFORE the slow teardown — proc.Close — finishes.
 type blockingCloseProc struct {
 	*fakeProcess
-	release   chan struct{}
-	closeDone chan struct{}
+	closeStarted chan struct{}
+	release      chan struct{}
+	closeDone    chan struct{}
 }
 
 func newBlockingCloseProc() *blockingCloseProc {
 	return &blockingCloseProc{
-		fakeProcess: newIdleProc(),
-		release:     make(chan struct{}),
-		closeDone:   make(chan struct{}),
+		fakeProcess:  newIdleProc(),
+		closeStarted: make(chan struct{}),
+		release:      make(chan struct{}),
+		closeDone:    make(chan struct{}),
 	}
 }
 
 func (b *blockingCloseProc) Close() {
+	close(b.closeStarted)
 	<-b.release // block until the test lets the teardown proceed
 	b.fakeProcess.Close()
 	close(b.closeDone)

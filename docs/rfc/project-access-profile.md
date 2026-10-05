@@ -108,9 +108,11 @@ access profile = { env overlay（白名单内）, 默认 backend, 默认 model }
 
 ```
 auth (env overlay):  请求显式 → per-session override → per-agent accessProfile → per-project accessProfile → 全局默认(现状 settings.json，即 profile="")
-backend:             请求显式(opts.Backend) → per-session backendOverride(已有) → per-agent backend → per-project backend → cli.defaultBackend
+backend:             请求显式(opts.Backend) → per-session backendOverride(已有) → per-agent backend → per-project backend → accessProfile.default_backend → cli.defaultBackend
 model:               请求显式(opts.Model) → per-session → per-agent model → per-project(PlannerModel / accessProfile.default_model) → backend.DefaultModel
 ```
+
+> **backend 链里的 `accessProfile.default_backend`**（#3299）：只对 key 上还没有 session 的新会话生效；已有 session（含 backend 为空的 RegisterForResume 占位）沿用它记录的 backend，profile 不会把一个可 resume 的会话挪到另一个 CLI。所用 profile 是 auth 链解析出的那一个（含 dashboard 的 profile pick 与 `default_access_profile`）；Takeover 收编外部 Claude CLI 时强制 claude，不受此层影响。
 
 > **为何 auth 是独立维而不并进 backend**：§1.2#1 已证 Profile 不含认证；且同一 backend（claude）要能跑在两条认证链上（polyquant 的 1P claude、JD 的 Bedrock claude）。若把认证塞进 backend，用户就得为每条认证链复制一个 backend 定义，且 kiro/codex 的认证语义完全不同——耦合是净负债。
 

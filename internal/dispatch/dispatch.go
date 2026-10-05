@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -101,6 +102,10 @@ type Dispatcher struct {
 	// inboundLogCache memoizes the per-(platform,user,chat) logger built in
 	// prepareInbound (#2233). Zero value ready; see inbound_logcache.go.
 	inboundLogCache inboundLogCache
+
+	// reactionFailLogged holds each platform name whose ⏳ add has failed
+	// once; later failures log at Debug (ackQueuedWithReaction).
+	reactionFailLogged sync.Map
 }
 
 // keyForChat returns the routed session key for the chat coordinates and
