@@ -1,8 +1,9 @@
 // Package session router cleanup, periodic loops, and shutdown.
 //
 // This file holds session lifecycle teardown: Remove (per-key delete +
-// event-log drop + attachment tracker clear), Cleanup (TTL-based pruning),
-// the StartCleanupLoop ticker, periodic saveIfDirty, and graceful Shutdown.
+// event-log drop + attachment tracker clear, ordered against a same-key
+// re-create in history_retire.go), Cleanup (TTL-based pruning), the
+// StartCleanupLoop ticker, periodic saveIfDirty, and graceful Shutdown.
 package session
 
 import (
@@ -22,10 +23,12 @@ import (
 // taken in the transaction that unregisters it, so the teardown that follows
 // (possibly a detached RemoveAsync goroutine) never reads the removed
 // session's state again: the table only answers whether key is back.
+// retiring reports that the transaction raised key's retire barrier.
 type removeSnapshot struct {
 	proc             processIface
 	workspace        string
 	retiredSessionID string
+	retiring         bool
 }
 
 // unregisterAndSnapshot runs the fast, transactional half of a session
@@ -33,7 +36,8 @@ type removeSnapshot struct {
 // finalise active-count and dirty/version bookkeeping, hand back a value
 // snapshot. Returns ok=false when the key is absent — lookup and delete are
 // one transaction, so two concurrent Remove/RemoveAsync calls cannot both
-// capture a non-nil proc.
+// capture a non-nil proc. The same transaction raises key's retire barrier,
+// which finishRemoveCleanup lowers once the event log is dropped.
 func (r *Router) unregisterAndSnapshot(key string) (snap removeSnapshot, ok bool) {
 	r.ss.Update(func(tx sessTx) {
 		var s *ManagedSession
@@ -45,7 +49,8 @@ func (r *Router) unregisterAndSnapshot(key string) (snap removeSnapshot, ok bool
 		// Snapshot workspace and session UUID BEFORE unregister: afterwards the
 		// session is gone from the session table, and OnSessionRemoved needs the
 		// root while notifyKeyRetired needs the UUID to stamp retired_at.
-		snap = removeSnapshot{proc: proc, workspace: s.Workspace(), retiredSessionID: s.SessionID()}
+		snap = removeSnapshot{proc: proc, workspace: s.Workspace(), retiredSessionID: s.SessionID(),
+			retiring: r.hist.beginRetire(key)}
 		backend := s.Backend()
 		r.unregisterSession(tx, key, s, false)
 		if wasActive {
@@ -78,12 +83,15 @@ func (r *Router) notifyKeyRetired(key, sessionID string) {
 }
 
 // finishRemoveCleanup runs the slow half of a session removal, outside any
-// transaction: close the process, wait for its shim socket to disappear, drop
-// the event log, attachment refs and run-history ring unless a same-key
-// session is back, notify the change. Reads the removed session only through
-// `snap`, so it is safe in a detached goroutine (the session is already gone
-// from every map). Worst case ~15s.
+// transaction: drop the event log and attachment refs, close the process,
+// wait for its shim socket to disappear, free the run-history ring unless a
+// same-key session is back, notify the change. Reads the removed session only
+// through `snap`, so it is safe in a detached goroutine (the session is
+// already gone from every map). Worst case ~15s.
 func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
+	// Before Close: a same-key session admitted from here on waits for the
+	// drop to bind its sink, so the log holds only its own entries.
+	r.hist.retireKeyHistory(key, snap)
 	proc := snap.proc
 	if proc != nil && proc.Alive() {
 		proc.Close()
@@ -97,26 +105,16 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 				"key", key)
 		}
 	}
-	// A same-key session admitted during the teardown owns the key's event
-	// log, attachment refs and run-history ring with its per-owner lock, all
-	// stored by key: keep them, as a failed drop would. Dropping the lock
-	// under a live Append/Recent would let the next caller take a second one.
-	// The check and the drop are not atomic, so a re-create in that gap
-	// still loses what it wrote before the drop.
+	// A same-key session admitted during the teardown owns the key's
+	// run-history ring and its per-owner lock: freeing them under a live
+	// Append/Recent would let the next caller take a second lock. Otherwise
+	// free the resident ring (on-disk records stay) so the map stays bounded.
 	var recreated bool
 	r.ss.View(func(v sessView) { _, recreated = v.Lookup(key) })
 	if recreated {
-		slog.Info("session re-created during remove teardown; keeping its event log and run-history ring",
+		slog.Info("session re-created during remove teardown; keeping its run-history ring",
 			"key", key)
 	} else {
-		// Drop the on-disk event log so a future session reusing the key
-		// starts empty. Best-effort: a failed DropKey only leaves stale bytes.
-		r.hist.dropEventLogForKey(key)
-		// Clear the attachment tracker's refs so double-TTL GC reclaims
-		// images. Best-effort: stale keyhash entries do not affect correctness.
-		r.hist.clearAttachmentTrackerRefs(key, snap.workspace)
-		// Free the resident run-history ring (on-disk records stay) so the
-		// per-session ring map stays bounded.
 		r.runs.Invalidate(key)
 	}
 	// Wake a Shutdown waiting on this session running: it has left the
@@ -173,10 +171,12 @@ func (r *Router) RemoveAsync(key string) bool {
 }
 
 // dropEventLogForKey removes a session's persisted event log files (.log +
-// .idx). Safe with no persister or never-written keys. The timeout ctx derives
-// from h.ctx so an in-flight Shutdown cancels DropKey at the next
-// syscall boundary instead of blocking Remove for the full 2s; h.ctx is
-// nil only in tests that bypass NewRouter, which fall back to Background.
+// .idx) so a future session reusing the key starts empty; best-effort, a
+// failed drop only leaves stale bytes. Safe with no persister or
+// never-written keys. The timeout ctx derives from h.ctx so an in-flight
+// Shutdown cancels DropKey at the next syscall boundary instead of blocking
+// Remove for the full 2s; h.ctx is nil only in tests that bypass NewRouter,
+// which fall back to Background.
 func (h *HistoryIO) dropEventLogForKey(key string) {
 	if h.persister == nil {
 		return

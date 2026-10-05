@@ -11,6 +11,7 @@ import (
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/history"
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // HistoryIO is Router's history facet: where transcripts and event logs live,
@@ -60,6 +61,12 @@ type HistoryIO struct {
 	// to .meta sidecar updates. nil when eventLogDir is unset (no event
 	// source). See docs/rfc/attachment-refcount.md.
 	tracker *attachmentTracker
+
+	// retiring holds a barrier per key whose removal is still dropping its
+	// event log and attachment refs; installPersistSink waits on it. See
+	// history_retire.go. retireMu is a leaf below the table lock.
+	retireMu sync.Mutex
+	retiring map[string]*retireBarrier
 }
 
 // History returns the router's history facet; nil for a nil Router.
@@ -227,14 +234,20 @@ func (h *HistoryIO) bindNewSessionHistory(
 	h.installPersistSink(proc, key)
 }
 
-// installPersistSink wires the event-log persister into the given Process's
-// EventLog. No-op when the persister is disabled or proc is not a real
-// *cli.Process (test fakes). Must be called AFTER any InjectHistory calls
-// have completed (RFC §3.2.2).
+// installPersistSink wires the event-log persister into proc's EventLog,
+// once any removal of key still dropping its log has finished. No-op when
+// the persister is disabled or proc has no EventLog (test fakes). Must be
+// called AFTER any InjectHistory calls have completed (RFC §3.2.2).
 func (h *HistoryIO) installPersistSink(proc processIface, key string) {
-	if realProc, ok := proc.(*cli.Process); ok {
-		h.bindPersistSink(realProc.EventLog(), key)
+	holder, ok := proc.(eventLogHolder)
+	if !ok || h.persister == nil {
+		return
 	}
+	if !h.awaitRetire(key, retireWaitMax) {
+		slog.Warn("event log drop of a removed same-key session still running; binding the sink anyway",
+			"key", osutil.SanitizeForLog(key, 64), "waited", retireWaitMax)
+	}
+	h.bindPersistSink(holder.EventLog(), key)
 }
 
 // loadResumeHistoryOnSpawn synchronously loads the JSONL chain for a resume
