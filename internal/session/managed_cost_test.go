@@ -532,7 +532,8 @@ func TestBookUnownedResults_RunIDNamesTheCLISession(t *testing.T) {
 	hooked.fn(clievent.SendResult{CostUSD: 3, SessionID: "sid-result"})
 	s.setSessionID("sid-held")
 	hooked.fn(clievent.SendResult{CostUSD: 6})
-	want := map[float64]string{1: "", 2: "unowned:sid-result:", 3: "unowned:sid-held:"}
+	hooked.fn(clievent.SendResult{CostUSD: 10, SessionID: "sid-result2"}) // the CLI moved on first
+	want := map[float64]string{1: "", 2: "unowned:sid-result:", 3: "unowned:sid-held:", 4: "unowned:sid-result2:"}
 	ents := allEntries(t, ledger)
 	if len(ents) != len(want) {
 		t.Fatalf("entries = %+v, want %d", ents, len(want))
