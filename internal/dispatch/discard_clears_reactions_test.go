@@ -82,6 +82,42 @@ func TestReset_ClearsQueuedReactions(t *testing.T) {
 	wantRemoved(t, rp, "m1", "m2")
 }
 
+// TestRemovedKey_ClearsReactionsAndNoticesEachChatOnce (#3297): a message
+// queued on a key the router retired loses its ⏳ and its chat is told once,
+// however many of its messages were queued; another chat sharing the key is
+// told too. A reset, which the user asked for, clears the ⏳ only.
+func TestRemovedKey_ClearsReactionsAndNoticesEachChatOnce(t *testing.T) {
+	d, rp := newReactorDispatcher(t, turn.QueueOptions{MaxDepth: 8}, &testSender{})
+	origin := func(id, chat string) *imOrigin {
+		m := reactorMsg(id, id)
+		m.ChatID = chat
+		return d.newIMOrigin(m, slog.Default(), reactorKey, "general", session.AgentOpts{}, imMessage, len(id), 0)
+	}
+	ctx := context.Background()
+	origin("m0", "chat1").Dropped(ctx, turn.DropReset)
+	if n := rp.fakePlatform.replyCount(); n != 0 {
+		t.Fatalf("a reset drop sent %d notices, want none", n)
+	}
+	for _, o := range []*imOrigin{origin("m1", "chat1"), origin("m2", "chat1"), origin("m3", "chat2")} {
+		o.Dropped(ctx, turn.DropRemoved)
+	}
+
+	wantRemoved(t, rp, "m0", "m1", "m2", "m3")
+	rp.fakePlatform.mu.Lock()
+	replies := slices.Clone(rp.fakePlatform.replies)
+	rp.fakePlatform.mu.Unlock()
+	var chats []string
+	for _, r := range replies {
+		if r.Text != "会话已结束，这条消息未被处理，请重新发送。" {
+			t.Fatalf("reply %q, want only the removed-session notice", r.Text)
+		}
+		chats = append(chats, r.ChatID)
+	}
+	if !slices.Equal(chats, []string{"chat1", "chat2"}) {
+		t.Fatalf("notices went to %v, want one each to chat1 and chat2", chats)
+	}
+}
+
 // TestOwnerLoopCtxDone_ClearsQueuedReactions covers the systemctl-restart
 // path: the turn ctx is cancelled while a follow-up sits in the queue. The
 // hour-long collect delay leaves ctx.Done as the loop's only way out.

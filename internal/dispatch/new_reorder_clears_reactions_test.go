@@ -9,12 +9,12 @@ import (
 
 // #2185: /new must discard the queue (the #2013 drain-and-clear-reactions
 // path) BEFORE the session reset. The reset synchronously fires the
-// observer's KeyRetired → Orchestrator.Cleanup, which deletes the queue ring
-// without surfacing the parked messages' HOURGLASS reactions. Turns.Reset
-// owns that order now; this test models the reset's side effect with
-// Cleanup in the Sender, exactly what production's KeyRetired closure calls.
-// Why the order matters is internal/turn's
-// TestQueue_CleanupLeavesNothingToDiscard.
+// observer's KeyRetired → Orchestrator.Retire, which deletes the queue ring
+// and would tell the parked messages DropRemoved, the notice for a removal
+// the user did not ask for. Turns.Reset owns that order now; this test models
+// the reset's side effect with Retire in the Sender, exactly what
+// production's KeyRetired closure calls. Why the order matters is
+// internal/turn's TestQueue_CleanupReturnsTheQueuedMessages.
 
 // TestNewOrder_DiscardBeforeReset_ClearsReactions: the drain+clear sees the
 // populated ring, so the parked reactions are cleared, and the reset then
@@ -25,7 +25,7 @@ func TestNewOrder_DiscardBeforeReset_ClearsReactions(t *testing.T) {
 	d, rp := newReactorDispatcher(t, turn.QueueOptions{MaxDepth: 8}, &testSender{
 		reset: func(key string, _ bool) {
 			resets++
-			d.turns.(*turn.Orchestrator).Cleanup(key) // models router.Reset → the observer's KeyRetired → Cleanup
+			d.turns.(*turn.Orchestrator).Retire(context.Background(), key) // models router.Reset → the observer's KeyRetired → Retire
 		},
 	})
 	holdKey(t, d, reactorKey)

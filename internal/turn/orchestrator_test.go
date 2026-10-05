@@ -189,17 +189,72 @@ func TestNew_QueueFromOptions(t *testing.T) {
 	}
 }
 
-// TestShouldNotifyAndCleanup: both delegate to the queue.
-func TestShouldNotifyAndCleanup(t *testing.T) {
+// TestShouldNotifyAndRetire: both delegate to the queue.
+func TestShouldNotifyAndRetire(t *testing.T) {
 	t.Parallel()
 	h := newHarness(8, ModeCollect)
 	if !h.o.ShouldNotify("k") || h.o.ShouldNotify("k") {
 		t.Fatal("ShouldNotify is not the queue's 3s cooldown")
 	}
 	_, _, _, running := h.q.enqueueTuple("k", Msg{Text: "running"})
-	h.o.Cleanup("k")
+	h.o.Retire(context.Background(), "k")
 	if isOwner, _, _, gen := h.q.enqueueTuple("k", Msg{}); !isOwner || gen == running {
-		t.Fatalf("after Cleanup Enqueue = owner %v gen %d, want a fresh entry (not gen %d)", isOwner, gen, running)
+		t.Fatalf("after Retire Enqueue = owner %v gen %d, want a fresh entry (not gen %d)", isOwner, gen, running)
+	}
+}
+
+// gatedOrigin is a fakeOrigin whose Dropped waits for gate to close.
+type gatedOrigin struct {
+	*fakeOrigin
+	gate chan struct{}
+}
+
+func (o *gatedOrigin) Dropped(ctx context.Context, why DropReason) {
+	<-o.gate
+	o.fakeOrigin.Dropped(ctx, why)
+}
+
+// TestRetire_TellsEachQueuedOriginDropRemoved (#3297): a key the router
+// retires tells every origin queued on it DropRemoved, FIFO and on a live
+// ctx although the router's is done. Retire returns before the origins are
+// told, and the key is free for the next request.
+func TestRetire_TellsEachQueuedOriginDropRemoved(t *testing.T) {
+	t.Parallel()
+	h := newHarness(8, ModeCollect)
+	h.q.Enqueue("k", Msg{Text: "running"})
+	b := &gatedOrigin{fakeOrigin: newOrigin(h.rec, "b", "im:b"), gate: make(chan struct{})}
+	c := newOrigin(h.rec, "c", "ws:c")
+	for _, org := range []Origin{b, c} {
+		if ack := h.submit("queued", org, &fakeAdmission{rec: h.rec}); ack != AckQueued {
+			t.Fatalf("precondition: Submit = %v, want AckQueued", ack)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	retired := make(chan struct{})
+	go func() {
+		h.o.Retire(ctx, "k")
+		close(retired)
+	}()
+	select {
+	case <-retired:
+	case <-time.After(waitTimeout):
+		t.Fatal("Retire waited on a queued origin's Dropped")
+	}
+	close(b.gate)
+	h.rec.waitFor(t, "dropped:c:removed", 1)
+	h.rec.assertOrder(t, "dropped:b:removed", "dropped:c:removed")
+	for _, org := range []*fakeOrigin{b.fakeOrigin, c} {
+		if got := org.doneCtxCalls(); len(got) != 0 {
+			t.Fatalf("%s told on the router's done ctx: %v", org.name, got)
+		}
+	}
+	if ack := h.submit("next", newOrigin(h.rec, "d", "ws:d"), &fakeAdmission{rec: h.rec, decline: true}); ack != AckShuttingDown {
+		t.Fatalf("Submit after Retire = %v, want the owner's Admit (AckShuttingDown on decline)", ack)
+	}
+	if n := h.rec.count("admit:owner"); n != 1 {
+		t.Fatalf("Submit after Retire asked for %d owner runs, want 1 (the key is free)", n)
 	}
 }
 
