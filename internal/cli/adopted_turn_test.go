@@ -96,6 +96,48 @@ func TestApplyReconnectVerdict_ArmsOnlyWhatTheBacklogJustifies(t *testing.T) {
 	})
 }
 
+// TestReplayVerdict_SettleFoldsUnknown: applyReconnectVerdict has no unknown,
+// so settle decides it, and only it consults the resolver. Without a resolver
+// (no workspace, a test) unknown stays mid-turn: Running recovers when a
+// result comes, a false Ready would hide a running foreground tool.
+func TestReplayVerdict_SettleFoldsUnknown(t *testing.T) {
+	res := &clievent.Event{Type: "result", Result: "r"}
+	var asked []string
+	resolve := func(idle bool) func(string) bool {
+		return func(sid string) bool { asked = append(asked, sid); return idle }
+	}
+	cases := []struct {
+		name        string
+		v           replayVerdict
+		resolve     func(string) bool
+		wantMidTurn bool
+		wantResult  bool
+		wantAsked   int
+	}{
+		{"unknown, transcript says ended", replayVerdict{kind: verdictUnknown}, resolve(true), false, false, 1},
+		{"unknown, transcript says running", replayVerdict{kind: verdictUnknown}, resolve(false), true, false, 1},
+		{"unknown, no resolver", replayVerdict{kind: verdictUnknown}, nil, true, false, 0},
+		{"mid turn", replayVerdict{kind: verdictMidTurn}, resolve(true), true, false, 0},
+		{"finished", replayVerdict{kind: verdictFinished, finished: res, finishedSeq: 9}, resolve(false), false, true, 0},
+		{"idle", replayVerdict{kind: verdictIdle}, resolve(false), false, false, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			asked = nil
+			midTurn, finished, seq := tc.v.settle(tc.resolve, "hello-sid")
+			if midTurn != tc.wantMidTurn {
+				t.Errorf("midTurn = %v, want %v", midTurn, tc.wantMidTurn)
+			}
+			if (finished != nil) != tc.wantResult || (tc.wantResult && (finished != res || seq != 9)) {
+				t.Errorf("finished = %+v at %d, want result=%v", finished, seq, tc.wantResult)
+			}
+			if len(asked) != tc.wantAsked || (tc.wantAsked > 0 && asked[0] != "hello-sid") {
+				t.Errorf("resolver calls = %q, want %d with hello-sid", asked, tc.wantAsked)
+			}
+		})
+	}
+}
+
 // TestAdoptedTurn_LatchKeepsTheResultTextTheEventLogDrops is the defect this
 // latch exists for: a result arriving with no Send active leaves its text
 // nowhere. The test asserts both halves — the latch has the text, and the
@@ -419,7 +461,7 @@ func TestReconnectVerdict_HandsBackTheFinishedResult(t *testing.T) {
 		{Type: "replay", Seq: 12, Line: `{"type":"result","subtype":"success","result":"finished while down","session_id":"s1"}`},
 		{Type: "replay", Seq: 13, Line: `{"type":"control_response","response":{"subtype":"success","request_id":"naozhi-setmodel-1"}}`},
 	}
-	midTurn, finished, finishedSeq := reconnectVerdict(replays, proto)
+	midTurn, finished, finishedSeq := reconnectVerdict(replays, 0, proto).settle(nil, "")
 	if midTurn {
 		t.Error("midTurn = true for a backlog ending in a result")
 	}
@@ -461,7 +503,7 @@ func TestReconnectVerdict_MidTurnAndFinishedAreExclusive(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			midTurn, finished, _ := reconnectVerdict(tc.replays, proto)
+			midTurn, finished, _ := reconnectVerdict(tc.replays, 0, proto).settle(nil, "")
 			if midTurn && finished != nil {
 				t.Errorf("both set: midTurn=%v finished=%+v", midTurn, finished)
 			}

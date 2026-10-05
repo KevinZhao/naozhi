@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -582,8 +583,18 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 	return proc, nil
 }
 
+// ReconnectHooks lend SpawnReconnect what only the session layer knows. Every
+// field is optional; a struct so a new hook does not change the signature.
+type ReconnectHooks struct {
+	// ResolveUnknown settles a backlog the replay cannot (turn-neutral frames
+	// only, ring wrapped): idle=true means the turn had ended. Called
+	// synchronously before the read loop starts, with the shim hello's session
+	// id ("" when it has none). nil → mid-turn.
+	ResolveUnknown func(helloSessionID string) (idle bool)
+}
+
 // SpawnReconnect creates a Process by reconnecting to an existing shim after a naozhi restart.
-func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64, proto Protocol, noOutputTimeout, totalTimeout time.Duration) (*Process, []shim.ServerMsg, error) {
+func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64, proto Protocol, noOutputTimeout, totalTimeout time.Duration, hooks ReconnectHooks) (*Process, []shim.ServerMsg, error) {
 	if w.ShimManager == nil {
 		return nil, nil, fmt.Errorf("shim manager not configured")
 	}
@@ -592,7 +603,12 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 	if err != nil {
 		return nil, nil, fmt.Errorf("reconnect shim: %w", err)
 	}
+	return w.attachReconnected(ctx, handle, key, lastSeq, proto, noOutputTimeout, totalTimeout, hooks)
+}
 
+// attachReconnected is SpawnReconnect past the dial: drain the backlog, build
+// the Process, arm the turn verdict, start the read loop.
+func (w *Wrapper) attachReconnected(ctx context.Context, handle *shim.ShimHandle, key string, lastSeq int64, proto Protocol, noOutputTimeout, totalTimeout time.Duration, hooks ReconnectHooks) (*Process, []shim.ServerMsg, error) {
 	// Drain replay
 	replays, err := handle.DrainReplay(ctx)
 	if err != nil {
@@ -632,7 +648,8 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 	// The adopted-turn latch is armed on the same decision and for the same
 	// reason: startReadLoop can deliver the late result before this function even
 	// returns, so nothing may be attached to that turn after this point.
-	proc.applyReconnectVerdict(reconnectVerdict(replays, proto))
+	// An unknown verdict is settled here, synchronously, for the same reason.
+	proc.applyReconnectVerdict(reconnectVerdict(replays, lastSeq, proto).settle(hooks.ResolveUnknown, handle.Hello.SessionID))
 	// The replayed frames were received too, and readLoop stores live seqs from
 	// here on: seed it now, or LastSeq reads 0 until the first live frame and a
 	// TurnWatermark taken then places every replayed result after it.
@@ -659,20 +676,21 @@ func WaitSocketGoneForKey(key string, maxWait time.Duration) bool {
 }
 
 // reconnectVerdict classifies what the replayed backlog says about the turn that
-// was in flight when this process reconnected:
+// was in flight when this process reconnected (see replayVerdict): the last
+// semantic event decides — a result is a finished turn, anything else one still
+// running, none at all an idle session. Turn-neutral frames are skipped, those
+// a line prefix identifies without decoding them (a long background workflow
+// fills the ring with them). When only neutral frames survive a wrapped ring
+// the tool_use that started the turn may have been evicted, so the verdict is
+// unknown rather than idle.
 //
-//	midTurn true             the CLI is still working; the result has not arrived
-//	finished != nil          the backlog ends in a result, at shim seq finishedSeq
-//	both zero                no meaningful backlog — nothing was in flight
-//
-// midTurn and finished are mutually exclusive by construction. Both come out of
-// one reverse walk because they are one fact: the walk that decides "the last
-// meaningful event is a result" is holding that result when it decides, and the
-// caller needs it (adopted_turn.go — the backlog is drained once per Reconnect,
-// so a second pass to recover it later is not available).
-func reconnectVerdict(replays []shim.ServerMsg, proto Protocol) (midTurn bool, finished *clievent.Event, finishedSeq int64) {
+// One reverse walk yields both the state and the result because they are one
+// fact: the walk that decides "the last meaningful event is a result" is
+// holding that result, and the caller needs it (adopted_turn.go — the backlog
+// is drained once per Reconnect, so there is no second pass to recover it).
+func reconnectVerdict(replays []shim.ServerMsg, lastSeq int64, proto Protocol) replayVerdict {
 	for i := len(replays) - 1; i >= 0; i-- {
-		if replays[i].Type != "replay" {
+		if replays[i].Type != "replay" || isTurnNeutralLine(replays[i].Line) {
 			continue
 		}
 		// done is intentionally discarded: turn-end is read off the emitted
@@ -685,16 +703,30 @@ func reconnectVerdict(replays []shim.ServerMsg, proto Protocol) (midTurn bool, f
 		// emits assistant+result; only the result settles the question).
 		for j := len(events) - 1; j >= 0; j-- {
 			ev := events[j]
-			if ev.Type == "" || isTurnNeutralEventType(ev.Type) {
+			if ev.Type == "" || isTurnNeutralEvent(ev) {
 				continue
 			}
 			if ev.Type == "result" {
-				return false, &ev, replays[i].Seq
+				return replayVerdict{kind: verdictFinished, finished: &ev, finishedSeq: replays[i].Seq}
 			}
-			return true, nil, 0
+			return replayVerdict{kind: verdictMidTurn}
 		}
 	}
-	return false, nil, 0
+	if replayWrapped(replays, lastSeq) {
+		return replayVerdict{kind: verdictUnknown}
+	}
+	return replayVerdict{kind: verdictIdle}
+}
+
+// replayWrapped reports whether the shim ring evicted frames this replay
+// should have started with: its first frame sits past lastSeq+1.
+func replayWrapped(replays []shim.ServerMsg, lastSeq int64) bool {
+	for i := range replays {
+		if replays[i].Type == "replay" {
+			return replays[i].Seq > lastSeq+1
+		}
+	}
+	return false
 }
 
 // lastReplayedSeq is the highest shim seq among the replayed frames.
@@ -708,14 +740,40 @@ func lastReplayedSeq(replays []shim.ServerMsg) int64 {
 	return last
 }
 
-// isTurnNeutralEventType reports whether an clievent.Event type carries no turn state
-// and must be skipped by reconnectVerdict's reverse walk. control_ack (receipt for a
-// naozhi-originated control RPC, see ModelSetter) is emitted with or without a
-// turn in flight — an idle session that switched models leaves it as the LAST
-// buffered shim line — so counting it would arm reconnectedMidTurn with no
-// result coming and park the session in StateRunning forever after a restart.
-func isTurnNeutralEventType(t string) bool {
-	return t == "control_ack"
+// turnNeutralSystemSubtypes are the claude system frames a background task
+// emits with or without a turn in flight. task_started is not among them: it
+// belongs to the turn whose tool call launched the task.
+var turnNeutralSystemSubtypes = [...]string{"task_progress", "task_updated", "task_notification", "background_tasks_changed"}
+
+// turnNeutralLinePrefixes are those frames' line heads as the CLI writes them.
+var turnNeutralLinePrefixes = func() (p [len(turnNeutralSystemSubtypes)]string) {
+	for i, st := range turnNeutralSystemSubtypes {
+		p[i] = `{"type":"system","subtype":"` + st + `"`
+	}
+	return p
+}()
+
+// isTurnNeutralLine reports whether line is a turn-neutral frame recognisable
+// without decoding it. A miss (other key order) is caught by isTurnNeutralEvent.
+func isTurnNeutralLine(line string) bool {
+	for _, p := range turnNeutralLinePrefixes {
+		if strings.HasPrefix(line, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// isTurnNeutralEvent reports whether ev carries no turn state, so
+// reconnectVerdict must skip it. Besides the background-task frames this is
+// control_ack, the receipt for a naozhi-originated control RPC (ModelSetter):
+// an idle session that switched models leaves it as the LAST buffered line,
+// and counting it would park the session in StateRunning after a restart.
+func isTurnNeutralEvent(ev clievent.Event) bool {
+	if ev.Type == "control_ack" {
+		return true
+	}
+	return ev.Type == "system" && slices.Contains(turnNeutralSystemSubtypes[:], ev.SubType)
 }
 
 // shimLineReader adapts the shim connection to LineReader for the Init handshake.

@@ -1711,7 +1711,7 @@ R5  **有**存活进程、但 retained 条目没人认领（v4 新增）：R4 �
   persist sink 最后才装，`router_shim.go:483-486`）。
 - 已知：长 workflow 后 replay ring 几乎必然已淘汰 `task_started` 与 launch tool_result
   （10000 行上限被 progress 小帧撑满），所以 R0 的 Ref 与 R3a 的磁盘定位是必要的，而非锦上添花。
-  ring 是否已绕回：首个 replay 的 `Seq > 1`（或 hello 的 `BufferSeqStart > 1`，
+  ring 是否已绕回：首个 replay 的 `Seq > lastSeq + 1`（重启时 lastSeq = 0，即 `Seq > 1`；PR-3 的 `replayWrapped`）（或 hello 的 `BufferSeqStart > 1`，
   `server_client.go:90-103`、`shim/protocol.go:32`，naozhi 目前未读）；绕回时才走 R3a 扫描，
   §5.10 的 `unknown` 判定也用它。
 
@@ -1752,12 +1752,15 @@ envelope 反转义，或下发预解码的 seq 索引。
   - **walk 走完只见到中性帧**：ring 未绕回 → 与今天一致（无语义帧 = 空 session）；ring 已绕回
     （§5.9 判据）→ 返回 `unknown`。前台 turn 的 tool_use 可能已被快照挤出，判 idle 会把正在跑的
     长 Bash 显示为 Ready；无条件判 midTurn 又会让本修复对长 workflow（ring 几乎必绕回）失效。
-    `unknown` 由 session 层读 session JSONL 的尾窗裁决：末条主链记录是 `assistant` 且
-    `stop_reason == "end_turn"`，或是 `result` → idle；否则 midTurn（既有 stray-result 恢复兜底）。读不到 JSONL 时按 midTurn。
+    `unknown` 由 session 层读 session JSONL 的尾窗裁决（`claudefs.TranscriptTurnEnded`）：主链记录指 `isSidechain` 不为真的
+    `user` / `assistant` / `result` 行，attachment、system（`turn_duration` 等）与元数据行（`last-prompt`、`cost-state` 等）一律越过——
+    实测它们常跟在 end_turn 之后。末条主链记录是 `assistant` 且 `stop_reason` ∈ {`end_turn`, `stop_sequence`, `refusal`}
+    （`stop_sequence` 是 CLI 合成 API 错误消息所带的，同样结束 turn），或是 `result` → idle；否则 midTurn（既有 stray-result 恢复兜底）。
+    读不到 JSONL、session id 不过 `IsValidSessionID` 时按 midTurn。
     **尾窗是读窗口，不是文件尺寸上限**：`osutil.OpenRegular(path, 0)`（不设 maxBytes——真实 session JSONL 是 MB 级，v3 把 64KiB 写进尺寸上限，
     照抄会让每个文件都 `ErrTooLarge`、再按"读不到 → midTurn"处理，修复在长 workflow 这一主场景里失效）→ 由 Fstat 得 size →
-    `ReadAt` 从 `max(0, size − 64KiB)` 起读 → 偏移不为 0 时丢掉第一段不完整的行 → 从后往前找最后一条完整的主链记录。窗口里一条完整记录都没有
-    （末条记录本身超过 64KiB，例如很大的 tool_use input）→ 放大到 1MiB 重读一次，仍没有 → midTurn。
+    `ReadAt` 从 `max(0, size − 64KiB)` 起读 → 偏移不为 0 时丢掉第一段不完整的行 → 从后往前找最后一条完整的主链记录。窗口里一条完整的主链记录都没有
+    （末条记录本身超过 64KiB，例如很大的 tool_use input；或尾部 64KiB 全是元数据）→ 放大到 1MiB 重读一次，仍没有 → midTurn。
   - **裁决必须在 `startReadLoop` 之前完成**。v2 写的是 `SetCwdForLinker` 之后（`router_shim.go:404-406`），可那时
     `SpawnReconnect` 已经调过 `applyReconnectVerdict` 与 `startReadLoop`（`wrapper.go:625-641`）；代码明确要求 midTurn 状态、
     `reconnectedMidTurn` 与 adopted-turn latch 在 readLoop 启动前武装（`wrapper.go:629-635`、`adopted_turn.go:72-87`，#1778）。
@@ -1769,8 +1772,9 @@ envelope 反转义，或下发预解码的 seq 索引。
     **之前**同步调用 `hooks.ResolveUnknown`，把结果折成 idle / midTurn 再武装；为 nil（测试、无 workspace）时按 midTurn。session 层在调用
     `SpawnReconnect` 之前就有构造它所需的一切：`sess.Workspace()` 与 `state.SessionID`（`router_shim.go:365` 的
     `markTranscript` 正是用它们定位主 transcript，`managed_cost_end.go:35-55`；`backendProfile(...).ResumeTarget` 给出路径）；
-    resolver 以 `handle.Hello.SessionID`（非空时）优先、否则 `state.SessionID`。resolver 是 `router_shim.go` 里构造的闭包，
-    不新增 Router 方法（§5.6(6b)）。读尾窗如上（同步，在 `SpawnReconnect` 里、`shimReconnectTimeout` 内完成；这里没有 b.mu，也不在表事务里）。
+    resolver 以 `handle.Hello.SessionID`（非空时）优先、否则 `state.SessionID`。resolver 由 `router_shim.go` 的自由函数
+    `reconnectHooks(...)` 构造（路径经与 `markTranscript` 共用的 `mainTranscript`），不新增 Router 方法（§5.6(6b)）。
+    `SpawnReconnect` 拨号之后的部分拆成 `attachReconnected(handle, ...)`，测试用 net.Pipe 的 handle 直接驱动它。读尾窗如上（同步，在 `SpawnReconnect` 里、`shimReconnectTimeout` 内完成；这里没有 b.mu，也不在表事务里）。
   - 测试：replay 只剩中性帧且 ring 已绕回、JSONL 尾为 `end_turn` → Ready（**fixture 为 5MB 的 JSONL**，小 fixture 测不出尺寸上限的误用）；
     末条记录 200KiB → 放大窗口后正确裁决；为 tool_use → Running 且之后一个 live result 翻回 Ready；
     **live result 紧随 `startReadLoop` 到达**（fake shim 在 readLoop 启动后立即写出 result）时 session 仍到达 Ready（#1778 回归）。
@@ -2670,8 +2674,9 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   但交给 `applyReconnectVerdict` 之前已被折成 idle / midTurn）、`internal/session/router_shim.go`（:365-370 在调用 `SpawnReconnect` 前用
   `sess.Workspace()` + `state.SessionID` 构造 resolver 闭包，路径同 `markTranscript` 的 `backendProfile(...).ResumeTarget`；**不新增 Router
   方法**；JSONL 尾窗按 §5.10 读：`OpenRegular(path, 0)` + `ReadAt` 尾部 64KiB、必要时放大到 1MiB，**不**把 64KiB 当 maxBytes）、新
-  `internal/osutil/open_regular_unix.go` / `open_regular_nonunix.go` + `open_regular_unix_test.go`（`//go:build !windows`，FIFO 用例在这里，§10；本 PR
-  首个使用者，PR-9 / PR-13 复用）、`process_reconnect_drain_bug_test.go`、`adopted_turn_test.go`。
+  `internal/osutil/open_regular.go`（`ErrNotRegular` / `ErrTooLarge`）/ `open_regular_unix.go` / `open_regular_nonunix.go` + `open_regular_unix_test.go`
+  （`//go:build unix`，与实现文件同一约束，FIFO 用例在这里，§10；本 PR 首个使用者，PR-9 / PR-13 复用）、尾窗解析在
+  `internal/claudefs/turntail.go`（`TranscriptTurnEnded`，transcript 格式知识归 claudefs）、`process_reconnect_drain_bug_test.go`、`adopted_turn_test.go`。
 - 测试：见 §11.2 reconnectVerdict 行，含"live result 紧随 startReadLoop 到达"、5MB JSONL fixture、末条记录 200KiB。
   （`ReconnectHooks` 用结构体：PR-7 加 `KnownWorkflowTasks` 字段时不再改 `SpawnReconnect` 的签名，§5.9 R1。）
 - 验收：空闲 + 后台 workflow 的 session 重启后为 Ready；前台长 Bash + 后台 workflow 洪水（ring 已绕回）

@@ -83,7 +83,7 @@ cmd/naozhi/main.go
   -> attachment   附件持久化 + refcount tracker 子包
   -> runlog       per-owner run 记录的磁盘布局层（根校验/目录守卫/原子写/owner 锁），cron 与 session/runhistory 共用
   -> discovery    扫描 Claude CLI 磁盘工件（外部进程发现 / takeover）
-  -> claudefs     Claude CLI 磁盘布局单一真相源（projects slug 编码 / transcript 路径 / session id 校验 / cost-state 与按消息 usage 读取）
+  -> claudefs     Claude CLI 磁盘布局单一真相源（projects slug 编码 / transcript 路径 / session id 校验 / cost-state 与按消息 usage 读取 / 尾窗判定末轮是否结束）
   -> subagent     Task 工具子代理 ↔ JSONL transcript 的关联与读取（linker + reader）
 
   辅助域
@@ -113,7 +113,7 @@ cmd/naozhi/main.go
   -> datadir      store 文件所在目录的布局策略（Layout 值类型，只派生 sibling）
 
   叶子工具
-  -> osutil       Home/路径展开、进程 helpers、sd_notify、PID 复用防护
+  -> osutil       Home/路径展开、进程 helpers、sd_notify、PID 复用防护、只收 regular file 的打开（OpenRegular：FIFO 不阻塞、不跟随 symlink）
   -> textutil     字符串工具：截断、脱敏、UUID 派生（依赖 osutil.IsLogInjectionRune，非零依赖叶子）
   -> netutil      Client-IP 提取（trusted-proxy 处理）
   -> ratelimit    Per-key token-bucket 限流（login/WS/upload 用）
