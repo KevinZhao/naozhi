@@ -1,4 +1,4 @@
-// anchor-keep: the package's source facts — a leaf-package import ban the cron↔sysession merge RFC depends on, and the enum constant set, which reflect cannot enumerate.
+// anchor-keep: the package's source facts — a leaf-package import ban the cron↔sysession merge RFC depends on, and the enum constant sets (its own, and cron's re-exports of them), which reflect cannot enumerate.
 package runtelemetry
 
 import (
@@ -24,7 +24,7 @@ func TestPackageIsLeaf(t *testing.T) {
 	t.Parallel()
 
 	const forbidden = "github.com/naozhi/naozhi/internal/"
-	_, files := parseProductionFiles(t)
+	_, files := parseProductionFiles(t, ".")
 	for name, f := range files {
 		for _, imp := range f.Imports {
 			p := strings.Trim(imp.Path.Value, `"`)
@@ -35,14 +35,10 @@ func TestPackageIsLeaf(t *testing.T) {
 	}
 }
 
-// parseProductionFiles parses every non-test .go file of the package, keyed by
-// file name.
-func parseProductionFiles(t *testing.T) (*token.FileSet, map[string]*ast.File) {
+// parseProductionFiles parses every non-test .go file in dir, keyed by file
+// name.
+func parseProductionFiles(t *testing.T, dir string) (*token.FileSet, map[string]*ast.File) {
 	t.Helper()
-	dir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read dir %q: %v", dir, err)
@@ -74,7 +70,7 @@ func parseProductionFiles(t *testing.T) (*token.FileSet, map[string]*ast.File) {
 // scope.
 func declaredEnums(t *testing.T) map[string][]string {
 	t.Helper()
-	fset, files := parseProductionFiles(t)
+	fset, files := parseProductionFiles(t, ".")
 	enums := map[string][]string{}
 	for _, f := range files {
 		for _, d := range f.Decls {
@@ -147,4 +143,102 @@ func identName(e ast.Expr) string {
 		return id.Name
 	}
 	return ""
+}
+
+// cronEnums maps each run enum type cron aliases to its constants' name prefix.
+var cronEnums = map[string]string{"ErrorClass": "ErrClass", "RunState": "RunState", "TriggerKind": "Trigger"}
+
+// TestCronEnumsReexportRuntelemetry pins that cron mints no run enum value of
+// its own: the wire freeze sees only this package's constants, so a cron-local
+// type, literal or conversion would put an unfrozen string on the wire, on
+// disk and over REST. Each enum type must alias this package's, each constant
+// with an enum prefix must re-export one of ours, and cron's production code
+// must not convert into an enum type.
+func TestCronEnumsReexportRuntelemetry(t *testing.T) {
+	t.Parallel()
+	fset, files := parseProductionFiles(t, filepath.Join("..", "cron"))
+	aliases, reexports := 0, 0
+	for _, f := range files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.TypeSpec:
+				if _, ok := cronEnums[n.Name.Name]; !ok {
+					return true
+				}
+				aliases++
+				if n.Assign == 0 || !isRuntelemetrySel(n.Type, n.Name.Name) {
+					t.Errorf("%s: type %s must be `= runtelemetry.%s`", fset.Position(n.Pos()), n.Name.Name, n.Name.Name)
+				}
+			case *ast.ValueSpec:
+				if !isCronEnumConst(n) {
+					return true
+				}
+				reexports++
+				if n.Type != nil {
+					t.Errorf("%s: const %s names a type; re-export the runtelemetry constant untyped", fset.Position(n.Pos()), n.Names[0].Name)
+				}
+				if len(n.Values) != len(n.Names) {
+					t.Errorf("%s: const %s has no value of its own; re-export a runtelemetry constant", fset.Position(n.Pos()), n.Names[0].Name)
+				}
+				for _, v := range n.Values {
+					if !isRuntelemetrySel(v, "") {
+						t.Errorf("%s: const %s must be a runtelemetry constant, not a local value", fset.Position(v.Pos()), n.Names[0].Name)
+					}
+				}
+			case *ast.CallExpr:
+				if name, ok := cronEnumType(n.Fun); ok {
+					t.Errorf("%s: conversion to %s; use a runtelemetry constant", fset.Position(n.Pos()), name)
+				}
+			}
+			return true
+		})
+	}
+	if aliases != len(cronEnums) {
+		t.Errorf("found %d cron run enum type specs, want %d: the scan has gone blind or a type moved", aliases, len(cronEnums))
+	}
+	if reexports < 20 {
+		t.Errorf("found only %d cron run enum constants: the scan has gone blind", reexports)
+	}
+}
+
+// isCronEnumConst reports whether a value spec declares a run enum value: it
+// names an enum type, or one of its names carries an enum's constant prefix.
+func isCronEnumConst(vs *ast.ValueSpec) bool {
+	if _, ok := cronEnumType(vs.Type); ok {
+		return true
+	}
+	for _, name := range vs.Names {
+		for _, prefix := range cronEnums {
+			if strings.HasPrefix(name.Name, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// cronEnumType reports whether e names a run enum type, bare or qualified by
+// runtelemetry.
+func cronEnumType(e ast.Expr) (string, bool) {
+	switch e := e.(type) {
+	case *ast.Ident:
+		_, ok := cronEnums[e.Name]
+		return e.Name, ok
+	case *ast.SelectorExpr:
+		if x, ok := e.X.(*ast.Ident); ok && x.Name == "runtelemetry" {
+			_, ok := cronEnums[e.Sel.Name]
+			return "runtelemetry." + e.Sel.Name, ok
+		}
+	}
+	return "", false
+}
+
+// isRuntelemetrySel reports whether e is runtelemetry.<sel>, any sel if empty.
+func isRuntelemetrySel(e ast.Expr, sel string) bool {
+	s, ok := e.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	x, ok := s.X.(*ast.Ident)
+	return ok && x.Name == "runtelemetry" && (sel == "" || s.Sel.Name == sel)
 }
