@@ -554,8 +554,9 @@ im_access:
 - **怎么拿用户 ID**：被拒的消息会在 Info 级别打一行 `im access denied`，`user`
   字段就是要填的 ID（飞书 open_id `ou_...`、Slack `U...`、Discord 用户 ID、微信
   `from`）。私聊里被拒的人也会收到带自己 ID 的提示，同一人 10 分钟最多一次；群里
-  不回复，免得刷屏。拒绝次数记在 expvar `naozhi_dispatch_denied_total`。
-- `/cd`、`/project`、`/cron` 只有 `admin_users` 能用；`admin_users` 为空时所有
+  对名单外的人不回复，免得刷屏。拒绝次数记在 expvar `naozhi_dispatch_denied_total`。
+- `/cd`、`/project`、`/cron` 只有 `admin_users` 能用；名单内的非管理员用这些命令
+  时（私聊和群里都一样）会收到「该命令需要管理员权限。」。`admin_users` 为空时所有
   `allowed_users` 都算管理员，所以只开白名单不会少功能。
 - 已有的定时任务不受影响：把某人移出名单后，他创建过的 cron 任务照常运行，要在
   dashboard 里手动删除。
