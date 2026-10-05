@@ -2,8 +2,10 @@ package session
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net"
 	"os"
 	"runtime"
@@ -17,11 +19,13 @@ import (
 
 // resetShimFake is a shim bound on key's socket whose hello reports cliAlive.
 // It records the client messages and, on shutdown, closes its listener, which
-// unlinks the socket the way a real shim's exit does.
+// unlinks the socket the way a real shim's exit does. With lateFrames it
+// writes the frames after the hello only once the client has hung up.
 type resetShimFake struct {
-	ln       net.Listener
-	socket   string
-	cliAlive bool
+	ln         net.Listener
+	socket     string
+	cliAlive   bool
+	lateFrames bool
 
 	mu       sync.Mutex
 	accepted int
@@ -32,7 +36,7 @@ type resetShimFake struct {
 // newResetShimRouter returns a Router whose wrapper has a real shim manager,
 // with a fake shim for key listening on the key's socket and a state file
 // naming it. Not parallel-safe: it sets XDG_RUNTIME_DIR.
-func newResetShimRouter(t *testing.T, key string, cliAlive bool) (*Router, *resetShimFake) {
+func newResetShimRouter(t *testing.T, key string, cliAlive, lateFrames bool) (*Router, *resetShimFake) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("shim retire needs unix sockets and unix PID liveness")
@@ -58,7 +62,7 @@ func newResetShimRouter(t *testing.T, key string, cliAlive bool) (*Router, *rese
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &resetShimFake{ln: ln, socket: socket, cliAlive: cliAlive}
+	f := &resetShimFake{ln: ln, socket: socket, cliAlive: cliAlive, lateFrames: lateFrames}
 	t.Cleanup(func() {
 		_ = ln.Close()
 		f.conns.Wait()
@@ -113,14 +117,19 @@ func (f *resetShimFake) handle(conn net.Conn) {
 		code := 1
 		frames = append(frames, shim.ServerMsg{Type: "cli_exited", Code: &code})
 	}
+	// Write errors are ignored, as the real shim's writeRaw does: the retire
+	// client hangs up right after the hello, so a later frame can hit EPIPE
+	// while its shutdown line is still queued for reading.
 	for i := range frames {
+		if i == 1 && f.lateFrames {
+			queued, _ := io.ReadAll(rd)
+			rd = bufio.NewReader(bytes.NewReader(queued))
+		}
 		data, err := frames[i].MarshalLine()
 		if err != nil {
 			return
 		}
-		if _, err := conn.Write(data); err != nil {
-			return
-		}
+		_, _ = conn.Write(data)
 	}
 	for {
 		line, err := rd.ReadBytes('\n')
@@ -162,15 +171,18 @@ func shimStuckFlag(r *Router, key string) (stuck bool) {
 // flagged shim-stuck and the socket is free for the next spawn.
 func TestReset_RetiresDeadCLIShim(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		proc processIface
+		name       string
+		proc       processIface
+		lateFrames bool
 	}{
-		{"dead process", newDeadProc()},
-		{"no process", nil},
+		{"dead process", newDeadProc(), false},
+		{"no process", nil, false},
+		// The client reads only the hello, then sends shutdown and closes.
+		{"client hangs up after hello", newDeadProc(), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const key = "feishu:direct:alice:general"
-			r, f := newResetShimRouter(t, key, false)
+			r, f := newResetShimRouter(t, key, false, tc.lateFrames)
 			injectSession(r, key, tc.proc)
 
 			r.Reset(key)
@@ -196,7 +208,7 @@ func TestReset_LeavesLiveCLIShimRunning(t *testing.T) {
 		t.Skip("slow: waits out the 2s socket wait")
 	}
 	const key = "feishu:direct:bob:general"
-	r, f := newResetShimRouter(t, key, true)
+	r, f := newResetShimRouter(t, key, true, false)
 	injectSession(r, key, newDeadProc())
 
 	r.Reset(key)
@@ -216,7 +228,7 @@ func TestReset_LiveProcessIsClosedNotProbed(t *testing.T) {
 		t.Skip("slow: waits out the 2s socket wait")
 	}
 	const key = "feishu:direct:carol:general"
-	r, f := newResetShimRouter(t, key, false)
+	r, f := newResetShimRouter(t, key, false, false)
 	proc := newIdleProc()
 	injectSession(r, key, proc)
 

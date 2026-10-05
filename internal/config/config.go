@@ -64,6 +64,8 @@ type Config struct {
 	Update      UpdateConfig      `yaml:"update,omitempty"`
 	ImageOrient ImageOrientConfig `yaml:"image_orient,omitempty"`
 	Cost        CostConfig        `yaml:"cost,omitempty"`
+	// IMAccess restricts which IM senders the dispatcher serves (im_access.go).
+	IMAccess IMAccessConfig `yaml:"im_access,omitempty"`
 
 	// Parsed durations, populated once in Load.
 	cachedTTL             time.Duration `yaml:"-"`
@@ -265,6 +267,7 @@ func validateConfig(cfg *Config) error {
 		validateArgvBearingFields,
 		validateAgentCommands,
 		validateProjects,
+		validateIMAccess,
 	} {
 		if err := check(cfg); err != nil {
 			return err

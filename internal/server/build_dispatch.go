@@ -50,6 +50,7 @@ func (s *Server) buildDispatcher(w *wiring) *dispatch.Dispatcher {
 		Turns:                 w.turns,
 		Dedup:                 w.dedup,
 		AllowedRoot:           w.allowedRoot,
+		Access:                w.imAccess,
 		ClaudeDir:             s.claudeDir,
 		Capabilities:          serverCaps{s: s},
 		NoOutputTimeout:       s.noOutputTimeout,

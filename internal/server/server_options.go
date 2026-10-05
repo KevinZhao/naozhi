@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/imauth"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
@@ -30,6 +31,9 @@ type ServerOptions struct {
 	// Identity groups what the server reports about itself (S8, #2987).
 	Identity    IdentityOptions
 	AllowedRoot string // restricts /cd to paths under this root
+	// IMAccess is the IM sender policy the dispatcher enforces; nil allows
+	// every sender.
+	IMAccess *imauth.Policy
 	// StateDir is the only state directory the constructor owns end-to-end
 	// (cookie_secret 0700/0600, retired-key ledger, size warning). Other state
 	// dirs (~/.claude, workspace cwd, attachments, cron runs/shims) are owned

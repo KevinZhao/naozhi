@@ -73,10 +73,9 @@ func bookProcessEnd(s *ManagedSession, proc processIface, claudeDir string) {
 
 // onProcessEnd books end's spend off the read loop. A detached CLI, or one
 // whose shim outlived the socket, is still running and will report its spend
-// itself; a key a cron run owns when the process ends is that run's to
-// account.
+// itself.
 func (c *costAccounting) onProcessEnd(s *ManagedSession, end cli.ProcessEnd, claudeDir string) {
-	if c == nil || end.Detached || !c.ledger.Enabled() || c.owned(s.key) {
+	if c == nil || end.Detached || !c.ledger.Enabled() {
 		return
 	}
 	if end.ShimLive {

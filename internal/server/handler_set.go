@@ -45,6 +45,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/uisettings"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
+	"github.com/naozhi/naozhi/internal/imauth"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/routerrelay"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
@@ -122,7 +123,8 @@ type wiring struct {
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string
 	allowedRoot   string
-	debugMode     bool // gates /api/debug/pprof and /api/debug/vars
+	imAccess      *imauth.Policy // nil allows every IM sender
+	debugMode     bool           // gates /api/debug/pprof and /api/debug/vars
 	resolver      *session.KeyResolver
 	sysessionMgr  *sysession.Manager
 	orient        *orientConfig // nil = image auto-orientation off

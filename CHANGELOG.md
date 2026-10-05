@@ -60,6 +60,7 @@
 
 ### Security
 
+- **IM 发送者鉴权 `im_access`**（#3442）：此前任何能给 bot 发消息的 IM 用户都能让 naozhi 在宿主机上执行命令。新增顶层配置 `im_access`（`default_deny` / `deny_reply` / `platforms.<p>.allowed_users` / `admin_users`），在所有入口（含飞书 AskUserQuestion 卡片回答）命令分发前统一判定；`/cron`、`/cd`、`/project` 需 admin，`admin_users` 为空时所有 allowed 用户都是 admin。被拒消息记 Info `im access denied`（带 user ID）并计入 `naozhi_dispatch_denied_total`；私聊回复一次本人 ID（同一用户 10 分钟内只回一次），群聊静默。**不配置时行为不变**（全放行），但启动日志与 `naozhi config check` 对每个未受限的已启用平台给出 WARN——`config check` 因此会从退出码 0 变为 1，按退出码 0 判定的脚本需要调整。条目里的未知平台名、空 ID、未展开的 `${VAR}` 会让配置加载失败。改名单需重启
 - **Multipart Value 字段数上限 32**（RNEW-SEC-001），阻断 padded-body DoS
 - **PDF 上传路径显式拒 gzip magic**（RNEW-SEC-002），defence-in-depth
 - **Attachment ETag 改为 sha256 前 16 字符**（RNEW-SEC-004），不再通过响应头泄漏纳秒级 mtime
@@ -70,6 +71,7 @@
 - `/urgent` 之后，在它之前已排队的消息现在会拿到自己的真实回答，不再收到"上一条消息已被 /urgent 打断，请在当前任务完成后重发"：真实 CLI 实测（claude 2.1.288）表明 `priority:"now"` 抢占不丢弃队列，紧急消息先跑、排队消息随后各自成轮（`docs/rfc/passthrough-mode-validation.md` V10，#3394）
 - 删除会话后立刻在同一个 key 上新建会话时，被删对话的记录不再留在新会话的 event log 里（#3416）：以前重启后它会出现在新会话 dashboard 历史的最前面，旧 workspace 的附件引用也一直不释放。现在删除会先清掉 event log 和附件引用、再关进程，新会话等清理完成（通常几毫秒，最多约 8 秒）才开始落盘
 - `spawnSession` panic recover 错误消息不再双前缀 `"spawn process: spawn process:"`（RNEW-009）
+- IM 首轮自动接管不再在 naozhi 会拒绝接管时（max_procs 已满 / 该 key 正在 spawn / 正在关停 / planner 的 exempt 配额已满 / agent 的 model 或 backend 非法）先 SIGTERM 掉终端里的 Claude CLI；接管前改为先跑 `Router.TakeoverPrecheck`（#3395）
 
 ### Documentation
 

@@ -398,6 +398,10 @@ type ManagedSession struct {
 	// so it takes this session's readings whole. Both under costMu.
 	successor *ManagedSession
 	renamed   bool
+	// costWindow is the spend this session's own results reported while a
+	// run owner held its cost window open (managed_cost_window.go); nil when
+	// closed. Under costMu.
+	costWindow *costledger.Totals
 	// costAcct is the router-wide ledger sink; nil in tests that don't wire one.
 	costAcct *costAccounting
 
