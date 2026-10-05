@@ -1449,6 +1449,16 @@ func TestEventEntryFromEvent(t *testing.T) {
 			wantOK: false,
 		},
 		{
+			name:   "system vcs_state_changed skipped",
+			event:  clievent.Event{Type: "system", SubType: "vcs_state_changed"},
+			wantOK: false,
+		},
+		{
+			name:   "system code_change_published skipped",
+			event:  clievent.Event{Type: "system", SubType: "code_change_published"},
+			wantOK: false,
+		},
+		{
 			name: "assistant thinking",
 			event: clievent.Event{Type: "assistant", Message: &clievent.AssistantMessage{
 				Content: []clievent.ContentBlock{{Type: "thinking", Text: "analyzing"}},
