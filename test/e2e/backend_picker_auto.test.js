@@ -1,0 +1,207 @@
+// @ts-check
+//
+// The backend picker's 自动 option (#3418). Untouched, every picker sends no
+// backend, so the server's own order (agents[].backend, the access profile's
+// default_backend, the router default) decides; only an explicit pick is
+// sent. The 自动 label names the backend that order would pick from the
+// access profile in view.
+//
+//   - New session (palette and custom-workspace modal): 自动 selected and
+//     labelled for the default profile; the send carries no backend unless
+//     one was picked; switching profile relabels 自动 without changing it.
+//   - Project settings: a project with no backend opens on 自动 and saves
+//     backend "" instead of pinning the router default.
+//   - Cron: a create on 自动 sends no backend, and saving an edit of a job
+//     with none does not PATCH one in.
+//
+// /api/cli/backends, /api/access-profiles and /api/projects/config are
+// answered by page.route (the mock serves none of them).
+//
+// 跑法：cd test/e2e && npx playwright test backend_picker_auto.test.js --project=desktop-chrome
+
+const { test, expect } = require('@playwright/test');
+const { startMockServer } = require('./mock-server');
+
+const MANIFEST = {
+  backends: [
+    { id: 'claude', display_name: 'claude-code', protocol: 'stream-json', available: true },
+    { id: 'kiro', display_name: 'kiro', protocol: 'acp', available: true },
+  ],
+  default: 'claude',
+  detected: [],
+};
+
+const PROFILES = {
+  profiles: [
+    { id: 'team', display_name: 'Team', default_backend: 'kiro', secret_ok: true },
+    { id: 'solo', display_name: 'Solo', secret_ok: true },
+  ],
+  default: 'team',
+};
+
+const NOW = Date.now();
+const CRON_JOB = {
+  id: 'cron-auto-1', schedule: '0 9 * * *', prompt: 'no backend job', backend: '',
+  work_dir: '/home/user/workspace/myproject', paused: false, created_at: NOW - 86400000,
+  next_run: NOW + 3600000, recent_runs: [], stats: { total: 0, succeeded: 0 },
+};
+
+/** @param {object} body */
+function json(body) {
+  return { status: 200, contentType: 'application/json', body: JSON.stringify(body) };
+}
+
+test.use({ viewport: { width: 1600, height: 900 } });
+
+test.beforeEach(({ }, testInfo) => {
+  if (testInfo.project.name !== 'desktop-chrome') {
+    testInfo.skip(true, 'viewport-independent; desktop-chrome only');
+  }
+});
+
+/** @type {Awaited<ReturnType<typeof startMockServer>>} */
+let mock;
+test.beforeAll(async () => { mock = await startMockServer({ cronJobs: [CRON_JOB] }); });
+test.afterAll(async () => { await new Promise(r => mock.server.close(r)); });
+
+test.beforeEach(async ({ page }) => {
+  mock.resetCalls();
+  await page.route(url => url.pathname === '/api/cli/backends', route => route.fulfill(json(MANIFEST)));
+  await page.route(url => url.pathname === '/api/access-profiles', route => route.fulfill(json(PROFILES)));
+});
+
+/** @param {import('@playwright/test').Page} page */
+async function openPalette(page) {
+  await page.goto(mock.url + '/dashboard');
+  await page.waitForSelector('.session-card');
+  await page.click('.hdr-btn[title="New Session"]');
+  await page.waitForSelector('.cmd-palette-item');
+}
+
+/**
+ * Opens myproject from the palette, sends one message and returns its body.
+ * @param {import('@playwright/test').Page} page
+ */
+async function sendFromProject(page) {
+  await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().click();
+  const input = page.locator('#msg-input');
+  await input.click();
+  await input.pressSequentially('hello');
+  await page.keyboard.press('Enter');
+  await expect.poll(() => mock.sendCalls.length).toBe(1);
+  return JSON.parse(mock.sendCalls[0]);
+}
+
+test('palette: 自动 is preselected, labelled for the profile, and sends no backend', async ({ page }) => {
+  await openPalette(page);
+  const backend = page.locator('#new-backend');
+  await expect(backend).toHaveValue('');
+  await expect(backend.locator('option')).toHaveText(['自动（kiro）', 'claude-code', 'kiro']);
+
+  const body = await sendFromProject(page);
+  expect('backend' in body, 'an untouched picker must leave the backend to the server').toBe(false);
+  expect(body.access_profile).toBe('team');
+});
+
+test('palette: an explicit pick of the router default is still sent', async ({ page }) => {
+  await openPalette(page);
+  await page.selectOption('#new-backend', 'claude');
+  const body = await sendFromProject(page);
+  expect(body.backend).toBe('claude');
+});
+
+test('palette: switching access profile relabels 自动 and keeps it selected', async ({ page }) => {
+  await openPalette(page);
+  await page.selectOption('#new-access-profile', 'solo');
+  const auto = page.locator('#new-backend option[value=""]');
+  await expect(auto).toHaveText('自动（claude-code）');
+  await expect(page.locator('#new-backend')).toHaveValue('');
+  // An explicit pick survives the repaint a profile switch triggers.
+  await page.selectOption('#new-backend', 'kiro');
+  await page.selectOption('#new-access-profile', 'team');
+  await expect(auto).toHaveText('自动（kiro）');
+  await expect(page.locator('#new-backend')).toHaveValue('kiro');
+});
+
+test('custom workspace: 自动 and the profile carry over from the palette', async ({ page }) => {
+  await openPalette(page);
+  await page.selectOption('#new-access-profile', 'solo');
+  await page.locator('.cmd-palette-item', { hasText: '打开自定义工作目录' }).click();
+  await expect(page.locator('#new-access-profile')).toHaveValue('solo');
+  const backend = page.locator('#new-backend');
+  await expect(backend).toHaveValue('');
+  await expect(backend.locator('option[value=""]')).toHaveText('自动（claude-code）');
+
+  await page.fill('#new-workspace', '/tmp/elsewhere');
+  await page.click('.modal-overlay .modal-btns button.primary');
+  const input = page.locator('#msg-input');
+  await input.click();
+  await input.pressSequentially('hello');
+  await page.keyboard.press('Enter');
+  await expect.poll(() => mock.sendCalls.length).toBe(1);
+  const body = JSON.parse(mock.sendCalls[0]);
+  expect('backend' in body).toBe(false);
+  expect(body.access_profile).toBe('solo');
+});
+
+test('project settings: no saved backend opens on 自动 and saves backend ""', async ({ page }) => {
+  /** @type {any[]} */
+  const puts = [];
+  await page.route(url => url.pathname === '/api/projects/config', route => {
+    if (route.request().method() === 'PUT') {
+      puts.push(JSON.parse(route.request().postData() || '{}'));
+      return route.fulfill(json({ ok: true }));
+    }
+    return route.fulfill(json({ access_profile: 'solo' }));
+  });
+  await page.goto(`${mock.url}/dashboard`);
+  await page.locator('[data-action="project-settings"][data-name="myproject"]').click();
+
+  const backend = page.locator('#ps-backend');
+  await expect(backend).toHaveValue('');
+  const auto = backend.locator('option[value=""]');
+  await expect(auto).toHaveText('自动（claude-code）');
+  await page.selectOption('#ps-access-profile', 'team');
+  await expect(auto).toHaveText('自动（kiro）');
+
+  await page.click('[data-action="ps-save"]');
+  await expect.poll(() => puts.length).toBe(1);
+  expect(puts[0].backend).toBe('');
+  expect(puts[0].access_profile).toBe('team');
+});
+
+/** @param {import('@playwright/test').Page} page */
+async function openCron(page) {
+  await page.goto(mock.url + '/dashboard');
+  await page.waitForSelector('.session-card');
+  await page.click('#abnav-cron');
+  await page.waitForSelector('.cj-row[data-cron-id="cron-auto-1"]');
+}
+
+test('cron create on 自动 sends no backend', async ({ page }) => {
+  await openCron(page);
+  await page.click('.cron-new-btn');
+  await page.waitForSelector('.cron-modal');
+  await expect(page.locator('#cron-backend')).toHaveValue('');
+  await page.evaluate(() => {
+    const el = /** @type {HTMLInputElement|null} */ (document.getElementById('freq-advanced-input'));
+    if (el) el.value = '0 9 * * *';
+  });
+  await page.fill('#cron-prompt', 'auto job');
+  await page.click('[data-action="cron-create-save"]');
+  await expect.poll(() => mock.cronCreateCalls.length).toBe(1);
+  expect('backend' in JSON.parse(mock.cronCreateCalls[0])).toBe(false);
+});
+
+test('cron edit of a job with no backend does not PATCH one in', async ({ page }) => {
+  await openCron(page);
+  await page.click('.cj-row[data-cron-id="cron-auto-1"] .cj-schedule');
+  await page.waitForSelector('[data-action="cron-edit-save"]');
+  await expect(page.locator('#edit-cron-backend')).toHaveValue('');
+  await page.fill('#edit-cron-prompt', 'edited prompt');
+  await page.click('[data-action="cron-edit-save"]');
+  await expect.poll(() => mock.cronPatchCalls.length).toBe(1);
+  const body = JSON.parse(mock.cronPatchCalls[0].body);
+  expect(body.prompt).toBe('edited prompt');
+  expect('backend' in body, 'saving a job with no backend must not pin the router default').toBe(false);
+});

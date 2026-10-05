@@ -45,6 +45,7 @@ naozhi doctor --timeout 2s
 | `transcribe creds` | `transcribe.enabled` 时 AWS 凭证链取得到凭证（显示来源）；未启用则 skipped | 取不到凭证，语音消息会失败 | - |
 | `transcribe ffmpeg` | 找得到 ffmpeg（`NAOZHI_FFMPEG_PATH` 优先，其次 `$PATH`）；未启用则 skipped | 找不到，ogg/flac/pcm 以外的语音格式转不了 | - |
 | `zero-downtime` | `naozhi-shim-*.scope` 有 ≥1 | 0 个 scope（sudoers hardening 未生效） | systemctl list-units 失败 |
+| `im access` | 每个已配置的 IM 平台都有 `im_access` 条目（列出去重后的用户数、管理员数；`admin_users` 为空时写 `all admin`），或被 `default_deny` 拒绝；没配任何平台；配置读不出时 skipped | 某平台没有 `im_access` 条目且 `default_deny` 关闭：任何能给 bot 发消息的人都能在宿主机执行命令（与启动日志、`naozhi config check` 的告警同源） | - |
 
 `cli runtime` 到 `dispatch` 五项和 `config-drift` 读的是同一次带 token 的 `GET /health`（整次 doctor 只发一次）。没有 token、token 被拒或 `/health` 不可达时，这五项各输出一行 `skipped (…)`，不计 fail。`platforms` 一行读 `/health` 的 `platforms`（每个平台的状态名）和 `platform_conn`（状态起始时间 `since`、最近一次错误）：整行取最差那个平台的级别，每个平台一段，最近错误只在未连上时显示，超过 120 字节截断并以 `...` 结尾（每段单独截断，一个平台的长错误不会挤掉其他平台）。状态持续时长按 `/health` 响应的 `Date` 头（服务端时钟）减 `since` 计算，不受两边时钟偏差影响；响应没有 `Date` 头时才退回本机时钟。5 分钟的宽限覆盖 feishu 长连接默认 2 分钟的重连间隔加抖动和 weixin 的 30 秒退避。discord 掉线期间会用 REST（`GET /users/@me`）探测 bot token：被拒（401/403）直接报 `failed`，其他错误作为最近错误显示；4013/4014（intent 不允许）这类网关关闭码探测不到，仍只显示 `disconnected`，靠 5 分钟宽限报出。`failed` 不代表适配器停止重试：discord 报 401/403 之后 discordgo 仍在重连，拒绝在 Discord 侧解除后会自行回到 `connected`；weixin 遇到 iLink -14 也会每小时继续轮询一次，token 恢复可用后同样回到 `connected`。只报 `registered` 的平台（适配器观察不到连接，或服务端早于连接状态上报）没有连接状态，「平台没连上」只能从 `dispatch` 的入站计数推断，所有平台都能上报时 `dispatch` 不再做这条推断：这个计数不含斜杠命令，只收到 `/help` 之类命令（或确实没人发消息）的安静 bot 启动 10 分钟后也会报这条 warn（不影响退出码）；启动时长同样按 `Date` 头减服务端的 `config_loaded_at` 计算，没有 `Date` 头时才退回本机时钟。
 
@@ -77,6 +78,7 @@ $ naozhi doctor
 ✓ transcribe creds       AWS credentials from EC2RoleProvider
 ✓ transcribe ffmpeg      /usr/bin/ffmpeg
 ✓ zero-downtime          2 shim scope(s) active (sudoers hardening is working)
+✓ im access              feishu 3 user(s), 1 admin(s)
 ```
 
 服务 down：

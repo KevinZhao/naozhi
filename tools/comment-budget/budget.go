@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
@@ -34,9 +35,10 @@ type Counts struct {
 	// separated by exactly one blank line (a stray copy left by a split).
 	DuplicateComments int
 	// MisplacedDocs counts godocs off the declaration they describe: one
-	// opening with another top-level name of its package or with an
-	// identifier-shaped name nothing declares, or a top-level block after a
-	// file's last declaration, which documents nothing.
+	// opening with another top-level name of its package that its own
+	// signature, value or type does not use, or with an identifier-shaped
+	// name nothing declares, or a top-level block after a file's last
+	// declaration, which documents nothing.
 	MisplacedDocs int
 	// IssueRefs counts #NNNN references.
 	IssueRefs int
@@ -198,9 +200,12 @@ func (c *Counts) hit(fset *token.FileSet, key string, pos token.Pos) {
 }
 
 // countMisplacedDocs counts MisplacedDocs over the files of one package. A
-// doc may open with its own name or a prefix of it (a family doc); prose
-// openers are legal because only declared or identifier-shaped words count.
-// A file with no declarations is a design note and is skipped.
+// doc may open with its own name or a prefix of it (a family doc), or with a
+// name its declaration's param and result types, value or type use ("Config
+// returned by Load" on func Load() *Config); a receiver, a function body or a
+// sibling spec does not count. Prose openers are legal because only declared
+// or identifier-shaped words count. A file with no declarations is a design
+// note and is skipped.
 func countMisplacedDocs(c *Counts, fset *token.FileSet, files []*ast.File) {
 	names := map[string]bool{}
 	for _, f := range files {
@@ -210,9 +215,9 @@ func countMisplacedDocs(c *Counts, fset *token.FileSet, files []*ast.File) {
 			}
 		}
 	}
-	misplaced := func(doc *ast.CommentGroup, own []string) {
-		w := docSubject(doc)
-		if w == "" || slices.Contains(own, w) || !slices.ContainsFunc(own, func(n string) bool { return n != "_" }) {
+	misplaced := func(doc *ast.CommentGroup, d ast.Decl, scope ast.Node) {
+		w, own := docSubject(doc), declNames(d)
+		if w == "" || slices.Contains(own, w) || !slices.ContainsFunc(own, func(n string) bool { return n != "_" }) || declRefs(scope)[w] {
 			return
 		}
 		if !names[w] && (!identShaped(w) || slices.ContainsFunc(own, func(n string) bool { return strings.HasPrefix(n, w) })) {
@@ -229,15 +234,15 @@ func countMisplacedDocs(c *Counts, fset *token.FileSet, files []*ast.File) {
 			switch d := d.(type) {
 			case *ast.FuncDecl:
 				if d.Doc != nil {
-					misplaced(d.Doc, declNames(d))
+					misplaced(d.Doc, d, d)
 				}
 			case *ast.GenDecl:
 				if d.Doc != nil && len(d.Specs) == 1 {
-					misplaced(d.Doc, declNames(d))
+					misplaced(d.Doc, d, d)
 				}
 				for _, s := range d.Specs {
 					if doc := specDoc(s); doc != nil {
-						misplaced(doc, declNames(d))
+						misplaced(doc, d, s)
 					}
 				}
 			}
@@ -280,6 +285,54 @@ func declNames(d ast.Decl) []string {
 	return nil
 }
 
+// declRefs collects the identifiers n's types and values use, not the field,
+// method or param names n declares: a function's param and result types, not
+// its receiver or body; a spec's type and values, skipping function literal
+// bodies. n is a FuncDecl, a GenDecl or one spec of it.
+func declRefs(n ast.Node) map[string]bool {
+	refs := map[string]bool{}
+	var visit func(n ast.Node) bool
+	visit = func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.Ident:
+			refs[n.Name] = true
+		case *ast.Field:
+			ast.Inspect(n.Type, visit)
+			return false
+		case *ast.FuncLit:
+			ast.Inspect(n.Type, visit)
+			return false
+		}
+		return true
+	}
+	var specs []ast.Spec
+	switch n := n.(type) {
+	case *ast.FuncDecl:
+		ast.Inspect(n.Type, visit)
+	case *ast.GenDecl:
+		specs = n.Specs
+	case ast.Spec:
+		specs = []ast.Spec{n}
+	}
+	for _, s := range specs {
+		switch s := s.(type) {
+		case *ast.TypeSpec:
+			ast.Inspect(s.Type, visit)
+			if s.TypeParams != nil {
+				ast.Inspect(s.TypeParams, visit)
+			}
+		case *ast.ValueSpec:
+			if s.Type != nil {
+				ast.Inspect(s.Type, visit)
+			}
+			for _, v := range s.Values {
+				ast.Inspect(v, visit)
+			}
+		}
+	}
+	return refs
+}
+
 func specNames(s ast.Spec) []string {
 	switch s := s.(type) {
 	case *ast.TypeSpec:
@@ -305,13 +358,18 @@ func specDoc(s ast.Spec) *ast.CommentGroup {
 }
 
 // docSubject returns the identifier doc opens with, the last part of a
-// dotted Type.Method, or "" when it opens with something else.
+// dotted Type.Method, or "" when it opens with something else. A subject
+// ends at whitespace or the end of the text; a token followed by other
+// punctuation is a prose compound ("Server-side", "Config:", "Server's").
 func docSubject(doc *ast.CommentGroup) string {
 	text := strings.TrimLeft(doc.Text(), " \t\n")
 	i := strings.IndexFunc(text, func(r rune) bool {
 		return r != '.' && r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
 	if i >= 0 {
+		if r, _ := utf8.DecodeRuneInString(text[i:]); !unicode.IsSpace(r) {
+			return ""
+		}
 		text = text[:i]
 	}
 	text = strings.TrimRight(text, ".")
