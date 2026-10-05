@@ -182,6 +182,20 @@ func TestDescribeDecodeError(t *testing.T) {
 				"line 3: cannot unmarshal !!str into int; line 4: cannot unmarshal !!str into int; " +
 				"line 5: cannot unmarshal !!str into int (+3 more)",
 		},
+		{
+			name: "exactly five entries carry no overflow count",
+			err:  &yaml.TypeError{Errors: many[:5]},
+			want: "yaml type error: line 1: cannot unmarshal !!str into int; line 2: cannot unmarshal !!str into int; " +
+				"line 3: cannot unmarshal !!str into int; line 4: cannot unmarshal !!str into int; " +
+				"line 5: cannot unmarshal !!str into int",
+		},
+		{
+			name: "sixth entry is counted",
+			err:  &yaml.TypeError{Errors: many[:6]},
+			want: "yaml type error: line 1: cannot unmarshal !!str into int; line 2: cannot unmarshal !!str into int; " +
+				"line 3: cannot unmarshal !!str into int; line 4: cannot unmarshal !!str into int; " +
+				"line 5: cannot unmarshal !!str into int (+1 more)",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
