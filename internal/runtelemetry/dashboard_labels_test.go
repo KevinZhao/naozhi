@@ -19,7 +19,9 @@ var notCronDashboardClasses = map[ErrorClass]bool{
 	ErrClassSysessionValidation: true,
 }
 
-var labelKey = regexp.MustCompile(`(?m)^\s*([a-z_]+):\s*'`)
+// labelKey matches one `key: <string literal>` entry per line; the value may
+// use any of JS's three quote characters.
+var labelKey = regexp.MustCompile(`(?m)^\s*([A-Za-z0-9_]+):\s*['"` + "`]")
 
 // TestCronErrorClassesHaveDashboardLabels: every frozen error class outside
 // notCronDashboardClasses has a label in CRON_ERROR_CLASS_LABELS, and every
@@ -35,7 +37,7 @@ func TestCronErrorClassesHaveDashboardLabels(t *testing.T) {
 		case notCronDashboardClasses[c] && labels[string(c)]:
 			t.Errorf("error class %q has a dashboard label but is listed in notCronDashboardClasses", c)
 		case !notCronDashboardClasses[c] && !labels[string(c)]:
-			t.Errorf("error class %q has no label in CRON_ERROR_CLASS_LABELS (%s); the dashboard would show the raw string", c, cronDashboardLabels)
+			t.Errorf("error class %q has no label in CRON_ERROR_CLASS_LABELS (%s); the dashboard would show the raw string (only one `key: <string literal>` entry per line is recognised)", c, cronDashboardLabels)
 		}
 	}
 	for k := range labels {
