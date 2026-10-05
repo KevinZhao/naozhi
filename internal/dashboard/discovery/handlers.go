@@ -65,6 +65,7 @@ type Handlers struct {
 	// procStartTime reads /proc start_time for a pid; feeds the pidfd-based
 	// SendTermVerified guard so SIGTERM cannot leak to a recycled PID (#1670).
 	procStartTime func(pid int) (uint64, error)
+	takeovers     *takeoverTracker
 }
 
 // Deps bundles all wiring for New.
@@ -104,6 +105,7 @@ func New(d Deps) *Handlers {
 		validateWS:      d.ValidateWS,
 		verifyProcIdent: d.VerifyProcID,
 		procStartTime:   d.ProcStartTime,
+		takeovers:       newTakeoverTracker(),
 	}
 }
 
@@ -346,6 +348,7 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 	broadcast := h.broadcast
 	claudeDir := h.claudeDir
 	router := h.router
+	takeoverID := h.takeovers.begin()
 
 	h.bg.Add(1)
 	go func() {
@@ -363,6 +366,7 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 			// No AccessProfile: the external process never ran on the
 			// agent's pin, so the takeover stays on default_access_profile.
 		})
+		h.takeovers.finish(takeoverID, err)
 		if err != nil {
 			slog.Error("session takeover failed", "key", key, "session_id", sessionID, "pid", pid, "err", err)
 			if broadcast != nil {
@@ -377,7 +381,7 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	httputil.WriteJSONStatus(w, http.StatusAccepted, map[string]string{"status": "accepted", "key": key})
+	httputil.WriteJSONStatus(w, http.StatusAccepted, map[string]string{"status": "accepted", "key": key, "takeover_id": takeoverID})
 }
 
 // writeTakeoverRefusal answers a takeover TakeoverPrecheck refused; the
