@@ -310,10 +310,13 @@ func (d *Discord) probeWhileDisconnected(sess *discordgo.Session) {
 }
 
 // probeOnce runs one REST check and reports whether the state is now terminal.
+// Both verdicts apply only while the state is still disconnected, so a check
+// that outlives a reconnect leaves the recovered state and LastError alone.
+// The 429 retry is off: discordgo would sleep it out ignoring ctx.
 func (d *Discord) probeOnce(sess *discordgo.Session) bool {
 	ctx, cancel := context.WithTimeout(d.stopCtx, durationOr(d.probeTimeout, discordProbeTimeout))
 	defer cancel()
-	_, err := sess.User("@me", discordgo.WithContext(ctx))
+	_, err := sess.User("@me", discordgo.WithContext(ctx), discordgo.WithRetryOnRatelimit(false))
 	if err == nil {
 		slog.Debug("discord gateway down but REST accepts the bot token")
 		return false
@@ -321,22 +324,47 @@ func (d *Discord) probeOnce(sess *discordgo.Session) bool {
 	if d.stopCtx.Err() != nil {
 		return true
 	}
+	if code := restStatus(err); code == http.StatusUnauthorized || code == http.StatusForbidden {
+		if d.connState.FailIf(platform.ConnDisconnected, platform.ConnFailed,
+			fmt.Errorf("discord rejected the bot token (HTTP %d): update platforms.discord.bot_token and restart", code)) {
+			slog.Error("discord rejected the bot token while the gateway is down; update platforms.discord.bot_token and restart",
+				"status", code)
+		}
+		return true
+	}
+	d.connState.FailIf(platform.ConnDisconnected, platform.ConnDisconnected,
+		fmt.Errorf("gateway down; REST probe: %w", probeReason(err)))
+	return false
+}
+
+// discordRetriesExhausted prefixes the plain error discordgo v0.29.0 returns
+// for a 502 that outlived its retries; that error carries the response body.
+const discordRetriesExhausted = "Exceeded Max retries HTTP "
+
+// probeReason reduces a failed response to its status, because a body can
+// echo request details or be a whole HTML error page. Transport errors pass
+// through as they are.
+func probeReason(err error) error {
+	if code := restStatus(err); code != 0 {
+		return fmt.Errorf("HTTP %d", code)
+	}
+	var rateLimited *discordgo.RateLimitError
+	if errors.As(err, &rateLimited) {
+		return fmt.Errorf("HTTP %d", http.StatusTooManyRequests)
+	}
+	if strings.HasPrefix(err.Error(), discordRetriesExhausted) {
+		return fmt.Errorf("HTTP %d", http.StatusBadGateway)
+	}
+	return err
+}
+
+// restStatus is the HTTP status of a discordgo RESTError, or 0.
+func restStatus(err error) int {
 	var restErr *discordgo.RESTError
 	if errors.As(err, &restErr) && restErr.Response != nil {
-		code := restErr.Response.StatusCode
-		// The response body is left out: it can echo request details.
-		if code == http.StatusUnauthorized || code == http.StatusForbidden {
-			if d.connState.FailIf(platform.ConnDisconnected, platform.ConnFailed,
-				fmt.Errorf("discord rejected the bot token (HTTP %d): update platforms.discord.bot_token and restart", code)) {
-				slog.Error("discord rejected the bot token while the gateway is down; update platforms.discord.bot_token and restart",
-					"status", code)
-			}
-			return true
-		}
-		err = fmt.Errorf("HTTP %d", code)
+		return restErr.Response.StatusCode
 	}
-	d.connState.NoteError(fmt.Errorf("gateway down; REST probe: %w", err))
-	return false
+	return 0
 }
 
 // nextProbeDelay doubles the wait between checks up to maxInterval, so a long

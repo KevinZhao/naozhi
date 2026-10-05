@@ -104,23 +104,29 @@ func TestConfigureSession_SyncEvents(t *testing.T) {
 // one value on hello, so a test can observe the state while Open is blocked.
 // A connection is published on conns only after the client's first
 // heartbeat, so closing it cannot fail that heartbeat and start a second
-// reconnect.
+// reconnect. With holdUser set, GET /users/@me signals userHeld and answers
+// only once userRelease is closed.
 type fakeGateway struct {
-	srv        *httptest.Server
-	restStatus atomic.Int32 // non-zero: every REST request fails with this status
-	userCalls  atomic.Int32 // GET /users/@me requests, i.e. disconnect probes
-	dials      atomic.Int32
-	hello      chan struct{}
-	conns      chan *websocket.Conn
-	done       chan struct{}
+	srv         *httptest.Server
+	restStatus  atomic.Int32 // non-zero: every REST request fails with this status
+	userCalls   atomic.Int32 // GET /users/@me requests, i.e. disconnect probes
+	holdUser    atomic.Bool
+	userHeld    chan struct{}
+	userRelease chan struct{}
+	dials       atomic.Int32
+	hello       chan struct{}
+	conns       chan *websocket.Conn
+	done        chan struct{}
 }
 
 func newFakeGateway(t *testing.T, restStatus int) *fakeGateway {
 	t.Helper()
 	g := &fakeGateway{
-		hello: make(chan struct{}, 4),
-		conns: make(chan *websocket.Conn, 4),
-		done:  make(chan struct{}),
+		userHeld:    make(chan struct{}, 1),
+		userRelease: make(chan struct{}),
+		hello:       make(chan struct{}, 4),
+		conns:       make(chan *websocket.Conn, 4),
+		done:        make(chan struct{}),
 	}
 	g.restStatus.Store(int32(restStatus))
 	g.srv = httptest.NewServer(http.HandlerFunc(g.serve))
@@ -133,6 +139,17 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 	if !websocket.IsWebSocketUpgrade(r) {
 		if strings.HasSuffix(r.URL.Path, "/users/@me") {
 			g.userCalls.Add(1)
+			if g.holdUser.Load() {
+				select {
+				case g.userHeld <- struct{}{}:
+				default:
+				}
+				select {
+				case <-g.userRelease:
+				case <-g.done:
+					return
+				}
+			}
 		}
 		if status := int(g.restStatus.Load()); status != 0 {
 			http.Error(w, `{"message": "401: Unauthorized", "code": 0}`, status)
@@ -394,29 +411,68 @@ func TestConnState_DropWithRevokedTokenFails(t *testing.T) {
 
 // TestConnState_DropNotesProbeError: a REST failure that says nothing about
 // the token is recorded as the reason without leaving disconnected, and the
-// probe keeps checking until the gateway is back, then stops.
+// probe keeps checking until the gateway is back, then stops. Only the status
+// is kept: 502 (after discordgo's own retries) and 429 do not arrive as a
+// RESTError, and the fake's body must not reach LastError on any of them.
 func TestConnState_DropNotesProbeError(t *testing.T) {
 	t.Parallel()
-	g := newFakeGateway(t, 0)
-	d := newGatewayAdapter(t, g)
-	startDropped(t, g, d, http.StatusServiceUnavailable)
+	for _, status := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusTooManyRequests} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+			g := newFakeGateway(t, 0)
+			d := newGatewayAdapter(t, g)
+			startDropped(t, g, d, status)
 
-	testhelper.Eventually(t, func() bool { return g.userCalls.Load() >= 2 },
-		connStateTestTimeout, "the probe stopped after its first failed check")
-	st, _ := d.ConnState()
-	if st.State != platform.ConnDisconnected {
-		t.Fatalf("state = %q, want disconnected (a 503 is not a token verdict)", st.State)
-	}
-	if st.LastError != "gateway down; REST probe: HTTP 503" {
-		t.Fatalf("LastError = %q, want the probe's status", st.LastError)
-	}
+			want := "gateway down; REST probe: HTTP " + strconv.Itoa(status)
+			var st platform.ConnState
+			testhelper.Eventually(t, func() bool {
+				st, _ = d.ConnState()
+				return st.LastError != ""
+			}, connStateTestTimeout, "the probe noted nothing")
+			if st.State != platform.ConnDisconnected || st.LastError != want {
+				t.Fatalf("state = %+v, want disconnected with LastError %q", st, want)
+			}
+			calls := g.userCalls.Load()
+			testhelper.Eventually(t, func() bool { return g.userCalls.Load() > calls },
+				connStateTestTimeout, "the probe stopped after its first failed check")
 
-	back := reconnect(t, g, d)
-	if back.LastError != st.LastError {
-		t.Fatalf("after reconnect LastError = %q, want %q kept", back.LastError, st.LastError)
+			back := reconnect(t, g, d)
+			if back.LastError != st.LastError {
+				t.Fatalf("after reconnect LastError = %q, want %q kept", back.LastError, st.LastError)
+			}
+			testhelper.Eventually(t, func() bool { return !d.probing.Load() },
+				connStateTestTimeout, "the probe kept running after the gateway reconnected")
+		})
 	}
-	testhelper.Eventually(t, func() bool { return !d.probing.Load() },
-		connStateTestTimeout, "the probe kept running after the gateway reconnected")
+}
+
+// TestConnState_LateProbeVerdictKeepsReconnect: a probe answer that arrives
+// after the gateway came back neither fails the live link nor leaves a
+// "gateway down" reason behind.
+func TestConnState_LateProbeVerdictKeepsReconnect(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{http.StatusUnauthorized, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+			g := newFakeGateway(t, 0)
+			d := newGatewayAdapter(t, g)
+			g.holdUser.Store(true)
+			startDropped(t, g, d, status)
+
+			<-g.userHeld
+			g.hello <- struct{}{}
+			<-g.conns
+			waitConnState(t, d, platform.ConnConnected)
+			close(g.userRelease)
+			testhelper.Eventually(t, func() bool { return !d.probing.Load() },
+				connStateTestTimeout, "the probe kept running after the gateway reconnected")
+
+			st, _ := d.ConnState()
+			if st.State != platform.ConnConnected || st.LastError != "" {
+				t.Fatalf("after a late HTTP %d verdict state = %+v, want connected with no LastError", status, st)
+			}
+		})
+	}
 }
 
 // TestOnDisconnect_ProbeLifetime: a Disconnect during Stop starts no probe;
