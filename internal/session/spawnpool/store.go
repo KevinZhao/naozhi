@@ -35,7 +35,8 @@ type Store struct {
 	// socket outlive its wait; consumed by the next spawn for that key.
 	shimStuck map[string]bool
 	// failures maps a key whose last spawns failed their Init handshake to
-	// that run; a spawn that gets past Init and every reset clear it.
+	// that run; a spawn that gets past Init, every per-key reset and a chat
+	// reset clear it.
 	failures map[string]StartupFailure
 }
 
@@ -139,6 +140,17 @@ func (s *Store) StartupFailure(key string) (StartupFailure, bool) {
 
 // ClearStartupFailure drops key's run.
 func (s *Store) ClearStartupFailure(key string) { delete(s.failures, key) }
+
+// ClearStartupFailuresOfChat drops the run of every key whose chatOf is chat,
+// including keys with no session. The caller passes the function its session
+// table groups keys by, so membership matches that table's chat index.
+func (s *Store) ClearStartupFailuresOfChat(chat string, chatOf func(key string) string) {
+	for key := range s.failures {
+		if chatOf(key) == chat {
+			delete(s.failures, key)
+		}
+	}
+}
 
 // PruneStartupFailures drops the runs whose last failure is before cutoff,
 // so a key that is never retried cannot pin an entry, and returns their keys.
