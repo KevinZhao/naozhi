@@ -487,9 +487,6 @@ func shouldKeepAttachment(metaPath string, dayTime time.Time, uploadCutoff time.
 	}
 }
 
-// loadMetaFile reads + parses a single .meta sidecar. Missing files return
-// (nil, nil) — legacy attachments. Corrupt JSON returns an error so the
-// caller retains the file.
 // maxMetaFileBytes caps one .meta sidecar. Its only unbounded field is one
 // key hash per referencing session, so 4 MiB is some 200k sessions: far past
 // any real workspace, and far short of what a planted file could make the GC

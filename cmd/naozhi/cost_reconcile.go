@@ -28,11 +28,13 @@ import (
 )
 
 const (
-	// restoreRatio and restoreFloor flag an entry as charging a restored
-	// cost-state total r: Amount >= restoreRatio*r with r >= restoreFloor,
-	// and its model rows (when it has any) hold restoreRatio of r's tokens.
-	restoreRatio = 0.98
-	restoreFloor = 0.5
+	// An entry charged a restored cost-state total r when r >= restoreFloor,
+	// Amount >= restoreRatio*r, and it exceeds its own turn's transcript
+	// usage by restoreExcess of r: nearer r than 0, as that window can also
+	// hold spend no entry booked and the entry spend no transcript shows.
+	restoreRatio  = 0.98
+	restoreFloor  = 0.5
+	restoreExcess = 0.5
 	// residualFloor and residualShare bound the per-day gap left alone:
 	// max(residualFloor, residualShare*transcript).
 	residualFloor = 1.0
@@ -113,9 +115,11 @@ type sessionSettlement struct {
 	FlaggedUSD, ResidualUSD       float64
 	FlaggedN, ResidualDays        int
 	UnpricedDays, AlreadyFlaggedN int
+	UndecidedN                    int    // entries whose turn could not be priced or bounded to judge a restore
 	HeldDays                      int    // days an unattributed entry shared a key with
 	OpenDays                      int    // days whose spend another day's entry books, or none yet
 	ForeignDays                   int    // days holding a cron run's turns or lines of unknown origin
+	EmptyDays                     int    // days the ledger books spend on and the transcript shows none
 	TerminalN                     int    // interactive-terminal messages left out
 	Skipped                       string // why nothing was settled; "" when settled
 }
@@ -169,9 +173,9 @@ func reconcileLedger(o reconcileOpts, out io.Writer) (reconcileReport, error) {
 	if err != nil {
 		return rep, err
 	}
-	byRun, byKey, started := sessionAttribution(o.SessionStorePath)
+	byRun, byKey, runs := sessionAttribution(o.SessionStorePath)
 	rep.Unattributed = l.attribute(byRun, byKey)
-	l.runStart = started
+	l.runs = runs
 
 	if o.Session != "" && len(l.bySID[o.Session]) == 0 {
 		return rep, fmt.Errorf("no ledger entries attributed to session %s", o.Session)
@@ -228,8 +232,8 @@ type ledgerSessions struct {
 	unassigned map[keyDay]bool
 	runIDs     map[string]bool
 	rates      *costledger.RateBook
-	first      time.Time            // oldest entry of any source
-	runStart   map[string]time.Time // run id -> when its session-runs record says it started
+	first      time.Time           // oldest entry of any source
+	runs       map[string]timeSpan // run id -> its session-runs record's start and end, either may be zero
 }
 
 // keyDay is a session key on a UTC day (YYYY-MM-DD).
@@ -322,12 +326,12 @@ func (l *ledgerSessions) order() []string {
 	return out
 }
 
-// sessionAttribution maps run id to CLI session id and to start time from the
+// sessionAttribution maps run id to CLI session id and to its span from the
 // session-runs records, and each session key to the one CLI session it ever
 // held. A key whose records and sessions.json chain together name more than
 // one session is ambiguous and left out.
-func sessionAttribution(storePath string) (byRun, byKey map[string]string, started map[string]time.Time) {
-	byRun, started = map[string]string{}, map[string]time.Time{}
+func sessionAttribution(storePath string) (byRun, byKey map[string]string, runs map[string]timeSpan) {
+	byRun, runs = map[string]string{}, map[string]timeSpan{}
 	held := map[string]map[string]bool{}
 	hold := func(key, sid string) {
 		if held[key] == nil {
@@ -342,9 +346,7 @@ func sessionAttribution(storePath string) (byRun, byKey map[string]string, start
 		}
 		if r.RunID != "" {
 			byRun[r.RunID] = r.SessionID
-			if !r.StartedAt.IsZero() {
-				started[r.RunID] = r.StartedAt
-			}
+			runs[r.RunID] = timeSpan{r.StartedAt, r.EndedAt}
 		}
 		if r.SessionKey != "" {
 			hold(r.SessionKey, r.SessionID)
@@ -363,7 +365,7 @@ func sessionAttribution(storePath string) (byRun, byKey map[string]string, start
 			}
 		}
 	}
-	return byRun, byKey, started
+	return byRun, byKey, runs
 }
 
 // cronSessionRuns maps each CLI session a cron run used to the spans of
@@ -452,7 +454,9 @@ func costStateRows(m claudefs.CostStateMark) []costledger.ModelDelta {
 
 // restoredBy returns the cost-state a process starting before ts restored:
 // the last one some later line follows by ts. A cost-state the process wrote
-// itself, on its way out, is followed only by later lines.
+// itself, on its way out, is followed only by later lines. Every later entry
+// gets it as a candidate, as a killed process writes none and the next one
+// restores the same line again; chargesRestore tells which of them charged it.
 func restoredBy(marks []claudefs.CostStateMark, ts time.Time) (claudefs.CostStateMark, bool) {
 	var best claudefs.CostStateMark
 	found := false
@@ -506,18 +510,75 @@ func addRow(r *costledger.ModelDelta, d costledger.ModelDelta) {
 	r.WebSearch += d.WebSearch
 }
 
-// chargesRestore reports whether e charged m's total on top of its own turn.
-// A turn differenced from a baseline of 0 also carries every restored token
-// in its model rows, which a correctly baselined turn after a large restore
-// does not; an entry without rows is judged on its amount alone.
-func chargesRestore(e costledger.Entry, m claudefs.CostStateMark) bool {
-	if m.TotalCostUSD < restoreFloor || e.Amount < restoreRatio*m.TotalCostUSD {
-		return false
+// turnUsage is the transcript usage of the turn an entry booked; usd is set
+// when priced.
+type turnUsage struct {
+	tokens int64
+	usd    float64
+	priced bool
+}
+
+// turnWindow sums the messages with from < At <= to, leaving out
+// interactive-terminal ones as classifyMessages does, and prices them.
+func turnWindow(msgs []claudefs.MessageUsage, from, to time.Time, rates *costledger.RateBook) turnUsage {
+	var in []claudefs.MessageUsage
+	var u turnUsage
+	for _, m := range msgs {
+		if !m.At.After(from) || m.At.After(to) || m.Entrypoint == "cli" || m.Entrypoint == "claude-vscode" {
+			continue
+		}
+		in = append(in, m)
+		u.tokens += m.Input + m.Output + m.CacheRead + m.CacheWrite
 	}
-	if len(e.Models) == 0 {
-		return true
+	u.priced = true
+	for _, rows := range claudefs.DayTotals(in) {
+		p, ok := priceDay(rows, rates)
+		u.usd, u.priced = u.usd+p.usd, u.priced && ok
 	}
-	return float64(tokenSum(e.Models)) >= restoreRatio*float64(tokenSum(costStateRows(m)))
+	return u
+}
+
+// turnSpan is the window (from, to] of entries[i]'s turn, prev being where
+// the turn before it ended, and next where the next one starts. A turn entry
+// is booked at its end. A backfill is booked at its run's start and spans to
+// the run's recorded end, else up to the next entry, which may take in that
+// entry's turn too, so the next turn then starts back at the backfill's
+// start; to is zero when nothing bounds it.
+func turnSpan(entries []costledger.Entry, i int, prev time.Time, runs map[string]timeSpan) (from, to, next time.Time) {
+	e := entries[i]
+	if e.Kind != costledger.KindBackfill {
+		return prev, e.TS, e.TS
+	}
+	if end := runs[e.RunID].to; end.After(e.TS) {
+		return e.TS, end, end
+	}
+	for _, n := range entries[i+1:] {
+		if n.Kind != costledger.KindAdjust {
+			return e.TS, n.TS, e.TS
+		}
+	}
+	return e.TS, time.Time{}, e.TS
+}
+
+// mayChargeRestore reports whether e is large enough to have charged m's
+// total, which must be large enough to tell.
+func mayChargeRestore(e costledger.Entry, m claudefs.CostStateMark) bool {
+	return m.TotalCostUSD >= restoreFloor && e.Amount >= restoreRatio*m.TotalCostUSD
+}
+
+// chargesRestore reports whether e, which mayChargeRestore of m, charged m's
+// total on top of turn, the usage of its own turn: a turn differenced from a
+// baseline of 0 exceeds it by about r, a correctly baselined one by about
+// nothing. Tokens are compared when e and m both have them, priced USD
+// otherwise; decided is false when that needs a price turn lacks.
+func chargesRestore(e costledger.Entry, m claudefs.CostStateMark, turn turnUsage) (charged, decided bool) {
+	if et, rt := tokenSum(e.Models), tokenSum(costStateRows(m)); et > 0 && rt > 0 {
+		return float64(et-turn.tokens) >= restoreExcess*float64(rt), true
+	}
+	if !turn.priced {
+		return false, false
+	}
+	return e.Amount-turn.usd >= restoreExcess*m.TotalCostUSD, true
 }
 
 func tokenSum(rows []costledger.ModelDelta) int64 {
@@ -535,7 +596,9 @@ func tokenSum(rows []costledger.ModelDelta) int64 {
 // session's entries that day; a message has no entry of the session after it
 // that same day (the entry that books it, if any, is on another day, which is
 // held too) or predates the run of the session's first entry; a cron run of
-// the session touched it; or a message's origin is unknown.
+// the session touched it; or a message's origin is unknown. Nor does a day
+// whose transcript shows none of the spend its entries book: nothing proves
+// them wrong. A day they net below zero on is still raised to zero.
 func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessions, cronRuns []timeSpan, firstDay, until time.Time, rep *reconcileReport) sessionSettlement {
 	st := sessionSettlement{SessionID: in.sid, Entries: len(entries), Skipped: in.skipped}
 	settles := func(t time.Time) bool { return !t.Before(firstDay) && t.Before(until) }
@@ -560,12 +623,34 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 		return st
 	}
 
-	for _, e := range entries {
+	var prev time.Time // where the next entry's turn starts
+	for i, e := range entries {
+		if e.Kind == costledger.KindAdjust {
+			continue
+		}
+		var from, to time.Time
+		from, to, prev = turnSpan(entries, i, prev, l.runs)
 		if !settles(e.TS) || e.RunID == "" || (e.Kind != costledger.KindTurn && e.Kind != costledger.KindBackfill) {
 			continue
 		}
 		m, ok := restoredBy(in.marks, e.TS)
-		if !ok || !chargesRestore(e, m) {
+		if !ok || !mayChargeRestore(e, m) {
+			continue
+		}
+		if to.IsZero() {
+			st.UndecidedN++
+			continue
+		}
+		// The turn starts no earlier than the cost-state: what the process
+		// that wrote it ran after the previous entry is in r.
+		if m.Before.After(from) {
+			from = m.Before
+		}
+		charged, decided := chargesRestore(e, m, turnWindow(in.usage.Messages, from, to, l.rates))
+		if !decided {
+			st.UndecidedN++
+		}
+		if !charged {
 			continue
 		}
 		runID := reconcilePrefix + in.sid + ":run:" + e.RunID
@@ -582,7 +667,7 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 		st.FlaggedUSD += adj.Amount
 	}
 
-	usage, open, foreign := classifyMessages(in.usage.Messages, entries, l.runStart, cronRuns, &st)
+	usage, open, foreign := classifyMessages(in.usage.Messages, entries, l.runs, cronRuns, &st)
 	days := make([]string, 0, len(ledger)+len(usage))
 	for d := range ledger {
 		days = append(days, d)
@@ -619,6 +704,9 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 		case open[d]:
 			st.OpenDays++
 			continue
+		case len(usage[d]) == 0 && lf.usd > 0:
+			st.EmptyDays++
+			continue
 		}
 		adj := adjustOf(lastBefore(entries, start.Add(24*time.Hour)), reconcilePrefix+in.sid+":day:"+d, diff)
 		adj.TS, adj.Basis = start.Add(12*time.Hour), t.basis
@@ -635,7 +723,7 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 // marks the days settleSession holds as open or foreign (see there).
 // entries are time-ordered; a first entry with no run start known holds
 // every message before it.
-func classifyMessages(msgs []claudefs.MessageUsage, entries []costledger.Entry, runStart map[string]time.Time,
+func classifyMessages(msgs []claudefs.MessageUsage, entries []costledger.Entry, runs map[string]timeSpan,
 	cronRuns []timeSpan, st *sessionSettlement) (usage map[string][]claudefs.ModelTokens, open, foreign map[string]bool) {
 	var booked []time.Time
 	var since time.Time
@@ -645,7 +733,7 @@ func classifyMessages(msgs []claudefs.MessageUsage, entries []costledger.Entry, 
 		}
 		if booked == nil {
 			since = e.TS
-			if t, ok := runStart[e.RunID]; ok && t.Before(e.TS) {
+			if t := runs[e.RunID].from; !t.IsZero() && t.Before(e.TS) {
 				since = t
 			}
 		}
@@ -822,11 +910,17 @@ func printReconcile(out io.Writer, rep reconcileReport, write bool) {
 			if s.ForeignDays > 0 {
 				note += fmt.Sprintf("；%d 天含 cron run 或来源不明的用量，残差未记", s.ForeignDays)
 			}
+			if s.EmptyDays > 0 {
+				note += fmt.Sprintf("；%d 天 transcript 无用量而账本有，残差未记", s.EmptyDays)
+			}
 			if s.TerminalN > 0 {
 				note += fmt.Sprintf("；%d 条终端交互消息不计入", s.TerminalN)
 			}
 			if s.UnpricedDays > 0 {
 				note += fmt.Sprintf("；%d 天含未学到单价的模型，未比对", s.UnpricedDays)
+			}
+			if s.UndecidedN > 0 {
+				note += fmt.Sprintf("；%d 条无法判定是否计入恢复额（无单价或回填 run 无结束时间），未标记", s.UndecidedN)
 			}
 		}
 		fmt.Fprintf(out, "%-8.8s %5d %11.2f %11.2f %11.2f %+11.2f  %s\n", s.SessionID, s.Entries, s.Before, s.After, s.Transcript, s.After-s.Before, note)

@@ -50,9 +50,11 @@ type SessionLookup interface {
 }
 
 // SessionLifecycle is the create/recreate/remove sub-capability used by RPC
-// handlers that allocate or tear down sessions.
+// handlers that allocate or tear down sessions. TakeoverPrecheck reports,
+// changing nothing, the error Takeover on key would be refused with now.
 type SessionLifecycle interface {
 	ResetAndRecreate(ctx context.Context, key string, opts sessionview.AgentOpts) (Session, error)
+	TakeoverPrecheck(key string) error
 	Takeover(ctx context.Context, key string, sessionID string, workspace string, opts sessionview.AgentOpts) (Session, error)
 	Remove(key string) bool
 	DefaultWorkspace() string
@@ -85,7 +87,8 @@ type SessionRouter interface {
 // TurnSubmitter runs a send the primary relayed: on the node's
 // turn.Orchestrator, like an IM or dashboard send, so slash commands, the
 // queue and agent options apply. It creates the session before returning;
-// status is "accepted", "queued" or "reset". server.Server implements it.
+// status is "accepted", "queued", "reset" or "busy" (not buffered; the user
+// retries). server.Server implements it.
 type TurnSubmitter interface {
 	SubmitRelayed(ctx context.Context, key, text, workspace string) (status string, err error)
 }

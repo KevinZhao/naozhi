@@ -110,6 +110,29 @@ func countExemptCombined(v sessView, kind string) (perKind int, total int) {
 	return perKind, total
 }
 
+// takeoverHasSlot is reserveSpawn's non-exempt capacity gate for a Takeover of
+// key, read-only. Takeover closes an alive session on key first, so it holds
+// no slot and cannot be the eviction victim. Admission passes on the active
+// count, else on a recount, else when evicting one idle session makes room.
+func takeoverHasSlot(v sessView, key string, maxProcs int) bool {
+	active := v.Active()
+	var alive int64
+	evictable := false
+	for k, s := range v.All() {
+		if s.exempt || !s.isAlive() {
+			continue
+		}
+		if k == key {
+			active--
+			continue
+		}
+		alive++
+		evictable = evictable || !s.loadProcess().IsRunning()
+	}
+	pending, limit := int64(v.Ext().PendingSpawns()), int64(maxProcs)
+	return min(active, alive)+pending < limit || (evictable && alive-1+pending < limit)
+}
+
 // evictOldest closes the oldest idle (non-Running) session to free a slot.
 // Close() runs with the lock released (tx.Unlocked) so it does not block
 // other goroutines. Returns true if a session was evicted.

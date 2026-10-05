@@ -334,7 +334,8 @@ func (s *Scheduler) executeAcquired(jobID string, viaTriggerNow bool, inflight *
 
 	// The run's identity, built once. Every phase below and every terminal branch
 	// reads it from here instead of re-listing the same ten values (Epic H #2546).
-	// key is filled in after execPrepareSpawn derives it. Handed to the scaffold
+	// key is filled in after execPrepareSpawn derives it, backend once the
+	// session exists. Handed to the scaffold
 	// as soon as the started event is out, so a panic from here on closes it.
 	rc := runCtx{
 		snap: snap, startedAt: startedAt, notifyTo: notifyTo,
@@ -383,6 +384,7 @@ func (s *Scheduler) executeAcquired(jobID string, viaTriggerNow bool, inflight *
 	if abortSpawn {
 		return
 	}
+	rc.backend = effectiveBackend(opts, sess)
 
 	// Send is parented on s.stopCtx so Stop() can short-circuit an in-flight
 	// Send (#790, #500). sendBudget = jobTimeout minus spawn time, floored at

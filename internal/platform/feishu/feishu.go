@@ -236,8 +236,6 @@ func New(cfg Config, transcriber transcribe.Service) *Feishu {
 	return f
 }
 
-// nonceTTL matches verifyTimestamp's 5-minute freshness window; older
-// requests are rejected by timestamp anyway, so longer retention only bloats the map.
 func (f *Feishu) Name() string { return "feishu" }
 
 func (f *Feishu) MaxReplyLength() int { return f.cfg.MaxReplyLen }
@@ -309,9 +307,7 @@ func (f *Feishu) Start(handler platform.MessageHandler) error {
 	return nil
 }
 
-// fetchBotInfo populates botOpenID via GET /open-apis/bot/v3/info. Note the
-// `bot` field is at top level, NOT under `data` (older API predating the
-// standard envelope).
+// Stop implements RunnablePlatform. Stops WebSocket connection.
 func (f *Feishu) Stop() error {
 	f.startMu.Lock()
 	cancel := f.cancel
@@ -335,5 +331,3 @@ func (f *Feishu) Stop() error {
 	f.cleanupWg.Wait() // cleanupNonces goroutine
 	return nil
 }
-
-// Reply sends a message to a Feishu chat. Handles text and/or images.

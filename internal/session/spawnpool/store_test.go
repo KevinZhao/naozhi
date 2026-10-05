@@ -24,6 +24,7 @@ func TestZeroValue_ReadsAreSafe(t *testing.T) {
 		t.Error("zero Store must not report a startup failure")
 	}
 	s.ClearStartupFailure("k")
+	s.ClearStartupFailuresOfChat("k", func(string) string { return "k" })
 	s.PruneStartupFailures(time.Now())
 }
 
@@ -169,6 +170,24 @@ func TestShimStuck_ConsumeClearsFlag(t *testing.T) {
 		t.Error("ClearShimStuck must drop the flag")
 	}
 	s.ClearShimStuck("missing")
+}
+
+// A chat clear matches chatOf exactly: a sibling chat sharing the byte prefix
+// and a deeper chat keep their runs.
+func TestClearStartupFailuresOfChat_ExactChatOnly(t *testing.T) {
+	var s Store
+	chatOf := func(key string) string { return key[:strings.LastIndexByte(key, ':')] }
+	keys := []string{"a:b:x", "a:b:y", "a:bc:x", "a:b:c:x"}
+	for _, k := range keys {
+		s.NoteStartupFailure(k, StartupFailure{Streak: 1, Detail: k})
+	}
+	s.ClearStartupFailuresOfChat("a:b", chatOf)
+	for _, k := range keys {
+		_, ok := s.StartupFailure(k)
+		if want := chatOf(k) != "a:b"; ok != want {
+			t.Errorf("after clearing chat a:b, run of %q present = %v, want %v", k, ok, want)
+		}
+	}
 }
 
 func TestStartupFailure_NoteClearPrune(t *testing.T) {
