@@ -380,7 +380,7 @@ func TestOwnerLoop_ResetStopsTheStaleOwner(t *testing.T) {
 }
 
 // TestOwnerLoop_ResetThenRetireStopsTheStaleOwner: Reset followed by the
-// router's KeyRetired Cleanup, as /new runs it. The stale owner finishing its
+// router's KeyRetired Retire, as /new runs it. The stale owner finishing its
 // turn must not release the new owner's key, so a later request queues
 // behind the new owner instead of starting a second one (#3113).
 func TestOwnerLoop_ResetThenRetireStopsTheStaleOwner(t *testing.T) {
@@ -392,7 +392,7 @@ func TestOwnerLoop_ResetThenRetireStopsTheStaleOwner(t *testing.T) {
 	h.submit("m1", newOrigin(h.rec, "a", "ws:a"), adm)
 	h.rec.waitFor(t, "send:k:m1", 1)
 	h.o.Reset(context.Background(), "k", false)
-	h.o.Cleanup("k")
+	h.o.Retire(context.Background(), "k")
 	// A second gate, so releaseStale lets through m1's turn and not m3's.
 	releaseNew := h.hold()
 	if ack := h.submit("m3", newOrigin(h.rec, "c", "ws:c"), adm); ack != AckOwner {

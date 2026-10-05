@@ -92,6 +92,10 @@ type Event struct {
 	// answer returns as a normal user message. See docs/rfc/askuser-question.md.
 	AskQuestion *AskQuestion `json:"ask_question,omitempty"`
 
+	// CodeChange is populated for a valid system/code_change_published frame
+	// (ClaudeProtocol.ReadEventInto); nil otherwise.
+	CodeChange *CodeChange `json:"-"`
+
 	// ToolCall is populated for ACP tool_call / tool_call_update events
 	// (dashboard progress row with collapsible rawOutput). nil on stream-json,
 	// where tool use flows through Message.Content[].Type=="tool_use".

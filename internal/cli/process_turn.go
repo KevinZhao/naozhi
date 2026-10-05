@@ -112,7 +112,11 @@ func (p *Process) drainStaleEvents(ctx context.Context) error {
 			for {
 				select {
 				case ev, ok := <-p.eventCh:
-					if !ok || ev.Type == "result" {
+					if !ok {
+						goto drain
+					}
+					if ev.Type == "result" {
+						p.bookDroppedResult(ev)
 						goto drain
 					}
 					if ev.RecvAt.After(cutoff) {
@@ -160,8 +164,10 @@ drain:
 			}
 			if ev.RecvAt.After(cutoff) {
 				holdback = append(holdback, ev)
+				continue
 			}
 			// pre-cutoff events are dropped (drained)
+			p.bookDroppedResult(ev)
 		default:
 			// Channel empty — push back held events (same closed guard as above).
 			if !isChanAlive(p.done) {
@@ -313,4 +319,21 @@ func sanitizeStderrLine(line string) string {
 	// The sanitizer only removes bytes from the pre-truncated input, so the
 	// result is never longer than maxStderrLogLineBytes plus the marker.
 	return b.String()
+}
+
+// bookDroppedResult hands a result Send discards as stale to onUnownedResult:
+// it was queued on eventCh in the instant its own Send gave up, too late for
+// readLoop to see the turn as abandoned. Results readLoop already booked come
+// through again harmlessly (the session books cumulative differences). One
+// such result is still lost if the process dies before the next Send drains.
+func (p *Process) bookDroppedResult(ev clievent.Event) {
+	if ev.Type != "result" {
+		return
+	}
+	p.turn.mu.RLock()
+	fn := p.turn.onUnownedResult
+	p.turn.mu.RUnlock()
+	if fn != nil {
+		fn(resultFromEvent(ev))
+	}
 }

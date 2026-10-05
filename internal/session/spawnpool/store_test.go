@@ -183,7 +183,9 @@ func TestStartupFailure_NoteClearPrune(t *testing.T) {
 		t.Fatalf("StartupFailure(old) = %+v,%v; want %+v", got, ok, old)
 	}
 	s.ClearStartupFailure("cleared")
-	s.PruneStartupFailures(now.Add(-time.Minute))
+	if pruned := s.PruneStartupFailures(now.Add(-time.Minute)); len(pruned) != 1 || pruned[0] != "old" {
+		t.Errorf("PruneStartupFailures returned %q, want [old]", pruned)
+	}
 	if _, ok := s.StartupFailure("cleared"); ok {
 		t.Error("ClearStartupFailure must drop the run")
 	}

@@ -2,9 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -124,5 +128,60 @@ func TestFileSize_InflatedBaselineIsViolation(t *testing.T) {
 	vs = scanFileSize(dir, 100, grown)
 	if len(vs) != 1 || !strings.Contains(vs[0].Message, "file grew") {
 		t.Fatalf("want one 'file grew' violation, got %d: %+v", len(vs), vs)
+	}
+}
+
+// TestTool_NeverWritesExemptions keeps the tool a pure checker. Every
+// exemptions.yaml entry carries a hand-written ownership comment and adding
+// one is the review the handle_decl rule forces, so a writer that regenerates
+// the file from source would drop the comments and skip the review.
+func TestTool_NeverWritesExemptions(t *testing.T) {
+	writers := map[string]map[string]bool{
+		"os":               {"WriteFile": true, "Create": true, "CreateTemp": true, "OpenFile": true},
+		"io/ioutil":        {"WriteFile": true},
+		"gopkg.in/yaml.v3": {"Marshal": true, "NewEncoder": true},
+	}
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	scanned := 0
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, n, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scanned++
+		names := map[string]string{} // local import name -> import path
+		for _, imp := range f.Imports {
+			p, _ := strconv.Unquote(imp.Path.Value)
+			name := p[strings.LastIndex(p, "/")+1:]
+			if p == "gopkg.in/yaml.v3" {
+				name = "yaml"
+			}
+			if imp.Name != nil {
+				name = imp.Name.Name
+			}
+			names[name] = p
+		}
+		ast.Inspect(f, func(node ast.Node) bool {
+			sel, ok := node.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := sel.X.(*ast.Ident); ok && writers[names[id.Name]][sel.Sel.Name] {
+				t.Errorf("%s: %s.%s: lint-server-handlers must not write files; exemptions.yaml is maintained by hand",
+					fset.Position(sel.Pos()), id.Name, sel.Sel.Name)
+			}
+			return true
+		})
+	}
+	if scanned == 0 {
+		t.Fatal("no non-test sources scanned")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/routerrelay"
@@ -12,11 +13,12 @@ import (
 )
 
 // The server binds both of the router's notification slots, and a retired key
-// reaches the dashboard's retired-session ledger through the relay.
+// reaches the dashboard's retired-session ledger through the relay; the send
+// queued on it is told the key was removed (#3297).
 func TestServer_BindsRouterEvents(t *testing.T) {
 	relay := &routerrelay.Relay{}
 	stateDir := t.TempDir()
-	_, hs := buildServerWithHandlers(ServerOptions{
+	srv, hs := buildServerWithHandlers(ServerOptions{
 		Addr:      ":0",
 		Router:    session.NewRouter(session.RouterConfig{Observer: relay}),
 		Platforms: map[string]platform.Platform{"test": &mockPlatform{}},
@@ -33,15 +35,26 @@ func TestServer_BindsRouterEvents(t *testing.T) {
 	if ack := turns.Submit(ctx, turn.Request{Key: key, Text: "first"}, neverRunAdmission{}); ack != turn.AckOwner {
 		t.Fatalf("precondition: first request ack %d, want AckOwner", ack)
 	}
-	if ack := turns.Submit(ctx, turn.Request{Key: key, Text: "queued"}, neverRunAdmission{}); ack != turn.AckQueued {
+	t.Cleanup(srv.hub.Shutdown)
+	c, out := newCapturedClient(t, srv.hub)
+	queued := turn.Request{Key: key, Text: "queued", Origin: hs.wiring.engine.wsOrigin(c, "w2", key)}
+	if ack := turns.Submit(ctx, queued, neverRunAdmission{}); ack != turn.AckQueued {
 		t.Fatalf("precondition: second request ack %d, want AckQueued behind the owner", ack)
 	}
 	relay.KeyRetired(key, "sid-retired")
-	// The retirement reached the Orchestrator's Cleanup: the key is free.
+	select {
+	case msg := <-out:
+		if msg.Type != "send_ack" || msg.ID != "w2" || msg.Error != removedSendMsg {
+			t.Errorf("the queued send was answered %+v, want the removed-session error ack", msg)
+		}
+	case <-time.After(parityWait):
+		t.Error("a key retired through the relay left its queued send unanswered")
+	}
+	// The retirement reached the Orchestrator's Retire: the key is free.
 	if ack := turns.Submit(ctx, turn.Request{Key: key, Text: "after"}, neverRunAdmission{}); ack != turn.AckOwner {
 		t.Errorf("a key retired through the relay kept its owner: next request ack %d, want AckOwner", ack)
 	}
-	turns.Cleanup(key)
+	turns.Retire(ctx, key)
 	hs.sessionH.FlushRetiredStore()
 	store, err := buildRetiredStoreWithErr(stateDir)
 	if err != nil {

@@ -444,19 +444,25 @@ func (q *queue) discardLocked(key string, sq *sessionQueue) []Msg {
 	return dropped
 }
 
-// Cleanup deletes the map entry for key, dropping its queued messages without
-// telling their origins. An owner still running on key finds no entry, or a
-// later entry with a different gen, on its next DoneOrDrain and stops. Its one
-// caller is Orchestrator.Cleanup, on a key the router retired.
-func (q *queue) Cleanup(key string) {
+// Cleanup deletes the map entry for key and returns its queued messages FIFO
+// (nil when none) so each origin can be told. An owner still running on key
+// finds no entry, or a later entry with a different gen, on its next
+// DoneOrDrain and stops. Its one caller is Orchestrator.Retire, on a key the
+// router retired.
+func (q *queue) Cleanup(key string) []Msg {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	delete(q.queues, key)
+	var dropped []Msg
+	if sq := q.queues[key]; sq != nil {
+		dropped = sq.ring.drainAll()
+		delete(q.queues, key)
+	}
 	if e, ok := q.dropNotifyIndex[key]; ok {
 		q.dropNotifyLRU.Remove(e.elem)
 		delete(q.dropNotifyIndex, key)
 		q.releasePooledEntry(e)
 	}
+	return dropped
 }
 
 // CollectDelay returns the configured collect delay.

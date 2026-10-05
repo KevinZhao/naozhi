@@ -24,7 +24,8 @@ type AccessProfile struct {
 	// DefaultModel participates in model resolution below an explicit
 	// per-request / PlannerModel choice and above backend.DefaultModel.
 	DefaultModel string
-	// DefaultBackend optionally pins a backend inside the profile.
+	// DefaultBackend is the backend for a key with no session, below
+	// agents[].backend and above the router default (EffectiveDefaultBackend).
 	DefaultBackend string
 }
 

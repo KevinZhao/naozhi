@@ -97,7 +97,9 @@ v1 原文的 §1/§2/§3/§4/§5/§6/§7/§8/§9/§10 对应章节已就地修�
   - #6(HTTP restart)+ #7(reverse-RPC restart)= **"planner 视角"**,从**空 opts**起步,只用 project 配置。
   - 这两条路径的 opts 起点**不同**是正确设计,不能一刀切合并。
 
-- 因此本 RFC 的 Resolver 暴露**两个** planner-相关方法:`ResolveForChat(agentID="general")` 做 chat 视角(从 defaults 起步),`ResolveForPlannerKey(name)` 做 planner 视角(从空 opts 起步)。迁移 #6/#7 走 `ResolveForPlannerKey`,**禁止**走 `ResolveForKey`(后者对 planner key 内部也 delegate 到 `ResolveForPlannerKey`,对外只保证"给同一个 key 返回同样 opts")。
+  > **2026-10-05 更新(#3300)**:上面的分歧只是迁移 #6/#7 时避免 P1 回归的手段(B1),不是产品规则。同一个 planner key 按路径拿到不同 opts 是 bug:IM 新开的 planner 带着 `agents["general"]` 的 Model / ExtraArgs / SystemPrompt / Effort,dashboard 发消息、resume、重启却没有。现在 `ResolveForChat` 的"绑定 + general"分支与 `ResolveForPlannerKey` 共用 `plannerOpts(b)`,planner key 在每条路径上都只取项目配置,不叠 `defaults["general"]`(AccessProfile / backend 已由 41cb7baf 先行收敛)。`buildSessionOpts` 没有 resolver 时也临时建一个走 `ResolveForKey`,项目已删除的 planner key 拿空白 `{Exempt: true}`。chat 视角仍只适用于 IM key。
+
+- 因此本 RFC 的 Resolver 暴露**两个** planner-相关入口:`ResolveForChat(agentID="general")`(绑定项目时)和 `ResolveForPlannerKey(name)`。#3300 之后两者都返回 `plannerOpts(b)`(从空 opts 起步,只取项目配置);从 `defaults[agentID]` 起步的 chat 视角只用于非 planner 的 IM key。迁移 #6/#7 走 `ResolveForPlannerKey`,**禁止**走 `ResolveForKey`(后者对 planner key 内部也 delegate 到 `ResolveForPlannerKey`,对外只保证"给同一个 key 返回同样 opts")。
 
 把 `ExtraArgs` 合并从"调用方责任"升级为"接口内部不变量":
 - aliasing 防护(`[:len:len]`)唯一出现在 `ResolveForChat` 里(planner 视角不涉及 defaults 切片共享)
@@ -310,7 +312,7 @@ func (r *KeyResolver) KeyForChat(platform, chatType, chatID, agentID string) str
 |---|---|---|---|---|---|
 | 未绑定 project | `{plat}:{ct}:{id}:{agent}` | base | base | base | 保持 base |
 | 绑定 + 非 general | `{plat}:{ct}:{id}:{agent}` | **proj.Path** | base | base | **显式 false**(§3.1 伪代码) |
-| 绑定 + general | `project:{name}:planner` | **proj.Path** | planner > base | **`[:len:len]` 追加** | **显式 true** |
+| 绑定 + general | `project:{name}:planner` | **proj.Path** | **planner only** | **planner only**(不读 defaults,#3300) | **显式 true** |
 
 ResolveForPlannerKey 分支(planner-view,**不读 defaults**):
 
@@ -717,6 +719,8 @@ Phase 2-5 在每个调用点都保留了 `if d.resolver != nil { resolver.X } el
 - `go test -race ./internal/dispatch/... ./internal/server/...` 通过
 
 **未在 Phase 6 处理**:`internal/server/dashboard.go::buildSessionOpts` 仍保留 `if resolver != nil` 双轨,因为它的输入是 raw key(不是 chat coords)且要兼容已废 / 不存在的 project 的 dashboard resume 路径,行为分支语义与 dispatch 路径不同。后续若把这条路径完全收敛进 `ResolveForKey + ok 分支`,可加 Phase 7 关闭。
+
+> **2026-10-05 (#3300)**:dashboard planner restart(`internal/dashboard/project/api.go`)和 upstream `restart_planner`(`internal/upstream/connector_rpc.go`)残留的 nil-resolver 内联分支已删除——它们漏设 Backend / AccessProfile,upstream 那份还跳过了 `SanitisePlannerPromptForSpawn`。resolver 为 nil 时两处都返回 "projects not configured"(HTTP 400 / RPC error);生产 wiring 总是传入 resolver,只有测试会走到这条分支。
 
 ### 总计 **2.75 人天**
 

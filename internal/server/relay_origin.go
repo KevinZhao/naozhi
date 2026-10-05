@@ -89,7 +89,8 @@ func (o *relayOrigin) Finish(ctx context.Context, out turn.Outcome) {
 }
 
 // Dropped reports the failures a queued relayed send can meet; a reset or a
-// shutdown speaks for itself through the session's state.
+// shutdown speaks for itself through the session's state. DropRemoved is not
+// reported: the retired key has no session left to log into.
 func (o *relayOrigin) Dropped(_ context.Context, why turn.DropReason) {
 	switch why {
 	case turn.DropEvicted:

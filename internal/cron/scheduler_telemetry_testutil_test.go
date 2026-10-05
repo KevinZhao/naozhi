@@ -75,13 +75,13 @@ func (r *recordingBroadcaster) endedAtCron(i int) RunEndedEvent {
 	return RunEndedEvent{
 		JobID:      ev.OwnerID,
 		RunID:      ev.RunID,
-		State:      RunState(ev.State),
+		State:      ev.State,
 		StartedAt:  ev.StartedAt,
 		EndedAt:    ev.EndedAt,
 		DurationMS: ev.DurationMS,
 		SessionID:  ev.SessionID,
-		ErrorClass: ErrorClass(ev.ErrorClass),
+		ErrorClass: ev.ErrorClass,
 		ErrorMsg:   ev.ErrorMsg,
-		Trigger:    TriggerKind(ev.Trigger),
+		Trigger:    ev.Trigger,
 	}
 }

@@ -3,6 +3,7 @@ package session
 import (
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	"github.com/naozhi/naozhi/internal/cli/backend"
@@ -106,9 +107,10 @@ func (s *ManagedSession) accountTurnCost(result *clievent.SendResult, runID stri
 
 // accountCost is accountTurnCost for a reading that counts only while onlyFor
 // is still s's process (nil: always). Checked under costMu, so it is atomic
-// with RenameSession, which moves the process before copying the baseline: a
-// reading lands on the old session before the copy, or is dropped and picked
-// up by the new session's next one — never booked on both.
+// with RenameSession, which copies the baseline and links the new session in
+// one costMu section: a reading lands on the old session before the copy, or
+// the new session differences it — never booked on both. A respawned
+// session keeps its process's baseline and forwards the increment (addSpent).
 func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, onlyFor processIface) float64 {
 	if result == nil {
 		return 0
@@ -120,6 +122,11 @@ func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, 
 	raw := cumulativeFromResult(result, metering)
 
 	s.costMu.Lock()
+	if s.renamed {
+		next := s.successor
+		s.costMu.Unlock()
+		return next.accountCost(result, runID, onlyFor)
+	}
 	if onlyFor != nil && s.loadProcess() != onlyFor {
 		s.costMu.Unlock()
 		return 0
@@ -136,16 +143,18 @@ func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, 
 	inc, next := costledger.Delta(raw, s.lastCumulative)
 	s.lastCumulative = next
 	storeTotalCost(&s.lastCumulativeCost, next.USD)
-	if inc.USD != 0 {
-		storeTotalCost(&s.costSpent, loadTotalCost(&s.costSpent)+inc.USD)
-	}
-	dropModels := s.modelsBaselineUnknown
-	s.modelsBaselineUnknown = false
-	if dropModels {
+	if s.modelsBaselineUnknown {
+		s.modelsBaselineUnknown = false
 		inc.Models = nil
 	}
-	s.spent = s.spent.Accumulate(inc)
+	fwd := s.successor
+	if fwd == nil {
+		s.addSpentLocked(inc.USD, inc)
+	}
 	s.costMu.Unlock()
+	if fwd != nil {
+		fwd.addSpent(inc.USD, inc)
+	}
 
 	if s.costAcct != nil {
 		rates := s.costAcct.ledger.Rates()
@@ -162,47 +171,48 @@ func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, 
 	return inc.USD
 }
 
-// bookUnownedResults books the cost of the turns proc's CLI starts on its own
-// (background-task notifications): their results reach no Send, so without
-// this their spend waited for the next owned result's cumulative and was lost
-// when the process died first (#3096). The cumulative differencing makes a
-// reading booked here and again by a later Send harmless.
+// bookUnownedResults books the results proc's CLI reports that no live caller
+// consumes: turns it starts on its own (background-task notifications) and
+// turns whose Send gave up first (an interrupt, a cron deadline). Without this
+// their spend waited for the next owned result's cumulative and was lost when
+// the process died first (#3096, #3322). The cumulative differencing makes a
+// reading booked here and again by a later Send harmless. No run record shares
+// the entry's run id, so it names the CLI session (sessionRunID).
 func bookUnownedResults(s *ManagedSession, proc processIface) {
 	if n, ok := proc.(unownedResultNotifier); ok {
-		n.SetOnUnownedResult(func(res clievent.SendResult) { s.accountCost(&res, newRunID(), proc) })
+		n.SetOnUnownedResult(func(res clievent.SendResult) {
+			sid := res.SessionID
+			if sid == "" {
+				sid = s.getSessionID()
+			}
+			s.accountCost(&res, sessionRunID("unowned:", sid), proc)
+		})
 	}
 }
 
 // bookPartialUsage records a Kind=partial entry for u, spend a process
 // reported in no result frame (bookProcessEnd, which has already applied the
-// cron-ownership gate), one row per model priced at the rates the ledger
-// learned from the CLI's own results, and adds its amount to the session's
-// spend. A model with no learned rate books tokens only and no basis:
-// BasisUnknown means the CLI guessed a rate, and here nothing priced it.
+// cron-ownership gate), one row per canonical model priced at the rates the
+// ledger learned from the CLI's own results, and adds its amount to the
+// session's spend. A model with no learned rate books tokens only and no
+// basis: BasisUnknown means the CLI guessed a rate, and here nothing priced it.
 func (s *ManagedSession) bookPartialUsage(u clievent.ShadowUsage, runID string) {
 	if s.costAcct == nil || !s.costAcct.ledger.Enabled() || u.IsZero() {
 		return
 	}
 	e := costledger.Entry{
 		Source: costledger.SourceSession, Kind: costledger.KindPartial,
-		SessionKey: s.key, RunID: runID, Workspace: filepath.Base(s.Workspace()), Backend: s.Backend(),
+		SessionKey: s.key, RunID: runID, Workspace: ledgerWorkspace(s.Workspace()), Backend: s.Backend(),
 		Unit:   costledger.UnitUSD,
-		Models: make([]costledger.ModelDelta, 0, len(u.Models)),
+		Models: partialRows(u.Models),
 	}
 	if e.Backend == "" {
 		e.Backend = "claude"
 	}
 	rates := s.costAcct.ledger.Rates()
-	for _, m := range u.Models {
-		t := costledger.Tokens{Input: m.Input, Output: m.Output, CacheRead: m.CacheRead, CacheWrite: m.CacheWrite}
-		if t == (costledger.Tokens{}) {
-			continue
-		}
-		d := costledger.ModelDelta{Model: costledger.CanonicalModel("", m.Model), RawModel: m.Model, Tokens: t}
-		if d.Model == "" {
-			d.Model = "unknown"
-		}
-		usd, basis, priced := rates.Estimate(d.Model, t)
+	for i := range e.Models {
+		d := &e.Models[i]
+		usd, basis, priced := rates.Estimate(d.Model, d.Tokens)
 		if !priced && s.costAcct.firstWarn("partial:"+d.Model) {
 			slog.Warn("cost: no learned rate for a partial turn's model; booked tokens only",
 				"model", osutil.SanitizeForLog(d.Model, 128), "session", osutil.SanitizeForLog(s.key, 128))
@@ -210,17 +220,92 @@ func (s *ManagedSession) bookPartialUsage(u clievent.ShadowUsage, runID string) 
 		d.CostUSD, d.Basis = usd, basis
 		e.Amount += usd
 		e.Basis = costledger.WorseBasis(e.Basis, basis)
-		e.Models = append(e.Models, d)
 	}
 	if e.Basis == costledger.BasisNone && e.Amount > 0 {
 		e.Basis = costledger.BasisList
 	}
 	if e.Amount > 0 {
-		s.costMu.Lock()
-		storeTotalCost(&s.costSpent, loadTotalCost(&s.costSpent)+e.Amount)
-		s.costMu.Unlock()
+		s.addSpent(e.Amount, costledger.Increment{})
 	}
 	s.costAcct.ledger.Append(e)
+}
+
+// addSpent adds usd and inc to the spend of s or, once s has been replaced,
+// of the live session at the end of its successor chain. Each lock is
+// released before the next is taken, so costMu never nests.
+func (s *ManagedSession) addSpent(usd float64, inc costledger.Increment) {
+	for {
+		s.costMu.Lock()
+		next := s.successor
+		if next == nil {
+			s.addSpentLocked(usd, inc)
+			s.costMu.Unlock()
+			return
+		}
+		s.costMu.Unlock()
+		s = next
+	}
+}
+
+func (s *ManagedSession) addSpentLocked(usd float64, inc costledger.Increment) {
+	if usd != 0 {
+		storeTotalCost(&s.costSpent, loadTotalCost(&s.costSpent)+usd)
+	}
+	if inc.USD != 0 || len(inc.Models) > 0 || len(inc.Metered) > 0 {
+		s.spent = s.spent.Accumulate(inc)
+	}
+}
+
+// linkSuccessor makes fresh, which replaced old from a snapshot whose spend
+// was snap, the session old's later spend reaches, and hands it what old
+// booked after the snapshot. Link and catch-up share one costMu section, so
+// each booking on old lands on fresh exactly once. Nil-safe.
+func linkSuccessor(old, fresh *ManagedSession, snap costledger.Totals) {
+	if old == nil {
+		return
+	}
+	old.costMu.Lock()
+	now := costledger.Totals{USD: loadTotalCost(&old.costSpent), Metered: old.spent.Metered, Models: old.spent.Models}
+	late := now.Sub(snap)
+	old.successor = fresh
+	old.costMu.Unlock()
+	fresh.addSpent(late.USD, late)
+}
+
+// partialRows turns a shadow account into one ledger row per canonical model:
+// raw ids differing only in a context suffix ("x" and "x[1m]") are one model
+// at one rate. A merged row keeps the first raw id seen. Rows with no tokens
+// are dropped.
+func partialRows(ms []clievent.ShadowModel) []costledger.ModelDelta {
+	out := make([]costledger.ModelDelta, 0, len(ms))
+	for _, m := range ms {
+		t := costledger.Tokens{Input: m.Input, Output: m.Output, CacheRead: m.CacheRead, CacheWrite: m.CacheWrite}
+		if t == (costledger.Tokens{}) {
+			continue
+		}
+		model := costledger.CanonicalModel("", m.Model)
+		if model == "" {
+			model = "unknown"
+		}
+		if i := slices.IndexFunc(out, func(d costledger.ModelDelta) bool { return d.Model == model }); i >= 0 {
+			d := &out[i]
+			d.Input, d.Output = d.Input+t.Input, d.Output+t.Output
+			d.CacheRead, d.CacheWrite = d.CacheRead+t.CacheRead, d.CacheWrite+t.CacheWrite
+			continue
+		}
+		out = append(out, costledger.ModelDelta{Model: model, RawModel: m.Model, Tokens: t})
+	}
+	return out
+}
+
+// ledgerWorkspace is the workspace label a session's ledger rows carry: the
+// basename, or "" for a session with no real directory.
+func ledgerWorkspace(ws string) string {
+	b := filepath.Base(ws)
+	if b == "." || b == string(filepath.Separator) {
+		return ""
+	}
+	return b
 }
 
 // ledgerEntries renders an Increment as ledger rows: one USD row carrying the
@@ -230,14 +315,11 @@ func (s *ManagedSession) ledgerEntries(inc costledger.Increment, runID string) [
 		Source:     costledger.SourceSession,
 		SessionKey: s.key,
 		RunID:      runID,
-		Workspace:  filepath.Base(s.Workspace()),
+		Workspace:  ledgerWorkspace(s.Workspace()),
 		Backend:    s.Backend(),
 	}
 	if base.Backend == "" {
 		base.Backend = "claude"
-	}
-	if base.Workspace == "." || base.Workspace == string(filepath.Separator) {
-		base.Workspace = ""
 	}
 	var out []costledger.Entry
 	if inc.USD > 0 || len(inc.Models) > 0 {
@@ -280,8 +362,10 @@ func (s *ManagedSession) CostTotals() costledger.Totals {
 }
 
 // copyCostBaseline carries the delta baseline and totals from old to fresh
-// when the SAME live process keeps running under a new key (rename). Maps
-// are cloned so the two sessions never share mutable state.
+// when the SAME live process keeps running under a new key (rename), and
+// links old to fresh in the same costMu section: a reading old receives
+// afterwards is fresh's to difference (accountCost). Maps are cloned so the
+// two sessions never share mutable state.
 func copyCostBaseline(fresh, old *ManagedSession) {
 	old.costMu.Lock()
 	fresh.lastCumulative = cloneCumulative(old.lastCumulative)
@@ -289,9 +373,10 @@ func copyCostBaseline(fresh, old *ManagedSession) {
 	fresh.modelsBaselineUnknown = old.modelsBaselineUnknown
 	fresh.costBaselineUnknown = old.costBaselineUnknown
 	fresh.endMark = old.endMark
-	old.costMu.Unlock()
 	storeTotalCost(&fresh.costSpent, loadTotalCost(&old.costSpent))
 	storeTotalCost(&fresh.lastCumulativeCost, loadTotalCost(&old.lastCumulativeCost))
+	old.successor, old.renamed = fresh, true
+	old.costMu.Unlock()
 }
 
 func cloneCumulative(c costledger.Cumulative) costledger.Cumulative {

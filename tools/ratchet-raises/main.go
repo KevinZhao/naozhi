@@ -2,7 +2,11 @@
 // approved ledger entry (#2900). It reads every baseline at -base and in the
 // working tree, lists the values that went up, and requires each to have a
 // line appended to scripts/ratchet-raises.jsonl citing an issue that carries
-// the ratchet-raise-approved label. Run from the repo root:
+// the ratchet-raise-approved label. A Go baseline constant that loses its
+// last use in its directory is a raise too (go-ref:, see goRefs for what
+// counts), and so is a new t.Skip in a file declaring or using one
+// (go-skip:, see skipCalls).
+// Run from the repo root:
 //
 //	go run ./tools/ratchet-raises -base origin/master
 package main
@@ -80,7 +84,7 @@ func run(base, head tree, labels labelSource) ([]string, []raise, error) {
 	if strings.TrimSpace(basePins) != "" {
 		markNewIsRaise(hm, "golden:")
 	}
-	rs := raises(bm, hm)
+	rs := withoutCoveredRefs(raises(bm, hm))
 	// Creating scripts/js-ratchet.caps.json establishes a new ratchet, not a
 	// raise: its first exempt/legacy/cycle entries are already-real
 	// violations being recorded. jsCaps parses one side at a time, so only
@@ -163,6 +167,24 @@ func withoutPrefix(rs []raise, prefix string) []raise {
 	out := rs[:0:0]
 	for _, r := range rs {
 		if !strings.HasPrefix(r.Gate, prefix) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// withoutCoveredRefs drops the go-ref: raise of a constant whose go: key
+// went to -1 as well: deleting a used baseline needs one ledger line.
+func withoutCoveredRefs(rs []raise) []raise {
+	gone := map[string]bool{}
+	for _, r := range rs {
+		if c, ok := strings.CutPrefix(r.Gate, "go:"); ok && r.To == -1 {
+			gone[c] = true
+		}
+	}
+	out := rs[:0:0]
+	for _, r := range rs {
+		if c, ok := strings.CutPrefix(r.Gate, "go-ref:"); !ok || !gone[c] {
 			out = append(out, r)
 		}
 	}

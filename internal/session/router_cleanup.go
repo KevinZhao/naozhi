@@ -20,8 +20,8 @@ import (
 
 // removeSnapshot captures everything finishRemoveCleanup needs from a session,
 // taken in the transaction that unregisters it, so the teardown that follows
-// (possibly a detached RemoveAsync goroutine) never reads router state again:
-// finishRemoveCleanup MUST NOT touch r.ss.
+// (possibly a detached RemoveAsync goroutine) never reads the removed
+// session's state again: the table only answers whether key is back.
 type removeSnapshot struct {
 	proc             processIface
 	workspace        string
@@ -60,10 +60,29 @@ func (r *Router) unregisterAndSnapshot(key string) (snap removeSnapshot, ok bool
 	return snap, ok
 }
 
+// notifyKeyRetired tells the observer key has left the table. Call outside
+// the table lock. The process teardown runs after it, so a panicking consumer
+// is recovered and counted here rather than leaking the process.
+func (r *Router) notifyKeyRetired(key, sessionID string) {
+	if r.observer == nil {
+		return
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			metrics.PanicRecoveredTotal.Add(1)
+			slog.Error("session retire: KeyRetired consumer panicked",
+				"key", key, "panic", rec, "stack", string(debug.Stack()))
+		}
+	}()
+	r.observer.KeyRetired(key, sessionID)
+}
+
 // finishRemoveCleanup runs the slow half of a session removal, outside any
 // transaction: close the process, wait for its shim socket to disappear, drop
-// the event log + attachment refs, fire lifecycle notifications. Reads only `snap` — never router state — so it is safe in a detached
-// goroutine (the session is already gone from every map). Worst case ~15s.
+// the event log + attachment refs unless a same-key session is back, notify
+// the change. Reads the removed session only through `snap`, so it is safe in
+// a detached goroutine (the session is already gone from every map). Worst
+// case ~15s.
 func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 	proc := snap.proc
 	if proc != nil && proc.Alive() {
@@ -78,12 +97,23 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 				"key", key)
 		}
 	}
-	// Drop the on-disk event log so a future session reusing the key starts
-	// empty. Best-effort: a failed DropKey only leaves stale bytes behind.
-	r.hist.dropEventLogForKey(key)
-	// Clear the attachment tracker's refs so double-TTL GC reclaims images.
-	// Best-effort: stale keyhash entries do not affect correctness.
-	r.hist.clearAttachmentTrackerRefs(key, snap.workspace)
+	// A same-key session admitted during the teardown owns the key's event
+	// log and attachment refs, which are stored by key: keep them, as a
+	// failed drop would. The check and the drop are not atomic, so a
+	// re-create in that gap still loses what it wrote before the drop.
+	var recreated bool
+	r.ss.View(func(v sessView) { _, recreated = v.Lookup(key) })
+	if recreated {
+		slog.Info("session re-created during remove teardown; keeping its event log",
+			"key", key)
+	} else {
+		// Drop the on-disk event log so a future session reusing the key
+		// starts empty. Best-effort: a failed DropKey only leaves stale bytes.
+		r.hist.dropEventLogForKey(key)
+		// Clear the attachment tracker's refs so double-TTL GC reclaims
+		// images. Best-effort: stale keyhash entries do not affect correctness.
+		r.hist.clearAttachmentTrackerRefs(key, snap.workspace)
+	}
 	// Free the resident run-history ring (on-disk records stay) so the
 	// per-session ring map stays bounded.
 	r.runs.Invalidate(key)
@@ -92,7 +122,6 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 	r.ss.Update(func(tx sessTx) { tx.Broadcast() })
 
 	logSessionLifecycle("removed", key)
-	r.notifyKeyRetired(key, snap.retiredSessionID)
 	r.notifyChange()
 }
 
@@ -104,6 +133,9 @@ func (r *Router) Remove(key string) bool {
 	if !ok {
 		return false
 	}
+	// Retire as the key leaves the table, not after the slow teardown: a
+	// same-key session admitted meanwhile must keep its message queue.
+	r.notifyKeyRetired(key, snap.retiredSessionID)
 	r.finishRemoveCleanup(key, snap)
 	return true
 }
@@ -120,6 +152,7 @@ func (r *Router) RemoveAsync(key string) bool {
 	if !ok {
 		return false
 	}
+	r.notifyKeyRetired(key, snap.retiredSessionID) // before teardown, as Remove
 	r.removes.Add(1)
 	go func() {
 		defer r.removes.Done()
@@ -311,6 +344,7 @@ func (r *Router) Cleanup() {
 	}
 
 	var pruned int
+	var listedRunPruned bool // a pruned run was on a listed entry
 	var snap saveSnapshot
 	r.ss.Update(func(tx sessTx) {
 		// Broadcast in the same transaction as the prune so Shutdown's wait
@@ -333,7 +367,14 @@ func (r *Router) Cleanup() {
 			pruned++
 		}
 		// The run of a key that is never retried outlives any cooldown.
-		tx.Ext().spawns.PruneStartupFailures(now.Add(-2 * startupCooldownMax))
+		for _, key := range tx.Ext().spawns.PruneStartupFailures(now.Add(-2 * startupCooldownMax)) {
+			if tx.Get(key) != nil {
+				listedRunPruned = true
+			}
+		}
+		if listedRunPruned {
+			tx.BumpGen()
+		}
 		// Recompute the per-backend gauge and the alive total in one reconcile
 		// walk; skip the O(N) walk when nothing changed.
 		var aliveTotal int64
@@ -369,7 +410,7 @@ func (r *Router) Cleanup() {
 		}
 	}
 
-	if len(expired) > 0 || len(stuckKill) > 0 || pruned > 0 {
+	if len(expired) > 0 || len(stuckKill) > 0 || pruned > 0 || listedRunPruned {
 		r.notifyChange()
 	}
 }

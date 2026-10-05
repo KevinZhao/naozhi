@@ -2,7 +2,9 @@ package session
 
 import (
 	"context"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -381,6 +383,43 @@ func TestBookPartialUsage_UnreportedBasisPromotedToList(t *testing.T) {
 	}
 }
 
+// Raw ids that differ only in a context suffix are one model at one rate, so
+// a partial books them as one row carrying both rows' tokens.
+func TestBookPartialUsage_OneRowPerCanonicalModel(t *testing.T) {
+	s, ledger := newLedgerSession(t, "feishu:p2p:suffix", &TestProcess{AliveVal: true})
+	ledger.Rates().Observe(costledger.ModelDelta{Model: "claude-opus-5-5", CostUSD: 0.01, Tokens: costledger.Tokens{Output: 1000}})
+	s.bookPartialUsage(clievent.ShadowUsage{Models: []clievent.ShadowModel{
+		{Model: "claude-opus-5-5", Input: 11, Output: 100, CacheRead: 7},
+		{Model: "claude-sonnet-5-5", Output: 20},
+		{Model: "claude-opus-5-5[1m]", Input: 13, Output: 300, CacheWrite: 5},
+	}}, "run-1")
+	ents := allEntries(t, ledger)
+	if len(ents) != 1 || len(ents[0].Models) != 2 {
+		t.Fatalf("partial entry = %+v, want one entry with an opus and a sonnet row", ents)
+	}
+	opus := ents[0].Models[0]
+	want := costledger.Tokens{Input: 24, Output: 400, CacheRead: 7, CacheWrite: 5}
+	if opus.Model != "claude-opus-5-5" || opus.RawModel != "claude-opus-5-5" || opus.Tokens != want {
+		t.Fatalf("opus row = %+v, want both raw ids' tokens %+v under the first raw id", opus, want)
+	}
+	if !approxEq(opus.CostUSD, ents[0].Amount) || ents[0].Models[1].Model != "claude-sonnet-5-5" {
+		t.Fatalf("rows = %+v amount %v: the priced opus row should carry the whole amount", ents[0].Models, ents[0].Amount)
+	}
+}
+
+// A session with no real directory books its partial under the same empty
+// workspace its turn rows carry, not under filepath.Base's ".".
+func TestBookPartialUsage_WorkspaceMatchesTurnRows(t *testing.T) {
+	s, ledger := newLedgerSession(t, "feishu:p2p:nows", &TestProcess{AliveVal: true})
+	s.setWorkspace("")
+	turn := s.ledgerEntries(costledger.Increment{USD: 0.01}, "run-0")
+	s.bookPartialUsage(clievent.ShadowUsage{Models: []clievent.ShadowModel{{Model: "claude-opus-5-5", Output: 100}}}, "run-1")
+	ents := allEntries(t, ledger)
+	if len(ents) != 1 || len(turn) != 1 || ents[0].Workspace != "" || turn[0].Workspace != "" {
+		t.Fatalf("partial %+v, turn %+v: want both under workspace \"\"", ents, turn)
+	}
+}
+
 // TestAccountTurnCost_AdoptedBaselineChargesNothingForHistory covers the shim
 // adopted with no store entry (adoptLiveShim): its CLI has already spent
 // an unknown amount, and the first result it reports is a CUMULATIVE figure
@@ -478,6 +517,62 @@ func TestBookUnownedResults_BooksCLIStartedTurnsOnce(t *testing.T) {
 	}
 	if len(amounts) != 3 || !approxEq(amounts[0]+amounts[1]+amounts[2], 3.5) {
 		t.Fatalf("ledger amounts = %v, want three entries summing to 3.5", amounts)
+	}
+}
+
+// #3322: a Send that gave up (interrupt, cron deadline) books nothing; the
+// late result its process hands over is booked once, and the same reading
+// handed over again (readLoop and the next Send's drain both see it) adds
+// nothing.
+func TestBookUnownedResults_AbandonedSendsLateResultBooksOnce(t *testing.T) {
+	proc := &TestProcess{AliveVal: true, SendFunc: func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
+		return nil, context.Canceled
+	}}
+	s, ledger := newLedgerSession(t, "dashboard:direct:host:general", proc)
+	hooked := &hookedTestProcess{TestProcess: proc}
+	s.storeProcess(hooked)
+	bookUnownedResults(s, hooked)
+
+	if _, err := s.Send(context.Background(), "hi", nil, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Send = %v, want context.Canceled", err)
+	}
+	late := clievent.SendResult{CostUSD: 2, SessionID: "sid"}
+	hooked.fn(late)
+	hooked.fn(late)
+	if got := loadTotalCost(&s.costSpent); !approxEq(got, 2) {
+		t.Fatalf("costSpent = %v, want the late result's 2 once", got)
+	}
+	ents := allEntries(t, ledger)
+	if len(ents) != 1 || ents[0].Kind != costledger.KindTurn || !approxEq(ents[0].Amount, 2) {
+		t.Fatalf("entries = %+v, want one Kind=turn row of 2", ents)
+	}
+}
+
+// No run record shares an unowned result's run id, so the id names the CLI
+// session reconcile attributes it to: the result's own, else the session's.
+func TestBookUnownedResults_RunIDNamesTheCLISession(t *testing.T) {
+	proc := &TestProcess{AliveVal: true}
+	s, ledger := newLedgerSession(t, "dashboard:direct:host:general", proc)
+	hooked := &hookedTestProcess{TestProcess: proc}
+	s.storeProcess(hooked)
+	bookUnownedResults(s, hooked)
+
+	hooked.fn(clievent.SendResult{CostUSD: 1}) // neither knows the session yet
+	hooked.fn(clievent.SendResult{CostUSD: 3, SessionID: "sid-result"})
+	s.setSessionID("sid-held")
+	hooked.fn(clievent.SendResult{CostUSD: 6})
+	hooked.fn(clievent.SendResult{CostUSD: 10, SessionID: "sid-result2"}) // the CLI moved on first
+	want := map[float64]string{1: "", 2: "unowned:sid-result:", 3: "unowned:sid-held:", 4: "unowned:sid-result2:"}
+	ents := allEntries(t, ledger)
+	if len(ents) != len(want) {
+		t.Fatalf("entries = %+v, want %d", ents, len(want))
+	}
+	for _, e := range ents {
+		prefix, ok := want[e.Amount]
+		id, found := strings.CutPrefix(e.RunID, prefix)
+		if !ok || !found || len(id) != 16 || strings.Contains(id, ":") {
+			t.Errorf("entry $%v run id = %q, want %q + a bare run id", e.Amount, e.RunID, prefix)
+		}
 	}
 }
 

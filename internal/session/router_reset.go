@@ -18,17 +18,18 @@ import (
 // in which picks survive, and in whether the key is retired:
 //
 //   - Reset / ResetAndDiscardOverride: one key; every pick is dropped; the
-//     key is retired (notifyKeyRetired → the message queue's Cleanup, the
-//     history cache, retired_at). Cleanup drops the key's queued messages
-//     without telling their origins, which is why callers discard the key's
-//     queue first (dispatch /new, server /clear).
+//     key is retired before the release (notifyKeyRetired → the queue's
+//     Retire, the history cache, retired_at). Retire tells the queued
+//     origins DropRemoved, which is why callers that reset on the user's
+//     request discard the queue first (DropReset: dispatch /new, server
+//     /clear).
 //   - ResetChatAndSetWorkspace: every agent key of a chat; only the backend
 //     pick is dropped (pendingPicks.dropBackend); the keys are NOT retired —
 //     /cd does not discard their queues, and queued messages are meant to run
 //     in the new workspace.
 //   - ResetAndRecreate: one key, re-spawned in the same transaction; picks
-//     are kept for that spawn; not retired, since Cleanup would silently
-//     drop the messages queued for the recreated session.
+//     are kept for that spawn; not retired, since a Retire would drop the
+//     messages queued for the recreated session.
 
 // ResetChatAndSetWorkspace atomically resets all sessions belonging to a chat
 // (all agents) and installs a new workspace override for it in one
@@ -221,10 +222,11 @@ func (r *Router) ResetAndDiscardOverride(key string) {
 // ResetAndDiscardOverride. Must be called without the table lock held. sessionID
 // is the UUID captured by resetEntry before unregister removed the key's
 // table entry; pass through as-is to notifyKeyRetired so the
-// dashboard history-sort hook can stamp retired_at.
+// dashboard history-sort hook can stamp retired_at. The key is retired before
+// releaseKeys, as Remove does, so a session admitted during it keeps its queue.
 func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
-	r.releaseKeys([]releasedKey{{key: key, proc: proc}})
 	r.notifyKeyRetired(key, sessionID)
+	r.releaseKeys([]releasedKey{{key: key, proc: proc}})
 	r.notifyChange()
 }
 

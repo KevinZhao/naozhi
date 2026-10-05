@@ -25,6 +25,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // withShortStopBudget shortens a Scheduler's per-instance stop budget for
@@ -62,15 +64,36 @@ func TestStop_BudgetCapsTotalDuration(t *testing.T) {
 		<-hold
 	}()
 
+	// Stop's wall clock also covers waitGCDrain and the final fsync'd
+	// persist, so the budget mechanism is proven by the breach counters, not
+	// by elapsed time. Either budget arm (drain or trigger) skipping the held
+	// triggerWG satisfies the contract; exactly one must fire. Not
+	// t.Parallel: the counters are process-global expvars.
+	drain0 := metrics.CronStopBudgetExceededDrainTotal.Value()
+	trigger0 := metrics.CronStopBudgetExceededTriggerTotal.Value()
+	// waitGCDrain may legitimately spend its whole budget under heavy IO.
+	ceiling := s.gcBudget + 2*time.Second
 	start := time.Now()
-	s.Stop()
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		s.Stop()
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(ceiling + 3*time.Second):
+		t.Fatalf("Stop still blocked after %v with triggerWG held (budget=%v); it must not wait for triggerWG", ceiling+3*time.Second, s.stopBudget)
+	}
 	elapsed := time.Since(start)
 
-	// Budget is 80ms. Stop should return somewhere under ~4×budget
-	// (slack for scheduler jitter on slow CI). If the old per-wait
-	// doubling crept back this would regress to ≥1h+5s.
-	if elapsed > 400*time.Millisecond {
-		t.Errorf("Stop took %v, want < 400ms (budget=%v)", elapsed, s.stopBudget)
+	breaches := metrics.CronStopBudgetExceededDrainTotal.Value() - drain0 +
+		metrics.CronStopBudgetExceededTriggerTotal.Value() - trigger0
+	if breaches != 1 {
+		t.Errorf("stop budget breaches = %d, want 1 (the held triggerWG must trip exactly one budget arm)", breaches)
+	}
+	// Loose guard against the old ExecTimeout-derived budget (>= 1h).
+	if elapsed > ceiling {
+		t.Errorf("Stop took %v, want < %v (budget=%v)", elapsed, ceiling, s.stopBudget)
 	}
 }
 
@@ -139,9 +162,10 @@ func TestStop_FastPathDrainsCleanly(t *testing.T) {
 	s.Stop()
 	elapsed := time.Since(start)
 
-	// No jobs, no hanging triggerWG — should finish in milliseconds.
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("clean Stop took %v, want < 500ms", elapsed)
+	// No jobs, no hanging triggerWG. A fast-path regression waits out the
+	// 5s budget, so 2s separates the two without timing the persist fsync.
+	if elapsed > 2*time.Second {
+		t.Errorf("clean Stop took %v, want < 2s", elapsed)
 	}
 }
 

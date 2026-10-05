@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -32,12 +33,11 @@ type imOrigin struct {
 	kind    imKind
 	textLen int
 	images  int
-	// reacted is set by Admitted when the ⏳ landed on the message, before
-	// the turn that answers it can start, so Finish knows to clear it.
+	// ackDone is closed once the ⏳ of a request that runs at once has
+	// landed or failed (startAck); nil for any other request. reacted is
+	// written before the close and read only after it (awaitAck).
+	ackDone chan struct{}
 	reacted bool
-	// unacked is set by Admitted, also before the turn starts, when a request
-	// that runs at once got no ⏳; its turn posts a fallback banner instead.
-	unacked bool
 }
 
 func (d *Dispatcher) newIMOrigin(msg platform.IncomingMessage, lg *slog.Logger, key, agentID string, opts sessionview.AgentOpts, kind imKind, textLen, images int) *imOrigin {
@@ -81,22 +81,21 @@ func (o *imOrigin) SessionOpts(string) sessionview.AgentOpts { return o.opts }
 // Admitted acks the message with a ⏳, or a rate-limited busy notice and a
 // log line when the queue is disabled. A queued request whose ⏳ fails gets a
 // rate-limited notice instead; one that runs now or detached does not, its
-// reply is the ack. The ⏳ goes on before the turn can clear it (#1963).
+// reply is the ack, and its ⏳ goes on in the background so the turn does not
+// wait for the IM API (#3329). Every clear waits for that add (#1963).
 func (o *imOrigin) Admitted(ctx context.Context, a turn.Ack) {
 	d := o.d
 	switch a {
 	case turn.AckOwner:
 		o.lg.Info("message received", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
-		o.reacted = d.ackQueuedWithReaction(ctx, o.msg, o.lg)
-		o.unacked = !o.reacted
+		o.startAck(ctx)
 	case turn.AckDetached:
 		if o.kind == imUrgent {
 			o.lg.Info("/urgent dispatched", "key", o.key, "text_len", o.textLen)
 		} else {
 			o.lg.Info("message received (passthrough)", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
 		}
-		o.reacted = d.ackQueuedWithReaction(ctx, o.msg, o.lg)
-		o.unacked = !o.reacted
+		o.startAck(ctx)
 	case turn.AckQueued:
 		if !d.ackQueuedWithReaction(ctx, o.msg, o.lg) {
 			d.replyNotice(ctx, o.msg, o.key, "消息已收到，待当前回复完成后一并处理。", o.lg, "queued")
@@ -109,10 +108,52 @@ func (o *imOrigin) Admitted(ctx context.Context, a turn.Ack) {
 	}
 }
 
+// startAck adds the ⏳ on its own goroutine. WithoutCancel: a detached
+// request's inbound ctx can end as soon as Submit returns; the add is still
+// bounded by reactionAckTimeout.
+func (o *imOrigin) startAck(ctx context.Context) {
+	done := make(chan struct{})
+	o.ackDone = done
+	go func() {
+		defer close(done)
+		o.reacted = o.d.ackQueuedWithReaction(context.WithoutCancel(ctx), o.msg, o.lg)
+	}()
+}
+
+// ackWaitLimit bounds awaitAck past reactionAckTimeout, for a Reactor that
+// ignores its ctx.
+const ackWaitLimit = reactionAckTimeout + time.Second
+
+// awaitAck waits for startAck's add and reports whether the ⏳ landed; false
+// at once when no add was started, and false when the add outlives
+// ackWaitLimit.
+func (o *imOrigin) awaitAck() bool {
+	if o.ackDone == nil {
+		return false
+	}
+	t := time.NewTimer(ackWaitLimit)
+	defer t.Stop()
+	select {
+	case <-o.ackDone:
+		return o.reacted
+	case <-t.C:
+		return false
+	}
+}
+
 // Dropped clears the ⏳ of a request that will never get a turn (#1945,
-// #2013).
-func (o *imOrigin) Dropped(ctx context.Context, _ turn.DropReason) {
+// #2013). Only queued requests are dropped, and their add is synchronous;
+// awaitAck guards a dropped request that ran startAck, so its ⏳ cannot land
+// behind the clear. A removed key also gets a notice (#3297): the user did
+// not ask for the removal, and a platform without reactions promised to
+// answer. It is rate-limited per chat on the key (chats can share a planner
+// key), so a chat's queued messages share one.
+func (o *imOrigin) Dropped(ctx context.Context, why turn.DropReason) {
+	o.awaitAck()
 	o.d.clearQueuedReaction(ctx, o.msg.Platform, o.msg.MessageID, o.lg)
+	if why == turn.DropRemoved {
+		o.d.replyNotice(ctx, o.msg, o.key+"\x00"+o.Sink(), "会话已结束，这条消息未被处理，请重新发送。", o.lg, "removed")
+	}
 }
 
 // Begin opens the reply to o's chat. An Observer is answered like a Head:
@@ -141,15 +182,16 @@ type imDelivery struct {
 func (dl *imDelivery) Blocking() bool { return true }
 
 // BeforeSession starts the tracker that streams the turn's progress into the
-// chat, armed with a fallback banner when the request's message got no ⏳ so
-// a slow spawn is covered too. On a first turn it then offers the chat's
-// external session for takeover; the result is ignored: GetOrCreate resumes
-// an adopted session and spawns a fresh one otherwise.
+// chat. A head that runs at once is armed with a fallback banner that posts
+// only if its message got no ⏳, so a slow spawn is covered too. On a first
+// turn it then offers the chat's external session for takeover; the result
+// is ignored: GetOrCreate resumes an adopted session and spawns a fresh one
+// otherwise.
 func (dl *imDelivery) BeforeSession(ctx context.Context) {
 	o := dl.o
 	dl.tracker = newIMEventTracker(ctx, dl.p, o.msg.ChatID, o.msg.ChatType, o.agentID)
-	if dl.info.Role == turn.RoleHead && o.unacked {
-		dl.tracker.armFallbackBanner(o.d.fallbackBannerDelay)
+	if dl.info.Role == turn.RoleHead && o.ackDone != nil {
+		dl.tracker.armFallbackBanner(o.d.fallbackBannerDelay, o.awaitAck)
 	}
 	if !dl.info.First {
 		return
@@ -217,11 +259,14 @@ func (dl *imDelivery) Finish(ctx context.Context, out turn.Outcome) {
 
 // queuedIDs are the message IDs carrying a ⏳ that this delivery answers: the
 // Mates, and the head itself unless it is a first turn's message whose ⏳
-// never landed.
+// never landed. It waits for the head's add still in flight, so the ⏳
+// cannot land after it is cleared.
 func (dl *imDelivery) queuedIDs() []string {
 	var ids []string
-	if dl.info.Role == turn.RoleHead && (!dl.info.First || dl.o.reacted) {
-		ids = append(ids, dl.o.msg.MessageID)
+	if dl.info.Role == turn.RoleHead {
+		if reacted := dl.o.awaitAck(); !dl.info.First || reacted {
+			ids = append(ids, dl.o.msg.MessageID)
+		}
 	}
 	for _, m := range dl.info.Mates {
 		if mo, ok := m.(*imOrigin); ok {

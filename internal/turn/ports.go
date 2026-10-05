@@ -57,6 +57,7 @@ const (
 	DropShutdown                   // the owner loop's ctx ended, or its Admission declined, with messages queued
 	DropPanic                      // a turn on the key panicked and the queue was discarded
 	DropEvicted                    // a newer message pushed it out of a full queue
+	DropRemoved                    // the router retired the key (session removed, reset or closed) with messages queued
 )
 
 // Origin is an entry point's view of one submitted request. Every method is
@@ -67,9 +68,10 @@ type Origin interface {
 	// send "ws:<conn>:<sendID>", HTTP "http:<key>".
 	Sink() string
 	// Admitted reports Submit's Ack. It runs inside Submit; for AckOwner and
-	// AckDetached that is before the turn's goroutine (if any) starts, so the
-	// ack is in place before the turn can finish and clear it (#1963). An
-	// AckQueued request may already be drained into a running turn by then.
+	// AckDetached that is before the turn's goroutine (if any) starts. An ack
+	// that completes after Admitted returns must be ordered before its clear
+	// by the origin (#1963). An AckQueued request may already be drained into
+	// a running turn by then.
 	Admitted(ctx context.Context, a Ack)
 	// SessionOpts returns the options for GetOrCreate. Only the origin that
 	// holds the owner loop (or runs a detached turn) is asked, once per turn.
