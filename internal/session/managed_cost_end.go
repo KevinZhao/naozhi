@@ -119,17 +119,40 @@ func (c *costAccounting) waitEnds(d time.Duration) bool { return c.ends.wait(d) 
 // inflight counts running tasks. Unlike sync.WaitGroup it may be waited on
 // while tasks start: a process can end during shutdown's wait.
 type inflight struct {
-	mu   sync.Mutex
-	n    int
-	idle chan struct{} // closed when n drops to 0
+	mu     sync.Mutex
+	n      int
+	idle   chan struct{} // closed when n drops to 0
+	closed bool          // tryAdd refuses new tasks
 }
 
 func (f *inflight) add() {
 	f.mu.Lock()
+	f.addLocked()
+	f.mu.Unlock()
+}
+
+// tryAdd is add unless close was called; it reports whether the task counts.
+func (f *inflight) tryAdd() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return false
+	}
+	f.addLocked()
+	return true
+}
+
+func (f *inflight) addLocked() {
 	if f.n == 0 {
 		f.idle = make(chan struct{})
 	}
 	f.n++
+}
+
+// close makes every later tryAdd fail; tasks already counted run on.
+func (f *inflight) close() {
+	f.mu.Lock()
+	f.closed = true
 	f.mu.Unlock()
 }
 
