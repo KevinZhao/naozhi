@@ -90,10 +90,16 @@ func (f *removeTeardownFixture) attachmentReferenced(t *testing.T) bool {
 // TestRemoveAsync_KeepsLogOfSameKeySessionRecreatedDuringTeardown: a session
 // re-created on the key while the old one is still closing owns the key's
 // event log and attachment refs, so the old teardown leaves both in place.
+// The re-create lands inside Close, so a presence check before Close misses it.
 func TestRemoveAsync_KeepsLogOfSameKeySessionRecreatedDuringTeardown(t *testing.T) {
 	f := newRemoveTeardownFixture(t)
 	if !f.r.RemoveAsync(f.key) {
 		t.Fatal("RemoveAsync returned false")
+	}
+	select {
+	case <-f.proc.closeStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("teardown never reached proc.Close")
 	}
 	installSession(t, f.r, f.key, newIdleProc()).setWorkspace(f.ws)
 	f.write(t, "new")
