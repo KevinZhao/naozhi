@@ -105,8 +105,8 @@ func TestSystemPrompt_ExtraArgsRouteStillStripped(t *testing.T) {
 // (ResolveForChat with a bound project) all the way to argv. On origin/master
 // the prompt lands in ExtraArgs and BuildArgs strips it: values == nil.
 //
-// It also fixes the stacking order: agents[general].system_prompt first, the
-// project planner prompt after, "\n\n"-joined, one flag.
+// The planner prompt is the only one: agents[general]'s system_prompt and args
+// are not a planner layer, so the argv matches a restart of the same key.
 func TestSystemPrompt_PlannerPath_ReachesArgv(t *testing.T) {
 	t.Parallel()
 	r := mkSystemPromptRouter(t)
@@ -122,11 +122,11 @@ func TestSystemPrompt_PlannerPath_ReachesArgv(t *testing.T) {
 	key, opts := res.ResolveForChat("feishu", "group", "c1", "general")
 	args := spawnArgvFor(r, key, opts)
 
-	if got := appendSystemPromptValues(args); !slices.Equal(got, []string{"AGENT\n\nPLAN"}) {
-		t.Fatalf("planner path: argv values = %q, want [\"AGENT\\n\\nPLAN\"]\nargv=%v", got, args)
+	if got := appendSystemPromptValues(args); !slices.Equal(got, []string{"PLAN"}) {
+		t.Fatalf("planner path: argv values = %q, want [\"PLAN\"]\nargv=%v", got, args)
 	}
-	if !slices.Contains(args, "--keep") {
-		t.Errorf("agent ExtraArgs lost on the planner path: %v", args)
+	if slices.Contains(args, "--keep") {
+		t.Errorf("general's ExtraArgs leaked onto the planner path: %v", args)
 	}
 	// The registry entry must be untouched — layering copies, never mutates.
 	if defaults["general"].SystemPrompt != "AGENT" {

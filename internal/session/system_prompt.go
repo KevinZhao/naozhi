@@ -5,7 +5,7 @@ package session
 // the single stacking rule for every prompt channel (#2493):
 //
 //	agents[<id>].system_prompt          ← base (config, per agent)
-//	  + project planner prompt          ← ResolveForChat / buildSessionOpts
+//	  or project planner prompt         ← plannerOpts (a planner's base)
 //	  + scratch quoted context          ← ScratchPool.Open
 //
 // Callers never mutate a shared AgentOpts to add a layer — they copy and

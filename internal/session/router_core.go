@@ -686,10 +686,11 @@ type Observer interface {
 	// dashboard-visible state changed — per result event on the hot path, so
 	// it must be cheap.
 	SessionsChanged()
-	// KeyRetired fires from Reset/Remove after teardown completes (LRU eviction
-	// does not), with the session UUID captured before the key's table entry
-	// went away. sessionID may be empty when the session retired before the
-	// CLI ever returned one.
+	// KeyRetired fires from Reset/Remove once the key has left the table,
+	// before its process is torn down (LRU eviction does not fire it), with
+	// the session UUID captured before the key's table entry went away.
+	// sessionID may be empty when the session retired before the CLI ever
+	// returned one.
 	KeyRetired(key, sessionID string)
 }
 
@@ -698,14 +699,6 @@ type Observer interface {
 func (r *Router) notifyChange() {
 	if r.observer != nil {
 		r.observer.SessionsChanged()
-	}
-}
-
-// notifyKeyRetired tells the observer key finished retiring. Call outside the
-// table lock.
-func (r *Router) notifyKeyRetired(key, sessionID string) {
-	if r.observer != nil {
-		r.observer.KeyRetired(key, sessionID)
 	}
 }
 

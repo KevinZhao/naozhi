@@ -128,9 +128,14 @@ function applySessionsStats(data) {
   serverInfo.lastStatsSnapshot = data.stats;
 }
 
+// statePushes counts session_state pushes (n) and each key's latest (at).
+const statePushes = { n: 0, at: new Map() };
+
 // mergeBackendSessions folds the polled sessions into sessionsData, adds each
-// key to backendKeys and returns the list the sidebar paints from.
-function mergeBackendSessions(polled, backendKeys) {
+// key to backendKeys and returns the list the sidebar paints from. A key pushed
+// since the poll went out (pushesBefore) keeps its pushed state and death_reason;
+// overriding a state zeroes lastVersion, as the snapshot may postdate a lost push.
+function mergeBackendSessions(polled, backendKeys, pushesBefore) {
   // A session the operator just dismissed stays out until its DELETE
   // resolves, or a lagging poll re-adds the card; a failed delete clears the
   // key and the session reappears on the next poll.
@@ -140,17 +145,21 @@ function mergeBackendSessions(polled, backendKeys) {
   return live.map(s => {
     const n = s.node || 'local';
     const sKey = sid(s.key, n);
-    // Keep the optimistic 'running' flip while the REST snapshot still lags
-    // the send, or the banner hides until the session_state push catches up.
-    // It lands in the returned copy too: a re-render from the cached payload
-    // (project collapse, sidebar search) would otherwise paint the card idle
-    // while the banner shows running (#2431).
+    const cur = sessionList.sessionsData[sKey];
+    if (cur && statePushes.at.get(sKey) > pushesBefore) {
+      if (s.state !== cur.state) sessionList.lastVersion = 0;
+      s = Object.assign({}, s, { state: cur.state, death_reason: cur.death_reason });
+    }
+    // Keep the optimistic 'running' flip while the REST snapshot lags the send,
+    // or the banner hides until the push catches up. The returned copy keeps it
+    // too, or a re-render from the cached payload (project collapse, sidebar
+    // search) paints the card idle under a running banner (#2431).
     if (perSession.optimisticRunning[sKey] && s.state !== 'running') {
       s = Object.assign({}, s, { state: 'running' });
     }
     // A new workspace (/cd, or the first snapshot after spawn resolved the
     // real cwd) can be another repo, another worktree or no repo at all.
-    const prevWS = sessionList.sessionsData[sKey] && sessionList.sessionsData[sKey].workspace;
+    const prevWS = cur && cur.workspace;
     if (prevWS !== undefined && prevWS !== s.workspace) {
       invalidateGitState(s.key, n);
     }
@@ -247,6 +256,7 @@ export function onSessionsApplied(fn) {
 
 export async function fetchSessions() {
   try {
+    const pushesBefore = statePushes.n;
     const got = await fetchSessionsPayload();
     if (got === NOT_MODIFIED) return;
     if (!got) return false;
@@ -265,7 +275,7 @@ export async function fetchSessions() {
     if (sessionsUnchanged(data, wsConnected)) return;
     applySessionsStats(data);
     const backendKeys = new Set();
-    data = Object.assign({}, data, { sessions: mergeBackendSessions(data.sessions || [], backendKeys) });
+    data = Object.assign({}, data, { sessions: mergeBackendSessions(data.sessions || [], backendKeys, pushesBefore) });
     reconcilePending(backendKeys);
     appendPendingCards(data.sessions, backendKeys);
     renderSidebar(data);
@@ -849,6 +859,7 @@ wsm.onStateChange(wsStateChanged);
 function onSessionState(msg) {
   const msgNode = msg.node || 'local';
   const sKey = sid(msg.key, msgNode);
+  statePushes.at.set(sKey, ++statePushes.n);
   // Real state arrived — the optimistic flip has served its purpose, regardless
   // of whether the server says running/ready/dead. Clear the flag so future
   // turns don't short-circuit the running→ready rollback logic. Capture it
@@ -862,13 +873,10 @@ function onSessionState(msg) {
     clearTimeout(_optimisticRunningTimers[sKey]);
     delete _optimisticRunningTimers[sKey];
   }
-  // 服务端 resubscribeEvents 60s 超时后已经丢弃了本连接对该 key 的订阅
-  // (wshub_eventpush.go)，此后这条订阅不会再有任何事件帧。必须同步清掉
-  // 本地订阅簿记 —— 否则客户端永远"以为自己订阅着"：下一次 running 广播
-  // 到达时 needSub 的 case 1 (subscribedKey mismatch) 不成立、case 3
-  // (_subscriptionSuspended) 也不成立，整轮 turn 的事件全部推空，
-  // dashboard 静止直到手动重新点击会话（bug: 出结果后不自动更新）。
-  // 清掉之后，下一次 running 广播经 case 1 重新订阅，拿到完整初始帧。
+  // The server dropped this subscription after resubscribeEvents' 60 s timeout
+  // (wshub_eventpush.go). Forget it here too, or no needSub case fires on the
+  // next running push and the whole turn streams to nobody; cleared, case 1
+  // resubscribes and gets the full initial frames.
   if (msg.reason === 'subscription_timeout' &&
       sessionStream.subscribedKey === msg.key &&
       (sessionStream.subscribedNode || 'local') === msgNode) {
@@ -879,17 +887,13 @@ function onSessionState(msg) {
   }
   const prev = sessionList.sessionsData[sKey] || {};
   const prevState = prev.state;   // capture before mutation
-  // wasDead 判定必须穿透乐观 running 翻转：markSessionOptimisticRunning 在
-  // 网络往返之前就把 sessionsData.state 写成 'running'，所以对所有
-  // dashboard 本页发起的 send，服务端真正的 running 广播到达时 prevState
-  // 恒为 'running' —— 若直接读它，dead→running 的重订阅 (case 2) 对本页发送
-  // 永远是死代码，恰好漏掉"进程被回收后从本页发消息"这个最常见的失联场景。
-  // 用翻转前记录的真实状态还原判据。
+  // wasDead looks through the optimistic flip: a send from this page writes
+  // 'running' before the round trip, so prevState alone would make case 2
+  // (dead→running resubscribe) dead code for the commonest revive path.
   const effectivePrevState = wasOptimisticRunning ? optimisticPrevState : prevState;
-  // 判据是 state==='dead' 本身，而非 death_reason 非空：mapSendError 在
-  // no_output_timeout / total_timeout 时也写 death_reason（managed_send.go），
-  // 会话随后回到 ready 却留着它；按它判会让此后每次发送都走 case 2 全量重订阅，
-  // 重渲染抹掉尚未回显的 .optimistic-msg。sessionsData.state 保留后端真实状态。
+  // Test state, not death_reason: a send timeout writes death_reason too
+  // (managed_send.go) and the session returns to ready keeping it, so every
+  // later send would full-resubscribe and wipe the unechoed .optimistic-msg.
   const wasDead = effectivePrevState === 'dead';
   settleTurnBoundary(msg, msgNode, sKey, prevState);
   if (sessionList.sessionsData[sKey]) {
@@ -922,19 +926,14 @@ function settleTurnBoundary(msg, msgNode, sKey, prevState) {
   if (turnCompleted && !isActive) {
     perSession.unread[sKey] = (perSession.unread[sKey] || 0) + 1;
   }
-  // Turn 自然跑完后清掉上一次发出的文本缓存，否则下一轮刚进 running
-  // 就中断会把陈旧文本回填上来。中断路径不会走到这里被清掉，因为
-  // interruptSession 会先消费 lastSent 再发中断。
+  // A finished turn drops its sent text, or interrupting the next turn early
+  // refills stale text; interruptSession consumes lastSent itself.
   if (turnCompleted) delete perSession.lastSent[sKey];
-  // The HTTP send reached a terminal state (or never became a turn): the
-  // originator mark is no longer needed — drop it so it cannot linger and
-  // let a much later send_error for someone else's send slip through.
+  // The HTTP send ended (or never became a turn): drop its originator mark, or
+  // a much later send_error for someone else's send would slip through.
   if (msg.state === 'ready' || msg.state === 'dead') perSession.httpSendPending.delete(sKey);
-  // 一轮对话里 agent 很可能切了分支（git checkout / 新建 worktree 分支）。
-  // 这不改 workspace 路径，所以 workspace-diff 那条失效路径不会触发，chip
-  // 会一直停在选中会话那一刻的分支上。turn 边界是重新解析的自然时机：
-  // 频率低（每轮一次而非定时轮询），且恰好覆盖"agent 干完活"这个分支最可能
-  // 已变的时刻。invalidateGitState 内部只在该会话仍被选中时才真正发请求。
+  // A turn may switch branches without changing the workspace path, so the
+  // git chip re-resolves at each turn end (only for the selected session).
   if (turnCompleted) invalidateGitState(msg.key, msgNode);
 }
 
@@ -1011,6 +1010,7 @@ wsm.on(NZ_CONTRACT.WS.subscribed, (msg) => {
   if (msg.state && msg.key === selection.key && sessionStream.subscribedNode === selection.node) {
     const subSKey = sid(msg.key, sessionStream.subscribedNode);
     if (sessionList.sessionsData[subSKey]) {
+      statePushes.at.set(subSKey, ++statePushes.n);
       sessionList.sessionsData[subSKey].state = msg.state;
       updateMainState(msg.state);
     }

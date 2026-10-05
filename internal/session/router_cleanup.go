@@ -60,10 +60,28 @@ func (r *Router) unregisterAndSnapshot(key string) (snap removeSnapshot, ok bool
 	return snap, ok
 }
 
+// notifyKeyRetired tells the observer key has left the table. Call outside
+// the table lock. The process teardown runs after it, so a panicking consumer
+// is recovered and counted here rather than leaking the process.
+func (r *Router) notifyKeyRetired(key, sessionID string) {
+	if r.observer == nil {
+		return
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			metrics.PanicRecoveredTotal.Add(1)
+			slog.Error("session retire: KeyRetired consumer panicked",
+				"key", key, "panic", rec, "stack", string(debug.Stack()))
+		}
+	}()
+	r.observer.KeyRetired(key, sessionID)
+}
+
 // finishRemoveCleanup runs the slow half of a session removal, outside any
 // transaction: close the process, wait for its shim socket to disappear, drop
-// the event log + attachment refs, fire lifecycle notifications. Reads only `snap` — never router state — so it is safe in a detached
-// goroutine (the session is already gone from every map). Worst case ~15s.
+// the event log + attachment refs, notify the change. Reads only `snap` —
+// never router state — so it is safe in a detached goroutine (the session is
+// already gone from every map). Worst case ~15s.
 func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 	proc := snap.proc
 	if proc != nil && proc.Alive() {
@@ -92,7 +110,6 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 	r.ss.Update(func(tx sessTx) { tx.Broadcast() })
 
 	logSessionLifecycle("removed", key)
-	r.notifyKeyRetired(key, snap.retiredSessionID)
 	r.notifyChange()
 }
 
@@ -104,6 +121,9 @@ func (r *Router) Remove(key string) bool {
 	if !ok {
 		return false
 	}
+	// Retire as the key leaves the table, not after the slow teardown: a
+	// same-key session admitted meanwhile must keep its message queue.
+	r.notifyKeyRetired(key, snap.retiredSessionID)
 	r.finishRemoveCleanup(key, snap)
 	return true
 }
@@ -120,6 +140,7 @@ func (r *Router) RemoveAsync(key string) bool {
 	if !ok {
 		return false
 	}
+	r.notifyKeyRetired(key, snap.retiredSessionID) // before teardown, as Remove
 	r.removes.Add(1)
 	go func() {
 		defer r.removes.Done()
