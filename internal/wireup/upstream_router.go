@@ -23,9 +23,11 @@ var (
 func UpstreamRouter(r *session.Router) upstream.SessionRouter { return upstreamRouter{r} }
 
 // upstreamRouter forwards every method; the three that hand back a session
-// convert it with asUpstreamSession, and TakeoverPrecheck supplies the
-// connector's empty takeover opts. The rest are promoted from the embedded
-// router unchanged, since their signatures speak sessionview's types already.
+// convert it with asUpstreamSession, and the two takeover methods map the
+// connector's key-based calls onto the router's lease (TakeoverPrecheck with
+// the connector's empty takeover opts). The rest are promoted from the
+// embedded router unchanged, since their signatures speak sessionview's types
+// already.
 type upstreamRouter struct{ *session.Router }
 
 func (u upstreamRouter) SessionFor(key string) upstream.Session {
@@ -38,11 +40,17 @@ func (u upstreamRouter) ResetAndRecreate(ctx context.Context, key string, opts s
 }
 
 func (u upstreamRouter) TakeoverPrecheck(key string) error {
-	return u.Router.TakeoverPrecheck(key, sessionview.AgentOpts{})
+	lease, err := u.Router.ReserveTakeover(key, sessionview.AgentOpts{})
+	lease.Release()
+	return err
 }
 
 func (u upstreamRouter) Takeover(ctx context.Context, key, sessionID, workspace string, opts sessionview.AgentOpts) (upstream.Session, error) {
-	s, err := u.Router.Takeover(ctx, key, sessionID, workspace, opts)
+	lease, err := u.Router.ReserveTakeover(key, opts)
+	if err != nil {
+		return nil, err
+	}
+	s, err := u.Router.Takeover(ctx, lease, sessionID, workspace)
 	return asUpstreamSession(s), err
 }
 

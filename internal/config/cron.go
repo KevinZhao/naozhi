@@ -20,8 +20,10 @@ type CronConfig struct {
 	// period/4); TriggerNow bypasses it (docs/rfc/cron-v2-polish.md §3.2).
 	JitterMax string `yaml:"jitter_max,omitempty"`
 	// AutoPauseAfterFailures pauses a job after this many consecutive failed
-	// or timed-out runs; a lost sandbox connection and a transient backend
-	// failure do not count. 0/omitted = default 5; negative disables auto-pause.
+	// or timed-out runs; a sandbox run orphaned by a restart and a transient
+	// backend failure do not count, though this many transient failures
+	// spanning 6h pause the job too. 0/omitted = default 5; negative disables
+	// auto-pause.
 	AutoPauseAfterFailures int `yaml:"auto_pause_after_failures,omitempty"`
 	// Sandbox enables AgentCore cloud-sandbox placement for cron jobs
 	// (docs/rfc/agentcore-cloud-sandbox.md); both fields required. AWS

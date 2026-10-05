@@ -98,7 +98,7 @@ type HubOptions struct {
 	// Scheduler is the optional CronView hook; nil keeps stub revival and
 	// prompt auto-save dormant.
 	Scheduler        CronView
-	AllowedRoot      string
+	AllowedRoot      string // agent tailer's JSONL root: the resolved Claude projects root
 	TrustedProxy     bool
 	WSAuthLimiter    func(ip string) bool
 	WSUpgradeLimiter func(ip string) bool

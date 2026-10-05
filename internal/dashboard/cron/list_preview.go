@@ -81,7 +81,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			Placement:       j.Placement,
 			SideEffects:     j.SideEffects,
 		}
-		v.PausedReason, v.ConsecutiveFailures = j.PausedReason, j.ConsecutiveFailures
+		v.PausedReason, v.ConsecutiveFailures = j.PausedReason, max(j.ConsecutiveFailures, j.TransientFailures)
 		if !j.LastRunAt.IsZero() {
 			v.LastRunAt = j.LastRunAt.UnixMilli()
 		}

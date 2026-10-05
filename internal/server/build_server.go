@@ -9,6 +9,7 @@ import (
 	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
 	"github.com/naozhi/naozhi/internal/discovery"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/accessprofile"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/agentevents"
@@ -106,6 +107,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		agents:        agents,
 		agentCommands: agentCommands,
 		allowedRoot:   opts.AllowedRoot,
+		projectsRoot:  claudefs.ResolvedProjectsRoot(claudeDir),
 		imAccess:      opts.IMAccess,
 		debugMode:     opts.Features.Debug,
 		resolver:      resolver,
@@ -191,8 +193,9 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	hs.costH = buildCostHandlers(opts, router)
 	hs.sessionH = buildSessionHandlers(opts, s, w, retiredStore, agentIDs, tag)
 	hs.agentEventsH = agentevents.New(agentevents.Deps{
-		Router:     router,
-		NodeAccess: s.nodes,
+		Router:       router,
+		NodeAccess:   s.nodes,
+		ProjectsRoot: w.projectsRoot,
 	})
 
 	// StartupCtx lets SIGTERM during startup abort the --version probe.

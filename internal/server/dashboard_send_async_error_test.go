@@ -121,8 +121,8 @@ func TestBroadcastSendError_Scoping(t *testing.T) {
 
 // TestHTTPOrigin_SkipsInformationalErrors pins the M1 rule: the HTTP origin
 // fans a failed turn out to EVERY subscriber of the key, so outcomes the user
-// already knows about (ErrAbortedByUrgent / ErrSessionReset /
-// ErrReconnectedUnknown — session_state corrects the UI) must not become a
+// already knows about (ErrSessionReset / ErrReconnectedUnknown —
+// session_state corrects the UI) must not become a
 // send_error that would tear down a second tab's own optimistic state. The WS
 // origin keeps reporting them because it can address the originator alone.
 // Real failures (spawn error) and a panic must still fan out.
@@ -135,7 +135,6 @@ func TestHTTPOrigin_SkipsInformationalErrors(t *testing.T) {
 
 	d := hub.engine.httpOrigin(key).Begin(context.Background(), turn.TurnInfo{Role: turn.RoleHead})
 	for _, e := range []error{
-		clierr.ErrAbortedByUrgent,
 		fmt.Errorf("passthrough: %w", clierr.ErrSessionReset), // wrapped — errors.Is, not ==
 		clierr.ErrReconnectedUnknown,
 	} {
@@ -173,7 +172,6 @@ func TestWSOrigin_ReportsInformationalErrors(t *testing.T) {
 
 	d := hub.engine.wsOrigin(c, "w1", key).Begin(context.Background(), turn.TurnInfo{Role: turn.RoleHead})
 	for _, e := range []error{
-		clierr.ErrAbortedByUrgent,
 		fmt.Errorf("passthrough: %w", clierr.ErrSessionReset),
 		clierr.ErrReconnectedUnknown,
 	} {

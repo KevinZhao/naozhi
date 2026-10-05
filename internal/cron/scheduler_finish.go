@@ -181,7 +181,7 @@ func (s *Scheduler) deleteJobRuns(jobID string) {
 //   - cron_run_ended WS broadcast
 //   - JobRunCounters bump (under s.tbl.mu, alongside recordTerminalResult)
 //   - auto-pause at s.autoPauseAfter failures, before the gate is released;
-//     pausedAfter is that streak (0 = not paused) for the caller's notice
+//     pausedAfter is that count (0 = not paused) for the caller's notice
 //
 // rc is the run's identity and out how it ended, so a terminal branch spells
 // only its outcome; a new error class is one mapping plus one runOutcome literal.
@@ -330,8 +330,8 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) (pausedAfter int) {
 	// dropped as orphan, or has no store.
 	s.appendLedger(rc, out)
 
-	if jobPersistOK && failureStreakEffect(out.state, out.errClass, out.turnCause) == streakExtend {
-		return s.autoPauseIfDue(rc.jobID)
+	if transient := out.transientBackendFailure(); jobPersistOK && (transient || out.streakEffect() == streakExtend) {
+		return s.autoPauseIfDue(rc.jobID, transient)
 	}
 	return 0
 }
@@ -426,7 +426,7 @@ func (s *Scheduler) emitSyntheticSkipped(jobID string, viaTriggerNow bool, errCl
 
 // JobState is the runtime-mutable terminal-result half of the Job struct: the
 // LastRunAt / LastResult / LastError / LastErrorClass / LastSessionID /
-// RunCounters / ConsecutiveFailures cluster that every finishRun rewrites. It is a SEPARATE type from
+// RunCounters / failure-streak cluster that every finishRun rewrites. It is a SEPARATE type from
 // Job's wire-config fields so the runtime-state field set is enumerated in
 // exactly one place; capture (Job.snapshotResultState) and rollback (restore)
 // both route through it without changing the on-disk JSON shape (#764).
@@ -439,7 +439,7 @@ type JobState struct {
 	LastErrorClass ErrorClass
 	LastSessionID  string
 	Counters       JobRunCounters
-	Streak         int
+	Streaks        failureStreaks
 }
 
 func (p JobState) restore(j *Job) {
@@ -449,7 +449,7 @@ func (p JobState) restore(j *Job) {
 	j.LastErrorClass = p.LastErrorClass
 	j.LastSessionID = p.LastSessionID
 	j.RunCounters = p.Counters
-	j.ConsecutiveFailures = p.Streak
+	j.setStreaks(p.Streaks)
 }
 
 // snapshotResultState captures the runtime-mutable terminal-result state into
@@ -464,7 +464,7 @@ func (j *Job) snapshotResultState() JobState {
 		LastErrorClass: j.LastErrorClass,
 		LastSessionID:  j.LastSessionID,
 		Counters:       j.RunCounters,
-		Streak:         j.ConsecutiveFailures,
+		Streaks:        j.streaks(),
 	}
 }
 
@@ -500,7 +500,8 @@ func (s *Scheduler) recordTerminalResult(jobID string, out runOutcome, endedAt t
 	// does not serialise the dashboard read path on every tick (#1923).
 	c, ok := s.tbl.recordResult(jobID, terminalRecord{
 		endedAt: endedAt, result: result, errMsg: errMsg,
-		sessionID: out.sessionID, errClass: out.errClass, turnCause: out.turnCause, state: out.state,
+		sessionID: out.sessionID, errClass: out.errClass, state: out.state,
+		streak: out.streakEffect(), transient: out.transientBackendFailure(),
 	})
 	if !ok {
 		return result, errMsg, false

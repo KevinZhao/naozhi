@@ -65,7 +65,7 @@ type Scratch struct {
 	Key          string    // full router key: "scratch:<id>:general:<sourceAgentID>"
 	SourceKey    string    // key of the session the user quoted from
 	AgentID      string    // inherited from source
-	Backend      string    // inherited from source (empty = router default)
+	Backend      string    // inherited from source; an empty one resolved to the router default
 	Workspace    string    // inherited from source
 	Quote        string    // sanitized, truncated quote
 	QuoteTrunc   bool      // true when the quote was truncated at MaxScratchQuoteBytes
@@ -236,7 +236,7 @@ func (p *ScratchPool) lastActivity(key string, now time.Time) time.Time {
 type OpenOptions struct {
 	SourceKey string    // required: key of the session being quoted from
 	AgentID   string    // required: source session's agent ID
-	Backend   string    // source session's backend (empty = router default)
+	Backend   string    // source session's backend (empty = what the source resumes on)
 	Workspace string    // source session's workspace
 	BaseOpts  AgentOpts // router-resolved AgentOpts for the source agent (model / extra args / workspace)
 	Quote     string    // the text the user selected
@@ -290,6 +290,14 @@ func (p *ScratchPool) Open(opts OpenOptions) (*Scratch, error) {
 	)
 	if opts.Workspace != "" {
 		cloned.Workspace = opts.Workspace
+	}
+	// A source with no backend (a RegisterForResume placeholder, a legacy
+	// entry) resumes on wrapperFor(""), so the aside pins that same CLI; left
+	// empty, the scratch key would take the access profile's default_backend.
+	// A pending dashboard pick on the source is not mirrored: its spawn
+	// follows at once and stamps the source's backend.
+	if opts.Backend == "" && p.router != nil {
+		_, opts.Backend = p.router.backends.wrapperFor("")
 	}
 	if opts.Backend != "" {
 		cloned.Backend = opts.Backend

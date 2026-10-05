@@ -52,13 +52,14 @@ type userMessage struct {
 }
 
 type event struct {
-	Type      string          `json:"type"`
-	SubType   string          `json:"subtype,omitempty"`
-	SessionID string          `json:"session_id,omitempty"`
-	Result    string          `json:"result,omitempty"`
-	UUID      string          `json:"uuid,omitempty"`
-	IsReplay  bool            `json:"isReplay,omitempty"`
-	Message   json.RawMessage `json:"message,omitempty"`
+	Type           string          `json:"type"`
+	SubType        string          `json:"subtype,omitempty"`
+	SessionID      string          `json:"session_id,omitempty"`
+	Result         string          `json:"result,omitempty"`
+	TerminalReason string          `json:"terminal_reason,omitempty"`
+	UUID           string          `json:"uuid,omitempty"`
+	IsReplay       bool            `json:"isReplay,omitempty"`
+	Message        json.RawMessage `json:"message,omitempty"`
 }
 
 type slot struct {
@@ -79,6 +80,13 @@ type slotResult struct {
 	mergedCount  int
 	mergedWithID uint64
 	headText     string
+	aborted      bool
+}
+
+// isAbortedResult covers both abort shapes: error_during_execution on older
+// CLIs, subtype=success with terminal_reason=aborted_* on newer ones.
+func isAbortedResult(ev event) bool {
+	return ev.SubType == "error_during_execution" || strings.HasPrefix(ev.TerminalReason, "aborted")
 }
 
 // liveCLI hosts a real `claude` child process and the passthrough bookkeeping
@@ -110,7 +118,7 @@ func startLiveCLI(t *testing.T) *liveCLI {
 		"--setting-sources", "",
 		"--dangerously-skip-permissions",
 	)
-	cmd.Env = append(os.Environ())
+	cmd.Env = os.Environ()
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -288,31 +296,8 @@ func (c *liveCLI) handleLine(line []byte) {
 	}
 
 	if ev.Type == "result" {
-		if ev.SubType == "error_during_execution" {
-			// Pending slots that never got replayed AND are not the
-			// priority:"now" triggers themselves were preempted.
-			c.mu.Lock()
-			var victims []*slot
-			kept := c.pending[:0]
-			for _, s := range c.pending {
-				if !s.replayed && s.priority != "now" {
-					victims = append(victims, s)
-				} else {
-					kept = append(kept, s)
-				}
-			}
-			c.pending = kept
-			c.mu.Unlock()
-			for _, s := range victims {
-				if s.canceled {
-					continue
-				}
-				select {
-				case s.errCh <- errors.New("aborted by priority:now preemption"):
-				default:
-				}
-			}
-		}
+		// An aborted result answers only the slots its turn claimed; queued
+		// slots keep waiting for their own replay (validation V10).
 		c.mu.Lock()
 		owners := c.currentTurnSlots
 		c.currentTurnSlots = nil
@@ -407,9 +392,11 @@ func fanout(owners []*slot, ev event) {
 	}
 	head := owners[0]
 	mergedCount := len(owners)
+	aborted := isAbortedResult(ev)
 	deliver(head, &slotResult{
 		text:        ev.Result,
 		mergedCount: mergedCount,
+		aborted:     aborted,
 	})
 	for _, s := range owners[1:] {
 		deliver(s, &slotResult{
@@ -417,6 +404,7 @@ func fanout(owners []*slot, ev event) {
 			mergedCount:  mergedCount,
 			mergedWithID: head.id,
 			headText:     ev.Result,
+			aborted:      aborted,
 		})
 	}
 }
@@ -546,8 +534,9 @@ func TestLive_BurstCoalesces(t *testing.T) {
 }
 
 // TestLive_PriorityNowAborts — verify that priority:"now" aborts an in-flight
-// long task. The preempted long slot should error with "aborted by
-// priority:now preemption"; the urgent slot should succeed with PIVOT.
+// long task. The long slot gets its turn's aborted result; the urgent slot
+// succeeds with PIVOT. A blocking tool call is not killed, so the abort can
+// arrive only once the tool returns (validation V10).
 func TestLive_PriorityNowAborts(t *testing.T) {
 	if os.Getenv("CLAUDE_BIN") == "" && !hasClaude() {
 		t.Skip("no claude")
@@ -565,7 +554,7 @@ func TestLive_PriorityNowAborts(t *testing.T) {
 		t.Fatalf("send urgent: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
 	startLong := time.Now()
@@ -579,15 +568,12 @@ func TestLive_PriorityNowAborts(t *testing.T) {
 	}
 	t.Logf("urgent text=%q", truncate(rUrgent.text, 80))
 
-	// Long slot should have errored with aborted-by-urgent. A successful
-	// completion would mean priority:now failed to preempt.
-	if errLong == nil {
-		t.Errorf("long slot succeeded (text=%q); expected aborted-by-urgent", truncate(rLong.text, 80))
-	} else if !strings.Contains(errLong.Error(), "aborted") {
-		t.Errorf("long err = %v, want aborted-by-urgent", errLong)
+	// A non-aborted result would mean priority:now failed to preempt.
+	if errLong != nil {
+		t.Fatalf("long err = %v, want its turn's aborted result", errLong)
 	}
-	if longDur > 25*time.Second {
-		t.Errorf("long took %s; urgent did not preempt quickly", longDur)
+	if !rLong.aborted {
+		t.Errorf("long result not aborted (text=%q); priority:now did not preempt", truncate(rLong.text, 80))
 	}
 	if !strings.Contains(strings.ToUpper(rUrgent.text), "PIVOT") {
 		t.Errorf("urgent reply missing PIVOT: %q", rUrgent.text)

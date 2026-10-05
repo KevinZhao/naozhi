@@ -90,6 +90,7 @@ import {
 } from './sidebar_project.js';
 import { backendDisplayName, backendDisplayVersion, createNewSession, doCreateSession, keyTailDisplay, saveToken, startWSAuthRetryCountdown } from './auth_modal.js';
 import { fetchAccessProfiles, fetchCLIBackends } from './backend_catalog.js';
+import { pendingBackendID } from './features.js';
 import {
   handleKey,
   sendMessage,
@@ -1040,23 +1041,16 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
   // feishu/slack/discord/weixin), right = cost (formatted per session's
   // cost_unit). originBadgeHtml / backendChipHtml return '' when the
   // session/deployment doesn't warrant a chip so the layout stays clean.
-  const effCLIName = s.cli_name || backendDisplayName(perSession.backends[selection.key]) || serverInfo.defaultCLIName;
-  const effCLIVersion = s.cli_version || backendDisplayVersion(perSession.backends[selection.key]) || serverInfo.defaultCLIVersion;
-  // ui-polish-light-theme D5: the version string is debug info an operator
-  // needs rarely — keep it in the hover title, show just the backend name.
-  // (The settings 关于 section lists versions permanently.)
+  const effCLIName = s.cli_name || backendDisplayName(pendingBackendID(selection.key, selection.node)) || serverInfo.defaultCLIName;
+  const effCLIVersion = s.cli_version || backendDisplayVersion(pendingBackendID(selection.key, selection.node)) || serverInfo.defaultCLIVersion;
+  // The version is debug info: it lives in the hover title (and the settings
+  // 关于 section); the text is just the backend name.
   const cliLabel = headerCLILabelHtml(effCLIName, effCLIVersion);
-  // UI Round 5 R5-3: model display for all backends.
-  //   - claude path: SessionView.model is auto-populated from the
-  //     system/init event ("global.anthropic.claude-opus-4-7[1m]"),
-  //     so it is always present after the first turn lands. Pre-init
-  //     turns (rare, brief window during spawn) and reconnect-without-
-  //     replay falls back to "(模型未配置)".
-  //   - kiro path: SessionView.model echoes cli.backends[].model from
-  //     config; "" if operator left it unset (kiro picks "auto").
-  // We compress noisy claude-style identifiers (e.g.
-  // "global.anthropic.claude-opus-4-7[1m]" → "claude-opus-4.7 1M") for
-  // the dashboard but keep the raw value in `title` for debug.
+  // The model: SessionView.model (claude: from system/init, so empty only
+  // before the first turn; kiro: cli.backends[].model, "" = kiro's auto), or a
+  // pending session's tuning pick. Bedrock ids are compacted for display
+  // ("global.anthropic.claude-opus-4-7[1m]" → "claude-opus-4.7 1m"); the
+  // title keeps the raw value.
   const rawModel = s.model ||
     (!sessionList.sessionsData[sid(selection.key, selection.node)] && perSession.pendingTuning[selection.key]
       ? (perSession.pendingTuning[selection.key].model || '') : '');
@@ -1068,24 +1062,11 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
     ? '<span class="model-label nz-clickable" id="header-model" data-action="tuning-model" title="' + escAttr(rawModel + ' — 点击切换模型') + '">· ' + esc(compactModel) + '</span>'
     : '<span class="model-label model-label-unset nz-clickable" id="header-model" data-action="tuning-model" title="model 未在 system/init 上报；可能仍在 spawn 中 — 点击可指定模型">· (模型未配置)</span>';
   const headerOriginBadge = originBadgeHtml(selection.key);
-  // UI Round 5 R5-2: header backend chip removed. The "kiro v2.3.0" /
-  // "claude-code 2.1.143" cliLabel already names the backend; the
-  // surrounding chip was a duplicate signal that competed for attention
-  // with cost / turn-timer.
+  // No backend chip: cliLabel already names the backend.
   const headerBackendChip = '';
-  // session-run-metrics header cleanup: the per-session cost chip was removed.
-  // The figure came from the CLI's self-reported total_cost_usd, which is
-  // computed against Anthropic list pricing — under Bedrock that diverges
-  // systematically from the actual AWS bill (often reading $0), so it misled
-  // more than it informed. The header now surfaces the run-history overview
-  // (N 轮 · 均 X · 最长 X) instead, injected asynchronously into
-  // #header-runstats by renderSessionRunsPanel.
-  // Multi-Backend RFC §8.3 D6: context usage progress bar driven by the
-  // UI Round 5 R5-7: header no longer renders ctx-bar — the 48×6 px
-  // strip carried low signal (operator can't act on "ctx 12%"), competed
-  // with cost / turn-timer for attention, and at <5% looked identical to
-  // "no data". The server-side SessionView.ContextUsagePercent stays so
-  // doctor / future compact-mode renders can opt in.
+  // No cost chip: the CLI's total_cost_usd misreads a Bedrock bill, so
+  // renderSessionRunsPanel fills #header-runstats with the run history
+  // (N 轮 · 均 X · 最长 X). No context-usage bar either (low signal).
   const ctxBarHtml = '';
   // Multi-Backend RFC §8.3 D7: turn duration timer (kiro real value;
   // claude 0 until estimator lands → cell hidden).
@@ -1379,11 +1360,10 @@ function updateHeaderCLI() {
   // Never rewrite the whole left container — #header-model lives next door.
   const el = document.getElementById('header-cli');
   if (!el) return;
-  // Fallback chain mirrors renderMainShell — see backendDisplayName godoc
-  // for why pending sessions need the sessionBackends lookup before the
-  // global defaultCLIName fallback.
-  const name = s.cli_name || backendDisplayName(perSession.backends[selection.key]) || serverInfo.defaultCLIName;
-  const version = s.cli_version || backendDisplayVersion(perSession.backends[selection.key]) || serverInfo.defaultCLIVersion;
+  // Fallback chain mirrors mainHeaderHtml; pendingBackendID covers a session
+  // the server does not list yet.
+  const name = s.cli_name || backendDisplayName(pendingBackendID(selection.key, selection.node)) || serverInfo.defaultCLIName;
+  const version = s.cli_version || backendDisplayVersion(pendingBackendID(selection.key, selection.node)) || serverInfo.defaultCLIVersion;
   // Same display rule as renderMainShell (D5): version lives in the hover
   // title only, the text is just the backend name.
   const text = name || '';

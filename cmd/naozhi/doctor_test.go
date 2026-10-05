@@ -487,8 +487,8 @@ reverse_nodes:
 	d.renderBackendsSection()
 	got := buf.String()
 
-	if !strings.Contains(got, "Default: kiro") {
-		t.Errorf("Default line should reflect cli.backend=kiro; got %q", got)
+	if !strings.Contains(got, "Default: kiro\n") {
+		t.Errorf("Default line should reflect cli.backend=kiro with no fallback note; got %q", got)
 	}
 	for _, want := range []string{
 		"=== CLI Backends ===",
@@ -510,6 +510,58 @@ reverse_nodes:
 	// claude (no cap required) AND kiro (acp required).
 	if !strings.Contains(got, "claude: no special cap required") {
 		t.Errorf("reverse-node block missing claude no-cap line; got %q", got)
+	}
+}
+
+// TestDoctor_BackendsSection_DefaultFallback pins that the Default line names
+// the backend startup binds, with a note naming the configured id, when the
+// configured default cannot be bound.
+func TestDoctor_BackendsSection_DefaultFallback(t *testing.T) {
+	cases := []struct {
+		name, body, wantLine, wrongLine string
+	}{
+		{
+			name: "cli.backend unregistered",
+			body: "cli:\n  backend: bogus\n  backends:\n    - id: claude\n    - id: kiro\n",
+			wantLine: `Default: claude (cli.backend "bogus" is not a registered backend id; ` +
+				`startup falls back to "claude")`,
+			wrongLine: "Default: bogus",
+		},
+		{
+			name: "cli.backend not listed",
+			body: "cli:\n  backend: kiro\n  backends:\n    - id: claude\n",
+			wantLine: `Default: claude (cli.backend "kiro" is not listed in cli.backends; ` +
+				`startup falls back to "claude")`,
+			wrongLine: "Default: kiro",
+		},
+		{
+			name: "cli.backend unset, first entry unregistered",
+			body: "cli:\n  backends:\n    - id: bogus\n    - id: kiro\n",
+			wantLine: `Default: kiro (cli.backend unset, and the first cli.backends entry "bogus" ` +
+				`is not a registered backend id; startup falls back to "kiro")`,
+			wrongLine: "Default: bogus",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(cfgPath, []byte(tc.body), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			var buf bytes.Buffer
+			d := &doctor{out: &buf, timeout: 2 * time.Second, configPath: cfgPath}
+			d.renderBackendsSection()
+			got := buf.String()
+			if strings.Contains(got, "not loaded") {
+				t.Fatalf("config must load for this case; got:\n%s", got)
+			}
+			if !strings.Contains(got, tc.wantLine+"\n") {
+				t.Errorf("missing %q; got:\n%s", tc.wantLine, got)
+			}
+			if strings.Contains(got, tc.wrongLine) {
+				t.Errorf("Default line names the configured id %q, not the bound one; got:\n%s", tc.wrongLine, got)
+			}
+		})
 	}
 }
 
@@ -693,5 +745,46 @@ func TestHistoryDirForBackend(t *testing.T) {
 				t.Errorf("historyDirForBackend(%q) = %q, want %q", tc.id, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestDoctor_IMAccess grades each configured IM platform's im_access state:
+// any platform open to every sender warns and is named, otherwise the pass
+// line counts each platform's distinct users and admins.
+func TestDoctor_IMAccess(t *testing.T) {
+	t.Parallel()
+	const platforms = "platforms:\n" +
+		"  feishu:\n    app_id: a\n    app_secret: s\n" +
+		"  slack:\n    bot_token: xoxb-test\n" +
+		"  discord:\n    bot_token: d\n"
+	cases := []struct {
+		name, body, level, detail string
+	}{
+		{"no platform", "log:\n  level: info\n", "pass", "no IM platform configured"},
+		{"open platforms", platforms +
+			"im_access:\n  platforms:\n    feishu:\n      allowed_users: [ou_a]\n",
+			"warn", "slack, discord open to every sender (no im_access entry, default_deny off): " +
+				"anyone who can message the bot runs commands on this host; " +
+				"set im_access.platforms.<platform>.allowed_users or im_access.default_deny: true"},
+		{"all guarded", platforms + "im_access:\n  default_deny: true\n  platforms:\n" +
+			"    feishu:\n      allowed_users: [ou_a, \" ou_b\"]\n      admin_users: [ou_b, ou_c]\n" +
+			"    discord:\n      allowed_users: [\"1\", \"2\", \"3\"]\n",
+			"pass", "feishu 3 user(s), 2 admin(s) · slack refused (default_deny) · discord 3 user(s), all admin"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := &doctor{out: &bytes.Buffer{}, configPath: writeDoctorConfig(t, tc.body)}
+			d.checkIMAccess()
+			if f := findingsByCategory(d)["im access"]; f.Level != tc.level || f.Detail != tc.detail {
+				t.Errorf("im access = %+v\nwant level %q detail %q", f, tc.level, tc.detail)
+			}
+		})
+	}
+
+	d := &doctor{out: &bytes.Buffer{}, configPath: filepath.Join(t.TempDir(), "missing.yaml")}
+	d.checkIMAccess()
+	if f := findingsByCategory(d)["im access"]; f.Level != "pass" || f.Detail != "skipped (config not loaded)" {
+		t.Errorf("unloadable config: im access = %+v, want a pass skip", f)
 	}
 }

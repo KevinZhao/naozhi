@@ -44,7 +44,7 @@ func TestSessionsList_CronFilteredOut(t *testing.T) {
 
 	cronRunningKey := sessionkey.CronKey("job-running")
 	cronRunningProc := session.NewTestProcess()
-	cronRunningProc.StateVal = cli.StateRunning
+	cronRunningProc.SetState(cli.StateRunning)
 	srv.router.InjectSession(cronRunningKey, cronRunningProc)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
