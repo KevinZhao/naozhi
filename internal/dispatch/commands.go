@@ -180,9 +180,10 @@ func (d *Dispatcher) interruptChat(platform, chatType, chatID string) sessionvie
 }
 
 // handleUrgentCommand submits text at turn.PriorityNow: the CLI aborts any
-// in-flight turn and runs the urgent message next; pending messages are
-// failed with ErrAbortedByUrgent. Protocols without passthrough (ACP) fall
-// back to InterruptViaControl + Send. turn.Parse never yields an empty text.
+// in-flight turn and runs the urgent message next; messages already queued
+// stay queued and get their own answers afterwards. Protocols without
+// passthrough (ACP) fall back to InterruptViaControl + Send. turn.Parse never
+// yields an empty text.
 func (d *Dispatcher) handleUrgentCommand(ctx context.Context, msg platform.IncomingMessage, text string, log *slog.Logger) {
 	// Resolve via KeyResolver so /urgent gets the same project-bound opts as
 	// the main IM path (docs/rfc/key-resolver.md §2.1 #3).
