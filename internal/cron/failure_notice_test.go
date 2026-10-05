@@ -107,15 +107,16 @@ func TestFailureNoticeBody_TurnCause(t *testing.T) {
 
 // TestFailureNoticeBody_ContextTooLongByMode: a context-too-long failure of a
 // job that keeps its context names the dashboard toggle, plus for an IM job the
-// recreate route, placed in the creating chat when the notice goes elsewhere; a
-// fresh job keeps the plain sentence, and other causes are unaffected.
+// /cron mode command with the job's id, placed in the creating chat when the
+// notice goes elsewhere; a fresh job keeps the plain sentence, and other causes
+// are unaffected.
 func TestFailureNoticeBody_ContextTooLongByMode(t *testing.T) {
 	t.Parallel()
 	const (
 		runID   = "1a2b3c4d5e6f7a8b"
 		persist = "执行失败（对话上下文已超出模型上限）；该任务保留上下文，之后每次执行都会因此失败，可在控制台编辑任务勾选“每次全新上下文”"
 	)
-	im := jobSnapshot{platName: "feishu", chatID: "chat-1"}
+	im := jobSnapshot{jobID: "job-7", platName: "feishu", chatID: "chat-1"}
 	source := NotifyTarget{Platform: "feishu", ChatID: "chat-1"}
 	other := NotifyTarget{Platform: "feishu", ChatID: "chat-2"}
 	cases := []struct {
@@ -131,11 +132,11 @@ func TestFailureNoticeBody_ContextTooLongByMode(t *testing.T) {
 		{"persistent without source platform", jobSnapshot{}, other, TurnCauseContextTooLong, persist},
 		{"persistent without source chat", jobSnapshot{platName: "feishu"}, other, TurnCauseContextTooLong, persist},
 		{"persistent IM, source chat", im, source, TurnCauseContextTooLong,
-			persist + "，或删除后不带 --keep-context 重新创建"},
+			persist + "，或发送 /cron mode job-7 fresh 改为每次从新会话开始"},
 		{"persistent IM, other chat", im, other, TurnCauseContextTooLong,
-			persist + "，或在创建该任务的会话删除后不带 --keep-context 重新创建"},
+			persist + "，或在创建该任务的会话发送 /cron mode job-7 fresh"},
 		{"persistent IM, other platform", im, NotifyTarget{Platform: "slack", ChatID: "chat-1"}, TurnCauseContextTooLong,
-			persist + "，或在创建该任务的会话删除后不带 --keep-context 重新创建"},
+			persist + "，或在创建该任务的会话发送 /cron mode job-7 fresh"},
 		{"persistent IM, other cause", im, source, TurnCauseMaxTurns,
 			"执行未完成（已达到最大执行步数），请检查执行历史"},
 	}
@@ -172,11 +173,11 @@ func TestExecuteOpt_ContextTooLongNoticeByMode(t *testing.T) {
 		suffix     func(id string) string
 	}{
 		{"fresh IM", "feishu", "", true, 0, plain, nil},
-		{"persistent IM", "feishu", "", false, 0, persist + "，或删除后不带 --keep-context 重新创建", nil},
+		{"persistent IM", "feishu", "", false, 0, persist + "，或发送 /cron mode <id> fresh 改为每次从新会话开始", nil},
 		{"persistent IM, notify override", "feishu", "chat-2", false, 0,
-			persist + "，或在创建该任务的会话删除后不带 --keep-context 重新创建", nil},
+			persist + "，或在创建该任务的会话发送 /cron mode <id> fresh", nil},
 		{"persistent dashboard", "dashboard", "", false, 0, persist, nil},
-		{"persistent IM, auto-paused", "feishu", "", false, 1, persist + "，或删除后不带 --keep-context 重新创建",
+		{"persistent IM, auto-paused", "feishu", "", false, 1, persist + "，或发送 /cron mode <id> fresh 改为每次从新会话开始",
 			func(id string) string {
 				return "；已连续失败 1 次，任务已自动暂停，修复后发送 /cron resume " + id + " 恢复"
 			}},
@@ -194,8 +195,9 @@ func TestExecuteOpt_ContextTooLongNoticeByMode(t *testing.T) {
 			r.set(nil, &TurnFailedError{Cause: TurnCauseContextTooLong})
 			runN(s, id, 1)
 			got := ns.noticesAfter(s)
-			if len(got) != 1 || !strings.HasPrefix(got[0], "[Cron ping] "+tc.want+" · run ") {
-				t.Fatalf("notices = %q, want one starting %q", got, "[Cron ping] "+tc.want+" · run ")
+			want := "[Cron ping] " + strings.ReplaceAll(tc.want, "<id>", id) + " · run "
+			if len(got) != 1 || !strings.HasPrefix(got[0], want) {
+				t.Fatalf("notices = %q, want one starting %q", got, want)
 			}
 			if tc.suffix != nil && !strings.HasSuffix(got[0], tc.suffix(id)) {
 				t.Errorf("notice = %q, want it to end %q", got[0], tc.suffix(id))

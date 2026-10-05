@@ -128,7 +128,8 @@ type updateResult struct {
 	snap    marshaledJobs
 }
 
-// update applies upd to job id. Every failure — the sandbox+work_dir guard on
+// update applies upd to job id, or with upd.InChat to the job findByPrefixLocked
+// resolves id to in that chat. Every failure — the sandbox+work_dir guard on
 // the effective post-patch job (agentcore §4.4) or the persist — restores the
 // pre-update job by value under the same hold, including the Notify pointer
 // applyTo replaces. The schedule is not applyTo's: it is written here, and on
@@ -138,8 +139,13 @@ func (t *jobTable) update(id string, upd JobUpdate) (updateResult, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	j, ok := t.jobs[id]
-	if !ok {
+	j := t.jobs[id]
+	if c := upd.InChat; c != nil {
+		var err error
+		if j, err = t.findByPrefixLocked(id, c.Platform, c.ChatID); err != nil {
+			return updateResult{}, err
+		}
+	} else if j == nil {
 		return updateResult{}, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 	}
 	preUpdate := *j

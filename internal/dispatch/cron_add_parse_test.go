@@ -70,15 +70,16 @@ func TestParseCronAdd_RejectsUnknownOrBareFlag(t *testing.T) {
 }
 
 // IM jobs default to a fresh context; --keep-context flips the request, and
-// the success reply names the mode the job actually got.
+// the success reply names the mode the job actually got and the /cron mode
+// command for the other one, never recreating the job.
 func TestHandleCronAdd_ContextMode(t *testing.T) {
 	cases := []struct {
 		args      string
 		wantFresh bool
 		wantNote  string
 	}{
-		{`"@every 30m" x`, true, "需要延续上次的上下文，请创建时加 --keep-context"},
-		{`--keep-context "@every 30m" x`, false, "每次执行延续同一会话的上下文"},
+		{`"@every 30m" x`, true, "每次执行都从新会话开始；需要延续上次的上下文，发送 /cron mode fake-id keep"},
+		{`--keep-context "@every 30m" x`, false, "每次执行延续同一会话的上下文；需要每次从新会话开始，发送 /cron mode fake-id fresh"},
 	}
 	for _, c := range cases {
 		fake := &fakeCronScheduler{}
