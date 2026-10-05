@@ -135,16 +135,15 @@ func legacyMerge(agents map[string]session.AgentOpts, binding session.ProjectBin
 	opts := agents[agentID]
 	if binding.Bound {
 		if agentID == "general" {
+			// A planner is built from the project alone, never from
+			// agents["general"] (#3300); the prompt rides in SystemPrompt,
+			// never in ExtraArgs (#2493).
 			key = "project:" + binding.Name + ":planner"
-			opts.Exempt = true
-			opts.Workspace = binding.WorkspaceDir
-			if binding.PlannerModel != "" {
-				opts.Model = binding.PlannerModel
-			}
-			if binding.PlannerPrompt != "" {
-				// #2493: prompt layers into SystemPrompt (agent prompt
-				// first), never into ExtraArgs.
-				opts.SystemPrompt = session.JoinSystemPrompts(opts.SystemPrompt, binding.PlannerPrompt)
+			opts = session.AgentOpts{
+				Exempt:       true,
+				Workspace:    binding.WorkspaceDir,
+				Model:        binding.PlannerModel,
+				SystemPrompt: binding.PlannerPrompt,
 			}
 		} else {
 			key = session.SessionKey(platform, chatType, chatID, agentID)

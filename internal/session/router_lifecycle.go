@@ -576,13 +576,19 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (_ *M
 	// Spawn must still decrement pendingSpawns or the router permanently
 	// refuses new sessions with ErrMaxProcs. A failed Init handshake is
 	// recorded before the marker ends, so the waiters it wakes are paused.
-	defer r.ss.Update(func(tx sessTx) {
-		res.slot.releaseIn(tx)
-		if countsAsStartupFailure(ctx, err) {
-			noteSpawnFailure(tx, key, err, time.Now())
+	defer func() {
+		listed := false
+		r.ss.Update(func(tx sessTx) {
+			res.slot.releaseIn(tx)
+			if countsAsStartupFailure(ctx, err) {
+				listed = noteSpawnFailure(tx, key, err, time.Now())
+			}
+			tx.Ext().spawns.EndSpawn(key, res.doneCh)
+		})
+		if listed {
+			r.notifyChange()
 		}
-		tx.Ext().spawns.EndSpawn(key, res.doneCh)
-	})
+	}()
 
 	if res.wrapper == nil {
 		return nil, fmt.Errorf("spawn process (backend %q): %w", res.backendID, ErrNoCLIWrapper)
@@ -661,6 +667,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (_ *M
 			hist.userTurns, overrides,
 		)
 		s.startupFails.Store(max(snap.startupFails, failedSpawns.Streak))
+		s.setCodeChanges(snap.codeChanges)
 		s.costMu.Lock()
 		s.spent = snap.spent
 		costBase.applyLocked(s)
@@ -785,6 +792,7 @@ func (r *Router) installFreshSession(tx sessTx,
 		n.SetOnTurnDone(func() { r.notifyChange() })
 	}
 	bookUnownedResults(s, proc)
+	bookCodeChanges(s, proc, func() { r.ss.Update(markChanged); r.notifyChange() })
 	bookProcessEnd(s, proc, r.hist.claudeDir)
 	if len(snapshot) > 0 {
 		proc.InjectHistory(snapshot)

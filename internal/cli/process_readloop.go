@@ -558,10 +558,11 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	// legacy eventCh delivery. We still log to ring.EventLog so dashboard
 	// sees the turn-complete event.
 	if ev.Type == "result" && p.caps.Replay {
-		// error_during_execution signals the CLI aborted the turn, e.g. a
-		// priority:"now" preempted it: pending slots it never replayed were
-		// dropped, so their callers get clierr.ErrAbortedByUrgent. Before any
-		// output it is a CLI failing to start, and cli_exited answers them.
+		// error_during_execution signals the CLI aborted the turn. Only a
+		// priority:"now" preemption drops the slots it never replayed, whose
+		// callers get clierr.ErrAbortedByUrgent; after a /stop or another
+		// abort they stay queued for their own turns. Before any output it is
+		// a CLI failing to start, and cli_exited answers them.
 		if ev.SubType == "error_during_execution" && p.sawOutput.Load() {
 			victims := p.reapAbortedPreempted()
 			fireAbortErrors(victims)
@@ -597,6 +598,11 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 		p.setLiveVersion(ev.ClaudeCodeVersion)
 	}
 	p.notifyLinker(ev, nowMS, isSystemInit)
+	if ev.CodeChange != nil {
+		if fn := p.onCodeChange.Load(); fn != nil {
+			(*fn)(*ev.CodeChange)
+		}
+	}
 
 	// Always log to ring.EventLog so dashboard subscribers see events
 	// even when no Send() is active (e.g., after service restart
@@ -624,6 +630,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 		// claimed the result — and AFTER the turn ends, so whoever the latch wakes
 		// finds the process Ready. See resolveResult for both rules.
 		p.adopted.resolveResult(ev)
+		// Queued after Ready: a Send that claims in between drops it by RecvAt.
 	} else if ev.Type == "result" && p.caps.Replay {
 		// After eventCh, so a Send claiming Ready drains this result.
 		if p.deliverEvent(ev, now, log) {

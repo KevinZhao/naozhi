@@ -145,6 +145,7 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 		Model: s.Model(),
 	}
 	snap.DeathReason = loadAtomicString(&s.deathReason)
+	snap.CodeChanges = s.CodeChanges()
 
 	proc := s.loadProcess()
 	sessCost := loadTotalCost(&s.totalCost)
