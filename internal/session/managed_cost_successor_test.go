@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -149,28 +150,41 @@ func TestSuccessorChain_ReachesTheLiveSession(t *testing.T) {
 }
 
 // Bookings racing the link each land on the new session exactly once,
-// whether before the link (in the catch-up) or after it (forwarded).
+// whether before the link (in the catch-up) or after it (forwarded). The
+// bookers keep costMu contended across the link; a link split from its
+// catch-up loses the bookings between the two, a window only many rounds hit.
 func TestLinkSuccessor_ConcurrentBookingsLandOnce(t *testing.T) {
-	const n = 400
-	for round := range 20 {
+	const bookers, after = 8, 20
+	credit := costledger.Increment{Metered: map[costledger.Unit]float64{costledger.UnitCredits: 1}}
+	for round := range 300 {
 		old, fresh := &ManagedSession{key: "old"}, &ManagedSession{key: "new"}
 		snap := old.CostTotals()
+		var linked atomic.Bool
+		var booked atomic.Int64
 		var wg sync.WaitGroup
 		start := make(chan struct{})
-		for i := range n {
+		for range bookers {
 			wg.Go(func() {
 				<-start
-				old.addSpent(1, costledger.Increment{Metered: map[costledger.Unit]float64{costledger.UnitCredits: 1}})
-				if i == n/2 {
-					linkSuccessor(old, fresh, snap)
+				for n := 0; n < after; {
+					old.addSpent(1, credit)
+					booked.Add(1)
+					if linked.Load() {
+						n++
+					}
 				}
 			})
 		}
+		wg.Go(func() {
+			<-start
+			linkSuccessor(old, fresh, snap)
+			linked.Store(true)
+		})
 		close(start)
 		wg.Wait()
-		tot := fresh.CostTotals()
-		if tot.USD != n || tot.Metered[costledger.UnitCredits] != n {
-			t.Fatalf("round %d: new session's totals = %+v, want %d USD and credits", round, tot, n)
+		want := float64(booked.Load())
+		if tot := fresh.CostTotals(); tot.USD != want || tot.Metered[costledger.UnitCredits] != want {
+			t.Fatalf("round %d: new session's totals = %+v, want %v USD and credits", round, tot, want)
 		}
 	}
 }

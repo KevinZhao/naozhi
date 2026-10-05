@@ -12,9 +12,9 @@ import (
 // fields are written inside transactions by sibling paths (RegisterCronStubWithChain,
 // evictOldest, the spawn itself), so reading them outside one races those
 // writers.
-func snapshotOldSession(_ sessView, old *ManagedSession) ([]string, float64, float64, int64, sessionOverrides) {
+func snapshotOldSession(_ sessView, old *ManagedSession) ([]string, float64, int64, sessionOverrides) {
 	if old == nil {
-		return nil, 0, 0, 0, sessionOverrides{}
+		return nil, 0, 0, sessionOverrides{}
 	}
 	var oldPrevIDs []string
 	if len(old.prevSessionIDs) > 0 {
@@ -34,16 +34,11 @@ func snapshotOldSession(_ sessView, old *ManagedSession) ([]string, float64, flo
 	// Carry the original creation timestamp so the session keeps its sidebar
 	// position; installFreshSession stamps now when zero.
 	oldCreatedAt := old.createdAt.Load()
-	// costSpent MUST carry across the replacement (same logical session).
-	// lastCumulativeCost is NOT carried: the new CLI counts from 0, or from the
-	// cost-state a resume restores (resumed_cost.go). Spend the old process
-	// books after this read reaches the new session through linkSuccessor.
-	oldCostSpent := loadTotalCost(&old.costSpent)
 	// Overrides come from the same object as history/cost/createdAt. They are
 	// never re-read through the key's entry, which may be swapped or removed
 	// during the unlocked part of a spawn, pairing one session's history with
 	// another's tuning; completeSpawn re-reads them from old itself.
-	return oldPrevIDs, oldTotalCost, oldCostSpent, oldCreatedAt, snapshotOverrides(old)
+	return oldPrevIDs, oldTotalCost, oldCreatedAt, snapshotOverrides(old)
 }
 
 // snapshotOverrides reads old's operator-owned overrides. Nil-safe; call it
@@ -66,11 +61,13 @@ type respawnSnapshot struct {
 	sid       string // the ID being replaced; installFreshSession clears idToKey[sid] on rotation
 	prevIDs   []string
 	cost      float64 // the replaced process's cumulative cost (loadTotalCost fallback)
-	costSpent float64
 	createdAt int64
 	overrides sessionOverrides
-	// spent is the monotonic metering total, which follows the logical
-	// session across process replacement like costSpent.
+	// spent is the monotonic spend (USD is costSpent), which follows the
+	// logical session across process replacement. lastCumulativeCost does
+	// not: the new CLI counts from 0, or from the cost-state a resume
+	// restores (resumed_cost.go). Spend the old process books after this
+	// read reaches the new session through linkSuccessor.
 	spent costledger.Totals
 	// startupFails is the startup-failure streak the replacement inherits.
 	startupFails int32
@@ -80,13 +77,10 @@ type respawnSnapshot struct {
 
 func snapshotRespawn(v sessView, old *ManagedSession) respawnSnapshot {
 	var snap respawnSnapshot
-	snap.prevIDs, snap.cost, snap.costSpent, snap.createdAt, snap.overrides = snapshotOldSession(v, old)
+	snap.prevIDs, snap.cost, snap.createdAt, snap.overrides = snapshotOldSession(v, old)
 	if old != nil {
 		snap.sid = old.getSessionID()
 		snap.spent = old.CostTotals()
-		// One costMu reading for both, so linkSuccessor's catch-up differences
-		// against exactly what the new session starts from.
-		snap.costSpent = snap.spent.USD
 		snap.startupFails = startupFailureOf(old).streak
 		snap.codeChanges = old.CodeChanges()
 	}

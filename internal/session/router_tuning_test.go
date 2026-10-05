@@ -430,7 +430,7 @@ func TestInstallFreshSessionLocked_InheritsTuning(t *testing.T) {
 		// the map — so swap the map entry for an unrelated stub in between (what
 		// RegisterForResume / Remove can do during the unlocked history copy) and
 		// require the ORIGINAL values to win.
-		_, _, _, _, ov := snapshotOldSession(sessView{}, old)
+		_, _, _, ov := snapshotOldSession(sessView{}, old)
 		stub = newSessionWithID(key, "sess-stub")
 		stub.SetTuningModel("stub-model")
 		stub.SetUserLabel("stub label")

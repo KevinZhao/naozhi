@@ -664,7 +664,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (_ *M
 		oldHistory, prevIDs = hist.entries, hist.prevIDs
 		s = r.installFreshSession(tx,
 			key, proc, res.workspace, res.backendID, res.accessProfileID, res.wrapper, res.resumeID,
-			oldHistory, respawnChain(prevIDs, res.rejectedResumeID, ""), snap.cost, snap.costSpent, snap.createdAt, res.opts.Exempt, snap.sid,
+			oldHistory, respawnChain(prevIDs, res.rejectedResumeID, ""), snap.cost, snap.spent.USD, snap.createdAt, res.opts.Exempt, snap.sid,
 			hist.userTurns, overrides,
 		)
 		s.startupFails.Store(max(snap.startupFails, failedSpawns.Streak))
