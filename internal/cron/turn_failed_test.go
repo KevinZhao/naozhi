@@ -59,9 +59,9 @@ func TestClassifyExecError_TurnFailed(t *testing.T) {
 
 // TestExecuteOpt_TurnFailedIsAFailedRun drives a whole run whose Send reports
 // a failed turn: the record is failed/turn_failed with the detail in its error
-// message and the session its result frame named, the failure streak advances,
-// and the IM notice names the cause the error carries without the raw backend
-// text or RPC code.
+// message and the session its result frame named, the overloaded backend's
+// failure leaves the streak alone, and the IM notice names the cause the error
+// carries without the raw backend text or RPC code.
 func TestExecuteOpt_TurnFailedIsAFailedRun(t *testing.T) {
 	s, r, ns, id := newAutoPauseScheduler(t, 0, "feishu")
 	rec := &recordingBroadcaster{}
@@ -82,8 +82,8 @@ func TestExecuteOpt_TurnFailedIsAFailedRun(t *testing.T) {
 	if j.LastErrorClass != ErrClassTurnFailed {
 		t.Errorf("LastErrorClass = %q, want turn_failed", j.LastErrorClass)
 	}
-	if j.ConsecutiveFailures != 1 {
-		t.Errorf("ConsecutiveFailures = %d, want 1: a failed turn counts toward auto-pause", j.ConsecutiveFailures)
+	if j.ConsecutiveFailures != 0 || j.RunCounters.Failed != 1 {
+		t.Errorf("ConsecutiveFailures = %d, failed = %d, want 0 and 1: a transient backend failure is a failed run outside the streak", j.ConsecutiveFailures, j.RunCounters.Failed)
 	}
 	if !strings.Contains(j.LastError, "turn failed") || !strings.Contains(j.LastError, "-32001") {
 		t.Errorf("LastError = %q, want the turn-failure detail for run history", j.LastError)
@@ -293,5 +293,45 @@ func TestAdoption_FailedTurnThatPausesAnnouncesIt(t *testing.T) {
 	want := "执行未完成（已达到最大执行步数），请检查执行历史 · run " + runID[:8] + "；已连续失败 1 次，任务已自动暂停"
 	if got := ns.noticesAfter(s); len(got) != 1 || !strings.Contains(got[0], want) {
 		t.Errorf("notices = %q, want one containing %q", got, want)
+	}
+}
+
+// TestAdoption_TransientTurnFailureLeavesStreak: an adopted turn failed by a
+// transient backend cause is recorded failed, leaves the streak alone and so
+// neither pauses the job nor announces anything.
+func TestAdoption_TransientTurnFailureLeavesStreak(t *testing.T) {
+	t.Parallel()
+	router := &adoptingRouter{verdicts: map[string]AdoptVerdict{}, runs: map[string]*fakeInFlightRun{}}
+	s, jobID, runID, _ := seedMarkedRun(t, router, 0)
+	s.autoPauseAfter = 2
+	ns := &recordingNotifySender{}
+	s.configMapsPtr.Store(&cronConfigMaps{notifySender: ns})
+	s.editJobForTest(t, jobID, func(j *Job) {
+		j.NotifyPlatform, j.NotifyChatID = "feishu", "chat-1"
+		j.ConsecutiveFailures = 1
+	})
+	key := "cron:" + jobID
+	run := &fakeInFlightRun{
+		outcome: AdoptedRunOutcome{
+			Completed: true,
+			TurnErr:   fmt.Errorf("%w (overloaded)", &TurnFailedError{Cause: TurnCauseBackendOverloaded}),
+		},
+		ready: make(chan struct{}),
+	}
+	router.verdicts[key] = AdoptLive
+	router.runs[key] = run
+
+	s.reconcileRunInflight()
+	close(run.ready)
+	if got := waitRun(t, s, jobID, runID); got.State != RunStateFailed || got.ErrorClass != ErrClassTurnFailed {
+		t.Errorf("got (%s, %s), want (failed, turn_failed)", got.State, got.ErrorClass)
+	}
+	s.gcWG.Wait()
+
+	if j := s.jobForTest(t, jobID); j.Paused || j.ConsecutiveFailures != 1 {
+		t.Errorf("paused=%v streak=%d, want active with streak 1", j.Paused, j.ConsecutiveFailures)
+	}
+	if got := ns.noticesAfter(s); len(got) != 0 {
+		t.Errorf("notices = %q, want none", got)
 	}
 }

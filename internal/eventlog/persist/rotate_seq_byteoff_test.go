@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/naozhi/naozhi/internal/eventlog/schema"
 )
@@ -42,14 +41,27 @@ func TestSpliceLog_PreservesSeqViaByteOffCorrelation(t *testing.T) {
 		return Entry{JSON: buf, TimeMS: int64(1700000000000 + i)}
 	}
 
-	for i := 0; i < DefaultKeepRecords+50; i++ {
-		sink([]Entry{mkEntry(i)}, false)
+	// Batched so the queued batch count stays far below ChannelBuffer:
+	// accept() drops a batch on a full channel, and too few records on disk
+	// leave rotate with nothing to cut.
+	const total = DefaultKeepRecords + 100
+	const batchSize = 50
+	for start := 0; start < total; start += batchSize {
+		batch := make([]Entry, 0, batchSize)
+		for i := start; i < start+batchSize && i < total; i++ {
+			batch = append(batch, mkEntry(i))
+		}
+		sink(batch, false)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
 	defer cancel()
 	if err := p.Flush(ctx); err != nil {
 		t.Fatalf("flush: %v", err)
+	}
+	if st := p.Stats(); st.Dropped != 0 || st.Written != total {
+		t.Fatalf("stats: written=%d dropped=%d, want written=%d dropped=0",
+			st.Written, st.Dropped, total)
 	}
 
 	logPath := LogPath(dir, "k")
@@ -82,6 +94,13 @@ func TestSpliceLog_PreservesSeqViaByteOffCorrelation(t *testing.T) {
 	if idxEntries[0].ByteOff != 0 || idxEntries[0].Seq != 0 {
 		t.Errorf("idx[0] should be header (ByteOff=0, Seq=0), got ByteOff=%d Seq=%d",
 			idxEntries[0].ByteOff, idxEntries[0].Seq)
+	}
+	// Without a rotate the first record (Seq=1) is still on disk and every
+	// correlation below holds trivially.
+	records := readAllRecords(t, logPath)
+	if len(records) < 2 || records[1].Seq <= 1 || len(records)-1 >= total {
+		t.Fatalf("no rotate cut the head of the log: %d records on disk, want fewer than %d starting past Seq 1",
+			len(records)-1, total)
 	}
 
 	// Build a ByteOff → Seq map by scanning the on-disk log frame-by-frame.

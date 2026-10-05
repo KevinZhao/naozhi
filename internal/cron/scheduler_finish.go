@@ -258,7 +258,7 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) (pausedAfter int) {
 	}()
 	jobPersistOK := false
 	if !out.skipPersist {
-		persistedResult, persistedErrMsg, jobPersistOK = s.recordTerminalResult(rc.jobID, out.result, out.errMsg, out.sessionID, out.errClass, out.state, endedAt)
+		persistedResult, persistedErrMsg, jobPersistOK = s.recordTerminalResult(rc.jobID, out, endedAt)
 	} else {
 		persistedResult = sanitiseRunResult(persistedResult)
 		persistedErrMsg = sanitiseRunErrMsg(persistedErrMsg)
@@ -330,7 +330,7 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) (pausedAfter int) {
 	// dropped as orphan, or has no store.
 	s.appendLedger(rc, out)
 
-	if jobPersistOK && extendsFailureStreak(out.state) {
+	if jobPersistOK && failureStreakEffect(out.state, out.errClass, out.turnCause) == streakExtend {
 		return s.autoPauseIfDue(rc.jobID)
 	}
 	return 0
@@ -468,8 +468,8 @@ func (j *Job) snapshotResultState() JobState {
 	}
 }
 
-// recordTerminalResult persists the terminal result (LastResult / LastError /
-// LastErrorClass / Counters) for non-skipPersist paths and returns the
+// recordTerminalResult persists out's terminal result (LastResult / LastError /
+// LastErrorClass / Counters / streak) for non-skipPersist paths and returns the
 // post-sanitised (result, errMsg) pair so finishRun can reuse byte-identical
 // content in the CronRun history record.
 //
@@ -477,7 +477,8 @@ func (j *Job) snapshotResultState() JobState {
 // when marshal/persist failed and the Job fields were rolled back in-memory.
 // In both cases the caller MUST also skip the CronRun history record so the
 // dashboard list (Job fields) and timeline (CronRun) never diverge.
-func (s *Scheduler) recordTerminalResult(jobID string, result, errMsg, sessionID string, errClass ErrorClass, state RunState, endedAt time.Time) (string, string, bool) {
+func (s *Scheduler) recordTerminalResult(jobID string, out runOutcome, endedAt time.Time) (string, string, bool) {
+	result, errMsg := out.result, out.errMsg
 	// truncateWithSuffix is the single source of truth for the rune trim +
 	// …[truncated] suffix; this path and sanitiseRunResult must stay
 	// byte-identical.
@@ -499,7 +500,7 @@ func (s *Scheduler) recordTerminalResult(jobID string, result, errMsg, sessionID
 	// does not serialise the dashboard read path on every tick (#1923).
 	c, ok := s.tbl.recordResult(jobID, terminalRecord{
 		endedAt: endedAt, result: result, errMsg: errMsg,
-		sessionID: sessionID, errClass: errClass, state: state,
+		sessionID: out.sessionID, errClass: out.errClass, turnCause: out.turnCause, state: out.state,
 	})
 	if !ok {
 		return result, errMsg, false

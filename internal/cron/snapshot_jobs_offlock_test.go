@@ -214,7 +214,7 @@ func TestRecordTerminalResult_MarshalRunsOffLock(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		s.recordTerminalResult(j.ID, "result", "", "sess", ErrClassNone, RunStateSucceeded, time.Now())
+		s.recordTerminalResult(j.ID, runOutcome{result: "result", sessionID: "sess", state: RunStateSucceeded}, time.Now())
 	}()
 
 	// Wait until the slow marshaler is mid-encode.
