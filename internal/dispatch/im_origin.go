@@ -142,11 +142,12 @@ func (o *imOrigin) awaitAck() bool {
 }
 
 // Dropped clears the ⏳ of a request that will never get a turn (#1945,
-// #2013), after an add still in flight so the ⏳ cannot land behind it. A
-// removed key also gets a notice (#3297): the user did not ask for the
-// removal, and a platform without reactions promised to answer. It is
-// rate-limited per chat on the key (chats can share a planner key), so a
-// chat's queued messages share one.
+// #2013). Only queued requests are dropped, and their add is synchronous;
+// awaitAck guards a dropped request that ran startAck, so its ⏳ cannot land
+// behind the clear. A removed key also gets a notice (#3297): the user did
+// not ask for the removal, and a platform without reactions promised to
+// answer. It is rate-limited per chat on the key (chats can share a planner
+// key), so a chat's queued messages share one.
 func (o *imOrigin) Dropped(ctx context.Context, why turn.DropReason) {
 	o.awaitAck()
 	o.d.clearQueuedReaction(ctx, o.msg.Platform, o.msg.MessageID, o.lg)

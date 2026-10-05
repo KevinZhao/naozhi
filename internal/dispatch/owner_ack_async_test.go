@@ -79,3 +79,28 @@ func TestDropped_WaitsForAckInFlight(t *testing.T) {
 		t.Errorf("events = %v, want %v", got, want)
 	}
 }
+
+// TestAdmitted_AckOutlivesInboundCtx: a detached request's inbound ctx can
+// end once Submit returns; its ⏳ add must still land.
+func TestAdmitted_AckOutlivesInboundCtx(t *testing.T) {
+	t.Parallel()
+	p := &ackOrderPlatform{addGate: make(chan struct{})}
+	d := newTestDispatcher(&fakePlatform{})
+	d.platforms = map[string]platform.Platform{"fake": p}
+	ctx, cancel := context.WithCancel(context.Background())
+	o := d.newIMOrigin(reactorMsg("m1", "hi"), slog.Default(), reactorKey, "general", session.AgentOpts{}, imMessage, 2, 0)
+	o.Admitted(ctx, turn.AckDetached)
+	cancel()
+	select {
+	case <-o.ackDone:
+		t.Fatal("the ⏳ add ended with the inbound ctx")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(p.addGate)
+	if !o.awaitAck() {
+		t.Error("awaitAck = false: the ⏳ add died with the inbound ctx")
+	}
+	if got, want := p.events(), []string{"add:m1"}; !slices.Equal(got, want) {
+		t.Errorf("events = %v, want %v", got, want)
+	}
+}
