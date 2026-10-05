@@ -9,8 +9,8 @@ import (
 )
 
 // reactionAckTimeout bounds how long AddReaction/RemoveReaction can block:
-// reactions are UX sugar on the IM hot path, so a slow platform API falls back
-// to the text notice rather than stalling the inbound handler.
+// reactions are UX sugar, so a slow platform API falls back to the text notice
+// rather than stalling the inbound handler or a turn's clear.
 const reactionAckTimeout = 3 * time.Second
 
 // ackQueuedWithReaction signals "message queued" by adding a reaction on the
@@ -44,7 +44,13 @@ func (d *Dispatcher) ackQueuedWithReaction(ctx context.Context, msg platform.Inc
 	rctx, cancel := context.WithTimeout(ctx, reactionAckTimeout)
 	defer cancel()
 	if err := reactor.AddReaction(rctx, msg.MessageID, platform.ReactionQueued); err != nil {
-		useLg.Debug("ack queued reaction skipped", "reason", "api_error", "err", err)
+		// Info once per platform so a persistent failure (a missing scope) is
+		// findable at the default level without logging every message.
+		if _, logged := d.reactionFailLogged.LoadOrStore(msg.Platform, struct{}{}); !logged {
+			useLg.Info("ack reaction failed; later failures on this platform log at debug", "platform", msg.Platform, "err", err)
+		} else {
+			useLg.Debug("ack queued reaction skipped", "reason", "api_error", "err", err)
+		}
 		return false
 	}
 	return true
