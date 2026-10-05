@@ -9,17 +9,25 @@ import (
 	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
-// TestNew_ProjectsRoot: the server-injected root wins (it is the WS
-// tailer's root too), and without one New falls back to the resolved
-// default ~/.claude/projects.
+// claudeProjectsAllowedRoot is the resolved default ~/.claude/projects, the
+// root the handler tests serve transcripts from.
+func claudeProjectsAllowedRoot() string {
+	return claudefs.ResolvedProjectsRoot(claudefs.DefaultDir())
+}
+
+// TestNew_ProjectsRoot: the server-injected root (the WS tailer's root too)
+// is the one New uses, and without one there is no default to fall back to,
+// so agent_events fails closed instead of deriving a second root.
 func TestNew_ProjectsRoot(t *testing.T) {
 	t.Parallel()
 	if got := New(Deps{ProjectsRoot: "/srv/claude/projects"}).ProjectsRoot(); got != "/srv/claude/projects" {
 		t.Errorf("New(ProjectsRoot set).ProjectsRoot() = %q, want the injected root", got)
 	}
-	want := claudefs.ResolvedProjectsRoot(claudefs.DefaultDir())
-	if got := New(Deps{}).ProjectsRoot(); got != want {
-		t.Errorf("New(ProjectsRoot unset).ProjectsRoot() = %q, want the default %q", got, want)
+	if got := New(Deps{}).ProjectsRoot(); got != "" {
+		t.Errorf("New(ProjectsRoot unset).ProjectsRoot() = %q, want \"\" (fail closed)", got)
+	}
+	if jsonlPathUnderAllowedRoot(filepath.Join(claudeProjectsAllowedRoot(), "-ws", "agent-a1.jsonl"), "") {
+		t.Error("an empty root admitted a transcript under the default projects root")
 	}
 }
 

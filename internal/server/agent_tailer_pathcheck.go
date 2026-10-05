@@ -8,9 +8,24 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
+// unresolvedProjectsRoot is the tailer root when the Claude projects root
+// cannot be resolved (no home dir). An empty registry root would mean
+// unrestricted; this one is relative, so jsonlPathUnderAllowedRoot admits
+// nothing and the tailer fails closed like agentevents does on "".
+const unresolvedProjectsRoot = "unresolved-claude-projects-root"
+
+// tailerAllowedRoot is the HubOptions.AllowedRoot for a resolved projects root.
+func tailerAllowedRoot(projectsRoot string) string {
+	if projectsRoot == "" {
+		return unresolvedProjectsRoot
+	}
+	return projectsRoot
+}
+
 // jsonlPathUnderAllowedRoot returns true when jsonlPath is strictly beneath
 // allowedRoot by osutil.PathContainedInRoot (byte prefix on root + separator,
-// then the inode walk for case-insensitive filesystems). Both sides are
+// then the inode walk for case-insensitive filesystems). A relative
+// allowedRoot contains nothing. Both sides are
 // EvalSymlinks'd first — allowedRoot may contain a symlinked component (macOS
 // /var, bind-mounts) — and the not-yet-existing jsonlPath ("tail-before-write")
 // is resolved via its nearest existing ancestor so the two sides compare
@@ -21,6 +36,9 @@ func jsonlPathUnderAllowedRoot(jsonlPath, allowedRoot string) bool {
 		return false
 	}
 	root := filepath.Clean(allowedRoot)
+	if !filepath.IsAbs(root) {
+		return false
+	}
 	rootResolved := false
 	if resolvedRoot, err := filepath.EvalSymlinks(root); err == nil {
 		root = resolvedRoot

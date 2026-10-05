@@ -75,7 +75,8 @@ func ProjectsRoot(claudeDir string) string {
 // every transcript-path gate compares against: the agent tailer, the
 // agent_events handler and workflow run dirs. Before the directory exists
 // (first run) it is the lexical path, so the gates degrade rather than
-// reject; an empty claudeDir yields "", which the gates treat as fail-closed.
+// reject. An empty claudeDir yields "": agentevents then fails closed, and
+// the server hands the tailer a root that admits nothing.
 func ResolvedProjectsRoot(claudeDir string) string {
 	raw := ProjectsRoot(claudeDir)
 	if raw == "" {

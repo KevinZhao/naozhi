@@ -133,6 +133,67 @@ func TestBuildServer_TailerRootIsProjectsRoot(t *testing.T) {
 	}
 }
 
+// TestBuildServer_UnresolvedHomeFailsClosed: with no home dir the projects
+// root is "", which agent_events treats as fail closed; the tailer must
+// refuse every transcript too instead of reading unrestricted (an empty
+// registry root), including one under a former ~/.claude/projects.
+func TestBuildServer_UnresolvedHomeFailsClosed(t *testing.T) {
+	old := t.TempDir()
+	t.Setenv("HOME", "")
+	if dir := resolveClaudeDir(); dir != "" {
+		t.Skipf("resolveClaudeDir() = %q with HOME unset; cannot simulate a missing home", dir)
+	}
+	transcript := filepath.Join(old, ".claude", "projects", "-ws", "agent-a0123456789abcdef.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcript, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, hs := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: session.NewRouter(session.RouterConfig{}),
+		Backend: "claude", AllowedRoot: old})
+	t.Cleanup(srv.hub.Shutdown)
+	t.Cleanup(srv.appCancel)
+
+	if got := hs.agentEventsH.ProjectsRoot(); got != "" {
+		t.Errorf("agent_events root = %q, want \"\" (fail closed)", got)
+	}
+	if srv.hub.tailers.allowedRoot == "" {
+		t.Fatal("tailers.allowedRoot is empty, i.e. unrestricted, while agent_events fails closed")
+	}
+	if tl, ok := srv.hub.tailers.ensureTailer("k", "task-1", "tool-1", transcript); ok || tl != nil {
+		t.Errorf("ensureTailer accepted %q with no resolvable projects root", transcript)
+	}
+}
+
+// TestJsonlPathUnderAllowedRoot_RelativeRootContainsNothing: a relative root
+// (the unresolved-projects sentinel) admits no path, even when a directory
+// of that name exists in the working directory and holds the candidate.
+func TestJsonlPathUnderAllowedRoot_RelativeRootContainsNothing(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonl := filepath.Join(base, unresolvedProjectsRoot, "-ws", "agent-a1.jsonl")
+	if err := os.MkdirAll(filepath.Dir(jsonl), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(jsonl, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(base)
+	if jsonlPathUnderAllowedRoot(jsonl, unresolvedProjectsRoot) {
+		t.Errorf("jsonlPathUnderAllowedRoot(%q, %q) = true, want a relative root to contain nothing", jsonl, unresolvedProjectsRoot)
+	}
+	if got := tailerAllowedRoot(""); got != unresolvedProjectsRoot {
+		t.Errorf("tailerAllowedRoot(\"\") = %q, want the fail-closed sentinel", got)
+	}
+	if got := tailerAllowedRoot("/srv/claude/projects"); got != "/srv/claude/projects" {
+		t.Errorf("tailerAllowedRoot(root) = %q, want the root unchanged", got)
+	}
+}
+
 // recordingLinker captures its OnResolve registrations and answers Query
 // from a fixed table.
 type recordingLinker struct {

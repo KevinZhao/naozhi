@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/contracts"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
@@ -278,32 +277,23 @@ type Deps struct {
 	Router     SessionLookup
 	NodeAccess NodeAccessor
 	// ProjectsRoot is claudefs.ResolvedProjectsRoot of the server's Claude
-	// dir, the same root the WS agent tailer checks against; "" falls back
-	// to the default ~/.claude.
+	// dir, the same root the WS agent tailer checks against. There is no
+	// default: "" makes every transcript read fail closed.
 	ProjectsRoot string
 }
 
 // New constructs a Handler; every transcript path it serves must sit under
-// d.ProjectsRoot (or the resolved default ~/.claude/projects).
+// d.ProjectsRoot.
 func New(d Deps) *Handler {
-	root := d.ProjectsRoot
-	if root == "" {
-		root = claudeProjectsAllowedRoot()
-	}
 	return &Handler{
 		router:      d.Router,
 		nodeAccess:  d.NodeAccess,
-		allowedRoot: root,
+		allowedRoot: d.ProjectsRoot,
 	}
 }
 
-// ProjectsRoot is the root New settled on; "" makes agent_events fail closed.
+// ProjectsRoot is the root transcript paths are checked against.
 func (h *Handler) ProjectsRoot() string { return h.allowedRoot }
-
-// claudeProjectsAllowedRoot is the resolved default ~/.claude/projects.
-func claudeProjectsAllowedRoot() string {
-	return claudefs.ResolvedProjectsRoot(claudefs.DefaultDir())
-}
 
 // jsonlPathUnderAllowedRoot checks that p is strictly beneath root after
 // resolving p's nearest existing ancestor, by osutil.PathContainedInRoot —
