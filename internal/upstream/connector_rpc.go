@@ -153,6 +153,12 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err != nil {
 			return nil, err
 		}
+		// A primary that does not read the status shows a busy send, which was
+		// dropped, as accepted; an error is what it reports as a failure.
+		// Queued and reset only change the wording there, so they pass.
+		if status == "busy" && !c.hubSendStatus.Load() {
+			return nil, node.ErrSendBusy
+		}
 		return marshalResult(map[string]string{"status": status})
 
 	case "takeover":
