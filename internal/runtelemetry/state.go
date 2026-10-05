@@ -68,7 +68,7 @@ const (
 	// RunState would need a coordinated dashboard.js change, while an error class
 	// renders through the existing canceled badge with the detail attached.
 	// The next boot writes it to runs/ history from the run's leftover in-flight
-	// marker when the run cannot be adopted (#2546).
+	// marker, unless the run is adopted and its turn completes (#2546).
 	ErrClassCronInterrupted ErrorClass = "interrupted"
 	// ErrClassCronConfigDrift: at startup the surviving shim's argv no longer
 	// matched config, so it was shut down. RunState is "canceled".
