@@ -8,6 +8,7 @@
 // 跑法：cd test/e2e && npx playwright test version_skew.test.js --project=desktop-chrome
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
+const { waitForWs } = require('./shim_wait');
 
 const desktop = { viewport: { width: 1280, height: 800 } };
 const READY_KEY = 'dashboard:direct:2026-01-01-120000-1:myproject';
@@ -48,7 +49,7 @@ const noReload = async (page, loads) => {
   await expect(page.waitForRequest((r) => new URL(r.url()).pathname === '/dashboard', { timeout: 1000 })).rejects.toThrow();
   expect(loads).toHaveLength(1);
 };
-const connected = (page) => page.waitForFunction(() => !!window.wsm && window.wsm.state === window.WS_STATES.CONNECTED);
+const connected = (page) => waitForWs(page);
 
 test('a skewed visible tab shows a banner with no close control; clicking it reloads', async ({ browser }) => {
   const { page, loads, close } = await openDashboard(browser, { assetVersion: 'aaaa', wsAssetVersion: 'bbbb' });

@@ -8,15 +8,10 @@
 // dashboard state.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
+const { waitForWs } = require('./shim_wait');
 
 const desktop = { viewport: { width: 1280, height: 800 } };
 const SESSION_KEY = 'dashboard:direct:2026-01-01-120000-1:myproject';
-
-// Reads go through window.nz.test with optional chaining: a bare `wsm` read
-// before the e2e shim has loaded throws a ReferenceError, which
-// waitForFunction does not retry.
-const wsConnected = (page) =>
-  page.waitForFunction(() => window.nz?.test?.wsm?.state === 'connected');
 
 test.describe('WebSocket connect path', () => {
   let mock;
@@ -28,7 +23,7 @@ test.describe('WebSocket connect path', () => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
-    await wsConnected(page);
+    await waitForWs(page);
 
     // The handshake the server saw must start with the auth frame.
     expect(mock.wsConnections.length).toBeGreaterThan(0);
@@ -41,7 +36,7 @@ test.describe('WebSocket connect path', () => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
-    await wsConnected(page);
+    await waitForWs(page);
     await page.waitForFunction(
       (key) => !!window.nz.test.sessionsData[window.nz.test.sid(key, 'local')],
       SESSION_KEY

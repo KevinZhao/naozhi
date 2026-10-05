@@ -11,6 +11,7 @@
 
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
+const { waitForWs } = require('./shim_wait');
 
 const desktop = { viewport: { width: 1280, height: 800 } };
 
@@ -51,7 +52,7 @@ test.describe('乐观补丁 vs 迟到的旧 list 响应', () => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
-    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    await waitForWs(page);
     await page.click('#abnav-cron');
     const row = page.locator('.cj-row[data-cron-id="cron-wire-1"]');
     await row.waitFor();
@@ -88,7 +89,7 @@ test.describe('迟到的旧响应不得把新 run 换回刚结束的那次', () 
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
-    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    await waitForWs(page);
     await page.click('#abnav-cron');
     const row = page.locator('.cj-row[data-cron-id="cron-wire-1"]');
     await expect(row).toHaveClass(/is-running/);
@@ -140,7 +141,7 @@ test.describe('统一 run 帧的 WS 分发', () => {
     page.on('console', (m) => { if (m.type() === 'error' && m.text().startsWith('ws parse error')) pageErrors.push(m.text()); });
 
     await page.goto(mock.url + '/dashboard');
-    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    await waitForWs(page);
     await page.click('#abnav-cron');
     const row = page.locator('.cj-row[data-cron-id="cron-wire-1"]');
     await row.waitFor();
@@ -178,7 +179,7 @@ test.describe('统一 run 帧的 WS 分发', () => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
-    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    await waitForWs(page);
 
     // 后台 daemon 失败时，这个 fetch 是点亮系统徽章的唯一路径 —— 断言请求
     // 本身而不是渲染结果，这样 mock 不需要实现该端点（fetchJSON 会吞 404）。

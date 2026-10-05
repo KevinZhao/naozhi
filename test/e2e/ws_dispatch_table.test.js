@@ -6,6 +6,7 @@
 // changes reach dashboard's pollers through onStateChange.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
+const { waitForWs, waitForWsWhere } = require('./shim_wait');
 
 const desktop = { viewport: { width: 1280, height: 800 } };
 const KEY_A = 'dashboard:direct:2026-01-01-120000-1:myproject';
@@ -26,7 +27,7 @@ test.describe('WS dispatch table', () => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
-    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    await waitForWs(page);
     await page.click(`.session-card[data-key="${KEY_A}"]`);
     const first = mock.wsConnections[mock.wsConnections.length - 1];
     await expect.poll(() => subscribes(first, KEY_A).length).toBe(1);
@@ -46,7 +47,7 @@ test.describe('WS dispatch table', () => {
     const parseErrors = [];
     page.on('console', (m) => { if (m.text().includes('ws parse error')) parseErrors.push(m.text()); });
     await page.goto(mock.url + '/dashboard');
-    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    await waitForWs(page);
     // Called synchronously: onmessage's try/catch would swallow a throw.
     const r = await page.evaluate(() => {
       wsm.onMessage({ type: 'no_such_frame' });
@@ -70,7 +71,7 @@ test.describe('WS dispatch table', () => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
-    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    await waitForWs(page);
     await page.evaluate((key) => {
       sessionStream.lastEventTimeWs = 12345;
       sessionStream.unsubscribe();
@@ -88,10 +89,10 @@ test.describe('WS dispatch table', () => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
-    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    await waitForWs(page);
     let conn = mock.wsConnections[mock.wsConnections.length - 1];
     conn.send({ type: 'auth_fail', error: 'too many attempts', retry_after: 30 });
-    await page.waitForFunction(() => wsm.state === WS_STATES.DISCONNECTED);
+    await waitForWs(page, 'DISCONNECTED');
     const block = await page.evaluate(() => ({ left: wsm._authBlockUntil - Date.now(), timer: wsm.reconnectTimer !== null }));
     expect(block.left, 'retry_after arms the redial block').toBeGreaterThan(25000);
     expect(block.timer).toBe(true);
@@ -100,10 +101,10 @@ test.describe('WS dispatch table', () => {
     const before = mock.wsConnections.length;
     await page.evaluate(() => { wsm._authBlockUntil = Date.now(); });
     await expect.poll(() => mock.wsConnections.length, { timeout: 5000 }).toBe(before + 1);
-    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    await waitForWs(page);
     conn = mock.wsConnections[before];
     conn.send({ type: 'auth_fail', error: 'invalid token' });
-    await page.waitForFunction(() => wsm.state === WS_STATES.DISCONNECTED);
+    await waitForWs(page, 'DISCONNECTED');
     await expect(page.locator('#toast')).toContainText('WebSocket 鉴权失败');
     await ctx.close();
   });
@@ -112,7 +113,7 @@ test.describe('WS dispatch table', () => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
-    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    await waitForWs(page);
     expect(await page.evaluate(() => sessionPollTimer), 'the boot-time session poll stops once the socket is up').toBeNull();
     await page.click(`.session-card[data-key="${KEY_A}"]`);
     const conn = mock.wsConnections[mock.wsConnections.length - 1];
@@ -122,7 +123,7 @@ test.describe('WS dispatch table', () => {
     await page.waitForFunction((t) => sessionStream.lastEventTimeWs === t, T);
     conn.close();
     // Read in the tick the drop is seen: the reconnect re-enters CONNECTED.
-    const dropped = await (await page.waitForFunction(() => wsm.state === WS_STATES.DISCONNECTED &&
+    const dropped = await (await waitForWsWhere(page, () => wsm.state === WS_STATES.DISCONNECTED &&
       { poll: sessionPollTimer !== null, cursor: lastEventTime })).jsonValue();
     expect(dropped).toEqual({ poll: true, cursor: T });
     await ctx.close();

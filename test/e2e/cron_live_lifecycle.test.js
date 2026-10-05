@@ -7,6 +7,7 @@
 // error', not raised as a pageerror, so both are collected.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
+const { waitForWs } = require('./shim_wait');
 
 test.beforeEach(({ }, testInfo) => {
   if (testInfo.project.name !== 'desktop-chrome') testInfo.skip(true, 'desktop-chrome only');
@@ -34,7 +35,7 @@ test('cron-live claims subscribed / session_state / error without touching the s
   const page = await ctx.newPage();
   const pageErrors = collectErrors(page);
   await page.goto(mock.url + '/dashboard');
-  await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+  await waitForWs(page);
   await page.click('#abnav-cron');
   await page.click('.cj-row[data-cron-id="cron-001"]');
   await page.waitForSelector('#cron-live-events');
@@ -68,7 +69,7 @@ test('switching the drawer to another running job drops the previous job\'s live
   const page = await ctx.newPage();
   const pageErrors = collectErrors(page);
   await page.goto(mock.url + '/dashboard');
-  await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+  await waitForWs(page);
   await page.click('#abnav-cron');
   await page.click('.cj-row[data-cron-id="cron-001"]');
   await page.waitForSelector('#cron-live-events');
@@ -100,7 +101,7 @@ test('a reconnect resumes the live stream of a running job and leaves a finished
   const page = await ctx.newPage();
   const pageErrors = collectErrors(page);
   await page.goto(mock.url + '/dashboard');
-  await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+  await waitForWs(page);
   await page.click('#abnav-cron');
   await page.click('.cj-row[data-cron-id="cron-001"]');
   await page.waitForSelector('#cron-live-events');
@@ -116,7 +117,7 @@ test('a reconnect resumes the live stream of a running job and leaves a finished
     conn.close();
     await expect.poll(() => mock.wsConnections.length, { timeout: 5000 }).toBe(before + 1);
     conn = mock.wsConnections[before];
-    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    await waitForWs(page);
   };
   await reconnect();
   await expect.poll(() => conn.messages.filter((m) => m.type === 'subscribe' && m.key === 'cron:cron-001'),
@@ -152,7 +153,7 @@ test('a run that ends failed freezes its live stream until the next run starts',
   const page = await ctx.newPage();
   const pageErrors = collectErrors(page);
   await page.goto(mock.url + '/dashboard');
-  await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+  await waitForWs(page);
   await page.click('#abnav-cron');
   await page.click('.cj-row[data-cron-id="cron-001"]');
   await page.waitForSelector('#cron-live-events');

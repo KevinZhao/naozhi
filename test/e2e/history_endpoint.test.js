@@ -8,6 +8,7 @@
 //    sessions validator, so a 304 cannot keep the next poll from retrying it.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
+const { waitForShim, waitForWs } = require('./shim_wait');
 
 const desktop = { viewport: { width: 1280, height: 800 } };
 const OLD = { session_id: 'hist-001', workspace: '/home/user/workspace/myproject', project: 'myproject', last_prompt: 'old task from yesterday', last_active: Date.now() - 86400000 };
@@ -27,6 +28,7 @@ async function open(browser, mock) {
   const page = await ctx.newPage();
   await page.goto(mock.url + '/dashboard');
   await page.waitForSelector('.session-card');
+  await waitForShim(page);
   await page.waitForFunction(() => historyTag !== '');
   return { ctx, page };
 }
@@ -36,7 +38,7 @@ async function open(browser, mock) {
 // one-shot or move a call counter. The tag is unchanged, so it fetches no history.
 async function openConnected(browser, mock) {
   const { ctx, page } = await open(browser, mock);
-  await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+  await waitForWs(page);
   const calls = mock.historyGetCalls;
   await page.evaluate(() => debouncedFetchSessions());
   expect(mock.historyGetCalls, 'the connect poll fetched the history').toBe(calls);
