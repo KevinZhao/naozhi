@@ -18,15 +18,22 @@ func writeCheckConfig(t *testing.T, body string) string {
 	return path
 }
 
-const cleanCheckConfig = `
+const openPlatformCheckConfig = `
 platforms:
   weixin:
     token: "wx-token"
 `
 
+const cleanCheckConfig = openPlatformCheckConfig + `
+im_access:
+  platforms:
+    weixin:
+      allowed_users: ["wx-user"]
+`
+
 // TestConfigCheck_ExitCodes covers the three exit codes: clean config → 0,
-// a backend arg the argv denylist strips (#2412 shape) → 1 with the drop
-// named on stdout, unparsable YAML → 2.
+// an unrestricted IM platform or a backend arg the argv denylist strips
+// (#2412 shape) → 1 with the finding named on stdout, unparsable YAML → 2.
 func TestConfigCheck_ExitCodes(t *testing.T) {
 	t.Run("clean_config_exit0", func(t *testing.T) {
 		var out bytes.Buffer
@@ -36,6 +43,19 @@ func TestConfigCheck_ExitCodes(t *testing.T) {
 		}
 		if !strings.Contains(out.String(), "config check: OK") {
 			t.Errorf("missing OK line:\n%s", out.String())
+		}
+	})
+
+	// An enabled platform no im_access rule restricts is a warning: anyone who
+	// can message the bot there runs commands on the host.
+	t.Run("open_platform_exit1", func(t *testing.T) {
+		var out bytes.Buffer
+		code := configCheck([]string{"-config", writeCheckConfig(t, openPlatformCheckConfig)}, &out)
+		if code != 1 {
+			t.Fatalf("exit = %d, want 1; output:\n%s", code, out.String())
+		}
+		if s := out.String(); !strings.Contains(s, "platforms.weixin") || !strings.Contains(s, "im_access") {
+			t.Errorf("output must name the open platform and im_access:\n%s", s)
 		}
 	})
 

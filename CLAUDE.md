@@ -88,6 +88,7 @@ cmd/naozhi/main.go
   辅助域
   -> agentcore    AgentCore 云沙箱 control-plane 客户端
   -> agentroute   "/command agentId" 解析的单一真相源
+  -> imauth       IM 发送者授权策略（per-platform allowlist + admin 层，Decide 纯逻辑），config 构造、dispatch 执行；叶子
   -> assets       Dashboard "installed assets" 零依赖叶子
   -> ccassets     Claude Code 资产浏览 provider（dashboard 用）
   -> ccmodels     toolbox 推荐模型清单 ↔ cc settings 的对账（纯逻辑；子包 ccprobe 负责实跑验证）
