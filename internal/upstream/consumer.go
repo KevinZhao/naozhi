@@ -50,9 +50,11 @@ type SessionLookup interface {
 }
 
 // SessionLifecycle is the create/recreate/remove sub-capability used by RPC
-// handlers that allocate or tear down sessions.
+// handlers that allocate or tear down sessions. TakeoverPrecheck reports,
+// changing nothing, the error Takeover on key would be refused with now.
 type SessionLifecycle interface {
 	ResetAndRecreate(ctx context.Context, key string, opts sessionview.AgentOpts) (Session, error)
+	TakeoverPrecheck(key string) error
 	Takeover(ctx context.Context, key string, sessionID string, workspace string, opts sessionview.AgentOpts) (Session, error)
 	Remove(key string) bool
 	DefaultWorkspace() string

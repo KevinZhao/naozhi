@@ -166,6 +166,11 @@
   },
   {
     "method": "GET",
+    "path": "/api/discovered/takeover/status",
+    "handler_type": "*discovery.Handlers"
+  },
+  {
+    "method": "GET",
     "path": "/api/memory/{slug}",
     "handler_type": "*memory.Handler"
   },

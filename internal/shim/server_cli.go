@@ -298,5 +298,3 @@ func (c *cliProc) waitOrKill(timeout time.Duration) {
 		c.kill()
 	}
 }
-
-// CleanStaleSocket removes a socket file if no shim is listening on it.

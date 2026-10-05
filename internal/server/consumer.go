@@ -31,7 +31,6 @@ type HubRouter interface {
 	SetSessionAccessProfile(key, profile string)
 	DefaultWorkspace() string
 	RegisterForResume(key, sessionID, workspace, lastPrompt string) (effectiveKey string)
-	InterruptSession(key string) bool
 	InterruptSessionSafe(key string) session.InterruptOutcome
 	InterruptSessionViaControl(key string) session.InterruptOutcome
 	NotifyIdle()
@@ -42,7 +41,7 @@ type HubRouter interface {
 // plus GetOrCreate for a relayed send's preflight (relay_origin.go). Turns
 // reach sessions through turnSender (turnRouter), the one turn.Sender every
 // entry's turns go through. Deliberately not HubRouter — that
-// one is at 15 methods (the consumer-interfaces.md §7.2 rethink threshold) and
+// one is at 14 methods (near the consumer-interfaces.md §7.2 rethink threshold) and
 // its godoc admits it carries the transits *SendHandler borrows, so handing it
 // to the engine would just move the borrowing debt to a new holder.
 // *session.Router satisfies it structurally; consumer_contract_test.go guards

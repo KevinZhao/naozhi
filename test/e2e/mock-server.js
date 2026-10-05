@@ -300,6 +300,9 @@ function defaultGitStates() {
  * @param {string} [overrides.assetVersion] - Serve the page with this nz-asset-version
  *   meta, as the Go server's rendered page carries (the raw file has none).
  * @param {string} [overrides.wsAssetVersion] - With ws:true, auth_ok carries this asset_version.
+ * @param {{html: string, csp: string}} [overrides.dashboardPage] - Serve this page
+ *   and CSP at /dashboard instead of the raw file and MOCK_DASHBOARD_CSP: the
+ *   page Go renders, written by tools/render-dashboard. assetVersion is ignored.
  * @returns {Promise<{server: http.Server, port: number, url: string}>}
  */
 function startMockServer(overrides = {}) {
@@ -308,10 +311,12 @@ function startMockServer(overrides = {}) {
   // which imports the modules' exports and mirrors the names the suite
   // probes onto window and window.nz.test. New tests should use nz.test.*.
   // overrides.shim === false serves the page exactly as production does.
-  const page = fs.readFileSync(path.join(STATIC_DIR, 'dashboard.html'), 'utf8');
-  const versioned = overrides.assetVersion
+  const rendered = overrides.dashboardPage;
+  const page = rendered ? rendered.html : fs.readFileSync(path.join(STATIC_DIR, 'dashboard.html'), 'utf8');
+  const versioned = overrides.assetVersion && !rendered
     ? page.replace('</head>', `<meta name="nz-asset-version" content="${overrides.assetVersion}">\n</head>`)
     : page;
+  const dashboardCSP = rendered ? rendered.csp : MOCK_DASHBOARD_CSP;
   const html = overrides.shim === false
     ? versioned
     : versioned.replace('</body>', '<script type="module" src="/e2e-shim.js"></script>\n</body>');
@@ -454,10 +459,12 @@ function startMockServer(overrides = {}) {
       // Mirror the production CSP (routes.go handleDashboard) so the whole
       // Playwright suite runs the dashboard under the real policy — inline
       // handlers or scripts that production would block fail here too.
-      // Kept in lockstep by TestDashboardCSP_MockServerHeaderInSync.
+      // The default MOCK_DASHBOARD_CSP is kept in lockstep by
+      // TestDashboardCSP_MockServerHeaderInSync; a dashboardPage override
+      // serves the CSP tools/render-dashboard wrote out instead.
       res.writeHead(200, {
         'Content-Type': 'text/html',
-        'Content-Security-Policy': MOCK_DASHBOARD_CSP,
+        'Content-Security-Policy': dashboardCSP,
       });
       res.end(html);
       return;

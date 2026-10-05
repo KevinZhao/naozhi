@@ -421,25 +421,34 @@ func TestGetOrCreate_SpawnInitPauseLiftedByReset(t *testing.T) {
 }
 
 // Removing a dead entry for good, from the dashboard or by /cd, lifts the
-// pause of the key's run along with it.
+// pause of the key's run along with it; /cd does so on a key with no entry too.
 func TestGetOrCreate_SpawnInitPauseLiftedByRemoval(t *testing.T) {
 	t.Parallel()
-	removals := map[string]func(r *Router){
-		"Remove":                   func(r *Router) { r.Remove(sfKey) },
-		"ResetChatAndSetWorkspace": func(r *Router) { r.ResetChatAndSetWorkspace("feishu:direct:alice", t.TempDir()) },
+	removals := map[string]struct {
+		withEntry bool
+		remove    func(r *Router)
+	}{
+		"Remove":                        {true, func(r *Router) { r.Remove(sfKey) }},
+		"ResetChatAndSetWorkspace/dead": {true, func(r *Router) { r.ResetChatAndSetWorkspace("feishu:direct:alice", t.TempDir()) }},
+		"ResetChatAndSetWorkspace/none": {false, func(r *Router) { r.ResetChatAndSetWorkspace("feishu:direct:alice", t.TempDir()) }},
 	}
-	for name, remove := range removals {
+	for name, tc := range removals {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			r, spawnErr, spawns := newSpawnFailRouter(t)
-			injectSession(r, sfKey, newDeadProc())
+			if tc.withEntry {
+				injectSession(r, sfKey, newDeadProc())
+			}
 			for range 2 {
 				_, _, _ = r.GetOrCreate(context.Background(), sfKey, AgentOpts{})
 			}
 			if _, _, err := r.GetOrCreate(context.Background(), sfKey, AgentOpts{}); !errors.Is(err, ErrCLIStartupFailed) || *spawns != 2 {
-				t.Fatalf("setup: err = %v after %d spawns; want a paused dead entry", err, *spawns)
+				t.Fatalf("setup: err = %v after %d spawns; want a paused key", err, *spawns)
 			}
-			remove(r)
+			if hasEntry := r.ss.Load(sfKey) != nil; hasEntry != tc.withEntry {
+				t.Fatalf("setup: key has an entry = %v, want %v", hasEntry, tc.withEntry)
+			}
+			tc.remove(r)
 			if f, ok := spawnRun(r, sfKey); ok {
 				t.Errorf("run after %s = %+v, want none", name, f)
 			}
@@ -448,6 +457,28 @@ func TestGetOrCreate_SpawnInitPauseLiftedByRemoval(t *testing.T) {
 				t.Errorf("after %s: err = %v after %d spawns; want a third spawn", name, err, *spawns)
 			}
 		})
+	}
+}
+
+// A /cd lifts only its own chat's pauses: a key of a chat whose name extends
+// the reset chat's keeps its run.
+func TestResetChatAndSetWorkspace_KeepsASiblingChatsPause(t *testing.T) {
+	t.Parallel()
+	const sibling = "feishu:direct:alicex:general"
+	r, _, spawns := newSpawnFailRouter(t)
+	for range 2 {
+		_, _, _ = r.GetOrCreate(context.Background(), sfKey, AgentOpts{})
+		_, _, _ = r.GetOrCreate(context.Background(), sibling, AgentOpts{})
+	}
+	r.ResetChatAndSetWorkspace("feishu:direct:alice", t.TempDir())
+	if f, ok := spawnRun(r, sfKey); ok {
+		t.Errorf("run of the reset chat's key = %+v, want none", f)
+	}
+	if f, ok := spawnRun(r, sibling); !ok || f.Streak != 2 {
+		t.Errorf("run of the sibling chat's key = %+v,%v; want its streak of 2 kept", f, ok)
+	}
+	if _, _, err := r.GetOrCreate(context.Background(), sibling, AgentOpts{}); !errors.Is(err, ErrCLIStartupFailed) || *spawns != 4 {
+		t.Errorf("sibling after the /cd: err = %v after %d spawns; want still paused", err, *spawns)
 	}
 }
 

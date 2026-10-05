@@ -438,9 +438,9 @@ function announce(msg) {
 }
 
 // API_ERROR_HEADS: substrings of server error messages → the Chinese head
-// localizeAPIError uses instead of the status-class one. work_dir labels
-// mirror internal/server classifyWorkspaceErr; cron labels mirror
-// internal/dashboard/cron writeAddUpdateRejection.
+// localizeAPIError uses instead of the status-class one. Labels mirror
+// internal/server classifyWorkspaceErr (work_dir), internal/dashboard/cron
+// writeAddUpdateRejection and internal/dashboard/discovery writeTakeoverRefusal.
 const API_ERROR_HEADS = [
   ['work_dir outside allowed root', '工作目录不在允许范围内'],
   ['work_dir does not exist', '工作目录不存在'],
@@ -449,6 +449,9 @@ const API_ERROR_HEADS = [
   ['work_dir must be an absolute path', '工作目录必须是绝对路径'],
   ['cron job quota reached', '定时任务数已达上限，请先删除不用的任务'],
   ['schedule interval below the 5m minimum', '执行间隔不能短于 5 分钟'],
+  ['takeover refused: max concurrent processes reached', '进程数已满，外部进程未被终止；请先关闭一个空闲会话后重试'],
+  ['takeover already in progress', '该会话正在被接管，请稍候'],
+  ['takeover refused: router is shutting down', '服务正在重启，外部进程未被终止，请稍后重试'],
 ];
 
 // localizeAPIError turns an HTTP status code + raw server message into a
@@ -456,11 +459,7 @@ const API_ERROR_HEADS = [
 // a consistent mental model — 4xx = "你这边要改", 5xx = "服务端问题，请
 // 稍后重试". The raw tail is appended (truncated to 120 chars) so diagnostic
 // signal isn't lost, but the Chinese prefix is always there for screen-readers
-// and non-technical operators.
-//
-// Why not a full i18n dict: current project is single-locale (zh-CN); a
-// full go-i18n pipeline was floated in UX review but rejected as overkill
-// — UX1 target is "no raw English errors", not "pluggable locales".
+// and non-technical operators. Single locale (zh-CN), so no i18n layer.
 function localizeAPIError(status, raw) {
   const tail = (raw || '').toString().trim().slice(0, 120);
   const withTail = tail ? '（' + tail + '）' : '';

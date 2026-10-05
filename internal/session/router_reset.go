@@ -26,7 +26,8 @@ import (
 //   - ResetChatAndSetWorkspace: every agent key of a chat; only the backend
 //     pick is dropped (pendingPicks.dropBackend); the keys are NOT retired —
 //     /cd does not discard their queues, and queued messages are meant to run
-//     in the new workspace.
+//     in the new workspace. Like /new, it lifts the chat's startup-failure
+//     pauses, on keys with no entry too.
 //   - ResetAndRecreate: one key, re-spawned in the same transaction; picks
 //     are kept for that spawn; not retired, since a Retire would drop the
 //     messages queued for the recreated session.
@@ -44,6 +45,7 @@ func (r *Router) ResetChatAndSetWorkspace(chatKeyPrefix, path string) {
 		for _, key := range tx.KeysOfChat(chatKeyPrefix) {
 			released = r.resetChatEntry(tx, key, released, &closedActive)
 		}
+		tx.Ext().spawns.ClearStartupFailuresOfChat(chatKeyPrefix, chatKeyFor)
 		if closedActive > 0 {
 			if tx.AddActive(-int64(closedActive)) < 0 {
 				tx.SetActive(0)
@@ -83,7 +85,6 @@ func (r *Router) resetChatEntry(tx sessTx, key string, released []releasedKey, c
 		tx.ClearID(id)
 	}
 	tx.Delete(key)
-	tx.Ext().spawns.ClearStartupFailure(key)
 	// Backend pick only: the chat returns to the default backend, while the
 	// two consumed-on-spawn picks still apply to this key. dropBackend's doc
 	// records that the omission is deliberate.
