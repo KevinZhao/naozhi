@@ -23,7 +23,8 @@ var (
 func UpstreamRouter(r *session.Router) upstream.SessionRouter { return upstreamRouter{r} }
 
 // upstreamRouter forwards every method; the three that hand back a session
-// convert it with asUpstreamSession. The rest are promoted from the embedded
+// convert it with asUpstreamSession, and TakeoverPrecheck supplies the
+// connector's empty takeover opts. The rest are promoted from the embedded
 // router unchanged, since their signatures speak sessionview's types already.
 type upstreamRouter struct{ *session.Router }
 
@@ -34,6 +35,10 @@ func (u upstreamRouter) SessionFor(key string) upstream.Session {
 func (u upstreamRouter) ResetAndRecreate(ctx context.Context, key string, opts sessionview.AgentOpts) (upstream.Session, error) {
 	s, err := u.Router.ResetAndRecreate(ctx, key, opts)
 	return asUpstreamSession(s), err
+}
+
+func (u upstreamRouter) TakeoverPrecheck(key string) error {
+	return u.Router.TakeoverPrecheck(key, sessionview.AgentOpts{})
 }
 
 func (u upstreamRouter) Takeover(ctx context.Context, key, sessionID, workspace string, opts sessionview.AgentOpts) (upstream.Session, error) {

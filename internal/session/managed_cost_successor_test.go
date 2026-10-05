@@ -19,7 +19,7 @@ func lateSpendRouter(t *testing.T, key string, hook func(context.Context, cli.Sp
 	r := spawnRouter(t, 4, hook)
 	ledger := costledger.NewStore(t.TempDir(), costledger.Options{})
 	t.Cleanup(ledger.Close)
-	r.runs.cost = newCostAccounting(ledger, nil)
+	r.runs.cost = newCostAccounting(ledger)
 	ledger.Rates().Observe(costledger.ModelDelta{Model: "claude-opus-5-5", CostUSD: 1, Tokens: costledger.Tokens{Output: 1000}})
 	old := injectSession(r, key, newDeadProc())
 	old.costAcct = r.runs.cost
@@ -88,7 +88,7 @@ func TestRename_ReadingOnTheOldSessionIsTheNewSessionsToDifference(t *testing.T)
 	t.Cleanup(r.Shutdown)
 	ledger := costledger.NewStore(t.TempDir(), costledger.Options{})
 	t.Cleanup(ledger.Close)
-	r.runs.cost = newCostAccounting(ledger, nil)
+	r.runs.cost = newCostAccounting(ledger)
 	proc := &TestProcess{AliveVal: true, SendFunc: scripted(
 		&clievent.SendResult{Text: "a", CostUSD: 1}, &clievent.SendResult{Text: "b", CostUSD: 4})}
 	r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) { return proc, nil }
