@@ -10,7 +10,7 @@ import { esc, escAttr, fetchJSON, patchCardExitChip, reconcileChildren, sessionE
 import { setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderPRChip, setHeaderSpawnDiagChip } from './session_header.js';
 import { deselectNodeSession, reconcileSelectedNode } from './system_view.js';
 import { turnState, updateSendButton } from './running_banner.js';
-import { PENDING_LS_KEY, announce, formatAbsTime, persistPending, renderRecentSessionsPanel, setActiveSessionCard, showAuthModal, timeAgo } from './utilities.js';
+import { PENDING_LS_KEY, announce, formatAbsTime, persistPending, refreshSidebarTimes, renderRecentSessionsPanel, setActiveSessionCard, showAuthModal, timeAgo } from './utilities.js';
 import { scanDiscovered } from './discovery.js';
 import { invalidateGitState } from './tuning.js';
 import { sectionHeaderFallbackHtml, sectionHeaderHtml } from './sidebar_project.js';
@@ -319,16 +319,16 @@ export function renderSidebar(data) {
   if (st.projects) sessionList.projectsData = st.projects;
 
   const list = document.getElementById('session-list');
-  // R110-P2 empty-state CTA: keeps the "no sessions" text E2E asserts and adds
-  // the header `+` button's action for first-time users.
+  // R110-P2 empty-state CTA: the "no sessions" text E2E asserts + the header `+` action.
   const html = sidebarHtml(buildSidebarItems(data)) || '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" data-action="session-new">+ 开启你的第一个会话</button></div>';
-  // Keyed reconcile: only the rows whose markup changed are replaced, so a
-  // poll with nothing new touches no DOM, in-place patches (state dot, unread
-  // chip, a removed card) compare as they stand, and kept nodes keep the
-  // list's scroll position.
+  // Keyed reconcile: only rows whose markup changed are replaced, so a poll
+  // with nothing new touches no DOM, in-place patches (state dot, unread chip,
+  // a removed card) compare as they stand, and kept nodes keep the scroll
+  // position. The live time labels are first brought to html's instant, or a
+  // rolled "30s ago" replaces an unchanged card and swallows a click on it.
+  refreshSidebarTimes();
   if (reconcileChildren(list, html, sidebarRowKey) && selection.key) {
-    // A replaced card drops the cached active-card ref; re-resolve it so
-    // selector switches stay O(1) on the next click.
+    // A replaced card drops the cached active-card ref; re-resolve it (O(1) switches).
     setActiveSessionCard(selection.key, selection.node);
   }
 
