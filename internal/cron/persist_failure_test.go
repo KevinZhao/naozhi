@@ -271,7 +271,7 @@ func TestPersistFailure_RecordResultRollsBack(t *testing.T) {
 	// directly. The discriminating fields (LastErrorClass, RunCounters) get
 	// rolled back the same way as the four
 	// LastRunAt/LastResult/LastError/LastSessionID fields.
-	_, _, _ = s.recordTerminalResult(j.ID, "new-result", "new-error", "new-sess", ErrClassSessionError, RunStateFailed, time.Now())
+	_, _, _ = s.recordTerminalResult(j.ID, runOutcome{result: "new-result", errMsg: "new-error", sessionID: "new-sess", errClass: ErrClassSessionError, state: RunStateFailed}, time.Now())
 
 	snap := s.jobForTest(t, j.ID)
 
@@ -324,7 +324,7 @@ func TestPersistFailure_RecordResultHappyPathApplies(t *testing.T) {
 	// exercises the production path directly (recordTerminalResult, formerly
 	// recordResultP0WithSanitised) so a future change can't silently rot a
 	// happy-path test that exercises a separate helper.
-	_, _, _ = s.recordTerminalResult(j.ID, "fresh-result", "", "sess-1", ErrClassNone, RunStateSucceeded, time.Now())
+	_, _, _ = s.recordTerminalResult(j.ID, runOutcome{result: "fresh-result", sessionID: "sess-1", state: RunStateSucceeded}, time.Now())
 
 	snap := s.jobForTest(t, j.ID)
 

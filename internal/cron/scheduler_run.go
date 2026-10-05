@@ -787,12 +787,13 @@ func (s *Scheduler) execSendError(a execSendArgs, abort abortResult, err error, 
 	// Stub re-register BEFORE finishRun releases the gate (see the cancel
 	// branch); deliverNotice (IM, stub-independent) stays after finishRun.
 	stubRefresh.run()
+	cause := turnCauseOf(err)
 	paused := s.finishRun(a.runCtx, runOutcome{
-		state: state, errClass: errClass,
+		state: state, errClass: errClass, turnCause: cause,
 		errMsg:    "send error: " + sanitiseRunErrMsg(err.Error()), // strip IP:port/paths, mirrors lg.Error above
 		sessionID: sid, costInc: costInc,
 	})
-	s.deliverFailureNotice(a.runCtx, errClass, turnCauseOf(err), state, a.jobTimeout, paused)
+	s.deliverFailureNotice(a.runCtx, errClass, cause, state, a.jobTimeout, paused)
 }
 
 // execFinishSuccess records a successful run: latency observability, the
@@ -991,11 +992,12 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 		// Stub re-register BEFORE finishRun releases the gate — see execSendError;
 		// deliverNotice (IM, stub-independent) stays after finishRun.
 		a.stubRefresh.run()
+		cause := turnCauseOf(err)
 		paused := s.finishRun(a.runCtx, runOutcome{
-			state: state, errClass: errClass,
+			state: state, errClass: errClass, turnCause: cause,
 			errMsg: "session error: " + sanitiseRunErrMsg(err.Error()), // mirrors send-error path
 		})
-		s.deliverFailureNotice(a.runCtx, errClass, turnCauseOf(err), state, s.execTimeout, paused)
+		s.deliverFailureNotice(a.runCtx, errClass, cause, state, s.execTimeout, paused)
 		return nil, spawnStart, true
 	}
 	// GetOrCreate consumed ctx and nothing below references it (Send uses

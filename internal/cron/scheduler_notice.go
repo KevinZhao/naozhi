@@ -203,7 +203,7 @@ func (s *Scheduler) deliverFailureNotice(rc runCtx, errClass ErrorClass, turnCau
 }
 
 // deliverPauseNotice announces that the failure of a run with no per-run
-// notice (a restart-orphaned sandbox run, an adopted turn) auto-paused its job.
+// notice (an adopted turn) auto-paused its job.
 // The target is resolved from a fresh snapshot of the now-paused job.
 func (s *Scheduler) deliverPauseNotice(rc runCtx, errClass ErrorClass, turnCause TurnCause, state RunState, timeout time.Duration, paused int) {
 	snap, ok := s.tbl.runSnapshot(rc.jobID)

@@ -168,7 +168,8 @@ type Job struct {
 	RunCounters JobRunCounters `json:"run_counters,omitempty"`
 
 	// ConsecutiveFailures counts failed and timed-out runs since the last
-	// success, resume or edit; skipped and canceled runs leave it alone.
+	// success, resume or edit; runs that fail for reasons outside the job
+	// leave it alone (failureStreakEffect), as do skipped and canceled runs.
 	// Reaching the scheduler's auto-pause threshold pauses the job.
 	ConsecutiveFailures int `json:"consecutive_failures,omitempty"`
 
@@ -194,21 +195,50 @@ type Job struct {
 // paused after too many consecutive failed or timed-out runs.
 const PausedReasonAutoFailures = "auto_failures"
 
-// extendsFailureStreak reports whether a run ending in state counts toward
-// Job.ConsecutiveFailures. Skipped and canceled runs (contention, overlap,
-// shutdown) are not the job's fault and do not.
-func extendsFailureStreak(state RunState) bool {
-	return state == RunStateFailed || state == RunStateTimedOut
+// streakEffect is what a finished run does to Job.ConsecutiveFailures.
+type streakEffect int
+
+const (
+	streakKeep streakEffect = iota
+	streakExtend
+	streakReset
+)
+
+// transientTurnCauses are the host-wide backend conditions that clear on
+// their own: a turn failing on one says nothing about the job.
+var transientTurnCauses = map[TurnCause]bool{
+	TurnCauseBackendOverloaded:  true,
+	TurnCauseBackendRateLimited: true,
+	TurnCauseBackendUnreachable: true,
 }
 
-// nextFailureStreak is ConsecutiveFailures after a run that ended in state:
-// a counted failure extends the streak, a success ends it, anything else
-// leaves it unchanged.
-func nextFailureStreak(streak int, state RunState) int {
-	switch {
-	case extendsFailureStreak(state):
+// failureStreakEffect is how a run that ended in state with errClass (and
+// cause, for a failed turn) moves the failure streak. A success resets it.
+// Failures the job did not cause leave it alone: a lost sandbox connection
+// (the restart reconciler's orphans included) and a turn failed by a
+// transient backend cause. So do skipped and canceled runs.
+func failureStreakEffect(state RunState, errClass ErrorClass, cause TurnCause) streakEffect {
+	switch state {
+	case RunStateSucceeded:
+		return streakReset
+	case RunStateTimedOut:
+		return streakExtend
+	case RunStateFailed:
+		if errClass == ErrClassSandboxTransport ||
+			(errClass == ErrClassTurnFailed && transientTurnCauses[cause]) {
+			return streakKeep
+		}
+		return streakExtend
+	}
+	return streakKeep
+}
+
+// nextFailureStreak is ConsecutiveFailures after a run, per failureStreakEffect.
+func nextFailureStreak(streak int, state RunState, errClass ErrorClass, cause TurnCause) int {
+	switch failureStreakEffect(state, errClass, cause) {
+	case streakExtend:
 		return streak + 1
-	case state == RunStateSucceeded:
+	case streakReset:
 		return 0
 	}
 	return streak
