@@ -60,7 +60,11 @@
 - **cron：云沙箱连接在运行中断开，重新计入自动暂停**（#3422）：撤回 0.1.43 #3345 里「云沙箱连接中断不计」的那一半，以及它写明的已知副作用
   - 运行中丢失 sandbox stream（`failed/sandbox_transport`）重新计入连续失败。job 自己的负载每次都把 microVM 弄崩（OOM、崩溃）时，连续失败达到 `cron.auto_pause_after_failures` 后会照常自动暂停。有副作用的 job 因此最多重复执行这么多次，每次在确认队列里留一条记录。naozhi 所在主机一侧的原因（休眠、网络中断）导致的运行中断开同样计入：连接断在哪一端，代码无法区分
   - 只有 naozhi 重启后由启动收尾结掉的孤儿 sandbox run 仍然不计。run 记录、错误分类和通知文案不变，仍是 `sandbox_transport`
-  - 后端瞬时故障（`turn_failed` 且原因是 `backend_overloaded` / `backend_rate_limited` / `backend_unreachable`）仍然不计
+  - 后端瞬时故障（`turn_failed` 且原因是 `backend_overloaded` / `backend_rate_limited` / `backend_unreachable`）仍然不计入连续失败，但改为单独计数，见下一条
+- **cron：后端瞬时故障持续 6 小时以上也会自动暂停**（#3422）：此前过载 / 限流 / 连不上模型服务（`apierr` 的网络错误和超时都归到这里）一律不计，模型服务地址配错、凭证所在网络永久不通时，每个 job 每个 tick 都发一条失败通知，永不暂停
+  - 每个 job 新增两个落盘字段 `transient_failures`（自上次成功、恢复或编辑以来的瞬时故障次数）与 `transient_failing_since`（其中第一次的结束时间）。成功、恢复、编辑都会清零；job 自身原因的失败和重启孤儿都不动它们
+  - 次数达到 `cron.auto_pause_after_failures`，且距第一次已满 6 小时，这次失败就自动暂停该 job。`paused_reason` 仍是 `auto_failures`，通知照常带「已连续失败 N 次，任务已自动暂停」（N 是瞬时故障次数），`cron job auto-paused` 日志多了 `transient=true` 与 `transient_failures` 字段
+  - 窗口跟执行频率无关：每 5 分钟一次的 job 要故障 6 小时才停（不会因为半小时的故障就停），每天一次的 job 仍要 5 次。阈值设为负数同样关闭这条规则；6 小时不可配置
 
 ### Security
 
