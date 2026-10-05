@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -515,6 +516,33 @@ func TestBookUnownedResults_BooksCLIStartedTurnsOnce(t *testing.T) {
 	}
 	if len(amounts) != 3 || !approxEq(amounts[0]+amounts[1]+amounts[2], 3.5) {
 		t.Fatalf("ledger amounts = %v, want three entries summing to 3.5", amounts)
+	}
+}
+
+// No run record shares an unowned result's run id, so the id names the CLI
+// session reconcile attributes it to: the result's own, else the session's.
+func TestBookUnownedResults_RunIDNamesTheCLISession(t *testing.T) {
+	proc := &TestProcess{AliveVal: true}
+	s, ledger := newLedgerSession(t, "dashboard:direct:host:general", proc)
+	hooked := &hookedTestProcess{TestProcess: proc}
+	s.storeProcess(hooked)
+	bookUnownedResults(s, hooked)
+
+	hooked.fn(clievent.SendResult{CostUSD: 1}) // neither knows the session yet
+	hooked.fn(clievent.SendResult{CostUSD: 3, SessionID: "sid-result"})
+	s.setSessionID("sid-held")
+	hooked.fn(clievent.SendResult{CostUSD: 6})
+	want := map[float64]string{1: "", 2: "unowned:sid-result:", 3: "unowned:sid-held:"}
+	ents := allEntries(t, ledger)
+	if len(ents) != len(want) {
+		t.Fatalf("entries = %+v, want %d", ents, len(want))
+	}
+	for _, e := range ents {
+		prefix, ok := want[e.Amount]
+		id, found := strings.CutPrefix(e.RunID, prefix)
+		if !ok || !found || len(id) != 16 || strings.Contains(id, ":") {
+			t.Errorf("entry $%v run id = %q, want %q + a bare run id", e.Amount, e.RunID, prefix)
+		}
 	}
 }
 
