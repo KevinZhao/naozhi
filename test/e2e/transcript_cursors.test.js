@@ -13,6 +13,7 @@
 
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
+const { waitForWs } = require('./shim_wait');
 
 const KEY = 'dashboard:direct:2026-01-01-120000-1:myproject';
 
@@ -32,7 +33,7 @@ test.beforeEach(({ }, testInfo) => {
 async function openSubscribed(page, mock) {
   await page.waitForSelector('.session-card');
   // @ts-ignore — wsm / WS_STATES are mirrored onto window by the e2e shim.
-  await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+  await waitForWs(page);
   await page.click(`.session-card[data-key="${KEY}"]`);
   return subscribed(page, mock, KEY);
 }

@@ -25,6 +25,7 @@
 
 const { test, expect } = require('@playwright/test');
 const { startMockServer, defaultSessions } = require('./mock-server');
+const { waitForWs } = require('./shim_wait');
 
 const MANIFEST = {
   backends: [
@@ -331,7 +332,7 @@ for (const c of SENT_CASES) {
     try {
       await page.goto(own.url + '/dashboard');
       await page.waitForSelector('.session-card');
-      if (c.ws) await page.waitForFunction(() => /** @type {any} */ (window).nz.test.wsm.state === /** @type {any} */ (window).nz.test.WS_STATES.CONNECTED);
+      if (c.ws) await waitForWs(page);
       await page.click('.hdr-btn[title="New Session"]');
       await page.selectOption('#new-access-profile', c.profile);
       await page.selectOption('#new-backend', c.backend);

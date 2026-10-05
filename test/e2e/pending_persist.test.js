@@ -8,6 +8,7 @@
 // instead of the project dir.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
+const { waitForShim } = require('./shim_wait');
 
 let mock;
 
@@ -23,6 +24,7 @@ test.beforeEach(async ({ page }) => {
   mock.resetCalls();
   await page.goto(`${mock.url}/dashboard`);
   await page.waitForSelector('.session-card', { timeout: 5000 });
+  await waitForShim(page);
   // Clear any pending blob left by a prior test in this browser context.
   await page.evaluate(() => localStorage.removeItem('nz:pending_sessions'));
 });
@@ -58,6 +60,7 @@ test('reload-before-send still carries the workspace on the first send', async (
   // Simulate the proven trigger: reload BEFORE sending the first message.
   await page.reload();
   await page.waitForSelector('.session-card', { timeout: 5000 });
+  await waitForShim(page);
   // Let fetchSessions merge the restored pending session into the sidebar.
   await page.waitForFunction((k) => !!sessionWorkspaces[k], key, { timeout: 5000 });
 

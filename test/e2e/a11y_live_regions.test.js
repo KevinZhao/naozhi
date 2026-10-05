@@ -21,6 +21,7 @@
 
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
+const { waitForWs } = require('./shim_wait');
 
 const READY = 'dashboard:direct:2026-01-01-120000-1:myproject';
 const RUNNING = 'dashboard:direct:2026-01-01-120001-2:otherproject';
@@ -51,7 +52,7 @@ async function open(browser, key) {
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(mock.url + '/dashboard');
-  await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+  await waitForWs(page);
   const conn = mock.wsConnections[mock.wsConnections.length - 1];
   await page.evaluate(() => {
     const w = /** @type {any} */ (window);

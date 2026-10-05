@@ -13,6 +13,7 @@
 // /api/sessions/send per test. The WS test opts into the mock's socket.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
+const { waitForWs } = require('./shim_wait');
 
 test.use({ viewport: { width: 1280, height: 800 } });
 
@@ -328,7 +329,7 @@ test.describe('over the WebSocket', () => {
 
   test('a text send goes out as a frame, clears the composer and consumes the pending workspace', async ({ page }) => {
     await page.goto(wsMock.url + '/dashboard');
-    await page.waitForFunction(() => window.nz.test.wsm.state === window.nz.test.WS_STATES.CONNECTED);
+    await waitForWs(page);
     await page.waitForSelector('.session-card');
     const blob = () => page.evaluate(() => JSON.parse(localStorage.getItem('nz:pending_sessions') || '{}'));
     const key = await page.evaluate((proj) => {
@@ -359,7 +360,7 @@ test.describe('over the WebSocket', () => {
   // the upload used, so attachments always ride the HTTP POST.
   test('a send carrying files takes HTTP even while the socket is up', async ({ page }) => {
     await compose(page, 'with a photo', { withFile: true, url: wsMock.url });
-    await page.waitForFunction(() => window.nz.test.wsm.state === window.nz.test.WS_STATES.CONNECTED);
+    await waitForWs(page);
     const bodies = await reply(page, 200, { status: 'accepted' });
     await spyTimers(page);
     await send(page);
@@ -396,7 +397,7 @@ test.describe('over the WebSocket', () => {
       return page.evaluate(() => /** @type {any} */ (window).__toasts);
     };
     const opened = (text) => compose(page, text, { withFile: true, url: wsMock.url })
-      .then(() => page.waitForFunction(() => window.nz.test.wsm.state === window.nz.test.WS_STATES.CONNECTED));
+      .then(() => waitForWs(page));
 
     await opened('accepted');
     await reply(page, 200, { status: 'accepted' });

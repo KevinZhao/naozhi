@@ -14,6 +14,7 @@
 // in WebKit as well as Chromium.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
+const { waitForWs } = require('./shim_wait');
 
 const desktop = { viewport: { width: 1280, height: 800 } };
 const KEY_A = 'dashboard:direct:2026-01-01-120000-1:myproject';
@@ -42,7 +43,7 @@ async function open(browser, mock) {
   const page = await ctx.newPage();
   const errors = pageErrors(page);
   await page.goto(mock.url + '/dashboard');
-  await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+  await waitForWs(page);
   await page.click(`.session-card[data-key="${KEY_A}"]`);
   const conn = mock.wsConnections[mock.wsConnections.length - 1];
   await expect.poll(() => conn.messages.some((m) => m.type === 'subscribe' && m.key === KEY_A)).toBe(true);
@@ -119,7 +120,7 @@ test.describe('a body the short-circuit skipped', () => {
 
       await page.evaluate(() => { wsm.connect = () => {}; });
       conn.close();
-      await page.waitForFunction(() => wsm.state === WS_STATES.DISCONNECTED);
+      await waitForWs(page, 'DISCONNECTED');
       const m = mock.sessionsValidators.length;
       expect(await page.evaluate(() => fetchSessions()), 'the fallback poll applied a body').toBe(true);
       expect(validatorsSince(mock, m)[0], 'no validator for an unpainted body').toBe('');

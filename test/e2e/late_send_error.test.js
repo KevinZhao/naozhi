@@ -15,6 +15,7 @@
 // newer send (WS), or is dropped by the originator's gates (HTTP).
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
+const { waitForWs } = require('./shim_wait');
 
 const desktop = { viewport: { width: 1280, height: 800 } };
 const KEY = 'dashboard:direct:2026-01-01-120000-1:myproject';
@@ -41,7 +42,7 @@ async function open(browser) {
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(mock.url + '/dashboard');
-  await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+  await waitForWs(page);
   const conn = mock.wsConnections[mock.wsConnections.length - 1];
   await page.click(`.session-card[data-key="${KEY}"]`);
   await expect.poll(() => subs(conn).length).toBe(1);

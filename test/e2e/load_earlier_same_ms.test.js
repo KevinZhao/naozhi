@@ -9,6 +9,7 @@
 
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
+const { waitForWs } = require('./shim_wait');
 
 const desktop = { viewport: { width: 1280, height: 800 } };
 const KEY = 'dashboard:direct:2026-01-01-120000-1:myproject';
@@ -173,7 +174,7 @@ test.describe('加载更早的事件：页边界切在同一毫秒内', () => {
       await page.goto(mock.url + '/dashboard');
       await page.waitForSelector('.session-card');
       // @ts-ignore — wsm / WS_STATES are mirrored onto window by the e2e shim.
-      await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+      await waitForWs(page);
       await page.click(`.session-card[data-key="${KEY}"]`);
       const conn = mock.wsConnections[mock.wsConnections.length - 1];
       await expect.poll(() => conn.messages.some((/** @type {any} */ m) => m.type === 'subscribe' && m.key === KEY)).toBe(true);
