@@ -332,6 +332,70 @@ func TestRun_GoBaselineLosesItsLastUse(t *testing.T) {
 	}
 }
 
+// A skip in a file that compares against a baseline can keep the comparison
+// from ever running, so a new one there needs a ledger line; one elsewhere
+// in the package does not.
+func TestRun_SkipInAFileThatUsesABaseline(t *testing.T) {
+	t.Parallel()
+	const (
+		dir       = "internal/testhelper/"
+		constFile = dir + "sleep_ratchet_test.go"
+		gate      = "go-skip:internal/testhelper"
+	)
+	src := func(body ...string) string { return "package testhelper\n\n" + strings.Join(body, "\n") + "\n" }
+	const (
+		decl    = "const bareSleepBaseline = 135"
+		test    = "func TestX(t *testing.T) {\n\tif n > bareSleepBaseline {\n\t\tt.Fatal()\n\t}\n}"
+		skipped = "func TestY(t *testing.T) { t.Skip() }"
+	)
+	used := fakeTree{constFile: src(decl, test)}
+	skip := []raise{{gate, 0, 1}}
+	for _, tc := range []struct {
+		name    string
+		base    fakeTree // nil: used
+		head    fakeTree
+		want    []raise
+		cleared bool
+	}{
+		{name: "unchanged", head: used},
+		{name: "skip in the comparing test", head: fakeTree{constFile: src(decl, strings.Replace(test, "{\n", "{\n\tt.Skip(\"flaky\")\n", 1))}, want: skip},
+		{name: "skip in another test of the file", head: fakeTree{constFile: src(decl, test, skipped)}, want: skip},
+		{name: "Skipf", head: fakeTree{constFile: src(decl, test, `func TestY(t *testing.T) { t.Skipf("%d", 1) }`)}, want: skip},
+		{name: "SkipNow as a method value", head: fakeTree{constFile: src(decl, test, "func TestY(t *testing.T) { s := t.SkipNow; s() }")}, want: skip},
+		{name: "skip on a benchmark", head: fakeTree{constFile: src(decl, test, "func BenchmarkY(b *testing.B) { b.Skip() }")}, want: skip},
+		{name: "two skips", head: fakeTree{constFile: src(decl, test, skipped, "func TestZ(t *testing.T) { t.SkipNow() }")}, want: []raise{{gate, 0, 2}}},
+		{name: "skip in the file the test moved to", head: fakeTree{constFile: src(decl), dir + "other_test.go": src(test, skipped)}, want: skip},
+		{name: "skip in a file with no baseline use", head: fakeTree{constFile: src(decl, test), dir + "other_test.go": src(skipped)}},
+		{name: "SkipDir is not a skip", head: fakeTree{constFile: src(decl, test, "var errSkip = filepath.SkipDir")}},
+		{name: "skip removed", base: fakeTree{constFile: src(decl, test, skipped)}, head: used},
+		{name: "first use in a file that already skips", base: fakeTree{constFile: src(decl, skipped)}, head: fakeTree{constFile: src(decl, test, skipped)}},
+		{name: "ledger line clears it", head: fakeTree{constFile: src(decl, test, skipped), ledgerPath: `{"gate":"` + gate + `","from":0,"to":1,"issue":1,"reason":"r"}` + "\n"},
+			want: skip, cleared: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := tc.base
+			if b == nil {
+				b = used
+			}
+			problems, rs, err := run(b, tc.head, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(rs, tc.want) {
+				t.Errorf("raises = %v, want %v", rs, tc.want)
+			}
+			wantProblems := len(tc.want)
+			if tc.cleared {
+				wantProblems = 0
+			}
+			if len(problems) != wantProblems {
+				t.Errorf("problems = %q, want %d", problems, wantProblems)
+			}
+		})
+	}
+}
+
 // Retiring a baseline is a raise to -1 like any other; its ledger entry
 // clears it.
 func TestRun_DeletedGoBaselineWithLedgerEntry(t *testing.T) {

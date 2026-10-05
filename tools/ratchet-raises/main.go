@@ -4,7 +4,8 @@
 // line appended to scripts/ratchet-raises.jsonl citing an issue that carries
 // the ratchet-raise-approved label. A Go baseline constant that loses its
 // last use in its directory is a raise too (go-ref:, see goRefs for what
-// counts). Run from the repo root:
+// counts), and so is a new t.Skip in a file holding such a use (go-skip:).
+// Run from the repo root:
 //
 //	go run ./tools/ratchet-raises -base origin/master
 package main
