@@ -10,6 +10,10 @@
 
 ### Added
 
+- **cron：聊天里用 `/cron mode <id> fresh|keep` 切换任务的上下文模式**（#3406）：此前 IM 里只能在创建时用 `--keep-context` 决定，要换模式只能删掉重建（丢失 ID 与执行历史）
+  - 只在创建该任务的会话生效（与 `/cron del/pause/resume` 相同的前缀匹配和跨会话屏蔽）；模式词不区分大小写，`keep-context` 等同 `keep`；设成当前模式也返回成功
+  - 下次执行生效，正在执行的那次不受影响；与控制台编辑一样，连续失败计数（含瞬时故障计数）清零。任务处于暂停时不会自动恢复，回复里提示 `/cron resume <id>`
+  - 「对话上下文已超出模型上限」的失败通知与 `/cron add` 的创建回复改为给出 `/cron mode <id> fresh|keep`，不再建议删除后重建。按旧文案 `不带 --keep-context 重新创建` 匹配的告警请改为匹配 `/cron mode`
 - **Dashboard 版本提示与一键生效**（见 `docs/rfc/dashboard-update-notice.md`）：侧栏 header 新增一枚版本 chip，把此前只存在于日志里的"新版本已就绪"暴露出来，点击后确认即可让新版本生效。默认 `mode: download` 下后台 checker 发现新版本后数秒内就装好 binary，但生效要等重启——本项目自己的部署曾因此空转 22 小时，界面上毫无信号。
   - chip 区分两种状态并给出**相反**的操作：`install`（远端有新版本、磁盘未替换）与 `restart`（binary 已 staged，只需重启）。判定在服务端算好后由 `action` 字段下发，浏览器不做版本比较。这是正确性问题而非展示问题：`Replace()` 备份的是"当前磁盘上的 binary"，所以在 staged 态再装一次会用新版本覆盖 `.bak`，摧毁唯一可回滚的版本
   - 新增 `GET /api/system/update`（状态 + 预检 + 回滚命令）与 `POST /api/system/update/apply`（202 + 后台执行；`confirm_action` 须回传前端看到的 action，不一致返回 409）。不可操作时（dev build / 平台无 release 资产 / install 目录不可写 / 无受管服务）UI 给手工命令而不是一个点了必失败的按钮
@@ -86,8 +90,10 @@
   - 还没发出第一条消息的新会话，侧栏图标、会话头的 CLI 名、图片上传开关和模型列表跟随它将落到的 backend（显式选择，否则「自动」解析到的那个）；以前「自动」一律按 router 默认显示，显式选了 kiro 时图片上传开关也仍按 router 默认放行。远端节点上的显式选择同样驱动这些开关（与已列出的远端会话一致，按本节点缓存的 backend 清单查功能）；远端节点上的「自动」、单 backend 部署、以及第一条消息发出后到服务端列出该会话之前的这段时间，仍按 router 默认显示
   - 不做迁移：以前保存时被钉住的项目和 cron 任务保持原值（无法和有意的选择区分）。要恢复跟随，在项目设置或 cron 编辑里把 backend 选回「自动」并保存
 - `spawnSession` panic recover 错误消息不再双前缀 `"spawn process: spawn process:"`（RNEW-009）
-- IM 首轮自动接管不再在 naozhi 会拒绝接管时（max_procs 已满 / 该 key 正在 spawn / 正在关停 / planner 的 exempt 配额已满 / agent 的 model 或 backend 非法）先 SIGTERM 掉终端里的 Claude CLI；接管前改为先跑 `Router.TakeoverPrecheck`（#3395）
+- IM 首轮自动接管不再在 naozhi 会拒绝接管时（max_procs 已满 / 该 key 正在 spawn / 正在关停 / planner 的 exempt 配额已满 / agent 的 model 或 backend 非法）先 SIGTERM 掉终端里的 Claude CLI；接管前改为先跑 router 的接管检查（#3395）
 - 从未 spawn 过的源会话（历史面板 resume 占位 / backend 为空的旧持久化条目）上打开的 scratch 现在跑在源会话 resume 时会用的 CLI（router 默认 backend）上，不再落到 access profile 的 `default_backend`；`/api/scratch/open` 响应里的 `backend` 也改为报告实际解析出的 backend（#3420）
+- 接管外部 CLI 时，naozhi 在 SIGTERM 之前就向 router 预留该 key（`Router.ReserveTakeover`：in-flight 标记 + 一个 pending 名额），一直持有到新进程 spawn。此前预检只读状态，旧 CLI 退出的最长约 5s 里 key 上没有任何标记：同一 cwd 的第二个外部 CLI 接管会通过预检并被杀掉，max_procs 只剩一个名额时对两个不同 key 的接管也都能通过、其中一个杀掉 CLI 后才报满。现在第二次接管在杀进程前就返回 409「takeover already in progress」/ 503（dashboard、IM 自动接管同此；#3417）
+- Dashboard 的 Agent drill-in 走上 WS 实时推送：agent tailer 此前拿 operator workspace（`allowed_root`）当 transcript 根，`~/.claude/projects` 下的子 agent transcript 全被拒，客户端静默降级成 3s HTTP 轮询。现在 tailer 与 `/api/sessions/agent_events` 共用同一个解析后的 projects 根，并且两处都按 `PathContainedInRoot` 判定（macOS 上大小写与根不同的路径判定一致）
 
 ### Documentation
 

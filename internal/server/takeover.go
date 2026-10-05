@@ -98,18 +98,26 @@ func (s *Server) tryAutoTakeover(ctx context.Context, chatKey, key string, opts 
 	if best == nil {
 		return false
 	}
+	return s.adoptCandidate(ctx, key, best, opts)
+}
+
+// adoptCandidate stops the discovered CLI best and resumes its session on key.
+func (s *Server) adoptCandidate(ctx context.Context, key string, best *discovery.DiscoveredSession, opts session.AgentOpts) bool {
 	takeoverOpts := opts
 	takeoverOpts.Workspace = best.CWD
-	// A takeover the router would refuse must not cost the user the CLI.
-	if err := s.router.TakeoverPrecheck(key, takeoverOpts); err != nil {
+	// A takeover the router would refuse must not cost the user the CLI, and
+	// the lease keeps the key from other takeovers while the CLI exits.
+	lease, err := s.router.ReserveTakeover(key, takeoverOpts)
+	if err != nil {
 		slog.Info("auto-takeover: refused before kill", "key", key, "pid", best.PID, "err", err)
 		return false
 	}
 	if err := s.killAndCleanupClaude(ctx, best.PID, best.ProcStartTime, best.CWD, best.SessionID); err != nil {
+		lease.Release()
 		slog.Warn("auto-takeover: kill failed", "key", key, "pid", best.PID, "err", err)
 		return false
 	}
-	if _, err := s.router.Takeover(ctx, key, best.SessionID, best.CWD, takeoverOpts); err != nil {
+	if _, err := s.router.Takeover(ctx, lease, best.SessionID, best.CWD); err != nil {
 		slog.Warn("auto-takeover: resume failed", "key", key, "session_id", best.SessionID, "err", err)
 		return false
 	}

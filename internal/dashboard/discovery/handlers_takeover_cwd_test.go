@@ -25,9 +25,13 @@ type recordingRouter struct {
 	cwd string
 }
 
-func (r *recordingRouter) TakeoverPrecheck(string) error { return nil }
+func (r *recordingRouter) ReserveTakeover(string, session.AgentOpts) (TakeoverLease, error) {
+	return r, nil
+}
 
-func (r *recordingRouter) Takeover(_ context.Context, _, _, cwd string, _ session.AgentOpts) error {
+func (r *recordingRouter) Release() {}
+
+func (r *recordingRouter) Takeover(_ context.Context, _, cwd string) error {
 	r.mu.Lock()
 	r.cwd = cwd
 	r.mu.Unlock()

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // TestVerifyProcOwnedByEuid_Self confirms that the helper accepts a process
@@ -224,5 +226,117 @@ func TestDashboardTakeover_InvalidAgentModelLeavesCLIAlive(t *testing.T) {
 	case <-exited:
 		t.Fatal("the external CLI was killed for a takeover the router refuses")
 	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestTryAutoTakeover_HoldsTheKeyWhileTheCLIExits pins #3417 for IM: the key
+// is reserved before the SIGTERM, so while the terminal CLI exits another
+// takeover of it is refused, and the key is free again once the takeover ends.
+func TestTryAutoTakeover_HoldsTheKeyWhileTheCLIExits(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("discovery is POSIX-only")
+	}
+	const key = "test:direct:u1:general"
+	dir := t.TempDir()
+	termed, trapped := filepath.Join(dir, "termed"), filepath.Join(dir, "trapped")
+	// Survives SIGTERM, recording it, so the exit wait lasts until ctx ends.
+	cmd := exec.Command("sh", "-c", `trap 'echo > "$0"' TERM; echo > "$1"; while :; do sleep 0.05; done`, termed, trapped)
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot start child: %v", err)
+	}
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }()
+	t.Cleanup(func() { _ = cmd.Process.Kill(); <-exited })
+	testhelper.Eventually(t, func() bool {
+		_, err := os.Stat(trapped)
+		return err == nil
+	}, 5*time.Second, "the child never installed its SIGTERM trap")
+
+	claudeDir, ws := t.TempDir(), t.TempDir()
+	live, _ := json.Marshal(map[string]any{
+		"pid": cmd.Process.Pid, "sessionId": "0b8f3c2e-5d7a-4e1b-9c6f-2a4d8e1f3b5c",
+		"cwd": ws, "startedAt": time.Now().UnixMilli(), "entrypoint": "cli",
+	})
+	if err := os.MkdirAll(filepath.Join(claudeDir, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "sessions", "1.json"), live, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := cli.NewWrapperLazy("/nonexistent/claude", &cli.ClaudeProtocol{}, "claude")
+	router := session.NewRouter(session.RouterConfig{Wrapper: w, MaxProcs: 1})
+	t.Cleanup(router.Shutdown)
+	s := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
+	s.claudeDir = claudeDir
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() { done <- s.tryAutoTakeover(ctx, key, key, session.AgentOpts{Workspace: ws}) }()
+	testhelper.Eventually(t, func() bool {
+		_, err := os.Stat(termed)
+		return err == nil
+	}, 5*time.Second, "the terminal CLI never got its SIGTERM")
+	if _, err := router.ReserveTakeover(key, session.AgentOpts{}); !errors.Is(err, session.ErrSpawnInFlight) {
+		t.Errorf("ReserveTakeover during the exit wait = %v, want ErrSpawnInFlight", err)
+	}
+	cancel()
+	if <-done {
+		t.Fatal("the takeover reported success with a CLI that cannot spawn")
+	}
+	lease, err := router.ReserveTakeover(key, session.AgentOpts{})
+	if err != nil {
+		t.Fatalf("ReserveTakeover after the takeover ended: %v", err)
+	}
+	lease.Release()
+}
+
+// A kill refused for a PID whose identity changed gives the key back: a lease
+// kept would park every later spawn of it until restart.
+func TestAdoptCandidate_KillFailureReleasesTheKey(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("discovery is POSIX-only")
+	}
+	const key = "test:direct:u2:general"
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot start child: %v", err)
+	}
+	waited := false
+	t.Cleanup(func() {
+		if !waited {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+	pst, err := discovery.ProcStartTime(cmd.Process.Pid)
+	if err != nil {
+		t.Skipf("cannot read the child's start time: %v", err)
+	}
+	w := cli.NewWrapperLazy("/nonexistent/claude", &cli.ClaudeProtocol{}, "claude")
+	router := session.NewRouter(session.RouterConfig{Wrapper: w, MaxProcs: 1})
+	t.Cleanup(router.Shutdown)
+	s := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
+	s.claudeDir = t.TempDir()
+
+	ws := t.TempDir()
+	reused := &discovery.DiscoveredSession{
+		PID: cmd.Process.Pid, ProcStartTime: pst + 1, CWD: ws,
+		SessionID: "0b8f3c2e-5d7a-4e1b-9c6f-2a4d8e1f3b5d",
+	}
+	if s.adoptCandidate(context.Background(), key, reused, session.AgentOpts{Workspace: ws}) {
+		t.Fatal("adopted a candidate whose PID was reused")
+	}
+	lease, err := router.ReserveTakeover(key, session.AgentOpts{})
+	if err != nil {
+		t.Fatalf("ReserveTakeover after the failed kill: %v", err)
+	}
+	lease.Release()
+	// The process at the reused PID is not the CLI: only this kill may end it.
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	waited = true
+	if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); !ok || ws.Signal() != syscall.SIGKILL {
+		t.Errorf("the reused PID's process ended with %v, want the test's SIGKILL", cmd.ProcessState)
 	}
 }
