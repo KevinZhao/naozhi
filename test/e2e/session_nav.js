@@ -17,6 +17,9 @@ async function openSessionCard(page, card) {
     await expect(page.locator('body')).not.toHaveClass(/mobile-chat-view/);
   }
   await card.click();
+  // A click lost to a card re-rendered mid-press fails here, not at whatever
+  // the caller asserts about the opened session.
+  await expect(card).toHaveClass(/\bactive\b/);
 }
 
 module.exports = { openSessionCard };

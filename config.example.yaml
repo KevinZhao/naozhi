@@ -387,6 +387,22 @@ platforms:
     encrypt_key: "${FEISHU_ENCRYPT_KEY}"
     max_reply_length: 4000
 
+# IM sender access. Anyone who can message the bot can run commands on this
+# host, so restrict every platform you enable. Absent = every sender allowed
+# (startup and `naozhi config check` warn per open platform). A refused sender
+# is logged at Info as "im access denied" with the user ID to copy here; in a
+# direct chat they are also told their ID, at most once per 10 minutes. IDs:
+# Feishu open_id (ou_...), Slack user ID (U...), Discord user ID, Weixin from.
+# admin_users alone may run /cron, /cd and /project; leave it empty and every
+# allowed user is an admin. Changes need a restart.
+# im_access:
+#   default_deny: false     # true refuses every platform without an entry
+#   deny_reply: ""          # replaces the direct-chat refusal text
+#   platforms:
+#     feishu:
+#       allowed_users: ["ou_xxxxxxxx"]
+#       admin_users: ["ou_yyyyyyyy"]
+
 log:
   level: "info"
   # Size cap for the files launchd (StandardOutPath/StandardErrorPath) or

@@ -106,6 +106,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		agents:        agents,
 		agentCommands: agentCommands,
 		allowedRoot:   opts.AllowedRoot,
+		imAccess:      opts.IMAccess,
 		debugMode:     opts.Features.Debug,
 		resolver:      resolver,
 		sysessionMgr:  opts.Sysession.Manager,

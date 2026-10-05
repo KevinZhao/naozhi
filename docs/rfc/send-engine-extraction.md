@@ -166,8 +166,8 @@ type sendNotifier interface {
 
 ```go
 // sendErrorCallback 取代 Hub.httpSendErrorCallback。informational 结果
-// (ErrAbortedByUrgent / ErrSessionReset / ErrReconnectedUnknown) 被丢弃：
-// 该回调向 key 的每个订阅者 fan-out，若 A 的 HTTP send 被 B 的 /urgent 打断，
+// (ErrSessionReset / ErrReconnectedUnknown) 被丢弃：
+// 该回调向 key 的每个订阅者 fan-out，若 A 的 HTTP send 被 B 的 /new 重置，
 // B 的 tab 会自己拆掉乐观气泡。session_state 负责收敛 UI。
 func (e *sendEngine) sendErrorCallback(key string) asyncErrorFn {
     return func(err error, msg string) {

@@ -62,7 +62,7 @@ cmd/naozhi/main.go
   核心链路（IM 消息 → CLI 进程）
   -> cli          Protocol 接口（stream-json/ACP）+ spawn/manage CLI 进程 + watchdog；子包 clievent/backend/procmeter
   -> session      Session router、并发控制、TTL、持久化恢复；子包 agentlink/api/backendstore/runhistory/sessiontable/sessionview/spawnpool/workspacestore/knownids
-  -> routerrelay  Router 通知与 cost-run 归属的一次性绑定转发器（断开 router↔hub/scheduler 构造环）
+  -> routerrelay  Router 通知的一次性绑定转发器（断开 router↔hub 构造环）
   -> dispatch     IM 消息处理 + slash 命令；每条消息经 Turns 端口交给 turn.Orchestrator（IM origin/delivery 在 im_origin.go）
   -> turn         Orchestrator（Submit/Reset/ShouldNotify/Retire：owner loop、按 Sink 去重投递、detached 轮、panic 恢复；端口 Origin/Delivery/Sender/Admission）+ 它独占的 per-session 消息队列（非导出，`turn.New` 按 QueueOptions 构造；Msg/Mode/ParseMode/Coalesce）+ /new /clear /urgent 解析（Parse）；dispatch 和 server 的 dashboard 发送（dash_origin.go 的 wsOrigin/httpOrigin）共用同一个 Orchestrator；server 的 turnSender 实现 Sender；不 import dispatch/server/platform/session
   -> platform     Platform 接口 + feishu/slack/discord/weixin 子包
@@ -89,6 +89,7 @@ cmd/naozhi/main.go
   辅助域
   -> agentcore    AgentCore 云沙箱 control-plane 客户端
   -> agentroute   "/command agentId" 解析的单一真相源
+  -> imauth       IM 发送者授权策略（per-platform allowlist + admin 层，Decide 纯逻辑），config 构造、dispatch 执行；叶子
   -> assets       Dashboard "installed assets" 零依赖叶子
   -> ccassets     Claude Code 资产浏览 provider（dashboard 用）
   -> ccmodels     toolbox 推荐模型清单 ↔ cc settings 的对账（纯逻辑；子包 ccprobe 负责实跑验证）

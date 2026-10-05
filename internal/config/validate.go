@@ -30,8 +30,9 @@ type ValidationDiag struct {
 
 // Validate reports non-fatal config mistakes that must not block startup but
 // the operator needs to see: cli.backends IDs missing from the backend.Profile
-// registry, and a cli.backend that startup cannot bind as the default. MUST be
-// called after backend.RegisterDefaults() or every backend is flagged unknown.
+// registry, a cli.backend that startup cannot bind as the default, and an IM
+// platform no im_access rule restricts. MUST be called after
+// backend.RegisterDefaults() or every backend is flagged unknown.
 func (c *Config) Validate() []ValidationDiag {
 	var diags []ValidationDiag
 
@@ -84,7 +85,7 @@ func (c *Config) Validate() []ValidationDiag {
 		}
 	}
 
-	return diags
+	return append(diags, c.imAccessDiags()...)
 }
 
 // knownBackendIDs returns every registered backend ID, sorted for

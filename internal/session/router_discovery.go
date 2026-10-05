@@ -407,18 +407,27 @@ func errTakeoverRaced(key string) error {
 	return fmt.Errorf("%w: key %s", ErrTakeoverRaced, key)
 }
 
-// TakeoverPrecheck returns the error Takeover on key would be refused with
-// right now (ErrRouterStopped, ErrSpawnInFlight or ErrMaxProcs), changing
-// nothing, so a caller can refuse before it kills the external CLI. The
-// capacity check is reserveSpawn's for a non-exempt spawn; the state can
-// still change before Takeover runs.
-func (r *Router) TakeoverPrecheck(key string) (err error) {
+// TakeoverPrecheck returns the error Takeover(key, opts) would be refused
+// with before spawning (invalid model or backend, ErrRouterStopped,
+// ErrSpawnInFlight, ErrMaxProcs or, for exempt opts, ErrMaxExemptSessions),
+// changing nothing, so a caller can refuse before it kills the external CLI.
+// The capacity checks are reserveSpawn's; the state can still change before
+// Takeover runs.
+func (r *Router) TakeoverPrecheck(key string, opts AgentOpts) (err error) {
+	if err := validateModel(opts.Model); err != nil {
+		return err
+	}
+	if err := validateBackend(opts.Backend); err != nil {
+		return err
+	}
 	if r.stopped.Load() {
 		return ErrRouterStopped
 	}
 	r.ss.View(func(v sessView) {
 		if _, inflight := v.Ext().SpawnInFlight(key); inflight {
 			err = ErrSpawnInFlight
+		} else if opts.Exempt {
+			err = takeoverExemptRefusal(v, key)
 		} else if !takeoverHasSlot(v, key, r.maxProcs) {
 			err = fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
 		}
