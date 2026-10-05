@@ -17,16 +17,12 @@ const SHIM_TIMEOUT_MS = 10000;
 
 /**
  * Resolves once window.nz.test is installed. On timeout the error says how
- * far the page got and which page errors were seen while waiting.
+ * far the page got, the shim's HTTP status, and the page errors and console
+ * errors the current document has produced (load-time ones included).
  * @param {Page} page
  * @param {WaitOpts} [opts]
  */
 async function waitForShim(page, opts = {}) {
-  /** @type {string[]} */
-  const errors = [];
-  /** @param {Error} e */
-  const onError = (e) => errors.push(e.message);
-  page.on('pageerror', onError);
   try {
     await page.waitForFunction(() => {
       const w = /** @type {any} */ (window);
@@ -38,15 +34,23 @@ async function waitForShim(page, opts = {}) {
       return {
         url: location.pathname,
         shimTag: !!document.querySelector('script[src="/e2e-shim.js"]'),
-        shimFetched: performance.getEntriesByType('resource').some((r) => r.name.endsWith('/e2e-shim.js')),
         nz: !!w.nz,
         nzTest: !!(w.nz && w.nz.test),
       };
     }).catch((e) => ({ evaluateFailed: String(e) }));
-    throw new Error('e2e shim not installed: ' + JSON.stringify(seen) +
-      '; page errors: ' + JSON.stringify(errors) + '; ' + String(err), { cause: err });
-  } finally {
-    page.off('pageerror', onError);
+    // page.requests() keeps the last 100 requests across navigations; the
+    // newest shim request is this document's unless it has aged out.
+    const shimReq = (await page.requests().catch(() => []))
+      .filter((r) => r.url().endsWith('/e2e-shim.js')).pop();
+    const shimResp = shimReq && await shimReq.response().catch(() => null);
+    const shimStatus = !shimReq ? 'not requested' : shimResp ? shimResp.status() : 'no response';
+    const since = /** @type {const} */ ({ filter: 'since-navigation' });
+    const errors = (await page.pageErrors(since).catch(() => [])).map((e) => e.message);
+    const consoleErrors = [...new Set((await page.consoleMessages(since).catch(() => []))
+      .filter((m) => m.type() === 'error').map((m) => m.text()))];
+    throw new Error('e2e shim not installed: ' + JSON.stringify({ ...seen, shimStatus }) +
+      '; page errors: ' + JSON.stringify(errors) +
+      '; console errors: ' + JSON.stringify(consoleErrors) + '; ' + String(err), { cause: err });
   }
 }
 

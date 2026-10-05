@@ -2,7 +2,7 @@
 // shim_wait.js against a page whose e2e shim is late or missing (#3425). A
 // bare `wsm` read in that window throws, and waitForFunction does not retry a
 // throwing predicate; the helpers must keep polling, and say what they saw
-// when the shim never arrives.
+// when the shim never arrives or throws while loading.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
 const { waitForShim, waitForWs } = require('./shim_wait');
@@ -38,7 +38,19 @@ test('a shim that never loads fails waitForShim with what the page got to', asyn
   await page.route('**/e2e-shim.js', (route) => route.fulfill({ status: 404, body: '' }));
   await page.goto(mock.url + '/dashboard');
   const err = await waitForShim(page, { timeout: 1000 }).then(() => null, (e) => e);
-  expect(err && err.message).toMatch(/^e2e shim not installed: \{"url":"\/dashboard","shimTag":true,.*"nz":true,"nzTest":false\}; page errors: /);
+  expect(err && err.message).toMatch(/^e2e shim not installed: \{"url":"\/dashboard","shimTag":true,"nz":true,"nzTest":false,"shimStatus":404\}; page errors: \[\]; console errors: /);
+  // A timeout, not a predicate that threw on the missing surface.
+  expect(err.cause && err.cause.name).toBe('TimeoutError');
+});
+
+test('a shim that throws while loading is named in the waitForShim failure', async ({ page }) => {
+  await page.route('**/e2e-shim.js', (route) => route.fulfill({
+    status: 200, contentType: 'text/javascript', body: 'throw new Error("shim boom at load");',
+  }));
+  await page.goto(mock.url + '/dashboard');
+  const err = await waitForShim(page, { timeout: 1000 }).then(() => null, (e) => e);
+  expect(err && err.message).toMatch(/"nzTest":false,"shimStatus":200\}; page errors: \["shim boom at load"\]; /);
+  expect(err.cause && err.cause.name).toBe('TimeoutError');
 });
 
 test('waitForWs rejects a state that WS_STATES does not have', async ({ page }) => {
