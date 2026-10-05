@@ -136,25 +136,25 @@ async function takeoverThenSend(input, text) {
     dropDiscovered(pd.pid, pd.node);
     removeSidebarCard(discoveredKey(pd.pid, pd.node));
     selection.pendingDiscovered = null;
-    // Poll up to 10s for the session to appear. A local takeover also reports
-    // its outcome; a failure ends the wait unless another attempt holds the key.
+    // Poll up to 10s. A local takeover waits for its own attempt to report ready,
+    // so it never sends into a session another actor put on the key; any failure
+    // ends the wait. A remote takeover or an expired outcome ("unknown") goes by the key alone.
     const takenKey = data.key;
     const takenNode = pd.node || 'local';
     const statusURL = data.takeover_id && takenNode === 'local' ? NZ_CONTRACT.API.discovered_takeover_status + '?id=' + encodeURIComponent(data.takeover_id) : '';
-    let ready = false, failed = null;
-    for (const end = Date.now() + 10000; !ready && (!failed || failed.class === 'in_progress') && Date.now() < end;) {
+    let own = { state: statusURL ? 'pending' : 'unknown', class: '' }, ready = false;
+    for (const end = Date.now() + 10000; !ready && own.state !== 'failed' && Date.now() < end;) {
       await new Promise(resolve => setTimeout(resolve, 500));
       sessionList.lastVersion = 0;
       const [, st] = await Promise.all([shell.fetchSessions(),
         statusURL && fetchJSON(statusURL, { headers: authHeaders(), timeoutMs: 2000 }).catch(() => null)]);
-      ready = !!sessionList.sessionsData[sid(takenKey, takenNode)];
-      if (!ready && st && st.state === 'failed') failed = st;
+      if (st && st.state) own = st;
+      ready = (own.state === 'ready' || own.state === 'unknown') && !!sessionList.sessionsData[sid(takenKey, takenNode)];
     }
     if (!ready) {
-      showToast(failed ? takeoverFailText(failed.class) : '接管超时：外部 CLI 已终止，但新会话未就绪。对话记录仍在，可稍后从历史记录重新打开', 'error', 8000);
+      showToast(own.state === 'failed' ? takeoverFailText(own.class) : '接管超时：外部 CLI 已终止，但新会话未就绪。对话记录仍在，可稍后从历史记录重新打开', 'error', 8000);
       return endTakeover(input, btn, 'send a message...');
     }
-    // Session is ready — switch to it and send the message
     composer.sending = false;
     shell.selectSession(takenKey, takenNode);
     setMsgValue(document.getElementById('msg-input'), text);
