@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -139,6 +140,7 @@ func TestSend_ExitErrorCarriesStderrClass(t *testing.T) {
 				errCh <- err
 			}()
 			_ = sh.expectWrite(t, 2*time.Second)
+			nextMilli()
 			for _, f := range tc.frames {
 				sh.srv.SendFrame(f)
 			}
@@ -179,6 +181,14 @@ func TestSend_ExitErrorCarriesStderrClass(t *testing.T) {
 // before it exits 1 on a stale --resume id (usage trimmed).
 const startupRejectResult = `{"type":"result","subtype":"error_during_execution","duration_ms":0,"is_error":true,"num_turns":0,"session_id":"abc","total_cost_usd":0,"errors":["No conversation found with session ID: abc"]}`
 
+// nextMilli waits for the wall clock to leave the current millisecond, so the
+// frames a test sends next are logged after the turn start, as claude's are.
+func nextMilli() {
+	for ms := time.Now().UnixMilli(); time.Now().UnixMilli() <= ms; {
+		runtime.Gosched()
+	}
+}
+
 // stdoutFrame wraps one CLI stdout line in a shim stdout frame.
 func stdoutFrame(seq int, line string) string {
 	b, _ := json.Marshal(map[string]any{"type": "stdout", "seq": seq, "line": line})
@@ -187,15 +197,19 @@ func stdoutFrame(seq int, line string) string {
 
 // A legacy Send returns claude's startup-reject result itself when no
 // startup-failure exit follows it, and at once when it is no startup reject.
+// An abort armed while the result is held does not outlive the turn.
 func TestSend_StartupRejectResultWithoutStartupExit(t *testing.T) {
 	cases := []struct {
-		name        string
-		grace       time.Duration
-		abort       bool
-		frames      []string
-		wantAborted bool
+		name          string
+		grace         time.Duration
+		abort         bool
+		abortWhenHeld bool
+		frames        []string
+		wantAborted   bool
 	}{
 		{name: "no exit within the grace", grace: 50 * time.Millisecond,
+			frames: []string{stdoutFrame(1, startupRejectResult)}},
+		{name: "abort while held", grace: 100 * time.Millisecond, abortWhenHeld: true,
 			frames: []string{stdoutFrame(1, startupRejectResult)}},
 		{name: "clean exit", grace: time.Minute, frames: []string{
 			stdoutFrame(1, startupRejectResult),
@@ -227,11 +241,25 @@ func TestSend_StartupRejectResultWithoutStartupExit(t *testing.T) {
 				done <- sent{sr, err}
 			}()
 			_ = sh.expectWrite(t, 2*time.Second)
+			nextMilli()
 			if tc.abort {
 				sh.proc.turn.abortRequested.arm()
 			}
 			for _, f := range tc.frames {
 				sh.srv.SendFrame(f)
+			}
+			if tc.abortWhenHeld {
+				// readLoop takes the abort marker before it logs the result.
+				deadline := time.After(2 * time.Second)
+				for sh.proc.findResultSince(0) == nil {
+					select {
+					case <-deadline:
+						t.Fatal("the result was never logged")
+					default:
+						runtime.Gosched()
+					}
+				}
+				sh.proc.turn.abortRequested.arm()
 			}
 			select {
 			case got := <-done:
@@ -243,6 +271,9 @@ func TestSend_StartupRejectResultWithoutStartupExit(t *testing.T) {
 				}
 			case <-time.After(3 * time.Second):
 				t.Fatal("Send did not return the result")
+			}
+			if sh.proc.turn.abortRequested.armed() {
+				t.Error("an abort marker outlived the turn")
 			}
 		})
 	}

@@ -158,6 +158,11 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 		if startupExit != nil {
 			startupExit.Stop()
 		}
+		// The held result was the turn's only one, so an abort armed while it
+		// was held has no result left to take it.
+		if held != nil {
+			p.turn.abortRequested.clear()
+		}
 	}()
 
 	for {
