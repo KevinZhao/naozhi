@@ -158,12 +158,13 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 - 生命周期与 `lastCumulativeCost` 逐点对齐：
   - respawn：`installFreshSessionLocked`（`router_lifecycle.go:859`, `:900-902`）置零 `lastCumulative`，承接 `costSpent`；
   - 同进程迁移：`RenameSession`（`router_lifecycle.go:1283`, `:1335-1336`）同时拷贝 `costSpent` 与 `lastCumulative`；
+  - 被替换的会话之后还会记账（异步的进程结束 partial、迟到的 result）。respawn 提交与 rename 拷贝时，在旧会话的同一段 `costMu` 内把它链到新会话（`successor`），并把快照之后记在旧会话上的花费补给新会话；此后旧会话上的 `costSpent` / `spent` 增量沿链转给链尾的活会话（`addSpent`，逐个加锁、不嵌套）。respawn 的旧进程基线仍留在旧会话上差分；rename 的新会话跑的是同一进程，旧会话收到的读数整个交给新会话差分，不会被新会话的下一轮重算一次。账本行：respawn 前后是同一个 key，旧会话记的行仍写在这个 key 下；rename 后旧会话收到的读数由新会话记账，行写在新 key 下（只写一次）。
   - 重启恢复（shim reconnect，`router_shim.go:68-77`：CLI 是**同一 incarnation** 继续累计，这正是 `LastCumulativeCost` 要持久化的原因）：`router_core.go:825-833` 只恢复 USD 分量。`Metered` 基线 0 是正确的（`Process.meteringUsage` 是 naozhi 侧累加器，新 Process 对象归零）；`Models` 基线未知，若全额记入首 turn 会虚高，故 **restore 后首个 turn 的 `Models` 置空且跳过偏差 warn**（`Amount` 仍由 USD 差分保证正确），从第二 turn 起正常。不额外持久化 Models 基线。
 - `costMu` 保持叶子锁：其内只做差分与原子存储，**不得调用任何外部方法**（`ledger.Append`、slog 均在锁外）。
 - `finishRun` 拆为两段：
   - `accountTurnCost(result *cli.SendResult) (deltaUSD float64)`：**无 `rt==nil || runStore==nil` 门控**（修 P4）。在 `costMu` 内：构造 `raw := Cumulative{USD: result.CostUSD, Models: result.ModelUsage, Metered: proc.MeteringUsage() 按 Unit}`，`d, next := costledger.Delta(raw, s.lastCumulative)`，累进 `costSpent`，存 `next`；锁外若 `!IsCronKey(key)` 则 `ledger.Append(entryFrom(d))`。`Models` 上限 16，超出截断 + warn。
   - `persistRun(rt, result, err, deltaUSD)`：原 runhistory 逻辑，保留门控，`SessionRun.CostUSD = deltaUSD`（兼容）。
-  - CLI 自己发起的 turn（后台任务通知，#3096）的 result 不属于任何 Send，经 `SetOnUnownedResult` 同样差分记一条 `Kind=turn`。没有 run 记录与它共用 `RunID`，所以写成 `unowned:<cli-session-id>:<id>`（取 result 帧的 session id，缺省取会话持有的；都没有时为裸 id），reconcile 据此归属。
+  - 没有存活调用方消费的 result 经 `SetOnUnownedResult` 同样差分记一条 `Kind=turn`：CLI 自己发起的 turn（后台任务通知，#3096），以及 Send 先放弃（ctx 取消、cron deadline）后才到达的 result（#3322；readLoop 在 Ready 或 Send 已放弃时记，下一次 Send 丢弃的陈旧 result 也记，重复记账因累计差分无害）。没有 run 记录与它共用 `RunID`，所以写成 `unowned:<cli-session-id>:<id>`（取 result 帧的 session id，缺省取会话持有的；都没有时为裸 id），reconcile 据此归属。
 - Unit 选择：claude → `USD`，Kind=`turn`；kiro/codex → 按 `Metered` 中有增量的 Unit 各出一条 entry（`credits` / `tokens`），Kind=`metering`。**`proc.MeteringUsage()` 是进程级累计视图**（`cli/process.go:668-691`），必须差分，不能直接取值。
 - Basis：本 turn 有增量的 model 的 `costBasis` 取最差档（unknown > managed > list），缺省 `list`；首次遇到 `unknown` 的 model 名 warn 一次（内存去重 map，上限 64）。
 - 新增 `ManagedSession.CostTotals() costledger.Totals`：返回 `{USD: costSpent, Metered: 各 Unit 累计, Models: 各模型累计 delta 和}`（monotonic，跨 incarnation），供 cron 前后差分。

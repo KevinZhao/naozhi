@@ -6,6 +6,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -48,6 +49,10 @@ const (
 	// session until the next send.
 	sendAckReset sendAckStatus = "reset"
 )
+
+// errSendBusy is the error a primary reports for a remote send its node
+// answered "busy".
+var errSendBusy = errors.New("会话正忙，消息未送达，请稍后重试")
 
 // errUrgentUsage rejects a bare /urgent (#3004 分叉 6); asyncErrorMessage
 // passes its text through to the client.

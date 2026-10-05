@@ -113,46 +113,67 @@ func TestFallbackBanner_FastTurnAnswersAsNewMessage(t *testing.T) {
 	}
 }
 
-// TestFallbackBanner_ArmedOnlyForUnackedHead pins which deliveries arm the
-// fallback: a head that runs at once and got no ⏳. A landed ⏳, a queued
-// request (acked when it was queued) and an Observer (no message of its
-// chat in the batch) do not.
-func TestFallbackBanner_ArmedOnlyForUnackedHead(t *testing.T) {
+// TestFallbackBanner_PostsOnlyForUnackedHead pins which deliveries post the
+// fallback: a head that runs at once and got no ⏳. The timer fires while
+// the ⏳ add is still in flight and waits for it. A landed ⏳, a queued
+// request (acked when it was queued) and an Observer (no message of its chat
+// in the batch) post nothing.
+func TestFallbackBanner_PostsOnlyForUnackedHead(t *testing.T) {
 	t.Parallel()
+	head := turn.TurnInfo{Role: turn.RoleHead, First: true}
 	cases := []struct {
 		name    string
 		reactor bool
+		addErr  error
 		ack     turn.Ack
 		info    turn.TurnInfo
-		armed   bool
+		banner  bool
 	}{
-		{"owner_unacked", false, turn.AckOwner, turn.TurnInfo{Role: turn.RoleHead, First: true}, true},
-		{"detached_unacked", false, turn.AckDetached, turn.TurnInfo{Role: turn.RoleHead}, true},
-		{"owner_reacted", true, turn.AckOwner, turn.TurnInfo{Role: turn.RoleHead, First: true}, false},
-		{"detached_reacted", true, turn.AckDetached, turn.TurnInfo{Role: turn.RoleHead}, false},
-		{"queued_head", false, turn.AckQueued, turn.TurnInfo{Role: turn.RoleHead}, false},
-		{"observer", false, turn.AckOwner, turn.TurnInfo{Role: turn.RoleObserver}, false},
+		{"owner_not_reactor", false, nil, turn.AckOwner, head, true},
+		{"detached_not_reactor", false, nil, turn.AckDetached, turn.TurnInfo{Role: turn.RoleHead}, true},
+		{"owner_add_fails", true, errors.New("rate limited"), turn.AckOwner, head, true},
+		{"owner_reacted", true, nil, turn.AckOwner, head, false},
+		{"detached_reacted", true, nil, turn.AckDetached, turn.TurnInfo{Role: turn.RoleHead}, false},
+		{"queued_head", false, nil, turn.AckQueued, turn.TurnInfo{Role: turn.RoleHead}, false},
+		{"observer", false, nil, turn.AckOwner, turn.TurnInfo{Role: turn.RoleObserver}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var p platform.Platform = &fakePlatform{supportsInterim: true}
-			if tc.reactor {
-				p = newBannerPlatform(nil)
+			bp := newBannerPlatform(tc.addErr)
+			bp.addGate = make(chan struct{})
+			var p platform.Platform = bp
+			if !tc.reactor {
+				p = &bannerNoReactor{bp, bp}
 			}
 			d := newTestDispatcher(&fakePlatform{})
 			d.platforms = map[string]platform.Platform{"fake": p}
+			d.fallbackBannerDelay = time.Millisecond
 			ctx := context.Background()
 			o := d.newIMOrigin(reactorMsg("m1", "hi"), slog.Default(), reactorKey, "general", session.AgentOpts{}, imMessage, 2, 0)
 			o.Admitted(ctx, tc.ack)
 			dl := o.Begin(ctx, tc.info).(*imDelivery)
 			dl.BeforeSession(ctx)
-			defer dl.tracker.stop()
-			if armed := dl.tracker.fallbackTimer != nil; armed != tc.armed {
-				t.Errorf("fallback armed = %v, want %v", armed, tc.armed)
+			<-time.After(50 * time.Millisecond) // the timer fires and waits on the add
+			close(bp.addGate)
+			if tc.banner {
+				select {
+				case <-bp.replied:
+				case <-time.After(5 * time.Second):
+				}
+			}
+			dl.tracker.stop()
+			if got := slices.Contains(bp.allReplies(), thinkingLine); got != tc.banner {
+				t.Errorf("banner posted = %v (replies %q), want %v", got, bp.allReplies(), tc.banner)
 			}
 		})
 	}
+}
+
+// bannerNoReactor is a bannerPlatform without its Reactor methods.
+type bannerNoReactor struct {
+	platform.Platform
+	platform.InterimMessageCapable
 }
 
 // TestReplyTracker_OneBannerPerTurn: the fallback firing after an event
@@ -163,7 +184,7 @@ func TestReplyTracker_OneBannerPerTurn(t *testing.T) {
 		t.Parallel()
 		fp := &fakePlatform{supportsInterim: true}
 		tr := newIMEventTracker(context.Background(), fp, "chat1", "direct", "")
-		tr.armFallbackBanner(time.Hour)
+		tr.armFallbackBanner(time.Hour, nil)
 		tr.onEvent(clievent.Event{Type: "assistant", Message: &clievent.AssistantMessage{
 			Content: []clievent.ContentBlock{{Type: "text", Text: "working"}}}})
 		tr.postBanner() // the timer firing late
@@ -177,7 +198,7 @@ func TestReplyTracker_OneBannerPerTurn(t *testing.T) {
 		t.Parallel()
 		fp := &fakePlatform{supportsInterim: true}
 		tr := newIMEventTracker(context.Background(), fp, "chat1", "direct", "")
-		tr.armFallbackBanner(time.Hour)
+		tr.armFallbackBanner(time.Hour, nil)
 		tr.stop()
 		if tr.fallbackTimer.Stop() {
 			t.Error("stop left the fallback timer running")
@@ -211,7 +232,7 @@ func TestReplyTracker_StopWaitsForBannerInFlight(t *testing.T) {
 	p := &gatedReplyPlatform{entered: make(chan struct{}), release: make(chan struct{})}
 	p.supportsInterim = true
 	tr := newIMEventTracker(context.Background(), p, "chat1", "direct", "")
-	tr.armFallbackBanner(time.Millisecond)
+	tr.armFallbackBanner(time.Millisecond, nil)
 	<-p.entered
 	stopped := make(chan struct{})
 	go func() {

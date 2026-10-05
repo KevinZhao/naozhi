@@ -3,6 +3,7 @@ package weixin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -65,7 +66,14 @@ func replyOK(w http.ResponseWriter) {
 
 func startScripted(t *testing.T, rl *scriptedRelay) *Weixin {
 	t.Helper()
+	return startScriptedWith(t, rl, func(*Weixin) {})
+}
+
+// startScriptedWith lets the test set unexported knobs before Start.
+func startScriptedWith(t *testing.T, rl *scriptedRelay, configure func(*Weixin)) *Weixin {
+	t.Helper()
 	w := New(Config{Token: "tok", BaseURL: rl.srv.URL})
+	configure(w)
 	if err := w.Start(func(context.Context, platform.IncomingMessage) {}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -118,8 +126,8 @@ func TestConnState_LongPollLifecycle(t *testing.T) {
 	}
 }
 
-// TestConnState_FailedPollDisconnects: a transport failure and an iLink API
-// error both mark the link disconnected with the reason as LastError.
+// TestConnState_FailedPollDisconnects: a transport failure and a non-terminal
+// iLink API error both mark the link disconnected with the reason as LastError.
 var failedPollReplies = []struct {
 	name    string
 	reply   func(http.ResponseWriter)
@@ -135,9 +143,9 @@ var failedPollReplies = []struct {
 	{
 		name: "api error",
 		reply: func(w http.ResponseWriter) {
-			_ = json.NewEncoder(w).Encode(getUpdatesResp{Ret: -14, ErrCode: -14, ErrMsg: "session\x1b[31m timeout"})
+			_ = json.NewEncoder(w).Encode(getUpdatesResp{Ret: -1, ErrCode: -1, ErrMsg: "system\x1b[31m busy"})
 		},
-		wantErr: "getUpdates ret=-14 errcode=-14: session",
+		wantErr: "getUpdates ret=-1 errcode=-1: system",
 	},
 }
 
@@ -233,5 +241,87 @@ func TestConnState_RepeatedFailureKeepsSince(t *testing.T) {
 				t.Errorf("after a second failed poll: %+v, want disconnected since %v", second, first.Since)
 			}
 		})
+	}
+}
+
+func replyAPIError(ret, errCode int, msg string) func(http.ResponseWriter) {
+	return func(w http.ResponseWriter) {
+		_ = json.NewEncoder(w).Encode(getUpdatesResp{Ret: ret, ErrCode: errCode, ErrMsg: msg})
+	}
+}
+
+// TestConnState_StaleTokenFails: -14 in either ret or errcode is an expired
+// bot token, reported as failed with the re-login hint first. Polling goes on
+// after staleTokenPause rather than the 2s retry, and a later success
+// recovers to connected without dropping the error.
+func TestConnState_StaleTokenFails(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		ret, errCode int
+	}{
+		{"ret only", -14, 0},
+		{"errcode only", 0, -14},
+		{"both", -14, -14},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rl := newScriptedRelay(t)
+			w := startScriptedWith(t, rl, func(w *Weixin) { w.staleTokenPause = 50 * time.Millisecond })
+
+			rl.awaitPoll(t)
+			rl.script <- replyOK
+			rl.awaitPoll(t)
+
+			rl.script <- replyAPIError(tc.ret, tc.errCode, "session timeout")
+			replied := time.Now()
+			rl.awaitPoll(t)
+			// Well under pollLoop's 2s retryDelay, so the pause is what ran.
+			if waited := time.Since(replied); waited > time.Second {
+				t.Errorf("next poll came %v after the stale-token reply, want the %v pause", waited, w.staleTokenPause)
+			}
+			s := mustConnState(t, w)
+			if s.State != platform.ConnFailed {
+				t.Fatalf("after a stale-token reply: state %q, want failed", s.State)
+			}
+			if !strings.HasPrefix(s.LastError, "weixin token expired") ||
+				!strings.Contains(s.LastError, "naozhi setup weixin") {
+				t.Errorf("LastError = %q, want the re-login hint first", s.LastError)
+			}
+			wantCodes := fmt.Sprintf("ret=%d errcode=%d", tc.ret, tc.errCode)
+			if !strings.Contains(s.LastError, wantCodes) {
+				t.Errorf("LastError = %q, want it to carry %q", s.LastError, wantCodes)
+			}
+
+			rl.script <- replyOK
+			rl.awaitPoll(t)
+			recovered := mustConnState(t, w)
+			if recovered.State != platform.ConnConnected || recovered.LastError != s.LastError {
+				t.Errorf("after the token works again: %+v, want connected keeping %q", recovered, s.LastError)
+			}
+		})
+	}
+}
+
+// TestConnState_StaleTokenResetsFailureStreak: a stale-token reply ends the
+// run of failures, so the failure after it waits the 2s retry and not the 30s
+// backoff that a third strike would take. It pays the 2s retry three times.
+func TestConnState_StaleTokenResetsFailureStreak(t *testing.T) {
+	t.Parallel()
+	rl := newScriptedRelay(t)
+	startScriptedWith(t, rl, func(w *Weixin) { w.staleTokenPause = 50 * time.Millisecond })
+
+	busy := replyAPIError(-1, -1, "busy")
+	for _, reply := range []func(http.ResponseWriter){busy, busy, replyAPIError(-14, -14, "session timeout"), busy} {
+		rl.awaitPoll(t)
+		rl.script <- reply
+	}
+	rl.awaitPoll(t) // times out if the last failure took the backoff
+}
+
+func TestStaleTokenRetryDelay_DefaultsToAnHour(t *testing.T) {
+	t.Parallel()
+	if got := New(Config{Token: "tok"}).staleTokenRetryDelay(); got != time.Hour {
+		t.Errorf("default stale-token pause = %v, want 1h", got)
 	}
 }

@@ -55,7 +55,21 @@ type Weixin struct {
 
 	// connState is fed by each getUpdates round's outcome.
 	connState platform.ConnTracker
+
+	// staleTokenPause is the wait after a stale-token reply; zero means
+	// defaultStaleTokenPause. Tests shorten it.
+	staleTokenPause time.Duration
 }
+
+// iLinkStaleTokenCode is the getupdates ret/errcode for an expired bot token
+// (STALE_TOKEN_ERRCODE in Tencent's openclaw-weixin session-guard.ts). On
+// sendmessage -14 means a spent context_token instead, so only getUpdates
+// checks it.
+const iLinkStaleTokenCode = -14
+
+// defaultStaleTokenPause matches the reference client's pause on a stale token:
+// retrying sooner cannot help until the operator logs in again.
+const defaultStaleTokenPause = time.Hour
 
 // tokenTTL is the idle time after which a cached context_token is evicted;
 // the next inbound message refreshes it.
@@ -136,8 +150,9 @@ func (w *Weixin) SupportsInterimMessages() bool { return false }
 func (w *Weixin) UsesSingleUseReplyToken() bool { return true }
 
 // ConnState implements platform.ConnStateReporter: connected after a
-// successful getUpdates, disconnected (still retrying) after a failed one.
-// Not observable until Start.
+// successful getUpdates, disconnected (still retrying) after a failed one,
+// failed after a stale-token reply that needs a new login. Not observable
+// until Start.
 func (w *Weixin) ConnState() (platform.ConnState, bool) {
 	return w.connState.Snapshot()
 }
@@ -391,6 +406,24 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 			continue
 		}
 
+		if resp.Ret == iLinkStaleTokenCode || resp.ErrCode == iLinkStaleTokenCode {
+			// The hint leads so it survives doctor's truncation of LastError.
+			w.connState.Fail(platform.ConnFailed, fmt.Errorf(
+				"weixin token expired (iLink -14): run 'naozhi setup weixin' and restart: %w",
+				getUpdatesAPIError(resp)))
+			slog.Error("weixin getUpdates: bot token expired; run 'naozhi setup weixin' and restart",
+				"ret", resp.Ret,
+				"errcode", resp.ErrCode,
+				"errmsg", osutil.SanitizeForLog(resp.ErrMsg, 256),
+				"retry_in", w.staleTokenRetryDelay(),
+			)
+			// Keep polling slowly: a relay that accepts the token again
+			// recovers to connected without a restart.
+			consecutiveFailures = 0
+			sleepCtx(ctx, w.staleTokenRetryDelay())
+			continue
+		}
+
 		if resp.Ret != 0 || resp.ErrCode != 0 {
 			consecutiveFailures++
 			w.connState.Fail(platform.ConnDisconnected, getUpdatesAPIError(resp))
@@ -493,6 +526,13 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 				"user", osutil.SanitizeForLog(from, 128))
 		}
 	}
+}
+
+func (w *Weixin) staleTokenRetryDelay() time.Duration {
+	if w.staleTokenPause > 0 {
+		return w.staleTokenPause
+	}
+	return defaultStaleTokenPause
 }
 
 // getUpdatesAPIError describes a getUpdates reply that iLink answered with a
