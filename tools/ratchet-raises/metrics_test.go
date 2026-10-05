@@ -1,8 +1,11 @@
 package main
 
 import (
+	"go/parser"
+	"go/token"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -56,6 +59,53 @@ func TestGoConsts_SkipsTestdataAndVendor(t *testing.T) {
 	}
 	if got, want := slices.Sorted(maps.Keys(m)), []string{"go:tools/x#cBaseline"}; !slices.Equal(got, want) {
 		t.Errorf("keys = %v, want %v", got, want)
+	}
+}
+
+// go-ref: marks the baseline constants some code in their directory uses.
+func TestGoConsts_Uses(t *testing.T) {
+	t.Parallel()
+	m := metrics{}
+	_, err := goConsts(map[string]string{
+		"internal/x/a.go": "package x\nconst (\n\taBaseline = 1\n\tbBaseline = 1\n\tcBaseline = 1\n\tdBaseline = 1\n\teBaseline = 1\n\tfBaseline = 1\n\tgBaseline = 1\n\thBaseline = 1\n)\n" +
+			"var _, _ = cBaseline, 0\n" +
+			"func f() {\n\tconst localBaseline = 2\n\tif n > localBaseline {\n\t}\n\tvar bBaseline = 3\n\t_, _ = dBaseline, n\n\tx := []int{gBaseline}\n\t_ = x\n}\n",
+		// An external test package is the same directory.
+		"internal/x/a_test.go": "package x_test\nfunc TestA() {\n\tif x.aBaseline > 0 {\n\t}\n}\nfunc TestB() { use(hBaseline) }\n",
+		// A build constraint after the package clause is only a comment.
+		"internal/x/c_test.go":  "package x\n//go:build ignore\nfunc TestE() { use(eBaseline) }\n",
+		"internal/x/b_test.go":  "// +build linux\n\npackage x\nfunc TestF() { use(fBaseline) }\n",
+		"internal/x/d_amd64.go": "package x\nfunc g() { use(fBaseline) }\n",
+		"internal/y/e.go":       "package y\nfunc g() { use(fBaseline) }\n",
+	}, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for k := range m {
+		if strings.HasPrefix(k, "go-ref:") {
+			got = append(got, strings.TrimPrefix(k, "go-ref:internal/x#"))
+		}
+	}
+	slices.Sort(got)
+	if want := []string{"aBaseline", "eBaseline", "gBaseline", "hBaseline", "localBaseline"}; !slices.Equal(got, want) {
+		t.Errorf("used = %v, want %v", got, want)
+	}
+}
+
+func TestBuildConstrained(t *testing.T) {
+	t.Parallel()
+	for name, want := range map[string]bool{
+		"a.go": false, "a_test.go": false, "sleep_ratchet_test.go": false, "unix_x.go": false,
+		"a_linux.go": true, "a_linux_test.go": true, "a_windows_amd64.go": true, "a_arm64_test.go": true, "a_js.go": true,
+	} {
+		f, err := parser.ParseFile(token.NewFileSet(), name, "package a\n", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := buildConstrained("internal/a/"+name, f); got != want {
+			t.Errorf("buildConstrained(%s) = %v, want %v", name, got, want)
+		}
 	}
 }
 

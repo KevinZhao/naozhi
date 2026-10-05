@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/ast"
+	"go/build"
+	"go/build/constraint"
 	"go/parser"
 	"go/token"
+	"io"
 	"maps"
 	"path"
 	"regexp"
@@ -41,20 +44,25 @@ var goBaselineName = regexp.MustCompile(`[Bb]aseline`)
 // goConsts reads every baseline constant in files (path → source), package
 // level or local, into go:<dir>#<name>: moving one between files of a
 // package is not a change, and losing one (renamed, made a var, moved to
-// another package, its file deleted) is a raise to -1. It returns one
-// problem per constant whose value is not a plain integer literal (left
-// unread) and per name repeated within a directory (read as the largest).
+// another package, its file deleted) is a raise to -1. A constant some code
+// in its directory uses also gets go-ref:<dir>#<name>, so losing its last
+// use (goRefs) is a raise to -1 as well. It returns one problem per constant
+// whose value is not a plain integer literal (left unread) and per name
+// repeated within a directory (read as the largest).
 func goConsts(files map[string]string, into metrics) ([]string, error) {
 	var problems []string
 	fset := token.NewFileSet()
+	parsed := map[string]*ast.File{}
+	read := map[string]map[string]bool{} // dir → constants read into go:
 	for _, p := range slices.Sorted(maps.Keys(files)) {
 		if skipGoPath(p) {
 			continue
 		}
-		f, err := parser.ParseFile(fset, p, files[p], parser.SkipObjectResolution)
+		f, err := parser.ParseFile(fset, p, files[p], parser.SkipObjectResolution|parser.ParseComments)
 		if err != nil {
 			return nil, err
 		}
+		parsed[p] = f
 		ast.Inspect(f, func(n ast.Node) bool {
 			d, ok := n.(*ast.GenDecl)
 			if !ok || d.Tok != token.CONST {
@@ -68,22 +76,93 @@ func goConsts(files map[string]string, into metrics) ([]string, error) {
 					}
 					at := fset.Position(id.Pos())
 					v, ok := intLiteral(vs, i)
-					key := "go:" + path.Dir(p) + "#" + id.Name
+					dir := path.Dir(p)
+					key := "go:" + dir + "#" + id.Name
 					if !ok {
 						problems = append(problems, fmt.Sprintf("%s:%d: baseline constant %s must be a plain integer literal", p, at.Line, id.Name))
 						continue
 					}
 					if prev, dup := into[key]; dup {
-						problems = append(problems, fmt.Sprintf("%s:%d: baseline constant %s is declared twice in %s", p, at.Line, id.Name, path.Dir(p)))
+						problems = append(problems, fmt.Sprintf("%s:%d: baseline constant %s is declared twice in %s", p, at.Line, id.Name, dir))
 						v = max(v, prev.value)
 					}
 					into[key] = metric{value: v, goneIsRaise: true}
+					if read[dir] == nil {
+						read[dir] = map[string]bool{}
+					}
+					read[dir][id.Name] = true
 				}
 			}
 			return false
 		})
 	}
+	uses := map[string]bool{}
+	for p, f := range parsed {
+		dir := path.Dir(p)
+		if read[dir] != nil && !buildConstrained(p, f) {
+			goRefs(f, read[dir], func(name string) { uses[dir+"#"+name] = true })
+		}
+	}
+	for k := range uses {
+		into["go-ref:"+k] = metric{value: 1, goneIsRaise: true}
+	}
 	return problems, nil
+}
+
+// goRefs calls use for each identifier in f named in names that is not
+// declaring a var or const, nor inside the right side of a blank assignment
+// (_ = x, var _ = x), which only keeps an unused constant compiling.
+// Matching is by name, not by object; and a use that never runs to compare
+// against the constant (a t.Skip before it, an early return, an always-true
+// comparison, a helper nothing calls) still counts.
+func goRefs(f *ast.File, names map[string]bool, use func(name string)) {
+	var visit func(ast.Node) bool
+	visit = func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			return slices.ContainsFunc(n.Lhs, func(e ast.Expr) bool { return !isBlank(e) })
+		case *ast.ValueSpec:
+			if slices.ContainsFunc(n.Names, func(id *ast.Ident) bool { return !isBlank(id) }) {
+				for _, v := range n.Values {
+					ast.Inspect(v, visit)
+				}
+			}
+			return false
+		case *ast.Ident:
+			if names[n.Name] {
+				use(n.Name)
+			}
+		}
+		return true
+	}
+	ast.Inspect(f, visit)
+}
+
+func isBlank(e ast.Expr) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == "_"
+}
+
+// buildConstrained reports whether the file at p builds only for some
+// platforms or tags: a //go:build or // +build line above its package
+// clause, or a _GOOS / _GOARCH name suffix (checked with go/build against a
+// platform no suffix names, so the list stays the toolchain's own).
+func buildConstrained(p string, f *ast.File) bool {
+	for _, g := range f.Comments {
+		if g.Pos() >= f.Package {
+			break
+		}
+		for _, c := range g.List {
+			if constraint.IsGoBuild(c.Text) || constraint.IsPlusBuild(c.Text) {
+				return true
+			}
+		}
+	}
+	ctx := build.Context{GOOS: "none", GOARCH: "none", OpenFile: func(string) (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader("package p\n")), nil
+	}}
+	ok, err := ctx.MatchFile(".", path.Base(p))
+	return err != nil || !ok
 }
 
 // intLiteral is the value of the i-th name of vs when it is written as an
