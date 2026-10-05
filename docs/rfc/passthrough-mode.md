@@ -578,7 +578,7 @@ case "/urgent":
 `InterruptViaControl` **保留不删**。它是 CC CLI 原生的 `control_request interrupt` subtype（process.go:1099）。
 
 区别：
-- `/urgent <msg>` → `priority:'now'` user message → CLI drain 时 abort + 立即处理该消息
+- `/urgent <msg>` → `priority:'now'` user message → CLI drain 时 abort + 立即处理该消息；pendingSlots 里之前排队的 Send 随后照常被 CLI 消费（validation V10）
 - `/stop` → control_request interrupt → CLI abort 当前 turn，**不发新消息**；pendingSlots 里的后续 Send 会继续被 CLI 消费
 
 ## 6. 边界与失败处理

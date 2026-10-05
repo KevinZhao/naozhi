@@ -3,6 +3,8 @@
 // renderSidebar reconciles the session list against the DOM as it stands,
 // keyed by session (and project header):
 //  - a render with nothing new touches no DOM, so the card nodes survive;
+//  - a render after a seconds label rolled ("30s ago" to "31s ago") keeps the
+//    card and updates its label, so a click pressed on it is not swallowed;
 //  - a changed session replaces its own card and no other;
 //  - a card patched in place (the WS state dot) follows the data on the next
 //    render instead of being left as the patch drew it;
@@ -19,6 +21,7 @@ const { startMockServer, defaultSessions } = require('./mock-server');
 
 const A = 'dashboard:direct:2026-01-01-120000-1:myproject';
 const B = 'dashboard:direct:2026-01-01-120002-3:myproject';
+const RECENT = 'dashboard:direct:2026-01-01-120001-2:otherproject';
 
 test.beforeEach(({ }, testInfo) => {
   if (testInfo.project.name !== 'desktop-chrome') {
@@ -29,9 +32,9 @@ test.beforeEach(({ }, testInfo) => {
 /** @param {import('@playwright/test').Page} page @param {any} [overrides] */
 async function open(page, overrides) {
   const mock = await startMockServer(overrides);
-  // The fixture's 30s-old session renders a seconds-granular "30s ago", so
-  // two renders of the same data a second apart differ in markup. Date is
-  // frozen (timers still run); a test needing elapsed time uses page.clock.
+  // The fixture's 30s-old session renders a seconds-granular "30s ago". A
+  // render resyncs the live labels before comparing, so freezing Date (timers
+  // still run) is defence in depth; a test needing elapsed time uses page.clock.
   await page.clock.setFixedTime(Date.now());
   await page.goto(mock.url + '/dashboard');
   await page.waitForSelector(`.session-card[data-key="${A}"]`);
@@ -57,6 +60,27 @@ test('a render with nothing new touches no sidebar DOM', async ({ page }) => {
     };
   }, A);
   expect(result).toEqual({ mutations: 0, same: true });
+  mock.server.close();
+});
+
+test('a render after a seconds label rolled keeps the card and updates its label', async ({ page }) => {
+  const mock = await open(page);
+  const sel = `.session-card[data-key="${RECENT}"]`;
+  await expect(page.locator(`${sel} .sc-time`)).toHaveText(/^\d+s ago$/);
+  await page.evaluate((s) => {
+    /** @type {any} */ (window).__recentCard = document.querySelector(s);
+  }, sel);
+  const label = await page.locator(`${sel} .sc-time`).textContent();
+  await page.clock.setFixedTime(await page.evaluate(() => Date.now()) + 1000);
+  const result = await page.evaluate((s) => {
+    const w = /** @type {any} */ (window);
+    w.renderSidebar(JSON.parse(JSON.stringify(w._lastSidebarData)));
+    const card = document.querySelector(s);
+    return { same: card === w.__recentCard, label: card.querySelector('.sc-time').textContent };
+  }, sel);
+  expect(result.same, 'the card whose only change is its time label is kept').toBe(true);
+  expect(result.label).not.toBe(label);
+  expect(result.label).toMatch(/^\d+s ago$/);
   mock.server.close();
 });
 

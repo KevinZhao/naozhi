@@ -150,6 +150,7 @@ func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 	s := &ManagedSession{
 		key:      key,
 		runStore: r.runs.runs, // mirror production wiring so Send records runs
+		costAcct: r.runs.cost, // and books its spend to the router's ledger
 	}
 	if proc != nil { // typed-nil *TestProcess must not become a non-nil iface
 		s.storeProcess(proc)

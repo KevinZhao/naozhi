@@ -644,13 +644,12 @@ function historyDayLabel(d) {
   return d.toLocaleDateString(undefined, opts);
 }
 
-// Sidebar relative-time ticker. While WS is connected renderSidebar only
-// runs on sessions_update (the 5s /api/sessions poll short-circuits on an
-// unchanged version), so a card's "2m ago" label froze at whatever the last
-// render produced. Rather than force a full sidebar rebuild every minute,
-// recompute just the .sc-time text from the data-ts stamp renderSessionCard
-// emits. Paused while the tab is hidden via the visibilitychange gate below
-// (same as the other pollers) — stale text on a hidden tab costs nothing.
+// Sidebar relative-time ticker. While WS is connected renderSidebar only runs
+// on sessions_update (the 5s /api/sessions poll short-circuits on an unchanged
+// version), so every minute the .sc-time text is recomputed from the data-ts
+// stamp renderSessionCard emits instead of rebuilding the sidebar. Paused while
+// the tab is hidden via the visibilitychange gate below (same as the other
+// pollers) — stale text on a hidden tab costs nothing.
 const SIDEBAR_TIME_TICK_MS = 60000;
 let sidebarTimeTimer = null;
 function refreshSidebarTimes() {
@@ -1394,6 +1393,7 @@ export {
   promptDialog,
   reconnectNow,
   refreshCostSummary,
+  refreshSidebarTimes,
   renderRecentSessionsPanel,
   renderServiceOverviewHtml,
   safeUrl,

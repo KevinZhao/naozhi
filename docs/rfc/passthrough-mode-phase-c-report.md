@@ -42,6 +42,8 @@ Dashboard HTTP API（不走 IM 平台）：
 
 验证了 priority:"now" 原生抢占机制 + `reapAbortedPreempted` 正确跳过 priority="now" 自身。
 
+> **已被取代**：`passthrough-mode-validation.md` V10（claude 2.1.288）实测 now 抢占不丢弃 CLI 的排队消息，`reapAbortedPreempted` 让它们以 `ErrAbortedByUrgent` 失败是错的，已在 #3394 删除；排队消息现在等自己的 replay 拿真实回答。
+
 ### C.6 /stop 软中断 ✅
 
 原始实测首次发现 **State=Running 未设置 bug**：passthrough 模式下 `Process.State` 从未翻 Running，`InterruptViaControl` 检查 state != Running 就返回 `ErrNoActiveTurn` → dashboard 收到 `not_running` 无法中断。

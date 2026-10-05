@@ -10,7 +10,7 @@ import { esc, escAttr, fetchJSON, patchCardExitChip, reconcileChildren, sessionE
 import { setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderPRChip, setHeaderSpawnDiagChip } from './session_header.js';
 import { deselectNodeSession, reconcileSelectedNode } from './system_view.js';
 import { turnState, updateSendButton } from './running_banner.js';
-import { PENDING_LS_KEY, announce, formatAbsTime, persistPending, renderRecentSessionsPanel, setActiveSessionCard, showAuthModal, timeAgo } from './utilities.js';
+import { PENDING_LS_KEY, announce, formatAbsTime, persistPending, refreshSidebarTimes, renderRecentSessionsPanel, setActiveSessionCard, showAuthModal, timeAgo } from './utilities.js';
 import { scanDiscovered } from './discovery.js';
 import { invalidateGitState } from './tuning.js';
 import { sectionHeaderFallbackHtml, sectionHeaderHtml } from './sidebar_project.js';
@@ -128,9 +128,6 @@ function applySessionsStats(data) {
   serverInfo.lastStatsSnapshot = data.stats;
 }
 
-// statePushes counts session_state pushes (n) and each key's latest (at).
-const statePushes = { n: 0, at: new Map() };
-
 // mergeBackendSessions folds the polled sessions into sessionsData, adds each
 // key to backendKeys and returns the list the sidebar paints from. A key pushed
 // since the poll went out (pushesBefore) keeps its pushed state and death_reason;
@@ -146,7 +143,7 @@ function mergeBackendSessions(polled, backendKeys, pushesBefore) {
     const n = s.node || 'local';
     const sKey = sid(s.key, n);
     const cur = sessionList.sessionsData[sKey];
-    if (cur && statePushes.at.get(sKey) > pushesBefore) {
+    if (cur && sessionList.statePushes.at.get(sKey) > pushesBefore) {
       if (s.state !== cur.state) sessionList.lastVersion = 0;
       s = Object.assign({}, s, { state: cur.state, death_reason: cur.death_reason });
     }
@@ -256,7 +253,7 @@ export function onSessionsApplied(fn) {
 
 export async function fetchSessions() {
   try {
-    const pushesBefore = statePushes.n;
+    const pushesBefore = sessionList.statePushes.n;
     const got = await fetchSessionsPayload();
     if (got === NOT_MODIFIED) return;
     if (!got) return false;
@@ -322,16 +319,16 @@ export function renderSidebar(data) {
   if (st.projects) sessionList.projectsData = st.projects;
 
   const list = document.getElementById('session-list');
-  // R110-P2 empty-state CTA: keeps the "no sessions" text E2E asserts and adds
-  // the header `+` button's action for first-time users.
+  // R110-P2 empty-state CTA: the "no sessions" text E2E asserts + the header `+` action.
   const html = sidebarHtml(buildSidebarItems(data)) || '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" data-action="session-new">+ 开启你的第一个会话</button></div>';
-  // Keyed reconcile: only the rows whose markup changed are replaced, so a
-  // poll with nothing new touches no DOM, in-place patches (state dot, unread
-  // chip, a removed card) compare as they stand, and kept nodes keep the
-  // list's scroll position.
+  // Keyed reconcile: only rows whose markup changed are replaced, so a poll
+  // with nothing new touches no DOM, in-place patches (state dot, unread chip,
+  // a removed card) compare as they stand, and kept nodes keep the scroll
+  // position. The live time labels are first brought to html's instant, or a
+  // rolled "30s ago" replaces an unchanged card and swallows a click on it.
+  refreshSidebarTimes();
   if (reconcileChildren(list, html, sidebarRowKey) && selection.key) {
-    // A replaced card drops the cached active-card ref; re-resolve it so
-    // selector switches stay O(1) on the next click.
+    // A replaced card drops the cached active-card ref; re-resolve it (O(1) switches).
     setActiveSessionCard(selection.key, selection.node);
   }
 
@@ -859,7 +856,7 @@ wsm.onStateChange(wsStateChanged);
 function onSessionState(msg) {
   const msgNode = msg.node || 'local';
   const sKey = sid(msg.key, msgNode);
-  statePushes.at.set(sKey, ++statePushes.n);
+  sessionList.statePushes.at.set(sKey, ++sessionList.statePushes.n);
   // Real state arrived — the optimistic flip has served its purpose, regardless
   // of whether the server says running/ready/dead. Clear the flag so future
   // turns don't short-circuit the running→ready rollback logic. Capture it
@@ -1010,7 +1007,7 @@ wsm.on(NZ_CONTRACT.WS.subscribed, (msg) => {
   if (msg.state && msg.key === selection.key && sessionStream.subscribedNode === selection.node) {
     const subSKey = sid(msg.key, sessionStream.subscribedNode);
     if (sessionList.sessionsData[subSKey]) {
-      statePushes.at.set(subSKey, ++statePushes.n);
+      sessionList.statePushes.at.set(subSKey, ++sessionList.statePushes.n);
       sessionList.sessionsData[subSKey].state = msg.state;
       updateMainState(msg.state);
     }

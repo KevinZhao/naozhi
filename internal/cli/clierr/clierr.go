@@ -143,11 +143,6 @@ var (
 	ErrOrphanedSlot = errors.New("slot orphaned: no result or error received")
 )
 
-// ErrAbortedByUrgent fires when a priority:"now" message makes the CLI drop the
-// in-flight turn: older pending slots not yet replayed get this error — their
-// text never reached the model, so the user must decide whether to resend.
-var ErrAbortedByUrgent = errors.New("aborted by priority:now preemption")
-
 // ErrNoActiveTurn is returned by InterruptViaControl when no turn is running;
 // nothing was interrupted, so logs must not claim "aborted active turn".
 var ErrNoActiveTurn = errors.New("no active turn to interrupt")

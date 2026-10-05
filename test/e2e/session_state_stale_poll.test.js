@@ -13,6 +13,10 @@
 //      dropped terminal push heals;
 //  (f) a snapshot whose state the push overrode does not count as seen, so
 //      the next poll applies in full: that snapshot may be the newer one.
+//  (g) a 'running' snapshot taken before a result event, which ends the turn
+//      ahead of its 'ready' push, does not bring the turn back, so the turn
+//      end is announced once and a stopped turn is not reported as a reply;
+//      a poll sent after the result still applies its snapshot.
 //
 // Run: cd test/e2e && npx playwright test session_state_stale_poll.test.js --project=desktop-chrome
 
@@ -94,6 +98,20 @@ async function turnEnds(page) {
   return (await page.evaluate(() => /** @type {any} */ (window).__announced)).filter((/** @type {string} */ t) => TURN_END.test(t));
 }
 const dot = (page) => page.locator(`.session-card[data-key="${READY}"] .sc-dot`);
+const result = (conn) => conn.send({ type: 'event', key: READY, event: { time: Date.now(), type: 'result', summary: 'done' } });
+
+// endByResult ends a running turn with a result event while a poll holding a
+// running snapshot is in flight, lands that poll, then sends the ready push.
+async function endByResult(page, conn) {
+  const release = await holdPoll(page);
+  result(conn);
+  await expect(page.locator('#btn-send')).toBeVisible();
+  await expect(page.locator('#running-banner')).toHaveClass(/nz-hidden/);
+  await release();
+  await expect(page.locator('#btn-stop')).toBeHidden();
+  await expect(page.locator('#running-banner')).toHaveClass(/nz-hidden/);
+  push(conn, 'ready');
+}
 
 test('a ready snapshot requested before a running push keeps the turn running', async ({ browser }) => {
   const { ctx, page, conn, errors } = await open(browser);
@@ -203,6 +221,53 @@ test('the poll after an overridden snapshot applies in full', async ({ browser }
     await expect(page.locator('#btn-send')).toBeVisible();
     await expect(page.locator('#running-banner')).toHaveClass(/nz-hidden/);
     await expect(dot(page)).toHaveClass(/dot-ready/);
+    expect(errors).toEqual([]);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test('a running snapshot requested before a result event does not bring the turn back', async ({ browser }) => {
+  const { ctx, page, conn, errors } = await open(browser);
+  try {
+    push(conn, 'running');
+    await expect(page.locator('#btn-stop')).toBeVisible();
+    await endByResult(page, conn);
+    await expect(dot(page)).toHaveClass(/dot-ready/);
+    expect(await turnEnds(page)).toEqual([expect.stringMatching(/^回复完成/)]);
+    expect(errors).toEqual([]);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test('a stopped turn ended by a result event is announced once, as ended', async ({ browser }) => {
+  const { ctx, page, conn, errors } = await open(browser);
+  try {
+    push(conn, 'running');
+    await page.click('#btn-stop');
+    await expect.poll(() => conn.messages.filter((m) => m.type === 'interrupt').length).toBe(1);
+    await endByResult(page, conn);
+    expect(await turnEnds(page)).toEqual(['回合已结束']);
+    expect(errors).toEqual([]);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test('a poll requested after a result event still applies its snapshot', async ({ browser }) => {
+  const { ctx, page, conn, errors } = await open(browser);
+  try {
+    push(conn, 'running');
+    await expect(page.locator('#btn-stop')).toBeVisible();
+    result(conn);
+    await expect(page.locator('#btn-send')).toBeVisible();
+    // The REST snapshot stays running (a new turn whose push was lost), and a
+    // list change elsewhere gets the poll past the version short-circuit.
+    mock.setSessionWorkspace(OTHER, '/tmp/elsewhere');
+    await page.evaluate(async () => (await import('/static/session_list.js')).fetchSessions());
+    await expect(page.locator('#btn-stop')).toBeVisible();
+    await expect(dot(page)).toHaveClass(/dot-running/);
     expect(errors).toEqual([]);
   } finally {
     await ctx.close();

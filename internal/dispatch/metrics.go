@@ -27,4 +27,8 @@ var (
 	// failure, keyed by usermsg's turn class ("error_text" for an is_error
 	// answer that has text). Delivery still counts as a reply success.
 	dispatchTurnErrorResultTotal = expvar.NewMap("naozhi_dispatch_turn_error_result_total")
+
+	// dispatchDeniedTotal counts IM messages the access policy refused,
+	// keyed "<platform>:<reason>" (imauth.Reason*).
+	dispatchDeniedTotal = expvar.NewMap("naozhi_dispatch_denied_total")
 )
