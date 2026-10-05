@@ -17,6 +17,9 @@ import (
 // cooldown, and deciding whether an inbound message mentioned us. Extracted from
 // feishu.go (J10 of #2548).
 
+// fetchBotInfo populates botOpenID via GET /open-apis/bot/v3/info. Note the
+// `bot` field is at top level, NOT under `data` (older API predating the
+// standard envelope).
 func (f *Feishu) fetchBotInfo(ctx context.Context) error {
 	token, err := f.getAccessToken(ctx)
 	if err != nil {
@@ -127,5 +130,3 @@ func (f *Feishu) maybeRefreshBotInfo() {
 		})
 	})
 }
-
-// Stop implements RunnablePlatform. Stops WebSocket connection.

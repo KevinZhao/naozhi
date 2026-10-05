@@ -122,6 +122,10 @@ func (s *runStore) parseRunFromFile(f *os.File, fi os.FileInfo) (*CronRun, error
 	return decodeRunBytes(data, s.maxRunBytes)
 }
 
+// zeroProgressLimit is how many consecutive (0, nil) reads readAllIntoReader
+// tolerates before it gives up with io.ErrNoProgress.
+const zeroProgressLimit = 2
+
 // readAllIntoReader is the testable core of readAllInto. It accepts an
 // io.Reader so tests can inject a reader that repeatedly returns (0, nil).
 //
@@ -129,8 +133,6 @@ func (s *runStore) parseRunFromFile(f *os.File, fi os.FileInfo) (*CronRun, error
 // (0, nil) reads so the loop cannot hang on readers that are contractually
 // allowed to do that (e.g. some FUSE file systems); os.File on Linux does
 // not in practice.
-const zeroProgressLimit = 2
-
 func readAllIntoReader(r io.Reader, buf []byte) ([]byte, error) {
 	zeroCount := 0
 	for {

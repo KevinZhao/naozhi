@@ -13,6 +13,12 @@ import (
 	"time"
 )
 
+// Shim server timers (semantically independent despite equal values):
+//   - shimSocketWatchInterval: stat() poll cadence detecting a deleted AF_UNIX
+//     socket file so an orphaned shim can self-shutdown.
+//   - shimShutdownGracePeriod: window after SIGTERM/SIGINT for a fresh client
+//     Attach; otherwise the shim exits.
+//   - shimAuthReadDeadline: wait for a connecting peer's first line.
 const (
 	shimSocketWatchInterval = 30 * time.Second
 	shimShutdownGracePeriod = 30 * time.Second

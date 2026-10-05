@@ -19,8 +19,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "comment-budget:", err)
 		os.Exit(2)
 	}
-	fmt.Printf("InFuncBlocksOver5 %d\nDocOver10 %d\nPackageDocOver60 %d\nReviewAnchors %d\nHistoryPhrases %d\nDuplicateComments %d\nIssueRefs %d\n",
-		c.InFuncBlocksOver5, c.DocOver10, c.PackageDocOver60, c.ReviewAnchors, c.HistoryPhrases, c.DuplicateComments, c.IssueRefs)
+	fmt.Printf("InFuncBlocksOver5 %d\nDocOver10 %d\nPackageDocOver60 %d\nReviewAnchors %d\nHistoryPhrases %d\nDuplicateComments %d\nMisplacedDocs %d\nIssueRefs %d\n",
+		c.InFuncBlocksOver5, c.DocOver10, c.PackageDocOver60, c.ReviewAnchors, c.HistoryPhrases, c.DuplicateComments, c.MisplacedDocs, c.IssueRefs)
 	for _, h := range c.Offenders[*list] {
 		fmt.Println(h)
 	}

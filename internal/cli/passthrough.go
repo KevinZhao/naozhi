@@ -153,10 +153,10 @@ func (p *Process) awaitSlot(ctx context.Context, slot *sendSlot) (*clievent.Send
 			return nil, err
 		case <-ctx.Done():
 			// Tombstone: keep the slot so FIFO positioning survives; fanout
-			// sees canceled=true and drops the late result.
-			p.slots.mu.Lock()
-			slot.canceled.Store(true)
-			p.slots.mu.Unlock()
+			// sees canceled=true and books the late result instead.
+			if res := p.abandonSlot(slot); res != nil && res.MergedWithHead == 0 {
+				p.bookUnclaimed(*res)
+			}
 			return nil, ctx.Err()
 		case <-watchdog.C:
 			if err := p.passthroughWatchdogTick(time.Now(), noOutputDur, totalDur); err != nil {
@@ -186,13 +186,29 @@ func (p *Process) awaitSlot(ctx context.Context, slot *sendSlot) (*clievent.Send
 				bail.Reset(wait)
 				continue
 			}
-			// Mark canceled so a late result does not target a gone caller.
-			p.slots.mu.Lock()
-			slot.canceled.Store(true)
-			p.slots.mu.Unlock()
+			// Mark canceled so a late result is booked, not handed to a gone
+			// caller; one delivered since the check above still wins.
+			if res := p.abandonSlot(slot); res != nil {
+				return res, nil
+			}
 			slog.Warn("passthrough: slot orphaned", "slot_id", slot.id, "elapsed", time.Since(slot.enqueueAt))
 			return nil, clierr.ErrOrphanedSlot
 		}
+	}
+}
+
+// abandonSlot tombstones slot for a caller that stops waiting: it keeps its
+// FIFO place and fan-out books its result from now on. Returns a result
+// delivered before the tombstone, which fan-out has therefore not booked.
+func (p *Process) abandonSlot(slot *sendSlot) *clievent.SendResult {
+	p.slots.mu.Lock()
+	defer p.slots.mu.Unlock()
+	slot.canceled.Store(true)
+	select {
+	case res := <-slot.resultCh:
+		return res
+	default:
+		return nil
 	}
 }
 
@@ -374,9 +390,10 @@ func (p *Process) handleReplayEventLocked(ev clievent.Event) {
 
 // fanoutTurnResult delivers one CLI result event to every slot the turn
 // claimed: the head slot gets the full clievent.SendResult, followers get
-// MergedWithHead pointing at it. Called from readLoop after releasing slotsMu
-// so channel sends never happen under the lock.
-func fanoutTurnResult(owners []*sendSlot, ev clievent.Event) {
+// MergedWithHead pointing at it. A head whose caller left is booked through
+// onUnownedResult, as no finishRun will see its cost. Called from readLoop
+// after releasing slotsMu.
+func (p *Process) fanoutTurnResult(owners []*sendSlot, ev clievent.Event) {
 	slog.Debug("passthrough: fanout", "owners", len(owners),
 		"result_len", len(ev.Result), "session", ev.SessionID)
 	if len(owners) == 0 {
@@ -390,7 +407,9 @@ func fanoutTurnResult(owners []*sendSlot, ev clievent.Event) {
 
 	headRes := resultFromEvent(ev)
 	headRes.MergedCount = mergedCount
-	deliverSlotResult(head, &headRes)
+	if !p.deliverSlotResult(head, &headRes) {
+		p.bookUnclaimed(headRes)
+	}
 
 	if mergedCount == 1 {
 		return
@@ -404,22 +423,32 @@ func fanoutTurnResult(owners []*sendSlot, ev clievent.Event) {
 			MergedWithHead: head.id,
 			HeadText:       ev.Result,
 		}
-		deliverSlotResult(slot, folRes)
+		p.deliverSlotResult(slot, folRes)
 	}
 }
 
-// deliverSlotResult writes to slot.resultCh unless the slot was canceled. The
-// resultCh has cap 1 so non-blocking send is safe — a full channel would mean
-// fanout is running twice against the same slot, which should never happen.
-func deliverSlotResult(s *sendSlot, r *clievent.SendResult) {
-	if s.isCanceled() {
-		return
+// deliverSlotResult writes to slot.resultCh unless the slot was canceled and
+// reports whether it did. Checking and sending under slotsMu, like
+// abandonSlot's tombstone, means a result is either delivered before the
+// cancel (abandonSlot takes it back) or refused after it, never lost between.
+// resultCh has cap 1, so the send never blocks; a full channel would mean
+// fanout ran twice against the same slot.
+func (p *Process) deliverSlotResult(s *sendSlot, r *clievent.SendResult) bool {
+	p.slots.mu.Lock()
+	delivered, full := false, false
+	if !s.isCanceled() {
+		select {
+		case s.resultCh <- r:
+			delivered = true
+		default:
+			full = true
+		}
 	}
-	select {
-	case s.resultCh <- r:
-	default:
+	p.slots.mu.Unlock()
+	if full {
 		slog.Warn("passthrough: resultCh full, dropping", "slot_id", s.id)
 	}
+	return delivered
 }
 
 // discardAllPending is used when the CLI is known dead or the session is

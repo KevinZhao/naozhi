@@ -122,12 +122,6 @@ type HistoryInjector interface {
 	TurnAgents() []ring.SubagentInfo
 }
 
-// processIface abstracts the CLI process methods used by session-aware code
-// in internal/session, internal/server, internal/dispatch, internal/cron and
-// internal/upstream (all via ManagedSession.loadProcess()). Keep new methods
-// minimal — prefer the embedded facets (ProcessSender, ProcessLifecycle,
-// ProcessEventReader, HistoryInjector). *cli.Process is the only production
-// implementation; testutil.TestProcess is the test fake.
 // turnDoneNotifier is the optional hook a process offers for "a turn just
 // finished"; the router uses it to refresh the dashboard.
 type turnDoneNotifier interface {
@@ -146,6 +140,12 @@ type processEndNotifier interface {
 	SetOnEnd(fn func(cli.ProcessEnd))
 }
 
+// processIface abstracts the CLI process methods used by session-aware code
+// in internal/session, internal/server, internal/dispatch, internal/cron and
+// internal/upstream (all via ManagedSession.loadProcess()). Keep new methods
+// minimal — prefer the embedded facets (ProcessSender, ProcessLifecycle,
+// ProcessEventReader, HistoryInjector). *cli.Process is the only production
+// implementation; testutil.TestProcess is the test fake.
 type processIface interface {
 	ProcessSender
 	ProcessLifecycle
