@@ -27,7 +27,6 @@ var codeText = map[Code]string{
 	CodeCronAsleep:         "定时任务会话已休眠，下一次触发会自动唤醒。",
 	CodeTimeout:            "处理超时，请简化任务后重试。",
 	CodeProcessExited:      "进程意外退出，请重新发送消息，系统会自动重启会话。",
-	CodeAbortedByUrgent:    "上一条消息已被 /urgent 打断，请在当前任务完成后重发。",
 	CodeReconnectedUnknown: "系统已重启，处理状态未知，请查看历史记录或重发。",
 	CodeSessionReset:       "会话已重置。",
 	CodeTooManyPending:     "当前会话排队已满，请稍候或使用 /stop 取消。",
