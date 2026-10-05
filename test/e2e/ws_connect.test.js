@@ -12,6 +12,12 @@ const { startMockServer } = require('./mock-server');
 const desktop = { viewport: { width: 1280, height: 800 } };
 const SESSION_KEY = 'dashboard:direct:2026-01-01-120000-1:myproject';
 
+// Reads go through window.nz.test with optional chaining: a bare `wsm` read
+// before the e2e shim has loaded throws a ReferenceError, which
+// waitForFunction does not retry.
+const wsConnected = (page) =>
+  page.waitForFunction(() => window.nz?.test?.wsm?.state === 'connected');
+
 test.describe('WebSocket connect path', () => {
   let mock;
 
@@ -22,7 +28,7 @@ test.describe('WebSocket connect path', () => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
-    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    await wsConnected(page);
 
     // The handshake the server saw must start with the auth frame.
     expect(mock.wsConnections.length).toBeGreaterThan(0);
@@ -35,18 +41,33 @@ test.describe('WebSocket connect path', () => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
-    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    await wsConnected(page);
     await page.waitForFunction(
-      (key) => !!sessionsData[sid(key, 'local')],
+      (key) => !!window.nz.test.sessionsData[window.nz.test.sid(key, 'local')],
       SESSION_KEY
     );
+    // CONNECTED schedules a debounced /api/sessions refresh. One sent after
+    // the push applies the mock's static 'ready' snapshot over it, which is
+    // correct (a later snapshot is how a dropped push heals, case (e) in
+    // session_state_stale_poll), so push only once that refresh has started.
+    await page.evaluate(async () => {
+      /** @type {any} */ (window).__timers = (await import('/static/state.js')).timers;
+    });
+    await page.waitForFunction(() => /** @type {any} */ (window).__timers.fetchDebounce === null);
 
     const conn = mock.wsConnections[mock.wsConnections.length - 1];
     conn.send({ type: 'session_state', key: SESSION_KEY, node: 'local', state: 'running' });
     await page.waitForFunction(
-      (key) => sessionsData[sid(key, 'local')].state === 'running',
+      (key) => window.nz.test.sessionsData[window.nz.test.sid(key, 'local')].state === 'running',
       SESSION_KEY
     );
+    // Guards the fixture: the snapshot never says 'running', so a REST poll
+    // cannot have produced the flip.
+    const served = await page.evaluate(async (key) => {
+      const r = await fetch('/api/sessions');
+      return (await r.json()).sessions.find((s) => s.key === key).state;
+    }, SESSION_KEY);
+    expect(served).toBe('ready');
 
     await ctx.close();
   });
