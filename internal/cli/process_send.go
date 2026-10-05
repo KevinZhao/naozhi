@@ -103,6 +103,11 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 		return nil, fmt.Errorf("process busy (state=%s): %w", prev, clierr.ErrProcessBusy)
 	}
 	defer p.transition(evSendEnd)
+	// Nothing for this turn is written until after the claim, so a frame
+	// received before it belongs to an earlier turn. drainStaleEvents sweeps
+	// only what is already queued; a mid-turn reconnect's result is queued
+	// after the process turns Ready, so the read loop below drops it too.
+	staleBefore := time.Now()
 
 	// Drain stale events from a previous turn that completed with no Send()
 	// active (readLoop already logged them). After a SIGINT the CLI may still be
@@ -160,6 +165,10 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 					return sr, nil
 				}
 				return nil, p.exitErr()
+			}
+			if !ev.RecvAt.After(staleBefore) {
+				slog.Debug("send: dropping event received before the turn began", "type", ev.Type)
+				continue
 			}
 
 			lastOutput = time.Now()
