@@ -438,6 +438,11 @@ func (l *TakeoverLease) releaseIn(tx sessTx) {
 		return
 	}
 	l.spent = true
+	l.endIn(tx)
+}
+
+// endIn frees the lease's slot and ends its marker, spent or not.
+func (l *TakeoverLease) endIn(tx sessTx) {
 	l.slot.releaseIn(tx)
 	tx.Ext().spawns.EndSpawn(l.key, l.guard)
 }
@@ -448,7 +453,8 @@ func (l *TakeoverLease) releaseIn(tx sessTx) {
 // ErrSpawnInFlight, ErrMaxProcs or, for exempt opts, ErrMaxExemptSessions);
 // otherwise the lease holds the key's in-flight marker and, for non-exempt
 // opts, a pending slot until Takeover or Release, so a second takeover of key
-// is refused, a spawn of key parks and other spawns count the slot.
+// is refused, a spawn of key parks and other spawns count the slot. A live
+// session on key keeps its own count too until Takeover closes it.
 func (r *Router) ReserveTakeover(key string, opts AgentOpts) (*TakeoverLease, error) {
 	// Same flag-injection guard as GetOrCreate: AgentOpts is caller-supplied.
 	if err := validateModel(opts.Model); err != nil {
@@ -508,8 +514,10 @@ func (r *Router) Takeover(ctx context.Context, lease *TakeoverLease, sessionID s
 			err = errLeaseSpent
 			return
 		}
-		// The lease's marker makes this the key's one spawn: a GetOrCreate
-		// parks on it through the close below, and reserveSpawn takes it over.
+		// Consumed from here on, so a Release during the unlocked close below
+		// leaves the marker: a GetOrCreate parks on it through that close, and
+		// reserveSpawn takes it over.
+		lease.spent = true
 		res.guard = lease.guard
 		// If key already exists (e.g. re-takeover same CWD), close the old process.
 		if s, ok := tx.Lookup(key); ok {
@@ -540,7 +548,7 @@ func (r *Router) Takeover(ctx context.Context, lease *TakeoverLease, sessionID s
 					// spawn (a rename into it after a concurrent removal); abort
 					// rather than silently return the wrong session, ending the
 					// lease so its waiters wake.
-					lease.releaseIn(tx)
+					lease.endIn(tx)
 					aborted = true
 					return
 				}
@@ -568,7 +576,6 @@ func (r *Router) Takeover(ctx context.Context, lease *TakeoverLease, sessionID s
 		}
 		// The spawn holds its own slot and ends the marker however it goes.
 		lease.slot.releaseIn(tx)
-		lease.spent = true
 		err = r.reserveSpawn(tx, &res, key, sessionID, opts)
 	})
 	if aborted {

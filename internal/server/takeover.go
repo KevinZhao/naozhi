@@ -98,6 +98,11 @@ func (s *Server) tryAutoTakeover(ctx context.Context, chatKey, key string, opts 
 	if best == nil {
 		return false
 	}
+	return s.adoptCandidate(ctx, key, best, opts)
+}
+
+// adoptCandidate stops the discovered CLI best and resumes its session on key.
+func (s *Server) adoptCandidate(ctx context.Context, key string, best *discovery.DiscoveredSession, opts session.AgentOpts) bool {
 	takeoverOpts := opts
 	takeoverOpts.Workspace = best.CWD
 	// A takeover the router would refuse must not cost the user the CLI, and

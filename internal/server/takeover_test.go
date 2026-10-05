@@ -285,3 +285,53 @@ func TestTryAutoTakeover_HoldsTheKeyWhileTheCLIExits(t *testing.T) {
 	}
 	lease.Release()
 }
+
+// A kill refused for a PID whose identity changed gives the key back: a lease
+// kept would park every later spawn of it until restart.
+func TestAdoptCandidate_KillFailureReleasesTheKey(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("discovery is POSIX-only")
+	}
+	const key = "test:direct:u2:general"
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot start child: %v", err)
+	}
+	waited := false
+	t.Cleanup(func() {
+		if !waited {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+	pst, err := discovery.ProcStartTime(cmd.Process.Pid)
+	if err != nil {
+		t.Skipf("cannot read the child's start time: %v", err)
+	}
+	w := cli.NewWrapperLazy("/nonexistent/claude", &cli.ClaudeProtocol{}, "claude")
+	router := session.NewRouter(session.RouterConfig{Wrapper: w, MaxProcs: 1})
+	t.Cleanup(router.Shutdown)
+	s := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
+	s.claudeDir = t.TempDir()
+
+	ws := t.TempDir()
+	reused := &discovery.DiscoveredSession{
+		PID: cmd.Process.Pid, ProcStartTime: pst + 1, CWD: ws,
+		SessionID: "0b8f3c2e-5d7a-4e1b-9c6f-2a4d8e1f3b5d",
+	}
+	if s.adoptCandidate(context.Background(), key, reused, session.AgentOpts{Workspace: ws}) {
+		t.Fatal("adopted a candidate whose PID was reused")
+	}
+	lease, err := router.ReserveTakeover(key, session.AgentOpts{})
+	if err != nil {
+		t.Fatalf("ReserveTakeover after the failed kill: %v", err)
+	}
+	lease.Release()
+	// The process at the reused PID is not the CLI: only this kill may end it.
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	waited = true
+	if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); !ok || ws.Signal() != syscall.SIGKILL {
+		t.Errorf("the reused PID's process ended with %v, want the test's SIGKILL", cmd.ProcessState)
+	}
+}

@@ -111,6 +111,44 @@ func TestReserveTakeover_HoldsKeyUntilTakeover(t *testing.T) {
 	}
 }
 
+// A Release while Takeover closes the key's live session, with the table
+// lock dropped, comes after Takeover consumed the lease: the marker a
+// GetOrCreate would park on and the slot stay until the spawn takes them.
+func TestTakeover_ReleaseDuringTheCloseKeepsTheKey(t *testing.T) {
+	t.Parallel()
+	const key = "dashboard:takeover:close:general"
+	var spawns atomic.Int32
+	r := newLeaseTestRouter(3, &spawns, nil)
+	var lease *TakeoverLease
+	var heldMarker atomic.Bool
+	var heldSlots atomic.Int32
+	hook := newHookCloseProc(func() {
+		lease.Release()
+		_, held := spawnInFlight(r, key)
+		heldMarker.Store(held)
+		heldSlots.Store(int32(pendingSpawns(r)))
+	})
+	injectSession(r, key, hook).setSessionID("old-sess")
+
+	var err error
+	if lease, err = r.ReserveTakeover(key, AgentOpts{}); err != nil {
+		t.Fatalf("ReserveTakeover: %v", err)
+	}
+	if _, err := r.Takeover(context.Background(), lease, "sess-external", t.TempDir()); err != nil {
+		t.Fatalf("Takeover: %v", err)
+	}
+	if !heldMarker.Load() {
+		t.Error("Release during the close ended the key's marker")
+	}
+	if n := heldSlots.Load(); n != 1 {
+		t.Errorf("%d pending slots during the close, want the lease's 1", n)
+	}
+	if n := spawns.Load(); n != 1 {
+		t.Errorf("%d spawns, want 1", n)
+	}
+	assertNothingHeld(t, r, key)
+}
+
 // TestReserveTakeover_SlotCountsAgainstMaxProcs pins #3417's other race: a
 // lease holds a maxProcs slot while its CLI exits, so a second takeover or a
 // spawn of another key cannot take the last slot from under it.

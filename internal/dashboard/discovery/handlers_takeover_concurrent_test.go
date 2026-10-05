@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -171,4 +172,39 @@ func TestHandleTakeover_PidReuseReleasesTheKey(t *testing.T) {
 	if sig := reap(); sig != syscall.SIGKILL {
 		t.Errorf("the reused PID's process died of %v, not the test's SIGKILL", sig)
 	}
+}
+
+// TestHandleTakeover_TermFailureReleasesTheKey: a SIGTERM that fails for
+// another reason than a reused PID (EPERM on a process naozhi may not signal)
+// gives the reservation back too.
+func TestHandleTakeover_TermFailureReleasesTheKey(t *testing.T) {
+	const sid = "aaaaaaaa-bbbb-cccc-dddd-000000000004"
+	// PID 1 is the target only where signalling it is refused, so the test
+	// never delivers a signal.
+	initProc, err := os.FindProcess(1)
+	if err != nil || !errors.Is(initProc.Signal(syscall.Signal(0)), syscall.EPERM) {
+		t.Skip("needs a PID 1 this user may not signal")
+	}
+	cwd := t.TempDir()
+	router := session.NewRouter(session.RouterConfig{MaxProcs: 3})
+	h := New(Deps{
+		Cache: &fakeCache{snapshot: []discovery.DiscoveredSession{
+			{PID: 1, SessionID: sid, CWD: cwd, ProcStartTime: 100},
+		}},
+		NodeAccess:    fakeNodeAccess{},
+		ClaudeDir:     t.TempDir(),
+		Router:        gatedRouter{r: router},
+		ProcStartTime: func(int) (uint64, error) { return 100, nil },
+		AppCtx:        context.Background(),
+	})
+
+	if rec := postDiscoveredTakeover(h, 1, sid, cwd); rec.Code != http.StatusInternalServerError {
+		t.Fatalf("takeover with a refused SIGTERM = %d %q, want 500", rec.Code, rec.Body.String())
+	}
+	h.Wait()
+	lease, err := router.ReserveTakeover(session.TakeoverKey(session.SanitizeCWDKey(cwd)), session.AgentOpts{})
+	if err != nil {
+		t.Fatalf("ReserveTakeover after the refused SIGTERM: %v", err)
+	}
+	lease.Release()
 }
