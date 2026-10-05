@@ -649,8 +649,8 @@ function applyBackfillToTurn(events) {
 
 // applyTurnResult ends the turn a result event closes, on either frame path.
 function applyTurnResult(ev) {
+  const sKey = sid(selection.key, selection.node);
   if (ev.cost) {
-    const sKey = sid(selection.key, selection.node);
     // ev.cost is the CLI's per-incarnation cumulative total, which RESETS on
     // resume. The authoritative session total is the monotonic delta-sum the
     // server ships as total_cost on the next snapshot poll; never let this
@@ -660,11 +660,11 @@ function applyTurnResult(ev) {
       sessionList.sessionsData[sKey].total_cost = ev.cost;
     }
   }
-  // Optimistic: result means the turn is done. Update state to "ready"
-  // immediately so the banner hides without waiting for session_state WS msg.
-  const rsKey = sid(selection.key, selection.node);
-  if (sessionList.sessionsData[rsKey] && sessionList.sessionsData[rsKey].state === 'running') {
-    sessionList.sessionsData[rsKey].state = 'ready';
+  // The result ends the turn ahead of its 'ready' push, and counts as a push:
+  // a poll requested before it holds a running snapshot it must not reapply.
+  if (sessionList.sessionsData[sKey] && sessionList.sessionsData[sKey].state === 'running') {
+    sessionList.statePushes.at.set(sKey, ++sessionList.statePushes.n);
+    sessionList.sessionsData[sKey].state = 'ready';
     updateSendButton('ready');
   } else {
     resetTurnState();
