@@ -310,8 +310,8 @@ func ledgerWorkspace(ws string) string {
 }
 
 // ledgerBase is the identity every session-source row carries. A row on a
-// cron key names its job, so spend the session books after the run's window
-// closed still counts toward that job's per-job views.
+// cron key names its job, so what the session books outside a run's window
+// (late results, partials, user turns) still counts toward that job.
 func (s *ManagedSession) ledgerBase(runID string) costledger.Entry {
 	e := costledger.Entry{
 		Source:     costledger.SourceSession,

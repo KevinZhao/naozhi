@@ -128,7 +128,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 - `Source/Kind/Unit/Basis` 为类型化枚举；写入时校验，非法 `Basis` → `unknown`，非法 `Source/Kind/Unit` → 拒绝 + dropped 计数。
 - `Model/RawModel/Provider`：来自 CLI 输出，视为不可信：长度 ≤128、合法 UTF-8、禁 C0/DEL、禁换行；违规替换为 `<invalid>` 并 warn（每 raw 值去重）。
 - `Models` 上限 16 条（`cli/process.go maxMeteringUnits` 同款防御）：超出时第 16 条起合并成一条 `model="other"` 的行（`cost_usd` 与 token 相加，`basis` 取最差），分模型之和不因截断变小；`Amount` 不动（`costledger.CapModels`，sandbox 回执写 run 记录前同样合并）。
-- `Source=session` 的行在 cron key（`cron:<job_id>`）上带 `JobID`（`sessionkey.CronJobIDFromKey`，其余 key 为空）：cron 窗口关闭后由会话记账的迟到 result、partial 仍计入该 job 的 `group_by=job` 与 `job_id=` 视图（#3401）；`RunID` 仍是 `unowned:` / `end:`，不并入已落盘的 run 记录（§5.3）。
+- `Source=session` 的行在 cron key（`cron:<job_id>`）上带 `JobID`（`sessionkey.CronJobIDFromKey`，其余 key 为空）：会话在 cron key 上记的账——窗口关闭后到达的迟到 result、进程结束的 partial、运行窗口外从 dashboard 手动发进该会话的 turn——都计入该 job 的 `group_by=job` 与 `job_id=` 视图（#3401），所以该视图的 `entries` 是账本记录数而非运行次数；迟到 result 与 partial 的 `RunID` 仍是 `unowned:` / `end:`，不并入已落盘的 run 记录（§5.3）。
 - 一条 entry ≈ 350 B。
 
 ## 5. 精度修正设计
