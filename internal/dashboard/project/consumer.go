@@ -29,14 +29,13 @@ import (
 )
 
 // ProjectStore is the *project.Manager surface: the project list, one project,
-// the two writes reachable from the UI, and the two planner-config resolvers.
+// the two writes reachable from the UI, and the effective planner model.
 type ProjectStore interface {
 	All() []*projectpkg.Project
 	Get(name string) *projectpkg.Project
 	SetFavorite(name string, favorite bool) error
 	UpdateConfig(name string, cfg projectpkg.ProjectConfig) error
 	EffectivePlannerModel(p *projectpkg.Project) string
-	EffectivePlannerPrompt(p *projectpkg.Project) string
 }
 
 // RouterView is the 3 *session.Router methods this package calls, out of 54 when measured:

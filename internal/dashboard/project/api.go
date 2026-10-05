@@ -13,7 +13,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
@@ -77,7 +76,7 @@ type Deps struct {
 	Router     RouterView
 	// Resolver centralises planner-view opts (docs/rfc/key-resolver.md §3.1
 	// ResolveForPlannerKey) so planner restart keeps the "no defaults
-	// inheritance" contract. Nil falls back to the legacy inlined merge.
+	// inheritance" contract. Nil makes planner restart answer 400.
 	Resolver   PlannerKeyResolver
 	NodeAccess NodeAccessor
 	NodeCache  NodeCacheReader
@@ -390,43 +389,16 @@ func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if h.deps.ProjectMgr == nil {
+	// The resolver is the only source of planner opts
+	// (docs/rfc/key-resolver.md §2.2 #6); production always wires one.
+	if h.deps.ProjectMgr == nil || h.deps.Resolver == nil {
 		http.Error(w, "projects not configured", http.StatusBadRequest)
 		return
 	}
-
-	// Derive planner-view opts via the resolver (ResolveForPlannerKey), which
-	// keeps the "do not read defaults" contract (docs/rfc/key-resolver.md
-	// §2.2 #6). Legacy fallback serves headless test paths without a resolver.
-	var plannerKey string
-	var opts sessionview.AgentOpts
-	if h.deps.Resolver != nil {
-		key, plannerOpts, ok := h.deps.Resolver.ResolveForPlannerKey(name)
-		if !ok {
-			http.Error(w, "project not found", http.StatusNotFound)
-			return
-		}
-		plannerKey = key
-		opts = plannerOpts
-	} else {
-		p := h.deps.ProjectMgr.Get(name)
-		if p == nil {
-			http.Error(w, "project not found", http.StatusNotFound)
-			return
-		}
-		plannerKey = p.PlannerSessionKey()
-		opts = sessionview.AgentOpts{
-			Model:     h.deps.ProjectMgr.EffectivePlannerModel(p),
-			Workspace: p.Path,
-			Exempt:    true,
-		}
-		// Spawn-boundary re-validation (#535): EffectivePlannerPrompt re-reads
-		// cached project.yaml / CLAUDE.md, which Claude's Write tool can mutate
-		// past ValidateConfig. Drop the prompt entirely when sanitisation fails
-		// rather than feeding control bytes / oversize argv to the CLI.
-		if pp := sessionview.SanitisePlannerPromptForSpawn(h.deps.ProjectMgr.EffectivePlannerPrompt(p), p.Name); pp != "" {
-			opts.SystemPrompt = pp // #2493: dedicated field, not ExtraArgs
-		}
+	plannerKey, opts, ok := h.deps.Resolver.ResolveForPlannerKey(name)
+	if !ok {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(h.restartCtx(), 30*time.Second)

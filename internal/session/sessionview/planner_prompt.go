@@ -18,8 +18,8 @@ const MaxPlannerPromptBytesAtSpawn = 8 * 1024
 // "" for rejected input so the spawn runs with no planner prompt rather than a
 // poisoned one. Mirrors project.EffectivePlannerPrompt's rune guards plus a
 // length cap so any path bypassing the project layer still cannot inject
-// control bytes or oversize argv. Exported for the planner-restart
-// fallback in dashboard/project (#535).
+// control bytes or oversize argv. Exported for internal/session's
+// KeyResolver, which applies it on every planner spawn (#535).
 func SanitisePlannerPromptForSpawn(prompt, projectName string) string {
 	if prompt == "" {
 		return ""
