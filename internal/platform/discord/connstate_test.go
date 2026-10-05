@@ -23,6 +23,9 @@ import (
 
 const connStateTestTimeout = 10 * time.Second
 
+// restBotID is the fake's answer to GET /users/@me; READY carries "bot-1".
+const restBotID = "bot-rest"
+
 func TestConnState_BeforeStartIsNotObservable(t *testing.T) {
 	t.Parallel()
 	d := New(Config{BotToken: "test-token"})
@@ -105,7 +108,7 @@ func TestConfigureSession_SyncEvents(t *testing.T) {
 // A connection is published on conns only after the client's first
 // heartbeat, so closing it cannot fail that heartbeat and start a second
 // reconnect. With holdUser set, GET /users/@me signals userHeld and answers
-// only once userRelease is closed.
+// only once userRelease is closed; otherwise it answers as user restBotID.
 type fakeGateway struct {
 	srv         *httptest.Server
 	restStatus  atomic.Int32 // non-zero: every REST request fails with this status
@@ -156,6 +159,10 @@ func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/users/@me") {
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": restBotID, "username": "naozhi"})
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"url": "ws://" + r.Host})
 		return
 	}
@@ -511,6 +518,109 @@ func TestOnDisconnect_ProbeLifetime(t *testing.T) {
 	}
 	if d.probing.Load() {
 		t.Fatal("probing still set after the probe exited")
+	}
+}
+
+// startWithoutBotID starts d against g and forgets the identity READY gave
+// it, as when Open returns without a READY frame.
+func startWithoutBotID(t *testing.T, g *fakeGateway, d *Discord) {
+	t.Helper()
+	g.hello <- struct{}{}
+	if err := d.Start(func(context.Context, platform.IncomingMessage) {}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Stop() })
+	<-g.conns
+	waitConnState(t, d, platform.ConnConnected)
+	d.botID.Store(nil)
+}
+
+// waitDispatch waits for the adapter's background goroutines.
+func waitDispatch(t *testing.T, d *Discord, msg string) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { d.dispatch.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(connStateTestTimeout):
+		t.Fatal(msg)
+	}
+}
+
+func TestBotHeal_RecoversBotID(t *testing.T) {
+	t.Parallel()
+	g := newFakeGateway(t, 0)
+	d := newGatewayAdapter(t, g)
+	startWithoutBotID(t, g, d)
+
+	d.maybeHealBotID()
+	waitDispatch(t, d, "the self-heal never finished")
+	if got := d.getBotID(); got != restBotID {
+		t.Fatalf("botID = %q, want %q from REST", got, restBotID)
+	}
+}
+
+// TestBotHeal_StopDoesNotWaitOnHeldRequest: Stop cancels a self-heal whose
+// request the server never answers instead of waiting out the HTTP client
+// timeout (20s).
+func TestBotHeal_StopDoesNotWaitOnHeldRequest(t *testing.T) {
+	t.Parallel()
+	g := newFakeGateway(t, 0)
+	d := newGatewayAdapter(t, g)
+	d.probeTimeout = time.Hour
+	startWithoutBotID(t, g, d)
+	g.holdUser.Store(true)
+
+	d.maybeHealBotID()
+	<-g.userHeld
+	stopped := make(chan struct{})
+	go func() { _ = d.Stop(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop waited on the held self-heal request")
+	}
+}
+
+// TestBotHeal_BoundedByProbeTimeout: an unanswered self-heal gives up after
+// probeTimeout rather than the HTTP client timeout.
+func TestBotHeal_BoundedByProbeTimeout(t *testing.T) {
+	t.Parallel()
+	g := newFakeGateway(t, 0)
+	d := newGatewayAdapter(t, g)
+	d.probeTimeout = 50 * time.Millisecond
+	startWithoutBotID(t, g, d)
+	g.holdUser.Store(true)
+
+	d.maybeHealBotID()
+	<-g.userHeld
+	start := time.Now()
+	waitDispatch(t, d, "the held self-heal request never timed out")
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("self-heal gave up after %v, want about probeTimeout", took)
+	}
+	if got := d.getBotID(); got != "" {
+		t.Fatalf("botID = %q after a timed-out heal, want empty", got)
+	}
+}
+
+// TestBotHeal_RateLimitedIsNotRetried: the fake's 429 carries no retry_after,
+// so discordgo's own retry would re-request in a loop; the heal makes one
+// request and waits for the cooldown instead.
+func TestBotHeal_RateLimitedIsNotRetried(t *testing.T) {
+	t.Parallel()
+	g := newFakeGateway(t, 0)
+	d := newGatewayAdapter(t, g)
+	startWithoutBotID(t, g, d)
+	g.restStatus.Store(http.StatusTooManyRequests)
+
+	d.maybeHealBotID()
+	waitDispatch(t, d, "the rate-limited self-heal kept retrying")
+	if n := g.userCalls.Load(); n != 1 {
+		t.Fatalf("GET /users/@me made %d times, want 1", n)
+	}
+	if got := d.getBotID(); got != "" {
+		t.Fatalf("botID = %q after a 429, want empty", got)
 	}
 }
 

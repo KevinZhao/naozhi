@@ -119,13 +119,20 @@ func (d *Discord) maybeHealBotID() {
 	d.botHealMu.Unlock()
 
 	sess := d.session
-	if sess == nil {
+	if sess == nil || d.stopped() {
 		return
 	}
 	d.dispatch.Go("discord bot heal", func() {
-		u, err := sess.User("@me")
-		if err != nil || u == nil {
-			slog.Warn("discord bot identity self-heal failed; staying fail-open", "err", err)
+		u, err := d.fetchSelf(sess)
+		if d.stopped() {
+			return
+		}
+		if err != nil {
+			slog.Warn("discord bot identity self-heal failed; staying fail-open", "err", probeReason(err))
+			return
+		}
+		if u == nil || u.ID == "" {
+			slog.Warn("discord bot identity self-heal got no user ID; staying fail-open")
 			return
 		}
 		d.setBotID(u.ID)
@@ -133,6 +140,24 @@ func (d *Discord) maybeHealBotID() {
 			"bot_id", u.ID,
 			"bot_name", osutil.SanitizeForLog(u.Username, 128))
 	})
+}
+
+// stopped reports whether Stop has been called.
+func (d *Discord) stopped() bool {
+	return d.stopCtx != nil && d.stopCtx.Err() != nil
+}
+
+// fetchSelf asks REST who the bot is, bounded by probeTimeout and by Stop.
+// The 429 retry is off: discordgo would sleep it out ignoring ctx. Its
+// pre-request wait on an exhausted rate-limit bucket still ignores ctx.
+func (d *Discord) fetchSelf(sess *discordgo.Session) (*discordgo.User, error) {
+	parent := d.stopCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, durationOr(d.probeTimeout, discordProbeTimeout))
+	defer cancel()
+	return sess.User("@me", discordgo.WithContext(ctx), discordgo.WithRetryOnRatelimit(false))
 }
 
 func (d *Discord) Name() string { return "discord" }
@@ -255,7 +280,7 @@ func (d *Discord) onResumed(_ *discordgo.Session, _ *discordgo.Resumed) {
 // attempts emit nothing, so Since stays at the drop and the reason comes from
 // the disconnect probe. Stop leaves the state as it was.
 func (d *Discord) onDisconnect(s *discordgo.Session, _ *discordgo.Disconnect) {
-	if d.stopCtx != nil && d.stopCtx.Err() != nil {
+	if d.stopped() {
 		return
 	}
 	d.connState.Set(platform.ConnDisconnected)
@@ -312,11 +337,8 @@ func (d *Discord) probeWhileDisconnected(sess *discordgo.Session) {
 // probeOnce runs one REST check and reports whether the state is now terminal.
 // Both verdicts apply only while the state is still disconnected, so a check
 // that outlives a reconnect leaves the recovered state and LastError alone.
-// The 429 retry is off: discordgo would sleep it out ignoring ctx.
 func (d *Discord) probeOnce(sess *discordgo.Session) bool {
-	ctx, cancel := context.WithTimeout(d.stopCtx, durationOr(d.probeTimeout, discordProbeTimeout))
-	defer cancel()
-	_, err := sess.User("@me", discordgo.WithContext(ctx), discordgo.WithRetryOnRatelimit(false))
+	_, err := d.fetchSelf(sess)
 	if err == nil {
 		slog.Debug("discord gateway down but REST accepts the bot token")
 		return false
