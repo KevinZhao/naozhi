@@ -99,7 +99,7 @@ v1 原文的 §1/§2/§3/§4/§5/§6/§7/§8/§9/§10 对应章节已就地修�
 
   > **2026-10-05 更新(#3300)**:上面的分歧只是迁移 #6/#7 时避免 P1 回归的手段(B1),不是产品规则。同一个 planner key 按路径拿到不同 opts 是 bug:IM 新开的 planner 带着 `agents["general"]` 的 Model / ExtraArgs / SystemPrompt / Effort,dashboard 发消息、resume、重启却没有。现在 `ResolveForChat` 的"绑定 + general"分支与 `ResolveForPlannerKey` 共用 `plannerOpts(b)`,planner key 在每条路径上都只取项目配置,不叠 `defaults["general"]`(AccessProfile / backend 已由 41cb7baf 先行收敛)。`buildSessionOpts` 没有 resolver 时也临时建一个走 `ResolveForKey`,项目已删除的 planner key 拿空白 `{Exempt: true}`。chat 视角仍只适用于 IM key。
 
-- 因此本 RFC 的 Resolver 暴露**两个** planner-相关方法:`ResolveForChat(agentID="general")` 做 chat 视角(从 defaults 起步),`ResolveForPlannerKey(name)` 做 planner 视角(从空 opts 起步)。迁移 #6/#7 走 `ResolveForPlannerKey`,**禁止**走 `ResolveForKey`(后者对 planner key 内部也 delegate 到 `ResolveForPlannerKey`,对外只保证"给同一个 key 返回同样 opts")。
+- 因此本 RFC 的 Resolver 暴露**两个** planner-相关入口:`ResolveForChat(agentID="general")`(绑定项目时)和 `ResolveForPlannerKey(name)`。#3300 之后两者都返回 `plannerOpts(b)`(从空 opts 起步,只取项目配置);从 `defaults[agentID]` 起步的 chat 视角只用于非 planner 的 IM key。迁移 #6/#7 走 `ResolveForPlannerKey`,**禁止**走 `ResolveForKey`(后者对 planner key 内部也 delegate 到 `ResolveForPlannerKey`,对外只保证"给同一个 key 返回同样 opts")。
 
 把 `ExtraArgs` 合并从"调用方责任"升级为"接口内部不变量":
 - aliasing 防护(`[:len:len]`)唯一出现在 `ResolveForChat` 里(planner 视角不涉及 defaults 切片共享)
