@@ -20,8 +20,6 @@ import (
 func TestTickFlush_ParallelPersistsAllDirtyWriters(t *testing.T) {
 	p, dir := newTestPersister(t, func(o *Options) {
 		o.FlushInterval = 20 * time.Millisecond
-		// Keep the idle sweeper's close-time flush out of the window.
-		o.IdleCloseAfter = time.Hour
 	})
 
 	const n = 24 // > parallelFsyncMaxWorkers(8) so multiple worker batches run
