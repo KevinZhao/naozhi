@@ -383,6 +383,74 @@ function setHeaderOverlayDriftChip(sessions) {
   if (el.innerHTML !== html) el.innerHTML = html;
 }
 
+// ---- Code-change (PR) chip ----
+//
+// The pull/merge requests the session published or touched (code_changes,
+// newest last, from the CLI's code_change_published frames). The CLI scrapes
+// them from command output, so they are plain links: built with DOM APIs and
+// shown only for an http(s) URL, never fetched from.
+const PR_ACTION_LABELS = {
+  created: '已创建', edited: '已编辑', merged: '已合并', commented: '已评论',
+  closed: '已关闭', reopened: '已重开', ready: '待审', draft: '草稿',
+  'auto-merge-enabled': '自动合并', 'auto-merge-disabled': '取消自动合并',
+  pushed: '已推送', 'checked-out': '已检出', started: '进行中',
+};
+const PR_CHIP_LINKS = 3;
+
+function prTitle(c) {
+  const action = PR_ACTION_LABELS[c.action] || c.action;
+  return [(c.repo || '') + '#' + c.identifier + (action ? ' · ' + action : ''),
+    c.branch ? '分支: ' + c.branch : '', c.url].filter(Boolean).join('\n');
+}
+
+function prChipNode(changes) {
+  const list = (Array.isArray(changes) ? changes : []).filter(c => c && /^https?:\/\//i.test(c.url || ''));
+  if (!list.length) return null;
+  const chip = document.createElement('span');
+  chip.className = 'pr-chip';
+  chip.append(Object.assign(document.createElement('span'), { className: 'pr-chip-icon', textContent: 'PR' }));
+  const shown = list.slice(-PR_CHIP_LINKS).reverse();
+  shown.forEach((c, i) => {
+    const a = Object.assign(document.createElement('a'), {
+      className: 'pr-chip-link pr-action-' + (c.action || 'none'), href: c.url, target: '_blank',
+      rel: 'noopener noreferrer', textContent: '#' + (c.identifier || '?'), title: prTitle(c),
+    });
+    chip.append(a);
+    // The newest PR carries its state in the text; older ones in the tooltip.
+    if (i === 0 && PR_ACTION_LABELS[c.action]) {
+      chip.append(Object.assign(document.createElement('span'), { className: 'pr-chip-action', textContent: PR_ACTION_LABELS[c.action] }));
+    }
+  });
+  const rest = list.slice(0, -PR_CHIP_LINKS);
+  if (rest.length) {
+    chip.append(Object.assign(document.createElement('span'), {
+      className: 'pr-chip-more', textContent: '+' + rest.length, title: rest.reverse().map(prTitle).join('\n\n'),
+    }));
+  }
+  return chip;
+}
+
+// setHeaderPRChip mirrors setHeaderOverlayDriftChip — same two call sites,
+// same before-version-gate constraint: a PR reported mid-turn bumps the
+// session list without advancing stats.version.
+function setHeaderPRChip(sessions) {
+  const el = document.getElementById('header-pr');
+  if (!el) return;
+  let changes = null;
+  if (selection.key) {
+    const node = selection.node || 'local';
+    const row = sessions
+      ? sessions.find(s => s && s.key === selection.key && (s.node || 'local') === node)
+      : sessionList.sessionsData[sid(selection.key, selection.node)];
+    changes = row ? row.code_changes : null;
+  }
+  const sig = JSON.stringify(changes || []);
+  if (el.dataset.sig === sig) return;
+  el.dataset.sig = sig;
+  const node = prChipNode(changes);
+  el.replaceChildren(...(node ? [node] : []));
+}
+
 
 export {
   fetchSessionRuns,
@@ -392,6 +460,7 @@ export {
   setHeaderEffortChip,
   setHeaderGitChip,
   setHeaderOverlayDriftChip,
+  setHeaderPRChip,
   setHeaderRunStats,
   setHeaderSpawnDiagChip,
 };

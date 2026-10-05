@@ -644,8 +644,8 @@ func TestSpawnSession_ShutdownGateRefusesLateSpawns(t *testing.T) {
 }
 
 // TestSpawnSession_RespawnCarriesSpendAndRetiresTheOldID: respawning a dead
-// session keeps its monotonic spend, and when the session ID rotates the old
-// ID stops resolving to the key.
+// session keeps its monotonic spend and PR list, and when the session ID
+// rotates the old ID stops resolving to the key.
 func TestSpawnSession_RespawnCarriesSpendAndRetiresTheOldID(t *testing.T) {
 	r := spawnRouter(t, 4, func(context.Context, cli.SpawnOptions) (processIface, error) { return newIdleProc(), nil })
 	const key = "feishu:direct:respawn:general"
@@ -654,12 +654,16 @@ func TestSpawnSession_RespawnCarriesSpendAndRetiresTheOldID(t *testing.T) {
 	old.costMu.Lock()
 	old.spent = costledger.Totals{Metered: map[costledger.Unit]float64{"requests": 3}}
 	old.costMu.Unlock()
+	old.recordCodeChange(testPR)
 	s, err := spawnIn(r, key, func(tx sessTx) { tx.SetID("sid-old", key) })
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
 	if got := s.CostTotals().Metered["requests"]; got != 3 {
 		t.Errorf("respawned session's metered spend = %v, want the replaced session's 3", got)
+	}
+	if got := s.CodeChanges(); len(got) != 1 || got[0] != testPR {
+		t.Errorf("respawned session's code changes = %+v, want the replaced session's [%+v]", got, testPR)
 	}
 	var stale bool
 	r.ss.View(func(v sessView) {

@@ -75,6 +75,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		// next respawn/drift check flip the session to default.
 		fresh.SetTuningModel(old.TuningModel())
 		fresh.SetTuningEffort(old.TuningEffort())
+		fresh.setCodeChanges(old.CodeChanges())
 		if dr := loadAtomicString(&old.deathReason); dr != "" {
 			storeAtomicString(&fresh.deathReason, dr)
 		}
@@ -112,6 +113,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		copyCostBaseline(fresh, old)
 		if proc != nil {
 			bookUnownedResults(fresh, proc)
+			bookCodeChanges(fresh, proc, func() { r.ss.Update(markChanged); r.notifyChange() })
 			bookProcessEnd(fresh, proc, r.hist.claudeDir)
 		}
 
