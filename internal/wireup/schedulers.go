@@ -13,10 +13,8 @@ import (
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/platform"
-	"github.com/naozhi/naozhi/internal/routerrelay"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/session"
-	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/sysession"
 )
 
@@ -33,9 +31,6 @@ type SchedulersDeps struct {
 	// Router is the live session router; WireSchedulers wraps it in the
 	// cron.SessionRouter adapter so main never names cron.SessionRouter.
 	Router *session.Router
-	// RouterEvents is the relay Router was built with; the scheduler binds the
-	// cost-run owner to it once it exists. nil leaves it unbound.
-	RouterEvents *routerrelay.Relay
 
 	// Platforms is the live IM platform map for cron notification delivery.
 	Platforms map[string]platform.Platform
@@ -132,17 +127,6 @@ func (b *Boot) WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 		return out, fmt.Errorf("start cron scheduler: %w", err)
 	}
 	out.Cron = scheduler
-	// A turn on a cron key that lands inside an in-flight run belongs to that
-	// run: cron writes its ledger entry, the session layer stays silent.
-	if deps.RouterEvents != nil {
-		deps.RouterEvents.BindCostRunOwner(func(key string) bool {
-			if !sessionkey.IsCronKey(key) {
-				return false
-			}
-			_, running := scheduler.CurrentRun(sessionkey.CronJobIDFromKey(key))
-			return running
-		})
-	}
 
 	// Recorded after a successful cron.Start so the audit step reflects a live
 	// scheduler; not in requiredBootSteps because sysession is degradable (#2314).
