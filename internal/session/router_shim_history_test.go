@@ -112,6 +112,13 @@ func writeDriftedShim(t *testing.T, dir string, r *Router, w *cli.Wrapper, sess 
 // handshake and then hangs up, as when its CLI dies.
 func writeLiveShim(t *testing.T, dir string, r *Router, w *cli.Wrapper, sess *ManagedSession, last ...string) {
 	t.Helper()
+	writeLiveShimReplay(t, dir, r, w, sess, nil, last...)
+}
+
+// writeLiveShimReplay is writeLiveShim whose shim replays the CLI lines in
+// replays (hello carries session sid-1) before replay_done.
+func writeLiveShimReplay(t *testing.T, dir string, r *Router, w *cli.Wrapper, sess *ManagedSession, replays []string, last ...string) {
+	t.Helper()
 	t.Setenv("XDG_RUNTIME_DIR", dir)
 	socket := shim.SocketPath(shim.KeyHash(sess.key))
 	ln, err := net.Listen("unix", socket)
@@ -137,7 +144,16 @@ func writeLiveShim(t *testing.T, dir string, r *Router, w *cli.Wrapper, sess *Ma
 		if _, err := rd.ReadBytes('\n'); err != nil { // attach
 			return
 		}
-		fmt.Fprintf(conn, "{\"type\":\"hello\",\"protocol_version\":%d}\n{\"type\":\"replay_done\"}\n", shim.ProtocolVersion)
+		if len(replays) == 0 {
+			fmt.Fprintf(conn, "{\"type\":\"hello\",\"protocol_version\":%d}\n{\"type\":\"replay_done\"}\n", shim.ProtocolVersion)
+		} else {
+			fmt.Fprintf(conn, "{\"type\":\"hello\",\"session_id\":\"sid-1\",\"protocol_version\":%d}\n", shim.ProtocolVersion)
+			for i, l := range replays {
+				frame, _ := (&shim.ServerMsg{Type: "replay", Seq: int64(i + 1), Line: l}).MarshalLine()
+				conn.Write(frame) //nolint:errcheck
+			}
+			fmt.Fprintf(conn, "{\"type\":\"replay_done\",\"count\":%d}\n", len(replays))
+		}
 		if len(last) > 0 {
 			for _, l := range last {
 				io.WriteString(conn, l) //nolint:errcheck
