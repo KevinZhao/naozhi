@@ -61,8 +61,8 @@ test.describe('WebSocket connect path', () => {
       (key) => window.nz.test.sessionsData[window.nz.test.sid(key, 'local')].state === 'running',
       SESSION_KEY
     );
-    // The REST snapshot still says 'ready', so 'running' can only have come
-    // through onMessage.
+    // Guards the fixture: the snapshot never says 'running', so a REST poll
+    // cannot have produced the flip.
     const served = await page.evaluate(async (key) => {
       const r = await fetch('/api/sessions');
       return (await r.json()).sessions.find((s) => s.key === key).state;
