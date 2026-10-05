@@ -181,10 +181,10 @@ func TestDoctor_PlatformConn(t *testing.T) {
 			"slack disconnected — retrying", ""},
 		{"since after the server clock", one("disconnected", "-3s", ""), "warn",
 			"slack disconnected for 0s — retrying", ""},
-		{"long errors keep every platform", body(`{"discord":"disconnected","slack":"failed","weixin":"connecting"}`,
-			`{"discord":`+entry("disconnected", "1m0s", long)+`,"slack":`+entry("failed", "1s", long)+`,"weixin":`+entry("connecting", "2s", long)+`}`), "fail",
-			"discord disconnected for 1m0s (last error: " + long[:117] + "...) — retrying; " +
-				"slack failed for 1s (last error: " + long[:117] + "...) — needs operator action: fix the cause, then restart unless it reconnects by itself; " +
+		{"long errors keep every platform", body(`{"discord":"failed","slack":"disconnected","weixin":"connecting"}`,
+			`{"discord":`+entry("failed", "999h59m59s", long)+`,"slack":`+entry("disconnected", "1m0s", long)+`,"weixin":`+entry("connecting", "2s", long)+`}`), "fail",
+			"discord failed for 999h59m59s (last error: " + long[:117] + "...) — needs operator action: fix the cause, then restart unless it reconnects by itself; " +
+				"slack disconnected for 1m0s (last error: " + long[:117] + "...) — retrying; " +
 				"weixin connecting for 2s (last error: " + long[:117] + "...) — retrying", ""},
 		{"long name capped", body(`{"`+long+`":"connected"}`, `{"`+long+`":`+entry("connected", "1m0s", "")+`}`), "pass",
 			long[:253] + "...", ""},
