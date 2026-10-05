@@ -275,7 +275,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 	// be dispatched remotely: the env overlay is host-local and never crosses
 	// the wire, so the remote would spawn on the wrong account. Fail loud.
 	if err := gateRemoteAccessProfile(h.resolver, nodeID, msg.Key); err != nil {
-		slog.Debug("ws send: access-profile remote-dispatch rejected", "node", nodeID, "key", msg.Key, "err", err)
+		slog.Debug("ws send: remote-dispatch gate rejected", "node", nodeID, "key", msg.Key, "err", err)
 		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Key: msg.Key, Error: err.Error()}))
 		return
 	}
