@@ -3,8 +3,9 @@ package cli
 import "testing"
 
 // TestClaudeProtocol_ReadEvent_SubstringFastPath_SkipsBeforeUnmarshal
-// covers R20260527122801-PERF-3 (#1334): the line-prefix fast path must skip hook_started / hook_response / control_response frames
-// without invoking json.Unmarshal. We verify that by feeding a deliberately
+// covers R20260527122801-PERF-3 (#1334): the line-prefix fast path must
+// skip hook_started / hook_response / control_response frames without
+// invoking json.Unmarshal. We verify that by feeding a deliberately
 // MALFORMED JSON tail past the skip token — if the fast-path runs, the
 // frame is skipped (no error, no event); if the slow path runs, the
 // unmarshal fails and ReadEvent returns an error.
