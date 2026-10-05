@@ -176,15 +176,15 @@ func TestDoctor_PlatformConn(t *testing.T) {
 		{"connecting beyond grace", one("connecting", "1h2m3s", ""), "fail",
 			"slack connecting for 1h2m3s — still not connected after 5m0s", ""},
 		{"failed fails at once", one("failed", "1s", "invalid_auth"), "fail",
-			"slack failed for 1s (last error: invalid_auth) — the adapter gave up; fix the cause and restart", ""},
+			"slack failed for 1s (last error: invalid_auth) — needs operator action: fix the cause, then restart unless it reconnects by itself", ""},
 		{"no since", body(`{"slack":"disconnected"}`, `{}`), "warn",
 			"slack disconnected — retrying", ""},
 		{"since after the server clock", one("disconnected", "-3s", ""), "warn",
 			"slack disconnected for 0s — retrying", ""},
-		{"long errors keep every platform", body(`{"discord":"disconnected","slack":"failed","weixin":"connecting"}`,
-			`{"discord":`+entry("disconnected", "1m0s", long)+`,"slack":`+entry("failed", "1s", long)+`,"weixin":`+entry("connecting", "2s", long)+`}`), "fail",
-			"discord disconnected for 1m0s (last error: " + long[:117] + "...) — retrying; " +
-				"slack failed for 1s (last error: " + long[:117] + "...) — the adapter gave up; fix the cause and restart; " +
+		{"long errors keep every platform", body(`{"discord":"failed","slack":"disconnected","weixin":"connecting"}`,
+			`{"discord":`+entry("failed", "999h59m59s", long)+`,"slack":`+entry("disconnected", "1m0s", long)+`,"weixin":`+entry("connecting", "2s", long)+`}`), "fail",
+			"discord failed for 999h59m59s (last error: " + long[:117] + "...) — needs operator action: fix the cause, then restart unless it reconnects by itself; " +
+				"slack disconnected for 1m0s (last error: " + long[:117] + "...) — retrying; " +
 				"weixin connecting for 2s (last error: " + long[:117] + "...) — retrying", ""},
 		{"long name capped", body(`{"`+long+`":"connected"}`, `{"`+long+`":`+entry("connected", "1m0s", "")+`}`), "pass",
 			long[:253] + "...", ""},
@@ -195,7 +195,7 @@ func TestDoctor_PlatformConn(t *testing.T) {
 			"warn|since start at " + old + " — feishu, weixin may not be connected (inferred"},
 		{"worst platform wins", body(`{"discord":"connected","slack":"failed","weixin":"connecting"}`,
 			`{"discord":`+entry("connected", "9m0s", "")+`,"slack":`+entry("failed", "2m0s", "invalid_auth")+`,"weixin":`+entry("connecting", "10s", "")+`}`), "fail",
-			"discord connected for 9m0s; slack failed for 2m0s (last error: invalid_auth) — the adapter gave up; fix the cause and restart; weixin connecting for 10s — retrying",
+			"discord connected for 9m0s; slack failed for 2m0s (last error: invalid_auth) — needs operator action: fix the cause, then restart unless it reconnects by itself; weixin connecting for 10s — retrying",
 			"pass|no inbound IM messages yet"},
 	}
 	for _, tc := range tests {

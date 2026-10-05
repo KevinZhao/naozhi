@@ -239,7 +239,8 @@ func (d *doctor) platformsFinding(p healthPayload, now time.Time) (unobserved []
 // gradePlatformConn grades one observable platform. connecting and
 // disconnected are retries in progress, so they warn inside
 // platformReconnectGrace (or when the age is unknown) and fail beyond it;
-// failed means the adapter gave up and fails at once.
+// failed needs operator action and fails at once, even though some adapters
+// keep probing slowly and may recover.
 func gradePlatformConn(state string, age time.Duration, ageKnown bool, lastError string) (level, detail string) {
 	detail = state
 	if ageKnown {
@@ -252,7 +253,7 @@ func gradePlatformConn(state string, age time.Duration, ageKnown bool, lastError
 	case "connected":
 		return "pass", detail
 	case "failed":
-		return "fail", detail + " — the adapter gave up; fix the cause and restart"
+		return "fail", detail + " — needs operator action: fix the cause, then restart unless it reconnects by itself"
 	case "connecting", "disconnected":
 		if ageKnown && age >= platformReconnectGrace {
 			return "fail", detail + " — still not connected after " + platformReconnectGrace.String()
