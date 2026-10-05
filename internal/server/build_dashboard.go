@@ -110,7 +110,7 @@ func (s *Server) buildWSStack(w *wiring) *Hub {
 		Nodes:            s.nodes,
 		Resolver:         w.resolver,
 		Scheduler:        w.scheduler,
-		AllowedRoot:      w.allowedRoot,
+		AllowedRoot:      w.projectsRoot,
 		TrustedProxy:     s.auth.TrustedProxy,
 		WSAuthLimiter:    s.auth.LoginAllow,
 		WSUpgradeLimiter: s.auth.WSUpgradeAllow,

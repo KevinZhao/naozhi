@@ -22,7 +22,8 @@ type tailerRegistry struct {
 	byTask     map[tailerKey]*agentTailer
 	count      atomic.Int32
 	clientSubs map[*wsClient]map[tailerKey]struct{} // reverse index for client teardown
-	// allowedRoot, when set, confines the JSONL files a tailer may read.
+	// allowedRoot, when set, confines the JSONL files a tailer may read; the
+	// build wires the resolved Claude projects root (HubOptions.AllowedRoot).
 	allowedRoot string
 
 	// linkers dedups OnResolve / task_done wiring across re-subscribes. Keys
@@ -181,7 +182,8 @@ func (r *tailerRegistry) ensureTailer(key, taskID, toolUseID, jsonlPath string) 
 		return nil, false
 	}
 	// When allowedRoot is configured, refuse jsonlPath outside it so a
-	// malformed CLI event cannot make the tailer Stat/Tail an arbitrary file.
+	// malformed CLI event cannot make the tailer Stat/Tail an arbitrary file;
+	// the verdict matches agentevents' gate, so WS and HTTP drill-in agree.
 	// Empty allowedRoot means unrestricted.
 	if r.allowedRoot != "" {
 		if !jsonlPathUnderAllowedRoot(jsonlPath, r.allowedRoot) {

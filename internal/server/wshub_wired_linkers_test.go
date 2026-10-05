@@ -1,9 +1,11 @@
 package server
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
 	"github.com/naozhi/naozhi/internal/subagent"
@@ -85,11 +87,49 @@ func TestTailerRegistry_RefusesPathsOutsideAllowedRoot(t *testing.T) {
 	if n := r.count.Load(); n != 0 {
 		t.Errorf("%d tailers registered after a refused path", n)
 	}
+}
 
-	hub := newHubForTest(t, HubOptions{Router: session.NewRouter(session.RouterConfig{}), AllowedRoot: root}, sendEngineOpts{})
-	defer hub.Shutdown()
-	if hub.tailers.allowedRoot != root {
-		t.Errorf("NewHub's tailers allowedRoot = %q, want HubOptions.AllowedRoot %q", hub.tailers.allowedRoot, root)
+// TestBuildServer_TailerRootIsProjectsRoot drives the production wiring with
+// an operator workspace that is not the Claude projects root (the normal
+// deployment): the tailer must accept a sub-agent transcript under
+// ~/.claude/projects and refuse a JSONL inside the workspace. With the
+// workspace as the tailer root every transcript was refused and drill-in
+// silently fell back to the 3s HTTP poll. agent_events gets the same root.
+func TestBuildServer_TailerRootIsProjectsRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workspace := t.TempDir()
+	transcript := filepath.Join(home, ".claude", "projects", "-ws", "11111111-2222-4333-8444-555555555555",
+		"subagents", "agent-a0123456789abcdef.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcript, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, hs := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: session.NewRouter(session.RouterConfig{}),
+		Backend: "claude", AllowedRoot: workspace})
+	t.Cleanup(srv.hub.Shutdown)
+	t.Cleanup(srv.appCancel)
+
+	want := claudefs.ResolvedProjectsRoot(filepath.Join(home, ".claude"))
+	if got := srv.hub.tailers.allowedRoot; got != want {
+		t.Fatalf("tailers.allowedRoot = %q, want the resolved projects root %q", got, want)
+	}
+	if got := hs.agentEventsH.ProjectsRoot(); got != want {
+		t.Errorf("agent_events root = %q, tailer root = %q — WS and HTTP drill-in would disagree", got, want)
+	}
+	if got := hs.wiring.engine.allowedRoot; got != workspace {
+		t.Errorf("engine.allowedRoot = %q, want the operator workspace %q", got, workspace)
+	}
+
+	if tl, ok := srv.hub.tailers.ensureTailer("k", "task-1", "tool-1", transcript); !ok || tl == nil {
+		t.Errorf("ensureTailer refused the sub-agent transcript %q under the projects root", transcript)
+	}
+	inWorkspace := filepath.Join(workspace, "agent-a0123456789abcdef.jsonl")
+	if tl, ok := srv.hub.tailers.ensureTailer("k", "task-2", "tool-2", inWorkspace); ok || tl != nil {
+		t.Errorf("ensureTailer accepted %q, inside the workspace but outside the projects root", inWorkspace)
 	}
 }
 
