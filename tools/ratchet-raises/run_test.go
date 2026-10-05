@@ -349,6 +349,9 @@ func TestRun_SkipInAFileWithABaseline(t *testing.T) {
 		skipped = "func TestY(t *testing.T) { t.Skip() }"
 	)
 	used := fakeTree{constFile: src(decl, test)}
+	const other = dir + "other_test.go"
+	testZ := strings.Replace(test, "TestX", "TestZ", 1)
+	withOther := func(body string) fakeTree { return fakeTree{constFile: src(decl, test), other: body} }
 	skip := []raise{{gate, 0, 1}}
 	for _, tc := range []struct {
 		name    string
@@ -375,6 +378,18 @@ func TestRun_SkipInAFileWithABaseline(t *testing.T) {
 		{name: "skip in a declaring file with no use", base: fakeTree{constFile: src(decl), dir + "other_test.go": src(test)},
 			head: fakeTree{constFile: src(decl, skipped), dir + "other_test.go": src(test)}, want: skip},
 		{name: "new baseline in a file that already skips", base: fakeTree{constFile: src(skipped)}, head: fakeTree{constFile: src(decl, test, skipped)}},
+		{name: "new baseline with a new skip", base: fakeTree{}, head: fakeTree{constFile: src(decl, test, skipped)}},
+		{name: "existing skip in a file that gains a use", base: withOther(src(skipped)),
+			head: fakeTree{constFile: src(decl, test), other: src(skipped, testZ)}},
+		{name: "existing skip in a file that gains a declaration", base: withOther(src(skipped)),
+			head: fakeTree{constFile: src(decl, test), other: src("const otherBaseline = 1", skipped)}},
+		{name: "file gains a use and a new skip", base: withOther(src(skipped)),
+			head: fakeTree{constFile: src(decl, test), other: src(skipped, testZ, "func TestW(t *testing.T) { t.SkipNow() }")}, want: []raise{{gate, 1, 2}}},
+		{name: "skip moved from an uncounted file into a counted one", base: withOther(src(skipped)),
+			head: fakeTree{constFile: src(decl, test, skipped), other: src()}, want: skip},
+		// The base side reads the same path, so a rename reads as a new file.
+		{name: "renamed file with a skip gains a use", base: withOther(src(skipped)),
+			head: fakeTree{constFile: src(decl, test), dir + "renamed_test.go": src(skipped, testZ)}, want: skip},
 		{name: "ledger line clears it", head: fakeTree{constFile: src(decl, test, skipped), ledgerPath: `{"gate":"` + gate + `","from":0,"to":1,"issue":1,"reason":"r"}` + "\n"},
 			want: skip, cleared: true},
 	} {

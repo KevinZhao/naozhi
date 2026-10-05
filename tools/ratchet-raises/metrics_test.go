@@ -21,10 +21,10 @@ func TestRaises_GoConstants(t *testing.T) {
 	t.Parallel()
 	base, head := metrics{}, metrics{}
 	const p = "internal/x/a_test.go"
-	if _, err := goConsts(map[string]string{p: "package x\nconst bareSleepBaseline = 138\nconst (\n\tfooBaseline = 5\n\tbarBaseline = 2\n)\n"}, base); err != nil {
+	if _, _, err := goConsts(map[string]string{p: "package x\nconst bareSleepBaseline = 138\nconst (\n\tfooBaseline = 5\n\tbarBaseline = 2\n)\n"}, base); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := goConsts(map[string]string{p: "package x\nconst bareSleepBaseline = 139\nconst (\n\tfooBaseline = 4\n\tbarBaseline = 3\n)\nconst newBaseline = 9\n"}, head); err != nil {
+	if _, _, err := goConsts(map[string]string{p: "package x\nconst bareSleepBaseline = 139\nconst (\n\tfooBaseline = 4\n\tbarBaseline = 3\n)\nconst newBaseline = 9\n"}, head); err != nil {
 		t.Fatal(err)
 	}
 	rs := raises(base, head)
@@ -40,8 +40,22 @@ func TestRaises_GoConstants(t *testing.T) {
 // stops rather than reading it as empty.
 func TestGoConsts_UnparsableFileIsAnError(t *testing.T) {
 	t.Parallel()
-	if _, err := goConsts(map[string]string{"internal/x/a_test.go": "package x\nconst aBaseline = \n"}, metrics{}); err == nil {
+	if _, _, err := goConsts(map[string]string{"internal/x/a_test.go": "package x\nconst aBaseline = \n"}, metrics{}); err == nil {
 		t.Fatal("want a parse error")
+	}
+}
+
+// A base version that is missing or does not parse has no skips to offset.
+func TestSkipsIn(t *testing.T) {
+	t.Parallel()
+	for src, want := range map[string]int64{
+		"": 0,
+		"package x\nfunc TestY(t *testing.T) { t.Skip() }\n": 1,
+		"package x\nfunc TestY(t *testing.T) { t.Skip(":      0,
+	} {
+		if got := skipsIn("internal/x/a_test.go", src); got != want {
+			t.Errorf("skipsIn(%q) = %d, want %d", src, got, want)
+		}
 	}
 }
 
@@ -49,7 +63,7 @@ func TestGoConsts_UnparsableFileIsAnError(t *testing.T) {
 func TestGoConsts_SkipsTestdataAndVendor(t *testing.T) {
 	t.Parallel()
 	m := metrics{}
-	problems, err := goConsts(map[string]string{
+	problems, _, err := goConsts(map[string]string{
 		"tools/x/testdata/a.go": "package a\nconst aBaseline = 1 + 1\n",
 		"vendor/y/b.go":         "not go at all",
 		"tools/x/c.go":          "package x\nconst cBaseline = 2\n",
@@ -66,7 +80,7 @@ func TestGoConsts_SkipsTestdataAndVendor(t *testing.T) {
 func TestGoConsts_Uses(t *testing.T) {
 	t.Parallel()
 	m := metrics{}
-	_, err := goConsts(map[string]string{
+	_, _, err := goConsts(map[string]string{
 		"internal/x/a.go": "package x\nconst (\n\taBaseline = 1\n\tbBaseline = 1\n\tcBaseline = 1\n\tdBaseline = 1\n\teBaseline = 1\n\tfBaseline = 1\n\tgBaseline = 1\n\thBaseline = 1\n\tiBaseline = 1\n\tjBaseline = 1\n)\n" +
 			"var _, _ = cBaseline, 0\nvar _ = check(jBaseline)\n" +
 			"func f() {\n\tconst localBaseline = 2\n\tif n > localBaseline {\n\t}\n\tvar bBaseline = 3\n\t_, _ = dBaseline, n\n\t_ = check(n, iBaseline)\n\tx := []int{gBaseline}\n\t_ = x\n}\n",

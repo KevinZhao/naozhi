@@ -4,7 +4,7 @@
 // line appended to scripts/ratchet-raises.jsonl citing an issue that carries
 // the ratchet-raise-approved label. A Go baseline constant that loses its
 // last use in its directory is a raise too (go-ref:, see goRefs for what
-// counts), and so is a new t.Skip in a file declaring or using one
+// counts), and so is a t.Skip a change adds to a file declaring or using one
 // (go-skip:, see skipCalls).
 // Run from the repo root:
 //
@@ -66,13 +66,16 @@ type tree interface {
 func run(base, head tree, labels labelSource) ([]string, []raise, error) {
 	// Base already passed this gate: a baseline constant it cannot read was
 	// written before the integer-literal rule, and head is held to it.
-	bm, _, err := collect(base)
+	bm, _, _, err := collect(base)
 	if err != nil {
 		return nil, nil, fmt.Errorf("base: %w", err)
 	}
-	hm, headProblems, err := collect(head)
+	hm, headProblems, skipFiles, err := collect(head)
 	if err != nil {
 		return nil, nil, fmt.Errorf("head: %w", err)
+	}
+	if err := rebaseGoSkips(bm, base, skipFiles); err != nil {
+		return nil, nil, fmt.Errorf("base: %w", err)
 	}
 	// Once base has a pins document, every change to it is a raise, a pin head
 	// adds included; the first document is free because golden metrics are
@@ -118,24 +121,24 @@ func run(base, head tree, labels labelSource) ([]string, []raise, error) {
 }
 
 // collect reads every ratchet at one revision, with the baseline constants
-// goConsts could not read.
-func collect(t tree) (metrics, []string, error) {
+// goConsts could not read and the files go-skip: counts per directory.
+func collect(t tree) (metrics, []string, map[string][]string, error) {
 	m := metrics{}
 	paths, err := t.baselineGoFiles()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	files := map[string]string{}
 	for _, p := range paths {
 		src, err := t.read(p)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		files[p] = src
 	}
-	problems, err := goConsts(files, m)
+	problems, skipFiles, err := goConsts(files, m)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	for path, parse := range map[string]func(string, metrics) error{
 		jsRatchetPath: jsRatchet, jsCapsPath: jsCaps, jsDepsPath: jsDeps,
@@ -143,13 +146,36 @@ func collect(t tree) (metrics, []string, error) {
 	} {
 		raw, err := t.read(path)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if err := parse(raw, m); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
-	return m, problems, nil
+	return m, problems, skipFiles, nil
+}
+
+// rebaseGoSkips sets each go-skip:<dir> base already has to the skips in the
+// base versions of the files head counts there, so a file joining the counted
+// set brings its old skips to both sides. A directory new to go-skip: stays a
+// new ratchet.
+func rebaseGoSkips(bm metrics, base tree, skipFiles map[string][]string) error {
+	for dir, paths := range skipFiles {
+		key := "go-skip:" + dir
+		if _, ok := bm[key]; !ok {
+			continue
+		}
+		var n int64
+		for _, p := range paths {
+			src, err := base.read(p)
+			if err != nil {
+				return err
+			}
+			n += skipsIn(p, src)
+		}
+		bm[key] = metric{value: n}
+	}
+	return nil
 }
 
 // markNewIsRaise sets newIsRaise on every metric whose key starts with prefix.

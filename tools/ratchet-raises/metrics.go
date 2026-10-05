@@ -47,10 +47,10 @@ var goBaselineName = regexp.MustCompile(`[Bb]aseline`)
 // another package, its file deleted) is a raise to -1. A constant some code
 // in its directory uses (goRefs) also gets go-ref:<dir>#<name>, a raise to -1
 // once its last use goes, and go-skip:<dir> sums the skips (skipCalls) in the
-// files declaring or using one. It returns one problem per constant whose
-// value is not a plain integer literal (left unread) and per name repeated
-// within a directory (read as the largest).
-func goConsts(files map[string]string, into metrics) ([]string, error) {
+// files declaring or using one, which it returns per directory. It returns one
+// problem per constant whose value is not a plain integer literal (left
+// unread) and per name repeated within a directory (read as the largest).
+func goConsts(files map[string]string, into metrics) ([]string, map[string][]string, error) {
 	var problems []string
 	fset := token.NewFileSet()
 	parsed := map[string]*ast.File{}
@@ -62,7 +62,7 @@ func goConsts(files map[string]string, into metrics) ([]string, error) {
 		}
 		f, err := parser.ParseFile(fset, p, files[p], parser.SkipObjectResolution|parser.ParseComments)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		parsed[p] = f
 		ast.Inspect(f, func(n ast.Node) bool {
@@ -101,7 +101,9 @@ func goConsts(files map[string]string, into metrics) ([]string, error) {
 	}
 	uses := map[string]bool{}
 	skips := map[string]int64{} // dir → skips in the files that declare or use a baseline
-	for p, f := range parsed {
+	skipFiles := map[string][]string{}
+	for _, p := range slices.Sorted(maps.Keys(parsed)) {
+		f := parsed[p]
 		dir := path.Dir(p)
 		if read[dir] == nil || buildConstrained(p, f) {
 			continue
@@ -113,6 +115,7 @@ func goConsts(files map[string]string, into metrics) ([]string, error) {
 		})
 		if used || declares[p] {
 			skips[dir] += skipCalls(f)
+			skipFiles[dir] = append(skipFiles[dir], p)
 		}
 	}
 	for k := range uses {
@@ -121,15 +124,18 @@ func goConsts(files map[string]string, into metrics) ([]string, error) {
 	for dir, n := range skips {
 		into["go-skip:"+dir] = metric{value: n}
 	}
-	return problems, nil
+	return problems, skipFiles, nil
 }
 
 // skipCalls counts the Skip, Skipf and SkipNow selectors in f, called or
-// taken as a method value, on any receiver. Not counted: a skip in a file
-// that neither declares nor uses a baseline, even in a test calling a
-// comparison helper declared elsewhere; a skip through a helper declared in
-// another file; one in a build-constrained file. The sum is per directory,
-// so a skip removed from one file offsets one added in another.
+// taken as a method value, on any receiver. run() compares head against the
+// base versions of the files head counts, so only skips a change adds to them
+// raise. Not counted: a skip in a file that neither declares nor uses a
+// baseline, even in a test calling a comparison helper declared elsewhere; a
+// skip through a helper in another file, or in a same-file helper that was
+// there before a new comparing test calls it; one in a build-constrained file.
+// A renamed file reads as new, its skips a raise. A skip removed from one
+// counted file offsets one added in another of the directory.
 func skipCalls(f *ast.File) int64 {
 	var n int64
 	ast.Inspect(f, func(node ast.Node) bool {
@@ -142,6 +148,19 @@ func skipCalls(f *ast.File) int64 {
 		return true
 	})
 	return n
+}
+
+// skipsIn is skipCalls over src; a missing (empty) or unparsable source
+// counts 0, so a doubt reports a raise rather than hiding one.
+func skipsIn(p, src string) int64 {
+	if src == "" {
+		return 0
+	}
+	f, err := parser.ParseFile(token.NewFileSet(), p, src, parser.SkipObjectResolution)
+	if err != nil {
+		return 0
+	}
+	return skipCalls(f)
 }
 
 // goRefs calls use for each identifier in f named in names that is not
