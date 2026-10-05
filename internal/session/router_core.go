@@ -523,10 +523,6 @@ type RouterConfig struct {
 	// Observer receives the router's session-list and key-retirement
 	// notifications; nil drops them.
 	Observer Observer
-	// CostRunOwner reports whether a turn on key belongs to a run that writes
-	// its own ledger entry (a cron run), so the session layer stays silent for
-	// it; nil means no turn is owned elsewhere.
-	CostRunOwner func(key string) bool
 
 	// Resolver is the shared KeyResolver. When set, callers (Dispatcher, Hub,
 	// upstream wiring) should fetch it via Router.Resolver() instead of building
@@ -599,7 +595,7 @@ func NewRouter(cfg RouterConfig) *Router {
 			RollupDays:    cfg.CostLedger.RollupDays,
 		})
 	}
-	r.runs.cost = newCostAccounting(ledger, cfg.CostRunOwner)
+	r.runs.cost = newCostAccounting(ledger)
 
 	// nil HistoryLoader → production claude-factory-backed implementation so
 	// the rest of the router can call r.hist.loader unconditionally (#458).

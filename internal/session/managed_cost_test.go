@@ -20,7 +20,7 @@ func newLedgerSession(t *testing.T, key string, proc *TestProcess) (*ManagedSess
 	t.Helper()
 	ledger := costledger.NewStore(t.TempDir(), costledger.Options{})
 	t.Cleanup(ledger.Close)
-	s := &ManagedSession{key: key, costAcct: newCostAccounting(ledger, nil)}
+	s := &ManagedSession{key: key, costAcct: newCostAccounting(ledger)}
 	s.SetBackend("claude")
 	s.setWorkspace("/home/u/work/proj")
 	s.storeProcess(proc)
@@ -105,22 +105,27 @@ func TestAccountTurnCost_WritesOneEntryPerTurnWithModels(t *testing.T) {
 	}
 }
 
-func TestAccountTurnCost_CronOwnedTurnSkipsLedgerButAccrues(t *testing.T) {
+// A turn inside an open cost window is the window owner's to book: it accrues
+// and comes back from EndCostWindow, and the session writes no row for it.
+func TestAccountTurnCost_TurnInsideTheWindowSkipsLedgerButAccrues(t *testing.T) {
 	proc := &TestProcess{AliveVal: true, SendFunc: scripted(&clievent.SendResult{Text: "a", CostUSD: 0.4})}
 	s, ledger := newLedgerSession(t, "cron:job1", proc)
-	s.costAcct.ownedByRun = func(key string) bool { return key == "cron:job1" }
+	s.BeginCostWindow()
 	if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
 		t.Fatal(err)
+	}
+	if inc := s.EndCostWindow(); !approxEq(inc.USD, 0.4) {
+		t.Fatalf("window increment = %+v, want the turn's 0.4", inc)
 	}
 	if got := loadTotalCost(&s.costSpent); !approxEq(got, 0.4) {
 		t.Fatalf("costSpent = %v", got)
 	}
 	if ents := allEntries(t, ledger); len(ents) != 0 {
-		t.Fatalf("cron-owned turn must not write session entries: %+v", ents)
+		t.Fatalf("a turn inside the window must not write session entries: %+v", ents)
 	}
 }
 
-func TestAccountTurnCost_CronKeyWithoutGateWritesAsSession(t *testing.T) {
+func TestAccountTurnCost_CronKeyOutsideAWindowWritesAsSession(t *testing.T) {
 	proc := &TestProcess{AliveVal: true, SendFunc: scripted(&clievent.SendResult{Text: "a", CostUSD: 0.4})}
 	s, ledger := newLedgerSession(t, "cron:job1", proc)
 	if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
@@ -128,7 +133,7 @@ func TestAccountTurnCost_CronKeyWithoutGateWritesAsSession(t *testing.T) {
 	}
 	ents := allEntries(t, ledger)
 	if len(ents) != 1 || ents[0].Source != costledger.SourceSession {
-		t.Fatalf("ungated cron key must still be accounted: %+v", ents)
+		t.Fatalf("a cron key with no window open must still be accounted: %+v", ents)
 	}
 }
 
@@ -615,7 +620,7 @@ func TestBookUnownedResults_RenameMovesBookingWithTheProcess(t *testing.T) {
 	t.Cleanup(r.Shutdown)
 	ledger := costledger.NewStore(t.TempDir(), costledger.Options{})
 	t.Cleanup(ledger.Close)
-	r.runs.cost = newCostAccounting(ledger, nil)
+	r.runs.cost = newCostAccounting(ledger)
 	proc := &hookedTestProcess{TestProcess: &TestProcess{AliveVal: true, SendFunc: scripted(
 		&clievent.SendResult{Text: "owned", CostUSD: 4})}}
 	r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) { return proc, nil }

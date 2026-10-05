@@ -650,10 +650,11 @@ type execSendArgs struct {
 func (s *Scheduler) execSend(a execSendArgs) (result SendResult, costInc costledger.Increment, ok bool) {
 	sendCtx, sendCancel := context.WithTimeout(s.stopCtx, a.sendBudget)
 	defer sendCancel()
-	// Cost is attributed by differencing the session's monotonic totals
-	// around the turn; read through the held Session (the router may Reset
-	// the key before finishRun runs).
-	before := costTotalsOf(a.sess)
+	// The run owns the spend booked on the held Session while its Send is
+	// live; the window closes before any Reset or release, whose spend the
+	// session books itself.
+	win := openCostWindow(a.sess)
+	defer win.close()
 	// Structured signal when spawn already consumed >spawnElapsedWarnRatio of
 	// jobTimeout: the wall-clock doubling is intentional but operators of 300s+
 	// jobs need an event to alert on (counter + slog pair).
@@ -680,7 +681,7 @@ func (s *Scheduler) execSend(a execSendArgs) (result SendResult, costInc costled
 	// abortCh AFTER cancelling sendCtx) so a refactor here cannot let the next
 	// Reset race the in-flight interrupt write; see its godoc.
 	result, abort, err := s.sendWithWatchdog(sendCtx, sendCancel, a.sess, a.cleanText)
-	costInc = costTotalsOf(a.sess).Sub(before)
+	costInc = win.close()
 	// A failed turn whose result frame named its session (turn_failed) keeps
 	// that id, so the run record and sidebar stub reach the failed JSONL.
 	if result.SessionID != "" {
@@ -691,6 +692,36 @@ func (s *Scheduler) execSend(a execSendArgs) (result SendResult, costInc costled
 		return SendResult{}, costledger.Increment{}, false
 	}
 	return result, costInc, true
+}
+
+// runCostWindow measures the spend a run owns on sess: through CostWindow
+// when sess has it, else as the CostTotals difference.
+type runCostWindow struct {
+	sess   Session
+	before costledger.Totals
+	closed bool
+}
+
+func openCostWindow(sess Session) *runCostWindow {
+	w := &runCostWindow{sess: sess}
+	if cw, ok := sess.(CostWindow); ok {
+		cw.BeginCostWindow()
+	} else {
+		w.before = costTotalsOf(sess)
+	}
+	return w
+}
+
+// close ends the window and returns its spend; later calls return zero.
+func (w *runCostWindow) close() costledger.Increment {
+	if w.closed {
+		return costledger.Increment{}
+	}
+	w.closed = true
+	if cw, ok := w.sess.(CostWindow); ok {
+		return cw.EndCostWindow()
+	}
+	return costTotalsOf(w.sess).Sub(w.before)
 }
 
 // costTotalsOf reads the session's spend snapshot; sessions without the
