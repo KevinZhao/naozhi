@@ -12,15 +12,19 @@ import (
 // EndCostWindow, the spend this session's results report is collected for the
 // owner instead of written as session rows. Process-end partials and spend
 // forwarded from a replaced session are never collected; they keep their rows.
+// Reopening an open window books what the earlier one collected as session
+// rows, since no owner will claim it.
 func (s *ManagedSession) BeginCostWindow() {
 	s.costMu.Lock()
-	reopened := s.costWindow != nil
+	prev := s.costWindow
 	s.costWindow = &costledger.Totals{}
 	s.costMu.Unlock()
-	if reopened {
-		slog.Warn("cost: cost window opened while already open; the earlier window's spend goes unbooked",
-			"session", osutil.SanitizeForLog(s.key, 128))
+	if prev == nil {
+		return
 	}
+	slog.Warn("cost: cost window opened while already open; the earlier window's spend is booked to the session",
+		"session", osutil.SanitizeForLog(s.key, 128))
+	s.appendSessionRows(prev.Sub(costledger.Totals{}), newRunID())
 }
 
 // EndCostWindow closes the window and returns the spend collected in it, which

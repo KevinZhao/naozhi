@@ -165,9 +165,9 @@ func TestCostWindow_MeteringFollowsTheWindow(t *testing.T) {
 }
 
 // EndCostWindow without an open window returns nothing, and a reopened window
-// starts empty.
+// starts empty while the earlier window's spend becomes a session row.
 func TestCostWindow_EndIsIdempotentAndBeginStartsEmpty(t *testing.T) {
-	s, _ := newLedgerSession(t, "cron:idem", &TestProcess{AliveVal: true})
+	s, ledger := newLedgerSession(t, "cron:idem", &TestProcess{AliveVal: true})
 	if inc := s.EndCostWindow(); inc.USD != 0 {
 		t.Fatalf("End with no window = %+v", inc)
 	}
@@ -180,5 +180,8 @@ func TestCostWindow_EndIsIdempotentAndBeginStartsEmpty(t *testing.T) {
 	}
 	if inc := s.EndCostWindow(); inc.USD != 0 {
 		t.Fatalf("second End = %+v, want zero", inc)
+	}
+	if ents := allEntries(t, ledger); len(ents) != 1 || ents[0].Source != costledger.SourceSession || !approxEq(ents[0].Amount, 1) {
+		t.Fatalf("entries = %+v, want one session row of the earlier window's 1.0", ents)
 	}
 }

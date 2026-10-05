@@ -160,13 +160,22 @@ func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, 
 			rates.Observe(m)
 		}
 	}
-	if s.costAcct != nil && s.costAcct.ledger.Enabled() && !inWindow {
-		s.costAcct.warnUnknownBasis(s.key, inc.Models)
-		for _, e := range s.ledgerEntries(inc, runID) {
-			s.costAcct.ledger.Append(e)
-		}
+	if !inWindow {
+		s.appendSessionRows(inc, runID)
 	}
 	return inc.USD
+}
+
+// appendSessionRows writes inc as this session's own ledger rows. Called
+// outside costMu: the ledger is an external sink.
+func (s *ManagedSession) appendSessionRows(inc costledger.Increment, runID string) {
+	if s.costAcct == nil || !s.costAcct.ledger.Enabled() {
+		return
+	}
+	s.costAcct.warnUnknownBasis(s.key, inc.Models)
+	for _, e := range s.ledgerEntries(inc, runID) {
+		s.costAcct.ledger.Append(e)
+	}
 }
 
 // bookUnownedResults books the results proc's CLI reports that no live caller
