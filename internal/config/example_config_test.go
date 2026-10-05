@@ -162,6 +162,60 @@ func TestDocs_READMEListsAllBackends(t *testing.T) {
 	})
 }
 
+// codexEntryKeys returns, for every `- id: codex` backend entry in the doc
+// (commented out or not), the set of keys that entry sets.
+func codexEntryKeys(doc string) []map[string]bool {
+	uncomment := regexp.MustCompile(`^(\s*)#`)
+	var entries []map[string]bool
+	dashCol := -1
+	for _, raw := range strings.Split(doc, "\n") {
+		line := uncomment.ReplaceAllString(raw, "$1 ")
+		body := strings.TrimSpace(line)
+		col := len(line) - len(strings.TrimLeft(line, " "))
+		if strings.HasPrefix(body, "- id:") {
+			dashCol = -1
+			if f := strings.Fields(strings.TrimPrefix(body, "- id:")); len(f) > 0 && strings.Trim(f[0], `"`) == "codex" {
+				dashCol = col
+				entries = append(entries, map[string]bool{})
+			}
+			continue
+		}
+		if dashCol < 0 || body == "" || strings.HasPrefix(body, "#") {
+			continue
+		}
+		if col <= dashCol {
+			dashCol = -1
+			continue
+		}
+		if k, _, ok := strings.Cut(body, ":"); ok {
+			entries[len(entries)-1][k] = true
+		}
+	}
+	return entries
+}
+
+// TestDocs_CodexSamplesSetModelAndArgs: an omitted per-backend model/args
+// inherits cli.model/cli.args, which are claude's, so `codex app-server` would
+// get `-c model=sonnet` plus claude flags. Every documented codex entry must
+// set both.
+func TestDocs_CodexSamplesSetModelAndArgs(t *testing.T) {
+	for file, want := range map[string]int{"README.md": 2, "config.example.yaml": 1} {
+		data, err := os.ReadFile(filepath.Join("..", "..", file))
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		entries := codexEntryKeys(string(data))
+		if len(entries) != want {
+			t.Fatalf("%s: found %d codex backend entries, want %d", file, len(entries), want)
+		}
+		for i, keys := range entries {
+			if !keys["model"] || !keys["args"] {
+				t.Errorf("%s: codex entry #%d sets %v; it must set both model and args", file, i+1, keys)
+			}
+		}
+	}
+}
+
 // yamlChildScalar returns the scalar node for key, or nil.
 func yamlChildScalar(m *yaml.Node, key string) *yaml.Node {
 	for i := 0; i+1 < len(m.Content); i += 2 {

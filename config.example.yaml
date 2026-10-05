@@ -217,6 +217,10 @@ cli:
   #    models: ["sonnet", "opus", "haiku"]
   #  - id: "codex"
   #    path: "codex"
+  #    # Set model and args explicitly: when omitted they inherit cli.model /
+  #    # cli.args, i.e. claude's model name and flags. The model name follows
+  #    # model_provider in ~/.codex/config.toml (this one is amazon-bedrock).
+  #    model: "openai.gpt-5.5"
   #    # Reasoning effort rides on args, not `effort` (see above).
   #    args: ["-c", "model_reasoning_effort=high"]
   #

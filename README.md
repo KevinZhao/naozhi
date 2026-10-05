@@ -129,11 +129,14 @@ cli:
       model: "claude-sonnet-4.6"
     - id: "codex"            # codex app-server (JSON-RPC 2.0) 协议，自动选择
       path: "codex"
+      model: "openai.gpt-5.5"  # 按 ~/.codex/config.toml 的 model_provider 取名（此为 amazon-bedrock）
+      args: ["-c", "model_reasoning_effort=high"]
 ```
 
 - Dashboard "new session" 下拉菜单按会话选择 backend
 - API 通过 `/api/sessions/send {"backend": "kiro"}` 覆盖
 - ACP backend 自动处理 `session/new`、`session/cancel` 通知与权限请求
+- 每条 backend 的 `path`/`model`/`args` 省略时继承顶层 `cli.*`；codex 必须自己设 `model` 和 `args`，否则会拿到 claude 的模型名与 flag
 - Codex 不接受 `effort` 字段（设了会告警并忽略），推理强度经 `args` 传：`-c model_reasoning_effort=<tier>`
 
 ### 定时任务 (Cron)
@@ -392,7 +395,8 @@ cli:
   #     path: "~/.local/bin/kiro"         # ACP 协议根据 id=kiro 自动选择，无需额外 flag
   #   - id: codex
   #     path: "codex"                     # codex app-server 协议根据 id=codex 自动选择
-  #     args: ["-c", "model_reasoning_effort=high"]  # 显式设置，免得继承上面 claude 的 args
+  #     model: "openai.gpt-5.5"           # 与 args 都须显式设置，否则继承上面 claude 的 sonnet 与 flag
+  #     args: ["-c", "model_reasoning_effort=high"]
 
 session:
   cwd: "/home/user/projects"              # CLI 默认工作目录，亦作 /cd 的允许根路径
