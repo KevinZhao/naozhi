@@ -29,9 +29,17 @@ func (p *Process) InjectHistory(entries []clievent.EventEntry) {
 	// entries with task_start by ToolUseID and Resolve once per task_id.
 	seen := make(map[string]struct{})
 	taskStartByToolUse := make(map[string]clievent.EventEntry, len(entries))
+	// task_id → whether a task_start in this batch marks it a workflow.
+	startedWorkflow := make(map[string]bool)
 	for _, e := range entries {
-		if e.Type == clievent.KindTaskStart && e.ToolUseID != "" {
+		if e.Type != clievent.KindTaskStart {
+			continue
+		}
+		if e.ToolUseID != "" {
 			taskStartByToolUse[e.ToolUseID] = e
+		}
+		if e.TaskID != "" {
+			startedWorkflow[e.TaskID] = startedWorkflow[e.TaskID] || e.TaskType == TaskTypeWorkflow
 		}
 	}
 	kick := func(taskID, toolUseID, name, desc string, wallclock int64) {
@@ -76,12 +84,53 @@ func (p *Process) InjectHistory(entries []clievent.EventEntry) {
 			// Orphan task: the agent entry was evicted from the ring before the replay
 			// window; without this Linker.Query stays ok=false forever (HTTP 202).
 			// Resolve by task_id works because Claude names the jsonl after it.
-			if e.TaskID == "" || e.InternalAgentID != "" {
+			if e.TaskID == "" || e.InternalAgentID != "" || isWorkflowHistoryTask(e, startedWorkflow) {
 				continue
 			}
 			kick(e.TaskID, e.ToolUseID, e.Subagent, e.Summary, e.Time)
 		}
 	}
+}
+
+// TaskTypeWorkflow is the task_type CC gives a Workflow tool run.
+const TaskTypeWorkflow = "local_workflow"
+
+// LinkerSkipsTaskType reports whether tasks of this type have no transcript
+// the SubagentLinker can map, so a Resolve would only spend its retry budget
+// and tombstone: local_bash persists to tool-results/ only, and a workflow's
+// agents write under subagents/workflows/<runId>/, which the linker does not
+// scan (its description could even match an agentType there and mislink).
+func LinkerSkipsTaskType(taskType string) bool {
+	return taskType == "local_bash" || taskType == TaskTypeWorkflow
+}
+
+// isWorkflowHistoryTask reports whether a persisted task entry belongs to a
+// workflow. A row without TaskType takes the verdict of its task_start in the
+// same batch; an orphan whose task_start left the persisted history window
+// falls back to CC's workflow task-id shape.
+func isWorkflowHistoryTask(e clievent.EventEntry, startedWorkflow map[string]bool) bool {
+	if e.TaskType == TaskTypeWorkflow {
+		return true
+	}
+	if wf, ok := startedWorkflow[e.TaskID]; ok {
+		return wf
+	}
+	return isWorkflowTaskIDShape(e.TaskID)
+}
+
+// isWorkflowTaskIDShape matches CC's local_workflow task id, ^w[0-9a-z]{8}$.
+// A heuristic for legacy history only: a false positive merely skips a
+// Resolve that would have tombstoned.
+func isWorkflowTaskIDShape(id string) bool {
+	if len(id) != 9 || id[0] != 'w' {
+		return false
+	}
+	for i := 1; i < len(id); i++ {
+		if c := id[i]; (c < '0' || c > '9') && (c < 'a' || c > 'z') {
+			return false
+		}
+	}
+	return true
 }
 
 // InitLinker wires a subagent.Linker into the process (called by Wrapper.Spawn
