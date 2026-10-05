@@ -4,14 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/attachment"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/history/naozhilog"
+	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
 
 // removeTeardownFixture is a router with the event log and attachment
@@ -59,6 +62,27 @@ func (f *removeTeardownFixture) finishTeardown() {
 	close(f.proc.release)
 	<-f.proc.closeDone
 	f.r.removes.Wait()
+}
+
+// warmStaleRing warms key's resident run-history ring with one run, then has
+// a second store put another on disk behind it: a List that returns 1 run is
+// served by that ring, 2 means the ring was freed and re-warmed from disk.
+func (f *removeTeardownFixture) warmStaleRing(t *testing.T) {
+	t.Helper()
+	start := time.Now().Add(-time.Hour)
+	run := func(id string, d int64) runhistory.SessionRun {
+		return runhistory.SessionRun{RunID: id, SessionKey: f.key, StartedAt: start,
+			EndedAt: start.Add(time.Duration(d) * time.Millisecond), DurationMS: d,
+			Outcome: runhistory.OutcomeCompleted}
+	}
+	f.r.runs.runs.Append(run("00000000000000a1", 100))
+	storePath := filepath.Join(filepath.Dir(f.dir), "sessions.json")
+	other := runhistory.NewStore(datadir.ForStore(storePath).SessionRunsRoot(), 0, 0)
+	other.Append(run("00000000000000a2", 200))
+	other.Close()
+	if got := f.r.Runs().List(f.key, 0, time.Time{}); len(got) != 1 {
+		t.Fatalf("warmed ring lists %d runs, want 1", len(got))
+	}
 }
 
 func (f *removeTeardownFixture) persistedUUIDs(t *testing.T) []string {
@@ -129,5 +153,43 @@ func TestRemoveAsync_DropsLogWhenKeyStaysGone(t *testing.T) {
 	}
 	if f.attachmentReferenced(t) {
 		t.Fatal("attachment refs not cleared after Remove")
+	}
+}
+
+// TestRemoveAsync_KeepsRunHistoryRingOfSameKeySessionRecreatedDuringTeardown:
+// the run-history ring and its per-owner lock belong to the re-created
+// session, so the old teardown must not free them under it.
+func TestRemoveAsync_KeepsRunHistoryRingOfSameKeySessionRecreatedDuringTeardown(t *testing.T) {
+	f := newRemoveTeardownFixture(t)
+	if !f.r.RemoveAsync(f.key) {
+		t.Fatal("RemoveAsync returned false")
+	}
+	select {
+	case <-f.proc.closeStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("teardown never reached proc.Close")
+	}
+	installSession(t, f.r, f.key, newIdleProc()).setWorkspace(f.ws)
+	f.warmStaleRing(t)
+
+	f.finishTeardown()
+
+	if got := f.r.Runs().List(f.key, 0, time.Time{}); len(got) != 1 {
+		t.Fatalf("after teardown: %d runs, want the 1 in the re-created session's ring (ring freed?)", len(got))
+	}
+}
+
+// TestRemoveAsync_FreesRunHistoryRingWhenKeyStaysGone: with no same-key
+// session in the table, the teardown frees the key's resident ring.
+func TestRemoveAsync_FreesRunHistoryRingWhenKeyStaysGone(t *testing.T) {
+	f := newRemoveTeardownFixture(t)
+	f.warmStaleRing(t)
+	if !f.r.RemoveAsync(f.key) {
+		t.Fatal("RemoveAsync returned false")
+	}
+	f.finishTeardown()
+
+	if got := f.r.Runs().List(f.key, 0, time.Time{}); len(got) != 2 {
+		t.Fatalf("after teardown: %d runs, want 2 re-warmed from disk (ring not freed?)", len(got))
 	}
 }
