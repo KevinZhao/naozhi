@@ -14,39 +14,56 @@ import (
 
 const settingsMissingWarning = "claude: warning: failed to merge user --settings: failed to read /nonexistent/s.json: No such file or directory (os error 2); applying managed settings only"
 
-func TestClassifyStderr(t *testing.T) {
+func TestClassifyExit(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
+		code int64
 		tail []string
 		want clierr.ExitClass
 	}{
 		// Captured from claude-code 2.1.288's stderr on a fatal exit.
-		{"stale resume id", []string{"No conversation found with session ID: 0f3c2a7e-1111-4222-8333-444455556666"}, clierr.ExitResumeNotFound},
-		{"missing mcp config file", []string{"Error: Invalid MCP configuration:", "MCP config file not found: /nonexistent/m.json"}, clierr.ExitMCPConfig},
-		{"unparseable mcp config", []string{"Error: Invalid MCP configuration:", "MCP config is not a valid JSON"}, clierr.ExitMCPConfig},
+		{"stale resume id", 1, []string{"No conversation found with session ID: 0f3c2a7e-1111-4222-8333-444455556666"}, clierr.ExitResumeNotFound},
+		{"missing mcp config file", 1, []string{"Error: Invalid MCP configuration:", "MCP config file not found: /nonexistent/m.json"}, clierr.ExitMCPConfig},
+		{"unparseable mcp config", 1, []string{"Error: Invalid MCP configuration:", "MCP config is not a valid JSON"}, clierr.ExitMCPConfig},
 		// A broken --settings file is only a warning; the CLI runs on.
-		{"settings warning then the cause", []string{settingsMissingWarning, "No conversation found with session ID: abc"}, clierr.ExitResumeNotFound},
-		{"missing settings warning alone", []string{settingsMissingWarning}, clierr.ExitUnknown},
-		{"unparseable settings warning alone", []string{"claude: warning: failed to merge user --settings: failed to parse JSONC: key must be a string at line 1 column 2; applying managed settings only"}, clierr.ExitUnknown},
-		{"invalid api key", []string{"Invalid API key · Please run /login"}, clierr.ExitAuth},
-		{"expired oauth token", []string{"OAuth token has expired. Please obtain a new token or refresh your existing token."}, clierr.ExitAuth},
-		{"api 401", []string{`API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`}, clierr.ExitAuth},
-		{"acp backend not logged in", []string{"Error: You are not logged in, please log in with kiro-cli login"}, clierr.ExitAuth},
-		{"login required", []string{"Error: login required: run `codex login`"}, clierr.ExitAuth},
-		{"node missing", []string{"env: node: No such file or directory"}, clierr.ExitMissingRuntime},
-		{"broken install", []string{"node:internal/modules/cjs/loader:1228", "  throw err;", "Error: Cannot find module '/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js'"}, clierr.ExitMissingRuntime},
-		{"binary missing", []string{"/bin/sh: 1: claude: command not found"}, clierr.ExitMissingRuntime},
+		{"settings warning then the cause", 1, []string{settingsMissingWarning, "No conversation found with session ID: abc"}, clierr.ExitResumeNotFound},
+		{"missing settings warning alone", 1, []string{settingsMissingWarning}, clierr.ExitUnknown},
+		{"unparseable settings warning alone", 1, []string{"claude: warning: failed to merge user --settings: failed to parse JSONC: key must be a string at line 1 column 2; applying managed settings only"}, clierr.ExitUnknown},
+		{"invalid api key", 1, []string{"Invalid API key · Please run /login"}, clierr.ExitAuth},
+		{"expired oauth token", 1, []string{"OAuth token has expired. Please obtain a new token or refresh your existing token."}, clierr.ExitAuth},
+		{"api 401", 1, []string{`API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`}, clierr.ExitAuth},
+		{"acp backend not logged in", 1, []string{"Error: You are not logged in, please log in with kiro-cli login"}, clierr.ExitAuth},
+		{"login required", 1, []string{"Error: login required: run `codex login`"}, clierr.ExitAuth},
+		{"node missing", 1, []string{"env: node: No such file or directory"}, clierr.ExitMissingRuntime},
+		{"broken install", 1, []string{"node:internal/modules/cjs/loader:1228", "  throw err;", "Error: Cannot find module '/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js'"}, clierr.ExitMissingRuntime},
+		{"binary missing", 1, []string{"/bin/sh: 1: claude: command not found"}, clierr.ExitMissingRuntime},
 		// The first matching class wins, whatever line it is on.
-		{"resume beats auth", []string{"Error: Invalid API key", "No conversation found with session ID: abc"}, clierr.ExitResumeNotFound},
+		{"resume beats auth", 1, []string{"Error: Invalid API key", "No conversation found with session ID: abc"}, clierr.ExitResumeNotFound},
 		// A pair of terms counts only on one line.
-		{"pair split across lines", []string{"Loading MCP servers", "Error: invalid flag --frobnicate"}, clierr.ExitUnknown},
-		{"stack line number", []string{"TypeError: Cannot read properties of undefined (reading 'id')", "    at run (/app/cli.js:401:15)"}, clierr.ExitUnknown},
-		{"no stderr", nil, clierr.ExitUnknown},
+		{"pair split across lines", 1, []string{"Loading MCP servers", "Error: invalid flag --frobnicate"}, clierr.ExitUnknown},
+		{"stack line number", 1, []string{"TypeError: Cannot read properties of undefined (reading 'id')", "    at run (/app/cli.js:401:15)"}, clierr.ExitUnknown},
+		{"no stderr", 1, nil, clierr.ExitUnknown},
+		// dash and busybox say "not found" without "command"; a POSIX shell
+		// exits 127 when it cannot find a command.
+		{"dash sh missing runtime", 1, []string{"sh: 1: node: not found"}, clierr.ExitMissingRuntime},
+		{"dash sh missing runtime, 127", 127, []string{"sh: 1: node: not found"}, clierr.ExitMissingRuntime},
+		{"dash exec missing runtime", 1, []string{"/usr/local/bin/claude: 3: exec: node: not found"}, clierr.ExitMissingRuntime},
+		{"busybox missing runtime, 127", 127, []string{"/usr/local/bin/claude: line 3: node: not found"}, clierr.ExitMissingRuntime},
+		{"busybox line without 127", 1, []string{"/usr/local/bin/claude: line 3: node: not found"}, clierr.ExitUnknown},
+		{"127 with no stderr", 127, nil, clierr.ExitMissingRuntime},
+		{"127 after a warning only", 127, []string{settingsMissingWarning}, clierr.ExitMissingRuntime},
+		// A class the text names wins over 127.
+		{"stale resume id at 127", 127, []string{"No conversation found with session ID: abc"}, clierr.ExitResumeNotFound},
+		{"invalid api key at 127", 127, []string{"Invalid API key · Please run /login"}, clierr.ExitAuth},
+		{"mcp config not found at 127", 127, []string{"Error: Invalid MCP configuration:", "MCP config file not found: /x"}, clierr.ExitMCPConfig},
+		{"model not found", 1, []string{"Error: model: not found"}, clierr.ExitUnknown},
+		{"not found split from sh", 1, []string{"sh: 1: starting", "Error: model: not found"}, clierr.ExitUnknown},
+		{"exit code 2", 2, nil, clierr.ExitUnknown},
 	}
 	for _, tc := range cases {
-		if got := classifyStderr(tc.tail); got != tc.want {
-			t.Errorf("%s: classifyStderr(%q) = %d, want %d", tc.name, tc.tail, got, tc.want)
+		if got := classifyExit(tc.code, tc.tail); got != tc.want {
+			t.Errorf("%s: classifyExit(%d, %q) = %d, want %d", tc.name, tc.code, tc.tail, got, tc.want)
 		}
 	}
 }
@@ -198,6 +215,24 @@ func TestShimLineReader_InitStdoutCountsAsOutput(t *testing.T) {
 	var pe *clierr.ProcessExitedError
 	if !errors.As(p.exitErr(), &pe) || pe.Class != clierr.ExitUnknown {
 		t.Errorf("exitErr() = %v (%+v), want a code-1 exit with no class", p.exitErr(), pe)
+	}
+}
+
+// A shell's 127 names a missing runtime only before the CLI wrote stdout.
+func TestRecordExit_Code127(t *testing.T) {
+	t.Parallel()
+	for _, sawOutput := range []bool{false, true} {
+		p := &Process{}
+		p.sawOutput.Store(sawOutput)
+		p.recordExit(127, nil)
+		want := clierr.ExitMissingRuntime
+		if sawOutput {
+			want = clierr.ExitUnknown
+		}
+		var pe *clierr.ProcessExitedError
+		if !errors.As(p.exitErr(), &pe) || pe.Code != 127 || pe.Class != want {
+			t.Errorf("sawOutput=%v: exitErr() = %v (%+v), want a code-127 exit of class %d", sawOutput, p.exitErr(), pe, want)
+		}
 	}
 }
 

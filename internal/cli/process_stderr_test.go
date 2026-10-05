@@ -155,6 +155,12 @@ func TestShimLineReader_InitExitCarriesStderrCause(t *testing.T) {
 			want:   "cli exited during init (code 3): node: not found",
 		},
 		{
+			name:      "busybox wrapper without its runtime",
+			frames:    `{"type":"cli_exited","code":127,"stderr_tail":["/usr/local/bin/claude: line 3: node: not found"]}` + "\n",
+			want:      "cli exited during init (code 127): /usr/local/bin/claude: line 3: node: not found",
+			wantClass: clierr.ExitMissingRuntime,
+		},
+		{
 			name: "error line is quoted over the lines before it",
 			frames: `{"type":"cli_exited","code":1,"stderr_tail":["node:internal/modules/cjs/loader:1228",` +
 				`"  throw err;","Error: Cannot find module 'x'","    at Module._load (loader:1:1)"]}` + "\n",
