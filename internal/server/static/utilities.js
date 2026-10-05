@@ -9,7 +9,7 @@ import { esc, escAttr, showToast, trapFocus, sessionExitChipHtml } from './nz_ut
 import { wsm } from './ws_manager.js';
 import { authHeaders, getToken, lsSet } from './platform.js';
 import { sid } from './session_ident.js';
-import { featureForBackend } from './features.js';
+import { featureForBackend, pendingBackendID } from './features.js';
 
 // --- Utilities ---
 
@@ -1301,7 +1301,7 @@ export function applyFeatureGates() {
   if (serverInfo.cliBackends.backends.length <= 1) return; // single-backend mode
 
   const sess = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
-  const backendID = sess.backend || serverInfo.cliBackends.default || '';
+  const backendID = sess.backend || pendingBackendID(selection.key, selection.node) || serverInfo.cliBackends.default || '';
   const backendName = (() => {
     const e = serverInfo.cliBackends.backends.find(b => b && b.id === backendID);
     return (e && (e.display_name || e.id)) || backendID || 'this backend';

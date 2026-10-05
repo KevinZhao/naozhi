@@ -13,6 +13,9 @@
 //     backend "" instead of pinning the router default.
 //   - Cron: a create on 自动 sends no backend, and saving an edit of a job
 //     with none does not PATCH one in.
+//   - A session opened but not sent yet shows and gates on the backend it
+//     will spawn on: the pick, else what 自动 resolves to (sidebar icon,
+//     header label, image button, tuning model list).
 //
 // /api/cli/backends, /api/access-profiles and /api/projects/config are
 // answered by page.route (the mock serves none of them).
@@ -20,12 +23,14 @@
 // 跑法：cd test/e2e && npx playwright test backend_picker_auto.test.js --project=desktop-chrome
 
 const { test, expect } = require('@playwright/test');
-const { startMockServer } = require('./mock-server');
+const { startMockServer, defaultSessions } = require('./mock-server');
 
 const MANIFEST = {
   backends: [
-    { id: 'claude', display_name: 'claude-code', protocol: 'stream-json', available: true },
-    { id: 'kiro', display_name: 'kiro', protocol: 'acp', available: true },
+    { id: 'claude', display_name: 'claude-code', protocol: 'stream-json', available: true,
+      features: { image_input: true }, models: [{ id: 'claude-opus' }] },
+    { id: 'kiro', display_name: 'kiro', protocol: 'acp', available: true,
+      features: { image_input: false }, models: [{ id: 'kiro-auto' }] },
   ],
   default: 'claude',
   detected: [],
@@ -204,4 +209,125 @@ test('cron edit of a job with no backend does not PATCH one in', async ({ page }
   const body = JSON.parse(mock.cronPatchCalls[0].body);
   expect(body.prompt).toBe('edited prompt');
   expect('backend' in body, 'saving a job with no backend must not pin the router default').toBe(false);
+});
+
+/**
+ * What a pending session shows for its backend: the header label from both
+ * of its painters, whether the sidebar card wears the kiro mark, both image
+ * gates and the tuning popover's model ids.
+ * @param {import('@playwright/test').Page} page
+ */
+async function pendingBackendView(page) {
+  await expect(page.locator('.session-card.new-card')).toHaveCount(1);
+  const header = await page.evaluate(() => {
+    const t = /** @type {any} */ (window).nz.test;
+    t.renderMainShell();
+    const fromShell = document.getElementById('header-cli')?.textContent;
+    const el = /** @type {HTMLElement} */ (document.getElementById('header-cli'));
+    el.textContent = 'stale';
+    t.updateHeaderCLI();
+    return [fromShell, el.textContent];
+  });
+  // featureForCurrent, the gate behind a click that slips past the button.
+  const imageRefused = await page.evaluate(() => {
+    const toast = /** @type {HTMLElement} */ (document.getElementById('toast'));
+    const input = /** @type {HTMLInputElement} */ (document.getElementById('file-input'));
+    toast.textContent = '';
+    input.click = () => {};
+    /** @type {any} */ (window).nz.test.openFilePicker();
+    return toast.textContent === '当前后端不支持图片上传';
+  });
+  const kiroMark = await page.locator('.session-card.new-card .sc-cli-icon rect[fill="#9046FF"]').count();
+  const imageDisabled = await page.locator('button[data-action="file-picker"]').isDisabled();
+  await page.click('#header-model');
+  const models = await page.locator('#tuning-popover .tuning-opt[data-value]:not([data-value=""])')
+    .evaluateAll(els => els.map(e => e.getAttribute('data-value')));
+  return { header, kiroMark, imageDisabled, imageRefused, models };
+}
+
+test('pending session on 自动 under a kiro-default profile shows and gates on kiro', async ({ page }) => {
+  await openPalette(page);
+  await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().click();
+  expect(await pendingBackendView(page)).toEqual({
+    header: ['kiro', 'kiro'], kiroMark: 1, imageDisabled: true, imageRefused: true, models: ['kiro-auto'],
+  });
+});
+
+test('pending session on 自动 under a profile without default_backend stays on the router default', async ({ page }) => {
+  await openPalette(page);
+  await page.selectOption('#new-access-profile', 'solo');
+  await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().click();
+  expect(await pendingBackendView(page)).toEqual({
+    header: ['claude-code', 'claude-code'], kiroMark: 0, imageDisabled: false, imageRefused: false, models: ['claude-opus'],
+  });
+});
+
+test('pending session with an explicit kiro pick gates image upload on kiro', async ({ page }) => {
+  await openPalette(page);
+  await page.selectOption('#new-access-profile', 'solo');
+  await page.selectOption('#new-backend', 'kiro');
+  await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().click();
+  expect(await pendingBackendView(page)).toEqual({
+    header: ['kiro', 'kiro'], kiroMark: 1, imageDisabled: true, imageRefused: true, models: ['kiro-auto'],
+  });
+});
+
+/**
+ * A mock whose stats name the router default's CLI, so the header's no-guess
+ * fallback is visible.
+ * @param {(sessions: any) => void} [edit]
+ */
+async function mockWithCLIName(edit) {
+  const sessions = /** @type {any} */ (defaultSessions());
+  Object.assign(sessions.stats, { cli_name: 'claude-live', cli_version: '9.9.9' });
+  if (edit) edit(sessions);
+  return startMockServer({ sessions });
+}
+
+test('pending session on a remote node takes no guess from this node\'s profiles', async ({ page }) => {
+  const own = await mockWithCLIName(sessions => {
+    sessions.nodes.mac = { display_name: 'Mac', status: 'ok' };
+    sessions.stats.projects.push({ name: 'macproj', path: '/Users/m/macproj', node: 'mac' });
+  });
+  try {
+    await page.goto(own.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    await page.click('.hdr-btn[title="New Session"]');
+    await page.selectOption('#new-node', 'mac');
+    await page.locator('.cmd-palette-item', { hasText: 'macproj' }).first().click();
+    await expect(page.locator('.session-card.new-card')).toHaveCount(1);
+    await expect(page.locator('.main-header .detail-left #header-cli')).toHaveText('claude-live');
+  } finally { own.server.close(); }
+});
+
+test('pending session with a single backend keeps the server-reported CLI name', async ({ page }) => {
+  await page.route(url => url.pathname === '/api/cli/backends', route => route.fulfill(json({ backends: [MANIFEST.backends[0]], default: 'claude', detected: [] })));
+  const own = await mockWithCLIName();
+  try {
+    await page.goto(own.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    await page.click('.hdr-btn[title="New Session"]');
+    await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().click();
+    await expect(page.locator('.session-card.new-card')).toHaveCount(1);
+    await expect(page.locator('.main-header .detail-left #header-cli')).toHaveText('claude-live');
+  } finally { own.server.close(); }
+});
+
+test('a listed session with no backend field is not re-guessed from the access profile', async ({ page }) => {
+  const own = await mockWithCLIName();
+  try {
+    await page.goto(own.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    await page.click('.hdr-btn[title="New Session"]');
+    // The 自动 label proves the manifest and the profiles are both cached.
+    await expect(page.locator('#new-backend option[value=""]')).toHaveText('自动（kiro）');
+    await page.locator('#cp-input').press('Escape');
+    await expect(page.locator('.cmd-palette-overlay')).toHaveCount(0);
+    await page.click('.session-card[data-key="dashboard:direct:2026-01-01-120000-1:myproject"]');
+    await page.waitForSelector('#msg-input');
+    await page.evaluate(() => /** @type {any} */ (window).nz.test.applyFeatureGates());
+    await expect(page.locator('button[data-action="file-picker"]')).toBeEnabled();
+    await page.click('#header-model');
+    await expect(page.locator('#tuning-popover .tuning-opt[data-value="claude-opus"]')).toHaveCount(1);
+  } finally { own.server.close(); }
 });

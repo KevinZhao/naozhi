@@ -7,6 +7,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { serverInfo } from './state.js';
 import { esc, escAttr, fetchJSON } from './nz_util.js';
 import { applyFeatureGates } from './utilities.js';
+import { autoBackendID } from './features.js';
 
 // fetchCLIBackends retrieves the enabled CLI backends from the server.
 // Cached for 60 seconds — the set only changes across naozhi restarts.
@@ -145,18 +146,13 @@ export function accessProfileChipInfo(profileID) {
   };
 }
 
-// autoBackendLabel is the text of the picker's 自动 option: profileID's ("" =
-// default) default_backend when enabled here, else the router default. A
-// project backend pin, agents[].backend, a cron job's agent profile and a
+// autoBackendLabel is the text of the picker's 自动 option, naming autoBackendID.
+// A project backend pin, agents[].backend, a cron job's agent profile and a
 // remote node's own profiles are not visible here; the server decides.
 export function autoBackendLabel(backendsData, profileID) {
-  const list = backendsData.backends;
-  const ap = serverInfo.accessProfiles;
-  const pid = profileID || (ap && ap.default) || '';
-  const prof = pid && ap && Array.isArray(ap.profiles) ? ap.profiles.find(p => p && p.id === pid) : null;
-  const byID = id => id && list.find(b => b && b.id === id);
-  const b = byID(prof && prof.default_backend) || byID(backendsData.default) || list[0];
-  return '自动（' + ((b && (b.display_name || b.id)) || '') + '）';
+  const id = autoBackendID(backendsData, profileID);
+  const b = backendsData.backends.find(x => x && x.id === id);
+  return '自动（' + ((b && b.display_name) || id) + '）';
 }
 
 // renderBackendPicker returns the backend <select> fragment, or '' when only
