@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 	"time"
 
@@ -113,6 +114,67 @@ func TestTryAutoTakeover_KillsOnlyForAClaudeResume(t *testing.T) {
 				if tc.wantKill {
 					t.Error("the terminal CLI survived a takeover that resumes it on claude")
 				}
+			}
+		})
+	}
+}
+
+// A takeover the router would refuse leaves the terminal CLI running (#3395):
+// the precheck runs before SIGTERM, so the child dies only by the test's own
+// SIGKILL.
+func TestTryAutoTakeover_RefusedTakeoverLeavesCLIAlive(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("discovery is POSIX-only")
+	}
+	cases := []struct {
+		name  string
+		model string
+		setup func(r *session.Router)
+	}{
+		{name: "router stopped", setup: func(r *session.Router) { r.Shutdown() }},
+		{name: "invalid model", model: "--bad", setup: func(*session.Router) {}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command("sleep", "30")
+			if err := cmd.Start(); err != nil {
+				t.Skipf("cannot start child: %v", err)
+			}
+			exited := make(chan struct{})
+			go func() { _ = cmd.Wait(); close(exited) }()
+			t.Cleanup(func() { _ = cmd.Process.Kill(); <-exited })
+
+			claudeDir, ws := t.TempDir(), t.TempDir()
+			live, _ := json.Marshal(map[string]any{
+				"pid": cmd.Process.Pid, "sessionId": "0b8f3c2e-5d7a-4e1b-9c6f-2a4d8e1f3b5c",
+				"cwd": ws, "startedAt": time.Now().UnixMilli(), "entrypoint": "cli",
+			})
+			if err := os.MkdirAll(filepath.Join(claudeDir, "sessions"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(claudeDir, "sessions", "1.json"), live, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			w := cli.NewWrapperLazy("/nonexistent/claude", &cli.ClaudeProtocol{}, "claude")
+			router := session.NewRouter(session.RouterConfig{Wrapper: w, MaxProcs: 1})
+			t.Cleanup(router.Shutdown)
+			s := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
+			s.claudeDir = claudeDir
+			tc.setup(router)
+
+			opts := session.AgentOpts{Workspace: ws, Model: tc.model}
+			if s.tryAutoTakeover(context.Background(), "test:direct:u1:general", "test:direct:u1:general", opts) {
+				t.Fatal("a refused takeover reported success")
+			}
+			select {
+			case <-exited:
+				t.Fatal("the terminal CLI was killed for a takeover the router refuses")
+			case <-time.After(300 * time.Millisecond):
+			}
+			_ = cmd.Process.Kill()
+			<-exited
+			if st, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); !ok || st.Signal() != syscall.SIGKILL {
+				t.Errorf("child ended with %v, want the test's SIGKILL", cmd.ProcessState)
 			}
 		})
 	}

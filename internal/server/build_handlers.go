@@ -164,7 +164,7 @@ func buildDiscoveryHandlers(
 type routerTakeoverAdapter struct{ r *session.Router }
 
 func (a routerTakeoverAdapter) TakeoverPrecheck(key string) error {
-	return a.r.TakeoverPrecheck(key)
+	return a.r.TakeoverPrecheck(key, session.AgentOpts{})
 }
 
 func (a routerTakeoverAdapter) Takeover(ctx context.Context, key, sessionID, cwd string, opts session.AgentOpts) error {
