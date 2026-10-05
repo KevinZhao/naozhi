@@ -135,12 +135,12 @@ export function cronErrorClassLabel(cls) {
   return Object.hasOwn(CRON_ERROR_CLASS_LABELS, cls) ? CRON_ERROR_CLASS_LABELS[cls] : (cls || '');
 }
 
-// cronJobLedgerCostHtml renders the job's 30-day ledger figure (all runs,
-// local + sandbox) or '' before the fetch lands / when nothing was spent.
+// cronJobLedgerCostHtml renders the job's 30-day ledger figure (runs + session
+// spend outside a run window) or '' before the fetch lands / nothing was spent.
 export function cronJobLedgerCostHtml(jobId) {
   const c = cronJobCostCache[jobId];
   if (!c || !(c.usd > 0)) return '';
-  const title = '近 30 天账本合计：' + c.entries + ' 次运行（本地 + 云沙箱），CLI 估算口径' +
+  const title = '近 30 天账本合计：' + c.entries + ' 条账本记录（本地 / 云沙箱运行，及运行窗口外由会话记的账），CLI 估算口径' +
     (c.dropped > 0 ? '；账本曾丢弃 ' + c.dropped + ' 条，可能偏低' : '');
   return '<span class="ct-cost-ledger" title="' + escAttr(title) + '">30 天 ' + esc(formatCostUSD(c.usd)) + '</span>';
 }

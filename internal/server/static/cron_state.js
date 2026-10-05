@@ -39,9 +39,9 @@ export const cronStore = {
 // Exported as a const object so the other cron modules read the live value.
 export const cronDrawerState = { jobId: null };
 
-// cronJobCostCache: jobId → last-30-day ledger totals for the job (local +
-// sandbox runs), fetched when the drawer opens; complements the timeline's
-// "已加载 N 条" sum which only covers loaded rows.
+// cronJobCostCache: jobId → the job's last-30-day ledger totals (entries counts
+// records: runs + session spend outside a run window), fetched when the drawer
+// opens; complements the timeline's "已加载 N 条" sum over loaded rows only.
 export const cronJobCostCache = {};
 
 // cronFrozenRuns 是 timed_out（或其他非 succeeded/skipped 终态）后

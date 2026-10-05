@@ -10,6 +10,10 @@
 
 ### Added
 
+- **cron：聊天里用 `/cron mode <id> fresh|keep` 切换任务的上下文模式**（#3406）：此前 IM 里只能在创建时用 `--keep-context` 决定，要换模式只能删掉重建（丢失 ID 与执行历史）
+  - 只在创建该任务的会话生效（与 `/cron del/pause/resume` 相同的前缀匹配和跨会话屏蔽）；模式词不区分大小写，`keep-context` 等同 `keep`；设成当前模式也返回成功
+  - 下次执行生效，正在执行的那次不受影响；与控制台编辑一样，连续失败计数（含瞬时故障计数）清零。任务处于暂停时不会自动恢复，回复里提示 `/cron resume <id>`
+  - 「对话上下文已超出模型上限」的失败通知与 `/cron add` 的创建回复改为给出 `/cron mode <id> fresh|keep`，不再建议删除后重建。按旧文案 `不带 --keep-context 重新创建` 匹配的告警请改为匹配 `/cron mode`
 - **Dashboard 版本提示与一键生效**（见 `docs/rfc/dashboard-update-notice.md`）：侧栏 header 新增一枚版本 chip，把此前只存在于日志里的"新版本已就绪"暴露出来，点击后确认即可让新版本生效。默认 `mode: download` 下后台 checker 发现新版本后数秒内就装好 binary，但生效要等重启——本项目自己的部署曾因此空转 22 小时，界面上毫无信号。
   - chip 区分两种状态并给出**相反**的操作：`install`（远端有新版本、磁盘未替换）与 `restart`（binary 已 staged，只需重启）。判定在服务端算好后由 `action` 字段下发，浏览器不做版本比较。这是正确性问题而非展示问题：`Replace()` 备份的是"当前磁盘上的 binary"，所以在 staged 态再装一次会用新版本覆盖 `.bak`，摧毁唯一可回滚的版本
   - 新增 `GET /api/system/update`（状态 + 预检 + 回滚命令）与 `POST /api/system/update/apply`（202 + 后台执行；`confirm_action` 须回传前端看到的 action，不一致返回 409）。不可操作时（dev build / 平台无 release 资产 / install 目录不可写 / 无受管服务）UI 给手工命令而不是一个点了必失败的按钮
@@ -29,6 +33,7 @@
 - **Dashboard WS 重连加 jitter**（RNEW-UX-001），N 个 tab 同时掉线不再同秒风暴回包
 - **Dashboard 后台 tab 暂停 polling**（RNEW-UX-014），手机后台省电省流量
 - **触控目标 ≥ 44×44**（RNEW-UX-011），`.btn-dismiss` / `.status-reconnect` 在 `pointer:coarse` 下满足 WCAG 2.5.5
+- **启动日志点名 `default_backend` 生效的 access profile**（#3419）：profile 的 `default_backend` 与启动实际绑定的默认 backend 不同时，每个这样的 profile 打一行日志，带 `default_backend`、`router_default`、`scope`、`hint`。该 profile 是 `default_access_profile` 时为 Warn（没有解析到其他 profile、也没钉 backend 的新会话都会换 CLI），其余为 Info。与默认 backend 相同的不打。已有会话不受影响，完整的落点用 `naozhi config check --effective` 查看
 
 ### Changed
 
@@ -60,7 +65,11 @@
 - **cron：云沙箱连接在运行中断开，重新计入自动暂停**（#3422）：撤回 0.1.43 #3345 里「云沙箱连接中断不计」的那一半，以及它写明的已知副作用
   - 运行中丢失 sandbox stream（`failed/sandbox_transport`）重新计入连续失败。job 自己的负载每次都把 microVM 弄崩（OOM、崩溃）时，连续失败达到 `cron.auto_pause_after_failures` 后会照常自动暂停。有副作用的 job 因此最多重复执行这么多次，每次在确认队列里留一条记录。naozhi 所在主机一侧的原因（休眠、网络中断）导致的运行中断开同样计入：连接断在哪一端，代码无法区分
   - 只有 naozhi 重启后由启动收尾结掉的孤儿 sandbox run 仍然不计。run 记录、错误分类和通知文案不变，仍是 `sandbox_transport`
-  - 后端瞬时故障（`turn_failed` 且原因是 `backend_overloaded` / `backend_rate_limited` / `backend_unreachable`）仍然不计
+  - 后端瞬时故障（`turn_failed` 且原因是 `backend_overloaded` / `backend_rate_limited` / `backend_unreachable`）仍然不计入连续失败，但改为单独计数，见下一条
+- **cron：后端瞬时故障持续 6 小时以上也会自动暂停**（#3422）：此前过载 / 限流 / 连不上模型服务（`apierr` 的网络错误和超时都归到这里）一律不计，模型服务地址配错、凭证所在网络永久不通时，每个 job 每个 tick 都发一条失败通知，永不暂停
+  - 每个 job 新增两个落盘字段 `transient_failures`（自上次成功、恢复或编辑以来的瞬时故障次数）与 `transient_failing_since`（其中第一次的结束时间）。成功、恢复、编辑都会清零；job 自身原因的失败和重启孤儿都不动它们
+  - 次数达到 `cron.auto_pause_after_failures`，且距第一次已满 6 小时，这次失败就自动暂停该 job。`paused_reason` 仍是 `auto_failures`，通知照常带「已连续失败 N 次，任务已自动暂停」（N 是瞬时故障次数），`cron job auto-paused` 日志多了 `transient=true` 与 `transient_failures` 字段
+  - 窗口跟执行频率无关：每 5 分钟一次的 job 要故障 6 小时才停（不会因为半小时的故障就停），每天一次的 job 仍要 5 次。阈值设为负数同样关闭这条规则；6 小时不可配置
 
 ### Security
 
@@ -72,6 +81,7 @@
 
 ### Fixed
 
+- `naozhi doctor` 的 CLI Backends 段 `Default:` 现在显示启动时实际绑定的默认 backend：`cli.backend` 未在 `cli.backends` 中列出、不是已注册的 backend id，或未设置且 `cli.backends` 首项无效时，此前打印的是配置值（例如 `Default: bogus`），而启动实际跑的是回退后的 backend。现在打印回退目标，并在括号里附上与启动告警相同措辞的原因（#3409）
 - `/urgent` 之后，在它之前已排队的消息现在会拿到自己的真实回答，不再收到"上一条消息已被 /urgent 打断，请在当前任务完成后重发"：真实 CLI 实测（claude 2.1.288）表明 `priority:"now"` 抢占不丢弃队列，紧急消息先跑、排队消息随后各自成轮（`docs/rfc/passthrough-mode-validation.md` V10，#3394）
 - 删除会话后立刻在同一个 key 上新建会话时，被删对话的记录不再留在新会话的 event log 里（#3416）：以前重启后它会出现在新会话 dashboard 历史的最前面，旧 workspace 的附件引用也一直不释放。现在删除会先清掉 event log 和附件引用、再关进程，新会话等清理完成（通常几毫秒，最多约 8 秒）才开始落盘
 - **启用多个 backend 时，dashboard 不再替运维选 router 默认 backend**（#3418）：backend picker 第一项改为默认选中的「自动（X）」，不动它就不发 `backend`，由服务端按项目钉的 `backend` > `agents[].backend` > 访问档 `default_backend` > `cli.backend` 选；X 是所选访问档会落到的 backend，换访问档时跟着变（项目钉的 backend、`agents[].backend`、cron 任务所属 agent 的访问档、远端节点自己的访问档前端都看不到，这几种情况下 X 只是提示，以服务端为准）。以前 picker 总是预选 router 默认并当成显式选择发出，`default_backend`（#3364）和 `agents[].backend` 在 dashboard 入口从不生效

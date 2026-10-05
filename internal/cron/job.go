@@ -173,6 +173,13 @@ type Job struct {
 	// Reaching the scheduler's auto-pause threshold pauses the job.
 	ConsecutiveFailures int `json:"consecutive_failures,omitempty"`
 
+	// TransientFailures counts turns failed by a transient backend cause
+	// since the last success, resume or edit; TransientFailingSince is when
+	// the first of them ended. They leave ConsecutiveFailures alone, but a
+	// count at the threshold spanning transientAutoPauseWindow pauses the job.
+	TransientFailures     int       `json:"transient_failures,omitempty"`
+	TransientFailingSince time.Time `json:"transient_failing_since,omitzero"`
+
 	// PausedReason says why a paused job is paused: "" for a manual pause,
 	// PausedReasonAutoFailures when the failure streak paused it. Resume
 	// clears it.
@@ -212,11 +219,17 @@ var transientTurnCauses = map[TurnCause]bool{
 	TurnCauseBackendUnreachable: true,
 }
 
+// transientAutoPauseWindow is how long transient backend failures must go on
+// before their count can auto-pause a job: long enough that an outage pauses
+// no frequent job within minutes, short enough that a backend that never
+// comes back (a wrong endpoint) stops the notices within a day.
+const transientAutoPauseWindow = 6 * time.Hour
+
 // streakEffect is how the run moves the failure streak. A success resets it.
 // Failures the job did not cause leave it alone: a run the restart reconciler
-// closed as an orphan, and a turn failed by a transient backend cause. So do
-// skipped and canceled runs. A live lost sandbox connection counts whichever
-// end dropped it: a microVM that crashes on every run is the job's problem.
+// closed as an orphan, and a transient backend failure. So do skipped and
+// canceled runs. A live lost sandbox connection counts whichever end dropped
+// it: a microVM that crashes on every run is the job's problem.
 func (o runOutcome) streakEffect() streakEffect {
 	switch o.state {
 	case RunStateSucceeded:
@@ -224,12 +237,67 @@ func (o runOutcome) streakEffect() streakEffect {
 	case RunStateTimedOut:
 		return streakExtend
 	case RunStateFailed:
-		if o.restartOrphan || (o.errClass == ErrClassTurnFailed && transientTurnCauses[o.turnCause]) {
+		if o.restartOrphan || o.transientBackendFailure() {
 			return streakKeep
 		}
 		return streakExtend
 	}
 	return streakKeep
+}
+
+// transientBackendFailure reports a turn failed by a transient backend cause,
+// which Job.TransientFailures counts instead of ConsecutiveFailures.
+func (o runOutcome) transientBackendFailure() bool {
+	return o.state == RunStateFailed && !o.restartOrphan &&
+		o.errClass == ErrClassTurnFailed && transientTurnCauses[o.turnCause]
+}
+
+// failureStreaks is a Job's failure-streak fields, captured and restored as
+// one so a rolled-back mutation cannot leave them out of step.
+type failureStreaks struct {
+	consecutive, transient int
+	transientSince         time.Time
+}
+
+func (j *Job) streaks() failureStreaks {
+	return failureStreaks{j.ConsecutiveFailures, j.TransientFailures, j.TransientFailingSince}
+}
+
+func (j *Job) setStreaks(f failureStreaks) {
+	j.ConsecutiveFailures, j.TransientFailures, j.TransientFailingSince = f.consecutive, f.transient, f.transientSince
+}
+
+// recordStreaks moves j's failure streaks for a run that ended at endedAt
+// with effect e; transient marks a transient backend failure.
+func (j *Job) recordStreaks(e streakEffect, transient bool, endedAt time.Time) {
+	j.ConsecutiveFailures = nextFailureStreak(j.ConsecutiveFailures, e)
+	switch {
+	case e == streakReset:
+		j.setStreaks(failureStreaks{})
+	case transient:
+		if j.TransientFailures == 0 {
+			j.TransientFailingSince = endedAt
+		}
+		j.TransientFailures++
+	}
+}
+
+// autoPauseCount is the failure count at which active job j is due for an
+// auto-pause at now, 0 when it is not. After a counted failure it reads
+// ConsecutiveFailures; after a transient one, TransientFailures, and only once
+// they span transientAutoPauseWindow.
+func (j *Job) autoPauseCount(threshold int, transient bool, now time.Time) int {
+	n := j.ConsecutiveFailures
+	if transient {
+		n = j.TransientFailures
+		if now.Sub(j.TransientFailingSince) < transientAutoPauseWindow {
+			return 0
+		}
+	}
+	if j.Paused || n < threshold {
+		return 0
+	}
+	return n
 }
 
 // nextFailureStreak is ConsecutiveFailures after a run with effect e.

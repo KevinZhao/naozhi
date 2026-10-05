@@ -183,18 +183,18 @@ func turnFailedNotice(c TurnCause) string {
 
 // contextTooLongPersistentNotice is the context-too-long cause, sent to `to`,
 // for a job that keeps its context: every later run resumes the same oversized
-// conversation, so it names the dashboard toggle that resets it. IM cannot
-// toggle the mode, so an IM job also gets the recreate route, placed in the
-// creating chat when the notice lands elsewhere (/cron del only works there).
+// conversation, so it names the dashboard toggle that resets it. An IM job also
+// gets the /cron mode command, placed in the creating chat when the notice
+// lands elsewhere (/cron mode only works there).
 func contextTooLongPersistentNotice(snap jobSnapshot, to NotifyTarget) string {
 	const head = "执行失败（对话上下文已超出模型上限）；该任务保留上下文，之后每次执行都会因此失败，可在控制台编辑任务勾选“每次全新上下文”"
 	switch {
 	case !snap.hasIMChat():
 		return head
 	case snap.isSourceChat(to):
-		return head + "，或删除后不带 --keep-context 重新创建"
+		return head + "，或发送 /cron mode " + snap.jobID + " fresh 改为每次从新会话开始"
 	default:
-		return head + "，或在创建该任务的会话删除后不带 --keep-context 重新创建"
+		return head + "，或在创建该任务的会话发送 /cron mode " + snap.jobID + " fresh"
 	}
 }
 
