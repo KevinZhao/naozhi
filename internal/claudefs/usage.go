@@ -23,7 +23,8 @@ type ModelTokens struct {
 // UsageWindow selects transcript lines by timestamp: after Since, up to and
 // including Until (zero: no upper bound). MainOffset is where reading the
 // main transcript starts, a size it had before the window began; a line the
-// offset cuts through fails to decode and is skipped.
+// offset cuts through fails to decode and is skipped. A file with more than
+// seekPast bytes to read may start further on (usageStart).
 type UsageWindow struct {
 	Since, Until time.Time
 	MainOffset   int64
@@ -36,6 +37,15 @@ const maxUsageLine = 1 << 20
 
 // maxUsageFiles bounds the sub-agent transcripts one call opens.
 const maxUsageFiles = 512
+
+// A windowed read with more than seekPast bytes ahead bisects for its window,
+// stopping seekSlack before Since; a probe reads at most maxUsageProbe bytes
+// looking for an assistant usage line.
+const (
+	seekPast      = 8 << 20
+	seekSlack     = time.Minute
+	maxUsageProbe = 4 * maxUsageLine
+)
 
 var (
 	assistantMarker = []byte(`"assistant"`)
@@ -111,7 +121,7 @@ func readSessionUsage(projectDir, sessionID string, w UsageWindow, acc *usageAcc
 	if err != nil {
 		return false, false, err
 	}
-	err = readUsageFrom(f, w.MainOffset, acc)
+	err = readUsageFrom(f, w.MainOffset, w.Since, acc)
 	f.Close()
 	if err != nil {
 		return true, false, err
@@ -122,7 +132,7 @@ func readSessionUsage(projectDir, sessionID string, w UsageWindow, acc *usageAcc
 		if err != nil {
 			continue // removed meanwhile, or unreadable: its usage is lost, the rest still counts
 		}
-		err = readUsageFrom(f, 0, acc)
+		err = readUsageFrom(f, 0, w.Since, acc)
 		f.Close()
 		if err != nil {
 			return true, truncated, err
@@ -131,18 +141,61 @@ func readSessionUsage(projectDir, sessionID string, w UsageWindow, acc *usageAcc
 	return true, truncated, nil
 }
 
-// readUsageFrom feeds f's lines from offset on to acc; an offset past the end
-// (the file was replaced) reads from the start.
-func readUsageFrom(f *os.File, offset int64, acc *usageAcc) error {
-	if offset > 0 {
-		if st, err := f.Stat(); err != nil || offset > st.Size() {
-			offset = 0
-		}
-		if _, err := f.Seek(offset, io.SeekStart); err != nil {
-			return err
-		}
+// readUsageFrom feeds f's lines from usageStart on to acc.
+func readUsageFrom(f *os.File, offset int64, since time.Time, acc *usageAcc) error {
+	if _, err := f.Seek(usageStart(f, offset, since), io.SeekStart); err != nil {
+		return err
 	}
 	return eachLine(f, maxUsageLine, acc.line)
+}
+
+// usageStart is where reading f for the lines after since begins: at offset,
+// or the start when offset is past the end (the file was replaced). With more
+// than seekPast bytes ahead, usageSeek moves it on to seekSlack before since.
+func usageStart(f *os.File, offset int64, since time.Time) int64 {
+	st, err := f.Stat()
+	if err != nil {
+		return 0
+	}
+	if offset > st.Size() {
+		offset = 0
+	}
+	if since.IsZero() || st.Size()-offset <= seekPast {
+		return offset
+	}
+	return usageSeek(f, offset, st.Size(), since.Add(-seekSlack).UnixMilli())
+}
+
+// usageSeek bisects f's bytes from lo to hi for the start of an assistant
+// usage line at or before cutoff (unix ms), within maxUsageLine of the last
+// such line. The CLI appends those lines in time order, so none before it is
+// later than cutoff. A probe finding no usage line counts as later, which only
+// moves the start earlier.
+func usageSeek(f *os.File, lo, hi, cutoff int64) int64 {
+	for hi-lo > maxUsageLine {
+		mid := lo + (hi-lo)/2
+		if at, ms, ok := probeUsage(f, mid); ok && ms <= cutoff {
+			lo = at
+		} else {
+			hi = mid
+		}
+	}
+	return lo
+}
+
+// probeUsage finds the first assistant usage line starting at or after from,
+// within maxUsageProbe bytes: its offset and timestamp. The line from cuts
+// through fails to decode, as at MainOffset.
+func probeUsage(f *os.File, from int64) (at, ms int64, ok bool) {
+	r := io.NewSectionReader(f, from, maxUsageProbe)
+	_ = eachLineAt(r, maxUsageLine, func(off int64, b []byte) bool {
+		row, _, decoded := decodeUsage(b)
+		if decoded {
+			at, ms, ok = from+off, row.ms, true
+		}
+		return !decoded
+	})
+	return at, ms, ok
 }
 
 // agentTranscripts lists the sub-agent and workflow-agent transcripts under
@@ -206,8 +259,30 @@ func newUsageAcc(w UsageWindow) *usageAcc {
 
 // line folds one transcript line in, if it is an assistant line in the window.
 func (a *usageAcc) line(b []byte) {
-	if !bytes.Contains(b, assistantMarker) || !bytes.Contains(b, usageMarker) {
+	row, id, ok := decodeUsage(b)
+	if !ok || row.ms <= a.sinceMS || (a.untilMS != 0 && row.ms > a.untilMS) {
 		return
+	}
+	if id != "" && a.skip[id] {
+		return
+	}
+	if i, ok := a.msgs[id]; ok && id != "" {
+		r := &a.rows[i]
+		r.Input, r.Output = max(r.Input, row.Input), max(r.Output, row.Output)
+		r.CacheRead, r.CacheWrite = max(r.CacheRead, row.CacheRead), max(r.CacheWrite, row.CacheWrite)
+		return
+	}
+	if id != "" {
+		a.msgs[id] = len(a.rows)
+	}
+	a.rows = append(a.rows, row)
+}
+
+// decodeUsage decodes b if it is a timestamped assistant line with usage:
+// the line's usage, time and entrypoint, and its message id.
+func decodeUsage(b []byte) (row usageRow, id string, ok bool) {
+	if !bytes.Contains(b, assistantMarker) || !bytes.Contains(b, usageMarker) {
+		return usageRow{}, "", false
 	}
 	var v struct {
 		Type       string `json:"type"`
@@ -225,27 +300,15 @@ func (a *usageAcc) line(b []byte) {
 		} `json:"message"`
 	}
 	if json.Unmarshal(b, &v) != nil || v.Type != "assistant" || v.Message.Usage == nil {
-		return
+		return usageRow{}, "", false
 	}
 	ts := TimestampMillis(v.Timestamp)
-	if ts == 0 || ts <= a.sinceMS || (a.untilMS != 0 && ts > a.untilMS) {
-		return
-	}
-	if v.Message.ID != "" && a.skip[v.Message.ID] {
-		return
+	if ts == 0 {
+		return usageRow{}, "", false
 	}
 	u := v.Message.Usage
 	t := ModelTokens{Model: v.Message.Model, Input: u.Input, Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite}
-	if i, ok := a.msgs[v.Message.ID]; ok && v.Message.ID != "" {
-		r := &a.rows[i]
-		r.Input, r.Output = max(r.Input, t.Input), max(r.Output, t.Output)
-		r.CacheRead, r.CacheWrite = max(r.CacheRead, t.CacheRead), max(r.CacheWrite, t.CacheWrite)
-		return
-	}
-	if v.Message.ID != "" {
-		a.msgs[v.Message.ID] = len(a.rows)
-	}
-	a.rows = append(a.rows, usageRow{ModelTokens: t, ms: ts, entrypoint: v.Entrypoint})
+	return usageRow{ModelTokens: t, ms: ts, entrypoint: v.Entrypoint}, v.Message.ID, true
 }
 
 // totals sums the messages per model.

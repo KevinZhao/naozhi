@@ -114,11 +114,22 @@ func CostStates(path, sessionID string) ([]CostStateMark, error) {
 // buffer arrives in pieces: it is gathered while it could still fit and
 // skipped once it cannot.
 func eachLine(r io.Reader, maxLine int, fn func(line []byte)) error {
+	return eachLineAt(r, maxLine, func(_ int64, line []byte) bool {
+		fn(line)
+		return true
+	})
+}
+
+// eachLineAt is eachLine passing each line's offset in r; fn returning false
+// ends the read.
+func eachLineAt(r io.Reader, maxLine int, fn func(off int64, line []byte) bool) error {
 	br := bufio.NewReaderSize(r, 64<<10)
 	var long []byte
 	skipping := false
+	var off, next int64
 	for {
 		chunk, rerr := br.ReadSlice('\n')
+		next += int64(len(chunk))
 		if errors.Is(rerr, bufio.ErrBufferFull) {
 			if !skipping {
 				long = append(long, chunk...)
@@ -137,9 +148,12 @@ func eachLine(r io.Reader, maxLine int, fn func(line []byte)) error {
 			if len(long) > 0 {
 				chunk = append(long, chunk...)
 			}
-			fn(chunk)
+			if !fn(off, chunk) {
+				return nil
+			}
 		}
 		long = long[:0]
+		off = next
 		if rerr != nil {
 			return nil
 		}

@@ -192,6 +192,18 @@ func TestSessionMessageUsage_TagsEachMessageAndSkipsCountedOnes(t *testing.T) {
 	}
 }
 
+// An assistant line without a timestamp counts in no window, the whole
+// history's included.
+func TestSessionMessageUsage_UntimedLineCountsNowhere(t *testing.T) {
+	proj := t.TempDir()
+	untimed := strings.Replace(usageLine(1, "msg_untimed", "m", 1000, 0, 0, 0), `"timestamp"`, `"stamp"`, 1)
+	writeLines(t, TranscriptIn(proj, usageSID), usageT0, untimed, usageLine(2, "msg_timed", "m", 1, 0, 0, 0))
+	got, _, err := SessionMessageUsage(proj, usageSID, map[string]bool{})
+	if err != nil || len(got.Messages) != 1 || got.Messages[0].Input != 1 {
+		t.Fatalf("messages = %+v err=%v, want the timed line only", got.Messages, err)
+	}
+}
+
 func withEntrypoint(line, entrypoint string) string {
 	var v map[string]any
 	_ = json.Unmarshal([]byte(line), &v)
@@ -215,5 +227,192 @@ func TestSessionMessageUsage_ReportsTruncation(t *testing.T) {
 	}
 	if n := DayTotals(got.Messages)["2026-10-03"][0].Input; n != maxUsageFiles+1 {
 		t.Errorf("input = %d, want the main line plus %d agent files", n, maxUsageFiles)
+	}
+}
+
+// padded is line with a pad field of n bytes.
+func padded(line string, n int) string {
+	var v map[string]any
+	_ = json.Unmarshal([]byte(line), &v)
+	v["pad"] = strings.Repeat("x", n)
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+// userLine is a user line at usageT0 plus sec seconds, n bytes of padding.
+func userLine(sec, n int) string {
+	return padded(fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"q"}}`,
+		usageT0.Add(time.Duration(sec)*time.Second).Format(time.RFC3339Nano)), n)
+}
+
+// linearUsage is what reading every line of path through w's filter gives.
+func linearUsage(t *testing.T, path string, w UsageWindow) []ModelTokens {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	acc := newUsageAcc(w)
+	if err := eachLine(f, maxUsageLine, acc.line); err != nil {
+		t.Fatal(err)
+	}
+	return acc.totals()
+}
+
+func writeMainTranscript(t *testing.T, proj, body string) string {
+	t.Helper()
+	path := TranscriptIn(proj, usageSID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A window near the end of a large transcript starts reading close to it,
+// and sums what a line-by-line read does. The file holds what real
+// transcripts do: timestamp-less lines, a snapshot whose nested timestamp is
+// in the window, an overlong line, a stretch without usage lines longer than
+// a probe reads, a message whose blocks straddle Since, and user lines
+// stamped hours before the assistant lines around them. The read starts
+// before every usage line within seekSlack of Since.
+func TestSessionUsage_LargeTranscriptSeeksNearItsWindow(t *testing.T) {
+	const since = 10000
+	in := usageT0.Add(since * time.Second).Format(time.RFC3339Nano)
+	var b strings.Builder
+	add := func(lines ...string) {
+		for _, l := range lines {
+			b.WriteString(l + "\n")
+		}
+	}
+	for i := range 2485 {
+		add(padded(usageLine(i*4, fmt.Sprintf("msg_old%d", i/2), "m", 1000, 0, 0, 0), 4<<10))
+		switch {
+		case i%50 == 0:
+			add(`{"type":"summary","summary":"s"}`,
+				fmt.Sprintf(`{"type":"file-history-snapshot","snapshot":{"timestamp":%q}}`, in))
+		case i == 301:
+			add(padded(usageLine(i*4, "msg_long", "m", 1000, 0, 0, 0), 2<<20))
+		case i == 601:
+			for range 640 {
+				add(userLine(i*4, 8<<10))
+			}
+		}
+	}
+	late := int64(b.Len()) // the usage lines within seekSlack of Since, more than a margin of them
+	for sec := since - 59; sec < since-1; sec++ {
+		add(padded(usageLine(sec, fmt.Sprintf("msg_late%d", sec), "m", 1000, 0, 0, 0), 64<<10))
+	}
+	add(usageLine(since-1, "msg_straddle", "m", 7, 0, 0, 0))
+	for i := range 1200 {
+		for range 4 {
+			add(userLine(100, 2<<10))
+		}
+		if i == 0 {
+			add(usageLine(since+1, "msg_straddle", "m", 7, 0, 0, 0))
+		}
+		add(usageLine(since+1+i, fmt.Sprintf("msg_in%d", i), "m", 1, 0, 0, 0))
+	}
+	proj := t.TempDir()
+	path := writeMainTranscript(t, proj, b.String())
+	w := UsageWindow{Since: usageT0.Add(since * time.Second), Until: usageT0.Add((since + 1001) * time.Second)}
+
+	got, found, err := SessionUsage(proj, usageSID, w)
+	if err != nil || !found {
+		t.Fatalf("found=%v err=%v", found, err)
+	}
+	want := []ModelTokens{{Model: "m", Input: 1001 + 7}}
+	if lin := linearUsage(t, path, w); !reflect.DeepEqual(lin, want) || !reflect.DeepEqual(got, want) {
+		t.Fatalf("usage = %+v, line by line %+v, want %+v", got, lin, want)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	start := usageStart(f, 0, w.Since)
+	if start > late || start < late-2*maxUsageLine {
+		t.Fatalf("read starts at %d of %d, want within %d bytes before %d", start, b.Len(), 2*maxUsageLine, late)
+	}
+	if replaced := usageStart(f, 1<<40, w.Since); replaced != start {
+		t.Fatalf("an offset past the end starts at %d, want %d as from the start", replaced, start)
+	}
+}
+
+// A probe finding no usage line within its reach moves the start no further:
+// the usage lines before a long stretch of user lines (tool results) in the
+// window still count.
+func TestSessionUsage_ProbeMissKeepsTheStart(t *testing.T) {
+	var b strings.Builder
+	for i := range 500 {
+		b.WriteString(padded(usageLine(i, fmt.Sprintf("msg_old%d", i), "m", 1000, 0, 0, 0), 4<<10) + "\n")
+	}
+	b.WriteString(usageLine(1000, "msg_before_stretch", "m", 1, 0, 0, 0) + "\n")
+	for b.Len() < 16<<20 {
+		b.WriteString(userLine(1001, 8<<10) + "\n")
+	}
+	b.WriteString(usageLine(1002, "msg_after_stretch", "m", 2, 0, 0, 0) + "\n")
+	proj := t.TempDir()
+	writeMainTranscript(t, proj, b.String())
+	got, _, err := SessionUsage(proj, usageSID, UsageWindow{Since: usageT0.Add(999 * time.Second)})
+	if err != nil || !reflect.DeepEqual(got, []ModelTokens{{Model: "m", Input: 3}}) {
+		t.Fatalf("usage = %+v err=%v, want both lines in the window", got, err)
+	}
+}
+
+// With no more than seekPast bytes to read, every line is read: a usage line
+// out of time order still counts.
+func TestSessionUsage_ShortReadTakesEveryLine(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(usageLine(5000, "msg_early_in_window", "m", 1, 0, 0, 0) + "\n")
+	const size = 6 << 20 // more than a bisect step, less than seekPast
+	for i := 0; b.Len() < size; i++ {
+		b.WriteString(padded(usageLine(i, fmt.Sprintf("msg_old%d", i), "m", 1000, 0, 0, 0), 4<<10) + "\n")
+	}
+	if b.Len() > seekPast {
+		t.Fatalf("the transcript holds %d bytes, more than seekPast", b.Len())
+	}
+	proj := t.TempDir()
+	writeMainTranscript(t, proj, b.String())
+	got, _, err := SessionUsage(proj, usageSID, UsageWindow{Since: usageT0.Add(4500 * time.Second)})
+	if err != nil || !reflect.DeepEqual(got, []ModelTokens{{Model: "m", Input: 1}}) {
+		t.Fatalf("usage = %+v err=%v, want the early line", got, err)
+	}
+}
+
+// eachLineAt's offsets count every byte before a line, overlong lines it
+// skips and lines longer than its buffer included, and fn can stop it.
+func TestEachLineAt_OffsetsCountSkippedLines(t *testing.T) {
+	lines := []string{"a\n", strings.Repeat("b", 100<<10) + "\n", strings.Repeat("c", 300) + "\n", "d\n", "e\n", "f"}
+	type seen struct {
+		off int64
+		n   int
+	}
+	var got []seen
+	err := eachLineAt(strings.NewReader(strings.Join(lines, "")), 100<<10+1, func(off int64, line []byte) bool {
+		got = append(got, seen{off, len(line)})
+		return line[0] != 'e'
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []seen{{0, 2}, {2, 100<<10 + 1}, {2 + 100<<10 + 1, 301}, {2 + 100<<10 + 302, 2}, {2 + 100<<10 + 304, 2}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("lines = %v\nwant    %v", got, want)
+	}
+	got = nil
+	if err := eachLineAt(strings.NewReader(strings.Join(lines, "")), 1000, func(off int64, line []byte) bool {
+		got = append(got, seen{off, len(line)})
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want = []seen{{0, 2}, {2 + 100<<10 + 1, 301}, {2 + 100<<10 + 302, 2}, {2 + 100<<10 + 304, 2}, {2 + 100<<10 + 306, 1}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("with the long line skipped: lines = %v\nwant    %v", got, want)
 	}
 }
