@@ -31,10 +31,11 @@ type turnState struct {
 	// reconnectedMidTurn CAS path followed by <-killCh, plus cli_exited, the
 	// fall-out Dead path and the panic defer.
 	onTurnDone func()
-	// onUnownedResult receives the result of a turn no Send owns — one the
-	// CLI started itself (a background-task notification) — so the session
-	// can book its cost; such a result never reaches a Send's finishRun.
-	// Assign via SetOnUnownedResult; read under mu, invoked after release.
+	// onUnownedResult receives a result no live caller consumes — a turn the
+	// CLI started itself (a background-task notification), or one whose Send
+	// gave up before it arrived — so the session can book its cost; such a
+	// result never reaches a Send's finishRun. Assign via SetOnUnownedResult;
+	// read under mu, invoked after release.
 	onUnownedResult func(clievent.SendResult)
 
 	interrupted    atomic.Bool // set by Interrupt(), cleared by next Send()
@@ -51,6 +52,10 @@ type turnState struct {
 	// Send's defer will end it (e.g. the CLI waking itself for a background
 	// task-notification).
 	unowned bool
+	// sendAbandoned: the last Send returned before its result (ctx canceled
+	// or past its deadline), so that result is nobody's to consume. Cleared
+	// when the next Send claims the turn.
+	sendAbandoned bool
 }
 
 // transition applies ev and reports the state before it and whether the state
@@ -68,8 +73,20 @@ func (t *turnState) transitionLocked(ev stateEvent) (prev ProcessState, moved bo
 	if moved {
 		t.state = next
 		t.unowned = ev == evTurnStarted
+		if ev == evSendBegin {
+			t.sendAbandoned = false
+		}
 	}
 	return prev, moved
+}
+
+// noLiveSend reports whether no Send will consume a result read now: the
+// process is Ready (a Send claiming it later drops the result by RecvAt) or
+// the Send that owns the turn has given up.
+func (t *turnState) noLiveSend() bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.state == StateReady || t.sendAbandoned
 }
 
 // controlAcks matches control_request acks to their waiters: pending SetModel

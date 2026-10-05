@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -174,19 +175,26 @@ func TestReconcile_TakenOverHistoryIsNotBooked(t *testing.T) {
 }
 
 // Headless lines from before the run of the session's first entry, the same
-// day, are another process's: the session was resumed from history.
+// day, are another process's: the session was resumed from history. A run
+// record without a start leaves the run starting at the entry.
 func TestReconcile_LinesBeforeTheFirstRunHoldTheirDay(t *testing.T) {
-	s := newReconcileScope(t)
-	s.transcript(t, rcSID, scopeMsg(s.day(-1, 9, 0), "msg_before", 30, "sdk-cli"), scopeMsg(s.day(-1, 10, 0), "msg_nz", 2, "sdk-cli"))
-	s.runStarted(t, "aaaaaaaaaaaaaaaa", s.day(-1, 9, 59))
-	seedLedger(t, s.opts.SessionStorePath, rcTurn(s.day(-1, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 2),
-		rcTurn(s.day(-3, 9, 0), scopeKey2, "bbbbbbbbbbbbbbbb", 1))
-	rep, out := s.run(t)
-	if len(rep.Planned) != 0 {
-		t.Fatalf("planned %+v, want nothing\n%s", rep.Planned, out)
-	}
-	if st := settlementOf(rep, rcSID); st.OpenDays != 1 {
-		t.Errorf("open days = %d, want 1\n%s", st.OpenDays, out)
+	for _, started := range []bool{true, false} {
+		s := newReconcileScope(t)
+		s.transcript(t, rcSID, scopeMsg(s.day(-1, 9, 0), "msg_before", 30, "sdk-cli"), scopeMsg(s.day(-1, 10, 0), "msg_nz", 2, "sdk-cli"))
+		run := runhistory.SessionRun{RunID: "aaaaaaaaaaaaaaaa", SessionKey: rcKey, SessionID: rcSID, EndedAt: s.day(-1, 10, 1)}
+		if started {
+			run.StartedAt = s.day(-1, 9, 59)
+		}
+		s.sessionRun(t, run)
+		seedLedger(t, s.opts.SessionStorePath, rcTurn(s.day(-1, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 2),
+			rcTurn(s.day(-3, 9, 0), scopeKey2, "bbbbbbbbbbbbbbbb", 1))
+		rep, out := s.run(t)
+		if len(rep.Planned) != 0 {
+			t.Fatalf("started=%v: planned %+v, want nothing\n%s", started, rep.Planned, out)
+		}
+		if st := settlementOf(rep, rcSID); st.OpenDays != 1 {
+			t.Errorf("started=%v: open days = %d, want 1\n%s", started, st.OpenDays, out)
+		}
 	}
 }
 
@@ -262,5 +270,220 @@ func TestReconcile_SessionFilterKeepsAForksCopiedLinesWithItsParent(t *testing.T
 		if st := settlementOf(rep, scopeFork); !near(st.Transcript, 3) {
 			t.Errorf("-session %q: fork transcript = %v, want its own 3\n%s", only, st.Transcript, out)
 		}
+	}
+}
+
+// A turn correctly baselined after a small restore is genuine, however much
+// larger than the restore it is, and so is every later turn of its process.
+func TestReconcile_ABaselinedTurnAfterASmallRestoreIsNotFlagged(t *testing.T) {
+	s := newReconcileScope(t)
+	s.transcript(t, rcSID, scopeMsg(s.day(-2, 10, 0), "msg_1", 0.6, "sdk-cli"), rcCostState(0.6, 600),
+		rcLine("queue-operation", s.day(-1, 9, 0), "", 0),
+		scopeMsg(s.day(-1, 9, 1), "msg_2", 3, "sdk-cli"), scopeMsg(s.day(-1, 10, 1), "msg_3", 1, "sdk-cli"))
+	s.runStarted(t, "aaaaaaaaaaaaaaaa", s.day(-2, 9, 59))
+	seedLedger(t, s.opts.SessionStorePath, rcTurn(s.day(-2, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 0.6),
+		rcTurn(s.day(-1, 9, 2), rcKey, "cccccccccccccccc", 3), rcTurn(s.day(-1, 10, 2), rcKey, "dddddddddddddddd", 1),
+		rcTurn(s.day(-3, 9, 0), scopeKey2, "bbbbbbbbbbbbbbbb", 1))
+	rep, out := s.run(t)
+	if len(rep.Flagged) != 0 || len(rep.Planned) != 0 {
+		t.Fatalf("flagged %+v planned %+v, want nothing\n%s", rep.Flagged, rep.Planned, out)
+	}
+	if st := settlementOf(rep, rcSID); !near(st.After, 4.6) || !near(st.Transcript, 4.6) {
+		t.Errorf("settlement = %+v, want after = transcript = 4.60\n%s", st, out)
+	}
+}
+
+// The turn of an entry starts no earlier than the cost-state: a message the
+// writing process ran after its last booked entry is part of the restored
+// total, so it does not hide that the next process charged that total again.
+func TestReconcile_UnbookedSpendBeforeTheCostStateIsNotTheTurn(t *testing.T) {
+	s := newReconcileScope(t)
+	s.transcript(t, rcSID, scopeMsg(s.day(-2, 10, 0), "msg_1", 2, "sdk-cli"), scopeMsg(s.day(-2, 11, 0), "msg_k", 10, "sdk-cli"),
+		rcCostState(12, 12000), rcLine("queue-operation", s.day(-1, 9, 0), "", 0), scopeMsg(s.day(-1, 9, 1), "msg_2", 3, "sdk-cli"))
+	s.runStarted(t, "aaaaaaaaaaaaaaaa", s.day(-2, 9, 59))
+	seedLedger(t, s.opts.SessionStorePath, rcTurn(s.day(-2, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 2),
+		rcTurn(s.day(-1, 9, 2), rcKey, "cccccccccccccccc", 15), rcTurn(s.day(-3, 9, 0), scopeKey2, "bbbbbbbbbbbbbbbb", 1))
+	rep, out := s.run(t)
+	if len(rep.Flagged) != 1 || rep.Flagged[0].Entry.RunID != "cccccccccccccccc" || !near(rep.Planned[0].Amount, -12) {
+		t.Fatalf("flagged %+v planned %+v, want the resumed turn flagged -12\n%s", rep.Flagged, rep.Planned, out)
+	}
+}
+
+// Each process that resumes the same cost-state, the one before it killed
+// and so writing none, is judged on its own turn: the earlier one's turn,
+// booked by its result or by its process-end partial, is not in it.
+func TestReconcile_EachResumeOfOneCostStateIsJudgedOnItsOwnTurn(t *testing.T) {
+	for _, kind := range []costledger.Kind{costledger.KindTurn, costledger.KindPartial} {
+		t.Run(string(kind), func(t *testing.T) {
+			s := newReconcileScope(t)
+			s.transcript(t, rcSID, scopeMsg(s.day(-2, 10, 0), "msg_1", 10, "sdk-cli"), rcCostState(10, 10000),
+				rcLine("queue-operation", s.day(-1, 9, 0), "", 0), scopeMsg(s.day(-1, 9, 1), "msg_2", 8, "sdk-cli"),
+				rcLine("queue-operation", s.day(-1, 15, 0), "", 0), scopeMsg(s.day(-1, 15, 1), "msg_3", 2, "sdk-cli"))
+			s.runStarted(t, "aaaaaaaaaaaaaaaa", s.day(-2, 9, 59))
+			earlier := rcTurn(s.day(-1, 9, 2), rcKey, "cccccccccccccccc", 18)
+			if kind == costledger.KindPartial {
+				earlier = rcTurn(s.day(-1, 9, 2), rcKey, "end:"+rcSID+":p1", 8)
+				earlier.Kind = kind
+			}
+			seedLedger(t, s.opts.SessionStorePath, rcTurn(s.day(-2, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 10),
+				earlier, rcTurn(s.day(-1, 15, 2), rcKey, "dddddddddddddddd", 12), rcTurn(s.day(-3, 9, 0), scopeKey2, "bbbbbbbbbbbbbbbb", 1))
+			rep, out := s.run(t)
+			if n := len(rep.Flagged); n == 0 || rep.Flagged[n-1].Entry.RunID != "dddddddddddddddd" {
+				t.Fatalf("flagged %+v, want the last resumed turn among them\n%s", rep.Flagged, out)
+			}
+		})
+	}
+}
+
+// Spend in a turn's window that no entry booked, such as a workflow agent's,
+// does not hide a restore the entry charged with nothing of its own on top.
+func TestReconcile_UnbookedSpendInTheTurnDoesNotHideARestore(t *testing.T) {
+	s := newReconcileScope(t)
+	s.transcript(t, rcSID, scopeMsg(s.day(-2, 10, 0), "msg_1", 10, "sdk-cli"), rcCostState(10, 10000),
+		rcLine("queue-operation", s.day(-1, 9, 0), "", 0), scopeMsg(s.day(-1, 9, 1), "msg_u", 3, "sdk-cli"))
+	s.runStarted(t, "aaaaaaaaaaaaaaaa", s.day(-2, 9, 59))
+	seedLedger(t, s.opts.SessionStorePath, rcTurn(s.day(-2, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 10),
+		rcTurn(s.day(-1, 9, 2), rcKey, "cccccccccccccccc", 10), rcTurn(s.day(-3, 9, 0), scopeKey2, "bbbbbbbbbbbbbbbb", 1))
+	rep, out := s.run(t)
+	if len(rep.Flagged) != 1 || rep.Flagged[0].Entry.RunID != "cccccccccccccccc" {
+		t.Fatalf("flagged %+v, want the resumed turn\n%s", rep.Flagged, out)
+	}
+	if st := settlementOf(rep, rcSID); !near(st.After, 13) {
+		t.Errorf("settlement = %+v, want the restore out and the unbooked 3 in: 13\n%s", st, out)
+	}
+}
+
+// An entry smaller than the restore did not charge it, however little of
+// its turn the transcript shows.
+func TestReconcile_AnEntryBelowTheRestoreIsNotFlagged(t *testing.T) {
+	s := newReconcileScope(t)
+	s.transcript(t, rcSID, scopeMsg(s.day(-2, 10, 0), "msg_1", 10, "sdk-cli"), rcCostState(10, 10000),
+		rcLine("queue-operation", s.day(-1, 9, 0), "", 0))
+	s.runStarted(t, "aaaaaaaaaaaaaaaa", s.day(-2, 9, 59))
+	seedLedger(t, s.opts.SessionStorePath, rcTurn(s.day(-2, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 10),
+		rcTurn(s.day(-1, 9, 2), rcKey, "cccccccccccccccc", 6), rcTurn(s.day(-3, 9, 0), scopeKey2, "bbbbbbbbbbbbbbbb", 1))
+	if rep, out := s.run(t); len(rep.Flagged) != 0 {
+		t.Fatalf("flagged %+v, want nothing\n%s", rep.Flagged, out)
+	}
+}
+
+// An entry without model rows is judged on its amount less its turn's priced
+// usage; a turn that cannot be priced leaves it unflagged and reported.
+func TestReconcile_ARowlessEntryIsJudgedOnItsPricedTurn(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		amount    float64
+		model     string
+		flagged   int
+		undecided int
+	}{
+		{"restore plus the turn", 3.6, rcModel, 1, 0},
+		{"the turn alone", 3, rcModel, 0, 0},
+		{"turn not priced", 3, "claude-mystery-9", 0, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := newReconcileScope(t)
+			s.transcript(t, rcSID, scopeMsg(s.day(-2, 10, 0), "msg_1", 0.6, "sdk-cli"), rcCostState(0.6, 600),
+				rcLine("queue-operation", s.day(-1, 9, 0), "", 0), rcLine("assistant", s.day(-1, 9, 1), "msg_2", 3000, c.model))
+			s.runStarted(t, "aaaaaaaaaaaaaaaa", s.day(-2, 9, 59))
+			rowless := rcTurn(s.day(-1, 9, 2), rcKey, "cccccccccccccccc", c.amount)
+			rowless.Models = nil
+			seedLedger(t, s.opts.SessionStorePath, rcTurn(s.day(-2, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 0.6),
+				rowless, rcTurn(s.day(-3, 9, 0), scopeKey2, "bbbbbbbbbbbbbbbb", 1))
+			rep, out := s.run(t)
+			st := settlementOf(rep, rcSID)
+			if len(rep.Flagged) != c.flagged || st.UndecidedN != c.undecided {
+				t.Fatalf("flagged %d undecided %d, want %d and %d\n%s", len(rep.Flagged), st.UndecidedN, c.flagged, c.undecided, out)
+			}
+			if c.undecided > 0 && !strings.Contains(out, "1 条无法判定是否计入恢复额") {
+				t.Errorf("report does not name the undecided entry\n%s", out)
+			}
+		})
+	}
+}
+
+// A turn's usage runs after from up to and including to, without the
+// interactive-terminal messages, and is unpriced when a model has no rate.
+func TestTurnWindow(t *testing.T) {
+	t0 := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
+	rates := costledger.NewRateBook()
+	rates.Observe(costledger.ModelDelta{Model: rcModel, CostUSD: 1, Tokens: costledger.Tokens{CacheRead: 1000}})
+	msg := func(min int, cacheRead int64, entrypoint, model string) claudefs.MessageUsage {
+		return claudefs.MessageUsage{ModelTokens: claudefs.ModelTokens{Model: model, CacheRead: cacheRead},
+			At: t0.Add(time.Duration(min) * time.Minute), Entrypoint: entrypoint}
+	}
+	msgs := []claudefs.MessageUsage{msg(0, 1, "sdk-cli", rcModel), msg(1, 1000, "sdk-cli", rcModel), msg(2, 2000, "", rcModel),
+		msg(3, 4000, "cli", rcModel), msg(4, 8000, "claude-vscode", rcModel), msg(5, 16000, "sdk-cli", rcModel), msg(6, 32000, "sdk-cli", rcModel)}
+	if got := turnWindow(msgs, t0, t0.Add(5*time.Minute), rates); got.tokens != 19000 || !got.priced || !near(got.usd, 19) {
+		t.Errorf("turnWindow = %+v, want 19000 tokens priced at 19", got)
+	}
+	msgs = append(msgs, msg(5, 1, "sdk-cli", "claude-mystery-9"))
+	if got := turnWindow(msgs, t0, t0.Add(5*time.Minute), rates); got.priced {
+		t.Errorf("turnWindow = %+v, want unpriced with a model no row taught", got)
+	}
+}
+
+// A backfill is booked at its run's start, so its turn is the run, up to the
+// run's recorded end or else the next entry, and the turn after it starts
+// where the run ended. One that nothing bounds is reported, not flagged.
+func TestReconcile_ABackfillIsJudgedOnItsRun(t *testing.T) {
+	for _, c := range []struct {
+		name         string
+		backfill, dd float64 // dd 0 books no later turn
+		ended        bool
+		flagged      []string
+		undecided    int
+	}{
+		{"baselined backfill", 3, 1, true, nil, 0},
+		{"backfill charging the restore", 3.6, 1, true, []string{"cccccccccccccccc"}, 0},
+		{"turn after a backfill charging the restore", 3, 1.6, true, []string{"dddddddddddddddd"}, 0},
+		{"backfill without an end, bounded by the next entry", 3, 1, false, nil, 0},
+		{"backfill nothing bounds", 3, 0, false, nil, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := newReconcileScope(t)
+			s.transcript(t, rcSID, scopeMsg(s.day(-2, 10, 0), "msg_1", 0.6, "sdk-cli"), rcCostState(0.6, 600),
+				rcLine("queue-operation", s.day(-1, 9, 0), "", 0),
+				scopeMsg(s.day(-1, 9, 1), "msg_2", 3, "sdk-cli"), scopeMsg(s.day(-1, 10, 1), "msg_3", 1, "sdk-cli"))
+			s.runStarted(t, "aaaaaaaaaaaaaaaa", s.day(-2, 9, 59))
+			run := runhistory.SessionRun{RunID: "cccccccccccccccc", SessionKey: rcKey, SessionID: rcSID, StartedAt: s.day(-1, 9, 0)}
+			if c.ended {
+				run.EndedAt = s.day(-1, 9, 2)
+			}
+			s.sessionRun(t, run)
+			backfill := rcTurn(run.StartedAt, rcKey, run.RunID, c.backfill)
+			backfill.Kind, backfill.Models = costledger.KindBackfill, nil
+			entries := []costledger.Entry{rcTurn(s.day(-2, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 0.6), backfill,
+				rcTurn(s.day(-3, 9, 0), scopeKey2, "bbbbbbbbbbbbbbbb", 1)}
+			if c.dd > 0 {
+				entries = append(entries, rcTurn(s.day(-1, 10, 2), rcKey, "dddddddddddddddd", c.dd))
+			}
+			seedLedger(t, s.opts.SessionStorePath, entries...)
+			rep, out := s.run(t)
+			var flagged []string
+			for _, f := range rep.Flagged {
+				flagged = append(flagged, f.Entry.RunID)
+			}
+			if strings.Join(flagged, ",") != strings.Join(c.flagged, ",") || settlementOf(rep, rcSID).UndecidedN != c.undecided {
+				t.Fatalf("flagged %v undecided %d, want %v and %d\n%s", flagged, settlementOf(rep, rcSID).UndecidedN, c.flagged, c.undecided, out)
+			}
+		})
+	}
+}
+
+// An adjustment an earlier -write booked inside a turn, such as a day
+// residual at noon, does not cut that turn short.
+func TestReconcile_AnEarlierAdjustmentDoesNotSplitATurn(t *testing.T) {
+	s := newReconcileScope(t)
+	s.transcript(t, rcSID, scopeMsg(s.day(-2, 10, 0), "msg_1", 0.6, "sdk-cli"), rcCostState(0.6, 600),
+		rcLine("queue-operation", s.day(-1, 11, 0), "", 0),
+		scopeMsg(s.day(-1, 11, 30), "msg_2", 1.5, "sdk-cli"), scopeMsg(s.day(-1, 12, 30), "msg_3", 1.5, "sdk-cli"))
+	s.runStarted(t, "aaaaaaaaaaaaaaaa", s.day(-2, 9, 59))
+	residual := rcTurn(s.day(-1, 12, 0), rcKey, reconcilePrefix+rcSID+":day:"+s.day(-1, 0, 0).Format(time.DateOnly), 1)
+	residual.Kind, residual.Models = costledger.KindAdjust, nil
+	seedLedger(t, s.opts.SessionStorePath, rcTurn(s.day(-2, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 0.6), residual,
+		rcTurn(s.day(-1, 12, 31), rcKey, "cccccccccccccccc", 3), rcTurn(s.day(-3, 9, 0), scopeKey2, "bbbbbbbbbbbbbbbb", 1))
+	if rep, out := s.run(t); len(rep.Flagged) != 0 {
+		t.Fatalf("flagged %+v, want nothing\n%s", rep.Flagged, out)
 	}
 }

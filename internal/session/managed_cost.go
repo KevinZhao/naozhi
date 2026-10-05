@@ -107,9 +107,10 @@ func (s *ManagedSession) accountTurnCost(result *clievent.SendResult, runID stri
 
 // accountCost is accountTurnCost for a reading that counts only while onlyFor
 // is still s's process (nil: always). Checked under costMu, so it is atomic
-// with RenameSession, which moves the process before copying the baseline: a
-// reading lands on the old session before the copy, or is dropped and picked
-// up by the new session's next one — never booked on both.
+// with RenameSession, which copies the baseline and links the new session in
+// one costMu section: a reading lands on the old session before the copy, or
+// the new session differences it — never booked on both. A respawned
+// session keeps its process's baseline and forwards the increment (addSpent).
 func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, onlyFor processIface) float64 {
 	if result == nil {
 		return 0
@@ -121,6 +122,11 @@ func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, 
 	raw := cumulativeFromResult(result, metering)
 
 	s.costMu.Lock()
+	if s.renamed {
+		next := s.successor
+		s.costMu.Unlock()
+		return next.accountCost(result, runID, onlyFor)
+	}
 	if onlyFor != nil && s.loadProcess() != onlyFor {
 		s.costMu.Unlock()
 		return 0
@@ -137,16 +143,18 @@ func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, 
 	inc, next := costledger.Delta(raw, s.lastCumulative)
 	s.lastCumulative = next
 	storeTotalCost(&s.lastCumulativeCost, next.USD)
-	if inc.USD != 0 {
-		storeTotalCost(&s.costSpent, loadTotalCost(&s.costSpent)+inc.USD)
-	}
-	dropModels := s.modelsBaselineUnknown
-	s.modelsBaselineUnknown = false
-	if dropModels {
+	if s.modelsBaselineUnknown {
+		s.modelsBaselineUnknown = false
 		inc.Models = nil
 	}
-	s.spent = s.spent.Accumulate(inc)
+	fwd := s.successor
+	if fwd == nil {
+		s.addSpentLocked(inc.USD, inc)
+	}
 	s.costMu.Unlock()
+	if fwd != nil {
+		fwd.addSpent(inc.USD, inc)
+	}
 
 	if s.costAcct != nil {
 		rates := s.costAcct.ledger.Rates()
@@ -163,12 +171,14 @@ func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, 
 	return inc.USD
 }
 
-// bookUnownedResults books the cost of the turns proc's CLI starts on its own
-// (background-task notifications): their results reach no Send, so without
-// this their spend waited for the next owned result's cumulative and was lost
-// when the process died first (#3096). The cumulative differencing makes a
-// reading booked here and again by a later Send harmless. No run record shares
-// the entry's run id, so it names the CLI session (sessionRunID).
+// bookUnownedResults books the results proc's CLI reports that no live caller
+// consumes: turns it starts on its own (background-task notifications) and
+// turns whose caller gave up first (an interrupt, a cron deadline, a canceled
+// or orphaned passthrough slot). Without this their spend waited for the next
+// owned result's cumulative and was lost when the process died first (#3096,
+// #3322). The cumulative differencing makes a reading booked here and again by
+// a later Send harmless. No run record shares the entry's run id, so it names
+// the CLI session (sessionRunID).
 func bookUnownedResults(s *ManagedSession, proc processIface) {
 	if n, ok := proc.(unownedResultNotifier); ok {
 		n.SetOnUnownedResult(func(res clievent.SendResult) {
@@ -216,11 +226,51 @@ func (s *ManagedSession) bookPartialUsage(u clievent.ShadowUsage, runID string) 
 		e.Basis = costledger.BasisList
 	}
 	if e.Amount > 0 {
-		s.costMu.Lock()
-		storeTotalCost(&s.costSpent, loadTotalCost(&s.costSpent)+e.Amount)
-		s.costMu.Unlock()
+		s.addSpent(e.Amount, costledger.Increment{})
 	}
 	s.costAcct.ledger.Append(e)
+}
+
+// addSpent adds usd and inc to the spend of s or, once s has been replaced,
+// of the live session at the end of its successor chain. Each lock is
+// released before the next is taken, so costMu never nests.
+func (s *ManagedSession) addSpent(usd float64, inc costledger.Increment) {
+	for {
+		s.costMu.Lock()
+		next := s.successor
+		if next == nil {
+			s.addSpentLocked(usd, inc)
+			s.costMu.Unlock()
+			return
+		}
+		s.costMu.Unlock()
+		s = next
+	}
+}
+
+func (s *ManagedSession) addSpentLocked(usd float64, inc costledger.Increment) {
+	if usd != 0 {
+		storeTotalCost(&s.costSpent, loadTotalCost(&s.costSpent)+usd)
+	}
+	if inc.USD != 0 || len(inc.Models) > 0 || len(inc.Metered) > 0 {
+		s.spent = s.spent.Accumulate(inc)
+	}
+}
+
+// linkSuccessor makes fresh, which replaced old from a snapshot whose spend
+// was snap, the session old's later spend reaches, and hands it what old
+// booked after the snapshot. Link and catch-up share one costMu section, so
+// each booking on old lands on fresh exactly once. Nil-safe.
+func linkSuccessor(old, fresh *ManagedSession, snap costledger.Totals) {
+	if old == nil {
+		return
+	}
+	old.costMu.Lock()
+	now := costledger.Totals{USD: loadTotalCost(&old.costSpent), Metered: old.spent.Metered, Models: old.spent.Models}
+	late := now.Sub(snap)
+	old.successor = fresh
+	old.costMu.Unlock()
+	fresh.addSpent(late.USD, late)
 }
 
 // partialRows turns a shadow account into one ledger row per canonical model:
@@ -313,8 +363,10 @@ func (s *ManagedSession) CostTotals() costledger.Totals {
 }
 
 // copyCostBaseline carries the delta baseline and totals from old to fresh
-// when the SAME live process keeps running under a new key (rename). Maps
-// are cloned so the two sessions never share mutable state.
+// when the SAME live process keeps running under a new key (rename), and
+// links old to fresh in the same costMu section: a reading old receives
+// afterwards is fresh's to difference (accountCost). Maps are cloned so the
+// two sessions never share mutable state.
 func copyCostBaseline(fresh, old *ManagedSession) {
 	old.costMu.Lock()
 	fresh.lastCumulative = cloneCumulative(old.lastCumulative)
@@ -322,9 +374,10 @@ func copyCostBaseline(fresh, old *ManagedSession) {
 	fresh.modelsBaselineUnknown = old.modelsBaselineUnknown
 	fresh.costBaselineUnknown = old.costBaselineUnknown
 	fresh.endMark = old.endMark
-	old.costMu.Unlock()
 	storeTotalCost(&fresh.costSpent, loadTotalCost(&old.costSpent))
 	storeTotalCost(&fresh.lastCumulativeCost, loadTotalCost(&old.lastCumulativeCost))
+	old.successor, old.renamed = fresh, true
+	old.costMu.Unlock()
 }
 
 func cloneCumulative(c costledger.Cumulative) costledger.Cumulative {

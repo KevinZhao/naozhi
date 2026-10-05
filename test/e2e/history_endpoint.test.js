@@ -31,6 +31,18 @@ async function open(browser, mock) {
   return { ctx, page };
 }
 
+// openConnected also waits out the poll the socket's connect schedules 300 ms
+// later: one landing mid-test would spend a failNextHistory/staleNextHistory
+// one-shot or move a call counter. The tag is unchanged, so it fetches no history.
+async function openConnected(browser, mock) {
+  const { ctx, page } = await open(browser, mock);
+  await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+  const calls = mock.historyGetCalls;
+  await page.evaluate(() => debouncedFetchSessions());
+  expect(mock.historyGetCalls, 'the connect poll fetched the history').toBe(calls);
+  return { ctx, page };
+}
+
 test('the history popover fills from /api/sessions/history', async ({ browser }) => {
   const mock = await startMockServer({ historySessions: [OLD] });
   const { ctx, page } = await open(browser, mock);
@@ -44,8 +56,7 @@ test('the history popover fills from /api/sessions/history', async ({ browser })
 
 test('a poll refetches the history only when its tag moved', async ({ browser }) => {
   const mock = await startMockServer({ ws: true, historySessions: [OLD] });
-  const { ctx, page } = await open(browser, mock);
-  await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+  const { ctx, page } = await openConnected(browser, mock);
   const conn = mock.wsConnections[mock.wsConnections.length - 1];
   await page.evaluate(() => fetchSessions());
   const calls = mock.historyGetCalls;
@@ -66,8 +77,7 @@ test('a poll refetches the history only when its tag moved', async ({ browser })
 
 test('a failed history fetch is retried by the next poll despite the sessions validator', async ({ browser }) => {
   const mock = await startMockServer({ ws: true, sessionsETag: true, historySessions: [OLD] });
-  const { ctx, page } = await open(browser, mock);
-  await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+  const { ctx, page } = await openConnected(browser, mock);
   const tag = await page.evaluate(() => historyTag);
 
   mock.failNextHistory(1);
@@ -95,8 +105,7 @@ test('a failed history fetch is retried by the next poll despite the sessions va
 test('an older history fetch resolving last is corrected by the next poll despite the sessions validator', async ({ browser }) => {
   const MID = { ...NEW, session_id: 'hist-003', last_prompt: 'superseded list' };
   const mock = await startMockServer({ ws: true, sessionsETag: true, historySessions: [OLD] });
-  const { ctx, page } = await open(browser, mock);
-  await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+  const { ctx, page } = await openConnected(browser, mock);
 
   mock.setHistorySessions([MID, OLD]);
   const stale = mock.historyTag;

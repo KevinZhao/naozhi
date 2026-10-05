@@ -73,6 +73,15 @@ const (
 	// (correct — a cancel must not move LastRunAt) and the runs/ history append
 	// (wrong — the run did execute, sometimes for minutes). See Epic H #2546.
 	ErrClassCronInterrupted ErrorClass = "interrupted"
+	// ErrClassCronConfigDrift: at startup the surviving shim's argv no longer
+	// matched config, so it was shut down. RunState is "canceled".
+	ErrClassCronConfigDrift ErrorClass = "config_drift"
+	// ErrClassCronRouterMissing: the scheduler has no router to run the job on.
+	ErrClassCronRouterMissing ErrorClass = "router_missing"
+	// ErrClassCronPausedConcurrent and ErrClassCronDeletedConcurrent: the job
+	// was paused or deleted between dispatch and claiming its run slot.
+	ErrClassCronPausedConcurrent  ErrorClass = "paused_concurrent"
+	ErrClassCronDeletedConcurrent ErrorClass = "deleted_concurrent"
 
 	// cron sandbox placement (agentcore-cloud-sandbox RFC §6.1): distinct
 	// because they differ in replay safety — "sandbox_failed" is the CLI's
