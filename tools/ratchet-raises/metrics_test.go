@@ -67,9 +67,9 @@ func TestGoConsts_Uses(t *testing.T) {
 	t.Parallel()
 	m := metrics{}
 	_, err := goConsts(map[string]string{
-		"internal/x/a.go": "package x\nconst (\n\taBaseline = 1\n\tbBaseline = 1\n\tcBaseline = 1\n\tdBaseline = 1\n\teBaseline = 1\n\tfBaseline = 1\n\tgBaseline = 1\n\thBaseline = 1\n)\n" +
-			"var _, _ = cBaseline, 0\n" +
-			"func f() {\n\tconst localBaseline = 2\n\tif n > localBaseline {\n\t}\n\tvar bBaseline = 3\n\t_, _ = dBaseline, n\n\tx := []int{gBaseline}\n\t_ = x\n}\n",
+		"internal/x/a.go": "package x\nconst (\n\taBaseline = 1\n\tbBaseline = 1\n\tcBaseline = 1\n\tdBaseline = 1\n\teBaseline = 1\n\tfBaseline = 1\n\tgBaseline = 1\n\thBaseline = 1\n\tiBaseline = 1\n\tjBaseline = 1\n)\n" +
+			"var _, _ = cBaseline, 0\nvar _ = check(jBaseline)\n" +
+			"func f() {\n\tconst localBaseline = 2\n\tif n > localBaseline {\n\t}\n\tvar bBaseline = 3\n\t_, _ = dBaseline, n\n\t_ = check(n, iBaseline)\n\tx := []int{gBaseline}\n\t_ = x\n}\n",
 		// An external test package is the same directory.
 		"internal/x/a_test.go": "package x_test\nfunc TestA() {\n\tif x.aBaseline > 0 {\n\t}\n}\nfunc TestB() { use(hBaseline) }\n",
 		// A build constraint after the package clause is only a comment.
@@ -88,7 +88,7 @@ func TestGoConsts_Uses(t *testing.T) {
 		}
 	}
 	slices.Sort(got)
-	if want := []string{"aBaseline", "eBaseline", "gBaseline", "hBaseline", "localBaseline"}; !slices.Equal(got, want) {
+	if want := []string{"aBaseline", "eBaseline", "gBaseline", "hBaseline", "iBaseline", "jBaseline", "localBaseline"}; !slices.Equal(got, want) {
 		t.Errorf("used = %v, want %v", got, want)
 	}
 }

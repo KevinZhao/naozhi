@@ -291,6 +291,7 @@ func TestRun_GoBaselineLosesItsLastUse(t *testing.T) {
 		{name: "test deleted", head: unused, want: lost},
 		{name: "comparison commented out", head: fakeTree{constFile: src(decl + "\n// " + strings.ReplaceAll(test, "\n", "\n// "))}, want: lost},
 		{name: "blank assignment", head: fakeTree{constFile: src(decl + "\nfunc init() { _ = bareSleepBaseline }")}, want: lost},
+		{name: "call result discarded", head: fakeTree{constFile: src(decl + "\nfunc TestX(t *testing.T) { _ = below(t, bareSleepBaseline) }")}},
 		{name: "blank var", head: fakeTree{constFile: src(decl + "\nvar _ = []int{bareSleepBaseline}")}, want: lost},
 		{name: "build-tagged away", head: fakeTree{constFile: "//go:build ignore\n\n" + src(decl+"\n"+test)}, want: lost},
 		{name: "test moved to a GOOS file", head: fakeTree{constFile: src(decl), dir + "sleep_linux_test.go": src(test)}, want: lost},

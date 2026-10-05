@@ -110,22 +110,38 @@ func goConsts(files map[string]string, into metrics) ([]string, error) {
 }
 
 // goRefs calls use for each identifier in f named in names that is not
-// declaring a var or const, nor inside the right side of a blank assignment
-// (_ = x, var _ = x), which only keeps an unused constant compiling.
-// Matching is by name, not by object; and a use that never runs to compare
-// against the constant (a t.Skip before it, an early return, an always-true
-// comparison, a helper nothing calls) still counts.
+// declaring a var or const. On the right side of a blank assignment (_ = x,
+// var _ = x) only the arguments of a call count: a bare value there only
+// keeps an unused constant compiling. Matching is by name, not by object;
+// and a use that never runs to compare against the constant (a t.Skip
+// before it, an early return, an always-true comparison, a helper nothing
+// calls, a conversion like _ = int(x), a variable nothing reads) still counts.
 func goRefs(f *ast.File, names map[string]bool, use func(name string)) {
 	var visit func(ast.Node) bool
+	calls := func(n ast.Node) bool {
+		if c, ok := n.(*ast.CallExpr); ok {
+			ast.Inspect(c, visit)
+			return false
+		}
+		return true
+	}
 	visit = func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.AssignStmt:
-			return slices.ContainsFunc(n.Lhs, func(e ast.Expr) bool { return !isBlank(e) })
+			if slices.ContainsFunc(n.Lhs, func(e ast.Expr) bool { return !isBlank(e) }) {
+				return true
+			}
+			for _, v := range n.Rhs {
+				ast.Inspect(v, calls)
+			}
+			return false
 		case *ast.ValueSpec:
+			walk := calls
 			if slices.ContainsFunc(n.Names, func(id *ast.Ident) bool { return !isBlank(id) }) {
-				for _, v := range n.Values {
-					ast.Inspect(v, visit)
-				}
+				walk = visit
+			}
+			for _, v := range n.Values {
+				ast.Inspect(v, walk)
 			}
 			return false
 		case *ast.Ident:
