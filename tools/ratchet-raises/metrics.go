@@ -46,8 +46,8 @@ var goBaselineName = regexp.MustCompile(`[Bb]aseline`)
 // package is not a change, and losing one (renamed, made a var, moved to
 // another package, its file deleted) is a raise to -1. A constant some code
 // in its directory uses (goRefs) also gets go-ref:<dir>#<name>, a raise to -1
-// once its last use goes, and go-skip:<dir> counts the skips (skipCalls) in
-// the files holding those uses. It returns one problem per constant whose
+// once its last use goes, and go-skip:<dir> sums the skips (skipCalls) in the
+// files declaring or using one. It returns one problem per constant whose
 // value is not a plain integer literal (left unread) and per name repeated
 // within a directory (read as the largest).
 func goConsts(files map[string]string, into metrics) ([]string, error) {
@@ -55,6 +55,7 @@ func goConsts(files map[string]string, into metrics) ([]string, error) {
 	fset := token.NewFileSet()
 	parsed := map[string]*ast.File{}
 	read := map[string]map[string]bool{} // dir → constants read into go:
+	declares := map[string]bool{}        // files declaring a baseline constant
 	for _, p := range slices.Sorted(maps.Keys(files)) {
 		if skipGoPath(p) {
 			continue
@@ -75,6 +76,7 @@ func goConsts(files map[string]string, into metrics) ([]string, error) {
 					if !goBaselineName.MatchString(id.Name) {
 						continue
 					}
+					declares[p] = true
 					at := fset.Position(id.Pos())
 					v, ok := intLiteral(vs, i)
 					dir := path.Dir(p)
@@ -98,7 +100,7 @@ func goConsts(files map[string]string, into metrics) ([]string, error) {
 		})
 	}
 	uses := map[string]bool{}
-	skips := map[string]int64{} // dir → skips in the files that use a baseline
+	skips := map[string]int64{} // dir → skips in the files that declare or use a baseline
 	for p, f := range parsed {
 		dir := path.Dir(p)
 		if read[dir] == nil || buildConstrained(p, f) {
@@ -109,7 +111,7 @@ func goConsts(files map[string]string, into metrics) ([]string, error) {
 			uses[dir+"#"+name] = true
 			used = true
 		})
-		if used {
+		if used || declares[p] {
 			skips[dir] += skipCalls(f)
 		}
 	}
@@ -123,8 +125,11 @@ func goConsts(files map[string]string, into metrics) ([]string, error) {
 }
 
 // skipCalls counts the Skip, Skipf and SkipNow selectors in f, called or
-// taken as a method value, on any receiver. A skip through a helper declared
-// in another file is not counted.
+// taken as a method value, on any receiver. Not counted: a skip in a file
+// that neither declares nor uses a baseline, even in a test calling a
+// comparison helper declared elsewhere; a skip through a helper declared in
+// another file; one in a build-constrained file. The sum is per directory,
+// so a skip removed from one file offsets one added in another.
 func skipCalls(f *ast.File) int64 {
 	var n int64
 	ast.Inspect(f, func(node ast.Node) bool {

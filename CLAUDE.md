@@ -26,7 +26,7 @@ integer literal; renaming or deleting one, or moving it to another package,
 is a raise to -1 that needs a ledger line too. So is removing the last code
 in its directory that uses one (deleting, commenting out or build-tagging
 away the comparison) while keeping the constant, or adding a `t.Skip` to a
-file that holds such a use.
+file that declares or uses one.
 
 `config.yaml` is gitignored (environment-specific). Use `config.example.yaml`
 as the template: `cp config.example.yaml config.yaml` then fill in real values.

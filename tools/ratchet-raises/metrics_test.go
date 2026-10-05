@@ -57,7 +57,7 @@ func TestGoConsts_SkipsTestdataAndVendor(t *testing.T) {
 	if err != nil || len(problems) != 0 {
 		t.Fatalf("problems = %q, err = %v", problems, err)
 	}
-	if got, want := slices.Sorted(maps.Keys(m)), []string{"go:tools/x#cBaseline"}; !slices.Equal(got, want) {
+	if got, want := slices.Sorted(maps.Keys(m)), []string{"go-skip:tools/x", "go:tools/x#cBaseline"}; !slices.Equal(got, want) {
 		t.Errorf("keys = %v, want %v", got, want)
 	}
 }

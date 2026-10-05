@@ -332,10 +332,10 @@ func TestRun_GoBaselineLosesItsLastUse(t *testing.T) {
 	}
 }
 
-// A skip in a file that compares against a baseline can keep the comparison
-// from ever running, so a new one there needs a ledger line; one elsewhere
-// in the package does not.
-func TestRun_SkipInAFileThatUsesABaseline(t *testing.T) {
+// A skip in a file that declares or compares against a baseline can keep the
+// comparison from ever running, so a new one there needs a ledger line; one
+// elsewhere in the package does not.
+func TestRun_SkipInAFileWithABaseline(t *testing.T) {
 	t.Parallel()
 	const (
 		dir       = "internal/testhelper/"
@@ -368,7 +368,13 @@ func TestRun_SkipInAFileThatUsesABaseline(t *testing.T) {
 		{name: "skip in a file with no baseline use", head: fakeTree{constFile: src(decl, test), dir + "other_test.go": src(skipped)}},
 		{name: "SkipDir is not a skip", head: fakeTree{constFile: src(decl, test, "var errSkip = filepath.SkipDir")}},
 		{name: "skip removed", base: fakeTree{constFile: src(decl, test, skipped)}, head: used},
-		{name: "first use in a file that already skips", base: fakeTree{constFile: src(decl, skipped)}, head: fakeTree{constFile: src(decl, test, skipped)}},
+		{name: "skip in the declaring file, comparison moved out", head: fakeTree{
+			constFile:             src(decl, "func TestX(t *testing.T) {\n\tt.Skip(\"flaky\")\n\tcheck(t)\n}"),
+			dir + "check_test.go": src(strings.Replace(test, "TestX", "check", 1)),
+		}, want: skip},
+		{name: "skip in a declaring file with no use", base: fakeTree{constFile: src(decl), dir + "other_test.go": src(test)},
+			head: fakeTree{constFile: src(decl, skipped), dir + "other_test.go": src(test)}, want: skip},
+		{name: "new baseline in a file that already skips", base: fakeTree{constFile: src(skipped)}, head: fakeTree{constFile: src(decl, test, skipped)}},
 		{name: "ledger line clears it", head: fakeTree{constFile: src(decl, test, skipped), ledgerPath: `{"gate":"` + gate + `","from":0,"to":1,"issue":1,"reason":"r"}` + "\n"},
 			want: skip, cleared: true},
 	} {
