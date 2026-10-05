@@ -13,6 +13,9 @@ import (
 // belong to neither, so keeping them at the top of the run loop's file put the
 // least session-specific code first.
 
+// recordBufPool reuses the bytes.Buffer schema.MarshalRecordInto writes
+// into so handleBatch avoids json's per-call encodeState alloc. Reset
+// before Put; capped by recordBufMaxCap on return.
 var recordBufPool = sync.Pool{
 	New: func() any {
 		// 4 KiB covers typical EventEntry JSON.
@@ -138,13 +141,3 @@ func releaseLogBuf(bw *bufio.Writer) {
 	bw.Reset(io.Discard)
 	logBufPool.Put(bw)
 }
-
-// Observer receives real-time counter increments from the Persister;
-// implementations typically forward to expvar / Prometheus. Methods are
-// called from the writer goroutine or the PersistSink closure and MUST be
-// non-blocking and thread-safe.
-//
-// The only production implementation is eventLogMetricsObserver in
-// internal/session/eventlog_metrics.go, wired via Options.Observer. A new
-// persister site must pass the same instance or metrics silently fall
-// through to noopObserver; this cannot be enforced at compile time (#1171).

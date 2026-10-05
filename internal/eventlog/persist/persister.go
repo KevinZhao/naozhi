@@ -11,9 +11,15 @@ import (
 	"time"
 )
 
-// recordBufPool reuses the bytes.Buffer schema.MarshalRecordInto writes
-// into so handleBatch avoids json's per-call encodeState alloc. Reset
-// before Put; capped by recordBufMaxCap on return.
+// Observer receives real-time counter increments from the Persister;
+// implementations typically forward to expvar / Prometheus. Methods are
+// called from the writer goroutine or the PersistSink closure and MUST be
+// non-blocking and thread-safe.
+//
+// The only production implementation is eventLogMetricsObserver in
+// internal/session/eventlog_metrics.go, wired via Options.Observer. A new
+// persister site must pass the same instance or metrics silently fall
+// through to noopObserver; this cannot be enforced at compile time (#1171).
 type Observer interface {
 	// OnWrite is called once per EventEntry that reaches disk.
 	OnWrite(n int)
@@ -291,8 +297,9 @@ func (p *Persister) SinkFor(key string) PersistSink {
 	return (&sessionSink{p: p, key: key, stem: KeyHash(key)}).accept
 }
 
-// sessionSink binds (persister, key, stem) for the PersistSink method
-// value returned by SinkFor.
+// DropKey closes any open writer for key, then removes its log + idx
+// files. Safe from any goroutine; waits for the writer goroutine to
+// acknowledge the drop.
 func (p *Persister) DropKey(ctx context.Context, key string) error {
 	if p.closed.Load() {
 		return ErrPersisterClosed
@@ -421,5 +428,3 @@ func (p *Persister) WriterAlive() bool {
 	drainedRecently := lastAgo > 0 && lastAgo < 5*time.Second
 	return drainedRecently && notFull
 }
-
-// Errors callers can match with errors.Is.
