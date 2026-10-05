@@ -115,18 +115,18 @@ func (p *Process) applyReconnectVerdict(midTurn bool, finished *clievent.Event, 
 //
 // It must stay inside that CAS branch, because that is where the latch cannot
 // steal a result a live Send owns. Two different mechanisms guarantee that, one
-// per backend class, and both are load-bearing:
+// per send path, and both are load-bearing:
 //
-//   - passthrough backends (Caps.Replay, i.e. claude): the slot fan-out above the
+//   - SendPassthrough (claude's interactive turns): the slot fan-out above the
 //     CAS returns as soon as onTurnResult() reports an owner, so a claimed result
 //     never reaches here. SendPassthrough has no busy gate — this check is all
 //     that separates them.
-//   - legacy backends (acp, codex): Send refuses to start while State is Running
-//     (process_send.go, ErrProcessBusy), and a mid-turn reconnect stays Running
-//     until this very result. A Send that starts once it ends owns the next turn:
-//     the CAS has already disarmed the branch, so its result cannot land here.
-//     This result still reaches eventCh after Ready; Send drops it as received
-//     before its claim.
+//   - legacy Send (acp, codex, and claude's cron and non-passthrough turns): it
+//     refuses to start while State is Running (ErrProcessBusy), and a mid-turn
+//     reconnect stays Running until this very result. A Send that starts once it
+//     ends owns the next turn: the CAS has already disarmed the branch, so its
+//     result cannot land here. This result still reaches eventCh after Ready;
+//     Send drops it as received before its claim.
 //
 // Moving this call up into deliverEvent would defeat the first; letting a
 // mid-turn reconnect leave State anything but Running would defeat the second.
