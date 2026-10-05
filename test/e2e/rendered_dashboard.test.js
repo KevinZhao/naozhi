@@ -40,6 +40,8 @@ function renderedDashboard() {
 const ENTRY_MODULES = [...fs.readFileSync(path.join(REPO, 'internal', 'server', 'static', 'dashboard.html'), 'utf8')
   .matchAll(/<script type="module" src="(\/static\/[\w.]+\.js)"><\/script>/g)].map((m) => m[1]);
 
+const CONSOLE_ERROR_RE = /Content.Security.Policy|Refused to|import ?map|modulepreload|module specifier|does not resolve|resolve module|dynamically imported module|SyntaxError/i;
+
 test.describe('dashboard rendered by the Go server', () => {
   /** @type {{html: string, csp: string} | null} */
   let rendered;
@@ -66,11 +68,14 @@ test.describe('dashboard rendered by the Go server', () => {
     });
     const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
-    // The mock leaves some API routes unstubbed; their 404s are not this
-    // spec's concern, a /static one is (checked on the responses below).
-    // require-sri-for is not a directive browsers implement; they warn on it.
+    // Console errors are kept only when they name what this page can break:
+    // the policy or module loading. Engines log other noise at error level
+    // (unstubbed API 404s, viewport keys WebKit does not know); a /static
+    // failure is caught on the responses below. require-sri-for is not a
+    // directive browsers implement; they warn on it.
     page.on('console', (m) => {
-      if (m.type() === 'error' && !/Failed to load resource|require-sri-for/.test(m.text())) errors.push(m.text());
+      const text = m.text();
+      if (m.type() === 'error' && CONSOLE_ERROR_RE.test(text) && !/require-sri-for/.test(text)) errors.push(text);
     });
     /** @type {URL[]} */
     const statics = [];
