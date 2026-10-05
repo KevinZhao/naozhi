@@ -113,14 +113,19 @@ func (f *FakeShim) Attached(t testing.TB) {
 	}
 }
 
-// Emit sends a live stdout line, numbered right after the backlog, on the
-// connection Attached waited for.
+// Emit sends a live stdout line, numbered after the backlog and any earlier
+// Emit, on the connection Attached waited for.
 func (f *FakeShim) Emit(t testing.TB, line string) {
 	t.Helper()
+	if f.conn == nil {
+		t.Fatal("FakeShim.Emit called before Attached")
+		return
+	}
 	data, err := (&shim.ServerMsg{Type: "stdout", Seq: f.next, Line: line}).MarshalLine()
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.next++
 	if _, err := f.conn.Write(data); err != nil {
 		t.Fatal(err)
 	}

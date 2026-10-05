@@ -1,11 +1,16 @@
 package session
 
 import (
+	"bufio"
 	"context"
+	"fmt"
+	"net"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/shim"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
@@ -214,5 +219,51 @@ func TestTurnWatermark_NoneWhilePassthroughOwesAResult(t *testing.T) {
 	}
 	if w, ok := sess.TurnWatermark(); ok {
 		t.Errorf("TurnWatermark with a passthrough result owed = (%+v, true), want none", w)
+	}
+}
+
+// fatalRecorder stands in for the testing.TB a FakeShim helper fails through.
+type fatalRecorder struct {
+	testing.TB
+	msg string
+}
+
+func (f *fatalRecorder) Helper() {}
+
+func (f *fatalRecorder) Fatal(args ...any) { f.msg = fmt.Sprint(args...) }
+
+// TestFakeShim_Emit: Emit before Attached fails the test with a message rather
+// than a nil-conn panic, and each Emit takes the next seq so a client that
+// drops seqs it has seen does not discard a second live line.
+func TestFakeShim_Emit(t *testing.T) {
+	rec := &fatalRecorder{}
+	(&FakeShim{next: 3}).Emit(rec, "early")
+	if !strings.Contains(rec.msg, "before Attached") {
+		t.Fatalf("Emit before Attached: Fatal message = %q, want one naming Attached", rec.msg)
+	}
+
+	client, server := net.Pipe()
+	t.Cleanup(func() { client.Close(); server.Close() })
+	f := &FakeShim{next: 3, conn: server}
+	sent := &fatalRecorder{}
+	done := make(chan struct{})
+	go func() { defer close(done); f.Emit(sent, "a"); f.Emit(sent, "b") }()
+	rd := bufio.NewReader(client)
+	for _, want := range []int64{3, 4} {
+		line, err := rd.ReadBytes('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg, err := shim.ParseServerMsg(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if msg.Seq != want {
+			t.Fatalf("Emit seq = %d, want %d", msg.Seq, want)
+		}
+	}
+	<-done
+	if sent.msg != "" {
+		t.Fatalf("Emit after Attached failed: %s", sent.msg)
 	}
 }
