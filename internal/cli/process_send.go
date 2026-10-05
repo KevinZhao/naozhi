@@ -156,6 +156,10 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 			// Don't Kill the CLI: during graceful shutdown router.Shutdown calls
 			// Detach() to keep the shim alive for zero-downtime restart. readLoop
 			// detects the disconnect and closes eventCh, hitting the !ok branch.
+			// The turn's result is nobody's now: readLoop books it as unclaimed.
+			p.turn.mu.Lock()
+			p.turn.sendAbandoned = true
+			p.turn.mu.Unlock()
 			return nil, ctx.Err()
 		case ev, ok := <-p.eventCh:
 			if !ok {
@@ -168,6 +172,7 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 			}
 			if !ev.RecvAt.After(staleBefore) {
 				slog.Debug("send: dropping event received before the turn began", "type", ev.Type)
+				p.bookDroppedResult(ev)
 				continue
 			}
 

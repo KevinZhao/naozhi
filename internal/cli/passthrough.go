@@ -488,26 +488,28 @@ func (p *Process) onTurnResult() []*sendSlot {
 	return owners
 }
 
-// endUnownedTurn ends a turn the CLI started on its own (system/init with no
-// Send behind it, e.g. a background task-notification) once its result
-// arrives unclaimed. Without it nothing moves State back to Ready: no Send
-// defer owns the turn and onTurnResult only ends turns that consumed slots.
-// A queued passthrough slot keeps it Running — its own turn follows. Either
-// way the result goes to onUnownedResult so the session books the turn's cost
-// now: no Send's finishRun ever sees it, and the next owned result's
-// cumulative difference is lost if the process dies first (#3096).
-func (p *Process) endUnownedTurn(ev clievent.Event) {
+// settleUnclaimedResult hands a result no Send consumes to onUnownedResult so
+// the session books its cost now: no Send's finishRun ever sees it, and the
+// next owned result's cumulative difference is lost if the process dies first
+// (#3096, #3322). noLiveSend is turnState.noLiveSend read before the result
+// was queued. A turn the CLI started on its own (system/init with no Send
+// behind it) also ends here, since nothing else moves it back to Ready; a
+// queued passthrough slot keeps it Running for that slot's own turn. A result
+// a live Send owns is left alone.
+func (p *Process) settleUnclaimedResult(ev clievent.Event, noLiveSend bool) {
 	p.slots.mu.Lock()
 	pending := len(p.slots.pending)
 	p.slots.mu.Unlock()
 	p.turn.mu.Lock()
-	if !p.turn.unowned {
+	ended := false
+	switch {
+	case p.turn.unowned:
+		if pending == 0 {
+			_, ended = p.turn.transitionLocked(evTurnEnded)
+		}
+	case !noLiveSend:
 		p.turn.mu.Unlock()
 		return
-	}
-	ended := false
-	if pending == 0 {
-		_, ended = p.turn.transitionLocked(evTurnEnded)
 	}
 	onDone, onResult := p.turn.onTurnDone, p.turn.onUnownedResult
 	p.turn.mu.Unlock()

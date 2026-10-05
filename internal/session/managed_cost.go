@@ -163,10 +163,11 @@ func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, 
 	return inc.USD
 }
 
-// bookUnownedResults books the cost of the turns proc's CLI starts on its own
-// (background-task notifications): their results reach no Send, so without
-// this their spend waited for the next owned result's cumulative and was lost
-// when the process died first (#3096). The cumulative differencing makes a
+// bookUnownedResults books the results proc's CLI reports that no live caller
+// consumes: turns it starts on its own (background-task notifications) and
+// turns whose Send gave up first (an interrupt, a cron deadline). Without this
+// their spend waited for the next owned result's cumulative and was lost when
+// the process died first (#3096, #3322). The cumulative differencing makes a
 // reading booked here and again by a later Send harmless. No run record shares
 // the entry's run id, so it names the CLI session (sessionRunID).
 func bookUnownedResults(s *ManagedSession, proc processIface) {
