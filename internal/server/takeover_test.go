@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // TestVerifyProcOwnedByEuid_Self confirms that the helper accepts a process
@@ -225,4 +227,61 @@ func TestDashboardTakeover_InvalidAgentModelLeavesCLIAlive(t *testing.T) {
 		t.Fatal("the external CLI was killed for a takeover the router refuses")
 	case <-time.After(300 * time.Millisecond):
 	}
+}
+
+// TestTryAutoTakeover_HoldsTheKeyWhileTheCLIExits pins #3417 for IM: the key
+// is reserved before the SIGTERM, so while the terminal CLI exits another
+// takeover of it is refused, and the key is free again once the takeover ends.
+func TestTryAutoTakeover_HoldsTheKeyWhileTheCLIExits(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("discovery is POSIX-only")
+	}
+	const key = "test:direct:u1:general"
+	termed := filepath.Join(t.TempDir(), "termed")
+	// Survives SIGTERM, recording it, so the exit wait lasts until ctx ends.
+	cmd := exec.Command("sh", "-c", `trap 'echo > "$0"' TERM; while :; do sleep 0.05; done`, termed)
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot start child: %v", err)
+	}
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }()
+	t.Cleanup(func() { _ = cmd.Process.Kill(); <-exited })
+
+	claudeDir, ws := t.TempDir(), t.TempDir()
+	live, _ := json.Marshal(map[string]any{
+		"pid": cmd.Process.Pid, "sessionId": "0b8f3c2e-5d7a-4e1b-9c6f-2a4d8e1f3b5c",
+		"cwd": ws, "startedAt": time.Now().UnixMilli(), "entrypoint": "cli",
+	})
+	if err := os.MkdirAll(filepath.Join(claudeDir, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "sessions", "1.json"), live, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := cli.NewWrapperLazy("/nonexistent/claude", &cli.ClaudeProtocol{}, "claude")
+	router := session.NewRouter(session.RouterConfig{Wrapper: w, MaxProcs: 1})
+	t.Cleanup(router.Shutdown)
+	s := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
+	s.claudeDir = claudeDir
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() { done <- s.tryAutoTakeover(ctx, key, key, session.AgentOpts{Workspace: ws}) }()
+	testhelper.Eventually(t, func() bool {
+		_, err := os.Stat(termed)
+		return err == nil
+	}, 5*time.Second, "the terminal CLI never got its SIGTERM")
+	if _, err := router.ReserveTakeover(key, session.AgentOpts{}); !errors.Is(err, session.ErrSpawnInFlight) {
+		t.Errorf("ReserveTakeover during the exit wait = %v, want ErrSpawnInFlight", err)
+	}
+	cancel()
+	if <-done {
+		t.Fatal("the takeover reported success with a CLI that cannot spawn")
+	}
+	lease, err := router.ReserveTakeover(key, session.AgentOpts{})
+	if err != nil {
+		t.Fatalf("ReserveTakeover after the takeover ended: %v", err)
+	}
+	lease.Release()
 }

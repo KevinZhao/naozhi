@@ -79,8 +79,9 @@
   - 显式选某个 backend（包括 router 默认那个）仍原样发出并优先
   - 不做迁移：以前保存时被钉住的项目和 cron 任务保持原值（无法和有意的选择区分）。要恢复跟随，在项目设置或 cron 编辑里把 backend 选回「自动」并保存
 - `spawnSession` panic recover 错误消息不再双前缀 `"spawn process: spawn process:"`（RNEW-009）
-- IM 首轮自动接管不再在 naozhi 会拒绝接管时（max_procs 已满 / 该 key 正在 spawn / 正在关停 / planner 的 exempt 配额已满 / agent 的 model 或 backend 非法）先 SIGTERM 掉终端里的 Claude CLI；接管前改为先跑 `Router.TakeoverPrecheck`（#3395）
+- IM 首轮自动接管不再在 naozhi 会拒绝接管时（max_procs 已满 / 该 key 正在 spawn / 正在关停 / planner 的 exempt 配额已满 / agent 的 model 或 backend 非法）先 SIGTERM 掉终端里的 Claude CLI；接管前改为先跑 router 的接管检查（#3395）
 - 从未 spawn 过的源会话（历史面板 resume 占位 / backend 为空的旧持久化条目）上打开的 scratch 现在跑在源会话 resume 时会用的 CLI（router 默认 backend）上，不再落到 access profile 的 `default_backend`；`/api/scratch/open` 响应里的 `backend` 也改为报告实际解析出的 backend（#3420）
+- 接管外部 CLI 时，naozhi 在 SIGTERM 之前就向 router 预留该 key（`Router.ReserveTakeover`：in-flight 标记 + 一个 pending 名额），一直持有到新进程 spawn。此前预检只读状态，旧 CLI 退出的最长约 5s 里 key 上没有任何标记：同一 cwd 的第二个外部 CLI 接管会通过预检并被杀掉，max_procs 只剩一个名额时对两个不同 key 的接管也都能通过、其中一个杀掉 CLI 后才报满。现在第二次接管在杀进程前就返回 409「takeover already in progress」/ 503（dashboard、IM 自动接管同此；#3417）
 
 ### Documentation
 

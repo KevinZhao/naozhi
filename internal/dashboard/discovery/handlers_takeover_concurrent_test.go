@@ -1,0 +1,174 @@
+package discovery
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os/exec"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/session"
+)
+
+// gatedRouter adapts a real *session.Router the way the server's adapter
+// does, except that a lease's Takeover reports on arrived and then waits for
+// gate, holding open the window in which the CLI is still exiting.
+type gatedRouter struct {
+	r       *session.Router
+	arrived chan struct{}
+	gate    chan struct{}
+}
+
+func (g gatedRouter) ReserveTakeover(key string, opts session.AgentOpts) (TakeoverLease, error) {
+	lease, err := g.r.ReserveTakeover(key, opts)
+	if err != nil {
+		return nil, err
+	}
+	return gatedLease{g, lease}, nil
+}
+
+type gatedLease struct {
+	g     gatedRouter
+	lease *session.TakeoverLease
+}
+
+func (l gatedLease) Takeover(ctx context.Context, sessionID, cwd string) error {
+	l.g.arrived <- struct{}{}
+	<-l.g.gate
+	_, err := l.g.r.Takeover(ctx, l.lease, sessionID, cwd)
+	return err
+}
+
+func (l gatedLease) Release() { l.lease.Release() }
+
+// startSleeper starts a child that only a signal ends; the returned func
+// kills and reaps it and reports the signal it died of, the first one when
+// it was dead already.
+func startSleeper(t *testing.T) (*exec.Cmd, func() syscall.Signal) {
+	t.Helper()
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot start child: %v", err)
+	}
+	reaped := make(chan syscall.Signal, 1)
+	go func() {
+		st, _ := cmd.Process.Wait()
+		ws, _ := st.Sys().(syscall.WaitStatus)
+		reaped <- ws.Signal()
+	}()
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	return cmd, func() syscall.Signal {
+		_ = cmd.Process.Kill()
+		select {
+		case sig := <-reaped:
+			return sig
+		case <-time.After(10 * time.Second):
+			t.Fatal("child not reaped")
+			return 0
+		}
+	}
+}
+
+func postDiscoveredTakeover(h *Handlers, pid int, sessionID, cwd string) *httptest.ResponseRecorder {
+	body, _ := json.Marshal(map[string]any{"pid": pid, "session_id": sessionID, "cwd": cwd, "proc_start_time": 100})
+	rec := httptest.NewRecorder()
+	h.HandleTakeover(rec, httptest.NewRequest(http.MethodPost, "/api/discovered/takeover", bytes.NewReader(body)))
+	return rec
+}
+
+// TestHandleTakeover_SecondTakeoverOfKeyKeepsItsCLI pins #3417: two external
+// CLIs in one cwd map to one key, and the first takeover holds that key from
+// before its SIGTERM until its spawn, so the second, arriving after the first
+// CLI has exited but before the spawn, is refused and its CLI never signalled.
+func TestHandleTakeover_SecondTakeoverOfKeyKeepsItsCLI(t *testing.T) {
+	const sid1, sid2 = "aaaaaaaa-bbbb-cccc-dddd-000000000001", "aaaaaaaa-bbbb-cccc-dddd-000000000002"
+	cmd1, reap1 := startSleeper(t)
+	cmd2, reap2 := startSleeper(t)
+	cwd := t.TempDir()
+	key := session.TakeoverKey(session.SanitizeCWDKey(cwd))
+
+	router := session.NewRouter(session.RouterConfig{MaxProcs: 3})
+	arrived, gate := make(chan struct{}, 1), make(chan struct{})
+	h := New(Deps{
+		Cache: &fakeCache{snapshot: []discovery.DiscoveredSession{
+			{PID: cmd1.Process.Pid, SessionID: sid1, CWD: cwd, ProcStartTime: 100},
+			{PID: cmd2.Process.Pid, SessionID: sid2, CWD: cwd, ProcStartTime: 100},
+		}},
+		NodeAccess:    fakeNodeAccess{},
+		ClaudeDir:     t.TempDir(),
+		Router:        gatedRouter{router, arrived, gate},
+		ProcStartTime: func(int) (uint64, error) { return 100, nil },
+		AppCtx:        context.Background(),
+	})
+
+	if rec := postDiscoveredTakeover(h, cmd1.Process.Pid, sid1, cwd); rec.Code != http.StatusAccepted {
+		t.Fatalf("first takeover = %d %q, want 202", rec.Code, rec.Body.String())
+	}
+	select {
+	case <-arrived:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first takeover never got past its exit wait")
+	}
+	rec := postDiscoveredTakeover(h, cmd2.Process.Pid, sid2, cwd)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "takeover already in progress") {
+		t.Fatalf("second takeover of the key = %d %q, want 409 takeover already in progress", rec.Code, rec.Body.String())
+	}
+	if sig := reap2(); sig != syscall.SIGKILL {
+		t.Fatalf("the refused takeover's CLI died of %v, not the test's SIGKILL", sig)
+	}
+
+	close(gate)
+	h.Wait()
+	if sig := reap1(); sig != syscall.SIGTERM {
+		t.Errorf("the accepted takeover's CLI died of %v, want its SIGTERM", sig)
+	}
+	// The first takeover failed to spawn (no CLI here) and gave the key back.
+	lease, err := router.ReserveTakeover(key, session.AgentOpts{})
+	if err != nil {
+		t.Fatalf("ReserveTakeover after the takeover finished: %v", err)
+	}
+	lease.Release()
+}
+
+// TestHandleTakeover_PidReuseReleasesTheKey: a takeover refused at the SIGTERM
+// gives its reservation back, or the key would stay refused until restart.
+func TestHandleTakeover_PidReuseReleasesTheKey(t *testing.T) {
+	const sid = "aaaaaaaa-bbbb-cccc-dddd-000000000003"
+	cmd, reap := startSleeper(t)
+	cwd := t.TempDir()
+	router := session.NewRouter(session.RouterConfig{MaxProcs: 3})
+	h := New(Deps{
+		Cache: &fakeCache{snapshot: []discovery.DiscoveredSession{
+			{PID: cmd.Process.Pid, SessionID: sid, CWD: cwd, ProcStartTime: 100},
+		}},
+		NodeAccess: fakeNodeAccess{},
+		ClaudeDir:  t.TempDir(),
+		Router:     gatedRouter{r: router},
+		// Not the request's start time: the PID was reused.
+		ProcStartTime: func(int) (uint64, error) { return 999, nil },
+		AppCtx:        context.Background(),
+	})
+
+	if rec := postDiscoveredTakeover(h, cmd.Process.Pid, sid, cwd); rec.Code != http.StatusConflict {
+		t.Fatalf("takeover of a reused PID = %d %q, want 409", rec.Code, rec.Body.String())
+	}
+	h.Wait()
+	lease, err := router.ReserveTakeover(session.TakeoverKey(session.SanitizeCWDKey(cwd)), session.AgentOpts{})
+	if errors.Is(err, session.ErrSpawnInFlight) {
+		t.Fatal("the refused takeover kept its reservation of the key")
+	}
+	if err != nil {
+		t.Fatalf("ReserveTakeover: %v", err)
+	}
+	lease.Release()
+	if sig := reap(); sig != syscall.SIGKILL {
+		t.Errorf("the reused PID's process died of %v, not the test's SIGKILL", sig)
+	}
+}

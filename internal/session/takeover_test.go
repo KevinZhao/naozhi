@@ -54,7 +54,7 @@ func TestTakeover_NewKey(t *testing.T) {
 	key := "feishu:direct:user1:general"
 	workspace := "/tmp/takeover-ws"
 
-	_, err := r.Takeover(context.Background(), key, "sess-abc", workspace, AgentOpts{})
+	_, err := reserveAndTakeover(context.Background(), r, key, "sess-abc", workspace, AgentOpts{})
 	if err == nil {
 		t.Fatal("expected spawn error (nonexistent CLI), got nil")
 	}
@@ -90,7 +90,7 @@ func TestTakeover_ReplacesDeadSession(t *testing.T) {
 	setIDT(r, "old-sess", key)
 	genBefore := r.ss.Gen()
 
-	_, err := r.Takeover(context.Background(), key, "new-sess", "/tmp/ws", AgentOpts{})
+	_, err := reserveAndTakeover(context.Background(), r, key, "new-sess", "/tmp/ws", AgentOpts{})
 	if err == nil {
 		t.Fatal("expected spawn error after dead-session unregister")
 	}
@@ -121,7 +121,7 @@ func TestTakeover_ReplacesAliveSession(t *testing.T) {
 	old.setSessionID("old-alive-sess")
 	setIDT(r, "old-alive-sess", key)
 
-	_, err := r.Takeover(context.Background(), key, "new-sess", "/tmp/ws", AgentOpts{})
+	_, err := reserveAndTakeover(context.Background(), r, key, "new-sess", "/tmp/ws", AgentOpts{})
 	if err == nil {
 		t.Fatal("expected spawn error after alive-session replacement")
 	}
@@ -181,7 +181,7 @@ func TestTakeover_ConcurrentCreationAborts(t *testing.T) {
 	old := injectSession(r, key, hook)
 	old.setSessionID("old-sess")
 
-	_, err := r.Takeover(context.Background(), key, "new-sess", "/tmp/ws", AgentOpts{})
+	_, err := reserveAndTakeover(context.Background(), r, key, "new-sess", "/tmp/ws", AgentOpts{})
 	if err == nil {
 		t.Fatal("expected concurrent-creation abort error, got nil")
 	}
@@ -244,7 +244,7 @@ func TestTakeover_ParksConcurrentGetOrCreate(t *testing.T) {
 	})
 	injectSession(r, key, hook).setSessionID("old-sess")
 
-	took, err := r.Takeover(context.Background(), key, "new-sess", t.TempDir(), AgentOpts{})
+	took, err := reserveAndTakeover(context.Background(), r, key, "new-sess", t.TempDir(), AgentOpts{})
 	if err != nil {
 		t.Fatalf("Takeover: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestTakeover_RefusesBeforeClosingDuringInFlightSpawn(t *testing.T) {
 	proc := newIdleProc()
 	injectSession(r, key, proc)
 	r.ss.Update(func(tx sessTx) { tx.Ext().spawns.BeginSpawn(key) })
-	if _, err := r.Takeover(context.Background(), key, "new-sess", t.TempDir(), AgentOpts{}); !errors.Is(err, ErrSpawnInFlight) {
+	if _, err := reserveAndTakeover(context.Background(), r, key, "new-sess", t.TempDir(), AgentOpts{}); !errors.Is(err, ErrSpawnInFlight) {
 		t.Errorf("Takeover = %v, want ErrSpawnInFlight", err)
 	}
 	if !proc.Alive() {
@@ -288,7 +288,7 @@ func TestTakeover_EmptyWorkspaceSkipsOverride(t *testing.T) {
 		t.Fatalf("test precondition: chatKeyFor(%q) should equal %q", key, key)
 	}
 
-	_, err := r.Takeover(context.Background(), key, "sess-x", "/tmp/ws", AgentOpts{})
+	_, err := reserveAndTakeover(context.Background(), r, key, "sess-x", "/tmp/ws", AgentOpts{})
 	if err == nil {
 		t.Fatal("expected spawn error, got nil")
 	}
@@ -313,7 +313,7 @@ func TestTakeover_WorkspaceOverrideIdempotent(t *testing.T) {
 	stateOf(r).workspaces.Seed(map[string]string{chatKey: "/tmp/existing"})
 
 	// Same workspace: guard should see prev == workspace and skip dirty flip.
-	_, err := r.Takeover(context.Background(), key, "sess-y", "/tmp/existing", AgentOpts{})
+	_, err := reserveAndTakeover(context.Background(), r, key, "sess-y", "/tmp/existing", AgentOpts{})
 	if err == nil {
 		t.Fatal("expected spawn error")
 	}
@@ -323,7 +323,7 @@ func TestTakeover_WorkspaceOverrideIdempotent(t *testing.T) {
 
 	// Different workspace: must flip dirty.
 	stateOf(r).workspaces.MarkSavedIfUnchanged(stateOf(r).workspaces.Gen())
-	_, err = r.Takeover(context.Background(), key, "sess-y", "/tmp/changed", AgentOpts{})
+	_, err = reserveAndTakeover(context.Background(), r, key, "sess-y", "/tmp/changed", AgentOpts{})
 	if err == nil {
 		t.Fatal("expected spawn error")
 	}
@@ -374,7 +374,7 @@ func TestTakeover_RetriesARejectedResumeFresh(t *testing.T) {
 		r.hist.loader = loader
 		var spawns []cli.SpawnOptions
 		r.spawn.hook = rejectingResumes(&spawns, func() (processIface, error) { return newIdleProc(), nil })
-		s, err := r.Takeover(context.Background(), takeoverKey, sfSID, sfWS, AgentOpts{})
+		s, err := reserveAndTakeover(context.Background(), r, takeoverKey, sfSID, sfWS, AgentOpts{})
 		if err != nil || !slices.Equal(resumeIDs(spawns), []string{sfSID, ""}) {
 			t.Fatalf("Takeover err = %v, spawn resumes %q; want one rejected resume then a fresh spawn", err, resumeIDs(spawns))
 		}
@@ -393,7 +393,7 @@ func TestTakeover_RetriesARejectedResumeFresh(t *testing.T) {
 		var spawns []cli.SpawnOptions
 		errFresh := errors.New("fresh spawn failed")
 		r.spawn.hook = rejectingResumes(&spawns, func() (processIface, error) { return nil, errFresh })
-		_, err := r.Takeover(context.Background(), takeoverKey, sfSID, sfWS, AgentOpts{})
+		_, err := reserveAndTakeover(context.Background(), r, takeoverKey, sfSID, sfWS, AgentOpts{})
 		if !errors.Is(err, errFresh) || errors.Is(err, ErrShimStuck) {
 			t.Fatalf("Takeover err = %v, want the fresh spawn's error", err)
 		}
@@ -415,7 +415,7 @@ func TestTakeover_RetriesARejectedResumeFresh(t *testing.T) {
 		stateOf(r).picks.accessProfile[takeoverKey] = "work"
 		var spawns []cli.SpawnOptions
 		r.spawn.hook = rejectingResumes(&spawns, func() (processIface, error) { return newIdleProc(), nil })
-		s, err := r.Takeover(context.Background(), takeoverKey, sfSID, sfWS, AgentOpts{})
+		s, err := reserveAndTakeover(context.Background(), r, takeoverKey, sfSID, sfWS, AgentOpts{})
 		if err != nil || len(spawns) != 2 {
 			t.Fatalf("Takeover err = %v after %d spawns, want a fresh retry", err, len(spawns))
 		}
@@ -433,7 +433,7 @@ func TestTakeover_RetriesARejectedResumeFresh(t *testing.T) {
 			cancel()
 			return reject(ctx, opts)
 		}
-		_, err := r.Takeover(ctx, takeoverKey, sfSID, sfWS, AgentOpts{})
+		_, err := reserveAndTakeover(ctx, r, takeoverKey, sfSID, sfWS, AgentOpts{})
 		if !errors.Is(err, clierr.ErrResumeRejected) || len(spawns) != 1 {
 			t.Fatalf("Takeover err = %v after %d spawns, want the rejection with no retry", err, len(spawns))
 		}
@@ -461,7 +461,7 @@ func TestTakeover_RetriesARejectedResumeFresh(t *testing.T) {
 			}()
 			return reject(ctx, opts)
 		}
-		_, err := r.Takeover(context.Background(), takeoverKey, sfSID, sfWS, AgentOpts{})
+		_, err := reserveAndTakeover(context.Background(), r, takeoverKey, sfSID, sfWS, AgentOpts{})
 		ch := <-marker
 		r.ss.Update(func(tx sessTx) { tx.Ext().spawns.EndSpawn(takeoverKey, ch) })
 		if !errors.Is(err, ErrSpawnInFlight) || errors.Is(err, ErrShimStuck) || len(spawns) != 1 {
@@ -483,7 +483,7 @@ func TestTakeover_RetriesARejectedResumeFresh(t *testing.T) {
 			}
 			return reject(ctx, opts)
 		}
-		_, err := r.Takeover(context.Background(), takeoverKey, sfSID, sfWS, AgentOpts{})
+		_, err := reserveAndTakeover(context.Background(), r, takeoverKey, sfSID, sfWS, AgentOpts{})
 		if !errors.Is(err, ErrTakeoverRaced) || errors.Is(err, ErrShimStuck) {
 			t.Errorf("Takeover err = %v, want the concurrent-session refusal", err)
 		}
@@ -509,7 +509,7 @@ func TestTakeover_OtherSpawnErrorsAreNotRetried(t *testing.T) {
 		spawns++
 		return nil, errSpawn
 	}
-	if _, err := r.Takeover(context.Background(), takeoverKey, sfSID, sfWS, AgentOpts{}); !errors.Is(err, errSpawn) || spawns != 1 {
+	if _, err := reserveAndTakeover(context.Background(), r, takeoverKey, sfSID, sfWS, AgentOpts{}); !errors.Is(err, errSpawn) || spawns != 1 {
 		t.Fatalf("Takeover err = %v after %d spawns, want the one spawn's error", err, spawns)
 	}
 }
@@ -538,7 +538,7 @@ func TestTakeover_RejectedResumeRetryWaitsForTheSocket(t *testing.T) {
 		if released {
 			time.AfterFunc(100*time.Millisecond, func() { os.Remove(sock) })
 		}
-		_, err := r.Takeover(context.Background(), takeoverKey, sfSID, sfWS, AgentOpts{})
+		_, err := reserveAndTakeover(context.Background(), r, takeoverKey, sfSID, sfWS, AgentOpts{})
 		if !slices.Equal(resumeIDs(spawns), []string{sfSID, ""}) {
 			t.Fatalf("released=%v: spawn resumes = %q, want one resume then one fresh retry", released, resumeIDs(spawns))
 		}
@@ -578,7 +578,7 @@ func TestTakeover_ResumesOnTheClaudeBackend(t *testing.T) {
 			if tc.pick != "" {
 				stateOf(r).picks.backend[takeoverKey] = tc.pick
 			}
-			s, err := r.Takeover(context.Background(), takeoverKey, sfSID, sfWS, AgentOpts{Backend: tc.optsBackend})
+			s, err := reserveAndTakeover(context.Background(), r, takeoverKey, sfSID, sfWS, AgentOpts{Backend: tc.optsBackend})
 			if err != nil {
 				t.Fatalf("Takeover: %v", err)
 			}
