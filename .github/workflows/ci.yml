@@ -434,10 +434,11 @@ jobs:
       - name: Check flaky-report log parsing
         run: node scripts/check-flaky-report-parse.mjs
 
-  # RNEW-TEST-432: Windows build-only job. Not a supported runtime — the
+  # RNEW-TEST-432: Windows compile-only job. Not a supported runtime — the
   # gate exists to surface regressions in packages that must compile on
-  # all platforms. Shim/discovery syscall isolation was completed 2026-05-15
-  # (_unix.go / _windows.go build-tag split), so this is now a hard gate.
+  # all platforms. Vet type-checks _test.go files too, so a POSIX-only call
+  # in a test (syscall.Mkfifo, unix sockets) must sit behind a !windows tag.
+  # No test binary runs here.
   build-windows:
     runs-on: windows-latest
     timeout-minutes: 10
@@ -451,6 +452,9 @@ jobs:
 
       - name: Build
         run: go build ./...
+
+      - name: Vet (windows hard gate)
+        run: go vet ./...
 
   # Non-blocking runner for quarantined tests (#2537): they stay visible (a
   # fix can be verified here) without holding the merge queue hostage.
