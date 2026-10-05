@@ -280,11 +280,13 @@ func TestLocalRun_LedgerUsesAgentBackendWhenSessionSilent(t *testing.T) {
 }
 
 // The job's explicit backend still labels the rows when the session agrees,
-// and outranks the agent default when the session is silent.
+// and outranks the agent default when the session is silent. A reused session
+// running elsewhere outranks it: the rows follow where the spend happened.
 func TestLocalRun_LedgerKeepsJobBackendOverride(t *testing.T) {
 	agents := map[string]AgentOpts{"general": {Backend: "kiro"}}
 	wantAllBackend(t, runLedgerBackends(t, reportingBackendSession{&backendSession{backend: "codex"}}, agents, "codex"), "codex")
 	wantAllBackend(t, runLedgerBackends(t, &backendSession{}, agents, "codex"), "codex")
+	wantAllBackend(t, runLedgerBackends(t, reportingBackendSession{&backendSession{backend: "kiro"}}, nil, "codex"), "kiro")
 }
 
 func TestEffectiveBackend(t *testing.T) {
