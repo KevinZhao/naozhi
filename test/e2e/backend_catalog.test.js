@@ -89,7 +89,7 @@ test('project settings draws its pickers from the catalog and preselects the sav
 
   const backend = page.locator('#ps-backend');
   await expect(backend).toHaveValue('kiro');
-  await expect(backend.locator('option')).toHaveText(['claude-code', 'kiro']);
+  await expect(backend.locator('option')).toHaveText(['自动（claude-code）', 'claude-code', 'kiro']);
   const profile = page.locator('#ps-access-profile');
   await expect(profile).toHaveValue('team');
   await expect(profile.locator('option[value="broken"]')).toBeDisabled();

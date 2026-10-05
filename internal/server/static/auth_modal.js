@@ -277,6 +277,13 @@ function wireNodePicker(onChange) {
   });
 }
 
+// wireProfileRelabel repaints the backend picker in slotId when the access
+// profile changes, so its 自动 option names that profile's default_backend.
+function wireProfileRelabel(slotId) {
+  const el = document.getElementById('new-access-profile');
+  if (el) el.addEventListener('change', () => refreshBackendPicker(slotId));
+}
+
 // getSelectedAgent resolves the agent segment for the session key. The agent
 // picker was retired (its modal slot now hosts the connection picker), so
 // every dashboard-created session uses the default 'general' agent. Kept as a
@@ -443,14 +450,9 @@ document.addEventListener('keydown', function(e) {
 });
 
 function createNewSession() {
-  // Fetch backends upfront so the picker (if any) is ready when the modal
-  // renders. Failure falls back to the single-backend UI — cli.backends
-  // returns {} on older naozhi which fetchCLIBackends maps to null.
-  //
-  // Fetch the backend manifest for the CURRENTLY-SELECTED node so the picker
-  // pre-selects that node's default backend, not the primary's (picker
-  // node-aware fix). A node switch inside the modal re-fetches + repaints the
-  // picker via refreshBackendPicker below.
+  // Fetch the CURRENTLY-SELECTED node's backends (null on failure or older
+  // naozhi: no picker) with the access profiles; a node or profile switch
+  // inside the modal repaints the picker via refreshBackendPicker.
   Promise.all([fetchCLIBackends(selection.node), fetchAccessProfiles()]).then(([backendsData, profilesData]) => {
     // serverInfo.defaultWorkspace 来自 local stats，远程节点没有对应的 client 端字段，
     // 因此选中 remote 时不预填路径，让用户显式输入远程上的工作目录。
@@ -493,6 +495,7 @@ function createNewSession() {
         }
         refreshBackendPicker('new-backend-slot');
       });
+      wireProfileRelabel('new-backend-slot');
       // First-open path: a failed REMOTE manifest arrives here as null and
       // renderBackendPicker(null) painted an empty slot. Route through
       // refreshBackendPicker so the retry notice shows on open too (#2429).
@@ -505,12 +508,10 @@ function createNewSession() {
   });
 }
 
-// refreshBackendPicker re-fetches the backend manifest for the currently
-// selected node and repaints the picker inside the given slot element. Used
-// by the new-session flows when the connection picker changes node — without
-// this the picker keeps showing (and pre-selecting the default of) whichever
-// node was selected when the modal opened. Preserves the user's explicit
-// choice when that backend id still exists on the newly-selected node.
+// refreshBackendPicker re-fetches the selected node's backend manifest and
+// repaints the picker in slotId, keeping the current choice (自动 included)
+// when that node still has it and labelling 自动 for the picked access
+// profile. The new-session flows call it on node and access-profile switches.
 function refreshBackendPicker(slotId) {
   const slot = document.getElementById(slotId);
   if (!slot) return;
@@ -535,7 +536,7 @@ function refreshBackendPicker(slotId) {
       if (retry) retry.addEventListener('click', () => refreshBackendPicker(slotId));
       return;
     }
-    slot.innerHTML = renderBackendPicker(backendsData, { selectedId: prevChoice });
+    slot.innerHTML = renderBackendPicker(backendsData, { selectedId: prevChoice, profileID: getSelectedAccessProfile() });
   });
 }
 
@@ -592,6 +593,7 @@ function openProjectPalette(backendsData, profilesData) {
     renderPaletteList(state, input.value);
     refreshBackendPicker('cp-backend-slot');
   });
+  wireProfileRelabel('cp-backend-slot');
   // First-open path: see the no-projects modal above — a null remote
   // manifest must surface the retry notice, not an empty slot (#2429).
   if (!backendsData && (selection.node || 'local') !== 'local') refreshBackendPicker('cp-backend-slot');
@@ -920,14 +922,9 @@ function pickPaletteProject(p) {
   const backend = getSelectedBackend();
   const accessProfile = getSelectedAccessProfile();
   const agent = getSelectedAgent();
-  // The palette is the "New Session" entry point, so a project row always
-  // starts a fresh timestamp-keyed session (mode:'new'). Continuing the
-  // project-stable conversation (dashboard:pj:<hash>) is what the sidebar
-  // card for that session is for. Until v0.0.78 stats.projects carried no
-  // stableKey, so this path always fell back to a fresh key in practice;
-  // when the field appeared the row silently started resuming the folder's
-  // existing (often running) session — exactly the opposite of what a user
-  // clicking "New Session" asked for (#2476).
+  // The palette is the "New Session" entry point: a project row always starts
+  // a fresh timestamp-keyed session (mode:'new'), never the folder's
+  // project-stable conversation, which its sidebar card continues (#2476).
   doCreateInProject(p.path, p.name, p.node || 'local', backend, agent,
     { mode: 'new', accessProfile: accessProfile });
 }
@@ -959,7 +956,7 @@ function pickPaletteCustom(initialValue) {
   const seedBackends = (selection.node && selection.node !== 'local' && serverInfo.cliBackendsByNode[selection.node])
     ? serverInfo.cliBackendsByNode[selection.node].data
     : serverInfo.cliBackends;
-  const picker = renderBackendPicker(seedBackends, { selectedId: preselectedBackend });
+  const picker = renderBackendPicker(seedBackends, { selectedId: preselectedBackend, profileID: preselectedProfile });
   const nodePicker = renderNodePicker();
   const modal = document.createElement('div');
   modal.className = 'modal-overlay';
@@ -995,6 +992,7 @@ function pickPaletteCustom(initialValue) {
     }
     refreshBackendPicker('cw-backend-slot');
   });
+  wireProfileRelabel('cw-backend-slot');
   setTimeout(() => {
     const el = document.getElementById('new-workspace');
     if (el) { el.focus(); el.select(); }

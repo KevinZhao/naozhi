@@ -67,8 +67,8 @@ type terminalRecord struct {
 	errMsg    string
 	sessionID string
 	errClass  ErrorClass
-	turnCause TurnCause
 	state     RunState
+	streak    streakEffect
 }
 
 // resultChange is what recordResult did: the detached snapshot to marshal off
@@ -98,7 +98,7 @@ func (t *jobTable) recordResult(jobID string, rec terminalRecord) (c resultChang
 		j.LastSessionID = rec.sessionID
 	}
 	j.RunCounters.addRun(rec.state)
-	j.ConsecutiveFailures = nextFailureStreak(j.ConsecutiveFailures, rec.state, rec.errClass, rec.turnCause)
+	j.ConsecutiveFailures = nextFailureStreak(j.ConsecutiveFailures, rec.streak)
 	c.snap = t.snapshotForSaveLocked()
 	c.sessionChanged = rec.sessionID != "" && rec.sessionID != c.prev.LastSessionID
 	return c, true

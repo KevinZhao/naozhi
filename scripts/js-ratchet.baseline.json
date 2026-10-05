@@ -33,7 +33,7 @@
     "lateBindings": 2
   },
   "auth_modal.js": {
-    "lines": 1295,
+    "lines": 1293,
     "maxFnLines": 101,
     "fnOver100": 1,
     "topLevelLetVar": 1,
@@ -44,7 +44,7 @@
     "lateBindings": 0
   },
   "backend_catalog.js": {
-    "lines": 193,
+    "lines": 191,
     "maxFnLines": 44,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -418,7 +418,7 @@
     "lateBindings": 0
   },
   "sidebar_project.js": {
-    "lines": 527,
+    "lines": 525,
     "maxFnLines": 102,
     "fnOver100": 2,
     "topLevelLetVar": 0,
