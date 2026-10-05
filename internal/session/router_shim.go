@@ -391,6 +391,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		// leaves the dashboard stuck on a "running" spinner.
 		proc.SetOnTurnDone(func() { r.notifyChange() })
 		bookUnownedResults(sess, proc)
+		bookCodeChanges(sess, proc, func() { r.ss.Update(markChanged); r.notifyChange() })
 
 		// SpawnReconnect has no SpawnOptions, so launch-time state (effort tier,
 		// settings file) is recovered from the argv the shim recorded.

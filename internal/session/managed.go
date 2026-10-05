@@ -338,6 +338,9 @@ type ManagedSession struct {
 	// SpawnOptions.Model for kiro), persisted to sessions.json as the
 	// fallback for restart / pre-init windows; live proc.Model() wins.
 	model atomic.Pointer[string]
+	// codeChanges is the PRs this session published or touched, newest last,
+	// as an immutable slice replaced whole; see managed_code_change.go.
+	codeChanges atomic.Pointer[[]clievent.CodeChange]
 	// tuningModel / tuningEffort are the operator's per-session overrides
 	// (docs/rfc/dashboard-model-effort-control.md §4.3); "" = none. They top
 	// resolveSpawnParams's precedence and persist to sessions.json.

@@ -155,11 +155,11 @@ func TestResolveForChat(t *testing.T) {
 				PlannerModel: "opus", PlannerPrompt: "P",
 			},
 			wantKey: "project:myproj:planner",
+			// general's Backend stays out: a planner gets the project's only.
 			wantOpts: AgentOpts{
 				Model:        "opus",
 				Workspace:    "/w/myproj",
 				Exempt:       true,
-				Backend:      "claude",
 				SystemPrompt: "P",
 			},
 		},
@@ -172,8 +172,7 @@ func TestResolveForChat(t *testing.T) {
 			binding: ProjectBinding{Bound: true, Name: "p", WorkspaceDir: "/w"},
 			wantKey: "project:p:planner",
 			wantOpts: AgentOpts{
-				Model:     "sonnet", // defaults preserved when no override
-				Workspace: "/w",
+				Workspace: "/w", // general's Model is not a planner fallback
 				Exempt:    true,
 			},
 		},
@@ -192,10 +191,8 @@ func TestResolveForChat(t *testing.T) {
 			canaryCap: true,
 			wantKey:   "project:p:planner",
 			wantOpts: AgentOpts{
-				Model:        "sonnet",
 				Workspace:    "/w",
 				Exempt:       true,
-				ExtraArgs:    []string{"--existing"},
 				SystemPrompt: "P",
 			},
 		},
@@ -590,18 +587,17 @@ func TestKeyForChat_NilData(t *testing.T) {
 
 func TestResolveForChat_ConcurrentNoAliasing(t *testing.T) {
 	t.Parallel()
-	// Shared defaults with cap > len — if the Resolver's three-arg
-	// slice protection fails, concurrent goroutines will race to
-	// write the "--append-system-prompt" cell into the shared backing
-	// array. With the race detector on (-race) this surfaces as a
+	// Shared defaults with cap > len — if the Resolver's clone is
+	// removed, concurrent goroutines appending to the returned slice
+	// race to write the shared backing array. With the race detector on (-race) this surfaces as a
 	// DATA RACE warning; without it, the canary slot assertion fires.
 	shared := make([]string, 1, 8)
 	shared[0] = "--base"
 	defaults := map[string]AgentOpts{
-		"general": {ExtraArgs: shared},
+		"reviewer": {ExtraArgs: shared},
 	}
 	data := &fakeDataSource{byChat: map[string]ProjectBinding{
-		"feishu:direct:alice": {Bound: true, Name: "p", WorkspaceDir: "/w", PlannerPrompt: "P"},
+		"feishu:direct:alice": {Bound: true, Name: "p", WorkspaceDir: "/w"},
 	}}
 	r := NewKeyResolver(defaults, data)
 
@@ -617,15 +613,14 @@ func TestResolveForChat_ConcurrentNoAliasing(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < iters; i++ {
-				_, opts := r.ResolveForChat("feishu", "direct", "alice", "general")
-				// #2493: the planner prompt no longer rides in ExtraArgs
-				// (it is SystemPrompt now), so the base slice stays len 1
-				// and the prompt must land in the dedicated field.
-				if len(opts.ExtraArgs) != 1 {
-					t.Errorf("ExtraArgs len = %d, want 1", len(opts.ExtraArgs))
+				// A bound non-general agent keeps its own ExtraArgs (a
+				// planner has none), so it is the branch that can alias.
+				_, opts := r.ResolveForChat("feishu", "direct", "alice", "reviewer")
+				if len(opts.ExtraArgs) != 1 || opts.Workspace != "/w" {
+					t.Errorf("opts = %#v, want one ExtraArg and Workspace /w", opts)
 				}
-				if opts.SystemPrompt != "P" {
-					t.Errorf("SystemPrompt = %q, want P", opts.SystemPrompt)
+				if extra := append(opts.ExtraArgs, "--appended"); len(extra) != 2 {
+					t.Errorf("appended ExtraArgs len = %d, want 2", len(extra))
 				}
 			}
 		}()
@@ -635,7 +630,7 @@ func TestResolveForChat_ConcurrentNoAliasing(t *testing.T) {
 	// Defaults backing array must still look like before — len unchanged,
 	// and capacity slots past len must be zero strings (append never
 	// wrote into them).
-	orig := defaults["general"].ExtraArgs
+	orig := defaults["reviewer"].ExtraArgs
 	if len(orig) != 1 {
 		t.Errorf("defaults len changed from 1 to %d", len(orig))
 	}

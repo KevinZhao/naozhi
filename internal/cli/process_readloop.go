@@ -597,6 +597,11 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 		p.setLiveVersion(ev.ClaudeCodeVersion)
 	}
 	p.notifyLinker(ev, nowMS, isSystemInit)
+	if ev.CodeChange != nil {
+		if fn := p.onCodeChange.Load(); fn != nil {
+			(*fn)(*ev.CodeChange)
+		}
+	}
 
 	// Always log to ring.EventLog so dashboard subscribers see events
 	// even when no Send() is active (e.g., after service restart
@@ -624,6 +629,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 		// claimed the result — and AFTER the turn ends, so whoever the latch wakes
 		// finds the process Ready. See resolveResult for both rules.
 		p.adopted.resolveResult(ev)
+		// Queued after Ready: a Send that claims in between drops it by RecvAt.
 	} else if ev.Type == "result" && p.caps.Replay {
 		// After eventCh, so a Send claiming Ready drains this result.
 		if p.deliverEvent(ev, now, log) {

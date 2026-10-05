@@ -82,6 +82,10 @@ type SessionSnapshot struct {
 	// dashboard hides the tag. Not persisted, so it resets across restarts
 	// (docs/rfc/kiro-effort-visibility.md).
 	Effort string `json:"effort,omitempty"`
+	// CodeChanges is the PRs the session published or touched, newest last
+	// (system/code_change_published, persisted). The CLI scrapes them from
+	// command output: display-only links. READ-ONLY, shared with the session.
+	CodeChanges []clievent.CodeChange `json:"code_changes,omitempty"`
 	// StartupFailure is what the next send to a dead session will do about
 	// its CLI's failures at startup; nil when it just resumes.
 	StartupFailure *StartupFailureView `json:"startup_failure,omitempty"`

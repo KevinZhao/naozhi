@@ -277,16 +277,22 @@ func handleSW(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildSessionOpts resolves agent config and planner overrides for a session
-// key. With a resolver it delegates to ResolveForKey; otherwise (or when the
-// resolver reports ok=false, e.g. planner key whose project is gone) it falls
-// back to the inline merge so a dashboard resume never fails hard on a stale
-// key. Workspace is NOT overlaid for IM 4-segment keys (resume takes it from
-// sessions.json); planner keys are always Exempt.
+// key through ResolveForKey; a nil resolver is replaced by one over agents and
+// projectMgr, so a planner key always gets the resolver's project-only opts.
+// When ResolveForKey reports ok=false it falls back instead of failing, so a
+// dashboard resume never fails hard on a stale key: a planner key whose project
+// is gone gets blank Exempt opts, and any other key gets its agent's opts.
+// Workspace is NOT overlaid for IM 4-segment keys (resume takes it from
+// sessions.json).
 func buildSessionOpts(key string, resolver *session.KeyResolver, agents map[string]session.AgentOpts, projectMgr *project.Manager) session.AgentOpts {
-	if resolver != nil {
-		if opts, ok := resolver.ResolveForKey(key); ok {
-			return opts
-		}
+	if resolver == nil {
+		resolver = session.NewKeyResolver(agents, project.NewDataSource(projectMgr))
+	}
+	if opts, ok := resolver.ResolveForKey(key); ok {
+		return opts
+	}
+	if project.IsPlannerKey(key) {
+		return session.AgentOpts{Exempt: true}
 	}
 
 	parts := strings.SplitN(key, ":", 4)
@@ -297,28 +303,10 @@ func buildSessionOpts(key string, resolver *session.KeyResolver, agents map[stri
 
 	opts := agents[agentID]
 	// Only an IM agent key spawns on its agent's profile and backend, as in
-	// AccessProfileForKey; a planner's account is its project pin only.
+	// AccessProfileForKey.
 	if len(parts) != 4 || session.IsReservedNamespace(key) {
 		opts.AccessProfile = ""
 		opts.DefaultBackend = ""
-	}
-	if project.IsPlannerKey(key) {
-		opts.Exempt = true // planner sessions are always exempt, regardless of project config
-		// Inverse of PlannerKeyFor; splitting on ':' would truncate names
-		// containing ':'.
-		name := strings.TrimSuffix(strings.TrimPrefix(key, "project:"), ":planner")
-		if projectMgr != nil {
-			if p := projectMgr.Get(name); p != nil {
-				opts.Workspace = p.Path
-				opts.AccessProfile = p.Config.AccessProfile
-				if m := projectMgr.EffectivePlannerModel(p); m != "" {
-					opts.Model = m
-				}
-				if prompt := projectMgr.EffectivePlannerPrompt(p); prompt != "" {
-					opts.SystemPrompt = session.JoinSystemPrompts(opts.SystemPrompt, prompt) // #2493: layered, opts is a copy
-				}
-			}
-		}
 	}
 	return opts
 }

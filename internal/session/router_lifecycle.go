@@ -667,6 +667,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (_ *M
 			hist.userTurns, overrides,
 		)
 		s.startupFails.Store(max(snap.startupFails, failedSpawns.Streak))
+		s.setCodeChanges(snap.codeChanges)
 		s.costMu.Lock()
 		s.spent = snap.spent
 		costBase.applyLocked(s)
@@ -791,6 +792,7 @@ func (r *Router) installFreshSession(tx sessTx,
 		n.SetOnTurnDone(func() { r.notifyChange() })
 	}
 	bookUnownedResults(s, proc)
+	bookCodeChanges(s, proc, func() { r.ss.Update(markChanged); r.notifyChange() })
 	bookProcessEnd(s, proc, r.hist.claudeDir)
 	if len(snapshot) > 0 {
 		proc.InjectHistory(snapshot)
