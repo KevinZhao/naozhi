@@ -228,3 +228,98 @@
 - **防止通过 "latest" 降级**（#3223）：见升级须知
 - **远端调度的 access profile 闸门覆盖 agent 和 cron key**（#3247、#3292）：钉了 profile 的 agent 或 cron key 不会再被派到远端 node，用对方的凭证运行
 - **shim 不再给身份不符的 PID 发 SIGUSR2**（#3135）：Reconnect 遇到二进制路径不符的 shim PID 时不再发信号；PID ≤ 0 时也不再调用 kill（以前会把信号发给整个进程组）
+
+## [0.1.43] - 2026-10-05
+
+### 升级须知
+
+- **默认 backend 发生回落时，`naozhi config check` 会报出来，退出码随之变化**（#3381、#3389）
+  - 以下三种配置在启动时会改用另一个 backend：`cli.backend` 没列在 `cli.backends` 里；`cli.backend` 不是已注册的 backend id；没设 `cli.backend`，而 `cli.backends` 第一项的 id 没注册。现在 `Validate` 会对 `cli.backend` 报一条 warn（`… startup falls back to "<id>"`，hint 里列出可用的 id），启动时打 Warn，`config check` 退出 1（以前退出 0）
+  - 没有任何启用的条目能对应到已注册的 backend 时，`config check` 报 Fatal `no usable cli backend configured` 并退出 2（以前退出 1），摘要行改为 `FATAL — naozhi would refuse to start`。服务端本来就拒绝这种配置
+  - `config check` 现在输出 `Validate` 的全部结论，layer 为 `config-validate`，action 为 `warn` / `error`。未知的 `cli.backends[...]` 条目以前报为 `caps` / `ignored`，现在只报一次，归为 `config-validate` / `error`，文案也变了。按旧输出写的脚本需要改
+  - 发生回落时，以下几处都改用实际绑定的 backend：router 的默认 backend、dashboard 回复里的默认 backend 标签、启动日志 `naozhi starting` 的 `backend` 字段。以前标签可能写着 `cc`，实际跑的却是 kiro；没设 `cli.backend` 时，这个日志字段以前是空串，现在是例如 `claude`。启动提示里错写的 `cli.default` 改为 `cli.backend`
+  - 消除回落的办法：把 `cli.backend` 显式写成 `cli.backends` 里列出的、已注册的 id
+- **`access_profiles[].default_backend` 开始生效**（#3364）：这个字段以前能通过校验，dashboard 上也能看到和编辑，但从不参与选 backend。现在 key 上还没有会话时，新会话按以下顺序选 backend：显式请求、项目 `backend`、dashboard 的 backend 选择 > `agents[].backend` > profile 的 `default_backend` > `cli.backend`
+  - 生效的 profile 包括 `default_access_profile`。所以**设了 `default_access_profile`、且它的 profile 写了 `default_backend` 的部署，升级后所有新会话都会落到那个 backend 上**
+  - 已有会话保持记录里的 backend。项目只钉了 `access_profile`、没钉 `backend` 的 planner，也改用该 profile 的 backend。从终端接管仍固定走 claude
+  - `naozhi config check --effective` 按同一规则，只把 agent 列在它实际会落到的 backend 下
+  - 已知限制：启用了多个 backend 时，dashboard 新建会话会显式带上 router 默认 backend，profile 的 `default_backend` 在这个入口不生效（#3418，下个版本修）
+- **planner 的启动参数只来自项目**（#3342、#3357）：在绑定了项目的 IM 会话里拉起的 planner，以前会继承 `agents.general` 的 `model` / `args` / `system_prompt` / `effort`。现在不再继承，和 dashboard 发消息、resume、重启时拿到的参数一致
+  - 要给 planner 指定模型或 prompt，在项目的 `.naozhi/project.yaml` 里设 `planner_model` / `planner_prompt`，或设 `projects.planner_defaults`
+  - 已在运行的 planner 不受影响。dashboard resume 一个项目已删除的 planner key 时，也不再借用 `agents.general` 的配置
+- **一次性清理 `.naozhi/project.yaml` 桩文件时，保留 git 已跟踪的文件**（#3399）：这一条修正 0.1.42 升级须知里「commit 过的桩文件会在 git 里显示为一次删除」的说法
+  - 清理前先跑 `git ls-files` 确认，被跟踪的桩文件保留，并打一条 Info
+  - 项目目录及其上级目录里都没有 `.git` 时不调用 git，照旧删除。在 git checkout 里、但 git 给不出结论（没装 git、仓库被拒绝访问、超时、git 报错退出）时保留
+  - 调用 git 时不继承 naozhi 环境里的 `GIT_*` 变量。macOS 上没装 Command Line Tools 的主机，`/usr/bin/git` 可能弹出安装提示
+  - **只对从 v0.1.41 及更早版本升级的主机有用**：每个 root 只清理一次，已经运行过 v0.1.42 的 root 不会再清理。那次被删掉的已跟踪桩文件，需要在对应仓库里 `git checkout -- .naozhi/project.yaml` 自行恢复
+- **cron 自动暂停不再计入不是 job 自身原因的失败**（#3345）：以下 run 仍记为 `failed`，照常发失败通知，但连续失败计数既不增加也不清零
+  - `sandbox_transport`：云沙箱连接中断，包括 naozhi 重启后由启动收尾结掉的孤儿 sandbox run
+  - `turn_failed`，且原因是 `backend_overloaded` / `backend_rate_limited` / `backend_unreachable`。一次持续二三十分钟的 Bedrock 或网络故障，不会再把每 5 分钟跑一次的 job 全部暂停
+  - 额度用尽、认证失败、max turns、上下文超限、执行超时，以及 `timed_out/sandbox_transport`，仍然计入
+  - 已知副作用：job 自己的负载每次都把 microVM 弄崩（OOM、崩溃）时，它不会再被自动暂停，每个 tick 都会发一条失败通知
+- **`naozhi cost reconcile` 判定得更严，也能归属更多条目**（#3383、#3390、#3400、#3356）
+  - 判定恢复额重复计费的条件：只有当一个条目超出它自己那一轮 transcript 用量的部分达到恢复额的一半时，才会标记。以前只要条目金额 ≥ 恢复额的 98% 就会标记，所以很多基线正确、只是本身比较大的 turn 被误标成了 `-r`
+  - 一天里 transcript 没有可计的用量、账本上却有花费时，这一天保持原样，不再清零。对账表多一行提示 `N 天 transcript 无用量而账本有，残差未记`
+  - 无法判定的条目不标记，对账表多一行提示 `N 条无法判定是否计入恢复额（无单价或回填 run 无结束时间），未标记`
+  - 一个 key 先后有过多个 CLI 会话、又找不到 run 记录的 turn 条目，现在按 transcript 时间归属：只有一个候选会话在该轮时间窗内有消息时才归属，否则照旧留着不处理
+  - CLI 自己发起的 turn（后台任务通知等）在 ledger 里的 `run_id` 改为 `unowned:<sid>:<id>`，reconcile 可以直接定位到它的会话
+  - **已经在 v0.1.42 上跑过 `-write` 的账本，当时写入的误判条目不会被撤销**：误标的恢复额落在不能对账的日期（被留着不处理、有其他来源的花费、无单价）时，或者低于残差门槛时，当时没有被抵消；被清零的空日也不会恢复。0.1.43 只是不再写新的误判条目。还没跑过 `-write` 的，建议升级后再跑。以前因归属不明而留着不处理的日期，升级后重跑 dry-run 可能会出现新的修正条目。写入后仍需重启 naozhi
+- **本地 cron run 的 ledger 行按实际运行的 backend 记账**（#3387）：没设 job `backend` 的 job，以前一律记在 `claude` 名下。现在记在会话实际跑的 backend 上（agent 默认 backend 或 router 默认 backend，例如 kiro），所以 `naozhi cost` 和 dashboard 按 backend 分组时，这部分花费会换组。已写入的历史行不变；`naozhi cost backfill` 补记的行仍记为 `claude`
+- **weixin 的 bot token 过期（iLink `-14`）后，轮询暂停 1 小时**（#3360）：getUpdates 返回 `ret` 或 `errcode` 为 `-14` 时，平台状态直接置为 `failed`，`last_error` 以 `weixin token expired (iLink -14): run 'naozhi setup weixin' and restart` 开头，并打一条 Error。之后每小时才重试一次，以前是 2s / 30s 重试不停
+  - doctor 会立即报 fail，不再先报 5 分钟 `disconnected`
+  - 如果中转服务把 `-14` 用于临时状况，入站消息最多会延迟 1 小时
+  - token 恢复后，下一次轮询成功即回到 `connected`
+  - sendmessage 返回的 `-14` 照旧处理
+- **discord 网关掉线后用 REST 探测 bot token**（#3367）：掉线期间按 5s 起、最长 5m 的退避调用 `GET /users/@me`
+  - 返回 401/403 时立即置为 `failed`，`last_error` 为 `discord rejected the bot token (HTTP 401): update platforms.discord.bot_token and restart`，doctor 不再等 5 分钟宽限
+  - 返回其他错误时，`last_error` 里只记 HTTP 状态码
+  - 4013/4014（intent 不允许）这类网关关闭码仍然探测不到
+  - 每次掉线会多出几次 REST 请求
+- **日志变化**：按旧文案写的告警规则可能需要调整
+  - IM reaction 第一次添加失败时，每个平台打一条 Info `ack reaction failed; later failures on this platform log at debug`，之后同一平台的失败只记 Debug（#3340）。缺 `reactions:write` 权限的 Slack 会看到这一条
+  - `retiring dead-CLI shim before respawn` 改为 `retiring dead-CLI shim`；由 reset 触发回收时，另打一条 Info `reset: retired dead-CLI shim`（#3392）
+  - `naozhi starting` 的 `backend` 字段见上文第一条（#3389）
+
+### Added
+
+- **会话 header 显示该会话发布的 PR**（#3358、#3347）：git chip 旁新增 PR chip，显示最新 3 个 PR 的链接，最新一个附带状态（已合并 / 已创建…），更早的折叠成 `+N`，tooltip 里有 repo#n、状态、分支和 URL。只接受 http(s) 链接
+  - 数据来自 Claude Code 的 `code_change_published` 事件，持久化在 `sessions.json` 新增的 `code_changes` 字段。respawn 和 rename 会带过去，`/new` 不带。降级到旧版本后，这个字段会在下一次保存时丢失，不影响其他数据
+  - 时间线不再显示光秃秃的 `⚙ vcs_state_changed` / `⚙ code_change_published` 行。已落盘的旧行不回溯清理
+
+### Changed
+
+- **IM 回复不再先等 ⏳ reaction 加上**（#3340）：立即执行的消息（owner 的首条消息、passthrough 消息、`/urgent`）以前要等一次 `AddReaction` 往返（最多 3s）才开始 turn。现在 reaction 异步添加，移除 ⏳ 会等添加完成之后再做。reaction 没加上时，「💭 思考中...」banner 照常补发。回复比 reaction 接口快时，答复可能先于 ⏳ 出现
+- **会话被删除时，排队中的消息会收到通知**（#3343）：dashboard 删除、scratch 过期、planner 移除、upstream RPC 删掉一个 key 时，排在它后面的消息以前会被静默丢弃。现在 IM 每个 chat 回一条「会话已结束，这条消息未被处理，请重新发送。」（单次 reply token 的平台不发）；dashboard 里等待中的气泡会收到发送失败，不再一直挂着。`/new` 的行为不变
+- **reverse node 排不了队时显示「忙」**（#3354）：node 关闭了队列、会话又在运行时，主节点以前报「发送失败」并广播给所有订阅者，现在和 HTTP node 一样，弹出「忙」提示并撤回乐观气泡。node 关停中仍按错误处理
+- **cron 失败通知的措辞**（#3351、#3362）
+  - 自动暂停通知发到的不是创建任务的会话时（per-job `notify_platform` / `notify_chat_id` 或 `notify_default`），改为提示「在创建该任务的会话发送 /cron resume <id>，或在控制台恢复」，因为 `/cron resume` 只在创建会话里找得到任务。没有来源会话的任务只提示在控制台恢复
+  - 保留上下文的任务因上下文超限失败时，通知会说明之后每次执行都会因此失败，并提示「可在控制台编辑任务勾选“每次全新上下文”」。IM 创建的任务另加「或删除后不带 --keep-context 重新创建」
+- **配置类型错误不再报成 YAML 语法错误**（#3388）：例如字符串写进 int 字段、key 重复，以前统一报 `parse config: yaml syntax error`，现在报 `parse config: yaml type error: line 2: cannot unmarshal !!str into int (see naozhi debug logs for details)`，或 `line N: duplicate key (first defined at line M)`。最多列 5 条，多的写成 `(+K more)`。报错里不回显配置的值和 key 名。真正的语法错误照旧报 `yaml syntax error`。启动、`config check`、`doctor`、`shim`、`models`、`cost` 都会显示新文案
+- **cost ledger 的模型明细**（#3341）：中断 turn 的 partial 条目按规范化后的模型名合并，`claude-opus-5-5` 和 `claude-opus-5-5[1m]` 不再拆成两行；没有工作目录的会话，其 partial 的 workspace 标签和 turn 行一样是空串，不再是 `"."`。一行超过 16 个模型时，多出的折叠成末尾一行 `model="other"`，不再截断，所以按模型加总等于条目金额
+- **进程结束时读取 usage 更快**（#3403）：transcript 超过 8 MiB 时，用二分查找定位到时间窗附近再读，不再从头扫到尾。实测 69 MiB 的 transcript 从 189ms 降到 3.4ms，结果和全量读取一致
+
+### Fixed
+
+- **被放弃的 Send 晚到的中断结果不会被下一轮当成回复**（#3429）：Send 被中断又放弃后（典型是 cron 到截止时间而 CLI 中断较慢），它晚到的 `error_during_execution` 结果以前可能被下一次 Send 当成自己的答案，用户看到空回复、真实回答只被记账。现在这类结果绑定到发起中断的那一轮，只记账不投递
+- **cost 记账漏记**（#3365、#3377、#3385）
+  - Send 已经放弃（被中断、cron 超时）之后才到的 result 会补记；passthrough 中被取消或被判为孤儿的槽位，它们的 result 也会补记。以前这些花费随 `/new` 或进程回收永久丢失
+  - respawn 或 rename 之后，记到旧会话上的花费（例如 stuck_running 被杀后异步补记的 partial）会转给接替它的会话，会话花费卡片和 `sessions.json` 的 `CostSpent` 不再漏掉；rename 之后旧会话上的读数不再在新 key 上被重复计费
+- **中断与回复错位**（#3339、#3363、#3353）
+  - claude 非 passthrough 模式（collect 模式、cron）下 `/stop` 之后，turn 以前要卡到 15 分钟无输出超时才结束，并把中断误报为成功。现在立即返回中断结果，下一条消息也不再多等 500ms
+  - passthrough 模式下 `/stop`、SIGINT 或中途出错之后，排队的消息不再被错误地回「/urgent 已中断」：CLI 本来就会继续执行它们，现在它们各自拿到自己那一轮的答复。只有 `priority:"now"` 抢占才会丢弃排队消息
+  - CLI 在 turn 中途重连后，legacy Send 可能把上一轮的 result 当成本轮答复，之后每条回复都错位一轮。现在会忽略 turn 开始之前收到的事件
+- **删除 / 重置会话时的竞态**（#3359、#3372）：同一个 key 的会话在旧会话关闭期间被重新创建时，旧会话的收尾不会再删掉新会话的排队条目，也不会造成两个并发 owner；新会话已经写盘的 event log 和 attachment 引用也不再被删除
+- **启动失败的展示与暂停**（#3344、#3350、#3391）
+  - Init 握手失败后，dashboard 已打开的标签页会立即显示启动失败 chip 和暂停到的时间，并带上分类（认证、MCP 配置、缺少运行时），不再显示 `unknown`
+  - `/cd` 会解除该 chat 下所有 key 的启动失败暂停，包括还没有会话条目的 key
+  - 通过 `/bin/sh` 包装启动、缺少 `node` 时的报错（dash 的 `sh: 1: node: not found`、busybox 的 127 退出码）归为「缺少运行时」，保留 `--resume`，修好运行时之后可以接着原会话
+- **从终端接管会话**（#3369、#3384）：路由此刻会拒绝的接管（进程数已满、同一个 key 正在 spawn、服务正在关停）改为在发 SIGTERM 之前就拒绝，返回 503/409，外部 CLI 不受影响。以前会先杀掉外部 CLI，再让 dashboard 等 10 秒超时
+  - SIGTERM 之后才发生的失败，dashboard 会通过新接口 `GET /api/discovered/takeover/status` 立即得知，并显示原因，例如「接管失败：进程数已满，外部 CLI 已终止；请关闭一个空闲会话后从历史记录重新打开该会话（对话记录仍在）」
+  - reverse node 上的接管也会先做 cwd 校验和容量预检，被拒时外部 CLI 同样不受影响（主节点只报通用的 `502 upstream error`）
+- **dashboard**
+  - 在 `session_state` 推送之前发出的 `/api/sessions` 轮询，后到时不再覆盖推送的状态。以前会出现 turn 进行中运行横幅消失、提前播报「回复完成」，或者 turn 结束后横幅又回来（#3348）
+  - v0.1.41 及更早的 reverse node 不支持分页。对这类 node，「加载更早」到头时提示「已到该节点内存中最早的事件 — 升级该节点可加载更早历史」，导出改为警告提示，不再声称已完整导出（#3378）
+
+### Security
+
+- **scratch（aside）会话只能在本机运行**（#3376）：发往远端 node 的 `scratch:` key 一律拒绝（`ErrLocalOnlySession`）。scratch 继承源会话的 access profile，而这个信息只在本机的 scratch 池里，远端闸门以前看不到，会把它当成允许。dashboard 不会发这种请求，只有手工构造的已认证请求才会触发
