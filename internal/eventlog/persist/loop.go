@@ -329,7 +329,3 @@ func (p *Persister) drainInChannel() {
 // drainClockRefreshEvery bounds how stale drainInChannel's `now` may get
 // so a long burst cannot make tickIdleClose misjudge a late writer (#1525).
 const drainClockRefreshEvery = 16
-
-// dropInMemoryLocked closes the per-key writer and removes its map entry.
-// Must NOT touch the filesystem beyond the fd close so the op stays fast
-// on slow filesystems (#1284).

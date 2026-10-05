@@ -11,8 +11,15 @@ import (
 	"time"
 )
 
-// Observer receives the persister's write/drop/fsync counter ticks;
-// a nil Options.Observer means noopObserver.
+// Observer receives real-time counter increments from the Persister;
+// implementations typically forward to expvar / Prometheus. Methods are
+// called from the writer goroutine or the PersistSink closure and MUST be
+// non-blocking and thread-safe.
+//
+// The only production implementation is eventLogMetricsObserver in
+// internal/session/eventlog_metrics.go, wired via Options.Observer. A new
+// persister site must pass the same instance or metrics silently fall
+// through to noopObserver; this cannot be enforced at compile time (#1171).
 type Observer interface {
 	// OnWrite is called once per EventEntry that reaches disk.
 	OnWrite(n int)

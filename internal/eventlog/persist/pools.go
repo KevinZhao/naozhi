@@ -141,13 +141,3 @@ func releaseLogBuf(bw *bufio.Writer) {
 	bw.Reset(io.Discard)
 	logBufPool.Put(bw)
 }
-
-// Observer receives real-time counter increments from the Persister;
-// implementations typically forward to expvar / Prometheus. Methods are
-// called from the writer goroutine or the PersistSink closure and MUST be
-// non-blocking and thread-safe.
-//
-// The only production implementation is eventLogMetricsObserver in
-// internal/session/eventlog_metrics.go, wired via Options.Observer. A new
-// persister site must pass the same instance or metrics silently fall
-// through to noopObserver; this cannot be enforced at compile time (#1171).
