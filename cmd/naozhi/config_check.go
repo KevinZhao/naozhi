@@ -161,6 +161,7 @@ func configCheck(args []string, stdout io.Writer) int {
 	// through the same lookup the spawn path uses.
 	accessProfiles := buildAccessProfiles(cfg.AccessProfiles)
 
+	usable := 0
 	for _, b := range cfg.EnabledBackends() {
 		id := b.ID
 		profile, ok := backend.Get(id)
@@ -171,6 +172,7 @@ func configCheck(args []string, stdout io.Writer) int {
 		if !ok {
 			continue // reported by Validate above; the startup path skips it
 		}
+		usable++
 		proto := profile.NewProtocol(backend.ProtocolDeps{})
 		caps := cli.ProtocolCaps(proto)
 		// The startup path drops a tier the backend cannot accept
@@ -241,9 +243,17 @@ func configCheck(args []string, stdout io.Writer) int {
 			result.Effective[id] = eff
 		}
 	}
+	// initBackendWrappers binds no wrapper then, and main exits.
+	if usable == 0 {
+		result.Fatal = append(result.Fatal, "no usable cli backend configured: "+
+			"neither cli.backend nor any cli.backends entry is a registered backend id")
+	}
 	result.Diags = dedupBackendDiags(result.Diags)
 
 	emitCheckResult(stdout, result, *jsonOut)
+	if len(result.Fatal) > 0 {
+		return 2
+	}
 	if len(result.Diags) > 0 {
 		return 1
 	}

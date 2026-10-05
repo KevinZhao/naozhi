@@ -218,9 +218,9 @@ func TestConfigCheck_ReplacedValuesExit1(t *testing.T) {
 }
 
 // TestConfigCheck_StartupRefusalsAreFatal: an agent_commands entry naming an
-// undefined agent and a dashboard_token under 8 characters are configs the
-// server refuses to run, so `config check` must report them as Fatal (exit 2)
-// rather than OK.
+// undefined agent, a dashboard_token under 8 characters and a config with no
+// registered backend id are configs the server refuses to run, so `config
+// check` must report them as Fatal (exit 2) rather than OK.
 func TestConfigCheck_StartupRefusalsAreFatal(t *testing.T) {
 	cases := []struct {
 		name, body, want string
@@ -229,6 +229,10 @@ func TestConfigCheck_StartupRefusalsAreFatal(t *testing.T) {
 			`agent_commands["/x"] references undefined agent "ghost"`},
 		{"short dashboard token", cleanCheckConfig + "server:\n  dashboard_token: \"short\"\n",
 			"server.dashboard_token is too short"},
+		{"single unknown backend", cleanCheckConfig + "cli:\n  backend: nope\n",
+			"no usable cli backend configured"},
+		{"every listed backend unknown", cleanCheckConfig + "cli:\n  backends:\n    - id: nope\n    - id: nada\n",
+			"no usable cli backend configured"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

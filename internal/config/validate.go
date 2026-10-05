@@ -63,16 +63,22 @@ func (c *Config) Validate() []ValidationDiag {
 		}
 	}
 
-	if want := c.CLI.Backend; want != "" && listed {
+	// An unset cli.backend defaults to the first listed id, so an unknown
+	// first entry moves the default as surely as a wrong cli.backend does.
+	if want := c.DefaultBackendID(); listed {
 		if got := c.StartupDefaultBackendID(); got != want {
 			why, hint := "is not listed in cli.backends", fmt.Sprintf("add a cli.backends entry for %q, or set", want)
 			if _, ok := backend.Get(want); !ok {
 				why, hint = "is not a registered backend id", "set"
 			}
+			subject := fmt.Sprintf("%q", want)
+			if c.CLI.Backend == "" {
+				subject = fmt.Sprintf("unset, and the first cli.backends entry %q", want)
+			}
 			diags = append(diags, ValidationDiag{
 				Level: "warn",
 				Field: "cli.backend",
-				Msg:   fmt.Sprintf("%q %s; startup falls back to %q", want, why, got),
+				Msg:   fmt.Sprintf("%s %s; startup falls back to %q", subject, why, got),
 				Hint:  hint + " cli.backend to one of: " + strings.Join(usable, ", "),
 			})
 		}

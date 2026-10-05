@@ -163,6 +163,32 @@ func TestConfig_Validate(t *testing.T) {
 				wantContain: []string{"cli.backend | ", "refuse to run"},
 				wantLevel:   "error",
 			},
+			{
+				// Entries without an id are single-backend mode too, so the
+				// error still names cli.backend, not cli.backends[nope].
+				name: "single_backend_unknown_empty_id_entries",
+				cfg: Config{CLI: CLIConfig{
+					Backend:  "nope",
+					Backends: []CLIBackendConfig{{ID: ""}},
+				}},
+				wantDiags:   1,
+				wantContain: []string{"cli.backend | ", "refuse to run"},
+				wantLevel:   "error",
+			},
+			{
+				// No cli.backend: the default is the first entry, unknown
+				// here, so startup binds kiro. The entry error alone does not
+				// say the default moved.
+				name: "implicit_default_unregistered",
+				cfg: Config{CLI: CLIConfig{
+					Backends: []CLIBackendConfig{{ID: "nope"}, {ID: "kiro"}},
+				}},
+				wantDiags: 2,
+				wantContain: []string{
+					"cli.backends[nope] | unknown backend id",
+					`cli.backend | unset, and the first cli.backends entry "nope" is not a registered backend id; startup falls back to "kiro"`,
+				},
+			},
 		}
 
 		for _, tt := range tests {
