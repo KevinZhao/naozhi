@@ -307,6 +307,32 @@ func TestReconcile_HoldsADayAnUnattributedEntryMayBelongTo(t *testing.T) {
 	}
 }
 
+// An unowned result's run id names its CLI session, so its entry is placed
+// even under a key whose chain held several sessions, and the day's residual
+// counts its spend as booked.
+func TestReconcile_UnownedRunIDNamesItsSession(t *testing.T) {
+	f := newReconcileFixture(t)
+	const forked = "dashboard:direct:forked:general"
+	writeJSON(t, f.opts.SessionStorePath, []map[string]any{
+		{"key": rcKey, "session_id": rcSID},
+		{"key": "dashboard:direct:chained:general", "session_id": "s-new", "prev_session_ids": []string{"s-old"}},
+		{"key": forked, "session_id": rcSID, "prev_session_ids": []string{"s-older"}},
+	})
+	f.seed(t, costledger.Entry{TS: f.d2.Add(4 * time.Hour), Source: costledger.SourceSession, Kind: costledger.KindTurn,
+		SessionKey: forked, RunID: "unowned:" + rcSID + ":u1", Backend: "claude", Unit: costledger.UnitUSD, Amount: 1})
+	var out bytes.Buffer
+	rep, err := reconcileLedger(f.opts, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Unattributed != 1 {
+		t.Errorf("unattributed = %d, want 1 (only the chained turn without a session in its run id)\n%s", rep.Unattributed, out.String())
+	}
+	if len(rep.Planned) != 3 || !near(rep.Planned[2].Amount, 39) {
+		t.Fatalf("planned = %+v, want day two's residual reduced by the unowned $1 to +39\n%s", rep.Planned, out.String())
+	}
+}
+
 // A flag's rows land in the flagged entry's own model buckets, whatever the
 // cost-state calls the model, take no more than the entry's row carried, and
 // an entry booked without rows gets none.

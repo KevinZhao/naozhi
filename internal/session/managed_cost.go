@@ -167,10 +167,17 @@ func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, 
 // (background-task notifications): their results reach no Send, so without
 // this their spend waited for the next owned result's cumulative and was lost
 // when the process died first (#3096). The cumulative differencing makes a
-// reading booked here and again by a later Send harmless.
+// reading booked here and again by a later Send harmless. No run record shares
+// the entry's run id, so it names the CLI session (sessionRunID).
 func bookUnownedResults(s *ManagedSession, proc processIface) {
 	if n, ok := proc.(unownedResultNotifier); ok {
-		n.SetOnUnownedResult(func(res clievent.SendResult) { s.accountCost(&res, newRunID(), proc) })
+		n.SetOnUnownedResult(func(res clievent.SendResult) {
+			sid := res.SessionID
+			if sid == "" {
+				sid = s.getSessionID()
+			}
+			s.accountCost(&res, sessionRunID("unowned:", sid), proc)
+		})
 	}
 }
 
