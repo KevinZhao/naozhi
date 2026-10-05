@@ -51,6 +51,10 @@ type Manager struct {
 	// scanDiskHook, when set (tests only), runs at the end of every scanDisk.
 	scanDiskHook func()
 
+	// stubProbe tells the stub sweep whether git tracks a project's
+	// project.yaml; gitTracksStub except in tests.
+	stubProbe func(projDir string) trackState
+
 	mu       sync.RWMutex
 	projects map[string]*Project // name -> project
 
@@ -122,6 +126,7 @@ func NewManager(root string, defaults PlannerDefaults, opts ...Option) (*Manager
 		defaults:     defaults,
 		projects:     make(map[string]*Project),
 		bindingIndex: make(map[string]string),
+		stubProbe:    gitTracksStub,
 	}
 	for _, opt := range opts {
 		opt(m)

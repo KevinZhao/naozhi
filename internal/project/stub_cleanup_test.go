@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 )
 
 // writeStub writes the exact project.yaml an earlier Scan generated.
@@ -230,4 +232,122 @@ func TestScan_LegacyStubKeptUntilIndexDurable(t *testing.T) {
 			t.Errorf("index[p] = %d, want the stub's 100", got)
 		}
 	})
+}
+
+// gitIn runs git in dir with the host's global and system config ignored.
+func gitIn(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %q: %v\n%s", args, err, out)
+	}
+}
+
+// A stub git tracks is kept, so the sweep leaves no deletion in the working
+// tree; an untracked stub in a repo still goes.
+func TestScan_LegacyStubTrackedByGitKept(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	root := t.TempDir()
+	tracked := writeStub(t, root, "tracked", 100)
+	gitIn(t, filepath.Join(root, "tracked"), "init", "-q")
+	gitIn(t, filepath.Join(root, "tracked"), "add", "--", ".naozhi/project.yaml")
+	untracked := writeStub(t, root, "untracked", 200)
+	gitIn(t, filepath.Join(root, "untracked"), "init", "-q")
+	indexPath := filepath.Join(t.TempDir(), "projects-index.json")
+
+	m, _ := NewManager(root, PlannerDefaults{}, WithIndexPath(indexPath))
+	if err := m.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	assertExists(t, tracked, true)
+	assertExists(t, untracked, false)
+	assertExists(t, filepath.Dir(untracked), false)
+	if !slices.Equal(readIndexFile(t, indexPath).StubCleanupDone, []string{root}) {
+		t.Error("sweep not recorded as done")
+	}
+}
+
+// When git cannot answer, a stub is kept only if its project has its own
+// .git (a repo directory or a worktree's gitdir file).
+func TestScan_LegacyStubUnknownTrackingKeptInRepo(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	repo := writeStub(t, root, "repo", 1)
+	if err := os.Mkdir(filepath.Join(root, "repo", ".git"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	worktree := writeStub(t, root, "worktree", 2)
+	if err := os.WriteFile(filepath.Join(root, "worktree", ".git"), []byte("gitdir: /elsewhere\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	plain := writeStub(t, root, "plain", 3)
+	m, _ := NewManager(root, PlannerDefaults{}, WithIndexPath(filepath.Join(t.TempDir(), "projects-index.json")))
+	m.stubProbe = func(string) trackState { return trackUnknown }
+	if err := m.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	assertExists(t, repo, true)
+	assertExists(t, worktree, true)
+	assertExists(t, plain, false)
+}
+
+// The git probe runs without m.mu, and the removal that follows waits for a
+// writer holding m.mu and re-checks the bytes, so the writer's save is kept.
+func TestSweepLegacyStubs_ProbeUnlockedRemoveRechecks(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	stub := writeStub(t, root, "proj", 100)
+	m, _ := NewManager(root, PlannerDefaults{}, WithIndexPath(filepath.Join(t.TempDir(), "projects-index.json")))
+	writerHolds, release := make(chan struct{}), make(chan struct{})
+	probeHeldMu := false // read only after Scan returns
+	m.stubProbe = func(string) trackState {
+		if probeHeldMu = !m.mu.TryLock(); !probeHeldMu {
+			m.mu.Unlock()
+		}
+		go func() { // a writer mid-save, started while the sweep probes git
+			m.mu.Lock()
+			close(writerHolds)
+			<-release
+			m.mu.Unlock()
+		}()
+		select {
+		case <-writerHolds:
+		case <-time.After(time.Second):
+		}
+		return trackUntracked
+	}
+	done := make(chan error, 1)
+	go func() { done <- m.Scan() }()
+	select {
+	case <-writerHolds:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("writer never got m.mu")
+	}
+	select {
+	case err := <-done:
+		close(release)
+		t.Fatalf("sweep finished (err %v) while a writer held m.mu", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	assertExists(t, stub, true)
+	saved := []byte("created_at: 100\nfavorite: true\n")
+	if err := os.WriteFile(stub, saved, 0600); err != nil {
+		close(release)
+		t.Fatalf("writer save: %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if probeHeldMu {
+		t.Error("the git probe ran under m.mu")
+	}
+	if got, err := os.ReadFile(stub); err != nil || string(got) != string(saved) {
+		t.Errorf("writer's project.yaml = %q, %v; want it kept as %q", got, err, saved)
+	}
 }
