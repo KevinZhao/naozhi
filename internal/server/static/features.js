@@ -39,12 +39,12 @@ export function autoBackendID(backendsData, profileID) {
 }
 
 // pendingBackendID is the backend a session this browser created will spawn
-// on while the server does not list it: the explicit pick, else 自动. '' once
-// listed (sess.backend rules), with one backend, or on a remote node, whose
-// manifest and profiles are not the ones cached here.
+// on: the explicit pick (any node), else 自动. '' once listed (sess.backend
+// rules) or sent (pick and profile consumed), with one backend, or for 自动 on
+// a remote node, whose manifest and profiles are not the ones cached here.
 export function pendingBackendID(key, node) {
   if (perSession.backends[key]) return perSession.backends[key];
-  const n = node || perSession.nodes[key] || 'local', m = serverInfo.cliBackends;
-  if (!key || n !== 'local' || sessionList.sessionsData[sid(key, n)] || !m || !Array.isArray(m.backends) || m.backends.length < 2) return '';
+  const n = node || perSession.nodes[key] || 'local', m = serverInfo.cliBackends, s = sid(key, n);
+  if (!key || n !== 'local' || sessionList.sessionsData[s] || perSession.lastSent[s] || perSession.httpSendPending.has(s) || !m || !Array.isArray(m.backends) || m.backends.length < 2) return '';
   return autoBackendID(m, perSession.accessProfiles[key]);
 }

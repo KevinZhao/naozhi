@@ -15,7 +15,8 @@
 //     with none does not PATCH one in.
 //   - A session opened but not sent yet shows and gates on the backend it
 //     will spawn on: the pick, else what 自动 resolves to (sidebar icon,
-//     header label, image button, tuning model list).
+//     header label, image button, tuning model list). Once sent, it keeps
+//     the router default until the server lists it.
 //
 // /api/cli/backends, /api/access-profiles and /api/projects/config are
 // answered by page.route (the mock serves none of them).
@@ -276,12 +277,13 @@ test('pending session with an explicit kiro pick gates image upload on kiro', as
  * A mock whose stats name the router default's CLI, so the header's no-guess
  * fallback is visible.
  * @param {(sessions: any) => void} [edit]
+ * @param {object} [extra] more startMockServer overrides
  */
-async function mockWithCLIName(edit) {
+async function mockWithCLIName(edit, extra = {}) {
   const sessions = /** @type {any} */ (defaultSessions());
   Object.assign(sessions.stats, { cli_name: 'claude-live', cli_version: '9.9.9' });
   if (edit) edit(sessions);
-  return startMockServer({ sessions });
+  return startMockServer({ sessions, ...extra });
 }
 
 test('pending session on a remote node takes no guess from this node\'s profiles', async ({ page }) => {
@@ -312,6 +314,51 @@ test('pending session with a single backend keeps the server-reported CLI name',
     await expect(page.locator('.main-header .detail-left #header-cli')).toHaveText('claude-live');
   } finally { own.server.close(); }
 });
+
+// After the first send the pick and profile are consumed; until the server
+// lists the key the header keeps the router default instead of re-guessing
+// from the default profile (kiro here). The three sends leave different
+// marks: a WS send only lastSent, an image-only HTTP send only
+// httpSendPending, a text HTTP send both.
+const SENT_CASES = [
+  { name: 'an explicit claude pick sent over WS', profile: 'team', backend: 'claude', ws: true, text: 'hello' },
+  { name: '自动 under solo sent over HTTP', profile: 'solo', backend: '', ws: false, text: 'hello' },
+  { name: '自动 under solo sent image-only over HTTP', profile: 'solo', backend: '', ws: false, text: '' },
+];
+for (const c of SENT_CASES) {
+  test(`a sent, not yet listed session (${c.name}) takes no default-profile guess`, async ({ page }) => {
+    const own = await mockWithCLIName(undefined, { ws: c.ws });
+    try {
+      await page.goto(own.url + '/dashboard');
+      await page.waitForSelector('.session-card');
+      if (c.ws) await page.waitForFunction(() => /** @type {any} */ (window).nz.test.wsm.state === /** @type {any} */ (window).nz.test.WS_STATES.CONNECTED);
+      await page.click('.hdr-btn[title="New Session"]');
+      await page.selectOption('#new-access-profile', c.profile);
+      await page.selectOption('#new-backend', c.backend);
+      await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().click();
+      await expect(page.locator('.main-header .detail-left #header-cli')).toHaveText('claude-code');
+      await page.evaluate((text) => {
+        const t = /** @type {any} */ (window).nz.test;
+        t.setMsgValue(document.getElementById('msg-input'), text);
+        if (!text) t.pendingFiles.push({ id: 'file-1', kind: 'image', status: 'ready', normalizedSize: 16, file: new File([new Uint8Array(16)], 'p.png', { type: 'image/png' }) });
+        t.sendMessage();
+      }, c.text);
+      const wsSends = () => own.wsConnections.flatMap(conn => conn.messages).filter(m => m.type === 'send').length;
+      await expect.poll(() => own.sendCalls.length + wsSends()).toBe(1);
+      expect(wsSends()).toBe(c.ws ? 1 : 0);
+      const header = await page.evaluate(() => {
+        const t = /** @type {any} */ (window).nz.test;
+        t.renderMainShell();
+        const el = /** @type {HTMLElement} */ (document.getElementById('header-cli'));
+        const fromShell = el.textContent;
+        el.textContent = 'stale';
+        t.updateHeaderCLI();
+        return [fromShell, el.textContent];
+      });
+      expect(header).toEqual(['claude-live', 'claude-live']);
+    } finally { own.server.close(); }
+  });
+}
 
 test('a listed session with no backend field is not re-guessed from the access profile', async ({ page }) => {
   const own = await mockWithCLIName();
