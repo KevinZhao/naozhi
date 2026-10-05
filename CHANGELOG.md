@@ -32,12 +32,6 @@
 
 ### Changed
 
-- **一次性清理 `.naozhi/project.yaml` 桩文件时跳过 git 已跟踪的文件**（#3332）：0.1.42 的升级须知说，曾 commit 进仓库的桩文件会在 git 里显示为一次删除；现在清理前先用 `git ls-files` 确认，被跟踪的桩文件保留并打一条 Info。项目目录及其上级目录都没有 `.git` 时不调用 git、照旧删除；在 git checkout 里但 git 不可用或无法判断（仓库被拒绝访问、超时、git 自身报错退出）时保留；判断看 `git ls-files` 是否列出该文件，不再把退出码 1 当作未跟踪，也不继承 naozhi 环境里的 `GIT_*` 变量。macOS 上未装 Command Line Tools 的主机，`/usr/bin/git` 可能弹出安装提示，只在项目处于 checkout 里时才会碰到。每个 root 照旧只清理一次，所以保留下来的桩文件之后也不会再被删
-- **cron 自动暂停不再计入非 job 自身原因的失败**（#3328）：以下 run 仍记为 `failed`、照常发失败通知，但不再增加连续失败计数（也不清零）
-  - `sandbox_transport`：云沙箱连接中断、任务状态未知，包括 naozhi 重启后由启动收尾结掉的孤儿 sandbox run。频繁升级重启的主机上，长 sandbox job 不会再因此被自动暂停
-  - `turn_failed` 且原因为后端过载、限流或连不上模型服务（`backend_overloaded` / `backend_rate_limited` / `backend_unreachable`）。一次持续二三十分钟的 Bedrock 或网络故障不会再把主机上每 5 分钟一跑的 job 全部暂停
-  - 额度用尽、认证失败、max turns、上下文超限和执行超时仍然计入
-- **planner 的启动参数只来自项目**（#3300）：在绑定了项目的 IM 会话里拉起的 planner，不再继承 `agents.general` 的 `model` / `args` / `system_prompt` / `effort`，和 dashboard 发消息、resume、重启同一个 planner key 时拿到的参数一致（那几条路径本来就不继承）。要给 planner 指定模型或 prompt，在项目的 `.naozhi/project.yaml` 里设 `planner_model` / `planner_prompt`，或者设 `projects.planner_defaults`。已在运行的 planner 会话不受影响；dashboard resume 一个项目已删除的 planner key 时，也不再拿 `agents.general` 的配置去拉起
 - **JSON 状态快照不再跟随末端 symlink**：下列文件统一由 `osutil/jsonfile.Load` 以 `O_NOFOLLOW` 打开，文件本身是 symlink 时按"读不了、但仍在盘上"处理；读取只检查末端，路径中间目录的 symlink 照常跟随。写入不同：数据目录、以及它下面存放这些文件的目录本身不能是 symlink（`datadir.EnsureDir`、runlog、cron sandbox store 拒绝写入），只有数据目录之上的祖先目录照常跟随。此前会跟随的：`sessions.json`、`session-ids.json`、`workspace-overrides.json`、`sessions.meta.json`、uiprefs、retired sessions store、session run-history 记录、shim state、attachment `.meta`、cron sandbox 的 pending / attention / snapshot manifest。`cron_jobs.json` 一直如此，没有变化；projects index 从引入起就是这样
   - session store 的三个主文件（`sessions.json` / `session-ids.json` / `workspace-overrides.json`）：启动照常成功，但这个文件的保存被拒，内存里的改动不落盘。信号是一条 `ERROR session store: refusing to overwrite a file naozhi could not read`、authenticated `/health` 的 `session_store.blocked`，以及 `spawn_diags` 里一条 `layer=store-unreadable`。`sessions.meta.json` 只报告（Warn）不阻塞，下次保存把链接换成普通文件，链接目标不动
   - 旧行为其实也没真正支持过 symlink：`WriteFileAtomic` 是临时文件 + rename，第一次保存就把 symlink 本身换成普通文件，目标文件从此停在旧内容。现在只是把静默分叉变成显式拒绝
@@ -73,10 +67,6 @@
 
 ### Fixed
 
-- **`access_profiles[].default_backend` 现在真正决定新会话的 backend**（#3299）：此前该字段被校验、在 dashboard 展示，却从不参与选 backend，用 profile 的会话照样跑在 agent / router 默认 backend 上。现在它排在 `agents[].backend` 之后、router 默认 backend（`cli.backend`）之前，只作用于 key 上还没有会话的新会话；请求显式 backend、项目 `backend`、dashboard 的 backend 选择、已有会话（resume 不换 CLI）和 `agents[].backend` 仍然优先。所用 profile 包括 `default_access_profile`。`naozhi config check --effective` 按同一规则把 agent 只列在它会落到的 backend 下
-- **旧版远端节点的「加载更早」/ 会话导出不再静默停在节点内存边界**（#3310）：v0.1.41 及更早的 reverse 节点不支持分页，`before=` 请求只能拿到它内存里的事件，主节点据此算出的 has-more=0 只代表内存到头，节点磁盘上的更早历史仍在。主节点识别出这类回复（返回了游标之后的条目）时加 `X-Events-Paging: memory-only`；「加载更早」按钮到头时显示"已到该节点内存中最早的事件 — 升级该节点可加载更早历史"，导出改为警告提示"该节点版本过旧……升级该节点后可完整导出"。HTTP 节点与已升级节点不受影响（升级说明见 #3332）
-- **cron 自动暂停通知的恢复提示按通知去向给出**（#3328）：`/cron resume` 只认创建任务的那个会话，而暂停通知会发到 per-job `notify_platform`/`notify_chat_id` 或 `notify_default` 指定的会话；此前在那里照提示发 `/cron resume <id>` 只会得到"未找到"。通知不在创建会话时改为提示"在创建该任务的会话发送 /cron resume <id>，或在控制台恢复"（不写出创建会话的 id）；发回创建会话时措辞不变
-- **cron 上下文超限的失败通知对保留上下文的任务给出改法**（#3313）：保留上下文的任务因"对话上下文已超出模型上限"失败后，之后每次执行都会续接同一段超长对话、以同样原因失败直到自动暂停，而通知此前只说"请检查执行历史"。现在这类通知说明原因并提示"可在控制台编辑任务勾选“每次全新上下文”"（即编辑弹窗里开关的原文）；IM 创建的任务另加"或删除后不带 --keep-context 重新创建"，通知不在创建会话时写作"或在创建该任务的会话删除后……"（`/cron del` 只认创建会话）。每次重置上下文的任务与其他失败原因措辞不变
 - `spawnSession` panic recover 错误消息不再双前缀 `"spawn process: spawn process:"`（RNEW-009）
 
 ### Documentation
