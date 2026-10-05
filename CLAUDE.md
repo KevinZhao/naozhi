@@ -25,8 +25,9 @@ prints the lines a change needs. A `*Baseline*` constant must be a plain
 integer literal; renaming or deleting one, or moving it to another package,
 is a raise to -1 that needs a ledger line too. So is removing the last code
 in its directory that uses one (deleting, commenting out or build-tagging
-away the comparison) while keeping the constant, or adding a `t.Skip` to a
-file that declares or uses one.
+away the comparison) while keeping the constant, or adding a new `t.Skip` to
+a file that declares or uses one (skips a file already had before it gained
+the reference don't count).
 
 `config.yaml` is gitignored (environment-specific). Use `config.example.yaml`
 as the template: `cp config.example.yaml config.yaml` then fill in real values.
