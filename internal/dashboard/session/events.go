@@ -35,6 +35,25 @@ func setHasMore(w http.ResponseWriter, hasMore bool) {
 	}
 }
 
+// ignoredCursor reports whether a `before` answer holds an entry at or after
+// the cursor: the peer served its memory log instead of a page, so history
+// older than that log is on the node but out of reach through it.
+func ignoredCursor(entries []clievent.EventEntry, before int64) bool {
+	for _, e := range entries {
+		if e.Time >= before {
+			return true
+		}
+	}
+	return false
+}
+
+// setMemoryOnly writes X-Events-Paging: memory-only, telling the client that
+// has-more covers only the node's memory log and an upgraded node would page
+// further.
+func setMemoryOnly(w http.ResponseWriter) {
+	w.Header().Set("X-Events-Paging", "memory-only")
+}
+
 // HandleEvents serves GET /api/sessions/events?key=&node=&after=&before=&limit=.
 // `after` (ms) is an incremental fetch with Time >= after (watermark re-admitted,
 // #2456; client dedups by uuid); `before` (ms) pages strictly older entries,
@@ -183,6 +202,7 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 // paginated here: a `before` page asks for one entry more than it returns,
 // so a peer that bounds the page without a has-more flag still yields one.
 // The probe stays within the peer's own page cap, which would swallow it.
+// A peer that ignored the cursor also gets X-Events-Paging: memory-only.
 func (h *Handlers) remoteEventsPage(w http.ResponseWriter, r *http.Request, nc node.Conn, nodeID, key string, before int64, limit int, isBefore bool) {
 	q := node.EventsQuery{Limit: limit}
 	if isBefore {
@@ -205,6 +225,10 @@ func (h *Handlers) remoteEventsPage(w http.ResponseWriter, r *http.Request, nc n
 		// "Load earlier" page (#2433): strictly older than the cursor, newest
 		// `limit` of those, plus an authoritative has-more flag. An empty page
 		// is the client's stop signal, so it must be [] with has-more=0.
+		if ignoredCursor(entries, before) {
+			slog.Debug("remote events page from a node without paging", "node", nodeID, "key", key)
+			setMemoryOnly(w)
+		}
 		pageLimit := q.Limit - 1
 		entries = eventsBefore(entries, before)
 		hasMore := len(entries) > pageLimit

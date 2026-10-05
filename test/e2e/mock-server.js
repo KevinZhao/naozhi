@@ -239,6 +239,9 @@ function defaultGitStates() {
  *   events, mirroring the server's in-memory ring (EventEntries, default 500).
  * @param {boolean} [overrides.eventsBeforeLegacy] - `before=` pages omit X-Events-Has-More, as an
  *   older server does (the dashboard then reads a short page as exhausted).
+ * @param {boolean} [overrides.eventsBeforeMemoryOnly] - `before=` pages reach only the last eventsRingSize
+ *   events and carry X-Events-Paging: memory-only, as the primary relays a remote node too old to
+ *   page (its has-more covers that node's memory ring).
  * @param {number} [overrides.eventsBeforeFailCount] - The first N `before=` requests answer `[]` with
  *   has-more "1": the server's fail-open reply to a degraded disk read or a cancelled request.
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
@@ -634,7 +637,9 @@ function startMockServer(overrides = {}) {
       } else if (before > 0) {
         // events.go `before` branch: strictly older, newest `limit` of them,
         // chronological, and whether the page left any of them out.
-        const older = all.filter(e => e?.time && e.time < before);
+        const pool = overrides.eventsBeforeMemoryOnly ? all.slice(-eventsRingSize) : all;
+        const older = pool.filter(e => e?.time && e.time < before);
+        if (overrides.eventsBeforeMemoryOnly) headers['X-Events-Paging'] = 'memory-only';
         out = limit > 0 && older.length > limit ? older.slice(-limit) : older;
         if (eventsBeforeFailsLeft > 0) { eventsBeforeFailsLeft--; out = []; headers['X-Events-Has-More'] = '1'; }
         else if (!overrides.eventsBeforeLegacy) headers['X-Events-Has-More'] = older.length > out.length ? '1' : '0';
