@@ -184,8 +184,3 @@ func (p *Persister) tickIdleClose() {
 		delete(p.writers, k)
 	}
 }
-
-// handleBatch is the hot path: find-or-open the writer, append every
-// entry, mark dirty for debounce. It NEVER fsyncs — the debounce ticker
-// owns fsync so a 500-entry batch does not cause 500 fsyncs. `now` is
-// captured by the caller so one clock read also covers lastDrainNS.
