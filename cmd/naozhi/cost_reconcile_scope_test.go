@@ -491,29 +491,38 @@ func TestReconcile_AnEarlierAdjustmentDoesNotSplitATurn(t *testing.T) {
 // A day the ledger books spend on and the transcript shows none of naozhi's
 // is left as booked: nothing proves the entries wrong, and zeroing the day
 // would drop spend the transcript no longer holds. A day the transcript shows
-// less spend on than booked still gets the difference taken off.
+// less spend on than booked still gets the difference taken off, and one the
+// ledger nets below zero on is raised to zero: spend is never negative.
 func TestReconcile_ADayWithNoTranscriptSpendIsLeftAsBooked(t *testing.T) {
 	for _, c := range []struct {
 		name     string
 		lines    func(s reconcileScope) []string
+		credit   float64 // an adjustment taken off the $3 day
 		residual float64
 		adjusts  int
 		empty    int
 	}{
-		{"no lines", func(s reconcileScope) []string { return nil }, 0, 0, 1},
+		{"no lines", func(s reconcileScope) []string { return nil }, 0, 0, 0, 1},
 		{"only terminal lines", func(s reconcileScope) []string {
 			return []string{scopeMsg(s.day(-1, 9, 0), "msg_term", 4, "cli")}
-		}, 0, 0, 1},
+		}, 0, 0, 0, 1},
 		{"less spend than booked", func(s reconcileScope) []string {
 			return []string{scopeMsg(s.day(-1, 9, 0), "msg_2", 1, "sdk-cli")}
-		}, -2, 1, 0},
+		}, 0, -2, 1, 0},
+		{"no lines and a credit", func(s reconcileScope) []string { return nil }, 5, 2, 1, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := newReconcileScope(t)
 			s.transcript(t, rcSID, append([]string{scopeMsg(s.day(-2, 10, 0), "msg_1", 5, "sdk-cli")}, c.lines(s)...)...)
 			s.runStarted(t, "aaaaaaaaaaaaaaaa", s.day(-2, 9, 59))
-			seedLedger(t, s.opts.SessionStorePath, rcTurn(s.day(-2, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 5),
-				rcTurn(s.day(-1, 10, 1), rcKey, "cccccccccccccccc", 3), rcTurn(s.day(-3, 9, 0), scopeKey2, "bbbbbbbbbbbbbbbb", 1))
+			entries := []costledger.Entry{rcTurn(s.day(-2, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 5),
+				rcTurn(s.day(-1, 10, 1), rcKey, "cccccccccccccccc", 3), rcTurn(s.day(-3, 9, 0), scopeKey2, "bbbbbbbbbbbbbbbb", 1)}
+			if c.credit > 0 {
+				credit := rcTurn(s.day(-1, 10, 1), rcKey, reconcilePrefix+rcSID+":run:cccccccccccccccc", -c.credit)
+				credit.Kind, credit.Models = costledger.KindAdjust, nil
+				entries = append(entries, credit)
+			}
+			seedLedger(t, s.opts.SessionStorePath, entries...)
 			rep, out := s.run(t)
 			var planned float64
 			for _, e := range rep.Planned {
@@ -523,8 +532,8 @@ func TestReconcile_ADayWithNoTranscriptSpendIsLeftAsBooked(t *testing.T) {
 				t.Fatalf("planned %+v, want %v in %d adjustment(s)\n%s", rep.Planned, c.residual, c.adjusts, out)
 			}
 			st := settlementOf(rep, rcSID)
-			if st.EmptyDays != c.empty || !near(st.After, 8+c.residual) {
-				t.Errorf("settlement = %+v, want %d empty day(s) and the ledger at %v\n%s", st, c.empty, 8+c.residual, out)
+			if want := 8 - c.credit + c.residual; st.EmptyDays != c.empty || !near(st.After, want) {
+				t.Errorf("settlement = %+v, want %d empty day(s) and the ledger at %v\n%s", st, c.empty, want, out)
 			}
 			if named := strings.Contains(out, "天 transcript 无用量"); named != (c.empty == 1) {
 				t.Errorf("report names an empty day: %v, want %v\n%s", named, c.empty == 1, out)

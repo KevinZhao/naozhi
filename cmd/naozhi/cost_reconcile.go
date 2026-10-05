@@ -119,7 +119,7 @@ type sessionSettlement struct {
 	HeldDays                      int    // days an unattributed entry shared a key with
 	OpenDays                      int    // days whose spend another day's entry books, or none yet
 	ForeignDays                   int    // days holding a cron run's turns or lines of unknown origin
-	EmptyDays                     int    // days the ledger books and the transcript shows no spend on
+	EmptyDays                     int    // days the ledger books spend on and the transcript shows none
 	TerminalN                     int    // interactive-terminal messages left out
 	Skipped                       string // why nothing was settled; "" when settled
 }
@@ -598,7 +598,7 @@ func tokenSum(rows []costledger.ModelDelta) int64 {
 // held too) or predates the run of the session's first entry; a cron run of
 // the session touched it; or a message's origin is unknown. Nor does a day
 // whose transcript shows none of the spend its entries book: nothing proves
-// them wrong.
+// them wrong. A day they net below zero on is still raised to zero.
 func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessions, cronRuns []timeSpan, firstDay, until time.Time, rep *reconcileReport) sessionSettlement {
 	st := sessionSettlement{SessionID: in.sid, Entries: len(entries), Skipped: in.skipped}
 	settles := func(t time.Time) bool { return !t.Before(firstDay) && t.Before(until) }
@@ -704,7 +704,7 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 		case open[d]:
 			st.OpenDays++
 			continue
-		case len(usage[d]) == 0:
+		case len(usage[d]) == 0 && lf.usd > 0:
 			st.EmptyDays++
 			continue
 		}
