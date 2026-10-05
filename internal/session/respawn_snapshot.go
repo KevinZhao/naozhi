@@ -36,9 +36,8 @@ func snapshotOldSession(_ sessView, old *ManagedSession) ([]string, float64, flo
 	oldCreatedAt := old.createdAt.Load()
 	// costSpent MUST carry across the replacement (same logical session).
 	// lastCumulativeCost is NOT carried: the new CLI counts from 0, or from the
-	// cost-state a resume restores (resumed_cost.go). Known bounded loss: a turn
-	// still in flight on the OLD process lands its delta on the orphaned struct;
-	// cost is advisory, not billing-authoritative (#2284).
+	// cost-state a resume restores (resumed_cost.go). Spend the old process
+	// books after this read reaches the new session through linkSuccessor.
 	oldCostSpent := loadTotalCost(&old.costSpent)
 	// Overrides come from the same object as history/cost/createdAt. They are
 	// never re-read through the key's entry, which may be swapped or removed
@@ -85,6 +84,9 @@ func snapshotRespawn(v sessView, old *ManagedSession) respawnSnapshot {
 	if old != nil {
 		snap.sid = old.getSessionID()
 		snap.spent = old.CostTotals()
+		// One costMu reading for both, so linkSuccessor's catch-up differences
+		// against exactly what the new session starts from.
+		snap.costSpent = snap.spent.USD
 		snap.startupFails = startupFailureOf(old).streak
 		snap.codeChanges = old.CodeChanges()
 	}
@@ -93,9 +95,9 @@ func snapshotRespawn(v sessView, old *ManagedSession) respawnSnapshot {
 
 // rereadSameEntry refreshes snap and hist from old, still the key's entry at
 // commit, with what operator writes may have changed on it while the spawn
-// ran unlocked: the overrides, the PR list and the session-ID chain. History and cost are
-// written only by old's own, dead, process. Call it inside the commit
-// transaction; nil-safe.
+// ran unlocked: the overrides, the PR list and the session-ID chain. History
+// is written only by old's own, dead, process, and its late cost is
+// linkSuccessor's. Call it inside the commit transaction; nil-safe.
 func rereadSameEntry(old *ManagedSession, snap *respawnSnapshot, hist *respawnHistory, resumeID string) {
 	if old == nil {
 		return

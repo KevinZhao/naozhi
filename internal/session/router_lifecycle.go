@@ -674,6 +674,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (_ *M
 		costBase.applyLocked(s)
 		s.endMark = mark
 		s.costMu.Unlock()
+		linkSuccessor(old, s, snap.spent)
 	})
 	if winner != nil {
 		proc.Close()

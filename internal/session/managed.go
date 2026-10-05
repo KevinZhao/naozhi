@@ -361,8 +361,7 @@ type ManagedSession struct {
 	// unlike totalCost, the current process's own reading. lastCumulativeCost
 	// is the previous raw CLI reading the next delta diffs against; a resumed
 	// process starts it at the cost the CLI restores (resumed_cost.go). Both
-	// are Float64bits-packed and, after install, written only from
-	// accountTurnCost.
+	// are Float64bits-packed and, after install, written only under costMu.
 	costSpent          atomic.Uint64
 	lastCumulativeCost atomic.Uint64
 	// lastCumulative is the full per-incarnation baseline (USD, per-model
@@ -389,6 +388,12 @@ type ManagedSession struct {
 	// endMark is where the process's end starts reading its main transcript
 	// (managed_cost_end.go); under costMu.
 	endMark transcriptMark
+	// successor is the session that replaced this one in the table, by a
+	// respawn or a rename; spend booked here afterwards reaches it (addSpent).
+	// renamed marks a rename: the successor runs this session's own process,
+	// so it takes this session's readings whole. Both under costMu.
+	successor *ManagedSession
+	renamed   bool
 	// costAcct is the router-wide ledger sink; nil in tests that don't wire one.
 	costAcct *costAccounting
 
