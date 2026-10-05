@@ -67,6 +67,7 @@
 
 ### Fixed
 
+- `/urgent` 之后，在它之前已排队的消息现在会拿到自己的真实回答，不再收到"上一条消息已被 /urgent 打断，请在当前任务完成后重发"：真实 CLI 实测（claude 2.1.288）表明 `priority:"now"` 抢占不丢弃队列，紧急消息先跑、排队消息随后各自成轮（`docs/rfc/passthrough-mode-validation.md` V10，#3394）
 - `spawnSession` panic recover 错误消息不再双前缀 `"spawn process: spawn process:"`（RNEW-009）
 
 ### Documentation

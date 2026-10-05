@@ -6,6 +6,7 @@
 > **原始 ndjson**: `/tmp/v*.ndjson`
 
 本文档记录 RFC §7 的 9 个验证点（V1-V9）的实测结果，每个场景都有脚本 + 原始日志可复现。
+V10 是后补的验证，CLI 版本与日期见该节。
 
 ---
 
@@ -17,6 +18,7 @@
 | CLI 合并多条消息时，只 emit **一个 replay event**，但该 event 的 content 里含**所有被合并消息的 text blocks** | naozhi 可以逆推合并集合 |
 | `priority:"now"` 工作完美：立即 abort 当前 turn 并处理新消息 | `/urgent` 命令可落地 |
 | `control_request interrupt` 不丢弃 pending 队列 | `/stop` 可落地 |
+| `priority:"now"` 抢占同样不丢弃 pending 队列：now 消息先跑，之前排队的消息随后各自成轮（V10） | `/urgent` 不得让排队消息失败 |
 | Mid-turn 注入成功率依赖**内容**（非对抗性成功），不依赖路径 | 用户需心智接受 |
 | 纯生成 turn 无法 mid-turn，延迟到下一 turn | 和 CC TUI 一致 |
 | 并发 stdin 写安全（6 线程交错 all 到达） | shimWMu 已足够 |
@@ -232,6 +234,52 @@ result[1]: "Autumn Leaves... (重写版，含 'thin cirrus bars')"  ← 模型�
 
 ---
 
+## V10: `priority:"now"` 抢占时排队消息的命运
+
+> **CLI 版本**: claude 2.1.288（toolbox，opus-5-5 via Bedrock）
+> **日期**: 2026-10-05
+> **参数**: naozhi 实际参数（`-p`、stream-json 双向、`--verbose`、`--replay-user-messages`、`--setting-sources ''`、`--settings ~/.naozhi/naozhi-settings.json`、`--dangerously-skip-permissions`）
+
+**脚本**: `v10_now_preempt_queue.py`（`--bash` / `--gen`）
+
+**场景**: msgA 运行中；A 开始后约 2s 写 msgB（无 priority，"reply exactly B_DONE"）；再 1s 写 msgC（`priority:"now"`，"reply exactly C_DONE"）。
+
+### 结果
+
+A 为阻塞 Bash（`sleep 20 && echo A_DONE`）：
+
+```
+T=8.66s  replay(A)
+T=10.80s command_lifecycle B queued
+T=11.90s command_lifecycle C queued        ← 写入 C
+T=29.20s result(A) subtype=success is_error=false stop_reason=tool_use
+         terminal_reason=aborted_tools result=''
+T=29.20s command_lifecycle A cancelled / C started
+T=30.71s replay(C) → result 'C_DONE' terminal_reason=completed
+T=30.72s command_lifecycle B started
+T=33.16s replay(B) → result 'B_DONE' terminal_reason=completed
+```
+
+A 为纯生成（1500 字长文，无工具）：
+
+```
+T=23.18s replay(A)
+T=26.42s 写入 C
+T=26.43s result(A) subtype=success is_error=false terminal_reason=aborted_streaming result=<部分正文>
+T=29.88s replay(C) → result 'C_DONE'
+T=33.25s replay(B) → result 'B_DONE'
+```
+
+### 结论
+
+- **CLI 在 now 抢占时保留 commandQueue**（与 `passthrough-mode-cc-tui-analysis.md` §T5 的源码分析一致）：先跑 C，再让 B 以自己的 uuid replay 独立成轮。naozhi 因此不能在 aborted result 上让排队 slot 失败，它们要等自己的 replay（#3394 删除了 `reapAbortedPreempted`）
+- 2.1.288 的 aborted result 是 `subtype=success` + `is_error=false` + `terminal_reason=aborted_tools|aborted_streaming`，不再是 V2/V5 记录的 `error_during_execution`
+- 阻塞中的 Bash 工具不会被立即打断：abort 要等工具返回（上例 C 写入后约 17s），纯生成则是 10ms 级
+- 用提交的脚本复跑（同日，`--bash` 与 `--gen`）两种模式均 PASS，事件顺序同上
+- 新增的 `command_lifecycle` 事件（queued / started / cancelled / completed，带 `command_uuid`）直接给出每条消息的生命周期
+
+---
+
 ## 对 RFC v2 的修正 / 确认
 
 | RFC 断言 | 实测结论 |
@@ -243,6 +291,7 @@ result[1]: "Autumn Leaves... (重写版，含 'thin cirrus bars')"  ← 模型�
 | Mid-turn 成功率依赖时机 + 内容 | **确认**（V1/V1b/V1c 对比） |
 | 纯生成 turn 延迟到下一 turn | **确认**（V8） |
 | Interrupt 不丢队列 | **确认**（V5） |
+| `priority:"now"` 抢占不丢队列 | **确认**（V10，claude 2.1.288） |
 | SIGKILL 干净退出 | **确认**（V4） |
 | 并发写安全 | **确认**（V9） |
 
@@ -260,7 +309,7 @@ result[1]: "Autumn Leaves... (重写版，含 'thin cirrus bars')"  ← 模型�
 
 推荐再做两个验证（非阻断但有价值）：
 
-1. **V10 — 长 session 压测**: 连续 50 条消息（等 result 顺序发），验证 session 稳定性 + token 成本
-2. **V11 — MessageID 和 parent_tool_use_id 交叉**: 如果用户手动发多个 chat 消息（通过 IM），确认 naozhi 的 chat_key → session_key 路由在 passthrough 下仍然一致
+1. **V11 — 长 session 压测**: 连续 50 条消息（等 result 顺序发），验证 session 稳定性 + token 成本
+2. **V12 — MessageID 和 parent_tool_use_id 交叉**: 如果用户手动发多个 chat 消息（通过 IM），确认 naozhi 的 chat_key → session_key 路由在 passthrough 下仍然一致
 
 这两个可以和 Phase A 实施并行做。
