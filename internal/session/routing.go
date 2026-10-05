@@ -33,8 +33,9 @@ type PlannerDataSource = projectapi.DataSource
 type ProjectBinding = projectapi.ProjectBinding
 
 // KeyResolver derives a (session key, AgentOpts) pair for a dispatch context,
-// encoding the project-binding precedence (general → planner, non-general →
-// workspace-only) and ExtraArgs aliasing safety as internal invariants.
+// encoding the project-binding precedence (general → planner from the project
+// alone, non-general → workspace overlay) and ExtraArgs aliasing safety as
+// internal invariants.
 //
 // The zero value is not usable; construct via NewKeyResolver.
 type KeyResolver struct {
@@ -61,8 +62,8 @@ func (r *KeyResolver) WithCronAccessProfile(fn func(jobID string) string) *KeyRe
 // ResolveForChat is the "chat-view" path: given IM chat coordinates and
 // agentID, return the routed key and merged opts (docs/rfc/key-resolver.md
 // §3.3): unbound chat → defaults[agentID] + IM key; bound + non-general →
-// overlay Workspace only, Exempt explicitly false; bound + "general" → overlay
-// Workspace / Model / Prompt, Exempt = true, planner key.
+// overlay Workspace only, Exempt explicitly false; bound + "general" → planner
+// key with plannerOpts, the project's values only (no defaults["general"]).
 //
 // The planner prompt goes into AgentOpts.SystemPrompt — NOT ExtraArgs, where
 // cli.deniedExtraFlags would strip it (#2493). Every return path clones
@@ -99,32 +100,14 @@ func (r *KeyResolver) ResolveForChat(platform, chatType, chatID, agentID string)
 		return SessionKey(platform, chatType, chatID, agentID), base
 	}
 
-	// general agent + bound project ⇒ planner (chat-view).
-	base.Exempt = true
-	base.Workspace = b.WorkspaceDir
-	if b.Backend != "" {
-		base.Backend = b.Backend
-	}
-	// The planner's account and backend come from the project alone, never
-	// from defaults["general"]: ResolveForPlannerKey (restart, resume) cannot
-	// see general's, and one key must not change either by spawn path.
-	base.AccessProfile = b.AccessProfile
-	base.DefaultBackend = ""
-	if b.PlannerModel != "" {
-		base.Model = b.PlannerModel
-	}
-	// Spawn-boundary re-validation (see SanitisePlannerPromptForSpawn).
-	if pp := sessionview.SanitisePlannerPromptForSpawn(b.PlannerPrompt, b.Name); pp != "" {
-		// `base` is a value copy, so this never mutates r.defaults[agentID].
-		base.SystemPrompt = JoinSystemPrompts(base.SystemPrompt, pp)
-	}
-	return plannerKeyFor(b.Name), base
+	// general agent + bound project ⇒ planner, built from the project alone.
+	return plannerKeyFor(b.Name), plannerOpts(b)
 }
 
 // ResolveForPlannerKey is the "planner-view" path used by administrative
 // restart flows: from a project name, return the planner key and opts.
-// Deliberately does NOT inherit from defaults["general"]: it starts from blank
-// opts and layers only project configuration (docs/rfc/key-resolver.md §2.2).
+// Like ResolveForChat's planner branch it returns plannerOpts, which layers
+// only project configuration (docs/rfc/key-resolver.md §2.2).
 // Returns ok=false when the project cannot be found; callers must NOT fall back
 // to chat-view behaviour.
 func (r *KeyResolver) ResolveForPlannerKey(projectName string) (key string, opts AgentOpts, ok bool) {
@@ -135,19 +118,23 @@ func (r *KeyResolver) ResolveForPlannerKey(projectName string) (key string, opts
 	if !found {
 		return "", AgentOpts{}, false
 	}
-	opts = AgentOpts{
+	return plannerKeyFor(b.Name), plannerOpts(b), true
+}
+
+// plannerOpts is the one constructor for a planner key's spawn opts, shared by
+// every path that can spawn it. It starts from blank opts, never from
+// defaults["general"]: a key must spawn the same way whichever path starts it.
+// b.PlannerPrompt is re-validated here because it may be a stale value cached
+// from a prior disk reload.
+func plannerOpts(b ProjectBinding) AgentOpts {
+	return AgentOpts{
 		Exempt:        true,
 		Workspace:     b.WorkspaceDir,
 		Model:         b.PlannerModel,
 		Backend:       b.Backend,
 		AccessProfile: b.AccessProfile,
+		SystemPrompt:  sessionview.SanitisePlannerPromptForSpawn(b.PlannerPrompt, b.Name),
 	}
-	// Same spawn-boundary check as ResolveForChat: b.PlannerPrompt may be a
-	// stale value cached from a prior disk reload.
-	if pp := sessionview.SanitisePlannerPromptForSpawn(b.PlannerPrompt, b.Name); pp != "" {
-		opts.SystemPrompt = pp
-	}
-	return plannerKeyFor(b.Name), opts, true
 }
 
 // ResolveForKey is the "key-resume" path: given an existing key from
