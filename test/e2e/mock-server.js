@@ -459,7 +459,9 @@ function startMockServer(overrides = {}) {
       // Mirror the production CSP (routes.go handleDashboard) so the whole
       // Playwright suite runs the dashboard under the real policy — inline
       // handlers or scripts that production would block fail here too.
-      // Kept in lockstep by TestDashboardCSP_MockServerHeaderInSync.
+      // The default MOCK_DASHBOARD_CSP is kept in lockstep by
+      // TestDashboardCSP_MockServerHeaderInSync; a dashboardPage override
+      // serves the CSP tools/render-dashboard wrote out instead.
       res.writeHead(200, {
         'Content-Type': 'text/html',
         'Content-Security-Policy': dashboardCSP,
