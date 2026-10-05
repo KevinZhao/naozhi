@@ -145,49 +145,47 @@ export function accessProfileChipInfo(profileID) {
   };
 }
 
-// renderBackendPicker returns an HTML fragment for a backend <select>, or
-// an empty string when only one backend is enabled. The selected value is
-// surfaced via document.getElementById(opts.selectId).value at submit time.
-//
-// opts (all optional):
-//   - selectId: id of the <select> element. Defaults to 'new-backend' so
-//     existing call sites (createNewSession / openProjectPalette /
-//     pickPaletteCustom) keep working unchanged. The cron editor passes
-//     'cron-backend' / 'edit-cron-backend' to avoid id collisions when
-//     more than one modal is open simultaneously (defensive — modals are
-//     usually exclusive but trapFocus ordering plus future stacking
-//     should not silently corrupt the wrong picker).
-//   - selectedId: if non-empty, this backend ID is pre-selected instead
-//     of backendsData.default. Used by the cron edit modal to round-trip
-//     a saved Job.Backend choice. Falls through to default when the
-//     value doesn't match any enabled backend (e.g. operator removed
-//     that backend from config.yaml).
+// autoBackendLabel is the text of the picker's 自动 option: profileID's ("" =
+// default) default_backend when enabled here, else the router default. A
+// project backend pin, agents[].backend, a cron job's agent profile and a
+// remote node's own profiles are not visible here; the server decides.
+export function autoBackendLabel(backendsData, profileID) {
+  const list = backendsData.backends;
+  const ap = serverInfo.accessProfiles;
+  const pid = profileID || (ap && ap.default) || '';
+  const prof = pid && ap && Array.isArray(ap.profiles) ? ap.profiles.find(p => p && p.id === pid) : null;
+  const byID = id => id && list.find(b => b && b.id === id);
+  const b = byID(prof && prof.default_backend) || byID(backendsData.default) || list[0];
+  return '自动（' + ((b && (b.display_name || b.id)) || '') + '）';
+}
 
+// renderBackendPicker returns the backend <select> fragment, or '' when only
+// one backend is enabled; callers read #<selectId>.value at submit time. The
+// first option is 自动 (value ""): sending no backend lets the server resolve
+// agents[].backend / default_backend / the router default, so it is selected
+// unless opts.selectedId names an enabled backend.
+//
+// opts (all optional): selectId (default 'new-backend'; the cron editor and
+// project settings use their own ids), selectedId (a saved or carried-over
+// pick), profileID (the access profile the 自动 label resolves against).
 export function renderBackendPicker(backendsData, opts) {
   if (!backendsData || !Array.isArray(backendsData.backends)) return '';
   const list = backendsData.backends;
   if (list.length <= 1) return '';
   const o = opts || {};
   const selectId = o.selectId || 'new-backend';
-  const defaultID = backendsData.default || (list[0] && list[0].id) || '';
-  // Pre-select the saved value when it matches a current enabled backend;
-  // otherwise fall back to default. Iterating once keeps the lookup cheap.
-  let preselect = defaultID;
-  if (o.selectedId) {
-    for (const b of list) {
-      if (b && b.id === o.selectedId) { preselect = o.selectedId; break; }
-    }
-  }
+  const preselect = (o.selectedId && list.some(b => b && b.id === o.selectedId)) ? o.selectedId : '';
   const options = list.map(b => {
     const selected = b.id === preselect ? ' selected' : '';
     const label = (b.display_name || b.id) + (b.version ? ' ' + b.version : '') + (b.available === false ? ' (unavailable)' : '');
     const disabled = b.available === false ? ' disabled' : '';
     return '<option value="' + escAttr(b.id) + '"' + selected + disabled + '>' + esc(label) + '</option>';
   }).join('');
+  const auto = '<option value=""' + (preselect ? '' : ' selected') + '>' + esc(autoBackendLabel(backendsData, o.profileID)) + '</option>';
   return '<div class="nz-field">' +
     '<label class="nz-field-label" for="' + escAttr(selectId) + '">CLI backend</label>' +
     '<span class="picker-select-wrap"><select id="' + escAttr(selectId) + '" class="nz-picker-select nz-picker-select-only">' +
-    options +
+    auto + options +
     '</select></span>' +
     '</div>';
 }
