@@ -42,7 +42,7 @@ func TestFailureNoticeBody(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := failureNoticeBody(jobSnapshot{}, tc.class, TurnCauseUnknown, tc.state, runID, tc.timeout)
+			got := failureNoticeBody(jobSnapshot{}, NotifyTarget{}, tc.class, TurnCauseUnknown, tc.state, runID, tc.timeout)
 			if got != tc.want {
 				t.Errorf("failureNoticeBody(%q, %q) = %q, want %q", tc.class, tc.state, got, tc.want)
 			}
@@ -89,7 +89,7 @@ func TestFailureNoticeBody_TurnCause(t *testing.T) {
 		{TurnCause("from_a_newer_binary"), "执行失败（后端报告本轮出错），请检查执行历史 · run 1a2b3c4d"},
 	}
 	for _, tc := range cases {
-		got := failureNoticeBody(jobSnapshot{fresh: true}, ErrClassTurnFailed, tc.cause, RunStateFailed, runID, 5*time.Minute)
+		got := failureNoticeBody(jobSnapshot{fresh: true}, NotifyTarget{}, ErrClassTurnFailed, tc.cause, RunStateFailed, runID, 5*time.Minute)
 		if got != tc.want {
 			t.Errorf("cause %q: body = %q, want %q", tc.cause, got, tc.want)
 		}
@@ -100,39 +100,47 @@ func TestFailureNoticeBody_TurnCause(t *testing.T) {
 		}
 	}
 	// The cause only words a turn_failed run; any other class ignores it.
-	if got := failureNoticeBody(jobSnapshot{}, ErrClassSendError, TurnCauseMaxTurns, RunStateFailed, runID, time.Minute); got != "执行失败（CLI 发送错误） · run 1a2b3c4d" {
+	if got := failureNoticeBody(jobSnapshot{}, NotifyTarget{}, ErrClassSendError, TurnCauseMaxTurns, RunStateFailed, runID, time.Minute); got != "执行失败（CLI 发送错误） · run 1a2b3c4d" {
 		t.Errorf("send error with a cause: body = %q", got)
 	}
 }
 
 // TestFailureNoticeBody_ContextTooLongByMode: a context-too-long failure of a
-// job that keeps its context says to switch to reset-per-run, and where; a
-// fresh job keeps the plain sentence, and other causes of a persistent job are
-// unaffected.
+// job that keeps its context names the dashboard toggle, plus for an IM job the
+// recreate route, placed in the creating chat when the notice goes elsewhere; a
+// fresh job keeps the plain sentence, and other causes are unaffected.
 func TestFailureNoticeBody_ContextTooLongByMode(t *testing.T) {
 	t.Parallel()
 	const (
 		runID   = "1a2b3c4d5e6f7a8b"
-		persist = "执行失败（对话上下文已超出模型上限）；该任务保留上下文，之后每次执行都会因此失败，可在控制台改为每次重置上下文"
+		persist = "执行失败（对话上下文已超出模型上限）；该任务保留上下文，之后每次执行都会因此失败，可在控制台编辑任务勾选“每次全新上下文”"
 	)
+	im := jobSnapshot{platName: "feishu", chatID: "chat-1"}
+	source := NotifyTarget{Platform: "feishu", ChatID: "chat-1"}
+	other := NotifyTarget{Platform: "feishu", ChatID: "chat-2"}
 	cases := []struct {
 		name  string
 		snap  jobSnapshot
+		to    NotifyTarget
 		cause TurnCause
 		want  string
 	}{
-		{"fresh", jobSnapshot{fresh: true, platName: "feishu", chatID: "chat-1"}, TurnCauseContextTooLong,
+		{"fresh", jobSnapshot{fresh: true, platName: "feishu", chatID: "chat-1"}, source, TurnCauseContextTooLong,
 			"执行失败（对话上下文已超出模型上限），请检查执行历史"},
-		{"persistent dashboard", jobSnapshot{platName: "dashboard", chatID: "dash"}, TurnCauseContextTooLong, persist},
-		{"persistent without source platform", jobSnapshot{}, TurnCauseContextTooLong, persist},
-		{"persistent without source chat", jobSnapshot{platName: "feishu"}, TurnCauseContextTooLong, persist},
-		{"persistent IM", jobSnapshot{platName: "feishu", chatID: "chat-1"}, TurnCauseContextTooLong,
+		{"persistent dashboard", jobSnapshot{platName: "dashboard", chatID: "dash"}, other, TurnCauseContextTooLong, persist},
+		{"persistent without source platform", jobSnapshot{}, other, TurnCauseContextTooLong, persist},
+		{"persistent without source chat", jobSnapshot{platName: "feishu"}, other, TurnCauseContextTooLong, persist},
+		{"persistent IM, source chat", im, source, TurnCauseContextTooLong,
 			persist + "，或删除后不带 --keep-context 重新创建"},
-		{"persistent IM, other cause", jobSnapshot{platName: "feishu", chatID: "chat-1"}, TurnCauseMaxTurns,
+		{"persistent IM, other chat", im, other, TurnCauseContextTooLong,
+			persist + "，或在创建该任务的会话删除后不带 --keep-context 重新创建"},
+		{"persistent IM, other platform", im, NotifyTarget{Platform: "slack", ChatID: "chat-1"}, TurnCauseContextTooLong,
+			persist + "，或在创建该任务的会话删除后不带 --keep-context 重新创建"},
+		{"persistent IM, other cause", im, source, TurnCauseMaxTurns,
 			"执行未完成（已达到最大执行步数），请检查执行历史"},
 	}
 	for _, tc := range cases {
-		got := failureNoticeBody(tc.snap, ErrClassTurnFailed, tc.cause, RunStateFailed, runID, 5*time.Minute)
+		got := failureNoticeBody(tc.snap, tc.to, ErrClassTurnFailed, tc.cause, RunStateFailed, runID, 5*time.Minute)
 		if want := tc.want + " · run 1a2b3c4d"; got != want {
 			t.Errorf("%s: body = %q, want %q", tc.name, got, want)
 		}
@@ -144,27 +152,31 @@ func TestFailureNoticeBody_ContextTooLongByMode(t *testing.T) {
 	}
 }
 
-// TestExecuteOpt_ContextTooLongNoticeByMode: the run's snapshot reaches the
-// notice, so a real context-too-long run words it by the job's mode and
-// platform, and the auto-pause sentence still follows the run id.
+// TestExecuteOpt_ContextTooLongNoticeByMode: the run's snapshot and notify
+// target reach the notice, so a real context-too-long run words it by the
+// job's mode, platform and notice chat, and the auto-pause sentence still
+// follows the run id.
 func TestExecuteOpt_ContextTooLongNoticeByMode(t *testing.T) {
 	t.Parallel()
 	const (
 		plain   = "执行失败（对话上下文已超出模型上限），请检查执行历史"
-		persist = "执行失败（对话上下文已超出模型上限）；该任务保留上下文，之后每次执行都会因此失败，可在控制台改为每次重置上下文"
+		persist = "执行失败（对话上下文已超出模型上限）；该任务保留上下文，之后每次执行都会因此失败，可在控制台编辑任务勾选“每次全新上下文”"
 	)
 	cases := []struct {
-		name      string
-		platform  string
-		fresh     bool
-		threshold int
-		want      string
-		suffix    func(id string) string
+		name       string
+		platform   string
+		notifyChat string
+		fresh      bool
+		threshold  int
+		want       string
+		suffix     func(id string) string
 	}{
-		{"fresh IM", "feishu", true, 0, plain, nil},
-		{"persistent IM", "feishu", false, 0, persist + "，或删除后不带 --keep-context 重新创建", nil},
-		{"persistent dashboard", "dashboard", false, 0, persist, nil},
-		{"persistent IM, auto-paused", "feishu", false, 1, persist + "，或删除后不带 --keep-context 重新创建",
+		{"fresh IM", "feishu", "", true, 0, plain, nil},
+		{"persistent IM", "feishu", "", false, 0, persist + "，或删除后不带 --keep-context 重新创建", nil},
+		{"persistent IM, notify override", "feishu", "chat-2", false, 0,
+			persist + "，或在创建该任务的会话删除后不带 --keep-context 重新创建", nil},
+		{"persistent dashboard", "dashboard", "", false, 0, persist, nil},
+		{"persistent IM, auto-paused", "feishu", "", false, 1, persist + "，或删除后不带 --keep-context 重新创建",
 			func(id string) string {
 				return "；已连续失败 1 次，任务已自动暂停，修复后发送 /cron resume " + id + " 恢复"
 			}},
@@ -173,7 +185,12 @@ func TestExecuteOpt_ContextTooLongNoticeByMode(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s, r, ns, id := newAutoPauseScheduler(t, tc.threshold, tc.platform)
-			s.editJobForTest(t, id, func(j *Job) { j.FreshContext = tc.fresh })
+			s.editJobForTest(t, id, func(j *Job) {
+				j.FreshContext = tc.fresh
+				if tc.notifyChat != "" {
+					j.NotifyPlatform, j.NotifyChatID = "feishu", tc.notifyChat
+				}
+			})
 			r.set(nil, &TurnFailedError{Cause: TurnCauseContextTooLong})
 			runN(s, id, 1)
 			got := ns.noticesAfter(s)
@@ -210,10 +227,10 @@ func TestTurnFailedNotices_EveryCause(t *testing.T) {
 
 func TestFailureNoticeBody_ShortAndMissingRunID(t *testing.T) {
 	t.Parallel()
-	if got := failureNoticeBody(jobSnapshot{}, ErrClassSessionError, TurnCauseUnknown, RunStateFailed, "abc", time.Minute); got != "启动会话失败 · run abc" {
+	if got := failureNoticeBody(jobSnapshot{}, NotifyTarget{}, ErrClassSessionError, TurnCauseUnknown, RunStateFailed, "abc", time.Minute); got != "启动会话失败 · run abc" {
 		t.Errorf("short run id: got %q", got)
 	}
-	if got := failureNoticeBody(jobSnapshot{}, ErrClassSessionError, TurnCauseUnknown, RunStateFailed, "", time.Minute); got != "启动会话失败" {
+	if got := failureNoticeBody(jobSnapshot{}, NotifyTarget{}, ErrClassSessionError, TurnCauseUnknown, RunStateFailed, "", time.Minute); got != "启动会话失败" {
 		t.Errorf("empty run id must drop the run suffix: got %q", got)
 	}
 }
