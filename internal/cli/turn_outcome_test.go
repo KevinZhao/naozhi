@@ -242,15 +242,15 @@ func TestAbortMarker_Counts(t *testing.T) {
 	m.arm()
 	m.arm()
 	m.disarm()
-	if !m.take() {
+	if a, _ := m.take(); !a {
 		t.Error("a rolled-back arm disarmed a concurrent one that was sent")
 	}
-	if m.take() {
+	if a, _ := m.take(); a {
 		t.Error("a result left arms behind for the next result")
 	}
 	m.disarm()
 	m.arm()
-	if !m.take() {
+	if a, _ := m.take(); !a {
 		t.Error("a rollback after the result took the arm went below zero and swallowed the next arm")
 	}
 }

@@ -511,8 +511,9 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	}
 	nowMS := now.UnixMilli()
 	p.tools.observe(ev, now)
+	orphaned := false
 	if ev.Type == "result" {
-		ev.Aborted = p.turn.abortRequested.take()
+		ev.Aborted, orphaned = p.turn.abortRequested.take()
 	}
 
 	// ---- Passthrough mode hooks ----
@@ -631,6 +632,11 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 		// finds the process Ready. See resolveResult for both rules.
 		p.adopted.resolveResult(ev)
 		// Queued after Ready: a Send that claims in between drops it by RecvAt.
+	} else if ev.Type == "result" && orphaned {
+		// The abandoned turn's aborted result, read after the next Send
+		// claimed the process: that Send must not return it as its answer.
+		p.bookUnclaimed(resultFromEvent(ev))
+		return false
 	} else if ev.Type == "result" {
 		// noLiveSend is read before the handoff: once the result is on eventCh
 		// its Send may take it and turn Ready first. Settled after it, so a
