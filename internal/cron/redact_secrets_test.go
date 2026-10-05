@@ -205,7 +205,7 @@ func TestRecordTerminalResult_ErrMsgSecretRedacted(t *testing.T) {
 	const rawToken = "sk-ant-api03-abcdef0123456789abcdef"
 	errInput := "session error: header " + rawToken + " rejected"
 
-	_, gotErrMsg, _ := s.recordTerminalResult(j.ID, "", errInput, "", ErrClassSessionError, RunStateFailed, time.Now())
+	_, gotErrMsg, _ := s.recordTerminalResult(j.ID, runOutcome{errMsg: errInput, errClass: ErrClassSessionError, state: RunStateFailed}, time.Now())
 	if strings.Contains(gotErrMsg, rawToken) {
 		t.Errorf("recordTerminalResult returned errMsg still contains token: %q", gotErrMsg)
 	}
