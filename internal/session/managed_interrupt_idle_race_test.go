@@ -36,12 +36,10 @@ func TestInterrupt_IdleBranch_CancelsInFlightSend(t *testing.T) {
 
 	proc := NewTestProcess()
 	// Pin the process to the dead/idle branch BEFORE any goroutine starts
-	// — flipping AliveVal later would race Interrupt's proc.Alive() read
-	// (AliveVal is a plain bool on the test stub, not atomic) AND let the
-	// test pass via the wrong branch on unlucky scheduling. Static
-	// pre-set guarantees Interrupt takes the RNEW-006 idle path every
-	// invocation.
-	proc.AliveVal = false
+	// — flipping liveness later would let the test pass via the wrong
+	// branch on unlucky scheduling. Static pre-set guarantees Interrupt
+	// takes the RNEW-006 idle path every invocation.
+	proc.SetAlive(false)
 	// Gate the Send() call so we can assert ordering: Send must store
 	// sendCancel BEFORE Interrupt runs. The SendFunc blocks on ctx.Done().
 	sendEntered := make(chan struct{})
@@ -103,13 +101,11 @@ func TestInterrupt_ConcurrentSendRace(t *testing.T) {
 	}
 
 	proc := NewTestProcess()
-	// Fix the process to the dead-branch shape for the whole run. We do
-	// NOT flip AliveVal concurrently — that would be a test-only race on
-	// a non-atomic field unrelated to the RNEW-006 invariant under test.
-	// Keeping AliveVal=false throughout exercises the exact window the
-	// original bug described: Send() enters, Store(sendCancel); Interrupt
-	// observes proc != nil && !proc.Alive() and must still cancel.
-	proc.AliveVal = false
+	// Fix the process to the dead-branch shape for the whole run. Keeping
+	// it not-alive throughout exercises the exact window the original bug
+	// described: Send() enters, Store(sendCancel); Interrupt observes
+	// proc != nil && !proc.Alive() and must still cancel.
+	proc.SetAlive(false)
 	proc.SendFunc = func(ctx context.Context, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
