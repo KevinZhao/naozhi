@@ -121,9 +121,7 @@ func (r *agentcoreSandboxRunner) RunJob(ctx context.Context, job cron.SandboxJob
 	}
 	// The run record has a 32 KiB cap; the ledger caps rows on Append, the
 	// record needs the same bound here.
-	if len(meta.Models) > costledger.MaxModels {
-		meta.Models = meta.Models[:costledger.MaxModels]
-	}
+	meta.Models = costledger.CapModels(meta.Models)
 
 	switch res.State {
 	case agentcore.Success:
