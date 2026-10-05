@@ -281,7 +281,8 @@ func TestSend_DurationMonotonic(t *testing.T) {
 
 // TestSend_FirstRunRecordNamesItsSession: a new session learns its ID from
 // the first result, after finishRun, so the record must take it from the
-// result; an already-captured ID wins, and an error turn records none.
+// result; an already-captured ID wins, an error turn without a result records
+// none, and an error turn with a partial result is named but not captured.
 func TestSend_FirstRunRecordNamesItsSession(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -290,11 +291,13 @@ func TestSend_FirstRunRecordNamesItsSession(t *testing.T) {
 		result      *clievent.SendResult
 		err         error
 		want        string
+		captured    string
 	}{
-		{"send first turn", false, "", &clievent.SendResult{Text: "ok", SessionID: "S"}, nil, "S"},
-		{"passthrough first turn", true, "", &clievent.SendResult{Text: "ok", SessionID: "S"}, nil, "S"},
-		{"captured id wins", false, "OLD", &clievent.SendResult{Text: "ok", SessionID: "S"}, nil, "OLD"},
-		{"error turn", false, "", nil, errors.New("boom"), ""},
+		{"send first turn", false, "", &clievent.SendResult{Text: "ok", SessionID: "S"}, nil, "S", "S"},
+		{"passthrough first turn", true, "", &clievent.SendResult{Text: "ok", SessionID: "S"}, nil, "S", "S"},
+		{"captured id wins", false, "OLD", &clievent.SendResult{Text: "ok", SessionID: "S"}, nil, "OLD", "OLD"},
+		{"error turn", false, "", nil, errors.New("boom"), "", ""},
+		{"error turn with partial result", false, "", &clievent.SendResult{SessionID: "S"}, errors.New("boom"), "S", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -316,6 +319,9 @@ func TestSend_FirstRunRecordNamesItsSession(t *testing.T) {
 			}
 			if runs[0].SessionID != tt.want {
 				t.Errorf("record SessionID = %q, want %q", runs[0].SessionID, tt.want)
+			}
+			if got := s.getSessionID(); got != tt.captured {
+				t.Errorf("captured SessionID = %q, want %q", got, tt.captured)
 			}
 		})
 	}
