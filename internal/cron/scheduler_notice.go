@@ -179,17 +179,23 @@ func turnFailedNotice(c TurnCause) string {
 	return "执行失败（后端报告本轮出错），请检查执行历史"
 }
 
-// autoPauseNoticeSuffix is appended to a failure notice when that run's
-// failure auto-paused the job; pausedAfter is finishRun's result (0 = not
-// paused). It says where to resume: an IM job by /cron resume in its chat,
-// a dashboard job from the dashboard.
-func autoPauseNoticeSuffix(snap jobSnapshot, pausedAfter int) string {
+// autoPauseNoticeSuffix is appended to a failure notice sent to `to` when that
+// run's failure auto-paused the job; pausedAfter is finishRun's result (0 = not
+// paused). It says where to resume: /cron resume only works in the job's own
+// chat, so a notice delivered elsewhere names that chat generically (never its
+// id) and the dashboard; a job with no IM chat resumes from the dashboard.
+func autoPauseNoticeSuffix(snap jobSnapshot, to NotifyTarget, pausedAfter int) string {
 	if pausedAfter <= 0 {
 		return ""
 	}
-	how := "修复后发送 /cron resume " + snap.jobID + " 恢复"
-	if snap.platName == "dashboard" {
+	var how string
+	switch {
+	case snap.platName == "dashboard" || snap.platName == "" || snap.chatID == "":
 		how = "修复后在控制台恢复"
+	case to == NotifyTarget{Platform: snap.platName, ChatID: snap.chatID}:
+		how = "修复后发送 /cron resume " + snap.jobID + " 恢复"
+	default:
+		how = "修复后在创建该任务的会话发送 /cron resume " + snap.jobID + "，或在控制台恢复"
 	}
 	return "；已连续失败 " + strconv.Itoa(pausedAfter) + " 次，任务已自动暂停，" + how
 }
@@ -199,7 +205,7 @@ func autoPauseNoticeSuffix(snap jobSnapshot, pausedAfter int) string {
 // sentence.
 func (s *Scheduler) deliverFailureNotice(rc runCtx, errClass ErrorClass, turnCause TurnCause, state RunState, timeout time.Duration, pausedAfter int) {
 	s.deliverNotice(rc.notifyTo, formatCronNotice(rc.snap.labelOrID(),
-		failureNoticeBody(errClass, turnCause, state, rc.runID, timeout)+autoPauseNoticeSuffix(rc.snap, pausedAfter)))
+		failureNoticeBody(errClass, turnCause, state, rc.runID, timeout)+autoPauseNoticeSuffix(rc.snap, rc.notifyTo, pausedAfter)))
 }
 
 // deliverPauseNotice announces that the failure of a run with no per-run

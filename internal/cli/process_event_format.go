@@ -76,7 +76,7 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 			// Repo-mutation signals with no row-worthy payload: vcs_state_changed
 			// is a re-read-the-repo hint for the Bash command already on the
 			// timeline, and code_change_published re-fires on every push to a PR
-			// branch, so as rows they are bare ⚙ subtype names.
+			// branch; its PR reaches the dashboard header via Event.CodeChange.
 			"vcs_state_changed", "code_change_published":
 			return nil
 		}

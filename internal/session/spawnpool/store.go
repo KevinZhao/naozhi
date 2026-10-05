@@ -16,7 +16,11 @@
 // is written before its done-channel closes, so a woken waiter sees it.
 package spawnpool
 
-import "time"
+import (
+	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clierr"
+)
 
 // Store is the spawn-concurrency container; the zero value is ready to use.
 type Store struct {
@@ -36,9 +40,11 @@ type Store struct {
 }
 
 // StartupFailure is a key's run of spawns whose CLI failed the Init
-// handshake: Streak in a row, the last at At, Detail naming its cause.
+// handshake: Streak in a row, the last at At, Class and Detail naming its
+// cause.
 type StartupFailure struct {
 	Streak int32
+	Class  clierr.ExitClass
 	At     time.Time
 	Detail string
 }
@@ -135,11 +141,13 @@ func (s *Store) StartupFailure(key string) (StartupFailure, bool) {
 func (s *Store) ClearStartupFailure(key string) { delete(s.failures, key) }
 
 // PruneStartupFailures drops the runs whose last failure is before cutoff,
-// so a key that is never retried cannot pin an entry.
-func (s *Store) PruneStartupFailures(cutoff time.Time) {
+// so a key that is never retried cannot pin an entry, and returns their keys.
+func (s *Store) PruneStartupFailures(cutoff time.Time) (pruned []string) {
 	for key, f := range s.failures {
 		if f.At.Before(cutoff) {
 			delete(s.failures, key)
+			pruned = append(pruned, key)
 		}
 	}
+	return pruned
 }
