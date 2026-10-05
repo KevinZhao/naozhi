@@ -24,11 +24,17 @@ func (a testRouterAdapter) ResetAndRecreate(ctx context.Context, key string, opt
 }
 
 func (a testRouterAdapter) TakeoverPrecheck(key string) error {
-	return a.Router.TakeoverPrecheck(key, sessionview.AgentOpts{})
+	lease, err := a.Router.ReserveTakeover(key, sessionview.AgentOpts{})
+	lease.Release()
+	return err
 }
 
 func (a testRouterAdapter) Takeover(ctx context.Context, key, sessionID, workspace string, opts sessionview.AgentOpts) (Session, error) {
-	s, err := a.Router.Takeover(ctx, key, sessionID, workspace, opts)
+	lease, err := a.Router.ReserveTakeover(key, opts)
+	if err != nil {
+		return nil, err
+	}
+	s, err := a.Router.Takeover(ctx, lease, sessionID, workspace)
 	return testSession(s), err
 }
 
