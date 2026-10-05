@@ -246,12 +246,14 @@ func gitIn(t *testing.T, dir string, args ...string) {
 
 // A stub git tracks, in the project's own repo or in a repo around the
 // projects root, is kept, so the sweep leaves no deletion in the working
-// tree; an untracked stub in a repo still goes.
+// tree; an untracked stub in a repo still goes. GIT_DIR and GIT_INDEX_FILE
+// naming another repo do not reach the probe.
 func TestScan_LegacyStubTrackedByGitKept(t *testing.T) {
-	t.Parallel()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
 	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	root := t.TempDir()
 	tracked := writeStub(t, root, "tracked", 100)
 	gitIn(t, filepath.Join(root, "tracked"), "init", "-q")
@@ -261,6 +263,10 @@ func TestScan_LegacyStubTrackedByGitKept(t *testing.T) {
 	inParent := writeStub(t, root, "inparent", 300)
 	gitIn(t, root, "init", "-q")
 	gitIn(t, root, "add", "--", "inparent/.naozhi/project.yaml")
+	other := t.TempDir()
+	gitIn(t, other, "init", "-q")
+	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(other, ".git", "index"))
 	indexPath := filepath.Join(t.TempDir(), "projects-index.json")
 
 	m, _ := NewManager(root, PlannerDefaults{}, WithIndexPath(indexPath))

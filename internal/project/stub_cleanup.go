@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -129,24 +130,37 @@ func inGitCheckout(dir string) bool {
 }
 
 // gitTracksStub asks git whether projDir's .naozhi/project.yaml is in the
-// index. Exit 1 means untracked; a missing git, a non-repo, a refused repo
-// (exit 128) or a timeout are trackUnknown.
+// index: exit 0 listing the path is tracked, exit 0 listing nothing is
+// untracked, anything else is trackUnknown, since a broken git or the macOS
+// CLT shim also exits 1. GIT_* variables are dropped so naozhi's own
+// environment cannot point git at another repo or index.
 func gitTracksStub(projDir string) trackState {
 	ctx, cancel := context.WithTimeout(context.Background(), stubProbeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", projDir, "-c", "core.fsmonitor=false",
-		"ls-files", "--error-unmatch", "--", configDir+"/"+configFile)
-	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
+		"ls-files", "-z", "--", configDir+"/"+configFile)
+	cmd.Env = append(gitFreeEnv(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
 	cmd.WaitDelay = time.Second
-	err := cmd.Run()
-	var exitErr *exec.ExitError
+	out, err := cmd.Output()
 	switch {
-	case err == nil:
-		return trackTracked
-	case errors.As(err, &exitErr) && exitErr.ExitCode() == 1:
+	case err != nil:
+		return trackUnknown
+	case len(out) == 0:
 		return trackUntracked
 	}
-	return trackUnknown
+	return trackTracked
+}
+
+// gitFreeEnv is os.Environ without its GIT_* variables.
+func gitFreeEnv() []string {
+	env := os.Environ()
+	kept := env[:0]
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "GIT_") {
+			kept = append(kept, kv)
+		}
+	}
+	return kept
 }
 
 // remove deletes s's stub, and the then-empty .naozhi/, if it is still a
