@@ -455,14 +455,13 @@ func (s *Scheduler) finishOrphanRun(p sandboxstore.Pending, js orphanJobSnapshot
 		finalizer: &runFinalizer{},
 		snap:      jobSnapshot{prompt: js.prompt, workDir: js.workDir, fresh: js.freshContext},
 	}
-	paused := s.finishRun(rc, runOutcome{
+	// No pause notice to send: a sandbox_transport failure leaves the failure
+	// streak alone, so an orphan never auto-pauses its job.
+	s.finishRun(rc, runOutcome{
 		state: orphanTerminalState, errClass: orphanTerminalErrClass,
 		errMsg:  orphanTerminalErrMsg,
 		sandbox: true,
 	})
-	if paused > 0 {
-		s.deliverPauseNotice(rc, orphanTerminalErrClass, TurnCauseUnknown, orphanTerminalState, s.sandboxRunBudget(), paused)
-	}
 }
 
 // removeReconciledPending drops the pending file once reconcile has

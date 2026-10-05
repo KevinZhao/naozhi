@@ -237,7 +237,8 @@ type SchedulerConfig struct {
 	// without losing the metric. Zero/negative fall back to the default (#519).
 	SlowThreshold time.Duration
 	// AutoPauseAfterFailures pauses a job after this many consecutive failed
-	// or timed-out runs, so a broken job stops notifying every tick. Zero
+	// or timed-out runs, so a broken job stops notifying every tick; a lost
+	// sandbox connection and a transient backend failure do not count. Zero
 	// means defaultAutoPauseAfterFailures; negative disables auto-pause.
 	AutoPauseAfterFailures int
 	// AllowNilRouter opts the constructor out of the boot-time "router
