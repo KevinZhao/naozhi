@@ -130,7 +130,6 @@ func main() {
 		runMode      = flag.String("mode", "warn", "warn | fail")
 		sarif        = flag.Bool("sarif", false, "emit SARIF on stdout")
 		exemptPath   = flag.String("exemptions", defaultExemptionsPath, "path to exemptions.yaml")
-		genBaseline  = flag.Bool("gen-baseline", false, "(re)generate handle_baseline section of exemptions.yaml from current source and exit")
 		serverPkg    = flag.String("server-pkg", "internal/server", "server package directory")
 		dashboardPkg = flag.String("dashboard-pkg", "internal/dashboard", "dashboard package directory (may not exist yet)")
 		moduleRoot   = flag.String("module-root", ".", "module root the typed rules load")
@@ -148,22 +147,6 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "load exemptions %s: %v\n", *exemptPath, err)
 		os.Exit(2)
-	}
-
-	if *genBaseline {
-		decls, err := scanHandlerDecls(*serverPkg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "gen-baseline: %v\n", err)
-			os.Exit(2)
-		}
-		names := handlerKeys(decls)
-		exempts.HandleBaseline = names
-		if err := saveExemptions(*exemptPath, exempts); err != nil {
-			fmt.Fprintf(os.Stderr, "save: %v\n", err)
-			os.Exit(2)
-		}
-		fmt.Fprintf(os.Stderr, "baseline: %d HTTP handler declarations recorded\n", len(names))
-		return
 	}
 
 	vs, err := collectViolations(*serverPkg, *dashboardPkg, exempts, time.Now())
@@ -362,17 +345,6 @@ func loadExemptions(path string) (*exemptions, error) {
 		return nil, err
 	}
 	return &e, nil
-}
-
-func saveExemptions(path string, e *exemptions) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	data, err := yaml.Marshal(e)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
 }
 
 func emitText(vs []Violation) {
