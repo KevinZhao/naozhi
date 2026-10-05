@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // TestTestutil_BuildTagContract pins the production-binary protection on
@@ -119,12 +121,13 @@ func TestTestProcess_NoDirectStateFieldAccess(t *testing.T) {
 	t.Parallel()
 	fset := token.NewFileSet()
 	var hits []string
-	err := filepath.WalkDir("..", func(path string, d fs.DirEntry, err error) error {
+	const root = "../.."
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			if name := d.Name(); name == "testdata" || name == "node_modules" {
+			if testhelper.SkipRepoDir(root, path, d) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -149,7 +152,7 @@ func TestTestProcess_NoDirectStateFieldAccess(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("walk internal/: %v", err)
+		t.Fatalf("walk repository: %v", err)
 	}
 	if len(hits) > 0 {
 		t.Errorf("direct TestProcess state field access; use SetState/SetAlive or State/Alive:\n  %s", strings.Join(hits, "\n  "))
