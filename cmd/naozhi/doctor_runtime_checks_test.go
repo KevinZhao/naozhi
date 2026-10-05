@@ -220,8 +220,8 @@ func TestDoctor_LoadConfigOnce(t *testing.T) {
 	}
 }
 
-// TestDoctor_RunIncludesRuntimeChecks: run() wires the CLI and transcribe
-// checks into the report.
+// TestDoctor_RunIncludesRuntimeChecks: run() wires the CLI, transcribe and IM
+// access checks into the report.
 func TestDoctor_RunIncludesRuntimeChecks(t *testing.T) {
 	// run() includes checkStateDir, which writes a probe file under ~/.naozhi.
 	t.Setenv("HOME", t.TempDir())
@@ -232,7 +232,7 @@ func TestDoctor_RunIncludesRuntimeChecks(t *testing.T) {
 		timeout: 2 * time.Second, configPath: cfgPath}
 	d.run()
 	got := findingsByCategory(d)
-	for _, c := range []string{"cli backend claude", "transcribe creds", "transcribe ffmpeg"} {
+	for _, c := range []string{"cli backend claude", "transcribe creds", "transcribe ffmpeg", "im access"} {
 		if _, ok := got[c]; !ok {
 			t.Errorf("run() emitted no %q finding; findings %+v", c, d.findings)
 		}

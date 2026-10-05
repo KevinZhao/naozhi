@@ -60,7 +60,7 @@
 
 ### Security
 
-- **IM 发送者鉴权 `im_access`**（#3442）：此前任何能给 bot 发消息的 IM 用户都能让 naozhi 在宿主机上执行命令。新增顶层配置 `im_access`（`default_deny` / `deny_reply` / `platforms.<p>.allowed_users` / `admin_users`），在所有入口（含飞书 AskUserQuestion 卡片回答）命令分发前统一判定；`/cron`、`/cd`、`/project` 需 admin，`admin_users` 为空时所有 allowed 用户都是 admin。被拒消息记 Info `im access denied`（带 user ID）并计入 `naozhi_dispatch_denied_total`；私聊回复一次本人 ID（同一用户 10 分钟内只回一次），群聊静默。**不配置时行为不变**（全放行），但启动日志与 `naozhi config check` 对每个未受限的已启用平台给出 WARN——`config check` 因此会从退出码 0 变为 1，按退出码 0 判定的脚本需要调整。条目里的未知平台名、空 ID、未展开的 `${VAR}` 会让配置加载失败。改名单需重启
+- **IM 发送者鉴权 `im_access`**（#3442）：此前任何能给 bot 发消息的 IM 用户都能让 naozhi 在宿主机上执行命令。新增顶层配置 `im_access`（`default_deny` / `deny_reply` / `platforms.<p>.allowed_users` / `admin_users`），在所有入口（含飞书 AskUserQuestion 卡片回答）命令分发前统一判定；`/cron`、`/cd`、`/project` 需 admin，`admin_users` 为空时所有 allowed 用户都是 admin。被拒消息记 Info `im access denied`（带 user ID）并计入 `naozhi_dispatch_denied_total`；私聊回复一次本人 ID（同一用户 10 分钟内只回一次），群聊静默。**不配置时行为不变**（全放行），但启动日志与 `naozhi config check` 对每个未受限的已启用平台给出 WARN——`config check` 因此会从退出码 0 变为 1，按退出码 0 判定的脚本需要调整。条目里的未知平台名、空 ID、未展开的 `${VAR}` 会让配置加载失败。改名单需重启。`naozhi doctor` 新增 `im access` 一行，同样对未受限平台给 warn（不影响 doctor 退出码），受限时列出每个平台的用户数与 admin 数；README「部署 · IM 访问控制」说明威胁模型、如何从拒绝日志取 ID
 - **Multipart Value 字段数上限 32**（RNEW-SEC-001），阻断 padded-body DoS
 - **PDF 上传路径显式拒 gzip magic**（RNEW-SEC-002），defence-in-depth
 - **Attachment ETag 改为 sha256 前 16 字符**（RNEW-SEC-004），不再通过响应头泄漏纳秒级 mtime
@@ -76,6 +76,7 @@
   - 不做迁移：以前保存时被钉住的项目和 cron 任务保持原值（无法和有意的选择区分）。要恢复跟随，在项目设置或 cron 编辑里把 backend 选回「自动」并保存
 - `spawnSession` panic recover 错误消息不再双前缀 `"spawn process: spawn process:"`（RNEW-009）
 - IM 首轮自动接管不再在 naozhi 会拒绝接管时（max_procs 已满 / 该 key 正在 spawn / 正在关停 / planner 的 exempt 配额已满 / agent 的 model 或 backend 非法）先 SIGTERM 掉终端里的 Claude CLI；接管前改为先跑 `Router.TakeoverPrecheck`（#3395）
+- 从未 spawn 过的源会话（历史面板 resume 占位 / backend 为空的旧持久化条目）上打开的 scratch 现在跑在源会话 resume 时会用的 CLI（router 默认 backend）上，不再落到 access profile 的 `default_backend`；`/api/scratch/open` 响应里的 `backend` 也改为报告实际解析出的 backend（#3420）
 
 ### Documentation
 

@@ -695,3 +695,44 @@ func TestHistoryDirForBackend(t *testing.T) {
 		})
 	}
 }
+
+// TestDoctor_IMAccess grades each configured IM platform's im_access state:
+// any platform open to every sender warns and is named, otherwise the pass
+// line counts each platform's distinct users and admins.
+func TestDoctor_IMAccess(t *testing.T) {
+	t.Parallel()
+	const platforms = "platforms:\n" +
+		"  feishu:\n    app_id: a\n    app_secret: s\n" +
+		"  slack:\n    bot_token: xoxb-test\n" +
+		"  discord:\n    bot_token: d\n"
+	cases := []struct {
+		name, body, level, detail string
+	}{
+		{"no platform", "log:\n  level: info\n", "pass", "no IM platform configured"},
+		{"open platforms", platforms +
+			"im_access:\n  platforms:\n    feishu:\n      allowed_users: [ou_a]\n",
+			"warn", "slack, discord open to every sender (no im_access entry, default_deny off): " +
+				"anyone who can message the bot runs commands on this host; " +
+				"set im_access.platforms.<platform>.allowed_users or im_access.default_deny: true"},
+		{"all guarded", platforms + "im_access:\n  default_deny: true\n  platforms:\n" +
+			"    feishu:\n      allowed_users: [ou_a, \" ou_b\"]\n      admin_users: [ou_b, ou_c]\n" +
+			"    discord:\n      allowed_users: [\"1\", \"2\", \"3\"]\n",
+			"pass", "feishu 3 user(s), 2 admin(s) · slack refused (default_deny) · discord 3 user(s), all admin"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := &doctor{out: &bytes.Buffer{}, configPath: writeDoctorConfig(t, tc.body)}
+			d.checkIMAccess()
+			if f := findingsByCategory(d)["im access"]; f.Level != tc.level || f.Detail != tc.detail {
+				t.Errorf("im access = %+v\nwant level %q detail %q", f, tc.level, tc.detail)
+			}
+		})
+	}
+
+	d := &doctor{out: &bytes.Buffer{}, configPath: filepath.Join(t.TempDir(), "missing.yaml")}
+	d.checkIMAccess()
+	if f := findingsByCategory(d)["im access"]; f.Level != "pass" || f.Detail != "skipped (config not loaded)" {
+		t.Errorf("unloadable config: im access = %+v, want a pass skip", f)
+	}
+}

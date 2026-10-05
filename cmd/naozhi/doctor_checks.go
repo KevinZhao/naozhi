@@ -292,6 +292,42 @@ func (d *doctor) checkServerSecurity() {
 			"if you front naozhi with HTTPS termination (ALB/CloudFront/nginx), set server.trusted_proxy: true so dashboard cookies get Secure flag")
 }
 
+// checkIMAccess reports who may message the bot on each configured IM
+// platform. A platform with no im_access entry while default_deny is off
+// serves every sender, and an IM message there runs commands on this host.
+func (d *doctor) checkIMAccess() {
+	cfg, err := d.loadConfig()
+	if err != nil {
+		d.add("im access", "pass", "skipped (config not loaded)")
+		return
+	}
+	postures := cfg.IMAccessPostures()
+	if len(postures) == 0 {
+		d.add("im access", "pass", "no IM platform configured")
+		return
+	}
+	var open, parts []string
+	for _, p := range postures {
+		switch {
+		case p.Open:
+			open = append(open, p.Platform)
+		case p.Users == 0:
+			parts = append(parts, p.Platform+" refused (default_deny)")
+		case p.Admins == 0:
+			parts = append(parts, fmt.Sprintf("%s %d user(s), all admin", p.Platform, p.Users))
+		default:
+			parts = append(parts, fmt.Sprintf("%s %d user(s), %d admin(s)", p.Platform, p.Users, p.Admins))
+		}
+	}
+	if len(open) > 0 {
+		d.add("im access", "warn", strings.Join(open, ", ")+
+			" open to every sender (no im_access entry, default_deny off): anyone who can message the bot runs commands on this host; "+
+			"set im_access.platforms.<platform>.allowed_users or im_access.default_deny: true")
+		return
+	}
+	d.add("im access", "pass", strings.Join(parts, " · "))
+}
+
 // isLoopbackAddr returns true when addr clearly binds to localhost only.
 // Conservative: empty, ":port" (0.0.0.0) and unparseable addrs return false
 // so checkServerSecurity warns rather than silently passing.

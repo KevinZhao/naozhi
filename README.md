@@ -358,6 +358,8 @@ Dashboard: 浏览器打开 `http://localhost:8180`
 
 Agent 命令通过 `agent_commands` 配置映射，可自定义。
 
+配置了 `im_access` 后，`/cd`、`/project`、`/cron` 只有 `admin_users` 能用（`admin_users` 为空时所有 `allowed_users` 都算管理员），见 [IM 访问控制](#im-访问控制)。
+
 ---
 
 ## 配置参考
@@ -450,6 +452,14 @@ reverse_nodes:                            # 多节点：接受远程拨入
     token: "${NODE_TOKEN}"
     display_name: "Kevin's Mac"
 
+im_access:                                # IM 发送者白名单，见「部署 · IM 访问控制」
+  default_deny: false                     # true：没有条目的平台拒绝所有人
+  # deny_reply: ""                        # 替换私聊里的拒绝文案（默认附带对方 ID）
+  platforms:
+    feishu:
+      allowed_users: ["ou_xxxxxxxx"]      # 可以聊天；admin_users 也算
+      admin_users: ["ou_yyyyyyyy"]        # 可以用 /cd /project /cron；空 = 所有人都是管理员
+
 # upstream:                               # 多节点：作为远程节点拨入
 #   url: "wss://primary.example.com/ws-node"
 #   node_id: "my-workstation"
@@ -519,6 +529,39 @@ journalctl -u naozhi -f
 > **一键排障**：`naozhi doctor` 聚合 binary / systemd / HTTP / auth / pprof / 状态目录
 > 7 项检查，任一 fail 退出码 1。CI 友好，支持 `--json` 输出。详见
 > [`docs/ops/doctor.md`](docs/ops/doctor.md)。
+
+### IM 访问控制
+
+IM 消息会交给 CLI 执行，CLI 跳过权限确认（`--dangerously-skip-permissions`），
+所以**能给 bot 发消息就等于能在宿主机上跑命令**。dashboard 和反向节点都有 token，
+IM 入口靠的是 `im_access`：
+
+```yaml
+im_access:
+  platforms:
+    feishu:
+      allowed_users: ["ou_alice", "ou_bob"]   # 飞书 open_id
+      admin_users: ["ou_alice"]
+    slack:
+      allowed_users: ["U012ABCDEF"]           # Slack user ID
+```
+
+- **不配置 = 所有人都能用**（兼容旧配置）。启动日志、`naozhi config check`、
+  `naozhi doctor` 会对每个没有条目的平台告警，`config check` 因此退出码为 1。
+  `default_deny: true` 会拒绝所有没有条目的平台。
+- 平台一旦有条目，名单外的人和没有用户 ID 的消息都会被拒绝，包括飞书卡片上的
+  AskUserQuestion 回答。被拒的消息不会触发任何命令，也不会进 CLI。
+- **怎么拿用户 ID**：被拒的消息会在 Info 级别打一行 `im access denied`，`user`
+  字段就是要填的 ID（飞书 open_id `ou_...`、Slack `U...`、Discord 用户 ID、微信
+  `from`）。私聊里被拒的人也会收到带自己 ID 的提示，同一人 10 分钟最多一次；群里
+  对名单外的人不回复，免得刷屏。拒绝次数记在 expvar `naozhi_dispatch_denied_total`。
+- `/cd`、`/project`、`/cron` 只有 `admin_users` 能用；名单内的非管理员用这些命令
+  时（私聊和群里都一样）会收到「该命令需要管理员权限。」。`admin_users` 为空时所有
+  `allowed_users` 都算管理员，所以只开白名单不会少功能。
+- 已有的定时任务不受影响：把某人移出名单后，他创建过的 cron 任务照常运行，要在
+  dashboard 里手动删除。
+- 改名单要重启 naozhi（会打断正在运行的会话），配置热重载见 #3437。
+- 把自己关在外面时，dashboard 不受 `im_access` 影响，可以从那里继续操作。
 
 ### 生产架构
 
