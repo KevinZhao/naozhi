@@ -28,11 +28,13 @@ import (
 )
 
 const (
-	// restoreRatio and restoreFloor flag an entry as charging a restored
-	// cost-state total r: Amount >= restoreRatio*r with r >= restoreFloor,
-	// and its model rows (when it has any) hold restoreRatio of r's tokens.
-	restoreRatio = 0.98
-	restoreFloor = 0.5
+	// An entry charged a restored cost-state total r when r >= restoreFloor,
+	// Amount >= restoreRatio*r, and it exceeds its own turn's transcript
+	// usage by restoreExcess of r: nearer r than 0, as that window can also
+	// hold spend no entry booked and the entry spend no transcript shows.
+	restoreRatio  = 0.98
+	restoreFloor  = 0.5
+	restoreExcess = 0.5
 	// residualFloor and residualShare bound the per-day gap left alone:
 	// max(residualFloor, residualShare*transcript).
 	residualFloor = 1.0
@@ -113,6 +115,7 @@ type sessionSettlement struct {
 	FlaggedUSD, ResidualUSD       float64
 	FlaggedN, ResidualDays        int
 	UnpricedDays, AlreadyFlaggedN int
+	UndecidedN                    int    // entries whose turn could not be priced to judge a restore
 	HeldDays                      int    // days an unattributed entry shared a key with
 	OpenDays                      int    // days whose spend another day's entry books, or none yet
 	ForeignDays                   int    // days holding a cron run's turns or lines of unknown origin
@@ -452,7 +455,9 @@ func costStateRows(m claudefs.CostStateMark) []costledger.ModelDelta {
 
 // restoredBy returns the cost-state a process starting before ts restored:
 // the last one some later line follows by ts. A cost-state the process wrote
-// itself, on its way out, is followed only by later lines.
+// itself, on its way out, is followed only by later lines. Every later entry
+// gets it as a candidate, as a killed process writes none and the next one
+// restores the same line again; chargesRestore tells which of them charged it.
 func restoredBy(marks []claudefs.CostStateMark, ts time.Time) (claudefs.CostStateMark, bool) {
 	var best claudefs.CostStateMark
 	found := false
@@ -506,18 +511,53 @@ func addRow(r *costledger.ModelDelta, d costledger.ModelDelta) {
 	r.WebSearch += d.WebSearch
 }
 
-// chargesRestore reports whether e charged m's total on top of its own turn.
-// A turn differenced from a baseline of 0 also carries every restored token
-// in its model rows, which a correctly baselined turn after a large restore
-// does not; an entry without rows is judged on its amount alone.
-func chargesRestore(e costledger.Entry, m claudefs.CostStateMark) bool {
-	if m.TotalCostUSD < restoreFloor || e.Amount < restoreRatio*m.TotalCostUSD {
-		return false
+// turnUsage is the transcript usage of the turn an entry booked; usd is set
+// when priced.
+type turnUsage struct {
+	tokens int64
+	usd    float64
+	priced bool
+}
+
+// turnWindow sums the messages with from < At <= to, leaving out
+// interactive-terminal ones as classifyMessages does, and prices them.
+func turnWindow(msgs []claudefs.MessageUsage, from, to time.Time, rates *costledger.RateBook) turnUsage {
+	var in []claudefs.MessageUsage
+	var u turnUsage
+	for _, m := range msgs {
+		if !m.At.After(from) || m.At.After(to) || m.Entrypoint == "cli" || m.Entrypoint == "claude-vscode" {
+			continue
+		}
+		in = append(in, m)
+		u.tokens += m.Input + m.Output + m.CacheRead + m.CacheWrite
 	}
-	if len(e.Models) == 0 {
-		return true
+	u.priced = true
+	for _, rows := range claudefs.DayTotals(in) {
+		p, ok := priceDay(rows, rates)
+		u.usd, u.priced = u.usd+p.usd, u.priced && ok
 	}
-	return float64(tokenSum(e.Models)) >= restoreRatio*float64(tokenSum(costStateRows(m)))
+	return u
+}
+
+// mayChargeRestore reports whether e is large enough to have charged m's
+// total, which must be large enough to tell.
+func mayChargeRestore(e costledger.Entry, m claudefs.CostStateMark) bool {
+	return m.TotalCostUSD >= restoreFloor && e.Amount >= restoreRatio*m.TotalCostUSD
+}
+
+// chargesRestore reports whether e, which mayChargeRestore of m, charged m's
+// total on top of turn, the usage of its own turn: a turn differenced from a
+// baseline of 0 exceeds it by about r, a correctly baselined one by about
+// nothing. Tokens are compared when e and m both have them, priced USD
+// otherwise; decided is false when that needs a price turn lacks.
+func chargesRestore(e costledger.Entry, m claudefs.CostStateMark, turn turnUsage) (charged, decided bool) {
+	if et, rt := tokenSum(e.Models), tokenSum(costStateRows(m)); et > 0 && rt > 0 {
+		return float64(et-turn.tokens) >= restoreExcess*float64(rt), true
+	}
+	if !turn.priced {
+		return false, false
+	}
+	return e.Amount-turn.usd >= restoreExcess*m.TotalCostUSD, true
 }
 
 func tokenSum(rows []costledger.ModelDelta) int64 {
@@ -560,12 +600,29 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 		return st
 	}
 
+	var prev time.Time // the session's last non-adjust entry so far
 	for _, e := range entries {
+		from := prev
+		if e.Kind != costledger.KindAdjust {
+			prev = e.TS
+		}
 		if !settles(e.TS) || e.RunID == "" || (e.Kind != costledger.KindTurn && e.Kind != costledger.KindBackfill) {
 			continue
 		}
 		m, ok := restoredBy(in.marks, e.TS)
-		if !ok || !chargesRestore(e, m) {
+		if !ok || !mayChargeRestore(e, m) {
+			continue
+		}
+		// The turn starts at the previous entry, or at the cost-state when
+		// later: what the process that wrote it ran after that entry is in r.
+		if m.Before.After(from) {
+			from = m.Before
+		}
+		charged, decided := chargesRestore(e, m, turnWindow(in.usage.Messages, from, e.TS, l.rates))
+		if !decided {
+			st.UndecidedN++
+		}
+		if !charged {
 			continue
 		}
 		runID := reconcilePrefix + in.sid + ":run:" + e.RunID
@@ -827,6 +884,9 @@ func printReconcile(out io.Writer, rep reconcileReport, write bool) {
 			}
 			if s.UnpricedDays > 0 {
 				note += fmt.Sprintf("；%d 天含未学到单价的模型，未比对", s.UnpricedDays)
+			}
+			if s.UndecidedN > 0 {
+				note += fmt.Sprintf("；%d 条无法判定是否计入恢复额（无单价），未标记", s.UndecidedN)
 			}
 		}
 		fmt.Fprintf(out, "%-8.8s %5d %11.2f %11.2f %11.2f %+11.2f  %s\n", s.SessionID, s.Entries, s.Before, s.After, s.Transcript, s.After-s.Before, note)
