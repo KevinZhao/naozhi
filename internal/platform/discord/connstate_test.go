@@ -3,6 +3,7 @@ package discord
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -623,6 +624,42 @@ func TestBotHeal_RateLimitedIsNotRetried(t *testing.T) {
 		t.Fatalf("botID = %q after a 429, want empty", got)
 	}
 }
+
+// TestBotHeal_FailureLogsStatusNotBody: a failed heal logs the HTTP status,
+// not the response body, which can be an HTML page. Not parallel: it swaps
+// slog's default handler.
+func TestBotHeal_FailureLogsStatusNotBody(t *testing.T) {
+	var mu sync.Mutex
+	var logs strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(writerFunc(func(p []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return logs.Write(p)
+	}), &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	g := newFakeGateway(t, 0)
+	d := newGatewayAdapter(t, g)
+	startWithoutBotID(t, g, d)
+	g.restStatus.Store(http.StatusUnauthorized)
+
+	d.maybeHealBotID()
+	waitDispatch(t, d, "the failing self-heal never finished")
+	mu.Lock()
+	got := logs.String()
+	mu.Unlock()
+	if !strings.Contains(got, "self-heal failed") || !strings.Contains(got, "HTTP 401") {
+		t.Fatalf("heal failure log lacks the status:\n%s", got)
+	}
+	if strings.Contains(got, "Unauthorized") {
+		t.Fatalf("heal failure log carries the response body:\n%s", got)
+	}
+}
+
+type writerFunc func(p []byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
 func TestNextProbeDelay_DoublesToTheCap(t *testing.T) {
 	t.Parallel()
