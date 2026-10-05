@@ -82,19 +82,22 @@ func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 	return s.finishMutation(s.tbl.mutateByID(id, mutResume), mutResume)
 }
 
-// autoPauseIfDue pauses job id once its failure streak has reached
-// s.autoPauseAfter and returns the streak it paused at; 0 means it did not.
+// autoPauseIfDue pauses job id once its failures have reached
+// s.autoPauseAfter and returns the count it paused at; 0 means it did not.
+// transient says the run was a transient backend failure, which is judged by
+// Job.TransientFailures over transientAutoPauseWindow instead of the streak.
 // finishRun calls it with no lock held, before the run's gate is released,
 // so no further run of the job can start in between. Below the threshold it
 // returns without taking entryMu, which DeleteJob can hold for seconds.
-func (s *Scheduler) autoPauseIfDue(id string) int {
-	if s.autoPauseAfter <= 0 || !s.tbl.autoPauseCandidate(id, s.autoPauseAfter) {
+func (s *Scheduler) autoPauseIfDue(id string, transient bool) int {
+	now := s.now()
+	if s.autoPauseAfter <= 0 || !s.tbl.autoPauseCandidate(id, s.autoPauseAfter, transient, now) {
 		return 0
 	}
 	s.entryMu.Lock()
 	defer s.entryMu.Unlock()
-	r, due := s.tbl.autoPauseIfDue(id, s.autoPauseAfter)
-	if !due {
+	r, count := s.tbl.autoPauseIfDue(id, s.autoPauseAfter, transient, now)
+	if count == 0 {
 		return 0
 	}
 	if _, err := s.finishMutation(r, mutAutoPause); err != nil {
@@ -103,6 +106,7 @@ func (s *Scheduler) autoPauseIfDue(id string) int {
 	}
 	metrics.CronAutoPausedTotal.Add(1)
 	slog.Warn("cron job auto-paused after consecutive failures",
-		"job_id", id, "consecutive_failures", r.job.ConsecutiveFailures)
-	return r.job.ConsecutiveFailures
+		"job_id", id, "consecutive_failures", r.job.ConsecutiveFailures,
+		"transient", transient, "transient_failures", r.job.TransientFailures)
+	return count
 }
