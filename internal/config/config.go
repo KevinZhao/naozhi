@@ -269,6 +269,3 @@ func validateConfig(cfg *Config) error {
 	}
 	return nil
 }
-
-// The validators live in internal/tuningspec (leaf) so the session layer can
-// reuse them without importing config (which would cycle).

@@ -49,16 +49,16 @@ var cliAvailCacheTTL = 60 * time.Second
 // cliAvailCache memoises cliAvailable(path) → cliAvailEntry, keyed by path.
 var cliAvailCache sync.Map
 
-// systemInfo returns compact system fingerprint for the workspace info bar.
-// Cached after first call since values are static for the process lifetime.
-//
-// CONTRACT: the returned map is a process-wide singleton — callers MUST
-// treat it as read-only (initStaticStats deep-copies before mutating).
+// sysInfoOnce guards sysInfoVal, the process-wide cache behind systemInfo.
 var (
 	sysInfoOnce sync.Once
 	sysInfoVal  map[string]any
 )
 
+// systemInfo returns compact system fingerprint for the workspace info bar,
+// cached after the first call since the values are static for the process.
+// CONTRACT: the returned map is a process-wide singleton — callers MUST
+// treat it as read-only (initStaticStats deep-copies before mutating).
 func systemInfo() map[string]any {
 	sysInfoOnce.Do(func() {
 		memMB := 0
