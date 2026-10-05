@@ -2637,7 +2637,7 @@ workflowPushLoop 与 board 发布、generation 变化并发。
 | R6 | 保活改动让 session 永不过期 | `workflowPinMax=6h` 无观测后放开；scratch 按观测时间老化；驱逐有回退 |
 | R7 | shim idle timer 不随 stdout 刷新，naozhi 断开 > 4h 仍杀 CLI | 既有行为，记录；另开 issue |
 | R8 | js-ratchet / 前端闸门多 | 预先申请覆盖全特性的 ratchet-raise issue；逐 PR 台账；DOM API 构建零新增 sink |
-| R9 | hook / control_response 改为行首锚定后，CC 改键序时快路径失效 | 结构性兜底已存在（`protocol_claude.go:475`）且 control_response 兜底改走 `parseControlAck`、hook 兜底按 `hook_*` 通配，键序变化只变慢；前缀形态按 CC 2.1.288 bundle 的帧构造（`{type:"system",subtype:"hook_…"}`、`{type:"control_response",response:…}`）核对，快路径测试以该形态的 fixture 断言不经 unmarshal；stream-sample 不含这两类帧，真实抓帧的 golden 留待 PR-5 刷新 fixture 时补 |
+| R9 | hook / control_response 改为行首锚定后，CC 改键序时快路径失效 | 结构性兜底已存在（`protocol_claude.go:475`）且 control_response 兜底改走 `parseControlAck`、hook 兜底按 `hook_*` 通配，键序变化只变慢；前缀形态按 CC 2.1.288 bundle 的帧构造（`{type:"system",subtype:"hook_…"}`、`{type:"control_response",response:…}`）核对，快路径测试以该形态的 fixture 断言不经 unmarshal；PR-5 补了真实抓帧的 golden（`internal/cli/testdata/hook-control-2.1.288.jsonl`：CC 2.1.288 在临时 HOME 下、以 SessionStart hook 与 set_model 控制请求产出，不调模型），`TestReadEvent_CapturedHookControlFrames` 断言这三帧都走快路径 |
 | R10 | 修 tailer allowedRoot 改变既有行为（更多 tailer 真正起来，触及 50 上限） | 50 上限与 capacity 降级本已存在；PR 描述记录 |
 | R11 | CC 状态 / 词表再变（新 state、新 status） | 规范化表单点实现 + unknown 透传 + 手写 fixture 随升级刷新 |
 | R12 | 计数型 sessions_update（`BumpVersion`，推进 `stats.version`）让每个 tab 每 30s 重拉一次 `/api/sessions`、整块重绘 sidebar 并重跑 main-state reconcile 等 applied hooks | 仅限有 running workflow 的 session、每 session 至多 1/30s；trailing edge 合并；不置 dirty、不写 sessions.json；代价写明（§5.8） |

@@ -370,3 +370,34 @@ func benchReadEventLine(b *testing.B, line string) {
 		}
 	}
 }
+
+// TestReadEvent_CapturedHookControlFrames pins the line-start prefixes the
+// fast path keys on against frames CC 2.1.288 actually wrote (a SessionStart
+// hook and a set_model ack, captured under a throwaway HOME). Breaking each
+// line's last byte proves the skip / targeted parse ran instead of the full
+// unmarshal, which would reject the broken line.
+func TestReadEvent_CapturedHookControlFrames(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile("testdata/hook-control-2.1.288.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("fixture has %d lines, want hook_started, hook_response, control_response", len(lines))
+	}
+	p := &ClaudeProtocol{}
+	for _, line := range lines[:2] {
+		broken := line[:len(line)-1] + "!"
+		if events, _, err := p.ReadEvent(broken); err != nil || events != nil {
+			t.Errorf("hook frame missed the fast path: events %v err %v\nline: %.120s", events, err, line)
+		}
+	}
+	events, _, err := p.ReadEvent(lines[2])
+	if err != nil || len(events) != 1 || events[0].Type != "control_ack" || events[0].RPCRequestID != "req_1" || events[0].SubType != "success" {
+		t.Errorf("control_response = %+v, err %v; want a control_ack for req_1", events, err)
+	}
+	if events, _, err := p.ReadEvent(lines[2][:len(lines[2])-1] + "!"); err != nil || events != nil {
+		t.Errorf("control_response missed the fast path: events %v err %v", events, err)
+	}
+}
