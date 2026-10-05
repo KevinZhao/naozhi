@@ -99,6 +99,7 @@
 
 ### Documentation
 
+- `config.example.yaml` 补上注释掉的 `access_profiles` / `default_access_profile` 示例，以及 `agents[].access_profile` / `agents[].backend`，并写明 profile 的选取顺序、`default_model` 与 `default_backend` 在各自优先级链里的位置和 env 白名单；新测试把这段示例取消注释后跑一遍加载期校验，示例与代码不会再脱节（#3409）
 - `readLoop` defer 注释按 LIFO 执行序重写，避免未来 reviewer 误判 `isChanAlive` 不变量（RNEW-007）
 - `connector.handleRequest` ctx 参数 godoc 列出 appCtx vs connCtx 使用矩阵（RNEW-008）
 - `dispatcher.sendAndReply` 显式 `_ = takeoverFn(...)` 并注释为何不 branch（RNEW-010）

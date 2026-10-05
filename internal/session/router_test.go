@@ -2593,6 +2593,28 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 		}
 	})
 
+	// The lock holds only a recorded profile: an existing session that
+	// recorded none takes up whatever opts or the default resolve to now
+	// (config.example.yaml documents this).
+	t.Run("existing session without a recorded profile is resolved again", func(t *testing.T) {
+		key := "feishu:user:bob:agent1"
+		for _, tc := range []struct {
+			name, def string
+			opts      AgentOpts
+			want      string
+		}{
+			{"agent profile", "", AgentOpts{AccessProfile: "1p-fable"}, "1p-fable"},
+			{"default profile", "bedrock-opus", AgentOpts{}, "bedrock-opus"},
+		} {
+			r := mkRouter()
+			r.backends.defaultAccessProfile = tc.def
+			putT(r, key, &ManagedSession{key: key})
+			if sp := resolveT(r, key, "sid-1", tc.opts); sp.AccessProfileID != tc.want {
+				t.Errorf("%s: AccessProfileID = %q, want %q", tc.name, sp.AccessProfileID, tc.want)
+			}
+		}
+	})
+
 	// #3106: agents[].access_profile rides defaults[agentID] through the
 	// KeyResolver into opts.AccessProfile, so it outranks the default profile
 	// and still loses to a dashboard pick and the resume lock.

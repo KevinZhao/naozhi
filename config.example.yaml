@@ -280,6 +280,19 @@ agents:
   researcher:
     model: "opus"
     system_prompt: "You are a deep research expert. Decompose questions, search from multiple angles, and synthesize findings."
+    # Optional: run this agent's sessions and cron jobs under a named access
+    # profile (defined under access_profiles below) and on a given backend
+    # (which must be listed in cli.backends), e.g. keep it on claude when
+    # cli.backend is kiro. backend applies only to a key with no session yet;
+    # access_profile also reaches an existing session that recorded no profile,
+    # at its next spawn or resume. A project's own access_profile / backend pin
+    # outranks them; a project planner reads neither. A session pinned to a
+    # profile this way never runs on a remote node. A profile's env holds
+    # Claude Code settings, so pair it with claude; on kiro, model must be a
+    # kiro model id.
+    #access_profile: "bedrock"
+    #backend: "claude"
+    #
     # Optional, claude- and kiro-backed sessions only: overrides the backend's
     # thinking-effort tier for this agent — e.g. run a cheap tier for a
     # frequently-scheduled cron agent while the default stays higher.
@@ -301,6 +314,62 @@ agents:
 agent_commands:
   review: "code-reviewer"
   research: "researcher"
+
+# Optional: access profiles, named bundles of "how a session reaches the
+# model" (RFC docs/rfc/project-access-profile.md). Without any, every session
+# runs on the ~/.claude/settings.json baseline.
+#
+# env is overlaid on that baseline for the profile's sessions. Only the overlay
+# allowlist is accepted: CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_SKIP_BEDROCK_AUTH,
+# AWS_REGION, AWS_DEFAULT_REGION, ANTHROPIC_MODEL, ANTHROPIC_BASE_URL,
+# ANTHROPIC_BEDROCK_BASE_URL and the Anthropic credentials. Any other key,
+# AWS_PROFILE and the AWS access keys included, fails the load. A *_FILE value
+# is an absolute host path read at spawn; its contents become the matching
+# credential (ANTHROPIC_AUTH_TOKEN_FILE → ANTHROPIC_AUTH_TOKEN), and a missing
+# file fails the spawn instead of falling back to the baseline. The values live
+# only in this file: a project.yaml names a profile but never carries env.
+#
+# Which profile a session gets, highest first: the profile the session already
+# recorded (a resume never moves such a session to another account) > the
+# dashboard pick > the project's access_profile pin > agents[].access_profile >
+# default_access_profile > none. A project planner skips the agents[] tier.
+# An existing session that recorded no profile is resolved again: adding
+# default_access_profile or an agent/project pin moves it onto that profile
+# at its next spawn or resume.
+#
+# default_model: cli.backends[].model / cli.model < default_model <
+# agents[].model or the project planner_model < the dashboard per-session
+# model pick.
+#
+# default_backend applies only to a key with no session yet: an explicit
+# request, the project backend pin and the dashboard backend pick >
+# agents[].backend > default_backend > cli.backend. It must be an enabled
+# backend. With more than one backend enabled the dashboard "new session"
+# dialog always sends a backend, so it does not reach dashboard-created
+# sessions yet (#3418).
+#
+# `naozhi config check -effective` prints each agent's spawn argv under the
+# backend it lands on, and each profile's merged env (masked).
+#
+#default_access_profile: "bedrock"
+#access_profiles:
+#  bedrock:
+#    display_name: "Bedrock · Opus"
+#    chip_color: "#7c5cff"
+#    env:
+#      CLAUDE_CODE_USE_BEDROCK: "1"
+#      AWS_REGION: "us-west-2"
+#    default_model: "opus"
+#  personal:
+#    display_name: "1P · personal"
+#    chip_color: "#d97757"
+#    env:
+#      CLAUDE_CODE_USE_BEDROCK: "0"
+#      ANTHROPIC_AUTH_TOKEN_FILE: "/home/ec2-user/.secrets/anthropic-1p.token"
+#    default_model: "sonnet"
+#    # Anthropic credentials only work on claude, so keep this profile's
+#    # sessions there even when cli.backend is another CLI.
+#    default_backend: "claude"
 
 cron:
   store_path: "~/.naozhi/cron_jobs.json"
