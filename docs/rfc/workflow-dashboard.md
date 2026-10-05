@@ -861,7 +861,7 @@ Patch         *TaskPatch     `json:"patch,omitempty"`          // task_updated
 WorkflowProgress []WorkflowItem `json:"workflow_progress,omitempty"` // 见 4.1.1；nil = 本帧无快照（含 null）
 WorkflowDecode   WorkflowDecode `json:"-"`                     // ReadEventInto 填：ok | partial | failed
 WorkflowLaunch *WorkflowLaunch `json:"-"`                      // user 帧 tool_use_result（定向二次解码）
-WorkflowTask  bool           `json:"-"`                        // Tracker 标记：该 TaskID 是 local_workflow
+WorkflowTask  bool           `json:"-"`                        // Tracker 标记：该 TaskID 是 local_workflow（随写者 Observe 在 PR-6 加入）
 
 type TaskPatch struct {
     Status  string `json:"status,omitempty"`
@@ -919,10 +919,15 @@ type WorkflowDecode uint8 // WorkflowDecodeOK | WorkflowDecodePartial | Workflow
      header，**保留上一版的行**）。encoding/json 会把这些字段置零：`[1,2]` 得到 Type="" 的项、全部被当作未知类型忽略；
      `"index":"3"` 让各项都撞到 index 0。按 Partial 处理会用这些项整体替换、清空真实行，而且 CC 只要不改回来，之后每帧都如此
      （go1.27.0 实测）；
+   - **`Field` 的写法随 Go 版本而变**（PR-5 实测）：go1.27.0 带元素下标（`workflow_progress.0.tokens`，`[1,2]` 报
+     `workflow_progress.0`），CI 用的 go1.26.6 不带（`workflow_progress.tokens`，`[1,2]` 报 `workflow_progress`、落进规则 2）。
+     所以分级只看 `workflow_progress.` 之后的**最后一段**：身份字段名或纯数字 → Failed，其余 → Partial
+     （`clievent.WorkflowDecodeFromError`，两种写法都有测试）；
    - 其他字段（如实测的 `workflow_progress.0.tokens`）→ `WorkflowDecode = Partial`：坏字段置零，其余项完好。
      encoding/json 遇类型错会记录首个错误并**继续**解完（已实测：description、其余项均正确）。
    - **Partial 的身份复核**：encoding/json 只报**第一个**类型错，后面某项的 `index` 类型错会被前面的 `tokens` 错遮住。
-     所以 Partial 帧在 Tracker 应用前再做一遍 O(n) 校验：每项 `Type` 非空；`workflow_agent` 的 `Index ≥ 1` 且互不重复
+     所以 Partial 帧在 Tracker 应用前再做一遍 O(n) 校验（PR-5 放在 `ReadEventInto` 里做，`clievent.WorkflowItemsValid`，
+     不过即置 nil + Failed，Event 上不会出现不合格的快照；两类 index 都升序时零分配）：每项 `Type` 非空；`workflow_agent` 的 `Index ≥ 1` 且互不重复
      （CC 的 index 从 1 起连续编号，实测 309 项为 1..309）；`workflow_phase` 的 `Index` 互不重复。不通过即降为 Failed。
      （这项校验对 OK 帧同样执行，代价可忽略。）
 4. 其他错误（语法错、类型错不在 workflow_progress 下）→ 维持今天的行为（返回 err）。
@@ -2527,14 +2532,15 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
 ### 11.1 Golden fixture
 
 - 把 `/tmp/nz-wfprobe/stream-sample.jsonl` 复制为
-  `internal/cli/workflow/testdata/probe-3agent.jsonl`，脱敏（`/Users/zhaokm` → `/home/u`、
-  去掉 init 帧里的 MCP 清单）；对应的 `wf_2997921d-435.json` 与 agent jsonl `agent-a2093755b9a9ce8c0.jsonl` 的
+  `internal/cli/workflow/testdata/probe-3agent.jsonl`（PR-5 先放在 `internal/cli/testdata/workflow-probe-3agent.jsonl`），脱敏（`/Users/zhaokm` → `/home/u`、
+  去掉 init 帧里的 MCP 清单，以及同样暴露本机安装的 `slash_commands` / `skills` / `plugins`；其余行逐字节不变）；对应的 `wf_2997921d-435.json` 与 agent jsonl `agent-a2093755b9a9ce8c0.jsonl` 的
   首两行（首行即带 harness 框架的 prompt，§8.2 的剥离测试用）一并放入 `testdata/run/`。v5 不读 journal，不再收它。
 - 手写的小 fixture（按 §1.2.2 的 CC 构造器形态）：安全分类器拦截项（`state:"error",blocked:true`，
   无 agentId）、排队 catch 项、限流重排队（running → 无 agentId 的 `start` → 撤销 `error`）、重试换新
   agentId、用户跳过、`task_notification.status:"stopped"`、resume（同 runId 新 taskId，盘上为旧 taskId
   的结果文件）、`"workflow_progress":null`、mcp_task 带 `summary` 的 `task_progress`。
-- 大快照用包内测试 helper `func bigSnapshot(n int, opts bigOpts) []byte`（放在 `internal/cli/workflow` 与 `internal/cli`
+- 大快照用包内测试 helper `func bigSnapshot(n int, opts bigOpts) []byte`（PR-5 在 `internal/cli` 里先落一个只有跳过路径对照开关的
+  `bigSnapshot(n int, skipKey bool) string`，`opts` 随用到它的 PR 加）（放在 `internal/cli/workflow` 与 `internal/cli`
   各自的 `_test.go` 里，或前者导出给后者的 `workflowtest` 子包），在测试与 bench 里现场合成 400-agent / 2000-agent 快照（`opts` 可让
   lastToolSummary 全部含 `=`，走 redact 的正则分支），不入库大文件。v2 的 `testdata/gen_big.go`（`//go:build ignore`）在 `go test`
   时不会运行，产物又不入库，依赖它的 bench 与 2000 行用例拿不到输入。
@@ -2715,8 +2721,10 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   只解 `task_started` 前缀行。
 - 文件：`clievent/event.go`、新 `clievent/workflow.go` + test、`clievent/tool_input.go` + test、
   `protocol_claude.go`、`process_readloop.go`（deliverEvent 前清空 + defer 清 buf）、`process_event_format.go`、
-  `process_extra_test.go`（:1395-1440）、`internal/session/router_shim.go`（前缀门控放在 PR-2 抽出的 `replayLinkerTasks` 内）、
-  `internal/cli/testdata/`（fixture；PR-6 移入 `internal/cli/workflow/testdata/`）。
+  `process_extra_test.go`（:1395-1440）、`internal/session/router_shim.go`（前缀门控放在 PR-2 抽出的 `replayLinkerTasks` 内，
+  用解码计数测门控）、
+  `internal/cli/testdata/`（fixture；PR-6 移入 `internal/cli/workflow/testdata/`）。`Event.WorkflowTask` 不在本 PR：
+  它唯一的写者是 PR-6 的 `Observe`，随写者一起加。
 - 测试：§11.2 解码 / hook 之外的 `FormatToolInput` / eventCh-readEventBuf 行 + Fuzz + bench。
 - 验收：bench 数字（`-count 5`，含跳过路径对照）贴 PR，满足 ≤ 1.5ms / ≤ 400KB；`wsproto.schema.json`
   无变化（Event 不是 wire 类型）。
@@ -2734,7 +2742,8 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   的来源等级（SessionID 取自该 task 帧上的 `ev.SessionID`，§4.2）；`IsWorkflowTask` 规则 2b；SeedFromReplay 的"逆序收集、正序应用"与 `known` 参数（§5.9）；
   种子条目 `LastObservedAt = 0`；`Degraded=phases_capped`；`Source` 去掉从未产生的 `journal`；**无 `RowsGen`**。
 - 文件：新 `internal/cli/workflow/{types.go,published.go,tracker.go,normalize.go,classify.go,seed.go,merge.go,equal.go}` + tests
-  （含 `bigSnapshot(n)` 测试 helper，§11.1）；CLAUDE.md `cli` 行子包列表加 `workflow`。
+  （含 `bigSnapshot(n)` 测试 helper，§11.1）；CLAUDE.md `cli` 行子包列表加 `workflow`；`clievent/event.go` 加 `WorkflowTask`（`Observe` 是它的写者，PR-5 未加）；
+  probe fixture 从 `internal/cli/testdata/workflow-probe-3agent.jsonl` 移入 `testdata/`，`run/` 下的文件随用到它们的测试加入。
 - 测试：§11.2 Tracker 规范化 / 生命周期 / `IsWorkflowTask` / 结果文件合并 / SeedFromReplay 行（总解码次数 O(task 数)、探针截到第 16 行的正序应用）+ race；
   `BenchmarkObserve_*` 的 Tracker 部分。
 - 验收：probe fixture 回放结果与 `wf_*.json` 等价（状态、计数、tokens）；手写 fixture 全部按 §4.2 表

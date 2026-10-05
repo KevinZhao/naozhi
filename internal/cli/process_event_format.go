@@ -46,8 +46,15 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 			entry.Type = clievent.KindTaskProgress
 			entry.TaskID = ev.TaskID
 			entry.ToolUseID = ev.ToolUseID
+			// task_updated carries only a patch; the subtype is no summary (the
+			// dashboard copies a progress Summary into the agent's description).
 			if ev.Description != "" {
 				entry.Summary = textutil.TruncateRunes(ev.Description, 120)
+			} else if ev.SubType == "task_updated" {
+				entry.Summary = ""
+			}
+			if ev.Patch != nil {
+				entry.Status = ev.Patch.Status
 			}
 			entry.LastTool = ev.LastToolName
 			if ev.Usage != nil {
@@ -59,8 +66,12 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 			entry.Type = clievent.KindTaskDone
 			entry.TaskID = ev.TaskID
 			entry.ToolUseID = ev.ToolUseID
-			if ev.Description != "" {
+			// CC sends a notification's text as summary, not description.
+			switch {
+			case ev.Description != "":
 				entry.Summary = textutil.TruncateRunes(ev.Description, 120)
+			case ev.TaskSummary != "":
+				entry.Summary = textutil.TruncateRunes(ev.TaskSummary, 120)
 			}
 			entry.Status = ev.Status
 			if ev.Usage != nil {
