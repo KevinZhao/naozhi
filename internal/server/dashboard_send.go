@@ -273,11 +273,11 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid workspace"})
 			return
 		}
-		// Refuse remote dispatch for a non-default access-profile session —
-		// the env overlay is host-local and never crosses the wire (RFC
-		// project-access-profile P1-a). Unconditional since #2551; this is not
-		// a tightening — gateRemoteAccessProfile returns nil for a nil
-		// resolver by design, which is exactly what the old `h.hub != nil`
+		// Refuse remote dispatch for a scratch: or non-default access-profile
+		// session — the env overlay is host-local and never crosses the wire
+		// (RFC project-access-profile P1-a). Unconditional since #2551; not
+		// a tightening — the profile check is a no-op for a nil resolver
+		// by design, which is exactly what the old `h.hub != nil`
 		// guard produced for test harnesses.
 		// selectNodeForBackend below is the single node + cap authority (one
 		// GetNode; no TOCTOU between lookup and cap check).

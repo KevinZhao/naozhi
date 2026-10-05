@@ -2,7 +2,9 @@ package shim
 
 // Dead-CLI retire: a shim whose CLI exited keeps its socket bound for the
 // post-exit reattach window, so a respawn on the same key would be refused by
-// ensureSocketFreeForReuse. The respawn path asks that shim to exit first.
+// ensureSocketFreeForReuse. Two callers ask that shim to exit: StartShim's
+// pre-bind step (prepareSocketForSpawn) and the session reset path
+// (session.BackendRegistry.retireDeadShim), which spawns nothing afterwards.
 
 import (
 	"context"
@@ -45,7 +47,7 @@ func (m *Manager) RetireDeadShim(ctx context.Context, key string) (bool, error) 
 		handle.Close()
 		return false, nil
 	}
-	slog.Info("retiring dead-CLI shim before respawn",
+	slog.Info("retiring dead-CLI shim",
 		"key_hash", KeyHash(key), "shim_pid", handle.Hello.ShimPID)
 	handle.Shutdown()
 	if !WaitSocketGone(handle.State.Socket, retireSocketWait) {
