@@ -368,8 +368,10 @@ func TestReconcile_SessionFilter(t *testing.T) {
 }
 
 // An entry charged a restore only when the cost-state was already behind it
-// when its process started, and only when its rows carry the restored
-// tokens: a correctly baselined turn as large as the restore is genuine.
+// when its process started, and only when it exceeds its own turn's usage by
+// nearer the restore than nothing: a correctly baselined turn as large as the
+// restore is genuine. Tokens decide when both sides have rows, priced USD
+// otherwise.
 func TestChargesRestore(t *testing.T) {
 	ts := time.Date(2026, 9, 28, 4, 33, 46, 0, time.UTC)
 	marks := []claudefs.CostStateMark{
@@ -381,26 +383,43 @@ func TestChargesRestore(t *testing.T) {
 	if !ok || m.TotalCostUSD != 584.17 {
 		t.Fatalf("restoredBy = %v %v, want the 584.17 written before the process", m.TotalCostUSD, ok)
 	}
+	rowless := claudefs.CostStateMark{CostState: claudefs.CostState{TotalCostUSD: 10}}
 	row := func(cacheRead int64) []costledger.ModelDelta {
 		return []costledger.ModelDelta{{Model: "m", Tokens: costledger.Tokens{CacheRead: cacheRead}}}
 	}
+	priced := func(tokens int64, usd float64) turnUsage { return turnUsage{tokens: tokens, usd: usd, priced: true} }
 	for _, c := range []struct {
-		name string
-		e    costledger.Entry
-		want bool
+		name             string
+		e                costledger.Entry
+		m                claudefs.CostStateMark
+		turn             turnUsage
+		charged, decided bool
 	}{
-		{"restore plus a turn", costledger.Entry{Amount: 614.54, Models: row(614540)}, true},
-		{"no rows: amount alone", costledger.Entry{Amount: 600}, true},
-		{"large turn, baselined", costledger.Entry{Amount: 600, Models: row(60000)}, false},
-		{"below the restore", costledger.Entry{Amount: 500, Models: row(614540)}, false},
+		{"restore plus a turn", costledger.Entry{Amount: 614.54, Models: row(614540)}, m, priced(30370, 30.37), true, true},
+		{"restore plus unbooked spend in the turn", costledger.Entry{Amount: 584.17, Models: row(584170)}, m, priced(250000, 250), true, true},
+		{"large turn, baselined", costledger.Entry{Amount: 600, Models: row(600000)}, m, priced(600000, 600), false, true},
+		{"baselined turn with spend the transcript lacks", costledger.Entry{Amount: 600, Models: row(600000)}, m, priced(400000, 400), false, true},
+		{"tokens decide over a short price", costledger.Entry{Amount: 600, Models: row(600000)}, m, priced(600000, 0), false, true},
+		{"no rows: restore plus a priced turn", costledger.Entry{Amount: 600}, m, priced(15830, 15.83), true, true},
+		{"no rows: the priced turn alone", costledger.Entry{Amount: 600}, m, priced(600000, 600), false, true},
+		{"no rows: turn not priced", costledger.Entry{Amount: 600}, m, turnUsage{tokens: 600000}, false, false},
+		{"cost-state without rows: restore plus a turn", costledger.Entry{Amount: 12, Models: row(12000)}, rowless, priced(2000, 2), true, true},
+		{"cost-state without rows: the turn alone", costledger.Entry{Amount: 12, Models: row(12000)}, rowless, priced(12000, 12), false, true},
 	} {
-		if got := chargesRestore(c.e, m); got != c.want {
-			t.Errorf("%s: chargesRestore = %v, want %v", c.name, got, c.want)
+		if !mayChargeRestore(c.e, c.m) {
+			t.Errorf("%s: mayChargeRestore = false", c.name)
+		}
+		charged, decided := chargesRestore(c.e, c.m, c.turn)
+		if charged != c.charged || decided != c.decided {
+			t.Errorf("%s: chargesRestore = %v %v, want %v %v", c.name, charged, decided, c.charged, c.decided)
 		}
 	}
+	if mayChargeRestore(costledger.Entry{Amount: 500, Models: row(614540)}, m) {
+		t.Error("an entry below the restore may have charged it")
+	}
 	small := claudefs.CostStateMark{CostState: claudefs.CostState{TotalCostUSD: 0.4}}
-	if chargesRestore(costledger.Entry{Amount: 0.5}, small) {
-		t.Error("a restore under the floor flagged an entry")
+	if mayChargeRestore(costledger.Entry{Amount: 0.5}, small) {
+		t.Error("a restore under the floor may have been charged")
 	}
 }
 
