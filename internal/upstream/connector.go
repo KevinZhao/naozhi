@@ -11,8 +11,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -88,6 +90,9 @@ type Connector struct {
 	discovery        Discovery
 	// turns runs the "send" RPC; nil refuses every send.
 	turns TurnSubmitter
+	// hubSendStatus: the primary of the current link advertised
+	// node.CapSendStatus; set on every register.
+	hubSendStatus atomic.Bool
 }
 
 // New creates a Connector. projMgr may be nil if projects are not configured;
@@ -277,6 +282,7 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("register failed: primary speaks event schema %q, this node speaks %q — upgrade whichever is older",
 			hubTag, clievent.SchemaCap)
 	}
+	c.hubSendStatus.Store(slices.Contains(ack.Capabilities, node.CapSendStatus))
 	slog.Info("connected to primary", "url", c.cfg.URL, "node_id", c.cfg.NodeID)
 
 	// Enable WebSocket-level ping/pong for dead connection detection.

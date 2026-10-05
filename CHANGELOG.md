@@ -96,6 +96,7 @@
 - 接管外部 CLI 时，naozhi 在 SIGTERM 之前就向 router 预留该 key（`Router.ReserveTakeover`：in-flight 标记 + 一个 pending 名额），一直持有到新进程 spawn。此前预检只读状态，旧 CLI 退出的最长约 5s 里 key 上没有任何标记：同一 cwd 的第二个外部 CLI 接管会通过预检并被杀掉，max_procs 只剩一个名额时对两个不同 key 的接管也都能通过、其中一个杀掉 CLI 后才报满。现在第二次接管在杀进程前就返回 409「takeover already in progress」/ 503（dashboard、IM 自动接管同此；#3417）
 - Dashboard 的 Agent drill-in 走上 WS 实时推送：agent tailer 此前拿 operator workspace（`allowed_root`）当 transcript 根，`~/.claude/projects` 下的子 agent transcript 全被拒，客户端静默降级成 3s HTTP 轮询。现在 tailer 与 `/api/sessions/agent_events` 共用同一个解析后的 projects 根，并且两处都按 `PathContainedInRoot` 判定（macOS 上大小写与根不同的路径判定一致）
 - 主节点经反向连接代理到 node 的接管（`takeover` RPC）同样在 SIGTERM 之前预留 key 并持有到 spawn：此前 node 侧的预检只读状态，同一 cwd 的第二次接管会在第一个 CLI 退出期间通过预检并杀掉第二个 CLI；现在它在杀进程前就被拒绝（`takeover refused: a spawn for this key is already in flight`）。身份校验失败、SIGTERM 失败或连接器关停时预留都会归还（#3417）
+- reverse node 只对声明了 `send-status` 能力的 primary 回答「忙」（#3421）：v0.1.43 的 node 接在 v0.1.41 及更早的 primary 后面时，会话正忙、队列关闭而被丢弃的消息在 dashboard 上显示为「已接受」——旧 primary 不读 send 的返回状态。现在 primary 在 `registered` 应答里声明 `send-status`，node 对没有声明的 primary（包括 v0.1.42 / v0.1.43）改回 v0.1.43 之前的错误：「发送失败：会话正忙，消息未送达，请稍后重试」。升级顺序仍是先 primary 后 node；在 v0.1.41 primary 后面跑 v0.1.43 node 的部署请升级 primary。HTTP 拉取模式的 node 接在 v0.1.41 primary 后面同样显示「已接受」，这一侧没有握手可改，只能升级 primary（v0.1.42 起已修，#3209）
 
 ### Documentation
 
