@@ -256,12 +256,13 @@ func countMisplacedDocs(c *Counts, fset *token.FileSet, files []*ast.File) {
 // a lower-to-upper case step (fooBar, GetFoo) or a lower-case start with an
 // underscore.
 func identShaped(w string) bool {
-	for i := 1; i < len(w); i++ {
-		if unicode.IsLower(rune(w[i-1])) && unicode.IsUpper(rune(w[i])) {
+	r := []rune(w)
+	for i := 1; i < len(r); i++ {
+		if unicode.IsLower(r[i-1]) && unicode.IsUpper(r[i]) {
 			return true
 		}
 	}
-	return unicode.IsLower(rune(w[0])) && strings.Contains(w, "_")
+	return len(r) > 0 && unicode.IsLower(r[0]) && strings.Contains(w, "_")
 }
 
 // declNames lists the names d declares; a method declares its own name.

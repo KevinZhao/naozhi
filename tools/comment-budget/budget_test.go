@@ -162,6 +162,8 @@ func TestCountMisplacedDocs(t *testing.T) {
 		"// T.Run is fine dotted.\nfunc (T) Spin() {}\n\n" + // hit: Run is not Spin
 		"var (\n\t// guarded is guarded by guardedMu.\n\tguardedMu int\n\tguarded   int\n)\n\n" + // names a sibling spec
 		"// T satisfies fmt.Stringer.\nvar _ = T{}\n\n" + // a blank declaration
+		"// old_name was renamed.\nfunc New() {}\n\n" + // hit: snake_case, declared nowhere
+		"// naïve prose opens this doc.\nconst mode = 1\n\n" + // a non-ASCII word, not an identifier
 		"var last = 1 // a trailing note\n\n" +
 		"// orphan documents nothing.\n" // hit
 	b := "package p\n\n// Stop halts.\nfunc Stop() {}\n\n// helper helps.\nfunc helper() {}\n"
@@ -178,7 +180,7 @@ func TestCountMisplacedDocs(t *testing.T) {
 		files = append(files, f)
 	}
 	countMisplacedDocs(&c, fset, files)
-	want := []string{"a.go:9", "a.go:12", "a.go:15", "a.go:24", "a.go:38"}
+	want := []string{"a.go:9", "a.go:12", "a.go:15", "a.go:24", "a.go:36", "a.go:44"}
 	if c.MisplacedDocs != len(want) || strings.Join(c.Offenders["MisplacedDocs"], " ") != strings.Join(want, " ") {
 		t.Errorf("MisplacedDocs = %d at %v, want %v", c.MisplacedDocs, c.Offenders["MisplacedDocs"], want)
 	}
