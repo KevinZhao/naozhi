@@ -201,10 +201,11 @@ func (c *Counts) hit(fset *token.FileSet, key string, pos token.Pos) {
 
 // countMisplacedDocs counts MisplacedDocs over the files of one package. A
 // doc may open with its own name or a prefix of it (a family doc), or with a
-// name its declaration's params, results, value or type use ("Config returned
-// by Load" on func Load() *Config); a receiver or function body does not
-// count. Prose openers are legal because only declared or identifier-shaped
-// words count. A file with no declarations is a design note and is skipped.
+// name its declaration's param and result types, value or type use ("Config
+// returned by Load" on func Load() *Config); a receiver, a function body or a
+// sibling spec does not count. Prose openers are legal because only declared
+// or identifier-shaped words count. A file with no declarations is a design
+// note and is skipped.
 func countMisplacedDocs(c *Counts, fset *token.FileSet, files []*ast.File) {
 	names := map[string]bool{}
 	for _, f := range files {
@@ -214,9 +215,9 @@ func countMisplacedDocs(c *Counts, fset *token.FileSet, files []*ast.File) {
 			}
 		}
 	}
-	misplaced := func(doc *ast.CommentGroup, d ast.Decl) {
+	misplaced := func(doc *ast.CommentGroup, d ast.Decl, scope ast.Node) {
 		w, own := docSubject(doc), declNames(d)
-		if w == "" || slices.Contains(own, w) || !slices.ContainsFunc(own, func(n string) bool { return n != "_" }) || declRefs(d)[w] {
+		if w == "" || slices.Contains(own, w) || !slices.ContainsFunc(own, func(n string) bool { return n != "_" }) || declRefs(scope)[w] {
 			return
 		}
 		if !names[w] && (!identShaped(w) || slices.ContainsFunc(own, func(n string) bool { return strings.HasPrefix(n, w) })) {
@@ -233,15 +234,15 @@ func countMisplacedDocs(c *Counts, fset *token.FileSet, files []*ast.File) {
 			switch d := d.(type) {
 			case *ast.FuncDecl:
 				if d.Doc != nil {
-					misplaced(d.Doc, d)
+					misplaced(d.Doc, d, d)
 				}
 			case *ast.GenDecl:
 				if d.Doc != nil && len(d.Specs) == 1 {
-					misplaced(d.Doc, d)
+					misplaced(d.Doc, d, d)
 				}
 				for _, s := range d.Specs {
 					if doc := specDoc(s); doc != nil {
-						misplaced(doc, d)
+						misplaced(doc, d, s)
 					}
 				}
 			}
@@ -284,46 +285,50 @@ func declNames(d ast.Decl) []string {
 	return nil
 }
 
-// declRefs collects the identifiers d's type expressions and values use: a
-// function's params and results, not its receiver or body; a spec's type and
-// values, skipping the bodies of function literals.
-func declRefs(d ast.Decl) map[string]bool {
+// declRefs collects the identifiers n's types and values use, not the field,
+// method or param names n declares: a function's param and result types, not
+// its receiver or body; a spec's type and values, skipping function literal
+// bodies. n is a FuncDecl, a GenDecl or one spec of it.
+func declRefs(n ast.Node) map[string]bool {
 	refs := map[string]bool{}
 	var visit func(n ast.Node) bool
 	visit = func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.Ident:
 			refs[n.Name] = true
+		case *ast.Field:
+			ast.Inspect(n.Type, visit)
+			return false
 		case *ast.FuncLit:
 			ast.Inspect(n.Type, visit)
 			return false
 		}
 		return true
 	}
-	var roots []ast.Node
-	switch d := d.(type) {
+	var specs []ast.Spec
+	switch n := n.(type) {
 	case *ast.FuncDecl:
-		roots = append(roots, d.Type)
+		ast.Inspect(n.Type, visit)
 	case *ast.GenDecl:
-		for _, s := range d.Specs {
-			switch s := s.(type) {
-			case *ast.TypeSpec:
-				roots = append(roots, s.Type)
-				if s.TypeParams != nil {
-					roots = append(roots, s.TypeParams)
-				}
-			case *ast.ValueSpec:
-				if s.Type != nil {
-					roots = append(roots, s.Type)
-				}
-				for _, v := range s.Values {
-					roots = append(roots, v)
-				}
+		specs = n.Specs
+	case ast.Spec:
+		specs = []ast.Spec{n}
+	}
+	for _, s := range specs {
+		switch s := s.(type) {
+		case *ast.TypeSpec:
+			ast.Inspect(s.Type, visit)
+			if s.TypeParams != nil {
+				ast.Inspect(s.TypeParams, visit)
+			}
+		case *ast.ValueSpec:
+			if s.Type != nil {
+				ast.Inspect(s.Type, visit)
+			}
+			for _, v := range s.Values {
+				ast.Inspect(v, visit)
 			}
 		}
-	}
-	for _, r := range roots {
-		ast.Inspect(r, visit)
 	}
 	return refs
 }

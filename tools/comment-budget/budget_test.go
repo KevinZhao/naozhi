@@ -181,7 +181,12 @@ func TestCountMisplacedDocs(t *testing.T) {
 		"// Persister writes logs.\nfunc (p *Persister) Flush() {}\n\n" + // hit: the receiver is not exempt
 		"// Stop halts the loop.\nfunc Run(ctx context.Context) {}\n\n" + // hit: Stop is not in the signature
 		"// Config is read by the closure.\nvar opened = func() { _ = Config{} }\n\n" + // hit: a function body is not exempt
-		"// Config bounds the set.\ntype set[K Config] struct{}\n"
+		"// Config bounds the set.\ntype set[K Config] struct{}\n\n" +
+		"// Config is embedded.\ntype embeds struct{ Config }\n\n" +
+		"// Stop is the field.\ntype hooks struct{ Stop func() }\n\n" + // hit: a field name is not a use
+		"// Flush writes the batch.\ntype flusher interface{ Flush() }\n\n" + // hit: a method name is not a use
+		"// helper runs here.\nfunc call(helper int) {}\n\n" + // hit: a param name is not a use
+		"var (\n\t// Server is good.\n\tc1 = 1\n\td1 Server\n)\n" // hit: a sibling spec's type is not a use
 	note := "package p\n\n// note.go is a design note with no declarations.\n"
 	var c Counts
 	c.Offenders = map[string][]string{}
@@ -197,7 +202,7 @@ func TestCountMisplacedDocs(t *testing.T) {
 	countMisplacedDocs(&c, fset, files)
 	got := c.Offenders["MisplacedDocs"]
 	slices.Sort(got)
-	want := []string{"a.go:12", "a.go:15", "a.go:24", "a.go:36", "a.go:44", "a.go:9", "prose.go:23", "prose.go:26", "prose.go:29"}
+	want := []string{"a.go:12", "a.go:15", "a.go:24", "a.go:36", "a.go:44", "a.go:9", "prose.go:23", "prose.go:26", "prose.go:29", "prose.go:38", "prose.go:41", "prose.go:44", "prose.go:48"}
 	if c.MisplacedDocs != len(want) || !slices.Equal(got, want) {
 		t.Errorf("MisplacedDocs = %d at %v, want %v", c.MisplacedDocs, got, want)
 	}
