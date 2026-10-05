@@ -537,7 +537,9 @@ func TestAttachReconnected_UnknownMidTurnThenLiveResult(t *testing.T) {
 // unknown verdict: the result is the read loop's very first frame, so the
 // resolver's answer must already be armed when the loop starts. The resolver
 // waits a moment for that frame to be consumed; it cannot be, unless the loop
-// is already running.
+// is already running. That pins the resolver before the loop; arming after it
+// is pinned by TestAttachReconnected_UnknownMidTurnThenLiveResult, as here it
+// fails only when the loop wins a microsecond race.
 func TestAttachReconnected_LiveResultRightAfterReadLoopStarts(t *testing.T) {
 	f := newReconnectFixture(t, "s1", rvReplays(5001, rvProgress, rvProgress),
 		shim.ServerMsg{Type: "stdout", Seq: 5003, Line: rvResult})

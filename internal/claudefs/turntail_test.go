@@ -17,6 +17,8 @@ const (
 	ttTurnDur    = `{"parentUuid":"a2","isSidechain":false,"type":"system","subtype":"turn_duration","durationMs":5,"uuid":"x2","sessionId":"s"}`
 	ttLastPrompt = `{"type":"last-prompt","lastPrompt":"go","leafUuid":"a2","sessionId":"s"}`
 	ttCostState  = `{"type":"cost-state","sessionId":"s","totalCostUSD":0.5,"totalAPIDuration":10}`
+	ttInterrupt  = `{"parentUuid":"a1","isSidechain":false,"promptId":"p1","type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]},"uuid":"u3","sessionId":"s"}`
+	ttLocalCmd   = `{"parentUuid":"u1","isSidechain":false,"promptId":"p2","type":"user","message":{"role":"user","content":"<local-command-stdout>Set model to ` + "`Opus 5`" + `</local-command-stdout>"},"uuid":"u4","sessionId":"s"}`
 	ttSidechain  = `{"parentUuid":"z","isSidechain":true,"message":{"role":"assistant","content":[{"type":"tool_use","id":"t9","name":"Bash","input":{}}],"stop_reason":"tool_use"},"type":"assistant","uuid":"a9","sessionId":"s"}`
 )
 
@@ -56,6 +58,13 @@ func TestTranscriptTurnEnded(t *testing.T) {
 		{"stop_sequence (synthetic API error) ends a turn", ttLines(ttUserPrompt, assistantWithText(10, "stop_sequence")), true},
 		{"refusal ends a turn", ttLines(ttUserPrompt, assistantWithText(10, "refusal")), true},
 		{"missing stop_reason does not", ttLines(ttUserPrompt, strings.Replace(ttEndTurn, `,"stop_reason":"end_turn"`, "", 1)), false},
+		// The CLI writes these once the turn is over and waits for a prompt.
+		{"interrupted by the user", ttLines(ttUserPrompt, ttToolUse, ttInterrupt, ttLastPrompt), true},
+		{"interrupted during a tool call", ttLines(ttUserPrompt, ttToolUse, strings.Replace(ttInterrupt, "user]", "user for tool use]", 1)), true},
+		{"slash command output", ttLines(ttEndTurn, ttLocalCmd, ttLastPrompt), true},
+		{"slash command error", ttLines(ttEndTurn, strings.Replace(ttLocalCmd, "local-command-stdout", "local-command-stderr", 2)), true},
+		{"prompt quoting the marker mid-text", ttLines(strings.Replace(ttUserPrompt, `"go"`, `"why [Request interrupted by user]?"`, 1)), false},
+		{"tool result carrying the marker", ttLines(ttToolUse, strings.Replace(ttToolResult, `"ok"`, `"[Request interrupted by user]"`, 1)), false},
 		{"result record", ttLines(ttToolUse, `{"type":"result","subtype":"success","sessionId":"s"}`), true},
 		{"single-line file: the first line is whole", ttEndTurn + "\n", true},
 		{"torn last line is skipped", ttLines(ttEndTurn) + ttToolUse[:40], true},

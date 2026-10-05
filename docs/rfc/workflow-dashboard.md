@@ -256,7 +256,7 @@
     可它原本排在 PR-9 的 path helper 里，而 PR-9 又依赖 PR-8。现在把它和 runID 正则放进 PR-4（PR-4 已经在改 claudefs），PR-8 依赖 PR-4。
 24. **Windows vet**（§10、§11.5、PR-3/9/13）。必过的 `build-windows` job 会跑 `go vet ./...`，而 vet 会对测试文件做类型检查（`ci.yml:436-457`）；
     `syscall.Mkfifo` 在 windows 上不存在。现在规定每个 FIFO / O_NOFOLLOW 测试都放在 `*_unix_test.go` 里，并加 `//go:build !windows`
-    （仓里已有 3 个先例，如 `gitinfo/open_unix_test.go`），§11.5 加 `GOOS=windows go vet ./...`。
+    （仓里已有 3 个先例，如 `gitinfo/open_unix_test.go`），§11.5 加 `GOOS=windows go vet ./...`。PR-3 起改为 `//go:build unix`（与被测实现文件同一约束，§10）。
 25. **§11.4 按 PR 拆分**（§11.4、PR-12、PR-13）。v3 的 PR-12 测试写的是整个 §11.4，其中 drill-in 用例要等 PR-13 的 `switchTo` 第二参与
     `wf-open-agent`。现在拆成 PR-12 的面板 / store / 无障碍清单（"queued 行不可点"是 §7.3 的标记规则，留在 PR-12）和 PR-13 的 drill-in 清单。
 26. **R4 的验收真的覆盖 R4**（PR-8、PR-9）。naozhi 运行中杀掉 shim 时，`shimOutlivedSocket` 返回 `PidAlive(shimPID)` = false
@@ -1755,7 +1755,10 @@ envelope 反转义，或下发预解码的 seq 索引。
     `unknown` 由 session 层读 session JSONL 的尾窗裁决（`claudefs.TranscriptTurnEnded`）：主链记录指 `isSidechain` 不为真的
     `user` / `assistant` / `result` 行，attachment、system（`turn_duration` 等）与元数据行（`last-prompt`、`cost-state` 等）一律越过——
     实测它们常跟在 end_turn 之后。末条主链记录是 `assistant` 且 `stop_reason` ∈ {`end_turn`, `stop_sequence`, `refusal`}
-    （`stop_sequence` 是 CLI 合成 API 错误消息所带的，同样结束 turn），或是 `result` → idle；否则 midTurn（既有 stray-result 恢复兜底）。
+    （`stop_sequence` 是 CLI 合成 API 错误消息所带的，同样结束 turn），或是 `result`，或是文本以 `[Request interrupted by user` /
+    `<local-command-stdout>` / `<local-command-stderr>` 开头的 `user` 记录（用户中断与斜杠命令输出，CLI 写完即等下一条 prompt；真实 transcript 的末条主链记录里实测见到中断与 stdout 两种）
+    → idle；否则 midTurn（既有 stray-result 恢复兜底）。末行正在写、解不开时跳过它、由前一条完整记录裁决：误差方向是新 turn 的首条记录写到一半时
+    早显示 Ready（迟到的 result 照常按 unowned 消费），反过来则会把 end_turn 之后正在写的元数据行误判成 midTurn。
     读不到 JSONL、session id 不过 `IsValidSessionID` 时按 midTurn。
     **尾窗是读窗口，不是文件尺寸上限**：`osutil.OpenRegular(path, 0)`（不设 maxBytes——真实 session JSONL 是 MB 级，v3 把 64KiB 写进尺寸上限，
     照抄会让每个文件都 `ErrTooLarge`、再按"读不到 → midTurn"处理，修复在长 workflow 这一主场景里失效）→ 由 Fstat 得 size →
@@ -2508,8 +2511,9 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
     `os.ReadDir` 全量读入后再判断；条目只接受 `e.Type().IsRegular()` / 真目录（同 `usage.go:205-210`）。
   - 所有后台读取经 board 的有界 I/O 派发（§5.6(6b)：每 board ≤ 2、全局 8，卡死的任务继续占槽位）。`HandleToolResult` 与 `files_open_unix.go`
     的同类问题不在本 RFC 范围，另开 issue。
-  - **测试的平台约束**：每个用到 `syscall.Mkfifo` 或依赖 O_NOFOLLOW 语义的测试都放在 `*_unix_test.go` 里并加 `//go:build !windows`
-    （先例 `internal/gitinfo/open_unix_test.go`、`internal/dashboard/project/files_mkfifo_unix_test.go`、
+  - **测试的平台约束**：每个用到 `syscall.Mkfifo` 或依赖 O_NOFOLLOW 语义的测试都放在 `*_unix_test.go` 里并加 `//go:build unix`
+    （与 `open_regular_unix.go` 同一约束；`!windows` 会让测试在 js/wasip1/plan9 上编译，而那里的实现是 `_nonunix.go`；
+    文件后缀 `_unix` 本身不构成约束。`*_unix_test.go` 的先例 `internal/gitinfo/open_unix_test.go`、`internal/dashboard/project/files_mkfifo_unix_test.go`、
     `internal/cli/wrapper_enforce_clipath_unix_test.go`）——必过的 `build-windows` job 跑 `go vet ./...`，vet 会对测试文件做类型检查
     （`ci.yml:436-457`），windows 上没有 `syscall.Mkfifo`。涉及的包：osutil（PR-3、PR-9）、subagent（PR-13）、session（PR-9 的 sweeper / R3a）、
     agentevents 与 server（PR-13）。
@@ -2596,7 +2600,7 @@ workflowPushLoop 与 board 发布、generation 变化并发。
 
 ### 11.5 闸门
 
-`gofmt -l` 为空；`go vet ./...`；**`GOOS=windows go vet ./...`**（必过的 `build-windows` job 的本地等价，`ci.yml:436-457`；FIFO 测试须在 `*_unix_test.go` + `//go:build !windows`，§10）；`GOTOOLCHAIN=go1.26.6 make lint-staticcheck`；
+`gofmt -l` 为空；`go vet ./...`；**`GOOS=windows go vet ./...`**（必过的 `build-windows` job 的本地等价，`ci.yml:436-457`；FIFO 测试须在 `*_unix_test.go` + `//go:build unix`，§10）；`GOTOOLCHAIN=go1.26.6 make lint-staticcheck`；
 `lint-server-handlers -mode fail`（含 `hubOptionsFieldBaseline`）；**`go test ./internal/session -run TestRouterBudget`**
 （Router 字段 18 / 方法 98 / 类型引用 5，均为 ratchet 台账指标；本特性的 sweeper、resolver、R3 都不得新增 Router 方法或 `*Router`
 参数）；`node scripts/check-enum-literals.mjs` 与其 test；`node --test scripts/check-ws-receivers.test.mjs`；js-ratchet `--check`；
@@ -2796,7 +2800,7 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   已删除（NG8、NG9）；`HistoryIO.projectsRoot` 挪到 PR-8。
 - 文件：`internal/claudefs/path.go`（其余 path helper；`IsValidWorkflowRunID` 已在 PR-4）、新 `internal/claudefs/workflow.go` + test、
   `internal/osutil/pathroot.go`（`RelUnderRoot`，`PathContainedInRoot` 改为其薄包装）、`internal/osutil/open_regular_unix.go` / `_nonunix.go`
-  （`OpenRegularIn` / `OpenDirIn`）+ `*_unix_test.go`（`//go:build !windows`）、`usage.go`（共享常量）、
+  （`OpenRegularIn` / `OpenDirIn`）+ `*_unix_test.go`（`//go:build unix`）、`usage.go`（共享常量）、
   新 `internal/cli/workflow/disk.go` + test（结果文件解析，纯函数，入参是已打开的 reader）、`internal/session/managed_workflow.go`、
   `router_cleanup.go`（`startCleanupLoop` 的 saveTicker 分支加一行自由函数调用 `sweepWorkflowBoards(r.ss, time.Now())`——**不新增 Router 方法**，
   `routerMethodBaseline = 98` 已满）。
@@ -2890,7 +2894,7 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   `ReadFirstLineIDs` + test（含 > 32KiB 首行、`sessionId` 在 `message` 之后的键序）、`internal/subagent/transcript.go`
   （`NewTranscriptReaderFrom(f, open, opts)`，`f` 可为 nil；`openOrReuse` / `reprobeRotation` 的每次重新打开经注入的 opener，旋转探测改 `os.Lstat`；
   `NewTranscriptReader(path)` 默认 opener 为 `OpenRegular(path, 0)`，既有 Agent drill-in / tailer 一并受保护；`ReaderOpts.StripHarnessFraming` 与纯函数
-  `StripHarnessFraming`）+ `transcript_fifo_unix_test.go`（`//go:build !windows`）+ 探针首行 fixture、
+  `StripHarnessFraming`）+ `transcript_fifo_unix_test.go`（`//go:build unix`）+ 探针首行 fixture、
   `internal/server/wshub_agent.go`（:130 之前；校验用的 fd 用完即关）、`agent_tailer.go` / `agent_tailer_registry.go`（doneFn；`ensureTailer` 增 opener 参数、
   用 `NewTranscriptReaderFrom(nil, open, …)`，首次打开也经 opener）、
   `internal/session/managed_workflow_api.go`（`AgentTranscript`）、`static/agent_view.js`（switchTo 第二参；`pending` 分支回退 3s poll）、

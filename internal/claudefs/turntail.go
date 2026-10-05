@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
+	"strings"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 )
@@ -23,11 +25,16 @@ const (
 // next prompt. stop_sequence is what its synthetic API-error messages carry.
 var turnEndStopReasons = map[string]bool{"end_turn": true, "stop_sequence": true, "refusal": true}
 
+// turnEndUserPrefixes open the user records the CLI writes after which it
+// waits for the next prompt: an interrupt marker and a slash command's output.
+var turnEndUserPrefixes = [...]string{"[Request interrupted by user", "<local-command-stdout>", "<local-command-stderr>"}
+
 // TranscriptTurnEnded reports whether the last main-chain record of the
-// transcript at path closes a turn: a result, or an assistant message with a
-// turn-ending stop reason. A user record, a tool_use stop, or no main-chain
-// record within the widest tail window all report false: the turn may still
-// be running. Metadata, attachment and system lines are skipped.
+// transcript at path closes a turn: a result, an assistant message with a
+// turn-ending stop reason, or an interrupt / slash-command-output user record.
+// Any other user record, a tool_use stop, or no main-chain record within the
+// widest tail window report false: the turn may still be running. Metadata,
+// attachment and system lines are skipped.
 func TranscriptTurnEnded(path string) (bool, error) {
 	f, fi, err := osutil.OpenRegular(path, 0)
 	if err != nil {
@@ -48,7 +55,10 @@ func TranscriptTurnEnded(path string) (bool, error) {
 
 // lastTurnRecord scans the last window bytes of r backwards for the last
 // complete main-chain record. A window starting mid-file drops its first,
-// partial line.
+// partial line; a last line still being written is skipped like any line that
+// does not decode. That reads a turn whose first record is mid-write as ended,
+// the cheap error (its result is still consumed as unowned); the alternative
+// would read metadata mid-write after an ended turn as one still running.
 func lastTurnRecord(r io.ReaderAt, size, window int64) (ended, found bool, err error) {
 	off := max(0, size-window)
 	buf := make([]byte, size-off)
@@ -90,7 +100,7 @@ func turnRecord(line []byte) (ended, ok bool) {
 	case "result":
 		return true, true
 	case "user":
-		return false, true
+		return userEndsTurn(rec.Message), true
 	case "assistant":
 		var msg struct {
 			StopReason string `json:"stop_reason"`
@@ -99,4 +109,35 @@ func turnRecord(line []byte) (ended, ok bool) {
 		return turnEndStopReasons[msg.StopReason], true
 	}
 	return false, false
+}
+
+// userEndsTurn reports whether a user message is one the CLI writes once the
+// turn is over (turnEndUserPrefixes) rather than one that starts or feeds it.
+func userEndsTurn(raw json.RawMessage) bool {
+	var msg struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(raw, &msg) != nil {
+		return false
+	}
+	var text string
+	if json.Unmarshal(msg.Content, &text) == nil {
+		return hasTurnEndUserPrefix(text)
+	}
+	var blocks []struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(msg.Content, &blocks) != nil {
+		return false
+	}
+	for _, b := range blocks {
+		if hasTurnEndUserPrefix(b.Text) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasTurnEndUserPrefix(text string) bool {
+	return slices.ContainsFunc(turnEndUserPrefixes[:], func(p string) bool { return strings.HasPrefix(text, p) })
 }
