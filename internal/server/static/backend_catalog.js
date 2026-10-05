@@ -145,10 +145,10 @@ export function accessProfileChipInfo(profileID) {
   };
 }
 
-// autoBackendLabel is the text of the picker's 自动 option: the backend a
-// session with no pick gets under access profile profileID ("" = the default
-// profile), i.e. its default_backend when enabled here, else the router
-// default. agents[].backend is invisible to the client; the server decides.
+// autoBackendLabel is the text of the picker's 自动 option: profileID's ("" =
+// default) default_backend when enabled here, else the router default. A
+// project backend pin, agents[].backend, a cron job's agent profile and a
+// remote node's own profiles are not visible here; the server decides.
 export function autoBackendLabel(backendsData, profileID) {
   const list = backendsData.backends;
   const ap = serverInfo.accessProfiles;
