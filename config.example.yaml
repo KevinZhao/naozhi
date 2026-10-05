@@ -278,9 +278,9 @@ agents:
     # Precedence: cli.effort < cli.backends[].effort < agents[].effort.
     #
     # Applies to sessions routed to THIS agent id. Project planner sessions are
-    # not one of them: planner restart builds its opts from project config only
-    # and never reads agents[*] (see ResolveForPlannerKey), so set the tier on
-    # the backend if you want planners covered.
+    # not one of them, even when started from a "general" chat: a planner's
+    # opts come from project config only and never read agents[*], so set the
+    # tier on the backend if you want planners covered.
     #
     # Caveat: naozhi's shim config-drift check only compares BACKEND-level
     # args, so a session using this per-agent override is re-detected as
