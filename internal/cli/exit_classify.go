@@ -35,7 +35,7 @@ func classifyExit(code int64, tail []string) clierr.ExitClass {
 	case anyLine(lines, "", "invalid api key", "please run /login", "authentication", "oauth token has expired", "401 unauthorized", "not logged in", "login required"):
 		return clierr.ExitAuth
 	case anyLine(lines, "", "enoent", "no such file or directory", "command not found", "cannot find module"),
-		anyLine(lines, ": not found", "sh:", "exec:"): // dash: "sh: 1: node: not found"
+		dashNotFound(lines):
 		return clierr.ExitMissingRuntime
 	case code == 127:
 		return clierr.ExitMissingRuntime
@@ -51,6 +51,22 @@ func anyLine(lines []string, need string, oneOf ...string) bool {
 		}
 		for _, s := range oneOf {
 			if strings.Contains(l, s) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// dashNotFound reports a dash "not found" line: one holding ": not found" and
+// a whole word "sh:", "<path>/sh:" or "exec:", as in "sh: 1: node: not found".
+func dashNotFound(lines []string) bool {
+	for _, l := range lines {
+		if !strings.Contains(l, ": not found") {
+			continue
+		}
+		for _, f := range strings.Fields(l) {
+			if f == "sh:" || f == "exec:" || strings.HasSuffix(f, "/sh:") {
 				return true
 			}
 		}

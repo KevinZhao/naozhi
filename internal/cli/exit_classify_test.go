@@ -58,6 +58,11 @@ func TestClassifyExit(t *testing.T) {
 		{"invalid api key at 127", 127, []string{"Invalid API key · Please run /login"}, clierr.ExitAuth},
 		{"mcp config not found at 127", 127, []string{"Error: Invalid MCP configuration:", "MCP config file not found: /x"}, clierr.ExitMCPConfig},
 		{"model not found", 1, []string{"Error: model: not found"}, clierr.ExitUnknown},
+		// "sh:" and "exec:" count only as whole words.
+		{"word ending in sh", 1, []string{"Error: token refresh: not found"}, clierr.ExitUnknown},
+		{"bash word", 1, []string{"bash: node: not found"}, clierr.ExitUnknown},
+		{"word ending in exec", 1, []string{"Error: noexec: not found"}, clierr.ExitUnknown},
+		{"bin sh missing runtime", 1, []string{"/bin/sh: 1: node: not found"}, clierr.ExitMissingRuntime},
 		{"not found split from sh", 1, []string{"sh: 1: starting", "Error: model: not found"}, clierr.ExitUnknown},
 		{"exit code 2", 2, nil, clierr.ExitUnknown},
 	}
