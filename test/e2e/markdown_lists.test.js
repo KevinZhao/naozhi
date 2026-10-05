@@ -202,10 +202,13 @@ test.describe('renderMd list 渲染', () => {
       // 与 cron_timeline.js 展开 run 详情时的结构一致。
       const host = document.createElement('div');
       host.className = 'ctr-detail';
+      const finalEl = document.createElement('div');
+      finalEl.className = 'ctr-final';
       const body = document.createElement('div');
       body.className = 'ctr-final-body md';
       body.innerHTML = html;
-      host.appendChild(body);
+      finalEl.appendChild(body);
+      host.appendChild(finalEl);
       document.body.appendChild(host);
       const innerUl = body.querySelector('.md-ol > li > .md-ul');
       const cs = innerUl ? getComputedStyle(innerUl) : null;
