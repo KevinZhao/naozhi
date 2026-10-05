@@ -650,7 +650,7 @@ PR-1 把 timeline 行从「inline 展开 result」改成「点行打开右侧 sh
 - `TestDashboardJS_TranscriptTabs` / `TestDashboardHTML_TranscriptTabsCSS` 不动（transcript 渲染契约不变）
 - `test/e2e/cron_run_sheet.test.js` 删除（sheet 已无）；inline-expand e2e 留作后续单独 PR
 
-> 后续已删除：本节列出的 `TestDashboard*` 文本扫描测试（含 `TestDashboardJS_TranscriptTabs` / `TestDashboardHTML_TranscriptTabsCSS`）已随 A2b（04934631）全部删除，不再是守卫；inline-expand 行为现由 Playwright e2e `test/e2e/cron_inline_expand.test.js` 覆盖。
+> 后续已删除：本节列出的 `TestDashboard*` 文本扫描测试均已不存在，不再是守卫。`TestDashboardJS_CronHistoryRedesign_InlineExpand` / `TestDashboardHTML_CronHistoryRedesign_InlineExpandMarkup` 随 044c4c5e 改为 Playwright e2e `test/e2e/cron_inline_expand.test.js` 后删除；`TestDashboardJS_TranscriptTabs` / `TestDashboardHTML_TranscriptTabsCSS` 随 A2b（04934631）删除文本扫描测试层时一并移除。
 
 ### 16.7 §14 决议表后续
 
