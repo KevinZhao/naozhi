@@ -39,7 +39,7 @@ const anchorFileBaseline = 95
 
 // unjustifiedAnchorBaseline counts anchor files lacking an `// anchor-keep:`
 // justification line. The triage pass drives this to zero file by file.
-const unjustifiedAnchorBaseline = 42
+const unjustifiedAnchorBaseline = 41
 
 // anchorKeep matches a justification line: `// anchor-keep: <reason>` at the
 // start of a line. A mention of the marker inside other prose does not count.

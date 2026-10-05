@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -126,6 +128,90 @@ func TestDocs_WatchdogShowsDefaults(t *testing.T) {
 		}
 		if found == 0 {
 			t.Errorf("%s quotes no watchdog default; the pattern no longer matches the doc", doc)
+		}
+	}
+}
+
+// readmeBackendEnumRe matches the README config sample's `backend:` line and
+// captures its trailing comment, the operator-facing list of valid IDs.
+var readmeBackendEnumRe = regexp.MustCompile(`^\s+backend:\s*\S+\s+#(.*)$`)
+
+// TestDocs_READMEListsAllBackends: the README `cli.backend` comment names
+// exactly the registered backend IDs, so a new backend cannot ship undocumented.
+func TestDocs_READMEListsAllBackends(t *testing.T) {
+	withRegisteredBackends(t, func() {
+		data, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+		if err != nil {
+			t.Fatalf("read README.md: %v", err)
+		}
+		var got []string
+		for _, line := range strings.Split(string(data), "\n") {
+			if m := readmeBackendEnumRe.FindStringSubmatch(line); m != nil {
+				for _, q := range regexp.MustCompile(`"([a-z0-9_-]+)"`).FindAllStringSubmatch(m[1], -1) {
+					got = append(got, q[1])
+				}
+			}
+		}
+		if len(got) == 0 {
+			t.Fatal("README.md has no `backend: <id>  # \"a\" | \"b\"` line; the pattern no longer matches the doc")
+		}
+		sort.Strings(got)
+		if want := knownBackendIDs(); !slices.Equal(got, want) {
+			t.Errorf("README cli.backend comment lists %v, registered backends are %v", got, want)
+		}
+	})
+}
+
+// codexEntryKeys returns, for every `- id: codex` backend entry in the doc
+// (commented out or not), the set of keys that entry sets.
+func codexEntryKeys(doc string) []map[string]bool {
+	uncomment := regexp.MustCompile(`^(\s*)#`)
+	var entries []map[string]bool
+	dashCol := -1
+	for _, raw := range strings.Split(doc, "\n") {
+		line := uncomment.ReplaceAllString(raw, "$1 ")
+		body := strings.TrimSpace(line)
+		col := len(line) - len(strings.TrimLeft(line, " "))
+		if strings.HasPrefix(body, "- id:") {
+			dashCol = -1
+			if f := strings.Fields(strings.TrimPrefix(body, "- id:")); len(f) > 0 && strings.Trim(f[0], `"`) == "codex" {
+				dashCol = col
+				entries = append(entries, map[string]bool{})
+			}
+			continue
+		}
+		if dashCol < 0 || body == "" || strings.HasPrefix(body, "#") {
+			continue
+		}
+		if col <= dashCol {
+			dashCol = -1
+			continue
+		}
+		if k, _, ok := strings.Cut(body, ":"); ok {
+			entries[len(entries)-1][k] = true
+		}
+	}
+	return entries
+}
+
+// TestDocs_CodexSamplesSetModelAndArgs: an omitted per-backend model/args
+// inherits cli.model/cli.args, which are claude's, so `codex app-server` would
+// get `-c model=sonnet` plus claude flags. Every documented codex entry must
+// set both.
+func TestDocs_CodexSamplesSetModelAndArgs(t *testing.T) {
+	for file, want := range map[string]int{"README.md": 2, "config.example.yaml": 1} {
+		data, err := os.ReadFile(filepath.Join("..", "..", file))
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		entries := codexEntryKeys(string(data))
+		if len(entries) != want {
+			t.Fatalf("%s: found %d codex backend entries, want %d", file, len(entries), want)
+		}
+		for i, keys := range entries {
+			if !keys["model"] || !keys["args"] {
+				t.Errorf("%s: codex entry #%d sets %v; it must set both model and args", file, i+1, keys)
+			}
 		}
 	}
 }

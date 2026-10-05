@@ -18,6 +18,7 @@ import { dropDiscovered, findDiscovered, isDiscoveredKey, parseDiscoveredPid, sa
 import { gitChipHtml, gitStateCache, setHeaderGitChip } from './session_header.js';
 import { wireQuickAskInput } from './auth_modal.js';
 import { shell } from './shell.js';
+import { pendingBackendID } from './features.js';
 
 // ===== Session tuning popover =====
 // Per-session model/effort switching from the header chips.
@@ -61,12 +62,11 @@ function tuningToast(msg, isError) {
   setTimeout(() => t.remove(), isError ? 8000 : 4000);
 }
 
-// tuningModelsForSession resolves the popover's model choices from the
-// cached /api/cli/backends payload (BackendInfo.models: agent-reported for
-// kiro, cli.backends[].models fallback for claude). Empty list → the
-// popover shows its manual-input row only.
+// tuningModelsForSession: the popover's model choices, BackendInfo.models of
+// the cached /api/cli/backends (agent-reported for kiro, cli.backends[].models
+// for claude). An empty list leaves only the manual-input row.
 function tuningModelsForSession(s) {
-  const backendID = (s && s.backend) || perSession.backends[selection.key] ||
+  const backendID = (s && s.backend) || pendingBackendID(selection.key, selection.node) ||
     (serverInfo.cliBackends && serverInfo.cliBackends.default) || '';
   if (!serverInfo.cliBackends || !Array.isArray(serverInfo.cliBackends.backends)) return { models: [], backendID };
   const entry = serverInfo.cliBackends.backends.find(b => b && b.id === backendID) ||

@@ -18,6 +18,7 @@ import { accessProfileChipHtml, backendDisplayName, backendDisplayVersion } from
 import { _optimisticRunningTimers } from './send_message.js';
 import { fetchEvents, showHistoryRetry } from './event_stream.js';
 import { discoveredKey, getNodeDisplayName, isMultiNode, matchProject, nodeColor, sessionTypeTag, sid } from './session_ident.js';
+import { pendingBackendID } from './features.js';
 import { ICONS } from './icons.js';
 import { registerShell } from './shell.js';
 
@@ -200,11 +201,9 @@ function pendingCardFor(key) {
   // The agent chip shows the palette pick off the key tail; a legacy
   // 3-segment key degrades to "general".
   const pendingAgent = parts.length >= 4 && parts[3] ? parts[3] : 'general';
-  // The CLI brand (sidebar icon, chat header) follows the backend pick before
-  // the first message spawns the wrapper; a kiro pick must not show the
-  // claude logomark. With one backend there is no picker and no pick, and the
-  // lone backend is defaultCLIName. See backendDisplayName godoc.
-  const pendingBackend = perSession.backends[key] || '';
+  // The CLI brand (sidebar icon, chat header) follows the backend the first
+  // message will spawn; a kiro session must not show the claude logomark.
+  const pendingBackend = pendingBackendID(key);
   const pendingCLIName = backendDisplayName(pendingBackend) || serverInfo.defaultCLIName;
   // On the default backend the live version (from system/init, refreshed
   // every poll) beats the manifest, which is cached up to 60 s and would flash

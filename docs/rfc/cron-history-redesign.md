@@ -627,10 +627,10 @@ PR-1 把 timeline 行从「inline 展开 result」改成「点行打开右侧 sh
 - `.cron-run-sheet*` / `.crs-header` / `.crs-dot` / `.crs-title*` / `.crs-meta` / `.crs-actions` / `.crs-btn-icon` / `.crs-body*` 整段（约 80 行 CSS）
 
 保留：
-- `.crs-tabs` / `.crs-tab` / `.crs-transcript` / `.crs-turn` / `.crs-avatar` / `.crs-tool-card` 等仍由 `cronRunTranscriptHtml` 使用
+- `.crs-tabs` / `.crs-tab` / `.crs-transcript` / `.crs-turn` / `.crs-avatar` / `.crs-tool-card` 等当时仍由 `cronRunTranscriptHtml` 使用（后已删除，见下方说明）
 - `cronRunSheetSelectTab` 函数定义（现已为 no-op shim），契约测试 `TestDashboardJS_TranscriptTabs` 钉死了函数名 + 4 个 `tabBtn(...)` 字面量；后者在 `cronTimelineDetailHtml` 注释中保留 grep 兼容
 
-> 后续已删除（以下符号在代码中均已不存在）：`cronRunSheetSelectTab` 与 `cronRunTranscriptHtml` 随 #2557 PR-E1（65a86702）作为死代码移除；契约测试 `TestDashboardJS_TranscriptTabs` 随 A2b（04934631）删除文本扫描测试层时一并移除；`cronTimelineDetailHtml` 注释里的 `tabBtn(...)` 锚点随 d458d958 删去。
+> 后续已删除（以下符号在代码中均已不存在）：`cronRunSheetSelectTab` 与 `cronRunTranscriptHtml` 随 #2557 PR-E1（65a86702）作为死代码移除；契约测试 `TestDashboardJS_TranscriptTabs` 随 A2b（04934631）删除文本扫描测试层时一并移除；`cronTimelineDetailHtml` 注释里的 `tabBtn(...)` 锚点随 d458d958 删去；`cronRunTranscriptHtml` 移除后 `css/cron.css` 中残留的 `.crs-*` transcript 样式（含其 540px 媒体查询）作为死 CSS 随 #3408 删除。
 
 ### 16.5 新增
 

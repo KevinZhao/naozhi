@@ -195,15 +195,22 @@ test.describe('renderMd list 渲染', () => {
     expect((html.match(/<ol/g) || []).length).toBe(1);
   });
 
-  test('CSS：嵌套 list 在 .crs-text.md 容器下拿到紧凑 16px 缩进', async () => {
+  test('CSS：嵌套 list 在 .ctr-final-body.md 容器下拿到紧凑 16px 缩进', async () => {
     const m = await page.evaluate(() => {
       const w = /** @type {any} */ (window);
       const html = w.renderMd('1. 父项\n   - 子项\n');
+      // 与 cron_timeline.js 展开 run 详情时的结构一致。
       const host = document.createElement('div');
-      host.className = 'crs-text md';
-      host.innerHTML = html;
+      host.className = 'ctr-detail';
+      const finalEl = document.createElement('div');
+      finalEl.className = 'ctr-final';
+      const body = document.createElement('div');
+      body.className = 'ctr-final-body md';
+      body.innerHTML = html;
+      finalEl.appendChild(body);
+      host.appendChild(finalEl);
       document.body.appendChild(host);
-      const innerUl = host.querySelector('.md-ol > li > .md-ul');
+      const innerUl = body.querySelector('.md-ol > li > .md-ul');
       const cs = innerUl ? getComputedStyle(innerUl) : null;
       const result = {
         found: !!innerUl,
@@ -214,7 +221,7 @@ test.describe('renderMd list 渲染', () => {
       return result;
     });
     expect(m.found).toBe(true);
-    // 期望 16px（PR 紧凑规则），而非 22px（.crs-text.md ul 的覆盖）
+    // 期望 split_view.css 的嵌套紧凑规则生效，不被 .ctr-final-body.md 下的 ul/ol 覆盖压过
     expect(m.marginLeft).toBe('16px');
     expect(m.listStyle).toBe('circle');
   });
