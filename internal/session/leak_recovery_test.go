@@ -229,7 +229,7 @@ func TestRecover_CtxCancelled_NoResend(t *testing.T) {
 func TestRecover_ProcDead_NoResend(t *testing.T) {
 	t.Setenv(leakRecoveryEnvVar, "1")
 	s, proc := newLeakSession(nil)
-	proc.AliveVal = false
+	proc.SetAlive(false)
 	orig := &clievent.SendResult{Text: leakSample}
 
 	var calls int
