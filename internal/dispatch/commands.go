@@ -203,7 +203,7 @@ func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.Incomin
 		"  /cd <路径> — 切换工作目录\n" +
 		"  /pwd — 显示当前工作目录\n" +
 		"  /project [name|off|list] — 项目绑定\n" +
-		"  /cron <add|list|del|pause|resume> — 定时任务"
+		"  /cron <add|list|del|pause|resume|mode> — 定时任务"
 	if len(d.agentCommands) > 0 {
 		help += "\n\n可用 Agent:"
 		// Sort so /help output is stable (map iteration order is random).
@@ -297,7 +297,7 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 	log.Info("session reset by user", "agent", agentID)
 }
 
-// handleCronCommand dispatches /cron subcommands (add, list, del, pause, resume).
+// handleCronCommand dispatches /cron subcommands (add, list, del, pause, resume, mode).
 func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) {
 	if d.platforms[msg.Platform] == nil {
 		return
@@ -323,15 +323,18 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 		d.handleCronPause(msg, parts, reply, log)
 	case "resume":
 		d.handleCronResume(msg, parts, reply, log)
+	case "mode":
+		d.handleCronMode(msg, parts, reply, log)
 	default:
-		reply("用法: /cron <add|list|del|pause|resume>\n" +
+		reply("用法: /cron <add|list|del|pause|resume|mode>\n" +
 			"  /cron add \"@every 30m\" 检查服务状态\n" +
 			"  /cron add \"0 9 * * 1-5\" /review 扫描 open PRs\n" +
 			"  /cron add --keep-context \"0 18 * * *\" 接着昨天的进度写日报\n" +
 			"  /cron list\n" +
 			"  /cron del <id>\n" +
 			"  /cron pause <id>\n" +
-			"  /cron resume <id>")
+			"  /cron resume <id>\n" +
+			"  /cron mode <id> fresh|keep")
 	}
 }
 
@@ -340,8 +343,8 @@ const cronAddUsage = "用法: /cron add [--keep-context] \"<schedule>\" <prompt>
 
 // handleCronAdd implements /cron add [--keep-context] "<schedule>" <prompt>.
 // IM jobs start every run from a fresh session unless --keep-context is
-// given: the chat has no other way to see or change the mode, and a kept
-// context grows by one turn per run.
+// given, because a kept context grows by one turn per run; /cron mode
+// switches it later.
 func (d *Dispatcher) handleCronAdd(msg platform.IncomingMessage, parts []string, reply func(string), log *slog.Logger) {
 	if len(parts) < 3 {
 		reply(cronAddUsage + "\n例: /cron add \"@every 30m\" 检查服务状态")
@@ -376,19 +379,19 @@ func (d *Dispatcher) handleCronAdd(msg platform.IncomingMessage, parts []string,
 		job.ID,
 		osutil.SanitizeForLog(job.Schedule, 256),
 		formatCronNext(next),
-		cronContextNote(job.FreshContext)))
+		cronContextNote(job.ID, job.FreshContext)))
 	log.Info("cron job created", "id", job.ID,
 		"schedule", osutil.SanitizeForLog(job.Schedule, 256),
 		"fresh_context", job.FreshContext)
 }
 
-// cronContextNote tells the creator which context mode the new job runs in
-// and how to get the other one.
-func cronContextNote(fresh bool) string {
+// cronContextNote tells the creator which context mode job id runs in and
+// the /cron mode command that switches to the other one.
+func cronContextNote(id string, fresh bool) string {
 	if fresh {
-		return "每次执行都从新会话开始；需要延续上次的上下文，请创建时加 --keep-context"
+		return "每次执行都从新会话开始；需要延续上次的上下文，发送 /cron mode " + id + " keep"
 	}
-	return "每次执行延续同一会话的上下文"
+	return "每次执行延续同一会话的上下文；需要每次从新会话开始，发送 /cron mode " + id + " fresh"
 }
 
 // cronAddErrReply maps a /cron add failure's wire code (from
@@ -470,7 +473,7 @@ func (d *Dispatcher) handleCronList(msg platform.IncomingMessage, reply func(str
 	reply(sb.String())
 }
 
-// cronMutationErrReply maps a /cron del|pause|resume failure to a specific
+// cronMutationErrReply maps a /cron del|pause|resume|mode failure to a specific
 // user-facing reply so an ambiguous prefix or a pause/resume state conflict
 // is distinguishable from a bad ID. code is the wire code from
 // CronCommands.ClassifyError (#1164); raw err.Error() is never echoed (it
@@ -535,6 +538,53 @@ func (d *Dispatcher) handleCronResume(msg platform.IncomingMessage, parts []stri
 	}
 	reply(fmt.Sprintf("Job %s 已恢复。Next: %s", j.ID, formatCronNext(next)))
 	log.Info("cron job resumed", "id", j.ID)
+}
+
+// cronModeUsage is the /cron mode synopsis shown on a malformed invocation.
+const cronModeUsage = "用法: /cron mode <id> fresh|keep"
+
+// handleCronMode implements /cron mode <id> fresh|keep: whether the job's runs
+// start from a fresh session, from its next run on. The mode word is
+// case-insensitive and keep-context is an alias of keep, as in /cron add.
+func (d *Dispatcher) handleCronMode(msg platform.IncomingMessage, parts []string, reply func(string), log *slog.Logger) {
+	var args []string
+	if len(parts) == 3 {
+		args = strings.Fields(parts[2])
+	}
+	if len(args) != 2 {
+		reply(cronModeUsage)
+		return
+	}
+	id := args[0]
+	if len(id) > maxCronIDLen {
+		reply("无效 ID")
+		return
+	}
+	var fresh bool
+	switch strings.ToLower(args[1]) {
+	case "fresh":
+		fresh = true
+	case "keep", "keep-context":
+	default:
+		reply(cronModeUsage)
+		return
+	}
+	j, err := d.scheduler.SetFreshContext(id, msg.Platform, msg.ChatID, fresh)
+	if err != nil {
+		log.Warn("cron SetFreshContext failed", "err", err, "id_prefix", id)
+		reply(cronMutationErrReply("修改", d.scheduler.ClassifyError(err)))
+		return
+	}
+	mode := "延续同一会话的上下文"
+	if j.FreshContext {
+		mode = "都从新会话开始"
+	}
+	text := fmt.Sprintf("Job %s 已改为每次执行%s（下次执行生效）。", j.ID, mode)
+	if j.Paused {
+		text += "\n该任务当前已暂停，发送 /cron resume " + j.ID + " 恢复。"
+	}
+	reply(text)
+	log.Info("cron job context mode set", "id", j.ID, "fresh_context", j.FreshContext)
 }
 
 // validateCronIDArg checks parts has a third token (the job ID) within

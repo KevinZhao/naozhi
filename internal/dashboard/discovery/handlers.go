@@ -37,12 +37,18 @@ type NodeAccessor interface {
 	LookupNode(w http.ResponseWriter, id string) (node.Conn, bool)
 }
 
-// SessionRouter is the subset of *session.Router this package calls. Takeover
-// drops the *ManagedSession return (only success/failure matters) via an
-// adapter at the wiring site.
+// SessionRouter is the subset of *session.Router this package calls, through
+// an adapter at the wiring site.
 type SessionRouter interface {
-	TakeoverPrecheck(key string) error
-	Takeover(ctx context.Context, key, sessionID, cwd string, opts session.AgentOpts) error
+	ReserveTakeover(key string, opts session.AgentOpts) (TakeoverLease, error)
+}
+
+// TakeoverLease is a *session.TakeoverLease with its Router.Takeover, which
+// drops the *ManagedSession return (only success/failure matters). Takeover
+// consumes the lease; Release gives up one Takeover has not consumed.
+type TakeoverLease interface {
+	Takeover(ctx context.Context, sessionID, cwd string) error
+	Release()
 }
 
 // Handlers groups the discovered-session and takeover API endpoints.
@@ -315,25 +321,35 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "proc_start_time is required", http.StatusBadRequest)
 		return
 	}
+	agentOpts := h.defaultAgent
 	// Refuse a takeover the router would refuse now while the external CLI is
-	// still running; one refused after SIGTERM only reaches the log.
-	if err := h.router.TakeoverPrecheck(key); err != nil {
+	// still running; one refused after SIGTERM only reaches the log. The lease
+	// holds the key until the spawn, so a second takeover of it is refused
+	// here instead of killing another CLI during this one's exit wait.
+	lease, err := h.router.ReserveTakeover(key, session.AgentOpts{
+		Model:     agentOpts.Model,
+		ExtraArgs: agentOpts.ExtraArgs,
+		// Carry the agent's standing system prompt (#2493).
+		SystemPrompt: agentOpts.SystemPrompt,
+		// No AccessProfile: the external process never ran on the
+		// agent's pin, so the takeover stays on default_access_profile.
+	})
+	if err != nil {
 		writeTakeoverRefusal(w, key, err)
 		return
 	}
 	// Atomic identity-confirmed SIGTERM (#1670): pidfd pins the instance so no
 	// PidAlive→verify→SendTerm window remains. ESRCH is success; ErrPidReused
 	// is the 409 the frontend expects.
-	if err := h.sendTermVerified(req.PID, req.ProcStartTime); err != nil {
+	if err := h.sendTermVerified(req.PID, req.ProcStartTime); err != nil && !errors.Is(err, syscall.ESRCH) {
+		lease.Release()
 		if errors.Is(err, osutil.ErrPidReused) {
 			http.Error(w, "process identity changed (PID reused)", http.StatusConflict)
 			return
 		}
-		if !errors.Is(err, syscall.ESRCH) {
-			slog.Error("failed to terminate process", "pid", req.PID, "err", err)
-			http.Error(w, "failed to terminate process", http.StatusInternalServerError)
-			return
-		}
+		slog.Error("failed to terminate process", "pid", req.PID, "err", err)
+		http.Error(w, "failed to terminate process", http.StatusInternalServerError)
+		return
 	}
 
 	// Evict the killed PID now so the frontend's immediate fetchSessions()
@@ -343,29 +359,22 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 	pid := req.PID
 	sessionID := req.SessionID
 	procStartTime := req.ProcStartTime
-	agentOpts := h.defaultAgent
 
 	broadcast := h.broadcast
 	claudeDir := h.claudeDir
-	router := h.router
 	takeoverID := h.takeovers.begin()
 
 	h.bg.Add(1)
 	go func() {
 		defer h.bg.Done()
+		// A no-op once Takeover has consumed the lease.
+		defer lease.Release()
 		// Use the cleaned cwd so the lock-dir path WaitAndCleanup derives via
 		// projDirName matches the cwd router.Takeover spawns under (#1786).
 		discovery.WaitAndCleanup(h.appCtx, pid, procStartTime, claudeDir, cwd, sessionID)
 
 		// appCtx so the spawned process outlives the HTTP request.
-		err := router.Takeover(h.appCtx, key, sessionID, cwd, session.AgentOpts{
-			Model:     agentOpts.Model,
-			ExtraArgs: agentOpts.ExtraArgs,
-			// Carry the agent's standing system prompt (#2493).
-			SystemPrompt: agentOpts.SystemPrompt,
-			// No AccessProfile: the external process never ran on the
-			// agent's pin, so the takeover stays on default_access_profile.
-		})
+		err := lease.Takeover(h.appCtx, sessionID, cwd)
 		h.takeovers.finish(takeoverID, err)
 		if err != nil {
 			slog.Error("session takeover failed", "key", key, "session_id", sessionID, "pid", pid, "err", err)
@@ -384,7 +393,7 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSONStatus(w, http.StatusAccepted, map[string]string{"status": "accepted", "key": key, "takeover_id": takeoverID})
 }
 
-// writeTakeoverRefusal answers a takeover TakeoverPrecheck refused; the
+// writeTakeoverRefusal answers a takeover ReserveTakeover refused; the
 // bodies are the needles the dashboard's API_ERROR_HEADS localize.
 func writeTakeoverRefusal(w http.ResponseWriter, key string, err error) {
 	switch {

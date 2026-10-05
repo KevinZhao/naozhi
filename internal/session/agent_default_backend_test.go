@@ -88,7 +88,7 @@ func TestAgentDefaultBackend_SpawnAndTakeover(t *testing.T) {
 		t.Errorf("GetOrCreate backend = %q, want the agent's kiro", got)
 	}
 
-	took, err := r.Takeover(context.Background(), "feishu:direct:adopt:reviewer", "sess-external", t.TempDir(), opts)
+	took, err := reserveAndTakeover(context.Background(), r, "feishu:direct:adopt:reviewer", "sess-external", t.TempDir(), opts)
 	if err != nil {
 		t.Fatalf("Takeover: %v", err)
 	}

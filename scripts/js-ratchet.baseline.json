@@ -44,7 +44,7 @@
     "lateBindings": 0
   },
   "backend_catalog.js": {
-    "lines": 191,
+    "lines": 187,
     "maxFnLines": 44,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -176,9 +176,9 @@
     "lateBindings": 1
   },
   "dashboard.js": {
-    "lines": 2860,
-    "maxFnLines": 120,
-    "fnOver100": 1,
+    "lines": 2840,
+    "maxFnLines": 100,
+    "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0,
     "deadInjections": 0,
@@ -220,7 +220,7 @@
     "lateBindings": 0
   },
   "features.js": {
-    "lines": 30,
+    "lines": 50,
     "maxFnLines": 7,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -385,7 +385,7 @@
     "lateBindings": 0
   },
   "session_list.js": {
-    "lines": 1108,
+    "lines": 1107,
     "maxFnLines": 95,
     "fnOver100": 0,
     "topLevelLetVar": 0,

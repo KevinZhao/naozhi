@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -28,6 +29,9 @@ type costAccounting struct {
 	// run at once (managed_cost_end.go).
 	ends   inflight
 	endSem chan struct{}
+
+	// books counts the readings being booked (accountCost); freeze closes it.
+	books inflight
 }
 
 // maxWarnedModels bounds the unknown-basis dedup set.
@@ -36,6 +40,32 @@ const maxWarnedModels = 64
 func newCostAccounting(ledger *costledger.Store) *costAccounting {
 	return &costAccounting{ledger: ledger, warnedModel: make(map[string]struct{}),
 		endSem: make(chan struct{}, maxEndBookings)}
+}
+
+// beginBooking reports whether a reading may be booked now and, if so,
+// counts it until endBooking. Nil-safe.
+func (c *costAccounting) beginBooking() bool { return c == nil || c.books.tryAdd() }
+
+func (c *costAccounting) endBooking() {
+	if c != nil {
+		c.books.done()
+	}
+}
+
+// costFreezeDrain bounds freeze's wait at shutdown. A booking does no I/O
+// (ledger appends never block), so it is only reached by a stuck lock.
+const costFreezeDrain = time.Second
+
+// freeze stops booking readings and waits up to d for those being booked.
+// Shutdown calls it before saving the store, so each reading either lands in
+// the saved baseline or is left for the reattached CLI to difference against
+// it, never both (#3428). Reports whether the bookings finished in time.
+func (c *costAccounting) freeze(d time.Duration) bool {
+	if c == nil {
+		return true
+	}
+	c.books.close()
+	return c.books.wait(d)
 }
 
 // warnUnknownBasis logs once per model whose price the CLI had to guess.
@@ -105,7 +135,8 @@ func (s *ManagedSession) accountTurnCost(result *clievent.SendResult, runID stri
 // one costMu section: a reading lands on the old session before the copy, or
 // the new session differences it — never booked on both. A respawned
 // session keeps its process's baseline and forwards the increment (addSpent),
-// which no window collects.
+// which no window collects. Once shutdown froze booking (costAccounting.freeze)
+// nothing is booked.
 func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, onlyFor processIface) float64 {
 	if result == nil {
 		return 0
@@ -115,6 +146,10 @@ func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, 
 		metering = p.MeteringUsage()
 	}
 	raw := cumulativeFromResult(result, metering)
+	if !s.costAcct.beginBooking() {
+		return 0
+	}
+	defer s.costAcct.endBooking()
 
 	s.costMu.Lock()
 	if s.renamed {
@@ -311,11 +346,12 @@ func ledgerWorkspace(ws string) string {
 
 // ledgerBase is the identity every session-source row carries. A row on a
 // cron key names its job, so what the session books outside a run's window
-// (late results, partials, user turns) still counts toward that job.
+// (late results, partials, user turns) still counts toward that job. The row
+// is filed under ledgerKey; the job stays the one this session ran for.
 func (s *ManagedSession) ledgerBase(runID string) costledger.Entry {
 	e := costledger.Entry{
 		Source:     costledger.SourceSession,
-		SessionKey: s.key,
+		SessionKey: s.ledgerKey(),
 		JobID:      sessionkey.CronJobIDFromKey(s.key),
 		RunID:      runID,
 		Workspace:  ledgerWorkspace(s.Workspace()),
@@ -325,6 +361,22 @@ func (s *ManagedSession) ledgerBase(runID string) costledger.Entry {
 		e.Backend = "claude"
 	}
 	return e
+}
+
+// ledgerKey is the key of the live session at the end of s's successor
+// chain, so what a replaced session books after its replacement was renamed
+// lands under a key that still exists. Like addSpent, it holds one costMu at
+// a time.
+func (s *ManagedSession) ledgerKey() string {
+	for {
+		s.costMu.Lock()
+		next := s.successor
+		s.costMu.Unlock()
+		if next == nil {
+			return s.key
+		}
+		s = next
+	}
 }
 
 // ledgerEntries renders an Increment as ledger rows: one USD row carrying the

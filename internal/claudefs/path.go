@@ -71,6 +71,23 @@ func ProjectsRoot(claudeDir string) string {
 	return filepath.Join(claudeDir, projectsDirName)
 }
 
+// ResolvedProjectsRoot is ProjectsRoot with symlinks resolved, the one root
+// every transcript-path gate compares against: the agent tailer, the
+// agent_events handler and workflow run dirs. Before the directory exists
+// (first run) it is the lexical path, so the gates degrade rather than
+// reject. An empty claudeDir yields "": agentevents then fails closed, and
+// the server hands the tailer a root that admits nothing.
+func ResolvedProjectsRoot(claudeDir string) string {
+	raw := ProjectsRoot(claudeDir)
+	if raw == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(raw); err == nil {
+		return resolved
+	}
+	return raw
+}
+
 // ProjectDir is the directory holding one project's transcripts.
 func ProjectDir(claudeDir, cwd string) string {
 	root := ProjectsRoot(claudeDir)
@@ -299,6 +316,27 @@ func IsValidSessionID(s string) bool {
 			if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
 				return false
 			}
+		}
+	}
+	return true
+}
+
+// workflowRunIDMaxSuffix bounds the part of a workflow run ID after "wf_".
+const workflowRunIDMaxSuffix = 64
+
+// IsValidWorkflowRunID reports whether s matches ^wf_[A-Za-z0-9-]{1,64}$, the
+// shape of a workflow run ID (observed as wf_<8hex>-<3hex>). The ID becomes a
+// directory and file name under a session's subagents/workflows and
+// workflows dirs, and reaches naozhi from stream frames and sessions.json, so
+// callers validate it before building a path from it.
+func IsValidWorkflowRunID(s string) bool {
+	rest, ok := strings.CutPrefix(s, "wf_")
+	if !ok || len(rest) == 0 || len(rest) > workflowRunIDMaxSuffix {
+		return false
+	}
+	for i := 0; i < len(rest); i++ {
+		if c := rest[i]; !isASCIIAlnum(c) && c != '-' {
+			return false
 		}
 	}
 	return true

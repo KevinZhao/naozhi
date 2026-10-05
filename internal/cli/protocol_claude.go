@@ -443,15 +443,15 @@ func (p *ClaudeProtocol) ReadEvent(line string) ([]clievent.Event, bool, error) 
 // The returned slice uses buf[:0] as its base, so callers must not retain it
 // beyond the next ReadEventInto call sharing the same buf.
 func (p *ClaudeProtocol) ReadEventInto(line string, buf []clievent.Event) ([]clievent.Event, bool, error) {
-	// Fast-path skip for the dominant hook_started / hook_response frames before
-	// the full reflect-unmarshal (#1334). The `:"` anchor pins the match to a
-	// JSON key so user text containing the word cannot trigger a false skip.
-	// control_response frames are rare (one per interrupt / set_model) and carry
-	// the ack Process.SetModel blocks on, so they get a targeted parse instead.
-	if strings.Contains(line, `:"hook_`) {
+	// Fast-path skip for the dominant hook_* frames before the full unmarshal
+	// (#1334), anchored at line start: tool_use inputs and workflow labels are
+	// unescaped JSON, so `{"subtype":"hook_x"}` can appear anywhere else.
+	// control_response frames are rare and carry the ack Process.SetModel
+	// blocks on, so they get a targeted parse instead.
+	if strings.HasPrefix(line, `{"type":"system","subtype":"hook_`) {
 		return nil, false, nil
 	}
-	if strings.Contains(line, `:"control_response"`) {
+	if strings.HasPrefix(line, `{"type":"control_response"`) {
 		if ev, ok := parseControlAck(line); ok {
 			return append(buf[:0], ev), false, nil
 		}
@@ -469,12 +469,15 @@ func (p *ClaudeProtocol) ReadEventInto(line string, buf []clievent.Event) ([]cli
 	if err := json.Unmarshal(stringToBytesUnsafe(line), ev); err != nil {
 		return nil, false, err
 	}
-	// Defence-in-depth: structural skip in case the substring match misses
-	// (e.g. the CLI starts emitting the token under a different JSON key).
-	if ev.Type == "system" && (ev.SubType == "hook_started" || ev.SubType == "hook_response") {
+	// Structural fallback for frames the prefix match misses (e.g. the CLI
+	// reorders keys). The ack must survive here too or SetModel blocks.
+	if ev.Type == "system" && strings.HasPrefix(ev.SubType, "hook_") {
 		return nil, false, nil
 	}
 	if ev.Type == "control_response" {
+		if ack, ok := parseControlAck(line); ok {
+			return append(buf[:0], ack), false, nil
+		}
 		return nil, false, nil
 	}
 	// Cap total content bytes to bound per-event CPU / memory amplification: a

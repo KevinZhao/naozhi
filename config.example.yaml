@@ -156,8 +156,8 @@ cli:
   #   - Omitted => cli.backend (or first entry in `backends:`)
   #
   # Per-backend path/model/args are optional and fall back to cli.* above.
-  # ACP protocol is auto-selected for id="kiro"; stream-json for everything
-  # else — no extra flag needed.
+  # The protocol follows the id — stream-json for "claude", ACP for "kiro",
+  # codex app-server for "codex" — no extra flag needed.
   #
   #backend: "claude"
   #backends:
@@ -215,6 +215,14 @@ cli:
   #    # surfaces its rejection).
   #    # docs/rfc/dashboard-model-effort-control.md §4.2.
   #    models: ["sonnet", "opus", "haiku"]
+  #  - id: "codex"
+  #    path: "codex"
+  #    # Set model and args explicitly: when omitted they inherit cli.model /
+  #    # cli.args, i.e. claude's model name and flags. The model name follows
+  #    # model_provider in ~/.codex/config.toml (this one is amazon-bedrock).
+  #    model: "openai.gpt-5.5"
+  #    # Reasoning effort rides on args, not `effort` (see above).
+  #    args: ["-c", "model_reasoning_effort=high"]
   #
   # A top-level cli.effort works as an inheritable default for every backend
   # that supports one, exactly like cli.model:
@@ -330,7 +338,8 @@ cron:
   # 每个 tick 都刷一条失败通知；跳过（并发上限 / 上一轮未完）和取消不计数，
   # 后端瞬时故障（过载 / 限流 / 连不上模型服务）和 naozhi 重启后收尾的孤儿
   # 云沙箱 run 也不计数，运行中断开的云沙箱连接照常计数；成功、恢复、编辑都会
-  # 清零。默认 5；负数关闭。
+  # 清零。瞬时故障单独计数：达到这个次数且距第一次已满 6 小时同样自动暂停，
+  # 免得模型服务地址配错时永远不停。默认 5；负数关闭（两条规则都关）。
   # 恢复用 /cron resume <id> 或控制台。
   auto_pause_after_failures: 5
 

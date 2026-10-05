@@ -665,6 +665,13 @@ func (r *Router) shutdown() {
 		}
 	})
 
+	// The CLIs outlive the save (Detach below), so a reading booked after it
+	// would be booked again on the reattached CLI's next result, which
+	// differences against the saved baseline.
+	if !r.runs.cost.freeze(costFreezeDrain) {
+		slog.Warn("shutdown: cost bookings still running at the store save; their readings may be booked again after restart")
+	}
+
 	// Known IDs live off the table lock; the final save is unthrottled.
 	knownIDsCopy, knownIDsMarshalErr := r.kid.MarshalSnapshot()
 
