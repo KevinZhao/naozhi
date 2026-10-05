@@ -632,16 +632,24 @@ func TestEnsureSocketFreeForReuse_NoFileNoError(t *testing.T) {
 }
 
 // TestWaitSocketGone_AlreadyMissing is the fast path: no file, returns
-// true without waiting.
+// true without waiting for a poll tick. Without the fast path every call
+// blocks for at least one 20ms tick and still returns true, so the check is
+// the fastest of several runs against the tick: a regression fails it every
+// time, while a healthy fast path fails only if every run is starved.
 func TestWaitSocketGone_AlreadyMissing(t *testing.T) {
+	const pollTick = 20 * time.Millisecond // WaitSocketGone's ticker period
 	dir := t.TempDir()
 	path := filepath.Join(dir, "never-existed.sock")
-	start := time.Now()
-	if !WaitSocketGone(path, 2*time.Second) {
-		t.Fatal("WaitSocketGone returned false for missing path")
+	fastest := time.Duration(1<<63 - 1)
+	for range 5 {
+		start := time.Now()
+		if !WaitSocketGone(path, 2*time.Second) {
+			t.Fatal("WaitSocketGone returned false for missing path")
+		}
+		fastest = min(fastest, time.Since(start))
 	}
-	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-		t.Errorf("WaitSocketGone took %v for missing path; want ~0", elapsed)
+	if fastest >= pollTick {
+		t.Errorf("fastest WaitSocketGone on a missing path took %v; want < %v (no poll tick)", fastest, pollTick)
 	}
 }
 
