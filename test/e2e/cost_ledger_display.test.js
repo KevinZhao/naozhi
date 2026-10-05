@@ -177,6 +177,8 @@ test('cron drawer asks the ledger for its job and shows the 30-day figure', asyn
     await page.route((u) => u.pathname === '/api/cron' && u.searchParams.has('compact'), () => {});
     await row.click();
     await expect(page.locator('.ct-cost-ledger')).toHaveText('30 天 $3.25', { timeout: 5000 });
+    // entries counts ledger records (runs plus session spend outside a run window), not runs.
+    await expect(page.locator('.ct-cost-ledger')).toHaveAttribute('title', /^近 30 天账本合计：4 条账本记录（/);
     expect(mock.costSummaryCalls).toContainEqual({ group_by: 'job', job_id: 'cron-cost-1', session_key: '' });
     expect(pageErrors).toEqual([]);
   } finally {

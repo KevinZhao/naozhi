@@ -137,6 +137,45 @@ func TestAccountTurnCost_CronKeyOutsideAWindowWritesAsSession(t *testing.T) {
 	}
 }
 
+// Spend the session books on a cron key after the run's window closed (a late
+// result, a process-end partial) names the job, so per-job views count it;
+// rows on any other key name none.
+func TestLedgerRows_CronKeyNamesTheJob(t *testing.T) {
+	for _, tc := range []struct{ key, job string }{
+		{"cron:job1", "job1"},
+		{"feishu:p2p:x", ""},
+		{"cronographer:x", ""},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			proc := &TestProcess{AliveVal: true, SendFunc: scripted(&clievent.SendResult{Text: "a", CostUSD: 0.4})}
+			s, ledger := newLedgerSession(t, tc.key, proc)
+			hooked := &hookedTestProcess{TestProcess: proc}
+			s.storeProcess(hooked)
+			bookUnownedResults(s, hooked)
+			ledger.Rates().Observe(costledger.ModelDelta{Model: "claude-opus-5-5", CostUSD: 0.01, Tokens: costledger.Tokens{Output: 1000}})
+
+			s.BeginCostWindow()
+			if _, err := s.Send(context.Background(), "hi", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			s.EndCostWindow()
+			hooked.unownedHook.fn(clievent.SendResult{CostUSD: 0.6, SessionID: "sid-1"})
+			s.bookPartialUsage(clievent.ShadowUsage{Models: []clievent.ShadowModel{{Model: "claude-opus-5-5", Output: 100}}}, "end:sid-1:1")
+			metered := s.ledgerEntries(costledger.Increment{Metered: map[costledger.Unit]float64{costledger.UnitCredits: 2}}, "r")
+
+			ents := allEntries(t, ledger)
+			if len(ents) != 2 || ents[0].Kind == ents[1].Kind {
+				t.Fatalf("entries = %+v, want the late turn row and the partial row", ents)
+			}
+			for _, e := range append(ents, metered...) {
+				if e.Source != costledger.SourceSession || e.JobID != tc.job {
+					t.Fatalf("%s row %+v: job_id = %q, want %q", e.Kind, e, e.JobID, tc.job)
+				}
+			}
+		})
+	}
+}
+
 // kiro: the process view is a running sum, so equal readings must not
 // re-charge (the P2 class of bug on another backend).
 func TestAccountTurnCost_MeteringIsDifferenced(t *testing.T) {
