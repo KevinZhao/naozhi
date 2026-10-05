@@ -82,6 +82,8 @@
 ### Fixed
 
 - **优雅重启时，在保存会话状态之后才报告的 turn 不再记两次费用**（#3428）：重启时 CLI 进程存活并在重启后重新接管，以前在会话状态保存之后、断开 shim 之前收到的 result（CLI 自己发起的 turn，或 30 秒关停等待超时后才结束的 turn）会立刻记入 cost ledger，但保存下来的累计基线还是旧值，重启后下一条 result 按旧基线做差，同一段花费又记一次。现在关停在保存前冻结记账，这段花费留给重启后的第一条 result 一并计入；它在 ledger 里归到下一个 run id 名下
+- **`naozhi cost reconcile` 能归属已删除 dashboard 会话的首轮条目**（#3411）：#3494 之前，新会话首轮的 session-runs 记录不写 `session_id`，key 删掉后这些条目归不到任何 CLI session（本机实测 26 条）。现在按 transcript 的起头归属：只有一个 naozhi 用过的会话（`session-ids.json`）在该轮 run 的起止时间内（前后各 5s）起头、且这个起头不落在另一条同类 run 里时才归它；并发起头的首轮仍留着不处理（本机剩 2 条）
+  - 这类记录的 run 开始时间也用于对账：以前首轮在记账前的消息会被当成"首条记账前的历史"而整天跳过，现在这些日子照常算残差，dry-run 可能多出几条修正
 - `naozhi doctor` 的 CLI Backends 段 `Default:` 现在显示启动时实际绑定的默认 backend：`cli.backend` 未在 `cli.backends` 中列出、不是已注册的 backend id，或未设置且 `cli.backends` 首项无效时，此前打印的是配置值（例如 `Default: bogus`），而启动实际跑的是回退后的 backend。现在打印回退目标，并在括号里附上与启动告警相同措辞的原因（#3409）
 - `/urgent` 之后，在它之前已排队的消息现在会拿到自己的真实回答，不再收到"上一条消息已被 /urgent 打断，请在当前任务完成后重发"：真实 CLI 实测（claude 2.1.288）表明 `priority:"now"` 抢占不丢弃队列，紧急消息先跑、排队消息随后各自成轮（`docs/rfc/passthrough-mode-validation.md` V10，#3394）
 - 删除会话后立刻在同一个 key 上新建会话时，被删对话的记录不再留在新会话的 event log 里（#3416）：以前重启后它会出现在新会话 dashboard 历史的最前面，旧 workspace 的附件引用也一直不释放。现在删除会先清掉 event log 和附件引用、再关进程，新会话等清理完成（通常几毫秒，最多约 8 秒）才开始落盘

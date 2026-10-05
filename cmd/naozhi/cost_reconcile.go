@@ -173,9 +173,9 @@ func reconcileLedger(o reconcileOpts, out io.Writer) (reconcileReport, error) {
 	if err != nil {
 		return rep, err
 	}
-	byRun, byKey, chains, runs := sessionAttribution(o.SessionStorePath)
-	rep.Unattributed = l.attribute(byRun, byKey, chains, o.ClaudeDir)
-	l.runs = runs
+	at := sessionAttribution(o.SessionStorePath)
+	rep.Unattributed = l.attribute(at, o.ClaudeDir, o.SessionStorePath)
+	l.runs = at.runs
 
 	if o.Session != "" && len(l.bySID[o.Session]) == 0 {
 		return rep, fmt.Errorf("no ledger entries attributed to session %s", o.Session)
@@ -275,22 +275,28 @@ func loadLedgerSessions(store *costledger.Store, from, now time.Time) (*ledgerSe
 // attribute names each entry's CLI session: from its own run id (process-end
 // partials, unowned results and reconcile adjustments carry it), from the
 // session-runs record sharing its run id, from a key that only ever held one
-// session, or, for a turn under a key that held several, from their
-// transcripts (see soleActiveIn). It returns how many entries none of these
-// placed and records their key-days.
-func (l *ledgerSessions) attribute(runSID, keySID map[string]string, chains map[string][]string, claudeDir string) (unattributed int) {
-	act, booked := sessionActivity{}, bookedTimes(l.entries, chains)
+// session, for a turn under a key that held several from their transcripts
+// (see soleActiveIn), or, for an entry whose run record names no session,
+// from the one naozhi session whose transcript began in that run (see
+// soleBornIn). It returns how many entries none of these placed and records
+// their key-days.
+func (l *ledgerSessions) attribute(at attribution, claudeDir, storePath string) (unattributed int) {
+	act, booked := sessionActivity{}, bookedTimes(l.entries, at.chains)
+	born := newSessionBirths(claudeDir, storePath, at)
 	for _, e := range l.entries {
 		sid := runIDSession(e.RunID)
 		if sid == "" {
-			sid = runSID[e.RunID]
+			sid = at.byRun[e.RunID]
 		}
 		if sid == "" {
-			sid = keySID[e.SessionKey]
+			sid = at.byKey[e.SessionKey]
 		}
-		if c := chains[e.SessionKey]; sid == "" && len(c) > 0 && e.Kind == costledger.KindTurn {
+		if c := at.chains[e.SessionKey]; sid == "" && len(c) > 0 && e.Kind == costledger.KindTurn {
 			act.read(claudeDir, c)
 			sid = act.soleActiveIn(c, booked.before(e.SessionKey, e.TS), e.TS.Add(turnStampSlack))
+		}
+		if span := at.runs[e.RunID]; sid == "" && at.unnamed[e.RunID] && !span.from.IsZero() && !span.to.IsZero() {
+			sid = born.soleBornIn(span.from.Add(-turnStampSlack), span.to.Add(turnStampSlack))
 		}
 		if !claudefs.IsValidSessionID(sid) {
 			unattributed++
@@ -427,12 +433,23 @@ func (l *ledgerSessions) order() []string {
 	return out
 }
 
+// attribution is what the session store and session-runs records say about
+// which CLI session ran what.
+type attribution struct {
+	byRun   map[string]string   // run id -> CLI session
+	byKey   map[string]string   // key -> the one CLI session it ever held
+	chains  map[string][]string // key -> the sessions it held, sorted, when more than one
+	runs    map[string]timeSpan // run id -> its record's start and end, either may be zero
+	unnamed map[string]bool     // run ids whose record names no session
+}
+
 // sessionAttribution maps run id to CLI session id and to its span from the
 // session-runs records, and each session key to the one CLI session it ever
 // held. A key whose records and sessions.json chain together name more than
-// one session goes to chains instead, with those sessions sorted.
-func sessionAttribution(storePath string) (byRun, byKey map[string]string, chains map[string][]string, runs map[string]timeSpan) {
-	byRun, runs = map[string]string{}, map[string]timeSpan{}
+// one session goes to chains instead, with those sessions sorted. A record
+// naming no session still gives its run's span, and is marked unnamed.
+func sessionAttribution(storePath string) attribution {
+	byRun, runs, unnamed := map[string]string{}, map[string]timeSpan{}, map[string]bool{}
 	held := map[string]map[string]bool{}
 	hold := func(key, sid string) {
 		if held[key] == nil {
@@ -442,14 +459,18 @@ func sessionAttribution(storePath string) (byRun, byKey map[string]string, chain
 	}
 	runlog.WalkRecords(datadir.ForStore(storePath).SessionRunsRoot(), func(string, error) {}, func(rec runlog.Record) {
 		var r runhistory.SessionRun
-		if json.Unmarshal(rec.Raw, &r) != nil || r.SessionID == "" {
+		if json.Unmarshal(rec.Raw, &r) != nil {
 			return
 		}
 		if r.RunID != "" {
-			byRun[r.RunID] = r.SessionID
 			runs[r.RunID] = timeSpan{r.StartedAt, r.EndedAt}
+			if r.SessionID == "" {
+				unnamed[r.RunID] = true
+			} else {
+				byRun[r.RunID] = r.SessionID
+			}
 		}
-		if r.SessionKey != "" {
+		if r.SessionKey != "" && r.SessionID != "" {
 			hold(r.SessionKey, r.SessionID)
 		}
 	})
@@ -458,7 +479,7 @@ func sessionAttribution(storePath string) (byRun, byKey map[string]string, chain
 			hold(key, id)
 		}
 	}
-	byKey, chains = map[string]string{}, map[string][]string{}
+	byKey, chains := map[string]string{}, map[string][]string{}
 	for key, ids := range held {
 		if len(ids) == 1 {
 			for id := range ids {
@@ -471,7 +492,7 @@ func sessionAttribution(storePath string) (byRun, byKey map[string]string, chain
 		}
 		sort.Strings(chains[key])
 	}
-	return byRun, byKey, chains, runs
+	return attribution{byRun: byRun, byKey: byKey, chains: chains, runs: runs, unnamed: unnamed}
 }
 
 // cronSessionRuns maps each CLI session a cron run used to the spans of
@@ -1034,7 +1055,7 @@ func printReconcile(out io.Writer, rep reconcileReport, write bool) {
 	}
 	fmt.Fprintf(out, "%-8s %5s %11.2f %11.2f %11.2f %+11.2f\n", "合计", "", before, after, transcript, after-before)
 	if rep.Unattributed > 0 {
-		fmt.Fprintf(out, "%d 条会话条目归不到 CLI session（无 run 记录，key 没对应过 session，或对应过多个而按 transcript 时间分不出），未参与对账；同 key 同日的残差不记\n", rep.Unattributed)
+		fmt.Fprintf(out, "%d 条会话条目归不到 CLI session（无 run 记录，key 没对应过 session，或对应过多个而按 transcript 时间分不出；run 记录没写 session 的首轮，其间起头的已知 session 不止一个、没有或与别的首轮重叠），未参与对账；同 key 同日的残差不记\n", rep.Unattributed)
 	}
 	if len(rep.Flagged) > 0 {
 		fmt.Fprintln(out, "\n计入了 --resume 恢复总额的条目：")

@@ -489,6 +489,23 @@ func StoredSessionIDs(path string) map[string][]string {
 	return m
 }
 
+// StoredKnownIDs lists every CLI session id naozhi has used, from the
+// known-ids file beside the session store at storePath. Like
+// StoredSessionIDs it only reads: a corrupt file yields nil and stays put.
+func StoredKnownIDs(storePath string) []string {
+	path := knownIDsPath(storePath)
+	if path == "" {
+		return nil
+	}
+	ids, out, err := jsonfile.Load[[]string](path, jsonfile.Options{
+		MaxBytes: maxStoreFileBytes, Label: "known session IDs", Corrupt: jsonfile.LeaveCorrupt,
+	})
+	if err != nil || out != jsonfile.Parsed {
+		return nil
+	}
+	return ids
+}
+
 // knownIDsPath derives the known session IDs path (sessions.json → session-ids.json).
 func knownIDsPath(storePath string) string {
 	if storePath == "" {
