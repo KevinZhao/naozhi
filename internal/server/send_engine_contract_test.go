@@ -128,8 +128,8 @@ func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 	hub := newHubForTest(t, HubOptions{
 		Router:      router,
 		Resolver:    resolver,
-		AllowedRoot: "/tmp/nz-root",
-	}, sendEngineOpts{Agents: agents, ProjectMgr: projectMgr})
+		AllowedRoot: "/tmp/nz-projects",
+	}, sendEngineOpts{Agents: agents, ProjectMgr: projectMgr, AllowedRoot: "/tmp/nz-root"})
 	t.Cleanup(hub.Shutdown)
 
 	if hub.engine == nil {
@@ -150,8 +150,9 @@ func TestNewHub_SharesDependenciesWithEngine(t *testing.T) {
 	if hub.engine.projectMgr != projectMgr {
 		t.Error("engine.projectMgr is not the project manager passed to NewHub")
 	}
-	if hub.engine.allowedRoot != hub.tailers.allowedRoot {
-		t.Errorf("engine.allowedRoot = %q, tailers.allowedRoot = %q — a path allowed on one side would not be on the other",
+	// Two roots, not one: the engine checks workspaces, the tailer transcripts.
+	if hub.engine.allowedRoot != "/tmp/nz-root" || hub.tailers.allowedRoot != "/tmp/nz-projects" {
+		t.Errorf("engine.allowedRoot = %q, tailers.allowedRoot = %q, want the workspace and the projects root",
 			hub.engine.allowedRoot, hub.tailers.allowedRoot)
 	}
 	if hub.engine.notify != sendNotifier(hub.bcast) {
@@ -264,8 +265,11 @@ func TestBuildServer_SharesOneWSStack(t *testing.T) {
 	if w.engine.resolver == nil || w.engine.resolver != hub.resolver {
 		t.Error("engine and Hub do not share the resolver")
 	}
-	if w.engine.allowedRoot == "" || w.engine.allowedRoot != hub.tailers.allowedRoot {
-		t.Errorf("engine.allowedRoot = %q, tailers.allowedRoot = %q", w.engine.allowedRoot, hub.tailers.allowedRoot)
+	if w.engine.allowedRoot == "" || w.engine.allowedRoot != w.allowedRoot {
+		t.Errorf("engine.allowedRoot = %q, want the operator workspace %q", w.engine.allowedRoot, w.allowedRoot)
+	}
+	if hub.tailers.allowedRoot == "" || hub.tailers.allowedRoot != w.projectsRoot {
+		t.Errorf("tailers.allowedRoot = %q, want the projects root %q", hub.tailers.allowedRoot, w.projectsRoot)
 	}
 	if hub.scheduler != CronView(sched) {
 		t.Error("the Hub does not have the Server's Scheduler — stub revival would stop on the subscribe path")

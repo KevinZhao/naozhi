@@ -10,12 +10,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/contracts"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/limits"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
 	"github.com/naozhi/naozhi/internal/subagent"
@@ -276,36 +276,29 @@ func (h *Handler) HandleToolResult(w http.ResponseWriter, r *http.Request) {
 type Deps struct {
 	Router     SessionLookup
 	NodeAccess NodeAccessor
+	// ProjectsRoot is claudefs.ResolvedProjectsRoot of the server's Claude
+	// dir, the same root the WS agent tailer checks against. There is no
+	// default: "" makes every transcript read fail closed.
+	ProjectsRoot string
 }
 
-// New constructs a Handler, resolving ~/.claude/projects once as the canonical root.
+// New constructs a Handler; every transcript path it serves must sit under
+// d.ProjectsRoot.
 func New(d Deps) *Handler {
-	root := claudeProjectsAllowedRoot()
 	return &Handler{
 		router:      d.Router,
 		nodeAccess:  d.NodeAccess,
-		allowedRoot: root,
+		allowedRoot: d.ProjectsRoot,
 	}
 }
 
-// claudeProjectsAllowedRoot returns the EvalSymlinks-resolved ~/.claude/projects,
-// or the lexical path when resolution fails (first run) so checks degrade, not reject.
-func claudeProjectsAllowedRoot() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = os.Getenv("HOME")
-	}
-	raw := claudefs.ProjectsRoot(filepath.Join(home, ".claude"))
-	if resolved, err := filepath.EvalSymlinks(raw); err == nil {
-		return resolved
-	}
-	return raw
-}
+// ProjectsRoot is the root transcript paths are checked against.
+func (h *Handler) ProjectsRoot() string { return h.allowedRoot }
 
-// jsonlPathUnderAllowedRoot checks that p is anchored under root after
-// resolving p's nearest existing ancestor. Anchors on root + separator
-// (plain HasPrefix would match "/var/fooBar" for "/var/foo") and returns
-// false for an empty root to fail safe.
+// jsonlPathUnderAllowedRoot checks that p is strictly beneath root after
+// resolving p's nearest existing ancestor, by osutil.PathContainedInRoot —
+// the verdict the WS agent tailer reaches, case-insensitive filesystems
+// included. An empty root fails safe.
 func jsonlPathUnderAllowedRoot(p, root string) bool {
 	if root == "" {
 		return false
@@ -340,10 +333,9 @@ func jsonlPathUnderAllowedRoot(p, root string) bool {
 			}
 		}
 	}
-	if abs == root {
-		return false // exact root match is not under root
-	}
-	return strings.HasPrefix(abs, root+string(filepath.Separator))
+	// Asking about the parent makes the check strict: root itself is
+	// rejected, also when it is spelled in a different case.
+	return osutil.PathContainedInRoot(filepath.Dir(abs), root)
 }
 
 // SessionLookup is the *session.Router surface agentevents reads: the live
