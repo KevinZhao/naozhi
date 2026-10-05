@@ -269,9 +269,10 @@ func loadLedgerSessions(store *costledger.Store, from, now time.Time) (*ledgerSe
 }
 
 // attribute names each entry's CLI session: from its own run id (process-end
-// partials and reconcile adjustments carry it), from the session-runs record
-// sharing its run id, or from a key that only ever held one session. It
-// returns how many entries none of these placed and records their key-days.
+// partials, unowned results and reconcile adjustments carry it), from the
+// session-runs record sharing its run id, or from a key that only ever held
+// one session. It returns how many entries none of these placed and records
+// their key-days.
 func (l *ledgerSessions) attribute(runSID, keySID map[string]string) (unattributed int) {
 	for _, e := range l.entries {
 		sid := runIDSession(e.RunID)
@@ -291,10 +292,10 @@ func (l *ledgerSessions) attribute(runSID, keySID map[string]string) (unattribut
 	return unattributed
 }
 
-// runIDSession returns the CLI session an "end:<sid>:…" or
+// runIDSession returns the CLI session an "end:<sid>:…", "unowned:<sid>:…" or
 // "reconcile:<sid>:…" run id names.
 func runIDSession(runID string) string {
-	for _, p := range []string{"end:", reconcilePrefix} {
+	for _, p := range []string{"end:", "unowned:", reconcilePrefix} {
 		if rest, ok := strings.CutPrefix(runID, p); ok {
 			sid, _, _ := strings.Cut(rest, ":")
 			return sid

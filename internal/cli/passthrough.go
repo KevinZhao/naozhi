@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -487,26 +488,28 @@ func (p *Process) onTurnResult() []*sendSlot {
 	return owners
 }
 
-// endUnownedTurn ends a turn the CLI started on its own (system/init with no
-// Send behind it, e.g. a background task-notification) once its result
-// arrives unclaimed. Without it nothing moves State back to Ready: no Send
-// defer owns the turn and onTurnResult only ends turns that consumed slots.
-// A queued passthrough slot keeps it Running — its own turn follows. Either
-// way the result goes to onUnownedResult so the session books the turn's cost
-// now: no Send's finishRun ever sees it, and the next owned result's
-// cumulative difference is lost if the process dies first (#3096).
-func (p *Process) endUnownedTurn(ev clievent.Event) {
+// settleUnclaimedResult hands a result no Send consumes to onUnownedResult so
+// the session books its cost now: no Send's finishRun ever sees it, and the
+// next owned result's cumulative difference is lost if the process dies first
+// (#3096, #3322). noLiveSend is turnState.noLiveSend read before the result
+// was queued. A turn the CLI started on its own (system/init with no Send
+// behind it) also ends here, since nothing else moves it back to Ready; a
+// queued passthrough slot keeps it Running for that slot's own turn. A result
+// a live Send owns is left alone.
+func (p *Process) settleUnclaimedResult(ev clievent.Event, noLiveSend bool) {
 	p.slots.mu.Lock()
 	pending := len(p.slots.pending)
 	p.slots.mu.Unlock()
 	p.turn.mu.Lock()
-	if !p.turn.unowned {
+	ended := false
+	switch {
+	case p.turn.unowned:
+		if pending == 0 {
+			_, ended = p.turn.transitionLocked(evTurnEnded)
+		}
+	case !noLiveSend:
 		p.turn.mu.Unlock()
 		return
-	}
-	ended := false
-	if pending == 0 {
-		_, ended = p.turn.transitionLocked(evTurnEnded)
 	}
 	onDone, onResult := p.turn.onTurnDone, p.turn.onUnownedResult
 	p.turn.mu.Unlock()
@@ -522,10 +525,19 @@ func (p *Process) endUnownedTurn(ev clievent.Event) {
 // priority:"now" preempted the active turn (result.subtype ==
 // "error_during_execution"): slots not yet replayed that are not themselves
 // priority:"now" (those proceed into the next turn). Returns the victims
-// after removing them from pendingSlots.
+// after removing them from pendingSlots. Without an un-replayed "now" slot
+// (canceled ones count: the CLI still has it) the abort was a /stop, a SIGINT
+// or a mid-turn failure, which leave the CLI's queue intact
+// (docs/rfc/passthrough-mode-validation.md V5): queued slots wait for their
+// own turns.
 func (p *Process) reapAbortedPreempted() []*sendSlot {
 	p.slots.mu.Lock()
 	defer p.slots.mu.Unlock()
+	if !slices.ContainsFunc(p.slots.pending, func(s *sendSlot) bool {
+		return !s.replayed && s.priority == "now"
+	}) {
+		return nil
+	}
 	var victims []*sendSlot
 	kept := p.slots.pending[:0]
 	for _, s := range p.slots.pending {

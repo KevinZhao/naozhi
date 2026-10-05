@@ -17,7 +17,8 @@ import (
 const thinkingLine = "💭 思考中..."
 
 // fallbackBannerDelayDefault matches reactionAckTimeout: a chat whose message
-// got no ⏳ sees the turn running about as soon as a ⏳ would have shown.
+// got no ⏳ sees the turn running about as soon as a ⏳ would have shown, and
+// the ⏳'s add has settled by the time the banner asks.
 const fallbackBannerDelayDefault = 3 * time.Second
 
 // replyTracker manages IM status message streaming (thinking -> tool_use -> result).
@@ -377,14 +378,20 @@ func (t *replyTracker) onEvent(ev clievent.Event) {
 }
 
 // armFallbackBanner posts a "💭 思考中..." banner after delay unless an event
-// posted one or the turn reached its answer first; the answer is then edited
-// into it. For a request whose message got no ⏳, so the chat still sees the
-// turn running. No-op without interim messages.
-func (t *replyTracker) armFallbackBanner(delay time.Duration) {
+// posted one, the turn reached its answer first, or skip, asked when the
+// delay is up, reports the message got its ⏳; the answer is then edited into
+// it. So a chat without a ⏳ still sees the turn running. No-op without
+// interim messages.
+func (t *replyTracker) armFallbackBanner(delay time.Duration, skip func() bool) {
 	if !t.supportsInterim || delay <= 0 {
 		return
 	}
-	t.fallbackTimer = time.AfterFunc(delay, t.postBanner)
+	t.fallbackTimer = time.AfterFunc(delay, func() {
+		if skip != nil && skip() {
+			return
+		}
+		t.postBanner()
+	})
 }
 
 // postBanner posts the status banner, once per turn, on the loopWG slot

@@ -80,7 +80,7 @@ type Connector struct {
 	router  SessionRouter
 	projMgr *project.Manager // may be nil
 	// resolver derives planner-view opts for reverse-RPC restart_planner
-	// (docs/rfc/key-resolver.md Phase 5); nil falls back to inline AgentOpts.
+	// (docs/rfc/key-resolver.md Phase 5); nil refuses restart_planner.
 	resolver         PlannerResolver
 	claudeDir        string
 	hostname         string
@@ -91,7 +91,7 @@ type Connector struct {
 }
 
 // New creates a Connector. projMgr may be nil if projects are not configured;
-// resolver may be nil (restart_planner then uses the inline AgentOpts path);
+// resolver may be nil (restart_planner then refuses);
 // turns may be nil only where nothing sends.
 func New(cfg *Config, router SessionRouter, projMgr *project.Manager, resolver PlannerResolver, discovery Discovery, turns TurnSubmitter) *Connector {
 	claudeDir := ""

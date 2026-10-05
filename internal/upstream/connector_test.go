@@ -605,8 +605,8 @@ func TestHandleRequest_RestartPlanner_NilMgr(t *testing.T) {
 	params, _ := json.Marshal(map[string]string{"project_name": "myproj"})
 	req := node.ReverseMsg{Method: "restart_planner", Params: params}
 	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Error("expected error for restart_planner with nil projMgr, got nil")
+	if err == nil || !strings.Contains(err.Error(), "projects not configured") {
+		t.Errorf("err = %v, want projects not configured", err)
 	}
 }
 
@@ -1108,13 +1108,13 @@ func TestHandleRequest_RestartPlanner_ProjectNotFound(t *testing.T) {
 	mgr.Scan()
 
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), mgr, nil, Discovery{}, nil)
+	c := New(cfg, testRouter(makeRouter()), mgr, stubPlannerResolver{}, Discovery{}, nil)
 
 	params, _ := json.Marshal(map[string]string{"project_name": "ghost"})
 	req := node.ReverseMsg{Method: "restart_planner", Params: params}
 	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Error("expected error for non-existent project, got nil")
+	if err == nil || !strings.Contains(err.Error(), "project not found") {
+		t.Errorf("err = %v, want project not found", err)
 	}
 }
 

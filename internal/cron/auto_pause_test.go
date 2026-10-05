@@ -384,6 +384,77 @@ func TestAutoPause_DashboardJobPointsAtDashboard(t *testing.T) {
 	}
 }
 
+// TestAutoPause_ResumeHintFollowsNotifyChat: /cron resume only finds a job
+// from its own chat, so a pause notice delivered to another chat (a per-job
+// override or notify_default) points back at the creating chat and the
+// dashboard instead.
+func TestAutoPause_ResumeHintFollowsNotifyChat(t *testing.T) {
+	t.Parallel()
+	crossChat := func(id string) string {
+		return "；已连续失败 1 次，任务已自动暂停，修复后在创建该任务的会话发送 /cron resume " + id + "，或在控制台恢复"
+	}
+	cases := []struct {
+		name string
+		edit func(s *Scheduler, j *Job)
+		want func(id string) string
+	}{
+		{"override to another chat", func(_ *Scheduler, j *Job) {
+			j.NotifyPlatform, j.NotifyChatID = "feishu", "chat-2"
+		}, crossChat},
+		{"override to the source chat", func(_ *Scheduler, j *Job) {
+			j.NotifyPlatform, j.NotifyChatID = "feishu", "chat-1"
+		}, func(id string) string {
+			return "；已连续失败 1 次，任务已自动暂停，修复后发送 /cron resume " + id + " 恢复"
+		}},
+		{"notify_default elsewhere", func(s *Scheduler, j *Job) {
+			notify := true
+			j.Notify = &notify
+			s.notifyDefault = NotifyTarget{Platform: "slack", ChatID: "chat-1"}
+		}, crossChat},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, r, ns, id := newAutoPauseScheduler(t, 1, "feishu")
+			s.editJobForTest(t, id, func(j *Job) { tc.edit(s, j) })
+			r.set(nil, errStreakSend)
+			runN(s, id, 1)
+			got := ns.noticesAfter(s)
+			if len(got) != 1 || !strings.HasSuffix(got[0], tc.want(id)) {
+				t.Errorf("notices = %q, want one ending %q", got, tc.want(id))
+			}
+		})
+	}
+}
+
+func TestAutoPauseNoticeSuffix(t *testing.T) {
+	t.Parallel()
+	const head = "；已连续失败 3 次，任务已自动暂停，"
+	src := NotifyTarget{Platform: "feishu", ChatID: "chat-1"}
+	cases := []struct {
+		name       string
+		plat, chat string
+		to         NotifyTarget
+		paused     int
+		want       string
+	}{
+		{"not paused", "feishu", "chat-1", src, 0, ""},
+		{"source chat", "feishu", "chat-1", src, 3, head + "修复后发送 /cron resume j1 恢复"},
+		{"other chat", "feishu", "chat-1", NotifyTarget{Platform: "feishu", ChatID: "chat-2"}, 3,
+			head + "修复后在创建该任务的会话发送 /cron resume j1，或在控制台恢复"},
+		{"other platform", "feishu", "chat-1", NotifyTarget{Platform: "slack", ChatID: "chat-1"}, 3,
+			head + "修复后在创建该任务的会话发送 /cron resume j1，或在控制台恢复"},
+		{"dashboard job", "dashboard", "dash", src, 3, head + "修复后在控制台恢复"},
+		{"no source chat", "", "", src, 3, head + "修复后在控制台恢复"},
+	}
+	for _, tc := range cases {
+		snap := jobSnapshot{jobID: "j1", platName: tc.plat, chatID: tc.chat}
+		if got := autoPauseNoticeSuffix(snap, tc.to, tc.paused); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestAutoPause_PersistFailureLeavesJobActive: when the pause cannot be
 // persisted the job keeps running and keeps its entry, and the notice does
 // not claim a pause that did not happen.
@@ -432,7 +503,7 @@ func TestAutoPause_ResolveWorkspaceOutsideRootNotifiesOnPause(t *testing.T) {
 	outside := t.TempDir()
 	rc := withNotify(newGetSessionArgs(t, s, &Job{ID: id}), "日报").runCtx
 	rc.snap.workDir = outside
-	rc.snap.platName = "feishu"
+	rc.snap.platName, rc.snap.chatID = rc.notifyTo.Platform, rc.notifyTo.ChatID
 
 	if _, abort := s.resolveCronWorkspace(rc); !abort {
 		t.Fatal("outside-root work_dir must abort")
@@ -557,6 +628,7 @@ func TestAutoPause_OtherNoticePathsCarrySuffix(t *testing.T) {
 		t.Parallel()
 		s, _, ns, id := newAutoPauseScheduler(t, 1, "feishu")
 		rc := withNotify(newGetSessionArgs(t, s, &Job{ID: id}), "日报").runCtx
+		rc.snap.platName, rc.snap.chatID = rc.notifyTo.Platform, rc.notifyTo.ChatID
 		rc.snap.fresh, rc.snap.workDir = true, t.TempDir()+"/missing"
 		if _, ok := s.freshContextPreflightP0(preflightArgs{runCtx: rc}); ok {
 			t.Fatal("unreachable work_dir must fail the preflight")
@@ -570,6 +642,7 @@ func TestAutoPause_OtherNoticePathsCarrySuffix(t *testing.T) {
 		t.Parallel()
 		s, _, ns, id := newAutoPauseScheduler(t, 1, "feishu")
 		rc := withNotify(newGetSessionArgs(t, s, &Job{ID: id}), "日报").runCtx
+		rc.snap.platName, rc.snap.chatID = rc.notifyTo.Platform, rc.notifyTo.ChatID
 		s.finishSandboxRun(sandboxExecArgs{runCtx: rc}, RunStateFailed, ErrClassSandboxFailed, "", "boom", nil)
 		want := "[Cron 日报] 云沙箱任务失败 · run 9f8e7d6c" + suffix(id)
 		if got := ns.noticesAfter(s); len(got) != 1 || got[0] != want {

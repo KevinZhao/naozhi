@@ -97,7 +97,7 @@ func (f startupFailure) cooldownLeft(now time.Time) time.Duration {
 // has one).
 func (f startupFailure) orRun(run spawnpool.StartupFailure, ok bool) startupFailure {
 	if ok && run.At.After(f.at) {
-		return startupFailure{streak: run.Streak, at: run.At, detail: run.Detail}
+		return startupFailure{streak: run.Streak, class: run.Class, at: run.At, detail: run.Detail}
 	}
 	return f
 }
@@ -125,18 +125,36 @@ func countsAsStartupFailure(ctx context.Context, err error) bool {
 }
 
 // noteSpawnFailure records err as key's latest failed spawn, continuing the
-// streak of the key's run or of its dead entry's process.
-func noteSpawnFailure(tx sessTx, key string, err error, now time.Time) {
+// streak of the key's run or of its dead entry's process. listed reports
+// whether the session list shows the run, on key's entry: the version is
+// advanced then, and the caller notifies once outside the lock.
+func noteSpawnFailure(tx sessTx, key string, err error, now time.Time) (listed bool) {
 	cur := tx.Get(key)
 	if cur != nil && cur.isAlive() {
-		return // another path installed a live session: nothing to pause
+		return false // another path installed a live session: nothing to pause
 	}
 	rec, _ := tx.Ext().spawns.StartupFailure(key)
 	tx.Ext().spawns.NoteStartupFailure(key, spawnpool.StartupFailure{
 		Streak: max(rec.Streak, startupFailureOf(cur).streak) + 1,
+		Class:  spawnFailureClass(err),
 		At:     now,
 		Detail: osutil.SanitizeForLog(err.Error(), 200),
 	})
+	if cur == nil {
+		return false
+	}
+	tx.BumpGen() // the run is in-memory only: nothing to save
+	return true
+}
+
+// spawnFailureClass is the cause stderr names for a spawn whose CLI exited
+// in the Init handshake; ExitUnknown for any other Init failure.
+func spawnFailureClass(err error) clierr.ExitClass {
+	var pe *clierr.ProcessExitedError
+	if errors.As(err, &pe) {
+		return pe.Class
+	}
+	return clierr.ExitUnknown
 }
 
 // resumeDropReason is why a respawn of old must not resume its session id,

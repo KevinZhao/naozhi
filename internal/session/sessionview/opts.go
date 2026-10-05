@@ -13,8 +13,9 @@ type AgentOpts struct {
 	Backend   string // backend ID ("claude" / "kiro" / …); empty = router default
 	// DefaultBackend is the agent-config backend (agents[].backend). It ranks
 	// below Backend and the dashboard pick, applies only when the key has no
-	// session, and ranks above the router default, so it neither overrides
-	// the picker nor moves a resumable session onto another CLI.
+	// session, and ranks above the access profile's default_backend and the
+	// router default, so it neither overrides the picker nor moves a
+	// resumable session onto another CLI.
 	DefaultBackend string
 	// AccessProfile names the access profile (auth/upstream env overlay +
 	// default model) to spawn under. Empty = global default. Resume

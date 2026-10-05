@@ -99,18 +99,19 @@ func (c *costAccounting) onProcessEnd(s *ManagedSession, end cli.ProcessEnd, cla
 		if sid == "" { // a passthrough process never learns it; it runs the session's
 			sid = s.getSessionID()
 		}
-		s.bookPartialUsage(s.endUsage(end, sid, claudeDir), endRunID(sid))
+		s.bookPartialUsage(s.endUsage(end, sid, claudeDir), sessionRunID("end:", sid))
 	}()
 }
 
-// endRunID is a process-end partial's run id. No run record shares it, so it
-// carries the CLI session id the spend belongs to: "end:<sid>:<id>".
-func endRunID(sid string) string {
+// sessionRunID is the run id of a ledger entry no run record shares (a
+// process-end partial, an unowned result), so it carries the CLI session id
+// the spend belongs to: "<prefix><sid>:<id>", or a bare id when sid is unknown.
+func sessionRunID(prefix, sid string) string {
 	id := newRunID()
 	if sid == "" || id == "" {
 		return id
 	}
-	return "end:" + sid + ":" + id
+	return prefix + sid + ":" + id
 }
 
 // waitEnds waits up to d for running process-end bookings.

@@ -193,16 +193,16 @@ func configCheck(args []string, stdout io.Writer) int {
 				Env:  maskEnvValues(filteredEnv),
 			}
 			for agentID, ac := range cfg.Agents {
-				// An agent pinned to a backend spawns there unless the dashboard
-				// picks another, so it is listed only under that backend.
-				if ac.Backend != "" && ac.Backend != id {
-					continue
-				}
 				// An agent's own access_profile outranks default_access_profile at
-				// spawn, so its default_model is the one that reaches argv.
+				// spawn, so its default_model and default_backend are the ones used.
 				profileID := cfg.DefaultAccessProfile
 				if ac.AccessProfile != "" {
 					profileID = ac.AccessProfile
+				}
+				// An agent whose backend or profile names one spawns there unless
+				// the dashboard picks another, so it is listed only under that one.
+				if pin := session.EffectiveDefaultBackend(ac.Backend, accessProfiles, profileID); pin != "" && pin != id {
+					continue
 				}
 				model, agentEffort, args, prompt := session.EffectiveArgvLayers(bd, accessProfiles, profileID, session.AgentOpts{
 					Model: ac.Model, Effort: ac.Effort, ExtraArgs: ac.Args, SystemPrompt: ac.SystemPrompt,

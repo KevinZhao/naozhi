@@ -15,8 +15,8 @@ import (
 // non-positive int64 nanosecond count. mrand.Int64N panics on
 // n <= 0, so this test asserts jitterSleep returns cleanly without
 // dragging the cron tick into robfig/cron's recover path. It runs with
-// a pre-cancelled ctx so the timer wait short-circuits and the elapsed
-// assertion stays deterministic on loaded CI runners.
+// a pre-cancelled ctx so no case waits out its timer; the contract is
+// "returns without panicking", not a wall-clock ceiling.
 //
 // Direct inputs (period=-1, jitterMax=large positive): the existing
 // `if window <= 0` branch already rejects this; the new
@@ -51,24 +51,35 @@ func TestJitterSleep_NegativeWindowDoesNotPanic(t *testing.T) {
 	}
 	// Pre-cancelled ctx: jitterSleep still computes window and rolls
 	// mrand.Int64N (the panic-risk path this test guards), but the final
-	// select hits ctx.Done() immediately instead of waiting out the timer.
-	// This keeps the elapsed-time assertion deterministic — without it the
-	// "negative period, positive jitterMax" case legitimately sleeps up to
-	// jitterMax (1ms), and a busy CI runner's scheduler latency pushes the
-	// wakeup past any small fixed threshold, producing a flaky failure that
-	// has nothing to do with the guards under test.
+	// select hits ctx.Done() instead of waiting out the timer.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			start := time.Now()
 			jitterSleep(ctx, tc.period, tc.jitterMax)
-			// With a cancelled ctx the call must return effectively
-			// instantly regardless of the rolled window.
-			if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-				t.Errorf("jitterSleep with %s took %v; want ~0 (cancelled ctx must short-circuit the timer wait)", tc.name, elapsed)
-			}
 		})
+	}
+}
+
+// TestJitterSleep_CancelledCtxSkipsTimerWait pins the ctx.Done() arm of
+// jitterSleep's final select. The window is 24h, so a regression that waits
+// on the timer alone blocks for hours with probability ~1 - 5s/24h; the 5s
+// bound only has to separate "returns" from "sleeps", not measure latency.
+func TestJitterSleep_CancelledCtxSkipsTimerWait(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		jitterSleep(ctx, 0, 24*time.Hour)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("jitterSleep with a cancelled ctx still waited on its timer; the ctx.Done() arm must short-circuit it")
 	}
 }

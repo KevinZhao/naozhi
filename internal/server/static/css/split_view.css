@@ -558,6 +558,21 @@
 .git-chip-sep{margin:0 3px;opacity:.45}
 .git-chip-worktree{color:var(--nz-chip-info-fg);background:var(--nz-chip-info-bg);border-color:rgba(0,122,255,.35)}
 .git-chip-detached{color:var(--nz-amber);background:rgba(255,159,10,.12);border-color:rgba(255,159,10,.35);font-variant-numeric:tabular-nums}
+/* PR chip (session_header.js setHeaderPRChip): the PRs the session published
+   or touched, newest first. Sits after the git chip and takes over its auto
+   margin, handing it on to the effort tag the same way. */
+.main-header .detail-pr{display:inline-flex;align-items:center;flex-shrink:0;margin-right:auto}
+.main-header .detail-pr:empty{display:none}
+.main-header .detail:has(.detail-pr:not(:empty)) .detail-git,
+.main-header .detail:has(.detail-effort:not(:empty)) .detail-pr{margin-right:0}
+.pr-chip{display:inline-flex;align-items:center;gap:4px;padding:1px 6px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;letter-spacing:.2px;color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border);white-space:nowrap}
+.pr-chip-icon{font-weight:400;opacity:.75}
+.pr-chip-link{color:var(--nz-accent);text-decoration:none;font-variant-numeric:tabular-nums}
+.pr-chip-link:hover{text-decoration:underline}
+.pr-chip-link.pr-action-merged{color:var(--nz-purple)}
+.pr-chip-link.pr-action-closed{color:var(--nz-text-mute);text-decoration:line-through}
+.pr-chip-action{font-weight:400}
+.pr-chip-more{opacity:.75;cursor:help}
 .sc-type-tag{display:inline-block;padding:1px 5px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;color:var(--nz-text-mute);background:var(--nz-bg-2);letter-spacing:.2px;flex-shrink:0;margin-left:auto}
 .sc-agents{display:inline-flex;align-items:center;gap:2px;padding:1px 5px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;color:var(--nz-chip-info-fg);background:var(--nz-chip-info-bg);flex-shrink:0;margin-left:auto}
 /* R110-P1 Home panel (idle main area): "最近会话" compact list that appears

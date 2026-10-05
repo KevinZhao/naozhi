@@ -499,6 +499,14 @@ func (p *ClaudeProtocol) ReadEventInto(line string, buf []clievent.Event) ([]cli
 			ev.AskQuestion = aq
 		}
 	}
+	// The PR fields share no keys with Event, so they get their own pass on the
+	// rare frame that carries them.
+	if ev.Type == "system" && ev.SubType == "code_change_published" {
+		var cc clievent.CodeChange
+		if json.Unmarshal(stringToBytesUnsafe(line), &cc) == nil && cc.Valid() {
+			ev.CodeChange = &cc
+		}
+	}
 	// Copy the value out so the caller owns an independent clievent.Event; the deferred
 	// Put resets only the pooled struct's view, not the freshly-unmarshalled
 	// graph (Message, AskQuestion, ...) the copy points at.

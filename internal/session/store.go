@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
@@ -58,6 +59,9 @@ type storeEntry struct {
 	// Re-validated on load so a hand-edited file cannot smuggle argv into --model/--effort.
 	TuningModel  string `json:"tuning_model,omitempty"`
 	TuningEffort string `json:"tuning_effort,omitempty"`
+	// CodeChanges is the PRs the session published or touched, newest last,
+	// re-validated on load (the URLs become dashboard links).
+	CodeChanges []clievent.CodeChange `json:"code_changes,omitempty"`
 
 	// prevGen is ManagedSession.prevHistoryGen when the chain slices above were
 	// snapshotted (unexported: never hits disk). Bumped under historyMu on every
@@ -167,6 +171,7 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 		Model:              s.Model(),
 		TuningModel:        s.TuningModel(),
 		TuningEffort:       s.TuningEffort(),
+		CodeChanges:        s.CodeChanges(),
 	}, true
 }
 
@@ -191,6 +196,7 @@ func equalStoreEntry(a, b storeEntry) bool {
 		a.Model == b.Model &&
 		a.TuningModel == b.TuningModel &&
 		a.TuningEffort == b.TuningEffort &&
+		slices.Equal(a.CodeChanges, b.CodeChanges) &&
 		a.prevGen == b.prevGen
 }
 

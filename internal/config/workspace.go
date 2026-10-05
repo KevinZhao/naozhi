@@ -121,7 +121,10 @@ type AccessProfile struct {
 	// DefaultModel sits below an explicit per-request / PlannerModel choice and
 	// above backend.DefaultModel.
 	DefaultModel string `yaml:"default_model,omitempty"`
-	// DefaultBackend optionally pins a backend; a project's `backend` still wins.
+	// DefaultBackend is the backend a NEW session under this profile spawns
+	// on when nothing more specific names one: a request, a project's
+	// `backend`, the dashboard pick and agents[].backend all win, and an
+	// existing session never moves.
 	DefaultBackend string `yaml:"default_backend,omitempty"`
 }
 

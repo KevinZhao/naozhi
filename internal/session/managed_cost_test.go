@@ -2,7 +2,9 @@ package session
 
 import (
 	"context"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -515,6 +517,62 @@ func TestBookUnownedResults_BooksCLIStartedTurnsOnce(t *testing.T) {
 	}
 	if len(amounts) != 3 || !approxEq(amounts[0]+amounts[1]+amounts[2], 3.5) {
 		t.Fatalf("ledger amounts = %v, want three entries summing to 3.5", amounts)
+	}
+}
+
+// #3322: a Send that gave up (interrupt, cron deadline) books nothing; the
+// late result its process hands over is booked once, and the same reading
+// handed over again (readLoop and the next Send's drain both see it) adds
+// nothing.
+func TestBookUnownedResults_AbandonedSendsLateResultBooksOnce(t *testing.T) {
+	proc := &TestProcess{AliveVal: true, SendFunc: func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
+		return nil, context.Canceled
+	}}
+	s, ledger := newLedgerSession(t, "dashboard:direct:host:general", proc)
+	hooked := &hookedTestProcess{TestProcess: proc}
+	s.storeProcess(hooked)
+	bookUnownedResults(s, hooked)
+
+	if _, err := s.Send(context.Background(), "hi", nil, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Send = %v, want context.Canceled", err)
+	}
+	late := clievent.SendResult{CostUSD: 2, SessionID: "sid"}
+	hooked.fn(late)
+	hooked.fn(late)
+	if got := loadTotalCost(&s.costSpent); !approxEq(got, 2) {
+		t.Fatalf("costSpent = %v, want the late result's 2 once", got)
+	}
+	ents := allEntries(t, ledger)
+	if len(ents) != 1 || ents[0].Kind != costledger.KindTurn || !approxEq(ents[0].Amount, 2) {
+		t.Fatalf("entries = %+v, want one Kind=turn row of 2", ents)
+	}
+}
+
+// No run record shares an unowned result's run id, so the id names the CLI
+// session reconcile attributes it to: the result's own, else the session's.
+func TestBookUnownedResults_RunIDNamesTheCLISession(t *testing.T) {
+	proc := &TestProcess{AliveVal: true}
+	s, ledger := newLedgerSession(t, "dashboard:direct:host:general", proc)
+	hooked := &hookedTestProcess{TestProcess: proc}
+	s.storeProcess(hooked)
+	bookUnownedResults(s, hooked)
+
+	hooked.fn(clievent.SendResult{CostUSD: 1}) // neither knows the session yet
+	hooked.fn(clievent.SendResult{CostUSD: 3, SessionID: "sid-result"})
+	s.setSessionID("sid-held")
+	hooked.fn(clievent.SendResult{CostUSD: 6})
+	hooked.fn(clievent.SendResult{CostUSD: 10, SessionID: "sid-result2"}) // the CLI moved on first
+	want := map[float64]string{1: "", 2: "unowned:sid-result:", 3: "unowned:sid-held:", 4: "unowned:sid-result2:"}
+	ents := allEntries(t, ledger)
+	if len(ents) != len(want) {
+		t.Fatalf("entries = %+v, want %d", ents, len(want))
+	}
+	for _, e := range ents {
+		prefix, ok := want[e.Amount]
+		id, found := strings.CutPrefix(e.RunID, prefix)
+		if !ok || !found || len(id) != 16 || strings.Contains(id, ":") {
+			t.Errorf("entry $%v run id = %q, want %q + a bare run id", e.Amount, e.RunID, prefix)
+		}
 	}
 }
 

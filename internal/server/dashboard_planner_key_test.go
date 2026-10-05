@@ -3,6 +3,7 @@ package server
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/project"
@@ -41,7 +42,7 @@ func TestBuildSessionOpts_PlannerKeyColonName(t *testing.T) {
 	}
 
 	agents := map[string]session.AgentOpts{"general": {}}
-	// resolver=nil exercises the legacy inline planner branch directly.
+	// resolver=nil: buildSessionOpts resolves through one over mgr.
 	opts := buildSessionOpts(key, nil, agents, mgr)
 
 	if !opts.Exempt {
@@ -79,10 +80,10 @@ func TestBuildSessionOpts_PlannerKeySimpleName(t *testing.T) {
 	}
 }
 
-// The inline fallback starts from agents["general"], but only an IM agent key
-// spawns on an agent's profile and backend, as session.KeyResolver decides it.
-// A planner's account is its project's pin only; cron:, scratch: and malformed
-// keys get neither, so the session never records general's.
+// Only an IM agent key spawns on an agent's profile and backend, as
+// session.KeyResolver decides it. A planner's account is its project's pin
+// only; cron:, scratch: and malformed keys get neither, so the session never
+// records general's.
 func TestBuildSessionOpts_NonAgentKeysIgnoreGeneralAgentTier(t *testing.T) {
 	root := t.TempDir()
 	for _, n := range []string{"unpinned", "pinned"} {
@@ -113,7 +114,7 @@ func TestBuildSessionOpts_NonAgentKeysIgnoreGeneralAgentTier(t *testing.T) {
 		{"project gone, resolver miss", project.PlannerKeyFor("gone"), missing, ""},
 		{"project gone, no resolver", project.PlannerKeyFor("gone"), nil, ""},
 		{"project without a pin", project.PlannerKeyFor("unpinned"), nil, ""},
-		{"project pin", project.PlannerKeyFor("pinned"), missing, "personal"},
+		{"project pin", project.PlannerKeyFor("pinned"), nil, "personal"},
 		{"chat key keeps the agent profile", "feishu:direct:alice:general", nil, "company"},
 		{"cron key, resolver miss", "cron:job1", missing, ""},
 		{"cron key, no resolver", "cron:job1", nil, ""},
@@ -138,5 +139,51 @@ func TestBuildSessionOpts_NonAgentKeysIgnoreGeneralAgentTier(t *testing.T) {
 	}
 	if agents["general"].AccessProfile != "company" {
 		t.Errorf("agents map mutated: %+v", agents["general"])
+	}
+}
+
+// A planner key gets the resolver's project-only opts from buildSessionOpts,
+// with or without a resolver: the project's backend pin applies and general's
+// model, prompt, args and effort do not. A planner whose project is gone gets
+// blank exempt opts rather than general's.
+func TestBuildSessionOpts_PlannerMatchesResolver(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "kp"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	mgr, err := project.NewManager(root, project.PlannerDefaults{})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := mgr.Scan(); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if err := mgr.UpdateConfig("kp", project.ProjectConfig{Backend: "kiro", PlannerPrompt: "P"}); err != nil {
+		t.Fatalf("UpdateConfig: %v", err)
+	}
+	agents := map[string]session.AgentOpts{"general": {
+		Model: "sonnet", SystemPrompt: "G", ExtraArgs: []string{"--x"}, Effort: "high",
+	}}
+	resolver := session.NewKeyResolver(agents, project.NewDataSource(mgr))
+	key := project.PlannerKeyFor("kp")
+
+	want, ok := resolver.ResolveForKey(key)
+	if !ok {
+		t.Fatalf("precondition: resolver misses %q", key)
+	}
+	if want.Backend != "kiro" || want.SystemPrompt != "P" || want.Model != "" {
+		t.Fatalf("precondition: resolver opts = %#v", want)
+	}
+	for name, r := range map[string]*session.KeyResolver{"resolver": resolver, "no resolver": nil} {
+		if got := buildSessionOpts(key, r, agents, mgr); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: buildSessionOpts = %#v, want the resolver's %#v", name, got, want)
+		}
+	}
+
+	gone := project.PlannerKeyFor("gone")
+	for name, r := range map[string]*session.KeyResolver{"resolver": resolver, "no resolver": nil} {
+		if got := buildSessionOpts(gone, r, agents, mgr); !reflect.DeepEqual(got, session.AgentOpts{Exempt: true}) {
+			t.Errorf("%s: deleted project's planner = %#v, want blank exempt opts", name, got)
+		}
 	}
 }

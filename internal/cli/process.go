@@ -116,6 +116,9 @@ type Process struct {
 	// so the owning Wrapper can refresh the global dashboard banner. Assigned once
 	// before startReadLoop (no lock); nil for &Process{} test fixtures.
 	onLiveVersion func(string)
+	// onCodeChange receives each valid system/code_change_published frame so
+	// the session can record the PR. Set via SetOnCodeChange at any time.
+	onCodeChange atomic.Pointer[func(clievent.CodeChange)]
 
 	// readEventBuf is a reusable backing array for ReadEventInto (#1676), owned
 	// exclusively by handleShimStdout on the readLoop goroutine and consumed within
@@ -404,12 +407,22 @@ func (p *Process) SetOnTurnDone(fn func()) {
 	p.turn.mu.Unlock()
 }
 
-// SetOnUnownedResult sets the callback that receives the result of a turn no
-// Send owns (see turnState.onUnownedResult). mu-guarded, so safe at any time.
+// SetOnUnownedResult sets the callback that receives a result no live caller
+// consumes (see turnState.onUnownedResult). mu-guarded, so safe at any time.
 func (p *Process) SetOnUnownedResult(fn func(clievent.SendResult)) {
 	p.turn.mu.Lock()
 	p.turn.onUnownedResult = fn
 	p.turn.mu.Unlock()
+}
+
+// SetOnCodeChange sets the callback that receives the PRs the CLI reports
+// (see Process.onCodeChange). Lock-free, so safe at any time; nil clears it.
+func (p *Process) SetOnCodeChange(fn func(clievent.CodeChange)) {
+	if fn == nil {
+		p.onCodeChange.Store(nil)
+		return
+	}
+	p.onCodeChange.Store(&fn)
 }
 
 // SetOnLiveVersion sets the callback fired by setLiveVersion when a distinct
