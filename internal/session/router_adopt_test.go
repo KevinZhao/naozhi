@@ -3,10 +3,9 @@ package session
 import (
 	"bufio"
 	"context"
-	"io"
+	"fmt"
 	"net"
-	"os"
-	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,106 +16,25 @@ import (
 
 const adoptAssistantLine = `{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]},"session_id":"s1"}`
 
-// fakeShimPID is what the fake shim's hello reports. No process can have it,
-// so Kill's SIGUSR2 to the shim reaches nothing instead of the test binary.
-const fakeShimPID = 1 << 30
-
-// reconnectToFakeShim runs ReconnectShimsCtx against a fake shim for key that
-// replays backlog, numbered from firstSeq, and returns the reattached process
-// plus a func that sends a live stdout line on the same connection — the late
-// result of the turn.
+// reconnectToFakeShim reconnects a router to StartFakeShimForTest's shim for
+// key and returns the reattached process plus a func that sends a live stdout
+// line on the same connection — the late result of the turn.
 func reconnectToFakeShim(t *testing.T, key string, firstSeq int64, backlog []string) (*Router, *cli.Process, func(line string)) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("shim discovery needs unix PID liveness and unix sockets")
-	}
-	// t.TempDir() on darwin overflows the 104-byte sun_path limit.
-	dir, err := os.MkdirTemp("/tmp", "nz-adopt-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	mgr, err := shim.NewManager(shim.ManagerConfig{StateDir: dir})
-	if err != nil {
-		t.Fatal(err)
-	}
-	w := cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
-	w.ShimManager = mgr
-	r := NewRouter(RouterConfig{Wrapper: w})
+	fs := StartFakeShimForTest(t, key, firstSeq, backlog)
+	r := NewRouter(fs.Config)
 	t.Cleanup(r.Shutdown)
-
-	sess := injectSession(r, key, nil)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-	socket := shim.SocketPath(shim.KeyHash(key))
-	ln, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	attached := make(chan net.Conn, 1)
-	t.Cleanup(func() { ln.Close() })
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		rd := bufio.NewReader(conn)
-		if _, err := rd.ReadBytes('\n'); err != nil { // attach
-			return
-		}
-		frames := []shim.ServerMsg{{Type: "hello", ProtocolVersion: shim.ProtocolVersion, ShimPID: fakeShimPID}}
-		for i, line := range backlog {
-			frames = append(frames, shim.ServerMsg{Type: "replay", Seq: firstSeq + int64(i), Line: line})
-		}
-		frames = append(frames, shim.ServerMsg{Type: "replay_done", Count: len(backlog)})
-		for i := range frames {
-			data, err := frames[i].MarshalLine()
-			if err != nil {
-				return
-			}
-			if _, err := conn.Write(data); err != nil {
-				conn.Close()
-				return
-			}
-		}
-		attached <- conn
-		io.Copy(io.Discard, rd) //nolint:errcheck // nothing the client writes needs an answer
-	}()
-	// ShimPID is this test process: it passes the liveness and binary-identity
-	// gates. The socket must exist before ReconnectShimsCtx runs, or Discover
-	// treats the shim as a zombie and SIGTERMs that PID, i.e. the test binary.
-	state := shim.State{
-		ShimPID: os.Getpid(), Socket: socket, Key: key, Backend: "claude",
-		CLIArgs:      driftArgsFor(r).driftCompareArgs(w, "claude", key, sess, &shim.SpawnOverlay{}),
-		SpawnOverlay: &shim.SpawnOverlay{},
-	}
-	if err := shim.WriteStateFile(shim.StateFilePath(dir, shim.KeyHash(key)), state); err != nil {
-		t.Fatal(err)
-	}
-
 	r.ReconnectShimsCtx(context.Background())
-
+	fs.Attached(t)
+	sess := r.ss.Load(key)
+	if sess == nil {
+		t.Fatal("no session for the key after reconnect")
+	}
 	proc, ok := sess.loadProcess().(*cli.Process)
 	if !ok || proc == nil {
 		t.Fatalf("session process after reconnect = %T, want the reattached *cli.Process", sess.loadProcess())
 	}
-	var conn net.Conn
-	select {
-	case conn = <-attached:
-		t.Cleanup(func() { conn.Close() })
-	case <-time.After(5 * time.Second):
-		t.Fatal("fake shim never finished the attach handshake")
-	}
-	emit := func(line string) {
-		t.Helper()
-		data, err := (&shim.ServerMsg{Type: "stdout", Seq: firstSeq + int64(len(backlog)), Line: line}).MarshalLine()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := conn.Write(data); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return r, proc, emit
+	return r, proc, func(line string) { t.Helper(); fs.Emit(t, line) }
 }
 
 // TestAdoptInFlight_MidTurnLatchStaysAdoptableOnceResolved: the late result of
@@ -195,7 +113,7 @@ func TestAdoptInFlight_ResultAfterTheSendWatermarkIsAdopted(t *testing.T) {
 		`{"type":"result","subtype":"success","result":"this run","session_id":"s1"}`,
 	})
 
-	p, state := r.AdoptInFlight(key, cli.TurnWatermark{ShimPID: fakeShimPID, Seq: 5}, true)
+	p, state := r.AdoptInFlight(key, cli.TurnWatermark{ShimPID: FakeShimPID, Seq: 5}, true)
 	if state != AdoptLive || p != proc {
 		t.Fatalf("AdoptInFlight = (%p, %v), want (%p, AdoptLive) for a result past the watermark", p, state, proc)
 	}
@@ -222,9 +140,9 @@ func TestAdoptInFlight_WatermarkAfterReconnectRejectsTheReplayedResult(t *testin
 	})
 
 	w, ok := r.ss.Load(key).TurnWatermark()
-	if !ok || w != (cli.TurnWatermark{ShimPID: fakeShimPID, Seq: 2}) {
+	if !ok || w != (cli.TurnWatermark{ShimPID: FakeShimPID, Seq: 2}) {
 		t.Fatalf("TurnWatermark = (%+v, %v), want ({%d 2}, true): the replayed frames were received",
-			w, ok, fakeShimPID)
+			w, ok, FakeShimPID)
 	}
 	if p, state := r.AdoptInFlight(key, w, true); state != AdoptNone || p != nil {
 		t.Errorf("AdoptInFlight = (%p, %v), want (nil, AdoptNone) for the result the watermark already covers", p, state)
@@ -250,8 +168,8 @@ func TestTurnWatermark_NoneWhileATurnIsRunning(t *testing.T) {
 	emit(`{"type":"result","subtype":"success","result":"done","session_id":"s1"}`)
 	testhelper.Eventually(t, func() bool { return !proc.IsRunning() },
 		5*time.Second, "the live result never ended the turn")
-	if w, ok := sess.TurnWatermark(); !ok || w != (cli.TurnWatermark{ShimPID: fakeShimPID, Seq: 2}) {
-		t.Errorf("TurnWatermark once idle = (%+v, %v), want ({%d 2}, true)", w, ok, fakeShimPID)
+	if w, ok := sess.TurnWatermark(); !ok || w != (cli.TurnWatermark{ShimPID: FakeShimPID, Seq: 2}) {
+		t.Errorf("TurnWatermark once idle = (%+v, %v), want ({%d 2}, true)", w, ok, FakeShimPID)
 	}
 }
 
@@ -301,5 +219,51 @@ func TestTurnWatermark_NoneWhilePassthroughOwesAResult(t *testing.T) {
 	}
 	if w, ok := sess.TurnWatermark(); ok {
 		t.Errorf("TurnWatermark with a passthrough result owed = (%+v, true), want none", w)
+	}
+}
+
+// fatalRecorder stands in for the testing.TB a FakeShim helper fails through.
+type fatalRecorder struct {
+	testing.TB
+	msg string
+}
+
+func (f *fatalRecorder) Helper() {}
+
+func (f *fatalRecorder) Fatal(args ...any) { f.msg = fmt.Sprint(args...) }
+
+// TestFakeShim_Emit: Emit before Attached fails the test with a message rather
+// than a nil-conn panic, and each Emit takes the next seq so a client that
+// drops seqs it has seen does not discard a second live line.
+func TestFakeShim_Emit(t *testing.T) {
+	rec := &fatalRecorder{}
+	(&FakeShim{next: 3}).Emit(rec, "early")
+	if !strings.Contains(rec.msg, "before Attached") {
+		t.Fatalf("Emit before Attached: Fatal message = %q, want one naming Attached", rec.msg)
+	}
+
+	client, server := net.Pipe()
+	t.Cleanup(func() { client.Close(); server.Close() })
+	f := &FakeShim{next: 3, conn: server}
+	sent := &fatalRecorder{}
+	done := make(chan struct{})
+	go func() { defer close(done); f.Emit(sent, "a"); f.Emit(sent, "b") }()
+	rd := bufio.NewReader(client)
+	for _, want := range []int64{3, 4} {
+		line, err := rd.ReadBytes('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg, err := shim.ParseServerMsg(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if msg.Seq != want {
+			t.Fatalf("Emit seq = %d, want %d", msg.Seq, want)
+		}
+	}
+	<-done
+	if sent.msg != "" {
+		t.Fatalf("Emit after Attached failed: %s", sent.msg)
 	}
 }

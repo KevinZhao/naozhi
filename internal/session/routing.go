@@ -165,15 +165,14 @@ func (r *KeyResolver) ResolveForKey(key string) (opts AgentOpts, ok bool) {
 }
 
 // AccessProfileForKey returns the access-profile ID a key resolves to ("" =
-// global default). Used by the remote-dispatch gate: a session bound to a
-// non-default profile MUST NOT be dispatched to a remote node, because the env
-// overlay (and any *_FILE secret) is host-local and never crosses the
-// reverse-RPC wire — the remote would silently spawn on the wrong account (RFC
-// project-access-profile §4.5). The result covers every profile ResolveForChat
-// or ResolveForKey can put in opts.AccessProfile: a project pin, else the
-// agent's own (defaults[agentID]; a planner has only the project pin). A cron
-// key resolves through WithCronAccessProfile's lookup. Returns "" for other
-// reserved namespaces / malformed keys, which the gate treats as "remote OK".
+// global default) for the remote-dispatch gate: a non-default profile's env
+// overlay (and any *_FILE secret) is host-local, so its session MUST NOT run on
+// a remote node (RFC project-access-profile §4.5). It covers every profile
+// ResolveForChat / ResolveForKey can set: a project pin, else the agent's own
+// (a planner has only the project pin); a cron key goes through
+// WithCronAccessProfile's lookup. Returns "" for other reserved namespaces and
+// malformed keys. A scratch: key inherits its profile through the scratch pool,
+// which this resolver cannot see; the gate refuses those keys before asking.
 func (r *KeyResolver) AccessProfileForKey(key string) string {
 	if r == nil {
 		return ""

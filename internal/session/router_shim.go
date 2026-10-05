@@ -80,6 +80,7 @@ func (b *BackendRegistry) retireDeadShim(key string) bool {
 		retired, err := mgr.RetireDeadShim(ctx, key)
 		cancel()
 		if retired {
+			slog.Info("reset: retired dead-CLI shim", "key", key)
 			return true
 		}
 		if err != nil {

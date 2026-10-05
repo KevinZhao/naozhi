@@ -630,6 +630,8 @@ PR-1 把 timeline 行从「inline 展开 result」改成「点行打开右侧 sh
 - `.crs-tabs` / `.crs-tab` / `.crs-transcript` / `.crs-turn` / `.crs-avatar` / `.crs-tool-card` 等仍由 `cronRunTranscriptHtml` 使用
 - `cronRunSheetSelectTab` 函数定义（现已为 no-op shim），契约测试 `TestDashboardJS_TranscriptTabs` 钉死了函数名 + 4 个 `tabBtn(...)` 字面量；后者在 `cronTimelineDetailHtml` 注释中保留 grep 兼容
 
+> 后续已删除（以下符号在代码中均已不存在）：`cronRunSheetSelectTab` 与 `cronRunTranscriptHtml` 随 #2557 PR-E1（65a86702）作为死代码移除；契约测试 `TestDashboardJS_TranscriptTabs` 随 A2b（04934631）删除文本扫描测试层时一并移除；`cronTimelineDetailHtml` 注释里的 `tabBtn(...)` 锚点随 d458d958 删去。
+
 ### 16.5 新增
 
 `internal/server/static/dashboard.js`:
@@ -647,6 +649,8 @@ PR-1 把 timeline 行从「inline 展开 result」改成「点行打开右侧 sh
 - `TestDashboardHTML_CronHistoryRedesign_SheetMarkup` → **重写为** `TestDashboardHTML_CronHistoryRedesign_InlineExpandMarkup`：禁出现 `#cron-run-sheet` / `.cron-run-sheet`；要求 `.ctr-detail{` + `max-height:60vh` + `max-height:50vh`（移动端）
 - `TestDashboardJS_TranscriptTabs` / `TestDashboardHTML_TranscriptTabsCSS` 不动（transcript 渲染契约不变）
 - `test/e2e/cron_run_sheet.test.js` 删除（sheet 已无）；inline-expand e2e 留作后续单独 PR
+
+> 后续已删除：本节列出的 `TestDashboard*` 文本扫描测试均已不存在，不再是守卫。`TestDashboardJS_CronHistoryRedesign_InlineExpand` / `TestDashboardHTML_CronHistoryRedesign_InlineExpandMarkup` 随 044c4c5e 改为 Playwright e2e `test/e2e/cron_inline_expand.test.js` 后删除；`TestDashboardJS_TranscriptTabs` / `TestDashboardHTML_TranscriptTabsCSS` 随 A2b（04934631）删除文本扫描测试层时一并移除。
 
 ### 16.7 §14 决议表后续
 

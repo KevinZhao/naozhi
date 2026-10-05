@@ -60,6 +60,7 @@ export const NZ_CONTRACT = {
     discovered_close: '/api/discovered/close',
     discovered_preview: '/api/discovered/preview',
     discovered_takeover: '/api/discovered/takeover',
+    discovered_takeover_status: '/api/discovered/takeover/status',
     memory_slug: '/api/memory/{slug}',
     planner_stats: '/api/planner/stats',
     projects: '/api/projects',

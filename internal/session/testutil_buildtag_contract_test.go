@@ -25,53 +25,21 @@ import (
 // ever references them, a release build fails fast at link time.
 //
 // This contract test asserts the build tag is present at the head of
-// testutil.go so a future refactor that drops the tag (or migrates
+// every testutil*.go file so a future refactor that drops the tag (or migrates
 // to a positive `//go:build testing` form without updating the file)
 // fails the contract instead of silently shipping the test stub into
 // every production binary by default. Migrating to a different tag
 // shape is fine — update the regex below in the same patch.
 func TestTestutil_BuildTagContract(t *testing.T) {
 	t.Parallel()
+	for _, path := range testutilSources(t) {
+		checkReleaseExclusion(t, path)
+	}
 	src, err := os.ReadFile("testutil.go")
 	if err != nil {
 		t.Fatalf("read testutil.go: %v", err)
 	}
-
-	// Locate the first non-blank line: `//go:build` must appear at the very
-	// top of the file (Go spec — build constraint must precede the package
-	// clause and any blank line) before the package comment block. We
-	// tolerate either `//go:build !release` (current chosen form) or
-	// `//go:build release_excluded`-style alternatives so a future tag
-	// rename only touches this regex.
 	head := string(src)
-	if !strings.HasPrefix(head, "//go:build ") {
-		t.Fatalf("testutil.go does not start with `//go:build` constraint. " +
-			"R234-ARCH-18 / R239-ARCH-O / R246-ARCH-8: this file ships " +
-			"TestProcess + Router.InjectSession into the production binary " +
-			"by default unless a build constraint excludes it. The chosen " +
-			"approximation is `//go:build !release` so `-tags release` " +
-			"strips the stub at link time. Either restore that line or " +
-			"update this test to recognise the new exclusion shape.")
-	}
-
-	firstLineEnd := strings.IndexByte(head, '\n')
-	if firstLineEnd < 0 {
-		t.Fatal("testutil.go has no newline; build constraint cannot be parsed")
-	}
-	tag := strings.TrimSpace(head[len("//go:build "):firstLineEnd])
-
-	// Reject a tag that does not exclude any builds at all (e.g. the empty
-	// constraint or `any` — both compile in every config). The whole point
-	// of the constraint is to give ops a release-only opt-out, so the tag
-	// expression must exclude SOMETHING.
-	if tag == "" || tag == "any" {
-		t.Errorf("testutil.go //go:build %q does not exclude any build "+
-			"configuration; the production-binary protection is moot. "+
-			"R234-ARCH-18 / R239-ARCH-O: the chosen approximation is "+
-			"`!release` (excluded under `-tags release`); pick another "+
-			"shape only if it likewise excludes at least one realistic "+
-			"build matrix entry.", tag)
-	}
 
 	// The package + the standard test-utility doc comment must still be
 	// present — a refactor that drops the file's contents but leaves the
@@ -88,5 +56,51 @@ func TestTestutil_BuildTagContract(t *testing.T) {
 				"the symbols moved to a subpackage, update this test or "+
 				"remove it as part of the same migration.", sym)
 		}
+	}
+}
+
+// checkReleaseExclusion asserts path opens with a build constraint that
+// excludes at least one build configuration.
+func checkReleaseExclusion(t *testing.T, path string) {
+	t.Helper()
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+
+	// Locate the first non-blank line: `//go:build` must appear at the very
+	// top of the file (Go spec — build constraint must precede the package
+	// clause and any blank line) before the package comment block. We
+	// tolerate either `//go:build !release` (current chosen form) or
+	// `//go:build release_excluded`-style alternatives so a future tag
+	// rename only touches this regex.
+	head := string(src)
+	if !strings.HasPrefix(head, "//go:build ") {
+		t.Fatalf("%s does not start with `//go:build` constraint. "+
+			"R234-ARCH-18 / R239-ARCH-O / R246-ARCH-8: this file ships "+
+			"its cross-package test seams into the production binary "+
+			"by default unless a build constraint excludes it. The chosen "+
+			"approximation is `//go:build !release` so `-tags release` "+
+			"strips the stub at link time. Either restore that line or "+
+			"update this test to recognise the new exclusion shape.", path)
+	}
+
+	firstLineEnd := strings.IndexByte(head, '\n')
+	if firstLineEnd < 0 {
+		t.Fatalf("%s has no newline; build constraint cannot be parsed", path)
+	}
+	tag := strings.TrimSpace(head[len("//go:build "):firstLineEnd])
+
+	// Reject a tag that does not exclude any builds at all (e.g. the empty
+	// constraint or `any` — both compile in every config). The whole point
+	// of the constraint is to give ops a release-only opt-out, so the tag
+	// expression must exclude SOMETHING.
+	if tag == "" || tag == "any" {
+		t.Errorf("%s //go:build %q does not exclude any build "+
+			"configuration; the production-binary protection is moot. "+
+			"R234-ARCH-18 / R239-ARCH-O: the chosen approximation is "+
+			"`!release` (excluded under `-tags release`); pick another "+
+			"shape only if it likewise excludes at least one realistic "+
+			"build matrix entry.", path, tag)
 	}
 }

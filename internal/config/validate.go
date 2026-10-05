@@ -260,6 +260,9 @@ func validateArgvStrings(field string, args []string) error {
 	return nil
 }
 
+// The validators live in internal/tuningspec (leaf) so the session layer can
+// reuse them without importing config (which would cycle).
+
 // validateEffortString gates a configured thinking-effort tier; empty means
 // "pass no flag".
 func validateEffortString(field, value string) error {

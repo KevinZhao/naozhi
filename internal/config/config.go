@@ -163,8 +163,11 @@ func Load(path string) (*Config, error) {
 	}
 	var cfg Config
 	if err := doc.Decode(&cfg); err != nil {
+		// The file parsed, so this is a type or duplicate-key error, not a
+		// syntax one; describeDecodeError keeps its line numbers and drops the
+		// echoed values for the same secrecy reason as above.
 		slog.Debug("config yaml decode failed", "err", err)
-		return nil, fmt.Errorf("parse config: yaml syntax error (check naozhi logs for details)")
+		return nil, fmt.Errorf("parse config: %s (see naozhi debug logs for details)", describeDecodeError(err))
 	}
 	// The decode above ignores unknown keys, so report them before defaults are
 	// applied — a misspelled key is operator input that had no effect, same as a
@@ -269,6 +272,3 @@ func validateConfig(cfg *Config) error {
 	}
 	return nil
 }
-
-// The validators live in internal/tuningspec (leaf) so the session layer can
-// reuse them without importing config (which would cycle).
