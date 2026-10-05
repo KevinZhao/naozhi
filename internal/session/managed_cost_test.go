@@ -387,16 +387,16 @@ func TestBookPartialUsage_OneRowPerCanonicalModel(t *testing.T) {
 	s, ledger := newLedgerSession(t, "feishu:p2p:suffix", &TestProcess{AliveVal: true})
 	ledger.Rates().Observe(costledger.ModelDelta{Model: "claude-opus-5-5", CostUSD: 0.01, Tokens: costledger.Tokens{Output: 1000}})
 	s.bookPartialUsage(clievent.ShadowUsage{Models: []clievent.ShadowModel{
-		{Model: "claude-opus-5-5", Output: 100, CacheRead: 7},
+		{Model: "claude-opus-5-5", Input: 11, Output: 100, CacheRead: 7},
 		{Model: "claude-sonnet-5-5", Output: 20},
-		{Model: "claude-opus-5-5[1m]", Output: 300, CacheWrite: 5},
+		{Model: "claude-opus-5-5[1m]", Input: 13, Output: 300, CacheWrite: 5},
 	}}, "run-1")
 	ents := allEntries(t, ledger)
 	if len(ents) != 1 || len(ents[0].Models) != 2 {
 		t.Fatalf("partial entry = %+v, want one entry with an opus and a sonnet row", ents)
 	}
 	opus := ents[0].Models[0]
-	want := costledger.Tokens{Output: 400, CacheRead: 7, CacheWrite: 5}
+	want := costledger.Tokens{Input: 24, Output: 400, CacheRead: 7, CacheWrite: 5}
 	if opus.Model != "claude-opus-5-5" || opus.RawModel != "claude-opus-5-5" || opus.Tokens != want {
 		t.Fatalf("opus row = %+v, want both raw ids' tokens %+v under the first raw id", opus, want)
 	}

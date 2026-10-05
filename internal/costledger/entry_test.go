@@ -87,7 +87,8 @@ func TestNormalize_CapsModels(t *testing.T) {
 }
 
 // Rows past the cap fold into one "other" row, so the rows still sum to the
-// entry's Amount; Amount itself is never trimmed.
+// entry's Amount; Amount itself is never trimmed. A folded row's invalid basis
+// still surfaces as unknown, as it would on a kept row.
 func TestNormalize_FoldsOverflowModelsIntoOther(t *testing.T) {
 	e := validEntry()
 	var cost float64
@@ -97,6 +98,9 @@ func TestNormalize_FoldsOverflowModelsIntoOther(t *testing.T) {
 			Tokens: Tokens{Input: int64(i), Output: 10, CacheRead: 2, CacheWrite: 1, Thinking: 3, WebSearch: 1}}
 		if i == MaxModels+2 {
 			m.Basis = BasisManaged
+		}
+		if i == MaxModels {
+			m.Basis = "weird"
 		}
 		cost += m.CostUSD
 		tok = tok.add(m.Tokens)
@@ -113,8 +117,8 @@ func TestNormalize_FoldsOverflowModelsIntoOther(t *testing.T) {
 		gotTok = gotTok.add(m.Tokens)
 	}
 	last := e.Models[MaxModels-1]
-	if last.Model != OtherModel || last.Basis != BasisManaged || e.Models[MaxModels-2].Model != fmt.Sprintf("m%d", MaxModels-2) {
-		t.Fatalf("last rows = %+v, %+v: want the kept rows in order, then other at the worst basis", e.Models[MaxModels-2], last)
+	if last.Model != OtherModel || last.Basis != BasisUnknown || e.Models[MaxModels-2].Model != fmt.Sprintf("m%d", MaxModels-2) {
+		t.Fatalf("last rows = %+v, %+v: want the kept rows in order, then other at the worst basis (an invalid one counts as unknown)", e.Models[MaxModels-2], last)
 	}
 	if math.Abs(gotCost-cost) > 1e-12 || gotTok != tok {
 		t.Fatalf("rows sum to %v / %+v, want %v / %+v", gotCost, gotTok, cost, tok)

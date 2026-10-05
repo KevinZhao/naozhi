@@ -175,8 +175,8 @@ func sanitizeIdent(s string) string {
 }
 
 // CapModels bounds ms to MaxModels rows by folding every row from the last
-// slot on into one OtherModel row (costs and tokens summed, worst basis), so
-// the rows still add up to what they added up to before.
+// slot on into one OtherModel row (costs and tokens summed, worst normalized
+// basis), so the rows still add up to what they added up to before.
 func CapModels(ms []ModelDelta) []ModelDelta {
 	if len(ms) <= MaxModels {
 		return ms
@@ -185,7 +185,7 @@ func CapModels(ms []ModelDelta) []ModelDelta {
 	for _, m := range ms[MaxModels-1:] {
 		other.CostUSD += m.CostUSD
 		other.Tokens = other.Tokens.add(m.Tokens)
-		other.Basis = WorseBasis(other.Basis, m.Basis)
+		other.Basis = WorseBasis(other.Basis, normalizeBasis(m.Basis))
 	}
 	out := make([]ModelDelta, MaxModels)
 	copy(out, ms[:MaxModels-1])
