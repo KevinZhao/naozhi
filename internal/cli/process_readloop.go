@@ -558,10 +558,11 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	// legacy eventCh delivery. We still log to ring.EventLog so dashboard
 	// sees the turn-complete event.
 	if ev.Type == "result" && p.caps.Replay {
-		// error_during_execution signals the CLI aborted the turn, e.g. a
-		// priority:"now" preempted it: pending slots it never replayed were
-		// dropped, so their callers get clierr.ErrAbortedByUrgent. Before any
-		// output it is a CLI failing to start, and cli_exited answers them.
+		// error_during_execution signals the CLI aborted the turn. Only a
+		// priority:"now" preemption drops the slots it never replayed, whose
+		// callers get clierr.ErrAbortedByUrgent; after a /stop or another
+		// abort they stay queued for their own turns. Before any output it is
+		// a CLI failing to start, and cli_exited answers them.
 		if ev.SubType == "error_during_execution" && p.sawOutput.Load() {
 			victims := p.reapAbortedPreempted()
 			fireAbortErrors(victims)

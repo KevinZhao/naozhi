@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -522,10 +523,19 @@ func (p *Process) endUnownedTurn(ev clievent.Event) {
 // priority:"now" preempted the active turn (result.subtype ==
 // "error_during_execution"): slots not yet replayed that are not themselves
 // priority:"now" (those proceed into the next turn). Returns the victims
-// after removing them from pendingSlots.
+// after removing them from pendingSlots. Without an un-replayed "now" slot
+// (canceled ones count: the CLI still has it) the abort was a /stop, a SIGINT
+// or a mid-turn failure, which leave the CLI's queue intact
+// (docs/rfc/passthrough-mode-validation.md V5): queued slots wait for their
+// own turns.
 func (p *Process) reapAbortedPreempted() []*sendSlot {
 	p.slots.mu.Lock()
 	defer p.slots.mu.Unlock()
+	if !slices.ContainsFunc(p.slots.pending, func(s *sendSlot) bool {
+		return !s.replayed && s.priority == "now"
+	}) {
+		return nil
+	}
 	var victims []*sendSlot
 	kept := p.slots.pending[:0]
 	for _, s := range p.slots.pending {

@@ -158,9 +158,10 @@ func stdoutFrame(seq int, line string) string {
 	return string(b)
 }
 
-// An error_during_execution result after the CLI is running is a preemption:
-// a pending slot the CLI never replayed was dropped, and its caller is told so.
-func TestSendPassthrough_PreemptedAfterInitIsAbortedByUrgent(t *testing.T) {
+// An error_during_execution result after the CLI is running, with no
+// priority:"now" message behind it, is no preemption: the pending slot stays
+// queued, and the exit that follows answers it with the classified exit error.
+func TestSendPassthrough_ErrorAfterInitWithoutUrgentWaitsForExit(t *testing.T) {
 	sh := newPassthroughShim(t)
 	defer sh.close()
 	go sh.proc.readLoop()
@@ -173,13 +174,15 @@ func TestSendPassthrough_PreemptedAfterInitIsAbortedByUrgent(t *testing.T) {
 	_ = sh.expectWrite(t, 2*time.Second)
 	sh.srv.SendFrame(stdoutFrame(1, `{"type":"system","subtype":"init","session_id":"abc"}`))
 	sh.srv.SendFrame(stdoutFrame(2, startupRejectResult))
+	sh.srv.SendFrame(`{"type":"cli_exited","code":1}`)
 	select {
 	case err := <-errCh:
-		if !errors.Is(err, clierr.ErrAbortedByUrgent) {
-			t.Errorf("pending send err = %v, want ErrAbortedByUrgent", err)
+		var pe *clierr.ProcessExitedError
+		if !errors.As(err, &pe) || pe.Code != 1 {
+			t.Errorf("pending send err = %v, want the code-1 ProcessExitedError", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("the pending send was not aborted by the preempting result")
+		t.Fatal("the pending send did not return after cli_exited")
 	}
 }
 
