@@ -41,16 +41,27 @@ func applyJitterSched(ctx context.Context, sched robfigcron.Schedule, jitterMax 
 	jitterSleep(ctx, period, jitterMax)
 }
 
-// jitterSleep is the shared tail of applyJitter / applyJitterSched: clamp
-// jitterMax by period/4 (period<=0 = use jitterMax as-is), roll a random
-// duration in [0, window), and sleep on a Timer that respects ctx.
-func jitterSleep(ctx context.Context, period, jitterMax time.Duration) {
+// jitterWindow returns the upper bound of the random delay: jitterMax clamped
+// by period/4, with period<=0 (unparsable schedule) meaning jitterMax as-is.
+// A non-positive result means "no jitter".
+func jitterWindow(period, jitterMax time.Duration) time.Duration {
 	window := jitterMax
 	if period > 0 {
 		if quarter := period / 4; quarter < window {
 			window = quarter
 		}
 	}
+	if window <= 0 {
+		return 0
+	}
+	return window
+}
+
+// jitterSleep is the shared tail of applyJitter / applyJitterSched: take the
+// jitterWindow, roll a random duration in [0, window), and sleep on a Timer
+// that respects ctx.
+func jitterSleep(ctx context.Context, period, jitterMax time.Duration) {
+	window := jitterWindow(period, jitterMax)
 	if window <= 0 {
 		return
 	}

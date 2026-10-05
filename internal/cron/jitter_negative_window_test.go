@@ -27,12 +27,6 @@ import (
 func TestJitterSleep_NegativeWindowDoesNotPanic(t *testing.T) {
 	t.Parallel()
 
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("jitterSleep panicked on non-positive window: %v", r)
-		}
-	}()
-
 	cases := []struct {
 		name      string
 		period    time.Duration
@@ -57,6 +51,13 @@ func TestJitterSleep_NegativeWindowDoesNotPanic(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Recover inside the subtest: t.Run runs this closure on its own
+			// goroutine, so a recover in the parent would never see the panic.
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("jitterSleep panicked on non-positive window: %v", r)
+				}
+			}()
 			jitterSleep(ctx, tc.period, tc.jitterMax)
 		})
 	}
