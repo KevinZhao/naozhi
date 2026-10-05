@@ -14,22 +14,22 @@
 
 ## 为什么选 Naozhi？
 
-大多数 "AI 聊天机器人" 只是 API wrapper。Naozhi 不同 —— 它直接 spawn 本机 AI CLI（Claude Code 或 Kiro）作为长生命周期子进程，通过 stdin/stdout 进行原生协议通信，**保留 CLI 的全部能力**：
+大多数 "AI 聊天机器人" 只是 API wrapper。Naozhi 不同 —— 它直接 spawn 本机 AI CLI（Claude Code、Kiro 或 Codex）作为长生命周期子进程，通过 stdin/stdout 进行原生协议通信，**保留 CLI 的全部能力**：
 
 - 读写文件、执行 Bash、Git 操作、子 agent 编排
 - 所有已配置的 MCP servers
 - 自定义 system prompt 和 per-agent 模型选择
-- 可插拔 Protocol：Claude `stream-json`（NDJSON）或 Kiro `ACP`（JSON-RPC 2.0）
+- 可插拔 Protocol：Claude `stream-json`（NDJSON）、Kiro `ACP`（JSON-RPC 2.0）或 Codex `app-server`（JSON-RPC 2.0）
 
 ```mermaid
 graph TD
     IM["飞书 / Slack / Discord / 微信"]
     GW["Naozhi Gateway<br/>(Go, 单二进制)"]
-    CLI["AI CLI<br/>(Claude / Kiro, 长生命周期进程)"]
+    CLI["AI CLI<br/>(Claude / Kiro / Codex, 长生命周期进程)"]
     TOOLS["Bash · Read · Edit · Grep<br/>Glob · Agent · MCP servers"]
 
     IM -- "WebSocket / Socket Mode<br/>Gateway / HTTP 长轮询" --> GW
-    GW -- "stdin/stdout<br/>(stream-json / ACP JSON-RPC)" --> CLI
+    GW -- "stdin/stdout<br/>(stream-json / ACP / app-server JSON-RPC)" --> CLI
     CLI --- TOOLS
 
     style IM fill:#e8f4fd,stroke:#4a90d9
@@ -49,7 +49,7 @@ graph TD
 | **4** | 实时 Dashboard | 浏览器实时查看所有会话、事件流、费用统计 |
 | **5** | 多节点 NAT 穿越 | 远程机器反向拨入主节点，统一管理多台工作站 |
 | **6** | 消息队列与抢占 | 忙时消息自动排队/合并，支持 `/stop` 软中断与 `/urgent` 紧急抢占 |
-| **7** | 多 Backend | 同一实例可并存 Claude（stream-json）与 Kiro（ACP），按会话切换 |
+| **7** | 多 Backend | 同一实例可并存 Claude（stream-json）、Kiro（ACP）与 Codex（app-server），按会话切换 |
 
 ---
 
@@ -60,8 +60,8 @@ graph TD
 | 平台 | 接入方式 | 私聊 | 群聊 | 消息编辑 |
 |------|----------|------|------|----------|
 | **飞书** | WebSocket 长连接 / Webhook | ✓ | ✓ | ✓ 流式更新 |
-| **Slack** | Socket Mode | ✓ | ✓ (mention) | — |
-| **Discord** | Gateway WebSocket | ✓ | ✓ (mention) | — |
+| **Slack** | Socket Mode | ✓ | ✓ (mention) | ✓ 流式更新 |
+| **Discord** | Gateway WebSocket | ✓ | ✓ (mention) | ✓ 流式更新 |
 | **微信** | HTTP 长轮询 (iLink Bot) | ✓ | — | — |
 
 所有平台开箱即用，**无需公网 IP**。
@@ -127,11 +127,17 @@ cli:
     - id: "kiro"             # ACP (JSON-RPC 2.0) 协议，自动选择
       path: "~/.local/bin/kiro-cli"
       model: "claude-sonnet-4.6"
+    - id: "codex"            # codex app-server (JSON-RPC 2.0) 协议，自动选择
+      path: "codex"
+      model: "openai.gpt-5.5"  # 按 ~/.codex/config.toml 的 model_provider 取名（此为 amazon-bedrock）
+      args: ["-c", "model_reasoning_effort=high"]
 ```
 
 - Dashboard "new session" 下拉菜单按会话选择 backend
 - API 通过 `/api/sessions/send {"backend": "kiro"}` 覆盖
 - ACP backend 自动处理 `session/new`、`session/cancel` 通知与权限请求
+- 每条 backend 的 `path`/`model`/`args` 省略时继承顶层 `cli.*`；codex 必须自己设 `model` 和 `args`，否则会拿到 claude 的模型名与 flag
+- Codex 不接受 `effort` 字段（设了会告警并忽略），推理强度经 `args` 传：`-c model_reasoning_effort=<tier>`
 
 ### 定时任务 (Cron)
 
@@ -374,13 +380,13 @@ server:
   trusted_proxy: false                    # ALB/CloudFront 终止 TLS 时设为 true
 
 cli:
-  backend: claude                         # "claude" | "kiro"，单 backend 模式下的默认值
+  backend: claude                         # "claude" | "kiro" | "codex"，单 backend 模式下的默认值
   path: "~/.local/bin/claude"
   model: "sonnet"                         # sonnet / opus / haiku
   args:
     - "--dangerously-skip-permissions"
 
-  # 可选：多 backend 并存（Claude + Kiro 同时启用）。dashboard "new session"
+  # 可选：多 backend 并存（Claude / Kiro / Codex 同时启用）。dashboard "new session"
   # 下拉菜单可以按会话选 backend，API 端通过 /api/sessions/send {"backend": ...}
   # 覆盖。不设置 `backends` 时走单 backend 模式，使用上面的 cli.path/model/args；
   # 每条 backend 的 path/model/args 省略时从顶层 cli.* 继承；`backend` 字段决定
@@ -390,6 +396,10 @@ cli:
   #   - id: claude
   #   - id: kiro
   #     path: "~/.local/bin/kiro"         # ACP 协议根据 id=kiro 自动选择，无需额外 flag
+  #   - id: codex
+  #     path: "codex"                     # codex app-server 协议根据 id=codex 自动选择
+  #     model: "openai.gpt-5.5"           # 与 args 都须显式设置，否则继承上面 claude 的 sonnet 与 flag
+  #     args: ["-c", "model_reasoning_effort=high"]
 
 session:
   cwd: "/home/user/projects"              # CLI 默认工作目录，亦作 /cd 的允许根路径
