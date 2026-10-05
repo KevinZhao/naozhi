@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 )
@@ -97,15 +98,24 @@ func TestAccessProfileDefaultBackend_SpawnPaths(t *testing.T) {
 		t.Errorf("planner backend = %q, want the profile's kiro", got)
 	}
 
-	if err := r.backends.AddAccessProfile("later", AccessProfile{DefaultBackend: "claude"}); err != nil {
+	// An unknown id gives no tier, so the same opts land on claude until the
+	// profile exists and on its kiro right after AddAccessProfile.
+	early, _, err := r.GetOrCreate(ctx, "feishu:direct:early:general", AgentOpts{AccessProfile: "later"})
+	if err != nil {
+		t.Fatalf("GetOrCreate before AddAccessProfile: %v", err)
+	}
+	if got := early.Backend(); got != "claude" {
+		t.Errorf("backend before the profile exists = %q, want claude (the router default)", got)
+	}
+	if err := r.backends.AddAccessProfile("later", AccessProfile{DefaultBackend: "kiro"}); err != nil {
 		t.Fatalf("AddAccessProfile: %v", err)
 	}
 	added, _, err := r.GetOrCreate(ctx, "feishu:direct:later:general", AgentOpts{AccessProfile: "later"})
 	if err != nil {
 		t.Fatalf("GetOrCreate under runtime profile: %v", err)
 	}
-	if got := added.Backend(); got != "claude" {
-		t.Errorf("runtime-added profile backend = %q, want its claude over the default profile's kiro", got)
+	if got := added.Backend(); got != "kiro" {
+		t.Errorf("runtime-added profile backend = %q, want its kiro", got)
 	}
 
 	took, err := r.Takeover(ctx, "feishu:direct:adopt:general", "sess-external", t.TempDir(), AgentOpts{AccessProfile: "viakiro"})
@@ -124,5 +134,36 @@ func TestAccessProfileDefaultBackend_SpawnPaths(t *testing.T) {
 	}
 	if got := resumed.Backend(); got != "claude" {
 		t.Errorf("history resume backend = %q, want claude (the router default)", got)
+	}
+}
+
+// A scratch aside runs on its source's backend, which outranks the source's
+// access profile. A source that never spawned has no backend, so its scratch
+// takes the profile tier like any new key.
+func TestScratch_AccessProfileDefaultBackend(t *testing.T) {
+	for _, tc := range []struct{ sourceBackend, want string }{
+		{sourceBackend: "claude", want: "claude"},
+		{sourceBackend: "", want: "kiro"},
+	} {
+		r := twoBackendRouter()
+		setAccessProfiles(r, map[string]AccessProfile{"viakiro": {DefaultBackend: "kiro"}})
+		p := NewScratchPool(nil, 5, time.Minute)
+		sc, err := p.Open(OpenOptions{
+			SourceKey: "feishu:direct:bob:general",
+			AgentID:   "general",
+			Backend:   tc.sourceBackend,
+			BaseOpts:  AgentOpts{AccessProfile: "viakiro"},
+			Quote:     "why?",
+		})
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		opts, ok := p.OptsForKey(sc.Key)
+		if !ok {
+			t.Fatal("OptsForKey miss")
+		}
+		if got := resolveT(r, sc.Key, "", opts).BackendID; got != tc.want {
+			t.Errorf("source backend %q: scratch BackendID = %q, want %q", tc.sourceBackend, got, tc.want)
+		}
 	}
 }
