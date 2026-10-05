@@ -129,14 +129,19 @@ func inGitCheckout(dir string) bool {
 	}
 }
 
-// gitTracksStub asks git whether projDir's .naozhi/project.yaml is in the
-// index: exit 0 listing the path is tracked, exit 0 listing nothing is
-// untracked, anything else is trackUnknown, since a broken git or the macOS
-// CLT shim also exits 1. GIT_* variables are dropped so naozhi's own
-// environment cannot point git at another repo or index.
+// gitTracksStub is gitLsFilesStub bounded by stubProbeTimeout.
 func gitTracksStub(projDir string) trackState {
 	ctx, cancel := context.WithTimeout(context.Background(), stubProbeTimeout)
 	defer cancel()
+	return gitLsFilesStub(ctx, projDir)
+}
+
+// gitLsFilesStub asks git whether projDir's .naozhi/project.yaml is in the
+// index: exit 0 listing the path is tracked, exit 0 listing nothing is
+// untracked, anything else (ctx expiring included) is trackUnknown, since a
+// broken git or the macOS CLT shim also exits 1. GIT_* variables are dropped
+// so naozhi's own environment cannot point git at another repo or index.
+func gitLsFilesStub(ctx context.Context, projDir string) trackState {
 	cmd := exec.CommandContext(ctx, "git", "-C", projDir, "-c", "core.fsmonitor=false",
 		"ls-files", "-z", "--", configDir+"/"+configFile)
 	cmd.Env = append(gitFreeEnv(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")

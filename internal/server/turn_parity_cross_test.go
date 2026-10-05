@@ -276,7 +276,7 @@ func TestTurnParity22_Cross_HTTPFailureBroadcastOncePerTurn(t *testing.T) {
 		h.waitEngineIdle()
 
 		h.httpSend(t, "second")
-		turns.turn(t, "turn aborted by /urgent", parityOutcome{Err: clierr.ErrAbortedByUrgent})
+		turns.turn(t, "turn ended by /new", parityOutcome{Err: clierr.ErrSessionReset})
 		h.waitEngineIdle()
 
 		for name, w := range map[string]*parityWS{"a": a, "b": b} {
