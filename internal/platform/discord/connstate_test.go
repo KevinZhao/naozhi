@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -97,15 +99,16 @@ func TestConfigureSession_SyncEvents(t *testing.T) {
 	}
 }
 
-// fakeGateway serves Discord's REST gateway lookup and a websocket gateway
-// that answers Hello / Identify / Resume. Each websocket handshake waits for
+// fakeGateway serves Discord's REST API (every path answers like the gateway
+// lookup) and a websocket gateway that answers Hello / Identify / Resume. Each websocket handshake waits for
 // one value on hello, so a test can observe the state while Open is blocked.
 // A connection is published on conns only after the client's first
 // heartbeat, so closing it cannot fail that heartbeat and start a second
 // reconnect.
 type fakeGateway struct {
 	srv        *httptest.Server
-	restStatus int // non-zero: the gateway lookup fails with this status
+	restStatus atomic.Int32 // non-zero: every REST request fails with this status
+	userCalls  atomic.Int32 // GET /users/@me requests, i.e. disconnect probes
 	dials      atomic.Int32
 	hello      chan struct{}
 	conns      chan *websocket.Conn
@@ -115,11 +118,11 @@ type fakeGateway struct {
 func newFakeGateway(t *testing.T, restStatus int) *fakeGateway {
 	t.Helper()
 	g := &fakeGateway{
-		restStatus: restStatus,
-		hello:      make(chan struct{}, 4),
-		conns:      make(chan *websocket.Conn, 4),
-		done:       make(chan struct{}),
+		hello: make(chan struct{}, 4),
+		conns: make(chan *websocket.Conn, 4),
+		done:  make(chan struct{}),
 	}
+	g.restStatus.Store(int32(restStatus))
 	g.srv = httptest.NewServer(http.HandlerFunc(g.serve))
 	t.Cleanup(g.srv.Close)
 	t.Cleanup(func() { close(g.done) })
@@ -128,8 +131,11 @@ func newFakeGateway(t *testing.T, restStatus int) *fakeGateway {
 
 func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 	if !websocket.IsWebSocketUpgrade(r) {
-		if g.restStatus != 0 {
-			http.Error(w, `{"message": "401: Unauthorized", "code": 0}`, g.restStatus)
+		if strings.HasSuffix(r.URL.Path, "/users/@me") {
+			g.userCalls.Add(1)
+		}
+		if status := int(g.restStatus.Load()); status != 0 {
+			http.Error(w, `{"message": "401: Unauthorized", "code": 0}`, status)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -326,5 +332,141 @@ func TestConnState_OpenFailureIsFailed(t *testing.T) {
 	}
 	if strings.Contains(st.LastError, "test-token") {
 		t.Fatalf("LastError leaks the bot token: %q", st.LastError)
+	}
+}
+
+// startDropped starts d against g, then drops the link with REST answering
+// status, leaving the reconnect parked on its handshake until the test feeds
+// g.hello.
+func startDropped(t *testing.T, g *fakeGateway, d *Discord, status int) {
+	t.Helper()
+	d.probeDelay = 10 * time.Millisecond
+	d.probeMaxInterval = 20 * time.Millisecond
+	g.hello <- struct{}{}
+	if err := d.Start(func(context.Context, platform.IncomingMessage) {}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Stop() })
+	first := <-g.conns
+	waitConnState(t, d, platform.ConnConnected)
+	g.restStatus.Store(int32(status))
+	_ = first.Close()
+}
+
+// reconnect lets the parked reconnect finish and waits for connected.
+func reconnect(t *testing.T, g *fakeGateway, d *Discord) platform.ConnState {
+	t.Helper()
+	g.restStatus.Store(0)
+	g.hello <- struct{}{}
+	<-g.conns
+	return waitConnState(t, d, platform.ConnConnected)
+}
+
+// TestConnState_DropWithRevokedTokenFails: a token revoked mid-run makes every
+// reconnect fail without an event, so only the REST probe can tell the
+// operator; the state goes terminal and names the fix without leaking the
+// token or the response body.
+func TestConnState_DropWithRevokedTokenFails(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+			g := newFakeGateway(t, 0)
+			d := newGatewayAdapter(t, g)
+			startDropped(t, g, d, status)
+
+			st := waitConnState(t, d, platform.ConnFailed)
+			want := "discord rejected the bot token (HTTP " + strconv.Itoa(status) + "): update platforms.discord.bot_token"
+			if !strings.HasPrefix(st.LastError, want) || st.LastErrorAt.IsZero() {
+				t.Fatalf("LastError = %q at %v, want prefix %q", st.LastError, st.LastErrorAt, want)
+			}
+			if strings.Contains(st.LastError, "test-token") || strings.Contains(st.LastError, "message") {
+				t.Fatalf("LastError leaks the token or the response body: %q", st.LastError)
+			}
+
+			back := reconnect(t, g, d)
+			if back.LastError != st.LastError {
+				t.Fatalf("after reconnect LastError = %q, want the probe's %q kept", back.LastError, st.LastError)
+			}
+		})
+	}
+}
+
+// TestConnState_DropNotesProbeError: a REST failure that says nothing about
+// the token is recorded as the reason without leaving disconnected, and the
+// probe keeps checking until the gateway is back, then stops.
+func TestConnState_DropNotesProbeError(t *testing.T) {
+	t.Parallel()
+	g := newFakeGateway(t, 0)
+	d := newGatewayAdapter(t, g)
+	startDropped(t, g, d, http.StatusServiceUnavailable)
+
+	testhelper.Eventually(t, func() bool { return g.userCalls.Load() >= 2 },
+		connStateTestTimeout, "the probe stopped after its first failed check")
+	st, _ := d.ConnState()
+	if st.State != platform.ConnDisconnected {
+		t.Fatalf("state = %q, want disconnected (a 503 is not a token verdict)", st.State)
+	}
+	if st.LastError != "gateway down; REST probe: HTTP 503" {
+		t.Fatalf("LastError = %q, want the probe's status", st.LastError)
+	}
+
+	back := reconnect(t, g, d)
+	if back.LastError != st.LastError {
+		t.Fatalf("after reconnect LastError = %q, want %q kept", back.LastError, st.LastError)
+	}
+	testhelper.Eventually(t, func() bool { return !d.probing.Load() },
+		connStateTestTimeout, "the probe kept running after the gateway reconnected")
+}
+
+// TestOnDisconnect_ProbeLifetime: a Disconnect during Stop starts no probe;
+// a drop starts one, and Stop ends it even mid-wait.
+func TestOnDisconnect_ProbeLifetime(t *testing.T) {
+	t.Parallel()
+	sess, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+
+	stopped := New(Config{BotToken: "test-token"})
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped.stopCtx = ctx
+	cancel()
+	stopped.onDisconnect(sess, &discordgo.Disconnect{})
+	if stopped.probing.Load() {
+		t.Fatal("a Disconnect after Stop started a probe")
+	}
+
+	d := New(Config{BotToken: "test-token"})
+	ctx, cancel = context.WithCancel(context.Background())
+	d.stopCtx = ctx
+	d.probeDelay = time.Hour
+	d.onDisconnect(sess, &discordgo.Disconnect{})
+	if !d.probing.Load() {
+		t.Fatal("a drop started no probe")
+	}
+	cancel()
+	done := make(chan struct{})
+	go func() { d.dispatch.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(connStateTestTimeout):
+		t.Fatal("the probe outlived Stop")
+	}
+	if d.probing.Load() {
+		t.Fatal("probing still set after the probe exited")
+	}
+}
+
+func TestNextProbeDelay_DoublesToTheCap(t *testing.T) {
+	t.Parallel()
+	got := []time.Duration{discordProbeDelay}
+	for len(got) < 9 {
+		got = append(got, nextProbeDelay(got[len(got)-1], discordProbeMaxInterval))
+	}
+	want := []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second,
+		80 * time.Second, 160 * time.Second, 5 * time.Minute, 5 * time.Minute, 5 * time.Minute}
+	if !slices.Equal(got, want) {
+		t.Fatalf("probe delays = %v, want %v", got, want)
 	}
 }

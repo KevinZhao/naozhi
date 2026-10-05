@@ -103,6 +103,30 @@ func TestConnTracker_FailSanitisesAndCapsError(t *testing.T) {
 	}
 }
 
+// TestConnTracker_FailIfOnlyFromState: a probe verdict that lands after the
+// link recovered must leave the recovery alone.
+func TestConnTracker_FailIfOnlyFromState(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	tr := ConnTracker{now: steppingClock(t0)}
+	tr.Set(ConnConnected)
+	up, _ := tr.Snapshot()
+	if tr.FailIf(ConnDisconnected, ConnFailed, errors.New("late verdict")) {
+		t.Fatal("FailIf applied from connected, want a no-op")
+	}
+	if s, _ := tr.Snapshot(); s != up {
+		t.Fatalf("mismatched FailIf changed %+v -> %+v", up, s)
+	}
+
+	tr.Set(ConnDisconnected)
+	if !tr.FailIf(ConnDisconnected, ConnFailed, errors.New("token\nrejected")) {
+		t.Fatal("FailIf from the matching state did not apply")
+	}
+	s, _ := tr.Snapshot()
+	if s.State != ConnFailed || s.LastError != "token_rejected" || !s.LastErrorAt.Equal(s.Since) || !s.Since.After(up.Since) {
+		t.Fatalf("after FailIf: %+v; want failed with a fresh Since and the sanitised error stamped then", s)
+	}
+}
+
 // TestConnTracker_ConcurrentUse is for -race: SDK hooks and /health requests
 // hit the tracker from different goroutines.
 func TestConnTracker_ConcurrentUse(t *testing.T) {

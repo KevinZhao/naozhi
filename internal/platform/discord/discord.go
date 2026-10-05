@@ -36,6 +36,14 @@ const discordBotHealCooldown = time.Minute
 // deadline, and Close waits on that lock.
 const discordCloseTimeout = 5 * time.Second
 
+// Disconnect-probe cadence: the first REST check after a drop, the cap its
+// doubling backs off to, and the bound on one request.
+const (
+	discordProbeDelay       = 5 * time.Second
+	discordProbeMaxInterval = 5 * time.Minute
+	discordProbeTimeout     = 10 * time.Second
+)
+
 // Discord implements Platform and RunnablePlatform via WebSocket gateway.
 type Discord struct {
 	cfg     Config
@@ -62,6 +70,13 @@ type Discord struct {
 	restTransport http.RoundTripper
 	// closeTimeout overrides discordCloseTimeout when non-zero.
 	closeTimeout time.Duration
+	// probing is set while a disconnect probe goroutine runs.
+	probing atomic.Bool
+	// probeDelay / probeMaxInterval / probeTimeout override the discordProbe*
+	// defaults when non-zero.
+	probeDelay       time.Duration
+	probeMaxInterval time.Duration
+	probeTimeout     time.Duration
 }
 
 // New creates a Discord platform adapter.
@@ -237,13 +252,104 @@ func (d *Discord) onResumed(_ *discordgo.Session, _ *discordgo.Resumed) {
 
 // onDisconnect: discordgo emits Disconnect when it closes the websocket and,
 // unless Stop closed it, retries Open with backoff until one succeeds. Failed
-// attempts emit nothing, so Since stays at the drop. Stop leaves the state as
-// it was.
-func (d *Discord) onDisconnect(_ *discordgo.Session, _ *discordgo.Disconnect) {
+// attempts emit nothing, so Since stays at the drop and the reason comes from
+// the disconnect probe. Stop leaves the state as it was.
+func (d *Discord) onDisconnect(s *discordgo.Session, _ *discordgo.Disconnect) {
 	if d.stopCtx != nil && d.stopCtx.Err() != nil {
 		return
 	}
 	d.connState.Set(platform.ConnDisconnected)
+	if s != nil && d.stopCtx != nil && d.probing.CompareAndSwap(false, true) {
+		d.dispatch.Go("discord disconnect probe", func() { d.runDisconnectProbe(s) })
+	}
+}
+
+// runDisconnectProbe asks REST who the bot is while the gateway stays down:
+// discordgo reports drop and reconnect errors only to its package-global
+// logger, which has no session identity and hides them at the default level.
+// A rejected token is terminal; any other error becomes LastError. Close codes
+// such as 4014 (disallowed intents) stay invisible and are left to doctor's
+// grace period.
+func (d *Discord) runDisconnectProbe(sess *discordgo.Session) {
+	for {
+		d.probeWhileDisconnected(sess)
+		d.probing.Store(false)
+		// A Disconnect between the last state check and the Store found
+		// probing set and started nothing; pick it up here.
+		if d.stopCtx.Err() != nil || !d.stillDisconnected() || !d.probing.CompareAndSwap(false, true) {
+			return
+		}
+	}
+}
+
+func (d *Discord) stillDisconnected() bool {
+	st, _ := d.connState.Snapshot()
+	return st.State == platform.ConnDisconnected
+}
+
+func (d *Discord) probeWhileDisconnected(sess *discordgo.Session) {
+	delay := durationOr(d.probeDelay, discordProbeDelay)
+	maxInterval := durationOr(d.probeMaxInterval, discordProbeMaxInterval)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	for {
+		select {
+		case <-d.stopCtx.Done():
+			return
+		case <-timer.C:
+		}
+		if !d.stillDisconnected() {
+			return
+		}
+		if d.probeOnce(sess) {
+			return
+		}
+		delay = nextProbeDelay(delay, maxInterval)
+		timer.Reset(delay)
+	}
+}
+
+// probeOnce runs one REST check and reports whether the state is now terminal.
+func (d *Discord) probeOnce(sess *discordgo.Session) bool {
+	ctx, cancel := context.WithTimeout(d.stopCtx, durationOr(d.probeTimeout, discordProbeTimeout))
+	defer cancel()
+	_, err := sess.User("@me", discordgo.WithContext(ctx))
+	if err == nil {
+		slog.Debug("discord gateway down but REST accepts the bot token")
+		return false
+	}
+	if d.stopCtx.Err() != nil {
+		return true
+	}
+	var restErr *discordgo.RESTError
+	if errors.As(err, &restErr) && restErr.Response != nil {
+		code := restErr.Response.StatusCode
+		// The response body is left out: it can echo request details.
+		if code == http.StatusUnauthorized || code == http.StatusForbidden {
+			if d.connState.FailIf(platform.ConnDisconnected, platform.ConnFailed,
+				fmt.Errorf("discord rejected the bot token (HTTP %d): update platforms.discord.bot_token and restart", code)) {
+				slog.Error("discord rejected the bot token while the gateway is down; update platforms.discord.bot_token and restart",
+					"status", code)
+			}
+			return true
+		}
+		err = fmt.Errorf("HTTP %d", code)
+	}
+	d.connState.NoteError(fmt.Errorf("gateway down; REST probe: %w", err))
+	return false
+}
+
+// nextProbeDelay doubles the wait between checks up to maxInterval, so a long
+// outage costs a handful of REST calls rather than one every few seconds.
+func nextProbeDelay(delay, maxInterval time.Duration) time.Duration {
+	return min(2*delay, maxInterval)
+}
+
+func durationOr(v, def time.Duration) time.Duration {
+	if v > 0 {
+		return v
+	}
+	return def
 }
 
 // Stop implements RunnablePlatform. Closes Discord WebSocket gateway.
