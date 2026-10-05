@@ -1,6 +1,6 @@
 // scheduler_notice.go: cron IM-notice formatting (notice-prefix consts +
 // formatCronNotice + escapeCronMarkdownPunct + failureNoticeBody) and the
-// jobSnapshot that feeds notice labels. None read s.stopCtx; methods stay on *Scheduler / jobSnapshot
+// jobSnapshot that feeds notice labels and hints. None read s.stopCtx; methods stay on *Scheduler / jobSnapshot
 // so private fields remain accessible without exporting.
 
 package cron
@@ -109,12 +109,12 @@ func escapeCronMarkdownPunct(s string) string {
 	return textutil.EscapeCronMarkdownPunct(s)
 }
 
-// failureNoticeBody is the IM body for a run that did not succeed: the cause
-// named from errClass/state (and turnCause for a failed turn), then the run
-// id's first 8 hex chars (the same short form the dashboard history shows).
-// timeout is the run's wall-clock budget, printed on the timed-out bodies.
-// Never carries the raw error text.
-func failureNoticeBody(errClass ErrorClass, turnCause TurnCause, state RunState, runID string, timeout time.Duration) string {
+// failureNoticeBody is the IM body, sent to `to`, for a run of snap's job that
+// did not succeed: the cause named from errClass/state (and turnCause for a
+// failed turn), then the run id's first 8 hex chars (the same short form the
+// dashboard history shows). timeout is the run's wall-clock budget, printed on
+// the timed-out bodies. Never carries the raw error text.
+func failureNoticeBody(snap jobSnapshot, to NotifyTarget, errClass ErrorClass, turnCause TurnCause, state RunState, runID string, timeout time.Duration) string {
 	timedOut := state == RunStateTimedOut || errClass == ErrClassDeadlineExceeded
 	var cause string
 	switch {
@@ -130,6 +130,8 @@ func failureNoticeBody(errClass ErrorClass, turnCause TurnCause, state RunState,
 		cause = "启动会话失败"
 	case errClass == ErrClassSendError:
 		cause = "执行失败（CLI 发送错误）"
+	case errClass == ErrClassTurnFailed && turnCause == TurnCauseContextTooLong && !snap.fresh:
+		cause = contextTooLongPersistentNotice(snap, to)
 	case errClass == ErrClassTurnFailed:
 		cause = turnFailedNotice(turnCause)
 	case errClass == ErrClassWorkDirUnreachable:
@@ -179,6 +181,23 @@ func turnFailedNotice(c TurnCause) string {
 	return "执行失败（后端报告本轮出错），请检查执行历史"
 }
 
+// contextTooLongPersistentNotice is the context-too-long cause, sent to `to`,
+// for a job that keeps its context: every later run resumes the same oversized
+// conversation, so it names the dashboard toggle that resets it. IM cannot
+// toggle the mode, so an IM job also gets the recreate route, placed in the
+// creating chat when the notice lands elsewhere (/cron del only works there).
+func contextTooLongPersistentNotice(snap jobSnapshot, to NotifyTarget) string {
+	const head = "执行失败（对话上下文已超出模型上限）；该任务保留上下文，之后每次执行都会因此失败，可在控制台编辑任务勾选“每次全新上下文”"
+	switch {
+	case !snap.hasIMChat():
+		return head
+	case snap.isSourceChat(to):
+		return head + "，或删除后不带 --keep-context 重新创建"
+	default:
+		return head + "，或在创建该任务的会话删除后不带 --keep-context 重新创建"
+	}
+}
+
 // autoPauseNoticeSuffix is appended to a failure notice sent to `to` when that
 // run's failure auto-paused the job; pausedAfter is finishRun's result (0 = not
 // paused). It says where to resume: /cron resume only works in the job's own
@@ -190,9 +209,9 @@ func autoPauseNoticeSuffix(snap jobSnapshot, to NotifyTarget, pausedAfter int) s
 	}
 	var how string
 	switch {
-	case snap.platName == "dashboard" || snap.platName == "" || snap.chatID == "":
+	case !snap.hasIMChat():
 		how = "修复后在控制台恢复"
-	case to == NotifyTarget{Platform: snap.platName, ChatID: snap.chatID}:
+	case snap.isSourceChat(to):
 		how = "修复后发送 /cron resume " + snap.jobID + " 恢复"
 	default:
 		how = "修复后在创建该任务的会话发送 /cron resume " + snap.jobID + "，或在控制台恢复"
@@ -205,7 +224,7 @@ func autoPauseNoticeSuffix(snap jobSnapshot, to NotifyTarget, pausedAfter int) s
 // sentence.
 func (s *Scheduler) deliverFailureNotice(rc runCtx, errClass ErrorClass, turnCause TurnCause, state RunState, timeout time.Duration, pausedAfter int) {
 	s.deliverNotice(rc.notifyTo, formatCronNotice(rc.snap.labelOrID(),
-		failureNoticeBody(errClass, turnCause, state, rc.runID, timeout)+autoPauseNoticeSuffix(rc.snap, rc.notifyTo, pausedAfter)))
+		failureNoticeBody(rc.snap, rc.notifyTo, errClass, turnCause, state, rc.runID, timeout)+autoPauseNoticeSuffix(rc.snap, rc.notifyTo, pausedAfter)))
 }
 
 // deliverPauseNotice announces that the failure of a run with no per-run
@@ -243,6 +262,18 @@ func (s jobSnapshot) labelOrID() string {
 		return s.label
 	}
 	return s.jobID
+}
+
+// hasIMChat reports whether the job was created in an IM chat, the only place
+// its /cron commands work; dashboard jobs and jobs with no source chat are
+// managed from the dashboard alone.
+func (s jobSnapshot) hasIMChat() bool {
+	return s.platName != "dashboard" && s.platName != "" && s.chatID != ""
+}
+
+// isSourceChat reports whether to is the chat the job was created in.
+func (s jobSnapshot) isSourceChat(to NotifyTarget) bool {
+	return to == NotifyTarget{Platform: s.platName, ChatID: s.chatID}
 }
 
 // snapshotJobLocked copies the fields a run works from; callers MUST hold

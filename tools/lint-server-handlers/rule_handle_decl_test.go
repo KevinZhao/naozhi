@@ -176,3 +176,15 @@ func TestHandleBaseline_MatchesServerPackage(t *testing.T) {
 		t.Errorf("%s:%d: %s", v.File, v.Line, v.Message)
 	}
 }
+
+// handlerKeys collapses the adjacent repeats scanHandlerDecls reports for a
+// key declared more than once.
+func handlerKeys(decls []handlerDecl) []string {
+	var out []string
+	for _, d := range decls {
+		if len(out) == 0 || out[len(out)-1] != d.Key {
+			out = append(out, d.Key)
+		}
+	}
+	return out
+}
