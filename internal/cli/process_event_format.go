@@ -72,7 +72,12 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 			// 1p auth (e.g. fable-5) streams these telemetry events many times per
 			// turn; un-skipped they render as bare ⚙ rows. Drop at the source so they
 			// never enter ring.EventLog.
-			"thinking_tokens", "background_tasks_changed":
+			"thinking_tokens", "background_tasks_changed",
+			// Repo-mutation signals with no row-worthy payload: vcs_state_changed
+			// is a re-read-the-repo hint for the Bash command already on the
+			// timeline, and code_change_published re-fires on every push to a PR
+			// branch, so as rows they are bare ⚙ subtype names.
+			"vcs_state_changed", "code_change_published":
 			return nil
 		}
 		return []clievent.EventEntry{entry}
