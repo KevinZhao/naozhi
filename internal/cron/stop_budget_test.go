@@ -71,6 +71,8 @@ func TestStop_BudgetCapsTotalDuration(t *testing.T) {
 	// t.Parallel: the counters are process-global expvars.
 	drain0 := metrics.CronStopBudgetExceededDrainTotal.Value()
 	trigger0 := metrics.CronStopBudgetExceededTriggerTotal.Value()
+	// waitGCDrain may legitimately spend its whole budget under heavy IO.
+	ceiling := s.gcBudget + 2*time.Second
 	start := time.Now()
 	stopped := make(chan struct{})
 	go func() {
@@ -79,8 +81,8 @@ func TestStop_BudgetCapsTotalDuration(t *testing.T) {
 	}()
 	select {
 	case <-stopped:
-	case <-time.After(10 * time.Second):
-		t.Fatalf("Stop still blocked after 10s with triggerWG held (budget=%v); it must not wait for triggerWG", s.stopBudget)
+	case <-time.After(ceiling + 3*time.Second):
+		t.Fatalf("Stop still blocked after %v with triggerWG held (budget=%v); it must not wait for triggerWG", ceiling+3*time.Second, s.stopBudget)
 	}
 	elapsed := time.Since(start)
 
@@ -90,8 +92,8 @@ func TestStop_BudgetCapsTotalDuration(t *testing.T) {
 		t.Errorf("stop budget breaches = %d, want 1 (the held triggerWG must trip exactly one budget arm)", breaches)
 	}
 	// Loose guard against the old ExecTimeout-derived budget (>= 1h).
-	if elapsed > 5*time.Second {
-		t.Errorf("Stop took %v, want < 5s (budget=%v)", elapsed, s.stopBudget)
+	if elapsed > ceiling {
+		t.Errorf("Stop took %v, want < %v (budget=%v)", elapsed, ceiling, s.stopBudget)
 	}
 }
 
