@@ -17,6 +17,9 @@ import (
 // writer.go — the per-key writer: opening it, flushing it, closing it, and
 // removing its files. Extracted from persister.go (J9 of #2548).
 
+// dropInMemoryLocked closes the per-key writer and removes its map entry.
+// Must NOT touch the filesystem beyond the fd close so the op stays fast
+// on slow filesystems (#1284).
 func (p *Persister) dropInMemoryLocked(key string) {
 	if w, ok := p.writers[key]; ok {
 		if err := w.close(); err != nil {
@@ -49,6 +52,8 @@ func (p *Persister) removeKeyFiles(stem string) error {
 // removeFileHook is the test seam for a slow/instrumented unlink (#1774).
 var removeFileHook = os.Remove
 
+// writerFor returns an open perKeyWriter for key, creating or
+// recovering the file pair on first access.
 func (p *Persister) writerFor(key, stem string) (*perKeyWriter, error) {
 	if w, ok := p.writers[key]; ok {
 		return w, nil

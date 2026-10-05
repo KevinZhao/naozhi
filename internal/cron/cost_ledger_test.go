@@ -198,3 +198,125 @@ func TestAppendLedger_RecordsTheSnapshotBackend(t *testing.T) {
 		t.Fatalf("entries = %+v, want one on the snapshot's backend codex", ents)
 	}
 }
+
+// backendSession spends USD and credits on each Send. It does not implement
+// BackendReporter; reportingBackendSession adds it, reporting backend.
+type backendSession struct {
+	backend string
+	spent   float64
+}
+
+func (s *backendSession) Send(context.Context, string) (SendResult, error) {
+	s.spent++
+	return SendResult{Text: "done", SessionID: "sess-b"}, nil
+}
+func (s *backendSession) SessionID() string                     { return "sess-b" }
+func (s *backendSession) InterruptViaControl() InterruptOutcome { return InterruptUnsupported }
+func (s *backendSession) CostTotals() costledger.Totals {
+	return costledger.Totals{USD: s.spent, Metered: map[costledger.Unit]float64{costledger.UnitCredits: 2 * s.spent}}
+}
+
+type reportingBackendSession struct{ *backendSession }
+
+func (s reportingBackendSession) Backend() string { return s.backend }
+
+type backendRouter struct{ sess Session }
+
+func (r backendRouter) RegisterCronStubWithChain(string, string, string, []string) {}
+func (r backendRouter) Reset(string)                                               {}
+func (r backendRouter) GetOrCreate(context.Context, string, AgentOpts) (Session, SessionStatus, error) {
+	return r.sess, SessionExisting, nil
+}
+
+// runLedgerBackends runs job once against sess and returns the Backend of
+// every ledger row it booked, checking that both the USD and the credit row
+// exist.
+func runLedgerBackends(t *testing.T, sess Session, agents map[string]AgentOpts, jobBackend string) []string {
+	t.Helper()
+	ledger := costledger.NewStore(filepath.Join(t.TempDir(), "cost"), costledger.Options{})
+	t.Cleanup(ledger.Close)
+	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(t.TempDir(), "cron.json"), MaxJobs: 5},
+		SchedulerDeps{Router: backendRouter{sess: sess}, Ledger: ledger, Agents: agents})
+	j := &Job{ID: "0123456789abcdef", Schedule: "@every 5m", Prompt: "ping", Backend: jobBackend}
+	s.putJobForTest(j)
+	s.executeOpt(j.ID, true)
+
+	ents := ledgerEntries(t, ledger)
+	units := map[costledger.Unit]bool{}
+	var backends []string
+	for _, e := range ents {
+		units[e.Unit] = true
+		backends = append(backends, e.Backend)
+	}
+	if len(ents) != 2 || !units[costledger.UnitUSD] || !units[costledger.UnitCredits] {
+		t.Fatalf("ledger rows = %+v, want one USD and one credits row", ents)
+	}
+	return backends
+}
+
+func wantAllBackend(t *testing.T, got []string, want string) {
+	t.Helper()
+	for _, b := range got {
+		if b != want {
+			t.Fatalf("ledger backends = %q, want every row on %q", got, want)
+		}
+	}
+}
+
+// A session spawned on the router default (kiro here) books its kiro credits
+// under kiro, not under the "claude" the job's empty backend field used to
+// imply.
+func TestLocalRun_LedgerUsesSessionBackend(t *testing.T) {
+	sess := reportingBackendSession{&backendSession{backend: "kiro"}}
+	wantAllBackend(t, runLedgerBackends(t, sess, nil, ""), "kiro")
+}
+
+// A session that cannot say which backend it runs on falls back to the
+// resolved spawn option: here the agent's default backend.
+func TestLocalRun_LedgerUsesAgentBackendWhenSessionSilent(t *testing.T) {
+	agents := map[string]AgentOpts{"general": {Backend: "kiro"}}
+	wantAllBackend(t, runLedgerBackends(t, &backendSession{}, agents, ""), "kiro")
+	wantAllBackend(t, runLedgerBackends(t, reportingBackendSession{&backendSession{}}, agents, ""), "kiro")
+}
+
+// The job's explicit backend still labels the rows when the session agrees,
+// and outranks the agent default when the session is silent. A reused session
+// running elsewhere outranks it: the rows follow where the spend happened.
+func TestLocalRun_LedgerKeepsJobBackendOverride(t *testing.T) {
+	agents := map[string]AgentOpts{"general": {Backend: "kiro"}}
+	wantAllBackend(t, runLedgerBackends(t, reportingBackendSession{&backendSession{backend: "codex"}}, agents, "codex"), "codex")
+	wantAllBackend(t, runLedgerBackends(t, &backendSession{}, agents, "codex"), "codex")
+	wantAllBackend(t, runLedgerBackends(t, reportingBackendSession{&backendSession{backend: "kiro"}}, nil, "codex"), "kiro")
+}
+
+func TestEffectiveBackend(t *testing.T) {
+	cases := []struct {
+		name string
+		opts AgentOpts
+		sess Session
+		want string
+	}{
+		{"session wins", AgentOpts{Backend: "claude"}, reportingBackendSession{&backendSession{backend: "kiro"}}, "kiro"},
+		{"empty report falls back", AgentOpts{Backend: "codex"}, reportingBackendSession{&backendSession{}}, "codex"},
+		{"no capability falls back", AgentOpts{Backend: "codex"}, &backendSession{}, "codex"},
+		{"nothing known", AgentOpts{}, &backendSession{}, ""},
+	}
+	for _, c := range cases {
+		if got := effectiveBackend(c.opts, c.sess); got != c.want {
+			t.Errorf("%s: effectiveBackend = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// rc.backend outranks the snapshot's, which stays the fallback for sandbox
+// runs and pre-spawn finishes.
+func TestAppendLedger_SessionBackendOutranksSnapshot(t *testing.T) {
+	ledger := costledger.NewStore(filepath.Join(t.TempDir(), "cost"), costledger.Options{})
+	s := &Scheduler{ledger: ledger, tbl: newJobTable(nil)}
+	s.appendLedger(runCtx{jobID: "j", runID: "r", backend: "kiro", snap: jobSnapshot{backend: "codex"}},
+		runOutcome{costInc: costledger.Increment{Metered: map[costledger.Unit]float64{costledger.UnitCredits: 1}}})
+	ents := ledgerEntries(t, ledger)
+	if len(ents) != 1 || ents[0].Backend != "kiro" {
+		t.Fatalf("entries = %+v, want one on the session's backend kiro", ents)
+	}
+}

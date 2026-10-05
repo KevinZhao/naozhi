@@ -16,6 +16,8 @@ import (
 // reactions.go — the Reactor capability: adding and removing a reaction on an
 // inbound message. Extracted from feishu.go (J10 of #2548).
 
+// reactionRequestBody is the JSON body sent to POST /reactions (hot path:
+// one call per dispatched IM message, typed to avoid map allocations).
 type reactionRequestBody struct {
 	ReactionType reactionTypeField `json:"reaction_type"`
 }

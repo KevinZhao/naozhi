@@ -169,7 +169,8 @@ type Process struct {
 // (single sender) or text (merged sender), then handed the turn's result.
 // canceled is a tombstone (docs/rfc/passthrough-mode.md §5.2.2): a slot whose
 // caller left via ctx.Done stays in pendingSlots to keep FIFO order, but fan-out
-// drops its result. Atomic so fanout reads it lock-free after releasing slotsMu.
+// books its result instead of delivering it. Atomic so the error paths read it
+// lock-free after releasing slotsMu.
 type sendSlot struct {
 	id       uint64
 	uuid     string
@@ -180,14 +181,14 @@ type sendSlot struct {
 	errCh    chan error
 
 	// Only mutated under Process.slotsMu (atomic.Bool to allow lock-free
-	// reads from fanoutTurnResult outside slotsMu).
+	// reads from the error paths outside slotsMu).
 	canceled  atomic.Bool
 	replayed  bool
 	enqueueAt time.Time
 }
 
-// isCanceled reads canceled atomically; fanout uses it lock-free outside
-// slotsMu, while writes go through slotsMu to stay FIFO-ordered.
+// isCanceled reads canceled atomically; the error paths use it lock-free
+// outside slotsMu, while writes go through slotsMu to stay FIFO-ordered.
 func (s *sendSlot) isCanceled() bool {
 	return s.canceled.Load()
 }
@@ -407,8 +408,8 @@ func (p *Process) SetOnTurnDone(fn func()) {
 	p.turn.mu.Unlock()
 }
 
-// SetOnUnownedResult sets the callback that receives the result of a turn no
-// Send owns (see turnState.onUnownedResult). mu-guarded, so safe at any time.
+// SetOnUnownedResult sets the callback that receives a result no live caller
+// consumes (see turnState.onUnownedResult). mu-guarded, so safe at any time.
 func (p *Process) SetOnUnownedResult(fn func(clievent.SendResult)) {
 	p.turn.mu.Lock()
 	p.turn.onUnownedResult = fn

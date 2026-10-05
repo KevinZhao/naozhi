@@ -138,7 +138,7 @@ func TestTuningDriftParity_SurvivesRespawn(t *testing.T) {
 		r.spawn.argvSpawnOptions(sp.Model, sp.Effort, r.spawn.cliDebugFileFor(key), sp.SystemPrompt, sp.Args))
 
 	// The spawn then replaces the entry, carrying the snapshotted overrides.
-	_, _, _, _, ov := snapshotOldSession(sessView{}, s)
+	_, _, _, ov := snapshotOldSession(sessView{}, s)
 	var fresh *ManagedSession
 	r.ss.Update(func(tx sessTx) {
 		fresh = r.installFreshSession(tx,
