@@ -60,6 +60,31 @@
     }
   },
   "defs": {
+    "clievent.CodeChange": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "identifier": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    },
     "clievent.MeteringEntry": {
       "properties": {
         "unit": {
@@ -399,6 +424,13 @@
         },
         "cli_version": {
           "type": "string"
+        },
+        "code_changes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "clievent.CodeChange"
+          }
         },
         "context_usage_percent": {
           "type": "number"

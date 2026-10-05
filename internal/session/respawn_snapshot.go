@@ -75,6 +75,8 @@ type respawnSnapshot struct {
 	spent costledger.Totals
 	// startupFails is the startup-failure streak the replacement inherits.
 	startupFails int32
+	// codeChanges is the PR list, which follows the logical session.
+	codeChanges []clievent.CodeChange
 }
 
 func snapshotRespawn(v sessView, old *ManagedSession) respawnSnapshot {
@@ -84,13 +86,14 @@ func snapshotRespawn(v sessView, old *ManagedSession) respawnSnapshot {
 		snap.sid = old.getSessionID()
 		snap.spent = old.CostTotals()
 		snap.startupFails = startupFailureOf(old).streak
+		snap.codeChanges = old.CodeChanges()
 	}
 	return snap
 }
 
 // rereadSameEntry refreshes snap and hist from old, still the key's entry at
 // commit, with what operator writes may have changed on it while the spawn
-// ran unlocked: the overrides and the session-ID chain. History and cost are
+// ran unlocked: the overrides, the PR list and the session-ID chain. History and cost are
 // written only by old's own, dead, process. Call it inside the commit
 // transaction; nil-safe.
 func rereadSameEntry(old *ManagedSession, snap *respawnSnapshot, hist *respawnHistory, resumeID string) {
@@ -98,6 +101,7 @@ func rereadSameEntry(old *ManagedSession, snap *respawnSnapshot, hist *respawnHi
 		return
 	}
 	snap.overrides = snapshotOverrides(old)
+	snap.codeChanges = old.CodeChanges()
 	if !slices.Equal(old.prevSessionIDs, snap.prevIDs) {
 		snap.prevIDs = slices.Clone(old.prevSessionIDs)
 		hist.prevIDs = respawnChain(snap.prevIDs, old.getSessionID(), resumeID)

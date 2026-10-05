@@ -9,7 +9,7 @@ import { eventHtml } from './event_render.js';
 import { onAskOptionToggle, onAskSubmit } from './ask_card.js';
 import { eventIdentityKey, fetchEvents, hasMoreHeader, renderEvents } from './event_stream.js';
 import { renderMd, runPendingAsync } from './render_md.js';
-import { fetchSessionRuns, setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderSpawnDiagChip } from './session_header.js';
+import { fetchSessionRuns, setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderPRChip, setHeaderSpawnDiagChip } from './session_header.js';
 import {
   handleFiles,
   onThumbDragEnd,
@@ -1125,7 +1125,7 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
         // asynchronously by renderGitChip once /api/sessions/git resolves;
         // stays empty (collapses via :empty) for non-repo workspaces and
         // remote-node sessions.
-        '<span class="detail-git" id="header-git"></span>' +
+        '<span class="detail-git" id="header-git"></span><span class="detail-pr" id="header-pr"></span>' +
         ctxBarHtml +
         // kiro thinking-effort tier. Built empty and filled by
         // setHeaderEffortChip (called below and from fetchSessions) so a tier
@@ -1167,6 +1167,7 @@ function renderMainHeader() {
   setHeaderEffortChip();
   setHeaderSpawnDiagChip();
   setHeaderOverlayDriftChip();
+  setHeaderPRChip();
   fetchSessionRuns(selection.key, selection.node);
 }
 
@@ -1269,6 +1270,7 @@ function renderMainShell() {
   setHeaderEffortChip();
   setHeaderSpawnDiagChip();
   setHeaderOverlayDriftChip();
+  setHeaderPRChip();
 }
 
 // renderSettingsView paints the standalone settings top-level view into

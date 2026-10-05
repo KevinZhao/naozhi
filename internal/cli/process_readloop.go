@@ -597,6 +597,11 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 		p.setLiveVersion(ev.ClaudeCodeVersion)
 	}
 	p.notifyLinker(ev, nowMS, isSystemInit)
+	if ev.CodeChange != nil {
+		if fn := p.onCodeChange.Load(); fn != nil {
+			(*fn)(*ev.CodeChange)
+		}
+	}
 
 	// Always log to ring.EventLog so dashboard subscribers see events
 	// even when no Send() is active (e.g., after service restart
