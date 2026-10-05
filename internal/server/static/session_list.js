@@ -88,11 +88,11 @@ async function fetchSessionsPayload() {
 
 // sessionsUnchanged reports whether the poll carries nothing new, and
 // otherwise records it as the last one seen. stats.version changes on session
-// add/remove/rename/reset; nodes have no version and compare as JSON. Process
-// state flips (running↔ready, last_response) never advance it: over a live
-// socket the session_state push covers them, but under WS-fallback polling
-// REST is the only state source, so the short-circuit applies only while
-// connected (#2431) and the idempotent renderSidebar runs every 5 s.
+// add/remove/rename/reset and a listed key's failed spawn; nodes have no
+// version and compare as JSON. State flips (running↔ready, last_response)
+// never advance it: over a live socket session_state covers them, but under
+// WS-fallback polling REST is the only state source, so the short-circuit
+// applies only while connected (#2431); idempotent renderSidebar runs every 5 s.
 function sessionsUnchanged(data, wsConnected) {
   const version = (data.stats && data.stats.version) || 0;
   const nodesHash = JSON.stringify(data.nodes || {});

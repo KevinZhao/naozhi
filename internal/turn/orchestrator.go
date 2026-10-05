@@ -92,7 +92,7 @@ func (o *Orchestrator) interrupt(key string) {
 // Reset discards key's queue (each dropped origin sees DropReset), fails the
 // session's in-flight passthrough sends with clierr.ErrSessionReset, then
 // resets the session. The discard comes first: the session reset retires the
-// key, which cleans the queue up without telling the dropped origins (#2185).
+// key, and Retire would tell the dropped origins DropRemoved instead (#2185).
 func (o *Orchestrator) Reset(ctx context.Context, key string, discardOverride bool) {
 	o.dropQueued(ctx, key, DropReset)
 	o.s.DiscardPending(key, clierr.ErrSessionReset)
@@ -105,10 +105,23 @@ func (o *Orchestrator) ShouldNotify(key string) bool {
 	return o.q.ShouldNotify(key)
 }
 
-// Cleanup forgets key's queue state; queued messages are dropped silently
-// and an owner still running on key stops at its next drain (queue.Cleanup).
-func (o *Orchestrator) Cleanup(key string) {
-	o.q.Cleanup(key)
+// retireNotifyTimeout bounds the DropRemoved notifications of one Retire.
+const retireNotifyTimeout = 10 * time.Second
+
+// Retire forgets key's queue state for a key the router retired; an owner
+// still running on key stops at its next drain (queue.Cleanup). Each queued
+// origin is told DropRemoved on its own goroutine, so the router's Remove
+// never waits on an origin's network call; ctx contributes values only.
+func (o *Orchestrator) Retire(ctx context.Context, key string) {
+	msgs := o.q.Cleanup(key)
+	if len(msgs) == 0 {
+		return
+	}
+	nctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), retireNotifyTimeout)
+	go func() {
+		defer cancel()
+		tellDropped(nctx, key, msgs, DropRemoved)
+	}()
 }
 
 // dropQueued discards key's queue and tells each dropped origin why.

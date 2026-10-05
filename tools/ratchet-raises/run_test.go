@@ -262,6 +262,76 @@ func TestRun_GoBaselineSpellings(t *testing.T) {
 	}
 }
 
+// Keeping a baseline constant while dropping the code that compares against
+// it loosens the ratchet as surely as raising it: the last use going away
+// is a raise to -1, and deleting the constant with its test is still one.
+func TestRun_GoBaselineLosesItsLastUse(t *testing.T) {
+	t.Parallel()
+	const (
+		dir       = "internal/testhelper/"
+		constFile = dir + "sleep_ratchet_test.go"
+		ref       = "go-ref:internal/testhelper#bareSleepBaseline"
+	)
+	src := func(body string) string { return "package testhelper\n\n" + body + "\n" }
+	const (
+		decl = "const bareSleepBaseline = 135"
+		test = "func TestX(t *testing.T) {\n\tif n > bareSleepBaseline {\n\t\tt.Fatal()\n\t}\n}"
+	)
+	used := fakeTree{constFile: src(decl + "\n" + test)}
+	unused := fakeTree{constFile: src(decl)}
+	lost := []raise{{ref, 1, -1}}
+	for _, tc := range []struct {
+		name    string
+		base    fakeTree // nil: used
+		head    fakeTree
+		want    []raise
+		cleared bool
+	}{
+		{name: "unchanged", head: used},
+		{name: "test deleted", head: unused, want: lost},
+		{name: "comparison commented out", head: fakeTree{constFile: src(decl + "\n// " + strings.ReplaceAll(test, "\n", "\n// "))}, want: lost},
+		{name: "blank assignment", head: fakeTree{constFile: src(decl + "\nfunc init() { _ = bareSleepBaseline }")}, want: lost},
+		{name: "call result discarded", head: fakeTree{constFile: src(decl + "\nfunc TestX(t *testing.T) { _ = below(t, bareSleepBaseline) }")}},
+		{name: "blank var", head: fakeTree{constFile: src(decl + "\nvar _ = []int{bareSleepBaseline}")}, want: lost},
+		{name: "build-tagged away", head: fakeTree{constFile: "//go:build ignore\n\n" + src(decl+"\n"+test)}, want: lost},
+		{name: "test moved to a GOOS file", head: fakeTree{constFile: src(decl), dir + "sleep_linux_test.go": src(test)}, want: lost},
+		{name: "test moved to another file of the package", head: fakeTree{constFile: src(decl), dir + "other_test.go": src(test)}},
+		{name: "used by non-test code of the package", head: fakeTree{constFile: src(decl), dir + "rule.go": src("func over(n int) bool { return n > bareSleepBaseline }")}},
+		{name: "used only in another package", head: fakeTree{constFile: src(decl), "internal/other/x_test.go": src(test)}, want: lost},
+		{name: "constant and test deleted", head: fakeTree{}, want: []raise{{"go:internal/testhelper#bareSleepBaseline", 135, -1}}},
+		{name: "constant renamed with its use", head: fakeTree{constFile: src(strings.ReplaceAll(decl+"\n"+test, "bareSleep", "sleep"))},
+			want: []raise{{"go:internal/testhelper#bareSleepBaseline", 135, -1}}},
+		{name: "raised and its use dropped", head: fakeTree{constFile: src("const bareSleepBaseline = 136")},
+			want: []raise{{ref, 1, -1}, {"go:internal/testhelper#bareSleepBaseline", 135, 136}}},
+		{name: "never used", base: unused, head: unused},
+		{name: "used for the first time", base: unused, head: used},
+		{name: "ledger line clears it", head: fakeTree{constFile: src(decl), ledgerPath: `{"gate":"` + ref + `","from":1,"to":-1,"issue":1,"reason":"r"}` + "\n"},
+			want: lost, cleared: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := tc.base
+			if b == nil {
+				b = used
+			}
+			problems, rs, err := run(b, tc.head, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(rs, tc.want) {
+				t.Errorf("raises = %v, want %v", rs, tc.want)
+			}
+			wantProblems := len(tc.want)
+			if tc.cleared {
+				wantProblems = 0
+			}
+			if len(problems) != wantProblems {
+				t.Errorf("problems = %q, want %d", problems, wantProblems)
+			}
+		})
+	}
+}
+
 // Retiring a baseline is a raise to -1 like any other; its ledger entry
 // clears it.
 func TestRun_DeletedGoBaselineWithLedgerEntry(t *testing.T) {

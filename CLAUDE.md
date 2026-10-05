@@ -23,7 +23,9 @@ them, so lower them in the same PR. Raising one needs a line appended to
 `ratchet-raise-approved`; `go run ./tools/ratchet-raises -base origin/master`
 prints the lines a change needs. A `*Baseline*` constant must be a plain
 integer literal; renaming or deleting one, or moving it to another package,
-is a raise to -1 that needs a ledger line too.
+is a raise to -1 that needs a ledger line too. So is removing the last code
+in its directory that uses one (deleting, commenting out or build-tagging
+away the comparison) while keeping the constant.
 
 `config.yaml` is gitignored (environment-specific). Use `config.example.yaml`
 as the template: `cp config.example.yaml config.yaml` then fill in real values.
@@ -60,7 +62,7 @@ cmd/naozhi/main.go
   -> session      Session router、并发控制、TTL、持久化恢复；子包 agentlink/api/backendstore/runhistory/sessiontable/sessionview/spawnpool/workspacestore/knownids
   -> routerrelay  Router 通知与 cost-run 归属的一次性绑定转发器（断开 router↔hub/scheduler 构造环）
   -> dispatch     IM 消息处理 + slash 命令；每条消息经 Turns 端口交给 turn.Orchestrator（IM origin/delivery 在 im_origin.go）
-  -> turn         Orchestrator（Submit/Reset/ShouldNotify/Cleanup：owner loop、按 Sink 去重投递、detached 轮、panic 恢复；端口 Origin/Delivery/Sender/Admission）+ 它独占的 per-session 消息队列（非导出，`turn.New` 按 QueueOptions 构造；Msg/Mode/ParseMode/Coalesce）+ /new /clear /urgent 解析（Parse）；dispatch 和 server 的 dashboard 发送（dash_origin.go 的 wsOrigin/httpOrigin）共用同一个 Orchestrator；server 的 turnSender 实现 Sender；不 import dispatch/server/platform/session
+  -> turn         Orchestrator（Submit/Reset/ShouldNotify/Retire：owner loop、按 Sink 去重投递、detached 轮、panic 恢复；端口 Origin/Delivery/Sender/Admission）+ 它独占的 per-session 消息队列（非导出，`turn.New` 按 QueueOptions 构造；Msg/Mode/ParseMode/Coalesce）+ /new /clear /urgent 解析（Parse）；dispatch 和 server 的 dashboard 发送（dash_origin.go 的 wsOrigin/httpOrigin）共用同一个 Orchestrator；server 的 turnSender 实现 Sender；不 import dispatch/server/platform/session
   -> platform     Platform 接口 + feishu/slack/discord/weixin 子包
   -> server       HTTP server、路由注册、WebSocket hub、REST API
   -> dashboard    dashboard handler 子包群（auth/cron/cronview/discovery/project/session/ext/*；httputil 叶子）

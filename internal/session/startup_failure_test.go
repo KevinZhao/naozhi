@@ -572,19 +572,99 @@ func TestGetOrCreate_SpawnInitFailurePausesItsWaiters(t *testing.T) {
 }
 
 // Cleanup drops the run of a key that was not retried for two maximum
-// cooldowns.
+// cooldowns; when the list showed it on the key's entry, the list version
+// advances and the observer hears of it.
 func TestCleanup_PrunesStaleSpawnRuns(t *testing.T) {
 	t.Parallel()
-	r := newResumeGuardRouter(t)
-	r.ss.Update(func(tx sessTx) {
-		tx.Ext().spawns.NoteStartupFailure("stale", spawnpool.StartupFailure{Streak: 9, At: time.Now().Add(-2*startupCooldownMax - time.Minute)})
-		tx.Ext().spawns.NoteStartupFailure("recent", spawnpool.StartupFailure{Streak: 9, At: time.Now().Add(-startupCooldownMax)})
-	})
-	r.Cleanup()
-	if _, ok := spawnRun(r, "stale"); ok {
-		t.Error("stale run survived Cleanup")
+	for _, listed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("listed=%v", listed), func(t *testing.T) {
+			t.Parallel()
+			r := newResumeGuardRouter(t)
+			if listed {
+				injectSession(r, "stale", newDeadProc()).exempt = true
+			}
+			r.ss.Update(func(tx sessTx) {
+				tx.Ext().spawns.NoteStartupFailure("stale", spawnpool.StartupFailure{Streak: 9, At: time.Now().Add(-2*startupCooldownMax - time.Minute)})
+				tx.Ext().spawns.NoteStartupFailure("recent", spawnpool.StartupFailure{Streak: 9, At: time.Now().Add(-startupCooldownMax)})
+			})
+			var changed atomic.Int32
+			observe(r).changed = func() { changed.Add(1) }
+			_, before := r.ListSessionsWithVersion()
+			r.Cleanup()
+			if _, ok := spawnRun(r, "stale"); ok {
+				t.Error("stale run survived Cleanup")
+			}
+			if _, ok := spawnRun(r, "recent"); !ok {
+				t.Error("Cleanup pruned a run still within two maximum cooldowns")
+			}
+			_, after := r.ListSessionsWithVersion()
+			if moved, notified := after != before, changed.Load() > 0; moved != listed || notified != listed {
+				t.Errorf("version moved = %v, notified = %v; want %v for both", moved, notified, listed)
+			}
+		})
 	}
-	if _, ok := spawnRun(r, "recent"); !ok {
-		t.Error("Cleanup pruned a run still within two maximum cooldowns")
+}
+
+// A failed Init handshake on a key the list shows advances the list version
+// and tells the observer, so open dashboards redraw the startup chip with the
+// exit class stderr named. A key with no entry has no card to redraw.
+func TestGetOrCreate_SpawnInitFailureAdvancesTheVersion(t *testing.T) {
+	t.Parallel()
+	for _, listed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("listed=%v", listed), func(t *testing.T) {
+			t.Parallel()
+			r, _, spawns := newSpawnFailRouter(t)
+			if listed {
+				injectSession(r, sfKey, newDeadProc())
+			}
+			var changed atomic.Int32
+			observe(r).changed = func() { changed.Add(1) }
+			for i := int32(1); i <= 2; i++ {
+				_, before := r.ListSessionsWithVersion()
+				changed.Store(0)
+				if _, _, err := r.GetOrCreate(context.Background(), sfKey, AgentOpts{}); !errors.Is(err, clierr.ErrSpawnInit) || *spawns != int(i) {
+					t.Fatalf("failure %d: err = %v after %d spawns; want the spawn's error", i, err, *spawns)
+				}
+				snaps, after := r.ListSessionsWithVersion()
+				if moved, notified := after != before, changed.Load() > 0; moved != listed || notified != listed {
+					t.Errorf("failure %d: version moved = %v, notified = %v; want %v for both", i, moved, notified, listed)
+				}
+				if !listed {
+					continue
+				}
+				if len(snaps) != 1 || snaps[0].StartupFailure == nil {
+					t.Fatalf("failure %d: listed %+v; want the key's startup failure", i, snaps)
+				}
+				got := snaps[0].StartupFailure
+				if got.Class != "auth" || got.Streak != i || (got.RetryAt != 0) != (i == 2) {
+					t.Errorf("failure %d: StartupFailure = %+v; want auth, streak %d, a retry_at from the second", i, got, i)
+				}
+			}
+		})
+	}
+}
+
+// A failed spawn's run keeps the exit class Spawn classified the CLI's
+// stderr as; an Init failure with no exit behind it names no class.
+func TestNoteSpawnFailure_KeepsTheExitClass(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		err  error
+		want clierr.ExitClass
+	}{
+		{"auth exit", errInitAuth, clierr.ExitAuth},
+		{"mcp config exit", fmt.Errorf("%w: %w", clierr.ErrSpawnInit, &clierr.ProcessExitedError{Code: 1, Class: clierr.ExitMCPConfig}), clierr.ExitMCPConfig},
+		{"no exit", fmt.Errorf("%w: rpc", clierr.ErrSpawnInit), clierr.ExitUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newTestRouter(4)
+			r.ss.Update(func(tx sessTx) { noteSpawnFailure(tx, sfKey, tc.err, time.Now()) })
+			if got, ok := spawnRun(r, sfKey); !ok || got.Class != tc.want {
+				t.Errorf("run = %+v, %v; want class %v", got, ok, tc.want)
+			}
+		})
 	}
 }

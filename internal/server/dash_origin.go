@@ -24,6 +24,9 @@ const turnPanicMsg = "处理异常，请稍后重试。"
 // evictedSendMsg is what a WS send pushed out of a full queue is told.
 const evictedSendMsg = "排队消息过多，这条消息已被丢弃，请重新发送。"
 
+// removedSendMsg is what a WS send queued on a key the router retired is told.
+const removedSendMsg = "会话已结束，这条消息未被处理，请重新发送。"
+
 // dashOrigin is what both dashboard origins share. opts is the engine's
 // sessionOptsFor, asked once per turn the origin owns (#3004 分叉 26).
 // Admission is acked by the transport with sessionSend's status, so
@@ -83,14 +86,17 @@ func (o *wsOrigin) Finish(_ context.Context, out turn.Outcome) {
 }
 
 // Dropped answers a send that will never run because of a failure: pushed
-// out of a full queue, or discarded by a panic. A reset or a shutdown is
-// already visible to the tab (reset ack, closing socket).
+// out of a full queue, discarded by a panic, or queued on a key the router
+// retired. A reset or a shutdown is already visible to the tab (reset ack,
+// closing socket).
 func (o *wsOrigin) Dropped(_ context.Context, why turn.DropReason) {
 	switch why {
 	case turn.DropEvicted:
 		o.fail(evictedSendMsg)
 	case turn.DropPanic:
 		o.fail(turnPanicMsg)
+	case turn.DropRemoved:
+		o.fail(removedSendMsg)
 	}
 }
 
