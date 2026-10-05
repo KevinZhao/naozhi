@@ -65,6 +65,21 @@ func profileDefaultModelFor(profiles map[string]AccessProfile, id string) string
 	return ""
 }
 
+// EffectiveDefaultBackend is the backend tier for a key with no session,
+// below opts.Backend, the dashboard pick and resume continuity: the agent's
+// backend (agents[].backend), else default_backend of access profile
+// profileID, else "" (router default). Shared by the spawn path and `naozhi
+// config check --effective` so the two cannot list an agent differently.
+func EffectiveDefaultBackend(agentBackend string, profiles map[string]AccessProfile, profileID string) string {
+	if agentBackend != "" {
+		return agentBackend
+	}
+	if profileID == "" {
+		return ""
+	}
+	return profiles[profileID].DefaultBackend
+}
+
 // accessProfileDefaultModel is profileDefaultModelFor over the current
 // registry, for the drift check.
 func (b *BackendRegistry) accessProfileDefaultModel(id string) string {
