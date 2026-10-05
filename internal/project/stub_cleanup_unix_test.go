@@ -7,9 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // fakeGitOnPath puts a /bin/sh "git" running body first and alone on PATH,
@@ -52,38 +53,46 @@ func TestGitTracksStub_FakeGit(t *testing.T) {
 
 // A git that has listed the path but never exits is killed when ctx ends and
 // reads as trackUnknown, so the sweep keeps the file. ctx is cancelled once
-// the script has written its listing, through a FIFO.
+// the script has written its listing, through a FIFO. In "grandchild" the
+// killed sh leaves a sleep holding stdout open, which only WaitDelay ends.
 func TestGitTracksStub_HungGitIsKilled(t *testing.T) {
 	sleepBin, err := exec.LookPath("sleep")
 	if err != nil {
 		t.Fatal(err)
 	}
-	fifo := filepath.Join(t.TempDir(), "listed")
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fakeGitOnPath(t, "printf '.naozhi/project.yaml\\0'; echo > '"+fifo+"'; exec "+sleepBin+" 30")
-	// O_RDWR opens without waiting for a writer and lets the test itself
-	// release the reader when the script exits before writing.
-	listed, err := os.OpenFile(fifo, os.O_RDWR, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listed.Close()
-	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
-	defer cancel()
-	cancelled := make(chan time.Time, 1)
-	go func() {
-		_, _ = listed.Read(make([]byte, 1))
-		cancel()
-		cancelled <- time.Now()
-	}()
-	got := gitLsFilesStub(ctx, t.TempDir())
-	_, _ = listed.Write([]byte("\n"))
-	if since := time.Since(<-cancelled); since > 10*time.Second {
-		t.Errorf("gitLsFilesStub returned %v after cancel; the hung git was not killed", since)
-	}
-	if got != trackUnknown {
-		t.Errorf("gitLsFilesStub = %d; want trackUnknown (%d)", got, trackUnknown)
+	for _, tc := range []struct{ name, tail string }{
+		{"exec", "echo > \"$1\"; exec " + sleepBin + " 30"},
+		{"grandchild", sleepBin + " 30 & echo > \"$1\"; wait"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fifo := filepath.Join(t.TempDir(), "listed")
+			if err := unix.Mkfifo(fifo, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fakeGitOnPath(t, "set -- '"+fifo+"'\nprintf '.naozhi/project.yaml\\0'; "+tc.tail)
+			// O_RDWR opens without waiting for a writer and lets the test
+			// itself release the reader when the script exits before writing.
+			listed, err := os.OpenFile(fifo, os.O_RDWR, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listed.Close()
+			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+			defer cancel()
+			cancelled := make(chan time.Time, 1)
+			go func() {
+				_, _ = listed.Read(make([]byte, 1))
+				cancel()
+				cancelled <- time.Now()
+			}()
+			got := gitLsFilesStub(ctx, t.TempDir())
+			_, _ = listed.Write([]byte("\n"))
+			if since := time.Since(<-cancelled); since > 10*time.Second {
+				t.Errorf("gitLsFilesStub returned %v after cancel; the hung git was not reaped", since)
+			}
+			if got != trackUnknown {
+				t.Errorf("gitLsFilesStub = %d; want trackUnknown (%d)", got, trackUnknown)
+			}
+		})
 	}
 }
