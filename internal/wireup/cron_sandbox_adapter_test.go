@@ -3,7 +3,9 @@ package wireup
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockagentcore"
 	"github.com/naozhi/naozhi/internal/agentcore"
+	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/cron"
 )
 
@@ -228,5 +231,43 @@ func TestAdapter_MapsMetaFromRunResult(t *testing.T) {
 	}
 	if !reflect.DeepEqual(out.Meta, want) {
 		t.Fatalf("Meta = %+v, want %+v", out.Meta, want)
+	}
+}
+
+// A receipt naming more models than a ledger entry holds keeps its overflow
+// in one "other" row, so the run record's rows still sum to its cost.
+func TestAdapter_MetaFoldsModelsPastTheCap(t *testing.T) {
+	const n = costledger.MaxModels + 4
+	var usage strings.Builder
+	for i := range n {
+		if i > 0 {
+			usage.WriteByte(',')
+		}
+		fmt.Fprintf(&usage, `"m%d":{"outputTokens":10,"costUSD":0.001}`, i)
+	}
+	api := &fakeAgentcoreAPI{body: sseBody(
+		`{"kind":"cli","line":{"type":"result","is_error":false,"result":"ok","total_cost_usd":0.02,"modelUsage":{`+usage.String()+`}},"ts":"t"}`,
+		`{"kind":"exit","code":0,"ts":"t"}`,
+	)}
+	r := &agentcoreSandboxRunner{client: agentcore.NewWithAPIForTest(api,
+		agentcore.Config{RuntimeARN: "arn:aws:bedrock-agentcore:us-west-2:1:runtime/x", Region: "us-west-2"})}
+
+	out, err := r.RunJob(context.Background(), adapterJob(), nil)
+	if err != nil {
+		t.Fatalf("RunJob: %v", err)
+	}
+	var cost float64
+	var output int64
+	others := 0
+	for _, m := range out.Meta.Models {
+		cost += m.CostUSD
+		output += m.Output
+		if m.Model == costledger.OtherModel {
+			others++
+		}
+	}
+	if len(out.Meta.Models) != costledger.MaxModels || others != 1 || math.Abs(cost-0.001*n) > 1e-9 || output != 10*n {
+		t.Fatalf("models = %d (%d other) summing to %v / %d output, want %d rows summing to %v / %d",
+			len(out.Meta.Models), others, cost, output, costledger.MaxModels, 0.001*n, 10*n)
 	}
 }

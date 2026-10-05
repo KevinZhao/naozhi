@@ -110,9 +110,15 @@ func (o *imOrigin) Admitted(ctx context.Context, a turn.Ack) {
 }
 
 // Dropped clears the ⏳ of a request that will never get a turn (#1945,
-// #2013).
-func (o *imOrigin) Dropped(ctx context.Context, _ turn.DropReason) {
+// #2013). A removed key also gets a notice (#3297): the user did not ask for
+// the removal, and a platform without reactions promised to answer. It is
+// rate-limited per chat on the key (chats can share a planner key), so a
+// chat's queued messages share one.
+func (o *imOrigin) Dropped(ctx context.Context, why turn.DropReason) {
 	o.d.clearQueuedReaction(ctx, o.msg.Platform, o.msg.MessageID, o.lg)
+	if why == turn.DropRemoved {
+		o.d.replyNotice(ctx, o.msg, o.key+"\x00"+o.Sink(), "会话已结束，这条消息未被处理，请重新发送。", o.lg, "removed")
+	}
 }
 
 // Begin opens the reply to o's chat. An Observer is answered like a Head:

@@ -3,6 +3,7 @@ package session
 import (
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	"github.com/naozhi/naozhi/internal/cli/backend"
@@ -175,34 +176,27 @@ func bookUnownedResults(s *ManagedSession, proc processIface) {
 
 // bookPartialUsage records a Kind=partial entry for u, spend a process
 // reported in no result frame (bookProcessEnd, which has already applied the
-// cron-ownership gate), one row per model priced at the rates the ledger
-// learned from the CLI's own results, and adds its amount to the session's
-// spend. A model with no learned rate books tokens only and no basis:
-// BasisUnknown means the CLI guessed a rate, and here nothing priced it.
+// cron-ownership gate), one row per canonical model priced at the rates the
+// ledger learned from the CLI's own results, and adds its amount to the
+// session's spend. A model with no learned rate books tokens only and no
+// basis: BasisUnknown means the CLI guessed a rate, and here nothing priced it.
 func (s *ManagedSession) bookPartialUsage(u clievent.ShadowUsage, runID string) {
 	if s.costAcct == nil || !s.costAcct.ledger.Enabled() || u.IsZero() {
 		return
 	}
 	e := costledger.Entry{
 		Source: costledger.SourceSession, Kind: costledger.KindPartial,
-		SessionKey: s.key, RunID: runID, Workspace: filepath.Base(s.Workspace()), Backend: s.Backend(),
+		SessionKey: s.key, RunID: runID, Workspace: ledgerWorkspace(s.Workspace()), Backend: s.Backend(),
 		Unit:   costledger.UnitUSD,
-		Models: make([]costledger.ModelDelta, 0, len(u.Models)),
+		Models: partialRows(u.Models),
 	}
 	if e.Backend == "" {
 		e.Backend = "claude"
 	}
 	rates := s.costAcct.ledger.Rates()
-	for _, m := range u.Models {
-		t := costledger.Tokens{Input: m.Input, Output: m.Output, CacheRead: m.CacheRead, CacheWrite: m.CacheWrite}
-		if t == (costledger.Tokens{}) {
-			continue
-		}
-		d := costledger.ModelDelta{Model: costledger.CanonicalModel("", m.Model), RawModel: m.Model, Tokens: t}
-		if d.Model == "" {
-			d.Model = "unknown"
-		}
-		usd, basis, priced := rates.Estimate(d.Model, t)
+	for i := range e.Models {
+		d := &e.Models[i]
+		usd, basis, priced := rates.Estimate(d.Model, d.Tokens)
 		if !priced && s.costAcct.firstWarn("partial:"+d.Model) {
 			slog.Warn("cost: no learned rate for a partial turn's model; booked tokens only",
 				"model", osutil.SanitizeForLog(d.Model, 128), "session", osutil.SanitizeForLog(s.key, 128))
@@ -210,7 +204,6 @@ func (s *ManagedSession) bookPartialUsage(u clievent.ShadowUsage, runID string) 
 		d.CostUSD, d.Basis = usd, basis
 		e.Amount += usd
 		e.Basis = costledger.WorseBasis(e.Basis, basis)
-		e.Models = append(e.Models, d)
 	}
 	if e.Basis == costledger.BasisNone && e.Amount > 0 {
 		e.Basis = costledger.BasisList
@@ -223,6 +216,42 @@ func (s *ManagedSession) bookPartialUsage(u clievent.ShadowUsage, runID string) 
 	s.costAcct.ledger.Append(e)
 }
 
+// partialRows turns a shadow account into one ledger row per canonical model:
+// raw ids differing only in a context suffix ("x" and "x[1m]") are one model
+// at one rate. A merged row keeps the first raw id seen. Rows with no tokens
+// are dropped.
+func partialRows(ms []clievent.ShadowModel) []costledger.ModelDelta {
+	out := make([]costledger.ModelDelta, 0, len(ms))
+	for _, m := range ms {
+		t := costledger.Tokens{Input: m.Input, Output: m.Output, CacheRead: m.CacheRead, CacheWrite: m.CacheWrite}
+		if t == (costledger.Tokens{}) {
+			continue
+		}
+		model := costledger.CanonicalModel("", m.Model)
+		if model == "" {
+			model = "unknown"
+		}
+		if i := slices.IndexFunc(out, func(d costledger.ModelDelta) bool { return d.Model == model }); i >= 0 {
+			d := &out[i]
+			d.Input, d.Output = d.Input+t.Input, d.Output+t.Output
+			d.CacheRead, d.CacheWrite = d.CacheRead+t.CacheRead, d.CacheWrite+t.CacheWrite
+			continue
+		}
+		out = append(out, costledger.ModelDelta{Model: model, RawModel: m.Model, Tokens: t})
+	}
+	return out
+}
+
+// ledgerWorkspace is the workspace label a session's ledger rows carry: the
+// basename, or "" for a session with no real directory.
+func ledgerWorkspace(ws string) string {
+	b := filepath.Base(ws)
+	if b == "." || b == string(filepath.Separator) {
+		return ""
+	}
+	return b
+}
+
 // ledgerEntries renders an Increment as ledger rows: one USD row carrying the
 // model drill-down, plus one metering row per backend unit that grew.
 func (s *ManagedSession) ledgerEntries(inc costledger.Increment, runID string) []costledger.Entry {
@@ -230,14 +259,11 @@ func (s *ManagedSession) ledgerEntries(inc costledger.Increment, runID string) [
 		Source:     costledger.SourceSession,
 		SessionKey: s.key,
 		RunID:      runID,
-		Workspace:  filepath.Base(s.Workspace()),
+		Workspace:  ledgerWorkspace(s.Workspace()),
 		Backend:    s.Backend(),
 	}
 	if base.Backend == "" {
 		base.Backend = "claude"
-	}
-	if base.Workspace == "." || base.Workspace == string(filepath.Separator) {
-		base.Workspace = ""
 	}
 	var out []costledger.Entry
 	if inc.USD > 0 || len(inc.Models) > 0 {

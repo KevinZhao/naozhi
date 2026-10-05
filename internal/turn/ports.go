@@ -57,6 +57,7 @@ const (
 	DropShutdown                   // the owner loop's ctx ended, or its Admission declined, with messages queued
 	DropPanic                      // a turn on the key panicked and the queue was discarded
 	DropEvicted                    // a newer message pushed it out of a full queue
+	DropRemoved                    // the router retired the key (session removed, reset or closed) with messages queued
 )
 
 // Origin is an entry point's view of one submitted request. Every method is

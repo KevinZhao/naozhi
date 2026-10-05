@@ -89,3 +89,25 @@ func TestDashOrigins_ObserverHearsNothing(t *testing.T) {
 		t.Errorf("two WS sends share sink %q, want one per send id", a)
 	}
 }
+
+// TestWSOrigin_DroppedOnARemovedKeyFailsTheSend (#3297): a WS send queued on
+// a key the router retired gets an error ack, so the tab's pending bubble
+// resolves; a reset or a shutdown, already visible to the tab and told
+// first, sends nothing, so the first frame is DropRemoved's.
+func TestWSOrigin_DroppedOnARemovedKeyFailsTheSend(t *testing.T) {
+	hub, _ := newTestHub(t, "")
+	t.Cleanup(hub.Shutdown)
+	c, out := newCapturedClient(t, hub)
+	for id, why := range map[string]turn.DropReason{"reset": turn.DropReset, "shutdown": turn.DropShutdown} {
+		hub.engine.wsOrigin(c, id, "k").Dropped(context.Background(), why)
+	}
+	hub.engine.wsOrigin(c, "removed", "k").Dropped(context.Background(), turn.DropRemoved)
+	select {
+	case msg := <-out:
+		if msg.Type != "send_ack" || msg.ID != "removed" || msg.Status != "error" || msg.Error != removedSendMsg {
+			t.Fatalf("first frame = %+v, want the DropRemoved error ack (reset and shutdown are silent)", msg)
+		}
+	case <-time.After(parityWait):
+		t.Fatal("DropRemoved sent no error ack")
+	}
+}
