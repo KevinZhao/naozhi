@@ -130,6 +130,7 @@ func TestHandleRequest_Takeover_SecondTakeoverOfKeyKeepsItsCLI(t *testing.T) {
 
 	// No cwd: both map to the "unknown" cwd's key.
 	first := node.ReverseMsg{Method: "takeover", Params: takeoverParams(t, cmd1.Process.Pid, "12345678-1234-1234-1234-123456789012", start1)}
+	firstAt := time.Now()
 	if _, err := c.handleRequest(appCtx, context.Background(), first, &wg); err != nil {
 		t.Fatalf("first takeover: %v", err)
 	}
@@ -149,9 +150,13 @@ func TestHandleRequest_Takeover_SecondTakeoverOfKeyKeepsItsCLI(t *testing.T) {
 	if ws, ok := st.Sys().(syscall.WaitStatus); !ok || ws.Signal() != syscall.SIGKILL {
 		t.Fatalf("the refused takeover's CLI died of %v, not the test's SIGKILL", st)
 	}
+	// waitForExit SIGKILLs the trapping child after 5s, so only a run well
+	// inside that deadline can tell an early exit apart.
 	select {
 	case <-exited1:
-		t.Fatal("the first takeover's CLI exited before the exit wait ended")
+		if time.Since(firstAt) < 4*time.Second {
+			t.Fatal("the first takeover's CLI exited before the exit wait ended")
+		}
 	default:
 	}
 

@@ -201,25 +201,28 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		key := sessionkey.TakeoverKey(cwdKey)
 		// Everything that can refuse runs before SIGTERM, so a refused takeover
 		// leaves the external CLI running. The lease holds key until the spawn,
-		// so a second takeover is refused while this CLI exits; every return
-		// before the goroutine releases it. Empty AgentOpts: the remote node
-		// has no agents registry, so per-agent overrides (#2493) stay local.
+		// so a second takeover is refused while this CLI exits; until the
+		// goroutine owns it, any return or panic releases it. Empty AgentOpts:
+		// the remote node has no agents registry, so overrides (#2493) stay local.
 		lease, err := c.router.ReserveTakeover(key, sessionview.AgentOpts{})
 		if err != nil {
 			return nil, fmt.Errorf("takeover refused: %w", err)
 		}
+		handedOff := false
+		defer func() {
+			if !handedOff {
+				lease.Release()
+			}
+		}()
 		actual, err := discovery.ProcStartTime(p.PID)
 		if err != nil {
-			lease.Release()
 			return nil, fmt.Errorf("cannot verify process identity for pid %d: %w", p.PID, err)
 		}
 		if actual != p.ProcStartTime {
-			lease.Release()
 			return nil, fmt.Errorf("process identity mismatch (pid %d may have been reused)", p.PID)
 		}
 		if err := osutil.SendTerm(p.PID); err != nil {
 			if !errors.Is(err, syscall.ESRCH) {
-				lease.Release()
 				return nil, fmt.Errorf("kill process %d: %w", p.PID, err)
 			}
 		}
@@ -227,6 +230,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		// wg keeps reconnect waiting for in-flight cleanup; appCtx so a
 		// transient connection drop does not abort cleanup already in progress.
 		wg.Add(1)
+		handedOff = true
 		go func() {
 			defer wg.Done()
 			defer lease.Release() // no-op once Takeover consumed it
