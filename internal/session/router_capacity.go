@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -131,6 +132,27 @@ func takeoverHasSlot(v sessView, key string, maxProcs int) bool {
 	}
 	pending, limit := int64(v.Ext().PendingSpawns()), int64(maxProcs)
 	return min(active, alive)+pending < limit || (evictable && alive-1+pending < limit)
+}
+
+// takeoverExemptRefusal is reserveSpawn's exempt quota gate for a Takeover of
+// key, read-only. Takeover closes an alive session on key first, so it is
+// not counted against either quota.
+func takeoverExemptRefusal(v sessView, key string) error {
+	kind := exemptKind(key)
+	perKind, total := countExemptCombined(v, kind)
+	if s, ok := v.Lookup(key); ok && s.exempt && s.isAlive() {
+		total--
+		if kind != "" {
+			perKind--
+		}
+	}
+	if kind != "" && perKind >= exemptCapFor(kind) {
+		return fmt.Errorf("%w: %s namespace (%d)", ErrMaxExemptSessions, kind, exemptCapFor(kind))
+	}
+	if total >= maxExemptSessions {
+		return fmt.Errorf("%w (%d)", ErrMaxExemptSessions, maxExemptSessions)
+	}
+	return nil
 }
 
 // evictOldest closes the oldest idle (non-Running) session to free a slot.
