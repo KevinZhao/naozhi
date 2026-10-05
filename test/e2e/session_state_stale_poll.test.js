@@ -15,7 +15,8 @@
 //      the next poll applies in full: that snapshot may be the newer one.
 //  (g) a 'running' snapshot taken before a result event, which ends the turn
 //      ahead of its 'ready' push, does not bring the turn back, so the turn
-//      end is announced once and a stopped turn is not reported as a reply.
+//      end is announced once and a stopped turn is not reported as a reply;
+//      a poll sent after the result still applies its snapshot.
 //
 // Run: cd test/e2e && npx playwright test session_state_stale_poll.test.js --project=desktop-chrome
 
@@ -248,6 +249,25 @@ test('a stopped turn ended by a result event is announced once, as ended', async
     await expect.poll(() => conn.messages.filter((m) => m.type === 'interrupt').length).toBe(1);
     await endByResult(page, conn);
     expect(await turnEnds(page)).toEqual(['回合已结束']);
+    expect(errors).toEqual([]);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test('a poll requested after a result event still applies its snapshot', async ({ browser }) => {
+  const { ctx, page, conn, errors } = await open(browser);
+  try {
+    push(conn, 'running');
+    await expect(page.locator('#btn-stop')).toBeVisible();
+    result(conn);
+    await expect(page.locator('#btn-send')).toBeVisible();
+    // The REST snapshot stays running (a new turn whose push was lost), and a
+    // list change elsewhere gets the poll past the version short-circuit.
+    mock.setSessionWorkspace(OTHER, '/tmp/elsewhere');
+    await page.evaluate(async () => (await import('/static/session_list.js')).fetchSessions());
+    await expect(page.locator('#btn-stop')).toBeVisible();
+    await expect(dot(page)).toHaveClass(/dot-running/);
     expect(errors).toEqual([]);
   } finally {
     await ctx.close();
