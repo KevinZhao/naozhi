@@ -132,9 +132,9 @@ function applySessionsStats(data) {
 const statePushes = { n: 0, at: new Map() };
 
 // mergeBackendSessions folds the polled sessions into sessionsData, adds each
-// key to backendKeys and returns the list the sidebar paints from.
-// pushesBefore is the push count when the poll was sent: a key pushed since
-// keeps its pushed state and death_reason, which the snapshot predates.
+// key to backendKeys and returns the list the sidebar paints from. A key pushed
+// since the poll went out (pushesBefore) keeps its pushed state and death_reason;
+// overriding a state zeroes lastVersion, as the snapshot may postdate a lost push.
 function mergeBackendSessions(polled, backendKeys, pushesBefore) {
   // A session the operator just dismissed stays out until its DELETE
   // resolves, or a lagging poll re-adds the card; a failed delete clears the
@@ -147,13 +147,13 @@ function mergeBackendSessions(polled, backendKeys, pushesBefore) {
     const sKey = sid(s.key, n);
     const cur = sessionList.sessionsData[sKey];
     if (cur && statePushes.at.get(sKey) > pushesBefore) {
+      if (s.state !== cur.state) sessionList.lastVersion = 0;
       s = Object.assign({}, s, { state: cur.state, death_reason: cur.death_reason });
     }
-    // Keep the optimistic 'running' flip while the REST snapshot still lags
-    // the send, or the banner hides until the session_state push catches up.
-    // It lands in the returned copy too: a re-render from the cached payload
-    // (project collapse, sidebar search) would otherwise paint the card idle
-    // while the banner shows running (#2431).
+    // Keep the optimistic 'running' flip while the REST snapshot lags the send,
+    // or the banner hides until the push catches up. The returned copy keeps it
+    // too, or a re-render from the cached payload (project collapse, sidebar
+    // search) paints the card idle under a running banner (#2431).
     if (perSession.optimisticRunning[sKey] && s.state !== 'running') {
       s = Object.assign({}, s, { state: 'running' });
     }

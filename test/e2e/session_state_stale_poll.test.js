@@ -10,7 +10,9 @@
 //      the turn running;
 //  (d) a snapshot taken before a 'dead' push keeps the push's death_reason;
 //  (e) a poll sent after the push still applies its snapshot, which is how a
-//      dropped terminal push heals.
+//      dropped terminal push heals;
+//  (f) a snapshot whose state the push overrode does not count as seen, so
+//      the next poll applies in full: that snapshot may be the newer one.
 //
 // Run: cd test/e2e && npx playwright test session_state_stale_poll.test.js --project=desktop-chrome
 
@@ -178,6 +180,26 @@ test('a poll requested after the push still applies its snapshot', async ({ brow
     await expect(page.locator('#btn-stop')).toBeVisible();
     const release = await holdPoll(page);
     await release();
+    await expect(page.locator('#btn-send')).toBeVisible();
+    await expect(page.locator('#running-banner')).toHaveClass(/nz-hidden/);
+    await expect(dot(page)).toHaveClass(/dot-ready/);
+    expect(errors).toEqual([]);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test('the poll after an overridden snapshot applies in full', async ({ browser }) => {
+  const { ctx, page, conn, errors } = await open(browser);
+  try {
+    // The turn ends between the running push and the held snapshot, and its
+    // ready push is lost: the REST snapshot stays ready throughout.
+    const release = await holdPoll(page);
+    conn.send({ type: 'session_state', key: READY, node: 'local', state: 'running' });
+    await expect(page.locator('#btn-stop')).toBeVisible();
+    await release();
+    await expect(page.locator('#btn-stop')).toBeVisible();
+    await page.evaluate(async () => (await import('/static/session_list.js')).fetchSessions());
     await expect(page.locator('#btn-send')).toBeVisible();
     await expect(page.locator('#running-banner')).toHaveClass(/nz-hidden/);
     await expect(dot(page)).toHaveClass(/dot-ready/);
