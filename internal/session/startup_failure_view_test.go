@@ -101,8 +101,8 @@ func TestListSessions_StartupFailureJoinsTheKeysRun(t *testing.T) {
 	}{
 		{"run after a plain death", newDeadProc(), spawnpool.StartupFailure{Streak: 2, At: now},
 			&sfView{Class: "unknown", Streak: 2, RetryAt: now.Add(startupCooldownBase).UnixMilli()}},
-		{"run after the process's failure", newStartupFailedProc(clierr.ExitAuth, now.Add(-time.Minute)), spawnpool.StartupFailure{Streak: 3, At: now},
-			&sfView{Class: "unknown", Streak: 3, RetryAt: now.Add(2 * startupCooldownBase).UnixMilli()}},
+		{"run after the process's failure", newStartupFailedProc(clierr.ExitAuth, now.Add(-time.Minute)), spawnpool.StartupFailure{Streak: 3, Class: clierr.ExitMCPConfig, At: now},
+			&sfView{Class: "mcp_config", Streak: 3, RetryAt: now.Add(2 * startupCooldownBase).UnixMilli()}},
 		{"process failed last", newStartupFailedProc(clierr.ExitAuth, now), spawnpool.StartupFailure{Streak: 1, At: now.Add(-time.Minute)},
 			&sfView{Class: "auth", Streak: 1}},
 		{"alive", newIdleProc(), spawnpool.StartupFailure{Streak: 2, At: now}, nil},
