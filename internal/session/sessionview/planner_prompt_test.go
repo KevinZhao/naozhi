@@ -22,6 +22,8 @@ func TestSanitisePlannerPromptForSpawn_DirectFunction(t *testing.T) {
 		{"NUL", "x\x00y", ""},
 		{"BEL", "x\x07y", ""},
 		{"DEL", "x\x7fy", ""},
+		{"ESC", "x\x1by", ""},
+		{"C1 NEL", "x\u0085y", ""},
 		{"invalid utf8", "\xc0", ""},
 		{"bidi override", "x\u202ey", ""},
 		{"tab + LF + CR allowed", "a\tb\nc\rd", "a\tb\nc\rd"},

@@ -720,6 +720,8 @@ Phase 2-5 在每个调用点都保留了 `if d.resolver != nil { resolver.X } el
 
 **未在 Phase 6 处理**:`internal/server/dashboard.go::buildSessionOpts` 仍保留 `if resolver != nil` 双轨,因为它的输入是 raw key(不是 chat coords)且要兼容已废 / 不存在的 project 的 dashboard resume 路径,行为分支语义与 dispatch 路径不同。后续若把这条路径完全收敛进 `ResolveForKey + ok 分支`,可加 Phase 7 关闭。
 
+> **2026-10-05 (#3300)**:dashboard planner restart(`internal/dashboard/project/api.go`)和 upstream `restart_planner`(`internal/upstream/connector_rpc.go`)残留的 nil-resolver 内联分支已删除——它们漏设 Backend / AccessProfile,upstream 那份还跳过了 `SanitisePlannerPromptForSpawn`。resolver 为 nil 时两处都返回 "projects not configured"(HTTP 400 / RPC error);生产 wiring 总是传入 resolver,只有测试会走到这条分支。
+
 ### 总计 **2.75 人天**
 
 ---

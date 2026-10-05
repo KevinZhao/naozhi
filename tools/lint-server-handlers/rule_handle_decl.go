@@ -187,17 +187,6 @@ func scanHandleDecl(pkgDir string, baseline []string, baselineFile string) ([]Vi
 	return out, nil
 }
 
-// handlerKeys is the deduplicated key list -gen-baseline records.
-func handlerKeys(decls []handlerDecl) []string {
-	var out []string
-	for _, d := range decls {
-		if len(out) == 0 || out[len(out)-1] != d.Key {
-			out = append(out, d.Key)
-		}
-	}
-	return out
-}
-
 // netHTTPName is the name f refers to net/http by: "http", an alias, or "."
 // for a dot import; "" when f does not import it usably.
 func netHTTPName(f *ast.File) string {

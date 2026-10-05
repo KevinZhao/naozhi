@@ -17,8 +17,9 @@ func waitPassthroughState(t *testing.T, p *Process, want ProcessState) {
 
 // awaitUnclaimedEvent blocks until readLoop delivers an unclaimed event of
 // type typ to eventCh. An unowned result reaches eventCh before
-// endUnownedTurn runs, so a state that follows from it must be polled, or
-// read only after a later frame has been awaited (readLoop is sequential).
+// settleUnclaimedResult runs, so a state that follows from it must be
+// polled, or read only after a later frame has been awaited (readLoop is
+// sequential).
 func awaitUnclaimedEvent(t *testing.T, p *Process, typ string) {
 	t.Helper()
 	deadline := time.After(2 * time.Second)

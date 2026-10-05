@@ -1,8 +1,9 @@
 package dispatch
 
-// #3000: the message that starts an owner loop is acked with a ⏳ before its
-// turn runs, and the ⏳ comes off once the turn has answered, on every way
-// the turn can end.
+// #3000: the message that starts an owner loop is acked with a ⏳, and the ⏳
+// comes off once the turn has answered, on every way the turn can end. The
+// add runs beside the turn (#3329), so only its place before the removal is
+// fixed.
 
 import (
 	"context"
@@ -19,12 +20,14 @@ import (
 )
 
 // ackOrderPlatform is a Reactor that logs replies, reactions and the turn's
-// GetOrCreate in the order they happen.
+// GetOrCreate in the order they happen. A non-nil addGate holds every
+// AddReaction until it is closed.
 type ackOrderPlatform struct {
 	fakePlatform
 	logMu      sync.Mutex
 	log        []string
 	addErr     error
+	addGate    chan struct{}
 	replyPanic bool
 }
 
@@ -48,7 +51,14 @@ func (p *ackOrderPlatform) Reply(ctx context.Context, msg platform.OutgoingMessa
 	return p.fakePlatform.Reply(ctx, msg)
 }
 
-func (p *ackOrderPlatform) AddReaction(_ context.Context, id string, _ platform.ReactionType) error {
+func (p *ackOrderPlatform) AddReaction(ctx context.Context, id string, _ platform.ReactionType) error {
+	if p.addGate != nil {
+		select {
+		case <-p.addGate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	if p.addErr != nil {
 		return p.addErr
 	}
@@ -64,6 +74,12 @@ func (p *ackOrderPlatform) RemoveReaction(_ context.Context, id string, _ platfo
 // runOwnerTurn runs one owner-loop turn for message m1 on p, logging
 // GetOrCreate as "session".
 func runOwnerTurn(p platform.Platform, rec func(string), getOrCreate func() (turn.Session, session.SessionStatus, error), send func() (*clievent.SendResult, error)) {
+	runTurnOn(p, rec, getOrCreate, send, true)
+}
+
+// runTurnOn is runOwnerTurn for an owner turn when first, else a detached
+// PriorityNow turn.
+func runTurnOn(p platform.Platform, rec func(string), getOrCreate func() (turn.Session, session.SessionStatus, error), send func() (*clievent.SendResult, error), first bool) {
 	sender := &testSender{
 		getOrCreate: func(context.Context, string, session.AgentOpts) (turn.Session, session.SessionStatus, error) {
 			rec("session")
@@ -75,7 +91,18 @@ func runOwnerTurn(p platform.Platform, rec func(string), getOrCreate func() (tur
 	}
 	d := newTestDispatcher(&fakePlatform{}, withSender(sender))
 	d.platforms = map[string]platform.Platform{"fake": p}
-	runIMTurn(context.Background(), d, reactorKey, "hi", reactorMsg("m1", "hi"), true)
+	runIMTurn(context.Background(), d, reactorKey, "hi", reactorMsg("m1", "hi"), first)
+}
+
+// checkAckOrder reports got unless it is want with "add:m1" once somewhere
+// before "remove:m1".
+func checkAckOrder(t *testing.T, got, want []string) {
+	t.Helper()
+	add := slices.Index(got, "add:m1")
+	rest := slices.DeleteFunc(slices.Clone(got), func(s string) bool { return s == "add:m1" })
+	if add < 0 || len(rest) != len(got)-1 || add > slices.Index(got, "remove:m1") || !slices.Equal(rest, want) {
+		t.Errorf("events = %v, want %v with add:m1 once before remove:m1", got, want)
+	}
 }
 
 func existingSession() (turn.Session, session.SessionStatus, error) {
@@ -93,28 +120,26 @@ func TestOwnerTurn_AcksWithReactionAndClearsItAfterTheReply(t *testing.T) {
 		want        []string
 	}{
 		{"answer", existingSession, answer,
-			[]string{"add:m1", "session", "reply", "remove:m1"}},
+			[]string{"session", "reply", "remove:m1"}},
 		{"session_error", func() (turn.Session, session.SessionStatus, error) {
 			return nil, 0, errors.New("spawn failed")
 		}, answer,
-			[]string{"add:m1", "session", "reply", "remove:m1"}},
+			[]string{"session", "reply", "remove:m1"}},
 		{"send_error", existingSession, func() (*clievent.SendResult, error) {
 			return nil, clierr.ErrNoOutputTimeout
-		}, []string{"add:m1", "session", "reply", "remove:m1"}},
+		}, []string{"session", "reply", "remove:m1"}},
 		// A panic clears the ⏳ before the generic retry notice.
 		{"panic", func() (turn.Session, session.SessionStatus, error) {
 			panic("boom")
 		}, answer,
-			[]string{"add:m1", "session", "remove:m1", "reply"}},
+			[]string{"session", "remove:m1", "reply"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			p := &ackOrderPlatform{}
 			runOwnerTurn(p, p.record, tc.getOrCreate, tc.send)
-			if got := p.events(); !slices.Equal(got, tc.want) {
-				t.Errorf("events = %v, want %v", got, tc.want)
-			}
+			checkAckOrder(t, p.events(), tc.want)
 		})
 	}
 }
@@ -125,9 +150,7 @@ func TestOwnerTurn_ReplyPanicStillClearsReaction(t *testing.T) {
 	t.Parallel()
 	p := &ackOrderPlatform{replyPanic: true}
 	runOwnerTurn(p, p.record, existingSession, answer)
-	if got, want := p.events(), []string{"add:m1", "session", "reply", "remove:m1"}; !slices.Equal(got, want) {
-		t.Errorf("events = %v, want %v", got, want)
-	}
+	checkAckOrder(t, p.events(), []string{"session", "reply", "remove:m1"})
 }
 
 // TestOwnerTurn_NoReactionNoFallbackText: where the ⏳ cannot land (no

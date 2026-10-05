@@ -29,6 +29,10 @@ test.beforeEach(({ }, testInfo) => {
 /** @param {import('@playwright/test').Page} page @param {any} [overrides] */
 async function open(page, overrides) {
   const mock = await startMockServer(overrides);
+  // The fixture's 30s-old session renders a seconds-granular "30s ago", so
+  // two renders of the same data a second apart differ in markup. Date is
+  // frozen (timers still run); a test needing elapsed time uses page.clock.
+  await page.clock.setFixedTime(Date.now());
   await page.goto(mock.url + '/dashboard');
   await page.waitForSelector(`.session-card[data-key="${A}"]`);
   return mock;

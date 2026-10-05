@@ -39,6 +39,7 @@ test.describe('掉了终态信号的 turn 自愈', () => {
     /** @type {string[]} */
     const pageErrors = [];
     page.on('pageerror', (e) => pageErrors.push(String(e)));
+    await page.clock.install();
 
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
@@ -59,8 +60,10 @@ test.describe('掉了终态信号的 turn 自愈', () => {
     await expect(page.locator('#running-banner')).not.toHaveClass(/nz-hidden/);
     await expect(page.locator(`.session-card[data-key="${KEY}"] .sc-dot`)).toHaveClass(/dot-running/);
 
-    // 不发任何终态。5s poll（或 watchdog 兜底）把 REST 的 ready 对齐回来。
-    // 超时给到 9s：一个 poll 周期 + 渲染余量，卡死则一直是停止按钮。
+    // 不发任何终态。推送之后发出的 poll 才能对齐（推送之前发出的快照不能
+    // 覆盖推送），WS 在线时它来自 watchdog 的 15s tick：快进一个 tick，
+    // 再等 mock 扣住的 3s。卡死则一直是停止按钮。
+    await page.clock.runFor(16000);
     await expect(page.locator('#btn-send')).toBeVisible({ timeout: 9000 });
     await expect(page.locator('#btn-stop')).toBeHidden();
     await expect(page.locator('#running-banner')).toHaveClass(/nz-hidden/);

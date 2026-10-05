@@ -104,6 +104,8 @@ file_size:
 # HTTP 管道（mux/routes、middleware、WS hub、health、静态壳与资源、平台 webhook
 # 注册、send/upload 管线）；其余 /api/* handler 一律放 internal/dashboard/<sub>
 # 子包并经 Deps 结构体注入。新增一条就是一次归属评审。
+# 条目手工添加：键名照抄 violation 消息开头的 key，行尾写归属注释；
+# lint-server-handlers 只读此文件，不会生成或改写它。
 handle_baseline:
     - HealthHandler.handleHealth          # health：GET /health
     - HealthHandler.handleLivez           # health：GET /livez

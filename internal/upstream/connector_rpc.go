@@ -318,37 +318,16 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := project.ValidateProjectName(p.ProjectName); err != nil {
 			return nil, fmt.Errorf("restart_planner: %w", err)
 		}
-		// The resolver derives planner-view opts without inheriting defaults
-		// (docs/rfc/key-resolver.md §2.2, #7); the inline path serves
-		// headless/test callers without a resolver.
-		var plannerKey string
-		var opts sessionview.AgentOpts
-		if c.resolver != nil {
-			key, plannerOpts, ok := c.resolver.ResolveForPlannerKey(p.ProjectName)
-			if !ok {
-				// %q so bytes in the primary-supplied name cannot forge
-				// structured-log fields when the remote side logs this error.
-				return nil, fmt.Errorf("project not found: %q", p.ProjectName)
-			}
-			plannerKey = key
-			opts = plannerOpts
-		} else {
-			if c.projMgr == nil {
-				return nil, fmt.Errorf("projects not configured")
-			}
-			proj := c.projMgr.Get(p.ProjectName)
-			if proj == nil {
-				return nil, fmt.Errorf("project not found: %q", p.ProjectName)
-			}
-			plannerKey = proj.PlannerSessionKey()
-			opts = sessionview.AgentOpts{
-				Model:     c.projMgr.EffectivePlannerModel(proj),
-				Workspace: proj.Path,
-				Exempt:    true,
-			}
-			if prompt := c.projMgr.EffectivePlannerPrompt(proj); prompt != "" {
-				opts.SystemPrompt = prompt // #2493: dedicated field, not ExtraArgs
-			}
+		// The resolver is the only source of planner opts
+		// (docs/rfc/key-resolver.md §2.2, #7); production always wires one.
+		if c.resolver == nil {
+			return nil, fmt.Errorf("projects not configured")
+		}
+		plannerKey, opts, ok := c.resolver.ResolveForPlannerKey(p.ProjectName)
+		if !ok {
+			// %q so bytes in the primary-supplied name cannot forge
+			// structured-log fields when the remote side logs this error.
+			return nil, fmt.Errorf("project not found: %q", p.ProjectName)
 		}
 		if _, err := c.router.ResetAndRecreate(connCtx, plannerKey, opts); err != nil {
 			return nil, fmt.Errorf("restart planner: %w", err)
