@@ -576,13 +576,19 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (_ *M
 	// Spawn must still decrement pendingSpawns or the router permanently
 	// refuses new sessions with ErrMaxProcs. A failed Init handshake is
 	// recorded before the marker ends, so the waiters it wakes are paused.
-	defer r.ss.Update(func(tx sessTx) {
-		res.slot.releaseIn(tx)
-		if countsAsStartupFailure(ctx, err) {
-			noteSpawnFailure(tx, key, err, time.Now())
+	defer func() {
+		listed := false
+		r.ss.Update(func(tx sessTx) {
+			res.slot.releaseIn(tx)
+			if countsAsStartupFailure(ctx, err) {
+				listed = noteSpawnFailure(tx, key, err, time.Now())
+			}
+			tx.Ext().spawns.EndSpawn(key, res.doneCh)
+		})
+		if listed {
+			r.notifyChange()
 		}
-		tx.Ext().spawns.EndSpawn(key, res.doneCh)
-	})
+	}()
 
 	if res.wrapper == nil {
 		return nil, fmt.Errorf("spawn process (backend %q): %w", res.backendID, ErrNoCLIWrapper)

@@ -311,6 +311,7 @@ func (r *Router) Cleanup() {
 	}
 
 	var pruned int
+	var listedRunPruned bool // a pruned run was on a listed entry
 	var snap saveSnapshot
 	r.ss.Update(func(tx sessTx) {
 		// Broadcast in the same transaction as the prune so Shutdown's wait
@@ -333,7 +334,14 @@ func (r *Router) Cleanup() {
 			pruned++
 		}
 		// The run of a key that is never retried outlives any cooldown.
-		tx.Ext().spawns.PruneStartupFailures(now.Add(-2 * startupCooldownMax))
+		for _, key := range tx.Ext().spawns.PruneStartupFailures(now.Add(-2 * startupCooldownMax)) {
+			if tx.Get(key) != nil {
+				listedRunPruned = true
+			}
+		}
+		if listedRunPruned {
+			tx.BumpGen()
+		}
 		// Recompute the per-backend gauge and the alive total in one reconcile
 		// walk; skip the O(N) walk when nothing changed.
 		var aliveTotal int64
@@ -369,7 +377,7 @@ func (r *Router) Cleanup() {
 		}
 	}
 
-	if len(expired) > 0 || len(stuckKill) > 0 || pruned > 0 {
+	if len(expired) > 0 || len(stuckKill) > 0 || pruned > 0 || listedRunPruned {
 		r.notifyChange()
 	}
 }
