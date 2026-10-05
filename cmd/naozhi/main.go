@@ -575,6 +575,9 @@ func main() {
 	)
 	// Operators copy these URLs into the IM console; WS-only platforms omitted.
 	logWebhookEndpoints(cfg, platforms)
+	// A profile default_backend silently moves new sessions off the router
+	// default, so name each one that does.
+	logProfileDefaultBackends(cfg, defaultBackend)
 
 	// config.Load already logged this, but before setupLogging installed the
 	// configured handler, so it went to stderr rather than the service log.

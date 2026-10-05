@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -250,5 +253,140 @@ func TestSysessionDaemons(t *testing.T) {
 		if c.got != c.want {
 			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
 		}
+	}
+}
+
+func TestProfileDefaultBackendNotices(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		profiles       map[string]config.AccessProfile
+		defaultProfile string
+		want           []profileBackendNotice
+	}{
+		{name: "no_profiles"},
+		{
+			name:     "equal_to_router_default_skipped",
+			profiles: map[string]config.AccessProfile{"p": {DefaultBackend: "claude"}},
+		},
+		{
+			name:     "empty_default_backend_skipped",
+			profiles: map[string]config.AccessProfile{"p": {DefaultModel: "opus"}},
+		},
+		{
+			name:     "plain_profile",
+			profiles: map[string]config.AccessProfile{"p": {DefaultBackend: "kiro"}},
+			want:     []profileBackendNotice{{Profile: "p", DefaultBackend: "kiro", RouterDefault: "claude"}},
+		},
+		{
+			name:           "default_access_profile",
+			profiles:       map[string]config.AccessProfile{"p": {DefaultBackend: "kiro"}},
+			defaultProfile: "p",
+			want:           []profileBackendNotice{{Profile: "p", DefaultBackend: "kiro", RouterDefault: "claude", IsDefault: true}},
+		},
+		{
+			name: "sorted_by_profile_id",
+			profiles: map[string]config.AccessProfile{
+				"zeta":  {DefaultBackend: "kiro"},
+				"alpha": {DefaultBackend: "codex"},
+				"mid":   {DefaultBackend: "claude"},
+				"beta":  {DefaultBackend: "kiro"},
+			},
+			defaultProfile: "beta",
+			want: []profileBackendNotice{
+				{Profile: "alpha", DefaultBackend: "codex", RouterDefault: "claude"},
+				{Profile: "beta", DefaultBackend: "kiro", RouterDefault: "claude", IsDefault: true},
+				{Profile: "zeta", DefaultBackend: "kiro", RouterDefault: "claude"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := profileDefaultBackendNotices(tt.profiles, tt.defaultProfile, "claude")
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("got %+v\nwant %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLogProfileDefaultBackends_Levels checks the default_access_profile line
+// is a Warn and any other profile's line an Info, each naming the backend
+// and the router default it overrides.
+func TestLogProfileDefaultBackends_Levels(t *testing.T) {
+	// NOT t.Parallel(): swaps the global slog default.
+	var buf bytes.Buffer
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	cfg := &config.Config{
+		AccessProfiles: map[string]config.AccessProfile{
+			"viakiro": {DefaultBackend: "kiro"},
+			"team":    {DefaultBackend: "codex"},
+			"same":    {DefaultBackend: "claude"},
+		},
+		DefaultAccessProfile: "viakiro",
+	}
+	logProfileDefaultBackends(cfg, "claude")
+
+	type line struct {
+		Level, Msg, DefaultBackend, RouterDefault string
+	}
+	var got []line
+	for _, raw := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var rec struct {
+			Level          string `json:"level"`
+			Msg            string `json:"msg"`
+			DefaultBackend string `json:"default_backend"`
+			RouterDefault  string `json:"router_default"`
+		}
+		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+			t.Fatalf("unmarshal %q: %v", raw, err)
+		}
+		if !strings.HasPrefix(rec.Msg, "access_profiles[") {
+			continue // another goroutine's line
+		}
+		got = append(got, line{rec.Level, rec.Msg, rec.DefaultBackend, rec.RouterDefault})
+	}
+	want := []line{
+		{"INFO", "access_profiles[team].default_backend applies to new sessions under this profile", "codex", "claude"},
+		{"WARN", "access_profiles[viakiro].default_backend applies to every new session (it is default_access_profile)", "kiro", "claude"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("log lines:\n got %+v\nwant %+v\nraw=%s", got, want, buf.String())
+	}
+}
+
+// TestMain_LogsProfileDefaultBackends pins that main() emits the notices and
+// compares against defaultBackend, the backend startup bound.
+func TestMain_LogsProfileDefaultBackends(t *testing.T) {
+	t.Parallel()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "main.go", nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if fn, ok := call.Fun.(*ast.Ident); !ok || fn.Name != "logProfileDefaultBackends" {
+			return true
+		}
+		found = true
+		if len(call.Args) != 2 {
+			t.Fatalf("%s: logProfileDefaultBackends has %d args", fset.Position(call.Pos()), len(call.Args))
+		}
+		if arg, ok := call.Args[1].(*ast.Ident); !ok || arg.Name != "defaultBackend" {
+			t.Errorf("%s: router default argument must be defaultBackend (bws.DefaultID)", fset.Position(call.Pos()))
+		}
+		return true
+	})
+	if !found {
+		t.Error("main.go no longer calls logProfileDefaultBackends")
 	}
 }

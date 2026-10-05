@@ -29,6 +29,7 @@
 - **Dashboard WS 重连加 jitter**（RNEW-UX-001），N 个 tab 同时掉线不再同秒风暴回包
 - **Dashboard 后台 tab 暂停 polling**（RNEW-UX-014），手机后台省电省流量
 - **触控目标 ≥ 44×44**（RNEW-UX-011），`.btn-dismiss` / `.status-reconnect` 在 `pointer:coarse` 下满足 WCAG 2.5.5
+- **启动日志点名 `default_backend` 生效的 access profile**（#3419）：profile 的 `default_backend` 与启动实际绑定的默认 backend 不同时，每个这样的 profile 打一行日志，带 `default_backend`、`router_default`、`scope`、`hint`。该 profile 是 `default_access_profile` 时为 Warn（所有未钉 backend 的新会话都会换 CLI），其余为 Info。与默认 backend 相同的不打。已有会话不受影响，完整的落点用 `naozhi config check --effective` 查看
 
 ### Changed
 
