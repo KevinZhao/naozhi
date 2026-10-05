@@ -473,7 +473,7 @@
     "lateBindings": 0
   },
   "utilities.js": {
-    "lines": 1409,
+    "lines": 1408,
     "maxFnLines": 91,
     "fnOver100": 0,
     "topLevelLetVar": 1,

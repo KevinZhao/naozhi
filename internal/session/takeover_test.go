@@ -185,8 +185,8 @@ func TestTakeover_ConcurrentCreationAborts(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected concurrent-creation abort error, got nil")
 	}
-	if !strings.Contains(err.Error(), "concurrent session created") {
-		t.Errorf("error should identify the concurrent race, got: %v", err)
+	if !errors.Is(err, ErrTakeoverRaced) || !strings.Contains(err.Error(), key) {
+		t.Errorf("error should be ErrTakeoverRaced naming the key, got: %v", err)
 	}
 
 	// Interloper session must survive untouched; Takeover may not
@@ -484,7 +484,7 @@ func TestTakeover_RetriesARejectedResumeFresh(t *testing.T) {
 			return reject(ctx, opts)
 		}
 		_, err := r.Takeover(context.Background(), takeoverKey, sfSID, sfWS, AgentOpts{})
-		if err == nil || !strings.Contains(err.Error(), "concurrent session created") || errors.Is(err, ErrShimStuck) {
+		if !errors.Is(err, ErrTakeoverRaced) || errors.Is(err, ErrShimStuck) {
 			t.Errorf("Takeover err = %v, want the concurrent-session refusal", err)
 		}
 		if len(spawns) != 1 {

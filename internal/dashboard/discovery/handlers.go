@@ -41,6 +41,7 @@ type NodeAccessor interface {
 // drops the *ManagedSession return (only success/failure matters) via an
 // adapter at the wiring site.
 type SessionRouter interface {
+	TakeoverPrecheck(key string) error
 	Takeover(ctx context.Context, key, sessionID, cwd string, opts session.AgentOpts) error
 }
 
@@ -312,6 +313,12 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "proc_start_time is required", http.StatusBadRequest)
 		return
 	}
+	// Refuse a takeover the router would refuse now while the external CLI is
+	// still running; one refused after SIGTERM only reaches the log.
+	if err := h.router.TakeoverPrecheck(key); err != nil {
+		writeTakeoverRefusal(w, key, err)
+		return
+	}
 	// Atomic identity-confirmed SIGTERM (#1670): pidfd pins the instance so no
 	// PidAlive→verify→SendTerm window remains. ESRCH is success; ErrPidReused
 	// is the 409 the frontend expects.
@@ -371,6 +378,22 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	httputil.WriteJSONStatus(w, http.StatusAccepted, map[string]string{"status": "accepted", "key": key})
+}
+
+// writeTakeoverRefusal answers a takeover TakeoverPrecheck refused; the
+// bodies are the needles the dashboard's API_ERROR_HEADS localize.
+func writeTakeoverRefusal(w http.ResponseWriter, key string, err error) {
+	switch {
+	case errors.Is(err, session.ErrMaxProcs):
+		http.Error(w, "takeover refused: max concurrent processes reached", http.StatusServiceUnavailable)
+	case errors.Is(err, session.ErrSpawnInFlight):
+		http.Error(w, "takeover already in progress", http.StatusConflict)
+	case errors.Is(err, session.ErrRouterStopped):
+		http.Error(w, "takeover refused: router is shutting down", http.StatusServiceUnavailable)
+	default:
+		slog.Error("takeover precheck failed", "key", key, "err", err)
+		http.Error(w, "takeover unavailable", http.StatusServiceUnavailable)
+	}
 }
 
 // HandleClose serves POST /api/discovered/close — kill an external CLI process
