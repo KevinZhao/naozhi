@@ -187,17 +187,13 @@ func launchdServiceLabel() string {
 	return LaunchdLabel
 }
 
-// execCommand is exec.Command behind one name so tests can observe the argv the
-// launchd restart path builds. The default is exec.Command itself, so production
-// behaviour is byte-for-byte unchanged.
+// execCommand is exec.Command behind a var so tests can assert the exact argv
+// the launchd restart path builds; production uses exec.Command itself.
 //
-// It exists because this path's failure mode is SILENCE: a label that does not
-// match the running job makes `launchctl list` fail, verifiedLaunchdLabel return
-// "", and every restart decide there is nothing to restart — no error, no
-// warning, just a staged binary that never applies. The text-scanning tests that
-// used to guard it could confirm the strings "kickstart", "-k" and "gui/" were
-// present but not that they were assembled into the right argv with the right
-// label (Epic I #2547).
+// This path's failure mode is SILENCE: a label that does not match the running
+// job makes `launchctl list` fail, verifiedLaunchdLabel return "", and every
+// restart decide there is nothing to restart — no error, no warning, just a
+// staged binary that never applies (#2547).
 var execCommand = exec.Command
 
 // verifiedLaunchdLabel returns the launchd label managing THIS binary, or ""
