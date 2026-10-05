@@ -191,6 +191,67 @@ agents:
 	}
 }
 
+// access_profiles[].default_backend places a new session of an agent with no
+// backend of its own, so the listing follows it; the agent's own backend
+// still outranks the profile's, as at spawn.
+func TestConfigCheckEffective_ProfileBackendPlacesTheAgent(t *testing.T) {
+	const base = cleanCheckConfig + `
+cli:
+  backends:
+    - id: claude
+      path: /usr/bin/true
+    - id: codex
+      path: /usr/bin/true
+access_profiles:
+  viacodex:
+    default_backend: codex
+`
+	cases := []struct {
+		name string
+		cfg  string
+		want map[string][]string
+	}{
+		{
+			name: "agent access_profile",
+			cfg: base + `agents:
+  general:
+    model: sonnet
+  coder:
+    access_profile: viacodex
+  reviewer:
+    backend: claude
+    access_profile: viacodex
+`,
+			want: map[string][]string{"claude": {"general", "reviewer"}, "codex": {"coder", "general"}},
+		},
+		{
+			name: "default_access_profile",
+			cfg: base + `default_access_profile: viacodex
+agents:
+  general:
+    model: sonnet
+  reviewer:
+    backend: claude
+`,
+			want: map[string][]string{"claude": {"reviewer"}, "codex": {"general"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, raw := effectiveOf(t, tc.cfg)
+			for backendID, want := range tc.want {
+				eff, ok := got.Effective[backendID]
+				if !ok {
+					t.Fatalf("no effective entry for %s:\n%s", backendID, raw)
+				}
+				if ids := sortedKeys(eff.Agents); !slices.Equal(ids, want) {
+					t.Errorf("Effective[%s].Agents = %v, want %v", backendID, ids, want)
+				}
+			}
+		})
+	}
+}
+
 func TestConfigCheckEffective_NonAllowlistedOverlayKeyIsFatal(t *testing.T) {
 	cfg := cleanCheckConfig + `
 cli:

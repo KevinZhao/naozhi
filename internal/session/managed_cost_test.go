@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -516,6 +517,34 @@ func TestBookUnownedResults_BooksCLIStartedTurnsOnce(t *testing.T) {
 	}
 	if len(amounts) != 3 || !approxEq(amounts[0]+amounts[1]+amounts[2], 3.5) {
 		t.Fatalf("ledger amounts = %v, want three entries summing to 3.5", amounts)
+	}
+}
+
+// #3322: a Send that gave up (interrupt, cron deadline) books nothing; the
+// late result its process hands over is booked once, and the same reading
+// handed over again (readLoop and the next Send's drain both see it) adds
+// nothing.
+func TestBookUnownedResults_AbandonedSendsLateResultBooksOnce(t *testing.T) {
+	proc := &TestProcess{AliveVal: true, SendFunc: func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
+		return nil, context.Canceled
+	}}
+	s, ledger := newLedgerSession(t, "dashboard:direct:host:general", proc)
+	hooked := &hookedTestProcess{TestProcess: proc}
+	s.storeProcess(hooked)
+	bookUnownedResults(s, hooked)
+
+	if _, err := s.Send(context.Background(), "hi", nil, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Send = %v, want context.Canceled", err)
+	}
+	late := clievent.SendResult{CostUSD: 2, SessionID: "sid"}
+	hooked.fn(late)
+	hooked.fn(late)
+	if got := loadTotalCost(&s.costSpent); !approxEq(got, 2) {
+		t.Fatalf("costSpent = %v, want the late result's 2 once", got)
+	}
+	ents := allEntries(t, ledger)
+	if len(ents) != 1 || ents[0].Kind != costledger.KindTurn || !approxEq(ents[0].Amount, 2) {
+		t.Fatalf("entries = %+v, want one Kind=turn row of 2", ents)
 	}
 }
 

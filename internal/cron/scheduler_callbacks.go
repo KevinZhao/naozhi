@@ -1,9 +1,8 @@
 // scheduler_callbacks.go: cron-side run-event types + emit helpers +
-// per-state metrics bumps. The cron-local Run{Started,Ended}Event types carry
-// cron-specific fields (Trigger=cron.TriggerKind, ErrorClass=cron.ErrorClass)
-// and are translated to the wire runtelemetry shapes inside the private emit
-// helpers, so external callers reach the broadcast surface only through
-// SchedulerDeps.Telemetry (RFC §3.5).
+// per-state metrics bumps. The cron-local Run{Started,Ended}Event types use
+// cron's aliases of the runtelemetry enums, so the private emit helpers copy
+// them into the wire runtelemetry shapes field for field; external callers
+// reach the broadcast surface only through SchedulerDeps.Telemetry (RFC §3.5).
 
 package cron
 
@@ -56,7 +55,7 @@ func (s *Scheduler) emitRunStarted(ev RunStartedEvent) {
 		Subsystem: runtelemetry.SubsystemCron,
 		OwnerID:   ev.JobID,
 		RunID:     ev.RunID,
-		Trigger:   runtelemetry.TriggerKind(ev.Trigger),
+		Trigger:   ev.Trigger,
 		StartedAt: ev.StartedAt,
 		SessionID: ev.SessionID,
 		Fresh:     ev.Fresh,
@@ -72,13 +71,13 @@ func (s *Scheduler) emitRunEnded(ev RunEndedEvent) {
 		Subsystem:  runtelemetry.SubsystemCron,
 		OwnerID:    ev.JobID,
 		RunID:      ev.RunID,
-		State:      runtelemetry.RunState(ev.State),
+		State:      ev.State,
 		StartedAt:  ev.StartedAt,
 		EndedAt:    ev.EndedAt,
 		DurationMS: ev.DurationMS,
-		Trigger:    runtelemetry.TriggerKind(ev.Trigger),
+		Trigger:    ev.Trigger,
 		SessionID:  ev.SessionID,
-		ErrorClass: runtelemetry.ErrorClass(ev.ErrorClass),
+		ErrorClass: ev.ErrorClass,
 		ErrorMsg:   ev.ErrorMsg,
 	})
 }
