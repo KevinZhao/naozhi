@@ -1,3 +1,4 @@
+// anchor-keep: rule-ID registry drift and the no-write ban are structural facts about this tool's own sources; reading them is the check.
 package main
 
 import (

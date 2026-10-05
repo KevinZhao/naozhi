@@ -142,4 +142,8 @@ type wiring struct {
 	engine *sendEngine
 	bcast  *wsBroadcaster
 	turns  *turn.Orchestrator
+	// projectsRoot is claudefs.ResolvedProjectsRoot(claudeDir), the one root
+	// the WS agent tailer and agent_events check transcript paths against;
+	// allowedRoot (the operator workspace) is a different root.
+	projectsRoot string
 }
