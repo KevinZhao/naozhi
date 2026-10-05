@@ -182,6 +182,28 @@ test('a stalled status route does not stretch the poll past its deadline', async
   expect(statusReads).toBeLessThanOrEqual(6);
 });
 
+// A failed status read is no evidence of this attempt's outcome: with the key
+// listed from round 1 and every read failing, the poll times out unsent.
+test('a failing status route never sends into a listed key', async ({ page }) => {
+  test.setTimeout(30000);
+  const key = 'local:takeover:bgproj';
+  let statusReads = 0;
+  await page.route((url) => url.pathname === '/api/discovered/takeover', (route) => route.fulfill({ status: 202,
+    contentType: 'application/json', body: JSON.stringify({ status: 'accepted', key, takeover_id: TAKEOVER_ID }) }));
+  await page.route((url) => url.pathname === '/api/discovered/takeover/status', (route) => {
+    statusReads++;
+    return route.fulfill({ status: 500, contentType: 'text/plain', body: 'boom' });
+  });
+  await listKeyWhen(page, key, () => true);
+  const sendsBefore = mock.sendCalls.length;
+  await sendOnDiscovered(page);
+
+  await expect(page.locator('.toast')).toContainText(
+    '接管超时：外部 CLI 已终止，但新会话未就绪。对话记录仍在，可稍后从历史记录重新打开', { timeout: 15000 });
+  expect(statusReads).toBeGreaterThanOrEqual(10);
+  expect(sentKeys(sendsBefore)).not.toContain(key);
+});
+
 test('without a takeover_id the poll runs to its timeout, which says the external CLI is gone', async ({ page }) => {
   test.setTimeout(30000);
   const calls = await routeTakeover(page, { status: 'accepted', key: 'local:takeover:bgproj' }, { state: 'failed', class: 'max_procs' });
