@@ -54,8 +54,14 @@ func TestConfigCheck_ExitCodes(t *testing.T) {
 		if code != 1 {
 			t.Fatalf("exit = %d, want 1; output:\n%s", code, out.String())
 		}
-		if s := out.String(); !strings.Contains(s, "platforms.weixin") || !strings.Contains(s, "im_access") {
+		s := out.String()
+		if !strings.Contains(s, "platforms.weixin") || !strings.Contains(s, "im_access") {
 			t.Errorf("output must name the open platform and im_access:\n%s", s)
+		}
+		// Nothing is dropped: the platform runs open, so the summary must not
+		// claim the value had no effect.
+		if !strings.Contains(s, "1 config warning(s)") || strings.Contains(s, "drops the value") {
+			t.Errorf("summary must count a config warning, not a dropped input:\n%s", s)
 		}
 	})
 

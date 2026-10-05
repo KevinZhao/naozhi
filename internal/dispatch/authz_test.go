@@ -98,8 +98,15 @@ func TestAuthz_DeniedDirectMessage(t *testing.T) {
 	if got := fp.allReplies(); len(got) != 1 || !strings.Contains(got[0], "ID: eve") {
 		t.Errorf("replies = %q, want exactly one refusal naming the sender ID", got)
 	}
-	if got := deniedCount("fake:not_allowed") - before; got != 3 {
-		t.Errorf("naozhi_dispatch_denied_total[fake:not_allowed] moved by %d, want 3", got)
+	// The throttle is per sender: eve's refusal must not silence the next stranger.
+	if _, ok := d.prepareInbound(ctx, authzMsg("mallory", "direct", "hello")); ok {
+		t.Fatal("hello from mallory was accepted")
+	}
+	if got := fp.allReplies(); len(got) != 2 || !strings.Contains(got[1], "ID: mallory") {
+		t.Errorf("replies = %q, want a second refusal naming mallory", got)
+	}
+	if got := deniedCount("fake:not_allowed") - before; got != 4 {
+		t.Errorf("naozhi_dispatch_denied_total[fake:not_allowed] moved by %d, want 4", got)
 	}
 
 	if _, ok := d.prepareInbound(ctx, authzMsg("alice", "direct", "hello")); !ok {
