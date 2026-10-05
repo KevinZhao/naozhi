@@ -163,6 +163,10 @@ func buildDiscoveryHandlers(
 // sub-package consumes, so that interface need not re-export session types.
 type routerTakeoverAdapter struct{ r *session.Router }
 
+func (a routerTakeoverAdapter) TakeoverPrecheck(key string) error {
+	return a.r.TakeoverPrecheck(key)
+}
+
 func (a routerTakeoverAdapter) Takeover(ctx context.Context, key, sessionID, cwd string, opts session.AgentOpts) error {
 	_, err := a.r.Takeover(ctx, key, sessionID, cwd, opts)
 	return err

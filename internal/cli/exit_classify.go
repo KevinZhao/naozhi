@@ -13,12 +13,14 @@ import (
 	"github.com/naozhi/naozhi/internal/cliinfo"
 )
 
-// classifyStderr reads what a CLI's stderr tail says made it exit. Matching
-// is on substrings of the CLI's English messages, case-insensitive; a pair of
-// terms must share a line, and a class earlier in the switch wins when lines
-// match several. Warning lines are skipped: the CLI prints them and runs on
-// (a broken --settings file is one), so they name no exit cause.
-func classifyStderr(tail []string) clierr.ExitClass {
+// classifyExit reads what a CLI's exit code and stderr tail say made it exit.
+// Matching is on substrings of the CLI's English messages, case-insensitive; a
+// pair of terms must share a line, and a class earlier in the switch wins when
+// lines match several. Warning lines are skipped: the CLI prints them and runs
+// on (a broken --settings file is one), so they name no exit cause. When no
+// line names a cause, code 127 (a shell that could not find the command, in
+// whatever wording) counts as a missing runtime.
+func classifyExit(code int64, tail []string) clierr.ExitClass {
 	lines := make([]string, 0, len(tail))
 	for _, l := range tail {
 		if !isStderrWarningLine(l) {
@@ -32,7 +34,10 @@ func classifyStderr(tail []string) clierr.ExitClass {
 		return clierr.ExitMCPConfig
 	case anyLine(lines, "", "invalid api key", "please run /login", "authentication", "oauth token has expired", "401 unauthorized", "not logged in", "login required"):
 		return clierr.ExitAuth
-	case anyLine(lines, "", "enoent", "no such file or directory", "command not found", "cannot find module"):
+	case anyLine(lines, "", "enoent", "no such file or directory", "command not found", "cannot find module"),
+		dashNotFound(lines):
+		return clierr.ExitMissingRuntime
+	case code == 127:
 		return clierr.ExitMissingRuntime
 	}
 	return clierr.ExitUnknown
@@ -53,6 +58,22 @@ func anyLine(lines []string, need string, oneOf ...string) bool {
 	return false
 }
 
+// dashNotFound reports a dash "not found" line: one holding ": not found" and
+// a whole word "sh:", "<path>/sh:" or "exec:", as in "sh: 1: node: not found".
+func dashNotFound(lines []string) bool {
+	for _, l := range lines {
+		if !strings.Contains(l, ": not found") {
+			continue
+		}
+		for _, f := range strings.Fields(l) {
+			if f == "sh:" || f == "exec:" || strings.HasSuffix(f, "/sh:") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // noteOutput marks the CLI past startup on its first stdout event, except
 // the error_during_execution result claude writes just before exiting when it
 // cannot start (a stale --resume id): that frame is the startup failure.
@@ -64,15 +85,15 @@ func (p *Process) noteOutput(ev clievent.Event) {
 
 // recordExit keeps the error sends get for a CLI that exited with code;
 // code 0 keeps the bare ErrProcessExited. A CLI that already wrote stdout
-// died mid-session, where its stderr is not a startup cause, so it stays
-// ExitUnknown.
+// died mid-session, where neither its stderr nor its code is a startup
+// cause, so it stays ExitUnknown.
 func (p *Process) recordExit(code int64, tail []string) {
 	if code == 0 {
 		return
 	}
 	e := &clierr.ProcessExitedError{Code: code}
 	if !p.sawOutput.Load() {
-		e.Class = classifyStderr(tail)
+		e.Class = classifyExit(code, tail)
 	}
 	p.exitedAt.Store(time.Now().UnixNano())
 	p.exited.Store(e)
