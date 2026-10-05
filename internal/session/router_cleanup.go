@@ -60,6 +60,23 @@ func (r *Router) unregisterAndSnapshot(key string) (snap removeSnapshot, ok bool
 	return snap, ok
 }
 
+// notifyKeyRetired tells the observer key has left the table. Call outside
+// the table lock. The process teardown runs after it, so a panicking consumer
+// is recovered and counted here rather than leaking the process.
+func (r *Router) notifyKeyRetired(key, sessionID string) {
+	if r.observer == nil {
+		return
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			metrics.PanicRecoveredTotal.Add(1)
+			slog.Error("session retire: KeyRetired consumer panicked",
+				"key", key, "panic", rec, "stack", string(debug.Stack()))
+		}
+	}()
+	r.observer.KeyRetired(key, sessionID)
+}
+
 // finishRemoveCleanup runs the slow half of a session removal, outside any
 // transaction: close the process, wait for its shim socket to disappear, drop
 // the event log + attachment refs, notify the change. Reads only `snap` —

@@ -4,6 +4,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // TestRouter_OnSessionRetired_RemoveCarriesSessionID locks the contract
@@ -160,6 +162,39 @@ func TestRouter_KeyRetiredFiresBeforeTeardown(t *testing.T) {
 			defer mu.Unlock()
 			if fired != 1 {
 				t.Fatalf("KeyRetired fired %d times, want 1", fired)
+			}
+		})
+	}
+}
+
+// TestRouter_KeyRetiredPanicStillTearsDown: KeyRetired runs before the
+// teardown, so a panicking consumer is recovered and counted, and Remove,
+// RemoveAsync and Reset still close the process.
+func TestRouter_KeyRetiredPanicStillTearsDown(t *testing.T) {
+	for name, retire := range map[string]func(r *Router, key string){
+		"Remove":      func(r *Router, key string) { r.Remove(key) },
+		"RemoveAsync": func(r *Router, key string) { r.RemoveAsync(key) },
+		"Reset":       func(r *Router, key string) { r.Reset(key) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := NewRouter(RouterConfig{MaxProcs: 4, TTL: time.Hour})
+			t.Cleanup(r.Shutdown)
+			const key = "test:direct:retire-panic:general"
+			proc := newBlockingCloseProc()
+			close(proc.release)
+			installSession(t, r, key, proc)
+			observe(r).retired = func(string, string) { panic("consumer bug") }
+			start := metrics.PanicRecoveredTotal.Value()
+
+			retire(r, key)
+			select {
+			case <-proc.closeDone:
+			case <-time.After(5 * time.Second):
+				t.Fatal("process was not closed after KeyRetired panicked")
+			}
+			r.removes.Wait()
+			if got := metrics.PanicRecoveredTotal.Value() - start; got < 1 {
+				t.Fatalf("PanicRecoveredTotal moved by %d, want >= 1", got)
 			}
 		})
 	}

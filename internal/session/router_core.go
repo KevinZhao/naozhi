@@ -702,14 +702,6 @@ func (r *Router) notifyChange() {
 	}
 }
 
-// notifyKeyRetired tells the observer key has left the table. Call outside
-// the table lock.
-func (r *Router) notifyKeyRetired(key, sessionID string) {
-	if r.observer != nil {
-		r.observer.KeyRetired(key, sessionID)
-	}
-}
-
 // NotifyIdle wakes the Shutdown wait loop so it can re-check running sessions.
 // Call after a message send completes (session transitions running → ready).
 //
