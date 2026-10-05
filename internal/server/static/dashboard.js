@@ -7,7 +7,7 @@ import { composer, hooks, perSession, selection, serverInfo, sessionList, timers
 import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, registerActions, sessionExitChipHtml } from './nz_util.js';
 import { eventHtml } from './event_render.js';
 import { onAskOptionToggle, onAskSubmit } from './ask_card.js';
-import { eventIdentityKey, fetchEvents, hasMoreHeader, renderEvents } from './event_stream.js';
+import { eventIdentityKey, fetchEvents, hasMoreHeader, memoryOnlyHeader, renderEvents } from './event_stream.js';
 import { renderMd, runPendingAsync } from './render_md.js';
 import { fetchSessionRuns, setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderPRChip, setHeaderSpawnDiagChip } from './session_header.js';
 import {
@@ -908,12 +908,13 @@ function formatSessionMarkdown(meta, events) {
 const EXPORT_PAGE_LIMIT = 500;
 const EXPORT_MAX_PAGES = 40;
 
-// fetchAllSessionEvents returns { events, truncated } (or { status } on a
-// non-2xx first page). `truncated` is set whenever the export is known or
-// suspected to be incomplete — page cap hit, a later page failed or was
-// malformed, or a page with nothing new said has-more — so the caller must
-// warn rather than claim a full export. A remote session pages the same way:
-// its node serves the `before=` pages through the relay.
+// fetchAllSessionEvents returns { events, truncated, memoryOnly } (or
+// { status } on a non-2xx first page). `truncated` is set whenever the export
+// is known or suspected to be incomplete — page cap hit, a later page failed
+// or was malformed, or a page with nothing new said has-more — so the caller
+// must warn rather than claim a full export. A remote session pages the same
+// way through its node; `memoryOnly` marks a node too old to page past its
+// memory, whose older history the walk could not reach.
 //
 // Cursor: `before = oldest + 1`, NOT `before = oldest`. Both the ring
 // (EntriesBefore) and the disk sources filter strictly `Time < before`, so a
@@ -933,7 +934,7 @@ async function fetchAllSessionEvents(key, node, headers) {
   if (events.length === 0) return { events, truncated: false };
 
   const seen = new Set(events.map(eventIdentityKey));
-  let truncated = false;
+  let truncated = false, memoryOnly = false;
   let oldest = (events[0] && events[0].time) || 0;
   for (let pages = 0; oldest > 0; pages++) {
     if (pages >= EXPORT_MAX_PAGES) { truncated = true; break; }
@@ -942,6 +943,7 @@ async function fetchAllSessionEvents(key, node, headers) {
     const page = await pr.json();
     if (!Array.isArray(page)) { truncated = true; break; }
     const hm = hasMoreHeader(pr);
+    memoryOnly ||= memoryOnlyHeader(pr);
     const fresh = page.filter(e => {
       const k = eventIdentityKey(e);
       if (seen.has(k)) return false;
@@ -960,7 +962,7 @@ async function fetchAllSessionEvents(key, node, headers) {
     if (hm === false) break;
     oldest = pageOldest;
   }
-  return { events, truncated };
+  return { events, truncated, memoryOnly };
 }
 
 async function downloadSessionMarkdown() {
@@ -982,7 +984,6 @@ async function downloadSessionMarkdown() {
       return;
     }
     const events = res.events;
-    const truncated = res.truncated;
     if (!Array.isArray(events) || events.length === 0) {
       showToast('会话无可导出内容', 'warning');
       return;
@@ -1012,11 +1013,10 @@ async function downloadSessionMarkdown() {
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(href), 60000);
-    if (truncated) {
-      showToast('已导出 ' + events.length + ' 条事件（历史过长，更早的事件已截断）', 'warning', 5000);
-    } else {
-      showToast('已导出 ' + events.length + ' 条事件', 'success', 2000);
-    }
+    const done = '已导出 ' + events.length + ' 条事件';
+    if (res.truncated) showToast(done + '（历史过长，更早的事件已截断）', 'warning', 5000);
+    else if (res.memoryOnly) showToast(done + '（该节点版本过旧，只导出了它内存中的事件，更早的历史可能缺失；升级该节点后可完整导出）', 'warning', 5000);
+    else showToast(done, 'success', 2000);
   } catch (e) {
     showNetworkError('导出会话', e);
   } finally {

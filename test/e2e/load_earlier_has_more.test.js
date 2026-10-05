@@ -129,6 +129,25 @@ test.describe('加载更早的事件：以 X-Events-Has-More 判定到头', () =
     }
   });
 
+  test('远端节点版本过旧（X-Events-Paging: memory-only）：到它内存的尽头时提示升级节点', async ({ browser }) => {
+    // The node's ring holds e150..e399; its disk history (e0..e149) is out of reach.
+    const { page, earlierCalls, cleanup } = await openSession(browser, 400, { eventsRingSize: 250, eventsBeforeMemoryOnly: true });
+    try {
+      const btn = page.locator('#earlier-events-btn');
+      await btn.click();
+      await expect(page.locator('#events-scroll > .event')).toHaveCount(200);
+      await expect(btn).toHaveText('加载更早的事件');
+      await btn.click();
+      await expect(page.locator('#events-scroll > .event')).toHaveCount(250);
+      await expect(btn).toHaveText('已到该节点内存中最早的事件 — 升级该节点可加载更早历史');
+      await expect(btn).toBeDisabled();
+      await expect(page.locator('#events-scroll > .event').first()).toContainText('[e150]');
+      expect(earlierCalls()).toBe(2);
+    } finally {
+      await cleanup();
+    }
+  });
+
   test('服务端不带 header（旧版本）：仍按短页判定到头', async ({ browser }) => {
     const { page, earlierCalls, cleanup } = await openSession(browser, 200, { eventsBeforeLegacy: true });
     try {

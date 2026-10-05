@@ -65,11 +65,8 @@ export async function fetchEvents(full) {
     // job at switch time, so we don't touch it here.
     if (stale()) return;
 
-    if (full) {
-      renderEvents(events, hasMore);
-    } else {
-      appendEvents(events);
-    }
+    if (full) renderEvents(events, hasMore);
+    else appendEvents(events);
 
     const last = events[events.length - 1];
     if (last && last.time > transcript.lastEventTime) transcript.lastEventTime = last.time;
@@ -144,11 +141,13 @@ export function dedupEarlierPage(events, cursorMS, seenKeys) {
 // @contract-end dedupEarlierPage
 
 // hasMoreHeader reads X-Events-Has-More; null when absent (an older server
-// or relay), which leaves the caller its length heuristic.
+// or relay), which leaves the caller its length heuristic. memoryOnlyHeader:
+// that has-more covers only the memory of a remote node too old to page.
 export function hasMoreHeader(resp) {
   const v = resp && resp.headers ? resp.headers.get('X-Events-Has-More') : null;
   return v == null ? null : v === '1' || v === 'true';
 }
+export function memoryOnlyHeader(resp) { return resp?.headers?.get('X-Events-Paging') === 'memory-only'; }
 
 // The load-earlier cursor: a ms plus the keys of the entries held there.
 function setEarlierCursor(ms, keys) {
@@ -223,7 +222,7 @@ async function loadEarlierEvents(maxPages) {
       const shown = prependEvents(page.events);
       // The header is authoritative; only without it is a short page the end.
       const hm = hasMoreHeader(r);
-      if (hm === false || (hm === null && raw.length < limit)) { updateEarlierButton('done'); return; }
+      if (hm === false || (hm === null && raw.length < limit)) { updateEarlierButton(memoryOnlyHeader(r) ? 'node-old' : 'done'); return; }
       // More exists yet a short page brought nothing new: the read degraded.
       if (!page.events.length && raw.length < limit) { updateEarlierButton('error'); return; }
       if (!page.events.length && page.oldestMS >= c.ms) {
@@ -341,6 +340,7 @@ export function showHistoryRetry() {
 const EARLIER_BUTTON_STATES = {
   loading: ['加载中…', true],
   done: ['没有更早的事件', true],
+  'node-old': ['已到该节点内存中最早的事件 — 升级该节点可加载更早历史', true],
   error: ['加载失败 — 点击重试', false],
 };
 
