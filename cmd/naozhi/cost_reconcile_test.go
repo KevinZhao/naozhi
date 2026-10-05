@@ -423,6 +423,47 @@ func TestChargesRestore(t *testing.T) {
 	}
 }
 
+// A turn ends at its booking for restore detection and attribution alike:
+// its last message, stamped at the booking, is in its window, so a
+// correctly baselined turn whose cache-read is that message is not charged
+// the restore, and a line 1ms later is the next turn's in both scans.
+func TestTurnCut_AtTheBookingForRestoreAndAttribution(t *testing.T) {
+	const a, b = "aaaaaaaa-0000-0000-0000-000000000001", "bbbbbbbb-0000-0000-0000-000000000002"
+	t1 := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Hour)
+	entries := []costledger.Entry{rcTurn(t1, rcKey, "1111111111111111", 614.54), rcTurn(t2, rcKey, "2222222222222222", 3)}
+	msg := func(at time.Time, cacheRead int64) claudefs.MessageUsage {
+		return claudefs.MessageUsage{ModelTokens: claudefs.ModelTokens{Model: rcModel, CacheRead: cacheRead}, At: at, Entrypoint: "sdk-cli"}
+	}
+	msgs := []claudefs.MessageUsage{msg(t1.Add(-time.Minute), 14540), msg(t1, 600000), msg(t1.Add(time.Millisecond), 3000)}
+	m := claudefs.CostStateMark{CostState: claudefs.CostState{TotalCostUSD: 584.17,
+		ModelUsage: json.RawMessage(`{"m":{"cacheReadInputTokens":584170,"costUSD":584.17}}`)}}
+	if !mayChargeRestore(entries[0], m) {
+		t.Fatal("fixture: the first turn may not have charged the restore")
+	}
+
+	from1, to1, next := turnSpan(entries, 0, time.Time{}, nil)
+	from2, to2, _ := turnSpan(entries, 1, next, nil)
+	w := turnWindow(msgs, from1, to1, nil)
+	if w.tokens != 614540 {
+		t.Errorf("first turn's window holds %d tokens, want 614540: the message at its booking is its own", w.tokens)
+	}
+	if charged, _ := chargesRestore(entries[0], m, w); charged {
+		t.Error("a correctly baselined turn was charged the restore")
+	}
+	if w := turnWindow(msgs, from2, to2, nil); w.tokens != 3000 {
+		t.Errorf("second turn's window holds %d tokens, want 3000: the line after the first booking", w.tokens)
+	}
+
+	act := sessionActivity{a: {times: []time.Time{t1.Add(-time.Minute), t1}, ok: true}, b: {times: []time.Time{t1.Add(time.Millisecond)}, ok: true}}
+	booked := bookedTimes(entries, map[string][]string{rcKey: {a, b}})
+	for i, want := range []string{a, b} {
+		if got := act.soleActiveIn([]string{a, b}, booked.before(rcKey, entries[i].TS), entries[i].TS); got != want {
+			t.Errorf("turn %d attributed to %q, want %q", i+1, got, want)
+		}
+	}
+}
+
 func mapsEqual(a, b map[string]string) bool {
 	if len(a) != len(b) {
 		return false

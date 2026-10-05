@@ -544,10 +544,11 @@ func TestReconcile_ADayWithNoTranscriptSpendIsLeftAsBooked(t *testing.T) {
 
 // A turn under a key that held several sessions, with no run record, goes to
 // the one session with a message between the key's previous booking and the
-// turn's (its turn ends just before the result is booked). Nothing is
-// guessed when a fork's copied line or the next session's first line shares
-// the window, when no session has a message there, when a session's
-// transcript is gone, or for a backfill, which is booked at its run's start.
+// turn's (the turn ends at its booking; a later line is the next turn's).
+// Nothing is guessed when a fork's copied line or the next session's first
+// line shares the window, when no session has a message there, when a
+// session's transcript is gone, or for a backfill, which is booked at its
+// run's start.
 func TestReconcile_PlacesAChainedKeysTurnByTranscriptTime(t *testing.T) {
 	const (
 		key = "dashboard:direct:chain:general"
@@ -574,15 +575,23 @@ func TestReconcile_PlacesAChainedKeysTurnByTranscriptTime(t *testing.T) {
 				return []costledger.Entry{turn(s.day(-1, 9, 1), "aaaaaaaaaaaaaaa1", 5), turn(s.day(-1, 11, 1), "aaaaaaaaaaaaaaa2", 3),
 					turn(s.day(-1, 14, 1), "aaaaaaaaaaaaaaa3", 2)}
 			}, map[string]int{a: 2, b: 1}, 0},
-		{"a last message stamped after the booking", []string{a, b},
+		{"a last message stamped at the booking", []string{a, b},
 			func(s reconcileScope) map[string][]string {
 				return map[string][]string{a: {scopeMsg(s.day(-1, 9, 0), "msg_a1", 5, "sdk-cli")},
-					b: {scopeMsg(s.day(-1, 14, 0).Add(5*time.Second), "msg_b", 2, "sdk-cli")}}
+					b: {scopeMsg(s.day(-1, 14, 0), "msg_b", 2, "sdk-cli")}}
 			},
 			func(s reconcileScope) []costledger.Entry {
 				return []costledger.Entry{turn(s.day(-1, 9, 1), "aaaaaaaaaaaaaaa1", 5), turn(s.day(-1, 14, 0), "aaaaaaaaaaaaaaa2", 2)}
 			}, map[string]int{a: 1, b: 1}, 0},
-		{"the next session's first line within the slack", []string{a, b},
+		{"a line stamped just after the booking", []string{a, b},
+			func(s reconcileScope) map[string][]string {
+				return map[string][]string{a: {scopeMsg(s.day(-1, 9, 0), "msg_a1", 5, "sdk-cli")},
+					b: {scopeMsg(s.day(-1, 14, 0).Add(time.Millisecond), "msg_b", 2, "sdk-cli")}}
+			},
+			func(s reconcileScope) []costledger.Entry {
+				return []costledger.Entry{turn(s.day(-1, 9, 1), "aaaaaaaaaaaaaaa1", 5), turn(s.day(-1, 14, 0), "aaaaaaaaaaaaaaa2", 2)}
+			}, map[string]int{a: 1}, 1},
+		{"the next session's first line after the booking", []string{a, b},
 			func(s reconcileScope) map[string][]string {
 				return map[string][]string{
 					a: {scopeMsg(s.day(-1, 9, 0), "msg_a1", 5, "sdk-cli"), scopeMsg(s.day(-1, 14, 0), "msg_a2", 3, "sdk-cli")},
@@ -590,7 +599,7 @@ func TestReconcile_PlacesAChainedKeysTurnByTranscriptTime(t *testing.T) {
 			},
 			func(s reconcileScope) []costledger.Entry {
 				return []costledger.Entry{turn(s.day(-1, 9, 1), "aaaaaaaaaaaaaaa1", 5), turn(s.day(-1, 14, 0).Add(time.Second), "aaaaaaaaaaaaaaa2", 3)}
-			}, map[string]int{a: 1}, 1},
+			}, map[string]int{a: 2}, 0},
 		{"a terminal's later line", []string{a, b},
 			func(s reconcileScope) map[string][]string {
 				return map[string][]string{
