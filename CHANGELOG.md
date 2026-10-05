@@ -70,6 +70,10 @@
 
 - `/urgent` 之后，在它之前已排队的消息现在会拿到自己的真实回答，不再收到"上一条消息已被 /urgent 打断，请在当前任务完成后重发"：真实 CLI 实测（claude 2.1.288）表明 `priority:"now"` 抢占不丢弃队列，紧急消息先跑、排队消息随后各自成轮（`docs/rfc/passthrough-mode-validation.md` V10，#3394）
 - 删除会话后立刻在同一个 key 上新建会话时，被删对话的记录不再留在新会话的 event log 里（#3416）：以前重启后它会出现在新会话 dashboard 历史的最前面，旧 workspace 的附件引用也一直不释放。现在删除会先清掉 event log 和附件引用、再关进程，新会话等清理完成（通常几毫秒，最多约 8 秒）才开始落盘
+- **启用多个 backend 时，dashboard 不再替运维选 router 默认 backend**（#3418）：backend picker 第一项改为默认选中的「自动（X）」，不动它就不发 `backend`，由服务端按 `agents[].backend` > 访问档 `default_backend` > `cli.backend` 选；X 是所选访问档会落到的 backend，换访问档时跟着变。以前 picker 总是预选 router 默认并当成显式选择发出，`default_backend`（#3364）和 `agents[].backend` 在 dashboard 入口从不生效
+  - 同一原因的另外两处一起修好：保存项目设置不再把项目的 `backend` 钉成 router 默认（以前因任何原因保存一次，该项目的 IM 会话和 planner 就不再跟随 `default_backend`）；编辑没设 backend 的 cron 任务，保存时不再 PATCH 进 router 默认，新建 cron 任务选「自动」也不带 `backend`
+  - 显式选某个 backend（包括 router 默认那个）仍原样发出并优先
+  - 不做迁移：以前保存时被钉住的项目和 cron 任务保持原值（无法和有意的选择区分）。要恢复跟随，在项目设置或 cron 编辑里把 backend 选回「自动」并保存
 - `spawnSession` panic recover 错误消息不再双前缀 `"spawn process: spawn process:"`（RNEW-009）
 - IM 首轮自动接管不再在 naozhi 会拒绝接管时（max_procs 已满 / 该 key 正在 spawn / 正在关停 / planner 的 exempt 配额已满 / agent 的 model 或 backend 非法）先 SIGTERM 掉终端里的 Claude CLI；接管前改为先跑 `Router.TakeoverPrecheck`（#3395）
 
