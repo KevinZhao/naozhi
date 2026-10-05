@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -494,8 +493,9 @@ func (p *Process) onSystemInit() {
 
 // onTurnResult is called when readLoop sees a result event. It snapshots the
 // turn's claimed slots, strips them from pendingSlots, and returns them for
-// out-of-lock fanout (an aborted turn's victims are handled separately by
-// reapAbortedPreempted). Restarts the turn clock for whatever stays queued.
+// out-of-lock fanout. An aborted turn is no different: slots it never claimed
+// stay queued for their own turns. Restarts the turn clock for whatever stays
+// queued.
 func (p *Process) onTurnResult() []*sendSlot {
 	p.slots.mu.Lock()
 	owners := p.slots.current
@@ -547,53 +547,6 @@ func (p *Process) settleUnclaimedResult(ev clievent.Event, noLiveSend bool) {
 	}
 	if ended && onDone != nil {
 		onDone()
-	}
-}
-
-// reapAbortedPreempted collects pending slots the CLI discarded when a
-// priority:"now" preempted the active turn (result.subtype ==
-// "error_during_execution"): slots not yet replayed that are not themselves
-// priority:"now" (those proceed into the next turn). Returns the victims
-// after removing them from pendingSlots. Without an un-replayed "now" slot
-// (canceled ones count: the CLI still has it) the abort was a /stop, a SIGINT
-// or a mid-turn failure, which leave the CLI's queue intact
-// (docs/rfc/passthrough-mode-validation.md V5): queued slots wait for their
-// own turns.
-func (p *Process) reapAbortedPreempted() []*sendSlot {
-	p.slots.mu.Lock()
-	defer p.slots.mu.Unlock()
-	if !slices.ContainsFunc(p.slots.pending, func(s *sendSlot) bool {
-		return !s.replayed && s.priority == "now"
-	}) {
-		return nil
-	}
-	var victims []*sendSlot
-	kept := p.slots.pending[:0]
-	for _, s := range p.slots.pending {
-		if !s.replayed && s.priority != "now" {
-			victims = append(victims, s)
-			continue
-		}
-		kept = append(kept, s)
-	}
-	for i := len(kept); i < len(p.slots.pending); i++ {
-		p.slots.pending[i] = nil
-	}
-	p.slots.pending = kept
-	return victims
-}
-
-// fireAbortErrors delivers clierr.ErrAbortedByUrgent to each aborted slot's caller.
-// isCanceled() (atomic) is required: slotsMu is already released here.
-func fireAbortErrors(victims []*sendSlot) {
-	for _, s := range victims {
-		if s.isCanceled() {
-			continue
-		}
-		select {
-		case s.errCh <- clierr.ErrAbortedByUrgent:
-		default:
-		}
 	}
 }
 

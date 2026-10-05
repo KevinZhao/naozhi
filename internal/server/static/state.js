@@ -122,16 +122,16 @@ export const transcript = {
 export const sessionList = {
   sessionsData: {},
   allSessionsCache: [],
-  // Keys (sid(key,node)) optimistically removed by dismissSession before the
-  // DELETE round-trips. fetchSessions/renderSidebar skip these so an in-flight
-  // poll or sessions_update WS event that still lists the session cannot
-  // resurrect a card the operator already dismissed. Cleared when DELETE
-  // confirms (success/404) or fails — see dismissSession's normal-session branch.
+  // Keys (sid(key,node)) dismissSession removed before its DELETE resolves:
+  // fetchSessions/renderSidebar skip them so a lagging poll or sessions_update
+  // cannot resurrect the card. Cleared once the DELETE confirms (200/404) or fails.
   optimisticDeleteKeys: new Set(),
   // Initialized in dashboard.js at load.
   collapsedProjects: null,
   nodesData: {},
   lastVersion: 0,
+  // statePushes: changes a poll must not undo, counted (n) and stamped per key (at).
+  statePushes: { n: 0, at: new Map() },
   // lastETag is {etag, unpainted} for the last /api/sessions body handled
   // (see fetchSessionsPayload); null sends no If-None-Match.
   lastETag: null,
