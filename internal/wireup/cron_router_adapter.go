@@ -145,8 +145,9 @@ func (c cronSessionAdapter) Send(ctx context.Context, text string) (cron.SendRes
 
 // exitFailure wraps a cron.TurnFailedError around a CLI exit claude made
 // because it could not resume the session, keeping err in the chain for run
-// history; any other error is returned as is. The respawn drops that resume,
-// which is what the notice for the cause tells the user.
+// history; any other error is returned as is. The respawn normally drops that
+// resume (session's resumeDropReason), so the notice says the next run tries a
+// new session rather than promising one.
 func exitFailure(err error) error {
 	var pe *clierr.ProcessExitedError
 	if errors.As(err, &pe) && pe.Class == clierr.ExitResumeNotFound {

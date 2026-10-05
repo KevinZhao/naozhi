@@ -170,7 +170,7 @@ var turnFailedNotices = map[TurnCause]string{
 	TurnCauseBackendAuth:        "执行失败（后端认证失败或凭证已过期），请联系管理员",
 	TurnCauseBackendInvalid:     "执行失败（后端无法处理本次请求），请检查执行历史",
 	TurnCauseBackendUnreachable: "执行失败（连接模型服务超时或网络异常），请检查执行历史",
-	TurnCauseResumeUnavailable:  "执行失败（上次会话无法恢复），下次执行将开启新会话",
+	TurnCauseResumeUnavailable:  "执行失败（上次会话无法恢复），下次执行将尝试开启新会话",
 }
 
 // turnFailedNotice is the notice cause for a failed turn; a cause nobody
