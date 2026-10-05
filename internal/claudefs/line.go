@@ -46,33 +46,15 @@ func ParseTimestamp(s string) (time.Time, bool) {
 	return t, true
 }
 
-// TimestampMillis converts a transcript timestamp into unix ms, returning 0 when
-// the input is empty or unparseable so callers can use it as a "skip filter"
-// sentinel.
-//
-// Four packages had their own copy of this. Three used time.Parse; the fourth
-// (dashboard/cron) had grown the byte-level fast path below. That is the one
-// that moved here, so the other three inherit it rather than the reverse.
-//
-// Its original justification ("~30ns vs ~300ns for time.Parse", #1012) no longer
-// reproduces: measured 2026-09-09 on darwin/arm64 (Apple M4 Pro, Go 1.26) the
-// fast path is 19.1-19.5 ns/op against 24.0-24.7 for time.Parse — 1.26x, not
-// 10x. Go's time.Parse got faster. Kept as-is here because this commit is a
-// move, not a re-decision, but 105 lines of hand-rolled calendar arithmetic
-// (leap-year daysInMonth, a fractional-second padder — both places a bug can
-// hide) now buy ~5ns per transcript line, i.e. ~2.5us on a 500-line transcript.
-// Whether that trade still holds is worth asking on its own.
-
 // TimestampMillis converts an RFC 3339 / ISO 8601 timestamp into unix ms.
 // Returns 0 when the input is empty or unparseable so callers can use it as a
 // "skip filter" sentinel. time.RFC3339Nano is a strict superset of RFC3339
 // (the fractional part is optional), so no second layout is needed.
 //
-// The Claude CLI exclusively emits "YYYY-MM-DDTHH:MM:SS[.fff…]Z", which the
-// byte-level fast path parses in ~30ns vs ~300ns for time.Parse — compounding
-// across 500-line transcripts under bulk polling (#1012). Anything
-// non-canonical (offsets, exotic layouts) falls back to time.Parse, so
-// results are bit-identical to the slow path.
+// The Claude CLI's "YYYY-MM-DDTHH:MM:SS[.fff…]Z" goes through a byte-level fast
+// path: about 19 vs 24 ns/op for time.Parse on Go 1.26, a small win. Anything
+// non-canonical (offsets, exotic layouts) falls back to time.Parse, so results
+// are bit-identical to the slow path.
 func TimestampMillis(s string) int64 {
 	if s == "" {
 		return 0
