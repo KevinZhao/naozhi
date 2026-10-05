@@ -7,13 +7,55 @@ import (
 	"time"
 )
 
-// TestApplyJitter_ZeroMaxNoOp 确保 jitterMax=0 时 applyJitter 立即返回。
+// jitterGuard is the outer bound for "call returns rather than sleeps". The
+// calls under test either return at once or wait out a window of minutes to
+// hours, so 5s separates the two without measuring latency.
+const jitterGuard = 5 * time.Second
+
+// mustReturn runs f on a goroutine and fails the test if it does not return
+// within jitterGuard.
+func mustReturn(t *testing.T, what string, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f()
+	}()
+	select {
+	case <-done:
+	case <-time.After(jitterGuard):
+		t.Fatalf("%s did not return within %v; it waited on the jitter timer", what, jitterGuard)
+	}
+}
+
+// TestApplyJitter_ZeroMaxNoOp 确保 jitterMax=0 时 applyJitter 立即返回。ctx
+// 不取消，若 0 被当成"无上限"或回落到某个非零窗口，调用会挂住到 guard 超时。
 func TestApplyJitter_ZeroMaxNoOp(t *testing.T) {
 	t.Parallel()
-	start := time.Now()
-	applyJitter(context.Background(), "@every 30m", 0)
-	if elapsed := time.Since(start); elapsed > 5*time.Millisecond {
-		t.Fatalf("zero jitterMax should be instant, took %v", elapsed)
+	mustReturn(t, "applyJitter(jitterMax=0)", func() {
+		applyJitter(context.Background(), "@every 30m", 0)
+	})
+}
+
+// TestJitterWindow pins the window selection: jitterMax clamped by period/4,
+// jitterMax as-is when period<=0, and 0 (no jitter) for a non-positive result.
+func TestJitterWindow(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name              string
+		period, jitterMax time.Duration
+		want              time.Duration
+	}{
+		{"unparsable schedule falls back to jitterMax", 0, time.Hour, time.Hour},
+		{"period/4 clamps a larger jitterMax", 5 * time.Minute, 10 * time.Minute, 75 * time.Second},
+		{"jitterMax below period/4 wins", 30 * time.Minute, time.Second, time.Second},
+		{"zero jitterMax", time.Hour, 0, 0},
+		{"negative jitterMax", time.Hour, -time.Second, 0},
+		{"negative period treated as unknown", -time.Hour, time.Second, time.Second},
+	} {
+		if got := jitterWindow(c.period, c.jitterMax); got != c.want {
+			t.Errorf("%s: jitterWindow(%v, %v) = %v, want %v", c.name, c.period, c.jitterMax, got, c.want)
+		}
 	}
 }
 
@@ -43,22 +85,16 @@ func TestApplyJitter_RespectsCtxCancel(t *testing.T) {
 }
 
 // TestApplyJitter_CapClampedByPeriod 验证 jitter 窗口被 period/4 钳住：
-// 5m 周期 + 10m jitterMax → 实际 window 应该是 5m/4 = 75s，多次采样
-// 的最大延迟应落在 75s 以内（留足 rng 方差余量用统计上界）。
+// 5m 周期 + 10m jitterMax → jitterSleep 实际使用的 window 是 75s。
 func TestApplyJitter_CapClampedByPeriod(t *testing.T) {
 	t.Parallel()
 
-	// 直接调 schedulePeriod 验证 period 侧的 cap 计算，避免真的 sleep 测试
-	// 里做 75s 的实时等待（测试时间会爆炸）。
 	period := schedulePeriod("@every 5m", time.Now())
 	if period != 5*time.Minute {
 		t.Fatalf("schedulePeriod(@every 5m) = %v, want 5m", period)
 	}
-	// period/4 = 75s，说明 clamp 逻辑在运行时选取了较小的 window
-	// 而不是 jitterMax=10m 的默认窗口。
-	cap := period / 4
-	if cap != 75*time.Second {
-		t.Fatalf("period/4 = %v, want 75s", cap)
+	if got := jitterWindow(period, 10*time.Minute); got != 75*time.Second {
+		t.Fatalf("jitterWindow(5m, 10m) = %v, want 75s (period/4 must clamp jitterMax)", got)
 	}
 }
 
@@ -80,21 +116,17 @@ func TestApplyJitterSched_ReusesParsedSchedule(t *testing.T) {
 		t.Fatalf("period mismatch: sched=%v string=%v", got, want)
 	}
 
-	// jitterMax=0 → 立即返回，不 sleep。
-	start := time.Now()
-	applyJitterSched(context.Background(), sched, 0)
-	if elapsed := time.Since(start); elapsed > 5*time.Millisecond {
-		t.Fatalf("zero jitterMax should be instant, took %v", elapsed)
-	}
+	// jitterMax=0 → 立即返回，不 sleep（ctx 不取消，sleep 了就挂到 guard）。
+	mustReturn(t, "applyJitterSched(jitterMax=0)", func() {
+		applyJitterSched(context.Background(), sched, 0)
+	})
 
-	// nil schedule → 退化为 jitterMax 兜底，但 ctx 立刻 cancel 也应秒返。
+	// nil schedule → 退化为 jitterMax 兜底；24h 窗口 + 已取消 ctx 必须秒返。
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	start = time.Now()
-	applyJitterSched(ctx, nil, 100*time.Millisecond)
-	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
-		t.Fatalf("cancelled ctx + nil sched should return immediately, took %v", elapsed)
-	}
+	mustReturn(t, "applyJitterSched(cancelled ctx, nil sched)", func() {
+		applyJitterSched(ctx, nil, 24*time.Hour)
+	})
 
 	// ctx cancel 在窗口内 → 立即返回。覆盖 select 路径不依赖 timer 触发。
 	ctx, cancel = context.WithCancel(context.Background())
@@ -125,16 +157,17 @@ func TestApplyJitter_UnparsableSchedule_UsesMaxCap(t *testing.T) {
 		t.Fatalf("schedulePeriod(bogus) = %v, want 0", period)
 	}
 
-	// ctx 立即 cancel，确保 applyJitter 不会实际 sleep；它应该在进入 select
-	// 前（确认 window > 0）就已经选了 jitterMax 作为 window。
+	const jitterMax = 24 * time.Hour
+	if got := jitterWindow(period, jitterMax); got != jitterMax {
+		t.Fatalf("jitterWindow(0, %v) = %v, want the full jitterMax", jitterMax, got)
+	}
+
+	// 已取消 ctx：24h 窗口下若不走 ctx.Done() 分支会挂到 guard 超时。
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-
-	start := time.Now()
-	applyJitter(ctx, "not-a-cron-expr", 100*time.Millisecond)
-	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
-		t.Fatalf("cancel-before-call should return immediately, took %v", elapsed)
-	}
+	mustReturn(t, "applyJitter(cancelled ctx, bogus schedule)", func() {
+		applyJitter(ctx, "not-a-cron-expr", jitterMax)
+	})
 }
 
 // TestExecuteOpt_TriggerNowSkipsJitter 是对 executeOpt 的行为测试：

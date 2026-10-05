@@ -41,10 +41,10 @@ func applyJitterSched(ctx context.Context, sched robfigcron.Schedule, jitterMax 
 	jitterSleep(ctx, period, jitterMax)
 }
 
-// jitterSleep is the shared tail of applyJitter / applyJitterSched: clamp
-// jitterMax by period/4 (period<=0 = use jitterMax as-is), roll a random
-// duration in [0, window), and sleep on a Timer that respects ctx.
-func jitterSleep(ctx context.Context, period, jitterMax time.Duration) {
+// jitterWindow returns the upper bound of the random delay: jitterMax clamped
+// by period/4, with period<=0 (unparsable schedule) meaning jitterMax as-is.
+// A non-positive result means "no jitter".
+func jitterWindow(period, jitterMax time.Duration) time.Duration {
 	window := jitterMax
 	if period > 0 {
 		if quarter := period / 4; quarter < window {
@@ -52,16 +52,23 @@ func jitterSleep(ctx context.Context, period, jitterMax time.Duration) {
 		}
 	}
 	if window <= 0 {
-		return
+		return 0
 	}
+	return window
+}
+
+// jitterSleep is the shared tail of applyJitter / applyJitterSched: take the
+// jitterWindow, roll a random duration in [0, window), and sleep on a Timer
+// that respects ctx.
+func jitterSleep(ctx context.Context, period, jitterMax time.Duration) {
+	window := jitterWindow(period, jitterMax)
 	// mrand.Int64N panics on n <= 0; a buggy custom Schedule with
-	// non-monotonic Next could clamp period to a non-positive int64, so guard
+	// non-monotonic Next could clamp period to a non-positive value, so guard
 	// rather than fall into robfig/cron's recover path.
-	n := int64(window)
-	if n <= 0 {
+	if window <= 0 {
 		return
 	}
-	d := time.Duration(mrand.Int64N(n))
+	d := time.Duration(mrand.Int64N(int64(window)))
 	if d <= 0 {
 		return
 	}
