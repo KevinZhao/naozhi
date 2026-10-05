@@ -203,6 +203,11 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 				if ev.SessionID != "" {
 					p.turn.sessionID = ev.SessionID
 				}
+				// This is the interrupt's result: the next Send has none to settle for.
+				if ev.Aborted {
+					p.turn.interrupted.Store(false)
+					p.turn.interruptedRun.Store(false)
+				}
 				p.turn.mu.Unlock()
 				sr := resultFromEvent(ev)
 				return &sr, nil

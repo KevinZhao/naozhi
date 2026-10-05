@@ -61,6 +61,14 @@ func TestLegacySend_AbortedTurnReturnsItsResult(t *testing.T) {
 			if got := sh.proc.State(); got != StateReady {
 				t.Errorf("state after Send = %v, want Ready", got)
 			}
+			// The result was consumed here, so the next Send must not burn
+			// interruptedSettleWindow waiting for it.
+			sh.proc.turn.mu.Lock()
+			i, r := sh.proc.turn.interrupted.Load(), sh.proc.turn.interruptedRun.Load()
+			sh.proc.turn.mu.Unlock()
+			if i || r {
+				t.Errorf("interrupted, interruptedRun = %v, %v after the aborted result; want false, false", i, r)
+			}
 		})
 	}
 }
