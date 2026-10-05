@@ -118,7 +118,7 @@ func TestAccessProfileDefaultBackend_SpawnPaths(t *testing.T) {
 		t.Errorf("runtime-added profile backend = %q, want its kiro", got)
 	}
 
-	took, err := r.Takeover(ctx, "feishu:direct:adopt:general", "sess-external", t.TempDir(), AgentOpts{AccessProfile: "viakiro"})
+	took, err := reserveAndTakeover(ctx, r, "feishu:direct:adopt:general", "sess-external", t.TempDir(), AgentOpts{AccessProfile: "viakiro"})
 	if err != nil {
 		t.Fatalf("Takeover: %v", err)
 	}

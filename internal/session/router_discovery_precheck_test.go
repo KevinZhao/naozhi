@@ -17,14 +17,76 @@ func injectExempt(r *Router, key string, proc processIface) {
 	})
 }
 
-// TestTakeoverPrecheck pins #3315: the precheck refuses exactly the
-// takeovers Takeover itself refuses before spawning. Each case runs the
-// precheck and then a real Takeover on the same router; the spawn fails on
-// newTestRouter's missing CLI, so a takeover that got past its gates
-// returns a spawn error and no refusal sentinel.
-func TestTakeoverPrecheck(t *testing.T) {
+// checkReserveAgainstSpawn reserves key and holds the answer to what the
+// spawn gates say. A refusal must leave the table as it was and match the
+// error reserveSpawn gives the same takeover reaching it unreserved; a lease
+// must take a Takeover past every gate to newTestRouter's missing CLI, so it
+// fails with a spawn error and no refusal sentinel, and leave nothing held.
+// oracle false skips the unreserved run, for refusals of the opts themselves.
+func checkReserveAgainstSpawn(t *testing.T, r *Router, key string, opts AgentOpts, want error, oracle bool) {
+	t.Helper()
+	sentinels := []error{ErrMaxProcs, ErrSpawnInFlight, ErrRouterStopped, ErrMaxExemptSessions, ErrInvalidModel, ErrInvalidBackend}
+	gen, active, pending := r.ss.Gen(), r.ss.Active(), pendingSpawns(r)
+	_, inflight := spawnInFlight(r, key)
+
+	lease, perr := r.ReserveTakeover(key, opts)
+	if want == nil && perr != nil || want != nil && !errors.Is(perr, want) {
+		t.Fatalf("ReserveTakeover = %v, want %v", perr, want)
+	}
+	var terr error
+	if perr != nil {
+		if _, held := spawnInFlight(r, key); r.ss.Gen() != gen || r.ss.Active() != active || pendingSpawns(r) != pending || held != inflight {
+			t.Fatalf("a refused reserve changed the table: gen %d→%d, active %d→%d, pending %d→%d, marker %v→%v",
+				gen, r.ss.Gen(), active, r.ss.Active(), pending, pendingSpawns(r), inflight, held)
+		}
+		if !oracle {
+			return
+		}
+		_, terr = r.Takeover(context.Background(), unreservedLease(r, key, opts), "", "/tmp/precheck-ws")
+	} else {
+		_, terr = r.Takeover(context.Background(), lease, "", "/tmp/precheck-ws")
+		if terr == nil {
+			t.Fatal("Takeover succeeded; the test router cannot spawn")
+		}
+		if _, held := spawnInFlight(r, key); held || pendingSpawns(r) != pending {
+			t.Fatalf("after Takeover: marker %v, pending %d; want none and %d", held, pendingSpawns(r), pending)
+		}
+	}
+	for _, s := range sentinels {
+		if errors.Is(perr, s) != errors.Is(terr, s) {
+			t.Errorf("ReserveTakeover %v and the spawn %v disagree on %v", perr, terr, s)
+		}
+	}
+}
+
+// unreservedLease is a lease that skipped ReserveTakeover's checks, so
+// Takeover meets the spawn's own gates. A marker already on key stays its
+// owner's: the lease's guard is then not the key's marker.
+func unreservedLease(r *Router, key string, opts AgentOpts) *TakeoverLease {
+	l := &TakeoverLease{key: key, opts: opts, slot: pendingSpawnSlot{r: r, released: true}}
+	r.ss.Update(func(tx sessTx) {
+		var owned bool
+		if l.guard, owned = tx.Ext().spawns.BeginSpawn(key); !owned {
+			l.guard = make(chan struct{})
+		}
+	})
+	return l
+}
+
+func pendingSpawns(r *Router) (n int) {
+	r.ss.View(func(v sessView) { n = v.Ext().PendingSpawns() })
+	return n
+}
+
+func spawnInFlight(r *Router, key string) (ch chan struct{}, ok bool) {
+	r.ss.View(func(v sessView) { ch, ok = v.Ext().SpawnInFlight(key) })
+	return ch, ok
+}
+
+// TestReserveTakeover pins #3315: a reserve refuses exactly the takeovers the
+// spawn refuses before starting the CLI (see checkReserveAgainstSpawn).
+func TestReserveTakeover(t *testing.T) {
 	const key = "dashboard:takeover:proj:general"
-	sentinels := []error{ErrMaxProcs, ErrSpawnInFlight, ErrRouterStopped}
 	cases := []struct {
 		name     string
 		maxProcs int
@@ -101,35 +163,16 @@ func TestTakeoverPrecheck(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newTakeoverTestRouter(tc.maxProcs)
 			tc.setup(r)
-			gen, active := r.ss.Gen(), r.ss.Active()
-
-			perr := r.TakeoverPrecheck(key, AgentOpts{})
-			if tc.want == nil && perr != nil || tc.want != nil && !errors.Is(perr, tc.want) {
-				t.Fatalf("TakeoverPrecheck = %v, want %v", perr, tc.want)
-			}
-			if r.ss.Gen() != gen || r.ss.Active() != active {
-				t.Fatalf("precheck changed the table: gen %d→%d, active %d→%d", gen, r.ss.Gen(), active, r.ss.Active())
-			}
-
-			_, terr := r.Takeover(context.Background(), key, "", "/tmp/precheck-ws", AgentOpts{})
-			if terr == nil {
-				t.Fatal("Takeover succeeded; the test router cannot spawn")
-			}
-			for _, s := range sentinels {
-				if errors.Is(perr, s) != errors.Is(terr, s) {
-					t.Errorf("precheck %v and Takeover %v disagree on %v", perr, terr, s)
-				}
-			}
+			checkReserveAgainstSpawn(t, r, key, AgentOpts{}, tc.want, true)
 		})
 	}
 }
 
-// TestTakeoverPrecheck_ExemptAndOpts pins #3395: for a planner's exempt opts the
-// precheck applies reserveSpawn's exempt quotas instead of maxProcs, and it
-// rejects the opts Takeover rejects, each agreeing with a real Takeover.
-func TestTakeoverPrecheck_ExemptAndOpts(t *testing.T) {
+// TestReserveTakeover_ExemptAndOpts pins #3395: for a planner's exempt opts a
+// reserve applies reserveSpawn's exempt quotas instead of maxProcs, and it
+// rejects the opts GetOrCreate rejects.
+func TestReserveTakeover_ExemptAndOpts(t *testing.T) {
 	const key = "project:proj:planner"
-	sentinels := []error{ErrMaxProcs, ErrSpawnInFlight, ErrRouterStopped, ErrMaxExemptSessions, ErrInvalidModel, ErrInvalidBackend}
 	exempt := AgentOpts{Exempt: true}
 	injectN := func(r *Router, prefix string, n int) {
 		for i := range n {
@@ -179,25 +222,8 @@ func TestTakeoverPrecheck_ExemptAndOpts(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newTakeoverTestRouter(1)
 			tc.setup(r)
-			gen, active := r.ss.Gen(), r.ss.Active()
-
-			perr := r.TakeoverPrecheck(key, tc.opts)
-			if tc.want == nil && perr != nil || tc.want != nil && !errors.Is(perr, tc.want) {
-				t.Fatalf("TakeoverPrecheck = %v, want %v", perr, tc.want)
-			}
-			if r.ss.Gen() != gen || r.ss.Active() != active {
-				t.Fatalf("precheck changed the table: gen %d→%d, active %d→%d", gen, r.ss.Gen(), active, r.ss.Active())
-			}
-
-			_, terr := r.Takeover(context.Background(), key, "", "/tmp/precheck-ws", tc.opts)
-			if terr == nil {
-				t.Fatal("Takeover succeeded; the test router cannot spawn")
-			}
-			for _, s := range sentinels {
-				if errors.Is(perr, s) != errors.Is(terr, s) {
-					t.Errorf("precheck %v and Takeover %v disagree on %v", perr, terr, s)
-				}
-			}
+			optsRefused := errors.Is(tc.want, ErrInvalidModel) || errors.Is(tc.want, ErrInvalidBackend)
+			checkReserveAgainstSpawn(t, r, key, tc.opts, tc.want, !optsRefused)
 		})
 	}
 }

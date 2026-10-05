@@ -58,7 +58,7 @@ func TestSpawnSession_RejectedAfterStopped(t *testing.T) {
 		t.Parallel()
 		r := newStoppedGateRouter()
 		r.stopped.Store(true)
-		_, err := r.Takeover(context.Background(), "feishu:p2p:u2", "sess-abc", "", AgentOpts{})
+		_, err := reserveAndTakeover(context.Background(), r, "feishu:p2p:u2", "sess-abc", "", AgentOpts{})
 		if !errors.Is(err, ErrRouterStopped) {
 			t.Fatalf("Takeover err = %v, want ErrRouterStopped", err)
 		}
