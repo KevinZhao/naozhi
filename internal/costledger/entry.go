@@ -49,6 +49,9 @@ const (
 // MaxModels bounds Entry.Models so a misbehaving CLI cannot inflate a line.
 const MaxModels = 16
 
+// OtherModel names the row CapModels folds the overflow rows into.
+const OtherModel = "other"
+
 // maxIdentLen bounds model/provider strings copied from CLI output.
 const maxIdentLen = 128
 
@@ -171,6 +174,25 @@ func sanitizeIdent(s string) string {
 	return s
 }
 
+// CapModels bounds ms to MaxModels rows by folding every row from the last
+// slot on into one OtherModel row (costs and tokens summed, worst normalized
+// basis), so the rows still add up to what they added up to before.
+func CapModels(ms []ModelDelta) []ModelDelta {
+	if len(ms) <= MaxModels {
+		return ms
+	}
+	other := ModelDelta{Model: OtherModel}
+	for _, m := range ms[MaxModels-1:] {
+		other.CostUSD += m.CostUSD
+		other.Tokens = other.Tokens.add(m.Tokens)
+		other.Basis = WorseBasis(other.Basis, normalizeBasis(m.Basis))
+	}
+	out := make([]ModelDelta, MaxModels)
+	copy(out, ms[:MaxModels-1])
+	out[MaxModels-1] = other
+	return out
+}
+
 // normalize validates enums, sanitizes CLI-sourced strings and caps Models.
 // It returns false when the entry must be rejected outright: invalid
 // Source/Unit/Kind, empty Backend, or nothing to record (Amount <= 0 and no
@@ -189,9 +211,7 @@ func (e *Entry) normalize() bool {
 	}
 	e.Basis = normalizeBasis(e.Basis)
 	e.Backend = sanitizeIdent(e.Backend)
-	if len(e.Models) > MaxModels {
-		e.Models = e.Models[:MaxModels]
-	}
+	e.Models = CapModels(e.Models)
 	for i := range e.Models {
 		m := &e.Models[i]
 		m.Model = sanitizeIdent(m.Model)
