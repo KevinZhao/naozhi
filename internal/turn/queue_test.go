@@ -471,17 +471,28 @@ func TestEnqueue_InterruptMode_Discard_ResetsInterruptFlag(t *testing.T) {
 	}
 }
 
-// TestQueue_CleanupLeavesNothingToDiscard is why Orchestrator.Reset discards
-// before the session reset (#2185): the reset retires the key, whose Cleanup
-// deletes the ring, and a discard after it has no message left to report.
-func TestQueue_CleanupLeavesNothingToDiscard(t *testing.T) {
+// TestQueue_CleanupReturnsTheQueuedMessages (#3297): Cleanup hands back the
+// queued messages FIFO, so Orchestrator.Retire can tell each origin, and
+// leaves nothing for a later discard to report twice. An unknown key, or an
+// owner with nothing queued, returns nil.
+func TestQueue_CleanupReturnsTheQueuedMessages(t *testing.T) {
 	t.Parallel()
 	q := newTestQueue(8, 0)
 	q.Enqueue("k", Msg{Text: "owner"})
 	q.Enqueue("k", Msg{Text: "f1"})
-	q.Cleanup("k")
+	q.Enqueue("k", Msg{Text: "f2"})
+	got := q.Cleanup("k")
+	if len(got) != 2 || got[0].Text != "f1" || got[1].Text != "f2" {
+		t.Fatalf("Cleanup returned %+v, want f1 then f2", got)
+	}
 	if dropped := q.DiscardAndReturn("k"); dropped != nil {
 		t.Fatalf("discard after Cleanup reported %+v, want nothing (ring already gone)", dropped)
+	}
+	q.Enqueue("idle", Msg{Text: "owner"})
+	for _, key := range []string{"idle", "never-seen"} {
+		if got := q.Cleanup(key); got != nil {
+			t.Fatalf("Cleanup(%q) returned %+v, want nil", key, got)
+		}
 	}
 }
 

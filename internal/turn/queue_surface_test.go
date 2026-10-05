@@ -12,7 +12,7 @@ import (
 // the Orchestrator, so these four methods are the whole reach any entry has
 // into it. SessionRouter's and Turns' halves of G-c are
 // internal/dispatch/queue_surface_test.go.
-var orchestratorMethodNames = []string{"Cleanup", "Reset", "ShouldNotify", "Submit"}
+var orchestratorMethodNames = []string{"Reset", "Retire", "ShouldNotify", "Submit"}
 
 func exportedMethodNames(t reflect.Type) []string {
 	names := make([]string, 0, t.NumMethod())
@@ -55,7 +55,7 @@ func assertMethodSet(t *testing.T, label string, got []string, want []string) {
 
 // TestOrchestratorSurface_Ratchet pins *Orchestrator's exported method set
 // at #3004's final one: entry points submit, reset, rate-limit notices and
-// clean up a retired key.
+// retire a key the router retired.
 func TestOrchestratorSurface_Ratchet(t *testing.T) {
 	t.Parallel()
 	got := exportedMethodNames(reflect.TypeFor[*Orchestrator]())

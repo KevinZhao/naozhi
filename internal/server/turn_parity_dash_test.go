@@ -219,7 +219,7 @@ func (h *parityHarness) keyIsFree(t *testing.T) bool {
 	turns := h.hs.wiring.turns
 	ack := turns.Submit(context.Background(), turn.Request{Key: parityKey, Text: "probe"}, neverRunAdmission{})
 	if ack == turn.AckOwner {
-		turns.Cleanup(parityKey)
+		turns.Retire(context.Background(), parityKey)
 	}
 	return ack == turn.AckOwner || ack == turn.AckDetached
 }

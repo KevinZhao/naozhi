@@ -1,6 +1,8 @@
 package costledger
 
 import (
+	"fmt"
+	"math"
 	"strings"
 	"testing"
 )
@@ -81,6 +83,45 @@ func TestNormalize_CapsModels(t *testing.T) {
 	e.normalize()
 	if len(e.Models) != MaxModels {
 		t.Fatalf("models = %d, want %d", len(e.Models), MaxModels)
+	}
+}
+
+// Rows past the cap fold into one "other" row, so the rows still sum to the
+// entry's Amount; Amount itself is never trimmed. A folded row's invalid basis
+// still surfaces as unknown, as it would on a kept row.
+func TestNormalize_FoldsOverflowModelsIntoOther(t *testing.T) {
+	e := validEntry()
+	var cost float64
+	var tok Tokens
+	for i := 0; i < MaxModels+4; i++ {
+		m := ModelDelta{Model: fmt.Sprintf("m%d", i), CostUSD: 0.01 * float64(i+1), Basis: BasisList,
+			Tokens: Tokens{Input: int64(i), Output: 10, CacheRead: 2, CacheWrite: 1, Thinking: 3, WebSearch: 1}}
+		if i == MaxModels+2 {
+			m.Basis = BasisManaged
+		}
+		if i == MaxModels {
+			m.Basis = "weird"
+		}
+		cost += m.CostUSD
+		tok = tok.add(m.Tokens)
+		e.Models = append(e.Models, m)
+	}
+	e.Amount = cost
+	if !e.normalize() || len(e.Models) != MaxModels || e.Amount != cost {
+		t.Fatalf("normalize: %d models, amount %v; want %d and %v", len(e.Models), e.Amount, MaxModels, cost)
+	}
+	var gotCost float64
+	var gotTok Tokens
+	for _, m := range e.Models {
+		gotCost += m.CostUSD
+		gotTok = gotTok.add(m.Tokens)
+	}
+	last := e.Models[MaxModels-1]
+	if last.Model != OtherModel || last.Basis != BasisUnknown || e.Models[MaxModels-2].Model != fmt.Sprintf("m%d", MaxModels-2) {
+		t.Fatalf("last rows = %+v, %+v: want the kept rows in order, then other at the worst basis (an invalid one counts as unknown)", e.Models[MaxModels-2], last)
+	}
+	if math.Abs(gotCost-cost) > 1e-12 || gotTok != tok {
+		t.Fatalf("rows sum to %v / %+v, want %v / %+v", gotCost, gotTok, cost, tok)
 	}
 }
 

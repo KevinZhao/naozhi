@@ -346,7 +346,7 @@ func ackName(a Ack) string {
 func roleName(r Role) string { return [...]string{"head", "observer"}[r] }
 
 func dropName(d DropReason) string {
-	return [...]string{"reset", "shutdown", "panic", "evicted"}[d]
+	return [...]string{"reset", "shutdown", "panic", "evicted", "removed"}[d]
 }
 
 func runKindName(k RunKind) string { return [...]string{"owner", "detached"}[k] }

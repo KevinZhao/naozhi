@@ -52,7 +52,7 @@ func busyForTest(t testing.TB, hub *Hub, key string) {
 	if ack := hub.engine.turns.Submit(context.Background(), turn.Request{Key: key, Text: "busy"}, neverRunAdmission{}); ack != turn.AckOwner {
 		t.Fatalf("busyForTest: %q already has an owner (ack %d)", key, ack)
 	}
-	t.Cleanup(func() { hub.engine.turns.Cleanup(key) })
+	t.Cleanup(func() { hub.engine.turns.Retire(context.Background(), key) })
 }
 
 // neverRunAdmission admits a run and never starts it.
