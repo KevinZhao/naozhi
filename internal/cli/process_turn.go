@@ -326,8 +326,10 @@ func sanitizeStderrLine(line string) string {
 // readLoop to see the turn as abandoned. Results readLoop already booked come
 // through again harmlessly (the session books cumulative differences). One
 // such result is still lost if the process dies before the next Send drains.
+// A stale result also ends an abandoned turn, so it releases that turn's abort.
 func (p *Process) bookDroppedResult(ev clievent.Event) {
 	if ev.Type == "result" {
+		p.turn.abortRequested.release()
 		p.bookUnclaimed(resultFromEvent(ev))
 	}
 }

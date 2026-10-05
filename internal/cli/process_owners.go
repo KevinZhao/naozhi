@@ -74,6 +74,9 @@ func (t *turnState) transitionLocked(ev stateEvent) (prev ProcessState, moved bo
 		t.state = next
 		t.unowned = ev == evTurnStarted
 		if ev == evSendBegin {
+			if t.sendAbandoned {
+				t.abortRequested.orphan()
+			}
 			t.sendAbandoned = false
 		}
 	}
@@ -157,21 +160,66 @@ type sendSlots struct {
 // whole count: repeated aborts of one turn yield one result, and a leftover
 // count would mark a later real failure Aborted. Hence at most one result per
 // read is marked: if a second abort lands before the first abort's result is
-// read, the second aborted turn's result is not marked.
-type abortMarker struct{ n atomic.Int32 }
+// read, the second aborted turn's result is not marked. orphaned: the pending
+// abort was asked for by a Send that gave up (see orphan), not the live one.
+type abortMarker struct {
+	mu       sync.Mutex
+	n        int32
+	orphaned bool
+}
 
-func (m *abortMarker) arm() { m.n.Add(1) }
+// arm records an abort of the live turn, which then owns the next aborted
+// result even if an abandoned turn's abort is still outstanding.
+func (m *abortMarker) arm() {
+	m.mu.Lock()
+	m.n++
+	m.orphaned = false
+	m.mu.Unlock()
+}
 
 // disarm undoes one arm, never below zero: a result may already have taken it.
 func (m *abortMarker) disarm() {
-	for {
-		n := m.n.Load()
-		if n <= 0 || m.n.CompareAndSwap(n, n-1) {
-			return
-		}
+	m.mu.Lock()
+	if m.n > 0 {
+		m.n--
 	}
+	m.mu.Unlock()
 }
 
-func (m *abortMarker) take() bool  { return m.n.Swap(0) > 0 }
-func (m *abortMarker) clear()      { m.n.Store(0) }
-func (m *abortMarker) armed() bool { return m.n.Load() > 0 }
+// take hands the pending abort to the result just read: aborted when one was
+// pending, orphaned when the Send that asked for it has since been replaced.
+func (m *abortMarker) take() (aborted, orphaned bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	aborted, orphaned = m.n > 0, m.orphaned && m.n > 0
+	m.n, m.orphaned = 0, false
+	return aborted, orphaned
+}
+
+// orphan marks a pending abort as belonging to an abandoned Send, so the next
+// Send does not take that turn's late aborted result as its own answer.
+func (m *abortMarker) orphan() {
+	m.mu.Lock()
+	m.orphaned = m.n > 0
+	m.mu.Unlock()
+}
+
+// release drops the orphaned mark once the abandoned turn's result has been
+// read: the abort then has no result of its own left to come.
+func (m *abortMarker) release() {
+	m.mu.Lock()
+	m.orphaned = false
+	m.mu.Unlock()
+}
+
+func (m *abortMarker) clear() {
+	m.mu.Lock()
+	m.n, m.orphaned = 0, false
+	m.mu.Unlock()
+}
+
+func (m *abortMarker) armed() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.n > 0
+}
