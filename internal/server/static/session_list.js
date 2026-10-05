@@ -128,9 +128,6 @@ function applySessionsStats(data) {
   serverInfo.lastStatsSnapshot = data.stats;
 }
 
-// statePushes counts session_state pushes (n) and each key's latest (at).
-const statePushes = { n: 0, at: new Map() };
-
 // mergeBackendSessions folds the polled sessions into sessionsData, adds each
 // key to backendKeys and returns the list the sidebar paints from. A key pushed
 // since the poll went out (pushesBefore) keeps its pushed state and death_reason;
@@ -146,7 +143,7 @@ function mergeBackendSessions(polled, backendKeys, pushesBefore) {
     const n = s.node || 'local';
     const sKey = sid(s.key, n);
     const cur = sessionList.sessionsData[sKey];
-    if (cur && statePushes.at.get(sKey) > pushesBefore) {
+    if (cur && sessionList.statePushes.at.get(sKey) > pushesBefore) {
       if (s.state !== cur.state) sessionList.lastVersion = 0;
       s = Object.assign({}, s, { state: cur.state, death_reason: cur.death_reason });
     }
@@ -256,7 +253,7 @@ export function onSessionsApplied(fn) {
 
 export async function fetchSessions() {
   try {
-    const pushesBefore = statePushes.n;
+    const pushesBefore = sessionList.statePushes.n;
     const got = await fetchSessionsPayload();
     if (got === NOT_MODIFIED) return;
     if (!got) return false;
@@ -859,7 +856,7 @@ wsm.onStateChange(wsStateChanged);
 function onSessionState(msg) {
   const msgNode = msg.node || 'local';
   const sKey = sid(msg.key, msgNode);
-  statePushes.at.set(sKey, ++statePushes.n);
+  sessionList.statePushes.at.set(sKey, ++sessionList.statePushes.n);
   // Real state arrived — the optimistic flip has served its purpose, regardless
   // of whether the server says running/ready/dead. Clear the flag so future
   // turns don't short-circuit the running→ready rollback logic. Capture it
@@ -1010,7 +1007,7 @@ wsm.on(NZ_CONTRACT.WS.subscribed, (msg) => {
   if (msg.state && msg.key === selection.key && sessionStream.subscribedNode === selection.node) {
     const subSKey = sid(msg.key, sessionStream.subscribedNode);
     if (sessionList.sessionsData[subSKey]) {
-      statePushes.at.set(subSKey, ++statePushes.n);
+      sessionList.statePushes.at.set(subSKey, ++sessionList.statePushes.n);
       sessionList.sessionsData[subSKey].state = msg.state;
       updateMainState(msg.state);
     }
