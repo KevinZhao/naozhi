@@ -231,23 +231,28 @@ func (h *HistoryIO) bindNewSessionHistory(
 	oldHistory []clievent.EventEntry,
 ) {
 	h.loadResumeHistoryOnSpawn(ctx, s, key, resumeID, workspace, prevIDs, oldHistory)
-	h.installPersistSink(proc, key)
+	h.installPersistSink(ctx, s, proc, key)
 }
 
 // installPersistSink wires the event-log persister into proc's EventLog,
-// once any removal of key still dropping its log has finished. No-op when
-// the persister is disabled or proc has no EventLog (test fakes). Must be
-// called AFTER any InjectHistory calls have completed (RFC §3.2.2).
-func (h *HistoryIO) installPersistSink(proc processIface, key string) {
+// once any removal of key still dropping its log has finished, unless s
+// itself has left the table meanwhile. No-op when the persister is disabled or proc
+// has no EventLog (test fakes). Must be called AFTER any InjectHistory calls
+// have completed (RFC §3.2.2).
+func (h *HistoryIO) installPersistSink(ctx context.Context, s *ManagedSession, proc processIface, key string) {
 	holder, ok := proc.(eventLogHolder)
 	if !ok || h.persister == nil {
 		return
 	}
-	if !h.awaitRetire(key, retireWaitMax) {
+	log := holder.EventLog()
+	if log == nil {
+		return
+	}
+	if !h.awaitRetire(ctx, key, retireWaitMax) {
 		slog.Warn("event log drop of a removed same-key session still running; binding the sink anyway",
 			"key", osutil.SanitizeForLog(key, 64), "waited", retireWaitMax)
 	}
-	h.bindPersistSink(holder.EventLog(), key)
+	h.bindUnlessRetired(s, log, key)
 }
 
 // loadResumeHistoryOnSpawn synchronously loads the JSONL chain for a resume

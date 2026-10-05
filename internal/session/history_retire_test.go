@@ -17,23 +17,23 @@ func retireTestHistory() *HistoryIO {
 // awaitAsync runs awaitRetire in a goroutine and returns its result channel.
 func awaitAsync(h *HistoryIO, key string, limit time.Duration) <-chan bool {
 	got := make(chan bool, 1)
-	go func() { got <- h.awaitRetire(key, limit) }()
+	go func() { got <- h.awaitRetire(context.Background(), key, limit) }()
 	return got
 }
 
 func TestAwaitRetire_NoBarrierReturnsAtOnce(t *testing.T) {
 	h := retireTestHistory()
-	if !h.awaitRetire("k", time.Hour) {
+	if !h.awaitRetire(context.Background(), "k", time.Hour) {
 		t.Fatal("awaitRetire with no barrier reported a timeout")
 	}
 }
 
 func TestBeginRetire_NothingPersistedRaisesNoBarrier(t *testing.T) {
 	h := &HistoryIO{}
-	if h.beginRetire("k") {
+	if h.beginRetire("k", nil) {
 		t.Fatal("beginRetire raised a barrier with no persister and no tracker")
 	}
-	if !h.awaitRetire("k", time.Hour) {
+	if !h.awaitRetire(context.Background(), "k", time.Hour) {
 		t.Fatal("awaitRetire waited on a barrier that was never raised")
 	}
 }
@@ -43,11 +43,11 @@ func TestBeginRetire_NothingPersistedRaisesNoBarrier(t *testing.T) {
 func TestRetireBarrier_OverlappingRemovalsReleaseAfterBoth(t *testing.T) {
 	h := retireTestHistory()
 	for range 2 {
-		if !h.beginRetire("k") {
+		if !h.beginRetire("k", nil) {
 			t.Fatal("beginRetire did not raise the barrier")
 		}
 	}
-	h.beginRetire("other")
+	h.beginRetire("other", nil)
 	got := awaitAsync(h, "k", time.Hour)
 	h.endRetire("k")
 	select {
@@ -64,15 +64,15 @@ func TestRetireBarrier_OverlappingRemovalsReleaseAfterBoth(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("awaitRetire still waiting after both removals ended")
 	}
-	if !h.awaitRetire("k", time.Hour) {
+	if !h.awaitRetire(context.Background(), "k", time.Hour) {
 		t.Fatal("a later removal-free wait blocked")
 	}
 }
 
 func TestAwaitRetire_TimesOut(t *testing.T) {
 	h := retireTestHistory()
-	h.beginRetire("k")
-	if h.awaitRetire("k", 20*time.Millisecond) {
+	h.beginRetire("k", nil)
+	if h.awaitRetire(context.Background(), "k", 20*time.Millisecond) {
 		t.Fatal("awaitRetire on a held barrier reported it released")
 	}
 }
@@ -82,7 +82,7 @@ func TestAwaitRetire_TimesOut(t *testing.T) {
 func TestAwaitRetire_ShutdownReleasesWaiter(t *testing.T) {
 	h := retireTestHistory()
 	h.ctx, h.cancel = context.WithCancel(context.Background())
-	h.beginRetire("k")
+	h.beginRetire("k", nil)
 	got := awaitAsync(h, "k", time.Hour)
 	h.cancelTasks()
 	select {
@@ -92,5 +92,24 @@ func TestAwaitRetire_ShutdownReleasesWaiter(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("awaitRetire still waiting after shutdown")
+	}
+}
+
+// TestAwaitRetire_CallerCtxReleasesWaiter: a cancelled spawn ctx stops the
+// wait, so a gone caller does not hold the key's spawn marker for limit.
+func TestAwaitRetire_CallerCtxReleasesWaiter(t *testing.T) {
+	h := retireTestHistory()
+	h.beginRetire("k", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	got := make(chan bool, 1)
+	go func() { got <- h.awaitRetire(ctx, "k", time.Hour) }()
+	cancel()
+	select {
+	case ok := <-got:
+		if !ok {
+			t.Fatal("awaitRetire reported a timeout on a cancelled ctx")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("awaitRetire still waiting after its ctx was cancelled")
 	}
 }

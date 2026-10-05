@@ -50,7 +50,7 @@ func (r *Router) unregisterAndSnapshot(key string) (snap removeSnapshot, ok bool
 		// session is gone from the session table, and OnSessionRemoved needs the
 		// root while notifyKeyRetired needs the UUID to stamp retired_at.
 		snap = removeSnapshot{proc: proc, workspace: s.Workspace(), retiredSessionID: s.SessionID(),
-			retiring: r.hist.beginRetire(key)}
+			retiring: r.hist.beginRetire(key, s)}
 		backend := s.Backend()
 		r.unregisterSession(tx, key, s, false)
 		if wasActive {

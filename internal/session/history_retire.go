@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -26,18 +27,22 @@ type eventLogHolder interface {
 
 var _ eventLogHolder = (*cli.Process)(nil)
 
-// beginRetire raises key's barrier and reports whether it did; false when
-// nothing is persisted. Called inside the table transaction that removes key,
-// so no same-key session can commit and bind its sink first.
+// beginRetire raises key's barrier for the removal of s, marks s retired so
+// its own late installPersistSink binds nothing, and reports whether it did;
+// false when nothing is persisted. Called inside the table transaction that
+// removes key, so no same-key session can commit and bind its sink first.
 //
 // LOCK: retireMu is a leaf below the table lock: it never takes the table
 // lock and nothing under it blocks or does I/O.
-func (h *HistoryIO) beginRetire(key string) bool {
+func (h *HistoryIO) beginRetire(key string, s *ManagedSession) bool {
 	if h.persister == nil && h.tracker == nil {
 		return false
 	}
 	h.retireMu.Lock()
 	defer h.retireMu.Unlock()
+	if s != nil {
+		s.historyRetired = true
+	}
 	if h.retiring == nil {
 		h.retiring = map[string]*retireBarrier{}
 	}
@@ -65,9 +70,10 @@ func (h *HistoryIO) endRetire(key string) {
 	}
 }
 
-// awaitRetire blocks until no removal of key holds its barrier, limit elapses
-// or Shutdown cancels h.ctx. Reports false only when limit elapses.
-func (h *HistoryIO) awaitRetire(key string, limit time.Duration) bool {
+// awaitRetire blocks until no removal of key holds its barrier, limit
+// elapses, ctx ends or Shutdown cancels h.ctx. Reports false only when limit
+// elapses.
+func (h *HistoryIO) awaitRetire(ctx context.Context, key string, limit time.Duration) bool {
 	h.retireMu.Lock()
 	b := h.retiring[key]
 	h.retireMu.Unlock()
@@ -82,11 +88,24 @@ func (h *HistoryIO) awaitRetire(key string, limit time.Duration) bool {
 	defer timer.Stop()
 	select {
 	case <-b.done:
+	case <-ctx.Done():
 	case <-cancelled:
 	case <-timer.C:
 		return false
 	}
 	return true
+}
+
+// bindUnlessRetired binds key's persist sink to log unless s is retired.
+// The check and the bind share retireMu with beginRetire, so a removal
+// either sees the sink bound and detaches it, or the bind sees s retired.
+func (h *HistoryIO) bindUnlessRetired(s *ManagedSession, log *ring.EventLog, key string) {
+	h.retireMu.Lock()
+	defer h.retireMu.Unlock()
+	if s != nil && s.historyRetired {
+		return
+	}
+	h.bindPersistSink(log, key)
 }
 
 // retireKeyHistory drops a removed session's event log and attachment refs,

@@ -27,6 +27,7 @@ type removeTeardownFixture struct {
 	dir      string
 	ws       string
 	key      string
+	sess     *ManagedSession
 	proc     *blockingCloseProc
 	rel      string
 	metaPath string
@@ -45,7 +46,8 @@ func newRemoveTeardownFixtureWith(t *testing.T, wrap func(*blockingCloseProc) pr
 	now := time.Now().UTC()
 	f.rel, f.metaPath = writeAttachmentPair(t, f.ws, now.Format("2006-01-02"), "img", now)
 	f.proc = newBlockingCloseProc()
-	installSession(t, f.r, f.key, wrap(f.proc)).setWorkspace(f.ws)
+	f.sess = installSession(t, f.r, f.key, wrap(f.proc))
+	f.sess.setWorkspace(f.ws)
 	f.write(t, "old")
 	return f
 }
@@ -203,11 +205,12 @@ func TestRemoveAsync_RecreateBeforeDrop_SinkWaitsForIt(t *testing.T) {
 	}
 	fresh := newEventLogProc(newBlockingCloseProc())
 	close(fresh.release) // only the old process's Close blocks
-	installSession(t, f.r, f.key, fresh).setWorkspace(f.ws)
+	freshSess := installSession(t, f.r, f.key, fresh)
+	freshSess.setWorkspace(f.ws)
 	bound := make(chan struct{})
 	go func() {
 		defer close(bound)
-		f.r.hist.installPersistSink(fresh, f.key)
+		f.r.hist.installPersistSink(context.Background(), freshSess, fresh, f.key)
 	}()
 	select {
 	case <-bound:
@@ -238,9 +241,105 @@ func TestRemoveAsync_RecreateBeforeDrop_SinkWaitsForIt(t *testing.T) {
 	}
 }
 
-// TestRemove_DetachesRemovedProcessSink: what the removed process emits while
+// TestRemoveAsync_RemovedSessionLateSinkNotBound: a session removed after
+// its spawn committed but before it bound its persist sink never binds it,
+// so what it records afterwards (the caller's turn, its Close tail) is not
+// written under the dropped key.
+func TestRemoveAsync_RemovedSessionLateSinkNotBound(t *testing.T) {
+	var old *eventLogProc
+	f := newRemoveTeardownFixtureWith(t, func(p *blockingCloseProc) processIface {
+		old = newEventLogProc(p)
+		return old
+	})
+	if !f.r.RemoveAsync(f.key) {
+		t.Fatal("RemoveAsync returned false")
+	}
+	bound := make(chan struct{})
+	go func() {
+		defer close(bound)
+		f.r.hist.installPersistSink(context.Background(), f.sess, old, f.key)
+	}()
+	select {
+	case <-f.proc.closeStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("teardown never reached proc.Close")
+	}
+	select {
+	case <-bound:
+	case <-time.After(5 * time.Second):
+		t.Fatal("installPersistSink still waiting after the drop")
+	}
+	f.appendEntry(t, old.log, "sent-after-delete")
+	f.finishTeardown()
+
+	if _, err := os.Stat(persist.LogPath(f.dir, f.key)); !os.IsNotExist(err) {
+		t.Fatalf("event log on disk after Remove (entries %v): err=%v", f.persistedUUIDs(t), err)
+	}
+	if f.attachmentReferenced(t) {
+		t.Fatal("the removed session's late sink re-referenced the attachment")
+	}
+}
+
+// TestRemoveAsync_RecreateRemovedWhileWaiting_SinkNotBound: a re-created
+// session removed while its sink waits on the earlier removal's drop does not
+// bind once that drop ends.
+func TestRemoveAsync_RecreateRemovedWhileWaiting_SinkNotBound(t *testing.T) {
+	var old *eventLogProc
+	f := newRemoveTeardownFixtureWith(t, func(p *blockingCloseProc) processIface {
+		old = newEventLogProc(p)
+		old.gate, old.reached = make(chan struct{}), make(chan struct{})
+		return old
+	})
+	if !f.r.RemoveAsync(f.key) {
+		t.Fatal("RemoveAsync returned false")
+	}
+	select {
+	case <-old.reached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("teardown never reached the sink detach")
+	}
+	fresh := newEventLogProc(newBlockingCloseProc())
+	close(fresh.release)
+	freshSess := installSession(t, f.r, f.key, fresh)
+	freshSess.setWorkspace(f.ws)
+	bound := make(chan struct{})
+	go func() {
+		defer close(bound)
+		f.r.hist.installPersistSink(context.Background(), freshSess, fresh, f.key)
+	}()
+	select {
+	case <-bound:
+		t.Fatal("installPersistSink returned while the old teardown had not dropped the log")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if !f.r.RemoveAsync(f.key) {
+		t.Fatal("RemoveAsync of the re-created session returned false")
+	}
+	select {
+	case <-fresh.closeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("re-created session's teardown never closed it")
+	}
+	close(old.gate)
+	select {
+	case <-bound:
+	case <-time.After(5 * time.Second):
+		t.Fatal("installPersistSink still waiting after both drops")
+	}
+	if fresh.log.SinkReady() {
+		t.Fatal("removed re-created session bound its sink after the drops")
+	}
+	f.appendEntry(t, fresh.log, "sent-after-delete")
+	f.finishTeardown()
+
+	if _, err := os.Stat(persist.LogPath(f.dir, f.key)); !os.IsNotExist(err) {
+		t.Fatalf("event log on disk after both removals (entries %v): err=%v", f.persistedUUIDs(t), err)
+	}
+}
+
+// TestRemoveAsync_DetachesRemovedProcessSink: what the removed process emits while
 // it closes is not written back under the dropped key.
-func TestRemove_DetachesRemovedProcessSink(t *testing.T) {
+func TestRemoveAsync_DetachesRemovedProcessSink(t *testing.T) {
 	var old *eventLogProc
 	f := newRemoveTeardownFixtureWith(t, func(p *blockingCloseProc) processIface {
 		old = newEventLogProc(p)
