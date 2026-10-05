@@ -42,7 +42,7 @@ func TestFailureNoticeBody(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := failureNoticeBody(tc.class, TurnCauseUnknown, tc.state, runID, tc.timeout)
+			got := failureNoticeBody(jobSnapshot{}, tc.class, TurnCauseUnknown, tc.state, runID, tc.timeout)
 			if got != tc.want {
 				t.Errorf("failureNoticeBody(%q, %q) = %q, want %q", tc.class, tc.state, got, tc.want)
 			}
@@ -62,10 +62,10 @@ var allTurnCauses = []TurnCause{
 	TurnCauseBackendUnreachable,
 }
 
-// TestFailureNoticeBody_TurnCause pins the turn_failed body per cause: each
-// names what happened, none advises 继续 or /new (which in the notify chat
-// would act on the wrong session), and an unnamed cause keeps the generic
-// sentence.
+// TestFailureNoticeBody_TurnCause pins the turn_failed body per cause for a
+// fresh-context job: each names what happened, none advises 继续 or /new
+// (which in the notify chat would act on the wrong session), and an unnamed
+// cause keeps the generic sentence.
 func TestFailureNoticeBody_TurnCause(t *testing.T) {
 	t.Parallel()
 	const runID = "1a2b3c4d5e6f7a8b"
@@ -89,7 +89,7 @@ func TestFailureNoticeBody_TurnCause(t *testing.T) {
 		{TurnCause("from_a_newer_binary"), "执行失败（后端报告本轮出错），请检查执行历史 · run 1a2b3c4d"},
 	}
 	for _, tc := range cases {
-		got := failureNoticeBody(ErrClassTurnFailed, tc.cause, RunStateFailed, runID, 5*time.Minute)
+		got := failureNoticeBody(jobSnapshot{fresh: true}, ErrClassTurnFailed, tc.cause, RunStateFailed, runID, 5*time.Minute)
 		if got != tc.want {
 			t.Errorf("cause %q: body = %q, want %q", tc.cause, got, tc.want)
 		}
@@ -100,8 +100,90 @@ func TestFailureNoticeBody_TurnCause(t *testing.T) {
 		}
 	}
 	// The cause only words a turn_failed run; any other class ignores it.
-	if got := failureNoticeBody(ErrClassSendError, TurnCauseMaxTurns, RunStateFailed, runID, time.Minute); got != "执行失败（CLI 发送错误） · run 1a2b3c4d" {
+	if got := failureNoticeBody(jobSnapshot{}, ErrClassSendError, TurnCauseMaxTurns, RunStateFailed, runID, time.Minute); got != "执行失败（CLI 发送错误） · run 1a2b3c4d" {
 		t.Errorf("send error with a cause: body = %q", got)
+	}
+}
+
+// TestFailureNoticeBody_ContextTooLongByMode: a context-too-long failure of a
+// job that keeps its context says to switch to reset-per-run, and where; a
+// fresh job keeps the plain sentence, and other causes of a persistent job are
+// unaffected.
+func TestFailureNoticeBody_ContextTooLongByMode(t *testing.T) {
+	t.Parallel()
+	const (
+		runID   = "1a2b3c4d5e6f7a8b"
+		persist = "执行失败（对话上下文已超出模型上限）；该任务保留上下文，之后每次执行都会因此失败，可在控制台改为每次重置上下文"
+	)
+	cases := []struct {
+		name  string
+		snap  jobSnapshot
+		cause TurnCause
+		want  string
+	}{
+		{"fresh", jobSnapshot{fresh: true, platName: "feishu", chatID: "chat-1"}, TurnCauseContextTooLong,
+			"执行失败（对话上下文已超出模型上限），请检查执行历史"},
+		{"persistent dashboard", jobSnapshot{platName: "dashboard", chatID: "dash"}, TurnCauseContextTooLong, persist},
+		{"persistent without source platform", jobSnapshot{}, TurnCauseContextTooLong, persist},
+		{"persistent without source chat", jobSnapshot{platName: "feishu"}, TurnCauseContextTooLong, persist},
+		{"persistent IM", jobSnapshot{platName: "feishu", chatID: "chat-1"}, TurnCauseContextTooLong,
+			persist + "，或删除后不带 --keep-context 重新创建"},
+		{"persistent IM, other cause", jobSnapshot{platName: "feishu", chatID: "chat-1"}, TurnCauseMaxTurns,
+			"执行未完成（已达到最大执行步数），请检查执行历史"},
+	}
+	for _, tc := range cases {
+		got := failureNoticeBody(tc.snap, ErrClassTurnFailed, tc.cause, RunStateFailed, runID, 5*time.Minute)
+		if want := tc.want + " · run 1a2b3c4d"; got != want {
+			t.Errorf("%s: body = %q, want %q", tc.name, got, want)
+		}
+		for _, chatAdvice := range []string{"继续", "/new"} {
+			if strings.Contains(got, chatAdvice) {
+				t.Errorf("%s: body %q advises %q", tc.name, got, chatAdvice)
+			}
+		}
+	}
+}
+
+// TestExecuteOpt_ContextTooLongNoticeByMode: the run's snapshot reaches the
+// notice, so a real context-too-long run words it by the job's mode and
+// platform, and the auto-pause sentence still follows the run id.
+func TestExecuteOpt_ContextTooLongNoticeByMode(t *testing.T) {
+	t.Parallel()
+	const (
+		plain   = "执行失败（对话上下文已超出模型上限），请检查执行历史"
+		persist = "执行失败（对话上下文已超出模型上限）；该任务保留上下文，之后每次执行都会因此失败，可在控制台改为每次重置上下文"
+	)
+	cases := []struct {
+		name      string
+		platform  string
+		fresh     bool
+		threshold int
+		want      string
+		suffix    func(id string) string
+	}{
+		{"fresh IM", "feishu", true, 0, plain, nil},
+		{"persistent IM", "feishu", false, 0, persist + "，或删除后不带 --keep-context 重新创建", nil},
+		{"persistent dashboard", "dashboard", false, 0, persist, nil},
+		{"persistent IM, auto-paused", "feishu", false, 1, persist + "，或删除后不带 --keep-context 重新创建",
+			func(id string) string {
+				return "；已连续失败 1 次，任务已自动暂停，修复后发送 /cron resume " + id + " 恢复"
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, r, ns, id := newAutoPauseScheduler(t, tc.threshold, tc.platform)
+			s.editJobForTest(t, id, func(j *Job) { j.FreshContext = tc.fresh })
+			r.set(nil, &TurnFailedError{Cause: TurnCauseContextTooLong})
+			runN(s, id, 1)
+			got := ns.noticesAfter(s)
+			if len(got) != 1 || !strings.HasPrefix(got[0], "[Cron ping] "+tc.want+" · run ") {
+				t.Fatalf("notices = %q, want one starting %q", got, "[Cron ping] "+tc.want+" · run ")
+			}
+			if tc.suffix != nil && !strings.HasSuffix(got[0], tc.suffix(id)) {
+				t.Errorf("notice = %q, want it to end %q", got[0], tc.suffix(id))
+			}
+		})
 	}
 }
 
@@ -128,10 +210,10 @@ func TestTurnFailedNotices_EveryCause(t *testing.T) {
 
 func TestFailureNoticeBody_ShortAndMissingRunID(t *testing.T) {
 	t.Parallel()
-	if got := failureNoticeBody(ErrClassSessionError, TurnCauseUnknown, RunStateFailed, "abc", time.Minute); got != "启动会话失败 · run abc" {
+	if got := failureNoticeBody(jobSnapshot{}, ErrClassSessionError, TurnCauseUnknown, RunStateFailed, "abc", time.Minute); got != "启动会话失败 · run abc" {
 		t.Errorf("short run id: got %q", got)
 	}
-	if got := failureNoticeBody(ErrClassSessionError, TurnCauseUnknown, RunStateFailed, "", time.Minute); got != "启动会话失败" {
+	if got := failureNoticeBody(jobSnapshot{}, ErrClassSessionError, TurnCauseUnknown, RunStateFailed, "", time.Minute); got != "启动会话失败" {
 		t.Errorf("empty run id must drop the run suffix: got %q", got)
 	}
 }

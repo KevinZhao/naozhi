@@ -72,6 +72,7 @@
 ### Fixed
 
 - **cron 自动暂停通知的恢复提示按通知去向给出**（#3328）：`/cron resume` 只认创建任务的那个会话，而暂停通知会发到 per-job `notify_platform`/`notify_chat_id` 或 `notify_default` 指定的会话；此前在那里照提示发 `/cron resume <id>` 只会得到"未找到"。通知不在创建会话时改为提示"在创建该任务的会话发送 /cron resume <id>，或在控制台恢复"（不写出创建会话的 id）；发回创建会话时措辞不变
+- **cron 上下文超限的失败通知对保留上下文的任务给出改法**（#3313）：保留上下文的任务因"对话上下文已超出模型上限"失败后，之后每次执行都会续接同一段超长对话、以同样原因失败直到自动暂停，而通知此前只说"请检查执行历史"。现在这类通知说明原因并提示"可在控制台改为每次重置上下文"；IM 创建的任务另加"或删除后不带 --keep-context 重新创建"。每次重置上下文的任务与其他失败原因措辞不变
 - `spawnSession` panic recover 错误消息不再双前缀 `"spawn process: spawn process:"`（RNEW-009）
 
 ### Documentation
