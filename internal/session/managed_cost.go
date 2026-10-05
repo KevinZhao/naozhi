@@ -14,14 +14,11 @@ import (
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
 
-// costAccounting is the router-wide cost sink shared by every ManagedSession:
-// the ledger plus the run-ownership gate that hands cron-owned turns to the
-// cron scheduler instead of writing them here (docs/rfc/cost-ledger.md §5.0).
+// costAccounting is the router-wide cost sink shared by every ManagedSession.
+// Spend a run owner collects through a session's cost window is the owner's
+// to write (docs/rfc/cost-ledger.md §5.0); everything else is written here.
 type costAccounting struct {
 	ledger *costledger.Store
-	// ownedByRun reports a turn some run writes the ledger for itself; nil
-	// means none is.
-	ownedByRun func(key string) bool
 
 	warnMu      sync.Mutex
 	warnedModel map[string]struct{}
@@ -35,13 +32,9 @@ type costAccounting struct {
 // maxWarnedModels bounds the unknown-basis dedup set.
 const maxWarnedModels = 64
 
-func newCostAccounting(ledger *costledger.Store, ownedByRun func(key string) bool) *costAccounting {
-	return &costAccounting{ledger: ledger, ownedByRun: ownedByRun, warnedModel: make(map[string]struct{}),
+func newCostAccounting(ledger *costledger.Store) *costAccounting {
+	return &costAccounting{ledger: ledger, warnedModel: make(map[string]struct{}),
 		endSem: make(chan struct{}, maxEndBookings)}
-}
-
-func (c *costAccounting) owned(key string) bool {
-	return c != nil && c.ownedByRun != nil && c.ownedByRun(key)
 }
 
 // warnUnknownBasis logs once per model whose price the CLI had to guess.
@@ -98,7 +91,7 @@ func meteringUnit(u string) (costledger.Unit, bool) {
 
 // accountTurnCost differences the turn's cumulative readings against the
 // session baseline, folds the increment into the monotonic totals and, unless
-// a cron run owns the turn, appends the ledger entries. It runs on every
+// an open cost window collects it, appends the ledger entries. It runs on every
 // completed turn regardless of run-history persistence. costMu is a leaf
 // lock: nothing inside it calls out. Returns the turn's USD increment.
 func (s *ManagedSession) accountTurnCost(result *clievent.SendResult, runID string) float64 {
@@ -110,7 +103,8 @@ func (s *ManagedSession) accountTurnCost(result *clievent.SendResult, runID stri
 // with RenameSession, which copies the baseline and links the new session in
 // one costMu section: a reading lands on the old session before the copy, or
 // the new session differences it — never booked on both. A respawned
-// session keeps its process's baseline and forwards the increment (addSpent).
+// session keeps its process's baseline and forwards the increment (addSpent),
+// which no window collects.
 func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, onlyFor processIface) float64 {
 	if result == nil {
 		return 0
@@ -148,8 +142,12 @@ func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, 
 		inc.Models = nil
 	}
 	fwd := s.successor
+	inWindow := fwd == nil && s.costWindow != nil
 	if fwd == nil {
 		s.addSpentLocked(inc.USD, inc)
+	}
+	if inWindow {
+		*s.costWindow = s.costWindow.Accumulate(inc)
 	}
 	s.costMu.Unlock()
 	if fwd != nil {
@@ -162,7 +160,7 @@ func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, 
 			rates.Observe(m)
 		}
 	}
-	if s.costAcct != nil && s.costAcct.ledger.Enabled() && !s.costAcct.owned(s.key) {
+	if s.costAcct != nil && s.costAcct.ledger.Enabled() && !inWindow {
 		s.costAcct.warnUnknownBasis(s.key, inc.Models)
 		for _, e := range s.ledgerEntries(inc, runID) {
 			s.costAcct.ledger.Append(e)
@@ -192,10 +190,9 @@ func bookUnownedResults(s *ManagedSession, proc processIface) {
 }
 
 // bookPartialUsage records a Kind=partial entry for u, spend a process
-// reported in no result frame (bookProcessEnd, which has already applied the
-// cron-ownership gate), one row per canonical model priced at the rates the
-// ledger learned from the CLI's own results, and adds its amount to the
-// session's spend. A model with no learned rate books tokens only and no
+// reported in no result frame (bookProcessEnd), one row per canonical model
+// priced at the rates the ledger learned from the CLI's own results, and adds
+// its amount to the session's spend but never to an open cost window. A model with no learned rate books tokens only and no
 // basis: BasisUnknown means the CLI guessed a rate, and here nothing priced it.
 func (s *ManagedSession) bookPartialUsage(u clievent.ShadowUsage, runID string) {
 	if s.costAcct == nil || !s.costAcct.ledger.Enabled() || u.IsZero() {
