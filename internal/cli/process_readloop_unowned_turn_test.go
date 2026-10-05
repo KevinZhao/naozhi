@@ -115,13 +115,17 @@ func TestDispatch_ReconnectMidTurnResultEndsOnce(t *testing.T) {
 // When the turn ends, its result must already be on eventCh so a Send that
 // claims Ready next drains it instead of taking it as its own answer.
 func TestDispatch_UnownedResultQueuedBeforeReady(t *testing.T) {
-	p, _ := newUnownedTurnTestProcess()
-	dispatchAll(p, evInit)
-	<-p.eventCh // the init frame
-	var queuedAtReady bool
-	p.turn.onTurnDone = func() { queuedAtReady = len(p.eventCh) == 1 }
-	dispatchAll(p, evResultSuccess)
-	if !queuedAtReady {
-		t.Fatal("state reached Ready before the result was queued on eventCh")
+	for _, res := range []clievent.Event{evResultSuccess, evResultAborted} {
+		t.Run(res.SubType, func(t *testing.T) {
+			p, _ := newUnownedTurnTestProcess()
+			dispatchAll(p, evInit)
+			<-p.eventCh // the init frame
+			var queuedAtReady bool
+			p.turn.onTurnDone = func() { queuedAtReady = len(p.eventCh) == 1 }
+			dispatchAll(p, res)
+			if !queuedAtReady {
+				t.Fatal("state reached Ready before the result was queued on eventCh")
+			}
+		})
 	}
 }

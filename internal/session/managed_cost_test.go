@@ -381,6 +381,43 @@ func TestBookPartialUsage_UnreportedBasisPromotedToList(t *testing.T) {
 	}
 }
 
+// Raw ids that differ only in a context suffix are one model at one rate, so
+// a partial books them as one row carrying both rows' tokens.
+func TestBookPartialUsage_OneRowPerCanonicalModel(t *testing.T) {
+	s, ledger := newLedgerSession(t, "feishu:p2p:suffix", &TestProcess{AliveVal: true})
+	ledger.Rates().Observe(costledger.ModelDelta{Model: "claude-opus-5-5", CostUSD: 0.01, Tokens: costledger.Tokens{Output: 1000}})
+	s.bookPartialUsage(clievent.ShadowUsage{Models: []clievent.ShadowModel{
+		{Model: "claude-opus-5-5", Input: 11, Output: 100, CacheRead: 7},
+		{Model: "claude-sonnet-5-5", Output: 20},
+		{Model: "claude-opus-5-5[1m]", Input: 13, Output: 300, CacheWrite: 5},
+	}}, "run-1")
+	ents := allEntries(t, ledger)
+	if len(ents) != 1 || len(ents[0].Models) != 2 {
+		t.Fatalf("partial entry = %+v, want one entry with an opus and a sonnet row", ents)
+	}
+	opus := ents[0].Models[0]
+	want := costledger.Tokens{Input: 24, Output: 400, CacheRead: 7, CacheWrite: 5}
+	if opus.Model != "claude-opus-5-5" || opus.RawModel != "claude-opus-5-5" || opus.Tokens != want {
+		t.Fatalf("opus row = %+v, want both raw ids' tokens %+v under the first raw id", opus, want)
+	}
+	if !approxEq(opus.CostUSD, ents[0].Amount) || ents[0].Models[1].Model != "claude-sonnet-5-5" {
+		t.Fatalf("rows = %+v amount %v: the priced opus row should carry the whole amount", ents[0].Models, ents[0].Amount)
+	}
+}
+
+// A session with no real directory books its partial under the same empty
+// workspace its turn rows carry, not under filepath.Base's ".".
+func TestBookPartialUsage_WorkspaceMatchesTurnRows(t *testing.T) {
+	s, ledger := newLedgerSession(t, "feishu:p2p:nows", &TestProcess{AliveVal: true})
+	s.setWorkspace("")
+	turn := s.ledgerEntries(costledger.Increment{USD: 0.01}, "run-0")
+	s.bookPartialUsage(clievent.ShadowUsage{Models: []clievent.ShadowModel{{Model: "claude-opus-5-5", Output: 100}}}, "run-1")
+	ents := allEntries(t, ledger)
+	if len(ents) != 1 || len(turn) != 1 || ents[0].Workspace != "" || turn[0].Workspace != "" {
+		t.Fatalf("partial %+v, turn %+v: want both under workspace \"\"", ents, turn)
+	}
+}
+
 // TestAccountTurnCost_AdoptedBaselineChargesNothingForHistory covers the shim
 // adopted with no store entry (adoptLiveShim): its CLI has already spent
 // an unknown amount, and the first result it reports is a CUMULATIVE figure

@@ -83,7 +83,7 @@ func TestRecordTerminalResult_NewSessionInvalidatesKnownSessions(t *testing.T) {
 	if _, ok := s.KnownSessionIDs()["fresh-session"]; ok {
 		t.Fatal("precondition: session already known")
 	}
-	if _, _, ok := s.recordTerminalResult(id, "done", "", "fresh-session", "", RunStateSucceeded, time.Now()); !ok {
+	if _, _, ok := s.recordTerminalResult(id, runOutcome{result: "done", sessionID: "fresh-session", state: RunStateSucceeded}, time.Now()); !ok {
 		t.Fatal("recordTerminalResult failed")
 	}
 	if _, ok := s.KnownSessionIDs()["fresh-session"]; !ok {

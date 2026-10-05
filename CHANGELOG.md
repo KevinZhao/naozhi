@@ -32,6 +32,10 @@
 
 ### Changed
 
+- **cron 自动暂停不再计入非 job 自身原因的失败**（#3328）：以下 run 仍记为 `failed`、照常发失败通知，但不再增加连续失败计数（也不清零）
+  - `sandbox_transport`：云沙箱连接中断、任务状态未知，包括 naozhi 重启后由启动收尾结掉的孤儿 sandbox run。频繁升级重启的主机上，长 sandbox job 不会再因此被自动暂停
+  - `turn_failed` 且原因为后端过载、限流或连不上模型服务（`backend_overloaded` / `backend_rate_limited` / `backend_unreachable`）。一次持续二三十分钟的 Bedrock 或网络故障不会再把主机上每 5 分钟一跑的 job 全部暂停
+  - 额度用尽、认证失败、max turns、上下文超限和执行超时仍然计入
 - **JSON 状态快照不再跟随末端 symlink**：下列文件统一由 `osutil/jsonfile.Load` 以 `O_NOFOLLOW` 打开，文件本身是 symlink 时按"读不了、但仍在盘上"处理；读取只检查末端，路径中间目录的 symlink 照常跟随。写入不同：数据目录、以及它下面存放这些文件的目录本身不能是 symlink（`datadir.EnsureDir`、runlog、cron sandbox store 拒绝写入），只有数据目录之上的祖先目录照常跟随。此前会跟随的：`sessions.json`、`session-ids.json`、`workspace-overrides.json`、`sessions.meta.json`、uiprefs、retired sessions store、session run-history 记录、shim state、attachment `.meta`、cron sandbox 的 pending / attention / snapshot manifest。`cron_jobs.json` 一直如此，没有变化；projects index 从引入起就是这样
   - session store 的三个主文件（`sessions.json` / `session-ids.json` / `workspace-overrides.json`）：启动照常成功，但这个文件的保存被拒，内存里的改动不落盘。信号是一条 `ERROR session store: refusing to overwrite a file naozhi could not read`、authenticated `/health` 的 `session_store.blocked`，以及 `spawn_diags` 里一条 `layer=store-unreadable`。`sessions.meta.json` 只报告（Warn）不阻塞，下次保存把链接换成普通文件，链接目标不动
   - 旧行为其实也没真正支持过 symlink：`WriteFileAtomic` 是临时文件 + rename，第一次保存就把 symlink 本身换成普通文件，目标文件从此停在旧内容。现在只是把静默分叉变成显式拒绝
