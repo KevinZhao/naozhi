@@ -50,14 +50,20 @@ type SessionLookup interface {
 }
 
 // SessionLifecycle is the create/recreate/remove sub-capability used by RPC
-// handlers that allocate or tear down sessions. TakeoverPrecheck reports,
-// changing nothing, the error Takeover on key would be refused with now.
+// handlers that allocate or tear down sessions. ReserveTakeover refuses a
+// takeover of key, or reserves the key for it until the lease ends.
 type SessionLifecycle interface {
 	ResetAndRecreate(ctx context.Context, key string, opts sessionview.AgentOpts) (Session, error)
-	TakeoverPrecheck(key string) error
-	Takeover(ctx context.Context, key string, sessionID string, workspace string, opts sessionview.AgentOpts) (Session, error)
+	ReserveTakeover(key string, opts sessionview.AgentOpts) (TakeoverLease, error)
 	Remove(key string) bool
 	DefaultWorkspace() string
+}
+
+// TakeoverLease is a reserved takeover of one key. Takeover consumes it;
+// Release gives up one Takeover has not consumed and is idempotent.
+type TakeoverLease interface {
+	Takeover(ctx context.Context, sessionID, workspace string) (Session, error)
+	Release()
 }
 
 // SessionMutator is the in-place mutation sub-capability (interrupt, label

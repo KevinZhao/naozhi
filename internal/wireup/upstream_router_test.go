@@ -48,26 +48,35 @@ func TestUpstreamRouter_ALiveSessionComesThrough(t *testing.T) {
 	}
 }
 
-// TestUpstreamRouter_TakeoverPrecheckHoldsNothing: the connector's precheck
-// reserves the key only to ask, so neither a second precheck nor the
-// takeover itself is refused by it.
-func TestUpstreamRouter_TakeoverPrecheckHoldsNothing(t *testing.T) {
+// TestUpstreamRouter_TakeoverLeaseHoldsTheKey: the connector's lease holds
+// its key until Takeover ends it, a refusal arrives as a nil interface, and a
+// failed takeover gives the key back.
+func TestUpstreamRouter_TakeoverLeaseHoldsTheKey(t *testing.T) {
 	r := session.NewRouter(session.RouterConfig{MaxProcs: 1})
 	t.Cleanup(r.Shutdown)
 	u := UpstreamRouter(r)
 	const key = "local:takeover:proj:general"
 
-	for i := range 2 {
-		if err := u.TakeoverPrecheck(key); err != nil {
-			t.Fatalf("TakeoverPrecheck #%d = %v, want nil", i+1, err)
-		}
+	lease, err := u.ReserveTakeover(key, sessionview.AgentOpts{})
+	if err != nil {
+		t.Fatalf("ReserveTakeover = %v, want nil", err)
+	}
+	second, err := u.ReserveTakeover(key, sessionview.AgentOpts{})
+	if !errors.Is(err, session.ErrSpawnInFlight) {
+		t.Fatalf("second ReserveTakeover = %v, want ErrSpawnInFlight", err)
+	}
+	if second != nil {
+		t.Fatalf("refused ReserveTakeover = %#v, want a nil interface", second)
 	}
 	// No CLI wrapper is configured, so the takeover gets past every gate and
 	// fails in the spawn, then frees the key.
-	if _, err := u.Takeover(context.Background(), key, "", t.TempDir(), sessionview.AgentOpts{}); err == nil || errors.Is(err, session.ErrSpawnInFlight) || errors.Is(err, session.ErrMaxProcs) {
+	if _, err := lease.Takeover(context.Background(), "", t.TempDir()); err == nil || errors.Is(err, session.ErrSpawnInFlight) || errors.Is(err, session.ErrMaxProcs) {
 		t.Fatalf("Takeover = %v, want a spawn error", err)
 	}
-	if err := u.TakeoverPrecheck(key); err != nil {
-		t.Errorf("TakeoverPrecheck after the takeover = %v, want nil", err)
+	lease.Release()
+	again, err := u.ReserveTakeover(key, sessionview.AgentOpts{})
+	if err != nil {
+		t.Fatalf("ReserveTakeover after the takeover = %v, want nil", err)
 	}
+	again.Release()
 }
