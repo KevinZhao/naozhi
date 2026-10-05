@@ -79,10 +79,10 @@ func (r *Router) notifyKeyRetired(key, sessionID string) {
 
 // finishRemoveCleanup runs the slow half of a session removal, outside any
 // transaction: close the process, wait for its shim socket to disappear, drop
-// the event log + attachment refs unless a same-key session is back, notify
-// the change. Reads the removed session only through `snap`, so it is safe in
-// a detached goroutine (the session is already gone from every map). Worst
-// case ~15s.
+// the event log, attachment refs and run-history ring unless a same-key
+// session is back, notify the change. Reads the removed session only through
+// `snap`, so it is safe in a detached goroutine (the session is already gone
+// from every map). Worst case ~15s.
 func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 	proc := snap.proc
 	if proc != nil && proc.Alive() {
@@ -98,13 +98,15 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 		}
 	}
 	// A same-key session admitted during the teardown owns the key's event
-	// log and attachment refs, which are stored by key: keep them, as a
-	// failed drop would. The check and the drop are not atomic, so a
-	// re-create in that gap still loses what it wrote before the drop.
+	// log, attachment refs and run-history ring with its per-owner lock, all
+	// stored by key: keep them, as a failed drop would. Dropping the lock
+	// under a live Append/Recent would let the next caller take a second one.
+	// The check and the drop are not atomic, so a re-create in that gap
+	// still loses what it wrote before the drop.
 	var recreated bool
 	r.ss.View(func(v sessView) { _, recreated = v.Lookup(key) })
 	if recreated {
-		slog.Info("session re-created during remove teardown; keeping its event log",
+		slog.Info("session re-created during remove teardown; keeping its event log and run-history ring",
 			"key", key)
 	} else {
 		// Drop the on-disk event log so a future session reusing the key
@@ -113,10 +115,10 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 		// Clear the attachment tracker's refs so double-TTL GC reclaims
 		// images. Best-effort: stale keyhash entries do not affect correctness.
 		r.hist.clearAttachmentTrackerRefs(key, snap.workspace)
+		// Free the resident run-history ring (on-disk records stay) so the
+		// per-session ring map stays bounded.
+		r.runs.Invalidate(key)
 	}
-	// Free the resident run-history ring (on-disk records stay) so the
-	// per-session ring map stays bounded.
-	r.runs.Invalidate(key)
 	// Wake a Shutdown waiting on this session running: it has left the
 	// table, so the wait predicate may now pass.
 	r.ss.Update(func(tx sessTx) { tx.Broadcast() })
