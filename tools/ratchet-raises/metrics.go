@@ -133,7 +133,8 @@ func goConsts(files map[string]string, into metrics) ([]string, map[string][]str
 // raise. Not counted: a skip in a file that neither declares nor uses a
 // baseline, even in a test calling a comparison helper declared elsewhere; a
 // skip through a helper in another file, or in a same-file helper that was
-// there before a new comparing test calls it; one in a build-constrained file.
+// there before a new comparing test calls it; a skip a test already had
+// before a comparison was added to it; one in a build-constrained file.
 // A renamed file reads as new, its skips a raise. A skip removed from one
 // counted file offsets one added in another of the directory.
 func skipCalls(f *ast.File) int64 {
@@ -150,14 +151,15 @@ func skipCalls(f *ast.File) int64 {
 	return n
 }
 
-// skipsIn is skipCalls over src; a missing (empty) or unparsable source
-// counts 0, so a doubt reports a raise rather than hiding one.
+// skipsIn is skipCalls over src; a missing (empty), unparsable or
+// build-constrained source counts 0, as goConsts would not have counted it,
+// so a doubt reports a raise rather than hiding one.
 func skipsIn(p, src string) int64 {
 	if src == "" {
 		return 0
 	}
-	f, err := parser.ParseFile(token.NewFileSet(), p, src, parser.SkipObjectResolution)
-	if err != nil {
+	f, err := parser.ParseFile(token.NewFileSet(), p, src, parser.SkipObjectResolution|parser.ParseComments)
+	if err != nil || buildConstrained(p, f) {
 		return 0
 	}
 	return skipCalls(f)

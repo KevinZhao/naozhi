@@ -387,6 +387,11 @@ func TestRun_SkipInAFileWithABaseline(t *testing.T) {
 			head: fakeTree{constFile: src(decl, test), other: src(skipped, testZ, "func TestW(t *testing.T) { t.SkipNow() }")}, want: []raise{{gate, 1, 2}}},
 		{name: "skip moved from an uncounted file into a counted one", base: withOther(src(skipped)),
 			head: fakeTree{constFile: src(decl, test, skipped), other: src()}, want: skip},
+		// Skips are counted per file, not per test.
+		{name: "existing skip in a test that gains a comparison", base: withOther(src(skipped)),
+			head: fakeTree{constFile: src(decl, test), other: src(strings.Replace(test, "TestX(t *testing.T) {\n", "TestY(t *testing.T) {\n\tt.Skip()\n", 1))}},
+		{name: "build constraint dropped from a file with a skip", base: withOther("//go:build never\n\n" + src(skipped, testZ)),
+			head: fakeTree{constFile: src(decl, test), other: src(skipped, testZ)}, want: skip},
 		// The base side reads the same path, so a rename reads as a new file.
 		{name: "renamed file with a skip gains a use", base: withOther(src(skipped)),
 			head: fakeTree{constFile: src(decl, test), dir + "renamed_test.go": src(skipped, testZ)}, want: skip},

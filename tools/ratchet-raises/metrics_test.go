@@ -45,13 +45,15 @@ func TestGoConsts_UnparsableFileIsAnError(t *testing.T) {
 	}
 }
 
-// A base version that is missing or does not parse has no skips to offset.
+// A base version that is missing, does not parse or is build-constrained
+// has no skips to offset.
 func TestSkipsIn(t *testing.T) {
 	t.Parallel()
 	for src, want := range map[string]int64{
 		"": 0,
-		"package x\nfunc TestY(t *testing.T) { t.Skip() }\n": 1,
-		"package x\nfunc TestY(t *testing.T) { t.Skip(":      0,
+		"package x\nfunc TestY(t *testing.T) { t.Skip() }\n":                     1,
+		"package x\nfunc TestY(t *testing.T) { t.Skip(":                          0,
+		"//go:build never\n\npackage x\nfunc TestY(t *testing.T) { t.Skip() }\n": 0,
 	} {
 		if got := skipsIn("internal/x/a_test.go", src); got != want {
 			t.Errorf("skipsIn(%q) = %d, want %d", src, got, want)
