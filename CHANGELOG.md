@@ -72,6 +72,7 @@
 
 ### Fixed
 
+- **`access_profiles[].default_backend` 现在真正决定新会话的 backend**（#3299）：此前该字段被校验、在 dashboard 展示，却从不参与选 backend，用 profile 的会话照样跑在 agent / router 默认 backend 上。现在它排在 `agents[].backend` 之后、router 默认 backend（`cli.backend`）之前，只作用于 key 上还没有会话的新会话；请求显式 backend、项目 `backend`、dashboard 的 backend 选择、已有会话（resume 不换 CLI）和 `agents[].backend` 仍然优先。所用 profile 包括 `default_access_profile`。`naozhi config check --effective` 按同一规则把 agent 只列在它会落到的 backend 下
 - **cron 自动暂停通知的恢复提示按通知去向给出**（#3328）：`/cron resume` 只认创建任务的那个会话，而暂停通知会发到 per-job `notify_platform`/`notify_chat_id` 或 `notify_default` 指定的会话；此前在那里照提示发 `/cron resume <id>` 只会得到"未找到"。通知不在创建会话时改为提示"在创建该任务的会话发送 /cron resume <id>，或在控制台恢复"（不写出创建会话的 id）；发回创建会话时措辞不变
 - `spawnSession` panic recover 错误消息不再双前缀 `"spawn process: spawn process:"`（RNEW-009）
 
