@@ -2902,10 +2902,10 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 	})
 
 	// All waiters should observe the close + retry the loop. With
-	// newTestRouter the retried spawn also fails (binary missing); the
+	// newTestRouter the retried spawn also fails (no shim manager); the
 	// woken waiters serialize behind each other's failed spawns, so the
-	// drain time is N spawn attempts, not the wakeup. Only the bound below
-	// is a correctness signal.
+	// drain time is N spawn attempts, not the wakeup. The drain bound and
+	// the per-waiter result check below are the correctness signals.
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -2916,9 +2916,12 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("waiters did not drain within 10s — close(doneCh) likely failed to wake them")
 	}
+	// The "session <key>: spawn process:" wrap is only applied after a
+	// waiter's own completeSpawn, so it proves each one retried and spawned.
+	spawnErr := "session " + key + ": spawn process: "
 	for i := range N {
-		if errs[i] == nil || sessions[i] != nil {
-			t.Errorf("waiter %d: GetOrCreate = (%v, %v), want a spawn error after the retry", i, sessions[i], errs[i])
+		if errs[i] == nil || sessions[i] != nil || !strings.HasPrefix(errs[i].Error(), spawnErr) {
+			t.Errorf("waiter %d: GetOrCreate = (%v, %v), want its own %q error after the retry", i, sessions[i], errs[i], spawnErr)
 		}
 	}
 }
