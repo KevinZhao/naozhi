@@ -413,6 +413,7 @@ func main() {
 		Scheduler:     scheduler,
 		Backend:       defaultBackend,
 		AllowedRoot:   workspace,
+		IMAccess:      cfg.IMAccessPolicy(),
 		StateDir:      sessionLayout.Root(),
 		Config: server.ConfigOptions{
 			// Path enables the access-profile create endpoint; absolute so the

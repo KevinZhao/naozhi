@@ -15,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/agentroute"
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/imauth"
 	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -106,6 +107,11 @@ type Dispatcher struct {
 	// reactionFailLogged holds each platform name whose ⏳ add has failed
 	// once; later failures log at Debug (ackQueuedWithReaction).
 	reactionFailLogged sync.Map
+
+	// access is the IM sender policy prepareInbound enforces (authz.go);
+	// nil allows everyone. Swapped whole by SetAccessPolicy.
+	access      atomic.Pointer[imauth.Policy]
+	denyReplies denyThrottle
 }
 
 // keyForChat returns the routed session key for the chat coordinates and
@@ -187,6 +193,9 @@ type DispatcherConfig struct {
 	// StopCtx is the process-shutdown context the passthrough goroutine
 	// observes. Optional — nil falls back to context.Background() (#1320).
 	StopCtx context.Context
+
+	// Access is the IM sender policy; nil allows every sender.
+	Access *imauth.Policy
 }
 
 // ErrTurnsWireupMissing is returned by NewDispatcher when DispatcherConfig.Turns
@@ -255,6 +264,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		caps:                  caps,
 		fallbackBannerDelay:   fallbackBannerDelayDefault,
 	}
+	d.access.Store(cfg.Access)
 	// agentCommands is immutable after construction, so this snapshot stays
 	// correct for the dispatcher's lifetime (#2148).
 	d.knownAgentIDs = make(map[string]struct{}, len(d.agentCommands)+2)
@@ -320,9 +330,9 @@ type preparedInbound struct {
 }
 
 // prepareInbound runs the front-matter common to every dispatch strategy
-// (dedup, group-mention gate, slash commands, agent resolution, accounting,
-// key/opts resolution, image conversion). Returns false when the message was
-// fully handled or dropped here.
+// (dedup, group-mention gate, sender authorization, slash commands, agent
+// resolution, accounting, key/opts resolution, image conversion). Returns
+// false when the message was fully handled or dropped here.
 func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMessage) (preparedInbound, bool) {
 	// Dedup first: platform retries (e.g. Feishu webhook re-delivery) must
 	// not double-dispatch. Empty EventID (#1310) falls back to a composite
@@ -357,6 +367,12 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 		d.inboundLogCache.put(logKey, lg)
 	}
 	trimmed := strings.TrimSpace(msg.Text)
+
+	// Sender authorization: after the mention gate so un-mentioned group
+	// chatter stays a silent drop, before anything that acts on the message.
+	if !d.authorize(ctx, msg, trimmed, lg) {
+		return preparedInbound{}, false
+	}
 
 	if d.dispatchCommand(ctx, msg, trimmed, lg) {
 		return preparedInbound{}, false
