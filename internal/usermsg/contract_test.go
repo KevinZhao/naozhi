@@ -115,11 +115,6 @@ func TestForSendError_ContractTable(t *testing.T) {
 			wantSubs: []string{"进程意外退出"},
 		},
 		{
-			name:     "ErrAbortedByUrgent",
-			err:      clierr.ErrAbortedByUrgent,
-			wantSubs: []string{"/urgent", "打断"},
-		},
-		{
 			name:     "ErrReconnectedUnknown",
 			err:      clierr.ErrReconnectedUnknown,
 			wantSubs: []string{"系统已重启", "状态未知"},

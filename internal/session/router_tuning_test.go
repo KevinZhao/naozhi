@@ -160,7 +160,7 @@ func TestSetSessionTuning_RPCPath(t *testing.T) {
 		if s.TuningModel() != "" {
 			t.Errorf("rejected override was recorded: %q (violates §6 R8)", s.TuningModel())
 		}
-		if proc.AliveVal != true {
+		if !proc.Alive() {
 			t.Error("rejection must not touch the process")
 		}
 	})
@@ -226,7 +226,7 @@ func TestSetSessionTuning_F9PathSelection(t *testing.T) {
 		if proc.setModelCalled {
 			t.Error("RPC must not fire on the respawn path")
 		}
-		if proc.AliveVal {
+		if proc.Alive() {
 			t.Error("process must be closed for lazy respawn")
 		}
 		if s.TuningModel() != "claude-sonnet-4.6" {
@@ -264,7 +264,7 @@ func TestSetSessionTuning_F9PathSelection(t *testing.T) {
 		if !proc.setModelCalled {
 			t.Error("RPC path must invoke SetModel")
 		}
-		if proc.AliveVal != true {
+		if !proc.Alive() {
 			t.Error("RPC path must not restart the process")
 		}
 	})
@@ -284,7 +284,7 @@ func TestSetSessionTuning_F9PathSelection(t *testing.T) {
 		if s.TuningEffort() != "max" {
 			t.Errorf("TuningEffort = %q, want max", s.TuningEffort())
 		}
-		if proc.AliveVal {
+		if proc.Alive() {
 			t.Error("process must be closed")
 		}
 	})
@@ -387,7 +387,7 @@ func TestSetSessionTuning_ClearModelNeverTakesRPC(t *testing.T) {
 				if proc.setModelCalled {
 					t.Errorf("SetModel(%q) was invoked on the live process", proc.setModelArg)
 				}
-				if proc.AliveVal {
+				if proc.Alive() {
 					t.Error("live process must be closed for lazy respawn so the next spawn drops --model")
 				}
 			}

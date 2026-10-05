@@ -28,7 +28,7 @@ func resumeRouter(t *testing.T, key string, first *clievent.SendResult, lines ..
 	t.Cleanup(r.Shutdown)
 	ledger := costledger.NewStore(t.TempDir(), costledger.Options{})
 	t.Cleanup(ledger.Close)
-	r.runs.cost = newCostAccounting(ledger, nil)
+	r.runs.cost = newCostAccounting(ledger)
 
 	path := claudefs.SessionJSONL(claudeDir, ws, resumedSID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

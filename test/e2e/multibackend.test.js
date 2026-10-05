@@ -188,7 +188,8 @@ test.describe('Backend picker + chips', () => {
     const opts = await page.$$eval('select#new-backend option', els =>
       els.map(o => ({ value: o.value, label: o.textContent || '', disabled: o.disabled }))
     );
-    expect(opts.length).toBe(2);
+    // The first option is 自动 (value ""), then one per enabled backend.
+    expect(opts.filter(o => o.value !== '').length).toBe(2);
     expect(opts.find(o => o.value === 'claude')).toBeTruthy();
     expect(opts.find(o => o.value === 'kiro')).toBeTruthy();
     expect(opts.every(o => !o.disabled), 'no backend should be disabled').toBeTruthy();

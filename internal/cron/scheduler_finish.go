@@ -330,7 +330,7 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) (pausedAfter int) {
 	// dropped as orphan, or has no store.
 	s.appendLedger(rc, out)
 
-	if jobPersistOK && failureStreakEffect(out.state, out.errClass, out.turnCause) == streakExtend {
+	if jobPersistOK && out.streakEffect() == streakExtend {
 		return s.autoPauseIfDue(rc.jobID)
 	}
 	return 0
@@ -500,7 +500,7 @@ func (s *Scheduler) recordTerminalResult(jobID string, out runOutcome, endedAt t
 	// does not serialise the dashboard read path on every tick (#1923).
 	c, ok := s.tbl.recordResult(jobID, terminalRecord{
 		endedAt: endedAt, result: result, errMsg: errMsg,
-		sessionID: out.sessionID, errClass: out.errClass, turnCause: out.turnCause, state: out.state,
+		sessionID: out.sessionID, errClass: out.errClass, state: out.state, streak: out.streakEffect(),
 	})
 	if !ok {
 		return result, errMsg, false

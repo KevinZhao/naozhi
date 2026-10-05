@@ -60,7 +60,7 @@ func TestBackendModelManifest_Tiers(t *testing.T) {
 		}
 
 		// Process recycled: cached copy still serves.
-		proc.AliveVal = false
+		proc.SetAlive(false)
 		got = r.BackendModelManifest("kiro")
 		if len(got) != 2 {
 			t.Errorf("manifest lost after process death: %v", got)

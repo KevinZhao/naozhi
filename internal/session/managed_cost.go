@@ -12,16 +12,14 @@ import (
 	"github.com/naozhi/naozhi/internal/costledger/cliusage"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
-// costAccounting is the router-wide cost sink shared by every ManagedSession:
-// the ledger plus the run-ownership gate that hands cron-owned turns to the
-// cron scheduler instead of writing them here (docs/rfc/cost-ledger.md §5.0).
+// costAccounting is the router-wide cost sink shared by every ManagedSession.
+// Spend a run owner collects through a session's cost window is the owner's
+// to write (docs/rfc/cost-ledger.md §5.0); everything else is written here.
 type costAccounting struct {
 	ledger *costledger.Store
-	// ownedByRun reports a turn some run writes the ledger for itself; nil
-	// means none is.
-	ownedByRun func(key string) bool
 
 	warnMu      sync.Mutex
 	warnedModel map[string]struct{}
@@ -35,13 +33,9 @@ type costAccounting struct {
 // maxWarnedModels bounds the unknown-basis dedup set.
 const maxWarnedModels = 64
 
-func newCostAccounting(ledger *costledger.Store, ownedByRun func(key string) bool) *costAccounting {
-	return &costAccounting{ledger: ledger, ownedByRun: ownedByRun, warnedModel: make(map[string]struct{}),
+func newCostAccounting(ledger *costledger.Store) *costAccounting {
+	return &costAccounting{ledger: ledger, warnedModel: make(map[string]struct{}),
 		endSem: make(chan struct{}, maxEndBookings)}
-}
-
-func (c *costAccounting) owned(key string) bool {
-	return c != nil && c.ownedByRun != nil && c.ownedByRun(key)
 }
 
 // warnUnknownBasis logs once per model whose price the CLI had to guess.
@@ -98,7 +92,7 @@ func meteringUnit(u string) (costledger.Unit, bool) {
 
 // accountTurnCost differences the turn's cumulative readings against the
 // session baseline, folds the increment into the monotonic totals and, unless
-// a cron run owns the turn, appends the ledger entries. It runs on every
+// an open cost window collects it, appends the ledger entries. It runs on every
 // completed turn regardless of run-history persistence. costMu is a leaf
 // lock: nothing inside it calls out. Returns the turn's USD increment.
 func (s *ManagedSession) accountTurnCost(result *clievent.SendResult, runID string) float64 {
@@ -110,7 +104,8 @@ func (s *ManagedSession) accountTurnCost(result *clievent.SendResult, runID stri
 // with RenameSession, which copies the baseline and links the new session in
 // one costMu section: a reading lands on the old session before the copy, or
 // the new session differences it — never booked on both. A respawned
-// session keeps its process's baseline and forwards the increment (addSpent).
+// session keeps its process's baseline and forwards the increment (addSpent),
+// which no window collects.
 func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, onlyFor processIface) float64 {
 	if result == nil {
 		return 0
@@ -148,8 +143,12 @@ func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, 
 		inc.Models = nil
 	}
 	fwd := s.successor
+	inWindow := fwd == nil && s.costWindow != nil
 	if fwd == nil {
 		s.addSpentLocked(inc.USD, inc)
+	}
+	if inWindow {
+		*s.costWindow = s.costWindow.Accumulate(inc)
 	}
 	s.costMu.Unlock()
 	if fwd != nil {
@@ -162,13 +161,22 @@ func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, 
 			rates.Observe(m)
 		}
 	}
-	if s.costAcct != nil && s.costAcct.ledger.Enabled() && !s.costAcct.owned(s.key) {
-		s.costAcct.warnUnknownBasis(s.key, inc.Models)
-		for _, e := range s.ledgerEntries(inc, runID) {
-			s.costAcct.ledger.Append(e)
-		}
+	if !inWindow {
+		s.appendSessionRows(inc, runID)
 	}
 	return inc.USD
+}
+
+// appendSessionRows writes inc as this session's own ledger rows. Called
+// outside costMu: the ledger is an external sink.
+func (s *ManagedSession) appendSessionRows(inc costledger.Increment, runID string) {
+	if s.costAcct == nil || !s.costAcct.ledger.Enabled() {
+		return
+	}
+	s.costAcct.warnUnknownBasis(s.key, inc.Models)
+	for _, e := range s.ledgerEntries(inc, runID) {
+		s.costAcct.ledger.Append(e)
+	}
 }
 
 // bookUnownedResults books the results proc's CLI reports that no live caller
@@ -192,24 +200,16 @@ func bookUnownedResults(s *ManagedSession, proc processIface) {
 }
 
 // bookPartialUsage records a Kind=partial entry for u, spend a process
-// reported in no result frame (bookProcessEnd, which has already applied the
-// cron-ownership gate), one row per canonical model priced at the rates the
-// ledger learned from the CLI's own results, and adds its amount to the
-// session's spend. A model with no learned rate books tokens only and no
+// reported in no result frame (bookProcessEnd), one row per canonical model
+// priced at the rates the ledger learned from the CLI's own results, and adds
+// its amount to the session's spend but never to an open cost window. A model with no learned rate books tokens only and no
 // basis: BasisUnknown means the CLI guessed a rate, and here nothing priced it.
 func (s *ManagedSession) bookPartialUsage(u clievent.ShadowUsage, runID string) {
 	if s.costAcct == nil || !s.costAcct.ledger.Enabled() || u.IsZero() {
 		return
 	}
-	e := costledger.Entry{
-		Source: costledger.SourceSession, Kind: costledger.KindPartial,
-		SessionKey: s.key, RunID: runID, Workspace: ledgerWorkspace(s.Workspace()), Backend: s.Backend(),
-		Unit:   costledger.UnitUSD,
-		Models: partialRows(u.Models),
-	}
-	if e.Backend == "" {
-		e.Backend = "claude"
-	}
+	e := s.ledgerBase(runID)
+	e.Kind, e.Unit, e.Models = costledger.KindPartial, costledger.UnitUSD, partialRows(u.Models)
 	rates := s.costAcct.ledger.Rates()
 	for i := range e.Models {
 		d := &e.Models[i]
@@ -309,19 +309,28 @@ func ledgerWorkspace(ws string) string {
 	return b
 }
 
-// ledgerEntries renders an Increment as ledger rows: one USD row carrying the
-// model drill-down, plus one metering row per backend unit that grew.
-func (s *ManagedSession) ledgerEntries(inc costledger.Increment, runID string) []costledger.Entry {
-	base := costledger.Entry{
+// ledgerBase is the identity every session-source row carries. A row on a
+// cron key names its job, so what the session books outside a run's window
+// (late results, partials, user turns) still counts toward that job.
+func (s *ManagedSession) ledgerBase(runID string) costledger.Entry {
+	e := costledger.Entry{
 		Source:     costledger.SourceSession,
 		SessionKey: s.key,
+		JobID:      sessionkey.CronJobIDFromKey(s.key),
 		RunID:      runID,
 		Workspace:  ledgerWorkspace(s.Workspace()),
 		Backend:    s.Backend(),
 	}
-	if base.Backend == "" {
-		base.Backend = "claude"
+	if e.Backend == "" {
+		e.Backend = "claude"
 	}
+	return e
+}
+
+// ledgerEntries renders an Increment as ledger rows: one USD row carrying the
+// model drill-down, plus one metering row per backend unit that grew.
+func (s *ManagedSession) ledgerEntries(inc costledger.Increment, runID string) []costledger.Entry {
+	base := s.ledgerBase(runID)
 	var out []costledger.Entry
 	if inc.USD > 0 || len(inc.Models) > 0 {
 		e := base

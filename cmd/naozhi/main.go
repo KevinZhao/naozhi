@@ -186,13 +186,11 @@ func main() {
 	// unvalidated path would turn a typo into a total spawn outage.
 	mcpConfigFile := resolveMCPConfigFile(cfg)
 
-	// The router's notification consumers (dashboard hub, session handler, cron
-	// scheduler) need the router to exist first; they bind to this relay once
-	// built.
+	// The router's notification consumers (dashboard hub, session handler) need
+	// the router to exist first; they bind to this relay once built.
 	routerEvents := &routerrelay.Relay{}
 	router := session.NewRouter(session.RouterConfig{
 		Observer:       routerEvents,
-		CostRunOwner:   routerEvents.OwnsCostRun,
 		Wrapper:        wrapper,
 		DefaultBackend: defaultBackend,
 		MaxProcs:       cfg.Session.MaxProcs,
@@ -323,7 +321,6 @@ func main() {
 	schedulers, err := boot.WireSchedulers(wireup.SchedulersDeps{
 		Cfg:           cfg,
 		Router:        router,
-		RouterEvents:  routerEvents,
 		Platforms:     platforms,
 		Agents:        cronAgents,
 		Workspace:     workspace,
@@ -578,6 +575,9 @@ func main() {
 	)
 	// Operators copy these URLs into the IM console; WS-only platforms omitted.
 	logWebhookEndpoints(cfg, platforms)
+	// A profile default_backend silently moves new sessions off the router
+	// default, so name each one that does.
+	logProfileDefaultBackends(cfg, defaultBackend)
 
 	// config.Load already logged this, but before setupLogging installed the
 	// configured handler, so it went to stderr rather than the service log.

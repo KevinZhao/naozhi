@@ -12,9 +12,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -247,7 +252,7 @@ func TestCronRouterAdapter_ReleaseProcess(t *testing.T) {
 	}
 
 	running := session.NewTestProcess()
-	running.StateVal = cli.StateRunning
+	running.SetState(cli.StateRunning)
 	r.InjectSession(key, running).MarkExemptForTest()
 	_, v0 := r.ListSessionsWithVersion()
 	if a.ReleaseProcess(key) {
@@ -292,5 +297,48 @@ func TestCronSessionAdapter_BackendPassesThrough(t *testing.T) {
 	ms.SetBackend("kiro")
 	if got := a.Backend(); got != "kiro" {
 		t.Errorf("Backend = %q, want kiro", got)
+	}
+}
+
+// TestCronSessionAdapter_CostWindowReachesTheSession: the window cron opens
+// through the adapter is the session's, so a result inside it comes back as
+// the run's increment and writes no row, and the next one outside it is a row.
+func TestCronSessionAdapter_CostWindowReachesTheSession(t *testing.T) {
+	t.Parallel()
+	r := session.NewRouter(session.RouterConfig{StorePath: filepath.Join(t.TempDir(), "sessions.json")})
+	t.Cleanup(r.Shutdown)
+	cumulative := []float64{0.4, 1.0}
+	proc := session.NewTestProcess()
+	proc.SendFunc = func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
+		res := &clievent.SendResult{Text: "ok", SessionID: "sess-1", CostUSD: cumulative[0]}
+		cumulative = cumulative[1:]
+		return res, nil
+	}
+	var a cron.Session = cronSessionAdapter{s: r.InjectSession("cron:job-cost", proc)}
+	cw, ok := a.(cron.CostWindow)
+	if !ok {
+		t.Fatal("cronSessionAdapter does not offer cron.CostWindow")
+	}
+
+	cw.BeginCostWindow()
+	if _, err := a.Send(context.Background(), "ping"); err != nil {
+		t.Fatal(err)
+	}
+	inc := cw.EndCostWindow()
+	if _, err := a.Send(context.Background(), "ping"); err != nil {
+		t.Fatal(err)
+	}
+
+	if math.Abs(inc.USD-0.4) > 1e-9 {
+		t.Errorf("window increment = %v, want 0.4", inc.USD)
+	}
+	ledger := r.Runs().CostLedger()
+	ledger.Close()
+	ents, err := ledger.Entries(costledger.Query{From: time.Now().Add(-time.Hour), To: time.Now().Add(time.Hour)}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ents) != 1 || ents[0].Source != costledger.SourceSession || math.Abs(ents[0].Amount-0.6) > 1e-9 {
+		t.Fatalf("entries = %+v, want one session row of the 0.6 outside the window", ents)
 	}
 }

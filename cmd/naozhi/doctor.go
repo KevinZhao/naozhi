@@ -186,6 +186,7 @@ func (d *doctor) run() {
 	d.checkTranscribe()
 	d.checkZeroDowntimeScopes()
 	d.checkServerSecurity()
+	d.checkIMAccess()
 	d.render()
 	// After the findings so section headers don't interleave with the ✓/✗
 	// stream; JSON consumers get backend metadata from /api/cli/backends.

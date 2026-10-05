@@ -38,7 +38,6 @@ func TestClassify_SentinelToCode(t *testing.T) {
 		{"missing runtime", &clierr.ProcessExitedError{Code: 1, Class: clierr.ExitMissingRuntime}, "", CodeCLIMissingRuntime},
 		{"startup breaker", session.ErrCLIStartupFailed, "", CodeCLIStartupFailed},
 		{"wrapped exit cause", wrapErr(&clierr.ProcessExitedError{Code: 1, Class: clierr.ExitAuth}), "", CodeCLIAuthFailed},
-		{"AbortedByUrgent", clierr.ErrAbortedByUrgent, "", CodeAbortedByUrgent},
 		{"ReconnectedUnknown", clierr.ErrReconnectedUnknown, "", CodeReconnectedUnknown},
 		{"SessionReset", clierr.ErrSessionReset, "", CodeSessionReset},
 		{"TooManyPending", clierr.ErrTooManyPending, "", CodeTooManyPending},

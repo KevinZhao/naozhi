@@ -67,26 +67,51 @@ func validateIMAccess(cfg *Config) error {
 
 func isControlRune(r rune) bool { return r < 0x20 || r == 0x7f }
 
-// imAccessDiags warns once per configured platform that has no im_access
-// entry while default_deny is off: anyone who can message the bot there runs
-// commands on this host.
-func (c *Config) imAccessDiags() []ValidationDiag {
-	if c.IMAccess.DefaultDeny {
-		return nil
-	}
-	var diags []ValidationDiag
+// IMAccessPosture is one configured platform's im_access state.
+type IMAccessPosture struct {
+	Platform string
+	// Open is true when the platform has no entry and default_deny is off:
+	// every sender is served. No entry with Open false means default_deny.
+	Open bool
+	// Users counts the distinct IDs that may chat (admins included); Admins
+	// counts admin_users, where 0 makes every user an admin.
+	Users, Admins int
+}
+
+// IMAccessPostures reports the im_access state of every configured platform,
+// in imAccessPlatforms order.
+func (c *Config) IMAccessPostures() []IMAccessPosture {
+	var out []IMAccessPosture
 	for _, name := range imAccessPlatforms {
 		if !c.hasPlatform(name) {
 			continue
 		}
-		if _, ok := c.IMAccess.Platforms[name]; ok {
+		rule, ok := c.IMAccess.Platforms[name]
+		if !ok {
+			out = append(out, IMAccessPosture{Platform: name, Open: !c.IMAccess.DefaultDeny})
+			continue
+		}
+		admins := idSet(rule.AdminUsers)
+		users := idSet(rule.AllowedUsers)
+		maps.Copy(users, admins)
+		out = append(out, IMAccessPosture{Platform: name, Users: len(users), Admins: len(admins)})
+	}
+	return out
+}
+
+// imAccessDiags warns once per open platform (see IMAccessPosture.Open):
+// anyone who can message the bot there runs commands on this host.
+func (c *Config) imAccessDiags() []ValidationDiag {
+	var diags []ValidationDiag
+	for _, p := range c.IMAccessPostures() {
+		if !p.Open {
 			continue
 		}
 		diags = append(diags, ValidationDiag{
 			Level: "warn",
-			Field: "platforms." + name,
+			Field: "platforms." + p.Platform,
 			Msg:   "IM 入口无鉴权：任何能私聊 bot 的用户都可在宿主机执行命令 (no sender allowlist)",
-			Hint:  "set im_access.platforms." + name + ".allowed_users or im_access.default_deny: true",
+			Hint:  "set im_access.platforms." + p.Platform + ".allowed_users or im_access.default_deny: true",
 		})
 	}
 	return diags

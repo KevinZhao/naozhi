@@ -29,7 +29,6 @@ const (
 	CodeCronAsleep
 	CodeTimeout
 	CodeProcessExited
-	CodeAbortedByUrgent
 	CodeReconnectedUnknown
 	CodeSessionReset
 	CodeTooManyPending
@@ -83,8 +82,6 @@ func classify(err error, key string) Code {
 		return CodeTimeout
 	case errors.Is(err, clierr.ErrProcessExited):
 		return exitCode(err)
-	case errors.Is(err, clierr.ErrAbortedByUrgent):
-		return CodeAbortedByUrgent
 	case errors.Is(err, clierr.ErrReconnectedUnknown):
 		return CodeReconnectedUnknown
 	case errors.Is(err, clierr.ErrSessionReset):

@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,14 +33,14 @@ type endFixture struct {
 	t0        time.Time
 }
 
-func newEndFixture(t *testing.T, owned func(string) bool) *endFixture {
+func newEndFixture(t *testing.T) *endFixture {
 	t.Helper()
 	f := &endFixture{claudeDir: t.TempDir(), ws: t.TempDir(), t0: time.Now().Add(-time.Hour).Truncate(time.Millisecond)}
 	f.r = NewRouter(RouterConfig{Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude"), ClaudeDir: f.claudeDir})
 	t.Cleanup(f.r.Shutdown)
 	f.ledger = costledger.NewStore(t.TempDir(), costledger.Options{})
 	t.Cleanup(f.ledger.Close)
-	f.r.runs.cost = newCostAccounting(f.ledger, owned)
+	f.r.runs.cost = newCostAccounting(f.ledger)
 	for _, m := range []string{"claude-opus-5-5", "claude-haiku-4-5"} {
 		f.ledger.Rates().Observe(costledger.ModelDelta{Model: m, CostUSD: 5e-3, Tokens: costledger.Tokens{Output: 1000}})
 	}
@@ -98,7 +97,7 @@ type endingProcess struct {
 
 func newEndingProcess(state cli.ProcessState, end *cli.ProcessEnd) *endingProcess {
 	p := NewTestProcess()
-	p.StateVal = state
+	p.SetState(state)
 	return &endingProcess{TestProcess: p, end: end}
 }
 
@@ -146,7 +145,7 @@ func (f *endFixture) entries(t *testing.T) []costledger.Entry {
 // at the learned rates; the lines the last result already reported are not,
 // and the transcripts win over the main-loop-only shadow account.
 func TestProcessEnd_StuckRunningKillBooksTranscriptSpend(t *testing.T) {
-	f := newEndFixture(t, nil)
+	f := newEndFixture(t)
 	appendFile(t, f.mainPath(),
 		f.line(5, "msg_reported", "claude-opus-5-5", 9000),   // before the last result
 		f.line(10, "msg_at_result", "claude-opus-5-5", 9000), // at it: reported too
@@ -181,7 +180,7 @@ func TestProcessEnd_StuckRunningKillBooksTranscriptSpend(t *testing.T) {
 // not the main-loop shadow, and the partial's run id names that session id,
 // since no run record shares it.
 func TestProcessEnd_PassthroughEndReadsTheSessionsTranscripts(t *testing.T) {
-	f := newEndFixture(t, nil)
+	f := newEndFixture(t)
 	appendFile(t, f.mainPath(), f.line(20, "msg_main", "claude-opus-5-5", 200))
 	appendFile(t, f.workflowPath(), f.line(30, "msg_wf", "claude-haiku-4-5", 400))
 	e := f.end()
@@ -204,7 +203,7 @@ func TestProcessEnd_PassthroughEndReadsTheSessionsTranscripts(t *testing.T) {
 // /new on a session tears its process down with a reset error, not a death
 // error; the unfinished turn is booked all the same, from the end.
 func TestProcessEnd_ResetBooksTheUnfinishedTurn(t *testing.T) {
-	f := newEndFixture(t, nil)
+	f := newEndFixture(t)
 	appendFile(t, f.mainPath(), f.line(20, "msg_main", "claude-opus-5-5", 100))
 	proc := newEndingProcess(cli.StateRunning, f.end())
 	proc.PassthroughVal = true
@@ -220,25 +219,22 @@ func TestProcessEnd_ResetBooksTheUnfinishedTurn(t *testing.T) {
 
 // Ends that owe nothing book nothing: a detached CLI, or one whose shim
 // outlived the socket, keeps running and reports its own spend; a graceful
-// close after an idle result has no lines past it; a cron-owned key is the
-// cron run's to account.
+// close after an idle result has no lines past it.
 func TestProcessEnd_BooksNothingWhenNothingIsOwed(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		end   func(f *endFixture) *cli.ProcessEnd
-		owned bool
+		name string
+		end  func(f *endFixture) *cli.ProcessEnd
 	}{
-		{"detached", func(f *endFixture) *cli.ProcessEnd { e := f.end(); e.Detached = true; return e }, false},
-		{"shim outlived the socket", func(f *endFixture) *cli.ProcessEnd { e := f.end(); e.ShimLive = true; return e }, false},
+		{"detached", func(f *endFixture) *cli.ProcessEnd { e := f.end(); e.Detached = true; return e }},
+		{"shim outlived the socket", func(f *endFixture) *cli.ProcessEnd { e := f.end(); e.ShimLive = true; return e }},
 		{"idle close after the last result", func(f *endFixture) *cli.ProcessEnd {
 			e := f.end()
 			e.LastResultAt, e.Shadow = f.t0.Add(25*time.Second), clievent.ShadowUsage{}
 			return e
-		}, false},
-		{"cron-owned", func(f *endFixture) *cli.ProcessEnd { return f.end() }, true},
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newEndFixture(t, func(string) bool { return tc.owned })
+			f := newEndFixture(t)
 			appendFile(t, f.mainPath(), f.line(20, "msg_main", "claude-opus-5-5", 100))
 			proc := newEndingProcess(cli.StateReady, tc.end(f))
 			f.inject("cron:job-1", proc)
@@ -250,26 +246,55 @@ func TestProcessEnd_BooksNothingWhenNothingIsOwed(t *testing.T) {
 	}
 }
 
-// Cron ownership is decided once, when the process ends: a cron run that
-// takes the key while the transcripts are read does not drop the booking.
-func TestProcessEnd_CronGateDecidedAtTheEnd(t *testing.T) {
-	var checks atomic.Int32
-	f := newEndFixture(t, func(string) bool { return checks.Add(1) > 1 })
+// A cron run's process that dies with its cost window open books its partial
+// as the session's own row: the estimate reaches costSpent but not the window,
+// so the run's increment never carries it.
+func TestProcessEnd_CronKeyEndInsideTheWindowBooksItsPartial(t *testing.T) {
+	f := newEndFixture(t)
 	appendFile(t, f.mainPath(), f.line(20, "msg_main", "claude-opus-5-5", 100))
 	proc := newEndingProcess(cli.StateRunning, f.end())
-	f.inject("cron:job-1", proc)
+	s := f.inject("cron:job-1", proc)
+	s.BeginCostWindow()
 
 	proc.Kill()
 
+	ents := f.entries(t)
+	if len(ents) != 1 || ents[0].Kind != costledger.KindPartial || !approxEq(ents[0].Amount, 100*5e-6) {
+		t.Fatalf("entries = %+v, want one partial of the 100 tokens after the last result", ents)
+	}
+	if got := loadTotalCost(&s.costSpent); !approxEq(got, ents[0].Amount) {
+		t.Fatalf("costSpent = %v, want the partial amount", got)
+	}
+	if inc := s.EndCostWindow(); inc.USD != 0 || len(inc.Models) != 0 {
+		t.Fatalf("window increment = %+v, want none of the partial", inc)
+	}
+}
+
+// The cron deadline path closes the window, then resets the key while the
+// run still holds its gate: the killed turn is booked once, as a partial.
+func TestProcessEnd_CronDeadlineResetBooksOnce(t *testing.T) {
+	f := newEndFixture(t)
+	appendFile(t, f.mainPath(), f.line(20, "msg_main", "claude-opus-5-5", 100))
+	proc := newEndingProcess(cli.StateRunning, f.end())
+	const key = "cron:job-1"
+	s := f.inject(key, proc)
+	s.BeginCostWindow()
+	inc := s.EndCostWindow()
+
+	f.r.Reset(key)
+
 	if ents := f.entries(t); len(ents) != 1 || !approxEq(ents[0].Amount, 100*5e-6) {
-		t.Fatalf("entries = %+v, want the partial the end found unowned", ents)
+		t.Fatalf("entries = %+v, want one partial of the 100 tokens after the last result", ents)
+	}
+	if inc.USD != 0 {
+		t.Fatalf("window increment = %+v, want zero: no result reported in it", inc)
 	}
 }
 
 // Shutdown waits for a booking still running before it closes the ledger,
 // so the partial is in the ledger once Close returns.
 func TestRunLedgerClose_WaitsForRunningBookings(t *testing.T) {
-	f := newEndFixture(t, nil)
+	f := newEndFixture(t)
 	appendFile(t, f.mainPath(), f.line(20, "msg_main", "claude-opus-5-5", 100))
 	proc := newEndingProcess(cli.StateRunning, f.end())
 	f.inject("dashboard:direct:shutdown:general", proc)
@@ -299,7 +324,7 @@ func TestRunLedgerClose_WaitsForRunningBookings(t *testing.T) {
 func TestProcessEnd_ResumedSpawnReadsPastItsMark(t *testing.T) {
 	for _, renamed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "spawned", true: "renamed"}[renamed], func(t *testing.T) {
-			f := newEndFixture(t, nil)
+			f := newEndFixture(t)
 			appendFile(t, f.mainPath(), f.line(20, "msg_earlier_process", "claude-opus-5-5", 7000))
 			const oldKey, newKey = "dashboard:direct:resumed:general", "dashboard:direct:promoted:general"
 			dead := &ManagedSession{key: oldKey}
@@ -358,7 +383,7 @@ func TestReconnectShims_ReattachedProcessBooksItsEnd(t *testing.T) {
 	t.Cleanup(r.Shutdown)
 	ledger := costledger.NewStore(t.TempDir(), costledger.Options{})
 	t.Cleanup(ledger.Close)
-	r.runs.cost = newCostAccounting(ledger, nil)
+	r.runs.cost = newCostAccounting(ledger)
 	ledger.Rates().Observe(costledger.ModelDelta{Model: "claude-opus-5-5", CostUSD: 5e-3, Tokens: costledger.Tokens{Output: 1000}})
 
 	key := "feishu:direct:alice:general"
