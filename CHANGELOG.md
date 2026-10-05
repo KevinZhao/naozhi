@@ -32,7 +32,7 @@
 
 ### Changed
 
-- **一次性清理 `.naozhi/project.yaml` 桩文件时跳过 git 已跟踪的文件**（#3332）：0.1.42 的升级须知说，曾 commit 进仓库的桩文件会在 git 里显示为一次删除；现在清理前先用 `git ls-files` 确认，被跟踪的桩文件保留并打一条 Info。git 不可用或无法判断（不是仓库、仓库被拒绝访问、超时）时，项目目录下有 `.git` 就保留，没有才删除。每个 root 照旧只清理一次，所以保留下来的桩文件之后也不会再被删
+- **一次性清理 `.naozhi/project.yaml` 桩文件时跳过 git 已跟踪的文件**（#3332）：0.1.42 的升级须知说，曾 commit 进仓库的桩文件会在 git 里显示为一次删除；现在清理前先用 `git ls-files` 确认，被跟踪的桩文件保留并打一条 Info。项目目录及其上级目录都没有 `.git` 时不调用 git、照旧删除；在 git checkout 里但 git 不可用或无法判断（仓库被拒绝访问、超时）时保留。macOS 上未装 Command Line Tools 的主机，`/usr/bin/git` 可能弹出安装提示，只在项目处于 checkout 里时才会碰到。每个 root 照旧只清理一次，所以保留下来的桩文件之后也不会再被删
 - **cron 自动暂停不再计入非 job 自身原因的失败**（#3328）：以下 run 仍记为 `failed`、照常发失败通知，但不再增加连续失败计数（也不清零）
   - `sandbox_transport`：云沙箱连接中断、任务状态未知，包括 naozhi 重启后由启动收尾结掉的孤儿 sandbox run。频繁升级重启的主机上，长 sandbox job 不会再因此被自动暂停
   - `turn_failed` 且原因为后端过载、限流或连不上模型服务（`backend_overloaded` / `backend_rate_limited` / `backend_unreachable`）。一次持续二三十分钟的 Bedrock 或网络故障不会再把主机上每 5 分钟一跑的 job 全部暂停

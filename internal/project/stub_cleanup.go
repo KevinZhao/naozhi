@@ -94,8 +94,12 @@ func (s legacyStub) isStub() bool {
 }
 
 // keepTrackedStub reports whether the sweep must keep s's stub: git tracks
-// it, or git cannot tell and s.dir has its own .git.
+// it, or s.dir lies in a git checkout and git cannot tell. Outside a checkout
+// git is not run at all.
 func (m *Manager) keepTrackedStub(s legacyStub) bool {
+	if !inGitCheckout(s.dir) {
+		return false
+	}
 	path := filepath.Join(s.dir, configDir, configFile)
 	switch m.stubProbe(s.dir) {
 	case trackTracked:
@@ -104,12 +108,24 @@ func (m *Manager) keepTrackedStub(s legacyStub) bool {
 	case trackUntracked:
 		return false
 	}
-	if _, err := os.Lstat(filepath.Join(s.dir, ".git")); err != nil {
-		return false
-	}
 	slog.Info("kept legacy project.yaml stub: git could not tell whether it is tracked",
 		"project", s.name, "path", path)
 	return true
+}
+
+// inGitCheckout reports whether dir or one of its parents has a .git entry
+// (a repo directory, or the gitdir file of a worktree or submodule).
+func inGitCheckout(dir string) bool {
+	for {
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
 }
 
 // gitTracksStub asks git whether projDir's .naozhi/project.yaml is in the

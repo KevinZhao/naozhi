@@ -244,7 +244,8 @@ func gitIn(t *testing.T, dir string, args ...string) {
 	}
 }
 
-// A stub git tracks is kept, so the sweep leaves no deletion in the working
+// A stub git tracks, in the project's own repo or in a repo around the
+// projects root, is kept, so the sweep leaves no deletion in the working
 // tree; an untracked stub in a repo still goes.
 func TestScan_LegacyStubTrackedByGitKept(t *testing.T) {
 	t.Parallel()
@@ -257,6 +258,9 @@ func TestScan_LegacyStubTrackedByGitKept(t *testing.T) {
 	gitIn(t, filepath.Join(root, "tracked"), "add", "--", ".naozhi/project.yaml")
 	untracked := writeStub(t, root, "untracked", 200)
 	gitIn(t, filepath.Join(root, "untracked"), "init", "-q")
+	inParent := writeStub(t, root, "inparent", 300)
+	gitIn(t, root, "init", "-q")
+	gitIn(t, root, "add", "--", "inparent/.naozhi/project.yaml")
 	indexPath := filepath.Join(t.TempDir(), "projects-index.json")
 
 	m, _ := NewManager(root, PlannerDefaults{}, WithIndexPath(indexPath))
@@ -264,6 +268,7 @@ func TestScan_LegacyStubTrackedByGitKept(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertExists(t, tracked, true)
+	assertExists(t, inParent, true)
 	assertExists(t, untracked, false)
 	assertExists(t, filepath.Dir(untracked), false)
 	if !slices.Equal(readIndexFile(t, indexPath).StubCleanupDone, []string{root}) {
@@ -271,8 +276,9 @@ func TestScan_LegacyStubTrackedByGitKept(t *testing.T) {
 	}
 }
 
-// When git cannot answer, a stub is kept only if its project has its own
-// .git (a repo directory or a worktree's gitdir file).
+// When git cannot answer, a stub is kept only if its project lies in a git
+// checkout: its own .git (a repo directory or a worktree's gitdir file) or a
+// parent's. Git is not asked about a project outside any checkout.
 func TestScan_LegacyStubUnknownTrackingKeptInRepo(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -285,14 +291,37 @@ func TestScan_LegacyStubUnknownTrackingKeptInRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	plain := writeStub(t, root, "plain", 3)
+	var probed []string
 	m, _ := NewManager(root, PlannerDefaults{}, WithIndexPath(filepath.Join(t.TempDir(), "projects-index.json")))
-	m.stubProbe = func(string) trackState { return trackUnknown }
+	m.stubProbe = func(dir string) trackState {
+		probed = append(probed, filepath.Base(dir))
+		return trackUnknown
+	}
 	if err := m.Scan(); err != nil {
 		t.Fatal(err)
 	}
 	assertExists(t, repo, true)
 	assertExists(t, worktree, true)
 	assertExists(t, plain, false)
+	slices.Sort(probed)
+	if !slices.Equal(probed, []string{"repo", "worktree"}) {
+		t.Errorf("git probed %q; want only the projects in a checkout", probed)
+	}
+
+	t.Run("parent repo", func(t *testing.T) {
+		t.Parallel()
+		root := filepath.Join(t.TempDir(), "checkout", "projects")
+		child := writeStub(t, root, "child", 4)
+		if err := os.Mkdir(filepath.Join(filepath.Dir(root), ".git"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		m, _ := NewManager(root, PlannerDefaults{}, WithIndexPath(filepath.Join(t.TempDir(), "projects-index.json")))
+		m.stubProbe = func(string) trackState { return trackUnknown }
+		if err := m.Scan(); err != nil {
+			t.Fatal(err)
+		}
+		assertExists(t, child, true)
+	})
 }
 
 // The git probe runs without m.mu, and the removal that follows waits for a
@@ -301,6 +330,9 @@ func TestSweepLegacyStubs_ProbeUnlockedRemoveRechecks(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	stub := writeStub(t, root, "proj", 100)
+	if err := os.Mkdir(filepath.Join(root, "proj", ".git"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	m, _ := NewManager(root, PlannerDefaults{}, WithIndexPath(filepath.Join(t.TempDir(), "projects-index.json")))
 	writerHolds, release := make(chan struct{}), make(chan struct{})
 	probeHeldMu := false // read only after Scan returns
