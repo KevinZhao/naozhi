@@ -1,8 +1,5 @@
 // send_message.js — extracted from dashboard.js (#2558 D4).
 //
-// Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block and the export block below are the only additions.
-//
 // Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
 // back — that cycle puts dashboard's own top-level consts in TDZ while this
 // module evaluates. Shared state is read from the state.js objects and helpers are
@@ -12,11 +9,11 @@
 import { NZ_CONTRACT } from './contract.js';
 import { composer, perSession, selection, sessionList, timers } from './state.js';
 import { interruptSession, startTurnTimer, turnState, updateSendButton } from './running_banner.js';
-import { showToast, patchCardExitChip } from './nz_util.js';
+import { fetchJSON, showToast, patchCardExitChip } from './nz_util.js';
 import { wsm } from './ws_manager.js';
 import { featureForCurrent } from './features.js';
 import { EVENT_DIVIDER_GAP_MS, getMsgValue, lastDividerTime, persistPending, removeSidebarCard, setMsgValue, showAPIError, showAuthModal, showNetworkError, stickEventsBottom, timeDividerHtml } from './utilities.js';
-import { getToken } from './platform.js';
+import { authHeaders } from './platform.js';
 import { discoveredKey, dropDiscovered, sid } from './session_ident.js';
 import { eventHtml } from './event_render.js';
 import { awaitPendingOrients, renderFilePreviews } from './composer_files.js';
@@ -98,6 +95,76 @@ function validateComposerForSend(text) {
   return true;
 }
 
+// TAKEOVER_FAIL_TEXT words the class GET discovered_takeover_status reports
+// for a takeover that failed after the external CLI was terminated.
+const TAKEOVER_FAIL_TEXT = { max_procs: '进程数已满', in_progress: '该会话正被另一次接管占用', shutting_down: '服务正在重启',
+  startup_failed: 'CLI 反复启动失败', shim_stuck: '旧会话进程尚未释放', spawn_failed: '新会话启动失败' };
+function takeoverFailText(cls) {
+  return '接管失败：' + (TAKEOVER_FAIL_TEXT[cls] || TAKEOVER_FAIL_TEXT.spawn_failed) + '，外部 CLI 已终止；'
+    + (cls === 'max_procs' ? '请关闭一个空闲会话后' : '请稍后') + '从历史记录重新打开该会话（对话记录仍在）';
+}
+const TAKEOVER_PROMPT = 'send a message to take over...';
+function endTakeover(input, btn, placeholder) {
+  if (input) { input.dataset.placeholder = placeholder; input.contentEditable = 'true'; }
+  composer.sending = false;
+  if (btn) btn.classList.remove('sending');
+}
+
+// takeoverThenSend takes over the discovered session the composer shows, waits
+// for it to appear among the managed sessions, then sends text to it.
+async function takeoverThenSend(input, text) {
+  composer.sending = true;
+  const btn = document.getElementById('btn-send');
+  if (btn) btn.classList.add('sending');
+  if (input) { input.dataset.placeholder = '正在接管会话…'; input.contentEditable = 'false'; }
+  const pd = selection.pendingDiscovered;
+  try {
+    const r = await fetch(NZ_CONTRACT.API.discovered_takeover, {
+      method: 'POST', headers: {'Content-Type': 'application/json', ...authHeaders()},
+      body: JSON.stringify({pid: pd.pid, session_id: pd.sessionId, cwd: pd.cwd, proc_start_time: pd.procStartTime || 0, node: pd.node || ''})
+    });
+    if (!r.ok) {
+      showAPIError('接管进程', r.status, await r.text().catch(() => ''));
+      return endTakeover(input, btn, TAKEOVER_PROMPT);
+    }
+    const data = await r.json();
+    if (!data.key) {
+      showToast('接管进程失败：未返回会话标识', 'error');
+      return endTakeover(input, btn, TAKEOVER_PROMPT);
+    }
+    // Remove from discoveredItems so renderSidebar won't re-create the card
+    dropDiscovered(pd.pid, pd.node);
+    removeSidebarCard(discoveredKey(pd.pid, pd.node));
+    selection.pendingDiscovered = null;
+    // Poll up to 10s for the session to appear. A local takeover also reports
+    // its outcome; a failure ends the wait unless another attempt holds the key.
+    const takenKey = data.key;
+    const takenNode = pd.node || 'local';
+    const statusURL = data.takeover_id && takenNode === 'local' ? NZ_CONTRACT.API.discovered_takeover_status + '?id=' + encodeURIComponent(data.takeover_id) : '';
+    let ready = false, failed = null;
+    for (const end = Date.now() + 10000; !ready && (!failed || failed.class === 'in_progress') && Date.now() < end;) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      sessionList.lastVersion = 0;
+      const [, st] = await Promise.all([shell.fetchSessions(),
+        statusURL && fetchJSON(statusURL, { headers: authHeaders(), timeoutMs: 2000 }).catch(() => null)]);
+      ready = !!sessionList.sessionsData[sid(takenKey, takenNode)];
+      if (!ready && st && st.state === 'failed') failed = st;
+    }
+    if (!ready) {
+      showToast(failed ? takeoverFailText(failed.class) : '接管超时：外部 CLI 已终止，但新会话未就绪。对话记录仍在，可稍后从历史记录重新打开', 'error', 8000);
+      return endTakeover(input, btn, 'send a message...');
+    }
+    // Session is ready — switch to it and send the message
+    composer.sending = false;
+    shell.selectSession(takenKey, takenNode);
+    setMsgValue(document.getElementById('msg-input'), text);
+    await sendMessage();
+  } catch (e) {
+    showNetworkError('接管进程', e);
+    endTakeover(input, btn, TAKEOVER_PROMPT);
+  }
+}
+
 async function sendMessage() {
   if (composer.sending) return;
 
@@ -105,74 +172,8 @@ async function sendMessage() {
   if (selection.pendingDiscovered && !selection.key) {
     const input = document.getElementById('msg-input');
     const text = getMsgValue(input);
-    if (!text) return;
-    composer.sending = true;
-    const btn = document.getElementById('btn-send');
-    if (btn) btn.classList.add('sending');
-    if (input) input.dataset.placeholder = '正在接管会话…';
-    if (input) input.contentEditable = 'false';
-    const pd = selection.pendingDiscovered;
-    try {
-      const headers = {'Content-Type': 'application/json'};
-      const token = getToken();
-      if (token) headers['Authorization'] = 'Bearer ' + token;
-      const r = await fetch(NZ_CONTRACT.API.discovered_takeover, {
-        method: 'POST', headers,
-        body: JSON.stringify({pid: pd.pid, session_id: pd.sessionId, cwd: pd.cwd, proc_start_time: pd.procStartTime || 0, node: pd.node || ''})
-      });
-      if (!r.ok) {
-        const errText = await r.text().catch(() => '');
-        showAPIError('接管进程', r.status, errText);
-        if (input) { input.dataset.placeholder = 'send a message to take over...'; input.contentEditable = 'true'; }
-        composer.sending = false;
-        if (btn) btn.classList.remove('sending');
-        return;
-      }
-      const data = await r.json();
-      if (!data.key) {
-        showToast('接管进程失败：未返回会话标识', 'error');
-        if (input) { input.dataset.placeholder = 'send a message to take over...'; input.contentEditable = 'true'; }
-        composer.sending = false;
-        if (btn) btn.classList.remove('sending');
-        return;
-      }
-      // Remove from discoveredItems so renderSidebar won't re-create the card
-      dropDiscovered(pd.pid, pd.node);
-      // Remove the discovered card from sidebar
-      removeSidebarCard(discoveredKey(pd.pid, pd.node));
-      selection.pendingDiscovered = null;
-      // Poll until the session appears in managed sessions (up to 10s)
-      const takenKey = data.key;
-      const takenNode = pd.node || 'local';
-      let ready = false;
-      for (let i = 0; i < 20; i++) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        sessionList.lastVersion = 0;
-        await shell.fetchSessions();
-        if (sessionList.sessionsData[sid(takenKey, takenNode)]) { ready = true; break; }
-      }
-      if (!ready) {
-        showToast('接管超时：会话未就绪，请稍后重试', 'error');
-        if (input) { input.dataset.placeholder = 'send a message...'; input.contentEditable = 'true'; }
-        composer.sending = false;
-        if (btn) btn.classList.remove('sending');
-        return;
-      }
-      // Session is ready — switch to it and send the message
-      composer.sending = false;
-      shell.selectSession(takenKey, takenNode);
-      // Restore the message text and send
-      const newInput = document.getElementById('msg-input');
-      if (newInput) setMsgValue(newInput, text);
-      await sendMessage();
-      return;
-    } catch (e) {
-      showNetworkError('接管进程', e);
-      if (input) { input.dataset.placeholder = 'send a message to take over...'; input.contentEditable = 'true'; }
-      composer.sending = false;
-      if (btn) btn.classList.remove('sending');
-      return;
-    }
+    if (text) await takeoverThenSend(input, text);
+    return;
   }
 
   if (!selection.key) return;
@@ -399,9 +400,7 @@ async function sendComposerTurn(targetKey, targetNode) {
 
   // HTTP POST fallback — JSON only; files already on server.
   try {
-    const headers = { 'Content-Type': 'application/json' };
-    const token = getToken();
-    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const headers = { 'Content-Type': 'application/json', ...authHeaders() };
     const payload = buildSendPayload(text, fileIDs);
 
     // Mark this tab as the originator BEFORE the request leaves (text or

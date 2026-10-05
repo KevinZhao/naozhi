@@ -254,6 +254,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # rendered_dashboard.test.js boots the page the Go server renders;
+      # it fails rather than skips under CI when Go is missing.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Render the dashboard page and CSP
+        run: go run ./tools/render-dashboard -out "$RUNNER_TEMP/rendered-dashboard"
+
       - name: Install Playwright + chromium
         working-directory: test/e2e
         # npm install (not ci): repo policy gitignores package-lock.json
@@ -264,6 +274,8 @@ jobs:
 
       - name: Run mock-server suite (desktop-chrome)
         working-directory: test/e2e
+        env:
+          NAOZHI_RENDERED_DASHBOARD_DIR: ${{ runner.temp }}/rendered-dashboard
         run: npx playwright test --project=desktop-chrome
 
       - name: Upload traces on failure
@@ -284,6 +296,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # rendered_dashboard.test.js boots the page the Go server renders;
+      # it fails rather than skips under CI when Go is missing.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Render the dashboard page and CSP
+        run: go run ./tools/render-dashboard -out "$RUNNER_TEMP/rendered-dashboard"
+
       - name: Install Playwright + webkit
         working-directory: test/e2e
         # npm install (not ci): repo policy gitignores package-lock.json.
@@ -293,6 +315,8 @@ jobs:
 
       - name: Run mock-server suite (mobile-safari)
         working-directory: test/e2e
+        env:
+          NAOZHI_RENDERED_DASHBOARD_DIR: ${{ runner.temp }}/rendered-dashboard
         run: npx playwright test --project=mobile-safari
 
       - name: Upload traces on failure

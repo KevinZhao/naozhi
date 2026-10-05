@@ -816,7 +816,7 @@ func initExitError(msg shimMsg, tail []string) error {
 		e.code = msg.Code.Value
 	}
 	if e.code > 0 {
-		e.exit = &clierr.ProcessExitedError{Code: e.code, Class: classifyStderr(tail)}
+		e.exit = &clierr.ProcessExitedError{Code: e.code, Class: classifyExit(e.code, tail)}
 	}
 	return e
 }

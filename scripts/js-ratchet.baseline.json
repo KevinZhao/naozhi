@@ -66,7 +66,7 @@
     "lateBindings": 0
   },
   "contract.js": {
-    "lines": 109,
+    "lines": 110,
     "maxFnLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -352,9 +352,9 @@
     "lateBindings": 0
   },
   "send_message.js": {
-    "lines": 564,
-    "maxFnLines": 102,
-    "fnOver100": 1,
+    "lines": 563,
+    "maxFnLines": 52,
+    "fnOver100": 0,
     "topLevelLetVar": 1,
     "configureDeps": 3,
     "deadInjections": 0,

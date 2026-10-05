@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -20,6 +21,13 @@ import (
 // i.e. an allowlist bypass); TestDashboardCSP_CDNURLsMatchBundle keeps them in
 // lockstep with dashboard.js.
 var dashboardCSP = buildDashboardCSP(staticAssets["dashboard.html"].bytes)
+
+// DashboardPage returns a copy of the page handleDashboard serves and the
+// Content-Security-Policy it serves it with, for tools/render-dashboard, which
+// hands them to the e2e mock so a browser boots the rendered page.
+func DashboardPage() (page []byte, csp string) {
+	return slices.Clone(staticAssetBytes("dashboard.html")), dashboardCSP
+}
 
 // cdn URLs the dashboard's lazy loaders inject (SRI-pinned in dashboard.js).
 const (
