@@ -210,6 +210,8 @@ func TestPassthroughUnclaimed_OrphanedSlotLateResultIsBooked(t *testing.T) {
 	awaitBooked(t, booked, 0.001)
 }
 
+// awaitBooked waits for the late result to be booked, then checks no second
+// booking of it follows.
 func awaitBooked(t *testing.T, booked <-chan clievent.SendResult, wantUSD float64) {
 	t.Helper()
 	select {
@@ -219,5 +221,10 @@ func awaitBooked(t *testing.T, booked <-chan clievent.SendResult, wantUSD float6
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the late result was never booked")
+	}
+	select {
+	case r := <-booked:
+		t.Fatalf("the late result was booked twice (second: %+v)", r)
+	case <-time.After(150 * time.Millisecond):
 	}
 }
