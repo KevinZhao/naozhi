@@ -1738,6 +1738,32 @@ func TestACPProtocol_ReadEvent_ErrorResponse(t *testing.T) {
 	}
 }
 
+// TestACPProtocol_ReadEvent_ErrorResponseData: kiro sends Message "Internal
+// error" with the cause in a string data; the rejection must carry the cause
+// or the user only ever sees "Internal error".
+func TestACPProtocol_ReadEvent_ErrorResponseData(t *testing.T) {
+	t.Parallel()
+	p := &ACPProtocol{BackendID: "kiro"}
+	p.storeSessionID("sess_1")
+
+	line := `{"jsonrpc":"2.0","id":3,"error":{"code":-32603,"message":"Internal error","data":"Encountered an error in the response stream: The model you've selected is temporarily unavailable. (request_id: b90d)"}}`
+	_, done, err := readOne(t, p, line)
+	if !done {
+		t.Error("error response MUST be done=true")
+	}
+	var rejected *TurnRejectedError
+	if !errors.As(err, &rejected) {
+		t.Fatalf("err = %v, want a TurnRejectedError", err)
+	}
+	const want = "Internal error: Encountered an error in the response stream: The model you've selected is temporarily unavailable. (request_id: b90d)"
+	if rejected.Message != want {
+		t.Errorf("Message = %q, want %q", rejected.Message, want)
+	}
+	if !strings.Contains(err.Error(), "temporarily unavailable") {
+		t.Errorf("error = %q, should carry the data detail", err.Error())
+	}
+}
+
 // --- ACP Init test with mock LineReader (L3 fix) ---
 
 // mockLineReader feeds pre-recorded lines for testing.
