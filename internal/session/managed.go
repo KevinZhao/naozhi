@@ -134,8 +134,8 @@ type turnDoneNotifier interface {
 	SetOnTurnDone(fn func())
 }
 
-// unownedResultNotifier is the optional hook a process offers for the result
-// of a turn no Send owns; see bookUnownedResults.
+// unownedResultNotifier is the optional hook a process offers for a result no
+// live caller consumes; see bookUnownedResults.
 type unownedResultNotifier interface {
 	SetOnUnownedResult(fn func(clievent.SendResult))
 }

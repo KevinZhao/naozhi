@@ -407,8 +407,8 @@ func (p *Process) SetOnTurnDone(fn func()) {
 	p.turn.mu.Unlock()
 }
 
-// SetOnUnownedResult sets the callback that receives the result of a turn no
-// Send owns (see turnState.onUnownedResult). mu-guarded, so safe at any time.
+// SetOnUnownedResult sets the callback that receives a result no live caller
+// consumes (see turnState.onUnownedResult). mu-guarded, so safe at any time.
 func (p *Process) SetOnUnownedResult(fn func(clievent.SendResult)) {
 	p.turn.mu.Lock()
 	p.turn.onUnownedResult = fn
