@@ -333,9 +333,23 @@ func emitCheckResult(w io.Writer, r checkResult, asJSON bool) {
 		// The distinction matters: none of these stop a boot. At runtime the
 		// gates warn once and drop the value, which is how a stripped --effort
 		// survived three months (#2412) — the exit code and this line are the
-		// only things that make it loud.
-		fmt.Fprintf(w, "config check: %d configured input(s) would not take effect "+
-			"(naozhi would still start; each gate warns once at runtime and drops the value)\n", len(r.Diags))
+		// only things that make it loud. Validate findings drop nothing, so
+		// they are counted apart.
+		findings := 0
+		for _, d := range r.Diags {
+			if d.Layer == "config-validate" {
+				findings++
+			}
+		}
+		dropped := len(r.Diags) - findings
+		if dropped > 0 {
+			fmt.Fprintf(w, "config check: %d configured input(s) would not take effect "+
+				"(naozhi would still start; each gate warns once at runtime and drops the value)\n", dropped)
+		}
+		if findings > 0 {
+			fmt.Fprintf(w, "config check: %d config warning(s) "+
+				"(naozhi would still start; startup logs each one and runs as configured)\n", findings)
+		}
 	default:
 		fmt.Fprintln(w, "config check: OK")
 	}

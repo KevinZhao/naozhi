@@ -206,6 +206,14 @@ func (c cronSessionAdapter) CostTotals() costledger.Totals { return c.s.CostTota
 
 var _ cron.CostReporter = cronSessionAdapter{}
 
+// BeginCostWindow and EndCostWindow satisfy cron.CostWindow: the run books
+// the spend reported while its Send is live, the session the rest.
+func (c cronSessionAdapter) BeginCostWindow() { c.s.BeginCostWindow() }
+
+func (c cronSessionAdapter) EndCostWindow() costledger.Increment { return c.s.EndCostWindow() }
+
+var _ cron.CostWindow = cronSessionAdapter{}
+
 // Backend satisfies cron.BackendReporter with the backend ID the session was
 // spawned, restored, or reconnected under.
 func (c cronSessionAdapter) Backend() string { return c.s.Backend() }

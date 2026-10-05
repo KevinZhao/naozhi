@@ -69,11 +69,20 @@ type SendResult struct {
 	SessionID string
 }
 
-// CostReporter is the optional Session capability cron uses to attribute a
-// run's spend: the difference of two CostTotals snapshots taken around Send.
-// Sessions without it (test fakes) record zero cost.
+// CostReporter is the fallback Session capability for attributing a run's
+// spend: the difference of two CostTotals snapshots taken around Send.
+// Sessions with neither it nor CostWindow (test fakes) record zero cost.
 type CostReporter interface {
 	CostTotals() costledger.Totals
+}
+
+// CostWindow is the Session capability cron attributes a run's spend through
+// (docs/rfc/cost-ledger.md §5.0): the session collects the spend its results
+// report between Begin and End for the run instead of writing its own rows,
+// and books everything outside the window itself.
+type CostWindow interface {
+	BeginCostWindow()
+	EndCostWindow() costledger.Increment
 }
 
 // BackendReporter is the optional Session capability that names the backend

@@ -3,9 +3,7 @@ package wireup
 import (
 	"context"
 	"errors"
-	"github.com/naozhi/naozhi/internal/routerrelay"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/config"
@@ -162,28 +160,4 @@ func TestWireSchedulers_RecordsSchedulersBootStep(t *testing.T) {
 	if _, ok := b.steps.Get("schedulers"); !ok {
 		t.Errorf("WireSchedulers did not record the schedulers boot step; got %v", b.Steps())
 	}
-}
-
-// WireSchedulers binds the router's cost-run owner once the scheduler exists.
-func TestWireSchedulers_BindsCostRunOwner(t *testing.T) {
-	deps := baseDeps(t)
-	deps.RouterEvents = &routerrelay.Relay{}
-	out, err := NewBoot().WireSchedulers(deps)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if out.Cron != nil {
-			out.Cron.Stop()
-		}
-	})
-	if deps.RouterEvents.OwnsCostRun("cron:no-such-job") || deps.RouterEvents.OwnsCostRun("feishu:direct:u:general") {
-		t.Error("a key with no run in flight reported as run-owned")
-	}
-	defer func() {
-		if p, _ := recover().(string); !strings.Contains(p, "bound twice") {
-			t.Error("WireSchedulers left the cost-run owner unbound")
-		}
-	}()
-	deps.RouterEvents.BindCostRunOwner(func(string) bool { return false })
 }
