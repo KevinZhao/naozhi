@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -166,13 +167,27 @@ func TestCountMisplacedDocs(t *testing.T) {
 		"// naïve prose opens this doc.\nconst mode = 1\n\n" + // a non-ASCII word, not an identifier
 		"var last = 1 // a trailing note\n\n" +
 		"// orphan documents nothing.\n" // hit
-	b := "package p\n\n// Stop halts.\nfunc Stop() {}\n\n// helper helps.\nfunc helper() {}\n"
+	b := "package p\n\n// Stop halts.\nfunc Stop() {}\n\n// helper helps.\nfunc helper() {}\n\n" +
+		"type Server struct{}\n\ntype Config struct{}\n\ntype Persister struct{}\n"
+	// Prose opening with a package name: a compound or possessive, or a name
+	// the declaration's own signature, value or type uses.
+	prose := "package p\n\nimport \"context\"\n\n" +
+		"// Server-side check: check validates it.\nfunc check() {}\n\n" +
+		"// Config returned by Load is never nil.\nfunc Load() *Config { return nil }\n\n" +
+		"// Config: the defaults.\nvar defaults = 1\n\n" +
+		"// Server's address is fixed.\nvar addr = 1\n\n" +
+		"// Server is the default one.\nvar srv = Server{}\n\n" +
+		"// Config is wrapped here.\ntype wrapped struct{ c Config }\n\n" +
+		"// Persister writes logs.\nfunc (p *Persister) Flush() {}\n\n" + // hit: the receiver is not exempt
+		"// Stop halts the loop.\nfunc Run(ctx context.Context) {}\n\n" + // hit: Stop is not in the signature
+		"// Config is read by the closure.\nvar opened = func() { _ = Config{} }\n\n" + // hit: a function body is not exempt
+		"// Config bounds the set.\ntype set[K Config] struct{}\n"
 	note := "package p\n\n// note.go is a design note with no declarations.\n"
 	var c Counts
 	c.Offenders = map[string][]string{}
 	fset := token.NewFileSet()
 	var files []*ast.File
-	for name, src := range map[string]string{"a.go": a, "b.go": b, "note.go": note} {
+	for name, src := range map[string]string{"a.go": a, "b.go": b, "note.go": note, "prose.go": prose} {
 		f, err := countFile(&c, fset, name, []byte(src))
 		if err != nil {
 			t.Fatal(err)
@@ -180,9 +195,35 @@ func TestCountMisplacedDocs(t *testing.T) {
 		files = append(files, f)
 	}
 	countMisplacedDocs(&c, fset, files)
-	want := []string{"a.go:9", "a.go:12", "a.go:15", "a.go:24", "a.go:36", "a.go:44"}
-	if c.MisplacedDocs != len(want) || strings.Join(c.Offenders["MisplacedDocs"], " ") != strings.Join(want, " ") {
-		t.Errorf("MisplacedDocs = %d at %v, want %v", c.MisplacedDocs, c.Offenders["MisplacedDocs"], want)
+	got := c.Offenders["MisplacedDocs"]
+	slices.Sort(got)
+	want := []string{"a.go:12", "a.go:15", "a.go:24", "a.go:36", "a.go:44", "a.go:9", "prose.go:23", "prose.go:26", "prose.go:29"}
+	if c.MisplacedDocs != len(want) || !slices.Equal(got, want) {
+		t.Errorf("MisplacedDocs = %d at %v, want %v", c.MisplacedDocs, got, want)
+	}
+}
+
+// TestDocSubject: the subject is a token followed by whitespace or the end of
+// the text; one followed by other punctuation is a prose compound.
+func TestDocSubject(t *testing.T) {
+	t.Parallel()
+	for text, want := range map[string]string{
+		"Server-side check.": "",
+		"Config: defaults.":  "",
+		"Server's address.":  "",
+		"Run(ctx) starts.":   "",
+		"T.Run is fine.":     "Run",
+		"Foo.":               "Foo",
+		"Foo":                "Foo",
+		"Foo ends here.":     "Foo",
+		"  Foo\tis indented": "Foo",
+		"naïve prose.":       "naïve",
+		"- a list item":      "",
+	} {
+		doc := &ast.CommentGroup{List: []*ast.Comment{{Text: "// " + text}}}
+		if got := docSubject(doc); got != want {
+			t.Errorf("docSubject(%q) = %q, want %q", text, got, want)
+		}
 	}
 }
 
