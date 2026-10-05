@@ -173,8 +173,8 @@ func reconcileLedger(o reconcileOpts, out io.Writer) (reconcileReport, error) {
 	if err != nil {
 		return rep, err
 	}
-	byRun, byKey, runs := sessionAttribution(o.SessionStorePath)
-	rep.Unattributed = l.attribute(byRun, byKey)
+	byRun, byKey, chains, runs := sessionAttribution(o.SessionStorePath)
+	rep.Unattributed = l.attribute(byRun, byKey, chains, o.ClaudeDir)
 	l.runs = runs
 
 	if o.Session != "" && len(l.bySID[o.Session]) == 0 {
@@ -274,10 +274,12 @@ func loadLedgerSessions(store *costledger.Store, from, now time.Time) (*ledgerSe
 
 // attribute names each entry's CLI session: from its own run id (process-end
 // partials, unowned results and reconcile adjustments carry it), from the
-// session-runs record sharing its run id, or from a key that only ever held
-// one session. It returns how many entries none of these placed and records
-// their key-days.
-func (l *ledgerSessions) attribute(runSID, keySID map[string]string) (unattributed int) {
+// session-runs record sharing its run id, from a key that only ever held one
+// session, or, for a turn under a key that held several, from their
+// transcripts (see activeAt). It returns how many entries none of these
+// placed and records their key-days.
+func (l *ledgerSessions) attribute(runSID, keySID map[string]string, chains map[string][]string, claudeDir string) (unattributed int) {
+	act := sessionActivity{}
 	for _, e := range l.entries {
 		sid := runIDSession(e.RunID)
 		if sid == "" {
@@ -285,6 +287,10 @@ func (l *ledgerSessions) attribute(runSID, keySID map[string]string) (unattribut
 		}
 		if sid == "" {
 			sid = keySID[e.SessionKey]
+		}
+		if c := chains[e.SessionKey]; sid == "" && len(c) > 0 && e.Kind == costledger.KindTurn {
+			act.read(claudeDir, c)
+			sid = act.activeAt(c, e.TS.Add(turnStampSlack))
 		}
 		if !claudefs.IsValidSessionID(sid) {
 			unattributed++
@@ -308,6 +314,71 @@ func runIDSession(runID string) string {
 	return ""
 }
 
+// turnStampSlack is how much later than the entry booking a turn the turn's
+// last message may be stamped.
+const turnStampSlack = 5 * time.Second
+
+// sessionActivity holds the times of each read session's messages naozhi may
+// have run, ascending; a session whose transcript could not be read in full
+// is absent.
+type sessionActivity map[string][]time.Time
+
+// read adds the sessions of sids not read yet. Each is read on its own, so a
+// fork keeps the lines it copied from its parent.
+func (a sessionActivity) read(claudeDir string, sids []string) {
+	for _, sid := range sids {
+		if _, done := a[sid]; done {
+			continue
+		}
+		path := locateTranscript(claudeDir, sid)
+		if path == "" {
+			continue
+		}
+		u, found, err := claudefs.SessionMessageUsage(filepath.Dir(path), sid, map[string]bool{})
+		if err != nil || !found || u.Truncated {
+			continue
+		}
+		times := []time.Time{}
+		for _, m := range u.Messages {
+			if m.Entrypoint != "cli" && m.Entrypoint != "claude-vscode" {
+				times = append(times, m.At)
+			}
+		}
+		sort.Slice(times, func(i, j int) bool { return times[i].Before(times[j]) })
+		a[sid] = times
+	}
+}
+
+// activeAt names the session of sids, all held by one key, whose last message
+// at or before t is the latest: only one session of a key runs at a time.
+// It names none when a session was not read, when no session has a message
+// by t, or when the latest is shared, as a fork's copied lines are.
+func (a sessionActivity) activeAt(sids []string, t time.Time) string {
+	var best string
+	var bestAt time.Time
+	tie := false
+	for _, sid := range sids {
+		times, ok := a[sid]
+		if !ok {
+			return ""
+		}
+		i := sort.Search(len(times), func(i int) bool { return times[i].After(t) })
+		if i == 0 {
+			continue
+		}
+		switch at := times[i-1]; {
+		case at.After(bestAt):
+			best, bestAt, tie = sid, at, false
+		case at.Equal(bestAt):
+			tie = true
+		}
+	}
+	if tie {
+		return ""
+	}
+	return best
+}
+
 // order lists the sessions oldest first, so a fork's parent claims the
 // messages the fork copied.
 func (l *ledgerSessions) order() []string {
@@ -329,8 +400,8 @@ func (l *ledgerSessions) order() []string {
 // sessionAttribution maps run id to CLI session id and to its span from the
 // session-runs records, and each session key to the one CLI session it ever
 // held. A key whose records and sessions.json chain together name more than
-// one session is ambiguous and left out.
-func sessionAttribution(storePath string) (byRun, byKey map[string]string, runs map[string]timeSpan) {
+// one session goes to chains instead, with those sessions sorted.
+func sessionAttribution(storePath string) (byRun, byKey map[string]string, chains map[string][]string, runs map[string]timeSpan) {
 	byRun, runs = map[string]string{}, map[string]timeSpan{}
 	held := map[string]map[string]bool{}
 	hold := func(key, sid string) {
@@ -357,15 +428,20 @@ func sessionAttribution(storePath string) (byRun, byKey map[string]string, runs 
 			hold(key, id)
 		}
 	}
-	byKey = map[string]string{}
+	byKey, chains = map[string]string{}, map[string][]string{}
 	for key, ids := range held {
 		if len(ids) == 1 {
 			for id := range ids {
 				byKey[key] = id
 			}
+			continue
 		}
+		for id := range ids {
+			chains[key] = append(chains[key], id)
+		}
+		sort.Strings(chains[key])
 	}
-	return byRun, byKey, runs
+	return byRun, byKey, chains, runs
 }
 
 // cronSessionRuns maps each CLI session a cron run used to the spans of
@@ -928,7 +1004,7 @@ func printReconcile(out io.Writer, rep reconcileReport, write bool) {
 	}
 	fmt.Fprintf(out, "%-8s %5s %11.2f %11.2f %11.2f %+11.2f\n", "合计", "", before, after, transcript, after-before)
 	if rep.Unattributed > 0 {
-		fmt.Fprintf(out, "%d 条会话条目归不到 CLI session（无 run 记录，key 也对应多个 session），未参与对账；同 key 同日的残差不记\n", rep.Unattributed)
+		fmt.Fprintf(out, "%d 条会话条目归不到 CLI session（无 run 记录，key 没对应过 session，或对应过多个而按 transcript 时间分不出），未参与对账；同 key 同日的残差不记\n", rep.Unattributed)
 	}
 	if len(rep.Flagged) > 0 {
 		fmt.Fprintln(out, "\n计入了 --resume 恢复总额的条目：")
