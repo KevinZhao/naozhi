@@ -187,10 +187,6 @@ func launchdServiceLabel() string {
 	return LaunchdLabel
 }
 
-// verifiedLaunchdLabel returns the launchd label managing THIS binary, or ""
-// when unconfirmed. XPC_SERVICE_NAME is inherited, so a naozhi started from
-// Terminal.app sees com.apple.Terminal; acting on it would kickstart the
-// operator's terminal. Hence confirm the job runs our own executable.
 // execCommand is exec.Command behind one name so tests can observe the argv the
 // launchd restart path builds. The default is exec.Command itself, so production
 // behaviour is byte-for-byte unchanged.
@@ -204,6 +200,10 @@ func launchdServiceLabel() string {
 // label (Epic I #2547).
 var execCommand = exec.Command
 
+// verifiedLaunchdLabel returns the launchd label managing THIS binary, or ""
+// when unconfirmed. XPC_SERVICE_NAME is inherited, so a naozhi started from
+// Terminal.app sees com.apple.Terminal; acting on it would kickstart the
+// operator's terminal. Hence confirm the job runs our own executable.
 func verifiedLaunchdLabel() string {
 	label := launchdServiceLabel()
 	out, err := execCommand(resolveTrustedBin("launchctl"), "list", label).Output()

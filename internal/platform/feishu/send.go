@@ -19,6 +19,7 @@ import (
 // (J10 of #2548). Image sending lives in media.go, which shares postMessage's
 // token handling but not its body shape.
 
+// Reply sends a message to a Feishu chat. Handles text and/or images.
 func (f *Feishu) Reply(ctx context.Context, msg platform.OutgoingMessage) (string, error) {
 	var lastMsgID string
 
@@ -56,9 +57,10 @@ func (f *Feishu) sendText(ctx context.Context, chatID, text string) (string, err
 	return f.sendCard(ctx, chatID, text)
 }
 
-// Feishu interactive card, schema 2.0 (required for full GFM: headings,
-// fenced code, tables, blockquotes). Typed so json.Marshal avoids
-// map[string]any boxing on every reply.
+// feishuMarkdownElement and the types below build a Feishu interactive card,
+// schema 2.0 (required for full GFM: headings, fenced code, tables,
+// blockquotes). Typed so json.Marshal avoids map[string]any boxing on every
+// reply.
 type feishuMarkdownElement struct {
 	Tag     string `json:"tag"`
 	Content string `json:"content"`
@@ -148,6 +150,8 @@ func (f *Feishu) postMessage(ctx context.Context, token string, reqBody []byte) 
 	return result.Data.MessageID, nil
 }
 
+// replyError sends an error notice directly to the user on a short-lived ctx
+// derived from stopCtx, because the caller's ctx is often already cancelled.
 func (f *Feishu) replyError(_ context.Context, chatID, text string) {
 	rctx, cancel := context.WithTimeout(f.stopCtx, 5*time.Second)
 	defer cancel()
@@ -156,7 +160,7 @@ func (f *Feishu) replyError(_ context.Context, chatID, text string) {
 	}
 }
 
-// uploadImage uploads image data to Feishu and returns the image_key.
+// EditMessage updates an existing card message via PATCH (all messages are cards).
 func (f *Feishu) EditMessage(ctx context.Context, msgID string, text string) error {
 	token, err := f.getAccessToken(ctx)
 	if err != nil {
@@ -203,6 +207,3 @@ func (f *Feishu) EditMessage(ctx context.Context, msgID string, text string) err
 	}
 	return nil
 }
-
-// reactionRequestBody is the JSON body sent to POST /reactions (hot path:
-// one call per dispatched IM message, typed to avoid map allocations).

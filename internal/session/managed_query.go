@@ -802,13 +802,15 @@ func (s *ManagedSession) LogSystemEvent(summary string) {
 	s.InjectHistory([]clievent.EventEntry{entry})
 }
 
+// extractLastPromptScanN is how many tail events extractLastPromptFromProcess
+// reads.
+const extractLastPromptScanN = 64
+
 // extractLastPromptFromProcess scans the attached process's event log to
 // populate lastPrompt, lastActivity, and lastResponse when unset (e.g. after
 // shim reconnect where events bypassed InjectHistory). Only the tail is
 // needed since scanLastSummaries stops once all three are found; EventLastN
 // avoids the full-ring copy EventEntries would allocate.
-const extractLastPromptScanN = 64
-
 func (s *ManagedSession) extractLastPromptFromProcess() {
 	if loadAtomicString(&s.lastPrompt) != "" &&
 		loadAtomicString(&s.lastActivity) != "" &&

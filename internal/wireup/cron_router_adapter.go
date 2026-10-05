@@ -206,6 +206,12 @@ func (c cronSessionAdapter) CostTotals() costledger.Totals { return c.s.CostTota
 
 var _ cron.CostReporter = cronSessionAdapter{}
 
+// Backend satisfies cron.BackendReporter with the backend ID the session was
+// spawned, restored, or reconnected under.
+func (c cronSessionAdapter) Backend() string { return c.s.Backend() }
+
+var _ cron.BackendReporter = cronSessionAdapter{}
+
 // SendWatermark satisfies cron.SendWatermarker with the session's shim
 // watermark, encoded for cronRouterAdapter.AdoptInFlight to parse back.
 func (c cronSessionAdapter) SendWatermark() string {

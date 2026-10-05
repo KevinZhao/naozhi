@@ -67,6 +67,10 @@ var ErrRouterStopped = errors.New("router is shutting down")
 // the caller's call.
 var ErrSpawnInFlight = errors.New("a spawn for this key is already in flight")
 
+// ErrTakeoverRaced is returned by Takeover when a live session reached the
+// key while it was closing the old process.
+var ErrTakeoverRaced = errors.New("concurrent session created during takeover")
+
 // Router defaults applied by NewRouter when the corresponding RouterConfig
 // field is zero. The source of truth lives in internal/sessionconst so
 // internal/config can read it without importing internal/session; these
@@ -322,6 +326,7 @@ type routerStateView struct {
 		Snapshot() map[string]string
 	}
 	spawns interface {
+		PendingSpawns() int
 		SpawnInFlight(key string) (chan struct{}, bool)
 		StartupFailure(key string) (spawnpool.StartupFailure, bool)
 	}
@@ -361,6 +366,9 @@ func (v routerStateView) PickedBackend(key string) string { return v.picks.picke
 func (v routerStateView) PickedAccessProfile(key string) string {
 	return v.picks.pickedAccessProfile(key)
 }
+
+// PendingSpawns is the number of spawns holding a process slot.
+func (v routerStateView) PendingSpawns() int { return v.spawns.PendingSpawns() }
 
 // SpawnInFlight reports whether a spawn for key is in progress.
 func (v routerStateView) SpawnInFlight(key string) (chan struct{}, bool) {

@@ -277,3 +277,20 @@ func TestCronRouterAdapter_ReleaseProcess(t *testing.T) {
 		t.Error("release did not bump the list version; the dashboard keeps showing the process alive")
 	}
 }
+
+// TestCronSessionAdapter_BackendPassesThrough: cron's ledger labels a run with
+// the backend the session recorded at spawn, "" included.
+func TestCronSessionAdapter_BackendPassesThrough(t *testing.T) {
+	t.Parallel()
+	r := session.NewRouter(session.RouterConfig{})
+	t.Cleanup(r.Shutdown)
+	ms := r.InjectSession("cron:job-backend", session.NewTestProcess())
+	a := cronSessionAdapter{s: ms}
+	if got := a.Backend(); got != "" {
+		t.Errorf("Backend before SetBackend = %q, want empty", got)
+	}
+	ms.SetBackend("kiro")
+	if got := a.Backend(); got != "kiro" {
+		t.Errorf("Backend = %q, want kiro", got)
+	}
+}

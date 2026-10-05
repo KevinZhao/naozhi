@@ -170,8 +170,7 @@ func audioMagicOK(data []byte) bool {
 	return false
 }
 
-// replyError sends an error notice directly to the user on a short-lived ctx
-// derived from stopCtx, because the caller's ctx is often already cancelled.
+// uploadImage uploads image data to Feishu and returns the image_key.
 func (f *Feishu) uploadImage(ctx context.Context, data []byte, mimeType string) (string, error) {
 	token, err := f.getAccessToken(ctx)
 	if err != nil {
@@ -225,5 +224,3 @@ func (f *Feishu) uploadImage(ctx context.Context, data []byte, mimeType string) 
 	}
 	return result.Data.ImageKey, nil
 }
-
-// EditMessage updates an existing card message via PATCH (all messages are cards).

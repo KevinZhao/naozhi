@@ -33,7 +33,7 @@ const (
 	AdoptDriftShutdown
 )
 
-// driftShutdownKeys records the keys whose shims ReconnectShimsCtx shut down for
+// driftShutdowns records the keys whose shims ReconnectShimsCtx shut down for
 // argv drift, so a cron reconciler asking moments later can attribute the
 // death correctly. Startup-only state: written during the reconnect pass,
 // read during cron's reconcile, never cleaned — a handful of keys per process
