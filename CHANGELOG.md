@@ -57,6 +57,10 @@
   - 告警建议：按 `msg="spawn gate: configured input had no effect"` 加 `layer=` 字段过滤；或者看 authenticated `/health` 的 `spawn_diags.counts`（`layer|action` → 次数）与 `spawn_diags.recent`；debug 模式下 `/api/debug/vars` 有 `naozhi_spawn_diag_total{layer,action}`。按旧文案写的 grep / metric filter 已经静默失效
   - argv-validator 不豁免去重：shim reconcile 每 30s 会用同一 session key 重新推导 argv 并上报一次，豁免后日志和计数记录的是心跳而不是 spawn 尝试。这一层的丢弃总是 fail safe（新开会话，或不带该字段 spawn），值也不会完整回显，逐次审计的价值有限
 - **缺 history factory 的 Warn 前缀**：`cli: no history factory registered for backend; history will be empty` 改为 `history: no history factory registered for backend; history will be empty`（代码从 `internal/cli` 移到了 `internal/history`）。按整句匹配的告警请改为匹配 `no history factory registered`
+- **cron：云沙箱连接在运行中断开，重新计入自动暂停**（#3422）：撤回 0.1.43 #3345 里「云沙箱连接中断不计」的那一半，以及它写明的已知副作用
+  - 运行中丢失 sandbox stream（`failed/sandbox_transport`）重新计入连续失败。job 自己的负载每次都把 microVM 弄崩（OOM、崩溃）时，连续失败达到 `cron.auto_pause_after_failures` 后会照常自动暂停。有副作用的 job 因此最多重复执行这么多次，每次在确认队列里留一条记录。naozhi 所在主机一侧的原因（休眠、网络中断）导致的运行中断开同样计入：连接断在哪一端，代码无法区分
+  - 只有 naozhi 重启后由启动收尾结掉的孤儿 sandbox run 仍然不计。run 记录、错误分类和通知文案不变，仍是 `sandbox_transport`
+  - 后端瞬时故障（`turn_failed` 且原因是 `backend_overloaded` / `backend_rate_limited` / `backend_unreachable`）仍然不计
 
 ### Security
 
