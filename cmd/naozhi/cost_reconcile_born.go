@@ -17,6 +17,11 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
+// birthSlack is how far outside its run's recorded span a first turn's
+// transcript may begin: naozhi times the span around its send, the CLI
+// stamps the transcript.
+const birthSlack = 5 * time.Second
+
 // birthScanBytes bounds how much of a transcript's head is read for its
 // first timestamp and entrypoint.
 const birthScanBytes = 4 << 20
@@ -43,7 +48,7 @@ func newSessionBirths(claudeDir, storePath string, at attribution) *sessionBirth
 	b := &sessionBirths{claudeDir: claudeDir, storePath: storePath}
 	for id := range at.unnamed {
 		if s := at.runs[id]; !s.from.IsZero() && !s.to.IsZero() {
-			b.spans = append(b.spans, timeSpan{s.from.Add(-turnStampSlack), s.to.Add(turnStampSlack)})
+			b.spans = append(b.spans, timeSpan{s.from.Add(-birthSlack), s.to.Add(birthSlack)})
 		}
 	}
 	return b

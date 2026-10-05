@@ -293,10 +293,10 @@ func (l *ledgerSessions) attribute(at attribution, claudeDir, storePath string) 
 		}
 		if c := at.chains[e.SessionKey]; sid == "" && len(c) > 0 && e.Kind == costledger.KindTurn {
 			act.read(claudeDir, c)
-			sid = act.soleActiveIn(c, booked.before(e.SessionKey, e.TS), e.TS.Add(turnStampSlack))
+			sid = act.soleActiveIn(c, booked.before(e.SessionKey, e.TS), e.TS)
 		}
 		if span := at.runs[e.RunID]; sid == "" && at.unnamed[e.RunID] && !span.from.IsZero() && !span.to.IsZero() {
-			sid = born.soleBornIn(span.from.Add(-turnStampSlack), span.to.Add(turnStampSlack))
+			sid = born.soleBornIn(span.from.Add(-birthSlack), span.to.Add(birthSlack))
 		}
 		if !claudefs.IsValidSessionID(sid) {
 			unattributed++
@@ -319,10 +319,6 @@ func runIDSession(runID string) string {
 	}
 	return ""
 }
-
-// turnStampSlack is how much later than the entry booking a turn the turn's
-// last message may be stamped.
-const turnStampSlack = 5 * time.Second
 
 // sessionActivity holds what was read of each session's transcript, so a
 // session is read at most once whatever the outcome.
@@ -365,7 +361,8 @@ func readSessionTimes(claudeDir, sid string) sessionTimes {
 	return sessionTimes{times: times, ok: true}
 }
 
-// soleActiveIn names the one session of sids with a message in (from, to].
+// soleActiveIn names the one session of sids with a message in (from, to],
+// a turn's window as turnSpan cuts it.
 // A session's transcript also holds its turns under other keys, and a fork's
 // lines copied from its parent, so two sessions with a message there name
 // none; so do a session not read and a window no session has a message in.
@@ -667,10 +664,12 @@ func turnWindow(msgs []claudefs.MessageUsage, from, to time.Time, rates *costled
 
 // turnSpan is the window (from, to] of entries[i]'s turn, prev being where
 // the turn before it ended, and next where the next one starts. A turn entry
-// is booked at its end. A backfill is booked at its run's start and spans to
-// the run's recorded end, else up to the next entry, which may take in that
-// entry's turn too, so the next turn then starts back at the backfill's
-// start; to is zero when nothing bounds it.
+// is booked at its end: naozhi stamps it on the result, after the CLI stamped
+// that turn's lines on the same clock, so a later line is the next turn's.
+// A backfill is booked at its run's start and spans to the run's recorded
+// end, else up to the next entry, which may take in that entry's turn too,
+// so the next turn then starts back at the backfill's start; to is zero when
+// nothing bounds it.
 func turnSpan(entries []costledger.Entry, i int, prev time.Time, runs map[string]timeSpan) (from, to, next time.Time) {
 	e := entries[i]
 	if e.Kind != costledger.KindBackfill {
