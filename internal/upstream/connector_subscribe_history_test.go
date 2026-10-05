@@ -142,9 +142,9 @@ func TestHandleConn_WantHistory_EmptyCatchUp(t *testing.T) {
 	}{{cli.StateRunning, true}, {cli.StateReady, false}} {
 		t.Run(tc.state.String(), func(t *testing.T) {
 			r, proc := injectHistory(t, clievent.EventEntry{Time: 1000, UUID: "old", Type: "user", Summary: "hi"})
-			proc.StateVal = tc.state
+			proc.SetState(tc.state)
 			// Runs after the link closes; a running session stalls Shutdown.
-			t.Cleanup(func() { proc.StateVal = cli.StateReady })
+			t.Cleanup(func() { proc.SetState(cli.StateReady) })
 
 			frames := subscribeLink(t, r, node.ReverseMsg{Type: "subscribe", Key: historyKey, After: 2000, WantHistory: true})
 			nextFrame(t, frames, "subscribed")

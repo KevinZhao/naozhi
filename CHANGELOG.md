@@ -33,6 +33,7 @@
 - **Dashboard WS 重连加 jitter**（RNEW-UX-001），N 个 tab 同时掉线不再同秒风暴回包
 - **Dashboard 后台 tab 暂停 polling**（RNEW-UX-014），手机后台省电省流量
 - **触控目标 ≥ 44×44**（RNEW-UX-011），`.btn-dismiss` / `.status-reconnect` 在 `pointer:coarse` 下满足 WCAG 2.5.5
+- **启动日志点名 `default_backend` 生效的 access profile**（#3419）：profile 的 `default_backend` 与启动实际绑定的默认 backend 不同时，每个这样的 profile 打一行日志，带 `default_backend`、`router_default`、`scope`、`hint`。该 profile 是 `default_access_profile` 时为 Warn（没有解析到其他 profile、也没钉 backend 的新会话都会换 CLI），其余为 Info。与默认 backend 相同的不打。已有会话不受影响，完整的落点用 `naozhi config check --effective` 查看
 
 ### Changed
 
@@ -80,6 +81,7 @@
 
 ### Fixed
 
+- `naozhi doctor` 的 CLI Backends 段 `Default:` 现在显示启动时实际绑定的默认 backend：`cli.backend` 未在 `cli.backends` 中列出、不是已注册的 backend id，或未设置且 `cli.backends` 首项无效时，此前打印的是配置值（例如 `Default: bogus`），而启动实际跑的是回退后的 backend。现在打印回退目标，并在括号里附上与启动告警相同措辞的原因（#3409）
 - `/urgent` 之后，在它之前已排队的消息现在会拿到自己的真实回答，不再收到"上一条消息已被 /urgent 打断，请在当前任务完成后重发"：真实 CLI 实测（claude 2.1.288）表明 `priority:"now"` 抢占不丢弃队列，紧急消息先跑、排队消息随后各自成轮（`docs/rfc/passthrough-mode-validation.md` V10，#3394）
 - 删除会话后立刻在同一个 key 上新建会话时，被删对话的记录不再留在新会话的 event log 里（#3416）：以前重启后它会出现在新会话 dashboard 历史的最前面，旧 workspace 的附件引用也一直不释放。现在删除会先清掉 event log 和附件引用、再关进程，新会话等清理完成（通常几毫秒，最多约 8 秒）才开始落盘
 - **启用多个 backend 时，dashboard 不再替运维选 router 默认 backend**（#3418）：backend picker 第一项改为默认选中的「自动（X）」，不动它就不发 `backend`，由服务端按项目钉的 `backend` > `agents[].backend` > 访问档 `default_backend` > `cli.backend` 选；X 是所选访问档会落到的 backend，换访问档时跟着变（项目钉的 backend、`agents[].backend`、cron 任务所属 agent 的访问档、远端节点自己的访问档前端都看不到，这几种情况下 X 只是提示，以服务端为准）。以前 picker 总是预选 router 默认并当成显式选择发出，`default_backend`（#3364）和 `agents[].backend` 在 dashboard 入口从不生效

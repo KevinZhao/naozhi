@@ -487,8 +487,8 @@ reverse_nodes:
 	d.renderBackendsSection()
 	got := buf.String()
 
-	if !strings.Contains(got, "Default: kiro") {
-		t.Errorf("Default line should reflect cli.backend=kiro; got %q", got)
+	if !strings.Contains(got, "Default: kiro\n") {
+		t.Errorf("Default line should reflect cli.backend=kiro with no fallback note; got %q", got)
 	}
 	for _, want := range []string{
 		"=== CLI Backends ===",
@@ -510,6 +510,58 @@ reverse_nodes:
 	// claude (no cap required) AND kiro (acp required).
 	if !strings.Contains(got, "claude: no special cap required") {
 		t.Errorf("reverse-node block missing claude no-cap line; got %q", got)
+	}
+}
+
+// TestDoctor_BackendsSection_DefaultFallback pins that the Default line names
+// the backend startup binds, with a note naming the configured id, when the
+// configured default cannot be bound.
+func TestDoctor_BackendsSection_DefaultFallback(t *testing.T) {
+	cases := []struct {
+		name, body, wantLine, wrongLine string
+	}{
+		{
+			name: "cli.backend unregistered",
+			body: "cli:\n  backend: bogus\n  backends:\n    - id: claude\n    - id: kiro\n",
+			wantLine: `Default: claude (cli.backend "bogus" is not a registered backend id; ` +
+				`startup falls back to "claude")`,
+			wrongLine: "Default: bogus",
+		},
+		{
+			name: "cli.backend not listed",
+			body: "cli:\n  backend: kiro\n  backends:\n    - id: claude\n",
+			wantLine: `Default: claude (cli.backend "kiro" is not listed in cli.backends; ` +
+				`startup falls back to "claude")`,
+			wrongLine: "Default: kiro",
+		},
+		{
+			name: "cli.backend unset, first entry unregistered",
+			body: "cli:\n  backends:\n    - id: bogus\n    - id: kiro\n",
+			wantLine: `Default: kiro (cli.backend unset, and the first cli.backends entry "bogus" ` +
+				`is not a registered backend id; startup falls back to "kiro")`,
+			wrongLine: "Default: bogus",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(cfgPath, []byte(tc.body), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			var buf bytes.Buffer
+			d := &doctor{out: &buf, timeout: 2 * time.Second, configPath: cfgPath}
+			d.renderBackendsSection()
+			got := buf.String()
+			if strings.Contains(got, "not loaded") {
+				t.Fatalf("config must load for this case; got:\n%s", got)
+			}
+			if !strings.Contains(got, tc.wantLine+"\n") {
+				t.Errorf("missing %q; got:\n%s", tc.wantLine, got)
+			}
+			if strings.Contains(got, tc.wrongLine) {
+				t.Errorf("Default line names the configured id %q, not the bound one; got:\n%s", tc.wrongLine, got)
+			}
+		})
 	}
 }
 

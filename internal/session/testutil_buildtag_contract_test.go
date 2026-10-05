@@ -1,10 +1,19 @@
-// anchor-keep: whether test seams link into the production binary is a build-graph fact; the tag constraint on testutil.go is only visible at source.
+// anchor-keep: whether test seams link into the production binary is a build-graph fact, and which tests bypass TestProcess's lock is a call-site fact; both are only visible at source.
 package session
 
 import (
+	"bytes"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // TestTestutil_BuildTagContract pins the production-binary protection on
@@ -102,5 +111,50 @@ func checkReleaseExclusion(t *testing.T, path string) {
 			"`!release` (excluded under `-tags release`); pick another "+
 			"shape only if it likewise excludes at least one realistic "+
 			"build matrix entry.", path, tag)
+	}
+}
+
+// TestTestProcess_NoDirectStateFieldAccess keeps tests on the locked
+// accessors: a test that reads or assigns StateVal/AliveVal directly races
+// the router's Close. Struct-literal keys are not selectors and stay legal.
+func TestTestProcess_NoDirectStateFieldAccess(t *testing.T) {
+	t.Parallel()
+	fset := token.NewFileSet()
+	var hits []string
+	const root = "../.."
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if testhelper.SkipRepoDir(root, path, d) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, err := os.ReadFile(path)
+		if err != nil || !bytes.Contains(src, []byte("StateVal")) && !bytes.Contains(src, []byte("AliveVal")) {
+			return err
+		}
+		f, err := parser.ParseFile(fset, path, src, parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok && (sel.Sel.Name == "StateVal" || sel.Sel.Name == "AliveVal") {
+				hits = append(hits, fmt.Sprintf("%s .%s", fset.Position(sel.Pos()), sel.Sel.Name))
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk repository: %v", err)
+	}
+	if len(hits) > 0 {
+		t.Errorf("direct TestProcess state field access; use SetState/SetAlive or State/Alive:\n  %s", strings.Join(hits, "\n  "))
 	}
 }

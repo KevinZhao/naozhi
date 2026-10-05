@@ -1212,6 +1212,8 @@ running（5），否则探针行 6 的 B（`state:"start"`，只有 queuedAt）�
    CC 若改键序，前缀不命中，帧落到 :475 的结构性兜底，只是变慢。兜底里的
    `if ev.Type == "control_response" { return nil }`（:478）改为同样调用 `parseControlAck`
    （或直接用已解出的 ev 构造 ack），否则键序变化会让 `SetModel` 等 ack 的调用阻塞，而不只是变慢。
+   兜底的 hook 判断同时由 `hook_started` / `hook_response` 放宽为 `strings.HasPrefix(ev.SubType, "hook_")`，
+   与快路径的通配（R250531-PERF-9）一致；否则键序变化时 `hook_progress` 这类帧会漏给消费方，而键序正常时被丢。
 4. **Workflow tool_use 的 Detail**：`clievent/tool_input.go` `FormatToolInput` 增
    `case "Workflow":`，只解 `scriptPath`（取 basename）——输出 `Workflow <basename>` 或单独
    `Workflow`；**永不**读取 `script` / `args`。pin 测试：input 含 `script` / `args` 时 Detail 中
@@ -2613,7 +2615,7 @@ workflowPushLoop 与 board 发布、generation 变化并发。
 | R6 | 保活改动让 session 永不过期 | `workflowPinMax=6h` 无观测后放开；scratch 按观测时间老化；驱逐有回退 |
 | R7 | shim idle timer 不随 stdout 刷新，naozhi 断开 > 4h 仍杀 CLI | 既有行为，记录；另开 issue |
 | R8 | js-ratchet / 前端闸门多 | 预先申请覆盖全特性的 ratchet-raise issue；逐 PR 台账；DOM API 构建零新增 sink |
-| R9 | hook / control_response 改为行首锚定后，CC 改键序时快路径失效 | 结构性兜底已存在（`protocol_claude.go:475`）且 control_response 兜底改走 `parseControlAck`；fixture 断言前缀形态 |
+| R9 | hook / control_response 改为行首锚定后，CC 改键序时快路径失效 | 结构性兜底已存在（`protocol_claude.go:475`）且 control_response 兜底改走 `parseControlAck`、hook 兜底按 `hook_*` 通配，键序变化只变慢；前缀形态按 CC 2.1.288 bundle 的帧构造（`{type:"system",subtype:"hook_…"}`、`{type:"control_response",response:…}`）核对，快路径测试以该形态的 fixture 断言不经 unmarshal；stream-sample 不含这两类帧，真实抓帧的 golden 留待 PR-5 刷新 fixture 时补 |
 | R10 | 修 tailer allowedRoot 改变既有行为（更多 tailer 真正起来，触及 50 上限） | 50 上限与 capacity 降级本已存在；PR 描述记录 |
 | R11 | CC 状态 / 词表再变（新 state、新 status） | 规范化表单点实现 + unknown 透传 + 手写 fixture 随升级刷新 |
 | R12 | 计数型 sessions_update（`BumpVersion`，推进 `stats.version`）让每个 tab 每 30s 重拉一次 `/api/sessions`、整块重绘 sidebar 并重跑 main-state reconcile 等 applied hooks | 仅限有 running workflow 的 session、每 session 至多 1/30s；trailing edge 合并；不置 dirty、不写 sessions.json；代价写明（§5.8） |
@@ -2633,10 +2635,11 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
 ### PR-1 fix(cli): hook/control_response 快速跳过改为行首锚定
 
 - 范围：§5.1(3)。
-- 文件：`internal/cli/protocol_claude.go`（:451、:454、:478 兜底）、`internal/cli/protocol_claude_test.go`。
+- 文件：`internal/cli/protocol_claude.go`（:451、:454、:472-481 兜底）、`internal/cli/protocol_claude_skipfastpath_test.go`、
+  `internal/cli/protocol_claude_hook_wildcard_test.go`（既有快路径测试文件；`protocol_claude_test.go` 不存在）。
 - 测试：`"label":"hook_tests"` 快照帧不再被丢；assistant tool_use `input` 含 `{"subtype":"hook_started"}` /
   `{"type":"control_response"}` 的帧照常交付（旧代码失败）；真实 hook / control_response 帧仍走快路径；
-  键序不同的 control_response 经兜底仍得到 ack。
+  键序不同的 control_response 经兜底仍得到 ack，键序不同的 `hook_*` 帧经兜底仍被丢。
 - 验收：现有 hook skip 测试全绿；新回归测试在 master 上失败、在本 PR 上通过。
 - 依赖：无。
 
