@@ -18,20 +18,11 @@ import (
 // a pre-cancelled ctx so no case waits out its timer; the contract is
 // "returns without panicking", not a wall-clock ceiling.
 //
-// Direct inputs (period=-1, jitterMax=large positive): the existing
-// `if window <= 0` branch already rejects this; the new
-// `if int64(window) <= 0` is a redundant belt-and-suspenders that
-// only matters if a future refactor reorders the clamp. The test
-// covers both shapes (negative period; negative window via custom
-// jitterMax) so a regression that removes either guard fails here.
+// The guards are jitterWindow's non-positive -> 0 and jitterSleep's
+// `window <= 0`. The test covers both shapes (negative period; negative
+// window via custom jitterMax) so a regression that removes both fails here.
 func TestJitterSleep_NegativeWindowDoesNotPanic(t *testing.T) {
 	t.Parallel()
-
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("jitterSleep panicked on non-positive window: %v", r)
-		}
-	}()
 
 	cases := []struct {
 		name      string
@@ -57,6 +48,13 @@ func TestJitterSleep_NegativeWindowDoesNotPanic(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Recover inside the subtest: t.Run runs this closure on its own
+			// goroutine, so a recover in the parent would never see the panic.
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("jitterSleep panicked on non-positive window: %v", r)
+				}
+			}()
 			jitterSleep(ctx, tc.period, tc.jitterMax)
 		})
 	}

@@ -80,7 +80,7 @@ func TestHandleRequest_CtxMatrix_TakeoverUsesAppCtx(t *testing.T) {
 		t.Error(`takeover branch must call discovery.WaitAndCleanup(appCtx, ...) — takeover is app-scoped per the RNEW-008 matrix`)
 	}
 	if !strings.Contains(body, "Takeover(appCtx") {
-		t.Error(`takeover branch must call router.Takeover(appCtx, ...) — cleanup must survive a reconnect`)
+		t.Error(`takeover branch must call lease.Takeover(appCtx, ...) — cleanup must survive a reconnect`)
 	}
 	// Ban connCtx as a CALL ARGUMENT (e.g. "Foo(connCtx" or "(connCtx,").
 	// A bare doc mention ("appCtx outlives connCtx") is fine; what we

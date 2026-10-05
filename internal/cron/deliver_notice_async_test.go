@@ -10,6 +10,8 @@ package cron
 // IM webhook before the cron lib could observe the tick as done.
 
 import (
+	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -61,8 +63,8 @@ func TestDeliverNotice_EmptyTextIsNoOp(t *testing.T) {
 
 // TestDeliverNotice_SetTargetTracksWG is the core async-dispatch pin:
 // after deliverNotice returns the goroutine must already be Add'd onto
-// triggerWG, and Wait must drain it. The platform map is empty so
-// notifyTarget short-circuits at the `p == nil` check — we are testing
+// triggerWG, and Wait must drain it. No NotifySender is configured so
+// notifyTarget short-circuits at the `sender == nil` check — we are testing
 // the wrapper, not the IM transport.
 func TestDeliverNotice_SetTargetTracksWG(t *testing.T) {
 	t.Parallel()
@@ -83,33 +85,82 @@ func TestDeliverNotice_SetTargetTracksWG(t *testing.T) {
 	}
 }
 
-// TestDeliverNotice_ReturnsBeforeNotifyTarget verifies the call site is no
-// longer synchronously blocked by the IM transport. We can't stub
-// notifyTarget cleanly without a platform fake, so we observe the timing
-// directly: deliverNotice returns BEFORE the goroutine (which here trips a
-// channel send) makes progress. If a future regression reverts the async
-// wrapper, the channel send will sit ahead of deliverNotice's return and
-// deliverNotice will only "return" after the goroutine finishes — i.e. the
-// observed order will flip.
+// blockingReplier is a PlatformReplier whose Reply signals entered and then
+// holds until release is closed, so a test can observe deliverNotice's return
+// while delivery is provably still in flight.
+type blockingReplier struct {
+	entered chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (r *blockingReplier) MaxReplyLength() int                    { return 4096 }
+func (r *blockingReplier) Split(text string, maxLen int) []string { return []string{text} }
+func (r *blockingReplier) UsesSingleUseReplyToken() bool          { return false }
+
+func (r *blockingReplier) Reply(ctx context.Context, chatID, text string) (string, error) {
+	if r.calls.Add(1) == 1 {
+		close(r.entered)
+	}
+	select {
+	case <-r.release:
+		return "", nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+type blockingSender struct{ r *blockingReplier }
+
+func (b blockingSender) Lookup(platform string) (PlatformReplier, bool) {
+	if platform != "fake" {
+		return nil, false
+	}
+	return b.r, true
+}
+
+// TestDeliverNotice_ReturnsBeforeNotifyTarget verifies the call site is not
+// blocked by the IM transport: deliverNotice must return while Reply is still
+// held open. A synchronous regression cannot return before release is closed,
+// so the test fails regardless of machine load.
 func TestDeliverNotice_ReturnsBeforeNotifyTarget(t *testing.T) {
 	t.Parallel()
+	r := &blockingReplier{entered: make(chan struct{}), release: make(chan struct{})}
 	s := &Scheduler{}
-	// We intercept the goroutine via triggerWG: count Done events vs the
-	// time deliverNotice returns. With async dispatch, the call returns
-	// while triggerWG counter is still 1; Wait drains it shortly after.
-	target := NotifyTarget{Platform: "no-such-plat", ChatID: "x"}
-	preCallReturn := time.Now()
-	s.deliverNotice(target, "irrelevant")
-	// At this moment the goroutine may or may not have completed (it's
-	// just a nil-platform check + slog.Warn). The strict invariant we
-	// can check: deliverNotice itself must not have spent >50ms — that
-	// would only happen if the synchronous notifyTarget path were back.
-	dur := time.Since(preCallReturn)
-	if dur > 50*time.Millisecond {
-		t.Errorf("deliverNotice took %v (>50ms); the synchronous notifyTarget path is back — R242-GO-13 regressed", dur)
+	s.configMapsPtr.Store(&cronConfigMaps{notifySender: blockingSender{r: r}})
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		s.deliverNotice(NotifyTarget{Platform: "fake", ChatID: "c"}, "x")
+	}()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		close(r.release)
+		t.Fatal("deliverNotice blocked while Reply was held; the synchronous notifyTarget path is back — R242-GO-13 regressed")
 	}
-	// Drain the goroutine before returning so leak detectors stay clean.
-	s.triggerWG.Wait()
+	select {
+	case <-r.entered:
+	case <-time.After(5 * time.Second):
+		close(r.release)
+		t.Fatal("delivery goroutine never reached Reply")
+	}
+	close(r.release)
+
+	drained := make(chan struct{})
+	go func() {
+		s.triggerWG.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("triggerWG.Wait did not drain after Reply was released")
+	}
+	if n := r.calls.Load(); n != 1 {
+		t.Fatalf("Reply called %d times, want 1", n)
+	}
 }
 
 // TestDeliverNotice_BurstAddsCompleteSerially verifies the async wrapper still
