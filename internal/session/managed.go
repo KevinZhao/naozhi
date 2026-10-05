@@ -292,6 +292,10 @@ type ManagedSession struct {
 	meteringCache atomic.Pointer[meteringCache]
 	sendMu        sync.Mutex   // serializes messages to the same session
 	historyMu     sync.RWMutex // protects persistedHistory reads/writes (independent of sendMu)
+	// historyRetired is set by the removal that takes the session out of the
+	// table, so its process never binds an event-log sink afterwards. Guarded
+	// by HistoryIO.retireMu; see history_retire.go.
+	historyRetired bool
 	// turnWaiters counts Send calls from before they queue on sendMu until
 	// they return, and SendPassthrough calls for their whole duration, so
 	// ReleaseIdleProcess sees a turn that sendMu.TryLock cannot.

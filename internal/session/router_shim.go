@@ -491,7 +491,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		// Persist sink goes last so the history inject + shim replay above land
 		// with sinkReady=false and are dropped rather than written back to disk
 		// (RFC §3.2.2).
-		r.hist.installPersistSink(proc, state.Key)
+		r.hist.installPersistSink(parentCtx, sess, proc, state.Key)
 
 		// Sidebar label instead of "(no prompt)".
 		sess.extractLastPromptFromProcess()

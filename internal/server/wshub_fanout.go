@@ -24,11 +24,10 @@ func (b *wsBroadcaster) broadcastSendError(key, errMsg string) {
 }
 
 // informationalSendErr reports whether err is a passthrough outcome the user
-// already knows about: their own /urgent preemption, a /clear-/new reset, or a
-// reconnect with unknown state. session_state corrects the UI for all three.
+// already knows about: a /clear-/new reset or a reconnect with unknown state.
+// session_state corrects the UI for both.
 func informationalSendErr(err error) bool {
-	return errors.Is(err, clierr.ErrAbortedByUrgent) ||
-		errors.Is(err, clierr.ErrSessionReset) ||
+	return errors.Is(err, clierr.ErrSessionReset) ||
 		errors.Is(err, clierr.ErrReconnectedUnknown)
 }
 

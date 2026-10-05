@@ -143,11 +143,6 @@ var (
 	ErrOrphanedSlot = errors.New("slot orphaned: no result or error received")
 )
 
-// ErrAbortedByUrgent has no producer: a priority:"now" preemption aborts only
-// the in-flight turn and the CLI still runs the messages queued behind it
-// (passthrough-mode-validation V10). usermsg and the server still classify it.
-var ErrAbortedByUrgent = errors.New("aborted by priority:now preemption")
-
 // ErrNoActiveTurn is returned by InterruptViaControl when no turn is running;
 // nothing was interrupted, so logs must not claim "aborted active turn".
 var ErrNoActiveTurn = errors.New("no active turn to interrupt")
