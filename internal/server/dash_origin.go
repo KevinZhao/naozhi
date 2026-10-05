@@ -107,7 +107,7 @@ func (o *wsOrigin) fail(msg string) {
 // httpOrigin is one HTTP send. Its receiver speaks for every HTTP send on the
 // key in the batch (the Mates), so a failed turn is broadcast once. The
 // broadcast reaches every tab on the key, so informational outcomes are
-// dropped: B's /urgent aborting A's send must not tear down B's own bubble.
+// dropped: B's /new resetting A's send must not tear down B's own bubble.
 type httpOrigin struct {
 	dashOrigin
 	notify sendNotifier
