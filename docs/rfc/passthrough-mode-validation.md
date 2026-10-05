@@ -239,6 +239,7 @@ result[1]: "Autumn Leaves... (重写版，含 'thin cirrus bars')"  ← 模型�
 > **CLI 版本**: claude 2.1.288（toolbox，opus-5-5 via Bedrock）
 > **日期**: 2026-10-05
 > **参数**: naozhi 实际参数（`-p`、stream-json 双向、`--verbose`、`--replay-user-messages`、`--setting-sources ''`、`--settings ~/.naozhi/naozhi-settings.json`、`--dangerously-skip-permissions`）
+> **注**: 上述参数是原始抓包所用；仓库内脚本经 `harness.Session` 启动，用 harness 自己的参数加 `--replay-user-messages`，与上表相比少了 `--settings`（不加载 naozhi-settings.json）
 
 **脚本**: `v10_now_preempt_queue.py`（`--bash` / `--gen`）
 
