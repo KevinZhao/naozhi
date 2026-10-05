@@ -17,12 +17,13 @@ import (
 type fakeStore struct {
 	favorites map[string]bool
 	known     map[string]bool
+	projects  map[string]*projectpkg.Project
 }
 
 var _ ProjectStore = (*fakeStore)(nil)
 
-func (f *fakeStore) All() []*projectpkg.Project     { return nil }
-func (f *fakeStore) Get(string) *projectpkg.Project { return nil }
+func (f *fakeStore) All() []*projectpkg.Project          { return nil }
+func (f *fakeStore) Get(name string) *projectpkg.Project { return f.projects[name] }
 func (f *fakeStore) SetFavorite(name string, fav bool) error {
 	if !f.known[name] {
 		return projectpkg.ErrNotFound
@@ -32,14 +33,20 @@ func (f *fakeStore) SetFavorite(name string, fav bool) error {
 }
 func (f *fakeStore) UpdateConfig(string, projectpkg.ProjectConfig) error { return nil }
 func (f *fakeStore) EffectivePlannerModel(*projectpkg.Project) string    { return "" }
-func (f *fakeStore) EffectivePlannerPrompt(*projectpkg.Project) string   { return "" }
 
-type fakeRouter struct{ bumps int }
+type fakeRouter struct {
+	bumps     int
+	resets    int
+	resetKey  string
+	resetOpts sessionview.AgentOpts
+}
 
 var _ RouterView = (*fakeRouter)(nil)
 
 func (f *fakeRouter) SessionFor(string) PlannerSession { return nil }
-func (f *fakeRouter) ResetAndRecreate(context.Context, string, sessionview.AgentOpts) error {
+func (f *fakeRouter) ResetAndRecreate(_ context.Context, key string, opts sessionview.AgentOpts) error {
+	f.resets++
+	f.resetKey, f.resetOpts = key, opts
 	return nil
 }
 func (f *fakeRouter) BumpVersion() { f.bumps++ }

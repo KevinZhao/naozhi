@@ -125,7 +125,7 @@ model:               请求显式 → per-session → per-agent → project(Plan
 
 ### P3（完备性/打磨，可 GA 后跟进，但 v2 应记录）
 
-- **P3-1 remote-created session 绕过 resolver**：`connector_rpc.go:414-420` legacy inlined 路径直接从远端 `EffectivePlannerModel` 建 `AgentOpts`，只改主节点 resolver 会被绕过。→ 与 P1-a「仅本地派发」gate 一并处理。
+- **P3-1 remote-created session 绕过 resolver**：`connector_rpc.go:414-420` legacy inlined 路径直接从远端 `EffectivePlannerModel` 建 `AgentOpts`，只改主节点 resolver 会被绕过。→ 与 P1-a「仅本地派发」gate 一并处理。（2026-10-05 注：该 inline 路径已在 #3300 PR2（#3357）删除，planner restart 一律经 KeyResolver。）
 - **P3-2 scratch/quick/passthrough 入口**：走同一 `AgentOpts`/`GetOrCreate`，**若解析下沉到 `resolveSpawnParamsLocked`（不是 `ResolveForChat`）则自动继承正确**。scratch 追问继承**父会话锁定档**（不重解析）；quick session 无项目绑定 → 全局默认档。→ 强化「解析下沉」的架构决策。
 - **P3-3 codex 认证语义未验证**：overlay 的 env key 是 claude 语义（`ANTHROPIC_*`/`CLAUDE_CODE_USE_BEDROCK`），codex app-server 协议可能需不同 key。→ v2 声明「本轮仅验证 claude/kiro，codex 待验证」。
 - **P3-4 model×backend 兼容性 + PlannerModel vs profile.default_model 同级裁决**：kiro model 是 `deepseek-3.2`/`glm-5`，claude 是 `claude-*`；档 default_model 用在错 backend 上无效。ValidateConfig 应交叉校验或 doctor 警告。裁决：显式 `PlannerModel` > `profile.default_model`。
