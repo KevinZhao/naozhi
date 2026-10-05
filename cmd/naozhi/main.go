@@ -411,7 +411,7 @@ func main() {
 		Agents:        agents,
 		AgentCommands: cfg.AgentCommands,
 		Scheduler:     scheduler,
-		Backend:       cfg.CLI.Backend,
+		Backend:       defaultBackend,
 		AllowedRoot:   workspace,
 		StateDir:      sessionLayout.Root(),
 		Config: server.ConfigOptions{
@@ -570,7 +570,7 @@ func main() {
 		"addr", cfg.Server.Addr,
 		"workspace_id", cfg.Workspace.ID,
 		"workspace_name", cfg.Workspace.Name,
-		"backend", cfg.CLI.Backend,
+		"backend", defaultBackend,
 		"model", cfg.CLI.Model,
 		"max_procs", cfg.Session.MaxProcs,
 		"platforms", len(platforms),
