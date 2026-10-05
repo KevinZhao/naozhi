@@ -579,16 +579,9 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 			fanoutTurnResult(owners, ev)
 			return false
 		}
-		// No owner claimed this result. (a) abort with no claimed slots: log
-		// here and skip the legacy path — abort errors already fired above.
-		// (b) true stray result (reconnect, no active Send): fall through so the
-		// unconditional logEventAt below records the turn-complete entry (#1483);
-		// under passthrough no legacy eventCh consumer would append it.
-		if ev.SubType == "error_during_execution" {
-			p.logEventAt(ev, nowMS)
-			p.endUnownedTurn(ev)
-			return false
-		}
+		// No owner claimed this result, aborted or not: fall through so the
+		// logEventAt below records the turn-complete entry (#1483) and the tail
+		// ends or delivers its turn. An abort's victims were answered above.
 	}
 
 	// claude advertises the resolved model + binary version in system/init.
