@@ -160,6 +160,15 @@ test.describe('导出会话：以 X-Events-Has-More 判定历史是否完整', (
     expect(r.toast).toContain(TRUNCATED);
   });
 
+  test('远端节点版本过旧（X-Events-Paging: memory-only）：导出到它内存的尽头并提示升级节点', async ({ browser }) => {
+    // The ring holds 200..699; the node cannot page past it to e0..e199.
+    const r = await exportSession(browser, 700, { sessions: remoteSessions(), eventsBeforeMemoryOnly: true });
+    expect(r.exported).toBe(500);
+    expect(r.toast).toContain('该节点版本过旧');
+    expect(r.toast).not.toContain(TRUNCATED);
+    expect(r.exportBefore).toHaveLength(1);
+  });
+
   test('服务端不带 header（旧版本）：满页全是已持有事件仍提示已截断', async ({ browser }) => {
     // Indistinguishable from a same-ms flood wider than a page without the header.
     const r = await exportSession(browser, 700, {}, routeFirstBeforePage(history(700).slice(200), null));

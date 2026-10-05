@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -186,5 +187,38 @@ func TestHandleEvents_RemoteInitialAndAfter_Unchanged(t *testing.T) {
 	}
 	if len(got) != 10 {
 		t.Errorf("after wins over before: got %d entries want all 10 unfiltered", len(got))
+	}
+}
+
+// #3310: a peer predating paged fetch_events answers `before` from its memory
+// log only, so has-more=0 there is the ring's end, not the session's. Its
+// pages carry X-Events-Paging: memory-only; a peer that honours the cursor
+// (and so reaches its disk history) or reports has-more itself does not.
+func TestHandleEvents_RemoteBefore_MemoryOnlyPeerIsFlagged(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		conn    *fakeEventsConn
+		query   string
+		hasMore string
+		want    string
+	}{
+		{"legacy peer mid-ring", &fakeEventsConn{entries: remoteEventsFixture(10)}, "&before=6&limit=2", "1", "memory-only"},
+		{"legacy peer at its ring end", &fakeEventsConn{entries: remoteEventsFixture(10)}, "&before=1&limit=100", "0", "memory-only"},
+		{"legacy ring ending at the cursor", &fakeEventsConn{entries: remoteEventsFixture(5)}, "&before=5&limit=10", "0", "memory-only"},
+		{"bounded peer", &fakeEventsConn{entries: remoteEventsFixture(10), bounded: true}, "&before=3&limit=2", "0", ""},
+		{"paging node", pagedConn(false, 3, 4, 5), "&before=6&limit=2", "0", ""},
+		{"initial page", &fakeEventsConn{entries: remoteEventsFixture(10)}, "&limit=3", "", ""},
+		{"after", &fakeEventsConn{entries: remoteEventsFixture(10)}, "&after=7&limit=3", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newETagTestHandlers(t, newFakeRouter(), fakeEventsNodeAccessor{conn: tc.conn})
+			rec, _ := doRemoteEvents(t, h, tc.query)
+			if got := rec.Header().Values("X-Events-Paging"); len(got) > 1 || strings.Join(got, "") != tc.want {
+				t.Errorf("X-Events-Paging=%q want %q", got, tc.want)
+			}
+			if hm := rec.Header().Get("X-Events-Has-More"); hm != tc.hasMore {
+				t.Errorf("X-Events-Has-More=%q want %q (the flag must not change has-more)", hm, tc.hasMore)
+			}
+		})
 	}
 }
