@@ -97,7 +97,7 @@ type endingProcess struct {
 
 func newEndingProcess(state cli.ProcessState, end *cli.ProcessEnd) *endingProcess {
 	p := NewTestProcess()
-	p.StateVal = state
+	p.SetState(state)
 	return &endingProcess{TestProcess: p, end: end}
 }
 

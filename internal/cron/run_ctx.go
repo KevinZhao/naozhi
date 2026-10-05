@@ -99,6 +99,10 @@ type runOutcome struct {
 	// turnCause is why a turn_failed run's turn failed: it names the notice
 	// cause and decides whether the failure counts toward the streak.
 	turnCause TurnCause
+	// restartOrphan is set only by finishOrphanRun: the run ended because
+	// naozhi restarted under it, not because of the job, so it leaves the
+	// failure streak alone.
+	restartOrphan bool
 	// sessionID is the CLI session_id this run's result frame named; empty
 	// when no result arrived (spawn/preflight failure, transport error, or a
 	// deadline/cancel before the result).

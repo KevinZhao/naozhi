@@ -585,13 +585,13 @@ func TestScratchPool_SweepSkipsRunningTurn(t *testing.T) {
 	const ttl = time.Minute
 	r, p, sc := newSweepFixture(t, ttl)
 	proc := NewTestProcess()
-	proc.StateVal = cli.StateRunning
+	proc.SetState(cli.StateRunning)
 	s := r.InjectSession(sc.Key, proc)
 	s.lastActive.Store(time.Now().Add(-3 * ttl).UnixNano())
 
 	now := time.Now()
 	p.sweep(now)
-	if p.Get(sc.ID) == nil || r.SessionFor(sc.Key) == nil || !proc.AliveVal {
+	if p.Get(sc.ID) == nil || r.SessionFor(sc.Key) == nil || !proc.Alive() {
 		t.Fatal("sweep evicted a scratch whose turn is still running")
 	}
 	if !sc.LastUsed().Equal(now) {
@@ -599,13 +599,13 @@ func TestScratchPool_SweepSkipsRunningTurn(t *testing.T) {
 	}
 
 	// Once the turn ends the idle clock runs from the last sweep that saw it.
-	proc.StateVal = cli.StateReady
+	proc.SetState(cli.StateReady)
 	p.sweep(now.Add(ttl / 2))
 	if p.Get(sc.ID) == nil {
 		t.Fatal("scratch evicted within ttl of its turn")
 	}
 	p.sweep(now.Add(2 * ttl))
-	if p.Get(sc.ID) != nil || r.SessionFor(sc.Key) != nil || proc.AliveVal {
+	if p.Get(sc.ID) != nil || r.SessionFor(sc.Key) != nil || proc.Alive() {
 		t.Error("idle scratch survived ttl after its turn ended")
 	}
 }
@@ -627,8 +627,8 @@ func TestScratchPool_SweepEvictsDeadProcessStuckBusy(t *testing.T) {
 	const ttl = time.Minute
 	r, p, sc := newSweepFixture(t, ttl)
 	proc := NewTestProcess()
-	proc.StateVal = cli.StateRunning
-	proc.AliveVal = false
+	proc.SetState(cli.StateRunning)
+	proc.SetAlive(false)
 	s := r.InjectSession(sc.Key, proc)
 	s.lastActive.Store(time.Now().Add(-3 * ttl).UnixNano())
 	s.turnWaiters.Add(1)
@@ -657,7 +657,7 @@ func TestScratchPool_SweepCountsIdleFromLastEvent(t *testing.T) {
 	}
 
 	p.sweep(lastEvent.Add(2 * ttl))
-	if p.Get(sc.ID) != nil || r.SessionFor(sc.Key) != nil || proc.AliveVal {
+	if p.Get(sc.ID) != nil || r.SessionFor(sc.Key) != nil || proc.Alive() {
 		t.Error("scratch idle for 2*ttl after its last event survived the sweep")
 	}
 }
@@ -673,7 +673,7 @@ func TestScratchPool_SweepEvictsIdleRouterSession(t *testing.T) {
 	if p.Get(sc.ID) != nil {
 		t.Error("idle scratch survived the sweep")
 	}
-	if r.SessionFor(sc.Key) != nil || proc.AliveVal {
+	if r.SessionFor(sc.Key) != nil || proc.Alive() {
 		t.Error("sweep did not remove the idle scratch's router session")
 	}
 }
@@ -711,7 +711,7 @@ func TestScratchPool_SweepRechecksAfterTheLookup(t *testing.T) {
 			if got := p.Get(sc.ID) != nil; got != tc.kept {
 				t.Errorf("scratch in pool = %v, want %v", got, tc.kept)
 			}
-			if r.SessionFor(sc.Key) == nil || !proc.AliveVal {
+			if r.SessionFor(sc.Key) == nil || !proc.Alive() {
 				t.Error("sweep removed a router session it no longer owned as idle")
 			}
 		})

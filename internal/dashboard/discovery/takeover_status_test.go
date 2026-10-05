@@ -24,9 +24,13 @@ type outcomeRouter struct {
 	gate chan struct{}
 }
 
-func (r *outcomeRouter) TakeoverPrecheck(string) error { return nil }
+func (r *outcomeRouter) ReserveTakeover(string, session.AgentOpts) (TakeoverLease, error) {
+	return r, nil
+}
 
-func (r *outcomeRouter) Takeover(context.Context, string, string, string, session.AgentOpts) error {
+func (r *outcomeRouter) Release() {}
+
+func (r *outcomeRouter) Takeover(context.Context, string, string) error {
 	if r.gate != nil {
 		<-r.gate
 	}

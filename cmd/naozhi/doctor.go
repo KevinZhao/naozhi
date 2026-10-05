@@ -236,11 +236,13 @@ func (d *doctor) renderBackendsSection() {
 	// "what the binary CAN drive" from $PATH so a fresh install still gets a
 	// useful section.
 	cfg, cfgErr := d.loadConfig()
-	defaultBackend := "claude"
+	defaultBackend, fallbackNote := "claude", ""
 	var rows []backendProbe
 	var cfgReverseNodes map[string]config.ReverseNodeEntry
 	if cfgErr == nil {
-		defaultBackend = cfg.DefaultBackendID()
+		// The id startup binds, not the configured one, so this line agrees
+		// with the cli_backends finding when cli.backend cannot be bound.
+		defaultBackend, fallbackNote = cfg.StartupDefaultBackendID(), cfg.DefaultBackendFallback()
 		rows = d.probeBackends(cfg)
 		cfgReverseNodes = cfg.ReverseNodes
 	} else {
@@ -273,7 +275,11 @@ func (d *doctor) renderBackendsSection() {
 		fmt.Fprintf(d.out, "(config %s not loaded: %v — showing registry defaults only)\n",
 			d.configPath, cfgErr)
 	}
-	fmt.Fprintf(d.out, "Default: %s\n\n", defaultBackend)
+	if fallbackNote != "" {
+		fmt.Fprintf(d.out, "Default: %s (cli.backend %s)\n\n", defaultBackend, fallbackNote)
+	} else {
+		fmt.Fprintf(d.out, "Default: %s\n\n", defaultBackend)
+	}
 
 	for _, r := range rows {
 		id := r.id

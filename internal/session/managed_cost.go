@@ -12,6 +12,7 @@ import (
 	"github.com/naozhi/naozhi/internal/costledger/cliusage"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // costAccounting is the router-wide cost sink shared by every ManagedSession.
@@ -207,15 +208,8 @@ func (s *ManagedSession) bookPartialUsage(u clievent.ShadowUsage, runID string) 
 	if s.costAcct == nil || !s.costAcct.ledger.Enabled() || u.IsZero() {
 		return
 	}
-	e := costledger.Entry{
-		Source: costledger.SourceSession, Kind: costledger.KindPartial,
-		SessionKey: s.key, RunID: runID, Workspace: ledgerWorkspace(s.Workspace()), Backend: s.Backend(),
-		Unit:   costledger.UnitUSD,
-		Models: partialRows(u.Models),
-	}
-	if e.Backend == "" {
-		e.Backend = "claude"
-	}
+	e := s.ledgerBase(runID)
+	e.Kind, e.Unit, e.Models = costledger.KindPartial, costledger.UnitUSD, partialRows(u.Models)
 	rates := s.costAcct.ledger.Rates()
 	for i := range e.Models {
 		d := &e.Models[i]
@@ -315,19 +309,45 @@ func ledgerWorkspace(ws string) string {
 	return b
 }
 
-// ledgerEntries renders an Increment as ledger rows: one USD row carrying the
-// model drill-down, plus one metering row per backend unit that grew.
-func (s *ManagedSession) ledgerEntries(inc costledger.Increment, runID string) []costledger.Entry {
-	base := costledger.Entry{
+// ledgerBase is the identity every session-source row carries. A row on a
+// cron key names its job, so what the session books outside a run's window
+// (late results, partials, user turns) still counts toward that job. The row
+// is filed under ledgerKey; the job stays the one this session ran for.
+func (s *ManagedSession) ledgerBase(runID string) costledger.Entry {
+	e := costledger.Entry{
 		Source:     costledger.SourceSession,
-		SessionKey: s.key,
+		SessionKey: s.ledgerKey(),
+		JobID:      sessionkey.CronJobIDFromKey(s.key),
 		RunID:      runID,
 		Workspace:  ledgerWorkspace(s.Workspace()),
 		Backend:    s.Backend(),
 	}
-	if base.Backend == "" {
-		base.Backend = "claude"
+	if e.Backend == "" {
+		e.Backend = "claude"
 	}
+	return e
+}
+
+// ledgerKey is the key of the live session at the end of s's successor
+// chain, so what a replaced session books after its replacement was renamed
+// lands under a key that still exists. Like addSpent, it holds one costMu at
+// a time.
+func (s *ManagedSession) ledgerKey() string {
+	for {
+		s.costMu.Lock()
+		next := s.successor
+		s.costMu.Unlock()
+		if next == nil {
+			return s.key
+		}
+		s = next
+	}
+}
+
+// ledgerEntries renders an Increment as ledger rows: one USD row carrying the
+// model drill-down, plus one metering row per backend unit that grew.
+func (s *ManagedSession) ledgerEntries(inc costledger.Increment, runID string) []costledger.Entry {
+	base := s.ledgerBase(runID)
 	var out []costledger.Entry
 	if inc.USD > 0 || len(inc.Models) > 0 {
 		e := base

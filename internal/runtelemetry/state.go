@@ -67,11 +67,8 @@ const (
 	// carries WHY, following the same split as the sandbox classes below: a new
 	// RunState would need a coordinated dashboard.js change, while an error class
 	// renders through the existing canceled badge with the detail attached.
-	//
-	// Before this existed such a run left NO history record at all: finishRun's
-	// shutdown-cancel path sets skipPersist, which gates both the Job-field update
-	// (correct — a cancel must not move LastRunAt) and the runs/ history append
-	// (wrong — the run did execute, sometimes for minutes). See Epic H #2546.
+	// The next boot writes it to runs/ history from the run's leftover in-flight
+	// marker, unless the run is adopted and its turn completes (#2546).
 	ErrClassCronInterrupted ErrorClass = "interrupted"
 	// ErrClassCronConfigDrift: at startup the surviving shim's argv no longer
 	// matched config, so it was shut down. RunState is "canceled".

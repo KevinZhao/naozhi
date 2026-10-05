@@ -66,6 +66,9 @@ type CronCommands interface {
 	PauseJob(idPrefix, plat, chatID string) (CronJob, error)
 	// ResumeJob resumes a paused job and returns its next scheduled run time.
 	ResumeJob(idPrefix, plat, chatID string) (CronJob, time.Time, error)
+	// SetFreshContext sets whether the job's runs start from a fresh session;
+	// setting the mode the job already has succeeds.
+	SetFreshContext(idPrefix, plat, chatID string, fresh bool) (CronJob, error)
 	// ClassifyError maps a scheduler-returned error to a stable wire code (one
 	// of the CronCode* constants), returned verbatim from the cron-side classifier.
 	ClassifyError(err error) string

@@ -15,7 +15,7 @@ import { ICONS } from './icons.js';
 import { getToken } from './platform.js';
 import { projectDisplayLabel, projectDisplayPrefix } from './session_ident.js';
 import { showAPIError, showNetworkError } from './utilities.js';
-import { accessProfileChipInfo, fetchAccessProfiles, fetchCLIBackends, renderAccessProfilePicker, renderBackendPicker } from './backend_catalog.js';
+import { accessProfileChipInfo, autoBackendLabel, fetchAccessProfiles, fetchCLIBackends, renderAccessProfilePicker, renderBackendPicker } from './backend_catalog.js';
 import { shell } from './shell.js';
 
 // --- Project section header (favorite + github icons) ---
@@ -195,17 +195,14 @@ async function toggleFavorite(name, node) {
 }
 
 // openProjectSettings opens the per-project settings modal (RFC
-// project-access-profile §8.1). It reads GET /api/projects/config for the
-// current values, renders editable fields (display name / emoji / access
-// profile / backend / planner model + prompt), and writes back via PUT. The
-// access-profile + backend pickers reuse the same registries the new-session
-// modal consumes, so a project can be pinned to an auth chain / backend without
-// hand-editing project.yaml. Local projects only (see gear-button gating).
+// project-access-profile §8.1): GET /api/projects/config fills the display
+// name / emoji / access profile / backend / planner fields, the pickers built
+// from the new-session registries (backend 自动 = inherit, saved as ""), and
+// 保存 PUTs them back. Local projects only (see gear-button gating).
 async function openProjectSettings(name) {
   if (!name) return;
-  // Load the three inputs in parallel: current config + the two registries the
-  // pickers render from. Config failure is fatal (nothing to edit); registry
-  // failures degrade to hidden pickers (same as new-session modal).
+  // Config + the two picker registries in parallel. Only a config failure is
+  // fatal; a registry failure hides its picker (as in the new-session modal).
   let cfg;
   try {
     const headers = {};
@@ -260,9 +257,8 @@ async function openProjectSettings(name) {
   document.body.appendChild(overlay);
   trapFocus(overlay);
 
-  // Live "effective link" preview: shows how the next session under this
-  // project will resolve (profile → resolved model). Non-sensitive only — no
-  // base-URL/token, just the profile label + model (§8.1 联动预览 / §8.4).
+  // Live "effective link" preview (profile → resolved model; non-sensitive
+  // only, §8.1 联动预览 / §8.4), and the backend 自动 label for that profile.
   const updatePreview = () => {
     const apEl = document.getElementById('ps-access-profile');
     const apID = apEl ? apEl.value : (cfg.access_profile || '');
@@ -272,6 +268,8 @@ async function openProjectSettings(name) {
     const label = info ? info.label : '全局默认';
     const box = document.getElementById('ps-preview');
     if (box) box.textContent = '生效链路：' + label + ' → ' + model;
+    const auto = document.querySelector('#ps-backend option[value=""]');
+    if (auto) auto.textContent = autoBackendLabel(serverInfo.cliBackends, apID);
   };
   const apSel = document.getElementById('ps-access-profile');
   if (apSel) apSel.addEventListener('change', updatePreview);

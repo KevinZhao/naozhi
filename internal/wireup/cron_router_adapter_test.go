@@ -252,7 +252,7 @@ func TestCronRouterAdapter_ReleaseProcess(t *testing.T) {
 	}
 
 	running := session.NewTestProcess()
-	running.StateVal = cli.StateRunning
+	running.SetState(cli.StateRunning)
 	r.InjectSession(key, running).MarkExemptForTest()
 	_, v0 := r.ListSessionsWithVersion()
 	if a.ReleaseProcess(key) {

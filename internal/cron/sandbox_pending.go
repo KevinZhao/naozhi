@@ -455,12 +455,13 @@ func (s *Scheduler) finishOrphanRun(p sandboxstore.Pending, js orphanJobSnapshot
 		finalizer: &runFinalizer{},
 		snap:      jobSnapshot{prompt: js.prompt, workDir: js.workDir, fresh: js.freshContext},
 	}
-	// No pause notice to send: a sandbox_transport failure leaves the failure
-	// streak alone, so an orphan never auto-pauses its job.
+	// No pause notice to send: an orphan leaves the streak alone
+	// (restartOrphan), so it never auto-pauses its job.
 	s.finishRun(rc, runOutcome{
 		state: orphanTerminalState, errClass: orphanTerminalErrClass,
-		errMsg:  orphanTerminalErrMsg,
-		sandbox: true,
+		errMsg:        orphanTerminalErrMsg,
+		sandbox:       true,
+		restartOrphan: true,
 	})
 }
 
