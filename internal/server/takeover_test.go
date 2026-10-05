@@ -3,15 +3,20 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -177,5 +182,47 @@ func TestTryAutoTakeover_RefusedTakeoverLeavesCLIAlive(t *testing.T) {
 				t.Errorf("child ended with %v, want the test's SIGKILL", cmd.ProcessState)
 			}
 		})
+	}
+}
+
+// TestDashboardTakeover_InvalidAgentModelLeavesCLIAlive pins #3395 for the
+// dashboard: the precheck sees the general agent's model that Takeover will
+// be given, so a model the router rejects is refused before the SIGTERM.
+func TestDashboardTakeover_InvalidAgentModelLeavesCLIAlive(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("discovery is POSIX-only")
+	}
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot start child: %v", err)
+	}
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }()
+	t.Cleanup(func() { _ = cmd.Process.Kill(); <-exited })
+	start, err := discovery.ProcStartTime(cmd.Process.Pid)
+	if err != nil {
+		t.Skipf("cannot read child start time: %v", err)
+	}
+
+	const sid = "0b8f3c2e-5d7a-4e1b-9c6f-2a4d8e1f3b5c"
+	router := session.NewRouter(session.RouterConfig{MaxProcs: 1})
+	t.Cleanup(router.Shutdown)
+	s := NewWithOptions(ServerOptions{
+		Addr: ":0", Router: router, Backend: "claude",
+		Agents: map[string]session.AgentOpts{"general": {Model: "--bad"}},
+	})
+	s.discoveryH.SetClaudeDirForTest(t.TempDir())
+	s.discoveryCache.sessions = []discovery.DiscoveredSession{{PID: cmd.Process.Pid, SessionID: sid}}
+
+	body := fmt.Sprintf(`{"pid":%d,"session_id":%q,"cwd":%q,"proc_start_time":%d}`, cmd.Process.Pid, sid, t.TempDir(), start)
+	w := httptest.NewRecorder()
+	s.discoveryH.HandleTakeover(w, httptest.NewRequest(http.MethodPost, "/api/discovered/takeover", strings.NewReader(body)))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d (%q), want 503 from the precheck", w.Code, strings.TrimSpace(w.Body.String()))
+	}
+	select {
+	case <-exited:
+		t.Fatal("the external CLI was killed for a takeover the router refuses")
+	case <-time.After(300 * time.Millisecond):
 	}
 }

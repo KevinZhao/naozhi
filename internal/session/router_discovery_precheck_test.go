@@ -159,6 +159,10 @@ func TestTakeoverPrecheck_ExemptAndOpts(t *testing.T) {
 			injectN(r, "cron:c", maxExemptSessions-1)
 			injectExempt(r, key, newIdleProc())
 		}, nil},
+		{"a non-exempt session on the key frees no exempt slot", exempt, func(r *Router) {
+			injectN(r, "project:p", maxProjectExempt)
+			injectSession(r, key, newIdleProc())
+		}, ErrMaxExemptSessions},
 		{"dead exempt sessions hold no slot", exempt, func(r *Router) {
 			for i := range maxProjectExempt {
 				injectExempt(r, fmt.Sprintf("project:p%d", i), newDeadProc())

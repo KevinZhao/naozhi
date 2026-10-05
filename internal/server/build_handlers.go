@@ -148,7 +148,7 @@ func buildDiscoveryHandlers(
 		NodeAccess:    nodeAccess,
 		NodeCache:     nodeCache,
 		ClaudeDir:     claudeDir,
-		Router:        routerTakeoverAdapter{r: opts.Router},
+		Router:        newRouterTakeoverAdapter(opts.Router, opts.Agents["general"]),
 		AllowedRoot:   opts.AllowedRoot,
 		DefaultAgent:  opts.Agents["general"],
 		Broadcast:     broadcast,
@@ -161,10 +161,19 @@ func buildDiscoveryHandlers(
 // routerTakeoverAdapter narrows *session.Router's Takeover return shape
 // (`*ManagedSession, error`) to the `error`-only signature the discovery
 // sub-package consumes, so that interface need not re-export session types.
-type routerTakeoverAdapter struct{ r *session.Router }
+// precheck carries the model the dashboard's Takeover passes, so a model the
+// router rejects is refused before the external CLI is killed.
+type routerTakeoverAdapter struct {
+	r        *session.Router
+	precheck session.AgentOpts
+}
+
+func newRouterTakeoverAdapter(r *session.Router, general session.AgentOpts) routerTakeoverAdapter {
+	return routerTakeoverAdapter{r: r, precheck: session.AgentOpts{Model: general.Model}}
+}
 
 func (a routerTakeoverAdapter) TakeoverPrecheck(key string) error {
-	return a.r.TakeoverPrecheck(key, session.AgentOpts{})
+	return a.r.TakeoverPrecheck(key, a.precheck)
 }
 
 func (a routerTakeoverAdapter) Takeover(ctx context.Context, key, sessionID, cwd string, opts session.AgentOpts) error {
