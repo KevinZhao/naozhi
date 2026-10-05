@@ -543,11 +543,11 @@ func TestReconcile_ADayWithNoTranscriptSpendIsLeftAsBooked(t *testing.T) {
 }
 
 // A turn under a key that held several sessions, with no run record, goes to
-// the session whose last message by the turn's booking is the latest: one
-// session of a key runs at a time, and its turn ends just before the result
-// is booked. Nothing is guessed when a fork's copied line ties, when no
-// session has a message yet, when a session's transcript is gone, or for a
-// backfill, which is booked at its run's start.
+// the one session with a message between the key's previous booking and the
+// turn's (its turn ends just before the result is booked). Nothing is
+// guessed when a fork's copied line or the next session's first line shares
+// the window, when no session has a message there, when a session's
+// transcript is gone, or for a backfill, which is booked at its run's start.
 func TestReconcile_PlacesAChainedKeysTurnByTranscriptTime(t *testing.T) {
 	const (
 		key = "dashboard:direct:chain:general"
@@ -580,8 +580,17 @@ func TestReconcile_PlacesAChainedKeysTurnByTranscriptTime(t *testing.T) {
 					b: {scopeMsg(s.day(-1, 14, 0).Add(5*time.Second), "msg_b", 2, "sdk-cli")}}
 			},
 			func(s reconcileScope) []costledger.Entry {
-				return []costledger.Entry{turn(s.day(-1, 14, 0), "aaaaaaaaaaaaaaa1", 2)}
-			}, map[string]int{b: 1}, 0},
+				return []costledger.Entry{turn(s.day(-1, 9, 1), "aaaaaaaaaaaaaaa1", 5), turn(s.day(-1, 14, 0), "aaaaaaaaaaaaaaa2", 2)}
+			}, map[string]int{a: 1, b: 1}, 0},
+		{"the next session's first line within the slack", []string{a, b},
+			func(s reconcileScope) map[string][]string {
+				return map[string][]string{
+					a: {scopeMsg(s.day(-1, 9, 0), "msg_a1", 5, "sdk-cli"), scopeMsg(s.day(-1, 14, 0), "msg_a2", 3, "sdk-cli")},
+					b: {scopeMsg(s.day(-1, 14, 0).Add(3*time.Second), "msg_b", 2, "sdk-cli")}}
+			},
+			func(s reconcileScope) []costledger.Entry {
+				return []costledger.Entry{turn(s.day(-1, 9, 1), "aaaaaaaaaaaaaaa1", 5), turn(s.day(-1, 14, 0).Add(time.Second), "aaaaaaaaaaaaaaa2", 3)}
+			}, map[string]int{a: 1}, 1},
 		{"a terminal's later line", []string{a, b},
 			func(s reconcileScope) map[string][]string {
 				return map[string][]string{
@@ -589,8 +598,8 @@ func TestReconcile_PlacesAChainedKeysTurnByTranscriptTime(t *testing.T) {
 					b: {scopeMsg(s.day(-1, 14, 0), "msg_b", 2, "sdk-cli")}}
 			},
 			func(s reconcileScope) []costledger.Entry {
-				return []costledger.Entry{turn(s.day(-1, 14, 1), "aaaaaaaaaaaaaaa1", 2)}
-			}, map[string]int{b: 1}, 0},
+				return []costledger.Entry{turn(s.day(-1, 9, 1), "aaaaaaaaaaaaaaa1", 5), turn(s.day(-1, 14, 1), "aaaaaaaaaaaaaaa2", 2)}
+			}, map[string]int{a: 1, b: 1}, 0},
 		{"a fork's copied line", []string{a, b},
 			func(s reconcileScope) map[string][]string {
 				parent := scopeMsg(s.day(-1, 9, 0), "msg_a1", 5, "sdk-cli")
@@ -599,6 +608,17 @@ func TestReconcile_PlacesAChainedKeysTurnByTranscriptTime(t *testing.T) {
 			func(s reconcileScope) []costledger.Entry {
 				return []costledger.Entry{turn(s.day(-1, 9, 1), "aaaaaaaaaaaaaaa1", 5), turn(s.day(-1, 14, 1), "aaaaaaaaaaaaaaa2", 2)}
 			}, map[string]int{b: 1}, 1},
+		{"a reconcile adjustment is not a booking", []string{a, b},
+			func(s reconcileScope) map[string][]string {
+				return map[string][]string{
+					a: {scopeMsg(s.day(-1, 9, 0), "msg_a1", 5, "sdk-cli"), scopeMsg(s.day(-1, 11, 59), "msg_a2", 3, "sdk-cli")},
+					b: {scopeMsg(s.day(-1, 12, 30), "msg_b", 2, "sdk-cli")}}
+			},
+			func(s reconcileScope) []costledger.Entry {
+				adj := turn(s.day(-1, 12, 0), reconcilePrefix+a+":day:x", 1)
+				adj.Kind, adj.Models = costledger.KindAdjust, nil
+				return []costledger.Entry{turn(s.day(-1, 9, 1), "aaaaaaaaaaaaaaa1", 5), adj, turn(s.day(-1, 12, 31), "aaaaaaaaaaaaaaa2", 2)}
+			}, map[string]int{a: 2}, 1},
 		{"before any message", []string{a, b},
 			func(s reconcileScope) map[string][]string {
 				return map[string][]string{a: {scopeMsg(s.day(-1, 9, 0), "msg_a1", 5, "sdk-cli")},
@@ -621,10 +641,10 @@ func TestReconcile_PlacesAChainedKeysTurnByTranscriptTime(t *testing.T) {
 					b: {scopeMsg(s.day(-1, 14, 0), "msg_b", 2, "sdk-cli")}}
 			},
 			func(s reconcileScope) []costledger.Entry {
-				e := turn(s.day(-1, 14, 1), "aaaaaaaaaaaaaaa1", 2)
+				e := turn(s.day(-1, 14, 1), "aaaaaaaaaaaaaaa2", 2)
 				e.Kind, e.Models = costledger.KindBackfill, nil
-				return []costledger.Entry{e}
-			}, nil, 1},
+				return []costledger.Entry{turn(s.day(-1, 9, 1), "aaaaaaaaaaaaaaa1", 5), e}
+			}, map[string]int{a: 1}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newReconcileScope(t)
@@ -663,8 +683,8 @@ func TestSessionActivity_ReadsASessionOnce(t *testing.T) {
 	act.read(s.opts.ClaudeDir, []string{a, b})
 	s.transcript(t, a, scopeMsg(s.day(-1, 9, 0), "msg_a", 5, "sdk-cli"))
 	act.read(s.opts.ClaudeDir, []string{a, b})
-	if got := act.activeAt([]string{a, b}, s.day(-1, 14, 1)); got != "" {
-		t.Fatalf("activeAt = %.8s, want none: %.8s was read again", got, a)
+	if got := act.soleActiveIn([]string{a, b}, s.day(-1, 10, 0), s.day(-1, 14, 1)); got != "" {
+		t.Fatalf("soleActiveIn = %.8s, want none: %.8s was read again", got, a)
 	}
 }
 
@@ -710,5 +730,42 @@ func TestReconcile_APlacedChainedTurnSettlesItsDay(t *testing.T) {
 				t.Errorf("held days = %d, want %d\n%s", got, tc.held, out)
 			}
 		})
+	}
+}
+
+// A chained key's candidate also runs under another key (a history resume),
+// so its lines in the window of the key's untracked turn are not that turn:
+// the turn stays unattributed and its day is held, rather than going to the
+// candidate and planning away the spend the other candidate's transcript
+// shows.
+func TestReconcile_AChainedCandidateBusyUnderAnotherKeyIsNotGuessed(t *testing.T) {
+	const (
+		key   = "dashboard:direct:chain:general"
+		other = "dashboard:direct:r1a2b3c4d"
+		a     = "44444444-5555-6666-7777-888888888888"
+		b     = "55555555-6666-7777-8888-999999999999"
+	)
+	s := newReconcileScope(t)
+	writeJSON(t, s.opts.SessionStorePath, []map[string]any{
+		{"key": rcKey, "session_id": rcSID}, {"key": key, "session_id": b, "prev_session_ids": []string{a}},
+		{"key": other, "session_id": a},
+	})
+	at := func(hh, mm, ss int) time.Time { return s.day(-1, hh, mm).Add(time.Duration(ss) * time.Second) }
+	s.transcript(t, a, scopeMsg(at(9, 0, 0), "msg_a1", 5, "sdk-cli"),
+		scopeMsg(at(13, 59, 50), "msg_a2", 1, "sdk-cli"), scopeMsg(at(14, 0, 20), "msg_a3", 1, "sdk-cli"))
+	s.transcript(t, b, scopeMsg(at(13, 59, 30), "msg_b", 10, "sdk-cli"))
+	s.sessionRun(t, runhistory.SessionRun{RunID: "aaaaaaaaaaaaaaa0", SessionKey: key, SessionID: a, StartedAt: at(8, 59, 0)})
+	seedLedger(t, s.opts.SessionStorePath, rcTurn(at(9, 0, 1), key, "aaaaaaaaaaaaaaa0", 5),
+		rcTurn(at(13, 59, 51), other, "unowned:"+a+":u1", 1), rcTurn(at(14, 0, 21), other, "unowned:"+a+":u2", 1),
+		rcTurn(at(14, 0, 40), key, "aaaaaaaaaaaaaaa1", 10))
+	rep, out := s.run(t)
+	if rep.Unattributed != 1 {
+		t.Errorf("unattributed = %d, want 1\n%s", rep.Unattributed, out)
+	}
+	if got := settlementOf(rep, a).Entries; got != 3 {
+		t.Errorf("%.8s holds %d entries, want 3\n%s", a, got, out)
+	}
+	if len(rep.Planned) != 0 {
+		t.Errorf("planned %+v, want none\n%s", rep.Planned, out)
 	}
 }

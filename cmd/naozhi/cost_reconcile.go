@@ -276,10 +276,10 @@ func loadLedgerSessions(store *costledger.Store, from, now time.Time) (*ledgerSe
 // partials, unowned results and reconcile adjustments carry it), from the
 // session-runs record sharing its run id, from a key that only ever held one
 // session, or, for a turn under a key that held several, from their
-// transcripts (see activeAt). It returns how many entries none of these
+// transcripts (see soleActiveIn). It returns how many entries none of these
 // placed and records their key-days.
 func (l *ledgerSessions) attribute(runSID, keySID map[string]string, chains map[string][]string, claudeDir string) (unattributed int) {
-	act := sessionActivity{}
+	act, booked := sessionActivity{}, bookedTimes(l.entries, chains)
 	for _, e := range l.entries {
 		sid := runIDSession(e.RunID)
 		if sid == "" {
@@ -290,7 +290,7 @@ func (l *ledgerSessions) attribute(runSID, keySID map[string]string, chains map[
 		}
 		if c := chains[e.SessionKey]; sid == "" && len(c) > 0 && e.Kind == costledger.KindTurn {
 			act.read(claudeDir, c)
-			sid = act.activeAt(c, e.TS.Add(turnStampSlack))
+			sid = act.soleActiveIn(c, booked.before(e.SessionKey, e.TS), e.TS.Add(turnStampSlack))
 		}
 		if !claudefs.IsValidSessionID(sid) {
 			unattributed++
@@ -359,35 +359,54 @@ func readSessionTimes(claudeDir, sid string) sessionTimes {
 	return sessionTimes{times: times, ok: true}
 }
 
-// activeAt names the session of sids, all held by one key, whose last message
-// at or before t is the latest: only one session of a key runs at a time.
-// It names none when a session was not read, when no session has a message
-// by t, or when the latest is shared, as a fork's copied lines are.
-func (a sessionActivity) activeAt(sids []string, t time.Time) string {
-	var best string
-	var bestAt time.Time
-	tie := false
+// soleActiveIn names the one session of sids with a message in (from, to].
+// A session's transcript also holds its turns under other keys, and a fork's
+// lines copied from its parent, so two sessions with a message there name
+// none; so do a session not read and a window no session has a message in.
+func (a sessionActivity) soleActiveIn(sids []string, from, to time.Time) string {
+	sole := ""
 	for _, sid := range sids {
 		st := a[sid]
 		if !st.ok {
 			return ""
 		}
-		times := st.times
-		i := sort.Search(len(times), func(i int) bool { return times[i].After(t) })
-		if i == 0 {
+		i := sort.Search(len(st.times), func(i int) bool { return st.times[i].After(from) })
+		if i == len(st.times) || st.times[i].After(to) {
 			continue
 		}
-		switch at := times[i-1]; {
-		case at.After(bestAt):
-			best, bestAt, tie = sid, at, false
-		case at.Equal(bestAt):
-			tie = true
+		if sole != "" {
+			return ""
+		}
+		sole = sid
+	}
+	return sole
+}
+
+// keyBookings holds, per key, the ascending times of its entries other than
+// adjustments.
+type keyBookings map[string][]time.Time
+
+// bookedTimes collects the bookings of the keys in chains.
+func bookedTimes(entries []costledger.Entry, chains map[string][]string) keyBookings {
+	b := keyBookings{}
+	for _, e := range entries {
+		if e.Kind != costledger.KindAdjust && len(chains[e.SessionKey]) > 0 {
+			b[e.SessionKey] = append(b[e.SessionKey], e.TS)
 		}
 	}
-	if tie {
-		return ""
+	for _, ts := range b {
+		sort.Slice(ts, func(i, j int) bool { return ts[i].Before(ts[j]) })
 	}
-	return best
+	return b
+}
+
+// before returns key's latest booking earlier than t, or the zero time.
+func (b keyBookings) before(key string, t time.Time) time.Time {
+	ts := b[key]
+	if i := sort.Search(len(ts), func(i int) bool { return !ts[i].Before(t) }); i > 0 {
+		return ts[i-1]
+	}
+	return time.Time{}
 }
 
 // order lists the sessions oldest first, so a fork's parent claims the
