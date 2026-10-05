@@ -2,7 +2,7 @@
 //
 // This file holds operator-facing controls (SetUserLabel, the Interrupt
 // family) and discovery integration (DiscoveryExcludeIDs, RegisterForResume,
-// RegisterCronStub*, ManagedExcludeSets, Takeover).
+// RegisterCronStub*, ManagedExcludeSets, TakeoverPrecheck, Takeover).
 package session
 
 import (
@@ -125,19 +125,6 @@ func (r *Router) EventEntriesForKey(key string) []clievent.EventEntry {
 	return s.EventEntries()
 }
 
-// InterruptSession sends SIGINT to the CLI process for the given session key.
-// Returns true if the session was found and interrupted.
-// WARNING: SIGINT terminates the whole CLI process on Claude `-p` mode, killing
-// the live shim conversation. Prefer InterruptSessionSafe for operator-facing
-// actions; this is for process-level signalling and the fallback branch.
-func (r *Router) InterruptSession(key string) bool {
-	s := r.ss.Load(key)
-	if s == nil {
-		return false
-	}
-	return s.Interrupt()
-}
-
 // InterruptSessionSafe is the preferred entry point for dashboard/HTTP/WS
 // interrupt requests. It first tries the in-band stream-json control_request
 // path, which aborts the active turn WITHOUT terminating the CLI subprocess,
@@ -153,7 +140,7 @@ func (r *Router) InterruptSessionSafe(key string) InterruptOutcome {
 	switch outcome {
 	case InterruptUnsupported:
 		// Protocol has no stdin interrupt; SIGINT is the only option.
-		if r.InterruptSession(key) {
+		if s := r.ss.Load(key); s != nil && s.Interrupt() {
 			return InterruptSent
 		}
 		return InterruptNoSession
@@ -417,7 +404,26 @@ func (r *Router) ManagedExcludeSets() (pids map[int]bool, sessionIDs map[string]
 // errTakeoverRaced reports a live session that reached key while Takeover had
 // released the lock, so the takeover does not hand back someone else's session.
 func errTakeoverRaced(key string) error {
-	return fmt.Errorf("concurrent session created for key %s during takeover", key)
+	return fmt.Errorf("%w: key %s", ErrTakeoverRaced, key)
+}
+
+// TakeoverPrecheck returns the error Takeover on key would be refused with
+// right now (ErrRouterStopped, ErrSpawnInFlight or ErrMaxProcs), changing
+// nothing, so a caller can refuse before it kills the external CLI. The
+// capacity check is reserveSpawn's for a non-exempt spawn; the state can
+// still change before Takeover runs.
+func (r *Router) TakeoverPrecheck(key string) (err error) {
+	if r.stopped.Load() {
+		return ErrRouterStopped
+	}
+	r.ss.View(func(v sessView) {
+		if _, inflight := v.Ext().SpawnInFlight(key); inflight {
+			err = ErrSpawnInFlight
+		} else if !takeoverHasSlot(v, key, r.maxProcs) {
+			err = fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
+		}
+	})
+	return err
 }
 
 // Takeover creates a managed session to replace an external Claude CLI session.

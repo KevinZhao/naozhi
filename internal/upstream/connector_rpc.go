@@ -174,18 +174,6 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if p.ProcStartTime == 0 {
 			return nil, fmt.Errorf("proc_start_time is required")
 		}
-		actual, err := discovery.ProcStartTime(p.PID)
-		if err != nil {
-			return nil, fmt.Errorf("cannot verify process identity for pid %d: %w", p.PID, err)
-		}
-		if actual != p.ProcStartTime {
-			return nil, fmt.Errorf("process identity mismatch (pid %d may have been reused)", p.PID)
-		}
-		if err := osutil.SendTerm(p.PID); err != nil {
-			if !errors.Is(err, syscall.ESRCH) {
-				return nil, fmt.Errorf("kill process %d: %w", p.PID, err)
-			}
-		}
 		cwd := p.CWD
 		if cwd == "" {
 			cwd = "unknown"
@@ -211,6 +199,23 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		}
 		cwdKey := sessionkey.SanitizeCWDKey(cwd)
 		key := sessionkey.TakeoverKey(cwdKey)
+		// Everything that can refuse runs before SIGTERM, so a refused takeover
+		// leaves the external CLI running.
+		if err := c.router.TakeoverPrecheck(key); err != nil {
+			return nil, fmt.Errorf("takeover refused: %w", err)
+		}
+		actual, err := discovery.ProcStartTime(p.PID)
+		if err != nil {
+			return nil, fmt.Errorf("cannot verify process identity for pid %d: %w", p.PID, err)
+		}
+		if actual != p.ProcStartTime {
+			return nil, fmt.Errorf("process identity mismatch (pid %d may have been reused)", p.PID)
+		}
+		if err := osutil.SendTerm(p.PID); err != nil {
+			if !errors.Is(err, syscall.ESRCH) {
+				return nil, fmt.Errorf("kill process %d: %w", p.PID, err)
+			}
+		}
 		pid, sessionID, procStartTime, reqCWD, claudeDir := p.PID, p.SessionID, p.ProcStartTime, p.CWD, c.claudeDir
 		// wg keeps reconnect waiting for in-flight cleanup; appCtx so a
 		// transient connection drop does not abort cleanup already in progress.
