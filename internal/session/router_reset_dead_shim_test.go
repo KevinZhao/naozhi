@@ -67,7 +67,7 @@ func newResetShimRouter(t *testing.T, key string, cliAlive bool) (*Router, *rese
 	go f.serve()
 
 	// ShimPID is this test process: it passes the liveness and binary-identity
-	// checks. The hello reports fakeShimPID, which no process has.
+	// checks. The hello reports FakeShimPID, which no process has.
 	token := []byte("reset-retire-token")
 	state := shim.State{
 		ShimPID: os.Getpid(), Socket: socket, Key: key, Backend: "claude",
@@ -106,7 +106,7 @@ func (f *resetShimFake) handle(conn net.Conn) {
 	}
 	alive := f.cliAlive
 	frames := []shim.ServerMsg{
-		{Type: "hello", ProtocolVersion: shim.ProtocolVersion, ShimPID: fakeShimPID, CLIAlive: &alive},
+		{Type: "hello", ProtocolVersion: shim.ProtocolVersion, ShimPID: FakeShimPID, CLIAlive: &alive},
 		{Type: "replay_done"},
 	}
 	if !alive {
