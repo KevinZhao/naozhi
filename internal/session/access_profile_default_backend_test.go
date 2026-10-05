@@ -137,33 +137,92 @@ func TestAccessProfileDefaultBackend_SpawnPaths(t *testing.T) {
 	}
 }
 
-// A scratch aside runs on its source's backend, which outranks the source's
-// access profile. A source that never spawned has no backend, so its scratch
-// takes the profile tier like any new key.
+// A scratch aside runs on the CLI its source resumes on, which outranks the
+// access profile's default_backend. A source that never spawned has no
+// backend and resumes on the router default, so its aside does too, whether
+// the profile comes from the source or from default_access_profile.
 func TestScratch_AccessProfileDefaultBackend(t *testing.T) {
-	for _, tc := range []struct{ sourceBackend, want string }{
-		{sourceBackend: "claude", want: "claude"},
-		{sourceBackend: "", want: "kiro"},
+	for _, tc := range []struct {
+		name, sourceBackend, sourceProfile, defaultProfile, want string
+	}{
+		{name: "spawned on claude", sourceBackend: "claude", sourceProfile: "viakiro", want: "claude"},
+		{name: "spawned on kiro", sourceBackend: "kiro", want: "kiro"},
+		{name: "never spawned, source profile", sourceProfile: "viakiro", want: "claude"},
+		{name: "never spawned, default access profile", defaultProfile: "viakiro", want: "claude"},
 	} {
-		r := twoBackendRouter()
-		setAccessProfiles(r, map[string]AccessProfile{"viakiro": {DefaultBackend: "kiro"}})
-		p := NewScratchPool(nil, 5, time.Minute)
-		sc, err := p.Open(OpenOptions{
-			SourceKey: "feishu:direct:bob:general",
-			AgentID:   "general",
-			Backend:   tc.sourceBackend,
-			BaseOpts:  AgentOpts{AccessProfile: "viakiro"},
-			Quote:     "why?",
+		t.Run(tc.name, func(t *testing.T) {
+			r := twoBackendRouter()
+			setAccessProfiles(r, map[string]AccessProfile{"viakiro": {DefaultBackend: "kiro"}})
+			r.backends.defaultAccessProfile = tc.defaultProfile
+			p := NewScratchPool(r, 5, time.Minute)
+			sc, err := p.Open(OpenOptions{
+				SourceKey: "feishu:direct:bob:general",
+				AgentID:   "general",
+				Backend:   tc.sourceBackend,
+				BaseOpts:  AgentOpts{AccessProfile: tc.sourceProfile},
+				Quote:     "why?",
+			})
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if sc.Backend != tc.want {
+				t.Errorf("Scratch.Backend = %q, want %q", sc.Backend, tc.want)
+			}
+			opts, ok := p.OptsForKey(sc.Key)
+			if !ok {
+				t.Fatal("OptsForKey miss")
+			}
+			if got := resolveT(r, sc.Key, "", opts).BackendID; got != tc.want {
+				t.Errorf("scratch BackendID = %q, want %q", got, tc.want)
+			}
 		})
-		if err != nil {
-			t.Fatalf("Open: %v", err)
-		}
-		opts, ok := p.OptsForKey(sc.Key)
-		if !ok {
-			t.Fatal("OptsForKey miss")
-		}
-		if got := resolveT(r, sc.Key, "", opts).BackendID; got != tc.want {
-			t.Errorf("source backend %q: scratch BackendID = %q, want %q", tc.sourceBackend, got, tc.want)
-		}
+	}
+}
+
+// A history-pane resume placeholder and an aside opened from it resolve to
+// the same backend under a kiro-pinning profile.
+func TestScratch_ResumePlaceholderSameBackendAsSource(t *testing.T) {
+	r := twoBackendRouter()
+	setAccessProfiles(r, map[string]AccessProfile{"viakiro": {DefaultBackend: "kiro"}})
+	const srcKey = "dashboard:direct:rabc:general"
+	r.RegisterForResume(srcKey, "11111111-2222-3333-4444-555555555555", t.TempDir(), "")
+	src := r.SessionFor(srcKey)
+	if src == nil {
+		t.Fatal("placeholder not registered")
+	}
+	snap := src.Snapshot()
+	if snap.Backend != "" {
+		t.Fatalf("placeholder Backend = %q; fixture needs an unspawned source", snap.Backend)
+	}
+	p := NewScratchPool(r, 5, time.Minute)
+	sc, err := p.Open(OpenOptions{
+		SourceKey: srcKey,
+		AgentID:   "general",
+		Backend:   snap.Backend,
+		BaseOpts:  AgentOpts{AccessProfile: "viakiro"},
+		Quote:     "why?",
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	opts, ok := p.OptsForKey(sc.Key)
+	if !ok {
+		t.Fatal("OptsForKey miss")
+	}
+	srcBackend := resolveT(r, srcKey, "", AgentOpts{AccessProfile: "viakiro"}).BackendID
+	if got := resolveT(r, sc.Key, "", opts).BackendID; got != srcBackend {
+		t.Errorf("scratch BackendID = %q, source resumes on %q", got, srcBackend)
+	}
+}
+
+// Without a router the pool has nothing to resolve against and keeps "".
+func TestScratch_NilRouterKeepsEmptyBackend(t *testing.T) {
+	p := NewScratchPool(nil, 5, time.Minute)
+	sc, err := p.Open(OpenOptions{SourceKey: "feishu:direct:bob:general", Quote: "why?"})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if sc.Backend != "" || sc.BaseOpts.Backend != "" {
+		t.Errorf("Backend = %q, BaseOpts.Backend = %q, want both empty", sc.Backend, sc.BaseOpts.Backend)
 	}
 }

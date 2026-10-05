@@ -72,6 +72,7 @@
 - 删除会话后立刻在同一个 key 上新建会话时，被删对话的记录不再留在新会话的 event log 里（#3416）：以前重启后它会出现在新会话 dashboard 历史的最前面，旧 workspace 的附件引用也一直不释放。现在删除会先清掉 event log 和附件引用、再关进程，新会话等清理完成（通常几毫秒，最多约 8 秒）才开始落盘
 - `spawnSession` panic recover 错误消息不再双前缀 `"spawn process: spawn process:"`（RNEW-009）
 - IM 首轮自动接管不再在 naozhi 会拒绝接管时（max_procs 已满 / 该 key 正在 spawn / 正在关停 / planner 的 exempt 配额已满 / agent 的 model 或 backend 非法）先 SIGTERM 掉终端里的 Claude CLI；接管前改为先跑 `Router.TakeoverPrecheck`（#3395）
+- 从未 spawn 过的源会话（历史面板 resume 占位 / backend 为空的旧持久化条目）上打开的 scratch 现在跑在源会话 resume 时会用的 CLI（router 默认 backend）上，不再落到 access profile 的 `default_backend`；`/api/scratch/open` 响应里的 `backend` 也改为报告实际解析出的 backend（#3420）
 
 ### Documentation
 

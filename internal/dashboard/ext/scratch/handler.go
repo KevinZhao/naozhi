@@ -112,9 +112,9 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 		base = h.agents[agentID]
 	}
 	base = inheritSourceTuning(base, snap)
-	// Inherit the source's per-session backend override; empty means router
-	// default, and leaving BaseOpts.Backend empty preserves that.
-	backend := snap.Backend
+	// The aside runs on the source's backend. An empty one (a source that never
+	// spawned) is resolved by pool.Open to the CLI the source resumes on, never
+	// to the access profile's default_backend.
 	workspace := snap.Workspace
 
 	// ContextTurns is per side; the renderer enforces the byte budget later.
@@ -131,7 +131,7 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 	sc, err := h.pool.Open(session.OpenOptions{
 		SourceKey:     req.SourceKey,
 		AgentID:       agentID,
-		Backend:       backend,
+		Backend:       snap.Backend,
 		Workspace:     workspace,
 		BaseOpts:      base,
 		Quote:         req.Quote,
@@ -154,6 +154,7 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 		"id", sc.ID,
 		"source", sessionkey.SanitizeLogAttr(req.SourceKey),
 		"agent", sessionkey.SanitizeLogAttr(agentID),
+		"backend", sessionkey.SanitizeLogAttr(sc.Backend),
 		"quote_truncated", sc.QuoteTrunc,
 		"requested_turns", req.ContextTurns, // pre-clamp, as the client asked
 		"applied_turns", turns, // post-clamp, what collectScratchContext used
@@ -164,7 +165,7 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 		ScratchID:        sc.ID,
 		Key:              sc.Key,
 		AgentID:          agentID,
-		Backend:          backend,
+		Backend:          sc.Backend,
 		Workspace:        workspace,
 		QuoteTruncated:   sc.QuoteTrunc,
 		ContextTurns:     sc.ContextTurns,
