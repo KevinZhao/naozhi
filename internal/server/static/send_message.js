@@ -136,13 +136,13 @@ async function takeoverThenSend(input, text) {
     dropDiscovered(pd.pid, pd.node);
     removeSidebarCard(discoveredKey(pd.pid, pd.node));
     selection.pendingDiscovered = null;
-    // Poll until the session appears in managed sessions (up to 10s). A local
-    // takeover also reports its background outcome: a failure ends the wait.
+    // Poll up to 10s for the session to appear. A local takeover also reports
+    // its outcome; a failure ends the wait unless another attempt holds the key.
     const takenKey = data.key;
     const takenNode = pd.node || 'local';
     const statusURL = data.takeover_id && takenNode === 'local' ? NZ_CONTRACT.API.discovered_takeover_status + '?id=' + encodeURIComponent(data.takeover_id) : '';
     let ready = false, failed = null;
-    for (let i = 0; i < 20 && !ready && !failed; i++) {
+    for (const end = Date.now() + 10000; !ready && (!failed || failed.class === 'in_progress') && Date.now() < end;) {
       await new Promise(resolve => setTimeout(resolve, 500));
       sessionList.lastVersion = 0;
       const [, st] = await Promise.all([shell.fetchSessions(),
