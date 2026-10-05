@@ -20,8 +20,8 @@ import (
 
 // removeSnapshot captures everything finishRemoveCleanup needs from a session,
 // taken in the transaction that unregisters it, so the teardown that follows
-// (possibly a detached RemoveAsync goroutine) never reads router state again:
-// finishRemoveCleanup MUST NOT touch r.ss.
+// (possibly a detached RemoveAsync goroutine) never reads the removed
+// session's state again: the table only answers whether key is back.
 type removeSnapshot struct {
 	proc             processIface
 	workspace        string
@@ -79,9 +79,10 @@ func (r *Router) notifyKeyRetired(key, sessionID string) {
 
 // finishRemoveCleanup runs the slow half of a session removal, outside any
 // transaction: close the process, wait for its shim socket to disappear, drop
-// the event log + attachment refs, notify the change. Reads only `snap` —
-// never router state — so it is safe in a detached goroutine (the session is
-// already gone from every map). Worst case ~15s.
+// the event log + attachment refs unless a same-key session is back, notify
+// the change. Reads the removed session only through `snap`, so it is safe in
+// a detached goroutine (the session is already gone from every map). Worst
+// case ~15s.
 func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 	proc := snap.proc
 	if proc != nil && proc.Alive() {
@@ -96,12 +97,23 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 				"key", key)
 		}
 	}
-	// Drop the on-disk event log so a future session reusing the key starts
-	// empty. Best-effort: a failed DropKey only leaves stale bytes behind.
-	r.hist.dropEventLogForKey(key)
-	// Clear the attachment tracker's refs so double-TTL GC reclaims images.
-	// Best-effort: stale keyhash entries do not affect correctness.
-	r.hist.clearAttachmentTrackerRefs(key, snap.workspace)
+	// A same-key session admitted during the teardown owns the key's event
+	// log and attachment refs, which are stored by key: keep them, as a
+	// failed drop would. The check and the drop are not atomic, so a
+	// re-create in that gap still loses what it wrote before the drop.
+	var recreated bool
+	r.ss.View(func(v sessView) { _, recreated = v.Lookup(key) })
+	if recreated {
+		slog.Info("session re-created during remove teardown; keeping its event log",
+			"key", key)
+	} else {
+		// Drop the on-disk event log so a future session reusing the key
+		// starts empty. Best-effort: a failed DropKey only leaves stale bytes.
+		r.hist.dropEventLogForKey(key)
+		// Clear the attachment tracker's refs so double-TTL GC reclaims
+		// images. Best-effort: stale keyhash entries do not affect correctness.
+		r.hist.clearAttachmentTrackerRefs(key, snap.workspace)
+	}
 	// Free the resident run-history ring (on-disk records stay) so the
 	// per-session ring map stays bounded.
 	r.runs.Invalidate(key)
