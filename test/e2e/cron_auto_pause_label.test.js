@@ -1,8 +1,8 @@
 // @ts-check
 //
-// 连续失败自动暂停（#3009）：job 的 paused_reason=auto_failures 时，列表行显示
-// "已自动暂停"，抽屉写明连续失败次数（编辑后计数清零则不写次数）；手动暂停的
-// job 仍是"已暂停"。
+// 自动暂停（#3009 / #3515）：job 的 paused_reason=auto_failures 或 auto_transient
+// 时，列表行显示"已自动暂停"，抽屉写明失败次数（编辑后计数清零则不写次数）；
+// 手动暂停的 job 仍是"已暂停"。
 //
 // 跑法：cd test/e2e && npx playwright test cron_auto_pause_label.test.js --project=desktop-chrome
 
@@ -21,6 +21,7 @@ function jobs() {
   return [
     { ...base, id: 'cron-auto', prompt: 'broken digest', paused_reason: 'auto_failures', consecutive_failures: 5 },
     { ...base, id: 'cron-edited', prompt: 'edited digest', paused_reason: 'auto_failures' },
+    { ...base, id: 'cron-transient', prompt: 'outage digest', paused_reason: 'auto_transient', consecutive_failures: 72 },
     { ...base, id: 'cron-manual', prompt: 'held digest' },
   ];
 }
@@ -40,10 +41,14 @@ test.describe('cron 自动暂停标签', () => {
     await page.waitForSelector('.cj-row');
 
     await expect(page.locator('.cj-row[data-cron-id="cron-auto"] .cj-when')).toHaveText('已自动暂停');
+    await expect(page.locator('.cj-row[data-cron-id="cron-transient"] .cj-when')).toHaveText('已自动暂停');
     await expect(page.locator('.cj-row[data-cron-id="cron-manual"] .cj-when')).toHaveText('已暂停');
 
     await page.click('.cj-row[data-cron-id="cron-auto"]');
     await expect(page.locator('.css-when-paused')).toHaveText('连续失败 5 次，已自动暂停 · 恢复后排期');
+
+    await page.click('.cj-row[data-cron-id="cron-transient"]');
+    await expect(page.locator('.css-when-paused')).toHaveText('连续失败 72 次，已自动暂停 · 恢复后排期');
 
     await page.click('.cj-row[data-cron-id="cron-edited"]');
     await expect(page.locator('.css-when-paused')).toHaveText('已自动暂停 · 恢复后排期');

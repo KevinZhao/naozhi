@@ -71,7 +71,7 @@
   - 后端瞬时故障（`turn_failed` 且原因是 `backend_overloaded` / `backend_rate_limited` / `backend_unreachable`）仍然不计入连续失败，但改为单独计数，见下一条
 - **cron：后端瞬时故障持续 6 小时以上也会自动暂停**（#3422）：此前过载 / 限流 / 连不上模型服务（`apierr` 的网络错误和超时都归到这里）一律不计，模型服务地址配错、凭证所在网络永久不通时，每个 job 每个 tick 都发一条失败通知，永不暂停
   - 每个 job 新增两个落盘字段 `transient_failures`（自上次成功、恢复或编辑以来的瞬时故障次数）与 `transient_failing_since`（其中第一次的结束时间）。成功、恢复、编辑都会清零；job 自身原因的失败和重启孤儿都不动它们
-  - 次数达到 `cron.auto_pause_after_failures`，且距第一次已满 6 小时，这次失败就自动暂停该 job。`paused_reason` 仍是 `auto_failures`，通知照常带「已连续失败 N 次，任务已自动暂停」（N 是瞬时故障次数），`cron job auto-paused` 日志多了 `transient=true` 与 `transient_failures` 字段
+  - 次数达到 `cron.auto_pause_after_failures`，且距第一次已满 6 小时，这次失败就自动暂停该 job。`paused_reason` 记为新值 `auto_transient`（job 自身连续失败触发的仍是 `auto_failures`，两者以触发暂停的那个计数为准），通知末尾是「后端持续故障 6 小时以上（失败 N 次），任务已自动暂停，后端恢复后…恢复」（N 是瞬时故障次数），IM `/cron list` 标为 `[自动暂停：后端持续故障]`，控制台列表与抽屉照旧显示「已自动暂停」，`cron job auto-paused` 日志多了 `transient=true` 与 `transient_failures` 字段（#3515）。回退到旧版本时这类 job 显示为手动暂停，恢复后照常运行
   - 窗口跟执行频率无关：每 5 分钟一次的 job 要故障 6 小时才停（不会因为半小时的故障就停），每天一次的 job 仍要 5 次。阈值设为负数同样关闭这条规则；6 小时不可配置
 
 ### Security
@@ -88,6 +88,7 @@
 ### Fixed
 
 - **cron：CLI 因认证失败、MCP 配置无效或运行环境缺失而退出时，失败通知写明原因**（#3515）：此前只有「上次会话无法恢复」有专门文案，这三类退出都落到「执行失败（CLI 发送错误）」。现在分别是「执行失败（后端认证失败或凭证已过期），请联系管理员」（与后端返回的认证错误同一句）、「执行失败（CLI 配置错误导致启动失败，如 MCP 配置无效），请联系管理员」和「执行失败（CLI 运行环境缺失），请联系管理员」。这几次执行在 dashboard 上的错误类别随之从 `send_error`（发送失败）变为 `turn_failed`（后端报错），执行历史里的错误详情仍带 `process exited during send (code N)`；它们照常计入连续失败次数并可触发自动暂停
+- **新会话发出第一条消息后、服务端列出它之前，dashboard 不再闪回 router 默认 backend**（#3516）：这段时间（最长约一次轮询）里会话头的 CLI 名、图片上传开关、模型列表和助手消息图标继续跟随发送前显示的 backend（显式选择，或按创建时的 access profile 解析的「自动」），服务端列出后改由会话自己的 backend 决定。显式选择与 access profile 仍只随第一条消息发出，后续消息不再携带
 - **kiro / codex 后端收到 dashboard 上传的 PDF 时改为提示模型用 Read 工具读取**（#3451）：ACP（kiro）与 codex 协议以前把每个附件都编码成图片块，PDF 因此变成 `media_type: application/pdf`、数据为空的图片，模型既看不到文件也不知道它已写入 workspace。现在两个后端与 Claude 后端走同一个 `clievent.UserTextAndInline`：PDF 只出现在用户文本前的 Read 提示里（workspace 相对路径 + 原文件名），图片块只来自真正的图片附件。
 - **cron：重启后接管的那次执行若被 claude 中断，记为中断而不是成功**（#3498）：claude 2.1.288 起，被中断的 turn 以 `subtype=success`、`is_error=false` 加 `terminal_reason=aborted_tools|aborted_streaming` 结束，不再是 `error_during_execution`。接管路径只认后者，于是把这类中断当作正常完成，记为 `succeeded`，结果是空文本或半截输出。现在凡 `terminal_reason` 以 `aborted_` 开头都记为 `canceled`（`interrupted`），与旧版 CLI 的中断一致
 - **Slack 话题串 / 飞书话题里的提问，回复留在原话题里**（#3446）：以前回复（含「思考中」进度、分段、错误提示、命令回复、TodoWrite 清单、图片和 AskUserQuestion 卡片）都发到频道或群的顶层。现在 Slack 按 `thread_ts` 回到原话题串；飞书只对带 `thread_id` 的话题消息生效，用回复接口 `reply_in_thread` 发到话题里，普通群里的引用回复照旧发到群里。点话题里的卡片按钮作答，后续回复也在该话题。话题根消息已撤回等原因导致飞书拒绝回复时改发到群里。各话题的会话划分见上方 `session.group_scope`
@@ -103,7 +104,7 @@
 - **启用多个 backend 时，dashboard 不再替运维选 router 默认 backend**（#3418）：backend picker 第一项改为默认选中的「自动（X）」，不动它就不发 `backend`，由服务端按项目钉的 `backend` > `agents[].backend` > 访问档 `default_backend` > `cli.backend` 选；X 是所选访问档会落到的 backend，换访问档时跟着变（项目钉的 backend、`agents[].backend`、cron 任务所属 agent 的访问档、远端节点自己的访问档前端都看不到，这几种情况下 X 只是提示，以服务端为准）。以前 picker 总是预选 router 默认并当成显式选择发出，`default_backend`（#3364）和 `agents[].backend` 在 dashboard 入口从不生效
   - 同一原因的另外两处一起修好：保存项目设置不再把项目的 `backend` 钉成 router 默认（以前因任何原因保存一次，该项目的 IM 会话和 planner 就不再跟随 `default_backend`）；编辑没设 backend 的 cron 任务，保存时不再 PATCH 进 router 默认，新建 cron 任务选「自动」也不带 `backend`
   - 显式选某个 backend（包括 router 默认那个）仍原样发出并优先
-  - 还没发出第一条消息的新会话，侧栏图标、会话头的 CLI 名、图片上传开关和模型列表跟随它将落到的 backend（显式选择，否则「自动」解析到的那个）；以前「自动」一律按 router 默认显示，显式选了 kiro 时图片上传开关也仍按 router 默认放行。远端节点上的显式选择同样驱动这些开关（与已列出的远端会话一致，按本节点缓存的 backend 清单查功能）；远端节点上的「自动」、单 backend 部署、以及第一条消息发出后到服务端列出该会话之前的这段时间，仍按 router 默认显示
+  - 还没发出第一条消息的新会话，侧栏图标、会话头的 CLI 名、图片上传开关和模型列表跟随它将落到的 backend（显式选择，否则「自动」解析到的那个）；以前「自动」一律按 router 默认显示，显式选了 kiro 时图片上传开关也仍按 router 默认放行。远端节点上的显式选择同样驱动这些开关（与已列出的远端会话一致，按本节点缓存的 backend 清单查功能）；远端节点上的「自动」和单 backend 部署仍按 router 默认显示
   - 不做迁移：以前保存时被钉住的项目和 cron 任务保持原值（无法和有意的选择区分）。要恢复跟随，在项目设置或 cron 编辑里把 backend 选回「自动」并保存
 - `spawnSession` panic recover 错误消息不再双前缀 `"spawn process: spawn process:"`（RNEW-009）
 - IM 首轮自动接管不再在 naozhi 会拒绝接管时（max_procs 已满 / 该 key 正在 spawn / 正在关停 / planner 的 exempt 配额已满 / agent 的 model 或 backend 非法）先 SIGTERM 掉终端里的 Claude CLI；接管前改为先跑 router 的接管检查（#3395）
