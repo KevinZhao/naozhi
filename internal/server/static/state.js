@@ -189,13 +189,11 @@ export const timers = {
   turnWatchdog: null,
 };
 
-// hooks: functions assigned at load by the drawers and lightbox that own them, for callers that load earlier.
+// hooks: functions assigned at load by the aside drawer that owns them, for callers that load earlier.
 export const hooks = {
   // Late-bound intra-module hooks (#2557 PR-E3): these used to be IIFE
   // self-exports on window; they are module-scope lets now, assigned when the
   // owning IIFE runs and read at event time (never at load time).
-  openLightboxGroup: null,
-  openLightboxFromThumb: null,
   getActiveScratchKey: null,
   closeScratchDrawer: null,
   askAside: null,

@@ -423,16 +423,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				return
 			}
 			f.dispatch.TryGo("feishu image", func() {
-				imgMsg := msg
-				data, mime, err := f.DownloadImage(f.stopCtx, event.Message.MessageID, content.ImageKey)
-				if err != nil {
-					// image_key is sender-controlled; sanitize before slog.
-					slog.Error("feishu download image failed", "err", err,
-						"key", osutil.SanitizeForLog(content.ImageKey, 128))
-					return
-				}
-				imgMsg.Images = []platform.Image{{Data: data, MimeType: mime}}
-				handler(f.stopCtx, imgMsg)
+				f.handleImage(f.stopCtx, handler, msg, event.Message.MessageID, content.ImageKey)
 			})
 
 		case "audio":

@@ -162,6 +162,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	var startedPlatforms []platform.RunnablePlatform
 	for _, p := range s.platforms {
+		if a, ok := platform.AsCapability[platform.Admitter](p); ok {
+			a.SetAdmission(s.dispatcher.Admit)
+		}
 		p.RegisterRoutes(s.mux, handler)
 		slog.Info("platform registered", "name", p.Name())
 

@@ -108,7 +108,7 @@ func TestPrepareInbound_ExplicitAgentIDRoutesToAsker(t *testing.T) {
 	msg := platform.IncomingMessage{
 		Platform: "fake", EventID: "evt-ans1",
 		UserID: "u1", ChatID: "c1", ChatType: "direct",
-		Text:      "Error style: Return an error.", // composeAskAnswerText shape, no /agent prefix
+		Text:      "Error style: Return an error.", // platform.ComposeAskAnswerText shape, no /agent prefix
 		MentionMe: true,
 		AgentID:   "code-reviewer",
 	}

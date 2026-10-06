@@ -328,6 +328,15 @@ func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOu
 	// close MUST emit a result clievent.Event — see ProtocolCore.ReadEvent.
 	if ri, ok := p.protocol.(eventReaderInto); ok {
 		events, _, err = ri.ReadEventInto(msg.Line, p.readEventBuf[:0])
+		// The buf slots outlive this frame, so a snapshot left in one stays
+		// pinned until a later frame overwrites it; a dead Process never gets
+		// one. decoded keeps the slots even if events is replaced below.
+		decoded := events
+		defer func() {
+			for i := range decoded {
+				decoded[i].WorkflowProgress = nil
+			}
+		}()
 	} else {
 		events, _, err = p.protocol.ReadEvent(msg.Line)
 	}
@@ -599,6 +608,10 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 			(*fn)(*ev.CodeChange)
 		}
 	}
+
+	// No consumer past this point may keep a workflow snapshot: eventCh holds
+	// up to 1024 Events that nobody drains while the session is idle.
+	ev.WorkflowProgress = nil
 
 	// Always log to ring.EventLog so dashboard subscribers see events
 	// even when no Send() is active (e.g., after service restart
