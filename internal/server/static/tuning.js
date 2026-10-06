@@ -393,10 +393,11 @@ async function dismissSession(key, node, opts) {
   // Drop the cached git state so a later key reuse can't inherit this
   // session's branch chip before its own fetch resolves.
   delete gitStateCache[sid(key, node)];
-  // perSession.backends is normally consumed on first sendMessage; a dismiss
-  // before any send would leave a stale backend pick for a re-created key.
+  // A dismiss before the send consumes the picks, or before the server lists
+  // the key, would leave them for a re-created key.
   delete perSession.backends[key];
   delete perSession.accessProfiles[key];
+  delete perSession.sentPicks[key];
 
   // cron-panel-consolidation RFC §4.2: cron stubs are filtered server-side,
   // so this branch only runs if a server bug leaks one into the sidebar.

@@ -17,7 +17,7 @@ v1 的整个方案建立在一句话上：「收养的零件已经全在，缺�
 | §3.2「标记直到终态才删」 | `run_inflight_marker.go:134-137` 先删是**刻意的自愈**。reconcile 的 goroutine（`scheduler.go:570-574`）**没有 `recover()`**（对比 `scheduler_inflight.go:24-27` 有）。留着标记 = 收养一 panic 就崩进程、launchd 重启、标记还在 → **无界崩溃循环**，标记结构里没有 attempt/boot/age 任何上界 | 改为**有界重试**：标记记 attempt，第二次开机不再收养（§5） |
 | §3.1「`CostBefore` 落盘，收养后差值归属」 | 差值在边界上**不可比**：`CostTotals` 读 `ManagedSession.spent`（per-object），收养出来的 session 由 `adoptLiveShimLocked`（`router_shim.go:249-259`）重建、`lastCumulative` 为零，于是重连后第一次 cumulative 上报被**整笔算作增量**——`after - CostBefore` 会把这个 CLI session 的全部历史都记到这次 run 上。另外 `costledger.Totals`（`delta.go:142-146`）**一个 json tag 都没有**，字段改名会静默清零磁盘上的标记 | **删掉 `CostBefore`**。收养的 run 记"成本未知"，不记一个错数字（§6） |
 | §3.1「标记加 `SessionKey`」 | 写入点在 `scheduler_run.go:342`，:354 的注释明写 "key is filled in after execPrepareSpawn derives it"——那时 key 还不存在，要么第二次原子写、要么挪写入点 | **不需要这个字段**：key 是 `sessionkey.CronKey(jobID)`（`key.go:39`，jobID 的纯函数，fresh 模式同样）。收养侧自己推导。评审这条不成立，已复核 |
-| §3.4「`SessionRouter` 加第四个方法」 | `SessionRouter` 有 ~15 个实现（`wireup/cron_router_adapter.go:63` + 20 个 cron 测试 fake，7 个靠嵌入 `reapRouter` 继承） | 改用**能力断言**，`CostReporter`（`agent_opts.go:67`）是现成先例：1 个生产实现、0 个测试改动（§7） |
+| §3.4「`SessionRouter` 加第四个方法」 | `SessionRouter` 有 ~15 个实现（`wireup/cron_router_adapter.go:63` + 20 个 cron 测试 fake，7 个靠嵌入 `reapRouter` 继承） | 改用**能力断言**，`CostReporter`（`agent_opts.go:67`）是现成先例：1 个生产实现、0 个测试改动（§7）（`CostReporter` 后由 #3520 删除，现行同手法的例子是 `CostWindow`） |
 | （未提及） | **drift 关停会先杀掉要收养的 shim**：`classifyShimState` → `shimStateDrift` → `shutdownShimViaReconnect`（`router_shim.go:388-395`），发生在 `main.go:229`，比 cron 存在更早。一次同时改了 model/effort/extra_args 的 `naozhi upgrade` 正好命中 v1 §5 的验收场景 | 列为**明确的非目标**并写进验收前提（§8.2） |
 | （未提及） | gate 拿在 `execAcquireSlot` 之外会与周边簿记失同步：丢 CAS 的 tick 走 `emitOverlapSkipped`（`scheduler_run.go:428-435`）→ 收养期间每 tick 一条 overlap-skip；`RunID`/`Phase` 由 `execPopulateInflight` 填、gauge 与释放在 `runScaffold`/`runFinalizer`（`:313-318`），绕过去就是 `rangeRunningSessionIDs` 看不见 + 永久卡死 | 收养必须复用这三者，不自己拿 gate（§4.2） |
 | §6.1「`onTurnDone` 的所有权没核到底」 | 核到底了：两条 reconnect 路径都是 router 持有（`router_shim.go:457`、`router_lifecycle.go:940`，都是 `r.notifyChange`），`SetOnTurnDone`（`process.go:534`）是**直接覆盖** | 「不碰 `onTurnDone`」从偏好升级为**硬约束**（§3.3） |
@@ -188,7 +188,7 @@ type InFlightAdopter interface {
 }
 ```
 
-`CostReporter`（`agent_opts.go:67`，断言点 `scheduler_run.go:695`）是同一手法的先例。
+`CostReporter`（`agent_opts.go:67`，断言点 `scheduler_run.go:695`）是同一手法的先例（`CostReporter` 后由 #3520 删除，现行同手法的例子是 `cron.CostWindow`）。
 
 ## 5. 明确的非目标
 

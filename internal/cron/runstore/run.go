@@ -49,9 +49,10 @@ type CronRun struct {
 	// drops it to keep list payloads small.
 	SandboxMeta *SandboxRunMeta `json:"sandbox_meta,omitempty"`
 
-	// CostUSD is the LOCAL run's spend increment (session CostTotals after
-	// minus before, docs/rfc/cost-ledger.md §5.3); sandbox runs carry cost in
-	// SandboxMeta and leave this 0. summary() prefers SandboxMeta.CostUSD.
+	// CostUSD is the LOCAL run's spend increment: what was booked while the
+	// run's Send was live (cost window, docs/rfc/cost-ledger.md §5.0); sandbox
+	// runs carry cost in SandboxMeta and leave this 0. summary() prefers
+	// SandboxMeta.CostUSD.
 	CostUSD float64 `json:"cost_usd,omitempty"`
 }
 
