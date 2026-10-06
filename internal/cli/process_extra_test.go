@@ -17,6 +17,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/testhelper"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // startServerWriteTap is startServerDrain that also reports each "write"
@@ -1511,6 +1512,45 @@ func TestEventEntryFromEvent(t *testing.T) {
 			}
 			if tt.wantOK && entries[0].Type != tt.wantType {
 				t.Errorf("Type = %q, want %q", entries[0].Type, tt.wantType)
+			}
+		})
+	}
+}
+
+// TestEventEntryFromEvent_TaskSummaryAndStatus pins the task_updated and
+// task_notification rows: neither frame has a description, so the subtype
+// leaked in as the Summary, and the dashboard copies a task_progress Summary
+// into the agent card's description. task_updated's status is in its patch.
+func TestEventEntryFromEvent_TaskSummaryAndStatus(t *testing.T) {
+	tests := []struct {
+		name                string
+		event               clievent.Event
+		wantSummary, status string
+	}{
+		{"task_updated patch", clievent.Event{Type: "system", SubType: "task_updated", TaskID: "w1",
+			Patch: &clievent.TaskPatch{Status: "completed", EndTime: 1}}, "", "completed"},
+		{"task_updated without patch", clievent.Event{Type: "system", SubType: "task_updated", TaskID: "w1"}, "", ""},
+		{"task_updated with description", clievent.Event{Type: "system", SubType: "task_updated", Description: "probe",
+			Patch: &clievent.TaskPatch{Status: "killed"}}, "probe", "killed"},
+		{"task_progress keeps its description", clievent.Event{Type: "system", SubType: "task_progress",
+			Description: "Ask: A", TaskSummary: "tiny probe"}, "Ask: A", ""},
+		{"task_progress without description", clievent.Event{Type: "system", SubType: "task_progress"}, "task_progress", ""},
+		{"task_notification summary", clievent.Event{Type: "system", SubType: "task_notification", Status: "completed",
+			TaskSummary: `Dynamic workflow "tiny probe" completed`}, `Dynamic workflow "tiny probe" completed`, "completed"},
+		{"task_notification description wins", clievent.Event{Type: "system", SubType: "task_notification", Status: "failed",
+			Description: "reviewer", TaskSummary: "Agent failed"}, "reviewer", "failed"},
+		{"task_notification summary capped", clievent.Event{Type: "system", SubType: "task_notification",
+			TaskSummary: strings.Repeat("界", 130)}, textutil.TruncateRunes(strings.Repeat("界", 130), 120), ""},
+		{"task_notification bare", clievent.Event{Type: "system", SubType: "task_notification"}, "task_notification", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entries := EventEntriesFromEventAt(tt.event, 1)
+			if len(entries) != 1 {
+				t.Fatalf("got %d entries, want 1", len(entries))
+			}
+			if e := entries[0]; e.Summary != tt.wantSummary || e.Status != tt.status {
+				t.Errorf("Summary %q Status %q, want %q %q", e.Summary, e.Status, tt.wantSummary, tt.status)
 			}
 		})
 	}

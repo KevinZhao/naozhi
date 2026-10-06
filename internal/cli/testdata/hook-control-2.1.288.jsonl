@@ -1,0 +1,3 @@
+{"type":"system","subtype":"hook_started","hook_id":"7189b139-602d-4104-a8f3-1e0a3fc4b1fc","hook_name":"SessionStart:startup","hook_event":"SessionStart","uuid":"089c0699-ed79-4d3a-af82-d2a3c4f70384","session_id":"61794f96-ca82-4ad2-b2a1-2bc93c7fd5fc"}
+{"type":"system","subtype":"hook_response","hook_id":"7189b139-602d-4104-a8f3-1e0a3fc4b1fc","hook_name":"SessionStart:startup","hook_event":"SessionStart","output":"hook-ok\n","stdout":"hook-ok\n","stderr":"","exit_code":0,"outcome":"success","uuid":"152644c8-23a9-4d02-a9f2-1ea2dcd9470d","session_id":"61794f96-ca82-4ad2-b2a1-2bc93c7fd5fc"}
+{"type":"control_response","response":{"subtype":"success","request_id":"req_1"}}

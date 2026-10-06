@@ -94,3 +94,38 @@ func TestShortPathRuneBoundary(t *testing.T) {
 		})
 	}
 }
+
+// TestFormatToolInput_WorkflowNeverLeaksScript pins that a Workflow call's
+// Detail carries at most the script file's base name: the input holds the
+// whole script and its args, and Detail is stored, persisted and sent to
+// every dashboard client.
+func TestFormatToolInput_WorkflowNeverLeaksScript(t *testing.T) {
+	t.Parallel()
+	const (
+		script = `export const meta = { name: 'probe' }\nconst SECRET_SCRIPT_TOKEN = 1\nphase('Ask')`
+		args   = `{"target":"SECRET_ARGS_TOKEN","n":3}`
+	)
+	cases := []struct {
+		name, input, want string
+	}{
+		{"script only", `{"script":"` + script + `"}`, "Workflow"},
+		{"script and args", `{"script":"` + script + `","args":` + args + `}`, "Workflow"},
+		{"script path", `{"scriptPath":"/home/u/.claude/projects/-p/sid/workflows/scripts/probe-wf_1.js","args":` + args + `}`, "Workflow probe-wf_1.js"},
+		{"windows script path", `{"scriptPath":"C:\\Users\\u\\scripts\\probe.js"}`, "Workflow probe.js"},
+		{"resume", `{"scriptPath":"/s/probe.js","resumeFromRunId":"wf_2997921d-435"}`, "Workflow probe.js"},
+		{"root path", `{"scriptPath":"/","script":"` + script + `"}`, "Workflow"},
+		{"not an object", `["SECRET_SCRIPT_TOKEN"]`, "Workflow"},
+		{"scriptPath of the wrong type", `{"scriptPath":5,"script":"` + script + `"}`, "Workflow"},
+	}
+	for _, tc := range cases {
+		got := FormatToolInput("Workflow", json.RawMessage(tc.input))
+		if got != tc.want {
+			t.Errorf("%s: FormatToolInput = %q, want %q", tc.name, got, tc.want)
+		}
+		for _, secret := range []string{"SECRET_SCRIPT_TOKEN", "SECRET_ARGS_TOKEN", "export const", "phase("} {
+			if strings.Contains(got, secret) {
+				t.Errorf("%s: Detail %q leaks %q", tc.name, got, secret)
+			}
+		}
+	}
+}
