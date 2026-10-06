@@ -398,8 +398,8 @@ func (d *Discord) probeOnce(sess *discordgo.Session) bool {
 	}
 	if code := restStatus(err); code == http.StatusUnauthorized || code == http.StatusForbidden {
 		if d.connState.FailIf(platform.ConnDisconnected, platform.ConnFailed,
-			fmt.Errorf("discord rejected the bot token (HTTP %d): update platforms.discord.bot_token (restart unless it reconnects by itself)", code)) {
-			slog.Error("discord rejected the bot token while the gateway is down; update platforms.discord.bot_token (restart unless it reconnects by itself)",
+			fmt.Errorf("discord rejected the bot token (HTTP %d): update platforms.discord.bot_token; restart unless it reconnects by itself", code)) {
+			slog.Error("discord rejected the bot token while the gateway is down; update platforms.discord.bot_token; restart unless it reconnects by itself",
 				"status", code)
 		}
 		return true

@@ -416,7 +416,7 @@ func TestConnState_DropWithRevokedTokenFails(t *testing.T) {
 			st := waitConnState(t, d, platform.ConnFailed)
 			// Full text pinned: doctor says the same thing (#3514), and discordgo
 			// keeps reconnecting, so a restart is not always needed.
-			want := "discord rejected the bot token (HTTP " + strconv.Itoa(status) + "): update platforms.discord.bot_token (restart unless it reconnects by itself)"
+			want := "discord rejected the bot token (HTTP " + strconv.Itoa(status) + "): update platforms.discord.bot_token; restart unless it reconnects by itself"
 			if st.LastError != want || st.LastErrorAt.IsZero() {
 				t.Fatalf("LastError = %q at %v, want %q", st.LastError, st.LastErrorAt, want)
 			}
