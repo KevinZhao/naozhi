@@ -1,10 +1,12 @@
 package costledger
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
 	"testing"
+	"time"
 )
 
 func validEntry() Entry {
@@ -130,5 +132,44 @@ func TestSanitizeIdent_KeepsRealModelIDs(t *testing.T) {
 		if got := sanitizeIdent(s); got != s {
 			t.Errorf("sanitizeIdent(%q) = %q", s, got)
 		}
+	}
+}
+
+// A row's mark survives the store's write and read paths; a row without one
+// writes no "mark" key, and a line from before marks decodes with none.
+func TestEntry_MarkRoundTripsAndStaysOptional(t *testing.T) {
+	s, _ := newTestStore(t, t0)
+	marked := mk(t0, SourceSession, UnitUSD, 0.25)
+	marked.Mark = &SessionMark{Spent: 3.5, Cum: 1.25, Born: 1700000000123456789}
+	if !s.Append(marked) || !s.Append(mk(t0, SourceSession, UnitUSD, 0.5)) {
+		t.Fatal("append rejected")
+	}
+	s.Close()
+	got, err := s.Entries(Query{From: t0.Add(-time.Hour), To: t0.Add(time.Hour)}, 10)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("entries = %+v, %v", got, err)
+	}
+	for _, e := range got {
+		switch {
+		case e.Amount == 0.5 && e.Mark != nil:
+			t.Fatalf("unmarked row decoded with mark %+v", *e.Mark)
+		case e.Amount == 0.25 && (e.Mark == nil || *e.Mark != *marked.Mark):
+			t.Fatalf("marked row decoded with mark %+v, want %+v", e.Mark, *marked.Mark)
+		}
+	}
+
+	line, err := json.Marshal(validEntry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(line), `"mark"`) {
+		t.Fatalf("unmarked row encodes a mark: %s", line)
+	}
+	var legacy Entry
+	if err := json.Unmarshal([]byte(`{"ts":"2026-09-05T00:00:00Z","source":"session","kind":"turn","backend":"claude","unit":"USD","amount":1}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Mark != nil || legacy.Amount != 1 {
+		t.Fatalf("legacy line = %+v, want amount 1 and no mark", legacy)
 	}
 }

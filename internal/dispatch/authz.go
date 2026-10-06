@@ -72,6 +72,25 @@ func (d *Dispatcher) authorize(ctx context.Context, msg platform.IncomingMessage
 	return false
 }
 
+// Admit is the platform.AdmitFunc an adapter asks before downloading or
+// transcribing msg's media. It applies prepareInbound's group-mention gate
+// and the Chat-class policy decision, with authorize's log, metric and
+// throttled reply on a refusal. Admin is narrower than Chat, so a refusal
+// here refuses every class; an admitted message is judged again, with its
+// final text, by the handler. Dedup is neither consulted nor consumed.
+func (d *Dispatcher) Admit(ctx context.Context, msg platform.IncomingMessage) bool {
+	if unmentionedInGroup(msg) {
+		return false
+	}
+	return d.authorize(ctx, msg, "", d.inboundLogger(msg))
+}
+
+// unmentionedInGroup reports a group message that does not @mention the
+// bot; the dispatcher drops those silently.
+func unmentionedInGroup(msg platform.IncomingMessage) bool {
+	return msg.ChatType == "group" && !msg.MentionMe
+}
+
 func denyReplyText(p *imauth.Policy, userID string) string {
 	if p.DenyReply != "" {
 		return p.DenyReply
@@ -81,21 +100,29 @@ func denyReplyText(p *imauth.Policy, userID string) string {
 
 // denyThrottle remembers when each refused sender was last answered.
 type denyThrottle struct {
+	// window is the quiet time between two answers to one key; 0 means
+	// denyReplyWindow.
+	window time.Duration
+
 	mu   sync.Mutex
 	last map[string]time.Time
 }
 
 // allow reports whether key may be answered at now, recording it if so.
 func (t *denyThrottle) allow(key string, now time.Time) bool {
+	window := t.window
+	if window == 0 {
+		window = denyReplyWindow
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	at, seen := t.last[key]
-	if seen && now.Sub(at) < denyReplyWindow {
+	if seen && now.Sub(at) < window {
 		return false
 	}
 	if !seen && len(t.last) >= denyReplyCap {
 		for k, at := range t.last {
-			if now.Sub(at) >= denyReplyWindow {
+			if now.Sub(at) >= window {
 				delete(t.last, k)
 			}
 		}

@@ -643,7 +643,9 @@ func NewRouter(cfg RouterConfig) *Router {
 
 	// Restore sessions from store
 	if restored := loadStore(r.storePath); restored != nil {
-		r.ss.Update(func(tx sessTx) { r.restoreStore(tx, restored) })
+		now := time.Now()
+		marks := r.runs.cost.sessionMarks(costMarksSince(r.storePath, now), now)
+		r.ss.Update(func(tx sessTx) { r.restoreStore(tx, restored, marks) })
 	}
 
 	// Sidebar is driven purely by sessions.json (and live activity); filesystem-

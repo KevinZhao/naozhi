@@ -473,6 +473,10 @@ im_access:                                # IM 发送者白名单，见「部署
       allowed_users: ["ou_xxxxxxxx"]      # 可以聊天；admin_users 也算
       admin_users: ["ou_yyyyyyyy"]        # 可以用 /cd /project /cron；空 = 所有人都是管理员
 
+im_rate_limit:                            # 每个 IM 发送者的消息限流，见「部署 · IM 访问控制」
+  msgs_per_min: 10                        # 0 或不配 = 不限
+  burst: 3                                # 允许连发的条数；0 = 同 msgs_per_min
+
 # upstream:                               # 多节点：作为远程节点拨入
 #   url: "wss://primary.example.com/ws-node"
 #   node_id: "my-workstation"
@@ -563,7 +567,9 @@ im_access:
   `naozhi doctor` 会对每个没有条目的平台告警，`config check` 因此退出码为 1。
   `default_deny: true` 会拒绝所有没有条目的平台。
 - 平台一旦有条目，名单外的人和没有用户 ID 的消息都会被拒绝，包括飞书卡片上的
-  AskUserQuestion 回答。被拒的消息不会触发任何命令，也不会进 CLI。
+  AskUserQuestion 回答。被拒的消息不会触发任何命令，也不会进 CLI。飞书的语音和
+  图片在下载前就判定：名单外的人发来的语音不下载、不转写（不产生 Transcribe 费用），
+  群里的语音因为没法 @bot 也不转写。
 - **怎么拿用户 ID**：被拒的消息会在 Info 级别打一行 `im access denied`，`user`
   字段就是要填的 ID（飞书 open_id `ou_...`、Slack `U...`、Discord 用户 ID、微信
   `from`）。私聊里被拒的人也会收到带自己 ID 的提示，同一人 10 分钟最多一次；群里
@@ -575,6 +581,21 @@ im_access:
   dashboard 里手动删除。
 - 改名单要重启 naozhi（会打断正在运行的会话），配置热重载见 #3437。
 - 把自己关在外面时，dashboard 不受 `im_access` 影响，可以从那里继续操作。
+
+`im_rate_limit` 限制每个发送者发消息的频率（令牌桶，按平台 + 用户 ID 分桶；平台没给
+用户 ID 时按会话分桶），防止有人刷屏把账单打穿：
+
+```yaml
+im_rate_limit:
+  msgs_per_min: 10   # 持续速率；0 或不配 = 不限
+  burst: 3           # 可以连发的条数；0 = 同 msgs_per_min
+```
+
+- 斜杠命令也计数（`/cron add` 刷屏一样被挡），`/stop` 不计：它只会停下花费。
+- 超限的消息直接丢弃，不进 CLI；发送者每分钟最多收到一次「消息过于频繁」提示。
+  丢弃次数记在 expvar `naozhi_dispatch_rate_limited_total`。
+- 在 `im_access` 之后检查，所以被拒的人不消耗额度；没 @bot 的群消息也不消耗。
+- 管理员同样受限；改配置要重启 naozhi。
 
 ### 生产架构
 

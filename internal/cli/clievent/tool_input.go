@@ -13,6 +13,7 @@ package clievent
 
 import (
 	"encoding/json"
+	"path"
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -53,6 +54,9 @@ type (
 	}
 	toolInputAgent struct {
 		Description string `json:"description"`
+	}
+	toolInputWorkflow struct {
+		ScriptPath string `json:"scriptPath"`
 	}
 	toolInputFallback struct {
 		Description string `json:"description"`
@@ -108,6 +112,16 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 		if json.Unmarshal(input, &s) == nil && s.Description != "" {
 			return toolName + " " + textutil.TruncateRunes(s.Description, 60)
 		}
+	case "Workflow":
+		// The input carries the whole script and its args; only the script
+		// file's name may leave this function, never the raw-input fallback.
+		var s toolInputWorkflow
+		if json.Unmarshal(input, &s) == nil && s.ScriptPath != "" {
+			if base := path.Base(strings.ReplaceAll(s.ScriptPath, `\`, "/")); base != "/" && base != "." {
+				return toolName + " " + textutil.TruncateRunes(base, 80)
+			}
+		}
+		return toolName
 	default:
 		// Unknown tools: a concrete struct (json ignores unknown fields) beats a
 		// map decode and still works for MCP tools with new schemas.

@@ -678,6 +678,12 @@ func (r *Router) StartShimReconcileLoop(ctx context.Context, interval time.Durat
 	}()
 }
 
+// replayTaskStartedPrefix is how the claude CLI begins every task_started
+// line. The replay holds up to 10000 lines, mostly progress frames and
+// workflow snapshots worth ~1ms each to decode, so the walk decodes only
+// lines with this prefix.
+const replayTaskStartedPrefix = `{"type":"system","subtype":"task_started"`
+
 // replayLinkerTasks returns the task_started events in a shim replay that the
 // SubagentLinker can resolve, first occurrence per task_id, in replay order.
 // Replay frames map 1:1 to a semantic event in practice; iterating keeps the
@@ -686,7 +692,7 @@ func replayLinkerTasks(proto cli.Protocol, replays []shim.ServerMsg) []clievent.
 	var out []clievent.Event
 	seen := make(map[string]struct{})
 	for _, replay := range replays {
-		if replay.Type != "replay" {
+		if replay.Type != "replay" || !strings.HasPrefix(replay.Line, replayTaskStartedPrefix) {
 			continue
 		}
 		events, _, err := proto.ReadEvent(replay.Line)
