@@ -1,8 +1,9 @@
 # RFC: Dashboard CSP — drop `'unsafe-inline'` via hash/externalize (and the nonce/strict-dynamic question)
 
-> **状态**: Draft v1（待评审）
+> **状态**: Implemented v2（方案 A 落地：#1980 PR-1..3 去 script-src `'unsafe-inline'`，#2559 D6-3 去 style-src `'unsafe-inline'`；未走 nonce/strict-dynamic 分支；#3441 内置 KaTeX/mermaid 后 CSP 不再列任何外部源。#922/#1734/#1980/#2559 已关闭）
 > **作者**: naozhi team (cron-cr)
 > **创建**: 2026-06-04
+> **修订**: 2026-10-06（v2：按 master 实测把状态从 Draft 升为 Implemented，落地结果见 §0；§1-§8 保留为写作时点的设计，其中的行号、计数与"本轮不落地代码"等措辞是当时的快照）
 > **范围**: 移除 `/dashboard` 响应里 script-src / style-src 的 `'unsafe-inline'`，闭合 DOM-XSS→任意脚本执行的链路；定方案（全外置 vs 每请求 nonce+strict-dynamic）、分相、回归 lint。
 > **关联 issue**: #1734, #922（亦牵涉历史 #441 / #479 / #562 / #605 / #607 / #1526）
 > **关联代码**:
@@ -13,6 +14,28 @@
 > - `internal/server/static/dashboard.html:16-26`（头部 inline theme 引导 `<script>`）、`:2491-2493`（外置 script 标签）、8 处 inline `onclick`/`onsubmit`、1 处 inline `<style>`、11 处 inline `style=`
 > - `internal/server/static/dashboard.js:7410-7476`（mermaid/KaTeX 动态 `createElement('script')` 注入；~84 处生成 HTML 字符串内的 `onclick=`；~94 处 `.style.` 变更）
 > - 现有 pin 测试：`internal/server/dashboard_csp_test.go`（尤其 `TestDashboardCSP_ScriptSrcUnsafeInlineMigrationGate`、`TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow`）、`dashboard_csp_data_audit_test.go`、`dashboard_csp_katex_font_sri_test.go`
+
+
+---
+
+## 0. 落地结果（2026-10-06 核实）
+
+执行方案见 [csp-data-action.md](csp-data-action.md)（#1980 D5，按 §3 方案 A 细化）。与本文 §3-§8 的对应：
+
+- **方案 A（hash + handler 外置）胜出，nonce/strict-dynamic 未采用。** 理由与 §3 方案 B 一致：nonce 与 embed.FS + ETag/预压缩冲突，且不覆盖内联 `on*=`。
+- **handler 迁移**：#1980 PR-1（#2592）建 `data-action` 委托核心并迁 cron_view，PR-2（#2593）迁 dashboard 其余部分。`TestDashboardBundle_NoInlineHandlerAttributes` 把全 bundle 与 dashboard.html 的属性形态 `on*=` 钉在 0。
+- **script-src 切换**：#1980 PR-3（#2594）删 `'unsafe-inline'`。`internal/server/dashboard_csp.go` 的 `buildDashboardCSP` 在 init 时从实际下发的页面算 sha256：主题引导块（数量 ≠ 1 即 panic，仿登录页自检），以及生成的 import map 与入口 module loader。hash 计算没有抽成 §4 设想的共享 `csputil` 包，dashboard 自带 `cspHash`。`TestDashboardCSP_ScriptSrcUnsafeInlineMigrationGate` 已反转为禁 `'unsafe-inline'`、要求 sha256；`test/e2e/csp_negative.test.js` 在浏览器里证明注入的 `onclick` 与内联 `<script>` 被拦，主题引导仍执行。
+- **style-src 切换**：#2559 D6-1（#2606）把内联 `<style>` 拆到 `static/css/`，D6-3（#2608）把 `style=` 改成 class 并删 style-src `'unsafe-inline'`（`TestDashboardBundle_NoInlineStyleAttributes` 守门）。方案 C 的 `style-src-attr` 豁免没有用上。KaTeX/mermaid 产出的 style 属性与 `<style>` 被新策略拒绝，#2895 改走 CSSOM（`el.style` 回写、constructed stylesheet）。
+- **workspace HTML 预览**：实测 blob: 与 srcdoc iframe 都继承父页 CSP，PR-3 把预览改成服务端 `mode=render&inline=1` 响应（以 `Sec-Fetch-Dest: iframe` 门禁，带自身 sandbox CSP），详见 csp-data-action.md §4。
+- **e2e**：mock-server 下发与生产同源的 CSP（`TestDashboardCSP_MockServerHeaderInSync` 防漂移），整套 Playwright 都在真实策略下跑。
+- **没有做的**：§6/§7 的 `Content-Security-Policy-Report-Only` 投放、`/csp-report` 端点和过渡 flag 都没有建，迁移靠计数 ratchet 与 e2e 收口。
+- **CDN（§2 non-goal 已被推翻）**：PR-3 先把 jsdelivr `/npm/` 前缀收紧为 mermaid/KaTeX 的精确版本 URL；#3441 随后把 KaTeX 0.16.21（#3567）与 mermaid 11.14.0（#3577）内置到 `internal/server/static/vendor/`，经 `/static/vendor/` 同源加载并保留 SRI，jsdelivr 从 CSP 中消失。原来钉 CDN 的 `TestDashboardCSP_JsdelivrNpmPathScoped`、`CDNURLsMatchBundle` 与 `dashboard_csp_katex_font_sri_test.go` 由 `TestDashboardCSP_SelfHostedOnly`（每个 source token 只能是 `'self'`、`'none'`、`data:`、`blob:` 或 sha256 hash）与 `TestVendorAssets_SRIMatchesEmbedded` 取代。
+
+现行策略（hash 部分省略）：
+
+```
+default-src 'self'; script-src 'self' 'sha256-…'…; connect-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font
+```
 
 ---
 
