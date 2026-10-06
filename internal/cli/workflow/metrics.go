@@ -15,4 +15,12 @@ var (
 	// itemsIdentityTotal counts snapshots dropped (rows kept) because an
 	// item or an identity field had the wrong type.
 	itemsIdentityTotal = expvar.NewInt("naozhi_cli_workflow_items_identity_total")
+
+	// itemsUnknownTotal counts snapshots and result files holding items of
+	// a type the Tracker does not know (ignored).
+	itemsUnknownTotal = expvar.NewInt("naozhi_cli_workflow_items_unknown_total")
+
+	// phasesCappedTotal counts snapshots and result files whose phases past
+	// maxPhases were dropped.
+	phasesCappedTotal = expvar.NewInt("naozhi_cli_workflow_phases_capped_total")
 )

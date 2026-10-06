@@ -250,6 +250,7 @@ func (t *Tracker) applySnapshotLocked(b *builder, w *Workflow, ev *clievent.Even
 	if b.decodeErr {
 		itemsPartialTotal.Add(1)
 	}
+	pruneMemos(w, b.memos, b.phaseMemos)
 	w.SnapshotSeq++
 	if s.earliest > 0 {
 		setStarted(w, s.earliest, StartedFromSnapshot)

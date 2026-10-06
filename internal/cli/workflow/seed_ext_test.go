@@ -3,6 +3,7 @@ package workflow_test
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,6 +179,38 @@ func TestSeed_FallbackDecodeForOddTaskID(t *testing.T) {
 	}
 	if w := only(t, tr); w.TaskID != "W-Odd" || len(w.Agents) != 4 {
 		t.Fatalf("odd id entry: %s with %d rows, want the newer snapshot's 4", w.TaskID, len(w.Agents))
+	}
+	long := strings.Repeat("w", 33) // past the 32-byte bound, all in the class
+	lines = []string{string(bigSnapshot(3, bigOpts{task: long})), string(bigSnapshot(4, bigOpts{task: long}))}
+	if _, decodes := seed(t, lines, false); decodes != 2 {
+		t.Errorf("33-byte id: %d decodes, want 2", decodes)
+	}
+}
+
+// TestSeed_FailedNewestSnapshotFallsBack: live keeps the rows of the last
+// snapshot that decoded when a newer one fails the identity check; so does
+// the seed, trying at most three older snapshot lines.
+func TestSeed_FailedNewestSnapshotFallsBack(t *testing.T) {
+	t.Parallel()
+	good := string(bigSnapshot(3, bigOpts{}))
+	bad := strings.Replace(string(bigSnapshot(4, bigOpts{})), `"type":"workflow_agent","index":2,`, `"type":"workflow_agent","index":"x",`, 1)
+	if bad == string(bigSnapshot(4, bigOpts{})) {
+		t.Fatal("fixture: no agent index replaced")
+	}
+	live := workflow.New(nil)
+	feed(t, live, time.UnixMilli(1791170018000), good, bad)
+	want := only(t, live)
+	tr, decodes := seed(t, []string{good, bad}, false)
+	got := only(t, tr)
+	if len(want.Agents) != 3 || want.Degraded != workflow.DegradedDecodeError {
+		t.Fatalf("live: %d rows, %q", len(want.Agents), want.Degraded)
+	}
+	if len(got.Agents) != 3 || got.Degraded != want.Degraded || got.Counts != want.Counts || decodes != 2 {
+		t.Fatalf("seeded: %d rows, %q, counts %+v, %d decodes", len(got.Agents), got.Degraded, got.Counts, decodes)
+	}
+	tr, decodes = seed(t, []string{good, bad, bad, bad, bad}, false)
+	if w := only(t, tr); len(w.Agents) != 0 || w.Degraded != workflow.DegradedDecodeError || decodes != 4 {
+		t.Fatalf("fallback past three lines: %d rows, %q, %d decodes (want 1 + 3)", len(w.Agents), w.Degraded, decodes)
 	}
 }
 

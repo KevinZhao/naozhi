@@ -3,6 +3,7 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -436,9 +437,10 @@ func TestVersionAndCallback(t *testing.T) {
 	}
 }
 
-// TestConcurrentWriters runs the read loop's Observe, the board's
-// ApplyResultFile and KnowTasks and lock-free readers together (-race).
-func TestConcurrentWriters(t *testing.T) {
+// TestWorkflowTracker_ConcurrentWriters runs the read loop's Observe, the
+// board's ApplyResultFile and KnowTasks and lock-free readers together
+// (-race; the name matches §11.3's -run 'Workflow').
+func TestWorkflowTracker_ConcurrentWriters(t *testing.T) {
 	t.Parallel()
 	tr := New(func() {})
 	stop := make(chan struct{})
@@ -534,5 +536,79 @@ func TestEndTimeAfterTerminal(t *testing.T) {
 		if w := get(t, tr, "w1"); w.EndedAt != 77 || w.Status != StatusCompleted {
 			t.Errorf("patch status %q: %s ended %d, want completed at 77", status, w.Status, w.EndedAt)
 		}
+	}
+}
+
+// TestCaps_PastCapItemsNotNormalized: items past the row and phase caps are
+// counted but never redacted, given a memo or kept in a backing array, in
+// CC's ascending order and out of it. Not parallel: it swaps the redactor
+// and reads process-wide counters.
+func TestCaps_PastCapItemsNotNormalized(t *testing.T) {
+	n := countRedactions(t)
+	for _, descending := range []bool{false, true} {
+		var items []clievent.WorkflowItem
+		for i := 1; i <= maxPhases+5; i++ {
+			items = append(items, phase(i, fmt.Sprint("p", i)))
+		}
+		for i := 1; i <= maxAgents+10; i++ {
+			items = append(items, running(i, fmt.Sprintf("a%d", i)))
+		}
+		if descending {
+			slices.Reverse(items)
+		}
+		tr := New(nil)
+		before, capped := n.Load(), phasesCappedTotal.Value()
+		tr.Observe(progress("w1", items...), t0)
+		if d := n.Load() - before; d != maxAgents+maxPhases {
+			t.Errorf("descending=%v: %d redactions, want one per kept label and title (%d)", descending, d, maxAgents+maxPhases)
+		}
+		if d := phasesCappedTotal.Value() - capped; d != 1 {
+			t.Errorf("descending=%v: phases_capped counter moved by %d, want 1", descending, d)
+		}
+		b := tr.builders["w1"]
+		w := b.wf
+		if len(b.memos) != maxAgents || len(b.phaseMemos) != maxPhases {
+			t.Errorf("descending=%v: %d memos, %d phase memos", descending, len(b.memos), len(b.phaseMemos))
+		}
+		if cap(w.Agents) != maxAgents || cap(w.Phases) != maxPhases || w.Agents[maxAgents-1].Index != maxAgents || w.Phases[maxPhases-1].Index != maxPhases {
+			t.Errorf("descending=%v: rows cap %d, phases cap %d", descending, cap(w.Agents), cap(w.Phases))
+		}
+		// A snapshot of other indexes: the memos follow what is shown.
+		items = items[:0]
+		for i := 1; i <= maxPhases+5; i++ {
+			items = append(items, phase(1000+i, "q"))
+		}
+		for i := 1; i <= maxAgents+10; i++ {
+			items = append(items, running(10_000+i, "b"))
+		}
+		tr.Observe(progress("w1", items...), t0)
+		if len(b.memos) != maxAgents || len(b.phaseMemos) != maxPhases || b.memos[10_001] == nil || b.phaseMemos[1001] == nil {
+			t.Errorf("descending=%v: after the second snapshot %d memos, %d phase memos", descending, len(b.memos), len(b.phaseMemos))
+		}
+	}
+}
+
+// TestItemCounters: an item of an unknown type is ignored and the snapshot
+// holding it counted once; a result file's phases[] past the cap counts
+// too. Not parallel: process-wide counters.
+func TestItemCounters(t *testing.T) {
+	tr := New(nil)
+	before := itemsUnknownTotal.Value()
+	tr.Observe(progress("w1", running(1, "a1")), t0)
+	if d := itemsUnknownTotal.Value() - before; d != 0 {
+		t.Fatalf("known items counted %d", d)
+	}
+	odd := clievent.WorkflowItem{Type: "workflow_gizmo", Index: 2}
+	tr.Observe(progress("w1", running(1, "a1"), odd, odd), t0)
+	if d := itemsUnknownTotal.Value() - before; d != 1 {
+		t.Fatalf("unknown items: counter moved by %d, want 1", d)
+	}
+	if w := get(t, tr, "w1"); len(w.Agents) != 1 || w.Phases != nil || w.Counts.Total != 1 {
+		t.Fatalf("unknown item not ignored: %+v", *w)
+	}
+	capped := phasesCappedTotal.Value()
+	MergeResultFile(&Workflow{TaskID: "w1"}, &ResultFile{TaskID: "w1", Status: "completed", Phases: make([]resultPhase, maxPhases+1)})
+	if d := phasesCappedTotal.Value() - capped; d != 1 {
+		t.Fatalf("phases[] past the cap: counter moved by %d, want 1", d)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
@@ -190,10 +191,14 @@ func TestMergeRows(t *testing.T) {
 	}
 	upd := rows(2, 5)
 	upd[0].Label = "new"
-	got := mergeRows(rows(1, 2, 3, 7), upd)
+	got, over := mergeRows(rows(1, 2, 3, 7), upd, 5)
 	want := []Agent{{Index: 1, Label: "v1"}, {Index: 2, Label: "new"}, {Index: 3, Label: "v3"}, {Index: 5, Label: "v5"}, {Index: 7, Label: "v7"}}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("mergeRows = %+v", got)
+	if !reflect.DeepEqual(got, want) || over {
+		t.Fatalf("mergeRows = %+v, %v", got, over)
+	}
+	got, over = mergeRows(rows(1, 2, 3, 7), upd, 3)
+	if !reflect.DeepEqual(got, want[:3]) || !over || cap(got) != 3 {
+		t.Fatalf("mergeRows limit 3 = %+v (cap %d), %v", got, cap(got), over)
 	}
 }
 
@@ -271,5 +276,65 @@ func TestApplyResultFile_RejectsNonTerminal(t *testing.T) {
 	}
 	if got, ok := MergeResultFile(before, &ResultFile{TaskID: "w1", Status: "running"}); ok || got != before {
 		t.Fatal("MergeResultFile merged a running file")
+	}
+}
+
+// TestNewResultCache_TruncatedResultIsACopy: the 16KB cut must not pin the
+// whole result text. Not parallel: it swaps the redactor.
+func TestNewResultCache_TruncatedResultIsACopy(t *testing.T) {
+	var full string
+	orig := redactSecrets
+	redactSecrets = func(s string) string { full = orig(s); return full }
+	t.Cleanup(func() { redactSecrets = orig })
+	c := NewResultCache(&ResultFile{Result: json.RawMessage(`"` + strings.Repeat("x", 4*maxResultBytes) + `"`)})
+	if !c.ResultTruncated || len(full) <= len(c.Result) {
+		t.Fatalf("fixture not truncated: %d of %d bytes", len(c.Result), len(full))
+	}
+	start, p := uintptr(unsafe.Pointer(unsafe.StringData(full))), uintptr(unsafe.Pointer(unsafe.StringData(c.Result)))
+	if p >= start && p < start+uintptr(len(full)) {
+		t.Fatal("the truncated result shares the full text's storage")
+	}
+}
+
+// TestMergeResultFile_RowCapBacking: rows past the cap after the union
+// leave no backing array or memo behind. The rows are done, so stopAll
+// does not copy them.
+func TestMergeResultFile_RowCapBacking(t *testing.T) {
+	t.Parallel()
+	var base, file []clievent.WorkflowItem
+	for i := 1; i <= maxAgents; i++ {
+		base = append(base, doneItem(i, fmt.Sprintf("a%d", i), "x"))
+		file = append(file, doneItem(maxAgents+i, fmt.Sprintf("b%d", i), "x"))
+	}
+	tr := New(nil)
+	tr.Observe(progress("w1", base...), t0)
+	if !tr.ApplyResultFile(resultFor("w1", file...)) {
+		t.Fatal("not merged")
+	}
+	b := tr.builders["w1"]
+	if w := b.wf; len(w.Agents) != maxAgents || cap(w.Agents) != maxAgents || !w.AgentsCapped || w.Agents[maxAgents-1].Index != maxAgents {
+		t.Fatalf("union: %d rows, cap %d, capped %v", len(w.Agents), cap(w.Agents), w.AgentsCapped)
+	}
+	if len(b.memos) > maxAgents || b.memos[maxAgents+1] != nil {
+		t.Fatalf("%d memos after the capped union", len(b.memos))
+	}
+}
+
+// TestApplyResultFile_PhasesCappedSticks: a frame after the merge keeps the
+// file's phases_capped.
+func TestApplyResultFile_PhasesCappedSticks(t *testing.T) {
+	t.Parallel()
+	tr := New(nil)
+	tr.Observe(progress("w1", running(1, "a1")), t0)
+	rf := resultFor("w1", doneItem(1, "a1", "x"))
+	for i := 2; i <= maxPhases+1; i++ {
+		rf.WorkflowProgress = append(rf.WorkflowProgress, phase(i, "p"))
+	}
+	if !tr.ApplyResultFile(rf) || get(t, tr, "w1").Degraded != DegradedPhasesCapped {
+		t.Fatalf("merge: %q", get(t, tr, "w1").Degraded)
+	}
+	tr.Observe(notification("w1", "completed"), t0)
+	if w := get(t, tr, "w1"); w.Degraded != DegradedPhasesCapped {
+		t.Fatalf("a later notification cleared phases_capped: %q", w.Degraded)
 	}
 }

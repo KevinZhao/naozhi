@@ -1172,7 +1172,7 @@ running（5），否则探针行 6 的 B（`state:"start"`，只有 queuedAt）�
 | 未识别的 `state` / `status` → `RawState` / `RawStatus` | 先 redact、再截 32 runes | 透传值，原本无上限；只截不遮的话，形如密钥的值会以 29 字符残段上 wire |
 | `blocked` / `skipped` | 保留（bool） | 状态规范化需要 |
 | `workflow_log` 项 | 忽略（本就不发） | |
-| 未知 `type` 项 | 忽略 + 计数 | 前向兼容 |
+| 未知 `type` 项 | 忽略 + 计数（`naozhi_cli_workflow_items_unknown_total`，每张含未知项的快照 / 结果文件计一次，PR-6） | 前向兼容 |
 | `task_started.prompt`（脚本） | 不声明 | NG2，且可达数十 KB |
 | `output_file` | 不声明 | TMPDIR 易失（§1.3） |
 | `fallbackModel` / `lastAttemptReason` 等真实数据中见到的额外键 | 不声明（json 忽略） | 需要时再加 |
@@ -1298,11 +1298,11 @@ running（5），否则探针行 6 的 B（`state:"start"`，只有 queuedAt）�
 | 每 Process 跟踪的 running workflow | 16 带行；第 17-32 个只记 header（`Degraded=too_many`；header 含 phases 与计数，只是没有 agent 行）；> 32 忽略 | 超出 32 的 task 不建条目，计数 `naozhi_cli_workflow_untracked_total`（expvar，每 task 一次）；header-only 条目照常 running，**从不**被合成终态；带行的条目终态后让出名额，下一张快照起 header-only 条目补上 |
 | 每 Process 保留的终态 workflow | 5（按 EndedAt LRU） | 从 Tracker 淘汰；board 的 wake 把它移入 `retained`（§5.8），不会从面板消失 |
 | **每 board 的非终态条目**（live + retained，含 snapshot_stale / unknown） | 16（**只裁 retained**） | live + retained 超过 16 时，从 retained 里按 unknown → snapshot_stale / Ref 来源 → 其余、同类 `LastObservedAt` 最旧先**删除**（连带 `last` / 结果缓存 / `resolve`），直到满足或 retained 删空；**不**合成 interrupted（被裁不是终态证据），live 条目从不因此被裁或标终态（v3 会让 live > 16 时状态来回翻转、误播终态） |
-| 每 workflow 的 phase | 200（按 index 升序保留） | 超出丢弃、计数，`Degraded=phases_capped`（chip "phase 过多，部分未显示"；v4 复用 `too_many`，其 chip "仅显示概要"在行照常显示时是错的）；所属 phase 被丢的 agent 行照常保留，客户端归入"其余 phase"组；HTTP 与 WS 都继承此上限 |
+| 每 workflow 的 phase | 200（按 index 升序保留） | 超出丢弃、计数（`naozhi_cli_workflow_phases_capped_total`，每张超限的快照 / 结果文件计一次，PR-6），`Degraded=phases_capped`（chip "phase 过多，部分未显示"；v4 复用 `too_many`，其 chip "仅显示概要"在行照常显示时是错的）；所属 phase 被丢的 agent 行照常保留，客户端归入"其余 phase"组；HTTP 与 WS 都继承此上限 |
 | **每 board 的终态条目**（live 与 retained **合并**计） | 5（按 EndedAt LRU） | 淘汰时同时删除 `last[task]`、结果缓存、`resolve[task]`；Ref 从这个有界集合派生（≤ 21 条） |
-| 每 workflow agent 行 | 2000（board 第 4 步的并集同样受此上限） | 计数照算，行截断，`AgentsCapped=true` |
+| 每 workflow agent 行 | 2000（board 第 4 步的并集同样受此上限） | 计数照算，行截断，`AgentsCapped=true`；超出上限的项（phase 同理）只计数：不规范化、不 redact、不建记忆，也不留在发布切片的底层数组里；记忆超过上限时修剪到当前所示的 index（PR-6；先建全部行再切片的话，单个 10MiB 快照能让一个条目钉住 ~60MB） |
 | 每 agent 历史 agentId | 8 | 丢最旧 |
-| 每终态 workflow 的结果缓存（§6.2.1） | result 16KB + logs 合计 64KiB（≤ 200 行 × 500 runes，超出丢最旧） | ≤ ~80KB；不缓存 per-agent resultPreview |
+| 每终态 workflow 的结果缓存（§6.2.1） | result 16KB + logs 合计 64KiB（≤ 200 行 × 500 runes，超出丢最旧） | ≤ ~80KB；截断后的 result 是副本，不钉住整段原文（PR-6）；不缓存 per-agent resultPreview |
 | 后台磁盘 I/O（RunDir 解析、stat、结果文件、R3，§5.8 "I/O 派发"） | 每 board 在途 ≤ 2；全局 `workflowIOSlots = 8` | 在途 > 30s 记为卡死但**继续占全局槽位**，每 board 至多补发 1 个；挂死的文件系统最多卡住 8 个 goroutine / fd |
 | 字符串 | agent：label/title/phaseTitle 120、model 64、last tool 64、last tool summary 200、error 400；workflow：Name 120、Description / Current / NotifySummary 200、RawState / RawStatus 32 runes | 先 `RedactSecrets` 再 `textutil.TruncateRunes`（`textutil/truncate.go:19`），按原串 maphash 记忆（§4.3） |
 
@@ -1724,10 +1724,12 @@ R5  **有**存活进程、但 retained 条目没人认领（v4 新增）：R4 �
     error、is_backgrounded），不带 status 的 patch 并不取代更早的 status，所以两种 patch 各占一格（PR-6；只占一格时
     `paused` 之后一个只改 description 的 patch 会让种子回到 running）。这一条对 running 的 workflow 同样生效（它没有终态帧，
     但不需要等终态格填满）；
+  - 快照格的最新一行解码后身份复核不过（`Failed`，§5.7 L1'）时，live 路径保留的是更早一张快照的行：逆序遍历时每 task 另登记至多 3 行更旧的
+    快照行（不解码），由新到旧解码，取第一张能用的、紧挨在失败那张之前应用（两者之间只可能是该 task 的 header 类帧，失败那张随后照常更新 header）；3 行都不行就不再往前（零行 + `decode_error`）（PR-6）。
   - `subtype":"task_started` 与 `async_launched` 行总要登记并解码（名称、task_type、RunID、TranscriptDir 与等级 3 的 SessionID 只在这里）。
   - 种子条目的 `LastObservedAt` 为 0（replay 不带时间戳，不取观测时刻），由 board 合并时补（§5.8 第 3 步）。
   v3 只跳过快照行：ring 绕回后几乎全是小的 task_progress 行，每行仍要反射解码（实测 347B 的行 6.8-9.1µs / 440B，10k 行约
-  70-90ms / 4.4MB，是 v3 所写预算的 3-4 倍）。现在解码次数为 O(task 数)：每 task ≤ 5 行 + task_started + launch 行。
+  70-90ms / 4.4MB，是 v3 所写预算的 3-4 倍）。现在解码次数为 O(task 数)：每 task ≤ 5 行 + task_started + launch 行（快照格失败时另加 ≤ 3 行）。
 - 不把 replay 帧写进 ring / persist（`router_shim.go:409-413` 的既有约束：replay 无时间戳；
   persist sink 最后才装，`router_shim.go:483-486`）。
 - 已知：长 workflow 后 replay ring 几乎必然已淘汰 `task_started` 与 launch tool_result
@@ -2592,7 +2594,7 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
 | HTTP | 未鉴权 401（自动）；非法 key 400；`rows=none` 与 `since` 同时给 → 400；`SessionFor == nil` 404；nil board 404；task 不在 board 404；remote node 404；**结果文件缺失 / 是 FIFO / RunDir 未解析 → 200 + `result_unavailable`**（不是 404）；`rows=none` 不带行、但终态且有结果时照样带 result / logs；`since=V` 只带 `rev > V` 的行、epoch 不符时 `rows_mode:"full"`；重启后缓存缺失的终态 workflow 首次 GET 即返回行（`MergeResultFile` 经 `Result` 路径）；取不到全局 I/O 槽位时立即返回 `result_unavailable`、不等待；结果/日志截断（logs 合计 ≤ 64KiB）；结果文件只解析一次（计数）；taskId 不匹配不返回 result；响应带 `server_now`；限流 429；路由表里没有 `/workflow_agent`（v5 删除） |
 | drill-in | board 命中先于 linker nil（无进程的 session 可 drill）；transcript 未落盘 → 202 / `pending`；transcript 是 FIFO → 404 且不阻塞；**tail 中途把 agent jsonl rm + mkfifo**：下一次零字节轮询不阻塞、`Close()` 立即返回、registry 的其他 tailer 照常推进（`pollLoop` 串行，带超时断言）；既有 Agent tailer 同样受保护（默认 opener）；RunDir 未解析 → 202；首行 > 32KiB 仍校验通过；**首行 sessionId 与 RunDir rel 的 `<sid>` 比较**：`Workflow.SessionID` 只有等级 1 的值（或为空）时也能 drill-in，首行 sessionId/agentId 不符 → 404；历史 attempt agentId 可 drill 且 doneFn 立即 done；tailer 用共享 ProjectsRoot allowedRoot（新增生产配置用例，修 `newTailerRegistry("")` 盲区）；**WS 订阅一个已有 tailer 的 agent**：校验用的 fd 已关闭（fd 计数不增）、返回共享 tailer；新 tailer 的首次打开经注入的 opener（计数接缝）；**harness 框架剥离**：探针 agent jsonl 首行显示为 `Reply with just the number 2+2`，没有框架标记的首行原样显示，HTTP 分页与 WS tail 一致；done 时 `agent_done`；WS `pending` → 客户端回退 3s poll |
 | 前端 `workflow_state.js`（node --test） | §6.1 客户端表逐行：`workflow_set` 删掉不在列表 / epoch 不同的条目（`/new` 后清空）；full 在 epoch 变化时丢 rows、**相同时保留 rows**（内容未变的重订阅零请求，`rowsAt` 落后时恰一次 `since`）；fetch 在途时到达的 full 不另发请求、HTTP 响应 `H < version` 时 header 与 version **不倒退**；`version ≤ local` 忽略 header；`base > local` 触发 fetch；`base ≤ rowsAt < version` 合并行；`base > rowsAt` → `since` 拉取；fetch 在途时缓存并在 HTTP 落地后重放；`ensureRows` 与 full 帧同时触发时只发一次；兜底刷新：`!rowsLoaded` → `rows=none`、`rowsLoaded` → `since`（WS 断开 5s 轮询下折叠的 workflow 从不拉全量行）；**结果拉取**：展开中的条目收到终态 + `source:"result_file"` 的 delta 后恰好一次请求（`rowsLoaded` → `since`，否则 `rows=none`）、响应带 result 后不再请求、折叠中的条目不请求、`result_unavailable` 按退避重试至多 5 次、`source` 不是 `result_file` 的终态（如 interrupted）不请求；HTTP 之后的非终态 delta 不再触发重拉（无限重拉回归）；`agents_capped` 不触发 fetch，`rows_omitted` 只触发一次；epoch 变化；429 保持状态、按退避（含 Retry-After）重试；404 删除条目；Summary 兜底判定（node 非 local 跳过、无 `workflow_set` 时以 Summary 裁剪、**unknown 条目不被裁掉**）；`visibleWorkflows` 含 unknown；兜底 LRU 不淘汰最近 `workflow_set` 列出的条目（37 个 live 条目全部保留）；`releaseRows` 后 `rowsLoaded=false`、`resultLoaded=false` |
-| bench | `BenchmarkReadEvent_WorkflowSnapshot398`：`-count≥5` 中位数 ≤ 1.5ms 且 ≤ 400KB/op（M 系列本机；CI 不跑，PR 描述贴数，含跳过路径对照）。**`BenchmarkObserve_Snapshot398`**（解码 + `Observe` + board `wake`，真实 398-agent 快照，稳态：上一张与本张只差几行）中位数 ≤ 2.5ms；**`BenchmarkObserve_Snapshot2000Eq`**（2000 行、lastToolSummary 全含 `=`）首张 ≤ 25ms、稳态 ≤ 5ms——稳态预算靠 §4.3 的记忆化达成，PR-6 / PR-8 实测后在 PR 描述里定稿 |
+| bench | `BenchmarkReadEvent_WorkflowSnapshot398`：`-count≥5` 中位数 ≤ 1.5ms 且 ≤ 400KB/op（M 系列本机；CI 不跑，PR 描述贴数，含跳过路径对照）。**`BenchmarkObserve_Snapshot398`**（解码 + `Observe` + board `wake`，真实 398-agent 快照，稳态：上一张与本张只差几行）中位数 ≤ 2.5ms；**`BenchmarkObserve_Snapshot2000Eq`**（2000 行、lastToolSummary 全含 `=`）首张 ≤ 25ms、稳态 ≤ 5ms——稳态预算靠 §4.3 的记忆化达成，PR-6 / PR-8 实测后在 PR 描述里定稿。PR-6 实测（负载下）：PR-5 的解码本身每张 ~12ms，已超过 5ms，Tracker 的稳态份额约 0.4ms（CPU profile 里 `Observe` 占 ~3%）；所以 2000Eq 的稳态 5ms 只能不含解码，PR-8 定稿时按"Observe + wake ≤ 5ms"写，或连解码一起上调 |
 
 ### 11.3 Race
 

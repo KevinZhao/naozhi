@@ -88,7 +88,8 @@ func NewResultCache(rf *ResultFile) *ResultCache {
 		}
 		text = redactSecrets(text)
 		if cut := textutil.TruncateAtRuneBoundary(text, maxResultBytes); cut < len(text) {
-			text, c.ResultTruncated = text[:cut], true
+			// A copy: the prefix would pin the whole text.
+			text, c.ResultTruncated = strings.Clone(text[:cut]), true
 		}
 		c.Result = text
 	}
@@ -148,16 +149,15 @@ func mergeResult(w *Workflow, rf *ResultFile, memos map[int]*agentMemo, phaseMem
 		for i := 0; i < len(rf.Phases) && i < maxPhases; i++ {
 			phases = append(phases, Phase{Index: i + 1, Title: clip(rf.Phases[i].Title, maxLabelRunes)})
 		}
-		s.phasesCapped = len(rf.Phases) > maxPhases
+		if s.phasesCapped = len(rf.Phases) > maxPhases; s.phasesCapped {
+			phasesCappedTotal.Add(1)
+		}
 	}
 	if len(phases) == 0 {
 		phases = n.Phases
 	}
-	rows := mergeRows(n.Agents, s.agents)
-	capped := n.AgentsCapped || s.capped
-	if len(rows) > maxAgents {
-		rows, capped = rows[:maxAgents:maxAgents], true
-	}
+	rows, over := mergeRows(n.Agents, s.agents, maxAgents)
+	capped := n.AgentsCapped || s.capped || over
 	n.Agents, n.AgentsCapped = rows, capped
 	if len(rows) == 0 {
 		// Nothing to count (a header-only entry, items dropped): the
@@ -174,6 +174,7 @@ func mergeResult(w *Workflow, rf *ResultFile, memos map[int]*agentMemo, phaseMem
 		}
 	}
 	stopAll(&n)
+	pruneMemos(&n, memos, phaseMemos)
 	n.Source, n.ResultLoaded = SourceResultFile, true
 	n.Degraded = ""
 	if s.phasesCapped {
@@ -182,14 +183,18 @@ func mergeResult(w *Workflow, rf *ResultFile, memos map[int]*agentMemo, phaseMem
 	return &n, true
 }
 
-// mergeRows unions two index-sorted row sets; on a shared index, upd wins.
-func mergeRows(base, upd []Agent) []Agent {
+// mergeRows unions two index-sorted row sets, keeping the limit lowest
+// indexes; on a shared index, upd wins. It reports whether rows were left out.
+func mergeRows(base, upd []Agent, limit int) ([]Agent, bool) {
 	if len(upd) == 0 {
-		return base
+		return base, false
 	}
-	out := make([]Agent, 0, max(len(base), len(upd)))
+	out := make([]Agent, 0, min(len(base)+len(upd), limit))
 	i, j := 0, 0
 	for i < len(base) || j < len(upd) {
+		if len(out) == limit {
+			return out, true
+		}
 		switch {
 		case j == len(upd) || (i < len(base) && base[i].Index < upd[j].Index):
 			out = append(out, base[i])
@@ -202,7 +207,7 @@ func mergeRows(base, upd []Agent) []Agent {
 			i, j = i+1, j+1
 		}
 	}
-	return out
+	return out, false
 }
 
 // carryCounts gives phases the counts of from's phase with the same index.

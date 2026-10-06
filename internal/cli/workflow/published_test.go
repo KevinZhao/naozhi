@@ -166,6 +166,14 @@ func TestNewPublished_DuplicateIDPrefersCurrent(t *testing.T) {
 	if loc, _ := q.Agent("a1"); loc.TaskID != "wnew" {
 		t.Errorf("rebuild with duplicates: a1 → %+v", loc)
 	}
+	// The earlier attempt's place comes first in the walk this time.
+	first := wf("w1", StatusFailed, 9, Agent{Index: 1, AgentID: "a2", PrevAgentIDs: []string{"a1"}})
+	later := wf("w2", StatusFailed, 1, Agent{Index: 4, AgentID: "a1"})
+	if p := NewPublished("e", []*Workflow{later, first}, nil); p.Workflows[0] != first {
+		t.Fatal("fixture order: the earlier attempt must be walked first")
+	} else if loc, _ := p.Agent("a1"); loc != (AgentLoc{TaskID: "w2", Index: 4, Current: true}) {
+		t.Errorf("a1 → %+v, want the current row walked second", loc)
+	}
 }
 
 // TestAgentEqualIgnoringRev pins the field count and that every field but

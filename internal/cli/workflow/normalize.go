@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"hash/maphash"
 	"slices"
@@ -190,25 +191,20 @@ type snapshot struct {
 }
 
 // normalizeItems turns snapshot items into phases, counts and, when
-// withRows, rows keyed through memos. Indexes past the caps are dropped,
-// lowest first kept; Counts still cover every agent.
+// withRows, rows keyed through memos. Only the lowest indexes within the
+// caps are normalized and get a memo; Counts still cover every agent.
 func normalizeItems(items []clievent.WorkflowItem, memos map[int]*agentMemo, phaseMemos map[int]*memo, withRows bool) snapshot {
 	var s snapshot
-	if withRows {
-		s.agents = make([]Agent, 0, len(items))
-	}
+	var phaseOrder, agentOrder indexOrder
+	unknown := false
 	perPhase := map[int]*Counts{}
 	for i := range items {
 		it := &items[i]
 		switch it.Type {
 		case clievent.WorkflowItemPhase:
-			m := phaseMemos[it.Index]
-			if m == nil {
-				m = &memo{}
-				phaseMemos[it.Index] = m
-			}
-			s.phases = append(s.phases, Phase{Index: it.Index, Title: m.clip(it.Title, maxLabelRunes)})
+			phaseOrder.see(it.Index)
 		case clievent.WorkflowItemAgent:
+			agentOrder.see(it.Index)
 			st, _ := itemState(it)
 			s.counts.add(st)
 			pc := perPhase[it.PhaseIndex]
@@ -222,42 +218,102 @@ func normalizeItems(items []clievent.WorkflowItem, memos map[int]*agentMemo, pha
 					s.earliest = t
 				}
 			}
-			if withRows {
-				am := memos[it.Index]
-				if am == nil {
-					am = &agentMemo{}
-					memos[it.Index] = am
-				}
-				s.agents = append(s.agents, am.row(it))
-			}
+		default:
+			unknown = true
 		}
 	}
-	sortByIndex(s.phases, func(p *Phase) int { return p.Index })
-	if len(s.phases) > maxPhases {
-		s.phases, s.phasesCapped = s.phases[:maxPhases:maxPhases], true
+	if unknown {
+		itemsUnknownTotal.Add(1)
 	}
-	for i := range s.phases {
-		if pc := perPhase[s.phases[i].Index]; pc != nil {
-			s.phases[i].Counts = *pc
+	if phaseOrder.n > 0 {
+		s.phases = make([]Phase, 0, min(phaseOrder.n, maxPhases))
+	}
+	s.phasesCapped = eachLowest(items, clievent.WorkflowItemPhase, phaseOrder, maxPhases, func(it *clievent.WorkflowItem) {
+		m := phaseMemos[it.Index]
+		if m == nil {
+			m = &memo{}
+			phaseMemos[it.Index] = m
 		}
-	}
-	if withRows {
-		sortByIndex(s.agents, func(a *Agent) int { return a.Index })
-		if len(s.agents) > maxAgents {
-			s.agents, s.capped = s.agents[:maxAgents:maxAgents], true
+		p := Phase{Index: it.Index, Title: m.clip(it.Title, maxLabelRunes)}
+		if pc := perPhase[it.Index]; pc != nil {
+			p.Counts = *pc
 		}
-	} else if s.counts.Total > maxAgents {
-		s.capped = true
+		s.phases = append(s.phases, p)
+	})
+	if s.phasesCapped {
+		phasesCappedTotal.Add(1)
 	}
+	if !withRows {
+		s.capped = agentOrder.n > maxAgents
+		return s
+	}
+	s.agents = make([]Agent, 0, min(agentOrder.n, maxAgents))
+	s.capped = eachLowest(items, clievent.WorkflowItemAgent, agentOrder, maxAgents, func(it *clievent.WorkflowItem) {
+		am := memos[it.Index]
+		if am == nil {
+			am = &agentMemo{}
+			memos[it.Index] = am
+		}
+		s.agents = append(s.agents, am.row(it))
+	})
 	return s
 }
 
-// sortByIndex sorts unless already ascending, CC's normal order.
-func sortByIndex[T any](xs []T, index func(*T) int) {
-	for i := 1; i < len(xs); i++ {
-		if index(&xs[i-1]) > index(&xs[i]) {
-			slices.SortStableFunc(xs, func(a, b T) int { return index(&a) - index(&b) })
-			return
+// indexOrder is one item type's count and whether its indexes ascend,
+// CC's normal order.
+type indexOrder struct {
+	n, last  int
+	unsorted bool
+}
+
+func (o *indexOrder) see(index int) {
+	if o.n > 0 && index < o.last {
+		o.unsorted = true
+	}
+	o.last = index
+	o.n++
+}
+
+// eachLowest calls f on the items of type typ with the limit lowest
+// indexes, in index order (stable), and reports whether any were left out.
+func eachLowest(items []clievent.WorkflowItem, typ string, o indexOrder, limit int, f func(*clievent.WorkflowItem)) bool {
+	if !o.unsorted {
+		for i, k := 0, 0; i < len(items) && k < limit; i++ {
+			if items[i].Type == typ {
+				f(&items[i])
+				k++
+			}
+		}
+		return o.n > limit
+	}
+	pos := make([]int, 0, o.n)
+	for i := range items {
+		if items[i].Type == typ {
+			pos = append(pos, i)
+		}
+	}
+	slices.SortStableFunc(pos, func(a, b int) int { return cmp.Compare(items[a].Index, items[b].Index) })
+	for _, i := range pos[:min(len(pos), limit)] {
+		f(&items[i])
+	}
+	return o.n > limit
+}
+
+// pruneMemos drops the memos of indexes w no longer shows once they
+// outnumber the caps, so indexes that came and went cannot pile up.
+func pruneMemos(w *Workflow, memos map[int]*agentMemo, phaseMemos map[int]*memo) {
+	if len(memos) > maxAgents {
+		for i := range memos {
+			if _, ok := slices.BinarySearchFunc(w.Agents, i, func(a Agent, i int) int { return cmp.Compare(a.Index, i) }); !ok {
+				delete(memos, i)
+			}
+		}
+	}
+	if len(phaseMemos) > maxPhases {
+		for i := range phaseMemos {
+			if !slices.ContainsFunc(w.Phases, func(p Phase) bool { return p.Index == i }) {
+				delete(phaseMemos, i)
+			}
 		}
 	}
 }

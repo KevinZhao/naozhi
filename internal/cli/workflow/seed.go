@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -27,6 +28,9 @@ const (
 	seedTaskIDKey        = `"task_id":"`
 	seedPatchKey         = `"patch":{`
 	maxSeedTaskIDLen     = 32
+	// maxSeedFallback older snapshot lines are tried, newest first, when a
+	// task's newest one fails the identity check; live kept their rows.
+	maxSeedFallback = 3
 )
 
 // Seed frame classes: each task needs only its newest line of each, since
@@ -57,9 +61,11 @@ func (t *Tracker) SeedFromReplay(r Replay, dec Decoder, known []string) {
 	type pick struct {
 		line   int
 		events []clievent.Event // decoded already when the id needed it
+		snapOf string           // the task id, on a snapshot pick
 	}
 	var picks []pick
 	filled := map[string]*[numClasses]bool{}
+	older := map[string][]int{} // up to maxSeedFallback older snapshot lines
 	for i := len(r.Lines) - 1; i >= 0; i-- {
 		line := r.Lines[i]
 		class, ok := seedClass(line)
@@ -85,23 +91,43 @@ func (t *Tracker) SeedFromReplay(r Replay, dec Decoder, known []string) {
 			filled[id] = slots
 		}
 		if slots[class] {
+			if class == classSnapshot && len(older[id]) < maxSeedFallback {
+				older[id] = append(older[id], i)
+			}
 			continue
 		}
 		slots[class] = true
-		picks = append(picks, pick{line: i, events: events})
+		p := pick{line: i, events: events}
+		if class == classSnapshot {
+			p.snapOf = id
+		}
+		picks = append(picks, p)
 	}
 
 	t.mu.Lock()
-	for k := len(picks) - 1; k >= 0; k-- {
-		events := picks[k].events
-		if events == nil {
-			events, _, _ = dec.ReadEvent(r.Lines[picks[k].line])
-		}
+	apply := func(events []clievent.Event) {
 		for j := range events {
 			if kind := kindOf(&events[j]); kind != kindNone {
 				t.observeLocked(&events[j], kind, 0, SourceReplay)
 			}
 		}
+	}
+	for k := len(picks) - 1; k >= 0; k-- {
+		events := picks[k].events
+		if events == nil {
+			events, _, _ = dec.ReadEvent(r.Lines[picks[k].line])
+		}
+		if picks[k].snapOf != "" && snapshotFailed(events) {
+			// Live kept an older snapshot's rows. Applied right before this
+			// one, whose header then supersedes the frames in between.
+			for _, i := range older[picks[k].snapOf] {
+				if prev, _, _ := dec.ReadEvent(r.Lines[i]); !snapshotFailed(prev) {
+					apply(prev)
+					break
+				}
+			}
+		}
+		apply(events)
 	}
 	t.seedWrapped = r.Wrapped
 	t.publishLocked()
@@ -157,4 +183,10 @@ func seedTaskID(line string) (string, bool) {
 		}
 	}
 	return rest[:end], true
+}
+
+func snapshotFailed(events []clievent.Event) bool {
+	return slices.ContainsFunc(events, func(ev clievent.Event) bool {
+		return ev.WorkflowDecode == clievent.WorkflowDecodeFailed
+	})
 }
