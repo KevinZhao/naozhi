@@ -29,3 +29,10 @@ func OpenRegular(path string, maxBytes int64) (*os.File, os.FileInfo, error) {
 	}
 	return f, fi, nil
 }
+
+// openInFlags are OpenRegularIn's; there is no O_NONBLOCK or O_DIRECTORY
+// here, so the Lstat before the open is the only special-file guard.
+const (
+	openInFlags = os.O_RDONLY
+	openDirFlag = 0
+)
