@@ -316,12 +316,11 @@ func TestBuildMessageHandler_NewResetsNamedAgent(t *testing.T) {
 	agentCommands := map[string]string{"review": "code-reviewer"}
 	agents := map[string]session.AgentOpts{"code-reviewer": {}}
 	srv := NewWithOptions(ServerOptions{
-		Addr:          ":0",
-		Router:        router,
-		Platforms:     platforms,
-		Agents:        agents,
-		AgentCommands: agentCommands,
-		Backend:       "claude",
+		Addr:      ":0",
+		Router:    router,
+		Platforms: platforms,
+		Routing:   RoutingOptions{Agents: agents, AgentCommands: agentCommands},
+		Backend:   "claude",
 	})
 	handler := newTestDispatcher(srv).BuildHandler()
 

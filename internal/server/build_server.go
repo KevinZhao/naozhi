@@ -50,8 +50,8 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	addr := opts.Addr
 	router := opts.Router
 	platforms := opts.Platforms
-	agents := opts.Agents
-	agentCommands := opts.AgentCommands
+	agents := opts.Routing.Agents
+	agentCommands := opts.Routing.AgentCommands
 	// A nil *cron.Scheduler must become a nil interface, not a non-nil
 	// interface wrapping nil, or every `scheduler != nil` guard would fire.
 	var scheduler cronScheduler
@@ -78,20 +78,12 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	// token+secret forge a cookie valid across restarts (#595, #437).
 	cookieGen := auth.RandomCookieGen()
 
-	// One KeyResolver shared by dispatcher, hub and ProjectHandlers;
-	// NewDataSource returns untyped nil when projectMgr is nil.
-	resolver := session.NewKeyResolver(agents, project.NewDataSource(opts.ProjectManager))
-	if sched := opts.Scheduler; sched != nil {
-		// A cron run spawns on the profile of the agent its prompt routes to
-		// (the scheduler was built from these same maps); the remote gate must see it.
-		resolver = resolver.WithCronAccessProfile(func(jobID string) string {
-			j, ok := sched.GetJob(jobID)
-			if !ok {
-				return ""
-			}
-			agentID, _ := session.ResolveAgent(j.Prompt, agentCommands)
-			return agents[agentID].AccessProfile
-		})
+	// One KeyResolver shared by dispatcher, hub and ProjectHandlers. The
+	// fallback has no cron access-profile lookup; NewDataSource returns
+	// untyped nil when projectMgr is nil.
+	resolver := opts.Routing.Resolver
+	if resolver == nil {
+		resolver = session.NewKeyResolver(agents, project.NewDataSource(opts.ProjectManager))
 	}
 
 	// Dependencies only the build steps below read: they reach the dispatcher,

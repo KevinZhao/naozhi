@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // TestBuildAgentOpts covers the cfg.Agents → session/cron map translation
@@ -97,5 +99,35 @@ func TestBuildAgentOpts(t *testing.T) {
 	}
 	if len(emptyAgents) != 0 || len(emptyCron) != 0 {
 		t.Errorf("buildAgentOpts(empty) = %d/%d entries, want 0/0", len(emptyAgents), len(emptyCron))
+	}
+}
+
+// The routing main hands to both the server and the upstream connector carries
+// the resolver with the cron access-profile lookup: without it the server
+// falls back to a resolver that lets a profile-pinned cron key go remote.
+func TestBuildRouting_ResolverCarriesCronProfile(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{
+		Agents:        map[string]config.AgentConfig{"general": {}, "reviewer": {AccessProfile: "personal"}},
+		AgentCommands: map[string]string{"review": "reviewer"},
+	}
+	agents, cronAgents := buildAgentOpts(cfg)
+	sched := cron.NewScheduler(cron.SchedulerConfig{MaxJobs: 2, AllowNilRouter: true}, cron.SchedulerDeps{
+		Agents: cronAgents, AgentCommands: cfg.AgentCommands,
+	})
+	job := &cron.Job{Schedule: "@every 30m", Prompt: "/review the diff", Paused: true}
+	if err := sched.AddJob(job); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+
+	routing := buildRouting(cfg, agents, nil, sched)
+	if routing.Resolver == nil {
+		t.Fatal("buildRouting left Resolver nil: the server would build its own, without the cron lookup")
+	}
+	if got := routing.Resolver.AccessProfileForKey(sessionkey.CronKey(job.ID)); got != "personal" {
+		t.Errorf("cron key access profile = %q, want the routed agent's %q", got, "personal")
+	}
+	if !reflect.DeepEqual(routing.Agents, agents) || !reflect.DeepEqual(routing.AgentCommands, cfg.AgentCommands) {
+		t.Errorf("routing maps = %v / %v, want the agents and cfg.AgentCommands", routing.Agents, routing.AgentCommands)
 	}
 }
