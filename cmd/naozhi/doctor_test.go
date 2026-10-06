@@ -180,6 +180,56 @@ func TestDoctor_ExpvarLoopbackGate(t *testing.T) {
 	}
 }
 
+// TestDoctor_MetricsTiers pins the /metrics probe: 404 is "not enabled"
+// (opt-in feature, not a fault), only a 200 that is not naozhi's exposition
+// text fails.
+func TestDoctor_MetricsTiers(t *testing.T) {
+	t.Parallel()
+	const ok = "# TYPE naozhi_session_create_total counter\nnaozhi_session_create_total 3\n"
+	tests := []struct {
+		name      string
+		status    int
+		body      string
+		wantLevel string
+	}{
+		{"pass-exposition", http.StatusOK, ok, "pass"},
+		{"pass-not-enabled", http.StatusNotFound, "", "pass"},
+		{"fail-wrong-body", http.StatusOK, `{"naozhi_session_create_total":0}`, "fail"},
+		{"warn-no-dashboard-token", http.StatusForbidden, "", "warn"},
+		{"warn-token-rejected", http.StatusUnauthorized, "", "warn"},
+		{"warn-bad-gateway", http.StatusBadGateway, "", "warn"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var gotPath, gotAuth string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			d := &doctor{addr: srv.URL, client: srv.Client(), token: "T", timeout: 2 * time.Second, out: io.Discard}
+			d.checkMetrics()
+			if f := d.findings[0]; f.Category != "metrics" || f.Level != tc.wantLevel {
+				t.Errorf("status %d → %s/%s, want metrics/%s", tc.status, f.Category, f.Level, tc.wantLevel)
+			}
+			if gotPath != "/metrics" || gotAuth != "Bearer T" {
+				t.Errorf("probe hit %q with Authorization %q", gotPath, gotAuth)
+			}
+		})
+	}
+}
+
+func TestDoctor_MetricsNoToken(t *testing.T) {
+	t.Parallel()
+	d := &doctor{addr: "http://127.0.0.1:1", timeout: 100 * time.Millisecond, out: io.Discard}
+	d.checkMetrics()
+	if d.hasFail || d.findings[0].Level != "warn" {
+		t.Errorf("no-token metrics check = %+v, want a warn", d.findings[0])
+	}
+}
+
 // TestDoctor_ExpvarNoToken pins the no-token degraded path: warn, not
 // fail, consistent with the other auth-gated probes.
 func TestDoctor_ExpvarNoToken(t *testing.T) {

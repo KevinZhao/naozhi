@@ -294,7 +294,7 @@ ssh ec2-user@prod-host 'curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1
 ### 回归契约
 
 - `internal/metrics/metrics_test.go`: 锁 expvar 名 / Add 语义 / JSON shape
-- `internal/metrics/metrics_doc_sync_test.go`: 对比 `docs/ops/pprof.md` 表格首列的 `naozhi_*` 名（代码→文档方向）及全文反引号引用（文档→代码方向）与全仓非测试代码注册的集合（`expvar.NewInt` / `NewMap` / `NewFloat` / `NewLabeledCounter` / `NewLabeledGauge`），漏/多均失败；同名重复注册也失败
+- `internal/metrics/metrics_doc_sync_test.go`: 对比 `docs/ops/pprof.md` 表格首列的 `naozhi_*` 名（代码→文档方向）及全文反引号引用（文档→代码方向）与全仓非测试代码注册的集合（`expvar.NewInt` / `NewMap` / `NewFloat` / `promexport.NewMap` / `NewLabeledCounter` / `NewLabeledGauge`），漏/多均失败；同名重复注册也失败
 - `internal/metrics/counter_wiring_contract_test.go`: source-grep 锁 call site + WSAuthFail 两分支 ≥2 次
 - `internal/server/debug_expvar_test.go`: 锁 auth 401 / 非 loopback 403 / loopback+auth 返 JSON 含已注册 counter + stdlib memstats
 - `cmd/naozhi/doctor_test.go`: `checkExpvar` 覆盖 pass/fail/warn/no-token 4 档
@@ -303,10 +303,7 @@ ssh ec2-user@prod-host 'curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1
 
 ### 升级路径
 
-若未来部署进入有 Prometheus scraper 的环境：
-1. `internal/metrics/metrics.go` 把 `expvar.NewInt` 换成 `prometheus.NewCounter`，保留 `*expvar.Int` 变量名别名（或定义 `type Counter interface { Add(int64) }`）
-2. 新增 `/metrics` 端点挂 `promhttp.Handler()`（同样 auth + loopback 保护）
-3. call sites 零改动
+Prometheus 文本导出已由 `server.metrics_enabled` 的 `GET /metrics` 提供（[metrics.md](metrics.md)），仍保持零依赖：`internal/promexport` 手写 0.0.4 文本格式，label 名在注册 map 时登记。若将来要 OTLP / 直方图原生类型，再把 `expvar.NewInt` 换成 client 库并保留变量名别名，call sites 不动。
 
 ---
 

@@ -55,3 +55,110 @@ func TestWrite_RendersNaozhiVarsOnly(t *testing.T) {
 		}
 	}
 }
+
+func render(t *testing.T) string {
+	t.Helper()
+	var sb strings.Builder
+	if err := Write(&sb); err != nil {
+		t.Fatal(err)
+	}
+	return sb.String()
+}
+
+func TestWrite_RegisteredLabelNames(t *testing.T) {
+	m := NewMap("naozhi_zz_lbl_rpc_total", "backend", "method", "code")
+	m.Add("acp|session/new|-32000", 4)
+	m.Add("acp|"+"_empty_"+"|7", 1)
+	m.Add("_overflow_", 2)
+	m.Add("acp", 5)
+	out := render(t)
+	for _, want := range []string{
+		"# TYPE naozhi_zz_lbl_rpc_total counter\n",
+		`naozhi_zz_lbl_rpc_total{backend="acp",method="session/new",code="-32000"} 4` + "\n",
+		`naozhi_zz_lbl_rpc_total{backend="acp",method="_empty_",code="7"} 1` + "\n",
+		`naozhi_zz_lbl_rpc_total{backend="_overflow_",method="_overflow_",code="_overflow_"} 2` + "\n",
+		`naozhi_zz_lbl_rpc_total{backend="acp",method="_empty_",code="_empty_"} 5` + "\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q\n---\n%s", want, out)
+		}
+	}
+	if !HasSchema("naozhi_zz_lbl_rpc_total") || HasSchema("naozhi_zz_never_registered") {
+		t.Error("HasSchema does not reflect label registrations")
+	}
+}
+
+func TestWrite_UnregisteredMapKeepsKeyLabel(t *testing.T) {
+	expvar.NewMap("naozhi_zz_plain_total").Add("a|b", 1)
+	if out := render(t); !strings.Contains(out, `naozhi_zz_plain_total{key="a|b"} 1`+"\n") {
+		t.Errorf("unregistered map should keep one key label\n%s", out)
+	}
+}
+
+func TestWrite_LabelValueEscaping(t *testing.T) {
+	NewMap("naozhi_zz_esc_total", "v").Add("a\\b\"c\nd\te\xff", 1)
+	want := `naozhi_zz_esc_total{v="a\\b\"c\nd` + "\te�" + `"} 1` + "\n"
+	if out := render(t); !strings.Contains(out, want) {
+		t.Errorf("output lacks %q\n%s", want, out)
+	}
+}
+
+func TestWrite_Histogram(t *testing.T) {
+	bm := expvar.NewMap("naozhi_zz_hist_ms_bucket")
+	sum := expvar.NewInt("naozhi_zz_hist_ms_sum")
+	RegisterHistogram("naozhi_zz_hist_ms", []string{"10", "100", "+Inf"})
+
+	empty := render(t)
+	if !strings.Contains(empty, "naozhi_zz_hist_ms_bucket{le=\"+Inf\"} 0\n") ||
+		!strings.Contains(empty, "naozhi_zz_hist_ms_count 0\n") {
+		t.Errorf("an unobserved histogram should export zeros\n%s", empty)
+	}
+
+	if !HasSchema("naozhi_zz_hist_ms_bucket") {
+		t.Error("HasSchema should cover a histogram's bucket map")
+	}
+	bm.Add("10", 1)
+	bm.Add("100", 2)
+	bm.Add("+Inf", 3)
+	sum.Add(155)
+	out := render(t)
+	want := "# TYPE naozhi_zz_hist_ms histogram\n" +
+		"naozhi_zz_hist_ms_bucket{le=\"10\"} 1\n" +
+		"naozhi_zz_hist_ms_bucket{le=\"100\"} 2\n" +
+		"naozhi_zz_hist_ms_bucket{le=\"+Inf\"} 3\n" +
+		"naozhi_zz_hist_ms_sum 155\n" +
+		"naozhi_zz_hist_ms_count 3\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("output lacks histogram family\n--- want\n%s--- got\n%s", want, out)
+	}
+	for _, absent := range []string{"# TYPE naozhi_zz_hist_ms_bucket", "# TYPE naozhi_zz_hist_ms_sum", "naozhi_zz_hist_ms_bucket{key"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("backing var leaked into the generic pass: %q", absent)
+		}
+	}
+}
+
+func TestWrite_HistogramMissingBucketKeyIsZero(t *testing.T) {
+	expvar.NewMap("naozhi_zz_hist2_ms_bucket").Add("+Inf", 1)
+	expvar.NewInt("naozhi_zz_hist2_ms_sum")
+	RegisterHistogram("naozhi_zz_hist2_ms", []string{"10", "+Inf"})
+	if out := render(t); !strings.Contains(out, "naozhi_zz_hist2_ms_bucket{le=\"10\"} 0\n") {
+		t.Errorf("a bound never hit must export 0\n%s", out)
+	}
+}
+
+func TestRegisterPanics(t *testing.T) {
+	for name, fn := range map[string]func(){
+		"labels without names":   func() { RegisterLabels("naozhi_zz_p") },
+		"histogram without +Inf": func() { RegisterHistogram("naozhi_zz_p", []string{"10"}) },
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: want panic", name)
+				}
+			}()
+			fn()
+		}()
+	}
+}

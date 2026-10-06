@@ -246,7 +246,7 @@ func TestLabelKey_PipeInSegmentReplaced(t *testing.T) {
 // scrape-friendly: the top-level value must be a JSON object whose values
 // are JSON numbers, mirroring the legacy expvar.Int contract.
 func TestLabeledCounter_JSONShape(t *testing.T) {
-	counter := NewLabeledCounter("test_metric_jsonshape_" + t.Name())
+	counter := NewLabeledCounter("test_metric_jsonshape_"+t.Name(), "backend")
 	counter.Add(1, "claude")
 	counter.Add(2, "kiro")
 
@@ -272,7 +272,7 @@ func TestLabeledCounter_JSONShape(t *testing.T) {
 // race here would surface either as a wrong total or as -race detector
 // fire. Two goroutines × 1000 iterations is enough to flush the pool.
 func TestLabeledCounter_ConcurrentAdd(t *testing.T) {
-	counter := NewLabeledCounter("test_metric_concurrent_" + t.Name())
+	counter := NewLabeledCounter("test_metric_concurrent_"+t.Name(), "backend")
 	const N = 1000
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -305,7 +305,7 @@ func TestLabeledCounter_ConcurrentAdd(t *testing.T) {
 // land in one expvar map operation rather than N Inc/Dec iterations,
 // which was the racy pattern flagged in PR #113 review.
 func TestLabeledGauge_Add(t *testing.T) {
-	gauge := NewLabeledGauge("test_gauge_add_" + t.Name())
+	gauge := NewLabeledGauge("test_gauge_add_"+t.Name(), "backend")
 	gauge.Add(5, "claude")
 	if got := gauge.Get("claude"); got != 5 {
 		t.Errorf("Add(5)=%d, want 5", got)
@@ -331,7 +331,7 @@ func TestLabeledGauge_Add(t *testing.T) {
 // backend's value to zero (without it, the bucket would linger at its
 // last non-zero value indefinitely).
 func TestLabeledGauge_SumAndForEachKey(t *testing.T) {
-	gauge := NewLabeledGauge("test_gauge_sum_foreach_" + t.Name())
+	gauge := NewLabeledGauge("test_gauge_sum_foreach_"+t.Name(), "backend")
 	gauge.Inc("claude")
 	gauge.Inc("claude")
 	gauge.Inc("kiro")
@@ -348,7 +348,7 @@ func TestLabeledGauge_SumAndForEachKey(t *testing.T) {
 // TestLabeledCounter_ForEachKey covers the symmetric helper on the
 // counter side; rarely needed at runtime but exercised in tests.
 func TestLabeledCounter_ForEachKey(t *testing.T) {
-	counter := NewLabeledCounter("test_counter_foreach_" + t.Name())
+	counter := NewLabeledCounter("test_counter_foreach_"+t.Name(), "backend")
 	counter.Add(1, "claude")
 	counter.Add(1, "kiro")
 	seen := map[string]bool{}
@@ -413,5 +413,21 @@ func TestByBackendNamingConvention(t *testing.T) {
 				t.Errorf("wire metric %q not registered", tc.wireName)
 			}
 		})
+	}
+}
+
+func TestNewLabeled_RequiresLabelNames(t *testing.T) {
+	for name, fn := range map[string]func(){
+		"counter": func() { NewLabeledCounter("test_nolabels_counter_" + t.Name()) },
+		"gauge":   func() { NewLabeledGauge("test_nolabels_gauge_" + t.Name()) },
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s without label names should panic", name)
+				}
+			}()
+			fn()
+		}()
 	}
 }
