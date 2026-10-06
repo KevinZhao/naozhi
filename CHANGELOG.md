@@ -74,6 +74,7 @@
 ### Security
 
 - **IM 发送者鉴权 `im_access`**（#3442）：此前任何能给 bot 发消息的 IM 用户都能让 naozhi 在宿主机上执行命令。新增顶层配置 `im_access`（`default_deny` / `deny_reply` / `platforms.<p>.allowed_users` / `admin_users`），在所有入口（含飞书 AskUserQuestion 卡片回答）命令分发前统一判定；`/cron`、`/cd`、`/project` 需 admin，`admin_users` 为空时所有 allowed 用户都是 admin。被拒消息记 Info `im access denied`（带 user ID）并计入 `naozhi_dispatch_denied_total`；私聊回复一次本人 ID（同一用户 10 分钟内只回一次），群聊静默。**不配置时行为不变**（全放行），但启动日志与 `naozhi config check` 对每个未受限的已启用平台给出 WARN——`config check` 因此会从退出码 0 变为 1，按退出码 0 判定的脚本需要调整。条目里的未知平台名、空 ID、未展开的 `${VAR}` 会让配置加载失败。改名单需重启。`naozhi doctor` 新增 `im access` 一行，同样对未受限平台给 warn（不影响 doctor 退出码），受限时列出每个平台的用户数与 admin 数；README「部署 · IM 访问控制」说明威胁模型、如何从拒绝日志取 ID
+- **飞书语音和图片在下载前先过 `im_access`**（#3513）：此前飞书适配器先下载语音、调 Amazon Transcribe（按时长计费）转写，或先下载图片，再交给 dispatcher 判定；名单外的人能刷转写费用，下载/转写失败时还会收到适配器的错误回复，从而确认 bot 在线。现在下载前先按 dispatcher 的同一套规则预判（群聊未 @bot → 静默丢弃；名单外 → 与文字消息相同的 Info 日志、`naozhi_dispatch_denied_total` 计数和私聊 10 分钟一次的 ID 提示），被拒的消息不下载、不转写、不回错误文案。**行为变化**：群里的飞书语音不能 @bot，此前转写完也会被丢弃，现在直接不转写——省下的只是费用，可见行为不变
 - **Multipart Value 字段数上限 32**（RNEW-SEC-001），阻断 padded-body DoS
 - **PDF 上传路径显式拒 gzip magic**（RNEW-SEC-002），defence-in-depth
 - **Attachment ETag 改为 sha256 前 16 字符**（RNEW-SEC-004），不再通过响应头泄漏纳秒级 mtime

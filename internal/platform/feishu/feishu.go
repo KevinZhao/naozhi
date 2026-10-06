@@ -160,6 +160,10 @@ type Feishu struct {
 
 	transcriber transcribe.Service // nil when STT not configured
 
+	// admit gates media downloads and transcription; nil admits everyone.
+	// Set by SetAdmission before RegisterRoutes/Start, read-only after.
+	admit platform.AdmitFunc
+
 	// Lifecycle context: cancelled on Stop(), used by webhook goroutines.
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
@@ -249,6 +253,15 @@ func (f *Feishu) ConnState() (platform.ConnState, bool) {
 		return platform.ConnState{}, false
 	}
 	return f.connState.Snapshot()
+}
+
+// SetAdmission implements platform.Admitter.
+func (f *Feishu) SetAdmission(fn platform.AdmitFunc) { f.admit = fn }
+
+// admitted reports whether msg's sender may cost a media download or a
+// transcription.
+func (f *Feishu) admitted(ctx context.Context, msg platform.IncomingMessage) bool {
+	return f.admit == nil || f.admit(ctx, msg)
 }
 
 // RegisterRoutes registers webhook routes (only in webhook mode).

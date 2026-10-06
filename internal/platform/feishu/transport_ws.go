@@ -56,16 +56,7 @@ func (f *Feishu) startWebSocket() error {
 		switch pe.MediaType {
 		case "image":
 			f.dispatch.TryGo("feishu ws image", func() {
-				msg := pe.Msg
-				data, mime, err := f.DownloadImage(ctx, pe.MessageID, pe.MediaKey)
-				if err != nil {
-					// image_key is sender-controlled; sanitize before slog.
-					slog.Error("feishu ws download image failed", "err", err,
-						"key", osutil.SanitizeForLog(pe.MediaKey, 128))
-					return
-				}
-				msg.Images = []platform.Image{{Data: data, MimeType: mime}}
-				handler(ctx, msg)
+				f.handleImage(ctx, handler, pe.Msg, pe.MessageID, pe.MediaKey)
 			})
 
 		case "audio":
@@ -170,11 +161,32 @@ func (f *Feishu) dispatchCardActionTracked(
 	})
 }
 
+// handleImage downloads an image message's picture, then calls handler with
+// it attached. A sender refused by admission costs no download.
+func (f *Feishu) handleImage(ctx context.Context, handler platform.MessageHandler, msg platform.IncomingMessage, messageID, imageKey string) {
+	if !f.admitted(ctx, msg) {
+		return
+	}
+	data, mime, err := f.DownloadImage(ctx, messageID, imageKey)
+	if err != nil {
+		// image_key is sender-controlled; sanitize before slog.
+		slog.Error("feishu download image failed", "err", err,
+			"key", osutil.SanitizeForLog(imageKey, 128))
+		return
+	}
+	msg.Images = []platform.Image{{Data: data, MimeType: mime}}
+	handler(ctx, msg)
+}
+
 // handleAudio downloads and transcribes audio, then calls handler with the text.
-// Errors are replied directly to the user, not sent through Claude.
+// Errors are replied directly to the user, not sent through Claude. A sender
+// refused by admission gets no download, transcription or error reply.
 func (f *Feishu) handleAudio(ctx context.Context, handler platform.MessageHandler, msg platform.IncomingMessage, messageID, fileKey string) {
 	if f.transcriber == nil {
 		slog.Info("feishu audio ignored, transcriber not configured", "user", msg.UserID)
+		return
+	}
+	if !f.admitted(ctx, msg) {
 		return
 	}
 
