@@ -78,6 +78,13 @@ func (x *Index) firstNotice(n Notice, s Subject) bool {
 	return true
 }
 
+// clearNotices forgets today's notice marks.
+func (x *Index) clearNotices() {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	clear(x.noticed)
+}
+
 // rollLocked clears the sums when now() has moved to another day, and
 // returns that day.
 func (x *Index) rollLocked() string {

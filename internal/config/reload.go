@@ -11,10 +11,11 @@ import (
 // process applies without a restart, and the diff that tells an operator what
 // a restart would still be needed for.
 
-// hotSections are the yaml sections ApplyHotConfig can take at runtime.
-// log.level is the only sub-field: the rest of `log` (format, stdio cap) is
-// fixed at startup.
-var hotSections = []string{"im_access", "im_rate_limit", "log.level"}
+// hotSections are the yaml sections a reload can take at runtime. Two are
+// sub-fields: the rest of `log` (format, stdio cap) and of `cost` (ledger
+// switch, retention) is fixed at startup, and so is cost.budget's day
+// boundary (see budgetRestartRequired).
+var hotSections = []string{"im_access", "im_rate_limit", "log.level", "cost.budget"}
 
 // HotSections lists the sections a reload applies without a restart.
 func HotSections() []string { return slices.Clone(hotSections) }
@@ -48,6 +49,9 @@ func (c *Config) HotChanged(next *Config) []string {
 	}
 	if c.Log.Level != next.Log.Level {
 		out = append(out, "log.level")
+	}
+	if c.BudgetLimits() != next.BudgetLimits() {
+		out = append(out, "cost.budget")
 	}
 	return out
 }
@@ -97,16 +101,35 @@ func (c *Config) RestartRequired(next *Config) []string {
 			continue
 		}
 		a, b := cv.Field(i).Interface(), nv.Field(i).Interface()
-		if name == "log" {
+		switch name {
+		case "log":
 			la, lb := a.(LogConfig), b.(LogConfig)
 			la.Level, lb.Level = "", ""
 			a, b = la, lb
+		case "cost":
+			ca, cb := a.(CostConfig), b.(CostConfig)
+			ca.Budget, cb.Budget = CostBudgetConfig{}, CostBudgetConfig{}
+			a, b = ca, cb
 		}
 		if !reflect.DeepEqual(a, b) {
 			out = append(out, name)
 		}
 	}
-	return out
+	return append(out, c.budgetRestartRequired(next)...)
+}
+
+// budgetRestartRequired is the part of a cost.budget change a running gate
+// cannot take: the gate exists only if c sets a cap (it subscribes to the
+// ledger at startup), and its index counts days from c's midnight.
+func (c *Config) budgetRestartRequired(next *Config) []string {
+	had, has := c.Cost.Budget.HasLimit(), next.Cost.Budget.HasLimit()
+	switch {
+	case !had && has:
+		return []string{"cost.budget"}
+	case had && has && c.BudgetLocation().String() != next.BudgetLocation().String():
+		return []string{"cost.budget.timezone"}
+	}
+	return nil
 }
 
 // yamlName is f's yaml key, or "" for unexported / untagged / `yaml:"-"`.

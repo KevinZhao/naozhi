@@ -26,8 +26,8 @@ type Ledger interface {
 	Entries(costledger.Query, int) ([]costledger.Entry, error)
 }
 
-// Deps wires the handlers. Limiter nil = unlimited (tests only); Budget nil
-// = cost.budget sets no cap.
+// Deps wires the handlers. Limiter nil = unlimited (tests only); Budget nil,
+// or one a reload left without a cap, = cost.budget sets no cap.
 type Deps struct {
 	Ledger  Ledger
 	Limiter contracts.IPLimiter
@@ -154,7 +154,7 @@ func (h *Handlers) HandleBudget(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if h.budget == nil {
+	if !h.budget.Enabled() {
 		httputil.WriteJSON(w, budgetResp{})
 		return
 	}

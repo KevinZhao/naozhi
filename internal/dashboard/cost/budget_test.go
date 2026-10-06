@@ -96,6 +96,20 @@ func TestBudget_NoApplicableCapAndWarnAction(t *testing.T) {
 	}
 }
 
+// A reload that removes every cap leaves the gate built but enforcing
+// nothing; the endpoint then reads as cost.budget off.
+func TestBudget_ReloadedWithoutCapReadsOff(t *testing.T) {
+	g := budgetGate(budget.Limits{DailyUSD: 1}, nil)
+	h := New(Deps{Budget: g})
+	if got := getBudget(t, h, ""); !got.Enabled || got.Limit != 1 {
+		t.Fatalf("capped = %+v", got)
+	}
+	g.SetLimits(budget.Limits{})
+	if got := getBudget(t, h, ""); got != (budgetResp{}) {
+		t.Errorf("after the cap is removed = %+v, want the off response", got)
+	}
+}
+
 func TestBudget_RejectsBadParamsAndLimits(t *testing.T) {
 	h := New(Deps{Budget: budgetGate(budget.Limits{DailyUSD: 1}, nil)})
 	for _, q := range []string{

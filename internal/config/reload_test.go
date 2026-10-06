@@ -45,6 +45,39 @@ func TestReloadDiff(t *testing.T) {
 	}
 }
 
+// cost.budget caps are hot; what the running gate cannot take is not: a cap
+// where the process started with none (no gate was built) and a move of the
+// day boundary. The rest of cost stays restart-only.
+func TestReloadDiff_CostBudget(t *testing.T) {
+	t.Parallel()
+	const capped = "cost:\n  budget:\n    per_chat_daily_usd: 5\n    timezone: UTC\n"
+	cases := []struct {
+		name, cur, next string
+		wantHot, want   []string
+	}{
+		{"cap raised", capped, "cost:\n  budget:\n    per_chat_daily_usd: 9\n    timezone: UTC\n", []string{"cost.budget"}, nil},
+		{"action warn", capped, "cost:\n  budget:\n    per_chat_daily_usd: 5\n    action: warn\n    timezone: UTC\n", []string{"cost.budget"}, nil},
+		{"budget removed", capped, "", []string{"cost.budget"}, nil},
+		{"timezone moved", capped, "cost:\n  budget:\n    per_chat_daily_usd: 5\n    timezone: Asia/Shanghai\n", nil, []string{"cost.budget.timezone"}},
+		{"timezone moved and cap raised", capped, "cost:\n  budget:\n    daily_usd: 50\n    timezone: Asia/Tokyo\n",
+			[]string{"cost.budget"}, []string{"cost.budget.timezone"}},
+		{"same zone spelled out", "cost:\n  budget:\n    daily_usd: 5\n", "cost:\n  budget:\n    daily_usd: 5\n    timezone: Local\n", nil, nil},
+		{"retention", capped, capped + "  retention_days: 30\n", nil, []string{"cost"}},
+		{"cap where none ran", "", "cost:\n  budget:\n    daily_usd: 5\n", []string{"cost.budget"}, []string{"cost.budget"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cur, next := loadBody(t, "cli:\n  model: sonnet\n"+tc.cur), loadBody(t, "cli:\n  model: sonnet\n"+tc.next)
+			if got := cur.HotChanged(next); !reflect.DeepEqual(got, tc.wantHot) {
+				t.Errorf("HotChanged = %v, want %v", got, tc.wantHot)
+			}
+			if got := cur.RestartRequired(next); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("RestartRequired = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // Every hot section is a real yaml key, and none of them is also counted as
 // restart-required.
 func TestHotSections_AreYAMLKeys(t *testing.T) {
