@@ -382,8 +382,9 @@ jobs:
       - name: Type-check the opted-in dashboard files
         run: test/e2e/node_modules/.bin/tsc -p internal/server/static
 
-      # The opted-in list may only grow, and a handler registered through
-      # wsm.on must see its own frame's fields.
+      # The opted-in list may only grow, a handler registered through wsm.on
+      # sees its own frame's fields, and no frame reaches an unchecked file or
+      # an untyped parameter: tsc is the field check on frames.
       - name: Test the type-check floor and the wsm.on typing
         run: node --test scripts/ts-check.test.mjs
 
@@ -431,9 +432,6 @@ jobs:
       # fail at boot instead of at the first click.
       - name: Test the shell table
         run: node --test scripts/shell.test.mjs
-
-      - name: Test the nested WS field check
-        run: node --test scripts/ws-contract-nested.test.mjs
 
       - name: Test the enum-literal checks (death_reason, EventEntry kinds)
         run: node --test scripts/check-enum-literals.test.mjs

@@ -11,15 +11,6 @@
 //       top-level IIFE counts) — not inside a function, branch or loop.
 //   R3  every outbound type has a registration, and at most one unconditional one.
 //   R4  blind guard: at least as many registrations as outbound types.
-//   R6  a handler / claim that takes a parameter names it `msg`; a handler that
-//       forwards `msg` to a same-file function reaches a parameter named `msg`;
-//       forwarding it to a method its same-file object literal does not
-//       define (a handler left on wsm after a move) or to an imported binding
-//       is refused. check-ws-contract's
-//       field check only reads `msg.<field>`, so a renamed parameter would
-//       drop that handler's reads out of it without a sound. wsm.onAuthFail
-//       and wsm.onReady callbacks are held to the same rule: they read
-//       auth_fail's and auth_ok's fields.
 //   R5  wsm, sessionStream and cronLive are managed objects, each a literal in
 //       its owner file (MANAGED):
 //       (a) outside the owner the name appears only as `name.<key>` or in an
@@ -78,58 +69,7 @@ export function checkSource(file, src, outbound) {
   const regs = [];
   const ast = espree.parse(src, { ecmaVersion: 'latest', sourceType: 'module', loc: true });
   const names = (n) => (n && n.type === 'Literal' && outbound.has(n.value) ? n.value : (outbound.has(wsKey(n)) ? wsKey(n) : null));
-  // Same-file bindings: function declarations, `const f = () =>`, object-literal methods.
-  const fns = new Map();
-  const objs = new Map();
-  const imported = new Set();
-  walk(ast, (n) => {
-    if (n.type === 'FunctionDeclaration' && n.id) fns.set(n.id.name, n);
-    if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier') {
-      if (isFn(n.init)) fns.set(n.id.name, n.init);
-      if (n.init && n.init.type === 'ObjectExpression') {
-        const m = new Map();
-        for (const p of n.init.properties) if (p.key && isFn(p.value)) m.set(p.key.name, p.value);
-        objs.set(n.id.name, m);
-      }
-    }
-    if (n.type === 'ImportSpecifier' || n.type === 'ImportNamespaceSpecifier' || n.type === 'ImportDefaultSpecifier') imported.add(n.local.name);
-  });
   const at = (n) => `${file}:${n.loc.start.line}`;
-  const firstParamMsg = (fn, what, node) => {
-    if (fn.params.length && !(fn.params[0].type === 'Identifier' && fn.params[0].name === 'msg')) {
-      problems.push(`${at(node)}: ${what} must name its frame parameter msg (R6: the field check reads msg.<field>)`);
-    }
-  };
-  const checkForwards = (fn, node) => {
-    walk(fn.body, (c) => {
-      if (c.type !== 'CallExpression') return;
-      c.arguments.forEach((a, i) => {
-        if (!(a.type === 'Identifier' && a.name === 'msg')) return;
-        let target = null;
-        let root = null;
-        if (c.callee.type === 'Identifier') { root = c.callee.name; target = fns.get(root); }
-        else if (c.callee.type === 'MemberExpression' && !c.callee.computed) {
-          let o = c.callee.object;
-          while (o.type === 'MemberExpression') o = o.object;
-          root = o.type === 'Identifier' ? o.name : null;
-          if (c.callee.object.type === 'Identifier') {
-            const obj = objs.get(c.callee.object.name);
-            target = obj?.get(c.callee.property.name);
-            if (obj && !target) {
-              problems.push(`${at(c)}: msg is forwarded to ${c.callee.object.name}.${c.callee.property.name}, which ${c.callee.object.name} does not define (R6)`);
-              return;
-            }
-          }
-        }
-        if (target) {
-          const p = target.params[i];
-          if (!(p && p.type === 'Identifier' && p.name === 'msg')) problems.push(`${at(c)}: msg is forwarded to a parameter not named msg (R6)`);
-        } else if (root && imported.has(root)) {
-          problems.push(`${at(c)}: msg is forwarded to imported ${root}; register the handler in the module that owns it (R6)`);
-        }
-      });
-    });
-  };
   walk(ast, (n, parents) => {
     if (n.type === 'SwitchStatement' && isTypeMember(n.discriminant)) {
       for (const c of n.cases) if (names(c.test)) problems.push(`${at(c)}: switch case on outbound frame type ${names(c.test)} (R1: register it with wsm.on)`);
@@ -144,25 +84,7 @@ export function checkSource(file, src, outbound) {
       if (!key || !outbound.has(key)) problems.push(`${at(n)}: wsm.on must name an outbound type as NZ_CONTRACT.WS.<key> (R2)`);
       if (n.arguments.length < 2 || n.arguments.length > 3) problems.push(`${at(n)}: wsm.on takes (type, handler[, when]) (R2)`);
       if (!atModuleScope(parents)) problems.push(`${at(n)}: wsm.on must be a statement at module scope (R2)`);
-      for (const [idx, what] of [[1, 'handler'], [2, 'claim']]) {
-        let f = n.arguments[idx];
-        if (!f) continue;
-        if (f.type === 'Identifier') {
-          const d = fns.get(f.name);
-          if (!d) { problems.push(`${at(n)}: ${what} ${f.name} must be a function declared in this file (R6)`); continue; }
-          f = d;
-        }
-        if (!isFn(f)) { problems.push(`${at(n)}: ${what} must be a function (R6)`); continue; }
-        firstParamMsg(f, what, n);
-        checkForwards(f, n);
-      }
       regs.push({ file, line: n.loc.start.line, key, claim: n.arguments.length === 3 });
-    }
-    if (n.type === 'CallExpression' && n.callee.type === 'MemberExpression' && !n.callee.computed &&
-        n.callee.object.type === 'Identifier' && n.callee.object.name === 'wsm' && /^(onAuthFail|onReady)$/.test(n.callee.property.name) &&
-        isFn(n.arguments[0])) {
-      firstParamMsg(n.arguments[0], n.callee.property.name + ' callback', n);
-      checkForwards(n.arguments[0], n);
     }
   });
   return { problems, regs };

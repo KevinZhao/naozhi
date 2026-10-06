@@ -1,6 +1,6 @@
 {
   "agent_view.js": {
-    "lines": 720,
+    "lines": 717,
     "maxFnLines": 66,
     "maxIifeLines": 696,
     "fnOver100": 0,
@@ -132,7 +132,7 @@
     "lateBindings": 0
   },
   "cron_live.js": {
-    "lines": 322,
+    "lines": 319,
     "maxFnLines": 24,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -192,7 +192,7 @@
     "lateBindings": 0
   },
   "cron_view.js": {
-    "lines": 2035,
+    "lines": 2033,
     "maxFnLines": 103,
     "maxIifeLines": 0,
     "fnOver100": 1,
@@ -204,7 +204,7 @@
     "lateBindings": 1
   },
   "dashboard.js": {
-    "lines": 1702,
+    "lines": 1697,
     "maxFnLines": 91,
     "maxIifeLines": 61,
     "fnOver100": 0,
@@ -228,8 +228,8 @@
     "lateBindings": 0
   },
   "event_render.js": {
-    "lines": 390,
-    "maxFnLines": 41,
+    "lines": 389,
+    "maxFnLines": 39,
     "maxIifeLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 0,

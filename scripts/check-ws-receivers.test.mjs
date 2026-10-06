@@ -90,54 +90,9 @@ test('R4: fewer registrations than outbound types means the scan went blind', ()
   assert.ok(two.some((x) => /only 1 wsm.on registrations for 2 outbound types .*\(R4\)/.test(x)), two.join('\n'));
 });
 
-test('R6: a handler or claim parameter not named msg', () => {
-  const h = problemsOf(CLEAN.replace('(msg) => sessionFrames.onHistory(msg)', '(frame) => sessionFrames.onHistory(frame)'));
-  assert.ok(h.some((x) => /handler must name its frame parameter msg/.test(x)), h.join('\n'));
-  const c = problemsOf(CLEAN.replace("const live = (msg) => msg.key === 'cron:x';", "const live = (f) => f.key === 'cron:x';"));
-  assert.ok(c.some((x) => /claim must name its frame parameter msg/.test(x)), c.join('\n'));
-});
-
-test('R6: msg forwarded to a same-file function or method whose parameter is not msg', () => {
-  const m = problemsOf(CLEAN.replace('onHistory(msg) { return msg.key; }', 'onHistory(frame) { return frame.key; }'));
-  assert.ok(m.some((x) => /forwarded to a parameter not named msg/.test(x)), m.join('\n'));
-  const f = problemsOf(CLEAN.replace('function onLive(msg) { return msg.events; }', 'function onLive(f) { return f.events; }'));
-  assert.ok(f.some((x) => /handler must name its frame parameter msg/.test(x)), f.join('\n'));
-  const fwd = problemsOf(CLEAN + "function helper(frame) { return frame; }\nwsm.on(NZ_CONTRACT.WS.pong, (msg) => helper(msg), live);");
-  assert.ok(fwd.some((x) => /forwarded to a parameter not named msg/.test(x)), fwd.join('\n'));
-});
-
-test('R6: msg forwarded to a method its same-file object does not define', () => {
-  const p = problemsOf(CLEAN.replace('(msg) => sessionFrames.onHistory(msg)', '(msg) => sessionFrames.onEvent(msg)'));
-  assert.ok(p.some((x) => /forwarded to sessionFrames.onEvent, which sessionFrames does not define/.test(x)), p.join('\n'));
-});
-
-test('R6: msg forwarded to an imported binding is refused', () => {
-  const p = problemsOf("import { cronLiveEvent } from './cron_view.js';\n" + CLEAN +
-    'wsm.on(NZ_CONTRACT.WS.pong, (msg) => cronLiveEvent(msg), live);');
-  assert.ok(p.some((x) => /forwarded to imported cronLiveEvent/.test(x)), p.join('\n'));
-});
-
-test('R6: a named handler must be a function declared in the file', () => {
-  const p = problemsOf(CLEAN + 'wsm.on(NZ_CONTRACT.WS.pong, elsewhere, live);');
-  assert.ok(p.some((x) => /handler elsewhere must be a function declared in this file/.test(x)), p.join('\n'));
-});
-
 test('checkSource reports the file and line of a problem', () => {
   const { problems } = checkSource('x.js', "\n\nfunction f(msg) { return msg.type === 'pong'; }", OUT);
   assert.deepEqual(problems, ['x.js:3: .type compared with outbound frame type (R1: register it with wsm.on)']);
-});
-
-test('R6: a wsm.onAuthFail callback names its parameter msg', () => {
-  const p = problemsOf(CLEAN + 'wsm.onAuthFail((frame) => frame.error);');
-  assert.ok(p.some((x) => /onAuthFail callback must name its frame parameter msg/.test(x)), p.join('\n'));
-  assert.deepEqual(problemsOf(CLEAN + 'wsm.onAuthFail((msg) => msg.error);'), []);
-});
-
-test('R6: a wsm.onReady callback that takes the auth_ok frame names it msg', () => {
-  const p = problemsOf(CLEAN + 'wsm.onReady((frame) => frame.asset_version);');
-  assert.ok(p.some((x) => /onReady callback must name its frame parameter msg/.test(x)), p.join('\n'));
-  assert.deepEqual(problemsOf(CLEAN + 'wsm.onReady((msg) => msg.asset_version);'), []);
-  assert.deepEqual(problemsOf(CLEAN + 'wsm.onReady(() => f());'), []);
 });
 
 // R5 / R7 fixtures: a two-object world with its own owners, core set and leaf.
