@@ -16,10 +16,15 @@ type Index struct {
 	loc *time.Location
 	now func() time.Time
 
-	mu     sync.Mutex
-	day    string
-	spent  map[Subject]float64
-	warned map[Subject]bool
+	mu      sync.Mutex
+	day     string
+	spent   map[Subject]float64
+	noticed map[noticeKey]bool
+}
+
+type noticeKey struct {
+	n Notice
+	s Subject
 }
 
 // NewIndex returns an empty index; nil loc means time.Local, nil now
@@ -31,7 +36,7 @@ func NewIndex(loc *time.Location, now func() time.Time) *Index {
 	if now == nil {
 		now = time.Now
 	}
-	return &Index{loc: loc, now: now, spent: map[Subject]float64{}, warned: map[Subject]bool{}}
+	return &Index{loc: loc, now: now, spent: map[Subject]float64{}, noticed: map[noticeKey]bool{}}
 }
 
 // Add counts e if it is a USD entry dated today. Adjust rows count too: a
@@ -60,15 +65,16 @@ func (x *Index) Spent(s Subject) float64 {
 	return x.spent[s]
 }
 
-// firstWarn reports whether s has not been marked today, and marks it.
-func (x *Index) firstWarn(s Subject) bool {
+// firstNotice reports whether (n, s) has not been marked today, and marks it.
+func (x *Index) firstNotice(n Notice, s Subject) bool {
+	k := noticeKey{n, s}
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	x.rollLocked()
-	if x.warned[s] {
+	if x.noticed[k] {
 		return false
 	}
-	x.warned[s] = true
+	x.noticed[k] = true
 	return true
 }
 
@@ -79,7 +85,7 @@ func (x *Index) rollLocked() string {
 	if today != x.day {
 		x.day = today
 		clear(x.spent)
-		clear(x.warned)
+		clear(x.noticed)
 	}
 	return today
 }

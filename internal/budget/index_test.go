@@ -27,11 +27,13 @@ func TestSubjectForKey(t *testing.T) {
 		key  string
 		want Subject
 	}{
+		{"feishu:group:oc_1:general", "chat:feishu:group:oc_1"},
+		{"feishu:group:oc_1:reviewer", "chat:feishu:group:oc_1"},
+		{"slack:direct:U1:general", "chat:slack:direct:U1"},
 		{"cron:0123456789abcdef", "job:0123456789abcdef"},
 		{"cron:", ""},
-		{"feishu:group:oc_1:general", ""},
-		{"slack:direct:U1:general", ""},
-		{"project:naozhi:planner", ""},
+		{"project:naozhi:planner", "project:naozhi"},
+		{"project::planner", ""},
 		{"dashboard:direct:abc:general", ""},
 		{"dashboard:pj:0123456789abcdef:general", ""},
 		{"local:takeover:Users-me-src:general", ""},
@@ -47,9 +49,8 @@ func TestSubjectForKey(t *testing.T) {
 	}
 }
 
-// Every USD entry dated today in loc counts toward Global, and toward its job
-// when it has one: a row carrying a JobID counts toward the job even on a
-// non-cron key.
+// Every USD entry dated today in loc counts toward Global and its subject; a
+// row carrying a JobID counts toward the job even on a non-cron key.
 func TestIndex_SumsTodaysUSDPerSubject(t *testing.T) {
 	x := NewIndex(cst, (&clock{now}).now)
 	todayEarly := time.Date(2026, 9, 5, 17, 0, 0, 0, time.UTC) // 01:00 on 6 Sep in cst
@@ -72,10 +73,11 @@ func TestIndex_SumsTodaysUSDPerSubject(t *testing.T) {
 		x.Add(e)
 	}
 	for s, want := range map[Subject]float64{
-		"job:j1": 4,
-		"job:j2": 8,
-		"job:j3": 0,
-		Global:   30.5,
+		"chat:feishu:group:oc_1": 2.5,
+		"job:j1":                 4,
+		"job:j2":                 8,
+		"chat:feishu:p2p:u1":     0,
+		Global:                   30.5,
 	} {
 		if got := x.Spent(s); got != want {
 			t.Errorf("Spent(%s) = %v, want %v", s, got, want)
@@ -83,25 +85,43 @@ func TestIndex_SumsTodaysUSDPerSubject(t *testing.T) {
 	}
 }
 
-// The sums and the warn marks reset at midnight in loc, not in UTC.
+// The sums and the notice marks reset at midnight in loc, not in UTC.
 func TestIndex_RollsOverAtLocalMidnight(t *testing.T) {
 	c := &clock{time.Date(2026, 9, 6, 23, 59, 0, 0, cst)}
 	x := NewIndex(cst, c.now)
 	x.Add(usd(c.t, "feishu:group:oc_1:general", "", 3))
-	if !x.firstWarn(Global) || x.firstWarn(Global) {
-		t.Fatal("firstWarn must report true once per day")
+	if !x.firstNotice(NoticeWarn, Global) || x.firstNotice(NoticeWarn, Global) {
+		t.Fatal("firstNotice must report true once per day")
 	}
 	c.t = c.t.Add(2 * time.Minute) // 00:01 on 7 Sep in cst, still 6 Sep in UTC
 	if got := x.Spent(Global); got != 0 {
 		t.Errorf("after local midnight Spent(Global) = %v, want 0", got)
 	}
-	if !x.firstWarn(Global) {
-		t.Error("the warn mark must reset with the day")
+	if !x.firstNotice(NoticeWarn, Global) {
+		t.Error("the notice mark must reset with the day")
 	}
 	x.Add(usd(c.t.Add(-2*time.Minute), "feishu:group:oc_1:general", "", 5)) // late row for 6 Sep
 	x.Add(usd(c.t, "feishu:group:oc_1:general", "", 1))
-	if got := x.Spent(Global); got != 1 {
+	if got := x.Spent("chat:feishu:group:oc_1"); got != 1 {
 		t.Errorf("Spent after rollover = %v, want 1 (yesterday's late row ignored)", got)
+	}
+}
+
+func TestSubject_KindAndName(t *testing.T) {
+	cases := []struct {
+		s          Subject
+		kind, name string
+	}{
+		{Global, "global", ""},
+		{"chat:feishu:group:oc_1", "chat", "feishu:group:oc_1"},
+		{"project:naozhi", "project", "naozhi"},
+		{JobSubject("j1"), "job", "j1"},
+		{"", "", ""},
+	}
+	for _, tc := range cases {
+		if k, n := tc.s.Kind(), tc.s.Name(); k != tc.kind || n != tc.name {
+			t.Errorf("%q: Kind, Name = %q, %q; want %q, %q", tc.s, k, n, tc.kind, tc.name)
+		}
 	}
 }
 
