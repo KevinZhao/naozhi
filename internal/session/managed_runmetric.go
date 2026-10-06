@@ -49,8 +49,8 @@ func (s *ManagedSession) instrumentRun(onEvent clievent.EventCallback) (*runTime
 // persistence. Its work is cheap and the enqueue is NON-BLOCKING, so calling
 // it while sendMu is still held (the Send path) does not extend the lock window.
 func (s *ManagedSession) finishRun(ctx context.Context, rt *runTimer, result *clievent.SendResult, err error) {
-	// The orchestrator's run id (ctxutil.WithRunID) names this turn in the
-	// logs; adopting it keeps the run record and the journal on one key.
+	// sendRunCtx put a run id in ctx before the process call, so the run
+	// record, the ledger, the transcript and the journal share one key.
 	runID := ctxutil.RunID(ctx)
 	if runID == "" {
 		runID = newRunID()
@@ -87,6 +87,15 @@ func (s *ManagedSession) finishRun(ctx context.Context, rt *runTimer, result *cl
 	}
 	rec.CostUSD = delta
 	s.runStore.AppendAsync(rec)
+}
+
+// sendRunCtx names a send no orchestrator named (cron, sysession) before it
+// reaches the process, which stamps the id on the turn's transcript entries.
+func sendRunCtx(ctx context.Context) context.Context {
+	if ctxutil.RunID(ctx) != "" {
+		return ctx
+	}
+	return ctxutil.WithRunID(ctx, newRunID())
 }
 
 // nudgeRunCtx gives the leaked-toolcall re-send its own run id: it is a

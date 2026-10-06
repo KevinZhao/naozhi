@@ -40,8 +40,10 @@ type EventEntry struct {
 	// RunID is the run id (ctxutil.RunID) of the Send behind a "user" or
 	// "result" entry, the key that joins the transcript with runhistory and
 	// the cost ledger. A merged turn's result names its head run, which
-	// carries the cost; a result whose caller gave up still names that run.
-	// "" for a turn no Send owns and for entries written before the field.
+	// carries the cost; a result whose caller gave up still names that run,
+	// unless it is read after the next Send claimed the process without an
+	// abort pending, when it names the live run. "" for a turn the CLI
+	// started itself, a mid-turn reconnect and entries older than the field.
 	RunID string `json:"run_id,omitempty"`
 	// Agent team internal-view linkage, persisted on "agent" and "task_start"
 	// entries so SubagentLinker.SeedFromHistory can rebuild the task_id →
