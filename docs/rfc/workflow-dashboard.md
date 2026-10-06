@@ -1163,13 +1163,13 @@ running（5），否则探针行 6 的 B（`state:"start"`，只有 queuedAt）�
 | `lastToolSummary` | 保留；**先 `RedactSecrets` 原串、再截 200 runes** | per-agent 行需要；常含 bash 命令 |
 | `label` / `title` / `phaseTitle` | 先 redact、再截 120 runes | 模型生成 |
 | `lastToolName` | 先 redact、再截 64 runes | workflow 层的 `last_tool_name` 被 CC 设成 agent label（§1.2.1 行 6），同样是模型文本 |
-| `model` | 截 64 runes | |
+| `model` | 先 redact、再截 64 runes | 透传值；与下一行一样先 redact（PR-6）：上 wire 的每个字符串都经过 `RedactSecrets`，泄漏测试才能覆盖全部字段 |
 | `error` | raw → string，先 redact、再截 400 runes | 类型不定 |
 | `workflow_name` → `Name` | 先 redact、再截 120 runes | 进 `/api/sessions` 每次刷新（Summary.Name）与 sessions.json（Ref.Name） |
 | `task_progress.summary` → `Description` | 先 redact、再截 200 runes | 模型生成 |
 | `task_progress.description` → `Current` | **先 redact 原串**、再截 200 runes | CC 拼的 `"<phaseTitle>: <label>"`，含未截断的 label；也是 Summary.CurrentPhase 的来源 |
 | `task_notification.summary` → `NotifySummary` | 先 redact、再截 200 runes | |
-| 未识别的 `state` / `status` → `RawState` / `RawStatus` | 截 32 runes | 透传值，原本无上限 |
+| 未识别的 `state` / `status` → `RawState` / `RawStatus` | 先 redact、再截 32 runes | 透传值，原本无上限；只截不遮的话，形如密钥的值会以 29 字符残段上 wire |
 | `blocked` / `skipped` | 保留（bool） | 状态规范化需要 |
 | `workflow_log` 项 | 忽略（本就不发） | |
 | 未知 `type` 项 | 忽略 + 计数 | 前向兼容 |
@@ -1271,6 +1271,8 @@ running（5），否则探针行 6 的 B（`state:"start"`，只有 queuedAt）�
   这个条件会把真正的结果文件永远拒之门外；而 taskId 是每个 attempt 新生成的 9 字符随机 id（§1.2.2），已足以挡住续跑期间旧 attempt 的文件。
   满足即作为终态权威覆盖：status、agent 行（经同一张规范化表，按 index 合并、身份校验同 §4.1.1）、totals、StartedAt
   （`startTime`），置 `Source=result_file`、`ResultLoaded=true`。此后到达的 `task_notification` 只补 `NotifySummary`，不再覆盖 totals。
+  结果文件没有结束时刻的键：条目尚无 `EndedAt`（终态帧丢了，sweeper 才找到文件）时取 `startTime + durationMs`，否则终态 LRU 会把它当作最旧的淘汰（PR-6）。
+  文件里 `workflowProgress` 的类型错只丢掉这些项（行保留 stream 的），同 §4.1.1 规则 5 再遮蔽解码一遍，其余键的类型错让整个文件不可用（`workflow.ParseResultFile`）。
   - 优先级总结：**结果文件（taskId 匹配）> stream 快照（live / replay）> Ref**。
   - **journal 不再产出 agent 行**（v2 的 `ApplyJournal` 与 R3c 删除）：journal 行只有 `key / agentId / label / phase`，没有 CC 的 `index`
     （实测 `wf_3c5f7769-1b7/journal.jsonl` 中 0 处），行只能用合成 index，首张 live 快照整体替换时会留下客户端删不掉的幽灵行（§6.1）。
@@ -1293,7 +1295,7 @@ running（5），否则探针行 6 的 B（`state:"start"`，只有 queuedAt）�
 
 | 项 | 上限 | 超出处理 |
 |---|---|---|
-| 每 Process 跟踪的 running workflow | 16 带行；第 17-32 个只记 header（`Degraded=too_many`）；> 32 忽略 | 超出 32 的 task 不建条目，计数 `workflow_untracked`（expvar）；header-only 条目照常 running，**从不**被合成终态 |
+| 每 Process 跟踪的 running workflow | 16 带行；第 17-32 个只记 header（`Degraded=too_many`；header 含 phases 与计数，只是没有 agent 行）；> 32 忽略 | 超出 32 的 task 不建条目，计数 `naozhi_cli_workflow_untracked_total`（expvar，每 task 一次）；header-only 条目照常 running，**从不**被合成终态；带行的条目终态后让出名额，下一张快照起 header-only 条目补上 |
 | 每 Process 保留的终态 workflow | 5（按 EndedAt LRU） | 从 Tracker 淘汰；board 的 wake 把它移入 `retained`（§5.8），不会从面板消失 |
 | **每 board 的非终态条目**（live + retained，含 snapshot_stale / unknown） | 16（**只裁 retained**） | live + retained 超过 16 时，从 retained 里按 unknown → snapshot_stale / Ref 来源 → 其余、同类 `LastObservedAt` 最旧先**删除**（连带 `last` / 结果缓存 / `resolve`），直到满足或 retained 删空；**不**合成 interrupted（被裁不是终态证据），live 条目从不因此被裁或标终态（v3 会让 live > 16 时状态来回翻转、误播终态） |
 | 每 workflow 的 phase | 200（按 index 升序保留） | 超出丢弃、计数，`Degraded=phases_capped`（chip "phase 过多，部分未显示"；v4 复用 `too_many`，其 chip "仅显示概要"在行照常显示时是错的）；所属 phase 被丢的 agent 行照常保留，客户端归入"其余 phase"组；HTTP 与 WS 都继承此上限 |
@@ -1392,12 +1394,12 @@ Tracker 当前版、CoW 期间的旧版、board 盖过 Rev 的上一发布版（
 | 级别 | 触发 | 行为 |
 |---|---|---|
 | L0 | 正常 | 全部功能 |
-| L1 | 某些项的**非身份**字段类型错（`WorkflowDecode=Partial`，且通过 §4.1.1 的身份复核） | 坏字段置零，计数 `workflow_items_partial`（expvar），`Degraded=decode_error`；其余正常 |
-| L1' | 条目本身或身份字段（type/index/phaseIndex/agentId/state）类型错，或 Partial 帧身份复核不过（按 Failed） | **保留上一版的行**，只更新 header；计数 `workflow_items_identity`，`Degraded=decode_error` |
+| L1 | 某些项的**非身份**字段类型错（`WorkflowDecode=Partial`，且通过 §4.1.1 的身份复核） | 坏字段置零，计数 `naozhi_cli_workflow_items_partial_total`（expvar），`Degraded=decode_error`；其余正常 |
+| L1' | 条目本身或身份字段（type/index/phaseIndex/agentId/state）类型错，或 Partial 帧身份复核不过（按 Failed） | **保留上一版的行**，只更新 header；计数 `naozhi_cli_workflow_items_identity_total`，`Degraded=decode_error` |
 | L1'' | 快照行的 envelope 超过 naozhi 的 10MiB 行上限（§1.2.3 天花板，约 4k-7k agents） | readLoop 的 oversize 分支（`process_readloop.go:189-195`，`line` 里留有前 ~10MiB）在跳过之前窥视前 1KiB：含转义形态的 `\"subtype\":\"task_progress\"` 且能截出 `\"task_id\":\"<id>\"`、该 id 是已知 workflow → `Tracker.NoteDropped(id, now)`：**保留上一版的行**，置 `Degraded=snapshot_dropped`（chip "明细过大，已停止更新"），计数 `workflow_lines_oversize`；下一张被接受的快照清除该标记（快照只增不减，实际上通常不会再出现）。截不出 id 只计数。不冻结 `LastObservedAt`（CLI 仍活着、帧仍在到达） |
 | L2 | `workflow_progress` 整体失败 / 缺失 / 被 withhold | header 退化为 task_started + description + usage（名称、当前 "phase: label"、tokens、tool uses、elapsed），`Degraded=no_snapshot`；withhold 的 phase 标题原样显示为 `phase N`（v4 用 journal / meta.json 回填，v5 删除，NG9） |
 | L3 | 连 task_started 都没见到（replay 被淘汰） | 仅当 `IsWorkflowTask` 为真（见下）才建条目；名称回落 `summary` |
-| L4 | CC 完全改协议 | 无条目，dashboard 与今天一致；`workflow_decode_errors` 计数可观测 |
+| L4 | CC 完全改协议 | 无条目，dashboard 与今天一致；`skip unparseable event` 日志可观测（L4 的帧到不了 Tracker，PR-6 不另设 `workflow_decode_errors` 计数） |
 
 **`workflow.IsWorkflowTask` 判定**（L3 建条目、§5.2 的 `ev.WorkflowTask`、PR-7 的 TaskType 标记、
 §9 共用；顺序求值）：
@@ -1408,6 +1410,8 @@ Tracker 当前版、CoW 期间的旧版、board 盖过 Rev 的上一发布版（
    subtype，那个分支永远不会命中，删除；不为它加定向解码——task_started 与规则 3 已经够用。）
    2b. Tracker 已有该 task_id 的 builder（之前某帧已按本表判为是）→ 是。（v5 新增。entry 一旦建起来，之后的 task_updated / task_notification /
    description-only 帧本来就会更新它，但 `ev.WorkflowTask` 标记——PR-7 的 TaskType、§9 的丢弃——也依赖这个判定，不能让它们落到规则 5。）
+   规则 2 与 4 的"曾见 / 已知"是 Tracker 里同一个有界集合（256 个 task_id，先进先出，PR-6）：判为 workflow 的 id 都记进去，所以超过 32 个未建条目的 workflow
+   之后的 description-only 帧照样标 `ev.WorkflowTask`；按终态 LRU 淘汰的条目也留在集合里并标为已淘汰，迟到的帧不会重建一个残缺条目（board 已把它移入 retained）。
 3. 本帧带 `workflow_progress` 键（`WorkflowProgress != nil`，或 `WorkflowDecode == Failed`：键在但不是数组）→ 是。CC 只给 workflow 帧附这个键（非 workflow 调 `Une` 时该值为 undefined，序列化时省略）。
 4. 已知 `WorkflowLaunch.TaskID` 或 session 侧 Ref / retained 里有该 task_id → 是。这个集合交给 Tracker **两次**：重连时经 `SpawnReconnect` 的
    `ReconnectHooks.KnownWorkflowTasks` 在 `SeedFromReplay` 之前交一次（§5.9 R1），bind 时再交一次（取并集）。v4 只在 bind 时交，而 bind 在
@@ -1497,7 +1501,7 @@ type WorkflowBoard struct { // 导出类型名、全部字段未导出：server 
      O(live + 有界 retained)，不随 session 寿命增长。
   4. **分配 wire 版本**：对每个 task 与 `b.last[task]` 比较——
      - `Agents` 切片与上次源切片同一底层数组且长度相同（CoW 共享）→ 行沿用上次的 wire Rev，不逐行比较；
-     - 否则逐行（按 index）用 `agentEqualIgnoringRev(a, b)` 比较：相同则沿用上次 Rev，不同或新增则盖
+     - 否则逐行（按 index）用 `workflow.AgentEqualIgnoringRev(a, b)` 比较：相同则沿用上次 Rev，不同或新增则盖
        `newVer = last.Version + 1`。`Agent` 含 `PrevAgentIDs []string`，**不是**可比较结构体（v2 写的 `==` 编不过），
        所以这是手写函数：标量字段逐个 `==`、`PrevAgentIDs` 用 `slices.Equal`；单测以 `reflect.TypeOf(Agent{}).NumField()`
        钉住字段数（新增字段而忘了在这里比较即红），并测"只有 PrevAgentIDs 变化（重试换 id）也推进 Rev"；
@@ -1666,7 +1670,7 @@ R0  router_restore：storeEntry.Workflows（Ref）→ board.retained
       调用同一个 board 方法（§6.2.1）
 R1  ReconnectShimsCtx → SpawnReconnect（wrapper.go:586-642）:
       DrainReplay → proc 构造（Tracker 已在）
-      → Tracker.SeedFromReplay(replays, proto, hooks.KnownWorkflowTasks)  ← 新增，startReadLoop 之前；已知 task_id 由 router_shim.go 从该 session 的
+      → Tracker.SeedFromReplay(workflow.Replay{Lines, Wrapped}, proto, hooks.KnownWorkflowTasks)  ← 新增，startReadLoop 之前；已知 task_id 由 router_shim.go 从该 session 的
                                                                             board（R0 恢复的 Ref / retained）取出、经 ReconnectHooks 传入（§5.7 规则 4）
       → reconnectVerdict(...)；结果为 unknown 时同步调用 session 层传入的 resolver 读 JSONL 尾（§5.10）
       → applyReconnectVerdict(verdict)                 ← 同时修 turn-neutral（§5.10）；startReadLoop 之前武装
@@ -2570,7 +2574,7 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
 | reconnectVerdict | 末尾 workflow task 帧 → 不再 midTurn；前台 Agent 中途仍 midTurn；task-notification 自启 turn（init 在后）→ midTurn；只剩中性帧且 ring 已绕回 → `unknown` → resolver（`startReadLoop` 之前调用，计数接缝断言顺序）读 JSONL 尾 `end_turn` → idle、否则 midTurn（**5MB 的 JSONL fixture**：尾窗是读窗口、不是尺寸上限）；末条记录 200KiB → 窗口放大到 1MiB 后裁决、> 1MiB → midTurn；resolver 为 nil → midTurn；**live result 紧随 `startReadLoop` 到达时仍回到 Ready**；中性帧不被解码（计数） |
 | linker | `local_workflow` 三处都不 Resolve；InjectHistory：带 TaskType 的 progress、遗留 `w`+8 孤儿 progress 都不 Resolve；`a…` 孤儿仍 Resolve |
 | Board 并发 / 锁序 | **在 `r.ss.Update` 回调内 bind 一个含 running workflow 且 Tracker 领先 `applied` 的 proc：不死锁，且随后恰好一次 structural 通知**（v2 设计下死锁）；readLoop wake 与事务内 bind 交错（`-race`，10k 次）无死锁；事务内 `evictOldest` 调 `workflowPinned` 不取 b.mu（接缝断言）；`SetOnEnd` 在事务内同步投递时 procEnded 不死锁；同一 proc 重复 bind 为 no-op；bind 时的 Load 与 readLoop 唤醒竞速、结果文件合并与 Observe 竞速：最终发布态等于 Tracker 最新 Set；旧 Version 永不覆盖新；被放弃的 reattach proc 不发布；旧 proc 解绑后的唤醒被忽略；bind 时旧 proc 的 running 折入 retained 为 snapshot_stale、新 Tracker 同 task_id 覆盖；**RunDir 解析不在锁内**：计数型 fake resolver 下，`r.ss.Update` 内 bind 与 readLoop 上 wake 都零次同步调用；resolver 阻塞在 channel 上时 wake / bind 照常返回；解析途中来源元组变化 → 旧结果丢弃；rel 的 `<sid>` 写进发布态后不触发重解析（等级 4 不回写元组）；未解析完成时 sweeper 跳过〔PR-9〕、drill-in 202〔PR-13〕 |
-| Board 版本 | Ref 条目（R0）被版本更低的 Tracker 条目替换：wire version 仍递增、内容未变的行 Rev 不变、变化的行 Rev 前进；shim 重连换 Tracker 同上；retained 被 board 改为 interrupted / snapshot_stale / result_file 时版本递增；CoW 共享切片不逐行比较（计数）；`agentEqualIgnoringRev` 的字段数钉（`reflect` NumField）；只有 `PrevAgentIDs` 变化也推进 Rev；**行并集**：某 index 从新行集里消失 → 沿用上次的行、Rev 不变；workflow 随后终态 → 沿用的 running 行置 stopped 且 Rev 前进；shim 重连换上无快照的 Tracker（`no_snapshot`）→ 发布的行一行不少，下一张快照到达后按 index 替换；并集不超过 2000 行 |
+| Board 版本 | Ref 条目（R0）被版本更低的 Tracker 条目替换：wire version 仍递增、内容未变的行 Rev 不变、变化的行 Rev 前进；shim 重连换 Tracker 同上；retained 被 board 改为 interrupted / snapshot_stale / result_file 时版本递增；CoW 共享切片不逐行比较（计数）；`AgentEqualIgnoringRev` 的字段数钉（`reflect` NumField）；只有 `PrevAgentIDs` 变化也推进 Rev；**行并集**：某 index 从新行集里消失 → 沿用上次的行、Rev 不变；workflow 随后终态 → 沿用的 running 行置 stopped 且 Rev 前进；shim 重连换上无快照的 Tracker（`no_snapshot`）→ 发布的行一行不少，下一张快照到达后按 index 替换；并集不超过 2000 行 |
 | Board 合并（v5） | **R0 条目 + 没有 task_started / launch 的种子条目**（ring 已绕回）：Name 保持 Ref 的 `probe`（不翻成 summary 回落的 `tiny probe`）、StartedAt / SessionID / RunID 取 Ref、status / 行 / 计数取进程侧、`LastObservedAt = max(Ref, bindAt)`、随后 `workflowPinned` 为真；种子条目带等级 3 的 SessionID 时盖过 Ref；Tracker 已有真名时盖过 Ref；RunDir 解析后 SessionID 取 rel 的 `<sid>`、并随下一次存盘写进 Ref；`NewPublished` 在 agentId 集合不变时复用 `byAgentID`（指针相等） |
 | Board 进程结束 | `ProcessEnd{}`（cli_exited / Kill）→ interrupted；`ShimLive` → snapshot_stale、LastObservedAt 冻结、status 仍 running、不发终态；`Detached` → 同 ShimLive；ShimLive 之后重接的 Tracker 带同 task_id → 回到 live、无终态翻转；ShimLive 之后 90s 内无进程 → sweeper 判 interrupted（R4），再重接 → 覆盖回 running〔PR-9〕；**R5**（假时钟）〔PR-9〕：R0 恢复的 running 条目、bind 了一个从不报告它的新 proc → 未绕回 90s / 已绕回 10min 后变为 unknown（`unclaimed`）、不播报、`workflowPinned` 为假、仍在 Summary 里；之后该 Tracker 报告同一 task_id → 覆盖回 running；unknown 且超过 `workflowPinMax` 的条目不写进 Ref |
 | Board 容量 | Tracker LRU 淘汰的终态条目仍在 Published（移入 retained）；**N > 5 次 bind 循环**（每次旧 Tracker 带若干终态）后 retained 终态 ≤ 5、非终态 ≤ 16、行总数有界，被淘汰条目的 `last` / 结果缓存 / `resolve` 同时释放；Ref 恰为有界集合的 header；**live 非终态 20 个（Tracker 16 带行 + 4 header-only）+ retained 3 个**：多次 wake 后 live 全部保持 running、无 interrupted、无结构通知抖动，retained 3 个被删除，**Ref 恰为 `LastObservedAt` 最新的 16 个**（§4.2 Ref 注释）；第 33 个 live 不建条目且计数；phase 第 201 个起被丢弃、`Degraded=phases_capped`（header-only 条目仍是 `too_many`） |
@@ -2743,7 +2747,7 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   §5.3 的 Tracker 侧上限（live 非终态 16 带行 / 32 header-only、phase 200）、§5.5、§5.6(1-3,5)、§5.7（含 `IsWorkflowTask`、身份复核、
   `NoteDropped` → `snapshot_dropped`）、`SeedFromReplay`（每 task 每帧类只解最新一行、`Set.SeedWrapped`）、`MergeResultFile` 纯函数（瘦结构的
   `workflowProgress[]` 复用 `clievent.WorkflowItem`，行带 label / model / tokens）、
-  `agentEqualIgnoringRev`（供 board 用，放在 workflow 包以便字段数钉测试与 Agent 定义同处）；v5 新增：`WireView` 与 `Workflow.Wire(rows)`、
+  `AgentEqualIgnoringRev`（供 board 用，放在 workflow 包以便字段数钉测试与 Agent 定义同处；session 包要调用，所以导出）；v5 新增：`WireView` 与 `Workflow.Wire(rows)`、
   `NewPublished` / `Published.Agent` / `Published.AgentState` 与 `AgentLoc`、`ResultCache`（§4.2、§5.8.1）；`FieldSrc` 与 Name / StartedAt / SessionID
   的来源等级（SessionID 取自该 task 帧上的 `ev.SessionID`，§4.2）；`IsWorkflowTask` 规则 2b；SeedFromReplay 的"逆序收集、正序应用"与 `known` 参数（§5.9）；
   种子条目 `LastObservedAt = 0`；`Degraded=phases_capped`；`Source` 去掉从未产生的 `journal`；**无 `RowsGen`**。
@@ -2754,6 +2758,12 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   `BenchmarkObserve_*` 的 Tracker 部分。
 - 验收：probe fixture 回放结果与 `wf_*.json` 等价（状态、计数、tokens）；手写 fixture 全部按 §4.2 表
   规范化；无 session/server import。
+- 落地的 API（PR-7 / PR-8 用）：`workflow.New(onChange func()) *Tracker`；`Tracker.Load() *Set`（无锁，永不为 nil）、`Observe(ev, now time.Time)`、
+  `SeedFromReplay(workflow.Replay{Lines, Wrapped}, dec Decoder, known []string)`（`Wrapped` 由 cli 的 `replayWrapped` 算；`Decoder` 即 `ReadEvent`，
+  `cli.Protocol` 满足；叶子包不 import `internal/shim`，所以不收 `[]shim.ServerMsg`）、`KnowTasks(ids)`（bind 时下发）、`NoteDropped(id, now) bool`、
+  `ApplyResultFile(*ResultFile) bool`、`IsWorkflowTask(ev) bool`；`ParseResultFile` / `MergeResultFile` / `NewResultCache`、`NewPublished`、
+  `AgentEqualIgnoringRev`、`IsRunning` / `IsUnsettled` / `IsTerminal`；`clievent.TaskTypeWorkflow`（`cli.TaskTypeWorkflow` 改为它的别名）。
+  `Summary` / `Ref` 只定义类型，由 PR-8 的 board 构造。
 - 依赖：PR-5。
 
 ### PR-7 feat(cli): Process 接入 Tracker
@@ -2775,7 +2785,7 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
 - 范围：§5.8 全部——**锁序**（表锁 → b.mu → Tracker.mu，持 b.mu 不取表锁）、通知经 notifyTimer goroutine 异步发出
   （structural 闭包 / `BumpVersion` 闭包）、无锁访问器、唤醒式合并 + 版本守卫 + 进程身份、淘汰接管与 board 上限（非终态 16 / 终态 5，
   连带 `last` / 缓存 / `resolve`）、**逐字段合并**（第 3 步，含种子条目 `LastObservedAt = max(retained, bindAt)`）、wire version / 行 rev 重盖
-  （`agentEqualIgnoringRev`）、**行按 index 取并集**（第 4 步；无 `rows_gen`）、经 `workflow.NewPublished` 发布、epoch、commit 之后绑定、同 proc bind no-op、
+  （`workflow.AgentEqualIgnoringRev`）、**行按 index 取并集**（第 4 步；无 `rows_gen`）、经 `workflow.NewPublished` 发布、epoch、commit 之后绑定、同 proc bind no-op、
   指针携带（**respawn 经 `respawnSnapshot` 传入 `installFreshSession`、先于绑定**）、Summary 含 version 且取显示集合（全部 `IsUnsettled` + 最近 3 个终态）、
   sessions_update 节流、Ref（含 `last_observed_at`、从有界集合派生、过期 unknown 不写；R0 只丢**非空且非法**的 ID）、保活四处；board 非终态上限**只裁 retained**；
   §5.8.1 的导出类型 `*WorkflowBoard` 与本 PR 用得到的方法（`Subscribe` / `Published` / `Summaries` / `Running` / `LastObservedAt` / `WorkflowAgent`），

@@ -60,7 +60,7 @@ cmd/naozhi/main.go
   -> config       YAML 加载、${ENV_VAR} 展开、校验
 
   核心链路（IM 消息 → CLI 进程）
-  -> cli          Protocol 接口（stream-json/ACP）+ spawn/manage CLI 进程 + watchdog；子包 clievent/backend/procmeter
+  -> cli          Protocol 接口（stream-json/ACP）+ spawn/manage CLI 进程 + watchdog；子包 clievent/backend/procmeter/workflow
   -> session      Session router、并发控制、TTL、持久化恢复；子包 agentlink/api/backendstore/runhistory/sessiontable/sessionview/spawnpool/workspacestore/knownids
   -> routerrelay  Router 通知的一次性绑定转发器（断开 router↔hub 构造环）
   -> dispatch     IM 消息处理 + slash 命令；每条消息经 Turns 端口交给 turn.Orchestrator（IM origin/delivery 在 im_origin.go）

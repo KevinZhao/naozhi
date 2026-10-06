@@ -16,6 +16,9 @@ import (
 // WorkflowProgressKey is the task_progress key that carries the snapshot.
 const WorkflowProgressKey = "workflow_progress"
 
+// TaskTypeWorkflow is the task_type CC gives a Workflow tool run.
+const TaskTypeWorkflow = "local_workflow"
+
 // TaskPatch is a system/task_updated frame's patch.
 type TaskPatch struct {
 	Status  string `json:"status,omitempty"`

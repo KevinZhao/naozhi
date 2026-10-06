@@ -66,6 +66,9 @@ type Event struct {
 	WorkflowProgress []WorkflowItem  `json:"workflow_progress,omitempty"`
 	WorkflowDecode   WorkflowDecode  `json:"-"`
 	WorkflowLaunch   *WorkflowLaunch `json:"-"`
+	// WorkflowTask is set by workflow.Tracker.Observe on a task_* frame of
+	// a local_workflow task; false on every frame it has not seen.
+	WorkflowTask bool `json:"-"`
 	// ToolName and ParentToolUseID name the tool a claude tool_progress frame
 	// reports on; its own ToolUseID is a per-heartbeat "<id>-heartbeat-N". The
 	// CLI sends one every 30s while a main-thread tool runs, as a liveness
