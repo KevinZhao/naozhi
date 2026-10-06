@@ -258,7 +258,7 @@ function toolResultHtml(e) {
 // eventImagesHtml: user-message thumbnails. The click target is the
 // full-size attachment URL when image_paths is populated, else the data URI;
 // `?v=<time>` cache-busts a GC'd attachment. Click handling is delegated
-// (the lightbox IIFE), so it survives innerHTML re-renders.
+// (lightbox.js), so it survives innerHTML re-renders.
 function eventImagesHtml(e) {
   if (!e.images || e.images.length === 0) return '';
   const paths = e.image_paths || [];
