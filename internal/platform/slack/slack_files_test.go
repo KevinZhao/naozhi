@@ -3,6 +3,7 @@ package slack
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -163,6 +164,32 @@ func TestHandleMessage_OtherSubtypesIgnoreFiles(t *testing.T) {
 	}
 }
 
+// TestHandleMessage_IgnoresOwnUploads: the bot's own uploads come back as
+// file_share events with bot_id null and user = the bot, the payload shape
+// decoded here; they cost no download and reach no handler.
+func TestHandleMessage_IgnoresOwnUploads(t *testing.T) {
+	t.Parallel()
+	raw := `{"type":"message","subtype":"file_share","user":"UBOT","bot_id":null,` +
+		`"channel":"D789","channel_type":"im","ts":"1234567890.000100","text":"",` +
+		`"files":[{"id":"F1","name":"shot.png","mimetype":"image/png","size":8,` +
+		`"url_private_download":"https://files.slack.com/a/shot.png"}]}`
+	var ev slackevents.MessageEvent
+	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.BotID != "" || ev.Message == nil || len(ev.Message.Files) != 1 {
+		t.Fatalf("decoded bot_id %q, message %+v; want no bot_id and one file", ev.BotID, ev.Message)
+	}
+	stub := &fileStub{resps: map[string]stubResp{"/a/shot.png": {body: testPNG}}}
+	s := newFileSlack(stub)
+	if got := deliver(s, &ev); len(got) != 0 {
+		t.Errorf("handler called %d times for the bot's own upload, want 0", len(got))
+	}
+	if n := len(stub.requests()); n != 0 {
+		t.Errorf("%d downloads, want 0", n)
+	}
+}
+
 // TestDownloadFile_HostWhitelist pins that the bot token is only ever sent to
 // https://files.slack.com: every other URL fails before any request.
 func TestDownloadFile_HostWhitelist(t *testing.T) {
@@ -242,6 +269,8 @@ func TestAttachFiles_Rejects(t *testing.T) {
 		{"image bytes are not an image", stubResp{body: testPDF}, file("x.png", "image/png", len(testPDF)), platform.FileRejectUnsupported, true},
 		{"not found", stubResp{status: http.StatusNotFound}, file("x.pdf", "application/pdf", 10), platform.FileRejectDownloadFailed, true},
 		{"sign-in page", stubResp{ctype: "text/html; charset=utf-8", body: []byte("<html>")}, file("x.txt", "text/plain", 6), platform.FileRejectDownloadFailed, true},
+		{"sign-in page, mixed-case type", stubResp{ctype: "Text/HTML", body: []byte("<html>")}, file("x.txt", "text/plain", 6), platform.FileRejectDownloadFailed, true},
+		{"body over file cap, read cap equals file cap", stubResp{body: bytes.Repeat([]byte("a"), limits.MaxFileAttachmentBytes+1)}, file("x.txt", "text/plain", 10), platform.FileRejectTooLarge, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

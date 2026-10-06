@@ -456,6 +456,12 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 	if ev.BotID != "" || (ev.SubType != "" && ev.SubType != subtypeFileShare) {
 		return
 	}
+	// The bot's own uploads come back as file_share events with no bot_id,
+	// only user = the bot's user ID.
+	botID := s.botIDOrEmpty()
+	if botID != "" && ev.User == botID {
+		return
+	}
 	var files []slack.File
 	if ev.Message != nil {
 		files = ev.Message.Files
@@ -464,7 +470,6 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 	text := ev.Text
 	mentionMe := false
 
-	botID := s.botIDOrEmpty()
 	if botID != "" {
 		mention := "<@" + botID + ">"
 		if strings.Contains(text, mention) {
