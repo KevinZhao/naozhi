@@ -23,12 +23,14 @@ const (
 	wfRun  = "wf_2997921d-435"
 )
 
-// setProc is a workflowNotifier whose Set the test writes directly.
+// setProc is a workflowNotifier whose Set the test writes directly. A
+// result file merges into its Set as a Tracker's does; onApply runs first.
 type setProc struct {
-	mu    sync.Mutex
-	set   *workflow.Set
-	cb    func()
-	known []string
+	mu      sync.Mutex
+	set     *workflow.Set
+	cb      func()
+	known   []string
+	onApply func(*workflow.ResultFile)
 }
 
 func (p *setProc) Workflows() *workflow.Set {
@@ -52,7 +54,29 @@ func (p *setProc) KnowWorkflowTasks(ids []string) {
 	p.mu.Unlock()
 }
 
-func (p *setProc) ApplyWorkflowResult(*workflow.ResultFile) bool { return false }
+func (p *setProc) ApplyWorkflowResult(rf *workflow.ResultFile) bool {
+	p.mu.Lock()
+	var wfs []*workflow.Workflow
+	merged := false
+	if p.set != nil {
+		wfs = slices.Clone(p.set.Workflows)
+		for i, w := range wfs {
+			if n, ok := workflow.MergeResultFile(w, rf); ok {
+				wfs[i], merged = n, true
+			}
+		}
+	}
+	hook := p.onApply
+	p.mu.Unlock()
+	if !merged {
+		return false
+	}
+	if hook != nil {
+		hook(rf)
+	}
+	p.publish(wfs...)
+	return true
+}
 
 // publish makes wfs the next Set and wakes the board, as a Tracker does.
 func (p *setProc) publish(wfs ...*workflow.Workflow) {
@@ -116,6 +140,7 @@ func newWFRig(t *testing.T) *wfRig {
 	b.notify.now = r.now
 	b.notify.newTimer = func(func()) workflowTimer { return r.timer }
 	b.io.pool = newIOPool(workflowIOSlots)
+	b.disk = workflowDisk{}
 	b.setNotify(func() { r.structural.Add(1) }, func() { r.counts.Add(1) })
 	r.b = b
 	return r
@@ -727,7 +752,7 @@ func TestWorkflowBoard_ResolveOffLock(t *testing.T) {
 	}
 	calls := make(chan call, 4)
 	var n atomic.Int32
-	r.b.resolver = func(_ string, src workflowRunSource) (workflowRun, bool) {
+	r.b.disk.resolve = func(_ string, src workflowRunSource) (workflowRun, bool) {
 		n.Add(1)
 		c := call{src: src, done: make(chan workflowRun)}
 		calls <- c
@@ -812,7 +837,7 @@ func TestWorkflowBoard_IOBounds(t *testing.T) {
 	var boards []*WorkflowBoard
 	for i := range 6 {
 		b := newWorkflowBoard("/projects")
-		b.io.pool, b.resolver = pool, hang
+		b.io.pool, b.disk = pool, workflowDisk{resolve: hang}
 		p := &setProc{}
 		var wfs []*workflow.Workflow
 		for j := range 3 {

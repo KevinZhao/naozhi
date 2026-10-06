@@ -66,11 +66,19 @@ type WorkflowBoard struct {
 	// last is the published state per task; ver the newest wire version.
 	last map[string]*wireState
 	ver  uint64
-	// resolve tracks each task's RunDir resolution; resolver nil leaves
-	// RunDir empty.
-	resolve  map[string]*resolveState
-	resolver workflowRunResolver
-	io       ioDispatch
+	// resolve tracks each task's RunDir resolution and result file reads,
+	// through disk (a nil resolve leaves RunDir empty); cache holds the
+	// result files read.
+	resolve map[string]*resolveState
+	disk    workflowDisk
+	io      ioDispatch
+	cache   map[string]*workflow.ResultCache
+	// For the current bind: the tasks its Tracker reported (R5), the ones
+	// a run dir scan was started for (R3a), and the reconciliation read
+	// each entry still gets (R3b). located holds run ids found on disk.
+	claimed, scanned map[string]bool
+	reconcile        bool
+	located          map[string]string
 
 	cur       atomic.Pointer[workflow.Published]
 	summaries atomic.Pointer[[]workflow.Summary]
@@ -120,6 +128,11 @@ func newWorkflowBoard(projectsRoot string) *WorkflowBoard {
 		retained:     map[string]*retainedEntry{},
 		last:         map[string]*wireState{},
 		resolve:      map[string]*resolveState{},
+		disk:         workflowDiskFS,
+		cache:        map[string]*workflow.ResultCache{},
+		claimed:      map[string]bool{},
+		scanned:      map[string]bool{},
+		located:      map[string]string{},
 		subs:         map[chan struct{}]struct{}{},
 		io:           ioDispatch{pool: workflowIO},
 		now:          time.Now,
@@ -177,6 +190,7 @@ func (b *WorkflowBoard) bind(proc workflowNotifier, workspace string) {
 	}
 	b.proc, b.set, b.applied, b.procGone, b.ended = proc, nil, 0, 0, nil
 	b.workspace, b.bindAt = workspace, b.now().UnixMilli()
+	b.claimed, b.scanned, b.reconcile = map[string]bool{}, map[string]bool{}, true
 	if ids := b.knownLocked(); len(ids) > 0 {
 		proc.KnowWorkflowTasks(ids)
 	}

@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/workflow"
 	"github.com/naozhi/naozhi/internal/metrics"
 )
@@ -176,12 +177,24 @@ func (p *ioPool) wakeWaiter() {
 	}
 }
 
-// ioJob is one background task of a board: work runs off every lock and
-// returns what to apply under b.mu (nil for nothing).
+// ioJob is one background task of a board, of a kind (ioResolve, ioRead,
+// ioLocate): work runs off every lock and returns what to apply under b.mu
+// (nil for nothing).
 type ioJob struct {
-	task string
-	work func() (apply func())
+	task, kind string
+	work       func() ioApply
 }
+
+// ioApply applies a job's result under b.mu; the func it returns, if any,
+// runs once b.mu is released (a Tracker merge, whose wake takes b.mu).
+type ioApply func() (after func())
+
+// I/O job kinds.
+const (
+	ioResolve = "resolve"
+	ioRead    = "read"
+	ioLocate  = "locate"
+)
 
 // ioDispatch is a board's background I/O. All bookkeeping is under b.mu and
 // makes no system call, so enqueueing is safe on the read loop and inside a
@@ -192,11 +205,11 @@ type ioDispatch struct {
 	inflight map[string]time.Time
 }
 
-// enqueueLocked queues job, replacing a queued one for the same task, and
-// starts what the bounds allow.
+// enqueueLocked queues job, replacing a queued one of its task and kind,
+// and starts what the bounds allow.
 func (b *WorkflowBoard) enqueueLocked(job ioJob) {
 	d := &b.io
-	if i := slices.IndexFunc(d.queue, func(q ioJob) bool { return q.task == job.task }); i >= 0 {
+	if i := slices.IndexFunc(d.queue, func(q ioJob) bool { return q.task == job.task && q.kind == job.kind }); i >= 0 {
 		d.queue[i] = job
 	} else {
 		d.queue = append(d.queue, job)
@@ -235,25 +248,30 @@ func (b *WorkflowBoard) pumpLocked() {
 // runJob runs job's work off-lock, then applies its result under b.mu and
 // hands its slot on.
 func (b *WorkflowBoard) runJob(job ioJob) {
-	var apply func()
-	func() {
+	var apply ioApply
+	var after func()
+	guard := func(f func()) {
 		defer func() {
 			if r := recover(); r != nil {
 				metrics.PanicRecoveredTotal.Add(1)
 				slog.Error("workflow board I/O panic recovered", "panic", r, "stack", string(debug.Stack()))
 			}
 		}()
-		apply = job.work()
-	}()
+		f()
+	}
+	guard(func() { apply = job.work() })
 	b.mu.Lock()
 	delete(b.io.inflight, job.task)
 	if apply != nil {
-		apply()
+		guard(func() { after = apply() })
 	}
 	b.io.pool.release()
 	b.pumpLocked()
 	b.mu.Unlock()
 	b.io.pool.wakeWaiter()
+	if after != nil {
+		guard(after)
+	}
 }
 
 // workflowRunSource is what a run's directory is resolved from: the launch
@@ -264,22 +282,31 @@ type workflowRunSource struct {
 }
 
 // workflowRun is a resolved run directory: RunDir spelled under the
-// projects root, and the session id its path names.
-type workflowRun struct {
-	RunDir, SessionID string
-}
+// projects root, Rel / ResultRel below it, the session id its path names.
+type workflowRun = claudefs.WorkflowRun
 
 // workflowRunResolver resolves a run directory under projectsRoot; it may
 // do I/O and block, so the board calls it only from the I/O dispatch.
 type workflowRunResolver func(projectsRoot string, src workflowRunSource) (workflowRun, bool)
 
 // resolveState is one task's resolution: the source it was started for
-// and, once resolved, the run directory. A changed source replaces it.
+// and, once done, whether and where it resolved. A changed source replaces
+// it, and with it the bookkeeping of the run's result file reads.
 type resolveState struct {
-	src workflowRunSource
-	ok  bool
-	run workflowRun
+	src      workflowRunSource
+	done, ok bool
+	run      workflowRun
+	// readAt is when the result file was last read (unix ms); readEnded
+	// whether a read happened with the entry terminal; owed asks for one
+	// read once resolved (a new bind's reconciliation, R3b).
+	readAt    int64
+	readEnded bool
+	owed      bool
 }
+
+// pending reports whether the run directory is still being resolved: work
+// that needs it waits, and the sweeper skips the entry.
+func (rs *resolveState) pending() bool { return rs.src.RunID != "" && !rs.done }
 
 // registerResolveLocked starts resolving w's run directory when its source
 // is new or changed. Only bookkeeping happens here; the resolver runs on the
@@ -292,17 +319,19 @@ func (b *WorkflowBoard) registerResolveLocked(w *workflow.Workflow) {
 	}
 	rs := &resolveState{src: src}
 	b.resolve[w.TaskID] = rs
-	if b.resolver == nil || src.RunID == "" {
+	if b.disk.resolve == nil || src.RunID == "" {
+		rs.done = true
 		return
 	}
-	task, root, resolver := w.TaskID, b.projectsRoot, b.resolver
-	b.enqueueLocked(ioJob{task: task, work: func() func() {
+	task, root, resolver := w.TaskID, b.projectsRoot, b.disk.resolve
+	b.enqueueLocked(ioJob{task: task, kind: ioResolve, work: func() ioApply {
 		run, ok := resolver(root, src)
-		return func() {
-			rs.ok, rs.run = ok, run
+		return func() func() {
+			rs.done, rs.ok, rs.run = true, ok, run
 			if ok && b.resolve[task] == rs {
 				b.publishLocked(true)
 			}
+			return nil
 		}
 	}})
 }
