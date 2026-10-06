@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cli/workflow"
 	"github.com/naozhi/naozhi/internal/testhelper"
@@ -25,6 +27,9 @@ type fakeDisk struct {
 	agents      map[string]string
 	resolveGate chan struct{}
 	readGate    chan struct{}
+
+	// missing makes every resolution fail, a run dir not on disk yet.
+	missing atomic.Bool
 
 	resolves, reads, locates atomic.Int32
 	inflight, peak           atomic.Int32
@@ -47,6 +52,9 @@ func (f *fakeDisk) disk() workflowDisk {
 			f.resolves.Add(1)
 			if resolveGate != nil {
 				<-resolveGate
+			}
+			if f.missing.Load() {
+				return workflowRun{}, false
 			}
 			return workflowRun{RunDir: "/projects/s/" + src.RunID, ResultRel: src.RunID + ".json", SessionID: wfSID}, true
 		},
@@ -594,5 +602,181 @@ func TestWorkflowBoard_CapDropsCache(t *testing.T) {
 	}
 	if got := taskIDs(r.pub()); len(got) != workflowBoardMaxTerminal || slices.Contains(got, "w0") {
 		t.Errorf("published %v, want the 5 latest", got)
+	}
+}
+
+// TestWorkflowSweep_ResolveRetried: CC can create the run dir just after
+// the launch receipt arrives, so a failed resolution is tried again every
+// 30s, and a run whose terminal frame was lost settles within 60s plus a
+// tick of the dir appearing. Attempts stop 10 minutes after the first.
+func TestWorkflowSweep_ResolveRetried(t *testing.T) {
+	d := newFakeDisk()
+	d.missing.Store(true)
+	r := diskRig(t, d)
+	p := &setProc{}
+	p.publish(runningWithRun("w1", wfRun))
+	r.b.bind(p, "/ws")
+	r.settleIO(t)
+	if n := d.resolves.Load(); n != 1 || r.entry(t, "w1").RunDir != "" {
+		t.Fatalf("%d resolves, run dir %q; want one failed attempt", n, r.entry(t, "w1").RunDir)
+	}
+	d.missing.Store(false)
+	d.put(wfRun, resultFile("w1"))
+	r.sweepAfter(t, 29*time.Second)
+	if n := d.resolves.Load(); n != 1 {
+		t.Fatalf("%d resolves 29s on, want no retry before 30s", n)
+	}
+	r.sweepAfter(t, time.Second)
+	testhelper.Eventually(t, func() bool { return r.entry(t, "w1").RunDir != "" }, 5*time.Second, "the retry never resolved the run dir")
+	r.sweepAfter(t, 30*time.Second)
+	r.sweepAfter(t, 30*time.Second)
+	testhelper.Eventually(t, func() bool { return r.entry(t, "w1").Status == workflow.StatusCompleted }, 5*time.Second, "the lost terminal frame was never settled from the file")
+
+	// A dir that never appears: retried every 30s for 10 minutes only.
+	d.missing.Store(true)
+	p.publish(p.Workflows().Workflows[0], runningWithRun("w2", "wf_bbbbbbbb-222"))
+	r.settleIO(t)
+	base := d.resolves.Load()
+	for range 20 {
+		r.sweepAfter(t, 30*time.Second)
+	}
+	if n := d.resolves.Load() - base; n != 20 {
+		t.Errorf("%d retries in 10 minutes, want 20", n)
+	}
+	for range 4 {
+		r.sweepAfter(t, 30*time.Second)
+	}
+	if n := d.resolves.Load() - base; n != 20 {
+		t.Errorf("%d retries after 12 minutes, want still 20", n)
+	}
+}
+
+// TestWorkflowSweep_ResolveRetryKeepsDebt: the reconciliation read a bind
+// owes survives a failed first resolution, and is made once a retry finds
+// the dir; the retry also finds a run the stream said nothing about.
+func TestWorkflowSweep_ResolveRetryKeepsDebt(t *testing.T) {
+	d := newFakeDisk()
+	d.missing.Store(true)
+	d.put(wfRun, resultFile("w1"))
+	r := diskRig(t, d)
+	p := &setProc{}
+	p.publish(runningWithRun("w1", wfRun))
+	r.b.bind(p, "/ws")
+	r.settleIO(t)
+	d.missing.Store(false)
+	r.sweepAfter(t, 30*time.Second)
+	testhelper.Eventually(t, func() bool { return r.entry(t, "w1").Status == workflow.StatusCompleted }, 5*time.Second, "the owed read never ran after the retry")
+}
+
+// TestWorkflowSweep_OrphanNotHeldByRetry: an entry whose run dir never
+// resolves is still interrupted by R4 on time; the retry runs beside it.
+func TestWorkflowSweep_OrphanNotHeldByRetry(t *testing.T) {
+	d := newFakeDisk()
+	d.missing.Store(true)
+	r := diskRig(t, d)
+	r.b.restore("k", []workflow.Ref{{TaskID: "w1", RunID: wfRun, SessionID: wfSID, Status: workflow.StatusRunning, LastObservedAt: wfT0}}, "/ws", r.now())
+	r.settleIO(t)
+	for range 4 {
+		r.sweepAfter(t, 30*time.Second)
+	}
+	if st := r.entry(t, "w1").Status; st != workflow.StatusInterrupted {
+		t.Errorf("status %s, want interrupted despite the retries", st)
+	}
+	if n := d.resolves.Load(); n < 3 {
+		t.Errorf("%d resolves, want retries while interrupted", n)
+	}
+	d.missing.Store(false)
+	d.put(wfRun, resultFile("w1"))
+	r.sweepAfter(t, 30*time.Second)
+	testhelper.Eventually(t, func() bool { return r.entry(t, "w1").Status == workflow.StatusCompleted }, 5*time.Second, "a late dir and file never overrode the orphan verdict")
+}
+
+// TestWorkflowBoard_LocateOncePerBind: a run dir scan that finds nothing
+// is not repeated by later publications of the same agents, and an entry
+// without a session id waits for one before scanning.
+func TestWorkflowBoard_LocateOncePerBind(t *testing.T) {
+	d := newFakeDisk()
+	r := diskRig(t, d)
+	w := wfEntry("w1", workflow.StatusRunning, wfRow(1, workflow.AgentRunning))
+	w.Agents[0].AgentID = "a2093755b9a9ce8c0"
+	p := &setProc{set: &workflow.Set{Version: 1, SeedWrapped: true, Workflows: []*workflow.Workflow{w}}}
+	r.b.bind(p, "/ws")
+	r.settleIO(t)
+	if n := d.locates.Load(); n != 0 {
+		t.Fatalf("%d scans without a session id, want none", n)
+	}
+	w2 := *w
+	w2.SessionID = wfSID
+	p.publish(&w2)
+	r.settleIO(t)
+	for range 5 {
+		w3 := w2
+		w3.LastObservedAt++
+		p.publish(&w3)
+		r.settleIO(t)
+	}
+	if n := d.locates.Load(); n != 1 {
+		t.Errorf("%d scans for an agent not on disk, want one per bind", n)
+	}
+}
+
+// TestCleanupLoop_SweepsWorkflowBoards: the cleanup loop's save tick runs
+// the workflow sweep, so an orphan restored from sessions.json is
+// interrupted without anyone calling the sweeper by hand.
+func TestCleanupLoop_SweepsWorkflowBoards(t *testing.T) {
+	old := saveTickInterval
+	saveTickInterval = 10 * time.Millisecond
+	t.Cleanup(func() { saveTickInterval = old })
+	r := wfRouter(t)
+	const key = "feishu:direct:alice:general"
+	entry := &storeEntry{Key: key, Backend: "claude", Workspace: t.TempDir(), SessionID: wfSID,
+		Workflows: []workflow.Ref{{TaskID: "w1", Status: workflow.StatusRunning, LastObservedAt: time.Now().UnixMilli()}}}
+	r.ss.Update(func(tx sessTx) { r.restoreSessionFromEntry(tx, key, entry) })
+	b := r.SessionFor(key).WorkflowBoard()
+	b.mu.Lock()
+	b.procGone -= 2 * workflowOrphanAfter.Milliseconds()
+	b.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.StartCleanupLoop(ctx, time.Hour)
+	testhelper.Eventually(t, func() bool {
+		w := boardEntry(r.SessionFor(key), "w1")
+		return w != nil && w.Status == workflow.StatusInterrupted
+	}, 5*time.Second, "the save tick never swept the board")
+}
+
+// TestWorkflowSweep_RacesBind: the sweeper runs while the board is bound,
+// published to and unbound over and over (RFC §11.3); under -race nothing
+// trips and the board still answers afterwards.
+func TestWorkflowSweep_RacesBind(t *testing.T) {
+	d := newFakeDisk()
+	r := diskRig(t, d)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for at := r.now(); ; at = at.Add(45 * time.Second) {
+			select {
+			case <-stop:
+				return
+			default:
+				r.b.sweep(at)
+			}
+		}
+	}()
+	for i := range 200 {
+		p := &setProc{}
+		p.publish(runningWithRun("w1", wfRun), runningWithRun("w2", "wf_bbbbbbbb-222"))
+		r.b.bind(p, "/ws")
+		if i%2 == 0 {
+			p.publish(runningWithRun("w1", wfRun))
+		}
+		r.b.procEnded(p, cli.ProcessEnd{ShimLive: i%3 == 0})
+	}
+	close(stop)
+	<-done
+	r.settleIO(t)
+	if r.b.Published() == nil {
+		t.Error("no publication after the race")
 	}
 }

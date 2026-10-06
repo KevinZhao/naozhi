@@ -495,6 +495,10 @@ func (r *Router) shouldPrune(s *ManagedSession, now time.Time) bool {
 	return !proc.Alive() // exited process past pruneTTL, no SessionID
 }
 
+// saveTickInterval is the cleanup loop's save and workflow sweep cadence;
+// tests shorten it.
+var saveTickInterval = sessionSaveInterval
+
 // cleanupLoopMaxRestarts caps panic-resurrections of the cleanup loop so a bug
 // that panics every tick fails loudly and stops instead of spinning forever.
 const cleanupLoopMaxRestarts = 10
@@ -515,6 +519,7 @@ func (r *Router) startCleanupLoop(ctx context.Context, interval time.Duration, a
 			"interval", interval)
 		return
 	}
+	saveEvery := saveTickInterval
 	go func() {
 		// A panic inside Cleanup or saveIfDirty would silently kill the loop,
 		// letting sessions accumulate past TTL and losing the periodic flush.
@@ -548,7 +553,7 @@ func (r *Router) startCleanupLoop(ctx context.Context, interval time.Duration, a
 		defer cleanupTicker.Stop()
 		// Save dirty state on sessionSaveInterval to reduce crash-recovery
 		// data loss from ~TTL/2 to one window.
-		saveTicker := time.NewTicker(sessionSaveInterval)
+		saveTicker := time.NewTicker(saveEvery)
 		defer saveTicker.Stop()
 		for {
 			select {

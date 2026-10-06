@@ -302,6 +302,10 @@ type resolveState struct {
 	readAt    int64
 	readEnded bool
 	owed      bool
+	// firstAt is when resolving began for the source, doneAt when the
+	// latest attempt finished (unix ms): a failed resolution is tried
+	// again until workflowResultRetryFor past firstAt.
+	firstAt, doneAt int64
 }
 
 // pending reports whether the run directory is still being resolved: work
@@ -317,21 +321,40 @@ func (b *WorkflowBoard) registerResolveLocked(w *workflow.Workflow) {
 	if rs := b.resolve[w.TaskID]; rs != nil && rs.src == src {
 		return
 	}
-	rs := &resolveState{src: src}
+	rs := &resolveState{src: src, firstAt: b.now().UnixMilli()}
 	b.resolve[w.TaskID] = rs
-	if b.disk.resolve == nil || src.RunID == "" {
+	b.startResolveLocked(w.TaskID, rs)
+}
+
+// startResolveLocked resolves rs's source on the I/O dispatch.
+func (b *WorkflowBoard) startResolveLocked(task string, rs *resolveState) {
+	if b.disk.resolve == nil || rs.src.RunID == "" {
 		rs.done = true
 		return
 	}
-	task, root, resolver := w.TaskID, b.projectsRoot, b.disk.resolve
+	root, resolver, src := b.projectsRoot, b.disk.resolve, rs.src
 	b.enqueueLocked(ioJob{task: task, kind: ioResolve, work: func() ioApply {
 		run, ok := resolver(root, src)
 		return func() func() {
-			rs.done, rs.ok, rs.run = true, ok, run
+			rs.done, rs.ok, rs.run, rs.doneAt = true, ok, run, b.now().UnixMilli()
 			if ok && b.resolve[task] == rs {
 				b.publishLocked(true)
 			}
 			return nil
 		}
 	}})
+}
+
+// retryResolveLocked starts resolving task's source again when the last
+// attempt failed: CC may create the run directory just after its launch
+// receipt arrives, so a miss is not final. Attempts are workflowResultRetry
+// apart and stop workflowResultRetryFor after the first.
+func (b *WorkflowBoard) retryResolveLocked(task string, rs *resolveState, ms int64) {
+	if b.disk.resolve == nil || !rs.done || rs.ok || rs.src.RunID == "" || b.resolve[task] != rs ||
+		ms-rs.doneAt < workflowResultRetry.Milliseconds() || ms-rs.firstAt > workflowResultRetryFor.Milliseconds() {
+		return
+	}
+	next := &resolveState{src: rs.src, owed: rs.owed, firstAt: rs.firstAt}
+	b.resolve[task] = next
+	b.startResolveLocked(task, next)
 }

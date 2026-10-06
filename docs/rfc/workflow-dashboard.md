@@ -1384,8 +1384,9 @@ Tracker 当前版、CoW 期间的旧版、board 盖过 Rev 的上一发布版（
      直到卡死的任务返回；返回的结果按 taskId 与条目代数复核后丢弃。v3 的"卡死即允许发起新的"会在挂死的 FS 上每 board 每 30s 泄漏一个
      goroutine 与 fd、没有上限；现在最多卡住 8 个。RunDir 尚未解析完成的条目不是候选。候选：
      - `IsUnsettled`、`RunID` 已知、`now − LastObservedAt ≥ 60s`、距上次 stat ≥ 60s；
-     - 终态、`!ResultLoaded`、`RunID` 已知，且（`now − EndedAt ≤ 10min`，或 `Source=ref` 且本次进程生命期内尚未尝试过），距上次 stat ≥ 30s
-       （第 4 步的重试；后一种是 R0 恢复的终态条目补行，§5.9）；
+     - 终态、`!ResultLoaded`、`RunID` 已知，且 `now − EndedAt ≤ 10min`，距上次 stat ≥ 30s（第 4 步的重试）；R0 恢复的终态条目的补行
+       不靠这个候选：RunDir 解析成功的发布里 `diskWorkLocked` 已对每个尚未读过的终态条目发起读取（PR-9；v5 写的第二个候选"`Source=ref` 且尚未尝试过"
+       不可达，删除）；
      - **R4**（§5.9）：`IsUnsettled`、board 已无存活进程（未绑定，或绑定进程已结束）持续 ≥ `workflowOrphanAfter = 90s`
        （3 个 reconcile tick，常量）、且本轮 stat 未命中 taskId 匹配的结果文件 → `interrupted`；
      - **R5**（§5.9）：board **有**存活进程，retained 中的 `IsRunning` 条目自本次 bind 起 ≥ `workflowUnclaimedAfter` 未被当前 Tracker
@@ -1393,6 +1394,7 @@ Tracker 当前版、CoW 期间的旧版、board 盖过 Rev 的上一发布版（
 
      stat 命中后读取并经 `ApplyResultFile`。taskId 不匹配（续跑中的旧文件）→ 视为未命中。
      实际延迟：丢失终态帧后 ≤ 60s（无观测阈值）+ ≤ 30s（tick 间隔）= **≤ 90s**。
+     R5 判成 `unknown` 或 `paused` 的条目仍是 `IsUnsettled`，会继续每 60s 做一次静默读取（一次 open，受 I/O 池约束），直到被容量上限裁掉或 board 消失；接受（PR-9）。
      （PR-9）stat 与读取是同一个任务：经 `OpenRegularIn` 打开即读，ENOENT 即未命中。没有可读的 run dir 的条目（RunID 未知，或解析已完成但失败）
      在 R4 / R5 的条件成立时直接判定、不等 stat——"RunID 未知视为未命中"；只有解析**还在进行中**的条目跳过。R4 / R5 的判定在读取返回、
      回到 b.mu 内时按当时的状态重算一次，条件已不成立（期间重接了进程、Tracker 认领了它）就不改。R4 的那次读取算作该终态条目的首次读取，
@@ -1547,7 +1549,11 @@ type WorkflowBoard struct { // 导出类型名、全部字段未导出：server 
   `EvalSymlinks(workspace)`，用 `ProjectSlug(解析结果)` 求 ProjectDir；与 `ProjectSlug(workspace)` 不同时两个候选依次试（EvalSymlinks 失败只试原拼写）。
   v4 写的是纯字符串运算：ring 绕回后重启只剩来源 2、3，symlink workspace 下它们指向不存在的目录，RunDir 永远解析不出，drill-in 一直 202，R0 的终态条目也补不了行。
   EvalSymlinks 是系统调用，所以它只在这个锁外任务里做。解析失败
-  （ok=false）也记下，元组不变就不重试。依赖 RunDir 的工作都等它完成：终态后的结果文件读取（§5.6(4)）排在它之后；sweeper 与 R3 跳过未解析的
+  （ok=false）也记下，但**不是终局**（PR-9）：launch receipt 与 CC 创建 run 目录几乎同时（实测 25 个历史 run 中 6 个的目录晚于 receipt 0.1–4ms），
+  naozhi 读到 receipt 时目录可能还没有。v5 的"元组不变就不重试"会让这个 run 的 RunDir 永远为空、结果文件永不读取、drill-in 永远 202。
+  所以 sweeper 对 `RunID` 已知、解析失败的条目，每隔 `workflowResultRetry`（30s）以同一来源元组重新解析，到首次登记起
+  `workflowResultRetryFor`（10min）为止（元组变化则重新计时）；R4 / R5 不等重试，照旧在条件成立时直接判定，之后目录与结果文件出现，
+  终态候选的读取仍以文件为准（可逆）。该 bind 欠的 R3b 读取随重试保留。依赖 RunDir 的工作都等它完成：终态后的结果文件读取（§5.6(4)）排在它之后；sweeper 与 R3 跳过未解析的
   条目；drill-in 返回 202 pending（§8.2，与"transcript 尚未落盘"同一语义）；HTTP 不返回 result / logs，置 `result_unavailable`（§6.2）。
   测试：用计数型 fake resolver 断言在 `r.ss.Update` 内 bind、在 readLoop 上 wake 都**零次**同步调用；resolver 阻塞在 channel 上时 wake / bind
   照常返回、其他 board 不受影响；来源元组在解析途中变化时旧结果被丢弃。
@@ -1689,7 +1695,7 @@ R0  router_restore：storeEntry.Workflows（Ref）→ board.retained
       b.procGone = 恢复时刻；
       终态条目没有行（Ref 不带 agents）：RunID 已知的，在 RunDir 解析完成后经 I/O 派发做一次 MergeResultFile（行 + 总计 + 结果缓存，
       按普通 board 版本推进发布）——否则没有 shim 的重启之后，展开恢复出来的终态 workflow 只有 header（sweeper 的终态候选要求
-      now − EndedAt ≤ 10min，R3b 又只在重接时跑）；sweeper 的第二个候选为此放宽到"Source=ref 且尚未尝试过"（§5.6(6b)），HTTP 的缓存缺失路径
+      now − EndedAt ≤ 10min，R3b 又只在重接时跑）；由 `diskWorkLocked` 在 RunDir 解析成功的那次发布里对每个尚未读过的终态条目发起一次读取（不再放宽 sweeper 的候选），HTTP 的缓存缺失路径
       调用同一个 board 方法（§6.2.1）
 R1  ReconnectShimsCtx → SpawnReconnect（wrapper.go:586-642）:
       DrainReplay → proc 构造（Tracker 已在）
@@ -1709,7 +1715,7 @@ R3  紧随其后（SetCwdForLinker 已于 :405-407 执行）由一个闭包经 b
      每次 bind 每个 task 至多一次，条目第一次带上 agentId 时发出——种子里没有快照时，下一张 live 快照才带来 agentId。spawn / respawn 的 bind
      同样对账：每个条目至多一次 open。）
     所有路径经 claudefs.ResolveWorkflowRunDir（§8.1），所有文件 / 目录经 root 锚定的 osutil.OpenRegularIn / OpenDirIn + 有界 ReadDir（§10）：
-      a. 缺 RunID：OpenDirIn 打开 <ProjectSessionDir>/subagents/workflows/（ProjectDir 与来源 2 相同，先 EvalSymlinks(workspace)；SessionID 为空则跳过 R3a；
+      a. 缺 RunID：OpenDirIn 打开 <ProjectSessionDir>/subagents/workflows/（ProjectDir 与来源 2 相同，先 EvalSymlinks(workspace)；SessionID 为空则暂不做 R3a，等条目带上 SessionID 的那次发布再做；
          被换成 FIFO / symlink 时立即报错、不阻塞），f.ReadDir(257) 列目录（> 256 项即放弃并计数，
          名称过 runID 正则），找包含快照中任一 agent-<agentId>.jsonl 的 run dir（agentId 随机 a+16hex，无歧义）
          （PR-9：`claudefs.LocateWorkflowRun`；每个 run dir 只对前 4 个合法 agentId 各做一次 root 锚定的 Lstat，且只认 regular file，

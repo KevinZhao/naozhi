@@ -95,3 +95,38 @@ func TestWorkflowBoard_RealDiskResultFIFO(t *testing.T) {
 		t.Errorf("status %s, %d rows; want the orphan interrupted past the FIFO", w.Status, len(w.Agents))
 	}
 }
+
+// TestWorkflowBoard_RealDiskRunDirAfterReceipt: the launch receipt can be
+// read before CC has created the run dir. The first resolution fails, a
+// later sweep finds the dir, and the run whose terminal frame never came
+// settles from its result file.
+func TestWorkflowBoard_RealDiskRunDirAfterReceipt(t *testing.T) {
+	root, _, resultPath := realRunLayout(t)
+	projectDir := filepath.Dir(filepath.Dir(filepath.Dir(resultPath)))
+	runDir := claudefs.WorkflowRunDir(claudefs.SubagentsDir(projectDir, wfSID), wfRun)
+	hidden := runDir + ".hidden"
+	if err := os.Rename(runDir, hidden); err != nil {
+		t.Fatal(err)
+	}
+	r := newWFRig(t)
+	r.b.projectsRoot, r.b.disk = root, workflowDiskFS
+	p := &setProc{}
+	w := runningWithRun(probeTask, wfRun)
+	w.LaunchTranscriptDir = runDir
+	p.publish(w)
+	r.b.bind(p, "/elsewhere")
+	r.settleIO(t)
+	if got := r.entry(t, probeTask).RunDir; got != "" {
+		t.Fatalf("run dir %q resolved before it existed", got)
+	}
+	if err := os.Rename(hidden, runDir); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		r.sweepAfter(t, 30*time.Second)
+	}
+	testhelper.Eventually(t, func() bool { return r.entry(t, probeTask).Status == workflow.StatusCompleted }, 5*time.Second, "the run never settled once its dir appeared")
+	if got := r.entry(t, probeTask).RunDir; got != runDir {
+		t.Errorf("run dir %q, want %q", got, runDir)
+	}
+}

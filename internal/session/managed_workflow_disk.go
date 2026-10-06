@@ -107,7 +107,7 @@ func (b *WorkflowBoard) diskWorkLocked(p *workflow.Workflow, live bool) {
 	if rs.ok && !p.ResultLoaded && (rs.owed || (workflow.IsTerminal(p.Status) && !rs.readEnded)) {
 		b.enqueueReadLocked(p, rs, missNothing)
 	}
-	if p.RunID == "" && live && b.bindWrapped && !b.scanned[id] {
+	if p.RunID == "" && p.SessionID != "" && live && b.bindWrapped && !b.scanned[id] {
 		var agents []string
 		for i := range p.Agents {
 			if a := p.Agents[i].AgentID; a != "" {
@@ -257,6 +257,9 @@ func (b *WorkflowBoard) sweep(now time.Time) {
 		if rs == nil || rs.pending() || w.ResultLoaded {
 			continue
 		}
+		// The failed state still decides R4 / R5 below; a retry that finds
+		// the dir is read from the next tick on.
+		b.retryResolveLocked(id, rs, ms)
 		since := ms - rs.readAt
 		if workflow.IsUnsettled(w.Status) {
 			miss := b.missLocked(id, ms)
@@ -270,7 +273,7 @@ func (b *WorkflowBoard) sweep(now time.Time) {
 			}
 			continue
 		}
-		recent := ms-w.EndedAt <= workflowResultRetryFor.Milliseconds() || (w.Source == workflow.SourceRef && !rs.readEnded)
+		recent := ms-w.EndedAt <= workflowResultRetryFor.Milliseconds()
 		if rs.ok && recent && since >= workflowResultRetry.Milliseconds() {
 			b.enqueueReadLocked(w, rs, missNothing)
 		}
