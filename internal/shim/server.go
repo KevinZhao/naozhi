@@ -175,7 +175,7 @@ func Run(cfg Config) error {
 
 	// SIGTERM/SIGINT: always arm the grace timer, even with a client attached
 	// (otherwise systemctl stop is ignored until SIGKILL). Only a fresh client
-	// Attach cancels it (setClient clears graceTimer); a plain Detach does not.
+	// Attach cancels it (admitClient clears graceTimer); a plain Detach does not.
 	sigCh := make(chan os.Signal, 1)
 	notifyTerminate(sigCh)
 	go func() {
@@ -352,6 +352,8 @@ type shimServer struct {
 	// a stale true falls through to enqueueWrite, which is nil-safe.
 	clientAttached atomic.Bool
 	clientConn     net.Conn      // current connected client (at most one)
+	clientGen      uint64        // attach generation of clientConn
+	lastAttachGen  uint64        // last generation handed out at a hello snapshot
 	writeCh        chan []byte   // buffered channel for async writes to client
 	clientDone     chan struct{} // closed to signal writer goroutine + enqueueWrite to stop
 	graceTimer     *time.Timer
@@ -392,15 +394,33 @@ func (s *shimServer) resetIdleTimer(d time.Duration) {
 	s.idleTimer = time.NewTimer(d)
 }
 
-// setClient atomically replaces the current client and returns a write channel + done channel.
-// The old client (if any) is kicked. Must only be called AFTER auth succeeds.
-func (s *shimServer) setClient(conn net.Conn) (writeCh chan []byte, clientDone chan struct{}) {
+// admitResult is admitClient's verdict on a handler that finished its replay.
+type admitResult int
+
+const (
+	admitOK         admitResult = iota
+	admitSuperseded             // a client with a later hello is already active
+	admitBusy                   // the CLI was alive and another client is active
+)
+
+// admitClient decides, under one s.mu hold, whether conn becomes the active
+// client. gen orders handlers by hello snapshot, so a slow handler cannot kick
+// a client that authenticated after it; with a live CLI an active client is
+// never kicked. On admitOK the old client (if any) is kicked and conn's write
+// channel and done channel are returned. Must only be called AFTER auth.
+func (s *shimServer) admitClient(conn net.Conn, gen uint64, cliAlive bool) (writeCh chan []byte, clientDone chan struct{}, res admitResult) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Kick old client: close its done channel, then its conn. Never close
-	// writeCh — the writer goroutine drains it.
 	if s.clientConn != nil {
+		if cliAlive {
+			return nil, nil, admitBusy
+		}
+		if s.clientGen > gen {
+			return nil, nil, admitSuperseded
+		}
+		// Kick old client: close its done channel, then its conn. Never
+		// close writeCh — the writer goroutine drains it.
 		if s.clientDone != nil {
 			close(s.clientDone)
 		}
@@ -408,6 +428,7 @@ func (s *shimServer) setClient(conn net.Conn) (writeCh chan []byte, clientDone c
 	}
 
 	s.clientConn = conn
+	s.clientGen = gen
 	s.writeCh = make(chan []byte, 256)
 	s.clientDone = make(chan struct{})
 	s.clientAttached.Store(true)
@@ -418,7 +439,7 @@ func (s *shimServer) setClient(conn net.Conn) (writeCh chan []byte, clientDone c
 		s.graceTimer = nil
 	}
 
-	return s.writeCh, s.clientDone
+	return s.writeCh, s.clientDone, admitOK
 }
 
 // clearClient removes the current client if it matches conn.
