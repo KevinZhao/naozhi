@@ -126,6 +126,8 @@ type Dispatcher struct {
 
 	// groupScope splits a group chat's sessions (sessionChatID).
 	groupScope GroupScope
+	// threadAutoOpen answers a group @mention in a new thread (openThread).
+	threadAutoOpen bool
 }
 
 // keyForChat returns the routed session key for the chat coordinates and
@@ -217,6 +219,9 @@ type DispatcherConfig struct {
 	Budget BudgetGate
 	// GroupScope is what one group-chat session covers; zero is per thread.
 	GroupScope GroupScope
+	// ThreadAutoOpen answers a group @mention outside any thread in a new
+	// thread under it.
+	ThreadAutoOpen bool
 }
 
 // ErrTurnsWireupMissing is returned by NewDispatcher when DispatcherConfig.Turns
@@ -289,6 +294,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		rateLimitReplies:      denyThrottle{window: rateLimitReplyWindow},
 		budgetReplies:         denyThrottle{window: budgetReplyWindow},
 		groupScope:            cfg.GroupScope,
+		threadAutoOpen:        cfg.ThreadAutoOpen,
 	}
 	if !isNilInterface(cfg.Budget) {
 		d.budget = cfg.Budget
@@ -350,6 +356,9 @@ func fallbackDedupKey(msg platform.IncomingMessage, now time.Time) string {
 // preparedInbound is the per-message state prepareInbound resolves for the
 // dispatch-strategy tail of BuildHandler (#1527).
 type preparedInbound struct {
+	// msg is the message as the turn sees it (openThread may have put it in
+	// a thread).
+	msg       platform.IncomingMessage
 	lg        *slog.Logger
 	agentID   string
 	cleanText string
@@ -458,6 +467,8 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	d.messageCount.Add(1)
 	dispatchMessageTotal.Add(1)
 
+	msg = d.openThread(msg)
+
 	// KeyResolver is the single source of truth for project-binding
 	// precedence and ExtraArgs merge (docs/rfc/key-resolver.md §3.1).
 	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, d.sessionChatID(msg), agentID)
@@ -471,6 +482,7 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	}
 
 	return preparedInbound{
+		msg:       msg,
 		lg:        lg,
 		agentID:   agentID,
 		cleanText: cleanText,
@@ -488,7 +500,7 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		if !ok {
 			return
 		}
-		o := d.newIMOrigin(msg, p.lg, p.key, p.agentID, p.opts, imMessage, len(p.cleanText), len(p.images))
+		o := d.newIMOrigin(p.msg, p.lg, p.key, p.agentID, p.opts, imMessage, len(p.cleanText), len(p.images))
 		d.submit(ctx, o, turn.Request{Key: p.key, Text: p.cleanText, Images: p.images})
 	}
 }

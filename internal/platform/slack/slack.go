@@ -499,6 +499,11 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 		Text:      text,
 		MentionMe: mentionMe,
 	}
+	// A reply with thread_ts set to a top-level message's ts opens a thread
+	// under it; its replies then carry that ts as their thread_ts.
+	if ev.ThreadTimeStamp == "" {
+		msg.SelfThread = ev.TimeStamp
+	}
 
 	s.dispatch.TryGo("slack", func() { s.handler(s.ctx, msg) },
 		"chat", msg.ChatID, "user", msg.UserID)
