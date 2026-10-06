@@ -24,7 +24,7 @@ func (s *ManagedSession) BeginCostWindow() {
 	}
 	slog.Warn("cost: cost window opened while already open; the earlier window's spend is booked to the session",
 		"session", osutil.SanitizeForLog(s.key, 128))
-	s.appendSessionRows(prev.Sub(costledger.Totals{}), newRunID())
+	s.appendSessionRows(prev.Sub(costledger.Totals{}), newRunID(), nil)
 }
 
 // EndCostWindow closes the window and returns the spend collected in it, which
