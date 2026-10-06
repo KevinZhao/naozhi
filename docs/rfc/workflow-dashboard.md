@@ -1290,6 +1290,9 @@ running（5），否则探针行 6 的 B（`state:"start"`，只有 queuedAt）�
 - **暴露方式**：`Process.Workflows() *workflow.Set`。session 层通过可选接口类型断言获取
   （`workflowNotifier`），仿 `codeChangeNotifier`（`managed_code_change.go:11`）；**不**给
   `processIface`（`managed.go:149`）加方法，免得波及 `testutil.TestProcess` 与 facet pin。
+  board 对 Tracker 的另两个写操作同样经 Process 转发（PR-7）：bind 时下发已知 task_id 用 `Process.KnowWorkflowTasks(ids)`，
+  结果文件合并用 `Process.ApplyWorkflowResult(rf) bool`（即 `Tracker.ApplyResultFile`，返回前同步调回调，所以同样要放开 b.mu 再调，§5.6(4)）。
+  于是 `workflowNotifier` 是这四个方法，PR-8 不改 `internal/cli`，session 的测试替身也不必构造 Tracker。
 
 ### 5.3 内存上限
 
@@ -1399,7 +1402,7 @@ Tracker 当前版、CoW 期间的旧版、board 盖过 Rev 的上一发布版（
 | L0 | 正常 | 全部功能 |
 | L1 | 某些项的**非身份**字段类型错（`WorkflowDecode=Partial`，且通过 §4.1.1 的身份复核） | 坏字段置零，计数 `naozhi_cli_workflow_items_partial_total`（expvar），`Degraded=decode_error`；其余正常 |
 | L1' | 条目本身或身份字段（type/index/phaseIndex/agentId/state）类型错，或 Partial 帧身份复核不过（按 Failed） | **保留上一版的行**，只更新 header；计数 `naozhi_cli_workflow_items_identity_total`，`Degraded=decode_error` |
-| L1'' | 快照行的 envelope 超过 naozhi 的 10MiB 行上限（§1.2.3 天花板，约 4k-7k agents） | readLoop 的 oversize 分支（`process_readloop.go:189-195`，`line` 里留有前 ~10MiB）在跳过之前窥视前 1KiB：含转义形态的 `\"subtype\":\"task_progress\"` 且能截出 `\"task_id\":\"<id>\"`、该 id 是已知 workflow → `Tracker.NoteDropped(id, now)`：**保留上一版的行**，置 `Degraded=snapshot_dropped`（chip "明细过大，已停止更新"），计数 `workflow_lines_oversize`；下一张被接受的快照清除该标记（快照只增不减，实际上通常不会再出现）。截不出 id 只计数。不冻结 `LastObservedAt`（CLI 仍活着、帧仍在到达） |
+| L1'' | 快照行的 envelope 超过 naozhi 的 10MiB 行上限（§1.2.3 天花板，约 4k-7k agents） | readLoop 的 oversize 分支（`process_readloop.go:189-195`，`line` 里留有前 ~10MiB）在跳过之前窥视前 1KiB：`{"type":"stdout",` 开头的 envelope、其 `"line":"` 的值以转义形态的 `{\"type\":\"system\",\"subtype\":\"task_progress\"` 开头（行首锚定，同 §5.1(3)：tool input 里同样的键只多转义一层，照样会被子串匹配命中）即计数 `naozhi_cli_workflow_lines_oversize_total`（PR-7）；能在其后截出首个 `\"task_id\":\"<id>\"`（id 过 `^[a-z0-9]{1,32}$`）→ `Tracker.NoteDropped(id, now)`，id 是在跟踪、未终态的 workflow 时**保留上一版的行**，置 `Degraded=snapshot_dropped`（chip "明细过大，已停止更新"）；下一张被接受的快照清除该标记（快照只增不减，实际上通常不会再出现）。截不出 id、或 id 不是 workflow 的只计数。不冻结 `LastObservedAt`（CLI 仍活着、帧仍在到达） |
 | L2 | `workflow_progress` 整体失败 / 缺失 / 被 withhold | header 退化为 task_started + description + usage（名称、当前 "phase: label"、tokens、tool uses、elapsed），`Degraded=no_snapshot`；withhold 的 phase 标题原样显示为 `phase N`（v4 用 journal / meta.json 回填，v5 删除，NG9） |
 | L3 | 连 task_started 都没见到（replay 被淘汰） | 仅当 `IsWorkflowTask` 为真（见下）才建条目；名称回落 `summary` |
 | L4 | CC 完全改协议 | 无条目，dashboard 与今天一致；`skip unparseable event` 日志可观测（L4 的帧到不了 Tracker，PR-6 不另设 `workflow_decode_errors` 计数） |
@@ -2577,7 +2580,7 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
 | hook 快路径 | `"label":"hook_tests"` 的快照**不再被跳过**；assistant tool_use `input` 含 `{"subtype":"hook_started"}` / `{"type":"control_response"}` 的帧照常交付（旧代码必失败）；真实 hook / control_response 帧仍走快路径；键序变化的 control_response 经兜底仍产出 ack |
 | `FormatToolInput` | Workflow input 含 `script` / `args` 时 Detail 不含其任何子串；有 `scriptPath` 时只出 basename |
 | eventCh / readEventBuf | 出 `deliverEvent` 的 Event 与喂完快照帧后的 `p.readEventBuf[*]`，`WorkflowProgress == nil`（照 `process_live_version_test.go:25` 的接缝写法）；**killCh 已关闭时喂一张快照帧**（dispatch 提前 `return shimDispatchReturn`）后 `readEventBuf[*]` 同样为 nil |
-| 超长行（§5.7 L1''） | fake shim 写一个 envelope > 10MiB 的已知 workflow 快照行：readLoop 跳过、Process 不结束、该 workflow `Degraded=snapshot_dropped` 且保留旧行、`workflow_lines_oversize` +1；截不出 task_id 的超长行只计数；之后一张正常快照清除标记 |
+| 超长行（§5.7 L1''） | fake shim 写一个 envelope > 10MiB 的已知 workflow 快照行：readLoop 跳过、Process 不结束、该 workflow `Degraded=snapshot_dropped` 且保留旧行、`naozhi_cli_workflow_lines_oversize_total` +1；截不出 task_id、或 task 不是 workflow 的 task_progress 超长行只计数，非 task_progress 的超长行（含 tool input 里带同样键的）不计；之后一张正常快照清除标记 |
 | Tracker 规范化 | 规范化表逐行（含 blocked / 排队 catch / 限流撤销 → failed，skipped，行 6 的 B → queued）；限流重排队后 `AgentID` 粘滞、`State=queued`；重试换 id 进 `PrevAgentIDs`（≤8）；先 redact 后截断（密钥跨 200 rune 边界仍被遮）；Name / Description / Current / NotifySummary / RawState / RawStatus 的上限；**记忆化**：原串不变时不再调用 `RedactSecrets`（计数接缝），原串变化时重算；Partial 帧身份复核不过时保留旧行 |
 | Tracker 生命周期 | probe 回放后状态与 `wf_*.json` 一致；StartedAt：live task_started 取观测时刻、SeedFromReplay 不取观测时刻、结果文件 `startTime` 覆盖其余来源，`Src.StartedAt` 记对等级；**SessionID**：task_started / launch 帧的 `session_id` 记等级 3、只见过 progress 帧时取最早一帧的值记等级 1、之后更低等级的帧不覆盖；Name：真名记等级 3、summary 回落记等级 1；description-only 帧只改 header 且不清 agent；`task_updated` 先于 notification 置终态；notification `stopped` → killed；终态后 running→stopped；终态后 progress 被忽略；两个 workflow 交错；2000 行 `AgentsCapped`；withheld（`phase N` 原样显示、无 promptPreview）；未知 state/status 透传 |
 | `IsWorkflowTask` / L3 | `a…` id 的 task_progress 带 `summary`、无 task_started/workflow_progress → **不建条目**；带 `subagent_type` → 否；Ref 已知的 task_id → 是（**seed 之前经 `ReconnectHooks` 交来的集合同样生效**）；**规则 2b**：已有 builder 的 task 的 task_updated / task_notification / description-only 帧 → 是、`ev.WorkflowTask` 为真；`background_tasks_changed` 帧不影响判定 |
@@ -2789,6 +2792,10 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   `process_event_query.go`、`wrapper.go`（:597-641，`startReadLoop` 在 :641；`ReconnectHooks.KnownWorkflowTasks`）、测试。
 - 测试：用 fake shim 逐行喂 probe → Set 正确；空闲期（无 Send）同样更新；replay 种子 + live 无竞态；`KnownWorkflowTasks` 在 seed 时生效；
   非 workflow 的带 summary 的 task_progress 不打 TaskType；§11.2 超长行。另开 issue：shim 遇 `ErrTooLong` 结束 stdout 循环（§13 R14）。
+- 落地的 API（PR-8 用；`internal/cli/process_workflow.go`）：`Process.Workflows() *workflow.Set`（无锁，永不为 nil）、`SetOnWorkflowChange(fn func())`
+  （nil 清除；在写者 goroutine 上、Tracker.mu 之外调用）、`KnowWorkflowTasks(ids []string)`、`ApplyWorkflowResult(*workflow.ResultFile) bool`；
+  `ReconnectHooks.KnownWorkflowTasks []string`；workflow 的 `KindTaskProgress` / `KindTaskDone` 条目带 `TaskType=local_workflow`（取自 `ev.WorkflowTask`）；
+  计数 `naozhi_cli_workflow_lines_oversize_total`（`docs/ops/pprof.md`）。InjectHistory 认 TaskType 的过滤 PR-2 已落地，本 PR 只补上打标。
 - 验收：`go test -race ./internal/cli/...` 绿。
 - 依赖：PR-6、PR-3（同改 SpawnReconnect / wrapper.go，避免冲突）。
 
