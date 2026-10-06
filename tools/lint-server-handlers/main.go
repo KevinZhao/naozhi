@@ -28,6 +28,8 @@
 //     (rule_sublock.go).
 //   - no_late_setters: session / cron / sysession / upstream take their
 //     collaborators at construction (rule_late_setters.go).
+//   - concrete_router: only the server package's wiring files name
+//     *session.Router (rule_concrete_router.go).
 //   - wire_egress / evententry_kind: an EventEntry leaves only as its wire view
 //     and its kind is a clievent.Kind* constant. Typed over the whole module, so
 //     they run from main beside collectViolations (whose tests use fixtures).
@@ -95,6 +97,7 @@ var ruleIDs = []string{
 	"sublock_encapsulation",
 	"no_late_setters",
 	"turn_boundary",
+	"concrete_router",
 	"wire_egress",
 	"evententry_kind",
 }
@@ -232,6 +235,10 @@ func collectViolations(serverPkg, dashboardPkg string, exempts *exemptions, now 
 	// turn_boundary: G-a/G-b/G-d gate #3004's turn-orchestration merge in
 	// before any structural move (#2897 T3004 A1).
 	vs = append(vs, scanTurnBoundary(serverPkg)...)
+
+	// concrete_router: runtime server code holds the router through a
+	// consumer interface (#3431).
+	vs = append(vs, scanConcreteRouter(serverPkg)...)
 
 	// Rule 5: stale_exemption
 	vs = append(vs, scanStaleExemption(exempts, now)...)

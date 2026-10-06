@@ -71,6 +71,12 @@ func newTestServerHS(p *mockPlatform) (*Server, *handlerSet) {
 	})
 }
 
+// routerOf returns the concrete router a test fixture built srv with, for the
+// test-only Router methods (InjectSession, Shutdown, …) serverRouter omits.
+func routerOf(srv *Server) *session.Router {
+	return srv.router.(*session.Router)
+}
+
 func newTestServer(p *mockPlatform) *Server {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": p}

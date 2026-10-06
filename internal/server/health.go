@@ -15,7 +15,7 @@ import (
 
 // HealthHandler serves the /health endpoint with system status information.
 type HealthHandler struct {
-	router        *session.Router
+	router        healthRouter // nil interface when ServerOptions.Router is nil
 	auth          *auth.Handlers
 	startedAt     time.Time
 	workspaceID   string

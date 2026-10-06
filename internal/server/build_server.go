@@ -97,7 +97,8 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	// Dependencies only the build steps below read: they reach the dispatcher,
 	// the Hub and the handlers through hs.wiring and are not kept on Server.
 	w := &wiring{
-		dedup: platform.NewDedup(defaultDedupCapacity),
+		router: router,
+		dedup:  platform.NewDedup(defaultDedupCapacity),
 		queue: turn.QueueOptions{
 			MaxDepth:     opts.Queue.MaxDepth,
 			CollectDelay: opts.Queue.CollectDelay,
@@ -119,12 +120,17 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		runTelemetry:  opts.Relays.RunTelemetry,
 	}
 
+	// The one typed-nil unwrap for the runtime router views: a nil
+	// *session.Router boxed into serverRouter / healthRouter would read
+	// non-nil and defeat every `router != nil` guard behind them.
+	srvRouter, healthR := routerViews(router)
+
 	s := &Server{
 		addr:             addr,
 		mux:              http.NewServeMux(),
 		shutdownComplete: make(chan struct{}),
 		platforms:        platforms,
-		router:           router,
+		router:           srvRouter,
 		logger:           opts.Logger,
 		claudeDir:        claudeDir,
 		noOutputTimeout:  opts.Watchdog.NoOutput,
@@ -186,7 +192,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		w.bcast.BroadcastSessionsUpdate,
 	)
 
-	s.discoveryCache = newDiscoveryCache(claudeDir, s.router.ManagedExcludeSets, opts.ProjectManager)
+	s.discoveryCache = newDiscoveryCache(claudeDir, router.ManagedExcludeSets, opts.ProjectManager)
 
 	hs.discoveryH = buildDiscoveryHandlers(opts, claudeDir, s.discoveryCache, s.nodes, s.nodeCache, w.bcast.BroadcastSessionsUpdate, s.appCtx)
 	hs.projectH = buildProjectHandlers(opts, resolver, s.nodes, s.nodeCache, s.hub.ctx)
@@ -212,7 +218,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	// argument rather than a field back-filled from Start.
 	s.dispatcher = s.buildDispatcher(w)
 
-	hs.healthH = buildHealthHandler(opts, s, w)
+	hs.healthH = buildHealthHandler(opts, s, w, healthR)
 
 	s.attachReverseNodeServer(opts.Remote.ReverseServer)
 
@@ -229,6 +235,15 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	s.registerDashboard(hs)
 
 	return s, hs
+}
+
+// routerViews boxes r into the runtime router interfaces, leaving both nil
+// interfaces when r is nil.
+func routerViews(r *session.Router) (serverRouter, healthRouter) {
+	if r == nil {
+		return nil, nil
+	}
+	return r, r
 }
 
 // warnUnsetAllowedRoot reports an unset allowed_root, the one
@@ -252,7 +267,7 @@ func warnUnsetAllowedRoot(opts ServerOptions) {
 // handlers exist, so the fan-out is never half-wired while WarmHistoryCache
 // runs.
 func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore *discovery.RetiredStore, agentIDs []string, tag string) *dashsession.Handlers {
-	router := s.router
+	router := w.router
 	// Typed-nil unwrap before the interface boxing (#2561). dashsession's Deps
 	// fields became consumer-side interfaces, and dashsession nil-guards three
 	// of them (projectMgr ×3, retiredStore ×5, router ×1). Assigning a nil
@@ -320,10 +335,10 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 // buildHealthHandler builds the server-owned probes (/health, /livez,
 // /readyz). The dispatcher exists by now, so its metrics closure is a
 // constructor argument (#2633).
-func buildHealthHandler(opts ServerOptions, s *Server, w *wiring) *HealthHandler {
+func buildHealthHandler(opts ServerOptions, s *Server, w *wiring, router healthRouter) *HealthHandler {
 	return &HealthHandler{
 		dispatcherMetrics:  s.dispatcher.Metrics,
-		router:             s.router,
+		router:             router,
 		auth:               s.auth,
 		startedAt:          w.startedAt,
 		workspaceID:        opts.Identity.WorkspaceID,
