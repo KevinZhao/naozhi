@@ -44,9 +44,9 @@ func (s *fileStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(s.body)
 }
 
-func newFileFeishu(t *testing.T, cfg Config, stub *fileStub) *Feishu {
+func newFileFeishu(t *testing.T, cfg Config, upstream http.Handler) *Feishu {
 	t.Helper()
-	srv := httptest.NewServer(stub)
+	srv := httptest.NewServer(upstream)
 	t.Cleanup(srv.Close)
 	f := New(cfg, nil)
 	t.Cleanup(func() { _ = f.Stop() })
@@ -247,5 +247,82 @@ func TestWebhook_FileMessageMalformedKeyNotDownloaded(t *testing.T) {
 	f.dispatch.Wait()
 	if stub.hits.Load() != 0 || len(h.all()) != 0 {
 		t.Errorf("malformed file_key: downloads=%d handled=%d, want 0/0", stub.hits.Load(), len(h.all()))
+	}
+}
+
+// The shared client's 10s Client.Timeout also covers the body read, so a file
+// near the byte cap would need ~3.4 MB/s; file downloads get their own budget
+// on the same connection pool.
+func TestFileDownloadClient_Budget(t *testing.T) {
+	t.Parallel()
+	f := New(Config{}, nil)
+	t.Cleanup(func() { _ = f.Stop() })
+	if f.fileHTTP != feishuFileDownloadClient {
+		t.Fatal("New does not wire feishuFileDownloadClient for file downloads")
+	}
+	fc := feishuFileDownloadClient
+	if fc == feishuHTTPClient {
+		t.Fatal("file downloads use the shared 10s client")
+	}
+	// The cap must survive a 256 KiB/s link.
+	minBudget := time.Duration(limits.MaxFileAttachmentBytes/(256<<10)) * time.Second
+	if fc.Timeout < minBudget {
+		t.Errorf("file download Timeout = %v, want a bounded budget of at least %v", fc.Timeout, minBudget)
+	}
+	if fc.Transport != feishuHTTPClient.Transport {
+		t.Error("file download client does not share the Feishu transport (TLS floor, pool)")
+	}
+}
+
+// countingTransport counts the requests it forwards to http.DefaultTransport.
+type countingTransport struct{ n atomic.Int64 }
+
+func (c *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.n.Add(1)
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+// DownloadFile goes through the file client; image and audio stay on the
+// shared one.
+func TestDownloadFile_UsesFileClient(t *testing.T) {
+	t.Parallel()
+	stub := &fileStub{body: pdfBytes}
+	f := newFileFeishu(t, Config{}, stub)
+	rt := &countingTransport{}
+	f.fileHTTP = &http.Client{Transport: rt}
+
+	if _, err := f.DownloadFile(context.Background(), "om_1", "file_1"); err != nil {
+		t.Fatalf("DownloadFile: %v", err)
+	}
+	// Both fail the image/audio sniff on PDF bytes; only the route matters.
+	_, _, _ = f.DownloadImage(context.Background(), "om_1", "img_1")
+	_, _, _ = f.DownloadAudio(context.Background(), "om_1", "aud_1")
+	if got := rt.n.Load(); got != 1 {
+		t.Errorf("file client carried %d requests, want only the file download", got)
+	}
+	if got := stub.hits.Load(); got != 3 {
+		t.Errorf("upstream saw %d downloads, want 3", got)
+	}
+}
+
+// A file download carries the bearer token, so a 3xx is surfaced as a failure
+// rather than followed to wherever the upstream points it.
+func TestDownloadFile_DoesNotFollowRedirects(t *testing.T) {
+	t.Parallel()
+	var followed atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/elsewhere", func(w http.ResponseWriter, r *http.Request) {
+		followed.Add(1)
+		_, _ = w.Write(pdfBytes)
+	})
+	mux.HandleFunc("/open-apis/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/elsewhere", http.StatusFound)
+	})
+	f := newFileFeishu(t, Config{}, mux)
+	if data, err := f.DownloadFile(context.Background(), "om_1", "file_1"); err == nil {
+		t.Errorf("redirected download succeeded with %d bytes, want an error", len(data))
+	}
+	if n := followed.Load(); n != 0 {
+		t.Errorf("redirect followed %d times, want 0", n)
 	}
 }

@@ -16,13 +16,13 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
+// media.go — images, audio and files: sending an image, downloading an
+// inbound resource, sniffing audio magic bytes, and uploading. Extracted from
+// feishu.go (J10 of #2548).
+
 // errResourceTooLarge is wrapped by downloadResource when the body exceeds
 // its byte cap, so callers can tell "too large" from "download failed".
 var errResourceTooLarge = errors.New("payload exceeds the download limit")
-
-// media.go — images and audio: sending an image, downloading an inbound
-// resource, sniffing audio magic bytes, and uploading. Extracted from feishu.go
-// (J10 of #2548).
 
 func (f *Feishu) sendImage(ctx context.Context, chatID, threadID string, img platform.Image) (string, error) {
 	imageKey, err := f.uploadImage(ctx, img.Data, img.MimeType)
@@ -81,7 +81,12 @@ func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resTy
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := feishuHTTPClient.Do(req)
+	// Files get their own time budget, sized for their larger byte cap.
+	client := feishuHTTPClient
+	if resType == "file" {
+		client = f.fileHTTP
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, "", fmt.Errorf("download %s: %w", resType, err)
 	}
