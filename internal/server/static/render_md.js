@@ -670,16 +670,16 @@ function renderTable(lines) {
   return '<div class="md-table-wrap">' + h + '</tbody></table></div>';
 }
 
-const CDN_RETRY_MS = 60000;
+const LOAD_RETRY_MS = 60000;
 const mermaidLoad = { ready: false, busy: false, failures: 0, loaded: new Set() };
 const katexLoad = { ready: false, busy: false, failures: 0, loaded: new Set() };
 
-// cdnLoad appends each lazily loaded asset ([url, sha384]) under its SRI
+// lazyLoad appends each lazily loaded asset ([url, sha384]) under its SRI
 // pin; st is ready once all of them have loaded. A failed attempt is retried
-// once, CDN_RETRY_MS later, re-appending only the assets that did not load,
+// once, LOAD_RETRY_MS later, re-appending only the assets that did not load,
 // then not until the page reloads. rerun runs when an attempt settles and when
 // the retry falls due; meanwhile runMermaid / runKatex leave the source showing.
-function cdnLoad(st, assets, rerun) {
+function lazyLoad(st, assets, rerun) {
   if (st.ready || st.busy) return;
   st.busy = true;
   const todo = assets.filter(([url]) => !st.loaded.has(url));
@@ -687,7 +687,7 @@ function cdnLoad(st, assets, rerun) {
   const settle = () => {
     if (--left > 0) return;
     if (!failed) st.ready = true;
-    else if (++st.failures === 1) setTimeout(() => { st.busy = false; rerun(); }, CDN_RETRY_MS);
+    else if (++st.failures === 1) setTimeout(() => { st.busy = false; rerun(); }, LOAD_RETRY_MS);
     rerun();
   };
   todo.forEach(([url, integrity]) => {
@@ -701,10 +701,10 @@ function cdnLoad(st, assets, rerun) {
   });
 }
 
-// awaitingCdn reports whether pending[id] still waits for st, marking an
+// awaitingLoad reports whether pending[id] still waits for st, marking an
 // attached el while st is failing. The entry is dropped once st has loaded or
 // failed for good, so an offline page does not keep one per detached bubble.
-function awaitingCdn(pending, id, el, st) {
+function awaitingLoad(pending, id, el, st) {
   if (el) {
     const failed = !st.ready && st.failures > 0;
     el.classList.toggle('md-render-unavailable', failed);
@@ -716,7 +716,7 @@ function awaitingCdn(pending, id, el, st) {
 }
 
 function loadMermaid() {
-  cdnLoad(mermaidLoad, [['https://cdn.jsdelivr.net/npm/mermaid@11.14.0/dist/mermaid.min.js',
+  lazyLoad(mermaidLoad, [['/static/vendor/mermaid-11.14.0/mermaid.min.js',
     'sha384-1CMXl090wj8Dd6YfnzSQUOgWbE6suWCaenYG7pox5AX7apTpY3PmJMeS2oPql4Gk']], () => {
     if (mermaidLoad.ready) window.mermaid.initialize(mermaidConfig());
     runMermaid();
@@ -730,7 +730,7 @@ function runMermaid() {
   Object.entries(mermaidPending).forEach(([id, code]) => {
     const el = document.getElementById(id);
     if (el) el.textContent = code;
-    if (awaitingCdn(mermaidPending, id, el, mermaidLoad)) return;
+    if (awaitingLoad(mermaidPending, id, el, mermaidLoad)) return;
     el.className = 'mermaid';
     delete mermaidPending[id];
     hasNew = true;
@@ -823,7 +823,7 @@ const katexPending = {};
 // markup shows its MathML and HTML copies side by side. Both are vendored, and
 // TestVendorAssets_SRIMatchesEmbedded checks each SRI pin (R219-SEC-4).
 function loadKatex() {
-  cdnLoad(katexLoad, [
+  lazyLoad(katexLoad, [
     ['/static/vendor/katex-0.16.21/katex.min.css',
       'sha384-zh0CIslj+VczCZtlzBcjt5ppRcsAmDnRem7ESsYwWwg3m/OaJ2l4x7YBZl9Kxxib'],
     ['/static/vendor/katex-0.16.21/katex.min.js',
@@ -836,7 +836,7 @@ function runKatex() {
   if (!katexLoad.ready) loadKatex();
   Object.entries(katexPending).forEach(([id, info]) => {
     const el = document.getElementById(id);
-    if (awaitingCdn(katexPending, id, el, katexLoad)) return;
+    if (awaitingLoad(katexPending, id, el, katexLoad)) return;
     try {
       window.katex.render(info.tex, el, { displayMode: info.display, throwOnError: false });
     } catch(_) {

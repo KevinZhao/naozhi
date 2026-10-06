@@ -1,11 +1,10 @@
 // @ts-check
 //
-// KaTeX loads lazily from /static/vendor/ and mermaid from the CDN. When a
-// load fails (offline, a VPC with no egress, a server mid-restart), the
-// formula and the diagram have to stay readable as source and say why, and
-// the page must not inject a fresh failing script on every re-render:
-// render_md.js retries once, CDN_RETRY_MS (60s) after the failure, and then
-// waits for a page reload.
+// KaTeX and mermaid load lazily from /static/vendor/. When a load fails (a
+// server mid-restart, a dropped connection), the formula and the diagram have
+// to stay readable as source and say why, and the page must not inject a fresh
+// failing script on every re-render: render_md.js retries once, LOAD_RETRY_MS
+// (60s) after the failure, and then waits for a page reload.
 //
 // 跑法：cd test/e2e && npx playwright test markdown_offline.test.js --project=desktop-chrome
 
@@ -31,8 +30,8 @@ test.beforeEach(({ }, testInfo) => {
 /**
  * Opens session A with the KaTeX and mermaid loads routed through serve, which
  * answers each request (counted per asset) or aborts it; anything else under
- * /static/vendor/ or on the CDN (the KaTeX fonts) is aborted. The page clock
- * is installed so the retry delay can be skipped.
+ * /static/vendor/ (the KaTeX fonts) is aborted. The page clock is installed so
+ * the retry delay can be skipped.
  *
  * @param {import('@playwright/test').Browser} browser
  * @param {(asset: Asset, n: number, route: import('@playwright/test').Route) => Promise<void>} serve
@@ -48,11 +47,11 @@ async function openOffline(browser, serve) {
   });
   const ctx = await browser.newContext();
   const requests = { katex: 0, katexCSS: 0, mermaid: 0 };
-  await ctx.route(/\/static\/vendor\/|cdn\.jsdelivr\.net/, route => route.abort());
-  await ctx.route(/\/static\/vendor\/katex-[^/]+\/katex\.min\.(js|css)$|cdn\.jsdelivr\.net\/npm\/mermaid@[^/]+\/dist\/mermaid\.min\.js$/, route => {
+  await ctx.route(/\/static\/vendor\//, route => route.abort());
+  await ctx.route(/\/static\/vendor\/(katex-[^/]+\/katex|mermaid-[^/]+\/mermaid)\.min\.(js|css)$/, route => {
     const url = route.request().url();
     /** @type {Asset} */
-    const asset = url.includes('/mermaid@') ? 'mermaid' : url.endsWith('.css') ? 'katexCSS' : 'katex';
+    const asset = url.includes('/mermaid-') ? 'mermaid' : url.endsWith('.css') ? 'katexCSS' : 'katex';
     return serve(asset, ++requests[asset], route);
   });
   const page = await ctx.newPage();

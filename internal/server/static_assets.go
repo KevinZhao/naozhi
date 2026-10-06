@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -181,10 +182,11 @@ var filesViewJS embed.FS
 //go:embed static/favicon.svg
 var faviconSVG embed.FS
 
-// Third-party release files, byte-identical to their npm dist and kept under a
-// versioned directory, so their SRI pins in render_md.js stay valid and their
-// responses can be cached as immutable. KaTeX ships only its woff2 fonts: every
-// browser the dashboard supports takes the first src of each @font-face.
+// Third-party release files, byte-identical to their npm dist (mermaid's bundle
+// gzipped) and kept under a versioned directory, so their SRI pins in
+// render_md.js stay valid and their responses can be cached as immutable. KaTeX
+// ships only its woff2 fonts: every browser the dashboard supports takes the
+// first src of each @font-face.
 //
 //go:embed static/vendor
 var vendorFS embed.FS
@@ -326,10 +328,14 @@ var staticAssets, servedAssetVersion = func() (map[string]staticAsset, string) {
 
 // addVendorAssets registers every servable file under static/vendor by its path
 // below static/, the key its /static/vendor/ URL maps to. Fonts are already
-// compressed, so only the script and the stylesheet are gzipped.
+// compressed, so only scripts and stylesheets are gzipped. A file embedded as
+// <name>.gz (gzip -9n of the release file) is served as <name>, its embedded
+// bytes as the gzip form, so a multi-megabyte bundle costs no compression at
+// init.
 func addVendorAssets(out map[string]staticAsset) {
 	err := fs.WalkDir(vendorFS, "static/vendor", func(name string, d fs.DirEntry, err error) error {
-		ext := path.Ext(name)
+		key, gzipped := strings.CutSuffix(strings.TrimPrefix(name, "static/"), ".gz")
+		ext := path.Ext(key)
 		if err != nil || d.IsDir() || (ext != ".js" && stylesheetTypes[ext] == "") {
 			return err
 		}
@@ -337,12 +343,31 @@ func addVendorAssets(out map[string]staticAsset) {
 		if err != nil {
 			return err
 		}
-		out[strings.TrimPrefix(name, "static/")] = newStaticAsset(b, ext != ".woff2")
+		if !gzipped {
+			out[key] = newStaticAsset(b, ext != ".woff2")
+			return nil
+		}
+		raw, err := gunzip(b)
+		if err != nil {
+			return err
+		}
+		a := newStaticAsset(raw, false)
+		a.gz = b
+		out[key] = a
 		return nil
 	})
 	if err != nil {
 		panic("read static/vendor: " + err.Error())
 	}
+}
+
+// gunzip returns the decompressed form of b.
+func gunzip(b []byte) ([]byte, error) {
+	zr, err := gzip.NewReader(bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	return io.ReadAll(zr)
 }
 
 // newStaticAsset wraps b with its strong ETag (sha256, first 16 bytes, hex)

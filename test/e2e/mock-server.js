@@ -5,6 +5,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
 
 const STATIC_DIR = path.join(__dirname, '..', '..', 'internal', 'server', 'static');
 // The generated backend contract — the same ES module the dashboard imports.
@@ -44,7 +45,7 @@ function sendEntries(res, route, fixture, page, headers = { 'Content-Type': 'app
 // A Go drift test (TestDashboardCSP_MockServerHeaderInSync) compares this
 // literal against the runtime header, so edit both together.
 const MOCK_DASHBOARD_CSP =
-  "default-src 'self'; script-src 'self' 'sha256-Dc5Mfm9TcKn7OwTLyG3/T2KjnRh7zV1Xc4ct4adm4/g=' https://cdn.jsdelivr.net/npm/mermaid@11.14.0/dist/mermaid.min.js; connect-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font";
+  "default-src 'self'; script-src 'self' 'sha256-Dc5Mfm9TcKn7OwTLyG3/T2KjnRh7zV1Xc4ct4adm4/g='; connect-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font";
 
 function defaultSessions() {
   return {
@@ -459,15 +460,17 @@ function startMockServer(overrides = {}) {
       return;
     }
 
-    // Vendored libraries (KaTeX): the same tree the Go handlers serve, with
-    // the same types; anything outside it 404s.
+    // Vendored libraries (KaTeX, mermaid): the same tree the Go handlers
+    // serve, with the same types; a file embedded as <name>.gz is served as
+    // <name>; anything outside the tree 404s.
     if (pathname.startsWith('/static/vendor/')) {
       const rel = pathname.slice('/static/'.length);
       const type = { '.js': 'application/javascript', '.css': 'text/css; charset=utf-8', '.woff2': 'font/woff2' }[path.extname(rel)];
+      const file = path.join(STATIC_DIR, rel);
       let body;
       try {
         if (!type || rel.split('/').includes('..')) throw new Error('outside the tree');
-        body = fs.readFileSync(path.join(STATIC_DIR, rel));
+        body = fs.existsSync(file) ? fs.readFileSync(file) : zlib.gunzipSync(fs.readFileSync(file + '.gz'));
       } catch { res.writeHead(404); res.end(); return; }
       res.writeHead(200, { 'Content-Type': type });
       res.end(body);
