@@ -158,6 +158,9 @@ var cronStateJS embed.FS
 //go:embed static/cron_format.js
 var cronFormatJS embed.FS
 
+//go:embed static/lightbox.js
+var lightboxJS embed.FS
+
 //go:embed static/agent_view.js
 var agentViewJS embed.FS
 
@@ -277,6 +280,7 @@ var staticAssets, servedAssetVersion = func() (map[string]staticAsset, string) {
 		{"backend_catalog.js", backendCatalogJS, "static/backend_catalog.js", true},
 		{"cron_state.js", cronStateJS, "static/cron_state.js", true},
 		{"cron_format.js", cronFormatJS, "static/cron_format.js", true},
+		{"lightbox.js", lightboxJS, "static/lightbox.js", true},
 		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
 		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
 		{"files_view.js", filesViewJS, "static/files_view.js", true},

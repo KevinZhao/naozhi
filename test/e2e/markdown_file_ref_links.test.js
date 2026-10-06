@@ -11,9 +11,9 @@
 //
 // The link target has already been through earlier inlineMd passes by the
 // time the link pass sees it. Those passes can leave naozhi's own
-// <strong>/<em> or \x00 tokenizer sentinels in it, so the rescue has to
-// refuse both, and it has to refuse slash-shaped non-files (dates,
-// fractions). The same <code> shape serves backtick spans and the rows of a
+// <strong>/<em> or \x00 tokenizer sentinels in it: the link pattern refuses
+// a sentinel-bearing target, the rescue refuses a tag-bearing one, and it
+// has to refuse slash-shaped non-files (dates, fractions). The same <code> shape serves backtick spans and the rows of a
 // fenced path list. Each call site escapes its own input, and the shared
 // helper must not escape it a second time.
 //
