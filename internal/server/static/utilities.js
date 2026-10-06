@@ -307,13 +307,22 @@ async function fetchCostSummary(query) {
   return resp.ok ? resp.json() : null;
 }
 
-// renderServiceOverviewHtml builds the 服务概览 section for the 系统 view:
-// the aggregate stats (today active / prompts / cost), the health strip
-// derived from the /api/sessions stats snapshot, and the multi-backend
-// doctor panel. Moved here from the Home panel (ui-polish-light-theme D3)
-// — the pure helpers stayed put, only the call site and CSS classes
-// (svc-*) changed. Version identity lines also render in the settings
-// 关于 section (renderSettingsView) for discoverability.
+// fetchCostBudget resolves /api/cost/budget for `query` (an encoded
+// session_key= or job_id=), or null when the request fails.
+const fetchCostBudget = (query) => fetch(NZ_CONTRACT.API.cost_budget + '?' + query, { headers: authHeaders() })
+  .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+
+// costBudgetChipHtml renders a /api/cost/budget answer as "今日 $x / $y",
+// ⚠-flagged from warn_ratio on, or '' when no cost.budget cap applies.
+const COST_BUDGET_SCOPES = { chat: '本聊天', project: '本项目（绑定的群共享）', job: '本任务', global: '整机' };
+function costBudgetChipHtml(b, cls) {
+  if (!b || !(b.limit > 0)) return '';
+  const usage = '$' + Number(b.spent || 0).toFixed(2) + ' / $' + b.limit.toFixed(2);
+  const title = (COST_BUDGET_SCOPES[b.scope] || '') + '今日费用预算（cost.budget）已用 ' + usage + '，' + formatAbsTime(b.reset_at) +
+    ' 重置' + (b.blocked ? '；已用尽，新消息和 cron 运行会被拒绝' : b.over ? '；已超出，仅提醒' : '');
+  return '<span class="' + cls + (b.over ? ' bad' : '') + '" title="' + escAttr(title) + '">' + (b.warn ? '⚠ ' : '') + '今日 ' + esc(usage) + '</span>';
+}
+
 // costStatHtml renders the 花费 card: ledger figure when loaded (with a
 // credits sub-line for kiro sessions and an honest hover explanation),
 // otherwise the legacy live-session sum labelled as such.
@@ -338,6 +347,8 @@ function costStatHtml(stats) {
     '</div>';
 }
 
+// renderServiceOverviewHtml builds the 系统 view's 服务概览: today's stats, the
+// health strip from the /api/sessions snapshot and the backend doctor panel.
 function renderServiceOverviewHtml() {
   const items = Array.isArray(sessionList.allSessionsCache) ? sessionList.allSessionsCache : [];
   const stats = computeHomeStats(items, Date.now());
@@ -1381,9 +1392,11 @@ export {
   confirmDialog,
   copyCodeBlock,
   copyEventContent,
+  costBudgetChipHtml,
   costCardTitle,
   decodeEscEntities,
   dismissAuthModal,
+  fetchCostBudget,
   fetchCostSummary,
   formatAbsTime,
   formatHomeCost,

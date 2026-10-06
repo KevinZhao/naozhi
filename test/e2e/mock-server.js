@@ -256,6 +256,9 @@ function defaultGitStates() {
  * @param {Function} [overrides.costSummary] - (searchParams) => GET /api/cost/summary payload,
  *   or null for a 404. Without it the route is absent (404). Calls land in `costSummaryCalls`
  *   as {group_by, job_id, session_key}.
+ * @param {Function} [overrides.costBudget] - (searchParams) => GET /api/cost/budget payload, or
+ *   null for a 404. Without it the route is absent (404). Calls land in `costBudgetCalls`
+ *   as {job_id, session_key}.
  * @param {object[]} [overrides.cronAttention] - §7.4 queue items for GET /api/cron/attention.
  *   POST /api/cron/runs/<id>/confirm records the id in `cronConfirmCalls` and drops the item;
  *   POST /api/cron/runs/<id>/replay does the same with `cronReplayCalls` (the {job_id} body).
@@ -361,12 +364,14 @@ function startMockServer(overrides = {}) {
   // drops the field from the JSON.
   const runDetailPatch = overrides.runDetailPatch || {};
   const costSummary = overrides.costSummary || null;
+  const costBudget = overrides.costBudget || null;
   const cronTrigger = overrides.cronTrigger || null;
   const systemDaemons = overrides.systemDaemons || null;
   const memories = overrides.memories || null;
   let systemDaemonsGetCount = 0;
   const cronTriggerCalls = [];
   const costSummaryCalls = [];
+  const costBudgetCalls = [];
   const cronAttention = overrides.cronAttention ? overrides.cronAttention.slice() : null;
   const cronConfirmCalls = [];
   const cronReplayCalls = [];
@@ -1182,6 +1187,19 @@ function startMockServer(overrides = {}) {
       return;
     }
 
+    // Cost budget status: opt-in via overrides.costBudget.
+    if (costBudget && pathname === NZ_CONTRACT.API.cost_budget && req.method === 'GET') {
+      if (!checkAuth()) return;
+      costBudgetCalls.push({
+        job_id: url.searchParams.get('job_id') || '',
+        session_key: url.searchParams.get('session_key') || '',
+      });
+      const payload = costBudget(url.searchParams);
+      res.writeHead(payload ? 200 : 404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(payload || { error: 'not found' }));
+      return;
+    }
+
     // Transcribe route
     if (pathname === NZ_CONTRACT.API.transcribe && req.method === 'POST') {
       if (!checkAuth()) return;
@@ -1292,6 +1310,7 @@ function startMockServer(overrides = {}) {
         get fullCronListCalls() { return fullCronListCalls; },
         get cronListGetCount() { return cronListGetCount; },
         get costSummaryCalls() { return costSummaryCalls; },
+        get costBudgetCalls() { return costBudgetCalls; },
         get sessionsGetCalls() { return sessionsGetCalls; },
         get sessionsValidators() { return sessionsValidators; },
         get sessionsNotModified() { return sessionsNotModified; },

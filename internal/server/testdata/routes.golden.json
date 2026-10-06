@@ -41,6 +41,11 @@
   },
   {
     "method": "GET",
+    "path": "/api/cost/budget",
+    "handler_type": "*dashcost.Handlers"
+  },
+  {
+    "method": "GET",
     "path": "/api/cost/entries",
     "handler_type": "*dashcost.Handlers"
   },
