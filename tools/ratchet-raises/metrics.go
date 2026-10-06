@@ -266,8 +266,9 @@ func skipGoPath(p string) bool {
 // deadInjections, innerHTMLAssign, htmlInsert and lateBindings are gated only
 // as their sum: moving code between files is a refactor, not a raise (S20a,
 // #3026 D-S20-4); the other per-file metrics are keys of their own. A new
-// file's metrics are new keys, so the totals and MAX.maxFnLines keep one from
-// absorbing growth; js-ratchet --check still holds each file's own values.
+// file's metrics are new keys, so the totals and the MAX.maxFnLines /
+// MAX.maxIifeLines maxima keep one from absorbing growth; js-ratchet --check
+// still holds each file's own values.
 // The "_global" entry is not a file: its metrics are GLOBAL.<name>.
 func jsRatchet(raw string, into metrics) error {
 	if raw == "" {
@@ -294,8 +295,8 @@ func jsRatchet(raw string, into metrics) error {
 				continue
 			case "fnOver100":
 				totals["TOTAL.fnOver100"] += v
-			case "maxFnLines":
-				totals["MAX.maxFnLines"] = max(totals["MAX.maxFnLines"], v)
+			case "maxFnLines", "maxIifeLines":
+				totals["MAX."+name] = max(totals["MAX."+name], v)
 			}
 			into["js-ratchet:"+file+"."+name] = metric{value: v}
 		}
