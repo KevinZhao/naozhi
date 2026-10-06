@@ -117,6 +117,16 @@ func (e *APIError) IsTokenExpired() bool {
 	return false
 }
 
+// isRateLimited reports a frequency limit: 99991400 per app, 11232-11234
+// and 230020 on sending messages. The same request may succeed later.
+func (e *APIError) isRateLimited() bool {
+	switch e.Code {
+	case 99991400, 11232, 11233, 11234, 230020:
+		return true
+	}
+	return false
+}
+
 // IsTokenInvalidated implements platform.TokenInvalidatedError: the cache was
 // just cleared, so ReplyWithRetry may grant one extra retry with a fresh token (#1339).
 func (e *APIError) IsTokenInvalidated() bool {

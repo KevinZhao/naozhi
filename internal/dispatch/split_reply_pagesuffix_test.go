@@ -54,7 +54,7 @@ func TestSendSplitReply_ChunksRespectHardLimit(t *testing.T) {
 	// Chinese paragraph). Use ASCII 'a' so rune count == byte count for clarity.
 	text := makeRunes('a', 2008)
 
-	d.SendSplitReply(context.Background(), hp, "chat-1", text)
+	d.SendSplitReply(context.Background(), hp, ReplyDest{ChatID: "chat-1"}, text)
 
 	hp.mu.Lock()
 	defer hp.mu.Unlock()
@@ -103,7 +103,7 @@ func TestSendSplitReply_NewlineDenseRespectsHardLimit(t *testing.T) {
 	}
 	text := string(b) // 13958 runes, newline-dense
 
-	d.SendSplitReply(context.Background(), hp, "chat-1", text)
+	d.SendSplitReply(context.Background(), hp, ReplyDest{ChatID: "chat-1"}, text)
 
 	hp.mu.Lock()
 	defer hp.mu.Unlock()
@@ -143,7 +143,7 @@ func TestSendSplitReply_FencedReplyStaysBalanced(t *testing.T) {
 	b.WriteString("```\nDone.\n")
 	text := b.String()
 
-	d.SendSplitReply(context.Background(), hp, "chat-1", text)
+	d.SendSplitReply(context.Background(), hp, ReplyDest{ChatID: "chat-1"}, text)
 
 	hp.mu.Lock()
 	defer hp.mu.Unlock()
@@ -196,7 +196,7 @@ func TestSendSplitReply_TinyMaxLenSuppressesSuffix(t *testing.T) {
 
 	text := makeRunes('a', 23) // > limit, forces multi-chunk split
 
-	d.SendSplitReply(context.Background(), hp, "chat-1", text)
+	d.SendSplitReply(context.Background(), hp, ReplyDest{ChatID: "chat-1"}, text)
 
 	hp.mu.Lock()
 	defer hp.mu.Unlock()
@@ -266,7 +266,7 @@ func TestSendSplitReply_SingleUseTokenCollapsesToOneMessage(t *testing.T) {
 
 	text := makeRunes('a', 350) // > limit, would normally split into 4 chunks
 
-	d.SendSplitReply(context.Background(), sp, "user-1", text)
+	d.SendSplitReply(context.Background(), sp, ReplyDest{ChatID: "user-1"}, text)
 
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
@@ -295,7 +295,7 @@ func TestSendSplitReply_SingleUseTokenShortReplyUnchanged(t *testing.T) {
 
 	text := makeRunes('b', 40) // <= limit
 
-	d.SendSplitReply(context.Background(), sp, "user-1", text)
+	d.SendSplitReply(context.Background(), sp, ReplyDest{ChatID: "user-1"}, text)
 
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
@@ -319,7 +319,7 @@ func TestSendSplitReply_ByteFastPath_ShortAsciiSingleChunk(t *testing.T) {
 
 	text := makeRunes('a', 100) // len(text)=100 bytes <= maxLen
 
-	d.SendSplitReply(context.Background(), hp, "chat-1", text)
+	d.SendSplitReply(context.Background(), hp, ReplyDest{ChatID: "chat-1"}, text)
 
 	hp.mu.Lock()
 	defer hp.mu.Unlock()
@@ -352,7 +352,7 @@ func TestSendSplitReply_ByteFastPath_MultibyteFallthroughSingleChunk(t *testing.
 		t.Fatalf("test setup: expected byte length > limit, got %d", len(text))
 	}
 
-	d.SendSplitReply(context.Background(), hp, "chat-1", text)
+	d.SendSplitReply(context.Background(), hp, ReplyDest{ChatID: "chat-1"}, text)
 
 	hp.mu.Lock()
 	defer hp.mu.Unlock()
