@@ -659,10 +659,10 @@ func (p *Process) notifyLinker(ev clievent.Event, nowMS int64, isSystemInit bool
 	}
 	// Resolve for BOTH in-process teammates (task_type="in_process_teammate")
 	// AND standalone sub-agents (task_type often empty/vendor-specific): both
-	// write subagents/agent-<task_id>.jsonl. Exclude local_bash — those only
-	// persist to tool-results/ and have no internal transcript.
+	// write subagents/agent-<task_id>.jsonl. local_bash and local_workflow
+	// tasks have no such transcript (LinkerSkipsTaskType).
 	if ev.Type != "system" || ev.SubType != "task_started" ||
-		ev.TaskType == "local_bash" || ev.TaskID == "" || ev.ToolUseID == "" {
+		LinkerSkipsTaskType(ev.TaskType) || ev.TaskID == "" || ev.ToolUseID == "" {
 		return
 	}
 	taskID := ev.TaskID

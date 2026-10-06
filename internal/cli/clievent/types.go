@@ -41,7 +41,7 @@ type EventEntry struct {
 	// entries so SubagentLinker.SeedFromHistory can rebuild the task_id →
 	// transcript mapping after reconnect/respawn without re-scanning
 	// ~/.claude/projects/. Async backfilled via EventLog.SetAgentInternalID.
-	TaskType        string `json:"task_type,omitempty"`         // "in_process_teammate" | "local_bash" | ""
+	TaskType        string `json:"task_type,omitempty"`         // "in_process_teammate" | "local_bash" | "local_workflow" | ""
 	InternalAgentID string `json:"internal_agent_id,omitempty"` // "agent-<hex17>" filename stem under <projectDir>/<sessionID>/subagents/
 	JSONLPath       string `json:"jsonl_path,omitempty"`        // absolute path to agent transcript jsonl
 	FirstPromptID   string `json:"first_prompt_id,omitempty"`   // jsonl first-line promptId; guards against same-name re-spawn

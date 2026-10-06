@@ -1720,7 +1720,7 @@ R5  **有**存活进程、但 retained 条目没人认领（v4 新增）：R4 �
 | 遍 | 今天 | 本 RFC 后 |
 |---|---|---|
 | `SeedFromReplay` | 无 | 前缀门控 + 每 task 每帧类只解最新 1 行（1 张快照 + 3 个小帧）+ task_started / launch 行：≤ 32 × (~1ms + 5 × ~10µs)；更旧的行按 task_id 截取后跳过 |
-| linker walk（`router_shim.go:416-450`） | 每行 `ReadEvent` 完整解码 | 只解以 `{"type":"system","subtype":"task_started"` 开头的行（PR-5） |
+| linker walk（`router_shim.go` 的 `replayLinkerTasks`） | 每行 `ReadEvent` 完整解码 | 只解以 `{"type":"system","subtype":"task_started"` 开头的行（PR-5） |
 | `reconnectVerdict`（`wrapper.go:673-698`） | 逆序每行解码，遇首个非中性帧停 | 中性帧按前缀识别、不解码直接越过（PR-3）；只解真正的语义帧 |
 
 这三遍**在既有的 DrainReplay 之上**合计新增：50MiB replay（~100 张大快照、其余是上万个小帧）每 session 解码 ≤ ~20ms（≤ 16 个 task）、
@@ -1733,7 +1733,8 @@ envelope 反转义，或下发预解码的 seq 索引。
 
 ### 5.10 linker 与 turn 判定修正
 
-- **linker 排除**：`local_workflow` 加入三处排除：`process_readloop.go:663-665`、`router_shim.go:433`、
+- **linker 排除**：`local_workflow` 加入三处排除：`process_readloop.go:663-665`、`router_shim.go:433`（PR-2 把这段 replay walk 抽成包级函数
+  `replayLinkerTasks`，过滤可单测；重连循环只对其结果起 `go linker.Resolve`）、
   `process_event_query.go:75-82`。InjectHistory（后者）的判定：
   - 条目带 `TaskType == "local_workflow"`（同批 `KindTaskStart`，以及 PR-7 起 workflow 的
     `KindTaskProgress` / `KindTaskDone` 条目也带，§5.4）→ 跳过；
@@ -2653,7 +2654,7 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
 ### PR-2 fix(cli,session): local_workflow 不走 SubagentLinker
 
 - 范围：§5.10 第一条（PR-7 之前的部分：task_start 的 TaskType + 遗留 id 形态启发式）。
-- 文件：`internal/cli/process_readloop.go`（:663-665）、`internal/session/router_shim.go`（:433）、
+- 文件：`internal/cli/process_readloop.go`（:663-665）、`internal/session/router_shim.go`（:433，抽成 `replayLinkerTasks`）、
   `internal/cli/process_event_query.go`（:75-82）及测试。
 - 测试：三条路径对 `local_workflow` 不调用 Resolve / DispatchResolve（fake linker 计数）；InjectHistory 中
   task_start 不在批内、id 为 `w`+8 的孤儿 progress 不 Resolve；`a…` 孤儿照常 Resolve。
@@ -2705,7 +2706,7 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   只解 `task_started` 前缀行。
 - 文件：`clievent/event.go`、新 `clievent/workflow.go` + test、`clievent/tool_input.go` + test、
   `protocol_claude.go`、`process_readloop.go`（deliverEvent 前清空 + defer 清 buf）、`process_event_format.go`、
-  `process_extra_test.go`（:1395-1440）、`internal/session/router_shim.go`（:416-450 前缀门控）、
+  `process_extra_test.go`（:1395-1440）、`internal/session/router_shim.go`（前缀门控放在 PR-2 抽出的 `replayLinkerTasks` 内）、
   `internal/cli/testdata/`（fixture；PR-6 移入 `internal/cli/workflow/testdata/`）。
 - 测试：§11.2 解码 / hook 之外的 `FormatToolInput` / eventCh-readEventBuf 行 + Fuzz + bench。
 - 验收：bench 数字（`-count 5`，含跳过路径对照）贴 PR，满足 ≤ 1.5ms / ≤ 400KB；`wsproto.schema.json`

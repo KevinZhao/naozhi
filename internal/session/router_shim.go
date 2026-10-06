@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/shim"
 )
@@ -411,47 +412,18 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		// the shim saw before restart. Without feeding those to the Linker the
 		// dashboard drill-in serves 202 forever. Walk the replay once and kick an
 		// async Resolve per unique task_id (Resolve is idempotent + cached).
-		if linker := proc.Linker(); linker != nil && len(replays) > 0 {
-			seen := make(map[string]struct{})
-			for _, replay := range replays {
-				if replay.Type != "replay" {
-					continue
+		if linker := proc.Linker(); linker != nil {
+			for _, ev := range replayLinkerTasks(recWrapper.Protocol, replays) {
+				name := strings.TrimSpace(ev.Description)
+				if i := strings.IndexByte(name, ':'); i > 0 {
+					name = strings.TrimSpace(name[:i])
 				}
-				events, _, err := recWrapper.Protocol.ReadEvent(replay.Line)
-				if err != nil || len(events) == 0 {
-					continue
-				}
-				// Replay frames map 1:1 to a semantic event in practice; iterating
-				// keeps the linker resilient if a protocol fans out from one frame.
-				for _, ev := range events {
-					if ev.Type != "system" || ev.SubType != "task_started" {
-						continue
-					}
-					if ev.TaskID == "" || ev.ToolUseID == "" {
-						continue
-					}
-					// Skip local_bash — no internal transcript on disk.
-					if ev.TaskType == "local_bash" {
-						continue
-					}
-					if _, dup := seen[ev.TaskID]; dup {
-						continue
-					}
-					seen[ev.TaskID] = struct{}{}
-					name := strings.TrimSpace(ev.Description)
-					if i := strings.IndexByte(name, ':'); i > 0 {
-						name = strings.TrimSpace(name[:i])
-					}
-					taskID, toolUseID := ev.TaskID, ev.ToolUseID
-					desc := ev.Description
-					// wallclock 0 = skip Resolve's staleness filter: replay frames
-					// carry no per-event timestamp, and any time.Now()-derived value
-					// would be newer than the real task and let every candidate
-					// pass anyway. Fail open honestly; Resolve's other guards
-					// (sessionID match, toolUseID dedup, modtime order) still apply.
-					wallclock := int64(0)
-					go linker.Resolve(parentCtx, taskID, toolUseID, name, desc, wallclock)
-				}
+				// wallclock 0 = skip Resolve's staleness filter: replay frames
+				// carry no per-event timestamp, and any time.Now()-derived value
+				// would be newer than the real task and let every candidate
+				// pass anyway. Fail open honestly; Resolve's other guards
+				// (sessionID match, toolUseID dedup, modtime order) still apply.
+				go linker.Resolve(parentCtx, ev.TaskID, ev.ToolUseID, name, ev.Description, 0)
 			}
 		}
 
@@ -678,4 +650,34 @@ func (r *Router) StartShimReconcileLoop(ctx context.Context, interval time.Durat
 			}
 		}
 	}()
+}
+
+// replayLinkerTasks returns the task_started events in a shim replay that the
+// SubagentLinker can resolve, first occurrence per task_id, in replay order.
+// Replay frames map 1:1 to a semantic event in practice; iterating keeps the
+// walk resilient if a protocol fans out from one frame.
+func replayLinkerTasks(proto cli.Protocol, replays []shim.ServerMsg) []clievent.Event {
+	var out []clievent.Event
+	seen := make(map[string]struct{})
+	for _, replay := range replays {
+		if replay.Type != "replay" {
+			continue
+		}
+		events, _, err := proto.ReadEvent(replay.Line)
+		if err != nil {
+			continue
+		}
+		for _, ev := range events {
+			if ev.Type != "system" || ev.SubType != "task_started" ||
+				ev.TaskID == "" || ev.ToolUseID == "" || cli.LinkerSkipsTaskType(ev.TaskType) {
+				continue
+			}
+			if _, dup := seen[ev.TaskID]; dup {
+				continue
+			}
+			seen[ev.TaskID] = struct{}{}
+			out = append(out, ev)
+		}
+	}
+	return out
 }
