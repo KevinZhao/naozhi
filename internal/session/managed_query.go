@@ -142,7 +142,9 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 		// Seed from the persisted value; the proc branch below overwrites
 		// with a fresher live value. No-proc snapshots (evicted / pre-spawn)
 		// keep it so the dashboard doesn't blink to "(模型未配置)".
-		Model: s.Model(),
+		Model:        s.Model(),
+		TuningModel:  s.TuningModel(),
+		TuningEffort: s.TuningEffort(),
 	}
 	snap.DeathReason = loadAtomicString(&s.deathReason)
 	snap.CodeChanges = s.CodeChanges()

@@ -359,6 +359,11 @@ var commandClasses = map[string]imauth.Class{
 	"/stop":    imauth.Chat,
 	"/urgent":  imauth.Chat,
 	"/pwd":     imauth.Chat,
+	// Tuning picks only choose among operator-configured backends / models
+	// for the caller's own chat; they rebind nothing outside it.
+	"/model":   imauth.Chat,
+	"/effort":  imauth.Chat,
+	"/backend": imauth.Chat,
 }
 
 func TestClassifyCommand_CoversHelp(t *testing.T) {

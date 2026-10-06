@@ -13,6 +13,7 @@ import (
 type fakeCapabilities struct {
 	takeover    func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
 	replyFooter func(backendID string) string
+	backendIDs  []string
 }
 
 func (f fakeCapabilities) Takeover(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool {
@@ -21,6 +22,8 @@ func (f fakeCapabilities) Takeover(ctx context.Context, chatKey, key string, opt
 	}
 	return f.takeover(ctx, chatKey, key, opts)
 }
+
+func (f fakeCapabilities) BackendIDs() []string { return f.backendIDs }
 
 func (f fakeCapabilities) ReplyFooter(backendID string) string {
 	if f.replyFooter == nil {
