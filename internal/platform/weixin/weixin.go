@@ -409,9 +409,9 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 		if resp.Ret == iLinkStaleTokenCode || resp.ErrCode == iLinkStaleTokenCode {
 			// The hint leads so it survives doctor's truncation of LastError.
 			w.connState.Fail(platform.ConnFailed, fmt.Errorf(
-				"weixin token expired (iLink -14): run 'naozhi setup weixin' and restart: %w",
+				"weixin token expired (iLink -14): run 'naozhi setup weixin' (restart unless it reconnects by itself): %w",
 				getUpdatesAPIError(resp)))
-			slog.Error("weixin getUpdates: bot token expired; run 'naozhi setup weixin' and restart",
+			slog.Error("weixin getUpdates: bot token expired; run 'naozhi setup weixin' (restart unless it reconnects by itself)",
 				"ret", resp.Ret,
 				"errcode", resp.ErrCode,
 				"errmsg", osutil.SanitizeForLog(resp.ErrMsg, 256),

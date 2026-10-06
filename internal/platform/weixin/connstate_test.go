@@ -284,13 +284,11 @@ func TestConnState_StaleTokenFails(t *testing.T) {
 			if s.State != platform.ConnFailed {
 				t.Fatalf("after a stale-token reply: state %q, want failed", s.State)
 			}
-			if !strings.HasPrefix(s.LastError, "weixin token expired") ||
-				!strings.Contains(s.LastError, "naozhi setup weixin") {
-				t.Errorf("LastError = %q, want the re-login hint first", s.LastError)
-			}
-			wantCodes := fmt.Sprintf("ret=%d errcode=%d", tc.ret, tc.errCode)
-			if !strings.Contains(s.LastError, wantCodes) {
-				t.Errorf("LastError = %q, want it to carry %q", s.LastError, wantCodes)
+			want := fmt.Sprintf("weixin token expired (iLink -14): run 'naozhi setup weixin' "+
+				"(restart unless it reconnects by itself): getUpdates ret=%d errcode=%d: session timeout",
+				tc.ret, tc.errCode)
+			if s.LastError != want {
+				t.Errorf("LastError = %q, want %q", s.LastError, want)
 			}
 
 			rl.script <- replyOK

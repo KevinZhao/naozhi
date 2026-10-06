@@ -88,6 +88,7 @@
 
 ### Fixed
 
+- **weixin bot token 过期（iLink `-14`）时的提示改为「除非自行重连否则重启」**（#3514）：`last_error` 与 Error 日志从 `run 'naozhi setup weixin' and restart` 改为 `run 'naozhi setup weixin' (restart unless it reconnects by itself)`，与 doctor 的 `failed` 提示（#3454）一致。适配器仍每小时重试一次，iLink 重新接受 token 后会自己回到 `connected`，不一定需要重启。按旧文案 `and restart` 匹配的告警请改为匹配 `naozhi setup weixin`
 - **cron：CLI 因认证失败、MCP 配置无效或运行环境缺失而退出时，失败通知写明原因**（#3515）：此前只有「上次会话无法恢复」有专门文案，这三类退出都落到「执行失败（CLI 发送错误）」。现在分别是「执行失败（后端认证失败或凭证已过期），请联系管理员」（与后端返回的认证错误同一句）、「执行失败（CLI 配置错误导致启动失败，如 MCP 配置无效），请联系管理员」和「执行失败（CLI 运行环境缺失），请联系管理员」。这几次执行在 dashboard 上的错误类别随之从 `send_error`（发送失败）变为 `turn_failed`（后端报错），执行历史里的错误详情仍带 `process exited during send (code N)`；它们照常计入连续失败次数并可触发自动暂停
 - **新会话发出第一条消息后、服务端列出它之前，dashboard 不再闪回 router 默认 backend**（#3516）：这段时间（最长约一次轮询）里会话头的 CLI 名、图片上传开关、模型列表和助手消息图标继续跟随发送前显示的 backend（显式选择，或按创建时的 access profile 解析的「自动」），服务端列出后改由会话自己的 backend 决定。显式选择与 access profile 仍只随第一条消息发出，后续消息不再携带
 - **kiro / codex 后端收到 dashboard 上传的 PDF 时改为提示模型用 Read 工具读取**（#3451）：ACP（kiro）与 codex 协议以前把每个附件都编码成图片块，PDF 因此变成 `media_type: application/pdf`、数据为空的图片，模型既看不到文件也不知道它已写入 workspace。现在两个后端与 Claude 后端走同一个 `clievent.UserTextAndInline`：PDF 只出现在用户文本前的 Read 提示里（workspace 相对路径 + 原文件名），图片块只来自真正的图片附件。
