@@ -52,8 +52,8 @@ type Server struct {
 	uploadStore *uploadStore
 
 	// ── core deps ──────────────────────────────────────
-	router     *session.Router
-	hub        *Hub // WebSocket hub
+	router     serverRouter // nil interface when ServerOptions.Router is nil
+	hub        *Hub         // WebSocket hub
 	projectMgr *project.Manager
 
 	// ── multi-node ─────────────────────────────────────

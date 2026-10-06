@@ -7,7 +7,7 @@
 | 创建日期 | 2026-05-10 |
 | 修订日期 | 2026-05-11（v3：按落地实测 + 第二轮 review 修订方法数与 typed-nil 防御） |
 | 关联代码 | `internal/session/router.go`<br/>`internal/dispatch/dispatch.go:39-70`（`*Dispatcher.router`）<br/>`internal/server/wshub.go:38-140`（`*Hub.router`）<br/>`internal/upstream/connector.go:67-95`（`*Connector.router`）<br/>`internal/cron/scheduler.go:60-85`（已有参考实现） |
-| 关联 RFC | `docs/rfc/key-resolver.md`（正交推进）<br/>延后：ARCH-ROUTER-SUBAGGREGATE（暂未立 ticket）<br/>延后：ARCH-SERVER-ROUTER-IF（Phase 2.5，Server/Handlers 迁移；本 RFC 非目标） |
+| 关联 RFC | `docs/rfc/key-resolver.md`（正交推进）<br/>延后：ARCH-ROUTER-SUBAGGREGATE（暂未立 ticket）<br/>ARCH-SERVER-ROUTER-IF（Phase 2.5，Server/Handlers 迁移；本 RFC 非目标，已由 #3431 落地，见 §7.4） |
 
 ## 0. 修订历史
 
@@ -510,6 +510,8 @@ var (
 ### 7.4 "Phase 2.5" 的关系
 
 Server / Handlers 的 `s.router` 迁移（8 处 receiver 共 ~30 处调用）是独立 RFC。完成 Phase 2 不触发 Phase 2.5；完成 Phase 2.5 不依赖 Phase 2（两个可并行做，冲突面是 server 包内部的新 consumer.go 文件）。
+
+**Phase 2.5 状态（#3431）**：剩下的三个运行期持有者已收窄——`Server.router` 是 `serverRouter`（takeover / 项目扫描 / 回复 footer），`HealthHandler.router` 与四个 health probe 参数是 `healthRouter`，`HubOptions.Router` 是 `HubRouter`；其余 handler 早已拆进 dashboard 子包各持 Deps 接口。`ServerOptions.Router` 按 §4.5 保留为具体类型，typed-nil 拆箱只在 `buildServerWithHandlers` 做一次（`routerViews`），构建步骤从 `wiring.router` 取具体指针。lint-server-handlers 的 `concrete_router` 规则把 `session.Router` 的类型引用限制在接线文件（`server_options.go` / `handler_set.go` / `build_*.go` / `*_adapter.go`），绑定断言在 `consumer_contract_test.go`。
 
 ---
 
