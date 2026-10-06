@@ -285,7 +285,7 @@ func TestConnState_StaleTokenFails(t *testing.T) {
 				t.Fatalf("after a stale-token reply: state %q, want failed", s.State)
 			}
 			want := fmt.Sprintf("weixin token expired (iLink -14): run 'naozhi setup weixin' "+
-				"(restart unless it reconnects by itself): getUpdates ret=%d errcode=%d: session timeout",
+				"and restart, unless it reconnects by itself: getUpdates ret=%d errcode=%d: session timeout",
 				tc.ret, tc.errCode)
 			if s.LastError != want {
 				t.Errorf("LastError = %q, want %q", s.LastError, want)
