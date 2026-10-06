@@ -4,10 +4,10 @@
 // and iteration order is deterministic (sorted by key).
 //
 // Typed is the default for new closed-set registries (#3444's platform
-// adapters are the intended first consumer). Two registries stay outside it
-// on purpose: backend.Register keeps registration order, supports
-// AttachAssetProvider and panics on a duplicate; history.RegisterFactory is
-// last-write-wins as a test-injection seam over distinct production IDs.
+// adapters first). Three stay outside it on purpose: backend.Register keeps
+// registration order, supports AttachAssetProvider and panics on a duplicate;
+// history.RegisterFactory is last-write-wins as a test-injection seam;
+// wireup.Registry is Boot's private panic-on-duplicate boot-step table.
 package registry
 
 import (

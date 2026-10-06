@@ -29,7 +29,8 @@ func TestHistoryBackends_ClaudeFactoryRegistered(t *testing.T) {
 
 // TestHistoryBackends_EveryProfileHasFactory guards the pairing nothing else
 // checks at startup: a backend profile registered without a blank-imported
-// history factory boots fine and then shows every session's history as empty.
+// history factory boots fine, then only logs a runtime Warn
+// (history.WarnMissingFactory) while every session's history shows empty.
 func TestHistoryBackends_EveryProfileHasFactory(t *testing.T) {
 	NewBoot().EnsureCLIBackends()
 	profiles := backend.All()
