@@ -466,7 +466,7 @@ func (p *ClaudeProtocol) ReadEventInto(line string, buf []clievent.Event) ([]cli
 		readEventPool.Put(ev)
 	}()
 	// Aliased bytes: json.Unmarshal only reads its input (#700).
-	if err := json.Unmarshal(stringToBytesUnsafe(line), ev); err != nil {
+	if err := decodeClaudeEvent(stringToBytesUnsafe(line), ev); err != nil {
 		return nil, false, err
 	}
 	// Structural fallback for frames the prefix match misses (e.g. the CLI
@@ -510,10 +510,88 @@ func (p *ClaudeProtocol) ReadEventInto(line string, buf []clievent.Event) ([]cli
 			ev.CodeChange = &cc
 		}
 	}
+	// Only a Workflow launch receipt is worth a second pass over a user frame:
+	// tool_use_result of a Read or Bash can run to megabytes.
+	if ev.Type == "user" && strings.Contains(line, `"async_launched"`) {
+		ev.WorkflowLaunch = parseWorkflowLaunch(line)
+	}
 	// Copy the value out so the caller owns an independent clievent.Event; the deferred
 	// Put resets only the pooled struct's view, not the freshly-unmarshalled
 	// graph (Message, AskQuestion, ...) the copy points at.
 	return append(buf[:0], *ev), ev.Type == "result", nil
+}
+
+// decodeClaudeEvent unmarshals one stream-json line into ev, tolerating a
+// type error under workflow_progress (docs/rfc/workflow-dashboard.md §4.1.1):
+// the frame is kept with the snapshot graded Partial or Failed. Because
+// encoding/json reports only its first type error, a tolerated one is followed
+// by a second pass with workflow_progress shadowed as raw bytes, so an error
+// elsewhere in the frame is still returned whatever the key order, and a
+// Partial snapshot's identity fields are re-decoded from those bytes.
+func decodeClaudeEvent(data []byte, ev *clievent.Event) error {
+	if err := json.Unmarshal(data, ev); err != nil {
+		grade, ok := clievent.WorkflowDecodeFromError(err)
+		if !ok {
+			return err
+		}
+		items := ev.WorkflowProgress
+		if grade == clievent.WorkflowDecodeFailed {
+			items = nil
+		}
+		var shadow eventWorkflowShadowed
+		if err := json.Unmarshal(data, &shadow); err != nil {
+			return err
+		}
+		if grade == clievent.WorkflowDecodePartial &&
+			!clievent.WorkflowIdentityDecodes(shadow.WorkflowProgress) {
+			items, grade = nil, clievent.WorkflowDecodeFailed
+		}
+		*ev = shadow.Event
+		ev.WorkflowProgress, ev.WorkflowDecode = items, grade
+	}
+	if ev.WorkflowProgress != nil && !clievent.WorkflowItemsValid(ev.WorkflowProgress) {
+		ev.WorkflowProgress, ev.WorkflowDecode = nil, clievent.WorkflowDecodeFailed
+	}
+	return nil
+}
+
+// eventWorkflowShadowed decodes an Event with workflow_progress skipped: the
+// outer field dominates the embedded one of the same key.
+type eventWorkflowShadowed struct {
+	clievent.Event
+	WorkflowProgress json.RawMessage `json:"workflow_progress"`
+}
+
+// wireWorkflowLaunch is the Workflow tool_result's tool_use_result. The stream
+// spells it snake_case; the on-disk JSONL uses toolUseResult.
+type wireWorkflowLaunch struct {
+	TUR *struct {
+		Status        string `json:"status"`
+		TaskID        string `json:"taskId"`
+		TaskType      string `json:"taskType"`
+		WorkflowName  string `json:"workflowName"`
+		RunID         string `json:"runId"`
+		Summary       string `json:"summary"`
+		TranscriptDir string `json:"transcriptDir"`
+	} `json:"tool_use_result"`
+}
+
+// parseWorkflowLaunch returns the launch receipt a user frame carries, or nil
+// when its tool_use_result is anything but an async local_workflow launch
+// (including a string, or a Read of text that merely mentions the status).
+func parseWorkflowLaunch(line string) *clievent.WorkflowLaunch {
+	var w wireWorkflowLaunch
+	if json.Unmarshal(stringToBytesUnsafe(line), &w) != nil || w.TUR == nil ||
+		w.TUR.Status != "async_launched" || w.TUR.TaskType != TaskTypeWorkflow {
+		return nil
+	}
+	return &clievent.WorkflowLaunch{
+		TaskID:        w.TUR.TaskID,
+		WorkflowName:  w.TUR.WorkflowName,
+		RunID:         w.TUR.RunID,
+		Summary:       w.TUR.Summary,
+		TranscriptDir: w.TUR.TranscriptDir,
+	}
 }
 
 // askUserQuestionInput matches the `input` of an AskUserQuestion tool_use

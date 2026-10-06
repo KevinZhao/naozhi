@@ -185,6 +185,10 @@ func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, 
 	if inWindow {
 		*s.costWindow = s.costWindow.Accumulate(inc)
 	}
+	var mark *costledger.SessionMark
+	if fwd == nil && !inWindow {
+		mark = s.costMarkLocked(next.USD)
+	}
 	s.costMu.Unlock()
 	if fwd != nil {
 		fwd.addSpent(inc.USD, inc)
@@ -197,19 +201,21 @@ func (s *ManagedSession) accountCost(result *clievent.SendResult, runID string, 
 		}
 	}
 	if !inWindow {
-		s.appendSessionRows(inc, runID)
+		s.appendSessionRows(inc, runID, mark)
 	}
 	return inc.USD
 }
 
-// appendSessionRows writes inc as this session's own ledger rows. Called
-// outside costMu: the ledger is an external sink.
-func (s *ManagedSession) appendSessionRows(inc costledger.Increment, runID string) {
+// appendSessionRows writes inc as this session's own ledger rows, each
+// carrying mark (nil: none). Called outside costMu: the ledger is an
+// external sink.
+func (s *ManagedSession) appendSessionRows(inc costledger.Increment, runID string, mark *costledger.SessionMark) {
 	if s.costAcct == nil || !s.costAcct.ledger.Enabled() {
 		return
 	}
 	s.costAcct.warnUnknownBasis(s.key, inc.Models)
 	for _, e := range s.ledgerEntries(inc, runID) {
+		e.Mark = mark
 		s.costAcct.ledger.Append(e)
 	}
 }
