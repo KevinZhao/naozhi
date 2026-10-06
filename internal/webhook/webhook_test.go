@@ -36,17 +36,6 @@ func (r *recv) handler(w http.ResponseWriter, req *http.Request) {
 
 func noSleep(context.Context, time.Duration) {}
 
-func waitFor(t *testing.T, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatal("condition not met in time")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
 func TestDeliver_SignedPayloadAndHeaders(t *testing.T) {
 	r := &recv{}
 	srv := httptest.NewServer(http.HandlerFunc(r.handler))
