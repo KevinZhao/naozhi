@@ -320,7 +320,8 @@ test('pending session with a single backend keeps the server-reported CLI name',
 
 /**
  * Opens myproject from the palette on profile/backend, sends text (or one
- * image when text is '') and waits for the send to leave.
+ * image when text is '') and waits for the send to leave. Returns the header
+ * labels painted before the send.
  * @param {import('@playwright/test').Page} page
  * @param {Awaited<ReturnType<typeof startMockServer>>} own
  * @param {{ profile: string, backend: string, ws: boolean, text: string }} c
@@ -334,7 +335,9 @@ async function createAndSend(page, own, c) {
   await page.selectOption('#new-backend', c.backend);
   await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().click();
   await expect(page.locator('.session-card.new-card')).toHaveCount(1);
+  const before = await headerLabels(page);
   await sendNow(page, own, c.text, 1);
+  return before;
 }
 
 /**
@@ -391,7 +394,7 @@ for (const c of SENT_CASES) {
   test(`a sent, not yet listed session (${c.name}) keeps its pre-send backend`, async ({ page }) => {
     const own = await mockWithCLIName(undefined, { ws: c.ws });
     try {
-      await createAndSend(page, own, c);
+      expect(await createAndSend(page, own, c)).toEqual(['claude-code', 'claude-code']);
       expect(wsSendBodies(own).length).toBe(c.ws ? 1 : 0);
       expect(await headerLabels(page)).toEqual(['claude-code', 'claude-code']);
     } finally { own.server.close(); }
@@ -417,7 +420,7 @@ test('a sent key this browser did not create takes no default-profile guess', as
 test('a sent kiro pick keeps gating images and the clawd icon off until listed', async ({ page }) => {
   const own = await mockWithCLIName(undefined, { ws: true });
   try {
-    await createAndSend(page, own, { profile: 'team', backend: 'kiro', ws: true, text: 'hello' });
+    expect(await createAndSend(page, own, { profile: 'team', backend: 'kiro', ws: true, text: 'hello' })).toEqual(['kiro', 'kiro']);
     expect(wsSendBodies(own)[0].backend).toBe('kiro');
     expect(await headerLabels(page)).toEqual(['kiro', 'kiro']);
     await page.evaluate(() => /** @type {any} */ (window).nz.test.applyFeatureGates());
@@ -480,9 +483,10 @@ test('re-creating a sent, not yet listed key starts from its new picks', async (
     await sendNow(page, own, 'hello', 1);
     expect(await headerLabels(page)).toEqual(['kiro', 'kiro']);
     // The same continued key on 自动 under solo must not inherit the kiro
-    // pick the first send left behind.
+    // pick the first send left behind. The key was already sent from here, so
+    // with no display copy it shows the router default's stats name.
     await create('', 'solo');
-    expect(await headerLabels(page)).not.toContain('kiro');
+    expect(await headerLabels(page)).toEqual(['claude-live', 'claude-live']);
   } finally { own.server.close(); }
 });
 
