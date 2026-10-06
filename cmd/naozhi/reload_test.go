@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/budget"
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/imauth"
 	"github.com/naozhi/naozhi/internal/server"
@@ -41,7 +43,7 @@ func newReloaderFixture(t *testing.T) (*configReloader, string, *[]server.HotCon
 	fp := server.NewConfigFingerprint(cfg.Fingerprint.SHA256, cfg.Fingerprint.LoadedAt)
 	r := newConfigReloader(path, cfg, level, fp)
 	var applied []server.HotConfig
-	r.bindApply(func(h server.HotConfig) { applied = append(applied, h) }, nil)
+	r.bindApply(func(h server.HotConfig) { applied = append(applied, h) }, nil, nil)
 	return r, path, &applied, level
 }
 
@@ -158,7 +160,7 @@ func TestConfigReloader_ReportsOpenedPlatform(t *testing.T) {
 	}
 	r := newConfigReloader(path, cfg, nil, nil)
 	var applied []server.HotConfig
-	r.bindApply(func(h server.HotConfig) { applied = append(applied, h) }, nil)
+	r.bindApply(func(h server.HotConfig) { applied = append(applied, h) }, nil, nil)
 	writeConfigFile(t, path, slack+"im_acess:\n  platforms:\n    slack:\n      allowed_users: [U1]\n")
 	res, err := r.Reload(context.Background())
 	if err != nil {
@@ -190,7 +192,7 @@ func TestConfigReloader_RuntimeCreatedProfileIsNotPending(t *testing.T) {
 	r, path, applied, _ := newReloaderFixture(t)
 	live := map[string]session.AccessProfile{}
 	r.bindApply(func(h server.HotConfig) { *applied = append(*applied, h) },
-		func() map[string]session.AccessProfile { return live })
+		func() map[string]session.AccessProfile { return live }, nil)
 	created := map[string]config.AccessProfile{
 		"team":  {DisplayName: "Team", Env: map[string]string{}},
 		"vault": {ChipColor: "#d97757", DefaultModel: "sonnet", Env: map[string]string{"ANTHROPIC_AUTH_TOKEN_FILE": filepath.Join(t.TempDir(), "vault.token")}},
@@ -222,6 +224,70 @@ func TestConfigReloader_RuntimeCreatedProfileIsNotPending(t *testing.T) {
 	}
 	if !reflect.DeepEqual(res.RestartRequired, []string{"access_profiles"}) {
 		t.Fatalf("restart_required = %v after editing a live profile, want [access_profiles]", res.RestartRequired)
+	}
+}
+
+// cost.budget caps reach the gate IM and cron share: a lowered cap blocks
+// the next check, and a moved day boundary waits for a restart.
+func TestConfigReloader_SwapsBudgetLimits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	capped := func(usd, zone string) string {
+		return reloadBase + "cost:\n  budget:\n    per_chat_daily_usd: " + usd + "\n    timezone: " + zone + "\n"
+	}
+	writeConfigFile(t, path, capped("10", "UTC"))
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := budget.NewIndex(cfg.BudgetLocation(), nil)
+	const key = "feishu:group:oc_1:general"
+	idx.Add(costledger.Entry{TS: time.Now(), SessionKey: key, Unit: costledger.UnitUSD, Amount: 6})
+	gate := budget.NewGate(cfg.BudgetLimits(), idx)
+	fp := server.NewConfigFingerprint(cfg.Fingerprint.SHA256, cfg.Fingerprint.LoadedAt)
+	r := newConfigReloader(path, cfg, nil, fp)
+	r.bindApply(func(server.HotConfig) {}, nil, gate)
+	if v := gate.CheckKey(key); v.Blocked {
+		t.Fatalf("before reload = %+v, want admitted", v)
+	}
+
+	writeConfigFile(t, path, capped("5", "UTC"))
+	res, err := r.Reload(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(res.Applied, []string{"cost.budget"}) || len(res.RestartRequired) != 0 {
+		t.Fatalf("lowered cap result = %+v", res)
+	}
+	if v := gate.CheckKey(key); !v.Blocked || v.Limit != 5 {
+		t.Fatalf("after lowering to 5 = %+v, want blocked", v)
+	}
+
+	writeConfigFile(t, path, capped("5", "Asia/Shanghai"))
+	if res, err = r.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Applied) != 0 || !reflect.DeepEqual(res.RestartRequired, []string{"cost.budget.timezone"}) {
+		t.Fatalf("moved zone result = %+v", res)
+	}
+	if _, _, pending := fp.Get(); !reflect.DeepEqual(pending, []string{"cost.budget.timezone"}) {
+		t.Fatalf("/health pending = %v", pending)
+	}
+}
+
+// A process that started without a cap has no gate: a cap added by reload
+// is restart_required, not reported as applied.
+func TestConfigReloader_BudgetWithoutGateWaitsForRestart(t *testing.T) {
+	r, path, applied, _ := newReloaderFixture(t)
+	writeConfigFile(t, path, reloadBase+"cost:\n  budget:\n    daily_usd: 5\n")
+	res, err := r.Reload(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Applied) != 0 || !reflect.DeepEqual(res.RestartRequired, []string{"cost.budget"}) {
+		t.Fatalf("result = %+v, want nothing applied and cost.budget pending", res)
+	}
+	if len(*applied) != 0 {
+		t.Fatalf("apply calls = %d, want 0", len(*applied))
 	}
 }
 

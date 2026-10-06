@@ -661,8 +661,11 @@ cost:
   超过上限标红，悬停可看 scope 和重置时间）；数据来自 `GET /api/cost/budget?session_key=|job_id=`。
 - 这是软上限：放行时还没超的那一轮可能把花费推过上限；花费在账本落盘后（约 1 秒内）才
   计入。只统计以 USD 计价的花费，按 credits / tokens 计量的 backend 不计入。
-- 需要 cost 账本开着（`cost.enabled` 不能为 false）；改配置要重启 naozhi（`naozhi config
-  reload` 会把 `cost` 列在 `restart_required` 里）。
+- 需要 cost 账本开着（`cost.enabled` 不能为 false）。改上限、`warn_ratio`、`action`
+  不用重启，`naozhi config reload` 即时生效，当天已花的钱照算；改了之后上面「每天一次」的
+  提醒和跳过记录重新计，新上限下再碰到会再提醒、再记一次。下面两种仍要重启（会列在
+  `restart_required` 里）：启动时没配任何上限、现在要加上（`cost.budget`），以及「一天」
+  的时区变了（`cost.budget.timezone`）。
 
 ### 配置热重载
 
@@ -676,7 +679,7 @@ kill -HUP $(pidof naozhi)
 ```
 
 - `SIGHUP` 的意思是重载配置，不再结束进程；要停进程用 `SIGTERM` / `SIGINT`。
-- 可热重载：`im_access`、`im_rate_limit`、`log.level`。其它段的改动会在结果里列为
+- 可热重载：`im_access`、`im_rate_limit`、`log.level`、`cost.budget` 的上限。其它段的改动会在结果里列为
   `restart_required`，直到真正重启前每次 reload 都会继续报告。`reverse_nodes`、
   `agents` / `agent_commands`、`access_profiles`、`cron.notify_default` 按设计只在
   重启时生效；dashboard 里新建的 access profile 已经即时生效，不算待重启。
