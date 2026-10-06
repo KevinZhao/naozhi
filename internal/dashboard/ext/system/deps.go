@@ -6,6 +6,7 @@
 //	POST /api/system/labels/clear-origin reset a session's LabelOrigin
 //	GET  /api/system/update              version state + what the operator can do
 //	POST /api/system/update/apply        carry it out (install and/or restart)
+//	POST /api/system/config/reload       re-read config.yaml, apply hot sections
 package system
 
 import (
@@ -44,6 +45,8 @@ type Deps struct {
 	BuildVersion  string
 	// InstallEnabled gates POST .../apply.
 	InstallEnabled bool
+	// ConfigReload is nil when the server has no config path.
+	ConfigReload ConfigReloader
 }
 
 // Handlers serves the /api/system/* endpoint family.
@@ -58,6 +61,9 @@ type Handlers struct {
 	applyLimiter *ratelimit.Limiter
 	// applyFn is a test seam; nil ⇒ updateChecker.InstallLatest.
 	applyFn func(ctx context.Context, restart bool) error
+	// configReload / reloadLimiter back POST /api/system/config/reload.
+	configReload  ConfigReloader
+	reloadLimiter *ratelimit.Limiter
 }
 
 // New returns Handlers wired from d.
@@ -78,6 +84,8 @@ func New(d Deps) *Handlers {
 		buildVersion:   d.BuildVersion,
 		installEnabled: d.InstallEnabled,
 		applyLimiter:   newUpdateApplyLimiter(),
+		configReload:   d.ConfigReload,
+		reloadLimiter:  newConfigReloadLimiter(),
 	}
 }
 
