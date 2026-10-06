@@ -44,6 +44,30 @@ func TestVendorAssets_SRIMatchesEmbedded(t *testing.T) {
 	}
 }
 
+// TestVendorAssets_DirectoryNamesRelease: vendor/ responses are immutable on
+// the strength of their path, so the KaTeX build embedded must be the release
+// its directory names. Changed bytes need a new directory, not a new pin.
+func TestVendorAssets_DirectoryNamesRelease(t *testing.T) {
+	t.Parallel()
+	dirs := map[string]bool{}
+	for key := range staticAssets {
+		if rest, ok := strings.CutPrefix(key, "vendor/"); ok {
+			dir, _, _ := strings.Cut(rest, "/")
+			dirs[dir] = true
+		}
+	}
+	if len(dirs) != 1 || !dirs["katex-0.16.21"] {
+		t.Fatalf("vendor/ holds %v, want katex-0.16.21 alone: a new library or release needs its own release check here", dirs)
+	}
+	js := string(staticAssetBytes("vendor/katex-0.16.21/katex.min.js"))
+	if got := regexp.MustCompile(`version:"([^"]+)"`).FindAllStringSubmatch(js, -1); len(got) != 1 || got[0][1] != "0.16.21" {
+		t.Errorf("vendor/katex-0.16.21/katex.min.js declares versions %v, want exactly 0.16.21", got)
+	}
+	if css := string(staticAssetBytes("vendor/katex-0.16.21/katex.min.css")); !strings.Contains(css, `.katex .katex-version:after{content:"0.16.21"}`) {
+		t.Error("vendor/katex-0.16.21/katex.min.css does not carry the 0.16.21 version marker")
+	}
+}
+
 // TestVendorRoutes_ServeEmbeddedTree requests every vendored asset through the
 // mux, plus every font the KaTeX stylesheet names, so a font left out of the
 // embed or a route that misses a subdirectory fails here instead of rendering
