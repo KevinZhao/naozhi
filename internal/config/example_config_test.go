@@ -218,6 +218,76 @@ func TestDocs_CodexSamplesSetModelAndArgs(t *testing.T) {
 	}
 }
 
+var (
+	docArgsLineRe = regexp.MustCompile(`^(\s*)(?:- )?args:\s*(.*)$`)
+	docArgsItemRe = regexp.MustCompile(`^(\s*)- (.*)$`)
+	docArgTokenRe = regexp.MustCompile(`"([^"]*)"|'([^']*)'|([^\s,'"]+)`)
+)
+
+// docArgsTokens returns every argv token the doc's `args:` keys carry, inline
+// (`args: [a, b]`) or as a block list, commented-out samples included.
+func docArgsTokens(doc string) (tokens []string, keys int) {
+	uncomment := regexp.MustCompile(`^(\s*)#`)
+	addTokens := func(s string) {
+		for _, m := range docArgTokenRe.FindAllStringSubmatch(s, -1) {
+			tokens = append(tokens, m[1]+m[2]+m[3])
+		}
+	}
+	blockCol := -1
+	for _, raw := range strings.Split(doc, "\n") {
+		line := uncomment.ReplaceAllString(raw, "$1 ")
+		if blockCol >= 0 {
+			if m := docArgsItemRe.FindStringSubmatch(line); m != nil && len(m[1]) >= blockCol {
+				item, _, _ := strings.Cut(m[2], " #")
+				addTokens(item)
+				continue
+			}
+			blockCol = -1
+		}
+		m := docArgsLineRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		keys++
+		rest, _, _ := strings.Cut(m[2], "#")
+		if rest = strings.TrimSpace(rest); rest == "" {
+			blockCol = len(m[1])
+			continue
+		}
+		addTokens(strings.Trim(rest, "[]"))
+	}
+	return tokens, keys
+}
+
+// TestDocs_ExampleArgsCarryNoDeniedFlags: the spawn pipeline strips denied
+// flags from configured args and the loader warns about each one, so a sample
+// that carries one teaches a no-op that logs a warning on every deployment.
+func TestDocs_ExampleArgsCarryNoDeniedFlags(t *testing.T) {
+	for _, file := range []string{"README.md", "config.example.yaml"} {
+		data, err := os.ReadFile(filepath.Join("..", "..", file))
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		tokens, keys := docArgsTokens(string(data))
+		if keys < 3 {
+			t.Fatalf("%s: found %d `args:` keys; the pattern no longer matches the doc", file, keys)
+		}
+		for _, tok := range tokens {
+			if cliinfo.IsDeniedExtraFlag(tok) {
+				t.Errorf("%s: sample args carry %q, which the spawn pipeline strips (use its dedicated config field)", file, tok)
+			}
+		}
+	}
+}
+
+func TestDocArgsTokens_InlineAndBlockForms(t *testing.T) {
+	doc := "cli:\n  args: [\"-c\", 'x=y'] # --model in a comment\n  #  - id: a\n  #    args:\n  #      - \"--add-dir\"\n  #      - --debug # note\n  #    model: m\n  list:\n    - --not-args\n"
+	tokens, keys := docArgsTokens(doc)
+	if want := []string{"-c", "x=y", "--add-dir", "--debug"}; keys != 2 || !slices.Equal(tokens, want) {
+		t.Errorf("docArgsTokens = %q (keys %d), want %q (keys 2)", tokens, keys, want)
+	}
+}
+
 // yamlChildScalar returns the scalar node for key, or nil.
 func yamlChildScalar(m *yaml.Node, key string) *yaml.Node {
 	for i := 0; i+1 < len(m.Content); i += 2 {
