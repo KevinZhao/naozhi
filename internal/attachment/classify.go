@@ -55,6 +55,19 @@ func ClassifyFile(name string, data []byte) (string, error) {
 	return mime, nil
 }
 
+// MaybeSupported reports whether an upload with this name or declared MIME
+// type could pass ClassifyFile, so an adapter can refuse other uploads
+// without downloading them. ClassifyFile still decides on the bytes; a PDF
+// with neither a .pdf name nor an application/pdf type is refused here.
+func MaybeSupported(name, mime string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	if _, ok := textFileMime[ext]; ok || ext == ".pdf" {
+		return true
+	}
+	base, _, _ := strings.Cut(mime, ";")
+	return strings.EqualFold(strings.TrimSpace(base), "application/pdf")
+}
+
 // ExtForMime is the on-disk extension Persist accepts for a MIME type
 // ClassifyFile returns; "" for any other type.
 func ExtForMime(mime string) string {

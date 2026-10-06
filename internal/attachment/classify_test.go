@@ -64,6 +64,35 @@ func TestClassifyFile_AtCapAccepted(t *testing.T) {
 	}
 }
 
+func TestMaybeSupported(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, file, mime string
+		want             bool
+	}{
+		{"pdf ext", "report.PDF", "", true},
+		{"pdf type without ext", "scan", "application/pdf", true},
+		{"pdf type with params", "scan", " Application/PDF; charset=binary", true},
+		{"text ext", "notes.txt", "application/octet-stream", true},
+		{"upper-case text ext", "README.MD", "", true},
+		{"video", "clip.mp4", "video/mp4", false},
+		{"docx", "a.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", false},
+		{"no ext no type", "Makefile", "", false},
+		{"text type alone is not enough", "a.go", "text/plain", false},
+	}
+	for _, tc := range cases {
+		if got := MaybeSupported(tc.file, tc.mime); got != tc.want {
+			t.Errorf("%s: MaybeSupported(%q, %q) = %v, want %v", tc.name, tc.file, tc.mime, got, tc.want)
+		}
+	}
+	// Every extension ClassifyFile accepts by name must pass the pre-filter.
+	for ext := range textFileMime {
+		if !MaybeSupported("a"+ext, "") {
+			t.Errorf("MaybeSupported(%q) = false, but ClassifyFile accepts it", "a"+ext)
+		}
+	}
+}
+
 // TestClassifiedMimesPersistable keeps the classifier and the persist
 // allowlist from drifting: every MIME type ClassifyFile can return must map
 // to an extension Persist accepts.

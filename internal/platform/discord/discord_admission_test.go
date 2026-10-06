@@ -30,17 +30,19 @@ func (c *cdnStub) RoundTrip(*http.Request) (*http.Response, error) {
 
 // TestOnMessageCreate_AdmissionBeforeAttachmentDownload pins #3513 for
 // Discord: a sender the dispatcher would refuse costs no CDN download, while
-// text-only messages skip the pre-check and reach the handler unchanged.
-// Not parallel: it swaps the package-level discordHTTPClient.
+// messages with nothing to download skip the pre-check and reach the handler.
 func TestOnMessageCreate_AdmissionBeforeAttachmentDownload(t *testing.T) {
 	cdn := &cdnStub{}
-	prev := discordHTTPClient
-	discordHTTPClient = &http.Client{Transport: cdn}
-	t.Cleanup(func() { discordHTTPClient = prev })
 
 	image := []*discordgo.MessageAttachment{{
 		URL:         "https://cdn.discordapp.com/attachments/1/2/a.png",
 		ContentType: "image/png",
+	}}
+	// video costs no download: it is refused from its metadata.
+	video := []*discordgo.MessageAttachment{{
+		URL:         "https://cdn.discordapp.com/attachments/1/2/a.mp4",
+		Filename:    "a.mp4",
+		ContentType: "video/mp4",
 	}}
 	refuse := func(context.Context, platform.IncomingMessage) bool { return false }
 	allow := func(context.Context, platform.IncomingMessage) bool { return true }
@@ -64,6 +66,7 @@ func TestOnMessageCreate_AdmissionBeforeAttachmentDownload(t *testing.T) {
 		{"refused image with caption", refuse, image, "look", false, false, 1, 0, 0, 0},
 		{"admitted image", allow, image, "", false, false, 1, 1, 1, 1},
 		{"refused text only", refuse, nil, "hi", false, false, 0, 0, 1, 0},
+		{"refused undownloadable file", refuse, video, "", false, false, 0, 0, 1, 0},
 		{"no admitter", nil, image, "", false, false, 0, 1, 1, 1},
 		{"unmentioned guild image", mentionGate, image, "", true, false, 1, 0, 0, 0},
 		{"mentioned guild image", mentionGate, image, "<@bot123> look", true, true, 1, 1, 1, 1},
@@ -72,6 +75,7 @@ func TestOnMessageCreate_AdmissionBeforeAttachmentDownload(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cdn.hits.Store(0)
 			d := New(Config{BotToken: "test-token"})
+			d.cdnHTTP = &http.Client{Transport: cdn}
 			setTestBotID(d, "bot123")
 			var admits atomic.Int32
 			var gotAdmit platform.IncomingMessage
