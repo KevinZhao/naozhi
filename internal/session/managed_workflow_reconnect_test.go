@@ -186,27 +186,63 @@ func TestReconnectShims_WorkflowSurvivesRestartAndSocketLoss(t *testing.T) {
 	}
 }
 
+// readLoops counts the cli read loops running in the test binary.
+func readLoops() int {
+	buf := make([]byte, 8<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+	return strings.Count(string(buf), "cli.(*Process).readLoop(")
+}
+
+// waitReadLoops waits, at most 5s, until at most n read loops run.
+func waitReadLoops(n int) {
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	deadline := time.After(5 * time.Second)
+	for readLoops() > n {
+		select {
+		case <-tick.C:
+		case <-deadline:
+			return
+		}
+	}
+}
+
 // TestReconnectShims_WorkflowEndsWithItsCLI: a shim killed under a running
 // naozhi (the socket breaks and the shim is gone) and a CLI that exits both
-// end the run as interrupted at once (§5.6(6a)).
+// end the run as interrupted at once (§5.6(6a)), also when the read loop
+// exits before the reattach commits: the end is then delivered inside
+// bookProcessEnd, which must come after the bind.
 func TestReconnectShims_WorkflowEndsWithItsCLI(t *testing.T) {
 	lines := probeLines(t)
 	for _, tc := range []struct {
-		name string
-		sc   shimScript
+		name     string
+		sc       shimScript
+		endFirst bool
 	}{
-		{"shim killed", shimScript{firstSeq: 1, replay: lines[3:11], hangUp: true, shimPID: FakeShimPID}},
-		{"cli exited", shimScript{firstSeq: 1, replay: lines[3:11], exit: true, shimPID: os.Getpid()}},
+		{"shim killed", shimScript{firstSeq: 1, replay: lines[3:11], hangUp: true, shimPID: FakeShimPID}, false},
+		{"cli exited", shimScript{firstSeq: 1, replay: lines[3:11], exit: true, shimPID: os.Getpid()}, false},
+		{"cli exited before the commit", shimScript{firstSeq: 1, replay: lines[3:11], exit: true, shimPID: os.Getpid()}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r, sess := workflowShim(t, &storeEntry{Key: "feishu:direct:alice:general", SessionID: resolveStoredSID}, tc.sc)
+			if tc.endFirst {
+				// The history read sits between the spawn and the commit.
+				base := readLoops()
+				r.hist.loader.(*racingHistoryLoader).duringRead = func() { waitReadLoops(base) }
+			}
 			r.ReconnectShimsCtx(context.Background())
+			if sess.loadProcess() == nil {
+				t.Fatal("premise: no reattach")
+			}
 			testhelper.Eventually(t, func() bool {
 				w := boardEntry(sess, probeTask)
 				return w != nil && w.Status == workflow.StatusInterrupted
 			}, 5*time.Second, "the run did not end with its CLI")
 			if w := boardEntry(sess, probeTask); w.Name != "probe" || w.Agents[2].State != workflow.AgentStopped {
 				t.Errorf("interrupted %q with agent C %s, want the probe's name and its live agent stopped", w.Name, w.Agents[2].State)
+			}
+			if boundProc(sess.WorkflowBoard()) != nil {
+				t.Error("the board stays bound to an ended process")
 			}
 		})
 	}

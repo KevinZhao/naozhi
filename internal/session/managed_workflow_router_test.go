@@ -655,3 +655,99 @@ func TestWorkflowBoard_ResultMergeRacesObserve(t *testing.T) {
 		t.Errorf("board at tracker version %d (%s), want %d (%s)", got.TrackerVersion, got.Status, want.TrackerVersion, want.Status)
 	}
 }
+
+// boundProc is the board's bound process, nil when unbound.
+func boundProc(b *WorkflowBoard) workflowNotifier {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.proc
+}
+
+// TestWorkflowBoard_RenameAfterEndStaysEnded: renaming a session whose CLI
+// died, its end already settled, does not bind the dead process again: the
+// run stays interrupted and the board unbound.
+func TestWorkflowBoard_RenameAfterEndStaysEnded(t *testing.T) {
+	r := wfRouter(t)
+	proc := newWFProc()
+	old := injectSession(r, "scratch:direct:x:general", proc)
+	bookWorkflows(old, proc, "", nil, nil)
+	bookProcessEnd(old, proc, "")
+	proc.observe(time.Now(), wfStarted("w1", "probe"), wfSnapshot("w1", "start"))
+	proc.finish(cli.ProcessEnd{})
+	b := old.WorkflowBoard()
+	if w := b.Published().Workflows[0]; w.Status != workflow.StatusInterrupted {
+		t.Fatalf("premise: %s after the CLI exited, want interrupted", w.Status)
+	}
+	if !r.RenameSession("scratch:direct:x:general", "dashboard:direct:x:general") {
+		t.Fatal("rename failed")
+	}
+	if w := b.Published().Workflows[0]; w.Status != workflow.StatusInterrupted || boundProc(b) != nil || b.Running() {
+		t.Errorf("after rename: %s, bound %v, running %v; want interrupted and unbound", w.Status, boundProc(b) != nil, b.Running())
+	}
+	b.bind(newWFProc(), "")
+	b.mu.Lock()
+	kept := b.ended != nil
+	b.mu.Unlock()
+	if kept {
+		t.Error("the next process's bind left the board holding the dead one")
+	}
+}
+
+// TestWorkflowBoard_BindBeforeEndAtEveryInstall: at each site that hands a
+// session its process, a process that ended before it was handed over (its
+// end not yet delivered) is bound before bookProcessEnd delivers that end,
+// so the board unbinds it and interrupts its run.
+func TestWorkflowBoard_BindBeforeEndAtEveryInstall(t *testing.T) {
+	ended := func() *wfProc {
+		p := newWFProc()
+		p.observe(time.Now(), wfStarted("w1", "probe"), wfSnapshot("w1", "start"))
+		p.finish(cli.ProcessEnd{})
+		return p
+	}
+	check := func(t *testing.T, s *ManagedSession) {
+		t.Helper()
+		b := s.WorkflowBoard()
+		if w := b.Published().Workflows; len(w) != 1 || w[0].Status != workflow.StatusInterrupted || boundProc(b) != nil {
+			t.Errorf("published %v (bound %v), want w1 interrupted and the board unbound", w, boundProc(b) != nil)
+		}
+	}
+	t.Run("spawn", func(t *testing.T) {
+		r := wfRouter(t)
+		r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) { return ended(), nil }
+		s, _, err := r.GetOrCreate(context.Background(), "dashboard:direct:wf:general", AgentOpts{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, s)
+	})
+	t.Run("rename", func(t *testing.T) {
+		r := wfRouter(t)
+		injectSession(r, "scratch:direct:x:general", ended())
+		if !r.RenameSession("scratch:direct:x:general", "dashboard:direct:x:general") {
+			t.Fatal("rename failed")
+		}
+		check(t, r.SessionFor("dashboard:direct:x:general"))
+	})
+}
+
+// TestCleanup_WorkflowObservationIsActivity: a finished workflow's recent
+// frame counts as the session's activity, so the idle TTL runs from it.
+func TestCleanup_WorkflowObservationIsActivity(t *testing.T) {
+	r := wfRouter(t)
+	r.ttl = time.Minute
+	proc := newWFProc()
+	s := injectSession(r, "feishu:direct:alice:general", proc)
+	s.lastActive.Store(time.Now().Add(-time.Hour).UnixNano())
+	p := &setProc{}
+	bookWorkflows(s, p.process(), "", nil, nil)
+	done := wfEntry("w1", workflow.StatusCompleted)
+	done.LastObservedAt, done.EndedAt = time.Now().Add(-10*time.Second).UnixMilli(), time.Now().UnixMilli()
+	p.publish(done)
+	if s.workflowPinned(time.Now()) {
+		t.Fatal("premise: a completed workflow must not pin")
+	}
+	r.Cleanup()
+	if !proc.Alive() {
+		t.Error("Cleanup expired a CLI whose workflow reported 10s ago")
+	}
+}

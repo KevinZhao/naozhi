@@ -48,10 +48,12 @@ type WorkflowBoard struct {
 	projectsRoot string
 	workspace    string
 	// proc is the bound process that has not ended; set is the newest of its
-	// Sets the board applied, applied that Set's Version.
+	// Sets the board applied, applied that Set's Version. ended is the last
+	// bound process whose end the board settled: rename hands it in again.
 	proc    workflowNotifier
 	set     *workflow.Set
 	applied uint64
+	ended   workflowNotifier
 	// procGone is when the board last lost its live process (unix ms), 0
 	// while it has one; bindAt / bindWrapped are the current bind's time
 	// and whether its replay had wrapped.
@@ -131,7 +133,8 @@ func newWorkflowBoard(projectsRoot string) *WorkflowBoard {
 // session that never had one. onStructural runs for a change of the
 // workflow set, a status or a run id, onCount for any other, at most every
 // workflowSummaryMinInterval. Bound right before bookProcessEnd, so a
-// process that already ended unbinds at once.
+// process that already ended unbinds at once; one whose end the board
+// already settled (a renamed dead CLI) stays unbound.
 func bookWorkflows(s *ManagedSession, proc processIface, projectsRoot string, onStructural, onCount func()) {
 	n, ok := proc.(workflowNotifier)
 	if !ok {
@@ -158,20 +161,21 @@ func (s *ManagedSession) workflowPinned(now time.Time) bool {
 // bind makes proc the board's live process. The board folds a process
 // still bound into retained (running entries go snapshot_stale: whether its
 // CLI died is for its end to tell), hands proc the task ids it knows and
-// publishes proc's current Set. Binding the bound process is a no-op.
+// publishes proc's current Set. Binding the bound process, or the one whose
+// end it last settled (its end is delivered once), is a no-op.
 func (b *WorkflowBoard) bind(proc workflowNotifier, workspace string) {
 	if b == nil || proc == nil {
 		return
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if proc == b.proc {
+	if proc == b.proc || proc == b.ended {
 		return
 	}
 	if b.proc != nil {
 		b.foldLiveLocked(b.proc, staleEntry)
 	}
-	b.proc, b.set, b.applied, b.procGone = proc, nil, 0, 0
+	b.proc, b.set, b.applied, b.procGone, b.ended = proc, nil, 0, 0, nil
 	b.workspace, b.bindAt = workspace, b.now().UnixMilli()
 	if ids := b.knownLocked(); len(ids) > 0 {
 		proc.KnowWorkflowTasks(ids)
@@ -227,7 +231,7 @@ func (b *WorkflowBoard) procEnded(p workflowNotifier, end cli.ProcessEnd) {
 		b.publishLocked(true)
 		b.foldLiveLocked(p, mark)
 		p.SetOnWorkflowChange(nil)
-		b.proc, b.set, b.procGone = nil, nil, at.UnixMilli()
+		b.proc, b.set, b.procGone, b.ended = nil, nil, at.UnixMilli(), p
 	} else {
 		for _, r := range b.retained {
 			if r.from == p {

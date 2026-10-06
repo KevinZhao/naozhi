@@ -133,7 +133,9 @@ type ioPool struct {
 
 func newIOPool(n int) *ioPool { return &ioPool{slots: make(chan struct{}, n)} }
 
-// acquire takes a slot, or registers b to be pumped when one frees.
+// acquire takes a slot, or registers b to be pumped when one frees. It
+// tries again once registered: a slot freed between the first try and the
+// registration found no one waiting to pump.
 func (p *ioPool) acquire(b *WorkflowBoard) bool {
 	select {
 	case p.slots <- struct{}{}:
@@ -141,11 +143,17 @@ func (p *ioPool) acquire(b *WorkflowBoard) bool {
 	default:
 	}
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if !slices.Contains(p.waiting, b) {
 		p.waiting = append(p.waiting, b)
 	}
-	p.mu.Unlock()
-	return false
+	select {
+	case p.slots <- struct{}{}:
+		p.waiting = slices.DeleteFunc(p.waiting, func(w *WorkflowBoard) bool { return w == b })
+		return true
+	default:
+		return false
+	}
 }
 
 func (p *ioPool) release() { <-p.slots }

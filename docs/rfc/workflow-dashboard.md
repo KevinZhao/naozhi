@@ -1552,6 +1552,9 @@ type WorkflowBoard struct { // 导出类型名、全部字段未导出：server 
   （endHook 只投递一次，`process_end.go:34-46`）。
   `bind(proc)` 在 `b.mu` 内：
   0. `proc == b.proc` → **no-op**（rename 沿用同一个 proc，`router_rename.go:105-118`；board 也以指针携带，见下）。
+     `proc == b.ended`（board 最近一次经 `procEnded` 解绑的 proc）同样 no-op：上面"紧挨在 `bookProcessEnd` 之前"只覆盖结束**尚未投递**的
+     proc；CLI 已死、结束已投递的 session 被 rename 时，`old.loadProcess()` 交来的正是这个 proc，再绑会把已 interrupted 的条目按它的
+     最终 Set 改回 running，且再也等不到第二次结束。绑定另一个 proc 时清空 `b.ended`。
   1. 若仍绑定着另一个旧 proc（尚未收到它的 ProcessEnd）：把它最后一次已应用的条目折入 `retained`，仍 running 的标
      `snapshot_stale`、**不**标 interrupted——此刻不知道它的 CLI 是否已死；它的 ProcessEnd 随后到达时由 `procEnded` 按原因处理
      （届时 `proc != b.proc`，只更新 retained 里来源是它的条目——retained 条目记录来源 proc 的身份）。新 Tracker 若带同 task_id，进程侧优先覆盖。

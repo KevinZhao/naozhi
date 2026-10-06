@@ -3,7 +3,9 @@ package session
 import (
 	"fmt"
 	"reflect"
+	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -188,6 +190,31 @@ func TestWorkflowBoard_MergePerField(t *testing.T) {
 	w = r.entry(t, "w113pvmto")
 	if w.Name != "real" || w.SessionID != wfSID2 || w.StartedAt != 100 {
 		t.Errorf("name/session/start = %q/%q/%d: launch grades beat the Ref, the Ref's start still beats a snapshot's", w.Name, w.SessionID, w.StartedAt)
+	}
+}
+
+// TestWorkflowBoard_MergeKeepsLaunchDir: a reattached CLI's seed lacks the
+// launch receipt the former process read; the retained entry's transcript
+// dir fills it in, on the entry and in the run dir's resolve source.
+func TestWorkflowBoard_MergeKeepsLaunchDir(t *testing.T) {
+	r := newWFRig(t)
+	const dir = "/projects/-ws/" + wfSID + "/subagents/workflows/" + wfRun
+	a := &setProc{}
+	launched := wfEntry("w1", workflow.StatusRunning)
+	launched.RunID, launched.LaunchTranscriptDir = wfRun, dir
+	a.publish(launched)
+	r.b.bind(a, "/ws")
+	r.b.procEnded(a, cli.ProcessEnd{ShimLive: true})
+	b := &setProc{}
+	seed := wfEntry("w1", workflow.StatusRunning)
+	seed.RunID = wfRun
+	b.publish(seed)
+	r.b.bind(b, "/ws")
+	r.b.mu.Lock()
+	src := r.b.resolve["w1"].src
+	r.b.mu.Unlock()
+	if w := r.entry(t, "w1"); w.LaunchTranscriptDir != dir || src.TranscriptDir != dir {
+		t.Errorf("launch dir %q, resolve source %q; want the retained %s", w.LaunchTranscriptDir, src.TranscriptDir, dir)
 	}
 }
 
@@ -511,6 +538,31 @@ func TestWorkflowBoard_Capacity(t *testing.T) {
 	}
 }
 
+// TestWorkflowBoard_CapacityDropsUnknownFirst: over the cap, retained
+// unknown entries go before stale running ones, however recently observed.
+func TestWorkflowBoard_CapacityDropsUnknownFirst(t *testing.T) {
+	r := newWFRig(t)
+	var refs []workflow.Ref
+	for i := range 10 {
+		refs = append(refs,
+			workflow.Ref{TaskID: fmt.Sprintf("u%d", i), Status: workflow.StatusUnknown, LastObservedAt: wfT0},
+			workflow.Ref{TaskID: fmt.Sprintf("s%d", i), Status: workflow.StatusRunning, LastObservedAt: wfT0 - time.Hour.Milliseconds()})
+	}
+	r.b.restore("k", refs, "/ws", r.now())
+	var unknown, stale int
+	for _, w := range r.pub() {
+		switch w.Status {
+		case workflow.StatusUnknown:
+			unknown++
+		case workflow.StatusRunning:
+			stale++
+		}
+	}
+	if unknown != 6 || stale != 10 {
+		t.Errorf("kept %d unknown, %d stale running; want 6 and 10: unknown entries are dropped first", unknown, stale)
+	}
+}
+
 // TestWorkflowBoard_LiveOverCap: a live process holding more unsettled runs
 // than the board's cap (16 with rows, 4 header-only) keeps all of them
 // running across wakes, without structural churn; only retained entries
@@ -786,6 +838,44 @@ func TestWorkflowBoard_IOBounds(t *testing.T) {
 	close(release)
 	// Boards that found no free slot are pumped as slots free up.
 	testhelper.Eventually(t, func() bool { return calls.Load() == 6*3 }, 5*time.Second, "a board waiting for a global slot was never pumped")
+}
+
+// acquireBlockedOnPoolMu reports whether a goroutine sits in pool's acquire
+// waiting for pool.mu.
+func acquireBlockedOnPoolMu(pool *ioPool) bool {
+	buf := make([]byte, 8<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+	frame := fmt.Sprintf("(*ioPool).acquire(%p", pool)
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(g, frame) && strings.Contains(g, "Mutex).Lock") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestIOPool_SlotFreedWhileRegistering: a slot freed after acquire found
+// none but before it registered as waiting (its releaser found no one to
+// pump) is taken, not left idle with the board waiting.
+func TestIOPool_SlotFreedWhileRegistering(t *testing.T) {
+	pool := newIOPool(1)
+	pool.slots <- struct{}{} // another board's job holds the only slot
+	b := newWorkflowBoard("/projects")
+	pool.mu.Lock()
+	got := make(chan bool, 1)
+	go func() { got <- pool.acquire(b) }()
+	testhelper.Eventually(t, func() bool { return acquireBlockedOnPoolMu(pool) }, 5*time.Second, "acquire never reached its registration")
+	pool.release() // that job ends; its wakeWaiter finds no one waiting
+	pool.mu.Unlock()
+	if !<-got {
+		t.Fatal("acquire missed the slot freed while it registered")
+	}
+	pool.mu.Lock()
+	waiting := len(pool.waiting)
+	pool.mu.Unlock()
+	if waiting != 0 || len(pool.slots) != 1 {
+		t.Errorf("%d boards waiting, %d slots taken; want 0 and 1", waiting, len(pool.slots))
+	}
 }
 
 // TestWorkflowBoard_NilSafe: a nil board reads as a session without
