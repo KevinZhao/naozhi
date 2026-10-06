@@ -184,3 +184,19 @@ func TestFileAttachments_Caps(t *testing.T) {
 		}
 	})
 }
+
+func TestAdapterRejectReason_EveryReject(t *testing.T) {
+	t.Parallel()
+	for r, want := range map[platform.FileReject]string{
+		platform.FileRejectNone:           "",
+		platform.FileRejectTooLarge:       fileReasonTooLarge,
+		platform.FileRejectUnsupported:    fileReasonUnsupported,
+		platform.FileRejectDownloadFailed: fileReasonDownload,
+		platform.FileRejectTooMany:        fileReasonTooMany,
+		platform.FileRejectTotalTooLarge:  fileReasonTotal,
+	} {
+		if got := adapterRejectReason(r); got != want {
+			t.Errorf("adapterRejectReason(%q) = %q, want %q", r, got, want)
+		}
+	}
+}

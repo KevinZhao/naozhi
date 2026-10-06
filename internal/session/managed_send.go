@@ -25,6 +25,7 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 	s.turnWaiters.Add(1)
 	defer s.turnWaiters.Add(-1)
 	s.touchLastActive()
+	ctx = sendRunCtx(ctx)
 
 	prompt := textutil.TruncateRunes(text, 120) + clievent.AttachmentSuffix(images)
 	storeAtomicString(&s.lastPrompt, prompt)
@@ -127,7 +128,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []clieven
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(sendRunCtx(ctx))
 	// Store the cancel func with proc=nil first so a concurrent Interrupt in
 	// this window still fires; once proc is known the box is re-stored with
 	// proc bound, letting a later Interrupt detect a respawn swap and skip

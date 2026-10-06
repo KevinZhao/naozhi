@@ -33,7 +33,7 @@ func TestBuildUserEntry_PopulatesImagePaths(t *testing.T) {
 			WorkspacePath: ".naozhi/attachments/2026-05-07/bbbb.png",
 		},
 	}
-	entry := buildUserEntry("look at these", imgs)
+	entry := buildUserEntry("look at these", imgs, "")
 
 	if len(entry.Images) != 2 {
 		t.Fatalf("Images len=%d want 2", len(entry.Images))
@@ -65,7 +65,7 @@ func TestBuildUserEntry_NoPathsWhenUnpersisted(t *testing.T) {
 		t.Fatalf("png encode: %v", err)
 	}
 	imgs := []clievent.Attachment{{Data: buf.Bytes(), MimeType: "image/png"}}
-	entry := buildUserEntry("hi", imgs)
+	entry := buildUserEntry("hi", imgs, "")
 	if len(entry.Images) != 1 {
 		t.Fatalf("Images len=%d want 1", len(entry.Images))
 	}
@@ -89,7 +89,7 @@ func TestBuildUserEntry_AlignmentSurvivesDrop(t *testing.T) {
 		{Data: ok.Bytes(), MimeType: "image/png",
 			WorkspacePath: ".naozhi/attachments/x/valid.png"},
 	}
-	entry := buildUserEntry("mixed", imgs)
+	entry := buildUserEntry("mixed", imgs, "")
 
 	// Undecodable one is dropped from Images — ImagePaths must drop in
 	// lock-step (not just "the last N paths").
@@ -111,7 +111,7 @@ func TestBuildUserEntry_FileRefSummary(t *testing.T) {
 	t.Parallel()
 	entry := buildUserEntry("read this", []clievent.Attachment{{
 		Kind: clievent.KindFileRef, MimeType: "application/pdf", WorkspacePath: ".naozhi/attachments/2026-05-07/cccc.pdf",
-	}})
+	}}, "")
 	if entry.Summary != "read this [+1 file(s)]" {
 		t.Errorf("Summary = %q", entry.Summary)
 	}

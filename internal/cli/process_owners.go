@@ -124,6 +124,25 @@ func (t *turnState) markAbandonedBooked() {
 	t.mu.Unlock()
 }
 
+// resultRunID is the run a result read now answers: the Send holding the
+// turn, or the one that gave up on it until its result is booked. "" when no
+// Send is in flight or the CLI started the turn itself.
+func (t *turnState) resultRunID() string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	switch {
+	case t.unowned:
+		return ""
+	case t.sendAbandoned:
+		if t.abandonedBooked {
+			return ""
+		}
+	case t.state != StateRunning:
+		return ""
+	}
+	return t.runID
+}
+
 // currentRunID is the run of the Send that claimed the process last.
 func (t *turnState) currentRunID() string {
 	t.mu.RLock()

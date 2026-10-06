@@ -295,7 +295,7 @@ func TestDownloadURL_SchemeGuard(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, _, err := downloadURL(tc.rawURL)
+			_, err := downloadURL(context.Background(), discordHTTPClient, tc.rawURL, 1)
 			if tc.wantErr && err == nil {
 				t.Errorf("downloadURL(%q) expected error, got nil", tc.rawURL)
 			}
@@ -310,7 +310,7 @@ func TestDownloadURL_SchemeGuard(t *testing.T) {
 // inline HTML. (R202606h-SEC-10)
 func TestResolveImageContentType_EmptyBody(t *testing.T) {
 	t.Parallel()
-	ct, err := resolveImageContentType(nil, "text/html", "cdn.discordapp.com")
+	ct, err := resolveImageContentType(nil)
 	if err == nil {
 		t.Fatalf("empty body: expected error, got ct=%q", ct)
 	}
@@ -323,12 +323,12 @@ func TestResolveImageContentType_EmptyBody(t *testing.T) {
 }
 
 // TestResolveImageContentType_SniffsImage verifies the normal path: a real
-// image body yields the sniffed image/* type and ignores the upstream header.
+// image body yields the sniffed image/* type.
 func TestResolveImageContentType_SniffsImage(t *testing.T) {
 	t.Parallel()
 	// Minimal PNG signature is enough for http.DetectContentType -> image/png.
 	png := []byte("\x89PNG\r\n\x1a\n")
-	ct, err := resolveImageContentType(png, "text/html", "cdn.discordapp.com")
+	ct, err := resolveImageContentType(png)
 	if err != nil {
 		t.Fatalf("valid image: unexpected error: %v", err)
 	}
@@ -341,7 +341,7 @@ func TestResolveImageContentType_SniffsImage(t *testing.T) {
 // body is rejected on mime mismatch.
 func TestResolveImageContentType_NonImageRejected(t *testing.T) {
 	t.Parallel()
-	if ct, err := resolveImageContentType([]byte("<html>"), "image/png", "cdn.discordapp.com"); err == nil {
+	if ct, err := resolveImageContentType([]byte("<html>")); err == nil {
 		t.Fatalf("non-image body: expected mime mismatch error, got ct=%q", ct)
 	}
 }
@@ -432,34 +432,6 @@ func TestRESTSession_NoRedirect_SEC2(t *testing.T) {
 	err = sess.Client.CheckRedirect(nil, nil)
 	if err != http.ErrUseLastResponse {
 		t.Errorf("CheckRedirect returned %v, want http.ErrUseLastResponse", err)
-	}
-}
-
-func TestAggregateAttachmentBytesAllow(t *testing.T) {
-	t.Parallel()
-	cap := maxDiscordTotalAttachmentBytes
-	cases := []struct {
-		name  string
-		soFar int
-		next  int
-		want  bool
-	}{
-		{"zero plus zero", 0, 0, true},
-		{"first chunk small", 0, 1024, true},
-		{"exactly at cap", cap - 100, 100, true},
-		{"just over cap", cap - 100, 101, false},
-		{"way over cap", 0, cap + 1, false},
-		{"already over cap stays over", cap, 1, false},
-		{"negative next rejected", 0, -1, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := aggregateAttachmentBytesAllow(tc.soFar, tc.next); got != tc.want {
-				t.Errorf("aggregateAttachmentBytesAllow(%d, %d) = %v, want %v",
-					tc.soFar, tc.next, got, tc.want)
-			}
-		})
 	}
 }
 

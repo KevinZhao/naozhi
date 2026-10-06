@@ -65,13 +65,14 @@ func TestSource_LoadLatest_EmptyDir(t *testing.T) {
 // TestSource_LoadLatest_RoundTrip writes N entries through the
 // persister and reads them back via the Source. Every field that
 // matters for dashboard rendering (UUID, Time, Type, Summary,
-// Images, ImagePaths) must survive the trip.
+// Images, ImagePaths) and the RunID join key must survive the trip.
 func TestSource_LoadLatest_RoundTrip(t *testing.T) {
 	p, src, sink, _ := newPersister(t, "k")
 
 	inputs := []clievent.EventEntry{
-		{UUID: "aaaa11", Time: 100, Type: "user", Summary: "hi"},
+		{UUID: "aaaa11", Time: 100, Type: "user", Summary: "hi", RunID: "0123456789abcdef"},
 		{UUID: "bbbb22", Time: 200, Type: "text", Summary: "hello back"},
+		{UUID: "dddd44", Time: 250, Type: "result", RunID: "0123456789abcdef"},
 		{
 			UUID: "cccc33", Time: 300, Type: "user", Summary: "look",
 			Images:     []string{"data:image/jpeg;base64,AAA="},
@@ -102,6 +103,9 @@ func TestSource_LoadLatest_RoundTrip(t *testing.T) {
 		}
 		if got[i].Summary != want.Summary {
 			t.Errorf("entry[%d].Summary=%q, want %q", i, got[i].Summary, want.Summary)
+		}
+		if got[i].RunID != want.RunID {
+			t.Errorf("entry[%d].RunID=%q, want %q", i, got[i].RunID, want.RunID)
 		}
 		if len(got[i].Images) != len(want.Images) {
 			t.Errorf("entry[%d] image count mismatch", i)

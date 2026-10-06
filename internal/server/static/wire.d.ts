@@ -83,6 +83,7 @@ declare global {
     image_paths?: string[];
     images?: string[];
     last_tool?: string;
+    run_id?: string;
     status?: string;
     subagent?: string;
     summary?: string;

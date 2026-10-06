@@ -367,6 +367,48 @@ func TestSend_RunRecordAdoptsCtxRunID(t *testing.T) {
 	}
 }
 
+// TestSend_UnnamedRunIDReachesTheProcess: a send with no run id in ctx (cron,
+// sysession) is named before the process call, so the CLI's transcript
+// entries carry the id its run record and ledger rows are booked under.
+func TestSend_UnnamedRunIDReachesTheProcess(t *testing.T) {
+	entries := map[string]func(*ManagedSession) error{
+		"Send": func(s *ManagedSession) error {
+			_, err := s.Send(context.Background(), "hi", nil, nil)
+			return err
+		},
+		"SendPassthrough": func(s *ManagedSession) error {
+			_, err := s.SendPassthrough(context.Background(), "hi", nil, nil, "")
+			return err
+		},
+	}
+	for name, send := range entries {
+		t.Run(name, func(t *testing.T) {
+			var sentWith string
+			proc := &TestProcess{AliveVal: true, SendFunc: func(ctx context.Context, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+				sentWith = ctxutil.RunID(ctx)
+				return &clievent.SendResult{Text: "ok", CostUSD: 0.1}, nil
+			}}
+			s, ledger := newLedgerSession(t, "cron:job1", proc)
+			store := runhistory.NewStore(t.TempDir(), 0, 0)
+			t.Cleanup(store.Close)
+			s.runStore = store
+			if err := send(s); err != nil {
+				t.Fatal(err)
+			}
+			store.Close()
+			if sentWith == "" {
+				t.Fatal("the process saw no run id")
+			}
+			if runs := store.Recent(s.key, 0); len(runs) != 1 || runs[0].RunID != sentWith {
+				t.Fatalf("run records %+v, want one under %s", runs, sentWith)
+			}
+			if ents := allEntries(t, ledger); len(ents) != 1 || ents[0].RunID != sentWith {
+				t.Fatalf("ledger rows %+v, want one under %s", ents, sentWith)
+			}
+		})
+	}
+}
+
 // TestSend_LeakNudgeGetsItsOwnRunID: the leaked-toolcall re-send is a second
 // run record, so it must not reuse the turn's id — runhistory and the cost
 // ledger are keyed by it. Its CLI send carries the id its record gets.

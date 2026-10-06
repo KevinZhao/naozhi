@@ -517,6 +517,9 @@
         "last_tool": {
           "type": "string"
         },
+        "run_id": {
+          "type": "string"
+        },
         "status": {
           "type": "string"
         },

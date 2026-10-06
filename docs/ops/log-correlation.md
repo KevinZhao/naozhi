@@ -26,8 +26,16 @@ result 属于哪一轮」时靠时间戳对齐很痛苦（#3322 / #3401 / #3411 
   `eventCh full, dropped result` 带当前那一轮。发送方放弃（ctx 取消、bail 超时、interrupt）之后
   才到的 result 按 `unowned:` 记账，账本里的 `RunID` 与这一轮不同，`cli: abandoned run's result
   booked as unowned` 行的 `run_id` 就是它属于的那一轮，据此把迟到的花费对回 run 记录。
-- 不经过 turn 的入口（cron、sysession）由 session 自己生成 `run_id`，日志里没有
-  这三个字段。
+- 会话 transcript（事件日志落盘记录、WS / REST 下发的 `EventEntry`）的 `user` 与
+  `result` 条目也带 `run_id`：每条用户消息是发送它的那一轮；`result` 是它回答的那一轮，
+  合并轮是 head（花费记在它上面），发送方已放弃的迟到 result 仍是放弃的那一轮；
+  例外是 legacy `Send` 放弃时没有挂起 abort（只是 ctx 取消或超时），而它的 result
+  在下一轮占用进程之后才读到，这条 result 记在下一轮上（与回答归属一致）。
+  CLI 自己发起的轮次（后台任务通知）、重连时已在跑的轮次，以及字段出现之前写下的条目
+  没有 `run_id`。按它把 transcript 和 `/api/sessions/runs`、cost ledger 对上。
+- 不经过 turn 的入口（cron、sysession）由 session 在发给 CLI 之前生成 `run_id`，
+  transcript、run record 与 cost ledger 用的是同一个值；session 与 cli 层带 ctx 的
+  日志行有它，cron / sysession 自己的日志行没有这三个字段。
 
 ## 用法
 
