@@ -1,13 +1,13 @@
-// Package registry is the canonical home for naozhi plugin / extension
-// registries. [Typed] is a small generic registry with three properties:
-// its constructor takes a name so errors are self-describing, Register
-// returns an error instead of panicking so the call site decides whether a
-// duplicate is fatal, and iteration order is deterministic (sorted by key).
+// Package registry holds [Typed], a small generic registry: its constructor
+// takes a name so errors are self-describing, Register returns an error
+// instead of panicking so the call site decides whether a duplicate is fatal,
+// and iteration order is deterministic (sorted by key).
 //
-// New plugin registries MUST use [Typed]; package-level init() MUST NOT be
-// used for plugin registration. Plugins → [Typed.Register] from a
-// constructor or main.go; test seams → struct field + constructor parameter;
-// startup self-checks → an explicit step in main (#660).
+// Typed is the default for new closed-set registries (#3444's platform
+// adapters are the intended first consumer). Two registries stay outside it
+// on purpose: backend.Register keeps registration order, supports
+// AttachAssetProvider and panics on a duplicate; history.RegisterFactory is
+// last-write-wins as a test-injection seam over distinct production IDs.
 package registry
 
 import (
