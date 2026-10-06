@@ -175,6 +175,10 @@ func TestSubBook_SnapshotIsDetachedAndReleaseClearsPointers(t *testing.T) {
 		t.Fatalf("scrubSnapshot left %v (len %d) in the array", backing, len(*snap))
 	}
 	releaseSnapshot(snap)
+	edge := make([]EventSink, 0, 256)
+	if !scrubSnapshot(&edge) {
+		t.Fatal("a 256-cap snapshot was refused by the pool")
+	}
 
 	// A slice grown past 256 is never pooled, so it stays private to this
 	// test and releaseSnapshot's own clearing can be read back.
