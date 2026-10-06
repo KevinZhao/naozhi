@@ -406,6 +406,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/aside_drawer.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/ask_card.js",
     "handler_type": "http.HandlerFunc"
   },
