@@ -124,7 +124,8 @@ func TestSendQuestionCard_PostsIntoThread(t *testing.T) {
 
 // TestHandleBlockActions_ThreadFromEnvelope: a click on a card in a thread
 // carries the thread, read from the envelope (container first, then the
-// message), never from the button value.
+// message), never from the button value. A top-level card that has replies
+// carries its own ts as thread_ts and stays top-level.
 func TestHandleBlockActions_ThreadFromEnvelope(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -134,6 +135,8 @@ func TestHandleBlockActions_ThreadFromEnvelope(t *testing.T) {
 		{"message", "", "17.2", "17.2"},
 		{"container wins", "17.1", "17.2", "17.1"},
 		{"top level", "", "", ""},
+		{"top level with replies", "111.222", "111.222", ""},
+		{"top level with replies, message only", "", "111.222", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

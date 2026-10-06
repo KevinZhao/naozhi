@@ -3,6 +3,7 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -190,8 +191,8 @@ func TestReply_InTopic(t *testing.T) {
 }
 
 // TestReply_TopicRefusedFallsBackToChat: a topic reply Feishu refuses (root
-// recalled, no permission) is sent to the chat instead; a refused token is
-// returned for ReplyWithRetry and not sent anywhere else.
+// recalled, no permission) is sent to the chat instead; a refused token or
+// a rate limit is returned for ReplyWithRetry and not sent anywhere else.
 func TestReply_TopicRefusedFallsBackToChat(t *testing.T) {
 	t.Parallel()
 	f, rec := newSendFeishu(t, 230011)
@@ -209,6 +210,18 @@ func TestReply_TopicRefusedFallsBackToChat(t *testing.T) {
 	}
 	if posts := rec.all(); len(posts) != 1 {
 		t.Errorf("token refusal posts = %+v, want only the reply", posts)
+	}
+
+	for _, code := range []int{99991400, 11232, 11233, 11234, 230020} {
+		f, rec = newSendFeishu(t, code)
+		_, err := f.Reply(context.Background(), platform.OutgoingMessage{ChatID: "oc_1", ThreadID: "om_root", Text: "hi"})
+		var api *APIError
+		if !errors.As(err, &api) || api.Code != code {
+			t.Errorf("rate limit %d: err = %v, want the APIError", code, err)
+		}
+		if posts := rec.all(); len(posts) != 1 {
+			t.Errorf("rate limit %d: posts = %+v, want only the reply", code, posts)
+		}
 	}
 }
 

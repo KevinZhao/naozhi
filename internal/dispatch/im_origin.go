@@ -78,11 +78,17 @@ func (a imAdmission) Admit(kind turn.RunKind) (func(fn func(ctx context.Context)
 // Sink is the chat, plus the thread when there is one: two threads of a
 // chat that share a session key each get the reply in their own thread.
 func (o *imOrigin) Sink() string {
-	sink := "im:" + sessionkey.ChatKey(o.msg.Platform, o.msg.ChatType, o.msg.ChatID)
 	if o.msg.ThreadID != "" {
-		sink += "#" + o.msg.ThreadID
+		return o.Scope() + "#" + o.msg.ThreadID
 	}
-	return sink
+	return o.Scope()
+}
+
+// Scope is the chat, whichever thread: an owner loop whose batch has a
+// message from the owner's chat does not also answer it in the owner's
+// thread.
+func (o *imOrigin) Scope() string {
+	return "im:" + sessionkey.ChatKey(o.msg.Platform, o.msg.ChatType, o.msg.ChatID)
 }
 
 func (o *imOrigin) SessionOpts(string) sessionview.AgentOpts { return o.opts }
@@ -155,8 +161,8 @@ func (o *imOrigin) awaitAck() bool {
 // awaitAck guards a dropped request that ran startAck, so its ⏳ cannot land
 // behind the clear. A removed key also gets a notice (#3297): the user did
 // not ask for the removal, and a platform without reactions promised to
-// answer. It is rate-limited per chat on the key (chats can share a planner
-// key), so a chat's queued messages share one.
+// answer. It is rate-limited per sink on the key (chats can share a planner
+// key), so the queued messages of a chat or thread share one.
 func (o *imOrigin) Dropped(ctx context.Context, why turn.DropReason) {
 	o.awaitAck()
 	o.d.clearQueuedReaction(ctx, o.msg.Platform, o.msg.MessageID, o.lg)
@@ -166,8 +172,9 @@ func (o *imOrigin) Dropped(ctx context.Context, why turn.DropReason) {
 }
 
 // Begin opens the reply to o's chat. An Observer is answered like a Head:
-// the owner's chat gets the reply to whatever the owner loop drained
-// (#3004 分叉 19a), and so does every other chat with a request in the batch.
+// the owner's chat gets the reply to whatever the owner loop drained from
+// other chats (#3004 分叉 19a), and so does every chat with a request in the
+// batch.
 func (o *imOrigin) Begin(_ context.Context, t turn.TurnInfo) turn.Delivery {
 	p := o.d.platforms[o.msg.Platform]
 	if p == nil {

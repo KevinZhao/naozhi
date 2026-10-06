@@ -110,8 +110,9 @@ func (f *Feishu) sendCard(ctx context.Context, chatID, threadID, text string) (s
 // postMessage posts a message to chatID or, when threadID (the topic's root
 // message id) is set, replies in that topic. content is stringified JSON, not
 // a nested object. A topic reply Feishu rejects for any reason but the token
-// (root recalled, no permission) goes to the chat instead: an answer outside
-// its topic beats none. A token error returns as is for ReplyWithRetry.
+// or a rate limit (root recalled, no permission) goes to the chat instead: an
+// answer outside its topic beats none. Those two return as is, for
+// ReplyWithRetry to retry the topic reply.
 func (f *Feishu) postMessage(ctx context.Context, token, chatID, threadID, msgType, content string) (string, error) {
 	if threadID != "" {
 		reqBody, err := json.Marshal(struct {
@@ -126,7 +127,7 @@ func (f *Feishu) postMessage(ctx context.Context, token, chatID, threadID, msgTy
 		id, err := f.doPostMessage(ctx, token,
 			f.baseURL+"/open-apis/im/v1/messages/"+url.PathEscape(threadID)+"/reply", reqBody)
 		var api *APIError
-		if err == nil || !errors.As(err, &api) || api.IsTokenExpired() {
+		if err == nil || !errors.As(err, &api) || api.IsTokenExpired() || api.isRateLimited() {
 			return id, err
 		}
 		slog.Warn("feishu topic reply rejected, sending to the chat", "err", err)

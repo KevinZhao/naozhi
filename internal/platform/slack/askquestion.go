@@ -176,9 +176,13 @@ func (s *Slack) handleBlockActions(cb slack.InteractionCallback) {
 		msgTs = cb.Message.Timestamp
 	}
 	// A card asked in a thread sits in it; the answer's reply goes there too.
+	// A top-level card with replies under it is its own thread_ts: no thread.
 	threadTs := cb.Container.ThreadTs
 	if threadTs == "" {
 		threadTs = cb.Message.ThreadTimestamp
+	}
+	if threadTs == msgTs {
+		threadTs = ""
 	}
 	// block_actions carry no channel_type. Fall back to the channel ID: only
 	// IMs start with "D", matching handleMessage's im -> direct mapping.

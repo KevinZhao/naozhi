@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -272,5 +273,83 @@ func TestIMOriginSink_Thread(t *testing.T) {
 	}
 	if got := in.Sink(); got != "im:slack:group:C1#17.1" {
 		t.Errorf("thread Sink = %q, want im:slack:group:C1#17.1", got)
+	}
+}
+
+// TestThreadReply_OwnerThreadGetsNoCopyOfItsChatsOtherAnswers: the owner
+// loop's drained turn holds only a message from elsewhere in the owner's
+// chat (another thread, or the top level). It is answered there alone; the
+// owner's own place gets no copy. A message from another chat on the same
+// key still gets the owner its Observer copy.
+func TestThreadReply_OwnerThreadGetsNoCopyOfItsChatsOtherAnswers(t *testing.T) {
+	type place struct{ chat, thread string }
+	for _, tc := range []struct {
+		name          string
+		owner, queued place
+		ownerCopy     bool
+	}{
+		{"thread_then_other_thread", place{"chat1", "T1"}, place{"chat1", "T2"}, false},
+		{"thread_then_top_level", place{"chat1", "T1"}, place{"chat1", ""}, false},
+		{"top_level_then_thread", place{"chat1", ""}, place{"chat1", "T2"}, false},
+		{"other_chat_observed", place{"chat1", "T1"}, place{"chat2", ""}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const key = "fake:group:planner:general"
+			started, release := make(chan struct{}, 1), make(chan struct{})
+			sender := &testSender{
+				getOrCreate: func(context.Context, string, session.AgentOpts) (turn.Session, session.SessionStatus, error) {
+					return fakeSession{}, session.SessionExisting, nil
+				},
+				send: func(_ context.Context, _ string, _ turn.Session, text string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+					if text == "q1" {
+						started <- struct{}{}
+						<-release
+					}
+					return &clievent.SendResult{Text: "answer to " + text}, nil
+				},
+			}
+			fp := &fakePlatform{}
+			d := newTestDispatcher(fp, withSender(sender))
+			submit := func(at place, id, text string) {
+				m := platform.IncomingMessage{Platform: "fake", ChatType: "group", ChatID: at.chat, ThreadID: at.thread, MessageID: id, Text: text}
+				o := d.newIMOrigin(m, slog.Default(), key, "general", session.AgentOpts{}, imMessage, len(text), 0)
+				d.submit(context.Background(), o, turn.Request{Key: key, Text: text})
+			}
+
+			ownerDone := make(chan struct{})
+			go func() {
+				defer close(ownerDone)
+				submit(tc.owner, "m1", "q1")
+			}()
+			<-started
+			submit(tc.queued, "m2", "q2")
+			close(release)
+			select {
+			case <-ownerDone:
+			case <-time.After(10 * time.Second):
+				t.Fatal("owner loop did not finish")
+			}
+
+			answers := map[place][]string{}
+			for _, r := range fp.replies {
+				if strings.HasPrefix(r.Text, "answer to ") {
+					at := place{r.ChatID, r.ThreadID}
+					answers[at] = append(answers[at], r.Text)
+				}
+			}
+			wantOwner := []string{"answer to q1"}
+			if tc.ownerCopy {
+				wantOwner = append(wantOwner, "answer to q2")
+			}
+			if got := answers[tc.owner]; !slices.Equal(got, wantOwner) {
+				t.Errorf("owner %+v answers = %q, want %q", tc.owner, got, wantOwner)
+			}
+			if got := answers[tc.queued]; !slices.Equal(got, []string{"answer to q2"}) {
+				t.Errorf("queued %+v answers = %q, want [answer to q2]", tc.queued, got)
+			}
+			if len(answers) != 2 {
+				t.Errorf("answers by place = %q, want only the owner's and the queued message's", answers)
+			}
+		})
 	}
 }
