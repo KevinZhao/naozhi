@@ -52,7 +52,8 @@ func (s Subject) Name() string {
 
 // SubjectForKey maps a router session key to its scoped subject: a cron key
 // to its job, a planner key to its project (shared by every chat bound to
-// it), an IM key (platform:chatType:chatID:agent) to its chat across agents.
+// it), an IM key (platform:chatType:chatID:agent) to its chat across agents
+// and threads (sessionkey.ParentChatKey).
 // Dashboard, takeover, sys and scratch keys have none ("") and count only
 // toward Global: the dashboard user is the owner and is never gated.
 func SubjectForKey(key string) Subject {
@@ -72,7 +73,7 @@ func SubjectForKey(key string) Subject {
 	if platform == sessionkey.DashboardPlatform || platform == takeoverPlatform {
 		return ""
 	}
-	return Subject(chatPrefix + key[:strings.LastIndexByte(key, ':')])
+	return Subject(chatPrefix + sessionkey.ParentChatKey(key[:strings.LastIndexByte(key, ':')]))
 }
 
 // subjectFor is e's scoped subject: its job when it carries one (a cron

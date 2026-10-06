@@ -114,13 +114,14 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 	}
 }
 
-// handleStopCommand aborts the in-flight turn for this chat's session via the
-// CLI's control_request interrupt (ACP sessions fall back to Interrupt()). In
+// handleStopCommand aborts the in-flight turn of the session msg routes to
+// (sessionChatID: a thread's own in a group chat) via the CLI's
+// control_request interrupt (ACP sessions fall back to Interrupt()). In
 // passthrough mode pending slots stay queued — only the active turn drops. The
 // interrupt is broadcast across every agent the chat could have a live session
 // for, so /stop also works for agent-command turns (#1944).
 func (d *Dispatcher) handleStopCommand(ctx context.Context, msg platform.IncomingMessage, log *slog.Logger) {
-	outcome := d.interruptChat(msg.Platform, msg.ChatType, msg.ChatID)
+	outcome := d.interruptChat(msg.Platform, msg.ChatType, d.sessionChatID(msg))
 	switch outcome {
 	case sessionview.InterruptSent:
 		d.replyText(ctx, msg, "已中断当前回复。", log)
@@ -188,7 +189,7 @@ func (d *Dispatcher) handleUrgentCommand(ctx context.Context, msg platform.Incom
 	// Resolve via KeyResolver so /urgent gets the same project-bound opts as
 	// the main IM path (docs/rfc/key-resolver.md §2.1 #3).
 	agentID := "general"
-	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, d.sessionChatID(msg), agentID)
 	o := d.newIMOrigin(msg, log, key, agentID, opts, imUrgent, len(text), 0)
 	d.submit(ctx, o, turn.Request{Key: key, Text: text, Priority: turn.PriorityNow})
 }
@@ -238,25 +239,27 @@ func (d *Dispatcher) resolveAgentToken(agentToReset string) (string, bool) {
 	return "", false
 }
 
-// handleNewCommand resets the chat's session for /new and /clear; arg is the
-// optional agent token. The reset goes through Turns.Reset, which discards
-// the key's queue (clearing the dropped messages' ⏳) before the session
-// reset retires the key (#2185), and keeps the /cd workspace override.
+// handleNewCommand resets the session msg routes to (sessionChatID) for /new
+// and /clear; arg is the optional agent token. The reset goes through
+// Turns.Reset, which discards the key's queue (clearing the dropped messages'
+// ⏳) before the session reset retires the key (#2185), and keeps the /cd
+// workspace override.
 func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.IncomingMessage, arg string, log *slog.Logger) {
 	// agentCommands keys are lowercased in applyDefaults; match case-insensitively.
 	agentToReset := strings.ToLower(trimUnicodeSpace(arg))
+	chatID := d.sessionChatID(msg)
 
 	// Project-bound chat: /new resets planner, /new {agent} resets that agent.
 	// Read the binding through the resolver so /new and the IM hot path see
 	// the same snapshot (#648).
 	if b := d.resolver.ProjectBindingForChat(msg.Platform, msg.ChatType, msg.ChatID); b.Bound {
 		if agentToReset == "" {
-			plannerKey := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, "general")
+			plannerKey := d.keyForChat(msg.Platform, msg.ChatType, chatID, "general")
 			d.turns.Reset(ctx, plannerKey, false)
 			d.replyText(ctx, msg, "项目 "+b.Name+" 的 planner 已重置。", log)
 		} else {
 			if id, ok := d.resolveAgentToken(agentToReset); ok {
-				key := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, id)
+				key := d.keyForChat(msg.Platform, msg.ChatType, chatID, id)
 				d.turns.Reset(ctx, key, false)
 				d.replyText(ctx, msg, "会话已重置 ("+id+")。", log)
 			} else {
@@ -287,7 +290,7 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 			return
 		}
 	}
-	key := sessionkey.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+	key := sessionkey.SessionKey(msg.Platform, msg.ChatType, chatID, agentID)
 	d.turns.Reset(ctx, key, false)
 	label := ""
 	if agentID != "general" {
@@ -461,7 +464,9 @@ func (d *Dispatcher) handleCronList(msg platform.IncomingMessage, reply func(str
 		if !j.FreshContext {
 			status = " [保留上下文]"
 		}
-		if j.AutoPaused {
+		if j.AutoPauseTransient {
+			status += " [自动暂停：后端持续故障]"
+		} else if j.AutoPaused {
 			status += " [自动暂停：连续失败]"
 		} else if j.Paused {
 			status += " [暂停]"

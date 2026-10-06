@@ -1,6 +1,6 @@
 # RFC: cron runStore — 收口半成品 facade（close the half-facade）
 
-> **状态**: Implemented v2 — Phase 1 facade 已落地；NG1 的子包抽取随 #3432 完成：store、`CronRun`/`CronRunSummary`/`SandboxRunMeta` 记录类型移入 `internal/cron/runstore`（cron 保留类型别名与常量再导出，on-disk 格式不变，由 `TestCronRun_WireFormatGolden` 钉住）。实测 runstore 只借用 cron 8 个标识符、无反向依赖，NG1 的 high 风险评估已过期。包私有性取代了 `TestNoDirectRunStoreAccess`，facade wrapper 收敛为 `s.runs.X` 直调（nil/disabled-safe）。
+> **状态**: Implemented v2 — Phase 1 facade 已落地；NG1 的子包抽取随 #3432 完成：store、`CronRun`/`CronRunSummary`/`SandboxRunMeta` 记录类型移入 `internal/cron/runstore`（cron 保留类型别名与常量再导出，on-disk 格式不变，由 `TestCronRun_WireFormatGolden` 钉住）。实测 runstore 只借用 cron 8 个标识符、无反向依赖，NG1 的 high 风险评估已过期。包私有性取代了 `TestNoDirectRunStoreAccess`，facade wrapper 收敛为 `s.runs.X` 直调（nil/disabled-safe）。随后 run-inflight 标记的磁盘读写也移入 `runstore.Markers`（独立于 `Store` 按 cron 状态目录定根，run store 关闭时照常写与对账，#2993）；认领/结算/adoption 仍在 Scheduler。
 > **作者**: naozhi team (cron-cr)
 > **创建**: 2026-06-04
 > **范围**: 把 `*Scheduler` 对 `*runStore` 的访问全部收敛到一组稳定的 `*Scheduler` 方法（facade），隐藏 cache/trim/lock 内部细节；不拆包、不导出边界类型、不改 on-disk 格式。

@@ -6,9 +6,7 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"sync"
-	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
@@ -120,7 +118,7 @@ func (r *Router) releaseKeys(keys []releasedKey) {
 		} else if r.backends.retireDeadShim(k.key) {
 			return
 		}
-		stuck[i] = !waitSocketGoneForKey(k.key, 2*time.Second)
+		stuck[i] = !waitSocketGoneForKey(k.key)
 	}
 	if len(keys) == 1 {
 		release(0)
@@ -204,14 +202,17 @@ func (r *Router) Reset(key string) {
 // ResetAndDiscardOverride atomically resets the session AND deletes its
 // chat's workspace override, so a concurrent SetWorkspace cannot survive a
 // bare Reset+delete pair and leak into the next session. Overrides are keyed
-// by the chat key, not the session key.
+// by the chat key, not the session key; a thread's or member's key only
+// borrows its chat's override, so resetting it leaves the override alone.
 func (r *Router) ResetAndDiscardOverride(key string) {
 	var proc processIface
 	var sessionID string
 	var hadSession bool
 	r.ss.Update(func(tx sessTx) {
 		proc, sessionID, hadSession = r.resetEntry(tx, key)
-		tx.Ext().workspaces.Delete(chatKeyFor(key))
+		if !isScopedKey(key) {
+			tx.Ext().workspaces.Delete(chatKeyFor(key))
+		}
 	})
 	if !hadSession {
 		return
@@ -229,14 +230,6 @@ func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
 	r.notifyKeyRetired(key, sessionID)
 	r.releaseKeys([]releasedKey{{key: key, proc: proc}})
 	r.notifyChange()
-}
-
-// waitSocketGoneForKey waits up to maxWait for the shim socket derived from
-// key to disappear; returns false on timeout. Socket naming lives behind
-// cli.WaitSocketGoneForKey so this package does not reach into internal/shim
-// (#711). Reset callers use the false branch to mark the key shim-stuck (#1324).
-func waitSocketGoneForKey(key string, maxWait time.Duration) bool {
-	return cli.WaitSocketGoneForKey(key, maxWait)
 }
 
 // ResetAndRecreate atomically resets a session and spawns a new one for the
@@ -309,7 +302,7 @@ func (r *Router) resetAndRecreateOnce(ctx context.Context, key string, opts Agen
 					// As in Reset: the shim socket must be gone before the
 					// spawn's StartShim dials it, or the re-bind fails with
 					// "refusing to clobber".
-					gone = waitSocketGoneForKey(key, 2*time.Second)
+					gone = waitSocketGoneForKey(key)
 				})
 				if !gone {
 					// Flag for the ErrShimStuck wrap on the spawn failure path

@@ -200,16 +200,17 @@ func (dl *imDelivery) Blocking() bool { return true }
 // BeforeSession starts the tracker that streams the turn's progress into the
 // chat. A head that runs at once is armed with a fallback banner that posts
 // only if its message got no ⏳, so a slow spawn is covered too. On a first
-// turn it then offers the chat's external session for takeover; the result
-// is ignored: GetOrCreate resumes an adopted session and spawns a fresh one
-// otherwise.
+// turn of a session the whole chat shares it then offers the chat's external
+// session for takeover; a thread's or member's session starts fresh. The
+// result is ignored: GetOrCreate resumes an adopted session and spawns a
+// fresh one otherwise.
 func (dl *imDelivery) BeforeSession(ctx context.Context) {
 	o := dl.o
 	dl.tracker = newIMEventTracker(ctx, dl.p, replyDestOf(o.msg), o.msg.ChatType, o.agentID)
 	if dl.info.Role == turn.RoleHead && o.ackDone != nil {
 		dl.tracker.armFallbackBanner(o.d.fallbackBannerDelay, o.awaitAck)
 	}
-	if !dl.info.First {
+	if !dl.info.First || o.d.scopedSession(o.msg, o.key) {
 		return
 	}
 	_ = o.d.caps.Takeover(ctx, sessionkey.ChatKey(o.msg.Platform, o.msg.ChatType, o.msg.ChatID), o.key, o.opts)

@@ -68,7 +68,7 @@ cmd/naozhi/main.go
   -> platform     Platform 接口 + feishu/slack/discord/weixin 子包
   -> server       HTTP server、路由注册、WebSocket hub、REST API
   -> dashboard    dashboard handler 子包群（auth/cron/cronview/discovery/project/session/ext/*；httputil 叶子）
-  -> cron         定时任务调度（robfig/cron）；runstore 子包放运行历史（runs/ 记录、newest-first 缓存、保留期 GC、CronRun 记录类型），sandboxstore 子包放 sandbox 的磁盘状态（确认队列/输入快照/事件日志），两者都不 import cron
+  -> cron         定时任务调度（robfig/cron）；runstore 子包放运行历史（runs/ 记录、newest-first 缓存、保留期 GC、CronRun 记录类型）与 runinflight/ 在途标记的读写，sandboxstore 子包放 sandbox 的磁盘状态（确认队列/输入快照/事件日志），两者都不 import cron
   -> sysession    内建后台 daemon 框架（system sessions）
   -> project      项目发现、chat 绑定、planner 路由
   -> projectapi   project 的零依赖契约类型
@@ -211,7 +211,7 @@ Platforms that can observe their own connection implement `ConnStateReporter` (`
 
 ### Session Management & Agent Routing
 
-Session key format: `{platform}:{chatType}:{chatID}:{agentId}` (e.g., `feishu:direct:alice:code-reviewer`).
+Session key format: `{platform}:{chatType}:{chatID}:{agentId}` (e.g., `feishu:direct:alice:code-reviewer`). In a group chat `session.group_scope` (default `thread`) can narrow `chatID` to `{chatID}#t{threadID}` for a Slack thread / Feishu topic, or `{chatID}#u{userID}` per member (`user`); a message outside any thread keeps the plain key. The chat itself still owns the `/cd` workspace, project binding, cron jobs and its `cost.budget` per-chat cap; only the session (and `/new`, `/stop`, `/urgent`) is per thread or member. Auto-takeover of a terminal CLI only lands on a session the whole chat shares; a thread's or member's session starts fresh.
 Other key namespaces (canonical home: `internal/sessionkey`, wire-stable constants):
 - `project:{name}:planner` -- project planner sessions (exempt from TTL and max_procs)
 - `cron:<jobID>` / `sys:<daemonID>` / `scratch:<sessionID>` -- cron jobs, sysession daemons, scratch sessions
