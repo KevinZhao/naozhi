@@ -218,6 +218,12 @@ type ConfigOptions struct {
 	// required". Empty/zero when the caller built the config programmatically.
 	SHA256   string
 	LoadedAt time.Time
+	// Live, when set, supersedes SHA256/LoadedAt on /health so a hot reload
+	// is reflected without a restart (docs/rfc/config-hot-reload.md).
+	Live *ConfigFingerprint
+	// Reload re-reads the file and applies its hot sections; nil leaves
+	// POST /api/system/config/reload answering 501.
+	Reload ConfigReloadFunc
 	// Path is the resolved path to config.yaml. Non-empty enables the
 	// POST /api/access-profiles create endpoint (appends via yaml.Node
 	// surgery); empty makes it return 400.

@@ -76,7 +76,9 @@ func main() {
 	}
 	metrics.StartupPhaseConfigMs.Set(time.Since(t0).Milliseconds())
 
-	setupLogging(cfg)
+	logLevel := setupLogging(cfg)
+	configFP := server.NewConfigFingerprint(cfg.Fingerprint.SHA256, cfg.Fingerprint.LoadedAt)
+	reloader := newConfigReloader(absConfigPath(*configPath), cfg, logLevel, configFP)
 
 	// Created before applyClaudeEnvSettings so readJSONWithRetry's sleeps
 	// honour ctx.Done() from the first use of the settings file.
@@ -424,6 +426,8 @@ func main() {
 			Path:                    absConfigPath(*configPath),
 			SHA256:                  cfg.Fingerprint.SHA256,
 			LoadedAt:                cfg.Fingerprint.LoadedAt,
+			Live:                    configFP,
+			Reload:                  reloader.Reload,
 			AccessProfileSecretsDir: sessionLayout.AccessProfileSecretsRoot(),
 		},
 		Queue: server.QueueOptions{
@@ -561,11 +565,23 @@ func main() {
 		})
 	}
 
+	reloader.bindApply(srv.ApplyHotConfig)
+
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	go func() {
-		sig := <-sigCh
-		runShutdown("signal:" + sig.String())
+		for sig := range sigCh {
+			if sig == syscall.SIGHUP {
+				// docs/rfc/config-hot-reload.md §3.4: SIGHUP re-reads config.yaml
+				// and applies the hot sections; a bad file is logged and ignored.
+				if _, err := reloader.Reload(ctx); err != nil {
+					slog.Error("SIGHUP config reload failed", "err", err)
+				}
+				continue
+			}
+			runShutdown("signal:" + sig.String())
+			return
+		}
 	}()
 
 	slog.Info("naozhi starting",

@@ -394,7 +394,8 @@ platforms:
 # direct chat they are also told their ID, at most once per 10 minutes. IDs:
 # Feishu open_id (ou_...), Slack user ID (U...), Discord user ID, Weixin from.
 # admin_users alone may run /cron, /cd and /project; leave it empty and every
-# allowed user is an admin. Changes need a restart.
+# allowed user is an admin. Reload without a restart: `naozhi config reload`
+# (or `systemctl reload naozhi`); see docs/rfc/config-hot-reload.md.
 # im_access:
 #   default_deny: false     # true refuses every platform without an entry
 #   deny_reply: ""          # replaces the direct-chat refusal text

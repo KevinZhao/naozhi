@@ -566,7 +566,8 @@ im_access:
   `allowed_users` 都算管理员，所以只开白名单不会少功能。
 - 已有的定时任务不受影响：把某人移出名单后，他创建过的 cron 任务照常运行，要在
   dashboard 里手动删除。
-- 改名单要重启 naozhi（会打断正在运行的会话），配置热重载见 #3437。
+- 改名单不用重启：`naozhi config reload`（或 `systemctl reload naozhi` / `kill -HUP`）
+  即时生效，见 [配置热重载](#配置热重载)。
 - 把自己关在外面时，dashboard 不受 `im_access` 影响，可以从那里继续操作。
 
 ### IM 用量限制
@@ -594,6 +595,24 @@ im_limits:
   `naozhi_dispatch_ratelimit_total`、`naozhi_dispatch_budget_ledger_error_total`。
 - 项目绑定聊天的 planner 会话（`project:<name>:planner`）不属于任何 chat，其花费
   暂不计入预算（RFC §6）。
+
+### 配置热重载
+
+改 `config.yaml` 后不必重启进程（重启会打断所有进行中的会话）。三个等价入口：
+
+```bash
+naozhi config reload                 # 走 HTTP，需要 dashboard token（同 doctor）
+systemctl reload naozhi              # 发 SIGHUP（naozhi install 生成的 unit 已带 ExecReload）
+kill -HUP $(pidof naozhi)
+```
+
+- 可热重载：`im_access`、`im_limits`、`log.level`。其它段的改动会在结果里列为
+  `restart_required`，直到真正重启前每次 reload 都会继续报告。
+- 新文件校验失败时进程完全不变，`naozhi config reload` 退出码 1 并打印校验错误；
+  有 `restart_required` 时退出码 3，方便脚本判断。
+- `/health.config_sha256` / `config_loaded_at` 随重载更新，doctor 的 config-drift
+  检查随之变绿。
+- 设计与后续可热重载范围见 [`docs/rfc/config-hot-reload.md`](docs/rfc/config-hot-reload.md)。
 
 ### 生产架构
 

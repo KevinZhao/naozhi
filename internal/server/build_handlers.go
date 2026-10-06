@@ -266,5 +266,6 @@ func buildSystemHandlers(opts ServerOptions, router *session.Router) *system.Han
 		BuildVersion:  opts.Identity.Version,
 		// nil ⇒ enabled, matching config.UpdateDashboardInstall's default.
 		InstallEnabled: opts.Update.DashboardInstall == nil || *opts.Update.DashboardInstall,
+		ConfigReload:   system.ConfigReloader(opts.Config.Reload),
 	})
 }
