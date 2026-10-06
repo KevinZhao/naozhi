@@ -18,7 +18,11 @@ package server
 // computed "GET /static/"+name would trade the anti-drift gate for a shorter
 // file.
 
-import "net/http"
+import (
+	"net/http"
+	"path"
+	"strings"
+)
 
 // serveStaticJS returns the handler for one embedded JS module.
 //
@@ -41,17 +45,27 @@ func serveStaticJS(name string) http.HandlerFunc {
 	}
 }
 
-// handleDashboardCSS serves static/css/<file> from the {file} path param. Not
+// stylesheetTypes maps the file types handleDashboardCSS serves, stylesheets
+// and the fonts they load, to their Content-Type. Scripts go through
+// serveStaticJS.
+var stylesheetTypes = map[string]string{
+	".css":   "text/css; charset=utf-8",
+	".woff2": "font/woff2",
+}
+
+// handleDashboardCSS serves static/css/<file> and the stylesheets and fonts
+// under static/vendor/, keyed by the request path below /static/. Not
 // serveStaticJS: the asset name comes from the request, so it needs the table
 // lookup to reject anything not embedded (a path-traversal attempt resolves to
 // a miss rather than a read).
 func handleDashboardCSS(w http.ResponseWriter, r *http.Request) {
-	name := "css/" + r.PathValue("file")
-	if staticAssetBytes(name) == nil {
+	name := strings.TrimPrefix(r.URL.Path, "/static/")
+	typ := stylesheetTypes[path.Ext(name)]
+	if typ == "" || staticAssetBytes(name) == nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.Header().Set("Content-Type", typ)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", staticCacheControl(r, name))
 	if serveStaticWithETag(w, r, name) {

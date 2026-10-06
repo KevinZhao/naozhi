@@ -18,7 +18,8 @@ import (
 // testdata/routes.golden.json (kept in step with the mux by
 // routes_snapshot_test.go; every /static/*.js route there must exist on disk),
 // and, through the real mux in token mode, answer 401 anonymously and 200
-// with exactly its own bytes when authenticated.
+// with exactly its own bytes when authenticated. Vendored scripts are not
+// modules; TestVendorRoutes_ServeEmbeddedTree covers their routes.
 func TestStaticJS_ModuleInventory(t *testing.T) {
 	t.Parallel()
 
@@ -35,7 +36,7 @@ func TestStaticJS_ModuleInventory(t *testing.T) {
 	routed := map[string]bool{}
 	for _, rt := range routes {
 		name, ok := strings.CutPrefix(rt.Path, "/static/")
-		if !ok || !strings.HasSuffix(name, ".js") {
+		if !ok || !strings.HasSuffix(name, ".js") || strings.HasPrefix(name, "vendor/") {
 			continue
 		}
 		if rt.Method != http.MethodGet {
