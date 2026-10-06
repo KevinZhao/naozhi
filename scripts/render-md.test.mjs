@@ -320,3 +320,31 @@ test('inline math wrapping a code span stays text once KaTeX is loaded', async (
     delete window.katex;
   }
 });
+
+// While mermaid is not loaded, a diagram whose <pre> is not attached yet keeps
+// its source for a later flush; once attached, the flush writes the source in,
+// and a failed load marks it unavailable. A fresh module instance keeps this
+// load state away from the other tests.
+test('a pending diagram shows its source, marked once the mermaid load fails', async () => {
+  const real = { createElement: document.createElement, getElementById: document.getElementById, setTimeout };
+  let script;
+  document.createElement = () => (script = { setAttribute() {} });
+  globalThis.setTimeout = () => 0;
+  try {
+    const m = await import('../internal/server/static/render_md.js?mermaid-pending');
+    const id = m.renderMd('```mermaid\ngraph TD;A-->B;\n```').match(/id="(mmd-\d+)"/)[1];
+    m.runMermaid();
+    const classes = new Set();
+    const el = { textContent: '', title: '', classList: { toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)) } };
+    document.getElementById = q => (q === id ? el : null);
+    m.runMermaid();
+    assert.equal(el.textContent, 'graph TD;A-->B;');
+    assert.equal(classes.has('md-render-unavailable'), false);
+    script.onerror();
+    assert.equal(classes.has('md-render-unavailable'), true);
+    assert.match(el.title, /离线/);
+  } finally {
+    Object.assign(document, { createElement: real.createElement, getElementById: real.getElementById });
+    globalThis.setTimeout = real.setTimeout;
+  }
+});

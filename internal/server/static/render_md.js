@@ -185,10 +185,8 @@ function renderFence(part) {
   const code = oneLine
     ? part.replace(/^```/, '').replace(/```$/, '')
     : m ? m[2].replace(/\n$/, '') : part.replace(/^```[^\n]*\n?/, '');
-  // FENCE_RENDERERS is a Map, not a plain object, so a fence lang of
-  // `constructor` / `__proto__` / `toString` cannot resolve to an inherited
-  // Object.prototype member — only a lang explicitly registered below ever
-  // dispatches.
+  // FENCE_RENDERERS is a Map, so a fence lang such as `constructor` or
+  // `__proto__` cannot resolve to an inherited Object.prototype member.
   const fenceRenderer = FENCE_RENDERERS.get(lang);
   if (fenceRenderer) return fenceRenderer(code);
   // Path-list fence: a language-less block whose every non-empty line is a
@@ -282,11 +280,9 @@ function renderProse(part) {
       return '\x00ILM' + (inlineMathTokens.length - 1) + '\x00';
     });
   }
-  // ctx accumulates block-level output (chunks) + single join() at the end
-  // rather than `html +=` per line: V8 reallocates the underlying string on
-  // every concat past the small-string threshold, which is O(n^2) over line
-  // count. A 200-line response rendered ~50 times per history replay was the
-  // dominant cost in the text-event path. listStack/baselineCols are the
+  // ctx collects block-level output in chunks joined once at the end: `html +=`
+  // per line reallocates the string each time, O(n^2) over line count on a
+  // path history replay re-renders many times. listStack/baselineCols are the
   // list-nesting state LINE_HANDLERS read and mutate; `i` lets a handler
   // consume extra lines (blockquote/table lookahead) by advancing it.
   const ctx = { chunks: [], listStack: [], baselineCols: -1, lines: part.split('\n'), i: 0 };
@@ -683,34 +679,55 @@ function renderTable(lines) {
   return '<div class="md-table-wrap">' + h + '</tbody></table></div>';
 }
 
-let mermaidLoading = false;
-let mermaidReady = false;
+const CDN_RETRY_MS = 60000;
+const mermaidLoad = { ready: false, busy: false, failures: 0 };
+const katexLoad = { ready: false, busy: false, failures: 0 };
+
+// cdnLoad appends a lazily loaded CDN script under its SRI pin. A failed load
+// is retried once, CDN_RETRY_MS later, then not until the page reloads; rerun
+// runs when the load settles and when the retry falls due, and meanwhile
+// runMermaid / runKatex leave the source showing, marked md-render-unavailable.
+function cdnLoad(st, src, integrity, rerun) {
+  if (st.ready || st.busy) return;
+  st.busy = true;
+  const s = document.createElement('script');
+  s.src = src;
+  s.integrity = integrity;
+  s.crossOrigin = 'anonymous';
+  s.onload = () => { st.ready = true; rerun(); };
+  s.onerror = () => {
+    if (++st.failures === 1) setTimeout(() => { st.busy = false; rerun(); }, CDN_RETRY_MS);
+    rerun();
+  };
+  document.head.appendChild(s);
+}
+
+// awaitingCdn marks el while st's script has failed, and reports whether el
+// still waits for that script.
+function awaitingCdn(el, st) {
+  const failed = !st.ready && st.failures > 0;
+  el.classList.toggle('md-render-unavailable', failed);
+  el.title = failed ? '渲染器未加载（离线？），显示源码' : '';
+  return !st.ready;
+}
 
 function loadMermaid() {
-  if (mermaidReady || mermaidLoading) return;
-  mermaidLoading = true;
-  const s = document.createElement('script');
-  s.src = 'https://cdn.jsdelivr.net/npm/mermaid@11.14.0/dist/mermaid.min.js';
-  s.integrity = 'sha384-1CMXl090wj8Dd6YfnzSQUOgWbE6suWCaenYG7pox5AX7apTpY3PmJMeS2oPql4Gk';
-  s.crossOrigin = 'anonymous';
-  s.onload = () => {
-    window.mermaid.initialize(mermaidConfig());
-    mermaidReady = true;
-    mermaidLoading = false;
-    runMermaid();
-  };
-  s.onerror = () => { mermaidLoading = false; };
-  document.head.appendChild(s);
+  cdnLoad(mermaidLoad, 'https://cdn.jsdelivr.net/npm/mermaid@11.14.0/dist/mermaid.min.js',
+    'sha384-1CMXl090wj8Dd6YfnzSQUOgWbE6suWCaenYG7pox5AX7apTpY3PmJMeS2oPql4Gk', () => {
+      if (mermaidLoad.ready) window.mermaid.initialize(mermaidConfig());
+      runMermaid();
+    });
 }
 
 function runMermaid() {
   if (Object.keys(mermaidPending).length === 0) return;
-  if (!mermaidReady) { loadMermaid(); return; }
+  if (!mermaidLoad.ready) loadMermaid();
   let hasNew = false;
   Object.entries(mermaidPending).forEach(([id, code]) => {
     const el = document.getElementById(id);
-    if (!el) { delete mermaidPending[id]; return; }
+    if (!el) { if (mermaidLoad.ready) delete mermaidPending[id]; return; }
     el.textContent = code;
+    if (awaitingCdn(el, mermaidLoad)) return;
     el.className = 'mermaid';
     delete mermaidPending[id];
     hasNew = true;
@@ -796,17 +813,12 @@ function mermaidConfig() {
 let mermaidCounter = 0;
 const mermaidPending = {};
 
-let katexLoading = false;
-let katexReady = false;
 let katexCounter = 0;
 const katexPending = {};
 
 function loadKatex() {
-  if (katexReady || katexLoading) return;
-  katexLoading = true;
-  // Inject stylesheet on demand (moved out of <head> to unblock first paint).
-  // R219-SEC-4: KaTeX CDN link + script need distinct SRI integrity hashes;
-  // pinned off the DOM by test/e2e/cdn_sri.test.js.
+  // The stylesheet loads on demand with the script, each under its own SRI
+  // hash (R219-SEC-4), pinned off the DOM by test/e2e/cdn_sri.test.js.
   if (!document.querySelector('link[data-nz-katex]')) {
     const link = document.createElement('link');
     link.rel = 'stylesheet';
@@ -816,25 +828,17 @@ function loadKatex() {
     link.setAttribute('data-nz-katex', '1');
     document.head.appendChild(link);
   }
-  const s = document.createElement('script');
-  s.src = 'https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js';
-  s.integrity = 'sha384-Rma6DA2IPUwhNxmrB/7S3Tno0YY7sFu9WSYMCuulLhIqYSGZ2gKCJWIqhBWqMQfh';
-  s.crossOrigin = 'anonymous';
-  s.onload = () => {
-    katexReady = true;
-    katexLoading = false;
-    runKatex();
-  };
-  s.onerror = () => { katexLoading = false; };
-  document.head.appendChild(s);
+  cdnLoad(katexLoad, 'https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js',
+    'sha384-Rma6DA2IPUwhNxmrB/7S3Tno0YY7sFu9WSYMCuulLhIqYSGZ2gKCJWIqhBWqMQfh', runKatex);
 }
 
 function runKatex() {
   if (Object.keys(katexPending).length === 0) return;
-  if (!katexReady) { loadKatex(); return; }
+  if (!katexLoad.ready) loadKatex();
   Object.entries(katexPending).forEach(([id, info]) => {
     const el = document.getElementById(id);
-    if (!el) { delete katexPending[id]; return; }
+    if (!el) { if (katexLoad.ready) delete katexPending[id]; return; }
+    if (awaitingCdn(el, katexLoad)) return;
     try {
       window.katex.render(info.tex, el, { displayMode: info.display, throwOnError: false });
     } catch(_) {
@@ -853,11 +857,7 @@ function runKatex() {
 //      single letters, operators, parens, punctuation) AND contain no two
 //      consecutive 3+ letter English words AND contain at least one math
 //      hint — digit, operator, OR a function-call pattern `letter(` /
-//      `)letter`. The function-call clause accepts `$h(x)$` / `$f(x)$` /
-//      `$g(t)$` which the previous "must contain digit/operator" rule
-//      mistakenly rejected (function references in prose carry no operator
-//      character themselves). Pure prose tokens like `$(test)$` still
-//      reject because they lack both a math hint and a function-call shape.
+//      `)letter`, so `$f(x)$` passes while prose like `$(test)$` does not.
 function isMathInline(tex) {
   if (/[\\^_{}]/.test(tex)) return true;
   // Bare 1-2 letter variable / segment name (`$x$`, `$AB$`): no digit,
@@ -890,7 +890,7 @@ function isMathDisplay(tex) {
 }
 
 function renderKatex(tex, displayMode) {
-  if (katexReady) {
+  if (katexLoad.ready) {
     try { return window.katex.renderToString(tex, { displayMode: displayMode, throwOnError: false }); }
     catch(_) { return esc(tex); }
   }

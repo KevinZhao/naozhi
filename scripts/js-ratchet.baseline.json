@@ -364,7 +364,7 @@
     "maxFnLines": 89,
     "maxIifeLines": 0,
     "fnOver100": 0,
-    "topLevelLetVar": 6,
+    "topLevelLetVar": 2,
     "configureDeps": 0,
     "deadInjections": 0,
     "innerHTMLAssign": 0,
