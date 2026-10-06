@@ -20,14 +20,15 @@ import (
 
 // topicCases: only a message with a thread_id is in a topic; the topic is
 // named by its root message, which is the message itself when it opens the
-// topic. A quote reply has a root but no thread and stays in the chat.
+// topic. A quote reply has a root but no thread and stays in the chat. Only
+// a plain message would open a topic under itself (wantSelf).
 var topicCases = []struct {
-	name, threadID, rootID, want string
+	name, threadID, rootID, want, wantSelf string
 }{
-	{"topic reply", "omt_1", "om_root", "om_root"},
-	{"topic opener", "omt_1", "", "om_self"},
-	{"quote reply", "", "om_root", ""},
-	{"plain message", "", "", ""},
+	{"topic reply", "omt_1", "om_root", "om_root", ""},
+	{"topic opener", "omt_1", "", "om_self", ""},
+	{"quote reply", "", "om_root", "", ""},
+	{"plain message", "", "", "", "om_self"},
 }
 
 func TestTopicRef(t *testing.T) {
@@ -39,6 +40,18 @@ func TestTopicRef(t *testing.T) {
 	}
 	if got := topicRef("omt_1", "om_"+strings.Repeat("x", maxTopicRefLen), "om_self"); got != "" {
 		t.Errorf("over-long root: topicRef = %q, want dropped", got)
+	}
+}
+
+func TestSelfTopicRef(t *testing.T) {
+	t.Parallel()
+	for _, tc := range topicCases {
+		if got := selfTopicRef(tc.threadID, tc.rootID, "om_self"); got != tc.wantSelf {
+			t.Errorf("%s: selfTopicRef = %q, want %q", tc.name, got, tc.wantSelf)
+		}
+	}
+	if got := selfTopicRef("", "", "om_"+strings.Repeat("x", maxTopicRefLen)); got != "" {
+		t.Errorf("over-long message id: selfTopicRef = %q, want dropped", got)
 	}
 }
 
@@ -59,8 +72,8 @@ func TestParseSDKEvent_Topic(t *testing.T) {
 			m.RootId = strPtr(tc.rootID)
 		}
 		pe, ok := (&Feishu{}).parseSDKEvent(&larkim.P2MessageReceiveV1{Event: &larkim.P2MessageReceiveV1Data{Message: m}})
-		if !ok || pe.Msg.ThreadID != tc.want {
-			t.Errorf("%s: parsed %+v, %v; want ThreadID %q", tc.name, pe.Msg, ok, tc.want)
+		if !ok || pe.Msg.ThreadID != tc.want || pe.Msg.SelfThread != tc.wantSelf {
+			t.Errorf("%s: parsed %+v, %v; want ThreadID %q, SelfThread %q", tc.name, pe.Msg, ok, tc.want, tc.wantSelf)
 		}
 	}
 }
@@ -91,8 +104,8 @@ func TestWebhook_Topic(t *testing.T) {
 		mux.ServeHTTP(w, buildTokenRequest(body))
 		select {
 		case m := <-got:
-			if m.ThreadID != tc.want {
-				t.Errorf("%s: ThreadID = %q, want %q", tc.name, m.ThreadID, tc.want)
+			if m.ThreadID != tc.want || m.SelfThread != tc.wantSelf {
+				t.Errorf("%s: ThreadID, SelfThread = %q, %q; want %q, %q", tc.name, m.ThreadID, m.SelfThread, tc.want, tc.wantSelf)
 			}
 		case <-time.After(5 * time.Second):
 			t.Fatalf("%s: no message dispatched (status %d)", tc.name, w.Code)

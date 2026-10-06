@@ -21,6 +21,9 @@ type SessionConfig struct {
 	// (default; a message outside any thread uses the chat's), the whole
 	// "chat", or one "user".
 	GroupScope string `yaml:"group_scope,omitempty"`
+	// ThreadAutoOpen answers a Slack / Feishu group @mention posted outside
+	// any thread in a new thread under it, which then scopes as that thread.
+	ThreadAutoOpen bool `yaml:"thread_auto_open,omitempty"`
 }
 
 // Group-chat session scopes (SessionConfig.GroupScope).
