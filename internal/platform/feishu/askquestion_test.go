@@ -288,8 +288,8 @@ func TestBuildQuestionCardJSON_OmitsUnknownChatType(t *testing.T) {
 // TestDispatchCardAction_DirectChatTypeRoutesToDirect is the core regression:
 // a 1:1 card click whose value carries chat_type=direct must route to a
 // direct session even though the chat_id is an "oc_" prefix (Feishu p2p chats
-// use oc_ open_chat_ids). The WS handler resolves chatType from the value and
-// passes it here; this asserts the resulting IncomingMessage stays "direct".
+// use oc_ open_chat_ids); this asserts the resulting IncomingMessage stays
+// "direct".
 func TestDispatchCardAction_DirectChatTypeRoutesToDirect(t *testing.T) {
 	t.Parallel()
 	f := &Feishu{}
@@ -393,6 +393,47 @@ func TestDispatchCardAction_FallsBackToValueChatType(t *testing.T) {
 		"oc_grp", "", "", "ou_user", handler)
 	if got.ChatType != "group" {
 		t.Errorf("ChatType = %q, want group (value fallback failed)", got.ChatType)
+	}
+}
+
+// TestDispatchCardAction_ChatTypeResolution pins the routing chat type for
+// every envelope/value pairing. The WS path passes an empty envelope, so the
+// tampered-value rows are what stop a forged button chat_type from reaching
+// the session key.
+func TestDispatchCardAction_ChatTypeResolution(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, envelope, value, want string
+	}{
+		{"ws_value_group", "", "group", "group"},
+		{"ws_value_direct", "", "direct", "direct"},
+		{"ws_value_missing", "", "", "direct"},
+		{"ws_value_tampered", "", "evil", "direct"},
+		{"ws_value_p2p", "", "p2p", "direct"},
+		{"envelope_wins_over_value", "direct", "group", "direct"},
+		{"envelope_group", "group", "", "group"},
+		{"envelope_tampered", "evil", "group", "direct"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &Feishu{}
+			var got platform.IncomingMessage
+			var called atomic.Int32
+			handler := func(_ context.Context, m platform.IncomingMessage) {
+				called.Add(1)
+				got = m
+			}
+			f.dispatchCardAction(context.Background(),
+				platform.AskAnswerPayload{Kind: "ask_answer", Label: "L", ChatType: tt.value},
+				"oc_chat", "", tt.envelope, "ou_user", handler)
+			if called.Load() != 1 {
+				t.Fatalf("handler called %d times, want 1", called.Load())
+			}
+			if got.ChatType != tt.want {
+				t.Errorf("ChatType = %q, want %q", got.ChatType, tt.want)
+			}
+		})
 	}
 }
 

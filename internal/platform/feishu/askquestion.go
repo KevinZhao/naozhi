@@ -256,9 +256,9 @@ func (f *Feishu) dispatchCardAction(
 			"tool_use_id", osutil.SanitizeForLog(val.ToolUseID, 64))
 		return
 	}
-	// The v2 envelope carries no chat_type at any level; fall back to the
-	// button value before defaulting to "direct", or a group answer routes
-	// into a phantom direct session (#2007).
+	// Neither the v2 envelope nor the WS callback carries chat_type; fall back
+	// to the button value before defaulting to "direct", or a group answer
+	// routes into a phantom direct session (#2007).
 	ct := chatType
 	if ct == "" {
 		ct = platform.NormalizeAskChatType(val.ChatType)

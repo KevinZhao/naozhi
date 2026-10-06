@@ -103,14 +103,9 @@ func (f *Feishu) startWebSocket() error {
 		if event.Event.Operator != nil {
 			operatorID = event.Event.Operator.OpenID
 		}
-		// The WS callback carries no chat_type; use the value embedded in the
-		// button, defaulting to "direct" (p2p chats also use "oc_" ids, so a
-		// prefix heuristic would mis-route 1:1 answers).
-		chatType := platform.NormalizeAskChatType(val.ChatType)
-		if chatType == "" {
-			chatType = "direct"
-		}
-		f.dispatchCardActionTracked(cardCtx, val, chatID, messageID, chatType, operatorID, handler)
+		// The WS callback carries no chat_type; an empty one makes
+		// dispatchCardAction derive it from the button value.
+		f.dispatchCardActionTracked(cardCtx, val, chatID, messageID, "", operatorID, handler)
 		return &callback.CardActionTriggerResponse{}, nil
 	})
 
