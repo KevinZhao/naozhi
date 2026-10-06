@@ -11,12 +11,12 @@ import (
 // chats carry these keys, so a renamed tag would make their clicks undecodable.
 func TestAskAnswerPayload_WireTags(t *testing.T) {
 	t.Parallel()
-	full := AskAnswerPayload{AgentID: "a", ChatType: "group", Header: "h", Kind: AskAnswerKind, Label: "l", ToolUseID: "t"}
+	full := AskAnswerPayload{AgentID: "a", ChatType: "group", Header: "h", Kind: AskAnswerKind, Label: "l", ThreadID: "om_1", ToolUseID: "t"}
 	data, err := json.Marshal(full)
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = `{"agent_id":"a","chat_type":"group","header":"h","kind":"ask_answer","label":"l","tool_use_id":"t"}`
+	const want = `{"agent_id":"a","chat_type":"group","header":"h","kind":"ask_answer","label":"l","thread_id":"om_1","tool_use_id":"t"}`
 	if string(data) != want {
 		t.Errorf("Marshal = %s\nwant      %s", data, want)
 	}
@@ -29,8 +29,8 @@ func TestAskAnswerPayload_WireTags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s := string(data); strings.Contains(s, "agent_id") || strings.Contains(s, "chat_type") {
-		t.Errorf("empty agent_id/chat_type must be omitted: %s", s)
+	if s := string(data); strings.Contains(s, "agent_id") || strings.Contains(s, "chat_type") || strings.Contains(s, "thread_id") {
+		t.Errorf("empty agent_id/chat_type/thread_id must be omitted: %s", s)
 	}
 }
 
@@ -67,6 +67,21 @@ func TestNewAskAnswerPayload_CapsAndWhitelist(t *testing.T) {
 	card.ChatType = "group"
 	if got := NewAskAnswerPayload(card, item, opt).ChatType; got != "group" {
 		t.Errorf("whitelisted chat type dropped: %q", got)
+	}
+}
+
+// TestNewAskAnswerPayload_ThreadID: the card's thread round-trips through the
+// button, and an id too long for the value is dropped, not clipped into the
+// id of some other thread.
+func TestNewAskAnswerPayload_ThreadID(t *testing.T) {
+	t.Parallel()
+	card := QuestionCard{ThreadID: "om_root"}
+	if got := NewAskAnswerPayload(card, QuestionItem{}, QuestionOption{Label: "l"}).ThreadID; got != "om_root" {
+		t.Errorf("ThreadID = %q, want om_root", got)
+	}
+	card.ThreadID = "om_" + strings.Repeat("x", AskIDMaxRunes)
+	if got := NewAskAnswerPayload(card, QuestionItem{}, QuestionOption{Label: "l"}).ThreadID; got != "" {
+		t.Errorf("over-long ThreadID = %q, want dropped", got)
 	}
 }
 

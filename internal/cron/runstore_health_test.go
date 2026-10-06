@@ -19,16 +19,16 @@ func TestRunStoreHealth_ReflectsARealWriteFailure(t *testing.T) {
 
 	jobID := mustGenerateID()
 	// Prime the job dir, then make it unwritable so the record write fails.
-	if _, err := s.runStore.layout.EnsureOwnerDir(jobID); err != nil {
+	if _, err := s.runs.EnsureJobDirForTest(jobID); err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Join(s.runStore.rootDir(), jobID)
+	dir := filepath.Join(s.runs.Dir(), jobID)
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = os.Chmod(dir, 0o700) }()
 
-	s.runStore.Append(makeRun(jobID, time.Now()))
+	s.runs.Append(makeRun(jobID, time.Now()))
 
 	if ents, _ := os.ReadDir(dir); len(ents) > 0 {
 		t.Skip("write into a 0500 dir succeeded (running as root?); failure path not exercised")

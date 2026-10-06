@@ -16,7 +16,7 @@ import (
 
 // fixtureRunWithJSONL writes a CronRun JSON record + matching JSONL into
 // a fresh sched on tmpRoot, then returns (handlers, sched, jobID, runID,
-// claudeDir). The scheduler is started so its runStore is wired to disk.
+// claudeDir). The scheduler is started so its run store is wired to disk.
 //
 // The JSONL is keyed under
 // `<claudeDir>/projects/<slug(workdir)>/<sessionID>.jsonl` matching the
@@ -35,7 +35,7 @@ func fixtureRunWithJSONL(t *testing.T, jsonlLines []string) (h *Handlers, jobID,
 
 	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath}, cronpkg.SchedulerDeps{})
 
-	// Persist a job so runStore.Get can resolve it.
+	// Persist a job so runstore.Store.Get can resolve it.
 	job := cronpkg.Job{
 		ID:       strings.Repeat("a", 16),
 		Schedule: "@every 1h",
@@ -52,7 +52,7 @@ func fixtureRunWithJSONL(t *testing.T, jsonlLines []string) (h *Handlers, jobID,
 
 	// Write the run JSON via the scheduler's TestAppendRun if it exists,
 	// otherwise drop the file directly. Direct write keeps the test
-	// agnostic to internal helpers; runStore.Append is exposed via
+	// agnostic to internal helpers; runstore.Store.Append is exposed via
 	// scheduler's RunStore for tests.
 	runsDir := filepath.Join(tmp, "runs", jobID)
 	if err := os.MkdirAll(runsDir, 0o700); err != nil {
@@ -236,7 +236,7 @@ func TestTranscript_RejectsCrossJobID(t *testing.T) {
 		`{"type":"user","message":{"role":"user","content":"x"}}`,
 	})
 	// Use a different (but valid hex) job_id in the URL — the run record
-	// on disk has a different job_id, so runStore.Get either returns
+	// on disk has a different job_id, so runstore.Store.Get either returns
 	// not-found OR our defensive cross-key check rejects.
 	otherJob := strings.Repeat("c", 16)
 	if otherJob == jobID {

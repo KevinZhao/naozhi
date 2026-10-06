@@ -11,9 +11,9 @@
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList } from './state.js';
 import { esc, escAttr, formatCostUSD, formatDurationShort, formatRunDuration, runStateDot, runStateLabel } from './nz_util.js';
-import { getToken } from './platform.js';
+import { authHeaders } from './platform.js';
 import { sid } from './session_ident.js';
-import { formatAbsTime } from './utilities.js';
+import { costBudgetChipHtml, fetchCostBudget, formatAbsTime } from './utilities.js';
 
 // ---- Session run-history timeline (docs/rfc/session-run-metrics.md §8) ----
 //
@@ -30,21 +30,14 @@ function sessionRunStateMeta(state) {
 }
 
 function sessionRunStatLabel(ms) {
-  // Reuse the cron duration formatter (cron_view.js) for visual parity. It is
-  // a top-level function in the shared script scope.
   return formatRunDuration(ms) || '0ms';
-  return Math.round(ms) + 'ms';
 }
 
-// sessionRunTotalLabel formats a CUMULATIVE duration for the header's
-// 「共 X」total. Unlike sessionRunStatLabel (per-run, reuses formatRunDuration
-// which tops out at "Xm Ys"), a session's total across many runs routinely
-// exceeds an hour — so we use formatDurationShort, which carries an "Xh YYm"
-// tier and renders "3h 07m" instead of an unreadable "187m 3s". Per-run rows
-// keep sessionRunStatLabel so their second-level precision ("26.5s") is intact.
+// sessionRunTotalLabel formats the header's cumulative 「共 X」: a session's
+// runs often add up past an hour, so it takes formatDurationShort's "3h 07m"
+// tier; per-run rows keep sessionRunStatLabel's "26.5s" precision.
 function sessionRunTotalLabel(ms) {
   return formatDurationShort(ms);
-  return sessionRunStatLabel(ms);
 }
 
 function sessionRunsStatsHtml(stats) {
@@ -98,33 +91,30 @@ function sessionRunRowHtml(r) {
     '</div>';
 }
 
-// setHeaderRunStats writes (or clears) the aggregate run-stats node that lives
-// in the session-detail header's .detail line. The run-history stats used to
-// sit inside the panel <summary>; they were promoted to the header so the
-// per-session "N 轮 · 均 X · 最长 X" overview is always visible without
-// expanding the (collapsed-by-default) timeline. The header node is built
-// empty by renderMainShell, so absence = no-op rather than throw.
+// setHeaderRunStats writes (or clears) the header's run-stats node, which
+// renderMainShell builds empty; absence is a no-op.
 function setHeaderRunStats(html) {
   const el = document.getElementById('header-runstats');
   if (el) el.innerHTML = html || '';
 }
 
-function renderSessionRunsPanel(data) {
+// renderSessionRunsPanel fills the run-history panel and the header stats,
+// which end with the /api/cost/budget answer for the session's key.
+function renderSessionRunsPanel(data, budget) {
   const panel = document.getElementById('session-runs-panel');
   if (!panel) return;
   const runs = (data && Array.isArray(data.runs)) ? data.runs : [];
-  const stats = data && data.stats;
+  // Stats are surfaced in the header; the panel keeps only the per-run detail
+  // rows behind a collapsed disclosure.
+  const stats = runs.length ? sessionRunsStatsHtml(data.stats) : '';
+  setHeaderRunStats([stats, costBudgetChipHtml(budget, 'srp-stat')].filter(Boolean).join('<span class="srp-stat-sep">·</span>'));
   if (!runs.length) {
     // Hidden entirely when there's no history (mirrors cron :empty behaviour).
     panel.hidden = true;
     panel.innerHTML = '';
-    setHeaderRunStats('');
     return;
   }
   panel.hidden = false;
-  // Stats are surfaced in the header; the panel keeps only the per-run detail
-  // rows behind a collapsed disclosure.
-  setHeaderRunStats(sessionRunsStatsHtml(stats));
   const rowsHtml = runs.map(sessionRunRowHtml).join('');
   // Collapsed by default everywhere: the run-history timeline grows without
   // bound as more runs accumulate, so leaving it open would steadily push the
@@ -160,17 +150,15 @@ async function fetchSessionRuns(key, node) {
   // previously-selected local session's "N 轮" overview.
   if (node && node !== 'local') { panel.hidden = true; setHeaderRunStats(''); return; }
   try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    const resp = await fetch(NZ_CONTRACT.API.sessions_runs + '?key=' + encodeURIComponent(key), { headers });
+    const [resp, budget] = await Promise.all([fetch(NZ_CONTRACT.API.sessions_runs + '?key=' + encodeURIComponent(key), { headers: authHeaders() }),
+      fetchCostBudget('session_key=' + encodeURIComponent(key))]);
     // Stale-check the error branch too: the header we would clear belongs to
     // whichever session is selected NOW, not the one this fetch was for.
     if (!resp.ok) { if (selection.key !== key) return; panel.hidden = true; setHeaderRunStats(''); return; }
     const data = await resp.json();
     // Guard against a stale response landing after the user switched sessions.
     if (selection.key !== key) return;
-    renderSessionRunsPanel(data);
+    renderSessionRunsPanel(data, budget);
   } catch (_) {
     if (selection.key !== key) return;
     panel.hidden = true;

@@ -26,7 +26,7 @@ func TestEditLoop_SkipsRedrawAfterFinalized(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	tracker := newIMEventTracker(ctx, fp, "chat1", "direct", "")
+	tracker := newIMEventTracker(ctx, fp, ReplyDest{ChatID: "chat1"}, "direct", "")
 
 	// Simulate a banner having been posted and some interim status queued.
 	id := "banner-1"
@@ -110,7 +110,7 @@ func TestMarkFinalized_WaitsForInFlightRedraw(t *testing.T) {
 	turnCtx, turnCancel := context.WithCancel(context.Background())
 	defer turnCancel()
 	start := time.Now()
-	tracker := newIMEventTracker(turnCtx, fp, "chat1", "direct", "")
+	tracker := newIMEventTracker(turnCtx, fp, ReplyDest{ChatID: "chat1"}, "direct", "")
 	defer tracker.stop()
 	release := sync.OnceFunc(func() { close(fp.release) })
 	defer release() // a failed assertion must not leave stop() waiting on the gate
@@ -182,7 +182,7 @@ func TestRedrawStatus_ChecksFinalizedUnderEditMu(t *testing.T) {
 	fp := &fakePlatform{supportsInterim: true}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	tracker := newIMEventTracker(ctx, fp, "chat1", "direct", "")
+	tracker := newIMEventTracker(ctx, fp, ReplyDest{ChatID: "chat1"}, "direct", "")
 
 	id := "banner-1"
 	tracker.thinkingMsgID.Store(&id)

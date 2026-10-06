@@ -99,6 +99,8 @@ type fakeOrigin struct {
 	blocking bool
 	rec      *recorder
 	opts     sessionview.AgentOpts
+	// scope is returned by Scope; empty matches nothing.
+	scope string
 	// nilDelivery makes Begin return nil (a receiver that wants nothing).
 	nilDelivery bool
 	// panicIn names a hook ("begin", "finish", "dropped") that panics.
@@ -128,6 +130,8 @@ func (o *fakeOrigin) doneCtxCalls() []string {
 }
 
 func (o *fakeOrigin) Sink() string { return o.sink }
+
+func (o *fakeOrigin) Scope() string { return o.scope }
 
 func (o *fakeOrigin) Admitted(_ context.Context, a Ack) {
 	o.rec.add("admitted:%s:%s", o.name, ackName(a))
