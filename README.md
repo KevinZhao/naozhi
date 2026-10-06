@@ -555,6 +555,11 @@ journalctl -u naozhi -f
 > 拉 heap / goroutine / CPU profile。端点受 token + **loopback-only** 双重防护，远端
 > 请求（ALB / CloudFront）一律 403。详见 [`docs/ops/pprof.md`](docs/ops/pprof.md)。
 
+> **监控接入**：`server.metrics_enabled: true` 后 `GET /metrics`（Bearer dashboard token）
+> 以 Prometheus 文本格式导出全部 `naozhi_*` 计数器，不限 loopback，可被另一台机器上的
+> Prometheus / CloudWatch agent 抓取。字段含义仍以 [`docs/ops/pprof.md`](docs/ops/pprof.md)
+> 的计数器表为准，抓取配置见 [`docs/ops/metrics.md`](docs/ops/metrics.md)。
+
 > **一键排障**：`naozhi doctor` 聚合 binary / codesign / systemd / HTTP / auth /
 > 服务端子系统 / 配置漂移 / pprof / 状态目录 / CLI backend / 语音转写 / 安全配置等检查，
 > 任一 fail 退出码 1。CI 友好，支持 `--json` 输出。完整检查项见

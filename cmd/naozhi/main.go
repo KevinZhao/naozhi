@@ -466,6 +466,7 @@ func main() {
 		},
 		Features: server.FeatureOptions{
 			Debug:     cfg.Server.DebugMode,
+			Metrics:   cfg.Server.MetricsEnabled,
 			PublicTmp: cfg.Projects.PublicTmp,
 			// Default-on; opt-out via session.project_stable_key.enabled: false.
 			ProjectStableKey: cfg.Session.ProjectStableKey.ResolvedEnabled(true),
