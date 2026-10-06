@@ -6,9 +6,8 @@
 // other markdown tests block both loads, so without this file nothing renders
 // either library under the real policy.
 //
-// KaTeX comes from the mock's /static/vendor/, the files the binary embeds.
-// Mermaid is 75 MB on npm, so its one bundle is fetched from the CDN through
-// the route.
+// Both come from the mock's /static/vendor/, the files the binary embeds, so
+// the test needs no network.
 //
 // 跑法：cd test/e2e && npx playwright test markdown_csp_render.test.js --project=desktop-chrome
 
@@ -33,21 +32,6 @@ function eventsWith(text) {
   ];
 }
 
-/** @param {import('@playwright/test').BrowserContext} ctx */
-async function routeMermaid(ctx) {
-  await ctx.route(/cdn\.jsdelivr\.net\/npm\/mermaid@/, async route => {
-    let lastErr;
-    for (let i = 0; i < 3; i++) {
-      try {
-        const resp = await route.fetch();
-        await route.fulfill({ response: resp });
-        return;
-      } catch (e) { lastErr = e; }
-    }
-    throw lastErr;
-  });
-}
-
 test('KaTeX and mermaid render with their styles under the CSP', async ({ browser }) => {
   const mock = await startMockServer({
     eventsByKey: {
@@ -61,7 +45,6 @@ test('KaTeX and mermaid render with their styles under the CSP', async ({ browse
     },
   });
   const ctx = await browser.newContext();
-  await routeMermaid(ctx);
   const page = await ctx.newPage();
   try {
     await page.goto(mock.url + '/dashboard');
