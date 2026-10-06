@@ -280,6 +280,8 @@ function defaultGitStates() {
  * @param {object[]} [overrides.discoveredPreview] - GET /api/discovered/preview entries (default: none).
  * POST /api/scratch/open always succeeds with a fixed scratch session (the
  * 追问 drawer's open path); its event polling rides the sessions_events route.
+ * @param {string} [overrides.scratchPromoteKey] - Enables POST /api/scratch/<id>/promote,
+ *   answering {key: scratchPromoteKey}; the ids land in `scratchPromoteCalls`.
  * @param {number} [overrides.sessionsDelayMs] - Hold GET /api/sessions responses
  *   this long. Lets a spec prove an optimistic DOM patch happened locally, by pushing
  *   the list-refetch repaint (which would mask it) out of the assertion window.
@@ -414,6 +416,7 @@ function startMockServer(overrides = {}) {
   const deleteStatus = overrides.deleteStatus || 200;
 
   let sendCalls = [];
+  const scratchPromoteCalls = [];
   let bindCalls = [];
   let cronCreateCalls = [];
   let loginCalls = [];
@@ -569,6 +572,13 @@ function startMockServer(overrides = {}) {
           context_truncated: false,
         }));
       });
+      return;
+    }
+
+    if (overrides.scratchPromoteKey && pathname.startsWith('/api/scratch/') && pathname.endsWith('/promote') && req.method === 'POST') {
+      scratchPromoteCalls.push(decodeURIComponent(pathname.slice('/api/scratch/'.length, -'/promote'.length)));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ key: overrides.scratchPromoteKey }));
       return;
     }
 
@@ -1281,6 +1291,7 @@ function startMockServer(overrides = {}) {
         port,
         url: `http://127.0.0.1:${port}`,
         get sendCalls() { return sendCalls; },
+        get scratchPromoteCalls() { return scratchPromoteCalls; },
         get eventsCalls() { return eventsCalls; },
         get bindCalls() { return bindCalls; },
         get cronCreateCalls() { return cronCreateCalls; },

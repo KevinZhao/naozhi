@@ -166,6 +166,9 @@ var lightboxJS embed.FS
 //go:embed static/mem_popover.js
 var memPopoverJS embed.FS
 
+//go:embed static/aside_drawer.js
+var asideDrawerJS embed.FS
+
 //go:embed static/agent_view.js
 var agentViewJS embed.FS
 
@@ -295,6 +298,7 @@ var staticAssets, servedAssetVersion = func() (map[string]staticAsset, string) {
 		{"cron_format.js", cronFormatJS, "static/cron_format.js", true},
 		{"lightbox.js", lightboxJS, "static/lightbox.js", true},
 		{"mem_popover.js", memPopoverJS, "static/mem_popover.js", true},
+		{"aside_drawer.js", asideDrawerJS, "static/aside_drawer.js", true},
 		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
 		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
 		{"files_view.js", filesViewJS, "static/files_view.js", true},
