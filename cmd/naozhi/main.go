@@ -30,6 +30,7 @@ import (
 	"github.com/naozhi/naozhi/internal/sysession"
 	"github.com/naozhi/naozhi/internal/transcribe"
 	"github.com/naozhi/naozhi/internal/upstream"
+	"github.com/naozhi/naozhi/internal/webhook"
 
 	// Side-effect import: history-source factory registration lives in wireup
 	// so internal/session stays backend-agnostic.
@@ -321,6 +322,13 @@ func main() {
 	// cron and sysession run-events reach the dashboard Hub, which does not
 	// exist yet; the server binds it to this relay.
 	runTelemetry := &runtelemetry.Relay{}
+	// Outbound webhooks ride the same relay as the dashboard Hub
+	// (docs/rfc/outbound-webhooks.md); nil when none is configured.
+	var webhooks *webhook.Sender
+	if eps := cfg.WebhookEndpoints(); len(eps) > 0 {
+		webhooks = webhook.New(eps, webhook.WithNode(cfg.Workspace.ID))
+		slog.Info("outbound webhooks enabled", "endpoints", len(eps))
+	}
 	// One gate for IM and cron, fed by the ledger; nil when cost.budget is off.
 	budgetGate := budget.Attach(router.Runs().CostLedger(), cfg.BudgetLimits(), cfg.BudgetLocation(), nil)
 	if budgetGate != nil {
@@ -490,6 +498,7 @@ func main() {
 		Relays: server.RelayOptions{
 			Router:       routerEvents,
 			RunTelemetry: runTelemetry,
+			Webhooks:     webhooks,
 		},
 	})
 	metrics.StartupPhaseServerMs.Set(time.Since(t0).Milliseconds())
@@ -563,6 +572,13 @@ func main() {
 				// ShutdownComplete closes after srv.Shutdown's 30s drain, i.e. after
 				// every in-flight handler finished, so router.Shutdown never races a
 				// half-cleaned session map. Already closed on server-exit paths.
+				// After the scheduler: its last run.ended must still go out;
+				// before http-drain so the budget is not spent on it.
+				{name: "webhooks", run: func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					webhooks.Close(ctx)
+				}},
 				{name: "http-drain", run: func() { <-srv.ShutdownComplete() }},
 				{name: "router", run: router.Shutdown},
 			})

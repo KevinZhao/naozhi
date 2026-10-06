@@ -557,6 +557,9 @@ journalctl -u naozhi -f
 > 拉 heap / goroutine / CPU profile。端点受 token + **loopback-only** 双重防护，远端
 > 请求（ALB / CloudFront）一律 403。详见 [`docs/ops/pprof.md`](docs/ops/pprof.md)。
 
+> **事件推送**：`integrations.webhooks` 把 cron / sysession 的 `run.started` / `run.ended`
+> POST 到你的端点（HMAC 签名、重试、不阻塞调度器），用于 CI 联动或告警；payload 只含
+> run 元数据，不含 prompt / 结果文本。见 [`docs/rfc/outbound-webhooks.md`](docs/rfc/outbound-webhooks.md)。
 > **监控接入**：`server.metrics_enabled: true` 后 `GET /metrics`（Bearer dashboard token）
 > 以 Prometheus 文本格式导出全部 `naozhi_*` 计数器，不限 loopback，可被另一台机器上的
 > Prometheus / CloudWatch agent 抓取。字段含义仍以 [`docs/ops/pprof.md`](docs/ops/pprof.md)
