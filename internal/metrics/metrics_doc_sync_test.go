@@ -71,8 +71,8 @@ func TestCountersDocSyncedWithPprofMd(t *testing.T) {
 }
 
 // metricDecl matches a naozhi_* expvar registration in any package; the
-// labeled forms are this package's wrappers around expvar.NewMap.
-var metricDecl = regexp.MustCompile(`(?:expvar\.NewInt|expvar\.NewMap|expvar\.NewFloat|NewLabeledCounter|NewLabeledGauge)\(\s*"(naozhi_[a-z0-9_]+)"`)
+// labeled forms (and promexport.NewMap) wrap expvar.NewMap.
+var metricDecl = regexp.MustCompile(`(?:expvar\.NewInt|expvar\.NewMap|expvar\.NewFloat|promexport\.NewMap|NewLabeledCounter|NewLabeledGauge)\(\s*"(naozhi_[a-z0-9_]+)"`)
 
 // repoRoot returns the checkout root this test file lives in.
 func repoRoot(t *testing.T) string {

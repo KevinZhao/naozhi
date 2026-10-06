@@ -3,6 +3,7 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -27,8 +28,9 @@ const (
 type parsedEvent struct {
 	Msg       platform.IncomingMessage
 	MessageID string
-	MediaType string // "" | "image" | "audio"
+	MediaType string // "" | "image" | "audio" | "file"
 	MediaKey  string // imageKey or fileKey
+	MediaName string // file_name of a "file" message
 }
 
 func (f *Feishu) startWebSocket() error {
@@ -150,6 +152,10 @@ func (f *Feishu) routeParsed(ctx context.Context, handler platform.MessageHandle
 		f.dispatch.TryGo("feishu ws audio", func() {
 			f.handleAudio(ctx, handler, pe.Msg, pe.MessageID, pe.MediaKey)
 		})
+	case "file":
+		f.dispatch.TryGo("feishu ws file", func() {
+			f.handleFile(ctx, handler, pe.Msg, pe.MessageID, pe.MediaKey, pe.MediaName)
+		})
 	default:
 		f.dispatch.TryGo("feishu ws text", func() { handler(ctx, pe.Msg) })
 	}
@@ -169,6 +175,35 @@ func (f *Feishu) handleImage(ctx context.Context, handler platform.MessageHandle
 		return
 	}
 	msg.Images = []platform.Image{{Data: data, MimeType: mime}}
+	handler(ctx, msg)
+}
+
+// handleFile downloads a file message's attachment and calls handler with it
+// in msg.Files. A failed download is still forwarded, marked with its
+// FileReject, so dispatch tells the user; a sender refused by admission costs
+// no download and gets no reply.
+func (f *Feishu) handleFile(ctx context.Context, handler platform.MessageHandler, msg platform.IncomingMessage, messageID, fileKey, fileName string) {
+	if !f.admitted(ctx, msg) {
+		return
+	}
+	file := platform.File{Name: fileName}
+	data, err := f.DownloadFile(ctx, messageID, fileKey)
+	switch {
+	case err == nil:
+		file.Data = data
+	case ctx.Err() != nil:
+		return // shutting down; no notice for a download we abandoned
+	case errors.Is(err, errResourceTooLarge):
+		file.Reject = platform.FileRejectTooLarge
+	default:
+		file.Reject = platform.FileRejectDownloadFailed
+	}
+	if err != nil {
+		// file_key is sender-controlled; sanitize before slog.
+		slog.Warn("feishu download file failed", "err", err,
+			"key", osutil.SanitizeForLog(fileKey, 128))
+	}
+	msg.Files = []platform.File{file}
 	handler(ctx, msg)
 }
 
@@ -257,7 +292,7 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 	}
 
 	msgType := *msg.MessageType
-	if msgType != "text" && msgType != "image" && msgType != "audio" {
+	if msgType != "text" && msgType != "image" && msgType != "audio" && msgType != "file" {
 		return parsedEvent{}, false
 	}
 
@@ -352,23 +387,33 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 		result.Text = text
 		return parsedEvent{Msg: result}, true
 
-	case "image":
+	case "image", "audio", "file":
 		var content struct {
 			ImageKey string `json:"image_key"`
+			FileKey  string `json:"file_key"`
+			FileName string `json:"file_name"`
 		}
-		if err := json.Unmarshal([]byte(*msg.Content), &content); err != nil || content.ImageKey == "" {
+		if err := json.Unmarshal([]byte(*msg.Content), &content); err != nil {
 			return parsedEvent{}, false
 		}
-		return parsedEvent{Msg: result, MessageID: messageID, MediaType: "image", MediaKey: content.ImageKey}, true
-
-	case "audio":
-		var content struct {
-			FileKey string `json:"file_key"`
+		key := content.FileKey
+		if msgType == "image" {
+			key = content.ImageKey
 		}
-		if err := json.Unmarshal([]byte(*msg.Content), &content); err != nil || content.FileKey == "" {
+		if key == "" {
 			return parsedEvent{}, false
 		}
-		return parsedEvent{Msg: result, MessageID: messageID, MediaType: "audio", MediaKey: content.FileKey}, true
+		// Same check as transport_hook.go: the key goes into the API URL.
+		if !isValidFeishuResourceKey(key) {
+			slog.Warn("feishu ws: rejecting malformed resource key", "type", msgType,
+				"key", osutil.SanitizeForLog(key, 64), "msg_id", osutil.SanitizeForLog(messageID, 64))
+			return parsedEvent{}, false
+		}
+		pe := parsedEvent{Msg: result, MessageID: messageID, MediaType: msgType, MediaKey: key}
+		if msgType == "file" {
+			pe.MediaName = content.FileName
+		}
+		return pe, true
 
 	default:
 		return parsedEvent{}, false

@@ -12,7 +12,7 @@ package metrics
 // this reads "distinct ineffective configs observed since process start" — the
 // 30s shim-reconcile heartbeat re-deriving the same argv does not inflate it.
 // Labeled-only (bare wire name, no ByBackend/By* Go suffix, #2243).
-var SpawnDiagTotal = NewLabeledCounter("naozhi_spawn_diag_total")
+var SpawnDiagTotal = NewLabeledCounter("naozhi_spawn_diag_total", "layer", "action")
 
 // RecordSpawnDiag increments the spawn-gate rejection counter.
 func RecordSpawnDiag(layer, action string) {

@@ -150,17 +150,58 @@ func (d *Discord) stopped() bool {
 	return d.stopCtx != nil && d.stopCtx.Err() != nil
 }
 
+// errProbeRateLimited is fetchSelf's answer when discordgo would have slept
+// on an exhausted bucket before sending: the request is not attempted, so
+// Stop is never held by that sleep (which ignores ctx).
+var errProbeRateLimited = errors.New("discord REST bucket exhausted; probe skipped")
+
 // fetchSelf asks REST who the bot is, bounded by probeTimeout and by Stop.
 // The 429 retry is off: discordgo would sleep it out ignoring ctx. Its
-// pre-request wait on an exhausted rate-limit bucket still ignores ctx.
+// pre-request bucket wait ignores ctx too: an exhausted bucket yields
+// errProbeRateLimited without a call, and a bucket another request holds is
+// waited on in a goroutine abandoned at the deadline, which then fails at
+// once on the cancelled ctx.
 func (d *Discord) fetchSelf(sess *discordgo.Session) (*discordgo.User, error) {
 	parent := d.stopCtx
 	if parent == nil {
 		parent = context.Background()
 	}
+	if usersBucketExhausted(sess) {
+		return nil, errProbeRateLimited
+	}
 	ctx, cancel := context.WithTimeout(parent, durationOr(d.probeTimeout, discordProbeTimeout))
 	defer cancel()
-	return sess.User("@me", discordgo.WithContext(ctx), discordgo.WithRetryOnRatelimit(false))
+	type result struct {
+		u   *discordgo.User
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		u, err := sess.User("@me", discordgo.WithContext(ctx), discordgo.WithRetryOnRatelimit(false))
+		done <- result{u, err}
+	}()
+	select {
+	case r := <-done:
+		return r.u, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// usersBucketExhausted reports whether Session.User (bucket EndpointUsers)
+// would sleep before sending. A bucket held by a request in flight is not
+// read, since that request updates it under the lock.
+func usersBucketExhausted(sess *discordgo.Session) bool {
+	rl := sess.Ratelimiter
+	if rl == nil {
+		return false
+	}
+	b := rl.GetBucket(discordgo.EndpointUsers)
+	if !b.TryLock() {
+		return false
+	}
+	defer b.Unlock()
+	return rl.GetWaitTime(b, 1) > 0
 }
 
 func (d *Discord) Name() string { return "discord" }
@@ -357,8 +398,8 @@ func (d *Discord) probeOnce(sess *discordgo.Session) bool {
 	}
 	if code := restStatus(err); code == http.StatusUnauthorized || code == http.StatusForbidden {
 		if d.connState.FailIf(platform.ConnDisconnected, platform.ConnFailed,
-			fmt.Errorf("discord rejected the bot token (HTTP %d): update platforms.discord.bot_token and restart", code)) {
-			slog.Error("discord rejected the bot token while the gateway is down; update platforms.discord.bot_token and restart",
+			fmt.Errorf("discord rejected the bot token (HTTP %d): update platforms.discord.bot_token; restart unless it reconnects by itself", code)) {
+			slog.Error("discord rejected the bot token while the gateway is down; update platforms.discord.bot_token; restart unless it reconnects by itself",
 				"status", code)
 		}
 		return true

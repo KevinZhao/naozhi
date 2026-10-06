@@ -198,6 +198,51 @@ func (d *doctor) checkExpvar() {
 	}
 }
 
+// checkMetrics probes GET /metrics, which only exists with
+// server.metrics_enabled; 404 therefore means "not enabled", not a fault.
+func (d *doctor) checkMetrics() {
+	if d.token == "" {
+		d.add("metrics", "warn", "no token; /metrics reachability not verified")
+		return
+	}
+	url := d.addr + "/metrics"
+	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		d.add("metrics", "fail", "request build: "+err.Error())
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+d.token)
+	resp, err := d.httpClient().Do(req)
+	if err != nil {
+		d.add("metrics", "fail", "request failed: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+		if readErr != nil {
+			d.add("metrics", "fail", "read body failed: "+readErr.Error())
+			return
+		}
+		if !strings.Contains(string(body), "# TYPE naozhi_session_create_total counter") {
+			d.add("metrics", "fail", "reachable but not Prometheus text with naozhi_* counters — routing wrong?")
+			return
+		}
+		d.add("metrics", "pass", "reachable at "+url)
+	case http.StatusNotFound:
+		d.add("metrics", "pass", "not enabled (server.metrics_enabled is off)")
+	case http.StatusForbidden:
+		d.add("metrics", "warn", "403 — server.dashboard_token is not configured on the server")
+	case http.StatusUnauthorized:
+		d.add("metrics", "warn", "token rejected (401); check NAOZHI_DASHBOARD_TOKEN")
+	default:
+		d.add("metrics", "warn", fmt.Sprintf("unexpected status %d", resp.StatusCode))
+	}
+}
+
 func (d *doctor) checkStateDir() {
 	home, err := os.UserHomeDir()
 	if err != nil {

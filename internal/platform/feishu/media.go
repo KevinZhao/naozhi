@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -11,12 +12,17 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
-// media.go — images and audio: sending an image, downloading an inbound
-// resource, sniffing audio magic bytes, and uploading. Extracted from feishu.go
-// (J10 of #2548).
+// media.go — images, audio and files: sending an image, downloading an
+// inbound resource, sniffing audio magic bytes, and uploading. Extracted from
+// feishu.go (J10 of #2548).
+
+// errResourceTooLarge is wrapped by downloadResource when the body exceeds
+// its byte cap, so callers can tell "too large" from "download failed".
+var errResourceTooLarge = errors.New("payload exceeds the download limit")
 
 func (f *Feishu) sendImage(ctx context.Context, chatID, threadID string, img platform.Image) (string, error) {
 	imageKey, err := f.uploadImage(ctx, img.Data, img.MimeType)
@@ -49,7 +55,15 @@ func (f *Feishu) DownloadAudio(ctx context.Context, messageID, fileKey string) (
 	return f.downloadResource(ctx, messageID, fileKey, "audio", maxAudioDownloadBytes, "audio/ogg")
 }
 
-// downloadResource downloads a message resource (image/audio) from the Feishu API.
+// DownloadFile downloads a file message's attachment, capped at
+// limits.MaxFileAttachmentBytes. The bytes are not sniffed here: dispatch
+// classifies them (attachment.ClassifyFile).
+func (f *Feishu) DownloadFile(ctx context.Context, messageID, fileKey string) ([]byte, error) {
+	data, _, err := f.downloadResource(ctx, messageID, fileKey, "file", limits.MaxFileAttachmentBytes, "application/octet-stream")
+	return data, err
+}
+
+// downloadResource downloads a message resource (image/audio/file) from the Feishu API.
 func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resType string, maxBytes int64, defaultMIME string) ([]byte, string, error) {
 	// math.MaxInt64 would overflow maxBytes+1 and degrade LimitReader to 0 bytes.
 	if maxBytes <= 0 || maxBytes >= (1<<62) {
@@ -67,7 +81,12 @@ func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resTy
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := feishuHTTPClient.Do(req)
+	// Files get their own time budget, sized for their larger byte cap.
+	client := feishuHTTPClient
+	if resType == "file" {
+		client = f.fileHTTP
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, "", fmt.Errorf("download %s: %w", resType, err)
 	}
@@ -86,7 +105,7 @@ func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resTy
 		return nil, "", fmt.Errorf("read %s body: %w", resType, err)
 	}
 	if int64(len(data)) > maxBytes {
-		return nil, "", fmt.Errorf("download %s: payload exceeds %d-byte limit", resType, maxBytes)
+		return nil, "", fmt.Errorf("download %s: %w (%d bytes)", resType, errResourceTooLarge, maxBytes)
 	}
 
 	contentType := resp.Header.Get("Content-Type")

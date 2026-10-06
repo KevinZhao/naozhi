@@ -24,6 +24,10 @@ const (
 	maxImageDownloadBytes = 10 * 1024 * 1024
 	maxAudioDownloadBytes = 20 * 1024 * 1024
 
+	// fileDownloadTimeout bounds a whole file download, body included: a
+	// limits.MaxFileAttachmentBytes file needs only ~190 KB/s to finish.
+	fileDownloadTimeout = 3 * time.Minute
+
 	// tokenTTLBuffer (seconds) is subtracted from Feishu's reported token
 	// expiry so a cached token is never used at its boundary (skew, latency).
 	tokenTTLBuffer = 60
@@ -76,6 +80,16 @@ var feishuHTTPClient = &http.Client{
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
+}
+
+// feishuFileDownloadClient shares feishuHTTPClient's connection pool and
+// redirect policy; only the time budget differs, because the shared 10s
+// Client.Timeout also covers the body read and would fail any file slower
+// than ~3.4 MB/s long before the byte cap.
+var feishuFileDownloadClient = &http.Client{
+	Timeout:       fileDownloadTimeout,
+	Transport:     feishuHTTPClient.Transport,
+	CheckRedirect: feishuHTTPClient.CheckRedirect,
 }
 
 // APIError is the typed error returned by Feishu Open API calls; callers use
@@ -152,8 +166,9 @@ type Config struct {
 // Feishu implements the Platform and RunnablePlatform interfaces.
 type Feishu struct {
 	cfg         Config
-	mode        string // resolved connection mode
-	baseURL     string // API base URL (overridable for testing)
+	mode        string       // resolved connection mode
+	baseURL     string       // API base URL (overridable for testing)
+	fileHTTP    *http.Client // file downloads (overridable for testing)
 	accessToken string
 	tokenExpiry time.Time
 	tokenMu     sync.RWMutex
@@ -239,7 +254,7 @@ func New(cfg Config, transcriber transcribe.Service) *Feishu {
 		mode = "websocket"
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	f := &Feishu{cfg: cfg, mode: mode, baseURL: "https://open.feishu.cn", transcriber: transcriber, dispatch: platform.BoundedDispatch{Name: "feishu"}, stopCtx: ctx, stopCancel: cancel}
+	f := &Feishu{cfg: cfg, mode: mode, baseURL: "https://open.feishu.cn", fileHTTP: feishuFileDownloadClient, transcriber: transcriber, dispatch: platform.BoundedDispatch{Name: "feishu"}, stopCtx: ctx, stopCancel: cancel}
 	f.cleanupWg.Add(1)
 	go func() {
 		defer f.cleanupWg.Done()

@@ -348,9 +348,9 @@ func TestParseSDKEvent_UnsupportedType(t *testing.T) {
 	event := &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Message: &larkim.EventMessage{
-				MessageType: strPtr("file"),
+				MessageType: strPtr("sticker"),
 				ChatId:      strPtr("oc_chat1"),
-				Content:     strPtr(`{}`),
+				Content:     strPtr(`{"file_key":"file_v3_abc"}`),
 			},
 		},
 	}

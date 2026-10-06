@@ -101,8 +101,8 @@ cmd/naozhi/main.go
   -> i18n         Locale 解析与消息渲染
   -> metrics      进程级计数器（expvar）
   -> runtelemetry 跨子系统 run 生命周期事件类型；Tee 把两个 Broadcaster 并列（Hub + webhook）
-  -> webhook      出站 webhook 发送器（每端点一 goroutine + 有界队列、HMAC 签名、退避重试、Deliver 永不阻塞），server 经 webhookBroadcaster 挂到 runtelemetry 上；叶子
-  -> promexport   expvar → Prometheus 文本格式（naozhi_* 前缀；_total 为 counter，其余 gauge；Map 按 key 打标签），server 的 GET /metrics 用；叶子
+  -> webhook      出站 webhook 发送器（每端点一 goroutine + 有界队列、HMAC 签名、退避重试、Deliver 永不阻塞），server 经 webhookBroadcaster 挂到 runtelemetry 上；只依赖 promexport
+  -> promexport   expvar → Prometheus 文本格式（naozhi_* 前缀；_total 为 counter，其余 gauge；Map 按注册的 label 名打标签，未注册退回 `key`；cron 延迟桶导出为 histogram），server 的 GET /metrics 用；叶子
   -> runtelemetry 跨子系统 run 生命周期事件类型
   -> costledger   统一 cost 账本叶子包（按天 JSONL append-only + rollup + 累计差分 + 按模型学习 CLI 单价）
   -> budget       每日 USD 预算：订阅 cost 账本的内存日索引（IM 会话 / 项目 planner / cron job / 全局）+ Gate 判定；只依赖 costledger 与 sessionkey
