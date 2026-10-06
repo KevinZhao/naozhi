@@ -542,8 +542,10 @@ jobs:
               const clean = log.replace(/\u001b\[[0-9;]*m/g, '');
               // Keyed by the top-level test: a failing subtest fails its parent
               // too and Go prints a FAIL line for each, so keying by the
-              // full path would file one issue per level for one flake.
-              for (const m of clean.matchAll(/--- FAIL: (Test\w+)(?:\/([^\s(]+))?/g)) {
+              // full path would file one issue per level for one flake. Go
+              // turns spaces in subtest names into `_`, so the name runs to
+              // the space before the duration.
+              for (const m of clean.matchAll(/--- FAIL: (Test\w+)(?:\/(\S+))?/g)) {
                 add(m[1], m[2]);
               }
               // The e2e job produces no `--- FAIL:` lines: Playwright's list
@@ -556,6 +558,12 @@ jobs:
                 // normalises to a second name for the same test.
                 add(m[1] + ' › ' + m[2].replace(/\s*\(\d+(?:\.\d+)?\s*m?s\)"?\s*$/, '').trim());
               }
+            }
+            // issueBody is the issue (or comment) text for one failing test.
+            function issueBody(sha, jobName, runURL, subtests) {
+              let body = `master red on ${sha.slice(0, 8)} — job \`${jobName}\`, [run](${runURL}).`;
+              if (subtests.size > 0) body += `\n\nFailed subtests: ${[...subtests].map(s => `\`${s}\``).join(', ')}.`;
+              return body;
             }
             const failures = new Map();
             for (const job of jobsResp.jobs) {
@@ -588,8 +596,7 @@ jobs:
             });
             for (const [test, { job: jobName, subtests }] of failures) {
               const title = `[flaky] ${test}`;
-              let body = `master red on ${context.sha.slice(0, 8)} — job \`${jobName}\`, [run](${runURL}).`;
-              if (subtests.size > 0) body += `\n\nFailed subtests: ${[...subtests].map(s => `\`${s}\``).join(', ')}.`;
+              const body = issueBody(context.sha, jobName, runURL, subtests);
               const existing = open.find(i => i.title === title);
               if (existing) {
                 await github.rest.issues.createComment({

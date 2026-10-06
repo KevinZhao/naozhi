@@ -5,9 +5,9 @@
 // matching fails open — the job succeeds and files nothing, which reads
 // exactly like a green week.
 //
-// This cuts the job's collectFailures function out of the workflow (so what
-// is checked is what ships) and runs it over log lines copied verbatim from
-// real runs. It also checks that flaky-report waits on every job that runs
+// This cuts the job's collectFailures and issueBody functions out of the
+// workflow (so what is checked is what ships) and runs them over log lines
+// copied verbatim from real runs. It also checks that flaky-report waits on every job that runs
 // tests: a job missing from its needs files nothing when it alone is red, and
 // otherwise is reported only if it happened to finish first. Last, it checks
 // Playwright's retries and trace settings (config, projects, CI flags and
@@ -42,6 +42,7 @@ function workflowFunction(name) {
   return new Function(`${lines.slice(start, end + 1).join('\n')}\nreturn ${name};`)();
 }
 const collectFailures = workflowFunction('collectFailures');
+const issueBody = workflowFunction('issueBody');
 
 // failures() runs one job log through the reporter's own parser: each key is
 // one issue title, so a name that appears twice must come back once.
@@ -79,9 +80,10 @@ const cases = [
     what: 'nested and punctuated subtest names are kept whole',
     log: '--- FAIL: TestParse (0.00s)\n'
       + '    --- FAIL: TestParse/group/#01 (0.00s)\n'
-      + '    --- FAIL: TestParse/key=a.b-c (0.00s)\n',
+      + '    --- FAIL: TestParse/key=a.b-c (0.00s)\n'
+      + '    --- FAIL: TestParse/f(x) (0.00s)\n',
     want: ['TestParse'],
-    subtests: { TestParse: ['group/#01', 'key=a.b-c'] },
+    subtests: { TestParse: ['group/#01', 'key=a.b-c', 'f(x)'] },
   },
   {
     what: 'a test whose name extends another is a separate issue',
@@ -133,6 +135,23 @@ const cases = [
     log: yml.split('\n').filter(l => /^ *echo "(--- FAIL|  ✘)/.test(l))
       .map(l => l.replace(/^ *echo "/, '').replace(/"$/, '') + '\n').join(''),
     want: ['TestFlakyProbeSynthetic', 'probe_synthetic.test.js › flaky probe synthetic spec'],
+  },
+];
+
+// The issue body names the run and, for a Go test, the subtests that failed:
+// with the title keyed by the top-level test, the body is the only place the
+// failing subtest shows.
+const RUN = 'https://github.com/o/r/actions/runs/1';
+const bodyCases = [
+  {
+    what: 'a test with no failed subtests gets the one-line body',
+    args: ['0123456789abcdef', 'test (2)', RUN, new Set()],
+    want: `master red on 01234567 — job \`test (2)\`, [run](${RUN}).`,
+  },
+  {
+    what: 'the failed subtests are listed under the run line',
+    args: ['0123456789abcdef', 'test (2)', RUN, new Set(['no_process', 'f(x)'])],
+    want: `master red on 01234567 — job \`test (2)\`, [run](${RUN}).\n\nFailed subtests: \`no_process\`, \`f(x)\`.`,
   },
 ];
 
@@ -354,8 +373,9 @@ if (!jobs(yml).has('flaky-report')) {
   console.error('check-flaky-report-parse: no flaky-report job in ci.yml');
   process.exit(1);
 }
-// The rest of the github-script (log fetch, issue titles and bodies) runs only
-// on a master red, so at least make it compile and hand logs to collectFailures.
+// The rest of the github-script (log fetch, issue lookup and filing) runs only
+// on a master red, so at least make it compile and call the two functions
+// checked above.
 {
   const lines = jobs(yml).get('flaky-report').split('\n');
   const at = lines.findIndex(l => /^ *script: \|\s*$/.test(l));
@@ -370,6 +390,7 @@ if (!jobs(yml).has('flaky-report')) {
     const AsyncFunction = (async () => {}).constructor;
     new AsyncFunction('github', 'context', 'core', body.join('\n'));
     if (!body.some(l => /^\s*collectFailures\(/.test(l))) throw new Error('nothing calls collectFailures');
+    if (!body.some(l => /=\s*issueBody\(/.test(l))) throw new Error('nothing calls issueBody');
   } catch (e) {
     bad++;
     console.error(`check-flaky-report-parse: flaky-report's github-script: ${e.message}`);
@@ -397,8 +418,15 @@ for (const c of cases) {
     console.error(`check-flaky-report-parse: ${c.what}\n  want ${JSON.stringify(c.want)} subtests ${JSON.stringify(wantSubtests)}\n  got  ${JSON.stringify(got)} subtests ${JSON.stringify(gotSubtests)}`);
   }
 }
+for (const c of bodyCases) {
+  const got = issueBody(...c.args);
+  if (got !== c.want) {
+    bad++;
+    console.error(`check-flaky-report-parse: ${c.what}\n  want ${JSON.stringify(c.want)}\n  got  ${JSON.stringify(got)}`);
+  }
+}
 if (bad > 0) {
   console.error(`check-flaky-report-parse: ${bad} check(s) failed — flaky-report would file the wrong issues, or none`);
   process.exit(1);
 }
-console.log(`check-flaky-report-parse: OK (${cases.length} log cases, ${needsCases.length} needs cases, ${playwrightCases.length} playwright cases, ${overrideCases.length} override cases, ${specs.length} specs, ${testJobs.length} test jobs: ${testJobs.join(', ')})`);
+console.log(`check-flaky-report-parse: OK (${cases.length} log cases, ${bodyCases.length} body cases, ${needsCases.length} needs cases, ${playwrightCases.length} playwright cases, ${overrideCases.length} override cases, ${specs.length} specs, ${testJobs.length} test jobs: ${testJobs.join(', ')})`);
