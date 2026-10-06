@@ -420,6 +420,12 @@ jobs:
       - name: Test the markdown renderer
         run: node --test scripts/render-md.test.mjs
 
+      # renderMd's list, GFM, link, fence and file-ref cases are string in,
+      # string out, so they run here rather than in a Chromium page; the
+      # __/~~ complexity ceiling is among them.
+      - name: Test the markdown renderer's cases
+        run: node --test scripts/render-md-cases.test.mjs
+
       # file_ref_parse, nz_util, cron_format and session_ident are pure leaves:
       # their formatters, escapers and key shapes are string-in, string-out, and
       # the run-state / error-class / death_reason tables are read against the
