@@ -150,7 +150,7 @@ func buildDiscoveryHandlers(
 		ClaudeDir:     claudeDir,
 		Router:        routerTakeoverAdapter{r: opts.Router},
 		AllowedRoot:   opts.AllowedRoot,
-		DefaultAgent:  opts.Agents["general"],
+		DefaultAgent:  opts.Routing.Agents["general"],
 		Broadcast:     broadcast,
 		ValidateWS:    validateWorkspace,
 		VerifyProcID:  verifyProcIdentity,

@@ -739,19 +739,27 @@ func TestLoadHistoryChainBeforeCtx_EmptyInputs(t *testing.T) {
 func BenchmarkLoadHistoryTail_vs_LoadHistory(b *testing.B) {
 	claudeDir := b.TempDir()
 	cwd := "/tmp/bench"
-	sessionID := "bench-session"
-	dirName := claudefs.ProjectSlug(cwd)
+	sessionID := "00000000-0000-4000-8000-00000000b001"
+	projDir := filepath.Join(claudeDir, "projects", claudefs.ProjectSlug(cwd))
 
 	// 10,000 assistant lines; small but emulates realistic large sessions.
-	lines := make([]string, 0, 10000)
-	for i := 0; i < 10000; i++ {
-		lines = append(lines, assistantJSONLLine(fmt.Sprintf("line %d reasonably long text content for realism", i)))
+	const n = 10000
+	var sb strings.Builder
+	for i := range n {
+		sb.WriteString(assistantJSONLLine(fmt.Sprintf("line %d reasonably long text content for realism", i)))
+		sb.WriteByte('\n')
 	}
-	// Reuse the helper via a minimal path dance; writeJSONL isn't directly
-	// accessible without test-only helpers but we can synthesize one here.
-	_ = filepath.Join(claudeDir, "projects", dirName, sessionID+".jsonl")
-	bt := &testing.T{}
-	makeSessionJSONL(bt, claudeDir, dirName, sessionID, lines)
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		b.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projDir, sessionID+".jsonl"), []byte(sb.String()), 0o644); err != nil {
+		b.Fatal(err)
+	}
+	// A rejected session ID or a missing file returns in nanoseconds, which
+	// would time that guard instead of the transcript scan.
+	if got, err := LoadHistory(claudeDir, sessionID, cwd); err != nil || len(got) != n {
+		b.Fatalf("LoadHistory = %d entries, err %v; want %d", len(got), err, n)
+	}
 
 	b.Run("LoadHistory_full", func(b *testing.B) {
 		for range b.N {

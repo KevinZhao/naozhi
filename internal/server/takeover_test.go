@@ -211,7 +211,7 @@ func TestDashboardTakeover_InvalidAgentModelLeavesCLIAlive(t *testing.T) {
 	t.Cleanup(router.Shutdown)
 	s := NewWithOptions(ServerOptions{
 		Addr: ":0", Router: router, Backend: "claude",
-		Agents: map[string]session.AgentOpts{"general": {Model: "--bad"}},
+		Routing: RoutingOptions{Agents: map[string]session.AgentOpts{"general": {Model: "--bad"}}},
 	})
 	s.discoveryH.SetClaudeDirForTest(t.TempDir())
 	s.discoveryCache.sessions = []discovery.DiscoveredSession{{PID: cmd.Process.Pid, SessionID: sid}}
