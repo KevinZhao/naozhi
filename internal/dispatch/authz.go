@@ -100,21 +100,29 @@ func denyReplyText(p *imauth.Policy, userID string) string {
 
 // denyThrottle remembers when each refused sender was last answered.
 type denyThrottle struct {
+	// window is the quiet time between two answers to one key; 0 means
+	// denyReplyWindow.
+	window time.Duration
+
 	mu   sync.Mutex
 	last map[string]time.Time
 }
 
 // allow reports whether key may be answered at now, recording it if so.
 func (t *denyThrottle) allow(key string, now time.Time) bool {
+	window := t.window
+	if window == 0 {
+		window = denyReplyWindow
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	at, seen := t.last[key]
-	if seen && now.Sub(at) < denyReplyWindow {
+	if seen && now.Sub(at) < window {
 		return false
 	}
 	if !seen && len(t.last) >= denyReplyCap {
 		for k, at := range t.last {
-			if now.Sub(at) >= denyReplyWindow {
+			if now.Sub(at) >= window {
 				delete(t.last, k)
 			}
 		}

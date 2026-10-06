@@ -402,6 +402,12 @@ jobs:
       - name: Test the cron list merge
         run: node --test scripts/cron-state.test.mjs
 
+      # render_md.js is the dashboard's XSS surface. A hostile corpus and a
+      # seeded fuzz loop check its output against a tag/attribute allowlist,
+      # so a placeholder restored inside an attribute fails here.
+      - name: Test the markdown renderer
+        run: node --test scripts/render-md.test.mjs
+
       # shell.js (S20f, #3026) is the upcall table; registerShell refusing a
       # missing or undeclared slot is what makes a forgotten registration
       # fail at boot instead of at the first click.

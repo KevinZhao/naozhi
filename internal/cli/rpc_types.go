@@ -34,6 +34,27 @@ type RPCMessage struct {
 type RPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+	// Data is the optional error detail. kiro always sends Message "Internal
+	// error" and puts the real cause ("The model ... is temporarily
+	// unavailable") in a string Data.
+	Data json.RawMessage `json:"data,omitempty"`
+}
+
+// rpcErrorTextMax caps a sanitized RPCError.Text: room for kiro's Data detail,
+// which runs ~200 bytes with its request_id.
+const rpcErrorTextMax = 512
+
+// Text is Message followed by Data when Data is a non-empty JSON string — the
+// wording to surface. Structured Data is left out: its shape is per-backend.
+func (e *RPCError) Text() string {
+	var detail string
+	if len(e.Data) == 0 || e.Data[0] != '"' || json.Unmarshal(e.Data, &detail) != nil || detail == "" {
+		return e.Message
+	}
+	if e.Message == "" {
+		return detail
+	}
+	return e.Message + ": " + detail
 }
 
 // hasID reports whether the message carries an id field. Only an explicit
