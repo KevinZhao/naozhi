@@ -13,6 +13,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cli/procmeter"
+	"github.com/naozhi/naozhi/internal/cli/workflow"
 	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -119,6 +120,11 @@ type Process struct {
 	// onCodeChange receives each valid system/code_change_published frame so
 	// the session can record the PR. Set via SetOnCodeChange at any time.
 	onCodeChange atomic.Pointer[func(clievent.CodeChange)]
+	// workflows tracks the CLI's background workflows from its task frames
+	// (process_workflow.go); onWorkflowChange is woken after each change.
+	// workflows is nil only in &Process{} test fixtures.
+	workflows        *workflow.Tracker
+	onWorkflowChange atomic.Pointer[func()]
 
 	// readEventBuf is a reusable backing array for ReadEventInto (#1676), owned
 	// exclusively by handleShimStdout on the readLoop goroutine and consumed within
@@ -293,6 +299,7 @@ func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
 		eventLog:        ring.NewEventLog(0),
 		startedAt:       time.Now(),
 	}
+	p.workflows = workflow.New(p.workflowChanged)
 	p.link.init(conn, reader, writer, cliPID, shimPID)
 	return p
 }
