@@ -16,6 +16,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/imauth"
 	"github.com/naozhi/naozhi/internal/server"
+	"github.com/naozhi/naozhi/internal/session"
 )
 
 func writeConfigFile(t *testing.T, path, body string) {
@@ -40,7 +41,7 @@ func newReloaderFixture(t *testing.T) (*configReloader, string, *[]server.HotCon
 	fp := server.NewConfigFingerprint(cfg.Fingerprint.SHA256, cfg.Fingerprint.LoadedAt)
 	r := newConfigReloader(path, cfg, level, fp)
 	var applied []server.HotConfig
-	r.bindApply(func(h server.HotConfig) { applied = append(applied, h) })
+	r.bindApply(func(h server.HotConfig) { applied = append(applied, h) }, nil)
 	return r, path, &applied, level
 }
 
@@ -157,20 +158,70 @@ func TestConfigReloader_ReportsOpenedPlatform(t *testing.T) {
 	}
 	r := newConfigReloader(path, cfg, nil, nil)
 	var applied []server.HotConfig
-	r.bindApply(func(h server.HotConfig) { applied = append(applied, h) })
+	r.bindApply(func(h server.HotConfig) { applied = append(applied, h) }, nil)
 	writeConfigFile(t, path, slack+"im_acess:\n  platforms:\n    slack:\n      allowed_users: [U1]\n")
 	res, err := r.Reload(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(res.OpenedPlatforms, []string{"slack"}) {
-		t.Fatalf("opened = %v, want [slack]", res.OpenedPlatforms)
+	if !reflect.DeepEqual(res.OpenedPlatforms, []string{"slack"}) || !reflect.DeepEqual(res.OpenPlatforms, []string{"slack"}) {
+		t.Fatalf("opened = %v open = %v, want [slack] for both", res.OpenedPlatforms, res.OpenPlatforms)
 	}
 	if len(applied) != 1 {
 		t.Fatalf("apply calls = %d, want 1", len(applied))
 	}
 	if ok, _ := applied[0].Access.Decide("slack", "U2", imauth.Chat); !ok {
 		t.Fatal("applied policy still restricts slack; the reload must apply what the file says")
+	}
+	// A later reload of the same file opens nothing new, but still says the
+	// platform is open: SIGHUP may have been the reload that opened it.
+	if res, err = r.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(res.OpenedPlatforms) != 0 || !reflect.DeepEqual(res.OpenPlatforms, []string{"slack"}) {
+		t.Fatalf("second reload opened = %v open = %v, want none and [slack]", res.OpenedPlatforms, res.OpenPlatforms)
+	}
+}
+
+// A profile the dashboard created is in config.yaml and already live, so a
+// reload must not list access_profiles as pending (which would also freeze
+// config_sha256); editing that profile in the file afterwards still does.
+func TestConfigReloader_RuntimeCreatedProfileIsNotPending(t *testing.T) {
+	r, path, applied, _ := newReloaderFixture(t)
+	live := map[string]session.AccessProfile{}
+	r.bindApply(func(h server.HotConfig) { *applied = append(*applied, h) },
+		func() map[string]session.AccessProfile { return live })
+	created := map[string]config.AccessProfile{
+		"team":  {DisplayName: "Team", Env: map[string]string{}},
+		"vault": {ChipColor: "#d97757", DefaultModel: "sonnet", Env: map[string]string{"ANTHROPIC_AUTH_TOKEN_FILE": filepath.Join(t.TempDir(), "vault.token")}},
+	}
+	for _, id := range []string{"team", "vault"} {
+		ap := created[id]
+		if err := config.AppendAccessProfile(path, id, ap); err != nil {
+			t.Fatal(err)
+		}
+		live[id] = session.AccessProfile{DisplayName: ap.DisplayName, ChipColor: ap.ChipColor, DefaultModel: ap.DefaultModel, Env: ap.Env}
+	}
+	res, err := r.Reload(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.RestartRequired) != 0 {
+		t.Fatalf("restart_required = %v after creating profiles that are already live", res.RestartRequired)
+	}
+	if sha, _, pending := r.fp.Get(); sha != res.SHA256 || pending != nil {
+		t.Fatalf("fingerprint = %q pending %v, want %q", sha, pending, res.SHA256)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeConfigFile(t, path, strings.Replace(string(body), `"Team"`, `"Team B"`, 1))
+	if res, err = r.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(res.RestartRequired, []string{"access_profiles"}) {
+		t.Fatalf("restart_required = %v after editing a live profile, want [access_profiles]", res.RestartRequired)
 	}
 }
 

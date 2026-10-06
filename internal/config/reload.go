@@ -32,6 +32,9 @@ type ReloadResult struct {
 	// OpenedPlatforms are the running platforms the previous configuration
 	// restricted and this one serves to every sender.
 	OpenedPlatforms []string `json:"opened_platforms,omitempty"`
+	// OpenPlatforms are the running platforms this configuration serves to
+	// every sender, whether or not this reload opened them.
+	OpenPlatforms []string `json:"open_platforms,omitempty"`
 }
 
 // HotChanged lists the hot sections whose value differs between c and next.
@@ -56,6 +59,18 @@ func (c *Config) IMAccessOpened(prev, next *Config) []string {
 	var out []string
 	for _, p := range c.IMAccessPostures() {
 		if !prev.imAccessOpen(p.Platform) && next.imAccessOpen(p.Platform) {
+			out = append(out, p.Platform)
+		}
+	}
+	return out
+}
+
+// IMAccessOpen lists the platforms c configures that next serves to every
+// sender.
+func (c *Config) IMAccessOpen(next *Config) []string {
+	var out []string
+	for _, p := range c.IMAccessPostures() {
+		if next.imAccessOpen(p.Platform) {
 			out = append(out, p.Platform)
 		}
 	}

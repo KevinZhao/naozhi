@@ -26,7 +26,8 @@ var configReloadTotal = expvar.NewMap("naozhi_config_reload_total")
 const configReloadKey = "config-reload"
 
 // newConfigReloadLimiter allows one reload per 10s: a reload re-parses the
-// file and rebuilds the usage gates, and nothing legitimate needs it faster.
+// file and may swap the IM access policy and rebuild the rate-limit buckets,
+// and nothing legitimate needs it faster.
 func newConfigReloadLimiter() *ratelimit.Limiter {
 	return ratelimit.New(ratelimit.Config{Rate: rate.Every(10 * time.Second), Burst: 1, MaxKeys: 4, TTL: time.Hour})
 }

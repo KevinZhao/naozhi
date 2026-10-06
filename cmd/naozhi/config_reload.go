@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -100,5 +101,14 @@ func printReloadResult(out io.Writer, res config.ReloadResult) {
 	if len(res.OpenedPlatforms) > 0 {
 		fmt.Fprintf(out, "WARNING: now open to every sender (was restricted): %s; a misspelt im_access key reads as absent\n",
 			strings.Join(res.OpenedPlatforms, ", "))
+	}
+	var stillOpen []string
+	for _, name := range res.OpenPlatforms {
+		if !slices.Contains(res.OpenedPlatforms, name) {
+			stillOpen = append(stillOpen, name)
+		}
+	}
+	if len(stillOpen) > 0 {
+		fmt.Fprintf(out, "WARNING: open to every sender: %s (no im_access rule)\n", strings.Join(stillOpen, ", "))
 	}
 }

@@ -87,6 +87,7 @@ type configReloader struct {
     level    *slog.LevelVar     // setupLogging 改用 LevelVar
     fp       *server.ConfigFingerprint
     apply    func(server.HotConfig)   // = srv.ApplyHotConfig，srv 建好后绑定一次
+    liveProfiles func() map[string]session.AccessProfile // 与 apply 一起绑定
     mu       sync.Mutex
     last     *config.Config     // 上次成功应用的配置：applied 对它比
 }
@@ -104,10 +105,15 @@ err（旧配置不动）→ `applied = last.HotChanged(next)`、
 `opened` 是上一份配置限制、新文件对所有人开放的运行中平台。`config.Load` 忽略未知
 键，把 `im_access` 拼错（`im_acess:`）等于删掉整段：重载成功、平台悄悄放开。这种
 情况打 Error 日志，`ReloadResult.opened_platforms` 列出平台，`naozhi config reload`
-退出码 4。
+退出码 4。`open_platforms` 则列出新文件对所有人开放的全部运行中平台（不论是不是这次
+放开的），CLI 每次都打印：放开它的可能是一次只写日志的 SIGHUP。
 
 `restart_required` 对 **baseline** 比而不是对 `last` 比：进程实际在跑的是启动时
-的 cli/session 配置，第二次 reload 也必须继续报告这个差异，直到真正重启。
+的 cli/session 配置，第二次 reload 也必须继续报告这个差异，直到真正重启。唯一的
+例外是 dashboard 运行时新建的 access profile（`POST /api/access-profiles` 写入
+config.yaml 并注册进 live registry）：比较前把 registry 里 baseline 没有的 profile
+补进 baseline（`running()`），否则它会一直被报成 `access_profiles` 待重启并冻住指纹；
+之后在文件里改这个 profile 仍然报 `access_profiles`。
 
 `apply` 为什么是绑定而不是构造参数：server 需要 reload 函数（给 HTTP 端点），
 reload 又需要 server（`ApplyHotConfig`）。`server.New` 之前先建 reloader 把
@@ -153,7 +159,8 @@ reload 又需要 server（`ApplyHotConfig`）。`server.New` 之前先建 reload
   改 `cli.model` → restart_required=[cli]，第二次 reload 仍报 cli；写坏 YAML →
   err 且 `last` 不变、`apply` 未调用
 - cmd：两次重载重叠时读文件在锁内；只改 `log.level` 不重新应用限流；有
-  restart_required 时指纹不前进；拼错 `im_access` 报 opened；`signalLoop` 对 SIGHUP
+  restart_required 时指纹不前进；拼错 `im_access` 报 opened，再次重载仍报 open；
+  dashboard 新建的 profile 不算待重启、之后改它才算；`signalLoop` 对 SIGHUP
   只 reload；真实 SIGHUP 到达 reload；`setupLogging` 装的全局 logger 跟随 LevelVar
 - server：`ApplyHotConfig` 把新 policy / 限流交给 dispatcher（用 `/help` 前后被拒/
   放行/限流证明），未列出的段不动；`ConfigFingerprint` 并发读写 `-race`

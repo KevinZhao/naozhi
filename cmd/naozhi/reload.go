@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"maps"
 	"os"
 	"os/signal"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/server"
+	"github.com/naozhi/naozhi/internal/session"
 )
 
 // configReloader re-reads config.yaml on demand and applies the hot sections
@@ -22,8 +24,9 @@ import (
 type configReloader struct {
 	path string
 	// baseline is the configuration the process started with; every
-	// restart_required list is computed against it, so a difference the
-	// process cannot absorb keeps being reported until a real restart.
+	// restart_required list is computed against it (see running), so a
+	// difference the process cannot absorb keeps being reported until a
+	// real restart.
 	baseline *config.Config
 	level    *slog.LevelVar
 	fp       *server.ConfigFingerprint
@@ -32,6 +35,9 @@ type configReloader struct {
 	mu    sync.Mutex
 	last  *config.Config // last successfully applied configuration
 	apply func(server.HotConfig)
+	// liveProfiles reads the access-profile registry, which the dashboard
+	// grows at runtime; nil compares access_profiles against baseline alone.
+	liveProfiles func() map[string]session.AccessProfile
 }
 
 // errReloadNotBound is returned when Reload runs before bindApply.
@@ -42,11 +48,55 @@ func newConfigReloader(path string, cfg *config.Config, level *slog.LevelVar, fp
 }
 
 // bindApply installs the function that applies a HotConfig to the running
-// server.
-func (r *configReloader) bindApply(apply func(server.HotConfig)) {
+// server and the reader of the live access-profile registry.
+func (r *configReloader) bindApply(apply func(server.HotConfig), liveProfiles func() map[string]session.AccessProfile) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.apply = apply
+	r.liveProfiles = liveProfiles
+}
+
+// running is baseline plus the access profiles created at runtime (the
+// dashboard writes them to config.yaml and registers them live), so a reload
+// does not list as pending a profile that is already in force.
+func (r *configReloader) running() *config.Config {
+	if r.liveProfiles == nil {
+		return r.baseline
+	}
+	var profiles map[string]config.AccessProfile
+	for id, ap := range r.liveProfiles() {
+		if _, ok := r.baseline.AccessProfiles[id]; ok {
+			continue
+		}
+		if profiles == nil {
+			profiles = maps.Clone(r.baseline.AccessProfiles)
+			if profiles == nil {
+				profiles = map[string]config.AccessProfile{}
+			}
+		}
+		profiles[id] = configAccessProfile(ap)
+	}
+	if profiles == nil {
+		return r.baseline
+	}
+	run := *r.baseline
+	run.AccessProfiles = profiles
+	return &run
+}
+
+// configAccessProfile is the config form a runtime-created profile loads back
+// as: AppendAccessProfile writes no env block for an empty Env.
+func configAccessProfile(ap session.AccessProfile) config.AccessProfile {
+	out := config.AccessProfile{
+		DisplayName:    ap.DisplayName,
+		ChipColor:      ap.ChipColor,
+		DefaultModel:   ap.DefaultModel,
+		DefaultBackend: ap.DefaultBackend,
+	}
+	if len(ap.Env) > 0 {
+		out.Env = ap.Env
+	}
+	return out
 }
 
 // hotConfigOf derives the runtime values of the hot sections; sections names
@@ -78,8 +128,9 @@ func (r *configReloader) Reload(ctx context.Context) (config.ReloadResult, error
 		SHA256:          next.Fingerprint.SHA256,
 		LoadedAt:        next.Fingerprint.LoadedAt,
 		Applied:         r.last.HotChanged(next),
-		RestartRequired: r.baseline.RestartRequired(next),
+		RestartRequired: r.running().RestartRequired(next),
 		OpenedPlatforms: r.baseline.IMAccessOpened(r.last, next),
+		OpenPlatforms:   r.baseline.IMAccessOpen(next),
 	}
 	if r.level != nil {
 		r.level.Set(resolveLogLevel(next.Log.Level))
@@ -95,9 +146,9 @@ func (r *configReloader) Reload(ctx context.Context) (config.ReloadResult, error
 		slog.Error("im access: reload OPENED a restricted platform to every sender; check the im_access key spelling",
 			"platform", name)
 	}
-	for _, p := range next.IMAccessPostures() {
-		if p.Open && !slices.Contains(res.OpenedPlatforms, p.Platform) {
-			slog.Warn("im access: platform open to every sender after reload", "platform", p.Platform)
+	for _, name := range res.OpenPlatforms {
+		if !slices.Contains(res.OpenedPlatforms, name) {
+			slog.Warn("im access: platform open to every sender after reload", "platform", name)
 		}
 	}
 	return res, nil

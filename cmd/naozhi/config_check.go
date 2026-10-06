@@ -44,7 +44,7 @@ func runConfig(args []string) {
 
 const configUsage = "usage: naozhi config check [-config config.yaml] [-effective] [-json]\n" +
 	"       naozhi config migrate [-config config.yaml] [-write]\n" +
-	"       naozhi config reload [-addr URL] [-token T] [-json]"
+	"       naozhi config reload [-addr URL] [-token T] [-timeout D] [-json]"
 
 // backendDiag is one gate decision attributed to the backend whose spawn
 // inputs produced it ("" for config-load diags with no backend context).

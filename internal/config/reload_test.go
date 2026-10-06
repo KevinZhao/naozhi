@@ -85,24 +85,29 @@ func cutDot(s string) (string, string, bool) {
 // IMAccessOpened names a running platform only when the previous file
 // restricted it and the next one serves every sender: a misspelt im_access
 // key decodes as absent, so the reload silently opens the platform.
+// IMAccessOpen names every running platform the next file serves to every
+// sender, opened by this reload or not.
 func TestIMAccessOpened(t *testing.T) {
 	t.Parallel()
 	slackRule := "im_access:\n  platforms:\n    slack:\n      allowed_users: [U1]\n"
 	cases := []struct {
 		name, prev, next string
-		want             []string
+		want, open       []string
 	}{
-		{"misspelt key opens", slackRule, "im_acess:\n  platforms:\n    slack:\n      allowed_users: [U1]\n", []string{"slack"}},
-		{"default_deny dropped", "im_access:\n  default_deny: true\n", "", []string{"slack"}},
-		{"rule kept", slackRule, slackRule, nil},
-		{"rule swapped for default_deny", slackRule, "im_access:\n  default_deny: true\n", nil},
-		{"already open", "", "", nil},
-		{"rule for another platform only", slackRule, "im_access:\n  platforms:\n    feishu:\n      allowed_users: [ou_1]\n", []string{"slack"}},
+		{"misspelt key opens", slackRule, "im_acess:\n  platforms:\n    slack:\n      allowed_users: [U1]\n", []string{"slack"}, []string{"slack"}},
+		{"default_deny dropped", "im_access:\n  default_deny: true\n", "", []string{"slack"}, []string{"slack"}},
+		{"rule kept", slackRule, slackRule, nil, nil},
+		{"rule swapped for default_deny", slackRule, "im_access:\n  default_deny: true\n", nil, nil},
+		{"already open", "", "", nil, []string{"slack"}},
+		{"rule for another platform only", slackRule, "im_access:\n  platforms:\n    feishu:\n      allowed_users: [ou_1]\n", []string{"slack"}, []string{"slack"}},
 	}
 	running := loadBody(t, imAccessSlack)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			prev, next := loadBody(t, imAccessSlack+tc.prev), loadBody(t, imAccessSlack+tc.next)
+			if got := running.IMAccessOpen(next); !reflect.DeepEqual(got, tc.open) {
+				t.Errorf("IMAccessOpen = %v, want %v", got, tc.open)
+			}
 			if got := running.IMAccessOpened(prev, next); !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("IMAccessOpened = %v, want %v", got, tc.want)
 			}

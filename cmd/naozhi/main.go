@@ -568,7 +568,7 @@ func main() {
 		})
 	}
 
-	reloader.bindApply(srv.ApplyHotConfig)
+	reloader.bindApply(srv.ApplyHotConfig, router.Backends().AccessProfiles)
 
 	watchSignals(func() {
 		if _, err := reloader.Reload(ctx); err != nil {

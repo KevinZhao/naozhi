@@ -668,12 +668,13 @@ kill -HUP $(pidof naozhi)
 - 可热重载：`im_access`、`im_rate_limit`、`log.level`。其它段的改动会在结果里列为
   `restart_required`，直到真正重启前每次 reload 都会继续报告。`reverse_nodes`、
   `agents` / `agent_commands`、`access_profiles`、`cron.notify_default` 按设计只在
-  重启时生效。
+  重启时生效；dashboard 里新建的 access profile 已经即时生效，不算待重启。
 - 新文件校验失败时进程完全不变，`naozhi config reload` 退出码 1 并打印校验错误；
   有 `restart_required` 时退出码 3，方便脚本判断。
 - 重载让某个原本有名单的平台变成对所有人开放时（多半是 `im_access` 键名拼错，未知
   键会被忽略），日志打 Error，`naozhi config reload` 打印 `WARNING` 并以退出码 4
-  结束（优先于 3）。
+  结束（优先于 3）。之后每次 reload 只要还有平台对所有人开放，都会再打印一行
+  `WARNING: open to every sender`（退出码不受影响），哪怕放开它的是一次 SIGHUP。
 - 没有 `restart_required` 时 `/health.config_sha256` / `config_loaded_at` 随重载
   更新，doctor 的 config-drift 检查随之变绿；有的话指纹保持不变，`/health` 的
   `config_restart_required` 列出这些段，doctor 报 `restart required for: ...`。
