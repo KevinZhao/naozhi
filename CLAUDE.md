@@ -110,7 +110,7 @@ cmd/naozhi/main.go
   -> wsproto      浏览器 WS 协议单一真相源（type 常量 + per-type frame + schema）
   -> jsonschema   Go 类型 → 契约检查读取的 JSON schema（WS frame 与 REST 响应共用，嵌套结构体展开进 defs）
   -> replyfmt     回复成形规则（单条截断标记 / [i/N] 页码 / 分页宽度预留 / 代码块感知的分段 SplitText），dispatch 与 cron 共用
-  -> contractjs   生成 static/contract.js 的构建器（WS/API/ENUMS 三段；ENUMS 含 death_reason、session state 与 EventEntry kind 词表）
+  -> contractjs   生成 static/contract.js 的构建器（WS/API/ENUMS 三段；ENUMS 含 death_reason、session state 与 EventEntry kind 词表）与 static/wire.d.ts（由 WS/REST 两份 schema 生成的全局类型，供 tsc --checkJs）
   -> datadir      store 文件所在目录的布局策略（Layout 值类型，只派生 sibling）
 
   叶子工具
@@ -248,6 +248,8 @@ The dashboard is an embedded PWA served at `/dashboard`: `internal/server/static
 - Remote node events are relayed transparently -- subscribe with `node` field to stream from a remote session.
 
 Dashboard modules layer base -> leaf -> view -> root. The base (`contract.js`, `state.js`, `nz_util.js`) and the leaves (`caps.leaves` in `scripts/js-ratchet.caps.json`) import only each other, views import downward, and the roots (`caps.shellRoots`) compose. A view that needs a root's function calls it as `shell.X`, which the root fills with one top-level `registerShell({ … })` (besides `wsm.on`, the only load-time call `nz/no-module-side-effects` allows a `caps.shellRoots` file outside `caps.sideEffectLegacy`); `scripts/js-ratchet.mjs` holds every slot to three checks: a root registers it (ownership), its implementation uses the root's own code instead of forwarding an import, and the root reaches the caller through imports (a real upcall, else import it). Nothing else receives injected dependencies: besides `registerShell`, only `caps.injectionAllow` (`nz_util.js:registerActions`, the data-action registry) and `caps.injectionLegacy`, the shrink-only list of `configureX` receivers left from before `shell.js`, now empty (the key stays, so a re-added entry is a raise); eslint `nz/shell-bindings` refuses a new `configureX` export.
+
+Type checking is per file: a dashboard file whose first line is `// @ts-check` is checked by `tsc -p internal/server/static` (lint-js; `tsconfig.json` keeps `checkJs` off for the rest) against `wire.d.ts`, the generated global types (`EventEntry`, `SessionSnapshot`, `WsFrames`, `RestResponses`, ...), and must have zero errors. `wsm.on` types each handler's `msg` by its frame. `scripts/ts-check.test.mjs` lists the opted-in files; that list only grows. Neither `wire.d.ts` nor `tsconfig.json` is served.
 
 REST API: ~80 method-prefixed routes registered in `internal/server/routes.go` (the authoritative list -- grep `HandleFunc` there rather than trusting any doc enumeration). Families: `/api/sessions/*` (list/send/events/runs/interrupt/resume/bind/label/upload/attachment/git...), `/api/cron/*` (CRUD + pause/resume/trigger/preview + runs history/replay), `/api/projects/*` (config/files/favorite/planner), `/api/discovered/*` (preview/takeover/close), `/api/scratch/*`, `/api/settings`, `/api/auth/*`, `/api/access-profiles`, `/api/cc/assets`, `/api/cli/backends`, `/api/system/*`, `/api/transcribe`, `/api/memory/{slug}`. WebSocket: `/ws` (dashboard), `/ws-node` (reverse-connect nodes). Health: `/health`, `/livez`, `/readyz`.
 

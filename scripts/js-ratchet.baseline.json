@@ -468,7 +468,7 @@
     "lateBindings": 0
   },
   "session_stream.js": {
-    "lines": 76,
+    "lines": 77,
     "maxFnLines": 18,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -576,7 +576,7 @@
     "lateBindings": 0
   },
   "ws_manager.js": {
-    "lines": 177,
+    "lines": 184,
     "maxFnLines": 33,
     "maxIifeLines": 0,
     "fnOver100": 0,
