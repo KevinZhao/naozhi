@@ -183,6 +183,9 @@ type fakeSlack struct {
 	opening  chan struct{} // one send per apps.connections.open, before it replies
 	script   chan map[string]any
 	accepted chan *websocket.Conn
+	inbound  chan []byte // frames the client wrote; dropped when full
+	mux      *http.ServeMux
+	handler  platform.MessageHandler // Start's handler; nil = discard
 }
 
 func newFakeSlack(t *testing.T) *fakeSlack {
@@ -193,6 +196,7 @@ func newFakeSlack(t *testing.T) *fakeSlack {
 		opening:  make(chan struct{}),
 		script:   make(chan map[string]any),
 		accepted: make(chan *websocket.Conn, 4),
+		inbound:  make(chan []byte, 16),
 	}
 	stop := make(chan struct{})
 	writeJSON := func(w http.ResponseWriter, v any) {
@@ -233,14 +237,21 @@ func newFakeSlack(t *testing.T) *fakeSlack {
 		if err != nil {
 			return
 		}
-		f.accepted <- conn
+		// hello goes first so a test may write to conn once it is accepted.
 		_ = conn.WriteJSON(map[string]any{"type": "hello", "num_connections": 1})
+		f.accepted <- conn
 		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
 				return
+			}
+			select {
+			case f.inbound <- data:
+			default:
 			}
 		}
 	})
+	f.mux = mux
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(func() {
 		close(stop)
@@ -267,7 +278,11 @@ func (f *fakeSlack) adapter() *Slack {
 func (f *fakeSlack) start(t *testing.T, s *Slack) {
 	t.Helper()
 	errc := make(chan error, 1)
-	go func() { errc <- s.Start(func(context.Context, platform.IncomingMessage) {}) }()
+	handler := f.handler
+	if handler == nil {
+		handler = func(context.Context, platform.IncomingMessage) {}
+	}
+	go func() { errc <- s.Start(handler) }()
 	select {
 	case <-f.authing:
 	case <-time.After(connStateTestTimeout):
