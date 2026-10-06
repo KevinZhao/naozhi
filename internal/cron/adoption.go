@@ -10,7 +10,7 @@ package cron
 // process, for a caller wired up minutes later. This file is that caller.
 //
 // The verdict comes from the router as a capability, not a SessionRouter
-// method: CostReporter set the precedent — one production implementation
+// method: CostWindow set the precedent — one production implementation
 // gains it, twenty test fakes degrade to "nothing to adopt", which is
 // exactly the pre-adoption behaviour and therefore the right default.
 

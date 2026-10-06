@@ -229,12 +229,6 @@ var turnCauseByKind = map[apierr.Kind]cron.TurnCause{
 	apierr.KindNetwork:       cron.TurnCauseBackendUnreachable,
 }
 
-// CostTotals satisfies cron.CostReporter: cron differences two snapshots
-// around Send to attribute the run's spend (docs/rfc/cost-ledger.md §5.3).
-func (c cronSessionAdapter) CostTotals() costledger.Totals { return c.s.CostTotals() }
-
-var _ cron.CostReporter = cronSessionAdapter{}
-
 // BeginCostWindow and EndCostWindow satisfy cron.CostWindow: the run books
 // the spend reported while its Send is live, the session the rest.
 func (c cronSessionAdapter) BeginCostWindow() { c.s.BeginCostWindow() }

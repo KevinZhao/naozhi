@@ -700,22 +700,18 @@ func (s *Scheduler) execSend(a execSendArgs) (result SendResult, costInc costled
 	return result, costInc, true
 }
 
-// runCostWindow measures the spend a run owns on sess: through CostWindow
-// when sess has it, else as the CostTotals difference.
+// runCostWindow measures the spend a run owns on sess through CostWindow;
+// a session without the capability owns zero.
 type runCostWindow struct {
 	sess   Session
-	before costledger.Totals
 	closed bool
 }
 
 func openCostWindow(sess Session) *runCostWindow {
-	w := &runCostWindow{sess: sess}
 	if cw, ok := sess.(CostWindow); ok {
 		cw.BeginCostWindow()
-	} else {
-		w.before = costTotalsOf(sess)
 	}
-	return w
+	return &runCostWindow{sess: sess}
 }
 
 // close ends the window and returns its spend; later calls return zero.
@@ -727,16 +723,7 @@ func (w *runCostWindow) close() costledger.Increment {
 	if cw, ok := w.sess.(CostWindow); ok {
 		return cw.EndCostWindow()
 	}
-	return costTotalsOf(w.sess).Sub(w.before)
-}
-
-// costTotalsOf reads the session's spend snapshot; sessions without the
-// capability report zero.
-func costTotalsOf(sess Session) costledger.Totals {
-	if cr, ok := sess.(CostReporter); ok {
-		return cr.CostTotals()
-	}
-	return costledger.Totals{}
+	return costledger.Increment{}
 }
 
 // execSendError terminates a run whose Send failed: classify, log, reap the
