@@ -72,8 +72,9 @@ type healthPayload struct {
 		SendFailCount       int64  `json:"send_fail_count"`
 		LastReplySuccessAgo string `json:"last_reply_success_ago"`
 	} `json:"dispatch"`
-	ConfigSHA256   string `json:"config_sha256"`
-	ConfigLoadedAt string `json:"config_loaded_at"`
+	ConfigSHA256          string   `json:"config_sha256"`
+	ConfigLoadedAt        string   `json:"config_loaded_at"`
+	ConfigRestartRequired []string `json:"config_restart_required"`
 }
 
 // platformConnMap is /health "platform_conn": the detail behind the

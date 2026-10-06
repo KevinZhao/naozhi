@@ -49,7 +49,7 @@ func TestNewLogHandler_FormatSelection(t *testing.T) {
 		}
 		return w.Unwrap()
 	}
-	text := newLogHandler(nil, &config.Config{Log: config.LogConfig{Format: "text", Level: "debug"}})
+	text := newLogHandler(nil, &config.Config{Log: config.LogConfig{Format: "text", Level: "debug"}}, nil)
 	if _, ok := unwrap(text).(*slog.TextHandler); !ok {
 		t.Fatalf("format=text: got %T, want *slog.TextHandler", text)
 	}
@@ -57,7 +57,7 @@ func TestNewLogHandler_FormatSelection(t *testing.T) {
 		t.Errorf("level=debug handler should enable Debug")
 	}
 
-	js := newLogHandler(nil, &config.Config{Log: config.LogConfig{Format: "json", Level: "warn"}})
+	js := newLogHandler(nil, &config.Config{Log: config.LogConfig{Format: "json", Level: "warn"}}, nil)
 	if _, ok := unwrap(js).(*slog.JSONHandler); !ok {
 		t.Fatalf("format=json: got %T, want *slog.JSONHandler", js)
 	}
@@ -66,7 +66,7 @@ func TestNewLogHandler_FormatSelection(t *testing.T) {
 	}
 
 	// Empty format defaults to JSON (matches the legacy else-branch).
-	def := newLogHandler(nil, &config.Config{Log: config.LogConfig{Format: ""}})
+	def := newLogHandler(nil, &config.Config{Log: config.LogConfig{Format: ""}}, nil)
 	if _, ok := unwrap(def).(*slog.JSONHandler); !ok {
 		t.Fatalf("format empty: got %T, want *slog.JSONHandler (default)", def)
 	}
@@ -100,7 +100,7 @@ func TestStartWatchdogLoop_StopsOnCtxCancel(t *testing.T) {
 func TestMain_WarnsDashboardTokenAfterSetupLogging(t *testing.T) {
 	t.Parallel()
 	src := readSrc(t, "main.go")
-	setup := strings.Index(src, "\tsetupLogging(cfg)\n")
+	setup := strings.Index(src, ":= setupLogging(cfg)\n")
 	warn := strings.Index(src, "config.WarnDashboardToken(cfg.Server.DashboardToken)")
 	if setup < 0 {
 		t.Fatal("main.go: setupLogging(cfg) call not found")

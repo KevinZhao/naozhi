@@ -30,5 +30,6 @@
     "last_reply_success_ago": "4s"
   },
   "config_sha256": "deadbeef",
-  "config_loaded_at": "2026-01-02T03:04:05Z"
+  "config_loaded_at": "2026-01-02T03:04:05Z",
+  "config_restart_required": ["cli"]
 }
