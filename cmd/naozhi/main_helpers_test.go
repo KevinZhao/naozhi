@@ -393,3 +393,62 @@ func TestMain_LogsProfileDefaultBackends(t *testing.T) {
 		t.Error("main.go no longer calls logProfileDefaultBackends")
 	}
 }
+
+// TestMain_SharesRoutingResolver pins that main() hands the buildRouting
+// result to the server and its Resolver to upstream.New. The server falls
+// back to a resolver without the cron access-profile lookup when Resolver is
+// nil, so dropping either wire loses the #3106 gate with no other test red.
+func TestMain_SharesRoutingResolver(t *testing.T) {
+	t.Parallel()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "main.go", nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	isIdent := func(e ast.Expr, name string) bool {
+		id, ok := e.(*ast.Ident)
+		return ok && id.Name == name
+	}
+	var built, serverWired, upstreamWired bool
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			if len(n.Lhs) == 1 && isIdent(n.Lhs[0], "routing") && len(n.Rhs) == 1 {
+				if call, ok := n.Rhs[0].(*ast.CallExpr); ok && isIdent(call.Fun, "buildRouting") {
+					built = true
+				}
+			}
+		case *ast.CompositeLit:
+			sel, ok := n.Type.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "ServerOptions" {
+				return true
+			}
+			for _, elt := range n.Elts {
+				if kv, ok := elt.(*ast.KeyValueExpr); ok && isIdent(kv.Key, "Routing") && isIdent(kv.Value, "routing") {
+					serverWired = true
+				}
+			}
+		case *ast.CallExpr:
+			sel, ok := n.Fun.(*ast.SelectorExpr)
+			if !ok || !isIdent(sel.X, "upstream") || sel.Sel.Name != "New" {
+				return true
+			}
+			if len(n.Args) < 4 {
+				t.Fatalf("%s: upstream.New has %d args", fset.Position(n.Pos()), len(n.Args))
+			}
+			if arg, ok := n.Args[3].(*ast.SelectorExpr); ok && isIdent(arg.X, "routing") && arg.Sel.Name == "Resolver" {
+				upstreamWired = true
+			}
+		}
+		return true
+	})
+	if !built {
+		t.Error("main.go must build routing via routing := buildRouting(...)")
+	}
+	if !serverWired {
+		t.Error("server.ServerOptions literal in main.go must pass Routing: routing")
+	}
+	if !upstreamWired {
+		t.Error("upstream.New in main.go must receive routing.Resolver as its resolver")
+	}
+}
