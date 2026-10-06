@@ -87,7 +87,7 @@ import { ICONS } from './icons.js';
 import { initLightbox } from './lightbox.js';
 import { initMemPopover } from './mem_popover.js';
 import { askAside, closeScratchDrawer, initAsideDrawer, promoteScratch } from './aside_drawer.js';
-import './workflow_view.js';
+import { onSessionsRefreshed, onWorkflowSessionSwitched, renderWorkflowPanel, workflowActions } from './workflow_view.js';
 // Service worker registration
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
 
@@ -336,6 +336,7 @@ function reconcileMainStateAfterPoll(wsConnected) {
 }
 onSessionsApplied(reconcileMainStateAfterPoll);
 onSessionsApplied(() => { if (selection.key) updateHeaderCLI(); });
+onSessionsApplied(onSessionsRefreshed);
 
 // --- History Popover ---
 
@@ -750,6 +751,7 @@ function selectSession(key, node) {
   selection.key = key;
   selection.node = node;
   selection.lastAppliedMainState = null; // #2431: new session → first poll must reconcile
+  if (prevKey && (prevKey !== key || prevNode !== node)) onWorkflowSessionSwitched(sid(prevKey, prevNode));
   // Opening a card counts as "reading" it — clear the chat-style unread chip
   // before the DOM toggle below so the next render reflects a zeroed state.
   const selSid = sid(key, node);
@@ -1155,6 +1157,7 @@ function renderMainShell() {
     // node here (not the relocated cron one). Hidden until renderSessionRunsPanel
     // populates it; :empty/[hidden] keeps it out of layout when a session has
     // no recorded runs.
+    '<div class="workflow-panel nz-hidden" id="workflow-panel"></div>' +
     '<details class="session-runs-panel" id="session-runs-panel" hidden></details>' +
     '<div class="events" id="events-scroll" role="log" aria-live="off">' + (s.state === 'running' ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>' : '') + '</div>' +
     '<div class="nav-pill" id="nav-pill">' +
@@ -1204,6 +1207,7 @@ function renderMainShell() {
   // references. Safe to call on every renderMainShell: dataset.frObserver
   // gates re-entry so we don't stack duplicate observers.
   startFileRefObserver();
+  renderWorkflowPanel();
   // Double-tap events feed → focus input (mobile)
   let lastTapMs = 0;
   document.getElementById('events-scroll').addEventListener('touchend', (/** @type {TouchEvent & {target: Element}} */ e) => {
@@ -1692,6 +1696,7 @@ registerActions({
   // absorbed: header tuning chips
   'tuning-model': () => openTuningPopover('model'),
   'tuning-effort': () => openTuningPopover('effort'),
+  ...workflowActions,
 });
 
 // Read by the e2e suite through test/e2e/e2e-shim.js.

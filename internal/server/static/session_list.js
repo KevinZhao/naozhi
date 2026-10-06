@@ -1094,7 +1094,15 @@ wsm.on(NZ_CONTRACT.WS.sessions_update, () => {
     // a no-process subscribe returns "subscribed" + persisted history but
     // no live eventPushLoop, so subscribedKey may not be set while the
     // pending flag was already cleared. This ensures recovery.
-    if (selection.key && !sessionStream.subscribedKey && sessionList.sessionsData[sid(selection.key, selection.node)]) {
+    const shown = sessionList.sessionsData[sid(selection.key, selection.node)];
+    if (selection.key && !sessionStream.subscribedKey && shown) {
+      sessionStream.subscribe(selection.key, selection.node);
+    }
+    // A subscription made without a process (suspended) has no push loops;
+    // once the snapshot names a protocol the process is back, whether or not
+    // it is running (docs/rfc/workflow-dashboard.md §6.1).
+    if (shown?.protocol && sessionStream._subscriptionSuspended && sessionStream._pendingSubscribeKey !== selection.key &&
+        sessionStream.subscribedKey === selection.key && sessionStream.subscribedNode === selection.node) {
       sessionStream.subscribe(selection.key, selection.node);
     }
     const added = Object.keys(sessionList.sessionsData || {}).filter(k => !prevSessKeys.has(k));
