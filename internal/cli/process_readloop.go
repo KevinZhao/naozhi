@@ -521,9 +521,9 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	}
 	nowMS := now.UnixMilli()
 	p.tools.observe(ev, now)
-	orphaned := false
+	orphaned, orphanRun := false, ""
 	if ev.Type == "result" {
-		ev.Aborted, orphaned = p.turn.abortRequested.take()
+		ev.Aborted, orphaned, orphanRun = p.turn.abortRequested.take()
 	}
 
 	// ---- Passthrough mode hooks ----
@@ -647,17 +647,17 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	} else if ev.Type == "result" && orphaned {
 		// The abandoned turn's aborted result, read after the next Send
 		// claimed the process: that Send must not return it as its answer.
-		p.bookUnclaimed(resultFromEvent(ev))
+		p.bookAbandoned(resultFromEvent(ev), orphanRun)
 		return false
 	} else if ev.Type == "result" {
 		// noLiveSend is read before the handoff: once the result is on eventCh
 		// its Send may take it and turn Ready first. Settled after it, so a
 		// Send claiming Ready drains this result.
-		noLiveSend := p.turn.noLiveSend()
+		noLiveSend, abandonedRun := p.turn.noLiveSend()
 		if p.deliverEvent(ev, now, log) {
 			return true
 		}
-		p.settleUnclaimedResult(ev, noLiveSend)
+		p.settleUnclaimedResult(ev, noLiveSend, abandonedRun)
 		return false
 	}
 
@@ -752,7 +752,7 @@ func (p *Process) deliverEvent(ev clievent.Event, now time.Time, log *slog.Logge
 		// expected pathway), so Debug to avoid masking the real drop case.
 		switch {
 		case ev.Type == "result" && !p.caps.Replay:
-			log.Warn("eventCh full, dropped result", "subtype", ev.SubType)
+			log.Warn("eventCh full, dropped result", "subtype", ev.SubType, "run_id", p.turn.currentRunID())
 		case ev.Type == "result":
 			log.Debug("eventCh full, dropped result (replay backend)", "subtype", ev.SubType)
 		default:

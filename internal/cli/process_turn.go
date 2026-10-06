@@ -107,7 +107,7 @@ func (p *Process) drainStaleEvents(ctx context.Context) error {
 		// An idle process produces no result event, so the settle timer would
 		// always expire; only wait when a turn was actually running.
 		if wasRunning {
-			slog.Debug("send: draining interrupted turn result")
+			slog.DebugContext(ctx, "send: draining interrupted turn result")
 			settle := time.NewTimer(interruptedSettleWindow)
 			defer settle.Stop()
 			for {
@@ -130,14 +130,14 @@ func (p *Process) drainStaleEvents(ctx context.Context) error {
 					}
 					// Pre-cutoff non-result event: drained, keep waiting for the result.
 				case <-settle.C:
-					slog.Debug("send: settle timeout, no stale result")
+					slog.DebugContext(ctx, "send: settle timeout, no stale result")
 					goto drain
 				case <-ctx.Done():
 					return ctx.Err()
 				}
 			}
 		} else {
-			slog.Debug("send: interrupted but idle, skipping settle wait")
+			slog.DebugContext(ctx, "send: interrupted but idle, skipping settle wait")
 		}
 	}
 drain:
@@ -343,4 +343,21 @@ func (p *Process) bookUnclaimed(res clievent.SendResult) {
 	if fn != nil {
 		fn(res)
 	}
+}
+
+// bookAbandoned is bookUnclaimed for the result of run runID, whose caller
+// gave up before it arrived. The ledger books it under its own id, so the
+// log line is what ties the run to its late spend.
+func (p *Process) bookAbandoned(res clievent.SendResult, runID string) {
+	p.turn.mu.RLock()
+	fn := p.turn.onUnownedResult
+	p.turn.mu.RUnlock()
+	if fn != nil {
+		logAbandonedResult(p.slogger(), res, runID)
+		fn(res)
+	}
+}
+
+func logAbandonedResult(log *slog.Logger, res clievent.SendResult, runID string) {
+	log.Info("cli: abandoned run's result booked as unowned", "run_id", runID, "cli_session", res.SessionID)
 }
