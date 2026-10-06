@@ -631,6 +631,16 @@
   },
   {
     "method": "GET",
+    "path": "/static/vendor/katex-0.16.21/katex.min.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/vendor/{file...}",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/voice.js",
     "handler_type": "http.HandlerFunc"
   },

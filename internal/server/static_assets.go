@@ -8,8 +8,10 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
+	"io/fs"
 	"log/slog"
 	"net/http"
+	"path"
 	"strings"
 )
 
@@ -176,6 +178,14 @@ var filesViewJS embed.FS
 //go:embed static/favicon.svg
 var faviconSVG embed.FS
 
+// Third-party release files, byte-identical to their npm dist and kept under a
+// versioned directory, so their SRI pins in render_md.js stay valid and their
+// responses can be cached as immutable. KaTeX ships only its woff2 fonts: every
+// browser the dashboard supports takes the first src of each @font-face.
+//
+//go:embed static/vendor
+var vendorFS embed.FS
+
 // staticAsset is the once-read, immutable view of an embedded dashboard asset:
 // its bytes and precomputed strong-form ETag. embed.FS.ReadFile copies the
 // whole file on every call, so each asset is read+hashed exactly once at init
@@ -296,6 +306,7 @@ var staticAssets, servedAssetVersion = func() (map[string]staticAsset, string) {
 			out[e.key] = a
 		}
 	}
+	addVendorAssets(out)
 	raw, ok := out["dashboard.html"]
 	if !ok {
 		return out, ""
@@ -308,6 +319,27 @@ var staticAssets, servedAssetVersion = func() (map[string]staticAsset, string) {
 	out["dashboard.html"] = newStaticAsset(page, true)
 	return out, version
 }()
+
+// addVendorAssets registers every servable file under static/vendor by its path
+// below static/, the key its /static/vendor/ URL maps to. Fonts are already
+// compressed, so only the script and the stylesheet are gzipped.
+func addVendorAssets(out map[string]staticAsset) {
+	err := fs.WalkDir(vendorFS, "static/vendor", func(name string, d fs.DirEntry, err error) error {
+		ext := path.Ext(name)
+		if err != nil || d.IsDir() || (ext != ".js" && stylesheetTypes[ext] == "") {
+			return err
+		}
+		b, err := vendorFS.ReadFile(name)
+		if err != nil {
+			return err
+		}
+		out[strings.TrimPrefix(name, "static/")] = newStaticAsset(b, ext != ".woff2")
+		return nil
+	})
+	if err != nil {
+		panic("read static/vendor: " + err.Error())
+	}
+}
 
 // newStaticAsset wraps b with its strong ETag (sha256, first 16 bytes, hex)
 // and, when compress is set, its precompressed gzip form.

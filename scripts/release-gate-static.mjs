@@ -13,6 +13,12 @@ export const IMMUTABLE_CACHE = 'private, max-age=31536000, immutable';
 
 const isStatic = (raw) => new URL(raw).pathname.startsWith('/static/');
 
+// A /static/vendor/ path names its release, so the server caches it as
+// immutable with no ?v=. render_md.js loads the vendored scripts as classic
+// scripts when a message needs them, and their stylesheets fetch the fonts:
+// none of it is in the import map, and the fonts are named by no element.
+const isVendor = (pathname) => pathname.startsWith('/static/vendor/');
+
 // recordStatic collects page's /static requests, failures and responses until
 // stop() is called.
 export function recordStatic(page) {
@@ -65,6 +71,7 @@ export function staticLoadProblems(named, rec) {
   const versionOf = new Map();
   for (const raw of named.urls) {
     const u = new URL(raw, 'http://page.invalid');
+    if (isVendor(u.pathname)) continue;
     if (!versionOf.has(u.pathname)) versionOf.set(u.pathname, new Set());
     versionOf.get(u.pathname).add(u.searchParams.get('v') || '');
   }
@@ -76,14 +83,14 @@ export function staticLoadProblems(named, rec) {
   const count = new Map();
   for (const raw of rec.requests) {
     const u = new URL(raw);
-    if (!versionOf.get(u.pathname)?.has(u.searchParams.get('v') || '')) {
+    if (!isVendor(u.pathname) && !versionOf.get(u.pathname)?.has(u.searchParams.get('v') || '')) {
       problems.push(`requested ${u.pathname}${u.search}, not the URL the page names`);
     }
     count.set(u.pathname, (count.get(u.pathname) || 0) + 1);
   }
   for (const [p, n] of count) {
     if (n > 1) problems.push(`${p} requested ${n} times`);
-    if (p.endsWith('.js') && !Object.hasOwn(named.imports, p)) problems.push(`module ${p} is not in the import map`);
+    if (p.endsWith('.js') && !isVendor(p) && !Object.hasOwn(named.imports, p)) problems.push(`module ${p} is not in the import map`);
   }
   for (const p of named.entries) {
     if (!count.has(p)) problems.push(`entry module ${p} never loaded`);

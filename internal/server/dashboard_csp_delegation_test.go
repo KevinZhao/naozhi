@@ -63,13 +63,13 @@ func TestDashboardBundle_NoInterpolatedDataAction(t *testing.T) {
 	}
 }
 
-// TestDashboardCSP_CDNURLsMatchBundle keeps the exact-URL CDN pins in
-// buildDashboardCSP in lockstep with the URLs dashboard.js actually injects:
-// bumping mermaid/KaTeX in one place but not the other would either block the
-// lazy load (CSP behind) or leave a stale allowlisted URL (CSP ahead).
+// TestDashboardCSP_CDNURLsMatchBundle keeps the exact-URL CDN pin in
+// buildDashboardCSP in lockstep with the URL render_md.js actually injects:
+// bumping mermaid in one place but not the other would either block the lazy
+// load (CSP behind) or leave a stale allowlisted URL (CSP ahead).
 func TestDashboardCSP_CDNURLsMatchBundle(t *testing.T) {
 	t.Parallel()
-	// #2558 D4: the lazy CDN loaders live in render_md.js; keep scanning
+	// #2558 D4: the lazy CDN loader lives in render_md.js; keep scanning
 	// dashboard.js too so a future move back stays covered. The two files are
 	// a deliberate choice, not a module list to keep in step: they are where
 	// the loaders live, and the reverse check below (every pinned URL is seen)
@@ -90,16 +90,14 @@ func TestDashboardCSP_CDNURLsMatchBundle(t *testing.T) {
 		switch {
 		case strings.HasSuffix(u, ".js"), strings.HasSuffix(u, ".css"):
 			if !strings.Contains(dashboardCSP, u) {
-				t.Errorf("dashboard.js injects %q but the CSP does not allowlist it — "+
-					"update the cdn* constants in dashboard_csp.go in the same change", u)
+				t.Errorf("render_md.js injects %q but the CSP does not allowlist it — "+
+					"update cdnMermaidJS in dashboard_csp.go in the same change", u)
 			}
 		}
 	}
-	for _, pinned := range []string{cdnMermaidJS, cdnKatexJS, cdnKatexCSS} {
-		if !seen[pinned] {
-			t.Errorf("CSP pins %q but dashboard.js no longer references it — drop or "+
-				"update the pin", pinned)
-		}
+	if !seen[cdnMermaidJS] {
+		t.Errorf("CSP pins %q but render_md.js no longer references it — drop or "+
+			"update the pin", cdnMermaidJS)
 	}
 }
 
