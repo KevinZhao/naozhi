@@ -1,6 +1,6 @@
 # RFC: eventlog 子系统统一——消解三层影子与 5 包散落
 
-> **状态**: Draft v1.1（§8 Phase 1 已实施 2026-07-31：api_assert_test.go 编译期断言 + round-trip 契约测试 + ring LoadBefore thin adapter，实测缺口恰为 §8 预判的 ring 一处；Phase 2-6 待评审后推进）
+> **状态**: v1.2 — Phase 1-2 已实施；Phase 3-6（`eventlogpipeline` 装配 facade）搁置（理由见 §8 末「Phase 3-6 搁置」）。Phase 1（2026-07-31）：api_assert_test.go 编译期断言 + round-trip 契约测试 + ring LoadBefore thin adapter；Phase 2：bridge / persist / ring 注释已指向 `api.EventStore` 为既成契约
 > **作者**: naozhi team (cron-cr)
 > **创建**: 2026-06-04
 > **范围**: 收敛 cli ring / persist spool / naozhilog replay 三层"影子"事件存储到单一 `EventStore` 契约，并把散落在 5 个包的 eventlog 状态聚合到一个 `internal/session/eventlogpipeline` 装配点
@@ -212,9 +212,17 @@ eventlog 的**运行态与装配逻辑**横跨 5 个包，且会话层（`intern
 
 **为何 low 风险**：纯 additive 测试代码，零生产行为改动，不碰任何 §5.2 不变量；编译失败即立即暴露走偏。落地后立即获得 CI 闸门，防 #1369 影子再生。唯一需核实点是断言测试放置位置不引入 import 环（§4.1 已给出 fallback 到独立测试包的预案）。
 
-> **注**：triage 已定调本轮为纯 RFC 产出，**不**落地 phase-1 代码。上表 Phase 1 描述的是"若落地，第一步确切做什么"及其风险评估，待评审通过后另起实施轮次。
+> **Phase 1 实施记录（2026-07-31）**：按上表预案落地——`internal/eventlog/api/api_assert_test.go`（ring 三分面 + EventStore、naozhilog/merged Reader 编译期断言 + round-trip 四态契约测试）；唯一方法缺口与预判一致（ring 缺 LoadBefore），以 `internal/eventlog/ring/eventlog_loadbefore.go` thin adapter 补齐（EntriesBefore 零逻辑封装，边界语义与 naozhilog 对齐），配 `eventlog_loadbefore_test.go` 逐字节等价 pin。既有 `api_test.go` 的 fullStore 组合演示因 ring 自带读侧后 selector 歧义，改为显式选择 durable 读 tier（语义即 merged-source 形态）。
 >
-> **Phase 1 实施记录（2026-07-31）**：按上表预案落地——`internal/eventlog/api/api_assert_test.go`（ring 三分面 + EventStore、naozhilog/merged Reader 编译期断言 + round-trip 四态契约测试）；唯一方法缺口与预判一致（ring 缺 LoadBefore），以 `internal/cli/eventlog_loadbefore.go` thin adapter 补齐（EntriesBefore 零逻辑封装，边界语义与 naozhilog 对齐），配 `eventlog_loadbefore_test.go` 逐字节等价 pin。既有 `api_test.go` 的 fullStore 组合演示因 ring 自带读侧后 selector 歧义，改为显式选择 durable 读 tier（语义即 merged-source 形态）。Phase 2-6 不随本轮，仍待评审。
+> **Phase 2 状态**：契约已写进代码注释——`internal/session/eventlog_bridge.go` 头注列出四个 tier 并说明 persist.Persister 不实现 `api.EventStore`；`internal/eventlog/persist/doc.go` 同述 Persister 走 PersistSink + Recover；`internal/eventlog/ring/eventlog_loadbefore.go` 指明 `*EventLog` 满足 `api.EventStore`。`cli/doc.go` 一项已随 ring 迁出 cli 失效。
+
+### Phase 3-6 搁置
+
+（#3433 复核，2026-10）Phase 3-6 不再推进，`api` 包保留为编译期契约闸门：
+
+- **四个 tier 是互补分层，不是互为影子的副本**：ring 是内存有损环，persist 是唯一持久写入方，naozhilog 只读 persist 的文件，merged 把 naozhilog 与 Claude CLI JSONL 兜底拼接。UUID 去重与 GapFill 源于"naozhi 自身日志 + Claude JSONL"两个独立真相源，属固有需要，不是副本间的漂移。§1.1 所说的"影子再生"风险已由 Phase 1 的编译期断言兜住。
+- **Phase 5 收益与风险不对称**：迁 bridge sink 构造与 merged 源装配直接触碰 §5.1 / §5.2 的 borrowed-bytes / ordering 不变量，而用户可见行为零变化。
+- Phase 3/4/6 单独做只是把装配点从 router 挪到新包，不消除任何重复；若日后 #1570 运行时注入落地，再按那时的装配形状重评。
 
 ---
 
