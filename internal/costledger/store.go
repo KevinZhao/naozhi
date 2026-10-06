@@ -60,6 +60,14 @@ type Store struct {
 	rollup *rollup
 	rates  *RateBook
 
+	// subMu orders a Subscribe replay against the worker's batch writes, so
+	// a subscriber sees each durable entry exactly once.
+	subMu sync.Mutex
+	subs  []func(Entry)
+	// replayedHook, when set by a test, runs between a Subscribe replay
+	// and its registration.
+	replayedHook func()
+
 	// cur is the open day file; owned by the worker goroutine.
 	cur    *os.File
 	curDay string
@@ -213,7 +221,9 @@ func (s *Store) worker() {
 		if len(batch) == 0 {
 			return
 		}
+		s.subMu.Lock()
 		s.writeBatch(batch)
+		s.subMu.Unlock()
 		batch = batch[:0]
 	}
 	for {
@@ -239,8 +249,9 @@ func (s *Store) worker() {
 }
 
 // writeBatch appends the batch to its day file(s), fsyncs once per file
-// touched and folds every entry into the rollup only after the bytes are
-// durable, so summaries never claim what disk does not hold.
+// touched and folds every entry into the rollup and the subscribers only
+// after the bytes are durable, so summaries never claim what disk does not
+// hold. The caller holds subMu.
 func (s *Store) writeBatch(batch []Entry) {
 	var buf []byte
 	written := batch[:0:0]
@@ -274,8 +285,8 @@ func (s *Store) writeBatch(batch []Entry) {
 }
 
 // flushBuf writes buf to the current file and, on success, folds the pending
-// entries into the rollup. Callers hand over the pending list so a failed
-// write drops exactly those entries.
+// entries into the rollup and hands them to the subscribers. Callers hand
+// over the pending list so a failed write drops exactly those entries.
 func (s *Store) flushBuf(buf *[]byte, pending *[]Entry) {
 	if len(*buf) == 0 || s.cur == nil {
 		*buf, *pending = (*buf)[:0], (*pending)[:0]
@@ -287,6 +298,9 @@ func (s *Store) flushBuf(buf *[]byte, pending *[]Entry) {
 	} else {
 		for _, e := range *pending {
 			s.rollup.add(e)
+			for _, fn := range s.subs {
+				fn(e)
+			}
 		}
 	}
 	*buf, *pending = (*buf)[:0], (*pending)[:0]
