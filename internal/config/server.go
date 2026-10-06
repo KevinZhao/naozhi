@@ -15,6 +15,10 @@ type ServerConfig struct {
 	// cannot enumerate goroutine stacks (which carry file paths and queue
 	// contents) or expvar counters. Turn it on only while capturing a profile.
 	DebugMode bool `yaml:"debug_mode,omitempty"`
+	// MetricsEnabled registers GET /metrics (Prometheus text format of the
+	// naozhi_* expvar counters), token-gated but not loopback-only so a
+	// scraper on another host can reach it. Default false.
+	MetricsEnabled bool `yaml:"metrics_enabled,omitempty"`
 }
 
 // UpdateConfig configures the in-process auto-update checker (GitHub

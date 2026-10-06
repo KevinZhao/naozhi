@@ -107,6 +107,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		imGroupScope:  opts.IMGroupScope,
 		imAutoThread:  opts.IMThreadAutoOpen,
 		debugMode:     opts.Features.Debug,
+		metricsOn:     opts.Features.Metrics,
 		resolver:      resolver,
 		sysessionMgr:  opts.Sysession.Manager,
 		orient:        buildOrientConfig(opts),
