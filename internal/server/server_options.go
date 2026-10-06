@@ -19,6 +19,7 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
 	transcribepkg "github.com/naozhi/naozhi/internal/transcribe"
+	"github.com/naozhi/naozhi/internal/webhook"
 )
 
 // ServerOptions holds optional configuration for a Server.
@@ -170,6 +171,9 @@ type RelayOptions struct {
 	// RunTelemetry is the relay cron and sysession were built with; the server
 	// binds the Hub's run-event broadcaster to it.
 	RunTelemetry *runtelemetry.Relay
+	// Webhooks, when non-nil, receives the same run events as the Hub
+	// (docs/rfc/outbound-webhooks.md); main owns its lifecycle.
+	Webhooks *webhook.Sender
 }
 
 // QueueOptions are the turn-queue knobs. Grouped out of the flat

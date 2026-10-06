@@ -80,7 +80,8 @@ func (c *Config) Validate() []ValidationDiag {
 		})
 	}
 
-	return append(diags, c.imAccessDiags()...)
+	diags = append(diags, c.imAccessDiags()...)
+	return append(diags, c.integrationsDiags()...)
 }
 
 // knownBackendIDs returns every registered backend ID, sorted for

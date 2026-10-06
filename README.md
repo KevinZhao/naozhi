@@ -555,6 +555,10 @@ journalctl -u naozhi -f
 > 拉 heap / goroutine / CPU profile。端点受 token + **loopback-only** 双重防护，远端
 > 请求（ALB / CloudFront）一律 403。详见 [`docs/ops/pprof.md`](docs/ops/pprof.md)。
 
+> **事件推送**：`integrations.webhooks` 把 cron / sysession 的 `run.started` / `run.ended`
+> POST 到你的端点（HMAC 签名、重试、不阻塞调度器），用于 CI 联动或告警；payload 只含
+> run 元数据，不含 prompt / 结果文本。见 [`docs/rfc/outbound-webhooks.md`](docs/rfc/outbound-webhooks.md)。
+
 > **一键排障**：`naozhi doctor` 聚合 binary / codesign / systemd / HTTP / auth /
 > 服务端子系统 / 配置漂移 / pprof / 状态目录 / CLI backend / 语音转写 / 安全配置等检查，
 > 任一 fail 退出码 1。CI 友好，支持 `--json` 输出。完整检查项见
