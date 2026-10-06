@@ -10,8 +10,8 @@
 
 ### Added
 
-- **IM 渠道接收文件：飞书 / Slack / Discord 发来的 PDF 和文本文件交给 Claude 读取**（#3451）：此前三个渠道只收文本、图片和语音（Slack 连图片也不收），其他附件被直接丢掉，只发了文件的消息得不到任何回复
-  - 支持 PDF（按文件内容识别）和 UTF-8 文本：`.txt` `.md` `.csv` `.json` `.log` `.yaml` `.yml`。docx / xlsx / zip 等不支持，改名成 `.txt` 的二进制文件也会被拒
+- **IM 渠道接收文件：飞书 / Slack / Discord 发来的 PDF 和文本文件交给 Claude 读取**（#3451）：此前飞书只收文本、图片和语音，Discord 只收文本和图片，Slack 只收文本，其他附件被直接丢掉，只发了文件的消息得不到任何回复
+  - 支持 PDF（按文件内容识别；Discord 在下载前先按文件名和类型筛选，PDF 需要 `.pdf` 文件名或 `application/pdf` 类型）和 UTF-8 文本：`.txt` `.md` `.csv` `.json` `.log` `.yaml` `.yml`。docx / xlsx / zip 等不支持，改名成 `.txt` 的二进制文件也会被拒
   - 文件在发送时写入会话工作目录的 `.naozhi/attachments/<日期>/`，提示里带上原文件名和相对路径，由 Claude 用 Read 工具读取，与 Dashboard 上传的 PDF 是同一条路径；Kiro / Codex 会话收到同样的读取提示
   - 上限：单个文件 32 MiB；每条消息最多 5 个、合计 32 MiB，Slack 和 Discord 消息里的图片也计入（图片本身仍是 10 MiB）
   - 不支持的类型、超限和下载失败的文件不再静默丢弃：bot 回一条「以下文件未处理：」，逐个列出文件名和原因；消息里的文字和其余文件照常发送
