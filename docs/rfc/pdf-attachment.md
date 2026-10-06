@@ -9,7 +9,7 @@
 让 dashboard 用户上传 PDF 文件作为附件，与文本一同发送给 Claude CLI，由 CC 原生能力解析 PDF 内容。
 
 **非目标** (本次不做):
-- IM 渠道（飞书/Slack/微信）接收 PDF
+- IM 渠道（飞书/Slack/微信）接收 PDF。已由 #3451 另行实现（飞书 / Slack / Discord，微信除外），走同一条路径 B：文件在发送时写入会话 workspace，再由 Read 提示交给 CLI；行为见 README「IM 平台接入」
 - OCR / 文本抽取 / 缩略图
 - 其他文档格式（docx / xlsx / pptx）——仅 PDF
 
@@ -272,7 +272,7 @@ if (f.type === 'application/pdf') {
 
 ## 6. Out of scope / 遗留项
 
-- IM 渠道接收 PDF（Feishu `file_key` 下载路径） — 后续 RFC
+- IM 渠道接收 PDF（Feishu `file_key` 下载路径）：已由 #3451 实现，见 §1 非目标的说明
 - 多 PDF 批次（当前允许 ≤20 files/send，已自然支持）
 - PDF 页数硬校验（不解析 PDF 结构，靠 Anthropic API 拒绝超 100 页）
 - workspace 外的"临时 session" PDF 落盘策略（当前强制要求 workspace 非空）

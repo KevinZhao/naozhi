@@ -57,14 +57,21 @@ graph TD
 
 ### IM 平台接入
 
-| 平台 | 接入方式 | 私聊 | 群聊 | 消息编辑 | 提问按钮 |
-|------|----------|------|------|----------|----------|
-| **飞书** | WebSocket 长连接 / Webhook | ✓ | ✓ | ✓ 流式更新 | ✓ |
-| **Slack** | Socket Mode | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ |
-| **Discord** | Gateway WebSocket | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ |
-| **微信** | HTTP 长轮询 (iLink Bot) | ✓ | — | — | — |
+| 平台 | 接入方式 | 私聊 | 群聊 | 消息编辑 | 提问按钮 | 文件 |
+|------|----------|------|------|----------|----------|------|
+| **飞书** | WebSocket 长连接 / Webhook | ✓ | ✓ | ✓ 流式更新 | ✓ | ✓ (仅私聊) |
+| **Slack** | Socket Mode | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ | ✓ (需 `files:read`) |
+| **Discord** | Gateway WebSocket | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ | ✓ (按文件名/类型预筛) |
+| **微信** | HTTP 长轮询 (iLink Bot) | ✓ | — | — | — | — |
 
 「提问按钮」指 Claude 调用 AskUserQuestion 时把选项渲染成可点击的按钮；没有按钮的平台收到纯文本选项列表，直接回复文字作答。
+
+「文件」指用户发来的 PDF 和 UTF-8 文本文件（`.txt` `.md` `.csv` `.json` `.log` `.yaml` `.yml`）。发送时文件写入会话工作目录的 `.naozhi/attachments/<日期>/`，Claude 用 Read 工具读取，与 Dashboard 上传的 PDF 是同一条路径。
+- 上限：单个文件 32 MiB；每条消息最多 5 个、合计 32 MiB，Slack 和 Discord 消息里的图片也计入（图片本身仍是 10 MiB）
+- docx / xlsx / zip 等其他类型、超限和下载失败的文件，bot 会回一条「以下文件未处理：」列出文件名和原因，消息里的文字和其余文件照常发送
+- Discord 在下载前先按文件名和类型筛选：PDF 需要 `.pdf` 文件名或 `application/pdf` 类型，文本文件需要上面列出的扩展名
+- 群聊里文件要和 @bot 在同一条消息里，否则与普通消息一样被忽略。飞书的文件消息没法 @bot，所以群里发的文件不处理，请私聊发送
+- 这些文件和 Dashboard 上传一样只按上传时间回收（`attachment-gc`，默认关闭），不开启就一直留在工作目录里
 
 所有平台开箱即用，**无需公网 IP**。
 
@@ -192,7 +199,7 @@ cli:
 
 - 所有会话列表（运行中 / 就绪 / 挂起）+ 实时状态更新
 - 事件流实时推送（thinking、tool_use、agent 调度、结果）
-- 直接在 Dashboard 发送消息、上传文件（图片）、按会话选择 backend
+- 直接在 Dashboard 发送消息、上传文件（图片、PDF）、按会话选择 backend
 - 会话级模型 / effort 切换：点击会话 header 的模型名或 effort 档位即可运行中切换（kiro 模型走 ACP `session/set_model`，claude 走 `set_model` control_request；effort 经优雅重启 + resume 生效，上下文保留），覆盖持久化、跨重启不弹回
 - 发现并接管外部 Claude CLI 进程（一键 Take Over）
 - 费用统计（per-session 累计 cost）
@@ -599,9 +606,10 @@ im_access:
 - 平台一旦有条目，名单外的人和没有用户 ID 的消息都会被拒绝，包括飞书 / Slack /
   Discord 卡片上的 AskUserQuestion 按钮回答。被拒的消息不会触发任何命令，也不会进
   CLI。注意卡片在鉴权之前就会变成"已回答"：名单外的人、被限流或超预算的点击同样会让
-  按钮消失，此时有权限的人请直接回复文字作答（与飞书一致）。飞书的语音和图片、Discord
-  的图片附件在下载前就判定：名单外的人发来的语音不下载、不转写（不产生 Transcribe
-  费用），图片不下载；群里的飞书语音因为没法 @bot 也不转写。
+  按钮消失，此时有权限的人请直接回复文字作答（与飞书一致）。飞书的语音、图片和文件，
+  Slack 上传的图片和文件，Discord 的附件都在下载前就判定：名单外的人发来的语音不下载、
+  不转写（不产生 Transcribe 费用），图片和文件不下载；群里的飞书语音、图片和文件因为
+  没法 @bot 也不下载。
 - **怎么拿用户 ID**：被拒的消息会在 Info 级别打一行 `im access denied`，`user`
   字段就是要填的 ID（飞书 open_id `ou_...`、Slack `U...`、Discord 用户 ID、微信
   `from`）。私聊里被拒的人也会收到带自己 ID 的提示，同一人 10 分钟最多一次；群里
