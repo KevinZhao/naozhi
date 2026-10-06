@@ -240,7 +240,7 @@ func TestBuildServer_SharesOneWSStack(t *testing.T) {
 	}
 	agents := map[string]session.AgentOpts{"a": {}}
 	srv, hs := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: router, Backend: "claude",
-		Scheduler: sched, ProjectManager: projects, Agents: agents, AllowedRoot: t.TempDir()})
+		Scheduler: sched, ProjectManager: projects, Routing: RoutingOptions{Agents: agents}, AllowedRoot: t.TempDir()})
 	t.Cleanup(srv.appCancel)
 	hub, w := srv.hub, hs.wiring
 

@@ -56,7 +56,7 @@ Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI, Kiro, or Codex) as
 ```
 cmd/naozhi/main.go
   组合根
-  -> wireup       组合根装配：backend 注册、config 校验、cron+sysession 调度器装配
+  -> wireup       组合根装配：backend 注册、config 校验、cron+sysession 调度器装配、server 与 upstream 共用的 KeyResolver
   -> config       YAML 加载、${ENV_VAR} 展开、校验
 
   核心链路（IM 消息 → CLI 进程）

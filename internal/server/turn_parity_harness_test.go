@@ -400,14 +400,13 @@ func newParityHarness(t *testing.T, o parityOpts) *parityHarness {
 		sched = cron.NewScheduler(cron.SchedulerConfig{MaxJobs: 5, StorePath: filepath.Join(t.TempDir(), "cron_jobs.json"), AllowNilRouter: true}, cron.SchedulerDeps{})
 	}
 	srv, hs := buildServerWithHandlers(ServerOptions{
-		Addr:          ":0",
-		Router:        router,
-		Platforms:     map[string]platform.Platform{parityPlatformName: p},
-		Backend:       "claude",
-		Agents:        o.agents,
-		AgentCommands: o.agentCommands,
-		Queue:         QueueOptions{MaxDepth: o.maxDepth, CollectDelay: o.collect, Mode: o.mode},
-		Scheduler:     sched,
+		Addr:      ":0",
+		Router:    router,
+		Platforms: map[string]platform.Platform{parityPlatformName: p},
+		Backend:   "claude",
+		Routing:   RoutingOptions{Agents: o.agents, AgentCommands: o.agentCommands},
+		Queue:     QueueOptions{MaxDepth: o.maxDepth, CollectDelay: o.collect, Mode: o.mode},
+		Scheduler: sched,
 	})
 	h := &parityHarness{t: t, srv: srv, hs: hs, router: router, plat: plat, sched: sched, im: srv.dispatcher.BuildHandler()}
 	h.imCtx, h.imCancel = context.WithCancel(context.Background())

@@ -9,10 +9,16 @@
 // ships) and runs them over log lines copied verbatim from real runs. It also
 // checks that flaky-report waits on every job that runs tests: a job missing
 // from its needs files nothing when it alone is red, and otherwise is reported
-// only if it happened to finish first.
+// only if it happened to finish first. Last, it checks Playwright's retries and
+// trace settings (config, projects, CI flags and per-spec overrides): a retry
+// turns a flake green before flaky-report sees it, and with no retry a trace
+// that records only on a retry records nothing.
+//
+// Loading the Playwright config needs test/e2e's npm install.
 //
 //   node scripts/check-flaky-report-parse.mjs
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -192,7 +198,132 @@ const needsCases = [
   },
 ];
 
+// Trace modes that record a test's first run, so a failure with no retry
+// still leaves trace.zip under test-results/.
+const RECORDS_FIRST_RUN = new Set(['on', 'retain-on-failure', 'retain-on-first-failure', 'retain-on-failure-and-retries']);
+
+// playwrightProblems() checks the config and every `playwright test` command
+// line, since a project or a CLI flag overrides the top-level setting.
+function playwrightProblems(config, commands) {
+  const out = [];
+  const modeOf = t => (t !== null && typeof t === 'object' ? t.mode : t);
+  if (!RECORDS_FIRST_RUN.has(modeOf(config.use?.trace))) {
+    out.push(`playwright.config.js: use.trace is ${JSON.stringify(config.use?.trace)}, which records nothing without a retry`);
+  }
+  for (const [where, scope] of [['playwright.config.js', config], ...(config.projects ?? []).map(p => [`playwright.config.js project ${p.name}`, p])]) {
+    if ((scope.retries ?? 0) !== 0) out.push(`${where}: retries is ${scope.retries}, want 0`);
+    const trace = scope.use?.trace;
+    if (scope !== config && trace !== undefined && !RECORDS_FIRST_RUN.has(modeOf(trace))) {
+      out.push(`${where}: use.trace is ${JSON.stringify(trace)}, which records nothing without a retry`);
+    }
+  }
+  for (const cmd of commands) {
+    const retries = cmd.match(/--retries[= ](\S+)/);
+    if (retries && retries[1] !== '0') out.push(`ci.yml: \`${cmd.trim()}\` passes --retries ${retries[1]}`);
+    const trace = cmd.match(/--trace[= ](\S+)/);
+    if (trace && !RECORDS_FIRST_RUN.has(trace[1])) out.push(`ci.yml: \`${cmd.trim()}\` passes --trace ${trace[1]}`);
+  }
+  return out;
+}
+
+const good = { retries: 0, use: { trace: 'retain-on-failure' }, projects: [{ name: 'desktop-chrome', use: {} }] };
+const playwrightCases = [
+  { what: 'retries 0 with a trace on failure passes', config: good, commands: ['npx playwright test --project=x'], want: 0 },
+  { what: 'the trace object form is read by its mode', config: { ...good, use: { trace: { mode: 'on' } } }, commands: [], want: 0 },
+  { what: "'on-first-retry' with no retry records nothing", config: { ...good, use: { trace: 'on-first-retry' } }, commands: [], want: 1 },
+  { what: 'a missing trace defaults to off', config: { ...good, use: {} }, commands: [], want: 1 },
+  { what: 'retries above 0 hides flakes from flaky-report', config: { ...good, retries: 1 }, commands: [], want: 1 },
+  { what: 'a project cannot re-add retries', config: { ...good, projects: [{ name: 'p', retries: 2 }] }, commands: [], want: 1 },
+  { what: 'a project cannot turn the trace off', config: { ...good, projects: [{ name: 'p', use: { trace: 'off' } }] }, commands: [], want: 1 },
+  { what: 'a CI command cannot pass --retries', config: good, commands: ['npx playwright test --retries=2'], want: 1 },
+  { what: 'a CI command cannot pass --trace off', config: good, commands: ['npx playwright test --trace off'], want: 1 },
+];
+
+// overrideProblems() checks the per-spec overrides: a spec's
+// test.describe.configure({ retries }) or test.use({ trace }) beats the config.
+// Each call's argument is cut out by balancing parentheses, so a nested
+// `viewport: { ... }` does not end it early.
+function overrideProblems(where, src) {
+  const out = [];
+  for (const m of src.matchAll(/\.(use|configure)\s*\(/g)) {
+    let depth = 1;
+    let i = m.index + m[0].length;
+    for (; i < src.length && depth > 0; i++) {
+      if (src[i] === '(') depth++;
+      else if (src[i] === ')') depth--;
+    }
+    const arg = src.slice(m.index + m[0].length, i - 1);
+    const call = `${where}: .${m[1]}(${arg.replace(/\s+/g, ' ').trim()})`;
+    const retries = arg.match(/\bretries\s*:\s*([^,}\s]+)/);
+    if (retries && retries[1] !== '0') out.push(`${call} sets retries ${retries[1]}, want 0`);
+    if (/\btrace\s*:/.test(arg)) {
+      const mode = arg.match(/\btrace\s*:\s*(?:\{[^}]*?\bmode\s*:\s*)?(['"])([\w-]+)\1/);
+      if (!mode || !RECORDS_FIRST_RUN.has(mode[2])) out.push(`${call} overrides trace with one that may record nothing without a retry`);
+    }
+  }
+  return out;
+}
+
+const overrideCases = [
+  { what: 'a viewport override is fine', src: "test.use({ viewport: { width: 1280, height: 800 } });", want: 0 },
+  { what: 'a spec cannot add retries', src: "test.describe.configure({ mode: 'serial', retries: 2 });", want: 1 },
+  { what: 'a spec may pin retries to 0', src: 'test.describe.configure({ retries: 0 });', want: 0 },
+  { what: 'a spec cannot turn the trace off past a nested object', src: "test.use({ viewport: { width: 1, height: 1 }, trace: 'off' });", want: 1 },
+  { what: 'a spec trace in object form is read by its mode', src: "test.use({ trace: { mode: 'retain-on-failure', snapshots: true } });", want: 0 },
+  { what: 'a spec trace set from a variable cannot be checked', src: 'test.use({ trace: mode });', want: 1 },
+];
+
+// specFiles() lists what Playwright's default testMatch picks up under testDir.
+function specFiles(dir) {
+  const out = [];
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (e.name === 'node_modules') continue;
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) out.push(...specFiles(full));
+    else if (/\.(spec|test)\.[cm]?[jt]sx?$/.test(e.name)) out.push(full);
+  }
+  return out;
+}
+
 let bad = 0;
+for (const c of playwrightCases) {
+  const got = playwrightProblems(c.config, c.commands);
+  if (got.length !== c.want) {
+    bad++;
+    console.error(`check-flaky-report-parse: ${c.what}\n  want ${c.want} problem(s)\n  got  ${JSON.stringify(got)}`);
+  }
+}
+for (const c of overrideCases) {
+  const got = overrideProblems('case', c.src);
+  if (got.length !== c.want) {
+    bad++;
+    console.error(`check-flaky-report-parse: ${c.what}\n  want ${c.want} problem(s)\n  got  ${JSON.stringify(got)}`);
+  }
+}
+// Resolve the config as CI does, so a `process.env.CI ? 2 : 0` fails locally too.
+process.env.CI ||= 'true';
+const E2E = path.join(ROOT, 'test', 'e2e');
+const pwConfig = createRequire(path.join(E2E, 'package.json'))('./playwright.config.js');
+const specs = specFiles(path.resolve(E2E, pwConfig.testDir ?? '.'));
+if (specs.length === 0) {
+  bad++;
+  console.error('check-flaky-report-parse: no spec files under test/e2e — did testDir move?');
+}
+for (const f of specs) {
+  for (const p of overrideProblems(path.relative(ROOT, f), fs.readFileSync(f, 'utf8'))) {
+    bad++;
+    console.error(`check-flaky-report-parse: ${p}`);
+  }
+}
+const pwCommands = yml.split('\n').filter(l => /\bplaywright test\b/.test(l));
+if (pwCommands.length === 0) {
+  bad++;
+  console.error('check-flaky-report-parse: no `playwright test` command in ci.yml — did the e2e jobs change shape?');
+}
+for (const p of playwrightProblems(pwConfig, pwCommands)) {
+  bad++;
+  console.error(`check-flaky-report-parse: ${p}`);
+}
 for (const c of needsCases) {
   const got = unwatched(c.yml, {}).missing;
   if (got.join(',') !== c.want.join(',')) {
@@ -228,4 +359,4 @@ if (bad > 0) {
   console.error(`check-flaky-report-parse: ${bad} check(s) failed — flaky-report would file the wrong issues, or none`);
   process.exit(1);
 }
-console.log(`check-flaky-report-parse: OK (${cases.length} log cases, ${needsCases.length} needs cases, ${testJobs.length} test jobs: ${testJobs.join(', ')})`);
+console.log(`check-flaky-report-parse: OK (${cases.length} log cases, ${needsCases.length} needs cases, ${playwrightCases.length} playwright cases, ${overrideCases.length} override cases, ${specs.length} specs, ${testJobs.length} test jobs: ${testJobs.join(', ')})`);

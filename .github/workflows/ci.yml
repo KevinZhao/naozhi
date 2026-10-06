@@ -408,6 +408,13 @@ jobs:
       - name: Test the markdown renderer
         run: node --test scripts/render-md.test.mjs
 
+      # file_ref_parse, nz_util, cron_format and session_ident are pure leaves:
+      # their formatters, escapers and key shapes are string-in, string-out, and
+      # the run-state / error-class / death_reason tables are read against the
+      # backend's wire values.
+      - name: Test the dashboard's leaf helpers
+        run: node --test scripts/dashboard-leaves.test.mjs
+
       # shell.js (S20f, #3026) is the upcall table; registerShell refusing a
       # missing or undeclared slot is what makes a forgotten registration
       # fail at boot instead of at the first click.

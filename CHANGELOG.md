@@ -10,6 +10,7 @@
 
 ### Added
 
+- **Slack：AskUserQuestion 渲染成可点击的按钮**（#3445）：单个问题的每个选项是一个按钮，点一下即提交答案并把卡片改成「✅ 已回答」；多个问题仍是只读列表，请在一条消息里一次回复全部。需要在 Slack app 设置里开启 Interactivity & Shortcuts（Socket Mode 无需 Request URL）；未开启时按钮无响应，卡片上提示可直接回复文字。超出 Block Kit 限制（25 个选项、文本过长）时回退为原来的纯文本列表
 - **cron：聊天里用 `/cron mode <id> fresh|keep` 切换任务的上下文模式**（#3406）：此前 IM 里只能在创建时用 `--keep-context` 决定，要换模式只能删掉重建（丢失 ID 与执行历史）
   - 只在创建该任务的会话生效（与 `/cron del/pause/resume` 相同的前缀匹配和跨会话屏蔽）；模式词不区分大小写，`keep-context` 等同 `keep`；设成当前模式也返回成功
   - 下次执行生效，正在执行的那次不受影响；与控制台编辑一样，连续失败计数（含瞬时故障计数）清零。任务处于暂停时不会自动恢复，回复里提示 `/cron resume <id>`
@@ -84,6 +85,7 @@
 
 ### Fixed
 
+- **kiro / codex 后端收到 dashboard 上传的 PDF 时改为提示模型用 Read 工具读取**（#3451）：ACP（kiro）与 codex 协议以前把每个附件都编码成图片块，PDF 因此变成 `media_type: application/pdf`、数据为空的图片，模型既看不到文件也不知道它已写入 workspace。现在两个后端与 Claude 后端走同一个 `clievent.UserTextAndInline`：PDF 只出现在用户文本前的 Read 提示里（workspace 相对路径 + 原文件名），图片块只来自真正的图片附件。
 - **`naozhi cost reconcile` 不再按 transcript 下调账本**（#3519）：按天残差以前双向记，transcript 用量比账本少超过 max($1, 5%) 的日子会写入负的 `Kind=adjust`。但 CLI 计费的请求并不都写进 transcript（取消或空闲后整段上下文重发的请求、后台请求，以及流式中途写下、比最终计费少的 output 计数），实测这类日子的差额正好等于这些没落行的用量，负残差会把 CLI 自报的正确花费调低。现在残差只往上补；账本高于 transcript 的日子只在报告里列出天数和金额（「账本高于 transcript 共 X，未下调」），包括 `--resume` 恢复额修正之后的余数。账本当天为负时补到 0 的规则不变
 - **naozhi 被强杀或崩溃后，最近一次保存会话状态之后已记的花费不再重复记账**（#3518）：会话状态每 30 秒才落盘一次，而 cost ledger 每条记录约 1 秒内就写盘。naozhi 非正常退出（SIGKILL、panic、OOM、断电）且 CLI 经 shim 存活、重启后重新接管时，下一条 result 按落后的基线做差，这段时间已经记过的花费会在 ledger 里再记一次。现在会话自己的 ledger 记录带上记账后的会话花费与累计基线，重启恢复时若 ledger 比会话状态新，就以 ledger 为准；CLI 未存活时，会话的累计花费也不再少算这段时间
 - **优雅重启时，在保存会话状态之后才报告的 turn 不再记两次费用**（#3428）：重启时 CLI 进程存活并在重启后重新接管，以前在会话状态保存之后、断开 shim 之前收到的 result（CLI 自己发起的 turn，或 30 秒关停等待超时后才结束的 turn）会立刻记入 cost ledger，但保存下来的累计基线还是旧值，重启后下一条 result 按旧基线做差，同一段花费又记一次。现在关停在保存前冻结记账，这段花费留给重启后的第一条 result 一并计入；它在 ledger 里归到下一个 run id 名下
