@@ -191,26 +191,39 @@ func TestCronSessionAdapter_SendReportsFailedTurn(t *testing.T) {
 	}
 }
 
-// TestExitFailure: a CLI exit claude made over a stale --resume becomes
-// cron.ErrTurnFailed with TurnCauseResumeUnavailable, the exit still in the
-// chain; every other error, including the other exit classes, passes through.
+// cliExitCauses are the exit classes exitFailure names, with their cause.
+var cliExitCauses = []struct {
+	class clierr.ExitClass
+	cause cron.TurnCause
+}{
+	{clierr.ExitResumeNotFound, cron.TurnCauseResumeUnavailable},
+	{clierr.ExitAuth, cron.TurnCauseBackendAuth},
+	{clierr.ExitMCPConfig, cron.TurnCauseCLIConfig},
+	{clierr.ExitMissingRuntime, cron.TurnCauseCLIMissingRuntime},
+}
+
+// TestExitFailure: a CLI exit whose stderr names a cause becomes
+// cron.ErrTurnFailed with that cause, the exit still in the chain; an
+// unrecognised exit and every other error pass through.
 func TestExitFailure(t *testing.T) {
 	t.Parallel()
-	resume := fmt.Errorf("send: %w", &clierr.ProcessExitedError{Code: 1, Class: clierr.ExitResumeNotFound})
-	err := exitFailure(resume)
-	var tf *cron.TurnFailedError
-	if !errors.As(err, &tf) || tf.Cause != cron.TurnCauseResumeUnavailable {
-		t.Fatalf("exitFailure(resume) = %v, want a TurnFailedError with TurnCauseResumeUnavailable", err)
-	}
-	var pe *clierr.ProcessExitedError
-	if !errors.Is(err, cron.ErrTurnFailed) || !errors.As(err, &pe) || pe.Code != 1 {
-		t.Errorf("exitFailure(resume) = %v, want ErrTurnFailed with the exit kept in the chain", err)
-	}
-	if got, want := err.Error(), "cron: turn failed: send: process exited during send (code 1)"; got != want {
-		t.Errorf("Error() = %q, want %q", got, want)
+	for _, tc := range cliExitCauses {
+		exit := fmt.Errorf("send: %w", &clierr.ProcessExitedError{Code: 1, Class: tc.class})
+		err := exitFailure(exit)
+		var tf *cron.TurnFailedError
+		if !errors.As(err, &tf) || tf.Cause != tc.cause {
+			t.Errorf("exitFailure(class %d) = %v, want a TurnFailedError with %q", tc.class, err, tc.cause)
+			continue
+		}
+		var pe *clierr.ProcessExitedError
+		if !errors.Is(err, cron.ErrTurnFailed) || !errors.As(err, &pe) || pe.Code != 1 || pe.Class != tc.class {
+			t.Errorf("exitFailure(class %d) = %v, want ErrTurnFailed with the exit kept in the chain", tc.class, err)
+		}
+		if got, want := err.Error(), "cron: turn failed: send: process exited during send (code 1)"; got != want {
+			t.Errorf("class %d: Error() = %q, want %q", tc.class, got, want)
+		}
 	}
 	for _, other := range []error{
-		&clierr.ProcessExitedError{Code: 1, Class: clierr.ExitAuth},
 		&clierr.ProcessExitedError{Code: 1, Class: clierr.ExitUnknown},
 		clierr.ErrProcessExited,
 		clierr.ErrNoOutputTimeout,
@@ -222,24 +235,27 @@ func TestExitFailure(t *testing.T) {
 	}
 }
 
-// TestCronSessionAdapter_SendNamesResumeUnavailable drives the adapter over a
-// real ManagedSession whose Send fails with claude's stale-resume exit.
-func TestCronSessionAdapter_SendNamesResumeUnavailable(t *testing.T) {
+// TestCronSessionAdapter_SendNamesCLIExitCause drives the adapter over a real
+// ManagedSession whose Send fails with each named CLI exit.
+func TestCronSessionAdapter_SendNamesCLIExitCause(t *testing.T) {
 	t.Parallel()
 	r := session.NewRouter(session.RouterConfig{})
 	t.Cleanup(r.Shutdown)
-	proc := session.NewTestProcess()
-	proc.SendFunc = func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
-		return nil, &clierr.ProcessExitedError{Code: 1, Class: clierr.ExitResumeNotFound}
-	}
-	a := cronSessionAdapter{s: r.InjectSession("cron:job-stale-resume", proc)}
-	_, err := a.Send(context.Background(), "ping")
-	var tf *cron.TurnFailedError
-	if !errors.As(err, &tf) || tf.Cause != cron.TurnCauseResumeUnavailable {
-		t.Fatalf("Send err = %v, want a TurnFailedError with TurnCauseResumeUnavailable", err)
-	}
-	if !errors.Is(err, clierr.ErrProcessExited) {
-		t.Errorf("Send err = %v, want the exit kept in the chain", err)
+	for _, tc := range cliExitCauses {
+		proc := session.NewTestProcess()
+		proc.SendFunc = func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
+			return nil, &clierr.ProcessExitedError{Code: 1, Class: tc.class}
+		}
+		a := cronSessionAdapter{s: r.InjectSession(fmt.Sprintf("cron:job-exit-%d", tc.class), proc)}
+		_, err := a.Send(context.Background(), "ping")
+		var tf *cron.TurnFailedError
+		if !errors.As(err, &tf) || tf.Cause != tc.cause {
+			t.Errorf("class %d: Send err = %v, want a TurnFailedError with %q", tc.class, err, tc.cause)
+			continue
+		}
+		if !errors.Is(err, clierr.ErrProcessExited) {
+			t.Errorf("class %d: Send err = %v, want the exit kept in the chain", tc.class, err)
+		}
 	}
 }
 
