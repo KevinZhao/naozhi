@@ -154,6 +154,15 @@ func TestFileAttachments_Caps(t *testing.T) {
 		}
 	})
 
+	t.Run("aggregate bytes at the cap", func(t *testing.T) {
+		a := bytes.Repeat([]byte("a"), limits.MaxFileAttachmentBytes/2)
+		b := bytes.Repeat([]byte("b"), limits.MaxFileAttachmentBytes-len(a))
+		acc, notice := fileAttachments([]platform.File{{Name: "a.txt", Data: a}, {Name: "b.txt", Data: b}})
+		if len(acc) != 2 || notice != "" {
+			t.Errorf("accepted %d, notice %q; want both files at exactly the aggregate cap", len(acc), notice)
+		}
+	})
+
 	t.Run("notice lists a bounded number of files", func(t *testing.T) {
 		var files []platform.File
 		for i := 0; i < limits.MaxFileAttachmentsPerMessage+3; i++ {
