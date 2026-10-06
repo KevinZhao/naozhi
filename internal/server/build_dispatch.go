@@ -53,6 +53,7 @@ func (s *Server) buildDispatcher(w *wiring) *dispatch.Dispatcher {
 		AllowedRoot:           w.allowedRoot,
 		Access:                w.imAccess,
 		RateLimit:             w.imRateLimit,
+		Budget:                w.imBudget,
 		ClaudeDir:             s.claudeDir,
 		Capabilities:          serverCaps{s: s},
 		NoOutputTimeout:       s.noOutputTimeout,

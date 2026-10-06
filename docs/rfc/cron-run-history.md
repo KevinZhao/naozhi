@@ -442,6 +442,7 @@ session events 面板里多次 cron 触发的 user 消息混在一起。在 cron
 | 现有代码位置 | 旧 LastError 文本 | ErrorClass |
 |---|---|---|
 | jobRunningGuard CAS=false | (无；只 slog) | `overlap_skipped` (skipped) |
+| budgetSkipped: `cost.budget` spent for the job or machine | "daily budget spent (...)" | `budget_exceeded` (skipped) |
 | freshContextPreflight ctx.Err | (无) | `canceled` (canceled) |
 | freshContextPreflight !workDirReachable | "work_dir unreachable" | `workdir_unreachable` (failed) |
 | executeOpt allowedRoot 失败 | "work_dir outside allowed_root" | `workdir_outside_root` (failed) |

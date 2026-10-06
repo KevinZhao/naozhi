@@ -103,6 +103,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		projectsRoot:  claudefs.ResolvedProjectsRoot(claudeDir),
 		imAccess:      opts.IMAccess,
 		imRateLimit:   opts.IMRateLimit,
+		imBudget:      opts.IMBudget,
 		debugMode:     opts.Features.Debug,
 		resolver:      resolver,
 		sysessionMgr:  opts.Sysession.Manager,

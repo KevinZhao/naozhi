@@ -360,6 +360,9 @@ const (
 	// ErrClassSessionCapacity marks a run skipped because GetOrCreate hit the
 	// router's session caps (ErrSessionCapacity): contention, not a job fault.
 	ErrClassSessionCapacity = runtelemetry.ErrClassCronSessionCapacity
+	// ErrClassBudgetExceeded marks a run skipped because cost.budget's cap
+	// for the job or the machine is spent for the day.
+	ErrClassBudgetExceeded = runtelemetry.ErrClassCronBudgetExceeded
 	// ErrClassTurnFailed marks a run whose Send returned a result the backend
 	// flagged as an error (ErrTurnFailed): max turns, an RPC rejection, a
 	// failed codex turn. The CLI ran; the turn did not succeed.

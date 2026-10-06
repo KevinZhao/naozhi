@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/naozhi/naozhi/internal/budget"
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -52,6 +53,9 @@ type SchedulersDeps struct {
 
 	// BuildSysession constructs the sysession Manager (see SysessionBuilder).
 	BuildSysession SysessionBuilder
+
+	// Budget refuses cron runs past cost.budget; nil runs every job.
+	Budget *budget.Gate
 }
 
 // Schedulers holds the constructed subsystem instances for caller-side
@@ -103,6 +107,12 @@ func (b *Boot) WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 			"err", sandboxErr)
 	}
 
+	// A nil *Gate stays a nil interface, so cron skips the check entirely.
+	var budgetGate cron.BudgetGate
+	if deps.Budget != nil {
+		budgetGate = deps.Budget
+	}
+
 	scheduler := cron.NewScheduler(cron.SchedulerConfig{
 		StorePath:     deps.CronStorePath,
 		MaxJobs:       deps.Cfg.Cron.MaxJobs,
@@ -122,6 +132,7 @@ func (b *Boot) WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 		Telemetry:     deps.Telemetry,
 		Sandbox:       sandboxRunner,
 		Ledger:        deps.Router.Runs().CostLedger(),
+		Budget:        budgetGate,
 	})
 	if err := scheduler.Start(); err != nil {
 		return out, fmt.Errorf("start cron scheduler: %w", err)

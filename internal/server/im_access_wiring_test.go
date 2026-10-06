@@ -4,7 +4,10 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/naozhi/naozhi/internal/budget"
+	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/imauth"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -61,5 +64,31 @@ func TestServerOptions_IMRateLimitReachesDispatcher(t *testing.T) {
 	}
 	if got := plat.allReplies(); len(got) != 2 || !strings.Contains(got[1], "消息过于频繁") {
 		t.Fatalf("replies = %q, want /help's answer then the rate-limit reply", got)
+	}
+}
+
+// ServerOptions.IMBudget reaches the same dispatcher: with the machine's
+// daily cap spent, a message gets the budget refusal instead of a turn.
+func TestServerOptions_IMBudgetReachesDispatcher(t *testing.T) {
+	plat := newParityPlatform(false)
+	idx := budget.NewIndex(time.UTC, nil)
+	idx.Add(costledger.Entry{TS: time.Now(), Unit: costledger.UnitUSD, Amount: 1})
+	srv, _ := buildServerWithHandlers(ServerOptions{
+		Addr:      ":0",
+		Router:    session.NewRouter(session.RouterConfig{}),
+		Platforms: map[string]platform.Platform{parityPlatformName: plat},
+		Backend:   "claude",
+		IMBudget:  budget.NewGate(budget.Limits{DailyUSD: 1}, idx),
+	})
+	t.Cleanup(func() {
+		srv.hub.Shutdown()
+		srv.appCancel()
+	})
+	srv.dispatcher.BuildHandler()(context.Background(), platform.IncomingMessage{
+		Platform: parityPlatformName, EventID: "e1", UserID: "alice",
+		ChatID: parityChatID, ChatType: "direct", Text: "hello",
+	})
+	if got := plat.allReplies(); len(got) != 1 || !strings.Contains(got[0], "今日费用预算已用尽") {
+		t.Fatalf("replies = %q, want the budget refusal", got)
 	}
 }

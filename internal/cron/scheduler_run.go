@@ -344,6 +344,12 @@ func (s *Scheduler) executeAcquired(jobID string, viaTriggerNow bool, inflight *
 	}
 	started.rc = &rc
 
+	// Before the marker and the spawn, so a refused run leaves neither; sandbox
+	// runs are refused too.
+	if s.budgetSkipped(rc) {
+		return
+	}
+
 	// Restart fate for this run (Epic H #2546): the marker says "still in flight".
 	// finishRun removes it on every terminal state; anything left at the next boot
 	// becomes a canceled record with ErrClassInterrupted. Written AFTER the
