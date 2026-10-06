@@ -156,24 +156,52 @@ func (d *Discord) stopped() bool {
 var errProbeRateLimited = errors.New("discord REST bucket exhausted; probe skipped")
 
 // fetchSelf asks REST who the bot is, bounded by probeTimeout and by Stop.
-// The 429 retry is off: discordgo would sleep it out ignoring ctx. The
-// pre-request bucket wait also ignores ctx, so it is checked first and an
-// exhausted bucket yields errProbeRateLimited instead of a blocking call.
+// The 429 retry is off: discordgo would sleep it out ignoring ctx. Its
+// pre-request bucket wait ignores ctx too: an exhausted bucket yields
+// errProbeRateLimited without a call, and a bucket another request holds is
+// waited on in a goroutine abandoned at the deadline, which then fails at
+// once on the cancelled ctx.
 func (d *Discord) fetchSelf(sess *discordgo.Session) (*discordgo.User, error) {
 	parent := d.stopCtx
 	if parent == nil {
 		parent = context.Background()
 	}
-	if rl := sess.Ratelimiter; rl != nil {
-		// Same bucket key Session.User uses (EndpointUsers). Any pending wait
-		// would be an uninterruptible sleep; the probe loop retries anyway.
-		if rl.GetWaitTime(rl.GetBucket(discordgo.EndpointUsers), 1) > 0 {
-			return nil, errProbeRateLimited
-		}
+	if usersBucketExhausted(sess) {
+		return nil, errProbeRateLimited
 	}
 	ctx, cancel := context.WithTimeout(parent, durationOr(d.probeTimeout, discordProbeTimeout))
 	defer cancel()
-	return sess.User("@me", discordgo.WithContext(ctx), discordgo.WithRetryOnRatelimit(false))
+	type result struct {
+		u   *discordgo.User
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		u, err := sess.User("@me", discordgo.WithContext(ctx), discordgo.WithRetryOnRatelimit(false))
+		done <- result{u, err}
+	}()
+	select {
+	case r := <-done:
+		return r.u, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// usersBucketExhausted reports whether Session.User (bucket EndpointUsers)
+// would sleep before sending. A bucket held by a request in flight is not
+// read, since that request updates it under the lock.
+func usersBucketExhausted(sess *discordgo.Session) bool {
+	rl := sess.Ratelimiter
+	if rl == nil {
+		return false
+	}
+	b := rl.GetBucket(discordgo.EndpointUsers)
+	if !b.TryLock() {
+		return false
+	}
+	defer b.Unlock()
+	return rl.GetWaitTime(b, 1) > 0
 }
 
 func (d *Discord) Name() string { return "discord" }
