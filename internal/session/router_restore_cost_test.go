@@ -60,6 +60,42 @@ func TestRestore_CrashAfterSaveBooksTheGapOnce(t *testing.T) {
 	}
 }
 
+// A store saved before the first result has baseline 0, which restore
+// takes as a known per-model baseline. Adopting a mark makes it unknown
+// again, so the first reattached turn does not report the CLI's whole
+// per-model cumulative as its own.
+func TestRestore_AdoptedMarkWithholdsTheFirstTurnsModels(t *testing.T) {
+	opus := func(cost float64) clievent.SendResult {
+		return clievent.SendResult{CostUSD: cost, ModelUsage: map[string]clievent.ModelUsage{
+			"claude-opus-5-5": {OutputTokens: int64(cost * 1000), CostUSD: cost}}}
+	}
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	r, _, proc := startCostRouter(t, storePath)
+	r.saveIfDirty()
+	if e := loadStore(storePath)[shutdownCostKey]; e == nil || e.LastCumulativeCost != 0 {
+		t.Fatalf("saved entry = %+v, want baseline 0", e)
+	}
+	proc.fn(opus(3))
+	r.runs.cost.ledger.Close()
+
+	r2 := newCostRouter(t, storePath)
+	s, ok := lookupT(r2, shutdownCostKey)
+	if !ok {
+		t.Fatal("session not restored")
+	}
+	next := &hookedTestProcess{TestProcess: &TestProcess{AliveVal: true}}
+	s.storeProcess(next)
+	bookUnownedResults(s, next)
+	next.fn(opus(4))
+	tot := s.CostTotals()
+	if !approxEq(tot.USD, 4) {
+		t.Errorf("restored spend = %v, want 4", tot.USD)
+	}
+	if mu, ok := tot.Models["claude-opus-5-5"]; ok {
+		t.Fatalf("first reattached turn booked models %+v, want them withheld", mu)
+	}
+}
+
 // Spend booked after the last marked row without a row of its own (a cron
 // window's) leaves the store ahead of the mark, so the store's baseline wins.
 func TestRestore_StoreAheadOfTheMarkKeepsTheStoreBaseline(t *testing.T) {

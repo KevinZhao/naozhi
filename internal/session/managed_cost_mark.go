@@ -85,17 +85,19 @@ func (c *costAccounting) sessionMarks(since, now time.Time) map[costMarkKey]cost
 // per-model baseline stays unknown, as after any restore.
 func (s *ManagedSession) adoptCostMark(m costledger.SessionMark) bool {
 	s.costMu.Lock()
-	defer s.costMu.Unlock()
-	stored := loadTotalCost(&s.costSpent)
-	if m.Spent <= stored {
-		return false
+	stored, storedBase := loadTotalCost(&s.costSpent), loadTotalCost(&s.lastCumulativeCost)
+	adopt := m.Spent > stored
+	if adopt {
+		storeTotalCost(&s.costSpent, m.Spent)
+		storeTotalCost(&s.lastCumulativeCost, m.Cum)
+		s.lastCumulative = costledger.Cumulative{USD: m.Cum}
+		s.modelsBaselineUnknown = true
 	}
-	slog.Info("cost: restored session's baseline taken from the ledger, which is ahead of the store",
-		"key", osutil.SanitizeForLog(s.key, 128), "store_spent", stored, "store_baseline", loadTotalCost(&s.lastCumulativeCost),
-		"ledger_spent", m.Spent, "ledger_baseline", m.Cum)
-	storeTotalCost(&s.costSpent, m.Spent)
-	storeTotalCost(&s.lastCumulativeCost, m.Cum)
-	s.lastCumulative = costledger.Cumulative{USD: m.Cum}
-	s.modelsBaselineUnknown = true
-	return true
+	s.costMu.Unlock()
+	if adopt {
+		slog.Info("cost: restored session's baseline taken from the ledger, which is ahead of the store",
+			"key", osutil.SanitizeForLog(s.key, 128), "store_spent", stored, "store_baseline", storedBase,
+			"ledger_spent", m.Spent, "ledger_baseline", m.Cum)
+	}
+	return adopt
 }
