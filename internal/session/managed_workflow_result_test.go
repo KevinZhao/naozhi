@@ -109,8 +109,8 @@ func TestWorkflowBoard_ResultUnresolved(t *testing.T) {
 	if _, st := r.b.Result(context.Background(), "w1"); st != ResultUnavailable {
 		t.Errorf("resolving: %v, want ResultUnavailable", st)
 	}
-	close(d.resolveGate)
 	d.missing.Store(true)
+	close(d.resolveGate)
 	r.settleIO(t)
 	if _, st := r.b.Result(context.Background(), "w1"); st != ResultUnavailable {
 		t.Errorf("failed resolution: %v, want ResultUnavailable", st)
@@ -274,5 +274,141 @@ func TestWorkflowBoard_ResultLiveEntryOtherTasksFile(t *testing.T) {
 	}
 	if r.b.cachedResult("w1") != nil || r.entry(t, "w1").Source == workflow.SourceResultFile {
 		t.Error("another task's file was cached or merged")
+	}
+}
+
+// TestWorkflowBoard_ResultReadWakesWaiter: a board that queued for a slot
+// while a Result read held the last one is pumped when that read ends.
+func TestWorkflowBoard_ResultReadWakesWaiter(t *testing.T) {
+	pool := newIOPool(1)
+	d := newFakeDisk()
+	r := diskRig(t, d)
+	r.b.io.pool = pool
+	r.b.restore("k", []workflow.Ref{{TaskID: "w1", RunID: wfRun, SessionID: wfSID, Status: workflow.StatusCompleted, EndedAt: wfT0 - 60_000}}, "/ws", r.now())
+	r.settleIO(t)
+	d.put(wfRun, resultFile("w1"))
+	gate := make(chan struct{})
+	r.b.disk.read = func(root string, run workflowRun) (*workflow.ResultFile, error) {
+		<-gate
+		return d.disk().read(root, run)
+	}
+	got := make(chan ResultStatus, 1)
+	go func() {
+		_, st := r.b.Result(context.Background(), "w1")
+		got <- st
+	}()
+	testhelper.Eventually(t, func() bool {
+		r.b.mu.Lock()
+		defer r.b.mu.Unlock()
+		return r.b.resultWait["w1"] != nil
+	}, 5*time.Second, "no read started")
+
+	other := newFakeDisk()
+	r2 := diskRig(t, other)
+	r2.b.io.pool = pool
+	p := &setProc{}
+	p.publish(runningWithRun("w1", "wf_eeeeeeee-555"))
+	r2.b.bind(p, "/ws")
+	pool.mu.Lock()
+	waiting := len(pool.waiting)
+	pool.mu.Unlock()
+	if waiting != 1 || other.resolves.Load() != 0 {
+		t.Fatalf("%d boards waiting, %d resolves; want the second board queued behind the Result read", waiting, other.resolves.Load())
+	}
+	close(gate)
+	if st := <-got; st != ResultReady {
+		t.Fatalf("Result = %v", st)
+	}
+	testhelper.Eventually(t, func() bool { return other.resolves.Load() == 1 }, 5*time.Second, "the waiting board was never pumped")
+}
+
+// TestWorkflowBoard_ResultReadCountsForSweep: a Result read that found no
+// file is the sweeper's latest read too; its next comes 30s after it.
+func TestWorkflowBoard_ResultReadCountsForSweep(t *testing.T) {
+	d := newFakeDisk()
+	r := restoredEnded(t, d)
+	r.advance(25 * time.Second)
+	if _, st := r.b.Result(context.Background(), "w1"); st != ResultUnavailable {
+		t.Fatalf("Result = %v, want ResultUnavailable", st)
+	}
+	r.sweepAfter(t, 6*time.Second) // 31s after the backfill, 6s after Result's read
+	if n := d.reads.Load(); n != 2 {
+		t.Errorf("%d reads, want the backfill and Result's: no sweep read 6s after Result's", n)
+	}
+	r.sweepAfter(t, 25*time.Second)
+	if n := d.reads.Load(); n != 3 {
+		t.Errorf("%d reads, want a sweep read 31s after Result's", n)
+	}
+}
+
+// TestWorkflowBoard_ResultWaitsForTrackerMerge: a read of a live entry's
+// file writes the cache before the Tracker merges it; a Result call in
+// between waits for the merge rather than serving the cache next to rows
+// not yet published, whether a sweep or another Result call read the file.
+func TestWorkflowBoard_ResultWaitsForTrackerMerge(t *testing.T) {
+	for _, viaSweep := range []bool{true, false} {
+		name := "read by Result"
+		if viaSweep {
+			name = "read by the sweeper"
+		}
+		t.Run(name, func(t *testing.T) {
+			d := newFakeDisk()
+			r := diskRig(t, d)
+			p := &setProc{}
+			ended := runningWithRun("w1", wfRun)
+			ended.Status, ended.EndedAt, ended.LastObservedAt = workflow.StatusCompleted, wfT0, wfT0
+			p.publish(ended)
+			r.b.bind(p, "/ws")
+			r.settleIO(t)
+			d.put(wfRun, resultFile("w1"))
+			entered, gate := make(chan struct{}), make(chan struct{})
+			p.onApply = func(*workflow.ResultFile) {
+				close(entered)
+				<-gate
+			}
+			first := make(chan ResultStatus, 1)
+			if viaSweep {
+				r.advance(31 * time.Second)
+				r.b.sweep(r.now())
+			} else {
+				go func() {
+					_, st := r.b.Result(context.Background(), "w1")
+					first <- st
+				}()
+			}
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the Tracker merge never started")
+			}
+			if r.b.cachedResult("w1") == nil {
+				t.Fatal("no cache before the Tracker merge")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			_, st := r.b.Result(ctx, "w1")
+			cancel()
+			if st != ResultUnavailable {
+				t.Errorf("Result during the Tracker merge = %v, want it to wait for the merge", st)
+			}
+			close(gate)
+			if c, st := r.b.Result(context.Background(), "w1"); st != ResultReady || c == nil {
+				t.Fatalf("Result after the merge = %v, %v", c, st)
+			}
+			if w := r.entry(t, "w1"); w.Source != workflow.SourceResultFile || len(w.Agents) != 3 {
+				t.Errorf("source %s, %d rows when Result returned; want the merge published", w.Source, len(w.Agents))
+			}
+			if !viaSweep {
+				if st := <-first; st != ResultReady {
+					t.Errorf("the reading Result call = %v", st)
+				}
+			}
+			r.settleIO(t)
+			r.b.mu.Lock()
+			left := len(r.b.resultWait)
+			r.b.mu.Unlock()
+			if left != 0 {
+				t.Errorf("%d waits left behind", left)
+			}
+		})
 	}
 }

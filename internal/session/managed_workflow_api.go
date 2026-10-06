@@ -107,12 +107,14 @@ func (b *WorkflowBoard) Result(ctx context.Context, taskID string) (*workflow.Re
 		b.mu.Unlock()
 		return nil, ResultNone
 	}
-	if c := b.cache[taskID]; c != nil {
-		b.mu.Unlock()
-		return c, ResultReady
-	}
+	// A read landing (its Tracker merge still to publish) comes before the
+	// cache it has already written.
 	done := b.resultWait[taskID]
 	if done == nil {
+		if c := b.cache[taskID]; c != nil {
+			b.mu.Unlock()
+			return c, ResultReady
+		}
 		rs := b.resolve[taskID]
 		if rs == nil || !rs.ok || b.disk.read == nil || !b.io.pool.tryAcquire() {
 			b.mu.Unlock()

@@ -73,8 +73,8 @@ type WorkflowBoard struct {
 	disk    workflowDisk
 	io      ioDispatch
 	cache   map[string]*workflow.ResultCache
-	// resultWait holds the read a Result call started per task, which the
-	// calls arriving meanwhile wait on.
+	// resultWait holds per task what Result calls wait on: the read a
+	// Result call started, or a landed read's Tracker merge still to run.
 	resultWait map[string]chan struct{}
 	// For the current bind: the tasks its Tracker reported (R5), the ones
 	// a run dir scan was started for (R3a), and the reconciliation read

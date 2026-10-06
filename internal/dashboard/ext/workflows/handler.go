@@ -179,7 +179,7 @@ func (h *Handler) HandleWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := WorkflowResponse{ServerNow: h.now().UnixMilli()}
+	var resp WorkflowResponse
 	if workflow.IsTerminal(wf.Status) {
 		// Reading the result file may merge rows into the board, so the
 		// workflow served is the one after the call.
@@ -209,6 +209,9 @@ func (h *Handler) HandleWorkflow(w http.ResponseWriter, r *http.Request) {
 		resp.RowsMode, rows = RowsDelta, newerRows(wf.Agents, rq.since)
 	}
 	resp.Epoch, resp.Version, resp.Workflow = pub.Epoch, wf.Version, wf.Wire(rows)
+	// Stamped last: the client calibrates its clock on it, and Result may
+	// have waited seconds.
+	resp.ServerNow = h.now().UnixMilli()
 	httputil.WriteJSON(w, resp)
 }
 

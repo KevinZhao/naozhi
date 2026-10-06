@@ -143,8 +143,9 @@ func (b *WorkflowBoard) enqueueReadLocked(p *workflow.Workflow, rs *resolveState
 // applyReadLocked lands a result file read for task id under rs. A file
 // naming the entry merges: the result cache is written first, then the
 // Tracker merges a live entry (the returned func, run once b.mu is
-// released) or the board merges its own. Anything else leaves the entry as
-// it is, except that a miss verdict still true now settles it.
+// released; Result calls meanwhile wait on resultWait) or the board merges
+// its own. Anything else leaves the entry as it is, except that a miss
+// verdict still true now settles it.
 func (b *WorkflowBoard) applyReadLocked(id string, rs *resolveState, rf *workflow.ResultFile, err error, miss missVerdict) func() {
 	st := b.last[id]
 	if b.resolve[id] != rs || st == nil || st.pub.ResultLoaded {
@@ -162,7 +163,21 @@ func (b *WorkflowBoard) applyReadLocked(id string, rs *resolveState, rf *workflo
 	if st.live && b.proc != nil {
 		b.cache[id] = workflow.NewResultCache(rf)
 		proc := b.proc
+		merged := b.resultWait[id] // a Result read's, which clears it itself
+		own := merged == nil
+		if own {
+			merged = make(chan struct{})
+			b.resultWait[id] = merged
+		}
 		return func() {
+			if own {
+				defer func() {
+					b.mu.Lock()
+					delete(b.resultWait, id)
+					b.mu.Unlock()
+					close(merged)
+				}()
+			}
 			if !proc.ApplyWorkflowResult(rf) {
 				b.mu.Lock()
 				b.mergeRetainedLocked(id, rf)
@@ -192,14 +207,14 @@ func (b *WorkflowBoard) readForResultLocked(p *workflow.Workflow, rs *resolveSta
 			defer b.mu.Unlock()
 			after = b.applyReadLocked(id, rs, rf, err, missNothing)
 		})
-		b.mu.Lock()
-		delete(b.resultWait, id)
-		b.mu.Unlock()
 		b.io.pool.release()
 		b.io.pool.wakeWaiter()
 		if after != nil {
 			guardWorkflowIO(after)
 		}
+		b.mu.Lock()
+		delete(b.resultWait, id)
+		b.mu.Unlock()
 		close(done)
 	}()
 	return done

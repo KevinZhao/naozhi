@@ -33,15 +33,16 @@ func (denyAll) AllowRequest(*http.Request) bool { return false }
 
 // fakeBoard publishes what a test sets and answers Result as configured.
 // merge, when set, replaces the publication during Result, as a read that
-// merged the file's rows would.
+// merged the file's rows would; onResult runs inside Result.
 type fakeBoard struct {
-	mu      sync.Mutex
-	pub     *workflow.Published
-	cache   *workflow.ResultCache
-	status  session.ResultStatus
-	merge   *workflow.Published
-	calls   int
-	lastCtx context.Context
+	mu       sync.Mutex
+	pub      *workflow.Published
+	cache    *workflow.ResultCache
+	status   session.ResultStatus
+	merge    *workflow.Published
+	calls    int
+	lastCtx  context.Context
+	onResult func()
 }
 
 func (b *fakeBoard) Published() *workflow.Published {
@@ -57,6 +58,9 @@ func (b *fakeBoard) Result(ctx context.Context, _ string) (*workflow.ResultCache
 	b.lastCtx = ctx
 	if b.merge != nil {
 		b.pub = b.merge
+	}
+	if b.onResult != nil {
+		b.onResult()
 	}
 	return b.cache, b.status
 }
@@ -226,14 +230,22 @@ func TestHandleWorkflow_NotFound(t *testing.T) {
 }
 
 // TestHandleWorkflow_RealSessions runs the production lookup against a
-// router: a key with no session, and a session that never held a process
-// (nil board), are both 404 and neither panics.
+// router: a key with no session, and sessions that never held a process
+// (injected, or a discovery stub: nil board), are all 404 and none panics.
 func TestHandleWorkflow_RealSessions(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{MaxProcs: 3})
 	router.InjectSession(testKey, nil)
+	const stubKey = "dashboard:direct:stub:general"
+	router.RegisterForResume(stubKey, "0b7d5a8e-3c1f-4e2a-9d6b-5f4e3a2b1c0d", t.TempDir(), "")
+	if router.SessionFor(stubKey) == nil {
+		t.Fatal("no discovery stub registered")
+	}
 	h := New(Deps{Router: router, Limiter: allowAll{}})
 	if rec := get(h, q()); rec.Code != http.StatusNotFound {
 		t.Errorf("session without a board: %d, want 404", rec.Code)
+	}
+	if rec := get(h, "key="+url.QueryEscape(stubKey)+"&task_id=w1"); rec.Code != http.StatusNotFound {
+		t.Errorf("discovery stub: %d, want 404", rec.Code)
 	}
 	if rec := get(h, "key=dashboard:direct:u2:general&task_id=w1"); rec.Code != http.StatusNotFound {
 		t.Errorf("no such session: %d, want 404", rec.Code)
@@ -318,6 +330,20 @@ func TestHandleWorkflow_ServesTheMergedState(t *testing.T) {
 	board = &fakeBoard{pub: pub(before), merge: pub(), status: session.ResultUnavailable}
 	if resp, _ := decode(t, get(newHandler(board), q())); resp.Version != 4 {
 		t.Errorf("evicted during Result: version %d, want the one read before", resp.Version)
+	}
+}
+
+// TestHandleWorkflow_ServerNowAfterResult: server_now is the clock when the
+// response is written, not when the request arrived, however long Result
+// waited.
+func TestHandleWorkflow_ServerNowAfterResult(t *testing.T) {
+	clock := nowMS
+	board := &fakeBoard{pub: pub(wf("w1", workflow.StatusCompleted, 4, nil)), status: session.ResultUnavailable}
+	board.onResult = func() { clock += 3000 }
+	h := newHandler(board)
+	h.now = func() time.Time { return time.UnixMilli(clock) }
+	if resp, _ := decode(t, get(h, q())); resp.ServerNow != nowMS+3000 {
+		t.Errorf("server_now %d, want %d: the clock after Result", resp.ServerNow, nowMS+3000)
 	}
 }
 

@@ -1666,7 +1666,9 @@ func (b *WorkflowBoard) WorkflowAgent(agentID string) (workflow.AgentLoc, bool) 
 // Result 给 HTTP 用：缓存命中直接返回；缺失且条目终态、RunID 已知、RunDir 已解析时按 task singleflight 发起一次读取（占一个全局 I/O 槽位，
 // 取不到即返回 ResultUnavailable、不等待），读完在 b.mu 内复核 taskId 与条目代数后经 MergeResultFile 合入行、总计与缓存并发布（§6.2.1）。
 // （PR-10：终态但没有 RunID 的条目返回 ResultNone——不会有结果文件；读取与 R0 补行 / sweeper 共用同一个落地函数 applyReadLocked，但不经 board 的
-// 两个任务位，singleflight 的读取直接占调用方已取到的全局槽位；等待读取的调用方受 ctx 约束，ctx 到期返回 ResultUnavailable、读取照常落地。）
+// 两个任务位，singleflight 的读取直接占调用方已取到的全局槽位；等待读取的调用方受 ctx 约束，ctx 到期返回 ResultUnavailable、读取照常落地。
+// 活条目的读取（不论 Result 还是 sweeper 发起）先写缓存、解锁后才由 Tracker 合入，这段时间 resultWait 里挂着一条等待，Result 先查它再查缓存，
+// 所以返回时 Published 一定已含文件带来的行与总计。）
 func (b *WorkflowBoard) Result(ctx context.Context, taskID string) (*workflow.ResultCache, ResultStatus) // ResultReady | ResultUnavailable | ResultNone（非终态）
 // AgentTranscript 给 drill-in 用（§8.2、§8.3）：隐藏 os.Root 与 rel。Open 每次调用都在锁外 os.OpenRoot(projectsRoot) + OpenRegularIn(root, rel, 0)
 // 并关闭 root（已打开的 fd 不受影响）；RunSessionID 是 RunDir rel 里的 <sid>，首行身份校验与它比较。
@@ -2007,7 +2009,7 @@ handler 不放 `internal/server`；dashboard 文件上限 800 行），只有一
 #### 6.2.1 `GET /api/sessions/workflow?key=&node=&task_id=[&rows=none | &since=&epoch=]`
 
 返回 `{epoch, version, server_now, rows_mode, workflow: WireView, result?: {text, truncated}, logs?: [string],
-logs_truncated?, result_unavailable?}`。`version` 与 WS 帧同一空间；`server_now`（ms）供客户端在没有 WS 帧时也能校准时钟（§7.4）。
+logs_truncated?, result_unavailable?}`。`version` 与 WS 帧同一空间；`server_now`（ms）供客户端在没有 WS 帧时也能校准时钟（§7.4）（PR-10：在 `Result` 等待之后、写响应前取，等待最长 5s 不会让它过时）。
 handler 只经 §5.8.1 的导出方法访问 board：`Published()` 取条目、`Result(ctx, task)` 取结果。
 
 - **行模式**（v4 新增；v3 只有全量，WS 断开时每个 running workflow 每 5s 整份重下，§6.1）。（PR-10：`rows` 只接受 `none`；`since` 与 `epoch` 必须同时给，缺一个或形态非法（`since` 非十进制 uint64、`epoch` 非 16 位小写十六进制）→ 400，而 epoch 形态合法但已变、或 `V` 大于当前 version → 退回 full。）
@@ -2072,7 +2074,7 @@ v4 的 `GET /api/sessions/workflow_agent`（per-agent 预览）连同它专用�
 | `wsproto.go` 常量 + struct + `New*`（`workflow_state`、`workflow_set` 两种帧） | 新增 | `literal_ban_test.go:21`（只能经 `New*` 构造） | PR-11 |
 | `wsproto/registry.go` Frames 示例（每个字段非零） | 新增 | `TestSchema_CoversEveryFrame`、`TestFramesRegistry_TypeStamped` | PR-11 |
 | `wsproto.schema.json` | `go generate ./internal/wsproto` | `TestSchema_IsGenerated`（`schema_contract_test.go:86-91`） | PR-11 |
-| `static/contract.js` | `go run ./tools/gen-contract`；PR-10 的一条 `/api` 路由让 API 表多 1 行（`contractjs.go:57-66`；v4 有两条，§6.2），PR-11 再加 WS 常量与 ENUMS——两者都要手改 js-ratchet 基线（`contract.js.lines`，现 110）并追加 `js-ratchet:TOTAL.lines` 台账行（§14） | `TestContractJS_Current`（只查新鲜度）、js-ratchet `--check`、`ratchet-raises` | PR-10/11 |
+| `static/contract.js` | `go run ./tools/gen-contract`；PR-10 的一条 `/api` 路由让 API 表多 1 行（`contractjs.go:57-66`；v4 有两条，§6.2），PR-11 再加 WS 常量与 ENUMS——两者都要手改 js-ratchet 基线（`contract.js.lines`，现 110）并追加 `js-ratchet:TOTAL.lines` 台账行（§14）（PR-10：master 上它已涨到 112，PR-10 改为 113） | `TestContractJS_Current`（只查新鲜度）、js-ratchet `--check`、`ratchet-raises` | PR-10/11 |
 | contractjs ENUMS `WORKFLOW_STATUS` / `WORKFLOW_AGENT_STATE` | 新增；`check-enum-literals.mjs` 扩展两条：① `workflow_state.js` 的状态显示表（键不加引号）须**恰好**含这两个枚举的键（复用 `tableKeys`，加文件参数；仿 `DEATH_REASONS`）；② **只在 `workflow_state.js` 与 `workflow_view.js` 内**禁止这些值的整串字面量（`literalHits` 限定这两个文件）。**不做全仓禁令**：running / failed / completed / queued / done / unknown / stopped / skipped / paused 在现有十几个 static 文件里作为 session / cron / agent 状态被比较（如 `dashboard.js:335` `sd.state === 'running'`、`agent_view.js:67` `a.status === 'completed'`、`event_stream.js:807` `msg.status === 'queued'`），`literalHits` 分不清比较的是哪个字段，全仓禁令首跑即红——`SESSION_STATE` 不纳管也是这个原因（`check-enum-literals.mjs:14-18`、`contractjs.go:68-71`，归 #2909 的后续）。夹具进 `scripts/check-enum-literals.test.mjs` | `node scripts/check-enum-literals.mjs` + 其 test | PR-11 |
 | 前端 `wsm.on(NZ_CONTRACT.WS.workflow_state, …)` 与 `wsm.on(NZ_CONTRACT.WS.workflow_set, …)` 各一个 | `workflow_view.js` 模块顶层。帧字段由 tsc 对照生成的 `wire.d.ts` 检查（#3439）：`wsm.on` 按帧类型给 handler 的 `msg` 定型，读帧上没有的字段即 tsc 报错，参数名不受约束。handler 直接把 `msg` 交给叶子模块：`(msg) => applyFrame(store, msg)`，`applyFrame` 的入参写成 `/** @type {WsFrames['workflow_state']} */ frame`（`applySet` 同理用 `WsFrames['workflow_set']`）。帧（或它的 `{ ...msg }` 拷贝）交给未标类型的参数时，`scripts/ts-check.test.mjs` 的 wireReach 报错；逐字段拼出的普通对象不是帧类型，wireReach 认不出，所以不用这种写法 | `check-ws-contract.mjs`（帧类型集合双向一致）、`check-ws-receivers.mjs` R1-R5/R7、tsc（lint-js）、`scripts/ts-check.test.mjs`（`CHECKED` 列入 `workflow_view.js`；wireReach） | PR-11 |
 | `workflow_state.js` 读取嵌套字段的函数（`applyFrame` / `applyHttp` / `reconcileSummaries` 及其内部 helper） | 文件第一行 `// @ts-check`，加入 `scripts/ts-check.test.mjs` 的 `CHECKED`（`wire.d.ts` 的类型到达未开检查的文件时 wireReach 报错）。tsconfig 不开 `strict`，未标类型的参数是 `any`，读取不受检查，所以接收帧或 def 值的参数都要标类型：帧用 `WsFrames['workflow_state']`，helper 入参用 `wire.d.ts` 里的 def 短名（`workflow` → `WireView`、行 → `Agent`、phase → `Phase`、Summary → `Summary`；短名与既有 def 或 TypeScript lib 全局名冲突时在 Go 侧换类型名，`ts-check.test.mjs` 会拦与 lib 重名的），HTTP 响应用 PR-10 生成的 `RestResponse_*`。wireReach 只追帧，def 值交给未标类型的参数不会报错，这一条靠评审。`@param` 与行内 `@type` 都可以，一个文档块写几个 `@param` 都行。v3 把 `msg.workflow` 原样交给不带类型的参数，`source`、`agents[].rev`、`agents_capped`、`prev_agent_ids`、`phases[].counts` 等读取都不受检查，Go 侧改一个 json tag 浏览器里就静默失效 | tsc（lint-js）、`scripts/ts-check.test.mjs` | PR-11 |
@@ -2917,7 +2919,7 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   `testdata/rest.schema.json` + tests、`internal/session/managed_workflow_api.go`（`Result`）与 `managed_workflow.go`（复用 PR-9 的读取路径）+ test、
   `internal/server/handler_set.go`、`build_server.go`（注入 IPLimiter；PR-10：不注入 projects root——handler 只经 board，root 在 board 里）、
   `routes.go`、`routes_snapshot_test.go`、`testdata/routes.golden.json`、`static/contract.js`（API 表 +1 行）、
-  `scripts/js-ratchet.baseline.json`（`contract.js.lines` 110 → 111，手改）、`scripts/ratchet-raises.jsonl`、
+  `scripts/js-ratchet.baseline.json`（`contract.js.lines` 112 → 113，手改；PR-10：v5 写时是 110，合入前 master 已到 112）、`scripts/ratchet-raises.jsonl`、
   `tools/gen-contract/main.go` + `internal/contractjs/wiredts.go`（多读一份 REST schema）、`static/wire.d.ts`（重生成）、`test/e2e/mock-server.js`（`/workflow` 路由，含三种行模式与 `result_unavailable`）、
   `scripts/check-mock-rest.test.mjs`（schema 列表 + workflow 响应用例，不动 `ROUTES`）。
 - ratchet 台账：`js-ratchet:TOTAL.lines`（重生成的 contract.js +1 行；v3 漏了这一行，`js-ratchet --check` 与 `ratchet-raises` 必红）。
