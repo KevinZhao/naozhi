@@ -1353,6 +1353,17 @@ function startMockServer(overrides = {}) {
             sessionsData.stats.version++;
           }
         },
+        // Replaces a session's workflows[] (sessionview.SessionSnapshot's
+        // Summaries). bump advances stats.version, as the server's workflow
+        // board does for every change it reports; false changes the payload
+        // under an unchanged version.
+        setSessionWorkflows(key, workflows, bump = true) {
+          const s = (sessionsData.sessions || []).find(x => x.key === key);
+          if (s) s.workflows = workflows;
+          if (bump && sessionsData.stats && typeof sessionsData.stats.version === 'number') {
+            sessionsData.stats.version++;
+          }
+        },
         // Rewrites a job's prompt so the next compact poll clips the NEW body:
         // the prefix guard in keepRefetchedPrompts must then drop the cached
         // full copy instead of resurrecting it.

@@ -51,7 +51,7 @@ func (d *Dispatcher) replyText(ctx context.Context, msg platform.IncomingMessage
 }
 
 // dispatchCommand handles slash commands (/help, /new, /clear, /urgent, /cron,
-// /cd, /pwd, /project, /stop). Returns true if the message was a command and
+// /cd, /pwd, /project, /stop, /model, /effort, /backend). Returns true if the message was a command and
 // was handled. turn.Parse recognises the turn commands; the rest match its
 // normalized Text. A switch rather than a handler table: arms carry unique
 // preconditions (/cd consults the project binding, /cron needs a scheduler).
@@ -107,6 +107,18 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 
 	case isStopCommand(trimmed):
 		d.handleStopCommand(ctx, msg, log)
+		return true
+
+	case trimmed == "/model" || strings.HasPrefix(trimmed, "/model "):
+		d.handleModelCommand(ctx, msg, strings.TrimPrefix(trimmed, "/model"), log)
+		return true
+
+	case trimmed == "/effort" || strings.HasPrefix(trimmed, "/effort "):
+		d.handleEffortCommand(ctx, msg, strings.TrimPrefix(trimmed, "/effort"), log)
+		return true
+
+	case trimmed == "/backend" || strings.HasPrefix(trimmed, "/backend "):
+		d.handleBackendCommand(ctx, msg, strings.TrimPrefix(trimmed, "/backend"), log)
 		return true
 
 	default:
@@ -203,6 +215,9 @@ func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.Incomin
 		"  /urgent <消息> — 中断当前回复并优先处理该消息（正在运行的工具需先结束）\n" +
 		"  /cd <路径> — 切换工作目录\n" +
 		"  /pwd — 显示当前工作目录\n" +
+		"  /model [名称|reset] [agent] — 查看/切换模型\n" +
+		"  /effort [档位|reset] [agent] — 查看/切换思考强度（kiro）\n" +
+		"  /backend [id|reset] [agent] — 查看/切换 CLI backend（/new 后生效）\n" +
 		"  /project [name|off|list] — 项目绑定\n" +
 		"  /cron <add|list|del|pause|resume|mode> — 定时任务"
 	if len(d.agentCommands) > 0 {

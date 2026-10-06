@@ -3011,11 +3011,17 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
 
 - 范围：非当前 session 的卡片从 `s.workflows` 显示 "⚙ 5/8"（计数至多 30s 陈旧，依赖 PR-8 的 `BumpVersion` 型 sessions_update——
   它推进 `stats.version`，WS 连接时 `renderSidebar` 才会重跑）；`node` 非 local 的卡片不显示（NG3）；Q12 的 `LastActivity` 回落。
-- 文件：`static/session_list.js`、`internal/session/managed_query.go`（LastActivity 回落）、
-  `test/e2e/golden/sidebar.json` + pins、`scripts/ratchet-raises.jsonl`。
+  - 徽标对 running 与 paused（`IsRunning`）的条目求和 done/total，`title` 每个 workflow 一行（`<name> · done/total`）；unknown 与终态不计，
+    全部结束即消失。当前卡片在 CSS 里隐藏（`.session-card.active .sc-wf{display:none}`）：选中切换只换 `active` 类、不重绘卡片，
+    渲染时判定会让旧卡片留着隐藏、新卡片留着徽标。样式 `.sc-wf` 进 `css/split_view.css`（与 `.sc-agents` 同处），只用既有 token。
+  - `LastActivity` 回落：`snap.State` 不是 running 时，取最晚启动的 running / paused 条目，"Workflow <name> · done/total"，无名时
+    "Workflow · done/total"。dashboard 不渲染 `last_activity`（只有 `/api/sessions` 的读者看得到它），所以 sidebar 上的信号只有徽标。
+- 文件：`static/session_list.js`、`static/css/split_view.css`、`internal/session/managed_query.go`（LastActivity 回落）、
+  `test/e2e/golden/sidebar.json` + pins、`test/e2e/mock-server.js`（`setSessionWorkflows`）、`scripts/ratchet-raises.jsonl`。
 - ratchet 台账：`js-ratchet:TOTAL.lines`、`golden:sidebar.json`（`session_list.js` 的 per-file 行数只改基线）。
 - 测试：WS 连接状态下徽标在计数变化后 ≤ 30s（假时钟 / mock 的 sessions_update，`stats.version` 前进）刷新；终态立即刷新；
-  remote session 不显示徽标。
+  remote session 不显示徽标。≤ 30s 与"终态立即"在服务端用假时钟测（`TestWorkflowSnapshotRefresh`：`/api/sessions` 的 version 与
+  counts / activity 一起前进）；e2e 用 mock 的 version 前进 + sessions_update，并验证 version 不动时徽标不变。
 - 依赖：PR-8。
 
 ## 15. 已决事项
@@ -3035,4 +3041,4 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
 | Q9 | resume（`resumeFromRunId`：同 runId、新 task_id）如何展示？ | 视为新 workflow；前端按 `run_id` 把旧条目折叠为"已续跑"子行；后端不合并，但结果文件按 taskId 归属（§5.5）。adopt 的 `paused` 占位沿用同一 task_id，不产生新条目 |
 | Q10 | 面板是否默认展开？ | 桌面只自动展开最新的 running、其余折叠；移动端一律折叠；面板整体限高；记住每个 workflow 的展开状态于 sessionStorage |
 | Q11 | 终态 workflow 在面板上保留多久？ | 每 Process 的 Tracker 5 个；**每 board 5 个**（live 与 retained 合并 LRU，带行与结果缓存）；快照摘要与面板 3 个（全部 `IsUnsettled` + 最近 3 个终态）；Ref = board 的有界集合（≤ 16 非终态 + 5 终态）。v2 的"更早的 N 个"链接删除：§6.2 没有列表端点，Summary 也不带更早的 task_id，客户端无从知道它们；为 2 个额外条目加一条路由（golden、contract、REST schema、mock）不划算。若有需求，后续加 `GET /api/sessions/workflows?key=` 返回 Ref 级行 |
-| Q12 | 是否在 sidebar activity（`last_activity`）里显示 workflow 进度替代被 §9 移除的 phase label？ | **是，低优先级**：snapshot 在 parent 非 running 且有 running workflow 时，`LastActivity` 回落为 "Workflow <name> · done/total"，随 PR-15；与徽标同一刷新机制（sessions_update 节流，至多 30s 陈旧） |
+| Q12 | 是否在 sidebar activity（`last_activity`）里显示 workflow 进度替代被 §9 移除的 phase label？ | **是，低优先级**：snapshot 在 parent 非 running 且有 running workflow 时，`LastActivity` 回落为 "Workflow <name> · done/total"（取最晚启动的那个），随 PR-15；与徽标同一刷新机制（sessions_update 节流，至多 30s 陈旧）。dashboard 的 sidebar 并不渲染 `last_activity`，所以这条回落只给 `/api/sessions` 的读者；sidebar 上靠徽标 |

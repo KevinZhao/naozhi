@@ -23,6 +23,10 @@ type Capabilities interface {
 	// non-empty. Empty backendID means "no backend pinned" and typically
 	// resolves to the router's default backend tag.
 	ReplyFooter(backendID string) string
+
+	// BackendIDs lists the backends a session may be pinned to, default
+	// first; nil when the host has none. /backend validates against it.
+	BackendIDs() []string
 }
 
 // NoopCapabilities is the default Capabilities when callers leave
@@ -38,6 +42,9 @@ func (NoopCapabilities) Takeover(context.Context, string, string, sessionview.Ag
 // ReplyFooter returns "" (no footer appended).
 func (NoopCapabilities) ReplyFooter(string) string { return "" }
 
+// BackendIDs returns nil (no backend catalogue).
+func (NoopCapabilities) BackendIDs() []string { return nil }
+
 // TakeoverHook isolates the optional first-message takeover probe.
 type TakeoverHook interface {
 	Takeover(ctx context.Context, chatKey, key string, opts sessionview.AgentOpts) bool
@@ -47,6 +54,10 @@ type TakeoverHook interface {
 // reply path.
 type ReplyFooterHook interface {
 	ReplyFooter(backendID string) string
+
+	// BackendIDs lists the backends a session may be pinned to, default
+	// first; nil when the host has none. /backend validates against it.
+	BackendIDs() []string
 }
 
 // Compile-time pin: Capabilities satisfies both facets.
@@ -91,3 +102,6 @@ func (c closureCapabilities) ReplyFooter(backendID string) string {
 	}
 	return c.replyFooter(backendID)
 }
+
+// BackendIDs returns nil: the legacy closure form carries no catalogue.
+func (c closureCapabilities) BackendIDs() []string { return nil }

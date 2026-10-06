@@ -145,6 +145,8 @@ declare global {
     subagents?: SubagentInfo[];
     summary?: string;
     total_cost: number;
+    tuning_effort?: string;
+    tuning_model?: string;
     turn_duration_ms?: number;
     user_label?: string;
     workflows?: Summary[];
