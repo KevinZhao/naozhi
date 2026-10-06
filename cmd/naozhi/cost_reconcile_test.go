@@ -516,8 +516,35 @@ func TestReconcile_ALedgerDayAboveItsTranscriptIsNotLowered(t *testing.T) {
 		if len(rep.Flagged) != 1 || len(rep.Planned) != 1 || !near(rep.Planned[0].Amount, -5) {
 			t.Fatalf("flagged %+v planned %+v, want only the -5 restore flag\n%s", rep.Flagged, rep.Planned, out)
 		}
-		if st := settlementOf(rep, rcSID); st.AboveDays != 1 || !near(st.AboveUSD, 3) || !near(st.After, 18) {
+		if st := settlementOf(rep, rcSID); st.AboveDays != 1 || !near(st.AboveUSD, 3) || !near(st.After, 18) || st.AboveUndecidedDays != 0 {
 			t.Errorf("settlement = %+v, want day -1 reported $3 above and the ledger at 18\n%s", st, out)
+		}
+		if strings.Contains(out, "高出部分可能就是恢复额") {
+			t.Errorf("report ties a decided day's excess to a restore:\n%s", out)
+		}
+	})
+	t.Run("a backfill undecided on a restore", func(t *testing.T) {
+		s := newReconcileScope(t)
+		s.transcript(t, rcSID, scopeMsg(s.day(-2, 10, 0), "msg_1", 0.6, "sdk-cli"), rcCostState(0.6, 600),
+			rcLine("queue-operation", s.day(-1, 8, 0), "", 0), scopeMsg(s.day(-1, 8, 1), "msg_2", 3, "sdk-cli"))
+		s.runStarted(t, "aaaaaaaaaaaaaaaa", s.day(-2, 9, 59))
+		// The backfilled run logged no line and nothing bounds it, so whether
+		// its $3.60 holds the restored $0.60 is undecided.
+		run := runhistory.SessionRun{RunID: "cccccccccccccccc", SessionKey: rcKey, SessionID: rcSID, StartedAt: s.day(-1, 9, 0)}
+		s.sessionRun(t, run)
+		backfill := rcTurn(run.StartedAt, rcKey, run.RunID, 3.6)
+		backfill.Kind, backfill.Models = costledger.KindBackfill, nil
+		seedLedger(t, s.opts.SessionStorePath, rcTurn(s.day(-2, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 0.6),
+			rcTurn(s.day(-1, 8, 2), rcKey, "dddddddddddddddd", 3), backfill)
+		rep, out := s.run(t)
+		if len(rep.Flagged) != 0 || len(rep.Planned) != 0 {
+			t.Fatalf("flagged %+v planned %+v, want nothing\n%s", rep.Flagged, rep.Planned, out)
+		}
+		if st := settlementOf(rep, rcSID); st.UndecidedN != 1 || st.AboveDays != 1 || !near(st.AboveUSD, 3.6) || st.AboveUndecidedDays != 1 {
+			t.Errorf("settlement = %+v, want day -1 reported $3.60 above with its undecided backfill\n%s", st, out)
+		}
+		if !strings.Contains(out, "其中 1 天含无法判定是否计入恢复额的条目") {
+			t.Errorf("report does not tie the excess to the undecided entry:\n%s", out)
 		}
 	})
 }

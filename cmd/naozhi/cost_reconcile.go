@@ -122,6 +122,7 @@ type sessionSettlement struct {
 	EmptyDays                     int     // days the ledger books spend on and the transcript shows none
 	AboveDays                     int     // other days the ledger books more on than the transcript shows
 	AboveUSD                      float64 // what the ledger books over the transcript on AboveDays
+	AboveUndecidedDays            int     // AboveDays holding an UndecidedN entry, whose excess may be a restore
 	TerminalN                     int     // interactive-terminal messages left out
 	Skipped                       string  // why nothing was settled; "" when settled
 }
@@ -731,7 +732,7 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 	st := sessionSettlement{SessionID: in.sid, Entries: len(entries), Skipped: in.skipped}
 	settles := func(t time.Time) bool { return !t.Before(firstDay) && t.Before(until) }
 	ledger := map[string]*dayFigures{}
-	held := map[string]bool{}
+	held, undecided := map[string]bool{}, map[string]bool{}
 	day := func(d string) *dayFigures {
 		if ledger[d] == nil {
 			ledger[d] = &dayFigures{models: map[string]*costledger.ModelDelta{}}
@@ -767,6 +768,7 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 		}
 		if to.IsZero() {
 			st.UndecidedN++
+			undecided[e.TS.UTC().Format(time.DateOnly)] = true
 			continue
 		}
 		// The turn starts no earlier than the cost-state: what the process
@@ -777,6 +779,7 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 		charged, decided := chargesRestore(e, m, turnWindow(in.usage.Messages, from, to, l.rates))
 		if !decided {
 			st.UndecidedN++
+			undecided[e.TS.UTC().Format(time.DateOnly)] = true
 		}
 		if !charged {
 			continue
@@ -838,6 +841,9 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 		case diff < 0:
 			st.AboveDays++
 			st.AboveUSD -= diff
+			if undecided[d] {
+				st.AboveUndecidedDays++
+			}
 			continue
 		}
 		adj := adjustOf(lastBefore(entries, start.Add(24*time.Hour)), reconcilePrefix+in.sid+":day:"+d, diff)
@@ -1047,6 +1053,9 @@ func printReconcile(out io.Writer, rep reconcileReport, write bool) {
 			}
 			if s.AboveDays > 0 {
 				note += fmt.Sprintf("；%d 天账本高于 transcript 共 %.2f（transcript 不记 CLI 的全部请求：取消/后台请求、流式中途的 output 计数），未下调", s.AboveDays, s.AboveUSD)
+				if s.AboveUndecidedDays > 0 {
+					note += fmt.Sprintf("，其中 %d 天含无法判定是否计入恢复额的条目，高出部分可能就是恢复额", s.AboveUndecidedDays)
+				}
 			}
 			if s.TerminalN > 0 {
 				note += fmt.Sprintf("；%d 条终端交互消息不计入", s.TerminalN)
