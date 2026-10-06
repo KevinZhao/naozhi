@@ -349,7 +349,7 @@
   },
   "render_md.js": {
     "lines": 1029,
-    "maxFnLines": 97,
+    "maxFnLines": 93,
     "maxIifeLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 6,
