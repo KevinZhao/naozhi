@@ -1677,7 +1677,9 @@ R0  router_restore：storeEntry.Workflows（Ref）→ board.retained
 R1  ReconnectShimsCtx → SpawnReconnect（wrapper.go:586-642）:
       DrainReplay → proc 构造（Tracker 已在）
       → Tracker.SeedFromReplay(workflow.Replay{Lines, Wrapped}, proto, hooks.KnownWorkflowTasks)  ← 新增，startReadLoop 之前；已知 task_id 由 router_shim.go 从该 session 的
-                                                                            board（R0 恢复的 Ref / retained）取出、经 ReconnectHooks 传入（§5.7 规则 4）
+                                                                            board（R0 恢复的 Ref / retained）取出、经 ReconnectHooks 传入（§5.7 规则 4）；
+        种子不在 readLoop 的 recover 之内、ring 又留在 shim 里，panic 会在每次重启复现：seedWorkflows 自带 recover（log + PanicRecoveredTotal），
+        换一个新 Tracker，只带已知 task_id、Wrapped=true（replay 等于丢了，R5 按 10min 给 live 帧留时间）
       → reconnectVerdict(...)；结果为 unknown 时同步调用 session 层传入的 resolver 读 JSONL 尾（§5.10）
       → applyReconnectVerdict(verdict)                 ← 同时修 turn-neutral（§5.10）；startReadLoop 之前武装
       → startReadLoop

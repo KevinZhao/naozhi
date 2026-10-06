@@ -7,10 +7,12 @@ package cli
 import (
 	"bytes"
 	"expvar"
+	"runtime/debug"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cli/workflow"
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -71,10 +73,23 @@ func (p *Process) observeWorkflow(ev *clievent.Event, now time.Time) {
 
 // seedWorkflows builds the Tracker from a reconnect's replayed backlog; it
 // must run before the read loop starts so no live frame precedes the replay.
+// It runs outside the read loop's recover, and the shim keeps the ring, so a
+// seed panic would recur on every restart: it is absorbed and the Process
+// starts with a fresh Tracker that knows the ids and reads as wrapped (the
+// replay was lost, so live frames get the longer unclaimed window).
 func (p *Process) seedWorkflows(replays []shim.ServerMsg, lastSeq int64, dec workflow.Decoder, known []string) {
 	if p.workflows == nil {
 		return
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			p.slogger().Error("workflow seed panic recovered; tracker starts unseeded",
+				"panic", r, "stack", string(debug.Stack()))
+			metrics.PanicRecoveredTotal.Add(1)
+			p.workflows = workflow.New(p.workflowChanged)
+			p.workflows.SeedFromReplay(workflow.Replay{Wrapped: true}, dec, known)
+		}
+	}()
 	lines := make([]string, 0, len(replays))
 	for i := range replays {
 		if replays[i].Type == "replay" {

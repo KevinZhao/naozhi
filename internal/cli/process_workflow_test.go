@@ -14,6 +14,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cli/workflow"
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/shim"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
@@ -165,9 +166,10 @@ func oversizeLine(head string) string {
 }
 
 // TestProcessWorkflow_OversizeSnapshot: a snapshot line too long to read is
-// skipped without ending the process; its workflow keeps the last rows and
-// shows snapshot_dropped until the next snapshot. Every task_progress line
-// is counted, whether or not its task is a workflow or its id is readable.
+// skipped without ending the process; its workflow keeps the last rows,
+// counts as observed and shows snapshot_dropped until the next snapshot.
+// Every task_progress line is counted, whether or not its task is a workflow
+// or its id is readable.
 func TestProcessWorkflow_OversizeSnapshot(t *testing.T) {
 	p, srv := shimTestPair(&ClaudeProtocol{})
 	go p.readLoop()
@@ -190,7 +192,9 @@ func TestProcessWorkflow_OversizeSnapshot(t *testing.T) {
 		srv.SendStdout(line)
 	}
 	barrier("rows")
-	rows := onlyWorkflow(t, p.Workflows()).Agents
+	w := onlyWorkflow(t, p.Workflows())
+	rows, observed := w.Agents, w.LastObservedAt
+	testhelper.Eventually(t, func() bool { return time.Now().UnixMilli() > observed }, time.Second, "the clock did not move")
 
 	srv.SendStdout(oversizeLine(`{"type":"system","subtype":"task_progress","task_id":"` + probeTaskID + `",`))
 	srv.SendStdout(oversizeLine(`{"type":"system","subtype":"task_progress",`))                              // no id
@@ -200,9 +204,12 @@ func TestProcessWorkflow_OversizeSnapshot(t *testing.T) {
 	if !p.Alive() {
 		t.Fatal("the process ended on an oversized line")
 	}
-	w := onlyWorkflow(t, p.Workflows())
+	w = onlyWorkflow(t, p.Workflows())
 	if w.Degraded != workflow.DegradedSnapshotDropped || !reflect.DeepEqual(w.Agents, rows) {
 		t.Errorf("after the oversized snapshot: degraded %q, rows %+v; want snapshot_dropped and %+v", w.Degraded, w.Agents, rows)
+	}
+	if w.LastObservedAt <= observed {
+		t.Errorf("LastObservedAt = %d after the oversized snapshot, want past %d", w.LastObservedAt, observed)
 	}
 	if n := workflowLinesOversize.Value() - before; n != 3 {
 		t.Errorf("%s moved by %d, want 3", "naozhi_cli_workflow_lines_oversize_total", n)
@@ -295,12 +302,20 @@ func TestAttachReconnected_SeedsWorkflowsBeforeReadLoop(t *testing.T) {
 
 // TestAttachReconnected_KnownWorkflowTasks: with only a workflow's terminal
 // frames left in the ring, the session's known ids decide whether the seed
-// builds an entry.
+// builds an entry, and the Set says whether the ring had wrapped.
 func TestAttachReconnected_KnownWorkflowTasks(t *testing.T) {
 	probe := readWorkflowProbe(t)
-	for name, known := range map[string][]string{"known": {probeTaskID}, "unknown": nil} {
+	for name, tc := range map[string]struct {
+		known    []string
+		firstSeq int64
+	}{
+		"known":           {[]string{probeTaskID}, 5001},
+		"unknown":         {nil, 5001},
+		"known unwrapped": {[]string{probeTaskID}, 1},
+	} {
 		t.Run(name, func(t *testing.T) {
-			f := newReconnectFixture(t, "s1", rvReplays(5001, probe[14], probe[15]))
+			known := tc.known
+			f := newReconnectFixture(t, "s1", rvReplays(tc.firstSeq, probe[14], probe[15]))
 			hooks := ReconnectHooks{ResolveUnknown: func(string) bool { return true }, KnownWorkflowTasks: known}
 			p, _, err := (&Wrapper{}).attachReconnected(context.Background(), f.handle, "k", 0, &ClaudeProtocol{}, 0, 0, hooks)
 			if err != nil {
@@ -309,6 +324,9 @@ func TestAttachReconnected_KnownWorkflowTasks(t *testing.T) {
 			f.drainWrites()
 			defer p.Kill()
 			set := p.Workflows()
+			if wrapped := tc.firstSeq > 1; set.SeedWrapped != wrapped {
+				t.Errorf("SeedWrapped = %v, want %v", set.SeedWrapped, wrapped)
+			}
 			if known == nil {
 				if len(set.Workflows) != 0 {
 					t.Errorf("unknown task seeded: %+v", set.Workflows)
@@ -320,6 +338,49 @@ func TestAttachReconnected_KnownWorkflowTasks(t *testing.T) {
 				t.Errorf("seeded %+v, want a header-only completed entry with no observation time", *w)
 			}
 		})
+	}
+}
+
+// panicOnSnapshot panics on a workflow snapshot, which the seed decodes
+// while it holds the Tracker's lock.
+type panicOnSnapshot struct{ *ClaudeProtocol }
+
+func (d panicOnSnapshot) ReadEvent(line string) ([]clievent.Event, bool, error) {
+	if strings.Contains(line, `"workflow_progress"`) {
+		panic("decoder")
+	}
+	return d.ClaudeProtocol.ReadEvent(line)
+}
+
+// TestProcessWorkflow_SeedPanic: a seed panic is absorbed and counted; the
+// Process carries on with an empty, wrapped Tracker that still knows the
+// session's ids and is not left locked.
+func TestProcessWorkflow_SeedPanic(t *testing.T) {
+	p, _ := shimTestPair(&ClaudeProtocol{})
+	probe := readWorkflowProbe(t)
+	before := metrics.PanicRecoveredTotal.Value()
+	p.seedWorkflows(rvReplays(1, probe...), 0, panicOnSnapshot{&ClaudeProtocol{}}, []string{probeTaskID})
+	if n := metrics.PanicRecoveredTotal.Value() - before; n != 1 {
+		t.Errorf("%s moved by %d, want 1", "naozhi_panic_recovered_total", n)
+	}
+	if set := p.Workflows(); !set.SeedWrapped || len(set.Workflows) != 0 {
+		t.Errorf("after the panic: wrapped %v, %d workflows; want wrapped and empty", set.SeedWrapped, len(set.Workflows))
+	}
+	terminal := []clievent.Event{decodeOne(t, probe[14]), decodeOne(t, probe[15])}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range terminal {
+			p.observeWorkflow(&terminal[i], time.Now())
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Observe blocked after the seed panic")
+	}
+	if w := onlyWorkflow(t, p.Workflows()); w.TaskID != probeTaskID || w.Status != workflow.StatusCompleted {
+		t.Errorf("the known task's terminal frames built %+v, want a completed entry", *w)
 	}
 }
 
