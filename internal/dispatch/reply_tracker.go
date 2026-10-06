@@ -212,7 +212,7 @@ func (t *replyTracker) sendAskQuestionCard(aq *clievent.AskQuestion) {
 		defer t.loopWG.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				slog.Warn("ask_question: card send panic recovered",
+				slog.WarnContext(t.ctx, "ask_question: card send panic recovered",
 					"chat_id", to.ChatID, "tool_use_id", aq.ToolUseID, "panic", r)
 			}
 		}()
@@ -229,7 +229,7 @@ func (t *replyTracker) sendAskQuestionCard(aq *clievent.AskQuestion) {
 				Items:     questionItems(aq),
 			}
 			if _, err := sender.SendQuestionCard(rctx, to.ChatID, card); err != nil {
-				slog.Warn("ask_question card send failed, falling back to text",
+				slog.WarnContext(t.ctx, "ask_question card send failed, falling back to text",
 					"chat_id", to.ChatID, "tool_use_id", aq.ToolUseID, "err", err)
 				t.sendAskQuestionFallback(rctx, aq)
 			}
@@ -246,7 +246,7 @@ func (t *replyTracker) sendAskQuestionFallback(ctx context.Context, aq *clievent
 	text := "Claude 想请你确认：\n" + platform.RenderAskQuestionPlain(questionItems(aq)) +
 		"\n直接回复选项内容即可（例如：「Error style: Return an error」）。"
 	if _, err := t.p.Reply(ctx, t.to.text(text)); err != nil {
-		slog.Debug("ask_question text fallback failed",
+		slog.DebugContext(t.ctx, "ask_question text fallback failed",
 			"chat_id", t.to.ChatID, "tool_use_id", aq.ToolUseID, "err", err)
 	}
 }
@@ -284,7 +284,7 @@ func (t *replyTracker) sendTodoMessage(text string) {
 	defer cancel()
 	if _, err := t.p.Reply(rctx, t.to.text(text)); err != nil {
 		// Warn, not Debug: the Reply is detached, so cancellation no longer masks errors.
-		slog.Warn("todo reply failed", "chat_id", t.to.ChatID, "err", err)
+		slog.WarnContext(t.ctx, "todo reply failed", "chat_id", t.to.ChatID, "err", err)
 	}
 }
 
@@ -493,7 +493,7 @@ func (t *replyTracker) redrawStatus() (skipped bool) {
 		ectx, cancel := context.WithTimeout(t.ctx, platformReplyTimeout)
 		defer cancel()
 		if err := t.p.EditMessage(ectx, msgID, text); err != nil {
-			slog.Debug("status edit failed", "msg_id", msgID, "err", err)
+			slog.DebugContext(t.ctx, "status edit failed", "msg_id", msgID, "err", err)
 		}
 	}
 	return false

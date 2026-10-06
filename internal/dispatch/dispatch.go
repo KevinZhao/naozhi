@@ -637,7 +637,7 @@ func (d *Dispatcher) sendOutboundImages(ctx context.Context, p platform.Platform
 			// Failed image sends must show in /health like text failures.
 			d.sendFailCount.Add(1)
 			dispatchSendFailTotal.Add(1)
-			slog.Warn("send image failed", "err", err)
+			slog.WarnContext(ctx, "send image failed", "err", err)
 		}
 	}
 }
@@ -678,8 +678,8 @@ func (d *Dispatcher) readTurnImages(replyText string) ([]platform.Image, string)
 // turnReplyText's answer or failure notice, then the partial-reply and
 // merge-group chips and the per-session ReplyFooter. Returns "" when nothing
 // should be sent (#656).
-func (d *Dispatcher) decorateReplyText(result *clievent.SendResult, sess turn.Session) string {
-	replyText, answer := turnReplyText(result)
+func (d *Dispatcher) decorateReplyText(ctx context.Context, result *clievent.SendResult, sess turn.Session) string {
+	replyText, answer := turnReplyText(ctx, result)
 	// claude cut the answer off (aborted_streaming keeps the partial text);
 	// keyed on CLIAborted, not Aborted, which a late interrupt can stamp on
 	// a turn that finished. A notice or error text is not a partial answer.
@@ -764,7 +764,7 @@ func (d *Dispatcher) sendChunks(ctx context.Context, p platform.Platform, to Rep
 		if _, err := platform.ReplyWithRetry(ctx, p, to.text(chunk), limits.PlatformReplyMaxAttempts); err != nil {
 			d.sendFailCount.Add(1)
 			dispatchSendFailTotal.Add(1)
-			slog.Error("reply chunk failed after retries", "chat", to.ChatID, "chunk", i+1, "err", err)
+			slog.ErrorContext(ctx, "reply chunk failed after retries", "chat", to.ChatID, "chunk", i+1, "err", err)
 		} else {
 			d.markReplySuccess()
 		}

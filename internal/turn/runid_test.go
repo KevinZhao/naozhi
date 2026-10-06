@@ -208,3 +208,48 @@ func TestTurnIDs_DetachedMintsTrace(t *testing.T) {
 		t.Fatalf("turn: start = %v", s)
 	}
 }
+
+// A panicking turn is recovered under its own ids: "turn: panic recovered"
+// and the panic-time Finish carry the turn's run id and head trace, not the
+// owner loop's ctx (which has the first message's trace and no run id).
+func TestTurnIDs_PanicRecoveredOnTheTurnCtx(t *testing.T) {
+	logs := captureLog(t)
+	rec := newRecorder()
+	ids := &idLog{}
+	fs := newSender(rec)
+	fs.panicIf = func(text string) bool { return text != "m1" }
+	o := New(QueueOptions{MaxDepth: 8, CollectDelay: time.Millisecond, Mode: ModeCollect}, idSender{fs, ids})
+	gate := make(chan struct{})
+	fs.gate = gate
+	adm := &fakeAdmission{rec: rec, async: true, ctx: ctxutil.WithTraceID(context.Background(), "t1")}
+	orig := func(name string) Origin { return idOrigin{newOrigin(rec, name, "ws:"+name), ids} }
+
+	o.Submit(context.Background(), Request{Key: "k", Text: "m1", Origin: orig("a"), TraceID: "t1"}, adm)
+	rec.waitFor(t, "send:k:m1", 1)
+	o.Submit(context.Background(), Request{Key: "k", Text: "m2", Origin: orig("b"), TraceID: "t2"}, adm)
+	gate <- struct{}{}
+	rec.waitFor(t, "send:k:m2", 1)
+	gate <- struct{}{}
+	rec.waitFor(t, "idle", 1)
+	adm.wg.Wait()
+
+	var send, finish turnIDs
+	for _, id := range ids.all() {
+		if id.trace != "t2" {
+			continue
+		}
+		switch id.hook {
+		case "send":
+			send = id
+		case "finish:b":
+			finish = id
+		}
+	}
+	if send.run == "" || finish.run != send.run {
+		t.Fatalf("panicking turn: send=%+v finish=%+v (all %v)", send, finish, ids.all())
+	}
+	p := logs.lines("turn: panic recovered")
+	if len(p) != 1 || p[0]["run_id"] != send.run || p[0]["trace_id"] != "t2" || p[0]["session_key"] != "k" {
+		t.Fatalf("turn: panic recovered = %v, want run_id %s trace_id t2", p, send.run)
+	}
+}

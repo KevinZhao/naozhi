@@ -311,7 +311,7 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 		tracker.markFinalized()
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			if err := p.EditMessage(ctx, msgID, "已合并到上一条回复。"); err != nil {
-				slog.Debug("merge follower banner edit failed", "msg_id", msgID, "err", err)
+				slog.DebugContext(ctx, "merge follower banner edit failed", "msg_id", msgID, "err", err)
 			}
 		}
 		d.ackMergedFollower(ctx, o.msg, o.key, result.MergedCount, dl.lg)
@@ -323,7 +323,7 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 	// result is still a healthy roundtrip for /health's lastReplySuccess.
 	d.markReplySuccess()
 
-	replyText := d.decorateReplyText(result, sess)
+	replyText := d.decorateReplyText(ctx, result, sess)
 	if replyText != "" {
 		replyText += d.budgetWarnLine(o.key)
 	}
@@ -349,7 +349,7 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 	if tracker.askQuestionFired.Load() {
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			if err := p.EditMessage(ctx, msgID, "⏳ 等待你的选择…"); err != nil {
-				slog.Debug("ask_question: banner edit failed", "err", err)
+				slog.DebugContext(ctx, "ask_question: banner edit failed", "err", err)
 			}
 		}
 		dl.lg.InfoContext(ctx, "ask_question suppressed redundant reply", "result_len", len(result.Text))
@@ -365,7 +365,7 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 		// last tool status needs replacing.
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			if err := p.EditMessage(ctx, msgID, bannerAborted); err != nil {
-				slog.Debug("aborted turn banner edit failed", "msg_id", msgID, "err", err)
+				slog.DebugContext(ctx, "aborted turn banner edit failed", "msg_id", msgID, "err", err)
 			}
 		}
 	}
@@ -391,10 +391,10 @@ const bannerAborted = "已中断。"
 func (d *Dispatcher) replyIntoBanner(ctx context.Context, p platform.Platform, to ReplyDest, msgID, text string) {
 	chunks := replyChunks(p, text)
 	if err := p.EditMessage(ctx, msgID, chunks[0]); err != nil {
-		slog.Warn("edit message failed, sending new", "err", err, "chunks", len(chunks))
+		slog.WarnContext(ctx, "edit message failed, sending new", "err", err, "chunks", len(chunks))
 		d.sendChunks(ctx, p, to, chunks)
 		if err := p.EditMessage(ctx, msgID, bannerAnsweredBelow); err != nil {
-			slog.Debug("banner answered-below edit failed", "msg_id", msgID, "err", err)
+			slog.DebugContext(ctx, "banner answered-below edit failed", "msg_id", msgID, "err", err)
 		}
 		return
 	}

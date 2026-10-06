@@ -15,7 +15,9 @@ result 属于哪一轮」时靠时间戳对齐很痛苦（#3322 / #3401 / #3411 
 
 - 排队合并的多条消息跑成**一轮**：这一轮的 `trace_id` 是批次第一条消息的，
   每轮开头的 `turn: start` 行用 `trace_ids` 列出批次里每条消息的 trace（最多 8 个），
-  按某条消息的 trace 找到它被合进了哪个 `run_id`。
+  按某条消息的 trace 找到它被合进了哪个 `run_id`。批次里每条消息的
+  `message replied` 行也带头一条的 `trace_id`（回复跑在这一轮的 ctx 上），
+  所以跟进消息的回复行要先由 `turn: start` 找到 `run_id`，再按 `run_id` 查。
 - leaked-toolcall 的自动续发是一条**独立的** run record，拿新的 `run_id`；
   `leak-recovery: nudge run` 行的 `nudge_of` 是它续的那一轮。
 - 不经过 turn 的入口（cron、sysession）由 session 自己生成 `run_id`，日志里没有
@@ -27,7 +29,7 @@ result 属于哪一轮」时靠时间戳对齐很痛苦（#3322 / #3401 / #3411 
 # 从 dashboard 的 run 列表拿到 run_id，拉这一轮所有日志
 journalctl -u naozhi -o cat | jq -c 'select(.run_id=="0123456789abcdef")'
 
-# 一条消息从收到到回复（含被合并进的那一轮）
+# 一条消息从收到到它被合进的那一轮的 turn: start（跟进消息的回复行再按这里的 run_id 查）
 journalctl -u naozhi -o cat | jq -c 'select(.trace_id=="feishu:om_xxx" or (.trace_ids // [] | index("feishu:om_xxx")))'
 
 # 某个会话今天的全部轮次
@@ -39,7 +41,9 @@ journalctl -u naozhi --since today -o cat \
 
 ## 覆盖范围（当前）
 
-已带 ctx 的日志：dispatch 的入站 / 拒绝 / 限流 / 预算 / 回复 / 出错各行，turn 的
-`turn: start` / `turn: processing queued messages` / interrupt / `turn: panic
-recovered`，以及 leak-recovery 的 nudge 行。其余包级 `slog.*` 调用迁移到
-`*Context` 变体即可获得字段，不需要改 handler。
+已带 ctx 的日志：dispatch 的入站 / 拒绝 / 限流 / 预算 / 回复 / 出错各行（含
+`turn ended in failure`、分片 / 图片发送失败、banner 编辑失败，以及 reply tracker 的
+ask_question / todo / 状态编辑失败），turn 的 `turn: start` / `turn: processing
+queued messages` / interrupt / `turn: panic recovered`，以及 leak-recovery 的
+nudge 行。其余包级 `slog.*` 调用迁移到 `*Context` 变体即可获得字段，不需要改
+handler。

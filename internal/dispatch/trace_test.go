@@ -36,9 +36,9 @@ func TestWithInboundTrace(t *testing.T) {
 	}
 }
 
-// A message's "message received" and "message replied" lines carry the same
-// trace_id, a run_id and the session_key, so journalctl can be grepped by
-// any of the three (#3436). The logger is the one BuildHandler's path uses:
+// A message's "message received", "message replied" and (for a failed turn)
+// "turn ended in failure" lines carry the same trace_id, a run_id and the
+// session_key, so journalctl can be grepped by any of the three (#3436). The logger is the one BuildHandler's path uses:
 // prepareInbound builds it from slog.Default, so the test swaps the default.
 func TestIMTurn_LogsCarryCorrelation(t *testing.T) {
 	var buf bytes.Buffer
@@ -52,7 +52,7 @@ func TestIMTurn_LogsCarryCorrelation(t *testing.T) {
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp, withSendFn(func(ctx context.Context, _ string, _ turn.Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 		seen.run, seen.key, seen.trace = ctxutil.RunID(ctx), ctxutil.SessionKey(ctx), ctxutil.TraceID(ctx)
-		return &clievent.SendResult{Text: "pong"}, nil
+		return &clievent.SendResult{Text: "pong", IsError: true}, nil
 	}))
 	// The test router has no CLI; InjectSession gives the key a live process.
 	router := d.router.(*session.Router)
@@ -66,7 +66,7 @@ func TestIMTurn_LogsCarryCorrelation(t *testing.T) {
 	if seen.run == "" || seen.key != key || seen.trace != "fake:evt-corr" {
 		t.Fatalf("Send ctx carried run=%q key=%q trace=%q", seen.run, seen.key, seen.trace)
 	}
-	var received, replied map[string]any
+	var received, replied, failed map[string]any
 	for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
 		var m map[string]any
 		if json.Unmarshal(line, &m) != nil {
@@ -77,9 +77,11 @@ func TestIMTurn_LogsCarryCorrelation(t *testing.T) {
 			received = m
 		case "message replied":
 			replied = m
+		case "turn ended in failure":
+			failed = m
 		}
 	}
-	if received == nil || replied == nil {
+	if received == nil || replied == nil || failed == nil {
 		t.Fatalf("missing log lines in:\n%s", buf.String())
 	}
 	if received["trace_id"] != "fake:evt-corr" || replied["trace_id"] != "fake:evt-corr" {
@@ -87,5 +89,8 @@ func TestIMTurn_LogsCarryCorrelation(t *testing.T) {
 	}
 	if replied["run_id"] != seen.run || replied["session_key"] != key {
 		t.Errorf("replied line run_id=%v session_key=%v, want %q / %q", replied["run_id"], replied["session_key"], seen.run, key)
+	}
+	if failed["run_id"] != seen.run || failed["trace_id"] != "fake:evt-corr" {
+		t.Errorf("failure line run_id=%v trace_id=%v, want %q", failed["run_id"], failed["trace_id"], seen.run)
 	}
 }

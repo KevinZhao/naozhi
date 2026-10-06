@@ -1,8 +1,12 @@
 package session
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -381,6 +385,10 @@ func TestSend_LeakNudgeGetsItsOwnRunID(t *testing.T) {
 	}
 	for name, send := range entries {
 		t.Run(name, func(t *testing.T) {
+			logs := &lockedBuf{}
+			prev := slog.Default()
+			slog.SetDefault(slog.New(ctxutil.NewHandler(slog.NewJSONHandler(logs, nil))))
+			t.Cleanup(func() { slog.SetDefault(prev) })
 			var sentWith []string
 			s, store := newInstrumentedSession(t, func(ctx context.Context, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
 				sentWith = append(sentWith, ctxutil.RunID(ctx))
@@ -404,6 +412,37 @@ func TestSend_LeakNudgeGetsItsOwnRunID(t *testing.T) {
 			if !got[parent] || !got[sentWith[1]] {
 				t.Fatalf("run record ids %v, want %s and the nudge's %s", got, parent, sentWith[1])
 			}
+			// The log line is the only join from a nudge run to its turn.
+			nudge := logs.lines("leak-recovery: nudge run")
+			if len(nudge) != 1 || nudge[0]["nudge_of"] != parent || nudge[0]["run_id"] != sentWith[1] {
+				t.Fatalf("nudge log = %v, want nudge_of %s run_id %s", nudge, parent, sentWith[1])
+			}
 		})
 	}
+}
+
+// lockedBuf is a goroutine-safe log sink.
+type lockedBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *lockedBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+// lines returns the decoded JSON records whose msg is msg.
+func (b *lockedBuf) lines(msg string) []map[string]any {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(b.b.Bytes()), []byte("\n")) {
+		var m map[string]any
+		if json.Unmarshal(line, &m) == nil && m["msg"] == msg {
+			out = append(out, m)
+		}
+	}
+	return out
 }
