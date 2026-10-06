@@ -109,8 +109,10 @@ func (b *WorkflowBoard) Result(ctx context.Context, taskID string) (*workflow.Re
 	}
 	// A read landing (its Tracker merge still to publish) comes before the
 	// cache it has already written.
-	done := b.resultWait[taskID]
-	if done == nil {
+	var done chan struct{}
+	if w := b.resultWait[taskID]; w != nil {
+		done = w.done
+	} else {
 		if c := b.cache[taskID]; c != nil {
 			b.mu.Unlock()
 			return c, ResultReady

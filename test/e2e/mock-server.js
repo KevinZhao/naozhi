@@ -60,10 +60,12 @@ const MOCK_DASHBOARD_CSP =
  */
 function workflowReply(fx, params) {
   const has = (k) => params.has(k);
-  const since = has('since') ? params.get('since') : null;
+  // A decimal uint64, as strconv.ParseUint reads it (leading zeros too).
+  const sinceText = has('since') ? params.get('since') : null;
+  const since = sinceText !== null && /^\d+$/.test(sinceText) && BigInt(sinceText) <= 0xffffffffffffffffn ? BigInt(sinceText) : null;
   const epoch = has('epoch') ? params.get('epoch') : null;
   if ((has('rows') && params.get('rows') !== 'none') || has('since') !== has('epoch')
-    || (has('rows') && has('since')) || (since !== null && !/^\d{1,18}$/.test(since))
+    || (has('rows') && has('since')) || (sinceText !== null && since === null)
     || (epoch !== null && !/^[0-9a-f]{16}$/.test(epoch))) {
     return { status: 400, body: { error: 'invalid rows, since or epoch parameter' } };
   }
@@ -73,9 +75,9 @@ function workflowReply(fx, params) {
   if (has('rows')) {
     rowsMode = 'none';
     rows = [];
-  } else if (since !== null && epoch === fx.epoch && Number(since) <= fx.version) {
+  } else if (since !== null && epoch === fx.epoch && since <= BigInt(fx.version)) {
     rowsMode = 'delta';
-    rows = all.filter((a) => a.rev > Number(since));
+    rows = all.filter((a) => BigInt(a.rev) > since);
   }
   const body = { ...fx, server_now: Date.now(), rows_mode: rowsMode, workflow: { ...fx.workflow, agents: rows } };
   const bad = schemaViolations(body, WORKFLOW_SCHEMA.responses.sessions_workflow, WORKFLOW_SCHEMA.defs, 'sessions_workflow', { strict: true });

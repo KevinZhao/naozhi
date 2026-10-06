@@ -1668,7 +1668,8 @@ func (b *WorkflowBoard) WorkflowAgent(agentID string) (workflow.AgentLoc, bool) 
 // （PR-10：终态但没有 RunID 的条目返回 ResultNone——不会有结果文件；读取与 R0 补行 / sweeper 共用同一个落地函数 applyReadLocked，但不经 board 的
 // 两个任务位，singleflight 的读取直接占调用方已取到的全局槽位；等待读取的调用方受 ctx 约束，ctx 到期返回 ResultUnavailable、读取照常落地。
 // 活条目的读取（不论 Result 还是 sweeper 发起）先写缓存、解锁后才由 Tracker 合入，这段时间 resultWait 里挂着一条等待，Result 先查它再查缓存，
-// 所以返回时 Published 一定已含文件带来的行与总计。）
+// 所以返回时 Published 一定已含文件带来的行与总计。等待按 task 计数：Result 的读取与每个待跑的 Tracker 合入各持一份，最后一份释放才关闭，
+// 于是 Result 自己的读取没找到文件、而同期 sweeper 的读取已写缓存但还没合入时，Result 也等到那次合入。）
 func (b *WorkflowBoard) Result(ctx context.Context, taskID string) (*workflow.ResultCache, ResultStatus) // ResultReady | ResultUnavailable | ResultNone（非终态）
 // AgentTranscript 给 drill-in 用（§8.2、§8.3）：隐藏 os.Root 与 rel。Open 每次调用都在锁外 os.OpenRoot(projectsRoot) + OpenRegularIn(root, rel, 0)
 // 并关闭 root（已打开的 fd 不受影响）；RunSessionID 是 RunDir rel 里的 <sid>，首行身份校验与它比较。

@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -410,5 +411,70 @@ func TestWorkflowBoard_ResultWaitsForTrackerMerge(t *testing.T) {
 				t.Errorf("%d waits left behind", left)
 			}
 		})
+	}
+}
+
+// TestWorkflowBoard_ResultFailedReadWaitsForSweepMerge: a Result read that
+// finds no file lands after a later sweeper read found it and wrote the
+// cache; the Result call still returns only once the sweeper's Tracker
+// merge has published the rows that cache goes with.
+func TestWorkflowBoard_ResultFailedReadWaitsForSweepMerge(t *testing.T) {
+	d := newFakeDisk()
+	r := diskRig(t, d)
+	p := &setProc{}
+	ended := runningWithRun("w1", wfRun)
+	ended.Status, ended.EndedAt, ended.LastObservedAt = workflow.StatusCompleted, wfT0, wfT0
+	p.publish(ended)
+	r.b.bind(p, "/ws")
+	r.settleIO(t)
+	base := d.disk().read
+	resultGate := make(chan struct{})
+	var calls atomic.Int32
+	r.b.disk.read = func(root string, run workflowRun) (*workflow.ResultFile, error) {
+		if calls.Add(1) == 1 {
+			<-resultGate
+			return nil, os.ErrNotExist
+		}
+		return base(root, run)
+	}
+	first := make(chan ResultStatus, 1)
+	go func() {
+		_, st := r.b.Result(context.Background(), "w1")
+		first <- st
+	}()
+	testhelper.Eventually(t, func() bool { return calls.Load() == 1 }, 5*time.Second, "Result never read")
+
+	d.put(wfRun, resultFile("w1"))
+	entered, mergeGate := make(chan struct{}), make(chan struct{})
+	p.onApply = func(*workflow.ResultFile) {
+		close(entered)
+		<-mergeGate
+	}
+	r.advance(31 * time.Second)
+	r.b.sweep(r.now())
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sweeper's Tracker merge never started")
+	}
+	close(resultGate)
+	select {
+	case st := <-first:
+		t.Fatalf("Result = %v before the sweeper's merge was published", st)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(mergeGate)
+	if st := <-first; st != ResultReady {
+		t.Fatalf("Result = %v, want the sweeper's file", st)
+	}
+	if w := r.entry(t, "w1"); w.Source != workflow.SourceResultFile || len(w.Agents) != 3 {
+		t.Errorf("source %s, %d rows when Result returned; want the merge published", w.Source, len(w.Agents))
+	}
+	r.settleIO(t)
+	r.b.mu.Lock()
+	left := len(r.b.resultWait)
+	r.b.mu.Unlock()
+	if left != 0 {
+		t.Errorf("%d waits left behind", left)
 	}
 }

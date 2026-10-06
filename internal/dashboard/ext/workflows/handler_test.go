@@ -138,6 +138,8 @@ func TestHandleWorkflow_RowModes(t *testing.T) {
 		{"since ahead of the version", q("since", "10", "epoch", testEpoch), RowsFull, 3},
 		{"since from another epoch", q("since", "3", "epoch", "ffffffffffffffff"), RowsFull, 3},
 		{"since zero", q("since", "0", "epoch", testEpoch), RowsDelta, 3},
+		{"since with leading zeros", q("since", "0003", "epoch", testEpoch), RowsDelta, 2},
+		{"since at the largest uint64", q("since", "18446744073709551615", "epoch", testEpoch), RowsFull, 3},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

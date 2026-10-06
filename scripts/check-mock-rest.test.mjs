@@ -169,7 +169,11 @@ test('the mock\'s /api/sessions/workflow serves the three row modes the backend 
   const caughtUp = await wfBody(await fetch(wfURL(mock, `&since=9&epoch=${EPOCH}`)));
   assert.deepEqual([caughtUp.rows_mode, caughtUp.workflow.agents], ['delta', []]);
 
-  for (const [what, query] of [['another epoch', `&since=3&epoch=ffffffffffffffff`], ['a version ahead', `&since=10&epoch=${EPOCH}`]]) {
+  const padded = await wfBody(await fetch(wfURL(mock, `&since=0003&epoch=${EPOCH}`)));
+  assert.deepEqual(padded.workflow.agents.map((a) => a.rev), [7, 9], 'leading zeros parse as ParseUint reads them');
+
+  for (const [what, query] of [['another epoch', `&since=3&epoch=ffffffffffffffff`], ['a version ahead', `&since=10&epoch=${EPOCH}`],
+    ['the largest uint64', `&since=18446744073709551615&epoch=${EPOCH}`]]) {
     const back = await wfBody(await fetch(wfURL(mock, query)));
     assert.equal(back.rows_mode, 'full', `since with ${what} falls back to full`);
     assert.equal(back.workflow.agents.length, 3);
@@ -177,7 +181,8 @@ test('the mock\'s /api/sessions/workflow serves the three row modes the backend 
 }));
 
 test('the mock\'s /api/sessions/workflow refuses what the backend refuses', () => withMock({ workflows: { w1: workflowFixture() } }, async (mock) => {
-  for (const query of ['&rows=full', '&rows=none&since=1&epoch=' + EPOCH, '&since=1', '&epoch=' + EPOCH, '&since=x&epoch=' + EPOCH, '&since=1&epoch=zz']) {
+  for (const query of ['&rows=full', '&rows=none&since=1&epoch=' + EPOCH, '&since=1', '&epoch=' + EPOCH, '&since=x&epoch=' + EPOCH, '&since=1&epoch=zz',
+    '&since=18446744073709551616&epoch=' + EPOCH, '&since=-1&epoch=' + EPOCH, '&since=+1&epoch=' + EPOCH]) {
     assert.equal((await fetch(wfURL(mock, query))).status, 400, query);
   }
   assert.equal((await fetch(`${mock.url}/api/sessions/workflow?key=k&task_id=w2`)).status, 404);
