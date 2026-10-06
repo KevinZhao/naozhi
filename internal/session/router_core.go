@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
@@ -569,10 +570,11 @@ func NewRouter(cfg RouterConfig) *Router {
 			totalTimeout:    cfg.TotalTimeout,
 		},
 		hist: HistoryIO{
-			claudeDir:   cfg.ClaudeDir,
-			backendDirs: maps.Clone(cfg.BackendDirs),
-			eventLogDir: cfg.EventLogDir,
-			loader:      cfg.HistoryLoader,
+			claudeDir:    cfg.ClaudeDir,
+			backendDirs:  maps.Clone(cfg.BackendDirs),
+			projectsRoot: claudefs.ResolvedProjectsRoot(cfg.ClaudeDir),
+			eventLogDir:  cfg.EventLogDir,
+			loader:       cfg.HistoryLoader,
 		},
 		resolver: cfg.Resolver,
 	}

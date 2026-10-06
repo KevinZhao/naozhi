@@ -303,8 +303,13 @@ func (r *Router) Cleanup() {
 			continue
 		}
 
+		// A workflow's frames are activity too, and a running one keeps
+		// its CLI (workflowPinned) however long the parent idles.
+		if obs := time.UnixMilli(c.s.WorkflowBoard().LastObservedAt()); obs.After(effective) {
+			effective = obs
+		}
 		// Normal idle TTL expiry.
-		if now.Sub(effective) > ttl {
+		if now.Sub(effective) > ttl && !c.s.workflowPinned(now) {
 			logSessionLifecycle("expired", c.key, "idle", now.Sub(effective))
 			// Carry the reason and stamp it only after the close-loop re-verify;
 			// stamping here would corrupt the deathReason of a replacement
