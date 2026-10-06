@@ -155,11 +155,14 @@ func takeoverExemptRefusal(v sessView, key string) error {
 	return nil
 }
 
-// evictOldest closes the oldest idle (non-Running) session to free a slot.
-// Close() runs with the lock released (tx.Unlocked) so it does not block
-// other goroutines. Returns true if a session was evicted.
+// evictOldest closes the oldest idle (non-Running) session to free a slot,
+// preferring one whose CLI runs no workflow; any idle session still counts
+// as evictable (takeoverHasSlot). Close() runs with the lock released
+// (tx.Unlocked) so it does not block other goroutines. Returns true if a
+// session was evicted.
 func (r *Router) evictOldest(tx sessTx) bool {
-	var oldest *ManagedSession
+	now := time.Now()
+	var oldest, oldestPinned *ManagedSession
 	for _, s := range tx.All() {
 		if s.exempt {
 			continue // planner sessions are never evicted
@@ -167,9 +170,16 @@ func (r *Router) evictOldest(tx sessTx) bool {
 		if !s.isAlive() || s.loadProcess().IsRunning() {
 			continue
 		}
-		if oldest == nil || s.LastActive().Before(oldest.LastActive()) {
-			oldest = s
+		pick := &oldest
+		if s.workflowPinned(now) {
+			pick = &oldestPinned
 		}
+		if *pick == nil || s.LastActive().Before((*pick).LastActive()) {
+			*pick = s
+		}
+	}
+	if oldest == nil {
+		oldest = oldestPinned
 	}
 	if oldest == nil {
 		return false

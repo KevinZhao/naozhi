@@ -73,6 +73,10 @@ type respawnSnapshot struct {
 	startupFails int32
 	// codeChanges is the PR list, which follows the logical session.
 	codeChanges []clievent.CodeChange
+	// workflows is the board, carried by pointer: it follows the logical
+	// session, subscribers and epoch included. Read at commit only
+	// (rereadSameEntry); nil spawns a new one.
+	workflows *WorkflowBoard
 }
 
 func snapshotRespawn(v sessView, old *ManagedSession) respawnSnapshot {
@@ -89,7 +93,8 @@ func snapshotRespawn(v sessView, old *ManagedSession) respawnSnapshot {
 
 // rereadSameEntry refreshes snap and hist from old, still the key's entry at
 // commit, with what operator writes may have changed on it while the spawn
-// ran unlocked: the overrides, the PR list and the session-ID chain. History
+// ran unlocked: the overrides, the PR list and the session-ID chain; and the
+// workflow board, which a reattach creates for a session without one. History
 // is written only by old's own, dead, process, and its late cost is
 // linkSuccessor's. Call it inside the commit transaction; nil-safe.
 func rereadSameEntry(old *ManagedSession, snap *respawnSnapshot, hist *respawnHistory, resumeID string) {
@@ -98,6 +103,7 @@ func rereadSameEntry(old *ManagedSession, snap *respawnSnapshot, hist *respawnHi
 	}
 	snap.overrides = snapshotOverrides(old)
 	snap.codeChanges = old.CodeChanges()
+	snap.workflows = old.WorkflowBoard()
 	if !slices.Equal(old.prevSessionIDs, snap.prevIDs) {
 		snap.prevIDs = slices.Clone(old.prevSessionIDs)
 		hist.prevIDs = respawnChain(snap.prevIDs, old.getSessionID(), resumeID)

@@ -667,7 +667,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (_ *M
 		s = r.installFreshSession(tx,
 			key, proc, res.workspace, res.backendID, res.accessProfileID, res.wrapper, res.resumeID,
 			oldHistory, respawnChain(prevIDs, res.rejectedResumeID, ""), snap.cost, snap.spent.USD, snap.createdAt, res.opts.Exempt, snap.sid,
-			hist.userTurns, overrides,
+			hist.userTurns, overrides, snap.workflows,
 		)
 		s.startupFails.Store(max(snap.startupFails, failedSpawns.Streak))
 		s.setCodeChanges(snap.codeChanges)
@@ -738,6 +738,7 @@ func (r *Router) installFreshSession(tx sessTx,
 	oldSID string,
 	oldUserTurns int64,
 	overrides sessionOverrides,
+	board *WorkflowBoard,
 ) *ManagedSession {
 	s := &ManagedSession{
 		key:              key,
@@ -795,8 +796,15 @@ func (r *Router) installFreshSession(tx sessTx,
 	if n, ok := proc.(turnDoneNotifier); ok {
 		n.SetOnTurnDone(func() { r.notifyChange() })
 	}
+	// The respawned session's board is the one it replaces (a pointer), set
+	// before binding so the new process binds to the board that stays.
+	if board == nil {
+		board = newWorkflowBoard(r.hist.projectsRoot)
+	}
+	s.workflows.Store(board)
 	bookUnownedResults(s, proc)
 	bookCodeChanges(s, proc, func() { r.ss.Update(markChanged); r.notifyChange() })
+	bookWorkflows(s, proc, r.hist.projectsRoot, func() { r.ss.Update(markChanged); r.notifyChange() }, r.BumpVersion)
 	bookProcessEnd(s, proc, r.hist.claudeDir)
 	if len(snapshot) > 0 {
 		proc.InjectHistory(snapshot)
