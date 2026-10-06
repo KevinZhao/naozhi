@@ -206,6 +206,24 @@ func TestBuildQuestionBlocks_MultiQuestionIsReadOnly(t *testing.T) {
 	}
 }
 
+func TestBuildQuestionBlocks_LongDescriptionsAreClipped(t *testing.T) {
+	t.Parallel()
+	opts := make([]platform.QuestionOption, 3)
+	for i := range opts {
+		opts[i] = platform.QuestionOption{Label: string(rune('A' + i)), Description: strings.Repeat("述", 2000)}
+	}
+	blocks, _ := renderBlocks(t, platform.QuestionCard{Items: []platform.QuestionItem{{Question: "Q", Options: opts}}})
+	if got := blockTypes(blocks); got != "section,context,actions,context" {
+		t.Fatalf("block types = %s", got)
+	}
+	if n := utf8.RuneCountInString(blocks[1].Elements[0].text()); n > slackTextObjectMaxRunes {
+		t.Errorf("description context has %d runes, over %d", n, slackTextObjectMaxRunes)
+	}
+	if n := len(blocks[2].Elements); n != 3 {
+		t.Errorf("%d buttons, want 3", n)
+	}
+}
+
 // TestBuildQuestionBlocks_OverLimitsErrors: a message past a Block Kit limit
 // is rejected whole, so the card must error and let dispatch post text.
 func TestBuildQuestionBlocks_OverLimitsErrors(t *testing.T) {
@@ -316,6 +334,7 @@ func TestHandleBlockActions_DispatchesAnswer(t *testing.T) {
 		{"tampered value in IM", "D1", "evil", "direct"},
 		{"missing value in IM", "D1", "", "direct"},
 		{"missing value in private channel", "G1", "", "group"},
+		{"value wins over the IM prefix", "D1", "group", "group"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
