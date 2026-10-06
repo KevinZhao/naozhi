@@ -14,6 +14,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 )
 
 // slotUUIDFallbackSeq is the monotonic counter newSlotUUID's crypto/rand
@@ -66,6 +67,7 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 		uuid:      newSlotUUID(),
 		text:      text,
 		priority:  priority,
+		runID:     ctxutil.RunID(ctx),
 		onEvent:   onEvent,
 		resultCh:  make(chan *clievent.SendResult, 1),
 		errCh:     make(chan error, 1),
@@ -154,7 +156,7 @@ func (p *Process) awaitSlot(ctx context.Context, slot *sendSlot) (*clievent.Send
 			// Tombstone: keep the slot so FIFO positioning survives; fanout
 			// sees canceled=true and books the late result instead.
 			if res := p.abandonSlot(slot); res != nil && res.MergedWithHead == 0 {
-				p.bookUnclaimed(*res)
+				p.bookAbandoned(*res, slot.runID)
 			}
 			return nil, ctx.Err()
 		case <-watchdog.C:
@@ -190,7 +192,7 @@ func (p *Process) awaitSlot(ctx context.Context, slot *sendSlot) (*clievent.Send
 			if res := p.abandonSlot(slot); res != nil {
 				return res, nil
 			}
-			slog.Warn("passthrough: slot orphaned", "slot_id", slot.id, "elapsed", time.Since(slot.enqueueAt))
+			slog.WarnContext(ctx, "passthrough: slot orphaned", "slot_id", slot.id, "elapsed", time.Since(slot.enqueueAt))
 			return nil, clierr.ErrOrphanedSlot
 		}
 	}
@@ -362,13 +364,13 @@ func (p *Process) findSlotByUUIDLocked(u string) *sendSlot {
 func (p *Process) handleReplayEventLocked(ev clievent.Event) {
 	if slot := p.findSlotByUUIDLocked(ev.UUID); slot != nil {
 		if slot.replayed {
-			slog.Debug("passthrough: replay uuid already claimed", "uuid", ev.UUID, "slot_id", slot.id)
+			slog.Debug("passthrough: replay uuid already claimed", "uuid", ev.UUID, "slot_id", slot.id, "run_id", slot.runID)
 			return
 		}
 		slot.replayed = true
 		p.slots.current = append(p.slots.current, slot)
 		slog.Debug("passthrough: independent replay matched", "uuid", ev.UUID,
-			"slot_id", slot.id, "turn_slots", len(p.slots.current))
+			"slot_id", slot.id, "run_id", slot.runID, "turn_slots", len(p.slots.current))
 		return
 	}
 
@@ -393,8 +395,6 @@ func (p *Process) handleReplayEventLocked(ev clievent.Event) {
 // onUnownedResult, as no finishRun will see its cost. Called from readLoop
 // after releasing slotsMu.
 func (p *Process) fanoutTurnResult(owners []*sendSlot, ev clievent.Event) {
-	slog.Debug("passthrough: fanout", "owners", len(owners),
-		"result_len", len(ev.Result), "session", ev.SessionID)
 	if len(owners) == 0 {
 		slog.Warn("passthrough: orphan result, no slot claim",
 			"session", ev.SessionID, "result_len", len(ev.Result))
@@ -402,12 +402,15 @@ func (p *Process) fanoutTurnResult(owners []*sendSlot, ev clievent.Event) {
 	}
 
 	head := owners[0]
+	// One CLI turn may answer several runs: the head's carries the cost.
+	slog.Debug("passthrough: fanout", "owners", len(owners), "run_id", head.runID,
+		"merged_run_ids", followerRunIDs(owners), "result_len", len(ev.Result), "session", ev.SessionID)
 	mergedCount := len(owners)
 
 	headRes := resultFromEvent(ev)
 	headRes.MergedCount = mergedCount
 	if !p.deliverSlotResult(head, &headRes) {
-		p.bookUnclaimed(headRes)
+		p.bookAbandoned(headRes, head.runID)
 	}
 
 	if mergedCount == 1 {
@@ -445,9 +448,22 @@ func (p *Process) deliverSlotResult(s *sendSlot, r *clievent.SendResult) bool {
 	}
 	p.slots.mu.Unlock()
 	if full {
-		slog.Warn("passthrough: resultCh full, dropping", "slot_id", s.id)
+		slog.Warn("passthrough: resultCh full, dropping", "slot_id", s.id, "run_id", s.runID)
 	}
 	return delivered
+}
+
+// followerRunIDs lists the run ids of the slots a merged turn answers after
+// its head; nil for a turn with one owner.
+func followerRunIDs(owners []*sendSlot) []string {
+	if len(owners) < 2 {
+		return nil
+	}
+	ids := make([]string, len(owners)-1)
+	for i, s := range owners[1:] {
+		ids[i] = s.runID
+	}
+	return ids
 }
 
 // discardAllPending is used when the CLI is known dead or the session is
@@ -521,11 +537,12 @@ func (p *Process) onTurnResult() []*sendSlot {
 // the session books its cost now: no Send's finishRun ever sees it, and the
 // next owned result's cumulative difference is lost if the process dies first
 // (#3096, #3322). noLiveSend is turnState.noLiveSend read before the result
-// was queued. A turn the CLI started on its own (system/init with no Send
+// was queued, and abandonedRun the run of the Send that gave up on it, if
+// one did. A turn the CLI started on its own (system/init with no Send
 // behind it) also ends here, since nothing else moves it back to Ready; a
 // queued passthrough slot keeps it Running for that slot's own turn. A result
 // a live Send owns is left alone.
-func (p *Process) settleUnclaimedResult(ev clievent.Event, noLiveSend bool) {
+func (p *Process) settleUnclaimedResult(ev clievent.Event, noLiveSend bool, abandonedRun string) {
 	p.slots.mu.Lock()
 	pending := len(p.slots.pending)
 	p.slots.mu.Unlock()
@@ -543,7 +560,11 @@ func (p *Process) settleUnclaimedResult(ev clievent.Event, noLiveSend bool) {
 	onDone, onResult := p.turn.onTurnDone, p.turn.onUnownedResult
 	p.turn.mu.Unlock()
 	if onResult != nil {
-		onResult(resultFromEvent(ev))
+		res := resultFromEvent(ev)
+		if abandonedRun != "" {
+			logAbandonedResult(p.slogger(), res, abandonedRun)
+		}
+		onResult(res)
 	}
 	if ended && onDone != nil {
 		onDone()

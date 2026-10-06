@@ -182,6 +182,7 @@ type sendSlot struct {
 	uuid     string
 	text     string
 	priority string // "" | "now" | "next" | "later"
+	runID    string // the caller's turn (ctxutil.RunID); "" outside one
 	onEvent  clievent.EventCallback
 	resultCh chan *clievent.SendResult
 	errCh    chan error
