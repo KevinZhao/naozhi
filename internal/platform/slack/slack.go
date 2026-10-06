@@ -50,6 +50,11 @@ type Slack struct {
 	dispatch platform.BoundedDispatch
 	// connState is fed by the socket mode client's lifecycle events.
 	connState platform.ConnTracker
+	// admit gates file downloads; nil admits everyone. Set by SetAdmission
+	// before Start.
+	admit platform.AdmitFunc
+	// fileHTTP downloads uploads (slackFileHTTPClient outside tests).
+	fileHTTP *http.Client
 }
 
 // slackHTTPClient is shared by all Slack adapters. The 10s Timeout matters
@@ -77,8 +82,12 @@ func New(cfg Config) *Slack {
 		cfg:      cfg,
 		api:      api,
 		dispatch: platform.BoundedDispatch{Name: "slack"},
+		fileHTTP: slackFileHTTPClient,
 	}
 }
+
+// SetAdmission implements platform.Admitter.
+func (s *Slack) SetAdmission(fn platform.AdmitFunc) { s.admit = fn }
 
 func (s *Slack) Name() string { return "slack" }
 
@@ -444,14 +453,23 @@ func (s *Slack) maybeHealBotID() {
 }
 
 func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
-	if ev.BotID != "" || ev.SubType != "" {
+	if ev.BotID != "" || (ev.SubType != "" && ev.SubType != subtypeFileShare) {
 		return
+	}
+	// The bot's own uploads come back as file_share events with no bot_id,
+	// only user = the bot's user ID.
+	botID := s.botIDOrEmpty()
+	if botID != "" && ev.User == botID {
+		return
+	}
+	var files []slack.File
+	if ev.Message != nil {
+		files = ev.Message.Files
 	}
 
 	text := ev.Text
 	mentionMe := false
 
-	botID := s.botIDOrEmpty()
 	if botID != "" {
 		mention := "<@" + botID + ">"
 		if strings.Contains(text, mention) {
@@ -466,7 +484,7 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 		s.maybeHealBotID()
 	}
 	text = strings.TrimSpace(text)
-	if text == "" {
+	if text == "" && len(files) == 0 {
 		return
 	}
 	// API-posted messages can exceed Slack's UX limit; cap before dispatch.
@@ -505,6 +523,21 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 		msg.SelfThread = ev.TimeStamp
 	}
 
-	s.dispatch.TryGo("slack", func() { s.handler(s.ctx, msg) },
-		"chat", msg.ChatID, "user", msg.UserID)
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.dispatch.TryGo("slack", func() {
+		// Only uploads cost a download; the handler judges every message anyway.
+		if len(files) > 0 {
+			if s.admit != nil && !s.admit(ctx, msg) {
+				return
+			}
+			s.attachFiles(ctx, &msg, files)
+			if ctx.Err() != nil {
+				return
+			}
+		}
+		s.handler(ctx, msg)
+	}, "chat", msg.ChatID, "user", msg.UserID)
 }
