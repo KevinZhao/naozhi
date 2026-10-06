@@ -211,7 +211,7 @@ Platforms that can observe their own connection implement `ConnStateReporter` (`
 
 ### Session Management & Agent Routing
 
-Session key format: `{platform}:{chatType}:{chatID}:{agentId}` (e.g., `feishu:direct:alice:code-reviewer`).
+Session key format: `{platform}:{chatType}:{chatID}:{agentId}` (e.g., `feishu:direct:alice:code-reviewer`). In a group chat `session.group_scope` (default `thread`) can narrow `chatID` to `{chatID}#t{threadID}` for a Slack thread / Feishu topic, or `{chatID}#u{userID}` per member (`user`); a message outside any thread keeps the plain key. The chat itself still owns the `/cd` workspace, project binding, cron jobs and its `cost.budget` per-chat cap; only the session (and `/new`, `/stop`, `/urgent`) is per thread or member. Auto-takeover of a terminal CLI only lands on a session the whole chat shares; a thread's or member's session starts fresh.
 Other key namespaces (canonical home: `internal/sessionkey`, wire-stable constants):
 - `project:{name}:planner` -- project planner sessions (exempt from TTL and max_procs)
 - `cron:<jobID>` / `sys:<daemonID>` / `scratch:<sessionID>` -- cron jobs, sysession daemons, scratch sessions
