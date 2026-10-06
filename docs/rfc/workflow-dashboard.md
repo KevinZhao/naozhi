@@ -1309,7 +1309,7 @@ running（5），否则探针行 6 的 B（`state:"start"`，只有 queuedAt）�
 | 每 workflow agent 行 | 2000（board 第 4 步的并集同样受此上限） | 计数照算，行截断，`AgentsCapped=true`；超出上限的项（phase 同理）只计数：不规范化、不 redact、不建记忆，也不留在发布切片的底层数组里；记忆超过上限时修剪到当前所示的 index（PR-6；先建全部行再切片的话，单个 10MiB 快照能让一个条目钉住 ~60MB） |
 | 每 agent 历史 agentId | 8 | 丢最旧 |
 | 每终态 workflow 的结果缓存（§6.2.1） | result 16KB + logs 合计 64KiB（≤ 200 行 × 500 runes，超出丢最旧） | ≤ ~80KB；截断后的 result 是副本，不钉住整段原文（PR-6）；不缓存 per-agent resultPreview |
-| 后台磁盘 I/O（RunDir 解析、stat、结果文件、R3，§5.8 "I/O 派发"） | 每 board 在途 ≤ 2；全局 `workflowIOSlots = 8` | 在途 > 30s 记为卡死但**继续占全局槽位**，每 board 至多补发 1 个；挂死的文件系统最多卡住 8 个 goroutine / fd；没抢到全局槽位的 board 在池里登记，槽位释放时按登记先后 pump（PR-8：否则它要等自己的下一次登记或 sweeper tick）；登记后再试一次槽位，否则在“首次尝试失败”与“登记”之间释放的槽位找不到等待者 |
+| 后台磁盘 I/O（RunDir 解析、stat、结果文件、R3，§5.8 "I/O 派发"） | 每 board 在途 ≤ 2；全局 `workflowIOSlots = 8` | 在途 > 30s 记为卡死但**继续占全局槽位**，每 board 至多补发 1 个；挂死的文件系统最多卡住 8 个 goroutine / fd；没抢到全局槽位的 board 在池里登记，槽位释放时按登记先后 pump（PR-8：否则它要等自己的下一次登记或 sweeper tick）；登记后再试一次槽位，否则在“首次尝试失败”与“登记”之间释放的槽位找不到等待者；任务分解析 / 读取 / 定位三种，排队中的任务只被同 task、同种类的新任务替换（读取不能顶掉排队中的解析），每 task 在途仍至多 1 个（PR-9） |
 | 字符串 | agent：label/title/phaseTitle 120、model 64、last tool 64、last tool summary 200、error 400；workflow：Name 120、Description / Current / NotifySummary 200、RawState / RawStatus 32 runes | 先 `RedactSecrets` 再 `textutil.TruncateRunes`（`textutil/truncate.go:19`），按原串 maphash 记忆（§4.3） |
 
 估算：一行 Agent 结构体 + 字符串 ≲ 600B，398 agents ≈ 240KB 上界、典型 ≈ 80KB。一个 workflow 的行最多同时有三份：
@@ -1384,8 +1384,9 @@ Tracker 当前版、CoW 期间的旧版、board 盖过 Rev 的上一发布版（
      直到卡死的任务返回；返回的结果按 taskId 与条目代数复核后丢弃。v3 的"卡死即允许发起新的"会在挂死的 FS 上每 board 每 30s 泄漏一个
      goroutine 与 fd、没有上限；现在最多卡住 8 个。RunDir 尚未解析完成的条目不是候选。候选：
      - `IsUnsettled`、`RunID` 已知、`now − LastObservedAt ≥ 60s`、距上次 stat ≥ 60s；
-     - 终态、`!ResultLoaded`、`RunID` 已知，且（`now − EndedAt ≤ 10min`，或 `Source=ref` 且本次进程生命期内尚未尝试过），距上次 stat ≥ 30s
-       （第 4 步的重试；后一种是 R0 恢复的终态条目补行，§5.9）；
+     - 终态、`!ResultLoaded`、`RunID` 已知，且 `now − EndedAt ≤ 10min`，距上次 stat ≥ 30s（第 4 步的重试）；R0 恢复的终态条目的补行
+       不靠这个候选：RunDir 解析成功的发布里 `diskWorkLocked` 已对每个尚未读过的终态条目发起读取（PR-9；v5 写的第二个候选"`Source=ref` 且尚未尝试过"
+       不可达，删除）；
      - **R4**（§5.9）：`IsUnsettled`、board 已无存活进程（未绑定，或绑定进程已结束）持续 ≥ `workflowOrphanAfter = 90s`
        （3 个 reconcile tick，常量）、且本轮 stat 未命中 taskId 匹配的结果文件 → `interrupted`；
      - **R5**（§5.9）：board **有**存活进程，retained 中的 `IsRunning` 条目自本次 bind 起 ≥ `workflowUnclaimedAfter` 未被当前 Tracker
@@ -1393,6 +1394,13 @@ Tracker 当前版、CoW 期间的旧版、board 盖过 Rev 的上一发布版（
 
      stat 命中后读取并经 `ApplyResultFile`。taskId 不匹配（续跑中的旧文件）→ 视为未命中。
      实际延迟：丢失终态帧后 ≤ 60s（无观测阈值）+ ≤ 30s（tick 间隔）= **≤ 90s**。
+     R5 判成 `unknown` 或 `paused` 的条目仍是 `IsUnsettled`，会继续每 60s 做一次静默读取（一次 open，受 I/O 池约束），直到被容量上限裁掉或 board 消失；接受（PR-9）。
+     （PR-9）stat 与读取是同一个任务：经 `OpenRegularIn` 打开即读，ENOENT 即未命中。没有可读的 run dir 的条目（RunID 未知，或解析已完成但失败）
+     在 R4 / R5 的条件成立时直接判定、不等 stat——"RunID 未知视为未命中"；只有解析**还在进行中**的条目跳过。R4 / R5 的判定在读取返回、
+     回到 b.mu 内时按当时的状态重算一次，条件已不成立（期间重接了进程、Tracker 认领了它）就不改。R4 的那次读取算作该终态条目的首次读取，
+     不会紧跟着再读一次；之后按第二个候选重试（结果文件迟到时以文件为准，同 (a)）。
+     Tracker 持有的条目由 Tracker 合并：board 在 b.mu 内先写结果缓存，再在**释放 b.mu 之后**调用 `ApplyWorkflowResult`（它同步回调 wake，而 wake 取 b.mu）；
+     I/O 任务的应用函数因此可以返回一个出锁后执行的后续函数。
    - Tracker 归属的 workflow 由 Tracker 合并；进程已不在、只剩 board `retained` 的条目由 board 用
      同一个纯函数（`workflow.MergeResultFile`）合并，保证优先级规则只有一处实现。
    - 由 R4 或 (a) 合成的 `interrupted`、由 R5 合成的 `unknown` 都可逆：之后若某个新绑定的（或当前的）Tracker 带回同一 task_id，进程侧优先覆盖回 running
@@ -1541,7 +1549,11 @@ type WorkflowBoard struct { // 导出类型名、全部字段未导出：server 
   `EvalSymlinks(workspace)`，用 `ProjectSlug(解析结果)` 求 ProjectDir；与 `ProjectSlug(workspace)` 不同时两个候选依次试（EvalSymlinks 失败只试原拼写）。
   v4 写的是纯字符串运算：ring 绕回后重启只剩来源 2、3，symlink workspace 下它们指向不存在的目录，RunDir 永远解析不出，drill-in 一直 202，R0 的终态条目也补不了行。
   EvalSymlinks 是系统调用，所以它只在这个锁外任务里做。解析失败
-  （ok=false）也记下，元组不变就不重试。依赖 RunDir 的工作都等它完成：终态后的结果文件读取（§5.6(4)）排在它之后；sweeper 与 R3 跳过未解析的
+  （ok=false）也记下，但**不是终局**（PR-9）：launch receipt 与 CC 创建 run 目录几乎同时（实测 25 个历史 run 中 6 个的目录晚于 receipt 0.1–4ms），
+  naozhi 读到 receipt 时目录可能还没有。v5 的"元组不变就不重试"会让这个 run 的 RunDir 永远为空、结果文件永不读取、drill-in 永远 202。
+  所以 sweeper 对 `RunID` 已知、解析失败的条目，每隔 `workflowResultRetry`（30s）以同一来源元组重新解析，到首次登记起
+  `workflowResultRetryFor`（10min）为止（元组变化则重新计时）；R4 / R5 不等重试，照旧在条件成立时直接判定，之后目录与结果文件出现，
+  终态候选的读取仍以文件为准（可逆）。该 bind 欠的 R3b 读取随重试保留。依赖 RunDir 的工作都等它完成：终态后的结果文件读取（§5.6(4)）排在它之后；sweeper 与 R3 跳过未解析的
   条目；drill-in 返回 202 pending（§8.2，与"transcript 尚未落盘"同一语义）；HTTP 不返回 result / logs，置 `result_unavailable`（§6.2）。
   测试：用计数型 fake resolver 断言在 `r.ss.Update` 内 bind、在 readLoop 上 wake 都**零次**同步调用；resolver 阻塞在 channel 上时 wake / bind
   照常返回、其他 board 不受影响；来源元组在解析途中变化时旧结果被丢弃。
@@ -1683,7 +1695,7 @@ R0  router_restore：storeEntry.Workflows（Ref）→ board.retained
       b.procGone = 恢复时刻；
       终态条目没有行（Ref 不带 agents）：RunID 已知的，在 RunDir 解析完成后经 I/O 派发做一次 MergeResultFile（行 + 总计 + 结果缓存，
       按普通 board 版本推进发布）——否则没有 shim 的重启之后，展开恢复出来的终态 workflow 只有 header（sweeper 的终态候选要求
-      now − EndedAt ≤ 10min，R3b 又只在重接时跑）；sweeper 的第二个候选为此放宽到"Source=ref 且尚未尝试过"（§5.6(6b)），HTTP 的缓存缺失路径
+      now − EndedAt ≤ 10min，R3b 又只在重接时跑）；由 `diskWorkLocked` 在 RunDir 解析成功的那次发布里对每个尚未读过的终态条目发起一次读取（不再放宽 sweeper 的候选），HTTP 的缓存缺失路径
       调用同一个 board 方法（§6.2.1）
 R1  ReconnectShimsCtx → SpawnReconnect（wrapper.go:586-642）:
       DrainReplay → proc 构造（Tracker 已在）
@@ -1698,10 +1710,17 @@ R2  router_shim.go：commitShimReattach 成功后 bookWorkflows → bind → 立
       → board 逐字段合并 retained（§5.8 第 3 步：Ref 补上被淘汰的 RunID / Name / StartedAt / SessionID，种子条目的 LastObservedAt 取
         max(Ref, bindAt)）；进程侧的状态与行覆盖 snapshot_stale；版本按 §5.8 单调分配
 R3  紧随其后（SetCwdForLinker 已于 :405-407 执行）由一个闭包经 board 的 I/O 派发启动一次异步磁盘对账（不新增 Router 方法，§5.6(6b)）；
+    （PR-9：不另设闭包，由 bind 自己登记——bind 本就紧随 commitShimReattach。每次绑定一个新 proc 时，每个 RunID 已知、`!ResultLoaded` 的条目
+     欠一次读取，RunDir 解析完成后发出（R3b）；R3a 只在该次 bind 的 replay 已绕回时、对 live Tracker 报告的、RunID 为空且带 agentId 的条目做，
+     每次 bind 每个 task 至多一次，条目第一次带上 agentId 时发出——种子里没有快照时，下一张 live 快照才带来 agentId。spawn / respawn 的 bind
+     同样对账：每个条目至多一次 open。）
     所有路径经 claudefs.ResolveWorkflowRunDir（§8.1），所有文件 / 目录经 root 锚定的 osutil.OpenRegularIn / OpenDirIn + 有界 ReadDir（§10）：
-      a. 缺 RunID：OpenDirIn 打开 <ProjectSessionDir>/subagents/workflows/（ProjectDir 与来源 2 相同，先 EvalSymlinks(workspace)；SessionID 为空则跳过 R3a；
+      a. 缺 RunID：OpenDirIn 打开 <ProjectSessionDir>/subagents/workflows/（ProjectDir 与来源 2 相同，先 EvalSymlinks(workspace)；SessionID 为空则暂不做 R3a，等条目带上 SessionID 的那次发布再做；
          被换成 FIFO / symlink 时立即报错、不阻塞），f.ReadDir(257) 列目录（> 256 项即放弃并计数，
          名称过 runID 正则），找包含快照中任一 agent-<agentId>.jsonl 的 run dir（agentId 随机 a+16hex，无歧义）
+         （PR-9：`claudefs.LocateWorkflowRun`；每个 run dir 只对前 4 个合法 agentId 各做一次 root 锚定的 Lstat，且只认 regular file，
+         上界 256 × 4 次；放弃计数 `naozhi_session_workflow_run_scan_capped_total`；找到的 runId 记在 board 上，在发布时补进 RunID 为空的条目，
+         随后照常走 RunDir 解析）
       b. 有 RunID 且 <sess>/workflows/<runId>.json 存在且 taskId 匹配 → ApplyResultFile（权威终态 + 总计）
       （v2 的 c：running 且无快照时读 journal 生成粗粒度行——删除，§5.2：journal 行没有 index；这种 workflow 只显示 header，
        Degraded=no_snapshot，下一张 live 快照 ≤ 10s 内到达，§1.2.2）
@@ -2327,6 +2346,9 @@ type WorkflowRun struct {
 `PathContainedInRoot` 的 CONTRACT）→ `rel, ok := osutil.RelUnderRoot(resolvedCandidate, projectsRoot)` → 结构检查（解析 `rel`，见来源 1）→
 **按 projectsRoot 的拼写重拼** `RunDir = filepath.Join(projectsRoot, rel)`（`ResultRel` 同样由 `rel` 推出 `<slug>/<sid>/workflows/<runId>.json`），
 并从 `rel` 取出 `<sid>` 填进 `WorkflowRun.SessionID`。
+（PR-9）`EvalSymlinks` 之前先 Lstat 候选：最后一个分量必须是真目录、不是 symlink（否则另一个 session 下指向本 run dir 的同名 symlink 能过结构检查）；
+候选必须是绝对路径；结构检查同时要求 `<slug>` 只含 `[A-Za-z0-9-]`。来源 2、3 的 ProjectDirs 由 `claudefs.WorkspaceProjectDirs(projectsRoot, workspace)`
+求出（realpath 拼写在前，原拼写不同时在后），board 的解析任务调用它。
 
 - **参数顺序**：`PathContainedInRoot` 的签名是 `(resolved, root string)`（`osutil/pathroot.go:19`），候选在前、root 在后。v3 写成
   `PathContainedInRoot(projectsRoot, …)`：照抄的话问的是"root 是否在候选之下"——合法的 run dir 一律被拒（功能静默 404），反过来 projectsRoot 的
@@ -2545,6 +2567,10 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
   按 `atomicfile_unix.go` / `atomicfile_nonunix.go` 的分法给一个 Lstat + Open + Fstat 的退化实现。）PR-9 先用测试确认 `Root.OpenFile`
   把 O_NONBLOCK 透传给最后一个分量（FIFO 不阻塞）；若不透传，`OpenRegularIn` 退回"`OpenRegular(filepath.Join(projectsRoot, rel))` 前再对
   `filepath.Dir` 做一次 EvalSymlinks 并要求等于已解析的父目录"，剩下的竞态窗口记为已知限制。
+  （PR-9 实测，Go 1.26：O_NONBLOCK 透传，`TestOpenRegularIn_FIFOSwappedAfterLstat` 钉住。但 `os.Root` 对每个分量自己加 O_NOFOLLOW、遇到 symlink 就读出来
+  继续解析，只要不出 root 就跟随——调用方传的 O_NOFOLLOW 不起作用，最后一个分量是 root 内的 symlink 时照样打开目标。所以两个函数都先 `root.Lstat(rel)`：
+  不是 regular file（`OpenDirIn`：不是真目录，`ErrNotDir`）即拒、不打开（也不去打开 socket / 设备），打开后再要求 `os.SameFile(Lstat, Fstat)`，
+  Lstat 与打开之间被换掉的文件同样被拒。实现放在 `open_regular.go`，两个平台只有 flag 不同。）
   - **尺寸上限**（`maxBytes`，超过即 `ErrTooLarge`）：结果文件 16MiB；agent jsonl 不设上限（分页读）。v4 的 journal 64MiB、meta.json 64KiB 随读取一起删除（NG8 / NG9）。
   - **读窗口**（不是尺寸上限，`maxBytes = 0` 打开后 `ReadAt` 尾部）：主 transcript 尾窗 64KiB、必要时放大到 1MiB（§5.10）。v3 把它和尺寸上限
     列在一起，照抄会让每个真实 JSONL 都 `ErrTooLarge`。
@@ -2864,6 +2890,9 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   新 `internal/cli/workflow/disk.go` + test（结果文件解析，纯函数，入参是已打开的 reader）、`internal/session/managed_workflow.go`、
   `router_cleanup.go`（`startCleanupLoop` 的 saveTicker 分支加一行自由函数调用 `sweepWorkflowBoards(r.ss, time.Now())`——**不新增 Router 方法**，
   `routerMethodBaseline = 98` 已满）。
+  （PR-9 实际：`OpenRegularIn` / `OpenDirIn` 在 `open_regular.go`，平台文件只给 flag；session 侧的磁盘对账、R3、R4 / R5 与 sweeper 在新文件
+  `managed_workflow_disk.go`（+ `_test.go`、`_unix_test.go`），`managed_workflow_io.go` 的 I/O 任务带种类、`managed_workflow_publish.go` 在发布时登记磁盘工作；
+  workflow 包另加 `ResultFile.Terminal`、`Unclaimed` / `RawStatusUnclaimed`；新计数器进 `docs/ops/pprof.md`。）
 - 测试：§11.2 磁盘 / sweeper 行（假时钟，含合法 run dir 被接受、root 祖先被拒、darwin 大小写、symlink workspace、FIFO / 目录 FIFO 不阻塞、挂死 FS 下在途 ≤ 8），
   以及其他行里标〔PR-9〕的子项：Board 并发行的 sweeper 跳过未解析条目、Board 进程结束行的 R4（90s 判定与翻回）与 R5、Board 其他行的 R0 终态补行；
   FIFO 用例全在 `*_unix_test.go`。

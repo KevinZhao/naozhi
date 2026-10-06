@@ -253,3 +253,19 @@ func TestInterrupted(t *testing.T) {
 		t.Errorf("EndedAt %d, want the known 7", got.EndedAt)
 	}
 }
+
+// TestUnclaimed: unknown with the unclaimed raw status, no longer stale,
+// rows and end time untouched (it is not a terminal status), input intact.
+func TestUnclaimed(t *testing.T) {
+	w := &Workflow{TaskID: "w1", Status: StatusRunning, Degraded: DegradedSnapshotStale, Agents: []Agent{{Index: 1, State: AgentRunning}}}
+	got := Unclaimed(w)
+	if got.Status != StatusUnknown || got.RawStatus != RawStatusUnclaimed || got.Degraded != "" || got.EndedAt != 0 || got.Agents[0].State != AgentRunning {
+		t.Errorf("got %s/%q degraded %q ended %d row %s", got.Status, got.RawStatus, got.Degraded, got.EndedAt, got.Agents[0].State)
+	}
+	if !IsUnsettled(got.Status) || IsRunning(got.Status) {
+		t.Error("an unclaimed entry must stay unsettled and stop running")
+	}
+	if w.Status != StatusRunning || w.Degraded != DegradedSnapshotStale {
+		t.Error("Unclaimed modified its input")
+	}
+}

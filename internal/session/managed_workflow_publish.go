@@ -40,11 +40,19 @@ func (b *WorkflowBoard) publishLocked(notify bool) {
 	}
 	merged := make([]*workflow.Workflow, 0, len(live)+len(b.retained))
 	for _, w := range live {
+		b.claimed[w.TaskID] = true
 		merged = append(merged, mergeEntry(w, b.retained[w.TaskID], b.bindAt))
 	}
 	for id, r := range b.retained {
 		if !held[id] {
 			merged = append(merged, r.wf)
+		}
+	}
+	for i, m := range merged {
+		if run := b.located[m.TaskID]; run != "" && m.RunID == "" {
+			c := *m
+			c.RunID = run
+			merged[i] = &c
 		}
 	}
 	merged = b.capLocked(merged, held)
@@ -84,6 +92,10 @@ func (b *WorkflowBoard) publishLocked(notify bool) {
 		b.ver = ver
 	}
 	b.last = next
+	for _, p := range pubs {
+		b.diskWorkLocked(p, held[p.TaskID])
+	}
+	b.reconcile = false
 
 	pub := workflow.NewPublished(b.epoch, pubs, b.cur.Load())
 	b.cur.Store(pub)
@@ -143,8 +155,8 @@ func mergeEntry(live *workflow.Workflow, ret *retainedEntry, bindAt int64) *work
 }
 
 // capLocked bounds the board: at most workflowBoardMaxUnsettled unsettled
-// and workflowBoardMaxTerminal terminal entries. Only retained entries are
-// dropped — unknown first, then stale or restored ones, then the rest, the
+// and workflowBoardMaxTerminal terminal entries, each dropped with all the
+// board keeps of it. Only retained entries are dropped — unknown first, then stale or restored ones, then the rest, the
 // longest unobserved (for terminal: the earliest ended) first; dropping one
 // is no evidence it ended. Live entries are the Tracker's to bound.
 func (b *WorkflowBoard) capLocked(wfs []*workflow.Workflow, held map[string]bool) []*workflow.Workflow {
@@ -187,6 +199,10 @@ func (b *WorkflowBoard) capLocked(wfs []*workflow.Workflow, held map[string]bool
 		delete(b.retained, id)
 		delete(b.last, id)
 		delete(b.resolve, id)
+		delete(b.cache, id)
+		delete(b.located, id)
+		delete(b.scanned, id)
+		delete(b.claimed, id)
 	}
 	return slices.DeleteFunc(wfs, func(w *workflow.Workflow) bool { return drop[w.TaskID] })
 }
