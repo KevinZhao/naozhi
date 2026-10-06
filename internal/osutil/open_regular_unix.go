@@ -19,3 +19,10 @@ func OpenRegular(path string, maxBytes int64) (*os.File, os.FileInfo, error) {
 	}
 	return checkRegular(f, maxBytes)
 }
+
+// openInFlags are OpenRegularIn's: os.Root already refuses a symlink that
+// leaves the root, and O_NONBLOCK keeps a FIFO from blocking the open.
+const (
+	openInFlags = os.O_RDONLY | syscall.O_NONBLOCK | syscall.O_CLOEXEC
+	openDirFlag = syscall.O_DIRECTORY
+)

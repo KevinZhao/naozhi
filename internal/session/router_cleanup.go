@@ -558,6 +558,7 @@ func (r *Router) startCleanupLoop(ctx context.Context, interval time.Duration, a
 				r.Cleanup()
 			case <-saveTicker.C:
 				r.saveIfDirty()
+				sweepWorkflowBoards(r.ss, time.Now())
 			}
 		}
 	}()

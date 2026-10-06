@@ -190,3 +190,69 @@ func TestSameFileAncestor_SymlinkMidPath(t *testing.T) {
 			outsideFile, allowed)
 	}
 }
+
+// TestRelUnderRoot: rel is what lies below root, "." for root itself, and
+// nothing for a path outside it; PathContainedInRoot agrees on every case.
+func TestRelUnderRoot(t *testing.T) {
+	t.Parallel()
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(tmp, "projects")
+	deep := filepath.Join(root, "slug", "sid", "subagents")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		path, rel string
+		ok        bool
+	}{
+		{root, ".", true},
+		{deep, filepath.Join("slug", "sid", "subagents"), true},
+		{tmp, "", false},
+		{filepath.Join(tmp, "projectsX", "a"), "", false},
+	}
+	for _, c := range cases {
+		rel, ok := RelUnderRoot(c.path, root)
+		if rel != c.rel || ok != c.ok {
+			t.Errorf("RelUnderRoot(%q) = %q, %v; want %q, %v", c.path, rel, ok, c.rel, c.ok)
+		}
+		if got := PathContainedInRoot(c.path, root); got != c.ok {
+			t.Errorf("PathContainedInRoot(%q) = %v, want %v", c.path, got, c.ok)
+		}
+	}
+	// The inode branch: root spelled through an alias, so the byte prefix
+	// misses; rel is still what lies below the matching ancestor.
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(tmp, alias); err != nil {
+		t.Skipf("symlink unsupported here: %v", err)
+	}
+	if rel, ok := RelUnderRoot(deep, filepath.Join(alias, "projects")); !ok || rel != filepath.Join("slug", "sid", "subagents") {
+		t.Errorf("inode branch: RelUnderRoot = %q, %v; want slug/sid/subagents", rel, ok)
+	}
+}
+
+// TestRelUnderRoot_CaseVariant is the case-insensitive filesystem (darwin's
+// default) the inode branch exists for: a path whose root part differs from
+// root only in case yields the components below it, so joining them onto
+// root respells the path in root's case.
+func TestRelUnderRoot_CaseVariant(t *testing.T) {
+	t.Parallel()
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(tmp, "projects")
+	if err := os.MkdirAll(filepath.Join(root, "Slug", "run"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	upper := filepath.Join(tmp, "PROJECTS")
+	if _, err := os.Stat(upper); err != nil {
+		t.Skip("case-sensitive filesystem")
+	}
+	rel, ok := RelUnderRoot(filepath.Join(upper, "Slug", "run"), root)
+	if !ok || rel != filepath.Join("Slug", "run") {
+		t.Errorf("RelUnderRoot = %q, %v; want Slug/run below the case-variant root", rel, ok)
+	}
+}
