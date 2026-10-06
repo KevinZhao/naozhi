@@ -49,7 +49,7 @@ func (d *Dispatcher) newIMOrigin(msg platform.IncomingMessage, lg *slog.Logger, 
 // deliver the reply. Neither does one past today's budget.
 func (d *Dispatcher) submit(ctx context.Context, o *imOrigin, r turn.Request) {
 	if d.platforms[o.msg.Platform] == nil {
-		o.lg.Error("unknown platform")
+		o.lg.ErrorContext(ctx, "unknown platform")
 		return
 	}
 	if !d.admitBudget(ctx, o) {
@@ -102,13 +102,13 @@ func (o *imOrigin) Admitted(ctx context.Context, a turn.Ack) {
 	d := o.d
 	switch a {
 	case turn.AckOwner:
-		o.lg.Info("message received", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
+		o.lg.InfoContext(ctx, "message received", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
 		o.startAck(ctx)
 	case turn.AckDetached:
 		if o.kind == imUrgent {
-			o.lg.Info("/urgent dispatched", "key", o.key, "text_len", o.textLen)
+			o.lg.InfoContext(ctx, "/urgent dispatched", "key", o.key, "text_len", o.textLen)
 		} else {
-			o.lg.Info("message received (passthrough)", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
+			o.lg.InfoContext(ctx, "message received (passthrough)", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
 		}
 		o.startAck(ctx)
 	case turn.AckQueued:
@@ -117,9 +117,9 @@ func (o *imOrigin) Admitted(ctx context.Context, a turn.Ack) {
 		}
 	case turn.AckDropped:
 		notified := d.replyNotice(ctx, o.msg, o.key, "正在处理上一条消息，请稍候...", o.lg, "busy")
-		o.lg.Info("message dropped: session busy", "key", o.key, "notified", notified)
+		o.lg.InfoContext(ctx, "message dropped: session busy", "key", o.key, "notified", notified)
 	case turn.AckShuttingDown:
-		o.lg.Warn("message declined: shutting down", "key", o.key)
+		o.lg.WarnContext(ctx, "message declined: shutting down", "key", o.key)
 	}
 }
 
@@ -299,7 +299,7 @@ func (dl *imDelivery) queuedIDs() []string {
 // aborted turn with nothing to say only marks the banner.
 func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, sess turn.Session) {
 	o, d, p, tracker := dl.o, dl.o.d, dl.p, dl.tracker
-	dl.lg.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD,
+	dl.lg.InfoContext(ctx, "message replied", "result_len", len(result.Text), "cost", result.CostUSD,
 		"merged_count", result.MergedCount, "merged_with_head", result.MergedWithHead)
 
 	// A merge follower (MergedWithHead set; the head slot is 0 and may carry
@@ -311,7 +311,7 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 		tracker.markFinalized()
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			if err := p.EditMessage(ctx, msgID, "已合并到上一条回复。"); err != nil {
-				slog.Debug("merge follower banner edit failed", "msg_id", msgID, "err", err)
+				slog.DebugContext(ctx, "merge follower banner edit failed", "msg_id", msgID, "err", err)
 			}
 		}
 		d.ackMergedFollower(ctx, o.msg, o.key, result.MergedCount, dl.lg)
@@ -323,7 +323,7 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 	// result is still a healthy roundtrip for /health's lastReplySuccess.
 	d.markReplySuccess()
 
-	replyText := d.decorateReplyText(result, sess)
+	replyText := d.decorateReplyText(ctx, result, sess)
 	if replyText != "" {
 		replyText += d.budgetWarnLine(o.key)
 	}
@@ -349,10 +349,10 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 	if tracker.askQuestionFired.Load() {
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			if err := p.EditMessage(ctx, msgID, "⏳ 等待你的选择…"); err != nil {
-				slog.Debug("ask_question: banner edit failed", "err", err)
+				slog.DebugContext(ctx, "ask_question: banner edit failed", "err", err)
 			}
 		}
-		dl.lg.Info("ask_question suppressed redundant reply", "result_len", len(result.Text))
+		dl.lg.InfoContext(ctx, "ask_question suppressed redundant reply", "result_len", len(result.Text))
 	} else if replyText != "" {
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			d.replyIntoBanner(ctx, p, replyDestOf(o.msg), msgID, replyText)
@@ -365,7 +365,7 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 		// last tool status needs replacing.
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			if err := p.EditMessage(ctx, msgID, bannerAborted); err != nil {
-				slog.Debug("aborted turn banner edit failed", "msg_id", msgID, "err", err)
+				slog.DebugContext(ctx, "aborted turn banner edit failed", "msg_id", msgID, "err", err)
 			}
 		}
 	}
@@ -391,10 +391,10 @@ const bannerAborted = "已中断。"
 func (d *Dispatcher) replyIntoBanner(ctx context.Context, p platform.Platform, to ReplyDest, msgID, text string) {
 	chunks := replyChunks(p, text)
 	if err := p.EditMessage(ctx, msgID, chunks[0]); err != nil {
-		slog.Warn("edit message failed, sending new", "err", err, "chunks", len(chunks))
+		slog.WarnContext(ctx, "edit message failed, sending new", "err", err, "chunks", len(chunks))
 		d.sendChunks(ctx, p, to, chunks)
 		if err := p.EditMessage(ctx, msgID, bannerAnsweredBelow); err != nil {
-			slog.Debug("banner answered-below edit failed", "msg_id", msgID, "err", err)
+			slog.DebugContext(ctx, "banner answered-below edit failed", "msg_id", msgID, "err", err)
 		}
 		return
 	}

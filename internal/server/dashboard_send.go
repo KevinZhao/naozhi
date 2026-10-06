@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -318,6 +319,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		Key: key, Text: text, Images: images,
 		Workspace: workspace, ResumeID: resumeID, Backend: backend,
 		AccessProfile: accessProfile,
+		TraceID:       osutil.SanitizeForLog(ctxutil.TraceID(r.Context()), 128),
 	}, h.engine.httpOrigin(key))
 	if err != nil {
 		cleanup()

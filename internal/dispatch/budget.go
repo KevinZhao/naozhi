@@ -35,10 +35,10 @@ func (d *Dispatcher) admitBudget(ctx context.Context, o *imOrigin) bool {
 	dispatchBudgetBlockedTotal.Add(v.Subject.Kind(), 1)
 	chat := sessionkey.ChatKey(o.msg.Platform, o.msg.ChatType, o.msg.ChatID)
 	if !d.budgetReplies.allow(chat, time.Now()) {
-		o.lg.Debug("im turn refused: daily budget spent")
+		o.lg.DebugContext(ctx, "im turn refused: daily budget spent")
 		return false
 	}
-	o.lg.Info("im turn refused: daily budget spent",
+	o.lg.InfoContext(ctx, "im turn refused: daily budget spent",
 		"subject", string(v.Subject), "spent_usd", v.Spent, "limit_usd", v.Limit)
 	d.replyText(ctx, o.msg, "今日费用预算已用尽（"+imBudgetScope(v.Subject)+" "+v.Usage()+"），"+
 		v.ResetAt.Format("01-02 15:04")+" 重置；在此之前新消息不会处理。", o.lg)
