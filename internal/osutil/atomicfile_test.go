@@ -179,3 +179,69 @@ func TestIsAtomicTempName_MatchesWriteFileAtomicTemps(t *testing.T) {
 		}
 	}
 }
+
+// countFsyncs swaps both fsync seams for counters and restores them on cleanup.
+// Callers must not be parallel: the seams are package globals.
+func countFsyncs(t *testing.T) (files, dirs *int) {
+	t.Helper()
+	origFile, origDir := syncFileFn, syncDirFn
+	t.Cleanup(func() { syncFileFn, syncDirFn = origFile, origDir })
+	files, dirs = new(int), new(int)
+	syncFileFn = func(f *os.File) error { *files++; return origFile(f) }
+	syncDirFn = func(dir string) error { *dirs++; return origDir(dir) }
+	return files, dirs
+}
+
+func TestWriteFileAtomic_FsyncsFileAndDirByDefault(t *testing.T) {
+	files, dirs := countFsyncs(t)
+	path := filepath.Join(t.TempDir(), "data.json")
+	if err := WriteFileAtomic(path, []byte("payload"), 0600); err != nil {
+		t.Fatalf("WriteFileAtomic: %v", err)
+	}
+	if *files != 1 || *dirs != 1 {
+		t.Fatalf("fsync calls: file=%d dir=%d, want 1 and 1", *files, *dirs)
+	}
+
+	closed, err := os.Create(filepath.Join(t.TempDir(), "closed"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed.Close()
+	if err := SyncFile(closed); err == nil {
+		t.Fatal("SyncFile on a closed file: want the fsync error, got nil")
+	}
+}
+
+// TestDisableFsyncForTesting_SkipsEveryFsync pins the switch cron's TestMain
+// relies on: no fsync from any of the three entry points, data still written.
+func TestDisableFsyncForTesting_SkipsEveryFsync(t *testing.T) {
+	files, dirs := countFsyncs(t)
+	t.Cleanup(func() { fsyncDisabled.Store(false) })
+	DisableFsyncForTesting()
+
+	path := filepath.Join(t.TempDir(), "data.json")
+	if err := WriteFileAtomic(path, []byte("payload"), 0600); err != nil {
+		t.Fatalf("WriteFileAtomic: %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "payload" {
+		t.Fatalf("read = %q, err=%v; want %q", got, err, "payload")
+	}
+	if *files != 0 || *dirs != 0 {
+		t.Fatalf("fsync calls with fsync disabled: file=%d dir=%d, want 0 and 0", *files, *dirs)
+	}
+
+	closed, err := os.Create(filepath.Join(t.TempDir(), "closed"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed.Close()
+	if err := SyncFile(closed); err != nil {
+		t.Fatalf("SyncFile with fsync disabled: want nil, got %v", err)
+	}
+	if err := SyncDir("/no/such/dir/here"); err != nil {
+		t.Fatalf("SyncDir with fsync disabled: want nil, got %v", err)
+	}
+	if *files != 0 {
+		t.Fatalf("SyncFile reached the fsync seam %d times with fsync disabled", *files)
+	}
+}

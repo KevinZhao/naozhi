@@ -225,6 +225,11 @@ type Scheduler struct {
 	// DeleteJobByID deterministically inside that window (#2473). Always nil
 	// in production; set only before the scheduler is shared across goroutines.
 	finishRunPreAppendHook func(jobID string)
+
+	// startupPassHook is a test-only seam run at the top of every goStartupPass
+	// goroutine, so a test can hold a named pass while it acts. Always nil in
+	// production; set only before Start.
+	startupPassHook func(pass string)
 }
 
 // NewScheduler creates a scheduler. Call Start() to begin. cfg carries the
@@ -452,6 +457,9 @@ func (s *Scheduler) Start() error {
 	// sending a second turn into the same live CLI (#2751). The run-store half
 	// of the reconcile stays async below.
 	inflight := s.claimRunInflight()
+	// Same for sandbox orphans: listed before this process starts runs of its
+	// own, so none of their pending records is taken for an orphan.
+	orphans := s.claimSandboxOrphans()
 	s.cron.Start()
 	// P1 cron-run-history: cold-start GC pass over 'runs/' tree to collect
 	// retention-policy violators that accumulated while this process was
@@ -469,7 +477,7 @@ func (s *Scheduler) Start() error {
 	// previous process (pending files whose streams died with it). Async
 	// like the GC pass above — each orphan costs a StopRuntimeSession
 	// network call and must not block Start. gcWG-tracked so Stop() waits.
-	s.goStartupPass("sandbox-pending-reconcile", s.reconcileSandboxPending)
+	s.goStartupPass("sandbox-pending-reconcile", func() { s.reconcileSandboxOrphans(orphans) })
 	// Blob GC for the snapshot store (#2682): manifest retention strands
 	// blobs, and nothing else ever deletes them. Not gated on the run store —
 	// snapshots are written by sandbox runs regardless of run-history state.
