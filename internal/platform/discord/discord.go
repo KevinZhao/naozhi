@@ -73,6 +73,8 @@ type Discord struct {
 	restTransport http.RoundTripper
 	// closeTimeout overrides discordCloseTimeout when non-zero.
 	closeTimeout time.Duration
+	// downloadTimeout overrides discordDownloadTimeout when non-zero.
+	downloadTimeout time.Duration
 	// probing is set while a disconnect probe goroutine runs.
 	probing atomic.Bool
 	// probeDelay / probeMaxInterval / probeTimeout override the discordProbe*
@@ -718,9 +720,10 @@ func blockPrivateDial() func(ctx context.Context, network, addr string) (net.Con
 	}
 }
 
-// discordDownloadTimeout bounds one attachment download, body included: a
-// file at the 32 MiB cap needs about 190 KB/s. ResponseHeaderTimeout still
-// gives up on a silent server after 15s, and Stop cancels through stopCtx.
+// discordDownloadTimeout bounds all of one message's attachment downloads,
+// bodies included, so a slow CDN holds a dispatch slot at most this long: the
+// 32 MiB aggregate cap needs about 190 KB/s. ResponseHeaderTimeout still gives
+// up on a silent server after 15s, and Stop cancels through stopCtx.
 const discordDownloadTimeout = 3 * time.Minute
 
 // discordHTTPClient disables redirects (a 302 could bypass the CDN allowlist

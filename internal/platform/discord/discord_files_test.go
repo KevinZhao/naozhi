@@ -8,7 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/naozhi/naozhi/internal/limits"
@@ -337,5 +339,39 @@ func TestOnMessageCreate_StopDuringDownloadForwardsNothing(t *testing.T) {
 	d.stopCancel()
 	if got := handled(); len(got) != 0 {
 		t.Fatalf("handler calls = %d, want 0 after Stop", len(got))
+	}
+}
+
+// hangingCDN holds every request until its context ends.
+type hangingCDN struct{ hits atomic.Int32 }
+
+func (h *hangingCDN) RoundTrip(req *http.Request) (*http.Response, error) {
+	h.hits.Add(1)
+	<-req.Context().Done()
+	return nil, req.Context().Err()
+}
+
+// TestOnMessageCreate_DownloadBudgetBoundsMessage: a CDN that never sends a
+// body costs the message its download budget once, not once per attachment,
+// and the message is still forwarded with every download marked failed.
+func TestOnMessageCreate_DownloadBudgetBoundsMessage(t *testing.T) {
+	t.Parallel()
+	d, handled := filesAdapter(&cdnFiles{})
+	cdn := &hangingCDN{}
+	d.cdnHTTP.Transport = cdn
+	d.downloadTimeout = 50 * time.Millisecond
+	postDM(d, "read these", cdnAtt("a.pdf", "application/pdf", 10), cdnAtt("b.pdf", "application/pdf", 10))
+	done := make(chan []platform.IncomingMessage, 1)
+	go func() { done <- handled() }()
+	select {
+	case got := <-done:
+		if len(got) != 1 {
+			t.Fatalf("handler calls = %d, want 1", len(got))
+		}
+		if s, want := fileSummary(got[0].Files), "a.pdf=download_failed/0 b.pdf=download_failed/0"; s != want {
+			t.Errorf("files = %q, want %q", s, want)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("message still downloading after 10s with a 50ms budget (%d requests)", cdn.hits.Load())
 	}
 }

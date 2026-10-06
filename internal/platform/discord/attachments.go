@@ -78,9 +78,16 @@ func needsDownload(plan []pendingAttachment) bool {
 // aggregate byte cap shared by images and files. Images go to msg.Images
 // once their bytes sniff as an image; files go to msg.Files for dispatch to
 // classify. Every attachment not delivered becomes a File carrying its
-// Reject reason, so the user is told. It reports false when ctx ended
-// mid-way, and the message must then not be forwarded.
+// Reject reason, so the user is told; downloads still running when the
+// per-message budget runs out fail. It reports false when ctx ended mid-way,
+// and the message must then not be forwarded.
 func (d *Discord) attachFiles(ctx context.Context, msg *platform.IncomingMessage, plan []pendingAttachment) bool {
+	budget := d.downloadTimeout
+	if budget <= 0 {
+		budget = discordDownloadTimeout
+	}
+	dlCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
 	total := 0
 	for _, p := range plan {
 		reject := func(r platform.FileReject) {
@@ -99,7 +106,7 @@ func (d *Discord) attachFiles(ctx context.Context, msg *platform.IncomingMessage
 			reject(platform.FileRejectTotalTooLarge)
 			continue
 		}
-		data, err := downloadURL(ctx, d.cdnHTTP, p.url, min(perFile, remaining))
+		data, err := downloadURL(dlCtx, d.cdnHTTP, p.url, min(perFile, remaining))
 		if err != nil {
 			if ctx.Err() != nil {
 				return false
