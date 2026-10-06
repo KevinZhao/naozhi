@@ -61,7 +61,7 @@ graph TD
 |------|----------|------|------|----------|----------|------|
 | **飞书** | WebSocket 长连接 / Webhook | ✓ | ✓ | ✓ 流式更新 | ✓ | ✓ (仅私聊) |
 | **Slack** | Socket Mode | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ | ✓ (需 `files:read`) |
-| **Discord** | Gateway WebSocket | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ | ✓ |
+| **Discord** | Gateway WebSocket | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ | ✓ (按文件名/类型预筛) |
 | **微信** | HTTP 长轮询 (iLink Bot) | ✓ | — | — | — | — |
 
 「提问按钮」指 Claude 调用 AskUserQuestion 时把选项渲染成可点击的按钮；没有按钮的平台收到纯文本选项列表，直接回复文字作答。
@@ -69,6 +69,7 @@ graph TD
 「文件」指用户发来的 PDF 和 UTF-8 文本文件（`.txt` `.md` `.csv` `.json` `.log` `.yaml` `.yml`）。发送时文件写入会话工作目录的 `.naozhi/attachments/<日期>/`，Claude 用 Read 工具读取，与 Dashboard 上传的 PDF 是同一条路径。
 - 上限：单个文件 32 MiB；每条消息最多 5 个、合计 32 MiB，Slack 和 Discord 消息里的图片也计入（图片本身仍是 10 MiB）
 - docx / xlsx / zip 等其他类型、超限和下载失败的文件，bot 会回一条「以下文件未处理：」列出文件名和原因，消息里的文字和其余文件照常发送
+- Discord 在下载前先按文件名和类型筛选：PDF 需要 `.pdf` 文件名或 `application/pdf` 类型，文本文件需要上面列出的扩展名
 - 群聊里文件要和 @bot 在同一条消息里，否则与普通消息一样被忽略。飞书的文件消息没法 @bot，所以群里发的文件不处理，请私聊发送
 - 这些文件和 Dashboard 上传一样只按上传时间回收（`attachment-gc`，默认关闭），不开启就一直留在工作目录里
 
