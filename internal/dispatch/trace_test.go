@@ -16,20 +16,22 @@ import (
 
 func TestWithInboundTrace(t *testing.T) {
 	t.Parallel()
-	ctx := withInboundTrace(context.Background(), platform.IncomingMessage{EventID: "evt-1\x1b[0m"})
-	if got := ctxutil.TraceID(ctx); got != "evt-1" && got == "" {
-		t.Fatalf("trace from event id = %q", got)
+	trace := func(ctx context.Context, msg platform.IncomingMessage) string {
+		return ctxutil.TraceID(withInboundTrace(ctx, msg))
 	}
-	if got := ctxutil.TraceID(ctx); got == "" || len(got) > 64 {
+	if got := trace(context.Background(), platform.IncomingMessage{Platform: "feishu", EventID: "ev1"}); got != "feishu:ev1" {
+		t.Fatalf("trace from event id = %q, want feishu:ev1", got)
+	}
+	// Control bytes from the platform payload never reach a log field.
+	if got := trace(context.Background(), platform.IncomingMessage{Platform: "slack\n", EventID: "evt-1\x1b[0m"}); got != "slack_:evt-1_[0m" {
 		t.Fatalf("sanitized trace id = %q", got)
 	}
 	// No event id: a fresh id, never empty.
-	if got := ctxutil.TraceID(withInboundTrace(context.Background(), platform.IncomingMessage{})); len(got) != 16 {
+	if got := trace(context.Background(), platform.IncomingMessage{Platform: "feishu"}); len(got) != 16 {
 		t.Fatalf("minted trace id = %q", got)
 	}
 	// An upstream trace wins.
-	pre := ctxutil.WithTraceID(context.Background(), "outer")
-	if got := ctxutil.TraceID(withInboundTrace(pre, platform.IncomingMessage{EventID: "e"})); got != "outer" {
+	if got := trace(ctxutil.WithTraceID(context.Background(), "outer"), platform.IncomingMessage{Platform: "feishu", EventID: "e"}); got != "outer" {
 		t.Fatalf("existing trace overwritten: %q", got)
 	}
 }
@@ -45,11 +47,11 @@ func TestIMTurn_LogsCarryCorrelation(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	var seen struct {
-		run, key string
+		run, key, trace string
 	}
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp, withSendFn(func(ctx context.Context, _ string, _ turn.Session, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
-		seen.run, seen.key = ctxutil.RunID(ctx), ctxutil.SessionKey(ctx)
+		seen.run, seen.key, seen.trace = ctxutil.RunID(ctx), ctxutil.SessionKey(ctx), ctxutil.TraceID(ctx)
 		return &clievent.SendResult{Text: "pong"}, nil
 	}))
 	// The test router has no CLI; InjectSession gives the key a live process.
@@ -61,8 +63,8 @@ func TestIMTurn_LogsCarryCorrelation(t *testing.T) {
 		Platform: "fake", EventID: "evt-corr", UserID: "user1", ChatID: "chat1", ChatType: "direct", Text: "ping",
 	})
 
-	if seen.run == "" || seen.key != key {
-		t.Fatalf("Send ctx carried run=%q key=%q", seen.run, seen.key)
+	if seen.run == "" || seen.key != key || seen.trace != "fake:evt-corr" {
+		t.Fatalf("Send ctx carried run=%q key=%q trace=%q", seen.run, seen.key, seen.trace)
 	}
 	var received, replied map[string]any
 	for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
@@ -80,7 +82,7 @@ func TestIMTurn_LogsCarryCorrelation(t *testing.T) {
 	if received == nil || replied == nil {
 		t.Fatalf("missing log lines in:\n%s", buf.String())
 	}
-	if received["trace_id"] != "evt-corr" || replied["trace_id"] != "evt-corr" {
+	if received["trace_id"] != "fake:evt-corr" || replied["trace_id"] != "fake:evt-corr" {
 		t.Errorf("trace_id: received=%v replied=%v", received["trace_id"], replied["trace_id"])
 	}
 	if replied["run_id"] != seen.run || replied["session_key"] != key {

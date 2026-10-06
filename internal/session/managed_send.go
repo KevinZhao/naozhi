@@ -63,9 +63,10 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 	// completes before this method returns, strictly upstream of any channel
 	// flush, so feishu/weixin never see the leaked XML.
 	result = s.recoverLeakedToolcall(ctx, proc, result, func(rctx context.Context, nudge string) (*clievent.SendResult, error) {
+		rctx = nudgeRunCtx(rctx)
 		rrt, revCb := s.instrumentRun(onEvent)
 		rr, rerr := proc.SendPassthrough(rctx, nudge, nil, revCb, "next")
-		s.finishRun(ctx, rrt, rr, rerr)
+		s.finishRun(rctx, rrt, rr, rerr)
 		return rr, rerr
 	})
 	return result, nil
@@ -175,9 +176,10 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []clieven
 	// so the re-send is serial with any other turn; its <system-reminder>
 	// nudge lands in EventLog but is hidden by dashboard.js's filter.
 	result = s.recoverLeakedToolcall(ctx, proc, result, func(rctx context.Context, nudge string) (*clievent.SendResult, error) {
+		rctx = nudgeRunCtx(rctx)
 		rrt, revCb := s.instrumentRun(onEvent)
 		rr, rerr := proc.Send(rctx, nudge, nil, revCb)
-		s.finishRun(ctx, rrt, rr, rerr)
+		s.finishRun(rctx, rrt, rr, rerr)
 		return rr, rerr
 	})
 	return result, nil

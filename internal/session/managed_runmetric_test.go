@@ -362,3 +362,48 @@ func TestSend_RunRecordAdoptsCtxRunID(t *testing.T) {
 		}
 	}
 }
+
+// TestSend_LeakNudgeGetsItsOwnRunID: the leaked-toolcall re-send is a second
+// run record, so it must not reuse the turn's id — runhistory and the cost
+// ledger are keyed by it. Its CLI send carries the id its record gets.
+func TestSend_LeakNudgeGetsItsOwnRunID(t *testing.T) {
+	t.Setenv(leakRecoveryEnvVar, "1")
+	const parent = "0123456789abcdef"
+	entries := map[string]func(*ManagedSession, context.Context) error{
+		"Send": func(s *ManagedSession, ctx context.Context) error {
+			_, err := s.Send(ctx, "hi", nil, nil)
+			return err
+		},
+		"SendPassthrough": func(s *ManagedSession, ctx context.Context) error {
+			_, err := s.SendPassthrough(ctx, "hi", nil, nil, "")
+			return err
+		},
+	}
+	for name, send := range entries {
+		t.Run(name, func(t *testing.T) {
+			var sentWith []string
+			s, store := newInstrumentedSession(t, func(ctx context.Context, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+				sentWith = append(sentWith, ctxutil.RunID(ctx))
+				if len(sentWith) == 1 {
+					return &clievent.SendResult{Text: leakSample}, nil
+				}
+				return &clievent.SendResult{Text: "clean"}, nil
+			})
+			if err := send(s, ctxutil.WithRunID(context.Background(), parent)); err != nil {
+				t.Fatal(err)
+			}
+			store.Close()
+			if len(sentWith) != 2 || sentWith[0] != parent || sentWith[1] == parent || sentWith[1] == "" {
+				t.Fatalf("CLI sends carried run ids %q, want [%s <fresh>]", sentWith, parent)
+			}
+			runs := store.Recent(s.key, 0)
+			if len(runs) != 2 {
+				t.Fatalf("runs = %d, want the turn and its nudge", len(runs))
+			}
+			got := map[string]bool{runs[0].RunID: true, runs[1].RunID: true}
+			if !got[parent] || !got[sentWith[1]] {
+				t.Fatalf("run record ids %v, want %s and the nudge's %s", got, parent, sentWith[1])
+			}
+		})
+	}
+}

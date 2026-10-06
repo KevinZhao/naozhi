@@ -352,7 +352,7 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 				slog.Debug("ask_question: banner edit failed", "err", err)
 			}
 		}
-		dl.lg.Info("ask_question suppressed redundant reply", "result_len", len(result.Text))
+		dl.lg.InfoContext(ctx, "ask_question suppressed redundant reply", "result_len", len(result.Text))
 	} else if replyText != "" {
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			d.replyIntoBanner(ctx, p, replyDestOf(o.msg), msgID, replyText)

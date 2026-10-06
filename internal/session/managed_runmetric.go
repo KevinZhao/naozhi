@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
@@ -86,4 +87,14 @@ func (s *ManagedSession) finishRun(ctx context.Context, rt *runTimer, result *cl
 	}
 	rec.CostUSD = delta
 	s.runStore.AppendAsync(rec)
+}
+
+// nudgeRunCtx gives the leaked-toolcall re-send its own run id: it is a
+// second run record and ledger row, and both are keyed by the id. The log
+// line ties it to the turn it continues.
+func nudgeRunCtx(ctx context.Context) context.Context {
+	parent := ctxutil.RunID(ctx)
+	ctx = ctxutil.WithRunID(ctx, newRunID())
+	slog.InfoContext(ctx, "leak-recovery: nudge run", "nudge_of", parent)
+	return ctx
 }

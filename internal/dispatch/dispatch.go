@@ -546,9 +546,9 @@ func (d *Dispatcher) handleGetOrCreateError(
 	lg *slog.Logger,
 ) (replyCtx context.Context, cleanup func(), errMsg string) {
 	if errors.Is(err, context.Canceled) {
-		lg.Info("get session cancelled during shutdown", "err", err)
+		lg.InfoContext(ctx, "get session cancelled during shutdown", "err", err)
 	} else {
-		lg.Error("get session", "err", err)
+		lg.ErrorContext(ctx, "get session", "err", err)
 	}
 	// Empty key keeps the regular (non-cron) phrasing.
 	errMsg = usermsg.ForSendError(err, "")
@@ -575,7 +575,7 @@ func (d *Dispatcher) handleSendError(
 	if errors.Is(err, clierr.ErrSessionReset) {
 		return
 	}
-	lg.Error("send to claude", "err", err)
+	lg.ErrorContext(ctx, "send to claude", "err", err)
 	// usermsg.UserMessage renders the configured timeout durations in
 	// Chinese (dashboard uses the generic ForSendError). Watchdog counters
 	// stay here because the IM side owns that configuration.
@@ -604,7 +604,7 @@ func (d *Dispatcher) handleSendError(
 	if _, err := platform.ReplyWithRetry(replyCtx, p, replyDestOf(msg).text(errMsg), limits.PlatformReplyMaxAttempts); err != nil {
 		d.sendFailCount.Add(1)
 		dispatchSendFailTotal.Add(1)
-		lg.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
+		lg.WarnContext(ctx, "error reply also failed", "chat", msg.ChatID, "err", err)
 	}
 }
 
@@ -771,17 +771,18 @@ func (d *Dispatcher) sendChunks(ctx context.Context, p platform.Platform, to Rep
 	}
 }
 
-// withInboundTrace gives the message a trace id for its logs (#3436): the
-// platform's event id when it sent one (so a redelivery shares the trace),
-// else a fresh id. The adapters start from context.Background(), so this is
-// where the trace begins.
+// withInboundTrace gives the message a trace id for its logs:
+// "<platform>:<event id>" when the platform sent one (a redelivery shares
+// the trace, and it greps against the platform's own logs), else a fresh
+// id. The adapters start from context.Background(), so this is where the
+// trace begins.
 func withInboundTrace(ctx context.Context, msg platform.IncomingMessage) context.Context {
 	if ctxutil.TraceID(ctx) != "" {
 		return ctx
 	}
-	id := osutil.SanitizeForLog(msg.EventID, 64)
-	if id == "" {
-		id = ctxutil.NewTraceID()
+	id := ctxutil.NewTraceID()
+	if ev := osutil.SanitizeForLog(msg.EventID, 96); ev != "" {
+		id = osutil.SanitizeForLog(msg.Platform, 32) + ":" + ev
 	}
 	return ctxutil.WithTraceID(ctx, id)
 }

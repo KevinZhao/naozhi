@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 )
 
 // TestResolveLogLevel covers the config.Log.Level → slog.Level mapping
@@ -42,10 +43,11 @@ func TestNewLogHandler_FormatSelection(t *testing.T) {
 	unwrap := func(h slog.Handler) slog.Handler {
 		// Every handler is wrapped for ctx correlation (#3436); the format
 		// lives one level down.
-		if u, ok := h.(interface{ Unwrap() slog.Handler }); ok {
-			return u.Unwrap()
+		w, ok := h.(*ctxutil.Handler)
+		if !ok {
+			t.Fatalf("got %T, want the *ctxutil.Handler wrapper", h)
 		}
-		return h
+		return w.Unwrap()
 	}
 	text := newLogHandler(nil, &config.Config{Log: config.LogConfig{Format: "text", Level: "debug"}})
 	if _, ok := unwrap(text).(*slog.TextHandler); !ok {
