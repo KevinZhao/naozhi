@@ -73,6 +73,10 @@ type WorkflowBoard struct {
 	disk    workflowDisk
 	io      ioDispatch
 	cache   map[string]*workflow.ResultCache
+	// resultWait holds per task what Result calls wait on: the read a
+	// Result call started and every landed read's Tracker merge still to
+	// run.
+	resultWait map[string]*resultWaitState
 	// For the current bind: the tasks its Tracker reported (R5), the ones
 	// a run dir scan was started for (R3a), and the reconciliation read
 	// each entry still gets (R3b). located holds run ids found on disk.
@@ -130,6 +134,7 @@ func newWorkflowBoard(projectsRoot string) *WorkflowBoard {
 		resolve:      map[string]*resolveState{},
 		disk:         workflowDiskFS,
 		cache:        map[string]*workflow.ResultCache{},
+		resultWait:   map[string]*resultWaitState{},
 		claimed:      map[string]bool{},
 		scanned:      map[string]bool{},
 		located:      map[string]string{},

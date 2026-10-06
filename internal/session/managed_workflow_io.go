@@ -157,6 +157,16 @@ func (p *ioPool) acquire(b *WorkflowBoard) bool {
 	}
 }
 
+// tryAcquire takes a slot if one is free, and never waits or registers.
+func (p *ioPool) tryAcquire() bool {
+	select {
+	case p.slots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
 func (p *ioPool) release() { <-p.slots }
 
 // wakeWaiter pumps waiting boards, longest-waiting first, while slots are
@@ -250,28 +260,31 @@ func (b *WorkflowBoard) pumpLocked() {
 func (b *WorkflowBoard) runJob(job ioJob) {
 	var apply ioApply
 	var after func()
-	guard := func(f func()) {
-		defer func() {
-			if r := recover(); r != nil {
-				metrics.PanicRecoveredTotal.Add(1)
-				slog.Error("workflow board I/O panic recovered", "panic", r, "stack", string(debug.Stack()))
-			}
-		}()
-		f()
-	}
-	guard(func() { apply = job.work() })
+	guardWorkflowIO(func() { apply = job.work() })
 	b.mu.Lock()
 	delete(b.io.inflight, job.task)
 	if apply != nil {
-		guard(func() { after = apply() })
+		guardWorkflowIO(func() { after = apply() })
 	}
 	b.io.pool.release()
 	b.pumpLocked()
 	b.mu.Unlock()
 	b.io.pool.wakeWaiter()
 	if after != nil {
-		guard(after)
+		guardWorkflowIO(after)
 	}
+}
+
+// guardWorkflowIO runs f, recovering a panic so a board's I/O goroutine
+// still hands its slot on.
+func guardWorkflowIO(f func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			metrics.PanicRecoveredTotal.Add(1)
+			slog.Error("workflow board I/O panic recovered", "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	f()
 }
 
 // workflowRunSource is what a run's directory is resolved from: the launch

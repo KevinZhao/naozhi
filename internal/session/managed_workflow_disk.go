@@ -136,35 +136,106 @@ func (b *WorkflowBoard) enqueueReadLocked(p *workflow.Workflow, rs *resolveState
 	}
 	b.enqueueLocked(ioJob{task: id, kind: ioRead, work: func() ioApply {
 		rf, err := read(root, run)
-		return func() func() {
-			st := b.last[id]
-			if b.resolve[id] != rs || st == nil || st.pub.ResultLoaded {
-				return nil
-			}
-			if err != nil || rf.TaskID != id || !rf.Terminal() {
-				if miss != missNothing && b.missLocked(id, b.now().UnixMilli()) == miss {
-					// This read counts as the settled entry's first.
-					rs.readEnded = miss == missOrphan
-					b.settleLocked(id, miss)
-					b.publishLocked(true)
-				}
-				return nil
-			}
-			if st.live && b.proc != nil {
-				b.cache[id] = workflow.NewResultCache(rf)
-				proc := b.proc
-				return func() {
-					if !proc.ApplyWorkflowResult(rf) {
-						b.mu.Lock()
-						b.mergeRetainedLocked(id, rf)
-						b.mu.Unlock()
-					}
-				}
-			}
-			b.mergeRetainedLocked(id, rf)
-			return nil
-		}
+		return func() func() { return b.applyReadLocked(id, rs, rf, err, miss) }
 	}})
+}
+
+// applyReadLocked lands a result file read for task id under rs. A file
+// naming the entry merges: the result cache is written first, then the
+// Tracker merges a live entry (the returned func, run once b.mu is
+// released; Result calls wait on resultWait until it has) or the board merges
+// its own. Anything else leaves the entry as it is, except that a miss
+// verdict still true now settles it.
+func (b *WorkflowBoard) applyReadLocked(id string, rs *resolveState, rf *workflow.ResultFile, err error, miss missVerdict) func() {
+	st := b.last[id]
+	if b.resolve[id] != rs || st == nil || st.pub.ResultLoaded {
+		return nil
+	}
+	if err != nil || rf.TaskID != id || !rf.Terminal() {
+		if miss != missNothing && b.missLocked(id, b.now().UnixMilli()) == miss {
+			// This read counts as the settled entry's first.
+			rs.readEnded = miss == missOrphan
+			b.settleLocked(id, miss)
+			b.publishLocked(true)
+		}
+		return nil
+	}
+	if st.live && b.proc != nil {
+		b.cache[id] = workflow.NewResultCache(rf)
+		proc := b.proc
+		b.holdResultWaitLocked(id)
+		return func() {
+			defer b.releaseResultWait(id)
+			if !proc.ApplyWorkflowResult(rf) {
+				b.mu.Lock()
+				b.mergeRetainedLocked(id, rf)
+				b.mu.Unlock()
+			}
+		}
+	}
+	b.mergeRetainedLocked(id, rf)
+	return nil
+}
+
+// readForResultLocked reads p's result file for a Result call, on a global
+// slot the caller took, and returns the channel closed once the read has
+// landed and every Tracker merge pending for the task has run. The landing
+// is enqueueReadLocked's, but outside the board's two-job bound: the caller
+// already holds the slot, and the one read per task is the singleflight.
+// The entry is terminal and resolved, so publication has already started
+// its read; only readAt, the sweeper's clock, moves.
+func (b *WorkflowBoard) readForResultLocked(p *workflow.Workflow, rs *resolveState) chan struct{} {
+	id, root, run, read := p.TaskID, b.projectsRoot, rs.run, b.disk.read
+	rs.readAt = b.now().UnixMilli()
+	done := b.holdResultWaitLocked(id)
+	go func() {
+		var after func()
+		guardWorkflowIO(func() {
+			rf, err := read(root, run)
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			after = b.applyReadLocked(id, rs, rf, err, missNothing)
+		})
+		b.io.pool.release()
+		b.io.pool.wakeWaiter()
+		if after != nil {
+			guardWorkflowIO(after)
+		}
+		b.releaseResultWait(id)
+	}()
+	return done
+}
+
+// resultWaitState is what Result calls on a task wait for: done closes
+// once the n holds (a Result read, landed reads' Tracker merges) are gone.
+type resultWaitState struct {
+	done chan struct{}
+	n    int
+}
+
+// holdResultWaitLocked keeps task id's Result callers waiting until a
+// matching releaseResultWait; it returns the channel they wait on.
+func (b *WorkflowBoard) holdResultWaitLocked(id string) chan struct{} {
+	w := b.resultWait[id]
+	if w == nil {
+		w = &resultWaitState{done: make(chan struct{})}
+		b.resultWait[id] = w
+	}
+	w.n++
+	return w.done
+}
+
+// releaseResultWait drops one hold on task id's wait, closing it with the
+// last.
+func (b *WorkflowBoard) releaseResultWait(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if w := b.resultWait[id]; w != nil {
+		if w.n--; w.n == 0 {
+			delete(b.resultWait, id)
+			close(w.done)
+		}
+	}
 }
 
 // mergeRetainedLocked merges a result file into the board's own entry.

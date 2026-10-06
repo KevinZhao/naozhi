@@ -1665,6 +1665,11 @@ func (b *WorkflowBoard) LastObservedAt() int64                       // IsRunnin
 func (b *WorkflowBoard) WorkflowAgent(agentID string) (workflow.AgentLoc, bool) // = Published().Agent(id)
 // Result 给 HTTP 用：缓存命中直接返回；缺失且条目终态、RunID 已知、RunDir 已解析时按 task singleflight 发起一次读取（占一个全局 I/O 槽位，
 // 取不到即返回 ResultUnavailable、不等待），读完在 b.mu 内复核 taskId 与条目代数后经 MergeResultFile 合入行、总计与缓存并发布（§6.2.1）。
+// （PR-10：终态但没有 RunID 的条目返回 ResultNone——不会有结果文件；读取与 R0 补行 / sweeper 共用同一个落地函数 applyReadLocked，但不经 board 的
+// 两个任务位，singleflight 的读取直接占调用方已取到的全局槽位；等待读取的调用方受 ctx 约束，ctx 到期返回 ResultUnavailable、读取照常落地。
+// 活条目的读取（不论 Result 还是 sweeper 发起）先写缓存、解锁后才由 Tracker 合入，这段时间 resultWait 里挂着一条等待，Result 先查它再查缓存，
+// 所以返回时 Published 一定已含文件带来的行与总计。等待按 task 计数：Result 的读取与每个待跑的 Tracker 合入各持一份，最后一份释放才关闭，
+// 于是 Result 自己的读取没找到文件、而同期 sweeper 的读取已写缓存但还没合入时，Result 也等到那次合入。）
 func (b *WorkflowBoard) Result(ctx context.Context, taskID string) (*workflow.ResultCache, ResultStatus) // ResultReady | ResultUnavailable | ResultNone（非终态）
 // AgentTranscript 给 drill-in 用（§8.2、§8.3）：隐藏 os.Root 与 rel。Open 每次调用都在锁外 os.OpenRoot(projectsRoot) + OpenRegularIn(root, rel, 0)
 // 并关闭 root（已打开的 fd 不受影响）；RunSessionID 是 RunDir rel 里的 <sid>，首行身份校验与它比较。
@@ -2005,10 +2010,10 @@ handler 不放 `internal/server`；dashboard 文件上限 800 行），只有一
 #### 6.2.1 `GET /api/sessions/workflow?key=&node=&task_id=[&rows=none | &since=&epoch=]`
 
 返回 `{epoch, version, server_now, rows_mode, workflow: WireView, result?: {text, truncated}, logs?: [string],
-logs_truncated?, result_unavailable?}`。`version` 与 WS 帧同一空间；`server_now`（ms）供客户端在没有 WS 帧时也能校准时钟（§7.4）。
+logs_truncated?, result_unavailable?}`。`version` 与 WS 帧同一空间；`server_now`（ms）供客户端在没有 WS 帧时也能校准时钟（§7.4）（PR-10：在 `Result` 等待之后、写响应前取，等待最长 5s 不会让它过时）。
 handler 只经 §5.8.1 的导出方法访问 board：`Published()` 取条目、`Result(ctx, task)` 取结果。
 
-- **行模式**（v4 新增；v3 只有全量，WS 断开时每个 running workflow 每 5s 整份重下，§6.1）：
+- **行模式**（v4 新增；v3 只有全量，WS 断开时每个 running workflow 每 5s 整份重下，§6.1）。（PR-10：`rows` 只接受 `none`；`since` 与 `epoch` 必须同时给，缺一个或形态非法（`since` 非十进制 uint64、`epoch` 非 16 位小写十六进制）→ 400，而 epoch 形态合法但已变、或 `V` 大于当前 version → 退回 full。）
   - 缺省 → `rows_mode:"full"`，`agents` 为全部行；
   - `rows=none` → `rows_mode:"none"`，`agents` 为空数组（header + phases + counts 照常）；
   - `since=V&epoch=E` → E 等于当前 epoch 且 `V ≤ 当前 version` 时 `rows_mode:"delta"`，`agents` 只含 `rev > V` 的行；
@@ -2027,7 +2032,7 @@ handler 只经 §5.8.1 的导出方法访问 board：`Published()` 取条目、`
   v2 还缓存每个 agent 的 `resultPreview`（≤ 8000 runes × ≤ 2000 agents），所谓"≤ ~120KB"并不成立：本机 309-agent 的
   `wf_51427dfc-2fd.json`（575,652B）光 resultPreview 就有 116,790 字符，再加 16KB 的 result 已超；而 CC 自己把
   resultPreview 截到 ~400 字符（实测最长 401），8000 runes 的上限从不起作用。per-agent 的结果在 drill-in 的 transcript 里看（NG8）。
-- 缓存缺失（例如重启后首次访问）→ handler 在请求 goroutine 上调用 `board.Result(ctx, task)`（§5.8.1；与 R0 补行、sweeper 是同一条读取路径，按 task
+- 缓存缺失（例如重启后首次访问）→ handler 在请求 goroutine 上调用 `board.Result(ctx, task)`（§5.8.1；PR-10：ctx 带 5s 超时；与 R0 补行、sweeper 是同一条读取路径，按 task
   singleflight；占一个全局 I/O 槽位，取不到时不等待、本次返回 `result_unavailable`，客户端照常显示 header 与已有行、按 §6.1 退避再试）：锁外读一次（root 锚定的 `osutil.OpenRegularIn`，≤ 16MiB，§10），回到 b.mu 内复核 taskId 与条目代数后经
   `MergeResultFile` 合入**行、总计与结果缓存**（`!ResultLoaded` 时），按普通版本推进发布；本次响应返回合并后的状态。v3 只回填 result / logs，
   恢复出来的终态条目展开后仍是零行。
@@ -2047,13 +2052,13 @@ v4 的 `GET /api/sessions/workflow_agent`（per-agent 预览）连同它专用�
   参数，无新 path wildcard）。
 - **校验顺序**（仿 `agentevents/handler.go:81-84`）：
   1. `session.ValidateSessionKey(key)` 失败 → 400（与 agentevents 一致）；
-  2. `node` 非空且非 `local` → 404（同 `agentevents/handler.go:121-140`）；
+  2. `node` 非空且非 `local` → 404（同 `agentevents/handler.go:121-140`；PR-10：不查 NodeAccessor——那里的 `LookupNode` 对未知节点写 400，而远端 session 一律 404 才是客户端要的）；
   3. `task_id` 过 `^[a-z0-9]{1,32}$`（同 `agentevents/handler.go:35`）、`rows` / `since` / `epoch`
      形态合法且不互斥冲突，否则 400；
   4. `router.SessionFor(key) == nil`、该 session 没有 board（nil，§5.8.1）或 board 里没有此 task → 404。
 - **限流**：`apiChain` 本身不限流（`sendLimiter` 只挂在 send/bind/upload，`build_dashboard.go:36`、
   `dashboard_send.go:79,349`）。仿 `ext/memory`（`handler.go:41,68-69,144`）注入 `IPLimiter` 依赖，
-  per-IP 令牌桶（10 rps / burst 20，与 memory 同参），超限 429。没配 TrustedProxy 的反向代理后面，所有 tab 共用一个 IP 的桶；
+  per-IP 令牌桶（10 rps / burst 20，与 memory 同参），超限 429（PR-10：限流先于其余校验，响应带 `Retry-After: 1`，客户端的退避取它与自己的指数退避较大者；`New` 在没有 limiter 时 panic，不让一个读盘端点因漏接线而不限流）。没配 TrustedProxy 的反向代理后面，所有 tab 共用一个 IP 的桶；
   客户端遇 429 的处理见 §6.1 客户端表（保持状态、退避重试）。
 - **404 只表示"资源不存在"**（session、task、remote node，即上面的第 2、4 步）。校验之后的磁盘失败（RunDir 未解析、路径越界、
   文件缺失、不是 regular file、超限）**不是** 404：返回 200 不带 result / logs 并置 `result_unavailable:true`。v3 把它们一律折叠为 404，
@@ -2070,7 +2075,7 @@ v4 的 `GET /api/sessions/workflow_agent`（per-agent 预览）连同它专用�
 | `wsproto.go` 常量 + struct + `New*`（`workflow_state`、`workflow_set` 两种帧） | 新增 | `literal_ban_test.go:21`（只能经 `New*` 构造） | PR-11 |
 | `wsproto/registry.go` Frames 示例（每个字段非零） | 新增 | `TestSchema_CoversEveryFrame`、`TestFramesRegistry_TypeStamped` | PR-11 |
 | `wsproto.schema.json` | `go generate ./internal/wsproto` | `TestSchema_IsGenerated`（`schema_contract_test.go:86-91`） | PR-11 |
-| `static/contract.js` | `go run ./tools/gen-contract`；PR-10 的一条 `/api` 路由让 API 表多 1 行（`contractjs.go:57-66`；v4 有两条，§6.2），PR-11 再加 WS 常量与 ENUMS——两者都要手改 js-ratchet 基线（`contract.js.lines`，现 110）并追加 `js-ratchet:TOTAL.lines` 台账行（§14） | `TestContractJS_Current`（只查新鲜度）、js-ratchet `--check`、`ratchet-raises` | PR-10/11 |
+| `static/contract.js` | `go run ./tools/gen-contract`；PR-10 的一条 `/api` 路由让 API 表多 1 行（`contractjs.go:57-66`；v4 有两条，§6.2），PR-11 再加 WS 常量与 ENUMS——两者都要手改 js-ratchet 基线（`contract.js.lines`，现 110）并追加 `js-ratchet:TOTAL.lines` 台账行（§14）（PR-10：master 上它已涨到 112，PR-10 改为 113） | `TestContractJS_Current`（只查新鲜度）、js-ratchet `--check`、`ratchet-raises` | PR-10/11 |
 | contractjs ENUMS `WORKFLOW_STATUS` / `WORKFLOW_AGENT_STATE` | 新增；`check-enum-literals.mjs` 扩展两条：① `workflow_state.js` 的状态显示表（键不加引号）须**恰好**含这两个枚举的键（复用 `tableKeys`，加文件参数；仿 `DEATH_REASONS`）；② **只在 `workflow_state.js` 与 `workflow_view.js` 内**禁止这些值的整串字面量（`literalHits` 限定这两个文件）。**不做全仓禁令**：running / failed / completed / queued / done / unknown / stopped / skipped / paused 在现有十几个 static 文件里作为 session / cron / agent 状态被比较（如 `dashboard.js:335` `sd.state === 'running'`、`agent_view.js:67` `a.status === 'completed'`、`event_stream.js:807` `msg.status === 'queued'`），`literalHits` 分不清比较的是哪个字段，全仓禁令首跑即红——`SESSION_STATE` 不纳管也是这个原因（`check-enum-literals.mjs:14-18`、`contractjs.go:68-71`，归 #2909 的后续）。夹具进 `scripts/check-enum-literals.test.mjs` | `node scripts/check-enum-literals.mjs` + 其 test | PR-11 |
 | 前端 `wsm.on(NZ_CONTRACT.WS.workflow_state, …)` 与 `wsm.on(NZ_CONTRACT.WS.workflow_set, …)` 各一个 | `workflow_view.js` 模块顶层。帧字段由 tsc 对照生成的 `wire.d.ts` 检查（#3439）：`wsm.on` 按帧类型给 handler 的 `msg` 定型，读帧上没有的字段即 tsc 报错，参数名不受约束。handler 直接把 `msg` 交给叶子模块：`(msg) => applyFrame(store, msg)`，`applyFrame` 的入参写成 `/** @type {WsFrames['workflow_state']} */ frame`（`applySet` 同理用 `WsFrames['workflow_set']`）。帧（或它的 `{ ...msg }` 拷贝）交给未标类型的参数时，`scripts/ts-check.test.mjs` 的 wireReach 报错；逐字段拼出的普通对象不是帧类型，wireReach 认不出，所以不用这种写法 | `check-ws-contract.mjs`（帧类型集合双向一致）、`check-ws-receivers.mjs` R1-R5/R7、tsc（lint-js）、`scripts/ts-check.test.mjs`（`CHECKED` 列入 `workflow_view.js`；wireReach） | PR-11 |
 | `workflow_state.js` 读取嵌套字段的函数（`applyFrame` / `applyHttp` / `reconcileSummaries` 及其内部 helper） | 文件第一行 `// @ts-check`，加入 `scripts/ts-check.test.mjs` 的 `CHECKED`（`wire.d.ts` 的类型到达未开检查的文件时 wireReach 报错）。tsconfig 不开 `strict`，未标类型的参数是 `any`，读取不受检查，所以接收帧或 def 值的参数都要标类型：帧用 `WsFrames['workflow_state']`，helper 入参用 `wire.d.ts` 里的 def 短名（`workflow` → `WireView`、行 → `Agent`、phase → `Phase`、Summary → `Summary`；短名与既有 def 或 TypeScript lib 全局名冲突时在 Go 侧换类型名，`ts-check.test.mjs` 会拦与 lib 重名的），HTTP 响应用 PR-10 生成的 `RestResponse_*`。wireReach 只追帧，def 值交给未标类型的参数不会报错，这一条靠评审。`@param` 与行内 `@type` 都可以，一个文档块写几个 `@param` 都行。v3 把 `msg.workflow` 原样交给不带类型的参数，`source`、`agents[].rev`、`agents_capped`、`prev_agent_ids`、`phases[].counts` 等读取都不受检查，Go 侧改一个 json tag 浏览器里就静默失效 | tsc（lint-js）、`scripts/ts-check.test.mjs` | PR-11 |
@@ -2913,9 +2918,9 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   `Published()` 访问 board。v4 列在这里的 `ReadFirstLineIDs` 回到 PR-13，`ReadFirstPrompt` 与首行缓存删除。
 - 文件：新 `internal/dashboard/ext/workflows/{deps.go,routes.go,handler.go,rest_schema_test.go}` +
   `testdata/rest.schema.json` + tests、`internal/session/managed_workflow_api.go`（`Result`）与 `managed_workflow.go`（复用 PR-9 的读取路径）+ test、
-  `internal/server/handler_set.go`、`build_server.go`（注入 IPLimiter 与 PR-4 的 projects root）、
+  `internal/server/handler_set.go`、`build_server.go`（注入 IPLimiter；PR-10：不注入 projects root——handler 只经 board，root 在 board 里）、
   `routes.go`、`routes_snapshot_test.go`、`testdata/routes.golden.json`、`static/contract.js`（API 表 +1 行）、
-  `scripts/js-ratchet.baseline.json`（`contract.js.lines` 110 → 111，手改）、`scripts/ratchet-raises.jsonl`、
+  `scripts/js-ratchet.baseline.json`（`contract.js.lines` 112 → 113，手改；PR-10：v5 写时是 110，合入前 master 已到 112）、`scripts/ratchet-raises.jsonl`、
   `tools/gen-contract/main.go` + `internal/contractjs/wiredts.go`（多读一份 REST schema）、`static/wire.d.ts`（重生成）、`test/e2e/mock-server.js`（`/workflow` 路由，含三种行模式与 `result_unavailable`）、
   `scripts/check-mock-rest.test.mjs`（schema 列表 + workflow 响应用例，不动 `ROUTES`）。
 - ratchet 台账：`js-ratchet:TOTAL.lines`（重生成的 contract.js +1 行；v3 漏了这一行，`js-ratchet --check` 与 `ratchet-raises` 必红）。

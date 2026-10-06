@@ -16,6 +16,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/planner"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/uisettings"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/workflows"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
@@ -200,6 +201,10 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		Router:       router,
 		NodeAccess:   s.nodes,
 		ProjectsRoot: w.projectsRoot,
+	})
+	hs.workflowsH = workflows.New(workflows.Deps{
+		Router:  router,
+		Limiter: newIPLimiterWithProxy(workflows.LimiterRate, workflows.LimiterBurst, s.auth.TrustedProxy),
 	})
 
 	// StartupCtx lets SIGTERM during startup abort the --version probe.

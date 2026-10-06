@@ -3,6 +3,29 @@
 export {};
 
 declare global {
+  interface Agent {
+    agent_id?: string;
+    attempt?: number;
+    blocked?: boolean;
+    cached?: boolean;
+    duration_ms?: number;
+    error?: string;
+    index: number;
+    label: string;
+    last_progress_at?: number;
+    last_tool?: string;
+    last_tool_summary?: string;
+    model?: string;
+    phase_index?: number;
+    prev_agent_ids?: string[];
+    queued_at?: number;
+    raw_state?: string;
+    rev: number;
+    started_at?: number;
+    state: string;
+    tokens?: number;
+    tool_calls?: number;
+  }
   interface AgentMetaPatch {
     duration_ms?: number;
     last_detail?: string;
@@ -84,6 +107,11 @@ declare global {
     current: string;
     field: string;
     stored: string;
+  }
+  interface Phase {
+    counts: Counts;
+    index: number;
+    title: string;
   }
   interface ProjectConfig {
     access_profile?: string;
@@ -194,6 +222,44 @@ declare global {
     output_json?: string;
     status?: string;
     title?: string;
+  }
+  interface WireView {
+    agents: Agent[];
+    agents_capped?: boolean;
+    counts: Counts;
+    current?: string;
+    degraded?: string;
+    description?: string;
+    duration_ms?: number;
+    ended_at?: number;
+    last_observed_at?: number;
+    name?: string;
+    notify_summary?: string;
+    phases: Phase[];
+    raw_status?: string;
+    run_id?: string;
+    source: string;
+    started_at?: number;
+    status: string;
+    task_id: string;
+    tokens?: number;
+    tool_calls?: number;
+    version: number;
+  }
+  interface WorkflowResponse {
+    epoch: string;
+    logs?: string[];
+    logs_truncated?: boolean;
+    result?: WorkflowResult;
+    result_unavailable?: boolean;
+    rows_mode: 'full' | 'none' | 'delta';
+    server_now: number;
+    version: number;
+    workflow: WireView;
+  }
+  interface WorkflowResult {
+    text: string;
+    truncated: boolean;
   }
   interface projectListEntry {
     config: ProjectConfig;
@@ -390,9 +456,21 @@ declare global {
     sessions: unknown[];
     stats: sessionStats;
   }
+  interface RestResponse_sessions_workflow {
+    epoch: string;
+    logs?: string[];
+    logs_truncated?: boolean;
+    result?: WorkflowResult;
+    result_unavailable?: boolean;
+    rows_mode: 'full' | 'none' | 'delta';
+    server_now: number;
+    version: number;
+    workflow: WireView;
+  }
   interface RestResponses {
     sessions: RestResponse_sessions;
     sessions_history: RestResponse_sessions_history;
     sessions_multi: RestResponse_sessions_multi;
+    sessions_workflow: RestResponse_sessions_workflow;
   }
 }

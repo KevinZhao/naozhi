@@ -331,6 +331,11 @@
   },
   {
     "method": "GET",
+    "path": "/api/sessions/workflow",
+    "handler_type": "*workflows.Handler"
+  },
+  {
+    "method": "GET",
     "path": "/api/settings",
     "handler_type": "*uisettings.Handler"
   },
