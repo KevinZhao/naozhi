@@ -258,8 +258,14 @@ func TestDashboardCSP_SelfHostedOnly(t *testing.T) {
 		}
 	}
 	for name, srcs := range directives {
+		if name == "require-sri-for" {
+			continue // its values are resource types, not sources
+		}
 		for _, src := range srcs {
-			if strings.Contains(src, ".") || (strings.HasSuffix(src, ":") && src != "data:" && src != "blob:") {
+			switch {
+			case src == "'self'", src == "'none'", src == "data:", src == "blob:":
+			case strings.HasPrefix(src, "'sha256-"):
+			default:
 				t.Errorf("CSP %s allows %q: the dashboard loads nothing from outside its origin", name, src)
 			}
 		}
