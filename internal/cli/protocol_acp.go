@@ -609,7 +609,7 @@ func (p *ACPProtocol) ReadEvent(line string) ([]clievent.Event, bool, error) {
 				ev := clievent.Event{Type: "control_ack", SubType: "success", RPCRequestID: reqID}
 				if msg.Error != nil {
 					ev.SubType = "error"
-					ev.Result = osutil.SanitizeForLog(msg.Error.Message, 256)
+					ev.Result = osutil.SanitizeForLog(msg.Error.Text(), rpcErrorTextMax)
 				}
 				return []clievent.Event{ev}, false, nil
 			}
@@ -618,12 +618,12 @@ func (p *ACPProtocol) ReadEvent(line string) ([]clievent.Event, bool, error) {
 			// Method on a Response is unknown without caller-side correlation, so
 			// pass "" and let operators read the vector by code+backend.
 			metrics.RecordProtocolRPCError(p.BackendID, "", strconv.Itoa(msg.Error.Code))
-			// msg.Error.Message crosses a trust boundary (the ACP agent) and flows
+			// msg.Error's text crosses a trust boundary (the ACP agent) and flows
 			// into slog attrs + the dashboard, so control chars / bidi are scrubbed.
 			// done=true: an error response to session/prompt closes that turn from
 			// kiro's POV; done=false would leave the session stuck in state=running.
 			// readLoop turns the TurnRejectedError into a synthetic result event.
-			msgText := osutil.SanitizeForLog(msg.Error.Message, 256)
+			msgText := osutil.SanitizeForLog(msg.Error.Text(), rpcErrorTextMax)
 			return nil, true, &TurnRejectedError{Backend: p.BackendID, Code: msg.Error.Code, Message: msgText,
 				Err: fmt.Errorf("%w %d: %s", ErrACPRPC, msg.Error.Code, msgText)}
 		}
@@ -1071,7 +1071,7 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 				if msg.Error != nil {
 					// Sanitize agent-supplied error text before it reaches slog attrs.
 					send(readResult{nil, fmt.Errorf("%w %d: %s", ErrACPRPC,
-						msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))})
+						msg.Error.Code, osutil.SanitizeForLog(msg.Error.Text(), rpcErrorTextMax))})
 					return
 				}
 				send(readResult{&msg, nil})

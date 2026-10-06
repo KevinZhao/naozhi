@@ -344,9 +344,9 @@ agent_commands:
 # default_backend applies only to a key with no session yet: an explicit
 # request, the project backend pin and the dashboard backend pick >
 # agents[].backend > default_backend > cli.backend. It must be an enabled
-# backend. With more than one backend enabled the dashboard "new session"
-# dialog always sends a backend, so it does not reach dashboard-created
-# sessions yet (#3418).
+# backend. The dashboard "new session" picker defaults to 自动, which sends
+# no backend and leaves the choice to this chain; picking a backend there
+# overrides it.
 #
 # `naozhi config check -effective` prints each agent's spawn argv under the
 # backend it lands on, and each profile's merged env (masked).
@@ -481,6 +481,14 @@ platforms:
 #     feishu:
 #       allowed_users: ["ou_xxxxxxxx"]
 #       admin_users: ["ou_yyyyyyyy"]
+
+# Per-sender IM message rate limit (token bucket keyed by platform + user ID,
+# or by chat when the platform sends no user ID). Slash commands count; /stop
+# does not. A limited message is dropped and the sender told at most once a
+# minute. Absent or 0 = unlimited. Changes need a restart.
+# im_rate_limit:
+#   msgs_per_min: 10        # sustained rate per sender
+#   burst: 3                # back-to-back allowance; 0 = msgs_per_min
 
 log:
   level: "info"
