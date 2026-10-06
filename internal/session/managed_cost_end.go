@@ -33,17 +33,7 @@ type transcriptMark struct {
 // it writes lies past the mark. Zero for a fresh session (its transcript
 // starts empty) or a backend whose transcripts naozhi does not read.
 func markTranscript(claudeDir string, backendDirs map[string]string, backendID, workspace, sid string) transcriptMark {
-	if sid == "" {
-		return transcriptMark{}
-	}
-	if backendID == "" {
-		backendID = "claude"
-	}
-	p, ok := backendProfile(backendID)
-	if !ok || p.TranscriptUsage == nil || p.ResumeTarget == nil {
-		return transcriptMark{}
-	}
-	path := p.ResumeTarget(backendDirs[backendID], claudeDir, workspace, sid)
+	path := mainTranscript(claudeDir, backendDirs, backendID, workspace, sid)
 	if path == "" {
 		return transcriptMark{}
 	}
@@ -52,6 +42,23 @@ func markTranscript(claudeDir string, backendDirs map[string]string, backendID, 
 		return transcriptMark{}
 	}
 	return transcriptMark{sid: sid, size: st.Size()}
+}
+
+// mainTranscript is the main transcript a process of backendID resuming sid in
+// workspace appends to, or "" for no sid or a backend whose transcripts naozhi
+// does not read.
+func mainTranscript(claudeDir string, backendDirs map[string]string, backendID, workspace, sid string) string {
+	if sid == "" {
+		return ""
+	}
+	if backendID == "" {
+		backendID = "claude"
+	}
+	p, ok := backendProfile(backendID)
+	if !ok || p.TranscriptUsage == nil || p.ResumeTarget == nil {
+		return ""
+	}
+	return p.ResumeTarget(backendDirs[backendID], claudeDir, workspace, sid)
 }
 
 func (s *ManagedSession) setEndMark(m transcriptMark) {

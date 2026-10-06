@@ -6,6 +6,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/metrics"
@@ -162,6 +164,29 @@ func shutdownShimViaReconnect(
 	if sigusr2Fallback {
 		shim.SignalAfterFailedReconnect(state.ShimPID, connErr)
 	}
+}
+
+// reconnectHooks is what SpawnReconnect borrows from the session layer.
+// ResolveUnknown reads the main transcript's tail (the file markTranscript
+// marks) for the session the shim names, else the stored one: a backlog of
+// background-task frames alone cannot say whether the turn ended. Anything it
+// cannot read counts as still running.
+func reconnectHooks(claudeDir string, backendDirs map[string]string, backendID, workspace, storedSID string) cli.ReconnectHooks {
+	return cli.ReconnectHooks{ResolveUnknown: func(helloSID string) bool {
+		sid := cmp.Or(helloSID, storedSID)
+		if !claudefs.IsValidSessionID(sid) {
+			return false
+		}
+		path := mainTranscript(claudeDir, backendDirs, backendID, workspace, sid)
+		if path == "" {
+			return false
+		}
+		ended, err := claudefs.TranscriptTurnEnded(path)
+		if err != nil {
+			slog.Debug("reconnect: transcript tail unreadable, keeping turn running", "session_id", sid, "err", err)
+		}
+		return ended
+	}}
 }
 
 // firstArgvDivergence returns the first differing token of two argv slices as
@@ -368,6 +393,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		proc, replays, err := recWrapper.SpawnReconnect(
 			spawnCtx, state.Key, lastSeq, recWrapper.Protocol,
 			r.spawn.noOutputTimeout, r.spawn.totalTimeout,
+			reconnectHooks(r.hist.claudeDir, r.hist.backendDirs, recBackendID, sess.Workspace(), state.SessionID),
 		)
 		spawnCancel()
 		if err != nil {
