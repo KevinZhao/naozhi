@@ -2,7 +2,6 @@ package dispatch
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -226,17 +225,7 @@ func (t *replyTracker) sendAskQuestionCard(aq *clievent.AskQuestion) {
 				ToolUseID: aq.ToolUseID,
 				ChatType:  t.chatType,
 				AgentID:   t.agentID,
-				Items:     make([]platform.QuestionItem, 0, len(aq.Items)),
-			}
-			for _, q := range aq.Items {
-				opts := make([]platform.QuestionOption, 0, len(q.Options))
-				for _, o := range q.Options {
-					opts = append(opts, platform.QuestionOption{Label: o.Label, Description: o.Description})
-				}
-				card.Items = append(card.Items, platform.QuestionItem{
-					Question: q.Question, Header: q.Header,
-					MultiSelect: q.MultiSelect, Options: opts,
-				})
+				Items:     questionItems(aq),
 			}
 			if _, err := sender.SendQuestionCard(rctx, chatID, card); err != nil {
 				slog.Warn("ask_question card send failed, falling back to text",
@@ -253,29 +242,28 @@ func (t *replyTracker) sendAskQuestionCard(aq *clievent.AskQuestion) {
 // options so a user on a platform without native card support can still reply
 // free-form (their next message becomes the answer).
 func (t *replyTracker) sendAskQuestionFallback(ctx context.Context, aq *clievent.AskQuestion) {
-	var b strings.Builder
-	b.WriteString("Claude 想请你确认：\n")
-	for qi, q := range aq.Items {
-		if q.Header != "" {
-			fmt.Fprintf(&b, "\n【%s】", q.Header)
-		} else {
-			fmt.Fprintf(&b, "\n问题 %d：", qi+1)
-		}
-		b.WriteString(q.Question)
-		b.WriteString("\n")
-		for oi, o := range q.Options {
-			fmt.Fprintf(&b, "  %d. %s", oi+1, o.Label)
-			if o.Description != "" {
-				fmt.Fprintf(&b, " — %s", o.Description)
-			}
-			b.WriteString("\n")
-		}
-	}
-	b.WriteString("\n直接回复选项内容即可（例如：「Error style: Return an error」）。")
-	if _, err := t.p.Reply(ctx, platform.OutgoingMessage{ChatID: t.chatID, Text: b.String()}); err != nil {
+	text := "Claude 想请你确认：\n" + platform.RenderAskQuestionPlain(questionItems(aq)) +
+		"\n直接回复选项内容即可（例如：「Error style: Return an error」）。"
+	if _, err := t.p.Reply(ctx, platform.OutgoingMessage{ChatID: t.chatID, Text: text}); err != nil {
 		slog.Debug("ask_question text fallback failed",
 			"chat_id", t.chatID, "tool_use_id", aq.ToolUseID, "err", err)
 	}
+}
+
+// questionItems converts aq's questions to the platform card shape.
+func questionItems(aq *clievent.AskQuestion) []platform.QuestionItem {
+	items := make([]platform.QuestionItem, 0, len(aq.Items))
+	for _, q := range aq.Items {
+		opts := make([]platform.QuestionOption, 0, len(q.Options))
+		for _, o := range q.Options {
+			opts = append(opts, platform.QuestionOption{Label: o.Label, Description: o.Description})
+		}
+		items = append(items, platform.QuestionItem{
+			Question: q.Question, Header: q.Header,
+			MultiSelect: q.MultiSelect, Options: opts,
+		})
+	}
+	return items
 }
 
 // sendTodoMessage posts the rendered checklist as a standalone Reply, skipping
