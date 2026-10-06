@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
@@ -28,6 +29,9 @@ type inflight struct {
 	receivers []*receiver
 	out       Outcome // the outcome so far; recovery delivers it with Panic set
 	afterTurn bool    // Send returned and Sender.AfterTurn has not run yet
+	// ctx is the turn's ctx (startTurn), so the panic recovery logs and
+	// delivers under the turn's ids; nil before the turn starts.
+	ctx context.Context
 }
 
 // receiversFor groups batch by Sink in first-appearance order: a group's
@@ -133,11 +137,12 @@ func (o *Orchestrator) ownerLoop(ctx context.Context, key string, gen uint64, fi
 
 // runBatch runs one turn of the owner loop over t.batch.
 func (o *Orchestrator) runBatch(ctx context.Context, key string, owner Origin, t *inflight) {
+	ctx = startTurn(ctx, key, t)
 	t.receivers = receiversFor(owner, t.batch, t.first)
 	text, images := t.batch[0].Text, t.batch[0].Images
 	if !t.first {
 		text, images = Coalesce(t.batch)
-		slog.Info("turn: processing queued messages", "key", key, "count", len(t.batch), "merged_len", len(text))
+		slog.InfoContext(ctx, "turn: processing queued messages", "key", key, "count", len(t.batch), "merged_len", len(text))
 	}
 	o.runTurn(ctx, key, t, sessionOpts(owner, key), text, images, SendSpec{})
 }
@@ -239,7 +244,10 @@ func joinCallbacks(cbs []clievent.EventCallback) clievent.EventCallback {
 // whose Begin or Finish panicked is not called again.
 func (o *Orchestrator) recovered(ctx context.Context, key string, owner Origin, t *inflight, r any, gen uint64) {
 	metrics.PanicRecoveredTotal.Add(1)
-	slog.Error("turn: panic recovered", "key", key, "panic", r, "stack", string(debug.Stack()))
+	if t != nil && t.ctx != nil {
+		ctx = t.ctx
+	}
+	slog.ErrorContext(ctx, "turn: panic recovered", "key", key, "panic", r, "stack", string(debug.Stack()))
 	// The turn's ctx may already be Done (shutdown racing the panic).
 	ctx = context.WithoutCancel(ctx)
 	if gen == detachedGen {
@@ -262,4 +270,25 @@ func (o *Orchestrator) recovered(ctx context.Context, key string, owner Origin, 
 	out := t.out
 	out.Panic = true
 	o.deliver(ctx, key, t, out, true)
+}
+
+// maxLoggedTraces caps the trace ids "turn: start" lists for a merged batch.
+const maxLoggedTraces = 8
+
+// startTurn derives the turn's ctx from the loop's: the head message's
+// trace id (a later batch must not inherit the first message's), a fresh
+// run id the session's run record adopts, and the session key. It logs one
+// "turn: start" line naming every merged message's trace.
+func startTurn(ctx context.Context, key string, t *inflight) context.Context {
+	traces := make([]string, 0, min(len(t.batch), maxLoggedTraces))
+	for _, m := range t.batch[:min(len(t.batch), maxLoggedTraces)] {
+		traces = append(traces, m.TraceID)
+	}
+	if len(t.batch) > 0 {
+		ctx = ctxutil.WithTraceID(ctx, t.batch[0].TraceID)
+	}
+	ctx = ctxutil.WithSessionKey(ctxutil.WithRunID(ctx, ctxutil.NewTraceID()), key)
+	t.ctx = ctx
+	slog.InfoContext(ctx, "turn: start", "key", key, "batch", len(t.batch), "trace_ids", traces)
+	return ctx
 }

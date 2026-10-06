@@ -81,6 +81,11 @@ server:
   # refuse to serve at all when dashboard_token is empty. Runbook:
   # docs/ops/pprof.md. Startup logs a WARN while this is on.
   # debug_mode: false
+  # metrics_enabled registers GET /metrics: the naozhi_* counters in Prometheus
+  # text format for a scraper on another host (dashboard token as Bearer; not
+  # loopback-only, unlike /api/debug/vars). Needs dashboard_token. See
+  # docs/ops/metrics.md.
+  # metrics_enabled: false
 
 workspace:
   id: "your-node-id"

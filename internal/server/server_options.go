@@ -133,6 +133,8 @@ type FeatureOptions struct {
 	// contents) or expvar counters. Set `server.debug_mode: true` only while
 	// capturing a profile.
 	Debug bool
+	// Metrics registers GET /metrics (docs/ops/metrics.md).
+	Metrics bool
 
 	// PublicTmp opts the __public_tmp__ pseudo-project in (#646). When
 	// false (default) that pseudo-project is a regular "project not found".

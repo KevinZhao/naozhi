@@ -28,6 +28,9 @@ type Request struct {
 	// Origin is the entry point the message came from; it receives the
 	// admission ack, the turn's outcome and any drop. A nil Origin is silent.
 	Origin Origin
+	// TraceID names the inbound message in logs; "" takes Submit's ctx
+	// trace id, else a fresh one.
+	TraceID string
 }
 
 // Ack is Submit's immediate answer, also passed to Origin.Admitted.

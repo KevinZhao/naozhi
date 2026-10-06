@@ -102,6 +102,8 @@ cmd/naozhi/main.go
   -> metrics      进程级计数器（expvar）
   -> runtelemetry 跨子系统 run 生命周期事件类型；Tee 把两个 Broadcaster 并列（Hub + webhook）
   -> webhook      出站 webhook 发送器（每端点一 goroutine + 有界队列、HMAC 签名、退避重试、Deliver 永不阻塞），server 经 webhookBroadcaster 挂到 runtelemetry 上；叶子
+  -> promexport   expvar → Prometheus 文本格式（naozhi_* 前缀；_total 为 counter，其余 gauge；Map 按 key 打标签），server 的 GET /metrics 用；叶子
+  -> runtelemetry 跨子系统 run 生命周期事件类型
   -> costledger   统一 cost 账本叶子包（按天 JSONL append-only + rollup + 累计差分 + 按模型学习 CLI 单价）
   -> budget       每日 USD 预算：订阅 cost 账本的内存日索引（IM 会话 / 项目 planner / cron job / 全局）+ Gate 判定；只依赖 costledger 与 sessionkey
   -> naozhisettings  naozhi 托管的 Claude settings 文件
@@ -125,7 +127,7 @@ cmd/naozhi/main.go
   -> tuningspec   model/effort 值校验（config 与 session 共享的 flag-injection 防线）
   -> backendid    Backend-ID 长度/格式校验
   -> apierr       Claude API 错误检测与本地化
-  -> ctxutil      context.Context helpers
+  -> ctxutil      context.Context helpers：trace_id（IM / HTTP 入口）/ run_id + session_key（turn）随 ctx 传递，Handler 把它们附到每条 *Context 日志上
   -> leakguard    "leaked tool" 检测的单一真相源
   -> spawndiag    spawn 门禁拒绝的上报（metrics + 日志 + observer）；位于 cli 之下，envpolicy 才能上报
   -> cliinfo      CLI 词汇的零依赖叶子（进程状态 / death reason / watchdog 默认值 / backend 与 model 行 / argv denylist），cli 重导出；只命名这些词汇的包 import 它而不是 cli
@@ -351,6 +353,10 @@ Config describes schema v2 only. The v1 keys (`nodes`, `session.workspace`, `ses
 - **Hub.mu** protects WebSocket client set and subscriptions. `nodesMu` (shared with Server) protects the nodes map.
 - Node cache is a separate `nodeCacheMu` to avoid blocking dashboard API.
 - Process Close() is always called outside router lock to prevent deadlock.
+
+## Logging
+
+- On a turn's path (dispatch, turn, session, cli) log with `slog.*Context(ctx, …)` / `lg.*Context(ctx, …)`: `ctxutil.Handler` adds the ctx's `trace_id` / `run_id` / `session_key`, and the package-level `slog.Info` family carries none of them. Startup, cron and config paths have no turn ctx and stay as they are. `docs/ops/log-correlation.md` has the field table and jq recipes.
 
 ## Code Comments
 
