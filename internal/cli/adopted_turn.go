@@ -80,6 +80,40 @@ func (a *adoptedTurn) arm(midTurn bool, resultSeq int64) {
 	a.armed.Store(true)
 }
 
+// verdictKind is what the drained backlog says about the turn in flight at
+// reconnect.
+type verdictKind uint8
+
+const (
+	verdictIdle     verdictKind = iota // nothing was in flight
+	verdictMidTurn                     // the CLI is still working; no result yet
+	verdictFinished                    // the backlog ends in a result
+	verdictUnknown                     // only turn-neutral frames survived a wrapped ring
+)
+
+// replayVerdict is reconnectVerdict's answer; finished is the result frame
+// (at shim seq finishedSeq) for verdictFinished only.
+type replayVerdict struct {
+	kind        verdictKind
+	finished    *clievent.Event
+	finishedSeq int64
+}
+
+// settle turns v into applyReconnectVerdict's arguments, which have no unknown:
+// resolve decides it (true = the turn had ended, so idle), and a nil resolve
+// leaves it mid-turn, whose stray-result handling recovers if a result comes.
+func (v replayVerdict) settle(resolve func(helloSessionID string) bool, helloSessionID string) (midTurn bool, finished *clievent.Event, finishedSeq int64) {
+	switch v.kind {
+	case verdictMidTurn:
+		return true, nil, 0
+	case verdictFinished:
+		return false, v.finished, v.finishedSeq
+	case verdictUnknown:
+		return resolve == nil || !resolve(helloSessionID), nil, 0
+	}
+	return false, nil, 0
+}
+
 // applyReconnectVerdict acts on what the drained backlog said. Called from
 // SpawnReconnect only, and BEFORE startReadLoop: the read loop can deliver the
 // late result before SpawnReconnect returns to its caller, so nothing may be
