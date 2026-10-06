@@ -98,7 +98,7 @@ func (s *Scheduler) claimSandboxOrphans() []sandboxOrphan {
 
 	orphans := make([]sandboxOrphan, 0, len(entries))
 	for _, e := range entries {
-		// Bail on shutdown so N×30s Stop timeouts don't exhaust gcWaitBudget.
+		// Claim nothing once shutdown has begun; the files stay for the next start.
 		if s.stopCtx.Err() != nil {
 			return nil
 		}
