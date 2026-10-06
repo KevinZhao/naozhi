@@ -19,8 +19,8 @@ import (
 	"github.com/naozhi/naozhi/internal/history/naozhilog"
 )
 
-// ring：三分面全满足 → EventStore。LoadBefore 缺口由
-// cli/eventlog_loadbefore.go 的 thin adapter 补齐（Phase 1 预案）。
+// ring：三分面全满足 → EventStore。LoadBefore 由
+// ring/eventlog_loadbefore.go 的 thin adapter 提供。
 var (
 	_ api.Appender   = (*ring.EventLog)(nil)
 	_ api.Subscriber = (*ring.EventLog)(nil)
@@ -30,6 +30,11 @@ var (
 
 // durable / replay tier：只读分面。写侧走 persist.Entry（bridge 转换），
 // 不参与 Appender 断言——见 api.go 对 bridge 剩余职责的定位。
+//
+// persist.Persister 不满足任何 api 接口：写入经 SinkFor(key) 返回的
+// PersistSink 回调，读回走包级 persist.Recover，没有 Append/AppendBatch、
+// SubscribeNew 或 LoadBefore。套上接口需要包装 sink 模型的非薄 adapter，
+// 留给 #1570 的注入迁移决定形状，这里不断言。
 var (
 	_ api.Reader = (*naozhilog.Source)(nil)
 	_ api.Reader = (*merged.Source)(nil)

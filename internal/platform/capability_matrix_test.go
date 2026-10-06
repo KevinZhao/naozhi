@@ -22,13 +22,13 @@ import (
 func TestCapabilityMatrixIsPinned(t *testing.T) {
 	t.Parallel()
 	want := map[string]platform.Capabilities{
+		// Discord, Feishu and Slack have native AskUserQuestion cards;
+		// elsewhere dispatch falls back to a plain-text option list.
 		"discord": {
 			InterimMessages: true, SingleUseReplyToken: false,
-			Reactions: true, QuestionCards: false, Runnable: true,
+			Reactions: true, QuestionCards: true, Runnable: true,
 			ConnState: true,
 		},
-		// Feishu is the only platform with native AskUserQuestion cards;
-		// everywhere else dispatch falls back to a plain-text option list.
 		"feishu": {
 			InterimMessages: true, SingleUseReplyToken: false,
 			Reactions: true, QuestionCards: true, Runnable: true,
@@ -36,7 +36,7 @@ func TestCapabilityMatrixIsPinned(t *testing.T) {
 		},
 		"slack": {
 			InterimMessages: true, SingleUseReplyToken: false,
-			Reactions: true, QuestionCards: false, Runnable: true,
+			Reactions: true, QuestionCards: true, Runnable: true,
 			ConnState: true,
 		},
 		// Weixin is the single-use-reply-token platform (#2136) and the only one

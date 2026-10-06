@@ -66,6 +66,9 @@ type Discord struct {
 	dispatch platform.BoundedDispatch
 	// connState is fed by the gateway's Connect/Ready/Resumed/Disconnect events.
 	connState platform.ConnTracker
+	// admit gates attachment downloads; nil admits everyone. Set by
+	// SetAdmission before Start, read-only after.
+	admit platform.AdmitFunc
 	// restTransport replaces the REST client's transport; nil in production.
 	restTransport http.RoundTripper
 	// closeTimeout overrides discordCloseTimeout when non-zero.
@@ -169,6 +172,9 @@ func (d *Discord) SupportsInterimMessages() bool { return true }
 // ConnState implements platform.ConnStateReporter; ok=false until Start.
 func (d *Discord) ConnState() (platform.ConnState, bool) { return d.connState.Snapshot() }
 
+// SetAdmission implements platform.Admitter.
+func (d *Discord) SetAdmission(fn platform.AdmitFunc) { d.admit = fn }
+
 // RegisterRoutes is a no-op for Discord (WebSocket gateway, no inbound HTTP).
 func (d *Discord) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
 
@@ -241,11 +247,14 @@ func (d *Discord) configureSession(sess *discordgo.Session) {
 	// Inline handlers see a drop's Disconnect before its reconnect's Connect;
 	// with a goroutine per event a late Disconnect could overwrite
 	// "connected". Connect and the first Ready fire inside Open under the
-	// session lock, so no handler may call back into sess. Messages keep
-	// their own goroutine.
+	// session lock, so no handler may call back into sess. Messages and
+	// interactions keep their own goroutine.
 	sess.SyncEvents = true
 	sess.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
 		go d.onMessageCreate(s, m)
+	})
+	sess.AddHandler(func(s *discordgo.Session, ic *discordgo.InteractionCreate) {
+		go d.onInteractionCreate(s, ic)
 	})
 	sess.AddHandler(d.onReady)
 	sess.AddHandler(d.onConnect)
@@ -629,6 +638,11 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 
 	// Downloads run in the bounded goroutine, not discordgo's event dispatch.
 	d.dispatch.TryGo("discord", func() {
+		// Only attachments cost a download; text-only messages go straight to
+		// the handler, which judges them anyway.
+		if len(pending) > 0 && d.admit != nil && !d.admit(d.stopCtx, msg) {
+			return
+		}
 		var total int
 		for _, p := range pending {
 			data, mime, err := downloadURL(p.url)

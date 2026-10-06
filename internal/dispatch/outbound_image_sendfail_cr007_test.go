@@ -32,7 +32,7 @@ func TestSendOutboundImages_FailureCountsInHealthMetrics(t *testing.T) {
 		{Data: []byte("a"), MimeType: "image/png"},
 		{Data: []byte("b"), MimeType: "image/png"},
 	}
-	d.sendOutboundImages(context.Background(), fp, "chat-1", imgs)
+	d.sendOutboundImages(context.Background(), fp, ReplyDest{ChatID: "chat-1"}, imgs)
 
 	if got := d.sendFailCount.Load() - beforeLocal; got != int64(len(imgs)) {
 		t.Errorf("sendFailCount delta = %d, want %d (one per failed image)", got, len(imgs))
@@ -53,7 +53,7 @@ func TestSendOutboundImages_SuccessNoFailCount(t *testing.T) {
 	beforeLocal := d.sendFailCount.Load()
 	beforeGlobal := dispatchSendFailTotal.Value()
 
-	d.sendOutboundImages(context.Background(), fp, "chat-1", []platform.Image{
+	d.sendOutboundImages(context.Background(), fp, ReplyDest{ChatID: "chat-1"}, []platform.Image{
 		{Data: []byte("a"), MimeType: "image/png"},
 	})
 

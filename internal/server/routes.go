@@ -116,6 +116,10 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	// Dashboard JS is auth-gated: it embeds the API endpoint list + client
 	// schema (recon surface); the login page loads no /static/ JS (#1328).
 	s.mux.HandleFunc("GET /static/css/{file}", auth(handleDashboardCSS))
+	// Vendored libraries: stylesheets and fonts by path, each script on its
+	// own route like the dashboard's modules.
+	s.mux.HandleFunc("GET /static/vendor/{file...}", auth(handleDashboardCSS))
+	s.mux.HandleFunc("GET /static/vendor/katex-0.16.21/katex.min.js", auth(serveStaticJS("vendor/katex-0.16.21/katex.min.js")))
 	s.mux.HandleFunc("GET /static/contract.js", auth(serveStaticJS("contract.js")))
 	s.mux.HandleFunc("GET /static/nz_util.js", auth(serveStaticJS("nz_util.js")))
 	s.mux.HandleFunc("GET /static/state.js", auth(serveStaticJS("state.js")))
@@ -160,6 +164,8 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	s.mux.HandleFunc("GET /static/cron_state.js", auth(serveStaticJS("cron_state.js")))
 	s.mux.HandleFunc("GET /static/cron_format.js", auth(serveStaticJS("cron_format.js")))
 	s.mux.HandleFunc("GET /static/lightbox.js", auth(serveStaticJS("lightbox.js")))
+	s.mux.HandleFunc("GET /static/mem_popover.js", auth(serveStaticJS("mem_popover.js")))
+	s.mux.HandleFunc("GET /static/aside_drawer.js", auth(serveStaticJS("aside_drawer.js")))
 	s.mux.HandleFunc("GET /static/agent_view.js", auth(serveStaticJS("agent_view.js")))
 	s.mux.HandleFunc("GET /static/asset_browser.js", auth(serveStaticJS("asset_browser.js")))
 	s.mux.HandleFunc("GET /static/files_view.js", auth(serveStaticJS("files_view.js")))

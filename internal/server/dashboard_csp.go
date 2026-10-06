@@ -16,10 +16,11 @@ import (
 // inline scripts (the theme bootstrap, which must run before first paint, and
 // the generated import map and entry loaders) are allowlisted by SHA-256 hash,
 // computed from the page as served, so an edit re-derives the hash instead of
-// silently breaking the page. The jsdelivr sources are pinned to the exact versioned files the
-// lazy loaders inject (an /npm/ prefix is an anyone-can-publish namespace,
-// i.e. an allowlist bypass); TestDashboardCSP_CDNURLsMatchBundle keeps them in
-// lockstep with dashboard.js.
+// silently breaking the page. KaTeX is served from static/vendor, so styles and
+// fonts are 'self' only. The one jsdelivr source, mermaid, is pinned to the
+// exact versioned file its lazy loader injects (an /npm/ prefix is an
+// anyone-can-publish namespace, i.e. an allowlist bypass);
+// TestDashboardCSP_CDNURLsMatchBundle keeps it in lockstep with render_md.js.
 var dashboardCSP = buildDashboardCSP(staticAssets["dashboard.html"].bytes)
 
 // DashboardPage returns a copy of the page handleDashboard serves and the
@@ -29,15 +30,8 @@ func DashboardPage() (page []byte, csp string) {
 	return slices.Clone(staticAssetBytes("dashboard.html")), dashboardCSP
 }
 
-// cdn URLs the dashboard's lazy loaders inject (SRI-pinned in dashboard.js).
-const (
-	cdnMermaidJS = "https://cdn.jsdelivr.net/npm/mermaid@11.14.0/dist/mermaid.min.js"
-	cdnKatexJS   = "https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js"
-	cdnKatexCSS  = "https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css"
-	// Fonts are referenced from within the KaTeX CSS; a path prefix is the
-	// tightest expressible source (the font set varies by glyph usage).
-	cdnKatexFonts = "https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/fonts/"
-)
+// cdnMermaidJS is the CDN URL loadMermaid injects (SRI-pinned in render_md.js).
+const cdnMermaidJS = "https://cdn.jsdelivr.net/npm/mermaid@11.14.0/dist/mermaid.min.js"
 
 // dashInlineScriptRe matches inline <script> blocks WITHOUT a src attribute —
 // external tags (<script defer src=…>) have empty bodies and must not
@@ -81,13 +75,12 @@ func buildDashboardCSP(page []byte) string {
 
 	return strings.Join([]string{
 		"default-src 'self'",
-		"script-src 'self' " + hashes + " " + cdnMermaidJS + " " + cdnKatexJS,
+		"script-src 'self' " + hashes + " " + cdnMermaidJS,
 		"connect-src 'self'",
 		// #2559 D6-3 dropped the last generated style="" attribute, so inline
-		// styles are no longer needed. KaTeX's stylesheet is the one external
-		// source (SRI-pinned where it is injected).
-		"style-src 'self' " + cdnKatexCSS,
-		"font-src 'self' " + cdnKatexFonts,
+		// styles are no longer needed.
+		"style-src 'self'",
+		"font-src 'self'",
 		"img-src 'self' data: blob:",
 		"frame-src 'self' blob:",
 		"object-src 'none'",

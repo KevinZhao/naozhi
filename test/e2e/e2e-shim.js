@@ -7,7 +7,8 @@
 // export them; state lives on exported const objects (state.js, msg_nav's
 // navState, voice's voiceRec), so those names are read/write accessors onto
 // the object its owner reads. This list may only shrink as tests migrate to
-// first-class assertions.
+// first-class assertions; internal/testhelper/e2e_shim_surface_ratchet_test.go
+// pins its size.
 import * as authModal from '/static/auth_modal.js';
 import * as composerFiles from '/static/composer_files.js';
 import * as dashboard from '/static/dashboard.js';

@@ -96,7 +96,7 @@ func TestReplyIntoBanner_LongAnswerEditsFirstChunk(t *testing.T) {
 	p := &discordLikePlatform{}
 	text := longAnswer(5000)
 
-	(&Dispatcher{}).replyIntoBanner(context.Background(), p, "chat-1", "banner-1", text)
+	(&Dispatcher{}).replyIntoBanner(context.Background(), p, ReplyDest{ChatID: "chat-1"}, "banner-1", text)
 
 	edits, failed := p.edited()
 	if len(edits) != 1 || failed != 0 {
@@ -112,7 +112,7 @@ func TestReplyIntoBanner_ShortAnswerEditOnly(t *testing.T) {
 	p := &discordLikePlatform{}
 	const text = "done: all tests pass"
 
-	(&Dispatcher{}).replyIntoBanner(context.Background(), p, "chat-1", "banner-1", text)
+	(&Dispatcher{}).replyIntoBanner(context.Background(), p, ReplyDest{ChatID: "chat-1"}, "banner-1", text)
 
 	if edits, _ := p.edited(); len(edits) != 1 || edits[0] != text {
 		t.Errorf("banner edits = %q, want [%q]", edits, text)
@@ -138,7 +138,7 @@ func TestReplyIntoBanner_EditFailureSendsAllAndMarksBanner(t *testing.T) {
 			t.Parallel()
 			p := &discordLikePlatform{failEdits: true}
 
-			(&Dispatcher{}).replyIntoBanner(context.Background(), p, "chat-1", "banner-1", tc.text)
+			(&Dispatcher{}).replyIntoBanner(context.Background(), p, ReplyDest{ChatID: "chat-1"}, "banner-1", tc.text)
 
 			if edits, _ := p.edited(); len(edits) != 1 || edits[0] != bannerAnsweredBelow {
 				t.Errorf("successful banner edits = %q, want only the marker %q", edits, bannerAnsweredBelow)
@@ -174,7 +174,7 @@ func TestReplyIntoBanner_SingleUseTokenSendsNothing(t *testing.T) {
 	p := &singleUseBanner{}
 	limit := p.MaxReplyLength()
 
-	(&Dispatcher{}).replyIntoBanner(context.Background(), p, "chat-1", "banner-1", longAnswer(3*limit))
+	(&Dispatcher{}).replyIntoBanner(context.Background(), p, ReplyDest{ChatID: "chat-1"}, "banner-1", longAnswer(3*limit))
 
 	if n := p.replyCount(); n != 0 {
 		t.Errorf("sent %d message(s) on a single-use-token platform, want 0", n)

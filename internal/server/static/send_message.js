@@ -241,19 +241,11 @@ function trySendViaWS(text, fileIDs, input) {
   const id = 'r' + (++wsm.sendCounter);
   const sendMsg = { type: 'send', key: selection.key, text: text, id: id };
   if (selection.node && selection.node !== 'local') sendMsg.node = selection.node;
-  if (perSession.workspaces[selection.key]) sendMsg.workspace = perSession.workspaces[selection.key];
-  if (perSession.backends[selection.key]) sendMsg.backend = perSession.backends[selection.key];
-  if (perSession.accessProfiles[selection.key]) sendMsg.access_profile = perSession.accessProfiles[selection.key];
-  if (!wsm.send(sendMsg)) return false;
-  // Workspace/backend/access profile are consumed once on session spawn;
-  // forget them only now that the frame is out — a failed wsm.send above
-  // falls through to HTTP, which must still see them.
-  if (sendMsg.workspace) {
-    delete perSession.workspaces[selection.key];
-    delete perSession.nodes[selection.key];
-  }
-  delete perSession.backends[selection.key];
-  delete perSession.accessProfiles[selection.key];
+  const spawn = spawnFields(selection.key);
+  if (!wsm.send(Object.assign(sendMsg, spawn))) return false;
+  // Consume only now that the frame is out: a failed wsm.send above falls
+  // through to HTTP, which must still see them.
+  consumeSpawnFields(selection.key, spawn);
   // Optimistic render: show the user message immediately without waiting
   // for the CLI to echo it back as a "user" event.
   renderOptimisticUserMsg(text, id);
@@ -268,28 +260,34 @@ function trySendViaWS(text, fileIDs, input) {
   return true;
 }
 
-// buildSendPayload builds the HTTP POST body and, in the same pass, consumes
-// (deletes) the pending workspace/backend/access_profile for this session —
-// they are spawn-time-only inputs the server reads once, so they must not
-// ride along on a retry of the same POST.
+// spawnFields returns the spawn-time fields of key's first send: the pending
+// workspace, backend and access_profile, each omitted when unset.
+function spawnFields(key) {
+  const f = {};
+  if (perSession.workspaces[key]) f.workspace = perSession.workspaces[key];
+  if (perSession.backends[key]) f.backend = perSession.backends[key];
+  if (perSession.accessProfiles[key]) f.access_profile = perSession.accessProfiles[key];
+  return f;
+}
+
+// consumeSpawnFields forgets the fields a send carried: the server reads them
+// once, at spawn, so no later send (or retry of this POST) may carry them.
+// The backend/profile pick moves to sentPicks, display-only, until listed.
+function consumeSpawnFields(key, f) {
+  if (f.workspace) { delete perSession.workspaces[key]; delete perSession.nodes[key]; }
+  if (f.workspace || f.backend || f.access_profile) perSession.sentPicks[key] = { backend: f.backend || '', accessProfile: f.access_profile || '' };
+  delete perSession.backends[key];
+  delete perSession.accessProfiles[key];
+}
+
+// buildSendPayload builds the HTTP POST body, consuming the spawn fields.
 function buildSendPayload(text, fileIDs) {
   const payload = { key: selection.key, text: text };
   if (fileIDs.length > 0) payload.file_ids = fileIDs;
   if (selection.node && selection.node !== 'local') payload.node = selection.node;
-  if (perSession.workspaces[selection.key]) {
-    payload.workspace = perSession.workspaces[selection.key];
-    delete perSession.workspaces[selection.key];
-    delete perSession.nodes[selection.key];
-  }
-  if (perSession.backends[selection.key]) {
-    payload.backend = perSession.backends[selection.key];
-    delete perSession.backends[selection.key];
-  }
-  if (perSession.accessProfiles[selection.key]) {
-    payload.access_profile = perSession.accessProfiles[selection.key];
-    delete perSession.accessProfiles[selection.key];
-  }
-  return payload;
+  const spawn = spawnFields(selection.key);
+  consumeSpawnFields(selection.key, spawn);
+  return Object.assign(payload, spawn);
 }
 
 // handleSendRejected runs the !r.ok branch: restores the composer and the

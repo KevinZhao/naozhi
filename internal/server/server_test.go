@@ -71,6 +71,12 @@ func newTestServerHS(p *mockPlatform) (*Server, *handlerSet) {
 	})
 }
 
+// routerOf returns the concrete router a test fixture built srv with, for the
+// test-only Router methods (InjectSession, Shutdown, …) serverRouter omits.
+func routerOf(srv *Server) *session.Router {
+	return srv.router.(*session.Router)
+}
+
 func newTestServer(p *mockPlatform) *Server {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": p}
@@ -310,12 +316,11 @@ func TestBuildMessageHandler_NewResetsNamedAgent(t *testing.T) {
 	agentCommands := map[string]string{"review": "code-reviewer"}
 	agents := map[string]session.AgentOpts{"code-reviewer": {}}
 	srv := NewWithOptions(ServerOptions{
-		Addr:          ":0",
-		Router:        router,
-		Platforms:     platforms,
-		Agents:        agents,
-		AgentCommands: agentCommands,
-		Backend:       "claude",
+		Addr:      ":0",
+		Router:    router,
+		Platforms: platforms,
+		Routing:   RoutingOptions{Agents: agents, AgentCommands: agentCommands},
+		Backend:   "claude",
 	})
 	handler := newTestDispatcher(srv).BuildHandler()
 
@@ -486,7 +491,7 @@ func TestSendSplitReply_ShortMessageSingleReply(t *testing.T) {
 	p := &mockPlatform{maxLen: 100}
 	srv := newTestServer(p)
 
-	newTestDispatcher(srv).SendSplitReply(context.Background(), p, "chat1", "hello world")
+	newTestDispatcher(srv).SendSplitReply(context.Background(), p, dispatch.ReplyDest{ChatID: "chat1"}, "hello world")
 
 	if p.replyCount() != 1 {
 		t.Fatalf("expected 1 reply, got %d", p.replyCount())
@@ -501,7 +506,7 @@ func TestSendSplitReply_LongMessageSplitsCorrectly(t *testing.T) {
 	srv := newTestServer(p)
 
 	text := strings.Repeat("a", 35)
-	newTestDispatcher(srv).SendSplitReply(context.Background(), p, "chat1", text)
+	newTestDispatcher(srv).SendSplitReply(context.Background(), p, dispatch.ReplyDest{ChatID: "chat1"}, text)
 
 	if p.replyCount() < 2 {
 		t.Fatalf("expected >= 2 replies for 35-char text with maxLen=10, got %d", p.replyCount())
@@ -527,7 +532,7 @@ func TestSendSplitReply_ZeroMaxLenDefaultsTo4000(t *testing.T) {
 	p := &mockPlatform{maxLen: 0} // triggers default 4000
 	srv := newTestServer(p)
 
-	newTestDispatcher(srv).SendSplitReply(context.Background(), p, "chat1", "short")
+	newTestDispatcher(srv).SendSplitReply(context.Background(), p, dispatch.ReplyDest{ChatID: "chat1"}, "short")
 
 	if p.replyCount() != 1 {
 		t.Errorf("expected 1 reply with 4000 default maxLen, got %d", p.replyCount())
@@ -538,7 +543,7 @@ func TestSendSplitReply_ExactlyMaxLen(t *testing.T) {
 	p := &mockPlatform{maxLen: 5}
 	srv := newTestServer(p)
 
-	newTestDispatcher(srv).SendSplitReply(context.Background(), p, "chat1", "hello")
+	newTestDispatcher(srv).SendSplitReply(context.Background(), p, dispatch.ReplyDest{ChatID: "chat1"}, "hello")
 
 	if p.replyCount() != 1 {
 		t.Errorf("expected 1 reply for text exactly at maxLen, got %d", p.replyCount())
@@ -549,7 +554,7 @@ func TestSendSplitReply_ChatIDForwarded(t *testing.T) {
 	p := &mockPlatform{maxLen: 100}
 	srv := newTestServer(p)
 
-	newTestDispatcher(srv).SendSplitReply(context.Background(), p, "room-xyz", "some text")
+	newTestDispatcher(srv).SendSplitReply(context.Background(), p, dispatch.ReplyDest{ChatID: "room-xyz"}, "some text")
 
 	for _, r := range p.allReplies() {
 		if r.ChatID != "room-xyz" {

@@ -58,6 +58,9 @@ const (
 	// ErrClassCronSessionCapacity: GetOrCreate refused at the router's session
 	// caps. RunState is "skipped" — contention, not a job fault.
 	ErrClassCronSessionCapacity ErrorClass = "session_capacity"
+	// ErrClassCronBudgetExceeded: today's spend reached cost.budget for the
+	// job or the machine. RunState is "skipped"; the budget resets at midnight.
+	ErrClassCronBudgetExceeded ErrorClass = "budget_exceeded"
 	// ErrClassCronTurnFailed: Send returned a result the backend flagged as
 	// an error (max turns, an RPC rejection). RunState is "failed".
 	ErrClassCronTurnFailed ErrorClass = "turn_failed"

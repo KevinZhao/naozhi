@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/budget"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/imauth"
@@ -37,6 +38,11 @@ type ServerOptions struct {
 	IMAccess *imauth.Policy
 	// IMRateLimit caps each IM sender's message rate; zero is unlimited.
 	IMRateLimit dispatch.RateLimit
+	// IMBudget refuses IM turns past cost.budget and answers /api/cost/budget;
+	// nil admits every turn.
+	IMBudget *budget.Gate
+	// IMGroupScope is what one IM group-chat session covers; zero is per thread.
+	IMGroupScope dispatch.GroupScope
 	// StateDir is the only state directory the constructor owns end-to-end
 	// (cookie_secret 0700/0600, retired-key ledger, size warning). Other state
 	// dirs (~/.claude, workspace cwd, attachments, cron runs/shims) are owned
@@ -76,16 +82,27 @@ type ServerOptions struct {
 	Addr   string
 	Router *session.Router
 	// Relays groups the construction-cycle relays the server binds (S7/S8).
-	Relays        RelayOptions
-	Platforms     map[string]platform.Platform
-	Agents        map[string]session.AgentOpts
-	AgentCommands map[string]string
-	Scheduler     *cron.Scheduler
-	Backend       string // "claude" | "kiro" | "" (empty → "claude")
+	Relays    RelayOptions
+	Platforms map[string]platform.Platform
+	// Routing groups the agent maps and the key resolver built over them.
+	Routing   RoutingOptions
+	Scheduler *cron.Scheduler
+	Backend   string // "claude" | "kiro" | "" (empty → "claude")
 
 	// Logger is the component logger the Server derives its structured logging
 	// from. nil falls back to slog.Default() (#620).
 	Logger *slog.Logger
+}
+
+// RoutingOptions are the agent maps and the KeyResolver the dispatcher, the
+// Hub and the handlers share.
+type RoutingOptions struct {
+	Agents        map[string]session.AgentOpts
+	AgentCommands map[string]string
+	// Resolver is the process's shared resolver (wireup.KeyResolver), carrying
+	// the cron access-profile lookup the remote gate needs. nil falls back to
+	// a plain resolver over Agents and ProjectManager, with no cron lookup.
+	Resolver *session.KeyResolver
 }
 
 // IdentityOptions is what the server reports about itself.

@@ -30,6 +30,7 @@ package server
 import (
 	"time"
 
+	"github.com/naozhi/naozhi/internal/budget"
 	dashcost "github.com/naozhi/naozhi/internal/dashboard/cost"
 	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/discovery"
@@ -118,6 +119,10 @@ func (hs *handlerSet) checkLimiters(schedulerWired bool) {
 // Server needs them. A Server field only construction reads is a field every
 // later reader has to rule out (#2897 S4).
 type wiring struct {
+	// router is ServerOptions.Router, for the build steps that hand the
+	// concrete router to a consumer with its own interface (turnSender, the
+	// send engine, the Hub, the dispatcher, the dashboard adapters).
+	router        *session.Router
 	dedup         *platform.Dedup
 	queue         turn.QueueOptions // buildWSStack builds turns' queue from it
 	startedAt     time.Time
@@ -125,6 +130,8 @@ type wiring struct {
 	agentCommands map[string]string
 	allowedRoot   string
 	imRateLimit   dispatch.RateLimit
+	imGroupScope  dispatch.GroupScope
+	imBudget      *budget.Gate   // nil admits every IM turn
 	imAccess      *imauth.Policy // nil allows every IM sender
 	debugMode     bool           // gates /api/debug/pprof and /api/debug/vars
 	resolver      *session.KeyResolver

@@ -1,6 +1,10 @@
 package session
 
-import "log/slog"
+import (
+	"log/slog"
+
+	"github.com/naozhi/naozhi/internal/sessionkey"
+)
 
 // The per-chat workspace-override facet (#383) lives in
 // internal/session/workspacestore (#2495): its fields are private to that
@@ -15,7 +19,8 @@ import "log/slog"
 // realistic operator usage (one override per chat, typically < 50 chats).
 const maxWorkspaceOverrides = 1024
 
-// SetWorkspace sets the working directory override for a chat. Bounded by
+// SetWorkspace sets the working directory override for a chat; a thread's or
+// member's chat key sets its chat's (sessionkey.ParentChatKey). Bounded by
 // maxWorkspaceOverrides to prevent DoS via unique-chat-key flooding.
 //
 // One-shot dashboard:direct keys are never recycled once their session ends
@@ -33,6 +38,7 @@ func (r *Router) SetWorkspace(chatKey, path string) {
 			"hint", "caller passed unauthenticated or misrouted chat_key — verify upstream auth")
 		return
 	}
+	chatKey = sessionkey.ParentChatKey(chatKey)
 	r.ss.Update(func(tx sessTx) { r.putWorkspaceOverride(tx, chatKey, path) })
 }
 
@@ -49,8 +55,10 @@ func (r *Router) putWorkspaceOverride(tx sessTx, chatKey, path string) bool {
 	return tx.Ext().workspaces.SetBounded(chatKey, path, maxWorkspaceOverrides, isLive)
 }
 
-// Workspace returns the effective workspace for a chat key.
+// Workspace returns the effective workspace for a chat key; a thread's or
+// member's chat key reads its chat's.
 func (r *Router) Workspace(chatKey string) string {
+	chatKey = sessionkey.ParentChatKey(chatKey)
 	var ws string
 	r.ss.View(func(v sessView) { ws = r.resolveWorkspace(v, chatKey) })
 	return ws

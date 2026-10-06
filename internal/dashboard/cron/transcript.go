@@ -136,7 +136,7 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cross-key check: defensive even though runStore.Get already keys
+	// Cross-key check: defensive even though runstore.Store.Get already keys
 	// the lookup on the disk path. A future refactor that loosens the
 	// key should not silently expose other-job runs through this URL.
 	if run.JobID != jobID {
@@ -380,11 +380,11 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 			// run; skip rather than leak adjacent-run state.
 			continue
 		} else if ev.Timestamp != "" {
-			// ts==0 with a non-empty source string means parseISO8601MS rejected
-			// it: disk corruption or a hand-written / hostile JSONL entry that
-			// could surface across every run's drawer. Drop it, matching the
-			// fresh=false skip policy (#1097). Empty ev.Timestamp (legitimate
-			// CLI shapes like "queue-operation") still flows through on fresh=true.
+			// ts==0 with a non-empty source string means TimestampMillis
+			// rejected it: disk corruption or a hand-written / hostile JSONL
+			// entry that could surface across every run's drawer. Drop it, as
+			// fresh=false does (#1097). Empty ev.Timestamp (legitimate CLI
+			// shapes like "queue-operation") still flows through on fresh=true.
 			continue
 		}
 		newTurns, addedTokens, addedToolCalls, isParsed := flattenJSONLEvent(&ev, ts, len(turns))

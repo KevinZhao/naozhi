@@ -144,25 +144,27 @@ cli:
   # Authority: pick one layout per deployment — either the legacy
   # single-backend (cli.path + cli.model + cli.args above, with no
   # `backends:` block) OR the multi-backend form (cli.backends + optional
-  # cli.backend for the default). Leaving both populated is legal — the
-  # per-backend fields just inherit from the top-level cli.* values — but
-  # mixing them makes the effective config hard to reason about. If you
-  # enable `backends:`, treat cli.path/model/args as inheritable defaults
-  # only, not as "the real backend".
+  # cli.backend for the default). Leaving both populated is legal — an
+  # entry's omitted model/args/effort inherit the top-level cli.* values —
+  # but mixing them makes the effective config hard to reason about. If you
+  # enable `backends:`, treat cli.model/args as inheritable defaults only;
+  # cli.path is not inherited and picks no entry's binary.
   #
   # Runtime selection:
   #   - Dashboard "new session" dropdown picks backend per session
   #   - API: POST /api/sessions/send {"backend": "kiro", ...}
   #   - Omitted => cli.backend (or first entry in `backends:`)
   #
-  # Per-backend path/model/args are optional and fall back to cli.* above.
+  # Per-backend model/args are optional and fall back to cli.* above. An
+  # omitted path is auto-detected by id (~/.local/bin/<binary>, then the
+  # usual install dirs, then $PATH); it does not fall back to cli.path.
   # The protocol follows the id — stream-json for "claude", ACP for "kiro",
   # codex app-server for "codex" — no extra flag needed.
   #
   #backend: "claude"
   #backends:
   #  - id: "claude"
-  #    # path/model/args inherit from cli.path + cli.args above when omitted.
+  #    # model/args inherit from cli.* above; path auto-detects by id.
   #  - id: "kiro"
   #    path: "~/.local/bin/kiro-cli"
   #    # Model ID forwarded as `kiro-cli acp --model <id>` at spawn time.
@@ -243,6 +245,17 @@ session:
     no_output_timeout: "15m"
     total_timeout: "2h"
   store_path: "~/.naozhi/sessions.json"
+  # What one session of an IM group chat covers:
+  #   thread (default) — each Slack thread / Feishu topic gets its own session;
+  #                      a message outside any thread uses the channel's
+  #   chat             — the whole channel or group shares one session
+  #   user             — each member of the group gets their own session
+  # The channel still owns /cd, the project binding and /cron; /new and /stop
+  # act on the thread's (or member's) session. Discord threads are separate
+  # channels and WeChat has only direct chats, so neither is affected.
+  # Under thread, replying in the thread of a top-level bot answer starts a
+  # fresh session without the channel's context; use chat to keep one.
+  group_scope: "thread"
   # auto_chain — REMOVED (schema v2). It joined sessions in the same
   # workspace by guessing that "same slug + 7d window" meant one conversation,
   # which stitched unrelated one-off sessions together as each other's history
@@ -475,6 +488,8 @@ platforms:
 # admin_users alone may run /cron, /cd and /project; leave it empty and every
 # allowed user is an admin. Reload without a restart: `naozhi config reload`
 # (or `systemctl reload naozhi`); see docs/rfc/config-hot-reload.md.
+# `naozhi setup weixin` writes the weixin entry for the WeChat user who
+# scanned the login QR code.
 # im_access:
 #   default_deny: false     # true refuses every platform without an entry
 #   deny_reply: ""          # replaces the direct-chat refusal text
@@ -490,6 +505,25 @@ platforms:
 # im_rate_limit:
 #   msgs_per_min: 10        # sustained rate per sender
 #   burst: 3                # back-to-back allowance; 0 = msgs_per_min
+
+# Daily USD budgets counted from the cost ledger; each cap is independent and
+# absent or 0 = off. A spent IM chat gets no new turns (commands still work)
+# and is told at most once a minute; a spent cron job's runs end skipped/
+# budget_exceeded without spawning (only the day's first is kept in history)
+# and never count toward auto-pause; a dashboard replay of a sandbox run gets
+# a 409. Admins are limited too. All chats bound to a project share its
+# planner's budget. The dashboard's own turns are never refused, but their
+# spend counts toward daily_usd. A soft cap: a turn let in under the cap may
+# overshoot it. Spend metered in credits or tokens is not counted. Needs the
+# cost ledger on; changes need a restart.
+# cost:
+#   budget:
+#     per_chat_daily_usd: 20      # each IM chat, across its agents
+#     per_cron_job_daily_usd: 5   # each cron job
+#     daily_usd: 100              # the whole machine
+#     warn_ratio: 0.8             # warn once a day per scope at this share
+#     action: block               # block | warn (warn never refuses)
+#     timezone: "Asia/Shanghai"   # the day starts at midnight here; default cron.timezone
 
 log:
   level: "info"

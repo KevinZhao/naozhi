@@ -10,6 +10,9 @@
 
 ### Added
 
+- **群聊会话按话题分开：`session.group_scope`**（#3446）：默认 `thread`，Slack 话题串、飞书话题里的提问各用一个独立会话，不再与频道 / 群顶层和其他话题共享上下文；不在话题里的消息仍用原来的频道会话，已有会话不受影响；在 bot 顶层回答下开话题串追问也会开一个新会话、不带频道上下文，需要接着聊请用 `chat`。`chat` 恢复整个群共用一个会话；`user` 让群里每个成员各用一个会话（在 `user` 模式下，别人点你的提问卡片作答会进入点击者自己的会话）。话题里的 `/new`、`/stop`、`/urgent` 只作用于该话题的会话；`/cd`、`/pwd`、`/project`、`/cron` 仍按整个群生效，话题会话沿用群的工作目录，费用计入群的每日预算；自动接管终端里在群工作目录运行的 claude CLI 只发生在群共用的会话（顶层会话、项目 planner）上，话题 / 成员会话总是新开。绑定了项目的群，`general` 消息仍进入项目唯一的 planner 会话，回复回到各自的话题。Discord 的话题本身就是独立频道，微信只有单聊，均不受影响
+- **Discord：AskUserQuestion 渲染成可点击的按钮**（#3445）：单个问题的每个选项是一个按钮（最多 25 个），点一下即提交答案并把卡片改成「✅ 已回答」；多个问题仍是只读列表，请在一条消息里一次回复全部。无需额外设置，但开发者后台的 Interactions Endpoint URL 必须留空，否则点击不经 Gateway 送达。选项超过 25 个、按钮文字超过 80 字、agent id 过长或文本超出 embed 限制时回退为原来的纯文本列表
+- **Slack：AskUserQuestion 渲染成可点击的按钮**（#3445）：单个问题的每个选项是一个按钮，点一下即提交答案并把卡片改成「✅ 已回答」；多个问题仍是只读列表，请在一条消息里一次回复全部。需要在 Slack app 设置里开启 Interactivity & Shortcuts（Socket Mode 无需 Request URL）；未开启时按钮无响应，卡片上提示可直接回复文字。超出 Block Kit 限制（25 个选项、文本过长）时回退为原来的纯文本列表
 - **cron：聊天里用 `/cron mode <id> fresh|keep` 切换任务的上下文模式**（#3406）：此前 IM 里只能在创建时用 `--keep-context` 决定，要换模式只能删掉重建（丢失 ID 与执行历史）
   - 只在创建该任务的会话生效（与 `/cron del/pause/resume` 相同的前缀匹配和跨会话屏蔽）；模式词不区分大小写，`keep-context` 等同 `keep`；设成当前模式也返回成功
   - 下次执行生效，正在执行的那次不受影响；与控制台编辑一样，连续失败计数（含瞬时故障计数）清零。任务处于暂停时不会自动恢复，回复里提示 `/cron resume <id>`
@@ -68,13 +71,15 @@
   - 后端瞬时故障（`turn_failed` 且原因是 `backend_overloaded` / `backend_rate_limited` / `backend_unreachable`）仍然不计入连续失败，但改为单独计数，见下一条
 - **cron：后端瞬时故障持续 6 小时以上也会自动暂停**（#3422）：此前过载 / 限流 / 连不上模型服务（`apierr` 的网络错误和超时都归到这里）一律不计，模型服务地址配错、凭证所在网络永久不通时，每个 job 每个 tick 都发一条失败通知，永不暂停
   - 每个 job 新增两个落盘字段 `transient_failures`（自上次成功、恢复或编辑以来的瞬时故障次数）与 `transient_failing_since`（其中第一次的结束时间）。成功、恢复、编辑都会清零；job 自身原因的失败和重启孤儿都不动它们
-  - 次数达到 `cron.auto_pause_after_failures`，且距第一次已满 6 小时，这次失败就自动暂停该 job。`paused_reason` 仍是 `auto_failures`，通知照常带「已连续失败 N 次，任务已自动暂停」（N 是瞬时故障次数），`cron job auto-paused` 日志多了 `transient=true` 与 `transient_failures` 字段
+  - 次数达到 `cron.auto_pause_after_failures`，且距第一次已满 6 小时，这次失败就自动暂停该 job。`paused_reason` 记为新值 `auto_transient`（job 自身连续失败触发的仍是 `auto_failures`，两者以触发暂停的那个计数为准），通知末尾是「后端持续故障 6 小时以上（失败 N 次），任务已自动暂停，后端恢复后…恢复」（N 是瞬时故障次数），IM `/cron list` 标为 `[自动暂停：后端持续故障]`，控制台列表与抽屉照旧显示「已自动暂停」，`cron job auto-paused` 日志多了 `transient=true` 与 `transient_failures` 字段（#3515）。回退到旧版本时这类 job 显示为手动暂停，恢复后照常运行
   - 窗口跟执行频率无关：每 5 分钟一次的 job 要故障 6 小时才停（不会因为半小时的故障就停），每天一次的 job 仍要 5 次。阈值设为负数同样关闭这条规则；6 小时不可配置
 
 ### Security
 
 - **IM 发送者鉴权 `im_access`**（#3442）：此前任何能给 bot 发消息的 IM 用户都能让 naozhi 在宿主机上执行命令。新增顶层配置 `im_access`（`default_deny` / `deny_reply` / `platforms.<p>.allowed_users` / `admin_users`），在所有入口（含飞书 AskUserQuestion 卡片回答）命令分发前统一判定；`/cron`、`/cd`、`/project` 需 admin，`admin_users` 为空时所有 allowed 用户都是 admin。被拒消息记 Info `im access denied`（带 user ID）并计入 `naozhi_dispatch_denied_total`；私聊回复一次本人 ID（同一用户 10 分钟内只回一次），群聊静默。**不配置时行为不变**（全放行），但启动日志与 `naozhi config check` 对每个未受限的已启用平台给出 WARN——`config check` 因此会从退出码 0 变为 1，按退出码 0 判定的脚本需要调整。条目里的未知平台名、空 ID、未展开的 `${VAR}` 会让配置加载失败。改名单需重启。`naozhi doctor` 新增 `im access` 一行，同样对未受限平台给 warn（不影响 doctor 退出码），受限时列出每个平台的用户数与 admin 数；README「部署 · IM 访问控制」说明威胁模型、如何从拒绝日志取 ID
 - **飞书语音和图片在下载前先过 `im_access`**（#3513）：此前飞书适配器先下载语音、调 Amazon Transcribe（按时长计费）转写，或先下载图片，再交给 dispatcher 判定；名单外的人能刷转写费用，下载/转写失败时还会收到适配器的错误回复，从而确认 bot 在线。现在下载前先按 dispatcher 的同一套规则预判（群聊未 @bot → 静默丢弃；名单外 → 与文字消息相同的 Info 日志、`naozhi_dispatch_denied_total` 计数和私聊 10 分钟一次的 ID 提示），被拒的消息不下载、不转写、不回错误文案。**行为变化**：群里的飞书语音不能 @bot，此前转写完也会被丢弃，现在直接不转写——省下的只是费用，可见行为不变
+- **Discord 图片附件在下载前先过 `im_access`**（#3513）：此前 Discord 适配器先从 CDN 下载最多 5 张附件图片（单张 10 MB、合计 32 MiB 封顶）再交给 dispatcher 判定，名单外的人能让 naozhi 白白消耗带宽和内存。现在带图片的消息下载前先用与飞书相同的预判，被拒的整条消息不下载、不进 dispatcher；日志、计数和私聊 ID 提示与被拒的文字消息相同。纯文字消息不走预判，行为不变。群里未 @bot 的带图消息此前下载完才被丢弃，现在直接不下载
+- **`naozhi setup weixin` 写入 `im_access`**（#3513）：此前 setup 只写 `platforms.weixin.token`，新装的实例一启动就对所有能给 bot 发消息的人开放。现在把扫码确认的微信用户（登录响应的 `ilink_user_id`，与收到消息的 `from_user_id` 同一 ID 空间）写进 `im_access.platforms.weixin.allowed_users`，并在结束时打印微信入口的放行状态。登录响应没有可用的 ID 时：新建的配置文件写 `im_access.default_deny: true`（被拒的私聊会收到自己的 ID，再加进名单）；已有的配置文件不写 `default_deny`（会把其他平台关在外面），只打印需要补的配置。已有的 `im_access.platforms.weixin` 条目从不改动，没列出扫码用户时给出提示。**行为变化**：对已有配置重新扫码（如 token 过期后）且原先没有 weixin 条目时，微信入口会从「所有人可用」变为只放行扫码用户；`platforms.weixin:` 留空的配置以前不会写入 token，现在会写
 - **Multipart Value 字段数上限 32**（RNEW-SEC-001），阻断 padded-body DoS
 - **PDF 上传路径显式拒 gzip magic**（RNEW-SEC-002），defence-in-depth
 - **Attachment ETag 改为 sha256 前 16 字符**（RNEW-SEC-004），不再通过响应头泄漏纳秒级 mtime
@@ -82,6 +87,12 @@
 
 ### Fixed
 
+- **cron：CLI 因认证失败、MCP 配置无效或运行环境缺失而退出时，失败通知写明原因**（#3515）：此前只有「上次会话无法恢复」有专门文案，这三类退出都落到「执行失败（CLI 发送错误）」。现在分别是「执行失败（后端认证失败或凭证已过期），请联系管理员」（与后端返回的认证错误同一句）、「执行失败（CLI 配置错误导致启动失败，如 MCP 配置无效），请联系管理员」和「执行失败（CLI 运行环境缺失），请联系管理员」。这几次执行在 dashboard 上的错误类别随之从 `send_error`（发送失败）变为 `turn_failed`（后端报错），执行历史里的错误详情仍带 `process exited during send (code N)`；它们照常计入连续失败次数并可触发自动暂停
+- **新会话发出第一条消息后、服务端列出它之前，dashboard 不再闪回 router 默认 backend**（#3516）：这段时间（最长约一次轮询）里会话头的 CLI 名、图片上传开关、模型列表和助手消息图标继续跟随发送前显示的 backend（显式选择，或按创建时的 access profile 解析的「自动」），服务端列出后改由会话自己的 backend 决定。显式选择与 access profile 仍只随第一条消息发出，后续消息不再携带
+- **kiro / codex 后端收到 dashboard 上传的 PDF 时改为提示模型用 Read 工具读取**（#3451）：ACP（kiro）与 codex 协议以前把每个附件都编码成图片块，PDF 因此变成 `media_type: application/pdf`、数据为空的图片，模型既看不到文件也不知道它已写入 workspace。现在两个后端与 Claude 后端走同一个 `clievent.UserTextAndInline`：PDF 只出现在用户文本前的 Read 提示里（workspace 相对路径 + 原文件名），图片块只来自真正的图片附件。
+- **cron：重启后接管的那次执行若被 claude 中断，记为中断而不是成功**（#3498）：claude 2.1.288 起，被中断的 turn 以 `subtype=success`、`is_error=false` 加 `terminal_reason=aborted_tools|aborted_streaming` 结束，不再是 `error_during_execution`。接管路径只认后者，于是把这类中断当作正常完成，记为 `succeeded`，结果是空文本或半截输出。现在凡 `terminal_reason` 以 `aborted_` 开头都记为 `canceled`（`interrupted`），与旧版 CLI 的中断一致
+- **Slack 话题串 / 飞书话题里的提问，回复留在原话题里**（#3446）：以前回复（含「思考中」进度、分段、错误提示、命令回复、TodoWrite 清单、图片和 AskUserQuestion 卡片）都发到频道或群的顶层。现在 Slack 按 `thread_ts` 回到原话题串；飞书只对带 `thread_id` 的话题消息生效，用回复接口 `reply_in_thread` 发到话题里，普通群里的引用回复照旧发到群里。点话题里的卡片按钮作答，后续回复也在该话题。话题根消息已撤回等原因导致飞书拒绝回复时改发到群里。各话题的会话划分见上方 `session.group_scope`
+- **`naozhi cost reconcile` 不再按 transcript 下调账本**（#3519）：按天残差以前双向记，transcript 用量比账本少超过 max($1, 5%) 的日子会写入负的 `Kind=adjust`。但 CLI 计费的请求并不都写进 transcript（取消或空闲后整段上下文重发的请求、后台请求，以及流式中途写下、比最终计费少的 output 计数），实测这类日子的差额正好等于这些没落行的用量，负残差会把 CLI 自报的正确花费调低。现在残差只往上补；账本高于 transcript 的日子只在报告里列出天数和金额（「账本高于 transcript 共 X，未下调」），包括 `--resume` 恢复额修正之后的余数。账本当天为负时补到 0 的规则不变
 - **naozhi 被强杀或崩溃后，最近一次保存会话状态之后已记的花费不再重复记账**（#3518）：会话状态每 30 秒才落盘一次，而 cost ledger 每条记录约 1 秒内就写盘。naozhi 非正常退出（SIGKILL、panic、OOM、断电）且 CLI 经 shim 存活、重启后重新接管时，下一条 result 按落后的基线做差，这段时间已经记过的花费会在 ledger 里再记一次。现在会话自己的 ledger 记录带上记账后的会话花费与累计基线，重启恢复时若 ledger 比会话状态新，就以 ledger 为准；CLI 未存活时，会话的累计花费也不再少算这段时间
 - **优雅重启时，在保存会话状态之后才报告的 turn 不再记两次费用**（#3428）：重启时 CLI 进程存活并在重启后重新接管，以前在会话状态保存之后、断开 shim 之前收到的 result（CLI 自己发起的 turn，或 30 秒关停等待超时后才结束的 turn）会立刻记入 cost ledger，但保存下来的累计基线还是旧值，重启后下一条 result 按旧基线做差，同一段花费又记一次。现在关停在保存前冻结记账，这段花费留给重启后的第一条 result 一并计入；它在 ledger 里归到下一个 run id 名下
 - **`naozhi cost reconcile` 能归属已删除 dashboard 会话的首轮条目**（#3411）：#3494 之前，新会话首轮的 session-runs 记录不写 `session_id`，key 删掉后这些条目归不到任何 CLI session（本机实测 26 条）。现在按 transcript 的起头归属：只有一个 naozhi 用过的会话（`session-ids.json`）在该轮 run 的起止时间内（前后各 5s）起头、且这个起头不落在另一条同类 run 里时才归它；并发起头的首轮仍留着不处理（本机剩 2 条）
@@ -93,7 +104,7 @@
 - **启用多个 backend 时，dashboard 不再替运维选 router 默认 backend**（#3418）：backend picker 第一项改为默认选中的「自动（X）」，不动它就不发 `backend`，由服务端按项目钉的 `backend` > `agents[].backend` > 访问档 `default_backend` > `cli.backend` 选；X 是所选访问档会落到的 backend，换访问档时跟着变（项目钉的 backend、`agents[].backend`、cron 任务所属 agent 的访问档、远端节点自己的访问档前端都看不到，这几种情况下 X 只是提示，以服务端为准）。以前 picker 总是预选 router 默认并当成显式选择发出，`default_backend`（#3364）和 `agents[].backend` 在 dashboard 入口从不生效
   - 同一原因的另外两处一起修好：保存项目设置不再把项目的 `backend` 钉成 router 默认（以前因任何原因保存一次，该项目的 IM 会话和 planner 就不再跟随 `default_backend`）；编辑没设 backend 的 cron 任务，保存时不再 PATCH 进 router 默认，新建 cron 任务选「自动」也不带 `backend`
   - 显式选某个 backend（包括 router 默认那个）仍原样发出并优先
-  - 还没发出第一条消息的新会话，侧栏图标、会话头的 CLI 名、图片上传开关和模型列表跟随它将落到的 backend（显式选择，否则「自动」解析到的那个）；以前「自动」一律按 router 默认显示，显式选了 kiro 时图片上传开关也仍按 router 默认放行。远端节点上的显式选择同样驱动这些开关（与已列出的远端会话一致，按本节点缓存的 backend 清单查功能）；远端节点上的「自动」、单 backend 部署、以及第一条消息发出后到服务端列出该会话之前的这段时间，仍按 router 默认显示
+  - 还没发出第一条消息的新会话，侧栏图标、会话头的 CLI 名、图片上传开关和模型列表跟随它将落到的 backend（显式选择，否则「自动」解析到的那个）；以前「自动」一律按 router 默认显示，显式选了 kiro 时图片上传开关也仍按 router 默认放行。远端节点上的显式选择同样驱动这些开关（与已列出的远端会话一致，按本节点缓存的 backend 清单查功能）；远端节点上的「自动」和单 backend 部署仍按 router 默认显示
   - 不做迁移：以前保存时被钉住的项目和 cron 任务保持原值（无法和有意的选择区分）。要恢复跟随，在项目设置或 cron 编辑里把 backend 选回「自动」并保存
 - `spawnSession` panic recover 错误消息不再双前缀 `"spawn process: spawn process:"`（RNEW-009）
 - IM 首轮自动接管不再在 naozhi 会拒绝接管时（max_procs 已满 / 该 key 正在 spawn / 正在关停 / planner 的 exempt 配额已满 / agent 的 model 或 backend 非法）先 SIGTERM 掉终端里的 Claude CLI；接管前改为先跑 router 的接管检查（#3395）

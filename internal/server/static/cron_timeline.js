@@ -13,7 +13,7 @@ import { cronErrorClassLabel, cronJobLedgerCostHtml } from './cron_format.js';
 import { cronAttentionQueueHtml } from './cron_attention.js';
 import { authHeaders } from './platform.js';
 import { renderMd, runPendingAsync } from './render_md.js';
-import { fetchCostSummary, formatAbsTime, showAPIError, showAuthModal, showNetworkError } from './utilities.js';
+import { costBudgetChipHtml, fetchCostBudget, fetchCostSummary, formatAbsTime, showAPIError, showAuthModal, showNetworkError } from './utilities.js';
 import {
   esc,
   escAttr,
@@ -106,7 +106,7 @@ function cronTimelineHtml(jobId, job, st) {
   // §7.5 cost小字：纯前端聚合已加载 run 的 cost_usd（只有云沙箱 run 带）。
   // 标注"已加载 N 条"避免误读为全量账单——这是轻量可见性，非账单系统。
   const costSummary = cronTimelineCostSummaryHtml(st.runs);
-  const ledgerCost = cronJobLedgerCostHtml(jobId);
+  const ledgerCost = cronJobLedgerCostHtml(jobId) + costBudgetChipHtml((cronJobCostCache[jobId] || {}).budget, 'ct-cost-ledger');
   const rowsHtml = st.runs.length === 0
     ? '<div class="ct-empty">暂无执行记录。下次调度或点击「立即执行」触发首次运行。</div>'
     : st.runs.map(r => cronTimelineRowHtml(jobId, r, st)).join('');
@@ -750,14 +750,9 @@ function cronTimelineLoadMore(jobId, onDone) {
   })();
 }
 
-// R243-PERF-7 / #812: rAF-debounce coalescing for cronTimelineRefreshHead.
-// Bursty run_ended events (multiple jobs ending in the same tick, or
-// a manual TriggerNow loop) used to fire a full fetch + sort + innerHTML
-// rebuild per event; the WS handler now routes through
-// cronTimelineRefreshHeadDebounced which collapses N events to a single
-// rAF-aligned call per (jobId). Coalescing is keyed on jobId so two
-// different jobs ending in the same tick still each get exactly one
-// refresh — the saving is on repeated events for the same job.
+// cronTimelineRefreshHeadDebounced collapses bursty run_ended events into one
+// rAF-aligned cronTimelineRefreshHead per jobId: two jobs ending in the same
+// tick still each get exactly one refresh.
 //
 // rAF (rather than setTimeout) keeps the refresh aligned with the next
 // paint frame, so sort+innerHTML happens once per visible frame instead
@@ -871,10 +866,8 @@ function renderCronTimelineForJob(jobId) {
       (total > 0 && total <= st.runs.length);
   }
   st.lastMountAt = Date.now();
-  // Mount path: unconditional innerHTML rewrite (shell remount or
-  // first paint). Stash the result so the subsequent identity-check in
-  // renderCronTimelinePanel sees a non-empty baseline and short-circuits
-  // truly idempotent re-renders. R243-PERF-12 (#817).
+  // Mount path: stash the HTML so renderCronTimelinePanel's identity check
+  // short-circuits an identical repaint.
   const html = cronTimelineHtml(jobId, job, st);
   st.lastRenderedHtml = html;
   host.innerHTML = html;
@@ -891,13 +884,14 @@ function renderCronTimelineForJob(jobId) {
 export async function cronJobCostRefresh(jobId) {
   if (!jobId) return;
   try {
-    const data = await fetchCostSummary('group_by=job&job_id=' + encodeURIComponent(jobId));
+    const [data, budget] = await Promise.all([fetchCostSummary('group_by=job&job_id=' + encodeURIComponent(jobId)),
+      fetchCostBudget('job_id=' + encodeURIComponent(jobId))]);
     if (!data) return;
     let usd = 0, entries = 0;
     for (const b of (data && Array.isArray(data.buckets) ? data.buckets : [])) {
       if (b && b.unit === 'USD' && typeof b.amount === 'number') { usd += b.amount; entries += (b.entries | 0); }
     }
-    cronJobCostCache[jobId] = { usd: usd, entries: entries, dropped: (data && data.dropped) | 0 };
+    cronJobCostCache[jobId] = { usd: usd, entries: entries, dropped: (data && data.dropped) | 0, budget: budget };
     if (cronDrawerState.jobId === jobId) renderCronTimelinePanel(jobId);
   } catch (_) {}
 }

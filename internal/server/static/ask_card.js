@@ -4,7 +4,7 @@
 // data-action handlers.
 import { NZ_CONTRACT } from './contract.js';
 import { getToken } from './platform.js';
-import { hooks, selection, transcript } from './state.js';
+import { selection, transcript } from './state.js';
 import { esc, escAttr } from './nz_util.js';
 import { featureForCurrent } from './features.js';
 import { formatTimeFull } from './utilities.js';
@@ -255,9 +255,7 @@ async function sendAskAnswerViaAPI(text, card) {
   let key = selection.key;
   let node = selection.node;
   if (card && card.closest && card.closest('#aside-drawer')) {
-    const scratchKey = hooks.getActiveScratchKey
-      ? hooks.getActiveScratchKey()
-      : '';
+    const scratchKey = selection.scratchKey;
     if (!scratchKey) throw new Error('no active scratch session');
     key = scratchKey;
     // Scratch sessions are always local — never forward to a remote node.

@@ -41,6 +41,11 @@
   },
   {
     "method": "GET",
+    "path": "/api/cost/budget",
+    "handler_type": "*dashcost.Handlers"
+  },
+  {
+    "method": "GET",
     "path": "/api/cost/entries",
     "handler_type": "*dashcost.Handlers"
   },
@@ -406,6 +411,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/aside_drawer.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/ask_card.js",
     "handler_type": "http.HandlerFunc"
   },
@@ -536,6 +546,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/mem_popover.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/mobile_nav.js",
     "handler_type": "http.HandlerFunc"
   },
@@ -627,6 +642,16 @@
   {
     "method": "GET",
     "path": "/static/utilities.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/vendor/katex-0.16.21/katex.min.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/vendor/{file...}",
     "handler_type": "http.HandlerFunc"
   },
   {

@@ -3,6 +3,7 @@ package discord
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -110,6 +111,7 @@ func TestConfigureSession_SyncEvents(t *testing.T) {
 // heartbeat, so closing it cannot fail that heartbeat and start a second
 // reconnect. With holdUser set, GET /users/@me signals userHeld and answers
 // only once userRelease is closed; otherwise it answers as user restBotID.
+// Interaction responses are answered 204 and their bodies sent on callbacks.
 type fakeGateway struct {
 	srv         *httptest.Server
 	restStatus  atomic.Int32 // non-zero: every REST request fails with this status
@@ -120,6 +122,7 @@ type fakeGateway struct {
 	dials       atomic.Int32
 	hello       chan struct{}
 	conns       chan *websocket.Conn
+	callbacks   chan []byte
 	done        chan struct{}
 }
 
@@ -130,6 +133,7 @@ func newFakeGateway(t *testing.T, restStatus int) *fakeGateway {
 		userRelease: make(chan struct{}),
 		hello:       make(chan struct{}, 4),
 		conns:       make(chan *websocket.Conn, 4),
+		callbacks:   make(chan []byte, 4),
 		done:        make(chan struct{}),
 	}
 	g.restStatus.Store(int32(restStatus))
@@ -141,6 +145,15 @@ func newFakeGateway(t *testing.T, restStatus int) *fakeGateway {
 
 func (g *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 	if !websocket.IsWebSocketUpgrade(r) {
+		if strings.Contains(r.URL.Path, "/interactions/") {
+			body, _ := io.ReadAll(r.Body)
+			select {
+			case g.callbacks <- body:
+			default:
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, "/users/@me") {
 			g.userCalls.Add(1)
 			if g.holdUser.Load() {

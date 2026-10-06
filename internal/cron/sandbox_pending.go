@@ -70,32 +70,37 @@ func (s *Scheduler) removeSandboxPending(path string, lg *slog.Logger) {
 	}
 }
 
-// reconcileSandboxPending is the startup pass: every pending file is an
-// orphaned run whose previous process died holding the stream. For each: Stop
-// the microVM (idempotent), close the run record as failed-transport, drop the
-// file. Runs asynchronously from Start() — Stops are network I/O. The terminal
-// record goes through finishRun with a synthetic started event first so
-// subscribers see a consistent started→ended pair.
-//
-// The validate/drop-corrupt pass is serial (local I/O); surviving orphans'
-// Stops fan out across sandboxReconcileWorkers since each is an independent
-// ~30s network call (#2142). reconcileOneSandboxOrphan is concurrency-safe.
+// sandboxOrphan is one pending record claimed by claimSandboxOrphans.
+type sandboxOrphan struct {
+	p    sandboxstore.Pending
+	path string
+}
+
+// reconcileSandboxPending is the whole startup pass in one call: every pending
+// file is an orphaned run whose previous process died holding the stream. For
+// each: Stop the microVM (idempotent), close the run record as failed-transport,
+// drop the file. Start runs the two halves separately (see claimSandboxOrphans).
 func (s *Scheduler) reconcileSandboxPending() {
+	s.reconcileSandboxOrphans(s.claimSandboxOrphans())
+}
+
+// claimSandboxOrphans is the synchronous half, run by Start before the first
+// tick: it lists the pending files before this process starts runs of its own,
+// so a run started right after Start is never taken for an orphan and has its
+// live microVM stopped. It validates each record and drops corrupt ones (local
+// I/O only).
+func (s *Scheduler) claimSandboxOrphans() []sandboxOrphan {
 	entries, err := s.sandboxState().ListPending()
 	if err != nil {
 		slog.Warn("cron sandbox: pending scan failed", "err", err)
-		return
+		return nil
 	}
 
-	type orphan struct {
-		p    sandboxstore.Pending
-		path string
-	}
-	orphans := make([]orphan, 0, len(entries))
+	orphans := make([]sandboxOrphan, 0, len(entries))
 	for _, e := range entries {
-		// Bail on shutdown so N×30s Stop timeouts don't exhaust gcWaitBudget.
+		// Claim nothing once shutdown has begun; the files stay for the next start.
 		if s.stopCtx.Err() != nil {
-			return
+			return nil
 		}
 		if e.State == sandboxstore.PendingUnreadable {
 			slog.Warn("cron sandbox: pending read failed; skipping", "file", osutil.SanitizeForLog(e.Name, 256))
@@ -112,9 +117,17 @@ func (s *Scheduler) reconcileSandboxPending() {
 			_ = s.sandboxState().RemovePending(e.Path)
 			continue
 		}
-		orphans = append(orphans, orphan{p: p, path: e.Path})
+		orphans = append(orphans, sandboxOrphan{p: p, path: e.Path})
 	}
+	return orphans
+}
 
+// reconcileSandboxOrphans is the asynchronous half: Stops are network I/O, so
+// they fan out across sandboxReconcileWorkers, each an independent ~30s call
+// (#2142). The terminal record goes through finishRun with a synthetic started
+// event first so subscribers see a consistent started→ended pair.
+// reconcileOneSandboxOrphan is concurrency-safe.
+func (s *Scheduler) reconcileSandboxOrphans(orphans []sandboxOrphan) {
 	if len(orphans) == 0 {
 		return
 	}
@@ -133,7 +146,7 @@ func (s *Scheduler) reconcileSandboxPending() {
 	if workers > len(orphans) {
 		workers = len(orphans)
 	}
-	jobs := make(chan orphan)
+	jobs := make(chan sandboxOrphan)
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for w := 0; w < workers; w++ {

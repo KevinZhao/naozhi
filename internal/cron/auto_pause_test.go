@@ -146,6 +146,8 @@ func TestNextFailureStreak(t *testing.T) {
 		{RunStateFailed, ErrClassTurnFailed, TurnCauseBackendUnreachable, 3, 3, false},
 		{RunStateFailed, ErrClassTurnFailed, TurnCauseQuota, 3, 4, false},
 		{RunStateFailed, ErrClassTurnFailed, TurnCauseBackendAuth, 3, 4, false},
+		{RunStateFailed, ErrClassTurnFailed, TurnCauseCLIConfig, 3, 4, false},
+		{RunStateFailed, ErrClassTurnFailed, TurnCauseCLIMissingRuntime, 3, 4, false},
 		{RunStateFailed, ErrClassTurnFailed, TurnCauseMaxTurns, 3, 4, false},
 		{RunStateFailed, ErrClassTurnFailed, TurnCauseContextTooLong, 3, 4, false},
 		{RunStateFailed, ErrClassTurnFailed, TurnCauseUnknown, 3, 4, false},
@@ -434,26 +436,33 @@ func TestAutoPause_ResumeHintFollowsNotifyChat(t *testing.T) {
 func TestAutoPauseNoticeSuffix(t *testing.T) {
 	t.Parallel()
 	const head = "；已连续失败 3 次，任务已自动暂停，"
+	const outage = "；后端持续故障 6 小时以上（失败 9 次），任务已自动暂停，"
 	src := NotifyTarget{Platform: "feishu", ChatID: "chat-1"}
 	cases := []struct {
 		name       string
 		plat, chat string
 		to         NotifyTarget
 		paused     int
+		transient  bool
 		want       string
 	}{
-		{"not paused", "feishu", "chat-1", src, 0, ""},
-		{"source chat", "feishu", "chat-1", src, 3, head + "修复后发送 /cron resume j1 恢复"},
-		{"other chat", "feishu", "chat-1", NotifyTarget{Platform: "feishu", ChatID: "chat-2"}, 3,
+		{"not paused", "feishu", "chat-1", src, 0, false, ""},
+		{"not paused, transient", "feishu", "chat-1", src, 0, true, ""},
+		{"source chat", "feishu", "chat-1", src, 3, false, head + "修复后发送 /cron resume j1 恢复"},
+		{"other chat", "feishu", "chat-1", NotifyTarget{Platform: "feishu", ChatID: "chat-2"}, 3, false,
 			head + "修复后在创建该任务的会话发送 /cron resume j1，或在控制台恢复"},
-		{"other platform", "feishu", "chat-1", NotifyTarget{Platform: "slack", ChatID: "chat-1"}, 3,
+		{"other platform", "feishu", "chat-1", NotifyTarget{Platform: "slack", ChatID: "chat-1"}, 3, false,
 			head + "修复后在创建该任务的会话发送 /cron resume j1，或在控制台恢复"},
-		{"dashboard job", "dashboard", "dash", src, 3, head + "修复后在控制台恢复"},
-		{"no source chat", "", "", src, 3, head + "修复后在控制台恢复"},
+		{"dashboard job", "dashboard", "dash", src, 3, false, head + "修复后在控制台恢复"},
+		{"no source chat", "", "", src, 3, false, head + "修复后在控制台恢复"},
+		{"transient, source chat", "feishu", "chat-1", src, 9, true, outage + "后端恢复后发送 /cron resume j1 恢复"},
+		{"transient, other chat", "feishu", "chat-1", NotifyTarget{Platform: "feishu", ChatID: "chat-2"}, 9, true,
+			outage + "后端恢复后在创建该任务的会话发送 /cron resume j1，或在控制台恢复"},
+		{"transient, dashboard job", "dashboard", "dash", src, 9, true, outage + "后端恢复后在控制台恢复"},
 	}
 	for _, tc := range cases {
 		snap := jobSnapshot{jobID: "j1", platName: tc.plat, chatID: tc.chat}
-		if got := autoPauseNoticeSuffix(snap, tc.to, tc.paused); got != tc.want {
+		if got := autoPauseNoticeSuffix(snap, tc.to, tc.paused, tc.transient); got != tc.want {
 			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
 		}
 	}

@@ -185,10 +185,8 @@ function renderFence(part) {
   const code = oneLine
     ? part.replace(/^```/, '').replace(/```$/, '')
     : m ? m[2].replace(/\n$/, '') : part.replace(/^```[^\n]*\n?/, '');
-  // FENCE_RENDERERS is a Map, not a plain object, so a fence lang of
-  // `constructor` / `__proto__` / `toString` cannot resolve to an inherited
-  // Object.prototype member — only a lang explicitly registered below ever
-  // dispatches.
+  // FENCE_RENDERERS is a Map, so a fence lang such as `constructor` or
+  // `__proto__` cannot resolve to an inherited Object.prototype member.
   const fenceRenderer = FENCE_RENDERERS.get(lang);
   if (fenceRenderer) return fenceRenderer(code);
   // Path-list fence: a language-less block whose every non-empty line is a
@@ -282,11 +280,9 @@ function renderProse(part) {
       return '\x00ILM' + (inlineMathTokens.length - 1) + '\x00';
     });
   }
-  // ctx accumulates block-level output (chunks) + single join() at the end
-  // rather than `html +=` per line: V8 reallocates the underlying string on
-  // every concat past the small-string threshold, which is O(n^2) over line
-  // count. A 200-line response rendered ~50 times per history replay was the
-  // dominant cost in the text-event path. listStack/baselineCols are the
+  // ctx collects block-level output in chunks joined once at the end: `html +=`
+  // per line reallocates the string each time, O(n^2) over line count on a
+  // path history replay re-renders many times. listStack/baselineCols are the
   // list-nesting state LINE_HANDLERS read and mutate; `i` lets a handler
   // consume extra lines (blockquote/table lookahead) by advancing it.
   const ctx = { chunks: [], listStack: [], baselineCols: -1, lines: part.split('\n'), i: 0 };
@@ -628,21 +624,12 @@ function renderTable(lines) {
   // splits mid-snippet and the trailing fragment spills into an extra column.
   // Strategy: encode `\|` → sentinel, split on `|`, decode sentinel → `|`.
   const PIPE = '\x00PIPE\x00';
-  // LLM output frequently embeds unescaped `|` inside `$...$`, `\(...\)`,
-  // or backtick code spans (e.g. `$|AB|=2$`, `$2^a - 2$ | < | ...`).
-  // Protect those regions BEFORE splitting on `|`, otherwise a single math
-  // formula would get sliced into many spurious columns.
-  //
-  // CAVEAT (currency vs math): a row like `| Pro | $20 | 1,000 | $0.04 |`
-  // contains four currency-style `$N` tokens, NOT two math spans. A naive
-  // `\$[^$]+\$` pass would greedily pair `$20 ... $0.04`, swallow the two
-  // pipes between them, and collapse the row from 4 cells to 2. To avoid
-  // that, only stash a `$...$` pair when its inner content unambiguously
-  // looks like LaTeX — either it carries a math-only character (\ ^ _ { })
-  // OR it sits entirely on one side of a pipe (no `|` inside). Pure-numeric
-  // tokens like `$20` / `$0.04/credit` then split as ordinary cells.
-  // Pipe-bearing math like `$|AB|=2$` should be authored with `\(...\)` or
-  // backticks inside tables — accepted limitation.
+  // `|` inside `$...$`, `\(...\)` or a code span (`$2^a - 2$ | < | ...`) is
+  // protected before the row splits on `|`, or one formula becomes many cells.
+  // A `$...$` pair is stashed only when it carries a math-only char (\ ^ _ { })
+  // or holds no `|`: in `| Pro | $20 | 1,000 | $0.04 |` a greedy pairing of
+  // `$20 ... $0.04` would swallow two pipes. Pipe-bearing math like `$|AB|=2$`
+  // has to use `\(...\)` or backticks inside a table.
   const isTableMathSpan = inner => {
     if (/[\\^_{}]/.test(inner)) return true;
     if (inner.indexOf('|') !== -1) return false;
@@ -683,34 +670,67 @@ function renderTable(lines) {
   return '<div class="md-table-wrap">' + h + '</tbody></table></div>';
 }
 
-let mermaidLoading = false;
-let mermaidReady = false;
+const CDN_RETRY_MS = 60000;
+const mermaidLoad = { ready: false, busy: false, failures: 0, loaded: new Set() };
+const katexLoad = { ready: false, busy: false, failures: 0, loaded: new Set() };
+
+// cdnLoad appends each lazily loaded asset ([url, sha384]) under its SRI
+// pin; st is ready once all of them have loaded. A failed attempt is retried
+// once, CDN_RETRY_MS later, re-appending only the assets that did not load,
+// then not until the page reloads. rerun runs when an attempt settles and when
+// the retry falls due; meanwhile runMermaid / runKatex leave the source showing.
+function cdnLoad(st, assets, rerun) {
+  if (st.ready || st.busy) return;
+  st.busy = true;
+  const todo = assets.filter(([url]) => !st.loaded.has(url));
+  let left = todo.length, failed = false;
+  const settle = () => {
+    if (--left > 0) return;
+    if (!failed) st.ready = true;
+    else if (++st.failures === 1) setTimeout(() => { st.busy = false; rerun(); }, CDN_RETRY_MS);
+    rerun();
+  };
+  todo.forEach(([url, integrity]) => {
+    const css = url.endsWith('.css');
+    document.head.appendChild(Object.assign(document.createElement(css ? 'link' : 'script'),
+      css ? { rel: 'stylesheet', href: url } : { src: url }, {
+        integrity, crossOrigin: 'anonymous',
+        onload: () => { st.loaded.add(url); settle(); },
+        onerror: () => { failed = true; settle(); },
+      }));
+  });
+}
+
+// awaitingCdn reports whether pending[id] still waits for st, marking an
+// attached el while st is failing. The entry is dropped once st has loaded or
+// failed for good, so an offline page does not keep one per detached bubble.
+function awaitingCdn(pending, id, el, st) {
+  if (el) {
+    const failed = !st.ready && st.failures > 0;
+    el.classList.toggle('md-render-unavailable', failed);
+    el.title = failed ? '渲染器未加载（离线？），显示源码' : '';
+    if (st.ready) return false;
+  }
+  if (st.ready || st.failures > 1) delete pending[id];
+  return true;
+}
 
 function loadMermaid() {
-  if (mermaidReady || mermaidLoading) return;
-  mermaidLoading = true;
-  const s = document.createElement('script');
-  s.src = 'https://cdn.jsdelivr.net/npm/mermaid@11.14.0/dist/mermaid.min.js';
-  s.integrity = 'sha384-1CMXl090wj8Dd6YfnzSQUOgWbE6suWCaenYG7pox5AX7apTpY3PmJMeS2oPql4Gk';
-  s.crossOrigin = 'anonymous';
-  s.onload = () => {
-    window.mermaid.initialize(mermaidConfig());
-    mermaidReady = true;
-    mermaidLoading = false;
+  cdnLoad(mermaidLoad, [['https://cdn.jsdelivr.net/npm/mermaid@11.14.0/dist/mermaid.min.js',
+    'sha384-1CMXl090wj8Dd6YfnzSQUOgWbE6suWCaenYG7pox5AX7apTpY3PmJMeS2oPql4Gk']], () => {
+    if (mermaidLoad.ready) window.mermaid.initialize(mermaidConfig());
     runMermaid();
-  };
-  s.onerror = () => { mermaidLoading = false; };
-  document.head.appendChild(s);
+  });
 }
 
 function runMermaid() {
   if (Object.keys(mermaidPending).length === 0) return;
-  if (!mermaidReady) { loadMermaid(); return; }
+  if (!mermaidLoad.ready) loadMermaid();
   let hasNew = false;
   Object.entries(mermaidPending).forEach(([id, code]) => {
     const el = document.getElementById(id);
-    if (!el) { delete mermaidPending[id]; return; }
-    el.textContent = code;
+    if (el) el.textContent = code;
+    if (awaitingCdn(mermaidPending, id, el, mermaidLoad)) return;
     el.className = 'mermaid';
     delete mermaidPending[id];
     hasNew = true;
@@ -796,45 +816,27 @@ function mermaidConfig() {
 let mermaidCounter = 0;
 const mermaidPending = {};
 
-let katexLoading = false;
-let katexReady = false;
 let katexCounter = 0;
 const katexPending = {};
 
+// Formulas wait for the stylesheet as well as the script: without it KaTeX
+// markup shows its MathML and HTML copies side by side. Both are vendored, and
+// TestVendorAssets_SRIMatchesEmbedded checks each SRI pin (R219-SEC-4).
 function loadKatex() {
-  if (katexReady || katexLoading) return;
-  katexLoading = true;
-  // Inject stylesheet on demand (moved out of <head> to unblock first paint).
-  // R219-SEC-4: KaTeX CDN link + script need distinct SRI integrity hashes;
-  // pinned off the DOM by test/e2e/cdn_sri.test.js.
-  if (!document.querySelector('link[data-nz-katex]')) {
-    const link = document.createElement('link');
-    link.rel = 'stylesheet';
-    link.href = 'https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css';
-    link.integrity = 'sha384-zh0CIslj+VczCZtlzBcjt5ppRcsAmDnRem7ESsYwWwg3m/OaJ2l4x7YBZl9Kxxib';
-    link.crossOrigin = 'anonymous';
-    link.setAttribute('data-nz-katex', '1');
-    document.head.appendChild(link);
-  }
-  const s = document.createElement('script');
-  s.src = 'https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js';
-  s.integrity = 'sha384-Rma6DA2IPUwhNxmrB/7S3Tno0YY7sFu9WSYMCuulLhIqYSGZ2gKCJWIqhBWqMQfh';
-  s.crossOrigin = 'anonymous';
-  s.onload = () => {
-    katexReady = true;
-    katexLoading = false;
-    runKatex();
-  };
-  s.onerror = () => { katexLoading = false; };
-  document.head.appendChild(s);
+  cdnLoad(katexLoad, [
+    ['/static/vendor/katex-0.16.21/katex.min.css',
+      'sha384-zh0CIslj+VczCZtlzBcjt5ppRcsAmDnRem7ESsYwWwg3m/OaJ2l4x7YBZl9Kxxib'],
+    ['/static/vendor/katex-0.16.21/katex.min.js',
+      'sha384-Rma6DA2IPUwhNxmrB/7S3Tno0YY7sFu9WSYMCuulLhIqYSGZ2gKCJWIqhBWqMQfh'],
+  ], runKatex);
 }
 
 function runKatex() {
   if (Object.keys(katexPending).length === 0) return;
-  if (!katexReady) { loadKatex(); return; }
+  if (!katexLoad.ready) loadKatex();
   Object.entries(katexPending).forEach(([id, info]) => {
     const el = document.getElementById(id);
-    if (!el) { delete katexPending[id]; return; }
+    if (awaitingCdn(katexPending, id, el, katexLoad)) return;
     try {
       window.katex.render(info.tex, el, { displayMode: info.display, throwOnError: false });
     } catch(_) {
@@ -853,11 +855,7 @@ function runKatex() {
 //      single letters, operators, parens, punctuation) AND contain no two
 //      consecutive 3+ letter English words AND contain at least one math
 //      hint — digit, operator, OR a function-call pattern `letter(` /
-//      `)letter`. The function-call clause accepts `$h(x)$` / `$f(x)$` /
-//      `$g(t)$` which the previous "must contain digit/operator" rule
-//      mistakenly rejected (function references in prose carry no operator
-//      character themselves). Pure prose tokens like `$(test)$` still
-//      reject because they lack both a math hint and a function-call shape.
+//      `)letter`, so `$f(x)$` passes while prose like `$(test)$` does not.
 function isMathInline(tex) {
   if (/[\\^_{}]/.test(tex)) return true;
   // Bare 1-2 letter variable / segment name (`$x$`, `$AB$`): no digit,
@@ -890,7 +888,7 @@ function isMathDisplay(tex) {
 }
 
 function renderKatex(tex, displayMode) {
-  if (katexReady) {
+  if (katexLoad.ready) {
     try { return window.katex.renderToString(tex, { displayMode: displayMode, throwOnError: false }); }
     catch(_) { return esc(tex); }
   }
@@ -900,12 +898,9 @@ function renderKatex(tex, displayMode) {
   return '<span id="' + id + '" class="katex-pending">' + esc(tex) + '</span>';
 }
 
-// runPendingAsync — single post-render glue point for every async pipeline
-// triggered by renderMd/renderRich output. Call sites that attach rendered
-// HTML to the live DOM invoke this once; never call runKatex / runMermaid
-// directly from feature code. Keeps chat bubbles, preview drawer, scratch
-// drawer, aside drawer on one flush contract so future pipelines (syntax
-// highlight etc.) plug in here without scattering across call sites.
+// runPendingAsync is the one post-render flush for every async pipeline that
+// renderMd/renderRich output starts: call sites invoke it once after attaching
+// the HTML, never runKatex / runMermaid directly.
 function runPendingAsync() {
   runMermaid();
   runKatex();
@@ -1013,6 +1008,7 @@ export {
   katexPending,
   loadKatex,
   loadMermaid,
+  mermaidPending,
   parseListItem,
   renderKatex,
   renderMd,

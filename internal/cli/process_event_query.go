@@ -93,7 +93,7 @@ func (p *Process) InjectHistory(entries []clievent.EventEntry) {
 }
 
 // TaskTypeWorkflow is the task_type CC gives a Workflow tool run.
-const TaskTypeWorkflow = "local_workflow"
+const TaskTypeWorkflow = clievent.TaskTypeWorkflow
 
 // LinkerSkipsTaskType reports whether tasks of this type have no transcript
 // the SubagentLinker can map, so a Resolve would only spend its retry budget

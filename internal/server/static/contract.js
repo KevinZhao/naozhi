@@ -38,6 +38,7 @@ export const NZ_CONTRACT = {
     cc_assets: '/api/cc/assets',
     cc_assets_raw: '/api/cc/assets/raw',
     cli_backends: '/api/cli/backends',
+    cost_budget: '/api/cost/budget',
     cost_entries: '/api/cost/entries',
     cost_summary: '/api/cost/summary',
     cron: '/api/cron',

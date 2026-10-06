@@ -12,9 +12,12 @@ import (
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/server"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/shim"
 	"github.com/naozhi/naozhi/internal/upstream"
+	"github.com/naozhi/naozhi/internal/wireup"
 )
 
 // Pure init helpers extracted from main() so each is unit-testable against a
@@ -142,6 +145,17 @@ func buildAgentOpts(cfg *config.Config) (map[string]session.AgentOpts, map[strin
 		cronAgents[id] = toCronAgentOpts(a)
 	}
 	return agents, cronAgents
+}
+
+// buildRouting is the routing the server and the upstream connector share: the
+// agent maps and the one KeyResolver over them, which carries the cron
+// access-profile lookup the server's remote-dispatch gate needs.
+func buildRouting(cfg *config.Config, agents map[string]session.AgentOpts, projectMgr *project.Manager, sched *cron.Scheduler) server.RoutingOptions {
+	return server.RoutingOptions{
+		Agents:        agents,
+		AgentCommands: cfg.AgentCommands,
+		Resolver:      wireup.KeyResolver(agents, cfg.AgentCommands, projectMgr, sched),
+	}
 }
 
 // logConfigValidationDiagnostics logs every config.Validate() finding at its

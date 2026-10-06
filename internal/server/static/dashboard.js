@@ -1,14 +1,12 @@
 import { NZ_CONTRACT } from './contract.js';
-import { authHeaders, getToken, lsGet, lsRemove, lsSet } from './platform.js';
+import { getToken, lsGet, lsRemove, lsSet } from './platform.js';
 import { registerShell } from './shell.js';
 import { sessionStream } from './session_stream.js';
 import { WS_STATES, wsm } from './ws_manager.js';
-import { composer, hooks, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
+import { composer, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
 import { esc, escAttr, fetchJSON, showToast, trapFocus, nzBus, nzViews, registerActions, sessionExitChipHtml } from './nz_util.js';
-import { eventHtml } from './event_render.js';
 import { onAskOptionToggle, onAskSubmit } from './ask_card.js';
 import { eventIdentityKey, fetchEvents, hasMoreHeader, memoryOnlyHeader, renderEvents } from './event_stream.js';
-import { renderMd, runPendingAsync } from './render_md.js';
 import { fetchSessionRuns, setHeaderEffortChip, setHeaderOverlayDriftChip, setHeaderPRChip, setHeaderSpawnDiagChip } from './session_header.js';
 import {
   handleFiles,
@@ -23,21 +21,16 @@ import {
   retryUpload,
 } from './composer_files.js';
 import {
-  collapseSidebarForDrawer,
   initMobile,
   initSidebarCollapsed,
   initSwipeBack,
   initSwipeDelete,
   initViewportTracking,
   mobileBack,
-  restoreSidebarAfterDrawer,
   toggleSidebarCollapsed,
 } from './mobile_nav.js';
 import { escCloseVoiceOverlay, toggleInputMode, voiceMouseDown, voiceTouchStart } from './voice.js';
-import {
-  initSplitWidth,
-  splitDock,
-} from './split_view.js';
+import { initSplitWidth } from './split_view.js';
 import {
   fetchSystemDaemons,
   openSystemPanel,
@@ -45,11 +38,10 @@ import {
   stopSystemPoll,
 } from './system_view.js';
 import { interruptSession, resetTurnState, saveScrollPos, updateSendButton } from './running_banner.js';
-import { closeFilePreview, regroupAvatars, startFileRefObserver } from './file_refs.js';
+import { closeFilePreview, startFileRefObserver } from './file_refs.js';
 import {
   applyFeatureGates,
   closeHistoryPopover,
-  confirmDialog,
   copyCodeBlock,
   copyEventContent,
   dismissAuthModal,
@@ -67,7 +59,6 @@ import {
   stopPreviewPolling,
   stopSidebarTimeTick,
   timeAgo,
-  timeDividerHtml,
 } from './utilities.js';
 import {
   previewDiscovered,
@@ -99,6 +90,8 @@ import { collectWorkspaceSessionIDs, fetchSessions, onSessionsApplied, originBad
 import { findDiscovered, isDiscoveredKey, matchProject, parseDiscoveredPid, sid } from './session_ident.js';
 import { ICONS } from './icons.js';
 import { initLightbox } from './lightbox.js';
+import { initMemPopover } from './mem_popover.js';
+import { askAside, closeScratchDrawer, initAsideDrawer, promoteScratch } from './aside_drawer.js';
 // Service worker registration
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
 
@@ -301,7 +294,7 @@ function setActivityView(view) {
   // reserved. Both close paths run splitDock.exit, clearing nz-split-open.
   if (prev === 'chat' && view !== 'chat') {
     closeFilePreview();
-    if (hooks.closeScratchDrawer) hooks.closeScratchDrawer();
+    closeScratchDrawer();
   }
   // Enter the target view.
   if (view === 'assets') { if (nzViews.asset) nzViews.asset.show(); }
@@ -614,7 +607,7 @@ const CHEATSHEET_ENTRIES = [
   { keys: ['/cd'], desc: '切换工作目录（/cd <path>；受 session.cwd 的 allowed_root 限制）' },
   { keys: ['/pwd'], desc: '显示当前工作目录' },
   { keys: ['/project'], desc: '绑定会话到项目（/project <name> 或 /project off 解绑）' },
-  { keys: ['/cron'], desc: '定时任务：/cron add "<schedule>" <prompt> · /cron list · /cron del <id>' },
+  { keys: ['/cron'], desc: '定时任务：/cron add [--keep-context] "<schedule>" <prompt> · /cron list · /cron del|pause|resume <id> · /cron mode <id> fresh|keep' },
   { keys: ['/help'], desc: '显示可用命令' },
   { keys: ['/stop'], desc: '中断当前回复（保留排队消息）；dashboard 上用双击 Esc' },
   { section: '上传' },
@@ -807,7 +800,7 @@ function selectSession(key, node) {
   }
 }
 
-// --- Markdown export (UX P2) ---
+// --- Markdown export ---
 
 // Kinds the export drops (clievent kindTable's MarkdownIgnore column says why).
 const MARKDOWN_EXPORT_IGNORE = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_MD_IGNORE);
@@ -1037,11 +1030,11 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
   // > agent name > key tail.
   const displayName = s.user_label || s.summary || s.last_prompt || (agentIsGeneric ? '' : s.agent) || keyTailDisplay(keyParts) || selection.key || '';
 
-  // Detail line: left = CLI name + version, middle = backend chip (multi-
-  // backend mode only) + IM origin chip (only for real IM threads —
-  // feishu/slack/discord/weixin), right = cost (formatted per session's
-  // cost_unit). originBadgeHtml / backendChipHtml return '' when the
-  // session/deployment doesn't warrant a chip so the layout stays clean.
+  // Detail line: CLI label + model on the left, then the IM origin chip (real
+  // IM threads only), exit chip, git/PR mounts, effort/diag mounts, turn timer
+  // and run stats. There is no backend chip (cliLabel names the backend) and
+  // no cost chip: total_cost_usd misreads a Bedrock bill, so #header-runstats
+  // carries the run history (N 轮 · 均 X · 最长 X) instead.
   const effCLIName = s.cli_name || backendDisplayName(pendingBackendID(selection.key, selection.node)) || serverInfo.defaultCLIName;
   const effCLIVersion = s.cli_version || backendDisplayVersion(pendingBackendID(selection.key, selection.node)) || serverInfo.defaultCLIVersion;
   // The version is debug info: it lives in the hover title (and the settings
@@ -1063,14 +1056,7 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
     ? '<span class="model-label nz-clickable" id="header-model" data-action="tuning-model" title="' + escAttr(rawModel + ' — 点击切换模型') + '">· ' + esc(compactModel) + '</span>'
     : '<span class="model-label model-label-unset nz-clickable" id="header-model" data-action="tuning-model" title="model 未在 system/init 上报；可能仍在 spawn 中 — 点击可指定模型">· (模型未配置)</span>';
   const headerOriginBadge = originBadgeHtml(selection.key);
-  // No backend chip: cliLabel already names the backend.
-  const headerBackendChip = '';
-  // No cost chip: the CLI's total_cost_usd misreads a Bedrock bill, so
-  // renderSessionRunsPanel fills #header-runstats with the run history
-  // (N 轮 · 均 X · 最长 X). No context-usage bar either (low signal).
-  const ctxBarHtml = '';
-  // Multi-Backend RFC §8.3 D7: turn duration timer (kiro real value;
-  // claude 0 until estimator lands → cell hidden).
+  // Last turn's duration; hidden when 0 or absent (claude does not report it).
   let turnTimerHtml = '';
   if (typeof s.turn_duration_ms === 'number' && s.turn_duration_ms > 0) {
     const sec = (s.turn_duration_ms / 1000).toFixed(1);
@@ -1085,11 +1071,9 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
   const renameBtn = canRename
     ? '<button type="button" class="btn-rename" data-action="session-rename" title="重命名会话" aria-label="重命名会话">' + ICONS.edit + '</button>'
     : '';
-  // UX P2 Markdown export: any session that has an addressable key can be
-  // exported — no dependency on managed status because the /api/sessions/events
-  // endpoint serves both managed and discovered keys uniformly. The button
-  // shares the .btn-rename hover-reveal treatment so the header stays calm
-  // by default.
+  // Any addressable key, managed or discovered, can be exported: the
+  // /api/sessions/events endpoint serves both. The button shares the
+  // .btn-rename hover-reveal treatment so the header stays calm by default.
   const downloadBtn = selection.key
     ? '<button type="button" class="btn-rename btn-download" data-action="session-download-md" title="导出会话为 Markdown" aria-label="导出会话为 Markdown">' + ICONS.download + '</button>'
     : '';
@@ -1100,7 +1084,6 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
       '<h2>' + esc(displayName) + renameBtn + downloadBtn + '</h2>' +
       '<div class="detail">' +
         '<span class="detail-left">' + cliLabel + modelLabel + '</span>' +
-        headerBackendChip +
         headerOriginBadge +
         '<span class="detail-exit" id="header-exit">' + sessionExitChipHtml(s.state, s.death_reason, s.death_detail, s.startup_failure) + '</span>' +
         // Git branch / worktree chip. Built empty here and filled
@@ -1108,7 +1091,6 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
         // stays empty (collapses via :empty) for non-repo workspaces and
         // remote-node sessions.
         '<span class="detail-git" id="header-git"></span><span class="detail-pr" id="header-pr"></span>' +
-        ctxBarHtml +
         // kiro thinking-effort tier. Built empty and filled by
         // setHeaderEffortChip (called below and from fetchSessions) so a tier
         // change lands without waiting for a header rebuild; collapses via
@@ -1378,7 +1360,7 @@ function updateHeaderCLI() {
 /* ===== Cron Tab =====
    The cron (定时任务) view lives in cron_view.js and the modules it imports
    (cron_live.js owns the live stream). They import this file, never the
-   reverse; dashboard reaches them through nz.bus ('cron:open-panel'), hooks
+   reverse; dashboard reaches them through nz.bus ('cron:open-panel')
    and the wsm.on / wsm.onReady registrations they make at load. */
 
 /* ===== Sidebar resizer (desktop only) ===== */
@@ -1644,839 +1626,9 @@ initViewportTracking();
 initSwipeDelete();
 initSwipeBack();
 initLightbox();
+initAsideDrawer();
 
-/* ─────────────────────────────────────────────────────────────────────────────
-   Aside (scratch) drawer — preview-pane追问
-   Opens on the ↗ button added to AI bubbles. Creates a scratch session on
-   the server, polls events for it, sends messages, and optionally promotes
-   it into a sidebar-visible session. Drawer DOM lives in dashboard.html.
-   ───────────────────────────────────────────────────────────────────────── */
-(function(){
-  const drawer = document.getElementById('aside-drawer');
-  if (!drawer) return;
-  const $ = (id) => document.getElementById(id);
-  const elMsgs = $('ad-messages');
-  const elEmpty = $('ad-empty');
-  const elInput = $('ad-input');
-  const elSend = $('ad-send');
-  const elClose = $('ad-close');
-  const elSave = $('ad-save');
-  const elQuoteChip = $('ad-quote-chip');
-  const elQuotePreview = $('ad-quote-preview');
-  const elQuoteTrunc = $('ad-quote-trunc');
-  const elQuoteCtx = $('ad-quote-ctx');
-  const elLoading = $('ad-loading');
-  const elAgent = $('ad-agent');
-
-  let state = null;            // {scratchId, key, agentId, sourceKey, sourceMsgTime, quote, lastEventTime, pendingUserEchoes}
-  let pollTimer = null;
-  let sending = false;
-  // Self-scheduling poll cadence. A brand-new scratch session has no
-  // persisted events yet, so /api/sessions/events returns 404 ("session not
-  // found") until the first turn lands. The old fixed setInterval(…,1000)
-  // hammered that 404 at 1Hz forever, flooding the browser network log and
-  // wasting requests. We instead back off 1s→2s→4s→…→POLL_MAX_MS while the
-  // session is still empty/unreachable, and snap back to POLL_BASE_MS the
-  // moment a real poll succeeds. R20260605.
-  const POLL_BASE_MS = 1000;
-  const POLL_MAX_MS = 8000;
-  let pollDelayMs = POLL_BASE_MS;
-
-  function authHeaders(extra) {
-    const h = Object.assign({}, extra || {});
-    try {
-      const t = getToken();
-      if (t) h['Authorization'] = 'Bearer ' + t;
-    } catch (_) {}
-    return h;
-  }
-
-  function clearMessages() {
-    if (!elMsgs) return;
-    // Preserve the empty placeholder for re-use.
-    elMsgs.innerHTML = '';
-    elMsgs.appendChild(elEmpty);
-  }
-
-  function showDrawer() {
-    drawer.classList.add('visible');
-    // Dock as a right-hand split on desktop (no-op on phone overlay).
-    splitDock.enter();
-    // Opened last → stack on top of the preview pane if both are docked.
-    splitDock.bringToFront('scratch');
-  }
-  function hideDrawer() {
-    drawer.classList.remove('visible');
-    splitDock.exit();
-    // Re-expand the sidebar if openScratch auto-collapsed it (no-op if the
-    // preview drawer is still open or the user collapsed it themselves).
-    restoreSidebarAfterDrawer();
-  }
-
-  function stopPolling() {
-    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
-  }
-
-  async function closeScratch(silent) {
-    stopPolling();
-    hideDrawer();
-    if (!state) return;
-    const id = state.scratchId;
-    state = null;
-    elSave.classList.remove('visible');
-    clearMessages();
-    elInput.value = '';
-    if (!id) return;
-    try {
-      await fetch(NZ_CONTRACT.API.scratch_id.replace('{id}', encodeURIComponent(id)), {
-        method: 'DELETE', headers: authHeaders(),
-      });
-    } catch (_) { /* best effort */ }
-  }
-
-  function previewText(s) {
-    if (!s) return '';
-    const one = s.replace(/\s+/g, ' ').trim();
-    return one.length > 40 ? one.slice(0, 40) + '…' : one;
-  }
-
-  // De-duplicate echoed user messages: sendInScratch renders the user bubble
-  // immediately for perceived responsiveness, then the server's event stream
-  // echoes the same text back as a `user` event. Without this filter the
-  // user's own message would appear twice. We compare the trimmed detail
-  // against the pendingUserEchoes set populated by sendInScratch; the set
-  // is bounded at 10 entries (most users don't queue more than 2-3 sends
-  // before polling catches up).
-  function matchesPendingEcho(ev) {
-    if (!state || !state.pendingUserEchoes || ev.type !== 'user') return false;
-    const body = String(ev.detail || ev.summary || '').trim();
-    if (!body) return false;
-    for (const pending of state.pendingUserEchoes) {
-      if (pending === body) {
-        state.pendingUserEchoes.delete(pending);
-        return true;
-      }
-    }
-    return false;
-  }
-
-  // isNearBottom mirrors the main transcript's wasBottom check (dashboard.js
-  // around line 1242 + 4604). 30px slack absorbs sub-pixel layout jitter.
-  function isNearBottom() {
-    if (!elMsgs) return true;
-    return elMsgs.scrollTop + elMsgs.clientHeight >= elMsgs.scrollHeight - 30;
-  }
-
-  // stickBottom mirrors the main transcript's stickEventsBottom: two rAFs
-  // to outlast KaTeX/mermaid layout bumps, plus image-load listeners so a
-  // late-loading thumbnail doesn't scroll the user away from the bottom.
-  // Used only when the caller wants a *forced* pin — incremental renders
-  // go through the isNearBottom path instead, matching the main window.
-  function stickBottom() {
-    if (!elMsgs) return;
-    elMsgs.scrollTop = elMsgs.scrollHeight;
-    requestAnimationFrame(() => {
-      elMsgs.scrollTop = elMsgs.scrollHeight;
-      requestAnimationFrame(() => { elMsgs.scrollTop = elMsgs.scrollHeight; });
-    });
-    elMsgs.querySelectorAll('img').forEach(img => {
-      if (img.complete) return;
-      const restick = () => {
-        if (elMsgs.scrollTop + elMsgs.clientHeight >= elMsgs.scrollHeight - 30) {
-          elMsgs.scrollTop = elMsgs.scrollHeight;
-        }
-      };
-      img.addEventListener('load', restick, { once: true });
-      img.addEventListener('error', restick, { once: true });
-    });
-  }
-
-  // Time-divider helpers mirror renderEventsWithDividers in the main file.
-  // Keeping this scoped copy lets the aside share the visual grammar
-  // (mm/dd HH:MM dividers every >15min gap) without exporting internals.
-  const EVENT_DIVIDER_GAP_MS = 15 * 60 * 1000;
-  function asideLastTime() {
-    // Walk backwards through already-rendered .event nodes to find the
-    // newest data-time; used to decide whether a fresh divider is needed.
-    for (let i = elMsgs.children.length - 1; i >= 0; i--) {
-      const c = elMsgs.children[i];
-      if (c.classList && c.classList.contains('event')) {
-        return Number(c.getAttribute('data-time') || 0);
-      }
-    }
-    return 0;
-  }
-
-  // @contract-begin scratchAdmitEvent
-  // scratchAdmitEvent is the same-ms replay gate for the drawer's HTTP poll.
-  // HandleEvents ?after= re-admits the watermark millisecond (#2456, so a
-  // same-ms sibling is never lost), which means every idle tick replays the
-  // entries AT st.lastEventTime. st.seenAtWM holds the uuids already
-  // processed (rendered OR echo-dropped) at that ms: the local optimistic
-  // user bubble carries no data-uuid and matchesPendingEcho consumes its
-  // entry on first sight, so a DOM lookup alone would re-render the echoed
-  // user event on the next tick. Returns false when e must be skipped;
-  // otherwise records it and advances the watermark. uuid-less (pre-uuid)
-  // events at the watermark are admitted — never swallow what we can't
-  // identify (losing history is worse than a duplicate bubble).
-  function scratchAdmitEvent(st, e) {
-    const t = (e && typeof e.time === 'number') ? e.time : 0;
-    if (t && t < st.lastEventTime) return false;
-    if (!st.seenAtWM) st.seenAtWM = new Set();
-    if (t && t === st.lastEventTime && e.uuid && st.seenAtWM.has(e.uuid)) return false;
-    if (t > st.lastEventTime) {
-      st.lastEventTime = t;
-      st.seenAtWM.clear();
-    }
-    if (t && t === st.lastEventTime && e.uuid) st.seenAtWM.add(e.uuid);
-    return true;
-  }
-  // @contract-end scratchAdmitEvent
-
-  function renderNewEvents(events) {
-    if (!Array.isArray(events) || events.length === 0) return;
-    // Remember whether the user was reading the latest message BEFORE we
-    // mutate the DOM. Mirrors the main transcript's policy: only auto-pin
-    // to the bottom if the user is already there, never drag them away
-    // from content they're reading. The visible symptom on mobile — the
-    // drawer snapping to the newest message every poll tick — was the
-    // earlier "always scrollTop=scrollHeight" behaviour.
-    const wasBottom = isNearBottom();
-    // Clear placeholder on first real content.
-    if (elEmpty && elEmpty.parentNode === elMsgs) {
-      elMsgs.removeChild(elEmpty);
-    }
-    let sawUser = false;
-    let prevT = asideLastTime();
-    for (const e of events) {
-      // Same-ms replay / strictly-older guard; also owns the watermark.
-      if (!scratchAdmitEvent(state, e)) continue;
-      // Drop server-echoed user messages that we already rendered locally.
-      if (matchesPendingEcho(e)) continue;
-      // Reuse the main event renderer so aside bubbles match the transcript
-      // style (markdown, code blocks, etc.) without duplicating logic.
-      const h = eventHtml(e);
-      if (!h) continue;
-      const t = e.time || 0;
-      // Insert a divider when the gap between adjacent visible bubbles
-      // exceeds EVENT_DIVIDER_GAP_MS — matches the main-window grammar.
-      if (t && (prevT === 0 || t - prevT >= EVENT_DIVIDER_GAP_MS)
-      ) {
-        elMsgs.insertAdjacentHTML('beforeend', timeDividerHtml(t));
-      }
-      const tmp = document.createElement('div');
-      tmp.innerHTML = h;
-      while (tmp.firstChild) elMsgs.appendChild(tmp.firstChild);
-      if (t) prevT = t;
-      if (e.type === 'user') sawUser = true;
-    }
-    // Hide any "↗ 追问" buttons inside the aside itself — stacking is disabled.
-    for (const btn of elMsgs.querySelectorAll('.event-ask-btn')) btn.remove();
-    // Apply WeChat-style avatar grouping in the aside too (it reuses eventHtml
-    // and the same .nz-grouped CSS, but lives outside the #events-scroll
-    // observer, so tag it explicitly).
-    regroupAvatars(elMsgs);
-    // Scroll policy, aligned with main window:
-    //  - the user just sent (sawUser on a local-render call): force-pin.
-    //  - otherwise: only stick if they were already at the bottom.
-    if (sawUser) stickBottom();
-    else if (wasBottom) elMsgs.scrollTop = elMsgs.scrollHeight;
-    // Save button appears once there's at least one AI reply.
-    if (events.some(e => e.type === 'text' || e.type === 'result')) {
-      elSave.classList.add('visible');
-    }
-  }
-
-  async function pollOnce() {
-    if (!state) return;
-    try {
-      let url = NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(state.key);
-      if (state.lastEventTime > 0) url += '&after=' + state.lastEventTime;
-      else url += '&limit=50';
-      const r = await fetch(url, { headers: authHeaders() });
-      if (!r.ok) {
-        // 404 = the scratch session has no persisted events yet (brand-new,
-        // first turn not landed). That is an expected empty state, not an
-        // error: back off so we stop hammering it at 1Hz. Other non-OK
-        // statuses get the same treatment — a transient server hiccup
-        // shouldn't busy-loop either.
-        pollDelayMs = Math.min(pollDelayMs * 2, POLL_MAX_MS);
-        return;
-      }
-      // A successful poll means the session is reachable; snap cadence back
-      // to the responsive base so newly-arriving events render promptly.
-      pollDelayMs = POLL_BASE_MS;
-      const evs = await r.json();
-      if (Array.isArray(evs) && evs.length > 0) {
-        renderNewEvents(evs);
-        // Hide the "thinking…" indicator once the first bubble arrives.
-        if (evs.some(e => e.type === 'text' || e.type === 'result')) {
-          elLoading.classList.remove('visible');
-        }
-      }
-    } catch (_) {
-      // Network error: back off too, same rationale as a non-OK response.
-      pollDelayMs = Math.min(pollDelayMs * 2, POLL_MAX_MS);
-    }
-  }
-
-  function startPolling() {
-    stopPolling();
-    pollDelayMs = POLL_BASE_MS;
-    // Self-scheduling loop (not setInterval) so each tick's delay can grow
-    // with the backoff set inside pollOnce. stopPolling()'s clearTimeout
-    // cancels the next scheduled tick.
-    const tick = async () => {
-      await pollOnce();
-      // stopPolling() nulls pollTimer; if that happened during the await we
-      // must not reschedule (the drawer closed mid-flight).
-      if (pollTimer === null) return;
-      pollTimer = setTimeout(tick, pollDelayMs);
-    };
-    pollTimer = setTimeout(tick, pollDelayMs);
-  }
-
-  async function openScratch(quote, agentId, sourceKey, sourceMsgTime) {
-    // Confirm replacement if an aside is already open. Replacement is
-    // non-destructive (the previous scratch is still reachable via history)
-    // so we use 'primary' variant instead of 'danger'.
-    if (state) {
-      // RNEW-UX-013: confirmDialog is unconditionally defined earlier in this
-      // file, so the native-confirm fallback was dead code that defeated
-      // theme/focus parity. Drop the fallback and rely on the themed dialog
-      // directly.
-      const ok = await confirmDialog({
-        title: '替换当前追问窗口？',
-        message: '当前未保存为正式会话的追问内容将被关闭。',
-        confirmText: '替换',
-        variant: 'primary',
-      });
-      if (!ok) return;
-      await closeScratch(true);
-    }
-    try {
-      const r = await fetch(NZ_CONTRACT.API.scratch_open, {
-        method: 'POST',
-        headers: authHeaders({'Content-Type': 'application/json'}),
-        body: JSON.stringify({
-          source_key: sourceKey,
-          source_message_id: String(sourceMsgTime || ''),
-          // Time hint lets the server fetch 5 turns on each side of the
-          // quoted message. Omitted (0) → server falls back to a tail-only
-          // window which still seeds the aside with some context.
-          source_message_time: Number(sourceMsgTime) || 0,
-          quote,
-        }),
-      });
-      if (!r.ok) {
-        const txt = await r.text().catch(() => '');
-        showAPIError('打开追问', r.status, txt);
-        return;
-      }
-      const data = await r.json();
-      state = {
-        scratchId: data.scratch_id,
-        key: data.key,
-        agentId: data.agent_id || agentId || 'general',
-        sourceKey,
-        sourceMsgTime: sourceMsgTime || 0,
-        quote,
-        lastEventTime: 0,
-        seenAtWM: new Set(), // uuids processed AT lastEventTime (scratchAdmitEvent)
-        // Bounded Set of user-message bodies that sendInScratch rendered
-        // locally. Consumed by matchesPendingEcho when the server event
-        // stream replays the same text as a `user` event. Set over array
-        // for O(1) lookup; bounded at ~10 entries by sendInScratch.
-        pendingUserEchoes: new Set(),
-      };
-      elAgent.textContent = state.agentId && state.agentId !== 'general' ? '· ' + state.agentId : '';
-      elQuotePreview.textContent = previewText(quote);
-      elQuoteTrunc.style.display = data.quote_truncated ? 'inline' : 'none';
-      // Context badge states (all three visible to the user):
-      //   turns > 0                    → "(上下文 N 轮[+])"  — injected; "+" = byte-budget trimmed
-      //   turns = 0 && truncated=true  → "(上下文已抑制)"    — quote filled the budget, nothing else fit
-      //   turns = 0 && truncated=false → hidden              — no eligible surrounding turns
-      // The third case is common for brand-new sessions so we hide the
-      // badge rather than claim "(上下文 0 轮)".
-      if (elQuoteCtx) {
-        const turns = Number(data.context_turns) || 0;
-        const truncated = !!data.context_truncated;
-        if (turns > 0) {
-          elQuoteCtx.textContent = '(上下文 ' + turns + ' 轮' + (truncated ? '+' : '') + ')';
-          elQuoteCtx.style.display = 'inline';
-        } else if (truncated) {
-          elQuoteCtx.textContent = '(上下文已抑制)';
-          elQuoteCtx.style.display = 'inline';
-        } else {
-          elQuoteCtx.textContent = '';
-          elQuoteCtx.style.display = 'none';
-        }
-      }
-      elQuoteChip.classList.remove('expanded');
-      elQuoteChip.dataset.full = quote;
-      clearMessages();
-      elSave.classList.remove('visible');
-      showDrawer();
-      collapseSidebarForDrawer();
-      setTimeout(() => elInput.focus(), 60);
-      startPolling();
-    } catch (e) {
-      console.error('open scratch', e);
-      showNetworkError('打开追问', e);
-    }
-  }
-
-  async function sendInScratch() {
-    if (sending || !state) return;
-    const text = elInput.value.trim();
-    if (!text) return;
-    sending = true;
-    elSend.disabled = true;
-    elLoading.classList.add('visible');
-    // Cap the pending echo set at 10 to bound memory under rapid repeated
-    // sends; old entries are dropped FIFO-ish (Set iteration order =
-    // insertion order).
-    if (state.pendingUserEchoes.size >= 10) {
-      const first = state.pendingUserEchoes.values().next().value;
-      if (first !== undefined) state.pendingUserEchoes.delete(first);
-    }
-    state.pendingUserEchoes.add(text);
-    // Render the user message immediately via renderNewEvents so scroll
-    // policy, divider insertion, and ↗-button stripping all match the
-    // poll path. The time stamp is just above Date.now() so it sorts
-    // after whatever was already rendered; the subsequent server replay
-    // will be consumed by matchesPendingEcho.
-    renderNewEvents([{type: 'user', detail: text, time: Date.now()}]);
-    elInput.value = '';
-    try {
-      const r = await fetch(NZ_CONTRACT.API.sessions_send, {
-        method: 'POST',
-        headers: authHeaders({'Content-Type': 'application/json'}),
-        body: JSON.stringify({key: state.key, text}),
-      });
-      if (!r.ok) {
-        const txt = await r.text().catch(() => '');
-        showAPIError('发送消息', r.status, txt);
-        elLoading.classList.remove('visible');
-      } else {
-        // The user just sent a turn, so the session is now live and events
-        // are imminent. Restart polling at the responsive base so the reply
-        // renders fast — without this, a tick already scheduled at the
-        // backed-off delay (up to POLL_MAX_MS from the pre-first-turn 404
-        // phase) could stall the first reply by several seconds.
-        if (pollTimer !== null) startPolling();
-      }
-    } catch (e) {
-      console.error('scratch send', e);
-      showNetworkError('发送消息', e);
-      elLoading.classList.remove('visible');
-    } finally {
-      sending = false;
-      elSend.disabled = false;
-      elInput.focus();
-    }
-  }
-
-  async function promoteScratch() {
-    if (!state) {
-      showToast('追问会话已关闭，无法保存');
-      return;
-    }
-    const id = state.scratchId;
-    try {
-      const r = await fetch(NZ_CONTRACT.API.scratch_id_promote.replace('{id}', encodeURIComponent(id)), {
-        method: 'POST', headers: authHeaders(),
-      });
-      if (!r.ok) {
-        const txt = await r.text().catch(() => '');
-        showAPIError('保存为正式会话', r.status, txt);
-        return;
-      }
-      const data = await r.json();
-      state = null;   // scratch was detached server-side; skip the DELETE in closeScratch
-      stopPolling();
-      hideDrawer();
-      clearMessages();
-      elSave.classList.remove('visible');
-      elInput.value = '';
-      showToast('已保存为正式会话');
-      // Refresh sidebar and try to select the new key.
-      try {
-        if (typeof sessionList.lastVersion !== 'undefined') sessionList.lastVersion = 0;
-        await fetchSessions();
-        if (data.key) selectSession(data.key, 'local');
-      } catch (_) {}
-    } catch (e) {
-      console.error('promote scratch', e);
-      showNetworkError('保存为正式会话', e);
-    }
-  }
-
-  // Expose the active scratch router-key so shared renderers (e.g. the
-  // AskUserQuestion submit handler) can route answers to the scratch CLI
-  // instead of the parent session whose `selectedKey` is what `onAskSubmit`
-  // would otherwise read. Returns '' when no scratch is open.
-  hooks.getActiveScratchKey = function() {
-    return (state && state.key) ? state.key : '';
-  };
-
-  // Exposed so the view-router (setActivityView) can tear the 追问 drawer down
-  // when leaving the chat view — the drawer is position:fixed and would
-  // otherwise float over assets/cron/settings. closeScratch handles the
-  // no-op-when-closed case internally.
-  hooks.closeScratchDrawer = function() { closeScratch(true); };
-
-  // Expose the global used by the ↗ button in eventHtml.
-  hooks.askAside = function(btn) {
-    if (!btn) return;
-    const raw = btn.getAttribute('data-raw') || '';
-    const msgTime = Number(btn.getAttribute('data-msg-time') || 0);
-    if (!raw || raw.length < 1) return;
-    if (!selection.key) {
-      showToast('请先选择会话');
-      return;
-    }
-    // Derive agentId from the current session key (4th segment) so the
-    // server can inherit the matching agent registration.
-    const parts = String(selection.key).split(':');
-    const agentId = parts.length >= 4 ? parts[3] : 'general';
-    openScratch(raw, agentId, selection.key, msgTime);
-  };
-
-  // Wire drawer buttons.
-  elClose.addEventListener('click', () => { closeScratch(true); });
-  elSend.addEventListener('click', sendInScratch);
-  elInput.addEventListener('keydown', (e) => {
-    // Enter sends; Shift+Enter inserts newline.
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
-      e.preventDefault();
-      sendInScratch();
-    }
-  });
-  if (elSave) {
-    elSave.addEventListener('click', () => { promoteScratch(); });
-  } else {
-    console.warn('[scratch] ad-save element missing at wire time');
-  }
-  elQuoteChip.addEventListener('click', () => {
-    const expanded = elQuoteChip.classList.toggle('expanded');
-    elQuotePreview.textContent = expanded ? (elQuoteChip.dataset.full || '') : previewText(elQuoteChip.dataset.full || '');
-    // Clicking the already-expanded chip scrolls the main transcript to the source.
-    if (!expanded && state && state.sourceMsgTime) {
-      const el = document.querySelector('.event[data-time="' + state.sourceMsgTime + '"]');
-      if (el && typeof el.scrollIntoView === 'function') {
-        el.scrollIntoView({behavior: 'smooth', block: 'center'});
-      }
-    }
-  });
-
-  // ESC closes when drawer has focus.
-  drawer.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { e.preventDefault(); closeScratch(true); }
-  });
-})();
-
-// ─── Memory wiki-link popover ────────────────────────────────────────────
-// Lazy hover/click preview for [[slug]] markers emitted by inlineMd.
-// Single popover element (#mem-popover, declared in dashboard.html); event
-// delegation watches the whole document so the popover works for messages
-// rendered after page load (live WS updates, scratch drawer, agent-view).
-//
-// Lifecycle:
-//   mouseenter span → 300ms debounce → fetch + show (anchored)
-//   mouseleave span → 200ms grace → hide if not pinned
-//   click span      → fetch + show + pin (sticks until ESC / outside click)
-//   ESC / outside click on pinned popover → unpin + hide
-//
-// Cache: module-level Map<slug, response>. Cleared on full page reload.
-// 404 results poison the slug span with .md-memlink-broken so subsequent
-// hovers skip the network.
-//
-// docs/rfc/memory-link-rendering.md
-(function () {
-  const memCache = new Map();
-  const NOT_FOUND = Symbol('memory-not-found');
-  let pop = null;
-  let popContent = null;
-  let popClose = null;
-  let pinned = false;
-  let currentSlug = null;
-  let hoverTimer = 0;
-  let leaveTimer = 0;
-
-  function ensurePopover() {
-    if (pop) return true;
-    pop = document.getElementById('mem-popover');
-    popContent = document.getElementById('mem-pop-content');
-    popClose = document.getElementById('mem-pop-close');
-    if (!pop || !popContent) return false;
-    if (popClose) {
-      popClose.addEventListener('click', (e) => {
-        e.stopPropagation();
-        hidePopover();
-      });
-    }
-    pop.addEventListener('mouseenter', () => {
-      if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = 0; }
-    });
-    pop.addEventListener('mouseleave', () => {
-      if (!pinned) scheduleHide();
-    });
-    return true;
-  }
-
-  function showPopover(anchor) {
-    if (!ensurePopover()) return;
-    pop.classList.add('show');
-    pop.setAttribute('aria-hidden', 'false');
-    positionPopover(anchor);
-  }
-
-  function hidePopover() {
-    if (!pop) return;
-    pop.classList.remove('show', 'pinned');
-    pop.setAttribute('aria-hidden', 'true');
-    pinned = false;
-    currentSlug = null;
-  }
-
-  function scheduleHide() {
-    if (leaveTimer) clearTimeout(leaveTimer);
-    leaveTimer = setTimeout(() => {
-      if (!pinned) hidePopover();
-    }, 200);
-  }
-
-  function positionPopover(anchor) {
-    const rect = anchor.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    let top = rect.bottom + 6;
-    let left = rect.left;
-    const popW = pop.offsetWidth || 400;
-    const popH = pop.offsetHeight || 200;
-    if (left + popW > vw - 12) left = Math.max(12, vw - popW - 12);
-    if (top + popH > vh - 12) {
-      const above = rect.top - 6 - popH;
-      top = above > 12 ? above : 12;
-    }
-    pop.style.top = top + 'px';
-    pop.style.left = left + 'px';
-  }
-
-  function renderLoading() {
-    popContent.innerHTML = '<div class="mem-pop-error">加载中…</div>';
-  }
-  function renderError(msg) {
-    popContent.innerHTML = '<div class="mem-pop-error">' + esc(msg) + '</div>';
-  }
-  function renderResponse(data) {
-    if (!data || !data.found) {
-      popContent.innerHTML = '<div class="mem-pop-error">未找到该记忆</div>';
-      return;
-    }
-    const parts = [];
-    const headerBits = [];
-    if (data.type) {
-      headerBits.push('<span class="mem-pop-type" data-type="' + escAttr(data.type) + '">' + esc(data.type) + '</span>');
-    }
-    if (data.scope === 'external' && data.project) {
-      const projLabel = String(data.project).split('-').filter(Boolean).pop() || data.project;
-      headerBits.push('<span class="mem-pop-scope">来自 ' + esc(projLabel) + ' 项目</span>');
-    }
-    if (headerBits.length > 0) {
-      parts.push('<div class="mem-pop-header">' + headerBits.join('') + '</div>');
-    }
-    parts.push('<div class="mem-pop-slug">' + esc(data.slug || '') + '</div>');
-    if (data.description) {
-      parts.push('<div class="mem-pop-desc">' + esc(data.description) + '</div>');
-    }
-    if (data.body) {
-      parts.push('<div class="mem-pop-body">' + renderMd(data.body) + '</div>');
-    }
-    popContent.innerHTML = parts.join('');
-    runPendingAsync();
-  }
-
-  function markBroken(slug) {
-    document.querySelectorAll('.md-memlink[data-slug="' + slug.replace(/"/g, '\\"') + '"]')
-      .forEach((el) => el.classList.add('md-memlink-broken'));
-  }
-
-  async function fetchMemory(slug) {
-    const cached = memCache.get(slug);
-    if (cached === NOT_FOUND) return null;
-    if (cached) return cached;
-    // RNEW-UX-003 (#444): fetchJSON wraps fetch with AbortController +
-    // 10s timeout. Memory popovers are click-to-open so a hung backend
-    // (NAT idle drop) leaves the user staring at a never-resolving
-    // popover; fetchJSON guarantees a deterministic failure path that
-    // returns `undefined` (preserves caller's "transient — retry next
-    // hover" semantics).
-    try {
-      const data = await fetchJSON(NZ_CONTRACT.API.memory_slug.replace('{slug}', encodeURIComponent(slug)), {
-        headers: authHeaders(),
-      });
-      if (!data || !data.found) {
-        memCache.set(slug, NOT_FOUND);
-        markBroken(slug);
-        return null;
-      }
-      memCache.set(slug, data);
-      return data;
-    } catch (e) {
-      // 404/400 — slug missing/invalid; cache the negative so we don't
-      // re-fetch on every hover. fetchJSON's err.status surfaces the
-      // server status so the callsite can branch.
-      if (e && (e.status === 404 || e.status === 400)) {
-        memCache.set(slug, NOT_FOUND);
-        markBroken(slug);
-        return null;
-      }
-      return undefined;
-    }
-  }
-
-  async function loadAndShow(slug, anchor, pin) {
-    if (!ensurePopover()) return;
-    currentSlug = slug;
-    if (pin) {
-      pinned = true;
-      pop.classList.add('pinned');
-    }
-    const cached = memCache.get(slug);
-    if (cached === NOT_FOUND) {
-      renderResponse(null);
-    } else if (cached) {
-      renderResponse(cached);
-    } else {
-      renderLoading();
-    }
-    showPopover(anchor);
-
-    if (cached === NOT_FOUND || cached) return;
-    const data = await fetchMemory(slug);
-    if (currentSlug !== slug) return;
-    if (data === undefined) {
-      renderError('加载失败');
-      return;
-    }
-    renderResponse(data);
-    positionPopover(anchor);
-  }
-
-  function onEnter(e) {
-    const span = e.target.closest && e.target.closest('.md-memlink');
-    if (!span) return;
-    if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = 0; }
-    if (pinned) return;
-    const slug = span.getAttribute('data-slug');
-    if (!slug) return;
-    if (memCache.get(slug) === NOT_FOUND) return;
-    if (hoverTimer) clearTimeout(hoverTimer);
-    hoverTimer = setTimeout(() => {
-      hoverTimer = 0;
-      loadAndShow(slug, span, false);
-    }, 300);
-  }
-
-  function onLeave(e) {
-    const span = e.target.closest && e.target.closest('.md-memlink');
-    if (!span) return;
-    if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = 0; }
-    if (!pinned) scheduleHide();
-  }
-
-  function onClick(e) {
-    const span = e.target.closest && e.target.closest('.md-memlink');
-    if (!span) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const slug = span.getAttribute('data-slug');
-    if (!slug) return;
-    if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = 0; }
-    loadAndShow(slug, span, true);
-  }
-
-  function onDocClick(e) {
-    if (!pop || !pinned) return;
-    if (pop.contains(e.target)) return;
-    if (e.target.closest && e.target.closest('.md-memlink')) return;
-    hidePopover();
-  }
-
-  function onKeyDown(e) {
-    if (e.key === 'Escape' && pinned) {
-      hidePopover();
-      return;
-    }
-    // role=link contract (WCAG 2.1.1): Enter/Space on a focused chip must
-    // activate it. Without this branch, keyboard users could tab to a chip
-    // and find no way to read the memory body.
-    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
-      const span = e.target && e.target.closest && e.target.closest('.md-memlink');
-      if (!span) return;
-      e.preventDefault();
-      const slug = span.getAttribute('data-slug');
-      if (!slug) return;
-      if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = 0; }
-      loadAndShow(slug, span, true);
-    }
-  }
-
-  // Copy fallback: chip renders only the icon + a short tail label, so a raw
-  // selection-copy would yield e.g. "💡 vs_practice" — the original
-  // [[full_slug]] wiki-link is lost, breaking round-trip into other docs / IM
-  // / markdown editors. We rewrite clipboardData when the active selection
-  // touches at least one chip, replacing each chip's text with its data-slug
-  // wrapped in [[]].
-  function onCopy(e) {
-    const sel = document.getSelection && document.getSelection();
-    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
-    // Cheap pre-check: only intervene if the selection actually crosses a chip.
-    let touchesChip = false;
-    for (let i = 0; i < sel.rangeCount; i++) {
-      const r = sel.getRangeAt(i);
-      const c = r.commonAncestorContainer;
-      const root = c.nodeType === 1 ? c : c.parentNode;
-      if (!root) continue;
-      if ((root.closest && root.closest('.md-memlink')) ||
-          (root.querySelector && root.querySelector('.md-memlink'))) {
-        touchesChip = true;
-        break;
-      }
-    }
-    if (!touchesChip) return;
-    const parts = [];
-    for (let i = 0; i < sel.rangeCount; i++) {
-      const frag = sel.getRangeAt(i).cloneContents();
-      // Replace each chip element inside the cloned fragment with a text node
-      // carrying [[slug]]. cloneContents loses parent context, so we walk
-      // the fragment itself.
-      const chips = frag.querySelectorAll ? frag.querySelectorAll('.md-memlink') : [];
-      chips.forEach((chip) => {
-        const slug = chip.getAttribute('data-slug') || '';
-        chip.replaceWith(document.createTextNode('[[' + slug + ']]'));
-      });
-      parts.push(frag.textContent || '');
-    }
-    const text = parts.join('\n');
-    if (e.clipboardData) {
-      e.clipboardData.setData('text/plain', text);
-      e.preventDefault();
-    }
-  }
-
-  document.addEventListener('mouseover', onEnter, true);
-  document.addEventListener('mouseout', onLeave, true);
-  document.addEventListener('click', onClick, true);
-  document.addEventListener('mousedown', onDocClick, true);
-  document.addEventListener('keydown', onKeyDown);
-  document.addEventListener('copy', onCopy);
-})();
-
-
-
+initMemPopover();
 
 export { setActivityView };
 
@@ -2517,7 +1669,8 @@ registerActions({
   'ask-option-toggle': (el) => onAskOptionToggle(el),
   'ask-submit': (el) => onAskSubmit(el),
   'event-copy': (el) => copyEventContent(el),
-  'ask-aside': (el) => hooks.askAside(el),
+  'ask-aside': (el) => askAside(el),
+  'scratch-promote': () => promoteScratch().then((key) => { if (key) selectSession(key, 'local'); }),
   'upload-retry': (el) => retryUpload(thumbIdxOf(el)),
   'file-remove': (el) => removeFile(thumbIdxOf(el)),
   'thumb-dragstart': (el, e) => onThumbDragStart(e, thumbIdxOf(el)),

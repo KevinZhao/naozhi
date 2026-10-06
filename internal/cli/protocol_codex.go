@@ -184,8 +184,9 @@ func (p *CodexProtocol) WriteMessage(w io.Writer, text string, images []clievent
 	p.textBuf.Reset()
 	p.mu.Unlock()
 
-	input := make([]codexUserInput, 0, len(images)+1)
-	for _, img := range images {
+	text, inline := clievent.UserTextAndInline(text, images)
+	input := make([]codexUserInput, 0, len(inline)+1)
+	for _, img := range inline {
 		// Image input is a data: URL; only the gpt-5.x path accepts images, the
 		// gpt-oss Bedrock path does not (validation §4).
 		input = append(input, codexUserInput{

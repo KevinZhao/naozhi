@@ -344,6 +344,12 @@ func (s *Scheduler) executeAcquired(jobID string, viaTriggerNow bool, inflight *
 	}
 	started.rc = &rc
 
+	// Before the marker and the spawn, so a refused run leaves neither; sandbox
+	// runs are refused too.
+	if s.budgetSkipped(rc) {
+		return
+	}
+
 	// Restart fate for this run (Epic H #2546): the marker says "still in flight".
 	// finishRun removes it on every terminal state; anything left at the next boot
 	// becomes a canceled record with ErrClassInterrupted. Written AFTER the
@@ -354,7 +360,7 @@ func (s *Scheduler) executeAcquired(jobID string, viaTriggerNow bool, inflight *
 		// sandboxpending/<runID>.json, and only its reconciler stops the
 		// microVM and classifies the orphan. A second marker here let the
 		// local reconcile settle the run first, or finish it twice (#2970).
-		rc.markerPath = s.writeRunInflightMarker(rc.inflightMarker(), lg)
+		rc.markerPath = s.runMarkers().Write(rc.inflightMarker(), lg)
 	}
 
 	// Per-job timeout is always s.execTimeout: robfig/cron's SkipIfStillRunning

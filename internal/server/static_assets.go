@@ -8,8 +8,10 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
+	"io/fs"
 	"log/slog"
 	"net/http"
+	"path"
 	"strings"
 )
 
@@ -161,6 +163,12 @@ var cronFormatJS embed.FS
 //go:embed static/lightbox.js
 var lightboxJS embed.FS
 
+//go:embed static/mem_popover.js
+var memPopoverJS embed.FS
+
+//go:embed static/aside_drawer.js
+var asideDrawerJS embed.FS
+
 //go:embed static/agent_view.js
 var agentViewJS embed.FS
 
@@ -172,6 +180,14 @@ var filesViewJS embed.FS
 
 //go:embed static/favicon.svg
 var faviconSVG embed.FS
+
+// Third-party release files, byte-identical to their npm dist and kept under a
+// versioned directory, so their SRI pins in render_md.js stay valid and their
+// responses can be cached as immutable. KaTeX ships only its woff2 fonts: every
+// browser the dashboard supports takes the first src of each @font-face.
+//
+//go:embed static/vendor
+var vendorFS embed.FS
 
 // staticAsset is the once-read, immutable view of an embedded dashboard asset:
 // its bytes and precomputed strong-form ETag. embed.FS.ReadFile copies the
@@ -281,6 +297,8 @@ var staticAssets, servedAssetVersion = func() (map[string]staticAsset, string) {
 		{"cron_state.js", cronStateJS, "static/cron_state.js", true},
 		{"cron_format.js", cronFormatJS, "static/cron_format.js", true},
 		{"lightbox.js", lightboxJS, "static/lightbox.js", true},
+		{"mem_popover.js", memPopoverJS, "static/mem_popover.js", true},
+		{"aside_drawer.js", asideDrawerJS, "static/aside_drawer.js", true},
 		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
 		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
 		{"files_view.js", filesViewJS, "static/files_view.js", true},
@@ -292,6 +310,7 @@ var staticAssets, servedAssetVersion = func() (map[string]staticAsset, string) {
 			out[e.key] = a
 		}
 	}
+	addVendorAssets(out)
 	raw, ok := out["dashboard.html"]
 	if !ok {
 		return out, ""
@@ -304,6 +323,27 @@ var staticAssets, servedAssetVersion = func() (map[string]staticAsset, string) {
 	out["dashboard.html"] = newStaticAsset(page, true)
 	return out, version
 }()
+
+// addVendorAssets registers every servable file under static/vendor by its path
+// below static/, the key its /static/vendor/ URL maps to. Fonts are already
+// compressed, so only the script and the stylesheet are gzipped.
+func addVendorAssets(out map[string]staticAsset) {
+	err := fs.WalkDir(vendorFS, "static/vendor", func(name string, d fs.DirEntry, err error) error {
+		ext := path.Ext(name)
+		if err != nil || d.IsDir() || (ext != ".js" && stylesheetTypes[ext] == "") {
+			return err
+		}
+		b, err := vendorFS.ReadFile(name)
+		if err != nil {
+			return err
+		}
+		out[strings.TrimPrefix(name, "static/")] = newStaticAsset(b, ext != ".woff2")
+		return nil
+	})
+	if err != nil {
+		panic("read static/vendor: " + err.Error())
+	}
+}
 
 // newStaticAsset wraps b with its strong ETag (sha256, first 16 bytes, hex)
 // and, when compress is set, its precompressed gzip form.

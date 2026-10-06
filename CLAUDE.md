@@ -56,11 +56,11 @@ Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI, Kiro, or Codex) as
 ```
 cmd/naozhi/main.go
   组合根
-  -> wireup       组合根装配：backend 注册、config 校验、cron+sysession 调度器装配
+  -> wireup       组合根装配：backend 注册、config 校验、cron+sysession 调度器装配、server 与 upstream 共用的 KeyResolver
   -> config       YAML 加载、${ENV_VAR} 展开、校验
 
   核心链路（IM 消息 → CLI 进程）
-  -> cli          Protocol 接口（stream-json/ACP）+ spawn/manage CLI 进程 + watchdog；子包 clievent/backend/procmeter
+  -> cli          Protocol 接口（stream-json/ACP）+ spawn/manage CLI 进程 + watchdog；子包 clievent/backend/procmeter/workflow
   -> session      Session router、并发控制、TTL、持久化恢复；子包 agentlink/api/backendstore/runhistory/sessiontable/sessionview/spawnpool/workspacestore/knownids
   -> routerrelay  Router 通知的一次性绑定转发器（断开 router↔hub 构造环）
   -> dispatch     IM 消息处理 + slash 命令；每条消息经 Turns 端口交给 turn.Orchestrator（IM origin/delivery 在 im_origin.go）
@@ -68,7 +68,7 @@ cmd/naozhi/main.go
   -> platform     Platform 接口 + feishu/slack/discord/weixin 子包
   -> server       HTTP server、路由注册、WebSocket hub、REST API
   -> dashboard    dashboard handler 子包群（auth/cron/cronview/discovery/project/session/ext/*；httputil 叶子）
-  -> cron         定时任务调度（robfig/cron）+ 运行历史；sandboxstore 子包放 sandbox 的磁盘状态（确认队列/输入快照/事件日志），不 import cron
+  -> cron         定时任务调度（robfig/cron）；runstore 子包放运行历史（runs/ 记录、newest-first 缓存、保留期 GC、CronRun 记录类型）与 runinflight/ 在途标记的读写，sandboxstore 子包放 sandbox 的磁盘状态（确认队列/输入快照/事件日志），两者都不 import cron
   -> sysession    内建后台 daemon 框架（system sessions）
   -> project      项目发现、chat 绑定、planner 路由
   -> projectapi   project 的零依赖契约类型
@@ -102,9 +102,10 @@ cmd/naozhi/main.go
   -> metrics      进程级计数器（expvar）
   -> runtelemetry 跨子系统 run 生命周期事件类型
   -> costledger   统一 cost 账本叶子包（按天 JSONL append-only + rollup + 累计差分 + 按模型学习 CLI 单价）
+  -> budget       每日 USD 预算：订阅 cost 账本的内存日索引（IM 会话 / 项目 planner / cron job / 全局）+ Gate 判定；只依赖 costledger 与 sessionkey
   -> naozhisettings  naozhi 托管的 Claude settings 文件
   -> uiprefs      Dashboard 展示偏好持久化
-  -> registry     插件 / 扩展注册表的 canonical home
+  -> registry     泛型 Typed 注册表（新闭集注册表的默认选择）
   -> envpolicy    共享 env 过滤原语
   -> wsproto      浏览器 WS 协议单一真相源（type 常量 + per-type frame + schema）
   -> jsonschema   Go 类型 → 契约检查读取的 JSON schema（WS frame 与 REST 响应共用，嵌套结构体展开进 defs）
@@ -210,7 +211,7 @@ Platforms that can observe their own connection implement `ConnStateReporter` (`
 
 ### Session Management & Agent Routing
 
-Session key format: `{platform}:{chatType}:{chatID}:{agentId}` (e.g., `feishu:direct:alice:code-reviewer`).
+Session key format: `{platform}:{chatType}:{chatID}:{agentId}` (e.g., `feishu:direct:alice:code-reviewer`). In a group chat `session.group_scope` (default `thread`) can narrow `chatID` to `{chatID}#t{threadID}` for a Slack thread / Feishu topic, or `{chatID}#u{userID}` per member (`user`); a message outside any thread keeps the plain key. The chat itself still owns the `/cd` workspace, project binding, cron jobs and its `cost.budget` per-chat cap; only the session (and `/new`, `/stop`, `/urgent`) is per thread or member. Auto-takeover of a terminal CLI only lands on a session the whole chat shares; a thread's or member's session starts fresh.
 Other key namespaces (canonical home: `internal/sessionkey`, wire-stable constants):
 - `project:{name}:planner` -- project planner sessions (exempt from TTL and max_procs)
 - `cron:<jobID>` / `sys:<daemonID>` / `scratch:<sessionID>` -- cron jobs, sysession daemons, scratch sessions
@@ -240,7 +241,7 @@ The project list is rescanned every 60s. Scan reads disk without the manager loc
 
 ### Dashboard & WebSocket
 
-The dashboard is an embedded PWA served at `/dashboard`: `internal/server/static/` holds `dashboard.html` plus JS modules (`dashboard.js`, `agent_view.js`, `cron_view.js`, `cron_live.js`, `asset_browser.js`, `files_view.js`, `nz_util.js`, and the leaves `ws_manager.js` / `session_stream.js` / `platform.js` / `features.js` / `session_ident.js` (session keys and labels, node connection status) / `icons.js` / `file_ref_parse.js` (the path-shape tests file refs and markdown share) / `shell.js` (the upcall table the root modules fill with `registerShell`) / `backend_catalog.js` (the CLI backends and access profiles a new session can pick, and their pickers) / `cron_state.js` (the cron view's jobs cache, drawer gate, trigger cooldown and the fetches that fill them) / `cron_format.js` (the cron view's text formatters) / `lightbox.js` (the image gallery overlay dashboard builds with `initLightbox`), `event_render.js` / `ask_card.js` for transcript bubbles, `event_stream.js` for the transcript's fetch, paging and append and its history / event / send-ack frames, and `session_list.js` for the sidebar's session poll, cards and status bar and the subscription, error and session-state frames), `sw.js`, and `manifest.json`. Real-time updates use a WebSocket hub (`/ws`) with:
+The dashboard is an embedded PWA served at `/dashboard`: `internal/server/static/` holds `dashboard.html` plus JS modules (`dashboard.js`, `agent_view.js`, `cron_view.js`, `cron_live.js`, `asset_browser.js`, `files_view.js`, `nz_util.js`, and the leaves `ws_manager.js` / `session_stream.js` / `platform.js` / `features.js` / `session_ident.js` (session keys and labels, node connection status) / `icons.js` / `file_ref_parse.js` (the path-shape tests file refs and markdown share) / `shell.js` (the upcall table the root modules fill with `registerShell`) / `backend_catalog.js` (the CLI backends and access profiles a new session can pick, and their pickers) / `cron_state.js` (the cron view's jobs cache, drawer gate, trigger cooldown and the fetches that fill them) / `cron_format.js` (the cron view's text formatters) / `lightbox.js` (the image gallery overlay dashboard builds with `initLightbox`), `mem_popover.js` for the memory `[[slug]]` hover/click preview (dashboard starts it with `initMemPopover`), `aside_drawer.js` for the 追问 scratch drawer (`initAsideDrawer`; ask_card reads its session key from `selection.scratchKey`), `event_render.js` / `ask_card.js` for transcript bubbles, `event_stream.js` for the transcript's fetch, paging and append and its history / event / send-ack frames, and `session_list.js` for the sidebar's session poll, cards and status bar and the subscription, error and session-state frames), `sw.js`, `manifest.json`, and `vendor/` (KaTeX 0.16.21's release files, embedded and served at `/static/vendor/` as immutable; `render_md.js` pins their SRI, and changed bytes need a new versioned directory). Real-time updates use a WebSocket hub (`/ws`) with:
 
 - **Client messages** (dispatch switch: `internal/server/wsclient.go`): `auth`, `subscribe` (with optional `after` timestamp), `unsubscribe`, `send`, `interrupt`, `ping`, `agent_subscribe`, `agent_unsubscribe`
 - **Server messages**: `auth_ok`, `auth_fail`, `subscribed`, `unsubscribed`, `history`, `event`, `send_ack`, `pong`, `error`, plus agent/team streaming types -- see `internal/server/wshub_types.go`. The dashboard receives each through a module-scope `wsm.on(NZ_CONTRACT.WS.<type>, handler[, when])` registration (a `when` makes it a claim, tried before the type's one unconditional handler); `scripts/check-ws-receivers.mjs` (lint-js) refuses hand-rolled `.type` dispatch, holds `wsm` (`ws_manager.js`: connection, dispatch table, `onReady`/`onStateChange`/`onAuthFail`) to its core keys, `sessionStream` and `cronLive` to their declared keys, and keeps the three leaves free of other imports
@@ -325,7 +326,7 @@ Each phase emits a `phase=` timing log line so a hung subsystem is attributable 
 - **server.addr**: Listen address (default `:8080`)
 - **cli**: `backend` (`claude`|`kiro`|`codex`), `path`, `model`, `args`, `effort`, `mcp_config` (absolute path to an MCP server definition file → `--mcp-config`; required to get MCP servers into a spawn when `naozhi_settings.enabled` is on, since that path's `--setting-sources ""` suppresses `~/.claude.json`'s `mcpServers` — see `docs/rfc/cli-mcp-config.md`). Multi-backend deployments use `cli.backends: [{id, path, model, args, effort}, ...]` so the dashboard picker can choose per-session — see `config.example.yaml` for the commented-out canonical example. `effort` (kiro only) also accepts a per-agent override via `agents[].effort`; precedence is `cli.effort < cli.backends[].effort < agents[].effort`
 - **session**: `max_procs`, `ttl`, `cwd` (working directory), `store_path`, `watchdog.no_output_timeout`, `watchdog.total_timeout`
-- **agents**: Map of agent_id -> {model, args}. Each agent spawns with custom system prompt via `--append-system-prompt`
+- **agents**: Map of agent_id -> {model, args, backend, access_profile, effort, system_prompt}. `system_prompt` is passed as `--append-system-prompt` (Claude backend only); the flag itself is denylisted in `args`
 - **agent_commands**: Map of command -> agent_id for routing (e.g., `review: code-reviewer`)
 - **platforms**: `feishu` (app credentials, connection_mode), `slack` (bot_token, app_token), `discord` (bot_token), `weixin` (token, base_url)
 - **cron**: `store_path`, `max_jobs`, `execution_timeout`

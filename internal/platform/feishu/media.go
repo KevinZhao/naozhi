@@ -18,7 +18,7 @@ import (
 // resource, sniffing audio magic bytes, and uploading. Extracted from feishu.go
 // (J10 of #2548).
 
-func (f *Feishu) sendImage(ctx context.Context, chatID string, img platform.Image) (string, error) {
+func (f *Feishu) sendImage(ctx context.Context, chatID, threadID string, img platform.Image) (string, error) {
 	imageKey, err := f.uploadImage(ctx, img.Data, img.MimeType)
 	if err != nil {
 		return "", fmt.Errorf("upload image: %w", err)
@@ -36,16 +36,7 @@ func (f *Feishu) sendImage(ctx context.Context, chatID string, img platform.Imag
 	if err != nil {
 		return "", fmt.Errorf("marshal content: %w", err)
 	}
-	reqBody, err := json.Marshal(struct {
-		ReceiveID string `json:"receive_id"`
-		MsgType   string `json:"msg_type"`
-		Content   string `json:"content"`
-	}{ReceiveID: chatID, MsgType: "image", Content: string(content)})
-	if err != nil {
-		return "", fmt.Errorf("marshal request body: %w", err)
-	}
-
-	return f.postMessage(ctx, token, reqBody)
+	return f.postMessage(ctx, token, chatID, threadID, "image", string(content))
 }
 
 // DownloadImage downloads an image from a message via Feishu API.

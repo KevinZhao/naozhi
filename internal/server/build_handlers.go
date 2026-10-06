@@ -85,6 +85,7 @@ func buildCostHandlers(opts ServerOptions, router *session.Router) *dashcost.Han
 	}
 	return dashcost.New(dashcost.Deps{
 		Ledger: ledger,
+		Budget: opts.IMBudget,
 		Limiter: newIPLimiterWithCap(
 			rate.Every(500*time.Millisecond), 30,
 			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
@@ -150,7 +151,7 @@ func buildDiscoveryHandlers(
 		ClaudeDir:     claudeDir,
 		Router:        routerTakeoverAdapter{r: opts.Router},
 		AllowedRoot:   opts.AllowedRoot,
-		DefaultAgent:  opts.Agents["general"],
+		DefaultAgent:  opts.Routing.Agents["general"],
 		Broadcast:     broadcast,
 		ValidateWS:    validateWorkspace,
 		VerifyProcID:  verifyProcIdentity,

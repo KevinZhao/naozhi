@@ -81,7 +81,7 @@ type Hub struct {
 
 // HubOptions holds configuration for a Hub.
 type HubOptions struct {
-	Router    *session.Router
+	Router    HubRouter
 	DashToken string
 	// CookieMAC is a static auth-cookie HMAC for tests without AuthHandlers.
 	CookieMAC string

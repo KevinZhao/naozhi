@@ -127,7 +127,8 @@ type cronJobView struct {
 	// SideEffects 是"有外部副作用"声明（agentcore §6.2）；tri-state 同 Notify。
 	SideEffects *bool `json:"side_effects,omitempty"`
 	// PausedReason is "auto_failures" when the failure streak paused the job,
-	// "" for a manual pause; ConsecutiveFailures is the larger of the streak
+	// "auto_transient" when a lasting backend outage did, "" for a manual
+	// pause; ConsecutiveFailures is the larger of the streak
 	// and the transient-failure count, so a transient pause shows its count.
 	PausedReason        string `json:"paused_reason,omitempty"`
 	ConsecutiveFailures int    `json:"consecutive_failures,omitempty"`

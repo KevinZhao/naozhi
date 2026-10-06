@@ -100,7 +100,7 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 		// hit the "refusing to clobber" guard. Deliberately do NOT set
 		// shim-stuck flag: Remove is terminal and unregisterSession already
 		// cleared it; re-inserting leaks an entry per one-shot key (#2261).
-		if !waitSocketGoneForKey(key, 2*time.Second) {
+		if !waitSocketGoneForKey(key) {
 			slog.Warn("shim socket still bound after Remove wait — terminal removal, not flagging key (Remove never reuses the key)",
 				"key", key)
 		}

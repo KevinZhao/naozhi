@@ -29,7 +29,7 @@ export function firstNonEmptyLine(text, limit) {
 // calendarDayDelta returns the number of calendar days between two epoch-ms
 // (positive if `b` is later than `a` in local time). Uses local midnight so
 // "昨天" / "明天" align with wall-clock date, not 24h intervals — a run
-// 25h ago from now=01:00 is actually 前天, not 昨天.
+// 26h ago from now=01:00 is already 前天, not 昨天.
 export function calendarDayDelta(a, b) {
   const da = new Date(a);
   const db = new Date(b);
@@ -102,8 +102,7 @@ export function formatRunningElapsed(startedAt) {
   return '运行中 ' + h + 'h ' + (m - h * 60) + 'm';
 }
 
-// cronErrorClassLabel —— 后端 ErrorClass 枚举的中文友好名。RFC §9 错误分类映射。
-// 未知值原样返回，方便排查（不应发生但容错）。
+// cronErrorClassLabel —— 后端 ErrorClass 枚举的中文友好名（RFC §9）；未知值原样返回，方便排查。
 const CRON_ERROR_CLASS_LABELS = Object.freeze({
   session_error: '会话错误',
   send_error: '发送失败',
@@ -114,6 +113,7 @@ const CRON_ERROR_CLASS_LABELS = Object.freeze({
   workdir_outside_root: '工作目录越界',
   overlap_skipped: '重叠跳过',
   session_capacity: '会话上限跳过',
+  budget_exceeded: '今日预算用尽跳过',
   router_missing: '路由未就绪',
   paused_concurrent: '暂停时被抢',
   deleted_concurrent: '运行中被删除',

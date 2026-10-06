@@ -44,7 +44,7 @@ function sendEntries(res, route, fixture, page, headers = { 'Content-Type': 'app
 // A Go drift test (TestDashboardCSP_MockServerHeaderInSync) compares this
 // literal against the runtime header, so edit both together.
 const MOCK_DASHBOARD_CSP =
-  "default-src 'self'; script-src 'self' 'sha256-Dc5Mfm9TcKn7OwTLyG3/T2KjnRh7zV1Xc4ct4adm4/g=' https://cdn.jsdelivr.net/npm/mermaid@11.14.0/dist/mermaid.min.js https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js; connect-src 'self'; style-src 'self' https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css; font-src 'self' https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/fonts/; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font";
+  "default-src 'self'; script-src 'self' 'sha256-Dc5Mfm9TcKn7OwTLyG3/T2KjnRh7zV1Xc4ct4adm4/g=' https://cdn.jsdelivr.net/npm/mermaid@11.14.0/dist/mermaid.min.js; connect-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font";
 
 function defaultSessions() {
   return {
@@ -256,6 +256,9 @@ function defaultGitStates() {
  * @param {Function} [overrides.costSummary] - (searchParams) => GET /api/cost/summary payload,
  *   or null for a 404. Without it the route is absent (404). Calls land in `costSummaryCalls`
  *   as {group_by, job_id, session_key}.
+ * @param {Function} [overrides.costBudget] - (searchParams) => GET /api/cost/budget payload, or
+ *   null for a 404. Without it the route is absent (404). Calls land in `costBudgetCalls`
+ *   as {job_id, session_key}.
  * @param {object[]} [overrides.cronAttention] - §7.4 queue items for GET /api/cron/attention.
  *   POST /api/cron/runs/<id>/confirm records the id in `cronConfirmCalls` and drops the item;
  *   POST /api/cron/runs/<id>/replay does the same with `cronReplayCalls` (the {job_id} body).
@@ -280,6 +283,8 @@ function defaultGitStates() {
  * @param {object[]} [overrides.discoveredPreview] - GET /api/discovered/preview entries (default: none).
  * POST /api/scratch/open always succeeds with a fixed scratch session (the
  * 追问 drawer's open path); its event polling rides the sessions_events route.
+ * @param {string} [overrides.scratchPromoteKey] - Enables POST /api/scratch/<id>/promote,
+ *   answering {key: scratchPromoteKey}; the ids land in `scratchPromoteCalls`.
  * @param {number} [overrides.sessionsDelayMs] - Hold GET /api/sessions responses
  *   this long. Lets a spec prove an optimistic DOM patch happened locally, by pushing
  *   the list-refetch repaint (which would mask it) out of the assertion window.
@@ -361,12 +366,14 @@ function startMockServer(overrides = {}) {
   // drops the field from the JSON.
   const runDetailPatch = overrides.runDetailPatch || {};
   const costSummary = overrides.costSummary || null;
+  const costBudget = overrides.costBudget || null;
   const cronTrigger = overrides.cronTrigger || null;
   const systemDaemons = overrides.systemDaemons || null;
   const memories = overrides.memories || null;
   let systemDaemonsGetCount = 0;
   const cronTriggerCalls = [];
   const costSummaryCalls = [];
+  const costBudgetCalls = [];
   const cronAttention = overrides.cronAttention ? overrides.cronAttention.slice() : null;
   const cronConfirmCalls = [];
   const cronReplayCalls = [];
@@ -414,6 +421,7 @@ function startMockServer(overrides = {}) {
   const deleteStatus = overrides.deleteStatus || 200;
 
   let sendCalls = [];
+  const scratchPromoteCalls = [];
   let bindCalls = [];
   let cronCreateCalls = [];
   let loginCalls = [];
@@ -447,6 +455,21 @@ function startMockServer(overrides = {}) {
       try { body = fs.readFileSync(path.join(STATIC_DIR, 'css', name)); }
       catch { res.writeHead(404); res.end(); return; }
       res.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8' });
+      res.end(body);
+      return;
+    }
+
+    // Vendored libraries (KaTeX): the same tree the Go handlers serve, with
+    // the same types; anything outside it 404s.
+    if (pathname.startsWith('/static/vendor/')) {
+      const rel = pathname.slice('/static/'.length);
+      const type = { '.js': 'application/javascript', '.css': 'text/css; charset=utf-8', '.woff2': 'font/woff2' }[path.extname(rel)];
+      let body;
+      try {
+        if (!type || rel.split('/').includes('..')) throw new Error('outside the tree');
+        body = fs.readFileSync(path.join(STATIC_DIR, rel));
+      } catch { res.writeHead(404); res.end(); return; }
+      res.writeHead(200, { 'Content-Type': type });
       res.end(body);
       return;
     }
@@ -554,6 +577,13 @@ function startMockServer(overrides = {}) {
           context_truncated: false,
         }));
       });
+      return;
+    }
+
+    if (overrides.scratchPromoteKey && pathname.startsWith('/api/scratch/') && pathname.endsWith('/promote') && req.method === 'POST') {
+      scratchPromoteCalls.push(decodeURIComponent(pathname.slice('/api/scratch/'.length, -'/promote'.length)));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ key: overrides.scratchPromoteKey }));
       return;
     }
 
@@ -1167,6 +1197,19 @@ function startMockServer(overrides = {}) {
       return;
     }
 
+    // Cost budget status: opt-in via overrides.costBudget.
+    if (costBudget && pathname === NZ_CONTRACT.API.cost_budget && req.method === 'GET') {
+      if (!checkAuth()) return;
+      costBudgetCalls.push({
+        job_id: url.searchParams.get('job_id') || '',
+        session_key: url.searchParams.get('session_key') || '',
+      });
+      const payload = costBudget(url.searchParams);
+      res.writeHead(payload ? 200 : 404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(payload || { error: 'not found' }));
+      return;
+    }
+
     // Transcribe route
     if (pathname === NZ_CONTRACT.API.transcribe && req.method === 'POST') {
       if (!checkAuth()) return;
@@ -1266,6 +1309,7 @@ function startMockServer(overrides = {}) {
         port,
         url: `http://127.0.0.1:${port}`,
         get sendCalls() { return sendCalls; },
+        get scratchPromoteCalls() { return scratchPromoteCalls; },
         get eventsCalls() { return eventsCalls; },
         get bindCalls() { return bindCalls; },
         get cronCreateCalls() { return cronCreateCalls; },
@@ -1277,6 +1321,7 @@ function startMockServer(overrides = {}) {
         get fullCronListCalls() { return fullCronListCalls; },
         get cronListGetCount() { return cronListGetCount; },
         get costSummaryCalls() { return costSummaryCalls; },
+        get costBudgetCalls() { return costBudgetCalls; },
         get sessionsGetCalls() { return sessionsGetCalls; },
         get sessionsValidators() { return sessionsValidators; },
         get sessionsNotModified() { return sessionsNotModified; },

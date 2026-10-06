@@ -118,6 +118,13 @@ type Dispatcher struct {
 	// SetRateLimit.
 	inbound          atomic.Pointer[inboundLimit]
 	rateLimitReplies denyThrottle
+
+	// budget refuses turns past cost.budget (budget.go); nil admits all.
+	budget        BudgetGate
+	budgetReplies denyThrottle
+
+	// groupScope splits a group chat's sessions (sessionChatID).
+	groupScope GroupScope
 }
 
 // keyForChat returns the routed session key for the chat coordinates and
@@ -204,6 +211,11 @@ type DispatcherConfig struct {
 	Access *imauth.Policy
 	// RateLimit caps each sender's message rate; the zero value is unlimited.
 	RateLimit RateLimit
+	// Budget refuses turns once today's spend reaches cost.budget; nil, or a
+	// nil pointer inside it, admits every turn.
+	Budget BudgetGate
+	// GroupScope is what one group-chat session covers; zero is per thread.
+	GroupScope GroupScope
 }
 
 // ErrTurnsWireupMissing is returned by NewDispatcher when DispatcherConfig.Turns
@@ -272,6 +284,11 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		caps:                  caps,
 		fallbackBannerDelay:   fallbackBannerDelayDefault,
 		rateLimitReplies:      denyThrottle{window: rateLimitReplyWindow},
+		budgetReplies:         denyThrottle{window: budgetReplyWindow},
+		groupScope:            cfg.GroupScope,
+	}
+	if !isNilInterface(cfg.Budget) {
+		d.budget = cfg.Budget
 	}
 	d.access.Store(cfg.Access)
 	d.SetRateLimit(cfg.RateLimit)
@@ -441,7 +458,7 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 
 	// KeyResolver is the single source of truth for project-binding
 	// precedence and ExtraArgs merge (docs/rfc/key-resolver.md §3.1).
-	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, d.sessionChatID(msg), agentID)
 
 	var images []clievent.Attachment
 	if len(msg.Images) > 0 {
@@ -558,21 +575,38 @@ func (d *Dispatcher) handleSendError(
 	if cleanup != nil {
 		defer cleanup()
 	}
-	if _, err := platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, limits.PlatformReplyMaxAttempts); err != nil {
+	if _, err := platform.ReplyWithRetry(replyCtx, p, replyDestOf(msg).text(errMsg), limits.PlatformReplyMaxAttempts); err != nil {
 		d.sendFailCount.Add(1)
 		dispatchSendFailTotal.Add(1)
 		lg.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
 	}
 }
 
+// ReplyDest is where the replies to one inbound message go: its chat and,
+// when it was posted in a thread or topic, that thread.
+type ReplyDest struct {
+	ChatID   string
+	ThreadID string
+}
+
+func replyDestOf(msg platform.IncomingMessage) ReplyDest {
+	return ReplyDest{ChatID: msg.ChatID, ThreadID: msg.ThreadID}
+}
+
+// text is a text message to r.
+func (r ReplyDest) text(s string) platform.OutgoingMessage {
+	return platform.OutgoingMessage{ChatID: r.ChatID, ThreadID: r.ThreadID, Text: s}
+}
+
 // sendOutboundImages delivers each turn image as its own reply bubble.
-func (d *Dispatcher) sendOutboundImages(ctx context.Context, p platform.Platform, chatID string, images []platform.Image) {
+func (d *Dispatcher) sendOutboundImages(ctx context.Context, p platform.Platform, to ReplyDest, images []platform.Image) {
 	for _, img := range images {
 		// ReplyWithRetry (not bare Reply) so an image gets the same
 		// token-rotation retry as text (#2305).
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{
-			ChatID: chatID,
-			Images: []platform.Image{img},
+			ChatID:   to.ChatID,
+			ThreadID: to.ThreadID,
+			Images:   []platform.Image{img},
 		}, limits.PlatformReplyMaxAttempts); err != nil {
 			// Failed image sends must show in /health like text failures.
 			d.sendFailCount.Add(1)
@@ -639,8 +673,8 @@ func (d *Dispatcher) decorateReplyText(result *clievent.SendResult, sess turn.Se
 }
 
 // SendSplitReply sends a reply, splitting into multiple messages if too long.
-func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, chatID, text string) {
-	d.sendChunks(ctx, p, chatID, replyChunks(p, text))
+func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, to ReplyDest, text string) {
+	d.sendChunks(ctx, p, to, replyChunks(p, text))
 }
 
 // replyChunks returns the messages p gets for text: one when it fits
@@ -689,12 +723,12 @@ func replyChunks(p platform.Platform, text string) []string {
 }
 
 // sendChunks sends each chunk as its own message, counting failures per chunk.
-func (d *Dispatcher) sendChunks(ctx context.Context, p platform.Platform, chatID string, chunks []string) {
+func (d *Dispatcher) sendChunks(ctx context.Context, p platform.Platform, to ReplyDest, chunks []string) {
 	for i, chunk := range chunks {
-		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: chunk}, limits.PlatformReplyMaxAttempts); err != nil {
+		if _, err := platform.ReplyWithRetry(ctx, p, to.text(chunk), limits.PlatformReplyMaxAttempts); err != nil {
 			d.sendFailCount.Add(1)
 			dispatchSendFailTotal.Add(1)
-			slog.Error("reply chunk failed after retries", "chat", chatID, "chunk", i+1, "err", err)
+			slog.Error("reply chunk failed after retries", "chat", to.ChatID, "chunk", i+1, "err", err)
 		} else {
 			d.markReplySuccess()
 		}
