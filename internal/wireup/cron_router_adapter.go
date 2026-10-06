@@ -159,12 +159,12 @@ func exitFailure(err error) error {
 // turnFailure wraps a cron.TurnFailedError (matching cron.ErrTurnFailed)
 // around a result the backend flagged as an error, so the run is recorded as
 // failed rather than succeeding with empty or raw-error text; nil for a
-// healthy turn. An abort is not a failure: claude's aborted_* terminal_reason
-// on newer CLIs, or error_during_execution after one naozhi requested (the
-// cron watchdog's interrupt) on older ones. The detail is for run history; the
-// IM notice only ever shows the cause.
+// healthy turn. An abort naozhi requested (the cron watchdog's interrupt) is
+// not a failure, whether claude reports it as error_during_execution or an
+// aborted_* terminal_reason. The detail is for run history; the IM notice only
+// ever shows the cause.
 func turnFailure(r *clievent.SendResult) error {
-	if !r.IsError || r.CLIAborted() || (r.Aborted && r.SubType == "error_during_execution") {
+	if !r.IsError || (r.Aborted && (r.SubType == "error_during_execution" || r.CLIAborted())) {
 		return nil
 	}
 	tf := &cron.TurnFailedError{Cause: turnCause(r)}
