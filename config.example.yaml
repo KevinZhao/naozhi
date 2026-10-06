@@ -144,25 +144,27 @@ cli:
   # Authority: pick one layout per deployment — either the legacy
   # single-backend (cli.path + cli.model + cli.args above, with no
   # `backends:` block) OR the multi-backend form (cli.backends + optional
-  # cli.backend for the default). Leaving both populated is legal — the
-  # per-backend fields just inherit from the top-level cli.* values — but
-  # mixing them makes the effective config hard to reason about. If you
-  # enable `backends:`, treat cli.path/model/args as inheritable defaults
-  # only, not as "the real backend".
+  # cli.backend for the default). Leaving both populated is legal — an
+  # entry's omitted model/args/effort inherit the top-level cli.* values —
+  # but mixing them makes the effective config hard to reason about. If you
+  # enable `backends:`, treat cli.model/args as inheritable defaults only;
+  # cli.path is not inherited and picks no entry's binary.
   #
   # Runtime selection:
   #   - Dashboard "new session" dropdown picks backend per session
   #   - API: POST /api/sessions/send {"backend": "kiro", ...}
   #   - Omitted => cli.backend (or first entry in `backends:`)
   #
-  # Per-backend path/model/args are optional and fall back to cli.* above.
+  # Per-backend model/args are optional and fall back to cli.* above. An
+  # omitted path is auto-detected by id (~/.local/bin/<binary>, then the
+  # usual install dirs, then $PATH); it does not fall back to cli.path.
   # The protocol follows the id — stream-json for "claude", ACP for "kiro",
   # codex app-server for "codex" — no extra flag needed.
   #
   #backend: "claude"
   #backends:
   #  - id: "claude"
-  #    # path/model/args inherit from cli.path + cli.args above when omitted.
+  #    # model/args inherit from cli.* above; path auto-detects by id.
   #  - id: "kiro"
   #    path: "~/.local/bin/kiro-cli"
   #    # Model ID forwarded as `kiro-cli acp --model <id>` at spawn time.
@@ -473,7 +475,8 @@ platforms:
 # direct chat they are also told their ID, at most once per 10 minutes. IDs:
 # Feishu open_id (ou_...), Slack user ID (U...), Discord user ID, Weixin from.
 # admin_users alone may run /cron, /cd and /project; leave it empty and every
-# allowed user is an admin. Changes need a restart.
+# allowed user is an admin. Changes need a restart. `naozhi setup weixin`
+# writes the weixin entry for the WeChat user who scanned the login QR code.
 # im_access:
 #   default_deny: false     # true refuses every platform without an entry
 #   deny_reply: ""          # replaces the direct-chat refusal text

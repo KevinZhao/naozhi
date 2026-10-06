@@ -136,7 +136,7 @@ cli:
 - Dashboard "new session" 下拉菜单按会话选择 backend
 - API 通过 `/api/sessions/send {"backend": "kiro"}` 覆盖
 - ACP backend 自动处理 `session/new`、`session/cancel` 通知与权限请求
-- 每条 backend 的 `path`/`model`/`args` 省略时继承顶层 `cli.*`；codex 必须自己设 `model` 和 `args`，否则会拿到 claude 的模型名与 flag
+- 每条 backend 的 `model`/`args` 省略时继承顶层 `cli.*`；`path` 不继承 `cli.path`，省略时按 id 自动查找（`~/.local/bin/<binary>`、常见安装目录、`$PATH`）；codex 必须自己设 `model` 和 `args`，否则会拿到 claude 的模型名与顶层 `cli.args`
 - Codex 不接受 `effort` 字段（设了会告警并忽略），推理强度经 `args` 传：`-c model_reasoning_effort=<tier>`
 
 ### 定时任务 (Cron)
@@ -303,7 +303,9 @@ naozhi setup weixin
 naozhi --config ~/.naozhi/config.yaml
 ```
 
-需要两个微信号 —— 一个登录为 bot，另一个发消息测试。
+扫码确认的微信用户（登录响应里的 `ilink_user_id`）会被写进
+`im_access.platforms.weixin.allowed_users`，只有这个号发来的消息会被处理。其他微信号
+发消息会在私聊里收到自己的 ID，加进 `allowed_users` 即可，见 [IM 访问控制](#im-访问控制)。
 
 ### 飞书
 
@@ -383,13 +385,13 @@ cli:
   backend: claude                         # "claude" | "kiro" | "codex"，单 backend 模式下的默认值
   path: "~/.local/bin/claude"
   model: "sonnet"                         # sonnet / opus / haiku
-  args:
-    - "--dangerously-skip-permissions"
+  args: []                                # claude 协议自己加 --dangerously-skip-permissions，写在这里只会被丢弃并告警
 
   # 可选：多 backend 并存（Claude / Kiro / Codex 同时启用）。dashboard "new session"
   # 下拉菜单可以按会话选 backend，API 端通过 /api/sessions/send {"backend": ...}
   # 覆盖。不设置 `backends` 时走单 backend 模式，使用上面的 cli.path/model/args；
-  # 每条 backend 的 path/model/args 省略时从顶层 cli.* 继承；`backend` 字段决定
+  # 每条 backend 的 model/args 省略时从顶层 cli.* 继承，path 不继承 cli.path，
+  # 省略时按 id 自动查找（~/.local/bin/<binary>、常见安装目录、$PATH）；`backend` 字段决定
   # 默认 backend（同时也作为 dashboard 下拉第一项）。完整注释示例见
   # config.example.yaml `cli.backends` 段。
   # backends:
@@ -398,7 +400,7 @@ cli:
   #     path: "~/.local/bin/kiro"         # ACP 协议根据 id=kiro 自动选择，无需额外 flag
   #   - id: codex
   #     path: "codex"                     # codex app-server 协议根据 id=codex 自动选择
-  #     model: "openai.gpt-5.5"           # 与 args 都须显式设置，否则继承上面 claude 的 sonnet 与 flag
+  #     model: "openai.gpt-5.5"           # 须显式设置，否则继承上面 claude 的 sonnet；args 也写明，免得继承顶层 cli.args
   #     args: ["-c", "model_reasoning_effort=high"]
 
 session:
@@ -422,7 +424,7 @@ session:
 agents:                                   # 自定义 agent
   code-reviewer:
     model: "sonnet"
-    args: ['--append-system-prompt', 'You are a code reviewer...']
+    system_prompt: "You are a code reviewer..."  # 追加到 CLI 系统提示词
   researcher:
     model: "opus"
 
@@ -543,8 +545,9 @@ journalctl -u naozhi -f
 > 拉 heap / goroutine / CPU profile。端点受 token + **loopback-only** 双重防护，远端
 > 请求（ALB / CloudFront）一律 403。详见 [`docs/ops/pprof.md`](docs/ops/pprof.md)。
 
-> **一键排障**：`naozhi doctor` 聚合 binary / systemd / HTTP / auth / pprof / 状态目录
-> 7 项检查，任一 fail 退出码 1。CI 友好，支持 `--json` 输出。详见
+> **一键排障**：`naozhi doctor` 聚合 binary / codesign / systemd / HTTP / auth /
+> 服务端子系统 / 配置漂移 / pprof / 状态目录 / CLI backend / 语音转写 / 安全配置等检查，
+> 任一 fail 退出码 1。CI 友好，支持 `--json` 输出。完整检查项见
 > [`docs/ops/doctor.md`](docs/ops/doctor.md)。
 
 ### IM 访问控制
@@ -566,6 +569,10 @@ im_access:
 - **不配置 = 所有人都能用**（兼容旧配置）。启动日志、`naozhi config check`、
   `naozhi doctor` 会对每个没有条目的平台告警，`config check` 因此退出码为 1。
   `default_deny: true` 会拒绝所有没有条目的平台。
+- `naozhi setup weixin` 会把扫码的微信用户写进 `im_access.platforms.weixin`。登录
+  响应没给用户 ID 时，新建的配置文件写 `default_deny: true`（先发一条消息拿到自己的
+  ID 再加进去）；已有的配置文件里不写 `default_deny`，免得把其他平台关在外面。已有的
+  `im_access.platforms.weixin` 条目不会被改动。
 - 平台一旦有条目，名单外的人和没有用户 ID 的消息都会被拒绝，包括飞书卡片上的
   AskUserQuestion 回答。被拒的消息不会触发任何命令，也不会进 CLI。飞书的语音和
   图片、Discord 的图片附件在下载前就判定：名单外的人发来的语音不下载、不转写（不产生
