@@ -115,13 +115,16 @@ type sessionSettlement struct {
 	FlaggedUSD, ResidualUSD       float64
 	FlaggedN, ResidualDays        int
 	UnpricedDays, AlreadyFlaggedN int
-	UndecidedN                    int    // entries whose turn could not be priced or bounded to judge a restore
-	HeldDays                      int    // days an unattributed entry shared a key with
-	OpenDays                      int    // days whose spend another day's entry books, or none yet
-	ForeignDays                   int    // days holding a cron run's turns or lines of unknown origin
-	EmptyDays                     int    // days the ledger books spend on and the transcript shows none
-	TerminalN                     int    // interactive-terminal messages left out
-	Skipped                       string // why nothing was settled; "" when settled
+	UndecidedN                    int     // entries whose turn could not be priced or bounded to judge a restore
+	HeldDays                      int     // days an unattributed entry shared a key with
+	OpenDays                      int     // days whose spend another day's entry books, or none yet
+	ForeignDays                   int     // days holding a cron run's turns or lines of unknown origin
+	EmptyDays                     int     // days the ledger books spend on and the transcript shows none
+	AboveDays                     int     // other days the ledger books more on than the transcript shows
+	AboveUSD                      float64 // what the ledger books over the transcript on AboveDays
+	AboveUndecidedDays            int     // AboveDays holding an UndecidedN entry, whose excess may be a restore
+	TerminalN                     int     // interactive-terminal messages left out
+	Skipped                       string  // why nothing was settled; "" when settled
 }
 
 // flaggedEntry is a ledger entry that charged a restored cost-state total.
@@ -135,10 +138,10 @@ type flaggedEntry struct {
 // transcripts, in two passes over the days before o.Until. An entry that
 // charged the cost-state total its process restored on --resume gets a
 // negative Kind=adjust of that total. Then each UTC day whose ledger sum is
-// off the priced transcript usage by more than max($1, 5%) gets the
-// difference as one Kind=adjust, unless settleSession holds the day. Adjust
-// run ids make a second run append nothing. Without o.Write nothing is opened
-// for writing.
+// short of the priced transcript usage by more than max($1, 5%) gets the
+// difference as one Kind=adjust, unless settleSession holds the day; a day
+// booked above its transcript is reported, not lowered. Adjust run ids make a
+// second run append nothing. Without o.Write nothing is opened for writing.
 func reconcileLedger(o reconcileOpts, out io.Writer) (reconcileReport, error) {
 	var rep reconcileReport
 	if o.SessionStorePath == "" {
@@ -716,20 +719,20 @@ func tokenSum(rows []costledger.ModelDelta) int64 {
 }
 
 // settleSession plans one session's adjustments into rep and returns its row.
-// Interactive-terminal messages are not naozhi's spend and are left out. A
-// day gets no residual when any of its spend may be booked elsewhere or not
-// be naozhi's: an entry no session could be named for shares a key with this
-// session's entries that day; a message has no entry of the session after it
-// that same day (the entry that books it, if any, is on another day, which is
-// held too) or predates the run of the session's first entry; a cron run of
-// the session touched it; or a message's origin is unknown. Nor does a day
-// whose transcript shows none of the spend its entries book: nothing proves
-// them wrong. A day they net below zero on is still raised to zero.
+// Terminal messages are not naozhi's spend and are left out. A day gets no
+// residual when any of its spend may be booked elsewhere or not be naozhi's:
+// an entry no session could be named for shares a key with this session's
+// entries that day; a message has no entry of the session after it that day
+// (the entry that books it, if any, is on another day, held too) or predates
+// the run of the session's first entry; a cron run of the session touched it;
+// or a message's origin is unknown. A residual only raises a day: the CLI also
+// bills requests its transcript never logs (cancels, background calls, output
+// counted mid-stream). A day the entries net below zero on is raised to zero.
 func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessions, cronRuns []timeSpan, firstDay, until time.Time, rep *reconcileReport) sessionSettlement {
 	st := sessionSettlement{SessionID: in.sid, Entries: len(entries), Skipped: in.skipped}
 	settles := func(t time.Time) bool { return !t.Before(firstDay) && t.Before(until) }
 	ledger := map[string]*dayFigures{}
-	held := map[string]bool{}
+	held, undecided := map[string]bool{}, map[string]bool{}
 	day := func(d string) *dayFigures {
 		if ledger[d] == nil {
 			ledger[d] = &dayFigures{models: map[string]*costledger.ModelDelta{}}
@@ -765,6 +768,7 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 		}
 		if to.IsZero() {
 			st.UndecidedN++
+			undecided[e.TS.UTC().Format(time.DateOnly)] = true
 			continue
 		}
 		// The turn starts no earlier than the cost-state: what the process
@@ -775,6 +779,7 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 		charged, decided := chargesRestore(e, m, turnWindow(in.usage.Messages, from, to, l.rates))
 		if !decided {
 			st.UndecidedN++
+			undecided[e.TS.UTC().Format(time.DateOnly)] = true
 		}
 		if !charged {
 			continue
@@ -832,6 +837,13 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 			continue
 		case len(usage[d]) == 0 && lf.usd > 0:
 			st.EmptyDays++
+			continue
+		case diff < 0:
+			st.AboveDays++
+			st.AboveUSD -= diff
+			if undecided[d] {
+				st.AboveUndecidedDays++
+			}
 			continue
 		}
 		adj := adjustOf(lastBefore(entries, start.Add(24*time.Hour)), reconcilePrefix+in.sid+":day:"+d, diff)
@@ -1038,6 +1050,12 @@ func printReconcile(out io.Writer, rep reconcileReport, write bool) {
 			}
 			if s.EmptyDays > 0 {
 				note += fmt.Sprintf("；%d 天 transcript 无用量而账本有，残差未记", s.EmptyDays)
+			}
+			if s.AboveDays > 0 {
+				note += fmt.Sprintf("；%d 天账本高于 transcript 共 %.2f（transcript 不记 CLI 的全部请求：取消/后台请求、流式中途的 output 计数），未下调", s.AboveDays, s.AboveUSD)
+				if s.AboveUndecidedDays > 0 {
+					note += fmt.Sprintf("，其中 %d 天含无法判定是否计入恢复额的条目，高出部分可能就是恢复额", s.AboveUndecidedDays)
+				}
 			}
 			if s.TerminalN > 0 {
 				note += fmt.Sprintf("；%d 条终端交互消息不计入", s.TerminalN)

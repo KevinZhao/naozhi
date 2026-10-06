@@ -192,14 +192,14 @@
     "lateBindings": 1
   },
   "dashboard.js": {
-    "lines": 2549,
+    "lines": 2249,
     "maxFnLines": 100,
     "maxIifeLines": 524,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0,
     "deadInjections": 0,
-    "innerHTMLAssign": 15,
+    "innerHTMLAssign": 11,
     "htmlInsert": 2,
     "lateBindings": 3
   },
@@ -311,6 +311,18 @@
     "htmlInsert": 0,
     "lateBindings": 0
   },
+  "mem_popover.js": {
+    "lines": 300,
+    "maxFnLines": 36,
+    "maxIifeLines": 0,
+    "fnOver100": 0,
+    "topLevelLetVar": 0,
+    "configureDeps": 0,
+    "deadInjections": 0,
+    "innerHTMLAssign": 4,
+    "htmlInsert": 0,
+    "lateBindings": 0
+  },
   "mobile_nav.js": {
     "lines": 544,
     "maxFnLines": 118,
@@ -360,11 +372,11 @@
     "lateBindings": 0
   },
   "render_md.js": {
-    "lines": 1025,
+    "lines": 1021,
     "maxFnLines": 89,
     "maxIifeLines": 0,
     "fnOver100": 0,
-    "topLevelLetVar": 6,
+    "topLevelLetVar": 2,
     "configureDeps": 0,
     "deadInjections": 0,
     "innerHTMLAssign": 0,

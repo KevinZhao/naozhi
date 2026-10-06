@@ -288,12 +288,13 @@ test('seeded fuzz over markdown metacharacters, placeholders and payloads', () =
 });
 
 // A fresh module instance (the query string defeats the ESM cache) whose
-// KaTeX onload has fired, so renderKatex calls renderToString. The stub
-// mirrors katex-error, which copies the TeX source into a title attribute.
+// KaTeX stylesheet and script have both loaded, so renderKatex calls
+// renderToString. The stub mirrors katex-error, which copies the TeX source
+// into a title attribute.
 test('inline math wrapping a code span stays text once KaTeX is loaded', async () => {
   const realCreate = document.createElement;
-  let script;
-  document.createElement = () => (script = { setAttribute() {} });
+  const assets = [];
+  document.createElement = () => { const el = {}; assets.push(el); return el; };
   const m = await import('../internal/server/static/render_md.js?katex-ready');
   m.loadKatex();
   document.createElement = realCreate;
@@ -303,7 +304,7 @@ test('inline math wrapping a code span stays text once KaTeX is loaded', async (
     render() {},
   };
   try {
-    script.onload();
+    assets.forEach(el => el.onload());
     assert.ok(m.renderMd('$x+1$').includes('<span class="katex-error" title="ParseError: x+1">'), 'stub is live');
     assert.equal(m.renderMd('$x_`a``b`$ q'), '$x_<code class="md-code">a</code><code class="md-code">b</code>$ q<br>');
     assert.equal(m.inlineMd('\\(a `b` c\\)'), '\\(a <code class="md-code">b</code> c\\)');
@@ -318,5 +319,91 @@ test('inline math wrapping a code span stays text once KaTeX is loaded', async (
     }
   } finally {
     delete window.katex;
+  }
+});
+
+// While mermaid is not loaded, a diagram whose <pre> is not attached yet keeps
+// its source for a later flush; once attached, the flush writes the source in,
+// and a failed load marks it unavailable. A fresh module instance keeps this
+// load state away from the other tests.
+test('a pending diagram shows its source, marked once the mermaid load fails', async () => {
+  const real = { createElement: document.createElement, getElementById: document.getElementById, setTimeout };
+  let script;
+  document.createElement = () => (script = { setAttribute() {} });
+  globalThis.setTimeout = () => 0;
+  try {
+    const m = await import('../internal/server/static/render_md.js?mermaid-pending');
+    const id = m.renderMd('```mermaid\ngraph TD;A-->B;\n```').match(/id="(mmd-\d+)"/)[1];
+    m.runMermaid();
+    const classes = new Set();
+    const el = { textContent: '', title: '', classList: { toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)) } };
+    document.getElementById = q => (q === id ? el : null);
+    m.runMermaid();
+    assert.equal(el.textContent, 'graph TD;A-->B;');
+    assert.equal(classes.has('md-render-unavailable'), false);
+    script.onerror();
+    assert.equal(classes.has('md-render-unavailable'), true);
+    assert.match(el.title, /离线/);
+  } finally {
+    Object.assign(document, { createElement: real.createElement, getElementById: real.getElementById });
+    globalThis.setTimeout = real.setTimeout;
+  }
+});
+
+// KaTeX is ready only once its stylesheet has loaded too: the script alone
+// renders the MathML and HTML copies side by side. The retry re-requests just
+// the asset that failed.
+test('a KaTeX load whose stylesheet fails retries the stylesheet only', async () => {
+  const real = { createElement: document.createElement, setTimeout };
+  const assets = [];
+  let retry;
+  document.createElement = tag => { const el = { tag }; assets.push(el); return el; };
+  globalThis.setTimeout = fn => { retry = fn; return 0; };
+  try {
+    const m = await import('../internal/server/static/render_md.js?katex-css');
+    m.renderMd('$x^2$');
+    assert.deepEqual(assets.map(el => el.tag), ['link', 'script']);
+    assets[0].onerror();
+    assets[1].onload();
+    assert.ok(m.renderMd('$y^2$').includes('katex-pending'), 'not ready without the stylesheet');
+    retry();
+    assert.deepEqual(assets.map(el => el.tag), ['link', 'script', 'link']);
+    assert.equal(assets[2].href, assets[0].href);
+    window.katex = { renderToString: () => '<span class="katex">k</span>', render() {} };
+    assets[2].onload();
+    assert.ok(m.renderMd('$z^2$').includes('class="katex"'), 'ready once both have loaded');
+  } finally {
+    Object.assign(document, { createElement: real.createElement });
+    globalThis.setTimeout = real.setTimeout;
+    delete window.katex;
+  }
+});
+
+// Once the retry has failed too, nothing will render a pending diagram, so a
+// flush marks the attached ones and drops every entry: an offline page that
+// keeps streaming diagrams does not grow mermaidPending.
+test('pending diagrams are dropped once the mermaid load has failed for good', async () => {
+  const real = { createElement: document.createElement, getElementById: document.getElementById, setTimeout };
+  const scripts = [];
+  let retry;
+  document.createElement = () => { const el = {}; scripts.push(el); return el; };
+  globalThis.setTimeout = fn => { retry = fn; return 0; };
+  try {
+    const m = await import('../internal/server/static/render_md.js?mermaid-final');
+    const ids = m.renderMd('```mermaid\ngraph TD;A;\n```\n\n```mermaid\ngraph TD;B;\n```').match(/mmd-\d+/g);
+    const classes = new Set();
+    const el = { textContent: '', title: '', classList: { toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)) } };
+    document.getElementById = q => (q === ids[0] ? el : null);
+    m.runMermaid();
+    scripts[0].onerror();
+    assert.deepEqual(Object.keys(m.mermaidPending), ids, 'kept for the retry');
+    retry();
+    scripts[1].onerror();
+    assert.deepEqual(Object.keys(m.mermaidPending), []);
+    assert.equal(el.textContent, 'graph TD;A;');
+    assert.equal(classes.has('md-render-unavailable'), true);
+  } finally {
+    Object.assign(document, { createElement: real.createElement, getElementById: real.getElementById });
+    globalThis.setTimeout = real.setTimeout;
   }
 });

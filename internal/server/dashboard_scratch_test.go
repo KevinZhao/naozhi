@@ -32,7 +32,7 @@ func newScratchTestServer(t *testing.T) (*Server, *handlerSet) {
 
 func TestScratchOpen_Happy(t *testing.T) {
 	srv, hs := newScratchTestServer(t)
-	srv.router.InjectSession("feishu:direct:alice:general", session.NewTestProcess())
+	routerOf(srv).InjectSession("feishu:direct:alice:general", session.NewTestProcess())
 
 	body := `{"source_key":"feishu:direct:alice:general","quote":"what does the circuit breaker do?"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", strings.NewReader(body))
@@ -65,7 +65,7 @@ func TestScratchOpen_Happy(t *testing.T) {
 
 func TestScratchOpen_MissingQuote(t *testing.T) {
 	srv, hs := newScratchTestServer(t)
-	srv.router.InjectSession("feishu:direct:alice:general", session.NewTestProcess())
+	routerOf(srv).InjectSession("feishu:direct:alice:general", session.NewTestProcess())
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open",
 		strings.NewReader(`{"source_key":"feishu:direct:alice:general"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -92,7 +92,7 @@ func TestScratchOpen_SourceIsScratchRefused(t *testing.T) {
 	srv, hs := newScratchTestServer(t)
 	// Simulate a live scratch source.
 	scratchKey := "scratch:aaaaaa:general:general"
-	srv.router.InjectSession(scratchKey, session.NewTestProcess())
+	routerOf(srv).InjectSession(scratchKey, session.NewTestProcess())
 
 	body, _ := json.Marshal(map[string]string{"source_key": scratchKey, "quote": "x"})
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", bytes.NewReader(body))
@@ -144,7 +144,7 @@ func TestScratchDelete_UnknownReturns204(t *testing.T) {
 
 func TestScratchDelete_Known(t *testing.T) {
 	srv, hs := newScratchTestServer(t)
-	srv.router.InjectSession("feishu:direct:alice:general", session.NewTestProcess())
+	routerOf(srv).InjectSession("feishu:direct:alice:general", session.NewTestProcess())
 	sc, err := srv.scratchPool.Open(session.OpenOptions{
 		SourceKey: "feishu:direct:alice:general",
 		AgentID:   "general",
@@ -167,7 +167,7 @@ func TestScratchDelete_Known(t *testing.T) {
 
 func TestScratchPromote_RenamesSession(t *testing.T) {
 	srv, hs := newScratchTestServer(t)
-	srv.router.InjectSession("feishu:direct:alice:general", session.NewTestProcess())
+	routerOf(srv).InjectSession("feishu:direct:alice:general", session.NewTestProcess())
 	sc, err := srv.scratchPool.Open(session.OpenOptions{
 		SourceKey: "feishu:direct:alice:general",
 		AgentID:   "general",
@@ -179,7 +179,7 @@ func TestScratchPromote_RenamesSession(t *testing.T) {
 	// The scratch key must be registered in the router for promote to
 	// succeed — InjectSession handles this for a different key; here we
 	// inject at sc.Key to simulate the first send having happened.
-	srv.router.InjectSession(sc.Key, session.NewTestProcess())
+	routerOf(srv).InjectSession(sc.Key, session.NewTestProcess())
 
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/"+sc.ID+"/promote", nil)
 	req.SetPathValue("id", sc.ID)
@@ -224,10 +224,10 @@ func TestScratchPromote_UnknownID(t *testing.T) {
 func TestScratchListFilteredFromSessions(t *testing.T) {
 	// handleList must hide scratch keys from the sidebar payload.
 	srv, _ := newScratchTestServer(t)
-	srv.router.InjectSession("feishu:direct:alice:general", session.NewTestProcess())
+	routerOf(srv).InjectSession("feishu:direct:alice:general", session.NewTestProcess())
 	// 32-char scratch id (lowercase hex) matches the newScratchID shape.
 	scratchKey := "scratch:cccccccccccccccccccccccccccccccc:general:general"
-	srv.router.InjectSession(scratchKey, session.NewTestProcess())
+	routerOf(srv).InjectSession(scratchKey, session.NewTestProcess())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
@@ -255,7 +255,7 @@ func TestScratchOpen_InjectsSurroundingContext(t *testing.T) {
 	proc.EventLog.Append(clievent.EventEntry{Time: 4000, Type: "user", Detail: "the quoted question"})
 	proc.EventLog.Append(clievent.EventEntry{Time: 5000, Type: "text", Detail: "a2 after"})
 	proc.EventLog.Append(clievent.EventEntry{Time: 6000, Type: "user", Detail: "q2 after"})
-	srv.router.InjectSession("feishu:direct:alice:general", proc)
+	routerOf(srv).InjectSession("feishu:direct:alice:general", proc)
 
 	body := `{"source_key":"feishu:direct:alice:general","quote":"the quoted question","source_message_time":4000,"context_turns":5}`
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", strings.NewReader(body))
@@ -317,7 +317,7 @@ func TestScratchOpen_InjectsSurroundingContext(t *testing.T) {
 func TestScratchOpen_TurnCountClamped(t *testing.T) {
 	srv, hs := newScratchTestServer(t)
 	proc := session.NewTestProcess()
-	srv.router.InjectSession("feishu:direct:alice:general", proc)
+	routerOf(srv).InjectSession("feishu:direct:alice:general", proc)
 
 	body := `{"source_key":"feishu:direct:alice:general","quote":"hi","context_turns":9999}`
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", strings.NewReader(body))
@@ -355,7 +355,7 @@ func TestScratchOpen_NoTimestampFallback(t *testing.T) {
 	proc.EventLog.Append(clievent.EventEntry{Time: 3000, Type: "tool_use", Tool: "Read", Summary: "noise"})
 	proc.EventLog.Append(clievent.EventEntry{Time: 4000, Type: "user", Detail: "new-q2"})
 	proc.EventLog.Append(clievent.EventEntry{Time: 5000, Type: "text", Detail: "new-a2"})
-	srv.router.InjectSession("feishu:direct:alice:general", proc)
+	routerOf(srv).InjectSession("feishu:direct:alice:general", proc)
 
 	// No source_message_time field → server treats as 0 and takes the tail.
 	body := `{"source_key":"feishu:direct:alice:general","quote":"asking about prior conversation"}`
@@ -400,7 +400,7 @@ func TestScratchOpen_NoTimestampFallback(t *testing.T) {
 // sweep manually via exposed test seam.
 func TestScratchSweeperRegistered(t *testing.T) {
 	srv, _ := newScratchTestServer(t)
-	srv.router.InjectSession("feishu:direct:alice:general", session.NewTestProcess())
+	routerOf(srv).InjectSession("feishu:direct:alice:general", session.NewTestProcess())
 	sc, _ := srv.scratchPool.Open(session.OpenOptions{
 		SourceKey: "feishu:direct:alice:general",
 		AgentID:   "general",
