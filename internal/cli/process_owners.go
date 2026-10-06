@@ -57,6 +57,9 @@ type turnState struct {
 	// or past its deadline), so that result is nobody's to consume. Cleared
 	// when the next Send claims the turn.
 	sendAbandoned bool
+	// abandonedBooked: the result sendAbandoned left behind has been booked,
+	// so a later stray result is not that run's.
+	abandonedBooked bool
 	// runID is the run (ctxutil.RunID) of the Send that claimed the process
 	// last, kept after it returns so a result it gave up on can name it.
 	runID string
@@ -82,6 +85,7 @@ func (t *turnState) transitionLocked(ev stateEvent) (prev ProcessState, moved bo
 				t.abortRequested.orphan(t.runID)
 			}
 			t.sendAbandoned = false
+			t.abandonedBooked = false
 		}
 	}
 	return prev, moved
@@ -106,10 +110,18 @@ func (t *turnState) claimSend(runID string) (prev ProcessState, claimed bool) {
 func (t *turnState) noLiveSend() (none bool, abandonedRun string) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	if t.sendAbandoned && !t.unowned {
+	if t.sendAbandoned && !t.unowned && !t.abandonedBooked {
 		abandonedRun = t.runID
 	}
 	return t.state == StateReady || t.sendAbandoned, abandonedRun
+}
+
+// markAbandonedBooked records that the result of the abandoned Send has been
+// booked, so noLiveSend stops naming its run.
+func (t *turnState) markAbandonedBooked() {
+	t.mu.Lock()
+	t.abandonedBooked = true
+	t.mu.Unlock()
 }
 
 // currentRunID is the run of the Send that claimed the process last.

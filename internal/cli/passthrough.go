@@ -403,8 +403,10 @@ func (p *Process) fanoutTurnResult(owners []*sendSlot, ev clievent.Event) {
 
 	head := owners[0]
 	// One CLI turn may answer several runs: the head's carries the cost.
-	slog.Debug("passthrough: fanout", "owners", len(owners), "run_id", head.runID,
-		"merged_run_ids", followerRunIDs(owners), "result_len", len(ev.Result), "session", ev.SessionID)
+	if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		slog.Debug("passthrough: fanout", "owners", len(owners), "run_id", head.runID,
+			"merged_run_ids", followerRunIDs(owners), "result_len", len(ev.Result), "session", ev.SessionID)
+	}
 	mergedCount := len(owners)
 
 	headRes := resultFromEvent(ev)
@@ -563,6 +565,7 @@ func (p *Process) settleUnclaimedResult(ev clievent.Event, noLiveSend bool, aban
 		res := resultFromEvent(ev)
 		if abandonedRun != "" {
 			logAbandonedResult(p.slogger(), res, abandonedRun)
+			p.turn.markAbandonedBooked()
 		}
 		onResult(res)
 	}

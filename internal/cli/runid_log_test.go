@@ -190,6 +190,12 @@ func TestSendRunID_AbandonedSendResultNamesItsRun(t *testing.T) {
 	awaitBooked(t, booked, 0.001)
 	wantOneRecord(t, sink, abandonedMsg, "run-l")
 
+	sh.emitResult("s1", "stray duplicate")
+	awaitBooked(t, booked, 0.001)
+	if recs := sink.records(abandonedMsg); len(recs) != 1 {
+		t.Fatalf("a stray result after the abandoned one was settled got its run id: %v", recs)
+	}
+
 	sh.emitInit("s1")
 	sh.emitResult("s1", "background turn")
 	awaitBooked(t, booked, 0.001)
