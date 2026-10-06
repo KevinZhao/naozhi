@@ -204,8 +204,8 @@
     "lateBindings": 1
   },
   "dashboard.js": {
-    "lines": 1698,
-    "maxFnLines": 91,
+    "lines": 1703,
+    "maxFnLines": 93,
     "maxIifeLines": 61,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -396,7 +396,7 @@
     "lateBindings": 0
   },
   "running_banner.js": {
-    "lines": 508,
+    "lines": 509,
     "maxFnLines": 95,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -456,7 +456,7 @@
     "lateBindings": 0
   },
   "session_list.js": {
-    "lines": 1125,
+    "lines": 1133,
     "maxFnLines": 93,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -588,8 +588,8 @@
     "lateBindings": 0
   },
   "workflow_view.js": {
-    "lines": 131,
-    "maxFnLines": 16,
+    "lines": 641,
+    "maxFnLines": 42,
     "maxIifeLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 0,

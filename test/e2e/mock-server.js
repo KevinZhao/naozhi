@@ -285,7 +285,10 @@ function defaultGitStates() {
  *   has-more "1": the server's fail-open reply to a degraded disk read or a cancelled request.
  * @param {object} [overrides.workflows] - task_id → GET /api/sessions/workflow fixture ({epoch, version,
  *   workflow: WireView with every row in agents, result?, logs?, logs_truncated?, result_unavailable?});
- *   the route applies rows=none / since=&epoch= to it and 404s task ids not listed.
+ *   the route applies rows=none / since=&epoch= to it and 404s task ids not listed. A test may edit
+ *   the object in place; each request reads it then.
+ * @param {number} [overrides.workflowDelayMs] - Hold GET /api/sessions/workflow answers this long
+ *   (setWorkflowDelayMs changes it mid-test).
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
  *   (timezone / timezone_abbr / timezone_label ...). recent_runs_cap defaults to 5 like the backend.
@@ -427,6 +430,7 @@ function startMockServer(overrides = {}) {
   // mock reproduces that inclusivity deliberately; a `>` here would hide the bug.
   const agentEvents = overrides.agentEvents || {};
   const workflows = overrides.workflows || {};
+  let workflowDelayMs = overrides.workflowDelayMs || 0;
   // Every GET /api/sessions/workflow, as its query parameters.
   const workflowCalls = [];
   // compactPromptLimit: when set, GET /api/cron?compact=1 clips each prompt to
@@ -1038,8 +1042,10 @@ function startMockServer(overrides = {}) {
         return;
       }
       const { status, body } = workflowReply(fx, url.searchParams);
-      res.writeHead(status, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(body));
+      setTimeout(() => {
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(body));
+      }, workflowDelayMs);
       return;
     }
 
@@ -1331,10 +1337,20 @@ function startMockServer(overrides = {}) {
         messages: [],
         send(obj) {
           const payload = Buffer.from(JSON.stringify(obj));
-          const head =
-            payload.length < 126
-              ? Buffer.from([0x81, payload.length])
-              : Buffer.concat([Buffer.from([0x81, 126]), (() => { const b = Buffer.alloc(2); b.writeUInt16BE(payload.length); return b; })()]);
+          // RFC 6455 §5.2: a 7-bit length, or 126 + 16-bit, or 127 + 64-bit
+          // (a 400-agent workflow frame passes 64 KiB).
+          let head;
+          if (payload.length < 126) {
+            head = Buffer.from([0x81, payload.length]);
+          } else if (payload.length < 0x10000) {
+            head = Buffer.alloc(4);
+            head.writeUInt16BE(payload.length, 2);
+          } else {
+            head = Buffer.alloc(10);
+            head.writeBigUInt64BE(BigInt(payload.length), 2);
+          }
+          head[0] = 0x81;
+          if (payload.length >= 126) head[1] = payload.length < 0x10000 ? 126 : 127;
           socket.write(Buffer.concat([head, payload]));
         },
         close() { socket.end(); },
@@ -1417,6 +1433,7 @@ function startMockServer(overrides = {}) {
         get fullCronListCalls() { return fullCronListCalls; },
         get wsConnections() { return wsConnections; },
         get workflowCalls() { return workflowCalls; },
+        setWorkflowDelayMs(ms) { workflowDelayMs = ms; },
         // Mutators for tests that need the snapshot to CHANGE mid-run (e.g. a
         // /cd that moves a session's workspace). Bumping stats.version is what
         // makes the dashboard's version short-circuit re-render.

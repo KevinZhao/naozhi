@@ -2115,7 +2115,9 @@ classic→module 文件（`:36-44`），新 ES module **不**登记在那里。
     `workflow_set` 可达 37 条，§6.1，21 条的 LRU 会淘汰仍在跑的条目）；
     **行与结果只为当前 session 保留**：切走 session 时 `releaseRows(prevSid)` 丢掉各条目的 rows 与 result、置 `rowsLoaded=false` / `resultLoaded=false`
     （header / phases 保留），回来时展开的 workflow 经 gzip HTTP 重拉。切走后旧 session 的行不再收 delta，回来时无论如何都要补拉，留着只是占内存
-    （每个 workflow 最多 2000 行，移动端尤甚）。
+    （每个 workflow 最多 2000 行，移动端尤甚）。（PR-12：除 `selectSession` 的 `onWorkflowSessionSwitched` 外，`renderWorkflowPanel` 与
+    `onSessionsRefreshed` 发现面板上次画的 sid 已不在屏上时也释放它——cron / system / tuning / 发现会话预览把 `selection.key` 置空，auth_modal 的新会话
+    直接改 `selection.key`，都不经过 `selectSession`。）
   - 模块级可变状态一律放进 `const` 对象（`const clock = { offset: null }`、`const announced = new Set()`），**不写顶层 `let` / `var`**：
     js-ratchet 的 `topLevelLetVar` 是 per-file 台账键（见下文），PR-11 落地时为 0，之后的 PR 加一个顶层 `let` 就是一次抬升。
   - 顶层只有 `wsm.on(...)` 注册（`nz/no-module-side-effects` 豁免项，`eslint-plugin-nz.mjs:26-42`）；
@@ -2131,7 +2133,7 @@ classic→module 文件（`:36-44`），新 ES module **不**登记在那里。
   又说 event_stream.js 不碰，PR-11 的文件清单里两者都没有——模块从不被执行，`wsm.on` handler 从不注册；import map 与 modulepreload
   只取回模块、不执行它）。PR-11 在 `dashboard.js` 加一行副作用 import `import './workflow_view.js';`，handler 从 PR-11 起生效、store 开始填充
   （尚不渲染）；PR-12 把它换成具名 import（`renderWorkflowPanel`、`onSessionsRefreshed`、`onWorkflowSessionSwitched`、`dropWorkflowSession`、
-  `workflowActions`）。
+  `workflowActions`）。（PR-12：具名 import 只有四个，没有 `dropWorkflowSession`——session 删除发生在 `tuning.js` 的 `dismissSession`、其他 tab 与服务端，dashboard.js 没有一处能看全；改为 `onSessionsRefreshed` 每次刷新时丢掉 payload 不再列出的 sid 的 store，删除从哪里发生都覆盖，导出随之删除。）
 - **js-ratchet**：TOTAL.lines 只能降（`scripts/js-ratchet.mjs`），`ratchet-raises` 是必过 job
   （`ci.yml:60-69,80-100`），**只认本 PR 追加**的 `scripts/ratchet-raises.jsonl` 行，from/to 须精确
   （`tools/ratchet-raises/ledger.go`）。所以**任何**改动 `static/*.js`（含生成的 `contract.js`）或 golden pin 的 PR——PR-10 至 PR-15——
@@ -2152,7 +2154,7 @@ classic→module 文件（`:36-44`），新 ES module **不**登记在那里。
 `renderWorkflowPanel()`。dashboard.js 现 2860 行、硬上限 2878（`scripts/js-ratchet.caps.json`），余量 18 行。本特性对它的**全部**净增
 （v3 只算了上面两行）：PR-11 的副作用 import +1；PR-12 的上面两行 +2、import 改具名（多行 import 块）约 +1-2、`registerActions` 表项 +1、
 `onSessionsApplied(onSessionsRefreshed)` +1、会话切换处的 `onWorkflowSessionSwitched` +1，合计约 +7，在余量之内；超出时把 import 并进既有的
-import 块。
+import 块。（PR-12：dashboard.js 在本特性之前已缩到 1698 行、上限 1713，PR-12 实增 +5（具名 import 替换原行不增行、面板 div、`renderWorkflowPanel()`、`...workflowActions`、`onSessionsApplied(onSessionsRefreshed)`、`selectSession` 里一行带守卫的 `onWorkflowSessionSwitched`），`renderMainShell` 因此 +2 行，`dashboard.js.maxFnLines` 91 → 93 记台账。）
 
 - **不放进 `#running-banner`**：banner 在 parent 空闲时隐藏（`running_banner.js:207-212`），移动端
   键盘弹出时 `display:none!important`（`responsive.css:182`），且每个事件整块 innerHTML 重建
@@ -2235,7 +2237,7 @@ import 块。
   `static_inline_style_test.go` 只管 `style=` 属性；PR-12 截图覆盖 light/dark。
 - 可点击行：行内主体是真 `<button type="button" class="wf-row-btn" data-action="wf-open-agent">`
   （原生 Enter / Space 激活；`dashActivate` 只认 Enter，`dashboard.js:2802-2807`，不改它以免波及全局）；
-  queued 且从未有 agentId 的行渲染为非按钮。
+  queued 且从未有 agentId 的行渲染为非按钮。（PR-12：按钮条件是 `agent_id` 或 `prev_agent_ids` 非空，`data-agent-id` 取前者、否则最后一个旧 attempt；PR-12 的 `wf-open-agent` 只把该行标为选中（`wf-sel` + `aria-current`，即 drill-in 中的那一行的样式），`switchTo` 由 PR-13 接上——PR-13 之前 agent_events 不认 workflow agentId，接了只会打开一个报错的视图。）
 - `degraded` 非空时 header 末尾加一个 chip（文本取显示表：`snapshot_stale` → "连接中断，进度可能过时"、`no_snapshot` → "暂无明细"、
   `decode_error` → "部分字段无法解析"、`snapshot_dropped` → "明细过大，已停止更新"、`too_many` → "仅显示概要"、`phases_capped` → "phase 过多，部分未显示"），`--nz-text-mute`，不改状态字形。
   `unknown` 条目属于显示集合（§4.2），与 running 一样列在终态之前。
@@ -2260,7 +2262,10 @@ import 块。
 - DOM 按 `index` 建 keyed Map（index → row element）。`rev` 变化的行：若 `state` 或 `agent_id` 与该元素渲染时不同（queued → running 时行要从非按钮
   变成带 `data-agent-id` 的 `<button>`，状态类与 `.sr-only` 文本也要换），**重建该行元素**并在 Map 里替换；否则只改 `textContent`。
   v4 只写"改 textContent"，探针里的 B 从 queued 变成 running 后会一直不可点。phase header 只改计数与 `<progress>.value`。
-- 每 phase 最多渲染 60 行，"显示其余 N 个"按钮（data-action）在客户端分页展开；折叠的 phase / workflow
+  （PR-12：每个 workflow 的视图记着它画的 store 条目与 epoch。条目被替换（新 epoch 的 `workflow_set` 删掉旧条目、紧随的 full 帧重建，两者落在
+  同一次批量重绘之前）或 epoch 变了（重启后的新 board，rev 从头计），行 / phase / 结果缓存全部清掉，否则 (index, rev) 相同的新行会沿用旧元素；
+  `<details>` 仍开着而条目未展开（被替换或被释放的条目 `open=false`）时，重绘对条目 `expand(e, true)` 并拉行，否则面板停在"加载中…"。）
+- 每 phase 最多渲染 60 行，"显示其余 N 个"按钮（data-action）在客户端分页展开；（PR-12：每次点击多显示 60 行；phase 用嵌套 `<details>`，全部 done 的默认折叠、用户的开合在本页内记住；`phase_index` 不在 phases 里的行归入末尾的"其他"组）折叠的 phase / workflow
   不渲染行。
 - 行只经 gzip HTTP 首次加载（展开时）；WS 只带 header 与变化行，每帧 ≤ 192KiB（§6.1）。
 
@@ -2271,7 +2276,7 @@ import 块。
 - task_type 被 `ForWire` 剥离（`clievent/wire.go:47-55`），前端本就无法从事件流识别 workflow——专用帧
   是唯一判别来源。
 - 会话切换：store 按 sid 保留 header / phases，切走时 `onWorkflowSessionSwitched(prevSid)` 释放旧 sid 的行（§7.1）；session 删除时
-  `dropWorkflowSession`；订阅后的 `workflow_set` 裁掉不在新 board 里的条目（`/new` 后面板清空），随后的 full 帧覆盖 header。
+  `dropWorkflowSession`（PR-12：改为 `onSessionsRefreshed` 丢掉 payload 不再列出的 sid，§7.1）；订阅后的 `workflow_set` 裁掉不在新 board 里的条目（`/new` 后面板清空），随后的 full 帧覆盖 header。
 - `/api/sessions` 刷新（`sessions_update` → `debouncedFetchSessions`，`session_list.js:1072`）后经 **`onSessionsApplied` hook**
   调用 `onSessionsRefreshed`（§6.1 的无推送兜底）。挂在这个 hook 上是有意的：它只在 `sessionsUnchanged` 判定 payload 确有变化之后执行
   （`session_list.js:275-286`），而计数型 sessions_update 经 `BumpVersion` 推进了 `stats.version`（§5.8），所以 WS 连着时也会走到。
@@ -2977,12 +2982,12 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   `session_list.js`（`sessions_update` 处理器里 suspended 升级，几行）、`running_banner.js`（toolVerbs）、
   `css/views.css`（`.wf-*`）、`css/responsive.css`（kbd-open）、e2e spec（含 §7.7 断言）、mock-server（64-bit 长度分支 +
   ws override，含 `workflow_set`；sessions_update 带 `protocol` 的快照；终态后 `source:"result_file"` 的 delta 与带 result 的 HTTP 响应）、截图、
-  `scripts/ratchet-raises.jsonl`、js-ratchet baseline。
+  `scripts/ratchet-raises.jsonl`、js-ratchet baseline。（PR-12：e2e spec 是 `test/e2e/workflow_panel.test.js`；mock 只加了 64-bit 长度分支与 `workflowDelayMs` / `setWorkflowDelayMs`（答复延迟，用来让"没有别的请求"的断言有确定的栅栏，e2e 的 fixed-wait ratchet 不许 `waitForTimeout`）——`protocol` 快照与 workflow fixture 的变化由测试原地改它传进去的对象；截图不入库，附在 PR。session 切换后才落地的拉取释放该 sid 的行，不留在非当前 session 上。suspended 升级另要求 `subscribedNode` 一致且没有在途的 subscribe，避免一次 sessions_update 发两次。）
 - ratchet 台账：`js-ratchet:TOTAL.lines`，以及可能的 `js-ratchet:<file>.maxFnLines` / `fnOver100`（per-file 行数只改基线）。模块状态都在 `const` 对象里，
   `workflow_view.js.topLevelLetVar` 保持 0（§7.1；v4 的"模块级 offset"若写成顶层 `let` 就是一次没登记的抬升）。
 - 测试：§11.4a。
 - 验收：desktop/mobile × light/dark 截图；三个 running workflow 时 transcript 仍可见；400-agent 合成
-  fixture 下滚动与更新流畅（Performance 面板单帧 < 16ms 的截图附 PR）；HTTP 拉取次数断言（含自动展开的 workflow 完成后恰好一次结果请求）；
+  fixture 下滚动与更新流畅（Performance 面板单帧 < 16ms 的截图附 PR）；（PR-12：headless Chromium 的 rAF 节奏被压到约 133ms，帧间隔量不出东西，改为 e2e 里给每个 rAF 回调计时——面板就在其中绘制——并收集 longtask；数字写进 PR）HTTP 拉取次数断言（含自动展开的 workflow 完成后恰好一次结果请求）；
   WS 连接时计数型 sessions_update 后兜底刷新确实执行（断言 hook 被调用）；多节点 mock 下 remote session 不触发 workflow HTTP。
 - 依赖：PR-10、PR-11。
 
