@@ -8,22 +8,22 @@ import (
 	"testing"
 )
 
-// TestDashboardJS_ScratchAdmitEvent_SameMsReplay (#2456 review P0): the
+// TestAsideDrawerJS_ScratchAdmitEvent_SameMsReplay (#2456 review P0): the
 // scratch drawer polls HandleEvents with ?after=<lastEventTime>, which is now
 // inclusive of the watermark millisecond. renderNewEvents used to append
 // everything the poll returned, so every idle tick would re-render the tail
 // bubble(s) until a newer event arrived. scratchAdmitEvent must drop same-ms
 // replays by uuid — including the echoed user event that matchesPendingEcho
 // consumed on first sight — while still admitting a genuine same-ms sibling.
-func TestDashboardJS_ScratchAdmitEvent_SameMsReplay(t *testing.T) {
+func TestAsideDrawerJS_ScratchAdmitEvent_SameMsReplay(t *testing.T) {
 	t.Parallel()
 	nodeBin, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not installed")
 	}
-	djs, err := dashboardJS.ReadFile("static/dashboard.js")
+	djs, err := asideDrawerJS.ReadFile("static/aside_drawer.js")
 	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
+		t.Fatalf("read aside_drawer.js: %v", err)
 	}
 	src := string(djs)
 	block := extractContractBlock(t, src, "scratchAdmitEvent")
@@ -32,8 +32,8 @@ func TestDashboardJS_ScratchAdmitEvent_SameMsReplay(t *testing.T) {
 	// longer own the watermark itself.
 	rn := src[strings.Index(src, "function renderNewEvents("):]
 	rn = rn[:strings.Index(rn, "async function pollOnce(")]
-	if !strings.Contains(rn, "if (!scratchAdmitEvent(state, e)) continue;") {
-		t.Fatal("renderNewEvents must gate each event through scratchAdmitEvent(state, e)")
+	if !strings.Contains(rn, "if (!scratchAdmitEvent(ad.state, e)) continue;") {
+		t.Fatal("renderNewEvents must gate each event through scratchAdmitEvent(ad.state, e)")
 	}
 	if strings.Contains(rn, "state.lastEventTime = e.time") {
 		t.Fatal("renderNewEvents must not advance state.lastEventTime itself (scratchAdmitEvent owns the watermark)")

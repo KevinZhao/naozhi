@@ -34,6 +34,9 @@ export const selection = {
   // {pid, sessionId, cwd, procStartTime, node} when previewing a discovered session
   pendingDiscovered: null,
   pendingRestored: false,
+  // Router key of the open 追问 scratch session ('' when none), written by
+  // aside_drawer.js; ask_card sends answers given inside the drawer there.
+  scratchKey: '',
 };
 
 // composer: the message being written.
@@ -187,16 +190,6 @@ export const timers = {
   fetchDebounceResolvers: [],
   // running_banner's turn watchdog interval, set only while the open session runs.
   turnWatchdog: null,
-};
-
-// hooks: functions assigned at load by the aside drawer that owns them, for callers that load earlier.
-export const hooks = {
-  // Late-bound intra-module hooks (#2557 PR-E3): these used to be IIFE
-  // self-exports on window; they are module-scope lets now, assigned when the
-  // owning IIFE runs and read at event time (never at load time).
-  getActiveScratchKey: null,
-  closeScratchDrawer: null,
-  askAside: null,
 };
 
 // perSession: per-session maps keyed by session id (sid), each filled and

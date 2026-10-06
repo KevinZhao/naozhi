@@ -15,7 +15,7 @@ import (
 // workflow (phase Ask runs A and B in parallel, phase Sum runs C), with home
 // paths rewritten to /home/u and the init frames' tool / MCP / skill lists
 // trimmed. docs/rfc/workflow-dashboard.md §1.2.1 walks it line by line.
-const workflowProbeFixture = "testdata/workflow-probe-3agent.jsonl"
+const workflowProbeFixture = "workflow/testdata/probe-3agent.jsonl"
 
 func readWorkflowProbe(tb testing.TB) []string {
 	tb.Helper()
