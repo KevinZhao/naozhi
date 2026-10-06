@@ -46,6 +46,9 @@ func TestItemState(t *testing.T) {
 		if got != c.want || raw != c.wantRaw {
 			t.Errorf("%s: itemState = %q/%q, want %q/%q", c.name, got, raw, c.want, c.wantRaw)
 		}
+		if a := (&agentMemo{}).row(&c.it); a.State != c.want || a.Blocked != c.it.Blocked {
+			t.Errorf("%s: row = %s blocked %v, want %s blocked %v", c.name, a.State, a.Blocked, c.want, c.it.Blocked)
+		}
 	}
 }
 

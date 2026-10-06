@@ -1724,12 +1724,16 @@ R5  **有**存活进程、但 retained 条目没人认领（v4 新增）：R4 �
     error、is_backgrounded），不带 status 的 patch 并不取代更早的 status，所以两种 patch 各占一格（PR-6；只占一格时
     `paused` 之后一个只改 description 的 patch 会让种子回到 running）。这一条对 running 的 workflow 同样生效（它没有终态帧，
     但不需要等终态格填满）；
-  - 快照格的最新一行解码后身份复核不过（`Failed`，§5.7 L1'）时，live 路径保留的是更早一张快照的行：逆序遍历时每 task 另登记至多 3 行更旧的
-    快照行（不解码），由新到旧解码，取第一张能用的、紧挨在失败那张之前应用（两者之间只可能是该 task 的 header 类帧，失败那张随后照常更新 header）；3 行都不行就不再往前（零行 + `decode_error`）（PR-6）。
+  - 某格的最新一行整行解不出（live 路径丢弃该行），或快照格的最新一行身份复核不过（`Failed`，§5.7 L1'）时，live 路径保留的是该类更早的一行：
+    逆序遍历时每格另登记至多 3 行更旧的同类行（不解码），由新到旧解码，取第一行能用的；3 行都不行就不再往前（快照格为零行 + `decode_error`）（PR-6）。
+    小帧格在应用前先解码，回落行在**自己的位置**应用。快照格仍按序惰性解码，回落快照紧挨在失败那张之前应用（两者之间只可能是该 task 的 header 类帧，
+    复核失败的那张随后照常更新 header；整行解不出的那张没有 header，于是比回落快照新的 header 格那一行再应用一次）。
+  - 规则 3 按位置生效：每 task 记下最旧一行快照类行的位置（前缀命中即规则 3 的证据），应用游标越过它之后该 id 视为已知（规则 2b），
+    所以只解了最新快照时，夹在两张快照之间的 `paused` 等 patch 照样被收下，与 live 一致（PR-6）。
   - `subtype":"task_started` 与 `async_launched` 行总要登记并解码（名称、task_type、RunID、TranscriptDir 与等级 3 的 SessionID 只在这里）。
   - 种子条目的 `LastObservedAt` 为 0（replay 不带时间戳，不取观测时刻），由 board 合并时补（§5.8 第 3 步）。
   v3 只跳过快照行：ring 绕回后几乎全是小的 task_progress 行，每行仍要反射解码（实测 347B 的行 6.8-9.1µs / 440B，10k 行约
-  70-90ms / 4.4MB，是 v3 所写预算的 3-4 倍）。现在解码次数为 O(task 数)：每 task ≤ 5 行 + task_started + launch 行（快照格失败时另加 ≤ 3 行）。
+  70-90ms / 4.4MB，是 v3 所写预算的 3-4 倍）。现在解码次数为 O(task 数)：每 task ≤ 5 行 + task_started + launch 行（某格回落时该格另加 ≤ 3 行）。
 - 不把 replay 帧写进 ring / persist（`router_shim.go:409-413` 的既有约束：replay 无时间戳；
   persist sink 最后才装，`router_shim.go:483-486`）。
 - 已知：长 workflow 后 replay ring 几乎必然已淘汰 `task_started` 与 launch tool_result

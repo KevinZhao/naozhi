@@ -69,8 +69,52 @@ func TestApplyResultFile_Authoritative(t *testing.T) {
 	// Later frames: a notification adds its summary only; a task_updated
 	// cannot move the status the file set.
 	observeAll(tr, t0, notification("w1", "failed"), updated("w1", "killed", 1))
-	if w := get(t, tr, "w1"); w.Tokens != 777 || w.NotifySummary != "note" || w.Status != StatusCompleted || w.EndedAt != 1500 {
+	if w := get(t, tr, "w1"); w.Tokens != 777 || w.NotifySummary != "note" || w.Status != StatusCompleted || w.EndedAt != 1500 ||
+		w.Source != SourceResultFile || !w.ResultLoaded {
 		t.Fatalf("after the file: %+v", *w)
+	}
+}
+
+// TestApplyResultFile_ClearsRawStatus: a file's status replaces an unknown
+// one, raw text included.
+func TestApplyResultFile_ClearsRawStatus(t *testing.T) {
+	t.Parallel()
+	tr := New(nil)
+	observeAll(tr, t0, progress("w1", running(1, "a1")), updated("w1", "adopted", 0))
+	if w := get(t, tr, "w1"); w.Status != StatusUnknown || w.RawStatus != "adopted" {
+		t.Fatalf("fixture: %s/%q", w.Status, w.RawStatus)
+	}
+	if !tr.ApplyResultFile(resultFor("w1", doneItem(1, "a1", "A"))) {
+		t.Fatal("not merged")
+	}
+	if w := get(t, tr, "w1"); w.Status != StatusCompleted || w.RawStatus != "" {
+		t.Fatalf("merged: %s/%q", w.Status, w.RawStatus)
+	}
+}
+
+// TestApplyResultFile_EvictsTerminal: a merge that ends a running entry
+// keeps the terminal bound, evicting the oldest by EndedAt for good.
+func TestApplyResultFile_EvictsTerminal(t *testing.T) {
+	t.Parallel()
+	tr := New(nil)
+	for i := 1; i <= maxTerminal; i++ {
+		id := fmt.Sprintf("w%02d", i)
+		observeAll(tr, t0, progress(id, running(1, "a")), updated(id, "completed", int64(i)))
+	}
+	tr.Observe(progress("wrun", running(1, "a1")), t0)
+	if !tr.ApplyResultFile(resultFor("wrun", doneItem(1, "a1", "A"))) { // EndedAt 1500, the newest
+		t.Fatal("not merged")
+	}
+	var ended []string
+	for _, w := range tr.Load().Workflows {
+		ended = append(ended, w.TaskID)
+	}
+	if fmt.Sprint(ended) != "[wrun w05 w04 w03 w02]" {
+		t.Fatalf("entries after the merge: %v", ended)
+	}
+	tr.Observe(notification("w01", "completed"), t0)
+	if n := len(tr.Load().Workflows); n != maxTerminal {
+		t.Fatalf("a late frame rebuilt the evicted w01: %d entries", n)
 	}
 }
 
@@ -334,7 +378,7 @@ func TestApplyResultFile_PhasesCappedSticks(t *testing.T) {
 		t.Fatalf("merge: %q", get(t, tr, "w1").Degraded)
 	}
 	tr.Observe(notification("w1", "completed"), t0)
-	if w := get(t, tr, "w1"); w.Degraded != DegradedPhasesCapped {
-		t.Fatalf("a later notification cleared phases_capped: %q", w.Degraded)
+	if w := get(t, tr, "w1"); w.Degraded != DegradedPhasesCapped || w.Source != SourceResultFile || !w.ResultLoaded {
+		t.Fatalf("a later notification cleared phases_capped or the source: %q, %q", w.Degraded, w.Source)
 	}
 }

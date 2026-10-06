@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/workflow"
 )
 
@@ -124,8 +125,9 @@ func TestSeed_OnlyTerminalFrames(t *testing.T) {
 	tr, _ = seed(t, tail, true, probeTask)
 	w := only(t, tr)
 	if w.Status != workflow.StatusCompleted || w.Agents != nil || w.Degraded != workflow.DegradedNoSnapshot ||
-		w.EndedAt != 1791170031523 || w.Tokens != 53217 || w.NotifySummary == "" {
-		t.Fatalf("header-only entry: %+v", *w)
+		w.EndedAt != 1791170031523 || w.Tokens != 53217 || w.NotifySummary == "" ||
+		w.SessionID != probeSession || w.Src.SessionID != workflow.SessionFromProgress {
+		t.Fatalf("header-only entry: %+v src %+v", *w, w.Src)
 	}
 }
 
@@ -150,7 +152,8 @@ func TestSeed_DecodesPerTaskNotPerLine(t *testing.T) {
 		default:
 			lines = append(lines, smallProgress(task, i))
 		}
-		lines = append(lines, `{"type":"assistant","message":{"role":"assistant","content":[]}}`)
+		lines = append(lines, `{"type":"assistant","message":{"role":"assistant","content":[]}}`,
+			`{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_r","type":"tool_result","content":"file text"}]}}`)
 	}
 	tr, decodes := seed(t, lines, true)
 	// Per task: newest snapshot, newest header-only line, and for the one
@@ -207,6 +210,19 @@ func TestSeed_FailedNewestSnapshotFallsBack(t *testing.T) {
 	}
 	if len(got.Agents) != 3 || got.Degraded != want.Degraded || got.Counts != want.Counts || decodes != 2 {
 		t.Fatalf("seeded: %d rows, %q, counts %+v, %d decodes", len(got.Agents), got.Degraded, got.Counts, decodes)
+	}
+	// The newest usable older line wins; one that does not decode is not usable.
+	tr, _ = seed(t, []string{good, string(bigSnapshot(5, bigOpts{})), bad}, false)
+	if w := only(t, tr); len(w.Agents) != 5 {
+		t.Fatalf("fallback took an older snapshot: %d rows, want 5", len(w.Agents))
+	}
+	broken := strings.Replace(string(bigSnapshot(5, bigOpts{})), `"total_tokens":1000,`, `"total_tokens":"1000",`, 1)
+	if !strings.Contains(broken, `"1000"`) {
+		t.Fatal("fixture: usage not broken")
+	}
+	tr, _ = seed(t, []string{good, broken, bad}, false)
+	if w := only(t, tr); len(w.Agents) != 3 {
+		t.Fatalf("fallback stopped at an undecodable line: %d rows, want 3", len(w.Agents))
 	}
 	tr, decodes = seed(t, []string{good, bad, bad, bad, bad}, false)
 	if w := only(t, tr); len(w.Agents) != 0 || w.Degraded != workflow.DegradedDecodeError || decodes != 4 {
@@ -275,5 +291,87 @@ func TestSeed_StatuslessPatchKeepsStatus(t *testing.T) {
 	tr, _ = seed(t, lines, false)
 	if w := only(t, tr); w.Status != workflow.StatusCompleted || w.EndedAt != 42 {
 		t.Fatalf("seeded terminal: %s ended %d", w.Status, w.EndedAt)
+	}
+}
+
+// feedLenient observes lines live, dropping the ones that fail to decode
+// as the read loop does.
+func feedLenient(tb testing.TB, tr *workflow.Tracker, lines ...string) {
+	tb.Helper()
+	var proto cli.ClaudeProtocol
+	for _, line := range lines {
+		events, _, err := proto.ReadEvent(line)
+		if err != nil {
+			continue
+		}
+		for j := range events {
+			tr.Observe(&events[j], time.UnixMilli(1791170018000))
+		}
+	}
+}
+
+// TestSeed_UndecodableLineFallsBack: a newest line that does not decode at
+// all leaves live with the older line of its class; the seed agrees.
+func TestSeed_UndecodableLineFallsBack(t *testing.T) {
+	t.Parallel()
+	all := probeLines(t)
+	breakUsage := func(line string) string {
+		out := strings.Replace(line, `"total_tokens":53217`, `"total_tokens":"53217"`, 1)
+		if out == line {
+			t.Fatal("fixture: no usage to break")
+		}
+		if _, _, err := (&cli.ClaudeProtocol{}).ReadEvent(out); err == nil {
+			t.Fatal("fixture: broken line still decodes")
+		}
+		return out
+	}
+	cases := map[string][]string{
+		// The newest snapshot is the only line of its class that broke.
+		"snapshot": append(pickLines(all, span(1, 11)...), breakUsage(all[12])),
+		// Same, with header line 12 between the fallback and the broken
+		// line: its header still wins over snapshot 11's.
+		"snapshot after a header": append(pickLines(all, span(1, 12)...), breakUsage(all[12])),
+		// Line 12 before snapshot 11 is not applied again after it.
+		"snapshot after an older header": append(pickLines(all, append(span(1, 10), 12, 11)...), breakUsage(all[12])),
+		// The newest header-only line broke: line 12 still counts.
+		"header": append(pickLines(all, span(1, 12)...), breakUsage(all[11])),
+		// Same with line 12 before snapshot 11: the fallback is applied at
+		// its own place, so the snapshot's header still wins.
+		"header before a snapshot": append(pickLines(all, append(span(1, 10), 12, 11)...), breakUsage(all[11])),
+	}
+	for name, lines := range cases {
+		live := workflow.New(nil)
+		feedLenient(t, live, lines...)
+		want := only(t, live)
+		tr, _ := seed(t, lines, false)
+		got := only(t, tr)
+		if len(got.Agents) != len(want.Agents) || got.Counts != want.Counts || got.Degraded != want.Degraded ||
+			got.Tokens != want.Tokens || got.DurationMS != want.DurationMS || got.Current != want.Current {
+			t.Errorf("%s: seeded %d rows %+v %q tokens %d duration %d; live %d rows %+v %q tokens %d duration %d", name,
+				len(got.Agents), got.Counts, got.Degraded, got.Tokens, got.DurationMS,
+				len(want.Agents), want.Counts, want.Degraded, want.Tokens, want.DurationMS)
+		}
+	}
+}
+
+// TestSeed_SnapshotBeforeStatusMakesItKnown: with no task_started, launch
+// or known id, an older snapshot is what made live take the patch after
+// it, even though the seed decodes only the newer one.
+func TestSeed_SnapshotBeforeStatusMakesItKnown(t *testing.T) {
+	t.Parallel()
+	const task = "wpause002"
+	lines := []string{
+		string(bigSnapshot(2, bigOpts{task: task})),
+		fmt.Sprintf(`{"type":"system","subtype":"task_updated","task_id":%q,"patch":{"status":"paused"},"uuid":"u","session_id":%q}`, task, probeSession),
+		string(bigSnapshot(3, bigOpts{task: task})),
+	}
+	live := workflow.New(nil)
+	feed(t, live, time.UnixMilli(1791170018000), lines...)
+	tr, decodes := seed(t, lines, true)
+	if got, want := only(t, tr), only(t, live); got.Status != workflow.StatusPaused || got.Status != want.Status || len(got.Agents) != 3 {
+		t.Fatalf("seeded %s with %d rows, live %s", got.Status, len(got.Agents), want.Status)
+	}
+	if decodes != 2 {
+		t.Errorf("%d decodes, want 2", decodes)
 	}
 }

@@ -211,6 +211,18 @@ func TestFieldSources(t *testing.T) {
 	if w := get(t, tr, "w1"); w.StartedAt != t0.Add(time.Minute).UnixMilli() || w.Name != "real" || w.SessionID != "sid-launch" {
 		t.Fatalf("lower grade overrode: %+v", *w)
 	}
+	// A known task's first frame may be a task_updated or a notification:
+	// each grades its session id like a progress frame.
+	tr.KnowTasks([]string{"wu", "wn"})
+	upd, note := updated("wu", "paused", 0), notification("wn", "completed")
+	upd.SessionID, note.SessionID = "sid-updated", "sid-note"
+	observeAll(tr, t0, upd, note)
+	if w := get(t, tr, "wu"); w.SessionID != "sid-updated" || w.Src.SessionID != SessionFromProgress {
+		t.Errorf("task_updated first: %q grade %d", w.SessionID, w.Src.SessionID)
+	}
+	if w := get(t, tr, "wn"); w.SessionID != "sid-note" || w.Src.SessionID != SessionFromProgress {
+		t.Errorf("notification first: %q grade %d", w.SessionID, w.Src.SessionID)
+	}
 	// An earlier snapshot time still improves a snapshot-graded StartedAt.
 	tr.Observe(progress("w2", running(1, "x")), t0)
 	tr.Observe(progress("w2", clievent.WorkflowItem{Type: clievent.WorkflowItemAgent, Index: 1, QueuedAt: 2, State: "start"}), t0)

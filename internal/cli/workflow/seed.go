@@ -28,8 +28,9 @@ const (
 	seedTaskIDKey        = `"task_id":"`
 	seedPatchKey         = `"patch":{`
 	maxSeedTaskIDLen     = 32
-	// maxSeedFallback older snapshot lines are tried, newest first, when a
-	// task's newest one fails the identity check; live kept their rows.
+	// maxSeedFallback older lines of a class are tried, newest first, when
+	// a task's newest one does not decode (or its snapshot fails the
+	// identity check): live kept the older one.
 	maxSeedFallback = 3
 )
 
@@ -51,21 +52,28 @@ const (
 // knows as workflows. Replay frames carry no time, so nothing seeded gets
 // LastObservedAt or a StartedAt from observation.
 //
-// A reverse walk picks lines by prefix alone, decoding none: per task the
-// newest line of each class, plus every task_started and launch line. The
-// picked lines are then decoded and applied oldest first, as live frames
-// would be — applying them newest first would let a terminal frame shut
-// out the snapshot before it. Decodes are O(tasks), not O(lines).
+// A reverse walk picks lines by prefix alone: per task the newest line of
+// each class, plus every task_started and launch line. The picks are then
+// decoded and applied oldest first, as live frames would be — applying
+// them newest first would let a terminal frame shut out the snapshot
+// before it. A pick that does not decode falls back to an older line of
+// its class, as live kept that one. Decodes are O(tasks), not O(lines).
 func (t *Tracker) SeedFromReplay(r Replay, dec Decoder, known []string) {
 	t.KnowTasks(known)
 	type pick struct {
 		line   int
-		events []clievent.Event // decoded already when the id needed it
-		snapOf string           // the task id, on a snapshot pick
+		class  int
+		id     string
+		events []clievent.Event // nil until decoded; snapshots decode last
+	}
+	type slot struct {
+		id    string
+		class int
 	}
 	var picks []pick
-	filled := map[string]*[numClasses]bool{}
-	older := map[string][]int{} // up to maxSeedFallback older snapshot lines
+	filled := map[slot]bool{}
+	older := map[slot][]int{} // up to maxSeedFallback older lines per slot
+	firstSnap := map[string]int{}
 	for i := len(r.Lines) - 1; i >= 0; i-- {
 		line := r.Lines[i]
 		class, ok := seedClass(line)
@@ -73,7 +81,7 @@ func (t *Tracker) SeedFromReplay(r Replay, dec Decoder, known []string) {
 			continue
 		}
 		if class == classAlways {
-			picks = append(picks, pick{line: i})
+			picks = append(picks, pick{line: i, class: class})
 			continue
 		}
 		id, ok := seedTaskID(line)
@@ -85,24 +93,50 @@ func (t *Tracker) SeedFromReplay(r Replay, dec Decoder, known []string) {
 			}
 			id = events[0].TaskID
 		}
-		slots := filled[id]
-		if slots == nil {
-			slots = &[numClasses]bool{}
-			filled[id] = slots
+		if class == classSnapshot {
+			firstSnap[id] = i
 		}
-		if slots[class] {
-			if class == classSnapshot && len(older[id]) < maxSeedFallback {
-				older[id] = append(older[id], i)
+		k := slot{id, class}
+		if filled[k] {
+			if len(older[k]) < maxSeedFallback {
+				older[k] = append(older[k], i)
 			}
 			continue
 		}
-		slots[class] = true
-		p := pick{line: i, events: events}
-		if class == classSnapshot {
-			p.snapOf = id
-		}
-		picks = append(picks, p)
+		filled[k] = true
+		picks = append(picks, pick{line: i, class: class, id: id, events: events})
 	}
+	// Small picks are decoded up front, so one that fails can fall back to
+	// an older line applied at its own place.
+	for k := range picks {
+		p := &picks[k]
+		if p.class == classSnapshot || p.class == classAlways {
+			continue
+		}
+		if p.events == nil {
+			p.events, _, _ = dec.ReadEvent(r.Lines[p.line])
+		}
+		for _, i := range older[slot{p.id, p.class}] {
+			if len(p.events) > 0 {
+				break
+			}
+			if prev, _, _ := dec.ReadEvent(r.Lines[i]); len(prev) > 0 {
+				p.line, p.events = i, prev
+			}
+		}
+	}
+	slices.SortFunc(picks, func(a, b pick) int { return b.line - a.line })
+	// A snapshot line is rule 3's evidence from its place on, even when
+	// only a newer one of its task is decoded.
+	type mark struct {
+		line int
+		id   string
+	}
+	marks := make([]mark, 0, len(firstSnap))
+	for id, i := range firstSnap {
+		marks = append(marks, mark{i, id})
+	}
+	slices.SortFunc(marks, func(a, b mark) int { return a.line - b.line })
 
 	t.mu.Lock()
 	apply := func(events []clievent.Event) {
@@ -113,18 +147,32 @@ func (t *Tracker) SeedFromReplay(r Replay, dec Decoder, known []string) {
 		}
 	}
 	for k := len(picks) - 1; k >= 0; k-- {
-		events := picks[k].events
-		if events == nil {
-			events, _, _ = dec.ReadEvent(r.Lines[picks[k].line])
+		p := picks[k]
+		for len(marks) > 0 && marks[0].line < p.line {
+			t.rememberLocked(marks[0].id, flagWorkflow)
+			marks = marks[1:]
 		}
-		if picks[k].snapOf != "" && snapshotFailed(events) {
+		events := p.events
+		if events == nil {
+			events, _, _ = dec.ReadEvent(r.Lines[p.line])
+		}
+		if p.class == classSnapshot && (len(events) == 0 || snapshotFailed(events)) {
 			// Live kept an older snapshot's rows. Applied right before this
-			// one, whose header then supersedes the frames in between.
-			for _, i := range older[picks[k].snapOf] {
-				if prev, _, _ := dec.ReadEvent(r.Lines[i]); !snapshotFailed(prev) {
-					apply(prev)
-					break
+			// one, whose header then supersedes the frames in between; one
+			// that did not decode has none, so the task's header pick, when
+			// newer than the fallback, is applied again.
+			for _, i := range older[slot{p.id, classSnapshot}] {
+				prev, _, _ := dec.ReadEvent(r.Lines[i])
+				if len(prev) == 0 || snapshotFailed(prev) {
+					continue
 				}
+				apply(prev)
+				if h := slices.IndexFunc(picks, func(q pick) bool {
+					return q.id == p.id && q.class == classHeader && q.line > i
+				}); h >= 0 && len(events) == 0 {
+					apply(picks[h].events)
+				}
+				break
 			}
 		}
 		apply(events)
