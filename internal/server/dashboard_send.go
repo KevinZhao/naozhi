@@ -7,6 +7,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
+	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -15,8 +16,8 @@ import (
 // limit so a file accepted here is not later rejected by the API; both values
 // match the byte counts announced to the user.
 const (
-	maxImageBytes = 10 << 20 // 10 MB
-	maxPDFBytes   = 32 << 20 // 32 MB (Anthropic API limit)
+	maxImageBytes = 10 << 20                      // 10 MB
+	maxPDFBytes   = limits.MaxFileAttachmentBytes // 32 MB (Anthropic API limit)
 
 	// uploadBodyBytes bounds the multipart envelope for /api/sessions/upload:
 	// maxPDFBytes + ~2 MB multipart overhead.
