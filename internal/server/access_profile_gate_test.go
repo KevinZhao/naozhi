@@ -13,6 +13,7 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
+	"github.com/naozhi/naozhi/internal/wireup"
 )
 
 // stubAPResolver satisfies accessProfileResolver for the gate test.
@@ -67,12 +68,13 @@ func TestGateRemoteAccessProfile_AgentProfile(t *testing.T) {
 }
 
 // A cron job routed to a profile-pinned agent spawns on that profile (#3106),
-// so both send paths' gates must hold its key local. buildServer wires a
-// job → routed agent → profile lookup into the resolver the engine (HTTP) and
-// the Hub (WS) share.
+// so both send paths' gates must hold its key local. The resolver carrying
+// that lookup comes from wireup.KeyResolver, as in production; the HTTP engine,
+// the Hub and the dispatcher must all use that instance, not a rebuilt one.
 func TestGateRemoteAccessProfile_CronKey(t *testing.T) {
 	t.Parallel()
 	agentCommands := map[string]string{"review": "reviewer"}
+	agents := map[string]session.AgentOpts{"general": {}, "reviewer": {AccessProfile: "personal"}}
 	sched := cron.NewScheduler(cron.SchedulerConfig{MaxJobs: 4, AllowNilRouter: true}, cron.SchedulerDeps{
 		Agents:        map[string]cron.AgentOpts{"general": {}, "reviewer": {AccessProfile: "personal"}},
 		AgentCommands: agentCommands,
@@ -84,11 +86,15 @@ func TestGateRemoteAccessProfile_CronKey(t *testing.T) {
 			t.Fatalf("AddJob: %v", err)
 		}
 	}
+	resolver := wireup.KeyResolver(agents, agentCommands, nil, sched)
 	srv, hs := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: session.NewRouter(session.RouterConfig{}),
-		Backend: "claude", Scheduler: sched, AgentCommands: agentCommands,
-		Agents: map[string]session.AgentOpts{"general": {}, "reviewer": {AccessProfile: "personal"}}})
+		Backend: "claude", Scheduler: sched,
+		Routing: RoutingOptions{Agents: agents, AgentCommands: agentCommands, Resolver: resolver}})
 	t.Cleanup(srv.appCancel)
 	engine, hub := hs.wiring.engine, srv.hub
+	if engine.resolver != resolver || hub.resolver != resolver || hs.wiring.resolver != resolver {
+		t.Fatal("engine, Hub and wiring do not all hold ServerOptions.Routing.Resolver")
+	}
 
 	key := sessionkey.CronKey(pinned.ID)
 	if err := engine.gateRemoteAccess("node-a", key); !errors.Is(err, ErrAccessProfileRemote) {
@@ -100,10 +106,25 @@ func TestGateRemoteAccessProfile_CronKey(t *testing.T) {
 	if err := engine.gateRemoteAccess("local", key); err != nil {
 		t.Errorf("local %q: err = %v, want nil", key, err)
 	}
-	for _, k := range []string{sessionkey.CronKey(plain.ID), sessionkey.CronKey("missing")} {
-		if err := engine.gateRemoteAccess("node-a", k); err != nil {
-			t.Errorf("remote %q: err = %v, want remote OK", k, err)
-		}
+	if err := engine.gateRemoteAccess("node-a", sessionkey.CronKey(plain.ID)); err != nil {
+		t.Errorf("remote unpinned cron key: err = %v, want remote OK", err)
+	}
+}
+
+// With no Routing.Resolver the server builds a plain one over the agent maps,
+// so the dispatcher, Hub and handlers still share a usable resolver.
+func TestBuildServer_NilResolverFallsBack(t *testing.T) {
+	t.Parallel()
+	agents := map[string]session.AgentOpts{"reviewer": {AccessProfile: "personal"}}
+	srv, hs := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: session.NewRouter(session.RouterConfig{}),
+		Backend: "claude", Routing: RoutingOptions{Agents: agents}})
+	t.Cleanup(srv.appCancel)
+	r := hs.wiring.resolver
+	if r == nil || srv.hub.resolver != r || hs.wiring.engine.resolver != r {
+		t.Fatal("nil Routing.Resolver: wiring, Hub and engine must share one fallback resolver")
+	}
+	if got := r.AccessProfileForKey("feishu:user:bob:reviewer"); got != "personal" {
+		t.Errorf("fallback resolver AccessProfileForKey = %q, want the agent's profile", got)
 	}
 }
 

@@ -35,7 +35,7 @@ func TestHandleAPISessions_StatsStructShape(t *testing.T) {
 	srv := NewWithOptions(ServerOptions{
 		Addr:    ":0",
 		Router:  router,
-		Agents:  agents,
+		Routing: RoutingOptions{Agents: agents},
 		Backend: "claude",
 	})
 
