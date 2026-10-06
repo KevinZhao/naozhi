@@ -10,8 +10,9 @@
 // checks that flaky-report waits on every job that runs tests: a job missing
 // from its needs files nothing when it alone is red, and otherwise is reported
 // only if it happened to finish first. Last, it checks Playwright's retries and
-// trace settings: a retry turns a flake green before flaky-report sees it, and
-// with no retry a trace that records only on a retry records nothing.
+// trace settings (config, projects, CI flags and per-spec overrides): a retry
+// turns a flake green before flaky-report sees it, and with no retry a trace
+// that records only on a retry records nothing.
 //
 // Loading the Playwright config needs test/e2e's npm install.
 //
@@ -238,6 +239,52 @@ const playwrightCases = [
   { what: 'a CI command cannot pass --trace off', config: good, commands: ['npx playwright test --trace off'], want: 1 },
 ];
 
+// overrideProblems() checks the per-spec overrides: a spec's
+// test.describe.configure({ retries }) or test.use({ trace }) beats the config.
+// Each call's argument is cut out by balancing parentheses, so a nested
+// `viewport: { ... }` does not end it early.
+function overrideProblems(where, src) {
+  const out = [];
+  for (const m of src.matchAll(/\.(use|configure)\s*\(/g)) {
+    let depth = 1;
+    let i = m.index + m[0].length;
+    for (; i < src.length && depth > 0; i++) {
+      if (src[i] === '(') depth++;
+      else if (src[i] === ')') depth--;
+    }
+    const arg = src.slice(m.index + m[0].length, i - 1);
+    const call = `${where}: .${m[1]}(${arg.replace(/\s+/g, ' ').trim()})`;
+    const retries = arg.match(/\bretries\s*:\s*([^,}\s]+)/);
+    if (retries && retries[1] !== '0') out.push(`${call} sets retries ${retries[1]}, want 0`);
+    if (/\btrace\s*:/.test(arg)) {
+      const mode = arg.match(/\btrace\s*:\s*(?:\{[^}]*?\bmode\s*:\s*)?(['"])([\w-]+)\1/);
+      if (!mode || !RECORDS_FIRST_RUN.has(mode[2])) out.push(`${call} overrides trace with one that may record nothing without a retry`);
+    }
+  }
+  return out;
+}
+
+const overrideCases = [
+  { what: 'a viewport override is fine', src: "test.use({ viewport: { width: 1280, height: 800 } });", want: 0 },
+  { what: 'a spec cannot add retries', src: "test.describe.configure({ mode: 'serial', retries: 2 });", want: 1 },
+  { what: 'a spec may pin retries to 0', src: 'test.describe.configure({ retries: 0 });', want: 0 },
+  { what: 'a spec cannot turn the trace off past a nested object', src: "test.use({ viewport: { width: 1, height: 1 }, trace: 'off' });", want: 1 },
+  { what: 'a spec trace in object form is read by its mode', src: "test.use({ trace: { mode: 'retain-on-failure', snapshots: true } });", want: 0 },
+  { what: 'a spec trace set from a variable cannot be checked', src: 'test.use({ trace: mode });', want: 1 },
+];
+
+// specFiles() lists what Playwright's default testMatch picks up under testDir.
+function specFiles(dir) {
+  const out = [];
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (e.name === 'node_modules') continue;
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) out.push(...specFiles(full));
+    else if (/\.(spec|test)\.[cm]?[jt]sx?$/.test(e.name)) out.push(full);
+  }
+  return out;
+}
+
 let bad = 0;
 for (const c of playwrightCases) {
   const got = playwrightProblems(c.config, c.commands);
@@ -246,7 +293,28 @@ for (const c of playwrightCases) {
     console.error(`check-flaky-report-parse: ${c.what}\n  want ${c.want} problem(s)\n  got  ${JSON.stringify(got)}`);
   }
 }
-const pwConfig = createRequire(path.join(ROOT, 'test', 'e2e', 'package.json'))('./playwright.config.js');
+for (const c of overrideCases) {
+  const got = overrideProblems('case', c.src);
+  if (got.length !== c.want) {
+    bad++;
+    console.error(`check-flaky-report-parse: ${c.what}\n  want ${c.want} problem(s)\n  got  ${JSON.stringify(got)}`);
+  }
+}
+// Resolve the config as CI does, so a `process.env.CI ? 2 : 0` fails locally too.
+process.env.CI ||= 'true';
+const E2E = path.join(ROOT, 'test', 'e2e');
+const pwConfig = createRequire(path.join(E2E, 'package.json'))('./playwright.config.js');
+const specs = specFiles(path.resolve(E2E, pwConfig.testDir ?? '.'));
+if (specs.length === 0) {
+  bad++;
+  console.error('check-flaky-report-parse: no spec files under test/e2e — did testDir move?');
+}
+for (const f of specs) {
+  for (const p of overrideProblems(path.relative(ROOT, f), fs.readFileSync(f, 'utf8'))) {
+    bad++;
+    console.error(`check-flaky-report-parse: ${p}`);
+  }
+}
 const pwCommands = yml.split('\n').filter(l => /\bplaywright test\b/.test(l));
 if (pwCommands.length === 0) {
   bad++;
@@ -291,4 +359,4 @@ if (bad > 0) {
   console.error(`check-flaky-report-parse: ${bad} check(s) failed — flaky-report would file the wrong issues, or none`);
   process.exit(1);
 }
-console.log(`check-flaky-report-parse: OK (${cases.length} log cases, ${needsCases.length} needs cases, ${playwrightCases.length} playwright cases, ${testJobs.length} test jobs: ${testJobs.join(', ')})`);
+console.log(`check-flaky-report-parse: OK (${cases.length} log cases, ${needsCases.length} needs cases, ${playwrightCases.length} playwright cases, ${overrideCases.length} override cases, ${specs.length} specs, ${testJobs.length} test jobs: ${testJobs.join(', ')})`);
