@@ -57,12 +57,14 @@ graph TD
 
 ### IM 平台接入
 
-| 平台 | 接入方式 | 私聊 | 群聊 | 消息编辑 |
-|------|----------|------|------|----------|
-| **飞书** | WebSocket 长连接 / Webhook | ✓ | ✓ | ✓ 流式更新 |
-| **Slack** | Socket Mode | ✓ | ✓ (mention) | ✓ 流式更新 |
-| **Discord** | Gateway WebSocket | ✓ | ✓ (mention) | ✓ 流式更新 |
-| **微信** | HTTP 长轮询 (iLink Bot) | ✓ | — | — |
+| 平台 | 接入方式 | 私聊 | 群聊 | 消息编辑 | 提问按钮 |
+|------|----------|------|------|----------|----------|
+| **飞书** | WebSocket 长连接 / Webhook | ✓ | ✓ | ✓ 流式更新 | ✓ |
+| **Slack** | Socket Mode | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ |
+| **Discord** | Gateway WebSocket | ✓ | ✓ (mention) | ✓ 流式更新 | — |
+| **微信** | HTTP 长轮询 (iLink Bot) | ✓ | — | — | — |
+
+「提问按钮」指 Claude 调用 AskUserQuestion 时把选项渲染成可点击的按钮；没有按钮的平台收到纯文本选项列表，直接回复文字作答。
 
 所有平台开箱即用，**无需公网 IP**。
 
@@ -326,6 +328,7 @@ naozhi --config ~/.naozhi/config.yaml
 2. 开启 Socket Mode，获取 App-Level Token (`xapp-...`)
 3. Bot Token Scopes: `chat:write`, `app_mentions:read`
 4. Event Subscriptions: `message.im`, `app_mention`
+5. Interactivity & Shortcuts → 开启（Socket Mode 下不需要填 Request URL）。不开启时 AskUserQuestion 的按钮点了没反应，但仍可直接回复文字作答
 
 ### Discord
 
@@ -573,10 +576,12 @@ im_access:
   响应没给用户 ID 时，新建的配置文件写 `default_deny: true`（先发一条消息拿到自己的
   ID 再加进去）；已有的配置文件里不写 `default_deny`，免得把其他平台关在外面。已有的
   `im_access.platforms.weixin` 条目不会被改动。
-- 平台一旦有条目，名单外的人和没有用户 ID 的消息都会被拒绝，包括飞书卡片上的
-  AskUserQuestion 回答。被拒的消息不会触发任何命令，也不会进 CLI。飞书的语音和
-  图片、Discord 的图片附件在下载前就判定：名单外的人发来的语音不下载、不转写（不产生
-  Transcribe 费用），图片不下载；群里的飞书语音因为没法 @bot 也不转写。
+- 平台一旦有条目，名单外的人和没有用户 ID 的消息都会被拒绝，包括飞书 / Slack 卡片上的
+  AskUserQuestion 按钮回答。被拒的消息不会触发任何命令，也不会进 CLI。注意卡片在
+  鉴权之前就会变成"已回答"：名单外的人、被限流或超预算的点击同样会让按钮消失，此时
+  有权限的人请直接回复文字作答（与飞书一致）。飞书的语音和图片、Discord 的图片附件在
+  下载前就判定：名单外的人发来的语音不下载、不转写（不产生 Transcribe 费用），图片不
+  下载；群里的飞书语音因为没法 @bot 也不转写。
 - **怎么拿用户 ID**：被拒的消息会在 Info 级别打一行 `im access denied`，`user`
   字段就是要填的 ID（飞书 open_id `ou_...`、Slack `U...`、Discord 用户 ID、微信
   `from`）。私聊里被拒的人也会收到带自己 ID 的提示，同一人 10 分钟最多一次；群里
