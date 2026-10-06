@@ -529,7 +529,7 @@ func (r *Router) Takeover(ctx context.Context, lease *TakeoverLease, sessionID s
 					p.Close()
 					// The spawn below will StartShim against the same socket
 					// path; wait for the shim to release it (same race as Reset).
-					waitSocketGoneForKey(key, 2*time.Second)
+					waitSocketGoneForKey(key)
 				})
 				// Only delete if no concurrent goroutine replaced this session.
 				// keepBackendOverride=true: Takeover re-spawns on the same key
@@ -593,7 +593,7 @@ func (r *Router) Takeover(ctx context.Context, lease *TakeoverLease, sessionID s
 	}
 	slog.Warn("resume rejected; takeover started fresh", "key", osutil.SanitizeForLog(key, 64),
 		"session_id", sessionID, "backend", res.backendID, "err", err)
-	stuck := !waitSocketGoneForKey(key, 2*time.Second)
+	stuck := !waitSocketGoneForKey(key)
 	opts.Backend = cmp.Or(res.backendID, opts.Backend)
 	opts.AccessProfile = cmp.Or(res.accessProfileID, opts.AccessProfile)
 	// A GetOrCreate parked on the first spawn may own the key by now: one
