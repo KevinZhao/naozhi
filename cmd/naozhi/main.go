@@ -569,7 +569,7 @@ func main() {
 		})
 	}
 
-	reloader.bindApply(srv.ApplyHotConfig, router.Backends().AccessProfiles)
+	reloader.bindApply(srv.ApplyHotConfig, router.Backends().AccessProfiles, budgetGate)
 
 	watchSignals(func() {
 		if _, err := reloader.Reload(ctx); err != nil {

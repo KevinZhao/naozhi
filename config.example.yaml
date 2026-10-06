@@ -523,7 +523,8 @@ platforms:
 # planner's budget. The dashboard's own turns are never refused, but their
 # spend counts toward daily_usd. A soft cap: a turn let in under the cap may
 # overshoot it. Spend metered in credits or tokens is not counted. Needs the
-# cost ledger on; changes need a restart.
+# cost ledger on. Caps, warn_ratio and action reload without a restart; adding
+# a cap where naozhi started with none, or moving the timezone, needs one.
 # cost:
 #   budget:
 #     per_chat_daily_usd: 20      # each IM chat, across its agents

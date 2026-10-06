@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/costledger"
@@ -65,7 +66,7 @@ const (
 
 // Gate checks today's spend against Limits. A nil Gate admits everything.
 type Gate struct {
-	lim Limits
+	lim atomic.Pointer[Limits] // swapped by SetLimits; each check reads it once
 	idx *Index
 }
 
@@ -74,13 +75,30 @@ func NewGate(lim Limits, idx *Index) *Gate {
 	if !lim.Enabled() || idx == nil {
 		return nil
 	}
+	g := &Gate{idx: idx}
+	g.SetLimits(lim)
+	return g
+}
+
+// SetLimits replaces the caps for every later check (a config reload). A
+// limits value with no cap leaves the gate admitting everything; the index
+// keeps counting, so caps set again later see today's spend. No-op on nil.
+func (g *Gate) SetLimits(lim Limits) {
+	if g == nil {
+		return
+	}
 	if lim.WarnRatio <= 0 || lim.WarnRatio > 1 {
 		lim.WarnRatio = DefaultWarnRatio
 	}
 	if lim.Action != ActionWarn {
 		lim.Action = ActionBlock
 	}
-	return &Gate{lim: lim, idx: idx}
+	g.lim.Store(&lim)
+}
+
+// Enabled reports whether the gate currently enforces any cap.
+func (g *Gate) Enabled() bool {
+	return g != nil && g.lim.Load().Enabled()
 }
 
 // Attach builds a Gate fed by store: it counts today's entries already in
@@ -120,9 +138,10 @@ func (g *Gate) check(scoped Subject) Verdict {
 	if g == nil {
 		return v
 	}
+	lim := g.lim.Load()
 	best := 0.0
 	for _, s := range []Subject{scoped, Global} {
-		limit := g.limitFor(s)
+		limit := lim.limitFor(s)
 		if limit <= 0 {
 			continue
 		}
@@ -130,24 +149,24 @@ func (g *Gate) check(scoped Subject) Verdict {
 		if r := spent / limit; v.Limit == 0 || r > best {
 			best = r
 			v = Verdict{Subject: s, Spent: spent, Limit: limit,
-				Warn: r >= g.lim.WarnRatio, Over: r >= 1}
+				Warn: r >= lim.WarnRatio, Over: r >= 1}
 		}
 	}
 	if v.Limit > 0 {
-		v.Blocked = v.Over && g.lim.Action == ActionBlock
+		v.Blocked = v.Over && lim.Action == ActionBlock
 		v.ResetAt = StartOfDay(g.idx.now(), g.idx.loc).AddDate(0, 0, 1)
 	}
 	return v
 }
 
-func (g *Gate) limitFor(s Subject) float64 {
+func (l Limits) limitFor(s Subject) float64 {
 	switch {
 	case s == "":
 		return 0
 	case s == Global:
-		return g.lim.DailyUSD
+		return l.DailyUSD
 	case strings.HasPrefix(string(s), jobPrefix):
-		return g.lim.PerJobDailyUSD
+		return l.PerJobDailyUSD
 	}
-	return g.lim.PerChatDailyUSD
+	return l.PerChatDailyUSD
 }

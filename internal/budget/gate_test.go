@@ -2,6 +2,7 @@ package budget
 
 import (
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -193,6 +194,64 @@ func TestGate_NegativeSpendStillChecked(t *testing.T) {
 	if v := g.CheckKey("feishu:group:oc_1:general"); v.Limit != 1 || v.Spent != -3 || v.Subject != "chat:feishu:group:oc_1" {
 		t.Errorf("CheckKey = %+v, want the chat at -3 / 1", v)
 	}
+}
+
+// SetLimits swaps the caps for the next check: a lower cap blocks spend the
+// old one admitted, a warn action stops blocking, no cap admits everything,
+// and a cap set again still sees today's spend.
+func TestGate_SetLimitsSwapsCaps(t *testing.T) {
+	const key = "feishu:group:oc_1:general"
+	g := gateWith(Limits{PerChatDailyUSD: 10}, usd(now, key, "", 6))
+	if v := g.CheckKey(key); v.Blocked || v.Limit != 10 {
+		t.Fatalf("before = %+v, want admitted under 10", v)
+	}
+	g.SetLimits(Limits{PerChatDailyUSD: 5})
+	if v := g.CheckKey(key); !v.Blocked || v.Limit != 5 || !v.Warn {
+		t.Errorf("lowered to 5 = %+v, want blocked (warn ratio back to the default)", v)
+	}
+	g.SetLimits(Limits{PerChatDailyUSD: 5, Action: ActionWarn, WarnRatio: 2})
+	if v := g.CheckKey(key); v.Blocked || !v.Over {
+		t.Errorf("action warn = %+v, want over and not blocked", v)
+	}
+	g.SetLimits(Limits{DailyUSD: 20})
+	if v := g.CheckKey(key); v.Subject != Global || v.Limit != 20 {
+		t.Errorf("per-chat cap removed = %+v, want only the global cap", v)
+	}
+	g.SetLimits(Limits{})
+	if v := g.CheckKey(key); v != (Verdict{}) || g.Enabled() {
+		t.Errorf("no cap = %+v enabled=%v, want the zero verdict and disabled", v, g.Enabled())
+	}
+	g.idx.Add(usd(now, key, "", 1))
+	g.SetLimits(Limits{PerChatDailyUSD: 7})
+	if v := g.CheckKey(key); !v.Blocked || v.Spent != 7 || !g.Enabled() {
+		t.Errorf("cap set again = %+v, want today's 7 counted and blocked", v)
+	}
+	var nilGate *Gate
+	nilGate.SetLimits(Limits{DailyUSD: 1})
+	if nilGate.Enabled() {
+		t.Error("a nil gate must stay disabled")
+	}
+}
+
+// A reload swaps the caps while IM and cron goroutines check them.
+func TestGate_SetLimitsConcurrentWithChecks(t *testing.T) {
+	g := gateWith(Limits{DailyUSD: 10}, usd(now, "cron:j1", "j1", 3))
+	var wg sync.WaitGroup
+	for i := range 4 {
+		wg.Go(func() {
+			for j := range 200 {
+				if i == 0 {
+					g.SetLimits(Limits{DailyUSD: float64(1 + j%20), PerJobDailyUSD: float64(j % 3)})
+					continue
+				}
+				if v := g.CheckJob("j1"); v.Limit <= 0 {
+					t.Errorf("CheckJob = %+v, want a cap", v)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
 }
 
 // Attach counts today's entries already in the ledger (a cst day starts
