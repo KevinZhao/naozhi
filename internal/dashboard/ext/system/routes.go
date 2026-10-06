@@ -20,5 +20,7 @@ func (h *Handlers) Routes() []httputil.Route {
 		// self-update (docs/rfc/dashboard-update-notice.md).
 		{Pattern: "GET /api/system/update", Handler: h.HandleUpdateStatus},
 		{Pattern: "POST /api/system/update/apply", Handler: h.HandleUpdateApply},
+		// config hot reload (docs/rfc/config-hot-reload.md).
+		{Pattern: "POST /api/system/config/reload", Handler: h.HandleConfigReload},
 	}
 }

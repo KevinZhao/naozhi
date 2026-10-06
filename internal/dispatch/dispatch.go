@@ -20,7 +20,6 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/ratelimit"
 	"github.com/naozhi/naozhi/internal/replyfmt"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -114,10 +113,10 @@ type Dispatcher struct {
 	access      atomic.Pointer[imauth.Policy]
 	denyReplies denyThrottle
 
-	// inboundLimit is the per-sender bucket admitRate draws from
-	// (ratelimit.go); nil when rateLimit is off.
-	inboundLimit     *ratelimit.Limiter
-	rateLimit        RateLimit
+	// inbound is the per-sender rate limit admitRate draws from
+	// (ratelimit.go); nil when the limit is off. Swapped whole by
+	// SetRateLimit.
+	inbound          atomic.Pointer[inboundLimit]
 	rateLimitReplies denyThrottle
 
 	// budget refuses turns past cost.budget (budget.go); nil admits all.
@@ -289,8 +288,6 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		watchdogTotalKills:    cfg.WatchdogTotalKills,
 		caps:                  caps,
 		fallbackBannerDelay:   fallbackBannerDelayDefault,
-		inboundLimit:          newInboundLimiter(cfg.RateLimit),
-		rateLimit:             cfg.RateLimit,
 		rateLimitReplies:      denyThrottle{window: rateLimitReplyWindow},
 		budgetReplies:         denyThrottle{window: budgetReplyWindow},
 		groupScope:            cfg.GroupScope,
@@ -300,6 +297,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		d.budget = cfg.Budget
 	}
 	d.access.Store(cfg.Access)
+	d.SetRateLimit(cfg.RateLimit)
 	// agentCommands is immutable after construction, so this snapshot stays
 	// correct for the dispatcher's lifetime (#2148).
 	d.knownAgentIDs = make(map[string]struct{}, len(d.agentCommands)+2)
@@ -386,9 +384,9 @@ func (d *Dispatcher) inboundLogger(msg platform.IncomingMessage) *slog.Logger {
 
 // prepareInbound runs the front-matter common to every dispatch strategy
 // (dedup, group-mention gate, sender authorization, rate limit, slash
-// commands, agent
-// resolution, accounting, key/opts resolution, image conversion). Returns
-// false when the message was fully handled or dropped here.
+// commands, agent resolution, file classification, accounting, key/opts
+// resolution, image conversion). Returns false when the message was fully
+// handled or dropped here.
 func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMessage) (preparedInbound, bool) {
 	// Dedup first: platform retries (e.g. Feishu webhook re-delivery) must
 	// not double-dispatch. Empty EventID (#1310) falls back to a composite
@@ -438,7 +436,7 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 		agentID = msg.AgentID
 	}
 
-	if cleanText == "" && len(msg.Images) == 0 {
+	if cleanText == "" && len(msg.Images) == 0 && len(msg.Files) == 0 {
 		if agentID != "general" {
 			d.replyText(ctx, msg, "请在指令后输入内容。", lg)
 		}
@@ -462,6 +460,15 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 		}
 	}
 
+	// A message whose only payload was rejected files ends at the notice.
+	files, fileNotice := fileAttachments(msg.Files)
+	if fileNotice != "" {
+		d.replyText(ctx, msg, fileNotice, lg)
+	}
+	if cleanText == "" && len(msg.Images) == 0 && len(files) == 0 {
+		return preparedInbound{}, false
+	}
+
 	// Accepted messages only (post-dedup, post-command). Feeds /health and
 	// /debug/vars (#892).
 	d.messageCount.Add(1)
@@ -474,11 +481,12 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, d.sessionChatID(msg), agentID)
 
 	var images []clievent.Attachment
-	if len(msg.Images) > 0 {
-		images = make([]clievent.Attachment, 0, len(msg.Images))
+	if n := len(msg.Images) + len(files); n > 0 {
+		images = make([]clievent.Attachment, 0, n)
 		for _, img := range msg.Images {
 			images = append(images, clievent.Attachment{Data: img.Data, MimeType: img.MimeType})
 		}
+		images = append(images, files...)
 	}
 
 	return preparedInbound{

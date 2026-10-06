@@ -48,7 +48,7 @@
     "lateBindings": 2
   },
   "auth_modal.js": {
-    "lines": 1294,
+    "lines": 1292,
     "maxFnLines": 101,
     "maxIifeLines": 0,
     "fnOver100": 1,
@@ -84,7 +84,7 @@
     "lateBindings": 0
   },
   "contract.js": {
-    "lines": 111,
+    "lines": 112,
     "maxFnLines": 0,
     "maxIifeLines": 0,
     "fnOver100": 0,
