@@ -25,17 +25,23 @@ func newHubForTest(t testing.TB, opts HubOptions, eo sendEngineOpts) *Hub {
 	if eo.Router != nil || eo.Resolver != nil || eo.Ctx != nil || eo.Notify != nil || eo.Turns != nil {
 		panic("newHubForTest: shared and Hub-derived dependencies come from opts; leave them unset in eo")
 	}
+	// Like buildWSStack, one concrete router feeds the Hub, turnSender and
+	// the engine; a fake HubRouter would reach only the Hub.
+	concrete, ok := opts.Router.(*session.Router)
+	if opts.Router != nil && !ok {
+		panic("newHubForTest: opts.Router must be a *session.Router")
+	}
 	bcast := newWSBroadcaster(newSubscriberRegistry())
 	var router turnRouter
-	if opts.Router != nil {
-		router = opts.Router
+	if concrete != nil {
+		router = concrete
 	}
 	var prompts cronPromptSaver
 	if opts.Scheduler != nil {
 		prompts = opts.Scheduler
 	}
 	eo.Turns = turn.New(turn.QueueOptions{MaxDepth: 5}, turnSender{router: router, notify: bcast, prompts: prompts})
-	eo.Router = opts.Router
+	eo.Router = concrete
 	eo.Resolver = opts.Resolver
 	eo.Ctx = opts.ParentCtx
 	eo.Notify = bcast

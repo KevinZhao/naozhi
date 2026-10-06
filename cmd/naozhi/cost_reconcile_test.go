@@ -475,3 +475,76 @@ func mapsEqual(a, b map[string]string) bool {
 	}
 	return true
 }
+
+// A day residual only raises a day. The CLI bills requests its transcript
+// never logs, so a day booked above its transcript, an extra request on a
+// turn or a remainder left after a restore flag, is reported and left as
+// booked, while a day the transcript shows more spend on is still raised.
+func TestReconcile_ALedgerDayAboveItsTranscriptIsNotLowered(t *testing.T) {
+	t.Run("an unlogged request", func(t *testing.T) {
+		s := newReconcileScope(t)
+		s.transcript(t, rcSID, scopeMsg(s.day(-3, 10, 0), "msg_1", 5, "sdk-cli"),
+			scopeMsg(s.day(-2, 10, 0), "msg_2", 10, "sdk-cli"),
+			scopeMsg(s.day(-1, 10, 0), "msg_3", 10, "sdk-cli"), scopeMsg(s.day(-1, 11, 0), "msg_4", 5, "sdk-cli"))
+		s.runStarted(t, "aaaaaaaaaaaaaaaa", s.day(-3, 9, 59))
+		// Day -2 books $4 of tokens no transcript line holds; day -1 books
+		// only the first of its two messages.
+		seedLedger(t, s.opts.SessionStorePath, rcTurn(s.day(-3, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 5),
+			rcTurn(s.day(-2, 10, 1), rcKey, "cccccccccccccccc", 14), rcTurn(s.day(-1, 11, 1), rcKey, "dddddddddddddddd", 10))
+		rep, out := s.run(t)
+		if len(rep.Planned) != 1 || !near(rep.Planned[0].Amount, 5) ||
+			rep.Planned[0].RunID != reconcilePrefix+rcSID+":day:"+s.day(-1, 0, 0).Format(time.DateOnly) {
+			t.Fatalf("planned %+v, want only +5 on day -1\n%s", rep.Planned, out)
+		}
+		st := settlementOf(rep, rcSID)
+		if st.AboveDays != 1 || !near(st.AboveUSD, 4) || !near(st.After, 34) {
+			t.Errorf("settlement = %+v, want day -2 reported $4 above and the ledger at 34\n%s", st, out)
+		}
+		if !strings.Contains(out, "1 天账本高于 transcript 共 4.00") {
+			t.Errorf("report does not name the day above its transcript:\n%s", out)
+		}
+	})
+	t.Run("a remainder after a restore flag", func(t *testing.T) {
+		s := newReconcileScope(t)
+		s.transcript(t, rcSID, scopeMsg(s.day(-2, 10, 0), "msg_1", 5, "sdk-cli"), rcCostState(5, 5000),
+			rcLine("queue-operation", s.day(-1, 9, 0), "", 0), scopeMsg(s.day(-1, 9, 1), "msg_2", 10, "sdk-cli"))
+		s.runStarted(t, "aaaaaaaaaaaaaaaa", s.day(-2, 9, 59))
+		// The resumed turn charged the restored $5 and $3 its transcript lacks.
+		seedLedger(t, s.opts.SessionStorePath, rcTurn(s.day(-2, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 5),
+			rcTurn(s.day(-1, 9, 2), rcKey, "cccccccccccccccc", 18))
+		rep, out := s.run(t)
+		if len(rep.Flagged) != 1 || len(rep.Planned) != 1 || !near(rep.Planned[0].Amount, -5) {
+			t.Fatalf("flagged %+v planned %+v, want only the -5 restore flag\n%s", rep.Flagged, rep.Planned, out)
+		}
+		if st := settlementOf(rep, rcSID); st.AboveDays != 1 || !near(st.AboveUSD, 3) || !near(st.After, 18) || st.AboveUndecidedDays != 0 {
+			t.Errorf("settlement = %+v, want day -1 reported $3 above and the ledger at 18\n%s", st, out)
+		}
+		if strings.Contains(out, "高出部分可能就是恢复额") {
+			t.Errorf("report ties a decided day's excess to a restore:\n%s", out)
+		}
+	})
+	t.Run("a backfill undecided on a restore", func(t *testing.T) {
+		s := newReconcileScope(t)
+		s.transcript(t, rcSID, scopeMsg(s.day(-2, 10, 0), "msg_1", 0.6, "sdk-cli"), rcCostState(0.6, 600),
+			rcLine("queue-operation", s.day(-1, 8, 0), "", 0), scopeMsg(s.day(-1, 8, 1), "msg_2", 3, "sdk-cli"))
+		s.runStarted(t, "aaaaaaaaaaaaaaaa", s.day(-2, 9, 59))
+		// The backfilled run logged no line and nothing bounds it, so whether
+		// its $3.60 holds the restored $0.60 is undecided.
+		run := runhistory.SessionRun{RunID: "cccccccccccccccc", SessionKey: rcKey, SessionID: rcSID, StartedAt: s.day(-1, 9, 0)}
+		s.sessionRun(t, run)
+		backfill := rcTurn(run.StartedAt, rcKey, run.RunID, 3.6)
+		backfill.Kind, backfill.Models = costledger.KindBackfill, nil
+		seedLedger(t, s.opts.SessionStorePath, rcTurn(s.day(-2, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 0.6),
+			rcTurn(s.day(-1, 8, 2), rcKey, "dddddddddddddddd", 3), backfill)
+		rep, out := s.run(t)
+		if len(rep.Flagged) != 0 || len(rep.Planned) != 0 {
+			t.Fatalf("flagged %+v planned %+v, want nothing\n%s", rep.Flagged, rep.Planned, out)
+		}
+		if st := settlementOf(rep, rcSID); st.UndecidedN != 1 || st.AboveDays != 1 || !near(st.AboveUSD, 3.6) || st.AboveUndecidedDays != 1 {
+			t.Errorf("settlement = %+v, want day -1 reported $3.60 above with its undecided backfill\n%s", st, out)
+		}
+		if !strings.Contains(out, "其中 1 天含无法判定是否计入恢复额的条目") {
+			t.Errorf("report does not tie the excess to the undecided entry:\n%s", out)
+		}
+	})
+}

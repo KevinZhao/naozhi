@@ -17,11 +17,9 @@ type AgentConfig struct {
 	Backend string `yaml:"backend,omitempty"`
 	// AccessProfile names the access profile for this agent's sessions and cron
 	// jobs. Precedence at spawn: resume lock > dashboard pick > project pin >
-	// this > default_access_profile. The project pin outranking the agent
-	// deviates from RFC project-access-profile §3, matching how project
-	// model/backend pins already layer. A project planner uses only the project
-	// pin. Empty = default_access_profile. Such a session is never dispatched to
-	// a remote node.
+	// this > default_access_profile (RFC project-access-profile §2). A project
+	// planner uses only the project pin. Empty = default_access_profile. Such a
+	// session is never dispatched to a remote node.
 	AccessProfile string `yaml:"access_profile,omitempty"`
 	// Effort overrides the thinking-effort tier for this agent's sessions.
 	// Empty = inherit cli.backends[].effort, then cli.effort.
@@ -69,10 +67,10 @@ type CLIConfig struct {
 }
 
 // CLIBackendConfig configures one backend in a multi-backend deployment.
-// ID is required; Path/Model/Args/Effort fall back to the top-level cli.* values.
+// ID is required; Model/Args/Effort fall back to the top-level cli.* values.
 type CLIBackendConfig struct {
 	ID    string   `yaml:"id"`              // "claude" | "kiro"
-	Path  string   `yaml:"path,omitempty"`  // overrides cli.path for this backend
+	Path  string   `yaml:"path,omitempty"`  // empty = auto-detect by id; cli.path is not inherited
 	Model string   `yaml:"model,omitempty"` // overrides cli.model for this backend
 	Args  []string `yaml:"args,omitempty"`  // overrides cli.args for this backend
 	// Effort overrides cli.effort for this backend. On a backend without a

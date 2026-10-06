@@ -16,7 +16,7 @@ import (
 // inject a permissive validateWS stub).
 func TestSessionsGitRoute_EndToEnd(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
-	t.Cleanup(srv.router.Shutdown)
+	t.Cleanup(routerOf(srv).Shutdown)
 
 	// A repo whose .git/HEAD names a branch, inside the server's allowed root.
 	root := t.TempDir()
@@ -31,7 +31,7 @@ func TestSessionsGitRoute_EndToEnd(t *testing.T) {
 	}
 
 	const key = "dashboard:pj:abc0123456789012:general"
-	srv.router.SetWorkspace("dashboard:pj:abc0123456789012", repo)
+	routerOf(srv).SetWorkspace("dashboard:pj:abc0123456789012", repo)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/git?key="+key, nil)
 	rec := httptest.NewRecorder()
@@ -73,7 +73,7 @@ func TestSessionsGitRoute_EndToEnd(t *testing.T) {
 // boundary and report the enclosing repo's absolute path and current branch.
 func TestSessionsGitRoute_DoesNotDiscloseRepoAboveAllowedRoot(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
-	t.Cleanup(srv.router.Shutdown)
+	t.Cleanup(routerOf(srv).Shutdown)
 
 	base := t.TempDir()
 	// The repo sits ABOVE the allowed root.
@@ -92,7 +92,7 @@ func TestSessionsGitRoute_DoesNotDiscloseRepoAboveAllowedRoot(t *testing.T) {
 	srv.sessionH.SetAllowedRootForTest(allowed)
 
 	const key = "dashboard:pj:abc0123456789012:general"
-	srv.router.SetWorkspace("dashboard:pj:abc0123456789012", ws)
+	routerOf(srv).SetWorkspace("dashboard:pj:abc0123456789012", ws)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/git?key="+key, nil)
 	rec := httptest.NewRecorder()
@@ -122,7 +122,7 @@ func TestSessionsGitRoute_DoesNotDiscloseRepoAboveAllowedRoot(t *testing.T) {
 // state names filesystem paths, so an unauthenticated read must not pass.
 func TestSessionsGitRoute_RequiresAuth(t *testing.T) {
 	srv := newTestServerWithToken(&mockPlatform{}, "s3cret")
-	t.Cleanup(srv.router.Shutdown)
+	t.Cleanup(routerOf(srv).Shutdown)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/git?key=a:b:c:general", nil)
 	rec := httptest.NewRecorder()
@@ -138,7 +138,7 @@ func TestSessionsGitRoute_RequiresAuth(t *testing.T) {
 // accept POST too.
 func TestSessionsGitRoute_MethodNotAllowed(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
-	t.Cleanup(srv.router.Shutdown)
+	t.Cleanup(routerOf(srv).Shutdown)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/git?key=a:b:c:general", nil)
 	rec := httptest.NewRecorder()
