@@ -204,14 +204,17 @@ func (r *Router) Reset(key string) {
 // ResetAndDiscardOverride atomically resets the session AND deletes its
 // chat's workspace override, so a concurrent SetWorkspace cannot survive a
 // bare Reset+delete pair and leak into the next session. Overrides are keyed
-// by the chat key, not the session key.
+// by the chat key, not the session key; a thread's or member's key only
+// borrows its chat's override, so resetting it leaves the override alone.
 func (r *Router) ResetAndDiscardOverride(key string) {
 	var proc processIface
 	var sessionID string
 	var hadSession bool
 	r.ss.Update(func(tx sessTx) {
 		proc, sessionID, hadSession = r.resetEntry(tx, key)
-		tx.Ext().workspaces.Delete(chatKeyFor(key))
+		if !isScopedKey(key) {
+			tx.Ext().workspaces.Delete(chatKeyFor(key))
+		}
 	})
 	if !hadSession {
 		return

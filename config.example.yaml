@@ -245,6 +245,15 @@ session:
     no_output_timeout: "15m"
     total_timeout: "2h"
   store_path: "~/.naozhi/sessions.json"
+  # What one session of an IM group chat covers:
+  #   thread (default) — each Slack thread / Feishu topic gets its own session;
+  #                      a message outside any thread uses the channel's
+  #   chat             — the whole channel or group shares one session
+  #   user             — each member of the group gets their own session
+  # The channel still owns /cd, the project binding and /cron; /new and /stop
+  # act on the thread's (or member's) session. Discord threads are separate
+  # channels and WeChat has only direct chats, so neither is affected.
+  group_scope: "thread"
   # auto_chain — REMOVED (schema v2). It joined sessions in the same
   # workspace by guessing that "same slug + 7d window" meant one conversation,
   # which stitched unrelated one-off sessions together as each other's history

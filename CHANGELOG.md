@@ -10,6 +10,7 @@
 
 ### Added
 
+- **群聊会话按话题分开：`session.group_scope`**（#3446）：默认 `thread`，Slack 话题串、飞书话题里的提问各用一个独立会话，不再与频道 / 群顶层和其他话题共享上下文；不在话题里的消息仍用原来的频道会话，已有会话不受影响。`chat` 恢复整个群共用一个会话；`user` 让群里每个成员各用一个会话（在 `user` 模式下，别人点你的提问卡片作答会进入点击者自己的会话）。话题里的 `/new`、`/stop`、`/urgent` 只作用于该话题的会话；`/cd`、`/pwd`、`/project`、`/cron` 仍按整个群生效，话题会话沿用群的工作目录，费用计入群的每日预算。绑定了项目的群，`general` 消息仍进入项目唯一的 planner 会话，回复回到各自的话题。Discord 的话题本身就是独立频道，微信只有单聊，均不受影响
 - **Discord：AskUserQuestion 渲染成可点击的按钮**（#3445）：单个问题的每个选项是一个按钮（最多 25 个），点一下即提交答案并把卡片改成「✅ 已回答」；多个问题仍是只读列表，请在一条消息里一次回复全部。无需额外设置，但开发者后台的 Interactions Endpoint URL 必须留空，否则点击不经 Gateway 送达。选项超过 25 个、按钮文字超过 80 字、agent id 过长或文本超出 embed 限制时回退为原来的纯文本列表
 - **Slack：AskUserQuestion 渲染成可点击的按钮**（#3445）：单个问题的每个选项是一个按钮，点一下即提交答案并把卡片改成「✅ 已回答」；多个问题仍是只读列表，请在一条消息里一次回复全部。需要在 Slack app 设置里开启 Interactivity & Shortcuts（Socket Mode 无需 Request URL）；未开启时按钮无响应，卡片上提示可直接回复文字。超出 Block Kit 限制（25 个选项、文本过长）时回退为原来的纯文本列表
 - **cron：聊天里用 `/cron mode <id> fresh|keep` 切换任务的上下文模式**（#3406）：此前 IM 里只能在创建时用 `--keep-context` 决定，要换模式只能删掉重建（丢失 ID 与执行历史）
@@ -88,7 +89,7 @@
 
 - **kiro / codex 后端收到 dashboard 上传的 PDF 时改为提示模型用 Read 工具读取**（#3451）：ACP（kiro）与 codex 协议以前把每个附件都编码成图片块，PDF 因此变成 `media_type: application/pdf`、数据为空的图片，模型既看不到文件也不知道它已写入 workspace。现在两个后端与 Claude 后端走同一个 `clievent.UserTextAndInline`：PDF 只出现在用户文本前的 Read 提示里（workspace 相对路径 + 原文件名），图片块只来自真正的图片附件。
 - **cron：重启后接管的那次执行若被 claude 中断，记为中断而不是成功**（#3498）：claude 2.1.288 起，被中断的 turn 以 `subtype=success`、`is_error=false` 加 `terminal_reason=aborted_tools|aborted_streaming` 结束，不再是 `error_during_execution`。接管路径只认后者，于是把这类中断当作正常完成，记为 `succeeded`，结果是空文本或半截输出。现在凡 `terminal_reason` 以 `aborted_` 开头都记为 `canceled`（`interrupted`），与旧版 CLI 的中断一致
-- **Slack 话题串 / 飞书话题里的提问，回复留在原话题里**（#3446）：以前回复（含「思考中」进度、分段、错误提示、命令回复、TodoWrite 清单、图片和 AskUserQuestion 卡片）都发到频道或群的顶层。现在 Slack 按 `thread_ts` 回到原话题串；飞书只对带 `thread_id` 的话题消息生效，用回复接口 `reply_in_thread` 发到话题里，普通群里的引用回复照旧发到群里。点话题里的卡片按钮作答，后续回复也在该话题。话题根消息已撤回等原因导致飞书拒绝回复时改发到群里。会话仍按频道 / 群共享，同一频道各话题与顶层共用一个会话上下文
+- **Slack 话题串 / 飞书话题里的提问，回复留在原话题里**（#3446）：以前回复（含「思考中」进度、分段、错误提示、命令回复、TodoWrite 清单、图片和 AskUserQuestion 卡片）都发到频道或群的顶层。现在 Slack 按 `thread_ts` 回到原话题串；飞书只对带 `thread_id` 的话题消息生效，用回复接口 `reply_in_thread` 发到话题里，普通群里的引用回复照旧发到群里。点话题里的卡片按钮作答，后续回复也在该话题。话题根消息已撤回等原因导致飞书拒绝回复时改发到群里。各话题的会话划分见上方 `session.group_scope`
 - **`naozhi cost reconcile` 不再按 transcript 下调账本**（#3519）：按天残差以前双向记，transcript 用量比账本少超过 max($1, 5%) 的日子会写入负的 `Kind=adjust`。但 CLI 计费的请求并不都写进 transcript（取消或空闲后整段上下文重发的请求、后台请求，以及流式中途写下、比最终计费少的 output 计数），实测这类日子的差额正好等于这些没落行的用量，负残差会把 CLI 自报的正确花费调低。现在残差只往上补；账本高于 transcript 的日子只在报告里列出天数和金额（「账本高于 transcript 共 X，未下调」），包括 `--resume` 恢复额修正之后的余数。账本当天为负时补到 0 的规则不变
 - **naozhi 被强杀或崩溃后，最近一次保存会话状态之后已记的花费不再重复记账**（#3518）：会话状态每 30 秒才落盘一次，而 cost ledger 每条记录约 1 秒内就写盘。naozhi 非正常退出（SIGKILL、panic、OOM、断电）且 CLI 经 shim 存活、重启后重新接管时，下一条 result 按落后的基线做差，这段时间已经记过的花费会在 ledger 里再记一次。现在会话自己的 ledger 记录带上记账后的会话花费与累计基线，重启恢复时若 ledger 比会话状态新，就以 ledger 为准；CLI 未存活时，会话的累计花费也不再少算这段时间
 - **优雅重启时，在保存会话状态之后才报告的 turn 不再记两次费用**（#3428）：重启时 CLI 进程存活并在重启后重新接管，以前在会话状态保存之后、断开 shim 之前收到的 result（CLI 自己发起的 turn，或 30 秒关停等待超时后才结束的 turn）会立刻记入 cost ledger，但保存下来的累计基线还是旧值，重启后下一条 result 按旧基线做差，同一段花费又记一次。现在关停在保存前冻结记账，这段花费留给重启后的第一条 result 一并计入；它在 ledger 里归到下一个 run id 名下
