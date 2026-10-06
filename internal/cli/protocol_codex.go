@@ -330,7 +330,7 @@ func (p *CodexProtocol) ReadEvent(line string) ([]clievent.Event, bool, error) {
 		p.mu.Lock()
 		p.textBuf.Reset()
 		p.mu.Unlock()
-		msgText := osutil.SanitizeForLog(msg.Error.Message, 256)
+		msgText := osutil.SanitizeForLog(msg.Error.Text(), rpcErrorTextMax)
 		return nil, true, &TurnRejectedError{Backend: p.BackendID, Code: msg.Error.Code, Message: msgText,
 			Err: fmt.Errorf("%w %d: %s", ErrCodexRPC, msg.Error.Code, msgText)}
 	}
@@ -578,7 +578,7 @@ func (p *CodexProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessa
 			if msg.IsResponse() && gotOK && gotID == expectedID {
 				if msg.Error != nil {
 					send(readResult{nil, fmt.Errorf("%w %d: %s", ErrCodexRPC,
-						msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))})
+						msg.Error.Code, osutil.SanitizeForLog(msg.Error.Text(), rpcErrorTextMax))})
 					return
 				}
 				send(readResult{&msg, nil})
