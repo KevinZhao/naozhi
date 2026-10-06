@@ -192,25 +192,6 @@ func TestBuildQuestionCardJSON_LongLabelTrimmed(t *testing.T) {
 	}
 }
 
-func TestComposeAskAnswerText(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		in   cardActionPayload
-		want string
-	}{
-		{"normal", cardActionPayload{Header: "Error style", Label: "Return an error"}, "Error style: Return an error."},
-		{"no header", cardActionPayload{Label: "A"}, "A."},
-		{"empty label", cardActionPayload{Header: "H"}, ""},
-		{"trims spaces", cardActionPayload{Header: "  H  ", Label: "  L  "}, "H: L."},
-	}
-	for _, tc := range cases {
-		if got := composeAskAnswerText(tc.in); got != tc.want {
-			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
-		}
-	}
-}
-
 func TestDispatchCardAction_RoutesAsMessage(t *testing.T) {
 	t.Parallel()
 	f := &Feishu{}
@@ -220,7 +201,7 @@ func TestDispatchCardAction_RoutesAsMessage(t *testing.T) {
 		called.Add(1)
 		got = m
 	}
-	payload := cardActionPayload{
+	payload := platform.AskAnswerPayload{
 		Kind:      "ask_answer",
 		ToolUseID: "toolu_xyz",
 		Header:    "Error style",
@@ -251,30 +232,10 @@ func TestDispatchCardAction_IgnoresUnknownKind(t *testing.T) {
 	var called atomic.Int32
 	handler := func(_ context.Context, _ platform.IncomingMessage) { called.Add(1) }
 	f.dispatchCardAction(context.Background(),
-		cardActionPayload{Kind: "something_else", Label: "X"},
+		platform.AskAnswerPayload{Kind: "something_else", Label: "X"},
 		"oc_1", "om_1", "direct", "ou_1", handler)
 	if called.Load() != 0 {
 		t.Errorf("handler should not fire on unknown kind, got %d", called.Load())
-	}
-}
-
-// TestNormalizeCardChatType pins the whitelist: only the two router-known
-// values survive; everything else (including attacker-relayed junk) is
-// dropped to "" so callers fall back to their own heuristic.
-func TestNormalizeCardChatType(t *testing.T) {
-	t.Parallel()
-	cases := map[string]string{
-		"direct": "direct",
-		"group":  "group",
-		"":       "",
-		"p2p":    "", // Feishu's wire value for 1:1 is normalised upstream; raw form rejected here
-		"GROUP":  "",
-		"../etc": "",
-	}
-	for in, want := range cases {
-		if got := normalizeCardChatType(in); got != want {
-			t.Errorf("normalizeCardChatType(%q) = %q, want %q", in, got, want)
-		}
 	}
 }
 
@@ -341,7 +302,7 @@ func TestDispatchCardAction_DirectChatTypeRoutesToDirect(t *testing.T) {
 	// chatID is an oc_ prefix (a real 1:1 open_chat_id) but the value-derived
 	// chatType is "direct" — the bug was treating this as "group".
 	f.dispatchCardAction(context.Background(),
-		cardActionPayload{Kind: "ask_answer", ToolUseID: "t1", Header: "H", Label: "L", ChatType: "direct"},
+		platform.AskAnswerPayload{Kind: "ask_answer", ToolUseID: "t1", Header: "H", Label: "L", ChatType: "direct"},
 		"oc_p2p_chat", "", "direct", "ou_user", handler)
 	if called.Load() != 1 {
 		t.Fatalf("handler called %d times, want 1", called.Load())
@@ -428,7 +389,7 @@ func TestDispatchCardAction_FallsBackToValueChatType(t *testing.T) {
 	handler := func(_ context.Context, m platform.IncomingMessage) { got = m }
 	// Envelope chatType empty; value carries the originating "group".
 	f.dispatchCardAction(context.Background(),
-		cardActionPayload{Kind: "ask_answer", Label: "L", ChatType: "group"},
+		platform.AskAnswerPayload{Kind: "ask_answer", Label: "L", ChatType: "group"},
 		"oc_grp", "", "", "ou_user", handler)
 	if got.ChatType != "group" {
 		t.Errorf("ChatType = %q, want group (value fallback failed)", got.ChatType)
@@ -491,7 +452,7 @@ func TestDispatchCardAction_CarriesAgentID(t *testing.T) {
 	f := &Feishu{}
 	var got platform.IncomingMessage
 	handler := func(_ context.Context, m platform.IncomingMessage) { got = m }
-	payload := cardActionPayload{
+	payload := platform.AskAnswerPayload{
 		Kind:      "ask_answer",
 		ToolUseID: "toolu_xyz",
 		Header:    "Error style",

@@ -22,7 +22,7 @@ import (
 func TestDispatchCardActionTracked(t *testing.T) {
 	t.Parallel()
 
-	payload := cardActionPayload{
+	payload := platform.AskAnswerPayload{
 		Kind:      "ask_answer",
 		ToolUseID: "toolu_xyz",
 		Header:    "Error style",
@@ -125,7 +125,7 @@ func TestDispatchCardActionTracked_StopDrainsInFlight(t *testing.T) {
 	go func() {
 		defer dispatchWG.Done()
 		f.dispatchCardActionTracked(context.Background(),
-			cardActionPayload{Kind: "ask_answer", Label: "L"},
+			platform.AskAnswerPayload{Kind: "ask_answer", Label: "L"},
 			"oc_1", "", "group", "ou_1", handler)
 	}()
 
