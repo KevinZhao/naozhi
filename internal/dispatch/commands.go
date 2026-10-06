@@ -105,7 +105,7 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 		d.handleProjectCommand(ctx, msg, trimmed, log)
 		return true
 
-	case trimmed == "/stop" || strings.HasPrefix(trimmed, "/stop "):
+	case isStopCommand(trimmed):
 		d.handleStopCommand(ctx, msg, log)
 		return true
 

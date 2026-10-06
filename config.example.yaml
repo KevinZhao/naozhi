@@ -482,6 +482,14 @@ platforms:
 #       allowed_users: ["ou_xxxxxxxx"]
 #       admin_users: ["ou_yyyyyyyy"]
 
+# Per-sender IM message rate limit (token bucket keyed by platform + user ID,
+# or by chat when the platform sends no user ID). Slash commands count; /stop
+# does not. A limited message is dropped and the sender told at most once a
+# minute. Absent or 0 = unlimited. Changes need a restart.
+# im_rate_limit:
+#   msgs_per_min: 10        # sustained rate per sender
+#   burst: 3                # back-to-back allowance; 0 = msgs_per_min
+
 log:
   level: "info"
   # Size cap for the files launchd (StandardOutPath/StandardErrorPath) or
