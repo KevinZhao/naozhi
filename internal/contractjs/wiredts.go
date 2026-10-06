@@ -1,6 +1,7 @@
 package contractjs
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -114,7 +115,11 @@ func readSchema(path string) (schemaFile, error) {
 	if err != nil {
 		return s, fmt.Errorf("read schema: %w", err)
 	}
-	if err := json.Unmarshal(data, &s); err != nil {
+	// A keyword this decoder does not model (oneOf, nullable, ...) is an
+	// error: dropping it would render a type that silently loses the rule.
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&s); err != nil {
 		return s, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return s, nil

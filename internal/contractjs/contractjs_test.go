@@ -200,6 +200,16 @@ func TestWireDTS_Rejects(t *testing.T) {
 			rest: `{"responses":{},"defs":{}}`,
 			want: "do not match frames",
 		},
+		"unmodelled schema keyword": {
+			ws:   `{"types":["a"],"frames":{"a":{"properties":{"type":{"type":"string"},"n":{"type":"string","nullable":true}},"required":["type"]}},"defs":{}}`,
+			rest: `{"responses":{},"defs":{}}`,
+			want: `unknown field "nullable"`,
+		},
+		"unmodelled object keyword": {
+			ws:   `{"types":["a"],"frames":{"a":` + frame + `},"defs":{}}`,
+			rest: `{"responses":{},"defs":{"p.D":{"properties":{},"required":[],"additionalProperties":false}}}`,
+			want: `unknown field "additionalProperties"`,
+		},
 		"unmapped schema type": {
 			ws:   `{"types":["a"],"frames":{"a":{"properties":{"type":{"type":"string"},"c":{"type":"complex128"}},"required":["type"]}},"defs":{}}`,
 			rest: `{"responses":{},"defs":{}}`,

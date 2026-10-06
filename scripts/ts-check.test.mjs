@@ -3,8 +3,9 @@
 // tsconfig.json has checkJs off, a file opts in with a `// @ts-check` first
 // line, and lint-js runs tsc over the directory, so an opted-in file must
 // have zero errors. CHECKED is the floor: a file cannot drop its pragma (and
-// with it every check) without that showing as a diff here, and a new opt-in
-// is listed too. The probes prove wire.d.ts reaches a handler through wsm.on.
+// with it every check) or silence lines with @ts-ignore / @ts-expect-error /
+// @ts-nocheck without failing here, and a new opt-in is listed too. The
+// probes prove wire.d.ts reaches a handler through wsm.on.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -29,6 +30,12 @@ test('the files carrying // @ts-check are exactly the floor list', () => {
     .sort();
   assert.deepEqual(opted, [...CHECKED].sort(),
     'a file with the pragma must be listed in CHECKED, and a listed file must keep it as its first line');
+});
+
+test('an opted-in file carries no directive that switches checks back off', () => {
+  const hits = CHECKED.flatMap((f) => fs.readFileSync(path.join(STATIC, f), 'utf8').split('\n')
+    .flatMap((line, i) => (/@ts-(nocheck|ignore|expect-error)\b/.test(line) ? [`${f}:${i + 1}`] : [])));
+  assert.deepEqual(hits, [], 'fix the type error or leave the file out of CHECKED');
 });
 
 test('no wire.d.ts global merges into a TypeScript lib declaration', () => {
