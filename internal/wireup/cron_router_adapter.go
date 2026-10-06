@@ -159,11 +159,12 @@ func exitFailure(err error) error {
 // turnFailure wraps a cron.TurnFailedError (matching cron.ErrTurnFailed)
 // around a result the backend flagged as an error, so the run is recorded as
 // failed rather than succeeding with empty or raw-error text; nil for a
-// healthy turn. error_during_execution after an abort naozhi requested (the
-// cron watchdog's interrupt) is that abort, not a failure. The detail is for
-// run history; the IM notice only ever shows the cause.
+// healthy turn. An abort is not a failure: claude's aborted_* terminal_reason
+// on newer CLIs, or error_during_execution after one naozhi requested (the
+// cron watchdog's interrupt) on older ones. The detail is for run history; the
+// IM notice only ever shows the cause.
 func turnFailure(r *clievent.SendResult) error {
-	if !r.IsError || (r.Aborted && r.SubType == "error_during_execution") {
+	if !r.IsError || r.CLIAborted() || (r.Aborted && r.SubType == "error_during_execution") {
 		return nil
 	}
 	tf := &cron.TurnFailedError{Cause: turnCause(r)}
@@ -298,9 +299,11 @@ func (ar adoptedRunAdapter) AwaitAdopted(ctx context.Context) (cron.AdoptedRunOu
 }
 
 // toCronAdoptedOutcome maps the latched turn onto cron's view. A completed
-// turn the backend flagged as an error carries TurnErr.
+// turn the backend flagged as an error carries TurnErr; an aborted one, in
+// either CLI's shape, is not completed.
 func toCronAdoptedOutcome(out cli.AdoptedOutcome) cron.AdoptedRunOutcome {
-	completed := out.End == cli.AdoptedEndResult && out.Result.SubType != "error_during_execution"
+	completed := out.End == cli.AdoptedEndResult &&
+		out.Result.SubType != "error_during_execution" && !out.Result.CLIAborted()
 	res := cron.AdoptedRunOutcome{
 		Completed: completed,
 		Text:      out.Result.Text,

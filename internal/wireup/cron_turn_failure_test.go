@@ -16,8 +16,8 @@ import (
 
 // TestTurnFailure: a result the backend flagged as an error becomes
 // cron.ErrTurnFailed with run-history detail and the cause the notice words;
-// a healthy turn and an abort naozhi asked for (error_during_execution +
-// Aborted) stay nil.
+// a healthy turn and an abort stay nil, whether claude reports it as an
+// aborted_* terminal_reason or (older CLIs) error_during_execution + Aborted.
 func TestTurnFailure(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -30,6 +30,9 @@ func TestTurnFailure(t *testing.T) {
 		{name: "success", r: clievent.SendResult{Text: "done", SubType: "success"}},
 		{name: "error subtype without is_error", r: clievent.SendResult{SubType: "error_max_turns"}},
 		{name: "own abort", r: clievent.SendResult{SubType: "error_during_execution", IsError: true, Aborted: true}},
+		{name: "own abort 2.1.288", r: clievent.SendResult{SubType: "success", Aborted: true, TerminalReason: "aborted_tools"}},
+		{name: "unrequested aborted_tools", r: clievent.SendResult{SubType: "success", TerminalReason: "aborted_tools"}},
+		{name: "aborted_* flagged is_error", r: clievent.SendResult{SubType: "success", IsError: true, TerminalReason: "aborted_streaming", Text: "partial"}},
 		{
 			name:   "max turns, empty text",
 			r:      clievent.SendResult{SubType: "error_max_turns", IsError: true},
@@ -236,8 +239,8 @@ func TestCronSessionAdapter_SendNamesResumeUnavailable(t *testing.T) {
 }
 
 // TestToCronAdoptedOutcome: an adopted turn that completed as a failure is
-// Completed with TurnErr; a healthy one has none; error_during_execution and a
-// CLI exit stay not-completed.
+// Completed with TurnErr; a healthy one has none; an abort in either CLI's
+// shape and a CLI exit stay not-completed.
 func TestToCronAdoptedOutcome(t *testing.T) {
 	t.Parallel()
 	failed := toCronAdoptedOutcome(cli.AdoptedOutcome{End: cli.AdoptedEndResult, Result: clievent.SendResult{
@@ -256,6 +259,9 @@ func TestToCronAdoptedOutcome(t *testing.T) {
 	}
 	for _, out := range []cli.AdoptedOutcome{
 		{End: cli.AdoptedEndResult, Result: clievent.SendResult{SubType: "error_during_execution", IsError: true}},
+		{End: cli.AdoptedEndResult, Result: clievent.SendResult{SubType: "success", TerminalReason: "aborted_tools"}},
+		{End: cli.AdoptedEndResult, Result: clievent.SendResult{SubType: "success", TerminalReason: "aborted_streaming", Text: "partial essay"}},
+		{End: cli.AdoptedEndResult, Result: clievent.SendResult{SubType: "success", IsError: true, TerminalReason: "aborted_tools"}},
 		{End: cli.AdoptedEndCLIExited},
 	} {
 		if got := toCronAdoptedOutcome(out); got.Completed || got.TurnErr != nil {
