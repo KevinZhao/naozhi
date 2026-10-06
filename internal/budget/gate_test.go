@@ -233,6 +233,24 @@ func TestGate_SetLimitsSwapsCaps(t *testing.T) {
 	}
 }
 
+// Changed caps start a new notice episode, so a re-block under a raised cap
+// is told again; a reload that leaves the normalized limits as they were
+// keeps today's marks.
+func TestGate_SetLimitsResetsNoticesOnChange(t *testing.T) {
+	g := gateWith(Limits{PerJobDailyUSD: 5}, usd(now, "cron:j1", "j1", 6))
+	if !g.Once(NoticeBlocked, "job:j1") || g.Once(NoticeBlocked, "job:j1") {
+		t.Fatal("Once must fire once before any reload")
+	}
+	g.SetLimits(Limits{PerJobDailyUSD: 5, WarnRatio: DefaultWarnRatio, Action: ActionBlock})
+	if g.Once(NoticeBlocked, "job:j1") {
+		t.Error("unchanged limits must keep today's notice marks")
+	}
+	g.SetLimits(Limits{PerJobDailyUSD: 6})
+	if !g.Once(NoticeBlocked, "job:j1") || g.Once(NoticeBlocked, "job:j1") {
+		t.Error("a raised cap must let the notice fire once more")
+	}
+}
+
 // A reload swaps the caps while IM and cron goroutines check them.
 func TestGate_SetLimitsConcurrentWithChecks(t *testing.T) {
 	g := gateWith(Limits{DailyUSD: 10}, usd(now, "cron:j1", "j1", 3))

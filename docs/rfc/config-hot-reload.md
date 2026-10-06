@@ -147,6 +147,8 @@ IM 和 cron 共用一个 `budget.Gate`，上限放在 `atomic.Pointer[Limits]` �
 只读一次。`HotChanged` 比较 `BudgetLimits()`（三档上限、`warn_ratio`、`action`），
 变了就由 reloader 直接调 `gate.SetLimits`（闸门属于组合根，不经过 Server）。改上限
 不清零当天已计的花费；上限全删掉时闸门仍在、放行一切，之后再加上限照样看到当天花费。
+规整后的 limits 真变了才清掉当天的提醒标记（`Once`），新上限算新一轮：调高后同一天再
+被拦的 cron 任务照样写一条历史并通知，IM 到新上限的 80% 也会再收到提醒行。
 
 闸门接不住的两种情况报 `restart_required`：
 

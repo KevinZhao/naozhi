@@ -82,7 +82,9 @@ func NewGate(lim Limits, idx *Index) *Gate {
 
 // SetLimits replaces the caps for every later check (a config reload). A
 // limits value with no cap leaves the gate admitting everything; the index
-// keeps counting, so caps set again later see today's spend. No-op on nil.
+// keeps counting, so caps set again later see today's spend. Changed limits
+// start a new notice episode: Once reports true again for every subject.
+// No-op on nil.
 func (g *Gate) SetLimits(lim Limits) {
 	if g == nil {
 		return
@@ -93,7 +95,9 @@ func (g *Gate) SetLimits(lim Limits) {
 	if lim.Action != ActionWarn {
 		lim.Action = ActionBlock
 	}
-	g.lim.Store(&lim)
+	if old := g.lim.Swap(&lim); old != nil && *old != lim {
+		g.idx.clearNotices()
+	}
 }
 
 // Enabled reports whether the gate currently enforces any cap.

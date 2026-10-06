@@ -651,7 +651,8 @@ cost:
 - 这是软上限：放行时还没超的那一轮可能把花费推过上限；花费在账本落盘后（约 1 秒内）才
   计入。只统计以 USD 计价的花费，按 credits / tokens 计量的 backend 不计入。
 - 需要 cost 账本开着（`cost.enabled` 不能为 false）。改上限、`warn_ratio`、`action`
-  不用重启，`naozhi config reload` 即时生效，当天已花的钱照算；下面两种仍要重启（会列在
+  不用重启，`naozhi config reload` 即时生效，当天已花的钱照算；改了之后上面「每天一次」的
+  提醒和跳过记录重新计，新上限下再碰到会再提醒、再记一次。下面两种仍要重启（会列在
   `restart_required` 里）：启动时没配任何上限、现在要加上（`cost.budget`），以及「一天」
   的时区变了（`cost.budget.timezone`）。
 
