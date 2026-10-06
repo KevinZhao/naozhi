@@ -16,7 +16,7 @@ V10 是后补的验证，CLI 版本与日期见该节。
 |---|---|
 | `--replay-user-messages` 是 naozhi ↔ CLI uuid 匹配的**唯一**可靠机制 | 必须默认启用 |
 | CLI 合并多条消息时，只 emit **一个 replay event**，但该 event 的 content 里含**所有被合并消息的 text blocks** | naozhi 可以逆推合并集合 |
-| `priority:"now"` 工作完美：立即 abort 当前 turn 并处理新消息 | `/urgent` 命令可落地 |
+| `priority:"now"` 工作完美：立即 abort 当前 turn 并处理新消息；阻塞中的工具例外，abort 要等工具返回（V10） | `/urgent` 命令可落地，文案不承诺"立即" |
 | `control_request interrupt` 不丢弃 pending 队列 | `/stop` 可落地 |
 | `priority:"now"` 抢占同样不丢弃 pending 队列：now 消息先跑，之前排队的消息随后各自成轮（V10） | `/urgent` 不得让排队消息失败 |
 | Mid-turn 注入成功率依赖**内容**（非对抗性成功），不依赖路径 | 用户需心智接受 |
@@ -278,6 +278,16 @@ T=33.25s replay(B) → result 'B_DONE'
 - 阻塞中的 Bash 工具不会被立即打断：abort 要等工具返回（上例 C 写入后约 17s），纯生成则是 10ms 级
 - 用提交的脚本复跑（同日，`--bash` 与 `--gen`）两种模式均 PASS，事件顺序同上
 - 新增的 `command_lifecycle` 事件（queued / started / cancelled / completed，带 `command_uuid`）直接给出每条消息的生命周期
+
+### 后续评估（#3498）
+
+- **`/urgent` 文案**：IM 用法提示、`/help`、dashboard 快捷键面板和 README 不再说"立即中断"，改为"中断当前回复，正在运行的工具需先结束"。`/stop` 走 `control_request interrupt`，V10 没有测它遇到阻塞工具时的延迟，文案不动
+- **slot 跟踪信号不换**：可选的更强信号有两个，`command_lifecycle`（顶层 `{"type":"command_lifecycle","command_uuid","state","uuid","session_id"}`，不是 system subtype）和 result 帧上的 `user_message_uuid` / `user_message_uuids`（V10 两种模式下都等于该轮 replay 的 uuid）。目前仍用 replay uuid 的 FIFO 匹配，原因是：
+  - FIFO 匹配在新旧 CLI 上都验证过（V3/V6/V10），#3394 已在它之上删掉 `reapAbortedPreempted`
+  - `command_lifecycle` 只有 2.1.288+ 才有，切换要按 CLI 版本维护两条路径
+  - 将来真需要更直接的绑定，result 帧的 `user_message_uuids` 比 `command_lifecycle` 更合适：它就在决定 slot 结局的那一帧上
+  - 只有在线上出现 FIFO 错配时才开后续 issue。naozhi 目前不解析 `command_lifecycle`：`logEvent` 没有对应分支，它不进 dashboard 事件日志；Send 循环只把它当作一次输出（刷新空闲计时），不影响 slot 结局
+- **aborted 帧的费用读数**：gen 模式下被打断的 A 是会话第一轮，它的 result 帧 `total_cost_usd=0`、`modelUsage={}`，下一轮（C）才报 0.025；bash 模式的 `aborted_tools` 帧正常带累计费用（0.078）。`costledger.Delta` 只认增长，读数变小时记 0 并保留基线，所以一个偏低的读数不会产生负数或假尖峰。仍未验证的是会话中途的 `aborted_streaming` 帧是否也报出低于上一轮的累计值，以及被打断那一轮的花费之后是否计入累计。这需要一次会话中途的抓包
 
 ---
 

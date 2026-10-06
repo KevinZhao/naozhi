@@ -117,7 +117,7 @@ graph LR
 | `passthrough` | 每条消息直接转发给 CLI，各自得到独立结果。需 stream-json 后端，ACP 自动回退到 collect |
 
 - **`/stop`**: 软中断当前回复，保留后续排队消息
-- **`/urgent <消息>`**: 紧急打断当前 turn 并优先处理该消息（passthrough 模式下的 `priority:"now"` 抢占）
+- **`/urgent <消息>`**: 中断当前 turn 并优先处理该消息（passthrough 模式下的 `priority:"now"` 抢占）。正在运行的工具不会被立即打断：CLI 要等工具返回才结束当前 turn（如 `sleep 20` 会让中断推迟到命令跑完）
 
 ### 多 Backend
 
@@ -362,7 +362,7 @@ Dashboard: 浏览器打开 `http://localhost:8180`
 | `/new review` | 重置指定 agent 对话 |
 | `/clear` | 重置会话（同 `/new`） |
 | `/stop` | 中断当前回复，保留后续排队消息 |
-| `/urgent <text>` | 紧急打断并优先处理该消息 |
+| `/urgent <text>` | 中断当前回复并优先处理该消息（正在运行的工具需先结束） |
 | `/cd <path>` | 切换工作目录 |
 | `/pwd` | 显示当前工作目录 |
 | `/project <name>` | 绑定到项目 |
