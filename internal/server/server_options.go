@@ -8,6 +8,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/imauth"
+	"github.com/naozhi/naozhi/internal/imbudget"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
@@ -34,6 +35,9 @@ type ServerOptions struct {
 	// IMAccess is the IM sender policy the dispatcher enforces; nil allows
 	// every sender.
 	IMAccess *imauth.Policy
+	// IMLimits caps IM usage (chat budget, sender rate); the zero value
+	// disables both gates.
+	IMLimits IMLimitsOptions
 	// StateDir is the only state directory the constructor owns end-to-end
 	// (cookie_secret 0700/0600, retired-key ledger, size warning). Other state
 	// dirs (~/.claude, workspace cwd, attachments, cron runs/shims) are owned
@@ -223,4 +227,13 @@ type ConfigOptions struct {
 	// The id is charset-validated so the path cannot escape this dir. Empty
 	// disables secret-file creation.
 	AccessProfileSecretsDir string
+}
+
+// IMLimitsOptions is the derived form of config.im_limits.
+type IMLimitsOptions struct {
+	// Budget is the per-chat spend policy; Enabled() false disables the gate.
+	Budget imbudget.Policy
+	// UserRatePerMinute / UserRateBurst shape the per-sender token bucket;
+	// PerMinute 0 disables it.
+	UserRatePerMinute, UserRateBurst int
 }

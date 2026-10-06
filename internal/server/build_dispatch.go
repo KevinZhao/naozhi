@@ -9,8 +9,14 @@ package server
 
 import (
 	"fmt"
+	"time"
 
+	"golang.org/x/time/rate"
+
+	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/imbudget"
+	"github.com/naozhi/naozhi/internal/ratelimit"
 )
 
 // buildDispatcher wires the dispatcher from the Server state that already
@@ -51,6 +57,8 @@ func (s *Server) buildDispatcher(w *wiring) *dispatch.Dispatcher {
 		Dedup:                 w.dedup,
 		AllowedRoot:           w.allowedRoot,
 		Access:                w.imAccess,
+		Budget:                s.buildBudgetGate(w.imLimits.Budget),
+		UserRate:              buildUserLimiter(w.imLimits),
 		ClaudeDir:             s.claudeDir,
 		Capabilities:          serverCaps{s: s},
 		NoOutputTimeout:       s.noOutputTimeout,
@@ -70,4 +78,50 @@ func (s *Server) buildDispatcher(w *wiring) *dispatch.Dispatcher {
 		panic(fmt.Sprintf("server: dispatch wireup: %v", err))
 	}
 	return d
+}
+
+// buildBudgetGate builds the per-chat spend gate over the router's cost
+// ledger; nil when the policy is off or there is no ledger to read (config
+// validation already refuses a budget with cost.enabled false).
+func (s *Server) buildBudgetGate(p imbudget.Policy) *imbudget.Gate {
+	if !p.Enabled() || s.router == nil {
+		return nil
+	}
+	ledger := s.router.Runs().CostLedger()
+	if !ledger.Enabled() {
+		return nil
+	}
+	return imbudget.New(p, ledgerSpendUSD(ledger))
+}
+
+// ledgerSpendUSD sums a chat's USD entries in [from, to); credits and token
+// units are not converted (docs/rfc/im-usage-limits.md §2).
+func ledgerSpendUSD(ledger *costledger.Store) imbudget.SpendFunc {
+	return func(chatKey string, from, to time.Time) (float64, error) {
+		sum, err := ledger.Summarize(costledger.Query{From: from, To: to, ChatKey: chatKey, GroupBy: costledger.GroupByUnit})
+		if err != nil {
+			return 0, err
+		}
+		for _, b := range sum.Buckets {
+			if b.Unit == costledger.UnitUSD {
+				return b.Amount, nil
+			}
+		}
+		return 0, nil
+	}
+}
+
+// buildUserLimiter builds the per-sender message limiter; nil when off.
+func buildUserLimiter(o IMLimitsOptions) *ratelimit.Limiter {
+	if o.UserRatePerMinute <= 0 {
+		return nil
+	}
+	burst := o.UserRateBurst
+	if burst <= 0 {
+		burst = o.UserRatePerMinute
+	}
+	return ratelimit.New(ratelimit.Config{
+		Rate:  rate.Every(time.Minute / time.Duration(o.UserRatePerMinute)),
+		Burst: burst,
+	})
 }

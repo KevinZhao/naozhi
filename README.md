@@ -452,6 +452,12 @@ reverse_nodes:                            # 多节点：接受远程拨入
     token: "${NODE_TOKEN}"
     display_name: "Kevin's Mac"
 
+im_limits:                                # IM 用量限制，见「部署 · IM 用量限制」
+  per_chat_daily_usd: 20                  # 每个 chat 滚动 24h 的 USD 预算；0 = 关闭
+  action: block                           # block | warn
+  user_rate:
+    per_minute: 10                        # 每个发送者的消息限流；0 = 关闭
+
 im_access:                                # IM 发送者白名单，见「部署 · IM 访问控制」
   default_deny: false                     # true：没有条目的平台拒绝所有人
   # deny_reply: ""                        # 替换私聊里的拒绝文案（默认附带对方 ID）
@@ -562,6 +568,32 @@ im_access:
   dashboard 里手动删除。
 - 改名单要重启 naozhi（会打断正在运行的会话），配置热重载见 #3437。
 - 把自己关在外面时，dashboard 不受 `im_access` 影响，可以从那里继续操作。
+
+### IM 用量限制
+
+`im_access` 决定谁能用，`im_limits` 决定能用多少（设计见
+[`docs/rfc/im-usage-limits.md`](docs/rfc/im-usage-limits.md)）：
+
+```yaml
+im_limits:
+  per_chat_daily_usd: 20      # 每个 chat 滚动 24 小时的 USD 预算
+  warn_ratio: 0.8             # 用到 80% 时提醒一次
+  action: block               # block：超限后新消息不再进 CLI；warn：只提醒
+  user_rate:
+    per_minute: 10            # 每个发送者每分钟最多 10 条，burst 默认同值
+```
+
+- 预算从 cost ledger 读取（要求 `cost.enabled` 不为 false），只统计 USD 条目，kiro
+  credits 不折算。一个 turn 的花费在它结束后才入账，所以闸门最多滞后一个 turn
+  再加 15s 缓存。
+- 超限后 `/stop`、`/new`、`/model`、`/help` 仍可用，只有会进 CLI 的消息被拒；拒绝回复
+  同一 chat 10 分钟最多一次。
+- 限流在命令之前生效（刷 `/help` 也算刷屏），命中静默丢弃，同一发送者 10 分钟最多
+  提示一次。
+- 指标：`naozhi_dispatch_budget_block_total`、`naozhi_dispatch_budget_warn_total`、
+  `naozhi_dispatch_ratelimit_total`、`naozhi_dispatch_budget_ledger_error_total`。
+- 项目绑定聊天的 planner 会话（`project:<name>:planner`）不属于任何 chat，其花费
+  暂不计入预算（RFC §6）。
 
 ### 生产架构
 

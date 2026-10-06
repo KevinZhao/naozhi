@@ -403,6 +403,21 @@ platforms:
 #       allowed_users: ["ou_xxxxxxxx"]
 #       admin_users: ["ou_yyyyyyyy"]
 
+# IM usage limits (docs/rfc/im-usage-limits.md). per_chat_daily_usd is a
+# rolling-24h USD budget per chat, read from the cost ledger (so it needs
+# cost.enabled); at the limit new messages are refused but /stop, /new and
+# /help still work, and a once-per-day notice fires at warn_ratio. Only USD
+# entries count (kiro credits are not converted). user_rate is a per-sender
+# token bucket applied before any command runs; hits are dropped silently and
+# the sender is told at most once per 10 minutes. Absent = both off.
+# im_limits:
+#   per_chat_daily_usd: 20
+#   warn_ratio: 0.8
+#   action: block           # block | warn (warn = notice only)
+#   user_rate:
+#     per_minute: 10
+#     burst: 5              # default = per_minute
+
 log:
   level: "info"
   # Size cap for the files launchd (StandardOutPath/StandardErrorPath) or

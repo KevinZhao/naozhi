@@ -16,10 +16,12 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/imauth"
+	"github.com/naozhi/naozhi/internal/imbudget"
 	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/ratelimit"
 	"github.com/naozhi/naozhi/internal/replyfmt"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -112,6 +114,9 @@ type Dispatcher struct {
 	// nil allows everyone. Swapped whole by SetAccessPolicy.
 	access      atomic.Pointer[imauth.Policy]
 	denyReplies denyThrottle
+	// budget and userRate are the usage gates (usage_gates.go); nil = off.
+	budget   atomic.Pointer[imbudget.Gate]
+	userRate atomic.Pointer[ratelimit.Limiter]
 }
 
 // keyForChat returns the routed session key for the chat coordinates and
@@ -196,6 +201,10 @@ type DispatcherConfig struct {
 
 	// Access is the IM sender policy; nil allows every sender.
 	Access *imauth.Policy
+	// Budget is the per-chat spend gate; nil disables it.
+	Budget *imbudget.Gate
+	// UserRate is the per-sender message limiter; nil disables it.
+	UserRate *ratelimit.Limiter
 }
 
 // ErrTurnsWireupMissing is returned by NewDispatcher when DispatcherConfig.Turns
@@ -265,6 +274,8 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		fallbackBannerDelay:   fallbackBannerDelayDefault,
 	}
 	d.access.Store(cfg.Access)
+	d.budget.Store(cfg.Budget)
+	d.userRate.Store(cfg.UserRate)
 	// agentCommands is immutable after construction, so this snapshot stays
 	// correct for the dispatcher's lifetime (#2148).
 	d.knownAgentIDs = make(map[string]struct{}, len(d.agentCommands)+2)
@@ -330,8 +341,8 @@ type preparedInbound struct {
 }
 
 // prepareInbound runs the front-matter common to every dispatch strategy
-// (dedup, group-mention gate, sender authorization, slash commands, agent
-// resolution, accounting, key/opts resolution, image conversion). Returns
+// (dedup, group-mention gate, sender authorization, sender rate limit, slash
+// commands, agent resolution, chat budget, accounting, key/opts resolution, image conversion). Returns
 // false when the message was fully handled or dropped here.
 func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMessage) (preparedInbound, bool) {
 	// Dedup first: platform retries (e.g. Feishu webhook re-delivery) must
@@ -373,6 +384,9 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	if !d.authorize(ctx, msg, trimmed, lg) {
 		return preparedInbound{}, false
 	}
+	if !d.rateLimitOK(ctx, msg, lg) {
+		return preparedInbound{}, false
+	}
 
 	if d.dispatchCommand(ctx, msg, trimmed, lg) {
 		return preparedInbound{}, false
@@ -411,6 +425,11 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 			d.replyText(ctx, msg, "未知命令: "+safeCmd+"\n输入 /help 查看可用命令，或直接发送消息。", lg)
 			return preparedInbound{}, false
 		}
+	}
+
+	// Chat budget after commands: a chat at its limit keeps /stop and /new.
+	if !d.budgetOK(ctx, msg, lg) {
+		return preparedInbound{}, false
 	}
 
 	// Accepted messages only (post-dedup, post-command). Feeds /health and

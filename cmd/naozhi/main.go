@@ -411,7 +411,12 @@ func main() {
 		Backend:       defaultBackend,
 		AllowedRoot:   workspace,
 		IMAccess:      cfg.IMAccessPolicy(),
-		StateDir:      sessionLayout.Root(),
+		IMLimits: server.IMLimitsOptions{
+			Budget:            cfg.IMLimits.BudgetPolicy(),
+			UserRatePerMinute: cfg.IMLimits.UserRate.PerMinute,
+			UserRateBurst:     cfg.IMLimits.EffectiveBurst(),
+		},
+		StateDir: sessionLayout.Root(),
 		Config: server.ConfigOptions{
 			// Path enables the access-profile create endpoint; absolute so the
 			// write target survives cwd changes. Secrets dir holds *_FILE

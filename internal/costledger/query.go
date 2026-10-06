@@ -3,6 +3,7 @@ package costledger
 import (
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -34,9 +35,12 @@ var ErrBadQuery = errors.New("costledger: bad query")
 
 // Query selects entries by window and optional filters and groups them.
 type Query struct {
-	From, To       time.Time
-	GroupBy        GroupBy
-	SessionKey     string
+	From, To   time.Time
+	GroupBy    GroupBy
+	SessionKey string
+	// ChatKey selects every session of one IM chat: entries whose SessionKey
+	// is ChatKey plus a ":<agent>" tail (docs/rfc/im-usage-limits.md §3.1).
+	ChatKey        string
 	JobID          string
 	RunID          string
 	Workspace      string
@@ -73,7 +77,14 @@ func (g GroupBy) valid() bool {
 }
 
 func (q Query) filtered() bool {
-	return q.SessionKey != "" || q.JobID != "" || q.RunID != "" || q.Workspace != ""
+	return q.SessionKey != "" || q.ChatKey != "" || q.JobID != "" || q.RunID != "" || q.Workspace != ""
+}
+
+// inChat reports whether sessionKey belongs to chatKey: the chat key followed
+// by exactly one more ":" segment, so "a:b:c" never matches "a:b:cd:general".
+func inChat(sessionKey, chatKey string) bool {
+	rest, ok := strings.CutPrefix(sessionKey, chatKey+":")
+	return ok && rest != "" && !strings.Contains(rest, ":")
 }
 
 func (q Query) match(e Entry) bool {
@@ -81,6 +92,9 @@ func (q Query) match(e Entry) bool {
 		return false
 	}
 	if q.SessionKey != "" && e.SessionKey != q.SessionKey {
+		return false
+	}
+	if q.ChatKey != "" && !inChat(e.SessionKey, q.ChatKey) {
 		return false
 	}
 	if q.JobID != "" && e.JobID != q.JobID {

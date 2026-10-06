@@ -124,7 +124,8 @@ type wiring struct {
 	agentCommands map[string]string
 	allowedRoot   string
 	imAccess      *imauth.Policy // nil allows every IM sender
-	debugMode     bool           // gates /api/debug/pprof and /api/debug/vars
+	imLimits      IMLimitsOptions
+	debugMode     bool // gates /api/debug/pprof and /api/debug/vars
 	resolver      *session.KeyResolver
 	sysessionMgr  *sysession.Manager
 	orient        *orientConfig // nil = image auto-orientation off
