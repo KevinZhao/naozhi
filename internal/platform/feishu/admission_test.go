@@ -11,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
+
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
@@ -194,6 +197,51 @@ func TestWebhook_MediaAdmission(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("webhook status = %d, want 200", w.Code)
 		}
+	}
+	f.dispatch.Wait()
+
+	if stub.downloads.Load() != 0 || tr.calls.Load() != 0 || stub.replies.Load() != 0 || len(h.all()) != 0 {
+		t.Errorf("refused media: downloads=%d transcribes=%d replies=%d handled=%d, want all 0",
+			stub.downloads.Load(), tr.calls.Load(), stub.replies.Load(), len(h.all()))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asked) != 2 {
+		t.Errorf("admission asked %d times, want once per media message", len(asked))
+	}
+}
+
+func sdkMediaEvent(eventID, msgType, content string) *larkim.P2MessageReceiveV1 {
+	return &larkim.P2MessageReceiveV1{
+		EventV2Base: &larkevent.EventV2Base{Header: &larkevent.EventHeader{EventID: eventID}},
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{SenderId: &larkim.UserId{OpenId: strPtr("ou_eve")}},
+			Message: &larkim.EventMessage{
+				MessageId: strPtr("om_" + eventID), ChatId: strPtr("oc_1"), ChatType: strPtr("p2p"),
+				MessageType: strPtr(msgType), Content: strPtr(content),
+			},
+		},
+	}
+}
+
+// The websocket transport routes image and voice messages through the same
+// admission check before it fetches anything.
+func TestWebSocket_MediaAdmission(t *testing.T) {
+	t.Parallel()
+	var asked []string
+	var mu sync.Mutex
+	f, stub, tr := newMediaFeishu(t, Config{}, refuseRecording(&asked, &mu))
+	var h handled
+
+	for _, ev := range []*larkim.P2MessageReceiveV1{
+		sdkMediaEvent("ev_img", "image", `{"image_key":"img_1"}`),
+		sdkMediaEvent("ev_audio", "audio", `{"file_key":"file_1"}`),
+	} {
+		pe, ok := f.parseSDKEvent(ev)
+		if !ok || pe.MediaType == "" {
+			t.Fatalf("parseSDKEvent(%s) = %+v, %v; want a media event", *ev.Event.Message.MessageType, pe, ok)
+		}
+		f.routeParsed(context.Background(), h.handler, pe)
 	}
 	f.dispatch.Wait()
 
