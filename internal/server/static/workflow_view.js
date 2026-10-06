@@ -39,6 +39,8 @@ import {
  * @property {HTMLElement | null} result the result block, for resultOf
  * @property {object | null} resultOf
  * @property {boolean} openNow set open once it is in the panel
+ * @property {WorkflowEntry} entry the store entry it renders
+ * @property {string} epoch that entry's epoch when the caches were filled
  */
 
 // store: session sid → its workflows (workflow_state.js); kept across turns
@@ -286,7 +288,18 @@ function newWorkflowView(s, e, newest) {
   const pref = openPrefs()[e.taskId];
   const openNow = pref !== undefined ? pref === 1 : (e.open || (newest && !isMobile()));
   const loading = el('div', 'wf-empty', '加载中…');
-  return { el: d, sum, body, phases: new Map(), phaseOpen: new Map(), limit: new Map(), rows: new Map(), loading, result: null, resultOf: null, openNow };
+  return {
+    el: d, sum, body, phases: new Map(), phaseOpen: new Map(), limit: new Map(), rows: new Map(), loading, result: null, resultOf: null, openNow,
+    entry: e, epoch: e.epoch,
+  };
+}
+
+// letGoOfHidden drops the rows and results of the session the panel last
+// showed once it is off screen, whichever way the dashboard left it.
+function letGoOfHidden() {
+  if (!view.sid || view.sid === shownSid()) return;
+  releaseRows(store, view.sid);
+  view.sid = '';
 }
 
 /**
@@ -299,6 +312,7 @@ export function renderWorkflowPanel() {
   paint.last = Date.now();
   const panel = document.getElementById('workflow-panel');
   const s = shownSid() || '';
+  letGoOfHidden();
   if (panel !== view.panel || s !== view.sid) {
     if (panel) panel.textContent = '';
     view.panel = panel;
@@ -328,6 +342,7 @@ export function renderWorkflowPanel() {
 
 /** @param {WorkflowView} v @param {WorkflowEntry} e */
 function paintWorkflow(v, e) {
+  rebind(v, e);
   paintSummary(v, e.workflow);
   if (!v.el.open) {
     v.body.textContent = '';
@@ -336,6 +351,30 @@ function paintWorkflow(v, e) {
     return;
   }
   paintBody(v, e);
+}
+
+/**
+ * rebind keeps view v in step with entry e. A new entry or epoch (a restart
+ * builds a new board, whose revs start over) empties the row, phase and
+ * result caches; a <details> left open makes an entry that is not (a
+ * replaced or released one) ask for its rows.
+ * @param {WorkflowView} v
+ * @param {WorkflowEntry} e
+ */
+function rebind(v, e) {
+  if (v.entry !== e || v.epoch !== e.epoch) {
+    v.entry = e;
+    v.epoch = e.epoch;
+    v.body.textContent = '';
+    v.phases.clear();
+    v.rows.clear();
+    v.result = null;
+    v.resultOf = null;
+  }
+  if (v.el.open && !e.open) {
+    expand(e, true);
+    pumpFetches();
+  }
 }
 
 /** @param {WorkflowView} v @param {WireView} w */
@@ -566,6 +605,7 @@ export function onSessionsRefreshed() {
   const sessions = /** @type {SessionSnapshot[]} */ (sessionList.lastSidebarData?.sessions || []);
   const listed = new Set(sessions.map((x) => sid(x.key, x.node)));
   for (const s of [...store.keys()]) if (!listed.has(s)) store.delete(s);
+  letGoOfHidden();
   const s = shownSid();
   const snap = s && sessions.find((x) => sid(x.key, x.node) === s);
   if (!snap) return;

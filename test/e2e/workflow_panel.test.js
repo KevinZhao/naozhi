@@ -15,11 +15,16 @@
 //    activated by Space; state labels are visually hidden;
 //  - an unclaimed unknown workflow is listed and says so;
 //  - switching away and back refetches each open workflow exactly once, also
-//    when the first fetch landed after the switch; an unchanged WS reconnect
-//    refetches nothing; /new's workflow_set empties it;
+//    when the first fetch landed after the switch, or the dashboard left the
+//    session some other way (another view, a new session); an unchanged WS
+//    reconnect refetches nothing; /new's workflow_set empties it;
+//  - an open workflow whose board restarted (a full frame of a new epoch, or
+//    a workflow_set replacing the entry) fetches the new rows once and shows
+//    them, not the old board's; only the newest running one opens by itself;
 //  - a suspended subscription re-subscribes once the snapshot names a
 //    protocol; a sessions_update over a live socket runs the fallback;
-//  - polling (no socket) fetches a folded workflow header only;
+//  - polling (no socket) fetches a folded workflow header only, and takes
+//    the elapsed clock from the answer;
 //  - a remote node's session never calls the endpoint; a session gone from
 //    the list takes its workflows with it; elapsed times tick between frames;
 //  - the panel is no live region; an ending is announced once, and only for
@@ -356,6 +361,93 @@ test('rows of a fetch that lands after a switch away are let go', async ({ page 
   } finally { mock.server.close(); }
 });
 
+test('an open workflow whose board restarts fetches the new board\'s rows once', async ({ page }) => {
+  const EPOCH3 = '00000000000000c3';
+  const w1 = view('w1', 9, [row(0, 2, 'running', { tokens: 100 })]);
+  const workflows = { w1: fixture(w1) };
+  const { mock, conn, errors } = await boot(page, { workflows, workflowDelayMs: SLOW });
+  try {
+    push(conn, A, [w1]);
+    const r0 = wf(page, 'w1').locator('.wf-row[data-index="0"] .wf-stat');
+    await expect(r0).toHaveText('100 tok · 0 tools');
+    expect(callsFor(mock, 'w1').length).toBe(1);
+
+    // A full frame of a new epoch: revs start over, so row 0's rev 2 is no
+    // longer the row the panel drew. The SLOW answer put it past the refetch
+    // gap; answered at once, less than the paint gap after a paint, its rows
+    // land before the next paint.
+    mock.setWorkflowDelayMs(0);
+    const w2 = view('w1', 3, [row(0, 2, 'running', { tokens: 900 }), row(1, 3, 'running')]);
+    workflows.w1 = { ...fixture(w2), epoch: EPOCH2 };
+    conn.send(delta(A, view('w1', 10, [], { tokens: 5000, counts: w1.counts, phases: w1.phases }), 9));
+    await page.waitForFunction(() => document.querySelector('#workflow-panel .wf-sum .wf-stat')?.textContent.startsWith('5.0k'), null, { polling: 'raf' });
+    conn.send(full(A, w2, EPOCH2));
+    await expect.poll(() => callsFor(mock, 'w1').length).toBe(2);
+    await expect(wf(page, 'w1').locator('.wf-row')).toHaveCount(2);
+    await expect(r0).toHaveText('900 tok · 0 tools');
+
+    // A workflow_set of another epoch replaces the entry; its full frame
+    // comes before the panel paints, so the <details> stays open.
+    const w3 = view('w1', 2, [row(0, 1, 'running', { tokens: 50 }), row(1, 2, 'running'), row(2, 2, 'running')]);
+    workflows.w1 = { ...fixture(w3), epoch: EPOCH3 };
+    conn.send(set(A, ['w1'], EPOCH3));
+    conn.send(full(A, w3, EPOCH3));
+    await expect.poll(() => callsFor(mock, 'w1').length).toBe(3);
+    await expect(wf(page, 'w1').locator('.wf-row')).toHaveCount(3);
+    await expect(r0).toHaveText('50 tok · 0 tools');
+    await expect(wf(page, 'w1')).toHaveAttribute('open', '');
+    await mark(conn, mock, 'm1');
+    expect(callsFor(mock, 'w1')).toEqual([{ key: A, task_id: 'w1' }, { key: A, task_id: 'w1' }, { key: A, task_id: 'w1' }]);
+    expect(errors).toEqual([]);
+  } finally { mock.server.close(); }
+});
+
+test('only the newest running workflow opens by itself', async ({ page }) => {
+  const old = view('w1', 9, [row(0, 9, 'running')], { started_at: Date.now() - 600000 });
+  const recent = view('w2', 9, [row(0, 9, 'running')], { started_at: Date.now() - 10000 });
+  const { mock, conn } = await boot(page, { workflows: { w1: fixture(old), w2: fixture(recent) } });
+  try {
+    push(conn, A, [old, recent]);
+    await expect(wf(page, 'w2')).toHaveAttribute('open', '');
+    await expect(wf(page, 'w2').locator('.wf-row')).toHaveCount(1);
+    await mark(conn, mock, 'm1');
+    await expect(wf(page, 'w1')).not.toHaveAttribute('open', '');
+    expect(callsFor(mock, 'w1')).toEqual([]);
+    expect(callsFor(mock, 'w2').length).toBe(1);
+  } finally { mock.server.close(); }
+});
+
+test('leaving for another view lets the rows go: back, the open workflow fetches them again', async ({ page }) => {
+  const data = defaultSessions();
+  const w1 = view('w1', 9, [row(0, 9, 'running')]);
+  const { mock, conn } = await boot(page, { sessions: data, workflows: { w1: fixture(w1) } });
+  try {
+    push(conn, A, [w1]);
+    await expect(wf(page, 'w1').locator('.wf-row')).toHaveCount(1);
+    expect(callsFor(mock, 'w1').length).toBe(1);
+    await page.click('#abnav-cron');
+    await expect(page.locator('body')).toHaveClass(/nz-view-cron/);
+    await refreshed(page, conn, data, 'while in cron');
+    await page.click('#abnav-chat');
+    await page.click(`.session-card[data-key="${A}"]`);
+    await expect.poll(() => callsFor(mock, 'w1').length).toBe(2);
+    await expect(wf(page, 'w1').locator('.wf-row')).toHaveCount(1);
+    expect(callsFor(mock, 'w1')[1]).toEqual({ key: A, task_id: 'w1' });
+
+    // auth_modal's new session shows another one without selectSession: the
+    // panel's first paint for it lets go.
+    await page.evaluate((b) => {
+      const w = /** @type {any} */ (window);
+      w.selectedKey = b;
+      w.renderMainShell();
+    }, B);
+    await expect(wf(page, 'w1')).toHaveCount(0);
+    await page.click(`.session-card[data-key="${A}"]`);
+    await expect.poll(() => callsFor(mock, 'w1').length).toBe(3);
+    await expect(wf(page, 'w1').locator('.wf-row')).toHaveCount(1);
+  } finally { mock.server.close(); }
+});
+
 test('a running workflow\'s elapsed time moves on between frames', async ({ page }) => {
   const w1 = view('w1', 9, [], { started_at: Date.now() - 65000 });
   const { mock, conn } = await boot(page, { workflows: { w1: fixture(w1) } });
@@ -440,6 +532,24 @@ test('polling without a socket fetches a folded workflow header only', async ({ 
     await expect.poll(() => callsFor(mock, 'w3').length, { timeout: 12000 }).toBe(2);
     expect(callsFor(mock, 'w3')).toEqual([{ key: A, task_id: 'w3', rows: 'none' }, { key: A, task_id: 'w3', rows: 'none' }]);
     await expect(wf(page, 'w3')).not.toHaveAttribute('open', '');
+  } finally { mock.server.close(); }
+});
+
+test('polling without a socket takes the elapsed clock from the HTTP answer', async ({ page }) => {
+  test.setTimeout(45000);
+  const data = defaultSessions();
+  const started = Date.now() - 65000;
+  data.sessions[0].workflows = [{ task_id: 'w4', name: 'wf w4', status: 'running', epoch: EPOCH, version: 4, started_at: started, counts: counts({ total: 1, running: 1 }) }];
+  const w4 = view('w4', 4, [row(0, 4, 'running')], { started_at: started });
+  const mock = await startMockServer({ sessions: data, workflows: { w4: fixture(w4) }, workflowDelayMs: 1500 });
+  try {
+    await page.goto(mock.url + '/dashboard');
+    await page.click(`.session-card[data-key="${A}"]`);
+    const stat = wf(page, 'w4').locator('> summary .wf-stat');
+    // Shown from the Summary, before any server clock: no elapsed time.
+    await expect(stat).toHaveText(/ tools$/, { timeout: 12000 });
+    expect(callsFor(mock, 'w4').length).toBeLessThanOrEqual(1);
+    await expect(stat).toHaveText(/^1\.2k tok · 3 tools · 1m\d\ds$/, { timeout: 12000 });
   } finally { mock.server.close(); }
 });
 

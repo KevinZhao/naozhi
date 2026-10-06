@@ -287,7 +287,8 @@ function defaultGitStates() {
  *   workflow: WireView with every row in agents, result?, logs?, logs_truncated?, result_unavailable?});
  *   the route applies rows=none / since=&epoch= to it and 404s task ids not listed. A test may edit
  *   the object in place; each request reads it then.
- * @param {number} [overrides.workflowDelayMs] - Hold GET /api/sessions/workflow answers this long.
+ * @param {number} [overrides.workflowDelayMs] - Hold GET /api/sessions/workflow answers this long
+ *   (setWorkflowDelayMs changes it mid-test).
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
  *   (timezone / timezone_abbr / timezone_label ...). recent_runs_cap defaults to 5 like the backend.
@@ -429,7 +430,7 @@ function startMockServer(overrides = {}) {
   // mock reproduces that inclusivity deliberately; a `>` here would hide the bug.
   const agentEvents = overrides.agentEvents || {};
   const workflows = overrides.workflows || {};
-  const workflowDelayMs = overrides.workflowDelayMs || 0;
+  let workflowDelayMs = overrides.workflowDelayMs || 0;
   // Every GET /api/sessions/workflow, as its query parameters.
   const workflowCalls = [];
   // compactPromptLimit: when set, GET /api/cron?compact=1 clips each prompt to
@@ -1432,6 +1433,7 @@ function startMockServer(overrides = {}) {
         get fullCronListCalls() { return fullCronListCalls; },
         get wsConnections() { return wsConnections; },
         get workflowCalls() { return workflowCalls; },
+        setWorkflowDelayMs(ms) { workflowDelayMs = ms; },
         // Mutators for tests that need the snapshot to CHANGE mid-run (e.g. a
         // /cd that moves a session's workspace). Bumping stats.version is what
         // makes the dashboard's version short-circuit re-render.
