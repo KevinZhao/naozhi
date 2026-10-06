@@ -136,7 +136,7 @@ func TestReset_FlagsAShimSocketThatOutlivesTheWait(t *testing.T) {
 // the wait. The keys wait together: one window, not one per key.
 func TestResetChatAndSetWorkspace_FlagsShimSocketsThatOutliveTheWait(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-	const window = 500 * time.Millisecond
+	const window = 750 * time.Millisecond
 	shortenShimGoneWait(t, window)
 	const chat = "feishu:group:stuckchat"
 	keys := []string{chat + ":general", chat + ":reviewer"}
