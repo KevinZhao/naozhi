@@ -196,3 +196,80 @@ func TestMergeRows(t *testing.T) {
 		t.Fatalf("mergeRows = %+v", got)
 	}
 }
+
+// TestMergeResultFile_Caps: a file past the row or phase cap counts every
+// agent and marks the phases capped, from items or from phases[].
+func TestMergeResultFile_Caps(t *testing.T) {
+	t.Parallel()
+	var items []clievent.WorkflowItem
+	for i := 1; i <= maxAgents+10; i++ {
+		items = append(items, doneItem(i, fmt.Sprint("a", i), "x"))
+	}
+	got, _ := MergeResultFile(&Workflow{TaskID: "w1"}, resultFor("w1", items...))
+	if len(got.Agents) != maxAgents || !got.AgentsCapped || got.Counts != (Counts{Total: maxAgents + 10, Done: maxAgents + 10}) {
+		t.Fatalf("rows %d capped %v counts %+v", len(got.Agents), got.AgentsCapped, got.Counts)
+	}
+	// The file brings no items: the capped entry's counts stand.
+	got, _ = MergeResultFile(got, &ResultFile{TaskID: "w1", Status: "completed"})
+	if got.Counts.Total != maxAgents+10 {
+		t.Fatalf("itemless file shrank the capped counts to %+v", got.Counts)
+	}
+	items = items[:0]
+	for i := 1; i <= maxPhases+1; i++ {
+		items = append(items, phase(i, "p"))
+	}
+	rf := resultFor("w1")
+	rf.WorkflowProgress = items
+	if got, _ := MergeResultFile(&Workflow{TaskID: "w1"}, rf); len(got.Phases) != maxPhases || got.Degraded != DegradedPhasesCapped {
+		t.Fatalf("phase items: %d phases, %q", len(got.Phases), got.Degraded)
+	}
+	rf = &ResultFile{TaskID: "w1", Status: "completed", Phases: make([]resultPhase, maxPhases+1)}
+	if got, _ := MergeResultFile(&Workflow{TaskID: "w1"}, rf); len(got.Phases) != maxPhases || got.Degraded != DegradedPhasesCapped {
+		t.Fatalf("phases[]: %d phases, %q", len(got.Phases), got.Degraded)
+	}
+}
+
+// TestMergeResultFile_NoRowsKeepsCounts: an entry without rows (header-only
+// or restored from a Ref) keeps its counts when the file brings no items.
+func TestMergeResultFile_NoRowsKeepsCounts(t *testing.T) {
+	t.Parallel()
+	ref := &Workflow{TaskID: "w1", Status: StatusRunning, Counts: Counts{Total: 5, Done: 3, Running: 2},
+		Phases: []Phase{{Index: 1, Title: "A", Counts: Counts{Total: 5, Done: 3, Running: 2}}}}
+	got, ok := MergeResultFile(ref, &ResultFile{TaskID: "w1", Status: "completed", Phases: []resultPhase{{"A"}, {"B"}}})
+	if !ok || got.Counts != (Counts{Total: 5, Done: 3, Stopped: 2}) || len(got.Phases) != 2 ||
+		got.Phases[0].Counts != got.Counts || got.Phases[1].Counts != (Counts{}) {
+		t.Fatalf("counts %+v phases %+v", got.Counts, got.Phases)
+	}
+	if ref.Phases[0].Counts.Running != 2 {
+		t.Fatal("MergeResultFile mutated its input's phases")
+	}
+	// Through the Tracker: the 17th workflow, header-only.
+	tr := New(nil)
+	for i := 1; i <= maxRowWorkflows+1; i++ {
+		tr.Observe(progress(fmt.Sprintf("w%02d", i), running(1, "a"), running(2, "b")), t0)
+	}
+	if !tr.ApplyResultFile(&ResultFile{TaskID: "w17", Status: "killed", StartTime: 1, DurationMs: 2}) {
+		t.Fatal("not merged")
+	}
+	if w := get(t, tr, "w17"); w.Counts != (Counts{Total: 2, Stopped: 2}) || w.Phases != nil {
+		t.Fatalf("header-only entry after the file: %+v", *w)
+	}
+}
+
+// TestApplyResultFile_RejectsNonTerminal: CC writes the file when an
+// attempt ends; any other status would turn a finished entry unknown.
+func TestApplyResultFile_RejectsNonTerminal(t *testing.T) {
+	t.Parallel()
+	tr := New(nil)
+	observeAll(tr, t0, progress("w1", running(1, "a1")), updated("w1", "completed", 9))
+	before := get(t, tr, "w1")
+	if tr.ApplyResultFile(&ResultFile{TaskID: "w1", Status: "weird"}) {
+		t.Fatal("non-terminal file merged")
+	}
+	if w := get(t, tr, "w1"); w != before {
+		t.Fatalf("rejected file changed the entry: %+v", *w)
+	}
+	if got, ok := MergeResultFile(before, &ResultFile{TaskID: "w1", Status: "running"}); ok || got != before {
+		t.Fatal("MergeResultFile merged a running file")
+	}
+}

@@ -30,8 +30,9 @@ const (
 // Tracker builds one CLI process's workflows from its frames. Writers are
 // the read loop (Observe, NoteDropped), SeedFromReplay before it starts,
 // and the session board (KnowTasks, ApplyResultFile); readers only Load.
-// onChange runs after every published change, outside the lock, and
-// carries no data: the reader Loads the latest Set itself.
+// onChange runs after every published change, outside the lock but on the
+// writer's goroutine, and carries no data: the reader Loads the latest Set
+// itself. A writer must not hold a lock onChange takes (the board's b.mu).
 type Tracker struct {
 	mu          sync.Mutex
 	builders    map[string]*builder
@@ -289,7 +290,7 @@ func setUsage(w *Workflow, u *clievent.TaskUsage) {
 // setStatus moves an unsettled workflow to st; the first terminal status
 // sticks, and only a result file overrides it (ApplyResultFile).
 func setStatus(w *Workflow, st Status, raw string, endTime, ms int64) {
-	if IsTerminal(w.Status) || w.ResultLoaded {
+	if IsTerminal(w.Status) {
 		if w.EndedAt == 0 && endTime > 0 {
 			w.EndedAt = endTime
 		}
@@ -344,8 +345,9 @@ func (t *Tracker) KnowTasks(ids []string) {
 }
 
 // ApplyResultFile merges a run's result file into its entry when the file's
-// taskId names it (a resumed run shares the runId with older attempts). The
-// file is authoritative from then on. It reports whether it merged.
+// taskId names it (a resumed run shares the runId with older attempts) and
+// its status is terminal. The file is authoritative from then on. It
+// reports whether it merged; onChange runs before it returns.
 func (t *Tracker) ApplyResultFile(rf *ResultFile) bool {
 	if rf == nil {
 		return false

@@ -213,3 +213,34 @@ func TestSeed_BigReplayBudget(t *testing.T) {
 		t.Errorf("%.0f allocs, want ≤ 60k", allocs)
 	}
 }
+
+// TestSeed_StatuslessPatchKeepsStatus: a task_updated patch holds only the
+// fields that changed, so a newer one without a status must not hide the
+// status an older one set. Seeded and live reads agree.
+func TestSeed_StatuslessPatchKeepsStatus(t *testing.T) {
+	t.Parallel()
+	const task = "wpause001"
+	upd := func(patch string) string {
+		return fmt.Sprintf(`{"type":"system","subtype":"task_updated","task_id":%q,"patch":%s,"uuid":"u","session_id":%q}`, task, patch, probeSession)
+	}
+	lines := []string{
+		fmt.Sprintf(`{"type":"system","subtype":"task_started","task_id":%q,"tool_use_id":"toolu_x","description":"d","task_type":"local_workflow","workflow_name":"n","uuid":"u","session_id":%q}`, task, probeSession),
+		upd(`{"status":"paused"}`),
+		upd(`{"description":"new desc"}`),
+	}
+	live := workflow.New(nil)
+	feed(t, live, time.UnixMilli(1791170018000), lines...)
+	tr, decodes := seed(t, lines, false)
+	if got, want := only(t, tr).Status, only(t, live).Status; got != workflow.StatusPaused || got != want {
+		t.Fatalf("seeded status %q, live %q, want paused", got, want)
+	}
+	if decodes != 3 {
+		t.Errorf("%d decodes, want 3", decodes)
+	}
+	// Ended, then a patch without a status: the end time survives.
+	lines = append(lines, upd(`{"status":"completed","end_time":42}`), upd(`{"is_backgrounded":true}`))
+	tr, _ = seed(t, lines, false)
+	if w := only(t, tr); w.Status != workflow.StatusCompleted || w.EndedAt != 42 {
+		t.Fatalf("seeded terminal: %s ended %d", w.Status, w.EndedAt)
+	}
+}

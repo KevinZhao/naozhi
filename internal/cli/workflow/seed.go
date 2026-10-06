@@ -25,15 +25,18 @@ const (
 	seedLaunchMarker     = `"async_launched"`
 	seedSnapshotMarker   = `"` + clievent.WorkflowProgressKey + `":[`
 	seedTaskIDKey        = `"task_id":"`
+	seedPatchKey         = `"patch":{`
 	maxSeedTaskIDLen     = 32
 )
 
 // Seed frame classes: each task needs only its newest line of each, since
-// every one of them supersedes the older ones.
+// every one of them supersedes the older ones. A task_updated patch holds
+// only the fields that changed, so one without a status supersedes none.
 const (
 	classSnapshot = iota // task_progress with a snapshot
 	classHeader          // task_progress without one
-	classUpdated
+	classStatus          // task_updated whose patch sets the status
+	classPatch           // any other task_updated
 	classNotification
 	numClasses
 	classAlways // task_started and launch lines: always decoded
@@ -125,7 +128,10 @@ func seedClass(line string) (int, bool) {
 		}
 		return classHeader, true
 	case strings.HasPrefix(rest, `updated"`):
-		return classUpdated, true
+		if _, patch, ok := strings.Cut(rest, seedPatchKey); ok && strings.Contains(patch, `"status":`) {
+			return classStatus, true
+		}
+		return classPatch, true
 	case strings.HasPrefix(rest, `notification"`):
 		return classNotification, true
 	}

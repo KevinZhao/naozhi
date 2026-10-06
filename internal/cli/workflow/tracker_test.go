@@ -304,6 +304,11 @@ func TestCaps(t *testing.T) {
 			t.Fatalf("w%02d header-only entry lost its counts or status: %+v", i, *w)
 		}
 	}
+	// A workflow keeps its rows on its next snapshot, all 16 slots taken.
+	tr.Observe(progress("w16", running(1, "a"), running(2, "b")), t0)
+	if w := get(t, tr, "w16"); len(w.Agents) != 2 || w.Degraded != "" {
+		t.Fatalf("w16 lost its rows on its second snapshot: %d rows, %q", len(w.Agents), w.Degraded)
+	}
 	// A row slot frees up when a workflow with rows ends.
 	tr.Observe(updated("w01", "completed", 1), t0)
 	tr.Observe(progress("w17", running(1, "a")), t0)
@@ -476,5 +481,58 @@ func TestConcurrentWriters(t *testing.T) {
 	reader.Wait()
 	if n := len(tr.Load().Workflows); n == 0 || n > maxTracked+maxTerminal {
 		t.Fatalf("%d entries after the run", n)
+	}
+}
+
+// TestRememberedIDsBounded: the ids judged as workflows are a FIFO of
+// maxRemembered, so a forgotten id's frames no longer build an entry.
+func TestRememberedIDsBounded(t *testing.T) {
+	t.Parallel()
+	tr := New(nil)
+	ids := make([]string, maxRemembered+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("k%03d", i)
+	}
+	tr.KnowTasks(ids)
+	if len(tr.ids) != maxRemembered || len(tr.idOrder) != maxRemembered {
+		t.Fatalf("%d ids, %d in order; want %d", len(tr.ids), len(tr.idOrder), maxRemembered)
+	}
+	tr.Observe(header("k000", "x"), t0)
+	tr.Observe(header("k001", "x"), t0)
+	if wfs := tr.Load().Workflows; len(wfs) != 1 || wfs[0].TaskID != "k001" {
+		t.Fatalf("want only the still-remembered k001 built: %+v", wfs)
+	}
+}
+
+// TestResultFileWithoutSnapshot: an entry the file filled in is not
+// no_snapshot when a later frame arrives.
+func TestResultFileWithoutSnapshot(t *testing.T) {
+	t.Parallel()
+	tr := New(nil)
+	tr.Observe(started("w1", "wf"), t0)
+	if !tr.ApplyResultFile(resultFor("w1", doneItem(1, "a1", "A"))) {
+		t.Fatal("not merged")
+	}
+	tr.Observe(notification("w1", "completed"), t0)
+	if w := get(t, tr, "w1"); w.Degraded != "" || len(w.Agents) != 1 {
+		t.Fatalf("after the notification: %q, %d rows", w.Degraded, len(w.Agents))
+	}
+}
+
+// TestEndTimeAfterTerminal: a replayed notification ends the run without a
+// time; a later task_updated's end_time fills it in, status or not.
+func TestEndTimeAfterTerminal(t *testing.T) {
+	t.Parallel()
+	for _, status := range []string{"", "completed"} {
+		tr := New(nil)
+		tr.Observe(started("w1", "wf"), time.Time{})
+		tr.Observe(notification("w1", "completed"), time.Time{})
+		if w := get(t, tr, "w1"); w.Status != StatusCompleted || w.EndedAt != 0 {
+			t.Fatalf("seeded terminal: %s ended %d", w.Status, w.EndedAt)
+		}
+		tr.Observe(updated("w1", status, 77), t0)
+		if w := get(t, tr, "w1"); w.EndedAt != 77 || w.Status != StatusCompleted {
+			t.Errorf("patch status %q: %s ended %d, want completed at 77", status, w.Status, w.EndedAt)
+		}
 	}
 }

@@ -1348,6 +1348,9 @@ Tracker 当前版、CoW 期间的旧版、board 盖过 Rev 的上一发布版（
    `osutil.OpenRegularIn` 打开，≤ 16MiB，
    §10；只解 §6.2.1 的瘦结构），经 `ApplyResultFile`（taskId 校验）覆盖 agent 行与 totals。文件尚未出现 → 交给下述 sweeper 重试。
    **顺序不变式**：board 在 b.mu 内先把裁剪后的 result / logs 写进结果缓存，再调 `ApplyResultFile` / `MergeResultFile`（后者置 `Source=result_file`）。
+   `MergeResultFile` 是纯函数，可在 b.mu 内调；`ApplyResultFile` 在返回前于调用方 goroutine 上同步调 `onChange`（即 `b.wake`，要拿 b.mu），
+   所以要先写缓存、**放开 b.mu**、再调它（PR-6）。status 不是 completed / failed / killed 的文件不合并（返回 false，视同未命中）：
+   CC 只写这三种，合并一个未知 status 会让已终态的条目退回 unknown。
    于是 wire 上 `source == "result_file"` 就意味着 HTTP 能给出 result / logs，客户端据此拉结果（§6.1），不需要另一个"结果已就绪"字段。
 5. 终态之后同 task 的 `task_progress` 一律忽略（防御；CC 本身不再发）。
 6. **丢失终态的兜底**：shim 写通道满时整帧丢弃，仅 Debug 日志（`internal/shim/server.go:443-457`），
@@ -1714,14 +1717,17 @@ R5  **有**存活进程、但 retained 条目没人认领（v4 新增）：R4 �
   `{"type":"user"` 开头且含 `"async_launched"` 的行（其余行零解码；ring 至多 10000 行）。
 - 对门控命中的行，从首个结构性 `"task_id":"` 处截出 id（值须匹配 `^[a-z0-9]{1,32}$`，否则
   回落完整解码）。每个 task 按**帧类**记"已取到最新一行"的格：带快照的 task_progress、不带快照的 task_progress（description / usage）、
-  task_updated、task_notification，共四格（帧类由前缀与本行是否含 `"workflow_progress"` 判定，不需解码）。逆序下第一次遇到的就是该类最新的一行：
+  带 status 的 task_updated、不带 status 的 task_updated、task_notification，共五格（帧类由前缀、本行是否含 `"workflow_progress"`、
+  task_updated 的 `"patch":{` 之后是否含 `"status":` 判定，不需解码）。逆序下第一次遇到的就是该类最新的一行：
   - 该类的格已满 → **跳过**（不登记、不解码）。四类帧都是"最新的覆盖旧的"：快照整体替换行，description-only 帧只更新 header，task_updated 的
-    patch.status / end_time 与 task_notification 的 status / summary 都只取最新值。这一条对 running 的 workflow 同样生效（它没有终态帧，
+    patch 与 task_notification 的 status / summary 都只取最新值。CC 的 patch 是差量（只含变了的键：status、description、end_time、total_paused_ms、
+    error、is_backgrounded），不带 status 的 patch 并不取代更早的 status，所以两种 patch 各占一格（PR-6；只占一格时
+    `paused` 之后一个只改 description 的 patch 会让种子回到 running）。这一条对 running 的 workflow 同样生效（它没有终态帧，
     但不需要等终态格填满）；
   - `subtype":"task_started` 与 `async_launched` 行总要登记并解码（名称、task_type、RunID、TranscriptDir 与等级 3 的 SessionID 只在这里）。
   - 种子条目的 `LastObservedAt` 为 0（replay 不带时间戳，不取观测时刻），由 board 合并时补（§5.8 第 3 步）。
   v3 只跳过快照行：ring 绕回后几乎全是小的 task_progress 行，每行仍要反射解码（实测 347B 的行 6.8-9.1µs / 440B，10k 行约
-  70-90ms / 4.4MB，是 v3 所写预算的 3-4 倍）。现在解码次数为 O(task 数)：每 task ≤ 4 行 + task_started + launch 行。
+  70-90ms / 4.4MB，是 v3 所写预算的 3-4 倍）。现在解码次数为 O(task 数)：每 task ≤ 5 行 + task_started + launch 行。
 - 不把 replay 帧写进 ring / persist（`router_shim.go:409-413` 的既有约束：replay 无时间戳；
   persist sink 最后才装，`router_shim.go:483-486`）。
 - 已知：长 workflow 后 replay ring 几乎必然已淘汰 `task_started` 与 launch tool_result

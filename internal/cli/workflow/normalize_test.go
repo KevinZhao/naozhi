@@ -70,14 +70,15 @@ func TestStatusMaps(t *testing.T) {
 		{"notification failed", notificationStatus, "failed", StatusFailed, ""},
 		{"notification stopped", notificationStatus, "stopped", StatusKilled, ""},
 		{"notification other", notificationStatus, "killed", StatusUnknown, "killed"},
-		{"file completed", resultFileStatus, "completed", StatusCompleted, ""},
-		{"file failed", resultFileStatus, "failed", StatusFailed, ""},
-		{"file killed", resultFileStatus, "killed", StatusKilled, ""},
-		{"file other", resultFileStatus, strings.Repeat("y", 40), StatusUnknown, strings.Repeat("y", 32) + "..."},
 	}
 	for _, c := range cases {
 		if got, raw := c.f(c.in); got != c.want || raw != c.wantRaw {
 			t.Errorf("%s: %q → %q/%q, want %q/%q", c.name, c.in, got, raw, c.want, c.wantRaw)
+		}
+	}
+	for in, want := range map[string]Status{"completed": StatusCompleted, "failed": StatusFailed, "killed": StatusKilled, "running": "", "stopped": ""} {
+		if got, ok := resultFileStatus(in); got != want || ok != (want != "") {
+			t.Errorf("file %q → %q/%v, want %q", in, got, ok, want)
 		}
 	}
 }
@@ -111,6 +112,24 @@ func TestStick(t *testing.T) {
 	am.stick("a7") // an earlier id coming back leaves the history
 	if am.agentID != "a7" || fmt.Sprint(am.prev) != "[a4 a5 a6 a8 a9 a10 a11 a12]" {
 		t.Fatalf("returning id: %+v", am)
+	}
+	// A memo seeded from a row without agentId (MergeResultFile's input).
+	am = agentMemo{prev: published}
+	am.stick("a1")
+	if am.agentID != "a1" || len(am.prev) != 0 || fmt.Sprint(published) != "[a1]" {
+		t.Fatalf("id back from the history of an id-less row: %+v, published %v", am, published)
+	}
+}
+
+// TestRowError: a string error shows unquoted, anything else as its JSON.
+func TestRowError(t *testing.T) {
+	t.Parallel()
+	for raw, want := range map[string]string{`"boom"`: "boom", `{"code":1}`: `{"code":1}`, `null`: "", `"a\"b"`: `a"b`} {
+		var am agentMemo
+		it := clievent.WorkflowItem{Type: clievent.WorkflowItemAgent, Index: 1, State: "error", Error: json.RawMessage(raw), AgentID: "a1", StartedAt: 1}
+		if got := am.row(&it).Error; got != want {
+			t.Errorf("error %s → %q, want %q", raw, got, want)
+		}
 	}
 }
 

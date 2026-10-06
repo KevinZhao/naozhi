@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -107,9 +108,10 @@ func NewResultCache(rf *ResultFile) *ResultCache {
 	return c
 }
 
-// MergeResultFile returns w with rf merged when rf.TaskID names it, and
-// false (w unchanged) otherwise. The board uses it for entries no live
-// Tracker holds; Tracker.ApplyResultFile shares the implementation.
+// MergeResultFile returns w with rf merged when rf.TaskID names it and rf
+// is terminal, and false (w unchanged) otherwise. The board uses it for
+// entries no live Tracker holds; Tracker.ApplyResultFile shares the
+// implementation.
 func MergeResultFile(w *Workflow, rf *ResultFile) (*Workflow, bool) {
 	memos := make(map[int]*agentMemo, len(w.Agents))
 	for i := range w.Agents {
@@ -121,15 +123,20 @@ func MergeResultFile(w *Workflow, rf *ResultFile) (*Workflow, bool) {
 
 // mergeResult overlays a result file: status, totals and StartedAt from
 // the file, rows merged by index (file rows win, others stay), phases from
-// the file when it lists any. A terminal status stops the remaining rows.
+// the file when it lists any; the remaining live rows stop. A file whose
+// status is not a terminal one CC writes is not merged.
 func mergeResult(w *Workflow, rf *ResultFile, memos map[int]*agentMemo, phaseMemos map[int]*memo) (*Workflow, bool) {
 	if rf == nil || rf.TaskID == "" || rf.TaskID != w.TaskID {
 		return w, false
 	}
+	st, ok := resultFileStatus(rf.Status)
+	if !ok {
+		return w, false
+	}
 	n := *w
-	n.Status, n.RawStatus = resultFileStatus(rf.Status)
+	n.Status, n.RawStatus = st, ""
 	setStarted(&n, rf.StartTime, StartedFromResultFile)
-	if n.EndedAt == 0 && IsTerminal(n.Status) && rf.StartTime > 0 {
+	if n.EndedAt == 0 && rf.StartTime > 0 {
 		n.EndedAt = rf.StartTime + rf.DurationMs
 	}
 	n.Tokens, n.ToolCalls, n.DurationMS = rf.TotalTokens, rf.TotalToolCalls, rf.DurationMs
@@ -152,13 +159,21 @@ func mergeResult(w *Workflow, rf *ResultFile, memos map[int]*agentMemo, phaseMem
 		rows, capped = rows[:maxAgents:maxAgents], true
 	}
 	n.Agents, n.AgentsCapped = rows, capped
-	n.Counts, n.Phases = recount(rows, phases)
-	if capped && s.counts.Total > n.Counts.Total {
-		n.Counts = s.counts
+	if len(rows) == 0 {
+		// Nothing to count (a header-only entry, items dropped): the
+		// entry's counts stand.
+		n.Phases = carryCounts(phases, n.Phases)
+	} else {
+		known := s.counts
+		if len(s.agents) == 0 {
+			known = n.Counts
+		}
+		n.Counts, n.Phases = recount(rows, phases)
+		if capped && known.Total > n.Counts.Total {
+			n.Counts = known
+		}
 	}
-	if IsTerminal(n.Status) {
-		stopAll(&n)
-	}
+	stopAll(&n)
 	n.Source, n.ResultLoaded = SourceResultFile, true
 	n.Degraded = ""
 	if s.phasesCapped {
@@ -185,6 +200,20 @@ func mergeRows(base, upd []Agent) []Agent {
 		default:
 			out = append(out, upd[j])
 			i, j = i+1, j+1
+		}
+	}
+	return out
+}
+
+// carryCounts gives phases the counts of from's phase with the same index.
+func carryCounts(phases, from []Phase) []Phase {
+	if len(phases) == 0 || (len(from) > 0 && &phases[0] == &from[0]) {
+		return phases
+	}
+	out := slices.Clone(phases)
+	for i := range out {
+		if j := slices.IndexFunc(from, func(p Phase) bool { return p.Index == out[i].Index }); j >= 0 {
+			out[i].Counts = from[j].Counts
 		}
 	}
 	return out

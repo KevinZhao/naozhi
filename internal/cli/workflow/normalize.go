@@ -315,11 +315,11 @@ func notificationStatus(s string) (Status, string) {
 	return StatusUnknown, clip(s, maxRawRunes)
 }
 
-// resultFileStatus maps a result file's status.
-func resultFileStatus(s string) (Status, string) {
+// resultFileStatus maps a result file's status; CC writes only these.
+func resultFileStatus(s string) (Status, bool) {
 	switch s {
 	case "completed", "failed", "killed":
-		return Status(s), ""
+		return Status(s), true
 	}
-	return StatusUnknown, clip(s, maxRawRunes)
+	return "", false
 }
