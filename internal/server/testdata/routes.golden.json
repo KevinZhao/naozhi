@@ -340,6 +340,11 @@
     "handler_type": "*uisettings.Handler"
   },
   {
+    "method": "POST",
+    "path": "/api/system/config/reload",
+    "handler_type": "*system.Handlers"
+  },
+  {
     "method": "GET",
     "path": "/api/system/daemons",
     "handler_type": "*system.Handlers"

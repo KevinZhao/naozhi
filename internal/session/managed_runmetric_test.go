@@ -1,13 +1,18 @@
 package session
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
 
@@ -114,8 +119,14 @@ func TestFinishRun_ConcurrentOutOfOrderNoOverCount(t *testing.T) {
 	rt1 := &runTimer{started: time.Now()}
 	rt2 := &runTimer{started: time.Now()}
 	done := make(chan struct{}, 2)
-	go func() { s.finishRun(rt1, &clievent.SendResult{CostUSD: 5.0}, nil); done <- struct{}{} }()
-	go func() { s.finishRun(rt2, &clievent.SendResult{CostUSD: 2.0}, nil); done <- struct{}{} }()
+	go func() {
+		s.finishRun(context.Background(), rt1, &clievent.SendResult{CostUSD: 5.0}, nil)
+		done <- struct{}{}
+	}()
+	go func() {
+		s.finishRun(context.Background(), rt2, &clievent.SendResult{CostUSD: 2.0}, nil)
+		done <- struct{}{}
+	}()
 	<-done
 	<-done
 
@@ -325,4 +336,113 @@ func TestSend_FirstRunRecordNamesItsSession(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSend_RunRecordAdoptsCtxRunID: the orchestrator's run id (#3436) names
+// the run record, so a journal grep by run_id lands on the same key as
+// /api/sessions/runs. Without one the session mints its own.
+func TestSend_RunRecordAdoptsCtxRunID(t *testing.T) {
+	s, store := newInstrumentedSession(t, func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
+		return &clievent.SendResult{Text: "ok"}, nil
+	})
+	if _, err := s.Send(ctxutil.WithRunID(context.Background(), "0123456789abcdef"), "hi", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Send(context.Background(), "again", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	runs := store.Recent(s.key, 0)
+	if len(runs) != 2 {
+		t.Fatalf("runs = %d", len(runs))
+	}
+	ids := map[string]bool{runs[0].RunID: true, runs[1].RunID: true}
+	if !ids["0123456789abcdef"] {
+		t.Fatalf("ctx run id not adopted: %v", ids)
+	}
+	for id := range ids {
+		if id == "" {
+			t.Fatal("a run without a ctx id must still get one")
+		}
+	}
+}
+
+// TestSend_LeakNudgeGetsItsOwnRunID: the leaked-toolcall re-send is a second
+// run record, so it must not reuse the turn's id — runhistory and the cost
+// ledger are keyed by it. Its CLI send carries the id its record gets.
+func TestSend_LeakNudgeGetsItsOwnRunID(t *testing.T) {
+	t.Setenv(leakRecoveryEnvVar, "1")
+	const parent = "0123456789abcdef"
+	entries := map[string]func(*ManagedSession, context.Context) error{
+		"Send": func(s *ManagedSession, ctx context.Context) error {
+			_, err := s.Send(ctx, "hi", nil, nil)
+			return err
+		},
+		"SendPassthrough": func(s *ManagedSession, ctx context.Context) error {
+			_, err := s.SendPassthrough(ctx, "hi", nil, nil, "")
+			return err
+		},
+	}
+	for name, send := range entries {
+		t.Run(name, func(t *testing.T) {
+			logs := &lockedBuf{}
+			prev := slog.Default()
+			slog.SetDefault(slog.New(ctxutil.NewHandler(slog.NewJSONHandler(logs, nil))))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+			var sentWith []string
+			s, store := newInstrumentedSession(t, func(ctx context.Context, _ string, _ []clievent.Attachment, _ clievent.EventCallback) (*clievent.SendResult, error) {
+				sentWith = append(sentWith, ctxutil.RunID(ctx))
+				if len(sentWith) == 1 {
+					return &clievent.SendResult{Text: leakSample}, nil
+				}
+				return &clievent.SendResult{Text: "clean"}, nil
+			})
+			if err := send(s, ctxutil.WithRunID(context.Background(), parent)); err != nil {
+				t.Fatal(err)
+			}
+			store.Close()
+			if len(sentWith) != 2 || sentWith[0] != parent || sentWith[1] == parent || sentWith[1] == "" {
+				t.Fatalf("CLI sends carried run ids %q, want [%s <fresh>]", sentWith, parent)
+			}
+			runs := store.Recent(s.key, 0)
+			if len(runs) != 2 {
+				t.Fatalf("runs = %d, want the turn and its nudge", len(runs))
+			}
+			got := map[string]bool{runs[0].RunID: true, runs[1].RunID: true}
+			if !got[parent] || !got[sentWith[1]] {
+				t.Fatalf("run record ids %v, want %s and the nudge's %s", got, parent, sentWith[1])
+			}
+			// The log line is the only join from a nudge run to its turn.
+			nudge := logs.lines("leak-recovery: nudge run")
+			if len(nudge) != 1 || nudge[0]["nudge_of"] != parent || nudge[0]["run_id"] != sentWith[1] {
+				t.Fatalf("nudge log = %v, want nudge_of %s run_id %s", nudge, parent, sentWith[1])
+			}
+		})
+	}
+}
+
+// lockedBuf is a goroutine-safe log sink.
+type lockedBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *lockedBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+// lines returns the decoded JSON records whose msg is msg.
+func (b *lockedBuf) lines(msg string) []map[string]any {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(b.b.Bytes()), []byte("\n")) {
+		var m map[string]any
+		if json.Unmarshal(line, &m) == nil && m["msg"] == msg {
+			out = append(out, m)
+		}
+	}
+	return out
 }

@@ -65,7 +65,7 @@ func TestDecorateReplyText_TurnFailure(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := d.decorateReplyText(tt.r, nil)
+			got := d.decorateReplyText(context.Background(), tt.r, nil)
 			if tt.want == nil {
 				if got != "" {
 					t.Fatalf("got %q, want the empty sentinel", got)
@@ -93,11 +93,11 @@ func TestDecorateReplyText_TurnFailure(t *testing.T) {
 func TestDecorateReplyText_PartialReplyChip(t *testing.T) {
 	d := &Dispatcher{caps: fixedFooterCaps{footer: "cc"}}
 	partial := &clievent.SendResult{Text: "half an essay", SubType: "success", TerminalReason: "aborted_streaming"}
-	if got, want := d.decorateReplyText(partial, nil), "half an essay"+replyChipPartial+"\n\n— cc"; got != want {
+	if got, want := d.decorateReplyText(context.Background(), partial, nil), "half an essay"+replyChipPartial+"\n\n— cc"; got != want {
 		t.Errorf("aborted_streaming: got %q, want %q", got, want)
 	}
 	merged := &clievent.SendResult{Text: "half", SubType: "success", TerminalReason: "aborted_streaming", Aborted: true, MergedCount: 2}
-	got := d.decorateReplyText(merged, nil)
+	got := d.decorateReplyText(context.Background(), merged, nil)
 	if i, j := strings.Index(got, "已中断，以上为部分回复"), strings.Index(got, "合并了 2 条"); i < 0 || j < i {
 		t.Errorf("aborted merge head: got %q, want the partial chip before the merge chip", got)
 	}
@@ -108,7 +108,7 @@ func TestDecorateReplyText_PartialReplyChip(t *testing.T) {
 		{Text: "Server overloaded", TerminalReason: "aborted_streaming", BackendError: &clievent.BackendError{Backend: "codex", Code: -32001}},
 		{Text: "API Error: 529 overloaded", SubType: "success", IsError: true, TerminalReason: "aborted_streaming"},
 	} {
-		if got := d.decorateReplyText(r, nil); strings.Contains(got, "已中断") {
+		if got := d.decorateReplyText(context.Background(), r, nil); strings.Contains(got, "已中断") {
 			t.Errorf("%+v: got %q, want no partial-reply chip", *r, got)
 		}
 	}
@@ -125,9 +125,9 @@ func TestDecorateReplyText_CountsTurnFailureByClass(t *testing.T) {
 		return 0
 	}
 	before, beforeText := count("max_budget"), count("error_text")
-	d.decorateReplyText(&clievent.SendResult{SubType: "error_max_budget_usd", IsError: true}, nil)
-	d.decorateReplyText(&clievent.SendResult{Text: "Execution error", IsError: true}, nil)
-	d.decorateReplyText(&clievent.SendResult{Text: "fine", SubType: "success"}, nil)
+	d.decorateReplyText(context.Background(), &clievent.SendResult{SubType: "error_max_budget_usd", IsError: true}, nil)
+	d.decorateReplyText(context.Background(), &clievent.SendResult{Text: "Execution error", IsError: true}, nil)
+	d.decorateReplyText(context.Background(), &clievent.SendResult{Text: "fine", SubType: "success"}, nil)
 	if got := count("max_budget") - before; got != 1 {
 		t.Errorf("max_budget count moved by %d, want 1", got)
 	}

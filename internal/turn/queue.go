@@ -23,6 +23,8 @@ type Msg struct {
 	EnqueueAt time.Time
 	// Origin is the submitting entry point; a nil Origin is silent.
 	Origin Origin
+	// TraceID is the request's trace id (Request.TraceID, resolved).
+	TraceID string
 }
 
 // Mode selects how new messages that arrive while a session is busy are

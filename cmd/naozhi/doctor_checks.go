@@ -359,9 +359,10 @@ func runOutput(cmd *exec.Cmd) (string, error) {
 
 // checkConfigDrift compares the disk config's sha256 with the fingerprint the
 // running process reports on authenticated /health (#2538): a mismatch means
-// config.yaml changed after the process loaded it — restart required. No
-// token / unreachable process / unreadable config degrade to a skip, not a
-// fail: this check is about drift, not liveness (checkHealth owns that).
+// config.yaml changed after the process loaded it, and config_restart_required
+// lists what a reload could not apply. No token / unreachable process /
+// unreadable config degrade to a skip, not a fail: this check is about drift,
+// not liveness (checkHealth owns that).
 func (d *doctor) checkConfigDrift() {
 	if d.token == "" {
 		d.add("config-drift", "pass", "skipped (no token; auth-scoped)")
@@ -400,6 +401,15 @@ func (d *doctor) checkConfigDrift() {
 		return
 	}
 	loadedAt := osutil.SanitizeForLog(health.ConfigLoadedAt, 64)
+	if pending := health.ConfigRestartRequired; len(pending) > 0 {
+		names := make([]string, len(pending))
+		for i, n := range pending {
+			names[i] = osutil.SanitizeForLog(n, 64)
+		}
+		d.add("config-drift", "warn", "restart required for: "+strings.Join(names, ", ")+
+			" (a config reload applied the hot sections; config_sha256 stays "+health.ConfigSHA256[:12]+"…, loaded_at="+loadedAt+", until a restart)")
+		return
+	}
 	if health.ConfigSHA256 == diskSum {
 		d.add("config-drift", "pass", "config_sha256 match ("+diskSum[:12]+"…), loaded_at="+loadedAt)
 		return
@@ -409,7 +419,8 @@ func (d *doctor) checkConfigDrift() {
 		mtime = fi.ModTime().Format(time.RFC3339)
 	}
 	d.add("config-drift", "warn", fmt.Sprintf(
-		"restart required: config.yaml changed at %s after process loaded at %s (disk %s… vs process %s…)",
+		"not applied: config.yaml changed at %s after process loaded at %s (disk %s… vs process %s…); "+
+			"`naozhi config reload` applies it and lists what still needs a restart",
 		mtime, loadedAt, diskSum[:12], health.ConfigSHA256[:12]))
 }
 

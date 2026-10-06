@@ -8,11 +8,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/budget"
@@ -79,7 +77,9 @@ func main() {
 	}
 	metrics.StartupPhaseConfigMs.Set(time.Since(t0).Milliseconds())
 
-	setupLogging(cfg)
+	logLevel := setupLogging(cfg)
+	configFP := server.NewConfigFingerprint(cfg.Fingerprint.SHA256, cfg.Fingerprint.LoadedAt)
+	reloader := newConfigReloader(absConfigPath(*configPath), cfg, logLevel, configFP)
 
 	// Created before applyClaudeEnvSettings so readJSONWithRetry's sleeps
 	// honour ctx.Done() from the first use of the settings file.
@@ -432,6 +432,8 @@ func main() {
 			Path:                    absConfigPath(*configPath),
 			SHA256:                  cfg.Fingerprint.SHA256,
 			LoadedAt:                cfg.Fingerprint.LoadedAt,
+			Live:                    configFP,
+			Reload:                  reloader.Reload,
 			AccessProfileSecretsDir: sessionLayout.AccessProfileSecretsRoot(),
 		},
 		Queue: server.QueueOptions{
@@ -468,6 +470,7 @@ func main() {
 		},
 		Features: server.FeatureOptions{
 			Debug:     cfg.Server.DebugMode,
+			Metrics:   cfg.Server.MetricsEnabled,
 			PublicTmp: cfg.Projects.PublicTmp,
 			// Default-on; opt-out via session.project_stable_key.enabled: false.
 			ProjectStableKey: cfg.Session.ProjectStableKey.ResolvedEnabled(true),
@@ -567,12 +570,13 @@ func main() {
 		})
 	}
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-	go func() {
-		sig := <-sigCh
-		runShutdown("signal:" + sig.String())
-	}()
+	reloader.bindApply(srv.ApplyHotConfig, router.Backends().AccessProfiles)
+
+	watchSignals(func() {
+		if _, err := reloader.Reload(ctx); err != nil {
+			slog.Error("SIGHUP config reload failed", "err", err)
+		}
+	}, runShutdown)
 
 	slog.Info("naozhi starting",
 		"version", version,
