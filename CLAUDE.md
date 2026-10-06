@@ -105,7 +105,7 @@ cmd/naozhi/main.go
   -> budget       每日 USD 预算：订阅 cost 账本的内存日索引（cron job / 全局）+ Gate 判定；只依赖 costledger 与 sessionkey
   -> naozhisettings  naozhi 托管的 Claude settings 文件
   -> uiprefs      Dashboard 展示偏好持久化
-  -> registry     插件 / 扩展注册表的 canonical home
+  -> registry     泛型 Typed 注册表（新闭集注册表的默认选择）
   -> envpolicy    共享 env 过滤原语
   -> wsproto      浏览器 WS 协议单一真相源（type 常量 + per-type frame + schema）
   -> jsonschema   Go 类型 → 契约检查读取的 JSON schema（WS frame 与 REST 响应共用，嵌套结构体展开进 defs）
