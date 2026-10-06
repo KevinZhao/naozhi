@@ -334,9 +334,26 @@ const (
 	mutDelete mutationKind = iota + 1
 	mutPause
 	mutResume
-	// mutAutoPause is mutPause stamped with PausedReasonAutoFailures.
+	// mutAutoPause is mutPause stamped with PausedReasonAutoFailures;
+	// mutAutoPauseTransient, with PausedReasonAutoTransient.
 	mutAutoPause
+	mutAutoPauseTransient
 )
+
+// autoPauseReasons is the PausedReason each auto-pause kind stamps.
+var autoPauseReasons = map[mutationKind]string{
+	mutAutoPause:          PausedReasonAutoFailures,
+	mutAutoPauseTransient: PausedReasonAutoTransient,
+}
+
+// autoPauseKind is the auto-pause mutation for a run whose failure was (or
+// was not) transient, the counter Job.autoPauseCount judged it by.
+func autoPauseKind(transient bool) mutationKind {
+	if transient {
+		return mutAutoPauseTransient
+	}
+	return mutAutoPause
+}
 
 // mutationResult is what a mutation did, as data. The caller runs the robfig
 // and router side effects and the disk write after the lock is released; the
@@ -386,7 +403,7 @@ func (t *jobTable) autoPauseIfDue(id string, threshold int, transient bool, now 
 	if count = j.autoPauseCount(threshold, transient, now); count == 0 {
 		return mutationResult{}, 0
 	}
-	return t.mutateLocked(j, mutAutoPause), count
+	return t.mutateLocked(j, autoPauseKind(transient)), count
 }
 
 // autoPauseCandidate is autoPauseIfDue's verdict as a read-only peek, which
@@ -420,14 +437,14 @@ func (t *jobTable) mutateLocked(j *Job, kind mutationKind) (r mutationResult) {
 	switch kind {
 	case mutDelete:
 		r.removeEntry = t.deleteLocked(j)
-	case mutPause, mutAutoPause:
+	case mutPause, mutAutoPause, mutAutoPauseTransient:
 		e, err := t.pauseLocked(j)
 		if err != nil {
 			return mutationResult{opErr: err}
 		}
 		r.removeEntry = e
-		if kind == mutAutoPause {
-			j.PausedReason = PausedReasonAutoFailures
+		if reason, ok := autoPauseReasons[kind]; ok {
+			j.PausedReason = reason
 		}
 	case mutResume:
 		p, err := t.resumeLocked(j)

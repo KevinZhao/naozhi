@@ -203,31 +203,39 @@ func contextTooLongPersistentNotice(snap jobSnapshot, to NotifyTarget) string {
 
 // autoPauseNoticeSuffix is appended to a failure notice sent to `to` when that
 // run's failure auto-paused the job; pausedAfter is finishRun's result (0 = not
-// paused). It says where to resume: /cron resume only works in the job's own
-// chat, so a notice delivered elsewhere names that chat generically (never its
-// id) and the dashboard; a job with no IM chat resumes from the dashboard.
-func autoPauseNoticeSuffix(snap jobSnapshot, to NotifyTarget, pausedAfter int) string {
+// paused), transient says the transient backend count paused it, which names
+// the outage rather than the job. It says where to resume: /cron resume only
+// works in the job's own chat, so a notice delivered elsewhere names that chat
+// generically (never its id) and the dashboard; a job with no IM chat resumes
+// from the dashboard.
+func autoPauseNoticeSuffix(snap jobSnapshot, to NotifyTarget, pausedAfter int, transient bool) string {
 	if pausedAfter <= 0 {
 		return ""
+	}
+	why, when := "；已连续失败 "+strconv.Itoa(pausedAfter)+" 次", "修复后"
+	if transient {
+		why = "；后端持续故障 " + strconv.Itoa(int(transientAutoPauseWindow/time.Hour)) + " 小时以上（失败 " + strconv.Itoa(pausedAfter) + " 次）"
+		when = "后端恢复后"
 	}
 	var how string
 	switch {
 	case !snap.hasIMChat():
-		how = "修复后在控制台恢复"
+		how = when + "在控制台恢复"
 	case snap.isSourceChat(to):
-		how = "修复后发送 /cron resume " + snap.jobID + " 恢复"
+		how = when + "发送 /cron resume " + snap.jobID + " 恢复"
 	default:
-		how = "修复后在创建该任务的会话发送 /cron resume " + snap.jobID + "，或在控制台恢复"
+		how = when + "在创建该任务的会话发送 /cron resume " + snap.jobID + "，或在控制台恢复"
 	}
-	return "；已连续失败 " + strconv.Itoa(pausedAfter) + " 次，任务已自动暂停，" + how
+	return why + "，任务已自动暂停，" + how
 }
 
 // deliverFailureNotice sends the IM notice for a run of rc that did not
 // succeed: failureNoticeBody plus, when pausedAfter > 0, the auto-pause
 // sentence.
 func (s *Scheduler) deliverFailureNotice(rc runCtx, errClass ErrorClass, turnCause TurnCause, state RunState, timeout time.Duration, pausedAfter int) {
+	transient := transientTurnFailure(state, errClass, turnCause)
 	s.deliverNotice(rc.notifyTo, formatCronNotice(rc.snap.labelOrID(),
-		failureNoticeBody(rc.snap, rc.notifyTo, errClass, turnCause, state, rc.runID, timeout)+autoPauseNoticeSuffix(rc.snap, rc.notifyTo, pausedAfter)))
+		failureNoticeBody(rc.snap, rc.notifyTo, errClass, turnCause, state, rc.runID, timeout)+autoPauseNoticeSuffix(rc.snap, rc.notifyTo, pausedAfter, transient)))
 }
 
 // deliverPauseNotice announces that the failure of a run with no per-run
