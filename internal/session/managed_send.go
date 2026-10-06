@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
@@ -27,10 +26,7 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 	defer s.turnWaiters.Add(-1)
 	s.touchLastActive()
 
-	prompt := textutil.TruncateRunes(text, 120)
-	if len(images) > 0 {
-		prompt += " [+" + strconv.Itoa(len(images)) + " image(s)]"
-	}
+	prompt := textutil.TruncateRunes(text, 120) + clievent.AttachmentSuffix(images)
 	storeAtomicString(&s.lastPrompt, prompt)
 
 	proc := s.loadProcess()
@@ -145,10 +141,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []clieven
 	s.touchLastActive()
 
 	// Cache the user prompt for Snapshot.
-	prompt := textutil.TruncateRunes(text, 120)
-	if len(images) > 0 {
-		prompt += " [+" + strconv.Itoa(len(images)) + " image(s)]"
-	}
+	prompt := textutil.TruncateRunes(text, 120) + clievent.AttachmentSuffix(images)
 	storeAtomicString(&s.lastPrompt, prompt)
 
 	proc := s.loadProcess()

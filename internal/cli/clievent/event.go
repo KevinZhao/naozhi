@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -470,6 +471,20 @@ func splitAttachments(atts []Attachment) (inline []Attachment, refs []Attachment
 		}
 	}
 	return inline, refs
+}
+
+// AttachmentSuffix is the " [+N image(s)] [+M file(s)]" decoration a user
+// turn's one-line summary carries; "" for no attachments.
+func AttachmentSuffix(atts []Attachment) string {
+	inline, refs := splitAttachments(atts)
+	var s string
+	if len(inline) > 0 {
+		s = " [+" + strconv.Itoa(len(inline)) + " image(s)]"
+	}
+	if len(refs) > 0 {
+		s += " [+" + strconv.Itoa(len(refs)) + " file(s)]"
+	}
+	return s
 }
 
 // prependFileRefHint returns text with a Read-tool instruction prepended when

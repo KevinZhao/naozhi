@@ -384,9 +384,9 @@ func (d *Dispatcher) inboundLogger(msg platform.IncomingMessage) *slog.Logger {
 
 // prepareInbound runs the front-matter common to every dispatch strategy
 // (dedup, group-mention gate, sender authorization, rate limit, slash
-// commands, agent
-// resolution, accounting, key/opts resolution, image conversion). Returns
-// false when the message was fully handled or dropped here.
+// commands, agent resolution, file classification, accounting, key/opts
+// resolution, image conversion). Returns false when the message was fully
+// handled or dropped here.
 func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMessage) (preparedInbound, bool) {
 	// Dedup first: platform retries (e.g. Feishu webhook re-delivery) must
 	// not double-dispatch. Empty EventID (#1310) falls back to a composite
@@ -436,7 +436,7 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 		agentID = msg.AgentID
 	}
 
-	if cleanText == "" && len(msg.Images) == 0 {
+	if cleanText == "" && len(msg.Images) == 0 && len(msg.Files) == 0 {
 		if agentID != "general" {
 			d.replyText(ctx, msg, "请在指令后输入内容。", lg)
 		}
@@ -460,6 +460,15 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 		}
 	}
 
+	// A message whose only payload was rejected files ends at the notice.
+	files, fileNotice := fileAttachments(msg.Files)
+	if fileNotice != "" {
+		d.replyText(ctx, msg, fileNotice, lg)
+	}
+	if cleanText == "" && len(msg.Images) == 0 && len(files) == 0 {
+		return preparedInbound{}, false
+	}
+
 	// Accepted messages only (post-dedup, post-command). Feeds /health and
 	// /debug/vars (#892).
 	d.messageCount.Add(1)
@@ -472,11 +481,12 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, d.sessionChatID(msg), agentID)
 
 	var images []clievent.Attachment
-	if len(msg.Images) > 0 {
-		images = make([]clievent.Attachment, 0, len(msg.Images))
+	if n := len(msg.Images) + len(files); n > 0 {
+		images = make([]clievent.Attachment, 0, n)
 		for _, img := range msg.Images {
 			images = append(images, clievent.Attachment{Data: img.Data, MimeType: img.MimeType})
 		}
+		images = append(images, files...)
 	}
 
 	return preparedInbound{
