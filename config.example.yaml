@@ -499,8 +499,10 @@ platforms:
 # direct chat they are also told their ID, at most once per 10 minutes. IDs:
 # Feishu open_id (ou_...), Slack user ID (U...), Discord user ID, Weixin from.
 # admin_users alone may run /cron, /cd and /project; leave it empty and every
-# allowed user is an admin. Changes need a restart. `naozhi setup weixin`
-# writes the weixin entry for the WeChat user who scanned the login QR code.
+# allowed user is an admin. Reload without a restart: `naozhi config reload`
+# (or `systemctl reload naozhi`); see docs/rfc/config-hot-reload.md.
+# `naozhi setup weixin` writes the weixin entry for the WeChat user who
+# scanned the login QR code.
 # im_access:
 #   default_deny: false     # true refuses every platform without an entry
 #   deny_reply: ""          # replaces the direct-chat refusal text
@@ -512,7 +514,7 @@ platforms:
 # Per-sender IM message rate limit (token bucket keyed by platform + user ID,
 # or by chat when the platform sends no user ID). Slash commands count; /stop
 # does not. A limited message is dropped and the sender told at most once a
-# minute. Absent or 0 = unlimited. Changes need a restart.
+# minute. Absent or 0 = unlimited. Reloads without a restart.
 # im_rate_limit:
 #   msgs_per_min: 10        # sustained rate per sender
 #   burst: 3                # back-to-back allowance; 0 = msgs_per_min

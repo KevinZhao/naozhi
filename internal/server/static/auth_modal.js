@@ -1272,8 +1272,6 @@ if (document.readyState === 'loading') {
   wireQuickAskInput(true);
 }
 
-
-
 export {
   accessProfileChipHtml,
   backendDisplayName,
