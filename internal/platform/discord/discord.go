@@ -150,13 +150,26 @@ func (d *Discord) stopped() bool {
 	return d.stopCtx != nil && d.stopCtx.Err() != nil
 }
 
+// errProbeRateLimited is fetchSelf's answer when discordgo would have slept
+// on an exhausted bucket before sending: the request is not attempted, so
+// Stop is never held by that sleep (which ignores ctx).
+var errProbeRateLimited = errors.New("discord REST bucket exhausted; probe skipped")
+
 // fetchSelf asks REST who the bot is, bounded by probeTimeout and by Stop.
-// The 429 retry is off: discordgo would sleep it out ignoring ctx. Its
-// pre-request wait on an exhausted rate-limit bucket still ignores ctx.
+// The 429 retry is off: discordgo would sleep it out ignoring ctx. The
+// pre-request bucket wait also ignores ctx, so it is checked first and an
+// exhausted bucket yields errProbeRateLimited instead of a blocking call.
 func (d *Discord) fetchSelf(sess *discordgo.Session) (*discordgo.User, error) {
 	parent := d.stopCtx
 	if parent == nil {
 		parent = context.Background()
+	}
+	if rl := sess.Ratelimiter; rl != nil {
+		// Same bucket key Session.User uses (EndpointUsers). Any pending wait
+		// would be an uninterruptible sleep; the probe loop retries anyway.
+		if rl.GetWaitTime(rl.GetBucket(discordgo.EndpointUsers), 1) > 0 {
+			return nil, errProbeRateLimited
+		}
 	}
 	ctx, cancel := context.WithTimeout(parent, durationOr(d.probeTimeout, discordProbeTimeout))
 	defer cancel()
@@ -357,8 +370,8 @@ func (d *Discord) probeOnce(sess *discordgo.Session) bool {
 	}
 	if code := restStatus(err); code == http.StatusUnauthorized || code == http.StatusForbidden {
 		if d.connState.FailIf(platform.ConnDisconnected, platform.ConnFailed,
-			fmt.Errorf("discord rejected the bot token (HTTP %d): update platforms.discord.bot_token and restart", code)) {
-			slog.Error("discord rejected the bot token while the gateway is down; update platforms.discord.bot_token and restart",
+			fmt.Errorf("discord rejected the bot token (HTTP %d): update platforms.discord.bot_token (restart unless it reconnects by itself)", code)) {
+			slog.Error("discord rejected the bot token while the gateway is down; update platforms.discord.bot_token (restart unless it reconnects by itself)",
 				"status", code)
 		}
 		return true
