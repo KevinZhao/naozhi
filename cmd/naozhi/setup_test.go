@@ -15,7 +15,7 @@ func TestSetupWriteConfig_NewFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 
-	if err := setupWriteConfig(path, "test-token-123"); err != nil {
+	if _, err := setupWriteConfig(path, "test-token-123", ""); err != nil {
 		t.Fatalf("setupWriteConfig: %v", err)
 	}
 
@@ -66,7 +66,7 @@ log:
 		t.Fatal(err)
 	}
 
-	if err := setupWriteConfig(path, "new-token-456"); err != nil {
+	if _, err := setupWriteConfig(path, "new-token-456", ""); err != nil {
 		t.Fatalf("setupWriteConfig: %v", err)
 	}
 
@@ -110,7 +110,7 @@ platforms:
 		t.Fatal(err)
 	}
 
-	if err := setupWriteConfig(path, "wx-token"); err != nil {
+	if _, err := setupWriteConfig(path, "wx-token", ""); err != nil {
 		t.Fatalf("setupWriteConfig: %v", err)
 	}
 
@@ -135,7 +135,7 @@ func TestSetupWriteConfig_CreateSubdirs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sub", "deep", "config.yaml")
 
-	if err := setupWriteConfig(path, "token"); err != nil {
+	if _, err := setupWriteConfig(path, "token", ""); err != nil {
 		t.Fatalf("setupWriteConfig: %v", err)
 	}
 
@@ -150,9 +150,9 @@ func TestUpdateWeixinToken_NoPlatforms(t *testing.T) {
 log:
   level: "info"
 `)
-	result, err := updateWeixinToken(input, "my-token")
+	result, _, err := updateWeixinConfig(input, "my-token", "", false)
 	if err != nil {
-		t.Fatalf("updateWeixinToken: %v", err)
+		t.Fatalf("updateWeixinConfig: %v", err)
 	}
 	content := string(result)
 
@@ -177,7 +177,7 @@ func TestSetupWriteConfig_LoadableByConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 
-	if err := setupWriteConfig(path, "wx-token"); err != nil {
+	if _, err := setupWriteConfig(path, "wx-token", ""); err != nil {
 		t.Fatalf("setupWriteConfig: %v", err)
 	}
 
@@ -216,7 +216,7 @@ func TestSetupWriteConfig_AppliesRuntimeDefaults(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 
-	if err := setupWriteConfig(path, "wx-token"); err != nil {
+	if _, err := setupWriteConfig(path, "wx-token", ""); err != nil {
 		t.Fatalf("setupWriteConfig: %v", err)
 	}
 
@@ -261,7 +261,7 @@ func TestSetupWriteConfig_AppliesRuntimeDefaults(t *testing.T) {
 // containing YAML specials (`"`, `#`, `:`, `\n`). The old fast path
 // substituted the token via fmt.Sprintf into a template quoted with
 // raw double-quotes, so a `"` or newline would truncate / inject
-// adjacent YAML keys. All paths now funnel through updateWeixinToken
+// adjacent YAML keys. All paths now funnel through updateWeixinConfig
 // (yaml.Node + DoubleQuotedStyle) which emits a correctly escaped
 // scalar no matter what bytes the token carries.
 func TestSetupWriteConfig_TokenWithYAMLSpecials(t *testing.T) {
@@ -283,7 +283,7 @@ func TestSetupWriteConfig_TokenWithYAMLSpecials(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "config.yaml")
 
-			if err := setupWriteConfig(path, token); err != nil {
+			if _, err := setupWriteConfig(path, token, ""); err != nil {
 				t.Fatalf("setupWriteConfig: %v", err)
 			}
 
@@ -309,15 +309,15 @@ func TestSetupWriteConfig_TokenWithYAMLSpecials(t *testing.T) {
 // TestDefaultConfigTemplate_TokenPlaceholderEmpty verifies that the
 // minimal template is now a static YAML document (no %s anywhere) so
 // `yaml.Unmarshal` can parse it directly. The token is injected
-// exclusively through updateWeixinToken to guarantee safe escaping.
+// exclusively through updateWeixinConfig to guarantee safe escaping.
 func TestDefaultConfigTemplate_TokenPlaceholderEmpty(t *testing.T) {
 	if strings.Contains(defaultConfigTemplate, "%s") {
 		t.Error("defaultConfigTemplate must not use fmt placeholder; " +
-			"token must go through updateWeixinToken for YAML-safe escaping")
+			"token must go through updateWeixinConfig for YAML-safe escaping")
 	}
 	if !strings.Contains(defaultConfigTemplate, `token: ""`) {
 		t.Error("defaultConfigTemplate should contain empty token anchor " +
-			`token: "" for updateWeixinToken to overwrite`)
+			`token: "" for updateWeixinConfig to overwrite`)
 	}
 }
 

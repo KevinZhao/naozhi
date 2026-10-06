@@ -5,7 +5,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/platform"
-	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/spawndiag"
 )
 
@@ -20,7 +19,7 @@ type HealthProbe func(auth *healthAuthSection)
 // EventLogHealthProbe returns a HealthProbe that populates the
 // eventlog auth-section field from the router-attached EventLog
 // subsystem. No-op when the router is nil or EventLog is disabled.
-func EventLogHealthProbe(router *session.Router) HealthProbe {
+func EventLogHealthProbe(router healthRouter) HealthProbe {
 	return func(auth *healthAuthSection) {
 		if router == nil || auth == nil {
 			return
@@ -107,7 +106,7 @@ func healthPlatformConnOf(cs platform.ConnState, now time.Time) healthPlatformCo
 // writes are currently refused. The section is omitted while there are none:
 // the router's saves are the only thing that lifts or sets a block, so the
 // field is exactly "is session state reaching disk right now".
-func sessionStoreHealthProbe(router *session.Router) HealthProbe {
+func sessionStoreHealthProbe(router healthRouter) HealthProbe {
 	return func(auth *healthAuthSection) {
 		if router == nil || auth == nil {
 			return
@@ -131,7 +130,7 @@ func spawnDiagsHealthProbe(auth *healthAuthSection) {
 // runStoresHealthProbe populates run_stores from the cron and session
 // run-history stores. A store that does not persist contributes no
 // sub-object, and with neither persisting the section is omitted.
-func runStoresHealthProbe(cronRunStore func() cron.RunStoreHealth, router *session.Router) HealthProbe {
+func runStoresHealthProbe(cronRunStore func() cron.RunStoreHealth, router healthRouter) HealthProbe {
 	return func(auth *healthAuthSection) {
 		if auth == nil {
 			return
@@ -204,7 +203,7 @@ func dispatchHealthProbe(metrics func() (int64, int64, int64, time.Time)) Health
 // AttachmentTrackerHealthProbe is the analogous factory for the
 // router-attached AttachmentTracker subsystem. Same disabled-as-noop
 // semantics as EventLogHealthProbe.
-func AttachmentTrackerHealthProbe(router *session.Router) HealthProbe {
+func AttachmentTrackerHealthProbe(router healthRouter) HealthProbe {
 	return func(auth *healthAuthSection) {
 		if router == nil || auth == nil {
 			return

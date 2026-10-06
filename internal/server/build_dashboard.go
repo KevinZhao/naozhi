@@ -86,14 +86,14 @@ func (s *Server) buildWSStack(w *wiring) *Hub {
 	w.bcast = newWSBroadcaster(newSubscriberRegistry())
 	// A nil *session.Router boxed into the interface would read non-nil.
 	var router turnRouter
-	if s.router != nil {
-		router = s.router
+	if w.router != nil {
+		router = w.router
 	}
 	w.turns = turn.New(w.queue, turnSender{router: router, notify: w.bcast, prompts: w.scheduler})
 	w.engine = newSendEngine(sendEngineOpts{
 		Turns:       w.turns,
 		Ctx:         s.appCtx,
-		Router:      s.router,
+		Router:      w.router,
 		Resolver:    w.resolver,
 		Agents:      w.agents,
 		ProjectMgr:  s.projectMgr,
@@ -102,7 +102,7 @@ func (s *Server) buildWSStack(w *wiring) *Hub {
 		Notify:      w.bcast,
 	})
 	return NewHub(HubOptions{
-		Router:    s.router,
+		Router:    w.router,
 		DashToken: s.dashboardToken,
 		// Live getter, not a snapshot: RotateCookieGen must invalidate WS
 		// upgrades on the next handshake (#1398).

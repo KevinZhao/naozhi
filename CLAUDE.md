@@ -56,7 +56,7 @@ Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI, Kiro, or Codex) as
 ```
 cmd/naozhi/main.go
   组合根
-  -> wireup       组合根装配：backend 注册、config 校验、cron+sysession 调度器装配
+  -> wireup       组合根装配：backend 注册、config 校验、cron+sysession 调度器装配、server 与 upstream 共用的 KeyResolver
   -> config       YAML 加载、${ENV_VAR} 展开、校验
 
   核心链路（IM 消息 → CLI 进程）
@@ -326,7 +326,7 @@ Each phase emits a `phase=` timing log line so a hung subsystem is attributable 
 - **server.addr**: Listen address (default `:8080`)
 - **cli**: `backend` (`claude`|`kiro`|`codex`), `path`, `model`, `args`, `effort`, `mcp_config` (absolute path to an MCP server definition file → `--mcp-config`; required to get MCP servers into a spawn when `naozhi_settings.enabled` is on, since that path's `--setting-sources ""` suppresses `~/.claude.json`'s `mcpServers` — see `docs/rfc/cli-mcp-config.md`). Multi-backend deployments use `cli.backends: [{id, path, model, args, effort}, ...]` so the dashboard picker can choose per-session — see `config.example.yaml` for the commented-out canonical example. `effort` (kiro only) also accepts a per-agent override via `agents[].effort`; precedence is `cli.effort < cli.backends[].effort < agents[].effort`
 - **session**: `max_procs`, `ttl`, `cwd` (working directory), `store_path`, `watchdog.no_output_timeout`, `watchdog.total_timeout`
-- **agents**: Map of agent_id -> {model, args}. Each agent spawns with custom system prompt via `--append-system-prompt`
+- **agents**: Map of agent_id -> {model, args, backend, access_profile, effort, system_prompt}. `system_prompt` is passed as `--append-system-prompt` (Claude backend only); the flag itself is denylisted in `args`
 - **agent_commands**: Map of command -> agent_id for routing (e.g., `review: code-reviewer`)
 - **platforms**: `feishu` (app credentials, connection_mode), `slack` (bot_token, app_token), `discord` (bot_token), `weixin` (token, base_url)
 - **cron**: `store_path`, `max_jobs`, `execution_timeout`

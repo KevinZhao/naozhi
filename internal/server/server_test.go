@@ -71,6 +71,12 @@ func newTestServerHS(p *mockPlatform) (*Server, *handlerSet) {
 	})
 }
 
+// routerOf returns the concrete router a test fixture built srv with, for the
+// test-only Router methods (InjectSession, Shutdown, …) serverRouter omits.
+func routerOf(srv *Server) *session.Router {
+	return srv.router.(*session.Router)
+}
+
 func newTestServer(p *mockPlatform) *Server {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": p}
@@ -310,12 +316,11 @@ func TestBuildMessageHandler_NewResetsNamedAgent(t *testing.T) {
 	agentCommands := map[string]string{"review": "code-reviewer"}
 	agents := map[string]session.AgentOpts{"code-reviewer": {}}
 	srv := NewWithOptions(ServerOptions{
-		Addr:          ":0",
-		Router:        router,
-		Platforms:     platforms,
-		Agents:        agents,
-		AgentCommands: agentCommands,
-		Backend:       "claude",
+		Addr:      ":0",
+		Router:    router,
+		Platforms: platforms,
+		Routing:   RoutingOptions{Agents: agents, AgentCommands: agentCommands},
+		Backend:   "claude",
 	})
 	handler := newTestDispatcher(srv).BuildHandler()
 
