@@ -127,8 +127,8 @@ export function formatDurationShort(ms) {
   const s = ms / 1000;
   if (s < 1) return Math.round(ms) + 'ms';
   if (s < 60) return s.toFixed(s < 10 ? 1 : 0) + 's';
-  const m = Math.floor(s / 60);
-  const rs = Math.round(s - m * 60);
+  const t = Math.round(s), m = Math.floor(t / 60); // round first: 119.6s is 2m 00s
+  const rs = t - m * 60;
   if (m < 60) return m + 'm ' + (rs < 10 ? '0' + rs : rs) + 's';
   const h = Math.floor(m / 60);
   const rm = m - h * 60;
@@ -150,8 +150,8 @@ export function formatRunDuration(ms) {
   if (ms < 1000) return ms + 'ms';
   const s = ms / 1000;
   if (s < 60) return s.toFixed(1).replace(/\.0$/, '') + 's';
-  const m = Math.floor(s / 60);
-  const ss = Math.round(s - m * 60);
+  const t = Math.round(s), m = Math.floor(t / 60);
+  const ss = t - m * 60;
   return m + 'm ' + ss + 's';
 }
 // isCronSessionKey — cron-scheduler session keys carry the cron: prefix;
