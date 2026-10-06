@@ -422,6 +422,27 @@ declare global {
     key?: string;
     node?: string;
   }
+  interface WsFrame_workflow_set {
+    type: 'workflow_set';
+    epoch: string;
+    key: string;
+    node?: string;
+    server_now: number;
+    task_ids: string[];
+  }
+  interface WsFrame_workflow_state {
+    type: 'workflow_state';
+    base_version?: number;
+    epoch: string;
+    full: boolean;
+    key: string;
+    node?: string;
+    rows_omitted?: number;
+    server_now: number;
+    task_id: string;
+    version: number;
+    workflow: WireView;
+  }
   interface WsFrames {
     agent_done: WsFrame_agent_done;
     agent_event: WsFrame_agent_event;
@@ -442,6 +463,8 @@ declare global {
     sessions_update: WsFrame_sessions_update;
     subscribed: WsFrame_subscribed;
     unsubscribed: WsFrame_unsubscribed;
+    workflow_set: WsFrame_workflow_set;
+    workflow_state: WsFrame_workflow_state;
   }
   interface RestResponse_sessions {
     sessions: SessionSnapshot[];

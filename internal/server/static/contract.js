@@ -29,6 +29,8 @@ export const NZ_CONTRACT = Object.freeze(/** @type {const} */ ({
     subscribed: 'subscribed',
     unsubscribe: 'unsubscribe',
     unsubscribed: 'unsubscribed',
+    workflow_set: 'workflow_set',
+    workflow_state: 'workflow_state',
   },
   API: {
     access_profiles: '/api/access-profiles',
@@ -108,6 +110,8 @@ export const NZ_CONTRACT = Object.freeze(/** @type {const} */ ({
     EVENT_TYPE_NO_BUBBLE: ['thinking'],
     EVENT_TYPE_MD_IGNORE: ['thinking', 'tool_use', 'agent', 'ask_question', 'task_start', 'task_progress', 'task_done', 'result'],
     STARTUP_FAILURE_CLASS: ['unknown', 'resume_not_found', 'auth', 'mcp_config', 'missing_runtime'],
+    WORKFLOW_STATUS: ['running', 'paused', 'completed', 'failed', 'killed', 'interrupted', 'unknown'],
+    WORKFLOW_AGENT_STATE: ['queued', 'running', 'done', 'failed', 'skipped', 'stopped', 'unknown'],
   },
   DEATH_REASON_PREFIX: { CODE: 'cli_exited_code_', SIGNAL: 'cli_exited_signal_' },
 }));

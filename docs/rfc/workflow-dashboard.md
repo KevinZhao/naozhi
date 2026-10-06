@@ -1916,7 +1916,8 @@ Tracker 负责，并配泄漏测试（仿 `wshub_eventpush_redact_paths_test.go`
 - 入队成功（`trySendRaw` 返回 true，`wsclient.go:120-148`）→ `lastSent = version`（含
   `rows_omitted` 的帧也前进：客户端负责 HTTP 补齐）。失败 → `lastSent` **不前进**，250ms 后重试；
   下次 delta 仍以旧 `lastSent` 为基，自动包含遗漏的行。WS 在入队之后有序。
-- **合并节奏**：结构变化或终态 → 下一次唤醒立即发；纯 progress → 每订阅每 task 至多 1 帧 / 秒。
+- **合并节奏**：结构变化或终态 → 下一次唤醒立即发；纯 progress → 每订阅每 task 至多 1 帧 / 秒。（PR-11：结构变化指 status、run_id、degraded、
+  source、counts、phase 数或 agents_capped 与上次送出的不同；其余变化（tokens、tool 数、current、行内进度）按 1 帧 / 秒，到期补发最新状态。）
 - **背压**：两道深度门，**超过门限时不调用 `trySendRaw`**，只 arm 250ms 重试：
   - 非终态 workflow 帧：`len(c.send) > 8` → 跳过（latest-wins：积压的旧帧没有价值；v1 的 `> 192` 允许 ~192 个大帧排队、可达数十 MB）；
   - 终态帧与 `workflow_set`：`len(c.send) ≥ cap(c.send)/2`（生产 cap 256，`wshub_upgrade.go:76`）→ 跳过。v2 让终态帧总是尝试入队、
@@ -1958,7 +1959,7 @@ Tracker 负责，并配泄漏测试（仿 `wshub_eventpush_redact_paths_test.go`
   "无订阅则自动订阅"恢复旁加一条——`sessionStream._subscriptionSuspended` 且 `subscribedKey === selection.key`，刷新后的快照 `protocol`
   非空（`managed_query.go:166-170` 只在有进程时填）→ `sessionStream.subscribe(...)`。重接本身推进 gen（`commitShimReattach` 的
   `MarkChanged`，`router_shim.go:635`）并发 sessions_update（`settleReconnected` → `notifyChange`，:518），所以 WS 连着时也能走到。
-  这同时补上了事件流在同一窗口的缺口。服务端方案（无进程分支也起 workflowPushLoop）需要不带 unsub 的注册项或另一套 generation，不选。近 5s 没收到 `workflow_set` 时，store 里该 sid 不在 Summary 中的条目一律删除
+  这同时补上了事件流在同一窗口的缺口。服务端方案（无进程分支也起 workflowPushLoop）需要不带 unsub 的注册项或另一套 generation，不选。近 5s 该 sid 既没收到 `workflow_set` 也没收到任何 `workflow_state` 帧时（PR-11：只看 `workflow_set` 的话，task 集合稳定 5s 以上的健康 board 每次刷新都被裁），store 里该 sid 不在 Summary 中的条目一律删除
   （Summary 恰好是面板要显示的集合：全部 `IsUnsettled` + 最近 3 个终态，§4.2；v4 写的"running 全部"会把 R5 的 unknown 删掉），这是无推送场景下 `workflow_set` 的替代。
   `node` 非空且非 `local` 的 session 一律跳过：多节点模式下远端 session 会原样带着 `workflows` 合进 `/api/sessions`
   （`internal/dashboard/session/list.go:266-296`），而 §6.2.3 对远端恒返回 404，不跳过就会每次刷新都白打一次 HTTP。
@@ -1978,12 +1979,12 @@ epoch 变化后）、`delta`（`since=rowsAt`）、`none`（`!rowsLoaded` 时的
 | `workflow_set` | — | 删除该 sid 下 `task_id` 不在列表中、或 `epoch ≠ 帧 epoch` 的全部条目；记录 sid 的当前 epoch |
 | full | `epoch ≠ local.epoch`（含新条目） | 替换 header/phases，`epoch`/`version` 取帧值；丢弃 rows 与 result、`rowsLoaded=false`、`resultLoaded=false`；展开中 → 拉 full（在途则落地后按 epoch 不符丢弃再拉一次） |
 | full | epoch 相同 | `version` 取 max(local, 帧)，帧更新时替换 header/phases；**保留 rows**；`rowsLoaded` 且 `rowsAt < 帧 version` → 拉 delta；`!rowsLoaded` 且展开中 → 拉 full（在途则都不另发，落地后再看）。短暂 WS 抖动、内容未变的重订阅不再重拉 |
-| delta | `epoch ≠ local.epoch` | 丢弃 → 拉 full |
+| delta | `epoch ≠ local.epoch` | 丢弃 → 拉 full（PR-11：未展开的条目拉 none，只要 header，同 §7.5"只在展开时拉行"） |
 | delta | `fetchInFlight` | 缓存进 `buffered`（含 header） |
 | delta | `version ≤ local.version` | 忽略 header；行同下一行规则（full 帧可能已把 header 推到前面，而行还停在 `rowsAt`） |
-| delta | 其余 | header：`base_version > local.version` → 缺帧，拉（`rowsLoaded` ? delta : none）；否则应用 header、`version = 帧值`。行（仅 `rowsLoaded`）：`base_version ≤ rowsAt < 帧 version` → 按 index 整行替换合并、`rowsAt = 帧 version`；`base_version > rowsAt` → 拉 delta。`rows_omitted > 0` 且 `rowsLoaded` → 拉 delta 一次 |
+| delta | 其余 | header：`base_version > local.version` → 缺帧，拉（`rowsLoaded` ? delta : none）；否则应用 header、`version = 帧值`。行（仅 `rowsLoaded`）：`base_version ≤ rowsAt < 帧 version` → 按 index 整行替换合并、`rowsAt = 帧 version`；`base_version > rowsAt` → 拉 delta。`rows_omitted > 0` 且 `rowsLoaded` → 拉 delta 一次（PR-11：此时合并本帧带来的行，但 `rowsAt` **不**前进——被省略的行 rev 也在 `(base, 帧 version]` 内，`rowsAt` 前进后 `since=rowsAt` 就取不回它们） |
 | 任一帧或 HTTP 响应应用之后 | **结果拉取**（v5）：header 的 status 为终态、`source == "result_file"`、`!resultLoaded`、`resultTries < 5`、条目展开中（含自动展开） | 拉一次（`rowsLoaded` ? delta : none）——行与结果一并取回。v4 没有这条：自动展开的 running workflow 首拉之后 `rowsLoaded` 已为真，终态 delta 与 result_file delta 都在本地合并，结果与日志永远不出现。`source == "result_file"` 即"结果已就绪"（§5.6(4) 的顺序不变式），不另设 wire 字段。之后才展开的终态条目由 `ensureRows` 走同一判定 |
-| HTTP 响应（H，`rows_mode`） | 响应 epoch ≠ 当前 epoch（且已有 WS 帧） | 丢弃，重拉一次 |
+| HTTP 响应（H，`rows_mode`） | 响应 epoch ≠ 当前 epoch（且已有 WS 帧） | 丢弃，重拉一次（PR-11："已有 WS 帧"指近 5s 内收到过该 task 的帧，比的是最近一帧所带的 epoch：delta 不改本地 epoch，由 delta 新建（epoch 为空）或刚收到新 epoch delta 的条目，与帧同 epoch 的响应直接采用；重拉沿用原请求的模式，折叠条目也真的重拉。帧已停的兜底场景里响应就是最新状态，直接采用其 epoch） |
 | HTTP 响应 | 否则 | header：`H ≥ local.version` 才替换，`version = max(local.version, H)`——**永不倒退**。行：`full` 且（`!rowsLoaded` 或 `H > rowsAt`）→ 整体替换、`rowsAt = H`、`rowsLoaded=true`（同一 epoch 内行不会被删除，所以 H 时刻的全量之后再叠加 delta 是正确的）；`full` 且 `H ≤ rowsAt` → 保留本地行；`delta` → 按 index 合并、`rowsAt = H`；`none` → 行不动。结果：带 `result` / `logs` → 存入、`resultLoaded=true`；`result_unavailable` 且结果拉取条件仍成立 → `resultTries++`，按下面的退避再试（至多 5 次；之后只在重新展开时再试）。然后按序重放 `buffered`（按上面 delta 的规则，与 `version` / `rowsAt` 分别比较）。重放后 `rowsLoaded` 且 `rowsAt < version` → 拉 delta 一次 |
 | HTTP 429 / 5xx / 网络错 | — | **保持当前状态**，`fetchInFlight=false`，`buffered` 保留；按指数退避（1s → 2s → … ≤ 30s，有 `Retry-After` 时取二者较大者）记 `retryAt`，到期且仍需要时重拉 |
 | `/workflow` 的 HTTP 404 | — | 删除该条目（session 不存在、task 不在 board 里、或 remote node；§6.2.3 起 404 只表示这些） |
@@ -1999,7 +2000,8 @@ epoch 变化后）、`delta`（`since=rowsAt`）、`none`（`!rowsLoaded` 时的
   `(key, task_id, epoch, version, base_version)`——现有指纹基于时间戳，不适合可变快照。
 - Hub 通过 `*ManagedSession` 取 board（`WorkflowBoard()`），**不**给 `HubRouter` 加方法（14 个，
   godoc 说到 15 要重新设计）、**不**加 `HubOptions` 字段（`hubOptionsFieldBaseline = 16`，`tools/lint-server-handlers/rule_server_fields.go:33`）。
-- reverse node 不转发这两种帧（NG3）。
+- reverse node 不转发这两种帧（NG3）。（PR-11：reverse 连接本就按类型白名单转发；HTTP 节点的 WS relay（`internal/node/relay.go` 的
+  `forwardEvent`）原样转发远端帧，在那里显式丢弃这两种帧。）
 
 ### 6.2 HTTP
 
@@ -2096,13 +2098,17 @@ classic→module 文件（`:36-44`），新 ES module **不**登记在那里。
 - 新叶子模块 `internal/server/static/workflow_state.js`（**不** import `wsm` / dashboard.js）：
   store 与 §6.1 客户端状态机的纯函数——`applyFrame(store, frame)`、`applySet(store, set)`、`applyHttp(store, sid, resp)`、
   `applyHttpError(store, sid, taskId, status, retryAfter, now)`、`needsFetch(entry, now)`、`reconcileSummaries(store, sid, summaries)`、
-  `releaseRows(store, sid)`、`visibleWorkflows(store, sid)`、`announceable(store, sid, selectedSid)`（§7.7）。入参 `frame` / `set` 是
+  `releaseRows(store, sid)`、`visibleWorkflows(store, sid)`、`announceable(store, sid, selectedSid)`（§7.7）（PR-11：凡涉及时间的函数都多一个
+  `now` 参数；`announceable` 另收 view 的 `announced` 集合；另导出 `expand(entry, open)`（展开时记 `open` 并按 §6.1 记下要拉的行 / 结果，PR-12 的
+  `ensureRows` 调它）、`startFetch(entry, mode, now)`（标记在途、返回查询串）、`rowsOf`、`isSettled` 与两张状态显示表；workflow_state.js 只
+  import `session_ident.js` 的 `sid`）。入参 `frame` / `set` 是
   `workflow_view.js` 的 handler 原样交来的帧，标 `WsFrames[...]` 类型；其中的 `workflow` / 行 / phase / HTTP 响应 / Summary
   参数一律带 `wire.d.ts` 的类型（§6.3），文件带 `// @ts-check`，嵌套字段因此受 tsc 校验。配
   `scripts/workflow-state.test.mjs`（`node --test`，CI 并入 `ci.yml:396-403` 那组，先例
   `cron_state.js` / `session_stream.js`）。
 - 新 ES module `internal/server/static/workflow_view.js`：薄层。
-  - 模块内 `const store = new Map()`（sid → Map(taskId → entry)），**不**
+  - 模块内 `const store = new Map()`（sid → Map(taskId → entry)；PR-11：sid → `{tasks: Map(taskId → entry), listed, epoch, setAt}`，
+    后三者是最近一次 `workflow_set` / Summary 的列表、epoch 与到达时刻），**不**
     `export let`（`nz/no-exported-let`）；跨 turn 存活，不放进 `turnState`（turn 边界会清，
     `running_banner.js:306-326`）。每 sid 的条目集合由 `workflow_set`（或无推送时的 Summary）裁剪；另有每 sid 37 条的 LRU 兜底，
     **从不淘汰最近一次 `workflow_set` / Summary 列出的条目**，只回收已不在其中、又没被裁掉的残留（v4 写 21 条：live 非终态 > 16 的病态情形下
@@ -2946,6 +2952,7 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   `scripts/ts-check.test.mjs`（`CHECKED` 加两个新文件；PLANTS 加 `applyFrame` / `applySet` 的帧参数锚点）、`static/dashboard.js`
   （`import './workflow_view.js';` 一行）、`static_assets.go`、`routes.go`、`testdata/routes.golden.json`、
   js-ratchet baseline（两个新文件的行、`contract.js` 与 `dashboard.js` 的行数）、`scripts/ratchet-raises.jsonl`、CLAUDE.md:242。
+  （PR-11 另动了：`internal/cli/workflow` 导出 `RowsAfter`（帧与 HTTP 的 delta 共用，替掉 handler 的 `newerRows`）与 `AllStatuses` / `AllAgentStates`（contractjs ENUMS 的来源）；`internal/node/relay.go` 丢弃这两种帧（§6.1 NG3 注）；`eslint.config.mjs` 与 `js-ratchet.caps.json` 的 `caps.leaves` 登记新模块；`session/testutil.go` 的 `BindWorkflowsForTest` / `EndWorkflowsForTest`；`ws_test.go` / `nodeclient_test.go` 的读帧 helper 跳过 workflow 帧（有进程的订阅现在都会收到 `workflow_set`）；mock-server 的 `workflowCalls` 与 e2e `workflow_frames.test.js`。`Hub.workflowPace` 是测试可调的节奏，不是 `HubOptions` 字段。）
 - ratchet 台账：`js-ratchet:TOTAL.lines`；新文件若含 > 100 行的函数则 `js-ratchet:TOTAL.fnOver100` / `js-ratchet:MAX.maxFnLines`。新文件的 per-file 键
   （`maxFnLines` / `fnOver100` / `topLevelLetVar`）首次出现，不算抬升；per-file 行数只改基线；`routes.golden.json` 不是 pin（v3 列的 `golden:routes` 删除）。
 - 测试：§11.2 wsproto / Hub / 前端 `workflow_state.js` 行；tsc（改一个 `WireView` 的 json tag 即报错、`RestResponse_*` 能被解析）、

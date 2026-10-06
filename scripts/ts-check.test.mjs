@@ -33,6 +33,8 @@ const CHECKED = [
   'session_ident.js',
   'session_list.js',
   'session_stream.js',
+  'workflow_state.js',
+  'workflow_view.js',
   'ws_manager.js',
 ];
 
@@ -106,6 +108,16 @@ test('wsm.on types each handler by its frame, and only outbound frame types regi
   assert.match(tscProbe('wsm.on(NZ_CONTRACT.WS.subscribe, () => {});'), /not assignable to parameter of type 'keyof WsFrames'/);
 });
 
+test('the workflow frames and response type their nested rows, phases and counts', () => {
+  assert.equal(tscProbe([
+    'wsm.on(NZ_CONTRACT.WS.workflow_state, (msg) => msg.workflow.agents[0].rev + msg.workflow.phases[0].counts.done + (msg.base_version || 0));',
+    'wsm.on(NZ_CONTRACT.WS.workflow_set, (msg) => msg.task_ids.length);',
+    "/** @param {RestResponses['sessions_workflow']} r */ export const f = (r) => r.workflow.agents_capped || r.result?.text;",
+  ].join('\n')), '');
+  assert.match(tscProbe('wsm.on(NZ_CONTRACT.WS.workflow_state, (msg) => msg.workflow.agents[0].revision);'), /Property 'revision' does not exist on type 'Agent'/);
+  assert.match(tscProbe('wsm.on(NZ_CONTRACT.WS.workflow_set, (msg) => msg.tasks);'), /Property 'tasks' does not exist on type 'WsFrame_workflow_set'/);
+});
+
 // Each anchor is the line that types a value the root modules read; the plant
 // after it reads a field no wire type has. Without the annotation the value is
 // `any` and tsc says nothing, so every plant must come back as an error.
@@ -125,6 +137,11 @@ const PLANTS = [
   ['session_list.js', 'function sessionCardHtml(', 's', 'SessionSnapshot'],
   ['self_update.js', 'wsm.onReady((msg) => {', 'msg', 'WsFrame_auth_ok'],
   ['dashboard.js', 'wsm.onAuthFail((msg) => {', 'msg', 'WsFrame_auth_fail'],
+  ['workflow_state.js', 'export function applyFrame(store, frame, now) {', 'frame', 'WsFrame_workflow_state'],
+  ['workflow_state.js', 'export function applySet(store, set, now) {', 'set', 'WsFrame_workflow_set'],
+  ['workflow_state.js', 'export function applyHttp(store, s, resp, now) {', 'resp', 'RestResponse_sessions_workflow'],
+  ['workflow_state.js', 'function setHeader(e, w) {', 'w', 'WireView'],
+  ['workflow_state.js', 'export function reconcileSummaries(store, s, summaries, now) {', 'summaries[0]', 'Summary'],
 ];
 
 // staticCopy copies what tsc reads from static/ into a temp dir.

@@ -506,17 +506,23 @@ func newTestWSClient() *wsClient {
 	return c
 }
 
+// readClientMsg returns c's next frame that is not a workflow push loop's.
 func readClientMsg(t *testing.T, c *wsClient, timeout time.Duration) node.ServerMsg {
 	t.Helper()
-	select {
-	case data := <-c.send:
-		var msg node.ServerMsg
-		if err := json.Unmarshal(data, &msg); err != nil {
-			t.Fatalf("unmarshal: %v", err)
+	deadline := time.After(timeout)
+	for {
+		select {
+		case data := <-c.send:
+			var msg node.ServerMsg
+			if err := json.Unmarshal(data, &msg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if !isWorkflowFrame(msg.Type) {
+				return msg
+			}
+		case <-deadline:
+			t.Fatal("timeout reading client message")
+			return node.ServerMsg{}
 		}
-		return msg
-	case <-time.After(timeout):
-		t.Fatal("timeout reading client message")
-		return node.ServerMsg{}
 	}
 }

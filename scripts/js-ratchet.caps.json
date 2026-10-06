@@ -40,6 +40,7 @@
     "shell.js",
     "state.js",
     "utilities.js",
+    "workflow_state.js",
     "ws_manager.js"
   ],
   "lateBindingTables": {

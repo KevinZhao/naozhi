@@ -161,6 +161,12 @@ var cronStateJS embed.FS
 //go:embed static/cron_format.js
 var cronFormatJS embed.FS
 
+//go:embed static/workflow_state.js
+var workflowStateJS embed.FS
+
+//go:embed static/workflow_view.js
+var workflowViewJS embed.FS
+
 //go:embed static/lightbox.js
 var lightboxJS embed.FS
 
@@ -298,6 +304,8 @@ var staticAssets, servedAssetVersion = func() (map[string]staticAsset, string) {
 		{"backend_catalog.js", backendCatalogJS, "static/backend_catalog.js", true},
 		{"cron_state.js", cronStateJS, "static/cron_state.js", true},
 		{"cron_format.js", cronFormatJS, "static/cron_format.js", true},
+		{"workflow_state.js", workflowStateJS, "static/workflow_state.js", true},
+		{"workflow_view.js", workflowViewJS, "static/workflow_view.js", true},
 		{"lightbox.js", lightboxJS, "static/lightbox.js", true},
 		{"mem_popover.js", memPopoverJS, "static/mem_popover.js", true},
 		{"aside_drawer.js", asideDrawerJS, "static/aside_drawer.js", true},

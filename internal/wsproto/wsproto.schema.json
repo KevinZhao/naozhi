@@ -18,7 +18,9 @@
     "session_state",
     "sessions_update",
     "subscribed",
-    "unsubscribed"
+    "unsubscribed",
+    "workflow_set",
+    "workflow_state"
   ],
   "frames": {
     "agent_done": {
@@ -426,6 +428,86 @@
       "required": [
         "type"
       ]
+    },
+    "workflow_set": {
+      "properties": {
+        "epoch": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        },
+        "server_now": {
+          "type": "integer"
+        },
+        "task_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "epoch",
+        "key",
+        "server_now",
+        "task_ids",
+        "type"
+      ]
+    },
+    "workflow_state": {
+      "properties": {
+        "base_version": {
+          "type": "integer"
+        },
+        "epoch": {
+          "type": "string"
+        },
+        "full": {
+          "type": "boolean"
+        },
+        "key": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        },
+        "rows_omitted": {
+          "type": "integer"
+        },
+        "server_now": {
+          "type": "integer"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "version": {
+          "type": "integer"
+        },
+        "workflow": {
+          "type": "object",
+          "$ref": "workflow.WireView"
+        }
+      },
+      "required": [
+        "epoch",
+        "full",
+        "key",
+        "server_now",
+        "task_id",
+        "type",
+        "version",
+        "workflow"
+      ]
     }
   },
   "defs": {
@@ -608,6 +690,220 @@
       },
       "required": [
         "id"
+      ]
+    },
+    "workflow.Agent": {
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "blocked": {
+          "type": "boolean"
+        },
+        "cached": {
+          "type": "boolean"
+        },
+        "duration_ms": {
+          "type": "integer"
+        },
+        "error": {
+          "type": "string"
+        },
+        "index": {
+          "type": "integer"
+        },
+        "label": {
+          "type": "string"
+        },
+        "last_progress_at": {
+          "type": "integer"
+        },
+        "last_tool": {
+          "type": "string"
+        },
+        "last_tool_summary": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "phase_index": {
+          "type": "integer"
+        },
+        "prev_agent_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "queued_at": {
+          "type": "integer"
+        },
+        "raw_state": {
+          "type": "string"
+        },
+        "rev": {
+          "type": "integer"
+        },
+        "started_at": {
+          "type": "integer"
+        },
+        "state": {
+          "type": "string"
+        },
+        "tokens": {
+          "type": "integer"
+        },
+        "tool_calls": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "index",
+        "label",
+        "rev",
+        "state"
+      ]
+    },
+    "workflow.Counts": {
+      "properties": {
+        "done": {
+          "type": "integer"
+        },
+        "failed": {
+          "type": "integer"
+        },
+        "queued": {
+          "type": "integer"
+        },
+        "running": {
+          "type": "integer"
+        },
+        "skipped": {
+          "type": "integer"
+        },
+        "stopped": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "done",
+        "failed",
+        "queued",
+        "running",
+        "skipped",
+        "stopped",
+        "total"
+      ]
+    },
+    "workflow.Phase": {
+      "properties": {
+        "counts": {
+          "type": "object",
+          "$ref": "workflow.Counts"
+        },
+        "index": {
+          "type": "integer"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "counts",
+        "index",
+        "title"
+      ]
+    },
+    "workflow.WireView": {
+      "properties": {
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "workflow.Agent"
+          }
+        },
+        "agents_capped": {
+          "type": "boolean"
+        },
+        "counts": {
+          "type": "object",
+          "$ref": "workflow.Counts"
+        },
+        "current": {
+          "type": "string"
+        },
+        "degraded": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "duration_ms": {
+          "type": "integer"
+        },
+        "ended_at": {
+          "type": "integer"
+        },
+        "last_observed_at": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "notify_summary": {
+          "type": "string"
+        },
+        "phases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "workflow.Phase"
+          }
+        },
+        "raw_status": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "tokens": {
+          "type": "integer"
+        },
+        "tool_calls": {
+          "type": "integer"
+        },
+        "version": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "agents",
+        "counts",
+        "phases",
+        "source",
+        "status",
+        "task_id",
+        "version"
       ]
     },
     "wsproto.AgentMetaPatch": {

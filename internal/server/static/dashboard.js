@@ -87,6 +87,7 @@ import { ICONS } from './icons.js';
 import { initLightbox } from './lightbox.js';
 import { initMemPopover } from './mem_popover.js';
 import { askAside, closeScratchDrawer, initAsideDrawer, promoteScratch } from './aside_drawer.js';
+import './workflow_view.js';
 // Service worker registration
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
 

@@ -23,6 +23,12 @@ const (
 	StatusUnknown     Status = "unknown"
 )
 
+// AllStatuses lists every Status, for the dashboard's generated contract.
+func AllStatuses() []string {
+	return []string{string(StatusRunning), string(StatusPaused), string(StatusCompleted), string(StatusFailed),
+		string(StatusKilled), string(StatusInterrupted), string(StatusUnknown)}
+}
+
 // AgentState is a workflow agent row's normalized state.
 type AgentState string
 
@@ -35,6 +41,12 @@ const (
 	AgentStopped AgentState = "stopped"
 	AgentUnknown AgentState = "unknown"
 )
+
+// AllAgentStates lists every AgentState, for the dashboard's generated contract.
+func AllAgentStates() []string {
+	return []string{string(AgentQueued), string(AgentRunning), string(AgentDone), string(AgentFailed),
+		string(AgentSkipped), string(AgentStopped), string(AgentUnknown)}
+}
 
 // Source names where a published workflow's rows last came from.
 type Source string

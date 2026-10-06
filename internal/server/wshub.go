@@ -56,6 +56,9 @@ type Hub struct {
 	// dropped on a full send buffer (defaultHistoryRetryInterval; tests
 	// shorten it).
 	historyRetryInterval time.Duration
+	// workflowPace times workflowPushLoop (defaultWorkflowPace; tests
+	// shorten it).
+	workflowPace workflowPace
 
 	// clientWG tracks per-client pump/eventPushLoop goroutines; owned by the
 	// connection lifecycle (conn.Close), whereas the send goroutines are owned
@@ -152,6 +155,7 @@ func NewHub(opts HubOptions) *Hub {
 
 		resubscribeInterval:  defaultResubscribeInterval,
 		historyRetryInterval: defaultHistoryRetryInterval,
+		workflowPace:         defaultWorkflowPace,
 	}
 	h.tailers = newTailerRegistry(opts.AllowedRoot)
 	h.historyMarshalCache = newHistoryMarshalCache()

@@ -427,6 +427,8 @@ function startMockServer(overrides = {}) {
   // mock reproduces that inclusivity deliberately; a `>` here would hide the bug.
   const agentEvents = overrides.agentEvents || {};
   const workflows = overrides.workflows || {};
+  // Every GET /api/sessions/workflow, as its query parameters.
+  const workflowCalls = [];
   // compactPromptLimit: when set, GET /api/cron?compact=1 clips each prompt to
   // this many characters and marks the row prompt_truncated, like the real
   // R236-SEC-08 (#494) wire shape. Without it the poll returns full prompts and
@@ -1028,6 +1030,7 @@ function startMockServer(overrides = {}) {
     // /api/sessions/workflow?key=&node=&task_id=[&rows=none | &since=&epoch=]
     if (pathname === NZ_CONTRACT.API.sessions_workflow && req.method === 'GET') {
       if (!checkAuth()) return;
+      workflowCalls.push(Object.fromEntries(url.searchParams));
       const fx = workflows[url.searchParams.get('task_id') || ''];
       if (!fx) {
         res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -1413,6 +1416,7 @@ function startMockServer(overrides = {}) {
         get discoveredCloseCalls() { return discoveredCloseCalls; },
         get fullCronListCalls() { return fullCronListCalls; },
         get wsConnections() { return wsConnections; },
+        get workflowCalls() { return workflowCalls; },
         // Mutators for tests that need the snapshot to CHANGE mid-run (e.g. a
         // /cd that moves a session's workspace). Bumping stats.version is what
         // makes the dashboard's version short-circuit re-render.
