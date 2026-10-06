@@ -13,7 +13,7 @@ import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.
 import { runPendingAsync } from './render_md.js';
 import { processEventsForDisplay } from './file_refs.js';
 import { navRebuild, navSync } from './msg_nav.js';
-import { applyEventToTurnState, paintTurnElapsed, refreshBanner, resetTurnState, resetTurnStateForUserEcho, restoreScrollPos, scrollSlackPx, turnState, updateSendButton } from './running_banner.js';
+import { applyEventToTurnState, idleTaskEvent, paintTurnElapsed, refreshBanner, resetTurnState, resetTurnStateForUserEcho, restoreScrollPos, scrollSlackPx, turnState, updateSendButton } from './running_banner.js';
 import { rollbackOptimisticRunning } from './send_message.js';
 import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, MAX_LIVE_DOM_EVENTS, lastDividerTime, showAPIError, stickEventsBottom, timeDividerHtml } from './utilities.js';
 import { isInternalEvent, sid } from './session_ident.js';
@@ -611,9 +611,12 @@ function rebuildTurnFromHistory(events) {
     if (events[i].type === 'user' || events[i].type === 'result') { turnStart = i + 1; break; }
     if (i === 0) turnStart = 0;
   }
-  // Anchor timer to the actual turn start time, not Date.now()
-  if (turnStart < events.length && events[turnStart].time) {
-    turnState.turnStartTime = events[turnStart].time;
+  // Anchor timer to the actual turn start time, not Date.now(); a background
+  // task reporting after the last turn starts none.
+  let anchor = turnStart;
+  while (anchor < events.length && idleTaskEvent(events[anchor])) anchor++;
+  if (anchor < events.length && events[anchor].time) {
+    turnState.turnStartTime = events[anchor].time;
     paintTurnElapsed();
     turnState.timerId = setInterval(paintTurnElapsed, 1000);
   }

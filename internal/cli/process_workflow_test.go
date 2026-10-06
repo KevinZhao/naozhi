@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -59,7 +60,8 @@ func drainEvents(p *Process) []clievent.Event {
 // TestProcessWorkflow_LiveProbe feeds the capture through a fake shim with no
 // Send in flight (the session is idle while a background workflow runs): the
 // Set matches the run's result file, every change wakes the callback once,
-// outside the Tracker's lock, and the workflow's ring entries are tagged.
+// outside the Tracker's lock, and the ring keeps only the workflow's tagged
+// start and end: its progress is the panel's (RFC §9).
 func TestProcessWorkflow_LiveProbe(t *testing.T) {
 	t.Parallel()
 	p, srv := shimTestPair(&ClaudeProtocol{})
@@ -93,18 +95,23 @@ func TestProcessWorkflow_LiveProbe(t *testing.T) {
 		t.Errorf("live header = name %q run %q source %q observed %d", got.Name, got.RunID, got.Source, got.LastObservedAt)
 	}
 
-	tagged := 0
+	var tasks []string
 	for _, e := range p.eventLog.Entries() {
 		switch e.Type {
 		case clievent.KindTaskStart, clievent.KindTaskProgress, clievent.KindTaskDone:
 			if e.TaskType != TaskTypeWorkflow {
 				t.Errorf("%s entry of the workflow has TaskType %q", e.Type, e.TaskType)
 			}
-			tagged++
+			tasks = append(tasks, e.Type+" "+e.Summary+" "+e.Status)
 		}
 	}
-	if tagged != 9 { // task_started, 6 progress, task_updated, the notification
-		t.Errorf("%d task entries in the ring, want 9", tagged)
+	// Of task_started, 6 progress, task_updated and the notification.
+	wantTasks := []string{"task_start tiny probe ", `task_done Dynamic workflow "tiny probe" completed completed`}
+	if !reflect.DeepEqual(tasks, wantTasks) {
+		t.Errorf("task entries in the ring:\n got %q\nwant %q", tasks, wantTasks)
+	}
+	if a := p.eventLog.LastActivitySummary(); strings.Contains(a, "Ask") || strings.Contains(a, "Sum") {
+		t.Errorf("activity line %q came from the workflow's progress", a)
 	}
 	for _, ev := range events {
 		if strings.HasPrefix(ev.SubType, "task_") && ev.SubType != "task_started" && !ev.WorkflowTask {
@@ -117,8 +124,9 @@ func TestProcessWorkflow_LiveProbe(t *testing.T) {
 }
 
 // TestProcessWorkflow_TaggedEntriesSkipResolve: a workflow whose task id has
-// no w-prefix shape is still kept from the linker by InjectHistory once its
-// task_start has left the persisted window, because its entries are tagged.
+// no w-prefix shape leaves no progress row for InjectHistory to resolve once
+// its task_start has left the persisted window, and its end is tagged; an
+// agent task's progress is still logged and resolved.
 func TestProcessWorkflow_TaggedEntriesSkipResolve(t *testing.T) {
 	t.Parallel()
 	p, srv := shimTestPair(&ClaudeProtocol{})
@@ -144,6 +152,9 @@ func TestProcessWorkflow_TaggedEntriesSkipResolve(t *testing.T) {
 		if e.TaskID == "a7k2m9p4q" && e.TaskType != "" {
 			t.Errorf("agent task_progress tagged %q", e.TaskType)
 		}
+		if e.TaskID == "q7wfabc12" && (e.Type != clievent.KindTaskDone || e.TaskType != TaskTypeWorkflow) {
+			t.Errorf("workflow left a %s row tagged %q, want only its tagged task_done", e.Type, e.TaskType)
+		}
 		history = append(history, e)
 	}
 	if n := len(p.Workflows().Workflows); n != 1 {
@@ -157,6 +168,59 @@ func TestProcessWorkflow_TaggedEntriesSkipResolve(t *testing.T) {
 	}
 	if !resolveKicked(lp, "a7k2m9p4q") {
 		t.Error("orphan agent progress did not dispatch a Resolve")
+	}
+}
+
+// wideRunLines is a 50-agent workflow reporting 600 snapshots after a reply:
+// more frames than the ring holds.
+func wideRunLines() []string {
+	lines := []string{
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"launching the review"}]},"session_id":"s1"}`,
+		`{"type":"system","subtype":"task_started","task_id":"wwide0001","tool_use_id":"toolu_w","description":"wide","task_type":"local_workflow","session_id":"s1"}`,
+	}
+	for k := 0; k < 600; k++ {
+		var items []string
+		for i := 1; i <= min(50, k/12+1); i++ {
+			state := "done"
+			if i == k/12+1 {
+				state = "progress"
+			}
+			items = append(items, fmt.Sprintf(`{"type":"workflow_agent","index":%d,"label":"r%d","agentId":"a%016d","state":%q,"startedAt":1}`, i, i, i, state))
+		}
+		lines = append(lines, fmt.Sprintf(`{"type":"system","subtype":"task_progress","task_id":"wwide0001","tool_use_id":"toolu_w","description":"review: r%d","workflow_progress":[%s],"session_id":"s1"}`,
+			k/12+1, strings.Join(items, ",")))
+	}
+	return append(lines, `{"type":"system","subtype":"task_notification","task_id":"wwide0001","tool_use_id":"toolu_w","status":"completed","summary":"Dynamic workflow \"wide\" completed","session_id":"s1"}`)
+}
+
+// TestProcessWorkflow_WideRunKeepsTheReply is §14 PR-14's acceptance: after
+// a 50-agent run the ring holds no workflow progress and the reply before it
+// is still the dashboard's opening bubble.
+func TestProcessWorkflow_WideRunKeepsTheReply(t *testing.T) {
+	t.Parallel()
+	p, srv := shimTestPair(&ClaudeProtocol{})
+	go p.readLoop()
+	for _, line := range wideRunLines() {
+		srv.SendStdout(line)
+	}
+	srv.SendCLIExited(0)
+	drainEvents(p)
+
+	if w := onlyWorkflow(t, p.Workflows()); w.Counts.Total != 50 || w.Status != workflow.StatusCompleted {
+		t.Fatalf("premise: workflow %s with %d agents, want completed with 50", w.Status, w.Counts.Total)
+	}
+	entries := p.eventLog.Entries()
+	for _, e := range entries {
+		if e.Type == clievent.KindTaskProgress {
+			t.Fatalf("a progress row reached the ring: %+v", e)
+		}
+	}
+	if len(entries) != 3 {
+		t.Errorf("%d ring entries, want the reply, task_start and task_done", len(entries))
+	}
+	vis := p.EventLastNVisible(30, 500)
+	if len(vis) == 0 || vis[0].Type != clievent.KindText || vis[0].Summary != "launching the review" {
+		t.Errorf("opening page %+v, want it to start with the reply", vis)
 	}
 }
 

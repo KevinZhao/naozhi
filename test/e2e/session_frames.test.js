@@ -17,6 +17,8 @@
 //    already on screen;
 //  - a turn ending on a session off screen raises its card's unread chip;
 //  - an opening frame anchors the turn timer at its last turn's first event;
+//    a background task reporting while the session is idle anchors no timer,
+//    on either frame path, so the next send's timer starts at the send;
 //  - a result on either frame path ends the turn this tab started (running
 //    flips to ready, the cost lands on total_cost), and a time-less user replay
 //    on either path is not painted twice;
@@ -246,6 +248,45 @@ test.describe('sessionFrames keep the bookkeeping on sessionStream', () => {
     ] });
     await page.waitForSelector('#events-scroll .event[data-uuid="u-go"]');
     expect(await page.evaluate(() => turnState.turnStartTime), 'anchored at the turn, not at render time').toBe(T0 + 1000);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  test('a background task reporting while the session is idle does not anchor the next turn\'s timer', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    const T = Date.now() + 60000;
+    const seen = (t) => page.waitForFunction((at) => sessionStream.lastEventTimeWs === at, t);
+    conn.send({ type: 'event', key: KEY_A, event: { type: 'task_progress', task_id: 'a1', summary: 'step', time: T, uuid: 'tp-1' } });
+    await seen(T);
+    conn.send({ type: 'event', key: KEY_A, event: { type: 'task_done', task_id: 'a1', status: 'completed', time: T + 1, uuid: 'td-1' } });
+    await seen(T + 1);
+    expect(await page.evaluate(() => turnState.turnStartTime), 'idle task events start no turn').toBe(0);
+    const before = await page.evaluate(() => Date.now());
+    await sendText(page, conn, 'after-idle');
+    expect(await page.evaluate(() => turnState.turnStartTime), 'the timer starts at the send').toBeGreaterThanOrEqual(before);
+
+    // A running turn's task events are the turn's: the first one anchors.
+    conn.send({ type: 'session_state', key: KEY_B, node: 'local', state: 'running' });
+    await page.click(`.session-card[data-key="${KEY_B}"]`);
+    await page.waitForFunction((key) => selectedKey === key && turnState.turnStartTime === 0, KEY_B);
+    conn.send({ type: 'event', key: KEY_B, event: { type: 'task_progress', task_id: 'b1', summary: 'step', time: T + 2, uuid: 'tp-2' } });
+    await page.waitForFunction(() => turnState.turnStartTime > 0);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  test('an opening frame whose last turn is followed by idle task reports anchors no timer', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    const T0 = Date.now() - 125000;
+    conn.send({ type: 'history', key: KEY_A, initial: true, events: [
+      { type: 'user', detail: 'go', time: T0, uuid: 'u-go' },
+      { type: 'text', detail: 'done', summary: 'done', time: T0 + 1000, uuid: 'u-done' },
+      { type: 'result', time: T0 + 2000, uuid: 'u-res' },
+      { type: 'task_progress', task_id: 'a1', summary: 'step', time: T0 + 3000, uuid: 'u-tp' },
+      { type: 'task_done', task_id: 'a1', status: 'completed', time: T0 + 4000, uuid: 'u-td' },
+    ] });
+    await page.waitForSelector('#events-scroll .event[data-uuid="u-done"]');
+    expect(await page.evaluate(() => turnState.turnStartTime), 'no turn runs after the result').toBe(0);
     expect(errors).toEqual([]);
     await ctx.close();
   });

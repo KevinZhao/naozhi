@@ -232,8 +232,17 @@ function updateSidebarAgentBadge() {
   } else if (existing) { existing.remove(); }
 }
 
+// idleTaskEvent reports whether ev is a background task's report arriving
+// while the session on screen is not running: it starts no turn, so it must
+// not anchor the next one's timer (startTurnTimer keeps its first anchor).
+function idleTaskEvent(ev) {
+  if (ev.type !== 'task_progress' && ev.type !== 'task_done') return false;
+  const sess = sessionList.sessionsData[sid(selection.key, selection.node)];
+  return !(sess && sess.state === 'running');
+}
+
 function applyEventToTurnState(ev) {
-  startTurnTimer();
+  if (!idleTaskEvent(ev)) startTurnTimer();
   // Any real turn event ends the optimistic "已发送，正在处理…" window — the
   // CLI is now actively thinking/using-tools/writing, so let the normal
   // activity labels take over.
@@ -494,6 +503,7 @@ function updateSendButton(state, opts) {
 export {
   applyEventToTurnState,
   fmtDuration,
+  idleTaskEvent,
   interruptSession,
   paintTurnElapsed,
   refreshBanner,
