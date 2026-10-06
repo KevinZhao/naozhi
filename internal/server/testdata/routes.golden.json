@@ -651,6 +651,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/vendor/mermaid-11.14.0/mermaid.min.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/vendor/{file...}",
     "handler_type": "http.HandlerFunc"
   },

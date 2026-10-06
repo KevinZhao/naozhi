@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	cronpkg "github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 )
 
@@ -81,7 +82,10 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			Placement:       j.Placement,
 			SideEffects:     j.SideEffects,
 		}
-		v.PausedReason, v.ConsecutiveFailures = j.PausedReason, max(j.ConsecutiveFailures, j.TransientFailures)
+		v.PausedReason, v.ConsecutiveFailures = j.PausedReason, j.AutoPauseCount()
+		if j.PausedReason == cronpkg.PausedReasonAutoTransient && !j.LastRunAt.IsZero() && !j.TransientFailingSince.IsZero() {
+			v.TransientOutageMS = j.LastRunAt.Sub(j.TransientFailingSince).Milliseconds()
+		}
 		if !j.LastRunAt.IsZero() {
 			v.LastRunAt = j.LastRunAt.UnixMilli()
 		}

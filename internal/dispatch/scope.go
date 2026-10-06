@@ -39,6 +39,17 @@ func (d *Dispatcher) sessionChatID(msg platform.IncomingMessage) string {
 	}
 }
 
+// openThread puts a group @mention posted outside any thread into the new
+// thread a reply under it opens (session.thread_auto_open), so the turn
+// scopes and answers as that thread's and the follow-ups posted there join
+// it. Slash commands never get here and answer where they were posted.
+func (d *Dispatcher) openThread(msg platform.IncomingMessage) platform.IncomingMessage {
+	if d.threadAutoOpen && msg.ChatType == "group" && msg.ThreadID == "" {
+		msg.ThreadID = msg.SelfThread
+	}
+	return msg
+}
+
 // scopedSession reports whether key, the session msg routes to, is a
 // thread's or member's own rather than one the whole chat shares (its
 // unscoped session, or a project's planner).

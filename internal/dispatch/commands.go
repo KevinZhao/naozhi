@@ -65,7 +65,7 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 		d.handleUrgentCommand(ctx, msg, cmd.Arg, log)
 		return true
 	case turn.CmdUrgentUsage:
-		d.replyText(ctx, msg, "用法：/urgent <紧急消息>（该消息会立即中断正在进行的回复）", log)
+		d.replyText(ctx, msg, "用法：/urgent <紧急消息>（该消息会中断正在进行的回复；正在运行的工具需先结束）", log)
 		return true
 	}
 	trimmed = cmd.Text
@@ -200,7 +200,7 @@ func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.Incomin
 		"  /new [agent] — 重置会话\n" +
 		"  /clear — 重置会话（同 /new）\n" +
 		"  /stop — 中断当前回复（保留后续排队消息）\n" +
-		"  /urgent <消息> — 紧急打断并优先处理该消息\n" +
+		"  /urgent <消息> — 中断当前回复并优先处理该消息（正在运行的工具需先结束）\n" +
 		"  /cd <路径> — 切换工作目录\n" +
 		"  /pwd — 显示当前工作目录\n" +
 		"  /project [name|off|list] — 项目绑定\n" +

@@ -11,6 +11,7 @@
 ### Added
 
 - **群聊会话按话题分开：`session.group_scope`**（#3446）：默认 `thread`，Slack 话题串、飞书话题里的提问各用一个独立会话，不再与频道 / 群顶层和其他话题共享上下文；不在话题里的消息仍用原来的频道会话，已有会话不受影响；在 bot 顶层回答下开话题串追问也会开一个新会话、不带频道上下文，需要接着聊请用 `chat`。`chat` 恢复整个群共用一个会话；`user` 让群里每个成员各用一个会话（在 `user` 模式下，别人点你的提问卡片作答会进入点击者自己的会话）。话题里的 `/new`、`/stop`、`/urgent` 只作用于该话题的会话；`/cd`、`/pwd`、`/project`、`/cron` 仍按整个群生效，话题会话沿用群的工作目录，费用计入群的每日预算；自动接管终端里在群工作目录运行的 claude CLI 只发生在群共用的会话（顶层会话、项目 planner）上，话题 / 成员会话总是新开。绑定了项目的群，`general` 消息仍进入项目唯一的 planner 会话，回复回到各自的话题。Discord 的话题本身就是独立频道，微信只有单聊，均不受影响
+- **群聊里 @bot 自动开话题：`session.thread_auto_open`**（#3446）：默认关闭。开启后，Slack 频道 / 飞书群里不在话题中的 @bot 提问，回复（含「思考中」进度、分段、错误提示和 AskUserQuestion 卡片）发到以这条提问为根新开的话题串 / 话题里；在默认的 `group_scope: thread` 下这个话题就是一个独立会话，之后在话题里继续 @bot 追问会接着同一个会话，不会再出现在顶层回答下开话题追问却丢了上下文的情况。斜杠命令（`/new`、`/cd`、`/help` 等）仍在原处回复并作用于原来的会话；单聊不受影响；`group_scope: chat` 下回复同样进话题，但仍共用频道的会话。Discord 暂不支持；飞书里引用回复的消息不开话题，仍在群里回答。飞书拒绝开话题（如应用缺少权限）时回答会改发到群里，这时每次 @bot 都是一个不带之前上下文的新会话，此类群请保持关闭
 - **Discord：AskUserQuestion 渲染成可点击的按钮**（#3445）：单个问题的每个选项是一个按钮（最多 25 个），点一下即提交答案并把卡片改成「✅ 已回答」；多个问题仍是只读列表，请在一条消息里一次回复全部。无需额外设置，但开发者后台的 Interactions Endpoint URL 必须留空，否则点击不经 Gateway 送达。选项超过 25 个、按钮文字超过 80 字、agent id 过长或文本超出 embed 限制时回退为原来的纯文本列表
 - **Slack：AskUserQuestion 渲染成可点击的按钮**（#3445）：单个问题的每个选项是一个按钮，点一下即提交答案并把卡片改成「✅ 已回答」；多个问题仍是只读列表，请在一条消息里一次回复全部。需要在 Slack app 设置里开启 Interactivity & Shortcuts（Socket Mode 无需 Request URL）；未开启时按钮无响应，卡片上提示可直接回复文字。超出 Block Kit 限制（25 个选项、文本过长）时回退为原来的纯文本列表
 - **cron：聊天里用 `/cron mode <id> fresh|keep` 切换任务的上下文模式**（#3406）：此前 IM 里只能在创建时用 `--keep-context` 决定，要换模式只能删掉重建（丢失 ID 与执行历史）
@@ -71,8 +72,9 @@
   - 后端瞬时故障（`turn_failed` 且原因是 `backend_overloaded` / `backend_rate_limited` / `backend_unreachable`）仍然不计入连续失败，但改为单独计数，见下一条
 - **cron：后端瞬时故障持续 6 小时以上也会自动暂停**（#3422）：此前过载 / 限流 / 连不上模型服务（`apierr` 的网络错误和超时都归到这里）一律不计，模型服务地址配错、凭证所在网络永久不通时，每个 job 每个 tick 都发一条失败通知，永不暂停
   - 每个 job 新增两个落盘字段 `transient_failures`（自上次成功、恢复或编辑以来的瞬时故障次数）与 `transient_failing_since`（其中第一次的结束时间）。成功、恢复、编辑都会清零；job 自身原因的失败和重启孤儿都不动它们
-  - 次数达到 `cron.auto_pause_after_failures`，且距第一次已满 6 小时，这次失败就自动暂停该 job。`paused_reason` 记为新值 `auto_transient`（job 自身连续失败触发的仍是 `auto_failures`，两者以触发暂停的那个计数为准），通知末尾是「后端持续故障 6 小时以上（失败 N 次），任务已自动暂停，后端恢复后…恢复」（N 是瞬时故障次数），IM `/cron list` 标为 `[自动暂停：后端持续故障]`，控制台列表与抽屉照旧显示「已自动暂停」，`cron job auto-paused` 日志多了 `transient=true` 与 `transient_failures` 字段（#3515）。回退到旧版本时这类 job 显示为手动暂停，恢复后照常运行
+  - 次数达到 `cron.auto_pause_after_failures`，且距第一次已满 6 小时，这次失败就自动暂停该 job。`paused_reason` 记为新值 `auto_transient`（job 自身连续失败触发的仍是 `auto_failures`，两者以触发暂停的那个计数为准），通知末尾是「后端持续故障 6 小时以上（失败 N 次），任务已自动暂停，后端恢复后…恢复」（N 是瞬时故障次数），IM `/cron list` 标为 `[自动暂停：后端持续故障]`，控制台列表显示「已自动暂停」，抽屉写「后端持续故障 X 小时（N 次），已自动暂停」（X 是到最后一次执行为止的故障时长，取整小时；`/api/cron` 为此多了 `transient_outage_ms`），`cron job auto-paused` 日志多了 `transient=true` 与 `transient_failures` 字段（#3515）。回退到旧版本时这类 job 显示为手动暂停，恢复后照常运行。`/api/cron` 的 `consecutive_failures` 现在是触发暂停的那个计数，只在自动暂停的 job 上下发：连续失败暂停的 job 不再因瞬时故障次数更多而显示偏大的次数
   - 窗口跟执行频率无关：每 5 分钟一次的 job 要故障 6 小时才停（不会因为半小时的故障就停），每天一次的 job 仍要 5 次。阈值设为负数同样关闭这条规则；6 小时不可配置
+- `/urgent` 的文案不再承诺"立即中断"（#3498）：工具正在运行时（例如阻塞的 Bash `sleep 20`），CLI 要等工具返回才结束当前回复（claude 2.1.288 实测，见 `docs/rfc/passthrough-mode-validation.md` V10）。IM 用法提示改为「用法：/urgent <紧急消息>（该消息会中断正在进行的回复；正在运行的工具需先结束）」，`/help`、dashboard 快捷键面板和 README 同步修改；按旧用法文案做匹配的脚本需要更新。`/stop` 的文案不变
 
 ### Security
 

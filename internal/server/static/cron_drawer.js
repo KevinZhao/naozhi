@@ -1,5 +1,5 @@
 // cron_drawer.js — the per-job drawer: open/close lifecycle, the drawer
-// shell (header / summary / actions / cockpit / spec), keyboard focus
+// shell (header / summary / actions / spec), keyboard focus
 // bookkeeping and the missing-job placeholder with its fetch-once reconcile
 // (#2715 D4 follow-up: cron_view.js four-region split, region 3).
 //
@@ -18,7 +18,6 @@ import { firstNonEmptyLine, formatAgoColloquial, formatRunningElapsed, formatWhe
 import { cronAttentionRefresh } from './cron_attention.js';
 import { cronExpandedRunId, cronJobCostRefresh, renderCronTimelineForJob, renderOpenCronTimeline } from './cron_timeline.js';
 import { cronLive, ensureCronLiveSubscription, repaintCronLive, unsubscribeCronLive } from './cron_live.js';
-
 
 // _cronDrawerFetchedFor tracks per-jobId reconcile attempts inside the
 // drawer's "task missing" branch. Without this guard, deep-linking to a
@@ -214,9 +213,8 @@ function cronDrawerHtml(j) {
 
   // cron-dashboard-redesign P3 §3 — task spec sections (做什么 / 什么时候 /
   // 在哪里 / 其他); clicking one opens the edit modal. The running banner
-  // replaces them, and the cockpit, while a run is in flight.
+  // replaces them while a run is in flight.
   const specHtml = isRunning ? '' : cronDrawerSpecHtml(j);
-  const cockpitHtml = isRunning ? '' : cronDrawerCockpitHtml(j);
 
   // An empty <details class="cron-drawer-summary"> marker: the
   // cron-panel-consolidation contract test and existing CSS rules key off it.
@@ -233,27 +231,17 @@ function cronDrawerHtml(j) {
 
   // cron-dashboard-redesign P3 §3 — final order.
   //   header → (running banner | spec sections) → live → history → sticky actions
-  return headerHtml + cockpitHtml + currentHtml + liveHtml + specHtml + summaryHtml + historyHtml +
+  return headerHtml + currentHtml + liveHtml + specHtml + summaryHtml + historyHtml +
     actionsHtml.replace('<nav class="cron-drawer-actions"', '<nav class="cron-drawer-actions is-sticky"');
 }
 
-
-// cronDrawerCockpitHtml — the KPI cockpit (下次运行 / 成功率 / 平均耗时 /
-// 上次结果) was retired per UX feedback: those four numbers read as an
-// ops dashboard, not a task UX. The header strip already shows the
-// schedule chip + work-dir, the running banner takes over for in-flight
-// runs, and the timeline shows per-run results. The function returns ''
-// so cronDrawerHtml can keep calling it unconditionally; the four label
-// strings remain as inert literals below so contract greps that pin the
-// design's "四大 KPI" intent still self-locate.
-function cronDrawerCockpitHtml(j) {
-  void j;
-  return '';
+// cronPausedLabel words why j is paused: a backend outage (hours, failures),
+// a failure streak (failures) or a manual pause. An edit clears the counts.
+function cronPausedLabel(j) {
+  const n = j.consecutive_failures, h = Math.floor((j.transient_outage_ms || 0) / 3600000);
+  if (j.paused_reason === 'auto_transient') return '后端持续故障' + (h ? ' ' + h + ' 小时' : '') + (n ? '（' + n + ' 次）' : '') + '，已自动暂停';
+  return j.paused_reason === 'auto_failures' ? (n ? '连续失败 ' + n + ' 次，' : '') + '已自动暂停' : '已暂停';
 }
-// Cockpit KPI labels (kept as inert strings so historic test greps for
-// the cron-dashboard-redesign §4.3 vocabulary still self-locate even
-// though the row is no longer rendered): 下次运行 / 成功率 / 平均耗时 /
-// 上次结果.
 
 // cronDrawerSpecHtml — task definition view (cron-dashboard-redesign
 // P3 §3). Three "spec sections" stacked vertically:
@@ -295,7 +283,7 @@ function cronDrawerSpecHtml(j) {
   // 什么时候 — schedule line + relative + absolute next-run.
   let nextLine;
   if (j.paused) {
-    nextLine = '<span class="css-when-paused">' + (j.paused_reason === 'auto_failures' || j.paused_reason === 'auto_transient' ? (j.consecutive_failures ? '连续失败 ' + j.consecutive_failures + ' 次，' : '') + '已自动暂停' : '已暂停') + ' · 恢复后排期</span>';
+    nextLine = '<span class="css-when-paused">' + esc(cronPausedLabel(j)) + ' · 恢复后排期</span>';
   } else if (nextMs) {
     const w = formatWhenColloquial(nextMs);
     const rel = w && w.label ? w.label : formatAgoColloquial(nextMs);

@@ -108,7 +108,7 @@
     "lateBindings": 0
   },
   "cron_drawer.js": {
-    "lines": 525,
+    "lines": 513,
     "maxFnLines": 70,
     "maxIifeLines": 0,
     "fnOver100": 0,
