@@ -20,7 +20,7 @@ import (
 
 // e2eShimSurfaceBaseline is the number of names e2e-shim.js puts on
 // window.nz.test (and so on window).
-const e2eShimSurfaceBaseline = 110
+const e2eShimSurfaceBaseline = 103
 
 // e2eShimSurfaceFloor is far below the real count; a scan that finds fewer
 // names has stopped recognising the file.
