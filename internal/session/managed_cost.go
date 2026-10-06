@@ -407,8 +407,9 @@ func (s *ManagedSession) ledgerEntries(inc costledger.Increment, runID string) [
 }
 
 // CostTotals returns the session's monotonic spend snapshot (USD, backend
-// metering units, per-model cumulative deltas). Run owners read it before and
-// after a turn and attribute the difference (docs/rfc/cost-ledger.md §5.3).
+// metering units, per-model cumulative deltas), carried across a respawn and
+// successor link. Run-spend attribution uses the cost window instead
+// (docs/rfc/cost-ledger.md §5.0).
 func (s *ManagedSession) CostTotals() costledger.Totals {
 	s.costMu.Lock()
 	t := s.spent
