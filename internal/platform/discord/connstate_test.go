@@ -414,9 +414,11 @@ func TestConnState_DropWithRevokedTokenFails(t *testing.T) {
 			startDropped(t, g, d, status)
 
 			st := waitConnState(t, d, platform.ConnFailed)
-			want := "discord rejected the bot token (HTTP " + strconv.Itoa(status) + "): update platforms.discord.bot_token"
-			if !strings.HasPrefix(st.LastError, want) || st.LastErrorAt.IsZero() {
-				t.Fatalf("LastError = %q at %v, want prefix %q", st.LastError, st.LastErrorAt, want)
+			// Full text pinned: doctor says the same thing (#3514), and discordgo
+			// keeps reconnecting, so a restart is not always needed.
+			want := "discord rejected the bot token (HTTP " + strconv.Itoa(status) + "): update platforms.discord.bot_token; restart unless it reconnects by itself"
+			if st.LastError != want || st.LastErrorAt.IsZero() {
+				t.Fatalf("LastError = %q at %v, want %q", st.LastError, st.LastErrorAt, want)
 			}
 			if strings.Contains(st.LastError, "test-token") || strings.Contains(st.LastError, "message") {
 				t.Fatalf("LastError leaks the token or the response body: %q", st.LastError)
