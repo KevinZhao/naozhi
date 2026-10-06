@@ -20,7 +20,6 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/ratelimit"
 	"github.com/naozhi/naozhi/internal/replyfmt"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -114,10 +113,10 @@ type Dispatcher struct {
 	access      atomic.Pointer[imauth.Policy]
 	denyReplies denyThrottle
 
-	// inboundLimit is the per-sender bucket admitRate draws from
-	// (ratelimit.go); nil when rateLimit is off.
-	inboundLimit     *ratelimit.Limiter
-	rateLimit        RateLimit
+	// inbound is the per-sender rate limit admitRate draws from
+	// (ratelimit.go); nil when the limit is off. Swapped whole by
+	// SetRateLimit.
+	inbound          atomic.Pointer[inboundLimit]
 	rateLimitReplies denyThrottle
 
 	// budget refuses turns past cost.budget (budget.go); nil admits all.
@@ -289,8 +288,6 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		watchdogTotalKills:    cfg.WatchdogTotalKills,
 		caps:                  caps,
 		fallbackBannerDelay:   fallbackBannerDelayDefault,
-		inboundLimit:          newInboundLimiter(cfg.RateLimit),
-		rateLimit:             cfg.RateLimit,
 		rateLimitReplies:      denyThrottle{window: rateLimitReplyWindow},
 		budgetReplies:         denyThrottle{window: budgetReplyWindow},
 		groupScope:            cfg.GroupScope,
@@ -300,6 +297,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		d.budget = cfg.Budget
 	}
 	d.access.Store(cfg.Access)
+	d.SetRateLimit(cfg.RateLimit)
 	// agentCommands is immutable after construction, so this snapshot stays
 	// correct for the dispatcher's lifetime (#2148).
 	d.knownAgentIDs = make(map[string]struct{}, len(d.agentCommands)+2)

@@ -348,6 +348,7 @@ func buildHealthHandler(opts ServerOptions, s *Server, w *wiring, router healthR
 		nodeAccess:         s.nodes,
 		configSHA256:       opts.Config.SHA256,
 		configLoadedAt:     opts.Config.LoadedAt,
+		configLive:         opts.Config.Live,
 		configPath:         opts.Config.Path,
 		platforms:          s.platforms,
 		platformCaps:       platform.CapabilityMatrix(s.platforms),

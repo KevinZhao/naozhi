@@ -36,8 +36,9 @@ func driftFinding(t *testing.T, d *doctor) finding {
 }
 
 // TestCheckConfigDrift covers the #2538 doctor matrix: hash match → pass,
-// mismatch → warn "restart required", no token → skip (pass), old process
-// without a fingerprint → warn, malformed fingerprint → warn.
+// mismatch → warn "not applied", sections a reload left pending → warn
+// "restart required for", no token → skip (pass), old process without a
+// fingerprint → warn, malformed fingerprint → warn.
 func TestCheckConfigDrift(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -48,11 +49,11 @@ func TestCheckConfigDrift(t *testing.T) {
 
 	// Like the real handler, only an accepted token gets the authenticated
 	// section; anyone else sees status and uptime.
-	healthWith := func(sum string) *httptest.Server {
+	healthWithExtra := func(sum, extra string) *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			body := `{"status":"ok","uptime":"1h"`
 			if r.Header.Get("Authorization") == "Bearer tok" {
-				body += `,"cli_available":true`
+				body += `,"cli_available":true` + extra
 				if sum != "" {
 					body += `,"config_sha256":"` + sum + `","config_loaded_at":"2026-09-05T10:00:00Z"`
 				}
@@ -61,6 +62,7 @@ func TestCheckConfigDrift(t *testing.T) {
 			_, _ = w.Write([]byte(body))
 		}))
 	}
+	healthWith := func(sum string) *httptest.Server { return healthWithExtra(sum, "") }
 
 	t.Run("match_pass", func(t *testing.T) {
 		srv := healthWith(diskSum)
@@ -73,17 +75,33 @@ func TestCheckConfigDrift(t *testing.T) {
 		}
 	})
 
-	t.Run("mismatch_warns_restart_required", func(t *testing.T) {
+	t.Run("mismatch_warns_not_applied", func(t *testing.T) {
 		srv := healthWith(strings.Repeat("0", 64))
 		defer srv.Close()
 		d := driftDoctor(t, srv, "tok", cfgPath)
 		d.checkConfigDrift()
 		f := driftFinding(t, d)
-		if f.Level != "warn" || !strings.Contains(f.Detail, "restart required") {
-			t.Errorf("finding = %+v, want warn/restart required", f)
+		if f.Level != "warn" || !strings.Contains(f.Detail, "not applied") || !strings.Contains(f.Detail, "naozhi config reload") {
+			t.Errorf("finding = %+v, want warn/not applied", f)
 		}
 		if d.hasFail {
 			t.Error("drift must not flip hasFail; it is a warn")
+		}
+	})
+
+	// A reload that left restart-only sections keeps the old fingerprint and
+	// lists them; doctor names them even when the sha happens to match.
+	t.Run("pending_restart_warns_with_sections", func(t *testing.T) {
+		srv := healthWithExtra(diskSum, `,"config_restart_required":["cli","session"]`)
+		defer srv.Close()
+		d := driftDoctor(t, srv, "tok", cfgPath)
+		d.checkConfigDrift()
+		f := driftFinding(t, d)
+		if f.Level != "warn" || !strings.Contains(f.Detail, "restart required for: cli, session") {
+			t.Errorf("finding = %+v, want warn/restart required for: cli, session", f)
+		}
+		if d.hasFail {
+			t.Error("pending restart must not flip hasFail; it is a warn")
 		}
 	})
 
