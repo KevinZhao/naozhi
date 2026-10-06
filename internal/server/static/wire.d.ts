@@ -36,6 +36,15 @@ declare global {
     repo?: string;
     url: string;
   }
+  interface Counts {
+    done: number;
+    failed: number;
+    queued: number;
+    running: number;
+    skipped: number;
+    stopped: number;
+    total: number;
+  }
   interface Diag {
     action: string;
     key: string;
@@ -138,6 +147,7 @@ declare global {
     total_cost: number;
     turn_duration_ms?: number;
     user_label?: string;
+    workflows?: Summary[];
     workspace?: string;
   }
   interface StartupFailureView {
@@ -160,6 +170,18 @@ declare global {
     task_type?: string;
     tool_use_id?: string;
     tool_uses?: number;
+  }
+  interface Summary {
+    counts: Counts;
+    current_phase?: string;
+    ended_at?: number;
+    epoch: string;
+    name?: string;
+    started_at?: number;
+    status: string;
+    task_id: string;
+    tokens?: number;
+    version: number;
   }
   interface ToolCall {
     id: string;
