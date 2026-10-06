@@ -1,5 +1,7 @@
 # RFC: inline handler → data-action 委托，去 CSP `unsafe-inline`（#1980 D5）
 
+> **状态**: 已实施（PR-1 #2592、PR-2 #2593、PR-3 #2594，#1980 已关闭）。下文的 jsdelivr 精确 URL 是 PR-3 时的形态，#3441 已把 KaTeX/mermaid 内置到 `/static/vendor/`，CSP 不再列外部源；落地汇总见 [dashboard-csp-strict.md](dashboard-csp-strict.md) §0。
+
 （v2，按两轮对抗评审修订：删除幻影 onerror/onload 需求、bubble 相位、命名空间
 碰撞处置、srcdoc/blob 预览回归、登录页 hash 模式复用、ratchet 口径修正。）
 
