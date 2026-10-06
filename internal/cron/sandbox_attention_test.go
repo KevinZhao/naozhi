@@ -208,7 +208,7 @@ func TestListSandboxAttention_SkipsCorruptWithInvalidName(t *testing.T) {
 		Reason: sandboxstore.ReasonTransport, CreatedAtMS: time.Now().UnixMilli(),
 	}, slog.Default())
 	// Drop a corrupt file alongside it.
-	if err := os.WriteFile(filepath.Join(s.stateSubtree("sandboxattention"), "garbage.json"), []byte("{not json"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(s.sandboxState().Subtree("sandboxattention"), "garbage.json"), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

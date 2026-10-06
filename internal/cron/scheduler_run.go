@@ -360,7 +360,7 @@ func (s *Scheduler) executeAcquired(jobID string, viaTriggerNow bool, inflight *
 		// sandboxpending/<runID>.json, and only its reconciler stops the
 		// microVM and classifies the orphan. A second marker here let the
 		// local reconcile settle the run first, or finish it twice (#2970).
-		rc.markerPath = s.writeRunInflightMarker(rc.inflightMarker(), lg)
+		rc.markerPath = s.runMarkers().Write(rc.inflightMarker(), lg)
 	}
 
 	// Per-job timeout is always s.execTimeout: robfig/cron's SkipIfStillRunning

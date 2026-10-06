@@ -24,7 +24,7 @@ import (
 func TestGetSandboxAttention_CorruptFailsClosedOnEveryRead(t *testing.T) {
 	t.Parallel()
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, filepath.Join(t.TempDir(), "cron_jobs.json"))
-	dir := s.stateSubtree("sandboxattention")
+	dir := s.sandboxState().Subtree("sandboxattention")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestSandboxRunSnapshotManifest_CorruptIsUnreadableNotMissing(t *testing.T) 
 	t.Parallel()
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, filepath.Join(t.TempDir(), "cron_jobs.json"))
 	jobID, runID := mustGenerateID(), mustGenerateRunID()
-	dir := filepath.Join(s.stateSubtree("runsnapshots"), jobID)
+	dir := filepath.Join(s.sandboxState().Subtree("runsnapshots"), jobID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestListSandboxAttention_ListsUnreadableRecords(t *testing.T) {
 	s, _ := sandboxTestScheduler(t, &fakeSandboxRunner{}, filepath.Join(t.TempDir(), "cron_jobs.json"))
 	goodJob, goodRun := mustGenerateID(), mustGenerateRunID()
 	s.sandboxState().WriteAttention(sandboxstore.Attention{JobID: goodJob, RunID: goodRun, Reason: sandboxstore.ReasonTransport, JobLabel: "nightly", CreatedAtMS: s.attentionNowMS()}, slog.Default())
-	dir := s.stateSubtree("sandboxattention")
+	dir := s.sandboxState().Subtree("sandboxattention")
 	badRun := mustGenerateRunID()
 	if err := os.WriteFile(filepath.Join(dir, badRun+".json"), []byte("{not valid"), 0o600); err != nil {
 		t.Fatal(err)

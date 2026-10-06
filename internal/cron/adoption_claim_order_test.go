@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cron/runstore"
 )
 
 // TestStart_ClaimsAdoptableRunBeforeFirstTick is #2751's ordering invariant,
@@ -33,7 +35,7 @@ func TestStart_ClaimsAdoptableRunBeforeFirstTick(t *testing.T) {
 		t.Fatalf("AddJob: %v", err)
 	}
 	runID := mustGenerateRunID()
-	if path := a.writeRunInflightMarker(runInflightMarker{
+	if path := a.runMarkers().Write(runstore.InflightMarker{
 		JobID: j.ID, RunID: runID, Trigger: TriggerScheduled,
 		StartedAtMS: time.Now().Add(-90 * time.Second).UnixMilli(),
 		Prompt:      "do thing",

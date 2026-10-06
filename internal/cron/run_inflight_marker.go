@@ -1,17 +1,11 @@
 package cron
 
 import (
-	"encoding/json"
-	"errors"
-	"github.com/naozhi/naozhi/internal/sessionkey"
-	"io/fs"
 	"log/slog"
-	"os"
-	"path/filepath"
-	"strings"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/cron/runstore"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // run_inflight_marker.go — restart fate for LOCAL cron runs. Epic H #2546,
@@ -39,33 +33,9 @@ import (
 // network, while a local orphan's process is already gone and only its history
 // row is missing.
 
-// runInflightMarker is the on-disk record for a local run in flight, at
-// <store-dir>/runinflight/<runID>.json.
-type runInflightMarker struct {
-	JobID       string      `json:"job_id"`
-	RunID       string      `json:"run_id"`
-	Trigger     TriggerKind `json:"trigger,omitempty"`
-	StartedAtMS int64       `json:"started_at_ms"`
-	Prompt      string      `json:"prompt,omitempty"`
-	WorkDir     string      `json:"work_dir,omitempty"`
-	Fresh       bool        `json:"fresh,omitempty"`
-	// Attempts counts boots that already tried to ADOPT this marker (#2712 PR
-	// B). Zero (and absent, so pre-adoption markers need no migration) means
-	// never tried; at maxAdoptAttempts the reconciler stops adopting and
-	// records interrupted, so a marker that somehow crashes its adoption can
-	// cost at most one extra boot — never the unbounded crash loop Phase 0's
-	// remove-before-record was protecting against (#2751).
-	Attempts int `json:"attempts,omitempty"`
-	// SendWatermark is the session's SendWatermarker value just before Send
-	// (#3104): it lets adoption accept a result that was already in the
-	// replayed backlog. Absent on markers from older binaries and on runs
-	// that never reached Send, which then adopt only a turn still running.
-	SendWatermark string `json:"adopt_after,omitempty"`
-}
-
 // inflightMarker is the marker for the run rc identifies.
-func (rc runCtx) inflightMarker() runInflightMarker {
-	return runInflightMarker{
+func (rc runCtx) inflightMarker() runstore.InflightMarker {
+	return runstore.InflightMarker{
 		JobID:       rc.jobID,
 		RunID:       rc.runID,
 		Trigger:     rc.trigger,
@@ -76,55 +46,11 @@ func (rc runCtx) inflightMarker() runInflightMarker {
 	}
 }
 
-// runInflightDir resolves the marker directory ("" when persistence is disabled,
-// which is every store-less test fixture).
-func (s *Scheduler) runInflightDir() string {
-	return s.stateSubtree("runinflight")
-}
-
-// writeRunInflightMarker persists the marker and returns its path, or "" when
-// persistence is off or the write failed. Best-effort by design: a marker that
-// cannot be written costs a missing history row on the next crash, which must
-// not stop the run itself.
-func (s *Scheduler) writeRunInflightMarker(m runInflightMarker, lg *slog.Logger) string {
-	dir := s.runInflightDir()
-	if dir == "" {
-		return ""
-	}
-	// Symlink-guarded create, same reason as the sandbox pending dir (#2166): a
-	// planted `<stateDir>/runinflight → /elsewhere` must not redirect where the
-	// next boot looks, nor where this write lands.
-	if err := s.mkdirStateSubtree(dir); err != nil {
-		lg.Warn("cron: run-inflight dir create failed; an interrupted run will not appear in history", "err", err)
-		return ""
-	}
-	b, err := json.Marshal(m)
-	if err != nil {
-		lg.Warn("cron: run-inflight marshal failed", "err", err)
-		return ""
-	}
-	// runID is scheduler-generated hex — path-safe by construction.
-	path := filepath.Join(dir, m.RunID+".json")
-	// Atomic: a truncated marker from a crash mid-write would be dropped as
-	// corrupt at reconcile, which is the outcome the marker exists to prevent.
-	if err := osutil.WriteFileAtomic(path, b, 0o600); err != nil {
-		lg.Warn("cron: run-inflight write failed; an interrupted run will not appear in history", "err", err)
-		return ""
-	}
-	return path
-}
-
-// removeRunInflightMarker drops the marker for runID. Called from finishRun for
-// every terminal state, including the skipPersist ones: the marker's job is to
-// say "this run never finished", so any finish at all must clear it.
-func (s *Scheduler) removeRunInflightMarker(runID string) {
-	dir := s.runInflightDir()
-	if dir == "" || runID == "" {
-		return
-	}
-	if err := os.Remove(filepath.Join(dir, runID+".json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		slog.Warn("cron: run-inflight marker remove failed", "run_id", runID, "err", err)
-	}
+// runMarkers is the run-inflight marker store under the cron state directory
+// ("" root, persistence disabled, for every store-less test fixture). It does
+// not depend on the run store being enabled.
+func (s *Scheduler) runMarkers() runstore.Markers {
+	return runstore.Markers{Root: s.sandboxState().Root}
 }
 
 // stampSendWatermark records sess's watermark in rc's marker, just before the
@@ -142,23 +68,7 @@ func (s *Scheduler) stampSendWatermark(rc runCtx, sess Session) {
 	}
 	m := rc.inflightMarker()
 	m.SendWatermark = after
-	s.rewriteRunInflightMarker(rc.markerPath, m)
-}
-
-// rewriteRunInflightMarker persists an updated marker in place (adoption bumps
-// Attempts before it starts waiting). Reports success; a failure means the
-// retry bound cannot be recorded, and the caller must not adopt.
-func (s *Scheduler) rewriteRunInflightMarker(path string, m runInflightMarker) bool {
-	data, err := json.Marshal(m)
-	if err != nil {
-		slog.Warn("cron: run-inflight marker re-marshal failed", "path", path, "err", err)
-		return false
-	}
-	if err := osutil.WriteFileAtomic(path, data, 0o600); err != nil {
-		slog.Warn("cron: run-inflight marker rewrite failed", "path", path, "err", err)
-		return false
-	}
-	return true
+	s.runMarkers().Rewrite(rc.markerPath, m)
 }
 
 // reconcileRunInflight is the startup pass: every marker left on disk is a run
@@ -187,7 +97,7 @@ type inflightSettlement struct {
 // interruptedRun is a marker whose run cannot be adopted: it ends as canceled
 // with the class that says why (the restart, or the operator's config edit).
 type interruptedRun struct {
-	m        runInflightMarker
+	m        runstore.InflightMarker
 	errClass ErrorClass
 	errMsg   string
 }
@@ -216,15 +126,14 @@ func (s *Scheduler) claimRunInflight() inflightSettlement {
 	// card, run_ended, metrics and adoption, none of which need run history,
 	// and finishRun gates its own append. A stricter gate here strands every
 	// marker a store-disabled boot writes, shutdown-cancel ones included.
-	dir := s.runInflightDir()
+	markers := s.runMarkers()
+	dir := markers.Dir()
 	if dir == "" {
 		return inflightSettlement{}
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := markers.List()
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			slog.Warn("cron: run-inflight dir read failed; interrupted runs stay invisible", "dir", dir, "err", err)
-		}
+		slog.Warn("cron: run-inflight dir read failed; interrupted runs stay invisible", "dir", dir, "err", err)
 		return inflightSettlement{}
 	}
 	out := inflightSettlement{dir: dir}
@@ -233,16 +142,11 @@ func (s *Scheduler) claimRunInflight() inflightSettlement {
 	// adopt" — the pre-adoption behaviour, and therefore the right default.
 	adopter, _ := s.router.(InFlightAdopter)
 	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		path := filepath.Join(dir, name)
-		m, ok := s.readRunInflightMarker(path)
-		if !ok {
+		path, m := e.Path, e.Marker
+		if !e.OK {
 			// Corrupt marker: nothing to record, nothing to adopt, and it must
 			// not be re-read every boot — the original self-healing rule.
-			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			if err := markers.RemovePath(path); err != nil {
 				slog.Warn("cron: corrupt run-inflight marker remove failed", "path", path, "err", err)
 			}
 			continue
@@ -252,7 +156,7 @@ func (s *Scheduler) claimRunInflight() inflightSettlement {
 		// stops the microVM and classifies the orphan. Settling it here
 		// recorded the run interrupted first, or finished it twice (#2970).
 		if s.sandboxState().HasPending(m.RunID) {
-			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			if err := markers.RemovePath(path); err != nil {
 				slog.Warn("cron: run-inflight marker remove failed during reconcile", "path", path, "err", err)
 			}
 			slog.Info("cron: run-inflight marker belongs to a sandbox run; left to the sandbox reconciler",
@@ -271,7 +175,7 @@ func (s *Scheduler) claimRunInflight() inflightSettlement {
 			// record that this run exists — but with its attempt counted, so a
 			// crashing adoption costs one extra boot, not a loop.
 			m.Attempts++
-			if !s.rewriteRunInflightMarker(path, m) {
+			if !markers.Rewrite(path, m) {
 				// Cannot bound the retries without the counter on disk; fall
 				// back to the safe branch rather than risk the loop.
 				verdict = AdoptNone
@@ -302,7 +206,7 @@ func (s *Scheduler) claimRunInflight() inflightSettlement {
 		}
 		// Terminal branches: the marker's story ends here, remove it first
 		// (self-healing, as before adoption existed).
-		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := markers.RemovePath(path); err != nil {
 			slog.Warn("cron: run-inflight marker remove failed during reconcile", "path", path, "err", err)
 		}
 		if !s.jobStillExists(m.JobID) {
@@ -337,26 +241,6 @@ func (s *Scheduler) settleRunInflight(out inflightSettlement) {
 	}
 }
 
-// readRunInflightMarker loads one marker. ok=false for anything unusable; the
-// caller removes the file regardless.
-func (s *Scheduler) readRunInflightMarker(path string) (runInflightMarker, bool) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		slog.Warn("cron: run-inflight marker read failed", "path", path, "err", err)
-		return runInflightMarker{}, false
-	}
-	var m runInflightMarker
-	if err := json.Unmarshal(b, &m); err != nil {
-		slog.Warn("cron: run-inflight marker parse failed; dropping", "path", path, "err", err)
-		return runInflightMarker{}, false
-	}
-	if m.RunID == "" || m.JobID == "" || m.StartedAtMS <= 0 {
-		slog.Warn("cron: run-inflight marker incomplete; dropping", "path", path)
-		return runInflightMarker{}, false
-	}
-	return m, true
-}
-
 // finishRestartedRun ends a run the previous process started, through the same
 // finishRun every live run ends in: Job.LastRunAt / LastResult / counters,
 // the run_ended frame, the per-state metrics, the sanitised history record and
@@ -367,7 +251,7 @@ func (s *Scheduler) readRunInflightMarker(path string) (runInflightMarker, bool)
 // finalizer is the adoption's gate holder, or nil for an interrupted run,
 // which never claimed one. Such a run sends no per-run notice, but a failure
 // that auto-pauses the job still announces the pause.
-func (s *Scheduler) finishRestartedRun(m runInflightMarker, finalizer *runFinalizer, out runOutcome) {
+func (s *Scheduler) finishRestartedRun(m runstore.InflightMarker, finalizer *runFinalizer, out runOutcome) {
 	rc := runCtx{
 		jobID:     m.JobID,
 		runID:     m.RunID,

@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// TestStateSubtree pins #2175: stateSubtree returns "" when persistence is
-// disabled, and otherwise produces exactly the legacy
+// TestStateSubtree pins #2175: sandboxState().Subtree is "" when persistence
+// is disabled, and otherwise produces exactly the legacy
 // filepath.Join(filepath.Dir(storePath), parts...) for each of the five
 // open-coded call shapes it replaced (golden equivalence).
 func TestStateSubtree(t *testing.T) {
@@ -68,16 +68,16 @@ func TestStateSubtree(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &Scheduler{storePath: tc.storePath}
-			got := s.stateSubtree(tc.parts...)
+			got := s.sandboxState().Subtree(tc.parts...)
 			if got != tc.want {
-				t.Fatalf("stateSubtree(%v) = %q, want %q", tc.parts, got, tc.want)
+				t.Fatalf("Subtree(%v) = %q, want %q", tc.parts, got, tc.want)
 			}
 			// Golden equivalence to the legacy open-coded form (skip the
 			// storeless case, whose legacy form was the early-return "").
 			if tc.storePath != "" {
 				legacy := filepath.Join(append([]string{filepath.Dir(tc.storePath)}, tc.parts...)...)
 				if got != legacy {
-					t.Fatalf("stateSubtree drift from legacy filepath.Join: got %q, legacy %q", got, legacy)
+					t.Fatalf("Subtree drift from legacy filepath.Join: got %q, legacy %q", got, legacy)
 				}
 			}
 		})
