@@ -323,6 +323,27 @@ func TestAttachFiles_MessageCaps(t *testing.T) {
 			t.Errorf("second file reject %q, want total_too_large without bytes", msg.Files[1].Reject)
 		}
 	})
+	t.Run("rejected image frees its share", func(t *testing.T) {
+		t.Parallel()
+		fake := append(bytes.Clone(testPDF), bytes.Repeat([]byte("x"), maxSlackImageBytes-len(testPDF))...)
+		textSize := limits.MaxFileAttachmentBytes - maxSlackImageBytes + 1
+		stub := &fileStub{resps: map[string]stubResp{
+			"/a/fake.png": {body: fake},
+			"/a/b.txt":    {body: bytes.Repeat([]byte("b"), textSize)},
+		}}
+		s := newFileSlack(stub)
+		var msg platform.IncomingMessage
+		s.attachFiles(context.Background(), &msg, []slack.File{
+			{Name: "fake.png", Mimetype: "image/png", Size: len(fake), URLPrivateDownload: slackURL("/a/fake.png")},
+			{Name: "b.txt", Size: textSize, URLPrivateDownload: slackURL("/a/b.txt")},
+		})
+		if len(msg.Images) != 0 || len(msg.Files) != 2 || msg.Files[0].Reject != platform.FileRejectUnsupported {
+			t.Fatalf("images = %d, files = %+v; want fake.png rejected as unsupported", len(msg.Images), len(msg.Files))
+		}
+		if b := msg.Files[1]; b.Reject != platform.FileRejectNone || len(b.Data) != textSize {
+			t.Errorf("b.txt reject %q with %d bytes; want it delivered, since fake.png's bytes do not count", b.Reject, len(b.Data))
+		}
+	})
 }
 
 // TestHandleMessage_FileShareAdmissionBeforeDownload: a sender the
