@@ -66,6 +66,8 @@ type Config struct {
 	Cost        CostConfig        `yaml:"cost,omitempty"`
 	// IMAccess restricts which IM senders the dispatcher serves (im_access.go).
 	IMAccess IMAccessConfig `yaml:"im_access,omitempty"`
+	// Integrations are outbound hooks (integrations.go).
+	Integrations IntegrationsConfig `yaml:"integrations,omitempty"`
 	// IMRateLimit caps each IM sender's message rate (im_rate_limit.go).
 	IMRateLimit IMRateLimitConfig `yaml:"im_rate_limit,omitempty"`
 
@@ -270,6 +272,7 @@ func validateConfig(cfg *Config) error {
 		validateAgentCommands,
 		validateProjects,
 		validateIMAccess,
+		validateIntegrations,
 		validateIMRateLimit,
 		validateCostBudget,
 		validateGroupScope,
