@@ -224,7 +224,7 @@ func TestMergeFollower_FinalizedBlocksResidualRepaint(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	tracker := newIMEventTracker(ctx, fp, "chat1", "direct", "general")
+	tracker := newIMEventTracker(ctx, fp, ReplyDest{ChatID: "chat1"}, "direct", "general")
 
 	tracker.onEvent(clievent.Event{
 		Type:    "assistant",
