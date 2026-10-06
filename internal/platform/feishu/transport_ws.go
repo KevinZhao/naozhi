@@ -61,7 +61,7 @@ func (f *Feishu) startWebSocket() error {
 			slog.Warn("feishu ws card_action: marshal value failed", "err", err)
 			return &callback.CardActionTriggerResponse{}, nil
 		}
-		var val cardActionPayload
+		var val platform.AskAnswerPayload
 		if err := json.Unmarshal(raw, &val); err != nil {
 			slog.Warn("feishu ws card_action: decode value failed", "err", err)
 			return &callback.CardActionTriggerResponse{}, nil
@@ -75,14 +75,9 @@ func (f *Feishu) startWebSocket() error {
 		if event.Event.Operator != nil {
 			operatorID = event.Event.Operator.OpenID
 		}
-		// The WS callback carries no chat_type; use the value embedded in the
-		// button, defaulting to "direct" (p2p chats also use "oc_" ids, so a
-		// prefix heuristic would mis-route 1:1 answers).
-		chatType := normalizeCardChatType(val.ChatType)
-		if chatType == "" {
-			chatType = "direct"
-		}
-		f.dispatchCardActionTracked(cardCtx, val, chatID, messageID, chatType, operatorID, handler)
+		// The WS callback carries no chat_type; an empty one makes
+		// dispatchCardAction derive it from the button value.
+		f.dispatchCardActionTracked(cardCtx, val, chatID, messageID, "", operatorID, handler)
 		return &callback.CardActionTriggerResponse{}, nil
 	})
 
@@ -133,7 +128,7 @@ func wsConnStateOptions(t *platform.ConnTracker) []larkws.ClientOption {
 // the click is dropped best-effort rather than blocking the SDK read loop (#1964).
 func (f *Feishu) dispatchCardActionTracked(
 	ctx context.Context,
-	val cardActionPayload,
+	val platform.AskAnswerPayload,
 	chatID, messageID, chatType, operatorID string,
 	handler platform.MessageHandler,
 ) {
