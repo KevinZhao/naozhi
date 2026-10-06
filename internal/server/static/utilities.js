@@ -319,7 +319,7 @@ function costBudgetChipHtml(b, cls) {
   if (!b || !(b.limit > 0)) return '';
   const usage = '$' + Number(b.spent || 0).toFixed(2) + ' / $' + b.limit.toFixed(2);
   const title = (COST_BUDGET_SCOPES[b.scope] || '') + '今日费用预算（cost.budget）已用 ' + usage + '，' + formatAbsTime(b.reset_at) +
-    ' 重置' + (b.blocked ? '；已用尽，新消息和 cron 运行会被拒绝' : b.over ? '；已超出，仅提醒' : '');
+    ' 重置' + (b.blocked ? '；已用尽，IM 新消息和 cron 运行会被拒绝（dashboard 不受限）' : b.over ? '；已超出，仅提醒' : '');
   return '<span class="' + cls + (b.over ? ' bad' : '') + '" title="' + escAttr(title) + '">' + (b.warn ? '⚠ ' : '') + '今日 ' + esc(usage) + '</span>';
 }
 

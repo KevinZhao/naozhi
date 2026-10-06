@@ -72,6 +72,7 @@ test('session header: the budget chip follows the run stats, flagged and titled'
     expect(title).toContain('整机今日费用预算');
     expect(title).toContain('重置');
     expect(title).toContain('已用尽');
+    expect(title).toContain('dashboard 不受限');
     await expect(page.locator('#header-runstats')).toContainText('1 轮');
     expect(mock.costBudgetCalls).toContainEqual({ job_id: '', session_key: KEY_OVER });
 
