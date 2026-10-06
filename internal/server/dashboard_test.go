@@ -172,7 +172,7 @@ func seedEventSession(t *testing.T, srv *Server, times ...int64) string {
 	for _, ts := range times {
 		proc.EventLog.Append(clievent.EventEntry{Time: ts, Type: "text", Summary: "msg"})
 	}
-	srv.router.InjectSession(key, proc)
+	routerOf(srv).InjectSession(key, proc)
 	return key
 }
 
@@ -192,7 +192,7 @@ func seedTypedEventSession(t *testing.T, srv *Server, events ...typedEvent) stri
 	for _, e := range events {
 		proc.EventLog.Append(clievent.EventEntry{Time: e.time, Type: e.typ, Summary: "x"})
 	}
-	srv.router.InjectSession(key, proc)
+	routerOf(srv).InjectSession(key, proc)
 	return key
 }
 
@@ -1090,7 +1090,7 @@ func TestHandleSetLabel_OK(t *testing.T) {
 func TestHandleSetLabel_EmptyClears(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 	key := seedEventSession(t, srv, 1000)
-	srv.router.SetUserLabel(key, "before")
+	routerOf(srv).SetUserLabel(key, "before")
 
 	body := `{"key":"` + key + `","label":""}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))

@@ -34,6 +34,16 @@ var _ HubBroadcaster = (*wsBroadcaster)(nil)
 var _ sendEngineRouter = (*session.Router)(nil)
 var _ sendNotifier = (*wsBroadcaster)(nil)
 
+// The remaining *session.Router consumer subsets: turnSender's (turn_sender.go)
+// and the runtime views Server and HealthHandler hold (consumer.go). The build
+// steps hand the concrete router to each; these keep a Router signature change
+// a compile error rather than a structural mismatch found at the wiring site.
+var (
+	_ turnRouter   = (*session.Router)(nil)
+	_ serverRouter = (*session.Router)(nil)
+	_ healthRouter = (*session.Router)(nil)
+)
+
 // Compile-time assertions for the dashsession consumer interfaces (#2561).
 // Declared HERE, at the wiring site, rather than in internal/dashboard/session:
 // that package must not import internal/session's concrete Router to assert it,
