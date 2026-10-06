@@ -69,6 +69,16 @@
 //   from contract.js, so those paths would have to restate a kind on
 //   purpose to slip past.
 //
+// Workflow statuses (docs/rfc/workflow-dashboard.md §6.3):
+//   W1. workflow_state.js's WORKFLOW_STATUS_DISPLAY and WORKFLOW_AGENT_DISPLAY
+//       tables have exactly the keys ENUMS.WORKFLOW_STATUS and
+//       ENUMS.WORKFLOW_AGENT_STATE list.
+//   W2. workflow_state.js and workflow_view.js quote none of those values
+//       whole: they read the tables instead. Only those two files: running,
+//       failed, done, queued, unknown… are also session, cron and agent
+//       states that other files compare, and a literal scan cannot tell
+//       which field a string is compared with.
+//
 //   node scripts/check-enum-literals.mjs
 import fs from 'node:fs';
 import path from 'node:path';
@@ -346,6 +356,35 @@ export function kindProblems(files, contract, other = OTHER_TYPES, sentinels = K
   return { problems, counts };
 }
 
+// WORKFLOW_TABLES: workflow_state.js's display tables (W1), by the ENUMS
+// column each must match; WORKFLOW_FILES: the files W2 scans.
+export const WORKFLOW_TABLES = { WORKFLOW_STATUS_DISPLAY: 'WORKFLOW_STATUS', WORKFLOW_AGENT_DISPLAY: 'WORKFLOW_AGENT_STATE' };
+export const WORKFLOW_FILES = ['workflow_state.js', 'workflow_view.js'];
+
+// workflowProblems is checks W1 and W2 over files (name → source).
+export function workflowProblems(files, enums) {
+  const problems = [];
+  const src = files['workflow_state.js'];
+  for (const [table, column] of Object.entries(WORKFLOW_TABLES)) {
+    const want = new Set(enums?.[column] || []);
+    if (want.size === 0) problems.push(`contract.js: ENUMS.${column} is missing or empty`);
+    const keys = src === undefined ? null : tableKeys(src, table);
+    if (!keys) {
+      problems.push(`workflow_state.js: no \`const ${table} = {...}\` found — the workflow status check has gone blind`);
+      continue;
+    }
+    const got = new Set(keys);
+    for (const k of got) if (!want.has(k)) problems.push(`workflow_state.js: ${table} has ${JSON.stringify(k)}, which NZ_CONTRACT.ENUMS.${column} does not list`);
+    for (const w of want) if (!got.has(w)) problems.push(`workflow_state.js: ${table} is missing ${JSON.stringify(w)}, which NZ_CONTRACT.ENUMS.${column} lists`);
+  }
+  const values = Object.values(WORKFLOW_TABLES).flatMap((column) => enums?.[column] || []);
+  const scoped = Object.fromEntries(WORKFLOW_FILES.filter((f) => f in files).map((f) => [f, files[f]]));
+  for (const hit of literalHits(scoped, values)) {
+    problems.push(`${hit.file}: hardcodes workflow status literal(s) ${hit.reasons.join(', ')} instead of reading workflow_state.js's display tables`);
+  }
+  return problems;
+}
+
 // EVENT_TABLES: the dashboard's eventHtml Maps (S19-2, #3025 D4). Every key
 // is a kind; WHOLE, CONTENT and ENUMS.EVENT_TYPE_NO_BUBBLE share none and
 // together cover every ENUMS.EVENT_TYPE kind — a kind with no entry in any
@@ -428,6 +467,7 @@ export function checkAll(files, contract, other = OTHER_TYPES, sentinels = KIND_
     ...contractKindProblems(contract.ENUMS),
     ...kind.problems,
     ...eventTableProblems(files, contract),
+    ...workflowProblems(files, contract.ENUMS),
   ];
   return { problems, counts: kind.counts };
 }
@@ -446,6 +486,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     process.exit(1);
   }
   const { kindComparisons, otherComparisons, lookups } = counts;
-  console.log(`check-enum-literals: OK (${contract.ENUMS.DEATH_REASON.length} death reasons, ${contract.ENUMS.STARTUP_FAILURE_CLASS.length} startup failure classes, ${contract.ENUMS.EVENT_TYPE.length} kinds; ` +
+  console.log(`check-enum-literals: OK (${contract.ENUMS.DEATH_REASON.length} death reasons, ${contract.ENUMS.STARTUP_FAILURE_CLASS.length} startup failure classes, ${contract.ENUMS.WORKFLOW_STATUS.length + contract.ENUMS.WORKFLOW_AGENT_STATE.length} workflow states, ${contract.ENUMS.EVENT_TYPE.length} kinds; ` +
     `${kindComparisons} kind and ${otherComparisons} other .type comparisons, ${lookups} [.type] table(s); ${Object.keys(files).length - 1} files scanned for kinds, ${Object.keys(files).length - 2} for death-reason literals)`);
 }

@@ -1,7 +1,7 @@
 // node --test scripts/check-enum-literals.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ANCHORS, checkAll, contractKindProblems, deathReasonKeys, eventTableProblems, kindProblems, literalHits, run, startupClassProblems } from './check-enum-literals.mjs';
+import { ANCHORS, checkAll, contractKindProblems, deathReasonKeys, eventTableProblems, kindProblems, literalHits, run, startupClassProblems, workflowProblems } from './check-enum-literals.mjs';
 
 const nzUtil = `
 const OTHER = { a: 1 };
@@ -308,13 +308,60 @@ test('eventTableProblems goes blind loudly when a table is declared nowhere, or 
   ]);
 });
 
+const wfEnums = { WORKFLOW_STATUS: ['running', 'completed', 'unknown'], WORKFLOW_AGENT_STATE: ['queued', 'done'] };
+const wfState = `
+export const WORKFLOW_STATUS_DISPLAY = {
+  running: { glyph: '●', text: 'a', settled: false },
+  completed: { glyph: '✓', text: 'b', settled: true },
+  unknown: { glyph: '?', text: 'c', settled: false },
+};
+export const WORKFLOW_AGENT_DISPLAY = {
+  queued: { glyph: '⏳', text: 'd', rank: 2 },
+  done: { glyph: '✓', text: 'e', rank: 4 },
+};
+export const isSettled = (st) => WORKFLOW_STATUS_DISPLAY[st]?.settled === true;
+`;
+
+test('workflowProblems passes tables that are exactly the ENUMS columns', () => {
+  assert.deepEqual(workflowProblems({ 'workflow_state.js': wfState, 'workflow_view.js': 'const x = 1;' }, wfEnums), []);
+});
+
+test('workflowProblems flags a table key the column lacks, a column value the table lacks, and a missing table', () => {
+  const extra = workflowProblems({ 'workflow_state.js': wfState.replace('unknown:', 'paused:') }, wfEnums);
+  assert.deepEqual(extra, [
+    'workflow_state.js: WORKFLOW_STATUS_DISPLAY has "paused", which NZ_CONTRACT.ENUMS.WORKFLOW_STATUS does not list',
+    'workflow_state.js: WORKFLOW_STATUS_DISPLAY is missing "unknown", which NZ_CONTRACT.ENUMS.WORKFLOW_STATUS lists',
+  ]);
+  const missing = workflowProblems({ 'workflow_state.js': wfState.replace("  done: { glyph: '✓', text: 'e', rank: 4 },\n", '') }, wfEnums);
+  assert.deepEqual(missing, ['workflow_state.js: WORKFLOW_AGENT_DISPLAY is missing "done", which NZ_CONTRACT.ENUMS.WORKFLOW_AGENT_STATE lists']);
+  const blind = workflowProblems({ 'workflow_state.js': 'const X = {};' }, wfEnums);
+  assert.equal(blind.length, 2);
+  assert.ok(blind.every((p) => /gone blind/.test(p)));
+  assert.ok(workflowProblems({}, wfEnums).every((p) => /gone blind/.test(p)));
+  assert.ok(workflowProblems({ 'workflow_state.js': wfState }, { WORKFLOW_STATUS: [] }).some((p) => /ENUMS.WORKFLOW_STATUS is missing or empty/.test(p)));
+});
+
+test('workflowProblems bans the values as literals in the two workflow modules only', () => {
+  const files = {
+    'workflow_state.js': wfState + "const t = (w) => w.status === 'completed';",
+    'workflow_view.js': "if (row.state === 'queued') {} // 'done' in a comment",
+    'dashboard.js': "if (sd.state === 'running') {}",
+    'agent_view.js': "const done = a.status === 'completed';",
+  };
+  assert.deepEqual(workflowProblems(files, wfEnums), [
+    "workflow_state.js: hardcodes workflow status literal(s) completed instead of reading workflow_state.js's display tables",
+    "workflow_view.js: hardcodes workflow status literal(s) queued instead of reading workflow_state.js's display tables",
+  ]);
+});
+
 test('checkAll reports every check, death_reason, startup classes and kinds alike, over one tree', () => {
-  const full = { ...contract, ENUMS: { ...contract.ENUMS, DEATH_REASON: ['idle_timeout', 'evicted', 'cli_exited'], STARTUP_FAILURE_CLASS: ['unknown', 'auth'] } };
-  const tree = { ...clean, 'nz_util.js': nzUtil };
+  const full = { ...contract, ENUMS: { ...contract.ENUMS, ...wfEnums, DEATH_REASON: ['idle_timeout', 'evicted', 'cli_exited'], STARTUP_FAILURE_CLASS: ['unknown', 'auth'] } };
+  const tree = { ...clean, 'nz_util.js': nzUtil, 'workflow_state.js': wfState };
   assert.deepEqual(checkAll(tree, full, other, ['a.js', 'b.js'], anchors).problems, []);
   const bad = {
     ...tree,
     'a.js': clean['a.js'].replace("['result', 4]", '') + "if (e.type === 'txt' || r === 'evicted') {}",
+    'workflow_view.js': "const d = s === 'done';",
   };
   const { problems } = checkAll(bad, { ...full, ENUMS: { ...full.ENUMS, EVENT_TYPE_MD_IGNORE: [], STARTUP_FAILURE_CLASS: ['unknown'] } }, other, ['a.js', 'b.js'], anchors);
   for (const want of [
@@ -323,6 +370,7 @@ test('checkAll reports every check, death_reason, startup classes and kinds alik
     /EVENT_TYPE_MD_IGNORE is missing or empty/,
     /a\.js:\d+: \.type compared with "txt"/,
     /do not cover kind "result"/,
+    /workflow_view\.js: hardcodes workflow status literal\(s\) done/,
   ]) {
     assert.ok(problems.some((p) => want.test(p)), `${want} not in:\n${problems.join('\n')}`);
   }

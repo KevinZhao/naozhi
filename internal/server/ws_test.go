@@ -19,6 +19,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -97,13 +98,23 @@ func wsWrite(t *testing.T, conn *websocket.Conn, msg node.ClientMsg) {
 	}
 }
 
+// wsRead returns the next frame that is not a workflow push loop's
+// (wshub_workflow_test.go covers those; they interleave with the rest).
 func wsRead(t *testing.T, conn *websocket.Conn) node.ServerMsg {
 	t.Helper()
-	var resp node.ServerMsg
-	if err := conn.ReadJSON(&resp); err != nil {
-		t.Fatalf("ws read: %v", err)
+	for {
+		var resp node.ServerMsg
+		if err := conn.ReadJSON(&resp); err != nil {
+			t.Fatalf("ws read: %v", err)
+		}
+		if !isWorkflowFrame(resp.Type) {
+			return resp
+		}
 	}
-	return resp
+}
+
+func isWorkflowFrame(typ string) bool {
+	return typ == string(wsproto.TypeWorkflowSet) || typ == string(wsproto.TypeWorkflowState)
 }
 
 // ─── Auth tests ──────────────────────────────────────────────────────────────
@@ -876,9 +887,12 @@ func TestWS_MultipleClientsReceiveEvents(t *testing.T) {
 	check := func(conn *websocket.Conn, label string) {
 		defer wg.Done()
 		var resp node.ServerMsg
-		if err := conn.ReadJSON(&resp); err != nil {
-			t.Errorf("%s: read error: %v", label, err)
-			return
+		for resp.Type == "" || isWorkflowFrame(resp.Type) {
+			resp = node.ServerMsg{}
+			if err := conn.ReadJSON(&resp); err != nil {
+				t.Errorf("%s: read error: %v", label, err)
+				return
+			}
 		}
 		if resp.Type != "history" {
 			t.Errorf("%s: type = %q, want history", label, resp.Type)

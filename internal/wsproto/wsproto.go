@@ -16,7 +16,10 @@
 //go:generate go run ./gen
 package wsproto
 
-import "github.com/naozhi/naozhi/internal/cli/clievent"
+import (
+	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cli/workflow"
+)
 
 // MsgType names one browser WS message type.
 type MsgType string
@@ -42,6 +45,8 @@ const (
 	TypeAgentMeta              MsgType = "agent_meta"
 	TypeAgentDone              MsgType = "agent_done"
 	TypeAgentSubscribeRejected MsgType = "agent_subscribe_rejected"
+	TypeWorkflowState          MsgType = "workflow_state"
+	TypeWorkflowSet            MsgType = "workflow_set"
 )
 
 // Inbound (browser → server) message types, parsed out of node.ClientMsg.
@@ -289,5 +294,46 @@ type AgentSubscribeRejected struct {
 
 func NewAgentSubscribeRejected(f AgentSubscribeRejected) AgentSubscribeRejected {
 	f.Type = TypeAgentSubscribeRejected
+	return f
+}
+
+// WorkflowState carries one workflow of a subscribed session's board
+// (docs/rfc/workflow-dashboard.md §6.1). A full frame (BaseVersion 0) holds
+// the header and phases and never rows; a delta holds every row whose rev
+// is above BaseVersion, less RowsOmitted ones the frame budget left out.
+// Versions are the board's, in the space of GET /api/sessions/workflow.
+type WorkflowState struct {
+	Type        MsgType           `json:"type"`
+	Key         string            `json:"key"`
+	Node        string            `json:"node,omitempty"`
+	TaskID      string            `json:"task_id"`
+	Epoch       string            `json:"epoch"`
+	Version     uint64            `json:"version"`
+	BaseVersion uint64            `json:"base_version,omitempty"`
+	Full        bool              `json:"full"`
+	ServerNow   int64             `json:"server_now"` // ms
+	RowsOmitted int               `json:"rows_omitted,omitempty"`
+	Workflow    workflow.WireView `json:"workflow"`
+}
+
+func NewWorkflowState(f WorkflowState) WorkflowState { f.Type = TypeWorkflowState; return f }
+
+// WorkflowSet lists every task the subscribed session's board publishes
+// (empty for an empty board); the dashboard drops what it no longer names.
+type WorkflowSet struct {
+	Type      MsgType  `json:"type"`
+	Key       string   `json:"key"`
+	Node      string   `json:"node,omitempty"`
+	Epoch     string   `json:"epoch"`
+	TaskIDs   []string `json:"task_ids"`
+	ServerNow int64    `json:"server_now"` // ms
+}
+
+// NewWorkflowSet stamps Type; nil TaskIDs encode as [].
+func NewWorkflowSet(f WorkflowSet) WorkflowSet {
+	f.Type = TypeWorkflowSet
+	if f.TaskIDs == nil {
+		f.TaskIDs = []string{}
+	}
 	return f
 }

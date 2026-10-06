@@ -21,6 +21,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cli/workflow"
 	"github.com/naozhi/naozhi/internal/cliinfo"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/wsproto"
@@ -80,6 +81,8 @@ export const NZ_CONTRACT = Object.freeze(/** @type {const} */ ({
 	writeEnum(&b, "EVENT_TYPE_NO_BUBBLE", clievent.NoBubbleKinds())
 	writeEnum(&b, "EVENT_TYPE_MD_IGNORE", clievent.MarkdownIgnoreKinds())
 	writeEnum(&b, "STARTUP_FAILURE_CLASS", clierr.AllExitClassWires())
+	writeEnum(&b, "WORKFLOW_STATUS", workflow.AllStatuses())
+	writeEnum(&b, "WORKFLOW_AGENT_STATE", workflow.AllAgentStates())
 	b.WriteString("  },\n")
 
 	// DEATH_REASON_PREFIX: the shapes of a cli_exited reason that carries an

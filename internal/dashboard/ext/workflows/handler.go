@@ -206,7 +206,7 @@ func (h *Handler) HandleWorkflow(w http.ResponseWriter, r *http.Request) {
 	case rq.none:
 		resp.RowsMode, rows = RowsNone, nil
 	case rq.epoch != "" && rq.epoch == pub.Epoch && rq.since <= wf.Version:
-		resp.RowsMode, rows = RowsDelta, newerRows(wf.Agents, rq.since)
+		resp.RowsMode, rows = RowsDelta, workflow.RowsAfter(wf.Agents, rq.since)
 	}
 	resp.Epoch, resp.Version, resp.Workflow = pub.Epoch, wf.Version, wf.Wire(rows)
 	// Stamped last: the client calibrates its clock on it, and Result may
@@ -226,15 +226,4 @@ func find(p *workflow.Published, taskID string) *workflow.Workflow {
 		}
 	}
 	return nil
-}
-
-// newerRows are the rows changed after wire version since.
-func newerRows(rows []workflow.Agent, since uint64) []workflow.Agent {
-	var out []workflow.Agent
-	for i := range rows {
-		if rows[i].Rev > since {
-			out = append(out, rows[i])
-		}
-	}
-	return out
 }

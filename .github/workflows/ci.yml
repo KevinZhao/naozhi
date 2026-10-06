@@ -414,6 +414,11 @@ jobs:
       - name: Test the cron list merge
         run: node --test scripts/cron-state.test.mjs
 
+      # workflow_state.js is a leaf too: the workflow frames, HTTP answers and
+      # Summary fallback of docs/rfc/workflow-dashboard.md §6.1, frame by frame.
+      - name: Test the workflow store
+        run: node --test scripts/workflow-state.test.mjs
+
       # render_md.js is the dashboard's XSS surface. A hostile corpus and a
       # seeded fuzz loop check its output against a tag/attribute allowlist,
       # so a placeholder restored inside an attribute fails here.

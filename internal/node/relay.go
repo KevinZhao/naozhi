@@ -349,6 +349,11 @@ func (r *wsRelay) forwardEvent(data []byte) {
 	if json.Unmarshal(data, &header) != nil {
 		return
 	}
+	// A remote session's workflows are not shown (docs/rfc/workflow-dashboard.md
+	// NG3): its board's frames stop here, as the reverse connection's do.
+	if header.Type == string(wsproto.TypeWorkflowState) || header.Type == string(wsproto.TypeWorkflowSet) {
+		return
+	}
 
 	tagged := injectNodeField(data, r.nodeField)
 	r.mu.Lock()

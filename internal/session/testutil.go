@@ -209,3 +209,25 @@ func (s *ManagedSession) SetWorkspaceForTest(ws string) { s.setWorkspace(ws) }
 // MarkExemptForTest flags an injected session exempt, as the spawn path does
 // for exempt-namespace keys, so it counts against the exempt caps.
 func (s *ManagedSession) MarkExemptForTest() { s.exempt = true }
+
+// BindWorkflowsForTest binds src to s's board as a new CLI process would,
+// creating a board that does no disk I/O when s has none. src must have
+// *cli.Process's workflow methods: Workflows, SetOnWorkflowChange,
+// KnowWorkflowTasks and ApplyWorkflowResult.
+func (s *ManagedSession) BindWorkflowsForTest(src any) {
+	b := s.workflows.Load()
+	if b == nil {
+		b = newWorkflowBoard("")
+		b.disk = workflowDisk{}
+		if !s.workflows.CompareAndSwap(nil, b) {
+			b = s.workflows.Load()
+		}
+	}
+	b.bind(src.(workflowNotifier), "")
+}
+
+// EndWorkflowsForTest settles src's workflows on s's board as its process's
+// read loop exiting with end does.
+func (s *ManagedSession) EndWorkflowsForTest(src any, end cli.ProcessEnd) {
+	s.workflows.Load().procEnded(src.(workflowNotifier), end)
+}

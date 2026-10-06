@@ -142,14 +142,14 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 
 	// admit re-checks ctx under the registry's lock: Shutdown cancels ctx
 	// before it drains the registry, so a subscription installed here is
-	// either seen by the drain or declined. clientWG.Add(1) happens inside the
+	// either seen by the drain or declined. clientWG.Add(2) happens inside the
 	// same critical section, so Shutdown's Wait cannot return before the
-	// eventPushLoop below starts.
+	// eventPushLoop and workflowPushLoop below start.
 	gen, ok := h.subs.install(c, key, unsub, func() bool {
 		if h.ctx.Err() != nil {
 			return false
 		}
-		h.clientWG.Add(1)
+		h.clientWG.Add(2)
 		return true
 	})
 	if !ok {
@@ -157,13 +157,14 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		return
 	}
 
-	// Balance clientWG.Add(1) if we never reach the goroutine spawn: anything
+	// Balance clientWG.Add(2) if we never reach the goroutine spawns: anything
 	// between here and `spawned = true` can panic, and readPump's recover then
-	// unwinds via unregister without the goroutine's deferred Done(), hanging
+	// unwinds via unregister without the goroutines' deferred Done(), hanging
 	// Hub.Shutdown's clientWG.Wait().
 	spawned := false
 	defer func() {
 		if !spawned {
+			h.clientWG.Done()
 			h.clientWG.Done()
 		}
 	}()
@@ -212,6 +213,10 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	go func() {
 		defer h.clientWG.Done()
 		h.eventPushLoop(c, key, gen, notify, sess, csr)
+	}()
+	go func() {
+		defer h.clientWG.Done()
+		h.workflowPushLoop(c, key, gen, sess)
 	}()
 }
 

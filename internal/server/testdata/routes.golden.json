@@ -671,6 +671,16 @@
   },
   {
     "method": "GET",
+    "path": "/static/workflow_state.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/workflow_view.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/ws_manager.js",
     "handler_type": "http.HandlerFunc"
   },

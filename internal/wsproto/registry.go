@@ -1,6 +1,9 @@
 package wsproto
 
-import "github.com/naozhi/naozhi/internal/cli/clievent"
+import (
+	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cli/workflow"
+)
 
 // Frames maps every outbound MsgType to an exemplar with every field of that
 // frame set non-zero. The schema generator reflects over these to emit
@@ -56,6 +59,31 @@ var Frames = map[MsgType]any{
 	TypeAgentSubscribeRejected: NewAgentSubscribeRejected(AgentSubscribeRejected{
 		Key: "k", Reason: "r", TaskID: "t",
 	}),
+	TypeWorkflowState: NewWorkflowState(WorkflowState{
+		Key: "k", Node: "n", TaskID: "t", Epoch: "e", Version: 2, BaseVersion: 1, Full: true,
+		ServerNow: 1, RowsOmitted: 1, Workflow: exemplarWorkflow(),
+	}),
+	TypeWorkflowSet: NewWorkflowSet(WorkflowSet{
+		Key: "k", Node: "n", Epoch: "e", TaskIDs: []string{"t"}, ServerNow: 1,
+	}),
+}
+
+// exemplarWorkflow is a WireView with every field set.
+func exemplarWorkflow() workflow.WireView {
+	counts := workflow.Counts{Total: 1, Queued: 1, Running: 1, Done: 1, Failed: 1, Skipped: 1, Stopped: 1}
+	return workflow.WireView{
+		TaskID: "t", RunID: "r", Name: "n", Description: "d", Current: "c",
+		Status: workflow.StatusRunning, RawStatus: "r", StartedAt: 1, EndedAt: 1, LastObservedAt: 1,
+		Tokens: 1, ToolCalls: 1, DurationMS: 1, Counts: counts,
+		Phases: []workflow.Phase{{Index: 1, Title: "p", Counts: counts}},
+		Agents: []workflow.Agent{{
+			Index: 1, PhaseIndex: 1, Label: "l", AgentID: "a", PrevAgentIDs: []string{"a0"}, Model: "m",
+			State: workflow.AgentRunning, RawState: "r", Blocked: true, Attempt: 1, Cached: true,
+			QueuedAt: 1, StartedAt: 1, LastProgressAt: 1, DurationMS: 1, Tokens: 1, ToolCalls: 1,
+			LastTool: "t", LastToolSummary: "s", Error: "e", Rev: 1,
+		}},
+		AgentsCapped: true, NotifySummary: "s", Source: workflow.SourceStream, Degraded: "d", Version: 2,
+	}
 }
 
 func boolPtr(b bool) *bool { return &b }

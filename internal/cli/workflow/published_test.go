@@ -80,6 +80,20 @@ func wf(id string, st Status, ended int64, rows ...Agent) *Workflow {
 	return &Workflow{TaskID: id, Status: st, EndedAt: ended, Agents: rows}
 }
 
+func TestRowsAfter(t *testing.T) {
+	t.Parallel()
+	rows := []Agent{{Index: 0, Rev: 3}, {Index: 1, Rev: 5}, {Index: 2, Rev: 4}}
+	for v, want := range map[uint64][]int{0: {0, 1, 2}, 3: {1, 2}, 4: {1}, 5: nil} {
+		var got []int
+		for _, a := range RowsAfter(rows, v) {
+			got = append(got, a.Index)
+		}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("RowsAfter(%d) = %v, want %v", v, got, want)
+		}
+	}
+}
+
 func TestNewPublished(t *testing.T) {
 	t.Parallel()
 	w1 := wf("w1", StatusRunning, 0, Agent{Index: 1, AgentID: "a2", PrevAgentIDs: []string{"a1"}, State: AgentRunning}, Agent{Index: 2, State: AgentQueued})

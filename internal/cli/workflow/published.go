@@ -52,6 +52,18 @@ func (w *Workflow) Wire(rows []Agent) WireView {
 	}
 }
 
+// RowsAfter returns the rows of rows whose content changed after wire
+// version v: what a delta based on v carries.
+func RowsAfter(rows []Agent, v uint64) []Agent {
+	var out []Agent
+	for i := range rows {
+		if rows[i].Rev > v {
+			out = append(out, rows[i])
+		}
+	}
+	return out
+}
+
 // AgentLoc locates a workflow agent by agentId.
 type AgentLoc struct {
 	TaskID string
