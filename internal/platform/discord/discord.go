@@ -247,11 +247,14 @@ func (d *Discord) configureSession(sess *discordgo.Session) {
 	// Inline handlers see a drop's Disconnect before its reconnect's Connect;
 	// with a goroutine per event a late Disconnect could overwrite
 	// "connected". Connect and the first Ready fire inside Open under the
-	// session lock, so no handler may call back into sess. Messages keep
-	// their own goroutine.
+	// session lock, so no handler may call back into sess. Messages and
+	// interactions keep their own goroutine.
 	sess.SyncEvents = true
 	sess.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
 		go d.onMessageCreate(s, m)
+	})
+	sess.AddHandler(func(s *discordgo.Session, ic *discordgo.InteractionCreate) {
+		go d.onInteractionCreate(s, ic)
 	})
 	sess.AddHandler(d.onReady)
 	sess.AddHandler(d.onConnect)

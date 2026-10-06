@@ -36,6 +36,9 @@ type SchedulerDeps struct {
 	// Ledger receives one cost entry per run (local: session CostTotals
 	// delta; sandbox: receipt). nil = no ledger.
 	Ledger CostLedger
+	// Budget refuses a run whose job or machine has spent its daily cap
+	// (budget.go). nil = no budget.
+	Budget BudgetGate
 }
 
 // CostLedger is the append-only sink cron writes run costs to; satisfied by

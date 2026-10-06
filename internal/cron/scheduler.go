@@ -176,6 +176,8 @@ type Scheduler struct {
 
 	// ledger is the cost ledger every terminal run writes one entry to; nil-safe.
 	ledger CostLedger
+	// budget is checked before each run spawns; nil runs every job.
+	budget BudgetGate
 
 	// sandboxPendingMu guards sandboxPendingIndex, independent of s.tbl.mu so the
 	// hot delete path never contends with job CRUD. RWMutex so the pure-read
@@ -302,6 +304,7 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		stopCancel:            stopCancel,
 		runStore:              newRunStore(cfg.StorePath, cfg.RunsKeepCount, cfg.RunsKeepWindow),
 		ledger:                deps.Ledger,
+		budget:                deps.Budget,
 		sandboxPendingIndex:   make(map[string]string),
 		// Tests swap a fake via the withClock seam.
 		clock: defaultClock,

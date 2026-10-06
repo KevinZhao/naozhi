@@ -56,6 +56,9 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 	if s.sandbox == nil {
 		return "", ErrSandboxUnavailable
 	}
+	if err := s.replayBudgetErr(jobID); err != nil {
+		return "", err
+	}
 
 	// No snapshot → no payload → cannot replay.
 	man, found, err := s.SandboxRunSnapshotManifest(jobID, origRunID)
