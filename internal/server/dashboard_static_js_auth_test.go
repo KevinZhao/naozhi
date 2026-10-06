@@ -332,7 +332,7 @@ func TestCronLiveJS_RequiresAuth_TokenMode(t *testing.T) {
 // event_stream.js (S19-E), session_list.js (S19-5), session_ident.js and
 // icons.js (S20d, #3026), file_ref_parse.js (S20e), shell.js (S20f),
 // backend_catalog.js (S20h), cron_state.js and cron_format.js (S20j), and
-// lightbox.js (#3438).
+// lightbox.js and mem_popover.js (#3438).
 func TestWSModulesJS_RequiresAuth_TokenMode(t *testing.T) {
 	t.Parallel()
 	srv := newTestServerWithToken(&mockPlatform{}, "secret")
@@ -354,6 +354,7 @@ func TestWSModulesJS_RequiresAuth_TokenMode(t *testing.T) {
 		"cron_state.js":      "cronRefetchFullJob",
 		"cron_format.js":     "formatWhenColloquial",
 		"lightbox.js":        "openLightboxGroup",
+		"mem_popover.js":     "initMemPopover",
 	} {
 		req := httptest.NewRequest(http.MethodGet, "/static/"+name, nil)
 		w := httptest.NewRecorder()
