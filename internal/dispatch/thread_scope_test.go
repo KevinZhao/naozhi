@@ -240,3 +240,53 @@ func TestGroupScope_ProjectBoundThreadNew(t *testing.T) {
 		t.Errorf("resets = %q, want the planner then the thread's code-reviewer", resets)
 	}
 }
+
+// TestGroupScope_OnlyChatSharedSessionsTakeOver: a first turn offers the
+// chat's external CLI for takeover only on a session the whole chat shares
+// (its own, or a project's planner); a thread's or member's session starts
+// fresh instead of stopping the terminal CLI for every new thread.
+func TestGroupScope_OnlyChatSharedSessionsTakeOver(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		scope GroupScope
+		bound bool
+		msgs  []platform.IncomingMessage
+		want  []string
+	}{
+		{"thread", GroupScopeThread, false, []platform.IncomingMessage{
+			scopeMsg("1", "group", "u1", "T1", "hi"), scopeMsg("2", "group", "u1", "", "hi"),
+		}, []string{"fake:group:g:general"}},
+		{"user", GroupScopeUser, false, []platform.IncomingMessage{scopeMsg("1", "group", "u1", "", "hi")}, nil},
+		{"chat", GroupScopeChat, false, []platform.IncomingMessage{scopeMsg("1", "group", "u1", "T1", "hi")}, []string{"fake:group:g:general"}},
+		{"planner", GroupScopeThread, true, []platform.IncomingMessage{scopeMsg("1", "group", "u1", "T1", "hi")}, []string{"project:demo:planner"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &keyRecorder{turned: make(chan struct{}, len(tc.msgs))}
+			var mu sync.Mutex
+			var offered []string
+			d := newTestDispatcher(&fakePlatform{}, withSender(rec.sender()), withGroupScope(tc.scope), func(cfg *testDispatcherConfig) {
+				cfg.Capabilities = fakeCapabilities{takeover: func(_ context.Context, chatKey, key string, _ session.AgentOpts) bool {
+					mu.Lock()
+					defer mu.Unlock()
+					if chatKey != "fake:group:g" {
+						t.Errorf("takeover of %q offered chat key %q, want the chat's", key, chatKey)
+					}
+					offered = append(offered, key)
+					return false
+				}}
+				if tc.bound {
+					cfg.Resolver = session.NewKeyResolver(map[string]session.AgentOpts{"general": {}}, boundChatData{})
+				}
+			})
+			for _, m := range tc.msgs {
+				d.BuildHandler()(context.Background(), m)
+			}
+			rec.waitTurns(t, len(tc.msgs))
+			mu.Lock()
+			defer mu.Unlock()
+			if !slices.Equal(offered, tc.want) {
+				t.Errorf("takeover offered for %q, want %q", offered, tc.want)
+			}
+		})
+	}
+}

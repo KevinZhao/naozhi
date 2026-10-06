@@ -1,6 +1,11 @@
 package session
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/naozhi/naozhi/internal/session/spawnpool"
+)
 
 // A thread's session key ("slack:group:C1#tT1:general") belongs to its chat
 // ("slack:group:C1") for everything chat-level: the workspace override, /cd's
@@ -70,6 +75,25 @@ func TestResetChatAndSetWorkspace_ResetsTheChatsThreads(t *testing.T) {
 	}
 	if !other.Alive() {
 		t.Error("/cd in C1 reset a thread of C2")
+	}
+}
+
+// TestResetChatAndSetWorkspace_LiftsTheChatsThreadPauses: /cd in a chat
+// lifts its threads' startup-failure pauses, and no other chat's.
+func TestResetChatAndSetWorkspace_LiftsTheChatsThreadPauses(t *testing.T) {
+	const otherThread = "slack:group:C2#tT1:general"
+	r := newTestRouter(4)
+	r.ss.Update(func(tx sessTx) {
+		for _, key := range []string{scopeThreadKey, otherThread} {
+			tx.Ext().spawns.NoteStartupFailure(key, spawnpool.StartupFailure{Streak: 2, At: time.Now()})
+		}
+	})
+	r.ResetChatAndSetWorkspace(scopeChat, t.TempDir())
+	if f, ok := spawnRun(r, scopeThreadKey); ok {
+		t.Errorf("run of the chat's thread after /cd = %+v, want none", f)
+	}
+	if _, ok := spawnRun(r, otherThread); !ok {
+		t.Error("/cd in C1 lifted the pause of a thread of C2")
 	}
 }
 
