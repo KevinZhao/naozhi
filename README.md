@@ -136,7 +136,7 @@ cli:
 - Dashboard "new session" 下拉菜单按会话选择 backend
 - API 通过 `/api/sessions/send {"backend": "kiro"}` 覆盖
 - ACP backend 自动处理 `session/new`、`session/cancel` 通知与权限请求
-- 每条 backend 的 `path`/`model`/`args` 省略时继承顶层 `cli.*`；codex 必须自己设 `model` 和 `args`，否则会拿到 claude 的模型名与 flag
+- 每条 backend 的 `model`/`args` 省略时继承顶层 `cli.*`；`path` 不继承 `cli.path`，省略时按 id 自动查找（`~/.local/bin/<binary>`、常见安装目录、`$PATH`）；codex 必须自己设 `model` 和 `args`，否则会拿到 claude 的模型名与顶层 `cli.args`
 - Codex 不接受 `effort` 字段（设了会告警并忽略），推理强度经 `args` 传：`-c model_reasoning_effort=<tier>`
 
 ### 定时任务 (Cron)
@@ -385,13 +385,13 @@ cli:
   backend: claude                         # "claude" | "kiro" | "codex"，单 backend 模式下的默认值
   path: "~/.local/bin/claude"
   model: "sonnet"                         # sonnet / opus / haiku
-  args:
-    - "--dangerously-skip-permissions"
+  args: []                                # claude 协议自己加 --dangerously-skip-permissions，写在这里只会被丢弃并告警
 
   # 可选：多 backend 并存（Claude / Kiro / Codex 同时启用）。dashboard "new session"
   # 下拉菜单可以按会话选 backend，API 端通过 /api/sessions/send {"backend": ...}
   # 覆盖。不设置 `backends` 时走单 backend 模式，使用上面的 cli.path/model/args；
-  # 每条 backend 的 path/model/args 省略时从顶层 cli.* 继承；`backend` 字段决定
+  # 每条 backend 的 model/args 省略时从顶层 cli.* 继承，path 不继承 cli.path，
+  # 省略时按 id 自动查找（~/.local/bin/<binary>、常见安装目录、$PATH）；`backend` 字段决定
   # 默认 backend（同时也作为 dashboard 下拉第一项）。完整注释示例见
   # config.example.yaml `cli.backends` 段。
   # backends:
@@ -400,7 +400,7 @@ cli:
   #     path: "~/.local/bin/kiro"         # ACP 协议根据 id=kiro 自动选择，无需额外 flag
   #   - id: codex
   #     path: "codex"                     # codex app-server 协议根据 id=codex 自动选择
-  #     model: "openai.gpt-5.5"           # 与 args 都须显式设置，否则继承上面 claude 的 sonnet 与 flag
+  #     model: "openai.gpt-5.5"           # 须显式设置，否则继承上面 claude 的 sonnet；args 也写明，免得继承顶层 cli.args
   #     args: ["-c", "model_reasoning_effort=high"]
 
 session:
@@ -424,7 +424,7 @@ session:
 agents:                                   # 自定义 agent
   code-reviewer:
     model: "sonnet"
-    args: ['--append-system-prompt', 'You are a code reviewer...']
+    system_prompt: "You are a code reviewer..."  # 追加到 CLI 系统提示词
   researcher:
     model: "opus"
 
@@ -545,8 +545,9 @@ journalctl -u naozhi -f
 > 拉 heap / goroutine / CPU profile。端点受 token + **loopback-only** 双重防护，远端
 > 请求（ALB / CloudFront）一律 403。详见 [`docs/ops/pprof.md`](docs/ops/pprof.md)。
 
-> **一键排障**：`naozhi doctor` 聚合 binary / systemd / HTTP / auth / pprof / 状态目录
-> 7 项检查，任一 fail 退出码 1。CI 友好，支持 `--json` 输出。详见
+> **一键排障**：`naozhi doctor` 聚合 binary / codesign / systemd / HTTP / auth /
+> 服务端子系统 / 配置漂移 / pprof / 状态目录 / CLI backend / 语音转写 / 安全配置等检查，
+> 任一 fail 退出码 1。CI 友好，支持 `--json` 输出。完整检查项见
 > [`docs/ops/doctor.md`](docs/ops/doctor.md)。
 
 ### IM 访问控制

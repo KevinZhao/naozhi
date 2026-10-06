@@ -30,10 +30,7 @@ type turnRouter interface {
 	NotifyIdle()
 }
 
-var (
-	_ turnRouter  = (*session.Router)(nil)
-	_ turn.Sender = turnSender{}
-)
+var _ turn.Sender = turnSender{}
 
 type turnSender struct {
 	router turnRouter

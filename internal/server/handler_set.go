@@ -118,6 +118,10 @@ func (hs *handlerSet) checkLimiters(schedulerWired bool) {
 // Server needs them. A Server field only construction reads is a field every
 // later reader has to rule out (#2897 S4).
 type wiring struct {
+	// router is ServerOptions.Router, for the build steps that hand the
+	// concrete router to a consumer with its own interface (turnSender, the
+	// send engine, the Hub, the dispatcher, the dashboard adapters).
+	router        *session.Router
 	dedup         *platform.Dedup
 	queue         turn.QueueOptions // buildWSStack builds turns' queue from it
 	startedAt     time.Time

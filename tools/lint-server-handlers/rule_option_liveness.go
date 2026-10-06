@@ -7,7 +7,7 @@
 // each field was used, only how many there were.
 //
 // A field set only in a composite literal (the write side, e.g.
-// build_dashboard.go's `HubOptions{Router: s.router, ...}`) does not count:
+// build_dashboard.go's `HubOptions{Router: w.router, ...}`) does not count:
 // that is where the option is populated, not where it is consumed.
 package main
 

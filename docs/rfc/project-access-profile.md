@@ -107,10 +107,12 @@ access profile = { env overlay（白名单内）, 默认 backend, 默认 model }
 三条链**各自独立**解析，最后在 `resolveSpawnParamsLocked` 合并进一次 spawn：
 
 ```
-auth (env overlay):  请求显式 → per-session override → per-agent accessProfile → per-project accessProfile → 全局默认(现状 settings.json，即 profile="")
-backend:             请求显式(opts.Backend) → per-session backendOverride(已有) → per-agent backend → per-project backend → accessProfile.default_backend → cli.defaultBackend
+auth (env overlay):  请求显式 → per-session override → per-project accessProfile → per-agent accessProfile → default_access_profile → 全局默认(现状 settings.json，即 profile="")
+backend:             请求显式(opts.Backend) → per-session backendOverride(已有) → per-project backend → per-agent backend → accessProfile.default_backend → cli.defaultBackend
 model:               请求显式(opts.Model) → per-session → per-agent model → per-project(PlannerModel / accessProfile.default_model) → backend.DefaultModel
 ```
+
+> **实装顺序（#3517 校正）**：auth 与 backend 两条链都是 project pin 高于 agent pin，与 project 的 model/backend pin 分层一致：非 general agent 在已绑定项目的 chat 里沿用项目钉住的 backend / accessProfile，项目没钉时才用 agent 自己的（`KeyResolver.ResolveForChat`，`internal/session/routing.go`）。
 
 > **backend 链里的 `accessProfile.default_backend`**（#3299）：只对 key 上还没有 session 的新会话生效；已有 session（含 backend 为空的 RegisterForResume 占位）沿用它记录的 backend，profile 不会把一个可 resume 的会话挪到另一个 CLI。所用 profile 是 auth 链解析出的那一个（含 dashboard 的 profile pick 与 `default_access_profile`）；Takeover 收编外部 Claude CLI 时强制 claude，不受此层影响。
 
@@ -305,7 +307,7 @@ type AgentOpts struct {
 
 ### 6.4 backend 链（PR-A，最小）
 
-复用已有 `backendOverrides` + `wrapperFor`。只需让 project/agent 的 `backend` 默认值参与 `resolveSpawnParamsLocked` 的 backend 优先级——在「per-session override」与「defaultBackend」之间插入「per-agent → per-project」两层。kiro 的 `RequiredNodeCaps=["acp"]` 节点选择（`multi-backend.md §6`）对项目默认 backend 同样生效。
+复用已有 `backendOverrides` + `wrapperFor`。只需让 project/agent 的 `backend` 默认值参与 `resolveSpawnParamsLocked` 的 backend 优先级——在「per-session override」与「defaultBackend」之间插入「per-project → per-agent」两层。kiro 的 `RequiredNodeCaps=["acp"]` 节点选择（`multi-backend.md §6`）对项目默认 backend 同样生效。
 
 ---
 
