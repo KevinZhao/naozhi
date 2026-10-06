@@ -20,6 +20,7 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/ratelimit"
 	"github.com/naozhi/naozhi/internal/replyfmt"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -112,6 +113,12 @@ type Dispatcher struct {
 	// nil allows everyone. Swapped whole by SetAccessPolicy.
 	access      atomic.Pointer[imauth.Policy]
 	denyReplies denyThrottle
+
+	// inboundLimit is the per-sender bucket admitRate draws from
+	// (ratelimit.go); nil when rateLimit is off.
+	inboundLimit     *ratelimit.Limiter
+	rateLimit        RateLimit
+	rateLimitReplies denyThrottle
 }
 
 // keyForChat returns the routed session key for the chat coordinates and
@@ -196,6 +203,8 @@ type DispatcherConfig struct {
 
 	// Access is the IM sender policy; nil allows every sender.
 	Access *imauth.Policy
+	// RateLimit caps each sender's message rate; the zero value is unlimited.
+	RateLimit RateLimit
 }
 
 // ErrTurnsWireupMissing is returned by NewDispatcher when DispatcherConfig.Turns
@@ -263,6 +272,9 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		watchdogTotalKills:    cfg.WatchdogTotalKills,
 		caps:                  caps,
 		fallbackBannerDelay:   fallbackBannerDelayDefault,
+		inboundLimit:          newInboundLimiter(cfg.RateLimit),
+		rateLimit:             cfg.RateLimit,
+		rateLimitReplies:      denyThrottle{window: rateLimitReplyWindow},
 	}
 	d.access.Store(cfg.Access)
 	// agentCommands is immutable after construction, so this snapshot stays
@@ -330,7 +342,8 @@ type preparedInbound struct {
 }
 
 // prepareInbound runs the front-matter common to every dispatch strategy
-// (dedup, group-mention gate, sender authorization, slash commands, agent
+// (dedup, group-mention gate, sender authorization, rate limit, slash
+// commands, agent
 // resolution, accounting, key/opts resolution, image conversion). Returns
 // false when the message was fully handled or dropped here.
 func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMessage) (preparedInbound, bool) {
@@ -371,6 +384,11 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	// Sender authorization: after the mention gate so un-mentioned group
 	// chatter stays a silent drop, before anything that acts on the message.
 	if !d.authorize(ctx, msg, trimmed, lg) {
+		return preparedInbound{}, false
+	}
+	// After authorization so a refused sender spends no tokens, before
+	// commands so command spam is limited too.
+	if !d.admitRate(ctx, msg, trimmed, lg) {
 		return preparedInbound{}, false
 	}
 
