@@ -12,7 +12,7 @@ import (
 )
 
 // newSchedulerRunStoreRefused builds a scheduler over storePath whose runs/ is
-// a symlink, so newRunStore refuses it (#825) while every other state subtree,
+// a symlink, so the run store refuses it (#825) while every other state subtree,
 // runinflight/ included, stays live.
 func newSchedulerRunStoreRefused(t *testing.T, storePath string, router SessionRouter) *Scheduler {
 	t.Helper()
@@ -27,7 +27,7 @@ func newSchedulerRunStoreRefused(t *testing.T, storePath string, router SessionR
 		}
 	}
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: router})
-	if s.runStoreEnabled() {
+	if s.runs.Enabled() {
 		t.Fatal("run store enabled over a symlinked runs/; the fixture does not exercise the disabled mode")
 	}
 	if s.runInflightDir() == "" {

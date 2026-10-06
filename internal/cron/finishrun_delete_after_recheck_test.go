@@ -7,11 +7,13 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cron/runstore"
 )
 
 // TestFinishRun_DeleteAfterRecheckNoOrphanRunsDir pins #2479, the residual
 // window left open by #2058. finishRun's pre-write jobStillExists re-check
-// only covers a DeleteJobByID that lands BEFORE it; runStore.Append then
+// only covers a DeleteJobByID that lands BEFORE it; runstore.Store.Append then
 // runs ensureJobDir (MkdirAll) + WriteFileAtomic outside jobLock (#1335),
 // and DeleteJob drops the jobLock entry after RemoveAll, so a delete landing
 // AFTER the re-check but before the disk write cannot be serialised against
@@ -21,15 +23,32 @@ import (
 // #2479 quotes the TestFinishRun_DeleteRaceNoOrphanRunsDir failure).
 //
 // The fix is a second, post-write re-check in finishRun: when the job is
-// gone after Append returned, runStore.dropOrphanRun removes exactly the
+// gone after Append returned, runstore.Store.DropOrphanRun removes exactly the
 // run file this finishRun wrote and rmdir's runs/<jobID>/ if that left it
-// empty. This test injects the delete via runStore.appendPreWriteHook so
-// the interleaving is fixed, not sampled. Removing the post-write re-check
-// (or dropOrphanRun) makes it fail deterministically.
+// empty. This test injects the delete via runstore.Options.AppendPreWriteHook
+// so the interleaving is fixed, not sampled. Removing the post-write re-check
+// (or DropOrphanRun) makes it fail deterministically.
 func TestFinishRun_DeleteAfterRecheckNoOrphanRunsDir(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "cron.json")
 	s := NewScheduler(SchedulerConfig{StorePath: storePath, MaxJobs: 5}, SchedulerDeps{})
+
+	// The hook fires inside runstore.Store.Append: after finishRun's pre-write
+	// jobStillExists re-check has already passed (#2058) and the record is
+	// marshalled, immediately before ensureJobDir + WriteFileAtomic. This is
+	// exactly the window #2479 describes. The store is swapped for one over the
+	// same StorePath that carries the hook before Start, so no goroutine has
+	// read s.runs yet; jobID is assigned below, before finishRun calls it.
+	var jobID string
+	hookCalls := 0
+	var deleteErr error
+	s.runs = runstore.New(runstore.Options{StorePath: storePath, AppendPreWriteHook: func(gotJobID string) {
+		hookCalls++
+		if gotJobID != jobID {
+			t.Errorf("hook job id = %q, want %q", gotJobID, jobID)
+		}
+		_, deleteErr = s.DeleteJobByID(jobID)
+	}})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -46,23 +65,8 @@ func TestFinishRun_DeleteAfterRecheckNoOrphanRunsDir(t *testing.T) {
 	if err := s.AddJob(j); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	jobID := j.ID
+	jobID = j.ID
 	jobRunDir := filepath.Join(dir, "runs", jobID)
-
-	// The hook fires inside runStore.Append: after finishRun's pre-write
-	// jobStillExists re-check has already passed (#2058) and the record is
-	// marshalled, immediately before ensureJobDir + WriteFileAtomic. This is
-	// exactly the window #2479 describes. Set before finishRun runs; nothing
-	// else touches s concurrently in this test.
-	hookCalls := 0
-	var deleteErr error
-	s.runStore.appendPreWriteHook = func(gotJobID string) {
-		hookCalls++
-		if gotJobID != jobID {
-			t.Errorf("hook job id = %q, want %q", gotJobID, jobID)
-		}
-		_, deleteErr = s.DeleteJobByID(jobID)
-	}
 
 	inflight := s.gateForTest().jobInflight(jobID)
 	if !inflight.running.CompareAndSwap(false, true) {

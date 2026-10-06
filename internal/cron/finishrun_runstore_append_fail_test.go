@@ -16,12 +16,12 @@ import (
 // finishRun's two-step terminal write is non-transactional:
 //  1. recordTerminalResult writes the Job fields (LastResult / LastErrorClass /
 //     RunCounters) to cron_jobs.json and returns jobPersistOK.
-//  2. ONLY when jobPersistOK==true does runStore.Append write
+//  2. ONLY when jobPersistOK==true does runstore.Store.Append write
 //     runs/<jobID>/<runID>.json.
 //
 // The forbidden direction (runs/ record without a Job-side counter) is gated
 // out by jobPersistOK and pinned by the divergence test. This test pins the
-// SAFE direction: Job-side persist SUCCEEDS but runStore.Append FAILS. The
+// SAFE direction: Job-side persist SUCCEEDS but runstore.Store.Append FAILS. The
 // design tolerates this as "over-report" — cron_jobs.json shows the run, the
 // per-state metric bumped, but runs/<jobID>/ lacks the timeline record. It is
 // observable (writeFailedOtherTotal bumps) and self-heals on the next run; it
@@ -51,8 +51,8 @@ func TestFinishRunRunStoreAppendFail(t *testing.T) {
 	}
 	t.Cleanup(s.Stop)
 
-	if s.runStore == nil || !s.runStore.layout.Enabled() {
-		t.Fatal("runStore must be enabled for this test (StorePath set)")
+	if !s.runs.Enabled() {
+		t.Fatal("run store must be enabled for this test (StorePath set)")
 	}
 
 	j := &Job{
@@ -67,20 +67,20 @@ func TestFinishRunRunStoreAppendFail(t *testing.T) {
 		t.Fatalf("AddJob: %v", err)
 	}
 
-	// Make the per-job runs dir read-only so runStore.Append's WriteFileAtomic
+	// Make the per-job runs dir read-only so runstore.Store.Append's WriteFileAtomic
 	// rename fails (POSIX: rename needs write+execute on the containing dir),
 	// while leaving the Job-side persist (cron_jobs.json) untouched. Seed
 	// jobDirEnsured first so Append takes the hot path and errors on the write,
 	// not on an ensureJobDir MkdirAll. Harness mirrors
 	// runstore_write_failed_counter_test.go:38-49.
-	jobDir := filepath.Join(s.runStore.rootDir(), j.ID)
+	jobDir := filepath.Join(s.runs.Dir(), j.ID)
 	if err := os.MkdirAll(jobDir, 0o700); err != nil {
 		t.Fatalf("mkdir job runs dir: %v", err)
 	}
 	// Prime the layout's ensured marker the way production does — one real
 	// EnsureOwnerDir — so the failure under test is the record write, not a
 	// MkdirAll into a dir we just chmodded away.
-	if _, err := s.runStore.layout.EnsureOwnerDir(j.ID); err != nil {
+	if _, err := s.runs.EnsureJobDirForTest(j.ID); err != nil {
 		t.Fatalf("prime ensured marker: %v", err)
 	}
 	if err := os.Chmod(jobDir, 0o500); err != nil {
@@ -88,11 +88,11 @@ func TestFinishRunRunStoreAppendFail(t *testing.T) {
 	}
 	defer os.Chmod(jobDir, 0o700) //nolint:errcheck // best-effort so t.TempDir RemoveAll works.
 
-	// Baselines: the package-global metric counter and the runStore's
+	// Baselines: the package-global metric counter and the run store's
 	// write-failed totals. Assert deltas, not absolutes — other tests in the
 	// package may have bumped the global expvar.
 	succ0 := metrics.CronRunSucceededTotal.Value()
-	df0, ot0 := s.runStore.WriteFailedTotals()
+	df0, ot0 := s.runs.WriteFailedTotals()
 
 	inflight := s.gateForTest().jobInflight(j.ID)
 	if !inflight.running.CompareAndSwap(false, true) {
@@ -149,7 +149,7 @@ func TestFinishRunRunStoreAppendFail(t *testing.T) {
 
 	// (c) Append failure is observable: the "other" (non-ENOSPC, here EACCES)
 	// write-failed counter bumps by exactly 1; diskFull stays put.
-	df1, ot1 := s.runStore.WriteFailedTotals()
+	df1, ot1 := s.runs.WriteFailedTotals()
 	if ot1 != ot0+1 {
 		t.Errorf("writeFailedOtherTotal: want +1, got delta %d", ot1-ot0)
 	}
