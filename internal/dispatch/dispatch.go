@@ -649,10 +649,17 @@ func (d *Dispatcher) readTurnImages(replyText string) ([]platform.Image, string)
 }
 
 // decorateReplyText post-processes the raw CLI result text for IM delivery:
-// turnReplyText's answer or failure notice, then the merge-group chip and the
-// per-session ReplyFooter. Returns "" when nothing should be sent (#656).
+// turnReplyText's answer or failure notice, then the partial-reply and
+// merge-group chips and the per-session ReplyFooter. Returns "" when nothing
+// should be sent (#656).
 func (d *Dispatcher) decorateReplyText(result *clievent.SendResult, sess turn.Session) string {
-	replyText := turnReplyText(result)
+	replyText, answer := turnReplyText(result)
+	// claude cut the answer off (aborted_streaming keeps the partial text);
+	// keyed on CLIAborted, not Aborted, which a late interrupt can stamp on
+	// a turn that finished. A notice or error text is not a partial answer.
+	if answer && result.CLIAborted() && replyText != "" {
+		replyText += replyChipPartial
+	}
 	// Head slot of a merge group: append a small chip so the user knows the
 	// single bot bubble covers N messages.
 	if result.MergedCount > 1 && replyText != "" {
@@ -671,6 +678,9 @@ func (d *Dispatcher) decorateReplyText(result *clievent.SendResult, sess turn.Se
 	}
 	return replyText
 }
+
+// replyChipPartial marks a reply claude aborted part-way.
+const replyChipPartial = "\n\n*— 已中断，以上为部分回复*"
 
 // SendSplitReply sends a reply, splitting into multiple messages if too long.
 func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, to ReplyDest, text string) {

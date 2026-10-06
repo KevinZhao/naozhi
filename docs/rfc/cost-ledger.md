@@ -180,7 +180,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 ### 5.3 cron 本地 run：与 session 同源（修 P2）
 
-- `cron.Session` 的可选能力 `cron.CostWindow`（`BeginCostWindow()` / `EndCostWindow() costledger.Increment`，wireup adapter 转发）；没有它的会话（测试桩）退回可选的 `CostReporter`（`CostTotals()` 前后差分），两者都没有记 0。
+- `cron.Session` 的可选能力 `cron.CostWindow`（`BeginCostWindow()` / `EndCostWindow() costledger.Increment`，wireup adapter 转发）；没有它的会话（测试桩）记 0。
 - `execSend` 在 Send **前** 开窗口、Send **返回处立即** 关窗口（经 adapter 持有的 `*ManagedSession` 指针，**不查 router**：success/error 路径在 finishRun 之前都会 `router.Reset(key)` 或释放进程，按 key 查会读空），再加一个 defer 兜底，Send panic 也会关窗口；增量随 `runOutcome.costInc` 传给 finishRun。窗口在 Reset / 释放进程之前关闭，所以被杀进程的 partial 由会话记账（§5.6）。cron run 之间由 per-job CAS gate 互斥；同一 cron session 上来自 dashboard 的手动 turn 只靠 `sendMu` 串行，在 cron 关窗口前报出 result 的会计入该 run（可接受：与 run 共享进程上下文），其余按 §5.0 以 `Source=session` 入账。leak-recovery 两回合都在 Send 内。
 - 窗口关闭后才记到的花费（迟到 result、partial）只出现在账本的 session 行里，不回写已经落盘的 `CronRun.CostUSD`：run 记录在终态写一次，账本是权威总额。
 - `finishRun` 写 `CronRun.CostUSD = delta.USD`（**语义从累计值变为增量**；`fresh_context=true` 的 job 前后数值不变，persistent job 的历史值本来就错），并 `ledger.Append(Entry{Source: cron_local, Kind: turn, JobID, RunID, Workspace: job.WorkDir stable id, Backend: job.Backend, Unit/Amount 按 delta 分量各一条, Models: delta.Models})`。
