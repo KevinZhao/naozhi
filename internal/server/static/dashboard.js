@@ -607,7 +607,7 @@ const CHEATSHEET_ENTRIES = [
   { keys: ['/cd'], desc: '切换工作目录（/cd <path>；受 session.cwd 的 allowed_root 限制）' },
   { keys: ['/pwd'], desc: '显示当前工作目录' },
   { keys: ['/project'], desc: '绑定会话到项目（/project <name> 或 /project off 解绑）' },
-  { keys: ['/cron'], desc: '定时任务：/cron add "<schedule>" <prompt> · /cron list · /cron del <id>' },
+  { keys: ['/cron'], desc: '定时任务：/cron add [--keep-context] "<schedule>" <prompt> · /cron list · /cron del|pause|resume <id> · /cron mode <id> fresh|keep' },
   { keys: ['/help'], desc: '显示可用命令' },
   { keys: ['/stop'], desc: '中断当前回复（保留排队消息）；dashboard 上用双击 Esc' },
   { section: '上传' },
@@ -800,7 +800,7 @@ function selectSession(key, node) {
   }
 }
 
-// --- Markdown export (UX P2) ---
+// --- Markdown export ---
 
 // Kinds the export drops (clievent kindTable's MarkdownIgnore column says why).
 const MARKDOWN_EXPORT_IGNORE = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_MD_IGNORE);
@@ -1030,11 +1030,11 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
   // > agent name > key tail.
   const displayName = s.user_label || s.summary || s.last_prompt || (agentIsGeneric ? '' : s.agent) || keyTailDisplay(keyParts) || selection.key || '';
 
-  // Detail line: left = CLI name + version, middle = backend chip (multi-
-  // backend mode only) + IM origin chip (only for real IM threads —
-  // feishu/slack/discord/weixin), right = cost (formatted per session's
-  // cost_unit). originBadgeHtml / backendChipHtml return '' when the
-  // session/deployment doesn't warrant a chip so the layout stays clean.
+  // Detail line: CLI label + model on the left, then the IM origin chip (real
+  // IM threads only), exit chip, git/PR mounts, effort/diag mounts, turn timer
+  // and run stats. There is no backend chip (cliLabel names the backend) and
+  // no cost chip: total_cost_usd misreads a Bedrock bill, so #header-runstats
+  // carries the run history (N 轮 · 均 X · 最长 X) instead.
   const effCLIName = s.cli_name || backendDisplayName(pendingBackendID(selection.key, selection.node)) || serverInfo.defaultCLIName;
   const effCLIVersion = s.cli_version || backendDisplayVersion(pendingBackendID(selection.key, selection.node)) || serverInfo.defaultCLIVersion;
   // The version is debug info: it lives in the hover title (and the settings
@@ -1056,14 +1056,7 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
     ? '<span class="model-label nz-clickable" id="header-model" data-action="tuning-model" title="' + escAttr(rawModel + ' — 点击切换模型') + '">· ' + esc(compactModel) + '</span>'
     : '<span class="model-label model-label-unset nz-clickable" id="header-model" data-action="tuning-model" title="model 未在 system/init 上报；可能仍在 spawn 中 — 点击可指定模型">· (模型未配置)</span>';
   const headerOriginBadge = originBadgeHtml(selection.key);
-  // No backend chip: cliLabel already names the backend.
-  const headerBackendChip = '';
-  // No cost chip: the CLI's total_cost_usd misreads a Bedrock bill, so
-  // renderSessionRunsPanel fills #header-runstats with the run history
-  // (N 轮 · 均 X · 最长 X). No context-usage bar either (low signal).
-  const ctxBarHtml = '';
-  // Multi-Backend RFC §8.3 D7: turn duration timer (kiro real value;
-  // claude 0 until estimator lands → cell hidden).
+  // Last turn's duration; hidden when 0 or absent (claude does not report it).
   let turnTimerHtml = '';
   if (typeof s.turn_duration_ms === 'number' && s.turn_duration_ms > 0) {
     const sec = (s.turn_duration_ms / 1000).toFixed(1);
@@ -1078,11 +1071,9 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
   const renameBtn = canRename
     ? '<button type="button" class="btn-rename" data-action="session-rename" title="重命名会话" aria-label="重命名会话">' + ICONS.edit + '</button>'
     : '';
-  // UX P2 Markdown export: any session that has an addressable key can be
-  // exported — no dependency on managed status because the /api/sessions/events
-  // endpoint serves both managed and discovered keys uniformly. The button
-  // shares the .btn-rename hover-reveal treatment so the header stays calm
-  // by default.
+  // Any addressable key, managed or discovered, can be exported: the
+  // /api/sessions/events endpoint serves both. The button shares the
+  // .btn-rename hover-reveal treatment so the header stays calm by default.
   const downloadBtn = selection.key
     ? '<button type="button" class="btn-rename btn-download" data-action="session-download-md" title="导出会话为 Markdown" aria-label="导出会话为 Markdown">' + ICONS.download + '</button>'
     : '';
@@ -1093,7 +1084,6 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
       '<h2>' + esc(displayName) + renameBtn + downloadBtn + '</h2>' +
       '<div class="detail">' +
         '<span class="detail-left">' + cliLabel + modelLabel + '</span>' +
-        headerBackendChip +
         headerOriginBadge +
         '<span class="detail-exit" id="header-exit">' + sessionExitChipHtml(s.state, s.death_reason, s.death_detail, s.startup_failure) + '</span>' +
         // Git branch / worktree chip. Built empty here and filled
@@ -1101,7 +1091,6 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
         // stays empty (collapses via :empty) for non-repo workspaces and
         // remote-node sessions.
         '<span class="detail-git" id="header-git"></span><span class="detail-pr" id="header-pr"></span>' +
-        ctxBarHtml +
         // kiro thinking-effort tier. Built empty and filled by
         // setHeaderEffortChip (called below and from fetchSessions) so a tier
         // change lands without waiting for a header rebuild; collapses via
