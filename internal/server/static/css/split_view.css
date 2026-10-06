@@ -580,6 +580,10 @@
 .pr-chip-more{opacity:.75;cursor:help}
 .sc-type-tag{display:inline-block;padding:1px 5px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;color:var(--nz-text-mute);background:var(--nz-bg-2);letter-spacing:.2px;flex-shrink:0;margin-left:auto}
 .sc-agents{display:inline-flex;align-items:center;gap:2px;padding:1px 5px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;color:var(--nz-chip-info-fg);background:var(--nz-chip-info-bg);flex-shrink:0;margin-left:auto}
+/* Running workflows on a card other than the open one (workflow-dashboard RFC PR-15). */
+.sc-wf{display:inline-flex;align-items:center;gap:2px;padding:1px 5px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;font-variant-numeric:tabular-nums;color:var(--nz-status-running);background:var(--nz-bg-2);flex-shrink:0;margin-left:auto}
+.sc-agents+.sc-wf{margin-left:0}
+.session-card.active .sc-wf{display:none}
 /* R110-P1 Home panel (idle main area): "最近会话" compact list that appears
    below the cold-start CTA when sessionsData has entries. Keeps density low
    (max 5 rows, 36px each) so it doesn't dominate the empty state, but gives

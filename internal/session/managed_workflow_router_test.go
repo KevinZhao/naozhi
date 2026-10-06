@@ -751,3 +751,107 @@ func TestCleanup_WorkflowObservationIsActivity(t *testing.T) {
 		t.Error("Cleanup expired a CLI whose workflow reported 10s ago")
 	}
 }
+
+// TestSnapshot_WorkflowActivity is Q12: between turns the activity line is
+// the latest started running workflow's progress; a running turn keeps its
+// tool activity, and a session with none running (ended or unknown) keeps
+// the last one.
+func TestSnapshot_WorkflowActivity(t *testing.T) {
+	running := func(id, name string, started int64, done, total int) *workflow.Workflow {
+		w := wfEntry(id, workflow.StatusRunning)
+		w.Name, w.StartedAt, w.Counts = name, started, workflow.Counts{Total: total, Done: done}
+		return w
+	}
+	paused := running("w5", "held", wfT0, 2, 3)
+	paused.Status = workflow.StatusPaused
+	ended := wfEntry("w4", workflow.StatusCompleted)
+	ended.Name, ended.StartedAt, ended.EndedAt = "finished", wfT0+3, wfT0+4
+
+	cases := []struct {
+		name  string
+		state cli.ProcessState
+		wfs   []*workflow.Workflow
+		want  string
+	}{
+		{"idle parent, latest started wins", cli.StateReady, []*workflow.Workflow{ended, running("w1", "older", wfT0, 1, 1), running("w2", "probe", wfT0+1, 5, 8), running("w6", "unstamped", 0, 0, 1)}, "Workflow probe · 5/8"},
+		{"unnamed workflow", cli.StateReady, []*workflow.Workflow{running("w3", "", wfT0, 0, 2)}, "Workflow · 0/2"},
+		{"paused counts as running", cli.StateReady, []*workflow.Workflow{paused}, "Workflow held · 2/3"},
+		{"running turn keeps its tool", cli.StateRunning, []*workflow.Workflow{running("w2", "probe", wfT0, 5, 8)}, "Read · main.go"},
+		{"none running", cli.StateReady, []*workflow.Workflow{ended, wfEntry("w7", workflow.StatusUnknown)}, "Read · main.go"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tp := NewTestProcess()
+			tp.EventLog.Append(clievent.EventEntry{Type: "tool_use", Summary: "Read · main.go"})
+			p := &setProc{}
+			proc := setProcess{tp, p}
+			s := injectSession(wfRouter(t), "feishu:direct:alice:general", proc)
+			// Cleanups run last first: the turn ends before Shutdown,
+			// which would otherwise wait it out.
+			tp.SetState(tc.state)
+			t.Cleanup(func() { tp.SetState(cli.StateReady) })
+			bookWorkflows(s, proc, "", nil, nil)
+			p.publish(tc.wfs...)
+			if got := s.Snapshot().LastActivity; got != tc.want {
+				t.Errorf("LastActivity = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWorkflowSnapshotRefresh: a count change reaches /api/sessions as a
+// version bump at most workflowSummaryMinInterval later, carrying the new
+// counts and activity line; a terminal status bumps it at once.
+func TestWorkflowSnapshotRefresh(t *testing.T) {
+	r := wfRouter(t)
+	p := &setProc{}
+	proc := setProcess{NewTestProcess(), p}
+	const key = "feishu:direct:alice:general"
+	s := injectSession(r, key, proc)
+	rig := newWFRig(t)
+	s.workflows.Store(rig.b)
+	bookWorkflows(s, proc, "", func() { r.ss.Update(markChanged); r.notifyChange() }, r.BumpVersion)
+	wf := func(st workflow.Status, done int) *workflow.Workflow {
+		w := wfEntry("w1", st)
+		w.Name, w.Counts = "probe", workflow.Counts{Total: 3, Done: done}
+		return w
+	}
+	listed := func() (SessionSnapshot, uint64) {
+		t.Helper()
+		snaps, v := r.ListSessionsWithVersion()
+		for _, sn := range snaps {
+			if sn.Key == key {
+				return sn, v
+			}
+		}
+		t.Fatalf("%s not listed", key)
+		return SessionSnapshot{}, 0
+	}
+	p.publish(wf(workflow.StatusRunning, 1))
+	rig.fire()
+	_, v0 := listed()
+
+	p.publish(wf(workflow.StatusRunning, 2))
+	if d, _ := rig.timer.last(); d <= 0 || d > workflowSummaryMinInterval {
+		t.Fatalf("count change armed %v, want within %v", d, workflowSummaryMinInterval)
+	}
+	if _, v := listed(); v != v0 {
+		t.Errorf("version moved %d -> %d before the count emission", v0, v)
+	}
+	rig.advance(workflowSummaryMinInterval)
+	rig.fire()
+	snap, v1 := listed()
+	if v1 <= v0 || len(snap.Workflows) != 1 || snap.Workflows[0].Counts.Done != 2 || snap.LastActivity != "Workflow probe · 2/3" {
+		t.Fatalf("after the count emission: version %d -> %d, workflows %+v, activity %q", v0, v1, snap.Workflows, snap.LastActivity)
+	}
+
+	p.publish(wf(workflow.StatusCompleted, 3))
+	if d, _ := rig.timer.last(); d != 0 {
+		t.Fatalf("terminal status armed %v, want an immediate emission", d)
+	}
+	rig.fire()
+	snap, v2 := listed()
+	if v2 <= v1 || snap.Workflows[0].Status != workflow.StatusCompleted || snap.LastActivity != "" {
+		t.Errorf("after the terminal emission: version %d -> %d, status %s, activity %q", v1, v2, snap.Workflows[0].Status, snap.LastActivity)
+	}
+}
