@@ -61,7 +61,7 @@ func viewOf(ev clievent.Event, done bool) wfView {
 	}
 }
 
-func decodeOne(t *testing.T, line string) (clievent.Event, bool) {
+func decodeOneDone(t *testing.T, line string) (clievent.Event, bool) {
 	t.Helper()
 	events, done, err := (&ClaudeProtocol{}).ReadEvent(line)
 	if err != nil {
@@ -106,7 +106,7 @@ func TestReadEvent_WorkflowProbeGolden(t *testing.T) {
 	lines := readWorkflowProbe(t)
 	events := make([]clievent.Event, len(lines)+1)
 	for i, line := range lines {
-		ev, done := decodeOne(t, line)
+		ev, done := decodeOneDone(t, line)
 		events[i+1] = ev
 		if got := viewOf(ev, done); !reflect.DeepEqual(got, want[i+1]) {
 			t.Errorf("line %d:\n got %+v\nwant %+v", i+1, got, want[i+1])
@@ -241,7 +241,7 @@ func TestReadEvent_WorkflowDecodeTolerance(t *testing.T) {
 // costs only itself.
 func TestReadEvent_WorkflowPartialKeepsOtherItems(t *testing.T) {
 	t.Parallel()
-	ev, _ := decodeOne(t, snapshotFrame(`[{"type":"workflow_agent","index":1,"label":"A","agentId":"a1","tokens":"x","toolCalls":4},{"type":"workflow_agent","index":2,"label":"B","agentId":"a2","tokens":3}]`, `,"last_tool_name":"A"`))
+	ev, _ := decodeOneDone(t, snapshotFrame(`[{"type":"workflow_agent","index":1,"label":"A","agentId":"a1","tokens":"x","toolCalls":4},{"type":"workflow_agent","index":2,"label":"B","agentId":"a2","tokens":3}]`, `,"last_tool_name":"A"`))
 	want := []clievent.WorkflowItem{
 		{Type: clievent.WorkflowItemAgent, Index: 1, Label: "A", AgentID: "a1", ToolCalls: 4},
 		{Type: clievent.WorkflowItemAgent, Index: 2, Label: "B", AgentID: "a2", Tokens: 3},
@@ -259,7 +259,7 @@ func TestReadEvent_WorkflowLaunch(t *testing.T) {
 		return `{"type":"user","message":{"role":"user","content":[{"tool_use_id":"t1","type":"tool_result","content":"x"}]},"tool_use_result":` + tur + `}`
 	}
 	launch := `{"status":"async_launched","taskId":"w1","taskType":"local_workflow","workflowName":"probe","runId":"wf_1","summary":"tiny","transcriptDir":"/d","scriptPath":"/s/probe.js"}`
-	if ev, _ := decodeOne(t, user(launch)); ev.WorkflowLaunch == nil ||
+	if ev, _ := decodeOneDone(t, user(launch)); ev.WorkflowLaunch == nil ||
 		*ev.WorkflowLaunch != (clievent.WorkflowLaunch{TaskID: "w1", WorkflowName: "probe", RunID: "wf_1", Summary: "tiny", TranscriptDir: "/d"}) {
 		t.Errorf("launch = %+v", ev.WorkflowLaunch)
 	}
@@ -271,7 +271,7 @@ func TestReadEvent_WorkflowLaunch(t *testing.T) {
 		"no tool_use_result": `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"\"async_launched\""}]}}`,
 		"assistant frame":    `{"type":"assistant","message":{"role":"assistant","content":[]},"tool_use_result":` + launch + `}`,
 	} {
-		if ev, _ := decodeOne(t, line); ev.WorkflowLaunch != nil {
+		if ev, _ := decodeOneDone(t, line); ev.WorkflowLaunch != nil {
 			t.Errorf("%s: WorkflowLaunch = %+v, want nil", name, ev.WorkflowLaunch)
 		}
 	}
@@ -339,14 +339,14 @@ func bigSnapshot(n int, skipKey bool) string {
 func TestBigSnapshotDecodes(t *testing.T) {
 	t.Parallel()
 	line := bigSnapshot(398, false)
-	ev, _ := decodeOne(t, line)
+	ev, _ := decodeOneDone(t, line)
 	if len(ev.WorkflowProgress) != 404 || ev.WorkflowDecode != clievent.WorkflowDecodeOK {
 		t.Fatalf("decoded %d items (%v), want 404 OK", len(ev.WorkflowProgress), ev.WorkflowDecode)
 	}
 	if n := len(line); n < 400<<10 || n > 600<<10 {
 		t.Errorf("398-agent line is %d bytes, want the real snapshot's ~496KB", n)
 	}
-	if ev, _ := decodeOne(t, bigSnapshot(398, true)); ev.WorkflowProgress != nil {
+	if ev, _ := decodeOneDone(t, bigSnapshot(398, true)); ev.WorkflowProgress != nil {
 		t.Error("skipKey line still decoded a snapshot")
 	}
 }

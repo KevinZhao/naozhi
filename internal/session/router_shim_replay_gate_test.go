@@ -29,6 +29,7 @@ func TestReplayLinkerTasks_DecodesOnlyTaskStartedLines(t *testing.T) {
 	const (
 		agentStarted = `{"type":"system","subtype":"task_started","task_id":"a7k2m9p4q","tool_use_id":"toolu_agent_1","description":"Explore: map the repo","task_type":"local_agent"}`
 		lateStarted  = `{"type":"system","subtype":"task_started","task_id":"a0000001z","tool_use_id":"toolu_agent_2","description":"reviewer: check","task_type":"local_agent"}`
+		noTaskID     = `{"type":"system","subtype":"task_started","tool_use_id":"toolu_agent_3","description":"x","task_type":"local_agent"}`
 		progress     = `{"type":"system","subtype":"task_progress","task_id":"w113pvmto","description":"Ask: A","summary":"tiny probe","workflow_progress":[{"type":"workflow_agent","index":1,"label":"A","state":"start"}]}`
 		// A tool_use whose input names task_started is not a task_started frame.
 		toolUse = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"mcp__x","input":{"type":"system","subtype":"task_started","task_id":"a9","tool_use_id":"t9"}}]}}`
@@ -40,6 +41,7 @@ func TestReplayLinkerTasks_DecodesOnlyTaskStartedLines(t *testing.T) {
 	replays = append(replays,
 		shim.ServerMsg{Type: "replay", Line: toolUse},
 		shim.ServerMsg{Type: "replay", Line: agentStarted},
+		shim.ServerMsg{Type: "replay", Line: noTaskID},
 		shim.ServerMsg{Type: "replay", Line: lateStarted},
 	)
 	proto := &countingProtocol{Protocol: &cli.ClaudeProtocol{}}
@@ -50,7 +52,7 @@ func TestReplayLinkerTasks_DecodesOnlyTaskStartedLines(t *testing.T) {
 	if want := []string{"a7k2m9p4q", "a0000001z"}; !slices.Equal(got, want) {
 		t.Errorf("replayLinkerTasks = %v, want %v", got, want)
 	}
-	if proto.decoded != 3 {
-		t.Errorf("decoded %d of %d replay lines, want the 3 task_started ones", proto.decoded, len(replays))
+	if proto.decoded != 4 {
+		t.Errorf("decoded %d of %d replay lines, want the 4 task_started ones", proto.decoded, len(replays))
 	}
 }

@@ -582,7 +582,7 @@ type wireWorkflowLaunch struct {
 func parseWorkflowLaunch(line string) *clievent.WorkflowLaunch {
 	var w wireWorkflowLaunch
 	if json.Unmarshal(stringToBytesUnsafe(line), &w) != nil || w.TUR == nil ||
-		w.TUR.Status != "async_launched" || w.TUR.TaskType != "local_workflow" {
+		w.TUR.Status != "async_launched" || w.TUR.TaskType != TaskTypeWorkflow {
 		return nil
 	}
 	return &clievent.WorkflowLaunch{
