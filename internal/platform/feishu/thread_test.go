@@ -20,14 +20,14 @@ import (
 
 // topicCases: only a message with a thread_id is in a topic; the topic is
 // named by its root message, which is the message itself when it opens the
-// topic. A quote reply has a root but no thread and stays in the chat. A
-// message outside any topic would open one under itself (wantSelf).
+// topic. A quote reply has a root but no thread and stays in the chat. Only
+// a plain message would open a topic under itself (wantSelf).
 var topicCases = []struct {
 	name, threadID, rootID, want, wantSelf string
 }{
 	{"topic reply", "omt_1", "om_root", "om_root", ""},
 	{"topic opener", "omt_1", "", "om_self", ""},
-	{"quote reply", "", "om_root", "", "om_self"},
+	{"quote reply", "", "om_root", "", ""},
 	{"plain message", "", "", "", "om_self"},
 }
 
@@ -46,11 +46,11 @@ func TestTopicRef(t *testing.T) {
 func TestSelfTopicRef(t *testing.T) {
 	t.Parallel()
 	for _, tc := range topicCases {
-		if got := selfTopicRef(tc.threadID, "om_self"); got != tc.wantSelf {
+		if got := selfTopicRef(tc.threadID, tc.rootID, "om_self"); got != tc.wantSelf {
 			t.Errorf("%s: selfTopicRef = %q, want %q", tc.name, got, tc.wantSelf)
 		}
 	}
-	if got := selfTopicRef("", "om_"+strings.Repeat("x", maxTopicRefLen)); got != "" {
+	if got := selfTopicRef("", "", "om_"+strings.Repeat("x", maxTopicRefLen)); got != "" {
 		t.Errorf("over-long message id: selfTopicRef = %q, want dropped", got)
 	}
 }

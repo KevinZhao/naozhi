@@ -234,11 +234,12 @@ func topicRef(threadID, rootID, messageID string) string {
 	return ref
 }
 
-// selfTopicRef is the topicRef a reply would open under a message outside
-// any topic (no thread_id): the message itself, the root_id of that topic's
-// replies.
-func selfTopicRef(threadID, messageID string) string {
-	if threadID != "" || len(messageID) > maxTopicRefLen {
+// selfTopicRef is the topicRef a reply would open under a plain message
+// (neither thread_id nor root_id): the message itself, the root_id of that
+// topic's replies. A quote reply gets none, since which root a topic under
+// it reports is not pinned down, and stays answered in the chat.
+func selfTopicRef(threadID, rootID, messageID string) string {
+	if threadID != "" || rootID != "" || len(messageID) > maxTopicRefLen {
 		return ""
 	}
 	return messageID
@@ -314,7 +315,7 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 		ThreadID:  topicRef(larkcore.StringValue(msg.ThreadId), larkcore.StringValue(msg.RootId), messageID),
 		MentionMe: hasMention,
 	}
-	result.SelfThread = selfTopicRef(larkcore.StringValue(msg.ThreadId), messageID)
+	result.SelfThread = selfTopicRef(larkcore.StringValue(msg.ThreadId), larkcore.StringValue(msg.RootId), messageID)
 
 	switch msgType {
 	case "text":

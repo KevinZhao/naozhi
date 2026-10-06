@@ -373,7 +373,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			ThreadID:  topicRef(event.Message.ThreadID, event.Message.RootID, event.Message.MessageID),
 			MentionMe: hasMention,
 		}
-		msg.SelfThread = selfTopicRef(event.Message.ThreadID, event.Message.MessageID)
+		msg.SelfThread = selfTopicRef(event.Message.ThreadID, event.Message.RootID, event.Message.MessageID)
 
 		switch msgType {
 		case "text":
