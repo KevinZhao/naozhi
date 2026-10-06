@@ -31,6 +31,9 @@ type sendParams struct {
 	// new-session picker ("" = global default). One-shot: recorded per key and
 	// consumed by spawnSession. RFC project-access-profile §8.2.
 	AccessProfile string
+	// TraceID names the send in the turn's logs: the HTTP request's
+	// X-Request-ID trace; "" lets turn mint one (WebSocket, relay).
+	TraceID string
 }
 
 // sendAckStatus describes the immediate ack status for a queued send.
@@ -167,7 +170,7 @@ func (e *sendEngine) prepareSend(p sendParams) (cmd turn.Cmd, reset bool, err er
 // submit hands a prepared send to the Orchestrator on the engine's ctx and
 // TrackSend; /urgent's text loses its prefix and preempts.
 func (e *sendEngine) submit(p sendParams, cmd turn.Cmd, origin turn.Origin) turn.Ack {
-	r := turn.Request{Key: p.Key, Text: p.Text, Images: p.Images, Origin: origin}
+	r := turn.Request{Key: p.Key, Text: p.Text, Images: p.Images, Origin: origin, TraceID: p.TraceID}
 	if cmd.Kind == turn.CmdUrgent {
 		r.Text, r.Priority = cmd.Arg, turn.PriorityNow
 	}
