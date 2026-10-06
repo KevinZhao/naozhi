@@ -360,7 +360,7 @@
     "lateBindings": 0
   },
   "render_md.js": {
-    "lines": 1025,
+    "lines": 1021,
     "maxFnLines": 89,
     "maxIifeLines": 0,
     "fnOver100": 0,

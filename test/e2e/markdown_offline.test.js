@@ -25,13 +25,16 @@ test.beforeEach(({ }, testInfo) => {
   }
 });
 
+/** @typedef {'katex' | 'katexCSS' | 'mermaid'} Asset */
+
 /**
  * Opens session A with the CDN routed through serve, which answers each
- * request (counted per asset) or aborts it. The page clock is installed so
- * the retry delay can be skipped.
+ * request (counted per asset) or aborts it; anything else on the CDN (the
+ * KaTeX fonts) is aborted. The page clock is installed so the retry delay can
+ * be skipped.
  *
  * @param {import('@playwright/test').Browser} browser
- * @param {(asset: 'katex' | 'mermaid', n: number, route: import('@playwright/test').Route) => Promise<void>} serve
+ * @param {(asset: Asset, n: number, route: import('@playwright/test').Route) => Promise<void>} serve
  */
 async function openOffline(browser, serve) {
   const mock = await startMockServer({
@@ -43,12 +46,14 @@ async function openOffline(browser, serve) {
     },
   });
   const ctx = await browser.newContext();
-  const requests = { katex: 0, mermaid: 0 };
-  await ctx.route(/cdn\.jsdelivr\.net\/npm\/(katex|mermaid)@[^/]+\/dist\/[^/]+\.min\.js$/, route => {
-    const asset = /** @type {'katex' | 'mermaid'} */ (route.request().url().includes('/katex@') ? 'katex' : 'mermaid');
+  const requests = { katex: 0, katexCSS: 0, mermaid: 0 };
+  await ctx.route(/cdn\.jsdelivr\.net/, route => route.abort());
+  await ctx.route(/cdn\.jsdelivr\.net\/npm\/(katex|mermaid)@[^/]+\/dist\/[^/]+\.min\.(js|css)$/, route => {
+    const url = route.request().url();
+    /** @type {Asset} */
+    const asset = url.includes('/mermaid@') ? 'mermaid' : url.endsWith('.css') ? 'katexCSS' : 'katex';
     return serve(asset, ++requests[asset], route);
   });
-  await ctx.route(/cdn\.jsdelivr\.net\/npm\/katex@.*\.css$/, route => route.abort());
   const page = await ctx.newPage();
   await page.clock.install();
   await page.goto(mock.url + '/dashboard');
@@ -62,11 +67,20 @@ async function openOffline(browser, serve) {
 }
 
 /** @param {import('@playwright/test').Page} page */
-async function scriptCounts(page) {
+async function assetCounts(page) {
   return page.evaluate(() => ({
     katex: document.querySelectorAll('script[src*="katex.min.js"]').length,
+    katexCSS: document.querySelectorAll('link[href*="katex.min.css"]').length,
     mermaid: document.querySelectorAll('script[src*="mermaid.min.js"]').length,
   }));
+}
+
+/**
+ * @param {string} type
+ * @param {Buffer} body
+ */
+function fulfill(type, body) {
+  return { status: 200, headers: { 'Content-Type': type, 'Access-Control-Allow-Origin': '*' }, body };
 }
 
 /**
@@ -102,29 +116,34 @@ test('offline: the diagram and formula show their source, and re-renders inject 
     await expect(page.locator('#events-scroll pre.mermaid-pending.md-render-unavailable')).toHaveCount(6);
     await expect(page.locator('#events-scroll .katex-pending.md-render-unavailable')).toHaveCount(6);
     await expect(page.locator('#events-scroll pre.mermaid-pending').last()).toHaveText(DIAGRAM);
-    expect(await scriptCounts(page)).toEqual({ katex: 1, mermaid: 1 });
-    expect(requests).toEqual({ katex: 1, mermaid: 1 });
+    expect(await assetCounts(page)).toEqual({ katex: 1, katexCSS: 1, mermaid: 1 });
+    expect(requests).toEqual({ katex: 1, katexCSS: 1, mermaid: 1 });
 
     // One retry falls due after the delay; it fails too, and that is the last.
     await page.clock.fastForward(RETRY);
-    await expect.poll(() => scriptCounts(page)).toEqual({ katex: 2, mermaid: 2 });
-    await expect.poll(() => ({ ...requests })).toEqual({ katex: 2, mermaid: 2 });
+    await expect.poll(() => assetCounts(page)).toEqual({ katex: 2, katexCSS: 2, mermaid: 2 });
+    await expect.poll(() => ({ ...requests })).toEqual({ katex: 2, katexCSS: 2, mermaid: 2 });
     await page.clock.fastForward(RETRY);
     await rerender(page, 5, 'b');
     await page.clock.fastForward(RETRY);
     await expect(page.locator('#events-scroll pre.mermaid-pending.md-render-unavailable')).toHaveCount(11);
-    expect(await scriptCounts(page)).toEqual({ katex: 2, mermaid: 2 });
-    expect(requests).toEqual({ katex: 2, mermaid: 2 });
+    expect(await assetCounts(page)).toEqual({ katex: 2, katexCSS: 2, mermaid: 2 });
+    expect(requests).toEqual({ katex: 2, katexCSS: 2, mermaid: 2 });
   } finally {
     await cleanup();
   }
 });
 
-test('a failed KaTeX load heals on the retry', async ({ browser }) => {
+// The whole CDN host is down at first and back for the retry. The stylesheet
+// has to come back with the script: KaTeX markup without it shows the MathML
+// copy next to the HTML one.
+test('a failed KaTeX load heals on the retry, stylesheet included', async ({ browser }) => {
   const katexJS = fs.readFileSync(path.join(KATEX_DIST, 'katex.min.js'));
-  const { page, requests, cleanup } = await openOffline(browser, (asset, n, route) => (asset === 'katex' && n === 2
-    ? route.fulfill({ status: 200, headers: { 'Content-Type': 'application/javascript', 'Access-Control-Allow-Origin': '*' }, body: katexJS })
-    : route.abort()));
+  const katexCSS = fs.readFileSync(path.join(KATEX_DIST, 'katex.min.css'));
+  const { page, requests, cleanup } = await openOffline(browser, (asset, n, route) => {
+    if (n !== 2 || asset === 'mermaid') return route.abort();
+    return route.fulfill(asset === 'katex' ? fulfill('application/javascript', katexJS) : fulfill('text/css', katexCSS));
+  });
   try {
     const ktx = page.locator('#events-scroll .katex-pending').first();
     await expect(ktx).toHaveClass(/md-render-unavailable/);
@@ -132,9 +151,33 @@ test('a failed KaTeX load heals on the retry', async ({ browser }) => {
     await expect(ktx.locator('.katex')).toBeVisible();
     await expect(ktx).not.toHaveClass(/md-render-unavailable/);
     await expect(ktx).toHaveAttribute('title', '');
-    expect(requests.katex).toBe(2);
+    await expect.poll(() => ({ ...requests })).toEqual({ katex: 2, katexCSS: 2, mermaid: 2 });
+    // The stylesheet is live: the MathML copy is clipped out of view.
+    expect(await ktx.locator('.katex-mathml').evaluate(el => getComputedStyle(el).position)).toBe('absolute');
     // Mermaid's retry fails, and the diagram keeps showing its source.
     await expect(page.locator('#events-scroll pre.mermaid-pending.md-render-unavailable')).toHaveText(DIAGRAM);
+  } finally {
+    await cleanup();
+  }
+});
+
+// The stylesheet loaded the first time and only the script failed: the retry
+// re-requests the script alone.
+test('a KaTeX retry re-requests only the asset that failed', async ({ browser }) => {
+  const katexJS = fs.readFileSync(path.join(KATEX_DIST, 'katex.min.js'));
+  const katexCSS = fs.readFileSync(path.join(KATEX_DIST, 'katex.min.css'));
+  const { page, requests, cleanup } = await openOffline(browser, (asset, n, route) => {
+    if (asset === 'katexCSS') return route.fulfill(fulfill('text/css', katexCSS));
+    if (asset === 'katex' && n === 2) return route.fulfill(fulfill('application/javascript', katexJS));
+    return route.abort();
+  });
+  try {
+    const ktx = page.locator('#events-scroll .katex-pending').first();
+    await expect(ktx).toHaveClass(/md-render-unavailable/);
+    await page.clock.fastForward(RETRY);
+    await expect(ktx.locator('.katex')).toBeVisible();
+    await expect.poll(() => assetCounts(page)).toEqual({ katex: 2, katexCSS: 1, mermaid: 2 });
+    expect(requests.katexCSS).toBe(1);
   } finally {
     await cleanup();
   }
