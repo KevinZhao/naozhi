@@ -497,11 +497,12 @@ platforms:
 # absent or 0 = off. A spent IM chat gets no new turns (commands still work)
 # and is told at most once a minute; a spent cron job's runs end skipped/
 # budget_exceeded without spawning (only the day's first is kept in history)
-# and never count toward auto-pause.
-# All chats bound to a project share its planner's budget. The dashboard is
-# never refused, but its spend counts toward daily_usd. A soft cap: a turn let
-# in under the cap may overshoot it. Spend metered in credits or tokens is not
-# counted. Needs the cost ledger on; changes need a restart.
+# and never count toward auto-pause; a dashboard replay of a sandbox run gets
+# a 409. Admins are limited too. All chats bound to a project share its
+# planner's budget. The dashboard's own turns are never refused, but their
+# spend counts toward daily_usd. A soft cap: a turn let in under the cap may
+# overshoot it. Spend metered in credits or tokens is not counted. Needs the
+# cost ledger on; changes need a restart.
 # cost:
 #   budget:
 #     per_chat_daily_usd: 20      # each IM chat, across its agents

@@ -2,6 +2,8 @@ package cron
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/budget"
 	"github.com/naozhi/naozhi/internal/costledger"
+	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 )
 
 // spawnCountingRouter counts GetOrCreate calls; every run it spawns succeeds.
@@ -177,5 +180,47 @@ func TestBudget_WarnActionRunsAndNotifiesOncePerLevel(t *testing.T) {
 	}
 	if len(budgetNotices) != 2 || budgetNotices[0] != want[0] || budgetNotices[1] != want[1] {
 		t.Errorf("budget notices = %q, want %q", budgetNotices, want)
+	}
+}
+
+// A replay is a new run: under the cap it dispatches, at the cap it is
+// refused with ErrBudgetSpent before admission — no run starts and the
+// attention entry stays for a retry after the reset.
+func TestBudget_ReplayRefusedAtCap(t *testing.T) {
+	runner := &fakeSandboxRunner{
+		lines:   []string{`{"kind":"cli","line":{"type":"result","is_error":false,"result":"ok"}}`},
+		outcome: SandboxOutcome{State: SandboxStateSuccess, ResultText: "ok"},
+	}
+	s, rec, j, origRunID := replaySetup(t, runner)
+	idx := budget.NewIndex(time.UTC, func() time.Time { return budgetDay })
+	s.budget = budget.NewGate(budget.Limits{PerJobDailyUSD: 2}, idx)
+	queue := func() {
+		s.sandboxState().WriteAttention(sandboxstore.Attention{
+			JobID: j.ID, RunID: origRunID,
+			Reason: sandboxstore.ReasonTransport, CreatedAtMS: time.Now().UnixMilli(),
+		}, slog.Default())
+	}
+
+	idx.Add(costledger.Entry{TS: budgetDay, JobID: j.ID, Unit: costledger.UnitUSD, Amount: 1})
+	queue()
+	if _, err := s.ReplaySandboxRun(j.ID, origRunID); err != nil {
+		t.Fatalf("replay under the cap: %v", err)
+	}
+	waitEnded(t, rec)
+
+	idx.Add(costledger.Entry{TS: budgetDay, JobID: j.ID, Unit: costledger.UnitUSD, Amount: 1})
+	queue()
+	_, err := s.ReplaySandboxRun(j.ID, origRunID)
+	if !errors.Is(err, ErrBudgetSpent) {
+		t.Fatalf("replay at the cap: err = %v, want ErrBudgetSpent", err)
+	}
+	runner.mu.Lock()
+	n := len(runner.gotJobs)
+	runner.mu.Unlock()
+	if n != 1 || rec.startedCount() != 1 {
+		t.Fatalf("runner jobs = %d, run_started = %d; want 1 each (the refused replay must not start)", n, rec.startedCount())
+	}
+	if got := s.sandboxState().AttentionCount(); got != 1 {
+		t.Fatalf("attention entries after the refusal = %d, want 1", got)
 	}
 }

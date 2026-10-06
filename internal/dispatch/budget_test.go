@@ -26,7 +26,10 @@ func newBudgetDispatcher(t *testing.T, lim budget.Limits) (*Dispatcher, *fakePla
 	t.Helper()
 	idx := budget.NewIndex(time.UTC, func() time.Time { return budgetNow })
 	fp := &fakePlatform{}
-	d := newTestDispatcher(fp, func(cfg *testDispatcherConfig) { cfg.Budget = budget.NewGate(lim, idx) })
+	d := newTestDispatcher(fp, func(cfg *testDispatcherConfig) {
+		cfg.Budget = budget.NewGate(lim, idx)
+		cfg.AgentCommands = map[string]string{"review": "reviewer"}
+	})
 	ct := &countingTurns{Turns: d.turns}
 	d.turns = ct
 	spend := func(key string, usd float64) {
@@ -47,8 +50,9 @@ func blockedCount(scope string) int64 {
 	return 0
 }
 
-// A chat at its cap gets no turn, for a message or /urgent, and is told once
-// per window; commands still work there, and another chat is unaffected.
+// A chat at its cap gets no turn, for a message, /urgent or another agent,
+// and is told once per window; commands still work there, and another chat
+// is unaffected.
 func TestBudget_ChatAtCapIsRefused(t *testing.T) {
 	d, fp, ct, spend := newBudgetDispatcher(t, budget.Limits{PerChatDailyUSD: 1})
 	spend("fake:direct:c1:general", 0.6)
@@ -59,6 +63,7 @@ func TestBudget_ChatAtCapIsRefused(t *testing.T) {
 	h(context.Background(), budgetMsg("c1", "hello"))
 	h(context.Background(), budgetMsg("c1", "again"))
 	h(context.Background(), budgetMsg("c1", "/urgent now"))
+	h(context.Background(), budgetMsg("c1", "/review look"))
 	if n := ct.submits.Load(); n != 0 {
 		t.Fatalf("submits in a spent chat = %d, want 0", n)
 	}
@@ -69,8 +74,8 @@ func TestBudget_ChatAtCapIsRefused(t *testing.T) {
 	if got := fp.allReplies(); len(got) == 0 || got[0] != want {
 		t.Errorf("first reply = %q, want %q", got, want)
 	}
-	if moved := blockedCount("chat") - before; moved != 3 {
-		t.Errorf("naozhi_dispatch_budget_blocked_total[chat] moved by %d, want 3", moved)
+	if moved := blockedCount("chat") - before; moved != 4 {
+		t.Errorf("naozhi_dispatch_budget_blocked_total[chat] moved by %d, want 4", moved)
 	}
 
 	h(context.Background(), budgetMsg("c1", "/new"))

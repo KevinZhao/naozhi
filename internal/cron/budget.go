@@ -1,10 +1,16 @@
 package cron
 
 import (
+	"errors"
+	"fmt"
 	"strconv"
 
 	"github.com/naozhi/naozhi/internal/budget"
 )
+
+// ErrBudgetSpent is returned by ReplaySandboxRun when the job's or the
+// machine's daily budget is spent; the dashboard maps it to 409.
+var ErrBudgetSpent = errors.New("cron: daily budget spent")
 
 // BudgetGate is the daily spend check a run passes before it spawns;
 // satisfied by *budget.Gate. nil in SchedulerDeps runs every job.
@@ -46,6 +52,22 @@ func (s *Scheduler) budgetSkipped(rc runCtx) bool {
 		s.deliverNotice(rc.notifyTo, formatCronNotice(rc.snap.labelOrID(), budgetWarnNotice(v)))
 	}
 	return false
+}
+
+// replayBudgetErr wraps ErrBudgetSpent when today's spend refuses a replay
+// of job id. A replay is a new run and passes the gate a TriggerNow does, but
+// is refused before admission: no run is recorded and the attention entry
+// stays for a retry after the reset.
+func (s *Scheduler) replayBudgetErr(id string) error {
+	if s.budget == nil {
+		return nil
+	}
+	v := s.budget.CheckJob(id)
+	if !v.Blocked {
+		return nil
+	}
+	return fmt.Errorf("%w (%s %s, resets %s)", ErrBudgetSpent,
+		v.Subject.Kind(), v.Usage(), v.ResetAt.Format("2006-01-02 15:04"))
 }
 
 // budgetScope names the subject a cron verdict is about.
