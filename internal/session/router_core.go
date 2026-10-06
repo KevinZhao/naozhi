@@ -380,12 +380,21 @@ func (v routerStateView) StartupFailure(key string) (spawnpool.StartupFailure, b
 	return v.spawns.StartupFailure(key)
 }
 
-// chatKeyFor strips the last ":agentID" segment from a session key to get the chat key.
+// chatKeyFor strips the last ":agentID" segment from a session key to get the
+// chat key, and a thread's or member's scope with it (sessionkey.ScopedChatID):
+// such a session shares its chat's workspace override and /cd reset.
 func chatKeyFor(key string) string {
 	if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
-		return key[:idx]
+		return sessionkey.ParentChatKey(key[:idx])
 	}
 	return key
+}
+
+// isScopedKey reports whether key is a thread's or member's session, whose
+// chat key chatKeyFor maps to its chat's.
+func isScopedKey(key string) bool {
+	idx := strings.LastIndexByte(key, ':')
+	return idx >= 0 && chatKeyFor(key) != key[:idx]
 }
 
 // HistoryLoader abstracts loading a session's persisted JSONL history tail

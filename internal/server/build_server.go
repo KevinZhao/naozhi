@@ -104,6 +104,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		imAccess:      opts.IMAccess,
 		imRateLimit:   opts.IMRateLimit,
 		imBudget:      opts.IMBudget,
+		imGroupScope:  opts.IMGroupScope,
 		debugMode:     opts.Features.Debug,
 		resolver:      resolver,
 		sysessionMgr:  opts.Sysession.Manager,

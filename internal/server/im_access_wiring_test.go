@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/budget"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/imauth"
@@ -113,5 +114,44 @@ func TestServerOptions_IMBudgetReachesCostAPI(t *testing.T) {
 	hs.costH.HandleBudget(rec, httptest.NewRequest(http.MethodGet, "/api/cost/budget", nil))
 	if body := rec.Body.String(); rec.Code != http.StatusOK || !strings.Contains(body, `"limit":2`) {
 		t.Fatalf("status %d body %s, want the machine-wide cap", rec.Code, body)
+	}
+}
+
+// ServerOptions.IMGroupScope reaches the same dispatcher: with the chat
+// scope a message in a thread runs on the channel's session, not the
+// thread's.
+func TestServerOptions_IMGroupScopeReachesDispatcher(t *testing.T) {
+	router := session.NewRouter(session.RouterConfig{})
+	srv, _ := buildServerWithHandlers(ServerOptions{
+		Addr:         ":0",
+		Router:       router,
+		Platforms:    map[string]platform.Platform{parityPlatformName: newParityPlatform(false)},
+		Backend:      "claude",
+		IMGroupScope: dispatch.GroupScopeChat,
+	})
+	t.Cleanup(func() {
+		srv.hub.Shutdown()
+		srv.appCancel()
+	})
+	ran := make(chan string, 2)
+	for _, key := range []string{"parity:group:chat1:general", "parity:group:chat1#tT1:general"} {
+		proc := session.NewTestProcess()
+		proc.SendFunc = func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
+			ran <- key
+			return &clievent.SendResult{Text: "ok"}, nil
+		}
+		router.InjectSession(key, proc)
+	}
+	srv.dispatcher.BuildHandler()(context.Background(), platform.IncomingMessage{
+		Platform: parityPlatformName, EventID: "e1", UserID: "alice", ChatID: parityChatID,
+		ChatType: "group", MentionMe: true, ThreadID: "T1", Text: "hello",
+	})
+	select {
+	case key := <-ran:
+		if key != "parity:group:chat1:general" {
+			t.Errorf("the thread's message ran on %q, want the channel's session", key)
+		}
+	default:
+		t.Fatal("the message reached no session")
 	}
 }

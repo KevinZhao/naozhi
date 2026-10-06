@@ -123,6 +123,9 @@ type Dispatcher struct {
 	// budget refuses turns past cost.budget (budget.go); nil admits all.
 	budget        BudgetGate
 	budgetReplies denyThrottle
+
+	// groupScope splits a group chat's sessions (sessionChatID).
+	groupScope GroupScope
 }
 
 // keyForChat returns the routed session key for the chat coordinates and
@@ -212,6 +215,8 @@ type DispatcherConfig struct {
 	// Budget refuses turns once today's spend reaches cost.budget; nil, or a
 	// nil pointer inside it, admits every turn.
 	Budget BudgetGate
+	// GroupScope is what one group-chat session covers; zero is per thread.
+	GroupScope GroupScope
 }
 
 // ErrTurnsWireupMissing is returned by NewDispatcher when DispatcherConfig.Turns
@@ -283,6 +288,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		rateLimit:             cfg.RateLimit,
 		rateLimitReplies:      denyThrottle{window: rateLimitReplyWindow},
 		budgetReplies:         denyThrottle{window: budgetReplyWindow},
+		groupScope:            cfg.GroupScope,
 	}
 	if !isNilInterface(cfg.Budget) {
 		d.budget = cfg.Budget
@@ -454,7 +460,7 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 
 	// KeyResolver is the single source of truth for project-binding
 	// precedence and ExtraArgs merge (docs/rfc/key-resolver.md §3.1).
-	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, d.sessionChatID(msg), agentID)
 
 	var images []clievent.Attachment
 	if len(msg.Images) > 0 {

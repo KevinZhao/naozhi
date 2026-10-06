@@ -30,6 +30,8 @@ func TestSubjectForKey(t *testing.T) {
 		{"feishu:group:oc_1:general", "chat:feishu:group:oc_1"},
 		{"feishu:group:oc_1:reviewer", "chat:feishu:group:oc_1"},
 		{"slack:direct:U1:general", "chat:slack:direct:U1"},
+		{"slack:group:C1#t1700.1:general", "chat:slack:group:C1"},
+		{"feishu:group:oc_1#uou_2:reviewer", "chat:feishu:group:oc_1"},
 		{"cron:0123456789abcdef", "job:0123456789abcdef"},
 		{"cron:", ""},
 		{"project:naozhi:planner", "project:naozhi"},
