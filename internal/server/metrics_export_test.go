@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/promexport"
 	"github.com/naozhi/naozhi/internal/session"
@@ -79,5 +80,31 @@ func TestMetrics_BearerFromAnyHost(t *testing.T) {
 	}
 	if strings.Contains(body, "memstats") || strings.Contains(body, "cmdline") {
 		t.Fatal("stdlib expvars must not be exported")
+	}
+}
+
+// TestMetrics_LabelNamesAndHistogram: the real registrations in internal/metrics
+// reach the scraper as named labels and a histogram family, not a `key` label.
+func TestMetrics_LabelNamesAndHistogram(t *testing.T) {
+	t.Parallel()
+	metrics.RecordCLISpawn("zz-metrics-backend")
+	metrics.RecordSpawnDiag("zz-layer", "zz-action")
+	metrics.ObserveCronExecutionDuration(42)
+	w := getMetrics(metricsServer(t, "tok", true), "tok", "10.0.0.9:4000")
+	body := w.Body.String()
+	for _, want := range []string{
+		"# TYPE naozhi_cli_spawn_total_by_backend counter\n",
+		`naozhi_cli_spawn_total_by_backend{backend="zz-metrics-backend"} `,
+		`naozhi_spawn_diag_total{layer="zz-layer",action="zz-action"} `,
+		"# TYPE naozhi_cron_execution_duration_ms histogram\n",
+		`naozhi_cron_execution_duration_ms_bucket{le="+Inf"} `,
+		"naozhi_cron_execution_duration_ms_count ",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q in:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, `naozhi_spawn_diag_total{key=`) {
+		t.Error("a registered map fell back to the generic key label")
 	}
 }

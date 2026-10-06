@@ -13,14 +13,14 @@ import "expvar"
 
 // CLISpawnTotalByBackend is the labeled counterpart to CLISpawnTotal, keyed
 // by backend ID. Sum over backends == CLISpawnTotal.
-var CLISpawnTotalByBackend = NewLabeledCounter("naozhi_cli_spawn_total_by_backend")
+var CLISpawnTotalByBackend = NewLabeledCounter("naozhi_cli_spawn_total_by_backend", "backend")
 
 // SessionActive is the unlabeled mirror (sum across backends) of
 // SessionActiveByBackend, kept consistent by RecordSessionActive so jq
 // queries can read either form.
 var (
 	SessionActive          = expvar.NewInt("naozhi_session_active")
-	SessionActiveByBackend = NewLabeledGauge("naozhi_session_active_by_backend")
+	SessionActiveByBackend = NewLabeledGauge("naozhi_session_active_by_backend", "backend")
 )
 
 // ProtocolRPCErrorTotal counts JSON-RPC errors from a CLI backend (ACP-only
@@ -28,13 +28,13 @@ var (
 // Labeled-only with no unlabeled mirror, so it keeps the bare wire name and
 // omits the `ByBackend` identifier suffix — that suffix is reserved for
 // vectors that also carry a `_by_backend` wire alias (#2243).
-var ProtocolRPCErrorTotal = NewLabeledCounter("naozhi_protocol_rpc_error_total")
+var ProtocolRPCErrorTotal = NewLabeledCounter("naozhi_protocol_rpc_error_total", "backend", "method", "code")
 
 // ACPCancelTotal counts session/cancel notifications written by
 // ACPProtocol.WriteInterrupt. Pre-handshake attempts return
 // ErrInterruptUnsupported and are not counted. Label: backend. Labeled-only;
 // bare wire name for the same reason as ProtocolRPCErrorTotal (#2243).
-var ACPCancelTotal = NewLabeledCounter("naozhi_acp_cancel_total")
+var ACPCancelTotal = NewLabeledCounter("naozhi_acp_cancel_total", "backend")
 
 // RecordCLISpawn bumps both CLISpawnTotal and the labeled vector so the two
 // cannot drift. An empty backendID maps to LabelEmpty and still bumps the
