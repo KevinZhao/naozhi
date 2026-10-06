@@ -124,24 +124,35 @@ func TestBudget_NilGateAdmits(t *testing.T) {
 // replyWithBudget delivers one answer on key and returns what the chat got.
 func replyWithBudget(t *testing.T, d *Dispatcher, fp *fakePlatform, key string) string {
 	t.Helper()
+	return replyTextWithBudget(t, d, fp, key, "answer")
+}
+
+// replyTextWithBudget delivers an answer of text on key and returns the
+// chat's last reply.
+func replyTextWithBudget(t *testing.T, d *Dispatcher, fp *fakePlatform, key, text string) string {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	msg := budgetMsg("c1", "hello")
 	o := d.newIMOrigin(msg, slog.Default(), key, "general", session.AgentOpts{}, imMessage, len(msg.Text), 0)
 	dl := &imDelivery{o: o, p: fp, lg: slog.Default()}
 	dl.BeforeSession(ctx)
-	dl.reply(ctx, &clievent.SendResult{Text: "answer"}, nil)
+	dl.reply(ctx, &clievent.SendResult{Text: text}, nil)
 	dl.tracker.stop()
 	return fp.lastReply()
 }
 
 // A reply ends with one warning line the first time each day its chat
 // passes warn_ratio, and again when it passes the cap; a planner key warns
-// for its project.
+// for its project. An empty answer sends nothing and leaves the mark unused.
 func TestBudget_ReplyWarnsOncePerLevel(t *testing.T) {
 	d, fp, _, spend := newBudgetDispatcher(t, budget.Limits{PerChatDailyUSD: 10})
 	key := "fake:direct:c1:general"
 	spend(key, 8)
+	replyTextWithBudget(t, d, fp, key, "")
+	if n := fp.replyCount(); n != 0 {
+		t.Fatalf("an empty answer sent %d replies: %q", n, fp.allReplies())
+	}
 	if got := replyWithBudget(t, d, fp, key); got != "answer\n\n⚠️ 今日费用已达预算的 80%（本会话 $8.00 / $10.00）" {
 		t.Errorf("first reply at 80%% = %q", got)
 	}

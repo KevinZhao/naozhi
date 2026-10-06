@@ -62,8 +62,8 @@ func newBudgetFixture(t *testing.T, lim budget.Limits) *budgetFixture {
 }
 
 // A job at its daily cap is skipped before it spawns, scheduled or triggered:
-// the skip is persisted as budget_exceeded, never counts toward auto-pause,
-// and the job's chat is told once a day.
+// the day's first skip is persisted as budget_exceeded and told to the job's
+// chat, later ones only end the run; none counts toward auto-pause.
 func TestBudget_BlockedRunSkipsWithoutSpawning(t *testing.T) {
 	t.Parallel()
 	f := newBudgetFixture(t, budget.Limits{PerJobDailyUSD: 2})
@@ -92,8 +92,11 @@ func TestBudget_BlockedRunSkipsWithoutSpawning(t *testing.T) {
 		t.Errorf("job after 4 budget skips: paused=%v streak=%d class=%q, want active, 0, budget_exceeded",
 			j.Paused, j.ConsecutiveFailures, j.LastErrorClass)
 	}
-	if runs := f.s.RecentRuns(f.jobID, 10); len(runs) != 5 {
-		t.Errorf("history rows = %d, want 5 (the skips are recorded)", len(runs))
+	if runs := f.s.RecentRuns(f.jobID, 10); len(runs) != 2 || runs[0].ErrorClass != ErrClassBudgetExceeded {
+		t.Errorf("history rows = %+v, want the ok run and the first skip", runs)
+	}
+	if j.RunCounters.Skipped != 1 {
+		t.Errorf("recorded skips = %d, want 1 (only the day's first)", j.RunCounters.Skipped)
 	}
 	notices := f.ns.noticesAfter(f.s)
 	var budgetNotices []string

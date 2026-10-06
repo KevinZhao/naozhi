@@ -14,10 +14,11 @@ type BudgetGate interface {
 }
 
 // budgetSkipped reports whether today's spend refuses rc's run. A refused
-// run ends skipped/budget_exceeded, which the auto-pause streak ignores, and
-// the job's chat hears about it once a day. Under action warn the run goes
-// ahead; the chat is told once a day when the job or the machine passes
-// warn_ratio, and once more when it passes the cap.
+// run ends skipped/budget_exceeded, which the auto-pause streak ignores. The
+// job's first refusal each day is recorded and told to its chat; later ones
+// only emit run_ended, so a frequent job cannot fill its history with skips.
+// Under action warn the run goes ahead; the chat is told once a day when the
+// job or the machine passes warn_ratio, and once more when it passes the cap.
 func (s *Scheduler) budgetSkipped(rc runCtx) bool {
 	if s.budget == nil {
 		return false
@@ -26,11 +27,13 @@ func (s *Scheduler) budgetSkipped(rc runCtx) bool {
 	if v.Blocked {
 		rc.lg.Warn("cron run skipped: daily budget spent",
 			"subject", string(v.Subject), "spent_usd", v.Spent, "limit_usd", v.Limit)
+		first := s.budget.Once(budget.NoticeBlocked, budget.JobSubject(rc.jobID))
 		s.finishRun(rc, runOutcome{
 			state: RunStateSkipped, errClass: ErrClassBudgetExceeded,
-			errMsg: "daily budget spent (" + v.Subject.Kind() + " " + v.Usage() + ")",
+			errMsg:      "daily budget spent (" + v.Subject.Kind() + " " + v.Usage() + ")",
+			skipPersist: !first,
 		})
-		if s.budget.Once(budget.NoticeBlocked, budget.JobSubject(rc.jobID)) {
+		if first {
 			s.deliverNotice(rc.notifyTo, formatCronNotice(rc.snap.labelOrID(), budgetBlockedNotice(v, rc.runID)))
 		}
 		return true

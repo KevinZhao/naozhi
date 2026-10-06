@@ -495,8 +495,9 @@ platforms:
 
 # Daily USD budgets counted from the cost ledger; each cap is independent and
 # absent or 0 = off. A spent IM chat gets no new turns (commands still work)
-# and is told at most once a minute; a spent cron job's runs are recorded as
-# skipped/budget_exceeded without spawning and never count toward auto-pause.
+# and is told at most once a minute; a spent cron job's runs end skipped/
+# budget_exceeded without spawning (only the day's first is kept in history)
+# and never count toward auto-pause.
 # All chats bound to a project share its planner's budget. The dashboard is
 # never refused, but its spend counts toward daily_usd. A soft cap: a turn let
 # in under the cap may overshoot it. Spend metered in credits or tokens is not
