@@ -482,6 +482,12 @@ im_rate_limit:                            # 每个 IM 发送者的消息限流�
   msgs_per_min: 10                        # 0 或不配 = 不限
   burst: 3                                # 允许连发的条数；0 = 同 msgs_per_min
 
+cost:
+  budget:                                 # 每日费用预算（USD），见「部署 · IM 访问控制」
+    per_chat_daily_usd: 20                # 每个 IM 会话；0 或不配 = 不限
+    per_cron_job_daily_usd: 5             # 每个定时任务
+    daily_usd: 100                        # 整台机器（dashboard 的花费也算）
+
 # upstream:                               # 多节点：作为远程节点拨入
 #   url: "wss://primary.example.com/ws-node"
 #   node_id: "my-workstation"
@@ -608,6 +614,36 @@ im_rate_limit:
   丢弃次数记在 expvar `naozhi_dispatch_rate_limited_total`。
 - 在 `im_access` 之后检查，所以被拒的人不消耗额度；没 @bot 的群消息也不消耗。
 - 管理员同样受限；改配置要重启 naozhi。
+
+`cost.budget` 按 cost 账本限制每天的花费（USD），三档上限各自独立，0 或不配 = 不限：
+
+```yaml
+cost:
+  budget:
+    per_chat_daily_usd: 20       # 每个 IM 会话（同一会话的各个 agent 合计）
+    per_cron_job_daily_usd: 5    # 每个定时任务
+    daily_usd: 100               # 整台机器：IM、定时任务、dashboard、系统会话合计
+    warn_ratio: 0.8              # 到这个比例时提醒；默认 0.8
+    action: block                # block（默认）= 用尽后拒绝；warn = 只提醒不拒绝
+    timezone: "Asia/Shanghai"    # 「一天」按这个时区的 0 点切换；默认同 cron.timezone
+```
+
+- **IM**：会话或整机的额度用尽后，新消息不进 CLI，会话每分钟最多收到一次「今日费用预算已
+  用尽（$X / $Y），… 重置」。斜杠命令不受影响，`/stop`、`/new` 照常可用。被拒次数按
+  scope 记在 expvar `naozhi_dispatch_budget_blocked_total`。绑定项目的会话走项目
+  planner，同一项目的所有会话共用一份额度。管理员（`admin_users`）同样受限：名单为空时
+  每个放行的用户都算管理员，豁免管理员等于让会话额度失效。
+- **定时任务**：任务或整机的额度用尽后，到点的运行（包括手动「立即执行」）直接记为
+  `skipped / budget_exceeded`，不启动会话、不计入自动暂停的连续失败次数；每个任务每天只有
+  第一次跳过写进运行历史并通知会话，之后的跳过不再占历史条数。沙箱任务在 dashboard 上的
+  「重放」也算一次新运行：额度用尽时返回 409、不启动 microVM，待处理条目留到重置后再重放。
+- 到 `warn_ratio` 时，IM 回复末尾追加一行「⚠️ 今日费用已达预算的 80%」，定时任务发一条提示；
+  每个 scope 每天各一次。整机额度的提醒每天只发给最先碰到它的那个会话或任务（额度用尽后的
+  拒绝提示则每个会话、每个任务都会收到）。`action: warn` 时超过上限也照常执行，只再提醒一次。
+- dashboard 不受预算限制（它是已登录的 owner），但它的花费计入整机额度。
+- 这是软上限：放行时还没超的那一轮可能把花费推过上限；花费在账本落盘后（约 1 秒内）才
+  计入。只统计以 USD 计价的花费，按 credits / tokens 计量的 backend 不计入。
+- 需要 cost 账本开着（`cost.enabled` 不能为 false）；改配置要重启 naozhi。
 
 ### 生产架构
 

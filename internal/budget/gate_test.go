@@ -29,8 +29,51 @@ func TestGate_NilAdmits(t *testing.T) {
 	if v := g.CheckJob("j1"); v != (Verdict{}) {
 		t.Errorf("nil gate CheckJob = %+v", v)
 	}
-	if g.ShouldWarnOnce(Global) {
-		t.Error("nil gate must never warn")
+	if g.Once(NoticeWarn, Global) {
+		t.Error("nil gate must never notify")
+	}
+}
+
+func TestGate_PerChatLimit(t *testing.T) {
+	g := gateWith(Limits{PerChatDailyUSD: 10},
+		usd(now, "feishu:group:oc_1:general", "", 6),
+		usd(now, "feishu:group:oc_1:reviewer", "", 2), // same chat, other agent
+		usd(now, "feishu:group:oc_2:general", "", 7.9),
+	)
+	cases := []struct {
+		key                 string
+		warn, over, blocked bool
+		spent               float64
+	}{
+		{"feishu:group:oc_1:general", true, false, false, 8},
+		{"feishu:group:oc_2:general", false, false, false, 7.9},
+		{"feishu:group:oc_3:general", false, false, false, 0},
+	}
+	for _, tc := range cases {
+		v := g.CheckKey(tc.key)
+		if v.Warn != tc.warn || v.Over != tc.over || v.Blocked != tc.blocked || v.Spent != tc.spent || v.Limit != 10 {
+			t.Errorf("CheckKey(%s) = %+v, want warn=%v over=%v blocked=%v spent=%v limit=10",
+				tc.key, v, tc.warn, tc.over, tc.blocked, tc.spent)
+		}
+	}
+	g.idx.Add(usd(now, "feishu:group:oc_1:general", "", 2))
+	if v := g.CheckKey("feishu:group:oc_1:general"); !v.Blocked || v.Subject != "chat:feishu:group:oc_1" {
+		t.Errorf("at the limit CheckKey = %+v, want blocked on the chat", v)
+	}
+	if v := g.CheckKey("feishu:group:oc_2:general"); v.Blocked {
+		t.Errorf("another chat was blocked: %+v", v)
+	}
+}
+
+// Every chat bound to a project shares its planner's budget; a dashboard
+// key has no scoped limit.
+func TestGate_PlannerAndDashboardKeys(t *testing.T) {
+	g := gateWith(Limits{PerChatDailyUSD: 5}, usd(now, "project:naozhi:planner", "", 5), usd(now, "dashboard:direct:x:general", "", 50))
+	if v := g.CheckKey("project:naozhi:planner"); !v.Blocked || v.Subject != "project:naozhi" {
+		t.Errorf("planner CheckKey = %+v, want blocked on project:naozhi", v)
+	}
+	if v := g.CheckKey("dashboard:direct:x:general"); v != (Verdict{}) {
+		t.Errorf("dashboard CheckKey = %+v, want no limit", v)
 	}
 }
 
@@ -70,8 +113,8 @@ func TestGate_PerJobLimit(t *testing.T) {
 	}
 }
 
-// IM, planner and dashboard keys have no scoped cap: a per-job limit alone
-// never applies to them, however much they spend.
+// A per-job cap alone never applies to IM, planner or dashboard keys,
+// however much they spend.
 func TestGate_NonCronKeysHaveNoScopedLimit(t *testing.T) {
 	g := gateWith(Limits{PerJobDailyUSD: 5},
 		usd(now, "feishu:group:oc_1:general", "", 50),
@@ -119,8 +162,36 @@ func TestGate_WarnActionAndDefaultRatio(t *testing.T) {
 	if v := g.CheckJob("j1"); !v.Warn || v.Blocked {
 		t.Errorf("8/10 = %+v, want warn at the default ratio", v)
 	}
-	if !g.ShouldWarnOnce(Global) || g.ShouldWarnOnce(Global) || !g.ShouldWarnOnce("job:j1") {
-		t.Error("ShouldWarnOnce must fire once per subject per day")
+	if !g.Once(NoticeWarn, Global) || g.Once(NoticeWarn, Global) || !g.Once(NoticeWarn, "job:j1") {
+		t.Error("Once must fire once per subject per day")
+	}
+	if !g.Once(NoticeBlocked, Global) || !g.Once(NoticeOver, Global) {
+		t.Error("each kind of notice must have its own daily mark")
+	}
+}
+
+// A verdict with a limit says when it resets (the next local midnight) and
+// renders its usage; one with none carries neither.
+func TestGate_VerdictResetAtAndUsage(t *testing.T) {
+	g := gateWith(Limits{PerChatDailyUSD: 5}, usd(now, "feishu:group:oc_1:general", "", 4.2))
+	v := g.CheckKey("feishu:group:oc_1:general")
+	if want := time.Date(2026, 9, 7, 0, 0, 0, 0, cst); !v.ResetAt.Equal(want) {
+		t.Errorf("ResetAt = %v, want %v", v.ResetAt, want)
+	}
+	if got := v.Usage(); got != "$4.20 / $5.00" {
+		t.Errorf("Usage = %q", got)
+	}
+	if v := g.CheckJob("j1"); !v.ResetAt.IsZero() || v.Limit != 0 {
+		t.Errorf("no limit applies to a job here: %+v", v)
+	}
+}
+
+// A negative balance (a reconcile refund) still names the subject with the
+// limit, so the verdict is not mistaken for "no limit".
+func TestGate_NegativeSpendStillChecked(t *testing.T) {
+	g := gateWith(Limits{PerChatDailyUSD: 1}, usd(now, "feishu:group:oc_1:general", "", -3))
+	if v := g.CheckKey("feishu:group:oc_1:general"); v.Limit != 1 || v.Spent != -3 || v.Subject != "chat:feishu:group:oc_1" {
+		t.Errorf("CheckKey = %+v, want the chat at -3 / 1", v)
 	}
 }
 
