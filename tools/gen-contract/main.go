@@ -18,7 +18,9 @@ func main() {
 	}
 	write("internal/server/static/contract.js", out)
 
-	dts, err := contractjs.BuildWireDTS("internal/wsproto/wsproto.schema.json", "internal/dashboard/session/testdata/rest.schema.json")
+	dts, err := contractjs.BuildWireDTS("internal/wsproto/wsproto.schema.json",
+		"internal/dashboard/session/testdata/rest.schema.json",
+		"internal/dashboard/ext/workflows/testdata/rest.schema.json")
 	if err != nil {
 		fail(err)
 	}

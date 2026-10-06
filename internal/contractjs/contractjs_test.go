@@ -111,10 +111,11 @@ func TestContractJS_StartupFailureClass(t *testing.T) {
 	}
 }
 
-func wireSchemas() (ws, rest string) {
+func wireSchemas() (ws, rest, workflows string) {
 	root := filepath.Join("..", "..")
 	return filepath.Join(root, "internal", "wsproto", "wsproto.schema.json"),
-		filepath.Join(root, "internal", "dashboard", "session", "testdata", "rest.schema.json")
+		filepath.Join(root, "internal", "dashboard", "session", "testdata", "rest.schema.json"),
+		filepath.Join(root, "internal", "dashboard", "ext", "workflows", "testdata", "rest.schema.json")
 }
 
 // TestWireDTS_Current byte-compares wire.d.ts against a rebuild from the two
@@ -162,6 +163,9 @@ func TestWireDTS_Anchors(t *testing.T) {
 		"    tool_call?: ToolCall;\n",        // omitempty, $ref by short name
 		"    sessions: SessionSnapshot[];\n", // REST response, array of a def
 		"    sessions: RestResponse_sessions;\n",
+		"    sessions_workflow: RestResponse_sessions_workflow;\n", // a second package's REST schema
+		"  interface WorkflowResponse {\n",
+		"    rows_mode: 'full' | 'none' | 'delta';\n",
 	} {
 		if !strings.Contains(out, anchor) {
 			t.Errorf("wire.d.ts lacks %q", anchor)
@@ -231,5 +235,34 @@ func TestWireDTS_Rejects(t *testing.T) {
 				t.Fatalf("BuildWireDTS error = %v, want one containing %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestWireDTS_RestSchemas: the REST schemas of several packages merge into
+// one RestResponses map; a response name two of them declare is refused.
+func TestWireDTS_RestSchemas(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	ws := write("ws.json", `{"types":["a"],"frames":{"a":{"properties":{"type":{"type":"string"}},"required":["type"]}},"defs":{}}`)
+	one := write("one.json", `{"responses":{"r1":{"properties":{"x":{"type":"string"}},"required":["x"]}},"defs":{}}`)
+	two := write("two.json", `{"responses":{"r2":{"properties":{"y":{"type":"integer"}},"required":[]}},"defs":{}}`)
+	out, err := BuildWireDTS(ws, one, two)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, anchor := range []string{"    r1: RestResponse_r1;\n", "    r2: RestResponse_r2;\n", "    y?: number;\n"} {
+		if !strings.Contains(out, anchor) {
+			t.Errorf("wire.d.ts lacks %q", anchor)
+		}
+	}
+	if _, err := BuildWireDTS(ws, one, one); err == nil || !strings.Contains(err.Error(), "response r1 is declared by two REST schemas") {
+		t.Errorf("a response declared twice: error = %v", err)
 	}
 }

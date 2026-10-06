@@ -38,19 +38,32 @@ type schemaProp struct {
 // by its Go type name without the package (so `@type {EventEntry}` resolves),
 // a WsFrame_<type> per WS frame with `type` pinned to its literal, a
 // RestResponse_<name> per REST response, and the WsFrames / RestResponses
-// maps that wsm.on and the fetch call sites index.
-func BuildWireDTS(wsSchemaPath, restSchemaPath string) (string, error) {
+// maps that wsm.on and the fetch call sites index. Every package that serves
+// REST responses contributes one schema file; a response name or a def two
+// of them share must agree.
+func BuildWireDTS(wsSchemaPath string, restSchemaPaths ...string) (string, error) {
 	ws, err := readSchema(wsSchemaPath)
 	if err != nil {
 		return "", err
 	}
-	rest, err := readSchema(restSchemaPath)
-	if err != nil {
-		return "", err
+	schemas := []schemaFile{ws}
+	rest := schemaFile{Responses: map[string]schemaObject{}}
+	for _, path := range restSchemaPaths {
+		f, err := readSchema(path)
+		if err != nil {
+			return "", err
+		}
+		schemas = append(schemas, f)
+		for name, obj := range f.Responses {
+			if _, dup := rest.Responses[name]; dup {
+				return "", fmt.Errorf("response %s is declared by two REST schemas", name)
+			}
+			rest.Responses[name] = obj
+		}
 	}
 
 	defs := map[string]schemaObject{}
-	for _, s := range []schemaFile{ws, rest} {
+	for _, s := range schemas {
 		for full, obj := range s.Defs {
 			if prev, ok := defs[full]; ok && !reflect.DeepEqual(prev, obj) {
 				return "", fmt.Errorf("def %s differs between the WS and REST schemas", full)
