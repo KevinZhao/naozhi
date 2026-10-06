@@ -136,35 +136,73 @@ func (b *WorkflowBoard) enqueueReadLocked(p *workflow.Workflow, rs *resolveState
 	}
 	b.enqueueLocked(ioJob{task: id, kind: ioRead, work: func() ioApply {
 		rf, err := read(root, run)
-		return func() func() {
-			st := b.last[id]
-			if b.resolve[id] != rs || st == nil || st.pub.ResultLoaded {
-				return nil
-			}
-			if err != nil || rf.TaskID != id || !rf.Terminal() {
-				if miss != missNothing && b.missLocked(id, b.now().UnixMilli()) == miss {
-					// This read counts as the settled entry's first.
-					rs.readEnded = miss == missOrphan
-					b.settleLocked(id, miss)
-					b.publishLocked(true)
-				}
-				return nil
-			}
-			if st.live && b.proc != nil {
-				b.cache[id] = workflow.NewResultCache(rf)
-				proc := b.proc
-				return func() {
-					if !proc.ApplyWorkflowResult(rf) {
-						b.mu.Lock()
-						b.mergeRetainedLocked(id, rf)
-						b.mu.Unlock()
-					}
-				}
-			}
-			b.mergeRetainedLocked(id, rf)
-			return nil
-		}
+		return func() func() { return b.applyReadLocked(id, rs, rf, err, miss) }
 	}})
+}
+
+// applyReadLocked lands a result file read for task id under rs. A file
+// naming the entry merges: the result cache is written first, then the
+// Tracker merges a live entry (the returned func, run once b.mu is
+// released) or the board merges its own. Anything else leaves the entry as
+// it is, except that a miss verdict still true now settles it.
+func (b *WorkflowBoard) applyReadLocked(id string, rs *resolveState, rf *workflow.ResultFile, err error, miss missVerdict) func() {
+	st := b.last[id]
+	if b.resolve[id] != rs || st == nil || st.pub.ResultLoaded {
+		return nil
+	}
+	if err != nil || rf.TaskID != id || !rf.Terminal() {
+		if miss != missNothing && b.missLocked(id, b.now().UnixMilli()) == miss {
+			// This read counts as the settled entry's first.
+			rs.readEnded = miss == missOrphan
+			b.settleLocked(id, miss)
+			b.publishLocked(true)
+		}
+		return nil
+	}
+	if st.live && b.proc != nil {
+		b.cache[id] = workflow.NewResultCache(rf)
+		proc := b.proc
+		return func() {
+			if !proc.ApplyWorkflowResult(rf) {
+				b.mu.Lock()
+				b.mergeRetainedLocked(id, rf)
+				b.mu.Unlock()
+			}
+		}
+	}
+	b.mergeRetainedLocked(id, rf)
+	return nil
+}
+
+// readForResultLocked reads p's result file for a Result call, on a global
+// slot the caller took, and returns the channel closed once the read has
+// landed (its Tracker merge included). The same bookkeeping and landing as
+// enqueueReadLocked, but outside the board's two-job bound: the caller
+// already holds the slot, and the one read per task is the singleflight.
+func (b *WorkflowBoard) readForResultLocked(p *workflow.Workflow, rs *resolveState) chan struct{} {
+	id, root, run, read := p.TaskID, b.projectsRoot, rs.run, b.disk.read
+	rs.readAt, rs.owed, rs.readEnded = b.now().UnixMilli(), false, true
+	done := make(chan struct{})
+	b.resultWait[id] = done
+	go func() {
+		var after func()
+		guardWorkflowIO(func() {
+			rf, err := read(root, run)
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			after = b.applyReadLocked(id, rs, rf, err, missNothing)
+		})
+		b.mu.Lock()
+		delete(b.resultWait, id)
+		b.mu.Unlock()
+		b.io.pool.release()
+		b.io.pool.wakeWaiter()
+		if after != nil {
+			guardWorkflowIO(after)
+		}
+		close(done)
+	}()
+	return done
 }
 
 // mergeRetainedLocked merges a result file into the board's own entry.
