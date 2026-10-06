@@ -11,6 +11,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/naozhi/naozhi/internal/budget"
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/server"
@@ -38,6 +39,9 @@ type configReloader struct {
 	// liveProfiles reads the access-profile registry, which the dashboard
 	// grows at runtime; nil compares access_profiles against baseline alone.
 	liveProfiles func() map[string]session.AccessProfile
+	// budget is the cost gate IM and cron share; nil when startup enforced no
+	// cost.budget (no cap, or the ledger off), so no change can be applied.
+	budget *budget.Gate
 }
 
 // errReloadNotBound is returned when Reload runs before bindApply.
@@ -48,12 +52,13 @@ func newConfigReloader(path string, cfg *config.Config, level *slog.LevelVar, fp
 }
 
 // bindApply installs the function that applies a HotConfig to the running
-// server and the reader of the live access-profile registry.
-func (r *configReloader) bindApply(apply func(server.HotConfig), liveProfiles func() map[string]session.AccessProfile) {
+// server, the reader of the live access-profile registry and the cost gate.
+func (r *configReloader) bindApply(apply func(server.HotConfig), liveProfiles func() map[string]session.AccessProfile, gate *budget.Gate) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.apply = apply
 	r.liveProfiles = liveProfiles
+	r.budget = gate
 }
 
 // running is baseline plus the access profiles created at runtime (the
@@ -127,13 +132,16 @@ func (r *configReloader) Reload(ctx context.Context) (config.ReloadResult, error
 	res := config.ReloadResult{
 		SHA256:          next.Fingerprint.SHA256,
 		LoadedAt:        next.Fingerprint.LoadedAt,
-		Applied:         r.last.HotChanged(next),
+		Applied:         r.hotChanged(next),
 		RestartRequired: r.running().RestartRequired(next),
 		OpenedPlatforms: r.baseline.IMAccessOpened(r.last, next),
 		OpenPlatforms:   r.baseline.IMAccessOpen(next),
 	}
 	if r.level != nil {
 		r.level.Set(resolveLogLevel(next.Log.Level))
+	}
+	if slices.Contains(res.Applied, "cost.budget") {
+		r.budget.SetLimits(next.BudgetLimits())
 	}
 	if len(res.Applied) > 0 {
 		r.apply(hotConfigOf(next, res.Applied))
@@ -152,6 +160,16 @@ func (r *configReloader) Reload(ctx context.Context) (config.ReloadResult, error
 		}
 	}
 	return res, nil
+}
+
+// hotChanged is the hot sections next changes that this process can apply:
+// cost.budget needs the gate, which only a capped startup builds.
+func (r *configReloader) hotChanged(next *config.Config) []string {
+	changed := r.last.HotChanged(next)
+	if r.budget == nil {
+		changed = slices.DeleteFunc(changed, func(s string) bool { return s == "cost.budget" })
+	}
+	return changed
 }
 
 // watchSignals routes the process signals: SIGHUP calls reload and keeps
