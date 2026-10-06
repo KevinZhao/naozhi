@@ -125,7 +125,8 @@ var (
 )
 
 // Register adds a Profile to the registry. Panics on duplicate ID: silent
-// last-write-wins would mask programmer error.
+// last-write-wins would mask programmer error. history.RegisterFactory
+// overwrites instead, on purpose; internal/registry's doc explains the split.
 func Register(p Profile) {
 	registryMu.Lock()
 	defer registryMu.Unlock()

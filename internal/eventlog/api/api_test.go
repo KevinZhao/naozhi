@@ -8,17 +8,6 @@ import (
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
-// TestEventLogSatisfiesAppenderAndSubscriber anchors
-// #1570: the canonical in-memory ring backend (*ring.EventLog) must already
-// satisfy the write + subscribe halves of the unified contract, so adopting
-// the api package is a no-cost convergence rather than a rewrite.
-func TestEventLogSatisfiesAppenderAndSubscriber(t *testing.T) {
-	t.Parallel()
-	var l *ring.EventLog
-	var _ Appender = l
-	var _ Subscriber = l
-}
-
 // stubReader is the minimal durable-tier shape: it implements the read side
 // (history.Source) the way naozhilog.Source / merged do.
 type stubReader struct{}

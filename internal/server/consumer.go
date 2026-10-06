@@ -1,5 +1,5 @@
 // consumer.go: per-consumer interface subsets of *session.Router (HubRouter /
-// ScratchRouter / SendRouter) and *wsBroadcaster (HubBroadcaster). Declared here (not in
+// ScratchRouter / serverRouter / healthRouter) and *wsBroadcaster (HubBroadcaster). Declared here (not in
 // session) so tests can inject fakes; the concrete types satisfy them
 // structurally, guarded by consumer_contract_test.go. See
 // docs/rfc/consumer-interfaces.md §3.2.2.
@@ -77,6 +77,31 @@ type ScratchRouter interface {
 	SessionFor(key string) *session.ManagedSession
 	Remove(key string) bool
 	RenameSession(oldKey, newKey string) bool
+}
+
+// serverRouter is the subset of *session.Router *Server's runtime methods
+// use: IM auto-takeover (takeover.go), the project-scan loop and the reply
+// footer default. The build steps take the concrete pointer from
+// wiring.router instead. consumer_contract_test.go guards the binding.
+type serverRouter interface {
+	Backends() *session.BackendRegistry
+	SessionFor(key string) *session.ManagedSession
+	Workspace(chatKey string) string
+	ManagedExcludeSets() (pids map[int]bool, sessionIDs map[string]bool, cwds map[string]bool)
+	ReserveTakeover(key string, opts session.AgentOpts) (*session.TakeoverLease, error)
+	Takeover(ctx context.Context, lease *session.TakeoverLease, sessionID string, workspace string) (*session.ManagedSession, error)
+	Remove(key string) bool
+	BumpVersion()
+}
+
+// healthRouter is the subset of *session.Router *HealthHandler and its
+// probes (health_probe.go) read. consumer_contract_test.go guards the binding.
+type healthRouter interface {
+	Stats() (active, total int)
+	Backends() *session.BackendRegistry
+	History() *session.HistoryIO
+	Runs() *session.RunLedger
+	StoreWriteBlocks() []session.StoreBlock
 }
 
 // HubBroadcaster names the broadcast / fan-out facet, *wsBroadcaster — the "push a
