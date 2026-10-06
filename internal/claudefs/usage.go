@@ -224,10 +224,10 @@ func agentTranscripts(dir string, since time.Time) (out []string, truncated bool
 		}
 	}
 	add(dir)
-	wfs, _ := os.ReadDir(filepath.Join(dir, "workflows"))
+	wfs, _ := os.ReadDir(WorkflowRunsDir(dir))
 	for _, wf := range wfs {
 		if wf.IsDir() {
-			add(filepath.Join(dir, "workflows", wf.Name()))
+			add(filepath.Join(WorkflowRunsDir(dir), wf.Name()))
 		}
 	}
 	return out, truncated

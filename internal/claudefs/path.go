@@ -142,6 +142,37 @@ func SubagentMeta(subagentsDir, agentID string) string {
 	return filepath.Join(subagentsDir, "agent-"+agentID+".meta.json")
 }
 
+// workflowsDirName names both a session's workflow run directories (below
+// its subagents dir) and its workflow result files (below the session dir).
+const workflowsDirName = "workflows"
+
+// WorkflowRunsDir holds a session's workflow run directories:
+// <subagentsDir>/workflows.
+func WorkflowRunsDir(subagentsDir string) string {
+	if subagentsDir == "" {
+		return ""
+	}
+	return filepath.Join(subagentsDir, workflowsDirName)
+}
+
+// WorkflowRunDir is one workflow run's directory, holding its agents'
+// transcripts; "" for an invalid run ID.
+func WorkflowRunDir(subagentsDir, runID string) string {
+	if subagentsDir == "" || !IsValidWorkflowRunID(runID) {
+		return ""
+	}
+	return filepath.Join(subagentsDir, workflowsDirName, runID)
+}
+
+// WorkflowResultFile is the result file CC writes when a workflow run ends:
+// <projectDir>/<sessionID>/workflows/<runID>.json; "" for an invalid ID.
+func WorkflowResultFile(projectDir, sessionID, runID string) string {
+	if projectDir == "" || !IsValidSessionID(sessionID) || !IsValidWorkflowRunID(runID) {
+		return ""
+	}
+	return filepath.Join(projectDir, sessionID, workflowsDirName, runID+".json")
+}
+
 // LiveSessionsDir is <claudeDir>/sessions, where each running CLI process
 // keeps a <pid>.json. Empty claudeDir yields "".
 func LiveSessionsDir(claudeDir string) string {

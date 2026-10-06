@@ -359,6 +359,21 @@ func Interrupted(w *Workflow, ms int64) *Workflow {
 	return &n
 }
 
+// RawStatusUnclaimed is the RawStatus of an entry Unclaimed made unknown.
+const RawStatusUnclaimed = "unclaimed"
+
+// Unclaimed returns a copy of w as unknown: the session board's verdict on
+// a running entry the session's live CLI never reported, which may still
+// run elsewhere. It is not terminal: agents and EndedAt stay.
+func Unclaimed(w *Workflow) *Workflow {
+	n := *w
+	n.Status, n.RawStatus = StatusUnknown, RawStatusUnclaimed
+	if n.Degraded == DegradedSnapshotStale {
+		n.Degraded = ""
+	}
+	return &n
+}
+
 func isLive(a Agent) bool { return a.State == AgentQueued || a.State == AgentRunning }
 
 func (c Counts) stopped() Counts {
