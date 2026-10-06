@@ -109,6 +109,7 @@ file_size:
 handle_baseline:
     - HealthHandler.handleHealth          # health：GET /health
     - HealthHandler.handleLivez           # health：GET /livez
+    - Server.handleMetrics                # health 旁的 GET /metrics：naozhi_* expvar 的 Prometheus 文本导出（#3436）
     - HealthHandler.handleReadyz          # health：GET /readyz
     - Hub.HandleUpgrade                   # WS hub：GET /ws 升级
     - SendHandler.handleAttachment        # send/upload 管线（随 Phase 3f/4c 迁出）
