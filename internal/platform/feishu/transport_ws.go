@@ -234,6 +234,16 @@ func topicRef(threadID, rootID, messageID string) string {
 	return ref
 }
 
+// selfTopicRef is the topicRef a reply would open under a message outside
+// any topic (no thread_id): the message itself, the root_id of that topic's
+// replies.
+func selfTopicRef(threadID, messageID string) string {
+	if threadID != "" || len(messageID) > maxTopicRefLen {
+		return ""
+	}
+	return messageID
+}
+
 // parseSDKEvent converts a Feishu SDK event to a parsedEvent.
 func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, bool) {
 	if event == nil || event.Event == nil || event.Event.Message == nil {
@@ -304,6 +314,7 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 		ThreadID:  topicRef(larkcore.StringValue(msg.ThreadId), larkcore.StringValue(msg.RootId), messageID),
 		MentionMe: hasMention,
 	}
+	result.SelfThread = selfTopicRef(larkcore.StringValue(msg.ThreadId), messageID)
 
 	switch msgType {
 	case "text":

@@ -45,3 +45,27 @@ func TestUnknownKeys_GroupScopeIsKnown(t *testing.T) {
 		}
 	}
 }
+
+// TestLoad_ThreadAutoOpen: absent is off, and the key is a known one.
+func TestLoad_ThreadAutoOpen(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want bool
+	}{
+		{"", false},
+		{"session:\n  thread_auto_open: true\n", true},
+	} {
+		diags, cfg, err := collectLoadDiags(t, writeCfg(t, tc.body))
+		if err != nil {
+			t.Fatalf("Load(%q): %v", tc.body, err)
+		}
+		if cfg.Session.ThreadAutoOpen != tc.want {
+			t.Errorf("Load(%q).Session.ThreadAutoOpen = %v, want %v", tc.body, cfg.Session.ThreadAutoOpen, tc.want)
+		}
+		for _, d := range diags {
+			if strings.Contains(d.Key, "thread_auto_open") || strings.Contains(d.Reason, "thread_auto_open") {
+				t.Errorf("session.thread_auto_open reported: %+v", d)
+			}
+		}
+	}
+}

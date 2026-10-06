@@ -49,10 +49,14 @@ type IncomingMessage struct {
 	// ThreadID is the platform-native id of the thread or topic the message
 	// was posted in (Slack thread_ts, Feishu topic root message id); empty
 	// outside one. Replies pass it back verbatim as OutgoingMessage.ThreadID.
-	ThreadID  string
-	Text      string
-	MentionMe bool
-	Images    []Image
+	ThreadID string
+	// SelfThread is the ThreadID that would open a new thread under this
+	// message (Slack ts, Feishu message id); empty when the message is
+	// already in a thread or the adapter cannot open one there.
+	SelfThread string
+	Text       string
+	MentionMe  bool
+	Images     []Image
 	// AgentID, when non-empty, pins the target agent (bypassing slash-command
 	// resolution) for synthetic messages such as an AskUserQuestion card click
 	// (#2148). The dispatcher whitelist-validates it before honouring it.

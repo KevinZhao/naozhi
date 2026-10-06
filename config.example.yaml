@@ -256,6 +256,11 @@ session:
   # Under thread, replying in the thread of a top-level bot answer starts a
   # fresh session without the channel's context; use chat to keep one.
   group_scope: "thread"
+  # Answer a Slack / Feishu group @mention posted outside any thread in a new
+  # thread (Feishu topic) under it; under group_scope thread that thread is
+  # also its own session, which the follow-ups posted there continue. Slash
+  # commands still answer where they were posted. Discord is not covered.
+  thread_auto_open: false
   # auto_chain — REMOVED (schema v2). It joined sessions in the same
   # workspace by guessing that "same slug + 7d window" meant one conversation,
   # which stitched unrelated one-off sessions together as each other's history
