@@ -6,7 +6,7 @@ import (
 )
 
 // TestFinishRun_NilJobNoPanicNoEmit pins R243-ARCH-6 (#837): the terminal
-// three-write protocol (recordTerminalResult → runStore.Append →
+// three-write protocol (recordTerminalResult → runstore.Store.Append →
 // emitRunEnded) dereferences a.job in every branch. A runCtx literal
 // carrying a nil job — a future call site mistake, or a snapshot path that
 // left job unset — would panic the cron-tick goroutine. robfig's Recover

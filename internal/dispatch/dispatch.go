@@ -119,6 +119,15 @@ type Dispatcher struct {
 	inboundLimit     *ratelimit.Limiter
 	rateLimit        RateLimit
 	rateLimitReplies denyThrottle
+
+	// budget refuses turns past cost.budget (budget.go); nil admits all.
+	budget        BudgetGate
+	budgetReplies denyThrottle
+
+	// groupScope splits a group chat's sessions (sessionChatID).
+	groupScope GroupScope
+	// threadAutoOpen answers a group @mention in a new thread (openThread).
+	threadAutoOpen bool
 }
 
 // keyForChat returns the routed session key for the chat coordinates and
@@ -205,6 +214,14 @@ type DispatcherConfig struct {
 	Access *imauth.Policy
 	// RateLimit caps each sender's message rate; the zero value is unlimited.
 	RateLimit RateLimit
+	// Budget refuses turns once today's spend reaches cost.budget; nil, or a
+	// nil pointer inside it, admits every turn.
+	Budget BudgetGate
+	// GroupScope is what one group-chat session covers; zero is per thread.
+	GroupScope GroupScope
+	// ThreadAutoOpen answers a group @mention outside any thread in a new
+	// thread under it.
+	ThreadAutoOpen bool
 }
 
 // ErrTurnsWireupMissing is returned by NewDispatcher when DispatcherConfig.Turns
@@ -275,6 +292,12 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		inboundLimit:          newInboundLimiter(cfg.RateLimit),
 		rateLimit:             cfg.RateLimit,
 		rateLimitReplies:      denyThrottle{window: rateLimitReplyWindow},
+		budgetReplies:         denyThrottle{window: budgetReplyWindow},
+		groupScope:            cfg.GroupScope,
+		threadAutoOpen:        cfg.ThreadAutoOpen,
+	}
+	if !isNilInterface(cfg.Budget) {
+		d.budget = cfg.Budget
 	}
 	d.access.Store(cfg.Access)
 	// agentCommands is immutable after construction, so this snapshot stays
@@ -333,6 +356,9 @@ func fallbackDedupKey(msg platform.IncomingMessage, now time.Time) string {
 // preparedInbound is the per-message state prepareInbound resolves for the
 // dispatch-strategy tail of BuildHandler (#1527).
 type preparedInbound struct {
+	// msg is the message as the turn sees it (openThread may have put it in
+	// a thread).
+	msg       platform.IncomingMessage
 	lg        *slog.Logger
 	agentID   string
 	cleanText string
@@ -441,9 +467,11 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	d.messageCount.Add(1)
 	dispatchMessageTotal.Add(1)
 
+	msg = d.openThread(msg)
+
 	// KeyResolver is the single source of truth for project-binding
 	// precedence and ExtraArgs merge (docs/rfc/key-resolver.md §3.1).
-	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, d.sessionChatID(msg), agentID)
 
 	var images []clievent.Attachment
 	if len(msg.Images) > 0 {
@@ -454,6 +482,7 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	}
 
 	return preparedInbound{
+		msg:       msg,
 		lg:        lg,
 		agentID:   agentID,
 		cleanText: cleanText,
@@ -471,7 +500,7 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		if !ok {
 			return
 		}
-		o := d.newIMOrigin(msg, p.lg, p.key, p.agentID, p.opts, imMessage, len(p.cleanText), len(p.images))
+		o := d.newIMOrigin(p.msg, p.lg, p.key, p.agentID, p.opts, imMessage, len(p.cleanText), len(p.images))
 		d.submit(ctx, o, turn.Request{Key: p.key, Text: p.cleanText, Images: p.images})
 	}
 }
@@ -560,21 +589,38 @@ func (d *Dispatcher) handleSendError(
 	if cleanup != nil {
 		defer cleanup()
 	}
-	if _, err := platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, limits.PlatformReplyMaxAttempts); err != nil {
+	if _, err := platform.ReplyWithRetry(replyCtx, p, replyDestOf(msg).text(errMsg), limits.PlatformReplyMaxAttempts); err != nil {
 		d.sendFailCount.Add(1)
 		dispatchSendFailTotal.Add(1)
 		lg.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
 	}
 }
 
+// ReplyDest is where the replies to one inbound message go: its chat and,
+// when it was posted in a thread or topic, that thread.
+type ReplyDest struct {
+	ChatID   string
+	ThreadID string
+}
+
+func replyDestOf(msg platform.IncomingMessage) ReplyDest {
+	return ReplyDest{ChatID: msg.ChatID, ThreadID: msg.ThreadID}
+}
+
+// text is a text message to r.
+func (r ReplyDest) text(s string) platform.OutgoingMessage {
+	return platform.OutgoingMessage{ChatID: r.ChatID, ThreadID: r.ThreadID, Text: s}
+}
+
 // sendOutboundImages delivers each turn image as its own reply bubble.
-func (d *Dispatcher) sendOutboundImages(ctx context.Context, p platform.Platform, chatID string, images []platform.Image) {
+func (d *Dispatcher) sendOutboundImages(ctx context.Context, p platform.Platform, to ReplyDest, images []platform.Image) {
 	for _, img := range images {
 		// ReplyWithRetry (not bare Reply) so an image gets the same
 		// token-rotation retry as text (#2305).
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{
-			ChatID: chatID,
-			Images: []platform.Image{img},
+			ChatID:   to.ChatID,
+			ThreadID: to.ThreadID,
+			Images:   []platform.Image{img},
 		}, limits.PlatformReplyMaxAttempts); err != nil {
 			// Failed image sends must show in /health like text failures.
 			d.sendFailCount.Add(1)
@@ -617,10 +663,17 @@ func (d *Dispatcher) readTurnImages(replyText string) ([]platform.Image, string)
 }
 
 // decorateReplyText post-processes the raw CLI result text for IM delivery:
-// turnReplyText's answer or failure notice, then the merge-group chip and the
-// per-session ReplyFooter. Returns "" when nothing should be sent (#656).
+// turnReplyText's answer or failure notice, then the partial-reply and
+// merge-group chips and the per-session ReplyFooter. Returns "" when nothing
+// should be sent (#656).
 func (d *Dispatcher) decorateReplyText(result *clievent.SendResult, sess turn.Session) string {
-	replyText := turnReplyText(result)
+	replyText, answer := turnReplyText(result)
+	// claude cut the answer off (aborted_streaming keeps the partial text);
+	// keyed on CLIAborted, not Aborted, which a late interrupt can stamp on
+	// a turn that finished. A notice or error text is not a partial answer.
+	if answer && result.CLIAborted() && replyText != "" {
+		replyText += replyChipPartial
+	}
 	// Head slot of a merge group: append a small chip so the user knows the
 	// single bot bubble covers N messages.
 	if result.MergedCount > 1 && replyText != "" {
@@ -640,9 +693,12 @@ func (d *Dispatcher) decorateReplyText(result *clievent.SendResult, sess turn.Se
 	return replyText
 }
 
+// replyChipPartial marks a reply claude aborted part-way.
+const replyChipPartial = "\n\n*— 已中断，以上为部分回复*"
+
 // SendSplitReply sends a reply, splitting into multiple messages if too long.
-func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, chatID, text string) {
-	d.sendChunks(ctx, p, chatID, replyChunks(p, text))
+func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, to ReplyDest, text string) {
+	d.sendChunks(ctx, p, to, replyChunks(p, text))
 }
 
 // replyChunks returns the messages p gets for text: one when it fits
@@ -691,12 +747,12 @@ func replyChunks(p platform.Platform, text string) []string {
 }
 
 // sendChunks sends each chunk as its own message, counting failures per chunk.
-func (d *Dispatcher) sendChunks(ctx context.Context, p platform.Platform, chatID string, chunks []string) {
+func (d *Dispatcher) sendChunks(ctx context.Context, p platform.Platform, to ReplyDest, chunks []string) {
 	for i, chunk := range chunks {
-		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: chunk}, limits.PlatformReplyMaxAttempts); err != nil {
+		if _, err := platform.ReplyWithRetry(ctx, p, to.text(chunk), limits.PlatformReplyMaxAttempts); err != nil {
 			d.sendFailCount.Add(1)
 			dispatchSendFailTotal.Add(1)
-			slog.Error("reply chunk failed after retries", "chat", chatID, "chunk", i+1, "err", err)
+			slog.Error("reply chunk failed after retries", "chat", to.ChatID, "chunk", i+1, "err", err)
 		} else {
 			d.markReplySuccess()
 		}

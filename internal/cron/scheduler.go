@@ -14,6 +14,7 @@ import (
 
 	robfigcron "github.com/robfig/cron/v3"
 
+	"github.com/naozhi/naozhi/internal/cron/runstore"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
@@ -169,13 +170,15 @@ type Scheduler struct {
 	// snapshot it tags — see jobtable.go.
 	lastSavedSeq atomic.Uint64 // read/CAS'd while holding storeMu
 
-	// runStore persists a CronRun record per terminal execution (P1
-	// cron-run-history). nil-safe: empty StorePath disables persistence
-	// transparently (tests / no-disk deployments).
-	runStore *runStore
+	// runs persists a CronRun record per terminal execution (P1
+	// cron-run-history). Empty StorePath disables persistence transparently
+	// (tests / no-disk deployments); a nil store behaves as a disabled one.
+	runs *runstore.Store
 
 	// ledger is the cost ledger every terminal run writes one entry to; nil-safe.
 	ledger CostLedger
+	// budget is checked before each run spawns; nil runs every job.
+	budget BudgetGate
 
 	// sandboxPendingMu guards sandboxPendingIndex, independent of s.tbl.mu so the
 	// hot delete path never contends with job CRUD. RWMutex so the pure-read
@@ -202,8 +205,8 @@ type Scheduler struct {
 
 	// knownSessionsCache memoises KnownSessionIDs() for knownSessionsCacheTTL:
 	// the dashboard polls it at 1Hz per tab and a rebuild walks every job's
-	// runStore.Recent. Invalidated explicitly on writes that can change the
-	// set (LastSessionID assignment, runStore.Append).
+	// run history. Invalidated explicitly on writes that can change the
+	// set (LastSessionID assignment, a run-record append).
 	knownSessionsCache knownSessionsCache
 
 	// marshalJobs is the JSON serializer used by marshalLocked, behind
@@ -225,6 +228,11 @@ type Scheduler struct {
 	// DeleteJobByID deterministically inside that window (#2473). Always nil
 	// in production; set only before the scheduler is shared across goroutines.
 	finishRunPreAppendHook func(jobID string)
+
+	// startupPassHook is a test-only seam run at the top of every goStartupPass
+	// goroutine, so a test can hold a named pass while it acts. Always nil in
+	// production; set only before Start.
+	startupPassHook func(pass string)
 }
 
 // NewScheduler creates a scheduler. Call Start() to begin. cfg carries the
@@ -295,9 +303,14 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		slowThreshold:         cfg.SlowThreshold,
 		stopCtx:               stopCtx,
 		stopCancel:            stopCancel,
-		runStore:              newRunStore(cfg.StorePath, cfg.RunsKeepCount, cfg.RunsKeepWindow),
-		ledger:                deps.Ledger,
-		sandboxPendingIndex:   make(map[string]string),
+		runs: runstore.New(runstore.Options{
+			StorePath:  cfg.StorePath,
+			KeepCount:  cfg.RunsKeepCount,
+			KeepWindow: cfg.RunsKeepWindow,
+		}),
+		ledger:              deps.Ledger,
+		budget:              deps.Budget,
+		sandboxPendingIndex: make(map[string]string),
 		// Tests swap a fake via the withClock seam.
 		clock: defaultClock,
 	}
@@ -452,16 +465,19 @@ func (s *Scheduler) Start() error {
 	// sending a second turn into the same live CLI (#2751). The run-store half
 	// of the reconcile stays async below.
 	inflight := s.claimRunInflight()
+	// Same for sandbox orphans: listed before this process starts runs of its
+	// own, so none of their pending records is taken for an orphan.
+	orphans := s.claimSandboxOrphans()
 	s.cron.Start()
 	// P1 cron-run-history: cold-start GC pass over 'runs/' tree to collect
 	// retention-policy violators that accumulated while this process was
 	// down. 异步执行避免在 jobs 多/历史目录大时阻塞 Start 返回（每个 job
 	// 一次 ReadDir + N 次 Remove）。
-	if s.runStoreEnabled() {
+	if s.runs.Enabled() {
 		s.goStartupPass("run-history-gc", func() {
 			slog.Info("cron run history: cold-start GC starting")
-			// 传 stopCtx 进 trimAll，Stop 可在 job 入口之间中断长时间的 GC 扫描 (#1019)。
-			s.trimAllRuns(s.stopCtx, time.Now())
+			// 传 stopCtx 进 TrimAll，Stop 可在 job 入口之间中断长时间的 GC 扫描 (#1019)。
+			s.runs.TrimAll(s.stopCtx, time.Now())
 			slog.Info("cron run history: cold-start GC done")
 		})
 	}
@@ -469,7 +485,7 @@ func (s *Scheduler) Start() error {
 	// previous process (pending files whose streams died with it). Async
 	// like the GC pass above — each orphan costs a StopRuntimeSession
 	// network call and must not block Start. gcWG-tracked so Stop() waits.
-	s.goStartupPass("sandbox-pending-reconcile", s.reconcileSandboxPending)
+	s.goStartupPass("sandbox-pending-reconcile", func() { s.reconcileSandboxOrphans(orphans) })
 	// Blob GC for the snapshot store (#2682): manifest retention strands
 	// blobs, and nothing else ever deletes them. Not gated on the run store —
 	// snapshots are written by sandbox runs regardless of run-history state.

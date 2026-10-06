@@ -305,6 +305,8 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			} `json:"sender"`
 			Message struct {
 				MessageID   string `json:"message_id"`
+				RootID      string `json:"root_id"`
+				ThreadID    string `json:"thread_id"`
 				ChatID      string `json:"chat_id"`
 				ChatType    string `json:"chat_type"`
 				Content     string `json:"content"`
@@ -368,8 +370,10 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			UserID:    event.Sender.SenderID.OpenID,
 			ChatID:    event.Message.ChatID,
 			ChatType:  chatType,
+			ThreadID:  topicRef(event.Message.ThreadID, event.Message.RootID, event.Message.MessageID),
 			MentionMe: hasMention,
 		}
+		msg.SelfThread = selfTopicRef(event.Message.ThreadID, event.Message.RootID, event.Message.MessageID)
 
 		switch msgType {
 		case "text":

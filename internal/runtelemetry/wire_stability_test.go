@@ -29,6 +29,7 @@ var (
 		ErrClassCronWorkDirOutsideRoot: "workdir_outside_root",
 		ErrClassCronOverlapSkipped:     "overlap_skipped",
 		ErrClassCronSessionCapacity:    "session_capacity",
+		ErrClassCronBudgetExceeded:     "budget_exceeded",
 		ErrClassCronTurnFailed:         "turn_failed",
 		ErrClassCronInterrupted:        "interrupted",
 		ErrClassCronConfigDrift:        "config_drift",

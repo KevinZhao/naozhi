@@ -115,6 +115,29 @@ test('a non-200 or failed /static request fails', () => {
   ]);
 });
 
+// What render_md.js adds once a message holds math: the vendored KaTeX
+// stylesheet and script, unversioned, and the fonts the stylesheet fetches.
+const KATEX = '/static/vendor/katex-0.16.21/';
+const katexNamed = () => ({ ...rendered(), urls: [...rendered().urls, KATEX + 'katex.min.css', KATEX + 'katex.min.js'] });
+const katexLoaded = () => loaded(['/static/css/views.css?v=cccc', '/static/dashboard.js?v=aaaa', '/static/state.js?v=bbbb',
+  KATEX + 'katex.min.css', KATEX + 'katex.min.js', KATEX + 'fonts/KaTeX_Main-Regular.woff2']);
+
+test('a lazily loaded vendored library breaks no rule', () => {
+  assert.deepEqual(staticLoadProblems(katexNamed(), katexLoaded()), []);
+});
+
+test('a vendored asset still answers 200, immutable, once', () => {
+  const rec = katexLoaded();
+  rec.responses[3].cacheControl = 'no-cache, must-revalidate';
+  rec.responses[5].status = 404;
+  rec.requests.push(BASE + KATEX + 'katex.min.js');
+  assert.deepEqual(staticLoadProblems(katexNamed(), rec), [
+    KATEX + 'katex.min.js requested 2 times',
+    KATEX + 'katex.min.css sent Cache-Control "no-cache, must-revalidate", want "' + IMMUTABLE_CACHE + '"',
+    '404 for ' + KATEX + 'fonts/KaTeX_Main-Regular.woff2',
+  ]);
+});
+
 test('recordStatic keeps /static traffic only, until stop', () => {
   const page = new EventEmitter();
   const req = (u) => ({ url: () => BASE + u });

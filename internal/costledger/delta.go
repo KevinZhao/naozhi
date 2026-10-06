@@ -137,8 +137,9 @@ func canonicalOr(canonical, raw string) string {
 	return raw
 }
 
-// Totals is a monotonic, cross-incarnation spend snapshot a run owner reads
-// before and after a turn to attribute the difference (docs/rfc §5.3).
+// Totals is a monotonic, cross-incarnation spend snapshot, carried across a
+// respawn and successor link; run spend is attributed by the cost window
+// (docs/rfc/cost-ledger.md §5.0).
 type Totals struct {
 	USD     float64
 	Metered map[Unit]float64

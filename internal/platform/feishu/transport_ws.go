@@ -189,7 +189,7 @@ func (f *Feishu) handleAudio(ctx context.Context, handler platform.MessageHandle
 		// file_key is sender-controlled; sanitize before slog.
 		slog.Error("feishu download audio failed", "err", err,
 			"key", osutil.SanitizeForLog(fileKey, 128))
-		f.replyError(ctx, msg.ChatID, msgVoiceDownloadFailed)
+		f.replyError(ctx, msg, msgVoiceDownloadFailed)
 		return
 	}
 
@@ -199,7 +199,7 @@ func (f *Feishu) handleAudio(ctx context.Context, handler platform.MessageHandle
 	text, err := f.transcriber.Transcribe(transcribeCtx, data, mime)
 	if err != nil {
 		slog.Error("feishu transcribe failed", "err", err, "mime", mime, "size", len(data))
-		f.replyError(ctx, msg.ChatID, msgVoiceTranscribeFailed)
+		f.replyError(ctx, msg, msgVoiceTranscribeFailed)
 		return
 	}
 
@@ -210,6 +210,39 @@ func (f *Feishu) handleAudio(ctx context.Context, handler platform.MessageHandle
 
 	msg.Text = text
 	handler(ctx, msg)
+}
+
+// maxTopicRefLen bounds the topic id carried into replies and card values;
+// Feishu message ids are far shorter.
+const maxTopicRefLen = 128
+
+// topicRef is the id a reply in the message's topic is posted against: the
+// topic's root message, or the message itself when it opens the topic. Only
+// a message with a thread_id is in a topic; a quote reply in an ordinary
+// group has a root_id but no thread_id, and its answer goes to the chat.
+func topicRef(threadID, rootID, messageID string) string {
+	if threadID == "" {
+		return ""
+	}
+	ref := rootID
+	if ref == "" {
+		ref = messageID
+	}
+	if len(ref) > maxTopicRefLen {
+		return ""
+	}
+	return ref
+}
+
+// selfTopicRef is the topicRef a reply would open under a plain message
+// (neither thread_id nor root_id): the message itself, the root_id of that
+// topic's replies. A quote reply gets none, since which root a topic under
+// it reports is not pinned down, and stays answered in the chat.
+func selfTopicRef(threadID, rootID, messageID string) string {
+	if threadID != "" || rootID != "" || len(messageID) > maxTopicRefLen {
+		return ""
+	}
+	return messageID
 }
 
 // parseSDKEvent converts a Feishu SDK event to a parsedEvent.
@@ -279,8 +312,10 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 		UserID:    userID,
 		ChatID:    chatID,
 		ChatType:  chatType,
+		ThreadID:  topicRef(larkcore.StringValue(msg.ThreadId), larkcore.StringValue(msg.RootId), messageID),
 		MentionMe: hasMention,
 	}
+	result.SelfThread = selfTopicRef(larkcore.StringValue(msg.ThreadId), larkcore.StringValue(msg.RootId), messageID)
 
 	switch msgType {
 	case "text":

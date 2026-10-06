@@ -178,10 +178,11 @@ func (s *Slack) Reply(ctx context.Context, msg platform.OutgoingMessage) (string
 	for _, img := range msg.Images {
 		ext := platform.ImageExt(img.MimeType)
 		_, err := s.api.UploadFileContext(ctx, slack.UploadFileParameters{
-			Channel:  msg.ChatID,
-			Filename: "image" + ext,
-			FileSize: len(img.Data),
-			Reader:   bytes.NewReader(img.Data),
+			Channel:         msg.ChatID,
+			ThreadTimestamp: msg.ThreadID,
+			Filename:        "image" + ext,
+			FileSize:        len(img.Data),
+			Reader:          bytes.NewReader(img.Data),
 		})
 		if err != nil {
 			slog.Warn("slack upload image failed", "err", err)
@@ -494,8 +495,14 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 		UserID:    ev.User,
 		ChatID:    ev.Channel,
 		ChatType:  chatType,
+		ThreadID:  ev.ThreadTimeStamp,
 		Text:      text,
 		MentionMe: mentionMe,
+	}
+	// A reply with thread_ts set to a top-level message's ts opens a thread
+	// under it; its replies then carry that ts as their thread_ts.
+	if ev.ThreadTimeStamp == "" {
+		msg.SelfThread = ev.TimeStamp
 	}
 
 	s.dispatch.TryGo("slack", func() { s.handler(s.ctx, msg) },

@@ -136,7 +136,7 @@ func (s *Scheduler) saveMarshaledSeq(data []byte, seq uint64) {
 			"our_seq", seq, "last_saved_seq", last)
 		return
 	}
-	// Parent dir clamped to 0700 (mirrors newRunStore): cron_jobs.json is 0600 but
+	// Parent dir clamped to 0700 (mirrors the run store): cron_jobs.json is 0600 but
 	// a default 0755 config dir leaks the file's existence to other local users.
 	// sync.Once keeps MkdirAll off the per-mutation hot path; Chmod follows because
 	// MkdirAll skips perm changes on an existing dir (#830).

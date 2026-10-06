@@ -86,6 +86,34 @@ func TestDecorateReplyText_TurnFailure(t *testing.T) {
 	}
 }
 
+// TestDecorateReplyText_PartialReplyChip: text claude aborted part-way
+// (terminal_reason aborted_*) is delivered with the partial-reply chip ahead
+// of the merge chip and footer; a turn that finished never gets it, even when
+// a late interrupt stamped it Aborted, nor does a notice or error text.
+func TestDecorateReplyText_PartialReplyChip(t *testing.T) {
+	d := &Dispatcher{caps: fixedFooterCaps{footer: "cc"}}
+	partial := &clievent.SendResult{Text: "half an essay", SubType: "success", TerminalReason: "aborted_streaming"}
+	if got, want := d.decorateReplyText(partial, nil), "half an essay"+replyChipPartial+"\n\n— cc"; got != want {
+		t.Errorf("aborted_streaming: got %q, want %q", got, want)
+	}
+	merged := &clievent.SendResult{Text: "half", SubType: "success", TerminalReason: "aborted_streaming", Aborted: true, MergedCount: 2}
+	got := d.decorateReplyText(merged, nil)
+	if i, j := strings.Index(got, "已中断，以上为部分回复"), strings.Index(got, "合并了 2 条"); i < 0 || j < i {
+		t.Errorf("aborted merge head: got %q, want the partial chip before the merge chip", got)
+	}
+	for _, r := range []*clievent.SendResult{
+		{Text: "full answer", SubType: "success"},
+		{Text: "full answer", SubType: "success", Aborted: true},
+		{SubType: "success", TerminalReason: "aborted_tools"},
+		{Text: "Server overloaded", TerminalReason: "aborted_streaming", BackendError: &clievent.BackendError{Backend: "codex", Code: -32001}},
+		{Text: "API Error: 529 overloaded", SubType: "success", IsError: true, TerminalReason: "aborted_streaming"},
+	} {
+		if got := d.decorateReplyText(r, nil); strings.Contains(got, "已中断") {
+			t.Errorf("%+v: got %q, want no partial-reply chip", *r, got)
+		}
+	}
+}
+
 // TestDecorateReplyText_CountsTurnFailureByClass: each failed result bumps
 // its class in naozhi_dispatch_turn_error_result_total; an answer does not.
 func TestDecorateReplyText_CountsTurnFailureByClass(t *testing.T) {
@@ -159,6 +187,25 @@ func TestIMDeliveryReply_AbortedTurnMarksBanner(t *testing.T) {
 	}
 	if len(replies) != 0 {
 		t.Errorf("sent %q besides the banner, want nothing", replies)
+	}
+}
+
+// TestIMDeliveryReply_CLIAbortedTurnMarksBanner: a turn claude reports as
+// aborted gets bannerAborted when it left no text, even if naozhi did not ask
+// for the abort, and its partial text with the chip when it did leave some.
+func TestIMDeliveryReply_CLIAbortedTurnMarksBanner(t *testing.T) {
+	t.Parallel()
+	edits, replies := deliverWithBanner(t, &clievent.SendResult{SubType: "success", TerminalReason: "aborted_tools"})
+	if len(edits) == 0 || edits[len(edits)-1] != bannerAborted {
+		t.Errorf("aborted_tools: banner edits = %q, want the last one %q", edits, bannerAborted)
+	}
+	if len(replies) != 0 {
+		t.Errorf("aborted_tools: sent %q besides the banner, want nothing", replies)
+	}
+
+	edits, _ = deliverWithBanner(t, &clievent.SendResult{Text: "half an essay", SubType: "success", Aborted: true, TerminalReason: "aborted_streaming"})
+	if len(edits) == 0 || !strings.HasPrefix(edits[len(edits)-1], "half an essay"+replyChipPartial) {
+		t.Errorf("aborted_streaming: banner edits = %q, want the last one the partial text with its chip", edits)
 	}
 }
 

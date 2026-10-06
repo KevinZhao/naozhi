@@ -2,6 +2,7 @@ package cron
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -150,6 +151,24 @@ func TestHandleRunReplay_JobNotFound(t *testing.T) {
 	h.HandleRunReplay(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestHandleRunReplay_BudgetSpent: a replay the daily budget refuses is a
+// 409 with a fixed message, not the 500 fallback.
+func TestHandleRunReplay_BudgetSpent(t *testing.T) {
+	t.Parallel()
+	h := &Handlers{deps: Deps{Scheduler: &fakeScheduler{
+		replayErr: fmt.Errorf("%w (job $2.00/$2.00)", cronpkg.ErrBudgetSpent),
+	}}}
+	runID, jobID := strings.Repeat("b", 16), strings.Repeat("a", 16)
+	req := httptest.NewRequest(http.MethodPost, "/api/cron/runs/"+runID+"/replay",
+		strings.NewReader(`{"job_id":"`+jobID+`"}`))
+	req.SetPathValue("run_id", runID)
+	w := httptest.NewRecorder()
+	h.HandleRunReplay(w, req)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "daily budget spent") {
+		t.Fatalf("status = %d body = %s, want 409 daily budget spent", w.Code, w.Body.String())
 	}
 }
 

@@ -61,7 +61,7 @@ graph TD
 |------|----------|------|------|----------|----------|
 | **飞书** | WebSocket 长连接 / Webhook | ✓ | ✓ | ✓ 流式更新 | ✓ |
 | **Slack** | Socket Mode | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ |
-| **Discord** | Gateway WebSocket | ✓ | ✓ (mention) | ✓ 流式更新 | — |
+| **Discord** | Gateway WebSocket | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ |
 | **微信** | HTTP 长轮询 (iLink Bot) | ✓ | — | — | — |
 
 「提问按钮」指 Claude 调用 AskUserQuestion 时把选项渲染成可点击的按钮；没有按钮的平台收到纯文本选项列表，直接回复文字作答。
@@ -79,6 +79,8 @@ graph TD
 ```
 
 Agent 命令、模型、system prompt 均可在 `config.yaml` 中自定义。
+
+群聊里，Slack 话题串和飞书话题各用一个独立会话，不在话题里的消息共用频道的会话；`session.group_scope` 可改为 `chat`（整个群一个会话）或 `user`（每个成员一个会话）。`/cd`、`/project`、`/cron` 始终按整个群生效。开启 `session.thread_auto_open` 后，顶层的 @bot 提问会在以它为根的新话题里回答，话题里的追问接着同一个会话。
 
 ### 会话生命周期
 
@@ -335,6 +337,7 @@ naozhi --config ~/.naozhi/config.yaml
 1. [discord.com/developers](https://discord.com/developers/applications) → New Application → Bot
 2. 开启 Message Content Intent
 3. 获取 Bot Token，邀请到服务器
+4. General Information 里的 Interactions Endpoint URL 留空：填了之后按钮点击改走 HTTP，不再经 Gateway 送达，AskUserQuestion 的按钮会点了没反应（仍可直接回复文字作答）
 
 ### 运行
 
@@ -482,6 +485,12 @@ im_rate_limit:                            # 每个 IM 发送者的消息限流�
   msgs_per_min: 10                        # 0 或不配 = 不限
   burst: 3                                # 允许连发的条数；0 = 同 msgs_per_min
 
+cost:
+  budget:                                 # 每日费用预算（USD），见「部署 · IM 访问控制」
+    per_chat_daily_usd: 20                # 每个 IM 会话；0 或不配 = 不限
+    per_cron_job_daily_usd: 5             # 每个定时任务
+    daily_usd: 100                        # 整台机器（dashboard 的花费也算）
+
 # upstream:                               # 多节点：作为远程节点拨入
 #   url: "wss://primary.example.com/ws-node"
 #   node_id: "my-workstation"
@@ -576,12 +585,12 @@ im_access:
   响应没给用户 ID 时，新建的配置文件写 `default_deny: true`（先发一条消息拿到自己的
   ID 再加进去）；已有的配置文件里不写 `default_deny`，免得把其他平台关在外面。已有的
   `im_access.platforms.weixin` 条目不会被改动。
-- 平台一旦有条目，名单外的人和没有用户 ID 的消息都会被拒绝，包括飞书 / Slack 卡片上的
-  AskUserQuestion 按钮回答。被拒的消息不会触发任何命令，也不会进 CLI。注意卡片在
-  鉴权之前就会变成"已回答"：名单外的人、被限流或超预算的点击同样会让按钮消失，此时
-  有权限的人请直接回复文字作答（与飞书一致）。飞书的语音和图片、Discord 的图片附件在
-  下载前就判定：名单外的人发来的语音不下载、不转写（不产生 Transcribe 费用），图片不
-  下载；群里的飞书语音因为没法 @bot 也不转写。
+- 平台一旦有条目，名单外的人和没有用户 ID 的消息都会被拒绝，包括飞书 / Slack /
+  Discord 卡片上的 AskUserQuestion 按钮回答。被拒的消息不会触发任何命令，也不会进
+  CLI。注意卡片在鉴权之前就会变成"已回答"：名单外的人、被限流或超预算的点击同样会让
+  按钮消失，此时有权限的人请直接回复文字作答（与飞书一致）。飞书的语音和图片、Discord
+  的图片附件在下载前就判定：名单外的人发来的语音不下载、不转写（不产生 Transcribe
+  费用），图片不下载；群里的飞书语音因为没法 @bot 也不转写。
 - **怎么拿用户 ID**：被拒的消息会在 Info 级别打一行 `im access denied`，`user`
   字段就是要填的 ID（飞书 open_id `ou_...`、Slack `U...`、Discord 用户 ID、微信
   `from`）。私聊里被拒的人也会收到带自己 ID 的提示，同一人 10 分钟最多一次；群里
@@ -608,6 +617,38 @@ im_rate_limit:
   丢弃次数记在 expvar `naozhi_dispatch_rate_limited_total`。
 - 在 `im_access` 之后检查，所以被拒的人不消耗额度；没 @bot 的群消息也不消耗。
 - 管理员同样受限；改配置要重启 naozhi。
+
+`cost.budget` 按 cost 账本限制每天的花费（USD），三档上限各自独立，0 或不配 = 不限：
+
+```yaml
+cost:
+  budget:
+    per_chat_daily_usd: 20       # 每个 IM 会话（同一会话的各个 agent 合计）
+    per_cron_job_daily_usd: 5    # 每个定时任务
+    daily_usd: 100               # 整台机器：IM、定时任务、dashboard、系统会话合计
+    warn_ratio: 0.8              # 到这个比例时提醒；默认 0.8
+    action: block                # block（默认）= 用尽后拒绝；warn = 只提醒不拒绝
+    timezone: "Asia/Shanghai"    # 「一天」按这个时区的 0 点切换；默认同 cron.timezone
+```
+
+- **IM**：会话或整机的额度用尽后，新消息不进 CLI，会话每分钟最多收到一次「今日费用预算已
+  用尽（$X / $Y），… 重置」。斜杠命令不受影响，`/stop`、`/new` 照常可用。被拒次数按
+  scope 记在 expvar `naozhi_dispatch_budget_blocked_total`。绑定项目的会话走项目
+  planner，同一项目的所有会话共用一份额度。管理员（`admin_users`）同样受限：名单为空时
+  每个放行的用户都算管理员，豁免管理员等于让会话额度失效。
+- **定时任务**：任务或整机的额度用尽后，到点的运行（包括手动「立即执行」）直接记为
+  `skipped / budget_exceeded`，不启动会话、不计入自动暂停的连续失败次数；每个任务每天只有
+  第一次跳过写进运行历史并通知会话，之后的跳过不再占历史条数。沙箱任务在 dashboard 上的
+  「重放」也算一次新运行：额度用尽时返回 409、不启动 microVM，待处理条目留到重置后再重放。
+- 到 `warn_ratio` 时，IM 回复末尾追加一行「⚠️ 今日费用已达预算的 80%」，定时任务发一条提示；
+  每个 scope 每天各一次。整机额度的提醒每天只发给最先碰到它的那个会话或任务（额度用尽后的
+  拒绝提示则每个会话、每个任务都会收到）。`action: warn` 时超过上限也照常执行，只再提醒一次。
+- dashboard 不受预算限制（它是已登录的 owner），但它的花费计入整机额度。会话头部的运行统计
+  和定时任务时间轴头部会显示「今日 $X / $Y」（取离上限最近的那一档，到 `warn_ratio` 加 ⚠，
+  超过上限标红，悬停可看 scope 和重置时间）；数据来自 `GET /api/cost/budget?session_key=|job_id=`。
+- 这是软上限：放行时还没超的那一轮可能把花费推过上限；花费在账本落盘后（约 1 秒内）才
+  计入。只统计以 USD 计价的花费，按 credits / tokens 计量的 backend 不计入。
+- 需要 cost 账本开着（`cost.enabled` 不能为 false）；改配置要重启 naozhi。
 
 ### 生产架构
 

@@ -64,8 +64,8 @@ const (
 // called from turn with no lock held.
 type Origin interface {
 	// Sink is the delivery identity: requests whose origins share a Sink get
-	// one Begin per turn between them. IM uses "im:<platform>:<chat>", a WS
-	// send "ws:<conn>:<sendID>", HTTP "http:<key>".
+	// one Begin per turn between them. IM uses "im:<platform>:<chat>", plus
+	// "#<thread>" in a thread; a WS send "ws:<conn>:<sendID>", HTTP "http:<key>".
 	Sink() string
 	// Admitted reports Submit's Ack. It runs inside Submit; for AckOwner and
 	// AckDetached that is before the turn's goroutine (if any) starts. An ack
@@ -81,6 +81,15 @@ type Origin interface {
 	Begin(ctx context.Context, t TurnInfo) Delivery
 	// Dropped reports that the queued request will never get a turn.
 	Dropped(ctx context.Context, why DropReason)
+}
+
+// Scoped is an optional Origin method. Scope names the conversation its Sink
+// is part of (IM: the chat a thread is in); an empty Scope matches nothing.
+// An owner whose scope has a request in the batch is not added as an
+// Observer, so a conversation is answered only where it asked; that
+// request's receiver is the Primary instead.
+type Scoped interface {
+	Scope() string
 }
 
 // Role is how a receiver relates to a turn's batch.

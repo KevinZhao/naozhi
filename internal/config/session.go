@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/sessionconst"
@@ -16,6 +17,31 @@ type SessionConfig struct {
 	CWD              string                     `yaml:"cwd"` // default working directory for CLI processes
 	Shim             ShimConfig                 `yaml:"shim"`
 	ProjectStableKey ProjectStableKeyYAMLConfig `yaml:"project_stable_key,omitempty"`
+	// GroupScope is what one session of an IM group chat covers: a "thread"
+	// (default; a message outside any thread uses the chat's), the whole
+	// "chat", or one "user".
+	GroupScope string `yaml:"group_scope,omitempty"`
+	// ThreadAutoOpen answers a Slack / Feishu group @mention posted outside
+	// any thread in a new thread under it, which then scopes as that thread.
+	ThreadAutoOpen bool `yaml:"thread_auto_open,omitempty"`
+}
+
+// Group-chat session scopes (SessionConfig.GroupScope).
+const (
+	GroupScopeThread = "thread"
+	GroupScopeChat   = "chat"
+	GroupScopeUser   = "user"
+)
+
+// validateGroupScope rejects a session.group_scope outside the three scopes
+// (empty is the default, thread).
+func validateGroupScope(cfg *Config) error {
+	switch cfg.Session.GroupScope {
+	case "", GroupScopeThread, GroupScopeChat, GroupScopeUser:
+		return nil
+	}
+	return fmt.Errorf("session.group_scope must be %q, %q or %q, got %q",
+		GroupScopeThread, GroupScopeChat, GroupScopeUser, cfg.Session.GroupScope)
 }
 
 // ProjectStableKeyYAMLConfig controls the project-level stable session key
@@ -135,5 +161,8 @@ func applySessionDefaults(cfg *Config) {
 	}
 	if cfg.Session.CWD == "" {
 		cfg.Session.CWD = defaultSessionCWD
+	}
+	if cfg.Session.GroupScope == "" {
+		cfg.Session.GroupScope = GroupScopeThread
 	}
 }

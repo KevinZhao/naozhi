@@ -674,7 +674,7 @@ const CDN_RETRY_MS = 60000;
 const mermaidLoad = { ready: false, busy: false, failures: 0, loaded: new Set() };
 const katexLoad = { ready: false, busy: false, failures: 0, loaded: new Set() };
 
-// cdnLoad appends each lazily loaded CDN asset ([url, sha384]) under its SRI
+// cdnLoad appends each lazily loaded asset ([url, sha384]) under its SRI
 // pin; st is ready once all of them have loaded. A failed attempt is retried
 // once, CDN_RETRY_MS later, re-appending only the assets that did not load,
 // then not until the page reloads. rerun runs when an attempt settles and when
@@ -820,13 +820,13 @@ let katexCounter = 0;
 const katexPending = {};
 
 // Formulas wait for the stylesheet as well as the script: without it KaTeX
-// markup shows its MathML and HTML copies side by side. Each asset has its own
-// SRI hash (R219-SEC-4), pinned off the DOM by test/e2e/cdn_sri.test.js.
+// markup shows its MathML and HTML copies side by side. Both are vendored, and
+// TestVendorAssets_SRIMatchesEmbedded checks each SRI pin (R219-SEC-4).
 function loadKatex() {
   cdnLoad(katexLoad, [
-    ['https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css',
+    ['/static/vendor/katex-0.16.21/katex.min.css',
       'sha384-zh0CIslj+VczCZtlzBcjt5ppRcsAmDnRem7ESsYwWwg3m/OaJ2l4x7YBZl9Kxxib'],
-    ['https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js',
+    ['/static/vendor/katex-0.16.21/katex.min.js',
       'sha384-Rma6DA2IPUwhNxmrB/7S3Tno0YY7sFu9WSYMCuulLhIqYSGZ2gKCJWIqhBWqMQfh'],
   ], runKatex);
 }

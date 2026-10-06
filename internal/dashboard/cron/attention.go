@@ -137,6 +137,8 @@ func (h *Handlers) HandleRunReplay(w http.ResponseWriter, r *http.Request) {
 			writeCronErr(w, http.StatusConflict, "original microVM termination unconfirmed; retry to replay safely")
 		case errors.Is(err, cronpkg.ErrReplayInFlight):
 			writeCronErr(w, http.StatusConflict, "job already has a run in flight")
+		case errors.Is(err, cronpkg.ErrBudgetSpent):
+			writeCronErr(w, http.StatusConflict, "daily budget spent; replay after the reset")
 		case errors.Is(err, cronpkg.ErrSandboxUnavailable):
 			writeCronErr(w, http.StatusNotImplemented, "sandbox placement not configured")
 		case errors.Is(err, cronpkg.ErrSchedulerStopped):

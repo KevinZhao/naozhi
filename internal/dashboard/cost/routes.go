@@ -17,5 +17,6 @@ func (h *Handlers) Routes() []httputil.Route {
 	return []httputil.Route{
 		{Pattern: "GET /api/cost/summary", Handler: h.HandleSummary},
 		{Pattern: "GET /api/cost/entries", Handler: h.HandleEntries},
+		{Pattern: "GET /api/cost/budget", Handler: h.HandleBudget},
 	}
 }

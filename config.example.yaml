@@ -245,6 +245,25 @@ session:
     no_output_timeout: "15m"
     total_timeout: "2h"
   store_path: "~/.naozhi/sessions.json"
+  # What one session of an IM group chat covers:
+  #   thread (default) — each Slack thread / Feishu topic gets its own session;
+  #                      a message outside any thread uses the channel's
+  #   chat             — the whole channel or group shares one session
+  #   user             — each member of the group gets their own session
+  # The channel still owns /cd, the project binding and /cron; /new and /stop
+  # act on the thread's (or member's) session. Discord threads are separate
+  # channels and WeChat has only direct chats, so neither is affected.
+  # Under thread, replying in the thread of a top-level bot answer starts a
+  # fresh session without the channel's context; use chat to keep one.
+  group_scope: "thread"
+  # Answer a Slack / Feishu group @mention posted outside any thread in a new
+  # thread (Feishu topic) under it; under group_scope thread that thread is
+  # also its own session, which the follow-ups posted there continue. Slash
+  # commands still answer where they were posted. Discord is not covered, nor
+  # is a Feishu quote reply. If Feishu refuses to open the topic (e.g. the app
+  # lacks permission), the answer is posted in the group instead and each
+  # such mention starts a session without the earlier context.
+  thread_auto_open: false
   # auto_chain — REMOVED (schema v2). It joined sessions in the same
   # workspace by guessing that "same slug + 7d window" meant one conversation,
   # which stitched unrelated one-off sessions together as each other's history
@@ -492,6 +511,25 @@ platforms:
 # im_rate_limit:
 #   msgs_per_min: 10        # sustained rate per sender
 #   burst: 3                # back-to-back allowance; 0 = msgs_per_min
+
+# Daily USD budgets counted from the cost ledger; each cap is independent and
+# absent or 0 = off. A spent IM chat gets no new turns (commands still work)
+# and is told at most once a minute; a spent cron job's runs end skipped/
+# budget_exceeded without spawning (only the day's first is kept in history)
+# and never count toward auto-pause; a dashboard replay of a sandbox run gets
+# a 409. Admins are limited too. All chats bound to a project share its
+# planner's budget. The dashboard's own turns are never refused, but their
+# spend counts toward daily_usd. A soft cap: a turn let in under the cap may
+# overshoot it. Spend metered in credits or tokens is not counted. Needs the
+# cost ledger on; changes need a restart.
+# cost:
+#   budget:
+#     per_chat_daily_usd: 20      # each IM chat, across its agents
+#     per_cron_job_daily_usd: 5   # each cron job
+#     daily_usd: 100              # the whole machine
+#     warn_ratio: 0.8             # warn once a day per scope at this share
+#     action: block               # block | warn (warn never refuses)
+#     timezone: "Asia/Shanghai"   # the day starts at midnight here; default cron.timezone
 
 log:
   level: "info"

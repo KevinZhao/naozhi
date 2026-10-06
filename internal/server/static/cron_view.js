@@ -1111,7 +1111,7 @@ function cronJobWhen(j, isRunning, isPaused) {
   if (isRunning) {
     label = formatRunningElapsed(j.current_run.started_at);
   } else if (isPaused) {
-    label = j.paused_reason === 'auto_failures' ? '已自动暂停' : '已暂停';
+    label = j.paused_reason === 'auto_failures' || j.paused_reason === 'auto_transient' ? '已自动暂停' : '已暂停';
   } else if (j.next_run) {
     const w = formatWhenColloquial(j.next_run);
     label = w.label;
