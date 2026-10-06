@@ -115,13 +115,16 @@ type sessionSettlement struct {
 	FlaggedUSD, ResidualUSD       float64
 	FlaggedN, ResidualDays        int
 	UnpricedDays, AlreadyFlaggedN int
-	UndecidedN                    int    // entries whose turn could not be priced or bounded to judge a restore
-	HeldDays                      int    // days an unattributed entry shared a key with
-	OpenDays                      int    // days whose spend another day's entry books, or none yet
-	ForeignDays                   int    // days holding a cron run's turns or lines of unknown origin
-	EmptyDays                     int    // days the ledger books spend on and the transcript shows none
-	TerminalN                     int    // interactive-terminal messages left out
-	Skipped                       string // why nothing was settled; "" when settled
+	UndecidedN                    int     // entries whose turn could not be priced or bounded to judge a restore
+	HeldDays                      int     // days an unattributed entry shared a key with
+	OpenDays                      int     // days whose spend another day's entry books, or none yet
+	ForeignDays                   int     // days holding a cron run's turns or lines of unknown origin
+	EmptyDays                     int     // days the ledger books spend on and the transcript shows none
+	AboveDays                     int     // other days the ledger books more on than the transcript shows
+	AboveUSD                      float64 // what the ledger books over the transcript on AboveDays
+	AboveUndecidedDays            int     // AboveDays holding an UndecidedN entry, whose excess may be a restore
+	TerminalN                     int     // interactive-terminal messages left out
+	Skipped                       string  // why nothing was settled; "" when settled
 }
 
 // flaggedEntry is a ledger entry that charged a restored cost-state total.
@@ -135,10 +138,10 @@ type flaggedEntry struct {
 // transcripts, in two passes over the days before o.Until. An entry that
 // charged the cost-state total its process restored on --resume gets a
 // negative Kind=adjust of that total. Then each UTC day whose ledger sum is
-// off the priced transcript usage by more than max($1, 5%) gets the
-// difference as one Kind=adjust, unless settleSession holds the day. Adjust
-// run ids make a second run append nothing. Without o.Write nothing is opened
-// for writing.
+// short of the priced transcript usage by more than max($1, 5%) gets the
+// difference as one Kind=adjust, unless settleSession holds the day; a day
+// booked above its transcript is reported, not lowered. Adjust run ids make a
+// second run append nothing. Without o.Write nothing is opened for writing.
 func reconcileLedger(o reconcileOpts, out io.Writer) (reconcileReport, error) {
 	var rep reconcileReport
 	if o.SessionStorePath == "" {
@@ -173,9 +176,9 @@ func reconcileLedger(o reconcileOpts, out io.Writer) (reconcileReport, error) {
 	if err != nil {
 		return rep, err
 	}
-	byRun, byKey, chains, runs := sessionAttribution(o.SessionStorePath)
-	rep.Unattributed = l.attribute(byRun, byKey, chains, o.ClaudeDir)
-	l.runs = runs
+	at := sessionAttribution(o.SessionStorePath)
+	rep.Unattributed = l.attribute(at, o.ClaudeDir, o.SessionStorePath)
+	l.runs = at.runs
 
 	if o.Session != "" && len(l.bySID[o.Session]) == 0 {
 		return rep, fmt.Errorf("no ledger entries attributed to session %s", o.Session)
@@ -275,22 +278,28 @@ func loadLedgerSessions(store *costledger.Store, from, now time.Time) (*ledgerSe
 // attribute names each entry's CLI session: from its own run id (process-end
 // partials, unowned results and reconcile adjustments carry it), from the
 // session-runs record sharing its run id, from a key that only ever held one
-// session, or, for a turn under a key that held several, from their
-// transcripts (see soleActiveIn). It returns how many entries none of these
-// placed and records their key-days.
-func (l *ledgerSessions) attribute(runSID, keySID map[string]string, chains map[string][]string, claudeDir string) (unattributed int) {
-	act, booked := sessionActivity{}, bookedTimes(l.entries, chains)
+// session, for a turn under a key that held several from their transcripts
+// (see soleActiveIn), or, for an entry whose run record names no session,
+// from the one naozhi session whose transcript began in that run (see
+// soleBornIn). It returns how many entries none of these placed and records
+// their key-days.
+func (l *ledgerSessions) attribute(at attribution, claudeDir, storePath string) (unattributed int) {
+	act, booked := sessionActivity{}, bookedTimes(l.entries, at.chains)
+	born := newSessionBirths(claudeDir, storePath, at)
 	for _, e := range l.entries {
 		sid := runIDSession(e.RunID)
 		if sid == "" {
-			sid = runSID[e.RunID]
+			sid = at.byRun[e.RunID]
 		}
 		if sid == "" {
-			sid = keySID[e.SessionKey]
+			sid = at.byKey[e.SessionKey]
 		}
-		if c := chains[e.SessionKey]; sid == "" && len(c) > 0 && e.Kind == costledger.KindTurn {
+		if c := at.chains[e.SessionKey]; sid == "" && len(c) > 0 && e.Kind == costledger.KindTurn {
 			act.read(claudeDir, c)
-			sid = act.soleActiveIn(c, booked.before(e.SessionKey, e.TS), e.TS.Add(turnStampSlack))
+			sid = act.soleActiveIn(c, booked.before(e.SessionKey, e.TS), e.TS)
+		}
+		if span := at.runs[e.RunID]; sid == "" && at.unnamed[e.RunID] && !span.from.IsZero() && !span.to.IsZero() {
+			sid = born.soleBornIn(span.from.Add(-birthSlack), span.to.Add(birthSlack))
 		}
 		if !claudefs.IsValidSessionID(sid) {
 			unattributed++
@@ -313,10 +322,6 @@ func runIDSession(runID string) string {
 	}
 	return ""
 }
-
-// turnStampSlack is how much later than the entry booking a turn the turn's
-// last message may be stamped.
-const turnStampSlack = 5 * time.Second
 
 // sessionActivity holds what was read of each session's transcript, so a
 // session is read at most once whatever the outcome.
@@ -359,7 +364,8 @@ func readSessionTimes(claudeDir, sid string) sessionTimes {
 	return sessionTimes{times: times, ok: true}
 }
 
-// soleActiveIn names the one session of sids with a message in (from, to].
+// soleActiveIn names the one session of sids with a message in (from, to],
+// a turn's window as turnSpan cuts it.
 // A session's transcript also holds its turns under other keys, and a fork's
 // lines copied from its parent, so two sessions with a message there name
 // none; so do a session not read and a window no session has a message in.
@@ -427,12 +433,23 @@ func (l *ledgerSessions) order() []string {
 	return out
 }
 
+// attribution is what the session store and session-runs records say about
+// which CLI session ran what.
+type attribution struct {
+	byRun   map[string]string   // run id -> CLI session
+	byKey   map[string]string   // key -> the one CLI session it ever held
+	chains  map[string][]string // key -> the sessions it held, sorted, when more than one
+	runs    map[string]timeSpan // run id -> its record's start and end, either may be zero
+	unnamed map[string]bool     // run ids whose record names no session
+}
+
 // sessionAttribution maps run id to CLI session id and to its span from the
 // session-runs records, and each session key to the one CLI session it ever
 // held. A key whose records and sessions.json chain together name more than
-// one session goes to chains instead, with those sessions sorted.
-func sessionAttribution(storePath string) (byRun, byKey map[string]string, chains map[string][]string, runs map[string]timeSpan) {
-	byRun, runs = map[string]string{}, map[string]timeSpan{}
+// one session goes to chains instead, with those sessions sorted. A record
+// naming no session still gives its run's span, and is marked unnamed.
+func sessionAttribution(storePath string) attribution {
+	byRun, runs, unnamed := map[string]string{}, map[string]timeSpan{}, map[string]bool{}
 	held := map[string]map[string]bool{}
 	hold := func(key, sid string) {
 		if held[key] == nil {
@@ -442,14 +459,18 @@ func sessionAttribution(storePath string) (byRun, byKey map[string]string, chain
 	}
 	runlog.WalkRecords(datadir.ForStore(storePath).SessionRunsRoot(), func(string, error) {}, func(rec runlog.Record) {
 		var r runhistory.SessionRun
-		if json.Unmarshal(rec.Raw, &r) != nil || r.SessionID == "" {
+		if json.Unmarshal(rec.Raw, &r) != nil {
 			return
 		}
 		if r.RunID != "" {
-			byRun[r.RunID] = r.SessionID
 			runs[r.RunID] = timeSpan{r.StartedAt, r.EndedAt}
+			if r.SessionID == "" {
+				unnamed[r.RunID] = true
+			} else {
+				byRun[r.RunID] = r.SessionID
+			}
 		}
-		if r.SessionKey != "" {
+		if r.SessionKey != "" && r.SessionID != "" {
 			hold(r.SessionKey, r.SessionID)
 		}
 	})
@@ -458,7 +479,7 @@ func sessionAttribution(storePath string) (byRun, byKey map[string]string, chain
 			hold(key, id)
 		}
 	}
-	byKey, chains = map[string]string{}, map[string][]string{}
+	byKey, chains := map[string]string{}, map[string][]string{}
 	for key, ids := range held {
 		if len(ids) == 1 {
 			for id := range ids {
@@ -471,7 +492,7 @@ func sessionAttribution(storePath string) (byRun, byKey map[string]string, chain
 		}
 		sort.Strings(chains[key])
 	}
-	return byRun, byKey, chains, runs
+	return attribution{byRun: byRun, byKey: byKey, chains: chains, runs: runs, unnamed: unnamed}
 }
 
 // cronSessionRuns maps each CLI session a cron run used to the spans of
@@ -646,10 +667,12 @@ func turnWindow(msgs []claudefs.MessageUsage, from, to time.Time, rates *costled
 
 // turnSpan is the window (from, to] of entries[i]'s turn, prev being where
 // the turn before it ended, and next where the next one starts. A turn entry
-// is booked at its end. A backfill is booked at its run's start and spans to
-// the run's recorded end, else up to the next entry, which may take in that
-// entry's turn too, so the next turn then starts back at the backfill's
-// start; to is zero when nothing bounds it.
+// is booked at its end: naozhi stamps it on the result, after the CLI stamped
+// that turn's lines on the same clock, so a later line is the next turn's.
+// A backfill is booked at its run's start and spans to the run's recorded
+// end, else up to the next entry, which may take in that entry's turn too,
+// so the next turn then starts back at the backfill's start; to is zero when
+// nothing bounds it.
 func turnSpan(entries []costledger.Entry, i int, prev time.Time, runs map[string]timeSpan) (from, to, next time.Time) {
 	e := entries[i]
 	if e.Kind != costledger.KindBackfill {
@@ -696,20 +719,20 @@ func tokenSum(rows []costledger.ModelDelta) int64 {
 }
 
 // settleSession plans one session's adjustments into rep and returns its row.
-// Interactive-terminal messages are not naozhi's spend and are left out. A
-// day gets no residual when any of its spend may be booked elsewhere or not
-// be naozhi's: an entry no session could be named for shares a key with this
-// session's entries that day; a message has no entry of the session after it
-// that same day (the entry that books it, if any, is on another day, which is
-// held too) or predates the run of the session's first entry; a cron run of
-// the session touched it; or a message's origin is unknown. Nor does a day
-// whose transcript shows none of the spend its entries book: nothing proves
-// them wrong. A day they net below zero on is still raised to zero.
+// Terminal messages are not naozhi's spend and are left out. A day gets no
+// residual when any of its spend may be booked elsewhere or not be naozhi's:
+// an entry no session could be named for shares a key with this session's
+// entries that day; a message has no entry of the session after it that day
+// (the entry that books it, if any, is on another day, held too) or predates
+// the run of the session's first entry; a cron run of the session touched it;
+// or a message's origin is unknown. A residual only raises a day: the CLI also
+// bills requests its transcript never logs (cancels, background calls, output
+// counted mid-stream). A day the entries net below zero on is raised to zero.
 func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessions, cronRuns []timeSpan, firstDay, until time.Time, rep *reconcileReport) sessionSettlement {
 	st := sessionSettlement{SessionID: in.sid, Entries: len(entries), Skipped: in.skipped}
 	settles := func(t time.Time) bool { return !t.Before(firstDay) && t.Before(until) }
 	ledger := map[string]*dayFigures{}
-	held := map[string]bool{}
+	held, undecided := map[string]bool{}, map[string]bool{}
 	day := func(d string) *dayFigures {
 		if ledger[d] == nil {
 			ledger[d] = &dayFigures{models: map[string]*costledger.ModelDelta{}}
@@ -745,6 +768,7 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 		}
 		if to.IsZero() {
 			st.UndecidedN++
+			undecided[e.TS.UTC().Format(time.DateOnly)] = true
 			continue
 		}
 		// The turn starts no earlier than the cost-state: what the process
@@ -755,6 +779,7 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 		charged, decided := chargesRestore(e, m, turnWindow(in.usage.Messages, from, to, l.rates))
 		if !decided {
 			st.UndecidedN++
+			undecided[e.TS.UTC().Format(time.DateOnly)] = true
 		}
 		if !charged {
 			continue
@@ -812,6 +837,13 @@ func settleSession(in *sessionInputs, entries []costledger.Entry, l *ledgerSessi
 			continue
 		case len(usage[d]) == 0 && lf.usd > 0:
 			st.EmptyDays++
+			continue
+		case diff < 0:
+			st.AboveDays++
+			st.AboveUSD -= diff
+			if undecided[d] {
+				st.AboveUndecidedDays++
+			}
 			continue
 		}
 		adj := adjustOf(lastBefore(entries, start.Add(24*time.Hour)), reconcilePrefix+in.sid+":day:"+d, diff)
@@ -1019,6 +1051,12 @@ func printReconcile(out io.Writer, rep reconcileReport, write bool) {
 			if s.EmptyDays > 0 {
 				note += fmt.Sprintf("；%d 天 transcript 无用量而账本有，残差未记", s.EmptyDays)
 			}
+			if s.AboveDays > 0 {
+				note += fmt.Sprintf("；%d 天账本高于 transcript 共 %.2f（transcript 不记 CLI 的全部请求：取消/后台请求、流式中途的 output 计数），未下调", s.AboveDays, s.AboveUSD)
+				if s.AboveUndecidedDays > 0 {
+					note += fmt.Sprintf("，其中 %d 天含无法判定是否计入恢复额的条目，高出部分可能就是恢复额", s.AboveUndecidedDays)
+				}
+			}
 			if s.TerminalN > 0 {
 				note += fmt.Sprintf("；%d 条终端交互消息不计入", s.TerminalN)
 			}
@@ -1034,7 +1072,7 @@ func printReconcile(out io.Writer, rep reconcileReport, write bool) {
 	}
 	fmt.Fprintf(out, "%-8s %5s %11.2f %11.2f %11.2f %+11.2f\n", "合计", "", before, after, transcript, after-before)
 	if rep.Unattributed > 0 {
-		fmt.Fprintf(out, "%d 条会话条目归不到 CLI session（无 run 记录，key 没对应过 session，或对应过多个而按 transcript 时间分不出），未参与对账；同 key 同日的残差不记\n", rep.Unattributed)
+		fmt.Fprintf(out, "%d 条会话条目归不到 CLI session（无 run 记录，key 没对应过 session，或对应过多个而按 transcript 时间分不出；run 记录没写 session 的首轮，其间起头的已知 session 不止一个、没有或与别的首轮重叠），未参与对账；同 key 同日的残差不记\n", rep.Unattributed)
 	}
 	if len(rep.Flagged) > 0 {
 		fmt.Fprintln(out, "\n计入了 --resume 恢复总额的条目：")

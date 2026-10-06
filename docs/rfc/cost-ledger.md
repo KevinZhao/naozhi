@@ -101,6 +101,13 @@ type Entry struct {
     Amount     float64      `json:"amount"`                // 本 entry 增量，唯一权威金额
     Basis      Basis        `json:"basis,omitempty"`
     Models     []ModelDelta `json:"models,omitempty"`      // 分模型下钻，仅供展示/诊断，不参与 rollup 求和
+    Mark       *SessionMark `json:"mark,omitempty"`        // 仅会话自己差分记的行：记账后的会话状态，供崩溃后 restore 用，不是金额
+}
+
+type SessionMark struct {
+    Spent float64 `json:"spent"` // 记账后的 costSpent（逻辑会话内单调）
+    Cum   float64 `json:"cum"`   // 记账后 CLI 的 USD 累计基线（lastCumulative.USD）
+    Born  int64   `json:"born"`  // 会话 createdAt，区分同 key 删除后重建的会话
 }
 
 type ModelDelta struct {
@@ -128,6 +135,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 - `Source/Kind/Unit/Basis` 为类型化枚举；写入时校验，非法 `Basis` → `unknown`，非法 `Source/Kind/Unit` → 拒绝 + dropped 计数。
 - `Model/RawModel/Provider`：来自 CLI 输出，视为不可信：长度 ≤128、合法 UTF-8、禁 C0/DEL、禁换行；违规替换为 `<invalid>` 并 warn（每 raw 值去重）。
 - `Models` 上限 16 条（`cli/process.go maxMeteringUnits` 同款防御）：超出时第 16 条起合并成一条 `model="other"` 的行（`cost_usd` 与 token 相加，`basis` 取最差），分模型之和不因截断变小；`Amount` 不动（`costledger.CapModels`，sandbox 回执写 run 记录前同样合并）。
+- `Source=session` 的行在 cron key（`cron:<job_id>`）上带 `JobID`（`sessionkey.CronJobIDFromKey`，其余 key 为空）：会话在 cron key 上记的账——窗口关闭后到达的迟到 result、进程结束的 partial、运行窗口外从 dashboard 手动发进该会话的 turn——都计入该 job 的 `group_by=job` 与 `job_id=` 视图（#3401），所以该视图的 `entries` 是账本记录数而非运行次数；迟到 result 与 partial 的 `RunID` 仍是 `unowned:` / `end:`，不并入已落盘的 run 记录（§5.3）。
 - 一条 entry ≈ 350 B。
 
 ## 5. 精度修正设计
@@ -158,13 +166,13 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 - 生命周期与 `lastCumulativeCost` 逐点对齐：
   - respawn：`installFreshSessionLocked`（`router_lifecycle.go:859`, `:900-902`）置零 `lastCumulative`，承接 `costSpent`；
   - 同进程迁移：`RenameSession`（`router_lifecycle.go:1283`, `:1335-1336`）同时拷贝 `costSpent` 与 `lastCumulative`；
-  - 被替换的会话之后还会记账（异步的进程结束 partial、迟到的 result）。respawn 提交与 rename 拷贝时，在旧会话的同一段 `costMu` 内把它链到新会话（`successor`），并把快照之后记在旧会话上的花费补给新会话；此后旧会话上的 `costSpent` / `spent` 增量沿链转给链尾的活会话（`addSpent`，逐个加锁、不嵌套）。respawn 的旧进程基线仍留在旧会话上差分；rename 的新会话跑的是同一进程，旧会话收到的读数整个交给新会话差分，不会被新会话的下一轮重算一次。账本行：respawn 前后是同一个 key，旧会话记的行仍写在这个 key 下；rename 后旧会话收到的读数由新会话记账，行写在新 key 下（只写一次）。
-  - 重启恢复（shim reconnect，`router_shim.go:68-77`：CLI 是**同一 incarnation** 继续累计，这正是 `LastCumulativeCost` 要持久化的原因）：`router_core.go:825-833` 只恢复 USD 分量。`Metered` 基线 0 是正确的（`Process.meteringUsage` 是 naozhi 侧累加器，新 Process 对象归零）；`Models` 基线未知，若全额记入首 turn 会虚高，故 **restore 后首个 turn 的 `Models` 置空且跳过偏差 warn**（`Amount` 仍由 USD 差分保证正确），从第二 turn 起正常。不额外持久化 Models 基线。
+  - 被替换的会话之后还会记账（异步的进程结束 partial、迟到的 result）。respawn 提交与 rename 拷贝时，在旧会话的同一段 `costMu` 内把它链到新会话（`successor`），并把快照之后记在旧会话上的花费补给新会话；此后旧会话上的 `costSpent` / `spent` 增量沿链转给链尾的活会话（`addSpent`，逐个加锁、不嵌套）。respawn 的旧进程基线仍留在旧会话上差分；rename 的新会话跑的是同一进程，旧会话收到的读数整个交给新会话差分，不会被新会话的下一轮重算一次。账本行：旧会话自己记的行写在链尾活会话的 key 下（`ledgerKey`，同样逐个加锁），`job_id` 仍取旧会话自己的 key；respawn 前后是同一个 key，所以只有 respawn 之后新会话又被 rename 时才有区别：旧会话迟到的 partial / result 记在 rename 后的新 key 下，不会落在已消失的 scratch key 上。rename 后旧会话收到的读数由新会话记账，行写在新 key 下（只写一次）。
+  - 重启恢复（shim reconnect，`router_shim.go:68-77`：CLI 是**同一 incarnation** 继续累计，这正是 `LastCumulativeCost` 要持久化的原因）：`router_core.go:825-833` 只恢复 USD 分量。`Metered` 基线 0 是正确的（`Process.meteringUsage` 是 naozhi 侧累加器，新 Process 对象归零）；`Models` 基线未知，若全额记入首 turn 会虚高，故 **restore 后首个 turn 的 `Models` 置空且跳过偏差 warn**（`Amount` 仍由 USD 差分保证正确），从第二 turn 起正常。不额外持久化 Models 基线。关停在保存 store 之前冻结记账（`costAccounting.freeze`，#3428）：CLI 在保存之后、Detach 之前报的 result（无主 turn，或 `ShutdownTimeout` 到期时仍在跑的 turn）不记，留给重启后同一 CLI 的下一个 result 按保存的基线差分；冻结会等已进入 `accountCost` 的记账做完（上限 1s），所以一个读数要么进了保存的基线（行也随 `runs.Close` 落盘），要么留给重启后，不会两边都记。代价是这段花费归到重启后下一个 run id 名下；CLI 在 naozhi 停机期间死掉时这段花费丢失，与停机期间结束的 turn 同理。非正常退出（SIGKILL、panic、OOM、断电）不经过保存：store 每 `sessionSaveInterval`（30s）才落盘，账本行约 1s 内 fsync，所以重启后 store 里的基线可能落后于账本（#3518）。会话自己差分记的行（`accountCost` 中既未转发也不在窗口里的读数）带 `mark`，`spent` / `cum` 在同一段 `costMu` 内取值，`born` 是会话的 `createdAt`。restore 前扫描 store mtime 前 10 分钟起的账本（stat 失败取 48h），按 `(session_key, born)` 取 `spent` 最大的 mark（行在解锁后 append，可能乱序），仅当它大于 store 的 `CostSpent` 时用它的 `spent` 与 `cum` 覆盖 restore 的花费与基线（`adoptCostMark`）：行已落盘则基线已含它，重新接管的 CLI 不再重记；行还在 1s 队列里就丢了，旧基线会把它重记一次，与之前相同。转发的花费、partial、重开窗口补记的行和 cron 窗口内的花费都不带 mark：它们若记在最后一条 mark 之后，store 的 `CostSpent` 不小于 mark，store 仍然生效，行为同前。残留情形：最后一条 mark 之后、崩溃之前的 cron 窗口花费，shim 存活时仍会被重新接管的 CLI 重记一次；保存之后 respawn 到新进程、新进程尚未记账就崩溃时，取到的是旧进程的 `cum`（resume 后的 CLI 累计通常从恢复的花费起算，二者接近）。shim 未存活时下次 spawn 照常换基线，mark 只让 `costSpent` 不再少算保存后的花费。
 - `costMu` 保持叶子锁：其内只做差分与原子存储，**不得调用任何外部方法**（`ledger.Append`、slog 均在锁外）。
 - `finishRun` 拆为两段：
   - `accountTurnCost(result *cli.SendResult) (deltaUSD float64)`：**无 `rt==nil || runStore==nil` 门控**（修 P4）。在 `costMu` 内：构造 `raw := Cumulative{USD: result.CostUSD, Models: result.ModelUsage, Metered: proc.MeteringUsage() 按 Unit}`，`d, next := costledger.Delta(raw, s.lastCumulative)`，累进 `costSpent`，存 `next`；锁外若这次读数不在 cost window 内（§5.0）则 `ledger.Append(entryFrom(d))`。`Models` 上限 16，超出截断 + warn。
   - `persistRun(rt, result, err, deltaUSD)`：原 runhistory 逻辑，保留门控，`SessionRun.CostUSD = deltaUSD`（兼容）。
-  - 没有存活调用方消费的 result 经 `SetOnUnownedResult` 同样差分记一条 `Kind=turn`：CLI 自己发起的 turn（后台任务通知，#3096），以及 Send 先放弃（ctx 取消、cron deadline）后才到达的 result（#3322；落在 cron 窗口关闭之后，所以 cron key 上也由会话记账，#3401；readLoop 在 Ready 或 Send 已放弃时记，下一次 Send 丢弃的陈旧 result 也记；passthrough 的 head slot 已取消或 orphan 时由 fan-out 记，取消前已投递未读的由 awaitSlot 收回后记；重复记账因累计差分无害）。没有 run 记录与它共用 `RunID`，所以写成 `unowned:<cli-session-id>:<id>`（取 result 帧的 session id，缺省取会话持有的；都没有时为裸 id），reconcile 据此归属。
+  - 没有存活调用方消费的 result 经 `SetOnUnownedResult` 同样差分记一条 `Kind=turn`：CLI 自己发起的 turn（后台任务通知，#3096），以及 Send 先放弃（ctx 取消、cron deadline）后才到达的 result（#3322；落在 cron 窗口关闭之后，所以 cron key 上也由会话记账，行带该 job 的 `JobID`（§4），#3401；readLoop 在 Ready 或 Send 已放弃时记，下一次 Send 丢弃的陈旧 result 也记；passthrough 的 head slot 已取消或 orphan 时由 fan-out 记，取消前已投递未读的由 awaitSlot 收回后记；重复记账因累计差分无害）。没有 run 记录与它共用 `RunID`，所以写成 `unowned:<cli-session-id>:<id>`（取 result 帧的 session id，缺省取会话持有的；都没有时为裸 id），reconcile 据此归属。
 - Unit 选择：claude → `USD`，Kind=`turn`；kiro/codex → 按 `Metered` 中有增量的 Unit 各出一条 entry（`credits` / `tokens`），Kind=`metering`。**`proc.MeteringUsage()` 是进程级累计视图**（`cli/process.go:668-691`），必须差分，不能直接取值。
 - Basis：本 turn 有增量的 model 的 `costBasis` 取最差档（unknown > managed > list），缺省 `list`；首次遇到 `unknown` 的 model 名 warn 一次（内存去重 map，上限 64）。
 - 新增 `ManagedSession.CostTotals() costledger.Totals`：返回 `{USD: costSpent, Metered: 各 Unit 累计, Models: 各模型累计 delta 和}`（monotonic，跨 incarnation）。
@@ -172,7 +180,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 ### 5.3 cron 本地 run：与 session 同源（修 P2）
 
-- `cron.Session` 的可选能力 `cron.CostWindow`（`BeginCostWindow()` / `EndCostWindow() costledger.Increment`，wireup adapter 转发）；没有它的会话（测试桩）退回可选的 `CostReporter`（`CostTotals()` 前后差分），两者都没有记 0。
+- `cron.Session` 的可选能力 `cron.CostWindow`（`BeginCostWindow()` / `EndCostWindow() costledger.Increment`，wireup adapter 转发）；没有它的会话（测试桩）记 0。
 - `execSend` 在 Send **前** 开窗口、Send **返回处立即** 关窗口（经 adapter 持有的 `*ManagedSession` 指针，**不查 router**：success/error 路径在 finishRun 之前都会 `router.Reset(key)` 或释放进程，按 key 查会读空），再加一个 defer 兜底，Send panic 也会关窗口；增量随 `runOutcome.costInc` 传给 finishRun。窗口在 Reset / 释放进程之前关闭，所以被杀进程的 partial 由会话记账（§5.6）。cron run 之间由 per-job CAS gate 互斥；同一 cron session 上来自 dashboard 的手动 turn 只靠 `sendMu` 串行，在 cron 关窗口前报出 result 的会计入该 run（可接受：与 run 共享进程上下文），其余按 §5.0 以 `Source=session` 入账。leak-recovery 两回合都在 Send 内。
 - 窗口关闭后才记到的花费（迟到 result、partial）只出现在账本的 session 行里，不回写已经落盘的 `CronRun.CostUSD`：run 记录在终态写一次，账本是权威总额。
 - `finishRun` 写 `CronRun.CostUSD = delta.USD`（**语义从累计值变为增量**；`fresh_context=true` 的 job 前后数值不变，persistent job 的历史值本来就错），并 `ledger.Append(Entry{Source: cron_local, Kind: turn, JobID, RunID, Workspace: job.WorkDir stable id, Backend: job.Backend, Unit/Amount 按 delta 分量各一条, Models: delta.Models})`。
@@ -224,6 +232,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 - 同一 `key` 不同 `unit` 是不同 bucket；前端按 unit 分别渲染。
 - `GET /api/cost/entries?session_key=|job_id=|run_id=&from=&to=&limit=`：明细，调试/审计用。
+- `GET /api/cost/budget?session_key=|job_id=`（#3447）：今日花费对 `cost.budget` 上限，`{enabled, scope, subject, spent, limit, warn, over, blocked, day, reset_at}`；取 IM / cron 闸门对该 key 或任务会检查的那一档（两者都不带 = 整机）。未配置预算时 `enabled:false`，没有适用上限时 `scope` 为空。只读，不拦 dashboard。
 - 校验（对照 `dashboard/cron/handlers.go:36-99 validateStringField`）：`from/to` RFC3339 解析失败 → 400，`to<from` → 400，跨度 > 90 天且无 `allow_full_range` → 400；`group_by` 白名单；`limit` ∈ [1,1000] 默认 200；`session_key/job_id/run_id/workspace` 长度 ≤256、合法 UTF-8、禁 C0/DEL、禁 log-injection runes；`dropped>0` 时响应加 `"note":"amount may be underestimated"`。
 - 鉴权走既有 `auth()`；挂 `listLimiter`。可见性与 `/api/sessions` 同级（naozhi 单租户；`session_key` 含平台用户 id 与现有 sessions API 暴露面一致，不新增）。
 
@@ -231,7 +240,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 - 服务概览「花费」卡：改读 `/api/cost/summary?from=<30d>&group_by=unit`（按单位分桶即够用），USD 主数字，credits 有值另起一行；hover 标注 "CLI 估算口径，非账单 / 含 N 条未知定价 / 账本丢弃 N 条"；`unknown>0 || dropped>0` 显示 ⚠；账本未加载前回退到 live session 求和并标注「累计花费」。
 - cron job 详情：新增 per-job 30 天聚合（`group_by=job` 或 `job_id=` 过滤），时间轴"已加载 run 之和"小字保留（口径不同，文案已区分）。
-- session header run-stats 不变。
+- session header run-stats 末尾、cron 时间轴头部：配置了 `cost.budget` 时显示「今日 $X / $Y」（`/api/cost/budget`）。
 - 前端契约测试（`static_ux_contract_test.go` 模式）锁定 unit 不混算。
 
 ## 9. 兼容与迁移
@@ -247,10 +256,10 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
   ```
 - 历史回填 `naozhi cost backfill [-config] [-dry-run]`：从 `session-runs/` 与 cron `runs/` 导入 `Kind=backfill`（TS=StartedAt，以 run_id 去重，超出保留期跳过）；persistent 模式 cron 旧记录是累计值，**跳过不导**；导入落在过去日期文件，需重启 naozhi 刷新内存 rollup。
 - 对账 `naozhi cost reconcile [-config] [-session <cli-session-id>] [-until YYYY-MM-DD] [-claude-dir] [-write]`（#3210）：修 #3097 之前每次 `--resume` 把恢复的 cost-state 总额记进首个 turn 的历史条目，并补上从未入账的花费。**默认只打印**，`-write` 才追加；只追加 `Kind=adjust`，不改已有行，与运行中的 naozhi 并存的理由同 backfill。
-  - 归属：只看 `Source=session`、claude、USD、非 cron key 的条目。CLI session 依次取 `RunID` 自带的（`end:<sid>:…` / `unowned:<sid>:…` / `reconcile:<sid>:…`）、同 `RunID` 的 session-runs 记录、只对应过一个 session id 的 key（session-runs 记录与 sessions.json 的 `prev_session_ids` 链合并后仍只有一个）；key 对应过多个 session 时，`Kind=turn` 条目（result 一到就记，这一轮的消息落在同 key 上一条非 adjust 条目之后、它之前）按这些 session 的 transcript 时间归属：窗口取 (同 key 上一条非 adjust 条目的 TS，没有则不设下限, 条目 TS+5s]，只有一个 session 在窗口里有消息（终端交互消息不算）时归它。候选 session 的 transcript 也记着它在别的 key 下（如 dashboard 历史恢复的 `r<hash>` key）跑的轮次、fork 复制的父会话行、以及下一个 session 落在 5s 余量里的首条消息，所以窗口里有两个及以上 session 的消息、都没有消息、或其中某个 session 的 transcript 读不全时不猜。都不成立的计数后跳过，并记下它所在的 (key, 日)。
+  - 归属：只看 `Source=session`、claude、USD、非 cron key 的条目。CLI session 依次取 `RunID` 自带的（`end:<sid>:…` / `unowned:<sid>:…` / `reconcile:<sid>:…`）、同 `RunID` 的 session-runs 记录、只对应过一个 session id 的 key（session-runs 记录与 sessions.json 的 `prev_session_ids` 链合并后仍只有一个）；key 对应过多个 session 时，`Kind=turn` 条目（result 一到就记，这一轮的消息落在同 key 上一条非 adjust 条目之后、它之前）按这些 session 的 transcript 时间归属：窗口取 (同 key 上一条非 adjust 条目的 TS，没有则不设下限, 条目 TS]，与下面恢复额判断里本轮窗口的截止点相同（条目在 result 到达后才打时间戳，CLI 在同一时钟上更早写这一轮的行，晚于条目的行属于下一轮），只有一个 session 在窗口里有消息（终端交互消息不算）时归它。候选 session 的 transcript 也记着它在别的 key 下（如 dashboard 历史恢复的 `r<hash>` key）跑的轮次、以及 fork 复制的父会话行，所以窗口里有两个及以上 session 的消息、都没有消息、或其中某个 session 的 transcript 读不全时不猜。session-runs 记录没写 `session_id` 的条目（#3494 之前新会话首轮的记录都这样，key 删掉后别处也查不到），按 transcript 的起头归属：候选是 `session-ids.json` 里的 session（只读，损坏时不挪走），起头取 transcript 第一条带时间戳的行，第一条带 `entrypoint` 的行是 `cli` / `claude-vscode` 的不算；只有一个候选的起头落在该 run 的 [`started_at`−5s, `ended_at`+5s] 里，且这个起头不同时落在另一条没写 `session_id` 的 run 窗口里（对方 transcript 已不在、或并发的首轮）时才归它。有候选的起头读不出来（transcript 在窗口开始后还写过）时也不猜。这类记录的起止时间也照常用于下面的轮次窗口和"首条记账前的历史"判断。都不成立的计数后跳过，并记下它所在的 (key, 日)。
   - 恢复额：cost-state 行没有时间戳，取它后面第一条带时间戳的行作为"之后的进程才能恢复它"的时刻。条目之前最后一个满足此条件的 cost-state 总额记为 r（被杀的进程不写 cost-state，连续几次 resume 会恢复同一行，所以之后每个条目都是候选）。条目自己这一轮的 transcript 用量取窗口 (max(上一轮的终点, cost-state 之前最后一个时间戳), 条目 TS]，不含终端交互消息，adjust 条目不算轮次；起点不早于 cost-state，是因为写它的进程在上一个条目之后跑的用量已在 r 里。`Kind=backfill` 的 TS 是 run 的开始，窗口改取 (TS, session-runs 记录的 `ended_at`]，没有结束时间时取到下一个非 adjust 条目的 TS（可能把下一轮也算进来，只会少标），下一轮也从这个 backfill 的 TS 起算；后面没有条目可作边界时不标记，计入"无法判定"。轮次终点：turn 是条目 TS，backfill 是 `ended_at`。条目满足 `Amount ≥ 0.98·r`、`r ≥ $0.5`，且比这一轮用量多出至少 r 的一半（基线为 0 的差分多出约 r，修好基线的 turn 约为 0；取中点是因为窗口里可能有没有条目记过的花费、条目里也可能有 transcript 看不到的花费，实测前者可达 r 的三成），就追加一条 `Amount=−r`、TS 与 key 同原条目的修正，`RunID=reconcile:<sid>:run:<原 run_id>`，已存在则跳过。`Models[]` 按 `costledger.RateKey` 把 r 的每个模型行与原条目的模型行配对取负，每行最多取到原条目该行的量；原条目或 cost-state 有一方没有 token 时改比金额（这一轮用量按 RateBook 定价）；这一轮有未学到单价的模型时不标记，计入说明里的"无法判定"条数。原条目没有 `Models[]` 时修正也不带。
-  - 按天残差：对每个 UTC 日（不含 `-until` 当天及以后，默认今天；不早于账本最早一天），transcript 花费 T 取主 JSONL、`subagents/agent-*.jsonl` 与 `subagents/workflows/*/agent-*.jsonl` 按 `message.id` 去重后的用量，按 §5.6 的 RateBook 定价（样本为账本里所有 `Kind=turn` 行加各 session 的 cost-state 行）。账本同日合计（含上一步的修正）记为 L。`|T−L| > max($1, 5%·T)` 时追加一条 `Amount=T−L`、`RunID=reconcile:<sid>:day:<日期>`、TS 为当日 12:00 UTC 的修正，`Models[]` 是逐模型的 transcript 减账本。重跑时 L 已含上次的修正，所以不再追加。那一天若有归不到任何 session 的条目落在这个 session 已持有的某个 key 上（即前一步归属失败并记下的 (key, 日)），当天残差整个跳过不记——它的花费可能已经在这份 transcript 里，又已经在账本里，残差会把它再记一次。
-  - 只记能证明是 naozhi 且没记在别处的花费（#3320）：`entrypoint` 为 `cli` / `claude-vscode`（交互终端，即被接管前的终端轮次）的消息不计入 T。以下情况当天残差跳过不记，只在 dry-run 表格里报天数：有消息在同一天里之后没有这个 session 的条目（记它的条目在别的日子——跨零点或跨 `-until` 的轮次——或者还没记账），记它的那一天也一起跳过；有消息早于这个 session 第一条条目所在 run 的开始（session-runs 记录的 `started_at`，没有记录时取该条目时间），即 resume 前的历史；当天有这个 CLI session 的 cron run（cron run 记录的 `session_id` 与起止时间，cron 已按自己的 Source 记过）；有消息的 `entrypoint` 既不是 `sdk-cli` 也不是交互终端（来源不明）。当天 transcript 没有可计入的消息（没有消息，或只有交互终端消息）而账本有条目时也跳过（#3302）：没有证据说明这些条目记错了，按 T=0 冲平会把 transcript 里已经找不到的花费一并抹掉；账本当天合计为负时照常补到 0（花费不会是负数，补正只会更接近真实值）；transcript 有消息、只是比账本少的日子照常记负残差。`-session` 也按全量顺序读完所有 session，fork 从父会话拷来的消息仍归父会话。
+  - 按天残差：对每个 UTC 日（不含 `-until` 当天及以后，默认今天；不早于账本最早一天），transcript 花费 T 取主 JSONL、`subagents/agent-*.jsonl` 与 `subagents/workflows/*/agent-*.jsonl` 按 `message.id` 去重后的用量，按 §5.6 的 RateBook 定价（样本为账本里所有 `Kind=turn` 行加各 session 的 cost-state 行）。账本同日合计（含上一步的修正）记为 L。`T−L > max($1, 5%·T)` 时追加一条 `Amount=T−L`、`RunID=reconcile:<sid>:day:<日期>`、TS 为当日 12:00 UTC 的修正，`Models[]` 是逐模型的 transcript 减账本。重跑时 L 已含上次的修正，所以不再追加。那一天若有归不到任何 session 的条目落在这个 session 已持有的某个 key 上（即前一步归属失败并记下的 (key, 日)），当天残差整个跳过不记——它的花费可能已经在这份 transcript 里，又已经在账本里，残差会把它再记一次。
+  - 只记能证明是 naozhi 且没记在别处的花费（#3320）：`entrypoint` 为 `cli` / `claude-vscode`（交互终端，即被接管前的终端轮次）的消息不计入 T。以下情况当天残差跳过不记，只在 dry-run 表格里报天数：有消息在同一天里之后没有这个 session 的条目（记它的条目在别的日子——跨零点或跨 `-until` 的轮次——或者还没记账），记它的那一天也一起跳过；有消息早于这个 session 第一条条目所在 run 的开始（session-runs 记录的 `started_at`，没有记录时取该条目时间），即 resume 前的历史；当天有这个 CLI session 的 cron run（cron run 记录的 `session_id` 与起止时间，cron 已按自己的 Source 记过）；有消息的 `entrypoint` 既不是 `sdk-cli` 也不是交互终端（来源不明）。当天 transcript 没有可计入的消息（没有消息，或只有交互终端消息）而账本有条目时也跳过（#3302）：没有证据说明这些条目记错了，按 T=0 冲平会把 transcript 里已经找不到的花费一并抹掉；账本当天合计为负时照常补到 0（花费不会是负数，补正只会更接近真实值）。残差只往上补、不往下调（#3519）：transcript 里的每条消息都是 CLI 计过费的请求，但 CLI 计费的请求不都写进 transcript——取消或空闲后整段上下文重发的请求、后台请求不落行，流式中途写下的 `output_tokens` 也比最终计费少——所以真实花费不低于 max(T, L)，T 少于 L 不能证明账本多记。`L−T` 超过同样容差的日子只在 dry-run 表格里报天数和金额（「账本高于 transcript」），包括 `--resume` 恢复额修正之后仍高出的余数：恢复额修正只减去 cost-state 总额 r，余数与没落行的请求无法区分。当天有计入"无法判定"的条目（如没有终点的 backfill）时另报这样的天数：高出的部分可能就是没能标记的 r，残差不再把它扣回，需要人工核对。`-session` 也按全量顺序读完所有 session，fork 从父会话拷来的消息仍归父会话。
   - 跳过：找不到 transcript、子 agent 文件超过单次读取上限（用量不全）、当天有没学到单价的模型（只跳过那一天）。同一条消息只算给最早出现的 session（fork 会复制父 session 的行）。
   - 修正落在过去日期文件，需重启 naozhi 刷新内存 rollup；会话侧的 `costSpent` 不跟着改。
 

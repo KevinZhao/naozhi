@@ -30,6 +30,7 @@
 // and the pending card's basename group is sidebar_p3_2431.test.js item 4.
 const { test, expect } = require('@playwright/test');
 const { startMockServer, defaultSessions } = require('./mock-server');
+const { waitForWs } = require('./shim_wait');
 
 test.use({ viewport: { width: 1280, height: 800 } });
 
@@ -116,7 +117,7 @@ test('over a live socket, a lagging REST running does not re-run the running tra
   const mock = await startMockServer({ sessions, ws: true });
   try {
     await page.goto(mock.url + '/dashboard');
-    await page.waitForFunction(() => window.nz.test.wsm.state === 'connected');
+    await waitForWs(page);
     const got = await restRunningBehindBanner(page, sessions, { showBanner: true });
     expect(got).toEqual({ applied: true, stop: 'none', send: 'flex' });
     expect(await page.evaluate(() => window.nz.test.wsm.state)).toBe('connected');
@@ -128,7 +129,7 @@ test('over a live socket, a REST running heals a hidden banner (the running push
   const mock = await startMockServer({ sessions, ws: true });
   try {
     await page.goto(mock.url + '/dashboard');
-    await page.waitForFunction(() => window.nz.test.wsm.state === 'connected');
+    await waitForWs(page);
     const got = await restRunningBehindBanner(page, sessions, { showBanner: false });
     expect(got).toEqual({ applied: true, stop: 'flex', send: 'none' });
     expect(await page.evaluate(() => window.nz.test.wsm.state)).toBe('connected');

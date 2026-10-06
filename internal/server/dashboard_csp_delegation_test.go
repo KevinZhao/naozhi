@@ -63,46 +63,6 @@ func TestDashboardBundle_NoInterpolatedDataAction(t *testing.T) {
 	}
 }
 
-// TestDashboardCSP_CDNURLsMatchBundle keeps the exact-URL CDN pins in
-// buildDashboardCSP in lockstep with the URLs dashboard.js actually injects:
-// bumping mermaid/KaTeX in one place but not the other would either block the
-// lazy load (CSP behind) or leave a stale allowlisted URL (CSP ahead).
-func TestDashboardCSP_CDNURLsMatchBundle(t *testing.T) {
-	t.Parallel()
-	// #2558 D4: the lazy CDN loaders live in render_md.js; keep scanning
-	// dashboard.js too so a future move back stays covered. The two files are
-	// a deliberate choice, not a module list to keep in step: they are where
-	// the loaders live, and the reverse check below (every pinned URL is seen)
-	// fails loudly if a loader moves anywhere else. Every module being served
-	// at all is TestStaticJS_ModuleInventory's job.
-	var js []byte
-	for _, name := range []string{"dashboard.js", "render_md.js"} {
-		b := staticAssetBytes(name)
-		if b == nil {
-			t.Fatalf("%s not embedded", name)
-		}
-		js = append(append(js, b...), '\n')
-	}
-	urlRe := regexp.MustCompile(`https://cdn\.jsdelivr\.net/npm/[^'"\s]+`)
-	seen := map[string]bool{}
-	for _, u := range urlRe.FindAllString(string(js), -1) {
-		seen[u] = true
-		switch {
-		case strings.HasSuffix(u, ".js"), strings.HasSuffix(u, ".css"):
-			if !strings.Contains(dashboardCSP, u) {
-				t.Errorf("dashboard.js injects %q but the CSP does not allowlist it — "+
-					"update the cdn* constants in dashboard_csp.go in the same change", u)
-			}
-		}
-	}
-	for _, pinned := range []string{cdnMermaidJS, cdnKatexJS, cdnKatexCSS} {
-		if !seen[pinned] {
-			t.Errorf("CSP pins %q but dashboard.js no longer references it — drop or "+
-				"update the pin", pinned)
-		}
-	}
-}
-
 // TestDashboardCSP_MockServerHeaderInSync compares the Playwright mock
 // server's hard-coded CSP literal against the policy the server derives for
 // the page the mock serves, so the e2e suite always exercises the dashboard

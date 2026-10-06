@@ -298,6 +298,28 @@ func TestDispatchCommand_Help(t *testing.T) {
 	}
 }
 
+// TestDispatchCommand_UrgentCopyNamesToolDelay pins that the /help line and
+// the bare /urgent usage do not promise an immediate stop: priority:"now"
+// waits for a running tool to return (validation RFC V10).
+func TestDispatchCommand_UrgentCopyNamesToolDelay(t *testing.T) {
+	fp := &fakePlatform{}
+	d := newTestDispatcher(fp)
+	d.dispatchCommand(context.Background(), incomingMsg("/help"), "/help", slog.Default())
+	var helpLine string
+	for _, line := range strings.Split(fp.lastReply(), "\n") {
+		if strings.Contains(line, "/urgent") {
+			helpLine = line
+		}
+	}
+	d.dispatchCommand(context.Background(), incomingMsg("/urgent"), "/urgent", slog.Default())
+	usage := fp.lastReply()
+	for name, text := range map[string]string{"help line": helpLine, "usage": usage} {
+		if !strings.Contains(text, "正在运行的工具需先结束") || strings.Contains(text, "立即") {
+			t.Errorf("/urgent %s = %q, want the running-tool caveat and no 立即", name, text)
+		}
+	}
+}
+
 func TestDispatchCommand_HelpWithAgents(t *testing.T) {
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp)
@@ -687,7 +709,7 @@ func TestBuildHandler_UnknownPlatformGetsNoTurn(t *testing.T) {
 func TestSendSplitReply_Short(t *testing.T) {
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp)
-	d.SendSplitReply(context.Background(), fp, "c1", "short message")
+	d.SendSplitReply(context.Background(), fp, ReplyDest{ChatID: "c1"}, "short message")
 	if fp.replyCount() != 1 || fp.lastReply() != "short message" {
 		t.Errorf("reply = %q, want %q", fp.lastReply(), "short message")
 	}
@@ -697,7 +719,7 @@ func TestSendSplitReply_Long_Paginates(t *testing.T) {
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp)
 	// >4000 chars → 2+ chunks
-	d.SendSplitReply(context.Background(), fp, "c1", strings.Repeat("A", 8001))
+	d.SendSplitReply(context.Background(), fp, ReplyDest{ChatID: "c1"}, strings.Repeat("A", 8001))
 	if fp.replyCount() < 2 {
 		t.Errorf("reply count = %d, want ≥ 2", fp.replyCount())
 	}
@@ -714,7 +736,7 @@ func (z *zeroMaxPlatform) MaxReplyLength() int { return 0 }
 func TestSendSplitReply_ZeroMax_Defaults4000(t *testing.T) {
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp)
-	d.SendSplitReply(context.Background(), &zeroMaxPlatform{fp}, "c1", "hello")
+	d.SendSplitReply(context.Background(), &zeroMaxPlatform{fp}, ReplyDest{ChatID: "c1"}, "hello")
 	if fp.replyCount() != 1 {
 		t.Errorf("reply count = %d, want 1", fp.replyCount())
 	}
@@ -726,7 +748,7 @@ func TestSendSplitReply_ZeroMax_Defaults4000(t *testing.T) {
 
 func TestReplyTracker_NonInterim_WaitReadyInstant(t *testing.T) {
 	fp := &fakePlatform{supportsInterim: false}
-	tracker := newIMEventTracker(context.Background(), fp, "c1", "direct", "")
+	tracker := newIMEventTracker(context.Background(), fp, ReplyDest{ChatID: "c1"}, "direct", "")
 	defer tracker.stop()
 	tracker.onEvent(clievent.Event{
 		Type:    "assistant",
@@ -748,7 +770,7 @@ func TestReplyTracker_Interim_InitialReply(t *testing.T) {
 	fp := &fakePlatform{supportsInterim: true, replyMsgID: "thinking-1"}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	tracker := newIMEventTracker(ctx, fp, "c1", "direct", "")
+	tracker := newIMEventTracker(ctx, fp, ReplyDest{ChatID: "c1"}, "direct", "")
 	defer tracker.stop()
 	tracker.onEvent(clievent.Event{
 		Type:    "assistant",
@@ -765,7 +787,7 @@ func TestReplyTracker_Interim_InitialReply(t *testing.T) {
 
 func TestReplyTracker_RenderStatus(t *testing.T) {
 	fp := &fakePlatform{supportsInterim: false}
-	tracker := newIMEventTracker(context.Background(), fp, "c1", "direct", "")
+	tracker := newIMEventTracker(context.Background(), fp, ReplyDest{ChatID: "c1"}, "direct", "")
 	defer tracker.stop()
 	tracker.linesMu.Lock()
 	tracker.statusLines = appendStatusLine(tracker.statusLines, "💭 thinking")
@@ -779,7 +801,7 @@ func TestReplyTracker_RenderStatus(t *testing.T) {
 
 func TestReplyTracker_Stop_Idempotent(t *testing.T) {
 	fp := &fakePlatform{supportsInterim: false}
-	tracker := newIMEventTracker(context.Background(), fp, "c1", "direct", "")
+	tracker := newIMEventTracker(context.Background(), fp, ReplyDest{ChatID: "c1"}, "direct", "")
 	tracker.stop()
 	tracker.stop()
 }
@@ -787,7 +809,7 @@ func TestReplyTracker_Stop_Idempotent(t *testing.T) {
 func TestReplyTracker_WaitReady_CtxCancel(t *testing.T) {
 	fp := &fakePlatform{supportsInterim: true}
 	ctx, cancel := context.WithCancel(context.Background())
-	tracker := newIMEventTracker(ctx, fp, "c1", "direct", "")
+	tracker := newIMEventTracker(ctx, fp, ReplyDest{ChatID: "c1"}, "direct", "")
 	defer tracker.stop()
 	cancel()
 	done := make(chan struct{})

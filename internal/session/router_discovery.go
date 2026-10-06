@@ -2,7 +2,7 @@
 //
 // This file holds operator-facing controls (SetUserLabel, the Interrupt
 // family) and discovery integration (DiscoveryExcludeIDs, RegisterForResume,
-// RegisterCronStub*, ManagedExcludeSets, TakeoverPrecheck, Takeover).
+// RegisterCronStub*, ManagedExcludeSets, ReserveTakeover, Takeover).
 package session
 
 import (
@@ -407,41 +407,55 @@ func errTakeoverRaced(key string) error {
 	return fmt.Errorf("%w: key %s", ErrTakeoverRaced, key)
 }
 
-// TakeoverPrecheck returns the error Takeover(key, opts) would be refused
-// with before spawning (invalid model or backend, ErrRouterStopped,
-// ErrSpawnInFlight, ErrMaxProcs or, for exempt opts, ErrMaxExemptSessions),
-// changing nothing, so a caller can refuse before it kills the external CLI.
-// The capacity checks are reserveSpawn's; the state can still change before
-// Takeover runs.
-func (r *Router) TakeoverPrecheck(key string, opts AgentOpts) (err error) {
-	if err := validateModel(opts.Model); err != nil {
-		return err
-	}
-	if err := validateBackend(opts.Backend); err != nil {
-		return err
-	}
-	if r.stopped.Load() {
-		return ErrRouterStopped
-	}
-	r.ss.View(func(v sessView) {
-		if _, inflight := v.Ext().SpawnInFlight(key); inflight {
-			err = ErrSpawnInFlight
-		} else if opts.Exempt {
-			err = takeoverExemptRefusal(v, key)
-		} else if !takeoverHasSlot(v, key, r.maxProcs) {
-			err = fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
-		}
-	})
-	return err
+// errLeaseSpent is Takeover's answer for a lease it or Release already ended.
+var errLeaseSpent = errors.New("takeover lease already used or released")
+
+// TakeoverLease is a takeover of one key reserved by ReserveTakeover. Takeover
+// consumes it; Release gives it up. Either ends it, after which both do
+// nothing more.
+type TakeoverLease struct {
+	key   string
+	opts  AgentOpts
+	guard chan struct{}
+	// slot is the lease's pending spawn slot, already released for exempt
+	// opts; its router is the one Release locks.
+	slot pendingSpawnSlot
+	// spent is read and set under the table lock.
+	spent bool
 }
 
-// Takeover creates a managed session to replace an external Claude CLI session.
-// It uses --resume to preserve the conversation context, and loads JSONL history
-// for dashboard display; a backend that rejects the resume gets a fresh session
-// chained to that transcript instead. It runs on the claude backend when one is
-// registered, unless opts.Backend or a backend pick names another. The caller
-// must ensure the original process has been terminated before calling.
-func (r *Router) Takeover(ctx context.Context, key string, sessionID string, workspace string, opts AgentOpts) (*ManagedSession, error) {
+// Release ends a lease Takeover has not consumed: the key's parked spawns
+// wake and its slot is freed. Nil-safe and idempotent.
+func (l *TakeoverLease) Release() {
+	if l == nil {
+		return
+	}
+	l.slot.r.ss.Update(l.releaseIn)
+}
+
+func (l *TakeoverLease) releaseIn(tx sessTx) {
+	if l.spent {
+		return
+	}
+	l.spent = true
+	l.endIn(tx)
+}
+
+// endIn frees the lease's slot and ends its marker, spent or not.
+func (l *TakeoverLease) endIn(tx sessTx) {
+	l.slot.releaseIn(tx)
+	tx.Ext().spawns.EndSpawn(l.key, l.guard)
+}
+
+// ReserveTakeover reserves key for a Takeover with opts, so a caller can
+// refuse before it stops the external CLI. It returns the error Takeover would
+// be refused with before spawning (invalid model or backend, ErrRouterStopped,
+// ErrSpawnInFlight, ErrMaxProcs or, for exempt opts, ErrMaxExemptSessions);
+// otherwise the lease holds the key's in-flight marker and, for non-exempt
+// opts, a pending slot until Takeover or Release, so a second takeover of key
+// is refused, a spawn of key parks and other spawns count the slot. A live
+// session on key keeps its own count too until Takeover closes it.
+func (r *Router) ReserveTakeover(key string, opts AgentOpts) (*TakeoverLease, error) {
 	// Same flag-injection guard as GetOrCreate: AgentOpts is caller-supplied.
 	if err := validateModel(opts.Model); err != nil {
 		return nil, err
@@ -449,6 +463,44 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 	if err := validateBackend(opts.Backend); err != nil {
 		return nil, err
 	}
+	var (
+		lease *TakeoverLease
+		err   error
+	)
+	r.ss.Update(func(tx sessTx) {
+		_, inflight := tx.Ext().spawns.SpawnInFlight(key)
+		switch {
+		case r.stopped.Load():
+			err = ErrRouterStopped
+		case inflight:
+			err = ErrSpawnInFlight
+		case opts.Exempt:
+			err = takeoverExemptRefusal(tx.View, key)
+		case !takeoverHasSlot(tx.View, key, r.maxProcs):
+			err = fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
+		}
+		if err != nil {
+			return
+		}
+		lease = &TakeoverLease{key: key, opts: opts, slot: pendingSpawnSlot{r: r, released: true}}
+		lease.guard, _ = tx.Ext().spawns.BeginSpawn(key)
+		// An exempt spawn needs no maxProcs room, so its lease takes none.
+		if !opts.Exempt {
+			lease.slot = r.acquirePendingSpawnSlot(tx)
+		}
+	})
+	return lease, err
+}
+
+// Takeover creates a managed session to replace an external Claude CLI session.
+// It uses --resume to preserve the conversation context, and loads JSONL history
+// for dashboard display; a backend that rejects the resume gets a fresh session
+// chained to that transcript instead. It runs on the claude backend when one is
+// registered, unless the lease's opts.Backend or a backend pick names another.
+// The caller reserves the key with ReserveTakeover and terminates the original
+// process before calling; Takeover consumes the lease however it returns.
+func (r *Router) Takeover(ctx context.Context, lease *TakeoverLease, sessionID string, workspace string) (*ManagedSession, error) {
+	key, opts := lease.key, lease.opts
 	// The adopted process is a Claude CLI; the agent's backend must not move
 	// its --resume onto another CLI.
 	opts.DefaultBackend = ""
@@ -458,27 +510,26 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 		aborted bool
 	)
 	r.ss.Update(func(tx sessTx) {
-		// One spawn per key (see ResetAndRecreate): a spawn already in flight
-		// is refused, not joined.
-		if _, inflight := tx.Ext().spawns.SpawnInFlight(key); inflight {
-			err = ErrSpawnInFlight
+		if lease.spent {
+			err = errLeaseSpent
 			return
 		}
+		// Consumed from here on, so a Release during the unlocked close below
+		// leaves the marker: a GetOrCreate parks on it through that close, and
+		// reserveSpawn takes it over.
+		lease.spent = true
+		res.guard = lease.guard
 		// If key already exists (e.g. re-takeover same CWD), close the old process.
 		if s, ok := tx.Lookup(key); ok {
 			// Mirror reset: only non-exempt AND alive sessions contributed to
 			// activeCount, so only those get a -1 (no O(n) countActive recount).
 			if p := s.loadProcess(); p != nil && p.Alive() {
 				oldBackend, oldExempt := s.Backend(), s.exempt
-				// Lease the key before releasing the lock, as ResetAndRecreate
-				// does: a concurrent GetOrCreate parks on it instead of spawning
-				// into the close window, and the spawn below takes it over.
-				res.guard, _ = tx.Ext().spawns.BeginSpawn(key)
 				tx.Unlocked(func() {
 					p.Close()
 					// The spawn below will StartShim against the same socket
 					// path; wait for the shim to release it (same race as Reset).
-					waitSocketGoneForKey(key, 2*time.Second)
+					waitSocketGoneForKey(key)
 				})
 				// Only delete if no concurrent goroutine replaced this session.
 				// keepBackendOverride=true: Takeover re-spawns on the same key
@@ -497,7 +548,7 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 					// spawn (a rename into it after a concurrent removal); abort
 					// rather than silently return the wrong session, ending the
 					// lease so its waiters wake.
-					tx.Ext().spawns.EndSpawn(key, res.guard)
+					lease.endIn(tx)
 					aborted = true
 					return
 				}
@@ -523,6 +574,8 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 		if opts.Backend == "" && tx.Ext().picks.backend[key] == "" {
 			opts.Backend = "claude"
 		}
+		// The spawn holds its own slot and ends the marker however it goes.
+		lease.slot.releaseIn(tx)
 		err = r.reserveSpawn(tx, &res, key, sessionID, opts)
 	})
 	if aborted {
@@ -540,7 +593,7 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 	}
 	slog.Warn("resume rejected; takeover started fresh", "key", osutil.SanitizeForLog(key, 64),
 		"session_id", sessionID, "backend", res.backendID, "err", err)
-	stuck := !waitSocketGoneForKey(key, 2*time.Second)
+	stuck := !waitSocketGoneForKey(key)
 	opts.Backend = cmp.Or(res.backendID, opts.Backend)
 	opts.AccessProfile = cmp.Or(res.accessProfileID, opts.AccessProfile)
 	// A GetOrCreate parked on the first spawn may own the key by now: one

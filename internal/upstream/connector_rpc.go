@@ -153,6 +153,12 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err != nil {
 			return nil, err
 		}
+		// A primary that does not read the status shows a busy send, which was
+		// dropped, as accepted; an error is what it reports as a failure.
+		// Queued and reset only change the wording there, so they pass.
+		if status == "busy" && !c.hubSendStatus.Load() {
+			return nil, node.ErrSendBusy
+		}
 		return marshalResult(map[string]string{"status": status})
 
 	case "takeover":
@@ -200,10 +206,20 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		cwdKey := sessionkey.SanitizeCWDKey(cwd)
 		key := sessionkey.TakeoverKey(cwdKey)
 		// Everything that can refuse runs before SIGTERM, so a refused takeover
-		// leaves the external CLI running.
-		if err := c.router.TakeoverPrecheck(key); err != nil {
+		// leaves the external CLI running. The lease holds key until the spawn,
+		// so a second takeover is refused while this CLI exits; until the
+		// goroutine owns it, any return or panic releases it. Empty AgentOpts:
+		// the remote node has no agents registry, so overrides (#2493) stay local.
+		lease, err := c.router.ReserveTakeover(key, sessionview.AgentOpts{})
+		if err != nil {
 			return nil, fmt.Errorf("takeover refused: %w", err)
 		}
+		handedOff := false
+		defer func() {
+			if !handedOff {
+				lease.Release()
+			}
+		}()
 		actual, err := discovery.ProcStartTime(p.PID)
 		if err != nil {
 			return nil, fmt.Errorf("cannot verify process identity for pid %d: %w", p.PID, err)
@@ -220,8 +236,10 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		// wg keeps reconnect waiting for in-flight cleanup; appCtx so a
 		// transient connection drop does not abort cleanup already in progress.
 		wg.Add(1)
+		handedOff = true
 		go func() {
 			defer wg.Done()
+			defer lease.Release() // no-op once Takeover consumed it
 			defer func() {
 				if r := recover(); r != nil {
 					slog.Error("connector takeover panic", "key", key, "panic", r, "stack", string(debug.Stack()))
@@ -231,10 +249,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			if appCtx.Err() != nil {
 				return // connector shutting down
 			}
-			// Empty AgentOpts by design: the remote node has no agents registry,
-			// so per-agent overrides (model / args / system_prompt, #2493) do
-			// not cross the node boundary on takeover.
-			if _, err := c.router.Takeover(appCtx, key, sessionID, cwd, sessionview.AgentOpts{}); err != nil {
+			if _, err := lease.Takeover(appCtx, sessionID, cwd); err != nil {
 				slog.Debug("connector takeover failed", "key", key, "err", err)
 			}
 		}()

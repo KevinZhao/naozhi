@@ -147,6 +147,9 @@ const deps = {
   'backend_catalog.js': {},
   'cron_state.js': {},
   'cron_format.js': {},
+  'lightbox.js': {},
+  'mem_popover.js': {},
+  'aside_drawer.js': {},
   'cron_drawer.js': {},
   'cron_trigger.js': {},
   // ES module since D3 PR-B: utilities and shared state come in via import;
@@ -160,7 +163,7 @@ const deps = {
 
 // Files migrated to ES modules (D3, docs/rfc/dashboard-es-modules.md).
 // sourceType 'module' makes no-undef a real scope check for them.
-const moduleFiles = new Set(['nz_util.js', 'state.js', 'send_message.js', 'auth_modal.js', 'sidebar_project.js', 'msg_nav.js', 'tuning.js', 'discovery.js', 'utilities.js', 'file_refs.js', 'running_banner.js', 'system_view.js', 'split_view.js', 'render_md.js', 'self_update.js', 'voice.js', 'session_header.js', 'composer_files.js', 'mobile_nav.js', 'dashboard.js', 'agent_view.js', 'asset_browser.js', 'files_view.js', 'cron_view.js', 'cron_schedule.js', 'cron_timeline.js', 'cron_drawer.js', 'cron_trigger.js', 'cron_attention.js', 'cron_live.js', 'platform.js', 'ws_manager.js', 'session_stream.js', 'features.js', 'ask_card.js', 'event_render.js', 'event_stream.js', 'session_list.js', 'session_ident.js', 'icons.js', 'file_ref_parse.js', 'shell.js', 'backend_catalog.js', 'cron_state.js', 'cron_format.js']);
+const moduleFiles = new Set(['nz_util.js', 'state.js', 'send_message.js', 'auth_modal.js', 'sidebar_project.js', 'msg_nav.js', 'tuning.js', 'discovery.js', 'utilities.js', 'file_refs.js', 'running_banner.js', 'system_view.js', 'split_view.js', 'render_md.js', 'self_update.js', 'voice.js', 'session_header.js', 'composer_files.js', 'mobile_nav.js', 'dashboard.js', 'agent_view.js', 'asset_browser.js', 'files_view.js', 'cron_view.js', 'cron_schedule.js', 'cron_timeline.js', 'cron_drawer.js', 'cron_trigger.js', 'cron_attention.js', 'cron_live.js', 'platform.js', 'ws_manager.js', 'session_stream.js', 'features.js', 'ask_card.js', 'event_render.js', 'event_stream.js', 'session_list.js', 'session_ident.js', 'icons.js', 'file_ref_parse.js', 'shell.js', 'backend_catalog.js', 'cron_state.js', 'cron_format.js', 'lightbox.js', 'mem_popover.js', 'aside_drawer.js']);
 
 const perFile = Object.entries(deps).map(([file, globals]) => ({
   files: [`internal/server/static/${file}`],

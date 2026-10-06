@@ -14,8 +14,9 @@ import (
 )
 
 // buildDispatcher wires the dispatcher from the Server state that already
-// exists at this point in buildServerWithHandlers (router, platforms, watchdog
-// counters, appCtx) and the construction-only dependencies in w.
+// exists at this point in buildServerWithHandlers (platforms, watchdog
+// counters, appCtx) and the construction-only dependencies in w (router
+// included).
 func (s *Server) buildDispatcher(w *wiring) *dispatch.Dispatcher {
 	// The nil guard must stay OUTSIDE the adapter: wrapping a nil scheduler in
 	// a struct value yields a non-nil interface and breaks the "nil disables
@@ -27,8 +28,8 @@ func (s *Server) buildDispatcher(w *wiring) *dispatch.Dispatcher {
 	// Same for the router and resolver: a nil pointer boxed into the
 	// interface field would defeat the dispatcher's nil checks.
 	var router dispatch.SessionRouter
-	if s.router != nil {
-		router = s.router
+	if w.router != nil {
+		router = w.router
 	}
 	var resolver dispatch.KeyResolver
 	if w.resolver != nil {
@@ -51,6 +52,10 @@ func (s *Server) buildDispatcher(w *wiring) *dispatch.Dispatcher {
 		Dedup:                 w.dedup,
 		AllowedRoot:           w.allowedRoot,
 		Access:                w.imAccess,
+		RateLimit:             w.imRateLimit,
+		Budget:                w.imBudget,
+		GroupScope:            w.imGroupScope,
+		ThreadAutoOpen:        w.imAutoThread,
 		ClaudeDir:             s.claudeDir,
 		Capabilities:          serverCaps{s: s},
 		NoOutputTimeout:       s.noOutputTimeout,

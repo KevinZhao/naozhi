@@ -5,10 +5,15 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/naozhi/naozhi/internal/budget"
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/costledger"
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // baseDeps builds the minimal SchedulersDeps that lets cron.Scheduler.Start
@@ -160,4 +165,29 @@ func TestWireSchedulers_RecordsSchedulersBootStep(t *testing.T) {
 	if _, ok := b.steps.Get("schedulers"); !ok {
 		t.Errorf("WireSchedulers did not record the schedulers boot step; got %v", b.Steps())
 	}
+}
+
+// SchedulersDeps.Budget reaches the scheduler: with the machine's daily cap
+// spent, a triggered run ends budget_exceeded instead of spawning.
+func TestWireSchedulers_BudgetReachesScheduler(t *testing.T) {
+	deps := baseDeps(t)
+	idx := budget.NewIndex(time.UTC, nil)
+	idx.Add(costledger.Entry{TS: time.Now(), Unit: costledger.UnitUSD, Amount: 1})
+	deps.Budget = budget.NewGate(budget.Limits{DailyUSD: 1}, idx)
+	out, err := NewBoot().WireSchedulers(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(out.Cron.Stop)
+	j := cron.NewJob("@every 10m", "ping", cron.JobIMContext{Platform: "feishu", ChatID: "c1"})
+	if err := out.Cron.AddJob(j); err != nil {
+		t.Fatal(err)
+	}
+	if err := out.Cron.TriggerNow(j.ID); err != nil {
+		t.Fatal(err)
+	}
+	testhelper.Eventually(t, func() bool {
+		got, _ := out.Cron.GetJob(j.ID)
+		return got.LastErrorClass == cron.ErrClassBudgetExceeded
+	}, 5*time.Second, "the triggered run was not refused by the budget")
 }

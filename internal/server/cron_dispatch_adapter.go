@@ -21,6 +21,7 @@ type cronCommandScheduler interface {
 	DeleteJob(idPrefix, plat, chatID string) (*cron.Job, error)
 	PauseJob(idPrefix, plat, chatID string) (*cron.Job, error)
 	ResumeJob(idPrefix, plat, chatID string) (*cron.Job, error)
+	UpdateJob(id string, upd cron.JobUpdate) (*cron.Job, error)
 }
 
 // cronDispatchAdapter implements dispatch.CronCommands over the concrete
@@ -35,19 +36,21 @@ type cronCommandScheduler interface {
 type cronDispatchAdapter struct{ s cronCommandScheduler }
 
 // projectCronJob copies the dispatch-read fields (ID / Schedule / Prompt /
-// Paused / FreshContext / AutoPaused) into the dispatch-side projection. nil maps to the zero value so
-// a scheduler that returns (nil, nil) cannot panic the adapter.
+// Paused / FreshContext / AutoPaused / AutoPauseTransient) into the
+// dispatch-side projection. nil maps to the zero value so a scheduler that
+// returns (nil, nil) cannot panic the adapter.
 func projectCronJob(j *cron.Job) dispatch.CronJob {
 	if j == nil {
 		return dispatch.CronJob{}
 	}
 	return dispatch.CronJob{
-		ID:           j.ID,
-		Schedule:     j.Schedule,
-		Prompt:       j.Prompt,
-		Paused:       j.Paused,
-		FreshContext: j.FreshContext,
-		AutoPaused:   j.Paused && j.PausedReason == cron.PausedReasonAutoFailures,
+		ID:                 j.ID,
+		Schedule:           j.Schedule,
+		Prompt:             j.Prompt,
+		Paused:             j.Paused,
+		FreshContext:       j.FreshContext,
+		AutoPaused:         j.Paused && cron.IsAutoPausedReason(j.PausedReason),
+		AutoPauseTransient: j.Paused && j.PausedReason == cron.PausedReasonAutoTransient,
 	}
 }
 
@@ -108,6 +111,19 @@ func (a cronDispatchAdapter) ResumeJob(idPrefix, plat, chatID string) (dispatch.
 		return dispatch.CronJob{}, time.Time{}, err
 	}
 	return projectCronJob(j), a.s.NextRun(j), nil
+}
+
+// SetFreshContext is the one UpdateJob field IM may set, on a job resolved by
+// prefix in the caller's chat like DeleteJob / PauseJob / ResumeJob.
+func (a cronDispatchAdapter) SetFreshContext(idPrefix, plat, chatID string, fresh bool) (dispatch.CronJob, error) {
+	j, err := a.s.UpdateJob(idPrefix, cron.JobUpdate{
+		InChat:       &cron.JobChat{Platform: plat, ChatID: chatID},
+		FreshContext: &fresh,
+	})
+	if err != nil {
+		return dispatch.CronJob{}, err
+	}
+	return projectCronJob(j), nil
 }
 
 func (a cronDispatchAdapter) ClassifyError(err error) string {

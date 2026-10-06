@@ -423,6 +423,47 @@ func TestChargesRestore(t *testing.T) {
 	}
 }
 
+// A turn ends at its booking for restore detection and attribution alike:
+// its last message, stamped at the booking, is in its window, so a
+// correctly baselined turn whose cache-read is that message is not charged
+// the restore, and a line 1ms later is the next turn's in both scans.
+func TestTurnCut_AtTheBookingForRestoreAndAttribution(t *testing.T) {
+	const a, b = "aaaaaaaa-0000-0000-0000-000000000001", "bbbbbbbb-0000-0000-0000-000000000002"
+	t1 := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Hour)
+	entries := []costledger.Entry{rcTurn(t1, rcKey, "1111111111111111", 614.54), rcTurn(t2, rcKey, "2222222222222222", 3)}
+	msg := func(at time.Time, cacheRead int64) claudefs.MessageUsage {
+		return claudefs.MessageUsage{ModelTokens: claudefs.ModelTokens{Model: rcModel, CacheRead: cacheRead}, At: at, Entrypoint: "sdk-cli"}
+	}
+	msgs := []claudefs.MessageUsage{msg(t1.Add(-time.Minute), 14540), msg(t1, 600000), msg(t1.Add(time.Millisecond), 3000)}
+	m := claudefs.CostStateMark{CostState: claudefs.CostState{TotalCostUSD: 584.17,
+		ModelUsage: json.RawMessage(`{"m":{"cacheReadInputTokens":584170,"costUSD":584.17}}`)}}
+	if !mayChargeRestore(entries[0], m) {
+		t.Fatal("fixture: the first turn may not have charged the restore")
+	}
+
+	from1, to1, next := turnSpan(entries, 0, time.Time{}, nil)
+	from2, to2, _ := turnSpan(entries, 1, next, nil)
+	w := turnWindow(msgs, from1, to1, nil)
+	if w.tokens != 614540 {
+		t.Errorf("first turn's window holds %d tokens, want 614540: the message at its booking is its own", w.tokens)
+	}
+	if charged, _ := chargesRestore(entries[0], m, w); charged {
+		t.Error("a correctly baselined turn was charged the restore")
+	}
+	if w := turnWindow(msgs, from2, to2, nil); w.tokens != 3000 {
+		t.Errorf("second turn's window holds %d tokens, want 3000: the line after the first booking", w.tokens)
+	}
+
+	act := sessionActivity{a: {times: []time.Time{t1.Add(-time.Minute), t1}, ok: true}, b: {times: []time.Time{t1.Add(time.Millisecond)}, ok: true}}
+	booked := bookedTimes(entries, map[string][]string{rcKey: {a, b}})
+	for i, want := range []string{a, b} {
+		if got := act.soleActiveIn([]string{a, b}, booked.before(rcKey, entries[i].TS), entries[i].TS); got != want {
+			t.Errorf("turn %d attributed to %q, want %q", i+1, got, want)
+		}
+	}
+}
+
 func mapsEqual(a, b map[string]string) bool {
 	if len(a) != len(b) {
 		return false
@@ -433,4 +474,77 @@ func mapsEqual(a, b map[string]string) bool {
 		}
 	}
 	return true
+}
+
+// A day residual only raises a day. The CLI bills requests its transcript
+// never logs, so a day booked above its transcript, an extra request on a
+// turn or a remainder left after a restore flag, is reported and left as
+// booked, while a day the transcript shows more spend on is still raised.
+func TestReconcile_ALedgerDayAboveItsTranscriptIsNotLowered(t *testing.T) {
+	t.Run("an unlogged request", func(t *testing.T) {
+		s := newReconcileScope(t)
+		s.transcript(t, rcSID, scopeMsg(s.day(-3, 10, 0), "msg_1", 5, "sdk-cli"),
+			scopeMsg(s.day(-2, 10, 0), "msg_2", 10, "sdk-cli"),
+			scopeMsg(s.day(-1, 10, 0), "msg_3", 10, "sdk-cli"), scopeMsg(s.day(-1, 11, 0), "msg_4", 5, "sdk-cli"))
+		s.runStarted(t, "aaaaaaaaaaaaaaaa", s.day(-3, 9, 59))
+		// Day -2 books $4 of tokens no transcript line holds; day -1 books
+		// only the first of its two messages.
+		seedLedger(t, s.opts.SessionStorePath, rcTurn(s.day(-3, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 5),
+			rcTurn(s.day(-2, 10, 1), rcKey, "cccccccccccccccc", 14), rcTurn(s.day(-1, 11, 1), rcKey, "dddddddddddddddd", 10))
+		rep, out := s.run(t)
+		if len(rep.Planned) != 1 || !near(rep.Planned[0].Amount, 5) ||
+			rep.Planned[0].RunID != reconcilePrefix+rcSID+":day:"+s.day(-1, 0, 0).Format(time.DateOnly) {
+			t.Fatalf("planned %+v, want only +5 on day -1\n%s", rep.Planned, out)
+		}
+		st := settlementOf(rep, rcSID)
+		if st.AboveDays != 1 || !near(st.AboveUSD, 4) || !near(st.After, 34) {
+			t.Errorf("settlement = %+v, want day -2 reported $4 above and the ledger at 34\n%s", st, out)
+		}
+		if !strings.Contains(out, "1 天账本高于 transcript 共 4.00") {
+			t.Errorf("report does not name the day above its transcript:\n%s", out)
+		}
+	})
+	t.Run("a remainder after a restore flag", func(t *testing.T) {
+		s := newReconcileScope(t)
+		s.transcript(t, rcSID, scopeMsg(s.day(-2, 10, 0), "msg_1", 5, "sdk-cli"), rcCostState(5, 5000),
+			rcLine("queue-operation", s.day(-1, 9, 0), "", 0), scopeMsg(s.day(-1, 9, 1), "msg_2", 10, "sdk-cli"))
+		s.runStarted(t, "aaaaaaaaaaaaaaaa", s.day(-2, 9, 59))
+		// The resumed turn charged the restored $5 and $3 its transcript lacks.
+		seedLedger(t, s.opts.SessionStorePath, rcTurn(s.day(-2, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 5),
+			rcTurn(s.day(-1, 9, 2), rcKey, "cccccccccccccccc", 18))
+		rep, out := s.run(t)
+		if len(rep.Flagged) != 1 || len(rep.Planned) != 1 || !near(rep.Planned[0].Amount, -5) {
+			t.Fatalf("flagged %+v planned %+v, want only the -5 restore flag\n%s", rep.Flagged, rep.Planned, out)
+		}
+		if st := settlementOf(rep, rcSID); st.AboveDays != 1 || !near(st.AboveUSD, 3) || !near(st.After, 18) || st.AboveUndecidedDays != 0 {
+			t.Errorf("settlement = %+v, want day -1 reported $3 above and the ledger at 18\n%s", st, out)
+		}
+		if strings.Contains(out, "高出部分可能就是恢复额") {
+			t.Errorf("report ties a decided day's excess to a restore:\n%s", out)
+		}
+	})
+	t.Run("a backfill undecided on a restore", func(t *testing.T) {
+		s := newReconcileScope(t)
+		s.transcript(t, rcSID, scopeMsg(s.day(-2, 10, 0), "msg_1", 0.6, "sdk-cli"), rcCostState(0.6, 600),
+			rcLine("queue-operation", s.day(-1, 8, 0), "", 0), scopeMsg(s.day(-1, 8, 1), "msg_2", 3, "sdk-cli"))
+		s.runStarted(t, "aaaaaaaaaaaaaaaa", s.day(-2, 9, 59))
+		// The backfilled run logged no line and nothing bounds it, so whether
+		// its $3.60 holds the restored $0.60 is undecided.
+		run := runhistory.SessionRun{RunID: "cccccccccccccccc", SessionKey: rcKey, SessionID: rcSID, StartedAt: s.day(-1, 9, 0)}
+		s.sessionRun(t, run)
+		backfill := rcTurn(run.StartedAt, rcKey, run.RunID, 3.6)
+		backfill.Kind, backfill.Models = costledger.KindBackfill, nil
+		seedLedger(t, s.opts.SessionStorePath, rcTurn(s.day(-2, 10, 1), rcKey, "aaaaaaaaaaaaaaaa", 0.6),
+			rcTurn(s.day(-1, 8, 2), rcKey, "dddddddddddddddd", 3), backfill)
+		rep, out := s.run(t)
+		if len(rep.Flagged) != 0 || len(rep.Planned) != 0 {
+			t.Fatalf("flagged %+v planned %+v, want nothing\n%s", rep.Flagged, rep.Planned, out)
+		}
+		if st := settlementOf(rep, rcSID); st.UndecidedN != 1 || st.AboveDays != 1 || !near(st.AboveUSD, 3.6) || st.AboveUndecidedDays != 1 {
+			t.Errorf("settlement = %+v, want day -1 reported $3.60 above with its undecided backfill\n%s", st, out)
+		}
+		if !strings.Contains(out, "其中 1 天含无法判定是否计入恢复额的条目") {
+			t.Errorf("report does not tie the excess to the undecided entry:\n%s", out)
+		}
+	})
 }

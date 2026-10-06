@@ -6,6 +6,8 @@
 //   maxFnLines      longest function, of every form: declarations, expressions,
 //                   arrows, object and class methods (nested ones counted on
 //                   their own); a top-level IIFE is a module scope, not a function
+//   maxIifeLines    longest top-level IIFE, (function(){…})(), arrow and unary
+//                   (!function(){…}()) forms: the module scope maxFnLines skips
 //   fnOver100       count of such functions longer than 100 lines
 //   topLevelLetVar  column-0 `let` / `var` declarations (mutable globals)
 //   configureDeps   dependencies the module receives by injection instead of
@@ -50,11 +52,11 @@
 // scripts/js-ratchet.baseline.json and an approved scripts/ratchet-raises.jsonl
 // entry (tools/ratchet-raises). That tool also holds the sums across files
 // (lines, fnOver100, configureDeps, deadInjections, innerHTMLAssign,
-// htmlInsert, lateBindings), the maximum maxFnLines and every _global metric,
-// so a new file cannot absorb growth; lines and the injection / HTML /
-// late-binding counts are judged only as sums there, since moving code
-// between files is a refactor, not a raise (js-ratchet --check still holds
-// every file's own values).
+// htmlInsert, lateBindings), the maxima of maxFnLines and maxIifeLines and
+// every _global metric, so a new file cannot absorb growth; lines and the
+// injection / HTML / late-binding counts are judged only as sums there, since
+// moving code between files is a refactor, not a raise (js-ratchet --check
+// still holds every file's own values).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -80,9 +82,9 @@ function loadEspree() {
   }
 }
 
-// functions returns every function in the program with its line span, except
-// top-level IIFEs, whose bodies are walked but which are not functions a
-// reader has to hold in their head at once.
+// functions returns every function in the program with its line span (fns),
+// except top-level IIFEs, whose bodies are walked but which are not functions
+// a reader has to hold in their head at once; their spans are iifes.
 function functions(program) {
   const scopes = new Set();
   for (const st of program.body) {
@@ -103,7 +105,8 @@ function functions(program) {
     }
   };
   walk(program);
-  return out;
+  const span = (n) => n.loc.end.line - n.loc.start.line + 1;
+  return { fns: out, iifes: [...scopes].map(span) };
 }
 
 // importsOf lists the relative module specifiers a file loads (its own
@@ -280,8 +283,9 @@ function fnName(fn, parent, key) {
 // The analysis reads three lists from caps.json, where tools/ratchet-raises
 // sees them (as constants here, each could zero a count without a raise):
 //   lateBindingTables  the late-bound function tables, by the module that
-//                      exports each (state.js hooks, nz_util.js nzViews); a
-//                      dropped table is a raise there
+//                      exports each (nz_util.js nzViews; state.js hooks,
+//                      which must stay absent: the entry counts any revived
+//                      export); a dropped table is a raise there
 //   injectionAllow     "file:fn" receivers that copy a parameter's fields
 //                      into module scope on purpose and are not dependency
 //                      injection (registerActions: the data-action registry).
@@ -986,12 +990,13 @@ export function measureSource(src, espree = loadEspree(), file = '', caps = NO_C
   const lines = src.split('\n');
   const total = lines.length - (src.endsWith('\n') ? 1 : 0);
   const program = espree.parse(src, PARSE);
-  const fns = functions(program);
+  const { fns, iifes } = functions(program);
   let letVar = 0;
   for (const line of lines) if (/^(?:let|var)\s/.test(line)) letVar++;
   return {
     lines: total,
     maxFnLines: fns.reduce((m, f) => Math.max(m, f.lines), 0),
+    maxIifeLines: Math.max(0, ...iifes),
     fnOver100: fns.filter((f) => f.lines > 100).length,
     topLevelLetVar: letVar,
     ...perFileMetrics(analyzeProgram(program, file, caps)),

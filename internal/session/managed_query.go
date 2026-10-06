@@ -148,6 +148,8 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 	}
 	snap.DeathReason = loadAtomicString(&s.deathReason)
 	snap.CodeChanges = s.CodeChanges()
+	// Precomputed at publication; with or without a process.
+	snap.Workflows = s.WorkflowBoard().Summaries()
 
 	proc := s.loadProcess()
 	sessCost := loadTotalCost(&s.totalCost)

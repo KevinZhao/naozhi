@@ -66,6 +66,8 @@ type Config struct {
 	Cost        CostConfig        `yaml:"cost,omitempty"`
 	// IMAccess restricts which IM senders the dispatcher serves (im_access.go).
 	IMAccess IMAccessConfig `yaml:"im_access,omitempty"`
+	// IMRateLimit caps each IM sender's message rate (im_rate_limit.go).
+	IMRateLimit IMRateLimitConfig `yaml:"im_rate_limit,omitempty"`
 
 	// Parsed durations, populated once in Load.
 	cachedTTL             time.Duration `yaml:"-"`
@@ -268,6 +270,9 @@ func validateConfig(cfg *Config) error {
 		validateAgentCommands,
 		validateProjects,
 		validateIMAccess,
+		validateIMRateLimit,
+		validateCostBudget,
+		validateGroupScope,
 	} {
 		if err := check(cfg); err != nil {
 			return err

@@ -9,7 +9,7 @@ import { esc, escAttr, showToast, trapFocus, sessionExitChipHtml } from './nz_ut
 import { wsm } from './ws_manager.js';
 import { authHeaders, getToken, lsSet } from './platform.js';
 import { sid } from './session_ident.js';
-import { featureForBackend } from './features.js';
+import { featureForBackend, pendingBackendID } from './features.js';
 
 // --- Utilities ---
 
@@ -307,13 +307,22 @@ async function fetchCostSummary(query) {
   return resp.ok ? resp.json() : null;
 }
 
-// renderServiceOverviewHtml builds the 服务概览 section for the 系统 view:
-// the aggregate stats (today active / prompts / cost), the health strip
-// derived from the /api/sessions stats snapshot, and the multi-backend
-// doctor panel. Moved here from the Home panel (ui-polish-light-theme D3)
-// — the pure helpers stayed put, only the call site and CSS classes
-// (svc-*) changed. Version identity lines also render in the settings
-// 关于 section (renderSettingsView) for discoverability.
+// fetchCostBudget resolves /api/cost/budget for `query` (an encoded
+// session_key= or job_id=), or null when the request fails.
+const fetchCostBudget = (query) => fetch(NZ_CONTRACT.API.cost_budget + '?' + query, { headers: authHeaders() })
+  .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+
+// costBudgetChipHtml renders a /api/cost/budget answer as "今日 $x / $y",
+// ⚠-flagged from warn_ratio on, or '' when no cost.budget cap applies.
+const COST_BUDGET_SCOPES = { chat: '本聊天', project: '本项目（绑定的群共享）', job: '本任务', global: '整机' };
+function costBudgetChipHtml(b, cls) {
+  if (!b || !(b.limit > 0)) return '';
+  const usage = '$' + Number(b.spent || 0).toFixed(2) + ' / $' + b.limit.toFixed(2);
+  const title = (COST_BUDGET_SCOPES[b.scope] || '') + '今日费用预算（cost.budget）已用 ' + usage + '，' + formatAbsTime(b.reset_at) +
+    ' 重置' + (b.blocked ? '；已用尽，IM 新消息和 cron 运行会被拒绝（dashboard 不受限）' : b.over ? '；已超出，仅提醒' : '');
+  return '<span class="' + cls + (b.over ? ' bad' : '') + '" title="' + escAttr(title) + '">' + (b.warn ? '⚠ ' : '') + '今日 ' + esc(usage) + '</span>';
+}
+
 // costStatHtml renders the 花费 card: ledger figure when loaded (with a
 // credits sub-line for kiro sessions and an honest hover explanation),
 // otherwise the legacy live-session sum labelled as such.
@@ -338,6 +347,8 @@ function costStatHtml(stats) {
     '</div>';
 }
 
+// renderServiceOverviewHtml builds the 系统 view's 服务概览: today's stats, the
+// health strip from the /api/sessions snapshot and the backend doctor panel.
 function renderServiceOverviewHtml() {
   const items = Array.isArray(sessionList.allSessionsCache) ? sessionList.allSessionsCache : [];
   const stats = computeHomeStats(items, Date.now());
@@ -418,9 +429,6 @@ function renderBackendsDoctorPanel() {
     '<div class="doctor-body">' + rows + '</div>' +
   '</details>';
 }
-
-// showToast moved to nz_util.js (PR-0a). Available as window.nz.util.showToast
-// and the top-level alias window.showToast, loaded before this file.
 
 // RNEW-UX-010 — polite announcement into #sr-announce for screen readers.
 // Used for signals that don't surface as a toast (WS connect/disconnect,
@@ -705,9 +713,6 @@ function formatAbsTime(ms) {
     ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) +
     ' (' + tz + ')';
 }
-
-// trapFocus moved to nz_util.js (PR-0a). Available as window.nz.util.trapFocus
-// and the top-level alias window.trapFocus, loaded before this file.
 
 // confirmDialog renders a styled confirm prompt matching the rest of the
 // dashboard (reuses .modal-overlay / .modal / .modal-btns). Returns a Promise
@@ -1058,12 +1063,8 @@ function timeDividerHtml(ms) {
   return '<div class="event-time-divider" data-time="' + (ms || 0) + '">' + esc(formatTimeShort(ms)) + '</div>';
 }
 
-// esc / escAttr / escJs moved to nz_util.js (PR-0a, RFC
-// dashboard-cron-view-extraction). They are exposed as window.nz.util.* and
-// as top-level aliases (window.esc, window.escAttr, window.escJs) loaded
-// before this file, so the bare call sites below keep working unchanged.
-// SECURITY: the single source of truth for HTML/attr/JS escaping lives there
-// — never re-define a local copy here or in any view module.
+// SECURITY: nz_util.js is the single source of truth for HTML/attr/JS escaping
+// (esc / escAttr / escJs); never re-define a local copy here or in a view module.
 
 // URL schemes that are safe to embed in <a href>.
 // RNEW-SEC-007: Only https?: and fragment-only URLs (#...) are accepted.
@@ -1301,7 +1302,7 @@ export function applyFeatureGates() {
   if (serverInfo.cliBackends.backends.length <= 1) return; // single-backend mode
 
   const sess = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
-  const backendID = sess.backend || serverInfo.cliBackends.default || '';
+  const backendID = sess.backend || pendingBackendID(selection.key, selection.node) || serverInfo.cliBackends.default || '';
   const backendName = (() => {
     const e = serverInfo.cliBackends.backends.find(b => b && b.id === backendID);
     return (e && (e.display_name || e.id)) || backendID || 'this backend';
@@ -1381,9 +1382,11 @@ export {
   confirmDialog,
   copyCodeBlock,
   copyEventContent,
+  costBudgetChipHtml,
   costCardTitle,
   decodeEscEntities,
   dismissAuthModal,
+  fetchCostBudget,
   fetchCostSummary,
   formatAbsTime,
   formatHomeCost,

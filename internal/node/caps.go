@@ -1,6 +1,7 @@
 package node
 
 import (
+	"errors"
 	"log/slog"
 	"sort"
 
@@ -11,6 +12,16 @@ import (
 // with its own opening page (ReverseMsg.WantHistory); a primary that sees it
 // skips the parallel fetch_events for that page.
 const CapSubscribeHistory = "subscribe-history"
+
+// CapSendStatus is the hub tag for reading the "send" RPC's {"status"} result
+// (ReverseConn.Send). A primary without it drops the result and reports every
+// send that returned no error as accepted, so a node answers it ErrSendBusy
+// instead of a "busy" status.
+const CapSendStatus = "send-status"
+
+// ErrSendBusy is the refusal for a send that was not buffered: the session is
+// busy and its queue is disabled, or the node is shutting down.
+var ErrSendBusy = errors.New("会话正忙，消息未送达，请稍后重试")
 
 // knownServerCaps is the capability set this binary understands. Unknown
 // advertised caps only WARN (mixed-version signal); the node still registers.
@@ -27,15 +38,12 @@ var knownServerCaps = map[string]struct{}{
 	CapSubscribeHistory: {},
 }
 
-// HubCaps is what the hub advertises about itself on the registered ack.
-//
-// Only the EventEntry schema tag: the other entries in knownServerCaps name
-// backends a NODE can run, which is the node's side of the negotiation, not the
-// hub's. Adding one here would tell a node the hub can run gemini, which is not
-// a thing a node ever needs to know — whereas the schema tag is exactly the fact
-// the node cannot discover any other way.
+// HubCaps is what the hub advertises about itself on the registered ack: the
+// EventEntry schema tag and CapSendStatus, facts the node cannot discover any
+// other way. The backend entries in knownServerCaps are the node's side of the
+// negotiation and do not belong here.
 func HubCaps() []string {
-	return []string{clievent.SchemaCap}
+	return []string{clievent.SchemaCap, CapSendStatus}
 }
 
 // logUnknownCaps WARNs when advertised contains caps outside knownServerCaps.

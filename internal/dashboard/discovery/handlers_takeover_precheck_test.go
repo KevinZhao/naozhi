@@ -27,14 +27,19 @@ type precheckRouter struct {
 	takeovers int
 }
 
-func (r *precheckRouter) TakeoverPrecheck(key string) error {
+func (r *precheckRouter) ReserveTakeover(key string, _ session.AgentOpts) (TakeoverLease, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.checked = append(r.checked, key)
-	return r.err
+	if r.err != nil {
+		return nil, r.err
+	}
+	return r, nil
 }
 
-func (r *precheckRouter) Takeover(context.Context, string, string, string, session.AgentOpts) error {
+func (r *precheckRouter) Release() {}
+
+func (r *precheckRouter) Takeover(context.Context, string, string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.takeovers++

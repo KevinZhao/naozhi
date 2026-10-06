@@ -135,7 +135,7 @@ func (t *jobTable) resumeLocked(j *Job) (cronEntryPlan, error) {
 	}
 	j.Paused = false
 	j.PausedReason = ""
-	j.ConsecutiveFailures = 0
+	j.setStreaks(failureStreaks{})
 	return p, nil
 }
 
@@ -334,9 +334,26 @@ const (
 	mutDelete mutationKind = iota + 1
 	mutPause
 	mutResume
-	// mutAutoPause is mutPause stamped with PausedReasonAutoFailures.
+	// mutAutoPause is mutPause stamped with PausedReasonAutoFailures;
+	// mutAutoPauseTransient, with PausedReasonAutoTransient.
 	mutAutoPause
+	mutAutoPauseTransient
 )
+
+// autoPauseReasons is the PausedReason each auto-pause kind stamps.
+var autoPauseReasons = map[mutationKind]string{
+	mutAutoPause:          PausedReasonAutoFailures,
+	mutAutoPauseTransient: PausedReasonAutoTransient,
+}
+
+// autoPauseKind is the auto-pause mutation for a run whose failure was (or
+// was not) transient, the counter Job.autoPauseCount judged it by.
+func autoPauseKind(transient bool) mutationKind {
+	if transient {
+		return mutAutoPauseTransient
+	}
+	return mutAutoPause
+}
 
 // mutationResult is what a mutation did, as data. The caller runs the robfig
 // and router side effects and the disk write after the lock is released; the
@@ -372,28 +389,31 @@ func (t *jobTable) mutateByID(id string, kind mutationKind) mutationResult {
 	return t.mutateLocked(j, kind)
 }
 
-// autoPauseIfDue pauses job id when it is active and its failure streak has
-// reached threshold. due is false, and nothing changed, otherwise: the decision
-// and the pause share one hold, so a resume racing the failing run's finish
-// (which resets the streak) cannot be undone by a stale verdict.
-func (t *jobTable) autoPauseIfDue(id string, threshold int) (r mutationResult, due bool) {
+// autoPauseIfDue pauses job id when Job.autoPauseCount says it is due and
+// returns that count; 0 means nothing changed. The decision and the pause
+// share one hold, so a resume racing the failing run's finish (which resets
+// the streak) cannot be undone by a stale verdict.
+func (t *jobTable) autoPauseIfDue(id string, threshold int, transient bool, now time.Time) (r mutationResult, count int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	j, ok := t.jobs[id]
-	if !ok || j.Paused || j.ConsecutiveFailures < threshold {
-		return mutationResult{}, false
+	if !ok {
+		return mutationResult{}, 0
 	}
-	return t.mutateLocked(j, mutAutoPause), true
+	if count = j.autoPauseCount(threshold, transient, now); count == 0 {
+		return mutationResult{}, 0
+	}
+	return t.mutateLocked(j, autoPauseKind(transient)), count
 }
 
-// autoPauseCandidate reports whether job id is active with a failure streak
-// of at least threshold: a read-only peek that lets the common below-threshold
-// failure skip entryMu. autoPauseIfDue re-makes the decision under the lock.
-func (t *jobTable) autoPauseCandidate(id string, threshold int) bool {
+// autoPauseCandidate is autoPauseIfDue's verdict as a read-only peek, which
+// lets the common below-threshold failure skip entryMu; autoPauseIfDue
+// re-makes the decision under the lock.
+func (t *jobTable) autoPauseCandidate(id string, threshold int, transient bool, now time.Time) bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	j, ok := t.jobs[id]
-	return ok && !j.Paused && j.ConsecutiveFailures >= threshold
+	return ok && j.autoPauseCount(threshold, transient, now) > 0
 }
 
 // mutateByPrefix applies kind to the one job in (plat, chatID) whose ID starts
@@ -413,18 +433,18 @@ func (t *jobTable) mutateByPrefix(idPrefix, plat, chatID string, kind mutationKi
 // (#1272).
 func (t *jobTable) mutateLocked(j *Job, kind mutationKind) (r mutationResult) {
 	prevEntry, prevPaused := j.entryID, j.Paused
-	prevReason, prevStreak := j.PausedReason, j.ConsecutiveFailures
+	prevReason, prevStreaks := j.PausedReason, j.streaks()
 	switch kind {
 	case mutDelete:
 		r.removeEntry = t.deleteLocked(j)
-	case mutPause, mutAutoPause:
+	case mutPause, mutAutoPause, mutAutoPauseTransient:
 		e, err := t.pauseLocked(j)
 		if err != nil {
 			return mutationResult{opErr: err}
 		}
 		r.removeEntry = e
-		if kind == mutAutoPause {
-			j.PausedReason = PausedReasonAutoFailures
+		if reason, ok := autoPauseReasons[kind]; ok {
+			j.PausedReason = reason
 		}
 	case mutResume:
 		p, err := t.resumeLocked(j)
@@ -436,7 +456,8 @@ func (t *jobTable) mutateLocked(j *Job, kind mutationKind) (r mutationResult) {
 	r.snap, r.persistErr = t.persistLocked()
 	if r.persistErr != nil && kind != mutDelete {
 		j.entryID, j.Paused = prevEntry, prevPaused
-		j.PausedReason, j.ConsecutiveFailures = prevReason, prevStreak
+		j.PausedReason = prevReason
+		j.setStreaks(prevStreaks)
 		r.removeEntry, r.plan = 0, nil
 	}
 	r.job = *j

@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
@@ -380,12 +381,21 @@ func (v routerStateView) StartupFailure(key string) (spawnpool.StartupFailure, b
 	return v.spawns.StartupFailure(key)
 }
 
-// chatKeyFor strips the last ":agentID" segment from a session key to get the chat key.
+// chatKeyFor strips the last ":agentID" segment from a session key to get the
+// chat key, and a thread's or member's scope with it (sessionkey.ScopedChatID):
+// such a session shares its chat's workspace override and /cd reset.
 func chatKeyFor(key string) string {
 	if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
-		return key[:idx]
+		return sessionkey.ParentChatKey(key[:idx])
 	}
 	return key
+}
+
+// isScopedKey reports whether key is a thread's or member's session, whose
+// chat key chatKeyFor maps to its chat's.
+func isScopedKey(key string) bool {
+	idx := strings.LastIndexByte(key, ':')
+	return idx >= 0 && chatKeyFor(key) != key[:idx]
 }
 
 // HistoryLoader abstracts loading a session's persisted JSONL history tail
@@ -560,10 +570,11 @@ func NewRouter(cfg RouterConfig) *Router {
 			totalTimeout:    cfg.TotalTimeout,
 		},
 		hist: HistoryIO{
-			claudeDir:   cfg.ClaudeDir,
-			backendDirs: maps.Clone(cfg.BackendDirs),
-			eventLogDir: cfg.EventLogDir,
-			loader:      cfg.HistoryLoader,
+			claudeDir:    cfg.ClaudeDir,
+			backendDirs:  maps.Clone(cfg.BackendDirs),
+			projectsRoot: claudefs.ResolvedProjectsRoot(cfg.ClaudeDir),
+			eventLogDir:  cfg.EventLogDir,
+			loader:       cfg.HistoryLoader,
 		},
 		resolver: cfg.Resolver,
 	}
@@ -643,7 +654,9 @@ func NewRouter(cfg RouterConfig) *Router {
 
 	// Restore sessions from store
 	if restored := loadStore(r.storePath); restored != nil {
-		r.ss.Update(func(tx sessTx) { r.restoreStore(tx, restored) })
+		now := time.Now()
+		marks := r.runs.cost.sessionMarks(costMarksSince(r.storePath, now), now)
+		r.ss.Update(func(tx sessTx) { r.restoreStore(tx, restored, marks) })
 	}
 
 	// Sidebar is driven purely by sessions.json (and live activity); filesystem-

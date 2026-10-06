@@ -3,21 +3,17 @@
 // KaTeX and mermaid under the dashboard CSP. style-src has no 'unsafe-inline',
 // so the style attributes and <style> elements both libraries emit as markup
 // are refused by the browser; render_md.js re-applies them through CSSOM. The
-// other markdown tests block the CDN, so without this file nothing renders
+// other markdown tests block both loads, so without this file nothing renders
 // either library under the real policy.
 //
-// KaTeX is served from the katex devDependency (byte-identical to the CDN
-// file, so SRI still passes). Mermaid is 75 MB on npm, so its one bundle is
-// fetched from the CDN through the route.
+// Both come from the mock's /static/vendor/, the files the binary embeds, so
+// the test needs no network.
 //
 // 跑法：cd test/e2e && npx playwright test markdown_csp_render.test.js --project=desktop-chrome
 
-const fs = require('fs');
-const path = require('path');
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
 
-const KATEX_DIST = path.join(__dirname, 'node_modules', 'katex', 'dist');
 // Two of the mock's default ready sessions.
 const KEY_A = 'dashboard:direct:2026-01-01-120000-1:myproject';
 const KEY_B = 'dashboard:direct:2026-01-01-120002-3:myproject';
@@ -36,32 +32,6 @@ function eventsWith(text) {
   ];
 }
 
-/** @param {import('@playwright/test').BrowserContext} ctx */
-async function routeCdn(ctx) {
-  await ctx.route(/cdn\.jsdelivr\.net\/npm\/katex@0\.16\.21\/dist\/(.+)$/, route => {
-    const rel = /** @type {RegExpMatchArray} */ (route.request().url().match(/dist\/(.+)$/))[1];
-    const file = path.join(KATEX_DIST, rel);
-    const type = rel.endsWith('.js') ? 'application/javascript'
-      : rel.endsWith('.css') ? 'text/css' : 'font/woff2';
-    route.fulfill({
-      status: 200,
-      headers: { 'Content-Type': type, 'Access-Control-Allow-Origin': '*' },
-      body: fs.readFileSync(file),
-    });
-  });
-  await ctx.route(/cdn\.jsdelivr\.net\/npm\/mermaid@/, async route => {
-    let lastErr;
-    for (let i = 0; i < 3; i++) {
-      try {
-        const resp = await route.fetch();
-        await route.fulfill({ response: resp });
-        return;
-      } catch (e) { lastErr = e; }
-    }
-    throw lastErr;
-  });
-}
-
 test('KaTeX and mermaid render with their styles under the CSP', async ({ browser }) => {
   const mock = await startMockServer({
     eventsByKey: {
@@ -75,7 +45,6 @@ test('KaTeX and mermaid render with their styles under the CSP', async ({ browse
     },
   });
   const ctx = await browser.newContext();
-  await routeCdn(ctx);
   const page = await ctx.newPage();
   try {
     await page.goto(mock.url + '/dashboard');
@@ -115,6 +84,9 @@ test('KaTeX and mermaid render with their styles under the CSP', async ({ browse
       expect(s.attr).toMatch(/height/);
       expect(s.applied, `strut style "${s.attr}" not applied`).not.toBe('');
     }
+    // The stylesheet's fonts come from /static/vendor/ under font-src 'self'.
+    await expect.poll(() => page.evaluate(() => [...document.fonts]
+      .some(f => f.family.replace(/"/g, '') === 'KaTeX_Main' && f.status === 'loaded'))).toBe(true);
   } finally {
     await ctx.close();
     mock.server.close();

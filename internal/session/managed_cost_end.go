@@ -33,17 +33,7 @@ type transcriptMark struct {
 // it writes lies past the mark. Zero for a fresh session (its transcript
 // starts empty) or a backend whose transcripts naozhi does not read.
 func markTranscript(claudeDir string, backendDirs map[string]string, backendID, workspace, sid string) transcriptMark {
-	if sid == "" {
-		return transcriptMark{}
-	}
-	if backendID == "" {
-		backendID = "claude"
-	}
-	p, ok := backendProfile(backendID)
-	if !ok || p.TranscriptUsage == nil || p.ResumeTarget == nil {
-		return transcriptMark{}
-	}
-	path := p.ResumeTarget(backendDirs[backendID], claudeDir, workspace, sid)
+	path := mainTranscript(claudeDir, backendDirs, backendID, workspace, sid)
 	if path == "" {
 		return transcriptMark{}
 	}
@@ -52,6 +42,23 @@ func markTranscript(claudeDir string, backendDirs map[string]string, backendID, 
 		return transcriptMark{}
 	}
 	return transcriptMark{sid: sid, size: st.Size()}
+}
+
+// mainTranscript is the main transcript a process of backendID resuming sid in
+// workspace appends to, or "" for no sid or a backend whose transcripts naozhi
+// does not read.
+func mainTranscript(claudeDir string, backendDirs map[string]string, backendID, workspace, sid string) string {
+	if sid == "" {
+		return ""
+	}
+	if backendID == "" {
+		backendID = "claude"
+	}
+	p, ok := backendProfile(backendID)
+	if !ok || p.TranscriptUsage == nil || p.ResumeTarget == nil {
+		return ""
+	}
+	return p.ResumeTarget(backendDirs[backendID], claudeDir, workspace, sid)
 }
 
 func (s *ManagedSession) setEndMark(m transcriptMark) {
@@ -64,10 +71,15 @@ func (s *ManagedSession) setEndMark(m transcriptMark) {
 // last result frame, which no result will now report, is booked as a
 // Kind=partial entry. This covers every way a process ends with a turn
 // unfinished — a death, a watchdog or stuck_running kill, a reset — whether
-// or not a Send owned the turn. claudeDir locates the transcripts.
+// or not a Send owned the turn. claudeDir locates the transcripts. The end
+// also settles the process's workflows on s's board (SetOnEnd has one slot).
 func bookProcessEnd(s *ManagedSession, proc processIface, claudeDir string) {
 	if n, ok := proc.(processEndNotifier); ok {
-		n.SetOnEnd(func(end cli.ProcessEnd) { s.costAcct.onProcessEnd(s, end, claudeDir) })
+		wf, _ := proc.(workflowNotifier)
+		n.SetOnEnd(func(end cli.ProcessEnd) {
+			s.costAcct.onProcessEnd(s, end, claudeDir)
+			s.WorkflowBoard().procEnded(wf, end)
+		})
 	}
 }
 
@@ -119,17 +131,40 @@ func (c *costAccounting) waitEnds(d time.Duration) bool { return c.ends.wait(d) 
 // inflight counts running tasks. Unlike sync.WaitGroup it may be waited on
 // while tasks start: a process can end during shutdown's wait.
 type inflight struct {
-	mu   sync.Mutex
-	n    int
-	idle chan struct{} // closed when n drops to 0
+	mu     sync.Mutex
+	n      int
+	idle   chan struct{} // closed when n drops to 0
+	closed bool          // tryAdd refuses new tasks
 }
 
 func (f *inflight) add() {
 	f.mu.Lock()
+	f.addLocked()
+	f.mu.Unlock()
+}
+
+// tryAdd is add unless close was called; it reports whether the task counts.
+func (f *inflight) tryAdd() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return false
+	}
+	f.addLocked()
+	return true
+}
+
+func (f *inflight) addLocked() {
 	if f.n == 0 {
 		f.idle = make(chan struct{})
 	}
 	f.n++
+}
+
+// close makes every later tryAdd fail; tasks already counted run on.
+func (f *inflight) close() {
+	f.mu.Lock()
+	f.closed = true
 	f.mu.Unlock()
 }
 

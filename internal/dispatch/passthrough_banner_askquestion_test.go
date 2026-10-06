@@ -65,7 +65,7 @@ func TestReplyTracker_ResultEvent_NoBanner(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	tracker := newIMEventTracker(ctx, fp, "chat1", "direct", "")
+	tracker := newIMEventTracker(ctx, fp, ReplyDest{ChatID: "chat1"}, "direct", "")
 	defer tracker.stop()
 
 	// Deliver a result event — the type passthrough fan-out sends to follower slots.
@@ -88,7 +88,7 @@ func TestReplyTracker_AssistantEvent_FiresBanner(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	tracker := newIMEventTracker(ctx, fp, "chat1", "direct", "")
+	tracker := newIMEventTracker(ctx, fp, ReplyDest{ChatID: "chat1"}, "direct", "")
 	defer tracker.stop()
 
 	tracker.onEvent(clievent.Event{
@@ -128,7 +128,7 @@ func TestReplyTracker_AskQuestion_SetsFlag(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	tracker := newIMEventTracker(ctx, fp, "chat1", "direct", "")
+	tracker := newIMEventTracker(ctx, fp, ReplyDest{ChatID: "chat1"}, "direct", "")
 	defer tracker.stop()
 
 	if tracker.askQuestionFired.Load() {

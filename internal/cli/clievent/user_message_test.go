@@ -33,3 +33,25 @@ func TestNewUserMessage_NoFileRef_ByteIdentical(t *testing.T) {
 		t.Errorf("image-only text block leaked hint prefix: %q", last.Text)
 	}
 }
+
+// TestAttachmentSuffix: summaries count images and file refs separately, so a
+// PDF or IM file is not announced as an image.
+func TestAttachmentSuffix(t *testing.T) {
+	t.Parallel()
+	img := Attachment{Data: []byte("x"), MimeType: "image/png"}
+	ref := Attachment{Kind: KindFileRef, MimeType: "application/pdf", WorkspacePath: "a.pdf"}
+	cases := []struct {
+		atts []Attachment
+		want string
+	}{
+		{nil, ""},
+		{[]Attachment{img, img}, " [+2 image(s)]"},
+		{[]Attachment{ref}, " [+1 file(s)]"},
+		{[]Attachment{img, ref, ref}, " [+1 image(s)] [+2 file(s)]"},
+	}
+	for _, c := range cases {
+		if got := AttachmentSuffix(c.atts); got != c.want {
+			t.Errorf("AttachmentSuffix(%d atts) = %q, want %q", len(c.atts), got, c.want)
+		}
+	}
+}

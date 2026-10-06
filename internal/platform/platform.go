@@ -16,10 +16,45 @@ import (
 // MessageHandler is the callback invoked when a platform receives a message.
 type MessageHandler func(ctx context.Context, msg IncomingMessage)
 
+// AdmitFunc is a read-only pre-check of the dispatcher's sender gates for an
+// adapter about to spend on a message (media download, transcription). false
+// means drop msg; true promises nothing, because the MessageHandler re-checks
+// and stays authoritative.
+type AdmitFunc func(ctx context.Context, msg IncomingMessage) bool
+
+// Admitter is an optional capability for adapters that consult an AdmitFunc
+// before costly inbound work. SetAdmission is called once, before
+// RegisterRoutes and Start. It is plumbing, not an operator-facing feature,
+// so Capabilities does not report it.
+type Admitter interface {
+	SetAdmission(AdmitFunc)
+}
+
 // Image represents an image attachment downloaded by a platform or to be sent.
 type Image struct {
 	Data     []byte
 	MimeType string // e.g., "image/png", "image/jpeg"
+}
+
+// FileReject records why an adapter could not deliver a file's bytes, so
+// dispatch can name the file in its "not processed" notice instead of the
+// file vanishing.
+type FileReject string
+
+const (
+	FileRejectNone           FileReject = ""
+	FileRejectTooLarge       FileReject = "too_large"
+	FileRejectUnsupported    FileReject = "unsupported"
+	FileRejectDownloadFailed FileReject = "download_failed"
+)
+
+// File is a non-image attachment downloaded by a platform. Data is unset when
+// Reject is; dispatch classifies the bytes (attachment.ClassifyFile), so an
+// adapter need not sniff them.
+type File struct {
+	Name   string
+	Data   []byte
+	Reject FileReject
 }
 
 // IncomingMessage is the platform-agnostic inbound message.
@@ -32,16 +67,26 @@ type IncomingMessage struct {
 	UserID    string
 	ChatID    string
 	ChatType  string // "direct" | "group"
-	Text      string
-	MentionMe bool
-	Images    []Image
+	// ThreadID is the platform-native id of the thread or topic the message
+	// was posted in (Slack thread_ts, Feishu topic root message id); empty
+	// outside one. Replies pass it back verbatim as OutgoingMessage.ThreadID.
+	ThreadID string
+	// SelfThread is the ThreadID that would open a new thread under this
+	// message (Slack ts, Feishu message id); empty when the message is
+	// already in a thread or the adapter cannot open one there.
+	SelfThread string
+	Text       string
+	MentionMe  bool
+	Images     []Image
+	Files      []File
 	// AgentID, when non-empty, pins the target agent (bypassing slash-command
 	// resolution) for synthetic messages such as an AskUserQuestion card click
 	// (#2148). The dispatcher whitelist-validates it before honouring it.
 	AgentID string
 }
 
-// OutgoingMessage is the platform-agnostic outbound message.
+// OutgoingMessage is the platform-agnostic outbound message. A non-empty
+// ThreadID posts it into that thread of ChatID, on adapters that have threads.
 type OutgoingMessage struct {
 	ChatID   string
 	Text     string
@@ -157,6 +202,9 @@ type QuestionCard struct {
 	// AgentID is the asking session's agent id, embedded for the same reason so
 	// the answer routes to the SAME agent session (#2148); empty = unknown.
 	AgentID string
+	// ThreadID is the thread the question was asked in: the card is posted
+	// there, and adapters whose click callback cannot recover it embed it.
+	ThreadID string
 	// Items is one or more questions, each rendered as its own block.
 	Items []QuestionItem
 }

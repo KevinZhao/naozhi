@@ -30,6 +30,10 @@ func TestForTurnResult(t *testing.T) {
 		{"max budget", &clievent.SendResult{SubType: "error_max_budget_usd", IsError: true}, "max_budget", []string{"费用上限"}},
 		{"during execution", &clievent.SendResult{SubType: "error_during_execution", IsError: true}, "turn_failed", []string{"中途出错", "/new"}},
 		{"own abort", &clievent.SendResult{SubType: "error_during_execution", IsError: true, Aborted: true}, "", nil},
+		{"own abort 2.1.288", &clievent.SendResult{SubType: "success", Aborted: true, TerminalReason: "aborted_tools"}, "", nil},
+		{"unrequested aborted_tools", &clievent.SendResult{SubType: "success", TerminalReason: "aborted_tools"}, "", nil},
+		{"aborted_streaming with text", &clievent.SendResult{Text: "partial", SubType: "success", TerminalReason: "aborted_streaming"}, "", nil},
+		{"aborted_* flagged is_error", &clievent.SendResult{SubType: "success", IsError: true, TerminalReason: "aborted_tools"}, "", nil},
 		{"abort does not mute max turns", &clievent.SendResult{SubType: "error_max_turns", IsError: true, Aborted: true}, "max_turns", nil},
 		{"unknown error subtype", &clievent.SendResult{SubType: "error_something_new"}, "turn_failed", nil},
 		{"bare is_error", &clievent.SendResult{IsError: true}, "turn_failed", nil},
@@ -45,6 +49,7 @@ func TestForTurnResult(t *testing.T) {
 		{"rpc auth", rpc("kiro", -32000, "Authentication required"), "backend_auth", []string{"认证失败"}},
 		{"rpc invalid params", rpc("kiro", -32602, "Invalid params: model overloaded"), "backend_invalid_request", []string{"请求格式无效"}},
 		{"rpc other", rpc("kiro", -32603, "internal error"), "backend_rejected", []string{"kiro 未能完成本轮请求"}},
+		{"kiro -32603 with data detail", rpc("kiro", -32603, "Internal error: The model you've selected is temporarily unavailable."), "backend_overloaded", []string{"kiro "}},
 		{"codex failed turn", &clievent.SendResult{
 			Text: "stream disconnected", SubType: "error", IsError: true,
 			BackendError: &clievent.BackendError{Backend: "codex", Message: "stream disconnected"},

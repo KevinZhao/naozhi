@@ -24,3 +24,13 @@ const MaxStreamJSONLine = 16 << 20
 // drift. 3 attempts fits transient 5xx clearing in 1-2 retries; bumps must keep
 // 15s × attempts inside outer ctx deadlines.
 const PlatformReplyMaxAttempts = 3
+
+// MaxFileAttachmentBytes caps one document attachment (dashboard upload or IM
+// file) and the aggregate of every file on one IM message. It equals
+// Anthropic's 32 MiB document-block limit, so an accepted file is not later
+// refused by the API.
+const MaxFileAttachmentBytes = 32 << 20
+
+// MaxFileAttachmentsPerMessage caps the files one IM message may carry, which
+// bounds the bytes a queued turn can pin.
+const MaxFileAttachmentsPerMessage = 5

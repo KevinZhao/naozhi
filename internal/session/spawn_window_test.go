@@ -247,6 +247,7 @@ func TestSpawnSession_RemovedMeanwhileStartsFresh(t *testing.T) {
 // retry's spawn error is wrapped as ErrShimStuck, as after a Reset.
 func TestSpawnSession_StaleSpawnFlagsAShimSocketThatOutlivesTheWait(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	shortenShimGoneWait(t, 50*time.Millisecond)
 	const key = "feishu:direct:spawn-stale-stuck:general"
 	if err := os.WriteFile(shim.SocketPath(shim.KeyHash(key)), nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -268,7 +269,7 @@ func TestSpawnSession_StaleSpawnFlagsAShimSocketThatOutlivesTheWait(t *testing.T
 	}
 	close(g.release)
 
-	got := waitResult(t, res) // waits out the 2s socket-gone window
+	got := waitResult(t, res) // waits out the socket-gone window
 	if !errors.Is(got.err, ErrShimStuck) || !errors.Is(got.err, boom) {
 		t.Errorf("GetOrCreate = %v, want ErrShimStuck wrapping the retry's spawn error", got.err)
 	}
@@ -289,6 +290,7 @@ func shimStuckLeft(r *Router, key string) bool {
 // call.
 func TestSpawnSession_StaleSpawnReplacedWithABoundSocketWrapsTheRetry(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	shortenShimGoneWait(t, 50*time.Millisecond)
 	const key = "feishu:direct:spawn-stale-replaced-stuck:general"
 	if err := os.WriteFile(shim.SocketPath(shim.KeyHash(key)), nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -311,7 +313,7 @@ func TestSpawnSession_StaleSpawnReplacedWithABoundSocketWrapsTheRetry(t *testing
 	r.ss.Update(func(tx sessTx) { tx.Put(key, second) })
 	close(g.release)
 
-	got := waitResult(t, res) // waits out the 2s socket-gone window
+	got := waitResult(t, res) // waits out the socket-gone window
 	if !errors.Is(got.err, ErrShimStuck) || !errors.Is(got.err, boom) {
 		t.Errorf("GetOrCreate = %v, want ErrShimStuck wrapping the retry's spawn error", got.err)
 	}
@@ -352,6 +354,7 @@ func (c *retryGateCtx) Done() <-chan struct{} {
 // later spawn failure is not reported as ErrShimStuck.
 func TestGetOrCreate_BoundStaleSocketWrapsOnlyTheNextRound(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	shortenShimGoneWait(t, 50*time.Millisecond)
 	const key = "feishu:direct:spawn-stale-then-wait:general"
 	if err := os.WriteFile(shim.SocketPath(shim.KeyHash(key)), nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -385,7 +388,7 @@ func TestGetOrCreate_BoundStaleSocketWrapsOnlyTheNextRound(t *testing.T) {
 	}
 	ctx.armed.Store(true)
 	close(g.release)
-	waitClosed(t, ctx.held, "the stale round never reached its ctx check") // after the 2s socket-gone window
+	waitClosed(t, ctx.held, "the stale round never reached its ctx check") // after the socket-gone window
 
 	other := spawnAsync(r, key)
 	waitClosed(t, otherEntered, "the other caller never spawned")
@@ -419,6 +422,7 @@ func waitClosed(t *testing.T, ch <-chan struct{}, msg string) {
 // and leaves no shim-stuck flag behind for the removed key.
 func TestGetOrCreate_CancelledDuringAStaleSpawnDoesNotRetry(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	shortenShimGoneWait(t, 50*time.Millisecond)
 	const key = "feishu:direct:spawn-stale-cancelled:general"
 	if err := os.WriteFile(shim.SocketPath(shim.KeyHash(key)), nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -444,7 +448,7 @@ func TestGetOrCreate_CancelledDuringAStaleSpawnDoesNotRetry(t *testing.T) {
 	}
 	close(g.release)
 
-	got := waitResult(t, out) // waits out the 2s socket-gone window
+	got := waitResult(t, out) // waits out the socket-gone window
 	if !errors.Is(got.err, context.Canceled) {
 		t.Errorf("GetOrCreate = %v, %v, want context.Canceled", got.s, got.err)
 	}
@@ -547,7 +551,7 @@ func TestSpawnSession_TakeoverIsNotRespawned(t *testing.T) {
 	}
 	out := make(chan result, 1)
 	go func() {
-		s, err := r.Takeover(context.Background(), key, "sid-external", t.TempDir(), AgentOpts{})
+		s, err := reserveAndTakeover(context.Background(), r, key, "sid-external", t.TempDir(), AgentOpts{})
 		out <- result{s, err}
 	}()
 	waitEntered(t, g)

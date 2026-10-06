@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -16,6 +17,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // retireFake is a shim stand-in bound at SocketPath(KeyHash(key)). It answers
@@ -452,78 +455,87 @@ func TestStartShimWithBackend_RetiresDeadCLIShimBeforeSpawn(t *testing.T) {
 	}
 }
 
+// startDeadCLIShimServer re-creates the real shim server in-process in its
+// post-exit reattach window (Run's accept loop, waitForReattach and teardown)
+// for key, replaying from buffer. runDone closes once the shim has exited and
+// unlinked its socket; cleanup shuts it down and waits for every handler.
+func startDeadCLIShimServer(t *testing.T, key string, buffer *RingBuffer) (s *shimServer, m *Manager, socketPath string, tokenRaw []byte, runDone <-chan struct{}) {
+	t.Helper()
+	t.Setenv("XDG_RUNTIME_DIR", shortSocketDir(t))
+	socketPath = SocketPath(KeyHash(key))
+	m = mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
+	stateFile := StateFilePath(m.stateDir, KeyHash(key))
+
+	tokenRaw, tokenB64, err := GenerateToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli, err := startCLI("sh", []string{"-c", "exit 1"}, t.TempDir())
+	if err != nil {
+		t.Fatalf("startCLI: %v", err)
+	}
+	cli.wait() //nolint:errcheck
+	ln, err := listenShimSocket(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s = &shimServer{
+		cli:       cli,
+		listener:  ln,
+		buffer:    buffer,
+		tokenRaw:  tokenRaw,
+		stateFile: stateFile,
+		state:     State{ShimPID: os.Getpid(), Key: key, Socket: socketPath, AuthToken: tokenB64},
+		done:      make(chan struct{}),
+		watchdog:  NewWatchdog(30*time.Second, nil),
+	}
+	s.saveStateCLIDead()
+
+	var handlers sync.WaitGroup
+	acceptCh := make(chan net.Conn)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			select {
+			case acceptCh <- conn:
+			case <-s.done:
+				conn.Close()
+				return
+			}
+		}
+	}()
+	spawn := func(conn net.Conn) {
+		handlers.Add(1)
+		go func() { defer handlers.Done(); s.handleClient(conn, time.Minute) }()
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.waitForReattach(acceptCh, spawn, "cli exit")
+		RemoveStateFile(stateFile)
+		_ = os.Remove(socketPath)
+		_ = ln.Close()
+	}()
+	t.Cleanup(func() {
+		s.initiateShutdown()
+		<-done
+		handlers.Wait()
+	})
+	return s, m, socketPath, tokenRaw, done
+}
+
 // TestRetireDeadShim_RealShimServerAfterCLIExit drives the retire against the
-// real shim server code in its post-exit reattach window (Run's accept loop,
-// waitForReattach and teardown re-created in-process): the shim must exit and
-// unlink its socket, also when a reattaching client already took the first
-// window.
+// real shim server code in its post-exit reattach window: the shim must exit
+// and unlink its socket, also when a reattaching client already took the
+// first window.
 func TestRetireDeadShim_RealShimServerAfterCLIExit(t *testing.T) {
 	for _, reattached := range []bool{false, true} {
 		t.Run(map[bool]string{false: "first client", true: "after a reattach"}[reattached], func(t *testing.T) {
 			const key = "feishu:direct:retire-real:general"
-			t.Setenv("XDG_RUNTIME_DIR", shortSocketDir(t))
-			socketPath := SocketPath(KeyHash(key))
-			m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
-			stateFile := StateFilePath(m.stateDir, KeyHash(key))
-
-			tokenRaw, tokenB64, err := GenerateToken()
-			if err != nil {
-				t.Fatal(err)
-			}
-			cli, err := startCLI("sh", []string{"-c", "exit 1"}, t.TempDir())
-			if err != nil {
-				t.Fatalf("startCLI: %v", err)
-			}
-			cli.wait() //nolint:errcheck
-			ln, err := listenShimSocket(socketPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			s := &shimServer{
-				cli:       cli,
-				listener:  ln,
-				buffer:    NewRingBuffer(100, 1024*1024),
-				tokenRaw:  tokenRaw,
-				stateFile: stateFile,
-				state:     State{ShimPID: os.Getpid(), Key: key, Socket: socketPath, AuthToken: tokenB64},
-				done:      make(chan struct{}),
-				watchdog:  NewWatchdog(30*time.Second, nil),
-			}
-			s.saveStateCLIDead()
-
-			var handlers sync.WaitGroup
-			acceptCh := make(chan net.Conn)
-			go func() {
-				for {
-					conn, err := ln.Accept()
-					if err != nil {
-						return
-					}
-					select {
-					case acceptCh <- conn:
-					case <-s.done:
-						conn.Close()
-						return
-					}
-				}
-			}()
-			spawn := func(conn net.Conn) {
-				handlers.Add(1)
-				go func() { defer handlers.Done(); s.handleClient(conn, time.Minute) }()
-			}
-			runDone := make(chan struct{})
-			go func() {
-				defer close(runDone)
-				s.waitForReattach(acceptCh, spawn, "cli exit")
-				RemoveStateFile(stateFile)
-				_ = os.Remove(socketPath)
-				_ = ln.Close()
-			}()
-			t.Cleanup(func() {
-				s.initiateShutdown()
-				<-runDone
-				handlers.Wait()
-			})
+			_, m, socketPath, tokenRaw, runDone := startDeadCLIShimServer(t, key, NewRingBuffer(100, 1024*1024))
 
 			if reattached {
 				h, err := m.connect(context.Background(), socketPath, tokenRaw, 0)
@@ -545,5 +557,64 @@ func TestRetireDeadShim_RealShimServerAfterCLIExit(t *testing.T) {
 				t.Fatal("shim still in its reattach window after the retire")
 			}
 		})
+	}
+}
+
+// An older reattach handler still writing its replay must not kick a client
+// that got its hello later and became active first: that client's shutdown
+// would be lost and the dead-CLI shim would keep its socket bound. The older
+// handler is held in replay by a backlog larger than the socket buffer.
+func TestRetireDeadShim_SlowOlderHandlerKeepsNewerShutdown(t *testing.T) {
+	const key = "feishu:direct:retire-slow-older:general"
+	buffer := NewRingBuffer(2048, 16<<20)
+	line := []byte(strings.Repeat("x", 4096))
+	for range 1024 {
+		buffer.Push(line)
+	}
+	s, m, socketPath, tokenRaw, _ := startDeadCLIShimServer(t, key, buffer)
+
+	older, err := m.connect(context.Background(), socketPath, tokenRaw, 0)
+	if err != nil {
+		t.Fatalf("older attach: %v", err)
+	}
+	defer older.Close()
+	newer, err := m.connect(context.Background(), socketPath, tokenRaw, math.MaxInt64)
+	if err != nil {
+		t.Fatalf("newer attach: %v", err)
+	}
+	defer newer.Close()
+	if _, err := newer.DrainReplay(context.Background()); err != nil {
+		t.Fatalf("newer drain: %v", err)
+	}
+	activeConn := func() net.Conn {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.clientConn
+	}
+	testhelper.Eventually(t, func() bool { return activeConn() != nil }, 5*time.Second,
+		"the newer client never became active")
+	newerConn := activeConn()
+
+	// Let the older handler finish its replay and reach admission. It either
+	// closes its conn (refused) or takes over from the newer client.
+	olderDone := make(chan struct{})
+	go func() { defer close(olderDone); _, _ = io.Copy(io.Discard, older.Conn) }()
+	testhelper.Eventually(t, func() bool {
+		select {
+		case <-olderDone:
+			return true
+		default:
+			return activeConn() != newerConn
+		}
+	}, 5*time.Second, "the older handler never reached admission")
+	if c := activeConn(); c != newerConn {
+		t.Fatalf("active client is %v, want the newer client to stay active", c)
+	}
+
+	newer.Shutdown()
+	select {
+	case <-s.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the newer client's shutdown was lost")
 	}
 }

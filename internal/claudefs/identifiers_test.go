@@ -4,7 +4,9 @@ package claudefs
 // implementation out of internal/discovery (#2643).
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -96,5 +98,71 @@ func TestLayoutPaths_EmptyRootIsEmpty(t *testing.T) {
 		if got != "" {
 			t.Errorf("%s = %q, want \"\"", name, got)
 		}
+	}
+}
+
+func TestIsValidWorkflowRunID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"observed shape", "wf_147c3298-35d", true},
+		{"one char suffix", "wf_a", true},
+		{"mixed case", "wf_AbC-9", true},
+		{"64 char suffix", "wf_" + strings.Repeat("a", 64), true},
+		{"65 char suffix", "wf_" + strings.Repeat("a", 65), false},
+		{"empty", "", false},
+		{"bare prefix", "wf_", false},
+		{"no prefix", "147c3298-35d", false},
+		{"uppercase prefix", "WF_147c3298", false},
+		{"dot dot", "wf_..", false},
+		{"traversal", "wf_../../etc", false},
+		{"slash", "wf_a/b", false},
+		{"backslash", `wf_a\b`, false},
+		{"underscore in suffix", "wf_a_b", false},
+		{"dot in suffix", "wf_a.json", false},
+		{"nul byte", "wf_a\x00", false},
+		{"non-ascii", "wf_é", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsValidWorkflowRunID(tc.input); got != tc.want {
+				t.Errorf("IsValidWorkflowRunID(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolvedProjectsRoot pins the three answers every transcript-path gate
+// relies on: symlinks resolved when projects/ exists, the lexical path before
+// it does, and "" (fail closed) without a claudeDir.
+func TestResolvedProjectsRoot(t *testing.T) {
+	t.Parallel()
+	realDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(realDir, "projects"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "claude-link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(filepath.Join(realDir, "projects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolvedProjectsRoot(link); got != want {
+		t.Errorf("ResolvedProjectsRoot(symlinked dir) = %q, want %q", got, want)
+	}
+
+	missing := filepath.Join(t.TempDir(), "no-such-claude")
+	if got, want := ResolvedProjectsRoot(missing), filepath.Join(missing, "projects"); got != want {
+		t.Errorf("ResolvedProjectsRoot(missing dir) = %q, want lexical %q", got, want)
+	}
+
+	if got := ResolvedProjectsRoot(""); got != "" {
+		t.Errorf(`ResolvedProjectsRoot("") = %q, want ""`, got)
 	}
 }

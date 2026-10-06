@@ -2,12 +2,13 @@
 // EVENT_WHOLE/EVENT_CONTENT/EVENT_ICONS tables), plus the time-divider and
 // dedup helpers the transcript, cron and agent views share.
 import { NZ_CONTRACT } from './contract.js';
-import { perSession, selection, serverInfo, sessionList } from './state.js';
+import { selection, serverInfo, sessionList } from './state.js';
 import { esc, escAttr } from './nz_util.js';
 import { renderMd } from './render_md.js';
 import { EVENT_DIVIDER_GAP_MS, formatTimeFull, timeDividerHtml } from './utilities.js';
 import { renderAskQuestionCard } from './ask_card.js';
 import { CLAWD_SVG, ICONS } from './icons.js';
+import { pendingBackendID } from './features.js';
 import { isInternalEvent, sid } from './session_ident.js';
 
 // renderTodoList parses the JSON todos payload stored on EventEntry.detail and
@@ -161,7 +162,7 @@ function eventIconHtml(e) {
   let icon = EVENT_ICONS.get(e.type) || '';
   if (e.type === 'text') {
     const sess = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
-    const backendID = sess.backend || perSession.backends[selection.key] || (serverInfo.cliBackends && serverInfo.cliBackends.default) || '';
+    const backendID = sess.backend || pendingBackendID(selection.key, selection.node) || (serverInfo.cliBackends && serverInfo.cliBackends.default) || '';
     if (backendID === 'claude' || backendID === '') icon = CLAWD_SVG;
   }
   return icon;
@@ -258,7 +259,7 @@ function toolResultHtml(e) {
 // eventImagesHtml: user-message thumbnails. The click target is the
 // full-size attachment URL when image_paths is populated, else the data URI;
 // `?v=<time>` cache-busts a GC'd attachment. Click handling is delegated
-// (the lightbox IIFE), so it survives innerHTML re-renders.
+// (lightbox.js), so it survives innerHTML re-renders.
 function eventImagesHtml(e) {
   if (!e.images || e.images.length === 0) return '';
   const paths = e.image_paths || [];

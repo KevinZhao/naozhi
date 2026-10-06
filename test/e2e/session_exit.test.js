@@ -19,6 +19,7 @@
 
 const { test, expect } = require('@playwright/test');
 const { startMockServer, defaultSessions } = require('./mock-server');
+const { waitForWs } = require('./shim_wait');
 
 const CRASHED = 'dashboard:direct:2026-01-01-120000-1:myproject';
 const STALE = 'dashboard:direct:2026-01-01-120001-2:otherproject';
@@ -157,7 +158,7 @@ test.describe('dead session exit chip', () => {
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector(`.session-card[data-key="${CRASHED}"]`);
     // @ts-ignore — wsm / WS_STATES are mirrored onto window by the e2e shim.
-    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    await waitForWs(page);
     const clock = await page.evaluate((t) => new Date(t).toLocaleTimeString('en-GB', { hour12: false }), retryAt);
     const paused = 'CLI 进程退出，CLI 连续启动失败（2 次），已暂停自动重试；' + clock + ' 后可重试，或发送 /new 立即重试\n' + DETAIL;
     await expect(card(page, CRASHED).locator('.sc-exit')).toHaveAttribute('title', paused);
@@ -203,7 +204,7 @@ test.describe('dead session exit chip', () => {
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector(`.session-card[data-key="${CRASHED}"]`);
     // @ts-ignore — wsm / WS_STATES are mirrored onto window by the e2e shim.
-    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    await waitForWs(page);
     await card(page, CRASHED).click();
     const header = page.locator('#header-exit .sc-exit');
     await expect(header).toHaveClass(/sc-exit-crashed/);
@@ -237,7 +238,7 @@ test.describe('dead session exit chip', () => {
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector(`.session-card[data-key="${CRASHED}"]`);
     // @ts-ignore — wsm / WS_STATES are mirrored onto window by the e2e shim.
-    await page.waitForFunction(() => wsm.state === WS_STATES.CONNECTED);
+    await waitForWs(page);
     await card(page, CRASHED).click();
     const header = page.locator('#header-exit .sc-exit');
     await expect(header).toHaveAttribute('title', 'CLI 进程退出，下次发送时自动恢复\n' + DETAIL);

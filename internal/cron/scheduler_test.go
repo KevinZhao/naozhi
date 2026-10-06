@@ -936,7 +936,7 @@ func TestKnownSessionIDs_NoJobsReturnsEmpty(t *testing.T) {
 }
 
 // TestSchedulerConfig_RunsKeepPlumbing verifies that SchedulerConfig.
-// RunsKeepCount and RunsKeepWindow flow through to the runStore. Zero
+// RunsKeepCount and RunsKeepWindow flow through to the run store. Zero
 // values must fall back to the documented defaults so existing callers
 // that omit the fields keep prior behaviour. R250-GO-3.
 func TestSchedulerConfig_RunsKeepPlumbing(t *testing.T) {
@@ -950,10 +950,10 @@ func TestSchedulerConfig_RunsKeepPlumbing(t *testing.T) {
 		RunsKeepCount:  17,
 		RunsKeepWindow: 3 * time.Hour,
 	}, SchedulerDeps{})
-	if got := custom.runStore.keepCount; got != 17 {
+	if got := custom.runs.KeepCount(); got != 17 {
 		t.Errorf("keepCount: got %d, want 17", got)
 	}
-	if got := custom.runStore.keepWindow; got != 3*time.Hour {
+	if got := custom.runs.KeepWindow(); got != 3*time.Hour {
 		t.Errorf("keepWindow: got %v, want 3h", got)
 	}
 
@@ -962,10 +962,10 @@ func TestSchedulerConfig_RunsKeepPlumbing(t *testing.T) {
 		StorePath: filepath.Join(dir, "default.json"),
 		MaxJobs:   5,
 	}, SchedulerDeps{})
-	if got := dflt.runStore.keepCount; got != DefaultRunsKeepCount {
+	if got := dflt.runs.KeepCount(); got != DefaultRunsKeepCount {
 		t.Errorf("default keepCount: got %d, want %d", got, DefaultRunsKeepCount)
 	}
-	if got := dflt.runStore.keepWindow; got != DefaultRunsKeepWindow {
+	if got := dflt.runs.KeepWindow(); got != DefaultRunsKeepWindow {
 		t.Errorf("default keepWindow: got %v, want %v", got, DefaultRunsKeepWindow)
 	}
 }

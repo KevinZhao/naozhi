@@ -14,15 +14,9 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// Rune caps for card-action value fields: they round-trip through the button
-// `value` object, and without caps a crafted relay could stuff ~60 KB into CC
-// stdin (the webhook body limit is 64 KiB with no per-field cap).
-const (
-	cardValueLabelMaxRunes  = 512 // labels may include descriptions
-	cardValueHeaderMaxRunes = 128 // short prose
-	cardValueIDMaxRunes     = 128 // tool_use_id etc
-	cardButtonTextMaxRunes  = 100 // Feishu truncates anyway; stay safe
-)
+// cardButtonTextMaxRunes caps button display text; Feishu truncates anyway.
+// The button value's caps live in platform.NewAskAnswerPayload.
+const cardButtonTextMaxRunes = 100
 
 // SendQuestionCard posts an AskUserQuestion prompt. Single-question cards
 // get per-option buttons (one click IS the full answer); multi-question cards
@@ -49,15 +43,7 @@ func (f *Feishu) SendQuestionCard(ctx context.Context, chatID string, card platf
 		return "", fmt.Errorf("get access token: %w", err)
 	}
 
-	reqBody, err := json.Marshal(struct {
-		ReceiveID string `json:"receive_id"`
-		MsgType   string `json:"msg_type"`
-		Content   string `json:"content"`
-	}{ReceiveID: chatID, MsgType: "interactive", Content: string(body)})
-	if err != nil {
-		return "", fmt.Errorf("marshal request body: %w", err)
-	}
-	return f.postMessage(ctx, token, reqBody)
+	return f.postMessage(ctx, token, chatID, card.ThreadID, "interactive", string(body))
 }
 
 // buildMultiQuestionMarkdownCardJSON renders a read-only card listing every
@@ -132,8 +118,8 @@ func buildQuestionCardJSON(card platform.QuestionCard) ([]byte, error) {
 			Tag     string `json:"tag"`
 			Content string `json:"content"`
 		} `json:"text"`
-		Type  string         `json:"type"`
-		Value map[string]any `json:"value"`
+		Type  string                    `json:"type"`
+		Value platform.AskAnswerPayload `json:"value"`
 	}
 	type actionModule struct {
 		Tag     string   `json:"tag"`
@@ -168,25 +154,9 @@ func buildQuestionCardJSON(card platform.QuestionCard) ([]byte, error) {
 			a := action{Tag: "button", Type: "default"}
 			a.Text.Tag = "plain_text"
 			a.Text.Content = btnText
-			// No session_key: routing re-derives from chat context, and every
-			// value is rune-capped so a replay cannot bounce 60 KB into CC stdin.
-			a.Value = map[string]any{
-				"kind":        "ask_answer",
-				"tool_use_id": textutil.TruncateRunesNoEllipsis(card.ToolUseID, cardValueIDMaxRunes),
-				"header":      textutil.TruncateRunesNoEllipsis(item.Header, cardValueHeaderMaxRunes),
-				"label":       textutil.TruncateRunesNoEllipsis(opt.Label, cardValueLabelMaxRunes),
-			}
-			// agent_id routes the answer back to the asking agent session; the
-			// callback has no agent dimension and the dispatcher whitelist-
-			// validates the value before honouring it (#2148).
-			if card.AgentID != "" {
-				a.Value["agent_id"] = textutil.TruncateRunesNoEllipsis(card.AgentID, cardValueIDMaxRunes)
-			}
 			// chat_type lets the WebSocket card path (whose callback lacks it)
-			// route back to the same session key; only whitelisted values are emitted.
-			if ct := normalizeCardChatType(card.ChatType); ct != "" {
-				a.Value["chat_type"] = ct
-			}
+			// route back to the same session key.
+			a.Value = platform.NewAskAnswerPayload(card, item, opt)
 			acts = append(acts, a)
 		}
 		elements = append(elements, actionModule{Tag: "action", Layout: "flow", Actions: acts})
@@ -207,6 +177,21 @@ func buildQuestionCardJSON(card platform.QuestionCard) ([]byte, error) {
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
+// cardTopicRef accepts a card value's topic id only in message-id shape
+// (om_ plus [A-Za-z0-9_]), so a malformed value cannot steer the reply
+// anywhere but the chat.
+func cardTopicRef(id string) string {
+	if !strings.HasPrefix(id, "om_") || len(id) > maxTopicRefLen {
+		return ""
+	}
+	for _, c := range id {
+		if !(c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+			return ""
+		}
+	}
+	return id
+}
+
 // markdownEscaper is shared: NewReplacer builds a trie per call and a
 // multi-question card escapes O(questions × options) strings.
 var markdownEscaper = strings.NewReplacer(
@@ -216,40 +201,10 @@ var markdownEscaper = strings.NewReplacer(
 	"_", "\\_",
 )
 
-// normalizeCardChatType whitelists to {"direct","group"}; anything else returns
-// "" so an attacker-relayed value never reaches the session key.
-func normalizeCardChatType(s string) string {
-	switch s {
-	case "direct", "group":
-		return s
-	default:
-		return ""
-	}
-}
-
 // escapeMarkdown escapes the emphasis / code-span metacharacters that could
 // break card rendering in short prose (headers, questions).
 func escapeMarkdown(s string) string {
 	return markdownEscaper.Replace(s)
-}
-
-// cardActionPayload is the button `value` object SendQuestionCard emits and
-// the card-action handlers decode. Deliberately minimal: session routing is
-// re-derived from the click's chat context, never from embedded state.
-type cardActionPayload struct {
-	Kind      string `json:"kind"`
-	ToolUseID string `json:"tool_use_id"`
-	Header    string `json:"header"`
-	Label     string `json:"label"`
-	// ChatType ("direct"/"group") is whitelisted on read and consulted only by
-	// the WebSocket path, whose callback lacks chat_type; the webhook path
-	// reads the signed envelope instead. Needed because p2p chats also use an
-	// "oc_" open_chat_id, so a prefix heuristic mis-routes 1:1 answers.
-	ChatType string `json:"chat_type,omitempty"`
-	// AgentID routes the answer back to the asking agent session; the
-	// dispatcher whitelist-validates it against the known agent set before it
-	// can influence routing (#2148).
-	AgentID string `json:"agent_id,omitempty"`
 }
 
 // handleCardActionWebhook parses an im.card.action.v1_trigger envelope (token
@@ -260,7 +215,7 @@ type cardActionPayload struct {
 func (f *Feishu) handleCardActionWebhook(ctx context.Context, raw json.RawMessage, handler platform.MessageHandler) {
 	var outer struct {
 		Action struct {
-			Value cardActionPayload `json:"value"`
+			Value platform.AskAnswerPayload `json:"value"`
 		} `json:"action"`
 		OpenChatID    string `json:"open_chat_id"`
 		OpenMessageID string `json:"open_message_id"`
@@ -293,27 +248,27 @@ func (f *Feishu) handleCardActionWebhook(ctx context.Context, raw json.RawMessag
 // MessageHandler call; shared by the webhook and WebSocket paths.
 func (f *Feishu) dispatchCardAction(
 	ctx context.Context,
-	val cardActionPayload,
+	val platform.AskAnswerPayload,
 	chatID, messageID, chatType, operatorID string,
 	handler platform.MessageHandler,
 ) {
-	if val.Kind != "ask_answer" {
+	if val.Kind != platform.AskAnswerKind {
 		slog.Debug("feishu card_action: unknown kind, ignoring",
 			"kind", osutil.SanitizeForLog(val.Kind, 32))
 		return
 	}
-	text := composeAskAnswerText(val)
+	text := platform.ComposeAskAnswerText(val)
 	if text == "" {
 		slog.Warn("feishu card_action: empty answer text",
 			"tool_use_id", osutil.SanitizeForLog(val.ToolUseID, 64))
 		return
 	}
-	// The v2 envelope carries no chat_type at any level; fall back to the
-	// button value before defaulting to "direct", or a group answer routes
-	// into a phantom direct session (#2007).
+	// Neither the v2 envelope nor the WS callback carries chat_type; fall back
+	// to the button value before defaulting to "direct", or a group answer
+	// routes into a phantom direct session (#2007).
 	ct := chatType
 	if ct == "" {
-		ct = normalizeCardChatType(val.ChatType)
+		ct = platform.NormalizeAskChatType(val.ChatType)
 	}
 	if ct != "group" {
 		ct = "direct"
@@ -342,9 +297,12 @@ func (f *Feishu) dispatchCardAction(
 		UserID:    operatorID,
 		ChatID:    chatID,
 		ChatType:  ct,
-		Text:      text,
+		// The callback does not say which topic the card is in; the card's
+		// value does, so the answer and its reply stay in that topic.
+		ThreadID: cardTopicRef(val.ThreadID),
+		Text:     text,
 		// Sanitised here; the dispatcher whitelist-validates before routing (#2148).
-		AgentID: osutil.SanitizeForLog(val.AgentID, cardValueIDMaxRunes),
+		AgentID: osutil.SanitizeForLog(val.AgentID, platform.AskIDMaxRunes),
 		// The user explicitly clicked the bot's card: bypass mention_only gating.
 		MentionMe: true,
 	}
@@ -370,19 +328,4 @@ func (f *Feishu) dispatchCardAction(
 		}()
 	}
 	handler(ctx, msg)
-}
-
-// composeAskAnswerText renders a card click as the dashboard's "Header: Label."
-// reply shape. Header and label are rune-capped and control-stripped so a
-// hostile relay cannot land oversized or bidi-injected strings on CC stdin.
-func composeAskAnswerText(p cardActionPayload) string {
-	h := strings.TrimSpace(textutil.TruncateRunesNoEllipsis(osutil.SanitizeForLog(p.Header, 0), cardValueHeaderMaxRunes))
-	l := strings.TrimSpace(textutil.TruncateRunesNoEllipsis(osutil.SanitizeForLog(p.Label, 0), cardValueLabelMaxRunes))
-	if l == "" {
-		return ""
-	}
-	if h == "" {
-		return l + "."
-	}
-	return h + ": " + l + "."
 }

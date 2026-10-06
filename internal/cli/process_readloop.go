@@ -188,6 +188,7 @@ func (p *Process) readLoop() {
 		}
 		if capExceeded {
 			log.Warn("readLoop: oversized shim message, skipping", "size", len(line))
+			p.noteOversizeLine(line, time.Now())
 			if readErr != nil {
 				p.classifyEOF(readErr, true, log)
 				break
@@ -328,6 +329,15 @@ func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOu
 	// close MUST emit a result clievent.Event — see ProtocolCore.ReadEvent.
 	if ri, ok := p.protocol.(eventReaderInto); ok {
 		events, _, err = ri.ReadEventInto(msg.Line, p.readEventBuf[:0])
+		// The buf slots outlive this frame, so a snapshot left in one stays
+		// pinned until a later frame overwrites it; a dead Process never gets
+		// one. decoded keeps the slots even if events is replaced below.
+		decoded := events
+		defer func() {
+			for i := range decoded {
+				decoded[i].WorkflowProgress = nil
+			}
+		}()
 	} else {
 		events, _, err = p.protocol.ReadEvent(msg.Line)
 	}
@@ -599,6 +609,13 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 			(*fn)(*ev.CodeChange)
 		}
 	}
+	// Idle or not, owned or not: background workflows report between turns.
+	// It also sets ev.WorkflowTask, which logEventAt's entries carry.
+	p.observeWorkflow(&ev, now)
+
+	// No consumer past this point may keep a workflow snapshot: eventCh holds
+	// up to 1024 Events that nobody drains while the session is idle.
+	ev.WorkflowProgress = nil
 
 	// Always log to ring.EventLog so dashboard subscribers see events
 	// even when no Send() is active (e.g., after service restart
@@ -659,10 +676,10 @@ func (p *Process) notifyLinker(ev clievent.Event, nowMS int64, isSystemInit bool
 	}
 	// Resolve for BOTH in-process teammates (task_type="in_process_teammate")
 	// AND standalone sub-agents (task_type often empty/vendor-specific): both
-	// write subagents/agent-<task_id>.jsonl. Exclude local_bash — those only
-	// persist to tool-results/ and have no internal transcript.
+	// write subagents/agent-<task_id>.jsonl. local_bash and local_workflow
+	// tasks have no such transcript (LinkerSkipsTaskType).
 	if ev.Type != "system" || ev.SubType != "task_started" ||
-		ev.TaskType == "local_bash" || ev.TaskID == "" || ev.ToolUseID == "" {
+		LinkerSkipsTaskType(ev.TaskType) || ev.TaskID == "" || ev.ToolUseID == "" {
 		return
 	}
 	taskID := ev.TaskID

@@ -491,8 +491,8 @@ func TestReconcile_AnEarlierAdjustmentDoesNotSplitATurn(t *testing.T) {
 // A day the ledger books spend on and the transcript shows none of naozhi's
 // is left as booked: nothing proves the entries wrong, and zeroing the day
 // would drop spend the transcript no longer holds. A day the transcript shows
-// less spend on than booked still gets the difference taken off, and one the
-// ledger nets below zero on is raised to zero: spend is never negative.
+// less spend on than booked is reported and left too, and one the ledger nets
+// below zero on is raised to zero: spend is never negative.
 func TestReconcile_ADayWithNoTranscriptSpendIsLeftAsBooked(t *testing.T) {
 	for _, c := range []struct {
 		name     string
@@ -501,15 +501,16 @@ func TestReconcile_ADayWithNoTranscriptSpendIsLeftAsBooked(t *testing.T) {
 		residual float64
 		adjusts  int
 		empty    int
+		above    float64 // what the day's ledger is reported over its transcript by
 	}{
-		{"no lines", func(s reconcileScope) []string { return nil }, 0, 0, 0, 1},
+		{"no lines", func(s reconcileScope) []string { return nil }, 0, 0, 0, 1, 0},
 		{"only terminal lines", func(s reconcileScope) []string {
 			return []string{scopeMsg(s.day(-1, 9, 0), "msg_term", 4, "cli")}
-		}, 0, 0, 0, 1},
+		}, 0, 0, 0, 1, 0},
 		{"less spend than booked", func(s reconcileScope) []string {
 			return []string{scopeMsg(s.day(-1, 9, 0), "msg_2", 1, "sdk-cli")}
-		}, 0, -2, 1, 0},
-		{"no lines and a credit", func(s reconcileScope) []string { return nil }, 5, 2, 1, 0},
+		}, 0, 0, 0, 0, 2},
+		{"no lines and a credit", func(s reconcileScope) []string { return nil }, 5, 2, 1, 0, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := newReconcileScope(t)
@@ -538,16 +539,24 @@ func TestReconcile_ADayWithNoTranscriptSpendIsLeftAsBooked(t *testing.T) {
 			if named := strings.Contains(out, "天 transcript 无用量"); named != (c.empty == 1) {
 				t.Errorf("report names an empty day: %v, want %v\n%s", named, c.empty == 1, out)
 			}
+			wantAbove := 0
+			if c.above > 0 {
+				wantAbove = 1
+			}
+			if st.AboveDays != wantAbove || !near(st.AboveUSD, c.above) || strings.Contains(out, "天账本高于 transcript") != (wantAbove == 1) {
+				t.Errorf("settlement = %+v, want the day reported %v above its transcript\n%s", st, c.above, out)
+			}
 		})
 	}
 }
 
 // A turn under a key that held several sessions, with no run record, goes to
 // the one session with a message between the key's previous booking and the
-// turn's (its turn ends just before the result is booked). Nothing is
-// guessed when a fork's copied line or the next session's first line shares
-// the window, when no session has a message there, when a session's
-// transcript is gone, or for a backfill, which is booked at its run's start.
+// turn's (the turn ends at its booking; a later line is the next turn's).
+// Nothing is guessed when a fork's copied line or the next session's first
+// line shares the window, when no session has a message there, when a
+// session's transcript is gone, or for a backfill, which is booked at its
+// run's start.
 func TestReconcile_PlacesAChainedKeysTurnByTranscriptTime(t *testing.T) {
 	const (
 		key = "dashboard:direct:chain:general"
@@ -574,15 +583,23 @@ func TestReconcile_PlacesAChainedKeysTurnByTranscriptTime(t *testing.T) {
 				return []costledger.Entry{turn(s.day(-1, 9, 1), "aaaaaaaaaaaaaaa1", 5), turn(s.day(-1, 11, 1), "aaaaaaaaaaaaaaa2", 3),
 					turn(s.day(-1, 14, 1), "aaaaaaaaaaaaaaa3", 2)}
 			}, map[string]int{a: 2, b: 1}, 0},
-		{"a last message stamped after the booking", []string{a, b},
+		{"a last message stamped at the booking", []string{a, b},
 			func(s reconcileScope) map[string][]string {
 				return map[string][]string{a: {scopeMsg(s.day(-1, 9, 0), "msg_a1", 5, "sdk-cli")},
-					b: {scopeMsg(s.day(-1, 14, 0).Add(5*time.Second), "msg_b", 2, "sdk-cli")}}
+					b: {scopeMsg(s.day(-1, 14, 0), "msg_b", 2, "sdk-cli")}}
 			},
 			func(s reconcileScope) []costledger.Entry {
 				return []costledger.Entry{turn(s.day(-1, 9, 1), "aaaaaaaaaaaaaaa1", 5), turn(s.day(-1, 14, 0), "aaaaaaaaaaaaaaa2", 2)}
 			}, map[string]int{a: 1, b: 1}, 0},
-		{"the next session's first line within the slack", []string{a, b},
+		{"a line stamped just after the booking", []string{a, b},
+			func(s reconcileScope) map[string][]string {
+				return map[string][]string{a: {scopeMsg(s.day(-1, 9, 0), "msg_a1", 5, "sdk-cli")},
+					b: {scopeMsg(s.day(-1, 14, 0).Add(time.Millisecond), "msg_b", 2, "sdk-cli")}}
+			},
+			func(s reconcileScope) []costledger.Entry {
+				return []costledger.Entry{turn(s.day(-1, 9, 1), "aaaaaaaaaaaaaaa1", 5), turn(s.day(-1, 14, 0), "aaaaaaaaaaaaaaa2", 2)}
+			}, map[string]int{a: 1}, 1},
+		{"the next session's first line after the booking", []string{a, b},
 			func(s reconcileScope) map[string][]string {
 				return map[string][]string{
 					a: {scopeMsg(s.day(-1, 9, 0), "msg_a1", 5, "sdk-cli"), scopeMsg(s.day(-1, 14, 0), "msg_a2", 3, "sdk-cli")},
@@ -590,7 +607,7 @@ func TestReconcile_PlacesAChainedKeysTurnByTranscriptTime(t *testing.T) {
 			},
 			func(s reconcileScope) []costledger.Entry {
 				return []costledger.Entry{turn(s.day(-1, 9, 1), "aaaaaaaaaaaaaaa1", 5), turn(s.day(-1, 14, 0).Add(time.Second), "aaaaaaaaaaaaaaa2", 3)}
-			}, map[string]int{a: 1}, 1},
+			}, map[string]int{a: 2}, 0},
 		{"a terminal's later line", []string{a, b},
 			func(s reconcileScope) map[string][]string {
 				return map[string][]string{

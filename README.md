@@ -14,22 +14,22 @@
 
 ## 为什么选 Naozhi？
 
-大多数 "AI 聊天机器人" 只是 API wrapper。Naozhi 不同 —— 它直接 spawn 本机 AI CLI（Claude Code 或 Kiro）作为长生命周期子进程，通过 stdin/stdout 进行原生协议通信，**保留 CLI 的全部能力**：
+大多数 "AI 聊天机器人" 只是 API wrapper。Naozhi 不同 —— 它直接 spawn 本机 AI CLI（Claude Code、Kiro 或 Codex）作为长生命周期子进程，通过 stdin/stdout 进行原生协议通信，**保留 CLI 的全部能力**：
 
 - 读写文件、执行 Bash、Git 操作、子 agent 编排
 - 所有已配置的 MCP servers
 - 自定义 system prompt 和 per-agent 模型选择
-- 可插拔 Protocol：Claude `stream-json`（NDJSON）或 Kiro `ACP`（JSON-RPC 2.0）
+- 可插拔 Protocol：Claude `stream-json`（NDJSON）、Kiro `ACP`（JSON-RPC 2.0）或 Codex `app-server`（JSON-RPC 2.0）
 
 ```mermaid
 graph TD
     IM["飞书 / Slack / Discord / 微信"]
     GW["Naozhi Gateway<br/>(Go, 单二进制)"]
-    CLI["AI CLI<br/>(Claude / Kiro, 长生命周期进程)"]
+    CLI["AI CLI<br/>(Claude / Kiro / Codex, 长生命周期进程)"]
     TOOLS["Bash · Read · Edit · Grep<br/>Glob · Agent · MCP servers"]
 
     IM -- "WebSocket / Socket Mode<br/>Gateway / HTTP 长轮询" --> GW
-    GW -- "stdin/stdout<br/>(stream-json / ACP JSON-RPC)" --> CLI
+    GW -- "stdin/stdout<br/>(stream-json / ACP / app-server JSON-RPC)" --> CLI
     CLI --- TOOLS
 
     style IM fill:#e8f4fd,stroke:#4a90d9
@@ -49,7 +49,7 @@ graph TD
 | **4** | 实时 Dashboard | 浏览器实时查看所有会话、事件流、费用统计 |
 | **5** | 多节点 NAT 穿越 | 远程机器反向拨入主节点，统一管理多台工作站 |
 | **6** | 消息队列与抢占 | 忙时消息自动排队/合并，支持 `/stop` 软中断与 `/urgent` 紧急抢占 |
-| **7** | 多 Backend | 同一实例可并存 Claude（stream-json）与 Kiro（ACP），按会话切换 |
+| **7** | 多 Backend | 同一实例可并存 Claude（stream-json）、Kiro（ACP）与 Codex（app-server），按会话切换 |
 
 ---
 
@@ -57,12 +57,14 @@ graph TD
 
 ### IM 平台接入
 
-| 平台 | 接入方式 | 私聊 | 群聊 | 消息编辑 |
-|------|----------|------|------|----------|
-| **飞书** | WebSocket 长连接 / Webhook | ✓ | ✓ | ✓ 流式更新 |
-| **Slack** | Socket Mode | ✓ | ✓ (mention) | — |
-| **Discord** | Gateway WebSocket | ✓ | ✓ (mention) | — |
-| **微信** | HTTP 长轮询 (iLink Bot) | ✓ | — | — |
+| 平台 | 接入方式 | 私聊 | 群聊 | 消息编辑 | 提问按钮 |
+|------|----------|------|------|----------|----------|
+| **飞书** | WebSocket 长连接 / Webhook | ✓ | ✓ | ✓ 流式更新 | ✓ |
+| **Slack** | Socket Mode | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ |
+| **Discord** | Gateway WebSocket | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ |
+| **微信** | HTTP 长轮询 (iLink Bot) | ✓ | — | — | — |
+
+「提问按钮」指 Claude 调用 AskUserQuestion 时把选项渲染成可点击的按钮；没有按钮的平台收到纯文本选项列表，直接回复文字作答。
 
 所有平台开箱即用，**无需公网 IP**。
 
@@ -77,6 +79,8 @@ graph TD
 ```
 
 Agent 命令、模型、system prompt 均可在 `config.yaml` 中自定义。
+
+群聊里，Slack 话题串和飞书话题各用一个独立会话，不在话题里的消息共用频道的会话；`session.group_scope` 可改为 `chat`（整个群一个会话）或 `user`（每个成员一个会话）。`/cd`、`/project`、`/cron` 始终按整个群生效。开启 `session.thread_auto_open` 后，顶层的 @bot 提问会在以它为根的新话题里回答，话题里的追问接着同一个会话。
 
 ### 会话生命周期
 
@@ -113,7 +117,7 @@ graph LR
 | `passthrough` | 每条消息直接转发给 CLI，各自得到独立结果。需 stream-json 后端，ACP 自动回退到 collect |
 
 - **`/stop`**: 软中断当前回复，保留后续排队消息
-- **`/urgent <消息>`**: 紧急打断当前 turn 并优先处理该消息（passthrough 模式下的 `priority:"now"` 抢占）
+- **`/urgent <消息>`**: 中断当前 turn 并优先处理该消息（passthrough 模式下的 `priority:"now"` 抢占）。正在运行的工具不会被立即打断：CLI 要等工具返回才结束当前 turn（如 `sleep 20` 会让中断推迟到命令跑完）
 
 ### 多 Backend
 
@@ -127,11 +131,17 @@ cli:
     - id: "kiro"             # ACP (JSON-RPC 2.0) 协议，自动选择
       path: "~/.local/bin/kiro-cli"
       model: "claude-sonnet-4.6"
+    - id: "codex"            # codex app-server (JSON-RPC 2.0) 协议，自动选择
+      path: "codex"
+      model: "openai.gpt-5.5"  # 按 ~/.codex/config.toml 的 model_provider 取名（此为 amazon-bedrock）
+      args: ["-c", "model_reasoning_effort=high"]
 ```
 
 - Dashboard "new session" 下拉菜单按会话选择 backend
 - API 通过 `/api/sessions/send {"backend": "kiro"}` 覆盖
 - ACP backend 自动处理 `session/new`、`session/cancel` 通知与权限请求
+- 每条 backend 的 `model`/`args` 省略时继承顶层 `cli.*`；`path` 不继承 `cli.path`，省略时按 id 自动查找（`~/.local/bin/<binary>`、常见安装目录、`$PATH`）；codex 必须自己设 `model` 和 `args`，否则会拿到 claude 的模型名与顶层 `cli.args`
+- Codex 不接受 `effort` 字段（设了会告警并忽略），推理强度经 `args` 传：`-c model_reasoning_effort=<tier>`
 
 ### 定时任务 (Cron)
 
@@ -143,13 +153,15 @@ cli:
 /cron add --keep-context "0 18 * * *" 接着昨天的进度写日报
 /cron list
 /cron pause <id>
+/cron mode <id> fresh
 ```
 
 - 标准 cron 表达式 + `@every` 语法
 - 聊天里创建的任务默认每次执行都从新会话开始；加 `--keep-context` 则延续同一会话（`/cron list` 标 `[保留上下文]`）。两种任务在两次执行之间都不常驻 CLI 进程，保留上下文的任务下次执行时恢复同一会话
+- 创建后可在创建该任务的会话发送 `/cron mode <id> fresh|keep` 切换，下次执行生效（正在执行的那次不受影响），连续失败计数清零
 - 每 chat 10 个 / 全局 50 个配额
 - 执行结果自动回推到聊天
-- 连续失败 5 次自动暂停（`cron.auto_pause_after_failures` 可调；后端瞬时故障和云沙箱连接中断不计），修复后在创建该任务的会话发送 `/cron resume <id>`，或在控制台恢复
+- 连续失败 5 次自动暂停（`cron.auto_pause_after_failures` 可调；重启后收尾的孤儿云沙箱 run 不计，后端瞬时故障也不计，但同样次数的瞬时故障持续满 6 小时也会暂停），修复后在创建该任务的会话发送 `/cron resume <id>`，或在控制台恢复
 
 ### 语音转文字
 
@@ -295,7 +307,9 @@ naozhi setup weixin
 naozhi --config ~/.naozhi/config.yaml
 ```
 
-需要两个微信号 —— 一个登录为 bot，另一个发消息测试。
+扫码确认的微信用户（登录响应里的 `ilink_user_id`）会被写进
+`im_access.platforms.weixin.allowed_users`，只有这个号发来的消息会被处理。其他微信号
+发消息会在私聊里收到自己的 ID，加进 `allowed_users` 即可，见 [IM 访问控制](#im-访问控制)。
 
 ### 飞书
 
@@ -316,12 +330,14 @@ naozhi --config ~/.naozhi/config.yaml
 2. 开启 Socket Mode，获取 App-Level Token (`xapp-...`)
 3. Bot Token Scopes: `chat:write`, `app_mentions:read`
 4. Event Subscriptions: `message.im`, `app_mention`
+5. Interactivity & Shortcuts → 开启（Socket Mode 下不需要填 Request URL）。不开启时 AskUserQuestion 的按钮点了没反应，但仍可直接回复文字作答
 
 ### Discord
 
 1. [discord.com/developers](https://discord.com/developers/applications) → New Application → Bot
 2. 开启 Message Content Intent
 3. 获取 Bot Token，邀请到服务器
+4. General Information 里的 Interactions Endpoint URL 留空：填了之后按钮点击改走 HTTP，不再经 Gateway 送达，AskUserQuestion 的按钮会点了没反应（仍可直接回复文字作答）
 
 ### 运行
 
@@ -346,7 +362,7 @@ Dashboard: 浏览器打开 `http://localhost:8180`
 | `/new review` | 重置指定 agent 对话 |
 | `/clear` | 重置会话（同 `/new`） |
 | `/stop` | 中断当前回复，保留后续排队消息 |
-| `/urgent <text>` | 紧急打断并优先处理该消息 |
+| `/urgent <text>` | 中断当前回复并优先处理该消息（正在运行的工具需先结束） |
 | `/cd <path>` | 切换工作目录 |
 | `/pwd` | 显示当前工作目录 |
 | `/model [名称\|reset] [agent]` | 查看/切换会话模型（运行中切换，上下文保留） |
@@ -357,6 +373,7 @@ Dashboard: 浏览器打开 `http://localhost:8180`
 | `/cron add [--keep-context] "<schedule>" <prompt>` | 创建定时任务（默认每次新会话） |
 | `/cron list` | 查看定时任务 |
 | `/cron del/pause/resume <id>` | 管理定时任务 |
+| `/cron mode <id> fresh\|keep` | 切换定时任务是否每次从新会话开始 |
 | `/help` | 显示可用命令 |
 
 Agent 命令通过 `agent_commands` 配置映射，可自定义。
@@ -374,22 +391,26 @@ server:
   trusted_proxy: false                    # ALB/CloudFront 终止 TLS 时设为 true
 
 cli:
-  backend: claude                         # "claude" | "kiro"，单 backend 模式下的默认值
+  backend: claude                         # "claude" | "kiro" | "codex"，单 backend 模式下的默认值
   path: "~/.local/bin/claude"
   model: "sonnet"                         # sonnet / opus / haiku
-  args:
-    - "--dangerously-skip-permissions"
+  args: []                                # claude 协议自己加 --dangerously-skip-permissions，写在这里只会被丢弃并告警
 
-  # 可选：多 backend 并存（Claude + Kiro 同时启用）。dashboard "new session"
+  # 可选：多 backend 并存（Claude / Kiro / Codex 同时启用）。dashboard "new session"
   # 下拉菜单可以按会话选 backend，API 端通过 /api/sessions/send {"backend": ...}
   # 覆盖。不设置 `backends` 时走单 backend 模式，使用上面的 cli.path/model/args；
-  # 每条 backend 的 path/model/args 省略时从顶层 cli.* 继承；`backend` 字段决定
+  # 每条 backend 的 model/args 省略时从顶层 cli.* 继承，path 不继承 cli.path，
+  # 省略时按 id 自动查找（~/.local/bin/<binary>、常见安装目录、$PATH）；`backend` 字段决定
   # 默认 backend（同时也作为 dashboard 下拉第一项）。完整注释示例见
   # config.example.yaml `cli.backends` 段。
   # backends:
   #   - id: claude
   #   - id: kiro
   #     path: "~/.local/bin/kiro"         # ACP 协议根据 id=kiro 自动选择，无需额外 flag
+  #   - id: codex
+  #     path: "codex"                     # codex app-server 协议根据 id=codex 自动选择
+  #     model: "openai.gpt-5.5"           # 须显式设置，否则继承上面 claude 的 sonnet；args 也写明，免得继承顶层 cli.args
+  #     args: ["-c", "model_reasoning_effort=high"]
 
 session:
   cwd: "/home/user/projects"              # CLI 默认工作目录，亦作 /cd 的允许根路径
@@ -412,7 +433,7 @@ session:
 agents:                                   # 自定义 agent
   code-reviewer:
     model: "sonnet"
-    args: ['--append-system-prompt', 'You are a code reviewer...']
+    system_prompt: "You are a code reviewer..."  # 追加到 CLI 系统提示词
   researcher:
     model: "opus"
 
@@ -462,6 +483,16 @@ im_access:                                # IM 发送者白名单，见「部署
     feishu:
       allowed_users: ["ou_xxxxxxxx"]      # 可以聊天；admin_users 也算
       admin_users: ["ou_yyyyyyyy"]        # 可以用 /cd /project /cron；空 = 所有人都是管理员
+
+im_rate_limit:                            # 每个 IM 发送者的消息限流，见「部署 · IM 访问控制」
+  msgs_per_min: 10                        # 0 或不配 = 不限
+  burst: 3                                # 允许连发的条数；0 = 同 msgs_per_min
+
+cost:
+  budget:                                 # 每日费用预算（USD），见「部署 · IM 访问控制」
+    per_chat_daily_usd: 20                # 每个 IM 会话；0 或不配 = 不限
+    per_cron_job_daily_usd: 5             # 每个定时任务
+    daily_usd: 100                        # 整台机器（dashboard 的花费也算）
 
 # upstream:                               # 多节点：作为远程节点拨入
 #   url: "wss://primary.example.com/ws-node"
@@ -529,8 +560,9 @@ journalctl -u naozhi -f
 > 拉 heap / goroutine / CPU profile。端点受 token + **loopback-only** 双重防护，远端
 > 请求（ALB / CloudFront）一律 403。详见 [`docs/ops/pprof.md`](docs/ops/pprof.md)。
 
-> **一键排障**：`naozhi doctor` 聚合 binary / systemd / HTTP / auth / pprof / 状态目录
-> 7 项检查，任一 fail 退出码 1。CI 友好，支持 `--json` 输出。详见
+> **一键排障**：`naozhi doctor` 聚合 binary / codesign / systemd / HTTP / auth /
+> 服务端子系统 / 配置漂移 / pprof / 状态目录 / CLI backend / 语音转写 / 安全配置等检查，
+> 任一 fail 退出码 1。CI 友好，支持 `--json` 输出。完整检查项见
 > [`docs/ops/doctor.md`](docs/ops/doctor.md)。
 
 ### IM 访问控制
@@ -552,8 +584,16 @@ im_access:
 - **不配置 = 所有人都能用**（兼容旧配置）。启动日志、`naozhi config check`、
   `naozhi doctor` 会对每个没有条目的平台告警，`config check` 因此退出码为 1。
   `default_deny: true` 会拒绝所有没有条目的平台。
-- 平台一旦有条目，名单外的人和没有用户 ID 的消息都会被拒绝，包括飞书卡片上的
-  AskUserQuestion 回答。被拒的消息不会触发任何命令，也不会进 CLI。
+- `naozhi setup weixin` 会把扫码的微信用户写进 `im_access.platforms.weixin`。登录
+  响应没给用户 ID 时，新建的配置文件写 `default_deny: true`（先发一条消息拿到自己的
+  ID 再加进去）；已有的配置文件里不写 `default_deny`，免得把其他平台关在外面。已有的
+  `im_access.platforms.weixin` 条目不会被改动。
+- 平台一旦有条目，名单外的人和没有用户 ID 的消息都会被拒绝，包括飞书 / Slack /
+  Discord 卡片上的 AskUserQuestion 按钮回答。被拒的消息不会触发任何命令，也不会进
+  CLI。注意卡片在鉴权之前就会变成"已回答"：名单外的人、被限流或超预算的点击同样会让
+  按钮消失，此时有权限的人请直接回复文字作答（与飞书一致）。飞书的语音和图片、Discord
+  的图片附件在下载前就判定：名单外的人发来的语音不下载、不转写（不产生 Transcribe
+  费用），图片不下载；群里的飞书语音因为没法 @bot 也不转写。
 - **怎么拿用户 ID**：被拒的消息会在 Info 级别打一行 `im access denied`，`user`
   字段就是要填的 ID（飞书 open_id `ou_...`、Slack `U...`、Discord 用户 ID、微信
   `from`）。私聊里被拒的人也会收到带自己 ID 的提示，同一人 10 分钟最多一次；群里
@@ -565,6 +605,53 @@ im_access:
   dashboard 里手动删除。
 - 改名单要重启 naozhi（会打断正在运行的会话），配置热重载见 #3437。
 - 把自己关在外面时，dashboard 不受 `im_access` 影响，可以从那里继续操作。
+
+`im_rate_limit` 限制每个发送者发消息的频率（令牌桶，按平台 + 用户 ID 分桶；平台没给
+用户 ID 时按会话分桶），防止有人刷屏把账单打穿：
+
+```yaml
+im_rate_limit:
+  msgs_per_min: 10   # 持续速率；0 或不配 = 不限
+  burst: 3           # 可以连发的条数；0 = 同 msgs_per_min
+```
+
+- 斜杠命令也计数（`/cron add` 刷屏一样被挡），`/stop` 不计：它只会停下花费。
+- 超限的消息直接丢弃，不进 CLI；发送者每分钟最多收到一次「消息过于频繁」提示。
+  丢弃次数记在 expvar `naozhi_dispatch_rate_limited_total`。
+- 在 `im_access` 之后检查，所以被拒的人不消耗额度；没 @bot 的群消息也不消耗。
+- 管理员同样受限；改配置要重启 naozhi。
+
+`cost.budget` 按 cost 账本限制每天的花费（USD），三档上限各自独立，0 或不配 = 不限：
+
+```yaml
+cost:
+  budget:
+    per_chat_daily_usd: 20       # 每个 IM 会话（同一会话的各个 agent 合计）
+    per_cron_job_daily_usd: 5    # 每个定时任务
+    daily_usd: 100               # 整台机器：IM、定时任务、dashboard、系统会话合计
+    warn_ratio: 0.8              # 到这个比例时提醒；默认 0.8
+    action: block                # block（默认）= 用尽后拒绝；warn = 只提醒不拒绝
+    timezone: "Asia/Shanghai"    # 「一天」按这个时区的 0 点切换；默认同 cron.timezone
+```
+
+- **IM**：会话或整机的额度用尽后，新消息不进 CLI，会话每分钟最多收到一次「今日费用预算已
+  用尽（$X / $Y），… 重置」。斜杠命令不受影响，`/stop`、`/new` 照常可用。被拒次数按
+  scope 记在 expvar `naozhi_dispatch_budget_blocked_total`。绑定项目的会话走项目
+  planner，同一项目的所有会话共用一份额度。管理员（`admin_users`）同样受限：名单为空时
+  每个放行的用户都算管理员，豁免管理员等于让会话额度失效。
+- **定时任务**：任务或整机的额度用尽后，到点的运行（包括手动「立即执行」）直接记为
+  `skipped / budget_exceeded`，不启动会话、不计入自动暂停的连续失败次数；每个任务每天只有
+  第一次跳过写进运行历史并通知会话，之后的跳过不再占历史条数。沙箱任务在 dashboard 上的
+  「重放」也算一次新运行：额度用尽时返回 409、不启动 microVM，待处理条目留到重置后再重放。
+- 到 `warn_ratio` 时，IM 回复末尾追加一行「⚠️ 今日费用已达预算的 80%」，定时任务发一条提示；
+  每个 scope 每天各一次。整机额度的提醒每天只发给最先碰到它的那个会话或任务（额度用尽后的
+  拒绝提示则每个会话、每个任务都会收到）。`action: warn` 时超过上限也照常执行，只再提醒一次。
+- dashboard 不受预算限制（它是已登录的 owner），但它的花费计入整机额度。会话头部的运行统计
+  和定时任务时间轴头部会显示「今日 $X / $Y」（取离上限最近的那一档，到 `warn_ratio` 加 ⚠，
+  超过上限标红，悬停可看 scope 和重置时间）；数据来自 `GET /api/cost/budget?session_key=|job_id=`。
+- 这是软上限：放行时还没超的那一轮可能把花费推过上限；花费在账本落盘后（约 1 秒内）才
+  计入。只统计以 USD 计价的花费，按 credits / tokens 计量的 backend 不计入。
+- 需要 cost 账本开着（`cost.enabled` 不能为 false）；改配置要重启 naozhi。
 
 ### 生产架构
 

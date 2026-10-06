@@ -100,7 +100,7 @@ func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
 		// hit the "refusing to clobber" guard. Deliberately do NOT set
 		// shim-stuck flag: Remove is terminal and unregisterSession already
 		// cleared it; re-inserting leaks an entry per one-shot key (#2261).
-		if !waitSocketGoneForKey(key, 2*time.Second) {
+		if !waitSocketGoneForKey(key) {
 			slog.Warn("shim socket still bound after Remove wait — terminal removal, not flagging key (Remove never reuses the key)",
 				"key", key)
 		}
@@ -303,8 +303,13 @@ func (r *Router) Cleanup() {
 			continue
 		}
 
+		// A workflow's frames are activity too, and a running one keeps
+		// its CLI (workflowPinned) however long the parent idles.
+		if obs := time.UnixMilli(c.s.WorkflowBoard().LastObservedAt()); obs.After(effective) {
+			effective = obs
+		}
 		// Normal idle TTL expiry.
-		if now.Sub(effective) > ttl {
+		if now.Sub(effective) > ttl && !c.s.workflowPinned(now) {
 			logSessionLifecycle("expired", c.key, "idle", now.Sub(effective))
 			// Carry the reason and stamp it only after the close-loop re-verify;
 			// stamping here would corrupt the deathReason of a replacement
@@ -664,6 +669,13 @@ func (r *Router) shutdown() {
 			}
 		}
 	})
+
+	// The CLIs outlive the save (Detach below), so a reading booked after it
+	// would be booked again on the reattached CLI's next result, which
+	// differences against the saved baseline.
+	if !r.runs.cost.freeze(costFreezeDrain) {
+		slog.Warn("shutdown: cost bookings still running at the store save; their readings may be booked again after restart")
+	}
 
 	// Known IDs live off the table lock; the final save is unthrottled.
 	knownIDsCopy, knownIDsMarshalErr := r.kid.MarshalSnapshot()

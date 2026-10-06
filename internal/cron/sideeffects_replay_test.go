@@ -72,24 +72,3 @@ func TestSnapshot_SideEffectsCollapsesToBool(t *testing.T) {
 		})
 	}
 }
-
-// TestCronRun_ReplayOfWireTagAndSummary pins replay_of on both CronRun and
-// the summary projection (the list view renders the chain badge too).
-func TestCronRun_ReplayOfWireTagAndSummary(t *testing.T) {
-	r := &CronRun{RunID: "b", JobID: "j", State: RunStateSucceeded, ReplayOf: "a"}
-
-	data, _ := json.Marshal(r)
-	if !strings.Contains(string(data), `"replay_of":"a"`) {
-		t.Fatalf("CronRun must carry replay_of: %s", data)
-	}
-	// Original runs (empty ReplayOf) omit the key.
-	data, _ = json.Marshal(&CronRun{RunID: "a", JobID: "j", State: RunStateSucceeded})
-	if strings.Contains(string(data), "replay_of") {
-		t.Fatalf("original run must omit replay_of: %s", data)
-	}
-	// Summary carries it (UI list draws the chain off the summary).
-	sdata, _ := json.Marshal(r.summary())
-	if !strings.Contains(string(sdata), `"replay_of":"a"`) {
-		t.Fatalf("CronRunSummary must carry replay_of: %s", sdata)
-	}
-}

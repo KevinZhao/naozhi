@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -29,11 +30,14 @@ type Event struct {
 	ModelUsage map[string]ModelUsage `json:"modelUsage,omitempty"`
 	// IsError is claude's result-frame failure flag; protocols that synthesize
 	// a failed result set it too. Aborted is stamped by readLoop on the first
-	// result after naozhi itself asked the turn to stop.
-	IsError      bool              `json:"is_error,omitempty"`
-	Aborted      bool              `json:"-"`
-	BackendError *BackendError     `json:"-"`
-	Message      *AssistantMessage `json:"message,omitempty"`
+	// result after naozhi itself asked the turn to stop. TerminalReason is
+	// claude's result-frame turn end (completed, aborted_tools, …); older CLIs
+	// omit it.
+	IsError        bool              `json:"is_error,omitempty"`
+	TerminalReason string            `json:"terminal_reason,omitempty"`
+	Aborted        bool              `json:"-"`
+	BackendError   *BackendError     `json:"-"`
+	Message        *AssistantMessage `json:"message,omitempty"`
 	// Model is the resolved model id the claude CLI advertises on system/init
 	// (claude resolves env/CLI defaults internally, so it is only known after
 	// init). readLoop forwards it to Process.setModel for the live dashboard
@@ -54,6 +58,21 @@ type Event struct {
 	Status       string     `json:"status,omitempty"`
 	LastToolName string     `json:"last_tool_name,omitempty"`
 	Usage        *TaskUsage `json:"usage,omitempty"`
+	// Workflow (local_workflow task) fields, see workflow.go. TaskSummary is
+	// set on non-workflow progress too, so it never identifies a workflow;
+	// SubagentType only rules one out. WorkflowProgress is nil when the frame
+	// has no snapshot (key absent or null) and non-nil, possibly empty, when
+	// it has one; readLoop clears it before the Event leaves the read loop.
+	WorkflowName     string          `json:"workflow_name,omitempty"`
+	TaskSummary      string          `json:"summary,omitempty"`
+	SubagentType     string          `json:"subagent_type,omitempty"`
+	Patch            *TaskPatch      `json:"patch,omitempty"`
+	WorkflowProgress []WorkflowItem  `json:"workflow_progress,omitempty"`
+	WorkflowDecode   WorkflowDecode  `json:"-"`
+	WorkflowLaunch   *WorkflowLaunch `json:"-"`
+	// WorkflowTask is set by workflow.Tracker.Observe on a task_* frame of
+	// a local_workflow task; false on every frame it has not seen.
+	WorkflowTask bool `json:"-"`
 	// ToolName and ParentToolUseID name the tool a claude tool_progress frame
 	// reports on; its own ToolUseID is a per-heartbeat "<id>-heartbeat-N". The
 	// CLI sends one every 30s while a main-thread tool runs, as a liveness
@@ -454,6 +473,20 @@ func splitAttachments(atts []Attachment) (inline []Attachment, refs []Attachment
 	return inline, refs
 }
 
+// AttachmentSuffix is the " [+N image(s)] [+M file(s)]" decoration a user
+// turn's one-line summary carries; "" for no attachments.
+func AttachmentSuffix(atts []Attachment) string {
+	inline, refs := splitAttachments(atts)
+	var s string
+	if len(inline) > 0 {
+		s = " [+" + strconv.Itoa(len(inline)) + " image(s)]"
+	}
+	if len(refs) > 0 {
+		s += " [+" + strconv.Itoa(len(refs)) + " file(s)]"
+	}
+	return s
+}
+
 // prependFileRefHint returns text with a Read-tool instruction prepended when
 // refs is non-empty; with no refs the text is returned unchanged so the NDJSON
 // wire form of image-only sends is stable. Paths are workspace-relative with
@@ -516,18 +549,25 @@ func formatBytesShort(n int64) string {
 	}
 }
 
+// UserTextAndInline returns the text a backend should send for a user turn
+// (with the Read-tool hint prepended when atts holds file_ref entries) and the
+// inline attachments that become image blocks. Every protocol encoder goes
+// through it so a file_ref never reaches the wire as an image block.
+func UserTextAndInline(text string, atts []Attachment) (effectiveText string, inline []Attachment) {
+	inline, refs := splitAttachments(atts)
+	return prependFileRefHint(text, refs), inline
+}
+
 // NewUserMessageWithMeta builds the stdin user message. Empty uuid / priority
 // are omitted from the JSON; non-empty values are serialised as top-level
 // fields, which the CLI accepts and (for uuid) round-trips on the replay
 // event. Priority "now" is an explicit abort signal.
 func NewUserMessageWithMeta(text string, atts []Attachment, uuid, priority string) InputMessage {
 	// file_ref attachments produce no content block; they reach Claude via
-	// the prepended Read-tool hint instead.
-	inline, refs := splitAttachments(atts)
-
-	// The hint is English because language-mixed prompts make the model
-	// switch reply language unpredictably; original filenames stay verbatim.
-	effectiveText := prependFileRefHint(text, refs)
+	// the prepended Read-tool hint instead. The hint is English because
+	// language-mixed prompts make the model switch reply language
+	// unpredictably; original filenames stay verbatim.
+	effectiveText, inline := UserTextAndInline(text, atts)
 
 	var content any
 	if len(inline) == 0 {
@@ -577,19 +617,30 @@ type SendResult struct {
 
 	// Turn outcome, copied from the result frame. SubType is the backend's raw
 	// subtype (claude's success / error_during_execution / error_max_turns …,
-	// an ACP stopReason, "error" for a synthesized failure). error_during_execution
-	// is also what an abort naozhi requested produces, so a consumer checks
-	// Aborted before treating it as a failure. BackendError is set when the
-	// backend rejected the turn over JSON-RPC or reported it failed.
-	SubType      string
-	IsError      bool
-	Aborted      bool
-	BackendError *BackendError
+	// an ACP stopReason, "error" for a synthesized failure). An aborted turn is
+	// error_during_execution on older claude and success with an aborted_*
+	// TerminalReason on newer ones (see CLIAborted); a consumer checks both
+	// before treating the result as a failure or a complete answer.
+	// BackendError is set when the backend rejected the turn over JSON-RPC or
+	// reported it failed.
+	SubType        string
+	IsError        bool
+	Aborted        bool
+	TerminalReason string
+	BackendError   *BackendError
 
 	// Merge metadata. Zero means "single-slot result, no merge".
 	MergedCount    int    // total slots sharing this result (>=2 in a merge)
 	MergedWithHead uint64 // 0 for head; for follower the id of the head sendSlot
 	HeadText       string // follower mirror of Text (optional, for UI association)
+}
+
+// CLIAborted reports a turn claude itself ended as aborted (terminal_reason
+// aborted_tools, aborted_streaming, …), whoever asked for it. Older claude
+// marks an abort only as error_during_execution, which is also a real failure
+// unless Aborted is set, so false here does not mean the turn completed.
+func (r SendResult) CLIAborted() bool {
+	return strings.HasPrefix(r.TerminalReason, "aborted_")
 }
 
 // BackendError is a turn failure an ACP or codex backend reported: a JSON-RPC

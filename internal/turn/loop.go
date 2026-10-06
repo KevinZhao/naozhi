@@ -32,9 +32,9 @@ type inflight struct {
 
 // receiversFor groups batch by Sink in first-appearance order: a group's
 // first member is its head and the rest are its Mates. owner joins as an
-// Observer when no batch member shares its sink (#3004 分叉 19a); the
-// receiver on owner's sink is the Primary. Requests with a nil Origin
-// receive nothing.
+// Observer when no batch member shares its sink or its Scope (#3004 分叉
+// 19a); otherwise the receiver on owner's sink, else the first on its
+// scope, is the Primary. Requests with a nil Origin receive nothing.
 func receiversFor(owner Origin, batch []Msg, first bool) []*receiver {
 	var out []*receiver
 	bySink := make(map[string]*receiver, len(batch))
@@ -54,12 +54,35 @@ func receiversFor(owner Origin, batch []Msg, first bool) []*receiver {
 	if owner == nil {
 		return out
 	}
-	if r := bySink[owner.Sink()]; r != nil {
+	r := bySink[owner.Sink()]
+	if r == nil {
+		r = sameScope(owner, out)
+	}
+	if r != nil {
 		r.info.Primary = true
 	} else {
 		out = append(out, &receiver{origin: owner, info: TurnInfo{Role: RoleObserver, Merged: len(batch), Primary: true}})
 	}
 	return out
+}
+
+// sameScope is the first of rs whose origin shares owner's Scope; nil when
+// owner is not Scoped or its Scope is empty.
+func sameScope(owner Origin, rs []*receiver) *receiver {
+	o, ok := owner.(Scoped)
+	if !ok {
+		return nil
+	}
+	scope := o.Scope()
+	if scope == "" {
+		return nil
+	}
+	for _, r := range rs {
+		if s, ok := r.origin.(Scoped); ok && s.Scope() == scope {
+			return r
+		}
+	}
+	return nil
 }
 
 func sessionOpts(owner Origin, key string) sessionview.AgentOpts {

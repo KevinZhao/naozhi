@@ -13,30 +13,36 @@ import (
 // turn.Orchestrator whose turnSender notifies it, an engine that submits to
 // that Orchestrator, and a Hub over the engine and the broadcaster. Hub
 // dependencies go in opts and the engine-only ones (Agents, ProjectMgr,
-// ScratchPool) in eo. Shared ones (Router, Resolver, Scheduler, AllowedRoot)
-// come from opts. Like buildServer it always wires the Orchestrator, over a
+// ScratchPool, AllowedRoot) in eo. Shared ones (Router, Resolver, Scheduler)
+// come from opts; HubOptions.AllowedRoot is the tailer's projects root, a
+// different root from the engine's workspace one, as in buildWSStack. Like buildServer it always wires the Orchestrator, over a
 // collect-mode queue, so sends take production's turn path.
 func newHubForTest(t testing.TB, opts HubOptions, eo sendEngineOpts) *Hub {
 	t.Helper()
 	if opts.Engine != nil || opts.Broadcaster != nil {
 		panic("newHubForTest: the port builds Engine and Broadcaster; leave them unset in opts")
 	}
-	if eo.Router != nil || eo.Resolver != nil || eo.AllowedRoot != "" || eo.Ctx != nil || eo.Notify != nil || eo.Turns != nil {
+	if eo.Router != nil || eo.Resolver != nil || eo.Ctx != nil || eo.Notify != nil || eo.Turns != nil {
 		panic("newHubForTest: shared and Hub-derived dependencies come from opts; leave them unset in eo")
+	}
+	// Like buildWSStack, one concrete router feeds the Hub, turnSender and
+	// the engine; a fake HubRouter would reach only the Hub.
+	concrete, ok := opts.Router.(*session.Router)
+	if opts.Router != nil && !ok {
+		panic("newHubForTest: opts.Router must be a *session.Router")
 	}
 	bcast := newWSBroadcaster(newSubscriberRegistry())
 	var router turnRouter
-	if opts.Router != nil {
-		router = opts.Router
+	if concrete != nil {
+		router = concrete
 	}
 	var prompts cronPromptSaver
 	if opts.Scheduler != nil {
 		prompts = opts.Scheduler
 	}
 	eo.Turns = turn.New(turn.QueueOptions{MaxDepth: 5}, turnSender{router: router, notify: bcast, prompts: prompts})
-	eo.Router = opts.Router
+	eo.Router = concrete
 	eo.Resolver = opts.Resolver
-	eo.AllowedRoot = opts.AllowedRoot
 	eo.Ctx = opts.ParentCtx
 	eo.Notify = bcast
 	opts.Engine = newSendEngine(eo)
@@ -69,7 +75,7 @@ func TestNewHubForTest_RejectsMisplacedDeps(t *testing.T) {
 	t.Parallel()
 	// One case per refused field: the two siblings the port builds itself in
 	// opts (the engine-only fields no longer exist on HubOptions, so the
-	// compiler refuses those), six shared or port-built fields in eo.
+	// compiler refuses those), five shared or port-built fields in eo.
 	// Dropping any one check from the port fails exactly one case.
 	cases := map[string]struct {
 		opts HubOptions
@@ -79,7 +85,6 @@ func TestNewHubForTest_RejectsMisplacedDeps(t *testing.T) {
 		"broadcaster in opts": {opts: HubOptions{Broadcaster: newWSBroadcaster(newSubscriberRegistry())}},
 		"router in eo":        {eo: sendEngineOpts{Router: &session.Router{}}},
 		"resolver in eo":      {eo: sendEngineOpts{Resolver: &session.KeyResolver{}}},
-		"allowedRoot in eo":   {eo: sendEngineOpts{AllowedRoot: "/tmp/nz-root"}},
 		"ctx in eo":           {eo: sendEngineOpts{Ctx: context.Background()}},
 		"notify in eo":        {eo: sendEngineOpts{Notify: nopNotifier{}}},
 		"turns in eo":         {eo: sendEngineOpts{Turns: turn.New(turn.QueueOptions{MaxDepth: 1}, turnSender{})}},

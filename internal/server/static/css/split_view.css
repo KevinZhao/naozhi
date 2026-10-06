@@ -379,6 +379,11 @@
    on slow connections don't stare at nothing. runKatex() swaps this span
    for the rendered formula once the bundle lands. */
 .katex-pending{font-family:'SF Mono',Consolas,monospace;color:var(--nz-text-dim);font-size:0.95em;padding:0 2px;background:var(--nz-bg-1);border-radius:var(--nz-radius-xs)}
+/* A diagram waiting for mermaid shows its source (runMermaid writes it into
+   the <pre>). md-render-unavailable marks a renderer whose lazy load failed. */
+.mermaid-pending{margin:0;text-align:left;white-space:pre-wrap;font-family:var(--nz-font-mono);font-size:var(--nz-fs-sm);color:var(--nz-text-dim)}
+.mermaid-pending.md-render-unavailable::before{content:'图表渲染器未加载（离线？），显示源码';display:block;margin-bottom:6px;font-size:var(--nz-fs-xs);color:var(--nz-text-faint)}
+.katex-pending.md-render-unavailable{border-bottom:1px dashed var(--nz-text-faint);cursor:help}
 /* renderRich output host — preview drawer today, scratch/aside drawers
    tomorrow. Block-level so list/table/code children stack naturally;
    .md-* styles continue to apply to markdown content inside. */

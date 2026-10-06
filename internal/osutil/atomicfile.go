@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
+	"testing"
 )
 
 // IsDiskFull is implemented per-platform (atomicfile_unix.go / atomicfile_nonunix.go).
@@ -27,6 +29,32 @@ func IsAtomicTempName(name string) bool {
 
 // syncDirFn indirects the directory fsync so tests can inject a failure.
 var syncDirFn = SyncDir
+
+// syncFileFn indirects the file fsync so tests can count calls.
+var syncFileFn = (*os.File).Sync
+
+// fsyncDisabled is set only by DisableFsyncForTesting.
+var fsyncDisabled atomic.Bool
+
+// DisableFsyncForTesting makes WriteFileAtomic, SyncFile and SyncDir skip
+// fsync for the rest of the process. A package whose tests are dominated by
+// persistence round-trips calls it from TestMain: on darwin each fsync is an
+// F_FULLFSYNC, and crash durability is not what those tests check. It panics
+// outside `go test` so a production binary cannot reach it.
+func DisableFsyncForTesting() {
+	if !testing.Testing() {
+		panic("osutil.DisableFsyncForTesting called outside go test")
+	}
+	fsyncDisabled.Store(true)
+}
+
+// SyncFile fsyncs f, or does nothing once DisableFsyncForTesting has run.
+func SyncFile(f *os.File) error {
+	if fsyncDisabled.Load() {
+		return nil
+	}
+	return syncFileFn(f)
+}
 
 // WriteFileAtomic writes data to path via write-tmp → fsync → close → rename.
 // The temp file is created in path's directory with mode perm and removed on
@@ -56,7 +84,7 @@ func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
 		cleanup()
 		return fmt.Errorf("write %s: %w", tmp, err)
 	}
-	if err := f.Sync(); err != nil {
+	if err := SyncFile(f); err != nil {
 		f.Close()
 		cleanup()
 		return fmt.Errorf("sync %s: %w", tmp, err)
@@ -68,6 +96,9 @@ func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
 	if err := os.Rename(tmp, path); err != nil {
 		cleanup()
 		return fmt.Errorf("rename %s to %s: %w", tmp, path, err)
+	}
+	if fsyncDisabled.Load() {
+		return nil
 	}
 	if err := syncDirFn(dir); err != nil {
 		// The rename already succeeded, so path holds the new data atomically;
@@ -86,6 +117,9 @@ func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
 // data dir can be correlated from logs (#730). Both are soft failures: the
 // caller has already written + fsynced the data file itself.
 func SyncDir(dir string) error {
+	if fsyncDisabled.Load() {
+		return nil
+	}
 	f, err := os.Open(dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrPermission) {

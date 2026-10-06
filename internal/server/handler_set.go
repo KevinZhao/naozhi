@@ -30,6 +30,7 @@ package server
 import (
 	"time"
 
+	"github.com/naozhi/naozhi/internal/budget"
 	dashcost "github.com/naozhi/naozhi/internal/dashboard/cost"
 	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/discovery"
@@ -45,6 +46,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/uisettings"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
+	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/imauth"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/routerrelay"
@@ -117,12 +119,20 @@ func (hs *handlerSet) checkLimiters(schedulerWired bool) {
 // Server needs them. A Server field only construction reads is a field every
 // later reader has to rule out (#2897 S4).
 type wiring struct {
+	// router is ServerOptions.Router, for the build steps that hand the
+	// concrete router to a consumer with its own interface (turnSender, the
+	// send engine, the Hub, the dispatcher, the dashboard adapters).
+	router        *session.Router
 	dedup         *platform.Dedup
 	queue         turn.QueueOptions // buildWSStack builds turns' queue from it
 	startedAt     time.Time
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string
 	allowedRoot   string
+	imRateLimit   dispatch.RateLimit
+	imGroupScope  dispatch.GroupScope
+	imAutoThread  bool
+	imBudget      *budget.Gate   // nil admits every IM turn
 	imAccess      *imauth.Policy // nil allows every IM sender
 	debugMode     bool           // gates /api/debug/pprof and /api/debug/vars
 	resolver      *session.KeyResolver
@@ -142,4 +152,8 @@ type wiring struct {
 	engine *sendEngine
 	bcast  *wsBroadcaster
 	turns  *turn.Orchestrator
+	// projectsRoot is claudefs.ResolvedProjectsRoot(claudeDir), the one root
+	// the WS agent tailer and agent_events check transcript paths against;
+	// allowedRoot (the operator workspace) is a different root.
+	projectsRoot string
 }

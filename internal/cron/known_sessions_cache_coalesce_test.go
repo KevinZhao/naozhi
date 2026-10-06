@@ -6,7 +6,7 @@ import (
 )
 
 // TestKnownSessionsCache_InvalidateCoalesces pins R20260608133928-PERF-3
-// (#1965): a burst of invalidate() calls (one per runStore.Append /
+// (#1965): a burst of invalidate() calls (one per run-record append /
 // LastSessionID write) must NOT drop the snapshot on every call. The first
 // invalidate after a publish drops once; subsequent invalidates inside
 // minInvalidateInterval only mark the cache dirty, so lookupFresh keeps
@@ -174,7 +174,7 @@ func TestKnownSessionsCache_CoalescedInvalidateRejectsInFlightBuild(t *testing.T
 	buildGen := c.beginBuild()
 	staleSet := map[string]struct{}{"old": {}} // no "X"
 
-	// (3) A cron run finishes: appendRun writes LastSessionID=X, then calls
+	// (3) A cron run finishes: the run-record append writes LastSessionID=X, then calls
 	// invalidate(). This is inside minInvalidateInterval → coalesce branch.
 	c.invalidate()
 

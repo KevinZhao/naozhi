@@ -165,10 +165,32 @@ func TestSubBook_SnapshotIsDetachedAndReleaseClearsPointers(t *testing.T) {
 	if got := *snap; len(got) != 2 || got[0] != s1 || got[1] != s2 {
 		t.Fatalf("snapshot changed with the book: %v", got)
 	}
+	// The pool is shared by every parallel test in the package, so the
+	// array is inspected after scrubbing and before it is handed back.
 	backing := (*snap)[:2]
+	if !scrubSnapshot(snap) {
+		t.Fatal("a 16-cap snapshot was refused by the pool")
+	}
+	if backing[0] != nil || backing[1] != nil || len(*snap) != 0 {
+		t.Fatalf("scrubSnapshot left %v (len %d) in the array", backing, len(*snap))
+	}
 	releaseSnapshot(snap)
-	if backing[0] != nil || backing[1] != nil {
-		t.Fatal("releaseSnapshot left sink pointers in the pooled array")
+	edge := make([]EventSink, 0, 256)
+	if !scrubSnapshot(&edge) {
+		t.Fatal("a 256-cap snapshot was refused by the pool")
+	}
+
+	// A slice grown past 256 is never pooled, so it stays private to this
+	// test and releaseSnapshot's own clearing can be read back.
+	spike := make([]EventSink, 2, 257)
+	if scrubSnapshot(&spike) {
+		t.Fatal("a slice grown past 256 by a subscriber spike would be pooled")
+	}
+	spike = spike[:2]
+	spike[0], spike[1] = s1, s2
+	releaseSnapshot(&spike)
+	if spike[:2][0] != nil || spike[:2][1] != nil {
+		t.Fatal("releaseSnapshot left sink pointers in the released array")
 	}
 }
 

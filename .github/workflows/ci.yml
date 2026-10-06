@@ -342,7 +342,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install eslint
+      - name: Install eslint and typescript
         working-directory: test/e2e
         run: npm install
 
@@ -376,6 +376,17 @@ jobs:
       - name: Check growth ratchet
         run: node scripts/js-ratchet.mjs --check
 
+      # Files whose first line is // @ts-check are type-checked against
+      # wire.d.ts and contract.js's literal types (#3439) and must have zero
+      # errors; checkJs is off, so the rest are parsed but not reported.
+      - name: Type-check the opted-in dashboard files
+        run: test/e2e/node_modules/.bin/tsc -p internal/server/static
+
+      # The opted-in list may only grow, and a handler registered through
+      # wsm.on must see its own frame's fields.
+      - name: Test the type-check floor and the wsm.on typing
+        run: node --test scripts/ts-check.test.mjs
+
       - name: Check WS contract (wsproto schema vs dashboard dispatch)
         run: node test/e2e/check-ws-contract.mjs
 
@@ -401,6 +412,19 @@ jobs:
       # held fetch and a test-driven clock.
       - name: Test the cron list merge
         run: node --test scripts/cron-state.test.mjs
+
+      # render_md.js is the dashboard's XSS surface. A hostile corpus and a
+      # seeded fuzz loop check its output against a tag/attribute allowlist,
+      # so a placeholder restored inside an attribute fails here.
+      - name: Test the markdown renderer
+        run: node --test scripts/render-md.test.mjs
+
+      # file_ref_parse, nz_util, cron_format and session_ident are pure leaves:
+      # their formatters, escapers and key shapes are string-in, string-out, and
+      # the run-state / error-class / death_reason tables are read against the
+      # backend's wire values.
+      - name: Test the dashboard's leaf helpers
+        run: node --test scripts/dashboard-leaves.test.mjs
 
       # shell.js (S20f, #3026) is the upcall table; registerShell refusing a
       # missing or undeclared slot is what makes a forgotten registration
@@ -516,7 +540,43 @@ jobs:
               run_id: context.runId,
               per_page: 100,
             });
-            const failures = new Map(); // test name -> job name
+            // collectFailures adds each failing test in one job's log to
+            // failures (name -> { job, subtests }). check-flaky-report-parse.mjs
+            // cuts this function out of ci.yml and runs it over real log lines.
+            function collectFailures(log, jobName, failures) {
+              const add = (name, subtest) => {
+                if (!failures.has(name)) failures.set(name, { job: jobName, subtests: new Set() });
+                if (subtest) failures.get(name).subtests.add(subtest);
+              };
+              // Runner logs carry ANSI colour, which Playwright emits around
+              // the ✘ marker.
+              const clean = log.replace(/\u001b\[[0-9;]*m/g, '');
+              // Keyed by the top-level test: a failing subtest fails its parent
+              // too and Go prints a FAIL line for each, so keying by the
+              // full path would file one issue per level for one flake. Go
+              // turns spaces in subtest names into `_`, so the name runs to
+              // the space before the duration.
+              for (const m of clean.matchAll(/--- FAIL: (Test\w+)(?:\/(\S+))?/g)) {
+                add(m[1], m[2]);
+              }
+              // The e2e job produces no `--- FAIL:` lines: Playwright's list
+              // reporter marks each failed spec with ✘. The line:column is
+              // dropped from the name so editing anything above a test does
+              // not file a second issue for the same test.
+              for (const m of clean.matchAll(/✘\s+\d+\s+(?:\[[^\]\n]+\]\s+›\s+)?(\S+?):\d+:\d+\s+›\s+([^\n]+)/g)) {
+                // The trailing quote is the runner echoing the step's own script:
+                // that line matches too, and without dropping the quote it
+                // normalises to a second name for the same test.
+                add(m[1] + ' › ' + m[2].replace(/\s*\(\d+(?:\.\d+)?\s*m?s\)"?\s*$/, '').trim());
+              }
+            }
+            // issueBody is the issue (or comment) text for one failing test.
+            function issueBody(sha, jobName, runURL, subtests) {
+              let body = `master red on ${sha.slice(0, 8)} — job \`${jobName}\`, [run](${runURL}).`;
+              if (subtests.size > 0) body += `\n\nFailed subtests: ${[...subtests].map(s => `\`${s}\``).join(', ')}.`;
+              return body;
+            }
+            const failures = new Map();
             for (const job of jobsResp.jobs) {
               if (job.conclusion !== 'failure') continue;
               let log = '';
@@ -531,23 +591,7 @@ jobs:
                 core.warning(`fetch logs for ${job.name}: ${e}`);
                 continue;
               }
-              // Runner logs carry ANSI colour, which Playwright emits around
-              // the ✘ marker.
-              const clean = log.replace(/\u001b\[[0-9;]*m/g, '');
-              for (const m of clean.matchAll(/--- FAIL: (Test[\w/]+)/g)) {
-                if (!failures.has(m[1])) failures.set(m[1], job.name);
-              }
-              // The e2e job produces no `--- FAIL:` lines: Playwright's list
-              // reporter marks each failed spec with ✘. The line:column is
-              // dropped from the name so editing anything above a test does
-              // not file a second issue for the same test.
-              for (const m of clean.matchAll(/✘\s+\d+\s+(?:\[[^\]\n]+\]\s+›\s+)?(\S+?):\d+:\d+\s+›\s+([^\n]+)/g)) {
-                // The trailing quote is the runner echoing the step's own script:
-                // that line matches too, and without dropping the quote it
-                // normalises to a second name for the same test.
-                const name = m[1] + ' › ' + m[2].replace(/\s*\(\d+(?:\.\d+)?\s*m?s\)"?\s*$/, '').trim();
-                if (!failures.has(name)) failures.set(name, job.name);
-              }
+              collectFailures(log, job.name, failures);
             }
             if (failures.size === 0) {
               core.info('no test-failure lines found in failed job logs');
@@ -561,9 +605,9 @@ jobs:
               labels: 'flaky,automated',
               per_page: 100,
             });
-            for (const [test, jobName] of failures) {
+            for (const [test, { job: jobName, subtests }] of failures) {
               const title = `[flaky] ${test}`;
-              const body = `master red on ${context.sha.slice(0, 8)} — job \`${jobName}\`, [run](${runURL}).`;
+              const body = issueBody(context.sha, jobName, runURL, subtests);
               const existing = open.find(i => i.title === title);
               if (existing) {
                 await github.rest.issues.createComment({

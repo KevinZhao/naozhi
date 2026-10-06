@@ -577,3 +577,32 @@ func TestStoredSessionIDs_ChainAndReadOnly(t *testing.T) {
 		t.Errorf("corrupt store was moved or rewritten: %q", b)
 	}
 }
+
+// StoredKnownIDs reads session-ids.json beside the store and, like
+// StoredSessionIDs, leaves a corrupt one where it is.
+func TestStoredKnownIDs_ReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	store := filepath.Join(dir, "sessions.json")
+	path := knownIDsPath(store)
+	if got := StoredKnownIDs(store); got != nil {
+		t.Fatalf("missing file: ids = %v, want nil", got)
+	}
+	if err := os.WriteFile(path, []byte(`["s1","s2"]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := StoredKnownIDs(store); !slices.Equal(got, []string{"s1", "s2"}) {
+		t.Fatalf("ids = %v", got)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := StoredKnownIDs(store); got != nil {
+		t.Errorf("corrupt file: ids = %v, want nil", got)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "{not json" {
+		t.Errorf("corrupt file was moved or rewritten: %q", b)
+	}
+	if m, _ := filepath.Glob(path + ".corrupt*"); len(m) != 0 {
+		t.Errorf("corrupt file was preserved aside: %v", m)
+	}
+}

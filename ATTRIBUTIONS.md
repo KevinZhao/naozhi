@@ -18,3 +18,31 @@ require attribution under their respective licenses.
   are compatible during this term. If naozhi's licensing is ever
   relicensed for commercial use ahead of the BSL Change Date, this icon
   must be replaced or separately licensed.
+
+## Libraries
+
+### KaTeX 0.16.21
+
+- **Used in**: `internal/server/static/vendor/katex-0.16.21/` — `katex.min.js`,
+  `katex.min.css` and the woff2 fonts, byte-identical to the npm release's
+  `dist/`, embedded in the binary and loaded by `render_md.js` to typeset
+  math in messages.
+- **Source**: [KaTeX](https://github.com/KaTeX/KaTeX), npm package `katex@0.16.21`.
+- **License**: [MIT](https://github.com/KaTeX/KaTeX/blob/main/LICENSE), copyright
+  Khan Academy and other contributors; the license text ships next to the
+  files as `LICENSE`.
+
+### Mermaid 11.14.0
+
+- **Used in**: `internal/server/static/vendor/mermaid-11.14.0/` —
+  `mermaid.min.js.gz`, the npm release's `dist/mermaid.min.js` compressed with
+  `gzip -9n` (its decompressed bytes match the SRI pin in `render_md.js`),
+  embedded in the binary and loaded by `render_md.js` to draw diagrams in
+  messages.
+- **Source**: [Mermaid](https://github.com/mermaid-js/mermaid), npm package
+  `mermaid@11.14.0`.
+- **License**: [MIT](https://github.com/mermaid-js/mermaid/blob/develop/LICENSE),
+  copyright Knut Sveidqvist; the license text ships next to the file as
+  `LICENSE`. The bundle includes its npm dependencies (d3, dagre-d3-es,
+  cytoscape, DOMPurify, chevrotain, marked, KaTeX and others) under their own
+  permissive licenses, MIT, ISC, BSD and Apache-2.0 among them.

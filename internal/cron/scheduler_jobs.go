@@ -66,7 +66,7 @@ func (s *Scheduler) AddJob(j *Job) error {
 //   - cron Remove of removeEntryID (0 = no entry; Remove(0) is a no-op) keeps
 //     the unbuffered c.remove send off the s.tbl.mu write hold (#1810);
 //   - resetRouterStub: router.Reset callbacks may re-enter s.tbl.mu;
-//   - runStore.DeleteJob fires even when persist failed so runs/<jobID>/ does
+//   - the run store's DeleteJob fires even when persist failed so runs/<jobID>/ does
 //     not leak once the in-memory record is gone;
 //   - cleanupRunningJobIfIdle bounds the per-jobID *runInflight leak (#758).
 func (s *Scheduler) deleteJobPostCleanup(jobID string, removeEntryID cronEntryID) {
@@ -82,10 +82,13 @@ func (s *Scheduler) deleteJobPostCleanup(jobID string, removeEntryID cronEntryID
 	s.gate.cleanupRunningJobIfIdle(jobID)
 }
 
-// JobUpdate captures fields a dashboard user may edit on an existing cron
-// job. Only non-nil pointers are applied, so callers can update a single
-// field without resending the rest.
+// JobUpdate captures fields a dashboard user (or IM /cron mode) may edit on
+// an existing cron job. Only non-nil pointers are applied, so callers can
+// update a single field without resending the rest.
 type JobUpdate struct {
+	// InChat, when set, selects the job rather than editing it: UpdateJob's id
+	// is then an ID prefix resolved among that chat's jobs, as /cron del does.
+	InChat   *JobChat
 	Schedule *string
 	Prompt   *string
 	WorkDir  *string
@@ -119,6 +122,11 @@ type JobUpdate struct {
 	// nil 保持原值；pointer 到 true/false 写显式三态。无 clear 语义——
 	// 与 Placement 一样属"运行属性"，不像 Notify 需要回 legacy-default。
 	SideEffects *bool
+}
+
+// JobChat is the IM chat that created a job.
+type JobChat struct {
+	Platform, ChatID string
 }
 
 // applyTo writes every non-nil JobUpdate field onto j. Caller must hold s.tbl.mu
@@ -169,11 +177,12 @@ func (upd JobUpdate) applyTo(j *Job) {
 	}
 }
 
-// UpdateJob applies a partial edit to an existing cron job. Schedule changes
-// are validated and re-registered atomically (the old robfig entry is
-// removed before the new one is installed) so a failed reschedule leaves
-// the previous behavior intact. Prompt/WorkDir changes flow through to the
-// router stub so the dashboard sidebar reflects the edit immediately.
+// UpdateJob applies a partial edit to an existing cron job: job id, or with
+// upd.InChat the one job of that chat whose ID starts with id. Schedule
+// changes are validated and re-registered atomically (the old robfig entry is
+// removed before the new one is installed) so a failed reschedule leaves the
+// previous behavior intact. Prompt/WorkDir changes flow through to the router
+// stub so the dashboard sidebar reflects the edit immediately.
 func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	// Validate schedule first (no lock needed) so we fail fast on bad input.
 	if upd.Schedule != nil {
@@ -272,6 +281,7 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	if err != nil {
 		return nil, err
 	}
+	id = r.job.ID // a chat-scoped id was only a prefix
 	result := r.job
 	if rs := r.resched; rs != nil {
 		if rs.removeEntry != 0 {

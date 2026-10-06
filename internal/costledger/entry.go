@@ -74,6 +74,17 @@ type Entry struct {
 	Amount     float64      `json:"amount"`
 	Basis      Basis        `json:"basis,omitempty"`
 	Models     []ModelDelta `json:"models,omitempty"`
+	Mark       *SessionMark `json:"mark,omitempty"`
+}
+
+// SessionMark is a session's cost state right after the booking its row
+// records: the monotonic spend, the CLI's cumulative USD baseline and the
+// session's creation stamp. Restore adopts the newest one when it is ahead
+// of the store snapshot. Not an amount; nothing sums it.
+type SessionMark struct {
+	Spent float64 `json:"spent"`
+	Cum   float64 `json:"cum"`
+	Born  int64   `json:"born"`
 }
 
 // ModelDelta is one model's share of an Entry.

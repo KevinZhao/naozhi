@@ -47,7 +47,7 @@ func TestLocalRunPanic_ClosesTheRun(t *testing.T) {
 	if metrics.CronRunInflight.Value() != inflightBase {
 		t.Errorf("inflight gauge = %d, want %d", metrics.CronRunInflight.Value(), inflightBase)
 	}
-	entries, _ := os.ReadDir(s.runInflightDir())
+	entries, _ := os.ReadDir(s.runMarkers().Dir())
 	if len(entries) != 0 {
 		t.Errorf("%d inflight marker(s) left; the next boot would mark the run interrupted", len(entries))
 	}

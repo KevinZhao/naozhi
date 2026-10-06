@@ -10,6 +10,7 @@ import (
 
 	robfigcron "github.com/robfig/cron/v3"
 
+	"github.com/naozhi/naozhi/internal/cron/runstore"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -169,12 +170,20 @@ type Job struct {
 
 	// ConsecutiveFailures counts failed and timed-out runs since the last
 	// success, resume or edit; runs that fail for reasons outside the job
-	// leave it alone (failureStreakEffect), as do skipped and canceled runs.
+	// leave it alone (runOutcome.streakEffect), as do skipped and canceled runs.
 	// Reaching the scheduler's auto-pause threshold pauses the job.
 	ConsecutiveFailures int `json:"consecutive_failures,omitempty"`
 
+	// TransientFailures counts turns failed by a transient backend cause
+	// since the last success, resume or edit; TransientFailingSince is when
+	// the first of them ended. They leave ConsecutiveFailures alone, but a
+	// count at the threshold spanning transientAutoPauseWindow pauses the job.
+	TransientFailures     int       `json:"transient_failures,omitempty"`
+	TransientFailingSince time.Time `json:"transient_failing_since,omitzero"`
+
 	// PausedReason says why a paused job is paused: "" for a manual pause,
-	// PausedReasonAutoFailures when the failure streak paused it. Resume
+	// PausedReasonAutoFailures when the failure streak paused it,
+	// PausedReasonAutoTransient when transient backend failures did. Resume
 	// clears it.
 	PausedReason string `json:"paused_reason,omitempty"`
 
@@ -191,9 +200,31 @@ type Job struct {
 	cachedSched robfigcron.Schedule // runtime only, not persisted
 }
 
-// PausedReasonAutoFailures is Job.PausedReason for a job the scheduler
-// paused after too many consecutive failed or timed-out runs.
-const PausedReasonAutoFailures = "auto_failures"
+// The Job.PausedReason values the scheduler stamps when it pauses a job
+// itself: after too many consecutive failed or timed-out runs, or after
+// transient backend failures went on for transientAutoPauseWindow.
+const (
+	PausedReasonAutoFailures  = "auto_failures"
+	PausedReasonAutoTransient = "auto_transient"
+)
+
+// IsAutoPausedReason reports whether r is a reason the scheduler stamps.
+func IsAutoPausedReason(r string) bool {
+	return r == PausedReasonAutoFailures || r == PausedReasonAutoTransient
+}
+
+// AutoPauseCount is the failure count behind j's PausedReason: the transient
+// count for a transient pause, the streak for a streak pause, 0 for any other
+// reason. An edit clears the counts, so it can be 0 on an auto-paused job.
+func (j *Job) AutoPauseCount() int {
+	switch j.PausedReason {
+	case PausedReasonAutoTransient:
+		return j.TransientFailures
+	case PausedReasonAutoFailures:
+		return j.ConsecutiveFailures
+	}
+	return 0
+}
 
 // streakEffect is what a finished run does to Job.ConsecutiveFailures.
 type streakEffect int
@@ -212,20 +243,25 @@ var transientTurnCauses = map[TurnCause]bool{
 	TurnCauseBackendUnreachable: true,
 }
 
-// failureStreakEffect is how a run that ended in state with errClass (and
-// cause, for a failed turn) moves the failure streak. A success resets it.
-// Failures the job did not cause leave it alone: a lost sandbox connection
-// (the restart reconciler's orphans included) and a turn failed by a
-// transient backend cause. So do skipped and canceled runs.
-func failureStreakEffect(state RunState, errClass ErrorClass, cause TurnCause) streakEffect {
-	switch state {
+// transientAutoPauseWindow is how long transient backend failures must go on
+// before their count can auto-pause a job: long enough that an outage pauses
+// no frequent job within minutes, short enough that a backend that never
+// comes back (a wrong endpoint) stops the notices within a day.
+const transientAutoPauseWindow = 6 * time.Hour
+
+// streakEffect is how the run moves the failure streak. A success resets it.
+// Failures the job did not cause leave it alone: a run the restart reconciler
+// closed as an orphan, and a transient backend failure. So do skipped and
+// canceled runs. A live lost sandbox connection counts whichever end dropped
+// it: a microVM that crashes on every run is the job's problem.
+func (o runOutcome) streakEffect() streakEffect {
+	switch o.state {
 	case RunStateSucceeded:
 		return streakReset
 	case RunStateTimedOut:
 		return streakExtend
 	case RunStateFailed:
-		if errClass == ErrClassSandboxTransport ||
-			(errClass == ErrClassTurnFailed && transientTurnCauses[cause]) {
+		if o.restartOrphan || o.transientBackendFailure() {
 			return streakKeep
 		}
 		return streakExtend
@@ -233,9 +269,70 @@ func failureStreakEffect(state RunState, errClass ErrorClass, cause TurnCause) s
 	return streakKeep
 }
 
-// nextFailureStreak is ConsecutiveFailures after a run, per failureStreakEffect.
-func nextFailureStreak(streak int, state RunState, errClass ErrorClass, cause TurnCause) int {
-	switch failureStreakEffect(state, errClass, cause) {
+// transientBackendFailure reports a turn failed by a transient backend cause,
+// which Job.TransientFailures counts instead of ConsecutiveFailures.
+func (o runOutcome) transientBackendFailure() bool {
+	return !o.restartOrphan && transientTurnFailure(o.state, o.errClass, o.turnCause)
+}
+
+// transientTurnFailure is transientBackendFailure from the fields a failure
+// notice carries. A restart orphan never auto-pauses, so for a run that did
+// the two agree.
+func transientTurnFailure(state RunState, errClass ErrorClass, cause TurnCause) bool {
+	return state == RunStateFailed && errClass == ErrClassTurnFailed && transientTurnCauses[cause]
+}
+
+// failureStreaks is a Job's failure-streak fields, captured and restored as
+// one so a rolled-back mutation cannot leave them out of step.
+type failureStreaks struct {
+	consecutive, transient int
+	transientSince         time.Time
+}
+
+func (j *Job) streaks() failureStreaks {
+	return failureStreaks{j.ConsecutiveFailures, j.TransientFailures, j.TransientFailingSince}
+}
+
+func (j *Job) setStreaks(f failureStreaks) {
+	j.ConsecutiveFailures, j.TransientFailures, j.TransientFailingSince = f.consecutive, f.transient, f.transientSince
+}
+
+// recordStreaks moves j's failure streaks for a run that ended at endedAt
+// with effect e; transient marks a transient backend failure.
+func (j *Job) recordStreaks(e streakEffect, transient bool, endedAt time.Time) {
+	j.ConsecutiveFailures = nextFailureStreak(j.ConsecutiveFailures, e)
+	switch {
+	case e == streakReset:
+		j.setStreaks(failureStreaks{})
+	case transient:
+		if j.TransientFailures == 0 {
+			j.TransientFailingSince = endedAt
+		}
+		j.TransientFailures++
+	}
+}
+
+// autoPauseCount is the failure count at which active job j is due for an
+// auto-pause at now, 0 when it is not. After a counted failure it reads
+// ConsecutiveFailures; after a transient one, TransientFailures, and only once
+// they span transientAutoPauseWindow.
+func (j *Job) autoPauseCount(threshold int, transient bool, now time.Time) int {
+	n := j.ConsecutiveFailures
+	if transient {
+		n = j.TransientFailures
+		if now.Sub(j.TransientFailingSince) < transientAutoPauseWindow {
+			return 0
+		}
+	}
+	if j.Paused || n < threshold {
+		return 0
+	}
+	return n
+}
+
+// nextFailureStreak is ConsecutiveFailures after a run with effect e.
+func nextFailureStreak(streak int, e streakEffect) int {
+	switch e {
 	case streakExtend:
 		return streak + 1
 	case streakReset:
@@ -293,6 +390,9 @@ const (
 	// ErrClassSessionCapacity marks a run skipped because GetOrCreate hit the
 	// router's session caps (ErrSessionCapacity): contention, not a job fault.
 	ErrClassSessionCapacity = runtelemetry.ErrClassCronSessionCapacity
+	// ErrClassBudgetExceeded marks a run skipped because cost.budget's cap
+	// for the job or the machine is spent for the day.
+	ErrClassBudgetExceeded = runtelemetry.ErrClassCronBudgetExceeded
 	// ErrClassTurnFailed marks a run whose Send returned a result the backend
 	// flagged as an error (ErrTurnFailed): max turns, an RPC rejection, a
 	// failed codex turn. The CLI ran; the turn did not succeed.
@@ -360,24 +460,11 @@ func generateRunID() (string, error) { return generateHexID() }
 func generateID() (string, error) { return generateHexID() }
 
 // IsValidID reports whether s is a valid cron / cron-run identifier: a
-// non-empty lowercase hex string of at most 64 bytes. Job and run IDs are
-// 16 hex chars today; the 64-byte bound is reserved for a schema bump.
-// Uppercase hex, path characters and temp/backup suffixes are all rejected,
-// so store entry points (parse / list / append / detail handler) can filter
-// stray files under runs/<jobID>/ and HTTP handlers can reject bad IDs
-// before any disk IO. Lives in job.go as the ID-schema home (#990).
-func IsValidID(s string) bool {
-	if len(s) == 0 || len(s) > 64 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-			return false
-		}
-	}
-	return true
-}
+// non-empty lowercase hex string of at most 64 bytes. Job and run IDs are 16
+// hex chars today; the 64-byte bound is reserved for a schema bump. HTTP
+// handlers use it to reject bad IDs before any disk IO. The run store owns
+// the check because IDs become its path components.
+func IsValidID(s string) bool { return runstore.ValidID(s) }
 
 // MaxCronTitleLen 是 Job.Title 的字符上限（UTF-8 rune 计）。256 覆盖绝大多数
 // 人类可读名称，且与 dashboard 的 escAttr 线长相容。导出以便 server 包

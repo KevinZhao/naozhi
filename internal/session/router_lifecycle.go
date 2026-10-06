@@ -180,7 +180,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 		// The failed spawn's shim is still releasing the key's socket, and the
 		// retry's StartShim would refuse to clobber it.
 		if errors.Is(err, clierr.ErrResumeRejected) && res.old != nil && !res.old.resumeRejected.Swap(true) {
-			retryStuck = !waitSocketGoneForKey(key, 2*time.Second)
+			retryStuck = !waitSocketGoneForKey(key)
 			continue
 		}
 		if err != nil {
@@ -423,8 +423,8 @@ type spawnReservation struct {
 	opts     AgentOpts
 	doneCh   chan struct{}
 	// guard is the in-flight marker the caller installed before reserving
-	// (ResetAndRecreate, across its unlocked close); reserveSpawn takes it
-	// over. Nil when the reservation installs its own.
+	// (ResetAndRecreate across its unlocked close, a takeover lease);
+	// reserveSpawn takes it over. Nil when the reservation installs its own.
 	guard     chan struct{}
 	slot      pendingSpawnSlot
 	spawnOpts cli.SpawnOptions
@@ -472,15 +472,17 @@ var errSpawnStale = errors.New("the resumed session left the table during the sp
 func (r *Router) reserveSpawn(tx sessTx, res *spawnReservation, key, resumeID string, opts AgentOpts) error {
 	// Shutdown gate (#1822): r.stopped is set in the same transaction as
 	// Shutdown's snapshot, so gate and snapshot are mutually exclusive and a
-	// late spawn cannot install a shim+CLI the snapshot missed.
+	// late spawn cannot install a shim+CLI the snapshot missed. A guard the
+	// caller installed is ended too, so nothing is left reserved.
 	if r.stopped.Load() {
+		tx.Ext().spawns.EndSpawn(key, res.guard)
 		return ErrRouterStopped
 	}
 
 	// Mark this key as spawning so ReconnectShims does not treat the fresh
 	// shim's state file as an orphan, and concurrent GetOrCreates park on the
 	// done-channel instead of spawning too. A guard the caller pre-installed
-	// (res.guard, ResetAndRecreate) is reused so the marker stays continuous
+	// (res.guard: ResetAndRecreate, a TakeoverLease) is reused so the marker stays continuous
 	// (#775); anyone else's in-flight spawn is refused, not joined — joining
 	// runs two spawns for one key and ends the guard twice. From here on any
 	// failure, error or panic, ends the marker so no waiter is left parked.
@@ -665,7 +667,7 @@ func (r *Router) completeSpawn(ctx context.Context, res *spawnReservation) (_ *M
 		s = r.installFreshSession(tx,
 			key, proc, res.workspace, res.backendID, res.accessProfileID, res.wrapper, res.resumeID,
 			oldHistory, respawnChain(prevIDs, res.rejectedResumeID, ""), snap.cost, snap.spent.USD, snap.createdAt, res.opts.Exempt, snap.sid,
-			hist.userTurns, overrides,
+			hist.userTurns, overrides, snap.workflows,
 		)
 		s.startupFails.Store(max(snap.startupFails, failedSpawns.Streak))
 		s.setCodeChanges(snap.codeChanges)
@@ -708,7 +710,7 @@ func discardStaleSpawn(key, resumeID string, proc processIface) bool {
 	slog.Info("resumed session left the table during the spawn; spawning again",
 		"key", osutil.SanitizeForLog(key, 64), "resume_id", resumeID)
 	proc.Close()
-	if waitSocketGoneForKey(key, 2*time.Second) {
+	if waitSocketGoneForKey(key) {
 		return true
 	}
 	slog.Warn("shim socket still bound after discarding a stale spawn — the retry's spawn error will be wrapped as ErrShimStuck",
@@ -736,6 +738,7 @@ func (r *Router) installFreshSession(tx sessTx,
 	oldSID string,
 	oldUserTurns int64,
 	overrides sessionOverrides,
+	board *WorkflowBoard,
 ) *ManagedSession {
 	s := &ManagedSession{
 		key:              key,
@@ -793,8 +796,15 @@ func (r *Router) installFreshSession(tx sessTx,
 	if n, ok := proc.(turnDoneNotifier); ok {
 		n.SetOnTurnDone(func() { r.notifyChange() })
 	}
+	// The respawned session's board is the one it replaces (a pointer), set
+	// before binding so the new process binds to the board that stays.
+	if board == nil {
+		board = newWorkflowBoard(r.hist.projectsRoot)
+	}
+	s.workflows.Store(board)
 	bookUnownedResults(s, proc)
 	bookCodeChanges(s, proc, func() { r.ss.Update(markChanged); r.notifyChange() })
+	bookWorkflows(s, proc, r.hist.projectsRoot, func() { r.ss.Update(markChanged); r.notifyChange() }, r.BumpVersion)
 	bookProcessEnd(s, proc, r.hist.claudeDir)
 	if len(snapshot) > 0 {
 		proc.InjectHistory(snapshot)

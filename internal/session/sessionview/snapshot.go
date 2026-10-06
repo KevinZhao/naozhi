@@ -2,6 +2,7 @@ package sessionview
 
 import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cli/workflow"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/spawndiag"
 )
@@ -92,6 +93,10 @@ type SessionSnapshot struct {
 	// (system/code_change_published, persisted). The CLI scrapes them from
 	// command output: display-only links. READ-ONLY, shared with the session.
 	CodeChanges []clievent.CodeChange `json:"code_changes,omitempty"`
+	// Workflows summarizes the session's Workflow tool runs: every unsettled
+	// one and the latest terminal ones. READ-ONLY, shared with the session's
+	// workflow board.
+	Workflows []workflow.Summary `json:"workflows,omitempty"`
 	// StartupFailure is what the next send to a dead session will do about
 	// its CLI's failures at startup; nil when it just resumes.
 	StartupFailure *StartupFailureView `json:"startup_failure,omitempty"`

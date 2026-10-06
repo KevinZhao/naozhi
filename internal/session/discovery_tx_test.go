@@ -61,7 +61,7 @@ func TestTakeover_ReplacingALiveSessionKeepsTheActiveCount(t *testing.T) {
 	const key = "feishu:direct:takeover-live:general"
 	injectSession(r, key, newIdleProc())
 
-	if _, err := r.Takeover(context.Background(), key, "sess-external", t.TempDir(), AgentOpts{}); err != nil {
+	if _, err := reserveAndTakeover(context.Background(), r, key, "sess-external", t.TempDir(), AgentOpts{}); err != nil {
 		t.Fatalf("Takeover: %v", err)
 	}
 	if got := r.ss.Active(); got != 1 {

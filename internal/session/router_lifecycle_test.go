@@ -28,8 +28,10 @@ func newStoppedGateRouter() *Router {
 // sessions), every reverse-RPC spawn path that funnels into the spawn —
 // GetOrCreate (send), Takeover (takeover), ResetAndRecreate (restart_planner) —
 // must refuse with ErrRouterStopped and must NOT install a fresh session into
-// the session table (the leak the issue is about). The gate sits before the spawningKeys
-// lazy-init/defer, so no guard channel may be left dangling either.
+// the session table. No guard channel may be left dangling either: the gate
+// ends a guard the caller installed, which "ResetAndRecreate stopped during
+// close" pins for ResetAndRecreate and TestTakeover_EndsTheLeaseOnFailure
+// ("router stopped meanwhile") for a TakeoverLease.
 func TestSpawnSession_RejectedAfterStopped(t *testing.T) {
 	t.Parallel()
 
@@ -39,7 +41,7 @@ func TestSpawnSession_RejectedAfterStopped(t *testing.T) {
 			t.Errorf("the session table grew to %d after a rejected spawn; gate must run before any map mutation", lenT(r))
 		}
 		if stateOf(r).spawns.SpawningCount() != 0 {
-			t.Errorf("stateOf(r).spawns.SpawningCount() = %d; gate must sit before spawningKeys lazy-init so no guard channel is left dangling", stateOf(r).spawns.SpawningCount())
+			t.Errorf("stateOf(r).spawns.SpawningCount() = %d; the stopped gate must end any guard so none is left dangling", stateOf(r).spawns.SpawningCount())
 		}
 	}
 
@@ -58,7 +60,7 @@ func TestSpawnSession_RejectedAfterStopped(t *testing.T) {
 		t.Parallel()
 		r := newStoppedGateRouter()
 		r.stopped.Store(true)
-		_, err := r.Takeover(context.Background(), "feishu:p2p:u2", "sess-abc", "", AgentOpts{})
+		_, err := reserveAndTakeover(context.Background(), r, "feishu:p2p:u2", "sess-abc", "", AgentOpts{})
 		if !errors.Is(err, ErrRouterStopped) {
 			t.Fatalf("Takeover err = %v, want ErrRouterStopped", err)
 		}
@@ -74,6 +76,30 @@ func TestSpawnSession_RejectedAfterStopped(t *testing.T) {
 			t.Fatalf("ResetAndRecreate err = %v, want ErrRouterStopped", err)
 		}
 		assertNoLeak(t, r)
+	})
+
+	// The router stops while ResetAndRecreate has the lock released to close
+	// the old process, after it installed its own in-flight guard.
+	t.Run("ResetAndRecreate stopped during close", func(t *testing.T) {
+		t.Parallel()
+		const key = "feishu:p2p:u4"
+		r := newStoppedGateRouter()
+		injectSession(r, key, newHookCloseProc(func() { r.stopped.Store(true) }))
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := r.ResetAndRecreate(ctx, key, AgentOpts{})
+		if !errors.Is(err, ErrRouterStopped) {
+			t.Fatalf("ResetAndRecreate err = %v, want ErrRouterStopped", err)
+		}
+		if _, held := spawnInFlight(r, key); held {
+			t.Errorf("%s still has the reset's in-flight marker", key)
+		}
+		assertNoLeak(t, r)
+		// A dangling marker would park this call until ctx expires.
+		start := time.Now()
+		if _, _, err := r.GetOrCreate(ctx, key, AgentOpts{}); !errors.Is(err, ErrRouterStopped) {
+			t.Errorf("follow-up GetOrCreate err = %v after %v, want ErrRouterStopped", err, time.Since(start))
+		}
 	})
 }
 

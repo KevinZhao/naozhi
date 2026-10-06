@@ -49,11 +49,13 @@ func versionedStaticURL(key string, a staticAsset) string {
 }
 
 // dashboardModuleKeys returns the asset keys of every dashboard JS module,
-// sorted: each .js asset except the service worker, which is served at /sw.js.
+// sorted: each .js asset except the service worker, which is served at /sw.js,
+// and the vendored libraries, which render_md.js loads as classic scripts only
+// when a message needs them.
 func dashboardModuleKeys(assets map[string]staticAsset) []string {
 	var out []string
 	for k := range assets {
-		if strings.HasSuffix(k, ".js") && k != "sw.js" {
+		if strings.HasSuffix(k, ".js") && k != "sw.js" && !strings.HasPrefix(k, "vendor/") {
 			out = append(out, k)
 		}
 	}
@@ -134,9 +136,11 @@ func renderDashboardHTML(raw []byte, assets map[string]staticAsset) ([]byte, err
 // request names the asset's current hash. An unversioned URL, or a stale v= (a
 // page rendered by the previous build during a restart), revalidates, so no
 // URL is ever pinned to bytes other than the ones its hash names. private: the
-// assets are auth-gated, so a shared cache must not serve them.
+// assets are auth-gated, so a shared cache must not serve them. A vendor/ path
+// names its release version, and its bytes are pinned by SRI, so it is always
+// immutable.
 func staticCacheControl(r *http.Request, key string) string {
-	if v := r.URL.Query().Get("v"); v != "" && v == assetURLVersion(staticAssets[key].etag) {
+	if v := r.URL.Query().Get("v"); strings.HasPrefix(key, "vendor/") || v != "" && v == assetURLVersion(staticAssets[key].etag) {
 		return "private, max-age=31536000, immutable"
 	}
 	return "no-cache, must-revalidate"

@@ -140,7 +140,7 @@ func (st Store) writeBlob(root, content string) (string, error) {
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("write blob tmp: %w", err)
 	}
-	if err := f.Sync(); err != nil {
+	if err := osutil.SyncFile(f); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("sync blob tmp: %w", err)

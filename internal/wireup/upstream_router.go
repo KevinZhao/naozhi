@@ -23,9 +23,9 @@ var (
 func UpstreamRouter(r *session.Router) upstream.SessionRouter { return upstreamRouter{r} }
 
 // upstreamRouter forwards every method; the three that hand back a session
-// convert it with asUpstreamSession, and TakeoverPrecheck supplies the
-// connector's empty takeover opts. The rest are promoted from the embedded
-// router unchanged, since their signatures speak sessionview's types already.
+// convert it with asUpstreamSession, and ReserveTakeover wraps the router's
+// lease in upstreamLease. The rest are promoted from the embedded router
+// unchanged, since their signatures speak sessionview's types already.
 type upstreamRouter struct{ *session.Router }
 
 func (u upstreamRouter) SessionFor(key string) upstream.Session {
@@ -37,14 +37,26 @@ func (u upstreamRouter) ResetAndRecreate(ctx context.Context, key string, opts s
 	return asUpstreamSession(s), err
 }
 
-func (u upstreamRouter) TakeoverPrecheck(key string) error {
-	return u.Router.TakeoverPrecheck(key, sessionview.AgentOpts{})
+func (u upstreamRouter) ReserveTakeover(key string, opts sessionview.AgentOpts) (upstream.TakeoverLease, error) {
+	lease, err := u.Router.ReserveTakeover(key, opts)
+	if err != nil {
+		return nil, err
+	}
+	return upstreamLease{u.Router, lease}, nil
 }
 
-func (u upstreamRouter) Takeover(ctx context.Context, key, sessionID, workspace string, opts sessionview.AgentOpts) (upstream.Session, error) {
-	s, err := u.Router.Takeover(ctx, key, sessionID, workspace, opts)
+// upstreamLease is a *session.TakeoverLease with its Router.Takeover.
+type upstreamLease struct {
+	r     *session.Router
+	lease *session.TakeoverLease
+}
+
+func (l upstreamLease) Takeover(ctx context.Context, sessionID, workspace string) (upstream.Session, error) {
+	s, err := l.r.Takeover(ctx, l.lease, sessionID, workspace)
 	return asUpstreamSession(s), err
 }
+
+func (l upstreamLease) Release() { l.lease.Release() }
 
 // asUpstreamSession converts a router session to the connector's view. A
 // missing session must arrive as a nil interface: a nil *ManagedSession

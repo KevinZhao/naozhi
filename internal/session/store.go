@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cli/workflow"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
@@ -62,6 +63,9 @@ type storeEntry struct {
 	// CodeChanges is the PRs the session published or touched, newest last,
 	// re-validated on load (the URLs become dashboard links).
 	CodeChanges []clievent.CodeChange `json:"code_changes,omitempty"`
+	// Workflows is the header of each workflow on the session's board, so a
+	// restart shows runs the shim replay no longer holds; re-validated on load.
+	Workflows []workflow.Ref `json:"workflows,omitempty"`
 
 	// prevGen is ManagedSession.prevHistoryGen when the chain slices above were
 	// snapshotted (unexported: never hits disk). Bumped under historyMu on every
@@ -172,6 +176,7 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 		TuningModel:        s.TuningModel(),
 		TuningEffort:       s.TuningEffort(),
 		CodeChanges:        s.CodeChanges(),
+		Workflows:          s.WorkflowBoard().refs(time.Now()),
 	}, true
 }
 
@@ -197,6 +202,7 @@ func equalStoreEntry(a, b storeEntry) bool {
 		a.TuningModel == b.TuningModel &&
 		a.TuningEffort == b.TuningEffort &&
 		slices.Equal(a.CodeChanges, b.CodeChanges) &&
+		slices.Equal(a.Workflows, b.Workflows) &&
 		a.prevGen == b.prevGen
 }
 
@@ -487,6 +493,23 @@ func StoredSessionIDs(path string) map[string][]string {
 		}
 	}
 	return m
+}
+
+// StoredKnownIDs lists every CLI session id naozhi has used, from the
+// known-ids file beside the session store at storePath. Like
+// StoredSessionIDs it only reads: a corrupt file yields nil and stays put.
+func StoredKnownIDs(storePath string) []string {
+	path := knownIDsPath(storePath)
+	if path == "" {
+		return nil
+	}
+	ids, out, err := jsonfile.Load[[]string](path, jsonfile.Options{
+		MaxBytes: maxStoreFileBytes, Label: "known session IDs", Corrupt: jsonfile.LeaveCorrupt,
+	})
+	if err != nil || out != jsonfile.Parsed {
+		return nil
+	}
+	return ids
 }
 
 // knownIDsPath derives the known session IDs path (sessions.json → session-ids.json).

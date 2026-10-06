@@ -3,6 +3,7 @@ package node
 import (
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -123,13 +124,10 @@ func TestReverseServer_Ack_carriesHubCaps(t *testing.T) {
 	if clievent.SchemaCapMismatch(resp.Capabilities) != "" {
 		t.Errorf("ack Capabilities = %v; a node applying the mirror gate would reject its own hub", resp.Capabilities)
 	}
-	var found bool
-	for _, c := range resp.Capabilities {
-		if c == clievent.SchemaCap {
-			found = true
+	// CapSendStatus: without it a node answers a busy send as an error.
+	for _, want := range []string{clievent.SchemaCap, CapSendStatus} {
+		if !slices.Contains(resp.Capabilities, want) {
+			t.Errorf("ack Capabilities = %v, want it to advertise %q", resp.Capabilities, want)
 		}
-	}
-	if !found {
-		t.Errorf("ack Capabilities = %v, want it to advertise %q", resp.Capabilities, clievent.SchemaCap)
 	}
 }

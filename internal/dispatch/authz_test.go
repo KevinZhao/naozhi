@@ -246,6 +246,77 @@ func TestAuthz_SetAccessPolicyTakesEffect(t *testing.T) {
 	}
 }
 
+// Admit refuses a sender exactly as a text message would be refused: same
+// metric, same throttled direct-chat reply naming the ID.
+func TestAdmit_RefusesLikeText(t *testing.T) {
+	d, fp, ct, _ := newAuthzDispatcher(t, aliceAndRoot())
+	ctx := context.Background()
+	before := deniedCount("fake:not_allowed")
+
+	for range 2 {
+		if d.Admit(ctx, authzMsg("eve", "direct", "")) {
+			t.Fatal("Admit let a sender outside allowed_users through")
+		}
+	}
+	if got := deniedCount("fake:not_allowed") - before; got != 2 {
+		t.Errorf("naozhi_dispatch_denied_total[fake:not_allowed] moved by %d, want 2", got)
+	}
+	if got := fp.allReplies(); len(got) != 1 || !strings.Contains(got[0], "ID: eve") {
+		t.Errorf("replies = %q, want one throttled refusal naming the sender ID", got)
+	}
+	if !d.Admit(ctx, authzMsg("alice", "direct", "")) {
+		t.Error("Admit refused an allowed sender")
+	}
+	if ct.submits.Load() != 0 {
+		t.Error("Admit submitted a turn")
+	}
+}
+
+// Admit drops an un-mentioned group message before the policy is asked, so
+// group chatter (and Feishu voice, which cannot @mention) is neither counted
+// as a refusal nor fetched.
+func TestAdmit_GroupMentionGate(t *testing.T) {
+	d, fp, _, _ := newAuthzDispatcher(t, aliceAndRoot())
+	ctx := context.Background()
+	before := deniedCount("fake:not_allowed")
+
+	for _, user := range []string{"alice", "eve"} {
+		msg := authzMsg(user, "group", "")
+		msg.MentionMe = false
+		if d.Admit(ctx, msg) {
+			t.Errorf("Admit let %s's un-mentioned group message through", user)
+		}
+	}
+	if got := deniedCount("fake:not_allowed") - before; got != 0 {
+		t.Errorf("un-mentioned group message counted %d refusals, want 0", got)
+	}
+	if fp.replyCount() != 0 {
+		t.Error("un-mentioned group message was answered")
+	}
+	if !d.Admit(ctx, authzMsg("alice", "group", "")) {
+		t.Error("Admit refused an allowed sender's mention")
+	}
+}
+
+// Admit leaves dedup alone: the handler still processes the message it
+// pre-checked, and an open dispatcher admits everyone.
+func TestAdmit_DoesNotConsumeDedupAndNilPolicyAdmits(t *testing.T) {
+	d, _, _, _ := newAuthzDispatcher(t, aliceAndRoot())
+	ctx := context.Background()
+	msg := authzMsg("alice", "direct", "hi")
+	if !d.Admit(ctx, msg) {
+		t.Fatal("Admit refused an allowed sender")
+	}
+	if _, ok := d.prepareInbound(ctx, msg); !ok {
+		t.Error("the admitted message was dropped as a duplicate")
+	}
+
+	open, _, _, _ := newAuthzDispatcher(t, nil)
+	if !open.Admit(ctx, authzMsg("", "direct", "")) {
+		t.Error("Admit refused with no policy")
+	}
+}
+
 func TestDenyThrottle(t *testing.T) {
 	var th denyThrottle
 	t0 := time.Unix(1_700_000_000, 0)

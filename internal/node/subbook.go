@@ -163,13 +163,20 @@ func (b *subBook) snapshot(key string) *[]EventSink {
 	return snapPtr
 }
 
-// releaseSnapshot clears the sink pointers, so disconnected sinks are not
-// pinned by the pool, and pools the slice unless a subscriber spike grew it.
+// releaseSnapshot scrubs the slice and pools it unless a subscriber spike
+// grew it; the caller must not touch the slice afterwards.
 func releaseSnapshot(snapPtr *[]EventSink) {
-	clients := *snapPtr
-	clear(clients)
-	if cap(clients) <= 256 {
-		*snapPtr = clients[:0]
+	if scrubSnapshot(snapPtr) {
 		subSnapPool.Put(snapPtr)
 	}
+}
+
+// scrubSnapshot clears the sink pointers, so disconnected sinks are not
+// pinned by the pool, truncates the slice, and reports whether it is small
+// enough to pool.
+func scrubSnapshot(snapPtr *[]EventSink) (poolable bool) {
+	clients := *snapPtr
+	clear(clients)
+	*snapPtr = clients[:0]
+	return cap(clients) <= 256
 }

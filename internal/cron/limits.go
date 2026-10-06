@@ -2,9 +2,9 @@ package cron
 
 import (
 	"fmt"
-	"time"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/cron/runstore"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -98,21 +98,12 @@ func validateJobFields(j *Job) error {
 	return nil
 }
 
-// truncatedSuffix marks where truncateWithSuffix cut a string that exceeded
-// the rune budget. Centralised so any downstream byte-cap can compensate for
-// its byte length (see truncateWithSuffix call sites that pass
-// maxStoredResultRunes+len(truncatedSuffix) into SanitizeForLog).
-const truncatedSuffix = "…[truncated]"
+// truncatedSuffix / truncateWithSuffix are the run store's truncation marker
+// and helper; cron_jobs.json fields use the same marker as run records.
+const truncatedSuffix = runstore.TruncatedSuffix
 
-// truncateWithSuffix returns s rune-truncated to maxRunes, appending
-// truncatedSuffix only when the input was actually shrunk. Idempotent on
-// already-clean strings.
 func truncateWithSuffix(s string, maxRunes int) string {
-	trimmed := textutil.TruncateRunesNoEllipsis(s, maxRunes)
-	if len(trimmed) >= len(s) {
-		return s
-	}
-	return trimmed + truncatedSuffix
+	return runstore.TruncateWithSuffix(s, maxRunes)
 }
 
 // Shared input bounds for cron-related trust boundaries (IM `/cron` commands
@@ -151,29 +142,11 @@ const (
 	previousTickMaxIter = 1000
 )
 
-// CronRun history limits, in two const blocks so a future SchedulerConfig
-// knob change cannot accidentally relax a hard schema cap.
-
-// User-configurable defaults — fallbacks when SchedulerConfig leaves
-// RunsKeepCount / RunsKeepWindow zero.
+// CronRun history limits, re-exported from the run store that enforces them.
+// The defaults are fallbacks when SchedulerConfig leaves RunsKeepCount /
+// RunsKeepWindow zero; MaxRunRecordBytes is a per-record format invariant.
 const (
-	// DefaultRunsKeepCount caps per-job history at this many entries.
-	DefaultRunsKeepCount = 200
-
-	// DefaultRunsKeepWindow ages out runs older than this even when the
-	// per-job count is below the cap. AND-with-OR semantics: a run is
-	// kept only when (count_rank ≤ keepCount) AND (age ≤ keepWindow);
-	// either condition false → trim.
-	DefaultRunsKeepWindow = 30 * 24 * time.Hour
-)
-
-// Hard limits — immutable per-record format invariants, not
-// operator-tunable. Changing them requires a schema bump because old
-// run.json files may exist on disk above the new cap.
-const (
-	// MaxRunRecordBytes caps a single CronRun JSON payload. The 4K rune
-	// cap on Result + 512-rune cap on ErrorMsg + 8K Prompt + ~512
-	// metadata add up to ~13 KiB worst case; 32 KiB leaves headroom.
-	// Reading a file larger than this returns ErrCorruptRun.
-	MaxRunRecordBytes = 32 * 1024
+	DefaultRunsKeepCount  = runstore.DefaultKeepCount
+	DefaultRunsKeepWindow = runstore.DefaultKeepWindow
+	MaxRunRecordBytes     = runstore.MaxRecordBytes
 )

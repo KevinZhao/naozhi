@@ -18,6 +18,7 @@ import { dropDiscovered, findDiscovered, isDiscoveredKey, parseDiscoveredPid, sa
 import { gitChipHtml, gitStateCache, setHeaderGitChip } from './session_header.js';
 import { wireQuickAskInput } from './auth_modal.js';
 import { shell } from './shell.js';
+import { pendingBackendID } from './features.js';
 
 // ===== Session tuning popover =====
 // Per-session model/effort switching from the header chips.
@@ -61,12 +62,11 @@ function tuningToast(msg, isError) {
   setTimeout(() => t.remove(), isError ? 8000 : 4000);
 }
 
-// tuningModelsForSession resolves the popover's model choices from the
-// cached /api/cli/backends payload (BackendInfo.models: agent-reported for
-// kiro, cli.backends[].models fallback for claude). Empty list → the
-// popover shows its manual-input row only.
+// tuningModelsForSession: the popover's model choices, BackendInfo.models of
+// the cached /api/cli/backends (agent-reported for kiro, cli.backends[].models
+// for claude). An empty list leaves only the manual-input row.
 function tuningModelsForSession(s) {
-  const backendID = (s && s.backend) || perSession.backends[selection.key] ||
+  const backendID = (s && s.backend) || pendingBackendID(selection.key, selection.node) ||
     (serverInfo.cliBackends && serverInfo.cliBackends.default) || '';
   if (!serverInfo.cliBackends || !Array.isArray(serverInfo.cliBackends.backends)) return { models: [], backendID };
   const entry = serverInfo.cliBackends.backends.find(b => b && b.id === backendID) ||
@@ -393,10 +393,11 @@ async function dismissSession(key, node, opts) {
   // Drop the cached git state so a later key reuse can't inherit this
   // session's branch chip before its own fetch resolves.
   delete gitStateCache[sid(key, node)];
-  // perSession.backends is normally consumed on first sendMessage; a dismiss
-  // before any send would leave a stale backend pick for a re-created key.
+  // A dismiss before the send consumes the picks, or before the server lists
+  // the key, would leave them for a re-created key.
   delete perSession.backends[key];
   delete perSession.accessProfiles[key];
+  delete perSession.sentPicks[key];
 
   // cron-panel-consolidation RFC §4.2: cron stubs are filtered server-side,
   // so this branch only runs if a server bug leaks one into the sidebar.

@@ -13,9 +13,9 @@ import (
 )
 
 // #2166: every sandbox-state writer routes its MkdirAll through
-// mkdirStateSubtree, which refuses a subtree that resolved to a symlink. A
-// planted `<stateDir>/<subtree> → /elsewhere` must NOT redirect writes into the
-// attacker-chosen target. These tests pre-create each subtree as a symlink to a
+// sandboxstore.Store.MkdirSubtree, which refuses a subtree that resolved to a
+// symlink. A planted `<stateDir>/<subtree> → /elsewhere` must NOT redirect
+// writes into the attacker-chosen target. These tests pre-create each subtree as a symlink to a
 // separate temp dir, drive the writer, and assert (a) the write was refused
 // and (b) no file landed at the symlink target.
 

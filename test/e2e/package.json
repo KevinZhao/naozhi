@@ -4,6 +4,6 @@
   },
   "devDependencies": {
     "eslint": "^10.10.0",
-    "katex": "0.16.21"
+    "typescript": "5.9.3"
   }
 }

@@ -85,6 +85,7 @@ func buildCostHandlers(opts ServerOptions, router *session.Router) *dashcost.Han
 	}
 	return dashcost.New(dashcost.Deps{
 		Ledger: ledger,
+		Budget: opts.IMBudget,
 		Limiter: newIPLimiterWithCap(
 			rate.Every(500*time.Millisecond), 30,
 			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
@@ -148,9 +149,9 @@ func buildDiscoveryHandlers(
 		NodeAccess:    nodeAccess,
 		NodeCache:     nodeCache,
 		ClaudeDir:     claudeDir,
-		Router:        newRouterTakeoverAdapter(opts.Router, opts.Agents["general"]),
+		Router:        routerTakeoverAdapter{r: opts.Router},
 		AllowedRoot:   opts.AllowedRoot,
-		DefaultAgent:  opts.Agents["general"],
+		DefaultAgent:  opts.Routing.Agents["general"],
 		Broadcast:     broadcast,
 		ValidateWS:    validateWorkspace,
 		VerifyProcID:  verifyProcIdentity,
@@ -158,28 +159,30 @@ func buildDiscoveryHandlers(
 	})
 }
 
-// routerTakeoverAdapter narrows *session.Router's Takeover return shape
-// (`*ManagedSession, error`) to the `error`-only signature the discovery
-// sub-package consumes, so that interface need not re-export session types.
-// precheck carries the model the dashboard's Takeover passes, so a model the
-// router rejects is refused before the external CLI is killed.
-type routerTakeoverAdapter struct {
-	r        *session.Router
-	precheck session.AgentOpts
+// routerTakeoverAdapter narrows *session.Router's takeover to the shapes the
+// discovery sub-package consumes (an error-only Takeover on an interface
+// lease), so that package need not re-export session types.
+type routerTakeoverAdapter struct{ r *session.Router }
+
+func (a routerTakeoverAdapter) ReserveTakeover(key string, opts session.AgentOpts) (dashdiscovery.TakeoverLease, error) {
+	lease, err := a.r.ReserveTakeover(key, opts)
+	if err != nil {
+		return nil, err
+	}
+	return takeoverLeaseAdapter{a.r, lease}, nil
 }
 
-func newRouterTakeoverAdapter(r *session.Router, general session.AgentOpts) routerTakeoverAdapter {
-	return routerTakeoverAdapter{r: r, precheck: session.AgentOpts{Model: general.Model}}
+type takeoverLeaseAdapter struct {
+	r     *session.Router
+	lease *session.TakeoverLease
 }
 
-func (a routerTakeoverAdapter) TakeoverPrecheck(key string) error {
-	return a.r.TakeoverPrecheck(key, a.precheck)
-}
-
-func (a routerTakeoverAdapter) Takeover(ctx context.Context, key, sessionID, cwd string, opts session.AgentOpts) error {
-	_, err := a.r.Takeover(ctx, key, sessionID, cwd, opts)
+func (a takeoverLeaseAdapter) Takeover(ctx context.Context, sessionID, cwd string) error {
+	_, err := a.r.Takeover(ctx, a.lease, sessionID, cwd)
 	return err
 }
+
+func (a takeoverLeaseAdapter) Release() { a.lease.Release() }
 
 // buildProjectHandlers wires the dashboard project-config + project-files
 // endpoints. Both per-IP limiters are tighter than the cron set because both

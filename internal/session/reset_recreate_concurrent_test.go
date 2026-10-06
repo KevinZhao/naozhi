@@ -107,7 +107,7 @@ func TestTakeover_DuringInFlightSpawn_Refuses(t *testing.T) {
 	}()
 	<-entered
 
-	if _, err := r.Takeover(context.Background(), key, "external-sess", t.TempDir(), AgentOpts{}); !errors.Is(err, ErrSpawnInFlight) {
+	if _, err := reserveAndTakeover(context.Background(), r, key, "external-sess", t.TempDir(), AgentOpts{}); !errors.Is(err, ErrSpawnInFlight) {
 		t.Errorf("Takeover during a spawn = %v, want ErrSpawnInFlight", err)
 	}
 	close(release)

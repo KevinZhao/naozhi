@@ -76,6 +76,8 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		fresh.SetTuningModel(old.TuningModel())
 		fresh.SetTuningEffort(old.TuningEffort())
 		fresh.setCodeChanges(old.CodeChanges())
+		// By pointer, before the bind below: subscribers and epoch follow.
+		fresh.workflows.Store(old.WorkflowBoard())
 		if dr := loadAtomicString(&old.deathReason); dr != "" {
 			storeAtomicString(&fresh.deathReason, dr)
 		}
@@ -114,6 +116,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		if proc != nil {
 			bookUnownedResults(fresh, proc)
 			bookCodeChanges(fresh, proc, func() { r.ss.Update(markChanged); r.notifyChange() })
+			bookWorkflows(fresh, proc, r.hist.projectsRoot, func() { r.ss.Update(markChanged); r.notifyChange() }, r.BumpVersion)
 			bookProcessEnd(fresh, proc, r.hist.claudeDir)
 		}
 

@@ -35,17 +35,17 @@ func TestSessionsList_CronFilteredOut(t *testing.T) {
 	imKey := "feishu:direct:alice:general"
 	imProc := session.NewTestProcess()
 	// NewTestProcess defaults to StateReady so the IM session is "ready".
-	srv.router.InjectSession(imKey, imProc)
+	routerOf(srv).InjectSession(imKey, imProc)
 
 	// Two cron stubs — must be filtered out of sessions[] but counted in stats.
 	cronReadyKey := sessionkey.CronKey("job-ready")
 	cronReadyProc := session.NewTestProcess()
-	srv.router.InjectSession(cronReadyKey, cronReadyProc)
+	routerOf(srv).InjectSession(cronReadyKey, cronReadyProc)
 
 	cronRunningKey := sessionkey.CronKey("job-running")
 	cronRunningProc := session.NewTestProcess()
-	cronRunningProc.StateVal = cli.StateRunning
-	srv.router.InjectSession(cronRunningKey, cronRunningProc)
+	cronRunningProc.SetState(cli.StateRunning)
+	routerOf(srv).InjectSession(cronRunningKey, cronRunningProc)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
@@ -99,7 +99,7 @@ func TestSessionsList_CronFilterRespectsCronKeyPrefix(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 	key := session.CronKeyPrefix + "edge"
 	proc := session.NewTestProcess()
-	srv.router.InjectSession(key, proc)
+	routerOf(srv).InjectSession(key, proc)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()

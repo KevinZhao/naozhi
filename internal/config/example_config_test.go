@@ -4,12 +4,16 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cliinfo"
+	"github.com/naozhi/naozhi/internal/envpolicy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -130,6 +134,160 @@ func TestDocs_WatchdogShowsDefaults(t *testing.T) {
 	}
 }
 
+// readmeBackendEnumRe matches the README config sample's `backend:` line and
+// captures its trailing comment, the operator-facing list of valid IDs.
+var readmeBackendEnumRe = regexp.MustCompile(`^\s+backend:\s*\S+\s+#(.*)$`)
+
+// TestDocs_READMEListsAllBackends: the README `cli.backend` comment names
+// exactly the registered backend IDs, so a new backend cannot ship undocumented.
+func TestDocs_READMEListsAllBackends(t *testing.T) {
+	withRegisteredBackends(t, func() {
+		data, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+		if err != nil {
+			t.Fatalf("read README.md: %v", err)
+		}
+		var got []string
+		for _, line := range strings.Split(string(data), "\n") {
+			if m := readmeBackendEnumRe.FindStringSubmatch(line); m != nil {
+				for _, q := range regexp.MustCompile(`"([a-z0-9_-]+)"`).FindAllStringSubmatch(m[1], -1) {
+					got = append(got, q[1])
+				}
+			}
+		}
+		if len(got) == 0 {
+			t.Fatal("README.md has no `backend: <id>  # \"a\" | \"b\"` line; the pattern no longer matches the doc")
+		}
+		sort.Strings(got)
+		if want := knownBackendIDs(); !slices.Equal(got, want) {
+			t.Errorf("README cli.backend comment lists %v, registered backends are %v", got, want)
+		}
+	})
+}
+
+// codexEntryKeys returns, for every `- id: codex` backend entry in the doc
+// (commented out or not), the set of keys that entry sets.
+func codexEntryKeys(doc string) []map[string]bool {
+	uncomment := regexp.MustCompile(`^(\s*)#`)
+	var entries []map[string]bool
+	dashCol := -1
+	for _, raw := range strings.Split(doc, "\n") {
+		line := uncomment.ReplaceAllString(raw, "$1 ")
+		body := strings.TrimSpace(line)
+		col := len(line) - len(strings.TrimLeft(line, " "))
+		if strings.HasPrefix(body, "- id:") {
+			dashCol = -1
+			if f := strings.Fields(strings.TrimPrefix(body, "- id:")); len(f) > 0 && strings.Trim(f[0], `"`) == "codex" {
+				dashCol = col
+				entries = append(entries, map[string]bool{})
+			}
+			continue
+		}
+		if dashCol < 0 || body == "" || strings.HasPrefix(body, "#") {
+			continue
+		}
+		if col <= dashCol {
+			dashCol = -1
+			continue
+		}
+		if k, _, ok := strings.Cut(body, ":"); ok {
+			entries[len(entries)-1][k] = true
+		}
+	}
+	return entries
+}
+
+// TestDocs_CodexSamplesSetModelAndArgs: an omitted per-backend model/args
+// inherits cli.model/cli.args, which are claude's, so `codex app-server` would
+// get `-c model=sonnet` plus claude flags. Every documented codex entry must
+// set both.
+func TestDocs_CodexSamplesSetModelAndArgs(t *testing.T) {
+	for file, want := range map[string]int{"README.md": 2, "config.example.yaml": 1} {
+		data, err := os.ReadFile(filepath.Join("..", "..", file))
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		entries := codexEntryKeys(string(data))
+		if len(entries) != want {
+			t.Fatalf("%s: found %d codex backend entries, want %d", file, len(entries), want)
+		}
+		for i, keys := range entries {
+			if !keys["model"] || !keys["args"] {
+				t.Errorf("%s: codex entry #%d sets %v; it must set both model and args", file, i+1, keys)
+			}
+		}
+	}
+}
+
+var (
+	docArgsLineRe = regexp.MustCompile(`^(\s*)(?:- )?args:\s*(.*)$`)
+	docArgsItemRe = regexp.MustCompile(`^(\s*)- (.*)$`)
+	docArgTokenRe = regexp.MustCompile(`"([^"]*)"|'([^']*)'|([^\s,'"]+)`)
+)
+
+// docArgsTokens returns every argv token the doc's `args:` keys carry, inline
+// (`args: [a, b]`) or as a block list, commented-out samples included.
+func docArgsTokens(doc string) (tokens []string, keys int) {
+	uncomment := regexp.MustCompile(`^(\s*)#`)
+	addTokens := func(s string) {
+		for _, m := range docArgTokenRe.FindAllStringSubmatch(s, -1) {
+			tokens = append(tokens, m[1]+m[2]+m[3])
+		}
+	}
+	blockCol := -1
+	for _, raw := range strings.Split(doc, "\n") {
+		line := uncomment.ReplaceAllString(raw, "$1 ")
+		if blockCol >= 0 {
+			if m := docArgsItemRe.FindStringSubmatch(line); m != nil && len(m[1]) >= blockCol {
+				item, _, _ := strings.Cut(m[2], " #")
+				addTokens(item)
+				continue
+			}
+			blockCol = -1
+		}
+		m := docArgsLineRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		keys++
+		rest, _, _ := strings.Cut(m[2], "#")
+		if rest = strings.TrimSpace(rest); rest == "" {
+			blockCol = len(m[1])
+			continue
+		}
+		addTokens(strings.Trim(rest, "[]"))
+	}
+	return tokens, keys
+}
+
+// TestDocs_ExampleArgsCarryNoDeniedFlags: the spawn pipeline strips denied
+// flags from configured args and the loader warns about each one, so a sample
+// that carries one teaches a no-op that logs a warning on every deployment.
+func TestDocs_ExampleArgsCarryNoDeniedFlags(t *testing.T) {
+	for _, file := range []string{"README.md", "config.example.yaml"} {
+		data, err := os.ReadFile(filepath.Join("..", "..", file))
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		tokens, keys := docArgsTokens(string(data))
+		if keys < 3 {
+			t.Fatalf("%s: found %d `args:` keys; the pattern no longer matches the doc", file, keys)
+		}
+		for _, tok := range tokens {
+			if cliinfo.IsDeniedExtraFlag(tok) {
+				t.Errorf("%s: sample args carry %q, which the spawn pipeline strips (use its dedicated config field)", file, tok)
+			}
+		}
+	}
+}
+
+func TestDocArgsTokens_InlineAndBlockForms(t *testing.T) {
+	doc := "cli:\n  args: [\"-c\", 'x=y'] # --model in a comment\n  #  - id: a\n  #    args:\n  #      - \"--add-dir\"\n  #      - --debug # note\n  #    model: m\n  list:\n    - --not-args\n"
+	tokens, keys := docArgsTokens(doc)
+	if want := []string{"-c", "x=y", "--add-dir", "--debug"}; keys != 2 || !slices.Equal(tokens, want) {
+		t.Errorf("docArgsTokens = %q (keys %d), want %q (keys 2)", tokens, keys, want)
+	}
+}
+
 // yamlChildScalar returns the scalar node for key, or nil.
 func yamlChildScalar(m *yaml.Node, key string) *yaml.Node {
 	for i := 0; i+1 < len(m.Content); i += 2 {
@@ -158,5 +316,98 @@ func TestExampleConfig_RunnerModelHaiku(t *testing.T) {
 	}
 	if model.Value != "haiku" {
 		t.Errorf("sysession.runner.model = %q, want haiku", model.Value)
+	}
+}
+
+// uncommentExampleBlock returns the commented-out YAML that starts at the line
+// "<indent>#<key>:" in src, with the one '#' after the indent removed. The
+// block runs until a line that is not "<indent>#" plus text.
+func uncommentExampleBlock(t *testing.T, src, key string) string {
+	t.Helper()
+	lines := strings.Split(src, "\n")
+	for i, l := range lines {
+		trimmed := strings.TrimLeft(l, " ")
+		if !strings.HasPrefix(trimmed, "#"+key+":") {
+			continue
+		}
+		prefix := l[:len(l)-len(trimmed)] + "#"
+		var out []string
+		for _, b := range lines[i:] {
+			if !strings.HasPrefix(b, prefix) || len(b) == len(prefix) {
+				break
+			}
+			out = append(out, l[:len(l)-len(trimmed)]+b[len(prefix):])
+		}
+		return strings.Join(out, "\n") + "\n"
+	}
+	t.Fatalf("config.example.yaml has no commented %q block", key)
+	return ""
+}
+
+// TestExampleConfig_AccessProfilesExampleIsValid: the template's commented
+// access_profiles block, the multi-backend cli block and the researcher pins,
+// uncommented together, must decode with no unknown key and pass the load-time
+// access-profile checks, so an operator who uncomments them gets a config
+// that loads.
+func TestExampleConfig_AccessProfilesExampleIsValid(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "config.example.yaml"))
+	if err != nil {
+		t.Fatalf("read config.example.yaml: %v", err)
+	}
+	src := string(data)
+	doc := uncommentExampleBlock(t, src, "default_access_profile") +
+		"cli:\n" + uncommentExampleBlock(t, src, "backend") +
+		"agents:\n  researcher:\n" + uncommentExampleBlock(t, src, "access_profile")
+
+	var cfg Config
+	dec := yaml.NewDecoder(strings.NewReader(doc))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil {
+		t.Fatalf("decode uncommented example:\n%s\nerr: %v", doc, err)
+	}
+	withRegisteredBackends(t, func() {
+		if err := validateAccessProfiles(&cfg); err != nil {
+			t.Fatalf("validateAccessProfiles: %v", err)
+		}
+		var withEnv, withModel, withBackend bool
+		for name, ap := range cfg.AccessProfiles {
+			withEnv = withEnv || len(ap.Env) > 0
+			withModel = withModel || ap.DefaultModel != ""
+			if ap.DefaultBackend != "" {
+				withBackend = true
+				if _, ok := backend.Get(ap.DefaultBackend); !ok {
+					t.Errorf("access_profiles[%s].default_backend %q is not a registered backend", name, ap.DefaultBackend)
+				}
+			}
+		}
+		if !withEnv || !withModel || !withBackend {
+			t.Errorf("example profiles must show env (%v), default_model (%v) and default_backend (%v)", withEnv, withModel, withBackend)
+		}
+		if cfg.DefaultAccessProfile == "" {
+			t.Error("example does not show default_access_profile")
+		}
+		r := cfg.Agents["researcher"]
+		if r.AccessProfile == "" || r.Backend == "" {
+			t.Errorf("researcher example pins access_profile %q backend %q; want both", r.AccessProfile, r.Backend)
+		}
+		if _, ok := backend.Get(r.Backend); !ok {
+			t.Errorf("researcher backend %q is not a registered backend", r.Backend)
+		}
+	})
+	// The template says AWS_PROFILE is refused in a profile's env.
+	if err := envpolicy.ValidateOverlayEntry("AWS_PROFILE", "default"); err == nil {
+		t.Error("AWS_PROFILE is accepted in an access-profile env; the template says it fails the load")
+	}
+	// Every key the allowlist prose names must be overlay-allowed.
+	prose := strings.Join(strings.Fields(strings.ReplaceAll(src, "\n#", " ")), " ")
+	_, list, ok := strings.Cut(prose, "Only the overlay allowlist is accepted: ")
+	list, _, ok2 := strings.Cut(list, " and the Anthropic credentials.")
+	if !ok || !ok2 {
+		t.Fatal("config.example.yaml lost the overlay allowlist sentence")
+	}
+	for _, k := range strings.Split(list, ", ") {
+		if _, allowed := envpolicy.Allowed(k, envpolicy.SourceOverlay); !allowed {
+			t.Errorf("template names %q in the overlay allowlist; the overlay refuses it", k)
+		}
 	}
 }

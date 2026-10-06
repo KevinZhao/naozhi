@@ -6,13 +6,13 @@
 package server
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -52,7 +52,7 @@ const (
 
 // errSendBusy is the error a primary reports for a remote send its node
 // answered "busy".
-var errSendBusy = errors.New("会话正忙，消息未送达，请稍后重试")
+var errSendBusy = node.ErrSendBusy
 
 // errUrgentUsage rejects a bare /urgent (#3004 分叉 6); asyncErrorMessage
 // passes its text through to the client.

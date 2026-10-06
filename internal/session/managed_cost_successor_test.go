@@ -188,3 +188,60 @@ func TestLinkSuccessor_ConcurrentBookingsLandOnce(t *testing.T) {
 		}
 	}
 }
+
+// Spend a replaced session books late (its process-end partial, an unowned
+// result) is filed under the key of the live session it forwards to: the
+// same key after a plain respawn, the new key once that replacement was
+// renamed. The run ids still name the replaced session's CLI session.
+func TestRespawn_LateRowsFollowARenameOfTheReplacement(t *testing.T) {
+	const key, renamedKey = "dashboard:direct:scratch-late:general", "dashboard:direct:promoted-late:general"
+	for _, tc := range []struct {
+		name    string
+		rename  bool
+		wantKey string
+	}{
+		{"respawn only", false, key},
+		{"respawn then rename", true, renamedKey},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, old := lateSpendRouter(t, key, func(context.Context, cli.SpawnOptions) (processIface, error) { return newIdleProc(), nil })
+			if _, err := spawnIn(r, key, nil); err != nil {
+				t.Fatal(err)
+			}
+			if tc.rename && !r.RenameSession(key, renamedKey) {
+				t.Fatal("rename failed")
+			}
+			endID, unownedID := sessionRunID("end:", "sid-a"), sessionRunID("unowned:", "sid-a")
+			old.bookPartialUsage(halfDollarPartial, endID)
+			old.accountTurnCost(&clievent.SendResult{CostUSD: 1}, unownedID)
+
+			ents := allEntries(t, r.runs.cost.ledger)
+			if len(ents) != 2 {
+				t.Fatalf("entries = %+v, want the partial and the unowned result", ents)
+			}
+			for _, e := range ents {
+				if e.SessionKey != tc.wantKey || (e.RunID != endID && e.RunID != unownedID) {
+					t.Errorf("%s row: session_key %q run_id %q, want %q and the replaced session's run id",
+						e.Kind, e.SessionKey, e.RunID, tc.wantKey)
+				}
+			}
+			live, _ := lookupT(r, tc.wantKey)
+			if usd := live.CostTotals().USD; !approxEq(usd, 3.5) {
+				t.Fatalf("live session's spend = %v, want 3.5", usd)
+			}
+		})
+	}
+}
+
+// A late row is filed under the live session's key but keeps the job of the
+// session that booked it: that session's process ran the job's turn.
+func TestLedgerBase_JobStaysWithTheBookingSession(t *testing.T) {
+	a := &ManagedSession{key: "cron:job1"}
+	b := &ManagedSession{key: "cron:job1"}
+	c := &ManagedSession{key: "dashboard:direct:moved:general"}
+	linkSuccessor(a, b, a.CostTotals())
+	copyCostBaseline(c, b)
+	if e := a.ledgerBase("end:sid:1"); e.SessionKey != c.key || e.JobID != "job1" {
+		t.Fatalf("row session_key %q job_id %q, want %q and job1", e.SessionKey, e.JobID, c.key)
+	}
+}

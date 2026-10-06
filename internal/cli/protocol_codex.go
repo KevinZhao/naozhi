@@ -184,8 +184,9 @@ func (p *CodexProtocol) WriteMessage(w io.Writer, text string, images []clievent
 	p.textBuf.Reset()
 	p.mu.Unlock()
 
-	input := make([]codexUserInput, 0, len(images)+1)
-	for _, img := range images {
+	text, inline := clievent.UserTextAndInline(text, images)
+	input := make([]codexUserInput, 0, len(inline)+1)
+	for _, img := range inline {
 		// Image input is a data: URL; only the gpt-5.x path accepts images, the
 		// gpt-oss Bedrock path does not (validation §4).
 		input = append(input, codexUserInput{
@@ -330,7 +331,7 @@ func (p *CodexProtocol) ReadEvent(line string) ([]clievent.Event, bool, error) {
 		p.mu.Lock()
 		p.textBuf.Reset()
 		p.mu.Unlock()
-		msgText := osutil.SanitizeForLog(msg.Error.Message, 256)
+		msgText := osutil.SanitizeForLog(msg.Error.Text(), rpcErrorTextMax)
 		return nil, true, &TurnRejectedError{Backend: p.BackendID, Code: msg.Error.Code, Message: msgText,
 			Err: fmt.Errorf("%w %d: %s", ErrCodexRPC, msg.Error.Code, msgText)}
 	}
@@ -578,7 +579,7 @@ func (p *CodexProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessa
 			if msg.IsResponse() && gotOK && gotID == expectedID {
 				if msg.Error != nil {
 					send(readResult{nil, fmt.Errorf("%w %d: %s", ErrCodexRPC,
-						msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))})
+						msg.Error.Code, osutil.SanitizeForLog(msg.Error.Text(), rpcErrorTextMax))})
 					return
 				}
 				send(readResult{&msg, nil})

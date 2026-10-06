@@ -10,6 +10,7 @@
 
 const { test, expect } = require('@playwright/test');
 const { startMockServer, defaultSessions } = require('./mock-server');
+const { waitForWs, waitForWsWhere } = require('./shim_wait');
 
 test.use({ viewport: { width: 1280, height: 800 } });
 
@@ -47,7 +48,7 @@ async function pickerLabels(page, wsState, opts = {}) {
   if (!mock) throw new Error('mock not started');
   if (opts.reload !== false) await page.goto(mock.url + '/dashboard');
   await page.waitForSelector('.session-card');
-  await page.waitForFunction((s) => wsm.state === s, wsState);
+  await waitForWs(page, wsState);
   await page.click('.hdr-btn[title="New Session"]');
   await page.waitForSelector('#new-node');
   return page.locator('#new-node option').allTextContents();
@@ -71,7 +72,7 @@ test('local reads connecting while the socket waits for auth_ok', async ({ page 
 test('local reads offline when there is no socket', async ({ page }) => {
   mock = await startMockServer({ sessions: multiNodeSessions() });
   await page.goto(mock.url + '/dashboard');
-  await page.waitForFunction(() => wsm.state === WS_STATES.DISCONNECTED && wsm.backoff >= 4000);
+  await waitForWsWhere(page, () => wsm.state === WS_STATES.DISCONNECTED && wsm.backoff >= 4000);
   const labels = await pickerLabels(page, 'disconnected', { reload: false });
   expect(labels[0]).toBe('本地 · offline');
 });

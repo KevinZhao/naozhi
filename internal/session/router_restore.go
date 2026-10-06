@@ -10,8 +10,9 @@ import (
 	"github.com/naozhi/naozhi/internal/tuningspec"
 )
 
-// restoreStore publishes the sessions loaded from the store.
-func (r *Router) restoreStore(tx sessTx, restored map[string]*storeEntry) {
+// restoreStore publishes the sessions loaded from the store, each advanced
+// to its ledger mark when that is ahead of the store (adoptCostMark).
+func (r *Router) restoreStore(tx sessTx, restored map[string]*storeEntry, marks map[costMarkKey]costledger.SessionMark) {
 	for key, entry := range restored {
 		// SECURITY: reject sys: entries even though saveStore already skips
 		// them (RFC v2.1 §3.4). A sys: entry on disk means a tampered
@@ -25,6 +26,11 @@ func (r *Router) restoreStore(tx sessTx, restored map[string]*storeEntry) {
 			continue
 		}
 		r.restoreSessionFromEntry(tx, key, entry)
+		if s := tx.Get(key); s != nil {
+			if m, ok := marks[costMarkKey{key, s.createdAt.Load()}]; ok {
+				s.adoptCostMark(m)
+			}
+		}
 	}
 }
 
@@ -103,6 +109,10 @@ func (r *Router) restoreSessionFromEntry(tx sessTx, key string, entry *storeEntr
 		}
 	}
 	s.setCodeChanges(restoredCodeChanges(entry.Key, entry.CodeChanges))
+	board := newWorkflowBoard(r.hist.projectsRoot)
+	board.setNotify(func() { r.ss.Update(markChanged); r.notifyChange() }, r.BumpVersion)
+	board.restore(entry.Key, entry.Workflows, entry.Workspace, time.Now())
+	s.workflows.Store(board)
 	s.setSessionID(entry.SessionID)
 	if entry.LastActive != 0 {
 		s.lastActive.Store(entry.LastActive)

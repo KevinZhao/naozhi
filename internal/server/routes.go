@@ -53,15 +53,13 @@ func (s *Server) startDashboardLoops() {
 	}
 }
 
-// registerDashboard registers the dashboard's routes. Construction moved to
-// buildDashboard in #2552 and the goroutine starts moved to
-// startDashboardLoops in #2553, so this function is registration only —
-// nothing here may build a dependency or start a goroutine. That is what lets
-// buildServer call it with a local handlerSet that then goes out of scope.
+// registerDashboard registers the dashboard's routes and nothing else: it must
+// not build a dependency or start a goroutine (that is buildDashboard /
+// startDashboardLoops), which is what lets buildServer pass a handlerSet that
+// then goes out of scope.
 func (s *Server) registerDashboard(hs *handlerSet) {
-	// Authenticated API routes. Every dashboard sub-package declares its own
-	// patterns (its routes.go) and mountRoutes applies the API chain, so this
-	// function no longer decides any feature's URL space (#2554).
+	// Authenticated API routes. Each dashboard sub-package declares its own
+	// patterns in its routes.go; mountRoutes applies the API chain (#2554).
 	s.mountRoutes(hs.cliH.Routes())
 	s.mountRoutes(hs.accessProfilesH.Routes())
 	s.mountRoutes(hs.sessionH.Routes())
@@ -118,6 +116,11 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	// Dashboard JS is auth-gated: it embeds the API endpoint list + client
 	// schema (recon surface); the login page loads no /static/ JS (#1328).
 	s.mux.HandleFunc("GET /static/css/{file}", auth(handleDashboardCSS))
+	// Vendored libraries: stylesheets and fonts by path, each script on its
+	// own route like the dashboard's modules.
+	s.mux.HandleFunc("GET /static/vendor/{file...}", auth(handleDashboardCSS))
+	s.mux.HandleFunc("GET /static/vendor/katex-0.16.21/katex.min.js", auth(serveStaticJS("vendor/katex-0.16.21/katex.min.js")))
+	s.mux.HandleFunc("GET /static/vendor/mermaid-11.14.0/mermaid.min.js", auth(serveStaticJS("vendor/mermaid-11.14.0/mermaid.min.js")))
 	s.mux.HandleFunc("GET /static/contract.js", auth(serveStaticJS("contract.js")))
 	s.mux.HandleFunc("GET /static/nz_util.js", auth(serveStaticJS("nz_util.js")))
 	s.mux.HandleFunc("GET /static/state.js", auth(serveStaticJS("state.js")))
@@ -161,6 +164,9 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	s.mux.HandleFunc("GET /static/backend_catalog.js", auth(serveStaticJS("backend_catalog.js")))
 	s.mux.HandleFunc("GET /static/cron_state.js", auth(serveStaticJS("cron_state.js")))
 	s.mux.HandleFunc("GET /static/cron_format.js", auth(serveStaticJS("cron_format.js")))
+	s.mux.HandleFunc("GET /static/lightbox.js", auth(serveStaticJS("lightbox.js")))
+	s.mux.HandleFunc("GET /static/mem_popover.js", auth(serveStaticJS("mem_popover.js")))
+	s.mux.HandleFunc("GET /static/aside_drawer.js", auth(serveStaticJS("aside_drawer.js")))
 	s.mux.HandleFunc("GET /static/agent_view.js", auth(serveStaticJS("agent_view.js")))
 	s.mux.HandleFunc("GET /static/asset_browser.js", auth(serveStaticJS("asset_browser.js")))
 	s.mux.HandleFunc("GET /static/files_view.js", auth(serveStaticJS("files_view.js")))
@@ -199,9 +205,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// style-src admits unsafe-inline — events are wired through data-action
 	// delegation plus a hash for the theme bootstrap, and the per-element colours
 	// JS still computes go through data attributes applied via CSSOM (nz_util.js
-	// applyDataBg) rather than style="" attributes. CDN entries pin exact
-	// versioned files; connect-src 'self' covers the same-origin ws/wss upgrade;
-	// frame-src blob: is for sandboxed previews.
+	// applyDataBg) rather than style="" attributes. No outside origin is
+	// listed: KaTeX and mermaid are vendored; connect-src 'self' covers the
+	// same-origin ws/wss upgrade; frame-src blob: is for sandboxed previews.
 	w.Header().Set("Content-Security-Policy", dashboardCSP)
 	// HSTS only over TLS (RFC 6797 §7.2): on plain HTTP it would brick local
 	// loopback access for a year. Same gate as the auth cookie Secure flag.
@@ -211,7 +217,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "same-origin")
-	// Defence in depth against a compromised CDN script: no getUserMedia etc.
+	// Defence in depth against a compromised library script: no getUserMedia etc.
 	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
 	// COOP blocks window.opener XS-Leaks; CORP blocks cross-origin no-cors embeds.
 	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")

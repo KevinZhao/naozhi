@@ -1,8 +1,9 @@
 // @ts-check
 //
 // R219-SEC-4: the KaTeX and Mermaid assets that render_md.js injects at runtime
-// must carry SRI integrity hashes and crossOrigin='anonymous', so a compromised
-// CDN response is rejected by the browser instead of executed.
+// must carry SRI integrity hashes and crossOrigin='anonymous', so a vendored
+// file that drifted from its pin is rejected by the browser instead of
+// executed.
 //
 // This replaced internal/server/static_cdn_sri_test.go, which read render_md.js
 // and counted `integrity` / `sha384-` / `'anonymous'` occurrences inside the
@@ -17,9 +18,10 @@
 //     rejects the asset at load time — which is the outcome SRI exists to
 //     prevent, arrived at by the SRI itself.
 //
-// Both are checked here off the DOM, with the CDN blocked so no network is
-// needed: aborting the request does not stop the element from being created and
-// appended with its attributes.
+// Both are checked here off the DOM. The mock serves KaTeX from the vendored
+// files, so the browser checks its pins for real. The mermaid request is
+// aborted, which does not stop its element from being appended with its
+// attributes; markdown_csp_render.test.js loads and checks the real bundle.
 //
 // 跑法：cd test/e2e && npx playwright test cdn_sri.test.js --project=desktop-chrome
 
@@ -38,11 +40,12 @@ test.beforeEach(({ }, testInfo) => {
 });
 
 /**
- * Opens the dashboard with the CDN blocked, triggers both lazy loaders, and
- * returns every CDN asset element the page injected.
+ * Opens the dashboard, triggers both lazy loaders, and returns every
+ * SRI-carrying element they injected.
  *
  * KaTeX: rendering inline math takes the katexReady=false branch, which calls
- * loadKatex() and appends the stylesheet link plus the script.
+ * loadKatex() and appends the stylesheet link plus the script; the test waits
+ * until both have passed their SRI check and KaTeX is defined.
  *
  * Mermaid: loadMermaid() is only reached from runMermaid(), which needs both a
  * pending diagram and a post-render flush, so this goes through the production
@@ -58,9 +61,7 @@ async function injectedAssets(browser) {
     },
   });
   const ctx = await browser.newContext();
-  // Block the CDN: the injected elements still land in <head> with their
-  // attributes, and nothing here depends on the real assets arriving.
-  await ctx.route(/cdn\.jsdelivr\.net/, route => route.abort());
+  await ctx.route(/\/mermaid\.min\.js$/, route => route.abort());
   const page = await ctx.newPage();
   const cleanup = async () => {
     await ctx.close();
@@ -73,8 +74,9 @@ async function injectedAssets(browser) {
   await page.waitForSelector('#events-scroll .event');
 
   await page.evaluate(() => (/** @type {any} */ (window)).renderMd('$x+y$'));
-  await page.waitForSelector('link[data-nz-katex]', { state: 'attached' });
+  await page.waitForSelector('link[href*="katex.min.css"]', { state: 'attached' });
   await page.waitForSelector('script[src*="katex.min.js"]', { state: 'attached' });
+  await page.waitForFunction(() => typeof (/** @type {any} */ (window)).katex?.render === 'function');
 
   await page.evaluate((fence) => (/** @type {any} */ (window)).appendEvents([{
     type: 'text', detail: fence, time: Date.now() + 1000, uuid: 'sri-mermaid-1',
@@ -83,7 +85,7 @@ async function injectedAssets(browser) {
 
   const assets = await page.evaluate(() =>
     Array.from(document.querySelectorAll(
-      'script[src*="cdn.jsdelivr.net"], link[href*="cdn.jsdelivr.net"]'
+      'script[src^="/static/vendor/"], link[href^="/static/vendor/"], script[integrity], link[integrity]'
     )).map(el => ({
       tag: el.tagName.toLowerCase(),
       url: el.getAttribute('src') || el.getAttribute('href') || '',
@@ -93,17 +95,18 @@ async function injectedAssets(browser) {
   return { cleanup, assets };
 }
 
-test.describe('CDN asset injection carries SRI', () => {
-  test('每个注入的 CDN 资产都带 sha384 SRI 与 crossOrigin=anonymous', async ({ browser }) => {
+test.describe('lazy asset injection carries SRI', () => {
+  test('每个懒加载资产都带 sha384 SRI 与 crossOrigin=anonymous', async ({ browser }) => {
     const { cleanup, assets } = await injectedAssets(browser);
     try {
-      // With the CDN blocked, onerror clears the loading flag, so a later
-      // render can inject a second element for the same URL. De-dupe by URL:
-      // the invariant is per asset, not per element.
+      // De-dupe by URL: the invariant is per asset, not per element. The
+      // delayed retry appends a second element for an asset that failed,
+      // though this test never waits long enough for it.
       const byURL = groupByURL(assets);
       const urls = [...byURL.keys()].sort();
-      expect(urls.filter(u => u.includes('/katex@'))).toHaveLength(2); // css + js
-      expect(urls.filter(u => u.includes('/mermaid@'))).toHaveLength(1);
+      expect(urls.filter(u => u.includes('/katex-0.16.21/'))).toHaveLength(2); // css + js
+      expect(urls.filter(u => u.includes('/mermaid-11.14.0/'))).toHaveLength(1);
+      expect(urls.filter(u => !u.startsWith('/static/vendor/')), 'lazy assets come from /static/vendor/ only').toEqual([]);
 
       for (const [url, els] of byURL) {
         for (const el of els) {

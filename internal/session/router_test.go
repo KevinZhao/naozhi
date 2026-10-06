@@ -763,7 +763,7 @@ func TestRouter_SetWorkspace_RejectsEmptyChatKey(t *testing.T) {
 // would block the caller for 2s for every test that never started a shim.
 func TestWaitSocketGoneForKey_EmptyKey(t *testing.T) {
 	start := time.Now()
-	waitSocketGoneForKey("", 2*time.Second)
+	waitSocketGoneForKey("")
 	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
 		t.Errorf("waitSocketGoneForKey('') took %v; want ~0", elapsed)
 	}
@@ -774,7 +774,7 @@ func TestWaitSocketGoneForKey_EmptyKey(t *testing.T) {
 // helper should return in a single stat().
 func TestWaitSocketGoneForKey_NoSocketReturnsFast(t *testing.T) {
 	start := time.Now()
-	waitSocketGoneForKey("test:fresh:key-that-never-spawned", 2*time.Second)
+	waitSocketGoneForKey("test:fresh:key-that-never-spawned")
 	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
 		t.Errorf("waitSocketGoneForKey(missing-socket) took %v; want ~0", elapsed)
 	}
@@ -2590,6 +2590,28 @@ func TestResolveSpawnParamsLocked_AccessProfile(t *testing.T) {
 		sp := resolveT(r, key, "", AgentOpts{})
 		if sp.AccessProfileID != "bedrock-opus" {
 			t.Errorf("AccessProfileID = %q, want bedrock-opus (resume lock beats default)", sp.AccessProfileID)
+		}
+	})
+
+	// The lock holds only a recorded profile: an existing session that
+	// recorded none takes up whatever opts or the default resolve to now
+	// (config.example.yaml documents this).
+	t.Run("existing session without a recorded profile is resolved again", func(t *testing.T) {
+		key := "feishu:user:bob:agent1"
+		for _, tc := range []struct {
+			name, def string
+			opts      AgentOpts
+			want      string
+		}{
+			{"agent profile", "", AgentOpts{AccessProfile: "1p-fable"}, "1p-fable"},
+			{"default profile", "bedrock-opus", AgentOpts{}, "bedrock-opus"},
+		} {
+			r := mkRouter()
+			r.backends.defaultAccessProfile = tc.def
+			putT(r, key, &ManagedSession{key: key})
+			if sp := resolveT(r, key, "sid-1", tc.opts); sp.AccessProfileID != tc.want {
+				t.Errorf("%s: AccessProfileID = %q, want %q", tc.name, sp.AccessProfileID, tc.want)
+			}
 		}
 	})
 

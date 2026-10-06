@@ -117,6 +117,16 @@ func (e *APIError) IsTokenExpired() bool {
 	return false
 }
 
+// isRateLimited reports a frequency limit: 99991400 per app, 11232-11234
+// and 230020 on sending messages. The same request may succeed later.
+func (e *APIError) isRateLimited() bool {
+	switch e.Code {
+	case 99991400, 11232, 11233, 11234, 230020:
+		return true
+	}
+	return false
+}
+
 // IsTokenInvalidated implements platform.TokenInvalidatedError: the cache was
 // just cleared, so ReplyWithRetry may grant one extra retry with a fresh token (#1339).
 func (e *APIError) IsTokenInvalidated() bool {
@@ -159,6 +169,10 @@ type Feishu struct {
 	tokenLastFailed error
 
 	transcriber transcribe.Service // nil when STT not configured
+
+	// admit gates media downloads and transcription; nil admits everyone.
+	// Set by SetAdmission before RegisterRoutes/Start, read-only after.
+	admit platform.AdmitFunc
 
 	// Lifecycle context: cancelled on Stop(), used by webhook goroutines.
 	stopCtx    context.Context
@@ -249,6 +263,15 @@ func (f *Feishu) ConnState() (platform.ConnState, bool) {
 		return platform.ConnState{}, false
 	}
 	return f.connState.Snapshot()
+}
+
+// SetAdmission implements platform.Admitter.
+func (f *Feishu) SetAdmission(fn platform.AdmitFunc) { f.admit = fn }
+
+// admitted reports whether msg's sender may cost a media download or a
+// transcription.
+func (f *Feishu) admitted(ctx context.Context, msg platform.IncomingMessage) bool {
+	return f.admit == nil || f.admit(ctx, msg)
 }
 
 // RegisterRoutes registers webhook routes (only in webhook mode).

@@ -311,53 +311,6 @@
   .session-runs-panel .srp-summary{min-height:44px}
   .session-runs-panel .srr-main{font-size:var(--nz-fs-sm);gap:var(--nz-space-2)}
 }
-/* cron-dashboard-redesign P2b §4.4.2 — run-detail sheet 4 tab + transcript timeline.
- * Tab bar sits above the legacy "原始日志" body content; transcript turn
- * cards live under .crs-transcript with avatar/role/text/tool styles. */
-.crs-tabs{display:flex;gap:18px;padding:0 4px;margin-bottom:14px;border-bottom:1px solid var(--nz-border);overflow-x:auto;scrollbar-width:none}
-.crs-tabs::-webkit-scrollbar{display:none}
-.crs-tab{padding:10px 0 10px;font-size:var(--nz-fs-sm);color:var(--nz-text-mute);cursor:pointer;border:none;border-bottom:2px solid transparent;background:transparent;font-family:inherit;display:inline-flex;align-items:center;gap:6px;font-weight:500;flex-shrink:0;transition:color .12s,border-color .12s}
-.crs-tab:hover{color:var(--nz-text)}
-.crs-tab.active{color:var(--nz-accent);border-bottom-color:var(--nz-accent)}
-.crs-tab:focus-visible{outline:1px solid var(--nz-accent);outline-offset:2px;border-radius:var(--nz-radius-xs)}
-.crs-tab-count{font-size:var(--nz-fs-2xs);background:var(--nz-bg-2);color:var(--nz-text-mute);padding:1px 6px;border-radius:var(--nz-radius-md);font-weight:500}
-.crs-tab.active .crs-tab-count{background:rgba(31,111,235,.18);color:var(--nz-accent)}
-.crs-tab-body{display:flex;flex-direction:column;gap:8px}
-.crs-transcript{display:flex;flex-direction:column;gap:14px}
-.crs-turn{display:flex;gap:10px}
-.crs-turn.err .crs-text{color:var(--nz-red)}
-.crs-avatar{width:24px;height:24px;border-radius:var(--nz-radius-ms);font-size:var(--nz-fs-xs);font-weight:600;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:white;line-height:1}
-.crs-avatar.user{background:#444c56}
-.crs-avatar.assistant{background:linear-gradient(135deg,var(--nz-blue),#a371f7)}
-.crs-avatar.tool{background:var(--nz-bg-2);color:var(--nz-amber);border:1px solid var(--nz-border)}
-.crs-turn-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:5px}
-.crs-turn-head{display:flex;align-items:baseline;gap:8px;font-size:var(--nz-fs-xs);flex-wrap:wrap}
-.crs-role{color:var(--nz-text-strong);font-weight:600}
-.crs-time{color:var(--nz-text-faint);font-variant-numeric:tabular-nums}
-.crs-tokens{margin-left:auto;color:var(--nz-text-faint);font-variant-numeric:tabular-nums;font-size:var(--nz-fs-2xs)}
-.crs-text{font-size:var(--nz-fs-sm2);color:var(--nz-text);line-height:1.55;white-space:pre-wrap;word-break:break-word;background:transparent;border:none;padding:0;margin:0;font-family:inherit}
-.crs-text.md{white-space:normal}
-.crs-text.md p{margin-bottom:6px}
-.crs-text.md p:last-child{margin-bottom:0}
-.crs-text.md ul,.crs-text.md ol{margin:6px 0 6px 22px}
-.crs-text.md ul ul,.crs-text.md ul ol,.crs-text.md ol ul,.crs-text.md ol ol{margin:2px 0 2px 16px}
-.crs-text.md code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-sm);background:var(--nz-bg-1);border:1px solid var(--nz-border);padding:0 5px;border-radius:var(--nz-radius-xs)}
-.crs-tool-card{border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);background:var(--nz-bg-1);overflow:hidden}
-.crs-tool-card.err{border-color:rgba(248,81,73,.4)}
-.crs-tool-head{padding:7px 11px;display:flex;align-items:center;gap:8px;cursor:pointer;list-style:none;font-size:var(--nz-fs-sm);-webkit-tap-highlight-color:transparent}
-.crs-tool-head::-webkit-details-marker{display:none}
-.crs-tool-card[open] .crs-tool-head{border-bottom:1px solid var(--nz-border)}
-.crs-tool-head:hover{background:var(--nz-bg-2)}
-.crs-tool-name{color:var(--nz-text-strong);font-weight:500;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-sm);flex-shrink:0}
-.crs-tool-summary{color:var(--nz-text-mute);font-size:var(--nz-fs-xs);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
-.crs-tool-card.err .crs-tool-name{color:var(--nz-red)}
-.crs-tool-body{margin:0;padding:10px 12px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--nz-fs-xs);color:var(--nz-text);background:var(--nz-bg-0);white-space:pre-wrap;word-break:break-word;line-height:1.55;max-height:280px;overflow-y:auto;border:none;border-radius:0}
-.crs-tool-card.err .crs-tool-body{color:var(--nz-text)}
-@media(max-width:540px){
-  .crs-tabs{gap:14px}
-  .crs-tool-head{flex-wrap:wrap;gap:5px}
-  .crs-tool-summary{flex-basis:100%;order:3}
-}
 
 /* timeline 行选中态 — sheet 打开后该行高亮，提示用户当前看的是哪一条 run */
 /* PR-1 followup #3: 选中态视觉加强。色条 3→4px (与 cj-row.is-active 同级)
@@ -398,7 +351,8 @@
 .cron-timeline-panel .ctr-sub .ctr-cost{color:var(--nz-text-mute);font-variant-numeric:tabular-nums}
 .cron-timeline-panel .ct-cost-sum{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-left:auto;font-variant-numeric:tabular-nums}
 .cron-timeline-panel .ct-cost-ledger{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-left:auto;font-variant-numeric:tabular-nums}
-.cron-timeline-panel .ct-cost-ledger + .ct-cost-sum{margin-left:var(--nz-space-3)}
+.cron-timeline-panel .ct-cost-ledger + .ct-cost-sum,.cron-timeline-panel .ct-cost-ledger + .ct-cost-ledger{margin-left:var(--nz-space-3)}
+.cron-timeline-panel .ct-cost-ledger.bad{color:var(--nz-red)}
 /* §7.3 input-snapshot collapsible (replay preview). */
 .ctr-detail .ctr-snapshot{margin-top:10px;border-top:1px solid var(--nz-border);padding-top:8px}
 .ctr-detail .ctr-snapshot>summary{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);cursor:pointer;user-select:none}

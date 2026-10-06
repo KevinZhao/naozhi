@@ -46,36 +46,8 @@ func (f *Feishu) startWebSocket() error {
 	eventHandler := dispatcher.NewEventDispatcher(
 		f.cfg.VerificationToken, f.cfg.EncryptKey,
 	).OnP2MessageReceiveV1(func(_ context.Context, event *larkim.P2MessageReceiveV1) error {
-		pe, ok := f.parseSDKEvent(event)
-		if !ok {
-			return nil
-		}
-
-		// TryGo does wg.Add(1) on this goroutine before `go`, so a concurrent
-		// Stop()/Wait() cannot observe counter=0 mid-dispatch.
-		switch pe.MediaType {
-		case "image":
-			f.dispatch.TryGo("feishu ws image", func() {
-				msg := pe.Msg
-				data, mime, err := f.DownloadImage(ctx, pe.MessageID, pe.MediaKey)
-				if err != nil {
-					// image_key is sender-controlled; sanitize before slog.
-					slog.Error("feishu ws download image failed", "err", err,
-						"key", osutil.SanitizeForLog(pe.MediaKey, 128))
-					return
-				}
-				msg.Images = []platform.Image{{Data: data, MimeType: mime}}
-				handler(ctx, msg)
-			})
-
-		case "audio":
-			f.dispatch.TryGo("feishu ws audio", func() {
-				msg := pe.Msg
-				f.handleAudio(ctx, handler, msg, pe.MessageID, pe.MediaKey)
-			})
-
-		default:
-			f.dispatch.TryGo("feishu ws text", func() { handler(ctx, pe.Msg) })
+		if pe, ok := f.parseSDKEvent(event); ok {
+			f.routeParsed(ctx, handler, pe)
 		}
 		return nil
 	}).OnP2CardActionTrigger(func(cardCtx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
@@ -89,7 +61,7 @@ func (f *Feishu) startWebSocket() error {
 			slog.Warn("feishu ws card_action: marshal value failed", "err", err)
 			return &callback.CardActionTriggerResponse{}, nil
 		}
-		var val cardActionPayload
+		var val platform.AskAnswerPayload
 		if err := json.Unmarshal(raw, &val); err != nil {
 			slog.Warn("feishu ws card_action: decode value failed", "err", err)
 			return &callback.CardActionTriggerResponse{}, nil
@@ -103,14 +75,9 @@ func (f *Feishu) startWebSocket() error {
 		if event.Event.Operator != nil {
 			operatorID = event.Event.Operator.OpenID
 		}
-		// The WS callback carries no chat_type; use the value embedded in the
-		// button, defaulting to "direct" (p2p chats also use "oc_" ids, so a
-		// prefix heuristic would mis-route 1:1 answers).
-		chatType := normalizeCardChatType(val.ChatType)
-		if chatType == "" {
-			chatType = "direct"
-		}
-		f.dispatchCardActionTracked(cardCtx, val, chatID, messageID, chatType, operatorID, handler)
+		// The WS callback carries no chat_type; an empty one makes
+		// dispatchCardAction derive it from the button value.
+		f.dispatchCardActionTracked(cardCtx, val, chatID, messageID, "", operatorID, handler)
 		return &callback.CardActionTriggerResponse{}, nil
 	})
 
@@ -161,7 +128,7 @@ func wsConnStateOptions(t *platform.ConnTracker) []larkws.ClientOption {
 // the click is dropped best-effort rather than blocking the SDK read loop (#1964).
 func (f *Feishu) dispatchCardActionTracked(
 	ctx context.Context,
-	val cardActionPayload,
+	val platform.AskAnswerPayload,
 	chatID, messageID, chatType, operatorID string,
 	handler platform.MessageHandler,
 ) {
@@ -170,11 +137,50 @@ func (f *Feishu) dispatchCardActionTracked(
 	})
 }
 
+// routeParsed hands a parsed WS event to its media helper or the handler on
+// the dispatch pool. TryGo does wg.Add(1) on this goroutine before `go`, so a
+// concurrent Stop()/Wait() cannot observe counter=0 mid-dispatch.
+func (f *Feishu) routeParsed(ctx context.Context, handler platform.MessageHandler, pe parsedEvent) {
+	switch pe.MediaType {
+	case "image":
+		f.dispatch.TryGo("feishu ws image", func() {
+			f.handleImage(ctx, handler, pe.Msg, pe.MessageID, pe.MediaKey)
+		})
+	case "audio":
+		f.dispatch.TryGo("feishu ws audio", func() {
+			f.handleAudio(ctx, handler, pe.Msg, pe.MessageID, pe.MediaKey)
+		})
+	default:
+		f.dispatch.TryGo("feishu ws text", func() { handler(ctx, pe.Msg) })
+	}
+}
+
+// handleImage downloads an image message's picture, then calls handler with
+// it attached. A sender refused by admission costs no download.
+func (f *Feishu) handleImage(ctx context.Context, handler platform.MessageHandler, msg platform.IncomingMessage, messageID, imageKey string) {
+	if !f.admitted(ctx, msg) {
+		return
+	}
+	data, mime, err := f.DownloadImage(ctx, messageID, imageKey)
+	if err != nil {
+		// image_key is sender-controlled; sanitize before slog.
+		slog.Error("feishu download image failed", "err", err,
+			"key", osutil.SanitizeForLog(imageKey, 128))
+		return
+	}
+	msg.Images = []platform.Image{{Data: data, MimeType: mime}}
+	handler(ctx, msg)
+}
+
 // handleAudio downloads and transcribes audio, then calls handler with the text.
-// Errors are replied directly to the user, not sent through Claude.
+// Errors are replied directly to the user, not sent through Claude. A sender
+// refused by admission gets no download, transcription or error reply.
 func (f *Feishu) handleAudio(ctx context.Context, handler platform.MessageHandler, msg platform.IncomingMessage, messageID, fileKey string) {
 	if f.transcriber == nil {
 		slog.Info("feishu audio ignored, transcriber not configured", "user", msg.UserID)
+		return
+	}
+	if !f.admitted(ctx, msg) {
 		return
 	}
 
@@ -183,7 +189,7 @@ func (f *Feishu) handleAudio(ctx context.Context, handler platform.MessageHandle
 		// file_key is sender-controlled; sanitize before slog.
 		slog.Error("feishu download audio failed", "err", err,
 			"key", osutil.SanitizeForLog(fileKey, 128))
-		f.replyError(ctx, msg.ChatID, msgVoiceDownloadFailed)
+		f.replyError(ctx, msg, msgVoiceDownloadFailed)
 		return
 	}
 
@@ -193,7 +199,7 @@ func (f *Feishu) handleAudio(ctx context.Context, handler platform.MessageHandle
 	text, err := f.transcriber.Transcribe(transcribeCtx, data, mime)
 	if err != nil {
 		slog.Error("feishu transcribe failed", "err", err, "mime", mime, "size", len(data))
-		f.replyError(ctx, msg.ChatID, msgVoiceTranscribeFailed)
+		f.replyError(ctx, msg, msgVoiceTranscribeFailed)
 		return
 	}
 
@@ -204,6 +210,39 @@ func (f *Feishu) handleAudio(ctx context.Context, handler platform.MessageHandle
 
 	msg.Text = text
 	handler(ctx, msg)
+}
+
+// maxTopicRefLen bounds the topic id carried into replies and card values;
+// Feishu message ids are far shorter.
+const maxTopicRefLen = 128
+
+// topicRef is the id a reply in the message's topic is posted against: the
+// topic's root message, or the message itself when it opens the topic. Only
+// a message with a thread_id is in a topic; a quote reply in an ordinary
+// group has a root_id but no thread_id, and its answer goes to the chat.
+func topicRef(threadID, rootID, messageID string) string {
+	if threadID == "" {
+		return ""
+	}
+	ref := rootID
+	if ref == "" {
+		ref = messageID
+	}
+	if len(ref) > maxTopicRefLen {
+		return ""
+	}
+	return ref
+}
+
+// selfTopicRef is the topicRef a reply would open under a plain message
+// (neither thread_id nor root_id): the message itself, the root_id of that
+// topic's replies. A quote reply gets none, since which root a topic under
+// it reports is not pinned down, and stays answered in the chat.
+func selfTopicRef(threadID, rootID, messageID string) string {
+	if threadID != "" || rootID != "" || len(messageID) > maxTopicRefLen {
+		return ""
+	}
+	return messageID
 }
 
 // parseSDKEvent converts a Feishu SDK event to a parsedEvent.
@@ -273,8 +312,10 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 		UserID:    userID,
 		ChatID:    chatID,
 		ChatType:  chatType,
+		ThreadID:  topicRef(larkcore.StringValue(msg.ThreadId), larkcore.StringValue(msg.RootId), messageID),
 		MentionMe: hasMention,
 	}
+	result.SelfThread = selfTopicRef(larkcore.StringValue(msg.ThreadId), larkcore.StringValue(msg.RootId), messageID)
 
 	switch msgType {
 	case "text":

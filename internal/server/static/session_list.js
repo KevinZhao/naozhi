@@ -1,3 +1,4 @@
+// @ts-check
 // session_list.js — the sidebar's session list: the /api/sessions poll and its
 // merge with pending (not yet sent) sessions, the cards and badges, the status
 // bar, the node helpers, and the WS state, subscription and session_state frames.
@@ -18,6 +19,7 @@ import { accessProfileChipHtml, backendDisplayName, backendDisplayVersion } from
 import { _optimisticRunningTimers } from './send_message.js';
 import { fetchEvents, showHistoryRetry } from './event_stream.js';
 import { discoveredKey, getNodeDisplayName, isMultiNode, matchProject, nodeColor, sessionTypeTag, sid } from './session_ident.js';
+import { pendingBackendID } from './features.js';
 import { ICONS } from './icons.js';
 import { registerShell } from './shell.js';
 
@@ -68,14 +70,14 @@ export function restorePending() {
 // sidebar has not painted, only over a live socket. A header rebuild, which
 // paints the chips from cache, drops the validator (setHeaderEffortChip).
 // 8 s timeout: RNEW-UX-003.
-const NOT_MODIFIED = Object.freeze({});
+const NOT_MODIFIED = 'not-modified';
 async function fetchSessionsPayload() {
   const headers = authHeaders();
   const v = sessionList.lastETag;
   if (v && sessionList.lastVersion > 0 && (!v.unpainted || wsm.state === WS_STATES.CONNECTED)) headers['If-None-Match'] = v.etag;
   let etag = '';
   try {
-    const data = await fetchJSON(NZ_CONTRACT.API.sessions, { headers, timeoutMs: 8000, onResponse: r => { etag = r.headers.get('ETag') || ''; } });
+    const data = /** @type {RestResponses['sessions'] | RestResponses['sessions_multi']} */ (await fetchJSON(NZ_CONTRACT.API.sessions, { headers, timeoutMs: 8000, onResponse: r => { etag = r.headers.get('ETag') || ''; } }));
     return data && { data, validator: etag && { etag, unpainted: true } };
   } catch (err) {
     if (err.status === 304) return NOT_MODIFIED;
@@ -109,7 +111,7 @@ function sessionsUnchanged(data, wsConnected) {
 function syncHistory(tag) {
   sessionList.historyPollTag = tag;
   if (tag === sessionList.historyTag) return;
-  const load = tag ? fetchJSON(NZ_CONTRACT.API.sessions_history, { headers: authHeaders(), timeoutMs: 8000 }) : Promise.resolve(null);
+  const load = /** @type {Promise<RestResponses['sessions_history'] | null>} */ (tag ? fetchJSON(NZ_CONTRACT.API.sessions_history, { headers: authHeaders(), timeoutMs: 8000 }) : Promise.resolve(null));
   load.then(h => {
     sessionList.historySessionsData = (h && h.history_sessions) || [];
     sessionList.historyTag = (h && h.history_tag) || '';
@@ -166,10 +168,10 @@ function mergeBackendSessions(polled, backendKeys, pushesBefore) {
   });
 }
 
-// reconcilePending forgets the pending sessions the backend now lists and
-// persists once: the durable blob must drop them, or a reload re-injects a
-// ghost card, and removePendingSession per key would re-serialize the whole
-// blob once per key.
+// reconcilePending forgets the pending sessions the backend now lists, and
+// the sentPicks of sent ones, and persists once: the durable blob must drop
+// them, or a reload re-injects a ghost card, and removePendingSession per key
+// would re-serialize the whole blob once per key.
 function reconcilePending(backendKeys) {
   let reconciledAny = false;
   for (const key of Object.keys(perSession.workspaces)) {
@@ -181,6 +183,7 @@ function reconcilePending(backendKeys) {
     delete perSession.pendingTuning[key];
     reconciledAny = true;
   }
+  for (const key of Object.keys(perSession.sentPicks)) if (backendKeys.has(key)) delete perSession.sentPicks[key];
   if (reconciledAny) persistPending();
 }
 
@@ -200,11 +203,9 @@ function pendingCardFor(key) {
   // The agent chip shows the palette pick off the key tail; a legacy
   // 3-segment key degrades to "general".
   const pendingAgent = parts.length >= 4 && parts[3] ? parts[3] : 'general';
-  // The CLI brand (sidebar icon, chat header) follows the backend pick before
-  // the first message spawns the wrapper; a kiro pick must not show the
-  // claude logomark. With one backend there is no picker and no pick, and the
-  // lone backend is defaultCLIName. See backendDisplayName godoc.
-  const pendingBackend = perSession.backends[key] || '';
+  // The CLI brand (sidebar icon, chat header) follows the backend the first
+  // message will spawn; a kiro session must not show the claude logomark.
+  const pendingBackend = pendingBackendID(key);
   const pendingCLIName = backendDisplayName(pendingBackend) || serverInfo.defaultCLIName;
   // On the default backend the live version (from system/init, refreshed
   // every poll) beats the manifest, which is cached up to 60 s and would flash
@@ -571,7 +572,7 @@ function cliIcon(name) {
   return '<svg class="sc-cli-icon" viewBox="0 0 248 248" fill="none"><path d="M52.4285 162.873L98.7844 136.879L99.5485 134.602L98.7844 133.334H96.4921L88.7237 132.862L62.2346 132.153L39.3113 131.207L17.0249 130.026L11.4214 128.844L6.2 121.873L6.7094 118.447L11.4214 115.257L18.171 115.847L33.0711 116.911L55.485 118.447L71.6586 119.392L95.728 121.873H99.5485L100.058 120.337L98.7844 119.392L97.7656 118.447L74.5877 102.732L49.4995 86.1905L36.3823 76.62L29.3779 71.7757L25.8121 67.2858L24.2839 57.3608L30.6515 50.2716L39.3113 50.8623L41.4763 51.4531L50.2636 58.1879L68.9842 72.7209L93.4357 90.6804L97.0015 93.6343L98.4374 92.6652L98.6571 91.9801L97.0015 89.2625L83.757 65.2772L69.621 40.8192L63.2534 30.6579L61.5978 24.632C60.9565 22.1032 60.579 20.0111 60.579 17.4246L67.8381 7.49965L71.9133 6.19995L81.7193 7.49965L85.7946 11.0443L91.9074 24.9865L101.714 46.8451L116.996 76.62L121.453 85.4816L123.873 93.6343L124.764 96.1155H126.292V94.6976L127.566 77.9197L129.858 57.3608L132.15 30.8942L132.915 23.4505L136.608 14.4708L143.994 9.62643L149.725 12.344L154.437 19.0788L153.8 23.4505L150.998 41.6463L145.522 70.1215L141.957 89.2625H143.994L146.414 86.7813L156.093 74.0206L172.266 53.698L179.398 45.6635L187.803 36.802L193.152 32.5484H203.34L210.726 43.6549L207.415 55.1159L196.972 68.3492L188.312 79.5739L175.896 96.2095L168.191 109.585L168.882 110.689L170.738 110.53L198.755 104.504L213.91 101.787L231.994 98.7149L240.144 102.496L241.036 106.395L237.852 114.311L218.495 119.037L195.826 123.645L162.07 131.592L161.696 131.893L162.137 132.547L177.36 133.925L183.855 134.279H199.774L229.447 136.524L237.215 141.605L241.8 147.867L241.036 152.711L229.065 158.737L213.019 154.956L175.45 145.977L162.587 142.787H160.805V143.85L171.502 154.366L191.242 172.089L215.82 195.011L217.094 200.682L213.91 205.172L210.599 204.699L188.949 188.394L180.544 181.069L161.696 165.118H160.422V166.772L164.752 173.152L187.803 207.771L188.949 218.405L187.294 221.832L181.308 223.959L174.813 222.777L161.187 203.754L147.305 182.486L136.098 163.345L134.745 164.2L128.075 235.42L125.019 239.082L117.887 241.8L111.902 237.31L108.718 229.984L111.902 215.452L115.722 196.547L118.779 181.541L121.58 162.873L123.291 156.636L123.14 156.219L121.773 156.449L107.699 175.752L86.304 204.699L69.3663 222.777L65.291 224.431L58.2867 220.768L58.9235 214.27L62.8713 208.48L86.304 178.705L100.44 160.155L109.551 149.507L109.462 147.967L108.959 147.924L46.6977 188.512L35.6182 189.93L30.7788 185.44L31.4156 178.115L33.7079 175.752L52.4285 162.873Z" fill="#D97757"/></svg>';
 }
 
-function sessionCardHtml(/** @type {SessionSnapshot} */ s) {
+function sessionCardHtml(/** @type {SessionSnapshot & {source?: 'managed' | 'terminal', type_label?: string}} */ s) {
   const sNode = s.node || 'local';
   const isActive = selection.key === s.key && selection.node === sNode;
   const isNew = s.state === 'new';
@@ -601,12 +602,10 @@ function sessionCardHtml(/** @type {SessionSnapshot} */ s) {
   const unreadBadge = (unreadCount > 0 && !isActive)
     ? '<span class="sc-unread" aria-label="' + unreadCount + ' 条未读">' + (unreadCount > 99 ? '99+' : unreadCount) + '</span>'
     : '';
-  // Per-card node badge: the sidebar now lists every connected node's
-  // sessions together (the node picker moved into the New Session modal), so
-  // each non-local card is tagged with its connection to disambiguate. Local
-  // sessions stay unmarked — they're the default and the common case. The
-  // hue is derived from the node id (nodeColor) so it matches the palette's
-  // .cp-node badge and the modal node picker.
+  // Per-card node badge: the sidebar lists every connected node's sessions
+  // together, so each non-local card names its node; local sessions, the
+  // common case, stay unmarked. The hue comes from the node id (nodeColor), so
+  // it matches the palette's .cp-node badge and the modal node picker.
   const nodeBadge = (isMultiNode() && sNode !== 'local')
     ? '<span class="sc-node" data-nz-bg="' + escAttr(nodeColor(sNode)) + '" title="' + escAttr(getNodeDisplayName(sNode)) + '">' + esc(getNodeDisplayName(sNode)) + '</span>'
     : '';
@@ -853,7 +852,7 @@ wsm.onStateChange(wsStateChanged);
 
 // onSessionState applies a pushed process state to the session: the optimistic
 // flip it settles, its bookkeeping, its card, the header and the subscription.
-function onSessionState(msg) {
+function onSessionState(/** @type {WsFrames['session_state']} */ msg) {
   const msgNode = msg.node || 'local';
   const sKey = sid(msg.key, msgNode);
   sessionList.statePushes.at.set(sKey, ++sessionList.statePushes.n);
@@ -914,7 +913,7 @@ function onSessionState(msg) {
 
 // settleTurnBoundary is what a session_state owes the turn it ends: the unread
 // count, the sent-text cache, the HTTP send mark and the git chip.
-function settleTurnBoundary(msg, msgNode, sKey, prevState) {
+function settleTurnBoundary(/** @type {WsFrames['session_state']} */ msg, msgNode, sKey, prevState) {
   // Chat-style unread: a running→ready (or dead) transition means the model
   // just produced a reply. Bump the unread counter unless the operator is
   // already looking at that card — in which case they're reading it live.
@@ -936,9 +935,9 @@ function settleTurnBoundary(msg, msgNode, sKey, prevState) {
 
 // paintSessionCardState patches the session's sidebar card in place: badge,
 // dot, state text, exit chip and unread chip.
-function paintSessionCardState(msg, msgNode, sKey) {
-  let card = null;
-  document.querySelectorAll('.session-card').forEach(c => {
+function paintSessionCardState(/** @type {WsFrames['session_state']} */ msg, msgNode, sKey) {
+  let card = /** @type {HTMLElement | null} */ (null);
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.session-card')).forEach(c => {
     if (c.dataset.key === msg.key && (c.dataset.node || 'local') === msgNode) card = c;
   });
   if (!card) return;
@@ -973,7 +972,7 @@ function paintSessionCardState(msg, msgNode, sKey) {
 //            — detected by the "suspended" reason the server sends for no-process subscribes.
 // Case 3 must NOT fire on normal ready→running transitions for already-subscribed
 // sessions — that would cause full re-render and wipe the optimistic user message.
-function resubscribeOnRunning(msg, msgNode, wasDead) {
+function resubscribeOnRunning(/** @type {WsFrames['session_state']} */ msg, msgNode, wasDead) {
   if (msg.key === selection.key && msgNode === selection.node && msg.state === 'running') {
     const needSub = (
       (sessionStream.subscribedKey !== msg.key && sessionStream._pendingSubscribeKey !== msg.key) || // case 1: not subscribed and no pending subscribe

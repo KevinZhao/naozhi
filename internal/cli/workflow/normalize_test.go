@@ -1,0 +1,255 @@
+package workflow
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+	"unicode/utf8"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/textutil"
+)
+
+// TestItemState walks RFC §4.2's normalization table, CC's special items
+// included.
+func TestItemState(t *testing.T) {
+	t.Parallel()
+	errText := json.RawMessage(`"boom"`)
+	cases := []struct {
+		name    string
+		it      clievent.WorkflowItem
+		want    AgentState
+		wantRaw string
+	}{
+		{"done", clievent.WorkflowItem{State: "done", AgentID: "a1", StartedAt: 1}, AgentDone, ""},
+		{"cached done", clievent.WorkflowItem{State: "done", Cached: true}, AgentDone, ""},
+		{"skipped flag", clievent.WorkflowItem{State: "error", Skipped: true, AgentID: "a1", StartedAt: 1}, AgentSkipped, ""},
+		{"skipped text", clievent.WorkflowItem{State: "error", Error: json.RawMessage(`"skipped by user"`), AgentID: "a1", StartedAt: 1}, AgentSkipped, ""},
+		{"classifier block", clievent.WorkflowItem{State: "error", Blocked: true, Error: errText, QueuedAt: 5}, AgentFailed, ""},
+		{"queue catch", clievent.WorkflowItem{State: "error", Error: errText, QueuedAt: 5}, AgentFailed, ""},
+		{"rate-limit revoke", clievent.WorkflowItem{State: "error", Error: errText, QueuedAt: 5, Tokens: 10}, AgentFailed, ""},
+		{"failed", clievent.WorkflowItem{State: "failed", AgentID: "a1", StartedAt: 1}, AgentFailed, ""},
+		{"probe line 6 B: start, queuedAt only", clievent.WorkflowItem{State: "start", QueuedAt: 5}, AgentQueued, ""},
+		{"rate-limit wait", clievent.WorkflowItem{State: "start", QueuedAt: 5, Tokens: 10, ToolCalls: 2}, AgentQueued, ""},
+		{"no state, not started", clievent.WorkflowItem{}, AgentQueued, ""},
+		{"start", clievent.WorkflowItem{State: "start", AgentID: "a1", StartedAt: 1}, AgentRunning, ""},
+		{"progress with startedAt only", clievent.WorkflowItem{State: "progress", StartedAt: 1}, AgentRunning, ""},
+		{"progress with agentId only", clievent.WorkflowItem{State: "progress", AgentID: "a1"}, AgentRunning, ""},
+		{"unknown", clievent.WorkflowItem{State: "thinking", AgentID: "a1"}, AgentUnknown, "thinking"},
+		{"unknown, long", clievent.WorkflowItem{State: strings.Repeat("x", 40), AgentID: "a1"}, AgentUnknown, strings.Repeat("x", 32) + "..."},
+	}
+	for _, c := range cases {
+		got, raw := itemState(&c.it)
+		if got != c.want || raw != c.wantRaw {
+			t.Errorf("%s: itemState = %q/%q, want %q/%q", c.name, got, raw, c.want, c.wantRaw)
+		}
+		if a := (&agentMemo{}).row(&c.it); a.State != c.want || a.Blocked != c.it.Blocked {
+			t.Errorf("%s: row = %s blocked %v, want %s blocked %v", c.name, a.State, a.Blocked, c.want, c.it.Blocked)
+		}
+	}
+}
+
+func TestStatusMaps(t *testing.T) {
+	t.Parallel()
+	type m = func(string) (Status, string)
+	cases := []struct {
+		name    string
+		f       m
+		in      string
+		want    Status
+		wantRaw string
+	}{
+		{"patch completed", patchStatus, "completed", StatusCompleted, ""},
+		{"patch failed", patchStatus, "failed", StatusFailed, ""},
+		{"patch killed", patchStatus, "killed", StatusKilled, ""},
+		{"patch paused", patchStatus, "paused", StatusPaused, ""},
+		{"patch running", patchStatus, "running", StatusRunning, ""},
+		{"patch pending", patchStatus, "pending", StatusRunning, ""},
+		{"patch other", patchStatus, "adopted", StatusUnknown, "adopted"},
+		{"notification completed", notificationStatus, "completed", StatusCompleted, ""},
+		{"notification failed", notificationStatus, "failed", StatusFailed, ""},
+		{"notification stopped", notificationStatus, "stopped", StatusKilled, ""},
+		{"notification other", notificationStatus, "killed", StatusUnknown, "killed"},
+	}
+	for _, c := range cases {
+		if got, raw := c.f(c.in); got != c.want || raw != c.wantRaw {
+			t.Errorf("%s: %q → %q/%q, want %q/%q", c.name, c.in, got, raw, c.want, c.wantRaw)
+		}
+	}
+	for in, want := range map[string]Status{"completed": StatusCompleted, "failed": StatusFailed, "killed": StatusKilled, "running": "", "stopped": ""} {
+		if got, ok := resultFileStatus(in); got != want || ok != (want != "") {
+			t.Errorf("file %q → %q/%v, want %q", in, got, ok, want)
+		}
+	}
+}
+
+func TestStick(t *testing.T) {
+	t.Parallel()
+	var am agentMemo
+	am.stick("")
+	if am.agentID != "" || am.prev != nil {
+		t.Fatalf("empty id on a fresh row: %+v", am)
+	}
+	am.stick("a1")
+	am.stick("") // rate-limit requeue drops agentId from the item
+	if am.agentID != "a1" || am.prev != nil {
+		t.Fatalf("empty id did not keep the last one: %+v", am)
+	}
+	am.stick("a2") // retry: new attempt, new id
+	if am.agentID != "a2" || fmt.Sprint(am.prev) != "[a1]" {
+		t.Fatalf("retry: %+v", am)
+	}
+	published := am.prev
+	for i := 3; i <= 12; i++ {
+		am.stick(fmt.Sprintf("a%d", i))
+	}
+	if am.agentID != "a12" || fmt.Sprint(am.prev) != "[a4 a5 a6 a7 a8 a9 a10 a11]" {
+		t.Fatalf("history not the newest %d: %+v", maxPrevAgentIDs, am)
+	}
+	if fmt.Sprint(published) != "[a1]" {
+		t.Fatalf("a published PrevAgentIDs slice was mutated: %v", published)
+	}
+	am.stick("a7") // an earlier id coming back leaves the history
+	if am.agentID != "a7" || fmt.Sprint(am.prev) != "[a4 a5 a6 a8 a9 a10 a11 a12]" {
+		t.Fatalf("returning id: %+v", am)
+	}
+	// A memo seeded from a row without agentId (MergeResultFile's input).
+	am = agentMemo{prev: published}
+	am.stick("a1")
+	if am.agentID != "a1" || len(am.prev) != 0 || fmt.Sprint(published) != "[a1]" {
+		t.Fatalf("id back from the history of an id-less row: %+v, published %v", am, published)
+	}
+}
+
+// TestRowError: a string error shows unquoted, anything else as its JSON.
+func TestRowError(t *testing.T) {
+	t.Parallel()
+	for raw, want := range map[string]string{`"boom"`: "boom", `{"code":1}`: `{"code":1}`, `null`: "", `"a\"b"`: `a"b`} {
+		var am agentMemo
+		it := clievent.WorkflowItem{Type: clievent.WorkflowItemAgent, Index: 1, State: "error", Error: json.RawMessage(raw), AgentID: "a1", StartedAt: 1}
+		if got := am.row(&it).Error; got != want {
+			t.Errorf("error %s → %q, want %q", raw, got, want)
+		}
+	}
+}
+
+// TestClipRedactsBeforeTruncating puts a key across each cap: truncating
+// first would cut it below RedactSecrets' minimum tail and leak the stub.
+func TestClipRedactsBeforeTruncating(t *testing.T) {
+	t.Parallel()
+	key := "sk-" + strings.Repeat("A1b2C3d4", 6)
+	for _, max := range []int{maxLabelRunes, maxLastToolRunes, maxToolSummaryRunes, maxErrorRunes, maxHeaderTextRunes} {
+		s := strings.Repeat("x", max-10) + " " + key
+		got := clip(s, max)
+		if strings.Contains(got, "sk-A1b2") {
+			t.Errorf("cap %d: key stub leaked: %q", max, got)
+		}
+		if n := utf8.RuneCountInString(got); n > max+3 {
+			t.Errorf("cap %d: %d runes", max, n)
+		}
+		if naive := textutil.RedactSecrets(textutil.TruncateRunes(s, max)); !strings.Contains(naive, "sk-A1b2") {
+			t.Fatalf("cap %d: the fixture no longer exercises the cut (truncate-then-redact hides it too)", max)
+		}
+	}
+}
+
+// countRedactions swaps the redactor for one that counts. Not parallel-safe.
+func countRedactions(t *testing.T) *atomic.Int64 {
+	t.Helper()
+	var n atomic.Int64
+	orig := redactSecrets
+	redactSecrets = func(s string) string { n.Add(1); return orig(s) }
+	t.Cleanup(func() { redactSecrets = orig })
+	return &n
+}
+
+func agentItem(idx int, label, summary string) clievent.WorkflowItem {
+	return clievent.WorkflowItem{
+		Type: clievent.WorkflowItemAgent, Index: idx, Label: label, PhaseIndex: 1,
+		AgentID: fmt.Sprintf("a%016x", idx), State: "progress", StartedAt: 1,
+		LastToolName: "Bash", LastToolSummary: summary, Error: json.RawMessage(`"e"`),
+	}
+}
+
+// TestMemoSkipsUnchangedStrings: a snapshot repeating a row's strings costs
+// no redaction; changing one string redacts that one only.
+func TestMemoSkipsUnchangedStrings(t *testing.T) {
+	n := countRedactions(t)
+	tr := New(nil)
+	items := []clievent.WorkflowItem{
+		{Type: clievent.WorkflowItemPhase, Index: 1, Title: "Impl"},
+		agentItem(1, "one", "FOO=bar go test"),
+		agentItem(2, "two", "ls"),
+	}
+	snap := func(items []clievent.WorkflowItem) *clievent.Event {
+		return &clievent.Event{Type: "system", SubType: "task_progress", TaskID: "w1", WorkflowProgress: items}
+	}
+	tr.Observe(snap(items), time.Now())
+	first := n.Load()
+	if first == 0 {
+		t.Fatal("first snapshot redacted nothing")
+	}
+	tr.Observe(snap(append([]clievent.WorkflowItem(nil), items...)), time.Now())
+	if d := n.Load() - first; d != 0 {
+		t.Fatalf("unchanged snapshot redacted %d strings, want 0", d)
+	}
+	changed := append([]clievent.WorkflowItem(nil), items...)
+	changed[2].LastToolSummary = "cat FOO=baz"
+	tr.Observe(snap(changed), time.Now())
+	if d := n.Load() - first; d != 1 {
+		t.Fatalf("one changed string redacted %d times, want 1", d)
+	}
+	if got := tr.Load().Workflows[0].Agents[1].LastToolSummary; got != textutil.RedactSecrets("cat FOO=baz") {
+		t.Fatalf("changed string not recomputed: %q", got)
+	}
+}
+
+// TestHeaderStringCaps covers the workflow-level strings' caps.
+func TestHeaderStringCaps(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("é", 500)
+	tr := New(nil)
+	now := time.Now()
+	tr.Observe(&clievent.Event{Type: "system", SubType: "task_started", TaskID: "w1", TaskType: clievent.TaskTypeWorkflow, WorkflowName: long}, now)
+	tr.Observe(&clievent.Event{Type: "system", SubType: "task_progress", TaskID: "w1", TaskSummary: long, Description: long}, now)
+	tr.Observe(&clievent.Event{Type: "system", SubType: "task_updated", TaskID: "w1", Patch: &clievent.TaskPatch{Status: long}}, now)
+	w := tr.Load().Workflows[0]
+	runes := utf8.RuneCountInString
+	if runes(w.Name) != maxLabelRunes+3 || runes(w.Description) != maxHeaderTextRunes+3 ||
+		runes(w.Current) != maxHeaderTextRunes+3 || runes(w.RawStatus) != maxRawRunes+3 {
+		t.Errorf("caps: name %d description %d current %d raw status %d",
+			runes(w.Name), runes(w.Description), runes(w.Current), runes(w.RawStatus))
+	}
+	tr.Observe(&clievent.Event{Type: "system", SubType: "task_notification", TaskID: "w1", Status: "completed", TaskSummary: long}, now)
+	if w := tr.Load().Workflows[0]; runes(w.NotifySummary) != maxHeaderTextRunes+3 {
+		t.Errorf("notify summary: %d runes", runes(w.NotifySummary))
+	}
+}
+
+// TestInterrupted: the synthesized end stops live rows and counts, keeps an
+// end time already known, drops snapshot_stale and leaves w unchanged.
+func TestInterrupted(t *testing.T) {
+	w := &Workflow{
+		TaskID: "w1", Status: StatusRunning, RawStatus: "x", Degraded: DegradedSnapshotStale,
+		Agents: []Agent{{Index: 1, State: AgentDone}, {Index: 2, State: AgentRunning}, {Index: 3, State: AgentQueued}},
+		Counts: Counts{Total: 3, Done: 1, Running: 1, Queued: 1},
+		Phases: []Phase{{Index: 1, Counts: Counts{Total: 3, Done: 1, Running: 1, Queued: 1}}},
+	}
+	got := Interrupted(w, 42)
+	if got.Status != StatusInterrupted || got.RawStatus != "" || got.EndedAt != 42 || got.Degraded != "" {
+		t.Errorf("header %s/%q ended %d degraded %q", got.Status, got.RawStatus, got.EndedAt, got.Degraded)
+	}
+	if got.Agents[1].State != AgentStopped || got.Agents[2].State != AgentStopped || got.Counts.Stopped != 2 || got.Phases[0].Stopped != 2 {
+		t.Errorf("rows %+v counts %+v phases %+v: live agents must stop", got.Agents, got.Counts, got.Phases)
+	}
+	if w.Status != StatusRunning || w.Agents[1].State != AgentRunning || w.Counts.Running != 1 {
+		t.Error("Interrupted modified its input")
+	}
+	w.EndedAt = 7
+	if got := Interrupted(w, 42); got.EndedAt != 7 {
+		t.Errorf("EndedAt %d, want the known 7", got.EndedAt)
+	}
+}

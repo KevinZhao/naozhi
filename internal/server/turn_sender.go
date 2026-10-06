@@ -30,10 +30,7 @@ type turnRouter interface {
 	NotifyIdle()
 }
 
-var (
-	_ turnRouter  = (*session.Router)(nil)
-	_ turn.Sender = turnSender{}
-)
+var _ turn.Sender = turnSender{}
 
 type turnSender struct {
 	router turnRouter
@@ -66,19 +63,21 @@ func (s turnSender) GetOrCreate(ctx context.Context, key string, opts session.Ag
 
 // Send runs the turn on the session GetOrCreate produced; anything else is a
 // wiring fault, reported rather than dereferenced. spec.Passthrough takes the
-// concurrent path only when the session supports it.
+// concurrent path only when the session supports it. Pending IM file refs
+// are written into the session's workspace first.
 func (s turnSender) Send(ctx context.Context, key string, ts turn.Session, text string, images []clievent.Attachment, spec turn.SendSpec, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
 	sess, ok := ts.(*session.ManagedSession)
 	if !ok || sess == nil {
 		return nil, fmt.Errorf("server: turn sent on a session turnSender did not produce (%T)", ts)
 	}
+	images, fileNote := persistPendingFileRefs(sess.Workspace(), images, key)
 	priority := ""
 	if spec.Priority == turn.PriorityNow {
 		priority = "now"
 	}
 	start := time.Now()
 	passthrough := spec.Passthrough && sess.SupportsPassthrough()
-	result, err := sendTurn(ctx, s.notify, key, sess, text, images, onEvent, passthrough, priority)
+	result, err := sendTurn(ctx, s.notify, key, sess, fileNote+text, images, onEvent, passthrough, priority)
 	if err == nil {
 		s.autoSaveCronPrompt(key, text)
 	}

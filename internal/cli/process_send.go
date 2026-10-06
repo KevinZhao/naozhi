@@ -30,7 +30,7 @@ func buildUserEntry(text string, images []clievent.Attachment) clievent.EventEnt
 		Detail:  textutil.TruncateRunes(text, clievent.EventDetailMaxRunes),
 	}
 	if len(images) > 0 {
-		entry.Summary += " [+" + strconv.Itoa(len(images)) + " image(s)]"
+		entry.Summary += clievent.AttachmentSuffix(images)
 		thumbs := make([]string, len(images))
 		if len(images) == 1 {
 			thumbs[0] = MakeThumbnail(images[0].Data, clievent.ThumbMaxDim)
@@ -94,6 +94,10 @@ func buildUserEntry(text string, images []clievent.Attachment) clievent.EventEnt
 // block — not text deltas or ACP tool_call_update progress — so treat it as a
 // tool-activity heartbeat, not "new content". Full-stream consumers use
 // ring.EventLog.Subscribe; Send logs every event under the same lock, nothing is lost.
+//
+// claude's startup-reject result (see noteOutput) is held for up to
+// startupExitGrace: if the CLI then exits as a startup failure, Send returns
+// that exit's error, as a passthrough send does, instead of the result.
 func (p *Process) Send(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
 	switch prev, claimed := p.transition(evSendBegin); {
 	case claimed:
@@ -140,6 +144,9 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 	turnStart := time.Now()
 	lastOutput := turnStart
 	watchdog := time.NewTimer(checkInterval)
+	var held *clievent.SendResult
+	var startupExit *time.Timer
+	var startupExitC <-chan time.Time
 	defer func() {
 		// Drain if the timer fired undrained so leak detectors see a clean state.
 		if !watchdog.Stop() {
@@ -147,6 +154,14 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 			case <-watchdog.C:
 			default:
 			}
+		}
+		if startupExit != nil {
+			startupExit.Stop()
+		}
+		// The held result was the turn's only one, so an abort armed while it
+		// was held has no result left to take it.
+		if held != nil {
+			p.turn.abortRequested.clear()
 		}
 	}()
 
@@ -165,6 +180,12 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 			if !ok {
 				// eventCh closed — process exited. Fall back to ring.EventLog for a result
 				// readLoop logged but eventCh dropped or delivered too late.
+				if held != nil {
+					if _, _, failed := p.StartupFailure(); failed {
+						return nil, p.exitErr()
+					}
+					return held, nil
+				}
 				if sr := p.findResultSince(turnStartMS); sr != nil {
 					return sr, nil
 				}
@@ -224,8 +245,16 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 				}
 				p.turn.mu.Unlock()
 				sr := resultFromEvent(ev)
+				if held == nil && ev.SubType == "error_during_execution" && !ev.Aborted && !p.sawOutput.Load() {
+					held = &sr
+					startupExit = time.NewTimer(startupExitGrace)
+					startupExitC = startupExit.C
+					continue
+				}
 				return &sr, nil
 			}
+		case <-startupExitC:
+			return held, nil
 		case <-watchdog.C:
 			sr, err := p.handleWatchdogTick(time.Now(), lastOutput, turnStart, turnStartMS, noOutputDur, totalDur)
 			if sr != nil || err != nil {
@@ -236,6 +265,10 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 		}
 	}
 }
+
+// startupExitGrace bounds how long Send holds claude's startup-reject result
+// for the exit that names its cause; the CLI exits right after writing it.
+var startupExitGrace = 3 * time.Second
 
 // clearInflightFlags resets the interrupt atomics after a watchdog kill: a
 // leftover flag would make a future Send on a recycled Process burn the 500ms

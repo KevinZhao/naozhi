@@ -27,7 +27,7 @@ func trimUnicodeSpace(s string) string {
 	return strings.TrimFunc(s, unicode.IsSpace)
 }
 
-// replyText sends a text reply to msg.ChatID via the matching platform,
+// replyText sends a text reply to msg's chat and thread via the matching platform,
 // logging but not returning errors. Returns false (no-op) when the platform
 // is unregistered so callers can skip follow-up logic.
 func (d *Dispatcher) replyText(ctx context.Context, msg platform.IncomingMessage, text string, log *slog.Logger) bool {
@@ -35,7 +35,7 @@ func (d *Dispatcher) replyText(ctx context.Context, msg platform.IncomingMessage
 	if p == nil {
 		return false
 	}
-	if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: text}); err != nil {
+	if _, err := p.Reply(ctx, replyDestOf(msg).text(text)); err != nil {
 		if log != nil {
 			log.Warn("reply failed", "err", err)
 		} else {
@@ -65,7 +65,7 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 		d.handleUrgentCommand(ctx, msg, cmd.Arg, log)
 		return true
 	case turn.CmdUrgentUsage:
-		d.replyText(ctx, msg, "用法：/urgent <紧急消息>（该消息会立即中断正在进行的回复）", log)
+		d.replyText(ctx, msg, "用法：/urgent <紧急消息>（该消息会中断正在进行的回复；正在运行的工具需先结束）", log)
 		return true
 	}
 	trimmed = cmd.Text
@@ -105,7 +105,7 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 		d.handleProjectCommand(ctx, msg, trimmed, log)
 		return true
 
-	case trimmed == "/stop" || strings.HasPrefix(trimmed, "/stop "):
+	case isStopCommand(trimmed):
 		d.handleStopCommand(ctx, msg, log)
 		return true
 
@@ -126,13 +126,14 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 	}
 }
 
-// handleStopCommand aborts the in-flight turn for this chat's session via the
-// CLI's control_request interrupt (ACP sessions fall back to Interrupt()). In
+// handleStopCommand aborts the in-flight turn of the session msg routes to
+// (sessionChatID: a thread's own in a group chat) via the CLI's
+// control_request interrupt (ACP sessions fall back to Interrupt()). In
 // passthrough mode pending slots stay queued — only the active turn drops. The
 // interrupt is broadcast across every agent the chat could have a live session
 // for, so /stop also works for agent-command turns (#1944).
 func (d *Dispatcher) handleStopCommand(ctx context.Context, msg platform.IncomingMessage, log *slog.Logger) {
-	outcome := d.interruptChat(msg.Platform, msg.ChatType, msg.ChatID)
+	outcome := d.interruptChat(msg.Platform, msg.ChatType, d.sessionChatID(msg))
 	switch outcome {
 	case sessionview.InterruptSent:
 		d.replyText(ctx, msg, "已中断当前回复。", log)
@@ -200,7 +201,7 @@ func (d *Dispatcher) handleUrgentCommand(ctx context.Context, msg platform.Incom
 	// Resolve via KeyResolver so /urgent gets the same project-bound opts as
 	// the main IM path (docs/rfc/key-resolver.md §2.1 #3).
 	agentID := "general"
-	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, d.sessionChatID(msg), agentID)
 	o := d.newIMOrigin(msg, log, key, agentID, opts, imUrgent, len(text), 0)
 	d.submit(ctx, o, turn.Request{Key: key, Text: text, Priority: turn.PriorityNow})
 }
@@ -211,14 +212,14 @@ func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.Incomin
 		"  /new [agent] — 重置会话\n" +
 		"  /clear — 重置会话（同 /new）\n" +
 		"  /stop — 中断当前回复（保留后续排队消息）\n" +
-		"  /urgent <消息> — 紧急打断并优先处理该消息\n" +
+		"  /urgent <消息> — 中断当前回复并优先处理该消息（正在运行的工具需先结束）\n" +
 		"  /cd <路径> — 切换工作目录\n" +
 		"  /pwd — 显示当前工作目录\n" +
 		"  /model [名称|reset] [agent] — 查看/切换模型\n" +
 		"  /effort [档位|reset] [agent] — 查看/切换思考强度（kiro）\n" +
 		"  /backend [id|reset] [agent] — 查看/切换 CLI backend（/new 后生效）\n" +
 		"  /project [name|off|list] — 项目绑定\n" +
-		"  /cron <add|list|del|pause|resume> — 定时任务"
+		"  /cron <add|list|del|pause|resume|mode> — 定时任务"
 	if len(d.agentCommands) > 0 {
 		help += "\n\n可用 Agent:"
 		// Sort so /help output is stable (map iteration order is random).
@@ -253,25 +254,27 @@ func (d *Dispatcher) resolveAgentToken(agentToReset string) (string, bool) {
 	return "", false
 }
 
-// handleNewCommand resets the chat's session for /new and /clear; arg is the
-// optional agent token. The reset goes through Turns.Reset, which discards
-// the key's queue (clearing the dropped messages' ⏳) before the session
-// reset retires the key (#2185), and keeps the /cd workspace override.
+// handleNewCommand resets the session msg routes to (sessionChatID) for /new
+// and /clear; arg is the optional agent token. The reset goes through
+// Turns.Reset, which discards the key's queue (clearing the dropped messages'
+// ⏳) before the session reset retires the key (#2185), and keeps the /cd
+// workspace override.
 func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.IncomingMessage, arg string, log *slog.Logger) {
 	// agentCommands keys are lowercased in applyDefaults; match case-insensitively.
 	agentToReset := strings.ToLower(trimUnicodeSpace(arg))
+	chatID := d.sessionChatID(msg)
 
 	// Project-bound chat: /new resets planner, /new {agent} resets that agent.
 	// Read the binding through the resolver so /new and the IM hot path see
 	// the same snapshot (#648).
 	if b := d.resolver.ProjectBindingForChat(msg.Platform, msg.ChatType, msg.ChatID); b.Bound {
 		if agentToReset == "" {
-			plannerKey := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, "general")
+			plannerKey := d.keyForChat(msg.Platform, msg.ChatType, chatID, "general")
 			d.turns.Reset(ctx, plannerKey, false)
 			d.replyText(ctx, msg, "项目 "+b.Name+" 的 planner 已重置。", log)
 		} else {
 			if id, ok := d.resolveAgentToken(agentToReset); ok {
-				key := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, id)
+				key := d.keyForChat(msg.Platform, msg.ChatType, chatID, id)
 				d.turns.Reset(ctx, key, false)
 				d.replyText(ctx, msg, "会话已重置 ("+id+")。", log)
 			} else {
@@ -302,7 +305,7 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 			return
 		}
 	}
-	key := sessionkey.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+	key := sessionkey.SessionKey(msg.Platform, msg.ChatType, chatID, agentID)
 	d.turns.Reset(ctx, key, false)
 	label := ""
 	if agentID != "general" {
@@ -312,7 +315,7 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 	log.Info("session reset by user", "agent", agentID)
 }
 
-// handleCronCommand dispatches /cron subcommands (add, list, del, pause, resume).
+// handleCronCommand dispatches /cron subcommands (add, list, del, pause, resume, mode).
 func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) {
 	if d.platforms[msg.Platform] == nil {
 		return
@@ -338,15 +341,18 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 		d.handleCronPause(msg, parts, reply, log)
 	case "resume":
 		d.handleCronResume(msg, parts, reply, log)
+	case "mode":
+		d.handleCronMode(msg, parts, reply, log)
 	default:
-		reply("用法: /cron <add|list|del|pause|resume>\n" +
+		reply("用法: /cron <add|list|del|pause|resume|mode>\n" +
 			"  /cron add \"@every 30m\" 检查服务状态\n" +
 			"  /cron add \"0 9 * * 1-5\" /review 扫描 open PRs\n" +
 			"  /cron add --keep-context \"0 18 * * *\" 接着昨天的进度写日报\n" +
 			"  /cron list\n" +
 			"  /cron del <id>\n" +
 			"  /cron pause <id>\n" +
-			"  /cron resume <id>")
+			"  /cron resume <id>\n" +
+			"  /cron mode <id> fresh|keep")
 	}
 }
 
@@ -355,8 +361,8 @@ const cronAddUsage = "用法: /cron add [--keep-context] \"<schedule>\" <prompt>
 
 // handleCronAdd implements /cron add [--keep-context] "<schedule>" <prompt>.
 // IM jobs start every run from a fresh session unless --keep-context is
-// given: the chat has no other way to see or change the mode, and a kept
-// context grows by one turn per run.
+// given, because a kept context grows by one turn per run; /cron mode
+// switches it later.
 func (d *Dispatcher) handleCronAdd(msg platform.IncomingMessage, parts []string, reply func(string), log *slog.Logger) {
 	if len(parts) < 3 {
 		reply(cronAddUsage + "\n例: /cron add \"@every 30m\" 检查服务状态")
@@ -391,19 +397,19 @@ func (d *Dispatcher) handleCronAdd(msg platform.IncomingMessage, parts []string,
 		job.ID,
 		osutil.SanitizeForLog(job.Schedule, 256),
 		formatCronNext(next),
-		cronContextNote(job.FreshContext)))
+		cronContextNote(job.ID, job.FreshContext)))
 	log.Info("cron job created", "id", job.ID,
 		"schedule", osutil.SanitizeForLog(job.Schedule, 256),
 		"fresh_context", job.FreshContext)
 }
 
-// cronContextNote tells the creator which context mode the new job runs in
-// and how to get the other one.
-func cronContextNote(fresh bool) string {
+// cronContextNote tells the creator which context mode job id runs in and
+// the /cron mode command that switches to the other one.
+func cronContextNote(id string, fresh bool) string {
 	if fresh {
-		return "每次执行都从新会话开始；需要延续上次的上下文，请创建时加 --keep-context"
+		return "每次执行都从新会话开始；需要延续上次的上下文，发送 /cron mode " + id + " keep"
 	}
-	return "每次执行延续同一会话的上下文"
+	return "每次执行延续同一会话的上下文；需要每次从新会话开始，发送 /cron mode " + id + " fresh"
 }
 
 // cronAddErrReply maps a /cron add failure's wire code (from
@@ -473,7 +479,9 @@ func (d *Dispatcher) handleCronList(msg platform.IncomingMessage, reply func(str
 		if !j.FreshContext {
 			status = " [保留上下文]"
 		}
-		if j.AutoPaused {
+		if j.AutoPauseTransient {
+			status += " [自动暂停：后端持续故障]"
+		} else if j.AutoPaused {
 			status += " [自动暂停：连续失败]"
 		} else if j.Paused {
 			status += " [暂停]"
@@ -485,7 +493,7 @@ func (d *Dispatcher) handleCronList(msg platform.IncomingMessage, reply func(str
 	reply(sb.String())
 }
 
-// cronMutationErrReply maps a /cron del|pause|resume failure to a specific
+// cronMutationErrReply maps a /cron del|pause|resume|mode failure to a specific
 // user-facing reply so an ambiguous prefix or a pause/resume state conflict
 // is distinguishable from a bad ID. code is the wire code from
 // CronCommands.ClassifyError (#1164); raw err.Error() is never echoed (it
@@ -550,6 +558,53 @@ func (d *Dispatcher) handleCronResume(msg platform.IncomingMessage, parts []stri
 	}
 	reply(fmt.Sprintf("Job %s 已恢复。Next: %s", j.ID, formatCronNext(next)))
 	log.Info("cron job resumed", "id", j.ID)
+}
+
+// cronModeUsage is the /cron mode synopsis shown on a malformed invocation.
+const cronModeUsage = "用法: /cron mode <id> fresh|keep"
+
+// handleCronMode implements /cron mode <id> fresh|keep: whether the job's runs
+// start from a fresh session, from its next run on. The mode word is
+// case-insensitive and keep-context is an alias of keep, as in /cron add.
+func (d *Dispatcher) handleCronMode(msg platform.IncomingMessage, parts []string, reply func(string), log *slog.Logger) {
+	var args []string
+	if len(parts) == 3 {
+		args = strings.Fields(parts[2])
+	}
+	if len(args) != 2 {
+		reply(cronModeUsage)
+		return
+	}
+	id := args[0]
+	if len(id) > maxCronIDLen {
+		reply("无效 ID")
+		return
+	}
+	var fresh bool
+	switch strings.ToLower(args[1]) {
+	case "fresh":
+		fresh = true
+	case "keep", "keep-context":
+	default:
+		reply(cronModeUsage)
+		return
+	}
+	j, err := d.scheduler.SetFreshContext(id, msg.Platform, msg.ChatID, fresh)
+	if err != nil {
+		log.Warn("cron SetFreshContext failed", "err", err, "id_prefix", id)
+		reply(cronMutationErrReply("修改", d.scheduler.ClassifyError(err)))
+		return
+	}
+	mode := "延续同一会话的上下文"
+	if j.FreshContext {
+		mode = "都从新会话开始"
+	}
+	text := fmt.Sprintf("Job %s 已改为每次执行%s（下次执行生效）。", j.ID, mode)
+	if j.Paused {
+		text += "\n该任务当前已暂停，发送 /cron resume " + j.ID + " 恢复。"
+	}
+	reply(text)
+	log.Info("cron job context mode set", "id", j.ID, "fresh_context", j.FreshContext)
 }
 
 // validateCronIDArg checks parts has a third token (the job ID) within

@@ -6,6 +6,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -14,7 +15,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/shim"
 )
@@ -161,6 +164,29 @@ func shutdownShimViaReconnect(
 	if sigusr2Fallback {
 		shim.SignalAfterFailedReconnect(state.ShimPID, connErr)
 	}
+}
+
+// reconnectHooks is what SpawnReconnect borrows from the session layer.
+// ResolveUnknown reads the main transcript's tail (the file markTranscript
+// marks) for the session the shim names, else the stored one: a backlog of
+// background-task frames alone cannot say whether the turn ended. Anything it
+// cannot read counts as still running.
+func reconnectHooks(claudeDir string, backendDirs map[string]string, backendID, workspace, storedSID string, knownWorkflows []string) cli.ReconnectHooks {
+	return cli.ReconnectHooks{KnownWorkflowTasks: knownWorkflows, ResolveUnknown: func(helloSID string) bool {
+		sid := cmp.Or(helloSID, storedSID)
+		if !claudefs.IsValidSessionID(sid) {
+			return false
+		}
+		path := mainTranscript(claudeDir, backendDirs, backendID, workspace, sid)
+		if path == "" {
+			return false
+		}
+		ended, err := claudefs.TranscriptTurnEnded(path)
+		if err != nil {
+			slog.Debug("reconnect: transcript tail unreadable, keeping turn running", "session_id", sid, "err", err)
+		}
+		return ended
+	}}
 }
 
 // firstArgvDivergence returns the first differing token of two argv slices as
@@ -367,6 +393,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		proc, replays, err := recWrapper.SpawnReconnect(
 			spawnCtx, state.Key, lastSeq, recWrapper.Protocol,
 			r.spawn.noOutputTimeout, r.spawn.totalTimeout,
+			reconnectHooks(r.hist.claudeDir, r.hist.backendDirs, recBackendID, sess.Workspace(), state.SessionID, sess.WorkflowBoard().knownTaskIDs()),
 		)
 		spawnCancel()
 		if err != nil {
@@ -411,47 +438,18 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		// the shim saw before restart. Without feeding those to the Linker the
 		// dashboard drill-in serves 202 forever. Walk the replay once and kick an
 		// async Resolve per unique task_id (Resolve is idempotent + cached).
-		if linker := proc.Linker(); linker != nil && len(replays) > 0 {
-			seen := make(map[string]struct{})
-			for _, replay := range replays {
-				if replay.Type != "replay" {
-					continue
+		if linker := proc.Linker(); linker != nil {
+			for _, ev := range replayLinkerTasks(recWrapper.Protocol, replays) {
+				name := strings.TrimSpace(ev.Description)
+				if i := strings.IndexByte(name, ':'); i > 0 {
+					name = strings.TrimSpace(name[:i])
 				}
-				events, _, err := recWrapper.Protocol.ReadEvent(replay.Line)
-				if err != nil || len(events) == 0 {
-					continue
-				}
-				// Replay frames map 1:1 to a semantic event in practice; iterating
-				// keeps the linker resilient if a protocol fans out from one frame.
-				for _, ev := range events {
-					if ev.Type != "system" || ev.SubType != "task_started" {
-						continue
-					}
-					if ev.TaskID == "" || ev.ToolUseID == "" {
-						continue
-					}
-					// Skip local_bash — no internal transcript on disk.
-					if ev.TaskType == "local_bash" {
-						continue
-					}
-					if _, dup := seen[ev.TaskID]; dup {
-						continue
-					}
-					seen[ev.TaskID] = struct{}{}
-					name := strings.TrimSpace(ev.Description)
-					if i := strings.IndexByte(name, ':'); i > 0 {
-						name = strings.TrimSpace(name[:i])
-					}
-					taskID, toolUseID := ev.TaskID, ev.ToolUseID
-					desc := ev.Description
-					// wallclock 0 = skip Resolve's staleness filter: replay frames
-					// carry no per-event timestamp, and any time.Now()-derived value
-					// would be newer than the real task and let every candidate
-					// pass anyway. Fail open honestly; Resolve's other guards
-					// (sessionID match, toolUseID dedup, modtime order) still apply.
-					wallclock := int64(0)
-					go linker.Resolve(parentCtx, taskID, toolUseID, name, desc, wallclock)
-				}
+				// wallclock 0 = skip Resolve's staleness filter: replay frames
+				// carry no per-event timestamp, and any time.Now()-derived value
+				// would be newer than the real task and let every candidate
+				// pass anyway. Fail open honestly; Resolve's other guards
+				// (sessionID match, toolUseID dedup, modtime order) still apply.
+				go linker.Resolve(parentCtx, ev.TaskID, ev.ToolUseID, name, ev.Description, 0)
 			}
 		}
 
@@ -486,6 +484,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		// Bound once sess holds proc: an abandoned reattach above closes proc
 		// for a session that never held it.
 		sess.setEndMark(mark)
+		bookWorkflows(sess, proc, r.hist.projectsRoot, func() { r.ss.Update(markChanged); r.notifyChange() }, r.BumpVersion)
 		bookProcessEnd(sess, proc, r.hist.claudeDir)
 
 		// Persist sink goes last so the history inject + shim replay above land
@@ -678,4 +677,40 @@ func (r *Router) StartShimReconcileLoop(ctx context.Context, interval time.Durat
 			}
 		}
 	}()
+}
+
+// replayTaskStartedPrefix is how the claude CLI begins every task_started
+// line. The replay holds up to 10000 lines, mostly progress frames and
+// workflow snapshots worth ~1ms each to decode, so the walk decodes only
+// lines with this prefix.
+const replayTaskStartedPrefix = `{"type":"system","subtype":"task_started"`
+
+// replayLinkerTasks returns the task_started events in a shim replay that the
+// SubagentLinker can resolve, first occurrence per task_id, in replay order.
+// Replay frames map 1:1 to a semantic event in practice; iterating keeps the
+// walk resilient if a protocol fans out from one frame.
+func replayLinkerTasks(proto cli.Protocol, replays []shim.ServerMsg) []clievent.Event {
+	var out []clievent.Event
+	seen := make(map[string]struct{})
+	for _, replay := range replays {
+		if replay.Type != "replay" || !strings.HasPrefix(replay.Line, replayTaskStartedPrefix) {
+			continue
+		}
+		events, _, err := proto.ReadEvent(replay.Line)
+		if err != nil {
+			continue
+		}
+		for _, ev := range events {
+			if ev.Type != "system" || ev.SubType != "task_started" ||
+				ev.TaskID == "" || ev.ToolUseID == "" || cli.LinkerSkipsTaskType(ev.TaskType) {
+				continue
+			}
+			if _, dup := seen[ev.TaskID]; dup {
+				continue
+			}
+			seen[ev.TaskID] = struct{}{}
+			out = append(out, ev)
+		}
+	}
+	return out
 }

@@ -91,7 +91,9 @@ func (s *ManagedSession) updateCLIIdentity(mut func(cliIdentityBox) cliIdentityB
 	}
 }
 
-// Backend returns the backend ID ("" when the router default is in effect).
+// Backend returns the resolved backend ID stamped at spawn, restore or shim
+// reconnect (wrapperFor's effective ID). It is "" only when none was recorded;
+// callers treat that as the router default.
 func (s *ManagedSession) Backend() string { return s.loadCLIIdentity().backend }
 
 // SetBackend records the backend ID for this session. Called at spawn time

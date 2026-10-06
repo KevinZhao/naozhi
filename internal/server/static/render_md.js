@@ -1,10 +1,8 @@
 // render_md.js — markdown / KaTeX / mermaid rendering (#2558 D4).
 //
-// Moved verbatim out of dashboard.js (`git diff --color-moved` shows this as a
-// pure move; only the import/export lines below are new). This is the
-// dashboard's XSS-critical surface — every renderer here must keep routing
-// untrusted text through esc()/escAttr()/safeUrl(); the sanitiser contract
-// tests (static_sanitize_test.go, static_markdown_p3_test.go) pin it.
+// The dashboard's XSS-critical surface: every renderer here routes untrusted
+// text through esc()/escAttr()/safeUrl(); static_sanitize_test.go,
+// static_markdown_p3_test.go and scripts/render-md.test.mjs pin it.
 //
 // Layering: imports nz_util, the URL / entity sanitisers from utilities.js
 // and the path-shape tests from the file_ref_parse.js leaf (file-reference
@@ -115,12 +113,19 @@ function mergeProseDollarBlocks(parts) {
   return out;
 }
 
+// replaceNul turns U+0000 into U+FFFD (CommonMark 2.3): the inline passes
+// delimit placeholders with \x00, and a source NUL could forge one.
+function replaceNul(s) {
+  return s.indexOf('\x00') === -1 ? s : s.replace(/\x00/g, '\uFFFD');
+}
+
 function renderMdUncached(s) {
   // Normalize CRLF/CR to LF up front. Source can be Windows-pasted text or
   // IM payloads carrying \r\n. Without this every per-line regex below
   // (LIST_ITEM_RE, heading, table) would silently miss-match on the trailing
   // \r and demote rich blocks to plain <br> spans.
   if (s.indexOf('\r') !== -1) s = s.replace(/\r\n?/g, '\n');
+  s = replaceNul(s);
   // Split by fenced code blocks and display math blocks (including LaTeX
   // environments like \begin{aligned}...\end{aligned}).
   const parts = mergeProseDollarBlocks(s.split(BLOCK_SPLIT_RE));
@@ -172,20 +177,16 @@ function renderFence(part) {
   // Info string → lang: first word, cut at whitespace / `:` / `{` so
   // `python:main.py` and `js {1,3}` yield `python` / `js`; restricted to a
   // safe charset so `c++` / `c#` / `objective-c` survive intact while stray
-  // punctuation never reaches data-lang. The old `(\w*)` stopped at the
-  // first non-word char and left the remainder (`++`) in the code body.
+  // punctuation never reaches data-lang.
   const lang = m ? (m[1].trim().split(/[\s:{]/)[0] || '').replace(/[^\w+#.\-]/g, '') : '';
   // Unclosed fence (streaming tail: BLOCK_SPLIT_RE needs a closing ```, so
   // the remainder arrives as a plain part that still starts with ```):
-  // strip only the opening ```lang line. The old slice(3, -3) assumed a
-  // closing fence and ate the last 3 characters of live output.
+  // strip only the opening ```lang line, never the tail of live output.
   const code = oneLine
     ? part.replace(/^```/, '').replace(/```$/, '')
     : m ? m[2].replace(/\n$/, '') : part.replace(/^```[^\n]*\n?/, '');
-  // FENCE_RENDERERS is a Map, not a plain object, so a fence lang of
-  // `constructor` / `__proto__` / `toString` cannot resolve to an inherited
-  // Object.prototype member — only a lang explicitly registered below ever
-  // dispatches.
+  // FENCE_RENDERERS is a Map, so a fence lang such as `constructor` or
+  // `__proto__` cannot resolve to an inherited Object.prototype member.
   const fenceRenderer = FENCE_RENDERERS.get(lang);
   if (fenceRenderer) return fenceRenderer(code);
   // Path-list fence: a language-less block whose every non-empty line is a
@@ -279,11 +280,9 @@ function renderProse(part) {
       return '\x00ILM' + (inlineMathTokens.length - 1) + '\x00';
     });
   }
-  // ctx accumulates block-level output (chunks) + single join() at the end
-  // rather than `html +=` per line: V8 reallocates the underlying string on
-  // every concat past the small-string threshold, which is O(n^2) over line
-  // count. A 200-line response rendered ~50 times per history replay was the
-  // dominant cost in the text-event path. listStack/baselineCols are the
+  // ctx collects block-level output in chunks joined once at the end: `html +=`
+  // per line reallocates the string each time, O(n^2) over line count on a
+  // path history replay re-renders many times. listStack/baselineCols are the
   // list-nesting state LINE_HANDLERS read and mutate; `i` lets a handler
   // consume extra lines (blockquote/table lookahead) by advancing it.
   const ctx = { chunks: [], listStack: [], baselineCols: -1, lines: part.split('\n'), i: 0 };
@@ -501,12 +500,27 @@ const LINE_HANDLERS = [
 /* Inline markdown: bold, italic, code, links, math */
 // `[text]( dest "title" )` — dest is a run of non-space/non-paren chars with
 // at most one nested `(...)` group; the title group is optional; CommonMark
-// permits whitespace padding on both sides of the body.
-const MD_LINK_RE = /\[([^\]]+)\]\(\s*((?:[^()\s]|\([^()\s]*\))+)(?:\s+(?:"([^"]*)"|'([^']*)'))?\s*\)/g;
+// permits whitespace padding on both sides of the body. Dest and title
+// exclude \x00 so no placeholder is restored inside an attribute value.
+const MD_LINK_RE = /\[([^\]]+)\]\(\s*((?:[^()\s\x00]|\([^()\s\x00]*\))+)(?:\s+(?:"([^"\x00]*)"|'([^'\x00]*)'))?\s*\)/g;
 // Bare-URL autolink. Applied only to text OUTSIDE already-emitted <a>…</a>
-// so a URL inside a link's label never becomes a nested anchor.
-const MD_AUTOLINK_RE = /(^|[^"'>])(https?:\/\/(?:(?!&lt;|&gt;)[^\s<)}\]\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65])+)/g;
+// so a URL inside a link's label never becomes a nested anchor; it stops at
+// a \x00 placeholder for the same reason as MD_LINK_RE.
+const MD_AUTOLINK_RE = /(^|[^"'>])(https?:\/\/(?:(?!&lt;|&gt;)[^\s<)}\]\x00\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65])+)/g;
 const MD_ANCHOR_SPLIT_RE = /(<a [^>]*>[\s\S]*?<\/a>)/;
+// Memory wiki-link `[[slug]]`. See docs/rfc/memory-link-rendering.md.
+function memlinkHtml(slug) {
+  var m = slug.match(/^(feedback|project|user|reference)_(.+)$/);
+  var type = m ? m[1] : 'memory';
+  var label = (m ? m[2] : slug).split('_').slice(-3).join('_');
+  var icon = ({ feedback: '💡', project: '📌', user: '👤', reference: '🔗', memory: '🧠' })[type];
+  var ariaLabel = 'memory 引用：[[' + slug + ']]';
+  return '<span class="md-memlink" data-slug="' + escAttr(slug) +
+    '" data-type="' + type + '" tabindex="0" role="link"' +
+    ' aria-label="' + escAttr(ariaLabel) + '">' +
+    '<span class="md-memlink-icon" aria-hidden="true">' + icon + '</span>' +
+    '<span class="md-memlink-label">' + esc(label) + '</span></span>';
+}
 function inlineMd(s) {
   // `code` spans extracted FIRST so later passes never peek inside them.
   const codeTokens = [];
@@ -517,36 +531,25 @@ function inlineMd(s) {
       return '\x00CODE' + idx + '\x00';
     });
   }
-  // Inline math extracted before HTML escaping, via \x00 delimiters.
+  // Inline math extracted before HTML escaping, via \x00 delimiters. Math
+  // wrapping a code placeholder stays text: KaTeX copies its source into an
+  // error span's title, where the code restore would land inside it.
   const mathTokens = [];
   if (s.indexOf('$') !== -1 || s.indexOf('\\(') !== -1) {
+    const stash = (match, tex) => (tex.indexOf('\x00') !== -1 ? match
+      : '\x00KTX' + (mathTokens.push(renderKatex(tex, false)) - 1) + '\x00');
     // `$...$`: non-alphanumeric outside + isMathInline on the inside.
-    s = s.replace(/(?<![A-Za-z0-9])\$([^\s\$][^\$\n]*?[^\s\$]|[^\s\$])\$(?![A-Za-z0-9])/g, function(match, tex) {
-      if (!isMathInline(tex)) return match;
-      const idx = mathTokens.length;
-      mathTokens.push(renderKatex(tex, false));
-      return '\x00KTX' + idx + '\x00';
-    });
-    s = s.replace(/\\\((.+?)\\\)/g, function(_, tex) {
-      const idx = mathTokens.length;
-      mathTokens.push(renderKatex(tex, false));
-      return '\x00KTX' + idx + '\x00';
-    });
+    s = s.replace(/(?<![A-Za-z0-9])\$([^\s\$][^\$\n]*?[^\s\$]|[^\s\$])\$(?![A-Za-z0-9])/g,
+      (match, tex) => (isMathInline(tex) ? stash(match, tex) : match));
+    s = s.replace(/\\\((.+?)\\\)/g, stash);
   }
   s = esc(s);
-  // Memory wiki-link `[[slug]]`, substituted before `[link](url)` so the
-  // two grammars cannot collide. See docs/rfc/memory-link-rendering.md.
+  // Wiki-links run before `[link](url)` so the grammars cannot collide, and
+  // are stashed like code spans so `__` cannot rewrite a slug's attributes.
+  const memTokens = [];
   s = s.replace(/\[\[([a-zA-Z0-9_\-]{1,64})\]\]/g, function(_, slug) {
-    var m = slug.match(/^(feedback|project|user|reference)_(.+)$/);
-    var type = m ? m[1] : 'memory';
-    var label = (m ? m[2] : slug).split('_').slice(-3).join('_');
-    var icon = ({ feedback: '💡', project: '📌', user: '👤', reference: '🔗', memory: '🧠' })[type];
-    var ariaLabel = 'memory 引用：[[' + slug + ']]';
-    return '<span class="md-memlink" data-slug="' + escAttr(slug) +
-      '" data-type="' + type + '" tabindex="0" role="link"' +
-      ' aria-label="' + escAttr(ariaLabel) + '">' +
-      '<span class="md-memlink-icon" aria-hidden="true">' + icon + '</span>' +
-      '<span class="md-memlink-label">' + esc(label) + '</span></span>';
+    memTokens.push(memlinkHtml(slug));
+    return '\x00MEM' + (memTokens.length - 1) + '\x00';
   });
   // SECURITY CONTRACT: bold/italic regex must run AFTER esc(s) and the
   // code/wiki-link passes above — same for strike/link below (`.+?`
@@ -568,10 +571,10 @@ function inlineMd(s) {
     const titleAttr = title ? ' title="' + escAttr(decodeEscEntities(title)) + '"' : '';
     if (safe === '#') {
       // Local-file link rescue: `urlEsc` is tokenized, not raw text —
-      // reject a `<`-bearing or \x00-bearing target before it reaches
-      // fileRefCode, and require a real extension.
+      // reject a `<`-bearing target before it reaches fileRefCode, and
+      // require a real extension.
       const target = urlEsc.trim();
-      if (target.indexOf('<') === -1 && target.indexOf('\x00') === -1 && isFileRefCandidate(target)) {
+      if (target.indexOf('<') === -1 && isFileRefCandidate(target)) {
         const { path: bare } = splitPathLine(target);
         const base = bare.slice(bare.lastIndexOf('/') + 1);
         if (FILE_REF_HAS_EXT.test(base)) return fileRefCode(target);
@@ -594,12 +597,15 @@ function inlineMd(s) {
       ? autolinkSeg(s)
       : s.split(MD_ANCHOR_SPLIT_RE).map((seg, k) => (k % 2 ? seg : autolinkSeg(seg))).join('');
   }
+  if (memTokens.length > 0) {
+    s = s.replace(/\x00MEM(\d+)\x00/g, function(_, idx) { return memTokens[+idx] || ''; });
+  }
   if (mathTokens.length > 0) {
-    s = s.replace(/\x00KTX(\d+)\x00/g, function(_, idx) { return mathTokens[+idx]; });
+    s = s.replace(/\x00KTX(\d+)\x00/g, function(_, idx) { return mathTokens[+idx] || ''; });
   }
   if (codeTokens.length > 0) {
     s = s.replace(/\x00CODE(\d+)\x00/g, function(_, idx) {
-      return fileRefCode(codeTokens[+idx]);
+      return codeTokens[+idx] ? fileRefCode(codeTokens[+idx]) : '';
     });
   }
   return s;
@@ -618,21 +624,12 @@ function renderTable(lines) {
   // splits mid-snippet and the trailing fragment spills into an extra column.
   // Strategy: encode `\|` → sentinel, split on `|`, decode sentinel → `|`.
   const PIPE = '\x00PIPE\x00';
-  // LLM output frequently embeds unescaped `|` inside `$...$`, `\(...\)`,
-  // or backtick code spans (e.g. `$|AB|=2$`, `$2^a - 2$ | < | ...`).
-  // Protect those regions BEFORE splitting on `|`, otherwise a single math
-  // formula would get sliced into many spurious columns.
-  //
-  // CAVEAT (currency vs math): a row like `| Pro | $20 | 1,000 | $0.04 |`
-  // contains four currency-style `$N` tokens, NOT two math spans. A naive
-  // `\$[^$]+\$` pass would greedily pair `$20 ... $0.04`, swallow the two
-  // pipes between them, and collapse the row from 4 cells to 2. To avoid
-  // that, only stash a `$...$` pair when its inner content unambiguously
-  // looks like LaTeX — either it carries a math-only character (\ ^ _ { })
-  // OR it sits entirely on one side of a pipe (no `|` inside). Pure-numeric
-  // tokens like `$20` / `$0.04/credit` then split as ordinary cells.
-  // Pipe-bearing math like `$|AB|=2$` should be authored with `\(...\)` or
-  // backticks inside tables — accepted limitation.
+  // `|` inside `$...$`, `\(...\)` or a code span (`$2^a - 2$ | < | ...`) is
+  // protected before the row splits on `|`, or one formula becomes many cells.
+  // A `$...$` pair is stashed only when it carries a math-only char (\ ^ _ { })
+  // or holds no `|`: in `| Pro | $20 | 1,000 | $0.04 |` a greedy pairing of
+  // `$20 ... $0.04` would swallow two pipes. Pipe-bearing math like `$|AB|=2$`
+  // has to use `\(...\)` or backticks inside a table.
   const isTableMathSpan = inner => {
     if (/[\\^_{}]/.test(inner)) return true;
     if (inner.indexOf('|') !== -1) return false;
@@ -654,7 +651,7 @@ function renderTable(lines) {
     return s.replace(/^\||\|$/g, '')
       .split('|')
       .map(c => c.trim()
-        .replace(/\x00G(\d+)\x00/g, (_, i) => guards[+i])
+        .replace(/\x00G(\d+)\x00/g, (_, i) => guards[+i] || '')
         .split(PIPE).join('|'));
   };
   const header = cells(lines[0]);
@@ -673,34 +670,67 @@ function renderTable(lines) {
   return '<div class="md-table-wrap">' + h + '</tbody></table></div>';
 }
 
-let mermaidLoading = false;
-let mermaidReady = false;
+const LOAD_RETRY_MS = 60000;
+const mermaidLoad = { ready: false, busy: false, failures: 0, loaded: new Set() };
+const katexLoad = { ready: false, busy: false, failures: 0, loaded: new Set() };
+
+// lazyLoad appends each lazily loaded asset ([url, sha384]) under its SRI
+// pin; st is ready once all of them have loaded. A failed attempt is retried
+// once, LOAD_RETRY_MS later, re-appending only the assets that did not load,
+// then not until the page reloads. rerun runs when an attempt settles and when
+// the retry falls due; meanwhile runMermaid / runKatex leave the source showing.
+function lazyLoad(st, assets, rerun) {
+  if (st.ready || st.busy) return;
+  st.busy = true;
+  const todo = assets.filter(([url]) => !st.loaded.has(url));
+  let left = todo.length, failed = false;
+  const settle = () => {
+    if (--left > 0) return;
+    if (!failed) st.ready = true;
+    else if (++st.failures === 1) setTimeout(() => { st.busy = false; rerun(); }, LOAD_RETRY_MS);
+    rerun();
+  };
+  todo.forEach(([url, integrity]) => {
+    const css = url.endsWith('.css');
+    document.head.appendChild(Object.assign(document.createElement(css ? 'link' : 'script'),
+      css ? { rel: 'stylesheet', href: url } : { src: url }, {
+        integrity, crossOrigin: 'anonymous',
+        onload: () => { st.loaded.add(url); settle(); },
+        onerror: () => { failed = true; settle(); },
+      }));
+  });
+}
+
+// awaitingLoad reports whether pending[id] still waits for st, marking an
+// attached el while st is failing. The entry is dropped once st has loaded or
+// failed for good, so an offline page does not keep one per detached bubble.
+function awaitingLoad(pending, id, el, st) {
+  if (el) {
+    const failed = !st.ready && st.failures > 0;
+    el.classList.toggle('md-render-unavailable', failed);
+    el.title = failed ? '渲染器未加载（离线？），显示源码' : '';
+    if (st.ready) return false;
+  }
+  if (st.ready || st.failures > 1) delete pending[id];
+  return true;
+}
 
 function loadMermaid() {
-  if (mermaidReady || mermaidLoading) return;
-  mermaidLoading = true;
-  const s = document.createElement('script');
-  s.src = 'https://cdn.jsdelivr.net/npm/mermaid@11.14.0/dist/mermaid.min.js';
-  s.integrity = 'sha384-1CMXl090wj8Dd6YfnzSQUOgWbE6suWCaenYG7pox5AX7apTpY3PmJMeS2oPql4Gk';
-  s.crossOrigin = 'anonymous';
-  s.onload = () => {
-    window.mermaid.initialize(mermaidConfig());
-    mermaidReady = true;
-    mermaidLoading = false;
+  lazyLoad(mermaidLoad, [['/static/vendor/mermaid-11.14.0/mermaid.min.js',
+    'sha384-1CMXl090wj8Dd6YfnzSQUOgWbE6suWCaenYG7pox5AX7apTpY3PmJMeS2oPql4Gk']], () => {
+    if (mermaidLoad.ready) window.mermaid.initialize(mermaidConfig());
     runMermaid();
-  };
-  s.onerror = () => { mermaidLoading = false; };
-  document.head.appendChild(s);
+  });
 }
 
 function runMermaid() {
   if (Object.keys(mermaidPending).length === 0) return;
-  if (!mermaidReady) { loadMermaid(); return; }
+  if (!mermaidLoad.ready) loadMermaid();
   let hasNew = false;
   Object.entries(mermaidPending).forEach(([id, code]) => {
     const el = document.getElementById(id);
-    if (!el) { delete mermaidPending[id]; return; }
-    el.textContent = code;
+    if (el) el.textContent = code;
+    if (awaitingLoad(mermaidPending, id, el, mermaidLoad)) return;
     el.className = 'mermaid';
     delete mermaidPending[id];
     hasNew = true;
@@ -786,45 +816,27 @@ function mermaidConfig() {
 let mermaidCounter = 0;
 const mermaidPending = {};
 
-let katexLoading = false;
-let katexReady = false;
 let katexCounter = 0;
 const katexPending = {};
 
+// Formulas wait for the stylesheet as well as the script: without it KaTeX
+// markup shows its MathML and HTML copies side by side. Both are vendored, and
+// TestVendorAssets_SRIMatchesEmbedded checks each SRI pin (R219-SEC-4).
 function loadKatex() {
-  if (katexReady || katexLoading) return;
-  katexLoading = true;
-  // Inject stylesheet on demand (moved out of <head> to unblock first paint).
-  // R219-SEC-4: KaTeX CDN link + script need distinct SRI integrity hashes;
-  // pinned off the DOM by test/e2e/cdn_sri.test.js.
-  if (!document.querySelector('link[data-nz-katex]')) {
-    const link = document.createElement('link');
-    link.rel = 'stylesheet';
-    link.href = 'https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css';
-    link.integrity = 'sha384-zh0CIslj+VczCZtlzBcjt5ppRcsAmDnRem7ESsYwWwg3m/OaJ2l4x7YBZl9Kxxib';
-    link.crossOrigin = 'anonymous';
-    link.setAttribute('data-nz-katex', '1');
-    document.head.appendChild(link);
-  }
-  const s = document.createElement('script');
-  s.src = 'https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js';
-  s.integrity = 'sha384-Rma6DA2IPUwhNxmrB/7S3Tno0YY7sFu9WSYMCuulLhIqYSGZ2gKCJWIqhBWqMQfh';
-  s.crossOrigin = 'anonymous';
-  s.onload = () => {
-    katexReady = true;
-    katexLoading = false;
-    runKatex();
-  };
-  s.onerror = () => { katexLoading = false; };
-  document.head.appendChild(s);
+  lazyLoad(katexLoad, [
+    ['/static/vendor/katex-0.16.21/katex.min.css',
+      'sha384-zh0CIslj+VczCZtlzBcjt5ppRcsAmDnRem7ESsYwWwg3m/OaJ2l4x7YBZl9Kxxib'],
+    ['/static/vendor/katex-0.16.21/katex.min.js',
+      'sha384-Rma6DA2IPUwhNxmrB/7S3Tno0YY7sFu9WSYMCuulLhIqYSGZ2gKCJWIqhBWqMQfh'],
+  ], runKatex);
 }
 
 function runKatex() {
   if (Object.keys(katexPending).length === 0) return;
-  if (!katexReady) { loadKatex(); return; }
+  if (!katexLoad.ready) loadKatex();
   Object.entries(katexPending).forEach(([id, info]) => {
     const el = document.getElementById(id);
-    if (!el) { delete katexPending[id]; return; }
+    if (awaitingLoad(katexPending, id, el, katexLoad)) return;
     try {
       window.katex.render(info.tex, el, { displayMode: info.display, throwOnError: false });
     } catch(_) {
@@ -843,11 +855,7 @@ function runKatex() {
 //      single letters, operators, parens, punctuation) AND contain no two
 //      consecutive 3+ letter English words AND contain at least one math
 //      hint — digit, operator, OR a function-call pattern `letter(` /
-//      `)letter`. The function-call clause accepts `$h(x)$` / `$f(x)$` /
-//      `$g(t)$` which the previous "must contain digit/operator" rule
-//      mistakenly rejected (function references in prose carry no operator
-//      character themselves). Pure prose tokens like `$(test)$` still
-//      reject because they lack both a math hint and a function-call shape.
+//      `)letter`, so `$f(x)$` passes while prose like `$(test)$` does not.
 function isMathInline(tex) {
   if (/[\\^_{}]/.test(tex)) return true;
   // Bare 1-2 letter variable / segment name (`$x$`, `$AB$`): no digit,
@@ -880,7 +888,7 @@ function isMathDisplay(tex) {
 }
 
 function renderKatex(tex, displayMode) {
-  if (katexReady) {
+  if (katexLoad.ready) {
     try { return window.katex.renderToString(tex, { displayMode: displayMode, throwOnError: false }); }
     catch(_) { return esc(tex); }
   }
@@ -890,12 +898,9 @@ function renderKatex(tex, displayMode) {
   return '<span id="' + id + '" class="katex-pending">' + esc(tex) + '</span>';
 }
 
-// runPendingAsync — single post-render glue point for every async pipeline
-// triggered by renderMd/renderRich output. Call sites that attach rendered
-// HTML to the live DOM invoke this once; never call runKatex / runMermaid
-// directly from feature code. Keeps chat bubbles, preview drawer, scratch
-// drawer, aside drawer on one flush contract so future pipelines (syntax
-// highlight etc.) plug in here without scattering across call sites.
+// runPendingAsync is the one post-render flush for every async pipeline that
+// renderMd/renderRich output starts: call sites invoke it once after attaching
+// the HTML, never runKatex / runMermaid directly.
 function runPendingAsync() {
   runMermaid();
   runKatex();
@@ -915,6 +920,7 @@ function runPendingAsync() {
 //   'plain'              — no rendering, esc + <pre>
 function renderRich(src, opts) {
   if (!src) return '';
+  src = replaceNul(src);
   const mode = (opts && opts.mode) || 'markdown';
   if (mode === 'plain') return '<pre class="rich-plain">' + esc(src) + '</pre>';
   if (mode === 'tex')   return renderTexDoc(src);
@@ -958,25 +964,10 @@ function renderTexDoc(src) {
    the initial history, plus nav rebuilds, plus preview polls. */
 const _mdCache = new Map();
 const _MD_CACHE_MAX = 500;
-// RNEW-PERF-003 (#454): cap cacheable input length at 2000 chars. The
-// previous 20000-char cap caused two pathologies on streaming text events:
-//
-//  1. Cache MISS on every render — streaming `text` events grow by chunks,
-//     so the cache key (full string) is unique per WS push. The Map.get
-//     was always undefined, the work was always done from scratch.
-//  2. Cache WRITE on every render evicted long-lived plain-text bubbles
-//     (welcome banner, system prompts, short replies) that would otherwise
-//     have been cheap repeat-hits as the user navigated views. Net cache
-//     hit rate fell off a cliff once a long streaming reply landed.
-//
-// Plain replies under 2000 chars ARE the cache's intended audience —
-// they're the ones that re-render on nav rebuild + preview poll without
-// changing. Above that threshold the input is either a wall-of-text final
-// reply (rendered once, never again — cache is a write-only bloat) or a
-// still-streaming `running` event (key changes every push — cache never
-// hits). Skip the cache write in both cases. The 2000-char threshold
-// covers >95% of stable IM-style replies on naozhi without paying
-// hash-the-string cost on streaming-storm responses.
+// Cacheable inputs are under 2000 chars (#454): short stable replies are what
+// re-render unchanged on nav rebuild and preview poll. A longer input is a
+// final reply rendered once or a streaming event whose key changes on every
+// push; caching it never hits and evicts the short bubbles that would.
 const _MD_CACHE_INPUT_MAX = 2000;
 // Any construct that can mint a unique DOM id (mmd-N via ```mermaid, ktx-N
 // via $ / \[ / \( / \begin{env}) must bypass the cache: a cached pending
@@ -1017,6 +1008,7 @@ export {
   katexPending,
   loadKatex,
   loadMermaid,
+  mermaidPending,
   parseListItem,
   renderKatex,
   renderMd,
