@@ -117,7 +117,8 @@ const toolVerbs = {
   SendMessage: '发消息', ToolSearch: '加载工具',
   TaskOutput: '读 agent 输出', TaskStop: '停止 agent',
   ScheduleWakeup: '排唤醒',
-  CronCreate: '建定时任务', CronDelete: '删定时任务', CronList: '查定时任务'
+  CronCreate: '建定时任务', CronDelete: '删定时任务', CronList: '查定时任务',
+  Workflow: '启动 Workflow'
 };
 
 function toolVerb(tool, summary) {
