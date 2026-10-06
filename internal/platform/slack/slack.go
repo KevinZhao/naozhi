@@ -363,6 +363,17 @@ func (s *Slack) handleSocketEvent(_ context.Context, client *socketmode.Client, 
 		case *slackevents.MessageEvent:
 			s.handleMessage(ev)
 		}
+	case socketmode.EventTypeInteractive:
+		cb, ok := evt.Data.(slack.InteractionCallback)
+		if !ok || evt.Request == nil {
+			return
+		}
+		// Ack every interaction within Slack's 3s window, ours or not, or the
+		// user sees an error and Slack redelivers.
+		client.Ack(*evt.Request)
+		if cb.Type == slack.InteractionTypeBlockActions {
+			s.handleBlockActions(cb)
+		}
 	}
 }
 
