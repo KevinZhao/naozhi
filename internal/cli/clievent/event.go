@@ -621,7 +621,7 @@ type SendResult struct {
 // aborted_tools, aborted_streaming, …), whoever asked for it. Older claude
 // marks an abort only as error_during_execution, which is also a real failure
 // unless Aborted is set, so false here does not mean the turn completed.
-func (r *SendResult) CLIAborted() bool {
+func (r SendResult) CLIAborted() bool {
 	return strings.HasPrefix(r.TerminalReason, "aborted_")
 }
 

@@ -25,9 +25,9 @@ func TestClaudeResult_IsErrorReachesSendResult(t *testing.T) {
 }
 
 // Claude 2.1.288 reports an aborted turn as subtype success with an aborted_*
-// terminal_reason (frames trimmed from the V10 captures in
-// docs/rfc/passthrough-mode-validation.md); the reason must reach SendResult
-// so a consumer can tell the cut-off turn from a completed one.
+// terminal_reason (frames trimmed from the V10 captures whose summaries
+// docs/rfc/passthrough-mode-validation.md records); the reason must reach
+// SendResult so a consumer can tell the cut-off turn from a completed one.
 func TestClaudeResult_TerminalReasonReachesSendResult(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -69,7 +69,7 @@ func TestSendResult_CLIAbortedMatchesThePrefix(t *testing.T) {
 		"aborted_tools": true, "aborted_streaming": true, "aborted_hook": true,
 		"completed": false, "": false, "aborted": false, "not_aborted_tools": false,
 	} {
-		if got := (&clievent.SendResult{TerminalReason: reason}).CLIAborted(); got != want {
+		if got := (clievent.SendResult{TerminalReason: reason}).CLIAborted(); got != want {
 			t.Errorf("CLIAborted(%q) = %v, want %v", reason, got, want)
 		}
 	}
