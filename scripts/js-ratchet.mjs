@@ -283,8 +283,9 @@ function fnName(fn, parent, key) {
 // The analysis reads three lists from caps.json, where tools/ratchet-raises
 // sees them (as constants here, each could zero a count without a raise):
 //   lateBindingTables  the late-bound function tables, by the module that
-//                      exports each (state.js hooks, nz_util.js nzViews); a
-//                      dropped table is a raise there
+//                      exports each (nz_util.js nzViews; state.js no longer
+//                      exports hooks, and the entry counts one brought back);
+//                      a dropped table is a raise there
 //   injectionAllow     "file:fn" receivers that copy a parameter's fields
 //                      into module scope on purpose and are not dependency
 //                      injection (registerActions: the data-action registry).
