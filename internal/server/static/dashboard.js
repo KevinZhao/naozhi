@@ -608,7 +608,7 @@ const CHEATSHEET_ENTRIES = [
   { section: '斜杠命令' },
   { keys: ['/new'], desc: '重置当前会话（不带参数；/new <agent> 在这里会当普通消息发送）' },
   { keys: ['/clear'], desc: '重置当前会话（同 /new）' },
-  { keys: ['/urgent'], desc: '/urgent <消息> 立即中断当前回复并优先发送（需后端支持抢占）' },
+  { keys: ['/urgent'], desc: '/urgent <消息> 中断当前回复并优先发送（正在运行的工具需先结束；需后端支持抢占）' },
   { section: '斜杠命令（仅 IM 平台）' },
   { keys: ['/new <agent>'], desc: '重置指定 agent 的对话（如 /new review 对应 code-reviewer）' },
   { keys: ['/cd'], desc: '切换工作目录（/cd <path>；受 session.cwd 的 allowed_root 限制）' },

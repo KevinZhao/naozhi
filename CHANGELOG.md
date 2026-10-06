@@ -107,6 +107,7 @@
 - Dashboard 的 Agent drill-in 走上 WS 实时推送：agent tailer 此前拿 operator workspace（`allowed_root`）当 transcript 根，`~/.claude/projects` 下的子 agent transcript 全被拒，客户端静默降级成 3s HTTP 轮询。现在 tailer 与 `/api/sessions/agent_events` 共用同一个解析后的 projects 根，并且两处都按 `PathContainedInRoot` 判定（macOS 上大小写与根不同的路径判定一致）
 - 主节点经反向连接代理到 node 的接管（`takeover` RPC）同样在 SIGTERM 之前预留 key 并持有到 spawn：此前 node 侧的预检只读状态，同一 cwd 的第二次接管会在第一个 CLI 退出期间通过预检并杀掉第二个 CLI；现在它在杀进程前就被拒绝（`takeover refused: a spawn for this key is already in flight`）。身份校验失败、SIGTERM 失败或连接器关停时预留都会归还（#3417）
 - reverse node 只对声明了 `send-status` 能力的 primary 回答「忙」（#3421）：v0.1.43 的 node 接在 v0.1.41 及更早的 primary 后面时，会话正忙、队列关闭而被丢弃的消息在 dashboard 上显示为「已接受」——旧 primary 不读 send 的返回状态。现在 primary 在 `registered` 应答里声明 `send-status`，node 对没有声明的 primary（包括 v0.1.42 / v0.1.43）改回 v0.1.43 之前的错误：「发送失败：会话正忙，消息未送达，请稍后重试」。升级顺序仍是先 primary 后 node；在 v0.1.41 primary 后面跑 v0.1.43 node 的部署请升级 primary。HTTP 拉取模式的 node 接在 v0.1.41 primary 后面同样显示「已接受」，这一侧没有握手可改，只能升级 primary（v0.1.42 起已修，#3209）
+- `/urgent` 的文案不再承诺"立即中断"（#3498）：工具正在运行时（例如阻塞的 Bash `sleep 20`），CLI 要等工具返回才结束当前回复（claude 2.1.288 实测，见 `docs/rfc/passthrough-mode-validation.md` V10）。IM 用法提示改为「用法：/urgent <紧急消息>（该消息会中断正在进行的回复；正在运行的工具需先结束）」，`/help`、dashboard 快捷键面板和 README 同步修改；按旧用法文案做匹配的脚本需要更新。`/stop` 的文案不变
 
 ### Documentation
 
