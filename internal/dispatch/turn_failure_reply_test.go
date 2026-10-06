@@ -89,7 +89,7 @@ func TestDecorateReplyText_TurnFailure(t *testing.T) {
 // TestDecorateReplyText_PartialReplyChip: text claude aborted part-way
 // (terminal_reason aborted_*) is delivered with the partial-reply chip ahead
 // of the merge chip and footer; a turn that finished never gets it, even when
-// a late interrupt stamped it Aborted.
+// a late interrupt stamped it Aborted, nor does a notice or error text.
 func TestDecorateReplyText_PartialReplyChip(t *testing.T) {
 	d := &Dispatcher{caps: fixedFooterCaps{footer: "cc"}}
 	partial := &clievent.SendResult{Text: "half an essay", SubType: "success", TerminalReason: "aborted_streaming"}
@@ -105,6 +105,8 @@ func TestDecorateReplyText_PartialReplyChip(t *testing.T) {
 		{Text: "full answer", SubType: "success"},
 		{Text: "full answer", SubType: "success", Aborted: true},
 		{SubType: "success", TerminalReason: "aborted_tools"},
+		{Text: "Server overloaded", TerminalReason: "aborted_streaming", BackendError: &clievent.BackendError{Backend: "codex", Code: -32001}},
+		{Text: "API Error: 529 overloaded", SubType: "success", IsError: true, TerminalReason: "aborted_streaming"},
 	} {
 		if got := d.decorateReplyText(r, nil); strings.Contains(got, "已中断") {
 			t.Errorf("%+v: got %q, want no partial-reply chip", *r, got)

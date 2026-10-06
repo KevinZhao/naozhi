@@ -655,11 +655,11 @@ func (d *Dispatcher) readTurnImages(replyText string) ([]platform.Image, string)
 // merge-group chips and the per-session ReplyFooter. Returns "" when nothing
 // should be sent (#656).
 func (d *Dispatcher) decorateReplyText(result *clievent.SendResult, sess turn.Session) string {
-	replyText := turnReplyText(result)
+	replyText, answer := turnReplyText(result)
 	// claude cut the answer off (aborted_streaming keeps the partial text);
 	// keyed on CLIAborted, not Aborted, which a late interrupt can stamp on
-	// a turn that finished.
-	if result.CLIAborted() && replyText != "" {
+	// a turn that finished. A notice or error text is not a partial answer.
+	if answer && result.CLIAborted() && replyText != "" {
 		replyText += replyChipPartial
 	}
 	// Head slot of a merge group: append a small chip so the user knows the
