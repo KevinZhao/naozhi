@@ -447,9 +447,9 @@ func TestReadStdout_NoClient_SkipsMarshalButStillBuffers(t *testing.T) {
 	}
 }
 
-// --- setClient / clearClient ---
+// --- admitClient / clearClient ---
 
-func TestSetClient_ReplacesOld(t *testing.T) {
+func TestAdmitClient_ReplacesOld(t *testing.T) {
 	s := makeShimServerForTest(t)
 
 	clientA, serverA := net.Pipe()
@@ -460,24 +460,95 @@ func TestSetClient_ReplacesOld(t *testing.T) {
 	defer clientB.Close()
 	defer serverB.Close()
 
-	// Set first client
-	ch1, done1 := s.setClient(clientA)
-	if ch1 == nil || done1 == nil {
-		t.Fatal("setClient returned nil channels")
+	ch1, done1, res := s.admitClient(clientA, 1, false)
+	if res != admitOK || ch1 == nil || done1 == nil {
+		t.Fatalf("admitClient = (%v, %v, %v), want channels and admitOK", ch1, done1, res)
 	}
 
-	// Set second client: old one's done channel must be closed
-	ch2, done2 := s.setClient(clientB)
-	if ch2 == nil || done2 == nil {
-		t.Fatal("setClient (second) returned nil channels")
+	// A later attach with the CLI dead kicks the old client.
+	ch2, done2, res := s.admitClient(clientB, 2, false)
+	if res != admitOK || ch2 == nil || done2 == nil {
+		t.Fatalf("admitClient (second) = (%v, %v, %v), want channels and admitOK", ch2, done2, res)
 	}
 
-	// done1 must be closed
 	select {
 	case <-done1:
-		// good
 	case <-time.After(time.Second):
 		t.Error("done1 not closed after replacing with new client")
+	}
+}
+
+// An older handler that reaches admission after a newer one must leave the
+// newer client untouched: its done channel open and its conn usable.
+func TestAdmitClient_OlderGenDoesNotKickNewer(t *testing.T) {
+	s := makeShimServerForTest(t)
+
+	oldServer, oldPeer := net.Pipe()
+	defer oldServer.Close()
+	defer oldPeer.Close()
+	newServer, newPeer := net.Pipe()
+	defer newServer.Close()
+	defer newPeer.Close()
+
+	_, newDone, res := s.admitClient(newServer, 2, false)
+	if res != admitOK {
+		t.Fatalf("newer admit = %v, want admitOK", res)
+	}
+	if ch, done, res := s.admitClient(oldServer, 1, false); res != admitSuperseded || ch != nil || done != nil {
+		t.Fatalf("older admit = (%v, %v, %v), want (nil, nil, admitSuperseded)", ch, done, res)
+	}
+
+	s.mu.Lock()
+	active, gen := s.clientConn, s.clientGen
+	s.mu.Unlock()
+	if active != newServer || gen != 2 {
+		t.Errorf("active client = (%v, gen %d), want the newer conn with gen 2", active, gen)
+	}
+	select {
+	case <-newDone:
+		t.Error("the newer client's done channel was closed by an older handler")
+	default:
+	}
+	go func() { _, _ = newPeer.Write([]byte("x")) }()
+	buf := make([]byte, 1)
+	_ = newServer.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := newServer.Read(buf); err != nil {
+		t.Errorf("the newer client's conn is no longer usable: %v", err)
+	}
+}
+
+// With the CLI alive an active client is never kicked, whatever the
+// generation; the newcomer is refused as busy.
+func TestAdmitClient_LiveCLIRejectsSecond(t *testing.T) {
+	s := makeShimServerForTest(t)
+
+	clientA, serverA := net.Pipe()
+	defer clientA.Close()
+	defer serverA.Close()
+	clientB, serverB := net.Pipe()
+	defer clientB.Close()
+	defer serverB.Close()
+
+	_, doneA, _ := s.admitClient(clientA, 1, true)
+	if ch, done, res := s.admitClient(clientB, 2, true); res != admitBusy || ch != nil || done != nil {
+		t.Fatalf("second admit with a live CLI = (%v, %v, %v), want (nil, nil, admitBusy)", ch, done, res)
+	}
+	s.mu.Lock()
+	active := s.clientConn
+	s.mu.Unlock()
+	if active != clientA {
+		t.Error("a busy refusal replaced the active client")
+	}
+	select {
+	case <-doneA:
+		t.Error("a busy refusal closed the active client's done channel")
+	default:
+	}
+
+	// Once the active client is gone the next attach is admitted.
+	s.clearClient(clientA)
+	if _, _, res := s.admitClient(clientB, 3, true); res != admitOK {
+		t.Errorf("admit after clearClient = %v, want admitOK", res)
 	}
 }
 
@@ -488,7 +559,7 @@ func TestClearClient_RemovesCorrectClient(t *testing.T) {
 	defer clientA.Close()
 	defer serverA.Close()
 
-	s.setClient(clientA)
+	s.admitClient(clientA, 1, false)
 
 	// Clear it
 	s.clearClient(clientA)
@@ -513,7 +584,7 @@ func TestClearClient_WrongConn_Ignored(t *testing.T) {
 	defer clientB.Close()
 	defer serverB.Close()
 
-	s.setClient(clientA)
+	s.admitClient(clientA, 1, false)
 	s.clearClient(clientB) // different conn, must be ignored
 
 	s.mu.Lock()
