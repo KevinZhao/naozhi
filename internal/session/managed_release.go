@@ -1,9 +1,6 @@
 package session
 
-import (
-	"log/slog"
-	"time"
-)
+import "log/slog"
 
 // ReleaseIdleProcess closes an exempt session's idle CLI process and keeps the
 // session, so the next GetOrCreate resumes it under the same session id. It
@@ -24,7 +21,7 @@ func (s *ManagedSession) ReleaseIdleProcess() bool {
 	storeAtomicString(&s.deathReason, DeathReasonReleased)
 	proc.Close()
 	s.sendMu.Unlock()
-	if !waitSocketGoneForKey(s.key, 2*time.Second) {
+	if !waitSocketGoneForKey(s.key) {
 		slog.Warn("session release: shim socket still bound after close; the next spawn may be refused", "key", s.key)
 	}
 	logSessionLifecycle("released", s.key)

@@ -87,6 +87,7 @@
 
 ### Fixed
 
+- **cron：CLI 因认证失败、MCP 配置无效或运行环境缺失而退出时，失败通知写明原因**（#3515）：此前只有「上次会话无法恢复」有专门文案，这三类退出都落到「执行失败（CLI 发送错误）」。现在分别是「执行失败（后端认证失败或凭证已过期），请联系管理员」（与后端返回的认证错误同一句）、「执行失败（CLI 配置错误导致启动失败，如 MCP 配置无效），请联系管理员」和「执行失败（CLI 运行环境缺失），请联系管理员」。这几次执行在 dashboard 上的错误类别随之从 `send_error`（发送失败）变为 `turn_failed`（后端报错），执行历史里的错误详情仍带 `process exited during send (code N)`；它们照常计入连续失败次数并可触发自动暂停
 - **kiro / codex 后端收到 dashboard 上传的 PDF 时改为提示模型用 Read 工具读取**（#3451）：ACP（kiro）与 codex 协议以前把每个附件都编码成图片块，PDF 因此变成 `media_type: application/pdf`、数据为空的图片，模型既看不到文件也不知道它已写入 workspace。现在两个后端与 Claude 后端走同一个 `clievent.UserTextAndInline`：PDF 只出现在用户文本前的 Read 提示里（workspace 相对路径 + 原文件名），图片块只来自真正的图片附件。
 - **cron：重启后接管的那次执行若被 claude 中断，记为中断而不是成功**（#3498）：claude 2.1.288 起，被中断的 turn 以 `subtype=success`、`is_error=false` 加 `terminal_reason=aborted_tools|aborted_streaming` 结束，不再是 `error_during_execution`。接管路径只认后者，于是把这类中断当作正常完成，记为 `succeeded`，结果是空文本或半截输出。现在凡 `terminal_reason` 以 `aborted_` 开头都记为 `canceled`（`interrupted`），与旧版 CLI 的中断一致
 - **Slack 话题串 / 飞书话题里的提问，回复留在原话题里**（#3446）：以前回复（含「思考中」进度、分段、错误提示、命令回复、TodoWrite 清单、图片和 AskUserQuestion 卡片）都发到频道或群的顶层。现在 Slack 按 `thread_ts` 回到原话题串；飞书只对带 `thread_id` 的话题消息生效，用回复接口 `reply_in_thread` 发到话题里，普通群里的引用回复照旧发到群里。点话题里的卡片按钮作答，后续回复也在该话题。话题根消息已撤回等原因导致飞书拒绝回复时改发到群里。各话题的会话划分见上方 `session.group_scope`

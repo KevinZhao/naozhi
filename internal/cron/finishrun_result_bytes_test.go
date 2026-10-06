@@ -59,8 +59,8 @@ func TestFinishRunResultBytesIsStoredNotRaw(t *testing.T) {
 				StorePath: filepath.Join(dir, "cron_jobs.json"),
 			}
 			sched := NewScheduler(cfg, SchedulerDeps{Router: &fakeRouter{}})
-			if sched.runStore == nil || !sched.runStore.layout.Enabled() {
-				t.Fatal("runStore must be enabled for this test (StorePath set)")
+			if !sched.runs.Enabled() {
+				t.Fatal("run store must be enabled for this test (StorePath set)")
 			}
 
 			j := &Job{
@@ -81,7 +81,7 @@ func TestFinishRunResultBytesIsStoredNotRaw(t *testing.T) {
 
 			// Read the persisted CronRun back off disk so we assert the durable
 			// record, not an in-memory shortcut.
-			path := filepath.Join(sched.runStore.rootDir(), j.ID, runID+".json")
+			path := filepath.Join(sched.runs.Dir(), j.ID, runID+".json")
 			data, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatalf("read persisted run: %v", err)

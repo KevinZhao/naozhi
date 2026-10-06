@@ -68,7 +68,7 @@ cmd/naozhi/main.go
   -> platform     Platform 接口 + feishu/slack/discord/weixin 子包
   -> server       HTTP server、路由注册、WebSocket hub、REST API
   -> dashboard    dashboard handler 子包群（auth/cron/cronview/discovery/project/session/ext/*；httputil 叶子）
-  -> cron         定时任务调度（robfig/cron）+ 运行历史；sandboxstore 子包放 sandbox 的磁盘状态（确认队列/输入快照/事件日志），不 import cron
+  -> cron         定时任务调度（robfig/cron）；runstore 子包放运行历史（runs/ 记录、newest-first 缓存、保留期 GC、CronRun 记录类型），sandboxstore 子包放 sandbox 的磁盘状态（确认队列/输入快照/事件日志），两者都不 import cron
   -> sysession    内建后台 daemon 框架（system sessions）
   -> project      项目发现、chat 绑定、planner 路由
   -> projectapi   project 的零依赖契约类型
