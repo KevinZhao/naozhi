@@ -588,7 +588,7 @@
     "lateBindings": 0
   },
   "workflow_view.js": {
-    "lines": 601,
+    "lines": 641,
     "maxFnLines": 42,
     "maxIifeLines": 0,
     "fnOver100": 0,
