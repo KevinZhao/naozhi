@@ -29,11 +29,14 @@ type Event struct {
 	ModelUsage map[string]ModelUsage `json:"modelUsage,omitempty"`
 	// IsError is claude's result-frame failure flag; protocols that synthesize
 	// a failed result set it too. Aborted is stamped by readLoop on the first
-	// result after naozhi itself asked the turn to stop.
-	IsError      bool              `json:"is_error,omitempty"`
-	Aborted      bool              `json:"-"`
-	BackendError *BackendError     `json:"-"`
-	Message      *AssistantMessage `json:"message,omitempty"`
+	// result after naozhi itself asked the turn to stop. TerminalReason is
+	// claude's result-frame turn end (completed, aborted_tools, …); older CLIs
+	// omit it.
+	IsError        bool              `json:"is_error,omitempty"`
+	TerminalReason string            `json:"terminal_reason,omitempty"`
+	Aborted        bool              `json:"-"`
+	BackendError   *BackendError     `json:"-"`
+	Message        *AssistantMessage `json:"message,omitempty"`
 	// Model is the resolved model id the claude CLI advertises on system/init
 	// (claude resolves env/CLI defaults internally, so it is only known after
 	// init). readLoop forwards it to Process.setModel for the live dashboard
@@ -596,19 +599,30 @@ type SendResult struct {
 
 	// Turn outcome, copied from the result frame. SubType is the backend's raw
 	// subtype (claude's success / error_during_execution / error_max_turns …,
-	// an ACP stopReason, "error" for a synthesized failure). error_during_execution
-	// is also what an abort naozhi requested produces, so a consumer checks
-	// Aborted before treating it as a failure. BackendError is set when the
-	// backend rejected the turn over JSON-RPC or reported it failed.
-	SubType      string
-	IsError      bool
-	Aborted      bool
-	BackendError *BackendError
+	// an ACP stopReason, "error" for a synthesized failure). An aborted turn is
+	// error_during_execution on older claude and success with an aborted_*
+	// TerminalReason on newer ones (see CLIAborted); a consumer checks both
+	// before treating the result as a failure or a complete answer.
+	// BackendError is set when the backend rejected the turn over JSON-RPC or
+	// reported it failed.
+	SubType        string
+	IsError        bool
+	Aborted        bool
+	TerminalReason string
+	BackendError   *BackendError
 
 	// Merge metadata. Zero means "single-slot result, no merge".
 	MergedCount    int    // total slots sharing this result (>=2 in a merge)
 	MergedWithHead uint64 // 0 for head; for follower the id of the head sendSlot
 	HeadText       string // follower mirror of Text (optional, for UI association)
+}
+
+// CLIAborted reports a turn claude itself ended as aborted (terminal_reason
+// aborted_tools, aborted_streaming, …), whoever asked for it. Older claude
+// marks an abort only as error_during_execution, which is also a real failure
+// unless Aborted is set, so false here does not mean the turn completed.
+func (r SendResult) CLIAborted() bool {
+	return strings.HasPrefix(r.TerminalReason, "aborted_")
 }
 
 // BackendError is a turn failure an ACP or codex backend reported: a JSON-RPC
