@@ -86,6 +86,7 @@
 
 ### Fixed
 
+- **cron：CLI 因认证失败、MCP 配置无效或运行环境缺失而退出时，失败通知写明原因**（#3515）：此前只有「上次会话无法恢复」有专门文案，这三类退出都落到「执行失败（CLI 发送错误）」。现在分别是「执行失败（后端认证失败或凭证已过期），请联系管理员」（与后端返回的认证错误同一句）、「执行失败（CLI 配置错误导致启动失败，如 MCP 配置无效），请联系管理员」和「执行失败（CLI 运行环境缺失），请联系管理员」。这几次执行在 dashboard 上的错误类别随之从 `send_error`（发送失败）变为 `turn_failed`（后端报错），执行历史里的错误详情仍带 `process exited during send (code N)`；它们照常计入连续失败次数并可触发自动暂停
 - **kiro / codex 后端收到 dashboard 上传的 PDF 时改为提示模型用 Read 工具读取**（#3451）：ACP（kiro）与 codex 协议以前把每个附件都编码成图片块，PDF 因此变成 `media_type: application/pdf`、数据为空的图片，模型既看不到文件也不知道它已写入 workspace。现在两个后端与 Claude 后端走同一个 `clievent.UserTextAndInline`：PDF 只出现在用户文本前的 Read 提示里（workspace 相对路径 + 原文件名），图片块只来自真正的图片附件。
 - **cron：重启后接管的那次执行若被 claude 中断，记为中断而不是成功**（#3498）：claude 2.1.288 起，被中断的 turn 以 `subtype=success`、`is_error=false` 加 `terminal_reason=aborted_tools|aborted_streaming` 结束，不再是 `error_during_execution`。接管路径只认后者，于是把这类中断当作正常完成，记为 `succeeded`，结果是空文本或半截输出。现在凡 `terminal_reason` 以 `aborted_` 开头都记为 `canceled`（`interrupted`），与旧版 CLI 的中断一致
 - **`naozhi cost reconcile` 不再按 transcript 下调账本**（#3519）：按天残差以前双向记，transcript 用量比账本少超过 max($1, 5%) 的日子会写入负的 `Kind=adjust`。但 CLI 计费的请求并不都写进 transcript（取消或空闲后整段上下文重发的请求、后台请求，以及流式中途写下、比最终计费少的 output 计数），实测这类日子的差额正好等于这些没落行的用量，负残差会把 CLI 自报的正确花费调低。现在残差只往上补；账本高于 transcript 的日子只在报告里列出天数和金额（「账本高于 transcript 共 X，未下调」），包括 `--resume` 恢复额修正之后的余数。账本当天为负时补到 0 的规则不变
