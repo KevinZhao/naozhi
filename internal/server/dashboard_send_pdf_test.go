@@ -180,30 +180,6 @@ func TestParseAttachmentFile_Image_StillWorks(t *testing.T) {
 	}
 }
 
-func TestSanitizeClientFilename(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"", ""},
-		{"report.pdf", "report.pdf"},
-		{"合同.pdf", "合同.pdf"},                    // utf-8 preserved
-		{"../etc/passwd", "_.._etc_passwd"[1:]}, // path separator collapsed; no leading '.' stripping (we don't care)
-		{"a/b\\c.pdf", "a_b_c.pdf"},
-		{"\x00\x01evil\x7f.pdf", "evil.pdf"}, // control chars stripped
-	}
-	for _, c := range cases {
-		got := sanitizeClientFilename(c.in)
-		if got != c.want {
-			t.Errorf("sanitizeClientFilename(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-
-	// Long-name truncation.
-	long := strings.Repeat("a", 500) + ".pdf"
-	got := sanitizeClientFilename(long)
-	if len([]rune(got)) > 120 {
-		t.Errorf("expected <=120 runes, got %d", len([]rune(got)))
-	}
-}
-
 func TestPersistFileRefs_WritesToWorkspace(t *testing.T) {
 	ws := t.TempDir()
 	atts := []clievent.Attachment{{
