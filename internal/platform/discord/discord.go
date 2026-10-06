@@ -5,11 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -62,13 +60,15 @@ type Discord struct {
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
 	// dispatch bounds concurrent handler goroutines — each may download up to
-	// maxDiscordAttachmentsPerMessage × 10 MB — and tracks the self-heal for Stop().
+	// limits.MaxFileAttachmentBytes — and tracks the self-heal for Stop().
 	dispatch platform.BoundedDispatch
 	// connState is fed by the gateway's Connect/Ready/Resumed/Disconnect events.
 	connState platform.ConnTracker
 	// admit gates attachment downloads; nil admits everyone. Set by
 	// SetAdmission before Start, read-only after.
 	admit platform.AdmitFunc
+	// cdnHTTP downloads attachments; New sets discordHTTPClient.
+	cdnHTTP *http.Client
 	// restTransport replaces the REST client's transport; nil in production.
 	restTransport http.RoundTripper
 	// closeTimeout overrides discordCloseTimeout when non-zero.
@@ -87,7 +87,7 @@ func New(cfg Config) *Discord {
 	if cfg.MaxReplyLen <= 0 {
 		cfg.MaxReplyLen = platform.DiscordMaxReplyLen // Discord's actual API limit
 	}
-	return &Discord{cfg: cfg, dispatch: platform.BoundedDispatch{Name: "discord"}}
+	return &Discord{cfg: cfg, dispatch: platform.BoundedDispatch{Name: "discord"}, cdnHTTP: discordHTTPClient}
 }
 
 // getBotID returns the bot's user ID, or "" before the gateway populated it.
@@ -634,30 +634,9 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 		return
 	}
 
-	// Attachment metadata is collected here; downloads happen asynchronously.
-	type pendingImage struct {
-		url         string
-		contentType string
-	}
-	// Discord allows 10 × 10 MB attachments per message; cap the in-flight
-	// footprint a hostile client can pin.
-	const maxDiscordAttachmentsPerMessage = 5
-	var pending []pendingImage
-	for _, att := range m.Attachments {
-		if !isImageContentType(att.ContentType) {
-			continue
-		}
-		if len(pending) >= maxDiscordAttachmentsPerMessage {
-			slog.Warn("discord attachments truncated",
-				"channel", m.ChannelID,
-				"kept", maxDiscordAttachmentsPerMessage,
-				"total", len(m.Attachments))
-			break
-		}
-		pending = append(pending, pendingImage{url: att.URL, contentType: att.ContentType})
-	}
-
-	if text == "" && len(pending) == 0 {
+	// Attachments are planned here from metadata; downloads run asynchronously.
+	plan := planAttachments(m.Attachments)
+	if text == "" && len(plan) == 0 {
 		return
 	}
 
@@ -679,47 +658,20 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 
 	// Downloads run in the bounded goroutine, not discordgo's event dispatch.
 	d.dispatch.TryGo("discord", func() {
-		// Only attachments cost a download; text-only messages go straight to
-		// the handler, which judges them anyway.
-		if len(pending) > 0 && d.admit != nil && !d.admit(d.stopCtx, msg) {
+		ctx := d.stopCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		// Only downloads cost anything; other messages go straight to the
+		// handler, which judges them anyway.
+		if needsDownload(plan) && d.admit != nil && !d.admit(ctx, msg) {
 			return
 		}
-		var total int
-		for _, p := range pending {
-			data, mime, err := downloadURL(p.url)
-			if err != nil {
-				slog.Warn("discord download attachment failed",
-					"err", err, "url", osutil.SanitizeForLog(p.url, 256))
-				continue
-			}
-			if !aggregateAttachmentBytesAllow(total, len(data)) {
-				slog.Warn("discord attachments aggregate cap reached",
-					"channel", m.ChannelID,
-					"kept", len(msg.Images),
-					"cap_bytes", maxDiscordTotalAttachmentBytes,
-					"so_far_bytes", total,
-					"next_bytes", len(data))
-				break
-			}
-			total += len(data)
-			msg.Images = append(msg.Images, platform.Image{Data: data, MimeType: mime})
+		if !d.attachFiles(ctx, &msg, plan) {
+			return
 		}
-		d.handler(d.stopCtx, msg)
+		d.handler(ctx, msg)
 	}, "channel", m.ChannelID, "user", m.Author.ID)
-}
-
-// maxDiscordTotalAttachmentBytes caps aggregate bytes per inbound message on
-// top of the per-image 10 MB cap: 32 MiB fits ordinary screenshots while
-// bounding heap pinned until the dispatcher consumes the message.
-const maxDiscordTotalAttachmentBytes = 32 * 1024 * 1024
-
-// aggregateAttachmentBytesAllow reports whether adding next bytes to soFar
-// stays within maxDiscordTotalAttachmentBytes.
-func aggregateAttachmentBytesAllow(soFar, next int) bool {
-	if next < 0 {
-		return false
-	}
-	return soFar+next <= maxDiscordTotalAttachmentBytes
 }
 
 func isImageContentType(ct string) bool {
@@ -766,10 +718,15 @@ func blockPrivateDial() func(ctx context.Context, network, addr string) (net.Con
 	}
 }
 
+// discordDownloadTimeout bounds one attachment download, body included: a
+// file at the 32 MiB cap needs about 190 KB/s. ResponseHeaderTimeout still
+// gives up on a silent server after 15s, and Stop cancels through stopCtx.
+const discordDownloadTimeout = 3 * time.Minute
+
 // discordHTTPClient disables redirects (a 302 could bypass the CDN allowlist
 // into an internal address) and dials through blockPrivateDial.
 var discordHTTPClient = &http.Client{
-	Timeout: 15 * time.Second,
+	Timeout: discordDownloadTimeout,
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
@@ -780,6 +737,7 @@ var discordHTTPClient = &http.Client{
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	},
 }
@@ -790,49 +748,16 @@ var discordCDNHosts = map[string]bool{
 	"media.discordapp.net": true,
 }
 
-func downloadURL(rawURL string) ([]byte, string, error) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return nil, "", fmt.Errorf("invalid attachment URL: %w", err)
-	}
-	// CDN URLs are always https; plaintext would let a MITM substitute bytes
-	// that are then forwarded as a trusted attachment.
-	if u.Scheme != "https" {
-		return nil, "", fmt.Errorf("attachment URL must be https, got %q", u.Scheme)
-	}
-	if !discordCDNHosts[u.Hostname()] {
-		return nil, "", fmt.Errorf("attachment URL host not in whitelist: %s", u.Hostname())
-	}
-	resp, err := discordHTTPClient.Get(rawURL)
-	if err != nil {
-		return nil, "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("status %d", resp.StatusCode)
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
-	if err != nil {
-		return nil, "", err
-	}
-	headerCT := stripMIMEParams(resp.Header.Get("Content-Type"))
-	ct, err := resolveImageContentType(data, headerCT, u.Hostname())
-	if err != nil {
-		return nil, "", err
-	}
-	return data, ct, nil
-}
-
 // resolveImageContentType derives the forwarded Content-Type from the bytes,
-// never the CDN-controlled header (a malicious edge could claim text/html for
-// XSS on IM clients). An empty body is an error, not a header fallback.
-func resolveImageContentType(data []byte, headerCT, host string) (string, error) {
+// never the CDN-controlled header or the uploader's claim (a malicious edge
+// could claim text/html for XSS on IM clients). An empty body is an error.
+func resolveImageContentType(data []byte) (string, error) {
 	if len(data) == 0 {
-		return "", fmt.Errorf("download: empty body from %s", host)
+		return "", errors.New("download: empty body")
 	}
 	sniffed := stripMIMEParams(http.DetectContentType(data))
 	if !strings.HasPrefix(sniffed, "image/") {
-		return "", fmt.Errorf("download: mime mismatch (header=%s sniffed=%s)", headerCT, sniffed)
+		return "", fmt.Errorf("download: not an image (sniffed=%s)", sniffed)
 	}
 	return sniffed, nil
 }
