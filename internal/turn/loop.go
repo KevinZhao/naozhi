@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
@@ -137,7 +138,7 @@ func (o *Orchestrator) runBatch(ctx context.Context, key string, owner Origin, t
 	text, images := t.batch[0].Text, t.batch[0].Images
 	if !t.first {
 		text, images = Coalesce(t.batch)
-		slog.Info("turn: processing queued messages", "key", key, "count", len(t.batch), "merged_len", len(text))
+		slog.InfoContext(ctx, "turn: processing queued messages", "key", key, "count", len(t.batch), "merged_len", len(text))
 	}
 	o.runTurn(ctx, key, t, sessionOpts(owner, key), text, images, SendSpec{})
 }
@@ -146,6 +147,7 @@ func (o *Orchestrator) runBatch(ctx context.Context, key string, owner Origin, t
 // Begin and BeforeSession on every receiver, GetOrCreate, SessionReady,
 // Send, then the outcome to every receiver.
 func (o *Orchestrator) runTurn(ctx context.Context, key string, t *inflight, opts sessionview.AgentOpts, text string, images []clievent.Attachment, spec SendSpec) {
+	ctx = withTurnIDs(ctx, key)
 	for _, r := range t.receivers {
 		r.begun = true
 		r.d = r.origin.Begin(ctx, r.info)
@@ -262,4 +264,10 @@ func (o *Orchestrator) recovered(ctx context.Context, key string, owner Origin, 
 	out := t.out
 	out.Panic = true
 	o.deliver(ctx, key, t, out, true)
+}
+
+// withTurnIDs stamps the turn's run id and session key on ctx (#3436) so
+// every log line and the session's run record share them.
+func withTurnIDs(ctx context.Context, key string) context.Context {
+	return ctxutil.WithSessionKey(ctxutil.WithRunID(ctx, ctxutil.NewTraceID()), key)
 }

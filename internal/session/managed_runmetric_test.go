@@ -8,6 +8,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
 
@@ -114,8 +115,14 @@ func TestFinishRun_ConcurrentOutOfOrderNoOverCount(t *testing.T) {
 	rt1 := &runTimer{started: time.Now()}
 	rt2 := &runTimer{started: time.Now()}
 	done := make(chan struct{}, 2)
-	go func() { s.finishRun(rt1, &clievent.SendResult{CostUSD: 5.0}, nil); done <- struct{}{} }()
-	go func() { s.finishRun(rt2, &clievent.SendResult{CostUSD: 2.0}, nil); done <- struct{}{} }()
+	go func() {
+		s.finishRun(context.Background(), rt1, &clievent.SendResult{CostUSD: 5.0}, nil)
+		done <- struct{}{}
+	}()
+	go func() {
+		s.finishRun(context.Background(), rt2, &clievent.SendResult{CostUSD: 2.0}, nil)
+		done <- struct{}{}
+	}()
 	<-done
 	<-done
 
@@ -324,5 +331,34 @@ func TestSend_FirstRunRecordNamesItsSession(t *testing.T) {
 				t.Errorf("captured SessionID = %q, want %q", got, tt.captured)
 			}
 		})
+	}
+}
+
+// TestSend_RunRecordAdoptsCtxRunID: the orchestrator's run id (#3436) names
+// the run record, so a journal grep by run_id lands on the same key as
+// /api/sessions/runs. Without one the session mints its own.
+func TestSend_RunRecordAdoptsCtxRunID(t *testing.T) {
+	s, store := newInstrumentedSession(t, func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
+		return &clievent.SendResult{Text: "ok"}, nil
+	})
+	if _, err := s.Send(ctxutil.WithRunID(context.Background(), "0123456789abcdef"), "hi", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Send(context.Background(), "again", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	runs := store.Recent(s.key, 0)
+	if len(runs) != 2 {
+		t.Fatalf("runs = %d", len(runs))
+	}
+	ids := map[string]bool{runs[0].RunID: true, runs[1].RunID: true}
+	if !ids["0123456789abcdef"] {
+		t.Fatalf("ctx run id not adopted: %v", ids)
+	}
+	for id := range ids {
+		if id == "" {
+			t.Fatal("a run without a ctx id must still get one")
+		}
 	}
 }

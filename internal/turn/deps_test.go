@@ -40,6 +40,7 @@ func TestDependencyBoundary(t *testing.T) {
 	want := []string{
 		"internal/cli/clierr",
 		"internal/cli/clievent",
+		"internal/ctxutil", // run id / session key on the turn ctx (#3436); leaf
 		"internal/limits",
 		"internal/metrics",
 		"internal/session/sessionview",

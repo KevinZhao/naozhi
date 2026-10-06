@@ -39,8 +39,16 @@ func TestResolveLogLevel(t *testing.T) {
 func TestNewLogHandler_FormatSelection(t *testing.T) {
 	t.Parallel()
 
+	unwrap := func(h slog.Handler) slog.Handler {
+		// Every handler is wrapped for ctx correlation (#3436); the format
+		// lives one level down.
+		if u, ok := h.(interface{ Unwrap() slog.Handler }); ok {
+			return u.Unwrap()
+		}
+		return h
+	}
 	text := newLogHandler(nil, &config.Config{Log: config.LogConfig{Format: "text", Level: "debug"}})
-	if _, ok := text.(*slog.TextHandler); !ok {
+	if _, ok := unwrap(text).(*slog.TextHandler); !ok {
 		t.Fatalf("format=text: got %T, want *slog.TextHandler", text)
 	}
 	if !text.Enabled(context.Background(), slog.LevelDebug) {
@@ -48,7 +56,7 @@ func TestNewLogHandler_FormatSelection(t *testing.T) {
 	}
 
 	js := newLogHandler(nil, &config.Config{Log: config.LogConfig{Format: "json", Level: "warn"}})
-	if _, ok := js.(*slog.JSONHandler); !ok {
+	if _, ok := unwrap(js).(*slog.JSONHandler); !ok {
 		t.Fatalf("format=json: got %T, want *slog.JSONHandler", js)
 	}
 	if js.Enabled(context.Background(), slog.LevelInfo) {
@@ -57,7 +65,7 @@ func TestNewLogHandler_FormatSelection(t *testing.T) {
 
 	// Empty format defaults to JSON (matches the legacy else-branch).
 	def := newLogHandler(nil, &config.Config{Log: config.LogConfig{Format: ""}})
-	if _, ok := def.(*slog.JSONHandler); !ok {
+	if _, ok := unwrap(def).(*slog.JSONHandler); !ok {
 		t.Fatalf("format empty: got %T, want *slog.JSONHandler (default)", def)
 	}
 }

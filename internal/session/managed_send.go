@@ -36,7 +36,7 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 
 	rt, evCb := s.instrumentRun(onEvent)
 	result, err := proc.SendPassthrough(ctx, text, images, evCb, priority)
-	s.finishRun(rt, result, err)
+	s.finishRun(ctx, rt, result, err)
 	if err != nil {
 		s.mapSendError(proc, err)
 		return nil, err
@@ -65,7 +65,7 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 	result = s.recoverLeakedToolcall(ctx, proc, result, func(rctx context.Context, nudge string) (*clievent.SendResult, error) {
 		rrt, revCb := s.instrumentRun(onEvent)
 		rr, rerr := proc.SendPassthrough(rctx, nudge, nil, revCb, "next")
-		s.finishRun(rrt, rr, rerr)
+		s.finishRun(ctx, rrt, rr, rerr)
 		return rr, rerr
 	})
 	return result, nil
@@ -156,7 +156,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []clieven
 	// nil-callback path; instrumentRun only wraps when runStore is set.
 	rt, evCb := s.instrumentRun(onEvent)
 	result, err := proc.Send(ctx, text, images, evCb)
-	s.finishRun(rt, result, err)
+	s.finishRun(ctx, rt, result, err)
 	if err != nil {
 		s.mapSendError(proc, err)
 		return nil, err
@@ -177,7 +177,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []clieven
 	result = s.recoverLeakedToolcall(ctx, proc, result, func(rctx context.Context, nudge string) (*clievent.SendResult, error) {
 		rrt, revCb := s.instrumentRun(onEvent)
 		rr, rerr := proc.Send(rctx, nudge, nil, revCb)
-		s.finishRun(rrt, rr, rerr)
+		s.finishRun(ctx, rrt, rr, rerr)
 		return rr, rerr
 	})
 	return result, nil

@@ -124,7 +124,7 @@ cmd/naozhi/main.go
   -> tuningspec   model/effort 值校验（config 与 session 共享的 flag-injection 防线）
   -> backendid    Backend-ID 长度/格式校验
   -> apierr       Claude API 错误检测与本地化
-  -> ctxutil      context.Context helpers
+  -> ctxutil      context.Context helpers：trace_id（IM 入口）/ run_id + session_key（turn）随 ctx 传递，Handler 把它们附到每条 *Context 日志上
   -> leakguard    "leaked tool" 检测的单一真相源
   -> spawndiag    spawn 门禁拒绝的上报（metrics + 日志 + observer）；位于 cli 之下，envpolicy 才能上报
   -> cliinfo      CLI 词汇的零依赖叶子（进程状态 / death reason / watchdog 默认值 / backend 与 model 行 / argv denylist），cli 重导出；只命名这些词汇的包 import 它而不是 cli

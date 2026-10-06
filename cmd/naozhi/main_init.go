@@ -10,6 +10,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
@@ -42,10 +43,14 @@ func resolveLogLevel(level string) slog.Level {
 // "text" selects a TextHandler, anything else (incl. default "json") a JSONHandler.
 func newLogHandler(w *os.File, cfg *config.Config) slog.Handler {
 	opts := &slog.HandlerOptions{Level: resolveLogLevel(cfg.Log.Level)}
+	var h slog.Handler
 	if cfg.Log.Format == "text" {
-		return slog.NewTextHandler(w, opts)
+		h = slog.NewTextHandler(w, opts)
+	} else {
+		h = slog.NewJSONHandler(w, opts)
 	}
-	return slog.NewJSONHandler(w, opts)
+	// trace_id / run_id / session_key from the ctx on every *Context log (#3436).
+	return ctxutil.NewHandler(h)
 }
 
 // setupLogging installs the process-global slog default logger from cfg,

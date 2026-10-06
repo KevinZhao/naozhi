@@ -93,10 +93,10 @@ func (d *Dispatcher) admitRate(ctx context.Context, msg platform.IncomingMessage
 	}
 	dispatchRateLimitedTotal.Add(1)
 	if !d.rateLimitReplies.allow(key, time.Now()) {
-		lg.Debug("im message rate limited")
+		lg.DebugContext(ctx, "im message rate limited")
 		return false
 	}
-	lg.Info("im message rate limited", "msgs_per_min", d.rateLimit.MsgsPerMin)
+	lg.InfoContext(ctx, "im message rate limited", "msgs_per_min", d.rateLimit.MsgsPerMin)
 	d.replyText(ctx, msg, "消息过于频繁（每分钟最多 "+strconv.Itoa(d.rateLimit.MsgsPerMin)+" 条），请稍后再试。", lg)
 	return false
 }

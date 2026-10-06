@@ -49,7 +49,7 @@ func (d *Dispatcher) newIMOrigin(msg platform.IncomingMessage, lg *slog.Logger, 
 // deliver the reply. Neither does one past today's budget.
 func (d *Dispatcher) submit(ctx context.Context, o *imOrigin, r turn.Request) {
 	if d.platforms[o.msg.Platform] == nil {
-		o.lg.Error("unknown platform")
+		o.lg.ErrorContext(ctx, "unknown platform")
 		return
 	}
 	if !d.admitBudget(ctx, o) {
@@ -102,13 +102,13 @@ func (o *imOrigin) Admitted(ctx context.Context, a turn.Ack) {
 	d := o.d
 	switch a {
 	case turn.AckOwner:
-		o.lg.Info("message received", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
+		o.lg.InfoContext(ctx, "message received", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
 		o.startAck(ctx)
 	case turn.AckDetached:
 		if o.kind == imUrgent {
-			o.lg.Info("/urgent dispatched", "key", o.key, "text_len", o.textLen)
+			o.lg.InfoContext(ctx, "/urgent dispatched", "key", o.key, "text_len", o.textLen)
 		} else {
-			o.lg.Info("message received (passthrough)", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
+			o.lg.InfoContext(ctx, "message received (passthrough)", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
 		}
 		o.startAck(ctx)
 	case turn.AckQueued:
@@ -117,9 +117,9 @@ func (o *imOrigin) Admitted(ctx context.Context, a turn.Ack) {
 		}
 	case turn.AckDropped:
 		notified := d.replyNotice(ctx, o.msg, o.key, "正在处理上一条消息，请稍候...", o.lg, "busy")
-		o.lg.Info("message dropped: session busy", "key", o.key, "notified", notified)
+		o.lg.InfoContext(ctx, "message dropped: session busy", "key", o.key, "notified", notified)
 	case turn.AckShuttingDown:
-		o.lg.Warn("message declined: shutting down", "key", o.key)
+		o.lg.WarnContext(ctx, "message declined: shutting down", "key", o.key)
 	}
 }
 
@@ -299,7 +299,7 @@ func (dl *imDelivery) queuedIDs() []string {
 // aborted turn with nothing to say only marks the banner.
 func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, sess turn.Session) {
 	o, d, p, tracker := dl.o, dl.o.d, dl.p, dl.tracker
-	dl.lg.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD,
+	dl.lg.InfoContext(ctx, "message replied", "result_len", len(result.Text), "cost", result.CostUSD,
 		"merged_count", result.MergedCount, "merged_with_head", result.MergedWithHead)
 
 	// A merge follower (MergedWithHead set; the head slot is 0 and may carry

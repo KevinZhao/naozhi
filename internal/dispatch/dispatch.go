@@ -15,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/agentroute"
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 	"github.com/naozhi/naozhi/internal/imauth"
 	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -506,6 +507,7 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 // a message that survives prepareInbound is submitted as an IM turn.
 func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 	return func(ctx context.Context, msg platform.IncomingMessage) {
+		ctx = withInboundTrace(ctx, msg)
 		p, ok := d.prepareInbound(ctx, msg)
 		if !ok {
 			return
@@ -767,4 +769,19 @@ func (d *Dispatcher) sendChunks(ctx context.Context, p platform.Platform, to Rep
 			d.markReplySuccess()
 		}
 	}
+}
+
+// withInboundTrace gives the message a trace id for its logs (#3436): the
+// platform's event id when it sent one (so a redelivery shares the trace),
+// else a fresh id. The adapters start from context.Background(), so this is
+// where the trace begins.
+func withInboundTrace(ctx context.Context, msg platform.IncomingMessage) context.Context {
+	if ctxutil.TraceID(ctx) != "" {
+		return ctx
+	}
+	id := osutil.SanitizeForLog(msg.EventID, 64)
+	if id == "" {
+		id = ctxutil.NewTraceID()
+	}
+	return ctxutil.WithTraceID(ctx, id)
 }
