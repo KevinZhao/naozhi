@@ -31,4 +31,7 @@ var (
 	// dispatchDeniedTotal counts IM messages the access policy refused,
 	// keyed "<platform>:<reason>" (imauth.Reason*).
 	dispatchDeniedTotal = expvar.NewMap("naozhi_dispatch_denied_total")
+
+	// dispatchRateLimitedTotal counts IM messages dropped by im_rate_limit.
+	dispatchRateLimitedTotal = expvar.NewInt("naozhi_dispatch_rate_limited_total")
 )

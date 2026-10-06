@@ -131,6 +131,34 @@ test.describe('Lightbox gallery navigation', () => {
     await ctx.close();
   });
 
+  test('opening takes focus, Tab stays inside, Escape hands focus back', async ({ browser }) => {
+    const ctx = await browser.newContext({ ...desktop });
+    const page = await ctx.newPage();
+    await openSession(page, mock.url);
+
+    // el.click() opens without moving focus, so the composer still holds it
+    // and is what the close has to restore.
+    await page.focus('#msg-input');
+    await page.$eval('.event-images img:nth-child(1)', el => el.click());
+    await page.waitForSelector('.lightbox-overlay.active');
+    expect(await page.evaluate(() => document.activeElement.classList.contains('lightbox-overlay'))).toBe(true);
+
+    await page.keyboard.press('ArrowRight');
+    await expect(page.locator('.lb-counter')).toHaveText('2 / 3');
+    // Shift+Tab from the overlay wraps to the last button; Tab from it wraps
+    // back to the first instead of reaching the transcript behind.
+    await page.keyboard.press('Shift+Tab');
+    expect(await page.evaluate(() => document.activeElement.className)).toContain('lb-nav-next');
+    await page.keyboard.press('Tab');
+    expect(await page.evaluate(() => document.activeElement.getAttribute('data-lb-action'))).toBe('zoom-out');
+
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.lightbox-overlay')).not.toHaveClass(/active/);
+    expect(await page.evaluate(() => document.activeElement && document.activeElement.id)).toBe('msg-input');
+
+    await ctx.close();
+  });
+
   test('single-image message hides nav rails and counter', async ({ browser }) => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();

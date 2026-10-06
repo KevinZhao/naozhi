@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/imauth"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
@@ -33,5 +34,32 @@ func TestServerOptions_IMAccessReachesDispatcher(t *testing.T) {
 	})
 	if got := plat.allReplies(); len(got) != 1 || !strings.Contains(got[0], "ID: eve") {
 		t.Fatalf("replies = %q, want the access refusal", got)
+	}
+}
+
+// ServerOptions.IMRateLimit reaches the same dispatcher: a sender past the
+// burst gets the "too fast" reply instead of a command answer.
+func TestServerOptions_IMRateLimitReachesDispatcher(t *testing.T) {
+	plat := newParityPlatform(false)
+	srv, _ := buildServerWithHandlers(ServerOptions{
+		Addr:        ":0",
+		Router:      session.NewRouter(session.RouterConfig{}),
+		Platforms:   map[string]platform.Platform{parityPlatformName: plat},
+		Backend:     "claude",
+		IMRateLimit: dispatch.RateLimit{MsgsPerMin: 1, Burst: 1},
+	})
+	t.Cleanup(func() {
+		srv.hub.Shutdown()
+		srv.appCancel()
+	})
+	h := srv.dispatcher.BuildHandler()
+	for _, ev := range []string{"e1", "e2"} {
+		h(context.Background(), platform.IncomingMessage{
+			Platform: parityPlatformName, EventID: ev, UserID: "alice",
+			ChatID: parityChatID, ChatType: "direct", Text: "/help",
+		})
+	}
+	if got := plat.allReplies(); len(got) != 2 || !strings.Contains(got[1], "消息过于频繁") {
+		t.Fatalf("replies = %q, want /help's answer then the rate-limit reply", got)
 	}
 }
