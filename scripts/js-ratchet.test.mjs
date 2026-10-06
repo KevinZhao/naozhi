@@ -54,6 +54,38 @@ test('a top-level IIFE is a scope, not a function', () => {
   assert.equal(measureSource(`(function () {\n  function g() {\n${body(5)}\n  }\n})();\n`).maxFnLines, 7);
 });
 
+test('maxIifeLines is the longest top-level IIFE, of every form', () => {
+  const forms = {
+    paren: `(function () {\n${body(10)}\n})();\n`,
+    'call inside the parens': `(function () {\n${body(10)}\n}());\n`,
+    arrow: `(() => {\n${body(10)}\n})();\n`,
+    async: `(async () => {\n${body(10)}\n})();\n`,
+    'unary !': `!function () {\n${body(10)}\n}();\n`,
+    'unary void': `void function () {\n${body(10)}\n}();\n`,
+  };
+  for (const [name, src] of Object.entries(forms)) {
+    assert.equal(measureSource(src).maxIifeLines, 12, name);
+  }
+  const two = `(function () {\n${body(3)}\n})();\nfunction f() {}\n(() => {\n${body(40)}\n})();\n`;
+  assert.equal(measureSource(two).maxIifeLines, 42);
+  assert.equal(measureSource(`function f() {\n${body(10)}\n}\n`).maxIifeLines, 0);
+  // An IIFE that is not a top-level statement is an ordinary function.
+  const nested = measureSource(`function f() {\n  (function () {\n${body(10)}\n  })();\n}\n`);
+  assert.equal(nested.maxIifeLines, 0);
+  assert.equal(nested.maxFnLines, 14);
+});
+
+test('an IIFE body that grows fails --check, one that shrinks must be written', () => {
+  const iife = (n) => `(function () {\n${body(n)}\n})();\n`;
+  const base = { 'a.js': measureSource(iife(150)) };
+  assert.deepEqual(compare({ 'a.js': measureSource(iife(150)) }, base), []);
+  const grown = compare({ 'a.js': measureSource(iife(151)) }, base);
+  assert.ok(grown.includes('a.js: maxIifeLines grew 152 -> 153 (ratchet: may only shrink)'), grown);
+  assert.deepEqual(raisedMetrics({ 'a.js': measureSource(iife(151)) }, base), ['a.js lines 152 -> 153', 'a.js maxIifeLines 152 -> 153']);
+  const shrunk = compare({ 'a.js': measureSource(iife(149)) }, base);
+  assert.ok(shrunk.some((p) => /^a\.js: maxIifeLines improved 152 -> 151/.test(p)), shrunk);
+});
+
 test('lines and top-level let/var', () => {
   const m = measureSource('let a = 1;\nvar b = 2;\nconst c = 3;\n  let d = 4;\n');
   assert.equal(m.lines, 4);
