@@ -41,6 +41,11 @@
   },
   {
     "method": "GET",
+    "path": "/api/cost/budget",
+    "handler_type": "*dashcost.Handlers"
+  },
+  {
+    "method": "GET",
     "path": "/api/cost/entries",
     "handler_type": "*dashcost.Handlers"
   },
@@ -397,6 +402,11 @@
   {
     "method": "GET",
     "path": "/static/agent_view.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/aside_drawer.js",
     "handler_type": "http.HandlerFunc"
   },
   {

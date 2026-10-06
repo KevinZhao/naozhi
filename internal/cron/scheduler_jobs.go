@@ -66,7 +66,7 @@ func (s *Scheduler) AddJob(j *Job) error {
 //   - cron Remove of removeEntryID (0 = no entry; Remove(0) is a no-op) keeps
 //     the unbuffered c.remove send off the s.tbl.mu write hold (#1810);
 //   - resetRouterStub: router.Reset callbacks may re-enter s.tbl.mu;
-//   - runStore.DeleteJob fires even when persist failed so runs/<jobID>/ does
+//   - the run store's DeleteJob fires even when persist failed so runs/<jobID>/ does
 //     not leak once the in-memory record is gone;
 //   - cleanupRunningJobIfIdle bounds the per-jobID *runInflight leak (#758).
 func (s *Scheduler) deleteJobPostCleanup(jobID string, removeEntryID cronEntryID) {

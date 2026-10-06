@@ -84,7 +84,7 @@ func (c *knownSessionsCache) lookupFreshFlush() (map[string]struct{}, bool) {
 
 // beginBuild snapshots the current generation counter. A caller that is
 // about to build a fresh set MUST call this BEFORE reading any source data
-// (Job.LastSessionID, runStore, …) and pass the returned token to publish().
+// (Job.LastSessionID, the run store, …) and pass the returned token to publish().
 // Any invalidate() that lands after beginBuild() bumps gen, so publish()
 // will refuse to install the now-stale set (#1811).
 func (c *knownSessionsCache) beginBuild() uint64 {
@@ -146,7 +146,7 @@ func (c *knownSessionsCache) invalidate() {
 const knownSessionsCacheTTL = 30 * time.Second
 
 // minInvalidateInterval bounds how often invalidate() actually drops the
-// snapshot: runStore.Append and LastSessionID writes call it many times per
+// snapshot: run-record appends and LastSessionID writes call it many times per
 // second, and without coalescing every spawn-time probe paid the
 // O(jobs × recentCap) cold rebuild (#1965).
 const minInvalidateInterval = 5 * time.Second

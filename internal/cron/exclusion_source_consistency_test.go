@@ -8,7 +8,7 @@ import (
 
 // TestExclusionSourceConsistency: KnownSessionIDs, the one cron session
 // exclusion entry point, covers every source a cron session ID lives in —
-// Job.LastSessionID, the in-flight runs and runStore.Recent — so no cron JSONL
+// Job.LastSessionID, the in-flight runs and runstore.Store.Recent — so no cron JSONL
 // leaks into the dashboard history panel (#1051).
 func TestExclusionSourceConsistency(t *testing.T) {
 	t.Parallel()
@@ -23,8 +23,8 @@ func TestExclusionSourceConsistency(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { s.Stop() })
-	if s.runStore == nil || !s.runStore.layout.Enabled() {
-		t.Fatal("test precondition: runStore must be enabled to exercise the slow-path source")
+	if !s.runs.Enabled() {
+		t.Fatal("test precondition: run store must be enabled to exercise the slow-path source")
 	}
 
 	job := &Job{Schedule: "@every 1h", Prompt: "p", Platform: "feishu", ChatID: "c", ChatType: "direct"}
@@ -37,11 +37,11 @@ func TestExclusionSourceConsistency(t *testing.T) {
 	s.editJobForTest(t, job.ID, func(j *Job) { j.LastSessionID = lastSessionID })
 
 	// Source 2 (cold-build only): a persisted run's SessionID that lives
-	// ONLY in runStore.Recent — not in LastSessionID, not in-flight. This is
+	// ONLY in runstore.Store.Recent — not in LastSessionID, not in-flight. This is
 	// the case where the single-key probe's cheap sources all miss and it
 	// must fall through to the same full build KnownSessionIDs walks.
 	const runStoreSessionID = "src2-runstore-dddd-eeee-ffff-000000000002"
-	s.runStore.Append(&CronRun{
+	s.runs.Append(&CronRun{
 		JobID:     job.ID,
 		RunID:     "abcdef0123456789",
 		SessionID: runStoreSessionID,

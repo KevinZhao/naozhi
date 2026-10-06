@@ -38,7 +38,8 @@ type ServerOptions struct {
 	IMAccess *imauth.Policy
 	// IMRateLimit caps each IM sender's message rate; zero is unlimited.
 	IMRateLimit dispatch.RateLimit
-	// IMBudget refuses IM turns past cost.budget; nil admits every turn.
+	// IMBudget refuses IM turns past cost.budget and answers /api/cost/budget;
+	// nil admits every turn.
 	IMBudget *budget.Gate
 	// StateDir is the only state directory the constructor owns end-to-end
 	// (cookie_secret 0700/0600, retired-key ledger, size warning). Other state

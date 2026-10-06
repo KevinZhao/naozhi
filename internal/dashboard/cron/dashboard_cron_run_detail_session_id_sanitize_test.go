@@ -184,7 +184,7 @@ func TestHandleRunDetail_SessionID_Clean(t *testing.T) {
 
 // TestHandleRunDetail_CrossOwnership404 pins [R202606-SEC-2]: a run record
 // whose persisted JobID differs from the URL job_id must 404, mirroring
-// HandleRunTranscript. runStore.Get keys on the disk path today, but a future
+// HandleRunTranscript. runstore.Store.Get keys on the disk path today, but a future
 // refactor that loosens the key must not silently expose another job's run.
 // We stage a record physically under the URL job's runs dir but carrying a
 // foreign JobID to exercise the in-handler guard directly.

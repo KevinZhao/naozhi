@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// schedulerForDeleteParityTest spins up a minimal scheduler whose runStore is
+// schedulerForDeleteParityTest spins up a minimal scheduler whose run store is
 // enabled (StorePath has a sibling runs dir) so deleteJobPostCleanup's
-// runStore.DeleteJob branch is actually exercised — not skipped by the
+// runstore.Store.DeleteJob branch is actually exercised — not skipped by the
 // enabled() gate.
 func schedulerForDeleteParityTest(t *testing.T) *Scheduler {
 	t.Helper()
