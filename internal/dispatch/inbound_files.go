@@ -88,6 +88,10 @@ func adapterRejectReason(r platform.FileReject) string {
 		return fileReasonTooLarge
 	case platform.FileRejectDownloadFailed:
 		return fileReasonDownload
+	case platform.FileRejectTooMany:
+		return fileReasonTooMany
+	case platform.FileRejectTotalTooLarge:
+		return fileReasonTotal
 	default:
 		return fileReasonUnsupported
 	}
