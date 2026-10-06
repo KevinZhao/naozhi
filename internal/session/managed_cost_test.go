@@ -257,7 +257,7 @@ func TestAccountTurnCost_ConcurrentTurnsNoLostOrDoubleUpdate(t *testing.T) {
 	done := make(chan struct{})
 	for _, c := range []float64{1, 3, 2, 4} {
 		go func(c float64) {
-			s.finishRun(nil, &clievent.SendResult{Text: "x", CostUSD: c,
+			s.finishRun(context.Background(), nil, &clievent.SendResult{Text: "x", CostUSD: c,
 				ModelUsage: map[string]clievent.ModelUsage{"m": {CostUSD: c, InputTokens: int64(c * 10)}}}, nil)
 			done <- struct{}{}
 		}(c)

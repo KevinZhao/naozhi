@@ -499,6 +499,23 @@ platforms:
 # direct chat they are also told their ID, at most once per 10 minutes. IDs:
 # Feishu open_id (ou_...), Slack user ID (U...), Discord user ID, Weixin from.
 # admin_users alone may run /cron, /cd and /project; leave it empty and every
+# allowed user is an admin. Changes need a restart. `naozhi setup weixin`
+# writes the weixin entry for the WeChat user who scanned the login QR code.
+# Outbound webhooks (docs/rfc/outbound-webhooks.md): POST run lifecycle events
+# of cron jobs and system-session daemons to your own endpoints. Payload is run
+# metadata only (ids, state, duration, error_class) — never prompt / result /
+# error text. Signed with HMAC-SHA256 when `secret` is set (X-Naozhi-Signature:
+# sha256=…); X-Naozhi-Delivery is an idempotency key. Retries 408/429/5xx with
+# 1s/2s/4s backoff; a full per-endpoint queue drops (counted in
+# naozhi_webhook_dropped_total). Absent = off.
+# integrations:
+#   webhooks:
+#     - url: https://ci.example.com/hooks/naozhi
+#       secret: "${NAOZHI_WEBHOOK_SECRET}"
+#       events: [run.ended]          # run.started | run.ended; empty = both
+#       subsystems: [cron]           # cron | sysession; empty = both
+#       timeout: 10s
+
 # allowed user is an admin. Reload without a restart: `naozhi config reload`
 # (or `systemctl reload naozhi`); see docs/rfc/config-hot-reload.md.
 # `naozhi setup weixin` writes the weixin entry for the WeChat user who

@@ -15,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/agentroute"
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 	"github.com/naozhi/naozhi/internal/imauth"
 	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -504,6 +505,7 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 // a message that survives prepareInbound is submitted as an IM turn.
 func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 	return func(ctx context.Context, msg platform.IncomingMessage) {
+		ctx = withInboundTrace(ctx, msg)
 		p, ok := d.prepareInbound(ctx, msg)
 		if !ok {
 			return
@@ -542,9 +544,9 @@ func (d *Dispatcher) handleGetOrCreateError(
 	lg *slog.Logger,
 ) (replyCtx context.Context, cleanup func(), errMsg string) {
 	if errors.Is(err, context.Canceled) {
-		lg.Info("get session cancelled during shutdown", "err", err)
+		lg.InfoContext(ctx, "get session cancelled during shutdown", "err", err)
 	} else {
-		lg.Error("get session", "err", err)
+		lg.ErrorContext(ctx, "get session", "err", err)
 	}
 	// Empty key keeps the regular (non-cron) phrasing.
 	errMsg = usermsg.ForSendError(err, "")
@@ -571,7 +573,7 @@ func (d *Dispatcher) handleSendError(
 	if errors.Is(err, clierr.ErrSessionReset) {
 		return
 	}
-	lg.Error("send to claude", "err", err)
+	lg.ErrorContext(ctx, "send to claude", "err", err)
 	// usermsg.UserMessage renders the configured timeout durations in
 	// Chinese (dashboard uses the generic ForSendError). Watchdog counters
 	// stay here because the IM side owns that configuration.
@@ -600,7 +602,7 @@ func (d *Dispatcher) handleSendError(
 	if _, err := platform.ReplyWithRetry(replyCtx, p, replyDestOf(msg).text(errMsg), limits.PlatformReplyMaxAttempts); err != nil {
 		d.sendFailCount.Add(1)
 		dispatchSendFailTotal.Add(1)
-		lg.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
+		lg.WarnContext(ctx, "error reply also failed", "chat", msg.ChatID, "err", err)
 	}
 }
 
@@ -633,7 +635,7 @@ func (d *Dispatcher) sendOutboundImages(ctx context.Context, p platform.Platform
 			// Failed image sends must show in /health like text failures.
 			d.sendFailCount.Add(1)
 			dispatchSendFailTotal.Add(1)
-			slog.Warn("send image failed", "err", err)
+			slog.WarnContext(ctx, "send image failed", "err", err)
 		}
 	}
 }
@@ -674,8 +676,8 @@ func (d *Dispatcher) readTurnImages(replyText string) ([]platform.Image, string)
 // turnReplyText's answer or failure notice, then the partial-reply and
 // merge-group chips and the per-session ReplyFooter. Returns "" when nothing
 // should be sent (#656).
-func (d *Dispatcher) decorateReplyText(result *clievent.SendResult, sess turn.Session) string {
-	replyText, answer := turnReplyText(result)
+func (d *Dispatcher) decorateReplyText(ctx context.Context, result *clievent.SendResult, sess turn.Session) string {
+	replyText, answer := turnReplyText(ctx, result)
 	// claude cut the answer off (aborted_streaming keeps the partial text);
 	// keyed on CLIAborted, not Aborted, which a late interrupt can stamp on
 	// a turn that finished. A notice or error text is not a partial answer.
@@ -760,9 +762,25 @@ func (d *Dispatcher) sendChunks(ctx context.Context, p platform.Platform, to Rep
 		if _, err := platform.ReplyWithRetry(ctx, p, to.text(chunk), limits.PlatformReplyMaxAttempts); err != nil {
 			d.sendFailCount.Add(1)
 			dispatchSendFailTotal.Add(1)
-			slog.Error("reply chunk failed after retries", "chat", to.ChatID, "chunk", i+1, "err", err)
+			slog.ErrorContext(ctx, "reply chunk failed after retries", "chat", to.ChatID, "chunk", i+1, "err", err)
 		} else {
 			d.markReplySuccess()
 		}
 	}
+}
+
+// withInboundTrace gives the message a trace id for its logs:
+// "<platform>:<event id>" when the platform sent one (a redelivery shares
+// the trace, and it greps against the platform's own logs), else a fresh
+// id. The adapters start from context.Background(), so this is where the
+// trace begins.
+func withInboundTrace(ctx context.Context, msg platform.IncomingMessage) context.Context {
+	if ctxutil.TraceID(ctx) != "" {
+		return ctx
+	}
+	id := ctxutil.NewTraceID()
+	if ev := osutil.SanitizeForLog(msg.EventID, 96); ev != "" {
+		id = osutil.SanitizeForLog(msg.Platform, 32) + ":" + ev
+	}
+	return ctxutil.WithTraceID(ctx, id)
 }

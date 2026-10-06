@@ -1242,6 +1242,7 @@ type stubCaps struct{ id string }
 
 func (stubCaps) Takeover(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false }
 func (s stubCaps) ReplyFooter(_ string) string                                     { return "stubCaps:" + s.id }
+func (s stubCaps) BackendIDs() []string                                            { return nil }
 
 // TestNewDispatcher_CapabilitiesPrecedence pins the three-way precedence
 // resolution in NewDispatcher:

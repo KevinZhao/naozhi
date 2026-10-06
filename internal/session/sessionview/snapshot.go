@@ -28,8 +28,14 @@ type SessionSnapshot struct {
 	// one; the dashboard renders "(模型未配置)". For ACP backends the runtime
 	// model from session/new is not read back (see docs/TODO.md), so this
 	// reflects the configured value.
-	Model      string `json:"model,omitempty"`
-	LastActive int64  `json:"last_active"` // unix ms
+	Model string `json:"model,omitempty"`
+	// TuningModel / TuningEffort are the per-session overrides recorded by
+	// SetSessionTuning ("" = the config chain applies). Model already
+	// reflects TuningModel once it is in force; these say that it is an
+	// override, which the IM /model and /effort commands report.
+	TuningModel  string `json:"tuning_model,omitempty"`
+	TuningEffort string `json:"tuning_effort,omitempty"`
+	LastActive   int64  `json:"last_active"` // unix ms
 	// CreatedAt anchors sidebar order (ascending, so new rows land at the
 	// bottom and rows never shift on activity). unix ms; 0 only if loadStore
 	// couldn't infer one (treated as "very old").

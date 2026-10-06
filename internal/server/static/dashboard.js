@@ -1,3 +1,4 @@
+// @ts-check
 import { NZ_CONTRACT } from './contract.js';
 import { getToken, lsGet, lsRemove, lsSet } from './platform.js';
 import { registerShell } from './shell.js';
@@ -60,10 +61,7 @@ import {
   stopSidebarTimeTick,
   timeAgo,
 } from './utilities.js';
-import {
-  previewDiscovered,
-  scanDiscovered,
-} from './discovery.js';
+import { previewDiscovered, scanDiscovered } from './discovery.js';
 import {
   dismissSession,
   fetchGitState,
@@ -82,10 +80,7 @@ import {
 import { backendDisplayName, backendDisplayVersion, createNewSession, doCreateSession, keyTailDisplay, saveToken, startWSAuthRetryCountdown } from './auth_modal.js';
 import { fetchAccessProfiles, fetchCLIBackends } from './backend_catalog.js';
 import { pendingBackendID } from './features.js';
-import {
-  handleKey,
-  sendMessage,
-} from './send_message.js';
+import { handleKey, sendMessage } from './send_message.js';
 import { collectWorkspaceSessionIDs, fetchSessions, onSessionsApplied, originBadgeHtml, refreshHeaderExitChip, restorePending, updateCardUnreadChip, updateMainState } from './session_list.js';
 import { findDiscovered, isDiscoveredKey, matchProject, parseDiscoveredPid, sid } from './session_ident.js';
 import { ICONS } from './icons.js';
@@ -345,7 +340,7 @@ onSessionsApplied(() => { if (selection.key) updateHeaderCLI(); });
 
 
 document.addEventListener('click', function(e) {
-  if (ui.activePopover && !ui.activePopover.contains(e.target) && !e.target.closest('#btn-history')) {
+  if (ui.activePopover && !ui.activePopover.contains(/** @type {Node} */ (e.target)) && !/** @type {Element} */ (e.target).closest('#btn-history')) {
     closeHistoryPopover();
   }
 });
@@ -419,7 +414,7 @@ function toggleHistory() {
   // might disable inline event handlers on the items HTML.
   const searchInput = document.getElementById('hp-search');
   if (searchInput) {
-    searchInput.addEventListener('input', e => applyHistoryFilter(merged, e.target.value));
+    searchInput.addEventListener('input', e => applyHistoryFilter(merged, /** @type {HTMLInputElement} */ (e.target).value));
     // Auto-focus on desktop only; mobile focus pops the keyboard and
     // pushes the sheet up, which is annoying if the user just wanted to
     // eyeball the list.
@@ -668,7 +663,7 @@ function dismissCheatsheet() {
 // Global "?" shortcut: open the cheatsheet when not typing in an input
 // and no other modal is already open. The same Shift+/ also fires "?"
 // on US layouts, so the `key === '?'` check covers both.
-document.addEventListener('keydown', function(e) {
+document.addEventListener('keydown', function(/** @type {KeyboardEvent & {target: HTMLElement}} */ e) {
   if (e.key !== '?') return;
   const tag = (e.target.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
@@ -698,7 +693,7 @@ document.addEventListener('keydown', function(e) {
 // that is open. cron goes through nzViews.cron, absent when cron_view.js is not
 // loaded (dashboard-cron-view-extraction §2.6 B1); its own priority (expanded
 // row before drawer) lives in cron_view.js's cronEscClose.
-document.addEventListener('keydown', function(e) {
+document.addEventListener('keydown', function(/** @type {KeyboardEvent & {target: HTMLElement}} */ e) {
   if (e.key !== 'Escape') return;
   // Overlays with their own Esc trapFocus handling take precedence.
   if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
@@ -1210,7 +1205,7 @@ function renderMainShell() {
   startFileRefObserver();
   // Double-tap events feed → focus input (mobile)
   let lastTapMs = 0;
-  document.getElementById('events-scroll').addEventListener('touchend', e => {
+  document.getElementById('events-scroll').addEventListener('touchend', (/** @type {TouchEvent & {target: Element}} */ e) => {
     if (!isMobile() || e.target.closest('a,button,code,pre')) return;
     const now = Date.now();
     if (now - lastTapMs < 300) { document.getElementById('msg-input')?.focus(); lastTapMs = 0; }
@@ -1289,8 +1284,8 @@ function renderSettingsView() {
       sysLinkHtml +
     '</div>';
   const grp = document.getElementById('settings-theme-group');
-  if (grp) grp.addEventListener('click', function (e) {
-    const b = e.target.closest('.settings-theme-opt');
+  if (grp) grp.addEventListener('click', function (/** @type {MouseEvent & {target: Element}} */ e) {
+    const b = /** @type {HTMLElement} */ (e.target.closest('.settings-theme-opt'));
     if (!b) return;
     applyTheme(b.dataset.theme, true); // persist=true: user-initiated → save to server
     renderSettingsView(); // refresh active state
@@ -1308,13 +1303,13 @@ function renderSettingsView() {
 //
 // Rate-limit replies also carry `retry_after` (seconds) so the
 // UI can show a countdown instead of the legacy generic "稍后
-// 重试" hint. Older servers omit the field — parseInt of
+// 重试" hint. Older servers omit the field — Math.trunc of
 // undefined is NaN, and startWSAuthRetryCountdown clamps to a
 // 60s default so the UX degrades gracefully.
 wsm.onAuthFail((msg) => {
   const raw = (msg.error || '').toString();
   if (raw.toLowerCase().includes('too many')) {
-    let retryAfter = parseInt(msg.retry_after, 10);
+    let retryAfter = Math.trunc(msg.retry_after);
     if (!Number.isFinite(retryAfter) || retryAfter <= 0) retryAfter = 60;
     startWSAuthRetryCountdown(retryAfter);
   } else {
@@ -1331,7 +1326,7 @@ const daemonRun = () => {
     if (ui.activeView === 'system') renderSystemView();
   }).catch(() => {});
 };
-const sysRun = (msg) => msg.subsystem === 'sysession';
+const sysRun = (/** @type {WsFrames['run_started' | 'run_ended']} */ msg) => msg.subsystem === 'sysession';
 wsm.on(NZ_CONTRACT.WS.run_started, daemonRun, sysRun);
 wsm.on(NZ_CONTRACT.WS.run_ended, daemonRun, sysRun);
 
@@ -1366,7 +1361,7 @@ function updateHeaderCLI() {
 /* ===== Sidebar resizer (desktop only) ===== */
 (function(){
   const resizer = document.getElementById('resizer');
-  const sidebar = document.querySelector('.sidebar');
+  const sidebar = /** @type {HTMLElement} */ (document.querySelector('.sidebar'));
   // RNEW-UX-004 demo: migrated 'naozhi_sidebar_w' -> 'nz:sidebar_w' via
   // unified helper. One-time loss of saved width acceptable (defaults to
   // CSS width).
@@ -1375,7 +1370,7 @@ function updateHeaderCLI() {
   if (saved >= 200) sidebar.style.width = saved + 'px';
 
   let startX, startW;
-  resizer.addEventListener('mousedown', function(e) {
+  resizer.addEventListener('mousedown', function(/** @type {MouseEvent & {target: Element}} */ e) {
     // Mid-line collapse handle lives inside the resizer; let its click run
     // without starting a drag. Also skip when collapsed (nothing to resize).
     if (e.target && e.target.closest && e.target.closest('.resizer-handle')) return;
@@ -1401,7 +1396,7 @@ function updateHeaderCLI() {
     document.removeEventListener('mouseup', onUp);
     lsSet(LS_SIDEBAR_W, Math.round(sidebar.getBoundingClientRect().width));
   }
-  resizer.addEventListener('dblclick', function(e) {
+  resizer.addEventListener('dblclick', function(/** @type {MouseEvent & {target: Element}} */ e) {
     if (e.target && e.target.closest && e.target.closest('.resizer-handle')) return;
     if (document.body.classList.contains('sidebar-collapsed')) return;
     sidebar.style.width = '360px';

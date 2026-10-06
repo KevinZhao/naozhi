@@ -85,7 +85,8 @@
 13. **PR-11 依赖 PR-10；JSDoc 一块只标一个 def 参数**（§6.3、PR-11）。applyHttp 的 JSDoc 要用 PR-10 注册的 REST def，按 v4 允许的并行开发，
     check-ws-contract 会报"no schema defines"（`ws-contract-nested.mjs:146-150`）。另外 `paramRe`（:128）每个文档块只 exec 一次，
     `@param {Map} store @param {WireView} w` 这样的块只读到第一个，报 `Map` 未定义、`w` 不受检查。现在 PR-11 依赖 PR-10；§6.3 规定每个 def 类型参数用行内
-    `/** @type {X} */` 或只含一个 `@param` 的块，帧对象本身不标 def 类型。
+    `/** @type {X} */` 或只含一个 `@param` 的块，帧对象本身不标 def 类型。（#3439 删除了 `ws-contract-nested.mjs`，字段检查改由 tsc 对照 `wire.d.ts` 做，
+    `paramRe` 的写法约束随之失效；PR-11 仍依赖 PR-10，因为 REST 响应类型要先进 `wire.d.ts`。现行规则见 §6.3。）
 
 **简化（评审建议，采纳）**
 
@@ -229,7 +230,7 @@
     原样交给叶子模块，`rows_gen`、`agents[].rev`、`prev_agent_ids` 之类的读取于是都不受检查。现在 `workflow_state.js` 的入参用 JSDoc 标注
     wsproto 与 `ext/workflows` REST schema 里的 def 短名（`/** @param {WireView} w */` 等），§6.3 加一行。另外更正先例：`cron_view.js:2020-2021`
     就是 R6 有意允许的"转交给参数名为 msg 的同文件函数"，不是逐字段读取；v3"钻空子"的说法删除。两种形态都过 R6，本 RFC 保留逐字段拼对象，
-    因为字段一目了然。
+    因为字段一目了然。（#3439 起 R6、顶层 `msg.<field>` 扫描与 `ws-contract-nested.mjs` 都已删除，由 tsc 取代；现行规则见 §6.3。）
 19. **UI 细节与 CSS 对齐**（§7.3、§7.4、PR-12）。（1）`.sa-*` 规则全部限定在 `.rb-agent-row` 下（`split_view.css:91-99`），放到 `.wf-row`
     上不起作用。现在在 `views.css` 里写独立的 `.wf-*` 规则。（2）stopped 与 skipped 同为 `--nz-text-mute`；浅色主题下 queued 的 `--nz-text-dim`
     （`#6e7781`）与之几乎相同（`tokens.css:254,258`）。现在不再声称"颜色双编码"：颜色只区分 running / done / failed，中性的三种状态靠字形加
@@ -374,7 +375,8 @@
     `check-enum-literals.mjs:14-18`）。现在只查：显示表恰含枚举键 + 字面量禁令只覆盖 `workflow_state.js` / `workflow_view.js`。
 26. **`wsm.on` handler 的形态**（§6.3、§7.1）。check-ws-receivers R6 拒绝把 `msg` 转交给 import 进来的函数（`check-ws-receivers.mjs:127-128`），
     v2 的 `applyFrame(store, msg)` 跨模块调用必红；包一层同文件函数虽能绕过，却违背 R6 的本意。现在 handler 里逐字段读 `msg.<field>`
-    拼成普通对象再交给叶子模块（先例 `cron_view.js:2020-2021`）；PR-11 加 R6 夹具。
+    拼成普通对象再交给叶子模块（先例 `cron_view.js:2020-2021`）；PR-11 加 R6 夹具。（#3439 删除了 R6：handler 直接把 `msg` 交给
+    标了帧类型的叶子模块参数，见 §6.3。）
 27. **展开检测**（§7.2）。`toggle` 不冒泡、不在 `nz_util.js` 的委托列表里，新模块又不能在顶层挂 document 监听（`nz/no-module-side-effects`）。
     改为 `renderWorkflowPanel` 给自己创建的每个 `<details>` 挂 toggle 监听；自动展开走同一个"需要行"路径；只有用户触发的展开才写 sessionStorage。
 28. **行的 DOM 约定**（§7.3、§8.3、§8.4）。workflow 行不用 `.rb-agent-row[data-task]`：`agent_view.js:638-647` 的 document 级监听会再调一次
@@ -541,7 +543,8 @@
     - 枚举防漂移改为扩展 `check-enum-literals.mjs`（`TestContractJS_Current` 只查新鲜度）。
     - PR-8 补 `rest.schema.json` 重生成；Summary / Ref 写明 snake_case tag。
     - PR-10 在 `ext/workflows` 自带 schema test + golden，并登记进 `REST_SCHEMAS` 与
-      `check-mock-rest.test.mjs` 的 schema 列表；不扩 `ROUTES`（那是 EventEntry 专用）。
+      `check-mock-rest.test.mjs` 的 schema 列表；不扩 `ROUTES`（那是 EventEntry 专用）。（#3439 删除了 `REST_SCHEMAS`，
+      REST schema 改为由 `tools/gen-contract` 生成进 `wire.d.ts`，见 §6.3。）
 36. **ratchet 台账逐 PR**（§14、§11.5）。`ratchet-raises` 是必过 job，只认本 PR 追加的台账行。
     PR-11 至 PR-15 每个都要列出预期的 gate 并追加台账行；§11.5 加
     `go run ./tools/ratchet-raises -base origin/master`。
@@ -2050,11 +2053,11 @@ v4 的 `GET /api/sessions/workflow_agent`（per-agent 预览）连同它专用�
 | `wsproto.schema.json` | `go generate ./internal/wsproto` | `TestSchema_IsGenerated`（`schema_contract_test.go:86-91`） | PR-11 |
 | `static/contract.js` | `go run ./tools/gen-contract`；PR-10 的一条 `/api` 路由让 API 表多 1 行（`contractjs.go:57-66`；v4 有两条，§6.2），PR-11 再加 WS 常量与 ENUMS——两者都要手改 js-ratchet 基线（`contract.js.lines`，现 110）并追加 `js-ratchet:TOTAL.lines` 台账行（§14） | `TestContractJS_Current`（只查新鲜度）、js-ratchet `--check`、`ratchet-raises` | PR-10/11 |
 | contractjs ENUMS `WORKFLOW_STATUS` / `WORKFLOW_AGENT_STATE` | 新增；`check-enum-literals.mjs` 扩展两条：① `workflow_state.js` 的状态显示表（键不加引号）须**恰好**含这两个枚举的键（复用 `tableKeys`，加文件参数；仿 `DEATH_REASONS`）；② **只在 `workflow_state.js` 与 `workflow_view.js` 内**禁止这些值的整串字面量（`literalHits` 限定这两个文件）。**不做全仓禁令**：running / failed / completed / queued / done / unknown / stopped / skipped / paused 在现有十几个 static 文件里作为 session / cron / agent 状态被比较（如 `dashboard.js:335` `sd.state === 'running'`、`agent_view.js:67` `a.status === 'completed'`、`event_stream.js:807` `msg.status === 'queued'`），`literalHits` 分不清比较的是哪个字段，全仓禁令首跑即红——`SESSION_STATE` 不纳管也是这个原因（`check-enum-literals.mjs:14-18`、`contractjs.go:68-71`，归 #2909 的后续）。夹具进 `scripts/check-enum-literals.test.mjs` | `node scripts/check-enum-literals.mjs` + 其 test | PR-11 |
-| 前端 `wsm.on(NZ_CONTRACT.WS.workflow_state, …)` 与 `wsm.on(NZ_CONTRACT.WS.workflow_set, …)` 各一个 | `workflow_view.js` 模块顶层，参数名 `msg`。**handler 不得把 `msg` 交给 import 进来的函数**：check-ws-receivers R6 会拒（`check-ws-receivers.mjs:14-19,127-128`，夹具 `check-ws-receivers.test.mjs:114-117`）。R6 允许两种形态：在 handler 里逐字段读 `msg.<field>` 拼成普通对象再交给叶子模块，或转交给参数名为 `msg` 的**同文件**函数（R6 有意放行，因为那个函数里的 `msg.<field>` 仍在扫描范围内；`cron_view.js:2020-2021` 的 `cronApplyRunStarted(cronMsgOf(msg))` 就是这种，v3 把它当作逐字段读的先例、又把这种形态称为"钻空子"，两处都不对）。本 RFC 用前者，字段一目了然：`(msg) => applyFrame(store, { key: msg.key, node: msg.node, task_id: msg.task_id, epoch: msg.epoch, version: msg.version, base_version: msg.base_version, full: msg.full, server_now: msg.server_now, rows_omitted: msg.rows_omitted, workflow: msg.workflow })`。`check-ws-contract` 扫全部 static/*.js 的顶层 `msg.<field>`（`check-ws-contract.mjs:83-97`），只覆盖到 `msg.workflow` 这一层；嵌套读取见下一行 | `check-ws-contract.mjs:34-45`、`check-ws-receivers.mjs` R1-R7（新增 R6 正反夹具：转交 `msg` 被拒、逐字段对象通过） | PR-11 |
-| `workflow_state.js` 读取嵌套字段的函数（`applyFrame` / `applyHttp` / `reconcileSummaries` 及其内部 helper） | 入参用 JSDoc 标注 def 短名：WS 帧里的 `workflow` → `/** @param {WireView} w */`、行 → `{Agent}`、phase → `{Phase}`，HTTP 响应 → `ext/workflows` REST schema 里的响应 def，Summary → `{Summary}`（短名与既有 def 冲突时在 Go 侧换不冲突的类型名）。check-ws-contract 的嵌套检查只沿"从 `msg` 出发的成员链"和"带 def 短名 JSDoc 类型的参数"两条路跟踪（`scripts/ws-contract-nested.mjs` 文件头）；v3 把 `msg.workflow` 原样交给叶子模块、参数不带类型，`source`、`agents[].rev`、`agents_capped`、`prev_agent_ids`、`phases[].counts` 等读取都不受检查，Go 侧改一个 json tag 浏览器里就静默失效。本表下文登记的 workflow REST schema 也只经这条路生效。**写法约束**（v5）：`ws-contract-nested.mjs:128` 的 `paramRe` 每个文档块只 exec 一次，`@param {Map} store @param {WireView} w` 这样的块只读到第一个（报 `Map` 未定义、`w` 不受检查），所以每个 def 类型参数用紧贴参数的行内 `/** @type {WireView} */ w`，或者该函数的文档块里只有这一个 `@param`；非 def 参数（store、sid）不写带类型的 `@param`。帧不是 def（`wsproto.schema.json` 里 frames 与 defs 分开），handler 拼出的帧对象本身不标类型，只把 `frame.workflow` 交给标了 `WireView` 的 helper。HTTP 响应 def 由 PR-10 注册，所以 PR-11 依赖 PR-10（§14） | `check-ws-contract`（嵌套部分；`typedFns` 计数应增加） | PR-11 |
+| 前端 `wsm.on(NZ_CONTRACT.WS.workflow_state, …)` 与 `wsm.on(NZ_CONTRACT.WS.workflow_set, …)` 各一个 | `workflow_view.js` 模块顶层。帧字段由 tsc 对照生成的 `wire.d.ts` 检查（#3439）：`wsm.on` 按帧类型给 handler 的 `msg` 定型，读帧上没有的字段即 tsc 报错，参数名不受约束。handler 直接把 `msg` 交给叶子模块：`(msg) => applyFrame(store, msg)`，`applyFrame` 的入参写成 `/** @type {WsFrames['workflow_state']} */ frame`（`applySet` 同理用 `WsFrames['workflow_set']`）。帧（或它的 `{ ...msg }` 拷贝）交给未标类型的参数时，`scripts/ts-check.test.mjs` 的 wireReach 报错；逐字段拼出的普通对象不是帧类型，wireReach 认不出，所以不用这种写法 | `check-ws-contract.mjs`（帧类型集合双向一致）、`check-ws-receivers.mjs` R1-R5/R7、tsc（lint-js）、`scripts/ts-check.test.mjs`（`CHECKED` 列入 `workflow_view.js`；wireReach） | PR-11 |
+| `workflow_state.js` 读取嵌套字段的函数（`applyFrame` / `applyHttp` / `reconcileSummaries` 及其内部 helper） | 文件第一行 `// @ts-check`，加入 `scripts/ts-check.test.mjs` 的 `CHECKED`（`wire.d.ts` 的类型到达未开检查的文件时 wireReach 报错）。tsconfig 不开 `strict`，未标类型的参数是 `any`，读取不受检查，所以接收帧或 def 值的参数都要标类型：帧用 `WsFrames['workflow_state']`，helper 入参用 `wire.d.ts` 里的 def 短名（`workflow` → `WireView`、行 → `Agent`、phase → `Phase`、Summary → `Summary`；短名与既有 def 或 TypeScript lib 全局名冲突时在 Go 侧换类型名，`ts-check.test.mjs` 会拦与 lib 重名的），HTTP 响应用 PR-10 生成的 `RestResponse_*`。wireReach 只追帧，def 值交给未标类型的参数不会报错，这一条靠评审。`@param` 与行内 `@type` 都可以，一个文档块写几个 `@param` 都行。v3 把 `msg.workflow` 原样交给不带类型的参数，`source`、`agents[].rev`、`agents_capped`、`prev_agent_ids`、`phases[].counts` 等读取都不受检查，Go 侧改一个 json tag 浏览器里就静默失效 | tsc（lint-js）、`scripts/ts-check.test.mjs` | PR-11 |
 | `handlerSet` 字段、`build_server.go` 构造（注入 IPLimiter）、`registerDashboard` mount | 新增 | `routes_snapshot_test.go:195-212,406-427` | PR-10 |
 | `testdata/routes.golden.json` | `UPDATE_GOLDEN=1 go test -run TestRoutesSnapshot ./internal/server/` | `TestRoutesSnapshot` | PR-10、PR-11（静态资源路由） |
-| workflow REST 响应类型 | `internal/dashboard/ext/workflows/rest_schema_test.go` + `testdata/rest.schema.json`（仿 session 包的 `restResponses` 生成器）；路径追加到 `test/e2e/check-ws-contract.mjs:120` `REST_SCHEMAS` 与 `scripts/check-mock-rest.test.mjs:13` 的 schema 读取 | 新包自己的 `TestRESTSchema_IsGenerated`、`check-ws-contract` | PR-10 |
+| workflow REST 响应类型 | `internal/dashboard/ext/workflows/rest_schema_test.go` + `testdata/rest.schema.json`（仿 session 包的 `restResponses` 生成器）；`tools/gen-contract` 与 `contractjs.BuildWireDTS` 改为也读这份 schema，重生成 `static/wire.d.ts`，前端经 `RestResponse_*` 类型使用；路径追加到 `scripts/check-mock-rest.test.mjs:13` 的 schema 读取 | 新包自己的 `TestRESTSchema_IsGenerated`、`TestWireDTS_Current`、tsc（lint-js） | PR-10 |
 | mock-server 的 workflow 路由 | 新增 `/workflow`，含三种行模式（`rows=none`、`since=` → delta / 退回 full）与 `result_unavailable`；**不**扩 `check-mock-rest.test.mjs:51-55` 的 `ROUTES`（那是 EventEntry 夹具专用），另写 workflow 响应的 schema 校验用例 | `check-mock-rest` | PR-10 |
 | 新 ES module 资产 | `static_assets.go` `//go:embed` + 资产表行、`routes.go` 静态路由 + golden | `TestStaticJS_ModuleInventory`（`static_module_inventory_test.go:13-21`）、`TestDashboardPage_ImportMapAndPreload`（`static_versioning_test.go:78`） | PR-11 |
 | lint-server-handlers | `-mode fail`；新 server 文件 ≤ 500 行，**不抬基线** | CI | PR-10/11 |
@@ -2070,8 +2073,8 @@ classic→module 文件（`:36-44`），新 ES module **不**登记在那里。
   store 与 §6.1 客户端状态机的纯函数——`applyFrame(store, frame)`、`applySet(store, set)`、`applyHttp(store, sid, resp)`、
   `applyHttpError(store, sid, taskId, status, retryAfter, now)`、`needsFetch(entry, now)`、`reconcileSummaries(store, sid, summaries)`、
   `releaseRows(store, sid)`、`visibleWorkflows(store, sid)`、`announceable(store, sid, selectedSid)`（§7.7）。入参 `frame` / `set` 是
-  `workflow_view.js` 的 handler 逐字段拼出的普通对象，不是 `msg` 本身（§6.3 R6）；其中的 `workflow` / 行 / phase / HTTP 响应 / Summary
-  参数一律带 def 短名的 JSDoc 类型（§6.3），嵌套字段因此受 check-ws-contract 校验。配
+  `workflow_view.js` 的 handler 原样交来的帧，标 `WsFrames[...]` 类型；其中的 `workflow` / 行 / phase / HTTP 响应 / Summary
+  参数一律带 `wire.d.ts` 的类型（§6.3），文件带 `// @ts-check`，嵌套字段因此受 tsc 校验。配
   `scripts/workflow-state.test.mjs`（`node --test`，CI 并入 `ci.yml:396-403` 那组，先例
   `cron_state.js` / `session_stream.js`）。
 - 新 ES module `internal/server/static/workflow_view.js`：薄层。
@@ -2644,7 +2647,7 @@ workflowPushLoop 与 board 发布、generation 变化并发。
 `gofmt -l` 为空；`go vet ./...`；**`GOOS=windows go vet ./...`**（必过的 `build-windows` job 的本地等价，`ci.yml:436-457`；FIFO 测试须在 `*_unix_test.go` + `//go:build unix`，§10）；`GOTOOLCHAIN=go1.26.6 make lint-staticcheck`；
 `lint-server-handlers -mode fail`（含 `hubOptionsFieldBaseline`）；**`go test ./internal/session -run TestRouterBudget`**
 （Router 字段 18 / 方法 98 / 类型引用 5，均为 ratchet 台账指标；本特性的 sweeper、resolver、R3 都不得新增 Router 方法或 `*Router`
-参数）；`node scripts/check-enum-literals.mjs` 与其 test；`node --test scripts/check-ws-receivers.test.mjs`；js-ratchet `--check`；
+参数）；`node scripts/check-enum-literals.mjs` 与其 test；`node --test scripts/check-ws-receivers.test.mjs`；tsc 与 `node --test scripts/ts-check.test.mjs`；js-ratchet `--check`；
 **`go run ./tools/ratchet-raises -base origin/master`**（必过 job 的本地等价）；`check-ws-contract`；
 `check-mock-rest`；`node --test scripts/workflow-state.test.mjs`；CLAUDE.md 模块清单测试；推送前全仓
 `go test ./...`。
@@ -2884,7 +2887,7 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   `internal/server/handler_set.go`、`build_server.go`（注入 IPLimiter 与 PR-4 的 projects root）、
   `routes.go`、`routes_snapshot_test.go`、`testdata/routes.golden.json`、`static/contract.js`（API 表 +1 行）、
   `scripts/js-ratchet.baseline.json`（`contract.js.lines` 110 → 111，手改）、`scripts/ratchet-raises.jsonl`、
-  `test/e2e/check-ws-contract.mjs`（:120 `REST_SCHEMAS` 追加）、`test/e2e/mock-server.js`（`/workflow` 路由，含三种行模式与 `result_unavailable`）、
+  `tools/gen-contract/main.go` + `internal/contractjs/wiredts.go`（多读一份 REST schema）、`static/wire.d.ts`（重生成）、`test/e2e/mock-server.js`（`/workflow` 路由，含三种行模式与 `result_unavailable`）、
   `scripts/check-mock-rest.test.mjs`（schema 列表 + workflow 响应用例，不动 `ROUTES`）。
 - ratchet 台账：`js-ratchet:TOTAL.lines`（重生成的 contract.js +1 行；v3 漏了这一行，`js-ratchet --check` 与 `ratchet-raises` 必红）。
 - 测试：§11.2 HTTP 行。
@@ -2897,8 +2900,8 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
 
 - 范围：§6.1 全部（`workflow_state` + **`workflow_set`** 两种帧、两道深度门、客户端 429 / 404 规则、**`version` / `rowsAt` 分离、
   full 帧在 epoch 不变时保留行、fetch 在途时的 full、HTTP 响应不倒退、三种拉取模式与 `needsFetch` 去重、终态后的结果拉取**；无 `rows_gen`）；前端叶子模块
-  `workflow_state.js`（客户端状态机，配 node --test；入参带 def 短名 JSDoc 类型，**每个 def 参数单独一个 `@type` 或单 `@param` 块**，§6.3）+ `workflow_view.js`（两个 `wsm.on` handler，逐字段拼对象、
-  不转交 `msg`；导出函数骨架，不渲染；模块状态放 `const` 对象、无顶层 `let`），由 `dashboard.js` 的一行副作用 import 加载，handler 从本 PR 起生效；contractjs ENUMS +
+  `workflow_state.js`（客户端状态机，配 node --test；带 `// @ts-check`，帧参数标 `WsFrames[...]`、其余入参标 `wire.d.ts` 的 def 短名，§6.3）+ `workflow_view.js`（两个 `wsm.on` handler，带 `// @ts-check`，
+  把 `msg` 原样交给标了帧类型的 `applyFrame` / `applySet`；导出函数骨架，不渲染；模块状态放 `const` 对象、无顶层 `let`），由 `dashboard.js` 的一行副作用 import 加载，handler 从本 PR 起生效；contractjs ENUMS +
   `check-enum-literals.mjs` 扩展（**只限两个 workflow 模块**，§6.3）；store 的兜底 LRU 不淘汰最近 `workflow_set` / Summary 列出的条目（每 sid 上限 37）、
   显示集合含 unknown（§7.1）。
 - 文件：`internal/wsproto/{wsproto.go,registry.go,wsproto.schema.json}`、`internal/contractjs/contractjs.go`、
@@ -2906,19 +2909,19 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   workflowPushLoop、`clientWG.Add(2)`）、新 `static/workflow_state.js`、新 `static/workflow_view.js`、
   新 `scripts/workflow-state.test.mjs`、`.github/workflows/ci.yml`（node --test 列表）、
   `scripts/check-enum-literals.mjs` + `check-enum-literals.test.mjs`（表键恰等、两文件内字面量禁令、其他文件里的同名字面量不报的夹具）、
-  `scripts/check-ws-receivers.test.mjs`（R6 夹具：转交 `msg` 给 import 进来的函数被拒、逐字段对象通过）、`static/dashboard.js`
+  `scripts/ts-check.test.mjs`（`CHECKED` 加两个新文件；PLANTS 加 `applyFrame` / `applySet` 的帧参数锚点）、`static/dashboard.js`
   （`import './workflow_view.js';` 一行）、`static_assets.go`、`routes.go`、`testdata/routes.golden.json`、
   js-ratchet baseline（两个新文件的行、`contract.js` 与 `dashboard.js` 的行数）、`scripts/ratchet-raises.jsonl`、CLAUDE.md:242。
 - ratchet 台账：`js-ratchet:TOTAL.lines`；新文件若含 > 100 行的函数则 `js-ratchet:TOTAL.fnOver100` / `js-ratchet:MAX.maxFnLines`。新文件的 per-file 键
   （`maxFnLines` / `fnOver100` / `topLevelLetVar`）首次出现，不算抬升；per-file 行数只改基线；`routes.golden.json` 不是 pin（v3 列的 `golden:routes` 删除）。
-- 测试：§11.2 wsproto / Hub / 前端 `workflow_state.js` 行；`check-ws-contract`（嵌套检查的 `typedFns` 增加、改一个 `WireView` 的 json tag 即报错、
-  HTTP 响应 def 能被解析）、`check-ws-receivers`（含新夹具）、
+- 测试：§11.2 wsproto / Hub / 前端 `workflow_state.js` 行；tsc（改一个 `WireView` 的 json tag 即报错、`RestResponse_*` 能被解析）、
+  `ts-check.test.mjs`（新 PLANTS 报错、wireReach 为空）、`check-ws-contract`、`check-ws-receivers`、
   `check-enum-literals`（含新夹具；在现有 static 文件上首跑即绿）。
 - 验收：浏览器 devtools 见 `workflow_set` → `workflow_state` header-only full → delta 序列；`/new` 后收到空的 `workflow_set`；
   慢 client 模拟下（含队列满时三个 workflow 同时终态）不触发 `wsDropThreshold`；**CLI 退出**（cli_exited）且 eventPushLoop 阻塞在
   resubscribe 期间 interrupted 帧照常送达；**只 kill shim 连接**（CLI 存活）时收到的是 `degraded:"snapshot_stale"` 的 running 帧，
   **不**出现 interrupted，重接后恢复。
-- 依赖：PR-8、**PR-10**（applyHttp 的 JSDoc 用 PR-10 注册的 REST 响应 def；v4 只写 PR-8，并行开发时 check-ws-contract 报"no schema defines"）；
+- 依赖：PR-8、**PR-10**（applyHttp 的 JSDoc 用 PR-10 注册的 REST 响应 def；v4 只写 PR-8，并行开发时 tsc 找不到这些类型）；
   需要预先开好 `ratchet-raise-approved` issue。
 
 ### PR-12 feat(static): workflow 面板 UI
@@ -2982,11 +2985,17 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
 
 - 范围：非当前 session 的卡片从 `s.workflows` 显示 "⚙ 5/8"（计数至多 30s 陈旧，依赖 PR-8 的 `BumpVersion` 型 sessions_update——
   它推进 `stats.version`，WS 连接时 `renderSidebar` 才会重跑）；`node` 非 local 的卡片不显示（NG3）；Q12 的 `LastActivity` 回落。
-- 文件：`static/session_list.js`、`internal/session/managed_query.go`（LastActivity 回落）、
-  `test/e2e/golden/sidebar.json` + pins、`scripts/ratchet-raises.jsonl`。
+  - 徽标对 running 与 paused（`IsRunning`）的条目求和 done/total，`title` 每个 workflow 一行（`<name> · done/total`）；unknown 与终态不计，
+    全部结束即消失。当前卡片在 CSS 里隐藏（`.session-card.active .sc-wf{display:none}`）：选中切换只换 `active` 类、不重绘卡片，
+    渲染时判定会让旧卡片留着隐藏、新卡片留着徽标。样式 `.sc-wf` 进 `css/split_view.css`（与 `.sc-agents` 同处），只用既有 token。
+  - `LastActivity` 回落：`snap.State` 不是 running 时，取最晚启动的 running / paused 条目，"Workflow <name> · done/total"，无名时
+    "Workflow · done/total"。dashboard 不渲染 `last_activity`（只有 `/api/sessions` 的读者看得到它），所以 sidebar 上的信号只有徽标。
+- 文件：`static/session_list.js`、`static/css/split_view.css`、`internal/session/managed_query.go`（LastActivity 回落）、
+  `test/e2e/golden/sidebar.json` + pins、`test/e2e/mock-server.js`（`setSessionWorkflows`）、`scripts/ratchet-raises.jsonl`。
 - ratchet 台账：`js-ratchet:TOTAL.lines`、`golden:sidebar.json`（`session_list.js` 的 per-file 行数只改基线）。
 - 测试：WS 连接状态下徽标在计数变化后 ≤ 30s（假时钟 / mock 的 sessions_update，`stats.version` 前进）刷新；终态立即刷新；
-  remote session 不显示徽标。
+  remote session 不显示徽标。≤ 30s 与"终态立即"在服务端用假时钟测（`TestWorkflowSnapshotRefresh`：`/api/sessions` 的 version 与
+  counts / activity 一起前进）；e2e 用 mock 的 version 前进 + sessions_update，并验证 version 不动时徽标不变。
 - 依赖：PR-8。
 
 ## 15. 已决事项
@@ -3006,4 +3015,4 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
 | Q9 | resume（`resumeFromRunId`：同 runId、新 task_id）如何展示？ | 视为新 workflow；前端按 `run_id` 把旧条目折叠为"已续跑"子行；后端不合并，但结果文件按 taskId 归属（§5.5）。adopt 的 `paused` 占位沿用同一 task_id，不产生新条目 |
 | Q10 | 面板是否默认展开？ | 桌面只自动展开最新的 running、其余折叠；移动端一律折叠；面板整体限高；记住每个 workflow 的展开状态于 sessionStorage |
 | Q11 | 终态 workflow 在面板上保留多久？ | 每 Process 的 Tracker 5 个；**每 board 5 个**（live 与 retained 合并 LRU，带行与结果缓存）；快照摘要与面板 3 个（全部 `IsUnsettled` + 最近 3 个终态）；Ref = board 的有界集合（≤ 16 非终态 + 5 终态）。v2 的"更早的 N 个"链接删除：§6.2 没有列表端点，Summary 也不带更早的 task_id，客户端无从知道它们；为 2 个额外条目加一条路由（golden、contract、REST schema、mock）不划算。若有需求，后续加 `GET /api/sessions/workflows?key=` 返回 Ref 级行 |
-| Q12 | 是否在 sidebar activity（`last_activity`）里显示 workflow 进度替代被 §9 移除的 phase label？ | **是，低优先级**：snapshot 在 parent 非 running 且有 running workflow 时，`LastActivity` 回落为 "Workflow <name> · done/total"，随 PR-15；与徽标同一刷新机制（sessions_update 节流，至多 30s 陈旧） |
+| Q12 | 是否在 sidebar activity（`last_activity`）里显示 workflow 进度替代被 §9 移除的 phase label？ | **是，低优先级**：snapshot 在 parent 非 running 且有 running workflow 时，`LastActivity` 回落为 "Workflow <name> · done/total"（取最晚启动的那个），随 PR-15；与徽标同一刷新机制（sessions_update 节流，至多 30s 陈旧）。dashboard 的 sidebar 并不渲染 `last_activity`，所以这条回落只给 `/api/sessions` 的读者；sidebar 上靠徽标 |

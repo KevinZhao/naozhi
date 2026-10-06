@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 )
 
 // TestResolveLogLevel covers the config.Log.Level → slog.Level mapping
@@ -39,8 +40,17 @@ func TestResolveLogLevel(t *testing.T) {
 func TestNewLogHandler_FormatSelection(t *testing.T) {
 	t.Parallel()
 
+	unwrap := func(h slog.Handler) slog.Handler {
+		// Every handler is wrapped for ctx correlation (#3436); the format
+		// lives one level down.
+		w, ok := h.(*ctxutil.Handler)
+		if !ok {
+			t.Fatalf("got %T, want the *ctxutil.Handler wrapper", h)
+		}
+		return w.Unwrap()
+	}
 	text := newLogHandler(nil, &config.Config{Log: config.LogConfig{Format: "text", Level: "debug"}}, nil)
-	if _, ok := text.(*slog.TextHandler); !ok {
+	if _, ok := unwrap(text).(*slog.TextHandler); !ok {
 		t.Fatalf("format=text: got %T, want *slog.TextHandler", text)
 	}
 	if !text.Enabled(context.Background(), slog.LevelDebug) {
@@ -48,7 +58,7 @@ func TestNewLogHandler_FormatSelection(t *testing.T) {
 	}
 
 	js := newLogHandler(nil, &config.Config{Log: config.LogConfig{Format: "json", Level: "warn"}}, nil)
-	if _, ok := js.(*slog.JSONHandler); !ok {
+	if _, ok := unwrap(js).(*slog.JSONHandler); !ok {
 		t.Fatalf("format=json: got %T, want *slog.JSONHandler", js)
 	}
 	if js.Enabled(context.Background(), slog.LevelInfo) {
@@ -57,7 +67,7 @@ func TestNewLogHandler_FormatSelection(t *testing.T) {
 
 	// Empty format defaults to JSON (matches the legacy else-branch).
 	def := newLogHandler(nil, &config.Config{Log: config.LogConfig{Format: ""}}, nil)
-	if _, ok := def.(*slog.JSONHandler); !ok {
+	if _, ok := unwrap(def).(*slog.JSONHandler); !ok {
 		t.Fatalf("format empty: got %T, want *slog.JSONHandler (default)", def)
 	}
 }

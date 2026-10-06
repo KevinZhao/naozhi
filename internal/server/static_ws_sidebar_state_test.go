@@ -69,7 +69,7 @@ func TestDashboardJS_DaemonRunFramesRefreshSystemDaemons(t *testing.T) {
 	t.Parallel()
 	js := readDashboardJS(t)
 	for _, reg := range []string{
-		"const sysRun = (msg) => msg.subsystem === 'sysession';",
+		"const sysRun = (/** @type {WsFrames['run_started' | 'run_ended']} */ msg) => msg.subsystem === 'sysession';",
 		"wsm.on(NZ_CONTRACT.WS.run_started, daemonRun, sysRun);",
 		"wsm.on(NZ_CONTRACT.WS.run_ended, daemonRun, sysRun);",
 	} {

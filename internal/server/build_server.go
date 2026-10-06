@@ -114,6 +114,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		scheduler:     scheduler,
 		routerEvents:  opts.Relays.Router,
 		runTelemetry:  opts.Relays.RunTelemetry,
+		webhooks:      opts.Relays.Webhooks,
 	}
 
 	// The one typed-nil unwrap for the runtime router views: a nil

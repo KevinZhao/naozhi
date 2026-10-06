@@ -1,3 +1,4 @@
+// @ts-check
 // agent_view.js — RFC v4 agent-team-ui frontend module.
 //
 // Phase 2.5: moved the 5 banner helpers out of dashboard.js.
@@ -15,11 +16,7 @@ import { esc, escAttr, showToast, nzViews } from './nz_util.js';
 import { fetchEvents } from './event_stream.js';
 import { eventHtml, renderEventsWithDividers } from './event_render.js';
 import { wsm } from './ws_manager.js';
-import {
-  fmtDuration,
-  refreshBanner,
-  turnState,
-} from './running_banner.js';
+import { fmtDuration, refreshBanner, turnState } from './running_banner.js';
 import { sid } from './session_ident.js';
 
 (function () {
@@ -471,13 +468,13 @@ import { sid } from './session_ident.js';
   // "agent_*" frame types, so agent-view frames never touch the
   // dashboard.js receive table.
 
-  function onAgentEvent(msg) {
+  function onAgentEvent(/** @type {WsFrames['agent_event']} */ msg) {
     if (!msg || !msg.event) return;
     if (msg.task_id !== state.activeTaskID) return;
     appendAgentEvent(msg.event);
   }
 
-  function onAgentMeta(msg) {
+  function onAgentMeta(/** @type {WsFrames['agent_meta']} */ msg) {
     if (!msg || !msg.task_id) return;
     // Apply meta to the banner row so stat line stays fresh.
     var row = findAgentByTaskId(msg.task_id);
@@ -492,7 +489,7 @@ import { sid } from './session_ident.js';
     }
   }
 
-  function onAgentDone(msg) {
+  function onAgentDone(/** @type {WsFrames['agent_done']} */ msg) {
     if (!msg || !msg.task_id) return;
     var row = findAgentByTaskId(msg.task_id);
     if (row) {
@@ -510,7 +507,7 @@ import { sid } from './session_ident.js';
     }
   }
 
-  function onAgentSubscribeRejected(msg) {
+  function onAgentSubscribeRejected(/** @type {WsFrames['agent_subscribe_rejected']} */ msg) {
     if (!msg) return;
     if (msg.task_id !== state.activeTaskID) return;
     switch (msg.reason) {
@@ -637,9 +634,9 @@ import { sid } from './session_ident.js';
   // decoded the HTML-attr escape, so the value is a plain JS string and
   // never crosses a JS-parse boundary.
   document.addEventListener('click', function (e) {
-    var t = e.target;
+    var t = /** @type {Element} */ (e.target);
     if (!t || typeof t.closest !== 'function') return;
-    var row = t.closest('.rb-agent-row[data-task]');
+    var row = /** @type {HTMLElement} */ (t.closest('.rb-agent-row[data-task]'));
     if (!row) return;
     var taskID = row.dataset ? row.dataset.task : row.getAttribute('data-task');
     if (!taskID) return; // pre-task_start agents (no taskId yet) — dead tap.
@@ -654,7 +651,7 @@ import { sid } from './session_ident.js';
     if (!state.activeTaskID) return;
     // Don't hijack Esc if the user is focused in a text input (the
     // dashboard's interrupt shortcut owns Esc there).
-    var t = e.target;
+    var t = /** @type {HTMLElement} */ (e.target);
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
       t.isContentEditable)) {
       return;
