@@ -42,21 +42,31 @@ func TestOnMessageCreate_AdmissionBeforeAttachmentDownload(t *testing.T) {
 		URL:         "https://cdn.discordapp.com/attachments/1/2/a.png",
 		ContentType: "image/png",
 	}}
+	refuse := func(context.Context, platform.IncomingMessage) bool { return false }
+	allow := func(context.Context, platform.IncomingMessage) bool { return true }
+	// mentionGate mirrors Dispatcher.Admit's group gate.
+	mentionGate := func(_ context.Context, m platform.IncomingMessage) bool {
+		return m.ChatType != "group" || m.MentionMe
+	}
 	cases := []struct {
 		name        string
 		admit       platform.AdmitFunc // nil: SetAdmission never called
 		attachments []*discordgo.MessageAttachment
 		content     string
+		guild       bool // guild channel; mentioned adds an @bot mention
+		mentioned   bool
 		wantAdmits  int32
 		wantHits    int32
 		wantHandled int
 		wantImages  int
 	}{
-		{"refused image", func(context.Context, platform.IncomingMessage) bool { return false }, image, "", 1, 0, 0, 0},
-		{"refused image with caption", func(context.Context, platform.IncomingMessage) bool { return false }, image, "look", 1, 0, 0, 0},
-		{"admitted image", func(context.Context, platform.IncomingMessage) bool { return true }, image, "", 1, 1, 1, 1},
-		{"refused text only", func(context.Context, platform.IncomingMessage) bool { return false }, nil, "hi", 0, 0, 1, 0},
-		{"no admitter", nil, image, "", 0, 1, 1, 1},
+		{"refused image", refuse, image, "", false, false, 1, 0, 0, 0},
+		{"refused image with caption", refuse, image, "look", false, false, 1, 0, 0, 0},
+		{"admitted image", allow, image, "", false, false, 1, 1, 1, 1},
+		{"refused text only", refuse, nil, "hi", false, false, 0, 0, 1, 0},
+		{"no admitter", nil, image, "", false, false, 0, 1, 1, 1},
+		{"unmentioned guild image", mentionGate, image, "", true, false, 1, 0, 0, 0},
+		{"mentioned guild image", mentionGate, image, "<@bot123> look", true, true, 1, 1, 1, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -79,20 +89,30 @@ func TestOnMessageCreate_AdmissionBeforeAttachmentDownload(t *testing.T) {
 				handled = append(handled, msg)
 				mu.Unlock()
 			}
-			d.onMessageCreate(nil, &discordgo.MessageCreate{Message: &discordgo.Message{
+			m := &discordgo.Message{
 				ID:          "m1",
 				Author:      &discordgo.User{ID: "stranger"},
 				Content:     tc.content,
 				ChannelID:   "dm1",
 				Attachments: tc.attachments,
-			}})
+			}
+			wantChatType := "direct"
+			if tc.guild {
+				m.GuildID, m.ChannelID, wantChatType = "g1", "c1", "group"
+			}
+			if tc.mentioned {
+				m.Mentions = []*discordgo.User{{ID: "bot123"}}
+			}
+			d.onMessageCreate(nil, &discordgo.MessageCreate{Message: m})
 			d.dispatch.Wait()
 
 			if got := admits.Load(); got != tc.wantAdmits {
 				t.Errorf("admit calls = %d, want %d", got, tc.wantAdmits)
 			}
-			if tc.wantAdmits > 0 && (gotAdmit.UserID != "stranger" || gotAdmit.ChatType != "direct") {
-				t.Errorf("admit saw user=%q chat_type=%q, want stranger/direct", gotAdmit.UserID, gotAdmit.ChatType)
+			if tc.wantAdmits > 0 && (gotAdmit.UserID != "stranger" || gotAdmit.ChatType != wantChatType ||
+				gotAdmit.MentionMe != tc.mentioned) {
+				t.Errorf("admit saw user=%q chat_type=%q mention=%v, want stranger/%s/%v",
+					gotAdmit.UserID, gotAdmit.ChatType, gotAdmit.MentionMe, wantChatType, tc.mentioned)
 			}
 			if got := cdn.hits.Load(); got != tc.wantHits {
 				t.Errorf("CDN downloads = %d, want %d", got, tc.wantHits)
