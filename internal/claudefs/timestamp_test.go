@@ -1,187 +1,110 @@
 package claudefs
 
-import (
-	"testing"
-	"time"
-)
+import "testing"
 
-// TestParseISO8601MS_FastPathMatchesParse asserts the hand-rolled fast
-// path produces the same UnixMilli as time.Parse(time.RFC3339Nano, …)
-// across the canonical UTC shapes the Claude CLI emits. This is the
-// correctness guard for R234-PERF-10 / #1012 — any divergence should
-// fail loudly here before reaching production transcripts.
-func TestParseISO8601MS_FastPathMatchesParse(t *testing.T) {
-	cases := []string{
-		"2026-05-26T07:16:17Z",
-		"2026-05-26T07:16:17.0Z",
-		"2026-05-26T07:16:17.5Z",
-		"2026-05-26T07:16:17.123Z",
-		"2026-05-26T07:16:17.123456Z",
-		"2026-05-26T07:16:17.123456789Z",
-		"1970-01-01T00:00:00Z",
-		"1970-01-01T00:00:00.000000001Z",
-		"2099-12-31T23:59:59.999999999Z",
-		"2024-02-29T12:34:56Z", // leap year
+// TestTimestampMillis_Accepted pins unix-ms values worked out independently of
+// time.Parse, for the shapes the Claude CLI writes and for zone offsets.
+// Epoch and epoch+1ns are 0 like the sentinel, so ParseTimestamp's ok is
+// checked too.
+func TestTimestampMillis_Accepted(t *testing.T) {
+	cases := map[string]int64{
+		"2026-05-26T07:16:17Z":            1779779777000,
+		"2026-05-26T07:16:17.0Z":          1779779777000,
+		"2026-05-26T07:16:17.5Z":          1779779777500,
+		"2026-05-26T07:16:17.123Z":        1779779777123,
+		"2026-05-26T07:16:17.123456Z":     1779779777123,
+		"2026-05-26T07:16:17.123456789Z":  1779779777123,
+		"2026-05-26T07:16:17.1234567890Z": 1779779777123, // time.Parse takes >9 digits
+		"1970-01-01T00:00:00Z":            0,
+		"1970-01-01T00:00:00.000000001Z":  0,
+		"1969-12-31T23:59:59.999Z":        -1,
+		"2099-12-31T23:59:59.999999999Z":  4102444799999,
+		"2024-02-29T12:34:56Z":            1709210096000, // leap year
+		"2000-02-29T00:00:00Z":            951782400000,  // leap year by the 400 rule
+		"2026-01-31T23:59:59Z":            1769903999000, // last day of a 31-day month
+		"2026-04-30T23:59:59Z":            1777593599000, // last day of a 30-day month
+		"2026-05-26T07:16:17+00:00":       1779779777000,
+		"2026-05-26T15:16:17+08:00":       1779779777000,
+		"2026-05-26T07:16:17.500-05:00":   1779797777500,
 	}
-	for _, in := range cases {
-		want, err := time.Parse(time.RFC3339Nano, in)
-		if err != nil {
-			t.Fatalf("reference Parse(%q) errored: %v", in, err)
+	for in, want := range cases {
+		if got := TimestampMillis(in); got != want {
+			t.Errorf("TimestampMillis(%q) = %d, want %d", in, got, want)
 		}
-		got := TimestampMillis(in)
-		if got != want.UnixMilli() {
-			t.Errorf("TimestampMillis(%q) = %d, want %d", in, got, want.UnixMilli())
-		}
-		// Also exercise the fast path directly to confirm `ok=true`.
-		gotFast, ok := timestampMillisFast(in)
-		if !ok {
-			t.Errorf("timestampMillisFast(%q) ok=false; expected canonical shape to match", in)
-		}
-		if gotFast != want.UnixMilli() {
-			t.Errorf("timestampMillisFast(%q) = %d, want %d", in, gotFast, want.UnixMilli())
+		if _, ok := ParseTimestamp(in); !ok {
+			t.Errorf("ParseTimestamp(%q) ok=false, want true", in)
 		}
 	}
 }
 
-// TestParseISO8601MS_FastPathRejectsNonCanonical confirms the fast path
-// declines non-canonical shapes (timezone offsets, lowercase markers,
-// missing fields) so they fall through to time.Parse — which either
-// parses them correctly OR returns 0 sentinel via the err branch.
-func TestParseISO8601MS_FastPathRejectsNonCanonical(t *testing.T) {
+// TestTimestampMillis_RejectedIsZero covers the 0 sentinel callers use to skip
+// a line: malformed shapes, and calendar or clock fields out of range, which
+// must be rejected rather than normalised (month 13 is not next January).
+func TestTimestampMillis_RejectedIsZero(t *testing.T) {
 	rejects := []string{
-		"",                                // empty
-		"2026-05-26T07:16:17",             // no zone
-		"2026-05-26T07:16:17z",            // lowercase zone
-		"2026-05-26t07:16:17Z",            // lowercase T
-		"2026-05-26T07:16:17+00:00",       // offset (canonical-but-not-Z)
-		"2026-05-26T07:16:17-08:00",       // offset
-		"2026-05-26T07:16:17.Z",           // empty fraction
-		"2026-05-26T07:16:17.1234567890Z", // 10 fraction digits
-		"2026-05-26T07:16:17.12a3Z",       // non-digit in fraction
-		"2026/05/26T07:16:17Z",            // wrong separator
-		"26-05-26T07:16:17Z",              // 2-digit year
-		"2026-5-26T07:16:17Z",             // 1-digit month
-		// Out-of-range calendar/clock fields: the fast path must decline so
-		// the caller falls back to time.Parse (which rejects them) instead of
-		// silently normalising via time.Date.
-		"2024-99-01T00:00:00Z", // month 99
-		"2026-13-26T07:16:17Z", // month 13
-		"2026-00-26T07:16:17Z", // month 0
-		"2026-05-00T07:16:17Z", // day 0
-		"2026-05-32T07:16:17Z", // day 32
-		"2026-02-30T07:16:17Z", // Feb 30
-		"2026-02-29T07:16:17Z", // Feb 29 non-leap year
-		"2026-04-31T07:16:17Z", // Apr 31
-		"2026-05-26T24:00:00Z", // hour 24
-		"2026-05-26T07:60:00Z", // minute 60
-		"2026-05-26T12:00:60Z", // leap second (time.Parse rejects 60)
-		"2026-05-26T12:00:61Z", // second 61
-	}
-	for _, in := range rejects {
-		if _, ok := timestampMillisFast(in); ok {
-			t.Errorf("timestampMillisFast(%q) ok=true; expected fast path to decline", in)
-		}
-	}
-}
-
-// TestParseISO8601MS_NonCanonicalFallback confirms parseISO8601MS still
-// yields a correct result for inputs that bypass the fast path but are
-// valid RFC3339 (e.g. timezone offsets) — no regression vs. previous
-// behaviour where every input went through time.Parse.
-func TestParseISO8601MS_NonCanonicalFallback(t *testing.T) {
-	cases := []string{
-		"2026-05-26T07:16:17+00:00",
-		"2026-05-26T15:16:17+08:00",
-		"2026-05-26T07:16:17.500-05:00",
-	}
-	for _, in := range cases {
-		want, err := time.Parse(time.RFC3339Nano, in)
-		if err != nil {
-			t.Fatalf("reference Parse(%q) errored: %v", in, err)
-		}
-		got := TimestampMillis(in)
-		if got != want.UnixMilli() {
-			t.Errorf("TimestampMillis(%q) = %d, want %d (fallback path)", in, got, want.UnixMilli())
-		}
-	}
-}
-
-// TestParseISO8601MS_InvalidReturnsZero asserts garbage input yields the
-// 0 sentinel callers rely on to skip the time-window filter. Mirrors the
-// pre-fast-path contract (time.Parse error ⇒ 0) so callers don't need to
-// learn a new failure mode.
-func TestParseISO8601MS_InvalidReturnsZero(t *testing.T) {
-	cases := []string{
 		"",
 		"not-a-time",
-		"2026-13-26T07:16:17Z",  // month 13 — fast path range-rejects, fallback Parse also rejects ⇒ 0
-		"2026-05-26T25:00:00Z",  // hour 25
-		"2026-05-26T07:16:17.Z", // empty fraction
+		"2026-05-26T07:16:17",       // no zone
+		"2026-05-26T07:16:17z",      // lowercase zone
+		"2026-05-26t07:16:17Z",      // lowercase T
+		"2026-05-26T07:16:17.Z",     // empty fraction
+		"2026-05-26T07:16:17.12a3Z", // non-digit in fraction
+		"2026/05/26T07:16:17Z",      // wrong separator
+		"2026-05-26 07:16:17Z",      // space instead of T
+		"26-05-26T07:16:17Z",        // 2-digit year
+		"2026-5-26T07:16:17Z",       // 1-digit month
+		"2024-99-01T00:00:00Z",      // month 99
+		"2026-13-26T07:16:17Z",      // month 13
+		"2026-00-26T07:16:17Z",      // month 0
+		"2026-05-00T07:16:17Z",      // day 0
+		"2026-05-32T07:16:17Z",      // day 32
+		"2026-02-30T07:16:17Z",      // Feb 30
+		"2026-02-29T07:16:17Z",      // Feb 29 in a non-leap year
+		"2100-02-29T07:16:17Z",      // Feb 29 in a century non-leap year
+		"2026-04-31T07:16:17Z",      // Apr 31
+		"2026-05-26T24:00:00Z",      // hour 24
+		"2026-05-26T25:00:00Z",      // hour 25
+		"2026-05-26T07:60:00Z",      // minute 60
+		"2026-05-26T12:00:60Z",      // leap second
+		"2026-05-26T12:00:61Z",      // second 61
 	}
-	for _, in := range cases {
-		// Every input here is rejected by both the fast path's range check
-		// and time.Parse, so parseISO8601MS must yield the 0 sentinel.
+	for _, in := range rejects {
 		if got := TimestampMillis(in); got != 0 {
 			t.Errorf("TimestampMillis(%q) = %d, want 0", in, got)
 		}
-	}
-}
-
-// TestParseISO8601MS_OutOfRangeParityWithParse is the regression guard for
-// #1787: previously the fast path fed out-of-range fields straight to
-// time.Date, which *normalises* (month 13 → next Jan), while time.Parse
-// *rejects* them. That made the fast and slow paths diverge. This asserts
-// that for out-of-range canonical-shaped inputs (a) time.Parse rejects, and
-// (b) the fast path declines (ok=false), so parseISO8601MS falls back and
-// returns the same 0 sentinel.
-func TestParseISO8601MS_OutOfRangeParityWithParse(t *testing.T) {
-	cases := []string{
-		"2024-99-01T00:00:00Z", // month 99
-		"2026-13-26T07:16:17Z", // month 13
-		"2026-00-26T07:16:17Z", // month 0
-		"2026-05-00T07:16:17Z", // day 0
-		"2026-05-32T07:16:17Z", // day 32
-		"2026-02-30T07:16:17Z", // Feb 30
-		"2026-02-29T07:16:17Z", // Feb 29 non-leap
-		"2026-04-31T07:16:17Z", // Apr 31 (30-day month)
-		"2026-05-26T24:00:00Z", // hour 24
-		"2026-05-26T07:60:00Z", // minute 60
-		"2026-05-26T12:00:60Z", // leap second — time.Parse rejects 60
-		"2026-05-26T12:00:61Z", // second 61
-	}
-	for _, in := range cases {
-		if _, err := time.Parse(time.RFC3339Nano, in); err == nil {
-			t.Fatalf("reference Parse(%q) unexpectedly succeeded; test premise broken", in)
-		}
-		if _, ok := timestampMillisFast(in); ok {
-			t.Errorf("timestampMillisFast(%q) ok=true; fast path must decline out-of-range fields", in)
-		}
-		if got := TimestampMillis(in); got != 0 {
-			t.Errorf("TimestampMillis(%q) = %d, want 0 (both paths reject)", in, got)
+		if _, ok := ParseTimestamp(in); ok {
+			t.Errorf("ParseTimestamp(%q) ok=true, want false", in)
 		}
 	}
 }
 
-// TestParseISO8601MS_LeapDayAccepted confirms the per-month day validation
-// is leap-year aware: Feb 29 in a leap year is still accepted by both paths.
-func TestParseISO8601MS_LeapDayAccepted(t *testing.T) {
-	cases := []string{
-		"2024-02-29T12:34:56Z", // 2024 leap year
-		"2000-02-29T00:00:00Z", // 2000 leap (÷400)
-		"2026-01-31T23:59:59Z", // 31-day month boundary
-		"2026-04-30T23:59:59Z", // 30-day month boundary
+// FuzzTimestampMillis keeps the package's two exported timestamp entry points
+// in agreement: TimestampMillis is ParseTimestamp's UnixMilli, or 0 on failure.
+func FuzzTimestampMillis(f *testing.F) {
+	for _, s := range []string{
+		"2026-05-26T07:16:17Z", "2026-05-26T07:16:17.123456789Z",
+		"2026-05-26T07:16:17.500-05:00", "2026-02-29T07:16:17Z",
+		"2026-05-26T07:16:17.Z", "", "not-a-time",
+	} {
+		f.Add(s)
 	}
-	for _, in := range cases {
-		want, err := time.Parse(time.RFC3339Nano, in)
-		if err != nil {
-			t.Fatalf("reference Parse(%q) errored: %v", in, err)
+	f.Fuzz(func(t *testing.T, s string) {
+		var want int64
+		if ts, ok := ParseTimestamp(s); ok {
+			want = ts.UnixMilli()
 		}
-		got, ok := timestampMillisFast(in)
-		if !ok {
-			t.Errorf("timestampMillisFast(%q) ok=false; valid date should be accepted", in)
+		if got := TimestampMillis(s); got != want {
+			t.Errorf("TimestampMillis(%q) = %d, ParseTimestamp gives %d", s, got, want)
 		}
-		if got != want.UnixMilli() {
-			t.Errorf("timestampMillisFast(%q) = %d, want %d", in, got, want.UnixMilli())
-		}
+	})
+}
+
+func BenchmarkTimestampMillis(b *testing.B) {
+	for _, in := range []string{"2026-05-26T07:16:17.123Z", "2026-05-26T07:16:17.500-05:00"} {
+		b.Run(in, func(b *testing.B) {
+			for range b.N {
+				_ = TimestampMillis(in)
+			}
+		})
 	}
 }
