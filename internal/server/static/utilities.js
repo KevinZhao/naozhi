@@ -430,9 +430,6 @@ function renderBackendsDoctorPanel() {
   '</details>';
 }
 
-// showToast moved to nz_util.js (PR-0a). Available as window.nz.util.showToast
-// and the top-level alias window.showToast, loaded before this file.
-
 // RNEW-UX-010 — polite announcement into #sr-announce for screen readers.
 // Used for signals that don't surface as a toast (WS connect/disconnect,
 // new-session arrival, cron completion). We clear the textContent after a
@@ -716,9 +713,6 @@ function formatAbsTime(ms) {
     ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) +
     ' (' + tz + ')';
 }
-
-// trapFocus moved to nz_util.js (PR-0a). Available as window.nz.util.trapFocus
-// and the top-level alias window.trapFocus, loaded before this file.
 
 // confirmDialog renders a styled confirm prompt matching the rest of the
 // dashboard (reuses .modal-overlay / .modal / .modal-btns). Returns a Promise
@@ -1069,12 +1063,8 @@ function timeDividerHtml(ms) {
   return '<div class="event-time-divider" data-time="' + (ms || 0) + '">' + esc(formatTimeShort(ms)) + '</div>';
 }
 
-// esc / escAttr / escJs moved to nz_util.js (PR-0a, RFC
-// dashboard-cron-view-extraction). They are exposed as window.nz.util.* and
-// as top-level aliases (window.esc, window.escAttr, window.escJs) loaded
-// before this file, so the bare call sites below keep working unchanged.
-// SECURITY: the single source of truth for HTML/attr/JS escaping lives there
-// — never re-define a local copy here or in any view module.
+// SECURITY: nz_util.js is the single source of truth for HTML/attr/JS escaping
+// (esc / escAttr / escJs); never re-define a local copy here or in a view module.
 
 // URL schemes that are safe to embed in <a href>.
 // RNEW-SEC-007: Only https?: and fragment-only URLs (#...) are accepted.

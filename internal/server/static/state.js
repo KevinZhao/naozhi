@@ -201,6 +201,10 @@ export const perSession = {
   backends: {},
   // per-session access profile picked at creation ("" = global default)
   accessProfiles: {},
+  // Display-only copy of the two picks above once the first send consumed
+  // them; never sent again, dropped when the server lists the key.
+  // key -> { backend, accessProfile }
+  sentPicks: {},
   // Header-chip picks made on a session that has no server entry yet (created,
   // no message sent). The server parks them and applies them on first spawn;
   // this mirror lets the chips show the pick meanwhile. Dropped on promotion.

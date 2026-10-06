@@ -48,7 +48,7 @@
     "lateBindings": 2
   },
   "auth_modal.js": {
-    "lines": 1293,
+    "lines": 1294,
     "maxFnLines": 101,
     "maxIifeLines": 0,
     "fnOver100": 1,
@@ -228,7 +228,7 @@
     "lateBindings": 0
   },
   "event_render.js": {
-    "lines": 389,
+    "lines": 390,
     "maxFnLines": 41,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -252,7 +252,7 @@
     "lateBindings": 0
   },
   "features.js": {
-    "lines": 50,
+    "lines": 52,
     "maxFnLines": 7,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -420,7 +420,7 @@
     "lateBindings": 0
   },
   "send_message.js": {
-    "lines": 563,
+    "lines": 561,
     "maxFnLines": 52,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -456,7 +456,7 @@
     "lateBindings": 0
   },
   "session_list.js": {
-    "lines": 1107,
+    "lines": 1108,
     "maxFnLines": 95,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -516,7 +516,7 @@
     "lateBindings": 0
   },
   "state.js": {
-    "lines": 248,
+    "lines": 252,
     "maxFnLines": 0,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -540,7 +540,7 @@
     "lateBindings": 0
   },
   "tuning.js": {
-    "lines": 490,
+    "lines": 491,
     "maxFnLines": 112,
     "maxIifeLines": 0,
     "fnOver100": 1,
@@ -552,7 +552,7 @@
     "lateBindings": 0
   },
   "utilities.js": {
-    "lines": 1421,
+    "lines": 1411,
     "maxFnLines": 91,
     "maxIifeLines": 0,
     "fnOver100": 0,

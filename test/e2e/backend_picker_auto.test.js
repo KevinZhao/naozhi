@@ -15,8 +15,10 @@
 //     with none does not PATCH one in.
 //   - A session opened but not sent yet shows and gates on the backend it
 //     will spawn on: the pick, else what 自动 resolves to (sidebar icon,
-//     header label, image button, tuning model list). Once sent, it keeps
-//     the router default until the server lists it.
+//     header label, image button, tuning model list). Once sent it keeps
+//     showing that backend until the server lists the key, and no later send
+//     carries the pick again; a sent key this browser did not create shows
+//     the router default.
 //
 // /api/cli/backends, /api/access-profiles and /api/projects/config are
 // answered by page.route (the mock serves none of them).
@@ -316,9 +318,68 @@ test('pending session with a single backend keeps the server-reported CLI name',
   } finally { own.server.close(); }
 });
 
-// After the first send the pick and profile are consumed; until the server
-// lists the key the header keeps the router default instead of re-guessing
-// from the default profile (kiro here). The three sends leave different
+/**
+ * Opens myproject from the palette on profile/backend, sends text (or one
+ * image when text is '') and waits for the send to leave.
+ * @param {import('@playwright/test').Page} page
+ * @param {Awaited<ReturnType<typeof startMockServer>>} own
+ * @param {{ profile: string, backend: string, ws: boolean, text: string }} c
+ */
+async function createAndSend(page, own, c) {
+  await page.goto(own.url + '/dashboard');
+  await page.waitForSelector('.session-card');
+  if (c.ws) await waitForWs(page);
+  await page.click('.hdr-btn[title="New Session"]');
+  await page.selectOption('#new-access-profile', c.profile);
+  await page.selectOption('#new-backend', c.backend);
+  await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().click();
+  await expect(page.locator('.session-card.new-card')).toHaveCount(1);
+  await sendNow(page, own, c.text, 1);
+}
+
+/**
+ * Sends text (or one image when text is '') on the selected key and waits
+ * until n sends have left in total.
+ * @param {import('@playwright/test').Page} page
+ * @param {Awaited<ReturnType<typeof startMockServer>>} own
+ * @param {string} text
+ * @param {number} n
+ */
+async function sendNow(page, own, text, n) {
+  await page.evaluate((text) => {
+    const t = /** @type {any} */ (window).nz.test;
+    t.setMsgValue(document.getElementById('msg-input'), text);
+    if (!text) t.pendingFiles.push({ id: 'file-1', kind: 'image', status: 'ready', normalizedSize: 16, file: new File([new Uint8Array(16)], 'p.png', { type: 'image/png' }) });
+    t.sendMessage();
+  }, text);
+  await expect.poll(() => own.sendCalls.length + wsSendBodies(own).length).toBe(n);
+}
+
+/** @param {Awaited<ReturnType<typeof startMockServer>>} own */
+function wsSendBodies(own) {
+  return own.wsConnections.flatMap(conn => conn.messages).filter(m => m.type === 'send');
+}
+
+/**
+ * The header label from both of its painters.
+ * @param {import('@playwright/test').Page} page
+ */
+async function headerLabels(page) {
+  return page.evaluate(() => {
+    const t = /** @type {any} */ (window).nz.test;
+    t.renderMainShell();
+    const el = /** @type {HTMLElement} */ (document.getElementById('header-cli'));
+    const fromShell = el.textContent;
+    el.textContent = 'stale';
+    t.updateHeaderCLI();
+    return [fromShell, el.textContent];
+  });
+}
+
+// After the first send the pick and profile are consumed, but until the
+// server lists the key the header keeps the backend shown before the send
+// (claude-code), neither the router default's stats name (claude-live) nor a
+// guess from the default profile (kiro). The three sends leave different
 // marks: a WS send only lastSent, an image-only HTTP send only
 // httpSendPending, a text HTTP send both.
 const SENT_CASES = [
@@ -327,39 +388,103 @@ const SENT_CASES = [
   { name: '自动 under solo sent image-only over HTTP', profile: 'solo', backend: '', ws: false, text: '' },
 ];
 for (const c of SENT_CASES) {
-  test(`a sent, not yet listed session (${c.name}) takes no default-profile guess`, async ({ page }) => {
+  test(`a sent, not yet listed session (${c.name}) keeps its pre-send backend`, async ({ page }) => {
     const own = await mockWithCLIName(undefined, { ws: c.ws });
     try {
-      await page.goto(own.url + '/dashboard');
-      await page.waitForSelector('.session-card');
-      if (c.ws) await waitForWs(page);
-      await page.click('.hdr-btn[title="New Session"]');
-      await page.selectOption('#new-access-profile', c.profile);
-      await page.selectOption('#new-backend', c.backend);
-      await page.locator('.cmd-palette-item', { hasText: 'myproject' }).first().click();
-      await expect(page.locator('.main-header .detail-left #header-cli')).toHaveText('claude-code');
-      await page.evaluate((text) => {
-        const t = /** @type {any} */ (window).nz.test;
-        t.setMsgValue(document.getElementById('msg-input'), text);
-        if (!text) t.pendingFiles.push({ id: 'file-1', kind: 'image', status: 'ready', normalizedSize: 16, file: new File([new Uint8Array(16)], 'p.png', { type: 'image/png' }) });
-        t.sendMessage();
-      }, c.text);
-      const wsSends = () => own.wsConnections.flatMap(conn => conn.messages).filter(m => m.type === 'send').length;
-      await expect.poll(() => own.sendCalls.length + wsSends()).toBe(1);
-      expect(wsSends()).toBe(c.ws ? 1 : 0);
-      const header = await page.evaluate(() => {
-        const t = /** @type {any} */ (window).nz.test;
-        t.renderMainShell();
-        const el = /** @type {HTMLElement} */ (document.getElementById('header-cli'));
-        const fromShell = el.textContent;
-        el.textContent = 'stale';
-        t.updateHeaderCLI();
-        return [fromShell, el.textContent];
-      });
-      expect(header).toEqual(['claude-live', 'claude-live']);
+      await createAndSend(page, own, c);
+      expect(wsSendBodies(own).length).toBe(c.ws ? 1 : 0);
+      expect(await headerLabels(page)).toEqual(['claude-code', 'claude-code']);
     } finally { own.server.close(); }
   });
 }
+
+test('a sent key this browser did not create takes no default-profile guess', async ({ page }) => {
+  const own = await mockWithCLIName();
+  try {
+    await page.goto(own.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    await page.evaluate(() => {
+      const t = /** @type {any} */ (window).nz.test;
+      t.selectedKey = 'dashboard:direct:2026-02-02-000000-9:myproject';
+      t.selectedNode = 'local';
+      t.renderMainShell();
+    });
+    await sendNow(page, own, 'hello', 1);
+    expect(await headerLabels(page)).toEqual(['claude-live', 'claude-live']);
+  } finally { own.server.close(); }
+});
+
+test('a sent kiro pick keeps gating images and the clawd icon off until listed', async ({ page }) => {
+  const own = await mockWithCLIName(undefined, { ws: true });
+  try {
+    await createAndSend(page, own, { profile: 'team', backend: 'kiro', ws: true, text: 'hello' });
+    expect(wsSendBodies(own)[0].backend).toBe('kiro');
+    expect(await headerLabels(page)).toEqual(['kiro', 'kiro']);
+    await page.evaluate(() => /** @type {any} */ (window).nz.test.applyFeatureGates());
+    await expect(page.locator('button[data-action="file-picker"]')).toBeDisabled();
+    const clawd = await page.evaluate(() => /** @type {any} */ (window).nz.test.eventHtml({ type: 'text', detail: 'hi', time: 1 }).includes('cc-clawd'));
+    expect(clawd, 'a kiro turn must not wear the claude mascot').toBe(false);
+  } finally { own.server.close(); }
+});
+
+for (const ws of [false, true]) {
+  test(`a second send before listing carries no backend or access profile (${ws ? 'WS' : 'HTTP'})`, async ({ page }) => {
+    const own = await mockWithCLIName(undefined, { ws });
+    try {
+      await createAndSend(page, own, { profile: 'team', backend: 'kiro', ws, text: 'one' });
+      await sendNow(page, own, 'two', 2);
+      const bodies = ws ? wsSendBodies(own) : own.sendCalls.map(b => JSON.parse(b));
+      expect(bodies.length).toBe(2);
+      expect([bodies[0].backend, bodies[0].access_profile]).toEqual(['kiro', 'team']);
+      expect(['backend', 'access_profile', 'workspace'].filter(f => f in bodies[1]), 'spawn-time fields ride only the first send').toEqual([]);
+      // The display copy outlives the consumed pick.
+      expect(await headerLabels(page)).toEqual(['kiro', 'kiro']);
+    } finally { own.server.close(); }
+  });
+}
+
+test('once the server lists a sent key, its listing replaces the kept pick', async ({ page }) => {
+  /** @type {any} */
+  let sessions;
+  const own = await mockWithCLIName(s => { sessions = s; });
+  try {
+    await createAndSend(page, own, { profile: 'team', backend: 'kiro', ws: false, text: 'hello' });
+    expect(await headerLabels(page)).toEqual(['kiro', 'kiro']);
+    // Listed with no backend or cli_name, so only a kept pick could still
+    // name kiro; the header must fall back to the stats name.
+    const key = await page.evaluate(() => /** @type {any} */ (window).nz.test.selectedKey);
+    sessions.sessions.push({ key, state: 'ready', platform: 'dashboard', agent: 'general', workspace: '/home/user/workspace/myproject', last_active: Date.now(), node: 'local', project: 'myproject' });
+    sessions.stats.version++;
+    await page.evaluate(() => /** @type {any} */ (window).nz.test.fetchSessions());
+    await expect.poll(() => page.evaluate(k => {
+      const t = /** @type {any} */ (window).nz.test;
+      return !!t.sessionsData[t.sid(k, 'local')];
+    }, key)).toBe(true);
+    expect(await headerLabels(page)).toEqual(['claude-live', 'claude-live']);
+  } finally { own.server.close(); }
+});
+
+test('re-creating a sent, not yet listed key starts from its new picks', async ({ page }) => {
+  const own = await mockWithCLIName();
+  try {
+    await page.goto(own.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    /**
+     * @param {string} backend
+     * @param {string} profile
+     */
+    const create = (backend, profile) => page.evaluate(([b, p]) => /** @type {any} */ (window).nz.test.doCreateInProject(
+      '/home/user/workspace/myproject', 'myproject', 'local', b, 'general',
+      { mode: 'continue', stableKey: 'dashboard:pj:abc:general', accessProfile: p }), [backend, profile]);
+    await create('kiro', 'team');
+    await sendNow(page, own, 'hello', 1);
+    expect(await headerLabels(page)).toEqual(['kiro', 'kiro']);
+    // The same continued key on 自动 under solo must not inherit the kiro
+    // pick the first send left behind.
+    await create('', 'solo');
+    expect(await headerLabels(page)).not.toContain('kiro');
+  } finally { own.server.close(); }
+});
 
 test('a listed session with no backend field is not re-guessed from the access profile', async ({ page }) => {
   const own = await mockWithCLIName();
