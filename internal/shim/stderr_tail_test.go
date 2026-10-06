@@ -306,7 +306,7 @@ func TestReadStdout_ReapsAfterStderrDrained(t *testing.T) {
 	s := &shimServer{
 		cli: &cliProc{
 			cmd:        cmd,
-			stdout:     bufio.NewScanner(strings.NewReader("")),
+			stdout:     bufio.NewReader(strings.NewReader("")),
 			stderrR:    stderrR,
 			stderrDone: make(chan struct{}),
 			exited:     make(chan struct{}),

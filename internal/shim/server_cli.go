@@ -7,16 +7,27 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os/exec"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 )
+
+// maxStdoutLineBytes caps one CLI stdout line. A longer line is drained and
+// skipped (logged + counted), never fatal: with a bufio.Scanner the cap ended
+// the read loop while the CLI kept writing, so once the pipe filled the CLI
+// blocked forever with both processes alive (#3578).
+const maxStdoutLineBytes = 10 * 1024 * 1024
+
+// stdoutOversizeTotal counts skipped over-cap stdout lines.
+var stdoutOversizeTotal atomic.Int64
 
 // readStdout reads CLI stdout and pushes lines to the ring buffer + client.
 func (s *shimServer) readStdout() {
@@ -26,8 +37,23 @@ func (s *shimServer) readStdout() {
 				"panic", r, "stack", string(debug.Stack()))
 		}
 	}()
-	for s.cli.stdout.Scan() {
-		line := s.cli.stdout.Bytes() // valid until next Scan()
+	lineBuf := make([]byte, 0, 64*1024)
+	for {
+		line, oversize, err := readCappedLine(s.cli.stdout, lineBuf, maxStdoutLineBytes)
+		lineBuf = line[:0]
+		if oversize {
+			n := stdoutOversizeTotal.Add(1)
+			slog.Warn("CLI stdout line over cap; skipped", "cap_bytes", maxStdoutLineBytes, "skipped_total", n)
+			s.watchdog.Reset() // the CLI is alive and talking, just too loudly
+		}
+		if err != nil && len(line) == 0 {
+			break // EOF (or read error) with nothing left to forward
+		}
+		if oversize {
+			continue
+		}
+		// A final unterminated line (err == io.EOF, len > 0) is forwarded
+		// below; the loop ends on the next read.
 
 		seq := s.buffer.Push(line) // Push makes its own copy for replay storage
 		s.watchdog.Reset()
@@ -46,6 +72,9 @@ func (s *shimServer) readStdout() {
 		// this iteration.
 		if data, err := MarshalStdoutLine(seq, line); err == nil {
 			s.enqueueWrite(data)
+		}
+		if err != nil {
+			break
 		}
 	}
 
@@ -176,7 +205,7 @@ func (s *shimServer) readStderr() {
 type cliProc struct {
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
-	stdout  *bufio.Scanner
+	stdout  *bufio.Reader
 	stderrR io.ReadCloser
 	// stderrDone is closed by readStderr at stderr EOF.
 	stderrDone chan struct{}
@@ -214,13 +243,10 @@ func startCLI(cliPath string, args []string, cwd string) (*cliProc, error) {
 		return nil, fmt.Errorf("start: %w", err)
 	}
 
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
-
 	return &cliProc{
 		cmd:        cmd,
 		stdin:      stdin,
-		stdout:     scanner,
+		stdout:     bufio.NewReaderSize(stdout, 64*1024),
 		stderrR:    stderrPipe,
 		stderrDone: make(chan struct{}),
 		exited:     make(chan struct{}),
@@ -296,5 +322,43 @@ func (c *cliProc) waitOrKill(timeout time.Duration) {
 	case <-c.exited:
 	case <-t.C:
 		c.kill()
+	}
+}
+
+// readCappedLine reads one '\n'-terminated line into buf (reused across calls;
+// the returned slice aliases it). A line longer than capBytes is drained to its
+// terminator and reported as oversize with an empty line. err is io.EOF (or a
+// read error) only when the stream ended; a final unterminated line is
+// returned together with io.EOF.
+func readCappedLine(r *bufio.Reader, buf []byte, capBytes int) (line []byte, oversize bool, err error) {
+	line = buf[:0]
+	for {
+		chunk, rerr := r.ReadSlice('\n')
+		if len(line)+len(chunk) > capBytes {
+			// Drain the rest of this line unless this chunk already ended it.
+			if rerr != nil && errors.Is(rerr, bufio.ErrBufferFull) {
+				for {
+					_, derr := r.ReadSlice('\n')
+					if derr == nil {
+						break
+					}
+					if !errors.Is(derr, bufio.ErrBufferFull) {
+						return nil, true, derr
+					}
+				}
+			} else if rerr != nil {
+				return nil, true, rerr
+			}
+			return nil, true, nil
+		}
+		line = append(line, chunk...)
+		switch {
+		case rerr == nil:
+			return line[:len(line)-1], false, nil // strip '\n'
+		case errors.Is(rerr, bufio.ErrBufferFull):
+			continue
+		default:
+			return line, false, rerr
+		}
 	}
 }
