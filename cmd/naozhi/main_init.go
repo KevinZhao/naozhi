@@ -37,8 +37,11 @@ func resolveLogLevel(level string) slog.Level {
 
 // newLogHandler builds the slog.Handler for the configured format and level:
 // "text" selects a TextHandler, anything else (incl. default "json") a JSONHandler.
-func newLogHandler(w *os.File, cfg *config.Config) slog.Handler {
-	opts := &slog.HandlerOptions{Level: resolveLogLevel(cfg.Log.Level)}
+func newLogHandler(w *os.File, cfg *config.Config, level slog.Leveler) slog.Handler {
+	if level == nil {
+		level = resolveLogLevel(cfg.Log.Level)
+	}
+	opts := &slog.HandlerOptions{Level: level}
 	if cfg.Log.Format == "text" {
 		return slog.NewTextHandler(w, opts)
 	}
@@ -46,9 +49,12 @@ func newLogHandler(w *os.File, cfg *config.Config) slog.Handler {
 }
 
 // setupLogging installs the process-global slog default logger from cfg,
-// writing to stdout.
-func setupLogging(cfg *config.Config) {
-	slog.SetDefault(slog.New(newLogHandler(os.Stdout, cfg)))
+// writing to stdout. The returned LevelVar is what a config reload adjusts.
+func setupLogging(cfg *config.Config) *slog.LevelVar {
+	level := new(slog.LevelVar)
+	level.Set(resolveLogLevel(cfg.Log.Level))
+	slog.SetDefault(slog.New(newLogHandler(os.Stdout, cfg, level)))
+	return level
 }
 
 // startWatchdogLoop launches the systemd liveness heartbeat goroutine.

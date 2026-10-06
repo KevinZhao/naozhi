@@ -49,6 +49,7 @@ type HealthHandler struct {
 	// fingerprint (#2538); auth-only fields, empty when unknown.
 	configSHA256   string
 	configLoadedAt time.Time
+	configLive     *ConfigFingerprint // nil ⇒ the two static fields above
 	configPath     string
 	// cronRunStore snapshots the cron run store's loss counters; nil when the
 	// server runs without a scheduler.
@@ -285,12 +286,10 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 			TotalTimeout:    h.totalTimeoutStr,
 		},
 		CLIAvailable: cliAvailable(h.router.Backends().CLIPath()),
-		ConfigSHA256: h.configSHA256,
 		ConfigPath:   h.configPath,
 	}
-	if !h.configLoadedAt.IsZero() {
-		auth.ConfigLoadedAt = h.configLoadedAt.Format(time.RFC3339)
-	}
+	auth.ConfigSHA256, auth.ConfigLoadedAt = h.configFingerprint()
+
 	if nodeStatus := h.nodeAccess.NodesStatus(); len(nodeStatus) > 0 {
 		auth.Nodes = nodeStatus
 	}
@@ -304,4 +303,17 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	resp.healthAuthSection = auth
 	writeJSON(w, resp)
+}
+
+// configFingerprint is the sha256 and RFC3339 load time /health reports: the
+// live fingerprint when a reloader is wired, else the startup values.
+func (h *HealthHandler) configFingerprint() (sha, loadedAt string) {
+	sha, at := h.configSHA256, h.configLoadedAt
+	if h.configLive != nil {
+		sha, at = h.configLive.Get()
+	}
+	if !at.IsZero() {
+		loadedAt = at.Format(time.RFC3339)
+	}
+	return sha, loadedAt
 }
