@@ -9,10 +9,15 @@
 // ships) and runs them over log lines copied verbatim from real runs. It also
 // checks that flaky-report waits on every job that runs tests: a job missing
 // from its needs files nothing when it alone is red, and otherwise is reported
-// only if it happened to finish first.
+// only if it happened to finish first. Last, it checks Playwright's retries and
+// trace settings: a retry turns a flake green before flaky-report sees it, and
+// with no retry a trace that records only on a retry records nothing.
+//
+// Loading the Playwright config needs test/e2e's npm install.
 //
 //   node scripts/check-flaky-report-parse.mjs
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -192,7 +197,65 @@ const needsCases = [
   },
 ];
 
+// Trace modes that record a test's first run, so a failure with no retry
+// still leaves trace.zip under test-results/.
+const RECORDS_FIRST_RUN = new Set(['on', 'retain-on-failure', 'retain-on-first-failure', 'retain-on-failure-and-retries']);
+
+// playwrightProblems() checks the config and every `playwright test` command
+// line, since a project or a CLI flag overrides the top-level setting.
+function playwrightProblems(config, commands) {
+  const out = [];
+  const modeOf = t => (t !== null && typeof t === 'object' ? t.mode : t);
+  if (!RECORDS_FIRST_RUN.has(modeOf(config.use?.trace))) {
+    out.push(`playwright.config.js: use.trace is ${JSON.stringify(config.use?.trace)}, which records nothing without a retry`);
+  }
+  for (const [where, scope] of [['playwright.config.js', config], ...(config.projects ?? []).map(p => [`playwright.config.js project ${p.name}`, p])]) {
+    if ((scope.retries ?? 0) !== 0) out.push(`${where}: retries is ${scope.retries}, want 0`);
+    const trace = scope.use?.trace;
+    if (scope !== config && trace !== undefined && !RECORDS_FIRST_RUN.has(modeOf(trace))) {
+      out.push(`${where}: use.trace is ${JSON.stringify(trace)}, which records nothing without a retry`);
+    }
+  }
+  for (const cmd of commands) {
+    const retries = cmd.match(/--retries[= ](\S+)/);
+    if (retries && retries[1] !== '0') out.push(`ci.yml: \`${cmd.trim()}\` passes --retries ${retries[1]}`);
+    const trace = cmd.match(/--trace[= ](\S+)/);
+    if (trace && !RECORDS_FIRST_RUN.has(trace[1])) out.push(`ci.yml: \`${cmd.trim()}\` passes --trace ${trace[1]}`);
+  }
+  return out;
+}
+
+const good = { retries: 0, use: { trace: 'retain-on-failure' }, projects: [{ name: 'desktop-chrome', use: {} }] };
+const playwrightCases = [
+  { what: 'retries 0 with a trace on failure passes', config: good, commands: ['npx playwright test --project=x'], want: 0 },
+  { what: 'the trace object form is read by its mode', config: { ...good, use: { trace: { mode: 'on' } } }, commands: [], want: 0 },
+  { what: "'on-first-retry' with no retry records nothing", config: { ...good, use: { trace: 'on-first-retry' } }, commands: [], want: 1 },
+  { what: 'a missing trace defaults to off', config: { ...good, use: {} }, commands: [], want: 1 },
+  { what: 'retries above 0 hides flakes from flaky-report', config: { ...good, retries: 1 }, commands: [], want: 1 },
+  { what: 'a project cannot re-add retries', config: { ...good, projects: [{ name: 'p', retries: 2 }] }, commands: [], want: 1 },
+  { what: 'a project cannot turn the trace off', config: { ...good, projects: [{ name: 'p', use: { trace: 'off' } }] }, commands: [], want: 1 },
+  { what: 'a CI command cannot pass --retries', config: good, commands: ['npx playwright test --retries=2'], want: 1 },
+  { what: 'a CI command cannot pass --trace off', config: good, commands: ['npx playwright test --trace off'], want: 1 },
+];
+
 let bad = 0;
+for (const c of playwrightCases) {
+  const got = playwrightProblems(c.config, c.commands);
+  if (got.length !== c.want) {
+    bad++;
+    console.error(`check-flaky-report-parse: ${c.what}\n  want ${c.want} problem(s)\n  got  ${JSON.stringify(got)}`);
+  }
+}
+const pwConfig = createRequire(path.join(ROOT, 'test', 'e2e', 'package.json'))('./playwright.config.js');
+const pwCommands = yml.split('\n').filter(l => /\bplaywright test\b/.test(l));
+if (pwCommands.length === 0) {
+  bad++;
+  console.error('check-flaky-report-parse: no `playwright test` command in ci.yml — did the e2e jobs change shape?');
+}
+for (const p of playwrightProblems(pwConfig, pwCommands)) {
+  bad++;
+  console.error(`check-flaky-report-parse: ${p}`);
+}
 for (const c of needsCases) {
   const got = unwatched(c.yml, {}).missing;
   if (got.join(',') !== c.want.join(',')) {
@@ -228,4 +291,4 @@ if (bad > 0) {
   console.error(`check-flaky-report-parse: ${bad} check(s) failed — flaky-report would file the wrong issues, or none`);
   process.exit(1);
 }
-console.log(`check-flaky-report-parse: OK (${cases.length} log cases, ${needsCases.length} needs cases, ${testJobs.length} test jobs: ${testJobs.join(', ')})`);
+console.log(`check-flaky-report-parse: OK (${cases.length} log cases, ${needsCases.length} needs cases, ${playwrightCases.length} playwright cases, ${testJobs.length} test jobs: ${testJobs.join(', ')})`);
