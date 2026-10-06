@@ -253,6 +253,8 @@ session:
   # The channel still owns /cd, the project binding and /cron; /new and /stop
   # act on the thread's (or member's) session. Discord threads are separate
   # channels and WeChat has only direct chats, so neither is affected.
+  # Under thread, replying in the thread of a top-level bot answer starts a
+  # fresh session without the channel's context; use chat to keep one.
   group_scope: "thread"
   # auto_chain — REMOVED (schema v2). It joined sessions in the same
   # workspace by guessing that "same slug + 7d window" meant one conversation,
