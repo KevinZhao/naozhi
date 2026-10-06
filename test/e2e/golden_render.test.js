@@ -30,9 +30,8 @@
 //
 // Determinism: the timezone is UTC and the clock is fixed, so formatTimeFull
 // and the cards' relative times do not depend on the machine; /static/vendor/
-// and the CDN are blocked so KaTeX and mermaid never load and math stays on
-// the pending path; mmd-N / ktx-N ids come from module counters and are
-// normalised.
+// is blocked so KaTeX and mermaid never load and math stays on the pending
+// path; mmd-N / ktx-N ids come from module counters and are normalised.
 //
 //   cd test/e2e && npx playwright test golden_render.test.js --project=desktop-chrome
 //   UPDATE_GOLDEN=1 npx playwright test golden_render.test.js --project=desktop-chrome
@@ -98,7 +97,7 @@ test('pins.json pins exactly the golden files, each to its current sha256', () =
 
 /** @param {import('@playwright/test').Page} page */
 async function openDashboard(page, mock, ready = '.session-card') {
-  await page.route(/\/static\/vendor\/|cdn\.jsdelivr\.net/, (route) => route.abort());
+  await page.route(/\/static\/vendor\//, (route) => route.abort());
   await page.clock.setFixedTime(NOW);
   await page.goto(mock.url + '/dashboard');
   await page.waitForSelector(ready);

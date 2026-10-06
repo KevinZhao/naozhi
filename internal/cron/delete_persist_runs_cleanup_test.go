@@ -10,7 +10,7 @@ import (
 
 // TestDeleteJobByID_PersistFailureCleansRunsDir is a regression test for
 // R236-GO-04 (#495): when persistLocked fails inside DeleteJobByID,
-// the in-memory delete already happened — if runStore.DeleteJob does NOT
+// the in-memory delete already happened — if runstore.Store.DeleteJob does NOT
 // also fire on the persist-failure path, the runs/<jobID>/ subtree
 // remains on disk. A subsequent AddJob that reuses the same ID (16-hex
 // generator + tiny but non-zero collision probability) inherits the old
@@ -23,7 +23,7 @@ import (
 //
 // Test shape:
 //  1. Build a Scheduler + seed one job
-//  2. Append a fake CronRun directly via runStore so runs/<jobID>/<runID>.json
+//  2. Append a fake CronRun directly via the run store so runs/<jobID>/<runID>.json
 //     exists on disk
 //  3. Install the failing marshaler (so persistLocked errors)
 //  4. Call DeleteJobByID — expect ErrPersistFailed
@@ -31,14 +31,14 @@ import (
 func TestDeleteJobByID_PersistFailureCleansRunsDir(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)
 
-	if s.runStore == nil || !s.runStore.layout.Enabled() {
-		t.Fatal("test setup precondition: runStore must be enabled")
+	if !s.runs.Enabled() {
+		t.Fatal("test setup precondition: run store must be enabled")
 	}
 
 	// Append a fake run so the runs/<jobID>/ directory + a child file
 	// actually exist on disk. Without this the os.Stat below would pass
 	// trivially (dir is created lazily on first Append).
-	s.runStore.Append(&CronRun{
+	s.runs.Append(&CronRun{
 		JobID:     id,
 		RunID:     "1234567890abcdef",
 		StartedAt: time.Unix(1000, 0),
@@ -46,7 +46,7 @@ func TestDeleteJobByID_PersistFailureCleansRunsDir(t *testing.T) {
 		State:     RunStateSucceeded,
 	})
 
-	jobDir := filepath.Join(s.runStore.rootDir(), id)
+	jobDir := filepath.Join(s.runs.Dir(), id)
 	if _, err := os.Stat(jobDir); err != nil {
 		t.Fatalf("setup: runs/<jobID>/ should exist after Append: %v", err)
 	}
@@ -69,17 +69,17 @@ func TestDeleteJobByID_PersistFailureCleansRunsDir(t *testing.T) {
 
 // TestDeleteJobByPrefix_PersistFailureCleansRunsDir mirrors the byID
 // counterpart for the IM-prefix DeleteJob path. Both paths flow through
-// finishMutation → runStore.DeleteJob; the prefix path has its own
+// finishMutation → runstore.Store.DeleteJob; the prefix path has its own
 // lookup (mutateByPrefix) so a divergence between the two paths would
 // silently leak runs/ on the prefix path while the byID path stays clean.
 func TestDeleteJobByPrefix_PersistFailureCleansRunsDir(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)
 
-	if s.runStore == nil || !s.runStore.layout.Enabled() {
-		t.Fatal("test setup precondition: runStore must be enabled")
+	if !s.runs.Enabled() {
+		t.Fatal("test setup precondition: run store must be enabled")
 	}
 
-	s.runStore.Append(&CronRun{
+	s.runs.Append(&CronRun{
 		JobID:     id,
 		RunID:     "1234567890abcdef",
 		StartedAt: time.Unix(1000, 0),
@@ -87,7 +87,7 @@ func TestDeleteJobByPrefix_PersistFailureCleansRunsDir(t *testing.T) {
 		State:     RunStateSucceeded,
 	})
 
-	jobDir := filepath.Join(s.runStore.rootDir(), id)
+	jobDir := filepath.Join(s.runs.Dir(), id)
 	if _, err := os.Stat(jobDir); err != nil {
 		t.Fatalf("setup: runs/<jobID>/ should exist after Append: %v", err)
 	}

@@ -298,6 +298,28 @@ func TestDispatchCommand_Help(t *testing.T) {
 	}
 }
 
+// TestDispatchCommand_UrgentCopyNamesToolDelay pins that the /help line and
+// the bare /urgent usage do not promise an immediate stop: priority:"now"
+// waits for a running tool to return (validation RFC V10).
+func TestDispatchCommand_UrgentCopyNamesToolDelay(t *testing.T) {
+	fp := &fakePlatform{}
+	d := newTestDispatcher(fp)
+	d.dispatchCommand(context.Background(), incomingMsg("/help"), "/help", slog.Default())
+	var helpLine string
+	for _, line := range strings.Split(fp.lastReply(), "\n") {
+		if strings.Contains(line, "/urgent") {
+			helpLine = line
+		}
+	}
+	d.dispatchCommand(context.Background(), incomingMsg("/urgent"), "/urgent", slog.Default())
+	usage := fp.lastReply()
+	for name, text := range map[string]string{"help line": helpLine, "usage": usage} {
+		if !strings.Contains(text, "正在运行的工具需先结束") || strings.Contains(text, "立即") {
+			t.Errorf("/urgent %s = %q, want the running-tool caveat and no 立即", name, text)
+		}
+	}
+}
+
 func TestDispatchCommand_HelpWithAgents(t *testing.T) {
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp)

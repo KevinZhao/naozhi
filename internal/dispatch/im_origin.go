@@ -200,16 +200,17 @@ func (dl *imDelivery) Blocking() bool { return true }
 // BeforeSession starts the tracker that streams the turn's progress into the
 // chat. A head that runs at once is armed with a fallback banner that posts
 // only if its message got no ⏳, so a slow spawn is covered too. On a first
-// turn it then offers the chat's external session for takeover; the result
-// is ignored: GetOrCreate resumes an adopted session and spawns a fresh one
-// otherwise.
+// turn of a session the whole chat shares it then offers the chat's external
+// session for takeover; a thread's or member's session starts fresh. The
+// result is ignored: GetOrCreate resumes an adopted session and spawns a
+// fresh one otherwise.
 func (dl *imDelivery) BeforeSession(ctx context.Context) {
 	o := dl.o
 	dl.tracker = newIMEventTracker(ctx, dl.p, replyDestOf(o.msg), o.msg.ChatType, o.agentID)
 	if dl.info.Role == turn.RoleHead && o.ackDone != nil {
 		dl.tracker.armFallbackBanner(o.d.fallbackBannerDelay, o.awaitAck)
 	}
-	if !dl.info.First {
+	if !dl.info.First || o.d.scopedSession(o.msg, o.key) {
 		return
 	}
 	_ = o.d.caps.Takeover(ctx, sessionkey.ChatKey(o.msg.Platform, o.msg.ChatType, o.msg.ChatID), o.key, o.opts)
@@ -358,9 +359,10 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 		} else {
 			d.SendSplitReply(ctx, p, replyDestOf(o.msg), replyText)
 		}
-	} else if result.Aborted {
+	} else if result.Aborted || result.CLIAborted() {
 		// naozhi stopped the turn (/stop, interrupt, /urgent), which already
-		// said so; only the banner's last tool status needs replacing.
+		// said so, or claude reports it aborted; either way only the banner's
+		// last tool status needs replacing.
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			if err := p.EditMessage(ctx, msgID, bannerAborted); err != nil {
 				slog.Debug("aborted turn banner edit failed", "msg_id", msgID, "err", err)
@@ -379,7 +381,7 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 // be edited into it and went out as new messages instead.
 const bannerAnsweredBelow = "✅ 已回复，见下方"
 
-// bannerAborted replaces the progress banner of a turn naozhi aborted.
+// bannerAborted replaces the progress banner of an aborted turn.
 const bannerAborted = "已中断。"
 
 // replyIntoBanner edits the first reply chunk into the progress banner and

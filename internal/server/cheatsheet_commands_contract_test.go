@@ -1,9 +1,13 @@
 package server
 
 import (
+	"context"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/platform"
 )
 
 // TestCheatsheetDashboardSlashCommandsAreRecognised pins the help panel's
@@ -52,4 +56,65 @@ func TestCheatsheetDashboardSlashCommandsAreRecognised(t *testing.T) {
 		h.waitEngineIdle()
 	}
 	turns.noMoreTurns(t)
+}
+
+// TestCheatsheetCronRowMatchesDispatchUsage pins the help panel's /cron row to
+// what the IM dispatcher tells users: every subcommand in the "/cron <a|b|…>"
+// synopses of its /help and /cron replies must appear in the row as a /cron
+// invocation, and every flag in the /cron add usage reply must be listed too,
+// so a new subcommand or flag cannot ship without the dashboard showing it.
+func TestCheatsheetCronRowMatchesDispatchUsage(t *testing.T) {
+	p := &mockPlatform{}
+	handler := newTestDispatcher(newTestServerWithScheduler(p)).BuildHandler()
+	replyTo := func(text string) string {
+		t.Helper()
+		before := len(p.allReplies())
+		handler(context.Background(), platform.IncomingMessage{
+			Platform: "test", EventID: "cheatsheet-" + text, ChatID: "chat1", Text: text,
+		})
+		replies := p.allReplies()
+		if len(replies) != before+1 {
+			t.Fatalf("%q: got %d replies, want 1", text, len(replies)-before)
+		}
+		return replies[before].Text
+	}
+
+	var subs []string
+	synopsis := regexp.MustCompile(`/cron <([a-z]+(?:\|[a-z]+)+)>`)
+	for _, cmd := range []string{"/help", "/cron"} {
+		m := synopsis.FindStringSubmatch(replyTo(cmd))
+		if m == nil {
+			t.Fatalf("%s reply carries no \"/cron <sub|…>\" synopsis", cmd)
+		}
+		for _, sub := range strings.Split(m[1], "|") {
+			if !slices.Contains(subs, sub) {
+				subs = append(subs, sub)
+			}
+		}
+	}
+	if len(subs) < 3 {
+		t.Fatalf("parsed /cron subcommands %q, want at least 3", subs)
+	}
+	addUsage := replyTo("/cron add")
+	flags := regexp.MustCompile(`--[a-z][a-z-]*`).FindAllString(addUsage, -1)
+	if len(flags) == 0 {
+		t.Fatalf("/cron add usage %q lists no flags; update this test if that is intended", addUsage)
+	}
+
+	js := readStaticAsset(t, "dashboard.js")
+	row := regexp.MustCompile(`keys:\s*\['/cron'\],\s*desc:\s*'([^']*)'`).FindStringSubmatch(js)
+	if row == nil {
+		t.Fatal("dashboard.js: CHEATSHEET_ENTRIES has no keys: ['/cron'] row")
+	}
+	for _, sub := range subs {
+		re := regexp.MustCompile(`/cron (?:[a-z]+\|)*` + regexp.QuoteMeta(sub) + `\b`)
+		if !re.MatchString(row[1]) {
+			t.Errorf("cheatsheet /cron row %q does not list subcommand %q from the IM usage replies", row[1], sub)
+		}
+	}
+	for _, f := range flags {
+		if !strings.Contains(row[1], f) {
+			t.Errorf("cheatsheet /cron row %q does not list flag %s (/cron add usage: %q)", row[1], f, addUsage)
+		}
+	}
 }

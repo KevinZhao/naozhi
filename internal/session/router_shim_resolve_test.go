@@ -60,7 +60,7 @@ func TestReconnectHooks_ResolveUnknownReadsTheMainTranscript(t *testing.T) {
 	}
 
 	resolve := func(backendID, workspace, stored string) func(string) bool {
-		return reconnectHooks(claudeDir, nil, backendID, workspace, stored).ResolveUnknown
+		return reconnectHooks(claudeDir, nil, backendID, workspace, stored, nil).ResolveUnknown
 	}
 	cases := []struct {
 		name    string

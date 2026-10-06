@@ -593,6 +593,8 @@ func sanitizeExt(ext string) (string, error) {
 		return ".gif", nil
 	case ".webp":
 		return ".webp", nil
+	case ".txt", ".md", ".csv", ".json", ".yaml":
+		return strings.ToLower(ext), nil
 	default:
 		return "", fmt.Errorf("attachment: unsupported extension %q", ext)
 	}

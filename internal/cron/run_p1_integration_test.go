@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -17,8 +18,8 @@ func TestP1_FinishRunPersistsCronRun(t *testing.T) {
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
-	if s.runStore == nil || !s.runStore.layout.Enabled() {
-		t.Fatal("runStore should be enabled when StorePath is set")
+	if !s.runs.Enabled() {
+		t.Fatal("run store should be enabled when StorePath is set")
 	}
 
 	jobID := mustGenerateID()
@@ -168,7 +169,7 @@ func TestP1_StartTrimAllReclaimsStaleRuns(t *testing.T) {
 	}
 
 	// trimAll with default 30-day window should clear them all.
-	s.runStore.trimAll(time.Now())
+	s.runs.TrimAll(context.Background(), time.Now())
 	entries2, err := os.ReadDir(subtree)
 	if err != nil {
 		t.Fatalf("readdir2: %v", err)
@@ -190,7 +191,7 @@ func TestP1_RecentRunsSurfacesNewestFirst(t *testing.T) {
 	s.putJobForTest(j)
 
 	// Disable auto-trim so all 5 entries persist regardless of clock skew.
-	s.runStore.enableTrimGC = false
+	s.runs.SetTrimGCForTest(false)
 
 	type rec struct {
 		runID string
@@ -225,13 +226,13 @@ func TestP1_RecentRunsSurfacesNewestFirst(t *testing.T) {
 }
 
 // TestP1_DisabledStoreNoOps: NewScheduler with empty StorePath has a
-// disabled runStore — Append paths inside finishRun never panic and
+// disabled run store — Append paths inside finishRun never panic and
 // ListRuns / GetRun return empty.
 func TestP1_DisabledStoreNoOps(t *testing.T) {
 	t.Parallel()
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}})
-	if s.runStore == nil || s.runStore.layout.Enabled() {
-		t.Fatal("runStore should be disabled when StorePath is empty")
+	if s.runs == nil || s.runs.Enabled() {
+		t.Fatal("run store should be disabled when StorePath is empty")
 	}
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
@@ -249,7 +250,7 @@ func TestP1_DisabledStoreNoOps(t *testing.T) {
 
 // TestP1_ConcurrentFinishRunSerialised: multiple goroutines hitting
 // finishRun on the same job (CAS-violating overlap is impossible because
-// we bypass executeOpt; this only stresses runStore.Append's per-jobID
+// we bypass executeOpt; this only stresses runstore.Store.Append's per-jobID
 // mutex). All records persist, none lost. Race-clean under -race.
 func TestP1_ConcurrentFinishRunSerialised(t *testing.T) {
 	if testing.Short() {
@@ -260,7 +261,7 @@ func TestP1_ConcurrentFinishRunSerialised(t *testing.T) {
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
 	// Disable trim so we can observe all writes.
-	s.runStore.enableTrimGC = false
+	s.runs.SetTrimGCForTest(false)
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
 	s.putJobForTest(j)

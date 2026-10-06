@@ -14,7 +14,7 @@ type T struct{}
 func (t *T) SetOnChange(fn func())                        {}
 func (t *T) SetDiscoverFunc(fn func() error)              {}
 func (t *T) SetTelemetry(b interface{ Emit() })           {}
-func (t *T) SetCostRunOwnership(fn func(string) bool)     {}
+func (t *T) SetWidgetHook(fn func(string) bool)           {}
 func (t *T) SetFilter(fn func(string) bool)               {}
 func (t *T) SetBackend(id string)                         {}
 func (t *T) SetBounded(k string, n int, live func() bool) {}
@@ -40,7 +40,7 @@ func TestScanLateSetters(t *testing.T) {
 		}
 		got = append(got, v.Message[:strings.Index(v.Message, " ")])
 	}
-	want := "SetOnChange,SetDiscoverFunc,SetTelemetry,SetCostRunOwnership,SetFilter"
+	want := "SetOnChange,SetDiscoverFunc,SetTelemetry,SetWidgetHook,SetFilter"
 	if strings.Join(got, ",") != want {
 		t.Errorf("reported %v, want %s", got, want)
 	}

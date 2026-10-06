@@ -14,6 +14,7 @@ import (
 
 	robfigcron "github.com/robfig/cron/v3"
 
+	"github.com/naozhi/naozhi/internal/cron/runstore"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
@@ -169,10 +170,10 @@ type Scheduler struct {
 	// snapshot it tags — see jobtable.go.
 	lastSavedSeq atomic.Uint64 // read/CAS'd while holding storeMu
 
-	// runStore persists a CronRun record per terminal execution (P1
-	// cron-run-history). nil-safe: empty StorePath disables persistence
-	// transparently (tests / no-disk deployments).
-	runStore *runStore
+	// runs persists a CronRun record per terminal execution (P1
+	// cron-run-history). Empty StorePath disables persistence transparently
+	// (tests / no-disk deployments); a nil store behaves as a disabled one.
+	runs *runstore.Store
 
 	// ledger is the cost ledger every terminal run writes one entry to; nil-safe.
 	ledger CostLedger
@@ -204,8 +205,8 @@ type Scheduler struct {
 
 	// knownSessionsCache memoises KnownSessionIDs() for knownSessionsCacheTTL:
 	// the dashboard polls it at 1Hz per tab and a rebuild walks every job's
-	// runStore.Recent. Invalidated explicitly on writes that can change the
-	// set (LastSessionID assignment, runStore.Append).
+	// run history. Invalidated explicitly on writes that can change the
+	// set (LastSessionID assignment, a run-record append).
 	knownSessionsCache knownSessionsCache
 
 	// marshalJobs is the JSON serializer used by marshalLocked, behind
@@ -302,10 +303,14 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		slowThreshold:         cfg.SlowThreshold,
 		stopCtx:               stopCtx,
 		stopCancel:            stopCancel,
-		runStore:              newRunStore(cfg.StorePath, cfg.RunsKeepCount, cfg.RunsKeepWindow),
-		ledger:                deps.Ledger,
-		budget:                deps.Budget,
-		sandboxPendingIndex:   make(map[string]string),
+		runs: runstore.New(runstore.Options{
+			StorePath:  cfg.StorePath,
+			KeepCount:  cfg.RunsKeepCount,
+			KeepWindow: cfg.RunsKeepWindow,
+		}),
+		ledger:              deps.Ledger,
+		budget:              deps.Budget,
+		sandboxPendingIndex: make(map[string]string),
 		// Tests swap a fake via the withClock seam.
 		clock: defaultClock,
 	}
@@ -468,11 +473,11 @@ func (s *Scheduler) Start() error {
 	// retention-policy violators that accumulated while this process was
 	// down. 异步执行避免在 jobs 多/历史目录大时阻塞 Start 返回（每个 job
 	// 一次 ReadDir + N 次 Remove）。
-	if s.runStoreEnabled() {
+	if s.runs.Enabled() {
 		s.goStartupPass("run-history-gc", func() {
 			slog.Info("cron run history: cold-start GC starting")
-			// 传 stopCtx 进 trimAll，Stop 可在 job 入口之间中断长时间的 GC 扫描 (#1019)。
-			s.trimAllRuns(s.stopCtx, time.Now())
+			// 传 stopCtx 进 TrimAll，Stop 可在 job 入口之间中断长时间的 GC 扫描 (#1019)。
+			s.runs.TrimAll(s.stopCtx, time.Now())
 			slog.Info("cron run history: cold-start GC done")
 		})
 	}

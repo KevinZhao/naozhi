@@ -438,7 +438,7 @@ func TestInstallFreshSessionLocked_InheritsTuning(t *testing.T) {
 
 		fresh = r.installFreshSession(tx,
 			key, &cli.Process{}, "/ws", "kiro", "", wrapper, "sess-old",
-			nil, nil, 0, 0, 0, false, "sess-old", 0, ov,
+			nil, nil, 0, 0, 0, false, "sess-old", 0, ov, nil,
 		)
 	})
 

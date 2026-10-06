@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cron/runstore"
 )
 
 func newSchedulerWithStore(t *testing.T) (*Scheduler, string) {
@@ -14,8 +16,8 @@ func newSchedulerWithStore(t *testing.T) (*Scheduler, string) {
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
-	if s.runStore == nil || !s.runStore.layout.Enabled() {
-		t.Fatal("runStore should be enabled when StorePath is set")
+	if !s.runs.Enabled() {
+		t.Fatal("run store should be enabled when StorePath is set")
 	}
 	return s, storePath
 }
@@ -40,7 +42,7 @@ func TestInterruptedLocalRunAppearsInHistory(t *testing.T) {
 
 	runID := mustGenerateRunID()
 	startedAt := time.Now().Add(-90 * time.Second)
-	if path := s1.writeRunInflightMarker(runInflightMarker{
+	if path := s1.runMarkers().Write(runstore.InflightMarker{
 		JobID: jobID, RunID: runID, Trigger: TriggerScheduled,
 		StartedAtMS: startedAt.UnixMilli(), Prompt: "do thing", WorkDir: "/tmp/wd", Fresh: true,
 	}, slog.Default()); path == "" {
@@ -97,7 +99,7 @@ func TestFinishRunClearsTheInflightMarker(t *testing.T) {
 	s.putJobForTest(j)
 
 	runID := mustGenerateRunID()
-	if path := s.writeRunInflightMarker(runInflightMarker{
+	if path := s.runMarkers().Write(runstore.InflightMarker{
 		JobID: jobID, RunID: runID, StartedAtMS: time.Now().UnixMilli(),
 	}, slog.Default()); path == "" {
 		t.Fatal("marker write failed")
@@ -129,7 +131,7 @@ func TestFinishRunClearsMarkerOnSkipPersistPaths(t *testing.T) {
 	s.putJobForTest(j)
 
 	runID := mustGenerateRunID()
-	s.writeRunInflightMarker(runInflightMarker{
+	s.runMarkers().Write(runstore.InflightMarker{
 		JobID: jobID, RunID: runID, StartedAtMS: time.Now().UnixMilli(),
 	}, slog.Default())
 	s.finishRun(runCtx{jobID: j.ID, runID: runID, startedAt: time.Now().Add(-time.Second), trigger: TriggerScheduled}, runOutcome{state: RunStateCanceled, errClass: ErrClassCanceled, skipPersist: true})
@@ -146,8 +148,8 @@ func TestReconcileDropsUnusableMarkers(t *testing.T) {
 	jobID := mustGenerateID()
 	s.putJobForTest(&Job{ID: jobID, Schedule: "@every 5m"})
 
-	dir := s.runInflightDir()
-	if err := s.mkdirStateSubtree(dir); err != nil {
+	dir := s.runMarkers().Dir()
+	if err := s.sandboxState().MkdirSubtree(dir); err != nil {
 		t.Fatal(err)
 	}
 	for name, body := range map[string]string{
@@ -179,7 +181,7 @@ func TestReconcileSkipsDeletedJobs(t *testing.T) {
 	s, _ := newSchedulerWithStore(t)
 	goneJob := mustGenerateID()
 	runID := mustGenerateRunID()
-	s.writeRunInflightMarker(runInflightMarker{
+	s.runMarkers().Write(runstore.InflightMarker{
 		JobID: goneJob, RunID: runID, StartedAtMS: time.Now().UnixMilli(),
 	}, slog.Default())
 
@@ -195,7 +197,7 @@ func TestReconcileSkipsDeletedJobs(t *testing.T) {
 // markerFiles lists the marker directory's entries by name.
 func markerFiles(t *testing.T, s *Scheduler) []string {
 	t.Helper()
-	dir := s.runInflightDir()
+	dir := s.runMarkers().Dir()
 	if dir == "" {
 		return nil
 	}
@@ -214,7 +216,7 @@ func markerFiles(t *testing.T, s *Scheduler) []string {
 }
 
 // TestExecuteWritesTheInflightMarker closes the gap the tests above leave: they
-// call writeRunInflightMarker directly, which proves the marker mechanism works
+// call runMarkers().Write directly, which proves the marker mechanism works
 // but not that a real run ever writes one. The wiring is the easiest half to get
 // wrong — exactly how the shim-log sweep shipped inert in v0.1.0.
 //

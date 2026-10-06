@@ -14,11 +14,13 @@ import (
 	"github.com/slack-go/slack/slackevents"
 )
 
+// TestHandleMessage_ThreadTs: a message in a thread carries its thread_ts;
+// a top-level one instead names the thread a reply would open under it.
 func TestHandleMessage_ThreadTs(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct{ name, threadTs string }{
-		{"in a thread", "1700000000.000001"},
-		{"top level", ""},
+	for _, tc := range []struct{ name, threadTs, self string }{
+		{"in a thread", "1700000000.000001", ""},
+		{"top level", "", "1700000000.000200"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -30,8 +32,8 @@ func TestHandleMessage_ThreadTs(t *testing.T) {
 				User: "U456", Channel: "C789", ChannelType: "channel",
 				Text: "<@U123> hi", TimeStamp: "1700000000.000200", ThreadTimeStamp: tc.threadTs,
 			})
-			if m := <-got; m.ThreadID != tc.threadTs {
-				t.Errorf("ThreadID = %q, want %q", m.ThreadID, tc.threadTs)
+			if m := <-got; m.ThreadID != tc.threadTs || m.SelfThread != tc.self {
+				t.Errorf("ThreadID, SelfThread = %q, %q; want %q, %q", m.ThreadID, m.SelfThread, tc.threadTs, tc.self)
 			}
 		})
 	}

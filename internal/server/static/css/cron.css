@@ -351,7 +351,8 @@
 .cron-timeline-panel .ctr-sub .ctr-cost{color:var(--nz-text-mute);font-variant-numeric:tabular-nums}
 .cron-timeline-panel .ct-cost-sum{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-left:auto;font-variant-numeric:tabular-nums}
 .cron-timeline-panel .ct-cost-ledger{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-left:auto;font-variant-numeric:tabular-nums}
-.cron-timeline-panel .ct-cost-ledger + .ct-cost-sum{margin-left:var(--nz-space-3)}
+.cron-timeline-panel .ct-cost-ledger + .ct-cost-sum,.cron-timeline-panel .ct-cost-ledger + .ct-cost-ledger{margin-left:var(--nz-space-3)}
+.cron-timeline-panel .ct-cost-ledger.bad{color:var(--nz-red)}
 /* §7.3 input-snapshot collapsible (replay preview). */
 .ctr-detail .ctr-snapshot{margin-top:10px;border-top:1px solid var(--nz-border);padding-top:8px}
 .ctr-detail .ctr-snapshot>summary{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);cursor:pointer;user-select:none}

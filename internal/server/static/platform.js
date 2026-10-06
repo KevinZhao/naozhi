@@ -16,7 +16,7 @@ export function lsRemove(key) { try { localStorage.removeItem(LS_PREFIX + key); 
 export function getToken() { return ''; }
 // authHeaders builds the Authorization header set for fetch calls.
 export function authHeaders() {
-  const headers = {};
+  const headers = /** @type {Record<string, string>} */ ({});
   const t = getToken();
   if (t) headers['Authorization'] = 'Bearer ' + t;
   return headers;

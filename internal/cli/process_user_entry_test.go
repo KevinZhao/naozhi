@@ -104,3 +104,18 @@ func TestBuildUserEntry_AlignmentSurvivesDrop(t *testing.T) {
 			entry.ImagePaths[0])
 	}
 }
+
+// TestBuildUserEntry_FileRefSummary: a file ref is summarised as a file and
+// produces no thumbnail or image path.
+func TestBuildUserEntry_FileRefSummary(t *testing.T) {
+	t.Parallel()
+	entry := buildUserEntry("read this", []clievent.Attachment{{
+		Kind: clievent.KindFileRef, MimeType: "application/pdf", WorkspacePath: ".naozhi/attachments/2026-05-07/cccc.pdf",
+	}})
+	if entry.Summary != "read this [+1 file(s)]" {
+		t.Errorf("Summary = %q", entry.Summary)
+	}
+	if len(entry.Images) != 0 || len(entry.ImagePaths) != 0 {
+		t.Errorf("Images=%v ImagePaths=%v, want none for a file ref", entry.Images, entry.ImagePaths)
+	}
+}

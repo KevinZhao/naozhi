@@ -412,17 +412,19 @@ func main() {
 
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)
 	srv := server.NewWithOptions(server.ServerOptions{
-		Addr:        cfg.Server.Addr,
-		Router:      router,
-		Platforms:   platforms,
-		Routing:     routing,
-		Scheduler:   scheduler,
-		Backend:     defaultBackend,
-		AllowedRoot: workspace,
-		IMAccess:    cfg.IMAccessPolicy(),
-		IMRateLimit: dispatch.RateLimit{MsgsPerMin: cfg.IMRateLimit.MsgsPerMin, Burst: cfg.IMRateLimit.Burst},
-		IMBudget:    budgetGate,
-		StateDir:    sessionLayout.Root(),
+		Addr:             cfg.Server.Addr,
+		Router:           router,
+		Platforms:        platforms,
+		Routing:          routing,
+		Scheduler:        scheduler,
+		Backend:          defaultBackend,
+		AllowedRoot:      workspace,
+		IMAccess:         cfg.IMAccessPolicy(),
+		IMRateLimit:      dispatch.RateLimit{MsgsPerMin: cfg.IMRateLimit.MsgsPerMin, Burst: cfg.IMRateLimit.Burst},
+		IMBudget:         budgetGate,
+		IMGroupScope:     dispatch.GroupScope(cfg.Session.GroupScope),
+		IMThreadAutoOpen: cfg.Session.ThreadAutoOpen,
+		StateDir:         sessionLayout.Root(),
 		Config: server.ConfigOptions{
 			// Path enables the access-profile create endpoint; absolute so the
 			// write target survives cwd changes. Secrets dir holds *_FILE

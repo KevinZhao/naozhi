@@ -1,8 +1,9 @@
+// @ts-check
 // event_stream.js — the main transcript's event list: the HTTP fetch and poll
 // tail, "load earlier" paging, the full render, the live append and its DOM
 // cap, and the history / event / send-ack WS frames that feed them.
 import { NZ_CONTRACT } from './contract.js';
-import { getToken } from './platform.js';
+import { authHeaders } from './platform.js';
 import { INITIAL_HISTORY_LIMIT, sessionStream } from './session_stream.js';
 import { wsm } from './ws_manager.js';
 import { perSession, selection, sessionList, transcript } from './state.js';
@@ -42,9 +43,7 @@ export async function fetchEvents(full) {
       url += '&limit=' + INITIAL_HISTORY_LIMIT;
     }
 
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const headers = authHeaders();
     // RNEW-UX-003: 5s timeout — events poll fallback ticks every 1s, so
     // a hung response must release well before the next tick or the UI
     // falls behind the live stream.
@@ -196,9 +195,7 @@ async function loadEarlierEvents(maxPages) {
   const stale = () => selection.key !== key || selection.node !== node || gen !== transcript.earlierGen;
   transcript.earlierLoading = true;
   try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const headers = authHeaders();
     let steppedPast = false;
     for (let n = 1; ; n++) {
       // Per page: prependEvents re-mounts the button in its 'ready' state.
@@ -345,7 +342,7 @@ const EARLIER_BUTTON_STATES = {
 };
 
 function updateEarlierButton(state) {
-  const btn = document.getElementById('earlier-events-btn');
+  const btn = /** @type {HTMLButtonElement | null} */ (document.getElementById('earlier-events-btn'));
   if (!btn) return;
   btn.dataset.state = state;
   [btn.textContent, btn.disabled] = EARLIER_BUTTON_STATES[state] || ['加载更早的事件', false];
@@ -496,7 +493,7 @@ export function appendEvents(events) {
 // renderInitialHistory paints a subscribe's opening frame over the whole pane:
 // the placeholder for an empty or all-internal page, the paging cursor and
 // "load earlier", then the scroll position.
-function renderInitialHistory(el, msg, events, display) {
+function renderInitialHistory(el, /** @type {WsFrames['history']} */ msg, events, display) {
   // Full render replaces everything — remove any optimistic messages
   const html = renderEventsWithDividers(display, 0);
   // Decide "load earlier" BEFORE the all-internal placeholder so its copy never
@@ -721,7 +718,7 @@ function appendLiveEvent(ev) {
 
 // Session-stream frame handlers; the subscription bookkeeping is sessionStream.
 const sessionFrames = {
-  onHistory(msg) {
+  onHistory(/** @type {WsFrames['history']} */ msg) {
     if (msg.key !== selection.key || (msg.node || 'local') !== selection.node) return;
     const el = document.getElementById('events-scroll');
     if (!el) return;
@@ -758,7 +755,7 @@ const sessionFrames = {
     refreshBanner();
   },
 
-  onEvent(msg) {
+  onEvent(/** @type {WsFrames['event']} */ msg) {
     if (msg.key !== selection.key || (msg.node || 'local') !== selection.node) return;
     // Cron timed_out / failed 终态后丢弃后续 ghost 事件（CLI 子进程
     // 在 deadline 命中后还会再吐 result，但 cron run 已记录为终态，
@@ -793,7 +790,7 @@ const sessionFrames = {
     appendLiveEvent(ev);
   },
 
-  onSendAck(msg) {
+  onSendAck(/** @type {Omit<WsFrames['send_ack'], 'type'>} */ msg) {
     // "reset" = /clear or /new — the send was consumed by the router to reset
     // the session, not handed to the CLI, so roll back the optimistic running
     // flip. No banner, no turn.
@@ -863,7 +860,7 @@ const sessionFrames = {
   // so a status:"error" ack (unknown node / server shutting down / remote RPC
   // failure / internal error) or "not_running" (no live process to interrupt)
   // must be reported or the operator believes the interrupt landed.
-  onInterruptAck(msg) {
+  onInterruptAck(/** @type {WsFrames['interrupt_ack']} */ msg) {
     if (!msg || msg.status === 'ok') return;
     if (msg.status === 'not_running') {
       showToast('会话未在运行，无需中断', 'warning');
@@ -890,7 +887,7 @@ const sessionFrames = {
   // (toast, drop the optimistic bubble if any, roll back running) for the
   // on-screen key, or just undo the running flip for a key we sent to and
   // then navigated away from.
-  onSendError(msg) {
+  onSendError(/** @type {WsFrames['send_error']} */ msg) {
     if (!msg || !msg.key) return;
     const node = msg.node || 'local';
     const sKey = sid(msg.key, node);

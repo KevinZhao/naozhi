@@ -177,68 +177,14 @@ func TestDashboardCSP_FrameSrcBlob(t *testing.T) {
 
 	// R243-SEC-4 / R244-SEC-P2-4 [REPEAT-3]: dashboard CSP must carry
 	// `require-sri-for script style font` as a forward-compatibility hook.
-	// Today every CDN <script>/<link> injected by dashboard.js (mermaid,
-	// KaTeX) already declares `integrity=`; the directive is therefore a
+	// Today every <script>/<link> render_md.js injects (the vendored mermaid
+	// and KaTeX) already declares `integrity=`; the directive is therefore a
 	// no-op for naozhi but locks the contract so a future change adding a
-	// CDN asset without SRI fails closed when any browser revives the
+	// lazy asset without SRI fails closed when any browser revives the
 	// withdrawn spec. Pin both `script` and `style` tokens (the original
 	// directive only listed `font`).
 	if !strings.Contains(csp, "require-sri-for script style font") {
 		t.Errorf("CSP must include `require-sri-for script style font` as forward-compat SRI gate (R243-SEC-4 / R244-SEC-P2-4), got %q", csp)
-	}
-}
-
-// TestDashboardCSP_JsdelivrNpmPathScoped pins R242-SEC-2 (#607): every
-// `cdn.jsdelivr.net` source expression in the dashboard CSP must carry the
-// `/npm/` path prefix so the CDN scope can only load assets under the npm
-// subtree (mermaid lives there), not arbitrary follow-on resources
-// from other jsdelivr path namespaces (`/gh/<attacker>/<repo>`, `/combine/`
-// bundle endpoints, etc.). A bare `https://cdn.jsdelivr.net` host-source
-// re-opens that surface, so the test fails if any directive lists the host
-// without the `/npm/` path segment.
-func TestDashboardCSP_JsdelivrNpmPathScoped(t *testing.T) {
-	s := newTestServer(&mockPlatform{})
-
-	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
-	w := httptest.NewRecorder()
-	s.handleDashboard(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
-	}
-	csp := w.Header().Get("Content-Security-Policy")
-	if csp == "" {
-		t.Fatal("Content-Security-Policy header missing on /dashboard")
-	}
-
-	// The CDN must only ever appear scoped to /npm/. Tokenise on whitespace
-	// so a host-source that ends exactly at `cdn.jsdelivr.net` (no path) is
-	// caught regardless of which directive it sits in.
-	for _, tok := range strings.Fields(csp) {
-		if !strings.Contains(tok, "cdn.jsdelivr.net") {
-			continue
-		}
-		if !strings.HasPrefix(tok, "https://cdn.jsdelivr.net/npm/") {
-			t.Errorf("R242-SEC-2 (#607): CSP source %q references cdn.jsdelivr.net "+
-				"without the /npm/ path prefix — the CDN scope must be pinned to "+
-				"https://cdn.jsdelivr.net/npm/ so a non-npm jsdelivr path cannot "+
-				"bootstrap an arbitrary follow-on load. got CSP %q", tok, csp)
-		}
-	}
-
-	// Positive (#1980 tightening): the CDN source is pinned to the exact
-	// versioned file the lazy loader injects — /npm/ alone is an
-	// anyone-can-publish namespace, i.e. an allowlist bypass for an attacker
-	// who can inject a <script src> tag.
-	if !strings.Contains(csp, cdnMermaidJS) {
-		t.Errorf("R242-SEC-2 (#607) / #1980: CSP must carry the exact pinned "+
-			"CDN source %q, got %q", cdnMermaidJS, csp)
-	}
-	// And the bare /npm/ prefix as its own source token must be gone.
-	for _, tok := range strings.Fields(csp) {
-		if tok == "https://cdn.jsdelivr.net/npm/" || tok == "https://cdn.jsdelivr.net/npm/;" {
-			t.Errorf("#1980: CSP still lists the bare /npm/ wildcard %q — pin exact files", tok)
-		}
 	}
 }
 
