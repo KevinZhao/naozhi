@@ -172,7 +172,7 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) (pausedAfter int) {
 	// Clearing before the persistence branches means a marshal failure below
 	// cannot leave a marker that resurrects a genuinely finished run next boot.
 	if !out.keepInflightMarker {
-		s.removeRunInflightMarker(rc.runID)
+		s.runMarkers().Remove(rc.runID)
 	}
 
 	persistedResult := out.result

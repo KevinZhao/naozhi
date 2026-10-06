@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cron/runstore"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
@@ -64,7 +65,7 @@ func seedMarkedRun(t *testing.T, router SessionRouter, attempts int) (s *Schedul
 	j := &Job{ID: jobID, Schedule: "@every 5m", Prompt: "do thing", WorkDir: "/tmp/wd"}
 	s.putJobForTest(j)
 	runID = mustGenerateRunID()
-	if path := s.writeRunInflightMarker(runInflightMarker{
+	if path := s.runMarkers().Write(runstore.InflightMarker{
 		JobID: jobID, RunID: runID, Trigger: TriggerScheduled,
 		StartedAtMS: time.Now().Add(-90 * time.Second).UnixMilli(),
 		Prompt:      "do thing", WorkDir: "/tmp/wd", Attempts: attempts,
@@ -145,7 +146,7 @@ func TestAdoption_LiveRunCompletesAcrossRestart(t *testing.T) {
 	// The marker must be deleted with the terminal record: a survivor would be
 	// reconciled AGAIN next boot (Attempts=1 → interrupted) and append a second,
 	// contradictory record for the same run.
-	if _, err := os.Stat(filepath.Join(s.runInflightDir(), runID+".json")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(s.runMarkers().Dir(), runID+".json")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("marker still on disk after the adoption settled (stat err=%v)", err)
 	}
 }
@@ -252,7 +253,7 @@ func TestAdoption_ShutdownResolvesWait(t *testing.T) {
 func TestShutdownCancelKeepsMarker(t *testing.T) {
 	t.Parallel()
 	s, jobID, runID, _ := seedMarkedRun(t, &fakeRouter{}, 0)
-	markerPath := filepath.Join(s.runInflightDir(), runID+".json")
+	markerPath := filepath.Join(s.runMarkers().Dir(), runID+".json")
 	if _, err := os.Stat(markerPath); err != nil {
 		t.Fatalf("seed marker missing: %v", err)
 	}

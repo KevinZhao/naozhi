@@ -77,7 +77,9 @@ func (r *KeyResolver) ResolveForChat(platform, chatType, chatID, agentID string)
 		return SessionKey(platform, chatType, chatID, agentID), base
 	}
 
-	b := r.data.ProjectBinding(platform, chatType, chatID)
+	// A thread's or member's chatID (sessionkey.ScopedChatID) keeps its scope
+	// in the key; the project binding is its chat's.
+	b := r.data.ProjectBinding(platform, chatType, sessionkey.ParentChatID(chatType, chatID))
 	if !b.Bound {
 		return SessionKey(platform, chatType, chatID, agentID), base
 	}
@@ -197,7 +199,7 @@ func (r *KeyResolver) AccessProfileForKey(key string) string {
 	// ResolveForKey deliberately skips the project binding (§4.5), so read it
 	// directly: a non-general project-bound session still carries the profile.
 	if r.data != nil {
-		if b := r.data.ProjectBinding(parts[0], parts[1], parts[2]); b.Bound && b.AccessProfile != "" {
+		if b := r.data.ProjectBinding(parts[0], parts[1], sessionkey.ParentChatID(parts[1], parts[2])); b.Bound && b.AccessProfile != "" {
 			return b.AccessProfile
 		}
 	}
@@ -205,10 +207,11 @@ func (r *KeyResolver) AccessProfileForKey(key string) string {
 }
 
 // KeyForChat is the key-only variant for callers that do not need opts (e.g.
-// /stop, /new). Project-bound chats with agentID=="general" get the planner key.
+// /stop, /new). Project-bound chats with agentID=="general" get the planner
+// key; chatID may be scoped as in ResolveForChat.
 func (r *KeyResolver) KeyForChat(platform, chatType, chatID, agentID string) string {
 	if r.data != nil && agentID == "general" {
-		b := r.data.ProjectBinding(platform, chatType, chatID)
+		b := r.data.ProjectBinding(platform, chatType, sessionkey.ParentChatID(chatType, chatID))
 		if b.Bound {
 			return plannerKeyFor(b.Name)
 		}

@@ -174,7 +174,7 @@ func TestReplay_CorruptAttentionFailsClosed(t *testing.T) {
 	}
 	s, _, j, origRunID := replaySetup(t, runner)
 	// Stage a corrupt attention file for the original run (truncated JSON).
-	dir := s.stateSubtree("sandboxattention")
+	dir := s.sandboxState().Subtree("sandboxattention")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}

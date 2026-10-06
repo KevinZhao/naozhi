@@ -41,6 +41,8 @@ type ServerOptions struct {
 	// IMBudget refuses IM turns past cost.budget and answers /api/cost/budget;
 	// nil admits every turn.
 	IMBudget *budget.Gate
+	// IMGroupScope is what one IM group-chat session covers; zero is per thread.
+	IMGroupScope dispatch.GroupScope
 	// StateDir is the only state directory the constructor owns end-to-end
 	// (cookie_secret 0700/0600, retired-key ledger, size warning). Other state
 	// dirs (~/.claude, workspace cwd, attachments, cron runs/shims) are owned
