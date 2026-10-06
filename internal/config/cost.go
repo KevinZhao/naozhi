@@ -20,11 +20,12 @@ type CostConfig struct {
 // IsEnabled resolves the tri-state Enabled flag (nil = true).
 func (c CostConfig) IsEnabled() bool { return c.Enabled == nil || *c.Enabled }
 
-// CostBudgetConfig is cost.budget: daily USD caps counted from the cost
-// ledger (internal/budget), 0 = off. The day starts at midnight in Timezone,
-// else cron.timezone. WarnRatio 0 means 0.8; Action "" means block.
+// CostBudgetConfig is cost.budget: daily USD caps per cron job and for the
+// whole machine, counted from the cost ledger (internal/budget), 0 = off.
+// Spend metered in credits or tokens is not counted. The day starts at
+// midnight in Timezone, else cron.timezone. WarnRatio 0 means 0.8; Action ""
+// means block.
 type CostBudgetConfig struct {
-	PerChatDailyUSD    float64 `yaml:"per_chat_daily_usd,omitempty"`
 	PerCronJobDailyUSD float64 `yaml:"per_cron_job_daily_usd,omitempty"`
 	DailyUSD           float64 `yaml:"daily_usd,omitempty"`
 	WarnRatio          float64 `yaml:"warn_ratio,omitempty"`
@@ -34,7 +35,7 @@ type CostBudgetConfig struct {
 
 // HasLimit reports whether any cap is set.
 func (b CostBudgetConfig) HasLimit() bool {
-	return b.PerChatDailyUSD > 0 || b.PerCronJobDailyUSD > 0 || b.DailyUSD > 0
+	return b.PerCronJobDailyUSD > 0 || b.DailyUSD > 0
 }
 
 // BudgetLocation is where a cost.budget day starts: cost.budget.timezone,
@@ -62,7 +63,7 @@ func validateCostBudget(cfg *Config) error {
 	for _, f := range []struct {
 		key string
 		v   float64
-	}{{"per_chat_daily_usd", b.PerChatDailyUSD}, {"per_cron_job_daily_usd", b.PerCronJobDailyUSD}, {"daily_usd", b.DailyUSD}} {
+	}{{"per_cron_job_daily_usd", b.PerCronJobDailyUSD}, {"daily_usd", b.DailyUSD}} {
 		if f.v < 0 || math.IsNaN(f.v) || math.IsInf(f.v, 0) {
 			return fmt.Errorf("cost.budget.%s must be a USD amount >= 0 (0 = off), got %v", f.key, f.v)
 		}
@@ -82,7 +83,7 @@ func validateCostBudget(cfg *Config) error {
 	}
 	if !b.HasLimit() {
 		if b != (CostBudgetConfig{}) {
-			return fmt.Errorf("cost.budget sets no per_chat_daily_usd, per_cron_job_daily_usd or daily_usd; set a cap, or remove the block")
+			return fmt.Errorf("cost.budget sets no per_cron_job_daily_usd or daily_usd; set a cap, or remove the block")
 		}
 		return nil
 	}

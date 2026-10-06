@@ -61,24 +61,25 @@ func tagged(ts time.Time, run string) Entry {
 // writer, so the batch is delivered live instead of falling in the gap.
 func TestSubscribe_ReplayThenLiveDeliversEachEntryOnce(t *testing.T) {
 	s, _ := newTestStore(t, t0)
-	for _, e := range []Entry{tagged(t0.Add(-25*time.Hour), "yesterday"), tagged(t0.Add(-2*time.Hour), "before-from"), tagged(t0, "on-disk")} {
+	from := t0.Add(-time.Hour)
+	for _, e := range []Entry{tagged(t0.Add(-25*time.Hour), "yesterday"), tagged(from.Add(-time.Nanosecond), "before-from"), tagged(from, "at-from"), tagged(t0, "on-disk")} {
 		s.Append(e)
 	}
-	if !waitDurable(s, 3, 5*time.Second) {
+	if !waitDurable(s, 4, 5*time.Second) {
 		t.Fatal("seed entries never reached disk")
 	}
 	s.replayedHook = func() {
 		for i := range batchMax {
 			s.Append(tagged(t0, fmt.Sprintf("gap-%d", i)))
 		}
-		waitDurable(s, 3+batchMax, 300*time.Millisecond)
+		waitDurable(s, 4+batchMax, 300*time.Millisecond)
 	}
 	got := &tally{n: map[string]int{}}
-	s.Subscribe(t0.Add(-time.Hour), got.add)
+	s.Subscribe(from, got.add)
 	s.Append(tagged(t0, "after"))
 	s.Close()
 
-	want := map[string]int{"on-disk": 1, "after": 1}
+	want := map[string]int{"at-from": 1, "on-disk": 1, "after": 1}
 	for i := range batchMax {
 		want[fmt.Sprintf("gap-%d", i)] = 1
 	}

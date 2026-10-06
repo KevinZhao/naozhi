@@ -27,13 +27,11 @@ func TestSubjectForKey(t *testing.T) {
 		key  string
 		want Subject
 	}{
-		{"feishu:group:oc_1:general", "chat:feishu:group:oc_1"},
-		{"feishu:group:oc_1:reviewer", "chat:feishu:group:oc_1"},
-		{"slack:direct:U1:general", "chat:slack:direct:U1"},
 		{"cron:0123456789abcdef", "job:0123456789abcdef"},
 		{"cron:", ""},
-		{"project:naozhi:planner", "project:naozhi"},
-		{"project::planner", ""},
+		{"feishu:group:oc_1:general", ""},
+		{"slack:direct:U1:general", ""},
+		{"project:naozhi:planner", ""},
 		{"dashboard:direct:abc:general", ""},
 		{"dashboard:pj:0123456789abcdef:general", ""},
 		{"local:takeover:Users-me-src:general", ""},
@@ -49,8 +47,9 @@ func TestSubjectForKey(t *testing.T) {
 	}
 }
 
-// Every USD entry dated today in loc counts toward Global and its subject; a
-// row carrying a JobID counts toward the job even on a non-cron key.
+// Every USD entry dated today in loc counts toward Global, and toward its job
+// when it has one: a row carrying a JobID counts toward the job even on a
+// non-cron key.
 func TestIndex_SumsTodaysUSDPerSubject(t *testing.T) {
 	x := NewIndex(cst, (&clock{now}).now)
 	todayEarly := time.Date(2026, 9, 5, 17, 0, 0, 0, time.UTC) // 01:00 on 6 Sep in cst
@@ -73,11 +72,10 @@ func TestIndex_SumsTodaysUSDPerSubject(t *testing.T) {
 		x.Add(e)
 	}
 	for s, want := range map[Subject]float64{
-		"chat:feishu:group:oc_1": 2.5,
-		"job:j1":                 4,
-		"job:j2":                 8,
-		"chat:feishu:p2p:u1":     0,
-		Global:                   30.5,
+		"job:j1": 4,
+		"job:j2": 8,
+		"job:j3": 0,
+		Global:   30.5,
 	} {
 		if got := x.Spent(s); got != want {
 			t.Errorf("Spent(%s) = %v, want %v", s, got, want)
@@ -102,7 +100,7 @@ func TestIndex_RollsOverAtLocalMidnight(t *testing.T) {
 	}
 	x.Add(usd(c.t.Add(-2*time.Minute), "feishu:group:oc_1:general", "", 5)) // late row for 6 Sep
 	x.Add(usd(c.t, "feishu:group:oc_1:general", "", 1))
-	if got := x.Spent("chat:feishu:group:oc_1"); got != 1 {
+	if got := x.Spent(Global); got != 1 {
 		t.Errorf("Spent after rollover = %v, want 1 (yesterday's late row ignored)", got)
 	}
 }

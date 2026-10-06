@@ -19,18 +19,18 @@ const (
 // DefaultWarnRatio is the share of a limit at which Verdict.Warn turns on.
 const DefaultWarnRatio = 0.8
 
-// Limits are the daily USD caps; 0 turns one off.
+// Limits are the daily USD caps; 0 turns one off. Spend metered in another
+// unit (credits, tokens) counts toward neither.
 type Limits struct {
-	PerChatDailyUSD float64 // each IM chat; each project planner as one
-	PerJobDailyUSD  float64 // each cron job
-	DailyUSD        float64 // everything booked, dashboard included
-	WarnRatio       float64 // 0 means DefaultWarnRatio
-	Action          Action  // "" means ActionBlock
+	PerJobDailyUSD float64 // each cron job
+	DailyUSD       float64 // everything booked, dashboard included
+	WarnRatio      float64 // 0 means DefaultWarnRatio
+	Action         Action  // "" means ActionBlock
 }
 
 // Enabled reports whether any cap is set.
 func (l Limits) Enabled() bool {
-	return l.PerChatDailyUSD > 0 || l.PerJobDailyUSD > 0 || l.DailyUSD > 0
+	return l.PerJobDailyUSD > 0 || l.DailyUSD > 0
 }
 
 // Verdict is one check's outcome for the subject nearest its limit. The zero
@@ -80,7 +80,7 @@ func Attach(store *costledger.Store, lim Limits, loc *time.Location, now func() 
 	return NewGate(lim, idx)
 }
 
-// CheckKey checks the session key's chat or project, and Global.
+// CheckKey checks the session key's cron job, if it has one, and Global.
 func (g *Gate) CheckKey(sessionKey string) Verdict {
 	return g.check(SubjectForKey(sessionKey))
 }
@@ -119,12 +119,10 @@ func (g *Gate) check(scoped Subject) Verdict {
 
 func (g *Gate) limitFor(s Subject) float64 {
 	switch {
-	case s == "":
-		return 0
 	case s == Global:
 		return g.lim.DailyUSD
 	case strings.HasPrefix(string(s), jobPrefix):
 		return g.lim.PerJobDailyUSD
 	}
-	return g.lim.PerChatDailyUSD
+	return 0
 }
