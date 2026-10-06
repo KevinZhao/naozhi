@@ -156,6 +156,43 @@ func TestOwnerLoop_OwnerObservesBatchItIsNotIn(t *testing.T) {
 	}
 }
 
+// TestOwnerLoop_OwnerSkipsBatchFromItsScope: a drain turn with a request
+// from the owner's scope (another thread of its chat) answers that request
+// alone and makes it the Primary; the owner does not observe it. A request
+// from another scope in the same batch still gets its own receiver.
+func TestOwnerLoop_OwnerSkipsBatchFromItsScope(t *testing.T) {
+	t.Parallel()
+	h := newHarness(8, ModeCollect)
+	release := h.hold()
+	adm := &fakeAdmission{rec: h.rec, async: true}
+	owner := newOrigin(h.rec, "t1", "im:c#T1")
+	owner.scope = "im:c"
+	t2 := newOrigin(h.rec, "t2", "im:c#T2")
+	t2.scope = "im:c"
+	other := newOrigin(h.rec, "d", "im:d")
+	other.scope = "im:d"
+
+	h.submit("m1", owner, adm)
+	h.rec.waitFor(t, "send:k:m1", 1)
+	h.submit("m2", other, adm)
+	h.submit("m3", t2, adm)
+	release()
+	h.rec.waitFor(t, "begin:t2:head", 1)
+	release()
+	h.rec.waitFor(t, "idle", 1)
+	adm.wg.Wait()
+
+	if n := h.rec.count("begin:t1:observer"); n != 0 {
+		t.Fatalf("owner observed a batch from its own scope %d times, want 0", n)
+	}
+	if infos := t2.turnInfos(); len(infos) != 1 || infos[0].Role != RoleHead || !infos[0].Primary {
+		t.Fatalf("same-scope TurnInfos = %+v, want one Primary head", infos)
+	}
+	if infos := other.turnInfos(); len(infos) != 1 || infos[0].Role != RoleHead || infos[0].Primary {
+		t.Fatalf("other-scope TurnInfos = %+v, want one non-Primary head", infos)
+	}
+}
+
 // TestDeliver_NonBlockingThenAfterTurnThenBlocking (#3004 分叉 21):
 // receivers whose Blocking is false are finished before Sender.AfterTurn,
 // blocking ones after it, whatever their order in the batch.

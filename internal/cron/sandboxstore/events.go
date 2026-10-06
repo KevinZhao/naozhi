@@ -18,7 +18,7 @@ import (
 // writing one envelope per line, plus a closer. Streaming to disk means the
 // events received before a mid-job stream break are already durable. On open
 // failure the sink degrades to a no-op with one WARN (the run is more valuable
-// than its event log). Deliberately separate from the runStore's runs/ tree.
+// than its event log). Deliberately separate from the run store's runs/ tree.
 func (st Store) EventSink(jobID, runID string, lg *slog.Logger) (sink func([]byte) error, closer func()) {
 	if st.Root == "" {
 		return func([]byte) error { return nil }, func() {}

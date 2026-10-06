@@ -31,10 +31,13 @@ type AskAnswerPayload struct {
 	AgentID string `json:"agent_id,omitempty"`
 	// ChatType ("direct"/"group") is whitelisted on read, for callbacks that
 	// carry no chat type of their own.
-	ChatType  string `json:"chat_type,omitempty"`
-	Header    string `json:"header"`
-	Kind      string `json:"kind"`
-	Label     string `json:"label"`
+	ChatType string `json:"chat_type,omitempty"`
+	Header   string `json:"header"`
+	Kind     string `json:"kind"`
+	Label    string `json:"label"`
+	// ThreadID carries QuestionCard.ThreadID for callbacks that do not say
+	// which thread the card is in; omitted outside a thread.
+	ThreadID  string `json:"thread_id,omitempty"`
 	ToolUseID string `json:"tool_use_id"`
 }
 
@@ -47,8 +50,18 @@ func NewAskAnswerPayload(card QuestionCard, item QuestionItem, opt QuestionOptio
 		Header:    textutil.TruncateRunesNoEllipsis(item.Header, AskHeaderMaxRunes),
 		Kind:      AskAnswerKind,
 		Label:     textutil.TruncateRunesNoEllipsis(opt.Label, AskLabelMaxRunes),
+		ThreadID:  askThreadID(card.ThreadID),
 		ToolUseID: textutil.TruncateRunesNoEllipsis(card.ToolUseID, AskIDMaxRunes),
 	}
+}
+
+// askThreadID drops an over-long thread id rather than clipping it: a
+// clipped id names a different thread, or none.
+func askThreadID(id string) string {
+	if len(id) > AskIDMaxRunes {
+		return ""
+	}
+	return id
 }
 
 // NormalizeAskChatType whitelists to {"direct","group"}; anything else returns

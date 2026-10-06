@@ -17,7 +17,7 @@ import (
 //
 // We test the trigger-phase counter rather than the gc / drain counters
 // because those phases are harder to wedge from in-package tests
-// (gcWG.Wait depends on runStore lifecycle; cron.Stop's drain ctx is
+// (gcWG.Wait depends on run store lifecycle; cron.Stop's drain ctx is
 // internal to robfig/cron). The trigger counter shares the same wiring
 // pattern as the other two — bumped immediately before the slog.Warn —
 // so a regression on any one is structurally observable here. The

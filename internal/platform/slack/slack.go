@@ -178,10 +178,11 @@ func (s *Slack) Reply(ctx context.Context, msg platform.OutgoingMessage) (string
 	for _, img := range msg.Images {
 		ext := platform.ImageExt(img.MimeType)
 		_, err := s.api.UploadFileContext(ctx, slack.UploadFileParameters{
-			Channel:  msg.ChatID,
-			Filename: "image" + ext,
-			FileSize: len(img.Data),
-			Reader:   bytes.NewReader(img.Data),
+			Channel:         msg.ChatID,
+			ThreadTimestamp: msg.ThreadID,
+			Filename:        "image" + ext,
+			FileSize:        len(img.Data),
+			Reader:          bytes.NewReader(img.Data),
 		})
 		if err != nil {
 			slog.Warn("slack upload image failed", "err", err)
@@ -494,6 +495,7 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 		UserID:    ev.User,
 		ChatID:    ev.Channel,
 		ChatType:  chatType,
+		ThreadID:  ev.ThreadTimeStamp,
 		Text:      text,
 		MentionMe: mentionMe,
 	}

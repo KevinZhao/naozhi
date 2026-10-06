@@ -25,9 +25,9 @@ const fallbackBannerDelayDefault = 3 * time.Second
 // read by editLoop; joining is deferred to the read path so events coalesced
 // away by the 1/s rate limit cost no allocation.
 type replyTracker struct {
-	ctx    context.Context
-	p      platform.Platform
-	chatID string
+	ctx context.Context
+	p   platform.Platform
+	to  ReplyDest
 	// chatType ("direct"/"group") is embedded into AskUserQuestion cards so
 	// transports that can't recover it from the card callback (Feishu WS)
 	// route the answer back to the originating session key.
@@ -128,13 +128,13 @@ func (t *replyTracker) getThinkingMsgID() string {
 	return ""
 }
 
-func newIMEventTracker(ctx context.Context, p platform.Platform, chatID, chatType, agentID string) *replyTracker {
+func newIMEventTracker(ctx context.Context, p platform.Platform, to ReplyDest, chatType, agentID string) *replyTracker {
 	supportsInterim := platform.SupportsInterimMessages(p)
 	singleUseToken := platform.UsesSingleUseReplyToken(p)
 	t := &replyTracker{
 		ctx:             ctx,
 		p:               p,
-		chatID:          chatID,
+		to:              to,
 		chatType:        chatType,
 		agentID:         agentID,
 		msgIDReady:      make(chan struct{}),
@@ -196,14 +196,14 @@ func (t *replyTracker) todoLoop() {
 // derives from context.Background(), not the turn ctx: the turn may be near
 // its deadline or cancelled by a fresh /new, which would abort the API call
 // mid-flight and leave the user with no question. Errors fall back to a
-// plain-text post. (p, chatID) are snapshotted so later mutations to t don't
+// plain-text post. (p, to) are snapshotted so later mutations to t don't
 // race the goroutine.
 func (t *replyTracker) sendAskQuestionCard(aq *clievent.AskQuestion) {
 	if aq == nil || len(aq.Items) == 0 {
 		return
 	}
 	p := t.p
-	chatID := t.chatID
+	to := t.to
 
 	// Track on loopWG so stop() blocks until the card send finishes and cannot
 	// leak past the turn boundary.
@@ -213,7 +213,7 @@ func (t *replyTracker) sendAskQuestionCard(aq *clievent.AskQuestion) {
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Warn("ask_question: card send panic recovered",
-					"chat_id", chatID, "tool_use_id", aq.ToolUseID, "panic", r)
+					"chat_id", to.ChatID, "tool_use_id", aq.ToolUseID, "panic", r)
 			}
 		}()
 		// Detached via NotifyCtx like the other dispatch reply sites (#632).
@@ -225,11 +225,12 @@ func (t *replyTracker) sendAskQuestionCard(aq *clievent.AskQuestion) {
 				ToolUseID: aq.ToolUseID,
 				ChatType:  t.chatType,
 				AgentID:   t.agentID,
+				ThreadID:  to.ThreadID,
 				Items:     questionItems(aq),
 			}
-			if _, err := sender.SendQuestionCard(rctx, chatID, card); err != nil {
+			if _, err := sender.SendQuestionCard(rctx, to.ChatID, card); err != nil {
 				slog.Warn("ask_question card send failed, falling back to text",
-					"chat_id", chatID, "tool_use_id", aq.ToolUseID, "err", err)
+					"chat_id", to.ChatID, "tool_use_id", aq.ToolUseID, "err", err)
 				t.sendAskQuestionFallback(rctx, aq)
 			}
 			return
@@ -244,9 +245,9 @@ func (t *replyTracker) sendAskQuestionCard(aq *clievent.AskQuestion) {
 func (t *replyTracker) sendAskQuestionFallback(ctx context.Context, aq *clievent.AskQuestion) {
 	text := "Claude 想请你确认：\n" + platform.RenderAskQuestionPlain(questionItems(aq)) +
 		"\n直接回复选项内容即可（例如：「Error style: Return an error」）。"
-	if _, err := t.p.Reply(ctx, platform.OutgoingMessage{ChatID: t.chatID, Text: text}); err != nil {
+	if _, err := t.p.Reply(ctx, t.to.text(text)); err != nil {
 		slog.Debug("ask_question text fallback failed",
-			"chat_id", t.chatID, "tool_use_id", aq.ToolUseID, "err", err)
+			"chat_id", t.to.ChatID, "tool_use_id", aq.ToolUseID, "err", err)
 	}
 }
 
@@ -281,9 +282,9 @@ func (t *replyTracker) sendTodoMessage(text string) {
 	// Detached from t.ctx via NotifyCtx so a near-deadline turn still delivers (#632).
 	rctx, cancel := NotifyCtx(t.ctx, NotifyKindTodoMessage, platformReplyTimeout)
 	defer cancel()
-	if _, err := t.p.Reply(rctx, platform.OutgoingMessage{ChatID: t.chatID, Text: text}); err != nil {
+	if _, err := t.p.Reply(rctx, t.to.text(text)); err != nil {
 		// Warn, not Debug: the Reply is detached, so cancellation no longer masks errors.
-		slog.Warn("todo reply failed", "chat_id", t.chatID, "err", err)
+		slog.Warn("todo reply failed", "chat_id", t.to.ChatID, "err", err)
 	}
 }
 
@@ -398,7 +399,7 @@ func (t *replyTracker) postBanner() {
 			// (and editLoop + shutdown WaitGroups) for the full turn timeout.
 			rctx, cancel := context.WithTimeout(t.ctx, platformReplyTimeout)
 			defer cancel()
-			id, err := t.p.Reply(rctx, platform.OutgoingMessage{ChatID: t.chatID, Text: snapshot})
+			id, err := t.p.Reply(rctx, t.to.text(snapshot))
 			if err == nil {
 				t.thinkingMsgID.Store(&id)
 			}

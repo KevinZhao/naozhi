@@ -112,6 +112,7 @@ func TestResetChat_ClosesTheChatsProcessesAndWakesShutdown(t *testing.T) {
 // is wrapped as ErrShimStuck.
 func TestReset_FlagsAShimSocketThatOutlivesTheWait(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	shortenShimGoneWait(t, 50*time.Millisecond)
 	const key = "feishu:direct:stuck:general"
 	sock := shim.SocketPath(shim.KeyHash(key))
 	if err := os.WriteFile(sock, nil, 0o600); err != nil {
@@ -121,7 +122,7 @@ func TestReset_FlagsAShimSocketThatOutlivesTheWait(t *testing.T) {
 	r := spawnRouter(t, 4, func(context.Context, cli.SpawnOptions) (processIface, error) { return nil, boom })
 	injectSession(r, key, newIdleProc())
 
-	r.Reset(key) // waits out the 2s socket-gone window
+	r.Reset(key) // waits out the socket-gone window
 
 	_, _, err := r.GetOrCreate(context.Background(), key, AgentOpts{})
 	if !errors.Is(err, ErrShimStuck) || !errors.Is(err, boom) {
@@ -135,6 +136,8 @@ func TestReset_FlagsAShimSocketThatOutlivesTheWait(t *testing.T) {
 // the wait. The keys wait together: one window, not one per key.
 func TestResetChatAndSetWorkspace_FlagsShimSocketsThatOutliveTheWait(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	const window = 750 * time.Millisecond
+	shortenShimGoneWait(t, window)
 	const chat = "feishu:group:stuckchat"
 	keys := []string{chat + ":general", chat + ":reviewer"}
 	for _, key := range keys {
@@ -149,9 +152,9 @@ func TestResetChatAndSetWorkspace_FlagsShimSocketsThatOutliveTheWait(t *testing.
 	}
 
 	start := time.Now()
-	r.ResetChatAndSetWorkspace(chat, t.TempDir()) // waits out the 2s socket-gone window
-	if waited := time.Since(start); waited >= 4*time.Second {
-		t.Errorf("the chat reset waited %v for two keys, want one ~2s window", waited)
+	r.ResetChatAndSetWorkspace(chat, t.TempDir()) // waits out the socket-gone window
+	if waited := time.Since(start); waited >= 2*window {
+		t.Errorf("the chat reset waited %v for two keys, want one ~%v window", waited, window)
 	}
 
 	for _, key := range keys {

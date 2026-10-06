@@ -74,7 +74,7 @@ func TestBatchRecentRuns_OrderingAndEmpty(t *testing.T) {
 }
 
 // hexJobID returns a 16-char lowercase-hex job ID derived from i so that
-// runStore.IsValidID accepts it and each index maps to a distinct ID.
+// runstore.ValidID accepts it and each index maps to a distinct ID.
 func hexJobID(i int) string {
 	return fmt.Sprintf("%016x", 0x100+i)
 }

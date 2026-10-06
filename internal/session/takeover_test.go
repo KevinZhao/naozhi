@@ -514,13 +514,13 @@ func TestTakeover_OtherSpawnErrorsAreNotRetried(t *testing.T) {
 // The fresh retry waits for the refused spawn's shim to release the key's
 // socket; one that outlives the wait makes a failed retry ErrShimStuck.
 func TestTakeover_RejectedResumeRetryWaitsForTheSocket(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow: waits out the 2s socket-gone timeout")
-	}
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	sock := shim.SocketPath(shim.KeyHash(takeoverKey))
 	errClobber := errors.New("start shim: shim already listening: refusing to clobber")
 	for _, released := range []bool{true, false} {
+		if !released {
+			shortenShimGoneWait(t, 50*time.Millisecond)
+		}
 		if err := os.WriteFile(sock, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}

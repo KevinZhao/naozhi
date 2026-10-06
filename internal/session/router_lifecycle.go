@@ -180,7 +180,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 		// The failed spawn's shim is still releasing the key's socket, and the
 		// retry's StartShim would refuse to clobber it.
 		if errors.Is(err, clierr.ErrResumeRejected) && res.old != nil && !res.old.resumeRejected.Swap(true) {
-			retryStuck = !waitSocketGoneForKey(key, 2*time.Second)
+			retryStuck = !waitSocketGoneForKey(key)
 			continue
 		}
 		if err != nil {
@@ -710,7 +710,7 @@ func discardStaleSpawn(key, resumeID string, proc processIface) bool {
 	slog.Info("resumed session left the table during the spawn; spawning again",
 		"key", osutil.SanitizeForLog(key, 64), "resume_id", resumeID)
 	proc.Close()
-	if waitSocketGoneForKey(key, 2*time.Second) {
+	if waitSocketGoneForKey(key) {
 		return true
 	}
 	slog.Warn("shim socket still bound after discarding a stale spawn — the retry's spawn error will be wrapped as ErrShimStuck",

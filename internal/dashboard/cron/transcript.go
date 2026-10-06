@@ -136,7 +136,7 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cross-key check: defensive even though runStore.Get already keys
+	// Cross-key check: defensive even though runstore.Store.Get already keys
 	// the lookup on the disk path. A future refactor that loosens the
 	// key should not silently expose other-job runs through this URL.
 	if run.JobID != jobID {

@@ -84,7 +84,7 @@
     "lateBindings": 0
   },
   "contract.js": {
-    "lines": 110,
+    "lines": 111,
     "maxFnLines": 0,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -168,7 +168,7 @@
     "lateBindings": 0
   },
   "cron_timeline.js": {
-    "lines": 922,
+    "lines": 916,
     "maxFnLines": 64,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -432,8 +432,8 @@
     "lateBindings": 0
   },
   "session_header.js": {
-    "lines": 467,
-    "maxFnLines": 33,
+    "lines": 455,
+    "maxFnLines": 32,
     "maxIifeLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -552,7 +552,7 @@
     "lateBindings": 0
   },
   "utilities.js": {
-    "lines": 1408,
+    "lines": 1421,
     "maxFnLines": 91,
     "maxIifeLines": 0,
     "fnOver100": 0,
