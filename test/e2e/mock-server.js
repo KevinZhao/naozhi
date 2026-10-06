@@ -802,18 +802,17 @@ function startMockServer(overrides = {}) {
         res.end(JSON.stringify({ error: 'mock delete failure' }));
         return;
       }
+      // Like the backend, a 200 means the key is already gone from the list:
+      // the client's post-DELETE re-sync must not bring the card back.
       let body = '';
       req.on('data', c => (body += c));
       req.on('end', () => {
-        // A delete that succeeded leaves the session out of every later list,
-        // as the backend does; otherwise the refetch after it revives the card.
         try {
+          const b = JSON.parse(body || '{}');
           const list = sessionsData.sessions || [];
-          const i = list.findIndex(x => x.key === JSON.parse(body || '{}').key);
-          if (i >= 0) {
-            list.splice(i, 1);
-            if (sessionsData.stats && typeof sessionsData.stats.version === 'number') sessionsData.stats.version++;
-          }
+          const i = list.findIndex(x => x.key === b.key && (x.node || 'local') === (b.node || 'local'));
+          if (i >= 0) list.splice(i, 1);
+          if (sessionsData.stats && typeof sessionsData.stats.version === 'number') sessionsData.stats.version++;
         } catch (_) { /* malformed body: still ack like a lenient server */ }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));

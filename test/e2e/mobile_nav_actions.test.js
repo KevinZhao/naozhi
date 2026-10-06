@@ -54,11 +54,17 @@ test.describe('mobile_nav actions', () => {
   test('delete from the context menu dismisses that card', async ({ browser }) => {
     const { ctx, page } = await open(browser);
     await page.click(`.session-card[data-key="${MENU_KEY}"]`, { button: 'right' });
-    const del = page.waitForRequest((r) => r.method() === 'DELETE' && new URL(r.url()).pathname === '/api/sessions');
+    const isDelete = (r) => r.method() === 'DELETE' && new URL(r.url()).pathname === '/api/sessions';
+    let deleted = false;
+    page.on('requestfinished', (r) => { if (isDelete(r)) deleted = true; });
+    // The DELETE's settle re-syncs the list (lastVersion = 0, then a fetch);
+    // the card must still be gone once that fetch has repainted the sidebar.
+    const resynced = page.waitForResponse((r) => deleted && r.request().method() === 'GET' && new URL(r.url()).pathname === '/api/sessions');
+    const del = page.waitForRequest(isDelete);
     await page.locator('#session-ctx-menu .ctx-menu-item').filter({ hasText: '删除' }).click();
     expect(JSON.parse((await del).postData() || '{}').key).toBe(MENU_KEY);
-    // The refetch after the DELETE is the one that must not revive the card.
-    await page.waitForResponse((r) => r.request().method() === 'GET' && new URL(r.url()).pathname === '/api/sessions');
+    await resynced;
+    await expect.poll(() => page.evaluate(() => /** @type {any} */ (window).nz.test.lastVersion)).toBeGreaterThan(0);
     await expect(page.locator(`.session-card[data-key="${MENU_KEY}"]`)).toHaveCount(0);
     await expect(page.locator('#session-ctx-menu')).toHaveCount(0);
     await ctx.close();
