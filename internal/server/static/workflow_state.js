@@ -72,6 +72,7 @@ const MODE_RANK = { none: 0, delta: 1, full: 2 };
  * @property {number} backoffMs
  * @property {WsFrames['workflow_state'][]} buffered deltas held while a fetch is in flight
  * @property {number} frameAt when a workflow_state frame last arrived (ms)
+ * @property {string} frameEpoch the epoch that frame named
  * @property {number} lastFetchAt
  * @property {boolean} open the panel shows it expanded
  * @property {boolean} sawUnsettled a header of this page showed it not settled
@@ -108,7 +109,7 @@ function newEntry(key, node, taskId) {
     rowsLoaded: false, rowsAt: 0, rows: new Map(),
     result: null, logs: null, logsTruncated: false, resultLoaded: false, resultTries: 0,
     fetchInFlight: false, inflight: null, want: null, retryAt: 0, backoffMs: 0, buffered: [],
-    frameAt: 0, lastFetchAt: 0, open: false, sawUnsettled: false, staleRetried: false, used: 0,
+    frameAt: 0, frameEpoch: '', lastFetchAt: 0, open: false, sawUnsettled: false, staleRetried: false, used: 0,
   };
 }
 
@@ -207,6 +208,7 @@ export function applyFrame(store, frame, now) {
   const b = bucket(store, sidOf(frame.key, frame.node));
   const e = entryFor(b, frame.key, frame.node || '', frame.task_id, now);
   e.frameAt = now;
+  e.frameEpoch = frame.epoch;
   e.staleRetried = false;
   if (frame.full) applyFull(e, frame);
   else applyDelta(e, frame);
@@ -275,20 +277,24 @@ function applyDelta(e, frame) {
 export function applyHttp(store, s, resp, now) {
   const e = store.get(s)?.tasks.get(resp.workflow.task_id);
   if (!e) return;
-  const backoffMs = e.backoffMs;
+  const { backoffMs, inflight } = e;
   e.fetchInFlight = false;
   e.inflight = null;
   e.want = null;
   e.backoffMs = 0;
   e.retryAt = 0;
   e.used = now;
-  if (resp.epoch !== e.epoch && now - e.frameAt < PUSH_FRESH_MS) {
+  if (resp.epoch !== e.frameEpoch && now - e.frameAt < PUSH_FRESH_MS) {
     // Frames that are flowing name another epoch: this answer is stale.
-    // Ask again once.
+    // Ask again once; an entry still without that epoch's header (a delta
+    // of it came first) asks for what it asked before.
     const again = !e.staleRetried;
     e.staleRetried = true;
     replay(e);
-    if (again) due(e);
+    if (again) {
+      if (e.epoch !== e.frameEpoch) want(e, inflight || 'none');
+      due(e);
+    }
     return;
   }
   e.staleRetried = false;
@@ -430,8 +436,9 @@ function splitSid(s) {
  * reconcileSummaries is the fallback when no frames flow (RFC §6.1): after
  * an /api/sessions refresh, a workflow whose Summary is ahead of the entry
  * and that had no frame for PUSH_FRESH_MS is fetched (header only unless
- * rows are held); without a recent workflow_set, the Summary list trims
- * the session's entries. A remote node's sessions are skipped.
+ * rows are held); with neither a workflow_set nor a frame for the session
+ * in that time, the Summary list trims its entries. A remote node's
+ * sessions are skipped.
  * @param {Map<string, WorkflowBucket>} store
  * @param {string} s
  * @param {Summary[] | undefined} summaries
@@ -442,7 +449,7 @@ export function reconcileSummaries(store, s, summaries, now) {
   if (node !== 'local') return;
   const b = bucket(store, s);
   const list = summaries || [];
-  if (now - b.setAt >= PUSH_FRESH_MS) {
+  if (now - pushedAt(b) >= PUSH_FRESH_MS) {
     const ids = new Set(list.map((x) => x.task_id));
     for (const id of [...b.tasks.keys()]) if (!ids.has(id)) b.tasks.delete(id);
     b.listed = ids;
@@ -453,6 +460,14 @@ export function reconcileSummaries(store, s, summaries, now) {
     if (now - e.frameAt < PUSH_FRESH_MS) continue;
     if (sum.epoch !== e.epoch || sum.version > e.version) want(e, e.rowsLoaded ? 'delta' : 'none');
   }
+}
+
+// pushedAt is when session b last had a workflow_set or frame (ms).
+/** @param {WorkflowBucket} b */
+function pushedAt(b) {
+  let at = b.setAt;
+  for (const e of b.tasks.values()) at = Math.max(at, e.frameAt);
+  return at;
 }
 
 // headerOf stands a Summary in for a header until a frame or response

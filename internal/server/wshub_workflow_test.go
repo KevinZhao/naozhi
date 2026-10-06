@@ -757,3 +757,185 @@ func TestWorkflowPush_RacesPublishAndTakeover(t *testing.T) {
 		t.Fatalf("the new loop opened on tokens %d, want the newest %d", m.Workflow.Tokens, want)
 	}
 }
+
+// Each part of the head goes out at once, not after pace.progress.
+func TestWorkflowPush_HeadChangesNotPaced(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(w *workflow.Workflow)
+	}{
+		{"status", func(w *workflow.Workflow) { w.Status = workflow.StatusPaused }},
+		{"run id", func(w *workflow.Workflow) { w.RunID = "wf_0a1b2c3d-4e5" }},
+		{"degraded", func(w *workflow.Workflow) { w.Degraded = workflow.DegradedSnapshotStale }},
+		{"source", func(w *workflow.Workflow) { w.Source = workflow.SourceReplay }},
+		{"counts", func(w *workflow.Workflow) { w.Counts.Done++ }},
+		{"phases", func(w *workflow.Workflow) { w.Phases = append(w.Phases, workflow.Phase{Index: 2, Title: "Merge"}) }},
+		{"agents capped", func(w *workflow.Workflow) { w.AgentsCapped = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hub, router := newWorkflowHub(t)
+			sess := router.InjectSession(wfKey, session.NewTestProcess())
+			src := bindSource(sess)
+			src.Publish(wfOf("wtask0001", workflow.StatusRunning, row(0, workflow.AgentRunning)))
+			c := newTestWSClient()
+			p := newPush(t, hub, c, sess)
+			t0 := time.Now()
+			stepOK(t, p, t0)
+			nextWF(t, c)
+			nextWF(t, c)
+
+			w := wfOf("wtask0001", workflow.StatusRunning, row(0, workflow.AgentRunning))
+			tc.change(w)
+			src.Publish(w)
+			stepOK(t, p, t0.Add(time.Millisecond))
+			if n := len(c.send); n != 1 {
+				t.Fatalf("%d frames right after the change, want it at once", n)
+			}
+		})
+	}
+}
+
+// The loop's timer brings back what a step held: a progress frame once
+// pace.progress is out, a frame the deep queue held after pace.retry,
+// though nothing on the board changes and pace.alive is far off.
+func TestWorkflowPush_TimerSendsHeldFrames(t *testing.T) {
+	hub, router := newWorkflowHub(t)
+	hub.workflowPace.alive = time.Hour
+	sess := router.InjectSession(wfKey, session.NewTestProcess())
+	src := bindSource(sess)
+	running := func(id string, done int) *workflow.Workflow {
+		w := wfOf(id, workflow.StatusRunning, row(0, workflow.AgentRunning))
+		w.Counts.Done = done
+		return w
+	}
+	first := running("wtask0001", 0)
+	src.Publish(first, running("wtask0002", 0))
+	c := newTestWSClient()
+	startWorkflowLoop(t, hub, c, sess)
+	for range 3 {
+		nextWF(t, c)
+	}
+
+	paced := running("wtask0002", 0)
+	paced.Tokens = 7
+	src.Publish(first, paced)
+	if m := nextWF(t, c); m.TaskID != "wtask0002" || m.Workflow.Tokens != 7 {
+		t.Fatalf("frame = %+v, want the paced progress", m)
+	}
+
+	// An end frame passes the depth gate a running one is held at, so its
+	// arrival shows the step that held wtask0002 has run.
+	fill(c, workflowQueueDepth+1)
+	end := wfOf("wtask0001", workflow.StatusCompleted, row(0, workflow.AgentDone))
+	src.Publish(end, running("wtask0002", 1))
+	testhelper.Eventually(t, func() bool { return len(c.send) == workflowQueueDepth+2 }, 3*time.Second, "no end frame")
+	drain(t, c, workflowQueueDepth+1)
+	if m := nextWF(t, c); m.TaskID != "wtask0001" || m.Workflow.Status != workflow.StatusCompleted {
+		t.Fatalf("frame = %+v, want the end frame", m)
+	}
+	if m := nextWF(t, c); m.TaskID != "wtask0002" || m.Workflow.Counts.Done != 1 {
+		t.Fatalf("frame = %+v, want the held frame", m)
+	}
+}
+
+// workflow_set has the half-queue gate: a queue too deep for a running
+// workflow's frame still takes it.
+func TestWorkflowPush_SetPassesTheRunningGate(t *testing.T) {
+	hub, router := newWorkflowHub(t)
+	sess := router.InjectSession(wfKey, session.NewTestProcess())
+	src := bindSource(sess)
+	src.Publish(wfOf("wtask0001", workflow.StatusRunning))
+	c := newTestWSClient()
+	p := newPush(t, hub, c, sess)
+	t0 := time.Now()
+	stepOK(t, p, t0)
+	nextWF(t, c)
+	nextWF(t, c)
+
+	depth := cap(c.send)/2 - 1
+	fill(c, depth)
+	src.Publish(wfOf("wtask0001", workflow.StatusRunning), wfOf("wtask0002", workflow.StatusRunning))
+	if next := stepOK(t, p, t0.Add(time.Second)); next != hub.workflowPace.retry {
+		t.Fatalf("next %v, want a retry for the held frame", next)
+	}
+	if n := len(c.send); n != depth+1 {
+		t.Fatalf("%d queued, want the placeholders and the workflow_set alone", n)
+	}
+	drain(t, c, depth)
+	if m := nextWF(t, c); m.Type != "workflow_set" || len(m.TaskIDs) != 2 {
+		t.Fatalf("frame = %+v, want the new workflow_set", m)
+	}
+}
+
+// step checks the subscription before it sends, a workflow_set or a task
+// frame: once it is taken over, step sends nothing and reports it gone.
+func TestWorkflowPush_StepSendsNothingAfterTakeover(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ids  []string
+	}{
+		{"task frame", []string{"wtask0001"}},
+		{"workflow_set", []string{"wtask0001", "wtask0002"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hub, router := newWorkflowHub(t)
+			sess := router.InjectSession(wfKey, session.NewTestProcess())
+			src := bindSource(sess)
+			src.Publish(wfOf("wtask0001", workflow.StatusRunning))
+			c := newTestWSClient()
+			p := newPush(t, hub, c, sess)
+			t0 := time.Now()
+			stepOK(t, p, t0)
+			nextWF(t, c)
+			nextWF(t, c)
+
+			subscribeTest(hub, c, wfKey, func() {})
+			var wfs []*workflow.Workflow
+			for _, id := range tc.ids {
+				wfs = append(wfs, wfOf(id, workflow.StatusCompleted))
+			}
+			src.Publish(wfs...)
+			if _, ok := p.step(t0.Add(time.Second)); ok {
+				t.Fatal("step went on after the takeover")
+			}
+			if n := len(c.send); n != 0 {
+				t.Fatalf("%d frames sent after the takeover", n)
+			}
+		})
+	}
+}
+
+// Following a new board forgets what was sent of the old one: a task id
+// both boards hold opens with a full frame of the new epoch, though its
+// version there is below the one last sent.
+func TestWorkflowPush_FollowReopensReusedTask(t *testing.T) {
+	hub, router := newWorkflowHub(t)
+	sess := router.InjectSession(wfKey, session.NewTestProcess())
+	src := bindSource(sess)
+	for i := 1; i <= 3; i++ {
+		w := wfOf("wtask0001", workflow.StatusRunning)
+		w.Tokens = int64(i)
+		src.Publish(w)
+	}
+	c := newTestWSClient()
+	p := newPush(t, hub, c, sess)
+	t0 := time.Now()
+	stepOK(t, p, t0)
+	nextWF(t, c)
+	old := nextWF(t, c)
+
+	fresh := router.InjectSession(wfKey, session.NewTestProcess())
+	bindSource(fresh).Publish(wfOf("wtask0001", workflow.StatusRunning))
+	epoch := fresh.WorkflowBoard().Published().Epoch
+	if v := fresh.WorkflowBoard().Published().Workflows[0].Version; v >= old.Version {
+		t.Fatalf("the new board's version %d is not below the old %d", v, old.Version)
+	}
+	p.follow()
+	stepOK(t, p, t0.Add(time.Second))
+	if m := nextWF(t, c); m.Type != "workflow_set" || m.Epoch != epoch {
+		t.Fatalf("frame = %+v, want the new board's set", m)
+	}
+	if m := nextWF(t, c); m.TaskID != "wtask0001" || !m.Full || m.Epoch != epoch {
+		t.Fatalf("frame = %+v, want a full frame of the new board", m)
+	}
+}

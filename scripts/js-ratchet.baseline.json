@@ -576,8 +576,8 @@
     "lateBindings": 0
   },
   "workflow_state.js": {
-    "lines": 529,
-    "maxFnLines": 53,
+    "lines": 544,
+    "maxFnLines": 57,
     "maxIifeLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 0,

@@ -234,16 +234,19 @@ test('the Summary fallback fetches the header alone without rows, and the rows s
   assert.deepEqual(ws.rowsOf(e).map((a) => a.index), [0]);
 });
 
-test('the Summary fallback trims without a recent workflow_set, keeps unknown, and skips remote nodes', () => {
+test('the Summary fallback trims without a recent workflow_set or frame, keeps unknown, and skips remote nodes', () => {
   const sum = (task, status) => ({ task_id: task, status, counts: wv(task, 0).counts, epoch: E1, version: 1 });
   const store = new Map();
   ws.applySet(store, set(['w1', 'w2', 'w3'], E1), T0);
   for (const t of ['w1', 'w2', 'w3']) ws.applyFrame(store, full(t, E1, 1), T0);
   ws.reconcileSummaries(store, SID, [sum('w1', 'running')], T0 + 1000);
   assert.equal(store.get(SID).tasks.size, 3, 'a recent workflow_set is the list');
-  ws.reconcileSummaries(store, SID, [sum('w1', 'running'), sum('w3', 'unknown')], T0 + 6000);
+  ws.applyFrame(store, full('w2', E1, 2), T0 + 4000);
+  ws.reconcileSummaries(store, SID, [sum('w1', 'running')], T0 + 8000);
+  assert.equal(store.get(SID).tasks.size, 3, 'frames flowing: the last workflow_set still stands, however old');
+  ws.reconcileSummaries(store, SID, [sum('w1', 'running'), sum('w3', 'unknown')], T0 + 9000);
   assert.deepEqual([...store.get(SID).tasks.keys()].sort(), ['w1', 'w3']);
-  ws.applyFrame(store, full('w3', E1, 2, { status: 'unknown' }), T0 + 6000);
+  ws.applyFrame(store, full('w3', E1, 2, { status: 'unknown' }), T0 + 9000);
   assert.deepEqual(ws.visibleWorkflows(store, SID).map((e) => e.taskId).sort(), ['w1', 'w3'], 'unknown is shown');
 
   const remote = KEY + '\tnode-b';
@@ -339,6 +342,83 @@ test('a delta of another epoch, or a response of another epoch, refetches', () =
   assert.deepEqual(modes(requests(store, T0 + 12000)), ['w1:full'], 'and asked again');
   ws.applyHttp(store, SID, resp('w1', E1, 5, 'full', [row(0, 5)]), T0 + 12001);
   assert.deepEqual(requests(store, T0 + 14000), [], 'only once');
+});
+
+test('an answer naming the epoch of the flowing frames is taken, by an entry a delta started or one of an older epoch', () => {
+  const sum = (task, status, ended) => ({ task_id: task, status, counts: wv(task, 0).counts, epoch: E1, version: 1, ended_at: ended });
+  const store = new Map();
+  ws.applySet(store, set(['w1', 'w2', 'w3', 'w4'], E1), T0);
+  for (const [i, t] of ['w1', 'w2', 'w3', 'w4'].entries()) ws.applyFrame(store, full(t, E1, 1, { status: 'completed', ended_at: 100 - i }), T0);
+  ws.reconcileSummaries(store, SID, ['w1', 'w2', 'w3'].map((t, i) => sum(t, 'completed', 100 - i)), T0 + 10000);
+  assert.equal(entry(store, 'w4'), undefined, 'the Summary trims the fourth settled one');
+  ws.applyFrame(store, delta('w4', E1, 2, 1, [], { status: 'completed', source: 'result_file' }), T0 + 11000);
+  const e = entry(store, 'w4');
+  assert.equal(e.epoch, '', 'a delta names no epoch for an entry without one');
+  assert.deepEqual(modes(requests(store, T0 + 11000)), ['w4:none']);
+  ws.applyHttp(store, SID, resp('w4', E1, 2, 'none', [], { status: 'completed', source: 'result_file' }), T0 + 11010);
+  assert.equal(e.epoch, E1);
+  assert.equal(e.workflow?.source, 'result_file');
+  assert.equal(e.version, 2);
+  ws.applyFrame(store, delta('w4', E1, 3, 2, [], { status: 'completed', source: 'result_file', tokens: 9 }), T0 + 12000);
+  assert.equal(e.workflow?.tokens, 9, 'later deltas apply');
+  assert.deepEqual(requests(store, T0 + 14000), [], 'no fetch per delta');
+
+  const older = new Map();
+  ws.applyFrame(older, full('w1', E1, 5), T0);
+  ws.applyFrame(older, delta('w1', E2, 3, 1, [row(0, 3)], { name: 'rebuilt' }), T0 + 5000);
+  assert.deepEqual(modes(requests(older, T0 + 5000)), ['w1:none']);
+  ws.applyHttp(older, SID, resp('w1', E2, 3, 'none', [], { name: 'rebuilt' }), T0 + 5010);
+  const o = entry(older, 'w1');
+  assert.equal(o.epoch, E2);
+  assert.equal(o.workflow?.name, 'rebuilt');
+  assert.deepEqual(requests(older, T0 + 8000), []);
+});
+
+test('a stale answer for a collapsed entry that lacks the frames\' epoch refetches once', () => {
+  const store = new Map();
+  ws.applyFrame(store, full('w1', E1, 5), T0);
+  ws.applyFrame(store, delta('w1', E2, 3, 1, []), T0 + 5000);
+  assert.deepEqual(modes(requests(store, T0 + 5000)), ['w1:none']);
+  ws.applyHttp(store, SID, resp('w1', E1, 6, 'none'), T0 + 5010);
+  const e = entry(store, 'w1');
+  assert.equal(e.epoch, E1);
+  assert.equal(e.version, 5, 'the stale answer is dropped');
+  assert.deepEqual(modes(requests(store, T0 + 6010)), ['w1:none'], 'and asked again');
+  ws.applyHttp(store, SID, resp('w1', E1, 6, 'none'), T0 + 6020);
+  assert.deepEqual(requests(store, T0 + 9000), [], 'only once');
+});
+
+test('a full frame of a new epoch drops the deltas held for the old one', () => {
+  const store = loaded();
+  const e = entry(store, 'w1');
+  ws.applyFrame(store, full('w1', E1, 7), T0 + 5000);
+  assert.deepEqual(modes(requests(store, T0 + 10000)), ['w1:delta']);
+  ws.applyFrame(store, delta('w1', E1, 8, 7, [row(2, 8)]), T0 + 10010);
+  ws.applyFrame(store, full('w1', E2, 2), T0 + 10020);
+  assert.equal(e.buffered.length, 0);
+  ws.applyHttp(store, SID, resp('w1', E2, 2, 'full', [row(0, 2)]), T0 + 10030);
+  assert.equal(e.rowsAt, 2);
+  assert.deepEqual(ws.rowsOf(e).map((a) => a.index), [0]);
+  assert.deepEqual(requests(store, T0 + 20000), [], 'no old-epoch delta replayed into a refetch');
+});
+
+test('after releaseRows a delta due is fetched header only, and a delta answer adds no rows', () => {
+  const store = loaded();
+  const e = entry(store, 'w1');
+  ws.applyFrame(store, full('w1', E1, 7), T0 + 5000);
+  ws.releaseRows(store, SID);
+  assert.deepEqual(requests(store, T0 + 10000).map(([, m, q]) => m + ' ' + q), [`none key=${encodeURIComponent(KEY)}&task_id=w1&rows=none`]);
+
+  const s2 = loaded();
+  const e2 = entry(s2, 'w1');
+  ws.applyFrame(s2, full('w1', E1, 7), T0 + 5000);
+  assert.deepEqual(modes(requests(s2, T0 + 10000)), ['w1:delta']);
+  ws.releaseRows(s2, SID);
+  ws.applyHttp(s2, SID, resp('w1', E1, 7, 'delta', [row(2, 7)]), T0 + 10010);
+  assert.equal(e2.rowsLoaded, false);
+  assert.equal(e2.rows.size, 0);
+  assert.equal(e2.rowsAt, 0);
+  assert.equal(e.rowsAt, 0);
 });
 
 test('429 and network errors keep the state and retry the same fetch after a backoff, Retry-After included', () => {

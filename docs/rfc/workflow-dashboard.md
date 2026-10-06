@@ -1959,7 +1959,7 @@ Tracker 负责，并配泄漏测试（仿 `wshub_eventpush_redact_paths_test.go`
   "无订阅则自动订阅"恢复旁加一条——`sessionStream._subscriptionSuspended` 且 `subscribedKey === selection.key`，刷新后的快照 `protocol`
   非空（`managed_query.go:166-170` 只在有进程时填）→ `sessionStream.subscribe(...)`。重接本身推进 gen（`commitShimReattach` 的
   `MarkChanged`，`router_shim.go:635`）并发 sessions_update（`settleReconnected` → `notifyChange`，:518），所以 WS 连着时也能走到。
-  这同时补上了事件流在同一窗口的缺口。服务端方案（无进程分支也起 workflowPushLoop）需要不带 unsub 的注册项或另一套 generation，不选。近 5s 没收到 `workflow_set` 时，store 里该 sid 不在 Summary 中的条目一律删除
+  这同时补上了事件流在同一窗口的缺口。服务端方案（无进程分支也起 workflowPushLoop）需要不带 unsub 的注册项或另一套 generation，不选。近 5s 该 sid 既没收到 `workflow_set` 也没收到任何 `workflow_state` 帧时（PR-11：只看 `workflow_set` 的话，task 集合稳定 5s 以上的健康 board 每次刷新都被裁），store 里该 sid 不在 Summary 中的条目一律删除
   （Summary 恰好是面板要显示的集合：全部 `IsUnsettled` + 最近 3 个终态，§4.2；v4 写的"running 全部"会把 R5 的 unknown 删掉），这是无推送场景下 `workflow_set` 的替代。
   `node` 非空且非 `local` 的 session 一律跳过：多节点模式下远端 session 会原样带着 `workflows` 合进 `/api/sessions`
   （`internal/dashboard/session/list.go:266-296`），而 §6.2.3 对远端恒返回 404，不跳过就会每次刷新都白打一次 HTTP。
@@ -1984,7 +1984,7 @@ epoch 变化后）、`delta`（`since=rowsAt`）、`none`（`!rowsLoaded` 时的
 | delta | `version ≤ local.version` | 忽略 header；行同下一行规则（full 帧可能已把 header 推到前面，而行还停在 `rowsAt`） |
 | delta | 其余 | header：`base_version > local.version` → 缺帧，拉（`rowsLoaded` ? delta : none）；否则应用 header、`version = 帧值`。行（仅 `rowsLoaded`）：`base_version ≤ rowsAt < 帧 version` → 按 index 整行替换合并、`rowsAt = 帧 version`；`base_version > rowsAt` → 拉 delta。`rows_omitted > 0` 且 `rowsLoaded` → 拉 delta 一次（PR-11：此时合并本帧带来的行，但 `rowsAt` **不**前进——被省略的行 rev 也在 `(base, 帧 version]` 内，`rowsAt` 前进后 `since=rowsAt` 就取不回它们） |
 | 任一帧或 HTTP 响应应用之后 | **结果拉取**（v5）：header 的 status 为终态、`source == "result_file"`、`!resultLoaded`、`resultTries < 5`、条目展开中（含自动展开） | 拉一次（`rowsLoaded` ? delta : none）——行与结果一并取回。v4 没有这条：自动展开的 running workflow 首拉之后 `rowsLoaded` 已为真，终态 delta 与 result_file delta 都在本地合并，结果与日志永远不出现。`source == "result_file"` 即"结果已就绪"（§5.6(4) 的顺序不变式），不另设 wire 字段。之后才展开的终态条目由 `ensureRows` 走同一判定 |
-| HTTP 响应（H，`rows_mode`） | 响应 epoch ≠ 当前 epoch（且已有 WS 帧） | 丢弃，重拉一次（PR-11："已有 WS 帧"指近 5s 内收到过该 task 的帧；帧已停的兜底场景里响应就是最新状态，直接采用其 epoch） |
+| HTTP 响应（H，`rows_mode`） | 响应 epoch ≠ 当前 epoch（且已有 WS 帧） | 丢弃，重拉一次（PR-11："已有 WS 帧"指近 5s 内收到过该 task 的帧，比的是最近一帧所带的 epoch：delta 不改本地 epoch，由 delta 新建（epoch 为空）或刚收到新 epoch delta 的条目，与帧同 epoch 的响应直接采用；重拉沿用原请求的模式，折叠条目也真的重拉。帧已停的兜底场景里响应就是最新状态，直接采用其 epoch） |
 | HTTP 响应 | 否则 | header：`H ≥ local.version` 才替换，`version = max(local.version, H)`——**永不倒退**。行：`full` 且（`!rowsLoaded` 或 `H > rowsAt`）→ 整体替换、`rowsAt = H`、`rowsLoaded=true`（同一 epoch 内行不会被删除，所以 H 时刻的全量之后再叠加 delta 是正确的）；`full` 且 `H ≤ rowsAt` → 保留本地行；`delta` → 按 index 合并、`rowsAt = H`；`none` → 行不动。结果：带 `result` / `logs` → 存入、`resultLoaded=true`；`result_unavailable` 且结果拉取条件仍成立 → `resultTries++`，按下面的退避再试（至多 5 次；之后只在重新展开时再试）。然后按序重放 `buffered`（按上面 delta 的规则，与 `version` / `rowsAt` 分别比较）。重放后 `rowsLoaded` 且 `rowsAt < version` → 拉 delta 一次 |
 | HTTP 429 / 5xx / 网络错 | — | **保持当前状态**，`fetchInFlight=false`，`buffered` 保留；按指数退避（1s → 2s → … ≤ 30s，有 `Retry-After` 时取二者较大者）记 `retryAt`，到期且仍需要时重拉 |
 | `/workflow` 的 HTTP 404 | — | 删除该条目（session 不存在、task 不在 board 里、或 remote node；§6.2.3 起 404 只表示这些） |
