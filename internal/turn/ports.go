@@ -64,8 +64,8 @@ const (
 // called from turn with no lock held.
 type Origin interface {
 	// Sink is the delivery identity: requests whose origins share a Sink get
-	// one Begin per turn between them. IM uses "im:<platform>:<chat>", a WS
-	// send "ws:<conn>:<sendID>", HTTP "http:<key>".
+	// one Begin per turn between them. IM uses "im:<platform>:<chat>", plus
+	// "#<thread>" in a thread; a WS send "ws:<conn>:<sendID>", HTTP "http:<key>".
 	Sink() string
 	// Admitted reports Submit's Ack. It runs inside Submit; for AckOwner and
 	// AckDetached that is before the turn's goroutine (if any) starts. An ack

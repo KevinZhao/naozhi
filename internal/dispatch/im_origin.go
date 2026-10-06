@@ -75,8 +75,14 @@ func (a imAdmission) Admit(kind turn.RunKind) (func(fn func(ctx context.Context)
 	return func(fn func(ctx context.Context)) { go fn(ctx) }, true
 }
 
+// Sink is the chat, plus the thread when there is one: two threads of a
+// chat that share a session key each get the reply in their own thread.
 func (o *imOrigin) Sink() string {
-	return "im:" + sessionkey.ChatKey(o.msg.Platform, o.msg.ChatType, o.msg.ChatID)
+	sink := "im:" + sessionkey.ChatKey(o.msg.Platform, o.msg.ChatType, o.msg.ChatID)
+	if o.msg.ThreadID != "" {
+		sink += "#" + o.msg.ThreadID
+	}
+	return sink
 }
 
 func (o *imOrigin) SessionOpts(string) sessionview.AgentOpts { return o.opts }
@@ -192,7 +198,7 @@ func (dl *imDelivery) Blocking() bool { return true }
 // otherwise.
 func (dl *imDelivery) BeforeSession(ctx context.Context) {
 	o := dl.o
-	dl.tracker = newIMEventTracker(ctx, dl.p, o.msg.ChatID, o.msg.ChatType, o.agentID)
+	dl.tracker = newIMEventTracker(ctx, dl.p, replyDestOf(o.msg), o.msg.ChatType, o.agentID)
 	if dl.info.Role == turn.RoleHead && o.ackDone != nil {
 		dl.tracker.armFallbackBanner(o.d.fallbackBannerDelay, o.awaitAck)
 	}
@@ -341,9 +347,9 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 		dl.lg.Info("ask_question suppressed redundant reply", "result_len", len(result.Text))
 	} else if replyText != "" {
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
-			d.replyIntoBanner(ctx, p, o.msg.ChatID, msgID, replyText)
+			d.replyIntoBanner(ctx, p, replyDestOf(o.msg), msgID, replyText)
 		} else {
-			d.SendSplitReply(ctx, p, o.msg.ChatID, replyText)
+			d.SendSplitReply(ctx, p, replyDestOf(o.msg), replyText)
 		}
 	} else if result.Aborted {
 		// naozhi stopped the turn (/stop, interrupt, /urgent), which already
@@ -358,7 +364,7 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 	// outImages derive from replyText; when the card suppresses the text,
 	// suppress its images too or orphaned bubbles follow the card (#1959).
 	if !tracker.askQuestionFired.Load() {
-		d.sendOutboundImages(ctx, p, o.msg.ChatID, outImages)
+		d.sendOutboundImages(ctx, p, replyDestOf(o.msg), outImages)
 	}
 }
 
@@ -373,15 +379,15 @@ const bannerAborted = "已中断。"
 // sends the rest as new messages, so the edit obeys MaxReplyLength like any
 // send. If that edit fails, every chunk is sent and the banner is replaced by
 // bannerAnsweredBelow so it does not keep showing the last tool status.
-func (d *Dispatcher) replyIntoBanner(ctx context.Context, p platform.Platform, chatID, msgID, text string) {
+func (d *Dispatcher) replyIntoBanner(ctx context.Context, p platform.Platform, to ReplyDest, msgID, text string) {
 	chunks := replyChunks(p, text)
 	if err := p.EditMessage(ctx, msgID, chunks[0]); err != nil {
 		slog.Warn("edit message failed, sending new", "err", err, "chunks", len(chunks))
-		d.sendChunks(ctx, p, chatID, chunks)
+		d.sendChunks(ctx, p, to, chunks)
 		if err := p.EditMessage(ctx, msgID, bannerAnsweredBelow); err != nil {
 			slog.Debug("banner answered-below edit failed", "msg_id", msgID, "err", err)
 		}
 		return
 	}
-	d.sendChunks(ctx, p, chatID, chunks[1:])
+	d.sendChunks(ctx, p, to, chunks[1:])
 }

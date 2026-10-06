@@ -46,6 +46,10 @@ type IncomingMessage struct {
 	UserID    string
 	ChatID    string
 	ChatType  string // "direct" | "group"
+	// ThreadID is the platform-native id of the thread or topic the message
+	// was posted in (Slack thread_ts, Feishu topic root message id); empty
+	// outside one. Replies pass it back verbatim as OutgoingMessage.ThreadID.
+	ThreadID  string
 	Text      string
 	MentionMe bool
 	Images    []Image
@@ -55,7 +59,8 @@ type IncomingMessage struct {
 	AgentID string
 }
 
-// OutgoingMessage is the platform-agnostic outbound message.
+// OutgoingMessage is the platform-agnostic outbound message. A non-empty
+// ThreadID posts it into that thread of ChatID, on adapters that have threads.
 type OutgoingMessage struct {
 	ChatID   string
 	Text     string
@@ -171,6 +176,9 @@ type QuestionCard struct {
 	// AgentID is the asking session's agent id, embedded for the same reason so
 	// the answer routes to the SAME agent session (#2148); empty = unknown.
 	AgentID string
+	// ThreadID is the thread the question was asked in: the card is posted
+	// there, and adapters whose click callback cannot recover it embed it.
+	ThreadID string
 	// Items is one or more questions, each rendered as its own block.
 	Items []QuestionItem
 }

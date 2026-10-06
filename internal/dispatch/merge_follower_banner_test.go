@@ -24,7 +24,7 @@ func TestMergeFollower_CollapsesInterimBanner(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	tracker := newIMEventTracker(ctx, fp, "chat1", "direct", "general")
+	tracker := newIMEventTracker(ctx, fp, ReplyDest{ChatID: "chat1"}, "direct", "general")
 
 	// Interim assistant event posts the "💭思考中…" banner on this follower
 	// slot (process_readloop interim fan-out claims all currentTurnSlots).
