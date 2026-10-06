@@ -167,10 +167,10 @@ function mergeBackendSessions(polled, backendKeys, pushesBefore) {
   });
 }
 
-// reconcilePending forgets the pending sessions the backend now lists and
-// persists once: the durable blob must drop them, or a reload re-injects a
-// ghost card, and removePendingSession per key would re-serialize the whole
-// blob once per key.
+// reconcilePending forgets the pending sessions the backend now lists, and
+// the sentPicks of sent ones, and persists once: the durable blob must drop
+// them, or a reload re-injects a ghost card, and removePendingSession per key
+// would re-serialize the whole blob once per key.
 function reconcilePending(backendKeys) {
   let reconciledAny = false;
   for (const key of Object.keys(perSession.workspaces)) {
@@ -182,6 +182,7 @@ function reconcilePending(backendKeys) {
     delete perSession.pendingTuning[key];
     reconciledAny = true;
   }
+  for (const key of Object.keys(perSession.sentPicks)) if (backendKeys.has(key)) delete perSession.sentPicks[key];
   if (reconciledAny) persistPending();
 }
 
