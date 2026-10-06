@@ -5,7 +5,8 @@
 // have zero errors. CHECKED is the floor: a file cannot drop its pragma (and
 // with it every check) or silence lines with @ts-ignore / @ts-expect-error /
 // @ts-nocheck without failing here, and a new opt-in is listed too. The
-// probes prove wire.d.ts reaches a handler through wsm.on.
+// probes prove wire.d.ts reaches a handler through wsm.on; the plants prove
+// the root modules' annotations type the frames and bodies they read.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -20,6 +21,8 @@ const TSC = path.join(ROOT, 'test', 'e2e', 'node_modules', 'typescript', 'bin', 
 const PRAGMA = '// @ts-check\n';
 
 const CHECKED = [
+  'event_stream.js',
+  'session_list.js',
   'session_stream.js',
   'ws_manager.js',
 ];
@@ -92,4 +95,51 @@ test('wsm.on types each handler by its frame, and only outbound frame types regi
   assert.match(tscProbe('wsm.on(NZ_CONTRACT.WS.evnt, () => {});'), /Property 'evnt' does not exist/);
   assert.match(tscProbe('const p = NZ_CONTRACT.API.sesions;'), /Property 'sesions' does not exist/);
   assert.match(tscProbe('wsm.on(NZ_CONTRACT.WS.subscribe, () => {});'), /not assignable to parameter of type 'keyof WsFrames'/);
+});
+
+// Each anchor is the line that types a value the root modules read; the plant
+// after it reads a field no wire type has. Without the annotation the value is
+// `any` and tsc says nothing, so every plant must come back as an error.
+const PLANTS = [
+  ['event_stream.js', "onHistory(/** @type {WsFrames['history']} */ msg) {", 'msg', 'WsFrame_history'],
+  ['event_stream.js', "onEvent(/** @type {WsFrames['event']} */ msg) {", 'msg', 'WsFrame_event'],
+  ['event_stream.js', "onSendAck(/** @type {Omit<WsFrames['send_ack'], 'type'>} */ msg) {", 'msg', "Omit<WsFrame_send_ack, \"type\">"],
+  ['event_stream.js', "onInterruptAck(/** @type {WsFrames['interrupt_ack']} */ msg) {", 'msg', 'WsFrame_interrupt_ack'],
+  ['event_stream.js', "onSendError(/** @type {WsFrames['send_error']} */ msg) {", 'msg', 'WsFrame_send_error'],
+  ['event_stream.js', 'function renderInitialHistory(', 'msg', 'WsFrame_history'],
+  ['session_list.js', "function onSessionState(/** @type {WsFrames['session_state']} */ msg) {", 'msg', 'WsFrame_session_state'],
+  ['session_list.js', 'function settleTurnBoundary(', 'msg', 'WsFrame_session_state'],
+  ['session_list.js', 'function paintSessionCardState(', 'msg', 'WsFrame_session_state'],
+  ['session_list.js', 'function resubscribeOnRunning(', 'msg', 'WsFrame_session_state'],
+  ['session_list.js', 'let data = got.data;', 'data', 'RestResponse_sessions'],
+  ['session_list.js', 'load.then(h => {', 'h', 'RestResponse_sessions_history'],
+  ['session_list.js', 'function sessionCardHtml(', 's', 'SessionSnapshot'],
+];
+
+test('the root modules type their frame handlers and session fetches', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nz-ts-plant-'));
+  try {
+    for (const f of fs.readdirSync(STATIC)) {
+      if (f.endsWith('.js') || f === 'wire.d.ts' || f === 'tsconfig.json') fs.copyFileSync(path.join(STATIC, f), path.join(dir, f));
+    }
+    PLANTS.forEach(([file, anchor, name], i) => {
+      const lines = fs.readFileSync(path.join(dir, file), 'utf8').split('\n');
+      const at = lines.findIndex((l) => l.includes(anchor));
+      assert.ok(at !== -1 && lines.findLastIndex((l) => l.includes(anchor)) === at, `${file} must have exactly one ${anchor}`);
+      lines.splice(at + 1, 0, `void ${name}.nzPlanted${i};`);
+      fs.writeFileSync(path.join(dir, file), lines.join('\n'));
+    });
+    let out = '';
+    try {
+      execFileSync(process.execPath, [TSC, '-p', dir], { encoding: 'utf8' });
+    } catch (err) {
+      out = String(err.stdout || err.message);
+    }
+    PLANTS.forEach(([file, anchor, , type], i) => {
+      assert.match(out, new RegExp(`${file}\\(\\d+,\\d+\\): error TS2339: Property 'nzPlanted${i}' does not exist on type '${type}`),
+        `the value typed at ${file} "${anchor}" is untyped`);
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -16,20 +16,21 @@
 package server
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
 
-// jsMethodBody slices a `  name(args) {` object-literal method (sessionFrames.onEvent
-// style) up to its two-space-indented closing `},`. jsFuncBody only handles
-// `function name(` declarations.
+// jsMethodBody slices a `  name(msg) {` object-literal method (sessionFrames.onEvent
+// style; msg may carry a JSDoc type) up to its two-space-indented closing `},`.
+// jsFuncBody only handles `function name(` declarations.
 func jsMethodBody(t *testing.T, js, name string) string {
 	t.Helper()
-	decl := "\n  " + name + "(msg) {"
-	start := strings.Index(js, decl)
-	if start < 0 {
+	loc := regexp.MustCompile(`\n  ` + regexp.QuoteMeta(name) + `\((?:/\*\* [^\n]*? \*/ )?msg\) \{`).FindStringIndex(js)
+	if loc == nil {
 		t.Fatalf("could not find method %q in dashboard.js", name)
 	}
+	start := loc[0]
 	end := strings.Index(js[start:], "\n  },")
 	if end < 0 {
 		t.Fatalf("could not bound %s body", name)
