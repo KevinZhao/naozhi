@@ -143,7 +143,7 @@ func TestTuningDriftParity_SurvivesRespawn(t *testing.T) {
 	r.ss.Update(func(tx sessTx) {
 		fresh = r.installFreshSession(tx,
 			key, &cli.Process{}, "/ws", "kiro", "", sp.Wrapper, "sess-drift-3",
-			nil, nil, 0, 0, 0, false, "sess-drift-3", 0, ov,
+			nil, nil, 0, 0, 0, false, "sess-drift-3", 0, ov, nil,
 		)
 	})
 

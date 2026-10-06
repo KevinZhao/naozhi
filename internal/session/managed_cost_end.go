@@ -71,10 +71,15 @@ func (s *ManagedSession) setEndMark(m transcriptMark) {
 // last result frame, which no result will now report, is booked as a
 // Kind=partial entry. This covers every way a process ends with a turn
 // unfinished — a death, a watchdog or stuck_running kill, a reset — whether
-// or not a Send owned the turn. claudeDir locates the transcripts.
+// or not a Send owned the turn. claudeDir locates the transcripts. The end
+// also settles the process's workflows on s's board (SetOnEnd has one slot).
 func bookProcessEnd(s *ManagedSession, proc processIface, claudeDir string) {
 	if n, ok := proc.(processEndNotifier); ok {
-		n.SetOnEnd(func(end cli.ProcessEnd) { s.costAcct.onProcessEnd(s, end, claudeDir) })
+		wf, _ := proc.(workflowNotifier)
+		n.SetOnEnd(func(end cli.ProcessEnd) {
+			s.costAcct.onProcessEnd(s, end, claudeDir)
+			s.WorkflowBoard().procEnded(wf, end)
+		})
 	}
 }
 

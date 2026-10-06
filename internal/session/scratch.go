@@ -210,8 +210,8 @@ func (p *ScratchPool) sweep(now time.Time) {
 }
 
 // lastActivity is when the router session under key was last active: now
-// while a turn is outstanding, else the later of its last send and last CLI
-// event. Zero when there is no router or no session (a scratch never sent to).
+// while a turn is outstanding, else the latest of its last send, last CLI
+// event and last observed workflow frame. Zero when there is no router or no session (a scratch never sent to).
 func (p *ScratchPool) lastActivity(key string, now time.Time) time.Time {
 	if p.router == nil {
 		return time.Time{}
@@ -228,6 +228,11 @@ func (p *ScratchPool) lastActivity(key string, now time.Time) time.Time {
 		if le := proc.LastEventAt(); le.After(last) {
 			last = le
 		}
+	}
+	// A workflow's frames count, but a stuck one (no terminal frame) does
+	// not keep the scratch from ageing out: it ages from its last frame.
+	if obs := time.UnixMilli(s.WorkflowBoard().LastObservedAt()); obs.After(last) {
+		last = obs
 	}
 	return last
 }

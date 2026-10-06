@@ -109,6 +109,10 @@ func (r *Router) restoreSessionFromEntry(tx sessTx, key string, entry *storeEntr
 		}
 	}
 	s.setCodeChanges(restoredCodeChanges(entry.Key, entry.CodeChanges))
+	board := newWorkflowBoard(r.hist.projectsRoot)
+	board.setNotify(func() { r.ss.Update(markChanged); r.notifyChange() }, r.BumpVersion)
+	board.restore(entry.Key, entry.Workflows, entry.Workspace, time.Now())
+	s.workflows.Store(board)
 	s.setSessionID(entry.SessionID)
 	if entry.LastActive != 0 {
 		s.lastActive.Store(entry.LastActive)

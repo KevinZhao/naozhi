@@ -342,7 +342,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install eslint
+      - name: Install eslint and typescript
         working-directory: test/e2e
         run: npm install
 
@@ -375,6 +375,17 @@ jobs:
 
       - name: Check growth ratchet
         run: node scripts/js-ratchet.mjs --check
+
+      # Files whose first line is // @ts-check are type-checked against
+      # wire.d.ts and contract.js's literal types (#3439) and must have zero
+      # errors; checkJs is off, so the rest are parsed but not reported.
+      - name: Type-check the opted-in dashboard files
+        run: test/e2e/node_modules/.bin/tsc -p internal/server/static
+
+      # The opted-in list may only grow, and a handler registered through
+      # wsm.on must see its own frame's fields.
+      - name: Test the type-check floor and the wsm.on typing
+        run: node --test scripts/ts-check.test.mjs
 
       - name: Check WS contract (wsproto schema vs dashboard dispatch)
         run: node test/e2e/check-ws-contract.mjs

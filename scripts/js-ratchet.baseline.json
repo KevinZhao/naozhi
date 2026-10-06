@@ -240,8 +240,8 @@
     "lateBindings": 0
   },
   "event_stream.js": {
-    "lines": 923,
-    "maxFnLines": 70,
+    "lines": 920,
+    "maxFnLines": 68,
     "maxIifeLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -456,8 +456,8 @@
     "lateBindings": 0
   },
   "session_list.js": {
-    "lines": 1108,
-    "maxFnLines": 95,
+    "lines": 1107,
+    "maxFnLines": 93,
     "maxIifeLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 0,
@@ -468,7 +468,7 @@
     "lateBindings": 0
   },
   "session_stream.js": {
-    "lines": 76,
+    "lines": 77,
     "maxFnLines": 18,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -576,7 +576,7 @@
     "lateBindings": 0
   },
   "ws_manager.js": {
-    "lines": 177,
+    "lines": 184,
     "maxFnLines": 33,
     "maxIifeLines": 0,
     "fnOver100": 0,
