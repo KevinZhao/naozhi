@@ -116,6 +116,10 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	// Dashboard JS is auth-gated: it embeds the API endpoint list + client
 	// schema (recon surface); the login page loads no /static/ JS (#1328).
 	s.mux.HandleFunc("GET /static/css/{file}", auth(handleDashboardCSS))
+	// Vendored libraries: stylesheets and fonts by path, each script on its
+	// own route like the dashboard's modules.
+	s.mux.HandleFunc("GET /static/vendor/{file...}", auth(handleDashboardCSS))
+	s.mux.HandleFunc("GET /static/vendor/katex-0.16.21/katex.min.js", auth(serveStaticJS("vendor/katex-0.16.21/katex.min.js")))
 	s.mux.HandleFunc("GET /static/contract.js", auth(serveStaticJS("contract.js")))
 	s.mux.HandleFunc("GET /static/nz_util.js", auth(serveStaticJS("nz_util.js")))
 	s.mux.HandleFunc("GET /static/state.js", auth(serveStaticJS("state.js")))

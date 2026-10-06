@@ -191,16 +191,11 @@ func TestDashboardCSP_FrameSrcBlob(t *testing.T) {
 // TestDashboardCSP_JsdelivrNpmPathScoped pins R242-SEC-2 (#607): every
 // `cdn.jsdelivr.net` source expression in the dashboard CSP must carry the
 // `/npm/` path prefix so the CDN scope can only load assets under the npm
-// subtree (mermaid + KaTeX live there), not arbitrary follow-on resources
+// subtree (mermaid lives there), not arbitrary follow-on resources
 // from other jsdelivr path namespaces (`/gh/<attacker>/<repo>`, `/combine/`
 // bundle endpoints, etc.). A bare `https://cdn.jsdelivr.net` host-source
 // re-opens that surface, so the test fails if any directive lists the host
 // without the `/npm/` path segment.
-//
-// CSP3 §6.6.2.6 path-part matching: a trailing-slash path in a host-source
-// matches every URL whose path begins with that prefix, so all three shipped
-// CDN URLs (`/npm/mermaid@…`, `/npm/katex@…/dist/katex.min.js`, the KaTeX
-// stylesheet + its `/npm/katex@…/dist/fonts/*` woff2 files) still load.
 func TestDashboardCSP_JsdelivrNpmPathScoped(t *testing.T) {
 	s := newTestServer(&mockPlatform{})
 
@@ -231,17 +226,13 @@ func TestDashboardCSP_JsdelivrNpmPathScoped(t *testing.T) {
 		}
 	}
 
-	// Positive (#1980 tightening): the CDN sources are pinned to the exact
-	// versioned files the lazy loaders inject — /npm/ alone is an
+	// Positive (#1980 tightening): the CDN source is pinned to the exact
+	// versioned file the lazy loader injects — /npm/ alone is an
 	// anyone-can-publish namespace, i.e. an allowlist bypass for an attacker
 	// who can inject a <script src> tag.
-	for _, want := range []string{
-		cdnMermaidJS, cdnKatexJS, cdnKatexCSS, cdnKatexFonts,
-	} {
-		if !strings.Contains(csp, want) {
-			t.Errorf("R242-SEC-2 (#607) / #1980: CSP must carry the exact pinned "+
-				"CDN source %q, got %q", want, csp)
-		}
+	if !strings.Contains(csp, cdnMermaidJS) {
+		t.Errorf("R242-SEC-2 (#607) / #1980: CSP must carry the exact pinned "+
+			"CDN source %q, got %q", cdnMermaidJS, csp)
 	}
 	// And the bare /npm/ prefix as its own source token must be gone.
 	for _, tok := range strings.Fields(csp) {

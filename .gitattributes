@@ -1,0 +1,2 @@
+# Vendored third-party release files: byte-identical to upstream, not source to review.
+internal/server/static/vendor/** linguist-vendored -diff
