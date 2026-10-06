@@ -303,7 +303,9 @@ naozhi setup weixin
 naozhi --config ~/.naozhi/config.yaml
 ```
 
-需要两个微信号 —— 一个登录为 bot，另一个发消息测试。
+扫码确认的微信用户（登录响应里的 `ilink_user_id`）会被写进
+`im_access.platforms.weixin.allowed_users`，只有这个号发来的消息会被处理。其他微信号
+发消息会在私聊里收到自己的 ID，加进 `allowed_users` 即可，见 [IM 访问控制](#im-访问控制)。
 
 ### 飞书
 
@@ -567,6 +569,10 @@ im_access:
 - **不配置 = 所有人都能用**（兼容旧配置）。启动日志、`naozhi config check`、
   `naozhi doctor` 会对每个没有条目的平台告警，`config check` 因此退出码为 1。
   `default_deny: true` 会拒绝所有没有条目的平台。
+- `naozhi setup weixin` 会把扫码的微信用户写进 `im_access.platforms.weixin`。登录
+  响应没给用户 ID 时，新建的配置文件写 `default_deny: true`（先发一条消息拿到自己的
+  ID 再加进去）；已有的配置文件里不写 `default_deny`，免得把其他平台关在外面。已有的
+  `im_access.platforms.weixin` 条目不会被改动。
 - 平台一旦有条目，名单外的人和没有用户 ID 的消息都会被拒绝，包括飞书卡片上的
   AskUserQuestion 回答。被拒的消息不会触发任何命令，也不会进 CLI。飞书的语音和
   图片、Discord 的图片附件在下载前就判定：名单外的人发来的语音不下载、不转写（不产生
