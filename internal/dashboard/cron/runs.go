@@ -139,7 +139,7 @@ func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "run not found", http.StatusNotFound)
 		return
 	}
-	// Cross-ownership check: runStore.Get keys on the disk path, but a future
+	// Cross-ownership check: runstore.Store.Get keys on the disk path, but a future
 	// refactor that loosens the key must not expose another job's run here.
 	if run.JobID != jobID {
 		slog.Warn("cron run detail: job_id mismatch", "url_job_id", jobID, "run_job_id", run.JobID, "run_id", runID)

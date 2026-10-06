@@ -66,7 +66,7 @@ func loadJobs(path string) (map[string]*Job, error) {
 			continue
 		}
 		// A non-conformant ID can only come from a hand-edited or attacker-written
-		// file; runStore.Append would reject it at runtime, but it would otherwise sit
+		// file; the run store's Append would reject it at runtime, but it would otherwise sit
 		// in s.tbl.jobs forever and round-trip to disk on every persist.
 		if !IsValidID(j.ID) {
 			slog.Warn("cron store: dropping job with invalid ID",

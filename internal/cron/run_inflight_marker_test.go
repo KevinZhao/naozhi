@@ -14,8 +14,8 @@ func newSchedulerWithStore(t *testing.T) (*Scheduler, string) {
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: storePath}, SchedulerDeps{Router: &fakeRouter{}})
-	if s.runStore == nil || !s.runStore.layout.Enabled() {
-		t.Fatal("runStore should be enabled when StorePath is set")
+	if !s.runs.Enabled() {
+		t.Fatal("run store should be enabled when StorePath is set")
 	}
 	return s, storePath
 }

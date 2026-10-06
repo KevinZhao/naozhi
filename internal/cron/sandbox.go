@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/costledger"
+	"github.com/naozhi/naozhi/internal/cron/runstore"
 	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 )
 
@@ -76,33 +76,9 @@ type SandboxOutcome struct {
 	Meta SandboxRunMeta
 }
 
-// SandboxRunMeta is the cloud-execution receipt for one sandbox run. cron
-// re-declares it so the scheduler stays independent of the AWS SDK; the wireup
-// adapter maps agentcore.RunResult → this struct. Every field omitempty so a
-// partial receipt persists only what it knows. NO secrets, NO AWS-internal IDs.
-type SandboxRunMeta struct {
-	RuntimeARN   string `json:"runtime_arn,omitempty"`
-	ImageVersion string `json:"image_version,omitempty"`
-	// ExitStatus has NO omitempty: exit 0 is the meaningful "success" value and a
-	// missing key would be indistinguishable from "exit unknown". The enclosing
-	// *SandboxRunMeta is itself omitempty, so local runs carry no exit_status.
-	ExitStatus      int     `json:"exit_status"`
-	CostUSD         float64 `json:"cost_usd,omitempty"`
-	DurationMS      int64   `json:"duration_ms,omitempty"`
-	MemoryPeakBytes int64   `json:"memory_peak_bytes,omitempty"`
-	// Models / Basis are the CLI result's per-model drill-down and worst
-	// price basis, carried into the ledger receipt.
-	Models []costledger.ModelDelta `json:"models,omitempty"`
-	Basis  costledger.Basis        `json:"basis,omitempty"`
-}
-
-// isZero reports whether the receipt carries no information (every field
-// at its zero value) — used to decide whether to attach it to the run
-// record at all, so non-sandbox runs never grow a `sandbox_meta` key.
-func (m SandboxRunMeta) isZero() bool {
-	return m.RuntimeARN == "" && m.ImageVersion == "" && m.ExitStatus == 0 && m.CostUSD == 0 &&
-		m.DurationMS == 0 && m.MemoryPeakBytes == 0 && len(m.Models) == 0 && m.Basis == ""
-}
+// SandboxRunMeta is the cloud-execution receipt for one sandbox run; it is
+// persisted inside the run record, so it lives with the record in runstore.
+type SandboxRunMeta = runstore.SandboxRunMeta
 
 // SandboxRunner executes run-once jobs at the sandbox placement. The
 // production implementation (wireup) wraps agentcore.Client; nil deps route
@@ -310,7 +286,7 @@ func (s *Scheduler) enqueueSandboxTransportAttention(a sandboxExecArgs, runtimeS
 // else nil — so a run that produced no receipt (preflight failure,
 // unavailable executor) never grows a sandbox_meta key in its record.
 func sandboxMetaPtr(meta SandboxRunMeta) *SandboxRunMeta {
-	if meta.isZero() {
+	if meta.IsZero() {
 		return nil
 	}
 	m := meta

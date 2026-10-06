@@ -10,6 +10,7 @@ import (
 
 	robfigcron "github.com/robfig/cron/v3"
 
+	"github.com/naozhi/naozhi/internal/cron/runstore"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -430,24 +431,11 @@ func generateRunID() (string, error) { return generateHexID() }
 func generateID() (string, error) { return generateHexID() }
 
 // IsValidID reports whether s is a valid cron / cron-run identifier: a
-// non-empty lowercase hex string of at most 64 bytes. Job and run IDs are
-// 16 hex chars today; the 64-byte bound is reserved for a schema bump.
-// Uppercase hex, path characters and temp/backup suffixes are all rejected,
-// so store entry points (parse / list / append / detail handler) can filter
-// stray files under runs/<jobID>/ and HTTP handlers can reject bad IDs
-// before any disk IO. Lives in job.go as the ID-schema home (#990).
-func IsValidID(s string) bool {
-	if len(s) == 0 || len(s) > 64 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-			return false
-		}
-	}
-	return true
-}
+// non-empty lowercase hex string of at most 64 bytes. Job and run IDs are 16
+// hex chars today; the 64-byte bound is reserved for a schema bump. HTTP
+// handlers use it to reject bad IDs before any disk IO. The run store owns
+// the check because IDs become its path components.
+func IsValidID(s string) bool { return runstore.ValidID(s) }
 
 // MaxCronTitleLen 是 Job.Title 的字符上限（UTF-8 rune 计）。256 覆盖绝大多数
 // 人类可读名称，且与 dashboard 的 escAttr 线长相容。导出以便 server 包
