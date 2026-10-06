@@ -163,8 +163,9 @@ test('the modules type their frame handlers and session fetches', () => {
 
 // wireReach type-checks dir and returns what would let a frame field go
 // unchecked: a file a wire.d.ts type reaches without the pragma (tsc reports
-// nothing there), and a WS frame handed to an untyped parameter, as an
-// argument or as the frame of a handler passed by name (its reads are `any`).
+// nothing there), and a WS frame (or a spread copy of one) handed to an
+// untyped parameter, as an argument or as the frame of a handler passed by
+// name (its reads are `any`).
 // typed counts the wire-typed identifiers in opted-in files.
 function wireReach(dir) {
   const ts = createRequire(path.join(ROOT, 'test', 'e2e', 'package.json'))('typescript');
@@ -179,7 +180,12 @@ function wireReach(dir) {
     if (t.isUnionOrIntersection()) return t.types.map((x) => wireName(x, frame, seen)).find(Boolean) || null;
     const sym = t.aliasSymbol || t.getSymbol();
     const ok = sym && sym.declarations?.some((d) => d.getSourceFile().fileName === wire) && (!frame || sym.name.startsWith('WsFrame_'));
-    return ok ? sym.name : null;
+    if (ok) return sym.name;
+    if (!frame) return null;
+    // A spread copy is an anonymous type whose fields keep their frame declarations.
+    const owner = t.getProperties().flatMap((p) => p.declarations ?? [])
+      .map((d) => d.parent).find((o) => o && o.getSourceFile().fileName === wire && ts.isInterfaceDeclaration(o) && o.name.text.startsWith('WsFrame_'));
+    return owner ? owner.name.text : null;
   };
   const isAny = (t) => (t.flags & ts.TypeFlags.Any) !== 0;
   const declaredHere = (sym) => sym.declarations?.some((d) => ours(d.getSourceFile().fileName));
@@ -227,7 +233,7 @@ test('every frame read is typed: wire types reach only opted-in files, and no fr
   assert.ok(typed > 0, 'no wire-typed identifier in an opted-in file: the reach check has gone blind');
 });
 
-test('wireReach catches an untyped forward, a handler passed by name and an unchecked consumer', () => {
+test('wireReach catches an untyped forward, a spread copy, a handler passed by name and an unchecked consumer', () => {
   const dir = staticCopy('nz-ts-reach-');
   try {
     const av = path.join(dir, 'agent_view.js');
@@ -240,10 +246,13 @@ test('wireReach catches an untyped forward, a handler passed by name and an unch
       'function onPong(m) { return m.nope; }\nwsm.on(NZ_CONTRACT.WS.pong, onPong);\n');
     fs.writeFileSync(path.join(dir, 'probe_unchecked.js'), head +
       'wsm.on(NZ_CONTRACT.WS.pong, (msg) => msg.nope);\n');
+    fs.writeFileSync(path.join(dir, 'probe_spread.js'), PRAGMA + head +
+      'function onRun(m) { return m.nope; }\nwsm.on(NZ_CONTRACT.WS.run_started, (msg) => onRun({ ...msg, job_id: msg.owner_id }));\n');
     const { problems } = wireReach(dir);
     const want = [
       /^agent_view\.js:\d+: a WsFrame_agent_event reaches untyped parameter msg$/,
       /^probe_named\.js:5: a WsFrame_pong reaches untyped parameter m$/,
+      /^probe_spread\.js:5: a WsFrame_run_started reaches untyped parameter m$/,
       /^probe_unchecked\.js:3: msg has a wire\.d\.ts type but probe_unchecked\.js has no \/\/ @ts-check$/,
     ];
     for (const re of want) assert.ok(problems.some((p) => re.test(p)), `${re} not in:\n${problems.join('\n')}`);
