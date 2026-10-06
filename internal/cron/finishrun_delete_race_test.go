@@ -12,12 +12,12 @@ import (
 // TestFinishRun_DeleteRaceNoOrphanRunsDir pins #2058: finishRun's terminal
 // write is two-step and non-atomic. recordTerminalResult confirms the job
 // exists, bumps RunCounters, persists cron_jobs.json, then RELEASES s.tbl.mu and
-// returns jobPersistOK=true. appendRun then writes the physically-separate
+// returns jobPersistOK=true. The run-record append then writes the physically-separate
 // runs/<jobID>/ store, which never takes s.tbl.mu.
 //
 // A DeleteJobByID landing in that window drops the job from s.tbl.jobs AND runs
-// runStore.DeleteJob → RemoveAll(runs/<jobID>). Without the s.tbl.jobs re-check
-// added before appendRun (#2058), the stale snapshot's appendRun →
+// Store.DeleteJob → RemoveAll(runs/<jobID>). Without the s.tbl.jobs re-check
+// added before the append (#2058), the stale snapshot's append →
 // ensureJobDir would MkdirAll the directory back, resurrecting an orphaned
 // runs/<jobID>/ subtree for a job that no longer exists in cron_jobs.json (a
 // bounded disk leak that retention trimming never reclaims).

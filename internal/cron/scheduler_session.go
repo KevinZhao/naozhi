@@ -34,7 +34,7 @@ const jobIDsScratchCapDrop = 4 * maxJobsHardCap // 2000 string slots
 // by cron jobs known to this Scheduler. The dashboard history panel uses it as
 // a blacklist so cron-spawned JSONLs stay out of the catch-all "recent
 // sessions" list. Sources: Job.LastSessionID for every job, in-flight runs, and
-// the last knownSessionIDsRecentCap runs per job from runStore.
+// the last knownSessionIDsRecentCap runs per job from the run store.
 //
 // The returned map is READ-ONLY and shared: callers MUST NOT mutate or persist
 // it. The set is only ever replaced wholesale or dropped by
@@ -79,10 +79,10 @@ func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
 
 	// Persisted history: RecentSessionIDs reads SessionID strings straight off
 	// the cache ring instead of value-copying full []CronRunSummary rows
-	// (~4 KB each). RunStore is nil only in tests.
-	if s.runStoreEnabled() {
+	// (~4 KB each). The store is disabled only in tests.
+	if s.runs.Enabled() {
 		for _, jobID := range jobIDs {
-			for _, sid := range s.recentSessionIDs(jobID, knownSessionIDsRecentCap) {
+			for _, sid := range s.runs.RecentSessionIDs(jobID, knownSessionIDsRecentCap) {
 				out[sid] = struct{}{}
 			}
 		}
@@ -102,7 +102,7 @@ func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
 
 // invalidateKnownSessionsCache clears the TTL snapshot so the next
 // KnownSessionIDs call rebuilds. Called from mutator paths that can change
-// the set: LastSessionID writes and runStore.Append. Cheap, so callers can
+// the set: LastSessionID writes and run-record appends. Cheap, so callers can
 // invoke unconditionally.
 func (s *Scheduler) invalidateKnownSessionsCache() {
 	if s == nil {

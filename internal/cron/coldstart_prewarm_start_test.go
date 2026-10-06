@@ -8,7 +8,7 @@ import (
 
 // TestScheduler_Start_PrewarmsRecentCacheOnRestart pins R250-PERF-9 (#1112)
 // at the Scheduler.Start integration level (the unit test
-// TestRunStore_TrimAll_PrewarmsRecentCache exercises trimAllCtx in
+// TestRunStore_TrimAll_PrewarmsRecentCache exercises the run store's TrimAll in
 // isolation; this one proves the cold-start GC goroutine Start() spawns
 // actually drives the pre-warm on a process restart).
 //
@@ -39,7 +39,7 @@ func TestScheduler_Start_PrewarmsRecentCacheOnRestart(t *testing.T) {
 		t.Fatalf("s1 AddJob: %v", err)
 	}
 	jobID := j.ID
-	s1.runStore.Append(makeRun(jobID, time.Now().Add(-30*time.Minute)))
+	s1.runs.Append(makeRun(jobID, time.Now().Add(-30*time.Minute)))
 	s1.gcWG.Wait() // let s1's own cold-start GC settle before Stop
 	s1.Stop()
 
@@ -61,15 +61,10 @@ func TestScheduler_Start_PrewarmsRecentCacheOnRestart(t *testing.T) {
 	// (which would itself lazily warm and mask a regression).
 	s2.gcWG.Wait()
 
-	v, ok := s2.runStore.recentCache.Load(jobID)
+	count, warm, ok := s2.runs.CacheStateForTest(jobID)
 	if !ok {
 		t.Fatal("restart cold-start GC must have pre-warmed (created) the cache entry (#1112)")
 	}
-	entry := v.(*recentCacheEntry)
-	entry.mu.Lock()
-	warm := entry.warm
-	count := entry.count
-	entry.mu.Unlock()
 	if !warm {
 		t.Fatal("restart cold-start GC must leave the recentCache entry warm (#1112)")
 	}

@@ -23,7 +23,7 @@ import (
 //
 //	recordTerminalResult (Job fields: LastRunAt, counters) — correct to skip:
 //	    a cancel must not move the job's last-run timestamp
-//	appendRun (runs/<jobID>/ history)                      — wrong to skip:
+//	run-record append (runs/<jobID>/ history)              — wrong to skip:
 //	    the run DID execute, sometimes for minutes
 //
 // And a hard kill never reaches finishRun at all, so no amount of care there
