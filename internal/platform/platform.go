@@ -46,6 +46,10 @@ const (
 	FileRejectTooLarge       FileReject = "too_large"
 	FileRejectUnsupported    FileReject = "unsupported"
 	FileRejectDownloadFailed FileReject = "download_failed"
+	// FileRejectTooMany and FileRejectTotalTooLarge mean the adapter stopped
+	// downloading at the per-message count or aggregate byte cap.
+	FileRejectTooMany       FileReject = "too_many"
+	FileRejectTotalTooLarge FileReject = "total_too_large"
 )
 
 // File is a non-image attachment downloaded by a platform. Data is unset when
