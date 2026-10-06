@@ -16,6 +16,20 @@ import (
 // MessageHandler is the callback invoked when a platform receives a message.
 type MessageHandler func(ctx context.Context, msg IncomingMessage)
 
+// AdmitFunc is a read-only pre-check of the dispatcher's sender gates for an
+// adapter about to spend on a message (media download, transcription). false
+// means drop msg; true promises nothing, because the MessageHandler re-checks
+// and stays authoritative.
+type AdmitFunc func(ctx context.Context, msg IncomingMessage) bool
+
+// Admitter is an optional capability for adapters that consult an AdmitFunc
+// before costly inbound work. SetAdmission is called once, before
+// RegisterRoutes and Start. It is plumbing, not an operator-facing feature,
+// so Capabilities does not report it.
+type Admitter interface {
+	SetAdmission(AdmitFunc)
+}
+
 // Image represents an image attachment downloaded by a platform or to be sent.
 type Image struct {
 	Data     []byte
