@@ -147,6 +147,8 @@ const PLACEHOLDERS = [
   '[y](https://e.com/`a" onclick="x`)',
   '[y](https://e.com/$x+1$)',
   '[y](https://e.com/\\(a+1\\))',
+  '[y](https://e.com/(`a"b`))',
+  '[y](https://e.com/($x+1$))',
   '[y](https://e.com/a "t`c`")',
   '[y](https://e.com/a "t$x+1$")',
   'https://e.com/`a"b`',
@@ -227,6 +229,8 @@ test('code or math inside a link destination or title renders outside the attrib
     ['[y](https://e.com/`a`)', '<code class="md-code">a</code>'],
     ['[y](https://e.com/$x+1$)', 'class="katex-pending">x+1</span>'],
     ['[y](https://e.com/\\(a+1\\))', 'class="katex-pending">a+1</span>'],
+    ['[y](https://e.com/(`a"b`))', '<code class="md-code">a"b</code>'],
+    ['[y](https://e.com/($x+1$))', 'class="katex-pending">x+1</span>'],
     ['[y](https://e.com/a "t`c`")', '<code class="md-code">c</code>'],
     ['https://e.com/`a"b`', '<code class="md-code">a"b</code>'],
   ];
