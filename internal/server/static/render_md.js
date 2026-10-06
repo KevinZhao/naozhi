@@ -535,21 +535,17 @@ function inlineMd(s) {
       return '\x00CODE' + idx + '\x00';
     });
   }
-  // Inline math extracted before HTML escaping, via \x00 delimiters.
+  // Inline math extracted before HTML escaping, via \x00 delimiters. Math
+  // wrapping a code placeholder stays text: KaTeX copies its source into an
+  // error span's title, where the code restore would land inside it.
   const mathTokens = [];
   if (s.indexOf('$') !== -1 || s.indexOf('\\(') !== -1) {
+    const stash = (match, tex) => (tex.indexOf('\x00') !== -1 ? match
+      : '\x00KTX' + (mathTokens.push(renderKatex(tex, false)) - 1) + '\x00');
     // `$...$`: non-alphanumeric outside + isMathInline on the inside.
-    s = s.replace(/(?<![A-Za-z0-9])\$([^\s\$][^\$\n]*?[^\s\$]|[^\s\$])\$(?![A-Za-z0-9])/g, function(match, tex) {
-      if (!isMathInline(tex)) return match;
-      const idx = mathTokens.length;
-      mathTokens.push(renderKatex(tex, false));
-      return '\x00KTX' + idx + '\x00';
-    });
-    s = s.replace(/\\\((.+?)\\\)/g, function(_, tex) {
-      const idx = mathTokens.length;
-      mathTokens.push(renderKatex(tex, false));
-      return '\x00KTX' + idx + '\x00';
-    });
+    s = s.replace(/(?<![A-Za-z0-9])\$([^\s\$][^\$\n]*?[^\s\$]|[^\s\$])\$(?![A-Za-z0-9])/g,
+      (match, tex) => (isMathInline(tex) ? stash(match, tex) : match));
+    s = s.replace(/\\\((.+?)\\\)/g, stash);
   }
   s = esc(s);
   // Wiki-links run before `[link](url)` so the grammars cannot collide, and

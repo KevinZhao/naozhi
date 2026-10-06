@@ -5,8 +5,8 @@
 // seeded fuzz loop through every entry point and check the output against a
 // tag and attribute allowlist: an author-supplied tag, an on* attribute, a
 // placeholder restored into an attribute value or a leaked \x00 all fail it.
-// KaTeX and mermaid are never loaded here, so math and diagrams stay in their
-// pending shapes, which are what the renderer itself emits.
+// Mermaid is never loaded and KaTeX only as a stub in the last test, so math
+// and diagrams otherwise stay in the pending shapes the renderer emits.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -284,5 +284,39 @@ test('seeded fuzz over markdown metacharacters, placeholders and payloads', () =
     for (let k = 0; k < len; k++) parts.push(FRAGMENTS[Math.floor(next() * FRAGMENTS.length)]);
     const input = parts.join('');
     for (const html of renderAll(input)) assertSafe(html, input);
+  }
+});
+
+// A fresh module instance (the query string defeats the ESM cache) whose
+// KaTeX onload has fired, so renderKatex calls renderToString. The stub
+// mirrors katex-error, which copies the TeX source into a title attribute.
+test('inline math wrapping a code span stays text once KaTeX is loaded', async () => {
+  const realCreate = document.createElement;
+  let script;
+  document.createElement = () => (script = { setAttribute() {} });
+  const m = await import('../internal/server/static/render_md.js?katex-ready');
+  m.loadKatex();
+  document.createElement = realCreate;
+  const escTex = t => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  window.katex = {
+    renderToString: tex => '<span class="katex-error" title="ParseError: ' + escTex(tex) + '">' + escTex(tex) + '</span>',
+    render() {},
+  };
+  try {
+    script.onload();
+    assert.ok(m.renderMd('$x+1$').includes('<span class="katex-error" title="ParseError: x+1">'), 'stub is live');
+    assert.equal(m.renderMd('$x_`a``b`$ q'), '$x_<code class="md-code">a</code><code class="md-code">b</code>$ q<br>');
+    assert.equal(m.inlineMd('\\(a `b` c\\)'), '\\(a <code class="md-code">b</code> c\\)');
+    const inputs = ['p $a+`b`$ q', '| $a+`b`$ | c |\n|---|---|\n| d | e |', '- $`x`$', '**$a `b` c$**'];
+    for (const p of [...PAYLOADS, ...LINKS, ...PLACEHOLDERS]) {
+      inputs.push('$' + p + '$', '\\(' + p + '\\)', 'x $a `' + p + '` b$ y', 'x \\(a `' + p + '` b\\) y');
+    }
+    for (const input of inputs) {
+      for (const html of [m.renderMd(input), m.renderRich(input), m.renderRich(input, { mode: 'tex' })]) {
+        assertSafe(html, input);
+      }
+    }
+  } finally {
+    delete window.katex;
   }
 });

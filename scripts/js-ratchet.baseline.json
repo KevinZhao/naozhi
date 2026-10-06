@@ -348,8 +348,8 @@
     "lateBindings": 0
   },
   "render_md.js": {
-    "lines": 1029,
-    "maxFnLines": 93,
+    "lines": 1025,
+    "maxFnLines": 89,
     "maxIifeLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 6,
