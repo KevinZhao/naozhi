@@ -22,14 +22,12 @@ import (
 // that never disappears (so waitSocketGoneForKey returns false), then asserts
 // the flag is NOT present afterwards.
 func TestFinishRemoveCleanup_DoesNotReinsertShimStuck(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow: skipped in -short")
-	}
 	// Point the shim socket dir at a temp dir we control, then plant a file at
 	// the computed socket path so WaitSocketGone (a pure os.Stat poll) keeps
-	// finding it and times out after the 2s wait.
+	// finding it and times out after the shortened wait.
 	runDir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", runDir)
+	shortenShimGoneWait(t, 50*time.Millisecond)
 
 	const key = "dashboard:direct:one-shot:general"
 	sockPath := shim.SocketPath(shim.KeyHash(key))
@@ -55,7 +53,7 @@ func TestFinishRemoveCleanup_DoesNotReinsertShimStuck(t *testing.T) {
 	}
 
 	// Synchronous Remove runs finishRemoveCleanup inline, including the full
-	// 2s socket-gone timeout, so the assertion below is race-free.
+	// socket-gone timeout, so the assertion below is race-free.
 	if !r.Remove(key) {
 		t.Fatal("Remove returned false for present key")
 	}

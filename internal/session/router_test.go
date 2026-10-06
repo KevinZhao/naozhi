@@ -763,7 +763,7 @@ func TestRouter_SetWorkspace_RejectsEmptyChatKey(t *testing.T) {
 // would block the caller for 2s for every test that never started a shim.
 func TestWaitSocketGoneForKey_EmptyKey(t *testing.T) {
 	start := time.Now()
-	waitSocketGoneForKey("", 2*time.Second)
+	waitSocketGoneForKey("")
 	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
 		t.Errorf("waitSocketGoneForKey('') took %v; want ~0", elapsed)
 	}
@@ -774,7 +774,7 @@ func TestWaitSocketGoneForKey_EmptyKey(t *testing.T) {
 // helper should return in a single stat().
 func TestWaitSocketGoneForKey_NoSocketReturnsFast(t *testing.T) {
 	start := time.Now()
-	waitSocketGoneForKey("test:fresh:key-that-never-spawned", 2*time.Second)
+	waitSocketGoneForKey("test:fresh:key-that-never-spawned")
 	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
 		t.Errorf("waitSocketGoneForKey(missing-socket) took %v; want ~0", elapsed)
 	}
