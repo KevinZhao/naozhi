@@ -271,6 +271,7 @@ func validateConfig(cfg *Config) error {
 		validateProjects,
 		validateIMAccess,
 		validateIMRateLimit,
+		validateCostBudget,
 	} {
 		if err := check(cfg); err != nil {
 			return err
