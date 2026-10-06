@@ -65,6 +65,7 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	s.mountRoutes(hs.sessionH.Routes())
 	s.mountRoutes(hs.costH.Routes())
 	s.mountRoutes(hs.agentEventsH.Routes())
+	s.mountRoutes(hs.workflowsH.Routes())
 	s.mountRoutes(hs.sendH.Routes())
 	s.mountRoutes(hs.discoveryH.Routes())
 	s.mountRoutes(hs.projectH.Routes())

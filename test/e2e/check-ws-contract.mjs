@@ -117,7 +117,10 @@ for (const field of Object.keys(FRONTEND_FIELDS)) {
 
 // ── Nested fields (#2909): see scripts/ws-contract-nested.mjs. Typed
 // parameters resolve against the WS defs and the REST response schemas' defs.
-const REST_SCHEMAS = [path.join(ROOT, 'internal', 'dashboard', 'session', 'testdata', 'rest.schema.json')];
+const REST_SCHEMAS = [
+  path.join(ROOT, 'internal', 'dashboard', 'session', 'testdata', 'rest.schema.json'),
+  path.join(ROOT, 'internal', 'dashboard', 'ext', 'workflows', 'testdata', 'rest.schema.json'),
+];
 const defs = { ...(schema.defs || {}) };
 for (const p of REST_SCHEMAS) Object.assign(defs, JSON.parse(fs.readFileSync(p, 'utf8')).defs);
 const typedSchema = { ...schema, defs };
@@ -140,6 +143,10 @@ for (const f of fs.readdirSync(staticDir)) {
 }
 if (!defs['clievent.EventEntry']) {
   console.error('check-ws-contract: the schema has no defs for clievent.EventEntry — regenerate it (go generate ./internal/wsproto)');
+  failures++;
+}
+if (!defs['workflows.WorkflowResponse']) {
+  console.error('check-ws-contract: no REST schema defines workflows.WorkflowResponse — list internal/dashboard/ext/workflows/testdata/rest.schema.json in REST_SCHEMAS');
   failures++;
 }
 for (const [def, fields] of Object.entries(FRONTEND_STRUCT_FIELDS)) {

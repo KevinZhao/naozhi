@@ -17,6 +17,7 @@ let NZ_CONTRACT;
 // checked against the WS schema's EventEntry def (the wire view) before it
 // leaves, so a spec's fixture cannot carry a field or a type no server has.
 const WS_DEFS = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'internal', 'wsproto', 'wsproto.schema.json'), 'utf8')).defs;
+const WORKFLOW_SCHEMA = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'internal', 'dashboard', 'ext', 'workflows', 'testdata', 'rest.schema.json'), 'utf8'));
 let schemaViolations, EVENT_ENTRIES;
 const contractReady = Promise.all([
   import(require('url').pathToFileURL(path.join(STATIC_DIR, 'contract.js')).href)
@@ -46,6 +47,41 @@ function sendEntries(res, route, fixture, page, headers = { 'Content-Type': 'app
 // literal against the runtime header, so edit both together.
 const MOCK_DASHBOARD_CSP =
   "default-src 'self'; script-src 'self' 'sha256-Dc5Mfm9TcKn7OwTLyG3/T2KjnRh7zV1Xc4ct4adm4/g='; connect-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font";
+
+/**
+ * workflowReply answers GET /api/sessions/workflow for the fixture of one
+ * task, as the Go handler does (ext/workflows): rows=none → no rows,
+ * since=V&epoch=E → the rows with rev > V when E is the fixture's epoch and
+ * V ≤ its version, else all of them; since with rows=none or a lone epoch
+ * is a 400. The fixture is the response minus rows_mode and server_now; its
+ * workflow.agents holds every row. The reply is checked against the
+ * backend's REST schema, strictly, so a fixture cannot carry a field or a
+ * mode no server has. Returns {status, body}.
+ */
+function workflowReply(fx, params) {
+  const has = (k) => params.has(k);
+  const since = has('since') ? params.get('since') : null;
+  const epoch = has('epoch') ? params.get('epoch') : null;
+  if ((has('rows') && params.get('rows') !== 'none') || has('since') !== has('epoch')
+    || (has('rows') && has('since')) || (since !== null && !/^\d{1,18}$/.test(since))
+    || (epoch !== null && !/^[0-9a-f]{16}$/.test(epoch))) {
+    return { status: 400, body: { error: 'invalid rows, since or epoch parameter' } };
+  }
+  const all = fx.workflow.agents || [];
+  let rowsMode = 'full';
+  let rows = all;
+  if (has('rows')) {
+    rowsMode = 'none';
+    rows = [];
+  } else if (since !== null && epoch === fx.epoch && Number(since) <= fx.version) {
+    rowsMode = 'delta';
+    rows = all.filter((a) => a.rev > Number(since));
+  }
+  const body = { ...fx, server_now: Date.now(), rows_mode: rowsMode, workflow: { ...fx.workflow, agents: rows } };
+  const bad = schemaViolations(body, WORKFLOW_SCHEMA.responses.sessions_workflow, WORKFLOW_SCHEMA.defs, 'sessions_workflow', { strict: true });
+  if (bad.length) return { status: 500, body: { error: `mock fixture is not a workflow response the backend sends: ${bad.join(', ')}` } };
+  return { status: 200, body };
+}
 
 function defaultSessions() {
   return {
@@ -245,6 +281,9 @@ function defaultGitStates() {
  *   page (its has-more covers that node's memory ring).
  * @param {number} [overrides.eventsBeforeFailCount] - The first N `before=` requests answer `[]` with
  *   has-more "1": the server's fail-open reply to a degraded disk read or a cancelled request.
+ * @param {object} [overrides.workflows] - task_id → GET /api/sessions/workflow fixture ({epoch, version,
+ *   workflow: WireView with every row in agents, result?, logs?, logs_truncated?, result_unavailable?});
+ *   the route applies rows=none / since=&epoch= to it and 404s task ids not listed.
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
  *   (timezone / timezone_abbr / timezone_label ...). recent_runs_cap defaults to 5 like the backend.
@@ -385,6 +424,7 @@ function startMockServer(overrides = {}) {
   // every poll page — the behaviour dedupAgentPollBatch exists to absorb. The
   // mock reproduces that inclusivity deliberately; a `>` here would hide the bug.
   const agentEvents = overrides.agentEvents || {};
+  const workflows = overrides.workflows || {};
   // compactPromptLimit: when set, GET /api/cron?compact=1 clips each prompt to
   // this many characters and marks the row prompt_truncated, like the real
   // R236-SEC-08 (#494) wire shape. Without it the poll returns full prompts and
@@ -967,6 +1007,21 @@ function startMockServer(overrides = {}) {
       // Inclusive, like the server: entries AT the watermark come back again.
       const page = all.filter(e => (e?.time || 0) >= after).slice(0, limit);
       sendEntries(res, 'sessions_agent_events', all, page);
+      return;
+    }
+
+    // /api/sessions/workflow?key=&node=&task_id=[&rows=none | &since=&epoch=]
+    if (pathname === NZ_CONTRACT.API.sessions_workflow && req.method === 'GET') {
+      if (!checkAuth()) return;
+      const fx = workflows[url.searchParams.get('task_id') || ''];
+      if (!fx) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('unknown task');
+        return;
+      }
+      const { status, body } = workflowReply(fx, url.searchParams);
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(body));
       return;
     }
 

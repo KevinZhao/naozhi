@@ -11,6 +11,7 @@ import { schemaViolations, unionResponse, EVENT_ENTRIES } from './check-mock-res
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const schema = JSON.parse(fs.readFileSync(path.join(ROOT, 'internal', 'dashboard', 'session', 'testdata', 'rest.schema.json'), 'utf8'));
+const wfSchema = JSON.parse(fs.readFileSync(path.join(ROOT, 'internal', 'dashboard', 'ext', 'workflows', 'testdata', 'rest.schema.json'), 'utf8'));
 const wsDefs = JSON.parse(fs.readFileSync(path.join(ROOT, 'internal', 'wsproto', 'wsproto.schema.json'), 'utf8')).defs;
 const { startMockServer } = createRequire(import.meta.url)(path.join(ROOT, 'test', 'e2e', 'mock-server.js'));
 
@@ -127,4 +128,105 @@ test('unionResponse takes each field from the first variant that declares it', (
   const u = unionResponse(typed, loose);
   assert.equal(u.properties.sessions.items.$ref, 'S');
   assert.ok('nodes' in u.properties);
+});
+
+// The workflow endpoint's fixtures: a running run with three rows and an ended
+// one whose result file was read. Every key the Go types always send is here.
+const EPOCH = '00112233aabbccdd';
+const counts = (n) => ({ total: n, queued: 0, running: 0, done: n, failed: 0, skipped: 0, stopped: 0 });
+const row = (index, rev) => ({ index, label: `agent ${index}`, state: 'done', rev });
+const workflowFixture = (over = {}) => ({
+  epoch: EPOCH,
+  version: 9,
+  workflow: {
+    task_id: 'w1', status: 'running', counts: counts(3), phases: [{ index: 1, title: 'Ask', counts: counts(3) }],
+    agents: [row(1, 3), row(2, 7), row(3, 9)], source: 'stream', version: 9,
+  },
+  ...over,
+});
+const wfURL = (mock, query = '') => `${mock.url}/api/sessions/workflow?key=k&task_id=w1${query}`;
+const wfBody = async (res) => {
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.deepEqual(schemaViolations(body, wfSchema.responses.sessions_workflow, wfSchema.defs, 'sessions_workflow', { strict: true }), []);
+  return body;
+};
+
+test('the mock\'s /api/sessions/workflow serves the three row modes the backend does', () => withMock({ workflows: { w1: workflowFixture() } }, async (mock) => {
+  const full = await wfBody(await fetch(wfURL(mock)));
+  assert.equal(full.rows_mode, 'full');
+  assert.deepEqual(full.workflow.agents.map((a) => a.index), [1, 2, 3]);
+  assert.ok(Math.abs(full.server_now - Date.now()) < 60_000, 'server_now is the mock\'s clock');
+
+  const none = await wfBody(await fetch(wfURL(mock, '&rows=none')));
+  assert.equal(none.rows_mode, 'none');
+  assert.deepEqual(none.workflow.agents, []);
+  assert.equal(none.workflow.task_id, 'w1', 'rows=none keeps the header');
+
+  const delta = await wfBody(await fetch(wfURL(mock, `&since=3&epoch=${EPOCH}`)));
+  assert.equal(delta.rows_mode, 'delta');
+  assert.deepEqual(delta.workflow.agents.map((a) => a.rev), [7, 9]);
+  const caughtUp = await wfBody(await fetch(wfURL(mock, `&since=9&epoch=${EPOCH}`)));
+  assert.deepEqual([caughtUp.rows_mode, caughtUp.workflow.agents], ['delta', []]);
+
+  for (const [what, query] of [['another epoch', `&since=3&epoch=ffffffffffffffff`], ['a version ahead', `&since=10&epoch=${EPOCH}`]]) {
+    const back = await wfBody(await fetch(wfURL(mock, query)));
+    assert.equal(back.rows_mode, 'full', `since with ${what} falls back to full`);
+    assert.equal(back.workflow.agents.length, 3);
+  }
+}));
+
+test('the mock\'s /api/sessions/workflow refuses what the backend refuses', () => withMock({ workflows: { w1: workflowFixture() } }, async (mock) => {
+  for (const query of ['&rows=full', '&rows=none&since=1&epoch=' + EPOCH, '&since=1', '&epoch=' + EPOCH, '&since=x&epoch=' + EPOCH, '&since=1&epoch=zz']) {
+    assert.equal((await fetch(wfURL(mock, query))).status, 400, query);
+  }
+  assert.equal((await fetch(`${mock.url}/api/sessions/workflow?key=k&task_id=w2`)).status, 404);
+}));
+
+test('the mock\'s /api/sessions/workflow carries result, logs and result_unavailable on every row mode', async () => {
+  const ended = workflowFixture({
+    result: { text: '{"answer":"Paris"}', truncated: false }, logs: ['phase 1 done'], logs_truncated: true,
+  });
+  ended.workflow.status = 'completed';
+  await withMock({ workflows: { w1: ended } }, async (mock) => {
+    for (const query of ['', '&rows=none', `&since=3&epoch=${EPOCH}`]) {
+      const body = await wfBody(await fetch(wfURL(mock, query)));
+      assert.equal(body.result.text, '{"answer":"Paris"}', query);
+      assert.deepEqual(body.logs, ['phase 1 done']);
+      assert.equal(body.logs_truncated, true);
+    }
+  });
+  const unavailable = workflowFixture({ result_unavailable: true });
+  unavailable.workflow.status = 'completed';
+  await withMock({ workflows: { w1: unavailable } }, async (mock) => {
+    const res = await fetch(wfURL(mock, '&rows=none'));
+    assert.equal(res.status, 200, 'an unreadable result file is a 200, never a 404');
+    assert.equal((await wfBody(res)).result_unavailable, true);
+  });
+});
+
+test('the mock\'s /api/sessions/workflow refuses a fixture the backend could not send', async () => {
+  const BADS = {
+    'an unknown field': [workflowFixture({ path: '/home/u/.claude/projects/p' }), 'sessions_workflow.path'],
+    'a header field the wire lacks': [workflowFixture({ workflow: { ...workflowFixture().workflow, run_dir: '/x' } }), 'sessions_workflow.workflow.run_dir'],
+    'a row field the wire lacks': [workflowFixture({ workflow: { ...workflowFixture().workflow, agents: [{ ...row(1, 3), jsonl_path: '/x' }] } }), 'sessions_workflow.workflow.agents[0].jsonl_path'],
+    'a row without rev': [workflowFixture({ workflow: { ...workflowFixture().workflow, agents: [{ index: 1, label: 'a', state: 'done' }] } }), 'agents[0].rev is required'],
+    'no epoch': [(() => { const f = workflowFixture(); delete f.epoch; return f; })(), 'sessions_workflow.epoch is required'],
+    'a string version': [workflowFixture({ version: '9' }), 'sessions_workflow.version is not an integer'],
+  };
+  for (const [what, [fx, violation]] of Object.entries(BADS)) {
+    await withMock({ workflows: { w1: fx } }, async (mock) => {
+      const res = await fetch(wfURL(mock));
+      assert.equal(res.status, 500, `served a fixture with ${what}`);
+      assert.ok((await res.json()).error.includes(violation), `the 500 for ${what} does not name ${violation}`);
+    });
+  }
+});
+
+test('the workflow REST schema closes rows_mode over the three modes and defines the response for typed reads', () => {
+  const def = wfSchema.defs['workflows.WorkflowResponse'];
+  assert.ok(def, 'the schema has no workflows.WorkflowResponse def for @type {WorkflowResponse}');
+  assert.deepEqual(def.properties.rows_mode.enum, ['full', 'none', 'delta']);
+  assert.deepEqual(wfSchema.responses.sessions_workflow, def);
+  assert.equal(def.properties.workflow.$ref, 'workflow.WireView');
 });

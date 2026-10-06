@@ -1,0 +1,330 @@
+{
+  "responses": {
+    "sessions_workflow": {
+      "properties": {
+        "epoch": {
+          "type": "string"
+        },
+        "logs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "logs_truncated": {
+          "type": "boolean"
+        },
+        "result": {
+          "type": "object",
+          "$ref": "workflows.WorkflowResult"
+        },
+        "result_unavailable": {
+          "type": "boolean"
+        },
+        "rows_mode": {
+          "type": "string",
+          "enum": [
+            "full",
+            "none",
+            "delta"
+          ]
+        },
+        "server_now": {
+          "type": "integer"
+        },
+        "version": {
+          "type": "integer"
+        },
+        "workflow": {
+          "type": "object",
+          "$ref": "workflow.WireView"
+        }
+      },
+      "required": [
+        "epoch",
+        "rows_mode",
+        "server_now",
+        "version",
+        "workflow"
+      ]
+    }
+  },
+  "defs": {
+    "workflow.Agent": {
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "blocked": {
+          "type": "boolean"
+        },
+        "cached": {
+          "type": "boolean"
+        },
+        "duration_ms": {
+          "type": "integer"
+        },
+        "error": {
+          "type": "string"
+        },
+        "index": {
+          "type": "integer"
+        },
+        "label": {
+          "type": "string"
+        },
+        "last_progress_at": {
+          "type": "integer"
+        },
+        "last_tool": {
+          "type": "string"
+        },
+        "last_tool_summary": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "phase_index": {
+          "type": "integer"
+        },
+        "prev_agent_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "queued_at": {
+          "type": "integer"
+        },
+        "raw_state": {
+          "type": "string"
+        },
+        "rev": {
+          "type": "integer"
+        },
+        "started_at": {
+          "type": "integer"
+        },
+        "state": {
+          "type": "string"
+        },
+        "tokens": {
+          "type": "integer"
+        },
+        "tool_calls": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "index",
+        "label",
+        "rev",
+        "state"
+      ]
+    },
+    "workflow.Counts": {
+      "properties": {
+        "done": {
+          "type": "integer"
+        },
+        "failed": {
+          "type": "integer"
+        },
+        "queued": {
+          "type": "integer"
+        },
+        "running": {
+          "type": "integer"
+        },
+        "skipped": {
+          "type": "integer"
+        },
+        "stopped": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "done",
+        "failed",
+        "queued",
+        "running",
+        "skipped",
+        "stopped",
+        "total"
+      ]
+    },
+    "workflow.Phase": {
+      "properties": {
+        "counts": {
+          "type": "object",
+          "$ref": "workflow.Counts"
+        },
+        "index": {
+          "type": "integer"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "counts",
+        "index",
+        "title"
+      ]
+    },
+    "workflow.WireView": {
+      "properties": {
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "workflow.Agent"
+          }
+        },
+        "agents_capped": {
+          "type": "boolean"
+        },
+        "counts": {
+          "type": "object",
+          "$ref": "workflow.Counts"
+        },
+        "current": {
+          "type": "string"
+        },
+        "degraded": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "duration_ms": {
+          "type": "integer"
+        },
+        "ended_at": {
+          "type": "integer"
+        },
+        "last_observed_at": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "notify_summary": {
+          "type": "string"
+        },
+        "phases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "workflow.Phase"
+          }
+        },
+        "raw_status": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "tokens": {
+          "type": "integer"
+        },
+        "tool_calls": {
+          "type": "integer"
+        },
+        "version": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "agents",
+        "counts",
+        "phases",
+        "source",
+        "status",
+        "task_id",
+        "version"
+      ]
+    },
+    "workflows.WorkflowResponse": {
+      "properties": {
+        "epoch": {
+          "type": "string"
+        },
+        "logs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "logs_truncated": {
+          "type": "boolean"
+        },
+        "result": {
+          "type": "object",
+          "$ref": "workflows.WorkflowResult"
+        },
+        "result_unavailable": {
+          "type": "boolean"
+        },
+        "rows_mode": {
+          "type": "string",
+          "enum": [
+            "full",
+            "none",
+            "delta"
+          ]
+        },
+        "server_now": {
+          "type": "integer"
+        },
+        "version": {
+          "type": "integer"
+        },
+        "workflow": {
+          "type": "object",
+          "$ref": "workflow.WireView"
+        }
+      },
+      "required": [
+        "epoch",
+        "rows_mode",
+        "server_now",
+        "version",
+        "workflow"
+      ]
+    },
+    "workflows.WorkflowResult": {
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "truncated"
+      ]
+    }
+  }
+}

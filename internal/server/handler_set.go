@@ -44,6 +44,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/system"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/transcribe"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/uisettings"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/workflows"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
 	"github.com/naozhi/naozhi/internal/dispatch"
@@ -73,6 +74,7 @@ type handlerSet struct {
 	memoryH         *memory.Handler
 	ccAssetsH       *extccassets.Handler
 	agentEventsH    *agentevents.Handler
+	workflowsH      *workflows.Handler
 	uiSettingsH     *uisettings.Handler
 	systemH         *system.Handlers
 	plannerH        *planner.Handlers

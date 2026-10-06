@@ -67,7 +67,7 @@ cmd/naozhi/main.go
   -> turn         Orchestrator（Submit/Reset/ShouldNotify/Retire：owner loop、按 Sink 去重投递、detached 轮、panic 恢复；端口 Origin/Delivery/Sender/Admission）+ 它独占的 per-session 消息队列（非导出，`turn.New` 按 QueueOptions 构造；Msg/Mode/ParseMode/Coalesce）+ /new /clear /urgent 解析（Parse）；dispatch 和 server 的 dashboard 发送（dash_origin.go 的 wsOrigin/httpOrigin）共用同一个 Orchestrator；server 的 turnSender 实现 Sender；不 import dispatch/server/platform/session
   -> platform     Platform 接口 + feishu/slack/discord/weixin 子包
   -> server       HTTP server、路由注册、WebSocket hub、REST API
-  -> dashboard    dashboard handler 子包群（auth/cron/cronview/discovery/project/session/ext/*；httputil 叶子）
+  -> dashboard    dashboard handler 子包群（auth/cron/cronview/discovery/project/session/ext/*，其中 ext/workflows 是 GET /api/sessions/workflow：经 session.WorkflowBoard 的 Published/Result 取 workflow 行与结果；httputil 叶子）
   -> cron         定时任务调度（robfig/cron）；runstore 子包放运行历史（runs/ 记录、newest-first 缓存、保留期 GC、CronRun 记录类型）与 runinflight/ 在途标记的读写，sandboxstore 子包放 sandbox 的磁盘状态（确认队列/输入快照/事件日志），两者都不 import cron
   -> sysession    内建后台 daemon 框架（system sessions）
   -> project      项目发现、chat 绑定、planner 路由
@@ -254,7 +254,7 @@ Dashboard modules layer base -> leaf -> view -> root. The base (`contract.js`, `
 
 Type checking is per file: a dashboard file whose first line is `// @ts-check` is checked by `tsc -p internal/server/static` (lint-js; `tsconfig.json` keeps `checkJs` off for the rest) against `wire.d.ts`, the generated global types (`EventEntry`, `SessionSnapshot`, `WsFrames`, `RestResponses`, ...), and must have zero errors. `wsm.on` types each handler's `msg` by its frame. `scripts/ts-check.test.mjs` lists the opted-in files; that list only grows. Neither `wire.d.ts` nor `tsconfig.json` is served.
 
-REST API: ~80 method-prefixed routes registered in `internal/server/routes.go` (the authoritative list -- grep `HandleFunc` there rather than trusting any doc enumeration). Families: `/api/sessions/*` (list/send/events/runs/interrupt/resume/bind/label/upload/attachment/git...), `/api/cron/*` (CRUD + pause/resume/trigger/preview + runs history/replay), `/api/projects/*` (config/files/favorite/planner), `/api/discovered/*` (preview/takeover/close), `/api/scratch/*`, `/api/settings`, `/api/auth/*`, `/api/access-profiles`, `/api/cc/assets`, `/api/cli/backends`, `/api/system/*`, `/api/transcribe`, `/api/memory/{slug}`. WebSocket: `/ws` (dashboard), `/ws-node` (reverse-connect nodes). Health: `/health`, `/livez`, `/readyz`.
+REST API: ~80 method-prefixed routes registered in `internal/server/routes.go` (the authoritative list -- grep `HandleFunc` there rather than trusting any doc enumeration). Families: `/api/sessions/*` (list/send/events/runs/workflow/interrupt/resume/bind/label/upload/attachment/git...), `/api/cron/*` (CRUD + pause/resume/trigger/preview + runs history/replay), `/api/projects/*` (config/files/favorite/planner), `/api/discovered/*` (preview/takeover/close), `/api/scratch/*`, `/api/settings`, `/api/auth/*`, `/api/access-profiles`, `/api/cc/assets`, `/api/cli/backends`, `/api/system/*`, `/api/transcribe`, `/api/memory/{slug}`. WebSocket: `/ws` (dashboard), `/ws-node` (reverse-connect nodes). Health: `/health`, `/livez`, `/readyz`.
 
 ### Session Discovery & Takeover
 
