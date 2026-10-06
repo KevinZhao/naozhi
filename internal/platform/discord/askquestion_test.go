@@ -383,13 +383,17 @@ func TestOnInteractionCreate_DispatchesAnswer(t *testing.T) {
 	cases := []struct {
 		name         string
 		header       string
+		label        string
 		guild        bool
 		wantChatType string
 		wantText     string
+		wantContent  string
 	}{
-		{"guild click", "Style", true, "group", "Style: opt B."},
-		{"dm click", "Style", false, "direct", "Style: opt B."},
-		{"no header", "", true, "group", "opt B."},
+		{"guild click", "Style", "opt B", true, "group", "Style: opt B.", "✅ 已回答：Style: opt B."},
+		{"dm click", "Style", "opt B", false, "direct", "Style: opt B.", "✅ 已回答：Style: opt B."},
+		{"no header", "", "opt B", true, "group", "opt B.", "✅ 已回答：opt B."},
+		// The CLI gets the raw label; only the card edit is escaped.
+		{"markdown label", "St*yle", "a_b*c", true, "group", "St*yle: a_b*c.", `✅ 已回答：St\*yle: a\_b\*c.`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -397,6 +401,7 @@ func TestOnInteractionCreate_DispatchesAnswer(t *testing.T) {
 			d, rec, msgs := questionAdapter(t)
 			card := oneQuestion(3)
 			card.Items[0].Header = tc.header
+			card.Items[0].Options[1].Label = tc.label
 			ms, err := buildQuestionMessage(card)
 			if err != nil {
 				t.Fatal(err)
@@ -421,7 +426,7 @@ func TestOnInteractionCreate_DispatchesAnswer(t *testing.T) {
 			if len(calls) != 1 || !strings.HasSuffix(calls[0].path, "/interactions/I1/tok/callback") {
 				t.Fatalf("calls = %+v", calls)
 			}
-			assertCardReplaced(t, calls[0].body, "✅ 已回答："+escapeMarkdown(tc.wantText))
+			assertCardReplaced(t, calls[0].body, tc.wantContent)
 		})
 	}
 }
@@ -569,7 +574,7 @@ func TestGateway_InteractionCreateAnswered(t *testing.T) {
 	}
 	select {
 	case body := <-g.callbacks:
-		assertCardReplaced(t, bytes.TrimSpace(body), "✅ 已回答："+escapeMarkdown("Style: opt B."))
+		assertCardReplaced(t, bytes.TrimSpace(body), "✅ 已回答：Style: opt B.")
 	case <-time.After(connStateTestTimeout):
 		t.Fatal("card was never replaced")
 	}
