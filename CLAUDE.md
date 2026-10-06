@@ -100,6 +100,8 @@ cmd/naozhi/main.go
   -> gitinfo      读取目录的 git branch / worktree 状态
   -> i18n         Locale 解析与消息渲染
   -> metrics      进程级计数器（expvar）
+  -> runtelemetry 跨子系统 run 生命周期事件类型；Tee 把两个 Broadcaster 并列（Hub + webhook）
+  -> webhook      出站 webhook 发送器（每端点一 goroutine + 有界队列、HMAC 签名、退避重试、Deliver 永不阻塞），server 经 webhookBroadcaster 挂到 runtelemetry 上；叶子
   -> promexport   expvar → Prometheus 文本格式（naozhi_* 前缀；_total 为 counter，其余 gauge；Map 按 key 打标签），server 的 GET /metrics 用；叶子
   -> runtelemetry 跨子系统 run 生命周期事件类型
   -> costledger   统一 cost 账本叶子包（按天 JSONL append-only + rollup + 累计差分 + 按模型学习 CLI 单价）

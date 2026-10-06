@@ -54,6 +54,7 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
 	"github.com/naozhi/naozhi/internal/turn"
+	"github.com/naozhi/naozhi/internal/webhook"
 )
 
 // handlerSet carries the dashboard handlers from construction to route
@@ -144,6 +145,7 @@ type wiring struct {
 	routerEvents *routerrelay.Relay
 	// runTelemetry is opts.Relays.RunTelemetry; buildDashboard binds the hub to it.
 	runTelemetry *runtelemetry.Relay
+	webhooks     *webhook.Sender // nil = no outbound webhooks
 	// watchdog holds the no-output / total watchdog-kill counters; the
 	// dispatcher, the session handlers and /health each get pointers into it.
 	watchdog watchdogCounters

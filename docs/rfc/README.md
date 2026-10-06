@@ -70,6 +70,7 @@
 | RFC | 状态 | 说明 |
 |---|---|---|
 | [passthrough-mode.md.v1-deprecated](passthrough-mode.md.v1-deprecated) | Superseded by `passthrough-mode.md` | v1 误判 naozhi 需要节流/合并，基于对 CC CLI 内部队列行为的错误假设 |
+| [outbound-webhooks.md](outbound-webhooks.md) | Phase 1 已实现（#3448 a） | 2026-10-06 | 出站 webhook：`integrations.webhooks` 配置端点，`runtelemetry.Tee` 把 `webhookBroadcaster` 与 dashboard Hub 并列在同一个 Relay 上；`internal/webhook` 叶子按端点独立 goroutine + 256 深队列、HMAC-SHA256 签名、408/429/5xx 退避重试 3 次、`Deliver` 永不阻塞；payload 只含 run 元数据。非目标：session turn 事件（无 Broadcaster 生产者）、动态注册、死信持久化、MCP server（#3448 b） |
 | [passthrough-mode-legacy-removal.md](passthrough-mode-legacy-removal.md) | Draft（未开始） | Passthrough 默认开启 + ACP fallback 并发 gate 的遗留代码移除计划 |
 
 > 状态标注以 RFC 文件内首屏（Status / 状态）为准；若 RFC 未写明状态，本表标 "unknown"。如发现表格与 RFC 本体不一致，请同步修正。
