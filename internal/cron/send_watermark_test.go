@@ -2,12 +2,13 @@ package cron
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cron/runstore"
 )
 
 // watermarkSession is gatedSendSession plus the SendWatermarker capability.
@@ -38,7 +39,7 @@ func (r *watermarkRouter) GetOrCreate(_ context.Context, _ string, _ AgentOpts) 
 
 // runAndReadMarker starts one local run on sess, and returns its marker as
 // read while Send is blocked — the only moment the marker exists.
-func runAndReadMarker(t *testing.T, sess Session, gate *gatedSendSession) (runInflightMarker, *Job) {
+func runAndReadMarker(t *testing.T, sess Session, gate *gatedSendSession) (runstore.InflightMarker, *Job) {
 	t.Helper()
 	s, _ := newSchedulerWithStore(t)
 	j := startBlockedRun(t, s, sess, gate)
@@ -46,7 +47,7 @@ func runAndReadMarker(t *testing.T, sess Session, gate *gatedSendSession) (runIn
 	if len(names) != 1 {
 		t.Fatalf("markers while in flight = %v, want exactly 1", names)
 	}
-	m, ok := s.readRunInflightMarker(filepath.Join(s.runInflightDir(), names[0]))
+	m, ok := s.runMarkers().Read(filepath.Join(s.runMarkers().Dir(), names[0]))
 	if !ok {
 		t.Fatal("marker unreadable while in flight")
 	}
@@ -118,10 +119,10 @@ func TestExecSend_NoWatermarkWhereAdmissionWroteNoMarker(t *testing.T) {
 	t.Parallel()
 	s, _ := newSchedulerWithStore(t)
 	elsewhere := t.TempDir()
-	if err := os.MkdirAll(filepath.Dir(s.runInflightDir()), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.runMarkers().Dir()), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(elsewhere, s.runInflightDir()); err != nil {
+	if err := os.Symlink(elsewhere, s.runMarkers().Dir()); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 	gate := &gatedSendSession{entered: make(chan struct{}), release: make(chan struct{})}
@@ -137,34 +138,6 @@ func TestExecSend_NoWatermarkWhereAdmissionWroteNoMarker(t *testing.T) {
 	}
 }
 
-// TestRunInflightMarker_WatermarkIsAdditive: a marker from an older binary has
-// no adopt_after and still parses, as one with no watermark.
-func TestRunInflightMarker_WatermarkIsAdditive(t *testing.T) {
-	t.Parallel()
-	s, _ := newSchedulerWithStore(t)
-	dir := s.runInflightDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	old := filepath.Join(dir, "old.json")
-	if err := os.WriteFile(old, []byte(`{"job_id":"j1","run_id":"r1","started_at_ms":1700000000000}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	m, ok := s.readRunInflightMarker(old)
-	if !ok || m.SendWatermark != "" {
-		t.Errorf("old marker = (%+v, %v), want parsed with no watermark", m, ok)
-	}
-
-	b, err := json.Marshal(runInflightMarker{JobID: "j1", RunID: "r2", StartedAtMS: 1, SendWatermark: "4242:9"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var back runInflightMarker
-	if err := json.Unmarshal(b, &back); err != nil || back.SendWatermark != "4242:9" {
-		t.Errorf("round trip = (%+v, %v) from %s", back, err, b)
-	}
-}
-
 // TestReconcile_HandsTheMarkersWatermarkToTheAdopter: the adopter decides
 // whether a replayed result is this run's by the watermark, so the reconcile
 // must pass the one the run recorded — and "" for a marker that has none.
@@ -174,7 +147,7 @@ func TestReconcile_HandsTheMarkersWatermarkToTheAdopter(t *testing.T) {
 	s, jobID, _, _ := seedMarkedRun(t, router, 0)
 	other := mustGenerateID()
 	s.putJobForTest(&Job{ID: other, Schedule: "@every 5m", Prompt: "other"})
-	if s.writeRunInflightMarker(runInflightMarker{
+	if s.runMarkers().Write(runstore.InflightMarker{
 		JobID: other, RunID: mustGenerateRunID(), StartedAtMS: time.Now().UnixMilli(), SendWatermark: "4242:9",
 	}, slog.Default()) == "" {
 		t.Fatal("marker write failed")

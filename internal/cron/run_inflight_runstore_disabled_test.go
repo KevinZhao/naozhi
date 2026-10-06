@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cron/runstore"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
@@ -30,7 +31,7 @@ func newSchedulerRunStoreRefused(t *testing.T, storePath string, router SessionR
 	if s.runs.Enabled() {
 		t.Fatal("run store enabled over a symlinked runs/; the fixture does not exercise the disabled mode")
 	}
-	if s.runInflightDir() == "" {
+	if s.runMarkers().Dir() == "" {
 		t.Fatal("runinflight dir unresolved; markers would not be written either")
 	}
 	return s
@@ -49,7 +50,7 @@ func TestReconcileSettlesMarkersWithRunStoreDisabled(t *testing.T) {
 	s.putJobForTest(&Job{ID: jobID, Schedule: "@every 5m", Prompt: "do thing"})
 	goneJob := mustGenerateID()
 	for _, j := range []string{jobID, goneJob} {
-		if path := s.writeRunInflightMarker(runInflightMarker{
+		if path := s.runMarkers().Write(runstore.InflightMarker{
 			JobID: j, RunID: mustGenerateRunID(), Trigger: TriggerScheduled,
 			StartedAtMS: time.Now().Add(-time.Minute).UnixMilli(),
 		}, slog.Default()); path == "" {
@@ -84,7 +85,7 @@ func TestShutdownCancelMarkerAdoptedWithRunStoreDisabled(t *testing.T) {
 	s1.putJobForTest(job)
 	runID := mustGenerateRunID()
 	startedAt := time.Now().Add(-30 * time.Second)
-	if path := s1.writeRunInflightMarker(runInflightMarker{
+	if path := s1.runMarkers().Write(runstore.InflightMarker{
 		JobID: jobID, RunID: runID, Trigger: TriggerScheduled, StartedAtMS: startedAt.UnixMilli(),
 	}, slog.Default()); path == "" {
 		t.Fatal("marker write failed")
