@@ -165,6 +165,7 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	s.mux.HandleFunc("GET /static/cron_format.js", auth(serveStaticJS("cron_format.js")))
 	s.mux.HandleFunc("GET /static/lightbox.js", auth(serveStaticJS("lightbox.js")))
 	s.mux.HandleFunc("GET /static/mem_popover.js", auth(serveStaticJS("mem_popover.js")))
+	s.mux.HandleFunc("GET /static/aside_drawer.js", auth(serveStaticJS("aside_drawer.js")))
 	s.mux.HandleFunc("GET /static/agent_view.js", auth(serveStaticJS("agent_view.js")))
 	s.mux.HandleFunc("GET /static/asset_browser.js", auth(serveStaticJS("asset_browser.js")))
 	s.mux.HandleFunc("GET /static/files_view.js", auth(serveStaticJS("files_view.js")))

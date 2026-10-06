@@ -11,8 +11,20 @@
     "htmlInsert": 3,
     "lateBindings": 8
   },
+  "aside_drawer.js": {
+    "lines": 545,
+    "maxFnLines": 85,
+    "maxIifeLines": 0,
+    "fnOver100": 0,
+    "topLevelLetVar": 0,
+    "configureDeps": 0,
+    "deadInjections": 0,
+    "innerHTMLAssign": 2,
+    "htmlInsert": 1,
+    "lateBindings": 0
+  },
   "ask_card.js": {
-    "lines": 277,
+    "lines": 275,
     "maxFnLines": 93,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -192,16 +204,16 @@
     "lateBindings": 1
   },
   "dashboard.js": {
-    "lines": 2249,
+    "lines": 1713,
     "maxFnLines": 100,
-    "maxIifeLines": 524,
+    "maxIifeLines": 61,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0,
     "deadInjections": 0,
-    "innerHTMLAssign": 11,
-    "htmlInsert": 2,
-    "lateBindings": 3
+    "innerHTMLAssign": 9,
+    "htmlInsert": 1,
+    "lateBindings": 0
   },
   "discovery.js": {
     "lines": 205,
@@ -504,7 +516,7 @@
     "lateBindings": 0
   },
   "state.js": {
-    "lines": 255,
+    "lines": 248,
     "maxFnLines": 0,
     "maxIifeLines": 0,
     "fnOver100": 0,
