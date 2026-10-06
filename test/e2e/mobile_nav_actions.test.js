@@ -57,6 +57,8 @@ test.describe('mobile_nav actions', () => {
     const del = page.waitForRequest((r) => r.method() === 'DELETE' && new URL(r.url()).pathname === '/api/sessions');
     await page.locator('#session-ctx-menu .ctx-menu-item').filter({ hasText: '删除' }).click();
     expect(JSON.parse((await del).postData() || '{}').key).toBe(MENU_KEY);
+    // The refetch after the DELETE is the one that must not revive the card.
+    await page.waitForResponse((r) => r.request().method() === 'GET' && new URL(r.url()).pathname === '/api/sessions');
     await expect(page.locator(`.session-card[data-key="${MENU_KEY}"]`)).toHaveCount(0);
     await expect(page.locator('#session-ctx-menu')).toHaveCount(0);
     await ctx.close();
