@@ -1,3 +1,4 @@
+// @ts-check
 // self_update.js — the dashboard's self-update chip and its version-skew
 // reload. It owns its poll timer and apply state machine, exposes nothing and
 // self-registers its bootstrap. Like every module dashboard.js imports, it
@@ -82,9 +83,8 @@ async function fetchUpdateStatus() {
     const r = await fetch(NZ_CONTRACT.API.system_update);
     if (!r.ok) return;
     updateState = await r.json();
-    // An apply has landed somewhere terminal — succeeded (nothing left to do),
-    // failed, or installed-but-not-restarted. Either way the server's own state
-    // is now more accurate than our local "in flight" flag.
+    // An apply has landed somewhere terminal (succeeded, failed, or installed
+    // but not restarted): the server's state now outranks our in-flight flag.
     if (updateApplying && (updateState.action === 'none' ||
         updateState.phase === 'failed' || updateState.phase === 'staged')) {
       setUpdateApplying(false);
@@ -344,7 +344,7 @@ const SKEW_BUSY = '.modal-overlay, .cmd-palette-overlay, .lightbox-overlay.activ
 const skew = { server: '', lastInputAt: 0 };
 
 function skewIdle() {
-  const texts = [...document.querySelectorAll('#msg-input, textarea')].map((el) => el.value ?? el.innerText);
+  const texts = [.../** @type {NodeListOf<HTMLElement & {value?: string}>} */ (document.querySelectorAll('#msg-input, textarea'))].map((el) => el.value ?? el.innerText);
   if (texts.concat(Object.values(perSession.drafts)).some((t) => (t || '').trim()) || composer.sending) return false;
   if (composer.pendingFiles.length || ui.activePopover || document.querySelector(SKEW_BUSY)) return false;
   if (document.hidden) return true;
@@ -364,7 +364,7 @@ function maybeSkewReload() {
 }
 
 wsm.onReady((msg) => {
-  const meta = document.querySelector('meta[name="nz-asset-version"]');
+  const meta = /** @type {HTMLMetaElement} */ (document.querySelector('meta[name="nz-asset-version"]'));
   if (!meta || !msg.asset_version || msg.asset_version === meta.content) return;
   if (!skew.server) {
     skew.lastInputAt = Date.now();

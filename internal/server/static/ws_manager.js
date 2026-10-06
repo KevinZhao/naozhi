@@ -120,11 +120,11 @@ export const wsm = {
     this._frames.set(type, t);
   },
 
-  onReady(fn) { this._ready.push(fn); },
+  onReady(/** @type {(msg: WsFrames['auth_ok']) => void} */ fn) { this._ready.push(fn); },
   onStateChange(fn) { this._stateChange.push(fn); },
-  onAuthFail(fn) { this._authFail.push(fn); },
+  onAuthFail(/** @type {(msg: WsFrames['auth_fail']) => void} */ fn) { this._authFail.push(fn); },
 
-  onMessage(msg) {
+  onMessage(/** @type {WsFrames[keyof WsFrames]} */ msg) {
     const t = this._frames.get(msg.type);
     if (!t) return;
     const c = t.claims.find((x) => x.when(msg));

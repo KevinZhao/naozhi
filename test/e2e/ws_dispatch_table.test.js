@@ -95,6 +95,7 @@ test.describe('WS dispatch table', () => {
     await waitForWs(page, 'DISCONNECTED');
     const block = await page.evaluate(() => ({ left: wsm._authBlockUntil - Date.now(), timer: wsm.reconnectTimer !== null }));
     expect(block.left, 'retry_after arms the redial block').toBeGreaterThan(25000);
+    expect(block.left, 'the block is retry_after long, not the 60s fallback').toBeLessThanOrEqual(30000);
     expect(block.timer).toBe(true);
 
     // Lift the block (as the countdown does at expiry): it redials at once.
