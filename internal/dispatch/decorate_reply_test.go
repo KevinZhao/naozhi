@@ -19,6 +19,7 @@ type fixedFooterCaps struct {
 }
 
 func (f fixedFooterCaps) ReplyFooter(string) string { return f.footer }
+func (f fixedFooterCaps) BackendIDs() []string      { return nil }
 
 // TestDispatcher_DecorateReplyText_Components covers each branch of
 // decorateReplyText (R219-CR-7 / #656) so the helper extraction from

@@ -536,6 +536,12 @@
         "total_cost": {
           "type": "number"
         },
+        "tuning_effort": {
+          "type": "string"
+        },
+        "tuning_model": {
+          "type": "string"
+        },
         "turn_duration_ms": {
           "type": "integer"
         },

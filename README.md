@@ -349,6 +349,9 @@ Dashboard: 浏览器打开 `http://localhost:8180`
 | `/urgent <text>` | 紧急打断并优先处理该消息 |
 | `/cd <path>` | 切换工作目录 |
 | `/pwd` | 显示当前工作目录 |
+| `/model [名称\|reset] [agent]` | 查看/切换会话模型（运行中切换，上下文保留） |
+| `/effort [档位\|reset] [agent]` | 查看/切换 kiro 思考强度（low/medium/high/xhigh/max） |
+| `/backend [id\|reset] [agent]` | 查看/切换 CLI backend（下次 `/new` 后生效） |
 | `/project <name>` | 绑定到项目 |
 | `/project off` | 解绑项目 |
 | `/cron add [--keep-context] "<schedule>" <prompt>` | 创建定时任务（默认每次新会话） |
