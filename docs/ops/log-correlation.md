@@ -20,6 +20,12 @@ result 属于哪一轮」时靠时间戳对齐很痛苦（#3322 / #3401 / #3411 
   所以跟进消息的回复行要先由 `turn: start` 找到 `run_id`，再按 `run_id` 查。
 - leaked-toolcall 的自动续发是一条**独立的** run record，拿新的 `run_id`；
   `leak-recovery: nudge run` 行的 `nudge_of` 是它续的那一轮。
+- cli 层不带 ctx 的 readLoop 日志靠 `run_id` 字段对齐：passthrough 的 slot 记下发送方的
+  `run_id`，`passthrough: fanout`（`run_id` 是 head，`merged_run_ids` 是合并进来的其余各轮）、
+  `passthrough: slot orphaned` 等行带它；legacy `Send` 把它记在进程的 turn 状态里，
+  `eventCh full, dropped result` 带当前那一轮。发送方放弃（ctx 取消、bail 超时、interrupt）之后
+  才到的 result 按 `unowned:` 记账，账本里的 `RunID` 与这一轮不同，`cli: abandoned run's result
+  booked as unowned` 行的 `run_id` 就是它属于的那一轮，据此把迟到的花费对回 run 记录。
 - 不经过 turn 的入口（cron、sysession）由 session 自己生成 `run_id`，日志里没有
   这三个字段。
 
