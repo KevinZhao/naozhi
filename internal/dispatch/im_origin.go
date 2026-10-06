@@ -359,9 +359,10 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 		} else {
 			d.SendSplitReply(ctx, p, replyDestOf(o.msg), replyText)
 		}
-	} else if result.Aborted {
+	} else if result.Aborted || result.CLIAborted() {
 		// naozhi stopped the turn (/stop, interrupt, /urgent), which already
-		// said so; only the banner's last tool status needs replacing.
+		// said so, or claude reports it aborted; either way only the banner's
+		// last tool status needs replacing.
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			if err := p.EditMessage(ctx, msgID, bannerAborted); err != nil {
 				slog.Debug("aborted turn banner edit failed", "msg_id", msgID, "err", err)
@@ -380,7 +381,7 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 // be edited into it and went out as new messages instead.
 const bannerAnsweredBelow = "✅ 已回复，见下方"
 
-// bannerAborted replaces the progress banner of a turn naozhi aborted.
+// bannerAborted replaces the progress banner of an aborted turn.
 const bannerAborted = "已中断。"
 
 // replyIntoBanner edits the first reply chunk into the progress banner and

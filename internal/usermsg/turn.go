@@ -28,8 +28,9 @@ const maxBackendNameRunes = 32
 // ForTurnResult returns the notice for a turn whose result is not an answer,
 // and its class label; both "" when no notice is due. A backend rejection
 // always gets one, since its text is the raw RPC error. Any other failure gets
-// one only when it left no text, and error_during_execution never does when
-// naozhi asked for the abort. The notice never carries the backend's code or
+// one only when it left no text. An abort never does: neither one claude
+// reports as an aborted_* terminal_reason nor the error_during_execution of
+// one naozhi asked for. The notice never carries the backend's code or
 // wording, and has no emoji, like UserMessage.
 func ForTurnResult(r *clievent.SendResult) (text, class string) {
 	if r == nil {
@@ -54,8 +55,11 @@ func ForTurnResult(r *clievent.SendResult) (text, class string) {
 }
 
 // classifyTurnSubType maps an empty-text result onto a turn Code; ok=false
-// for a healthy empty turn and for an abort naozhi requested.
+// for a healthy empty turn and for an abort.
 func classifyTurnSubType(r *clievent.SendResult) (Code, bool) {
+	if r.CLIAborted() {
+		return CodeUnknown, false
+	}
 	switch r.SubType {
 	case "error_during_execution":
 		if r.Aborted {
