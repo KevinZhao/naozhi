@@ -40,7 +40,7 @@ func TestBuildUserEntryDetailUsesTheSharedCap(t *testing.T) {
 	} {
 		// Multi-byte so a byte-vs-rune slip is visible.
 		text := strings.Repeat("界", runes)
-		got := buildUserEntry(text, nil).Detail
+		got := buildUserEntry(text, nil, "").Detail
 		want := textutil.TruncateRunes(text, clievent.EventDetailMaxRunes)
 		if got != want {
 			t.Errorf("buildUserEntry(%d runes).Detail is not TruncateRunes(text, %d):\n got %d runes\nwant %d runes\n"+
@@ -66,7 +66,7 @@ func TestLiveAndFallbackDetailAgreeThroughTheLiveCap(t *testing.T) {
 		history.DetailMaxRunes + 500,
 	} {
 		text := strings.Repeat("界", runes)
-		live := buildUserEntry(text, nil).Detail
+		live := buildUserEntry(text, nil, "").Detail
 		fallback := history.NewDerivedEntry(1_700_000_000_000, "user", text).Detail
 		if got := textutil.TruncateRunes(fallback, clievent.EventDetailMaxRunes); got != live {
 			t.Errorf("tiers disagree for a %d-rune message: normalising the fallback Detail to "+
@@ -82,10 +82,10 @@ func TestLiveAndFallbackDetailAgreeThroughTheLiveCap(t *testing.T) {
 // decoration is ever removed, whoever removes it learns that contentKey's
 // exclusion of Summary was compensating for it and can reconsider.
 func TestBuildUserEntrySummaryCarriesTheImageSuffix(t *testing.T) {
-	plain := buildUserEntry("hello", nil).Summary
+	plain := buildUserEntry("hello", nil, "").Summary
 	withImg := buildUserEntry("hello", []clievent.Attachment{
 		{Kind: clievent.KindImageInline, Data: []byte("not-an-image"), MimeType: "image/png"},
-	}).Summary
+	}, "").Summary
 	if plain == withImg {
 		t.Fatal("Summary is identical with and without images; the live tier used to append " +
 			"\" [+N image(s)]\", which is why merged.contentKey excludes Summary (#2406). " +
@@ -110,7 +110,7 @@ func TestThumbnailDimIsShared(t *testing.T) {
 
 	live := buildUserEntry("", []clievent.Attachment{
 		{Kind: clievent.KindImageInline, Data: png, MimeType: "image/png"},
-	}).Images
+	}, "").Images
 	if len(live) != 1 {
 		t.Fatalf("expected one thumbnail, got %d", len(live))
 	}

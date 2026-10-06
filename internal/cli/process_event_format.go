@@ -238,8 +238,9 @@ func workflowTaskType(ev clievent.Event) string {
 }
 
 // logEventAt converts an clievent.Event to one or more EventEntry values and appends them to the event log.
-// readLoop passes the same time.Now() value that stamps ev.RecvAt so timestamps match.
-func (p *Process) logEventAt(ev clievent.Event, nowMS int64) {
+// readLoop passes the same time.Now() value that stamps ev.RecvAt so timestamps match,
+// and for a result the run it answers, which its result entry carries.
+func (p *Process) logEventAt(ev clievent.Event, nowMS int64, runID string) {
 	p.meter.TrackShadow(ev, nowMS)
 	entries := EventEntriesFromEventAt(ev, nowMS)
 	if len(entries) == 0 {
@@ -247,6 +248,11 @@ func (p *Process) logEventAt(ev clievent.Event, nowMS int64) {
 	}
 	if ev.Type == "result" {
 		p.meter.RecordResultCost(ev.CostUSD)
+		for i := range entries {
+			if entries[i].Type == clievent.KindResult {
+				entries[i].RunID = runID
+			}
+		}
 	}
 	// AppendBatch takes l.mu and notifies subscribers ONCE; per-entry Append
 	// would lock N times and wake eventPushLoop spuriously per block.
