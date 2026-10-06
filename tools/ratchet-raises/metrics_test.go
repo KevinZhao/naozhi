@@ -159,6 +159,51 @@ func TestRaises_JSRatchet_NewFileCannotAbsorbALongFunction(t *testing.T) {
 	}
 }
 
+// maxIifeLines is held as a maximum, like maxFnLines: a new file can neither
+// carry a longer top-level IIFE than any file had, nor take a known one over
+// and grow it. Splitting one into smaller ones elsewhere is not a raise.
+func TestRaises_JSRatchet_IIFEMax(t *testing.T) {
+	t.Parallel()
+	base := metrics{}
+	if err := jsRatchet(`{"a.js":{"lines":100,"maxIifeLines":80},"b.js":{"lines":10,"maxIifeLines":0}}`, base); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, head string
+		want       []string
+	}{
+		{"a new file outgrows every IIFE", `{"a.js":{"lines":100,"maxIifeLines":80},"b.js":{"lines":10,"maxIifeLines":0},"n.js":{"lines":0,"maxIifeLines":81}}`,
+			[]string{"js-ratchet:MAX.maxIifeLines"}},
+		{"the IIFE moves to a new file and grows", `{"a.js":{"lines":20,"maxIifeLines":0},"b.js":{"lines":10,"maxIifeLines":0},"n.js":{"lines":80,"maxIifeLines":90}}`,
+			[]string{"js-ratchet:MAX.maxIifeLines"}},
+		{"part of the IIFE moves to a new file", `{"a.js":{"lines":60,"maxIifeLines":40},"b.js":{"lines":10,"maxIifeLines":0},"n.js":{"lines":40,"maxIifeLines":30}}`,
+			nil},
+		{"a second, shorter IIFE in a new file", `{"a.js":{"lines":100,"maxIifeLines":80},"b.js":{"lines":10,"maxIifeLines":0},"n.js":{"lines":0,"maxIifeLines":50}}`,
+			nil},
+		{"the metric is dropped", `{"a.js":{"lines":100},"b.js":{"lines":10}}`,
+			[]string{"js-ratchet:MAX.maxIifeLines"}},
+	} {
+		head := metrics{}
+		if err := jsRatchet(tc.head, head); err != nil {
+			t.Fatal(err)
+		}
+		if got := gates(raises(base, head)); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: raises = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	// A baseline that predates the metric has no ratchet to raise.
+	old, head := metrics{}, metrics{}
+	if err := jsRatchet(`{"a.js":{"lines":100}}`, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := jsRatchet(`{"a.js":{"lines":100,"maxIifeLines":500}}`, head); err != nil {
+		t.Fatal(err)
+	}
+	if got := gates(raises(old, head)); len(got) != 0 {
+		t.Errorf("first baseline with maxIifeLines: raises = %v, want none", got)
+	}
+}
+
 // configureDeps, deadInjections, innerHTMLAssign, htmlInsert and
 // lateBindings are gated like lines: only their sum (S20a, #3026 D-S20-4).
 // Moving an innerHTML assignment with its function, or counting an injection

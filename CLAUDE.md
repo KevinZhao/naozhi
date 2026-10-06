@@ -118,7 +118,6 @@ cmd/naozhi/main.go
   -> netutil      Client-IP 提取（trusted-proxy 处理）
   -> ratelimit    Per-key token-bucket 限流（login/WS/upload 用）
   -> limits       跨包大小/数量上限常量
-  -> timeouts     超时 / deadline 常量的 canonical home
   -> sessionconst Session 调优常量
   -> sessionkey   Session key 前缀规范（router 命名空间）
   -> tuningspec   model/effort 值校验（config 与 session 共享的 flag-injection 防线）
