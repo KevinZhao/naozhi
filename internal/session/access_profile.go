@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"sort"
 	"strings"
@@ -85,6 +86,13 @@ func (b *BackendRegistry) DefaultAccessProfile() string {
 func (b *BackendRegistry) HasAccessProfile(id string) bool {
 	_, ok := b.profiles()[id]
 	return ok
+}
+
+// AccessProfiles returns a copy of the registry, the profiles created at
+// runtime included; nil when none are configured. Env maps are shared and
+// must not be mutated.
+func (b *BackendRegistry) AccessProfiles() map[string]AccessProfile {
+	return maps.Clone(b.profiles())
 }
 
 // profiles returns the current access-profile registry; nil when none are

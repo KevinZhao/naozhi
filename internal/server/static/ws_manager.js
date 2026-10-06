@@ -1,3 +1,4 @@
+// @ts-check
 // ws_manager.js — the dashboard's WebSocket (S18, #3024): dial, auth, backoff
 // and reconnect, ping, send, and the receive dispatch table. Business state
 // lives with its owner (session_stream.js, cron_live.js, dashboard.js), which
@@ -104,6 +105,12 @@ export const wsm = {
   // No match, or an unregistered type, drops the frame.
   _frames: new Map(),
 
+  /**
+   * @template {keyof WsFrames} K
+   * @param {K} type
+   * @param {(msg: WsFrames[K]) => void} fn
+   * @param {(msg: WsFrames[K]) => boolean} [when]
+   */
   on(type, fn, when) {
     if (!Object.hasOwn(NZ_CONTRACT.WS, type)) throw new Error('wsm.on: unknown frame type ' + type);
     const t = this._frames.get(type) || { claims: [], fallback: null };

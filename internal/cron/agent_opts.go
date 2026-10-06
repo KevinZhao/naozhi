@@ -62,24 +62,18 @@ type Session interface {
 
 // SendResult is the cron-local subset of clievent.SendResult: Text (IM notify +
 // run history) and SessionID (stub chain refresh). Cost is NOT carried here:
-// the CLI figure is a process-cumulative total, so cron reads the session's
-// monotonic CostTotals before and after the turn instead (docs/rfc/cost-ledger.md §5.3).
+// the CLI figure is a process-cumulative total, so cron takes the run's spend
+// from the session's CostWindow instead (docs/rfc/cost-ledger.md §5.0).
 type SendResult struct {
 	Text      string
 	SessionID string
 }
 
-// CostReporter is the fallback Session capability for attributing a run's
-// spend: the difference of two CostTotals snapshots taken around Send.
-// Sessions with neither it nor CostWindow (test fakes) record zero cost.
-type CostReporter interface {
-	CostTotals() costledger.Totals
-}
-
 // CostWindow is the Session capability cron attributes a run's spend through
 // (docs/rfc/cost-ledger.md §5.0): the session collects the spend its results
 // report between Begin and End for the run instead of writing its own rows,
-// and books everything outside the window itself.
+// and books everything outside the window itself. A session without it (test
+// fakes) records zero cost.
 type CostWindow interface {
 	BeginCostWindow()
 	EndCostWindow() costledger.Increment

@@ -10,10 +10,19 @@ import (
 	"github.com/naozhi/naozhi/internal/costledger"
 )
 
+// deltaWindow is a CostWindow for fakes whose spend only grows: the run is
+// charged the growth between Begin and End.
+type deltaWindow struct{ before costledger.Totals }
+
+func (d *deltaWindow) begin(now costledger.Totals) { d.before = now }
+
+func (d *deltaWindow) end(now costledger.Totals) costledger.Increment { return now.Sub(d.before) }
+
 // costSession is a persistent-mode stand-in: the CLI's cumulative reading
-// grows across runs on the same process, and CostTotals mirrors what the
-// session layer would have accrued so far.
+// grows across runs on the same process, and spend mirrors what the session
+// layer would have accrued so far.
 type costSession struct {
+	deltaWindow
 	cumulative []float64
 	calls      int
 	spent      float64
@@ -28,7 +37,9 @@ func (s *costSession) Send(context.Context, string) (SendResult, error) {
 }
 func (s *costSession) SessionID() string                     { return "sess-p" }
 func (s *costSession) InterruptViaControl() InterruptOutcome { return InterruptUnsupported }
-func (s *costSession) CostTotals() costledger.Totals {
+func (s *costSession) BeginCostWindow()                      { s.begin(s.spend()) }
+func (s *costSession) EndCostWindow() costledger.Increment   { return s.end(s.spend()) }
+func (s *costSession) spend() costledger.Totals {
 	return costledger.Totals{USD: s.spent, Models: map[string]costledger.ModelUsage{
 		"m[1m]": {CostUSD: s.spent, Canonical: "m", Basis: costledger.BasisList}}}
 }
@@ -100,7 +111,10 @@ func TestLocalRun_CostIsPerRunDeltaNotCumulative(t *testing.T) {
 
 // failingCostSession spends and then fails the turn: the partial spend must
 // still reach the ledger through the send-error finishRun path.
-type failingCostSession struct{ spent float64 }
+type failingCostSession struct {
+	deltaWindow
+	spent float64
+}
 
 func (s *failingCostSession) Send(context.Context, string) (SendResult, error) {
 	s.spent = 0.7
@@ -108,7 +122,9 @@ func (s *failingCostSession) Send(context.Context, string) (SendResult, error) {
 }
 func (s *failingCostSession) SessionID() string                     { return "" }
 func (s *failingCostSession) InterruptViaControl() InterruptOutcome { return InterruptUnsupported }
-func (s *failingCostSession) CostTotals() costledger.Totals         { return costledger.Totals{USD: s.spent} }
+func (s *failingCostSession) BeginCostWindow()                      { s.begin(s.spend()) }
+func (s *failingCostSession) EndCostWindow() costledger.Increment   { return s.end(s.spend()) }
+func (s *failingCostSession) spend() costledger.Totals              { return costledger.Totals{USD: s.spent} }
 
 type failingCostRouter struct{ sess *failingCostSession }
 
@@ -133,16 +149,37 @@ func TestLocalRun_SendErrorStillBooksSpend(t *testing.T) {
 	}
 }
 
-func TestLocalRun_SessionWithoutCostReporterRecordsZero(t *testing.T) {
-	s, ledger := newCostScheduler(t, okRouter{sid: "sess-1"})
-	j := &Job{ID: "fedcba9876543210", Schedule: "@every 5m", Prompt: "ping"}
-	s.putJobForTest(j)
-	s.executeOpt(j.ID, true)
-	if runs := s.RecentRuns(j.ID, 1); len(runs) != 1 || runs[0].CostUSD != 0 {
-		t.Fatalf("runs = %+v", runs)
-	}
-	if ents := ledgerEntries(t, ledger); len(ents) != 0 {
-		t.Fatalf("zero-cost run must not write: %+v", ents)
+// totalsOnlySession spends on every Send and exposes its running total, but
+// has no CostWindow.
+type totalsOnlySession struct{ spent float64 }
+
+func (s *totalsOnlySession) Send(context.Context, string) (SendResult, error) {
+	s.spent += 0.4
+	return SendResult{Text: "done", SessionID: "sess-t"}, nil
+}
+func (s *totalsOnlySession) SessionID() string                     { return "sess-t" }
+func (s *totalsOnlySession) InterruptViaControl() InterruptOutcome { return InterruptUnsupported }
+func (s *totalsOnlySession) CostTotals() costledger.Totals         { return costledger.Totals{USD: s.spent} }
+
+// The cost window is the only way a local run is charged: a session without
+// it books zero, even one whose CostTotals grew across the Send.
+func TestLocalRun_SessionWithoutCostWindowRecordsZero(t *testing.T) {
+	for name, router := range map[string]SessionRouter{
+		"no cost capability": okRouter{sid: "sess-1"},
+		"CostTotals only":    backendRouter{sess: &totalsOnlySession{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, ledger := newCostScheduler(t, router)
+			j := &Job{ID: "fedcba9876543210", Schedule: "@every 5m", Prompt: "ping"}
+			s.putJobForTest(j)
+			s.executeOpt(j.ID, true)
+			if runs := s.RecentRuns(j.ID, 1); len(runs) != 1 || runs[0].CostUSD != 0 {
+				t.Fatalf("runs = %+v", runs)
+			}
+			if ents := ledgerEntries(t, ledger); len(ents) != 0 {
+				t.Fatalf("zero-cost run must not write: %+v", ents)
+			}
+		})
 	}
 }
 
@@ -202,6 +239,7 @@ func TestAppendLedger_RecordsTheSnapshotBackend(t *testing.T) {
 // backendSession spends USD and credits on each Send. It does not implement
 // BackendReporter; reportingBackendSession adds it, reporting backend.
 type backendSession struct {
+	deltaWindow
 	backend string
 	spent   float64
 }
@@ -212,7 +250,9 @@ func (s *backendSession) Send(context.Context, string) (SendResult, error) {
 }
 func (s *backendSession) SessionID() string                     { return "sess-b" }
 func (s *backendSession) InterruptViaControl() InterruptOutcome { return InterruptUnsupported }
-func (s *backendSession) CostTotals() costledger.Totals {
+func (s *backendSession) BeginCostWindow()                      { s.begin(s.spend()) }
+func (s *backendSession) EndCostWindow() costledger.Increment   { return s.end(s.spend()) }
+func (s *backendSession) spend() costledger.Totals {
 	return costledger.Totals{USD: s.spent, Metered: map[costledger.Unit]float64{costledger.UnitCredits: 2 * s.spent}}
 }
 

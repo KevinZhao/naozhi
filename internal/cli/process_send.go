@@ -30,7 +30,7 @@ func buildUserEntry(text string, images []clievent.Attachment) clievent.EventEnt
 		Detail:  textutil.TruncateRunes(text, clievent.EventDetailMaxRunes),
 	}
 	if len(images) > 0 {
-		entry.Summary += " [+" + strconv.Itoa(len(images)) + " image(s)]"
+		entry.Summary += clievent.AttachmentSuffix(images)
 		thumbs := make([]string, len(images))
 		if len(images) == 1 {
 			thumbs[0] = MakeThumbnail(images[0].Data, clievent.ThumbMaxDim)

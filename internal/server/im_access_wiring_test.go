@@ -155,3 +155,41 @@ func TestServerOptions_IMGroupScopeReachesDispatcher(t *testing.T) {
 		t.Fatal("the message reached no session")
 	}
 }
+
+// ServerOptions.IMThreadAutoOpen reaches the same dispatcher: a top-level
+// mention runs on the session of the thread its answer opens.
+func TestServerOptions_IMThreadAutoOpenReachesDispatcher(t *testing.T) {
+	router := session.NewRouter(session.RouterConfig{})
+	srv, _ := buildServerWithHandlers(ServerOptions{
+		Addr:             ":0",
+		Router:           router,
+		Platforms:        map[string]platform.Platform{parityPlatformName: newParityPlatform(false)},
+		Backend:          "claude",
+		IMThreadAutoOpen: true,
+	})
+	t.Cleanup(func() {
+		srv.hub.Shutdown()
+		srv.appCancel()
+	})
+	ran := make(chan string, 2)
+	for _, key := range []string{"parity:group:chat1:general", "parity:group:chat1#tS1:general"} {
+		proc := session.NewTestProcess()
+		proc.SendFunc = func(context.Context, string, []clievent.Attachment, clievent.EventCallback) (*clievent.SendResult, error) {
+			ran <- key
+			return &clievent.SendResult{Text: "ok"}, nil
+		}
+		router.InjectSession(key, proc)
+	}
+	srv.dispatcher.BuildHandler()(context.Background(), platform.IncomingMessage{
+		Platform: parityPlatformName, EventID: "e1", UserID: "alice", ChatID: parityChatID,
+		ChatType: "group", MentionMe: true, SelfThread: "S1", Text: "hello",
+	})
+	select {
+	case key := <-ran:
+		if key != "parity:group:chat1#tS1:general" {
+			t.Errorf("the top-level mention ran on %q, want the thread its answer opens", key)
+		}
+	default:
+		t.Fatal("the message reached no session")
+	}
+}

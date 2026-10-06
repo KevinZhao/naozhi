@@ -171,8 +171,8 @@ func shutdownShimViaReconnect(
 // marks) for the session the shim names, else the stored one: a backlog of
 // background-task frames alone cannot say whether the turn ended. Anything it
 // cannot read counts as still running.
-func reconnectHooks(claudeDir string, backendDirs map[string]string, backendID, workspace, storedSID string) cli.ReconnectHooks {
-	return cli.ReconnectHooks{ResolveUnknown: func(helloSID string) bool {
+func reconnectHooks(claudeDir string, backendDirs map[string]string, backendID, workspace, storedSID string, knownWorkflows []string) cli.ReconnectHooks {
+	return cli.ReconnectHooks{KnownWorkflowTasks: knownWorkflows, ResolveUnknown: func(helloSID string) bool {
 		sid := cmp.Or(helloSID, storedSID)
 		if !claudefs.IsValidSessionID(sid) {
 			return false
@@ -393,7 +393,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		proc, replays, err := recWrapper.SpawnReconnect(
 			spawnCtx, state.Key, lastSeq, recWrapper.Protocol,
 			r.spawn.noOutputTimeout, r.spawn.totalTimeout,
-			reconnectHooks(r.hist.claudeDir, r.hist.backendDirs, recBackendID, sess.Workspace(), state.SessionID),
+			reconnectHooks(r.hist.claudeDir, r.hist.backendDirs, recBackendID, sess.Workspace(), state.SessionID, sess.WorkflowBoard().knownTaskIDs()),
 		)
 		spawnCancel()
 		if err != nil {
@@ -484,6 +484,7 @@ func (r *Router) ReconnectShimsCtx(parentCtx context.Context) {
 		// Bound once sess holds proc: an abandoned reattach above closes proc
 		// for a session that never held it.
 		sess.setEndMark(mark)
+		bookWorkflows(sess, proc, r.hist.projectsRoot, func() { r.ss.Update(markChanged); r.notifyChange() }, r.BumpVersion)
 		bookProcessEnd(sess, proc, r.hist.claudeDir)
 
 		// Persist sink goes last so the history inject + shim replay above land

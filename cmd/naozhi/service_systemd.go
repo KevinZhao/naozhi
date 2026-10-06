@@ -29,6 +29,7 @@ Type=notify
 NotifyAccess=main
 WatchdogSec=120
 ExecStart="%s" --config "%s"
+ExecReload=/bin/kill -HUP $MAINPID
 WorkingDirectory=%s
 Restart=always
 RestartSec=5

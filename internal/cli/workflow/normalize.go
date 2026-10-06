@@ -21,9 +21,12 @@ const (
 	maxHeaderTextRunes  = 200 // Description, Current, NotifySummary
 	maxRawRunes         = 32  // RawState, RawStatus
 	maxPrevAgentIDs     = 8
-	maxAgents           = 2000
+	maxAgents           = MaxAgents
 	maxPhases           = 200
 )
+
+// MaxAgents is the most agent rows one workflow entry carries.
+const MaxAgents = 2000
 
 // redactSecrets is the redactor every clip runs; tests swap it to count calls.
 var redactSecrets = textutil.RedactSecrets
@@ -338,6 +341,22 @@ func stopAll(w *Workflow) {
 		}
 		w.Phases = phases
 	}
+}
+
+// Interrupted returns a copy of w ended as interrupted at ms, the status the
+// session board gives a run whose CLI is gone: its queued and running agents
+// stop, as for any terminal status, and a snapshot_stale mark goes.
+func Interrupted(w *Workflow, ms int64) *Workflow {
+	n := *w
+	n.Status, n.RawStatus = StatusInterrupted, ""
+	if n.EndedAt == 0 {
+		n.EndedAt = ms
+	}
+	if n.Degraded == DegradedSnapshotStale {
+		n.Degraded = ""
+	}
+	stopAll(&n)
+	return &n
 }
 
 func isLive(a Agent) bool { return a.State == AgentQueued || a.State == AgentRunning }

@@ -1,31 +1,46 @@
 package server
 
 import (
+	"bytes"
 	"crypto/sha512"
 	"encoding/base64"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"regexp"
 	"strings"
 	"testing"
 )
 
-// vendorPinRe matches one [url, sha384] pair render_md.js hands its loader.
-var vendorPinRe = regexp.MustCompile(`\['/static/(vendor/[^']+)',\s*'sha384-([^']+)'\]`)
+// vendorPinRe matches one [url, sha384] pair a lazy loader is handed.
+var vendorPinRe = regexp.MustCompile(`\['([^']+)',\s*'sha384-([^']+)'\]`)
 
-// TestVendorAssets_SRIMatchesEmbedded checks every vendored asset render_md.js
-// injects against the bytes the binary serves: a hash that drifts from the
-// file makes the browser refuse it, and the formula never renders. In reverse,
-// every vendored script and stylesheet has a pin, so none is served unloaded.
+// TestVendorAssets_SRIMatchesEmbedded checks every asset a dashboard module
+// injects against the bytes the binary serves: a hash that drifts from the file
+// makes the browser refuse it, and the formula or diagram never renders. Every
+// pin names a /static/vendor/ file, since the CSP allows no other origin. In
+// reverse, every vendored script and stylesheet has a pin, so none is served
+// unloaded.
 func TestVendorAssets_SRIMatchesEmbedded(t *testing.T) {
 	t.Parallel()
-	pins := vendorPinRe.FindAllStringSubmatch(string(staticAssetBytes("render_md.js")), -1)
-	if len(pins) < 2 {
-		t.Fatalf("found %d vendored [url, sha384] pins in render_md.js, want the KaTeX script and stylesheet (regex drift?)", len(pins))
+	var pins [][]string
+	for key := range staticAssets {
+		if strings.HasSuffix(key, ".js") && !strings.HasPrefix(key, "vendor/") {
+			pins = append(pins, vendorPinRe.FindAllStringSubmatch(string(staticAssetBytes(key)), -1)...)
+		}
+	}
+	if len(pins) < 3 {
+		t.Fatalf("found %d [url, sha384] pins in the dashboard modules, want KaTeX's script and stylesheet and mermaid's script (regex drift?)", len(pins))
 	}
 	pinned := map[string]bool{}
 	for _, p := range pins {
-		key, want := p[1], p[2]
+		key, ok := strings.CutPrefix(p[1], "/static/")
+		if !ok || !strings.HasPrefix(key, "vendor/") {
+			t.Errorf("a dashboard module loads %s, outside /static/vendor/: the CSP allows no other source", p[1])
+			continue
+		}
+		want := p[2]
 		pinned[key] = true
 		b := staticAssetBytes(key)
 		if b == nil {
@@ -44,9 +59,41 @@ func TestVendorAssets_SRIMatchesEmbedded(t *testing.T) {
 	}
 }
 
+// TestVendorAssets_LargeFilesPrecompressed: a raw bundle would be gzipped at
+// BestCompression during init, on every start (mermaid's 3 MB: 65-140ms against
+// 11-18ms to gunzip), and would weigh its full size in the binary. Anything
+// that large is embedded as <name>.gz instead, its gzip form served as is.
+func TestVendorAssets_LargeFilesPrecompressed(t *testing.T) {
+	t.Parallel()
+	err := fs.WalkDir(vendorFS, "static/vendor", func(name string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !strings.HasSuffix(name, ".gz") && info.Size() > 1<<20 {
+			t.Errorf("%s is %d bytes raw: embed it as %s.gz (gzip -9n)", name, info.Size(), path.Base(name))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "vendor/mermaid-11.14.0/mermaid.min.js"
+	gz, err := vendorFS.ReadFile("static/" + key + ".gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := staticAssets[key]; !bytes.Equal(a.gz, gz) || len(a.bytes) < 3<<20 {
+		t.Errorf("%s: gzip form is not the embedded .gz, or the raw form (%d bytes) is not its decompression", key, len(a.bytes))
+	}
+}
+
 // TestVendorAssets_DirectoryNamesRelease: vendor/ responses are immutable on
-// the strength of their path, so the KaTeX build embedded must be the release
-// its directory names. Changed bytes need a new directory, not a new pin.
+// the strength of their path, so each build embedded must be the release its
+// directory names. Changed bytes need a new directory, not a new pin.
 func TestVendorAssets_DirectoryNamesRelease(t *testing.T) {
 	t.Parallel()
 	dirs := map[string]bool{}
@@ -56,12 +103,17 @@ func TestVendorAssets_DirectoryNamesRelease(t *testing.T) {
 			dirs[dir] = true
 		}
 	}
-	if len(dirs) != 1 || !dirs["katex-0.16.21"] {
-		t.Fatalf("vendor/ holds %v, want katex-0.16.21 alone: a new library or release needs its own release check here", dirs)
+	if len(dirs) != 2 || !dirs["katex-0.16.21"] || !dirs["mermaid-11.14.0"] {
+		t.Fatalf("vendor/ holds %v, want katex-0.16.21 and mermaid-11.14.0: a new library or release needs its own release check here", dirs)
 	}
-	js := string(staticAssetBytes("vendor/katex-0.16.21/katex.min.js"))
-	if got := regexp.MustCompile(`version:"([^"]+)"`).FindAllStringSubmatch(js, -1); len(got) != 1 || got[0][1] != "0.16.21" {
-		t.Errorf("vendor/katex-0.16.21/katex.min.js declares versions %v, want exactly 0.16.21", got)
+	versionRe := regexp.MustCompile(`version:"([^"]+)"`)
+	for key, want := range map[string]string{
+		"vendor/katex-0.16.21/katex.min.js":     "0.16.21",
+		"vendor/mermaid-11.14.0/mermaid.min.js": "11.14.0",
+	} {
+		if got := versionRe.FindAllStringSubmatch(string(staticAssetBytes(key)), -1); len(got) != 1 || got[0][1] != want {
+			t.Errorf("%s declares versions %v, want exactly %s", key, got, want)
+		}
 	}
 	if css := string(staticAssetBytes("vendor/katex-0.16.21/katex.min.css")); !strings.Contains(css, `.katex .katex-version:after{content:"0.16.21"}`) {
 		t.Error("vendor/katex-0.16.21/katex.min.css does not carry the 0.16.21 version marker")
@@ -106,6 +158,16 @@ func TestVendorRoutes_ServeEmbeddedTree(t *testing.T) {
 		if w.Body.String() != string(staticAssetBytes(key)) {
 			t.Errorf("GET /static/%s body differs from the embedded file", key)
 		}
+		if strings.HasSuffix(key, ".woff2") {
+			continue
+		}
+		req := httptest.NewRequest(http.MethodGet, "/static/"+key, nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		w = httptest.NewRecorder()
+		srv.mux.ServeHTTP(w, req)
+		if raw, err := gunzip(w.Body.Bytes()); w.Header().Get("Content-Encoding") != "gzip" || err != nil || !bytes.Equal(raw, staticAssetBytes(key)) {
+			t.Errorf("GET /static/%s with gzip = %q encoding, err %v: want the gzip form of the embedded file", key, w.Header().Get("Content-Encoding"), err)
+		}
 	}
 }
 
@@ -116,6 +178,9 @@ func TestVendorRoutes_RejectOutsideTree(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 	for _, p := range []string{
 		"/static/vendor/katex-0.16.21/LICENSE",
+		"/static/vendor/mermaid-11.14.0/LICENSE",
+		"/static/vendor/mermaid-11.14.0/mermaid.min.js.gz",
+		"/static/vendor/mermaid-11.14.0/mermaid.js",
 		"/static/vendor/katex-0.16.21/fonts/KaTeX_Nope.woff2",
 		"/static/vendor/katex-0.16.21/katex.css",
 		"/static/vendor/tokens.css",
@@ -151,6 +216,7 @@ func TestVendorRoutes_RequireAuth(t *testing.T) {
 		"/static/vendor/katex-0.16.21/katex.min.js",
 		"/static/vendor/katex-0.16.21/katex.min.css",
 		"/static/vendor/katex-0.16.21/fonts/KaTeX_Main-Regular.woff2",
+		"/static/vendor/mermaid-11.14.0/mermaid.min.js",
 	} {
 		w := httptest.NewRecorder()
 		srv.mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, p, nil))
@@ -160,23 +226,49 @@ func TestVendorRoutes_RequireAuth(t *testing.T) {
 	}
 }
 
-// TestDashboardCSP_KatexSelfHosted: with KaTeX vendored, styles and fonts come
-// from the dashboard's own origin only, and no KaTeX source is allowlisted.
-func TestDashboardCSP_KatexSelfHosted(t *testing.T) {
+// TestDashboardCSP_SelfHostedOnly: with KaTeX and mermaid vendored, the policy
+// /dashboard serves names no origin but its own. Scripts are 'self' plus the
+// inline-script hashes; styles and fonts are 'self'; only images and frames add
+// data: / blob:, which are not origins.
+func TestDashboardCSP_SelfHostedOnly(t *testing.T) {
 	t.Parallel()
-	directives := map[string]string{}
-	for _, d := range strings.Split(dashboardCSP, ";") {
-		if name, value, ok := strings.Cut(strings.TrimSpace(d), " "); ok {
-			directives[name] = value
-		}
+	w := httptest.NewRecorder()
+	newTestServer(&mockPlatform{}).handleDashboard(w, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+	csp := w.Header().Get("Content-Security-Policy")
+	if csp != dashboardCSP {
+		t.Fatalf("/dashboard serves CSP %q, want dashboardCSP", csp)
+	}
+	directives := map[string][]string{}
+	for _, d := range strings.Split(csp, ";") {
+		f := strings.Fields(d)
+		directives[f[0]] = f[1:]
 	}
 	for _, name := range []string{"style-src", "font-src"} {
-		if got := directives[name]; got != "'self'" {
+		if got := strings.Join(directives[name], " "); got != "'self'" {
 			t.Errorf("CSP %s = %q, want 'self' (KaTeX is served from /static/vendor)", name, got)
 		}
 	}
-	if strings.Contains(dashboardCSP, "katex") {
-		t.Errorf("CSP still allowlists a KaTeX source: %q", dashboardCSP)
+	script := directives["script-src"]
+	if len(script) < 2 || script[0] != "'self'" {
+		t.Errorf("CSP script-src = %q, want 'self' and the inline-script hashes", script)
+	}
+	for _, src := range script[1:] {
+		if !strings.HasPrefix(src, "'sha256-") {
+			t.Errorf("CSP script-src lists %q: scripts come from /static/ or are hash-pinned inline blocks", src)
+		}
+	}
+	for name, srcs := range directives {
+		if name == "require-sri-for" {
+			continue // its values are resource types, not sources
+		}
+		for _, src := range srcs {
+			switch {
+			case src == "'self'", src == "'none'", src == "data:", src == "blob:":
+			case strings.HasPrefix(src, "'sha256-"):
+			default:
+				t.Errorf("CSP %s allows %q: the dashboard loads nothing from outside its origin", name, src)
+			}
+		}
 	}
 }
 

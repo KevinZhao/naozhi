@@ -340,6 +340,11 @@
     "handler_type": "*uisettings.Handler"
   },
   {
+    "method": "POST",
+    "path": "/api/system/config/reload",
+    "handler_type": "*system.Handlers"
+  },
+  {
     "method": "GET",
     "path": "/api/system/daemons",
     "handler_type": "*system.Handlers"
@@ -642,6 +647,11 @@
   {
     "method": "GET",
     "path": "/static/vendor/katex-0.16.21/katex.min.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/vendor/mermaid-11.14.0/mermaid.min.js",
     "handler_type": "http.HandlerFunc"
   },
   {

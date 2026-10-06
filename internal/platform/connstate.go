@@ -15,8 +15,9 @@ const (
 	ConnConnected  ConnStateKind = "connected"
 	// ConnDisconnected: the link dropped and the adapter is retrying.
 	ConnDisconnected ConnStateKind = "disconnected"
-	// ConnFailed: recovery needs operator action (a config fix and restart); the
-	// adapter may still probe slowly and report connected if the cause clears.
+	// ConnFailed: recovery needs operator action (fix the cause; restart unless
+	// the adapter reconnects by itself). The adapter may still probe slowly and
+	// report connected once the cause clears.
 	ConnFailed ConnStateKind = "failed"
 )
 
