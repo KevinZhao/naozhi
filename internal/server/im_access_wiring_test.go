@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -90,5 +92,26 @@ func TestServerOptions_IMBudgetReachesDispatcher(t *testing.T) {
 	})
 	if got := plat.allReplies(); len(got) != 1 || !strings.Contains(got[0], "今日费用预算已用尽") {
 		t.Fatalf("replies = %q, want the budget refusal", got)
+	}
+}
+
+// The same gate answers the dashboard's /api/cost/budget.
+func TestServerOptions_IMBudgetReachesCostAPI(t *testing.T) {
+	idx := budget.NewIndex(time.UTC, nil)
+	idx.Add(costledger.Entry{TS: time.Now(), Unit: costledger.UnitUSD, Amount: 0.5})
+	srv, hs := buildServerWithHandlers(ServerOptions{
+		Addr:     ":0",
+		Router:   session.NewRouter(session.RouterConfig{}),
+		Backend:  "claude",
+		IMBudget: budget.NewGate(budget.Limits{DailyUSD: 2}, idx),
+	})
+	t.Cleanup(func() {
+		srv.hub.Shutdown()
+		srv.appCancel()
+	})
+	rec := httptest.NewRecorder()
+	hs.costH.HandleBudget(rec, httptest.NewRequest(http.MethodGet, "/api/cost/budget", nil))
+	if body := rec.Body.String(); rec.Code != http.StatusOK || !strings.Contains(body, `"limit":2`) {
+		t.Fatalf("status %d body %s, want the machine-wide cap", rec.Code, body)
 	}
 }

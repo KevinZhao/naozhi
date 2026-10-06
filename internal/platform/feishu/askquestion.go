@@ -43,15 +43,7 @@ func (f *Feishu) SendQuestionCard(ctx context.Context, chatID string, card platf
 		return "", fmt.Errorf("get access token: %w", err)
 	}
 
-	reqBody, err := json.Marshal(struct {
-		ReceiveID string `json:"receive_id"`
-		MsgType   string `json:"msg_type"`
-		Content   string `json:"content"`
-	}{ReceiveID: chatID, MsgType: "interactive", Content: string(body)})
-	if err != nil {
-		return "", fmt.Errorf("marshal request body: %w", err)
-	}
-	return f.postMessage(ctx, token, reqBody)
+	return f.postMessage(ctx, token, chatID, card.ThreadID, "interactive", string(body))
 }
 
 // buildMultiQuestionMarkdownCardJSON renders a read-only card listing every
@@ -185,6 +177,21 @@ func buildQuestionCardJSON(card platform.QuestionCard) ([]byte, error) {
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
+// cardTopicRef accepts a card value's topic id only in message-id shape
+// (om_ plus [A-Za-z0-9_]), so a malformed value cannot steer the reply
+// anywhere but the chat.
+func cardTopicRef(id string) string {
+	if !strings.HasPrefix(id, "om_") || len(id) > maxTopicRefLen {
+		return ""
+	}
+	for _, c := range id {
+		if !(c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+			return ""
+		}
+	}
+	return id
+}
+
 // markdownEscaper is shared: NewReplacer builds a trie per call and a
 // multi-question card escapes O(questions × options) strings.
 var markdownEscaper = strings.NewReplacer(
@@ -290,7 +297,10 @@ func (f *Feishu) dispatchCardAction(
 		UserID:    operatorID,
 		ChatID:    chatID,
 		ChatType:  ct,
-		Text:      text,
+		// The callback does not say which topic the card is in; the card's
+		// value does, so the answer and its reply stay in that topic.
+		ThreadID: cardTopicRef(val.ThreadID),
+		Text:     text,
 		// Sanitised here; the dispatcher whitelist-validates before routing (#2148).
 		AgentID: osutil.SanitizeForLog(val.AgentID, platform.AskIDMaxRunes),
 		// The user explicitly clicked the bot's card: bypass mention_only gating.

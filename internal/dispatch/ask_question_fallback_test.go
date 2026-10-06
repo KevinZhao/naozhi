@@ -12,7 +12,7 @@ import (
 func TestSendAskQuestionFallback_Text(t *testing.T) {
 	t.Parallel()
 	fp := &fakeInterimPlatform{}
-	tr := &replyTracker{p: fp, chatID: "chat1"}
+	tr := &replyTracker{p: fp, to: ReplyDest{ChatID: "chat1"}}
 	tr.sendAskQuestionFallback(context.Background(), &clievent.AskQuestion{
 		ToolUseID: "t1",
 		Items: []clievent.AskQuestionItem{
