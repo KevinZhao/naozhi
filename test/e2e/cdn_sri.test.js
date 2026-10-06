@@ -73,7 +73,7 @@ async function injectedAssets(browser) {
   await page.waitForSelector('#events-scroll .event');
 
   await page.evaluate(() => (/** @type {any} */ (window)).renderMd('$x+y$'));
-  await page.waitForSelector('link[data-nz-katex]', { state: 'attached' });
+  await page.waitForSelector('link[href*="katex.min.css"]', { state: 'attached' });
   await page.waitForSelector('script[src*="katex.min.js"]', { state: 'attached' });
 
   await page.evaluate((fence) => (/** @type {any} */ (window)).appendEvents([{
@@ -97,9 +97,9 @@ test.describe('CDN asset injection carries SRI', () => {
   test('每个注入的 CDN 资产都带 sha384 SRI 与 crossOrigin=anonymous', async ({ browser }) => {
     const { cleanup, assets } = await injectedAssets(browser);
     try {
-      // With the CDN blocked, onerror clears the loading flag, so a later
-      // render can inject a second element for the same URL. De-dupe by URL:
-      // the invariant is per asset, not per element.
+      // De-dupe by URL: the invariant is per asset, not per element. The
+      // delayed retry appends a second element for an asset that failed,
+      // though this test never waits long enough for it.
       const byURL = groupByURL(assets);
       const urls = [...byURL.keys()].sort();
       expect(urls.filter(u => u.includes('/katex@'))).toHaveLength(2); // css + js
