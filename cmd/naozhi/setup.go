@@ -131,15 +131,7 @@ func runSetupWeixin(args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to write config: %v\n", err)
 		fmt.Println()
 		fmt.Println("Add manually to config.yaml:")
-		fmt.Println("  platforms:")
-		fmt.Println("    weixin:")
-		fmt.Printf("      token: \"%s\"\n", token)
-		if id, ok := setupAccessID(login.ILinkUserID); ok {
-			fmt.Println("  im_access:")
-			fmt.Println("    platforms:")
-			fmt.Println("      weixin:")
-			fmt.Printf("        allowed_users: [%s]\n", strconv.Quote(id))
-		}
+		printWeixinManualConfig(os.Stdout, token, login.ILinkUserID)
 		os.Exit(1)
 	}
 
@@ -392,10 +384,32 @@ func printWeixinAccess(w io.Writer, access weixinAccess, userID string) {
 		fmt.Fprintf(w, "IM access: kept the existing im_access.platforms.weixin entry; it does not list the account that just logged in (%s). Add it to allowed_users if that account should use the bot.\n", id)
 	default:
 		fmt.Fprintln(w, "IM access: im_access not changed; unless im_access.default_deny is on, anyone can message the weixin bot. Restrict it with:")
-		fmt.Fprintln(w, "  im_access:")
-		fmt.Fprintln(w, "    platforms:")
-		fmt.Fprintln(w, "      weixin:")
-		fmt.Fprintln(w, "        allowed_users: [\"<your ID>\"]")
+		printWeixinAccessTemplate(w, id)
+	}
+}
+
+// printWeixinManualConfig prints the config to paste when writing it failed.
+// It always carries an im_access block, so the pasted bot is never open.
+func printWeixinManualConfig(w io.Writer, token, userID string) {
+	id, _ := setupAccessID(userID)
+	fmt.Fprintln(w, "  platforms:")
+	fmt.Fprintln(w, "    weixin:")
+	fmt.Fprintf(w, "      token: \"%s\"\n", token)
+	printWeixinAccessTemplate(w, id)
+}
+
+// printWeixinAccessTemplate prints an im_access block allowlisting id, or a
+// placeholder plus how to learn the real ID when id is empty.
+func printWeixinAccessTemplate(w io.Writer, id string) {
+	shown := id
+	if shown == "" {
+		shown = "<your ID>"
+	}
+	fmt.Fprintln(w, "  im_access:")
+	fmt.Fprintln(w, "    platforms:")
+	fmt.Fprintln(w, "      weixin:")
+	fmt.Fprintf(w, "        allowed_users: [%s]\n", strconv.Quote(shown))
+	if id == "" {
 		fmt.Fprintln(w, "A refused sender is told their ID, and the Info log line \"im access denied\" carries it as user: start with a placeholder ID to learn yours.")
 	}
 }

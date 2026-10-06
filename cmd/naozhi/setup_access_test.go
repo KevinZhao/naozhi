@@ -284,3 +284,54 @@ func TestPrintWeixinAccess(t *testing.T) {
 		}
 	}
 }
+
+// The manual fallback is pasted verbatim, so it must load restricted even
+// when the login reported no usable ID.
+func TestPrintWeixinManualConfig_NeverOpen(t *testing.T) {
+	for _, tc := range []struct {
+		userID string
+		want   string
+	}{
+		{scanUser, scanUser},
+		{"", "<your ID>"},
+		{"bad\x00id", "<your ID>"},
+	} {
+		var buf bytes.Buffer
+		printWeixinManualConfig(&buf, "wx-token", tc.userID)
+		var yamlLines []string
+		for line := range strings.Lines(buf.String()) {
+			if strings.HasPrefix(line, "  ") {
+				yamlLines = append(yamlLines, line)
+			}
+		}
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(strings.Join(yamlLines, "")), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("userID %q: config.Load on manual config: %v\n%s", tc.userID, err, buf.String())
+		}
+		if got := cfg.IMAccess.Platforms["weixin"].AllowedUsers; !slices.Equal(got, []string{tc.want}) {
+			t.Errorf("userID %q: allowed_users = %q, want [%q]\n%s", tc.userID, got, tc.want, buf.String())
+		}
+		if p := posture(t, cfg, "weixin"); p.Open {
+			t.Errorf("userID %q: pasted manual config leaves weixin open\n%s", tc.userID, buf.String())
+		}
+	}
+}
+
+// Unset with a usable ID means im_access could not be edited (e.g. it is an
+// alias): the restriction template should carry the known ID.
+func TestPrintWeixinAccess_UnsetTemplateUsesKnownID(t *testing.T) {
+	var buf bytes.Buffer
+	printWeixinAccess(&buf, weixinAccessUnset, scanUser)
+	if out := buf.String(); !strings.Contains(out, `allowed_users: ["`+scanUser+`"]`) || strings.Contains(out, "<your ID>") {
+		t.Errorf("Unset with known ID printed %q, want the ID in the template", out)
+	}
+	buf.Reset()
+	printWeixinAccess(&buf, weixinAccessUnset, "")
+	if out := buf.String(); !strings.Contains(out, `allowed_users: ["<your ID>"]`) || !strings.Contains(out, "placeholder") {
+		t.Errorf("Unset without ID printed %q, want the placeholder template and hint", out)
+	}
+}
