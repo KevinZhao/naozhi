@@ -345,6 +345,10 @@ type ManagedSession struct {
 	// codeChanges is the PRs this session published or touched, newest last,
 	// as an immutable slice replaced whole; see managed_code_change.go.
 	codeChanges atomic.Pointer[[]clievent.CodeChange]
+	// workflows is the board of the session's Workflow tool runs; it follows
+	// the logical session across respawn and rename (managed_workflow.go).
+	// nil for a stub that never held a process.
+	workflows atomic.Pointer[WorkflowBoard]
 	// tuningModel / tuningEffort are the operator's per-session overrides
 	// (docs/rfc/dashboard-model-effort-control.md §4.3); "" = none. They top
 	// resolveSpawnParams's precedence and persist to sessions.json.

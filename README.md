@@ -80,6 +80,8 @@ graph TD
 
 Agent 命令、模型、system prompt 均可在 `config.yaml` 中自定义。
 
+群聊里，Slack 话题串和飞书话题各用一个独立会话，不在话题里的消息共用频道的会话；`session.group_scope` 可改为 `chat`（整个群一个会话）或 `user`（每个成员一个会话）。`/cd`、`/project`、`/cron` 始终按整个群生效。开启 `session.thread_auto_open` 后，顶层的 @bot 提问会在以它为根的新话题里回答，话题里的追问接着同一个会话。
+
 ### 会话生命周期
 
 ```mermaid
@@ -115,7 +117,7 @@ graph LR
 | `passthrough` | 每条消息直接转发给 CLI，各自得到独立结果。需 stream-json 后端，ACP 自动回退到 collect |
 
 - **`/stop`**: 软中断当前回复，保留后续排队消息
-- **`/urgent <消息>`**: 紧急打断当前 turn 并优先处理该消息（passthrough 模式下的 `priority:"now"` 抢占）
+- **`/urgent <消息>`**: 中断当前 turn 并优先处理该消息（passthrough 模式下的 `priority:"now"` 抢占）。正在运行的工具不会被立即打断：CLI 要等工具返回才结束当前 turn（如 `sleep 20` 会让中断推迟到命令跑完）
 
 ### 多 Backend
 
@@ -360,7 +362,7 @@ Dashboard: 浏览器打开 `http://localhost:8180`
 | `/new review` | 重置指定 agent 对话 |
 | `/clear` | 重置会话（同 `/new`） |
 | `/stop` | 中断当前回复，保留后续排队消息 |
-| `/urgent <text>` | 紧急打断并优先处理该消息 |
+| `/urgent <text>` | 中断当前回复并优先处理该消息（正在运行的工具需先结束） |
 | `/cd <path>` | 切换工作目录 |
 | `/pwd` | 显示当前工作目录 |
 | `/project <name>` | 绑定到项目 |
@@ -645,7 +647,9 @@ cost:
 - 到 `warn_ratio` 时，IM 回复末尾追加一行「⚠️ 今日费用已达预算的 80%」，定时任务发一条提示；
   每个 scope 每天各一次。整机额度的提醒每天只发给最先碰到它的那个会话或任务（额度用尽后的
   拒绝提示则每个会话、每个任务都会收到）。`action: warn` 时超过上限也照常执行，只再提醒一次。
-- dashboard 不受预算限制（它是已登录的 owner），但它的花费计入整机额度。
+- dashboard 不受预算限制（它是已登录的 owner），但它的花费计入整机额度。会话头部的运行统计
+  和定时任务时间轴头部会显示「今日 $X / $Y」（取离上限最近的那一档，到 `warn_ratio` 加 ⚠，
+  超过上限标红，悬停可看 scope 和重置时间）；数据来自 `GET /api/cost/budget?session_key=|job_id=`。
 - 这是软上限：放行时还没超的那一轮可能把花费推过上限；花费在账本落盘后（约 1 秒内）才
   计入。只统计以 USD 计价的花费，按 credits / tokens 计量的 backend 不计入。
 - 需要 cost 账本开着（`cost.enabled` 不能为 false）；改配置要重启 naozhi。

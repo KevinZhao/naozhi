@@ -15,7 +15,7 @@ import (
 func TestScheduler_Start_RunsBlobGC(t *testing.T) {
 	t.Parallel()
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: filepath.Join(t.TempDir(), "cron_jobs.json")}, SchedulerDeps{Router: &fakeRouter{}})
-	root := s.stateSubtree("runsnapshots")
+	root := s.sandboxState().Subtree("runsnapshots")
 	jobA, jobB := mustGenerateID(), mustGenerateID()
 	runA, runB := mustGenerateRunID(), mustGenerateRunID()
 	// Live: an old blob a manifest still references. Stranded: an old blob

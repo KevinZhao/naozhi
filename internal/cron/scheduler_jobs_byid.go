@@ -30,7 +30,7 @@ func (s *Scheduler) finishMutation(r mutationResult, kind mutationKind) (*Job, e
 	switch kind {
 	case mutDelete:
 		s.deleteJobPostCleanup(r.job.ID, r.removeEntry)
-	case mutPause, mutAutoPause:
+	case mutPause, mutAutoPause, mutAutoPauseTransient:
 		if r.removeEntry != 0 {
 			s.cron.Remove(r.removeEntry)
 		}
@@ -100,7 +100,7 @@ func (s *Scheduler) autoPauseIfDue(id string, transient bool) int {
 	if count == 0 {
 		return 0
 	}
-	if _, err := s.finishMutation(r, mutAutoPause); err != nil {
+	if _, err := s.finishMutation(r, autoPauseKind(transient)); err != nil {
 		slog.Warn("cron: auto-pause not persisted; job stays active", "job_id", id, "err", err)
 		return 0
 	}

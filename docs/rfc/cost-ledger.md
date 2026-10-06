@@ -180,7 +180,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 ### 5.3 cron 本地 run：与 session 同源（修 P2）
 
-- `cron.Session` 的可选能力 `cron.CostWindow`（`BeginCostWindow()` / `EndCostWindow() costledger.Increment`，wireup adapter 转发）；没有它的会话（测试桩）退回可选的 `CostReporter`（`CostTotals()` 前后差分），两者都没有记 0。
+- `cron.Session` 的可选能力 `cron.CostWindow`（`BeginCostWindow()` / `EndCostWindow() costledger.Increment`，wireup adapter 转发）；没有它的会话（测试桩）记 0。
 - `execSend` 在 Send **前** 开窗口、Send **返回处立即** 关窗口（经 adapter 持有的 `*ManagedSession` 指针，**不查 router**：success/error 路径在 finishRun 之前都会 `router.Reset(key)` 或释放进程，按 key 查会读空），再加一个 defer 兜底，Send panic 也会关窗口；增量随 `runOutcome.costInc` 传给 finishRun。窗口在 Reset / 释放进程之前关闭，所以被杀进程的 partial 由会话记账（§5.6）。cron run 之间由 per-job CAS gate 互斥；同一 cron session 上来自 dashboard 的手动 turn 只靠 `sendMu` 串行，在 cron 关窗口前报出 result 的会计入该 run（可接受：与 run 共享进程上下文），其余按 §5.0 以 `Source=session` 入账。leak-recovery 两回合都在 Send 内。
 - 窗口关闭后才记到的花费（迟到 result、partial）只出现在账本的 session 行里，不回写已经落盘的 `CronRun.CostUSD`：run 记录在终态写一次，账本是权威总额。
 - `finishRun` 写 `CronRun.CostUSD = delta.USD`（**语义从累计值变为增量**；`fresh_context=true` 的 job 前后数值不变，persistent job 的历史值本来就错），并 `ledger.Append(Entry{Source: cron_local, Kind: turn, JobID, RunID, Workspace: job.WorkDir stable id, Backend: job.Backend, Unit/Amount 按 delta 分量各一条, Models: delta.Models})`。
@@ -232,6 +232,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 - 同一 `key` 不同 `unit` 是不同 bucket；前端按 unit 分别渲染。
 - `GET /api/cost/entries?session_key=|job_id=|run_id=&from=&to=&limit=`：明细，调试/审计用。
+- `GET /api/cost/budget?session_key=|job_id=`（#3447）：今日花费对 `cost.budget` 上限，`{enabled, scope, subject, spent, limit, warn, over, blocked, day, reset_at}`；取 IM / cron 闸门对该 key 或任务会检查的那一档（两者都不带 = 整机）。未配置预算时 `enabled:false`，没有适用上限时 `scope` 为空。只读，不拦 dashboard。
 - 校验（对照 `dashboard/cron/handlers.go:36-99 validateStringField`）：`from/to` RFC3339 解析失败 → 400，`to<from` → 400，跨度 > 90 天且无 `allow_full_range` → 400；`group_by` 白名单；`limit` ∈ [1,1000] 默认 200；`session_key/job_id/run_id/workspace` 长度 ≤256、合法 UTF-8、禁 C0/DEL、禁 log-injection runes；`dropped>0` 时响应加 `"note":"amount may be underestimated"`。
 - 鉴权走既有 `auth()`；挂 `listLimiter`。可见性与 `/api/sessions` 同级（naozhi 单租户；`session_key` 含平台用户 id 与现有 sessions API 暴露面一致，不新增）。
 
@@ -239,7 +240,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 - 服务概览「花费」卡：改读 `/api/cost/summary?from=<30d>&group_by=unit`（按单位分桶即够用），USD 主数字，credits 有值另起一行；hover 标注 "CLI 估算口径，非账单 / 含 N 条未知定价 / 账本丢弃 N 条"；`unknown>0 || dropped>0` 显示 ⚠；账本未加载前回退到 live session 求和并标注「累计花费」。
 - cron job 详情：新增 per-job 30 天聚合（`group_by=job` 或 `job_id=` 过滤），时间轴"已加载 run 之和"小字保留（口径不同，文案已区分）。
-- session header run-stats 不变。
+- session header run-stats 末尾、cron 时间轴头部：配置了 `cost.budget` 时显示「今日 $X / $Y」（`/api/cost/budget`）。
 - 前端契约测试（`static_ux_contract_test.go` 模式）锁定 unit 不混算。
 
 ## 9. 兼容与迁移

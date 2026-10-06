@@ -121,13 +121,9 @@ const REST_SCHEMAS = [path.join(ROOT, 'internal', 'dashboard', 'session', 'testd
 const defs = { ...(schema.defs || {}) };
 for (const p of REST_SCHEMAS) Object.assign(defs, JSON.parse(fs.readFileSync(p, 'utf8')).defs);
 const typedSchema = { ...schema, defs };
-// Fields the dashboard adds to a backend struct itself, with where.
-const FRONTEND_STRUCT_FIELDS = {
-  'sessionview.SessionSnapshot': {
-    source: "renderSidebar marks a card 'managed' or 'terminal' (a discovered CLI session)",
-    type_label: 'renderSidebar copies a discovered session\'s type-chip label (backend.Profile.TerminalLabel) onto its card',
-  },
-};
+// Fields the dashboard adds to a backend struct itself, with where. A file
+// under tsc types such fields in its own annotations instead.
+const FRONTEND_STRUCT_FIELDS = {};
 const usedStructExtras = new Set();
 let nestedReads = 0;
 let typedFns = 0;

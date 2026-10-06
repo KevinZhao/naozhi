@@ -16,11 +16,8 @@ import (
 // inline scripts (the theme bootstrap, which must run before first paint, and
 // the generated import map and entry loaders) are allowlisted by SHA-256 hash,
 // computed from the page as served, so an edit re-derives the hash instead of
-// silently breaking the page. KaTeX is served from static/vendor, so styles and
-// fonts are 'self' only. The one jsdelivr source, mermaid, is pinned to the
-// exact versioned file its lazy loader injects (an /npm/ prefix is an
-// anyone-can-publish namespace, i.e. an allowlist bypass);
-// TestDashboardCSP_CDNURLsMatchBundle keeps it in lockstep with render_md.js.
+// silently breaking the page. KaTeX and mermaid are served from static/vendor,
+// so the policy names no origin but the dashboard's own.
 var dashboardCSP = buildDashboardCSP(staticAssets["dashboard.html"].bytes)
 
 // DashboardPage returns a copy of the page handleDashboard serves and the
@@ -29,9 +26,6 @@ var dashboardCSP = buildDashboardCSP(staticAssets["dashboard.html"].bytes)
 func DashboardPage() (page []byte, csp string) {
 	return slices.Clone(staticAssetBytes("dashboard.html")), dashboardCSP
 }
-
-// cdnMermaidJS is the CDN URL loadMermaid injects (SRI-pinned in render_md.js).
-const cdnMermaidJS = "https://cdn.jsdelivr.net/npm/mermaid@11.14.0/dist/mermaid.min.js"
 
 // dashInlineScriptRe matches inline <script> blocks WITHOUT a src attribute —
 // external tags (<script defer src=…>) have empty bodies and must not
@@ -75,7 +69,7 @@ func buildDashboardCSP(page []byte) string {
 
 	return strings.Join([]string{
 		"default-src 'self'",
-		"script-src 'self' " + hashes + " " + cdnMermaidJS,
+		"script-src 'self' " + hashes,
 		"connect-src 'self'",
 		// #2559 D6-3 dropped the last generated style="" attribute, so inline
 		// styles are no longer needed.

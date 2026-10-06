@@ -10,15 +10,17 @@ package cron
 // process, for a caller wired up minutes later. This file is that caller.
 //
 // The verdict comes from the router as a capability, not a SessionRouter
-// method: CostReporter set the precedent — one production implementation
-// gains it, twenty test fakes degrade to "nothing to adopt", which is
-// exactly the pre-adoption behaviour and therefore the right default.
+// method, the same optional-capability pattern as CostWindow /
+// BackendReporter — one production implementation gains it, twenty test
+// fakes degrade to "nothing to adopt", which is exactly the pre-adoption
+// behaviour and therefore the right default.
 
 import (
 	"context"
 	"log/slog"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cron/runstore"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
@@ -77,7 +79,7 @@ var adoptionWaitBudget = 30 * time.Minute
 // gcWG). The gate slot was claimed by claimRunInflight before the first tick;
 // finishRun releases it through the same finalizer every run body uses, so
 // CurrentRun / overlap / gauge behave as if the run were local.
-func (s *Scheduler) adoptRun(m runInflightMarker, run InFlightRun, inflight *runInflight) {
+func (s *Scheduler) adoptRun(m runstore.InflightMarker, run InFlightRun, inflight *runInflight) {
 	finalizer := &runFinalizer{inflight: inflight}
 	sc := runScaffold{finalizer: finalizer, jobID: m.JobID}
 	sc.run(func() {
@@ -122,7 +124,7 @@ func (s *Scheduler) adoptRun(m runInflightMarker, run InFlightRun, inflight *run
 // when no result frame named it). Persistent: release the idle process; a
 // still-running turn is left alone. Skipped on shutdown: Router.Shutdown owns
 // teardown, and the shim is meant to outlive this process.
-func (s *Scheduler) releaseAdoptedSession(m runInflightMarker, out runOutcome) {
+func (s *Scheduler) releaseAdoptedSession(m runstore.InflightMarker, out runOutcome) {
 	if s.stopCtx.Err() != nil {
 		return
 	}

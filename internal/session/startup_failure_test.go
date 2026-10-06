@@ -232,14 +232,14 @@ func TestGetOrCreate_RetriesARejectedResumeFresh(t *testing.T) {
 // release the key's socket, as a real StartShim refuses to clobber a bound
 // one; a socket that outlives the wait makes a failed retry ErrShimStuck.
 func TestGetOrCreate_RejectedResumeRetryWaitsForTheSocket(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow: waits out the 2s socket-gone timeout")
-	}
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	sock := shim.SocketPath(shim.KeyHash(sfKey))
 	rejected := fmt.Errorf("protocol init: acp session/load: %w", clierr.ErrResumeRejected)
 	errClobber := errors.New("start shim: shim already listening: refusing to clobber")
 	for _, released := range []bool{true, false} {
+		if !released {
+			shortenShimGoneWait(t, 50*time.Millisecond)
+		}
 		if err := os.WriteFile(sock, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}

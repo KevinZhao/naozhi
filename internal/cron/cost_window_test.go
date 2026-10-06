@@ -12,8 +12,9 @@ import (
 
 // windowSession books spend the way session.ManagedSession does: a result
 // reported while the cost window is open is the run's, any other result and
-// every process-end partial is a session row. CostTotals covers all of it, so
-// a run measured by differencing totals would also charge the session's rows.
+// every process-end partial is a session row. The session's running total
+// covers all of it, so a run measured by differencing totals would also
+// charge the session's rows.
 type windowSession struct {
 	mu       sync.Mutex
 	log      *[]string
@@ -21,7 +22,6 @@ type windowSession struct {
 	afterEnd func(w *windowSession)
 	open     bool
 	window   float64
-	total    float64
 	rows     []float64
 }
 
@@ -35,7 +35,6 @@ func (w *windowSession) note(ev string) {
 func (w *windowSession) result(usd float64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.total += usd
 	if w.open {
 		w.window += usd
 		return
@@ -47,7 +46,6 @@ func (w *windowSession) result(usd float64) {
 func (w *windowSession) partial(usd float64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.total += usd
 	w.rows = append(w.rows, usd)
 }
 
@@ -75,12 +73,6 @@ func (w *windowSession) EndCostWindow() costledger.Increment {
 		return costledger.Increment{}
 	}
 	return costledger.Increment{USD: inc}
-}
-
-func (w *windowSession) CostTotals() costledger.Totals {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return costledger.Totals{USD: w.total}
 }
 
 func (w *windowSession) sessionRows() []float64 {

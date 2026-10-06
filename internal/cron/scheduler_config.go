@@ -126,7 +126,7 @@ var ErrSessionCapacity = errors.New("cron: session capacity reached")
 
 // ErrTurnFailed marks a Send whose result frame reported the turn failed (the
 // backend's is_error) rather than an abort naozhi asked for, or whose CLI
-// exited because it could not resume the session. The run is recorded as
+// exited for a cause its stderr names. The run is recorded as
 // failed with ErrClassTurnFailed instead of succeeding with an empty or
 // raw-error result.
 var ErrTurnFailed = errors.New("cron: turn failed")
@@ -150,6 +150,8 @@ const (
 	TurnCauseBackendInvalid     TurnCause = "backend_invalid_request"
 	TurnCauseBackendUnreachable TurnCause = "backend_unreachable"
 	TurnCauseResumeUnavailable  TurnCause = "resume_unavailable"
+	TurnCauseCLIConfig          TurnCause = "cli_config"
+	TurnCauseCLIMissingRuntime  TurnCause = "cli_missing_runtime"
 )
 
 // TurnFailedError is ErrTurnFailed with the cause the session side found;

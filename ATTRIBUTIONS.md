@@ -31,3 +31,18 @@ require attribution under their respective licenses.
 - **License**: [MIT](https://github.com/KaTeX/KaTeX/blob/main/LICENSE), copyright
   Khan Academy and other contributors; the license text ships next to the
   files as `LICENSE`.
+
+### Mermaid 11.14.0
+
+- **Used in**: `internal/server/static/vendor/mermaid-11.14.0/` —
+  `mermaid.min.js.gz`, the npm release's `dist/mermaid.min.js` compressed with
+  `gzip -9n` (its decompressed bytes match the SRI pin in `render_md.js`),
+  embedded in the binary and loaded by `render_md.js` to draw diagrams in
+  messages.
+- **Source**: [Mermaid](https://github.com/mermaid-js/mermaid), npm package
+  `mermaid@11.14.0`.
+- **License**: [MIT](https://github.com/mermaid-js/mermaid/blob/develop/LICENSE),
+  copyright Knut Sveidqvist; the license text ships next to the file as
+  `LICENSE`. The bundle includes its npm dependencies (d3, dagre-d3-es,
+  cytoscape, DOMPurify, chevrotain, marked, KaTeX and others) under their own
+  permissive licenses, MIT, ISC, BSD and Apache-2.0 among them.

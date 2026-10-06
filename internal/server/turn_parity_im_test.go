@@ -130,7 +130,7 @@ func TestTurnParity06_IM_UrgentAnyModeCaseInsensitive(t *testing.T) {
 				t.Fatalf("urgent reply = %q", r)
 			}
 			h.imSend("m2", "/urgent")
-			if r := h.plat.waitReply(t, "bare /urgent"); r != "用法：/urgent <紧急消息>（该消息会立即中断正在进行的回复）" {
+			if r := h.plat.waitReply(t, "bare /urgent"); r != "用法：/urgent <紧急消息>（该消息会中断正在进行的回复；正在运行的工具需先结束）" {
 				t.Fatalf("bare /urgent reply = %q, want the usage line", r)
 			}
 			turns.noMoreTurns(t)

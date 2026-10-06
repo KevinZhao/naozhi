@@ -36,6 +36,27 @@ type Image struct {
 	MimeType string // e.g., "image/png", "image/jpeg"
 }
 
+// FileReject records why an adapter could not deliver a file's bytes, so
+// dispatch can name the file in its "not processed" notice instead of the
+// file vanishing.
+type FileReject string
+
+const (
+	FileRejectNone           FileReject = ""
+	FileRejectTooLarge       FileReject = "too_large"
+	FileRejectUnsupported    FileReject = "unsupported"
+	FileRejectDownloadFailed FileReject = "download_failed"
+)
+
+// File is a non-image attachment downloaded by a platform. Data is unset when
+// Reject is; dispatch classifies the bytes (attachment.ClassifyFile), so an
+// adapter need not sniff them.
+type File struct {
+	Name   string
+	Data   []byte
+	Reject FileReject
+}
+
 // IncomingMessage is the platform-agnostic inbound message.
 type IncomingMessage struct {
 	Platform string
@@ -49,10 +70,15 @@ type IncomingMessage struct {
 	// ThreadID is the platform-native id of the thread or topic the message
 	// was posted in (Slack thread_ts, Feishu topic root message id); empty
 	// outside one. Replies pass it back verbatim as OutgoingMessage.ThreadID.
-	ThreadID  string
-	Text      string
-	MentionMe bool
-	Images    []Image
+	ThreadID string
+	// SelfThread is the ThreadID that would open a new thread under this
+	// message (Slack ts, Feishu message id); empty when the message is
+	// already in a thread or the adapter cannot open one there.
+	SelfThread string
+	Text       string
+	MentionMe  bool
+	Images     []Image
+	Files      []File
 	// AgentID, when non-empty, pins the target agent (bypassing slash-command
 	// resolution) for synthetic messages such as an AskUserQuestion card click
 	// (#2148). The dispatcher whitelist-validates it before honouring it.

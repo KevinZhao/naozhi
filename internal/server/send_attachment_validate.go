@@ -1,6 +1,6 @@
 // "上传字节 → clievent.Attachment" 验证流水线：parseAttachmentFile（magic-byte
 // sniff + size gate）、pdfNestedInImage（防 JFIF+PDF 嵌套）、
-// hasPersistableAttachment、imageExtForMime、sanitizeClientFilename。
+// hasPersistableAttachment、imageExtForMime。
 // maxImageBytes / maxPDFBytes / uploadBodyBytes 定义在 dashboard_send.go。
 package server
 
@@ -12,11 +12,9 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
-	"strings"
-	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/attachment"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // parseAttachmentFile reads a multipart file header and returns the
@@ -111,7 +109,7 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (clievent.Atta
 			Kind:     clievent.KindFileRef,
 			Data:     data,
 			MimeType: "application/pdf",
-			OrigName: sanitizeClientFilename(fh.Filename),
+			OrigName: attachment.SanitizeOrigName(fh.Filename),
 			Size:     int64(len(data)),
 		}, nil
 	}
@@ -183,40 +181,3 @@ func imageExtForMime(mime string) string {
 		return ""
 	}
 }
-
-// sanitizeClientFilename strips control characters and path separators
-// from a multipart filename so it is safe to embed in the .meta sidecar,
-// Content-Disposition headers, and the text hint Claude receives, and caps
-// it at maxClientFilenameRunes. The filename is fully client-controlled and
-// must never be trusted as a path component; both '/' and '\\' are
-// collapsed to '_' (filepath.Base would miss Windows separators on Linux).
-func sanitizeClientFilename(name string) string {
-	if name == "" {
-		return ""
-	}
-	var b strings.Builder
-	b.Grow(len(name))
-	for _, r := range name {
-		switch {
-		case r < 0x20 || r == 0x7f:
-			// drop C0 control chars
-		case osutil.IsLogInjectionRune(r):
-			// drop C1 controls and bidi-override runes
-		case r == '/' || r == '\\':
-			b.WriteByte('_')
-		default:
-			b.WriteRune(r)
-		}
-	}
-	out := b.String()
-	// Byte short-circuit: ≤ N bytes implies ≤ N runes.
-	if len(out) > maxClientFilenameRunes && utf8.RuneCountInString(out) > maxClientFilenameRunes {
-		runes := []rune(out)
-		out = string(runes[:maxClientFilenameRunes])
-	}
-	return out
-}
-
-// maxClientFilenameRunes caps sanitizeClientFilename output so a huge
-// filename cannot bloat the prompt or the .meta sidecar.
-const maxClientFilenameRunes = 120

@@ -188,6 +188,7 @@ func (p *Process) readLoop() {
 		}
 		if capExceeded {
 			log.Warn("readLoop: oversized shim message, skipping", "size", len(line))
+			p.noteOversizeLine(line, time.Now())
 			if readErr != nil {
 				p.classifyEOF(readErr, true, log)
 				break
@@ -608,6 +609,9 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 			(*fn)(*ev.CodeChange)
 		}
 	}
+	// Idle or not, owned or not: background workflows report between turns.
+	// It also sets ev.WorkflowTask, which logEventAt's entries carry.
+	p.observeWorkflow(&ev, now)
 
 	// No consumer past this point may keep a workflow snapshot: eventCh holds
 	// up to 1024 Events that nobody drains while the session is idle.

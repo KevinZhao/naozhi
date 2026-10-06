@@ -143,17 +143,28 @@ func (c cronSessionAdapter) Send(ctx context.Context, text string) (cron.SendRes
 	return cron.SendResult{Text: r.Text, SessionID: r.SessionID}, err
 }
 
-// exitFailure wraps a cron.TurnFailedError around a CLI exit claude made
-// because it could not resume the session, keeping err in the chain for run
-// history; any other error is returned as is. The respawn normally drops that
-// resume (session's resumeDropReason), so the notice says the next run tries a
-// new session rather than promising one.
+// exitFailure wraps a cron.TurnFailedError around a CLI exit whose stderr
+// names its cause (exitTurnCause), keeping err in the chain for run history;
+// any other error, an unrecognised exit included, is returned as is.
 func exitFailure(err error) error {
 	var pe *clierr.ProcessExitedError
-	if errors.As(err, &pe) && pe.Class == clierr.ExitResumeNotFound {
-		return fmt.Errorf("%w: %w", &cron.TurnFailedError{Cause: cron.TurnCauseResumeUnavailable}, err)
+	if !errors.As(err, &pe) {
+		return err
+	}
+	if cause, ok := exitTurnCause[pe.Class]; ok {
+		return fmt.Errorf("%w: %w", &cron.TurnFailedError{Cause: cause}, err)
 	}
 	return err
+}
+
+// exitTurnCause maps the exit classes the notice can word. The respawn after a
+// stale resume normally drops it (session's resumeDropReason), so that notice
+// says the next run tries a new session rather than promising one.
+var exitTurnCause = map[clierr.ExitClass]cron.TurnCause{
+	clierr.ExitResumeNotFound: cron.TurnCauseResumeUnavailable,
+	clierr.ExitAuth:           cron.TurnCauseBackendAuth,
+	clierr.ExitMCPConfig:      cron.TurnCauseCLIConfig,
+	clierr.ExitMissingRuntime: cron.TurnCauseCLIMissingRuntime,
 }
 
 // turnFailure wraps a cron.TurnFailedError (matching cron.ErrTurnFailed)
@@ -217,12 +228,6 @@ var turnCauseByKind = map[apierr.Kind]cron.TurnCause{
 	apierr.KindTimeout:       cron.TurnCauseBackendUnreachable,
 	apierr.KindNetwork:       cron.TurnCauseBackendUnreachable,
 }
-
-// CostTotals satisfies cron.CostReporter: cron differences two snapshots
-// around Send to attribute the run's spend (docs/rfc/cost-ledger.md §5.3).
-func (c cronSessionAdapter) CostTotals() costledger.Totals { return c.s.CostTotals() }
-
-var _ cron.CostReporter = cronSessionAdapter{}
 
 // BeginCostWindow and EndCostWindow satisfy cron.CostWindow: the run books
 // the spend reported while its Send is live, the session the rest.

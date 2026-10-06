@@ -30,6 +30,9 @@ type HistoryIO struct {
 	// history.Wiring by attachHistorySource and read by resume validation. A
 	// private copy of RouterConfig.BackendDirs.
 	backendDirs map[string]string
+	// projectsRoot is claudeDir's projects dir with symlinks resolved, the
+	// one root workflow boards resolve run dirs under; "" with no claudeDir.
+	projectsRoot string
 	// loader loads a session's persisted JSONL history tail across a
 	// prev_session_ids chain; tests inject a fixture (#458). Never nil after
 	// NewRouter, read-only.

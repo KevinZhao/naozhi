@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cron/runstore"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
@@ -105,7 +106,7 @@ func startAdoption(t *testing.T, fresh bool, outcome AdoptedRunOutcome) adoptRea
 	router.gateHeld = func() bool { _, ok := s.CurrentRun(jobID); return ok }
 	s.putJobForTest(&Job{ID: jobID, Schedule: "@every 5m", Prompt: "do thing",
 		WorkDir: "/tmp/wd", FreshContext: fresh, LastSessionID: "sess-prev"})
-	if path := s.writeRunInflightMarker(runInflightMarker{
+	if path := s.runMarkers().Write(runstore.InflightMarker{
 		JobID: jobID, RunID: mustGenerateRunID(), Trigger: TriggerScheduled,
 		StartedAtMS: time.Now().Add(-90 * time.Second).UnixMilli(),
 		Prompt:      "do thing", WorkDir: "/tmp/wd", Fresh: fresh,

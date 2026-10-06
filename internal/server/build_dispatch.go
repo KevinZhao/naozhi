@@ -54,6 +54,8 @@ func (s *Server) buildDispatcher(w *wiring) *dispatch.Dispatcher {
 		Access:                w.imAccess,
 		RateLimit:             w.imRateLimit,
 		Budget:                w.imBudget,
+		GroupScope:            w.imGroupScope,
+		ThreadAutoOpen:        w.imAutoThread,
 		ClaudeDir:             s.claudeDir,
 		Capabilities:          serverCaps{s: s},
 		NoOutputTimeout:       s.noOutputTimeout,

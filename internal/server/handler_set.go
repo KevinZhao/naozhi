@@ -131,6 +131,8 @@ type wiring struct {
 	agentCommands map[string]string
 	allowedRoot   string
 	imRateLimit   dispatch.RateLimit
+	imGroupScope  dispatch.GroupScope
+	imAutoThread  bool
 	imBudget      *budget.Gate   // nil admits every IM turn
 	imAccess      *imauth.Policy // nil allows every IM sender
 	debugMode     bool           // gates /api/debug/pprof and /api/debug/vars
