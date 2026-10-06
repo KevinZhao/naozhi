@@ -11,7 +11,8 @@ import (
 func TestRunIDAndSessionKey_RoundTrip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	if RunID(ctx) != "" || SessionKey(ctx) != "" || RunID(nil) != "" {
+	var nilCtx context.Context
+	if RunID(ctx) != "" || SessionKey(ctx) != "" || RunID(nilCtx) != "" {
 		t.Fatal("empty ctx should carry nothing")
 	}
 	if WithRunID(ctx, "") != ctx || WithSessionKey(ctx, "") != ctx {
