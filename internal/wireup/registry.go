@@ -1,6 +1,7 @@
 // registry.go provides the generic type-safe registration idiom (Registry[T])
 // with a duplicate-key panic, so double-wireup surfaces at startup rather than
-// at first runtime use (#1058).
+// at first runtime use (#1058). It backs Boot's step table only; new
+// closed-set registries use registry.Typed.
 package wireup
 
 import (
@@ -12,7 +13,7 @@ import (
 // Registry is a concurrency-safe, type-safe name→value table for boot-time
 // subsystem registration. Zero value is NOT usable — construct via NewRegistry.
 type Registry[T any] struct {
-	// kind labels the registry in panic/audit messages ("backend", "platform").
+	// kind labels the registry in panic/audit messages ("boot-step").
 	kind string
 	mu   sync.RWMutex
 	m    map[string]T

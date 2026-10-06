@@ -192,16 +192,16 @@
     "lateBindings": 1
   },
   "dashboard.js": {
-    "lines": 2840,
+    "lines": 2249,
     "maxFnLines": 100,
     "maxIifeLines": 524,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0,
     "deadInjections": 0,
-    "innerHTMLAssign": 16,
+    "innerHTMLAssign": 11,
     "htmlInsert": 2,
-    "lateBindings": 5
+    "lateBindings": 3
   },
   "discovery.js": {
     "lines": 205,
@@ -299,6 +299,30 @@
     "htmlInsert": 0,
     "lateBindings": 0
   },
+  "lightbox.js": {
+    "lines": 291,
+    "maxFnLines": 49,
+    "maxIifeLines": 0,
+    "fnOver100": 0,
+    "topLevelLetVar": 0,
+    "configureDeps": 0,
+    "deadInjections": 0,
+    "innerHTMLAssign": 1,
+    "htmlInsert": 0,
+    "lateBindings": 0
+  },
+  "mem_popover.js": {
+    "lines": 300,
+    "maxFnLines": 36,
+    "maxIifeLines": 0,
+    "fnOver100": 0,
+    "topLevelLetVar": 0,
+    "configureDeps": 0,
+    "deadInjections": 0,
+    "innerHTMLAssign": 4,
+    "htmlInsert": 0,
+    "lateBindings": 0
+  },
   "mobile_nav.js": {
     "lines": 544,
     "maxFnLines": 118,
@@ -348,8 +372,8 @@
     "lateBindings": 0
   },
   "render_md.js": {
-    "lines": 1029,
-    "maxFnLines": 97,
+    "lines": 1025,
+    "maxFnLines": 89,
     "maxIifeLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 6,
@@ -480,7 +504,7 @@
     "lateBindings": 0
   },
   "state.js": {
-    "lines": 257,
+    "lines": 255,
     "maxFnLines": 0,
     "maxIifeLines": 0,
     "fnOver100": 0,

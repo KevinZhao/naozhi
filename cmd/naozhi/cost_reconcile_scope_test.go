@@ -491,8 +491,8 @@ func TestReconcile_AnEarlierAdjustmentDoesNotSplitATurn(t *testing.T) {
 // A day the ledger books spend on and the transcript shows none of naozhi's
 // is left as booked: nothing proves the entries wrong, and zeroing the day
 // would drop spend the transcript no longer holds. A day the transcript shows
-// less spend on than booked still gets the difference taken off, and one the
-// ledger nets below zero on is raised to zero: spend is never negative.
+// less spend on than booked is reported and left too, and one the ledger nets
+// below zero on is raised to zero: spend is never negative.
 func TestReconcile_ADayWithNoTranscriptSpendIsLeftAsBooked(t *testing.T) {
 	for _, c := range []struct {
 		name     string
@@ -501,15 +501,16 @@ func TestReconcile_ADayWithNoTranscriptSpendIsLeftAsBooked(t *testing.T) {
 		residual float64
 		adjusts  int
 		empty    int
+		above    float64 // what the day's ledger is reported over its transcript by
 	}{
-		{"no lines", func(s reconcileScope) []string { return nil }, 0, 0, 0, 1},
+		{"no lines", func(s reconcileScope) []string { return nil }, 0, 0, 0, 1, 0},
 		{"only terminal lines", func(s reconcileScope) []string {
 			return []string{scopeMsg(s.day(-1, 9, 0), "msg_term", 4, "cli")}
-		}, 0, 0, 0, 1},
+		}, 0, 0, 0, 1, 0},
 		{"less spend than booked", func(s reconcileScope) []string {
 			return []string{scopeMsg(s.day(-1, 9, 0), "msg_2", 1, "sdk-cli")}
-		}, 0, -2, 1, 0},
-		{"no lines and a credit", func(s reconcileScope) []string { return nil }, 5, 2, 1, 0},
+		}, 0, 0, 0, 0, 2},
+		{"no lines and a credit", func(s reconcileScope) []string { return nil }, 5, 2, 1, 0, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := newReconcileScope(t)
@@ -537,6 +538,13 @@ func TestReconcile_ADayWithNoTranscriptSpendIsLeftAsBooked(t *testing.T) {
 			}
 			if named := strings.Contains(out, "天 transcript 无用量"); named != (c.empty == 1) {
 				t.Errorf("report names an empty day: %v, want %v\n%s", named, c.empty == 1, out)
+			}
+			wantAbove := 0
+			if c.above > 0 {
+				wantAbove = 1
+			}
+			if st.AboveDays != wantAbove || !near(st.AboveUSD, c.above) || strings.Contains(out, "天账本高于 transcript") != (wantAbove == 1) {
+				t.Errorf("settlement = %+v, want the day reported %v above its transcript\n%s", st, c.above, out)
 			}
 		})
 	}

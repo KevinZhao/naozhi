@@ -1,10 +1,8 @@
 // render_md.js — markdown / KaTeX / mermaid rendering (#2558 D4).
 //
-// Moved verbatim out of dashboard.js (`git diff --color-moved` shows this as a
-// pure move; only the import/export lines below are new). This is the
-// dashboard's XSS-critical surface — every renderer here must keep routing
-// untrusted text through esc()/escAttr()/safeUrl(); the sanitiser contract
-// tests (static_sanitize_test.go, static_markdown_p3_test.go) pin it.
+// The dashboard's XSS-critical surface: every renderer here routes untrusted
+// text through esc()/escAttr()/safeUrl(); static_sanitize_test.go,
+// static_markdown_p3_test.go and scripts/render-md.test.mjs pin it.
 //
 // Layering: imports nz_util, the URL / entity sanitisers from utilities.js
 // and the path-shape tests from the file_ref_parse.js leaf (file-reference
@@ -115,12 +113,19 @@ function mergeProseDollarBlocks(parts) {
   return out;
 }
 
+// replaceNul turns U+0000 into U+FFFD (CommonMark 2.3): the inline passes
+// delimit placeholders with \x00, and a source NUL could forge one.
+function replaceNul(s) {
+  return s.indexOf('\x00') === -1 ? s : s.replace(/\x00/g, '\uFFFD');
+}
+
 function renderMdUncached(s) {
   // Normalize CRLF/CR to LF up front. Source can be Windows-pasted text or
   // IM payloads carrying \r\n. Without this every per-line regex below
   // (LIST_ITEM_RE, heading, table) would silently miss-match on the trailing
   // \r and demote rich blocks to plain <br> spans.
   if (s.indexOf('\r') !== -1) s = s.replace(/\r\n?/g, '\n');
+  s = replaceNul(s);
   // Split by fenced code blocks and display math blocks (including LaTeX
   // environments like \begin{aligned}...\end{aligned}).
   const parts = mergeProseDollarBlocks(s.split(BLOCK_SPLIT_RE));
@@ -172,13 +177,11 @@ function renderFence(part) {
   // Info string → lang: first word, cut at whitespace / `:` / `{` so
   // `python:main.py` and `js {1,3}` yield `python` / `js`; restricted to a
   // safe charset so `c++` / `c#` / `objective-c` survive intact while stray
-  // punctuation never reaches data-lang. The old `(\w*)` stopped at the
-  // first non-word char and left the remainder (`++`) in the code body.
+  // punctuation never reaches data-lang.
   const lang = m ? (m[1].trim().split(/[\s:{]/)[0] || '').replace(/[^\w+#.\-]/g, '') : '';
   // Unclosed fence (streaming tail: BLOCK_SPLIT_RE needs a closing ```, so
   // the remainder arrives as a plain part that still starts with ```):
-  // strip only the opening ```lang line. The old slice(3, -3) assumed a
-  // closing fence and ate the last 3 characters of live output.
+  // strip only the opening ```lang line, never the tail of live output.
   const code = oneLine
     ? part.replace(/^```/, '').replace(/```$/, '')
     : m ? m[2].replace(/\n$/, '') : part.replace(/^```[^\n]*\n?/, '');
@@ -501,12 +504,27 @@ const LINE_HANDLERS = [
 /* Inline markdown: bold, italic, code, links, math */
 // `[text]( dest "title" )` — dest is a run of non-space/non-paren chars with
 // at most one nested `(...)` group; the title group is optional; CommonMark
-// permits whitespace padding on both sides of the body.
-const MD_LINK_RE = /\[([^\]]+)\]\(\s*((?:[^()\s]|\([^()\s]*\))+)(?:\s+(?:"([^"]*)"|'([^']*)'))?\s*\)/g;
+// permits whitespace padding on both sides of the body. Dest and title
+// exclude \x00 so no placeholder is restored inside an attribute value.
+const MD_LINK_RE = /\[([^\]]+)\]\(\s*((?:[^()\s\x00]|\([^()\s\x00]*\))+)(?:\s+(?:"([^"\x00]*)"|'([^'\x00]*)'))?\s*\)/g;
 // Bare-URL autolink. Applied only to text OUTSIDE already-emitted <a>…</a>
-// so a URL inside a link's label never becomes a nested anchor.
-const MD_AUTOLINK_RE = /(^|[^"'>])(https?:\/\/(?:(?!&lt;|&gt;)[^\s<)}\]\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65])+)/g;
+// so a URL inside a link's label never becomes a nested anchor; it stops at
+// a \x00 placeholder for the same reason as MD_LINK_RE.
+const MD_AUTOLINK_RE = /(^|[^"'>])(https?:\/\/(?:(?!&lt;|&gt;)[^\s<)}\]\x00\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65])+)/g;
 const MD_ANCHOR_SPLIT_RE = /(<a [^>]*>[\s\S]*?<\/a>)/;
+// Memory wiki-link `[[slug]]`. See docs/rfc/memory-link-rendering.md.
+function memlinkHtml(slug) {
+  var m = slug.match(/^(feedback|project|user|reference)_(.+)$/);
+  var type = m ? m[1] : 'memory';
+  var label = (m ? m[2] : slug).split('_').slice(-3).join('_');
+  var icon = ({ feedback: '💡', project: '📌', user: '👤', reference: '🔗', memory: '🧠' })[type];
+  var ariaLabel = 'memory 引用：[[' + slug + ']]';
+  return '<span class="md-memlink" data-slug="' + escAttr(slug) +
+    '" data-type="' + type + '" tabindex="0" role="link"' +
+    ' aria-label="' + escAttr(ariaLabel) + '">' +
+    '<span class="md-memlink-icon" aria-hidden="true">' + icon + '</span>' +
+    '<span class="md-memlink-label">' + esc(label) + '</span></span>';
+}
 function inlineMd(s) {
   // `code` spans extracted FIRST so later passes never peek inside them.
   const codeTokens = [];
@@ -517,36 +535,25 @@ function inlineMd(s) {
       return '\x00CODE' + idx + '\x00';
     });
   }
-  // Inline math extracted before HTML escaping, via \x00 delimiters.
+  // Inline math extracted before HTML escaping, via \x00 delimiters. Math
+  // wrapping a code placeholder stays text: KaTeX copies its source into an
+  // error span's title, where the code restore would land inside it.
   const mathTokens = [];
   if (s.indexOf('$') !== -1 || s.indexOf('\\(') !== -1) {
+    const stash = (match, tex) => (tex.indexOf('\x00') !== -1 ? match
+      : '\x00KTX' + (mathTokens.push(renderKatex(tex, false)) - 1) + '\x00');
     // `$...$`: non-alphanumeric outside + isMathInline on the inside.
-    s = s.replace(/(?<![A-Za-z0-9])\$([^\s\$][^\$\n]*?[^\s\$]|[^\s\$])\$(?![A-Za-z0-9])/g, function(match, tex) {
-      if (!isMathInline(tex)) return match;
-      const idx = mathTokens.length;
-      mathTokens.push(renderKatex(tex, false));
-      return '\x00KTX' + idx + '\x00';
-    });
-    s = s.replace(/\\\((.+?)\\\)/g, function(_, tex) {
-      const idx = mathTokens.length;
-      mathTokens.push(renderKatex(tex, false));
-      return '\x00KTX' + idx + '\x00';
-    });
+    s = s.replace(/(?<![A-Za-z0-9])\$([^\s\$][^\$\n]*?[^\s\$]|[^\s\$])\$(?![A-Za-z0-9])/g,
+      (match, tex) => (isMathInline(tex) ? stash(match, tex) : match));
+    s = s.replace(/\\\((.+?)\\\)/g, stash);
   }
   s = esc(s);
-  // Memory wiki-link `[[slug]]`, substituted before `[link](url)` so the
-  // two grammars cannot collide. See docs/rfc/memory-link-rendering.md.
+  // Wiki-links run before `[link](url)` so the grammars cannot collide, and
+  // are stashed like code spans so `__` cannot rewrite a slug's attributes.
+  const memTokens = [];
   s = s.replace(/\[\[([a-zA-Z0-9_\-]{1,64})\]\]/g, function(_, slug) {
-    var m = slug.match(/^(feedback|project|user|reference)_(.+)$/);
-    var type = m ? m[1] : 'memory';
-    var label = (m ? m[2] : slug).split('_').slice(-3).join('_');
-    var icon = ({ feedback: '💡', project: '📌', user: '👤', reference: '🔗', memory: '🧠' })[type];
-    var ariaLabel = 'memory 引用：[[' + slug + ']]';
-    return '<span class="md-memlink" data-slug="' + escAttr(slug) +
-      '" data-type="' + type + '" tabindex="0" role="link"' +
-      ' aria-label="' + escAttr(ariaLabel) + '">' +
-      '<span class="md-memlink-icon" aria-hidden="true">' + icon + '</span>' +
-      '<span class="md-memlink-label">' + esc(label) + '</span></span>';
+    memTokens.push(memlinkHtml(slug));
+    return '\x00MEM' + (memTokens.length - 1) + '\x00';
   });
   // SECURITY CONTRACT: bold/italic regex must run AFTER esc(s) and the
   // code/wiki-link passes above — same for strike/link below (`.+?`
@@ -568,10 +575,10 @@ function inlineMd(s) {
     const titleAttr = title ? ' title="' + escAttr(decodeEscEntities(title)) + '"' : '';
     if (safe === '#') {
       // Local-file link rescue: `urlEsc` is tokenized, not raw text —
-      // reject a `<`-bearing or \x00-bearing target before it reaches
-      // fileRefCode, and require a real extension.
+      // reject a `<`-bearing target before it reaches fileRefCode, and
+      // require a real extension.
       const target = urlEsc.trim();
-      if (target.indexOf('<') === -1 && target.indexOf('\x00') === -1 && isFileRefCandidate(target)) {
+      if (target.indexOf('<') === -1 && isFileRefCandidate(target)) {
         const { path: bare } = splitPathLine(target);
         const base = bare.slice(bare.lastIndexOf('/') + 1);
         if (FILE_REF_HAS_EXT.test(base)) return fileRefCode(target);
@@ -594,12 +601,15 @@ function inlineMd(s) {
       ? autolinkSeg(s)
       : s.split(MD_ANCHOR_SPLIT_RE).map((seg, k) => (k % 2 ? seg : autolinkSeg(seg))).join('');
   }
+  if (memTokens.length > 0) {
+    s = s.replace(/\x00MEM(\d+)\x00/g, function(_, idx) { return memTokens[+idx] || ''; });
+  }
   if (mathTokens.length > 0) {
-    s = s.replace(/\x00KTX(\d+)\x00/g, function(_, idx) { return mathTokens[+idx]; });
+    s = s.replace(/\x00KTX(\d+)\x00/g, function(_, idx) { return mathTokens[+idx] || ''; });
   }
   if (codeTokens.length > 0) {
     s = s.replace(/\x00CODE(\d+)\x00/g, function(_, idx) {
-      return fileRefCode(codeTokens[+idx]);
+      return codeTokens[+idx] ? fileRefCode(codeTokens[+idx]) : '';
     });
   }
   return s;
@@ -654,7 +664,7 @@ function renderTable(lines) {
     return s.replace(/^\||\|$/g, '')
       .split('|')
       .map(c => c.trim()
-        .replace(/\x00G(\d+)\x00/g, (_, i) => guards[+i])
+        .replace(/\x00G(\d+)\x00/g, (_, i) => guards[+i] || '')
         .split(PIPE).join('|'));
   };
   const header = cells(lines[0]);
@@ -915,6 +925,7 @@ function runPendingAsync() {
 //   'plain'              — no rendering, esc + <pre>
 function renderRich(src, opts) {
   if (!src) return '';
+  src = replaceNul(src);
   const mode = (opts && opts.mode) || 'markdown';
   if (mode === 'plain') return '<pre class="rich-plain">' + esc(src) + '</pre>';
   if (mode === 'tex')   return renderTexDoc(src);
@@ -958,25 +969,10 @@ function renderTexDoc(src) {
    the initial history, plus nav rebuilds, plus preview polls. */
 const _mdCache = new Map();
 const _MD_CACHE_MAX = 500;
-// RNEW-PERF-003 (#454): cap cacheable input length at 2000 chars. The
-// previous 20000-char cap caused two pathologies on streaming text events:
-//
-//  1. Cache MISS on every render — streaming `text` events grow by chunks,
-//     so the cache key (full string) is unique per WS push. The Map.get
-//     was always undefined, the work was always done from scratch.
-//  2. Cache WRITE on every render evicted long-lived plain-text bubbles
-//     (welcome banner, system prompts, short replies) that would otherwise
-//     have been cheap repeat-hits as the user navigated views. Net cache
-//     hit rate fell off a cliff once a long streaming reply landed.
-//
-// Plain replies under 2000 chars ARE the cache's intended audience —
-// they're the ones that re-render on nav rebuild + preview poll without
-// changing. Above that threshold the input is either a wall-of-text final
-// reply (rendered once, never again — cache is a write-only bloat) or a
-// still-streaming `running` event (key changes every push — cache never
-// hits). Skip the cache write in both cases. The 2000-char threshold
-// covers >95% of stable IM-style replies on naozhi without paying
-// hash-the-string cost on streaming-storm responses.
+// Cacheable inputs are under 2000 chars (#454): short stable replies are what
+// re-render unchanged on nav rebuild and preview poll. A longer input is a
+// final reply rendered once or a streaming event whose key changes on every
+// push; caching it never hits and evicts the short bubbles that would.
 const _MD_CACHE_INPUT_MAX = 2000;
 // Any construct that can mint a unique DOM id (mmd-N via ```mermaid, ktx-N
 // via $ / \[ / \( / \begin{env}) must bypass the cache: a cached pending

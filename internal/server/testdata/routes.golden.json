@@ -526,6 +526,16 @@
   },
   {
     "method": "GET",
+    "path": "/static/lightbox.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
+    "path": "/static/mem_popover.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/mobile_nav.js",
     "handler_type": "http.HandlerFunc"
   },

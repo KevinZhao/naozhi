@@ -85,11 +85,14 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	postAuthLR := &io.LimitedReader{R: conn, N: int64(maxClientLineBytes()) + 1}
 	reader := bufio.NewReaderSize(postAuthLR, 64*1024)
 
-	// Send hello directly (before becoming the active client, so no live events interleave)
+	// Send hello directly (before becoming the active client, so no live
+	// events interleave). The attach generation is taken in the same snapshot.
 	s.mu.Lock()
 	seqStart, seqEnd := s.buffer.SeqRange()
 	cliAlive := s.cli.alive()
 	sessionID := s.state.SessionID
+	s.lastAttachGen++
+	gen := s.lastAttachGen
 	s.mu.Unlock()
 
 	writeMsg(conn, ServerMsg{
@@ -123,19 +126,19 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 		writeMsg(conn, ServerMsg{Type: "cli_exited", Code: intPtr(s.cli.exitCode), StderrTail: s.stderrTail.Lines()})
 	}
 
-	// Reject a new client while the CLI is alive and another client is
-	// connected, so an unexpected reconnect cannot kick an active one.
-	s.mu.Lock()
-	hasActiveClient := s.clientConn != nil
-	s.mu.Unlock()
-	if hasActiveClient && cliAlive {
+	// NOW become the active client (after replay complete, no duplication
+	// window). A refused handler returns before the defers below, leaving the
+	// watchdog, idle timer and state file to the client that is active.
+	writeCh, clientDone, admit := s.admitClient(conn, gen, cliAlive)
+	switch admit {
+	case admitBusy:
 		slog.Warn("rejecting new client: active client exists while CLI alive")
 		writeMsg(conn, ServerMsg{Type: "error", Msg: "another client is connected"})
 		return
+	case admitSuperseded:
+		slog.Debug("dropping superseded client: a newer attach is active", "gen", gen)
+		return
 	}
-
-	// NOW become the active client (after replay complete, no duplication window)
-	writeCh, clientDone := s.setClient(conn)
 
 	// A new client means the shim is needed: stop watchdog, cancel grace timer.
 	s.watchdog.Stop()
@@ -240,8 +243,8 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 // return unwinds the calling handleClient's defers.
 //
 //   - reader / postAuthLR: bounded line reader; postAuthLR.N is reset per line.
-//   - clientDone: closed by setClient teardown; the producer goroutine watches
-//     it to avoid leaking.
+//   - clientDone: closed when the client is kicked or cleared; the producer
+//     goroutine watches it to avoid leaking.
 //   - cliWasAlive: cli.alive() at attach time; drives cli_exited dedup.
 //
 // Returns sendCliExited=true (plus exit code) when the live CLI died, so

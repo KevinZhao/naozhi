@@ -90,7 +90,7 @@ argv 去 --resume）与 `currentArgs`（当前 config 重合并后的 argv）。
 
 | 新文件 | 内容 | 预计行数 |
 |---|---|---|
-| server.go（保留） | 包注释、Config、timer 常量、shimServer 类型、Run、waitForReattach、initiateShutdown、idle timer、setClient/clearClient/enqueueWrite | ~500 |
+| server.go（保留） | 包注释、Config、timer 常量、shimServer 类型、Run、waitForReattach、initiateShutdown、idle timer、admitClient/clearClient/enqueueWrite | ~500 |
 | server_client.go | performHandshake、handleClient、runCommandLoop、handleClientCommand、writeMsg、writeRaw | ~380 |
 | server_cli.go | startCLI、cliProc 全部方法、readStdout/readStderr、tryExtractSessionID | ~250 |
 | server_state.go | saveState、saveStateCLIDead | ~30 |
