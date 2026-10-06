@@ -102,7 +102,7 @@ cmd/naozhi/main.go
   -> metrics      进程级计数器（expvar）
   -> runtelemetry 跨子系统 run 生命周期事件类型
   -> costledger   统一 cost 账本叶子包（按天 JSONL append-only + rollup + 累计差分 + 按模型学习 CLI 单价）
-  -> budget       每日 USD 预算：订阅 cost 账本的内存日索引（cron job / 全局）+ Gate 判定；只依赖 costledger 与 sessionkey
+  -> budget       每日 USD 预算：订阅 cost 账本的内存日索引（IM 会话 / 项目 planner / cron job / 全局）+ Gate 判定；只依赖 costledger 与 sessionkey
   -> naozhisettings  naozhi 托管的 Claude settings 文件
   -> uiprefs      Dashboard 展示偏好持久化
   -> registry     泛型 Typed 注册表（新闭集注册表的默认选择）

@@ -46,10 +46,13 @@ func (d *Dispatcher) newIMOrigin(msg platform.IncomingMessage, lg *slog.Logger, 
 
 // submit hands r to the orchestrator with o as its origin. A message from a
 // platform the dispatcher does not know gets no turn: there is nowhere to
-// deliver the reply.
+// deliver the reply. Neither does one past today's budget.
 func (d *Dispatcher) submit(ctx context.Context, o *imOrigin, r turn.Request) {
 	if d.platforms[o.msg.Platform] == nil {
 		o.lg.Error("unknown platform")
+		return
+	}
+	if !d.admitBudget(ctx, o) {
 		return
 	}
 	r.Origin = o
@@ -307,6 +310,9 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 	d.markReplySuccess()
 
 	replyText := d.decorateReplyText(result, sess)
+	if replyText != "" {
+		replyText += d.budgetWarnLine(o.key)
+	}
 	outImages, replyText := d.readTurnImages(replyText)
 
 	// Passthrough turns are bound to d.stopCtx; if SIGTERM lands between

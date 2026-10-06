@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/budget"
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/dispatch"
@@ -319,6 +321,11 @@ func main() {
 	// cron and sysession run-events reach the dashboard Hub, which does not
 	// exist yet; the server binds it to this relay.
 	runTelemetry := &runtelemetry.Relay{}
+	// One gate for IM and cron, fed by the ledger; nil when cost.budget is off.
+	budgetGate := budget.Attach(router.Runs().CostLedger(), cfg.BudgetLimits(), cfg.BudgetLocation(), nil)
+	if budgetGate != nil {
+		slog.Info("cost budget enforced", "location", cfg.BudgetLocation().String(), "action", cmp.Or(cfg.Cost.Budget.Action, string(budget.ActionBlock)))
+	}
 	schedulers, err := boot.WireSchedulers(wireup.SchedulersDeps{
 		Cfg:           cfg,
 		Router:        router,
@@ -331,6 +338,7 @@ func main() {
 		BuildSysession: func() (*sysession.Manager, string, error) {
 			return buildSysessionManager(cfg, router, projectMgr, wrapper, storePath, runTelemetry)
 		},
+		Budget: budgetGate,
 	})
 	if err != nil {
 		slog.Error("start cron scheduler", "err", err)
@@ -413,6 +421,7 @@ func main() {
 		AllowedRoot: workspace,
 		IMAccess:    cfg.IMAccessPolicy(),
 		IMRateLimit: dispatch.RateLimit{MsgsPerMin: cfg.IMRateLimit.MsgsPerMin, Burst: cfg.IMRateLimit.Burst},
+		IMBudget:    budgetGate,
 		StateDir:    sessionLayout.Root(),
 		Config: server.ConfigOptions{
 			// Path enables the access-profile create endpoint; absolute so the

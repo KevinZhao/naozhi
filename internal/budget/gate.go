@@ -2,6 +2,7 @@ package budget
 
 import (
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,17 +21,18 @@ const (
 const DefaultWarnRatio = 0.8
 
 // Limits are the daily USD caps; 0 turns one off. Spend metered in another
-// unit (credits, tokens) counts toward neither.
+// unit (credits, tokens) counts toward none.
 type Limits struct {
-	PerJobDailyUSD float64 // each cron job
-	DailyUSD       float64 // everything booked, dashboard included
-	WarnRatio      float64 // 0 means DefaultWarnRatio
-	Action         Action  // "" means ActionBlock
+	PerChatDailyUSD float64 // each IM chat; each project planner as one
+	PerJobDailyUSD  float64 // each cron job
+	DailyUSD        float64 // everything booked, dashboard included
+	WarnRatio       float64 // 0 means DefaultWarnRatio
+	Action          Action  // "" means ActionBlock
 }
 
 // Enabled reports whether any cap is set.
 func (l Limits) Enabled() bool {
-	return l.PerJobDailyUSD > 0 || l.DailyUSD > 0
+	return l.PerChatDailyUSD > 0 || l.PerJobDailyUSD > 0 || l.DailyUSD > 0
 }
 
 // Verdict is one check's outcome for the subject nearest its limit. The zero
@@ -42,7 +44,24 @@ type Verdict struct {
 	Warn    bool // Spent has reached WarnRatio of Limit
 	Over    bool // Spent has reached Limit
 	Blocked bool // Over, and the action is block
+	// ResetAt is the next midnight in the budget's time zone, when Spent
+	// goes back to 0; zero when no limit applies.
+	ResetAt time.Time
 }
+
+// Usage renders Spent against Limit, e.g. "$4.20 / $5.00".
+func (v Verdict) Usage() string {
+	return "$" + strconv.FormatFloat(v.Spent, 'f', 2, 64) + " / $" + strconv.FormatFloat(v.Limit, 'f', 2, 64)
+}
+
+// Notice is what a once-a-day message about a subject reports.
+type Notice uint8
+
+const (
+	NoticeWarn    Notice = iota // spend reached warn_ratio
+	NoticeOver                  // spend reached the cap under action warn
+	NoticeBlocked               // a run or turn was refused
+)
 
 // Gate checks today's spend against Limits. A nil Gate admits everything.
 type Gate struct {
@@ -80,7 +99,7 @@ func Attach(store *costledger.Store, lim Limits, loc *time.Location, now func() 
 	return NewGate(lim, idx)
 }
 
-// CheckKey checks the session key's cron job, if it has one, and Global.
+// CheckKey checks the session key's chat, project or cron job, and Global.
 func (g *Gate) CheckKey(sessionKey string) Verdict {
 	return g.check(SubjectForKey(sessionKey))
 }
@@ -90,9 +109,10 @@ func (g *Gate) CheckJob(id string) Verdict {
 	return g.check(JobSubject(id))
 }
 
-// ShouldWarnOnce reports true the first time it is asked about s each day.
-func (g *Gate) ShouldWarnOnce(s Subject) bool {
-	return g != nil && g.idx.firstWarn(s)
+// Once reports true the first time it is asked about n for s each day, so
+// each kind of notice goes out at most once a day per subject.
+func (g *Gate) Once(n Notice, s Subject) bool {
+	return g != nil && g.idx.firstNotice(n, s)
 }
 
 func (g *Gate) check(scoped Subject) Verdict {
@@ -100,29 +120,34 @@ func (g *Gate) check(scoped Subject) Verdict {
 	if g == nil {
 		return v
 	}
-	best := -1.0
+	best := 0.0
 	for _, s := range []Subject{scoped, Global} {
 		limit := g.limitFor(s)
 		if limit <= 0 {
 			continue
 		}
 		spent := g.idx.Spent(s)
-		if r := spent / limit; r > best {
+		if r := spent / limit; v.Limit == 0 || r > best {
 			best = r
 			v = Verdict{Subject: s, Spent: spent, Limit: limit,
 				Warn: r >= g.lim.WarnRatio, Over: r >= 1}
 		}
 	}
-	v.Blocked = v.Over && g.lim.Action == ActionBlock
+	if v.Limit > 0 {
+		v.Blocked = v.Over && g.lim.Action == ActionBlock
+		v.ResetAt = StartOfDay(g.idx.now(), g.idx.loc).AddDate(0, 0, 1)
+	}
 	return v
 }
 
 func (g *Gate) limitFor(s Subject) float64 {
 	switch {
+	case s == "":
+		return 0
 	case s == Global:
 		return g.lim.DailyUSD
 	case strings.HasPrefix(string(s), jobPrefix):
 		return g.lim.PerJobDailyUSD
 	}
-	return 0
+	return g.lim.PerChatDailyUSD
 }

@@ -119,6 +119,10 @@ type Dispatcher struct {
 	inboundLimit     *ratelimit.Limiter
 	rateLimit        RateLimit
 	rateLimitReplies denyThrottle
+
+	// budget refuses turns past cost.budget (budget.go); nil admits all.
+	budget        BudgetGate
+	budgetReplies denyThrottle
 }
 
 // keyForChat returns the routed session key for the chat coordinates and
@@ -205,6 +209,9 @@ type DispatcherConfig struct {
 	Access *imauth.Policy
 	// RateLimit caps each sender's message rate; the zero value is unlimited.
 	RateLimit RateLimit
+	// Budget refuses turns once today's spend reaches cost.budget; nil, or a
+	// nil pointer inside it, admits every turn.
+	Budget BudgetGate
 }
 
 // ErrTurnsWireupMissing is returned by NewDispatcher when DispatcherConfig.Turns
@@ -275,6 +282,10 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		inboundLimit:          newInboundLimiter(cfg.RateLimit),
 		rateLimit:             cfg.RateLimit,
 		rateLimitReplies:      denyThrottle{window: rateLimitReplyWindow},
+		budgetReplies:         denyThrottle{window: budgetReplyWindow},
+	}
+	if !isNilInterface(cfg.Budget) {
+		d.budget = cfg.Budget
 	}
 	d.access.Store(cfg.Access)
 	// agentCommands is immutable after construction, so this snapshot stays
