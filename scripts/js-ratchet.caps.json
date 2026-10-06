@@ -4,7 +4,7 @@
     "exempt": []
   },
   "lines": {
-    "dashboard.js": 2878
+    "dashboard.js": 2549
   },
   "sideEffectLegacy": [
     "agent_view.js",
@@ -32,6 +32,7 @@
     "features.js",
     "file_ref_parse.js",
     "icons.js",
+    "lightbox.js",
     "nz_util.js",
     "platform.js",
     "session_ident.js",

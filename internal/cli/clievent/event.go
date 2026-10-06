@@ -54,6 +54,18 @@ type Event struct {
 	Status       string     `json:"status,omitempty"`
 	LastToolName string     `json:"last_tool_name,omitempty"`
 	Usage        *TaskUsage `json:"usage,omitempty"`
+	// Workflow (local_workflow task) fields, see workflow.go. TaskSummary is
+	// set on non-workflow progress too, so it never identifies a workflow;
+	// SubagentType only rules one out. WorkflowProgress is nil when the frame
+	// has no snapshot (key absent or null) and non-nil, possibly empty, when
+	// it has one; readLoop clears it before the Event leaves the read loop.
+	WorkflowName     string          `json:"workflow_name,omitempty"`
+	TaskSummary      string          `json:"summary,omitempty"`
+	SubagentType     string          `json:"subagent_type,omitempty"`
+	Patch            *TaskPatch      `json:"patch,omitempty"`
+	WorkflowProgress []WorkflowItem  `json:"workflow_progress,omitempty"`
+	WorkflowDecode   WorkflowDecode  `json:"-"`
+	WorkflowLaunch   *WorkflowLaunch `json:"-"`
 	// ToolName and ParentToolUseID name the tool a claude tool_progress frame
 	// reports on; its own ToolUseID is a per-heartbeat "<id>-heartbeat-N". The
 	// CLI sends one every 30s while a main-thread tool runs, as a liveness
