@@ -1,5 +1,6 @@
 // Package cost serves the dashboard's read-only view of the cost ledger
-// (docs/rfc/cost-ledger.md §7): unit-bucketed summaries and audit entries.
+// (docs/rfc/cost-ledger.md §7): unit-bucketed summaries, audit entries and
+// today's spend against cost.budget.
 package cost
 
 import (
@@ -11,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/budget"
 	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/dashboard/contracts"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
@@ -24,19 +26,22 @@ type Ledger interface {
 	Entries(costledger.Query, int) ([]costledger.Entry, error)
 }
 
-// Deps wires the handlers. Limiter nil = unlimited (tests only).
+// Deps wires the handlers. Limiter nil = unlimited (tests only); Budget nil
+// = cost.budget sets no cap.
 type Deps struct {
 	Ledger  Ledger
 	Limiter contracts.IPLimiter
+	Budget  *budget.Gate
 }
 
 // Handlers serves /api/cost/*.
 type Handlers struct {
 	ledger  Ledger
 	limiter contracts.IPLimiter
+	budget  *budget.Gate
 }
 
-func New(d Deps) *Handlers { return &Handlers{ledger: d.Ledger, limiter: d.Limiter} }
+func New(d Deps) *Handlers { return &Handlers{ledger: d.Ledger, limiter: d.Limiter, budget: d.Budget} }
 
 // HasLimiter reports whether a rate limiter is wired (boot-time guard).
 func (h *Handlers) HasLimiter() bool { return h.limiter != nil }
@@ -58,6 +63,21 @@ type summaryResp struct {
 type entriesResp struct {
 	Entries []costledger.Entry `json:"entries"`
 	Dropped int64              `json:"dropped"`
+}
+
+// budgetResp is today's spend against the cap nearest its limit. Scope is ""
+// (and the rest zero) when no cap applies to the subject asked about.
+type budgetResp struct {
+	Enabled bool      `json:"enabled"`
+	Scope   string    `json:"scope,omitempty"`
+	Subject string    `json:"subject,omitempty"`
+	Spent   float64   `json:"spent"`
+	Limit   float64   `json:"limit"`
+	Warn    bool      `json:"warn"`
+	Over    bool      `json:"over"`
+	Blocked bool      `json:"blocked"`
+	Day     string    `json:"day,omitempty"`
+	ResetAt time.Time `json:"reset_at,omitzero"`
 }
 
 // HandleSummary serves GET /api/cost/summary?from=&to=&group_by=&session_key=&job_id=&run_id=&workspace=&allow_full_range=1
@@ -111,6 +131,44 @@ func (h *Handlers) HandleEntries(w http.ResponseWriter, r *http.Request) {
 		dropped = s.Dropped()
 	}
 	httputil.WriteJSON(w, entriesResp{Entries: ents, Dropped: dropped})
+}
+
+// HandleBudget serves GET /api/cost/budget?session_key=|job_id=: what IM
+// dispatch or the cron scheduler would check for that key or job (its chat,
+// project or job cap, and the machine-wide one), or the machine-wide cap
+// alone with neither. Read-only: the dashboard itself is never refused.
+func (h *Handlers) HandleBudget(w http.ResponseWriter, r *http.Request) {
+	if h.limiter != nil && !h.limiter.AllowRequest(r) {
+		writeErr(w, http.StatusTooManyRequests, "rate limited")
+		return
+	}
+	v := r.URL.Query()
+	key, job := v.Get("session_key"), v.Get("job_id")
+	if key != "" && job != "" {
+		writeErr(w, http.StatusBadRequest, "session_key and job_id are exclusive")
+		return
+	}
+	for name, s := range map[string]string{"session_key": key, "job_id": job} {
+		if err := validateIdent(name, s); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if h.budget == nil {
+		httputil.WriteJSON(w, budgetResp{})
+		return
+	}
+	vd := h.budget.CheckKey(key)
+	if job != "" {
+		vd = h.budget.CheckJob(job)
+	}
+	resp := budgetResp{Enabled: true}
+	if vd.Limit > 0 {
+		resp = budgetResp{Enabled: true, Scope: vd.Subject.Kind(), Subject: vd.Subject.Name(),
+			Spent: vd.Spent, Limit: vd.Limit, Warn: vd.Warn, Over: vd.Over, Blocked: vd.Blocked,
+			Day: vd.ResetAt.AddDate(0, 0, -1).Format(time.DateOnly), ResetAt: vd.ResetAt}
+	}
+	httputil.WriteJSON(w, resp)
 }
 
 // gate applies the rate limit and the enabled check; false means a response
