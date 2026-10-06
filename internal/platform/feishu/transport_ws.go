@@ -46,36 +46,8 @@ func (f *Feishu) startWebSocket() error {
 	eventHandler := dispatcher.NewEventDispatcher(
 		f.cfg.VerificationToken, f.cfg.EncryptKey,
 	).OnP2MessageReceiveV1(func(_ context.Context, event *larkim.P2MessageReceiveV1) error {
-		pe, ok := f.parseSDKEvent(event)
-		if !ok {
-			return nil
-		}
-
-		// TryGo does wg.Add(1) on this goroutine before `go`, so a concurrent
-		// Stop()/Wait() cannot observe counter=0 mid-dispatch.
-		switch pe.MediaType {
-		case "image":
-			f.dispatch.TryGo("feishu ws image", func() {
-				msg := pe.Msg
-				data, mime, err := f.DownloadImage(ctx, pe.MessageID, pe.MediaKey)
-				if err != nil {
-					// image_key is sender-controlled; sanitize before slog.
-					slog.Error("feishu ws download image failed", "err", err,
-						"key", osutil.SanitizeForLog(pe.MediaKey, 128))
-					return
-				}
-				msg.Images = []platform.Image{{Data: data, MimeType: mime}}
-				handler(ctx, msg)
-			})
-
-		case "audio":
-			f.dispatch.TryGo("feishu ws audio", func() {
-				msg := pe.Msg
-				f.handleAudio(ctx, handler, msg, pe.MessageID, pe.MediaKey)
-			})
-
-		default:
-			f.dispatch.TryGo("feishu ws text", func() { handler(ctx, pe.Msg) })
+		if pe, ok := f.parseSDKEvent(event); ok {
+			f.routeParsed(ctx, handler, pe)
 		}
 		return nil
 	}).OnP2CardActionTrigger(func(cardCtx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
@@ -170,11 +142,50 @@ func (f *Feishu) dispatchCardActionTracked(
 	})
 }
 
+// routeParsed hands a parsed WS event to its media helper or the handler on
+// the dispatch pool. TryGo does wg.Add(1) on this goroutine before `go`, so a
+// concurrent Stop()/Wait() cannot observe counter=0 mid-dispatch.
+func (f *Feishu) routeParsed(ctx context.Context, handler platform.MessageHandler, pe parsedEvent) {
+	switch pe.MediaType {
+	case "image":
+		f.dispatch.TryGo("feishu ws image", func() {
+			f.handleImage(ctx, handler, pe.Msg, pe.MessageID, pe.MediaKey)
+		})
+	case "audio":
+		f.dispatch.TryGo("feishu ws audio", func() {
+			f.handleAudio(ctx, handler, pe.Msg, pe.MessageID, pe.MediaKey)
+		})
+	default:
+		f.dispatch.TryGo("feishu ws text", func() { handler(ctx, pe.Msg) })
+	}
+}
+
+// handleImage downloads an image message's picture, then calls handler with
+// it attached. A sender refused by admission costs no download.
+func (f *Feishu) handleImage(ctx context.Context, handler platform.MessageHandler, msg platform.IncomingMessage, messageID, imageKey string) {
+	if !f.admitted(ctx, msg) {
+		return
+	}
+	data, mime, err := f.DownloadImage(ctx, messageID, imageKey)
+	if err != nil {
+		// image_key is sender-controlled; sanitize before slog.
+		slog.Error("feishu download image failed", "err", err,
+			"key", osutil.SanitizeForLog(imageKey, 128))
+		return
+	}
+	msg.Images = []platform.Image{{Data: data, MimeType: mime}}
+	handler(ctx, msg)
+}
+
 // handleAudio downloads and transcribes audio, then calls handler with the text.
-// Errors are replied directly to the user, not sent through Claude.
+// Errors are replied directly to the user, not sent through Claude. A sender
+// refused by admission gets no download, transcription or error reply.
 func (f *Feishu) handleAudio(ctx context.Context, handler platform.MessageHandler, msg platform.IncomingMessage, messageID, fileKey string) {
 	if f.transcriber == nil {
 		slog.Info("feishu audio ignored, transcriber not configured", "user", msg.UserID)
+		return
+	}
+	if !f.admitted(ctx, msg) {
 		return
 	}
 

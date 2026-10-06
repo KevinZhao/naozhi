@@ -101,6 +101,13 @@ type Entry struct {
     Amount     float64      `json:"amount"`                // 本 entry 增量，唯一权威金额
     Basis      Basis        `json:"basis,omitempty"`
     Models     []ModelDelta `json:"models,omitempty"`      // 分模型下钻，仅供展示/诊断，不参与 rollup 求和
+    Mark       *SessionMark `json:"mark,omitempty"`        // 仅会话自己差分记的行：记账后的会话状态，供崩溃后 restore 用，不是金额
+}
+
+type SessionMark struct {
+    Spent float64 `json:"spent"` // 记账后的 costSpent（逻辑会话内单调）
+    Cum   float64 `json:"cum"`   // 记账后 CLI 的 USD 累计基线（lastCumulative.USD）
+    Born  int64   `json:"born"`  // 会话 createdAt，区分同 key 删除后重建的会话
 }
 
 type ModelDelta struct {
@@ -160,7 +167,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
   - respawn：`installFreshSessionLocked`（`router_lifecycle.go:859`, `:900-902`）置零 `lastCumulative`，承接 `costSpent`；
   - 同进程迁移：`RenameSession`（`router_lifecycle.go:1283`, `:1335-1336`）同时拷贝 `costSpent` 与 `lastCumulative`；
   - 被替换的会话之后还会记账（异步的进程结束 partial、迟到的 result）。respawn 提交与 rename 拷贝时，在旧会话的同一段 `costMu` 内把它链到新会话（`successor`），并把快照之后记在旧会话上的花费补给新会话；此后旧会话上的 `costSpent` / `spent` 增量沿链转给链尾的活会话（`addSpent`，逐个加锁、不嵌套）。respawn 的旧进程基线仍留在旧会话上差分；rename 的新会话跑的是同一进程，旧会话收到的读数整个交给新会话差分，不会被新会话的下一轮重算一次。账本行：旧会话自己记的行写在链尾活会话的 key 下（`ledgerKey`，同样逐个加锁），`job_id` 仍取旧会话自己的 key；respawn 前后是同一个 key，所以只有 respawn 之后新会话又被 rename 时才有区别：旧会话迟到的 partial / result 记在 rename 后的新 key 下，不会落在已消失的 scratch key 上。rename 后旧会话收到的读数由新会话记账，行写在新 key 下（只写一次）。
-  - 重启恢复（shim reconnect，`router_shim.go:68-77`：CLI 是**同一 incarnation** 继续累计，这正是 `LastCumulativeCost` 要持久化的原因）：`router_core.go:825-833` 只恢复 USD 分量。`Metered` 基线 0 是正确的（`Process.meteringUsage` 是 naozhi 侧累加器，新 Process 对象归零）；`Models` 基线未知，若全额记入首 turn 会虚高，故 **restore 后首个 turn 的 `Models` 置空且跳过偏差 warn**（`Amount` 仍由 USD 差分保证正确），从第二 turn 起正常。不额外持久化 Models 基线。关停在保存 store 之前冻结记账（`costAccounting.freeze`，#3428）：CLI 在保存之后、Detach 之前报的 result（无主 turn，或 `ShutdownTimeout` 到期时仍在跑的 turn）不记，留给重启后同一 CLI 的下一个 result 按保存的基线差分；冻结会等已进入 `accountCost` 的记账做完（上限 1s），所以一个读数要么进了保存的基线（行也随 `runs.Close` 落盘），要么留给重启后，不会两边都记。代价是这段花费归到重启后下一个 run id 名下；CLI 在 naozhi 停机期间死掉时这段花费丢失，与停机期间结束的 turn 同理。
+  - 重启恢复（shim reconnect，`router_shim.go:68-77`：CLI 是**同一 incarnation** 继续累计，这正是 `LastCumulativeCost` 要持久化的原因）：`router_core.go:825-833` 只恢复 USD 分量。`Metered` 基线 0 是正确的（`Process.meteringUsage` 是 naozhi 侧累加器，新 Process 对象归零）；`Models` 基线未知，若全额记入首 turn 会虚高，故 **restore 后首个 turn 的 `Models` 置空且跳过偏差 warn**（`Amount` 仍由 USD 差分保证正确），从第二 turn 起正常。不额外持久化 Models 基线。关停在保存 store 之前冻结记账（`costAccounting.freeze`，#3428）：CLI 在保存之后、Detach 之前报的 result（无主 turn，或 `ShutdownTimeout` 到期时仍在跑的 turn）不记，留给重启后同一 CLI 的下一个 result 按保存的基线差分；冻结会等已进入 `accountCost` 的记账做完（上限 1s），所以一个读数要么进了保存的基线（行也随 `runs.Close` 落盘），要么留给重启后，不会两边都记。代价是这段花费归到重启后下一个 run id 名下；CLI 在 naozhi 停机期间死掉时这段花费丢失，与停机期间结束的 turn 同理。非正常退出（SIGKILL、panic、OOM、断电）不经过保存：store 每 `sessionSaveInterval`（30s）才落盘，账本行约 1s 内 fsync，所以重启后 store 里的基线可能落后于账本（#3518）。会话自己差分记的行（`accountCost` 中既未转发也不在窗口里的读数）带 `mark`，`spent` / `cum` 在同一段 `costMu` 内取值，`born` 是会话的 `createdAt`。restore 前扫描 store mtime 前 10 分钟起的账本（stat 失败取 48h），按 `(session_key, born)` 取 `spent` 最大的 mark（行在解锁后 append，可能乱序），仅当它大于 store 的 `CostSpent` 时用它的 `spent` 与 `cum` 覆盖 restore 的花费与基线（`adoptCostMark`）：行已落盘则基线已含它，重新接管的 CLI 不再重记；行还在 1s 队列里就丢了，旧基线会把它重记一次，与之前相同。转发的花费、partial、重开窗口补记的行和 cron 窗口内的花费都不带 mark：它们若记在最后一条 mark 之后，store 的 `CostSpent` 不小于 mark，store 仍然生效，行为同前。残留情形：最后一条 mark 之后、崩溃之前的 cron 窗口花费，shim 存活时仍会被重新接管的 CLI 重记一次；保存之后 respawn 到新进程、新进程尚未记账就崩溃时，取到的是旧进程的 `cum`（resume 后的 CLI 累计通常从恢复的花费起算，二者接近）。shim 未存活时下次 spawn 照常换基线，mark 只让 `costSpent` 不再少算保存后的花费。
 - `costMu` 保持叶子锁：其内只做差分与原子存储，**不得调用任何外部方法**（`ledger.Append`、slog 均在锁外）。
 - `finishRun` 拆为两段：
   - `accountTurnCost(result *cli.SendResult) (deltaUSD float64)`：**无 `rt==nil || runStore==nil` 门控**（修 P4）。在 `costMu` 内：构造 `raw := Cumulative{USD: result.CostUSD, Models: result.ModelUsage, Metered: proc.MeteringUsage() 按 Unit}`，`d, next := costledger.Delta(raw, s.lastCumulative)`，累进 `costSpent`，存 `next`；锁外若这次读数不在 cost window 内（§5.0）则 `ledger.Append(entryFrom(d))`。`Models` 上限 16，超出截断 + warn。
