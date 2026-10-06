@@ -95,6 +95,9 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 		s.registerPprof()
 		s.registerExpvar()
 	}
+	if hs.wiring.metricsOn {
+		s.registerMetrics()
+	}
 
 	// Server-owned routes: the dashboard shell, static assets and the WS
 	// upgrade. These stay here because they are not a feature's API surface —

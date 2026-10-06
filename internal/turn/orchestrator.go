@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
@@ -29,6 +30,7 @@ func New(qo QueueOptions, s Sender) *Orchestrator {
 // the caller's Admission runs the owner loop. r.Origin.Admitted sees the
 // returned Ack before any turn of r starts.
 func (o *Orchestrator) Submit(ctx context.Context, r Request, a Admission) Ack {
+	r.TraceID = requestTrace(ctx, r.TraceID)
 	if r.Priority == PriorityNow || o.q.Mode() == ModePassthrough {
 		start, ok := a.Admit(RunDetached)
 		if !ok {
@@ -40,14 +42,14 @@ func (o *Orchestrator) Submit(ctx context.Context, r Request, a Admission) Ack {
 		return AckDetached
 	}
 
-	m := Msg{Text: r.Text, Images: r.Images, EnqueueAt: time.Now(), Origin: r.Origin}
+	m := Msg{Text: r.Text, Images: r.Images, EnqueueAt: time.Now(), Origin: r.Origin, TraceID: r.TraceID}
 	res := o.q.Enqueue(r.Key, m)
 	if !res.isOwner {
 		if res.evicted {
 			dropped(ctx, r.Key, res.dropped, DropEvicted)
 		}
 		if res.shouldInterrupt {
-			o.interrupt(r.Key)
+			o.interrupt(ctx, r.Key)
 		}
 		ack := AckQueued
 		if !res.enqueued {
@@ -78,15 +80,27 @@ func admitted(ctx context.Context, origin Origin, a Ack) {
 
 // interrupt aborts the in-flight turn for ModeInterrupt's first follow-up.
 // Every outcome but Sent leaves the follow-up to the next drain (collect).
-func (o *Orchestrator) interrupt(key string) {
+func (o *Orchestrator) interrupt(ctx context.Context, key string) {
 	switch outcome := o.s.Interrupt(key); outcome {
 	case sessionview.InterruptSent:
-		slog.Info("turn: interrupt mode aborted the active turn to process a follow-up", "key", key)
+		slog.InfoContext(ctx, "turn: interrupt mode aborted the active turn to process a follow-up", "key", key)
 	case sessionview.InterruptNoTurn, sessionview.InterruptNoSession, sessionview.InterruptUnsupported:
-		slog.Debug("turn: interrupt mode fell back to collect", "key", key, "outcome", outcome.String())
+		slog.DebugContext(ctx, "turn: interrupt mode fell back to collect", "key", key, "outcome", outcome.String())
 	case sessionview.InterruptError:
-		slog.Warn("turn: interrupt mode transport error, falling back to collect", "key", key)
+		slog.WarnContext(ctx, "turn: interrupt mode transport error, falling back to collect", "key", key)
 	}
+}
+
+// requestTrace resolves a request's trace id: its own, else ctx's (the IM
+// ingress sets one), else a fresh one, so every queued message is nameable.
+func requestTrace(ctx context.Context, id string) string {
+	if id != "" {
+		return id
+	}
+	if id = ctxutil.TraceID(ctx); id != "" {
+		return id
+	}
+	return ctxutil.NewTraceID()
 }
 
 // Reset discards key's queue (each dropped origin sees DropReset), fails the

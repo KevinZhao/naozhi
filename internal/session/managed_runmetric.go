@@ -1,10 +1,13 @@
 package session
 
 import (
+	"context"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
 )
 
@@ -45,8 +48,13 @@ func (s *ManagedSession) instrumentRun(onEvent clievent.EventCallback) (*runTime
 // instrumented (non-nil timer / store), enqueues the run record for async
 // persistence. Its work is cheap and the enqueue is NON-BLOCKING, so calling
 // it while sendMu is still held (the Send path) does not extend the lock window.
-func (s *ManagedSession) finishRun(rt *runTimer, result *clievent.SendResult, err error) {
-	runID := newRunID()
+func (s *ManagedSession) finishRun(ctx context.Context, rt *runTimer, result *clievent.SendResult, err error) {
+	// The orchestrator's run id (ctxutil.WithRunID) names this turn in the
+	// logs; adopting it keeps the run record and the journal on one key.
+	runID := ctxutil.RunID(ctx)
+	if runID == "" {
+		runID = newRunID()
+	}
 	delta := s.accountTurnCost(result, runID)
 	if rt == nil || s.runStore == nil || runID == "" {
 		return
@@ -79,4 +87,14 @@ func (s *ManagedSession) finishRun(rt *runTimer, result *clievent.SendResult, er
 	}
 	rec.CostUSD = delta
 	s.runStore.AppendAsync(rec)
+}
+
+// nudgeRunCtx gives the leaked-toolcall re-send its own run id: it is a
+// second run record and ledger row, and both are keyed by the id. The log
+// line ties it to the turn it continues.
+func nudgeRunCtx(ctx context.Context) context.Context {
+	parent := ctxutil.RunID(ctx)
+	ctx = ctxutil.WithRunID(ctx, newRunID())
+	slog.InfoContext(ctx, "leak-recovery: nudge run", "nudge_of", parent)
+	return ctx
 }

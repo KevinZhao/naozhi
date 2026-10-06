@@ -37,14 +37,14 @@ func TestDispatcher_DecorateReplyText_Components(t *testing.T) {
 	d := &Dispatcher{caps: fixedFooterCaps{footer: "cc"}}
 
 	t.Run("plain text gets footer", func(t *testing.T) {
-		got := d.decorateReplyText(&clievent.SendResult{Text: "hi"}, nil)
+		got := d.decorateReplyText(context.Background(), &clievent.SendResult{Text: "hi"}, nil)
 		if !strings.Contains(got, "hi") || !strings.Contains(got, "cc") {
 			t.Errorf("got %q, want both 'hi' and 'cc'", got)
 		}
 	})
 
 	t.Run("merge head gets chip + footer", func(t *testing.T) {
-		got := d.decorateReplyText(&clievent.SendResult{Text: "hi", MergedCount: 3}, nil)
+		got := d.decorateReplyText(context.Background(), &clievent.SendResult{Text: "hi", MergedCount: 3}, nil)
 		if !strings.Contains(got, "合并了 3 条") {
 			t.Errorf("got %q, want merge chip with count 3", got)
 		}
@@ -57,7 +57,7 @@ func TestDispatcher_DecorateReplyText_Components(t *testing.T) {
 		// Merge follower (Text=="" && MergedCount>1): chip MUST NOT
 		// fire because it'd add a "合并了…" line on a bubble that
 		// otherwise has no content.
-		got := d.decorateReplyText(&clievent.SendResult{Text: "", MergedCount: 5}, nil)
+		got := d.decorateReplyText(context.Background(), &clievent.SendResult{Text: "", MergedCount: 5}, nil)
 		if strings.Contains(got, "合并了") {
 			t.Errorf("got %q, must not contain merge chip on empty text", got)
 		}
@@ -82,7 +82,7 @@ func TestDispatcher_DecorateReplyText_Components(t *testing.T) {
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				got := d.decorateReplyText(tc.result, nil)
+				got := d.decorateReplyText(context.Background(), tc.result, nil)
 				if got != "" {
 					t.Errorf("got %q, want empty sentinel (no orphan footer bubble)", got)
 				}
@@ -110,7 +110,7 @@ func TestDispatcher_DecorateReplyText_RedactsSecrets(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := "your key is " + tc.token + " keep it safe"
-			got := d.decorateReplyText(&clievent.SendResult{Text: raw}, nil)
+			got := d.decorateReplyText(context.Background(), &clievent.SendResult{Text: raw}, nil)
 			if strings.Contains(got, tc.token) {
 				t.Fatalf("reply text leaked secret %q: got %q", tc.token, got)
 			}
@@ -136,7 +136,7 @@ func TestDispatcher_DecorateReplyText_NilCapsIsPanic(t *testing.T) {
 	// non-panicking path. NoopCapabilities.ReplyFooter returns "" which
 	// means no footer is appended.
 	d := &Dispatcher{caps: NoopCapabilities{}}
-	got := d.decorateReplyText(&clievent.SendResult{Text: "x"}, nil)
+	got := d.decorateReplyText(context.Background(), &clievent.SendResult{Text: "x"}, nil)
 	if got != "x" {
 		t.Errorf("NoopCapabilities footer should be empty; got %q want %q", got, "x")
 	}
@@ -147,5 +147,5 @@ func TestDispatcher_DecorateReplyText_NilCapsIsPanic(t *testing.T) {
 // produced by Router.GetOrCreate).
 var _ = func(d *Dispatcher, s turn.Session, ctx context.Context) string {
 	_ = ctx
-	return d.decorateReplyText(&clievent.SendResult{}, s)
+	return d.decorateReplyText(context.Background(), &clievent.SendResult{}, s)
 }
