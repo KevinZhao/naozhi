@@ -328,7 +328,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		}
 
 		msgType := event.Message.MessageType
-		if msgType != "text" && msgType != "image" && msgType != "audio" {
+		if msgType != "text" && msgType != "image" && msgType != "audio" && msgType != "file" {
 			return
 		}
 
@@ -450,6 +450,28 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			f.dispatch.TryGo("feishu audio", func() {
 				audioMsg := msg
 				f.handleAudio(f.stopCtx, handler, audioMsg, event.Message.MessageID, content.FileKey)
+			})
+
+		case "file":
+			var content struct {
+				FileKey  string `json:"file_key"`
+				FileName string `json:"file_name"`
+			}
+			if err := json.Unmarshal([]byte(event.Message.Content), &content); err != nil || content.FileKey == "" {
+				if err != nil {
+					slog.Debug("feishu webhook: file content unmarshal failed",
+						"err", err, "msg_id", osutil.SanitizeForLog(event.Message.MessageID, 64))
+				}
+				return
+			}
+			if !isValidFeishuResourceKey(content.FileKey) {
+				slog.Warn("feishu webhook: rejecting malformed file_key",
+					"key", osutil.SanitizeForLog(content.FileKey, 64),
+					"msg_id", osutil.SanitizeForLog(event.Message.MessageID, 64))
+				return
+			}
+			f.dispatch.TryGo("feishu file", func() {
+				f.handleFile(f.stopCtx, handler, msg, event.Message.MessageID, content.FileKey, content.FileName)
 			})
 		}
 	})
