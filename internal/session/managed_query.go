@@ -5,11 +5,13 @@ import (
 	"context"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cli/workflow"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/session/spawnpool"
 	"github.com/naozhi/naozhi/internal/subagent"
@@ -142,7 +144,9 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 		// Seed from the persisted value; the proc branch below overwrites
 		// with a fresher live value. No-proc snapshots (evicted / pre-spawn)
 		// keep it so the dashboard doesn't blink to "(模型未配置)".
-		Model: s.Model(),
+		Model:        s.Model(),
+		TuningModel:  s.TuningModel(),
+		TuningEffort: s.TuningEffort(),
 	}
 	snap.DeathReason = loadAtomicString(&s.deathReason)
 	snap.CodeChanges = s.CodeChanges()
@@ -265,6 +269,13 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 			snap.LastActivity = la
 		}
 	}
+	// Between turns the tool activity is the finished turn's; a workflow
+	// still running says more.
+	if snap.State != cli.StateRunning.String() {
+		if wa := workflowActivity(snap.Workflows); wa != "" {
+			snap.LastActivity = wa
+		}
+	}
 	// Live wins, cache survives restart; both empty leaves the field unset
 	// so JSON omitempty hides the dim line on brand-new sessions.
 	if snap.LastResponse == "" {
@@ -274,6 +285,25 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 	}
 
 	return snap
+}
+
+// workflowActivity is the activity line of the latest started running
+// workflow in sums ("Workflow <name> · done/total"); "" when none runs.
+func workflowActivity(sums []workflow.Summary) string {
+	var w *workflow.Summary
+	for i := range sums {
+		if workflow.IsRunning(sums[i].Status) && (w == nil || sums[i].StartedAt > w.StartedAt) {
+			w = &sums[i]
+		}
+	}
+	if w == nil {
+		return ""
+	}
+	name := "Workflow"
+	if w.Name != "" {
+		name += " " + w.Name
+	}
+	return name + " · " + strconv.Itoa(w.Counts.Done) + "/" + strconv.Itoa(w.Counts.Total)
 }
 
 // hasInjectedHistory reports whether persistedHistory contains any entries,

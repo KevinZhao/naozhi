@@ -1,3 +1,4 @@
+// @ts-check
 // event_render.js — one EventEntry to one transcript bubble (eventHtml and its
 // EVENT_WHOLE/EVENT_CONTENT/EVENT_ICONS tables), plus the time-divider and
 // dedup helpers the transcript, cron and agent views share.
@@ -19,9 +20,7 @@ function renderTodoList(detail, summary) {
   if (detail) {
     try { todos = JSON.parse(detail); } catch (_) { todos = null; }
   }
-  if (!Array.isArray(todos) || todos.length === 0) {
-    return esc(summary || 'Todos');
-  }
+  if (!Array.isArray(todos) || todos.length === 0) return esc(summary || 'Todos');
   let done = 0, active = 0, pending = 0;
   const items = todos.map(t => {
     const status = (t && t.status) || 'pending';

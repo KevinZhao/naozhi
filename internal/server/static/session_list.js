@@ -637,7 +637,7 @@ function sessionCardHtml(/** @type {SessionSnapshot & {source?: 'managed' | 'ter
     originBadge +
     accessProfileChip +
     typeTag +
-    agentBadge;
+    agentBadge + workflowBadgeHtml(s, sNode);
 
   // R110-P1: dim 30-rune preview of last assistant text reply. Skipped when
   // empty (omitempty hides it for brand-new sessions / runs that have not
@@ -664,6 +664,24 @@ function sessionCardHtml(/** @type {SessionSnapshot & {source?: 'managed' | 'ter
       '<div class="sc-meta">' + metaHtml + '</div>' +
     '</div>' +
   '</div>';
+}
+
+// workflowBadgeHtml is a card's "⚙ done/total" over its running workflows
+// as of the last /api/sessions, up to 30 s behind (docs/rfc/workflow-dashboard.md
+// §5.8); the open session's card hides it in CSS. A remote node's workflows
+// cannot be opened, so its cards get none (NG3).
+function workflowBadgeHtml(/** @type {SessionSnapshot} */ s, sNode) {
+  if (sNode !== 'local' || !Array.isArray(s.workflows)) return '';
+  let done = 0, total = 0;
+  const lines = [];
+  for (const w of s.workflows) {
+    if (w.status !== 'running' && w.status !== 'paused') continue;
+    done += w.counts.done;
+    total += w.counts.total;
+    lines.push((w.name || 'workflow') + ' · ' + w.counts.done + '/' + w.counts.total);
+  }
+  if (!lines.length) return '';
+  return '<span class="sc-wf" title="' + escAttr(lines.join('\n')) + '">' + ICONS.gear + ' ' + done + '/' + total + '</span>';
 }
 
 // truncateForSidebar caps `s` to at most `n` Unicode code points (so CJK
