@@ -27,21 +27,16 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/tuningspec"
 )
 
-// Tuning apply modes returned to the override API and surfaced to the
-// dashboard as `applied_via` (§4.1).
+// Tuning apply modes returned to the override API and the IM commands; the
+// values live in sessionview so dispatch can match on them.
 const (
-	// TuningAppliedRPC: the live process acknowledged the switch; effective
-	// for the next turn (kiro) or possibly the current one (claude).
-	TuningAppliedRPC = "rpc"
-	// TuningAppliedRespawn: the CLI process was closed; the next message
-	// respawns with the new flags, context restored via resume.
-	TuningAppliedRespawn = "respawn"
-	// TuningAppliedDeferred: recorded only (no live process, or the protocol
-	// has no runtime channel); the next spawn applies it.
-	TuningAppliedDeferred = "deferred"
+	TuningAppliedRPC      = sessionview.TuningAppliedRPC
+	TuningAppliedRespawn  = sessionview.TuningAppliedRespawn
+	TuningAppliedDeferred = sessionview.TuningAppliedDeferred
 )
 
 // pendingTuning is a model/effort pick recorded for a key that has no
@@ -63,11 +58,9 @@ const maxTuningOverrides = 1024
 // because picks.tuning is at maxTuningOverrides.
 var ErrTuningCapacity = errors.New("too many pending tuning overrides")
 
-// ErrTuningEffortUnsupported is returned when an effort tier is set for a
-// session whose backend protocol does not honour SpawnOptions.Effort (see
-// ClaudeProtocol.Capabilities). Mapped to 400 by the API handler — silently
-// recording it would let the operator believe a tier is in force when it is not.
-var ErrTuningEffortUnsupported = errors.New("backend does not support effort tiers")
+// ErrTuningEffortUnsupported is sessionview's, re-exported for callers that
+// spell it session.*.
+var ErrTuningEffortUnsupported = sessionview.ErrTuningEffortUnsupported
 
 // SetSessionTuning validates, records, persists and applies a per-session
 // model/effort override. nil = leave unchanged; pointer to "" = clear (config
