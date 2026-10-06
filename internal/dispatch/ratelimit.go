@@ -35,14 +35,24 @@ type RateLimit struct {
 	Burst      int
 }
 
-// newInboundLimiter builds the per-sender token bucket for rl, or nil when
-// the limit is off.
-func newInboundLimiter(rl RateLimit) *ratelimit.Limiter {
+// inboundLimit is an enabled RateLimit with its bucket.
+type inboundLimit struct {
+	policy  RateLimit
+	limiter *ratelimit.Limiter
+}
+
+// newInboundLimit builds the per-sender token bucket for rl, or nil when the
+// limit is off.
+func newInboundLimit(rl RateLimit) *inboundLimit {
 	if rl.MsgsPerMin <= 0 {
 		return nil
 	}
-	return ratelimit.New(inboundLimitConfig(rl))
+	return &inboundLimit{policy: rl, limiter: ratelimit.New(inboundLimitConfig(rl))}
 }
+
+// SetRateLimit replaces the per-sender rate limit; the next message draws
+// from a fresh bucket. The zero value turns the limit off.
+func (d *Dispatcher) SetRateLimit(rl RateLimit) { d.inbound.Store(newInboundLimit(rl)) }
 
 // inboundLimitConfig is the bucket for an enabled rl. Its idle TTL is at
 // least the time to refill the burst, so a reset never hands back more
@@ -84,11 +94,12 @@ func isStopCommand(trimmed string) bool {
 // limited: it ends spend. A limited message is counted and dropped; the
 // sender is told at most once per rateLimitReplyWindow.
 func (d *Dispatcher) admitRate(ctx context.Context, msg platform.IncomingMessage, trimmed string, lg *slog.Logger) bool {
-	if d.inboundLimit == nil || isStopCommand(trimmed) {
+	in := d.inbound.Load()
+	if in == nil || isStopCommand(trimmed) {
 		return true
 	}
 	key := rateLimitKey(msg)
-	if d.inboundLimit.Allow(key) {
+	if in.limiter.Allow(key) {
 		return true
 	}
 	dispatchRateLimitedTotal.Add(1)
@@ -96,7 +107,7 @@ func (d *Dispatcher) admitRate(ctx context.Context, msg platform.IncomingMessage
 		lg.Debug("im message rate limited")
 		return false
 	}
-	lg.Info("im message rate limited", "msgs_per_min", d.rateLimit.MsgsPerMin)
-	d.replyText(ctx, msg, "消息过于频繁（每分钟最多 "+strconv.Itoa(d.rateLimit.MsgsPerMin)+" 条），请稍后再试。", lg)
+	lg.Info("im message rate limited", "msgs_per_min", in.policy.MsgsPerMin)
+	d.replyText(ctx, msg, "消息过于频繁（每分钟最多 "+strconv.Itoa(in.policy.MsgsPerMin)+" 条），请稍后再试。", lg)
 	return false
 }

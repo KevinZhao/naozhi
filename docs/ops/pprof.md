@@ -182,6 +182,7 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_webhook_delivered_total` | expvar.Map，键 = `integrations.webhooks` 下标：某端点 2xx 接收的事件数 | 观察量；与 failed 对比看端点健康 |
 | `naozhi_webhook_failed_total` | expvar.Map，键 = 端点下标：重试用尽（4 次）或被 4xx 拒绝的事件数 | 非零即接收方有问题：slog `webhook delivery failed` / `webhook rejected` 带 status 与 host |
 | `naozhi_webhook_dropped_total` | expvar.Map，键 = 端点下标：端点队列（256）满时丢弃的事件数 | 增长说明接收方太慢或长期不可达；事件不会重放，先修接收方 |
+| `naozhi_config_reload_total` | expvar.Map，键 `ok` / `error`：`POST /api/system/config/reload` 的结果计数（SIGHUP 与 CLI 入口走同一函数，但只有 HTTP 入口计数；SIGHUP 看 slog `config reloaded` / `SIGHUP config reload failed`） | `error` 增长说明有人在推坏配置：看 422 响应体或 slog `config reload failed` 的校验错误 |
 | `naozhi_dispatch_turn_error_result_total` | expvar.Map，按 turn class 分键：IM 轮次的 result 是失败（回复照常送达，所以投递仍算成功）。键为 `error_text`（带正文的 is_error 回答）或 usermsg 的 class：`turn_failed` / `max_turns` / `max_budget` / `refused` / `truncated` / `backend_overloaded` / `backend_rate_limited` / `backend_auth` / `backend_invalid_request` / `backend_rejected` | 按键看：`backend_rate_limited` / `backend_overloaded` 涨 = 配额或容量问题；`backend_auth` 非零 = 凭证失效。取单键：`jq '.naozhi_dispatch_turn_error_result_total.backend_rate_limited'` |
 | `naozhi_node_insecure_reverse_upgrade_total` | 反向节点经明文 HTTP、从非 loopback 地址完成升级的次数（首帧的 bearer token 走明文；#1026） | **稳态应为 0**；非零 = 该节点链路需要上 TLS |
 | `naozhi_upstream_reqsem_wait_total` | 节点侧反向 RPC 请求没抢到非阻塞 reqSem、只能阻塞等待的次数 | 它占请求总数的比例就是饱和度；持续几个百分点 = 调大容量，或找慢的 handleRequest（常见是 send 现场 spawn 会话） |

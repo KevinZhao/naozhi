@@ -25,7 +25,7 @@ var subcmds = []subcmd{
 	{"doctor", "run health checks against a naozhi instance", runDoctor},
 	{"upgrade", "self-update to the latest release", runUpgrade},
 	{"cost", "cost ledger maintenance (backfill)", runCost},
-	{"config", "validate config.yaml (check) or upgrade its schema (migrate)", runConfig},
+	{"config", "config.yaml tools (check|migrate|reload)", runConfig},
 	{"models", "reconcile the toolbox model recommendation into cc settings (sync)", runModels},
 }
 

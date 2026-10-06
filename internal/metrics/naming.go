@@ -42,6 +42,7 @@ const (
 	SubsystemNode       Subsystem = "node"
 	SubsystemUpstream   Subsystem = "upstream"
 	SubsystemWebhook    Subsystem = "webhook"
+	SubsystemConfig     Subsystem = "config"
 )
 
 // KnownSubsystems is the canonical list, used by tests to assert every
@@ -51,7 +52,7 @@ var KnownSubsystems = []Subsystem{
 	SubsystemSpawn, SubsystemPanic, SubsystemInterrupt, SubsystemEventlog,
 	SubsystemAttachment, SubsystemCron, SubsystemSysession, SubsystemStartup,
 	SubsystemAutoChain, SubsystemProtocol, SubsystemACP, SubsystemMetrics,
-	SubsystemDispatch, SubsystemNode, SubsystemUpstream, SubsystemWebhook,
+	SubsystemDispatch, SubsystemNode, SubsystemUpstream, SubsystemConfig, SubsystemWebhook,
 }
 
 // Kind selects the metric's semantic and the suffix the name must carry.

@@ -92,6 +92,7 @@ export const NZ_CONTRACT = Object.freeze(/** @type {const} */ ({
     sessions_tool_result: '/api/sessions/tool_result',
     sessions_upload: '/api/sessions/upload',
     settings: '/api/settings',
+    system_config_reload: '/api/system/config/reload',
     system_daemons: '/api/system/daemons',
     system_labels_clear_origin: '/api/system/labels/clear-origin',
     system_update: '/api/system/update',
