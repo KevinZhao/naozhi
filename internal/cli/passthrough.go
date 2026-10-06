@@ -126,7 +126,7 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 	// Mirror Send's user-entry Append so a later subscribe can re-render the
 	// bubble (readLoop filters the CLI's replay echo out of ring.EventLog). After
 	// the successful write so a rejected write leaves no ghost entry.
-	p.eventLog.Append(buildUserEntry(text, images))
+	p.eventLog.Append(buildUserEntry(text, images, slot.runID))
 
 	return p.awaitSlot(ctx, slot)
 }

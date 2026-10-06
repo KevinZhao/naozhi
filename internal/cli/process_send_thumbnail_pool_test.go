@@ -50,7 +50,7 @@ func TestBuildUserEntry_ManyImagesCapsGoroutineCount(t *testing.T) {
 	}
 
 	beforeGo := runtime.NumGoroutine()
-	entry := buildUserEntry("hi", images)
+	entry := buildUserEntry("hi", images, "")
 	// After the call, all worker goroutines should have exited (jobs
 	// channel closed + wg.Wait drained). Allow a small grace for the
 	// scheduler to clean up.
@@ -86,7 +86,7 @@ func TestBuildUserEntry_OrderPreserved(t *testing.T) {
 		}
 	}
 
-	entry := buildUserEntry("hi", images)
+	entry := buildUserEntry("hi", images, "")
 	if len(entry.ImagePaths) != len(entry.Images) {
 		t.Fatalf("ImagePaths length %d != Images length %d",
 			len(entry.ImagePaths), len(entry.Images))
@@ -106,7 +106,7 @@ func TestBuildUserEntry_OrderPreserved(t *testing.T) {
 // to produce a thumbnail without going through the worker pool.
 func TestBuildUserEntry_SingleImageSerialPath(t *testing.T) {
 	pngData := makeTestPNG(t)
-	entry := buildUserEntry("hello", []clievent.Attachment{{Data: pngData}})
+	entry := buildUserEntry("hello", []clievent.Attachment{{Data: pngData}}, "")
 	if len(entry.Images) != 1 {
 		t.Fatalf("expected 1 thumbnail, got %d", len(entry.Images))
 	}
@@ -125,7 +125,7 @@ func TestBuildUserEntry_ExactlyCapImages(t *testing.T) {
 	for i := range images {
 		images[i] = clievent.Attachment{Data: pngData}
 	}
-	entry := buildUserEntry("", images)
+	entry := buildUserEntry("", images, "")
 	if len(entry.Images) != thumbnailWorkerCap {
 		t.Errorf("expected %d thumbnails, got %d",
 			thumbnailWorkerCap, len(entry.Images))

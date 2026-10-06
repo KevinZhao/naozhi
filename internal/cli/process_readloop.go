@@ -575,7 +575,7 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 		// their own replay (docs/rfc/passthrough-mode-validation.md V5, V10).
 		owners := p.onTurnResult()
 		if len(owners) > 0 {
-			p.logEventAt(ev, nowMS)
+			p.logEventAt(ev, nowMS, owners[0].runID)
 			// Fire onEvent for each owner's turn-scope callback
 			// before delivering the terminal result.
 			for _, owner := range owners {
@@ -620,7 +620,13 @@ func (p *Process) dispatchProtocolEvent(ev clievent.Event, log *slog.Logger) boo
 	// Always log to ring.EventLog so dashboard subscribers see events
 	// even when no Send() is active (e.g., after service restart
 	// reconnects to a shim that's mid-turn).
-	p.logEventAt(ev, nowMS)
+	runID := ""
+	if orphaned {
+		runID = orphanRun
+	} else if ev.Type == "result" {
+		runID = p.turn.resultRunID()
+	}
+	p.logEventAt(ev, nowMS, runID)
 
 	// A result no Send owns ends its turn: a reconnect's in-flight turn (the
 	// one-shot reconnectedMidTurn) or one the CLI started itself (unowned).
