@@ -1032,6 +1032,7 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   if (nodeId && nodeId !== 'local') perSession.nodes[key] = nodeId;
   if (backend) perSession.backends[key] = backend;
   if (accessProfile) perSession.accessProfiles[key] = accessProfile;
+  delete perSession.sentPicks[key]; // a continued stable key must not inherit an earlier send's
   // Durably persist the pending workspace and eagerly bind it server-side so a
   // reload-before-first-send (the proven cwd-fallback trigger) no longer drops
   // the workspace. This is the primary fix path (project palette open).
@@ -1270,8 +1271,6 @@ if (document.readyState === 'loading') {
 } else {
   wireQuickAskInput(true);
 }
-
-
 
 export {
   accessProfileChipHtml,

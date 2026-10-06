@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/naozhi/naozhi/internal/apierr"
@@ -17,10 +18,11 @@ func localizeAPIError(text string) string { return apierr.Localize(text) }
 // failure notice when usermsg has one, else the answer with secrets redacted
 // before an API error in it is localized (#1571). An is_error answer is
 // localized without the envelope prefix check. A failed turn is logged and
-// counted by class, never with the backend's raw message.
-func turnReplyText(r *clievent.SendResult) string {
+// counted by class, never with the backend's raw message. answer reports
+// whether text is the turn's answer rather than a notice or error text.
+func turnReplyText(ctx context.Context, r *clievent.SendResult) (text string, answer bool) {
 	notice, class := usermsg.ForTurnResult(r)
-	text := textutil.RedactSecrets(r.Text)
+	text = textutil.RedactSecrets(r.Text)
 	switch {
 	case notice != "":
 		text = "⚠️ " + notice
@@ -28,13 +30,13 @@ func turnReplyText(r *clievent.SendResult) string {
 		class = "error_text"
 		text, _ = apierr.LocalizeError(text)
 	default:
-		return localizeAPIError(text)
+		return localizeAPIError(text), true
 	}
 	attrs := []any{"class", class, "subtype", r.SubType}
 	if be := r.BackendError; be != nil {
 		attrs = append(attrs, "backend", be.Backend, "rpc_code", be.Code)
 	}
-	slog.Warn("turn ended in failure", attrs...)
+	slog.WarnContext(ctx, "turn ended in failure", attrs...)
 	dispatchTurnErrorResultTotal.Add(class, 1)
-	return text
+	return text, false
 }

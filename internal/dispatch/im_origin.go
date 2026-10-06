@@ -49,7 +49,7 @@ func (d *Dispatcher) newIMOrigin(msg platform.IncomingMessage, lg *slog.Logger, 
 // deliver the reply. Neither does one past today's budget.
 func (d *Dispatcher) submit(ctx context.Context, o *imOrigin, r turn.Request) {
 	if d.platforms[o.msg.Platform] == nil {
-		o.lg.Error("unknown platform")
+		o.lg.ErrorContext(ctx, "unknown platform")
 		return
 	}
 	if !d.admitBudget(ctx, o) {
@@ -102,13 +102,13 @@ func (o *imOrigin) Admitted(ctx context.Context, a turn.Ack) {
 	d := o.d
 	switch a {
 	case turn.AckOwner:
-		o.lg.Info("message received", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
+		o.lg.InfoContext(ctx, "message received", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
 		o.startAck(ctx)
 	case turn.AckDetached:
 		if o.kind == imUrgent {
-			o.lg.Info("/urgent dispatched", "key", o.key, "text_len", o.textLen)
+			o.lg.InfoContext(ctx, "/urgent dispatched", "key", o.key, "text_len", o.textLen)
 		} else {
-			o.lg.Info("message received (passthrough)", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
+			o.lg.InfoContext(ctx, "message received (passthrough)", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
 		}
 		o.startAck(ctx)
 	case turn.AckQueued:
@@ -117,9 +117,9 @@ func (o *imOrigin) Admitted(ctx context.Context, a turn.Ack) {
 		}
 	case turn.AckDropped:
 		notified := d.replyNotice(ctx, o.msg, o.key, "正在处理上一条消息，请稍候...", o.lg, "busy")
-		o.lg.Info("message dropped: session busy", "key", o.key, "notified", notified)
+		o.lg.InfoContext(ctx, "message dropped: session busy", "key", o.key, "notified", notified)
 	case turn.AckShuttingDown:
-		o.lg.Warn("message declined: shutting down", "key", o.key)
+		o.lg.WarnContext(ctx, "message declined: shutting down", "key", o.key)
 	}
 }
 
@@ -200,16 +200,17 @@ func (dl *imDelivery) Blocking() bool { return true }
 // BeforeSession starts the tracker that streams the turn's progress into the
 // chat. A head that runs at once is armed with a fallback banner that posts
 // only if its message got no ⏳, so a slow spawn is covered too. On a first
-// turn it then offers the chat's external session for takeover; the result
-// is ignored: GetOrCreate resumes an adopted session and spawns a fresh one
-// otherwise.
+// turn of a session the whole chat shares it then offers the chat's external
+// session for takeover; a thread's or member's session starts fresh. The
+// result is ignored: GetOrCreate resumes an adopted session and spawns a
+// fresh one otherwise.
 func (dl *imDelivery) BeforeSession(ctx context.Context) {
 	o := dl.o
 	dl.tracker = newIMEventTracker(ctx, dl.p, replyDestOf(o.msg), o.msg.ChatType, o.agentID)
 	if dl.info.Role == turn.RoleHead && o.ackDone != nil {
 		dl.tracker.armFallbackBanner(o.d.fallbackBannerDelay, o.awaitAck)
 	}
-	if !dl.info.First {
+	if !dl.info.First || o.d.scopedSession(o.msg, o.key) {
 		return
 	}
 	_ = o.d.caps.Takeover(ctx, sessionkey.ChatKey(o.msg.Platform, o.msg.ChatType, o.msg.ChatID), o.key, o.opts)
@@ -298,7 +299,7 @@ func (dl *imDelivery) queuedIDs() []string {
 // aborted turn with nothing to say only marks the banner.
 func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, sess turn.Session) {
 	o, d, p, tracker := dl.o, dl.o.d, dl.p, dl.tracker
-	dl.lg.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD,
+	dl.lg.InfoContext(ctx, "message replied", "result_len", len(result.Text), "cost", result.CostUSD,
 		"merged_count", result.MergedCount, "merged_with_head", result.MergedWithHead)
 
 	// A merge follower (MergedWithHead set; the head slot is 0 and may carry
@@ -310,7 +311,7 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 		tracker.markFinalized()
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			if err := p.EditMessage(ctx, msgID, "已合并到上一条回复。"); err != nil {
-				slog.Debug("merge follower banner edit failed", "msg_id", msgID, "err", err)
+				slog.DebugContext(ctx, "merge follower banner edit failed", "msg_id", msgID, "err", err)
 			}
 		}
 		d.ackMergedFollower(ctx, o.msg, o.key, result.MergedCount, dl.lg)
@@ -322,7 +323,7 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 	// result is still a healthy roundtrip for /health's lastReplySuccess.
 	d.markReplySuccess()
 
-	replyText := d.decorateReplyText(result, sess)
+	replyText := d.decorateReplyText(ctx, result, sess)
 	if replyText != "" {
 		replyText += d.budgetWarnLine(o.key)
 	}
@@ -348,22 +349,23 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 	if tracker.askQuestionFired.Load() {
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			if err := p.EditMessage(ctx, msgID, "⏳ 等待你的选择…"); err != nil {
-				slog.Debug("ask_question: banner edit failed", "err", err)
+				slog.DebugContext(ctx, "ask_question: banner edit failed", "err", err)
 			}
 		}
-		dl.lg.Info("ask_question suppressed redundant reply", "result_len", len(result.Text))
+		dl.lg.InfoContext(ctx, "ask_question suppressed redundant reply", "result_len", len(result.Text))
 	} else if replyText != "" {
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			d.replyIntoBanner(ctx, p, replyDestOf(o.msg), msgID, replyText)
 		} else {
 			d.SendSplitReply(ctx, p, replyDestOf(o.msg), replyText)
 		}
-	} else if result.Aborted {
+	} else if result.Aborted || result.CLIAborted() {
 		// naozhi stopped the turn (/stop, interrupt, /urgent), which already
-		// said so; only the banner's last tool status needs replacing.
+		// said so, or claude reports it aborted; either way only the banner's
+		// last tool status needs replacing.
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			if err := p.EditMessage(ctx, msgID, bannerAborted); err != nil {
-				slog.Debug("aborted turn banner edit failed", "msg_id", msgID, "err", err)
+				slog.DebugContext(ctx, "aborted turn banner edit failed", "msg_id", msgID, "err", err)
 			}
 		}
 	}
@@ -379,7 +381,7 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 // be edited into it and went out as new messages instead.
 const bannerAnsweredBelow = "✅ 已回复，见下方"
 
-// bannerAborted replaces the progress banner of a turn naozhi aborted.
+// bannerAborted replaces the progress banner of an aborted turn.
 const bannerAborted = "已中断。"
 
 // replyIntoBanner edits the first reply chunk into the progress banner and
@@ -389,10 +391,10 @@ const bannerAborted = "已中断。"
 func (d *Dispatcher) replyIntoBanner(ctx context.Context, p platform.Platform, to ReplyDest, msgID, text string) {
 	chunks := replyChunks(p, text)
 	if err := p.EditMessage(ctx, msgID, chunks[0]); err != nil {
-		slog.Warn("edit message failed, sending new", "err", err, "chunks", len(chunks))
+		slog.WarnContext(ctx, "edit message failed, sending new", "err", err, "chunks", len(chunks))
 		d.sendChunks(ctx, p, to, chunks)
 		if err := p.EditMessage(ctx, msgID, bannerAnsweredBelow); err != nil {
-			slog.Debug("banner answered-below edit failed", "msg_id", msgID, "err", err)
+			slog.DebugContext(ctx, "banner answered-below edit failed", "msg_id", msgID, "err", err)
 		}
 		return
 	}

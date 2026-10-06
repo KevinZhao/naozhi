@@ -76,7 +76,7 @@ func TestSchema_CoversEveryFrame(t *testing.T) {
 // TestSchema_IsGenerated: the committed schema is exactly what the registry
 // renders, nested structs included, so a renamed field in EventEntry or any
 // other nested shape fails here until the schema is regenerated — and the
-// regenerated file is what check-ws-contract.mjs holds the dashboard to.
+// regenerated file is what wire.d.ts (tsc in lint-js) holds the dashboard to.
 func TestSchema_IsGenerated(t *testing.T) {
 	t.Parallel()
 	want, err := wsproto.SchemaJSON()

@@ -77,7 +77,8 @@ func TestCronDispatchAdapter_ClassifyError_PreservesSentinelChain(t *testing.T) 
 // nil tolerance: a handler reading a field the projection does not copy
 // would read a zero value, so adding a field to dispatch.CronJob must extend
 // projectCronJob in the same change (cron_consumer.go godoc). AutoPaused is
-// derived: only a paused job whose reason is the failure streak.
+// derived: only a paused job whose reason is a scheduler-stamped one;
+// AutoPauseTransient only for the transient-outage reason.
 func TestCronDispatchAdapter_ProjectCronJob(t *testing.T) {
 	j := &cron.Job{ID: "id1", Schedule: "@hourly", Prompt: "p", Paused: true, FreshContext: true}
 	got := projectCronJob(j)
@@ -85,13 +86,21 @@ func TestCronDispatchAdapter_ProjectCronJob(t *testing.T) {
 	if got != want {
 		t.Errorf("projectCronJob = %+v, want %+v", got, want)
 	}
-	j.PausedReason = cron.PausedReasonAutoFailures
-	if got := projectCronJob(j); !got.AutoPaused {
-		t.Errorf("auto-paused job projected AutoPaused=false: %+v", got)
-	}
-	j.Paused = false
-	if got := projectCronJob(j); got.AutoPaused {
-		t.Errorf("active job with a stale reason projected AutoPaused=true: %+v", got)
+	for _, tc := range []struct {
+		reason          string
+		auto, transient bool
+	}{
+		{cron.PausedReasonAutoFailures, true, false},
+		{cron.PausedReasonAutoTransient, true, true},
+	} {
+		j.Paused, j.PausedReason = true, tc.reason
+		if got := projectCronJob(j); got.AutoPaused != tc.auto || got.AutoPauseTransient != tc.transient {
+			t.Errorf("paused with reason %q projected %+v, want AutoPaused=%v AutoPauseTransient=%v", tc.reason, got, tc.auto, tc.transient)
+		}
+		j.Paused = false
+		if got := projectCronJob(j); got.AutoPaused || got.AutoPauseTransient {
+			t.Errorf("active job with a stale reason %q projected an auto-pause: %+v", tc.reason, got)
+		}
 	}
 	if zero := projectCronJob(nil); zero != (dispatch.CronJob{}) {
 		t.Errorf("projectCronJob(nil) = %+v, want zero value", zero)

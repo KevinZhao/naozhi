@@ -1,3 +1,4 @@
+// @ts-check
 import { NZ_CONTRACT } from './contract.js';
 import { getToken, lsGet, lsRemove, lsSet } from './platform.js';
 import { registerShell } from './shell.js';
@@ -60,10 +61,7 @@ import {
   stopSidebarTimeTick,
   timeAgo,
 } from './utilities.js';
-import {
-  previewDiscovered,
-  scanDiscovered,
-} from './discovery.js';
+import { previewDiscovered, scanDiscovered } from './discovery.js';
 import {
   dismissSession,
   fetchGitState,
@@ -82,10 +80,7 @@ import {
 import { backendDisplayName, backendDisplayVersion, createNewSession, doCreateSession, keyTailDisplay, saveToken, startWSAuthRetryCountdown } from './auth_modal.js';
 import { fetchAccessProfiles, fetchCLIBackends } from './backend_catalog.js';
 import { pendingBackendID } from './features.js';
-import {
-  handleKey,
-  sendMessage,
-} from './send_message.js';
+import { handleKey, sendMessage } from './send_message.js';
 import { collectWorkspaceSessionIDs, fetchSessions, onSessionsApplied, originBadgeHtml, refreshHeaderExitChip, restorePending, updateCardUnreadChip, updateMainState } from './session_list.js';
 import { findDiscovered, isDiscoveredKey, matchProject, parseDiscoveredPid, sid } from './session_ident.js';
 import { ICONS } from './icons.js';
@@ -345,7 +340,7 @@ onSessionsApplied(() => { if (selection.key) updateHeaderCLI(); });
 
 
 document.addEventListener('click', function(e) {
-  if (ui.activePopover && !ui.activePopover.contains(e.target) && !e.target.closest('#btn-history')) {
+  if (ui.activePopover && !ui.activePopover.contains(/** @type {Node} */ (e.target)) && !/** @type {Element} */ (e.target).closest('#btn-history')) {
     closeHistoryPopover();
   }
 });
@@ -419,7 +414,7 @@ function toggleHistory() {
   // might disable inline event handlers on the items HTML.
   const searchInput = document.getElementById('hp-search');
   if (searchInput) {
-    searchInput.addEventListener('input', e => applyHistoryFilter(merged, e.target.value));
+    searchInput.addEventListener('input', e => applyHistoryFilter(merged, /** @type {HTMLInputElement} */ (e.target).value));
     // Auto-focus on desktop only; mobile focus pops the keyboard and
     // pushes the sheet up, which is annoying if the user just wanted to
     // eyeball the list.
@@ -601,13 +596,13 @@ const CHEATSHEET_ENTRIES = [
   { section: '斜杠命令' },
   { keys: ['/new'], desc: '重置当前会话（不带参数；/new <agent> 在这里会当普通消息发送）' },
   { keys: ['/clear'], desc: '重置当前会话（同 /new）' },
-  { keys: ['/urgent'], desc: '/urgent <消息> 立即中断当前回复并优先发送（需后端支持抢占）' },
+  { keys: ['/urgent'], desc: '/urgent <消息> 中断当前回复并优先发送（正在运行的工具需先结束；需后端支持抢占）' },
   { section: '斜杠命令（仅 IM 平台）' },
   { keys: ['/new <agent>'], desc: '重置指定 agent 的对话（如 /new review 对应 code-reviewer）' },
   { keys: ['/cd'], desc: '切换工作目录（/cd <path>；受 session.cwd 的 allowed_root 限制）' },
   { keys: ['/pwd'], desc: '显示当前工作目录' },
   { keys: ['/project'], desc: '绑定会话到项目（/project <name> 或 /project off 解绑）' },
-  { keys: ['/cron'], desc: '定时任务：/cron add "<schedule>" <prompt> · /cron list · /cron del <id>' },
+  { keys: ['/cron'], desc: '定时任务：/cron add [--keep-context] "<schedule>" <prompt> · /cron list · /cron del|pause|resume <id> · /cron mode <id> fresh|keep' },
   { keys: ['/help'], desc: '显示可用命令' },
   { keys: ['/stop'], desc: '中断当前回复（保留排队消息）；dashboard 上用双击 Esc' },
   { section: '上传' },
@@ -668,7 +663,7 @@ function dismissCheatsheet() {
 // Global "?" shortcut: open the cheatsheet when not typing in an input
 // and no other modal is already open. The same Shift+/ also fires "?"
 // on US layouts, so the `key === '?'` check covers both.
-document.addEventListener('keydown', function(e) {
+document.addEventListener('keydown', function(/** @type {KeyboardEvent & {target: HTMLElement}} */ e) {
   if (e.key !== '?') return;
   const tag = (e.target.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
@@ -698,7 +693,7 @@ document.addEventListener('keydown', function(e) {
 // that is open. cron goes through nzViews.cron, absent when cron_view.js is not
 // loaded (dashboard-cron-view-extraction §2.6 B1); its own priority (expanded
 // row before drawer) lives in cron_view.js's cronEscClose.
-document.addEventListener('keydown', function(e) {
+document.addEventListener('keydown', function(/** @type {KeyboardEvent & {target: HTMLElement}} */ e) {
   if (e.key !== 'Escape') return;
   // Overlays with their own Esc trapFocus handling take precedence.
   if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
@@ -800,7 +795,7 @@ function selectSession(key, node) {
   }
 }
 
-// --- Markdown export (UX P2) ---
+// --- Markdown export ---
 
 // Kinds the export drops (clievent kindTable's MarkdownIgnore column says why).
 const MARKDOWN_EXPORT_IGNORE = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_MD_IGNORE);
@@ -1030,11 +1025,11 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
   // > agent name > key tail.
   const displayName = s.user_label || s.summary || s.last_prompt || (agentIsGeneric ? '' : s.agent) || keyTailDisplay(keyParts) || selection.key || '';
 
-  // Detail line: left = CLI name + version, middle = backend chip (multi-
-  // backend mode only) + IM origin chip (only for real IM threads —
-  // feishu/slack/discord/weixin), right = cost (formatted per session's
-  // cost_unit). originBadgeHtml / backendChipHtml return '' when the
-  // session/deployment doesn't warrant a chip so the layout stays clean.
+  // Detail line: CLI label + model on the left, then the IM origin chip (real
+  // IM threads only), exit chip, git/PR mounts, effort/diag mounts, turn timer
+  // and run stats. There is no backend chip (cliLabel names the backend) and
+  // no cost chip: total_cost_usd misreads a Bedrock bill, so #header-runstats
+  // carries the run history (N 轮 · 均 X · 最长 X) instead.
   const effCLIName = s.cli_name || backendDisplayName(pendingBackendID(selection.key, selection.node)) || serverInfo.defaultCLIName;
   const effCLIVersion = s.cli_version || backendDisplayVersion(pendingBackendID(selection.key, selection.node)) || serverInfo.defaultCLIVersion;
   // The version is debug info: it lives in the hover title (and the settings
@@ -1056,14 +1051,7 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
     ? '<span class="model-label nz-clickable" id="header-model" data-action="tuning-model" title="' + escAttr(rawModel + ' — 点击切换模型') + '">· ' + esc(compactModel) + '</span>'
     : '<span class="model-label model-label-unset nz-clickable" id="header-model" data-action="tuning-model" title="model 未在 system/init 上报；可能仍在 spawn 中 — 点击可指定模型">· (模型未配置)</span>';
   const headerOriginBadge = originBadgeHtml(selection.key);
-  // No backend chip: cliLabel already names the backend.
-  const headerBackendChip = '';
-  // No cost chip: the CLI's total_cost_usd misreads a Bedrock bill, so
-  // renderSessionRunsPanel fills #header-runstats with the run history
-  // (N 轮 · 均 X · 最长 X). No context-usage bar either (low signal).
-  const ctxBarHtml = '';
-  // Multi-Backend RFC §8.3 D7: turn duration timer (kiro real value;
-  // claude 0 until estimator lands → cell hidden).
+  // Last turn's duration; hidden when 0 or absent (claude does not report it).
   let turnTimerHtml = '';
   if (typeof s.turn_duration_ms === 'number' && s.turn_duration_ms > 0) {
     const sec = (s.turn_duration_ms / 1000).toFixed(1);
@@ -1078,11 +1066,9 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
   const renameBtn = canRename
     ? '<button type="button" class="btn-rename" data-action="session-rename" title="重命名会话" aria-label="重命名会话">' + ICONS.edit + '</button>'
     : '';
-  // UX P2 Markdown export: any session that has an addressable key can be
-  // exported — no dependency on managed status because the /api/sessions/events
-  // endpoint serves both managed and discovered keys uniformly. The button
-  // shares the .btn-rename hover-reveal treatment so the header stays calm
-  // by default.
+  // Any addressable key, managed or discovered, can be exported: the
+  // /api/sessions/events endpoint serves both. The button shares the
+  // .btn-rename hover-reveal treatment so the header stays calm by default.
   const downloadBtn = selection.key
     ? '<button type="button" class="btn-rename btn-download" data-action="session-download-md" title="导出会话为 Markdown" aria-label="导出会话为 Markdown">' + ICONS.download + '</button>'
     : '';
@@ -1093,7 +1079,6 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
       '<h2>' + esc(displayName) + renameBtn + downloadBtn + '</h2>' +
       '<div class="detail">' +
         '<span class="detail-left">' + cliLabel + modelLabel + '</span>' +
-        headerBackendChip +
         headerOriginBadge +
         '<span class="detail-exit" id="header-exit">' + sessionExitChipHtml(s.state, s.death_reason, s.death_detail, s.startup_failure) + '</span>' +
         // Git branch / worktree chip. Built empty here and filled
@@ -1101,7 +1086,6 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
         // stays empty (collapses via :empty) for non-repo workspaces and
         // remote-node sessions.
         '<span class="detail-git" id="header-git"></span><span class="detail-pr" id="header-pr"></span>' +
-        ctxBarHtml +
         // kiro thinking-effort tier. Built empty and filled by
         // setHeaderEffortChip (called below and from fetchSessions) so a tier
         // change lands without waiting for a header rebuild; collapses via
@@ -1221,7 +1205,7 @@ function renderMainShell() {
   startFileRefObserver();
   // Double-tap events feed → focus input (mobile)
   let lastTapMs = 0;
-  document.getElementById('events-scroll').addEventListener('touchend', e => {
+  document.getElementById('events-scroll').addEventListener('touchend', (/** @type {TouchEvent & {target: Element}} */ e) => {
     if (!isMobile() || e.target.closest('a,button,code,pre')) return;
     const now = Date.now();
     if (now - lastTapMs < 300) { document.getElementById('msg-input')?.focus(); lastTapMs = 0; }
@@ -1300,8 +1284,8 @@ function renderSettingsView() {
       sysLinkHtml +
     '</div>';
   const grp = document.getElementById('settings-theme-group');
-  if (grp) grp.addEventListener('click', function (e) {
-    const b = e.target.closest('.settings-theme-opt');
+  if (grp) grp.addEventListener('click', function (/** @type {MouseEvent & {target: Element}} */ e) {
+    const b = /** @type {HTMLElement} */ (e.target.closest('.settings-theme-opt'));
     if (!b) return;
     applyTheme(b.dataset.theme, true); // persist=true: user-initiated → save to server
     renderSettingsView(); // refresh active state
@@ -1319,13 +1303,13 @@ function renderSettingsView() {
 //
 // Rate-limit replies also carry `retry_after` (seconds) so the
 // UI can show a countdown instead of the legacy generic "稍后
-// 重试" hint. Older servers omit the field — parseInt of
+// 重试" hint. Older servers omit the field — Math.trunc of
 // undefined is NaN, and startWSAuthRetryCountdown clamps to a
 // 60s default so the UX degrades gracefully.
 wsm.onAuthFail((msg) => {
   const raw = (msg.error || '').toString();
   if (raw.toLowerCase().includes('too many')) {
-    let retryAfter = parseInt(msg.retry_after, 10);
+    let retryAfter = Math.trunc(msg.retry_after);
     if (!Number.isFinite(retryAfter) || retryAfter <= 0) retryAfter = 60;
     startWSAuthRetryCountdown(retryAfter);
   } else {
@@ -1342,7 +1326,7 @@ const daemonRun = () => {
     if (ui.activeView === 'system') renderSystemView();
   }).catch(() => {});
 };
-const sysRun = (msg) => msg.subsystem === 'sysession';
+const sysRun = (/** @type {WsFrames['run_started' | 'run_ended']} */ msg) => msg.subsystem === 'sysession';
 wsm.on(NZ_CONTRACT.WS.run_started, daemonRun, sysRun);
 wsm.on(NZ_CONTRACT.WS.run_ended, daemonRun, sysRun);
 
@@ -1377,7 +1361,7 @@ function updateHeaderCLI() {
 /* ===== Sidebar resizer (desktop only) ===== */
 (function(){
   const resizer = document.getElementById('resizer');
-  const sidebar = document.querySelector('.sidebar');
+  const sidebar = /** @type {HTMLElement} */ (document.querySelector('.sidebar'));
   // RNEW-UX-004 demo: migrated 'naozhi_sidebar_w' -> 'nz:sidebar_w' via
   // unified helper. One-time loss of saved width acceptable (defaults to
   // CSS width).
@@ -1386,7 +1370,7 @@ function updateHeaderCLI() {
   if (saved >= 200) sidebar.style.width = saved + 'px';
 
   let startX, startW;
-  resizer.addEventListener('mousedown', function(e) {
+  resizer.addEventListener('mousedown', function(/** @type {MouseEvent & {target: Element}} */ e) {
     // Mid-line collapse handle lives inside the resizer; let its click run
     // without starting a drag. Also skip when collapsed (nothing to resize).
     if (e.target && e.target.closest && e.target.closest('.resizer-handle')) return;
@@ -1412,7 +1396,7 @@ function updateHeaderCLI() {
     document.removeEventListener('mouseup', onUp);
     lsSet(LS_SIDEBAR_W, Math.round(sidebar.getBoundingClientRect().width));
   }
-  resizer.addEventListener('dblclick', function(e) {
+  resizer.addEventListener('dblclick', function(/** @type {MouseEvent & {target: Element}} */ e) {
     if (e.target && e.target.closest && e.target.closest('.resizer-handle')) return;
     if (document.body.classList.contains('sidebar-collapsed')) return;
     sidebar.style.width = '360px';

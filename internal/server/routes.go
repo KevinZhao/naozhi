@@ -95,6 +95,9 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 		s.registerPprof()
 		s.registerExpvar()
 	}
+	if hs.wiring.metricsOn {
+		s.registerMetrics()
+	}
 
 	// Server-owned routes: the dashboard shell, static assets and the WS
 	// upgrade. These stay here because they are not a feature's API surface —
@@ -120,6 +123,7 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	// own route like the dashboard's modules.
 	s.mux.HandleFunc("GET /static/vendor/{file...}", auth(handleDashboardCSS))
 	s.mux.HandleFunc("GET /static/vendor/katex-0.16.21/katex.min.js", auth(serveStaticJS("vendor/katex-0.16.21/katex.min.js")))
+	s.mux.HandleFunc("GET /static/vendor/mermaid-11.14.0/mermaid.min.js", auth(serveStaticJS("vendor/mermaid-11.14.0/mermaid.min.js")))
 	s.mux.HandleFunc("GET /static/contract.js", auth(serveStaticJS("contract.js")))
 	s.mux.HandleFunc("GET /static/nz_util.js", auth(serveStaticJS("nz_util.js")))
 	s.mux.HandleFunc("GET /static/state.js", auth(serveStaticJS("state.js")))
@@ -204,9 +208,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// style-src admits unsafe-inline — events are wired through data-action
 	// delegation plus a hash for the theme bootstrap, and the per-element colours
 	// JS still computes go through data attributes applied via CSSOM (nz_util.js
-	// applyDataBg) rather than style="" attributes. CDN entries pin exact
-	// versioned files; connect-src 'self' covers the same-origin ws/wss upgrade;
-	// frame-src blob: is for sandboxed previews.
+	// applyDataBg) rather than style="" attributes. No outside origin is
+	// listed: KaTeX and mermaid are vendored; connect-src 'self' covers the
+	// same-origin ws/wss upgrade; frame-src blob: is for sandboxed previews.
 	w.Header().Set("Content-Security-Policy", dashboardCSP)
 	// HSTS only over TLS (RFC 6797 §7.2): on plain HTTP it would brick local
 	// loopback access for a year. Same gate as the auth cookie Secure flag.
@@ -216,7 +220,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "same-origin")
-	// Defence in depth against a compromised CDN script: no getUserMedia etc.
+	// Defence in depth against a compromised library script: no getUserMedia etc.
 	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
 	// COOP blocks window.opener XS-Leaks; CORP blocks cross-origin no-cors embeds.
 	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")

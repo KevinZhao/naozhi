@@ -27,6 +27,9 @@ WatchdogSec=120
 User=ec2-user
 WorkingDirectory=/home/ec2-user/naozhi
 ExecStart=/home/ec2-user/naozhi/bin/naozhi --config /home/ec2-user/naozhi/config.yaml
+# `systemctl reload naozhi` re-reads config.yaml without dropping sessions
+# (hot sections only: im_access, im_rate_limit, log.level — docs/rfc/config-hot-reload.md).
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5
 

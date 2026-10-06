@@ -380,7 +380,7 @@
    for the rendered formula once the bundle lands. */
 .katex-pending{font-family:'SF Mono',Consolas,monospace;color:var(--nz-text-dim);font-size:0.95em;padding:0 2px;background:var(--nz-bg-1);border-radius:var(--nz-radius-xs)}
 /* A diagram waiting for mermaid shows its source (runMermaid writes it into
-   the <pre>). md-render-unavailable marks a renderer whose CDN load failed. */
+   the <pre>). md-render-unavailable marks a renderer whose lazy load failed. */
 .mermaid-pending{margin:0;text-align:left;white-space:pre-wrap;font-family:var(--nz-font-mono);font-size:var(--nz-fs-sm);color:var(--nz-text-dim)}
 .mermaid-pending.md-render-unavailable::before{content:'图表渲染器未加载（离线？），显示源码';display:block;margin-bottom:6px;font-size:var(--nz-fs-xs);color:var(--nz-text-faint)}
 .katex-pending.md-render-unavailable{border-bottom:1px dashed var(--nz-text-faint);cursor:help}
@@ -580,6 +580,10 @@
 .pr-chip-more{opacity:.75;cursor:help}
 .sc-type-tag{display:inline-block;padding:1px 5px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;color:var(--nz-text-mute);background:var(--nz-bg-2);letter-spacing:.2px;flex-shrink:0;margin-left:auto}
 .sc-agents{display:inline-flex;align-items:center;gap:2px;padding:1px 5px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;color:var(--nz-chip-info-fg);background:var(--nz-chip-info-bg);flex-shrink:0;margin-left:auto}
+/* Running workflows on a card other than the open one (workflow-dashboard RFC PR-15). */
+.sc-wf{display:inline-flex;align-items:center;gap:2px;padding:1px 5px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;font-variant-numeric:tabular-nums;color:var(--nz-status-running);background:var(--nz-bg-2);flex-shrink:0;margin-left:auto}
+.sc-agents+.sc-wf{margin-left:0}
+.session-card.active .sc-wf{display:none}
 /* R110-P1 Home panel (idle main area): "最近会话" compact list that appears
    below the cold-start CTA when sessionsData has entries. Keeps density low
    (max 5 rows, 36px each) so it doesn't dominate the empty state, but gives

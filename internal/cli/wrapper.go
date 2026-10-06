@@ -591,6 +591,10 @@ type ReconnectHooks struct {
 	// synchronously before the read loop starts, with the shim hello's session
 	// id ("" when it has none). nil → mid-turn.
 	ResolveUnknown func(helloSessionID string) (idle bool)
+	// KnownWorkflowTasks are the task ids the session already knows as
+	// workflows; the replay seed builds their entries even when the ring no
+	// longer holds their task_started or launch frame.
+	KnownWorkflowTasks []string
 }
 
 // SpawnReconnect creates a Process by reconnecting to an existing shim after a naozhi restart.
@@ -640,6 +644,8 @@ func (w *Wrapper) attachReconnected(ctx context.Context, handle *shim.ShimHandle
 	if handle.Hello.SessionID != "" {
 		proc.turn.sessionID = handle.Hello.SessionID
 	}
+	// Before the read loop, so no live frame of a workflow precedes its replay.
+	proc.seedWorkflows(replays, lastSeq, proto, hooks.KnownWorkflowTasks)
 
 	// Mid-turn detection: a last replayed event that is not a result means the CLI
 	// is still processing → StateRunning, with reconnectedMidTurn letting readLoop's

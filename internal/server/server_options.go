@@ -19,6 +19,7 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
 	transcribepkg "github.com/naozhi/naozhi/internal/transcribe"
+	"github.com/naozhi/naozhi/internal/webhook"
 )
 
 // ServerOptions holds optional configuration for a Server.
@@ -41,6 +42,11 @@ type ServerOptions struct {
 	// IMBudget refuses IM turns past cost.budget and answers /api/cost/budget;
 	// nil admits every turn.
 	IMBudget *budget.Gate
+	// IMGroupScope is what one IM group-chat session covers; zero is per thread.
+	IMGroupScope dispatch.GroupScope
+	// IMThreadAutoOpen answers a group @mention outside any thread in a new
+	// thread under it.
+	IMThreadAutoOpen bool
 	// StateDir is the only state directory the constructor owns end-to-end
 	// (cookie_secret 0700/0600, retired-key ledger, size warning). Other state
 	// dirs (~/.claude, workspace cwd, attachments, cron runs/shims) are owned
@@ -127,6 +133,8 @@ type FeatureOptions struct {
 	// contents) or expvar counters. Set `server.debug_mode: true` only while
 	// capturing a profile.
 	Debug bool
+	// Metrics registers GET /metrics (docs/ops/metrics.md).
+	Metrics bool
 
 	// PublicTmp opts the __public_tmp__ pseudo-project in (#646). When
 	// false (default) that pseudo-project is a regular "project not found".
@@ -171,6 +179,9 @@ type RelayOptions struct {
 	// RunTelemetry is the relay cron and sysession were built with; the server
 	// binds the Hub's run-event broadcaster to it.
 	RunTelemetry *runtelemetry.Relay
+	// Webhooks, when non-nil, receives the same run events as the Hub
+	// (docs/rfc/outbound-webhooks.md); main owns its lifecycle.
+	Webhooks *webhook.Sender
 }
 
 // QueueOptions are the turn-queue knobs. Grouped out of the flat
@@ -232,6 +243,12 @@ type ConfigOptions struct {
 	// required". Empty/zero when the caller built the config programmatically.
 	SHA256   string
 	LoadedAt time.Time
+	// Live, when set, supersedes SHA256/LoadedAt on /health so a hot reload
+	// is reflected without a restart (docs/rfc/config-hot-reload.md).
+	Live *ConfigFingerprint
+	// Reload re-reads the file and applies its hot sections; nil leaves
+	// POST /api/system/config/reload answering 501.
+	Reload ConfigReloadFunc
 	// Path is the resolved path to config.yaml. Non-empty enables the
 	// POST /api/access-profiles create endpoint (appends via yaml.Node
 	// surgery); empty makes it return 400.

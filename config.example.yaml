@@ -81,6 +81,11 @@ server:
   # refuse to serve at all when dashboard_token is empty. Runbook:
   # docs/ops/pprof.md. Startup logs a WARN while this is on.
   # debug_mode: false
+  # metrics_enabled registers GET /metrics: the naozhi_* counters in Prometheus
+  # text format for a scraper on another host (dashboard token as Bearer; not
+  # loopback-only, unlike /api/debug/vars). Needs dashboard_token. See
+  # docs/ops/metrics.md.
+  # metrics_enabled: false
 
 workspace:
   id: "your-node-id"
@@ -245,6 +250,25 @@ session:
     no_output_timeout: "15m"
     total_timeout: "2h"
   store_path: "~/.naozhi/sessions.json"
+  # What one session of an IM group chat covers:
+  #   thread (default) — each Slack thread / Feishu topic gets its own session;
+  #                      a message outside any thread uses the channel's
+  #   chat             — the whole channel or group shares one session
+  #   user             — each member of the group gets their own session
+  # The channel still owns /cd, the project binding and /cron; /new and /stop
+  # act on the thread's (or member's) session. Discord threads are separate
+  # channels and WeChat has only direct chats, so neither is affected.
+  # Under thread, replying in the thread of a top-level bot answer starts a
+  # fresh session without the channel's context; use chat to keep one.
+  group_scope: "thread"
+  # Answer a Slack / Feishu group @mention posted outside any thread in a new
+  # thread (Feishu topic) under it; under group_scope thread that thread is
+  # also its own session, which the follow-ups posted there continue. Slash
+  # commands still answer where they were posted. Discord is not covered, nor
+  # is a Feishu quote reply. If Feishu refuses to open the topic (e.g. the app
+  # lacks permission), the answer is posted in the group instead and each
+  # such mention starts a session without the earlier context.
+  thread_auto_open: false
   # auto_chain — REMOVED (schema v2). It joined sessions in the same
   # workspace by guessing that "same slug + 7d window" meant one conversation,
   # which stitched unrelated one-off sessions together as each other's history
@@ -477,6 +501,25 @@ platforms:
 # admin_users alone may run /cron, /cd and /project; leave it empty and every
 # allowed user is an admin. Changes need a restart. `naozhi setup weixin`
 # writes the weixin entry for the WeChat user who scanned the login QR code.
+# Outbound webhooks (docs/rfc/outbound-webhooks.md): POST run lifecycle events
+# of cron jobs and system-session daemons to your own endpoints. Payload is run
+# metadata only (ids, state, duration, error_class) — never prompt / result /
+# error text. Signed with HMAC-SHA256 when `secret` is set (X-Naozhi-Signature:
+# sha256=…); X-Naozhi-Delivery is an idempotency key. Retries 408/429/5xx with
+# 1s/2s/4s backoff; a full per-endpoint queue drops (counted in
+# naozhi_webhook_dropped_total). Absent = off.
+# integrations:
+#   webhooks:
+#     - url: https://ci.example.com/hooks/naozhi
+#       secret: "${NAOZHI_WEBHOOK_SECRET}"
+#       events: [run.ended]          # run.started | run.ended; empty = both
+#       subsystems: [cron]           # cron | sysession; empty = both
+#       timeout: 10s
+
+# allowed user is an admin. Reload without a restart: `naozhi config reload`
+# (or `systemctl reload naozhi`); see docs/rfc/config-hot-reload.md.
+# `naozhi setup weixin` writes the weixin entry for the WeChat user who
+# scanned the login QR code.
 # im_access:
 #   default_deny: false     # true refuses every platform without an entry
 #   deny_reply: ""          # replaces the direct-chat refusal text
@@ -488,7 +531,7 @@ platforms:
 # Per-sender IM message rate limit (token bucket keyed by platform + user ID,
 # or by chat when the platform sends no user ID). Slash commands count; /stop
 # does not. A limited message is dropped and the sender told at most once a
-# minute. Absent or 0 = unlimited. Changes need a restart.
+# minute. Absent or 0 = unlimited. Reloads without a restart.
 # im_rate_limit:
 #   msgs_per_min: 10        # sustained rate per sender
 #   burst: 3                # back-to-back allowance; 0 = msgs_per_min

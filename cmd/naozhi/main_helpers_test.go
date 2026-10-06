@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -450,5 +451,40 @@ func TestMain_SharesRoutingResolver(t *testing.T) {
 	}
 	if !upstreamWired {
 		t.Error("upstream.New in main.go must receive routing.Resolver as its resolver")
+	}
+}
+
+// TestMain_WiresGroupChatSettings pins that main() hands session.group_scope
+// and session.thread_auto_open to the server; the server-side wiring tests
+// start from ServerOptions and cannot see a dropped field here.
+func TestMain_WiresGroupChatSettings(t *testing.T) {
+	t.Parallel()
+	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		if sel, ok := lit.Type.(*ast.SelectorExpr); !ok || sel.Sel.Name != "ServerOptions" {
+			return true
+		}
+		for _, elt := range lit.Elts {
+			if kv, ok := elt.(*ast.KeyValueExpr); ok {
+				got[types.ExprString(kv.Key)] = types.ExprString(kv.Value)
+			}
+		}
+		return true
+	})
+	for field, want := range map[string]string{
+		"IMGroupScope":     "dispatch.GroupScope(cfg.Session.GroupScope)",
+		"IMThreadAutoOpen": "cfg.Session.ThreadAutoOpen",
+	} {
+		if got[field] != want {
+			t.Errorf("server.ServerOptions in main.go passes %s: %q, want %q", field, got[field], want)
+		}
 	}
 }

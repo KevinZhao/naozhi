@@ -49,6 +49,7 @@ type HealthHandler struct {
 	// fingerprint (#2538); auth-only fields, empty when unknown.
 	configSHA256   string
 	configLoadedAt time.Time
+	configLive     *ConfigFingerprint // nil ⇒ the two static fields above
 	configPath     string
 	// cronRunStore snapshots the cron run store's loss counters; nil when the
 	// server runs without a scheduler.
@@ -97,10 +98,13 @@ type healthAuthSection struct {
 	// ConfigSHA256 / ConfigLoadedAt / ConfigPath fingerprint the config the
 	// process loaded (#2538). Auth-only by construction (this struct is the
 	// authenticated section), so a public probe cannot read the hash or path.
-	ConfigSHA256   string            `json:"config_sha256,omitempty"`
-	ConfigLoadedAt string            `json:"config_loaded_at,omitempty"`
-	ConfigPath     string            `json:"config_path,omitempty"`
-	Nodes          map[string]string `json:"nodes,omitempty"`
+	ConfigSHA256   string `json:"config_sha256,omitempty"`
+	ConfigLoadedAt string `json:"config_loaded_at,omitempty"`
+	// ConfigRestartRequired lists the sections a config reload could not
+	// apply; config_sha256 stays on the last file applied in full meanwhile.
+	ConfigRestartRequired []string          `json:"config_restart_required,omitempty"`
+	ConfigPath            string            `json:"config_path,omitempty"`
+	Nodes                 map[string]string `json:"nodes,omitempty"`
 	// Platforms maps each registered platform to its connection state name, or
 	// "registered" when the adapter cannot observe its connection.
 	Platforms map[string]string `json:"platforms"`
@@ -285,12 +289,10 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 			TotalTimeout:    h.totalTimeoutStr,
 		},
 		CLIAvailable: cliAvailable(h.router.Backends().CLIPath()),
-		ConfigSHA256: h.configSHA256,
 		ConfigPath:   h.configPath,
 	}
-	if !h.configLoadedAt.IsZero() {
-		auth.ConfigLoadedAt = h.configLoadedAt.Format(time.RFC3339)
-	}
+	auth.ConfigSHA256, auth.ConfigLoadedAt, auth.ConfigRestartRequired = h.configFingerprint()
+
 	if nodeStatus := h.nodeAccess.NodesStatus(); len(nodeStatus) > 0 {
 		auth.Nodes = nodeStatus
 	}
@@ -304,4 +306,18 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	resp.healthAuthSection = auth
 	writeJSON(w, resp)
+}
+
+// configFingerprint is the sha256, RFC3339 load time and pending restart
+// sections /health reports: the live fingerprint when a reloader is wired,
+// else the startup values.
+func (h *HealthHandler) configFingerprint() (sha, loadedAt string, restartRequired []string) {
+	sha, at := h.configSHA256, h.configLoadedAt
+	if h.configLive != nil {
+		sha, at, restartRequired = h.configLive.Get()
+	}
+	if !at.IsZero() {
+		loadedAt = at.Format(time.RFC3339)
+	}
+	return sha, loadedAt, restartRequired
 }

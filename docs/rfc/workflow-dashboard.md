@@ -85,7 +85,8 @@
 13. **PR-11 依赖 PR-10；JSDoc 一块只标一个 def 参数**（§6.3、PR-11）。applyHttp 的 JSDoc 要用 PR-10 注册的 REST def，按 v4 允许的并行开发，
     check-ws-contract 会报"no schema defines"（`ws-contract-nested.mjs:146-150`）。另外 `paramRe`（:128）每个文档块只 exec 一次，
     `@param {Map} store @param {WireView} w` 这样的块只读到第一个，报 `Map` 未定义、`w` 不受检查。现在 PR-11 依赖 PR-10；§6.3 规定每个 def 类型参数用行内
-    `/** @type {X} */` 或只含一个 `@param` 的块，帧对象本身不标 def 类型。
+    `/** @type {X} */` 或只含一个 `@param` 的块，帧对象本身不标 def 类型。（#3439 删除了 `ws-contract-nested.mjs`，字段检查改由 tsc 对照 `wire.d.ts` 做，
+    `paramRe` 的写法约束随之失效；PR-11 仍依赖 PR-10，因为 REST 响应类型要先进 `wire.d.ts`。现行规则见 §6.3。）
 
 **简化（评审建议，采纳）**
 
@@ -229,7 +230,7 @@
     原样交给叶子模块，`rows_gen`、`agents[].rev`、`prev_agent_ids` 之类的读取于是都不受检查。现在 `workflow_state.js` 的入参用 JSDoc 标注
     wsproto 与 `ext/workflows` REST schema 里的 def 短名（`/** @param {WireView} w */` 等），§6.3 加一行。另外更正先例：`cron_view.js:2020-2021`
     就是 R6 有意允许的"转交给参数名为 msg 的同文件函数"，不是逐字段读取；v3"钻空子"的说法删除。两种形态都过 R6，本 RFC 保留逐字段拼对象，
-    因为字段一目了然。
+    因为字段一目了然。（#3439 起 R6、顶层 `msg.<field>` 扫描与 `ws-contract-nested.mjs` 都已删除，由 tsc 取代；现行规则见 §6.3。）
 19. **UI 细节与 CSS 对齐**（§7.3、§7.4、PR-12）。（1）`.sa-*` 规则全部限定在 `.rb-agent-row` 下（`split_view.css:91-99`），放到 `.wf-row`
     上不起作用。现在在 `views.css` 里写独立的 `.wf-*` 规则。（2）stopped 与 skipped 同为 `--nz-text-mute`；浅色主题下 queued 的 `--nz-text-dim`
     （`#6e7781`）与之几乎相同（`tokens.css:254,258`）。现在不再声称"颜色双编码"：颜色只区分 running / done / failed，中性的三种状态靠字形加
@@ -374,7 +375,8 @@
     `check-enum-literals.mjs:14-18`）。现在只查：显示表恰含枚举键 + 字面量禁令只覆盖 `workflow_state.js` / `workflow_view.js`。
 26. **`wsm.on` handler 的形态**（§6.3、§7.1）。check-ws-receivers R6 拒绝把 `msg` 转交给 import 进来的函数（`check-ws-receivers.mjs:127-128`），
     v2 的 `applyFrame(store, msg)` 跨模块调用必红；包一层同文件函数虽能绕过，却违背 R6 的本意。现在 handler 里逐字段读 `msg.<field>`
-    拼成普通对象再交给叶子模块（先例 `cron_view.js:2020-2021`）；PR-11 加 R6 夹具。
+    拼成普通对象再交给叶子模块（先例 `cron_view.js:2020-2021`）；PR-11 加 R6 夹具。（#3439 删除了 R6：handler 直接把 `msg` 交给
+    标了帧类型的叶子模块参数，见 §6.3。）
 27. **展开检测**（§7.2）。`toggle` 不冒泡、不在 `nz_util.js` 的委托列表里，新模块又不能在顶层挂 document 监听（`nz/no-module-side-effects`）。
     改为 `renderWorkflowPanel` 给自己创建的每个 `<details>` 挂 toggle 监听；自动展开走同一个"需要行"路径；只有用户触发的展开才写 sessionStorage。
 28. **行的 DOM 约定**（§7.3、§8.3、§8.4）。workflow 行不用 `.rb-agent-row[data-task]`：`agent_view.js:638-647` 的 document 级监听会再调一次
@@ -541,7 +543,8 @@
     - 枚举防漂移改为扩展 `check-enum-literals.mjs`（`TestContractJS_Current` 只查新鲜度）。
     - PR-8 补 `rest.schema.json` 重生成；Summary / Ref 写明 snake_case tag。
     - PR-10 在 `ext/workflows` 自带 schema test + golden，并登记进 `REST_SCHEMAS` 与
-      `check-mock-rest.test.mjs` 的 schema 列表；不扩 `ROUTES`（那是 EventEntry 专用）。
+      `check-mock-rest.test.mjs` 的 schema 列表；不扩 `ROUTES`（那是 EventEntry 专用）。（#3439 删除了 `REST_SCHEMAS`，
+      REST schema 改为由 `tools/gen-contract` 生成进 `wire.d.ts`，见 §6.3。）
 36. **ratchet 台账逐 PR**（§14、§11.5）。`ratchet-raises` 是必过 job，只认本 PR 追加的台账行。
     PR-11 至 PR-15 每个都要列出预期的 gate 并追加台账行；§11.5 加
     `go run ./tools/ratchet-raises -base origin/master`。
@@ -1290,6 +1293,9 @@ running（5），否则探针行 6 的 B（`state:"start"`，只有 queuedAt）�
 - **暴露方式**：`Process.Workflows() *workflow.Set`。session 层通过可选接口类型断言获取
   （`workflowNotifier`），仿 `codeChangeNotifier`（`managed_code_change.go:11`）；**不**给
   `processIface`（`managed.go:149`）加方法，免得波及 `testutil.TestProcess` 与 facet pin。
+  board 对 Tracker 的另两个写操作同样经 Process 转发（PR-7）：bind 时下发已知 task_id 用 `Process.KnowWorkflowTasks(ids)`，
+  结果文件合并用 `Process.ApplyWorkflowResult(rf) bool`（即 `Tracker.ApplyResultFile`，返回前同步调回调，所以同样要放开 b.mu 再调，§5.6(4)）。
+  于是 `workflowNotifier` 是这四个方法，PR-8 不改 `internal/cli`，session 的测试替身也不必构造 Tracker。
 
 ### 5.3 内存上限
 
@@ -1303,7 +1309,7 @@ running（5），否则探针行 6 的 B（`state:"start"`，只有 queuedAt）�
 | 每 workflow agent 行 | 2000（board 第 4 步的并集同样受此上限） | 计数照算，行截断，`AgentsCapped=true`；超出上限的项（phase 同理）只计数：不规范化、不 redact、不建记忆，也不留在发布切片的底层数组里；记忆超过上限时修剪到当前所示的 index（PR-6；先建全部行再切片的话，单个 10MiB 快照能让一个条目钉住 ~60MB） |
 | 每 agent 历史 agentId | 8 | 丢最旧 |
 | 每终态 workflow 的结果缓存（§6.2.1） | result 16KB + logs 合计 64KiB（≤ 200 行 × 500 runes，超出丢最旧） | ≤ ~80KB；截断后的 result 是副本，不钉住整段原文（PR-6）；不缓存 per-agent resultPreview |
-| 后台磁盘 I/O（RunDir 解析、stat、结果文件、R3，§5.8 "I/O 派发"） | 每 board 在途 ≤ 2；全局 `workflowIOSlots = 8` | 在途 > 30s 记为卡死但**继续占全局槽位**，每 board 至多补发 1 个；挂死的文件系统最多卡住 8 个 goroutine / fd |
+| 后台磁盘 I/O（RunDir 解析、stat、结果文件、R3，§5.8 "I/O 派发"） | 每 board 在途 ≤ 2；全局 `workflowIOSlots = 8` | 在途 > 30s 记为卡死但**继续占全局槽位**，每 board 至多补发 1 个；挂死的文件系统最多卡住 8 个 goroutine / fd；没抢到全局槽位的 board 在池里登记，槽位释放时按登记先后 pump（PR-8：否则它要等自己的下一次登记或 sweeper tick）；登记后再试一次槽位，否则在“首次尝试失败”与“登记”之间释放的槽位找不到等待者 |
 | 字符串 | agent：label/title/phaseTitle 120、model 64、last tool 64、last tool summary 200、error 400；workflow：Name 120、Description / Current / NotifySummary 200、RawState / RawStatus 32 runes | 先 `RedactSecrets` 再 `textutil.TruncateRunes`（`textutil/truncate.go:19`），按原串 maphash 记忆（§4.3） |
 
 估算：一行 Agent 结构体 + 字符串 ≲ 600B，398 agents ≈ 240KB 上界、典型 ≈ 80KB。一个 workflow 的行最多同时有三份：
@@ -1399,7 +1405,7 @@ Tracker 当前版、CoW 期间的旧版、board 盖过 Rev 的上一发布版（
 | L0 | 正常 | 全部功能 |
 | L1 | 某些项的**非身份**字段类型错（`WorkflowDecode=Partial`，且通过 §4.1.1 的身份复核） | 坏字段置零，计数 `naozhi_cli_workflow_items_partial_total`（expvar），`Degraded=decode_error`；其余正常 |
 | L1' | 条目本身或身份字段（type/index/phaseIndex/agentId/state）类型错，或 Partial 帧身份复核不过（按 Failed） | **保留上一版的行**，只更新 header；计数 `naozhi_cli_workflow_items_identity_total`，`Degraded=decode_error` |
-| L1'' | 快照行的 envelope 超过 naozhi 的 10MiB 行上限（§1.2.3 天花板，约 4k-7k agents） | readLoop 的 oversize 分支（`process_readloop.go:189-195`，`line` 里留有前 ~10MiB）在跳过之前窥视前 1KiB：含转义形态的 `\"subtype\":\"task_progress\"` 且能截出 `\"task_id\":\"<id>\"`、该 id 是已知 workflow → `Tracker.NoteDropped(id, now)`：**保留上一版的行**，置 `Degraded=snapshot_dropped`（chip "明细过大，已停止更新"），计数 `workflow_lines_oversize`；下一张被接受的快照清除该标记（快照只增不减，实际上通常不会再出现）。截不出 id 只计数。不冻结 `LastObservedAt`（CLI 仍活着、帧仍在到达） |
+| L1'' | 快照行的 envelope 超过 naozhi 的 10MiB 行上限（§1.2.3 天花板，约 4k-7k agents） | readLoop 的 oversize 分支（`process_readloop.go:189-195`，`line` 里留有前 ~10MiB）在跳过之前窥视前 1KiB：`{"type":"stdout",` 开头的 envelope、其 `"line":"` 的值以转义形态的 `{\"type\":\"system\",\"subtype\":\"task_progress\"` 开头（行首锚定，同 §5.1(3)：tool input 里同样的键只多转义一层，照样会被子串匹配命中）即计数 `naozhi_cli_workflow_lines_oversize_total`（PR-7）；能在其后截出首个 `\"task_id\":\"<id>\"`（id 过 `^[a-z0-9]{1,32}$`）→ `Tracker.NoteDropped(id, now)`，id 是在跟踪、未终态的 workflow 时**保留上一版的行**，置 `Degraded=snapshot_dropped`（chip "明细过大，已停止更新"）；下一张被接受的快照清除该标记（快照只增不减，实际上通常不会再出现）。截不出 id、或 id 不是 workflow 的只计数。不冻结 `LastObservedAt`（CLI 仍活着、帧仍在到达） |
 | L2 | `workflow_progress` 整体失败 / 缺失 / 被 withhold | header 退化为 task_started + description + usage（名称、当前 "phase: label"、tokens、tool uses、elapsed），`Degraded=no_snapshot`；withhold 的 phase 标题原样显示为 `phase N`（v4 用 journal / meta.json 回填，v5 删除，NG9） |
 | L3 | 连 task_started 都没见到（replay 被淘汰） | 仅当 `IsWorkflowTask` 为真（见下）才建条目；名称回落 `summary` |
 | L4 | CC 完全改协议 | 无条目，dashboard 与今天一致；`skip unparseable event` 日志可观测（L4 的帧到不了 Tracker，PR-6 不另设 `workflow_decode_errors` 计数） |
@@ -1495,7 +1501,8 @@ type WorkflowBoard struct { // 导出类型名、全部字段未导出：server 
      的回落值或空值盖掉）。同一 task 两侧都有时：
      - **进程侧优先**：Status / RawStatus（因此覆盖 R4 / §5.6(6a) 合成的 interrupted、snapshot_stale 与 R5 的 unknown）、Agents、Phases、Counts、
        Tokens / ToolCalls / DurationMS、Current、Description、NotifySummary、Degraded、Source、ResultLoaded；
-     - **非空优先、两侧都有时进程侧**：RunID、EndedAt、LaunchTranscriptDir；
+     - **非空优先、两侧都有时进程侧**：RunID、EndedAt、LaunchTranscriptDir（EndedAt 只在合并后的 Status 是终态时才从 retained 补：
+       进程侧已覆盖回 running 的条目不该带着上一次合成的结束时刻，PR-8）；
      - **按来源等级**（§4.2 的三张等级表；Ref / retained 一侧按 `Src` 记录的等级，R0 恢复的条目取 Ref 等级）：Name、StartedAt、SessionID；
      - **LastObservedAt**：进程侧非 0 取进程侧；为 0（replay 种子条目，replay 不带时间戳）取 `max(retained.LastObservedAt, b.bindAt)`——
        bind 时刻有一个活着的 CLI 在报告它，不能让 `workflowPinned` 因为 0 在安静 phase 里放走它。
@@ -1505,7 +1512,7 @@ type WorkflowBoard struct { // 导出类型名、全部字段未导出：server 
   4. **分配 wire 版本**：对每个 task 与 `b.last[task]` 比较——
      - `Agents` 切片与上次源切片同一底层数组且长度相同（CoW 共享）→ 行沿用上次的 wire Rev，不逐行比较；
      - 否则逐行（按 index）用 `workflow.AgentEqualIgnoringRev(a, b)` 比较：相同则沿用上次 Rev，不同或新增则盖
-       `newVer = last.Version + 1`。`Agent` 含 `PrevAgentIDs []string`，**不是**可比较结构体（v2 写的 `==` 编不过），
+       `newVer`：board 级单调计数器的下一个值，一次发布里变化的 task 共用它（PR-8；≥ `last.Version + 1`，跨 task、跨 Tracker 都不回退）。`Agent` 含 `PrevAgentIDs []string`，**不是**可比较结构体（v2 写的 `==` 编不过），
        所以这是手写函数：标量字段逐个 `==`、`PrevAgentIDs` 用 `slices.Equal`；单测以 `reflect.TypeOf(Agent{}).NumField()`
        钉住字段数（新增字段而忘了在这里比较即红），并测"只有 PrevAgentIDs 变化（重试换 id）也推进 Rev"；
      - **行集取并集**（v5；替代 v4 的 `rows_gen`）：上次发布有、这次没有的 index → 沿用 `b.last[task]` 里那一行（Rev 不变）；合并后的 Status
@@ -1538,7 +1545,8 @@ type WorkflowBoard struct { // 导出类型名、全部字段未导出：server 
   条目；drill-in 返回 202 pending（§8.2，与"transcript 尚未落盘"同一语义）；HTTP 不返回 result / logs，置 `result_unavailable`（§6.2）。
   测试：用计数型 fake resolver 断言在 `r.ss.Update` 内 bind、在 readLoop 上 wake 都**零次**同步调用；resolver 阻塞在 channel 上时 wake / bind
   照常返回、其他 board 不受影响；来源元组在解析途中变化时旧结果被丢弃。
-- **绑定**：`bookWorkflows(s, proc, onStructural, onCount)`（内部调 `s.workflows.bind(proc, s.Workspace())`），在三处与 `bookProcessEnd`
+- **绑定**：`bookWorkflows(s, proc, projectsRoot, onStructural, onCount)`（内部调 `s.workflows.bind(proc, s.Workspace())`；`s.workflows` 是
+  `atomic.Pointer[WorkflowBoard]`，session 还没有 board 时——`RegisterForResume` / stub 的 session 被 shim 重接——在这里按 `projectsRoot` 建一个、CAS 写入，PR-8），在三处与 `bookProcessEnd`
   **同位**调用：`router_lifecycle.go:798`（`installFreshSession` 内；此时 `s.workflows` 已是携带来的 board，见下文"携带"）、`router_shim.go:489`（**`commitShimReattach` 成功之后**，不是
   `bookCodeChanges` 所在的 :395——被放弃的 reattach（`reattachReplaced`/`reattachSendInFlight`
   会 `proc.Close()`）不得往一个从未持有该 proc 的 session 的 board 里发布）、`router_rename.go:117`。
@@ -1547,6 +1555,9 @@ type WorkflowBoard struct { // 导出类型名、全部字段未导出：server 
   （endHook 只投递一次，`process_end.go:34-46`）。
   `bind(proc)` 在 `b.mu` 内：
   0. `proc == b.proc` → **no-op**（rename 沿用同一个 proc，`router_rename.go:105-118`；board 也以指针携带，见下）。
+     `proc == b.ended`（board 最近一次经 `procEnded` 解绑的 proc）同样 no-op：上面"紧挨在 `bookProcessEnd` 之前"只覆盖结束**尚未投递**的
+     proc；CLI 已死、结束已投递的 session 被 rename 时，`old.loadProcess()` 交来的正是这个 proc，再绑会把已 interrupted 的条目按它的
+     最终 Set 改回 running，且再也等不到第二次结束。绑定另一个 proc 时清空 `b.ended`。
   1. 若仍绑定着另一个旧 proc（尚未收到它的 ProcessEnd）：把它最后一次已应用的条目折入 `retained`，仍 running 的标
      `snapshot_stale`、**不**标 interrupted——此刻不知道它的 CLI 是否已死；它的 ProcessEnd 随后到达时由 `procEnded` 按原因处理
      （届时 `proc != b.proc`，只更新 retained 里来源是它的条目——retained 条目记录来源 proc 的身份）。新 Tracker 若带同 task_id，进程侧优先覆盖。
@@ -1567,7 +1578,8 @@ type WorkflowBoard struct { // 导出类型名、全部字段未导出：server 
   - **respawn**：v3 写的 `fresh.workflows = old.workflows` 在 `router_lifecycle.go:671`（`installFreshSession` 返回之后），而 bind 在
     `installFreshSession` 内的 :797-798。新 proc 被绑到临时的空 board 上，随即被旧指针覆盖；携带来的 board 的 `b.proc` 还是旧 proc 或 nil，
     收不到新 proc 的任何 wake，R4 最终把仍在跑的 workflow 标成 interrupted。现在 board 走 `respawnSnapshot`（`respawn_snapshot.go:60-104`，
-    与 `codeChanges` 同一条路）：`snapshotRespawn` 里 `snap.workflows = old.WorkflowBoard()`，`rereadSameEntry` 在提交事务内重读一次；
+    与 `codeChanges` 同一条路）：`rereadSameEntry` 在提交事务内取 `snap.workflows = old.WorkflowBoard()`（`snapshotRespawn` 不取：提交时总会经过
+    `rereadSameEntry`，先取的那份必被覆盖；而重接可能在 spawn 途中给没有 board 的 session 建一个，PR-8）；
     `installFreshSession`（:722）增参数 `board *WorkflowBoard`，在 `bookCodeChanges` / `bookWorkflows` / `bookProcessEnd`（:797-798）**之前**
     `s.workflows = board`，`board == nil`（`old == nil`：首次 spawn、`/new`）时才 `newWorkflowBoard(r.hist.projectsRoot)`。它仍是纯状态变更、无 I/O。
   - **rename**：`fresh.workflows = old.workflows` 放在 `router_rename.go:78`（`setCodeChanges` 旁）一带，早于 :117 的绑定，顺序本来就对；
@@ -1581,7 +1593,7 @@ type WorkflowBoard struct { // 导出类型名、全部字段未导出：server 
 - **快照**：`sessionview.SessionSnapshot` 增 `Workflows []workflow.Summary `json:"workflows,omitempty"``
   （放在 `Subagents` 旁，`sessionview/snapshot.go:58`），在 `managed_query.go:207` 附近一次
   atomic Load 填充；同 `MeteringUsage/CodeChanges` 的只读共享契约（`snapshot.go:74-88`），满足
-  #411 O(1)。`internal/server/sessions_shape_test.go` 的 `allowed` 集合加 `workflows`；
+  #411 O(1)。`internal/server/sessions_shape_test.go` 的必需键由 `contractFields(SessionSnapshot{})` 派生（已没有 `allowed` 表），omitempty 的 `workflows` 不用改它（PR-8）；
   `internal/dashboard/session/testdata/rest.schema.json` 含 `sessionview.SessionSnapshot` def
   （`restResponses["sessions"]`），须 `go test ./internal/dashboard/session -run TestRESTSchema
   -update-rest-schema` 重生成，否则 `TestRESTSchema_IsGenerated` 红。只放全部 `IsUnsettled`（running / paused / unknown）+ 最近 3 个终态
@@ -1604,6 +1616,8 @@ type WorkflowBoard struct { // 导出类型名、全部字段未导出：server 
 - **持久化 Ref**：`store.go` `storeEntry` 增 `Workflows []workflow.Ref `json:"workflows,omitempty"``
   （仿 `CodeChanges`，`store.go:62-64,174,199`），从 board 的有界集合派生（非终态 ≤ 16 + 终态 5，≤ 21 条、每条 ~200B；
   `LastObservedAt` 早于 `now − workflowPinMax` 的 unknown 条目不写，所以 R5 判过的条目不会无限期地随每次存盘回到 Ref）；含 `last_observed_at`。旧版 naozhi 读到未知键会忽略，降级安全。`Ref.Name` 来自已脱敏的 `Workflow.Name`；Ref 的 Name / StartedAt / SessionID 都取发布态的值（已按 §4.2 的等级合并，RunDir 解析之后 SessionID 就是 rel 里的 `<sid>`）。
+  R0 另外丢弃 task_id 不是 CC task id 形态（`^[a-z0-9]{1,32}$`）或 status 不在规范值里的条目，Name 重新脱敏、截断到 120 runes（文件可手改）；
+  R0 的发布不发 sessions_update，那是盘上已有的状态（PR-8）。
 - **保活**（不改 `turnOutstanding` 本身——它还被 `scratch.go:225` 调用）：
   - 新谓词 `s.workflowPinned(now) = board.Running() && now − board.LastObservedAt() < workflowPinMax`
     （`workflowPinMax = 6h`，常量，非配置；Q4）。`Running` 含 paused 与 snapshot_stale（§4.2）；snapshot_stale 期间
@@ -1635,7 +1649,7 @@ func (b *WorkflowBoard) Subscribe() (<-chan struct{}, func())          // nil bo
 func (b *WorkflowBoard) Published() *workflow.Published                // 原子 Load；nil board → nil
 func (b *WorkflowBoard) Summaries() []workflow.Summary                 // 原子 Load
 func (b *WorkflowBoard) Running() bool                                 // Published 中存在 IsRunning 的条目（§4.2）
-func (b *WorkflowBoard) LastObservedAt() int64
+func (b *WorkflowBoard) LastObservedAt() int64                       // IsRunning 条目里最新的观测，没有 running 时取全部条目的（PR-8：只取全部的话，刚结束的条目会让过期的 running 条目继续钉住保活）
 func (b *WorkflowBoard) WorkflowAgent(agentID string) (workflow.AgentLoc, bool) // = Published().Agent(id)
 // Result 给 HTTP 用：缓存命中直接返回；缺失且条目终态、RunID 已知、RunDir 已解析时按 task singleflight 发起一次读取（占一个全局 I/O 槽位，
 // 取不到即返回 ResultUnavailable、不等待），读完在 b.mu 内复核 taskId 与条目代数后经 MergeResultFile 合入行、总计与缓存并发布（§6.2.1）。
@@ -1674,7 +1688,9 @@ R0  router_restore：storeEntry.Workflows（Ref）→ board.retained
 R1  ReconnectShimsCtx → SpawnReconnect（wrapper.go:586-642）:
       DrainReplay → proc 构造（Tracker 已在）
       → Tracker.SeedFromReplay(workflow.Replay{Lines, Wrapped}, proto, hooks.KnownWorkflowTasks)  ← 新增，startReadLoop 之前；已知 task_id 由 router_shim.go 从该 session 的
-                                                                            board（R0 恢复的 Ref / retained）取出、经 ReconnectHooks 传入（§5.7 规则 4）
+                                                                            board（R0 恢复的 Ref / retained）取出、经 ReconnectHooks 传入（§5.7 规则 4）；
+        种子不在 readLoop 的 recover 之内、ring 又留在 shim 里，panic 会在每次重启复现：seedWorkflows 自带 recover（log + PanicRecoveredTotal），
+        换一个新 Tracker，只带已知 task_id、Wrapped=true（replay 等于丢了，R5 按 10min 给 live 帧留时间）
       → reconnectVerdict(...)；结果为 unknown 时同步调用 session 层传入的 resolver 读 JSONL 尾（§5.10）
       → applyReconnectVerdict(verdict)                 ← 同时修 turn-neutral（§5.10）；startReadLoop 之前武装
       → startReadLoop
@@ -2031,17 +2047,17 @@ v4 的 `GET /api/sessions/workflow_agent`（per-agent 预览）连同它专用�
 | 产物 | 动作 | 闸门 | PR |
 |---|---|---|---|
 | `SessionSnapshot.Workflows` | 重生成 `internal/dashboard/session/testdata/rest.schema.json`（`-update-rest-schema`） | `TestRESTSchema_IsGenerated` | PR-8 |
-| `sessions_shape_test.go` `allowed` | 加 `workflows` | 该测试 | PR-8 |
+| `sessions_shape_test.go` | 不用改：必需键由 `SessionSnapshot` 派生，`workflows` 是 omitempty（PR-8） | 该测试 | PR-8 |
 | `wsproto.go` 常量 + struct + `New*`（`workflow_state`、`workflow_set` 两种帧） | 新增 | `literal_ban_test.go:21`（只能经 `New*` 构造） | PR-11 |
 | `wsproto/registry.go` Frames 示例（每个字段非零） | 新增 | `TestSchema_CoversEveryFrame`、`TestFramesRegistry_TypeStamped` | PR-11 |
 | `wsproto.schema.json` | `go generate ./internal/wsproto` | `TestSchema_IsGenerated`（`schema_contract_test.go:86-91`） | PR-11 |
 | `static/contract.js` | `go run ./tools/gen-contract`；PR-10 的一条 `/api` 路由让 API 表多 1 行（`contractjs.go:57-66`；v4 有两条，§6.2），PR-11 再加 WS 常量与 ENUMS——两者都要手改 js-ratchet 基线（`contract.js.lines`，现 110）并追加 `js-ratchet:TOTAL.lines` 台账行（§14） | `TestContractJS_Current`（只查新鲜度）、js-ratchet `--check`、`ratchet-raises` | PR-10/11 |
 | contractjs ENUMS `WORKFLOW_STATUS` / `WORKFLOW_AGENT_STATE` | 新增；`check-enum-literals.mjs` 扩展两条：① `workflow_state.js` 的状态显示表（键不加引号）须**恰好**含这两个枚举的键（复用 `tableKeys`，加文件参数；仿 `DEATH_REASONS`）；② **只在 `workflow_state.js` 与 `workflow_view.js` 内**禁止这些值的整串字面量（`literalHits` 限定这两个文件）。**不做全仓禁令**：running / failed / completed / queued / done / unknown / stopped / skipped / paused 在现有十几个 static 文件里作为 session / cron / agent 状态被比较（如 `dashboard.js:335` `sd.state === 'running'`、`agent_view.js:67` `a.status === 'completed'`、`event_stream.js:807` `msg.status === 'queued'`），`literalHits` 分不清比较的是哪个字段，全仓禁令首跑即红——`SESSION_STATE` 不纳管也是这个原因（`check-enum-literals.mjs:14-18`、`contractjs.go:68-71`，归 #2909 的后续）。夹具进 `scripts/check-enum-literals.test.mjs` | `node scripts/check-enum-literals.mjs` + 其 test | PR-11 |
-| 前端 `wsm.on(NZ_CONTRACT.WS.workflow_state, …)` 与 `wsm.on(NZ_CONTRACT.WS.workflow_set, …)` 各一个 | `workflow_view.js` 模块顶层，参数名 `msg`。**handler 不得把 `msg` 交给 import 进来的函数**：check-ws-receivers R6 会拒（`check-ws-receivers.mjs:14-19,127-128`，夹具 `check-ws-receivers.test.mjs:114-117`）。R6 允许两种形态：在 handler 里逐字段读 `msg.<field>` 拼成普通对象再交给叶子模块，或转交给参数名为 `msg` 的**同文件**函数（R6 有意放行，因为那个函数里的 `msg.<field>` 仍在扫描范围内；`cron_view.js:2020-2021` 的 `cronApplyRunStarted(cronMsgOf(msg))` 就是这种，v3 把它当作逐字段读的先例、又把这种形态称为"钻空子"，两处都不对）。本 RFC 用前者，字段一目了然：`(msg) => applyFrame(store, { key: msg.key, node: msg.node, task_id: msg.task_id, epoch: msg.epoch, version: msg.version, base_version: msg.base_version, full: msg.full, server_now: msg.server_now, rows_omitted: msg.rows_omitted, workflow: msg.workflow })`。`check-ws-contract` 扫全部 static/*.js 的顶层 `msg.<field>`（`check-ws-contract.mjs:83-97`），只覆盖到 `msg.workflow` 这一层；嵌套读取见下一行 | `check-ws-contract.mjs:34-45`、`check-ws-receivers.mjs` R1-R7（新增 R6 正反夹具：转交 `msg` 被拒、逐字段对象通过） | PR-11 |
-| `workflow_state.js` 读取嵌套字段的函数（`applyFrame` / `applyHttp` / `reconcileSummaries` 及其内部 helper） | 入参用 JSDoc 标注 def 短名：WS 帧里的 `workflow` → `/** @param {WireView} w */`、行 → `{Agent}`、phase → `{Phase}`，HTTP 响应 → `ext/workflows` REST schema 里的响应 def，Summary → `{Summary}`（短名与既有 def 冲突时在 Go 侧换不冲突的类型名）。check-ws-contract 的嵌套检查只沿"从 `msg` 出发的成员链"和"带 def 短名 JSDoc 类型的参数"两条路跟踪（`scripts/ws-contract-nested.mjs` 文件头）；v3 把 `msg.workflow` 原样交给叶子模块、参数不带类型，`source`、`agents[].rev`、`agents_capped`、`prev_agent_ids`、`phases[].counts` 等读取都不受检查，Go 侧改一个 json tag 浏览器里就静默失效。本表下文登记的 workflow REST schema 也只经这条路生效。**写法约束**（v5）：`ws-contract-nested.mjs:128` 的 `paramRe` 每个文档块只 exec 一次，`@param {Map} store @param {WireView} w` 这样的块只读到第一个（报 `Map` 未定义、`w` 不受检查），所以每个 def 类型参数用紧贴参数的行内 `/** @type {WireView} */ w`，或者该函数的文档块里只有这一个 `@param`；非 def 参数（store、sid）不写带类型的 `@param`。帧不是 def（`wsproto.schema.json` 里 frames 与 defs 分开），handler 拼出的帧对象本身不标类型，只把 `frame.workflow` 交给标了 `WireView` 的 helper。HTTP 响应 def 由 PR-10 注册，所以 PR-11 依赖 PR-10（§14） | `check-ws-contract`（嵌套部分；`typedFns` 计数应增加） | PR-11 |
+| 前端 `wsm.on(NZ_CONTRACT.WS.workflow_state, …)` 与 `wsm.on(NZ_CONTRACT.WS.workflow_set, …)` 各一个 | `workflow_view.js` 模块顶层。帧字段由 tsc 对照生成的 `wire.d.ts` 检查（#3439）：`wsm.on` 按帧类型给 handler 的 `msg` 定型，读帧上没有的字段即 tsc 报错，参数名不受约束。handler 直接把 `msg` 交给叶子模块：`(msg) => applyFrame(store, msg)`，`applyFrame` 的入参写成 `/** @type {WsFrames['workflow_state']} */ frame`（`applySet` 同理用 `WsFrames['workflow_set']`）。帧（或它的 `{ ...msg }` 拷贝）交给未标类型的参数时，`scripts/ts-check.test.mjs` 的 wireReach 报错；逐字段拼出的普通对象不是帧类型，wireReach 认不出，所以不用这种写法 | `check-ws-contract.mjs`（帧类型集合双向一致）、`check-ws-receivers.mjs` R1-R5/R7、tsc（lint-js）、`scripts/ts-check.test.mjs`（`CHECKED` 列入 `workflow_view.js`；wireReach） | PR-11 |
+| `workflow_state.js` 读取嵌套字段的函数（`applyFrame` / `applyHttp` / `reconcileSummaries` 及其内部 helper） | 文件第一行 `// @ts-check`，加入 `scripts/ts-check.test.mjs` 的 `CHECKED`（`wire.d.ts` 的类型到达未开检查的文件时 wireReach 报错）。tsconfig 不开 `strict`，未标类型的参数是 `any`，读取不受检查，所以接收帧或 def 值的参数都要标类型：帧用 `WsFrames['workflow_state']`，helper 入参用 `wire.d.ts` 里的 def 短名（`workflow` → `WireView`、行 → `Agent`、phase → `Phase`、Summary → `Summary`；短名与既有 def 或 TypeScript lib 全局名冲突时在 Go 侧换类型名，`ts-check.test.mjs` 会拦与 lib 重名的），HTTP 响应用 PR-10 生成的 `RestResponse_*`。wireReach 只追帧，def 值交给未标类型的参数不会报错，这一条靠评审。`@param` 与行内 `@type` 都可以，一个文档块写几个 `@param` 都行。v3 把 `msg.workflow` 原样交给不带类型的参数，`source`、`agents[].rev`、`agents_capped`、`prev_agent_ids`、`phases[].counts` 等读取都不受检查，Go 侧改一个 json tag 浏览器里就静默失效 | tsc（lint-js）、`scripts/ts-check.test.mjs` | PR-11 |
 | `handlerSet` 字段、`build_server.go` 构造（注入 IPLimiter）、`registerDashboard` mount | 新增 | `routes_snapshot_test.go:195-212,406-427` | PR-10 |
 | `testdata/routes.golden.json` | `UPDATE_GOLDEN=1 go test -run TestRoutesSnapshot ./internal/server/` | `TestRoutesSnapshot` | PR-10、PR-11（静态资源路由） |
-| workflow REST 响应类型 | `internal/dashboard/ext/workflows/rest_schema_test.go` + `testdata/rest.schema.json`（仿 session 包的 `restResponses` 生成器）；路径追加到 `test/e2e/check-ws-contract.mjs:120` `REST_SCHEMAS` 与 `scripts/check-mock-rest.test.mjs:13` 的 schema 读取 | 新包自己的 `TestRESTSchema_IsGenerated`、`check-ws-contract` | PR-10 |
+| workflow REST 响应类型 | `internal/dashboard/ext/workflows/rest_schema_test.go` + `testdata/rest.schema.json`（仿 session 包的 `restResponses` 生成器）；`tools/gen-contract` 与 `contractjs.BuildWireDTS` 改为也读这份 schema，重生成 `static/wire.d.ts`，前端经 `RestResponse_*` 类型使用；路径追加到 `scripts/check-mock-rest.test.mjs:13` 的 schema 读取 | 新包自己的 `TestRESTSchema_IsGenerated`、`TestWireDTS_Current`、tsc（lint-js） | PR-10 |
 | mock-server 的 workflow 路由 | 新增 `/workflow`，含三种行模式（`rows=none`、`since=` → delta / 退回 full）与 `result_unavailable`；**不**扩 `check-mock-rest.test.mjs:51-55` 的 `ROUTES`（那是 EventEntry 夹具专用），另写 workflow 响应的 schema 校验用例 | `check-mock-rest` | PR-10 |
 | 新 ES module 资产 | `static_assets.go` `//go:embed` + 资产表行、`routes.go` 静态路由 + golden | `TestStaticJS_ModuleInventory`（`static_module_inventory_test.go:13-21`）、`TestDashboardPage_ImportMapAndPreload`（`static_versioning_test.go:78`） | PR-11 |
 | lint-server-handlers | `-mode fail`；新 server 文件 ≤ 500 行，**不抬基线** | CI | PR-10/11 |
@@ -2057,8 +2073,8 @@ classic→module 文件（`:36-44`），新 ES module **不**登记在那里。
   store 与 §6.1 客户端状态机的纯函数——`applyFrame(store, frame)`、`applySet(store, set)`、`applyHttp(store, sid, resp)`、
   `applyHttpError(store, sid, taskId, status, retryAfter, now)`、`needsFetch(entry, now)`、`reconcileSummaries(store, sid, summaries)`、
   `releaseRows(store, sid)`、`visibleWorkflows(store, sid)`、`announceable(store, sid, selectedSid)`（§7.7）。入参 `frame` / `set` 是
-  `workflow_view.js` 的 handler 逐字段拼出的普通对象，不是 `msg` 本身（§6.3 R6）；其中的 `workflow` / 行 / phase / HTTP 响应 / Summary
-  参数一律带 def 短名的 JSDoc 类型（§6.3），嵌套字段因此受 check-ws-contract 校验。配
+  `workflow_view.js` 的 handler 原样交来的帧，标 `WsFrames[...]` 类型；其中的 `workflow` / 行 / phase / HTTP 响应 / Summary
+  参数一律带 `wire.d.ts` 的类型（§6.3），文件带 `// @ts-check`，嵌套字段因此受 tsc 校验。配
   `scripts/workflow-state.test.mjs`（`node --test`，CI 并入 `ci.yml:396-403` 那组，先例
   `cron_state.js` / `session_stream.js`）。
 - 新 ES module `internal/server/static/workflow_view.js`：薄层。
@@ -2577,7 +2593,7 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
 | hook 快路径 | `"label":"hook_tests"` 的快照**不再被跳过**；assistant tool_use `input` 含 `{"subtype":"hook_started"}` / `{"type":"control_response"}` 的帧照常交付（旧代码必失败）；真实 hook / control_response 帧仍走快路径；键序变化的 control_response 经兜底仍产出 ack |
 | `FormatToolInput` | Workflow input 含 `script` / `args` 时 Detail 不含其任何子串；有 `scriptPath` 时只出 basename |
 | eventCh / readEventBuf | 出 `deliverEvent` 的 Event 与喂完快照帧后的 `p.readEventBuf[*]`，`WorkflowProgress == nil`（照 `process_live_version_test.go:25` 的接缝写法）；**killCh 已关闭时喂一张快照帧**（dispatch 提前 `return shimDispatchReturn`）后 `readEventBuf[*]` 同样为 nil |
-| 超长行（§5.7 L1''） | fake shim 写一个 envelope > 10MiB 的已知 workflow 快照行：readLoop 跳过、Process 不结束、该 workflow `Degraded=snapshot_dropped` 且保留旧行、`workflow_lines_oversize` +1；截不出 task_id 的超长行只计数；之后一张正常快照清除标记 |
+| 超长行（§5.7 L1''） | fake shim 写一个 envelope > 10MiB 的已知 workflow 快照行：readLoop 跳过、Process 不结束、该 workflow `Degraded=snapshot_dropped` 且保留旧行、`naozhi_cli_workflow_lines_oversize_total` +1；截不出 task_id、或 task 不是 workflow 的 task_progress 超长行只计数，非 task_progress 的超长行（含 tool input 里带同样键的）不计；之后一张正常快照清除标记 |
 | Tracker 规范化 | 规范化表逐行（含 blocked / 排队 catch / 限流撤销 → failed，skipped，行 6 的 B → queued）；限流重排队后 `AgentID` 粘滞、`State=queued`；重试换 id 进 `PrevAgentIDs`（≤8）；先 redact 后截断（密钥跨 200 rune 边界仍被遮）；Name / Description / Current / NotifySummary / RawState / RawStatus 的上限；**记忆化**：原串不变时不再调用 `RedactSecrets`（计数接缝），原串变化时重算；Partial 帧身份复核不过时保留旧行 |
 | Tracker 生命周期 | probe 回放后状态与 `wf_*.json` 一致；StartedAt：live task_started 取观测时刻、SeedFromReplay 不取观测时刻、结果文件 `startTime` 覆盖其余来源，`Src.StartedAt` 记对等级；**SessionID**：task_started / launch 帧的 `session_id` 记等级 3、只见过 progress 帧时取最早一帧的值记等级 1、之后更低等级的帧不覆盖；Name：真名记等级 3、summary 回落记等级 1；description-only 帧只改 header 且不清 agent；`task_updated` 先于 notification 置终态；notification `stopped` → killed；终态后 running→stopped；终态后 progress 被忽略；两个 workflow 交错；2000 行 `AgentsCapped`；withheld（`phase N` 原样显示、无 promptPreview）；未知 state/status 透传 |
 | `IsWorkflowTask` / L3 | `a…` id 的 task_progress 带 `summary`、无 task_started/workflow_progress → **不建条目**；带 `subagent_type` → 否；Ref 已知的 task_id → 是（**seed 之前经 `ReconnectHooks` 交来的集合同样生效**）；**规则 2b**：已有 builder 的 task 的 task_updated / task_notification / description-only 帧 → 是、`ev.WorkflowTask` 为真；`background_tasks_changed` 帧不影响判定 |
@@ -2589,7 +2605,7 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
 | Board 版本 | Ref 条目（R0）被版本更低的 Tracker 条目替换：wire version 仍递增、内容未变的行 Rev 不变、变化的行 Rev 前进；shim 重连换 Tracker 同上；retained 被 board 改为 interrupted / snapshot_stale / result_file 时版本递增；CoW 共享切片不逐行比较（计数）；`AgentEqualIgnoringRev` 的字段数钉（`reflect` NumField）；只有 `PrevAgentIDs` 变化也推进 Rev；**行并集**：某 index 从新行集里消失 → 沿用上次的行、Rev 不变；workflow 随后终态 → 沿用的 running 行置 stopped 且 Rev 前进；shim 重连换上无快照的 Tracker（`no_snapshot`）→ 发布的行一行不少，下一张快照到达后按 index 替换；并集不超过 2000 行 |
 | Board 合并（v5） | **R0 条目 + 没有 task_started / launch 的种子条目**（ring 已绕回）：Name 保持 Ref 的 `probe`（不翻成 summary 回落的 `tiny probe`）、StartedAt / SessionID / RunID 取 Ref、status / 行 / 计数取进程侧、`LastObservedAt = max(Ref, bindAt)`、随后 `workflowPinned` 为真；种子条目带等级 3 的 SessionID 时盖过 Ref；Tracker 已有真名时盖过 Ref；RunDir 解析后 SessionID 取 rel 的 `<sid>`、并随下一次存盘写进 Ref；`NewPublished` 在 agentId 集合不变时复用 `byAgentID`（指针相等） |
 | Board 进程结束 | `ProcessEnd{}`（cli_exited / Kill）→ interrupted；`ShimLive` → snapshot_stale、LastObservedAt 冻结、status 仍 running、不发终态；`Detached` → 同 ShimLive；ShimLive 之后重接的 Tracker 带同 task_id → 回到 live、无终态翻转；ShimLive 之后 90s 内无进程 → sweeper 判 interrupted（R4），再重接 → 覆盖回 running〔PR-9〕；**R5**（假时钟）〔PR-9〕：R0 恢复的 running 条目、bind 了一个从不报告它的新 proc → 未绕回 90s / 已绕回 10min 后变为 unknown（`unclaimed`）、不播报、`workflowPinned` 为假、仍在 Summary 里；之后该 Tracker 报告同一 task_id → 覆盖回 running；unknown 且超过 `workflowPinMax` 的条目不写进 Ref |
-| Board 容量 | Tracker LRU 淘汰的终态条目仍在 Published（移入 retained）；**N > 5 次 bind 循环**（每次旧 Tracker 带若干终态）后 retained 终态 ≤ 5、非终态 ≤ 16、行总数有界，被淘汰条目的 `last` / 结果缓存 / `resolve` 同时释放；Ref 恰为有界集合的 header；**live 非终态 20 个（Tracker 16 带行 + 4 header-only）+ retained 3 个**：多次 wake 后 live 全部保持 running、无 interrupted、无结构通知抖动，retained 3 个被删除，**Ref 恰为 `LastObservedAt` 最新的 16 个**（§4.2 Ref 注释）；第 33 个 live 不建条目且计数；phase 第 201 个起被丢弃、`Degraded=phases_capped`（header-only 条目仍是 `too_many`） |
+| Board 容量 | Set 里不再出现的条目（Tracker 的终态 LRU）移入 retained、仍在 Published 且内容与版本不变（PR-8 注：两边的终态上限都是 5、都按 EndedAt，真实 Tracker 的 LRU 受害者恰是 board 最旧的终态，同样会被 board 裁掉，所以接管本身用一个丢掉条目的 Set 来测）；**N > 5 次 bind 循环**（每次旧 Tracker 带若干终态）后 retained 终态 ≤ 5、非终态 ≤ 16、行总数有界，被淘汰条目的 `last` / 结果缓存 / `resolve` 同时释放；Ref 恰为有界集合的 header；**live 非终态 20 个（Tracker 16 带行 + 4 header-only）+ retained 3 个**：多次 wake 后 live 全部保持 running、无 interrupted、无结构通知抖动，retained 3 个被删除，**Ref 恰为 `LastObservedAt` 最新的 16 个**（§4.2 Ref 注释）；第 33 个 live 不建条目且计数；phase 第 201 个起被丢弃、`Degraded=phases_capped`（header-only 条目仍是 `too_many`） |
 | Board 其他 | respawn / rename 以指针携带（同一 `*WorkflowBoard`、epoch 不变）；**respawn 后被绑定的 board 就是携带来的指针**：`b.proc` 是新 proc、喂给新 proc 的快照出现在该 board 的 Published 里、旧 board 上没有残留的新 proc 绑定（v3 设计下新 proc 绑在一个随即被丢弃的空 board 上）；R0 的终态条目在 RunDir 解析后经一次 `MergeResultFile` 补齐行、version 前进〔PR-9〕；`/new` 新 epoch；Ref 持久化往返（含 `last_observed_at`；**非空且非法**的 SessionID / RunID 被丢弃，空值保留条目）；Summary 预计算 O(1)、含 unknown 条目（显示集合 = 全部 `IsUnsettled` + 最近 3 个终态）；`Running()` 对 paused 为真、对 unknown 为假；sessions_update：结构变化立即调 structural 闭包、计数变化 ≤ 1/30s 调 `BumpVersion` 闭包且 trailing edge 补发（假时钟计数断言）；**计数变化后 `r.ss.Gen()` 前进而 dirty 不置位**；**nil board**（`InjectSession(key, nil)`、discovery stub）：快照、`workflowPinned`、`bookProcessEnd` 扇出、§5.8.1 的每个方法都不 panic，表现为没有 workflow |
 | 保活 | `workflowPinned` 时 ReleaseIdleProcess 不释放；Cleanup 不过期、超过 `workflowPinMax` 后过期；scratch 从 `LastObservedAt` 起老化且 `turnOutstanding` 不变；`evictOldest` 优先非 workflow、无候选时回退驱逐 workflow session；`takeoverHasSlot` 与之一致 |
 | 磁盘 / sweeper | runID / sessionID 正则（`..`、`/`、`wf_`、超长）；`ResolveWorkflowRunDir` 拒绝 root 外 / 结构不符 / ID 非法，返回的 `WorkflowRun.SessionID` 等于 rel 里的 `<sid>`；path helper 对非法输入返回 ""；按 agentId 定位 run dir（`ReadDir(257)`，> 256 项放弃）；symlink run dir 被拒；**合法 run dir 被接受**（防参数顺序写反）；**候选是 projectsRoot 的祖先（如 `/`）→ 拒绝**；**darwin 上 transcriptDir 与 root 大小写不同 → 解析成功且 RunDir 按 root 的拼写重拼**（`RelUnderRoot` 的 inode 分支）；**workspace 是 symlink（如 `/tmp/x` → `/private/tmp/x`）、只剩来源 2 / 3 → 仍解析成功**（ProjectDir 先 EvalSymlinks，v4 的纯字符串运算在此失败）；SessionID 为空 → 跳过来源 2；**结果文件被换成 FIFO → `OpenRegularIn` 立即返回 ErrNotRegular、不阻塞**（带超时的测试）；**`subagents/workflows` 被换成 FIFO → R3a 的 `OpenDirIn` 立即报错**；中间目录在解析后被换成指向 root 外的 symlink → `OpenRegularIn` 拒绝；结果文件超限被拒；在途读取卡住 30s 后该 board 至多补发 1 个、旧结果被丢弃；**挂死的 fake FS 上跑 100 个 30s tick：在途 goroutine 恒 ≤ 8**（v3 无上限）；sweeper（假时钟）：丢失 `task_updated` 的 run 在第一个满足"60s 无观测"的 30s tick 置终态；终态后文件迟到由重试补上；续跑中旧文件不被采纳；结果缓存先于 `Source=result_file` 写入（发布态里 `source == "result_file"` 时 `Result` 必命中）；sweeper 是自由函数（`TestRouterBudget` 不变） |
@@ -2598,7 +2614,7 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
 | HTTP | 未鉴权 401（自动）；非法 key 400；`rows=none` 与 `since` 同时给 → 400；`SessionFor == nil` 404；nil board 404；task 不在 board 404；remote node 404；**结果文件缺失 / 是 FIFO / RunDir 未解析 → 200 + `result_unavailable`**（不是 404）；`rows=none` 不带行、但终态且有结果时照样带 result / logs；`since=V` 只带 `rev > V` 的行、epoch 不符时 `rows_mode:"full"`；重启后缓存缺失的终态 workflow 首次 GET 即返回行（`MergeResultFile` 经 `Result` 路径）；取不到全局 I/O 槽位时立即返回 `result_unavailable`、不等待；结果/日志截断（logs 合计 ≤ 64KiB）；结果文件只解析一次（计数）；taskId 不匹配不返回 result；响应带 `server_now`；限流 429；路由表里没有 `/workflow_agent`（v5 删除） |
 | drill-in | board 命中先于 linker nil（无进程的 session 可 drill）；transcript 未落盘 → 202 / `pending`；transcript 是 FIFO → 404 且不阻塞；**tail 中途把 agent jsonl rm + mkfifo**：下一次零字节轮询不阻塞、`Close()` 立即返回、registry 的其他 tailer 照常推进（`pollLoop` 串行，带超时断言）；既有 Agent tailer 同样受保护（默认 opener）；RunDir 未解析 → 202；首行 > 32KiB 仍校验通过；**首行 sessionId 与 RunDir rel 的 `<sid>` 比较**：`Workflow.SessionID` 只有等级 1 的值（或为空）时也能 drill-in，首行 sessionId/agentId 不符 → 404；历史 attempt agentId 可 drill 且 doneFn 立即 done；tailer 用共享 ProjectsRoot allowedRoot（新增生产配置用例，修 `newTailerRegistry("")` 盲区）；**WS 订阅一个已有 tailer 的 agent**：校验用的 fd 已关闭（fd 计数不增）、返回共享 tailer；新 tailer 的首次打开经注入的 opener（计数接缝）；**harness 框架剥离**：探针 agent jsonl 首行显示为 `Reply with just the number 2+2`，没有框架标记的首行原样显示，HTTP 分页与 WS tail 一致；done 时 `agent_done`；WS `pending` → 客户端回退 3s poll |
 | 前端 `workflow_state.js`（node --test） | §6.1 客户端表逐行：`workflow_set` 删掉不在列表 / epoch 不同的条目（`/new` 后清空）；full 在 epoch 变化时丢 rows、**相同时保留 rows**（内容未变的重订阅零请求，`rowsAt` 落后时恰一次 `since`）；fetch 在途时到达的 full 不另发请求、HTTP 响应 `H < version` 时 header 与 version **不倒退**；`version ≤ local` 忽略 header；`base > local` 触发 fetch；`base ≤ rowsAt < version` 合并行；`base > rowsAt` → `since` 拉取；fetch 在途时缓存并在 HTTP 落地后重放；`ensureRows` 与 full 帧同时触发时只发一次；兜底刷新：`!rowsLoaded` → `rows=none`、`rowsLoaded` → `since`（WS 断开 5s 轮询下折叠的 workflow 从不拉全量行）；**结果拉取**：展开中的条目收到终态 + `source:"result_file"` 的 delta 后恰好一次请求（`rowsLoaded` → `since`，否则 `rows=none`）、响应带 result 后不再请求、折叠中的条目不请求、`result_unavailable` 按退避重试至多 5 次、`source` 不是 `result_file` 的终态（如 interrupted）不请求；HTTP 之后的非终态 delta 不再触发重拉（无限重拉回归）；`agents_capped` 不触发 fetch，`rows_omitted` 只触发一次；epoch 变化；429 保持状态、按退避（含 Retry-After）重试；404 删除条目；Summary 兜底判定（node 非 local 跳过、无 `workflow_set` 时以 Summary 裁剪、**unknown 条目不被裁掉**）；`visibleWorkflows` 含 unknown；兜底 LRU 不淘汰最近 `workflow_set` 列出的条目（37 个 live 条目全部保留）；`releaseRows` 后 `rowsLoaded=false`、`resultLoaded=false` |
-| bench | `BenchmarkReadEvent_WorkflowSnapshot398`：`-count≥5` 中位数 ≤ 1.5ms 且 ≤ 400KB/op（M 系列本机；CI 不跑，PR 描述贴数，含跳过路径对照）。**`BenchmarkObserve_Snapshot398`**（解码 + `Observe` + board `wake`，真实 398-agent 快照，稳态：上一张与本张只差几行）中位数 ≤ 2.5ms；**`BenchmarkObserve_Snapshot2000Eq`**（2000 行、lastToolSummary 全含 `=`）首张 ≤ 25ms、稳态 ≤ 5ms——稳态预算靠 §4.3 的记忆化达成，PR-6 / PR-8 实测后在 PR 描述里定稿。PR-6 实测（负载下）：PR-5 的解码本身每张 ~12ms，已超过 5ms，Tracker 的稳态份额约 0.4ms（CPU profile 里 `Observe` 占 ~3%）；所以 2000Eq 的稳态 5ms 只能不含解码，PR-8 定稿时按"Observe + wake ≤ 5ms"写，或连解码一起上调 |
+| bench | `BenchmarkReadEvent_WorkflowSnapshot398`：`-count≥5` 中位数 ≤ 1.5ms 且 ≤ 400KB/op（M 系列本机；CI 不跑，PR 描述贴数，含跳过路径对照）。**`BenchmarkObserve_Snapshot398`**（解码 + `Observe` + board `wake`，真实 398-agent 快照，稳态：上一张与本张只差几行）中位数 ≤ 2.5ms；**`BenchmarkObserve_Snapshot2000Eq`**（2000 行、lastToolSummary 全含 `=`）首张 ≤ 25ms、稳态 ≤ 5ms——稳态预算靠 §4.3 的记忆化达成，PR-6 / PR-8 实测后在 PR 描述里定稿。PR-6 实测（负载下）：PR-5 的解码本身每张 ~12ms，已超过 5ms，Tracker 的稳态份额约 0.4ms（CPU profile 里 `Observe` 占 ~3%）；所以 2000Eq 的稳态 5ms 只能不含解码，PR-8 定稿时按"Observe + wake ≤ 5ms"写，或连解码一起上调。PR-8 实测（M 系列本机，`-count=5` 中位数，不含解码）：`BenchmarkWorkflowBoard_Wake398`（`Observe` + `wake`）≈0.15ms、415KB、421 allocs；`BenchmarkWorkflowBoard_Wake2000Eq` 稳态 ≈3.3ms、1.5MB——按"Observe + wake ≤ 5ms"定稿 |
 
 ### 11.3 Race
 
@@ -2631,7 +2647,7 @@ workflowPushLoop 与 board 发布、generation 变化并发。
 `gofmt -l` 为空；`go vet ./...`；**`GOOS=windows go vet ./...`**（必过的 `build-windows` job 的本地等价，`ci.yml:436-457`；FIFO 测试须在 `*_unix_test.go` + `//go:build unix`，§10）；`GOTOOLCHAIN=go1.26.6 make lint-staticcheck`；
 `lint-server-handlers -mode fail`（含 `hubOptionsFieldBaseline`）；**`go test ./internal/session -run TestRouterBudget`**
 （Router 字段 18 / 方法 98 / 类型引用 5，均为 ratchet 台账指标；本特性的 sweeper、resolver、R3 都不得新增 Router 方法或 `*Router`
-参数）；`node scripts/check-enum-literals.mjs` 与其 test；`node --test scripts/check-ws-receivers.test.mjs`；js-ratchet `--check`；
+参数）；`node scripts/check-enum-literals.mjs` 与其 test；`node --test scripts/check-ws-receivers.test.mjs`；tsc 与 `node --test scripts/ts-check.test.mjs`；js-ratchet `--check`；
 **`go run ./tools/ratchet-raises -base origin/master`**（必过 job 的本地等价）；`check-ws-contract`；
 `check-mock-rest`；`node --test scripts/workflow-state.test.mjs`；CLAUDE.md 模块清单测试；推送前全仓
 `go test ./...`。
@@ -2789,6 +2805,10 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   `process_event_query.go`、`wrapper.go`（:597-641，`startReadLoop` 在 :641；`ReconnectHooks.KnownWorkflowTasks`）、测试。
 - 测试：用 fake shim 逐行喂 probe → Set 正确；空闲期（无 Send）同样更新；replay 种子 + live 无竞态；`KnownWorkflowTasks` 在 seed 时生效；
   非 workflow 的带 summary 的 task_progress 不打 TaskType；§11.2 超长行。另开 issue：shim 遇 `ErrTooLong` 结束 stdout 循环（§13 R14）。
+- 落地的 API（PR-8 用；`internal/cli/process_workflow.go`）：`Process.Workflows() *workflow.Set`（无锁，永不为 nil）、`SetOnWorkflowChange(fn func())`
+  （nil 清除；在写者 goroutine 上、Tracker.mu 之外调用）、`KnowWorkflowTasks(ids []string)`、`ApplyWorkflowResult(*workflow.ResultFile) bool`；
+  `ReconnectHooks.KnownWorkflowTasks []string`；workflow 的 `KindTaskProgress` / `KindTaskDone` 条目带 `TaskType=local_workflow`（取自 `ev.WorkflowTask`）；
+  计数 `naozhi_cli_workflow_lines_oversize_total`（`docs/ops/pprof.md`）。InjectHistory 认 TaskType 的过滤 PR-2 已落地，本 PR 只补上打标。
 - 验收：`go test -race ./internal/cli/...` 绿。
 - 依赖：PR-6、PR-3（同改 SpawnReconnect / wrapper.go，避免冲突）。
 
@@ -2806,15 +2826,18 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   填进 PR-7 的 `ReconnectHooks.KnownWorkflowTasks`；RunDir 解析的"锁内登记 → 锁外执行 → 复核应用"骨架与有界 I/O 派发（resolver 可注入；本 PR 不接
   `ResolveWorkflowRunDir`，RunDir 恒为 ""，PR-9 接上）；§5.6(6a) 的按 `ProcessEnd` 区分（经 `bookProcessEnd` 回调扇出）；§5.9 R0/R2
   （R4 / R5 的 sweeper 与 R0 终态补行在 PR-9）。
-- 文件：新 `internal/session/managed_workflow.go` + test、新 `internal/session/managed_workflow_api.go`（§5.8.1）+ test、`managed.go`（字段）、
+- 文件：新 `internal/session/managed_workflow.go`（绑定 / 唤醒 / 进程结束）、`managed_workflow_publish.go`（合并、上限、版本、Summary、Ref 与 R0）、
+  `managed_workflow_io.go`（通知器、有界 I/O 派发与 RunDir 解析骨架）、`managed_workflow_api.go`（§5.8.1）+ tests（PR-8 按职责拆成四个文件）、
+  `internal/cli/workflow/normalize.go`（`Interrupted(w, ms)` 与导出的 `MaxAgents`：board 合成 interrupted、行并集上限沿用 Tracker 的同一条规则与常量，PR-8）、`managed.go`（字段）、
   `managed_query.go`（:207 附近）、`managed_cost_end.go`（`bookProcessEnd` 的 `SetOnEnd` 回调扇出到 board）、
-  `sessionview/snapshot.go`、`store.go`、`respawn_snapshot.go`（`respawnSnapshot.workflows`：`snapshotRespawn` 取、`rereadSameEntry` 重读）、
+  `sessionview/snapshot.go`、`store.go`、`respawn_snapshot.go`（`respawnSnapshot.workflows`：`rereadSameEntry` 在提交时取，PR-8）、
   `router_lifecycle.go`（:665 调用处传 `snap.workflows`；:722 `installFreshSession` 增 `board *WorkflowBoard` 参数，在 :797-798 的 book* 之前
   `s.workflows = board`，nil 才新建；**不**在 :671 赋值）、`router_tuning_test.go`（:439）与 `tuning_drift_parity_test.go`（:144）——
   `installFreshSession` 的另外两个调用点，新参数传 nil（v4 漏列，编不过）、`router_shim.go`（:365-370 填 `KnownWorkflowTasks`；:489 bind）、
   `router_rename.go`（:78 携带、:117 绑定）、`router_restore.go`、`history_io.go`（`projectsRoot` 字段）、`router_core.go`（`NewRouter` 里求一次 root）、
   `managed_release.go`（:20）、`router_cleanup.go`（:278-305）、`scratch.go`（:225）、`router_capacity.go`（`evictOldest` 两遍）、
-  `internal/server/sessions_shape_test.go`、`internal/dashboard/session/testdata/rest.schema.json`（重生成）。
+  `internal/dashboard/session/testdata/rest.schema.json`（重生成）。`internal/server/sessions_shape_test.go` 不用改：它的必需键已由
+  `contractFields(SessionSnapshot{})` 派生，没有 `allowed` 表，`workflows` 是 omitempty（PR-8）。
 - 测试：§11.2 Board 并发 / 锁序（含 fake resolver 零次同步调用）、Board 版本（含行并集）、Board 合并、Board 进程结束、Board 容量（含 live > 16、
   Ref 取最新 16 个）、Board 其他（含 respawn 后绑定的是携带来的指针、nil board）、保活行——**只认未标〔PR-9〕/〔PR-13〕的子项**；
   `BenchmarkObserve_*` 的 board 部分。
@@ -2864,7 +2887,7 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   `internal/server/handler_set.go`、`build_server.go`（注入 IPLimiter 与 PR-4 的 projects root）、
   `routes.go`、`routes_snapshot_test.go`、`testdata/routes.golden.json`、`static/contract.js`（API 表 +1 行）、
   `scripts/js-ratchet.baseline.json`（`contract.js.lines` 110 → 111，手改）、`scripts/ratchet-raises.jsonl`、
-  `test/e2e/check-ws-contract.mjs`（:120 `REST_SCHEMAS` 追加）、`test/e2e/mock-server.js`（`/workflow` 路由，含三种行模式与 `result_unavailable`）、
+  `tools/gen-contract/main.go` + `internal/contractjs/wiredts.go`（多读一份 REST schema）、`static/wire.d.ts`（重生成）、`test/e2e/mock-server.js`（`/workflow` 路由，含三种行模式与 `result_unavailable`）、
   `scripts/check-mock-rest.test.mjs`（schema 列表 + workflow 响应用例，不动 `ROUTES`）。
 - ratchet 台账：`js-ratchet:TOTAL.lines`（重生成的 contract.js +1 行；v3 漏了这一行，`js-ratchet --check` 与 `ratchet-raises` 必红）。
 - 测试：§11.2 HTTP 行。
@@ -2877,8 +2900,8 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
 
 - 范围：§6.1 全部（`workflow_state` + **`workflow_set`** 两种帧、两道深度门、客户端 429 / 404 规则、**`version` / `rowsAt` 分离、
   full 帧在 epoch 不变时保留行、fetch 在途时的 full、HTTP 响应不倒退、三种拉取模式与 `needsFetch` 去重、终态后的结果拉取**；无 `rows_gen`）；前端叶子模块
-  `workflow_state.js`（客户端状态机，配 node --test；入参带 def 短名 JSDoc 类型，**每个 def 参数单独一个 `@type` 或单 `@param` 块**，§6.3）+ `workflow_view.js`（两个 `wsm.on` handler，逐字段拼对象、
-  不转交 `msg`；导出函数骨架，不渲染；模块状态放 `const` 对象、无顶层 `let`），由 `dashboard.js` 的一行副作用 import 加载，handler 从本 PR 起生效；contractjs ENUMS +
+  `workflow_state.js`（客户端状态机，配 node --test；带 `// @ts-check`，帧参数标 `WsFrames[...]`、其余入参标 `wire.d.ts` 的 def 短名，§6.3）+ `workflow_view.js`（两个 `wsm.on` handler，带 `// @ts-check`，
+  把 `msg` 原样交给标了帧类型的 `applyFrame` / `applySet`；导出函数骨架，不渲染；模块状态放 `const` 对象、无顶层 `let`），由 `dashboard.js` 的一行副作用 import 加载，handler 从本 PR 起生效；contractjs ENUMS +
   `check-enum-literals.mjs` 扩展（**只限两个 workflow 模块**，§6.3）；store 的兜底 LRU 不淘汰最近 `workflow_set` / Summary 列出的条目（每 sid 上限 37）、
   显示集合含 unknown（§7.1）。
 - 文件：`internal/wsproto/{wsproto.go,registry.go,wsproto.schema.json}`、`internal/contractjs/contractjs.go`、
@@ -2886,19 +2909,19 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   workflowPushLoop、`clientWG.Add(2)`）、新 `static/workflow_state.js`、新 `static/workflow_view.js`、
   新 `scripts/workflow-state.test.mjs`、`.github/workflows/ci.yml`（node --test 列表）、
   `scripts/check-enum-literals.mjs` + `check-enum-literals.test.mjs`（表键恰等、两文件内字面量禁令、其他文件里的同名字面量不报的夹具）、
-  `scripts/check-ws-receivers.test.mjs`（R6 夹具：转交 `msg` 给 import 进来的函数被拒、逐字段对象通过）、`static/dashboard.js`
+  `scripts/ts-check.test.mjs`（`CHECKED` 加两个新文件；PLANTS 加 `applyFrame` / `applySet` 的帧参数锚点）、`static/dashboard.js`
   （`import './workflow_view.js';` 一行）、`static_assets.go`、`routes.go`、`testdata/routes.golden.json`、
   js-ratchet baseline（两个新文件的行、`contract.js` 与 `dashboard.js` 的行数）、`scripts/ratchet-raises.jsonl`、CLAUDE.md:242。
 - ratchet 台账：`js-ratchet:TOTAL.lines`；新文件若含 > 100 行的函数则 `js-ratchet:TOTAL.fnOver100` / `js-ratchet:MAX.maxFnLines`。新文件的 per-file 键
   （`maxFnLines` / `fnOver100` / `topLevelLetVar`）首次出现，不算抬升；per-file 行数只改基线；`routes.golden.json` 不是 pin（v3 列的 `golden:routes` 删除）。
-- 测试：§11.2 wsproto / Hub / 前端 `workflow_state.js` 行；`check-ws-contract`（嵌套检查的 `typedFns` 增加、改一个 `WireView` 的 json tag 即报错、
-  HTTP 响应 def 能被解析）、`check-ws-receivers`（含新夹具）、
+- 测试：§11.2 wsproto / Hub / 前端 `workflow_state.js` 行；tsc（改一个 `WireView` 的 json tag 即报错、`RestResponse_*` 能被解析）、
+  `ts-check.test.mjs`（新 PLANTS 报错、wireReach 为空）、`check-ws-contract`、`check-ws-receivers`、
   `check-enum-literals`（含新夹具；在现有 static 文件上首跑即绿）。
 - 验收：浏览器 devtools 见 `workflow_set` → `workflow_state` header-only full → delta 序列；`/new` 后收到空的 `workflow_set`；
   慢 client 模拟下（含队列满时三个 workflow 同时终态）不触发 `wsDropThreshold`；**CLI 退出**（cli_exited）且 eventPushLoop 阻塞在
   resubscribe 期间 interrupted 帧照常送达；**只 kill shim 连接**（CLI 存活）时收到的是 `degraded:"snapshot_stale"` 的 running 帧，
   **不**出现 interrupted，重接后恢复。
-- 依赖：PR-8、**PR-10**（applyHttp 的 JSDoc 用 PR-10 注册的 REST 响应 def；v4 只写 PR-8，并行开发时 check-ws-contract 报"no schema defines"）；
+- 依赖：PR-8、**PR-10**（applyHttp 的 JSDoc 用 PR-10 注册的 REST 响应 def；v4 只写 PR-8，并行开发时 tsc 找不到这些类型）；
   需要预先开好 `ratchet-raise-approved` issue。
 
 ### PR-12 feat(static): workflow 面板 UI
@@ -2962,11 +2985,17 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
 
 - 范围：非当前 session 的卡片从 `s.workflows` 显示 "⚙ 5/8"（计数至多 30s 陈旧，依赖 PR-8 的 `BumpVersion` 型 sessions_update——
   它推进 `stats.version`，WS 连接时 `renderSidebar` 才会重跑）；`node` 非 local 的卡片不显示（NG3）；Q12 的 `LastActivity` 回落。
-- 文件：`static/session_list.js`、`internal/session/managed_query.go`（LastActivity 回落）、
-  `test/e2e/golden/sidebar.json` + pins、`scripts/ratchet-raises.jsonl`。
+  - 徽标对 running 与 paused（`IsRunning`）的条目求和 done/total，`title` 每个 workflow 一行（`<name> · done/total`）；unknown 与终态不计，
+    全部结束即消失。当前卡片在 CSS 里隐藏（`.session-card.active .sc-wf{display:none}`）：选中切换只换 `active` 类、不重绘卡片，
+    渲染时判定会让旧卡片留着隐藏、新卡片留着徽标。样式 `.sc-wf` 进 `css/split_view.css`（与 `.sc-agents` 同处），只用既有 token。
+  - `LastActivity` 回落：`snap.State` 不是 running 时，取最晚启动的 running / paused 条目，"Workflow <name> · done/total"，无名时
+    "Workflow · done/total"。dashboard 不渲染 `last_activity`（只有 `/api/sessions` 的读者看得到它），所以 sidebar 上的信号只有徽标。
+- 文件：`static/session_list.js`、`static/css/split_view.css`、`internal/session/managed_query.go`（LastActivity 回落）、
+  `test/e2e/golden/sidebar.json` + pins、`test/e2e/mock-server.js`（`setSessionWorkflows`）、`scripts/ratchet-raises.jsonl`。
 - ratchet 台账：`js-ratchet:TOTAL.lines`、`golden:sidebar.json`（`session_list.js` 的 per-file 行数只改基线）。
 - 测试：WS 连接状态下徽标在计数变化后 ≤ 30s（假时钟 / mock 的 sessions_update，`stats.version` 前进）刷新；终态立即刷新；
-  remote session 不显示徽标。
+  remote session 不显示徽标。≤ 30s 与"终态立即"在服务端用假时钟测（`TestWorkflowSnapshotRefresh`：`/api/sessions` 的 version 与
+  counts / activity 一起前进）；e2e 用 mock 的 version 前进 + sessions_update，并验证 version 不动时徽标不变。
 - 依赖：PR-8。
 
 ## 15. 已决事项
@@ -2986,4 +3015,4 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
 | Q9 | resume（`resumeFromRunId`：同 runId、新 task_id）如何展示？ | 视为新 workflow；前端按 `run_id` 把旧条目折叠为"已续跑"子行；后端不合并，但结果文件按 taskId 归属（§5.5）。adopt 的 `paused` 占位沿用同一 task_id，不产生新条目 |
 | Q10 | 面板是否默认展开？ | 桌面只自动展开最新的 running、其余折叠；移动端一律折叠；面板整体限高；记住每个 workflow 的展开状态于 sessionStorage |
 | Q11 | 终态 workflow 在面板上保留多久？ | 每 Process 的 Tracker 5 个；**每 board 5 个**（live 与 retained 合并 LRU，带行与结果缓存）；快照摘要与面板 3 个（全部 `IsUnsettled` + 最近 3 个终态）；Ref = board 的有界集合（≤ 16 非终态 + 5 终态）。v2 的"更早的 N 个"链接删除：§6.2 没有列表端点，Summary 也不带更早的 task_id，客户端无从知道它们；为 2 个额外条目加一条路由（golden、contract、REST schema、mock）不划算。若有需求，后续加 `GET /api/sessions/workflows?key=` 返回 Ref 级行 |
-| Q12 | 是否在 sidebar activity（`last_activity`）里显示 workflow 进度替代被 §9 移除的 phase label？ | **是，低优先级**：snapshot 在 parent 非 running 且有 running workflow 时，`LastActivity` 回落为 "Workflow <name> · done/total"，随 PR-15；与徽标同一刷新机制（sessions_update 节流，至多 30s 陈旧） |
+| Q12 | 是否在 sidebar activity（`last_activity`）里显示 workflow 进度替代被 §9 移除的 phase label？ | **是，低优先级**：snapshot 在 parent 非 running 且有 running workflow 时，`LastActivity` 回落为 "Workflow <name> · done/total"（取最晚启动的那个），随 PR-15；与徽标同一刷新机制（sessions_update 节流，至多 30s 陈旧）。dashboard 的 sidebar 并不渲染 `last_activity`，所以这条回落只给 `/api/sessions` 的读者；sidebar 上靠徽标 |

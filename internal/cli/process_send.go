@@ -15,6 +15,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/ctxutil"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -30,7 +31,7 @@ func buildUserEntry(text string, images []clievent.Attachment) clievent.EventEnt
 		Detail:  textutil.TruncateRunes(text, clievent.EventDetailMaxRunes),
 	}
 	if len(images) > 0 {
-		entry.Summary += " [+" + strconv.Itoa(len(images)) + " image(s)]"
+		entry.Summary += clievent.AttachmentSuffix(images)
 		thumbs := make([]string, len(images))
 		if len(images) == 1 {
 			thumbs[0] = MakeThumbnail(images[0].Data, clievent.ThumbMaxDim)
@@ -99,7 +100,7 @@ func buildUserEntry(text string, images []clievent.Attachment) clievent.EventEnt
 // startupExitGrace: if the CLI then exits as a startup failure, Send returns
 // that exit's error, as a passthrough send does, instead of the result.
 func (p *Process) Send(ctx context.Context, text string, images []clievent.Attachment, onEvent clievent.EventCallback) (*clievent.SendResult, error) {
-	switch prev, claimed := p.transition(evSendBegin); {
+	switch prev, claimed := p.turn.claimSend(ctxutil.RunID(ctx)); {
 	case claimed:
 	case prev == StateDead:
 		return nil, fmt.Errorf("process dead: %w", p.exitErr())
@@ -192,7 +193,7 @@ func (p *Process) Send(ctx context.Context, text string, images []clievent.Attac
 				return nil, p.exitErr()
 			}
 			if !ev.RecvAt.After(staleBefore) {
-				slog.Debug("send: dropping event received before the turn began", "type", ev.Type)
+				slog.DebugContext(ctx, "send: dropping event received before the turn began", "type", ev.Type)
 				p.bookDroppedResult(ev)
 				continue
 			}

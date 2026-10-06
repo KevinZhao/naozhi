@@ -228,3 +228,28 @@ func TestHeaderStringCaps(t *testing.T) {
 		t.Errorf("notify summary: %d runes", runes(w.NotifySummary))
 	}
 }
+
+// TestInterrupted: the synthesized end stops live rows and counts, keeps an
+// end time already known, drops snapshot_stale and leaves w unchanged.
+func TestInterrupted(t *testing.T) {
+	w := &Workflow{
+		TaskID: "w1", Status: StatusRunning, RawStatus: "x", Degraded: DegradedSnapshotStale,
+		Agents: []Agent{{Index: 1, State: AgentDone}, {Index: 2, State: AgentRunning}, {Index: 3, State: AgentQueued}},
+		Counts: Counts{Total: 3, Done: 1, Running: 1, Queued: 1},
+		Phases: []Phase{{Index: 1, Counts: Counts{Total: 3, Done: 1, Running: 1, Queued: 1}}},
+	}
+	got := Interrupted(w, 42)
+	if got.Status != StatusInterrupted || got.RawStatus != "" || got.EndedAt != 42 || got.Degraded != "" {
+		t.Errorf("header %s/%q ended %d degraded %q", got.Status, got.RawStatus, got.EndedAt, got.Degraded)
+	}
+	if got.Agents[1].State != AgentStopped || got.Agents[2].State != AgentStopped || got.Counts.Stopped != 2 || got.Phases[0].Stopped != 2 {
+		t.Errorf("rows %+v counts %+v phases %+v: live agents must stop", got.Agents, got.Counts, got.Phases)
+	}
+	if w.Status != StatusRunning || w.Agents[1].State != AgentRunning || w.Counts.Running != 1 {
+		t.Error("Interrupted modified its input")
+	}
+	w.EndedAt = 7
+	if got := Interrupted(w, 42); got.EndedAt != 7 {
+		t.Errorf("EndedAt %d, want the known 7", got.EndedAt)
+	}
+}

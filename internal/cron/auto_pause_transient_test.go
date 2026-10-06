@@ -45,6 +45,9 @@ func TestTransientBackendFailure(t *testing.T) {
 		if got := tc.out.transientBackendFailure(); got != tc.want {
 			t.Errorf("transientBackendFailure(%+v) = %v, want %v", tc.out, got, tc.want)
 		}
+		if got := transientTurnFailure(tc.out.state, tc.out.errClass, tc.out.turnCause); !tc.out.restartOrphan && got != tc.want {
+			t.Errorf("transientTurnFailure(%+v) = %v, want %v", tc.out, got, tc.want)
+		}
 	}
 }
 
@@ -79,8 +82,8 @@ func TestJobRecordStreaks(t *testing.T) {
 
 // TestAutoPause_TransientFailuresPauseOnceTheySpanTheWindow: transient backend
 // failures at the threshold count do not pause a job until they have gone on
-// for transientAutoPauseWindow; then the failing run pauses it and its notice
-// says so.
+// for transientAutoPauseWindow; then the failing run pauses it as
+// auto_transient, its notice names the outage, and a resume clears the reason.
 func TestAutoPause_TransientFailuresPauseOnceTheySpanTheWindow(t *testing.T) {
 	t.Parallel()
 	s, r, ns, id, clk := transientScheduler(t, 3)
@@ -100,16 +103,94 @@ func TestAutoPause_TransientFailuresPauseOnceTheySpanTheWindow(t *testing.T) {
 
 	runAt(s, clk, id, transientAutoPauseWindow)
 	j = s.jobForTest(t, id)
-	if !j.Paused || j.PausedReason != PausedReasonAutoFailures || j.TransientFailures != 5 {
-		t.Fatalf("failure at the window: paused=%v reason=%q transient=%d, want auto-paused at 5", j.Paused, j.PausedReason, j.TransientFailures)
+	if !j.Paused || j.PausedReason != PausedReasonAutoTransient || j.TransientFailures != 5 || j.AutoPauseCount() != 5 {
+		t.Fatalf("failure at the window: paused=%v reason=%q transient=%d count=%d, want auto_transient at 5",
+			j.Paused, j.PausedReason, j.TransientFailures, j.AutoPauseCount())
 	}
-	if disk := persistedJob(t, s, id); !disk.Paused || disk.TransientFailures != 5 || !disk.TransientFailingSince.Equal(transientT0) {
-		t.Errorf("persisted = paused:%v transient:%d since:%v", disk.Paused, disk.TransientFailures, disk.TransientFailingSince)
+	if n := len(s.cron.Entries()); n != 0 {
+		t.Errorf("entries = %d after the transient auto-pause, want 0", n)
+	}
+	if disk := persistedJob(t, s, id); !disk.Paused || disk.PausedReason != PausedReasonAutoTransient ||
+		disk.TransientFailures != 5 || !disk.TransientFailingSince.Equal(transientT0) {
+		t.Errorf("persisted = paused:%v reason:%q transient:%d since:%v", disk.Paused, disk.PausedReason, disk.TransientFailures, disk.TransientFailingSince)
 	}
 	last := pausingNotice(t, ns.noticesAfter(s))
 	if !strings.Contains(last, turnFailedNotices[TurnCauseBackendOverloaded]) ||
-		!strings.HasSuffix(last, "；已连续失败 5 次，任务已自动暂停，修复后发送 /cron resume "+id+" 恢复") {
-		t.Errorf("pausing notice = %q, want the overloaded sentence and the pause suffix at 5", last)
+		!strings.HasSuffix(last, "；后端持续故障 6 小时以上（失败 5 次），任务已自动暂停，后端恢复后发送 /cron resume "+id+" 恢复") {
+		t.Errorf("pausing notice = %q, want the overloaded sentence and the outage pause suffix at 5", last)
+	}
+	if _, err := s.ResumeJobByID(id); err != nil {
+		t.Fatalf("ResumeJobByID: %v", err)
+	}
+	if j := s.jobForTest(t, id); j.Paused || j.PausedReason != "" {
+		t.Errorf("after resume: paused=%v reason=%q, want active with no reason", j.Paused, j.PausedReason)
+	}
+}
+
+// TestAutoPause_StreakPauseWithLargerTransientCount: a job whose transient
+// count is above the threshold but inside the window pauses on its own
+// failure streak, so the reason and count are the streak's.
+func TestAutoPause_StreakPauseWithLargerTransientCount(t *testing.T) {
+	t.Parallel()
+	s, r, ns, id, clk := transientScheduler(t, 5)
+	r.set(nil, errTransientOverloaded)
+	for i := range 6 {
+		runAt(s, clk, id, time.Duration(i)*50*time.Minute)
+	}
+	r.set(nil, errStreakSend)
+	for i := range 5 {
+		runAt(s, clk, id, 5*time.Hour+time.Duration(i)*time.Minute)
+	}
+	j := s.jobForTest(t, id)
+	if !j.Paused || j.PausedReason != PausedReasonAutoFailures || j.ConsecutiveFailures != 5 || j.TransientFailures != 6 || j.AutoPauseCount() != 5 {
+		t.Fatalf("paused=%v reason=%q streak=%d transient=%d count=%d, want auto_failures at streak 5 with 6 transient",
+			j.Paused, j.PausedReason, j.ConsecutiveFailures, j.TransientFailures, j.AutoPauseCount())
+	}
+	if last := pausingNotice(t, ns.noticesAfter(s)); !strings.HasSuffix(last, "；已连续失败 5 次，任务已自动暂停，修复后发送 /cron resume "+id+" 恢复") {
+		t.Errorf("pausing notice = %q, want the streak pause suffix at 5", last)
+	}
+}
+
+// TestAutoPause_TransientPersistFailureLeavesJobActive: a transient pause
+// that cannot be persisted is rolled back, reason included.
+func TestAutoPause_TransientPersistFailureLeavesJobActive(t *testing.T) {
+	t.Parallel()
+	s, _, _, id, _ := transientScheduler(t, 1)
+	s.editJobForTest(t, id, func(j *Job) {
+		j.TransientFailures, j.TransientFailingSince = 1, transientT0.Add(-transientAutoPauseWindow)
+	})
+	withFailingMarshal(t, s)
+	if got := s.autoPauseIfDue(id, true); got != 0 {
+		t.Fatalf("autoPauseIfDue with a failing persist = %d, want 0", got)
+	}
+	if j := s.jobForTest(t, id); j.Paused || j.PausedReason != "" || j.TransientFailures != 1 {
+		t.Errorf("after failed persist: paused=%v reason=%q transient=%d", j.Paused, j.PausedReason, j.TransientFailures)
+	}
+	if n := len(s.cron.Entries()); n != 1 {
+		t.Errorf("entries = %d, want the entry kept", n)
+	}
+}
+
+func TestJobAutoPauseCount(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		reason string
+		want   int
+		auto   bool
+	}{
+		{PausedReasonAutoFailures, 2, true},
+		{PausedReasonAutoTransient, 7, true},
+		{"", 0, false},
+		{"something_else", 0, false},
+	}
+	for _, tc := range cases {
+		j := Job{PausedReason: tc.reason, ConsecutiveFailures: 2, TransientFailures: 7}
+		if got := j.AutoPauseCount(); got != tc.want {
+			t.Errorf("AutoPauseCount(%q) = %d, want %d", tc.reason, got, tc.want)
+		}
+		if got := IsAutoPausedReason(tc.reason); got != tc.auto {
+			t.Errorf("IsAutoPausedReason(%q) = %v, want %v", tc.reason, got, tc.auto)
+		}
 	}
 }
 

@@ -33,8 +33,8 @@ func TestPersistOrdering_RunsNeverDivergeAheadOfJob(t *testing.T) {
 	}
 	t.Cleanup(s.Stop)
 
-	if s.runStore == nil || !s.runStore.layout.Enabled() {
-		t.Fatal("runStore must be enabled for this test (StorePath set)")
+	if !s.runs.Enabled() {
+		t.Fatal("run store must be enabled for this test (StorePath set)")
 	}
 
 	j := &Job{
@@ -74,7 +74,7 @@ func TestPersistOrdering_RunsNeverDivergeAheadOfJob(t *testing.T) {
 		result:    "ok",
 	})
 
-	// jobPersistOK was false (marshal injected an error), so runStore.Append
+	// jobPersistOK was false (marshal injected an error), so runstore.Store.Append
 	// must have been gated out: no per-job run directory, no run record.
 	jobRunDir := filepath.Join(runsRoot, j.ID)
 	if entries, err := os.ReadDir(jobRunDir); err == nil && len(entries) > 0 {

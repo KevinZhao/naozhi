@@ -57,6 +57,12 @@ type turnState struct {
 	// or past its deadline), so that result is nobody's to consume. Cleared
 	// when the next Send claims the turn.
 	sendAbandoned bool
+	// abandonedBooked: the result sendAbandoned left behind has been booked,
+	// so a later stray result is not that run's.
+	abandonedBooked bool
+	// runID is the run (ctxutil.RunID) of the Send that claimed the process
+	// last, kept after it returns so a result it gave up on can name it.
+	runID string
 }
 
 // transition applies ev and reports the state before it and whether the state
@@ -76,21 +82,53 @@ func (t *turnState) transitionLocked(ev stateEvent) (prev ProcessState, moved bo
 		t.unowned = ev == evTurnStarted
 		if ev == evSendBegin {
 			if t.sendAbandoned {
-				t.abortRequested.orphan()
+				t.abortRequested.orphan(t.runID)
 			}
 			t.sendAbandoned = false
+			t.abandonedBooked = false
 		}
 	}
 	return prev, moved
 }
 
+// claimSend is transition(evSendBegin) that also records runID as the run
+// now holding the turn.
+func (t *turnState) claimSend(runID string) (prev ProcessState, claimed bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	prev, claimed = t.transitionLocked(evSendBegin)
+	if claimed {
+		t.runID = runID
+	}
+	return prev, claimed
+}
+
 // noLiveSend reports whether no Send will consume a result read now: the
 // process is Ready (a Send claiming it later drops the result by RecvAt) or
-// the Send that owns the turn has given up.
-func (t *turnState) noLiveSend() bool {
+// the Send that owns the turn has given up. abandonedRun is that Send's run
+// id unless the CLI has since started a turn of its own.
+func (t *turnState) noLiveSend() (none bool, abandonedRun string) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	return t.state == StateReady || t.sendAbandoned
+	if t.sendAbandoned && !t.unowned && !t.abandonedBooked {
+		abandonedRun = t.runID
+	}
+	return t.state == StateReady || t.sendAbandoned, abandonedRun
+}
+
+// markAbandonedBooked records that the result of the abandoned Send has been
+// booked, so noLiveSend stops naming its run.
+func (t *turnState) markAbandonedBooked() {
+	t.mu.Lock()
+	t.abandonedBooked = true
+	t.mu.Unlock()
+}
+
+// currentRunID is the run of the Send that claimed the process last.
+func (t *turnState) currentRunID() string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.runID
 }
 
 // controlAcks matches control_request acks to their waiters: pending SetModel
@@ -162,11 +200,13 @@ type sendSlots struct {
 // count would mark a later real failure Aborted. Hence at most one result per
 // read is marked: if a second abort lands before the first abort's result is
 // read, the second aborted turn's result is not marked. orphaned: the pending
-// abort was asked for by a Send that gave up (see orphan), not the live one.
+// abort was asked for by a Send that gave up (see orphan), not the live one;
+// orphanRun is that Send's run id.
 type abortMarker struct {
-	mu       sync.Mutex
-	n        int32
-	orphaned bool
+	mu        sync.Mutex
+	n         int32
+	orphaned  bool
+	orphanRun string
 }
 
 // arm records an abort of the live turn, which then owns the next aborted
@@ -174,7 +214,7 @@ type abortMarker struct {
 func (m *abortMarker) arm() {
 	m.mu.Lock()
 	m.n++
-	m.orphaned = false
+	m.orphaned, m.orphanRun = false, ""
 	m.mu.Unlock()
 }
 
@@ -188,20 +228,26 @@ func (m *abortMarker) disarm() {
 }
 
 // take hands the pending abort to the result just read: aborted when one was
-// pending, orphaned when the Send that asked for it has since been replaced.
-func (m *abortMarker) take() (aborted, orphaned bool) {
+// pending, orphaned when the Send that asked for it (run orphanRun) has since
+// been replaced.
+func (m *abortMarker) take() (aborted, orphaned bool, orphanRun string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	aborted, orphaned = m.n > 0, m.orphaned && m.n > 0
-	m.n, m.orphaned = 0, false
-	return aborted, orphaned
+	if orphaned {
+		orphanRun = m.orphanRun
+	}
+	m.n, m.orphaned, m.orphanRun = 0, false, ""
+	return aborted, orphaned, orphanRun
 }
 
-// orphan marks a pending abort as belonging to an abandoned Send, so the next
-// Send does not take that turn's late aborted result as its own answer.
-func (m *abortMarker) orphan() {
+// orphan marks a pending abort as belonging to an abandoned Send (run runID),
+// so the next Send does not take that turn's late aborted result as its own
+// answer.
+func (m *abortMarker) orphan(runID string) {
 	m.mu.Lock()
 	m.orphaned = m.n > 0
+	m.orphanRun = runID
 	m.mu.Unlock()
 }
 
@@ -209,13 +255,13 @@ func (m *abortMarker) orphan() {
 // read: the abort then has no result of its own left to come.
 func (m *abortMarker) release() {
 	m.mu.Lock()
-	m.orphaned = false
+	m.orphaned, m.orphanRun = false, ""
 	m.mu.Unlock()
 }
 
 func (m *abortMarker) clear() {
 	m.mu.Lock()
-	m.n, m.orphaned = 0, false
+	m.n, m.orphaned, m.orphanRun = 0, false, ""
 	m.mu.Unlock()
 }
 

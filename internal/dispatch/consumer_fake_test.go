@@ -116,6 +116,18 @@ func (f *fakeSessionRouter) Workspace(string) string {
 	panic("fakeSessionRouter.Workspace not configured")
 }
 
+func (f *fakeSessionRouter) SetSessionTuning(context.Context, string, *string, *string) (string, error) {
+	panic("fakeSessionRouter.SetSessionTuning not configured")
+}
+
+func (f *fakeSessionRouter) SetSessionBackend(string, string) {
+	panic("fakeSessionRouter.SetSessionBackend not configured")
+}
+
+func (f *fakeSessionRouter) VisitSessions(func(session.SessionSnapshot) bool) {
+	panic("fakeSessionRouter.VisitSessions not configured")
+}
+
 func (f *fakeSessionRouter) InterruptSessionViaControl(key string) session.InterruptOutcome {
 	if f.interruptViaControl == nil {
 		panic("fakeSessionRouter.InterruptSessionViaControl not configured")

@@ -2,6 +2,7 @@ package sessionview
 
 import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/cli/workflow"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/spawndiag"
 )
@@ -27,8 +28,14 @@ type SessionSnapshot struct {
 	// one; the dashboard renders "(模型未配置)". For ACP backends the runtime
 	// model from session/new is not read back (see docs/TODO.md), so this
 	// reflects the configured value.
-	Model      string `json:"model,omitempty"`
-	LastActive int64  `json:"last_active"` // unix ms
+	Model string `json:"model,omitempty"`
+	// TuningModel / TuningEffort are the per-session overrides recorded by
+	// SetSessionTuning ("" = the config chain applies). Model already
+	// reflects TuningModel once it is in force; these say that it is an
+	// override, which the IM /model and /effort commands report.
+	TuningModel  string `json:"tuning_model,omitempty"`
+	TuningEffort string `json:"tuning_effort,omitempty"`
+	LastActive   int64  `json:"last_active"` // unix ms
 	// CreatedAt anchors sidebar order (ascending, so new rows land at the
 	// bottom and rows never shift on activity). unix ms; 0 only if loadStore
 	// couldn't infer one (treated as "very old").
@@ -86,6 +93,10 @@ type SessionSnapshot struct {
 	// (system/code_change_published, persisted). The CLI scrapes them from
 	// command output: display-only links. READ-ONLY, shared with the session.
 	CodeChanges []clievent.CodeChange `json:"code_changes,omitempty"`
+	// Workflows summarizes the session's Workflow tool runs: every unsettled
+	// one and the latest terminal ones. READ-ONLY, shared with the session's
+	// workflow board.
+	Workflows []workflow.Summary `json:"workflows,omitempty"`
 	// StartupFailure is what the next send to a dead session will do about
 	// its CLI's failures at startup; nil when it just resumes.
 	StartupFailure *StartupFailureView `json:"startup_failure,omitempty"`

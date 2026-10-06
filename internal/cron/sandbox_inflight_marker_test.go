@@ -60,7 +60,7 @@ func TestReconcile_SandboxPendingOwnsARunOverTheLocalMarker(t *testing.T) {
 		RuntimeSessionID: "run-feedfacefeedface-1234567890123456789",
 		StartedAtMS:      startedAt.UnixMilli(),
 	})
-	marker := filepath.Join(s.runInflightDir(), runID+".json")
+	marker := filepath.Join(s.runMarkers().Dir(), runID+".json")
 	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
 		t.Fatal(err)
 	}

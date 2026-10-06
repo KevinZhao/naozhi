@@ -5,6 +5,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
 
 const STATIC_DIR = path.join(__dirname, '..', '..', 'internal', 'server', 'static');
 // The generated backend contract — the same ES module the dashboard imports.
@@ -44,7 +45,7 @@ function sendEntries(res, route, fixture, page, headers = { 'Content-Type': 'app
 // A Go drift test (TestDashboardCSP_MockServerHeaderInSync) compares this
 // literal against the runtime header, so edit both together.
 const MOCK_DASHBOARD_CSP =
-  "default-src 'self'; script-src 'self' 'sha256-Dc5Mfm9TcKn7OwTLyG3/T2KjnRh7zV1Xc4ct4adm4/g=' https://cdn.jsdelivr.net/npm/mermaid@11.14.0/dist/mermaid.min.js; connect-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font";
+  "default-src 'self'; script-src 'self' 'sha256-Dc5Mfm9TcKn7OwTLyG3/T2KjnRh7zV1Xc4ct4adm4/g='; connect-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font";
 
 function defaultSessions() {
   return {
@@ -459,15 +460,17 @@ function startMockServer(overrides = {}) {
       return;
     }
 
-    // Vendored libraries (KaTeX): the same tree the Go handlers serve, with
-    // the same types; anything outside it 404s.
+    // Vendored libraries (KaTeX, mermaid): the same tree the Go handlers
+    // serve, with the same types; a file embedded as <name>.gz is served as
+    // <name>; anything outside the tree 404s.
     if (pathname.startsWith('/static/vendor/')) {
       const rel = pathname.slice('/static/'.length);
       const type = { '.js': 'application/javascript', '.css': 'text/css; charset=utf-8', '.woff2': 'font/woff2' }[path.extname(rel)];
+      const file = path.join(STATIC_DIR, rel);
       let body;
       try {
         if (!type || rel.split('/').includes('..')) throw new Error('outside the tree');
-        body = fs.readFileSync(path.join(STATIC_DIR, rel));
+        body = fs.existsSync(file) ? fs.readFileSync(file) : zlib.gunzipSync(fs.readFileSync(file + '.gz'));
       } catch { res.writeHead(404); res.end(); return; }
       res.writeHead(200, { 'Content-Type': type });
       res.end(body);
@@ -799,8 +802,21 @@ function startMockServer(overrides = {}) {
         res.end(JSON.stringify({ error: 'mock delete failure' }));
         return;
       }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true }));
+      // Like the backend, a 200 means the key is already gone from the list:
+      // the client's post-DELETE re-sync must not bring the card back.
+      let body = '';
+      req.on('data', c => (body += c));
+      req.on('end', () => {
+        try {
+          const b = JSON.parse(body || '{}');
+          const list = sessionsData.sessions || [];
+          const i = list.findIndex(x => x.key === b.key && (x.node || 'local') === (b.node || 'local'));
+          if (i >= 0) list.splice(i, 1);
+          if (sessionsData.stats && typeof sessionsData.stats.version === 'number') sessionsData.stats.version++;
+        } catch (_) { /* malformed body: still ack like a lenient server */ }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      });
       return;
     }
 
@@ -1347,6 +1363,17 @@ function startMockServer(overrides = {}) {
           const s = (sessionsData.sessions || []).find(x => x.key === key);
           if (s) s.workspace = workspace;
           if (sessionsData.stats && typeof sessionsData.stats.version === 'number') {
+            sessionsData.stats.version++;
+          }
+        },
+        // Replaces a session's workflows[] (sessionview.SessionSnapshot's
+        // Summaries). bump advances stats.version, as the server's workflow
+        // board does for every change it reports; false changes the payload
+        // under an unchanged version.
+        setSessionWorkflows(key, workflows, bump = true) {
+          const s = (sessionsData.sessions || []).find(x => x.key === key);
+          if (s) s.workflows = workflows;
+          if (bump && sessionsData.stats && typeof sessionsData.stats.version === 'number') {
             sessionsData.stats.version++;
           }
         },

@@ -24,6 +24,9 @@ func (c serverCaps) Takeover(ctx context.Context, chatKey, key string, opts sess
 	return c.s.tryAutoTakeover(ctx, chatKey, key, opts)
 }
 
+// BackendIDs is the router's backend catalogue, default first.
+func (c serverCaps) BackendIDs() []string { return c.s.router.Backends().BackendIDs() }
+
 // ReplyFooter resolves the reply tag for backendID, defaulting to the
 // router's default backend for sessions that have not pinned one.
 // replyTagForBackend returns "" for unknown ids so dispatch skips the footer.

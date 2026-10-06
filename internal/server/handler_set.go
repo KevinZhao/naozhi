@@ -54,6 +54,7 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
 	"github.com/naozhi/naozhi/internal/turn"
+	"github.com/naozhi/naozhi/internal/webhook"
 )
 
 // handlerSet carries the dashboard handlers from construction to route
@@ -130,9 +131,12 @@ type wiring struct {
 	agentCommands map[string]string
 	allowedRoot   string
 	imRateLimit   dispatch.RateLimit
+	imGroupScope  dispatch.GroupScope
+	imAutoThread  bool
 	imBudget      *budget.Gate   // nil admits every IM turn
 	imAccess      *imauth.Policy // nil allows every IM sender
 	debugMode     bool           // gates /api/debug/pprof and /api/debug/vars
+	metricsOn     bool           // gates GET /metrics
 	resolver      *session.KeyResolver
 	sysessionMgr  *sysession.Manager
 	orient        *orientConfig // nil = image auto-orientation off
@@ -141,6 +145,7 @@ type wiring struct {
 	routerEvents *routerrelay.Relay
 	// runTelemetry is opts.Relays.RunTelemetry; buildDashboard binds the hub to it.
 	runTelemetry *runtelemetry.Relay
+	webhooks     *webhook.Sender // nil = no outbound webhooks
 	// watchdog holds the no-output / total watchdog-kill counters; the
 	// dispatcher, the session handlers and /health each get pointers into it.
 	watchdog watchdogCounters

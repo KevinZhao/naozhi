@@ -46,6 +46,7 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 			entry.Type = clievent.KindTaskProgress
 			entry.TaskID = ev.TaskID
 			entry.ToolUseID = ev.ToolUseID
+			entry.TaskType = workflowTaskType(ev)
 			// task_updated carries only a patch; the subtype is no summary (the
 			// dashboard copies a progress Summary into the agent's description).
 			if ev.Description != "" {
@@ -66,6 +67,7 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 			entry.Type = clievent.KindTaskDone
 			entry.TaskID = ev.TaskID
 			entry.ToolUseID = ev.ToolUseID
+			entry.TaskType = workflowTaskType(ev)
 			// CC sends a notification's text as summary, not description.
 			switch {
 			case ev.Description != "":
@@ -223,6 +225,16 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 		return []clievent.EventEntry{entry}
 	}
 	return nil
+}
+
+// workflowTaskType is the TaskType a task progress / done entry carries: CC
+// names the type on task_started only, so a workflow's later entries are
+// tagged from the Tracker's verdict (ev.WorkflowTask) for InjectHistory.
+func workflowTaskType(ev clievent.Event) string {
+	if ev.WorkflowTask {
+		return TaskTypeWorkflow
+	}
+	return ""
 }
 
 // logEventAt converts an clievent.Event to one or more EventEntry values and appends them to the event log.

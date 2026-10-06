@@ -17,7 +17,8 @@
 //                                     sessionList.allSessionsCache (msg_nav's
 //                                     session order), over managed, discovered
 //                                     and pending sessions, with unread chips,
-//                                     agent badges and last responses
+//                                     agent and workflow badges and last
+//                                     responses
 //   golden/sidebar_empty.json         the empty sidebar
 //
 // golden/pins.json holds each file's sha256 and every run checks the file
@@ -30,9 +31,8 @@
 //
 // Determinism: the timezone is UTC and the clock is fixed, so formatTimeFull
 // and the cards' relative times do not depend on the machine; /static/vendor/
-// and the CDN are blocked so KaTeX and mermaid never load and math stays on
-// the pending path; mmd-N / ktx-N ids come from module counters and are
-// normalised.
+// is blocked so KaTeX and mermaid never load and math stays on the pending
+// path; mmd-N / ktx-N ids come from module counters and are normalised.
 //
 //   cd test/e2e && npx playwright test golden_render.test.js --project=desktop-chrome
 //   UPDATE_GOLDEN=1 npx playwright test golden_render.test.js --project=desktop-chrome
@@ -98,7 +98,7 @@ test('pins.json pins exactly the golden files, each to its current sha256', () =
 
 /** @param {import('@playwright/test').Page} page */
 async function openDashboard(page, mock, ready = '.session-card') {
-  await page.route(/\/static\/vendor\/|cdn\.jsdelivr\.net/, (route) => route.abort());
+  await page.route(/\/static\/vendor\//, (route) => route.abort());
   await page.clock.setFixedTime(NOW);
   await page.goto(mock.url + '/dashboard');
   await page.waitForSelector(ready);
@@ -340,13 +340,14 @@ test.describe('golden: renderMd', () => {
 function sidebarSessions() {
   const base = { platform: 'dashboard', agent: 'general', cli_name: 'claude', cli_version: '1.0.30', last_prompt: '', node: 'local' };
   const s = (key, extra) => ({ ...base, key, state: 'ready', last_active: T0 + 30 * MIN, ...extra });
+  const wf = (task_id, name, status, done, total) => ({ task_id, name, status, epoch: '00000000000000a1', version: 3, started_at: T0, counts: { total, queued: total - done, running: 0, done, failed: 0, skipped: 0, stopped: 0 } });
   return {
     sessions: [
       s('dashboard:direct:2026-01-01-120300-a:general', { workspace: '/home/user/workspace/myproject', project: 'myproject', created_at: T0 + 3 * MIN, last_prompt: 'third in myproject', last_response: 'Done: the "fix" & <its> tests pass, and the race run is clean too.' }),
-      s('dashboard:direct:2026-01-01-120100-b:general', { workspace: '/home/user/workspace/myproject', project: 'myproject', created_at: T0 + 1 * MIN, last_prompt: 'first in myproject' }),
-      s('dashboard:direct:2026-01-01-120200-c:reviewer', { agent: 'reviewer', workspace: '/home/user/workspace/myproject', project: 'myproject', created_at: T0 + 2 * MIN, last_prompt: 'second in myproject', state: 'running', subagents: [{ name: 'explore' }, { name: 'review', background: true }] }),
-      s('dashboard:direct:2026-01-01-120150-d:general', { workspace: '/home/user/workspace/otherproject', project: 'otherproject', created_at: T0 + 90 * 1000, last_prompt: 'other', last_response: 'short reply' }),
-      s('dashboard:direct:2026-01-01-120050-e:general', { node: 'remote1', workspace: '/srv/myproject', project: 'myproject', created_at: T0 + 50 * 1000, last_prompt: 'on remote1' }),
+      s('dashboard:direct:2026-01-01-120100-b:general', { workspace: '/home/user/workspace/myproject', project: 'myproject', created_at: T0 + 1 * MIN, last_prompt: 'first in myproject', workflows: [wf('w0', 'finished', 'completed', 2, 2)] }),
+      s('dashboard:direct:2026-01-01-120200-c:reviewer', { agent: 'reviewer', workspace: '/home/user/workspace/myproject', project: 'myproject', created_at: T0 + 2 * MIN, last_prompt: 'second in myproject', state: 'running', subagents: [{ name: 'explore' }, { name: 'review', background: true }], workflows: [wf('w1', 'fan-out', 'running', 1, 2)] }),
+      s('dashboard:direct:2026-01-01-120150-d:general', { workspace: '/home/user/workspace/otherproject', project: 'otherproject', created_at: T0 + 90 * 1000, last_prompt: 'other', last_response: 'short reply', workflows: [wf('w2', 'probe "q" <a&b>', 'running', 5, 8), wf('w3', '', 'paused', 0, 3), wf('w4', 'done', 'completed', 1, 1)] }),
+      s('dashboard:direct:2026-01-01-120050-e:general', { node: 'remote1', workspace: '/srv/myproject', project: 'myproject', created_at: T0 + 50 * 1000, last_prompt: 'on remote1', workflows: [wf('w5', 'remote', 'running', 1, 4)] }),
       s('dashboard:direct:2026-01-01-120400-f:general', { workspace: '/tmp/x/scratch', project: 'scratch', project_fallback: true, created_at: T0 + 4 * MIN, last_prompt: 'fallback group' }),
       s('dashboard:direct:2026-01-01-120450-g:general', { workspace: '', project: '', created_at: T0 + 270 * 1000, last_prompt: 'no project at all' }),
       // Also pending in this browser: the backend copy wins, no second card.

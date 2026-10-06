@@ -149,6 +149,27 @@ func TestAddAccessProfile(t *testing.T) {
 	}
 }
 
+// AccessProfiles is a snapshot: it carries the profiles added at runtime, and
+// writing to it never reaches the registry.
+func TestAccessProfiles_SnapshotIncludesRuntimeAdds(t *testing.T) {
+	r := &Router{ss: newSessionTable()}
+	if got := r.backends.AccessProfiles(); got != nil {
+		t.Fatalf("empty registry = %v, want nil", got)
+	}
+	setAccessProfiles(r, map[string]AccessProfile{"existing": {DisplayName: "Existing"}})
+	if err := r.backends.AddAccessProfile("new", AccessProfile{DisplayName: "New"}); err != nil {
+		t.Fatal(err)
+	}
+	got := r.backends.AccessProfiles()
+	if len(got) != 2 || got["existing"].DisplayName != "Existing" || got["new"].DisplayName != "New" {
+		t.Fatalf("AccessProfiles = %+v", got)
+	}
+	delete(got, "existing")
+	if !r.backends.HasAccessProfile("existing") {
+		t.Fatal("deleting from the snapshot removed the profile from the registry")
+	}
+}
+
 func TestAddAccessProfile_NilMapBootstrap(t *testing.T) {
 	r := &Router{ss: newSessionTable()} // nil accessProfiles
 	if err := r.backends.AddAccessProfile("first", AccessProfile{DisplayName: "First"}); err != nil {

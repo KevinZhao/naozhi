@@ -536,11 +536,24 @@
         "total_cost": {
           "type": "number"
         },
+        "tuning_effort": {
+          "type": "string"
+        },
+        "tuning_model": {
+          "type": "string"
+        },
         "turn_duration_ms": {
           "type": "integer"
         },
         "user_label": {
           "type": "string"
+        },
+        "workflows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "workflow.Summary"
+          }
         },
         "workspace": {
           "type": "string"
@@ -596,6 +609,82 @@
         "key",
         "layer",
         "reason"
+      ]
+    },
+    "workflow.Counts": {
+      "properties": {
+        "done": {
+          "type": "integer"
+        },
+        "failed": {
+          "type": "integer"
+        },
+        "queued": {
+          "type": "integer"
+        },
+        "running": {
+          "type": "integer"
+        },
+        "skipped": {
+          "type": "integer"
+        },
+        "stopped": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "done",
+        "failed",
+        "queued",
+        "running",
+        "skipped",
+        "stopped",
+        "total"
+      ]
+    },
+    "workflow.Summary": {
+      "properties": {
+        "counts": {
+          "type": "object",
+          "$ref": "workflow.Counts"
+        },
+        "current_phase": {
+          "type": "string"
+        },
+        "ended_at": {
+          "type": "integer"
+        },
+        "epoch": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "tokens": {
+          "type": "integer"
+        },
+        "version": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "counts",
+        "epoch",
+        "status",
+        "task_id",
+        "version"
       ]
     }
   }

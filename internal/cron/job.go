@@ -10,6 +10,7 @@ import (
 
 	robfigcron "github.com/robfig/cron/v3"
 
+	"github.com/naozhi/naozhi/internal/cron/runstore"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -181,7 +182,8 @@ type Job struct {
 	TransientFailingSince time.Time `json:"transient_failing_since,omitzero"`
 
 	// PausedReason says why a paused job is paused: "" for a manual pause,
-	// PausedReasonAutoFailures when the failure streak paused it. Resume
+	// PausedReasonAutoFailures when the failure streak paused it,
+	// PausedReasonAutoTransient when transient backend failures did. Resume
 	// clears it.
 	PausedReason string `json:"paused_reason,omitempty"`
 
@@ -198,9 +200,31 @@ type Job struct {
 	cachedSched robfigcron.Schedule // runtime only, not persisted
 }
 
-// PausedReasonAutoFailures is Job.PausedReason for a job the scheduler
-// paused after too many consecutive failed or timed-out runs.
-const PausedReasonAutoFailures = "auto_failures"
+// The Job.PausedReason values the scheduler stamps when it pauses a job
+// itself: after too many consecutive failed or timed-out runs, or after
+// transient backend failures went on for transientAutoPauseWindow.
+const (
+	PausedReasonAutoFailures  = "auto_failures"
+	PausedReasonAutoTransient = "auto_transient"
+)
+
+// IsAutoPausedReason reports whether r is a reason the scheduler stamps.
+func IsAutoPausedReason(r string) bool {
+	return r == PausedReasonAutoFailures || r == PausedReasonAutoTransient
+}
+
+// AutoPauseCount is the failure count behind j's PausedReason: the transient
+// count for a transient pause, the streak for a streak pause, 0 for any other
+// reason. An edit clears the counts, so it can be 0 on an auto-paused job.
+func (j *Job) AutoPauseCount() int {
+	switch j.PausedReason {
+	case PausedReasonAutoTransient:
+		return j.TransientFailures
+	case PausedReasonAutoFailures:
+		return j.ConsecutiveFailures
+	}
+	return 0
+}
 
 // streakEffect is what a finished run does to Job.ConsecutiveFailures.
 type streakEffect int
@@ -248,8 +272,14 @@ func (o runOutcome) streakEffect() streakEffect {
 // transientBackendFailure reports a turn failed by a transient backend cause,
 // which Job.TransientFailures counts instead of ConsecutiveFailures.
 func (o runOutcome) transientBackendFailure() bool {
-	return o.state == RunStateFailed && !o.restartOrphan &&
-		o.errClass == ErrClassTurnFailed && transientTurnCauses[o.turnCause]
+	return !o.restartOrphan && transientTurnFailure(o.state, o.errClass, o.turnCause)
+}
+
+// transientTurnFailure is transientBackendFailure from the fields a failure
+// notice carries. A restart orphan never auto-pauses, so for a run that did
+// the two agree.
+func transientTurnFailure(state RunState, errClass ErrorClass, cause TurnCause) bool {
+	return state == RunStateFailed && errClass == ErrClassTurnFailed && transientTurnCauses[cause]
 }
 
 // failureStreaks is a Job's failure-streak fields, captured and restored as
@@ -430,24 +460,11 @@ func generateRunID() (string, error) { return generateHexID() }
 func generateID() (string, error) { return generateHexID() }
 
 // IsValidID reports whether s is a valid cron / cron-run identifier: a
-// non-empty lowercase hex string of at most 64 bytes. Job and run IDs are
-// 16 hex chars today; the 64-byte bound is reserved for a schema bump.
-// Uppercase hex, path characters and temp/backup suffixes are all rejected,
-// so store entry points (parse / list / append / detail handler) can filter
-// stray files under runs/<jobID>/ and HTTP handlers can reject bad IDs
-// before any disk IO. Lives in job.go as the ID-schema home (#990).
-func IsValidID(s string) bool {
-	if len(s) == 0 || len(s) > 64 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-			return false
-		}
-	}
-	return true
-}
+// non-empty lowercase hex string of at most 64 bytes. Job and run IDs are 16
+// hex chars today; the 64-byte bound is reserved for a schema bump. HTTP
+// handlers use it to reject bad IDs before any disk IO. The run store owns
+// the check because IDs become its path components.
+func IsValidID(s string) bool { return runstore.ValidID(s) }
 
 // MaxCronTitleLen 是 Job.Title 的字符上限（UTF-8 rune 计）。256 覆盖绝大多数
 // 人类可读名称，且与 dashboard 的 escAttr 线长相容。导出以便 server 包

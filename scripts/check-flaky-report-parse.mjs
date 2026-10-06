@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 // check-flaky-report-parse.mjs — the flaky-report job in .github/workflows/ci.yml
-// turns failed-job logs into `[flaky] <test>` issue titles with three regexes.
-// Nothing else exercises them: they run only on a master red, and a regex that
-// stops matching fails open — the job succeeds and files nothing, which reads
+// turns failed-job logs into `[flaky] <test>` issue titles. Nothing else
+// exercises that parsing: it runs only on a master red, and a regex that stops
+// matching fails open — the job succeeds and files nothing, which reads
 // exactly like a green week.
 //
-// This pulls the regex literals out of the workflow (so what is checked is what
-// ships) and runs them over log lines copied verbatim from real runs. It also
-// checks that flaky-report waits on every job that runs tests: a job missing
-// from its needs files nothing when it alone is red, and otherwise is reported
-// only if it happened to finish first. Last, it checks Playwright's retries and
-// trace settings (config, projects, CI flags and per-spec overrides): a retry
-// turns a flake green before flaky-report sees it, and with no retry a trace
-// that records only on a retry records nothing.
+// This cuts the job's collectFailures and issueBody functions out of the
+// workflow (so what is checked is what ships) and runs them over log lines
+// copied verbatim from real runs. It also checks that flaky-report waits on every job that runs
+// tests: a job missing from its needs files nothing when it alone is red, and
+// otherwise is reported only if it happened to finish first. Last, it checks
+// Playwright's retries and trace settings (config, projects, CI flags and
+// per-spec overrides): a retry turns a flake green before flaky-report sees
+// it, and with no retry a trace that records only on a retry records nothing.
 //
 // Loading the Playwright config needs test/e2e's npm install.
 //
@@ -27,34 +27,29 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WORKFLOW = path.join(ROOT, '.github', 'workflows', 'ci.yml');
 const yml = fs.readFileSync(WORKFLOW, 'utf8');
 
-// Anchored on the call sites rather than the pattern bodies: a rewritten regex
-// is still found, a deleted one fails here instead of silently at 3am.
-function literal(re, what) {
-  const m = yml.match(re);
-  if (!m) {
-    console.error(`check-flaky-report-parse: ${what} not found in ci.yml — did the flaky-report script change shape?`);
+// The function runs from its declaration to the closing brace at the same
+// indent; YAML indentation makes that boundary exact. A renamed or deleted
+// function fails here instead of silently at 3am.
+function workflowFunction(name) {
+  const lines = yml.split('\n');
+  const start = lines.findIndex(l => new RegExp(`^ *function ${name}\\(`).test(l));
+  const indent = start < 0 ? '' : lines[start].match(/^ */)[0];
+  const end = lines.findIndex((l, i) => i > start && l === `${indent}}`);
+  if (start < 0 || end < 0) {
+    console.error(`check-flaky-report-parse: function ${name} not found in ci.yml — did the flaky-report script change shape?`);
     process.exit(1);
   }
-  return new Function('return ' + m[1])();
+  return new Function(`${lines.slice(start, end + 1).join('\n')}\nreturn ${name};`)();
 }
-const ansi = literal(/log\.replace\((\/.+?\/g)/, 'the ANSI strip');
-const goRe = literal(/clean\.matchAll\((\/--- FAIL.+?\/g)\)/, "go test's FAIL matcher");
-const pwRe = literal(/clean\.matchAll\((\/✘.+?\/g)\)/, "Playwright's ✘ matcher");
-// Also read from the workflow, not re-typed here: a copy would agree with a
-// broken original and this check would pass on it.
-const durTrim = literal(/m\[2\]\.replace\((\/.+?\/)/, "Playwright's trailing-duration trim");
+const collectFailures = workflowFunction('collectFailures');
+const issueBody = workflowFunction('issueBody');
 
-// names() drives the workflow's own two loops over one job log, deduping by
-// name exactly as the reporter's Map does — a name that appears twice must file
-// one issue, not two.
-function names(log) {
-  const clean = log.replace(ansi, '');
-  const out = new Set();
-  for (const m of clean.matchAll(goRe)) out.add(m[1]);
-  for (const m of clean.matchAll(pwRe)) {
-    out.add(m[1] + ' › ' + m[2].replace(durTrim, '').trim());
-  }
-  return [...out];
+// failures() runs one job log through the reporter's own parser: each key is
+// one issue title, so a name that appears twice must come back once.
+function failures(log) {
+  const out = new Map();
+  collectFailures(log, 'job', out);
+  return out;
 }
 
 const ESC = '\u001b';
@@ -65,9 +60,35 @@ const cases = [
     want: ['TestReverseServer_Reconnect_closesOldConn'],
   },
   {
-    what: 'go test subtest failure',
+    what: 'go test subtest failure files under its top-level test',
     log: '--- FAIL: TestWaitServiceActive/slow_cold_start (0.30s)\n',
-    want: ['TestWaitServiceActive/slow_cold_start'],
+    want: ['TestWaitServiceActive'],
+    subtests: { TestWaitServiceActive: ['slow_cold_start'] },
+  },
+  {
+    // go test prints a FAIL line for the parent and for each failed subtest;
+    // keyed by the full path that is three issues for one flake (#3370,
+    // #3371, #3393 were all TestReset_RetiresDeadCLIShim).
+    what: 'a test and its failed subtests file one issue',
+    log: '--- FAIL: TestReset_RetiresDeadCLIShim (4.02s)\n'
+      + '    --- FAIL: TestReset_RetiresDeadCLIShim/no_process (2.01s)\n'
+      + '    --- FAIL: TestReset_RetiresDeadCLIShim/dead_process (2.01s)\n',
+    want: ['TestReset_RetiresDeadCLIShim'],
+    subtests: { TestReset_RetiresDeadCLIShim: ['no_process', 'dead_process'] },
+  },
+  {
+    what: 'nested and punctuated subtest names are kept whole',
+    log: '--- FAIL: TestParse (0.00s)\n'
+      + '    --- FAIL: TestParse/group/#01 (0.00s)\n'
+      + '    --- FAIL: TestParse/key=a.b-c (0.00s)\n'
+      + '    --- FAIL: TestParse/f(x) (0.00s)\n',
+    want: ['TestParse'],
+    subtests: { TestParse: ['group/#01', 'key=a.b-c', 'f(x)'] },
+  },
+  {
+    what: 'a test whose name extends another is a separate issue',
+    log: '--- FAIL: TestSend (0.00s)\n--- FAIL: TestSendAll (0.00s)\n',
+    want: ['TestSend', 'TestSendAll'],
   },
   {
     what: 'Playwright spec failure (job `e2e`, run 34670407318)',
@@ -114,6 +135,23 @@ const cases = [
     log: yml.split('\n').filter(l => /^ *echo "(--- FAIL|  ✘)/.test(l))
       .map(l => l.replace(/^ *echo "/, '').replace(/"$/, '') + '\n').join(''),
     want: ['TestFlakyProbeSynthetic', 'probe_synthetic.test.js › flaky probe synthetic spec'],
+  },
+];
+
+// The issue body names the run and, for a Go test, the subtests that failed:
+// with the title keyed by the top-level test, the body is the only place the
+// failing subtest shows.
+const RUN = 'https://github.com/o/r/actions/runs/1';
+const bodyCases = [
+  {
+    what: 'a test with no failed subtests gets the one-line body',
+    args: ['0123456789abcdef', 'test (2)', RUN, new Set()],
+    want: `master red on 01234567 — job \`test (2)\`, [run](${RUN}).`,
+  },
+  {
+    what: 'the failed subtests are listed under the run line',
+    args: ['0123456789abcdef', 'test (2)', RUN, new Set(['no_process', 'f(x)'])],
+    want: `master red on 01234567 — job \`test (2)\`, [run](${RUN}).\n\nFailed subtests: \`no_process\`, \`f(x)\`.`,
   },
 ];
 
@@ -335,6 +373,29 @@ if (!jobs(yml).has('flaky-report')) {
   console.error('check-flaky-report-parse: no flaky-report job in ci.yml');
   process.exit(1);
 }
+// The rest of the github-script (log fetch, issue lookup and filing) runs only
+// on a master red, so at least make it compile and call the two functions
+// checked above.
+{
+  const lines = jobs(yml).get('flaky-report').split('\n');
+  const at = lines.findIndex(l => /^ *script: \|\s*$/.test(l));
+  const indent = at < 0 ? 0 : lines[at].match(/^ */)[0].length;
+  const body = [];
+  for (const l of lines.slice(at + 1)) {
+    if (l.trim() !== '' && l.match(/^ */)[0].length <= indent) break;
+    body.push(l);
+  }
+  try {
+    if (at < 0) throw new Error('no `script: |` block');
+    const AsyncFunction = (async () => {}).constructor;
+    new AsyncFunction('github', 'context', 'core', body.join('\n'));
+    if (!body.some(l => /^\s*collectFailures\(/.test(l))) throw new Error('nothing calls collectFailures');
+    if (!body.some(l => /=\s*issueBody\(/.test(l))) throw new Error('nothing calls issueBody');
+  } catch (e) {
+    bad++;
+    console.error(`check-flaky-report-parse: flaky-report's github-script: ${e.message}`);
+  }
+}
 const { testJobs, missing } = unwatched(yml, UNREPORTED);
 for (const job of missing) {
   bad++;
@@ -348,9 +409,18 @@ for (const job of Object.keys(UNREPORTED)) {
 }
 
 for (const c of cases) {
-  const got = names(c.log);
-  const same = got.length === c.want.length && got.every((g, i) => g === c.want[i]);
-  if (!same) {
+  const found = failures(c.log);
+  const got = [...found.keys()];
+  const gotSubtests = Object.fromEntries([...found].filter(([, f]) => f.subtests.size > 0).map(([n, f]) => [n, [...f.subtests]]));
+  const wantSubtests = c.subtests ?? {};
+  if (JSON.stringify(got) !== JSON.stringify(c.want) || JSON.stringify(gotSubtests) !== JSON.stringify(wantSubtests)) {
+    bad++;
+    console.error(`check-flaky-report-parse: ${c.what}\n  want ${JSON.stringify(c.want)} subtests ${JSON.stringify(wantSubtests)}\n  got  ${JSON.stringify(got)} subtests ${JSON.stringify(gotSubtests)}`);
+  }
+}
+for (const c of bodyCases) {
+  const got = issueBody(...c.args);
+  if (got !== c.want) {
     bad++;
     console.error(`check-flaky-report-parse: ${c.what}\n  want ${JSON.stringify(c.want)}\n  got  ${JSON.stringify(got)}`);
   }
@@ -359,4 +429,4 @@ if (bad > 0) {
   console.error(`check-flaky-report-parse: ${bad} check(s) failed — flaky-report would file the wrong issues, or none`);
   process.exit(1);
 }
-console.log(`check-flaky-report-parse: OK (${cases.length} log cases, ${needsCases.length} needs cases, ${playwrightCases.length} playwright cases, ${overrideCases.length} override cases, ${specs.length} specs, ${testJobs.length} test jobs: ${testJobs.join(', ')})`);
+console.log(`check-flaky-report-parse: OK (${cases.length} log cases, ${bodyCases.length} body cases, ${needsCases.length} needs cases, ${playwrightCases.length} playwright cases, ${overrideCases.length} override cases, ${specs.length} specs, ${testJobs.length} test jobs: ${testJobs.join(', ')})`);

@@ -104,13 +104,17 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		imAccess:      opts.IMAccess,
 		imRateLimit:   opts.IMRateLimit,
 		imBudget:      opts.IMBudget,
+		imGroupScope:  opts.IMGroupScope,
+		imAutoThread:  opts.IMThreadAutoOpen,
 		debugMode:     opts.Features.Debug,
+		metricsOn:     opts.Features.Metrics,
 		resolver:      resolver,
 		sysessionMgr:  opts.Sysession.Manager,
 		orient:        buildOrientConfig(opts),
 		scheduler:     scheduler,
 		routerEvents:  opts.Relays.Router,
 		runTelemetry:  opts.Relays.RunTelemetry,
+		webhooks:      opts.Relays.Webhooks,
 	}
 
 	// The one typed-nil unwrap for the runtime router views: a nil
@@ -346,6 +350,7 @@ func buildHealthHandler(opts ServerOptions, s *Server, w *wiring, router healthR
 		nodeAccess:         s.nodes,
 		configSHA256:       opts.Config.SHA256,
 		configLoadedAt:     opts.Config.LoadedAt,
+		configLive:         opts.Config.Live,
 		configPath:         opts.Config.Path,
 		platforms:          s.platforms,
 		platformCaps:       platform.CapabilityMatrix(s.platforms),

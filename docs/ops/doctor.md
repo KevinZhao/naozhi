@@ -39,7 +39,7 @@ naozhi doctor --timeout 2s
 | `eventlog writer` | `writer_alive=true`；或该子系统未启用（skipped） | - | `writer_alive=false`，事件没落盘 |
 | `attachment tracker` | 同上 | - | `writer_alive=false`，附件元数据没记录 |
 | `dispatch` | 有成功回复（显示多久前）/ 还没消息或刚启动 | 自启动起只有失败没有成功；或有只报 `registered` 的平台、启动超 10 分钟仍零条 IM 入站（这些平台可能没连上） | - |
-| `config-drift` | 磁盘 `config.yaml` 的 sha256 与进程上报的 `config_sha256` 一致（显示前 12 位和 `loaded_at`）；无 token、配置读不出、进程不可达、`/health` 非 200 或 token 不被接受时 skipped | 不一致（restart required，显示 mtime 与 `loaded_at`）；进程不上报指纹（早于 #2538）或指纹格式不对；`/health` JSON 解析失败 | - |
+| `config-drift` | 磁盘 `config.yaml` 的 sha256 与进程上报的 `config_sha256` 一致（显示前 12 位和 `loaded_at`）；无 token、配置读不出、进程不可达、`/health` 非 200 或 token 不被接受时 skipped | 不一致（not applied，显示 mtime 与 `loaded_at`，提示跑 `naozhi config reload`）；`/health` 有 `config_restart_required`（上次重载留下的待重启段，报 `restart required for: ...`，此时指纹停在上一份完整应用的文件）；进程不上报指纹（早于 #2538）或指纹格式不对；`/health` JSON 解析失败 | - |
 | `pprof` | `/api/debug/pprof/` 200 | 无 token；403（远端调用 / hardening 生效）或意外码 | 请求构造或发送失败 |
 | `expvar` | `/api/debug/vars` 200 且 payload 含 `naozhi_session_create_total` | 无 token；403（远端调用 / hardening 生效）或意外码 | 请求构造或发送失败；读 body 失败；200 但没有该计数器（路由挂错） |
 | `state dir` | `~/.naozhi` 可写 | 目录不存在（首次运行） | 存在但不可写 / 非目录 |

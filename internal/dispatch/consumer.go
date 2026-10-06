@@ -37,6 +37,12 @@ type SessionRouter interface {
 	// workspace override (#2342) — used by /cd to avoid the reset/set race.
 	ResetChatAndSetWorkspace(chatKeyPrefix, path string)
 	InterruptSessionViaControl(key string) sessionview.InterruptOutcome
+	// The /model, /effort and /backend surface (commands_tuning.go).
+	// SetSessionTuning returns the sessionview.TuningApplied* mode taken;
+	// VisitSessions is how a command reads one key's snapshot back.
+	SetSessionTuning(ctx context.Context, key string, model, effort *string) (string, error)
+	SetSessionBackend(key, backend string)
+	VisitSessions(fn func(sessionview.SessionSnapshot) bool)
 }
 
 // Turns is the *turn.Orchestrator surface the dispatcher submits IM turns

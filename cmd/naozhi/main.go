@@ -8,11 +8,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/budget"
@@ -32,6 +30,7 @@ import (
 	"github.com/naozhi/naozhi/internal/sysession"
 	"github.com/naozhi/naozhi/internal/transcribe"
 	"github.com/naozhi/naozhi/internal/upstream"
+	"github.com/naozhi/naozhi/internal/webhook"
 
 	// Side-effect import: history-source factory registration lives in wireup
 	// so internal/session stays backend-agnostic.
@@ -79,7 +78,9 @@ func main() {
 	}
 	metrics.StartupPhaseConfigMs.Set(time.Since(t0).Milliseconds())
 
-	setupLogging(cfg)
+	logLevel := setupLogging(cfg)
+	configFP := server.NewConfigFingerprint(cfg.Fingerprint.SHA256, cfg.Fingerprint.LoadedAt)
+	reloader := newConfigReloader(absConfigPath(*configPath), cfg, logLevel, configFP)
 
 	// Created before applyClaudeEnvSettings so readJSONWithRetry's sleeps
 	// honour ctx.Done() from the first use of the settings file.
@@ -321,6 +322,13 @@ func main() {
 	// cron and sysession run-events reach the dashboard Hub, which does not
 	// exist yet; the server binds it to this relay.
 	runTelemetry := &runtelemetry.Relay{}
+	// Outbound webhooks ride the same relay as the dashboard Hub
+	// (docs/rfc/outbound-webhooks.md); nil when none is configured.
+	var webhooks *webhook.Sender
+	if eps := cfg.WebhookEndpoints(); len(eps) > 0 {
+		webhooks = webhook.New(eps, webhook.WithNode(cfg.Workspace.ID))
+		slog.Info("outbound webhooks enabled", "endpoints", len(eps))
+	}
 	// One gate for IM and cron, fed by the ledger; nil when cost.budget is off.
 	budgetGate := budget.Attach(router.Runs().CostLedger(), cfg.BudgetLimits(), cfg.BudgetLocation(), nil)
 	if budgetGate != nil {
@@ -412,17 +420,19 @@ func main() {
 
 	routing := buildRouting(cfg, agents, projectMgr, scheduler)
 	srv := server.NewWithOptions(server.ServerOptions{
-		Addr:        cfg.Server.Addr,
-		Router:      router,
-		Platforms:   platforms,
-		Routing:     routing,
-		Scheduler:   scheduler,
-		Backend:     defaultBackend,
-		AllowedRoot: workspace,
-		IMAccess:    cfg.IMAccessPolicy(),
-		IMRateLimit: dispatch.RateLimit{MsgsPerMin: cfg.IMRateLimit.MsgsPerMin, Burst: cfg.IMRateLimit.Burst},
-		IMBudget:    budgetGate,
-		StateDir:    sessionLayout.Root(),
+		Addr:             cfg.Server.Addr,
+		Router:           router,
+		Platforms:        platforms,
+		Routing:          routing,
+		Scheduler:        scheduler,
+		Backend:          defaultBackend,
+		AllowedRoot:      workspace,
+		IMAccess:         cfg.IMAccessPolicy(),
+		IMRateLimit:      dispatch.RateLimit{MsgsPerMin: cfg.IMRateLimit.MsgsPerMin, Burst: cfg.IMRateLimit.Burst},
+		IMBudget:         budgetGate,
+		IMGroupScope:     dispatch.GroupScope(cfg.Session.GroupScope),
+		IMThreadAutoOpen: cfg.Session.ThreadAutoOpen,
+		StateDir:         sessionLayout.Root(),
 		Config: server.ConfigOptions{
 			// Path enables the access-profile create endpoint; absolute so the
 			// write target survives cwd changes. Secrets dir holds *_FILE
@@ -430,6 +440,8 @@ func main() {
 			Path:                    absConfigPath(*configPath),
 			SHA256:                  cfg.Fingerprint.SHA256,
 			LoadedAt:                cfg.Fingerprint.LoadedAt,
+			Live:                    configFP,
+			Reload:                  reloader.Reload,
 			AccessProfileSecretsDir: sessionLayout.AccessProfileSecretsRoot(),
 		},
 		Queue: server.QueueOptions{
@@ -466,6 +478,7 @@ func main() {
 		},
 		Features: server.FeatureOptions{
 			Debug:     cfg.Server.DebugMode,
+			Metrics:   cfg.Server.MetricsEnabled,
 			PublicTmp: cfg.Projects.PublicTmp,
 			// Default-on; opt-out via session.project_stable_key.enabled: false.
 			ProjectStableKey: cfg.Session.ProjectStableKey.ResolvedEnabled(true),
@@ -485,6 +498,7 @@ func main() {
 		Relays: server.RelayOptions{
 			Router:       routerEvents,
 			RunTelemetry: runTelemetry,
+			Webhooks:     webhooks,
 		},
 	})
 	metrics.StartupPhaseServerMs.Set(time.Since(t0).Milliseconds())
@@ -558,6 +572,13 @@ func main() {
 				// ShutdownComplete closes after srv.Shutdown's 30s drain, i.e. after
 				// every in-flight handler finished, so router.Shutdown never races a
 				// half-cleaned session map. Already closed on server-exit paths.
+				// After the scheduler: its last run.ended must still go out;
+				// before http-drain so the budget is not spent on it.
+				{name: "webhooks", run: func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					webhooks.Close(ctx)
+				}},
 				{name: "http-drain", run: func() { <-srv.ShutdownComplete() }},
 				{name: "router", run: router.Shutdown},
 			})
@@ -565,12 +586,13 @@ func main() {
 		})
 	}
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-	go func() {
-		sig := <-sigCh
-		runShutdown("signal:" + sig.String())
-	}()
+	reloader.bindApply(srv.ApplyHotConfig, router.Backends().AccessProfiles)
+
+	watchSignals(func() {
+		if _, err := reloader.Reload(ctx); err != nil {
+			slog.Error("SIGHUP config reload failed", "err", err)
+		}
+	}, runShutdown)
 
 	slog.Info("naozhi starting",
 		"version", version,

@@ -12,8 +12,14 @@ import (
 // edit to this list in the same change. #3004 has the plan that shrinks it.
 // The *turn.Orchestrator half of G-c is internal/turn/queue_surface_test.go.
 var sessionRouterMethodNames = []string{
+	// /model, /effort and /backend (#3452): the dashboard's tuning surface
+	// reached from IM. VisitSessions is the existing snapshot read and the
+	// backend catalogue comes via Capabilities, so Router gains no method.
 	"InterruptSessionViaControl",
 	"ResetChatAndSetWorkspace",
+	"SetSessionBackend",
+	"SetSessionTuning",
+	"VisitSessions",
 	"Workspace",
 }
 

@@ -1,13 +1,13 @@
 // scheduler_finish.go: terminal hooks for every cron execution path
 // (write side) plus run-history queries the dashboard reads (read side).
 // Keeping readers and writers together means a CronRun schema change moves
-// both at once. Methods stay on *Scheduler so the s.tbl.mu / s.tbl.jobs / s.runStore /
-// s.gate.runningJobs fields remain accessible without exporting.
+// both at once. Methods stay on *Scheduler so the s.tbl.mu / s.tbl.jobs /
+// s.gate.runningJobs fields remain accessible without exporting; the run
+// records themselves live in internal/cron/runstore.
 
 package cron
 
 import (
-	"context"
 	"io/fs"
 	"log/slog"
 	"regexp"
@@ -25,7 +25,7 @@ import (
 // handlers concerned solely with cron run history (transcript / detail /
 // list endpoints) need, so a history-read endpoint is not coupled to the
 // router / platforms / execute path carried by *Scheduler (#1172). The
-// underlying runStore stays unexported.
+// underlying store stays behind the Scheduler.
 type RunHistoryReader interface {
 	// CurrentRun returns the inflight snapshot for jobID, or (zero, false)
 	// when the job is not currently executing.
@@ -58,110 +58,57 @@ func (s *Scheduler) CurrentRun(jobID string) (RunInflightView, bool) {
 // means "no cutoff" (latest page). Returns nil when persistence is disabled
 // (StorePath empty).
 func (s *Scheduler) ListRuns(jobID string, limit int, before time.Time) []CronRunSummary {
-	if !s.runStoreEnabled() {
+	if s == nil {
 		return nil
 	}
-	return s.runStore.List(jobID, limit, before)
+	return s.runs.List(jobID, limit, before)
 }
 
 // RecentRuns is the convenience wrapper for the cron list view's
 // recent_runs field. Cap is enforced inside ListRuns.
 func (s *Scheduler) RecentRuns(jobID string, n int) []CronRunSummary {
-	if !s.runStoreEnabled() {
+	if s == nil {
 		return nil
 	}
-	return s.runStore.Recent(jobID, n)
+	return s.runs.Recent(jobID, n)
 }
 
 // Run returns the full CronRun for runID under jobID. Returns
 // (nil, fs.ErrNotExist) when missing; (nil, ErrCorruptRun) when present
 // but unusable. Server layer maps these to 404 / 500 respectively.
 func (s *Scheduler) Run(jobID, runID string) (*CronRun, error) {
-	if !s.runStoreEnabled() {
+	if s == nil {
 		return nil, fs.ErrNotExist
 	}
-	return s.runStore.Get(jobID, runID)
-}
-
-// --- runStore write / lifecycle facade (#509) ---
-//
-// Every package-internal access to the runStore goes through a *Scheduler
-// method in this file, so the storage type's surface is reachable from exactly
-// one file. Each wrapper applies the nil/enabled guard and forwards verbatim,
-// leaving the runStore's own lock discipline (s.tbl.mu > jobLock > entry.mu)
-// untouched. TestNoDirectRunStoreAccess pins the invariant.
-
-// runStoreEnabled reports whether run-history persistence is live: a non-nil
-// Scheduler whose runStore is enabled (StorePath set). runStore.enabled()
-// tolerates a nil receiver, so this never panics on a partially-constructed
-// Scheduler.
-func (s *Scheduler) runStoreEnabled() bool {
-	return s != nil && s.runStore.enabled()
+	return s.runs.Get(jobID, runID)
 }
 
 // jobStillExists reports whether jobID is still present in s.tbl.jobs under a
 // short s.tbl.mu read lock. finishRun uses it to re-check job existence between
 // recordTerminalResult (which released s.tbl.mu) and the runs/<jobID>/ disk write,
 // so a concurrent DeleteJobByID does not get its runs subtree resurrected by
-// appendRun's ensureJobDir (#2058).
+// the record append's directory create (#2058).
 func (s *Scheduler) jobStillExists(jobID string) bool {
 	return s.tbl.exists(jobID)
-}
-
-// appendRun persists one CronRun via the runStore. No-op when persistence is
-// disabled. Append owns its per-job jobLock internally, so this wrapper holds
-// no scheduler lock.
-func (s *Scheduler) appendRun(run *CronRun) {
-	if !s.runStoreEnabled() {
-		return
-	}
-	s.runStore.Append(run)
 }
 
 // RunStoreHealth snapshots the run store's loss counters. Safe on a nil or
 // persistence-disabled Scheduler.
 func (s *Scheduler) RunStoreHealth() RunStoreHealth {
-	if s == nil || !s.runStoreEnabled() {
+	if s == nil {
 		return RunStoreHealth{}
 	}
-	full, other := s.runStore.WriteFailedTotals()
-	return RunStoreHealth{
-		Enabled:             true,
-		WriteFailedDiskFull: full,
-		WriteFailedOther:    other,
-		HistoryDropped:      s.runStore.HistoryDropTotal(),
-		CacheStaleEvictions: s.runStore.CacheStaleEvictionTotal(),
-	}
-}
-
-// recentSessionIDs returns up to n distinct non-empty SessionID strings from
-// jobID's newest-first run history; nil when persistence is disabled. Reads
-// off the cache ring under entry.mu — no scheduler lock involved.
-func (s *Scheduler) recentSessionIDs(jobID string, n int) []string {
-	if !s.runStoreEnabled() {
-		return nil
-	}
-	return s.runStore.RecentSessionIDs(jobID, n)
-}
-
-// trimAllRuns runs the retention GC pass across every job's runs/ subtree.
-// No-op when persistence is disabled. runStore.trimAllCtx takes each per-job
-// jobLock internally and honours ctx cancellation at job boundaries.
-func (s *Scheduler) trimAllRuns(ctx context.Context, now time.Time) {
-	if !s.runStoreEnabled() {
-		return
-	}
-	s.runStore.trimAllCtx(ctx, now)
+	return s.runs.Health()
 }
 
 // deleteJobRuns removes jobID's entire runs/ subtree and reclaims its jobLock.
 // No-op when persistence is disabled. Called from deleteJobPostCleanup outside
-// s.tbl.mu; runStore.DeleteJob acquires the per-job jobLock internally.
+// s.tbl.mu; Store.DeleteJob acquires the per-job jobLock internally.
 func (s *Scheduler) deleteJobRuns(jobID string) {
-	if !s.runStoreEnabled() {
+	if !s.runs.Enabled() {
 		return
 	}
-	s.runStore.DeleteJob(jobID)
+	s.runs.DeleteJob(jobID)
 	// agentcore §5.1: also drop this job's input-snapshot manifests. Blobs are
 	// content-addressed and shared across jobs, so they are NOT removed here.
 	// TODO(agentcore §5.2): blob GC pass (refcount or mark-sweep against live
@@ -225,7 +172,7 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) (pausedAfter int) {
 	// Clearing before the persistence branches means a marshal failure below
 	// cannot leave a marker that resurrects a genuinely finished run next boot.
 	if !out.keepInflightMarker {
-		s.removeRunInflightMarker(rc.runID)
+		s.runMarkers().Remove(rc.runID)
 	}
 
 	persistedResult := out.result
@@ -274,7 +221,7 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) (pausedAfter int) {
 		s.bumpRunStateMetrics(out.state, out.sandbox)
 	}
 
-	// CronRun history 写盘条件：skipPersist=false、jobPersistOK=true、runStore
+	// CronRun history 写盘条件：skipPersist=false、jobPersistOK=true、run store
 	// 启用。两步写盘非事务（#992）：先 cron_jobs.json 成功才 Append runs/；崩溃
 	// 只可能让 Job 计数领先一条而 runs/ 缺最新一条（over-report，下次 run 自愈），
 	// 反方向结构上不可能。rc.snap.prompt 在此再过一次 SanitizeForLog（#1094）：旧
@@ -288,8 +235,8 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) (pausedAfter int) {
 	if s.finishRunPreAppendHook != nil {
 		s.finishRunPreAppendHook(rc.jobID)
 	}
-	if !out.skipPersist && jobPersistOK && s.runStoreEnabled() && s.jobStillExists(rc.jobID) {
-		s.appendRun(&CronRun{
+	if !out.skipPersist && jobPersistOK && s.runs.Enabled() && s.jobStillExists(rc.jobID) {
+		s.runs.Append(&CronRun{
 			RunID:      rc.runID,
 			JobID:      rc.jobID,
 			State:      out.state,
@@ -316,7 +263,7 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) (pausedAfter int) {
 		})
 		// #2479 (2): post-write re-check; see above.
 		if !s.jobStillExists(rc.jobID) {
-			s.runStore.dropOrphanRun(rc.jobID, rc.runID)
+			s.runs.DropOrphanRun(rc.jobID, rc.runID)
 			slog.Info("cron run: job deleted during history write; dropped orphan run record",
 				"job_id", rc.jobID, "run_id", rc.runID)
 		}
