@@ -43,8 +43,11 @@ func (s *Slack) SendQuestionCard(ctx context.Context, chatID string, card platfo
 	if err != nil {
 		return "", fmt.Errorf("slack question card: %w", err)
 	}
-	_, ts, _, err := s.api.SendMessageContext(ctx, chatID,
-		slack.MsgOptionText(text, true), slack.MsgOptionBlocks(blocks...))
+	opts := []slack.MsgOption{slack.MsgOptionText(text, true), slack.MsgOptionBlocks(blocks...)}
+	if card.ThreadID != "" {
+		opts = append(opts, slack.MsgOptionTS(card.ThreadID))
+	}
+	_, ts, _, err := s.api.SendMessageContext(ctx, chatID, opts...)
 	if err != nil {
 		return "", fmt.Errorf("slack send question card: %w", err)
 	}
@@ -172,6 +175,15 @@ func (s *Slack) handleBlockActions(cb slack.InteractionCallback) {
 	if msgTs == "" {
 		msgTs = cb.Message.Timestamp
 	}
+	// A card asked in a thread sits in it; the answer's reply goes there too.
+	// A top-level card with replies under it is its own thread_ts: no thread.
+	threadTs := cb.Container.ThreadTs
+	if threadTs == "" {
+		threadTs = cb.Message.ThreadTimestamp
+	}
+	if threadTs == msgTs {
+		threadTs = ""
+	}
 	// block_actions carry no channel_type. Fall back to the channel ID: only
 	// IMs start with "D", matching handleMessage's im -> direct mapping.
 	chatType := platform.NormalizeAskChatType(val.ChatType)
@@ -192,6 +204,7 @@ func (s *Slack) handleBlockActions(cb slack.InteractionCallback) {
 		UserID:    cb.User.ID,
 		ChatID:    channel,
 		ChatType:  chatType,
+		ThreadID:  threadTs,
 		Text:      text,
 		// The dispatcher whitelist-validates AgentID before routing (#2148).
 		AgentID: osutil.SanitizeForLog(val.AgentID, platform.AskIDMaxRunes),

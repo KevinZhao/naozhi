@@ -183,7 +183,7 @@ func TestReplyTracker_OneBannerPerTurn(t *testing.T) {
 	t.Run("event_first", func(t *testing.T) {
 		t.Parallel()
 		fp := &fakePlatform{supportsInterim: true}
-		tr := newIMEventTracker(context.Background(), fp, "chat1", "direct", "")
+		tr := newIMEventTracker(context.Background(), fp, ReplyDest{ChatID: "chat1"}, "direct", "")
 		tr.armFallbackBanner(time.Hour, nil)
 		tr.onEvent(clievent.Event{Type: "assistant", Message: &clievent.AssistantMessage{
 			Content: []clievent.ContentBlock{{Type: "text", Text: "working"}}}})
@@ -197,7 +197,7 @@ func TestReplyTracker_OneBannerPerTurn(t *testing.T) {
 	t.Run("after_stop", func(t *testing.T) {
 		t.Parallel()
 		fp := &fakePlatform{supportsInterim: true}
-		tr := newIMEventTracker(context.Background(), fp, "chat1", "direct", "")
+		tr := newIMEventTracker(context.Background(), fp, ReplyDest{ChatID: "chat1"}, "direct", "")
 		tr.armFallbackBanner(time.Hour, nil)
 		tr.stop()
 		if tr.fallbackTimer.Stop() {
@@ -231,7 +231,7 @@ func TestReplyTracker_StopWaitsForBannerInFlight(t *testing.T) {
 	t.Parallel()
 	p := &gatedReplyPlatform{entered: make(chan struct{}), release: make(chan struct{})}
 	p.supportsInterim = true
-	tr := newIMEventTracker(context.Background(), p, "chat1", "direct", "")
+	tr := newIMEventTracker(context.Background(), p, ReplyDest{ChatID: "chat1"}, "direct", "")
 	tr.armFallbackBanner(time.Millisecond, nil)
 	<-p.entered
 	stopped := make(chan struct{})

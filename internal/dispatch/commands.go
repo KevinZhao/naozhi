@@ -27,7 +27,7 @@ func trimUnicodeSpace(s string) string {
 	return strings.TrimFunc(s, unicode.IsSpace)
 }
 
-// replyText sends a text reply to msg.ChatID via the matching platform,
+// replyText sends a text reply to msg's chat and thread via the matching platform,
 // logging but not returning errors. Returns false (no-op) when the platform
 // is unregistered so callers can skip follow-up logic.
 func (d *Dispatcher) replyText(ctx context.Context, msg platform.IncomingMessage, text string, log *slog.Logger) bool {
@@ -35,7 +35,7 @@ func (d *Dispatcher) replyText(ctx context.Context, msg platform.IncomingMessage
 	if p == nil {
 		return false
 	}
-	if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: text}); err != nil {
+	if _, err := p.Reply(ctx, replyDestOf(msg).text(text)); err != nil {
 		if log != nil {
 			log.Warn("reply failed", "err", err)
 		} else {
