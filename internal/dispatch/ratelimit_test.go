@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -76,16 +77,20 @@ func TestRateLimit_BurstThenSilentDrops(t *testing.T) {
 }
 
 // Slash commands draw from the bucket (command spam is spam), except /stop,
-// which only ever ends spend.
+// which only ever ends spend. The exemption reads /stop the way
+// dispatchCommand does, so IME capitalisation counts.
 func TestRateLimit_CommandsLimitedStopExempt(t *testing.T) {
 	d, fp, ct := newRateLimitDispatcher(t, RateLimit{MsgsPerMin: 1, Burst: 1})
 	accepted(d, rateMsg("alice", "c1", "/help"), rateMsg("alice", "c1", "/new"))
 	if n := ct.resets.Load(); n != 0 {
 		t.Errorf("/new past the limit reset the session %d times", n)
 	}
-	accepted(d, rateMsg("alice", "c1", "/stop"))
-	if n := countReplies(fp, "当前没有正在进行的回复"); n != 1 {
-		t.Errorf("/stop past the limit was not handled: replies %q", fp.allReplies())
+	for _, stop := range []string{"/stop", "/Stop", "/STOP now", "/Stop\u3000"} {
+		before := countReplies(fp, "当前没有正在进行的回复")
+		accepted(d, rateMsg("alice", "c1", stop))
+		if countReplies(fp, "当前没有正在进行的回复") == before {
+			t.Errorf("%q past the limit was not handled: replies %q", stop, fp.allReplies())
+		}
 	}
 }
 
@@ -160,5 +165,24 @@ func TestRateLimit_ReplyWindow(t *testing.T) {
 	}
 	if !th.allow("k", t0.Add(rateLimitReplyWindow)) {
 		t.Error("reply after the window not answered")
+	}
+}
+
+// A bucket is reset no sooner than it would refill, so a large burst cannot
+// be regained by idling for the floor TTL.
+func TestInboundLimitConfig_TTLCoversRefill(t *testing.T) {
+	for _, tc := range []struct {
+		rl   RateLimit
+		want time.Duration
+	}{
+		{RateLimit{MsgsPerMin: 1}, rateLimitIdleTTL},
+		{RateLimit{MsgsPerMin: 6, Burst: 60}, rateLimitIdleTTL},
+		{RateLimit{MsgsPerMin: 1, Burst: 30}, 30 * time.Minute},
+		{RateLimit{MsgsPerMin: 2, Burst: 45}, 22*time.Minute + 30*time.Second},
+		{RateLimit{MsgsPerMin: 1, Burst: math.MaxInt}, math.MaxInt64},
+	} {
+		if got := inboundLimitConfig(tc.rl).TTL; got != tc.want {
+			t.Errorf("inboundLimitConfig(%+v).TTL = %v, want %v", tc.rl, got, tc.want)
+		}
 	}
 }

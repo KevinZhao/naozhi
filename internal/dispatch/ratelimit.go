@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"log/slog"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -12,13 +13,15 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/ratelimit"
 	"github.com/naozhi/naozhi/internal/sessionkey"
+	"github.com/naozhi/naozhi/internal/turn"
 )
 
 const (
 	// rateLimitMaxKeys bounds the sender buckets; the least recently seen
 	// sender is evicted first.
 	rateLimitMaxKeys = 4096
-	// rateLimitIdleTTL resets a bucket whose sender has been quiet this long.
+	// rateLimitIdleTTL is the shortest quiet spell that resets a bucket;
+	// inboundLimitConfig stretches it to the bucket's full refill time.
 	rateLimitIdleTTL = 10 * time.Minute
 	// rateLimitReplyWindow is how long a limited sender waits for the next
 	// "too fast" reply; the messages in between are dropped silently.
@@ -38,16 +41,27 @@ func newInboundLimiter(rl RateLimit) *ratelimit.Limiter {
 	if rl.MsgsPerMin <= 0 {
 		return nil
 	}
+	return ratelimit.New(inboundLimitConfig(rl))
+}
+
+// inboundLimitConfig is the bucket for an enabled rl. Its idle TTL is at
+// least the time to refill the burst, so a reset never hands back more
+// than waiting would.
+func inboundLimitConfig(rl RateLimit) ratelimit.Config {
 	burst := rl.Burst
 	if burst <= 0 {
 		burst = rl.MsgsPerMin
 	}
-	return ratelimit.New(ratelimit.Config{
+	ttl := time.Duration(math.MaxInt64)
+	if int64(burst) <= int64(math.MaxInt64/time.Minute) {
+		ttl = max(rateLimitIdleTTL, time.Duration(burst)*time.Minute/time.Duration(rl.MsgsPerMin))
+	}
+	return ratelimit.Config{
 		Rate:    rate.Limit(float64(rl.MsgsPerMin) / 60),
 		Burst:   burst,
 		MaxKeys: rateLimitMaxKeys,
-		TTL:     rateLimitIdleTTL,
-	})
+		TTL:     ttl,
+	}
 }
 
 // rateLimitKey is msg's bucket: the sender on its platform, or the chat when
@@ -59,8 +73,11 @@ func rateLimitKey(msg platform.IncomingMessage) string {
 	return "user\x00" + msg.Platform + "\x00" + msg.UserID
 }
 
+// isStopCommand reports whether trimmed is /stop as dispatchCommand reads
+// it: the command token normalized by turn.NormalizeCommand.
 func isStopCommand(trimmed string) bool {
-	return trimmed == "/stop" || strings.HasPrefix(trimmed, "/stop ")
+	t := turn.NormalizeCommand(trimmed)
+	return t == "/stop" || strings.HasPrefix(t, "/stop ")
 }
 
 // admitRate reports whether msg fits its sender's rate limit. /stop is never
