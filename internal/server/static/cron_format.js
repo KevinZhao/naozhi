@@ -29,7 +29,7 @@ export function firstNonEmptyLine(text, limit) {
 // calendarDayDelta returns the number of calendar days between two epoch-ms
 // (positive if `b` is later than `a` in local time). Uses local midnight so
 // "昨天" / "明天" align with wall-clock date, not 24h intervals — a run
-// 25h ago from now=01:00 is actually 前天, not 昨天.
+// 26h ago from now=01:00 is already 前天, not 昨天.
 export function calendarDayDelta(a, b) {
   const da = new Date(a);
   const db = new Date(b);

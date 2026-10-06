@@ -829,7 +829,7 @@ func TestHandleAPISessions_StatsIncludeAgentsAndWorkspace(t *testing.T) {
 		MaxProcs:  5,
 		Workspace: "/test/workspace",
 	})
-	srv, _ := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: router, Agents: agents, Backend: "claude"})
+	srv, _ := buildServerWithHandlers(ServerOptions{Addr: ":0", Router: router, Routing: RoutingOptions{Agents: agents}, Backend: "claude"})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
