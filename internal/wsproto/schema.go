@@ -37,9 +37,9 @@ func SchemaJSON() ([]byte, error) {
 // wireEventEntry turns the described EventEntry def into its wire view: type
 // is closed over the kind registry (clievent.AllKinds) and the fields ForWire
 // clears (clievent.WireOmittedFields) are gone, so a dashboard read of one
-// fails check-ws-contract. A name it does not find is an error, so a renamed
-// json tag cannot leave the def describing the Go struct. A todo's detail is
-// the CLI's TodoWrite bytes; clievent.TodoItem only parses them, so no def.
+// fails tsc against wire.d.ts. A name it does not find is an error, so a
+// renamed json tag cannot leave the def describing the Go struct. A todo's
+// detail is the CLI's TodoWrite bytes; TodoItem only parses them, so no def.
 func wireEventEntry(defs map[string]jsonschema.Object) error {
 	const name = "clievent.EventEntry"
 	def, ok := defs[name]
