@@ -1306,7 +1306,7 @@ running（5），否则探针行 6 的 B（`state:"start"`，只有 queuedAt）�
 | 每 workflow agent 行 | 2000（board 第 4 步的并集同样受此上限） | 计数照算，行截断，`AgentsCapped=true`；超出上限的项（phase 同理）只计数：不规范化、不 redact、不建记忆，也不留在发布切片的底层数组里；记忆超过上限时修剪到当前所示的 index（PR-6；先建全部行再切片的话，单个 10MiB 快照能让一个条目钉住 ~60MB） |
 | 每 agent 历史 agentId | 8 | 丢最旧 |
 | 每终态 workflow 的结果缓存（§6.2.1） | result 16KB + logs 合计 64KiB（≤ 200 行 × 500 runes，超出丢最旧） | ≤ ~80KB；截断后的 result 是副本，不钉住整段原文（PR-6）；不缓存 per-agent resultPreview |
-| 后台磁盘 I/O（RunDir 解析、stat、结果文件、R3，§5.8 "I/O 派发"） | 每 board 在途 ≤ 2；全局 `workflowIOSlots = 8` | 在途 > 30s 记为卡死但**继续占全局槽位**，每 board 至多补发 1 个；挂死的文件系统最多卡住 8 个 goroutine / fd；没抢到全局槽位的 board 在池里登记，槽位释放时按登记先后 pump（PR-8：否则它要等自己的下一次登记或 sweeper tick） |
+| 后台磁盘 I/O（RunDir 解析、stat、结果文件、R3，§5.8 "I/O 派发"） | 每 board 在途 ≤ 2；全局 `workflowIOSlots = 8` | 在途 > 30s 记为卡死但**继续占全局槽位**，每 board 至多补发 1 个；挂死的文件系统最多卡住 8 个 goroutine / fd；没抢到全局槽位的 board 在池里登记，槽位释放时按登记先后 pump（PR-8：否则它要等自己的下一次登记或 sweeper tick）；登记后再试一次槽位，否则在“首次尝试失败”与“登记”之间释放的槽位找不到等待者 |
 | 字符串 | agent：label/title/phaseTitle 120、model 64、last tool 64、last tool summary 200、error 400；workflow：Name 120、Description / Current / NotifySummary 200、RawState / RawStatus 32 runes | 先 `RedactSecrets` 再 `textutil.TruncateRunes`（`textutil/truncate.go:19`），按原串 maphash 记忆（§4.3） |
 
 估算：一行 Agent 结构体 + 字符串 ≲ 600B，398 agents ≈ 240KB 上界、典型 ≈ 80KB。一个 workflow 的行最多同时有三份：
