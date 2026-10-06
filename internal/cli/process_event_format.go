@@ -210,6 +210,16 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 		entry := base
 		entry.Type = clievent.KindResult
 		entry.Cost = ev.CostUSD
+		// A backend rejection (kiro session/prompt error, codex failed turn)
+		// has no assistant frame before it, so without a system line the turn
+		// just stops in the dashboard with no hint why. ev.Result was
+		// sanitized by the protocol.
+		if ev.BackendError != nil && ev.Result != "" {
+			notice := base
+			notice.Type = clievent.KindSystem
+			notice.Summary = ev.Result
+			return []clievent.EventEntry{notice, entry}
+		}
 		return []clievent.EventEntry{entry}
 	}
 	return nil
