@@ -214,7 +214,7 @@ eventlog 的**运行态与装配逻辑**横跨 5 个包，且会话层（`intern
 
 > **Phase 1 实施记录（2026-07-31）**：按上表预案落地——`internal/eventlog/api/api_assert_test.go`（ring 三分面 + EventStore、naozhilog/merged Reader 编译期断言 + round-trip 四态契约测试）；唯一方法缺口与预判一致（ring 缺 LoadBefore），以 `internal/eventlog/ring/eventlog_loadbefore.go` thin adapter 补齐（EntriesBefore 零逻辑封装，边界语义与 naozhilog 对齐），配 `eventlog_loadbefore_test.go` 逐字节等价 pin。既有 `api_test.go` 的 fullStore 组合演示因 ring 自带读侧后 selector 歧义，改为显式选择 durable 读 tier（语义即 merged-source 形态）。
 >
-> **Phase 2 状态**：契约已写进代码注释——`internal/session/eventlog_bridge.go` 头注列出四个 tier 并说明 persist.Persister 不实现 `api.EventStore`；`internal/eventlog/persist/doc.go` 同述 Persister 走 PersistSink + Recover；`internal/eventlog/ring/eventlog_loadbefore.go` 指明 `*EventLog` 满足 `api.EventStore`。`cli/doc.go` 一项已随 ring 迁出 cli 失效。
+> **Phase 2 状态**：契约已写进代码注释——`internal/session/eventlog_bridge.go` 头注列出四个 tier 并说明 persist.Persister 不实现 `api.EventStore`；`internal/eventlog/persist/doc.go` 同述 Persister 走 PersistSink + Recover；`internal/eventlog/ring/eventlog_loadbefore.go` 指明 `*EventLog` 满足 `api.EventStore`。`cli/doc.go` 一项已随 ring 迁出 cli 失效；`schema/doc.go` 不加指针——schema 只定义落盘记录格式（Record / FileHeader / IdxEntry），不实现任何 `api` 分面，也不是 tier。
 
 ### Phase 3-6 搁置
 
