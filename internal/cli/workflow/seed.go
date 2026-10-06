@@ -53,11 +53,10 @@ const (
 // LastObservedAt or a StartedAt from observation.
 //
 // A reverse walk picks lines by prefix alone: per task the newest line of
-// each class, plus every task_started and launch line. The picks are then
-// decoded and applied oldest first, as live frames would be — applying
-// them newest first would let a terminal frame shut out the snapshot
-// before it. A pick that does not decode falls back to an older line of
-// its class, as live kept that one. Decodes are O(tasks), not O(lines).
+// each class, plus every task_started and launch line. They are decoded
+// and applied oldest first, as live frames were (newest first, a terminal
+// frame would shut out the snapshot before it); a pick that fails falls
+// back to an older line of its class. Decodes are O(tasks), not O(lines).
 func (t *Tracker) SeedFromReplay(r Replay, dec Decoder, known []string) {
 	t.KnowTasks(known)
 	type pick struct {
