@@ -531,18 +531,25 @@ func formatBytesShort(n int64) string {
 	}
 }
 
+// UserTextAndInline returns the text a backend should send for a user turn
+// (with the Read-tool hint prepended when atts holds file_ref entries) and the
+// inline attachments that become image blocks. Every protocol encoder goes
+// through it so a file_ref never reaches the wire as an image block.
+func UserTextAndInline(text string, atts []Attachment) (effectiveText string, inline []Attachment) {
+	inline, refs := splitAttachments(atts)
+	return prependFileRefHint(text, refs), inline
+}
+
 // NewUserMessageWithMeta builds the stdin user message. Empty uuid / priority
 // are omitted from the JSON; non-empty values are serialised as top-level
 // fields, which the CLI accepts and (for uuid) round-trips on the replay
 // event. Priority "now" is an explicit abort signal.
 func NewUserMessageWithMeta(text string, atts []Attachment, uuid, priority string) InputMessage {
 	// file_ref attachments produce no content block; they reach Claude via
-	// the prepended Read-tool hint instead.
-	inline, refs := splitAttachments(atts)
-
-	// The hint is English because language-mixed prompts make the model
-	// switch reply language unpredictably; original filenames stay verbatim.
-	effectiveText := prependFileRefHint(text, refs)
+	// the prepended Read-tool hint instead. The hint is English because
+	// language-mixed prompts make the model switch reply language
+	// unpredictably; original filenames stay verbatim.
+	effectiveText, inline := UserTextAndInline(text, atts)
 
 	var content any
 	if len(inline) == 0 {
