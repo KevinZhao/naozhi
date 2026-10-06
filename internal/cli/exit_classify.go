@@ -77,6 +77,7 @@ func dashNotFound(lines []string) bool {
 // noteOutput marks the CLI past startup on its first stdout event, except
 // the error_during_execution result claude writes just before exiting when it
 // cannot start (a stale --resume id): that frame is the startup failure.
+// This is startup-reject detection, not abort detection.
 func (p *Process) noteOutput(ev clievent.Event) {
 	if ev.Type != "result" || ev.SubType != "error_during_execution" {
 		p.sawOutput.Store(true)

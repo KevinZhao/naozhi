@@ -42,8 +42,9 @@ type turnState struct {
 	interruptedRun atomic.Bool // true when Interrupt() was called while Running
 	// abortRequested: naozhi asked the in-flight turn to stop (Interrupt,
 	// InterruptViaControl, a priority:"now" passthrough send). readLoop takes
-	// it onto the next result as Event.Aborted, so a consumer can tell that
-	// abort's error_during_execution from a real failure.
+	// it onto the next result, whatever its shape, as Event.Aborted, so a
+	// consumer can tell that abort's error_during_execution (older claude)
+	// from a real failure.
 	abortRequested abortMarker
 	// reconnectedMidTurn: SpawnReconnect found a turn in flight, so a result
 	// with no active Send ends that turn (one-shot, CAS-consumed).

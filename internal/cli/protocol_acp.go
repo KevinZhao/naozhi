@@ -381,11 +381,12 @@ func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []clievent.A
 	p.thoughtBuf.Reset()
 	p.mu.Unlock()
 
+	text, inline := clievent.UserTextAndInline(text, images)
 	// Typed []acpPromptBlock so the encoding/json reflect cache hits the same
 	// concrete shape every call (no per-block map + interface{} boxing).
 	hasText := text != ""
-	prompt := make([]acpPromptBlock, 0, len(images)+1)
-	for _, img := range images {
+	prompt := make([]acpPromptBlock, 0, len(inline)+1)
+	for _, img := range inline {
 		prompt = append(prompt, acpPromptBlock{
 			Type: "image",
 			Source: &acpImageSource{

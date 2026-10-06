@@ -7,7 +7,7 @@
 //   3. `_mdCache` 缓存含 `\begin{env}` 的 KaTeX pending 占位符：首帧 KaTeX
 //      未就绪输出 `ktx-N` pending span 被缓存，二次命中返回同一 id 的陈旧 HTML
 //
-// 本文件屏蔽 cdn.jsdelivr.net，让 KaTeX 永不就绪 → 稳定走 pending 路径。
+// 本文件屏蔽 KaTeX（/static/vendor/）与 cdn.jsdelivr.net，让 KaTeX 永不就绪 → 稳定走 pending 路径。
 //
 // 跑法：cd test/e2e && npx playwright test markdown_math_code.test.js --project=desktop-chrome
 
@@ -29,9 +29,9 @@ test.describe('renderMd 行内数学 / 行内代码 / pending 缓存', () => {
   test.beforeAll(async ({ browser }) => {
     mock = await startMockServer();
     const ctx = await browser.newContext();
-    // KaTeX 走 CDN 懒加载；屏蔽后 katexReady 永为 false，renderKatex 稳定
+    // KaTeX 懒加载；屏蔽后 katexReady 永为 false，renderKatex 稳定
     // 产出 `ktx-N` pending span，缓存 bug 才可确定性复现。
-    await ctx.route(/cdn\.jsdelivr\.net/, route => route.abort());
+    await ctx.route(/\/static\/vendor\/|cdn\.jsdelivr\.net/, route => route.abort());
     page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
     await page.waitForFunction(() => typeof (/** @type {any} */ (window)).renderMd === 'function');

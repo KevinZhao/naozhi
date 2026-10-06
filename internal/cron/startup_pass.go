@@ -31,6 +31,9 @@ func (s *Scheduler) goStartupPass(name string, fn func()) {
 					"stack", string(debug.Stack()))
 			}
 		}()
+		if h := s.startupPassHook; h != nil {
+			h(name)
+		}
 		fn()
 	}()
 }
