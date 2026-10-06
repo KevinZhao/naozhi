@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -25,43 +26,146 @@ const e2eShimSurfaceBaseline = 110
 // names has stopped recognising the file.
 const e2eShimSurfaceFloor = 50
 
-// e2eShimNamedHelpers is how many Object.defineProperty(surface, <variable>,
-// ...) sites the shim has: expose, stateField and the strict-proxy loop. Any
-// other such site defines names this scanner cannot read.
-const e2eShimNamedHelpers = 3
+// shimForms are the only shapes the shim may use to define a name, in
+// canonical form: shimShape turns each into a regexp that ignores whitespace.
+// @N@ and @NAMES@ are captured, and every quoted string in a capture is a
+// name; @K@ is a quoted state key and @REF@ a dotted reference, neither counted.
+var shimForms = []string{
+	`const surface = {};`,
+	`function expose(mod, names) {
+  for (const name of names) {
+    if (!(name in mod)) throw new Error('e2e-shim: module does not export ' + name);
+    Object.defineProperty(surface, name, { get: () => mod[name], enumerable: true, configurable: true });
+  }
+}`,
+	`function stateField(name, obj, key) {
+  Object.defineProperty(surface, name, {
+    get: () => obj[key],
+    set: (v) => { obj[key] = v; },
+    enumerable: true,
+    configurable: true,
+  });
+}`,
+	`const strict = (obj, name) => new Proxy(obj, {`,
+	`for (const [name, obj] of [@PAIRS@]) {
+  const p = strict(obj, name);
+  Object.defineProperty(surface, name, { get: () => p, enumerable: true, configurable: true });
+}`,
+	`expose(@REF@, [@NAMES@]);`,
+	`stateField(@N@, @REF@, @K@);`,
+	`Object.defineProperty(surface, @N@, { get: () => @REF@, enumerable: true, configurable: true });`,
+	`window.nz.test = surface;
+for (const name of Object.keys(surface)) {
+  const d = Object.getOwnPropertyDescriptor(surface, name);
+  Object.defineProperty(window, name, { get: d.get, set: d.set, configurable: true });
+}`,
+}
 
-var (
-	shimExposeCall   = regexp.MustCompile(`\bexpose\(\s*\w+\s*,\s*\[([^\]]*)\]\s*\)`)
-	shimQuotedName   = regexp.MustCompile(`'([^']*)'`)
-	shimStateField   = regexp.MustCompile(`\bstateField\(\s*'([^']+)'`)
-	shimAccessor     = regexp.MustCompile(`Object\.defineProperty\(\s*surface\s*,\s*'([^']+)'`)
-	shimNamedSite    = regexp.MustCompile(`Object\.defineProperty\(\s*surface\s*,\s*[A-Za-z_$]`)
-	shimStrictLoop   = regexp.MustCompile(`(?s)for\s*\(\s*const\s*\[\s*\w+\s*,\s*\w+\s*\]\s*of\s*\[(.*?)\]\s*\)\s*\{[^}]*\bstrict\(`)
-	shimStrictName   = regexp.MustCompile(`\[\s*'([^']+)'\s*,`)
-	shimDirectWrite  = regexp.MustCompile(`\bsurface\s*(?:\.\s*[\w$]+|\[[^\]]*\])\s*=[^=]`)
-	shimBulkDefine   = regexp.MustCompile(`Object\.(?:assign|defineProperties)\(\s*(?:surface|window)\b`)
-	shimWindowLit    = regexp.MustCompile(`Object\.defineProperty\(\s*window\s*,\s*['"]`)
-	shimWindowAssign = regexp.MustCompile(`\bwindow\s*\.\s*([\w$.]+)\s*=[^=]`)
+const (
+	shimQ   = `(?:'[^'\\\n]*'|"[^"\\\n]*")`
+	shimRef = `[\w$]+(?:\.[\w$]+)*`
 )
 
-// countShimSurface returns the distinct names src exposes, and the forms it
-// could not count: a surface defined some other way than the shim's helpers.
+var (
+	shimPlaceholders = map[string]string{
+		"@N@":     `(` + shimQ + `)`,
+		"@K@":     shimQ,
+		"@REF@":   shimRef,
+		"@NAMES@": `((?:\s*` + shimQ + `\s*,)*\s*(?:` + shimQ + `\s*)?)`,
+		"@PAIRS@": `((?:\s*\[\s*` + shimQ + `\s*,\s*` + shimRef + `\s*\]\s*,)*\s*(?:\[\s*` + shimQ + `\s*,\s*` + shimRef + `\s*\]\s*)?)`,
+	}
+	shimToken  = regexp.MustCompile(`@[A-Z]+@|'[^']*'|[\w$]+|\S`)
+	shimQuoted = regexp.MustCompile(`'([^'\\\n]*)'|"([^"\\\n]*)"`)
+	// shimSensitive are the identifiers through which a name can reach
+	// window.nz.test or window; any left once shimForms are consumed is a
+	// definition the count cannot see.
+	shimSensitive = regexp.MustCompile(`\b(?:surface|window|globalThis|self|top|parent|frames|defaultView|Reflect|eval|Function|Object\s*\.\s*(?:assign|defineProperty|defineProperties|setPrototypeOf)|expose|stateField|strict)\b`)
+	shimFormRes   = func() []*regexp.Regexp {
+		var res []*regexp.Regexp
+		for _, f := range shimForms {
+			res = append(res, shimShape(f))
+		}
+		return res
+	}()
+)
+
+// shimShape compiles a canonical form, allowing any whitespace between tokens.
+func shimShape(canon string) *regexp.Regexp {
+	var parts []string
+	for _, tok := range shimToken.FindAllString(canon, -1) {
+		if re, ok := shimPlaceholders[tok]; ok {
+			parts = append(parts, re)
+		} else {
+			parts = append(parts, regexp.QuoteMeta(tok))
+		}
+	}
+	return regexp.MustCompile(`\b` + strings.Join(parts, `\s*`))
+}
+
+// blankJS replaces comments, and with blankStrings the contents of ” and ""
+// literals, by spaces, keeping newlines so line numbers hold. Template
+// literals keep their contents, since ${} can hold code. Regex literals are
+// not recognised; the shim has none.
+func blankJS(src string, blankStrings bool) string {
+	out := []byte(src)
+	for i := 0; i < len(src); {
+		switch c := src[i]; {
+		case c == '/' && i+1 < len(src) && src[i+1] == '/':
+			j := i
+			for j < len(src) && src[j] != '\n' {
+				j++
+			}
+			blankBytes(out, i, j)
+			i = j
+		case c == '/' && i+1 < len(src) && src[i+1] == '*':
+			j := len(src)
+			if e := strings.Index(src[i+2:], "*/"); e >= 0 {
+				j = i + 2 + e + 2
+			}
+			blankBytes(out, i, j)
+			i = j
+		case c == '\'' || c == '"' || c == '`':
+			j := i + 1
+			for j < len(src) && src[j] != c {
+				if src[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			if blankStrings && c != '`' {
+				blankBytes(out, i+1, j)
+			}
+			i = j + 1
+		default:
+			i++
+		}
+	}
+	return string(out)
+}
+
+// blankBytes spaces out b[from:to], keeping newlines.
+func blankBytes(b []byte, from, to int) {
+	for k := from; k < to && k < len(b); k++ {
+		if b[k] != '\n' {
+			b[k] = ' '
+		}
+	}
+}
+
+// countShimSurface returns the distinct names src exposes, and the problems:
+// a name defined twice, or a sensitive identifier outside every shimForms
+// match, which is a definition the count cannot read.
 func countShimSurface(src string) (names []string, problems []string) {
+	code := []byte(blankJS(src, false))
 	seen := map[string]int{}
-	add := func(n string) { seen[n]++ }
-	for _, m := range shimExposeCall.FindAllStringSubmatch(src, -1) {
-		for _, q := range shimQuotedName.FindAllStringSubmatch(m[1], -1) {
-			add(q[1])
-		}
-	}
-	for _, re := range []*regexp.Regexp{shimStateField, shimAccessor} {
-		for _, m := range re.FindAllStringSubmatch(src, -1) {
-			add(m[1])
-		}
-	}
-	for _, m := range shimStrictLoop.FindAllStringSubmatch(src, -1) {
-		for _, q := range shimStrictName.FindAllStringSubmatch(m[1], -1) {
-			add(q[1])
+	for _, re := range shimFormRes {
+		for _, m := range re.FindAllSubmatchIndex(code, -1) {
+			for g := 2; g < len(m); g += 2 {
+				for _, q := range shimQuoted.FindAllSubmatch(code[m[g]:m[g+1]], -1) {
+					seen[string(q[1])+string(q[2])]++
+				}
+			}
+			blankBytes(code, m[0], m[1])
 		}
 	}
 	for n, c := range seen {
@@ -71,21 +175,15 @@ func countShimSurface(src string) (names []string, problems []string) {
 		}
 	}
 	sort.Strings(names)
-
-	if got := len(shimNamedSite.FindAllString(src, -1)); got != e2eShimNamedHelpers {
-		problems = append(problems, fmt.Sprintf("%d Object.defineProperty(surface, <variable>) sites, want %d (expose, stateField, the strict loop)", got, e2eShimNamedHelpers))
-	}
-	for _, re := range []*regexp.Regexp{shimDirectWrite, shimBulkDefine, shimWindowLit} {
-		for _, m := range re.FindAllString(src, -1) {
-			problems = append(problems, fmt.Sprintf("unrecognised surface definition %q", strings.TrimSpace(m)))
-		}
-	}
-	for _, m := range shimWindowAssign.FindAllStringSubmatch(src, -1) {
-		if m[1] != "nz.test" {
-			problems = append(problems, fmt.Sprintf("unrecognised surface definition %q", strings.TrimSpace(m[0])))
-		}
-	}
 	sort.Strings(problems)
+
+	srcLines := strings.Split(src, "\n")
+	for i, line := range strings.Split(blankJS(string(code), true), "\n") {
+		if ids := shimSensitive.FindAllString(line, -1); len(ids) > 0 {
+			problems = append(problems, fmt.Sprintf("line %d: unrecognised surface definition (%s): %s",
+				i+1, strings.Join(ids, ", "), strings.TrimSpace(srcLines[i])))
+		}
+	}
 	return names, problems
 }
 
@@ -146,23 +244,28 @@ func TestE2EShimSurfaceProblems_BothDirections(t *testing.T) {
 
 func TestCountShimSurface(t *testing.T) {
 	t.Parallel()
-	helpers := "function expose(mod, names) {\n" +
-		"  for (const name of names) Object.defineProperty(surface, name, { get: () => mod[name] });\n}\n" +
-		"function stateField(name, obj, key) {\n  Object.defineProperty(surface, name, { get: () => obj[key] });\n}\n"
-	strictLoop := "for (const [name, obj] of [['wsm', wsManager.wsm], ['sessionStream', sessionStream]]) {\n" +
-		"  const p = strict(obj, name);\n  Object.defineProperty(surface, name, { get: () => p });\n}\n"
-	mirror := "window.nz.test = surface;\nfor (const name of Object.keys(surface)) {\n" +
-		"  const d = Object.getOwnPropertyDescriptor(surface, name);\n" +
-		"  Object.defineProperty(window, name, { get: d.get, set: d.set, configurable: true });\n}\n"
-	clean := helpers +
-		"expose(a, ['one', 'two']);\n" +
-		"expose(b, [\n  'three',\n  'four',\n]);\n" +
-		"stateField('five', s, 'k');\n" +
-		"Object.defineProperty(surface, 'six', { get: () => x.y });\n" +
-		strictLoop + mirror
+	// The placeholder-free forms are the helpers and the window mirror, as the
+	// real shim spells them.
+	var fixed []string
+	for _, f := range shimForms {
+		if !strings.Contains(f, "@") {
+			fixed = append(fixed, f)
+		}
+	}
+	clean := "// header: window.nz.test surface, expose(x, more)\n/**\n * stateField(name) puts it on window\n */\n" +
+		strings.Join(fixed, "\n  get(t, k) { return t[k]; },\n});\n") + "\n" +
+		"expose(a, ['one', \"two\"]);\n" +
+		"expose(b, [\n  'three',\n  'four', // window\n]);\n" +
+		"stateField('five', s.t, 'k');\n" +
+		"stateField(\"seven\", s, \"k2\");\n" +
+		"Object.defineProperty(surface, 'six', { get: () => x.y, enumerable: true, configurable: true });\n" +
+		"for (const [name, obj] of [['wsm', wsManager.wsm], ['sessionStream', sessionStream]]) {\n" +
+		"  const p = strict(obj, name);\n" +
+		"  Object.defineProperty(surface, name, { get: () => p, enumerable: true, configurable: true });\n}\n" +
+		"const msg = 'self top parent';\n"
 
 	names, problems := countShimSurface(clean)
-	want := []string{"five", "four", "one", "sessionStream", "six", "three", "two", "wsm"}
+	want := []string{"five", "four", "one", "sessionStream", "seven", "six", "three", "two", "wsm"}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Errorf("names = %v, want %v (state keys and module refs are not names)", names, want)
 	}
@@ -174,16 +277,34 @@ func TestCountShimSurface(t *testing.T) {
 		name, extra, want string
 	}{
 		{"duplicate", "stateField('one', s, 'k');\n", `"one" is defined 2 times`},
-		{"direct write", "surface.seven = 7;\n", "unrecognised surface definition"},
-		{"bracket write", "surface['seven'] = 7;\n", "unrecognised surface definition"},
-		{"nz.test write", "window.nz.test.seven = 7;\n", "unrecognised surface definition"},
-		{"Object.assign", "Object.assign(surface, { seven: 7 });\n", "unrecognised surface definition"},
-		{"window global", "window.seven = 7;\n", "unrecognised surface definition"},
-		{"window accessor", "Object.defineProperty(window, 'seven', { get: () => 7 });\n", "unrecognised surface definition"},
-		{"new helper", "for (const k of ks) Object.defineProperty(surface, k, { get: () => 7 });\n", "sites, want 3"},
+		{"direct write", "surface.eight = 8;\n", "(surface)"},
+		{"bracket write", "surface['eight'] = 8;\n", "(surface)"},
+		{"nz.test write", "window.nz.test.eight = 8;\n", "(window)"},
+		{"Object.assign", "Object.assign(surface, { eight: 8 });\n", "(Object.assign, surface)"},
+		{"window global", "window.eight = 8;\n", "(window)"},
+		{"window bracket", "window['eight'] = 8;\n", "(window)"},
+		{"globalThis", "globalThis.eight = 8;\n", "(globalThis)"},
+		{"self", "self.eight = 8;\n", "(self)"},
+		{"window accessor", "Object.defineProperty(window, 'eight', { get: () => 8 });\n", "(Object.defineProperty, window)"},
+		{"Reflect", "Reflect.defineProperty(surface, 'eight', { get: () => 8 });\n", "(Reflect, surface)"},
+		{"double-quoted accessor, other shape", "Object.defineProperty(surface, \"eight\", { get: () => 8 });\n", "(Object.defineProperty, surface)"},
+		{"template-literal name", "stateField(`eight`, s, 'k');\n", "(stateField)"},
+		{"new helper", "for (const k of ks) Object.defineProperty(surface, k, { get: () => 8 });\n", "(Object.defineProperty, surface)"},
+		{"non-literal array", "const more = ['eight'];\nexpose(nzUtil, more);\n", "(expose)"},
+		{"computed array", "expose(nzUtil, Object.keys(nzUtil).filter((n) => n));\n", "(expose)"},
+		{"array element not a string", "expose(nzUtil, ['eight', n]);\n", "(expose)"},
+		{"expose in a loop", "for (const n of ['eight']) expose(nzUtil, [n]);\n", "(expose)"},
+		{"aliased helper", "const e = expose;\n", "(expose)"},
+		{"helper reshaped", "", "(expose)"},
+		{"getter does more", "Object.defineProperty(surface, 'eight', { get: () => (window.x = 1), enumerable: true, configurable: true });\n", "(Object.defineProperty, surface, window)"},
+		{"template interpolation", "const s = `${window.eight = 8}`;\n", "(window)"},
 	} {
-		_, got := countShimSurface(clean + tc.extra)
-		if len(got) != 1 || !strings.Contains(got[0], tc.want) {
+		src := clean + tc.extra
+		if tc.name == "helper reshaped" {
+			src = strings.Replace(src, "for (const name of names)", "for (const name of [...names, 'eight'])", 1)
+		}
+		_, got := countShimSurface(src)
+		if !slices.ContainsFunc(got, func(p string) bool { return strings.Contains(p, tc.want) }) {
 			t.Errorf("%s: problems = %q, want one containing %q", tc.name, got, tc.want)
 		}
 	}
