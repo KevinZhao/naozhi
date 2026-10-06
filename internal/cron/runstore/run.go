@@ -1,0 +1,133 @@
+package runstore
+
+import (
+	"time"
+
+	"github.com/naozhi/naozhi/internal/costledger"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
+)
+
+// CronRun is the persistent record of a single cron job execution. It is
+// created in memory at executeOpt's CAS gate and written once by cron's finishRun via
+// Store.Append to runs/<jobID>/<run_id>.json on the terminal transition;
+// skipPersist runs (overlap_skipped / canceled / paused_concurrent) are not
+// persisted. GC trims to (keepCount AND keepWindow) per job.
+//
+// Prompt / WorkDir / Fresh are SNAPSHOTS at execute time so editing Job.Prompt
+// never changes what a past run shows. SessionID is shared across runs when
+// fresh=false and unique per run when fresh=true. Result is rune-truncated;
+// ErrorMsg is already redacted + sanitized like Job.LastError.
+type CronRun struct {
+	RunID      string                   `json:"run_id"`
+	JobID      string                   `json:"job_id"`
+	State      runtelemetry.RunState    `json:"state"`
+	Trigger    runtelemetry.TriggerKind `json:"trigger,omitempty"`
+	StartedAt  time.Time                `json:"started_at"`
+	EndedAt    time.Time                `json:"ended_at"` // omitempty has no effect on time.Time; use IsZero to test emptiness
+	DurationMS int64                    `json:"duration_ms,omitempty"`
+
+	// SessionID 在 fresh=true 路径下每条 run 独有，用来定位 ~/.claude/
+	// projects/<cwd>/<session_id>.jsonl；fresh=false 路径下多条 run 共享
+	// 同一 SessionID（详见 docs/rfc/cron-run-history.md §2）。
+	SessionID string `json:"session_id,omitempty"`
+
+	Prompt  string `json:"prompt,omitempty"`
+	WorkDir string `json:"work_dir,omitempty"`
+	Fresh   bool   `json:"fresh,omitempty"`
+
+	Result      string                  `json:"result,omitempty"`
+	ResultBytes int                     `json:"result_bytes,omitempty"`
+	ErrorClass  runtelemetry.ErrorClass `json:"error_class,omitempty"`
+	ErrorMsg    string                  `json:"error_msg,omitempty"`
+
+	// ReplayOf links a replay run to the original it re-executed. Empty for
+	// original runs; also carried on CronRunSummary for the list-view badge.
+	ReplayOf string `json:"replay_of,omitempty"`
+
+	// SandboxMeta is the cloud-execution receipt for placement=sandbox runs.
+	// Pointer + omitempty so local runs persist NO sandbox_meta key; summary()
+	// drops it to keep list payloads small.
+	SandboxMeta *SandboxRunMeta `json:"sandbox_meta,omitempty"`
+
+	// CostUSD is the LOCAL run's spend increment (session CostTotals after
+	// minus before, docs/rfc/cost-ledger.md §5.3); sandbox runs carry cost in
+	// SandboxMeta and leave this 0. summary() prefers SandboxMeta.CostUSD.
+	CostUSD float64 `json:"cost_usd,omitempty"`
+}
+
+// CronRunSummary is the slim shape returned by list endpoints + the
+// recent_runs field on the cron list view. Drops Prompt / Result / full
+// ErrorMsg so a /api/cron page with 50 jobs × 5 recent_runs does not
+// inflate to multi-MB. Detail endpoint returns full CronRun.
+type CronRunSummary struct {
+	RunID      string                   `json:"run_id"`
+	JobID      string                   `json:"job_id,omitempty"` // omitted in per-job nested context
+	State      runtelemetry.RunState    `json:"state"`
+	Trigger    runtelemetry.TriggerKind `json:"trigger,omitempty"`
+	StartedAt  time.Time                `json:"started_at"`
+	EndedAt    time.Time                `json:"ended_at"` // omitempty has no effect on time.Time; use IsZero to test emptiness
+	DurationMS int64                    `json:"duration_ms,omitempty"`
+	SessionID  string                   `json:"session_id,omitempty"`
+	ErrorClass runtelemetry.ErrorClass  `json:"error_class,omitempty"`
+	// ReplayOf surfaces the replay chain in list/recent_runs views too — the
+	// dashboard draws a "replay of …" badge directly off the summary.
+	ReplayOf string `json:"replay_of,omitempty"`
+	// CostUSD is carried in the slim summary so the per-run cost and per-job
+	// monthly aggregate (front-end sum over recent_runs) need no detail fetch.
+	// 0/omitted for local runs and sandbox runs that produced no cost.
+	CostUSD float64 `json:"cost_usd,omitempty"`
+}
+
+// summary derives a CronRunSummary from a CronRun. Centralised so any
+// future field addition stays in lockstep across list endpoint, recent_runs
+// nested array, and any test fixtures.
+func (r *CronRun) summary() CronRunSummary {
+	s := CronRunSummary{
+		RunID:      r.RunID,
+		JobID:      r.JobID,
+		State:      r.State,
+		Trigger:    r.Trigger,
+		StartedAt:  r.StartedAt,
+		EndedAt:    r.EndedAt,
+		DurationMS: r.DurationMS,
+		SessionID:  r.SessionID,
+		ErrorClass: r.ErrorClass,
+		ReplayOf:   r.ReplayOf,
+	}
+	if r.SandboxMeta != nil {
+		s.CostUSD = r.SandboxMeta.CostUSD
+	} else {
+		// Local runs have no receipt; fall back to the captured cost so monthly
+		// aggregates count them (#2280).
+		s.CostUSD = r.CostUSD
+	}
+	return s
+}
+
+// SandboxRunMeta is the cloud-execution receipt for one sandbox run. It is
+// declared here, not imported, so cron stays independent of the AWS SDK; the wireup
+// adapter maps agentcore.RunResult → this struct. Every field omitempty so a
+// partial receipt persists only what it knows. NO secrets, NO AWS-internal IDs.
+type SandboxRunMeta struct {
+	RuntimeARN   string `json:"runtime_arn,omitempty"`
+	ImageVersion string `json:"image_version,omitempty"`
+	// ExitStatus has NO omitempty: exit 0 is the meaningful "success" value and a
+	// missing key would be indistinguishable from "exit unknown". The enclosing
+	// *SandboxRunMeta is itself omitempty, so local runs carry no exit_status.
+	ExitStatus      int     `json:"exit_status"`
+	CostUSD         float64 `json:"cost_usd,omitempty"`
+	DurationMS      int64   `json:"duration_ms,omitempty"`
+	MemoryPeakBytes int64   `json:"memory_peak_bytes,omitempty"`
+	// Models / Basis are the CLI result's per-model drill-down and worst
+	// price basis, carried into the ledger receipt.
+	Models []costledger.ModelDelta `json:"models,omitempty"`
+	Basis  costledger.Basis        `json:"basis,omitempty"`
+}
+
+// IsZero reports whether the receipt carries no information (every field
+// at its zero value) — used to decide whether to attach it to the run
+// record at all, so non-sandbox runs never grow a `sandbox_meta` key.
+func (m SandboxRunMeta) IsZero() bool {
+	return m.RuntimeARN == "" && m.ImageVersion == "" && m.ExitStatus == 0 && m.CostUSD == 0 &&
+		m.DurationMS == 0 && m.MemoryPeakBytes == 0 && len(m.Models) == 0 && m.Basis == ""
+}

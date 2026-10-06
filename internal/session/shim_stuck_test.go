@@ -6,9 +6,46 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/naozhi/naozhi/internal/shim"
 )
+
+// shortenShimGoneWait sets the socket-gone window to d for the rest of t, for a
+// test whose socket fixture never goes away and would otherwise wait out
+// shimGoneWait. The window is package-wide, so t must not run in parallel.
+func shortenShimGoneWait(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := shimGoneWaitOverride.Swap(int64(d))
+	t.Cleanup(func() { shimGoneWaitOverride.Store(prev) })
+}
+
+// TestWaitSocketGoneForKey_OverrideBoundsTheWait: a bound socket is waited on
+// for the shortened window only, and the window is shimGoneWait again once the
+// test that shortened it ends.
+func TestWaitSocketGoneForKey_OverrideBoundsTheWait(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	const key = "feishu:direct:override:general"
+	if err := os.WriteFile(shim.SocketPath(shim.KeyHash(key)), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("shortened", func(t *testing.T) {
+		shortenShimGoneWait(t, 50*time.Millisecond)
+		start := time.Now()
+		if waitSocketGoneForKey(key) {
+			t.Fatal("waitSocketGoneForKey reported a bound socket gone")
+		}
+		if elapsed := time.Since(start); elapsed >= shimGoneWait/2 {
+			t.Errorf("waitSocketGoneForKey took %v with a 50ms window, want well under %v", elapsed, shimGoneWait)
+		}
+	})
+	if got := shimGoneWaitOverride.Load(); got != 0 {
+		t.Errorf("override = %v after the test that set it, want 0", time.Duration(got))
+	}
+}
 
 // TestErrShimStuck_WrapWalksChain pins the load-bearing contract: callers
 // like the cron freshContextPreflightP0 path can errors.Is(err, ErrShimStuck)

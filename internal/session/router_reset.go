@@ -6,9 +6,7 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"sync"
-	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
@@ -120,7 +118,7 @@ func (r *Router) releaseKeys(keys []releasedKey) {
 		} else if r.backends.retireDeadShim(k.key) {
 			return
 		}
-		stuck[i] = !waitSocketGoneForKey(k.key, 2*time.Second)
+		stuck[i] = !waitSocketGoneForKey(k.key)
 	}
 	if len(keys) == 1 {
 		release(0)
@@ -231,14 +229,6 @@ func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
 	r.notifyChange()
 }
 
-// waitSocketGoneForKey waits up to maxWait for the shim socket derived from
-// key to disappear; returns false on timeout. Socket naming lives behind
-// cli.WaitSocketGoneForKey so this package does not reach into internal/shim
-// (#711). Reset callers use the false branch to mark the key shim-stuck (#1324).
-func waitSocketGoneForKey(key string, maxWait time.Duration) bool {
-	return cli.WaitSocketGoneForKey(key, maxWait)
-}
-
 // ResetAndRecreate atomically resets a session and spawns a new one for the
 // same key, so no concurrent message can create a session with other opts. A
 // guard channel is installed with BeginSpawn before the transaction releases
@@ -309,7 +299,7 @@ func (r *Router) resetAndRecreateOnce(ctx context.Context, key string, opts Agen
 					// As in Reset: the shim socket must be gone before the
 					// spawn's StartShim dials it, or the re-bind fails with
 					// "refusing to clobber".
-					gone = waitSocketGoneForKey(key, 2*time.Second)
+					gone = waitSocketGoneForKey(key)
 				})
 				if !gone {
 					// Flag for the ErrShimStuck wrap on the spawn failure path

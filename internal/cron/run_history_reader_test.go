@@ -22,7 +22,7 @@ func TestRunHistoryReader_SchedulerSatisfies(t *testing.T) {
 
 	jobID := mustGenerateID()
 	run := makeRun(jobID, time.Now())
-	s.runStore.Append(run)
+	s.runs.Append(run)
 
 	// Use ONLY the narrow interface from here on.
 	var r RunHistoryReader = s
@@ -61,5 +61,22 @@ func TestRunHistoryReader_MissingRun(t *testing.T) {
 	_, err := r.Run(mustGenerateID(), mustGenerateRunID())
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("GetRun for missing run = %v, want fs.ErrNotExist", err)
+	}
+}
+
+// makeRun builds a non-zero CronRun with a unique RunID under the given JobID.
+// Caller can override fields after the helper returns.
+func makeRun(jobID string, startedAt time.Time) *CronRun {
+	return &CronRun{
+		RunID:      mustGenerateRunID(),
+		JobID:      jobID,
+		State:      RunStateSucceeded,
+		Trigger:    TriggerScheduled,
+		StartedAt:  startedAt,
+		EndedAt:    startedAt.Add(time.Second),
+		DurationMS: 1000,
+		Prompt:     "hello",
+		WorkDir:    "/tmp/wd",
+		Result:     "ok",
 	}
 }

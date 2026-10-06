@@ -204,11 +204,9 @@ func TestReset_RetiresDeadCLIShim(t *testing.T) {
 // live CLI (naozhi lost the link, not the CLI) is only probed; nothing is sent,
 // and the socket wait and shim-stuck flag behave as before.
 func TestReset_LeavesLiveCLIShimRunning(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow: waits out the 2s socket wait")
-	}
 	const key = "feishu:direct:bob:general"
 	r, f := newResetShimRouter(t, key, true, false)
+	shortenShimGoneWait(t, 50*time.Millisecond)
 	injectSession(r, key, newDeadProc())
 
 	r.Reset(key)
@@ -224,11 +222,9 @@ func TestReset_LeavesLiveCLIShimRunning(t *testing.T) {
 // TestReset_LiveProcessIsClosedNotProbed: a live process is released through
 // Close as before; the retire probe never dials its shim.
 func TestReset_LiveProcessIsClosedNotProbed(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow: waits out the 2s socket wait")
-	}
 	const key = "feishu:direct:carol:general"
 	r, f := newResetShimRouter(t, key, false, false)
+	shortenShimGoneWait(t, 50*time.Millisecond)
 	proc := newIdleProc()
 	injectSession(r, key, proc)
 
