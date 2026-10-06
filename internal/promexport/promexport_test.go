@@ -70,14 +70,14 @@ func TestWrite_RegisteredLabelNames(t *testing.T) {
 	m.Add("acp|session/new|-32000", 4)
 	m.Add("acp|"+"_empty_"+"|7", 1)
 	m.Add("_overflow_", 2)
-	m.Add("acp", 5)
+	m.Add("_empty_", 3)
 	out := render(t)
 	for _, want := range []string{
 		"# TYPE naozhi_zz_lbl_rpc_total counter\n",
 		`naozhi_zz_lbl_rpc_total{backend="acp",method="session/new",code="-32000"} 4` + "\n",
 		`naozhi_zz_lbl_rpc_total{backend="acp",method="_empty_",code="7"} 1` + "\n",
 		`naozhi_zz_lbl_rpc_total{backend="_overflow_",method="_overflow_",code="_overflow_"} 2` + "\n",
-		`naozhi_zz_lbl_rpc_total{backend="acp",method="_empty_",code="_empty_"} 5` + "\n",
+		`naozhi_zz_lbl_rpc_total{backend="_empty_",method="_empty_",code="_empty_"} 3` + "\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q\n---\n%s", want, out)
@@ -85,6 +85,64 @@ func TestWrite_RegisteredLabelNames(t *testing.T) {
 	}
 	if !HasSchema("naozhi_zz_lbl_rpc_total") || HasSchema("naozhi_zz_never_registered") {
 		t.Error("HasSchema does not reflect label registrations")
+	}
+}
+
+func TestWrite_ArityMismatchIsOverflowNotDuplicate(t *testing.T) {
+	m := NewMap("naozhi_zz_arity_total", "a", "b")
+	m.Add("x", 1)
+	m.Add("x|_empty_", 2)
+	m.Add("x|y|z", 4)
+	m.Add("_overflow_", 8)
+	m.Add("_empty_", 16)
+	m.Add("_empty_|_empty_", 32)
+	out := render(t)
+	for _, want := range []string{
+		`naozhi_zz_arity_total{a="x",b="_empty_"} 2` + "\n",
+		`naozhi_zz_arity_total{a="_overflow_",b="_overflow_"} 13` + "\n",
+		`naozhi_zz_arity_total{a="_empty_",b="_empty_"} 48` + "\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q\n---\n%s", want, out)
+		}
+	}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "naozhi_zz_arity_total{") {
+			continue
+		}
+		series := line[:strings.LastIndexByte(line, ' ')]
+		if seen[series] {
+			t.Errorf("duplicate series %s\n%s", series, out)
+		}
+		seen[series] = true
+	}
+}
+
+func TestWrite_DuplicateSeriesSumAsFloat(t *testing.T) {
+	m := NewMap("naozhi_zz_fsum_total", "a", "b")
+	f := new(expvar.Float)
+	f.Set(0.5)
+	m.Set("p", f)
+	m.Add("q", 1)
+	if out := render(t); !strings.Contains(out, `naozhi_zz_fsum_total{a="_overflow_",b="_overflow_"} 1.5`+"\n") {
+		t.Errorf("colliding float and int rows should sum\n%s", out)
+	}
+}
+
+func TestWrite_RegisteredCounterTypeIgnoresSuffix(t *testing.T) {
+	RegisterCounter("naozhi_zz_ctr_total_by_x", "x")
+	expvar.NewMap("naozhi_zz_ctr_total_by_x").Add("a", 1)
+	RegisterLabels("naozhi_zz_gauge_by_x", "x")
+	expvar.NewMap("naozhi_zz_gauge_by_x").Add("a", 1)
+	out := render(t)
+	for _, want := range []string{
+		"# TYPE naozhi_zz_ctr_total_by_x counter\n",
+		"# TYPE naozhi_zz_gauge_by_x gauge\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q\n%s", want, out)
+		}
 	}
 }
 

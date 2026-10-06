@@ -93,6 +93,7 @@ func TestMetrics_LabelNamesAndHistogram(t *testing.T) {
 	w := getMetrics(metricsServer(t, "tok", true), "tok", "10.0.0.9:4000")
 	body := w.Body.String()
 	for _, want := range []string{
+		"# TYPE naozhi_cli_spawn_total_by_backend counter\n",
 		`naozhi_cli_spawn_total_by_backend{backend="zz-metrics-backend"} `,
 		`naozhi_spawn_diag_total{layer="zz-layer",action="zz-action"} `,
 		"# TYPE naozhi_cron_execution_duration_ms histogram\n",

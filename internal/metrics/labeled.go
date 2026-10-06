@@ -43,10 +43,11 @@ type LabeledCounter struct {
 
 // NewLabeledCounter registers a labeled counter under name. labelNames name
 // the label positions Add receives and become the Prometheus label names on
-// /metrics. Panics on duplicate registration (as expvar.NewMap) or no names.
+// /metrics, where the map is typed counter whatever its suffix. Panics on
+// duplicate registration (as expvar.NewMap) or no names.
 func NewLabeledCounter(name string, labelNames ...string) *LabeledCounter {
 	m := expvar.NewMap(name)
-	promexport.RegisterLabels(name, labelNames...)
+	promexport.RegisterCounter(name, labelNames...)
 	return &LabeledCounter{m: m}
 }
 

@@ -16,8 +16,8 @@
 
 | expvar | Prometheus |
 |---|---|
-| `expvar.Int` / `Float`，名字以 `_total` 结尾 | `# TYPE … counter` |
-| 其它 `Int` / `Float` / 返回数字的 `Func` | `# TYPE … gauge` |
+| 名字以 `_total` 结尾，或按计数器注册的 Map（`NewLabeledCounter` / `promexport.NewMap`，如 `naozhi_cli_spawn_total_by_backend`） | `# TYPE … counter` |
+| 其它 `Int` / `Float` / Map / 返回数字的 `Func` | `# TYPE … gauge` |
 | `expvar.Map`（如 `naozhi_spawn_diag_total`） | 每个 key 一条样本；label 名取自注册表（见下），key 里的 `\|` 按位置拆成各个 label |
 | cron 延迟桶（`naozhi_cron_execution_duration_ms_bucket` + `_sum`） | `# TYPE naozhi_cron_execution_duration_ms histogram`：`_bucket{le=…}`、`_sum`、`_count`（= `+Inf` 桶）；单位仍是毫秒 |
 | 非 `naozhi_` 前缀（memstats / cmdline）、非数字值 | 不导出 |
@@ -27,7 +27,8 @@
 label 名在注册 map 时给出（`metrics.NewLabeledCounter(name, labels...)` /
 `promexport.NewMap(name, labels...)`），`cmd/naozhi` 的契约测试保证每个 `naozhi_*`
 Map 都登记过，没登记的会退回通用的 `key` 标签。空值是 `_empty_`，超长的整组值是
-`_overflow_`（所有 label 都填它）。
+`_overflow_`（所有 label 都填它）；值的个数与登记的 label 数对不上的 key 也导出为
+`_overflow_`，不补 `_empty_`。渲染成同一组 label 的多个 key 合并求和，一次抓取里不会出现重复序列。
 
 | 指标 | label |
 |---|---|

@@ -2,15 +2,16 @@
 // text exposition format, so the naozhi_* counters that today exist only for
 // /api/debug/vars can be scraped (#3436). Leaf: stdlib only. The naming
 // convention internal/metrics enforces (naozhi_<subsystem>_<name>_<suffix>)
-// is what makes the mapping mechanical: `_total` is a counter, everything
-// else a gauge; an expvar.Map becomes one series per key, labelled by the
-// schema its owner registered (RegisterLabels) or a single `key` label.
+// is what makes the mapping mechanical: `_total` or a counter registration
+// is a counter, everything else a gauge; an expvar.Map becomes one series per
+// key, labelled by the schema its owner registered or a single `key` label.
 package promexport
 
 import (
 	"expvar"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,7 +26,7 @@ const Prefix = "naozhi_"
 const ContentType = "text/plain; version=0.0.4; charset=utf-8"
 
 // Sentinel keys internal/metrics writes for an empty or over-long label
-// tuple; a tuple that carries one is exported with that value in every label.
+// tuple; a bare sentinel key is exported with that value in every label.
 const (
 	labelEmpty    = "_empty_"
 	labelOverflow = "_overflow_"
@@ -38,6 +39,7 @@ type histogram struct {
 var (
 	regMu      sync.RWMutex
 	mapLabels  = map[string][]string{}
+	counters   = map[string]bool{}
 	histograms = map[string]histogram{}
 )
 
@@ -54,11 +56,20 @@ func RegisterLabels(name string, labels ...string) {
 	mapLabels[name] = append([]string(nil), labels...)
 }
 
+// RegisterCounter is RegisterLabels for a map of monotonic counts: it is
+// exported as `# TYPE counter` whatever its name's suffix.
+func RegisterCounter(name string, labels ...string) {
+	RegisterLabels(name, labels...)
+	regMu.Lock()
+	defer regMu.Unlock()
+	counters[name] = true
+}
+
 // NewMap registers expvar.Map name (panicking on duplicates, as expvar.NewMap)
-// together with its label schema, for counters keyed by a plain string.
+// as a counter with its label schema, for counts keyed by a plain string.
 func NewMap(name string, labels ...string) *expvar.Map {
 	m := expvar.NewMap(name)
-	RegisterLabels(name, labels...)
+	RegisterCounter(name, labels...)
 	return m
 }
 
@@ -138,14 +149,25 @@ func writeVar(b *strings.Builder, name string, v expvar.Var) {
 		if labels == nil {
 			labels = []string{"key"}
 		}
-		var rows []string
+		// Distinct keys can render the same label set (a bare sentinel next
+		// to its spelled-out tuple, two malformed keys); they are summed so a
+		// scrape never carries a duplicate series.
+		series := map[string]string{}
 		x.Do(func(kv expvar.KeyValue) {
 			if val, ok := scalar(kv.Value); ok {
-				rows = append(rows, name+labelSet(labels, kv.Key)+" "+val)
+				ls := labelSet(labels, kv.Key)
+				if prev, dup := series[ls]; dup {
+					val = addScalar(prev, val)
+				}
+				series[ls] = val
 			}
 		})
-		if len(rows) == 0 {
+		if len(series) == 0 {
 			return
+		}
+		rows := make([]string, 0, len(series))
+		for ls, val := range series {
+			rows = append(rows, name+ls+" "+val)
 		}
 		sort.Strings(rows)
 		header(b, name)
@@ -183,21 +205,27 @@ func writeHistogram(b *strings.Builder, base string, h histogram) {
 	fmt.Fprintf(b, "%s_sum %d\n%s_count %s\n", base, sum.Value(), base, count)
 }
 
-// labelSet renders {l1="v1",l2="v2"} for a map key. The key is split on `|`
-// into len(labels) values; a missing value becomes the empty sentinel, and a
-// bare sentinel key fills every label so an overflow row stays recognisable.
+// labelSet renders {l1="v1",l2="v2"} for a map key. A multi-label key is
+// split on `|` into one value per label. A bare sentinel key fills every
+// label; any other key with the wrong number of values is a caller bug and
+// is exported as overflow, never padded into a tuple a well-formed key could
+// also produce.
 func labelSet(labels []string, key string) string {
-	parts := strings.SplitN(key, "|", len(labels))
+	parts := []string{key}
+	if len(labels) > 1 {
+		parts = strings.Split(key, "|")
+	}
+	if len(parts) != len(labels) {
+		fill := labelOverflow
+		if key == labelEmpty {
+			fill = labelEmpty
+		}
+		parts = slices.Repeat([]string{fill}, len(labels))
+	}
 	var b strings.Builder
 	b.WriteByte('{')
 	for i, l := range labels {
-		v := labelEmpty
-		switch {
-		case key == labelOverflow:
-			v = labelOverflow
-		case i < len(parts):
-			v = parts[i]
-		}
+		v := parts[i]
 		if i > 0 {
 			b.WriteByte(',')
 		}
@@ -237,10 +265,23 @@ func scalar(v expvar.Var) (string, bool) {
 	return "", false
 }
 
-// header writes the TYPE line; `_total` names a counter, anything else a gauge.
+// addScalar sums two rendered values, as integers when both are.
+func addScalar(a, b string) string {
+	x, errA := strconv.ParseInt(a, 10, 64)
+	y, errB := strconv.ParseInt(b, 10, 64)
+	if errA == nil && errB == nil {
+		return strconv.FormatInt(x+y, 10)
+	}
+	fx, _ := strconv.ParseFloat(a, 64)
+	fy, _ := strconv.ParseFloat(b, 64)
+	return strconv.FormatFloat(fx+fy, 'g', -1, 64)
+}
+
+// header writes the TYPE line: a `_total` name or a RegisterCounter map is a
+// counter, anything else a gauge. The caller holds regMu.
 func header(b *strings.Builder, name string) {
 	typ := "gauge"
-	if strings.HasSuffix(name, "_total") {
+	if strings.HasSuffix(name, "_total") || counters[name] {
 		typ = "counter"
 	}
 	fmt.Fprintf(b, "# TYPE %s %s\n", name, typ)
