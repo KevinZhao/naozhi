@@ -24,6 +24,57 @@ func TestClaudeResult_IsErrorReachesSendResult(t *testing.T) {
 	}
 }
 
+// Claude 2.1.288 reports an aborted turn as subtype success with an aborted_*
+// terminal_reason (frames trimmed from the V10 captures in
+// docs/rfc/passthrough-mode-validation.md); the reason must reach SendResult
+// so a consumer can tell the cut-off turn from a completed one.
+func TestClaudeResult_TerminalReasonReachesSendResult(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, frame, reason, text string
+		aborted                   bool
+	}{
+		{"aborted_tools", `{"type":"result","subtype":"success","is_error":false,"num_turns":2,"stop_reason":"tool_use","terminal_reason":"aborted_tools","result":"","total_cost_usd":0.077653,"session_id":"f3e41e3d","uuid":"200a9780"}`,
+			"aborted_tools", "", true},
+		{"aborted_streaming", `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"stop_reason":null,"terminal_reason":"aborted_streaming","result":"# 一片叶子的漫长旅程：茶的历史","total_cost_usd":0,"modelUsage":{},"session_id":"f337b168","uuid":"5b6f8c1e"}`,
+			"aborted_streaming", "# 一片叶子的漫长旅程：茶的历史", true},
+		{"completed", `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"stop_reason":"end_turn","terminal_reason":"completed","result":"C_DONE","total_cost_usd":0.081545,"session_id":"f3e41e3d","uuid":"dd12b0f5"}`,
+			"completed", "C_DONE", false},
+		{"older claude, no terminal_reason", abortedResult, "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evs, _, err := (&ClaudeProtocol{}).ReadEvent(tc.frame)
+			if err != nil || len(evs) != 1 {
+				t.Fatalf("ReadEvent = %v, %v; want one event", evs, err)
+			}
+			got := resultFromEvent(evs[0])
+			if got.TerminalReason != tc.reason || got.Text != tc.text {
+				t.Errorf("TerminalReason, Text = %q, %q; want %q, %q", got.TerminalReason, got.Text, tc.reason, tc.text)
+			}
+			if got.CLIAborted() != tc.aborted {
+				t.Errorf("CLIAborted() = %v, want %v", got.CLIAborted(), tc.aborted)
+			}
+			if tc.reason != "" && (got.SubType != "success" || got.IsError) {
+				t.Errorf("SubType, IsError = %q, %v; want the 2.1.288 shape success, false", got.SubType, got.IsError)
+			}
+		})
+	}
+}
+
+// CLIAborted keys on the aborted_ prefix, so a future aborted_* reason keeps
+// its meaning and a reason that merely mentions abort does not.
+func TestSendResult_CLIAbortedMatchesThePrefix(t *testing.T) {
+	t.Parallel()
+	for reason, want := range map[string]bool{
+		"aborted_tools": true, "aborted_streaming": true, "aborted_hook": true,
+		"completed": false, "": false, "aborted": false, "not_aborted_tools": false,
+	} {
+		if got := (&clievent.SendResult{TerminalReason: reason}).CLIAborted(); got != want {
+			t.Errorf("CLIAborted(%q) = %v, want %v", reason, got, want)
+		}
+	}
+}
+
 // Every SendResult field except the merge metadata comes from the result
 // frame, so resultFromEvent must fill each one from a fully populated Event:
 // a field added to SendResult but not copied here is lost by all three owners.
