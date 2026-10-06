@@ -1,3 +1,4 @@
+// @ts-check
 // cron_live.js — the cron live stream (cron-live RFC): a second subscription
 // channel beside the session one (sessionStream). While a cron drawer is
 // open on a running job it subscribes 'cron:<jobId>' so the operator sees the
@@ -37,9 +38,7 @@ export const cronLive = {
 export function subscribeCronLive(jobId, runStartedAtMs) {
   if (!jobId) return;
   if (cronLive.jobId === jobId && cronLive.subscribedKey) return; // already subscribed
-  if (cronLive.jobId && cronLive.jobId !== jobId) {
-    unsubscribeCronLive();
-  }
+  if (cronLive.jobId && cronLive.jobId !== jobId) unsubscribeCronLive();
   const key = 'cron:' + jobId;
   cronLive.jobId = jobId;
   cronLive.pendingJobId = jobId;
@@ -81,7 +80,7 @@ function isCronLiveKey(key) {
 // cron-live RFC §1.3 / §2.3: cron stub spawn 完成会广播 session_state running，
 // suspended sub 此时升级 —— re-sub 才能拿到 eventPushLoop 推送。fresh 模式下
 // 这是默认路径（每次 run 前 Reset 销毁旧 stub）。
-function onCronLiveSessionState(msg) {
+function onCronLiveSessionState(/** @type {WsFrames['session_state']} */ msg) {
   if (msg.state === 'running' && cronLive.suspended) {
     const jobId = cronLive.jobId;
     if (jobId) {
@@ -108,7 +107,7 @@ function onCronLiveSessionState(msg) {
 
 // cron-live RFC §5: 首批 history 帧到达。EventEntriesSince(after) 后端无条数
 // 上限（After>0 时 Limit 被忽略），前端必须自己截尾到 CRON_LIVE_MAX_EVENTS。
-function onCronLiveHistory(msg) {
+function onCronLiveHistory(/** @type {WsFrames['history']} */ msg) {
   if (isCronSessionFrozen(msg.key)) return;
   const incoming = msg.events || [];
   if (incoming.length === 0) return;
@@ -133,7 +132,7 @@ function onCronLiveHistory(msg) {
   repaintCronLive();
 }
 
-function onCronLiveEvent(msg) {
+function onCronLiveEvent(/** @type {WsFrames['event']} */ msg) {
   if (isCronSessionFrozen(msg.key)) return;
   const ev = msg.event;
   if (!ev) return;
@@ -269,9 +268,7 @@ export function ensureCronLiveSubscription() {
     if (cronLive.jobId) unsubscribeCronLive();
     return;
   }
-  if (cronLive.jobId && cronLive.jobId !== jobId) {
-    unsubscribeCronLive();
-  }
+  if (cronLive.jobId && cronLive.jobId !== jobId) unsubscribeCronLive();
   if (cronLive.jobId === jobId) return;
   const job = cronStore.jobs.find(j => j && j.id === jobId);
   const isRunning = !!(job && job.current_run && job.current_run.started_at);
@@ -281,7 +278,7 @@ export function ensureCronLiveSubscription() {
 
 // cron-live RFC §2.2: the acks and errors that answer a pending cron live
 // subscribe stay out of the session subscription's bookkeeping.
-const cronLivePending = (msg) => cronLive.pendingJobId && msg.key === ('cron:' + cronLive.pendingJobId);
+const cronLivePending = (/** @type {WsFrames['subscribed' | 'error']} */ msg) => cronLive.pendingJobId && msg.key === ('cron:' + cronLive.pendingJobId);
 wsm.on(NZ_CONTRACT.WS.subscribed, (msg) => {
   cronLive.subscribedKey = msg.key;
   cronLive.pendingJobId = null;
@@ -295,7 +292,7 @@ wsm.on(NZ_CONTRACT.WS.error, () => {
   cronLive.status = 'stopped';
   setCronLiveStatus('stopped');
 }, (msg) => msg.key && cronLivePending(msg));
-const cronLiveKey = (msg) => isCronLiveKey(msg.key);
+const cronLiveKey = (/** @type {WsFrames['history' | 'event' | 'session_state']} */ msg) => isCronLiveKey(msg.key);
 wsm.on(NZ_CONTRACT.WS.history, (msg) => onCronLiveHistory(msg), cronLiveKey);
 wsm.on(NZ_CONTRACT.WS.event, (msg) => onCronLiveEvent(msg), cronLiveKey);
 wsm.on(NZ_CONTRACT.WS.session_state, (msg) => onCronLiveSessionState(msg), cronLiveKey);
