@@ -36,6 +36,14 @@ func TestConfigReload_CLIExitCodes(t *testing.T) {
 		t.Fatalf("exit = %d, out=%s", code, out.String())
 	}
 
+	// A platform the reload opened outranks restart_required: the operator
+	// meant to tighten access and must not read the exit as success.
+	body = `{"sha256":"x","loaded_at":"2026-10-06T00:00:00Z","applied":["im_access"],"restart_required":["cli"],"opened_platforms":["slack"]}`
+	out.Reset()
+	if code := configReload([]string{"-addr", srv.URL}, &out); code != 4 || !strings.Contains(out.String(), "WARNING: now open to every sender (was restricted): slack") {
+		t.Fatalf("exit = %d, out=%s", code, out.String())
+	}
+
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "config reload failed: bad yaml", http.StatusUnprocessableEntity)
 	}))

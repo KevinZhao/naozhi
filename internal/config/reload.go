@@ -29,6 +29,9 @@ type ReloadResult struct {
 	// RestartRequired are the sections that differ from the configuration
 	// the process started with and cannot be applied live.
 	RestartRequired []string `json:"restart_required"`
+	// OpenedPlatforms are the running platforms the previous configuration
+	// restricted and this one serves to every sender.
+	OpenedPlatforms []string `json:"opened_platforms,omitempty"`
 }
 
 // HotChanged lists the hot sections whose value differs between c and next.
@@ -44,6 +47,25 @@ func (c *Config) HotChanged(next *Config) []string {
 		out = append(out, "log.level")
 	}
 	return out
+}
+
+// IMAccessOpened lists the platforms c configures that prev restricts and
+// next opens to every sender: what reloading a file whose im_access block was
+// dropped or misspelt (`im_acess:` decodes as absent) does.
+func (c *Config) IMAccessOpened(prev, next *Config) []string {
+	var out []string
+	for _, p := range c.IMAccessPostures() {
+		if !prev.imAccessOpen(p.Platform) && next.imAccessOpen(p.Platform) {
+			out = append(out, p.Platform)
+		}
+	}
+	return out
+}
+
+// imAccessOpen reports whether im_access lets every sender in on platform.
+func (c *Config) imAccessOpen(platform string) bool {
+	_, ok := c.IMAccess.Platforms[platform]
+	return !ok && !c.IMAccess.DefaultDeny
 }
 
 // RestartRequired lists the top-level yaml sections, hot ones excluded, whose

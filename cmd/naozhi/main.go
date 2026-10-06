@@ -8,11 +8,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/budget"
@@ -572,22 +570,11 @@ func main() {
 
 	reloader.bindApply(srv.ApplyHotConfig)
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
-	go func() {
-		for sig := range sigCh {
-			if sig == syscall.SIGHUP {
-				// docs/rfc/config-hot-reload.md §3.4: SIGHUP re-reads config.yaml
-				// and applies the hot sections; a bad file is logged and ignored.
-				if _, err := reloader.Reload(ctx); err != nil {
-					slog.Error("SIGHUP config reload failed", "err", err)
-				}
-				continue
-			}
-			runShutdown("signal:" + sig.String())
-			return
+	watchSignals(func() {
+		if _, err := reloader.Reload(ctx); err != nil {
+			slog.Error("SIGHUP config reload failed", "err", err)
 		}
-	}()
+	}, runShutdown)
 
 	slog.Info("naozhi starting",
 		"version", version,

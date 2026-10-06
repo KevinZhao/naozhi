@@ -617,7 +617,8 @@ im_rate_limit:
 - 超限的消息直接丢弃，不进 CLI；发送者每分钟最多收到一次「消息过于频繁」提示。
   丢弃次数记在 expvar `naozhi_dispatch_rate_limited_total`。
 - 在 `im_access` 之后检查，所以被拒的人不消耗额度；没 @bot 的群消息也不消耗。
-- 管理员同样受限；改配置要重启 naozhi。
+- 管理员同样受限；改配置不用重启，`naozhi config reload` 即时生效（只在
+  `im_rate_limit` 真的变了时才重建令牌桶）。
 
 `cost.budget` 按 cost 账本限制每天的花费（USD），三档上限各自独立，0 或不配 = 不限：
 
@@ -649,11 +650,13 @@ cost:
   超过上限标红，悬停可看 scope 和重置时间）；数据来自 `GET /api/cost/budget?session_key=|job_id=`。
 - 这是软上限：放行时还没超的那一轮可能把花费推过上限；花费在账本落盘后（约 1 秒内）才
   计入。只统计以 USD 计价的花费，按 credits / tokens 计量的 backend 不计入。
-- 需要 cost 账本开着（`cost.enabled` 不能为 false）；改配置要重启 naozhi。
+- 需要 cost 账本开着（`cost.enabled` 不能为 false）；改配置要重启 naozhi（`naozhi config
+  reload` 会把 `cost` 列在 `restart_required` 里）。
 
 ### 配置热重载
 
-改 `config.yaml` 后不必重启进程（重启会打断所有进行中的会话）。三个等价入口：
+改 `config.yaml` 后不必重启进程。重启时 shim 托管的 CLI 会话一般能保住，但正在回复
+的 IM 消息会丢，IM 和 dashboard 也要重连。三个等价入口：
 
 ```bash
 naozhi config reload                 # 走 HTTP，需要 dashboard token（同 doctor）
@@ -661,13 +664,21 @@ systemctl reload naozhi              # 发 SIGHUP（naozhi install 生成的 uni
 kill -HUP $(pidof naozhi)
 ```
 
+- `SIGHUP` 的意思是重载配置，不再结束进程；要停进程用 `SIGTERM` / `SIGINT`。
 - 可热重载：`im_access`、`im_rate_limit`、`log.level`。其它段的改动会在结果里列为
-  `restart_required`，直到真正重启前每次 reload 都会继续报告。
+  `restart_required`，直到真正重启前每次 reload 都会继续报告。`reverse_nodes`、
+  `agents` / `agent_commands`、`access_profiles`、`cron.notify_default` 按设计只在
+  重启时生效。
 - 新文件校验失败时进程完全不变，`naozhi config reload` 退出码 1 并打印校验错误；
   有 `restart_required` 时退出码 3，方便脚本判断。
-- `/health.config_sha256` / `config_loaded_at` 随重载更新，doctor 的 config-drift
-  检查随之变绿。
-- 设计与后续可热重载范围见 [`docs/rfc/config-hot-reload.md`](docs/rfc/config-hot-reload.md)。
+- 重载让某个原本有名单的平台变成对所有人开放时（多半是 `im_access` 键名拼错，未知
+  键会被忽略），日志打 Error，`naozhi config reload` 打印 `WARNING` 并以退出码 4
+  结束（优先于 3）。
+- 没有 `restart_required` 时 `/health.config_sha256` / `config_loaded_at` 随重载
+  更新，doctor 的 config-drift 检查随之变绿；有的话指纹保持不变，`/health` 的
+  `config_restart_required` 列出这些段，doctor 报 `restart required for: ...`。
+- `${VAR}` 按 naozhi 进程当前的环境变量展开，改了 EnvironmentFile 仍要重启。
+- 设计见 [`docs/rfc/config-hot-reload.md`](docs/rfc/config-hot-reload.md)。
 
 ### 生产架构
 

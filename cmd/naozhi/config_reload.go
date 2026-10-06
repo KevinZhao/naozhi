@@ -16,8 +16,9 @@ import (
 // configReload is `naozhi config reload`: it asks the running naozhi to re-read
 // its config.yaml (POST /api/system/config/reload) and prints what took
 // effect. Exit codes: 0 reloaded and nothing needs a restart, 3 reloaded but
-// some sections need a restart, 1 the server refused or is unreachable, 2 bad
-// flags.
+// some sections need a restart, 4 reloaded and a restricted platform is now
+// open to every sender (wins over 3), 1 the server refused or is unreachable,
+// 2 bad flags.
 func configReload(args []string, out io.Writer) int {
 	fs := newFlagSet("config reload")
 	addr := fs.String("addr", envDefault("NAOZHI_BASE_URL", "http://127.0.0.1:8180"), "naozhi base URL (NAOZHI_BASE_URL)")
@@ -50,7 +51,10 @@ func configReload(args []string, out io.Writer) int {
 	} else {
 		printReloadResult(out, res)
 	}
-	if len(res.RestartRequired) > 0 {
+	switch {
+	case len(res.OpenedPlatforms) > 0:
+		return 4
+	case len(res.RestartRequired) > 0:
 		return 3
 	}
 	return 0
@@ -92,5 +96,9 @@ func printReloadResult(out io.Writer, res config.ReloadResult) {
 	}
 	if len(res.RestartRequired) > 0 {
 		fmt.Fprintf(out, "restart required for: %s\n", strings.Join(res.RestartRequired, ", "))
+	}
+	if len(res.OpenedPlatforms) > 0 {
+		fmt.Fprintf(out, "WARNING: now open to every sender (was restricted): %s; a misspelt im_access key reads as absent\n",
+			strings.Join(res.OpenedPlatforms, ", "))
 	}
 }
