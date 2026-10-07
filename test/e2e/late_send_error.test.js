@@ -31,24 +31,20 @@ test.beforeEach(({ }, testInfo) => {
 let mock;
 test.beforeAll(async () => { mock = await startMockServer({ ws: true }); });
 test.afterAll(() => mock.server.close());
+// Each test starts from the listing a fresh mock has; state() moves it.
+test.beforeEach(() => mock.setSessionStateWithoutVersionBump(KEY, 'ready'));
 
 const subs = (conn) => conn.messages.filter((m) => m.type === 'subscribe' && m.key === KEY);
 const sends = (conn) => conn.messages.filter((m) => m.type === 'send');
 
 // open selects KEY in a fresh tab over its own socket and acks the subscribe.
-// The socket's connect schedules a sessions poll, the load's second, and the
-// mock lists KEY as ready whatever was pushed: that poll sent after a pushed
-// running would set KEY back to ready. open returns once it is answered.
 async function open(browser) {
   const ctx = await browser.newContext({ ...desktop });
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
-  let polls = 0;
-  page.on('response', (r) => { if (new URL(r.url()).pathname === '/api/sessions') polls++; });
   await page.goto(mock.url + '/dashboard');
   await waitForWs(page);
-  await expect.poll(() => polls, { message: 'the connect-time sessions poll is answered' }).toBeGreaterThanOrEqual(2);
   const conn = mock.wsConnections[mock.wsConnections.length - 1];
   await page.click(`.session-card[data-key="${KEY}"]`);
   await expect.poll(() => subs(conn).length).toBe(1);
@@ -65,7 +61,14 @@ async function sendWS(page, conn, text) {
   return sends(conn)[before].id;
 }
 
-const state = (conn, s) => conn.send({ type: 'session_state', key: KEY, node: 'local', state: s });
+// state pushes a process state and makes the mock's sessions listing agree,
+// so a sessions poll sent after the push, whenever and by whatever (the
+// socket's connect, a discovered-set change), reports it rather than rolling
+// it back.
+const state = (conn, s) => {
+  mock.setSessionStateWithoutVersionBump(KEY, s);
+  conn.send({ type: 'session_state', key: KEY, node: 'local', state: s });
+};
 const errorAck = (conn, id) => conn.send({ type: 'send_ack', id, status: 'error', key: KEY, error: 'boom' });
 const stateIs = (page, s) => page.waitForFunction(([k, want]) => sessionsData[sid(k, 'local')].state === want, [KEY, s]);
 const composerText = (page) => page.$eval('#msg-input', (el) => el.innerText.trim());
