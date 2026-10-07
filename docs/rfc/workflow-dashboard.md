@@ -2557,7 +2557,7 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
 - 前端顺带修 turn timer 缺陷：`applyEventToTurnState` 总是先 `startTurnTimer()`
   （`running_banner.js:234-235`），空闲期 progress 会设置 `turnStartTime`，下一轮 send 时
   `startTurnTimer` 早退（:83-89），elapsed 从第一条后台事件算起。改为：session 非 running 时
-  `task_progress/task_done` 不启动 timer。（PR-14：判定是 `running_banner.js` 导出的 `idleTaskEvent(ev)`，看当前选中 session 的
+  `task_start/task_progress/task_done` 不启动 timer。（PR-14：判定是 `running_banner.js` 导出的 `idleTaskEvent(ev)`，看当前选中 session 的
   `sessionsData` state；同一缺陷还有第二条路：`event_stream.js` 的 `rebuildTurnFromHistory` 不经 `startTurnTimer`，直接把
   `turnStartTime` 设为最后一个 user / result 之后第一条事件的时间——打开一个空闲期收过后台 progress 的 session，下一轮的 elapsed
   同样从那条 progress 算起。它改为跳过开头的空闲 task 事件再锚定。`idleTaskEvent` 看的是当前 state：session 因 CC 被
