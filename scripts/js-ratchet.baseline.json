@@ -1,8 +1,8 @@
 {
   "agent_view.js": {
-    "lines": 736,
+    "lines": 743,
     "maxFnLines": 66,
-    "maxIifeLines": 715,
+    "maxIifeLines": 722,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0,
@@ -588,7 +588,7 @@
     "lateBindings": 0
   },
   "workflow_view.js": {
-    "lines": 715,
+    "lines": 719,
     "maxFnLines": 42,
     "maxIifeLines": 0,
     "fnOver100": 0,

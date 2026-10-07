@@ -11,7 +11,10 @@
 //  - a WS subscribe rejected as pending falls back to the 3s HTTP poll;
 //  - the attempt badge unfolds the earlier attempts, each drilling in;
 //  - a drill-in straight after another gets the whole 202 budget, and
-//    leaving the session moves the mark off.
+//    leaving the session moves the mark off;
+//  - a settled row's breadcrumb shows its board duration as the row does, a
+//    running row's the tailer's live one, and a settled Task agent keeps
+//    task_done's (#3646).
 //
 // Run: cd test/e2e && npx playwright test workflow_drill_in.test.js --project=desktop-chrome
 
@@ -106,6 +109,77 @@ test('a row drills in once with a crumb; the replay is not shown twice; Esc goes
     await expect(rowOf(page, 1)).not.toHaveClass(/wf-sel/);
     await expect(rowOf(page, 1).locator('.wf-row-btn')).not.toHaveAttribute('aria-current', 'true');
     expect((await switchCalls(page)).length).toBe(1);
+    expect(errors).toEqual([]);
+  } finally { mock.server.close(); }
+});
+
+// #3646: a tailer opened on a finished agent replays it at once, so its own
+// duration is no measure of the agent's; the board's is.
+test("a settled row's breadcrumb shows the board's duration; a running one's follows the tailer", async ({ page }) => {
+  const done = row(1, 'done', { duration_ms: 65400, tool_calls: 2, attempt: 2, prev_agent_ids: ['a7'] });
+  const { mock, conn, errors } = await open(page, [done, row(2, 'running', { duration_ms: 3000 })], {
+    agentEvents: { a1: [text(T0, 'done task')], a2: [text(T0, 'live task')], a7: [text(T0, 'first try')] },
+  });
+  const stat = page.locator('#bc-agent-stat');
+  const meta = (id, m) => conn.send({ type: 'agent_meta', key: A, task_id: id, meta: m });
+  try {
+    // The breadcrumb formats the figure as the row does (1m05s, not 1m5s).
+    await expect(rowOf(page, 1).locator('.wf-stat')).toContainText('1m05s');
+    await rowOf(page, 1).locator('.wf-row-btn').click();
+    await expect(bubbles(page).filter({ hasText: 'done task' })).toHaveCount(1);
+    expect((await switchCalls(page))[0]).toEqual(['a1', { label: 'agent 1', crumb: 'wf w1 · Ask', duration: '1m05s' }]);
+    await expect(stat).toHaveText('1m05s');
+    await expect.poll(() => subscribes(conn, 'a1').length).toBe(1);
+    meta('a1', { tool_uses: 2, duration_ms: 206 });
+    await expect(stat).toHaveText('2 calls · 1m05s');
+
+    // An earlier attempt is not the row's run: no board figure for it.
+    await rowOf(page, 1).locator('.wf-attempt-btn').click();
+    await rowOf(page, 1).locator('.wf-attempt-item').first().click();
+    await expect(bubbles(page).filter({ hasText: 'first try' })).toHaveCount(1);
+    expect((await switchCalls(page))[1]).toEqual(['a7', { label: 'agent 1（第 1 次）', crumb: 'wf w1 · Ask' }]);
+    await expect(stat).toHaveText('');
+
+    // A running row's figure is a snapshot: the tailer's live one moves on.
+    await rowOf(page, 2).locator('.wf-row-btn').click();
+    await expect(bubbles(page).filter({ hasText: 'live task' })).toHaveCount(1);
+    expect((await switchCalls(page))[2]).toEqual(['a2', { label: 'agent 2', crumb: 'wf w1 · Ask' }]);
+    await expect.poll(() => subscribes(conn, 'a2').length).toBe(1);
+    meta('a2', { tool_uses: 1, duration_ms: 4000 });
+    await expect(stat).toHaveText('1 calls · 4.0s');
+    meta('a2', { tool_uses: 3, duration_ms: 9000 });
+    await expect(stat).toHaveText('3 calls · 9.0s');
+    expect(errors).toEqual([]);
+  } finally { mock.server.close(); }
+});
+
+// #3646: a settled Task agent's row and breadcrumb keep task_done's duration
+// over the span of a tailer opened on it later; a running one's follows it.
+test("a settled Task agent keeps task_done's duration; a running one's follows the tailer", async ({ page }) => {
+  const { mock, conn, errors } = await open(page, [row(1, 'running')], {
+    agentEvents: { t1: [text(T0, 'task one')], t2: [text(T0, 'task two')] },
+  });
+  const stat = page.locator('#bc-agent-stat');
+  const meta = (id, m) => conn.send({ type: 'agent_meta', key: A, task_id: id, meta: m });
+  const rowMs = (id) => page.evaluate((t) => /** @type {any} */ (window).turnState.agents.find((a) => a.taskId === t).durationMs, id);
+  try {
+    await page.evaluate(() => /** @type {any} */ (window).turnState.agents.push(
+      { toolUseId: 'u1', taskId: 't1', name: 'one', status: 'completed', durationMs: 45900, toolUses: 2 },
+      { toolUseId: 'u2', taskId: 't2', name: 'two', status: 'running', durationMs: 1000, toolUses: 1 }));
+    await page.evaluate(() => /** @type {any} */ (window).nz.views.agent.switchTo('t1'));
+    await expect(bubbles(page).filter({ hasText: 'task one' })).toHaveCount(1);
+    await expect(stat).toHaveText('completed');
+    await expect.poll(() => subscribes(conn, 't1').length).toBe(1);
+    meta('t1', { tool_uses: 2, duration_ms: 46100 });
+    await expect(stat).toHaveText('2 calls · 45.9s');
+    expect(await rowMs('t1')).toBe(45900);
+
+    await page.evaluate(() => /** @type {any} */ (window).nz.views.agent.switchTo('t2'));
+    await expect(bubbles(page).filter({ hasText: 'task two' })).toHaveCount(1);
+    await expect.poll(() => subscribes(conn, 't2').length).toBe(1);
+    meta('t2', { tool_uses: 3, duration_ms: 7000 });
+    await expect(stat).toHaveText('3 calls · 7.0s');
+    expect(await rowMs('t2')).toBe(7000);
     expect(errors).toEqual([]);
   } finally { mock.server.close(); }
 });

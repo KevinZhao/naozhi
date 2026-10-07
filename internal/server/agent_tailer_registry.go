@@ -143,7 +143,8 @@ func (r *tailerRegistry) lookup(tk tailerKey) *agentTailer {
 // parent-stream task_progress; the tailer overwrites only with a later value,
 // since it tracks per-agent tool_use count and step duration at finer
 // granularity. Once task_done has closed the tailer it is gone from the
-// registry and the EventLog values stand.
+// registry and the EventLog values stand; a tailer opened later on the
+// settled task (a drill-in) does not override its duration.
 func (r *tailerRegistry) enrich(snap *session.SessionSnapshot) {
 	if r == nil || snap == nil {
 		return
@@ -167,10 +168,19 @@ func (r *tailerRegistry) enrich(snap *session.SessionSnapshot) {
 		if meta.ToolUses > sa.ToolUses {
 			sa.ToolUses = meta.ToolUses
 		}
-		if meta.DurationMS > sa.DurationMS {
+		// A settled task's duration is the CLI's own figure (task_done
+		// usage) and stands: a tailer opened afterwards (drill-in) must not
+		// replace it with a larger transcript span (#3646).
+		if meta.DurationMS > sa.DurationMS && !(subagentSettled(sa.Status) && sa.DurationMS > 0) {
 			sa.DurationMS = meta.DurationMS
 		}
 	}
+}
+
+// subagentSettled reports whether status is past "spawned"/"running":
+// task_done stores the CLI's status ("completed", "error", ...) verbatim.
+func subagentSettled(status string) bool {
+	return status != "" && status != "spawned" && status != "running"
 }
 
 // workflowTail is what a workflow agent's tailer needs besides its path:
@@ -234,7 +244,6 @@ func (r *tailerRegistry) ensureTailer(key, taskID, toolUseID, jsonlPath string, 
 		stopCh:     make(chan struct{}),
 		subs:       make(map[*wsClient]struct{}),
 		lastActive: time.Now(),
-		startedAt:  time.Now(),
 	}
 	r.byTask[tk] = t
 	r.count.Add(1)

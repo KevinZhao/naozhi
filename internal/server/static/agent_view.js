@@ -95,6 +95,9 @@ import { sid } from './session_ident.js';
     return parts;
   }
 
+  // settledMs: a settled row's task_done duration, which stands over a tailer's (as in the server's enrich, #3646).
+  function settledMs(a) { return a.status && a.status !== 'spawned' && a.status !== 'running' ? a.durationMs || 0 : 0; }
+
   function findAgentByToolUseId(tuid) {
     for (var i = 0; i < turnState.agents.length; i++) {
       if (turnState.agents[i].toolUseId === tuid) return turnState.agents[i];
@@ -135,6 +138,7 @@ import { sid } from './session_ident.js';
     activeAgentName: '',
     activeTeamName: '',
     activeStatus: '',  // mirrors the tailer status for the breadcrumb stat
+    fixedDur: '',      // a settled agent's own run time, formatted; beats the tailer's (#3646)
     switchSeq: 0,      // monotonic — lets async Resolve polls abandon stale switches
     retries: 0,        // 202 retry counter (bounded, §3.6.4)
     pollTimer: null,   // HTTP fallback interval ID
@@ -174,8 +178,8 @@ import { sid } from './session_ident.js';
   // switchTo(taskID, opts) — drill into a specific agent's internal transcript.
   // Called by:
   //   - banner row onclick (AgentView.switchTo)
-  //   - a workflow panel row, with opts {label, crumb}: its agent is not in
-  //     turnState.agents, so the breadcrumb comes from the caller
+  //   - a workflow panel row, with opts {label, crumb, duration}: its agent
+  //     is not in turnState.agents, so the breadcrumb comes from the caller
   //   - WS agent_subscribe_rejected{reason:"capacity"} fallback path
   //   - Esc (via switchTo(null))
   // Every change of the drilled agent is announced on nzBus as 'agent:view'.
@@ -185,6 +189,7 @@ import { sid } from './session_ident.js';
     state.retries = 0;
     state.activeKey = selection.key || '';
     state.activeTaskID = taskID || '';
+    state.fixedDur = (opts && opts.duration) || '';
     announceView();
     // Opening a drill-in cancels any auto-collapse-in-progress on the banner
     // so the user's explicit click isn't immediately undone.
@@ -219,6 +224,7 @@ import { sid } from './session_ident.js';
       state.activeAgentName = row.name || '';
       state.activeTeamName = row.teamName || '';
       state.activeStatus = row.status || '';
+      if (settledMs(row) > 0) state.fixedDur = fmtDuration(row.durationMs);
     }
     showBreadcrumb();
     el.innerHTML = '<div class="empty-state loading-indicator">加载中…</div>';
@@ -452,7 +458,7 @@ import { sid } from './session_ident.js';
     var st = document.getElementById('bc-agent-stat');
     if (nm) nm.textContent = state.activeAgentName || '';
     if (tm) tm.textContent = state.activeTeamName || '';
-    if (st) st.textContent = state.activeStatus || '';
+    if (st) st.textContent = state.activeStatus || state.fixedDur;
   }
 
   function hideBreadcrumb() {
@@ -466,7 +472,8 @@ import { sid } from './session_ident.js';
     if (!st) return;
     var pieces = [];
     if (patch && patch.tool_uses > 0) pieces.push(patch.tool_uses + ' calls');
-    if (patch && patch.duration_ms > 0) pieces.push(fmtDuration(patch.duration_ms));
+    var dur = state.fixedDur || (patch && patch.duration_ms > 0 ? fmtDuration(patch.duration_ms) : '');
+    if (dur) pieces.push(dur);
     if (pieces.length > 0) st.textContent = pieces.join(' · ');
   }
 
@@ -494,7 +501,7 @@ import { sid } from './session_ident.js';
     if (row && msg.meta) {
       if (msg.meta.last_tool) row.lastTool = msg.meta.last_tool;
       if (msg.meta.tool_uses > 0) row.toolUses = msg.meta.tool_uses;
-      if (msg.meta.duration_ms > 0) row.durationMs = msg.meta.duration_ms;
+      if (msg.meta.duration_ms > 0 && !settledMs(row)) row.durationMs = msg.meta.duration_ms;
       refreshBanner();
     }
     if (msg.task_id === state.activeTaskID) {

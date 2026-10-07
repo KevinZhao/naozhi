@@ -62,7 +62,6 @@ type agentTailer struct {
 	buffered   []clievent.EventEntry
 	meta       node.AgentMetaPatch
 	lastActive time.Time
-	startedAt  time.Time
 	closed     bool
 }
 
@@ -83,6 +82,12 @@ func (t *agentTailer) pollOnce() bool {
 	if err != nil {
 		slog.Debug("agent_tailer: tail error", "key", t.key, "task", t.taskID, "err", err)
 	}
+	// DurationMS is the span of the transcript's record timestamps, not the
+	// tailer's age: a tailer opened on a finished agent replays it in one
+	// poll, and its age would be milliseconds (#3646). A live agent's span
+	// grows with each record, so its duration still moves; a rotated file
+	// starts its own span.
+	firstMS, lastMS := t.reader.Span()
 	// Wall clock captured outside the lock to keep the critical section short (#1407).
 	now := time.Now()
 	if status, settled := t.doneSettled(len(events) > 0, now); settled {
@@ -95,12 +100,13 @@ func (t *agentTailer) pollOnce() bool {
 		t.mu.Unlock()
 		return false
 	}
+	t.meta.DurationMS = lastMS - firstMS
 	if len(events) > 0 {
 		t.lastActive = now
 		// Buffer for late subscribers, bounded at 500; oldest dropped first.
 		for _, e := range events {
 			t.buffered = append(t.buffered, e)
-			t.updateMetaFromEventLocked(e, now)
+			t.updateMetaFromEventLocked(e)
 		}
 		if over := len(t.buffered) - 500; over > 0 {
 			// In-place copy reuses the backing array (zero alloc in steady
@@ -238,9 +244,8 @@ func (t *agentTailer) doneSettled(gotEvents bool, now time.Time) (string, bool) 
 }
 
 // updateMetaFromEventLocked refreshes meta counters from a single event.
-// `now` is shared by all events of one pollOnce so DurationMS is consistent.
 // Caller must hold t.mu.
-func (t *agentTailer) updateMetaFromEventLocked(e clievent.EventEntry, now time.Time) {
+func (t *agentTailer) updateMetaFromEventLocked(e clievent.EventEntry) {
 	switch e.Type {
 	case clievent.KindToolUse:
 		t.meta.ToolUses++
@@ -258,9 +263,6 @@ func (t *agentTailer) updateMetaFromEventLocked(e clievent.EventEntry, now time.
 	case clievent.KindThinking:
 		// Not a tool use, but advances the "doing right now" line.
 		t.meta.LastTool = "thinking"
-	}
-	if !t.startedAt.IsZero() {
-		t.meta.DurationMS = now.Sub(t.startedAt).Milliseconds()
 	}
 }
 

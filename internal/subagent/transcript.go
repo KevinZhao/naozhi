@@ -46,6 +46,10 @@ type TranscriptReader struct {
 	closeOnce sync.Once
 	// pastFirst is set once the file's first line has been mapped.
 	pastFirst bool
+	// firstMS/lastMS bound the timestamps of every record read so far (unix
+	// ms, 0 = none), mapped or dropped: a teammate's prompt wrapper maps to
+	// nothing but still starts its run. Reset with the offset on rotation.
+	firstMS, lastMS int64
 }
 
 // ReaderOpts tunes a TranscriptReader.
@@ -148,6 +152,15 @@ func (r *TranscriptReader) Read(afterMS int64, limit int) ([]clievent.EventEntry
 	return r.readLocked(afterMS, limit)
 }
 
+// Span returns the earliest and latest record timestamps read so far (unix
+// ms; 0, 0 before any): the transcript's own run time, however late the
+// reader started.
+func (r *TranscriptReader) Span() (first, last int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.firstMS, r.lastMS
+}
+
 // Tail reads any content written since the last Read/Tail call, returning
 // entries in chronological order. Equivalent to Read(lastSeenMS, -1) but
 // skips the time filter — tailer callers already know the previous watermark.
@@ -179,6 +192,7 @@ func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]clievent.Even
 			r.offset = 0
 			r.tail = nil
 			r.pastFirst = false
+			r.firstMS, r.lastMS = 0, 0
 			freshBytes, err = r.readFresh(r.f)
 			if err != nil {
 				return nil, err
@@ -216,7 +230,8 @@ func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]clievent.Even
 		}
 		first := !r.pastFirst
 		r.pastFirst = true
-		ents := mapJSONLLine(line, first && r.strip)
+		ents, ts := mapJSONLLine(line, first && r.strip)
+		r.widenSpan(ts)
 		for _, e := range ents {
 			if afterMS > 0 && e.Time > 0 && e.Time <= afterMS {
 				continue
@@ -231,6 +246,20 @@ func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]clievent.Even
 	// Bytes held in r.tail count as read from the OS, so offset advances fully.
 	r.offset += readLen
 	return out, nil
+}
+
+// widenSpan folds a record's timestamp (0 = none) into firstMS/lastMS.
+// Caller must hold r.mu.
+func (r *TranscriptReader) widenSpan(ts int64) {
+	if ts <= 0 {
+		return
+	}
+	if r.firstMS == 0 || ts < r.firstMS {
+		r.firstMS = ts
+	}
+	if ts > r.lastMS {
+		r.lastMS = ts
+	}
 }
 
 // readFresh seeks f to r.offset and reads everything available into the
@@ -322,27 +351,30 @@ func advanceOffset(prev int64, readLen int64, consumed int, data, fresh []byte, 
 }
 
 // mapJSONLLine transforms one subagent jsonl record into zero or more
-// EventEntry values. Malformed lines yield nil (dropped silently so one
-// corrupted record does not abort an otherwise-valid transcript).
-func mapJSONLLine(line []byte, strip bool) []clievent.EventEntry {
+// EventEntry values, and returns a user/assistant/system record's timestamp
+// (unix ms, 0 when absent) even when it maps to nothing; other record types
+// (bookkeeping) report 0. Malformed lines yield nil, 0
+// (dropped silently so one corrupted record does not abort an
+// otherwise-valid transcript).
+func mapJSONLLine(line []byte, strip bool) ([]clievent.EventEntry, int64) {
 	var raw transcriptLine
 	if err := json.Unmarshal(line, &raw); err != nil {
-		return nil
+		return nil, 0
 	}
 	ts := claudefs.TimestampMillis(raw.Timestamp)
 
 	switch raw.Type {
 	case "user":
-		return mapUserLine(raw, ts, strip)
+		return mapUserLine(raw, ts, strip), ts
 	case "assistant":
-		return mapAssistantLine(raw, ts)
+		return mapAssistantLine(raw, ts), ts
 	case "system":
 		if raw.SubType != "api_error" {
-			return nil
+			return nil, ts
 		}
-		return []clievent.EventEntry{{Time: ts, Type: clievent.KindSystem, Summary: "api_error"}}
+		return []clievent.EventEntry{{Time: ts, Type: clievent.KindSystem, Summary: "api_error"}}, ts
 	default:
-		return nil
+		return nil, 0
 	}
 }
 
