@@ -436,7 +436,7 @@ for (const ws of [false, true]) {
   test(`a second send before listing carries no backend or access profile (${ws ? 'WS' : 'HTTP'})`, async ({ page }) => {
     // The HTTP reply comes late, as on a loaded runner, so the second send
     // only goes out if sendNow waited for the first one to finish.
-    const own = await mockWithCLIName(undefined, { ws, sendReplyDelayMs: 300 });
+    const own = await mockWithCLIName(undefined, ws ? { ws } : { ws, sendReplyDelayMs: 300 });
     try {
       await createAndSend(page, own, { profile: 'team', backend: 'kiro', ws, text: 'one' });
       await sendNow(page, own, 'two', 2);
