@@ -75,6 +75,7 @@ type healthPayload struct {
 	ConfigSHA256          string   `json:"config_sha256"`
 	ConfigLoadedAt        string   `json:"config_loaded_at"`
 	ConfigRestartRequired []string `json:"config_restart_required"`
+	ConfigReloadedSHA256  string   `json:"config_reloaded_sha256"`
 }
 
 // platformConnMap is /health "platform_conn": the detail behind the

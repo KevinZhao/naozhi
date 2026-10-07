@@ -31,6 +31,9 @@ func TestHandleHealth_ConfigFingerprint(t *testing.T) {
 	if got := body["config_sha256"]; got != hs.healthH.configSHA256 {
 		t.Errorf("config_sha256 = %v, want the full hash", got)
 	}
+	if got := body["config_reloaded_sha256"]; got != hs.healthH.configSHA256 {
+		t.Errorf("config_reloaded_sha256 = %v, want the startup hash", got)
+	}
 	if got := body["config_loaded_at"]; got != "2026-09-05T12:00:00Z" {
 		t.Errorf("config_loaded_at = %v, want RFC3339", got)
 	}
@@ -41,7 +44,7 @@ func TestHandleHealth_ConfigFingerprint(t *testing.T) {
 	anon := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w2 := httptest.NewRecorder()
 	hs.healthH.handleHealth(w2, anon)
-	if s := w2.Body.String(); strings.Contains(s, "config_sha256") || strings.Contains(s, "config.yaml") {
+	if s := w2.Body.String(); strings.Contains(s, "sha256") || strings.Contains(s, "config.yaml") {
 		t.Errorf("unauthenticated /health leaked the config fingerprint: %s", s)
 	}
 }

@@ -64,7 +64,7 @@ func TestConfigReloader_AppliesHotSections(t *testing.T) {
 	if level.Level() != slog.LevelInfo {
 		t.Fatalf("log level moved to %v without a change", level.Level())
 	}
-	if sha, _, pending := r.fp.Get(); sha != res.SHA256 || sha == "" || pending != nil {
+	if sha, _, pending, _ := r.fp.Get(); sha != res.SHA256 || sha == "" || pending != nil {
 		t.Fatalf("fingerprint %q (pending %v) not updated to %q", sha, pending, res.SHA256)
 	}
 }
@@ -130,12 +130,12 @@ func TestConfigReloader_LoadsUnderLock(t *testing.T) {
 // reverting the restart-only edit lets the fingerprint advance again.
 func TestConfigReloader_FingerprintWaitsForRestartRequired(t *testing.T) {
 	r, path, _, _ := newReloaderFixture(t)
-	shaStart, atStart, _ := r.fp.Get()
+	shaStart, atStart, _, _ := r.fp.Get()
 	writeConfigFile(t, path, "cli:\n  model: opus\nlog:\n  level: debug\n")
 	if _, err := r.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if sha, at, pending := r.fp.Get(); sha != shaStart || !at.Equal(atStart) || !reflect.DeepEqual(pending, []string{"cli"}) {
+	if sha, at, pending, _ := r.fp.Get(); sha != shaStart || !at.Equal(atStart) || !reflect.DeepEqual(pending, []string{"cli"}) {
 		t.Fatalf("fingerprint = %q %v pending %v, want the startup one with [cli]", sha, at, pending)
 	}
 	writeConfigFile(t, path, reloadBase+"im_rate_limit:\n  msgs_per_min: 9\n")
@@ -143,7 +143,7 @@ func TestConfigReloader_FingerprintWaitsForRestartRequired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sha, _, pending := r.fp.Get(); sha != res.SHA256 || sha == shaStart || pending != nil {
+	if sha, _, pending, _ := r.fp.Get(); sha != res.SHA256 || sha == shaStart || pending != nil {
 		t.Fatalf("fingerprint = %q pending %v, want %q with nothing pending", sha, pending, res.SHA256)
 	}
 }
@@ -211,7 +211,7 @@ func TestConfigReloader_RuntimeCreatedProfileIsNotPending(t *testing.T) {
 	if len(res.RestartRequired) != 0 {
 		t.Fatalf("restart_required = %v after creating profiles that are already live", res.RestartRequired)
 	}
-	if sha, _, pending := r.fp.Get(); sha != res.SHA256 || pending != nil {
+	if sha, _, pending, _ := r.fp.Get(); sha != res.SHA256 || pending != nil {
 		t.Fatalf("fingerprint = %q pending %v, want %q", sha, pending, res.SHA256)
 	}
 	body, err := os.ReadFile(path)
@@ -269,7 +269,7 @@ func TestConfigReloader_SwapsBudgetLimits(t *testing.T) {
 	if len(res.Applied) != 0 || !reflect.DeepEqual(res.RestartRequired, []string{"cost.budget.timezone"}) {
 		t.Fatalf("moved zone result = %+v", res)
 	}
-	if _, _, pending := fp.Get(); !reflect.DeepEqual(pending, []string{"cost.budget.timezone"}) {
+	if _, _, pending, _ := fp.Get(); !reflect.DeepEqual(pending, []string{"cost.budget.timezone"}) {
 		t.Fatalf("/health pending = %v", pending)
 	}
 }
@@ -320,7 +320,7 @@ func TestConfigReloader_LogLevelAndRestartRequiredAgainstBaseline(t *testing.T) 
 
 func TestConfigReloader_BadFileLeavesStateUntouched(t *testing.T) {
 	r, path, applied, level := newReloaderFixture(t)
-	shaBefore, _, _ := r.fp.Get()
+	shaBefore, _, _, _ := r.fp.Get()
 	writeConfigFile(t, path, "cli:\n  model: [not a string\nlog:\n  level: debug\n")
 	if _, err := r.Reload(context.Background()); err == nil {
 		t.Fatal("broken YAML reloaded without error")
@@ -332,7 +332,7 @@ func TestConfigReloader_BadFileLeavesStateUntouched(t *testing.T) {
 	if len(*applied) != 0 || level.Level() != slog.LevelInfo {
 		t.Fatalf("failed reloads had side effects: applied=%d level=%v", len(*applied), level.Level())
 	}
-	if sha, _, _ := r.fp.Get(); sha != shaBefore {
+	if sha, _, _, _ := r.fp.Get(); sha != shaBefore {
 		t.Fatal("fingerprint moved on a failed reload")
 	}
 	if r.last != r.baseline {

@@ -700,6 +700,8 @@ kill -HUP $(pidof naozhi)
 - 没有 `restart_required` 时 `/health.config_sha256` / `config_loaded_at` 随重载
   更新，doctor 的 config-drift 检查随之变绿；有的话指纹保持不变，`/health` 的
   `config_restart_required` 列出这些段，doctor 报 `restart required for: ...`。
+  `/health.config_reloaded_sha256` 始终是最近一次加载或重载读到的文件，此后磁盘上
+  再改而没有重载，doctor 照样报 `not applied`，同时列出待重启段。
 - `${VAR}` 按 naozhi 进程当前的环境变量展开，改了 EnvironmentFile 仍要重启。
 - 设计见 [`docs/rfc/config-hot-reload.md`](docs/rfc/config-hot-reload.md)。
 
