@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -102,6 +104,51 @@ func TestCheckConfigDrift(t *testing.T) {
 		}
 		if d.hasFail {
 			t.Error("pending restart must not flip hasFail; it is a warn")
+		}
+	})
+
+	// #3649: once a reload has left sections pending, config_sha256 is
+	// frozen; an edit on disk after that reload is compared against
+	// config_reloaded_sha256 and still reported as not applied.
+	t.Run("pending_restart_and_unreloaded_edit_warns_both", func(t *testing.T) {
+		reloaded := strings.Repeat("1", 64)
+		srv := healthWithExtra(strings.Repeat("0", 64),
+			`,"config_restart_required":["cron"],"config_reloaded_sha256":"`+reloaded+`"`)
+		defer srv.Close()
+		d := driftDoctor(t, srv, "tok", cfgPath)
+		d.checkConfigDrift()
+		f := driftFinding(t, d)
+		for _, want := range []string{"not applied", "naozhi config reload", diskSum[:12], reloaded[:12], "restart required for: cron"} {
+			if f.Level != "warn" || !strings.Contains(f.Detail, want) {
+				t.Errorf("finding = %+v, want warn containing %q", f, want)
+			}
+		}
+		if strings.Contains(f.Detail, "applied the hot sections") {
+			t.Errorf("detail claims the hot sections were applied: %q", f.Detail)
+		}
+	})
+
+	t.Run("pending_restart_disk_matches_reload", func(t *testing.T) {
+		srv := healthWithExtra(strings.Repeat("0", 64),
+			`,"config_restart_required":["cron"],"config_reloaded_sha256":"`+diskSum+`"`)
+		defer srv.Close()
+		d := driftDoctor(t, srv, "tok", cfgPath)
+		d.checkConfigDrift()
+		f := driftFinding(t, d)
+		if f.Level != "warn" || !strings.Contains(f.Detail, "restart required for: cron") || strings.Contains(f.Detail, "not applied") {
+			t.Errorf("finding = %+v, want warn/restart required without not applied", f)
+		}
+	})
+
+	t.Run("pending_restart_malformed_reloaded_sha_warns", func(t *testing.T) {
+		srv := healthWithExtra(diskSum,
+			`,"config_restart_required":["cron"],"config_reloaded_sha256":"\u001b[31mzz"`)
+		defer srv.Close()
+		d := driftDoctor(t, srv, "tok", cfgPath)
+		d.checkConfigDrift()
+		f := driftFinding(t, d)
+		if f.Level != "warn" || !strings.Contains(f.Detail, "malformed") || strings.Contains(f.Detail, "\x1b") {
+			t.Errorf("finding = %+v, want a sanitised warn/malformed", f)
 		}
 	})
 
@@ -226,5 +273,40 @@ func TestIsSHA256Hex(t *testing.T) {
 		if got := isSHA256Hex(tc.in); got != tc.want {
 			t.Errorf("isSHA256Hex(%q) = %v, want %v", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestConfigDrift_EditAfterPartialReload walks #3649 through the real
+// reloader: a reload that leaves cli pending, then a log.level edit that is
+// never reloaded. Doctor must name both the pending section and the edit.
+func TestConfigDrift_EditAfterPartialReload(t *testing.T) {
+	r, path, _, _ := newReloaderFixture(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		sha, at, pending, read := r.fp.Get()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok", "cli_available": true,
+			"config_sha256": sha, "config_loaded_at": at.Format(time.RFC3339),
+			"config_restart_required": pending, "config_reloaded_sha256": read,
+		})
+	}))
+	defer srv.Close()
+	doctorFinding := func() finding {
+		d := driftDoctor(t, srv, "tok", path)
+		d.checkConfigDrift()
+		return driftFinding(t, d)
+	}
+
+	writeConfigFile(t, path, "cli:\n  model: opus\nlog:\n  level: info\n")
+	if _, err := r.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if f := doctorFinding(); f.Level != "warn" || !strings.Contains(f.Detail, "restart required for: cli") || strings.Contains(f.Detail, "not applied") {
+		t.Fatalf("after the partial reload: %+v, want restart required for cli only", f)
+	}
+
+	writeConfigFile(t, path, "cli:\n  model: opus\nlog:\n  level: warn\n")
+	f := doctorFinding()
+	if f.Level != "warn" || !strings.Contains(f.Detail, "not applied") || !strings.Contains(f.Detail, "restart required for: cli") {
+		t.Fatalf("after an edit that was not reloaded: %+v, want not applied plus restart required for cli", f)
 	}
 }

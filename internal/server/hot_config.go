@@ -46,24 +46,26 @@ func (s *Server) ApplyHotConfig(h HotConfig) {
 type ConfigReloadFunc func(ctx context.Context) (config.ReloadResult, error)
 
 // ConfigFingerprint is the loaded config's sha256 / load time as /health
-// reports them, plus the sections the last reload could not apply. Zero
-// value = unknown.
+// reports them, the sections the last reload could not apply, and the sha256
+// of the file the last load or reload read. Zero value = unknown.
 type ConfigFingerprint struct {
 	mu              sync.Mutex
 	sha256          string
 	loadedAt        time.Time
 	restartRequired []string
+	readSHA256      string
 }
 
 // NewConfigFingerprint seeds a fingerprint with the startup values.
 func NewConfigFingerprint(sha string, at time.Time) *ConfigFingerprint {
-	return &ConfigFingerprint{sha256: sha, loadedAt: at}
+	return &ConfigFingerprint{sha256: sha, loadedAt: at, readSHA256: sha}
 }
 
 // Set records a reloaded file. config_sha256 means the process runs those
 // bytes in full (#2538), so sha and at are taken only when restartRequired
 // is empty; otherwise the previous fingerprint stays and the sections are
-// what /health lists as still needing a restart.
+// what /health lists as still needing a restart. The read sha is always
+// taken, so doctor can tell a later edit on disk from the reloaded file.
 func (f *ConfigFingerprint) Set(sha string, at time.Time, restartRequired []string) {
 	if f == nil {
 		return
@@ -71,17 +73,19 @@ func (f *ConfigFingerprint) Set(sha string, at time.Time, restartRequired []stri
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.restartRequired = slices.Clone(restartRequired)
+	f.readSHA256 = sha
 	if len(restartRequired) == 0 {
 		f.sha256, f.loadedAt = sha, at
 	}
 }
 
-// Get returns the current fingerprint; a nil receiver reads as unknown.
-func (f *ConfigFingerprint) Get() (sha string, at time.Time, restartRequired []string) {
+// Get returns the current fingerprint and the sha of the last file read; a
+// nil receiver reads as unknown.
+func (f *ConfigFingerprint) Get() (sha string, at time.Time, restartRequired []string, readSHA string) {
 	if f == nil {
-		return "", time.Time{}, nil
+		return "", time.Time{}, nil, ""
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.sha256, f.loadedAt, slices.Clone(f.restartRequired)
+	return f.sha256, f.loadedAt, slices.Clone(f.restartRequired), f.readSHA256
 }

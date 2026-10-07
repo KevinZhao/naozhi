@@ -152,21 +152,25 @@ func TestHandleHealth_LiveConfigFingerprint(t *testing.T) {
 		}
 		return body
 	}
-	if b := probe(); b["config_sha256"] != "aaaa" || b["config_loaded_at"] != "2026-10-06T01:00:00Z" {
-		t.Fatalf("initial = %v / %v", b["config_sha256"], b["config_loaded_at"])
+	if b := probe(); b["config_sha256"] != "aaaa" || b["config_loaded_at"] != "2026-10-06T01:00:00Z" || b["config_reloaded_sha256"] != "aaaa" {
+		t.Fatalf("initial = %v / %v / %v", b["config_sha256"], b["config_loaded_at"], b["config_reloaded_sha256"])
 	}
 	fp.Set("bbbb", time.Date(2026, 10, 6, 2, 0, 0, 0, time.UTC), nil)
 	if b := probe(); b["config_sha256"] != "bbbb" || b["config_loaded_at"] != "2026-10-06T02:00:00Z" || b["config_restart_required"] != nil {
 		t.Fatalf("after Set = %v / %v / %v", b["config_sha256"], b["config_loaded_at"], b["config_restart_required"])
 	}
-	// A reload with restart-only sections keeps the fingerprint and lists them.
+	// A reload with restart-only sections keeps the fingerprint and lists
+	// them; config_reloaded_sha256 still names the file that reload read.
 	fp.Set("cccc", time.Date(2026, 10, 6, 3, 0, 0, 0, time.UTC), []string{"cli"})
 	b := probe()
 	if pending, _ := b["config_restart_required"].([]any); b["config_sha256"] != "bbbb" || len(pending) != 1 || pending[0] != "cli" {
 		t.Fatalf("after a partial reload = %v / %v, want bbbb with [cli]", b["config_sha256"], b["config_restart_required"])
 	}
+	if b["config_reloaded_sha256"] != "cccc" {
+		t.Fatalf("after a partial reload config_reloaded_sha256 = %v, want cccc", b["config_reloaded_sha256"])
+	}
 	var nilFP *ConfigFingerprint
-	if sha, at, pending := nilFP.Get(); sha != "" || !at.IsZero() || pending != nil {
+	if sha, at, pending, read := nilFP.Get(); sha != "" || !at.IsZero() || pending != nil || read != "" {
 		t.Fatal("nil fingerprint should read as unknown")
 	}
 }

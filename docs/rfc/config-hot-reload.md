@@ -75,8 +75,9 @@ func (s *Server) ApplyHotConfig(h HotConfig)
 填满，所以只在 `im_rate_limit` 真的变了时才重建，只改 `log.level` 的重载不碰它。
 
 `/health` 的指纹改为读一个共享的 `*server.ConfigFingerprint`（互斥锁保护的
-sha/loadedAt/restartRequired），`ConfigOptions.Live` 可选注入；为空时退回原来的静态
-字段。`Set` 只在 `restartRequired` 为空时更新 sha/loadedAt。
+sha/loadedAt/restartRequired/readSHA），`ConfigOptions.Live` 可选注入；为空时退回原来的静态
+字段。`Set` 只在 `restartRequired` 为空时更新 sha/loadedAt；readSHA 每次都记，作为
+`/health.config_reloaded_sha256` 下发，doctor 拿它和磁盘比，待重启期间的后续改动也能报出（#3649）。
 
 ### 3.3 组合根：`cmd/naozhi/reload.go`
 
@@ -138,7 +139,7 @@ reload 又需要 server（`ApplyHotConfig`）。`server.New` 之前先建 reload
 
 - `naozhi_config_reload_total{result=ok|error}` expvar
 - `/health.config_sha256` / `config_loaded_at` 在没有待重启段时即时更新；
-  `config_restart_required` 列出待重启段
+  `config_restart_required` 列出待重启段；`config_reloaded_sha256` 是最近一次读到的文件
 - 日志 `config reloaded` / `config reload failed`
 
 ### 3.6 `cost.budget`
