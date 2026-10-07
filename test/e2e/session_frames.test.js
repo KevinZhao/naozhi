@@ -20,6 +20,8 @@
 //    a background task reporting while the session is idle anchors no timer,
 //    on either frame path, so the next send's timer starts at the send, and
 //    an opening frame of a turn CC woke itself for anchors at the task_done;
+//  - a background task's report after a send keeps "已发送，正在处理…" up on
+//    either frame path; the first real turn event ends it;
 //  - a result on either frame path ends the turn this tab started (running
 //    flips to ready, the cost lands on total_cost), and a time-less user replay
 //    on either path is not painted twice;
@@ -257,6 +259,9 @@ test.describe('sessionFrames keep the bookkeeping on sessionStream', () => {
     const { ctx, page, conn, errors } = await open(browser, mock);
     const T = Date.now() + 60000;
     const seen = (t) => page.waitForFunction((at) => sessionStream.lastEventTimeWs === at, t);
+    conn.send({ type: 'event', key: KEY_A, event: { type: 'task_start', task_id: 'a1', summary: 'bg', time: T - 1, uuid: 'ts-1' } });
+    await seen(T - 1);
+    expect(await page.evaluate(() => turnState.turnStartTime), 'an idle task_start starts no turn').toBe(0);
     conn.send({ type: 'event', key: KEY_A, event: { type: 'task_progress', task_id: 'a1', summary: 'step', time: T, uuid: 'tp-1' } });
     await seen(T);
     conn.send({ type: 'event', key: KEY_A, event: { type: 'task_done', task_id: 'a1', status: 'completed', time: T + 1, uuid: 'td-1' } });
@@ -275,6 +280,37 @@ test.describe('sessionFrames keep the bookkeeping on sessionStream', () => {
     expect(errors).toEqual([]);
     await ctx.close();
   });
+
+  // The send flips the session to running before the CLI starts the turn, so a
+  // background task's report landing in that window must leave the
+  // "已发送，正在处理…" label up; the first real turn event still takes it down.
+  for (const path of ['event', 'history']) {
+    test(`a background task report in ${path === 'event' ? 'an event' : 'a backfill history'} frame keeps the just-sent label`, async ({ browser }) => {
+      const { ctx, page, conn, errors } = await open(browser, mock);
+      const T = Date.now() + 60000;
+      const label = () => page.evaluate(() => document.getElementById('tool-activity').textContent);
+      const deliver = async (events) => {
+        if (path === 'event') for (const e of events) conn.send({ type: 'event', key: KEY_A, event: e });
+        else conn.send({ type: 'history', key: KEY_A, events });
+        const last = events[events.length - 1].time;
+        await page.waitForFunction((at) => sessionStream.lastEventTimeWs === at, last);
+      };
+      await sendText(page, conn, 'bg-' + path);
+      expect(await label()).toBe('已发送，正在处理…');
+      await deliver([
+        { type: 'task_start', task_id: 'w1', summary: 'workflow', time: T, uuid: 'ts-' + path },
+        { type: 'task_progress', task_id: 'w1', summary: 'step', time: T + 1, uuid: 'tp-' + path },
+        { type: 'task_done', task_id: 'w1', status: 'completed', time: T + 2, uuid: 'td-' + path },
+      ]);
+      expect(await page.evaluate(() => turnState.justSent), 'task reports are not the new turn').toBe(true);
+      expect(await label()).toBe('已发送，正在处理…');
+      await deliver([{ type: 'thinking', summary: 'hm', time: T + 3, uuid: 'th-' + path }]);
+      expect(await page.evaluate(() => turnState.justSent), 'a real turn event ends the window').toBe(false);
+      expect(await label()).toBe('思考中...');
+      expect(errors).toEqual([]);
+      await ctx.close();
+    });
+  }
 
   test('an opening frame whose last turn is followed by idle task reports anchors no timer', async ({ browser }) => {
     const { ctx, page, conn, errors } = await open(browser, mock);

@@ -148,7 +148,7 @@ function refreshBanner() {
   const statsEl = document.getElementById('rb-stats');
 
   // Line 1: current activity. justSent (set on the optimistic flip, cleared by
-  // the first real event in updateTurnState) gives a distinct "received,
+  // the first real turn event in applyEventToTurnState) gives a distinct "received,
   // starting up" message during the CLI-spawn window so the operator knows the
   // send landed rather than staring at a generic static "处理中…".
   if (actEl) {
@@ -232,21 +232,27 @@ function updateSidebarAgentBadge() {
   } else if (existing) { existing.remove(); }
 }
 
+// taskReportEvent reports whether ev is a task's lifecycle report, which may
+// come from a task an earlier turn left running in the background.
+function taskReportEvent(ev) {
+  return ev.type === 'task_start' || ev.type === 'task_progress' || ev.type === 'task_done';
+}
+
 // idleTaskEvent reports whether ev is a background task's report arriving
 // while the session on screen is not running: it starts no turn, so it must
 // not anchor the next one's timer (startTurnTimer keeps its first anchor).
 function idleTaskEvent(ev) {
-  if (ev.type !== 'task_progress' && ev.type !== 'task_done') return false;
+  if (!taskReportEvent(ev)) return false;
   const sess = sessionList.sessionsData[sid(selection.key, selection.node)];
   return !(sess && sess.state === 'running');
 }
 
 function applyEventToTurnState(ev) {
   if (!idleTaskEvent(ev)) startTurnTimer();
-  // Any real turn event ends the optimistic "已发送，正在处理…" window — the
-  // CLI is now actively thinking/using-tools/writing, so let the normal
-  // activity labels take over.
-  turnState.justSent = false;
+  // A real turn event ends the "已发送，正在处理…" window. A task report is not
+  // one: the send already flipped the session to running, so idleTaskEvent
+  // cannot tell a background task's report from the new turn's.
+  if (!taskReportEvent(ev)) turnState.justSent = false;
   switch (ev.type) {
     case 'tool_use':
       turnState.toolCount++;
@@ -498,7 +504,6 @@ function updateSendButton(state, opts) {
     evEl.scrollTop = evEl.scrollHeight;
   }
 }
-
 
 export {
   applyEventToTurnState,

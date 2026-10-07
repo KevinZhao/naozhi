@@ -396,7 +396,7 @@
     "lateBindings": 0
   },
   "running_banner.js": {
-    "lines": 519,
+    "lines": 524,
     "maxFnLines": 95,
     "maxIifeLines": 0,
     "fnOver100": 0,
