@@ -700,9 +700,9 @@ export const workflowActions = {
     const phase = btn.closest('.wf-phase')?.querySelector('.wf-phase-title')?.textContent;
     if (!view.following) { view.following = true; nzBus.addEventListener('agent:view', onAgentView); }
     const opts = { label, crumb: nameOf(v.entry.workflow) + (phase ? ' · ' + phase : '') };
-    // A settled row's duration_ms is the agent's run time; an earlier attempt's is not on the row.
+    // A settled row's duration_ms is the agent's run time, formatted as the row shows it; an earlier attempt's is not on the row.
     const a = v.entry.rows.get(Number(/** @type {HTMLElement} */ (row).dataset.index));
-    if (!btn.dataset.attempt && a?.duration_ms && WORKFLOW_AGENT_DISPLAY[a.state]?.settled) opts.durationMs = a.duration_ms;
+    if (!btn.dataset.attempt && a?.duration_ms && WORKFLOW_AGENT_DISPLAY[a.state]?.settled) opts.duration = fmtElapsed(a.duration_ms);
     nzViews.agent?.switchTo(id, opts);
   },
   'wf-attempts': (/** @type {HTMLElement} */ btn) => {

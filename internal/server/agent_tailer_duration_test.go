@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
@@ -114,15 +113,51 @@ func TestTailer_DurationOfRunningAgentGrows(t *testing.T) {
 	}
 }
 
-// The span is earliest to latest whatever order the records arrive in.
-func TestTailer_DurationSpanIgnoresOrder(t *testing.T) {
+// A teammate's prompt arrives in a teammate-message wrapper that maps to no
+// event; the run still starts there, so its first model turn counts.
+func TestTailer_DurationStartsAtDroppedPrompt(t *testing.T) {
 	t.Parallel()
-	tl := &agentTailer{}
-	for _, at := range []int64{20_000, 45_900, 0, 1_000} {
-		tl.updateMetaFromEventLocked(clievent.EventEntry{Type: clievent.KindText, Time: at})
+	path := filepath.Join(t.TempDir(), "agent-mate.jsonl")
+	appendLines(t, path,
+		`{"type":"user","message":{"role":"user","content":"<teammate-message teammate_id=\"lister-1\">go</teammate-message>"},"sessionId":"s","timestamp":"2026-05-10T10:00:00Z"}`+"\n",
+		textLine("first reply", "2026-05-10T10:00:08Z"),
+		textLine("answer", "2026-05-10T10:00:10Z"),
+	)
+	r := newTailerRegistry("")
+	defer r.Shutdown()
+	tl, ok := r.ensureTailer("k", "t1", "toolu", path, nil)
+	if !ok {
+		t.Fatal("ensureTailer failed")
 	}
-	if got := tl.meta.DurationMS; got != 44_900 {
-		t.Fatalf("DurationMS = %d, want 44900", got)
+	tl.pollOnce()
+	if got := tl.MetaSnapshot().DurationMS; got != 10000 {
+		t.Fatalf("DurationMS = %d, want 10000 (prompt to answer)", got)
+	}
+}
+
+// A transcript replaced by another run reports the new run's span, not one
+// stretched across both files.
+func TestTailer_DurationFollowsRotation(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "agent-rot.jsonl")
+	appendLines(t, path, textLine("old", "2026-05-10T09:00:00Z"), textLine("old2", "2026-05-10T09:30:00Z"))
+	r := newTailerRegistry("")
+	defer r.Shutdown()
+	tl, ok := r.ensureTailer("k", "t1", "toolu", path, nil)
+	if !ok {
+		t.Fatal("ensureTailer failed")
+	}
+	tl.pollOnce()
+	if got := tl.MetaSnapshot().DurationMS; got != 1_800_000 {
+		t.Fatalf("before rotation: DurationMS = %d, want 1800000", got)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	appendLines(t, path, textLine("new", "2026-05-10T10:00:00Z"), textLine("new2", "2026-05-10T10:00:03Z"))
+	tl.pollOnce()
+	if got := tl.MetaSnapshot().DurationMS; got != 3000 {
+		t.Fatalf("after rotation: DurationMS = %d, want 3000", got)
 	}
 }
 
