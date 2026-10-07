@@ -3,7 +3,8 @@
 // dismissSession (tuning.js) has one branch per kind of sidebar card. Each
 // removes the card; when the dismissed session is the one on screen the main
 // panel falls back to the empty quick-ask state:
-//   - managed: optimistic, DELETE /api/sessions fired without waiting;
+//   - managed: optimistic, DELETE /api/sessions fired without waiting, and
+//     the card stays gone once the DELETE's re-sync has painted;
 //   - pending (never sent): only the local record goes, no request;
 //   - discovered: POST /api/discovered/close, the card goes once it lands;
 //   - a cron stub (server-side filtered, so only a server bug shows one):
@@ -51,6 +52,12 @@ test('the selected managed session: card and panel go at once, DELETE carries th
     expect(await selectedKey(page)).toBeNull();
     await expect.poll(() => deletes.length).toBe(1);
     expect(JSON.parse(deletes[0])).toEqual({ key: KEY });
+    // The DELETE's settle re-syncs the list. The fixture is at stats.version 1
+    // and a 200 DELETE bumps it, so lastVersion 2 means a list fetched after the
+    // DELETE has painted: the card must still be gone and the panel still empty.
+    await expect.poll(() => page.evaluate(() => window.nz.test.lastVersion)).toBe(2);
+    await expect(page.locator(`.session-card[data-key="${KEY}"]`)).toHaveCount(0);
+    await expect(page.locator('#main #quick-ask-input')).toHaveCount(1);
   } finally { await close(); }
 });
 
