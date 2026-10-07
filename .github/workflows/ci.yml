@@ -7,6 +7,13 @@ on:
   pull_request:
     branches:
       - master
+  # The merge queue builds candidate merge commits on
+  # refs/heads/gh-readonly-queue/master/*; the required checks must report on
+  # those or every queue entry times out. The master-only side effects
+  # (flaky-report, vuln issues) key on refs/heads/master and stay quiet here.
+  merge_group:
+    branches:
+      - master
   # flaky_probe forces a synthetic failure so the flaky-report job can be
   # exercised end-to-end without a real master red (#2537).
   workflow_dispatch:

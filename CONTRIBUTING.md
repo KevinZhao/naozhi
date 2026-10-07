@@ -49,6 +49,11 @@ naozhi 的定位是"轻量 IM -> Claude Code CLI 网关"：用最少的代码把
 3. 如果改动触碰了 `docs/design/`、`CLAUDE.md`、`config.example.yaml`，同步更新其他两处（单一事实源原则）。
 4. Commit message 参考 `git log --oneline -20` 近期风格
 5. PR 描述写清 **why**（动机、关联的 issue），而非 what（代码本身会说话）
+6. 合入走 merge queue：PR 绿了点 **Merge when ready**（或 `gh pr merge --auto`），
+   不要自己 rebase 到最新 master 再合。queue 会把你的 PR 叠在前面的候选上跑一遍
+   CI（`merge_group` 事件），绿了自动进 master；红了被踢出队列，看 queue 分支上
+   那次 run 的日志修完再排。多个 PR 同时排队时只需要一次 CI 就能全部落地，
+   不再出现"刚绿又 BEHIND"的循环。
 
 ## Testing
 
