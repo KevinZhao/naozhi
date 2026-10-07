@@ -1,6 +1,6 @@
 # RFC: Workflow 运行进度看板（dashboard）
 
-- 状态：Draft v5（四轮评审，Ready for implementation）
+- 状态：已实现（v5；PR-1..PR-15 已合并，2026-10-07 真机验收通过，见 #3475）
 - 日期：2026-10-05（v1）；2026-10-05（v2）；2026-10-05（v3）；2026-10-05（v4）；2026-10-05（v5）
 - 作者：Kevin Zhao
 - 范围：naozhi 托管的 Claude Code session 通过 `Workflow` 工具（ultracode）跑的后台
