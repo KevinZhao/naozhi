@@ -2,10 +2,13 @@ package server
 
 import (
 	"regexp"
+	"slices"
 
+	"github.com/naozhi/naozhi/internal/cli/workflow"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
+	"github.com/naozhi/naozhi/internal/subagent"
 	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
@@ -77,7 +80,7 @@ func (h *Hub) wireLinker(key string, linker agentlink.AgentLinker, taskDone agen
 		}
 		// Silent tailer: no subscribers yet. refCount stays 0 until a
 		// WS agent_subscribe arrives; ensureTailer starts the ticker.
-		h.tailers.ensureTailer(key, taskID, toolUseID, info.JSONLPath)
+		h.tailers.ensureTailer(key, taskID, toolUseID, info.JSONLPath, nil)
 	})
 	if taskDone != nil {
 		taskDone.SetOnAgentTaskDone(func(taskID, status string) {
@@ -109,32 +112,23 @@ func (h *Hub) handleAgentSubscribe(c *wsClient, msg node.ClientMsg) {
 	// back to the HTTP endpoint (which rejects remote with 404 today,
 	// same effective UX).
 	if msg.Node != "" && msg.Node != "local" {
-		c.SendJSON(wsproto.NewAgentSubscribeRejected(wsproto.AgentSubscribeRejected{
-
-			Key:    msg.Key,
-			TaskID: msg.TaskID,
-			Reason: "remote_not_supported",
-		}))
+		rejectAgentSubscribe(c, msg, "remote_not_supported")
 		return
 	}
 	sess := h.router.SessionFor(msg.Key)
 	if sess == nil {
-		c.SendJSON(wsproto.NewAgentSubscribeRejected(wsproto.AgentSubscribeRejected{
-
-			Key:    msg.Key,
-			TaskID: msg.TaskID,
-			Reason: "session_not_found",
-		}))
+		rejectAgentSubscribe(c, msg, "session_not_found")
+		return
+	}
+	// A workflow agent is the board's, whether or not a process is alive.
+	b := sess.WorkflowBoard()
+	if tr, st := b.AgentTranscript(msg.TaskID); st != session.TranscriptNone {
+		h.subscribeWorkflowAgent(c, msg, b, tr, st)
 		return
 	}
 	linker := sess.SubagentLinker()
 	if linker == nil {
-		c.SendJSON(wsproto.NewAgentSubscribeRejected(wsproto.AgentSubscribeRejected{
-
-			Key:    msg.Key,
-			TaskID: msg.TaskID,
-			Reason: "no_linker",
-		}))
+		rejectAgentSubscribe(c, msg, "no_linker")
 		return
 	}
 	info, ok := linker.QueryOrResolveFast(msg.TaskID)
@@ -142,44 +136,81 @@ func (h *Hub) handleAgentSubscribe(c *wsClient, msg node.ClientMsg) {
 		// Linker context not yet installed (awaiting init event). The HTTP
 		// endpoint returns 202 on the same condition; tell WS clients to
 		// retry once the polling loop settles.
-		c.SendJSON(wsproto.NewAgentSubscribeRejected(wsproto.AgentSubscribeRejected{
-
-			Key:    msg.Key,
-			TaskID: msg.TaskID,
-			Reason: "pending",
-		}))
+		rejectAgentSubscribe(c, msg, "pending")
 		return
 	}
 	if info.InternalAgentID == "" || info.JSONLPath == "" {
-		c.SendJSON(wsproto.NewAgentSubscribeRejected(wsproto.AgentSubscribeRejected{
-
-			Key:    msg.Key,
-			TaskID: msg.TaskID,
-			Reason: "tombstone",
-		}))
+		rejectAgentSubscribe(c, msg, "tombstone")
 		return
 	}
 	// toolUseID isn't strictly needed by the tailer (all lookups use taskID)
 	// but we thread it through for log correlation. attach_subscribe does
 	// not expose it on the WS layer.
-	t, ok := h.tailers.ensureTailer(msg.Key, msg.TaskID, "", info.JSONLPath)
-	if !ok || t == nil {
-		c.SendJSON(wsproto.NewAgentSubscribeRejected(wsproto.AgentSubscribeRejected{
+	h.attachTailer(c, msg, info.JSONLPath, nil)
+}
 
-			Key:    msg.Key,
-			TaskID: msg.TaskID,
-			Reason: "capacity",
-		}))
+// subscribeWorkflowAgent tails a workflow agent's transcript once it is
+// there and its first line names the agent and its run's session; the fd
+// that check opened is closed, the tailer opens through tr.Open.
+func (h *Hub) subscribeWorkflowAgent(c *wsClient, msg node.ClientMsg, b *session.WorkflowBoard, tr session.AgentTranscript, st session.TranscriptStatus) {
+	if st == session.TranscriptPending {
+		rejectAgentSubscribe(c, msg, "pending")
+		return
+	}
+	f, pending, err := subagent.OpenAgentTranscript(tr.Open, tr.RunSessionID, msg.TaskID)
+	if pending {
+		rejectAgentSubscribe(c, msg, "pending")
+		return
+	}
+	if err != nil {
+		rejectAgentSubscribe(c, msg, "tombstone")
+		return
+	}
+	_ = f.Close()
+	h.attachTailer(c, msg, tr.Path, &workflowTail{open: tr.Open, done: workflowAgentDone(b, msg.TaskID)})
+}
+
+// attachTailer subscribes c to the (shared) tailer of msg's task.
+func (h *Hub) attachTailer(c *wsClient, msg node.ClientMsg, path string, wf *workflowTail) {
+	t, ok := h.tailers.ensureTailer(msg.Key, msg.TaskID, "", path, wf)
+	if !ok || t == nil {
+		rejectAgentSubscribe(c, msg, "capacity")
 		return
 	}
 	if !h.tailers.attach(tailerKey{msg.Key, msg.TaskID}, c) {
-		c.SendJSON(wsproto.NewAgentSubscribeRejected(wsproto.AgentSubscribeRejected{
+		rejectAgentSubscribe(c, msg, "closed")
+	}
+}
 
-			Key:    msg.Key,
-			TaskID: msg.TaskID,
-			Reason: "closed",
-		}))
-		return
+func rejectAgentSubscribe(c *wsClient, msg node.ClientMsg, reason string) {
+	c.SendJSON(wsproto.NewAgentSubscribeRejected(wsproto.AgentSubscribeRejected{Key: msg.Key, TaskID: msg.TaskID, Reason: reason}))
+}
+
+// workflowAgentDone reads agentID's row from b's publication: an attempt
+// that ended, an earlier attempt, an ended workflow or a row gone are over.
+func workflowAgentDone(b *session.WorkflowBoard, agentID string) func() (string, bool) {
+	return func() (string, bool) {
+		p := b.Published()
+		loc, ok := p.Agent(agentID)
+		if !ok {
+			return "completed", true
+		}
+		if !loc.Current {
+			return "stopped", true // superseded; the board keeps no outcome
+		}
+		switch st, _ := p.AgentState(loc); st {
+		case workflow.AgentDone, workflow.AgentSkipped:
+			return "completed", true
+		case workflow.AgentFailed:
+			return "error", true
+		case workflow.AgentStopped:
+			return "stopped", true
+		}
+		i := slices.IndexFunc(p.Workflows, func(w *workflow.Workflow) bool { return w.TaskID == loc.TaskID })
+		if i >= 0 && workflow.IsTerminal(p.Workflows[i].Status) {
+			return "stopped", true
+		}
+		return "", false
 	}
 }
 

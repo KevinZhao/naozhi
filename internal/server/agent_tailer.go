@@ -31,6 +31,11 @@ const (
 	// agentTailerMax caps concurrent tailers per Hub; beyond it subscribers get
 	// agent_subscribe_rejected{reason:"capacity"} and fall back to HTTP poll.
 	agentTailerMax = 50
+
+	// agentTailerDoneSettle is how long a workflow agent's board must have
+	// called it over, with no new lines, before its tailer closes: CC flushes
+	// the last lines (usually the answer) after the board hears the end.
+	agentTailerDoneSettle = time.Second
 )
 
 // agentTailer streams a single agent jsonl to any number of subscribed
@@ -41,6 +46,11 @@ type agentTailer struct {
 	taskID    string
 	toolUseID string
 	reader    *subagent.TranscriptReader
+	// done, set for a workflow agent, reports from its board whether the
+	// agent is over: no task_done ever names it.
+	done func() (status string, over bool)
+	// overSince is when done first held on an empty poll; zero otherwise.
+	overSince time.Time
 	reg       *tailerRegistry
 
 	stopCh   chan struct{}
@@ -73,9 +83,12 @@ func (t *agentTailer) pollOnce() bool {
 	if err != nil {
 		slog.Debug("agent_tailer: tail error", "key", t.key, "task", t.taskID, "err", err)
 	}
-
 	// Wall clock captured outside the lock to keep the critical section short (#1407).
 	now := time.Now()
+	if status, settled := t.doneSettled(len(events) > 0, now); settled {
+		t.reg.closeTask(t.key, t.taskID, status)
+		return false
+	}
 
 	t.mu.Lock()
 	if t.closed {
@@ -199,6 +212,29 @@ func (t *agentTailer) pollOnce() bool {
 		return false
 	}
 	return true
+}
+
+// doneSettled reports a workflow agent over once its board has said so on
+// every empty poll for agentTailerDoneSettle; a poll with lines restarts it.
+func (t *agentTailer) doneSettled(gotEvents bool, now time.Time) (string, bool) {
+	if t.done == nil {
+		return "", false
+	}
+	status, over := "", false
+	if !gotEvents {
+		status, over = t.done()
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	switch {
+	case !over:
+		t.overSince = time.Time{}
+	case t.overSince.IsZero():
+		t.overSince = now
+	default:
+		return status, now.Sub(t.overSince) >= agentTailerDoneSettle
+	}
+	return "", false
 }
 
 // updateMetaFromEventLocked refreshes meta counters from a single event.

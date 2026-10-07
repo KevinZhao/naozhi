@@ -289,6 +289,9 @@ function defaultGitStates() {
  *   the object in place; each request reads it then.
  * @param {number} [overrides.workflowDelayMs] - Hold GET /api/sessions/workflow answers this long
  *   (setWorkflowDelayMs changes it mid-test).
+ * @param {object} [overrides.agentEventsPending] - task_id → how many GET /api/sessions/agent_events
+ *   answer 202 {"status":"pending"} before the entries do, as for a workflow agent whose transcript
+ *   is not on disk yet. Every request lands in `agentEventsCalls`.
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
  *   (timezone / timezone_abbr / timezone_label ...). recent_runs_cap defaults to 5 like the backend.
@@ -429,6 +432,8 @@ function startMockServer(overrides = {}) {
   // every poll page — the behaviour dedupAgentPollBatch exists to absorb. The
   // mock reproduces that inclusivity deliberately; a `>` here would hide the bug.
   const agentEvents = overrides.agentEvents || {};
+  const agentEventsPending = { ...overrides.agentEventsPending };
+  const agentEventsCalls = [];
   const workflows = overrides.workflows || {};
   let workflowDelayMs = overrides.workflowDelayMs || 0;
   // Every GET /api/sessions/workflow, as its query parameters.
@@ -1024,6 +1029,13 @@ function startMockServer(overrides = {}) {
       const taskId = url.searchParams.get('task_id') || '';
       const after = Number(url.searchParams.get('after') || 0);
       const limit = Number(url.searchParams.get('limit') || 200);
+      agentEventsCalls.push(Object.fromEntries(url.searchParams));
+      if (agentEventsPending[taskId] > 0) {
+        agentEventsPending[taskId]--;
+        res.writeHead(202, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'pending' }));
+        return;
+      }
       const all = agentEvents[taskId] || [];
       // Inclusive, like the server: entries AT the watermark come back again.
       const page = all.filter(e => (e?.time || 0) >= after).slice(0, limit);
@@ -1433,6 +1445,7 @@ function startMockServer(overrides = {}) {
         get fullCronListCalls() { return fullCronListCalls; },
         get wsConnections() { return wsConnections; },
         get workflowCalls() { return workflowCalls; },
+        get agentEventsCalls() { return agentEventsCalls; },
         setWorkflowDelayMs(ms) { workflowDelayMs = ms; },
         // Mutators for tests that need the snapshot to CHANGE mid-run (e.g. a
         // /cd that moves a session's workspace). Bumping stats.version is what

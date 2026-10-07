@@ -7,8 +7,14 @@ package session
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 
+	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/workflow"
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // WorkflowBoard returns the session's workflow board; nil for a stub that
@@ -134,4 +140,73 @@ func (b *WorkflowBoard) Result(ctx context.Context, taskID string) (*workflow.Re
 		return c, ResultReady
 	}
 	return nil, ResultUnavailable
+}
+
+// TranscriptStatus is what AgentTranscript found for an agentId.
+type TranscriptStatus uint8
+
+const (
+	// TranscriptNone: no workflow row of the board has the agentId.
+	TranscriptNone TranscriptStatus = iota
+	// TranscriptPending: a row has it, but the run directory is not resolved.
+	TranscriptPending
+	// TranscriptReady: the transcript can be opened.
+	TranscriptReady
+)
+
+// AgentTranscript is a workflow agent's transcript for drill-in. Open opens
+// it anew each call inside an os.Root at the projects root, a regular file
+// only and without blocking; Path is where it sits, under the projects
+// root's spelling; RunSessionID is the session its run directory hangs
+// under, which the transcript's first line must name.
+type AgentTranscript struct {
+	Loc          workflow.AgentLoc
+	Path         string
+	Open         func() (*os.File, error)
+	RunSessionID string
+}
+
+// AgentTranscript locates agentID's transcript, current or earlier attempt,
+// from the board's publication.
+func (b *WorkflowBoard) AgentTranscript(agentID string) (AgentTranscript, TranscriptStatus) {
+	p := b.Published()
+	loc, ok := p.Agent(agentID)
+	if !ok || !validAgentFileID(agentID) {
+		return AgentTranscript{}, TranscriptNone
+	}
+	i := slices.IndexFunc(p.Workflows, func(w *workflow.Workflow) bool { return w.TaskID == loc.TaskID })
+	if i < 0 || p.Workflows[i].RunDir == "" {
+		return AgentTranscript{Loc: loc}, TranscriptPending
+	}
+	root, runDir := b.projectsRoot, p.Workflows[i].RunDir
+	rel, err := filepath.Rel(root, runDir)
+	parts := strings.Split(rel, string(filepath.Separator))
+	if err != nil || len(parts) < 2 || !claudefs.IsValidSessionID(parts[1]) {
+		return AgentTranscript{Loc: loc}, TranscriptPending
+	}
+	rel = claudefs.SubagentJSONL(rel, agentID)
+	open := func() (*os.File, error) {
+		r, err := os.OpenRoot(root)
+		if err != nil {
+			return nil, err
+		}
+		defer r.Close()
+		f, _, err := osutil.OpenRegularIn(r, rel, 0)
+		return f, err
+	}
+	return AgentTranscript{Loc: loc, Path: filepath.Join(root, rel), Open: open, RunSessionID: parts[1]}, TranscriptReady
+}
+
+// validAgentFileID reports whether id can name an agent file: letters and
+// digits only, as CC's agentIds are.
+func validAgentFileID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if c := id[i]; !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9') {
+			return false
+		}
+	}
+	return true
 }

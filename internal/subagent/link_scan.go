@@ -8,6 +8,8 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/limits"
 )
 
 // SeedFromHistory pre-populates the cache from persisted EventEntry records
@@ -216,3 +219,49 @@ func ProjectDir(cwd string) string {
 	}
 	return claudefs.ProjectDir(claudefs.DefaultDir(), cwd)
 }
+
+// ReadFirstLineIDs decodes the sessionId and agentId of a transcript's first
+// line from r, skipping every other key however large, up to
+// limits.MaxStreamJSONLine. An empty or half-written first line is an
+// io.EOF or io.ErrUnexpectedEOF.
+func ReadFirstLineIDs(r io.Reader) (sessionID, agentID string, err error) {
+	var ids struct {
+		SessionID string `json:"sessionId"`
+		AgentID   string `json:"agentId"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r, limits.MaxStreamJSONLine)).Decode(&ids); err != nil {
+		return "", "", err
+	}
+	return ids.SessionID, ids.AgentID, nil
+}
+
+// OpenAgentTranscript opens a workflow agent's transcript through open and
+// checks that its first line names sessionID and agentID. pending means it
+// is not there yet: missing, empty, or its first line half-written. Any
+// other failure (no regular file, another agent's file) is err. The caller
+// owns f.
+func OpenAgentTranscript(open func() (*os.File, error), sessionID, agentID string) (f *os.File, pending bool, err error) {
+	f, err = open()
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, true, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	sid, aid, err := ReadFirstLineIDs(f)
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		f.Close()
+		return nil, true, nil
+	}
+	if err == nil && (sid != sessionID || aid != agentID) {
+		err = errAgentMismatch
+	}
+	if err != nil {
+		f.Close()
+		return nil, false, err
+	}
+	return f, false, nil
+}
+
+// errAgentMismatch: a transcript's first line names another session or agent.
+var errAgentMismatch = errors.New("subagent: transcript names another session or agent")

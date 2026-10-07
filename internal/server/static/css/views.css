@@ -714,7 +714,8 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .wf-bar::-webkit-progress-value{background:var(--nz-ok);border-radius:var(--nz-radius-xs)}
 .wf-bar::-moz-progress-bar{background:var(--nz-ok);border-radius:var(--nz-radius-xs)}
 .wf-rows{display:flex;flex-direction:column;padding-left:var(--nz-space-4)}
-.wf-row{border-radius:var(--nz-radius-sm)}
+.wf-row{display:flex;flex-wrap:wrap;align-items:center;border-radius:var(--nz-radius-sm)}
+.wf-row>.wf-row-btn{flex:1 1 0}
 .wf-row.wf-sel{background:var(--nz-selected-bg);box-shadow:inset 2px 0 0 var(--nz-selected-bar)}
 .wf-row-btn{display:flex;align-items:center;gap:var(--nz-space-2);width:100%;min-width:0;padding:3px var(--nz-space-2);font:inherit;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);background:none;border:0;border-radius:var(--nz-radius-sm);text-align:left}
 button.wf-row-btn{cursor:pointer}
@@ -725,6 +726,14 @@ button.wf-row-btn:focus-visible{outline:2px solid var(--nz-focus);outline-offset
 .wf-model{flex-shrink:0;width:9em;color:var(--nz-text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .wf-row-btn .wf-stat{flex-shrink:0;min-width:9em}
 .wf-attempt{color:var(--nz-text-mute);white-space:nowrap}
+.wf-attempt-btn,.wf-attempt-item{flex-shrink:0;font:inherit;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);background:none;border:1px solid var(--nz-border);border-radius:var(--nz-radius-pill);padding:0 var(--nz-space-2);cursor:pointer;white-space:nowrap}
+.wf-attempt-btn{margin-right:var(--nz-space-2)}
+.wf-attempt-btn:hover,.wf-attempt-item:hover{background:var(--nz-bg-2)}
+.wf-attempt-btn:focus-visible,.wf-attempt-item:focus-visible{outline:2px solid var(--nz-focus);outline-offset:-2px}
+.wf-attempt-btn[aria-expanded="true"]{color:var(--nz-text);border-color:var(--nz-text-dim)}
+.wf-attempts{display:flex;flex-basis:100%;flex-wrap:wrap;gap:var(--nz-space-1);padding:0 var(--nz-space-2) var(--nz-space-1) var(--nz-space-6)}
+.wf-attempts.nz-hidden{display:none}
+.wf-attempt-item[aria-current]{color:var(--nz-text-strong);border-color:var(--nz-selected-bar);background:var(--nz-selected-bg)}
 .wf-detail{flex:1;min-width:0;color:var(--nz-text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .wf-s-err .wf-detail{color:var(--nz-err)}
 .wf-more{align-self:flex-start;margin:var(--nz-space-1) var(--nz-space-2);padding:0;font:inherit;font-size:var(--nz-fs-xs);color:var(--nz-accent);background:none;border:0;cursor:pointer}

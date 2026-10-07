@@ -915,6 +915,9 @@ func TestWorkflowBoard_NilSafe(t *testing.T) {
 	if _, ok := b.WorkflowAgent("a1"); ok {
 		t.Error("nil board found an agent")
 	}
+	if _, st := b.AgentTranscript("a1"); st != TranscriptNone {
+		t.Errorf("nil board's transcript status %d, want TranscriptNone", st)
+	}
 	b.bind(&setProc{}, "/ws")
 	b.procEnded(&setProc{}, cli.ProcessEnd{})
 	b.restore("k", []workflow.Ref{{TaskID: "w1", Status: workflow.StatusRunning}}, "/ws", time.Now())

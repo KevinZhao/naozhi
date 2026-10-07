@@ -81,7 +81,7 @@ func TestTailerRegistry_RefusesPathsOutsideAllowedRoot(t *testing.T) {
 	root := t.TempDir()
 	r := newTailerRegistry(root)
 	outside := filepath.Join(t.TempDir(), "agent.jsonl")
-	if tl, ok := r.ensureTailer("k", "task-1", "tool-1", outside); ok || tl != nil {
+	if tl, ok := r.ensureTailer("k", "task-1", "tool-1", outside, nil); ok || tl != nil {
 		t.Fatalf("ensureTailer accepted %q outside allowedRoot %q", outside, root)
 	}
 	if n := r.count.Load(); n != 0 {
@@ -124,11 +124,11 @@ func TestBuildServer_TailerRootIsProjectsRoot(t *testing.T) {
 		t.Errorf("engine.allowedRoot = %q, want the operator workspace %q", got, workspace)
 	}
 
-	if tl, ok := srv.hub.tailers.ensureTailer("k", "task-1", "tool-1", transcript); !ok || tl == nil {
+	if tl, ok := srv.hub.tailers.ensureTailer("k", "task-1", "tool-1", transcript, nil); !ok || tl == nil {
 		t.Errorf("ensureTailer refused the sub-agent transcript %q under the projects root", transcript)
 	}
 	inWorkspace := filepath.Join(workspace, "agent-a0123456789abcdef.jsonl")
-	if tl, ok := srv.hub.tailers.ensureTailer("k", "task-2", "tool-2", inWorkspace); ok || tl != nil {
+	if tl, ok := srv.hub.tailers.ensureTailer("k", "task-2", "tool-2", inWorkspace, nil); ok || tl != nil {
 		t.Errorf("ensureTailer accepted %q, inside the workspace but outside the projects root", inWorkspace)
 	}
 }
@@ -162,7 +162,7 @@ func TestBuildServer_UnresolvedHomeFailsClosed(t *testing.T) {
 	if srv.hub.tailers.allowedRoot == "" {
 		t.Fatal("tailers.allowedRoot is empty, i.e. unrestricted, while agent_events fails closed")
 	}
-	if tl, ok := srv.hub.tailers.ensureTailer("k", "task-1", "tool-1", transcript); ok || tl != nil {
+	if tl, ok := srv.hub.tailers.ensureTailer("k", "task-1", "tool-1", transcript, nil); ok || tl != nil {
 		t.Errorf("ensureTailer accepted %q with no resolvable projects root", transcript)
 	}
 }

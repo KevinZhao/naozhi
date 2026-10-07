@@ -94,8 +94,8 @@ func TestTailer_RegistryEnsureIdempotent(t *testing.T) {
 	r := newTailerRegistry("")
 	defer r.Shutdown()
 
-	t1, ok1 := r.ensureTailer("k", "t1", "toolu_A", path)
-	t2, ok2 := r.ensureTailer("k", "t1", "toolu_A", path)
+	t1, ok1 := r.ensureTailer("k", "t1", "toolu_A", path, nil)
+	t2, ok2 := r.ensureTailer("k", "t1", "toolu_A", path, nil)
 	if !ok1 || !ok2 || t1 != t2 {
 		t.Errorf("ensureTailer not idempotent: ok1=%v ok2=%v same=%v", ok1, ok2, t1 == t2)
 	}
@@ -114,12 +114,12 @@ func TestTailer_CapacityRejected(t *testing.T) {
 	// Fill to the cap.
 	for i := 0; i < agentTailerMax; i++ {
 		taskID := "t" + itoaSmall(i)
-		_, ok := r.ensureTailer("k", taskID, "toolu", path)
+		_, ok := r.ensureTailer("k", taskID, "toolu", path, nil)
 		if !ok {
 			t.Fatalf("unexpected reject at slot %d", i)
 		}
 	}
-	_, ok := r.ensureTailer("k", "overflow", "toolu", path)
+	_, ok := r.ensureTailer("k", "overflow", "toolu", path, nil)
 	if ok {
 		t.Errorf("expected reject past cap, got ok")
 	}
@@ -137,7 +137,7 @@ func TestTailer_AttachReplaysBufferedEvents(t *testing.T) {
 	r := newTailerRegistry("")
 	defer r.Shutdown()
 
-	tl, ok := r.ensureTailer("k", "t1", "toolu", path)
+	tl, ok := r.ensureTailer("k", "t1", "toolu", path, nil)
 	if !ok {
 		t.Fatal("ensureTailer failed")
 	}
@@ -183,7 +183,7 @@ func TestTailer_AttachEmptyBufferNoReplay(t *testing.T) {
 	r := newTailerRegistry("")
 	defer r.Shutdown()
 
-	if _, ok := r.ensureTailer("k", "t1", "toolu", path); !ok {
+	if _, ok := r.ensureTailer("k", "t1", "toolu", path, nil); !ok {
 		t.Fatal("ensureTailer failed")
 	}
 
@@ -213,7 +213,7 @@ func TestTailer_CloseTaskFiresAgentDone(t *testing.T) {
 	r := newTailerRegistry("")
 	defer r.Shutdown()
 
-	_, _ = r.ensureTailer("k", "t1", "toolu", path)
+	_, _ = r.ensureTailer("k", "t1", "toolu", path, nil)
 	c, out := newCapturedClient(t, nil)
 	if !r.attach(tailerKey{"k", "t1"}, c) {
 		t.Fatal("attach failed")
@@ -264,7 +264,7 @@ func TestTailer_DetachDoesNotStopTailer(t *testing.T) {
 	r := newTailerRegistry("")
 	defer r.Shutdown()
 
-	tl, _ := r.ensureTailer("k", "t1", "toolu", path)
+	tl, _ := r.ensureTailer("k", "t1", "toolu", path, nil)
 	c, _ := newCapturedClient(t, nil)
 	r.attach(tailerKey{"k", "t1"}, c)
 	r.detach(tailerKey{"k", "t1"}, c)
@@ -298,7 +298,7 @@ func TestTailer_AttachAfterDoneClosedIsNoOp(t *testing.T) {
 	r := newTailerRegistry("")
 	defer r.Shutdown()
 
-	r.ensureTailer("k", "t1", "u", p1)
+	r.ensureTailer("k", "t1", "u", p1, nil)
 	c, _ := newCapturedClient(t, nil)
 
 	// Simulate the pump teardown that closed c.done before the buffered
@@ -341,8 +341,8 @@ func TestTailer_DetachClientDropsAllSubscriptions(t *testing.T) {
 	r := newTailerRegistry("")
 	defer r.Shutdown()
 
-	r.ensureTailer("k", "t1", "u", p1)
-	r.ensureTailer("k", "t2", "u", p2)
+	r.ensureTailer("k", "t1", "u", p1, nil)
+	r.ensureTailer("k", "t2", "u", p2, nil)
 	c, _ := newCapturedClient(t, nil)
 	r.attach(tailerKey{"k", "t1"}, c)
 	r.attach(tailerKey{"k", "t2"}, c)
@@ -430,7 +430,7 @@ func TestTailer_FinalizeClosesReaderFD(t *testing.T) {
 	t.Run("closeTask", func(t *testing.T) {
 		r := newTailerRegistry("")
 		defer r.Shutdown()
-		tl, ok := r.ensureTailer("k", "t1", "toolu", path)
+		tl, ok := r.ensureTailer("k", "t1", "toolu", path, nil)
 		if !ok {
 			t.Fatal("ensureTailer failed")
 		}
@@ -446,7 +446,7 @@ func TestTailer_FinalizeClosesReaderFD(t *testing.T) {
 
 	t.Run("shutdown", func(t *testing.T) {
 		r := newTailerRegistry("")
-		tl, ok := r.ensureTailer("k", "t2", "toolu", path)
+		tl, ok := r.ensureTailer("k", "t2", "toolu", path, nil)
 		if !ok {
 			t.Fatal("ensureTailer failed")
 		}
@@ -475,4 +475,38 @@ func itoaSmall(n int) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+// TestTailer_DoneSettled: a workflow tailer is over only after its board has
+// said so on every empty poll for agentTailerDoneSettle; lines restart it.
+func TestTailer_DoneSettled(t *testing.T) {
+	over := false
+	tl := &agentTailer{done: func() (string, bool) { return "completed", over }}
+	t0 := time.Unix(1000, 0)
+	at := func(d time.Duration) time.Time { return t0.Add(d) }
+	steps := []struct {
+		events bool
+		over   bool
+		at     time.Duration
+		want   bool
+	}{
+		{false, false, 0, false},
+		{false, true, 100 * time.Millisecond, false},                         // first seen
+		{false, true, 100*time.Millisecond + agentTailerDoneSettle/2, false}, // too soon
+		{true, true, 200*time.Millisecond + agentTailerDoneSettle, false},    // a line restarts it
+		{false, true, 300*time.Millisecond + agentTailerDoneSettle, false},   // seen again
+		{false, false, 400*time.Millisecond + 2*agentTailerDoneSettle, false},
+		{false, true, 500*time.Millisecond + 2*agentTailerDoneSettle, false},
+		{false, true, 500*time.Millisecond + 3*agentTailerDoneSettle, true},
+	}
+	for i, s := range steps {
+		over = s.over
+		status, got := tl.doneSettled(s.events, at(s.at))
+		if got != s.want || (got && status != "completed") {
+			t.Fatalf("step %d: (%q, %v), want settled=%v", i, status, got, s.want)
+		}
+	}
+	if _, got := (&agentTailer{}).doneSettled(false, t0); got {
+		t.Error("a tailer with no done func settled")
+	}
 }

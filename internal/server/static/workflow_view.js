@@ -10,7 +10,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { wsm } from './ws_manager.js';
 import { selection, sessionList } from './state.js';
 import { authHeaders } from './platform.js';
-import { fetchJSON } from './nz_util.js';
+import { fetchJSON, nzBus, nzViews } from './nz_util.js';
 import { sid } from './session_ident.js';
 import { announce, isMobile } from './utilities.js';
 import {
@@ -35,6 +35,7 @@ import {
  * @property {Map<number, boolean>} phaseOpen the user's phase toggles
  * @property {Map<number, number>} limit rows shown per phase
  * @property {Map<number, RowView>} rows by agent index
+ * @property {Set<number>} attempts rows whose earlier attempts are listed
  * @property {HTMLElement} loading
  * @property {HTMLElement | null} result the result block, for resultOf
  * @property {object | null} resultOf
@@ -52,7 +53,7 @@ const clock = { offset: null };
 // pump.timer wakes the fetch pump for a fetch that had to wait.
 const pump = { timer: 0, at: 0 };
 // view is what the panel shows: its element, the session and a view per task.
-const view = { panel: null, sid: '', wfs: /** @type {Map<string, WorkflowView>} */ (new Map()), selected: '' };
+const view = { panel: null, sid: '', wfs: /** @type {Map<string, WorkflowView>} */ (new Map()), selected: '', following: false };
 const paint = { pending: false, last: 0 };
 const tick = { timer: 0 };
 // announced holds the (task, settled status) pairs this page has passed.
@@ -289,7 +290,7 @@ function newWorkflowView(s, e, newest) {
   const openNow = pref !== undefined ? pref === 1 : (e.open || (newest && !isMobile()));
   const loading = el('div', 'wf-empty', '加载中…');
   return {
-    el: d, sum, body, phases: new Map(), phaseOpen: new Map(), limit: new Map(), rows: new Map(), loading, result: null, resultOf: null, openNow,
+    el: d, sum, body, phases: new Map(), phaseOpen: new Map(), limit: new Map(), rows: new Map(), attempts: new Set(), loading, result: null, resultOf: null, openNow,
     entry: e, epoch: e.epoch,
   };
 }
@@ -490,10 +491,31 @@ function agentIdOf(a) {
   return a.agent_id || (a.prev_agent_ids || []).slice(-1)[0] || '';
 }
 
+/** @param {Agent} a */
+function earlierIdsOf(a) {
+  return (a.prev_agent_ids || []).filter((id) => id !== a.agent_id);
+}
+
+/**
+ * openButton is a button drilling into agentId's transcript.
+ * @param {string} cls
+ * @param {string} taskId
+ * @param {string} agentId
+ */
+function openButton(cls, taskId, agentId) {
+  const b = el('button', cls);
+  b.setAttribute('type', 'button');
+  b.dataset.action = 'wf-open-agent';
+  b.dataset.agentId = agentId;
+  b.dataset.taskId = taskId;
+  return b;
+}
+
 /**
  * rowEl is agent a's row element, rebuilt when its state or agent id
  * changed (a started agent's row becomes a button), refilled when only its
- * content did.
+ * content did. A row with earlier attempts gets their badge, which lists
+ * them, each a button too.
  * @param {WorkflowView} v
  * @param {string} taskId
  * @param {Agent} a
@@ -509,22 +531,43 @@ function rowEl(v, taskId, a) {
   }
   const row = el('div', 'wf-row');
   row.dataset.index = String(a.index);
-  const inner = el(id ? 'button' : 'div', 'wf-row-btn');
-  if (id) {
-    inner.setAttribute('type', 'button');
-    inner.dataset.action = 'wf-open-agent';
-    inner.dataset.agentId = id;
-    inner.dataset.taskId = taskId;
-  }
+  const inner = id ? openButton('wf-row-btn', taskId, id) : el('div', 'wf-row-btn');
   const d = WORKFLOW_AGENT_DISPLAY[a.state] || WORKFLOW_AGENT_DISPLAY.unknown;
   row.classList.add('wf-s-' + d.tone);
-  inner.append(glyph(d, d.text), el('span', 'wf-name'), el('span', 'wf-model'), quiet('wf-stat', ''), el('span', 'wf-attempt'), el('span', 'wf-detail'));
+  const earlier = earlierIdsOf(a);
+  inner.append(glyph(d, d.text), el('span', 'wf-name'), el('span', 'wf-model'), quiet('wf-stat', ''), ...(earlier.length ? [] : [el('span', 'wf-attempt')]), el('span', 'wf-detail'));
   row.append(inner);
+  if (earlier.length) row.append(...attemptList(v, taskId, a, earlier));
   fillRow(row, a);
-  markSelected(row, id);
+  markSelected(row);
   if (r) r.el.replaceWith(row);
   v.rows.set(a.index, { el: row, state: a.state, agentId: id, rev: a.rev });
   return row;
+}
+
+/**
+ * attemptList is a's badge of earlier attempts and the list it unfolds.
+ * @param {WorkflowView} v
+ * @param {string} taskId
+ * @param {Agent} a
+ * @param {string[]} earlier
+ */
+function attemptList(v, taskId, a, earlier) {
+  const open = v.attempts.has(a.index);
+  const badge = el('button', 'wf-attempt-btn', '×' + Math.max(a.attempt || 0, earlier.length + 1));
+  badge.setAttribute('type', 'button');
+  badge.setAttribute('aria-expanded', String(open));
+  badge.setAttribute('aria-label', '较早的 ' + earlier.length + ' 次尝试');
+  badge.dataset.action = 'wf-attempts';
+  badge.dataset.taskId = taskId;
+  const list = el('div', 'wf-attempts' + (open ? '' : ' nz-hidden'));
+  earlier.forEach((prev, i) => {
+    const b = openButton('wf-attempt-item', taskId, prev);
+    b.dataset.attempt = String(i + 1);
+    b.textContent = '第 ' + (i + 1) + ' 次';
+    list.append(b);
+  });
+  return [badge, list];
 }
 
 /** @param {HTMLElement} row @param {Agent} a */
@@ -537,19 +580,32 @@ function fillRow(row, a) {
   if (a.tool_calls !== undefined || a.tokens) stat.push((a.tool_calls || 0) + ' tools');
   if (a.duration_ms) stat.push(fmtElapsed(a.duration_ms));
   q('.wf-stat').textContent = stat.join(' · ');
-  q('.wf-attempt').textContent = a.attempt > 1 ? '×' + a.attempt : '';
+  const at = q('.wf-attempt');
+  if (at) at.textContent = a.attempt > 1 ? '×' + a.attempt : '';
   const unknown = !WORKFLOW_AGENT_DISPLAY[a.state] || WORKFLOW_AGENT_DISPLAY[a.state] === WORKFLOW_AGENT_DISPLAY.unknown;
   const tool = a.last_tool ? [a.last_tool, a.last_tool_summary].filter(Boolean).join(' · ') : '';
   q('.wf-detail').textContent = a.error || (unknown ? a.raw_state || '' : '') || tool;
 }
 
-/** @param {HTMLElement} row @param {string} id */
-function markSelected(row, id) {
-  const on = !!id && id === view.selected;
+// markSelected marks the row, and its button, of the agent drilled into.
+/** @param {HTMLElement} row */
+function markSelected(row) {
+  let on = false;
+  for (const btn of row.querySelectorAll('[data-agent-id]')) {
+    const hit = !!view.selected && /** @type {HTMLElement} */ (btn).dataset.agentId === view.selected;
+    on = on || hit;
+    if (hit) btn.setAttribute('aria-current', 'true');
+    else btn.removeAttribute('aria-current');
+  }
   row.classList.toggle('wf-sel', on);
-  const btn = row.querySelector('.wf-row-btn');
-  if (on) btn.setAttribute('aria-current', 'true');
-  else btn.removeAttribute('aria-current');
+}
+
+// onAgentView follows the agent view from the panel's first drill-in on:
+// a row click, Esc or a session switch moves the mark.
+/** @param {Event} ev */
+function onAgentView(ev) {
+  view.selected = /** @type {CustomEvent} */ (ev).detail?.taskID || '';
+  for (const v of view.wfs.values()) for (const r of v.rows.values()) markSelected(r.el);
 }
 
 /** @param {WorkflowEntry} e */
@@ -624,8 +680,8 @@ export function onWorkflowSessionSwitched(prevSid) {
 }
 
 // workflowActions are the panel's data-action handlers, merged into
-// dashboard.js's registerActions table. wf-open-agent marks the row the
-// drill-in shows.
+// dashboard.js's registerActions table. wf-open-agent drills into a row's
+// agent (or an earlier attempt), wf-attempts unfolds a row's attempts.
 export const workflowActions = {
   'wf-more': (/** @type {HTMLElement} */ btn) => {
     const v = view.wfs.get(btn.dataset.taskId);
@@ -635,7 +691,25 @@ export const workflowActions = {
     renderWorkflowPanel();
   },
   'wf-open-agent': (/** @type {HTMLElement} */ btn) => {
-    view.selected = btn.dataset.agentId || '';
-    for (const v of view.wfs.values()) for (const r of v.rows.values()) markSelected(r.el, r.agentId);
+    const id = btn.dataset.agentId;
+    const v = view.wfs.get(btn.dataset.taskId);
+    const row = btn.closest('.wf-row');
+    if (!id || !v || !row) return;
+    let label = row.querySelector('.wf-name')?.textContent || id;
+    if (btn.dataset.attempt) label += '（第 ' + btn.dataset.attempt + ' 次）';
+    const phase = btn.closest('.wf-phase')?.querySelector('.wf-phase-title')?.textContent;
+    if (!view.following) { view.following = true; nzBus.addEventListener('agent:view', onAgentView); }
+    nzViews.agent?.switchTo(id, { label, crumb: nameOf(v.entry.workflow) + (phase ? ' · ' + phase : '') });
+  },
+  'wf-attempts': (/** @type {HTMLElement} */ btn) => {
+    const v = view.wfs.get(btn.dataset.taskId);
+    const row = btn.closest('.wf-row');
+    if (!v || !row) return;
+    const index = Number(/** @type {HTMLElement} */ (row).dataset.index);
+    const open = !v.attempts.has(index);
+    if (open) v.attempts.add(index);
+    else v.attempts.delete(index);
+    btn.setAttribute('aria-expanded', String(open));
+    row.querySelector('.wf-attempts')?.classList.toggle('nz-hidden', !open);
   },
 };
