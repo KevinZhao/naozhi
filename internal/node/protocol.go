@@ -28,9 +28,9 @@ type ServerMsg struct {
 	// mirroring the HTTP Retry-After header on /api/auth/login 429.
 	RetryAfter int `json:"retry_after,omitempty"`
 
-	// Agent-team fields (RFC v4 agent-team-ui §3.5.2), all omitempty.
-	// TODO(docs/TODO.md): agent_event has no per-message seq; the dashboard
-	// de-dups replay/live overlap via (time, type, tool_use_id).
+	// Agent-team fields (RFC v4 agent-team-ui §3.5.2), all omitempty. An
+	// agent_event's entry carries the UUID subagent.TranscriptReader derives
+	// from its jsonl line; the dashboard dedups replay/live overlap by it.
 	TaskID    string          `json:"task_id,omitempty"`
 	AgentMeta *AgentMetaPatch `json:"meta,omitempty"`
 

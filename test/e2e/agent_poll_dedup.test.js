@@ -182,3 +182,91 @@ test.describe('#2432 agent transcript poll dedup', () => {
     }
   });
 });
+
+// #3669 C: an entry whose time is 0 (a transcript record without a parseable
+// timestamp) passes every time filter — the server's and the client's — so
+// the WS tailer's replay and every poll page carry it again. The server gives
+// each transcript entry a uuid derived from its jsonl line; the drill-in must
+// render each untimed uuid once, while two untimed entries with the same text
+// but distinct uuids both render.
+test.describe('#3669 untimed agent entries', () => {
+  const initial = [
+    { time: T0, type: 'user', summary: 'go', detail: 'go', uuid: 'a0000000000000000000000000000001' },
+    { time: 0, type: 'text', summary: 'untimed', detail: 'untimed', uuid: 'a0000000000000000000000000000002' },
+    { time: 0, type: 'text', summary: 'untimed', detail: 'untimed', uuid: 'a0000000000000000000000000000003' },
+    { time: T_SAME, type: 'text', summary: 'answer-a', detail: 'answer-a', uuid: 'a0000000000000000000000000000004' },
+  ];
+
+  /**
+   * @param {import('@playwright/test').Page} page
+   * @param {string} mockURL
+   */
+  async function openDrillIn(page, mockURL) {
+    await page.goto(mockURL + '/dashboard');
+    await page.waitForSelector('.session-card');
+    await page.click(`.session-card[data-key="${SESSION_KEY}"]`);
+    await page.waitForSelector('#events-scroll');
+    await page.evaluate((taskID) => {
+      (/** @type {any} */ (window)).nz.views.agent.switchTo(taskID);
+    }, TASK_ID);
+  }
+
+  /** @param {import('@playwright/test').Locator} rows */
+  async function untimedCount(rows) {
+    return (await rows.allInnerTexts()).filter(t => t.includes('untimed')).length;
+  }
+
+  test('WS tailer 从头重放时 time 为 0 的条目不重复渲染', async ({ browser }) => {
+    const mock = await startMockServer({ agentEvents: { [TASK_ID]: initial } });
+    const ctx = await browser.newContext({ ...desktop });
+    try {
+      const page = await ctx.newPage();
+      await openDrillIn(page, mock.url);
+      const rows = page.locator('#events-scroll > .event');
+      await expect(rows).toHaveCount(4);
+      expect(await untimedCount(rows), 'same text, distinct uuids').toBe(2);
+
+      // The tailer replays its buffer from the transcript's start, one
+      // agent_event frame per entry, then a new untimed entry whose text
+      // matches the replayed ones but whose uuid does not.
+      const replay = initial.concat([
+        { time: 0, type: 'text', summary: 'untimed', detail: 'untimed', uuid: 'a0000000000000000000000000000005' },
+      ]);
+      await page.evaluate(({ taskID, key, events }) => {
+        for (const event of events) {
+          (/** @type {any} */ (window)).wsm.onMessage({ type: 'agent_event', key, task_id: taskID, event });
+        }
+      }, { taskID: TASK_ID, key: SESSION_KEY, events: replay });
+
+      await expect(rows, 'replayed untimed entries rendered again, or the new one was dropped')
+        .toHaveCount(5);
+      expect(await untimedCount(rows)).toBe(3);
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
+  });
+
+  test('HTTP poll 每页都带回 time 为 0 的条目时不重复渲染', async ({ browser }) => {
+    const mock = await startMockServer({ agentEvents: { [TASK_ID]: initial } });
+    const ctx = await browser.newContext({ ...desktop });
+    try {
+      const page = await ctx.newPage();
+      await openDrillIn(page, mock.url);
+      const rows = page.locator('#events-scroll > .event');
+      await expect(rows).toHaveCount(4);
+      await startPollFallback(page);
+
+      // Each tick polls after=T_SAME and the mock (like the server) re-admits
+      // the untimed entries on that page. A second request means the first
+      // tick's page has been applied.
+      await expect.poll(() => mock.agentEventsCalls.filter(c => c.after === String(T_SAME)).length,
+        { timeout: POLL_MS * 3 }).toBeGreaterThan(1);
+      await expect(rows, 'a poll tick re-rendered the untimed entries').toHaveCount(4);
+      expect(await untimedCount(rows)).toBe(2);
+    } finally {
+      await ctx.close();
+      mock.server.close();
+    }
+  });
+});

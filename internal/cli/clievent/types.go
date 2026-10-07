@@ -13,7 +13,8 @@ type EventEntry struct {
 	// UUID is a 32-char lowercase hex identity assigned by EventLog.stampUUID
 	// and persisted; MergedSource's exact-match dedup key between the local
 	// JSONL tier and Claude CLI JSONL fallback. "" = legacy entry (MergedSource
-	// derives a stable UUID from Time + Summary).
+	// derives a stable UUID from Time + Summary). Subagent transcript entries
+	// get one derived from their jsonl line (subagent.TranscriptReader).
 	UUID       string   `json:"uuid,omitempty"`
 	Time       int64    `json:"time"`                 // unix ms
 	Type       string   `json:"type"`                 // init, thinking, tool_use, text, result, system, agent, todo, task_start, task_progress (also maps task_updated), task_done
