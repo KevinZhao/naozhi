@@ -14,7 +14,7 @@
 // 跑法：cd test/e2e && npx playwright test dismiss_branches.test.js --project=desktop-chrome
 
 const { test, expect } = require('@playwright/test');
-const { startMockServer } = require('./mock-server');
+const { startMockServer, defaultSessions } = require('./mock-server');
 
 const KEY = 'dashboard:direct:2026-01-01-120000-1:myproject';
 const PROJ = '/home/user/workspace/myproject';
@@ -42,20 +42,28 @@ const dismiss = (page, key) => page.evaluate((k) => window.nz.test.dismissSessio
 const selectedKey = (page) => page.evaluate(() => window.nz.test.selectedKey);
 
 test('the selected managed session: card and panel go at once, DELETE carries the key', async ({ browser }) => {
-  const { page, deletes, close } = await open(browser);
+  const sessions = defaultSessions();
+  const { page, deletes, close } = await open(browser, { sessions });
   try {
     await page.click(`.session-card[data-key="${KEY}"]`);
     await expect(page.locator('#main #events-scroll')).toHaveCount(1);
+    const deleted = page.waitForEvent('requestfinished', (r) => r.method() === 'DELETE' && new URL(r.url()).pathname === '/api/sessions');
     await dismiss(page, KEY);
     await expect(page.locator(`.session-card[data-key="${KEY}"]`)).toHaveCount(0);
     await expect(page.locator('#main #quick-ask-input')).toHaveCount(1);
     expect(await selectedKey(page)).toBeNull();
     await expect.poll(() => deletes.length).toBe(1);
     expect(JSON.parse(deletes[0])).toEqual({ key: KEY });
-    // The DELETE's settle re-syncs the list. The fixture is at stats.version 1
-    // and a 200 DELETE bumps it, so lastVersion 2 means a list fetched after the
-    // DELETE has painted: the card must still be gone and the panel still empty.
-    await expect.poll(() => page.evaluate(() => window.nz.test.lastVersion)).toBe(2);
+    // The DELETE's settle stops hiding the key and zeroes lastVersion, then
+    // re-syncs. Seeing both "no key hidden" and the server's post-DELETE
+    // version therefore means a list fetched after the settle has painted
+    // unfiltered: the card must still be gone and the panel still empty.
+    await deleted;
+    const version = sessions.stats.version;
+    await expect.poll(() => page.evaluate(async () => {
+      const { sessionList } = await import('/static/state.js');
+      return { hidden: sessionList.optimisticDeleteKeys.size, version: sessionList.lastVersion };
+    })).toEqual({ hidden: 0, version });
     await expect(page.locator(`.session-card[data-key="${KEY}"]`)).toHaveCount(0);
     await expect(page.locator('#main #quick-ask-input')).toHaveCount(1);
   } finally { await close(); }
