@@ -3,7 +3,8 @@
 // dismissSession (tuning.js) has one branch per kind of sidebar card. Each
 // removes the card; when the dismissed session is the one on screen the main
 // panel falls back to the empty quick-ask state:
-//   - managed: optimistic, DELETE /api/sessions fired without waiting;
+//   - managed: optimistic, DELETE /api/sessions fired without waiting, and
+//     the card stays gone once the DELETE's re-sync has painted;
 //   - pending (never sent): only the local record goes, no request;
 //   - discovered: POST /api/discovered/close, the card goes once it lands;
 //   - a cron stub (server-side filtered, so only a server bug shows one):
@@ -13,7 +14,7 @@
 // 跑法：cd test/e2e && npx playwright test dismiss_branches.test.js --project=desktop-chrome
 
 const { test, expect } = require('@playwright/test');
-const { startMockServer } = require('./mock-server');
+const { startMockServer, defaultSessions } = require('./mock-server');
 
 const KEY = 'dashboard:direct:2026-01-01-120000-1:myproject';
 const PROJ = '/home/user/workspace/myproject';
@@ -41,16 +42,30 @@ const dismiss = (page, key) => page.evaluate((k) => window.nz.test.dismissSessio
 const selectedKey = (page) => page.evaluate(() => window.nz.test.selectedKey);
 
 test('the selected managed session: card and panel go at once, DELETE carries the key', async ({ browser }) => {
-  const { page, deletes, close } = await open(browser);
+  const sessions = defaultSessions();
+  const { page, deletes, close } = await open(browser, { sessions });
   try {
     await page.click(`.session-card[data-key="${KEY}"]`);
     await expect(page.locator('#main #events-scroll')).toHaveCount(1);
+    const deleted = page.waitForEvent('requestfinished', (r) => r.method() === 'DELETE' && new URL(r.url()).pathname === '/api/sessions');
     await dismiss(page, KEY);
     await expect(page.locator(`.session-card[data-key="${KEY}"]`)).toHaveCount(0);
     await expect(page.locator('#main #quick-ask-input')).toHaveCount(1);
     expect(await selectedKey(page)).toBeNull();
     await expect.poll(() => deletes.length).toBe(1);
     expect(JSON.parse(deletes[0])).toEqual({ key: KEY });
+    // The DELETE's settle stops hiding the key and zeroes lastVersion, then
+    // re-syncs. Seeing both "no key hidden" and the server's post-DELETE
+    // version therefore means a list fetched after the settle has painted
+    // unfiltered: the card must still be gone and the panel still empty.
+    await deleted;
+    const version = sessions.stats.version;
+    await expect.poll(() => page.evaluate(async () => {
+      const { sessionList } = await import('/static/state.js');
+      return { hidden: sessionList.optimisticDeleteKeys.size, version: sessionList.lastVersion };
+    })).toEqual({ hidden: 0, version });
+    await expect(page.locator(`.session-card[data-key="${KEY}"]`)).toHaveCount(0);
+    await expect(page.locator('#main #quick-ask-input')).toHaveCount(1);
   } finally { await close(); }
 });
 
