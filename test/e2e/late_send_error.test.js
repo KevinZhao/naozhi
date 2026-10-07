@@ -31,6 +31,8 @@ test.beforeEach(({ }, testInfo) => {
 let mock;
 test.beforeAll(async () => { mock = await startMockServer({ ws: true }); });
 test.afterAll(() => mock.server.close());
+// Each test starts from the listing a fresh mock has; state() moves it.
+test.beforeEach(() => mock.setSessionStateWithoutVersionBump(KEY, 'ready'));
 
 const subs = (conn) => conn.messages.filter((m) => m.type === 'subscribe' && m.key === KEY);
 const sends = (conn) => conn.messages.filter((m) => m.type === 'send');
@@ -59,7 +61,14 @@ async function sendWS(page, conn, text) {
   return sends(conn)[before].id;
 }
 
-const state = (conn, s) => conn.send({ type: 'session_state', key: KEY, node: 'local', state: s });
+// state pushes a process state and makes the mock's sessions listing agree,
+// so a sessions poll sent after the push, whenever and by whatever (the
+// socket's connect, a discovered-set change), reports it rather than rolling
+// it back.
+const state = (conn, s) => {
+  mock.setSessionStateWithoutVersionBump(KEY, s);
+  conn.send({ type: 'session_state', key: KEY, node: 'local', state: s });
+};
 const errorAck = (conn, id) => conn.send({ type: 'send_ack', id, status: 'error', key: KEY, error: 'boom' });
 const stateIs = (page, s) => page.waitForFunction(([k, want]) => sessionsData[sid(k, 'local')].state === want, [KEY, s]);
 const composerText = (page) => page.$eval('#msg-input', (el) => el.innerText.trim());
