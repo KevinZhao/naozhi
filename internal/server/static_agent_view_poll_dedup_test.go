@@ -112,6 +112,11 @@ eq(c.cursor.afterMS, 100, 'untimed entries do not move the watermark');
 for (const ev of page0) {
   const r = dedupAgentPollBatch([ev], c.cursor);
   eq(r.events.length, 0, 'WS replay of ' + ev.uuid + ' renders nothing');
+  // One call per WS frame: copying the untimed set each time makes a
+  // tailer replay quadratic in the transcript's untimed entries.
+  if (r.cursor.untimed !== c.cursor.untimed) {
+    console.error('FAIL the untimed set was copied, not carried over'); process.exit(1);
+  }
   c = r;
 }
 c = dedupAgentPollBatch(page0, c.cursor);

@@ -566,17 +566,17 @@ import { sid } from './session_ident.js';
   }
 
   // dedupAgentPollBatch filters a batch (an HTTP page, one WS agent_event)
-  // against cursor (null = nothing rendered yet): the newest real time shown
-  // (afterMS), the keys shown at that ms (seenKeys) and those of every entry
-  // shown with no time (untimed). The server re-admits the watermark ms
-  // (#2432 item 5) and the WS tailer replays from the transcript's start, so
-  // both sets drop replays by key; untimed entries pass every time filter.
+  // against cursor (null = nothing rendered yet; the result supersedes it and
+  // reuses its untimed set): the newest real time shown (afterMS), the keys
+  // shown at that ms (seenKeys) and those of every entry shown with no time
+  // (untimed), which passes every time filter. The server re-admits the
+  // watermark ms (#2432 item 5) and the WS tailer replays from the start.
   function dedupAgentPollBatch(events, cursor) {
     var afterMS = cursor ? cursor.afterMS : 0;
     var prev = cursor ? cursor.seenKeys : [];
     var seen = {};
     for (var i = 0; i < prev.length; i++) seen[prev[i]] = true;
-    var untimed = Object.assign({}, cursor && cursor.untimed);
+    var untimed = (cursor && cursor.untimed) || {};
     var out = [];
     var maxT = afterMS;
     for (var j = 0; j < events.length; j++) {
