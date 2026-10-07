@@ -78,6 +78,20 @@
 //       failed, done, queued, unknown… are also session, cron and agent
 //       states that other files compare, and a literal scan cannot tell
 //       which field a string is compared with.
+//   W3. session_list.js (WORKFLOW_STATUS_FILES), whose sidebar badge reads
+//       workflow statuses, compares no `.status` (x.status, x?.status,
+//       x['status']) with a WORKFLOW_STATUS value — by ===, !==, ==, !=, a
+//       switch case, or an element of an inline array / `new Set([...])`
+//       passed to .includes/.has/.indexOf — and reads
+//       WORKFLOW_STATUS_DISPLAY at least once, or the scan has gone blind.
+//       Not followed: a status held in a variable or passed to a function.
+//   W4. Every static/*.js read of a named key of either table
+//       (WORKFLOW_STATUS_DISPLAY.paused, ?.paused, ['paused']) names a value
+//       of its ENUMS column. tsc lets a JS file read a key an object literal
+//       lacks, so a value renamed in the enum and the table alike would
+//       otherwise leave the read undefined, and `d === TABLE.paused` true
+//       for every status the table does not know. Destructuring is not
+//       followed.
 //
 //   node scripts/check-enum-literals.mjs
 import fs from 'node:fs';
@@ -205,9 +219,11 @@ const walk = (n, fn, parent = null) => {
 };
 const unchain = (n) => (n?.type === 'ChainExpression' ? n.expression : n);
 // isTypeMember: x.type, x?.type or x['type'].
-const isTypeMember = (n) => {
+const isTypeMember = (n) => isMember(n, 'type');
+// isMember: x.<name>, x?.<name> or x['<name>'].
+const isMember = (n, name) => {
   const m = unchain(n);
-  return m?.type === 'MemberExpression' && (m.computed ? str(m.property) === 'type' : m.property.name === 'type');
+  return m?.type === 'MemberExpression' && (m.computed ? str(m.property) === name : m.property.name === name);
 };
 // str: the value of a string literal or of a template with no expressions.
 const str = (n) => {
@@ -385,6 +401,64 @@ export function workflowProblems(files, enums) {
   return problems;
 }
 
+// WORKFLOW_STATUS_FILES: files outside WORKFLOW_FILES that read a workflow's
+// .status (W3).
+export const WORKFLOW_STATUS_FILES = ['session_list.js'];
+
+// workflowStatusProblems is check W3 over files (name → source).
+export function workflowStatusProblems(files, enums) {
+  const statuses = new Set(enums?.WORKFLOW_STATUS || []);
+  const problems = [];
+  for (const file of WORKFLOW_STATUS_FILES) {
+    let ast;
+    try {
+      ast = espree.parse(files[file] ?? '', { ecmaVersion: 'latest', sourceType: 'module', loc: true });
+    } catch {
+      continue; // reported by kindProblems
+    }
+    let reads = 0;
+    const compared = (node, v) => {
+      if (v !== null && statuses.has(v)) problems.push(`${file}:${node.loc.start.line}: .status compared with workflow status ${JSON.stringify(v)} — read workflow_state.js's WORKFLOW_STATUS_DISPLAY instead`);
+    };
+    walk(ast, (n) => {
+      if (n.type === 'MemberExpression' && n.object.type === 'Identifier' && n.object.name === 'WORKFLOW_STATUS_DISPLAY') reads++;
+      if (n.type === 'BinaryExpression' && /^[!=]==?$/.test(n.operator)) {
+        for (const [a, b] of [[n.left, n.right], [n.right, n.left]]) if (isMember(a, 'status')) compared(n, str(b));
+      }
+      if (n.type === 'SwitchStatement' && isMember(n.discriminant, 'status')) {
+        for (const c of n.cases) compared(c, str(c.test));
+      }
+      const callee = unchain(n.type === 'CallExpression' ? n.callee : null);
+      if (callee?.type === 'MemberExpression' && !callee.computed && ['includes', 'has', 'indexOf'].includes(callee.property.name) && isMember(n.arguments[0], 'status')) {
+        const o = callee.object;
+        const list = o.type === 'ArrayExpression' ? o : o.type === 'NewExpression' && o.callee.name === 'Set' && o.arguments[0]?.type === 'ArrayExpression' ? o.arguments[0] : null;
+        for (const el of list?.elements || []) compared(el, str(el));
+      }
+    });
+    if (!reads) problems.push(`${file}: never reads WORKFLOW_STATUS_DISPLAY — the workflow .status scan has gone blind`);
+  }
+  return problems;
+}
+
+// workflowReadProblems is check W4 over files (name → source).
+export function workflowReadProblems(files, enums) {
+  const problems = [];
+  for (const [file, src] of Object.entries(files)) {
+    let ast;
+    try {
+      ast = espree.parse(src, { ecmaVersion: 'latest', sourceType: 'module', loc: true });
+    } catch {
+      continue; // reported by kindProblems
+    }
+    walk(ast, (n) => {
+      const column = n.type === 'MemberExpression' && n.object.type === 'Identifier' && Object.hasOwn(WORKFLOW_TABLES, n.object.name) ? WORKFLOW_TABLES[n.object.name] : null;
+      const key = !column ? null : n.computed ? str(n.property) : n.property.name;
+      if (key !== null && !(enums?.[column] || []).includes(key)) problems.push(`${file}:${n.loc.start.line}: reads ${n.object.name}.${key}, which NZ_CONTRACT.ENUMS.${column} does not list — the read is undefined`);
+    });
+  }
+  return problems;
+}
+
 // EVENT_TABLES: the dashboard's eventHtml Maps (S19-2, #3025 D4). Every key
 // is a kind; WHOLE, CONTENT and ENUMS.EVENT_TYPE_NO_BUBBLE share none and
 // together cover every ENUMS.EVENT_TYPE kind — a kind with no entry in any
@@ -468,6 +542,8 @@ export function checkAll(files, contract, other = OTHER_TYPES, sentinels = KIND_
     ...kind.problems,
     ...eventTableProblems(files, contract),
     ...workflowProblems(files, contract.ENUMS),
+    ...workflowStatusProblems(files, contract.ENUMS),
+    ...workflowReadProblems(files, contract.ENUMS),
   ];
   return { problems, counts: kind.counts };
 }
