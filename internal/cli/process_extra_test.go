@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1551,6 +1552,53 @@ func TestEventEntryFromEvent_TaskSummaryAndStatus(t *testing.T) {
 			}
 			if e := entries[0]; e.Summary != tt.wantSummary || e.Status != tt.status {
 				t.Errorf("Summary %q Status %q, want %q %q", e.Summary, e.Status, tt.wantSummary, tt.status)
+			}
+		})
+	}
+}
+
+// TestEventEntryFromEvent_WorkflowRows: a workflow's task_progress and
+// task_updated make no row (RFC §9), its start and end stay with their
+// description and summary; a non-workflow task, summary or not, is logged.
+func TestEventEntryFromEvent_WorkflowRows(t *testing.T) {
+	usage := &clievent.TaskUsage{TotalTokens: 9, ToolUses: 2, DurationMS: 3}
+	for _, ev := range []clievent.Event{
+		{Type: "system", SubType: "task_progress", TaskID: "w1", WorkflowTask: true, Description: "Ask: A",
+			TaskSummary: "probe", Usage: usage},
+		{Type: "system", SubType: "task_updated", TaskID: "w1", WorkflowTask: true,
+			Patch: &clievent.TaskPatch{Status: "completed", EndTime: 1}},
+	} {
+		if got := EventEntriesFromEventAt(ev, 1); got != nil {
+			t.Errorf("workflow %s logged %+v", ev.SubType, got)
+		}
+	}
+
+	tests := []struct {
+		name  string
+		event clievent.Event
+		want  clievent.EventEntry
+	}{
+		{"workflow task_started", clievent.Event{Type: "system", SubType: "task_started", TaskID: "w1", ToolUseID: "tu",
+			TaskType: TaskTypeWorkflow, WorkflowTask: true, Description: "tiny probe"},
+			clievent.EventEntry{Type: clievent.KindTaskStart, TaskID: "w1", ToolUseID: "tu", TaskType: TaskTypeWorkflow, Summary: "tiny probe"}},
+		{"workflow task_notification", clievent.Event{Type: "system", SubType: "task_notification", TaskID: "w1", ToolUseID: "tu",
+			WorkflowTask: true, Status: "completed", Description: "tiny probe", TaskSummary: `Dynamic workflow "tiny probe" completed`, Usage: usage},
+			clievent.EventEntry{Type: clievent.KindTaskDone, TaskID: "w1", ToolUseID: "tu", TaskType: TaskTypeWorkflow,
+				Summary: `Dynamic workflow "tiny probe" completed`, Status: "completed", Tokens: 9, ToolUses: 2, DurationMS: 3}},
+		{"mcp_task progress with a summary", clievent.Event{Type: "system", SubType: "task_progress", TaskID: "m1", ToolUseID: "tu2",
+			Description: "query", TaskSummary: "polling", LastToolName: "Read", Usage: usage},
+			clievent.EventEntry{Type: clievent.KindTaskProgress, TaskID: "m1", ToolUseID: "tu2", Summary: "query", LastTool: "Read",
+				Tokens: 9, ToolUses: 2, DurationMS: 3}},
+		{"agent task_updated", clievent.Event{Type: "system", SubType: "task_updated", TaskID: "a1",
+			Patch: &clievent.TaskPatch{Status: "killed"}},
+			clievent.EventEntry{Type: clievent.KindTaskProgress, TaskID: "a1", Status: "killed"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entries := EventEntriesFromEventAt(tt.event, 1)
+			tt.want.Time = 1
+			if len(entries) != 1 || !reflect.DeepEqual(entries[0], tt.want) {
+				t.Errorf("entries %+v\nwant [%+v]", entries, tt.want)
 			}
 		})
 	}

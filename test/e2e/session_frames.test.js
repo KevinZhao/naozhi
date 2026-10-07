@@ -17,6 +17,9 @@
 //    already on screen;
 //  - a turn ending on a session off screen raises its card's unread chip;
 //  - an opening frame anchors the turn timer at its last turn's first event;
+//    a background task reporting while the session is idle anchors no timer,
+//    on either frame path, so the next send's timer starts at the send, and
+//    an opening frame of a turn CC woke itself for anchors at the task_done;
 //  - a result on either frame path ends the turn this tab started (running
 //    flips to ready, the cost lands on total_cost), and a time-less user replay
 //    on either path is not painted twice;
@@ -249,6 +252,68 @@ test.describe('sessionFrames keep the bookkeeping on sessionStream', () => {
     expect(errors).toEqual([]);
     await ctx.close();
   });
+
+  test('a background task reporting while the session is idle does not anchor the next turn\'s timer', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    const T = Date.now() + 60000;
+    const seen = (t) => page.waitForFunction((at) => sessionStream.lastEventTimeWs === at, t);
+    conn.send({ type: 'event', key: KEY_A, event: { type: 'task_progress', task_id: 'a1', summary: 'step', time: T, uuid: 'tp-1' } });
+    await seen(T);
+    conn.send({ type: 'event', key: KEY_A, event: { type: 'task_done', task_id: 'a1', status: 'completed', time: T + 1, uuid: 'td-1' } });
+    await seen(T + 1);
+    expect(await page.evaluate(() => turnState.turnStartTime), 'idle task events start no turn').toBe(0);
+    const before = await page.evaluate(() => Date.now());
+    await sendText(page, conn, 'after-idle');
+    expect(await page.evaluate(() => turnState.turnStartTime), 'the timer starts at the send').toBeGreaterThanOrEqual(before);
+
+    // A running turn's task events are the turn's: the first one anchors.
+    conn.send({ type: 'session_state', key: KEY_B, node: 'local', state: 'running' });
+    await page.click(`.session-card[data-key="${KEY_B}"]`);
+    await page.waitForFunction((key) => selectedKey === key && turnState.turnStartTime === 0, KEY_B);
+    conn.send({ type: 'event', key: KEY_B, event: { type: 'task_progress', task_id: 'b1', summary: 'step', time: T + 2, uuid: 'tp-2' } });
+    await page.waitForFunction(() => turnState.turnStartTime > 0);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  test('an opening frame whose last turn is followed by idle task reports anchors no timer', async ({ browser }) => {
+    const { ctx, page, conn, errors } = await open(browser, mock);
+    const T0 = Date.now() - 125000;
+    conn.send({ type: 'history', key: KEY_A, initial: true, events: [
+      { type: 'user', detail: 'go', time: T0, uuid: 'u-go' },
+      { type: 'text', detail: 'done', summary: 'done', time: T0 + 1000, uuid: 'u-done' },
+      { type: 'result', time: T0 + 2000, uuid: 'u-res' },
+      { type: 'task_progress', task_id: 'a1', summary: 'step', time: T0 + 3000, uuid: 'u-tp' },
+      { type: 'task_done', task_id: 'a1', status: 'completed', time: T0 + 4000, uuid: 'u-td' },
+    ] });
+    await page.waitForSelector('#events-scroll .event[data-uuid="u-done"]');
+    expect(await page.evaluate(() => turnState.turnStartTime), 'no turn runs after the result').toBe(0);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  // A running session's opening frame: after a user row its task reports are
+  // the turn's; after a result CC woke itself, so the progress before the
+  // task_done that woke it was reported while idle.
+  for (const [boundary, want] of [['user', 3000], ['result', 4000]]) {
+    test(`a running session's opening frame after a ${boundary} anchors at ${boundary === 'user' ? 'its first task report' : 'the task_done that woke it'}`, async ({ browser }) => {
+      const { ctx, page, conn, errors } = await open(browser, mock);
+      conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'running' });
+      await expect.poll(() => running(page, KEY_A)).toBe('running');
+      const T0 = Date.now() - 125000;
+      conn.send({ type: 'history', key: KEY_A, initial: true, events: [
+        { type: 'text', detail: 'done', summary: 'done', time: T0 + 1000, uuid: 'u-done' },
+        { type: boundary, detail: 'go', time: T0 + 2000, uuid: 'u-edge' },
+        { type: 'task_progress', task_id: 'a1', summary: 'step', time: T0 + 3000, uuid: 'u-tp' },
+        { type: 'task_done', task_id: 'a1', status: 'completed', time: T0 + 4000, uuid: 'u-td' },
+        { type: 'text', detail: 'woke', summary: 'woke', time: T0 + 5000, uuid: 'u-woke' },
+      ] });
+      await page.waitForSelector('#events-scroll .event[data-uuid="u-woke"]');
+      expect(await page.evaluate(() => turnState.turnStartTime)).toBe(T0 + want);
+      expect(errors).toEqual([]);
+      await ctx.close();
+    });
+  }
 
   // A result event ends the turn on either frame path: the optimistic running
   // flips to ready (no session_state needed) and its cost bumps total_cost.

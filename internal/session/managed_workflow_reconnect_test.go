@@ -285,3 +285,35 @@ func TestReconnectShims_KnownTasksSeedTheReplay(t *testing.T) {
 		t.Fatalf("entry %+v, want the replay's completed status under the Ref's name", w)
 	}
 }
+
+// TestCleanup_RunningWorkflowWithoutRingRows: a workflow's progress no
+// longer reaches the ring (RFC §9), so an idle parent reporting only through
+// its workflow has no recent event; Cleanup keeps its CLI from the board.
+func TestCleanup_RunningWorkflowWithoutRingRows(t *testing.T) {
+	lines := probeLines(t)
+	// The launch turn, ended by its result, then the run's progress live.
+	replay := append(append([]string(nil), lines[:5]...), lines[18])
+	r, sess := workflowShim(t, &storeEntry{Key: "feishu:direct:alice:general", SessionID: resolveStoredSID},
+		shimScript{firstSeq: 1, replay: replay, live: lines[5:8], shimPID: os.Getpid()})
+	r.ttl = time.Minute
+	r.ReconnectShimsCtx(context.Background())
+	proc := sess.loadProcess()
+	if proc == nil {
+		t.Fatal("premise: no reattach")
+	}
+	testhelper.Eventually(t, func() bool {
+		w := boardEntry(sess, probeTask)
+		return w != nil && w.Status == workflow.StatusRunning && w.Counts.Done == 1 // the last live frame
+	}, 5*time.Second, "the live progress never reached the board")
+	if proc.State() != cli.StateReady {
+		t.Fatalf("premise: parent state %v, want ready", proc.State())
+	}
+	if le := proc.LastEventAt(); !le.IsZero() {
+		t.Errorf("the workflow's progress logged an event at %v", le)
+	}
+	sess.lastActive.Store(time.Now().Add(-time.Hour).UnixNano())
+	r.Cleanup()
+	if !proc.Alive() {
+		t.Error("Cleanup expired the CLI of a running workflow")
+	}
+}

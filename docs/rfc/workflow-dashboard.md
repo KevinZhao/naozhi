@@ -2525,7 +2525,9 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
   `lastActivitySummary`）。非 workflow 任务（含带 `summary` 的 mcp_task / local_agent progress）不受影响。
 - workflow 的 `task_started` 保留（`KindTaskStart`，Summary=description，TaskType=local_workflow）；
   `task_notification` 保留为 `KindTaskDone`，Summary 用 `ev.TaskSummary`（修 "task_notification" 字面量）、
-  TaskType=local_workflow。
+  TaskType=local_workflow。（PR-14：字面量 PR-5 已修，非 workflow 的通知仍是 description 优先；workflow 的通知改为 `TaskSummary` 优先，
+  没有才落回 description。workflow 的 progress 条目不再存在，`workflowTaskType` 只剩 task_done 一个用处；
+  旧版本持久化的带 TaskType 的 progress 行照旧由 `isWorkflowHistoryTask` 挡在 Resolve 之外。）
 - 非 workflow 的 `task_updated` 也修：不再写 Summary=`task_updated`，`Status` 取 `patch.status`。
 - 前提：保活已改看 `board.LastObservedAt`（§5.8），否则 ring 不再刷新 `LastEventAt`
   （`eventlog_append.go:136,316`）会让 Cleanup 提前过期。
@@ -2535,7 +2537,12 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
 - 前端顺带修 turn timer 缺陷：`applyEventToTurnState` 总是先 `startTurnTimer()`
   （`running_banner.js:234-235`），空闲期 progress 会设置 `turnStartTime`，下一轮 send 时
   `startTurnTimer` 早退（:83-89），elapsed 从第一条后台事件算起。改为：session 非 running 时
-  `task_progress/task_done` 不启动 timer。
+  `task_progress/task_done` 不启动 timer。（PR-14：判定是 `running_banner.js` 导出的 `idleTaskEvent(ev)`，看当前选中 session 的
+  `sessionsData` state；同一缺陷还有第二条路：`event_stream.js` 的 `rebuildTurnFromHistory` 不经 `startTurnTimer`，直接把
+  `turnStartTime` 设为最后一个 user / result 之后第一条事件的时间——打开一个空闲期收过后台 progress 的 session，下一轮的 elapsed
+  同样从那条 progress 算起。它改为跳过开头的空闲 task 事件再锚定。`idleTaskEvent` 看的是当前 state：session 因 CC 被
+  task_notification 唤醒而 running 时，最后一个 result 之后没有 user 行，空闲期的 progress 会被当成本轮的；所以边界是 result 时
+  开头的 `task_progress` 无论当前 state 都跳过，锚在唤醒它的 task_done 上。）
 - 兼容：`process_extra_test.go:1395-1440` 钉住的映射需同步更新；`kinds_test.go` 不变（不新增 kind）。
 
 此项单独成 PR、放在最后，因为它是唯一改变既有可见行为（历史里不再有 workflow progress 行）的改动。
@@ -3026,6 +3033,11 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   不再启动 turn timer。
 - 验收：跑一个 50-agent workflow 后 ring / 持久化 log 中无 workflow progress 行，首页对话气泡完整。
 - 依赖：PR-8（保活已改看 board）、PR-12（用户已有替代视图）。
+- （PR-14：golden 是渲染层的，不经 `EventEntriesFromEventAt`，pin 不变；`process_workflow_test.go` 的 live probe 改为只剩 start / done 两条。
+  前端 timer 修复另动 `event_stream.js`（见 §9），e2e 在 `session_frames.test.js`。"Cleanup 不过期" 用真 `*cli.Process` 经假 shim 重连跑：
+  ring 里没有事件（`LastEventAt` 为零）而 Cleanup 仍留着 CLI。"50-agent workflow" 的验收不在真 CC 上跑，改为向 readLoop 灌一个 50 agent、
+  600 张快照的合成 run（多于 ring 的 500 槽），断言 ring 只剩回复与 start / done、首页（`EventLastNVisible`）以那条回复开头；
+  持久化 log 只从 ring 写，所以同样没有。）
 
 ### PR-15（可选）feat(static,session): sidebar workflow 徽标 + activity 回落
 
