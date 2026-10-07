@@ -351,8 +351,8 @@ func TestBigSnapshotDecodes(t *testing.T) {
 	}
 }
 
-// BenchmarkReadEvent_WorkflowSnapshot398 is the §1.2.3 budget (≤ 1.5ms,
-// ≤ 400KB per op); the Skipped variant is the same line as decoded before
+// BenchmarkReadEvent_WorkflowSnapshot398 is the §11.2 budget (≤ 2.0ms on
+// the go.mod toolchain, ≤ 400KB per op); the Skipped variant is the same line as decoded before
 // WorkflowProgress existed.
 //
 //	go test -run '^$' -bench 'WorkflowSnapshot398' -benchmem -count 5 ./internal/cli/
