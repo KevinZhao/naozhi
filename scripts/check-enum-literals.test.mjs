@@ -1,7 +1,7 @@
 // node --test scripts/check-enum-literals.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ANCHORS, checkAll, contractKindProblems, deathReasonKeys, eventTableProblems, kindProblems, literalHits, run, startupClassProblems, workflowProblems, workflowStatusProblems } from './check-enum-literals.mjs';
+import { ANCHORS, checkAll, contractKindProblems, deathReasonKeys, eventTableProblems, kindProblems, literalHits, run, startupClassProblems, workflowProblems, workflowReadProblems, workflowStatusProblems } from './check-enum-literals.mjs';
 
 const nzUtil = `
 const OTHER = { a: 1 };
@@ -387,6 +387,20 @@ test('workflowStatusProblems goes blind loudly: no table read, or no session_lis
   assert.deepEqual(workflowStatusProblems({}, wfEnums), blind);
 });
 
+test('workflowReadProblems flags a named table key its column lacks, however it is spelled, in any file', () => {
+  const files = {
+    'workflow_state.js': wfState,
+    'session_list.js': wfBadge + 'const p = (d) => d === WORKFLOW_STATUS_DISPLAY.paused;',
+    'workflow_view.js': "const a = WORKFLOW_AGENT_DISPLAY?.['stopped'], b = WORKFLOW_AGENT_DISPLAY[`done`], c = WORKFLOW_STATUS_DISPLAY[w.status];",
+    'other.js': 'const x = OTHER_DISPLAY.paused;',
+  };
+  assert.deepEqual(workflowReadProblems(files, wfEnums), [
+    'session_list.js:6: reads WORKFLOW_STATUS_DISPLAY.paused, which NZ_CONTRACT.ENUMS.WORKFLOW_STATUS does not list — the read is undefined',
+    'workflow_view.js:1: reads WORKFLOW_AGENT_DISPLAY.stopped, which NZ_CONTRACT.ENUMS.WORKFLOW_AGENT_STATE does not list — the read is undefined',
+  ]);
+  assert.deepEqual(workflowReadProblems({ 'workflow_state.js': wfState, 'session_list.js': wfBadge }, wfEnums), []);
+});
+
 test('checkAll reports every check, death_reason, startup classes and kinds alike, over one tree', () => {
   const full = { ...contract, ENUMS: { ...contract.ENUMS, ...wfEnums, DEATH_REASON: ['idle_timeout', 'evicted', 'cli_exited'], STARTUP_FAILURE_CLASS: ['unknown', 'auth'] } };
   const tree = { ...clean, 'nz_util.js': nzUtil, 'workflow_state.js': wfState, 'session_list.js': wfBadge };
@@ -395,7 +409,7 @@ test('checkAll reports every check, death_reason, startup classes and kinds alik
     ...tree,
     'a.js': clean['a.js'].replace("['result', 4]", '') + "if (e.type === 'txt' || r === 'evicted') {}",
     'workflow_view.js': "const d = s === 'done';",
-    'session_list.js': wfBadge + "const p = w.status === 'completed';",
+    'session_list.js': wfBadge + "const p = w.status === 'completed' || d === WORKFLOW_STATUS_DISPLAY.paused;",
   };
   const { problems } = checkAll(bad, { ...full, ENUMS: { ...full.ENUMS, EVENT_TYPE_MD_IGNORE: [], STARTUP_FAILURE_CLASS: ['unknown'] } }, other, ['a.js', 'b.js'], anchors);
   for (const want of [
@@ -406,6 +420,7 @@ test('checkAll reports every check, death_reason, startup classes and kinds alik
     /do not cover kind "result"/,
     /workflow_view\.js: hardcodes workflow status literal\(s\) done/,
     /session_list\.js:\d+: \.status compared with workflow status "completed"/,
+    /session_list\.js:\d+: reads WORKFLOW_STATUS_DISPLAY\.paused/,
   ]) {
     assert.ok(problems.some((p) => want.test(p)), `${want} not in:\n${problems.join('\n')}`);
   }

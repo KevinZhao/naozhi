@@ -85,6 +85,13 @@
 //       passed to .includes/.has/.indexOf — and reads
 //       WORKFLOW_STATUS_DISPLAY at least once, or the scan has gone blind.
 //       Not followed: a status held in a variable or passed to a function.
+//   W4. Every static/*.js read of a named key of either table
+//       (WORKFLOW_STATUS_DISPLAY.paused, ?.paused, ['paused']) names a value
+//       of its ENUMS column. tsc lets a JS file read a key an object literal
+//       lacks, so a value renamed in the enum and the table alike would
+//       otherwise leave the read undefined, and `d === TABLE.paused` true
+//       for every status the table does not know. Destructuring is not
+//       followed.
 //
 //   node scripts/check-enum-literals.mjs
 import fs from 'node:fs';
@@ -433,6 +440,25 @@ export function workflowStatusProblems(files, enums) {
   return problems;
 }
 
+// workflowReadProblems is check W4 over files (name → source).
+export function workflowReadProblems(files, enums) {
+  const problems = [];
+  for (const [file, src] of Object.entries(files)) {
+    let ast;
+    try {
+      ast = espree.parse(src, { ecmaVersion: 'latest', sourceType: 'module', loc: true });
+    } catch {
+      continue; // reported by kindProblems
+    }
+    walk(ast, (n) => {
+      const column = n.type === 'MemberExpression' && n.object.type === 'Identifier' && Object.hasOwn(WORKFLOW_TABLES, n.object.name) ? WORKFLOW_TABLES[n.object.name] : null;
+      const key = !column ? null : n.computed ? str(n.property) : n.property.name;
+      if (key !== null && !(enums?.[column] || []).includes(key)) problems.push(`${file}:${n.loc.start.line}: reads ${n.object.name}.${key}, which NZ_CONTRACT.ENUMS.${column} does not list — the read is undefined`);
+    });
+  }
+  return problems;
+}
+
 // EVENT_TABLES: the dashboard's eventHtml Maps (S19-2, #3025 D4). Every key
 // is a kind; WHOLE, CONTENT and ENUMS.EVENT_TYPE_NO_BUBBLE share none and
 // together cover every ENUMS.EVENT_TYPE kind — a kind with no entry in any
@@ -517,6 +543,7 @@ export function checkAll(files, contract, other = OTHER_TYPES, sentinels = KIND_
     ...eventTableProblems(files, contract),
     ...workflowProblems(files, contract.ENUMS),
     ...workflowStatusProblems(files, contract.ENUMS),
+    ...workflowReadProblems(files, contract.ENUMS),
   ];
   return { problems, counts: kind.counts };
 }
