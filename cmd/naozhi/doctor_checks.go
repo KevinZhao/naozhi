@@ -447,26 +447,53 @@ func (d *doctor) checkConfigDrift() {
 	}
 	loadedAt := osutil.SanitizeForLog(health.ConfigLoadedAt, 64)
 	if pending := health.ConfigRestartRequired; len(pending) > 0 {
-		names := make([]string, len(pending))
-		for i, n := range pending {
-			names[i] = osutil.SanitizeForLog(n, 64)
-		}
-		d.add("config-drift", "warn", "restart required for: "+strings.Join(names, ", ")+
-			" (a config reload applied the hot sections; config_sha256 stays "+health.ConfigSHA256[:12]+"…, loaded_at="+loadedAt+", until a restart)")
+		d.checkConfigDriftPending(&health, diskSum, loadedAt)
 		return
 	}
 	if health.ConfigSHA256 == diskSum {
 		d.add("config-drift", "pass", "config_sha256 match ("+diskSum[:12]+"…), loaded_at="+loadedAt)
 		return
 	}
-	mtime := ""
-	if fi, statErr := os.Stat(d.configPath); statErr == nil {
-		mtime = fi.ModTime().Format(time.RFC3339)
-	}
 	d.add("config-drift", "warn", fmt.Sprintf(
 		"not applied: config.yaml changed at %s after process loaded at %s (disk %s… vs process %s…); "+
 			"`naozhi config reload` applies it and lists what still needs a restart",
-		mtime, loadedAt, diskSum[:12], health.ConfigSHA256[:12]))
+		configMTime(d.configPath), loadedAt, diskSum[:12], health.ConfigSHA256[:12]))
+}
+
+// checkConfigDriftPending reports the sections a reload left for a restart.
+// config_sha256 is frozen meanwhile, so an edit made after that reload is
+// found by comparing the disk against config_reloaded_sha256 (#3649).
+func (d *doctor) checkConfigDriftPending(health *healthPayload, diskSum, loadedAt string) {
+	names := make([]string, len(health.ConfigRestartRequired))
+	for i, n := range health.ConfigRestartRequired {
+		names[i] = osutil.SanitizeForLog(n, 64)
+	}
+	restart := "restart required for: " + strings.Join(names, ", ")
+	frozen := "config_sha256 stays " + health.ConfigSHA256[:12] + "…, loaded_at=" + loadedAt + ", until a restart"
+	switch reloaded := health.ConfigReloadedSHA256; {
+	case reloaded == "":
+		d.add("config-drift", "warn", restart+" ("+frozen+
+			"; process reports no config_reloaded_sha256, so edits since the last reload are not compared)")
+	case !isSHA256Hex(reloaded):
+		d.add("config-drift", "warn", fmt.Sprintf("%s; process reports a malformed config_reloaded_sha256 (%q); cannot compare",
+			restart, osutil.SanitizeForLog(reloaded, 64)))
+	case reloaded != diskSum:
+		d.add("config-drift", "warn", fmt.Sprintf(
+			"not applied: config.yaml changed at %s after the last reload (disk %s… vs reloaded %s…); "+
+				"`naozhi config reload` applies it; %s (%s)",
+			configMTime(d.configPath), diskSum[:12], reloaded[:12], restart, frozen))
+	default:
+		d.add("config-drift", "warn", restart+" (a config reload applied the hot sections; "+frozen+")")
+	}
+}
+
+// configMTime is path's RFC3339 mtime, empty when it cannot be stat'ed.
+func configMTime(path string) string {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return fi.ModTime().Format(time.RFC3339)
 }
 
 // isSHA256Hex reports whether s is the 64-char lowercase hex the server writes

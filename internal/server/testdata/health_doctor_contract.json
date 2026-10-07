@@ -31,5 +31,6 @@
   },
   "config_sha256": "deadbeef",
   "config_loaded_at": "2026-01-02T03:04:05Z",
-  "config_restart_required": ["cli"]
+  "config_restart_required": ["cli"],
+  "config_reloaded_sha256": "deadbeef"
 }

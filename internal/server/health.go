@@ -102,9 +102,12 @@ type healthAuthSection struct {
 	ConfigLoadedAt string `json:"config_loaded_at,omitempty"`
 	// ConfigRestartRequired lists the sections a config reload could not
 	// apply; config_sha256 stays on the last file applied in full meanwhile.
-	ConfigRestartRequired []string          `json:"config_restart_required,omitempty"`
-	ConfigPath            string            `json:"config_path,omitempty"`
-	Nodes                 map[string]string `json:"nodes,omitempty"`
+	ConfigRestartRequired []string `json:"config_restart_required,omitempty"`
+	// ConfigReloadedSHA256 is the sha256 of the file the last load or reload
+	// read, so doctor can see an edit made after a partial reload.
+	ConfigReloadedSHA256 string            `json:"config_reloaded_sha256,omitempty"`
+	ConfigPath           string            `json:"config_path,omitempty"`
+	Nodes                map[string]string `json:"nodes,omitempty"`
 	// Platforms maps each registered platform to its connection state name, or
 	// "registered" when the adapter cannot observe its connection.
 	Platforms map[string]string `json:"platforms"`
@@ -291,7 +294,7 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		CLIAvailable: cliAvailable(h.router.Backends().CLIPath()),
 		ConfigPath:   h.configPath,
 	}
-	auth.ConfigSHA256, auth.ConfigLoadedAt, auth.ConfigRestartRequired = h.configFingerprint()
+	auth.ConfigSHA256, auth.ConfigLoadedAt, auth.ConfigRestartRequired, auth.ConfigReloadedSHA256 = h.configFingerprint()
 
 	if nodeStatus := h.nodeAccess.NodesStatus(); len(nodeStatus) > 0 {
 		auth.Nodes = nodeStatus
@@ -308,16 +311,17 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-// configFingerprint is the sha256, RFC3339 load time and pending restart
-// sections /health reports: the live fingerprint when a reloader is wired,
-// else the startup values.
-func (h *HealthHandler) configFingerprint() (sha, loadedAt string, restartRequired []string) {
+// configFingerprint is the sha256, RFC3339 load time, pending restart
+// sections and last-read sha256 /health reports: the live fingerprint when a
+// reloader is wired, else the startup values.
+func (h *HealthHandler) configFingerprint() (sha, loadedAt string, restartRequired []string, readSHA string) {
 	sha, at := h.configSHA256, h.configLoadedAt
+	readSHA = sha
 	if h.configLive != nil {
-		sha, at, restartRequired = h.configLive.Get()
+		sha, at, restartRequired, readSHA = h.configLive.Get()
 	}
 	if !at.IsZero() {
 		loadedAt = at.Format(time.RFC3339)
 	}
-	return sha, loadedAt, restartRequired
+	return sha, loadedAt, restartRequired, readSHA
 }
