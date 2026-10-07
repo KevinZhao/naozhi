@@ -745,6 +745,39 @@ func TestCleanupLoop_SweepsWorkflowBoards(t *testing.T) {
 	}, 5*time.Second, "the save tick never swept the board")
 }
 
+// TestCleanupLoop_SweepSettlesLostTerminalFrame: a run whose task_updated
+// was lost is settled from its result file by the save tick alone. The
+// board's clock stays at wfT0 while the tick sweeps at wall time, so the
+// run is long quiet by the first tick.
+func TestCleanupLoop_SweepSettlesLostTerminalFrame(t *testing.T) {
+	old := saveTickInterval
+	saveTickInterval = 10 * time.Millisecond
+	t.Cleanup(func() { saveTickInterval = old })
+	r := wfRouter(t)
+	s := injectSession(r, "feishu:direct:alice:general", nil)
+	d := newFakeDisk()
+	rig := diskRig(t, d)
+	s.workflows.Store(rig.b)
+	p := &setProc{}
+	p.publish(runningWithRun("w1", wfRun))
+	rig.b.bind(p, "/ws")
+	rig.settleIO(t)
+	d.put(wfRun, resultFile("w1")) // CC ended the run; its frame never arrived
+	if w := rig.entry(t, "w1"); w.Status != workflow.StatusRunning {
+		t.Fatalf("status %s before any tick, want running", w.Status)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.StartCleanupLoop(ctx, time.Hour)
+	testhelper.Eventually(t, func() bool {
+		w := boardEntry(s, "w1")
+		return w != nil && w.Status == workflow.StatusCompleted && w.Source == workflow.SourceResultFile
+	}, 5*time.Second, "the save tick never settled the run from its result file")
+	if c := rig.b.cachedResult("w1"); c == nil || c.Result != `{"answer":"Paris"}` {
+		t.Errorf("result cache %+v, want the file's", c)
+	}
+}
+
 // TestWorkflowSweep_RacesBind: the sweeper runs while the board is bound,
 // published to and unbound over and over (RFC §11.3); under -race nothing
 // trips and the board still answers afterwards.
