@@ -135,6 +135,7 @@ import { sid } from './session_ident.js';
     activeAgentName: '',
     activeTeamName: '',
     activeStatus: '',  // mirrors the tailer status for the breadcrumb stat
+    boardMs: 0,        // a settled workflow agent's board duration; beats the tailer's (#3646)
     switchSeq: 0,      // monotonic — lets async Resolve polls abandon stale switches
     retries: 0,        // 202 retry counter (bounded, §3.6.4)
     pollTimer: null,   // HTTP fallback interval ID
@@ -174,8 +175,8 @@ import { sid } from './session_ident.js';
   // switchTo(taskID, opts) — drill into a specific agent's internal transcript.
   // Called by:
   //   - banner row onclick (AgentView.switchTo)
-  //   - a workflow panel row, with opts {label, crumb}: its agent is not in
-  //     turnState.agents, so the breadcrumb comes from the caller
+  //   - a workflow panel row, with opts {label, crumb, durationMs}: its agent
+  //     is not in turnState.agents, so the breadcrumb comes from the caller
   //   - WS agent_subscribe_rejected{reason:"capacity"} fallback path
   //   - Esc (via switchTo(null))
   // Every change of the drilled agent is announced on nzBus as 'agent:view'.
@@ -185,6 +186,7 @@ import { sid } from './session_ident.js';
     state.retries = 0;
     state.activeKey = selection.key || '';
     state.activeTaskID = taskID || '';
+    state.boardMs = (opts && opts.durationMs) || 0;
     announceView();
     // Opening a drill-in cancels any auto-collapse-in-progress on the banner
     // so the user's explicit click isn't immediately undone.
@@ -452,7 +454,7 @@ import { sid } from './session_ident.js';
     var st = document.getElementById('bc-agent-stat');
     if (nm) nm.textContent = state.activeAgentName || '';
     if (tm) tm.textContent = state.activeTeamName || '';
-    if (st) st.textContent = state.activeStatus || '';
+    if (st) st.textContent = state.boardMs ? fmtDuration(state.boardMs) : state.activeStatus || '';
   }
 
   function hideBreadcrumb() {
@@ -466,7 +468,8 @@ import { sid } from './session_ident.js';
     if (!st) return;
     var pieces = [];
     if (patch && patch.tool_uses > 0) pieces.push(patch.tool_uses + ' calls');
-    if (patch && patch.duration_ms > 0) pieces.push(fmtDuration(patch.duration_ms));
+    var ms = state.boardMs || (patch && patch.duration_ms) || 0;
+    if (ms > 0) pieces.push(fmtDuration(ms));
     if (pieces.length > 0) st.textContent = pieces.join(' · ');
   }
 

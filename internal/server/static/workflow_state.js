@@ -26,13 +26,13 @@ export const WORKFLOW_STATUS_DISPLAY = {
 };
 // rank orders rows failed, running, queued, the other settled states, done.
 export const WORKFLOW_AGENT_DISPLAY = {
-  queued: { glyph: '⏳', text: '排队中', tone: 'dim', rank: 2 },
-  running: { glyph: '▶', text: '运行中', tone: 'run', rank: 1 },
-  done: { glyph: '✓', text: '已完成', tone: 'ok', rank: 4 },
-  failed: { glyph: '✗', text: '失败', tone: 'err', rank: 0 },
-  skipped: { glyph: '⤼', text: '已跳过', tone: 'mute', rank: 3 },
-  stopped: { glyph: '■', text: '已停止', tone: 'mute', rank: 3 },
-  unknown: { glyph: '?', text: '状态未知', tone: 'mute', rank: 3 },
+  queued: { glyph: '⏳', text: '排队中', tone: 'dim', rank: 2, settled: false },
+  running: { glyph: '▶', text: '运行中', tone: 'run', rank: 1, settled: false },
+  done: { glyph: '✓', text: '已完成', tone: 'ok', rank: 4, settled: true },
+  failed: { glyph: '✗', text: '失败', tone: 'err', rank: 0, settled: true },
+  skipped: { glyph: '⤼', text: '已跳过', tone: 'mute', rank: 3, settled: true },
+  stopped: { glyph: '■', text: '已停止', tone: 'mute', rank: 3, settled: true },
+  unknown: { glyph: '?', text: '状态未知', tone: 'mute', rank: 3, settled: false },
 };
 
 // A workflow whose header names this source has its result file read.

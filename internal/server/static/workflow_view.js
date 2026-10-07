@@ -699,7 +699,11 @@ export const workflowActions = {
     if (btn.dataset.attempt) label += '（第 ' + btn.dataset.attempt + ' 次）';
     const phase = btn.closest('.wf-phase')?.querySelector('.wf-phase-title')?.textContent;
     if (!view.following) { view.following = true; nzBus.addEventListener('agent:view', onAgentView); }
-    nzViews.agent?.switchTo(id, { label, crumb: nameOf(v.entry.workflow) + (phase ? ' · ' + phase : '') });
+    const opts = { label, crumb: nameOf(v.entry.workflow) + (phase ? ' · ' + phase : '') };
+    // A settled row's duration_ms is the agent's run time; an earlier attempt's is not on the row.
+    const a = v.entry.rows.get(Number(/** @type {HTMLElement} */ (row).dataset.index));
+    if (!btn.dataset.attempt && a?.duration_ms && WORKFLOW_AGENT_DISPLAY[a.state]?.settled) opts.durationMs = a.duration_ms;
+    nzViews.agent?.switchTo(id, opts);
   },
   'wf-attempts': (/** @type {HTMLElement} */ btn) => {
     const v = view.wfs.get(btn.dataset.taskId);

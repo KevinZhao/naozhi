@@ -62,8 +62,12 @@ type agentTailer struct {
 	buffered   []clievent.EventEntry
 	meta       node.AgentMetaPatch
 	lastActive time.Time
-	startedAt  time.Time
-	closed     bool
+	// firstAtMS/lastAtMS bound the transcript's own record timestamps (unix
+	// ms, 0 = none seen): DurationMS is their span, the agent's run time
+	// however late the tailer started (#3646).
+	firstAtMS int64
+	lastAtMS  int64
+	closed    bool
 }
 
 // MetaSnapshot returns a copy of the tailer's meta without mutating state.
@@ -100,7 +104,7 @@ func (t *agentTailer) pollOnce() bool {
 		// Buffer for late subscribers, bounded at 500; oldest dropped first.
 		for _, e := range events {
 			t.buffered = append(t.buffered, e)
-			t.updateMetaFromEventLocked(e, now)
+			t.updateMetaFromEventLocked(e)
 		}
 		if over := len(t.buffered) - 500; over > 0 {
 			// In-place copy reuses the backing array (zero alloc in steady
@@ -238,9 +242,8 @@ func (t *agentTailer) doneSettled(gotEvents bool, now time.Time) (string, bool) 
 }
 
 // updateMetaFromEventLocked refreshes meta counters from a single event.
-// `now` is shared by all events of one pollOnce so DurationMS is consistent.
 // Caller must hold t.mu.
-func (t *agentTailer) updateMetaFromEventLocked(e clievent.EventEntry, now time.Time) {
+func (t *agentTailer) updateMetaFromEventLocked(e clievent.EventEntry) {
 	switch e.Type {
 	case clievent.KindToolUse:
 		t.meta.ToolUses++
@@ -259,8 +262,19 @@ func (t *agentTailer) updateMetaFromEventLocked(e clievent.EventEntry, now time.
 		// Not a tool use, but advances the "doing right now" line.
 		t.meta.LastTool = "thinking"
 	}
-	if !t.startedAt.IsZero() {
-		t.meta.DurationMS = now.Sub(t.startedAt).Milliseconds()
+	// DurationMS is the span of the transcript's record timestamps, not the
+	// tailer's age: a tailer opened on a finished agent replays it in one
+	// poll, and its age would be milliseconds (#3646). A live agent's span
+	// grows with each record, so its duration still moves. Records without
+	// a parseable timestamp (Time == 0) are left out.
+	if e.Time > 0 {
+		if t.firstAtMS == 0 || e.Time < t.firstAtMS {
+			t.firstAtMS = e.Time
+		}
+		if e.Time > t.lastAtMS {
+			t.lastAtMS = e.Time
+		}
+		t.meta.DurationMS = t.lastAtMS - t.firstAtMS
 	}
 }
 
