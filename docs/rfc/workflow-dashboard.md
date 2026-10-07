@@ -2512,9 +2512,11 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
   的全部 workflow tailer。
 - `enrich()`（`agent_tailer_registry.go:145-172`）只覆盖 `snap.Subagents`，不处理 workflow（不需要）。
 - （PR-13：`ensureTailer` 的新末参是 `*workflowTail{open, done}`——doneFn 与 opener 经同一次调用交给 tailer，nil 即 Agent 工具的默认 opener。
-  doneFn 在该 agentId 已不在 board 上时也算结束；`agent_done` 的 status：done / skipped → `completed`，failed → `error`，stopped 或所在
-  workflow 已终态 → `stopped`。"workflow 终态时关闭该 run 的全部 workflow tailer"由每个 tailer 在下一次 EOF 轮询时经 doneFn 看到终态完成，
-  不另做扇出。WS handler 的拒绝帧收进 `rejectAgentSubscribe`，Agent 与 workflow 两条路径共用 `attachTailer`。）
+  doneFn 在该 agentId 已不在 board 上时也算结束；`agent_done` 的 status：done / skipped → `completed`，failed → `error`，stopped、历史 attempt
+  （board 不记它的结局）或所在 workflow 已终态 → `stopped`。"workflow 终态时关闭该 run 的全部 workflow tailer"由每个 tailer 在 EOF 轮询时经 doneFn
+  看到终态完成，不另做扇出。board 先于 CC 把 agent 最后几行（通常是答案）落盘得知结束（实测落盘晚 p90 约 170ms），所以 tailer 不在第一次
+  "EOF 且 done"时关闭：doneFn 须在连续的空轮询里持续为 done 满 `agentTailerDoneSettle`（1s），期间读到新行就重新计时。
+  WS handler 的拒绝帧收进 `rejectAgentSubscribe`，Agent 与 workflow 两条路径共用 `attachTailer`。）
 
 ### 8.4 前端
 
@@ -2530,7 +2532,8 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
   所以徽标是行按钮旁的 `<button class="wf-attempt-btn" aria-expanded>`（`×N`），展开 `.wf-attempts` 里每个历史 attempt 一个
   `wf-attempt-item` 按钮（"第 N 次"）；展开态按行 index 记在该 workflow 的视图上，行重建后保留。选中标记跟随 agent view：`switchTo`
   与 `onSessionSwitch` 每次改变 drill 的 agent 都在 `nzBus` 上发 `agent:view`，面板在第一次从面板 drill-in 时注册监听（模块加载时不得有副作用），
-  Esc / 切 session 后标记随之移走。WS `agent_event` 按 HTTP 页播种的同一水位经 `dedupAgentPollBatch` 去重：订阅时新建的 tailer 从 transcript
+  Esc / 切 session 后标记随之移走。202 重试计数在每次 `switchTo` 时清零（原先只在 Esc 时），从一行直接点到另一行时新的 drill-in 拿到完整的 5s 预算。
+  WS `agent_event` 按 HTTP 页播种的同一水位经 `dedupAgentPollBatch` 去重：订阅时新建的 tailer 从 transcript
   第一行开始重放，HTTP 页已经显示过这些条目（普通 Agent drill-in 同样如此）。）
 
 ## 9. 可选：合并冗余的单行 task_progress ring 条目

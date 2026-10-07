@@ -476,3 +476,37 @@ func itoaSmall(n int) string {
 	}
 	return string(buf[i:])
 }
+
+// TestTailer_DoneSettled: a workflow tailer is over only after its board has
+// said so on every empty poll for agentTailerDoneSettle; lines restart it.
+func TestTailer_DoneSettled(t *testing.T) {
+	over := false
+	tl := &agentTailer{done: func() (string, bool) { return "completed", over }}
+	t0 := time.Unix(1000, 0)
+	at := func(d time.Duration) time.Time { return t0.Add(d) }
+	steps := []struct {
+		events bool
+		over   bool
+		at     time.Duration
+		want   bool
+	}{
+		{false, false, 0, false},
+		{false, true, 100 * time.Millisecond, false},                         // first seen
+		{false, true, 100*time.Millisecond + agentTailerDoneSettle/2, false}, // too soon
+		{true, true, 200*time.Millisecond + agentTailerDoneSettle, false},    // a line restarts it
+		{false, true, 300*time.Millisecond + agentTailerDoneSettle, false},   // seen again
+		{false, false, 400*time.Millisecond + 2*agentTailerDoneSettle, false},
+		{false, true, 500*time.Millisecond + 2*agentTailerDoneSettle, false},
+		{false, true, 500*time.Millisecond + 3*agentTailerDoneSettle, true},
+	}
+	for i, s := range steps {
+		over = s.over
+		status, got := tl.doneSettled(s.events, at(s.at))
+		if got != s.want || (got && status != "completed") {
+			t.Fatalf("step %d: (%q, %v), want settled=%v", i, status, got, s.want)
+		}
+	}
+	if _, got := (&agentTailer{}).doneSettled(false, t0); got {
+		t.Error("a tailer with no done func settled")
+	}
+}

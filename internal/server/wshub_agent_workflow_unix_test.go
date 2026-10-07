@@ -131,14 +131,78 @@ func TestAgentSubscribe_WorkflowAgent(t *testing.T) {
 }
 
 // TestAgentSubscribe_WorkflowAgentEarlierAttempt: an earlier attempt's id
-// is tailed too and is over at once.
+// is tailed too and is over at once, as stopped whatever ended it.
 func TestAgentSubscribe_WorkflowAgentEarlierAttempt(t *testing.T) {
 	t.Parallel()
 	r := newWFAgentRig(t)
 	out := r.subscribe(t, wfAgentPrev)
 	next(t, out, "agent_event")
+	if done := next(t, out, "agent_done"); done.Status != "stopped" {
+		t.Errorf("agent_done status %q, want stopped", done.Status)
+	}
+}
+
+// TestAgentSubscribe_WorkflowAgentLateLine: CC flushes an agent's last line
+// after its board row has ended; a line appended once the tailer has seen
+// the end still goes out, before agent_done.
+func TestAgentSubscribe_WorkflowAgentLateLine(t *testing.T) {
+	t.Parallel()
+	r := newWFAgentRig(t)
+	out := r.subscribe(t, wfAgentID)
+	next(t, out, "agent_event")
+	next(t, out, "agent_event")
+	r.wf.Agents[0].State = workflow.AgentDone
+	r.publish()
+	tl := r.hub.tailers.lookup(tailerKey{wfAgentKey, wfAgentID})
+	testhelper.Eventually(t, func() bool {
+		tl.mu.Lock()
+		defer tl.mu.Unlock()
+		return !tl.overSince.IsZero()
+	}, 3*time.Second, "tailer never saw the row end")
+	data, err := os.ReadFile(r.path(wfAgentID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := strings.SplitAfter(string(data), "\n")[1]
+	f, err := os.OpenFile(r.path(wfAgentID), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.WriteString(strings.Replace(last, `"text":"4"`, `"text":"late"`, 1))
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(3 * time.Second)
+	for got := false; !got; {
+		select {
+		case m := <-out:
+			if m.Type == "agent_done" {
+				t.Fatal("agent_done before the late line")
+			}
+			if got = m.Type == "agent_event"; got && (m.Event == nil || m.Event.Detail != "late") {
+				t.Fatalf("late agent_event %+v", m)
+			}
+		case <-deadline:
+			t.Fatal("no late agent_event")
+		}
+	}
 	if done := next(t, out, "agent_done"); done.Status != "completed" {
 		t.Errorf("agent_done status %q, want completed", done.Status)
+	}
+}
+
+// TestAgentSubscribe_WorkflowAgentWorkflowEnded: a row in a state no end
+// settles still closes its tailer once the workflow is terminal.
+func TestAgentSubscribe_WorkflowAgentWorkflowEnded(t *testing.T) {
+	t.Parallel()
+	r := newWFAgentRig(t)
+	out := r.subscribe(t, wfAgentID)
+	next(t, out, "agent_event")
+	r.wf.Status, r.wf.Agents[0].State = workflow.StatusCompleted, workflow.AgentUnknown
+	r.publish()
+	if done := next(t, out, "agent_done"); done.Status != "stopped" {
+		t.Errorf("agent_done status %q, want stopped", done.Status)
 	}
 }
 

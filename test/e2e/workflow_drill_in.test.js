@@ -9,7 +9,9 @@
 //  - an agent whose transcript is not on disk yet (202 pending) opens by
 //    itself once it is;
 //  - a WS subscribe rejected as pending falls back to the 3s HTTP poll;
-//  - the attempt badge unfolds the earlier attempts, each drilling in.
+//  - the attempt badge unfolds the earlier attempts, each drilling in;
+//  - a drill-in straight after another gets the whole 202 budget, and
+//    leaving the session moves the mark off.
 //
 // Run: cd test/e2e && npx playwright test workflow_drill_in.test.js --project=desktop-chrome
 
@@ -170,6 +172,45 @@ test('the attempt badge lists the earlier attempts, each drilling in', async ({ 
     await expect(items.first()).toHaveAttribute('aria-current', 'true');
     await badge.click();
     await expect(rowOf(page, 1).locator('.wf-attempts')).toBeHidden();
+    expect(errors).toEqual([]);
+  } finally { mock.server.close(); }
+});
+
+test('a second pending drill-in right after the first gets its own 202 budget', async ({ page }) => {
+  const { mock, errors } = await open(page, [row(1, 'running'), row(2, 'running')], {
+    agentEvents: { a1: [text(T0, 'task one')], a2: [text(T0, 'task two')] },
+    agentEventsPending: { a1: 12, a2: 12 },
+  });
+  try {
+    await rowOf(page, 1).locator('.wf-row-btn').click();
+    await expect(bubbles(page).filter({ hasText: 'task one' })).toHaveCount(1, { timeout: 8000 });
+    await rowOf(page, 2).locator('.wf-row-btn').click();
+    await expect(bubbles(page).filter({ hasText: 'task two' })).toHaveCount(1, { timeout: 8000 });
+    await expect(page.locator('#bc-agent-name')).toHaveText('agent 2');
+    expect(agentCalls(mock, 'a2').length).toBe(13);
+    expect(errors).toEqual([]);
+  } finally { mock.server.close(); }
+});
+
+test('leaving the session moves the mark off the drilled row', async ({ page }) => {
+  const B = 'dashboard:direct:2026-01-01-120001-2:otherproject';
+  const agents = [row(1, 'running')];
+  const { mock, conn, errors } = await open(page, agents, { agentEvents: { a1: [text(T0, 'the task')] } });
+  try {
+    await rowOf(page, 1).locator('.wf-row-btn').click();
+    await expect(bubbles(page).filter({ hasText: 'the task' })).toHaveCount(1);
+    await expect(rowOf(page, 1)).toHaveClass(/wf-sel/);
+    await page.click(`.session-card[data-key="${B}"]`);
+    await expect.poll(() => conn.messages.filter((m) => m.type === 'subscribe' && m.key === B).length).toBe(1);
+    await page.click(`.session-card[data-key="${A}"]`);
+    await expect.poll(() => conn.messages.filter((m) => m.type === 'subscribe' && m.key === A).length).toBe(2);
+    const w1 = view('w1', agents);
+    conn.send({ type: 'workflow_set', key: A, epoch: EPOCH, task_ids: ['w1'], server_now: Date.now() });
+    conn.send({ type: 'workflow_state', key: A, task_id: 'w1', epoch: EPOCH, version: 3, full: true, server_now: Date.now(), workflow: { ...w1, agents: [] } });
+    await expect(rowOf(page, 1)).toHaveCount(1);
+    await expect(page.locator('#agent-breadcrumb')).toBeHidden();
+    await expect(rowOf(page, 1)).not.toHaveClass(/wf-sel/);
+    await expect(rowOf(page, 1).locator('.wf-row-btn')).not.toHaveAttribute('aria-current', 'true');
     expect(errors).toEqual([]);
   } finally { mock.server.close(); }
 });

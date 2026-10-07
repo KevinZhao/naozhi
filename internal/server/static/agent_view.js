@@ -181,9 +181,8 @@ import { sid } from './session_ident.js';
   // Every change of the drilled agent is announced on nzBus as 'agent:view'.
   function switchTo(taskID, opts) {
     var seq = ++state.switchSeq;
-    if (!taskID) {
-      state.retries = 0;
-    }
+    // Each drill-in gets the whole 202 budget; seq retires the old loop.
+    state.retries = 0;
     state.activeKey = selection.key || '';
     state.activeTaskID = taskID || '';
     announceView();

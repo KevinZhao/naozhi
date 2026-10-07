@@ -195,6 +195,9 @@ func workflowAgentDone(b *session.WorkflowBoard, agentID string) func() (string,
 		if !ok {
 			return "completed", true
 		}
+		if !loc.Current {
+			return "stopped", true // superseded; the board keeps no outcome
+		}
 		switch st, _ := p.AgentState(loc); st {
 		case workflow.AgentDone, workflow.AgentSkipped:
 			return "completed", true
