@@ -11,10 +11,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,9 +35,11 @@ const (
 	QueueDepth = 256
 	// DefaultTimeout bounds one HTTP attempt.
 	DefaultTimeout = 10 * time.Second
-	// maxAttempts is the first try plus retries; backoff doubles from firstBackoff.
+	// maxAttempts is the first try plus retries; backoff doubles from
+	// firstBackoff up to maxBackoff, plus up to 25% jitter.
 	maxAttempts  = 4
 	firstBackoff = time.Second
+	maxBackoff   = 30 * time.Second
 	userAgent    = "naozhi-webhook/1"
 )
 
@@ -51,6 +56,23 @@ type Endpoint struct {
 	Events     []string
 	Subsystems []string
 	Timeout    time.Duration
+}
+
+// LogValue keeps the URL's userinfo, path and query and the signing secret
+// out of logs.
+func (e Endpoint) LogValue() slog.Value {
+	secret := ""
+	if e.Secret != "" {
+		secret = "[REDACTED]"
+	}
+	return slog.GroupValue(
+		slog.String("url", RedactURL(e.URL)),
+		slog.String("url_id", urlID(e.URL)),
+		slog.String("secret", secret),
+		slog.Any("events", e.Events),
+		slog.Any("subsystems", e.Subsystems),
+		slog.Duration("timeout", e.Timeout),
+	)
 }
 
 // Event is the payload. It carries run metadata only: no prompt, result or
@@ -72,10 +94,14 @@ type Event struct {
 
 // Sender fans events out to its endpoints.
 type Sender struct {
-	workers []*worker
-	wg      sync.WaitGroup
-	sleep   func(context.Context, time.Duration)
-	node    string
+	workers      []*worker
+	wg           sync.WaitGroup
+	sleep        func(context.Context, time.Duration)
+	firstBackoff time.Duration
+	node         string
+
+	mu     sync.RWMutex // guards closed against Deliver's queue sends
+	closed bool
 }
 
 // Option tunes a Sender.
@@ -104,7 +130,7 @@ func WithSleep(fn func(context.Context, time.Duration)) Option {
 // New starts one worker per endpoint. A Sender with no endpoints is valid
 // and drops everything silently.
 func New(eps []Endpoint, opts ...Option) *Sender {
-	s := &Sender{sleep: func(ctx context.Context, d time.Duration) {
+	s := &Sender{firstBackoff: firstBackoff, sleep: func(ctx context.Context, d time.Duration) {
 		t := time.NewTimer(d)
 		defer t.Stop()
 		select {
@@ -117,13 +143,17 @@ func New(eps []Endpoint, opts ...Option) *Sender {
 		if timeout <= 0 {
 			timeout = DefaultTimeout
 		}
+		ctx, stop := context.WithCancel(context.Background())
 		s.workers = append(s.workers, &worker{
 			idx:    strconv.Itoa(i),
 			ep:     ep,
-			host:   hostOf(ep.URL),
+			target: RedactURL(ep.URL),
+			urlID:  urlID(ep.URL),
 			queue:  make(chan Event, QueueDepth),
 			client: &http.Client{Timeout: timeout},
 			s:      s,
+			ctx:    ctx,
+			stop:   stop,
 		})
 	}
 	for _, o := range opts {
@@ -141,8 +171,14 @@ func (s *Sender) Endpoints() int { return len(s.workers) }
 
 // Deliver enqueues ev for every endpoint subscribed to its type and
 // subsystem. Never blocks: a full queue drops the event and counts it.
+// After Close it drops everything.
 func (s *Sender) Deliver(ev Event) {
 	if s == nil {
+		return
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
 		return
 	}
 	for _, w := range s.workers {
@@ -153,20 +189,26 @@ func (s *Sender) Deliver(ev Event) {
 		case w.queue <- ev:
 		default:
 			droppedTotal.Add(w.idx, 1)
-			slog.Warn("webhook queue full; event dropped", "endpoint", w.idx, "host", w.host, "type", ev.Type)
+			slog.Warn("webhook queue full; event dropped", "endpoint", w.idx, "target", w.target, "url_id", w.urlID, "type", ev.Type)
 		}
 	}
 }
 
 // Close stops accepting events and waits for the queues to drain or ctx to
-// end, whichever first. Attempts in flight when ctx ends are abandoned.
+// end, whichever first. Attempts and backoffs in flight when ctx ends are
+// abandoned. Safe to call more than once.
 func (s *Sender) Close(ctx context.Context) {
 	if s == nil {
 		return
 	}
-	for _, w := range s.workers {
-		close(w.queue)
+	s.mu.Lock()
+	if !s.closed {
+		s.closed = true
+		for _, w := range s.workers {
+			close(w.queue)
+		}
 	}
+	s.mu.Unlock()
 	done := make(chan struct{})
 	go func() { s.wg.Wait(); close(done) }()
 	select {
@@ -182,14 +224,15 @@ func (s *Sender) Close(ctx context.Context) {
 type worker struct {
 	idx    string
 	ep     Endpoint
-	host   string
+	target string // scheme://host, the only part of the URL that is logged
+	urlID  string
 	queue  chan Event
 	client *http.Client
 	s      *Sender
 
-	mu     sync.Mutex
-	cancel context.CancelFunc // of the attempt in flight
-	closed bool
+	// ctx parents every attempt and backoff; stop (via abort) ends them all.
+	ctx  context.Context
+	stop context.CancelFunc
 }
 
 func (w *worker) wants(ev Event) bool {
@@ -211,32 +254,14 @@ func contains(list []string, v string) bool {
 
 func (w *worker) run() {
 	defer w.s.wg.Done()
+	defer w.stop()
 	for ev := range w.queue {
 		w.send(ev)
 	}
 }
 
-// abort cancels the current attempt and every later one.
-func (w *worker) abort() {
-	w.mu.Lock()
-	w.closed = true
-	if w.cancel != nil {
-		w.cancel()
-	}
-	w.mu.Unlock()
-}
-
-// attemptCtx returns a ctx for one attempt, or false once aborted.
-func (w *worker) attemptCtx() (context.Context, context.CancelFunc, bool) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.closed {
-		return nil, nil, false
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	w.cancel = cancel
-	return ctx, cancel, true
-}
+// abort cancels the current attempt or backoff and every later one.
+func (w *worker) abort() { w.stop() }
 
 // send tries ev until a receiver accepts it, a non-retryable status comes
 // back, or the attempts run out.
@@ -246,13 +271,12 @@ func (w *worker) send(ev Event) {
 		failedTotal.Add(w.idx, 1)
 		return
 	}
-	backoff := firstBackoff
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		ctx, cancel, ok := w.attemptCtx()
-		if !ok {
+		if w.ctx.Err() != nil {
 			failedTotal.Add(w.idx, 1)
 			return
 		}
+		ctx, cancel := context.WithCancel(w.ctx)
 		status, err := w.post(ctx, ev, body)
 		cancel()
 		switch {
@@ -261,17 +285,31 @@ func (w *worker) send(ev Event) {
 			return
 		case err == nil && !retryable(status):
 			failedTotal.Add(w.idx, 1)
-			slog.Warn("webhook rejected", "endpoint", w.idx, "host", w.host, "status", status, "type", ev.Type, "run_id", ev.RunID)
+			slog.Warn("webhook rejected", "endpoint", w.idx, "target", w.target, "url_id", w.urlID, "status", status, "type", ev.Type, "run_id", ev.RunID)
 			return
 		}
 		if attempt == maxAttempts {
 			failedTotal.Add(w.idx, 1)
-			slog.Warn("webhook delivery failed", "endpoint", w.idx, "host", w.host, "status", status, "err", err, "attempts", attempt, "type", ev.Type, "run_id", ev.RunID)
+			slog.Warn("webhook delivery failed", "endpoint", w.idx, "target", w.target, "url_id", w.urlID, "status", status, "err", redactErr(err, w.ep.URL), "attempts", attempt, "type", ev.Type, "run_id", ev.RunID)
 			return
 		}
-		w.s.sleep(ctx, backoff)
-		backoff *= 2
+		w.s.sleep(w.ctx, backoffFor(w.s.firstBackoff, attempt))
 	}
+}
+
+// backoffFor is the wait after the given failed attempt: base doubled per
+// attempt, capped at maxBackoff, plus up to 25% random jitter so receivers
+// recovering from an outage are not hit in lockstep.
+func backoffFor(base time.Duration, attempt int) time.Duration {
+	d := base
+	for i := 1; i < attempt && d < maxBackoff; i++ {
+		d *= 2
+	}
+	d = min(d, maxBackoff)
+	if q := int64(d / 4); q > 0 {
+		d += time.Duration(rand.Int64N(q))
+	}
+	return d
 }
 
 func retryable(status int) bool {
@@ -310,11 +348,37 @@ func Verify(secret string, body []byte, sig string) bool {
 	return hmac.Equal([]byte(sig), []byte(Sign(secret, body)))
 }
 
-// hostOf is the URL's host for log lines (the full URL may carry a token).
-func hostOf(raw string) string {
+// RedactURL is raw reduced to scheme://host, or "?" when unparsable. The
+// userinfo, path and query may carry a token, so only this form is logged.
+func RedactURL(raw string) string {
 	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
+	if err != nil || u.Scheme == "" || u.Host == "" {
 		return "?"
 	}
-	return u.Host
+	return u.Scheme + "://" + u.Host
+}
+
+// urlID is a short stable hash of the full URL, telling apart endpoints that
+// share a host without revealing their path or query.
+func urlID(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:4])
+}
+
+// redactErr renders err for a log line without the request URL: a *url.Error
+// (whose text embeds the full URL, possibly a redirect target) keeps only its
+// op and cause, and any remaining copy of raw is reduced to scheme://host.
+func redactErr(err error, raw string) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		msg = uerr.Op + " " + RedactURL(uerr.URL)
+		if uerr.Err != nil {
+			msg += ": " + uerr.Err.Error()
+		}
+	}
+	return strings.ReplaceAll(msg, raw, RedactURL(raw))
 }
