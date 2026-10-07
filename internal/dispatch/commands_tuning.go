@@ -21,8 +21,9 @@ const tuningResetToken = "reset"
 
 // tuningTarget resolves "<value> [agent]" for /model, /effort and /backend:
 // the value, and the session key of the agent the chat addresses (general, or
-// the planner when the chat is project-bound). ok=false means the agent token
-// was unknown and a reply was already sent.
+// the planner when the chat is project-bound) under the sender's group scope
+// (sessionChatID), the key their turns use. ok=false means the agent token was
+// unknown and a reply was already sent.
 func (d *Dispatcher) tuningTarget(ctx context.Context, msg platform.IncomingMessage, args string, log *slog.Logger) (value, key, agentID string, ok bool) {
 	fields := strings.Fields(trimUnicodeSpace(args))
 	if len(fields) > 2 {
@@ -41,7 +42,7 @@ func (d *Dispatcher) tuningTarget(ctx context.Context, msg platform.IncomingMess
 	if len(fields) >= 1 {
 		value = fields[0]
 	}
-	return value, d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID), agentID, true
+	return value, d.keyForChat(msg.Platform, msg.ChatType, d.sessionChatID(msg), agentID), agentID, true
 }
 
 // defaultBackendID is the first (default) entry of the host's catalogue, or "".

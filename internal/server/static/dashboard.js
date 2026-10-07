@@ -1579,17 +1579,13 @@ wsm.connect();
 })();
 
 /*
- * RNEW-UX-002: global error handler.
- *
- * Before this, an uncaught exception inside a handler (async listener, WS
- * callback, render path) would bubble to the browser's default handler and
- * silently freeze the UI — operators had to open devtools to notice. This
- * block catches both sync errors and unhandled promise rejections, surfaces
- * a warning toast so the user knows to consider a refresh, and dumps full
- * details to console with a [global-error] prefix for devtools triage. We
- * throttle identical messages within 5s so a tight error loop doesn't spam
- * the toast layer. Never calls preventDefault — the browser's own console
- * output is still allowed to fire, preserving stack traces for remote debug.
+ * RNEW-UX-002: global error handler. Uncaught exceptions and unhandled
+ * rejections get a warning toast (identical messages throttled to one per
+ * 5s) and a [global-error] console dump; preventDefault is never called, so
+ * the browser's own stack trace still prints. The error listener is
+ * bubble-phase: a capture listener also receives element load errors (a
+ * <style> the CSP refuses inside a mermaid SVG, a 404 <img>), which carry no
+ * error object and would toast "[object Object]" on a working page.
  */
 (function () {
   const THROTTLE_MS = 5 * 1000;
@@ -1617,7 +1613,7 @@ wsm.connect();
       showToast('页面遇到异常，可能需要刷新：' + msg, 'warning', 4000);
     } catch (_) { /* last-resort: never throw from the error handler */ }
   }
-  window.addEventListener('error', handle, true);
+  window.addEventListener('error', handle);
   window.addEventListener('unhandledrejection', handle);
 })();
 
