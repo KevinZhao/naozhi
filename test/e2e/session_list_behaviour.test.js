@@ -95,10 +95,20 @@ test('a poll that applies a new snapshot repaints the header CLI label', async (
 // up (as refreshBanner does for background agents after a turn ends), then
 // has REST say 'running' with a bumped version so the poll gets past the
 // short-circuit. It returns what fetchSessions returned: true means the
-// payload was applied and the hooks ran.
+// payload was applied and the hooks ran. Before the edit it waits out the
+// debounced refreshes the boot discovery scan and the socket's connect
+// schedule: one that read the mock after the edit would apply the snapshot
+// first, and the call under test would find the version seen.
 async function restRunningBehindBanner(page, sessions, { showBanner }) {
   await page.click(`.session-card[data-key="${KEY}"]`);
   await page.waitForSelector('#msg-input');
+  // Once a scan of ours has landed, the boot scan has scheduled its refresh or
+  // never will; debouncedFetchSessions then joins the pending refresh, or
+  // follows the one already sent.
+  await page.evaluate(async () => {
+    await window.nz.test.scanDiscovered();
+    await window.nz.test.debouncedFetchSessions();
+  });
   const display = (id) => page.evaluate((i) => document.getElementById(i).style.display, id);
   await expect.poll(() => display('btn-send')).toBe('flex');
   await expect(page.locator('#running-banner')).toHaveClass(/nz-hidden/);
