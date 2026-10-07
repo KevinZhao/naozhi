@@ -1,7 +1,7 @@
 // node --test scripts/check-enum-literals.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ANCHORS, checkAll, contractKindProblems, deathReasonKeys, eventTableProblems, kindProblems, literalHits, run, startupClassProblems, workflowProblems } from './check-enum-literals.mjs';
+import { ANCHORS, checkAll, contractKindProblems, deathReasonKeys, eventTableProblems, kindProblems, literalHits, run, startupClassProblems, workflowProblems, workflowStatusProblems } from './check-enum-literals.mjs';
 
 const nzUtil = `
 const OTHER = { a: 1 };
@@ -354,14 +354,48 @@ test('workflowProblems bans the values as literals in the two workflow modules o
   ]);
 });
 
+const wfBadge = `
+import { WORKFLOW_STATUS_DISPLAY } from './workflow_state.js';
+const live = (w) => WORKFLOW_STATUS_DISPLAY[w.status] === WORKFLOW_STATUS_DISPLAY.running;
+if (s.state === 'running' || err.status === 304 || nd.status === 'offline') {}
+const label = 'completed';
+`;
+
+test('workflowStatusProblems passes a badge that reads the table, whatever else compares running', () => {
+  assert.deepEqual(workflowStatusProblems({ 'session_list.js': wfBadge }, wfEnums), []);
+});
+
+test('workflowStatusProblems flags a .status compared with a workflow status, each way it can be spelled', () => {
+  for (const [src, v] of [
+    ["if (w.status !== 'running') {}", 'running'],
+    ["if ('completed' == w?.status) {}", 'completed'],
+    ["if (w['status'] === `unknown`) {}", 'unknown'],
+    ["switch (w.status) { case 'completed': break; case 'x': break; }", 'completed'],
+    ["if (['running', 'x'].includes(w.status)) {}", 'running'],
+    ["if (new Set(['completed']).has(w.status)) {}", 'completed'],
+  ]) {
+    assert.deepEqual(workflowStatusProblems({ 'session_list.js': wfBadge + src }, wfEnums), [
+      `session_list.js:6: .status compared with workflow status ${JSON.stringify(v)} — read workflow_state.js's WORKFLOW_STATUS_DISPLAY instead`,
+    ], src);
+  }
+  assert.deepEqual(workflowStatusProblems({ 'session_list.js': wfBadge, 'dashboard.js': "if (w.status === 'running') {}" }, wfEnums), []);
+});
+
+test('workflowStatusProblems goes blind loudly: no table read, or no session_list.js', () => {
+  const blind = ['session_list.js: never reads WORKFLOW_STATUS_DISPLAY — the workflow .status scan has gone blind'];
+  assert.deepEqual(workflowStatusProblems({ 'session_list.js': "import { WORKFLOW_STATUS_DISPLAY } from './workflow_state.js';" }, wfEnums), blind);
+  assert.deepEqual(workflowStatusProblems({}, wfEnums), blind);
+});
+
 test('checkAll reports every check, death_reason, startup classes and kinds alike, over one tree', () => {
   const full = { ...contract, ENUMS: { ...contract.ENUMS, ...wfEnums, DEATH_REASON: ['idle_timeout', 'evicted', 'cli_exited'], STARTUP_FAILURE_CLASS: ['unknown', 'auth'] } };
-  const tree = { ...clean, 'nz_util.js': nzUtil, 'workflow_state.js': wfState };
+  const tree = { ...clean, 'nz_util.js': nzUtil, 'workflow_state.js': wfState, 'session_list.js': wfBadge };
   assert.deepEqual(checkAll(tree, full, other, ['a.js', 'b.js'], anchors).problems, []);
   const bad = {
     ...tree,
     'a.js': clean['a.js'].replace("['result', 4]", '') + "if (e.type === 'txt' || r === 'evicted') {}",
     'workflow_view.js': "const d = s === 'done';",
+    'session_list.js': wfBadge + "const p = w.status === 'completed';",
   };
   const { problems } = checkAll(bad, { ...full, ENUMS: { ...full.ENUMS, EVENT_TYPE_MD_IGNORE: [], STARTUP_FAILURE_CLASS: ['unknown'] } }, other, ['a.js', 'b.js'], anchors);
   for (const want of [
@@ -371,6 +405,7 @@ test('checkAll reports every check, death_reason, startup classes and kinds alik
     /a\.js:\d+: \.type compared with "txt"/,
     /do not cover kind "result"/,
     /workflow_view\.js: hardcodes workflow status literal\(s\) done/,
+    /session_list\.js:\d+: \.status compared with workflow status "completed"/,
   ]) {
     assert.ok(problems.some((p) => want.test(p)), `${want} not in:\n${problems.join('\n')}`);
   }

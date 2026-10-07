@@ -20,6 +20,7 @@ import { _optimisticRunningTimers } from './send_message.js';
 import { fetchEvents, showHistoryRetry } from './event_stream.js';
 import { discoveredKey, getNodeDisplayName, isMultiNode, matchProject, nodeColor, sessionTypeTag, sid } from './session_ident.js';
 import { pendingBackendID } from './features.js';
+import { WORKFLOW_STATUS_DISPLAY } from './workflow_state.js';
 import { ICONS } from './icons.js';
 import { registerShell } from './shell.js';
 
@@ -675,7 +676,8 @@ function workflowBadgeHtml(/** @type {SessionSnapshot} */ s, sNode) {
   let done = 0, total = 0;
   const lines = [];
   for (const w of s.workflows) {
-    if (w.status !== 'running' && w.status !== 'paused') continue;
+    const d = WORKFLOW_STATUS_DISPLAY[w.status];
+    if (d !== WORKFLOW_STATUS_DISPLAY.running && d !== WORKFLOW_STATUS_DISPLAY.paused) continue;
     done += w.counts.done;
     total += w.counts.total;
     lines.push((w.name || 'workflow') + ' · ' + w.counts.done + '/' + w.counts.total);
