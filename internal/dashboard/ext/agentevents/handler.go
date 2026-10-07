@@ -26,7 +26,12 @@ import (
 //
 //   GET /api/sessions/agent_events?key=&node=&task_id=&after=<ms>&limit=
 //     → 200 [EventEntry...] (Time >= after) | 202 pending (linker not yet
-//       resolved) | 404 unknown task | 400 bad param
+//       resolved, or a workflow agent's transcript not there yet) | 404
+//       unknown task | 400 bad param
+//
+// task_id is a Task tool id or a workflow agent's agentId; the session's
+// workflow board is asked first, so a session without a live process can
+// show its workflow agents.
 //   GET /api/sessions/tool_result?key=&node=&path=tool-results/<id>.ext
 //     → 200 text/plain | 404 no linker/file/traversal | 400 | 413 > cap
 
@@ -53,6 +58,7 @@ type Handler struct {
 	router      SessionLookup
 	nodeAccess  NodeAccessor
 	linkerFor   func(key string) agentlink.AgentLinker
+	workflowFor func(key, agentID string) (session.AgentTranscript, session.TranscriptStatus)
 	allowedRoot string // EvalSymlinks-resolved ~/.claude/projects; set by New
 }
 
@@ -73,6 +79,18 @@ func (h *Handler) linkerForSession(key string) agentlink.AgentLinker {
 		return nil
 	}
 	return concrete
+}
+
+// workflowAgent is the board lookup, injectable like linkerFor; nil router
+// means no board.
+func (h *Handler) workflowAgent(key, agentID string) (session.AgentTranscript, session.TranscriptStatus) {
+	if h.workflowFor != nil {
+		return h.workflowFor(key, agentID)
+	}
+	if h.router == nil {
+		return session.AgentTranscript{}, session.TranscriptNone
+	}
+	return WorkflowAgentTranscript(h.router, key, agentID)
 }
 
 func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
@@ -139,6 +157,11 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if tr, st := h.workflowAgent(key, taskID); st != session.TranscriptNone {
+		h.serveWorkflowAgent(w, taskID, tr, st, after, limit)
+		return
+	}
+
 	linker := h.linkerForSession(key)
 	if linker == nil {
 		http.Error(w, "unknown task", http.StatusNotFound)
@@ -149,9 +172,7 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		// Linker context not yet installed (awaiting first live init event):
 		// tell the client to retry; switchAgentView bounds the retry loop.
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		_, _ = w.Write([]byte(`{"status":"pending"}`))
+		writePending(w)
 		return
 	}
 	if info.InternalAgentID == "" || info.JSONLPath == "" {
@@ -169,7 +190,46 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reader := subagent.NewTranscriptReader(info.JSONLPath)
+	writeTranscriptPage(w, subagent.NewTranscriptReader(info.JSONLPath), info.JSONLPath, after, limit)
+}
+
+// serveWorkflowAgent answers for a workflow agent the board knows: 202
+// until its run dir is resolved and its transcript has a first line, 404
+// unless that is a regular file whose first line names the agent and the
+// run dir's session; then a page read through the fd that was checked.
+func (h *Handler) serveWorkflowAgent(w http.ResponseWriter, agentID string, tr session.AgentTranscript, st session.TranscriptStatus, after int64, limit int) {
+	if st == session.TranscriptPending {
+		writePending(w)
+		return
+	}
+	if !jsonlPathUnderAllowedRoot(tr.Path, h.allowedRoot) {
+		slog.Warn("agent_events: workflow transcript outside allowed root, rejecting", "path", tr.Path, "allowed_root", h.allowedRoot)
+		http.Error(w, "unknown task", http.StatusNotFound)
+		return
+	}
+	f, pending, err := subagent.OpenAgentTranscript(tr.Open, tr.RunSessionID, agentID)
+	switch {
+	case pending:
+		writePending(w)
+		return
+	case err != nil:
+		slog.Debug("agent_events: workflow transcript refused", "path", tr.Path, "err", err)
+		http.Error(w, "unknown task", http.StatusNotFound)
+		return
+	}
+	writeTranscriptPage(w, subagent.NewTranscriptReaderFrom(tr.Path, f, tr.Open, subagent.ReaderOpts{StripHarnessFraming: true}), tr.Path, after, limit)
+}
+
+// writePending is the 202 agent_view.js retries on, bounded.
+func writePending(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_, _ = w.Write([]byte(`{"status":"pending"}`))
+}
+
+// writeTranscriptPage writes the entries of reader (closed here) at or
+// after the after millisecond, at most limit.
+func writeTranscriptPage(w http.ResponseWriter, reader *subagent.TranscriptReader, path string, after int64, limit int) {
 	defer reader.Close()
 	// Re-admit the `after` millisecond (as /api/sessions/events): consecutive
 	// transcript lines can share a timestamp, so a strict `>` cursor lost
@@ -181,7 +241,7 @@ func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unknown task", http.StatusNotFound)
 			return
 		}
-		slog.Warn("agent_events: transcript read failed", "path", info.JSONLPath, "err", err)
+		slog.Warn("agent_events: transcript read failed", "path", path, "err", err)
 		http.Error(w, "transcript read error", http.StatusInternalServerError)
 		return
 	}

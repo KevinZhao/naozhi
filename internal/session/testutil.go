@@ -226,6 +226,20 @@ func (s *ManagedSession) BindWorkflowsForTest(src any) {
 	b.bind(src.(workflowNotifier), "")
 }
 
+// BindWorkflowsOnDiskForTest is BindWorkflowsForTest for a board that
+// resolves run directories under projectsRoot on the real disk, for the
+// session's workspace.
+func (s *ManagedSession) BindWorkflowsOnDiskForTest(src any, projectsRoot, workspace string) {
+	b := s.workflows.Load()
+	if b == nil {
+		b = newWorkflowBoard(projectsRoot)
+		if !s.workflows.CompareAndSwap(nil, b) {
+			b = s.workflows.Load()
+		}
+	}
+	b.bind(src.(workflowNotifier), workspace)
+}
+
 // EndWorkflowsForTest settles src's workflows on s's board as its process's
 // read loop exiting with end does.
 func (s *ManagedSession) EndWorkflowsForTest(src any, end cli.ProcessEnd) {

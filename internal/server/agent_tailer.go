@@ -41,7 +41,10 @@ type agentTailer struct {
 	taskID    string
 	toolUseID string
 	reader    *subagent.TranscriptReader
-	reg       *tailerRegistry
+	// done, set for a workflow agent, reports from its board whether the
+	// agent is over: no task_done ever names it.
+	done func() (status string, over bool)
+	reg  *tailerRegistry
 
 	stopCh   chan struct{}
 	doneOnce sync.Once
@@ -72,6 +75,13 @@ func (t *agentTailer) pollOnce() bool {
 	events, err := t.reader.Tail()
 	if err != nil {
 		slog.Debug("agent_tailer: tail error", "key", t.key, "task", t.taskID, "err", err)
+	}
+	// Read to the end and the board says the agent is over: agent_done.
+	if len(events) == 0 && t.done != nil {
+		if status, over := t.done(); over {
+			t.reg.closeTask(t.key, t.taskID, status)
+			return false
+		}
 	}
 
 	// Wall clock captured outside the lock to keep the critical section short (#1407).

@@ -12,7 +12,7 @@
 // reassign the primitives.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList, transcript } from './state.js';
-import { esc, escAttr, showToast, nzViews } from './nz_util.js';
+import { esc, escAttr, showToast, nzBus, nzViews } from './nz_util.js';
 import { fetchEvents } from './event_stream.js';
 import { eventHtml, renderEventsWithDividers } from './event_render.js';
 import { wsm } from './ws_manager.js';
@@ -171,18 +171,22 @@ import { sid } from './session_ident.js';
     }
   }
 
-  // switchTo(taskID) — drill into a specific agent's internal transcript.
+  // switchTo(taskID, opts) — drill into a specific agent's internal transcript.
   // Called by:
   //   - banner row onclick (AgentView.switchTo)
+  //   - a workflow panel row, with opts {label, crumb}: its agent is not in
+  //     turnState.agents, so the breadcrumb comes from the caller
   //   - WS agent_subscribe_rejected{reason:"capacity"} fallback path
   //   - Esc (via switchTo(null))
-  function switchTo(taskID) {
+  // Every change of the drilled agent is announced on nzBus as 'agent:view'.
+  function switchTo(taskID, opts) {
     var seq = ++state.switchSeq;
     if (!taskID) {
       state.retries = 0;
     }
     state.activeKey = selection.key || '';
     state.activeTaskID = taskID || '';
+    announceView();
     // Opening a drill-in cancels any auto-collapse-in-progress on the banner
     // so the user's explicit click isn't immediately undone.
     if (turnState.collapsedByAuto !== undefined) {
@@ -208,7 +212,11 @@ import { sid } from './session_ident.js';
 
     // Found the row? Populate the breadcrumb with the best info we have.
     var row = findAgentByTaskId(taskID);
-    if (row) {
+    if (opts) {
+      state.activeAgentName = opts.label || '';
+      state.activeTeamName = opts.crumb || '';
+      state.activeStatus = '';
+    } else if (row) {
       state.activeAgentName = row.name || '';
       state.activeTeamName = row.teamName || '';
       state.activeStatus = row.status || '';
@@ -468,10 +476,16 @@ import { sid } from './session_ident.js';
   // "agent_*" frame types, so agent-view frames never touch the
   // dashboard.js receive table.
 
+  // A tailer replays its buffer from the transcript's start, so events the
+  // HTTP page already showed are dropped against the same watermark the
+  // HTTP poll keeps.
   function onAgentEvent(/** @type {WsFrames['agent_event']} */ msg) {
     if (!msg || !msg.event) return;
     if (msg.task_id !== state.activeTaskID) return;
-    appendAgentEvent(msg.event);
+    var batch = dedupAgentPollBatch([msg.event], state.pollAfterMS, state.pollSeenKeys);
+    state.pollAfterMS = batch.afterMS;
+    state.pollSeenKeys = batch.seenKeys;
+    if (batch.events.length) appendAgentEvent(batch.events[0]);
   }
 
   function onAgentMeta(/** @type {WsFrames['agent_meta']} */ msg) {
@@ -530,8 +544,9 @@ import { sid } from './session_ident.js';
         switchTo(null);
         break;
       case 'pending':
-        // Linker hasn't seen this task_id yet; the HTTP 202 path already
-        // handles the retry loop for us — no extra action needed.
+        // The transcript went away between the HTTP page and the subscribe
+        // (the HTTP 200 already showed it): follow it by HTTP poll.
+        startHttpPoll(msg.task_id);
         break;
       default:
         showToast('agent 订阅被拒绝 (' + msg.reason + ')', 'warning');
@@ -691,6 +706,11 @@ import { sid } from './session_ident.js';
     state.activeTeamName = '';
     state.activeStatus = '';
     hideBreadcrumb();
+    announceView();
+  }
+
+  function announceView() {
+    nzBus.dispatchEvent(new CustomEvent('agent:view', { detail: { taskID: state.activeTaskID } }));
   }
 
   wsm.on(NZ_CONTRACT.WS.agent_event, (msg) => onAgentEvent(msg));

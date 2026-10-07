@@ -4,6 +4,7 @@ package server
 
 import (
 	"log/slog"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -172,12 +173,20 @@ func (r *tailerRegistry) enrich(snap *session.SessionSnapshot) {
 	}
 }
 
+// workflowTail is what a workflow agent's tailer needs besides its path:
+// open, the board's root-anchored opener every open of its reader goes
+// through, and done, which tells from the board whether the agent is over.
+type workflowTail struct {
+	open func() (*os.File, error)
+	done func() (status string, done bool)
+}
+
 // ensureTailer is called by the Linker OnResolve callback or by an
 // agent_subscribe message before the silent tailer has started. Idempotent:
 // repeated calls for the same (key, taskID) return the existing tailer.
 // Returns (nil, false) when the cap has been hit — caller must emit
-// agent_subscribe_rejected.
-func (r *tailerRegistry) ensureTailer(key, taskID, toolUseID, jsonlPath string) (*agentTailer, bool) {
+// agent_subscribe_rejected. wf is set for a workflow agent.
+func (r *tailerRegistry) ensureTailer(key, taskID, toolUseID, jsonlPath string, wf *workflowTail) (*agentTailer, bool) {
 	if jsonlPath == "" {
 		return nil, false
 	}
@@ -209,11 +218,18 @@ func (r *tailerRegistry) ensureTailer(key, taskID, toolUseID, jsonlPath string) 
 	if r.count.Load() >= agentTailerMax {
 		return nil, false
 	}
+	reader := subagent.NewTranscriptReader(jsonlPath)
+	var done func() (string, bool)
+	if wf != nil {
+		reader = subagent.NewTranscriptReaderFrom(jsonlPath, nil, wf.open, subagent.ReaderOpts{StripHarnessFraming: true})
+		done = wf.done
+	}
 	t := &agentTailer{
 		key:        key,
 		taskID:     taskID,
 		toolUseID:  toolUseID,
-		reader:     subagent.NewTranscriptReader(jsonlPath),
+		reader:     reader,
+		done:       done,
 		reg:        r,
 		stopCh:     make(chan struct{}),
 		subs:       make(map[*wsClient]struct{}),

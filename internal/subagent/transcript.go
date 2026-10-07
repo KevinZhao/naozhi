@@ -5,13 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -25,6 +28,10 @@ import (
 // released eagerly.
 type TranscriptReader struct {
 	path string
+	// open opens path for every (re)open; strip asks for the first line's
+	// harness framing to be dropped (ReaderOpts).
+	open  func() (*os.File, error)
+	strip bool
 
 	mu     sync.Mutex
 	offset int64
@@ -37,13 +44,42 @@ type TranscriptReader struct {
 	f         *os.File
 	statSig   os.FileInfo
 	closeOnce sync.Once
+	// pastFirst is set once the file's first line has been mapped.
+	pastFirst bool
+}
+
+// ReaderOpts tunes a TranscriptReader.
+type ReaderOpts struct {
+	// StripHarnessFraming shows the first line's user text through
+	// StripHarnessFraming: a workflow agent's task, not the harness's frame.
+	StripHarnessFraming bool
 }
 
 // NewTranscriptReader constructs a reader anchored at path. path is trusted:
 // callers must already have validated it lives under ~/.claude/projects and
-// matches agent-<hex>.jsonl.
+// matches agent-<hex>.jsonl. It opens only a regular file, without blocking.
 func NewTranscriptReader(path string) *TranscriptReader {
-	return &TranscriptReader{path: path}
+	open := func() (*os.File, error) {
+		f, _, err := osutil.OpenRegular(path, 0)
+		return f, err
+	}
+	return NewTranscriptReaderFrom(path, nil, open, ReaderOpts{})
+}
+
+// NewTranscriptReaderFrom is a reader that opens the transcript only through
+// open, which must refuse anything but a regular file and never block; f,
+// when not nil, is the first fd (the reader owns it). path is only Lstat'ed,
+// to notice a rotation after a read that found nothing new.
+func NewTranscriptReaderFrom(path string, f *os.File, open func() (*os.File, error), opts ReaderOpts) *TranscriptReader {
+	r := &TranscriptReader{path: path, open: open, strip: opts.StripHarnessFraming}
+	if f != nil {
+		if fi, err := f.Stat(); err == nil {
+			r.f, r.statSig = f, fi
+		} else {
+			_ = f.Close()
+		}
+	}
+	return r
 }
 
 // Close releases the persistent transcript fd. Idempotent; subsequent
@@ -62,49 +98,44 @@ func (r *TranscriptReader) Close() error {
 	return err
 }
 
-// openOrReuse returns the cached fd, or opens fresh. reset=true means a
-// prior fd existed and the inode swapped (rotation), so the caller must drop
-// offset/tail; the first open returns reset=false. On Stat/Open errors any
-// prior fd is closed. A live fd is returned WITHOUT an os.Stat — an actively
-// growing file cannot have rotated; readLocked re-probes only on a zero-byte
-// poll (#1884). Caller MUST hold r.mu.
-func (r *TranscriptReader) openOrReuse() (*os.File, bool, error) {
+// openOrReuse returns the cached fd, or opens fresh through r.open. A live
+// fd is returned without a stat — an actively growing file cannot have
+// rotated; readLocked re-probes only on a zero-byte poll (#1884). Caller MUST
+// hold r.mu.
+func (r *TranscriptReader) openOrReuse() (*os.File, error) {
 	if r.f != nil && r.statSig != nil {
-		return r.f, false, nil
+		return r.f, nil
 	}
-	st, err := os.Stat(r.path)
+	return r.reopen()
+}
+
+// reopen replaces the cached fd with a fresh one from r.open. A path that
+// is no regular file now (O_NOFOLLOW's ELOOP for a symlink) reads as gone,
+// so callers keep their not-exist branch. Caller must hold r.mu.
+func (r *TranscriptReader) reopen() (*os.File, error) {
+	r.dropFD()
+	f, err := r.open()
 	if err != nil {
-		// Path gone: drop the cached fd; surface err verbatim so callers can
-		// branch on os.IsNotExist.
-		if r.f != nil {
-			_ = r.f.Close()
-			r.f = nil
-			r.statSig = nil
+		if errors.Is(err, osutil.ErrNotRegular) || errors.Is(err, syscall.ELOOP) {
+			err = &os.PathError{Op: "open", Path: r.path, Err: fs.ErrNotExist}
 		}
-		return nil, false, err
+		return nil, err
 	}
-	if r.f != nil && r.statSig != nil && os.SameFile(r.statSig, st) {
-		return r.f, false, nil
-	}
-	hadPrior := r.f != nil
-	if r.f != nil {
-		_ = r.f.Close()
-		r.f = nil
-		r.statSig = nil
-	}
-	f, err := os.Open(r.path)
-	if err != nil {
-		return nil, false, err
-	}
-	// Re-stat the opened fd: a rotation could swap the file between Stat and Open.
 	fi, err := f.Stat()
 	if err != nil {
 		_ = f.Close()
-		return nil, false, err
+		return nil, err
 	}
-	r.f = f
-	r.statSig = fi
-	return r.f, hadPrior, nil
+	r.f, r.statSig = f, fi
+	return f, nil
+}
+
+// dropFD closes the cached fd. Caller must hold r.mu.
+func (r *TranscriptReader) dropFD() {
+	if r.f != nil {
+		_ = r.f.Close()
+	}
+	r.f, r.statSig = nil, nil
 }
 
 // Read returns up to `limit` EventEntry values with Time > afterMS. Entries
@@ -127,13 +158,9 @@ func (r *TranscriptReader) Tail() ([]clievent.EventEntry, error) {
 }
 
 func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]clievent.EventEntry, error) {
-	f, reset, err := r.openOrReuse()
+	f, err := r.openOrReuse()
 	if err != nil {
 		return nil, err
-	}
-	if reset {
-		r.offset = 0
-		r.tail = nil
 	}
 
 	freshBytes, err := r.readFresh(f)
@@ -151,6 +178,7 @@ func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]clievent.Even
 		if rotated {
 			r.offset = 0
 			r.tail = nil
+			r.pastFirst = false
 			freshBytes, err = r.readFresh(r.f)
 			if err != nil {
 				return nil, err
@@ -186,7 +214,9 @@ func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]clievent.Even
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-		ents := mapJSONLLine(line)
+		first := !r.pastFirst
+		r.pastFirst = true
+		ents := mapJSONLLine(line, first && r.strip)
 		for _, e := range ents {
 			if afterMS > 0 && e.Time > 0 && e.Time <= afterMS {
 				continue
@@ -229,40 +259,27 @@ func (r *TranscriptReader) readFresh(f *os.File) ([]byte, error) {
 	return freshBytes, nil
 }
 
-// reprobeRotation runs the Stat + SameFile rotation guard after a zero-byte
-// poll. Returns rotated=true with r.f/r.statSig swapped to the new inode, or
-// false when unchanged. A vanished path drops the cached fd and surfaces the
-// os.IsNotExist error so agent_tailer keeps its 404 semantics. Caller must
-// hold r.mu.
+// reprobeRotation runs the Lstat + SameFile rotation guard after a
+// zero-byte poll. Returns rotated=true with r.f/r.statSig swapped to the new
+// inode, or false when unchanged. A vanished path, or one that is no regular
+// file now (a FIFO, a symlink), drops the cached fd and surfaces a
+// not-exist error so agent_tailer keeps its 404 semantics; nothing but
+// r.open opens it. Caller must hold r.mu.
 func (r *TranscriptReader) reprobeRotation() (bool, error) {
-	st, err := os.Stat(r.path)
+	st, err := os.Lstat(r.path)
+	if err == nil && !st.Mode().IsRegular() {
+		err = &os.PathError{Op: "lstat", Path: r.path, Err: fs.ErrNotExist}
+	}
 	if err != nil {
-		if r.f != nil {
-			_ = r.f.Close()
-			r.f = nil
-			r.statSig = nil
-		}
+		r.dropFD()
 		return false, err
 	}
 	if r.f != nil && r.statSig != nil && os.SameFile(r.statSig, st) {
 		return false, nil
 	}
-	if r.f != nil {
-		_ = r.f.Close()
-		r.f = nil
-		r.statSig = nil
-	}
-	f, err := os.Open(r.path)
-	if err != nil {
+	if _, err := r.reopen(); err != nil {
 		return false, err
 	}
-	fi, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return false, err
-	}
-	r.f = f
-	r.statSig = fi
 	return true, nil
 }
 
@@ -307,7 +324,7 @@ func advanceOffset(prev int64, readLen int64, consumed int, data, fresh []byte, 
 // mapJSONLLine transforms one subagent jsonl record into zero or more
 // EventEntry values. Malformed lines yield nil (dropped silently so one
 // corrupted record does not abort an otherwise-valid transcript).
-func mapJSONLLine(line []byte) []clievent.EventEntry {
+func mapJSONLLine(line []byte, strip bool) []clievent.EventEntry {
 	var raw transcriptLine
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return nil
@@ -316,7 +333,7 @@ func mapJSONLLine(line []byte) []clievent.EventEntry {
 
 	switch raw.Type {
 	case "user":
-		return mapUserLine(raw, ts)
+		return mapUserLine(raw, ts, strip)
 	case "assistant":
 		return mapAssistantLine(raw, ts)
 	case "system":
@@ -354,7 +371,7 @@ type transcriptUserBlock struct {
 
 // mapUserLine handles content as either plain string (teammate control channel
 // or plain prompt) or array of blocks (typically [{"tool_result": ...}]).
-func mapUserLine(raw transcriptLine, ts int64) []clievent.EventEntry {
+func mapUserLine(raw transcriptLine, ts int64, strip bool) []clievent.EventEntry {
 	if raw.Message == nil || len(raw.Message.Content) == 0 {
 		return nil
 	}
@@ -366,6 +383,9 @@ func mapUserLine(raw transcriptLine, ts int64) []clievent.EventEntry {
 		// (user-role only, so substring detection is safe).
 		if strings.Contains(s, "<teammate-message teammate_id=") {
 			return nil
+		}
+		if strip {
+			s, _ = StripHarnessFraming(s)
 		}
 		return []clievent.EventEntry{{
 			Time:    ts,
@@ -389,11 +409,15 @@ func mapUserLine(raw transcriptLine, ts int64) []clievent.EventEntry {
 			if block.Text == "" {
 				continue
 			}
+			text := block.Text
+			if strip {
+				text, _ = StripHarnessFraming(text)
+			}
 			out = append(out, clievent.EventEntry{
 				Time:    ts,
 				Type:    clievent.KindText,
-				Summary: textutil.TruncateRunes(block.Text, 120),
-				Detail:  textutil.TruncateRunes(block.Text, clievent.EventDetailMaxRunes),
+				Summary: textutil.TruncateRunes(text, 120),
+				Detail:  textutil.TruncateRunes(text, clievent.EventDetailMaxRunes),
 			})
 		case "tool_result":
 			summary, detail, persistedPath, skip := flattenToolResultRaw(block.Content)
