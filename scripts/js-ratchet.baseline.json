@@ -240,7 +240,7 @@
     "lateBindings": 0
   },
   "event_stream.js": {
-    "lines": 923,
+    "lines": 925,
     "maxFnLines": 68,
     "maxIifeLines": 0,
     "fnOver100": 0,

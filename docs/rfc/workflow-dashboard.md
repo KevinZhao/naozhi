@@ -2540,7 +2540,9 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
   `task_progress/task_done` 不启动 timer。（PR-14：判定是 `running_banner.js` 导出的 `idleTaskEvent(ev)`，看当前选中 session 的
   `sessionsData` state；同一缺陷还有第二条路：`event_stream.js` 的 `rebuildTurnFromHistory` 不经 `startTurnTimer`，直接把
   `turnStartTime` 设为最后一个 user / result 之后第一条事件的时间——打开一个空闲期收过后台 progress 的 session，下一轮的 elapsed
-  同样从那条 progress 算起。它改为跳过开头的空闲 task 事件再锚定。）
+  同样从那条 progress 算起。它改为跳过开头的空闲 task 事件再锚定。`idleTaskEvent` 看的是当前 state：session 因 CC 被
+  task_notification 唤醒而 running 时，最后一个 result 之后没有 user 行，空闲期的 progress 会被当成本轮的；所以边界是 result 时
+  开头的 `task_progress` 无论当前 state 都跳过，锚在唤醒它的 task_done 上。）
 - 兼容：`process_extra_test.go:1395-1440` 钉住的映射需同步更新；`kinds_test.go` 不变（不新增 kind）。
 
 此项单独成 PR、放在最后，因为它是唯一改变既有可见行为（历史里不再有 workflow progress 行）的改动。

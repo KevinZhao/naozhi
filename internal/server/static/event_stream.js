@@ -612,9 +612,11 @@ function rebuildTurnFromHistory(events) {
     if (i === 0) turnStart = 0;
   }
   // Anchor timer to the actual turn start time, not Date.now(); a background
-  // task reporting after the last turn starts none.
+  // task reporting after the last turn starts none. A turn that follows a
+  // result has no user row (CC woke on a task_done): progress before it is idle.
+  const woke = turnStart > 0 && events[turnStart - 1].type === 'result';
   let anchor = turnStart;
-  while (anchor < events.length && idleTaskEvent(events[anchor])) anchor++;
+  while (anchor < events.length && (idleTaskEvent(events[anchor]) || (woke && events[anchor].type === 'task_progress'))) anchor++;
   if (anchor < events.length && events[anchor].time) {
     turnState.turnStartTime = events[anchor].time;
     paintTurnElapsed();
