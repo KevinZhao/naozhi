@@ -204,7 +204,7 @@
     "lateBindings": 1
   },
   "dashboard.js": {
-    "lines": 1703,
+    "lines": 1699,
     "maxFnLines": 93,
     "maxIifeLines": 61,
     "fnOver100": 0,
