@@ -43,10 +43,14 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 				entry.Summary = textutil.TruncateRunes(ev.Description, 120)
 			}
 		case "task_progress", "task_updated":
+			// A workflow's progress is its panel's (RFC §9): one row per
+			// snapshot flooded the ring, its persisted log and the activity line.
+			if ev.WorkflowTask {
+				return nil
+			}
 			entry.Type = clievent.KindTaskProgress
 			entry.TaskID = ev.TaskID
 			entry.ToolUseID = ev.ToolUseID
-			entry.TaskType = workflowTaskType(ev)
 			// task_updated carries only a patch; the subtype is no summary (the
 			// dashboard copies a progress Summary into the agent's description).
 			if ev.Description != "" {
@@ -68,8 +72,11 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 			entry.TaskID = ev.TaskID
 			entry.ToolUseID = ev.ToolUseID
 			entry.TaskType = workflowTaskType(ev)
-			// CC sends a notification's text as summary, not description.
+			// CC sends a notification's text as summary, not description; a
+			// workflow's summary names the run and its outcome.
 			switch {
+			case ev.WorkflowTask && ev.TaskSummary != "":
+				entry.Summary = textutil.TruncateRunes(ev.TaskSummary, 120)
 			case ev.Description != "":
 				entry.Summary = textutil.TruncateRunes(ev.Description, 120)
 			case ev.TaskSummary != "":
@@ -227,9 +234,9 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 	return nil
 }
 
-// workflowTaskType is the TaskType a task progress / done entry carries: CC
-// names the type on task_started only, so a workflow's later entries are
-// tagged from the Tracker's verdict (ev.WorkflowTask) for InjectHistory.
+// workflowTaskType is the TaskType a task_done entry carries: CC names the
+// type on task_started only, so a workflow's notification is tagged from the
+// Tracker's verdict (ev.WorkflowTask) for InjectHistory.
 func workflowTaskType(ev clievent.Event) string {
 	if ev.WorkflowTask {
 		return TaskTypeWorkflow
