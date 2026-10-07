@@ -342,7 +342,9 @@ async function createAndSend(page, own, c) {
 
 /**
  * Sends text (or one image when text is '') on the selected key and waits
- * until n sends have left in total.
+ * until sendMessage has finished and n sends have left in total. Until an
+ * HTTP send has its reply, sendMessage drops a further send at its
+ * reentrancy gate, so the mock having the POST is not enough.
  * @param {import('@playwright/test').Page} page
  * @param {Awaited<ReturnType<typeof startMockServer>>} own
  * @param {string} text
@@ -353,7 +355,7 @@ async function sendNow(page, own, text, n) {
     const t = /** @type {any} */ (window).nz.test;
     t.setMsgValue(document.getElementById('msg-input'), text);
     if (!text) t.pendingFiles.push({ id: 'file-1', kind: 'image', status: 'ready', normalizedSize: 16, file: new File([new Uint8Array(16)], 'p.png', { type: 'image/png' }) });
-    t.sendMessage();
+    return t.sendMessage();
   }, text);
   await expect.poll(() => own.sendCalls.length + wsSendBodies(own).length).toBe(n);
 }
@@ -432,7 +434,9 @@ test('a sent kiro pick keeps gating images and the clawd icon off until listed',
 
 for (const ws of [false, true]) {
   test(`a second send before listing carries no backend or access profile (${ws ? 'WS' : 'HTTP'})`, async ({ page }) => {
-    const own = await mockWithCLIName(undefined, { ws });
+    // The HTTP reply comes late, as on a loaded runner, so the second send
+    // only goes out if sendNow waited for the first one to finish.
+    const own = await mockWithCLIName(undefined, ws ? { ws } : { ws, sendReplyDelayMs: 300 });
     try {
       await createAndSend(page, own, { profile: 'team', backend: 'kiro', ws, text: 'one' });
       await sendNow(page, own, 'two', 2);

@@ -326,6 +326,8 @@ function defaultGitStates() {
  *   the created job (fixed id cron-new-001) to the served list, so the dashboard's
  *   post-create refetch sees it - the drawer-opens-on-created-job flow needs that.
  * @param {number} [overrides.sendStatus] - Status code for POST /api/sessions/send.
+ * @param {number} [overrides.sendReplyDelayMs] - Hold POST /api/sessions/send answers this long after
+ *   recording the body in sendCalls, as a loaded server would.
  * @param {object} [overrides.sessionRuns] - session key → GET /api/sessions/runs payload ({runs, stats}); unknown keys 404 (header runstats stay empty).
  * @param {object[]} [overrides.discovered] - GET /api/discovered payload (default: none).
  * @param {object[]} [overrides.discoveredPreview] - GET /api/discovered/preview entries (default: none).
@@ -822,16 +824,20 @@ function startMockServer(overrides = {}) {
       req.on('end', () => {
         sendCalls.push(body);
         if (overrides.onSend) overrides.onSend(body);
-        if (status === 429) {
-          res.writeHead(429, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'message queue full' }));
-        } else if (status >= 400) {
-          res.writeHead(status, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'send failed' }));
-        } else {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true }));
-        }
+        const reply = () => {
+          if (status === 429) {
+            res.writeHead(429, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'message queue full' }));
+          } else if (status >= 400) {
+            res.writeHead(status, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'send failed' }));
+          } else {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+          }
+        };
+        if (overrides.sendReplyDelayMs) setTimeout(reply, overrides.sendReplyDelayMs);
+        else reply();
       });
       return;
     }
