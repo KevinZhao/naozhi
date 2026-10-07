@@ -1,7 +1,7 @@
 {
   "agent_view.js": {
     "lines": 743,
-    "maxFnLines": 66,
+    "maxFnLines": 62,
     "maxIifeLines": 722,
     "fnOver100": 0,
     "topLevelLetVar": 0,

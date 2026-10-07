@@ -142,8 +142,7 @@ import { sid } from './session_ident.js';
     switchSeq: 0,      // monotonic — lets async Resolve polls abandon stale switches
     retries: 0,        // 202 retry counter (bounded, §3.6.4)
     pollTimer: null,   // HTTP fallback interval ID
-    pollAfterMS: 0,    // HTTP poll watermark
-    pollSeenKeys: [],  // content keys already rendered AT pollAfterMS (same-ms replay dedup)
+    pollCursor: null,  // replay dedup state (dedupAgentPollBatch); null = nothing rendered
   };
 
   var MAX_SWITCH_RETRIES = 20; // §R14: 5 s retry ceiling
@@ -197,8 +196,7 @@ import { sid } from './session_ident.js';
       turnState.collapsedByAuto = false;
     }
     stopHttpPoll();
-    state.pollAfterMS = 0;
-    state.pollSeenKeys = [];
+    state.pollCursor = null;
     refreshBanner();
 
     var el = document.getElementById('events-scroll');
@@ -287,13 +285,9 @@ import { sid } from './session_ident.js';
       .then(function (events) {
         if (!events || seq !== state.switchSeq) return;
         renderAgentEvents(events, /*reset=*/ true);
-        // Seed the HTTP-poll watermark from what is now on screen so a
-        // capacity-rejected WS subscribe does not replay this whole page on
-        // the first poll tick (after=0). dedupAgentPollBatch's bookkeeping
-        // (max real time + content keys at that ms) is exactly the seed.
-        var seed = dedupAgentPollBatch(events, 0, []);
-        state.pollAfterMS = seed.afterMS;
-        state.pollSeenKeys = seed.seenKeys;
+        // Seed the dedup cursor from what is on screen: neither the WS
+        // tailer's replay nor a fallback poll tick may render it again.
+        state.pollCursor = dedupAgentPollBatch(events, null).cursor;
         subscribeCurrent(taskID);
       })
       .catch(function (err) {
@@ -488,9 +482,8 @@ import { sid } from './session_ident.js';
   function onAgentEvent(/** @type {WsFrames['agent_event']} */ msg) {
     if (!msg || !msg.event) return;
     if (msg.task_id !== state.activeTaskID) return;
-    var batch = dedupAgentPollBatch([msg.event], state.pollAfterMS, state.pollSeenKeys);
-    state.pollAfterMS = batch.afterMS;
-    state.pollSeenKeys = batch.seenKeys;
+    var batch = dedupAgentPollBatch([msg.event], state.pollCursor);
+    state.pollCursor = batch.cursor;
     if (batch.events.length) appendAgentEvent(batch.events[0]);
   }
 
@@ -563,36 +556,44 @@ import { sid } from './session_ident.js';
   // ─── HTTP poll fallback (capacity rejected path) ───────────────────
 
   // @contract-begin dedupAgentPollBatch
-  // agentEventKey identifies a transcript entry for same-ms replay dedup.
-  // Transcript entries carry no uuid (cli.mapAssistantLine), so the full
-  // content tuple is the identity.
+  // agentEventKey identifies a transcript entry for replay dedup: the uuid
+  // the server's transcript reader derives from the jsonl line, else (an
+  // entry without one) the full content tuple.
   function agentEventKey(ev) {
+    if (ev.uuid) return 'u\u0001' + ev.uuid;
     return [ev.time || 0, ev.type || '', ev.tool || '', ev.summary || '',
       ev.detail || ''].join('\u0001');
   }
 
-  // dedupAgentPollBatch consumes one HTTP poll page. The server re-admits the
-  // watermark millisecond (Time >= after, #2432 item 5) so a same-ms sibling
-  // cut off by the previous page's `limit` is not lost; entries already
-  // rendered at that ms are dropped here instead. Returns the events to
-  // render plus the next watermark and the content keys rendered at it.
-  function dedupAgentPollBatch(events, afterMS, seenKeys) {
+  // dedupAgentPollBatch filters a batch (an HTTP page, one WS agent_event)
+  // against cursor (null = nothing rendered yet): the newest real time shown
+  // (afterMS), the keys shown at that ms (seenKeys) and those of every entry
+  // shown with no time (untimed). The server re-admits the watermark ms
+  // (#2432 item 5) and the WS tailer replays from the transcript's start, so
+  // both sets drop replays by key; untimed entries pass every time filter.
+  function dedupAgentPollBatch(events, cursor) {
+    var afterMS = cursor ? cursor.afterMS : 0;
+    var prev = cursor ? cursor.seenKeys : [];
     var seen = {};
-    var prev = seenKeys || [];
     for (var i = 0; i < prev.length; i++) seen[prev[i]] = true;
+    var untimed = Object.assign({}, cursor && cursor.untimed);
     var out = [];
     var maxT = afterMS;
     for (var j = 0; j < events.length; j++) {
       var ev = events[j];
       if (!ev) continue;
       var t = typeof ev.time === 'number' ? ev.time : 0;
+      if (!t) {
+        var uk = agentEventKey(ev);
+        if (!untimed[uk]) out.push(ev);
+        untimed[uk] = true;
+        continue;
+      }
       // Strictly older than the watermark: already on screen (mirrors the
       // main transcript's appendEvents rule).
-      if (t && t < afterMS) continue;
-      if (t && t === afterMS && seen[agentEventKey(ev)]) continue;
+      if (t < afterMS) continue;
+      if (t === afterMS && seen[agentEventKey(ev)]) continue;
       out.push(ev);
-      // Advance only on a real timestamp: time===0 predates the field and
-      // treating it as newest would pin after=0 forever.
       if (t > maxT) maxT = t;
     }
     var keys = maxT === afterMS ? prev.slice() : [];
@@ -600,7 +601,7 @@ import { sid } from './session_ident.js';
       var t2 = typeof out[m].time === 'number' ? out[m].time : 0;
       if (t2 && t2 === maxT) keys.push(agentEventKey(out[m]));
     }
-    return { events: out, afterMS: maxT, seenKeys: keys };
+    return { events: out, cursor: { afterMS: maxT, seenKeys: keys, untimed: untimed } };
   }
   // @contract-end dedupAgentPollBatch
 
@@ -616,7 +617,7 @@ import { sid } from './session_ident.js';
       var qs = '?key=' + encodeURIComponent(selection.key) +
         '&node=' + encodeURIComponent(selection.node || 'local') +
         '&task_id=' + encodeURIComponent(taskID) +
-        '&after=' + state.pollAfterMS +
+        '&after=' + (state.pollCursor ? state.pollCursor.afterMS : 0) +
         '&limit=200';
       fetch(NZ_CONTRACT.API.sessions_agent_events + qs, { credentials: 'same-origin' })
         .then(function (r) {
@@ -628,12 +629,11 @@ import { sid } from './session_ident.js';
         })
         .then(function (events) {
           if (!events || !events.length) return;
-          var batch = dedupAgentPollBatch(events, state.pollAfterMS, state.pollSeenKeys);
+          var batch = dedupAgentPollBatch(events, state.pollCursor);
           for (var i = 0; i < batch.events.length; i++) {
             appendAgentEvent(batch.events[i]);
           }
-          state.pollAfterMS = batch.afterMS;
-          state.pollSeenKeys = batch.seenKeys;
+          state.pollCursor = batch.cursor;
         })
         .catch(function () { /* swallow; will retry */ });
     }, 3000);

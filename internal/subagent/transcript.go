@@ -2,12 +2,15 @@ package subagent
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -231,6 +234,7 @@ func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]clievent.Even
 		first := !r.pastFirst
 		r.pastFirst = true
 		ents, ts := mapJSONLLine(line, first && r.strip)
+		stampEntryUUIDs(ents, line)
 		r.widenSpan(ts)
 		for _, e := range ents {
 			if afterMS > 0 && e.Time > 0 && e.Time <= afterMS {
@@ -246,6 +250,25 @@ func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]clievent.Even
 	// Bytes held in r.tail count as read from the OS, so offset advances fully.
 	r.offset += readLen
 	return out, nil
+}
+
+// stampEntryUUIDs gives each entry mapped from line an identity derived from
+// the line's bytes and the entry's index in it. Every reader of the same file
+// (an HTTP page, the WS tailer's replay) derives the same UUID for the same
+// entry, so the dashboard can dedup entries the time watermark cannot order,
+// such as those with Time 0. A CC record carries its own uuid, which makes
+// the bytes unique per record.
+func stampEntryUUIDs(ents []clievent.EventEntry, line []byte) {
+	h := sha256.New()
+	for i := range ents {
+		h.Reset()
+		h.Write([]byte("agent-transcript-v1\x00"))
+		h.Write(line)
+		h.Write([]byte{0x00})
+		h.Write([]byte(strconv.Itoa(i)))
+		sum := h.Sum(nil)
+		ents[i].UUID = hex.EncodeToString(sum[:16])
+	}
 }
 
 // widenSpan folds a record's timestamp (0 = none) into firstMS/lastMS.

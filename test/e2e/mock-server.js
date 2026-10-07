@@ -1043,8 +1043,9 @@ function startMockServer(overrides = {}) {
         return;
       }
       const all = agentEvents[taskId] || [];
-      // Inclusive, like the server: entries AT the watermark come back again.
-      const page = all.filter(e => (e?.time || 0) >= after).slice(0, limit);
+      // Inclusive, like the server: entries AT the watermark come back again,
+      // and an entry with no time passes the filter on every page.
+      const page = all.filter(e => !e?.time || e.time >= after).slice(0, limit);
       sendEntries(res, 'sessions_agent_events', all, page);
       return;
     }
