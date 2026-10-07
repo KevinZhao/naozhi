@@ -46,8 +46,20 @@ test('KaTeX and mermaid render with their styles under the CSP', async ({ browse
   });
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
+  // The refused <style> fires an element error event; it must not reach the
+  // global error handler as a "页面遇到异常" toast.
+  /** @type {string[]} */
+  const errors = [];
+  page.on('pageerror', e => errors.push('pageerror: ' + e.message));
+  page.on('console', m => { if (m.text().startsWith('[global-error]')) errors.push(m.text()); });
   try {
     await page.goto(mock.url + '/dashboard');
+    await page.evaluate(() => {
+      const w = /** @type {any} */ (window);
+      const el = /** @type {HTMLElement} */ (document.getElementById('toast'));
+      w.__toasts = [];
+      new MutationObserver(() => w.__toasts.push(el.textContent)).observe(el, { childList: true, characterData: true, subtree: true });
+    });
     await page.locator(`.session-card[data-key="${KEY_A}"]`).click();
     await expect(page.locator('#events-scroll .katex').first()).toBeVisible({ timeout: 15000 });
     await expect(page.locator('#events-scroll .mermaid svg')).toBeVisible({ timeout: 30000 });
@@ -87,6 +99,10 @@ test('KaTeX and mermaid render with their styles under the CSP', async ({ browse
     // The stylesheet's fonts come from /static/vendor/ under font-src 'self'.
     await expect.poll(() => page.evaluate(() => [...document.fonts]
       .some(f => f.family.replace(/"/g, '') === 'KaTeX_Main' && f.status === 'loaded'))).toBe(true);
+
+    const toasts = await page.evaluate(() => /** @type {any} */ (window).__toasts);
+    expect(toasts.filter((/** @type {string} */ t) => t.includes('页面遇到异常'))).toEqual([]);
+    expect(errors).toEqual([]);
   } finally {
     await ctx.close();
     mock.server.close();

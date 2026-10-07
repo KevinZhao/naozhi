@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"slices"
@@ -28,6 +29,18 @@ type WebhookConfig struct {
 	Subsystems []string `yaml:"subsystems,omitempty"`
 	// Timeout per HTTP attempt, e.g. "10s"; empty = webhook.DefaultTimeout.
 	Timeout string `yaml:"timeout,omitempty"`
+}
+
+// LogValue implements slog.LogValuer: the URL is reduced to scheme://host
+// (its path or query may carry a token) and the secret is redacted.
+func (c WebhookConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("url", webhook.RedactURL(strings.TrimSpace(c.URL))),
+		slog.String("secret", redactSecret(c.Secret)),
+		slog.Any("events", c.Events),
+		slog.Any("subsystems", c.Subsystems),
+		slog.String("timeout", c.Timeout),
+	)
 }
 
 var (

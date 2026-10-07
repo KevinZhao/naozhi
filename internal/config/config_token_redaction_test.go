@@ -165,3 +165,21 @@ func TestConfig_LogValue_EmptyTokenNotRedacted(t *testing.T) {
 		t.Errorf("empty token should not render [REDACTED]: %s", out)
 	}
 }
+
+func TestWebhookConfig_LogValue_RedactsURLAndSecret(t *testing.T) {
+	t.Parallel()
+	cfg := WebhookConfig{
+		URL:    "https://alice:hunter2@hooks.example/in/PATHTOK?token=SEKRET123",
+		Secret: "sign-key-xyz",
+		Events: []string{"run.ended"},
+	}
+	out := logLine(t, "webhook", cfg)
+	for _, secret := range []string{"hunter2", "alice", "PATHTOK", "SEKRET123", "sign-key-xyz"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("%q leaked into log output: %s", secret, out)
+		}
+	}
+	if !strings.Contains(out, "https://hooks.example") || !strings.Contains(out, "[REDACTED]") {
+		t.Errorf("expected redacted target and secret marker: %s", out)
+	}
+}

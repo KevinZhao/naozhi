@@ -67,11 +67,11 @@ func (s *Sender) Close(ctx)           // 等队列排空或 ctx 到期
 - 每个 endpoint 一个 goroutine + 一条 256 深队列：慢端点不拖慢快端点
 - 请求：`POST`，`Content-Type: application/json`，头 `X-Naozhi-Event: run.ended`、
   `X-Naozhi-Delivery: <run_id>-<type>`（幂等键）、`X-Naozhi-Signature: sha256=<hex HMAC(body)>`
-- 重试：2xx 成功；408/429/5xx 和网络错误重试，退避 1s → 2s → 4s，共 3 次；
+- 重试：2xx 成功；408/429/5xx 和网络错误重试，退避 1s → 2s → 4s（各加 0–25% 随机抖动，关停时中断），共 3 次；
   其它 4xx 不重试（接收方拒绝）
 - 指标：`naozhi_webhook_delivered_total{key=endpoint#}`、`_failed_total`、`_dropped_total`
   （endpoint 用序号不用 URL，URL 可能含 token）
-- 日志只记 host，不记完整 URL
+- 日志只记 `scheme://host` 与完整 URL 的短哈希（`url_id`），不记 userinfo、path、query
 
 ### 3.3 接线
 
