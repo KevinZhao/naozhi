@@ -97,7 +97,10 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 			// is a re-read-the-repo hint for the Bash command already on the
 			// timeline, and code_change_published re-fires on every push to a PR
 			// branch; its PR reaches the dashboard header via Event.CodeChange.
-			"vcs_state_changed", "code_change_published":
+			"vcs_state_changed", "code_change_published",
+			// The slash-command list changed (plugin/MCP load); the frame carries
+			// nothing a timeline row could show.
+			"commands_changed":
 			return nil
 		}
 		return []clievent.EventEntry{entry}
