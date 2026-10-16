@@ -154,6 +154,7 @@ func configCheck(args []string, stdout io.Writer) int {
 		}
 	}
 	mcpConfigFile := resolveMCPConfigFile(cfg)
+	permissionMode := cliPermissionMode(cfg)
 	// Same two-step main() takes: the debug root hangs off the event-log dir,
 	// and the file name is the session key hash. CLIDebugDir is the read-only
 	// half, so a check never creates a debug directory.
@@ -192,9 +193,9 @@ func configCheck(args []string, stdout io.Writer) int {
 		// replacing the backend's and ignored default_model (#2969).
 		bd := session.BackendDefaults{Model: b.Model, Args: b.Args, Effort: effort}
 		baseModel, baseEffort, baseArgs, _ := session.EffectiveArgvLayers(bd, accessProfiles, cfg.DefaultAccessProfile, session.AgentOpts{})
-		opts := session.ArgvSpawnOptions(baseModel, baseEffort, debugFile, "", baseArgs, settingsFile, mcpConfigFile)
+		opts := session.ArgvSpawnOptions(baseModel, baseEffort, debugFile, "", baseArgs, settingsFile, mcpConfigFile, permissionMode)
 		for _, d := range cli.SpawnDiagsFor(
-			session.ArgvSpawnOptions(b.Model, b.Effort, debugFile, "", b.Args, settingsFile, mcpConfigFile),
+			session.ArgvSpawnOptions(b.Model, b.Effort, debugFile, "", b.Args, settingsFile, mcpConfigFile, permissionMode),
 			caps,
 		) {
 			result.Diags = append(result.Diags, backendDiag{Backend: id, SpawnDiag: d})
@@ -228,7 +229,7 @@ func configCheck(args []string, stdout io.Writer) int {
 					eff.Agents = map[string][]string{}
 				}
 				eff.Agents[agentID] = proto.BuildArgs(session.ArgvSpawnOptions(
-					model, agentEffort, debugFile, prompt, args, settingsFile, mcpConfigFile))
+					model, agentEffort, debugFile, prompt, args, settingsFile, mcpConfigFile, permissionMode))
 			}
 			for apID, ap := range cfg.AccessProfiles {
 				if len(ap.Env) == 0 {
