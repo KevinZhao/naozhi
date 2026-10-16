@@ -336,3 +336,36 @@ access_profiles:
 		t.Errorf("profile block must show the overlay value:\n%s", s)
 	}
 }
+
+// `--effective` builds through session.ArgvSpawnOptions, so cli.permission_mode
+// shows in the backend and agent argv exactly as the spawn passes it.
+func TestConfigCheckEffective_ReportsThePermissionMode(t *testing.T) {
+	for _, tc := range []struct {
+		mode     string
+		wantAuto bool
+	}{{"", false}, {"bypass", false}, {"auto", true}} {
+		t.Run("mode="+tc.mode, func(t *testing.T) {
+			cfg := cleanCheckConfig + `
+cli:
+  path: /usr/bin/true
+  permission_mode: "` + tc.mode + `"
+agents:
+  reviewer:
+    model: sonnet
+`
+			got, raw := effectiveOf(t, cfg)
+			eff, ok := got.Effective["claude"]
+			if !ok {
+				t.Fatalf("no effective entry for claude:\n%s", raw)
+			}
+			for name, argv := range map[string][]string{"backend": eff.Argv, "agent": eff.Agents["reviewer"]} {
+				if got := argvPair(argv, "--permission-mode", "auto"); got != tc.wantAuto {
+					t.Errorf("%s argv: has --permission-mode auto = %v, want %v: %v", name, got, tc.wantAuto, argv)
+				}
+				if got := slices.Contains(argv, "--dangerously-skip-permissions"); got == tc.wantAuto {
+					t.Errorf("%s argv: has --dangerously-skip-permissions = %v, want %v: %v", name, got, !tc.wantAuto, argv)
+				}
+			}
+		})
+	}
+}
