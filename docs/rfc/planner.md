@@ -1,8 +1,8 @@
 # RFC: Planner —— 一个对话框，规划 agent 自己调度 session
 
-- 状态: Draft v2（设计决策已与 owner 确认，未实施）
-- 日期: 2026-10-16（v1 名为 conductor.md，v2 改名并并入六个专题调研）
-- 范围: 把 naozhi 的交互从"用户逐个操作 session"改为"用户只面对一个对话框：快模型前台负责人机沟通，强模型 Planner 只做策划并把任务派给 worker session 执行，主动 Planner 按章程巡检项目并在授权范围内自主执行"。同时定义配套执行环境（凭证、沙箱、auto mode）、多节点调度与现有功能的迁移。
+- 状态: Draft v3（设计决策已与 owner 确认，未实施）
+- 日期: 2026-10-16（v1 名为 conductor.md；v2 改名并并入六个专题调研；v3 加入话题线程、协同矩阵与监护规则）
+- 范围: 把 naozhi 的交互从"用户逐个操作 session"改为"用户只面对一个对话框：前台负责人机沟通与路由，话题线程和用户一起做事，强模型 Planner 负责跨线程跨时间的推进与监护、并把大任务派给 worker session 执行，主动 Planner 按章程巡检项目并在授权范围内自主执行"。同时定义配套执行环境（凭证、沙箱、auto mode）、多节点调度与现有功能的迁移。
 - 相关: #3448(b)（naozhi 作为 MCP server）、#3449（per-session git worktree）、#3686（`cli.permission_mode`）、`cli-mcp-config.md`、`system-session.md`、`workflow-dashboard.md`、`node-pairing.md`
 
 > **术语**：本文的 **Planner** 即 v1 草稿里的 Conductor（D12 改名）。现有的 project planner（`project:{name}:planner`）不是另一个概念，而是 Planner 的雏形，迁移后合并为同一个东西（§13）。
@@ -41,29 +41,46 @@
 ## 3. 角色模型
 
 ```
-用户（Dashboard / IM，自然语言）
-    │
-前台 Interlocutor   sonnet 5.5，每个入口一个；自己能答的直接答（快路径）
-    │  委托（带用户原话）            ▲ 报告 / 提问（原样转发，不改写）
-Planner（可多个）   偏好表首个可用的最强模型；每个 workspace 唯一、串行；无 Bash/Edit，有只读工具
-    │  dispatch（立即返回句柄）      ▲ 完成信封（摘要 + 结果引用）
-worker sessions     按任务选模型 / backend / 能力档 / 节点；各自 worktree
+一个对话框（Dashboard / IM，自然语言）
+ ├─ 前台 Interlocutor    opus 5.5 · low/medium；当场答问答 / 调研 / 状态；决定消息归属哪个话题线程或新开
+ ├─ 话题线程（多个）     opus 5.5 · high；"讨论 → 改吧 → 当场改 → 推送"都在这里；状态变更一律登记任务板
+ └─ Planner（可多个）    偏好表首个可用的最强模型 · xhigh；每个 workspace 唯一、串行；无 Bash/Edit，有只读工具
+       只接：大任务、跨 workspace、主动 duty；并监护托管中的线程与 worker（§5.5）
+       │  dispatch（立即返回句柄）      ▲ 完成信封（摘要 + 结果引用）
+     worker sessions     按任务选模型 / backend / 能力档 / 节点；各自 worktree
 ```
+
+多数请求只经过一层协调（前台 → 话题线程），与 Claude Projects 等产品一致；"前台 → Planner → worker"两层只出现在大任务上（这类任务 p50 耗时 21 分钟，多一跳的延迟可以忽略）。调研未发现两层协调叠加的已发布先例，这样也避开了该风险。
 
 ### 3.1 前台（Interlocutor）
 
-- sonnet 5.5，每个入口（dashboard / IM chat）一个，按渠道排版。
-- **快路径**：闲聊、状态查询（读任务板）、简单问答直接答，不惊动 Planner。
+- opus 5.5 · low/medium（D21）：Claude Projects 的协调者默认即 Opus low effort；Anthropic 数据中 Opus 5.5 low 与 Sonnet 5.5 默认解题率持平（87.4% vs 87.6%），"调 effort 往往比换模型更有效"。owner 从未主动选过 sonnet，且前台要当场回答深度领域问题。IM 入口在意延迟时可按入口降到 sonnet 5.5。
+- 每个入口（dashboard / IM chat）一个，按渠道排版；前台本身不改状态，只答、只路由、只汇报。
+- 每轮重建上下文：最近消息 + 任务板 + 记忆，不依赖完整历史（Projects 做法），因此不会越聊越乱。
+- **快路径**：问答、调研、状态查询（读任务板）直接答，约占 owner 消息的 40%。
 - **不当传话筒**：委托信封携带用户原话与附件，前台理解只作附注；Planner 的提问、worker 的产出经 `forward` 原样给用户；批准 / 提问走带 ID 的结构化卡片（LangChain 实测原文转发比转述好约 50%）。
-- 用户可直接回复某个 worker / Planner 的消息操控它（绕过前台）；"顺便问一下"式侧问不打断主任务。
+- 用户可直接回复某个话题线程 / worker / Planner 的消息操控它（绕过前台）；"顺便问一下"式侧问不打断主任务。
 - 收到消息立即回执，永不阻塞等 Planner。
 - 主路径不需要斜杠命令：`/new` `/stop` `/urgent` 等意图由前台从自然语言识别（"停下"、"先处理这个"、"换个话题"），破坏性意图（停止 worker、丢弃上下文）以卡片确认。
+- 交接给 Planner 时，把多轮零碎需求整理成**一份完整规格**并附用户原话（多轮零碎给需求平均掉分 39%，arXiv 2505.06120）。Planner 的提问原样转给用户；前台可附上有出处的事实，但它替用户的回答记为 agent 来源，不能授权不可逆操作。
+- 用户回来时先给一段"离开期间发生了什么"，再接话题。
 
-### 3.2 Planner
+### 3.2 话题线程（D22）
+
+依据 owner 使用数据（附录 B）：一个话题一个线程、多线程并行（47% 的活跃小时同时 ≥2 个线程）；主节奏是"讨论 → 改吧 → 当场改完 → 推送"，改状态的回合里 49% 是依赖上下文的跟进，60% 在 5 分钟内完成，owner 回复中位间隔 3.9 分钟。
+
+- 话题线程是现有 dashboard / IM 会话的升级版：opus 5.5 · high，完整工具集。
+- **可以在用户指令下直接改状态**，包括 push、merge、发版、改 AWS 资源，不弹确认卡片（D6）；网关硬规则（§10.1）照样生效。
+- **不变量**：所有状态变更都**登记到任务板**（可见），而不是必须经过 Planner。Planner 需要的是全局视野（去重、冲突、Now / Next 边界），不需要替用户把关用户亲口下的指令。
+- **粘性路由**：一个线程成为"当前对象"后，后续"改吧""去掉第 9 页"由网关直接送给它，不经前台模型；用户换话题或点名另一个线程时才由前台判归属。
+- UI 上话题线程以卡片 / 标签出现在主对话里，不再是侧边栏里的一个个 session。
+- 线程发现活变大（预计多个独立 PR、跨 workspace、预计 >1 小时、或用户要离开）时整体交给 Planner（§5.6）。
+
+### 3.3 Planner
 
 **模型与工具**
 
-- 有序偏好表，取第一个当前凭证能调通的（复用 `ccprobe` 实跑验证），不由系统自评谁更强。例：`[claude-opus-5-5[1m], claude-fable-5-1]`（fable-5-1 在本机 naozhi 凭证下 deny，当前落到 opus 5.5）。
+- 有序偏好表，取第一个当前凭证能调通的（复用 `ccprobe` 实跑验证），不由系统自评谁更强。例：`[claude-opus-5-5[1m], claude-fable-5-1]`（fable-5-1 在本机 naozhi 凭证下 deny，当前落到 opus 5.5）。Fable 级不可用期间与前台、话题线程同用 opus 5.5，**靠 effort 拉开**（Planner xhigh，D23）；凭证放开后直接切换，前台不动。
 - 证据支持最强模型：弱 planner 的损失远大于弱执行者，且换强执行者补不回（PEAR，EACL 2026 Findings）；强 manager + 便宜 worker 与强模型单干持平，弱带弱反而比单干差（arXiv 2603.26458）。Planner 单轮短、token 大头在 worker 层，强模型的边际成本低。用回归评测集做一次"sonnet 当 Planner"对照，再决定"个人杂事"等领域可否降级。
 - 无 Bash / Edit / Write；**保留只读工具**（Read / Grep / Glob、`git log`、`gh ... view`），只用于核实具体说法，不用于"读一眼就判定已修好"（同一研究观察到的失败模式）。
 
@@ -120,7 +137,7 @@ worker sessions     按任务选模型 / backend / 能力档 / 节点；各自 w
 - 大 diff 或高风险任务另派强模型、干净上下文的评审 worker，Planner 只读其结论。
 - 评审质量取决于派活时写下的验收标准（"Review Beats Planning"：评审收益随规格详细程度放大 4 倍）。
 
-### 3.3 worker
+### 3.4 worker
 
 **选型与交接**
 
@@ -148,6 +165,20 @@ worker sessions     按任务选模型 / backend / 能力档 / 节点；各自 w
 - 进入 dormant 前必须 commit + push WIP；远端分支是真相源，worktree 可删可重建。
 - 缓存 TTL 按角色：Planner、前台、awaiting-ci 的 PR worker 用 `promptCacheTtl: "1h"`，其余 5 分钟（本机当前未配，全为 5 分钟）。
 - 上限：活进程受每 Planner `max_workers`、`task:` 命名空间配额、主机级上限三者约束；awaiting + dormant 条目每 Planner ≤50，超出先归档最老的 dormant。
+
+### 3.5 按角色动态配置模型（D23）
+
+每个角色映射到一组 `{model, effort}`，配置可热更新；解析优先级 **任务 > workspace > 角色默认**；Planner 可在允许列表内给具体任务改模型；当前所用 model / effort 以 chip 展示。默认值（均可改）：
+
+| 角色 | 默认 |
+|---|---|
+| 前台 | opus 5.5 · low/medium（IM 入口可降 sonnet 5.5） |
+| 话题线程 | opus 5.5 · high |
+| Planner | `[Fable 级, opus 5.5]` 取第一个可用 · xhigh |
+| 停顿判读（§5.5 L1） | sonnet 5.5 · low |
+| verifier | sonnet / opus · medium |
+| 侦察 | sonnet 5.5 |
+| worker | 由 Planner 按任务选 |
 
 ## 4. 主动 Planner：charter、duties、触发器
 
@@ -178,7 +209,7 @@ limits: { max_workers: 4, max_threads_per_day: 40 }
 - 巡检不在 Planner 的长上下文里跑：先由轻量上下文 + 便宜模型的侦察 worker 执行，默认静默，有结论才投信封唤醒 Planner。
 - 自主度三档 propose → draft → execute，默认 propose，按 §8.3 升降档；批准粒度是"计划"。
 - 常设授权：卡片上"以后都允许"生成可撤销、有使用计数与过期时间的 standing grant。
-- 所有自发任务受 Now / Next / Not-now 边界约束（§3.2）。
+- 所有自发任务受 Now / Next / Not-now 边界约束（§3.3）。
 - 第一个主动 Planner 落在 naozhi 仓库本身；邮箱类等 §10.3 的读写分离落地后再上。
 
 ## 5. 信封、任务板与 naozhi MCP
@@ -215,10 +246,83 @@ Planner 之间不直接对话，只互投请求信封，由对方决定接不接
 - **防环与防失控**：跨 Planner 最多 2 跳；目标已在 `chain` 中即拒绝；按（origin, target, 意图哈希）去重；每对 Planner 设速率上限，被弹回 3 次熔断；每个请求必须有 deadline 并一定走到终态（Agents of Chaos：两个互相转发的 agent 持续 9 天、约 6 万 token，并自建 cron）。
 - 否决的方案：直接对话（MAST FC2 协调失配、注入扩散）、黑板自愿认领（责任分散）、contract-net 竞标（每个 workspace 只有一个承接方）、handoff 移交对话（打破归属、污染上下文）、同步调用（违反"从不等待"）。
 
+### 5.4 协同原则与协同矩阵（D24）
+
+四条原则：
+
+1. **人在场让人，人离场接管**。在场 = 最近 N 分钟（默认 10，可配）在该线程发过消息，或 dashboard 焦点停在它上面；离场 = 超过 N 分钟未回、用户说"你盯着 / 我先走"、或任务已交给 Planner。在场时 Planner 只观察，建议放收件箱，不往线程插话（冲突与危险操作除外）；离场后由 Planner 接管监护。
+2. **规则先行，模型兜底**：网关确定性规则处理多数情况；便宜模型只做停顿判读；Planner 只处理需要判断的决策。
+3. **所有协同都走信封，可见、可追溯**：注入线程的消息标出来源（🧭 Planner / 📥 前台）。用户消息永远优先：用户一开口，排队中的信封作废、Planner 重新评估。
+4. **授权不扩张**：Planner 能替用户说"可以"的范围只限：原始委托写明的范围、charter 常设授权、用户以往同类决定；超出就找用户。
+
+| 方向 | 什么时候 | 触发 |
+|---|---|---|
+| 前台 → 话题线程 | 每条消息；粘性路由，"改吧""继续"直送当前线程 | 被动 |
+| 前台 → 新线程 | 新话题，或用户说"另开一个" | 被动 |
+| 前台 → Planner | 大任务、跨 workspace、后台长跑，或用户说"交给 Planner" | 被动 |
+| 线程 → Planner | 启动 workflow 或预计 >15 分钟的操作时自动登记监护；活变大时升级 | 自动 |
+| 网关 → Planner | 停顿、workflow 阶段变化 / 失败、进程死亡、auto mode 拒绝、长时间无输出 | 自动，事件驱动 |
+| Planner → 线程 / worker | 监护指令：继续 / 纠正 / 回答 / 暂停 / 停止，**只在用户离场或任务已托管时发** | 主动 |
+| Planner → 用户 | 里程碑、blocker、早报 | 主动 |
+| 前台 → 用户 | 回来时的"离开期间发生了什么"；里程碑推送（替代用户问"进展如何"） | 主动 |
+
+主动协同的边界：
+
+- Planner 主动做：托管中的停顿与异常、duty、两个线程 / workflow 改同一路径或同一 PR 时提醒、线程等用户超过 X 小时在早报提醒、Now / Next 到期确认。
+- 前台主动做：按里程碑与 blocker 推送，不按时间刷屏。
+- 不主动做：用户在场时 Planner 不往线程塞指令（冲突与危险操作除外）。
+
+### 5.5 监护：替用户盯着（D25、D26）
+
+依据 owner 305 条"继续 / 进展 / 按你的建议"前的停顿原因统计（附录 B）：编排类会话里约 85% 的催促可由机器代劳；对话类会话里 C（真 blocker）+ G（完成后改需求）合计 65%，本就需要人。所以**监护的价值集中在编排类线程与 Planner 名下的任务**，对话线程基本不监护。
+
+**托管条件**（任一即进入）：任务归 Planner；线程启动了 workflow；任务未完成而用户已离场；用户说"你盯着"。托管时有一份监护契约：目标、验收标准、授权范围（来自用户原话）、自动继续上限。
+
+**三层检测**
+
+- L0 网关（不用模型）：回合结束、workflow 状态变化、运行中长时间无新事件、进程死亡 / 被 watchdog 杀、权限拒绝、模型拒答。
+- L1 停顿判读（便宜模型）：每个托管回合结束时，依据最后一段输出与任务状态判断停顿原因。附录 B 的 305 条人工标注可直接作为 L1 的评测集。
+- L2 Planner：只处理需要判断的停顿。
+
+**按停顿原因处理**
+
+| 停顿原因 | 处理者 | 规则 |
+|---|---|---|
+| E 做了一部分就停、没提问（owner 平均 106 分钟才发现） | L0 | 结尾不是问句、后台无任务在跑、任务未完成 → 自动投"继续，还剩这几条验收项：…" |
+| F 出错 | L0（按错误类型） | 超时 / DNS / 5xx：按 1、2、4、8 分钟退避重试；地区拒绝 400（网络出口漂移）：先探测出口，恢复后再续；显式 deny、429：不重试，直接上报；输出中途截断：先查磁盘与进程再续 |
+| A 问已授权的下一步 | L1 | 同一计划内的下一步自动批准 |
+| D 等后台 workflow | L0 | 不唤醒任何人、不催；里程碑推送（阶段完成 / 出现失败 / 全部完成），超过 2 小时无里程碑推一条心跳；看门狗：静默 >60 分钟且最后一条是 API Error → 报警 |
+| B 给选项等选择 | Planner | 在授权范围内选推荐项并记录理由；落在"需人决定清单"的一律问用户 |
+| C 真 blocker（62% 是只有用户知道的业务事实，14% 是凭证 / mwinit） | 用户 | 同一任务的多个问题合并成一张卡片一次问完；不受阻的部分继续 |
+| G 完成后用户改需求 | 用户 | 不自动处理；语言漂移（如应中文却切成英文）加确定性检查兜底 |
+
+**需人决定清单**（默认，用户可增删；只约束 Planner 替用户做选择，用户在话题线程里亲口下的指令不受此限）：发版或打 tag；改分支保护；修改 epic 验收标准或 `docs/` 下的设计文档；合并来源不明的 PR；动 Now / Next / Not-now。
+
+**防循环**（D26）：
+
+- 连续 3 次自动"继续"无进展 → 停下找用户。进展 = 新 commit / PR 更新 / workflow 进入新阶段 / 新的文件改动 / 某个验收项变绿。
+- 有进展则计数清零，但同一条链最多自动续 8 次（取自 owner 实际最长的连续催促）。
+- 同类错误连续 5 次 → 停止并通知。
+- 同一条指令发两次无效 → 升级。
+
+### 5.6 执行形态与 Workflow 的决定规则（D27）
+
+| 形态 | 适合 | 谁决定 |
+|---|---|---|
+| 线程内直接做 | 交互式、小、依赖上下文 | 话题线程 |
+| CC Workflow（会话内扇出） | 同一 workspace 内同质可并行的批量（处理 N 个 issue、批量审查、批量调研），汇总成一个产物 | 线程或 worker 自行决定，受任务的 `workflow` 策略约束；用户说"用 ultracode / workflow"直接生效 |
+| naozhi worker（多 session） | 每个子项有独立产物（各自 PR）、需单独追问、跨 workspace / 节点 / 凭证、寿命超过一个会话 | Planner |
+
+- 任务字段 `workflow: auto | allowed | forbidden`，默认 `auto`（线程自判）；Planner 需要时可设 `forbidden`（例如要求每个子项各开一个 PR）。
+- **启动 workflow 自动登记监护**：网关已能观测 workflow 帧（WorkflowBoard），不需要线程主动报告。
+- 交给 Planner 的判据（任一）：预计多个独立 PR、跨 workspace、预计 >1 小时、用户要离开。
+- workflow 也受路径归属约束：一个 workflow 算一个任务，占用它要改的路径。
+- 大任务交给 Planner 后**默认自主推进到完成**，按里程碑主动推送，只在 blocker 与需人决定清单上找用户（owner 最贵的 $12.2k 会话 54 条消息里 40 条是"继续"）。
+
 ## 6. 验证闸门
 
 - 验收标准在 dispatch 时写好（default-FAIL：每条初始未通过）。
-- 任务"完成"只认 verifier 的 PASS（§3.2 审查分工），按任务类别可配置。
+- 任务"完成"只认 verifier 的 PASS（§3.3 审查分工），按任务类别可配置。
 - **测试完整性 diff 闸门**：改动触及 `*_test.go`、CI 配置、新增 `t.Skip`、`*Baseline*` 常量、`scripts/ratchet-raises.jsonl`、lint 豁免、`.claude/` 设置、`.naozhi/planner*` 时默认拦下标记，除非任务明确允许（ImpossibleBench：Claude 模型多见直接改测试；Opus 5.5 system card：不可能任务下奖励作弊率 6.0% → 34.7%）。
 - CC 的 `/goal` 只是停止规则，不能当 verifier。
 
@@ -384,6 +488,9 @@ EC2 重启：节点把进程已消失的 run 标 `failed(node_restart)` 并保�
 | workflow 面板 / agent drill-in | 任务面板主体 |
 | AskUserQuestion 卡片 | 带 ID 的批准 / 提问卡片 |
 | `PermissionMode`（Default / Standard） | 新增 Auto（#3686） |
+| `Sender.AfterTurn`、`WorkflowBoard.Subscribe / Running / Result`、`SendResult`、death reason、eventlog | 监护 L0 的事件源（§5.5），新放 `internal/planner/supervisor` |
+| 现有 dashboard / IM 会话 | 话题线程：登记到任务板 + 在场判定（dashboard 焦点、最后一条用户消息时间） |
+| `/api/sessions/override` 的 model / effort 调整、config 热重载 | 按角色动态配置模型（§3.5） |
 | node / upstream `send` | `send-backend` → `fetch_manifest` → `dispatch-v1` |
 
 新 key 命名空间：`task:<planner>:<id>`（worker）、前台另起前缀。新包暂定 `internal/planner`（任务板、信封日志、charter / lessons 校验、放置）。新增前缀须逐一审计 `internal/sessionkey` 的前缀判断（cron、budget、TTL 豁免、max_procs）。
@@ -420,7 +527,7 @@ EC2 重启：节点把进程已消失的 run 标 `failed(node_restart)` 并保�
 | 阶段 | 内容 |
 |---|---|
 | P0 验证 | ① auto mode 试用（#3686）；② per-session mcp-config；③ naozhi MCP 桥 + 句柄式 dispatch/await 在 `-p` stream-json 长驻进程中的行为；④ Bedrock 下 `promptCacheTtl: "1h"` 生效（看 `ephemeral_1h_input_tokens`）；⑤ srt 包裹 shim 启动的 CLI；⑥ 用现有 REST + curl 糊原型验证交互；⑦ 远程 `send` 缺 backend 的缺口修复 |
-| P1 编排内核 | 信封 / 任务板 / `envelopeOrigin`、naozhi MCP、`task:` 命名空间与网关限额、worker 生命周期状态机、worktree + 路径归属、结构化交接、verifier 与 diff 闸门、急停与快照 |
+| P1 编排内核 | 信封 / 任务板 / `envelopeOrigin`、naozhi MCP、`task:` 命名空间与网关限额、worker 生命周期状态机、worktree + 路径归属、结构化交接、verifier 与 diff 闸门、急停与快照；**监护 L0 + L1**（§5.5，用附录 B 的 305 条标注评测 L1）与里程碑推送——它直接替代 owner 现在的手工"继续 / 进展"，收益最早可见 |
 | P2 交互 | 前台（快路径 / 原样转发 / 自然语言意图）、收件箱、卡片、主对话框 + 任务面板、专家模式切换 |
 | P3 主动模式 | charter / duties / Now-Next-Not-now 边界 / 事件触发 / 自主度 / standing grants / SLO；首个落在 naozhi 仓库（单机 Mac） |
 | P4 记忆与带教 | understanding.md + 过期脚本、lessons.yaml、dream duty、技能提炼 |
@@ -456,7 +563,7 @@ EC2 重启：节点把进程已消失的 run 标 `failed(node_restart)` 并保�
 |---|---|---|---|
 | D1 | 2026-10-15 | 三层：前台（人机沟通）/ Planner（策划）/ worker（执行） | 规划与沟通、执行解耦；前台用快模型压延迟 |
 | D2 | 2026-10-15 | Planner 用偏好表首个可用的最强模型（当前 opus 5.5） | 强弱排序是 owner 的判断；PEAR 等证据支持强 planner |
-| D3 | 2026-10-15 | 前台用 sonnet 5.5，每入口一个 | 够用且快 |
+| D3 | 2026-10-15 | ~~前台用 sonnet 5.5~~，每入口一个（模型被 D21 取代） | — |
 | D4 | 2026-10-15 | Planner 每个 workspace 唯一、串行；定时任务与事件是投给它的触发器；并行在 worker 层；可按 workspace / 领域有多个 Planner | Planner 不执行、单轮短，串行不成瓶颈；多实例并行会重复派活 |
 | D5 | 2026-10-15 | 主动 / 被动是同一 Planner 有无 duties 的区别；主动模式在授权前提下自动执行 | 统一模型，复用 cron |
 | D6 | 2026-10-15 | 写操作不逐次人工批准 | 以硬边界、审计、急停替代 |
@@ -474,6 +581,13 @@ EC2 重启：节点把进程已消失的 run 标 `failed(node_restart)` 并保�
 | D18 | 2026-10-16 | worker 生命周期：进程 / 上下文 / 记录分层回收，寿命跟产物走，按四条件决定复活或新开 | 进程昂贵、冷上下文复活昂贵、产物才是连续性所在 |
 | D19 | 2026-10-16 | 多 Planner 只经请求信封协作：状态机 + `accepts:` + provenance 只降不升 + 2 跳上限 + 单一 lead 对用户汇报 | 防责任分散、转发死循环与注入扩散 |
 | D20 | 2026-10-16 | 带教规则存 `lessons.yaml`，与 charter 分离，按类型落地（constraint 编译进网关），每轮 ≤50 条，升降档按 §8.3 | 防 charter 膨胀与指令遵循退化 |
+| D21 | 2026-10-16 | 前台用 opus 5.5 · low/medium（不是 Fable 级）；IM 入口可按入口降 sonnet 5.5 | Projects 协调者默认 Opus low；Opus low ≈ Sonnet 默认；owner 从未主动选 sonnet |
+| D22 | 2026-10-16 | 一个入口 + 话题线程 + Planner；话题线程可在用户指令下直接改状态（含 push / merge / 发版），不弹确认卡片；不变量改为"所有状态变更登记任务板"；粘性路由 | owner 主节奏"讨论 → 改吧 → 当场改 → 推送"；多数请求只经一层协调 |
+| D23 | 2026-10-16 | 模型按角色动态配置（任务 > workspace > 角色默认，热更新）；Fable 级不可用时 Planner 与前台同用 opus 5.5，以 effort xhigh 区分 | owner：只要能动态配置即可；"调 effort 往往比换模型更有效" |
+| D24 | 2026-10-16 | 协同四原则（人在场让人 / 规则先行 / 信封可见 / 授权不扩张）与协同矩阵 | 明确谁在何时主动、何时被动 |
+| D25 | 2026-10-16 | Planner 监护托管中的线程与 worker：三层检测 + 按停顿原因处理 + 需人决定清单（发版 / tag、分支保护、epic 验收标准与 docs 设计、来源不明 PR、Now / Next） | owner 编排会话里约 85% 的催促可由机器代劳 |
+| D26 | 2026-10-16 | 防循环：无进展 3 次停、每链最多 8 次、同类错误 5 次停；在场阈值默认 10 分钟可配 | owner 最长连续催促 8 次；放行后 79% 下一轮有 commit / PR |
+| D27 | 2026-10-16 | 执行形态：线程内 / CC Workflow / naozhi worker 的判据与决定者；`workflow` 任务策略；启动 workflow 自动登记监护；大任务交 Planner 后默认自主推进到完成并按里程碑推送 | 明确"什么时候用 workflow、谁决定" |
 
 ## 附录 A. auto mode 实测（2026-10-16）
 
@@ -492,7 +606,32 @@ EC2 重启：节点把进程已消失的 run 标 `failed(node_restart)` 并保�
 - 新的 stream-json 帧：`system/permission_check_status`（每个受审调用 `checking` / `done` 各一帧，#3686 已在时间线丢弃）、`system/permission_denied`（`tool_name` / `tool_use_id` / `decision_reason_type: classifier` / `decision_reason`）、`result.permission_denials[]`。
 - 一个写成"被拒后换语法重试 + 把含密钥的文件外发"的探测 prompt 直接触发了 **Opus 5.5 模型级 safeguard**：`system/informational` + `system/model_refusal_no_fallback`，`result.is_error=true`，进程退出码 1，分类器没有机会介入。naozhi 目前不识别这类帧；安全评审类任务可能被误伤，需要单独的错误分类。
 
-## 附录 B. 参考（调研 2026-10-16）
+## 附录 B. owner 使用数据（2026-10-16，本机只读分析）
+
+范围：8/31–10/16 由 naozhi 管理的 118 个 session、owner 亲手输入的 715 条消息（逐条人工分类，单人标注）；session-runs 覆盖 60 天。
+
+**请求构成**：跟进 / 继续 / 批准 34%（99 条 ≤12 字，无主语）；问答 / 讨论 / 设计 26%；状态查询 9%；外部系统操作 9%；小改动 6%；调研 5%；本机运维 5%；PR / 发版 5%；大任务 2%（却带来 90% 以上的成本与大部分"继续"）。
+
+**习惯**：一个话题一个线程、每天新开约 2 个、47% 的活跃小时同时 ≥2 个线程；改状态的回合里 49% 是依赖上下文的跟进，60% 在 5 分钟内完成；owner 回复中位间隔 3.9 分钟（对话类）/ 24 分钟（编排类）；opus 5.5 占 57% 回合，sonnet 只来自自动 fallback；跨 session 发消息 31 次——owner 已在手工充当 Planner。
+
+**停顿原因**（305 条"继续 / 进展 / 按你的建议"之前的上一轮）：
+
+| 停顿原因 | 编排类（128） | 对话类（177） |
+|---|---|---|
+| A 问已授权的下一步 | 7% | 5% |
+| B 给选项等选择 | 30% | 17% |
+| C 真 blocker | 2% | 31% |
+| D 后台 workflow 在跑，owner 来问 | 21% | 9% |
+| E 做了一部分就停、没提问 | 17% | 0 |
+| F 出错 / 断线 / 进程被杀 | 20% | 4% |
+| G 声称完成后 owner 改需求 | 2% | 34% |
+
+- E 类 owner 平均 106 分钟后才发现；F 类中地区拒绝 400 有 9 次、断网 / DNS 8 次、中途截断 8 次；D 类 77% 是纯状态查询，workflow 多数最终跑完（issue 批处理 24/24）。
+- 编排会话 B 类 38 条里 27 条回复是"继续 / 按你的建议"，11 条是"要不要发版"。
+- owner 纯放行后下一轮 79% 产生 commit 或 PR；"继续 → 无产出"连续 3 次只出现 1 次；最长连续催促 8 次。
+- 局限：单人标注；编排会话样本只有 4 个；后台任务"未回报"状态在 session 重启后不可靠。
+
+## 附录 C. 参考（调研 2026-10-16）
 
 - Claude Code Projects: https://code.claude.com/docs/en/claude-projects ；Routines: https://code.claude.com/docs/en/routines
 - Auto mode: https://code.claude.com/docs/en/auto-mode-config ；权限模式: https://code.claude.com/docs/en/permission-modes ；prompt caching: https://code.claude.com/docs/en/prompt-caching
@@ -504,3 +643,4 @@ EC2 重启：节点把进程已消失的 run 标 `failed(node_restart)` 并保�
 - Google SRE AI 自主度分级；Anthropic Measuring agent autonomy（2026-02-18）
 - Nomad placement / disconnect: https://developer.hashicorp.com/nomad/docs/job-specification/disconnect ；Claude Code Remote Control: https://code.claude.com/docs/en/remote-control
 - MCP 2026-07-28 changelog；OpenClaw standing orders / heartbeat / memory；Meta Rule of Two；ImpossibleBench；METR time horizons；Kiro CLI V3
+- 模型选择：https://platform.claude.com/docs/en/about-claude/models/choosing-a-model （Opus 5.5 low vs Sonnet 5.5 默认解题率、"调 effort 往往比换模型更有效"）；多轮零碎需求掉分 39%（arXiv 2505.06120）；LangChain supervisor 原样转发（2025-06-11）
