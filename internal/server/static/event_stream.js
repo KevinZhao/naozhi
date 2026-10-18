@@ -443,12 +443,14 @@ export function appendEvents(events) {
   // An ask_question followed by a user event inside this same batch must
   // render already locked (mirrors onHistory's pre-render hydrate).
   hydrateAskAnsweredFromHistory(events);
-  // Force-bottom when a "user" event arrives: either the local operator just
-  // hit send, or a teammate posted through the IM channel — in both cases the
-  // message must be visible, even if the viewport was scrolled up.
+  // Force-bottom when a teammate's "user" event arrives (IM channel): it must be
+  // visible even if scrolled up. The echo of this tab's send (it replaces the
+  // optimistic bubble) does not: the send pinned already, and a queued send
+  // echoes after the running turn's result, when the reader may be scrolled up.
   let sawUser = false;
   events.forEach(e => {
     if (isInternalEvent(e)) return;
+    let echo = false;
     // Deduplicate: drop strictly-older events. Same-ms events are legitimate
     // siblings (thinking + text from one frame, two text blocks) and are only
     // dropped when their uuid is already on screen — same rule as onHistory.
@@ -464,8 +466,7 @@ export function appendEvents(events) {
         if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
         return;
       }
-      const opt = el.querySelector('.optimistic-msg');
-      if (opt) opt.remove();
+      echo = removeOptimisticMsg();
       // Lock cards already on screen before this user bubble is appended.
       lockRenderedAskCards(el);
     }
@@ -477,7 +478,7 @@ export function appendEvents(events) {
     el.insertAdjacentHTML('beforeend', h);
     if (t) prevT = t;
     if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
-    if (e.type === 'user') sawUser = true;
+    if (e.type === 'user' && !echo) sawUser = true;
   });
   // Bound the live DOM before scroll/scan so a long streaming session can't
   // grow #events-scroll without limit and OOM the tab (#398).
@@ -550,9 +551,8 @@ function appendHistoryBackfill(el, display) {
   const emptyEl = el.querySelector('.empty-state');
   if (emptyEl) emptyEl.remove();
   let prevT = lastDividerTime(el);
-  // Force-bottom when a "user" event arrives: either the local operator
-  // just hit send, or a teammate posted through the IM channel — in both
-  // cases the message must be visible even if the viewport was scrolled up.
+  // Force-bottom on a teammate's "user" event, not on this tab's own echo —
+  // the same rule as appendEvents.
   let sawUser = false;
   display.forEach(e => {
     // Strictly-older events were rendered by an earlier frame. Same-ms
@@ -577,9 +577,7 @@ function appendHistoryBackfill(el, display) {
         if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
         return;
       }
-      const opt = el.querySelector('.optimistic-msg');
-      if (opt) opt.remove();
-      sawUser = true;
+      if (!removeOptimisticMsg()) sawUser = true;
       lockRenderedAskCards(el);
     }
     const h = eventHtml(e);
@@ -683,6 +681,7 @@ function appendLiveEvent(ev) {
   const empty = el.querySelector('.empty-state');
   if (empty) empty.remove();
   const isUser = ev.type === 'user';
+  let echo = false;
   if (isUser) {
     // uuid idempotency (user bubbles only): a duplicate push or a re-subscribe
     // replay must not paint the same user message twice; advance the cursor so
@@ -694,12 +693,11 @@ function appendLiveEvent(ev) {
       return;
     }
     // First arrival of the real user event: drop the optimistic placeholder.
-    const opt = el.querySelector('.optimistic-msg');
-    if (opt) opt.remove();
+    echo = removeOptimisticMsg();
   }
   // An 80px slack band so a small natural scroll doesn't leave auto-stick.
-  // User events always pin; AI chunks / result events only stick when the
-  // user is in the band, so reading earlier history keeps its position.
+  // A teammate's user event always pins; AI chunks, results and this tab's own
+  // echo stick only in the band, so reading earlier history keeps its position.
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - scrollSlackPx;
   const prevT = lastDividerTime(el);
   const evT = ev.time || 0;
@@ -714,8 +712,7 @@ function appendLiveEvent(ev) {
   // can't grow #events-scroll without limit and OOM the tab (#398). Must run
   // before the scrollHeight reads below, matching appendEvents.
   trimEventsScroll(el);
-  // User events always force-bottom; AI output only sticks when already at bottom.
-  if (isUser) stickEventsBottom();
+  if (isUser && !echo) stickEventsBottom();
   else if (wasBottom) el.scrollTop = el.scrollHeight;
   runPendingAsync();
   if (ev.type === 'user') navSync();
