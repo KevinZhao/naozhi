@@ -525,7 +525,7 @@ limits: { max_workers: 4, max_dispatches_per_day: 40 }
 - **收件箱**：分组 Waiting on you / Ready for review / Working / Landing / Idle / Resolved（一周无活动转入）；条目 notify / question / review / decision / error，带归属 Planner、workspace、等待时长；**只有 notify 会在条件消失时自动关闭，其余只有你能关**。早报与离开摘要是收件箱的分组，不是另一个视图。
 - **卡片**：带请求 ID，校验发送者本人；首个回答生效；应用决定前重读待决项。
 - **可解释**：每条代办 / 注入消息带原因码与计数（"⚙ 自动继续 · E · 第 2/8 次 · 剩余验收项…"）；每个 session 显示托管 chip；Planner 卡片显示"被什么唤醒、做了什么决定、理由"；全局暂停开关。
-- **推送渠道**：dashboard 目前只注册了 service worker，没有 Notification / Web Push，IM 未接（`platforms: {}`）。Mac 用浏览器 Notification；手机渠道待定（飞书 bot 单聊 / PWA Web Push，§17）。
+- **推送渠道**：dashboard 目前只注册了 service worker，没有 Notification / Web Push，IM 未接（`platforms: {}`）。Mac 用浏览器 Notification；手机渠道待定（候选：原生 iOS app，见 `docs/design/ios-app.md`；§17）。
 - **专家视图**（D16）：斜杠命令、会话侧边栏、新建会话对话框、tuning 弹层、`/cd` 等保留为**视图**，操作对象仍是执行 session，一键可达、长期保留。
 - 团队群聊保持隔离，不并入个人对话框；IM 上无"焦点"，以所在话题为归属。
 
@@ -622,7 +622,7 @@ limits: { max_workers: 4, max_dispatches_per_day: 40 }
 
 - **路线**：按 §15 推进，还是评审建议的"先托管 MVP、不建 Planner"。
 - **仓库侧安全缓解**（§7.5 列表）：做哪些、何时做。
-- **手机推送渠道**：飞书 bot 单聊，还是 PWA Web Push（需 HTTPS，iOS 需添加到主屏）。
+- **手机推送渠道**：候选方案为原生 iOS app（可操作通知 + Live Activity，需付费开发者账号），设计草案见 `docs/design/ios-app.md` 与 `docs/design/ios-app-mockup.html`；过渡方案为 PWA Web Push（iOS 上无通知按钮）或飞书 bot 单聊。
 - 本机卫生项：shell rc 里的 `AWS_BEARER_TOKEN_BEDROCK`、`~/.aws/credentials` 的静态密钥、SSH 私钥 passphrase。
 - 多用户：v1 声明只支持单 owner；团队群聊场景的授权来源细则留到需要时。
 - 新消息归属提示的误判率阈值（P3 用真实数据测）。

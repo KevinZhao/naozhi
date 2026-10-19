@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>naozhi iOS app —— 界面草图（对应 docs/rfc/planner.md v5）</title>
+<style>
+  :root {
+    --bg: #f2f2f7; --card: #ffffff; --text: #1c1c1e; --muted: #8e8e93; --line: #e5e5ea;
+    --blue: #0a84ff; --green: #30d158; --orange: #ff9f0a; --red: #ff453a; --purple: #8e5cf7; --teal: #40c8e0;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 32px; background: #d9dce3; font: 14px/1.4 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; color: var(--text); }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #555; margin: 0 0 24px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, 390px); gap: 40px 32px; }
+  .shot h2 { font-size: 14px; margin: 0 0 8px; color: #333; }
+  .shot p.note { font-size: 12px; color: #555; margin: 8px 0 0; width: 390px; }
+  .phone { width: 390px; height: 844px; border-radius: 48px; background: var(--bg); position: relative; overflow: hidden;
+           box-shadow: 0 0 0 10px #1c1c1e, 0 20px 50px rgba(0,0,0,.35); display: flex; flex-direction: column; }
+  .status { height: 50px; display: flex; justify-content: space-between; align-items: flex-end; padding: 0 28px 6px; font-weight: 600; font-size: 15px; flex: none; }
+  .island { position: absolute; top: 11px; left: 50%; transform: translateX(-50%); width: 126px; height: 37px; background: #000; border-radius: 20px; }
+  .nav { padding: 6px 16px 10px; flex: none; }
+  .nav .title { font-size: 30px; font-weight: 700; }
+  .nav .row { display: flex; justify-content: space-between; align-items: center; }
+  .content { flex: 1; overflow: hidden; padding: 0 12px; }
+  .tabbar { height: 82px; flex: none; background: rgba(249,249,249,.94); border-top: 1px solid var(--line); display: flex; justify-content: space-around; padding-top: 8px; }
+  .tab { text-align: center; font-size: 10px; color: var(--muted); width: 70px; position: relative; }
+  .tab .ic { font-size: 22px; display: block; height: 28px; }
+  .tab.on { color: var(--blue); }
+  .badge { position: absolute; top: -2px; right: 14px; background: var(--red); color: #fff; font-size: 11px; border-radius: 9px; padding: 0 6px; line-height: 18px; }
+  .card { background: var(--card); border-radius: var(--radius); padding: 12px; margin-bottom: 10px; }
+  .chip { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #eef0f5; color: #3a3a3c; margin-right: 4px; }
+  .chip.blue { background: #e1efff; color: #0a64c8; } .chip.green { background: #dcf7e3; color: #1d8a3c; }
+  .chip.orange { background: #fff0d9; color: #a35f00; } .chip.red { background: #ffe1df; color: #c4281f; } .chip.purple { background: #ede5ff; color: #5b34c2; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .strip { display: flex; gap: 6px; padding: 0 4px 10px; flex-wrap: wrap; }
+  .bubble { max-width: 80%; padding: 9px 12px; border-radius: 18px; margin: 6px 0; font-size: 14px; }
+  .me { background: var(--blue); color: #fff; margin-left: auto; border-bottom-right-radius: 6px; }
+  .pl { background: var(--card); border-bottom-left-radius: 6px; }
+  .who { font-size: 11px; color: var(--muted); margin: 8px 4px 0; }
+  .advice { border-left: 3px solid var(--purple); }
+  .sess { border: 1px solid var(--line); }
+  .sess .t { font-weight: 600; font-size: 14px; }
+  .bar { height: 6px; background: #e5e5ea; border-radius: 3px; overflow: hidden; margin: 8px 0 4px; }
+  .bar > i { display: block; height: 100%; background: var(--blue); }
+  .composer { flex: none; padding: 8px 12px 10px; background: var(--bg); }
+  .target { font-size: 12px; color: var(--blue); margin: 0 6px 6px; }
+  .inputrow { display: flex; gap: 8px; align-items: center; }
+  .input { flex: 1; background: var(--card); border: 1px solid var(--line); border-radius: 20px; padding: 9px 14px; color: var(--muted); }
+  .round { width: 36px; height: 36px; border-radius: 18px; background: var(--card); border: 1px solid var(--line); display: flex; align-items: center; justify-content: center; }
+  .send { background: var(--blue); color: #fff; border: none; }
+  .sect { font-size: 13px; font-weight: 600; color: #3a3a3c; margin: 14px 6px 6px; display: flex; justify-content: space-between; }
+  .btns { display: flex; gap: 8px; margin-top: 10px; }
+  .btn { flex: 1; text-align: center; padding: 8px 0; border-radius: 10px; background: #eef0f5; font-weight: 600; font-size: 13px; }
+  .btn.pri { background: var(--blue); color: #fff; } .btn.danger { color: var(--red); }
+  .kv { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .kv:last-child { border: none; }
+  .tl { position: relative; padding-left: 18px; margin: 4px 0 10px; }
+  .tl:before { content: ""; position: absolute; left: 5px; top: 4px; bottom: 4px; width: 2px; background: var(--line); }
+  .ev { position: relative; margin: 8px 0; font-size: 13px; }
+  .ev:before { content: ""; position: absolute; left: -17px; top: 4px; width: 10px; height: 10px; border-radius: 5px; background: var(--blue); }
+  .ev.auto:before { background: var(--muted); } .ev.adv:before { background: var(--purple); } .ev.ok:before { background: var(--green); }
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+  .tile { background: var(--card); border-radius: 12px; padding: 10px; }
+  .tile .k { font-size: 11px; color: var(--muted); } .tile .v { font-size: 16px; font-weight: 600; margin-top: 2px; }
+  .warn .v { color: #c27400; } .good .v { color: #1d8a3c; }
+  .toggle { width: 44px; height: 26px; border-radius: 13px; background: var(--green); position: relative; display: inline-block; vertical-align: middle; }
+  .toggle:after { content: ""; position: absolute; right: 3px; top: 3px; width: 20px; height: 20px; border-radius: 10px; background: #fff; }
+  .kill { background: var(--red); color: #fff; text-align: center; padding: 12px; border-radius: 12px; font-weight: 700; margin-top: 10px; }
+  /* lock screen */
+  .lock { background: linear-gradient(160deg, #2b3a67 0%, #6b4c8a 55%, #c06c84 100%); color: #fff; }
+  .lock .time { text-align: center; font-size: 82px; font-weight: 300; line-height: 1; margin-top: 18px; }
+  .lock .date { text-align: center; font-size: 17px; margin-top: 6px; opacity: .9; }
+  .glass { background: rgba(30,30,40,.45); backdrop-filter: blur(20px); border-radius: 22px; padding: 12px 14px; margin: 10px 12px 0; color: #fff; }
+  .glass .app { font-size: 12px; opacity: .8; display: flex; justify-content: space-between; }
+  .glass .h { font-weight: 600; margin-top: 4px; } .glass .b { font-size: 13px; opacity: .92; margin-top: 2px; }
+  .glass .acts { display: flex; gap: 8px; margin-top: 10px; }
+  .glass .acts span { flex: 1; text-align: center; background: rgba(255,255,255,.18); border-radius: 10px; padding: 7px 0; font-size: 13px; font-weight: 600; }
+  .la .row { display: flex; justify-content: space-between; font-size: 13px; margin-top: 6px; }
+  .la .bar { background: rgba(255,255,255,.25); } .la .bar > i { background: #7ee0a1; }
+  .di { position: absolute; top: 11px; left: 50%; transform: translateX(-50%); height: 37px; background: #000; border-radius: 20px; color: #fff; display: flex; align-items: center; gap: 10px; padding: 0 14px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .dot { width: 8px; height: 8px; border-radius: 4px; display: inline-block; }
+</style>
+</head>
+<body>
+<h1>naozhi iOS app —— 界面草图</h1>
+<p class="sub">对应 <code>docs/rfc/planner.md</code> v5 与 <code>docs/design/ios-app.md</code>。四个标签：对话 · 收件箱 · 系统（懂系统）· 我（懂你）；锁屏承载推送与 Live Activity。所有内容均为示意数据。</p>
+
+<div class="grid">
+
+<!-- 1. 锁屏 -->
+<div class="shot">
+  <h2>① 锁屏：推送三级 + Live Activity</h2>
+  <div class="phone lock">
+    <div class="di"><span class="dot" style="background:#30d158"></span>3 在跑<span class="dot" style="background:#ff9f0a"></span>1 等你</div>
+    <div class="status"><span></span><span>5G ▮▮▮</span></div>
+    <div class="time">9:41</div>
+    <div class="date">10月19日 星期日</div>
+
+    <div class="glass la" style="margin-top:22px">
+      <div class="app"><span>naozhi · 正在替你盯着 3 件事</span><span>托管中</span></div>
+      <div class="h">处理 review issues（ultracode）</div>
+      <div class="bar"><i style="width:72%"></i></div>
+      <div class="row"><span>阶段 4/5 · 18/24 PR</span><span>自动继续 2/8</span></div>
+      <div class="row" style="opacity:.8"><span>ClickHouse 压测 · 跑第 3 轮</span><span>flaky 清扫 · 提议 2 条</span></div>
+      <div class="acts"><span>暂停托管</span><span>打开</span></div>
+    </div>
+
+    <div class="glass">
+      <div class="app"><span>naozhi · 需要你决定 · 时效</span><span>刚刚</span></div>
+      <div class="h">发版 v0.1.46？</div>
+      <div class="b">CI 绿 · 12 个 PR 已合并 · changelog 草稿已备好（你过去 9 次合并后都发版）</div>
+      <div class="acts"><span>发版（Face ID）</span><span>稍后</span><span>查看</span></div>
+    </div>
+
+    <div class="glass">
+      <div class="app"><span>naozhi · 系统 · 时效</span><span>3 分钟前</span></div>
+      <div class="h">Midway 2 小时后过期</div>
+      <div class="b">今晚有 2 个托管任务要用到。现在跑一下 mwinit，可以避免半夜失败。</div>
+      <div class="acts"><span>我去处理</span><span>1 小时后提醒</span></div>
+    </div>
+  </div>
+  <p class="note">紧急 / 需人决定 → time-sensitive，带操作按钮，敏感操作要 Face ID；里程碑 → active；其余进日报（passive）。Live Activity 只有一个"总览"，避免每个 session 各占一块；灵动岛显示在跑 / 等你计数。</p>
+</div>
+
+<!-- 2. 对话 -->
+<div class="shot">
+  <h2>② 对话：一个输入框，session 以卡片出现</h2>
+  <div class="phone">
+    <div class="island"></div>
+    <div class="status"><span>9:41</span><span>5G ▮▮▮</span></div>
+    <div class="nav"><div class="row"><span class="title">对话</span><span class="chip green">环境正常</span></div></div>
+    <div class="strip"><span class="chip blue">3 在跑</span><span class="chip orange">1 等你</span><span class="chip">2 待审</span><span class="chip">naozhi ▾</span></div>
+    <div class="content">
+      <div class="bubble me">那个 TGW 方案图里，把共享 VPC 那块去掉，换成网络账号集中出口</div>
+      <div class="card sess">
+        <div class="t">JD 网络架构图 <span class="chip green">已完成</span></div>
+        <div class="muted">执行 session · opus 5.5 · ~/Workspace/JD</div>
+        <div style="margin-top:6px;font-size:13px">已改 arch.html：移除共享 VPC，新增 Network 账号 + TGW 集中出口。</div>
+      </div>
+      <div class="who">🧭 Planner · 顾问意见</div>
+      <div class="bubble pl advice">提醒一下：上周三你和客户确认过"出口要按 BU 分账"，集中出口后 NAT 费用会落在网络账号。要不要在图上标出分摊方式？<div class="muted" style="margin-top:4px">依据：10/15 讨论记录 · 懂你/决定与先例</div></div>
+      <div class="bubble me">要，加一行注释</div>
+      <div class="card sess">
+        <div class="t">处理 review issues <span class="chip blue">托管中</span><span class="chip purple">Planner 派出</span></div>
+        <div class="bar"><i style="width:72%"></i></div>
+        <div class="muted">阶段 4/5 · 18/24 PR · 最近：⚙ 自动继续（E · 第 2/8 次）</div>
+      </div>
+    </div>
+    <div class="composer">
+      <div class="target">→ 发往：JD 网络架构图 ▾　　＋ 新话题</div>
+      <div class="inputrow"><span class="round">＋</span><span class="input">说点什么…</span><span class="round">🎙</span><span class="round send">↑</span></div>
+    </div>
+    <div class="tabbar">
+      <div class="tab on"><span class="ic">💬</span>对话</div>
+      <div class="tab"><span class="ic">📥</span>收件箱<span class="badge">3</span></div>
+      <div class="tab"><span class="ic">🛰</span>系统</div>
+      <div class="tab"><span class="ic">👤</span>我</div>
+    </div>
+  </div>
+  <p class="note">输入框常显"→ 发往 X"；焦点 session 在跑而新消息不像短跟进时，先提示"像是新话题，要另开吗？"。Planner 的顾问意见以紫色旁注出现，附依据，不插进你正在对话的 session。</p>
+</div>
+
+<!-- 3. 收件箱 -->
+<div class="shot">
+  <h2>③ 收件箱：等你的事按优先级排好</h2>
+  <div class="phone">
+    <div class="island"></div>
+    <div class="status"><span>9:41</span><span>5G ▮▮▮</span></div>
+    <div class="nav"><span class="title">收件箱</span></div>
+    <div class="content">
+      <div class="card" style="background:#f7f3ff">
+        <div style="font-weight:600">你不在的 7 小时里</div>
+        <div style="font-size:13px;margin-top:4px">合并 9 个 PR · 自动继续 4 次 · 地区 400 打断 3 个 session，已合并处理并恢复 · 1 件事等你</div>
+      </div>
+      <div class="sect"><span>Waiting on you · 2</span><span class="muted">按紧急程度</span></div>
+      <div class="card">
+        <span class="chip red">决定</span><span class="muted">naozhi · 等了 12 分钟</span>
+        <div style="font-weight:600;margin-top:6px">发版 v0.1.46？</div>
+        <div class="muted">CI 绿 · 12 个 PR · changelog 草稿已备好</div>
+        <div class="btns"><span class="btn pri">发版</span><span class="btn">看 changelog</span><span class="btn">稍后</span></div>
+      </div>
+      <div class="card">
+        <span class="chip orange">提问</span><span class="muted">ClickHouse 压测 · 等了 40 分钟</span>
+        <div style="font-weight:600;margin-top:6px">第 3 轮要不要把副本数从 2 提到 3？</div>
+        <div class="muted">它给了两个方案；Planner 拿不准（不可逆：会重建集群）</div>
+        <div class="btns"><span class="btn">保持 2</span><span class="btn">提到 3</span><span class="btn">回复…</span></div>
+      </div>
+      <div class="sect"><span>Ready for review · 2</span><span class="muted">展开</span></div>
+      <div class="card">
+        <span class="chip blue">PR #3701</span><span class="muted">flaky 清扫 · verifier PASS</span>
+        <div style="font-size:13px;margin-top:4px">修 TestShimWriteDeadline 的竞态（根因：未等真实输出）</div>
+        <div class="btns"><span class="btn pri">合并</span><span class="btn">要求修改</span></div>
+      </div>
+      <div class="sect"><span>Working · 3　Idle · 5　Resolved · 21</span><span class="muted">›</span></div>
+    </div>
+    <div class="tabbar">
+      <div class="tab"><span class="ic">💬</span>对话</div>
+      <div class="tab on"><span class="ic">📥</span>收件箱<span class="badge">3</span></div>
+      <div class="tab"><span class="ic">🛰</span>系统</div>
+      <div class="tab"><span class="ic">👤</span>我</div>
+    </div>
+  </div>
+  <p class="note">"离开期间"摘要置顶，由事件流确定性渲染。同一 session 的多个问题合并成一张卡。只有 notify 会自动关闭，决定 / 提问 / 待审只有你能关。</p>
+</div>
+
+<!-- 4. session 详情 -->
+<div class="shot">
+  <h2>④ session 详情：契约、里程碑、为什么</h2>
+  <div class="phone">
+    <div class="island"></div>
+    <div class="status"><span>9:41</span><span>5G ▮▮▮</span></div>
+    <div class="nav"><div class="muted">‹ 对话</div><div style="font-size:20px;font-weight:700;margin-top:4px">处理 review issues</div>
+      <div style="margin-top:4px"><span class="chip">naozhi</span><span class="chip">opus 5.5 · high</span><span class="chip purple">Planner 派出</span></div></div>
+    <div class="content">
+      <div class="card">
+        <div class="kv"><span>托管</span><span class="toggle"></span></div>
+        <div class="kv"><span>目标</span><span class="muted">处理 #3650–#3672 的 24 个 issue</span></div>
+        <div class="kv"><span>验收</span><span class="muted">每个 issue 一个 PR · CI 绿 · 不弱化测试</span></div>
+        <div class="kv"><span>血缘</span><span class="muted">由 Planner 派出 · 接续自 #a41f</span></div>
+      </div>
+      <div class="sect"><span>里程碑</span><span class="muted">原始记录 ›</span></div>
+      <div class="tl">
+        <div class="ev ok">阶段 3 完成 · 14 个 PR 已合并 <span class="muted">07:12</span></div>
+        <div class="ev auto">⚙ 自动继续 · E（做了一部分就停）· 第 2/8 次 <span class="muted">07:40</span></div>
+        <div class="ev adv">🧭 顾问：#3664 的修法在改症状，根因在 queue 的 FIFO 假设，建议改 Orchestrator 而不是加 sleep <span class="muted">08:05</span></div>
+        <div class="ev">session 回应：接受，已改为调整出队顺序 <span class="muted">08:09</span></div>
+        <div class="ev auto">⚙ 地区 400 · 退避 2 分钟后恢复（同一根因影响 3 个 session）<span class="muted">08:31</span></div>
+      </div>
+      <div class="card"><div class="muted">产物</div><div style="font-size:13px;margin-top:4px">PR #3688 … #3705（18）· 分支 naozhi/run-7f3c</div></div>
+    </div>
+    <div class="composer">
+      <div class="target">→ 直接对这个 session 说</div>
+      <div class="inputrow"><span class="round">⏸</span><span class="input">追问或调整方向…</span><span class="round send">↑</span></div>
+    </div>
+  </div>
+  <p class="note">每条自动动作带原因码与计数；顾问意见与 session 的回应都留在时间线上。托管开关可一键关闭；"原始记录"进入完整 transcript（与网页专家视图同源）。</p>
+</div>
+
+<!-- 5. 系统 -->
+<div class="shot">
+  <h2>⑤ 系统：懂系统</h2>
+  <div class="phone">
+    <div class="island"></div>
+    <div class="status"><span>9:41</span><span>5G ▮▮▮</span></div>
+    <div class="nav"><span class="title">系统</span></div>
+    <div class="content">
+      <div class="tiles">
+        <div class="tile warn"><div class="k">Midway</div><div class="v">2 小时后过期</div></div>
+        <div class="tile good"><div class="k">Bedrock / 网络</div><div class="v">正常 · us-east-1</div></div>
+        <div class="tile good"><div class="k">master CI</div><div class="v">绿</div></div>
+        <div class="tile"><div class="k">Mac 节点</div><div class="v">在线 · 磁盘 78%</div></div>
+      </div>
+      <div class="sect"><span>在途 session</span><span class="muted">按 workspace</span></div>
+      <div class="card">
+        <div class="kv"><span>处理 review issues</span><span class="chip blue">托管 · 4/5</span></div>
+        <div class="kv"><span>ClickHouse 压测</span><span class="chip orange">等你</span></div>
+        <div class="kv"><span>flaky 清扫（duty）</span><span class="chip">提议 2</span></div>
+        <div class="kv"><span>JD 网络架构图</span><span class="chip green">完成</span></div>
+      </div>
+      <div class="sect"><span>冲突与关系</span></div>
+      <div class="card"><span class="chip red">冲突</span><span style="font-size:13px">"review issues"与"flaky 清扫"都改了 internal/turn/queue.go · Planner 已让后者排后</span></div>
+      <div class="sect"><span>Planner 最近的决定</span><span class="muted">全部 ›</span></div>
+      <div class="card" style="font-size:13px">
+        <div>通知已有 session：把 #3666 交给"review issues"——同一模块、上下文 62k</div>
+        <div class="muted" style="margin-top:4px">理由来自：懂系统/在途 session · 可改判</div>
+      </div>
+    </div>
+    <div class="tabbar">
+      <div class="tab"><span class="ic">💬</span>对话</div>
+      <div class="tab"><span class="ic">📥</span>收件箱<span class="badge">3</span></div>
+      <div class="tab on"><span class="ic">🛰</span>系统</div>
+      <div class="tab"><span class="ic">👤</span>我</div>
+    </div>
+  </div>
+  <p class="note">环境健康、在途 session、冲突、Planner 的决定与理由——全部来自事件流派生，Planner 只加批注。"为什么"总能点开看依据。</p>
+</div>
+
+<!-- 6. 我 -->
+<div class="shot">
+  <h2>⑥ 我：懂你（只有你能改）</h2>
+  <div class="phone">
+    <div class="island"></div>
+    <div class="status"><span>9:41</span><span>5G ▮▮▮</span></div>
+    <div class="nav"><span class="title">我</span></div>
+    <div class="content">
+      <div class="sect"><span>关注点 · naozhi</span><span class="muted">编辑 ›</span></div>
+      <div class="card" style="font-size:13px">
+        <div><span class="chip green">Now</span>Planner 托管 MVP；推送管线</div>
+        <div style="margin-top:6px"><span class="chip blue">Next</span>iOS app；多节点 dispatch-v1</div>
+        <div style="margin-top:6px"><span class="chip">Not-now</span>多 Planner 协作；邮箱接入</div>
+        <div class="muted" style="margin-top:6px">9 天前确认 · 14 天未确认会在早报里问你</div>
+      </div>
+      <div class="sect"><span>注意力</span></div>
+      <div class="card">
+        <div class="kv"><span>想听</span><span class="muted">需要我决定的、CI 变红、凭证将过期</span></div>
+        <div class="kv"><span>永远别提</span><span class="muted">依赖小版本、外观类 issue</span></div>
+        <div class="kv"><span>什么时候</span><span class="muted">22:30–08:00 只推紧急</span></div>
+        <div class="kv"><span>每天立即推送上限</span><span>6 次</span></div>
+      </div>
+      <div class="sect"><span>授权（Planner 可代你做的）</span><span class="muted">全部 ›</span></div>
+      <div class="card">
+        <div class="kv"><span>修 flaky 并开 PR</span><span class="muted">剩 17 次 · 12/31 到期 · 撤销</span></div>
+        <div class="kv"><span>依赖安全补丁</span><span class="muted">永久 · 撤销</span></div>
+      </div>
+      <div class="kill">急停：暂停所有托管与派活</div>
+    </div>
+    <div class="tabbar">
+      <div class="tab"><span class="ic">💬</span>对话</div>
+      <div class="tab"><span class="ic">📥</span>收件箱<span class="badge">3</span></div>
+      <div class="tab"><span class="ic">🛰</span>系统</div>
+      <div class="tab on"><span class="ic">👤</span>我</div>
+    </div>
+  </div>
+  <p class="note">Now/Next/Not-now、注意力偏好（想听 / 别提 / 何时 / 上限）、授权与撤销、需人决定清单都在这里，修改需 Face ID。急停同时提供控制中心开关。</p>
+</div>
+
+</div>
+</body>
+</html>
