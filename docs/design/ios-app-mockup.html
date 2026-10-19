@@ -121,12 +121,12 @@
       <div class="acts"><span>我去处理</span><span>1 小时后提醒</span></div>
     </div>
   </div>
-  <p class="note">紧急 / 需人决定 → time-sensitive，带操作按钮，敏感操作要 Face ID；里程碑 → active；其余进日报（passive）。Live Activity 只有一个"总览"，避免每个 session 各占一块；灵动岛显示在跑 / 等你计数。</p>
+  <p class="note">紧急 / 需人决定 → time-sensitive，带操作按钮，敏感操作要 Face ID；里程碑 → active；其余进日报（passive）。Live Activity 只有一个"总览"，避免每个会话各占一块；灵动岛显示在跑 / 等你计数。</p>
 </div>
 
 <!-- 2. 对话 -->
 <div class="shot">
-  <h2>② 对话：一个输入框，session 以卡片出现</h2>
+  <h2>② 对话：一个输入框，会话以卡片出现</h2>
   <div class="phone">
     <div class="island"></div>
     <div class="status"><span>9:41</span><span>5G ▮▮▮</span></div>
@@ -136,7 +136,7 @@
       <div class="bubble me">那个 TGW 方案图里，把共享 VPC 那块去掉，换成网络账号集中出口</div>
       <div class="card sess">
         <div class="t">JD 网络架构图 <span class="chip green">已完成</span></div>
-        <div class="muted">执行 session · opus 5.5 · ~/Workspace/JD</div>
+        <div class="muted">执行会话 · opus 5.5 · ~/Workspace/JD</div>
         <div style="margin-top:6px;font-size:13px">已改 arch.html：移除共享 VPC，新增 Network 账号 + TGW 集中出口。</div>
       </div>
       <div class="who">🧭 Planner · 顾问意见</div>
@@ -159,7 +159,7 @@
       <div class="tab"><span class="ic">👤</span>我</div>
     </div>
   </div>
-  <p class="note">输入框常显"→ 发往 X"；焦点 session 在跑而新消息不像短跟进时，先提示"像是新话题，要另开吗？"。Planner 的顾问意见以紫色旁注出现，附依据，不插进你正在对话的 session。</p>
+  <p class="note">输入框常显"→ 发往 X"；焦点会话在跑而新消息不像短跟进时，先提示"像是新话题，要另开吗？"。Planner 的顾问意见以紫色旁注出现，附依据，不插进你正在对话的会话。</p>
 </div>
 
 <!-- 3. 收件箱 -->
@@ -172,7 +172,7 @@
     <div class="content">
       <div class="card" style="background:#f7f3ff">
         <div style="font-weight:600">你不在的 7 小时里</div>
-        <div style="font-size:13px;margin-top:4px">合并 9 个 PR · 自动继续 4 次 · 地区 400 打断 3 个 session，已合并处理并恢复 · 1 件事等你</div>
+        <div style="font-size:13px;margin-top:4px">合并 9 个 PR · 自动继续 4 次 · 地区 400 打断 3 个会话，已合并处理并恢复 · 1 件事等你</div>
       </div>
       <div class="sect"><span>Waiting on you · 2</span><span class="muted">按紧急程度</span></div>
       <div class="card">
@@ -202,12 +202,12 @@
       <div class="tab"><span class="ic">👤</span>我</div>
     </div>
   </div>
-  <p class="note">"离开期间"摘要置顶，由事件流确定性渲染。同一 session 的多个问题合并成一张卡。只有 notify 会自动关闭，决定 / 提问 / 待审只有你能关。</p>
+  <p class="note">"离开期间"摘要置顶，由事件流确定性渲染。同一会话的多个问题合并成一张卡。只有 notify 会自动关闭，决定 / 提问 / 待审只有你能关。</p>
 </div>
 
-<!-- 4. session 详情 -->
+<!-- 4. 会话详情 -->
 <div class="shot">
-  <h2>④ session 详情：契约、里程碑、为什么</h2>
+  <h2>④ 会话详情：契约、里程碑、为什么</h2>
   <div class="phone">
     <div class="island"></div>
     <div class="status"><span>9:41</span><span>5G ▮▮▮</span></div>
@@ -225,17 +225,17 @@
         <div class="ev ok">阶段 3 完成 · 14 个 PR 已合并 <span class="muted">07:12</span></div>
         <div class="ev auto">⚙ 自动继续 · E（做了一部分就停）· 第 2/8 次 <span class="muted">07:40</span></div>
         <div class="ev adv">🧭 顾问：#3664 的修法在改症状，根因在 queue 的 FIFO 假设，建议改 Orchestrator 而不是加 sleep <span class="muted">08:05</span></div>
-        <div class="ev">session 回应：接受，已改为调整出队顺序 <span class="muted">08:09</span></div>
-        <div class="ev auto">⚙ 地区 400 · 退避 2 分钟后恢复（同一根因影响 3 个 session）<span class="muted">08:31</span></div>
+        <div class="ev">会话回应：接受，已改为调整出队顺序 <span class="muted">08:09</span></div>
+        <div class="ev auto">⚙ 地区 400 · 退避 2 分钟后恢复（同一根因影响 3 个会话）<span class="muted">08:31</span></div>
       </div>
       <div class="card"><div class="muted">产物</div><div style="font-size:13px;margin-top:4px">PR #3688 … #3705（18）· 分支 naozhi/run-7f3c</div></div>
     </div>
     <div class="composer">
-      <div class="target">→ 直接对这个 session 说</div>
+      <div class="target">→ 直接对这个会话说</div>
       <div class="inputrow"><span class="round">⏸</span><span class="input">追问或调整方向…</span><span class="round send">↑</span></div>
     </div>
   </div>
-  <p class="note">每条自动动作带原因码与计数；顾问意见与 session 的回应都留在时间线上。托管开关可一键关闭；"原始记录"进入完整 transcript（与网页专家视图同源）。</p>
+  <p class="note">每条自动动作带原因码与计数；顾问意见与会话的回应都留在时间线上。托管开关可一键关闭；"原始记录"进入完整 transcript（与网页专家视图同源）。</p>
 </div>
 
 <!-- 5. 系统 -->
@@ -252,19 +252,19 @@
         <div class="tile good"><div class="k">master CI</div><div class="v">绿</div></div>
         <div class="tile"><div class="k">Mac 节点</div><div class="v">在线 · 磁盘 78%</div></div>
       </div>
-      <div class="sect"><span>在途 session</span><span class="muted">按 workspace</span></div>
+      <div class="sect"><span>在途会话</span><span class="muted">按工作区</span></div>
       <div class="card">
         <div class="kv"><span>处理 review issues</span><span class="chip blue">托管 · 4/5</span></div>
         <div class="kv"><span>ClickHouse 压测</span><span class="chip orange">等你</span></div>
-        <div class="kv"><span>flaky 清扫（duty）</span><span class="chip">提议 2</span></div>
+        <div class="kv"><span>flaky 清扫（例行任务）</span><span class="chip">提议 2</span></div>
         <div class="kv"><span>JD 网络架构图</span><span class="chip green">完成</span></div>
       </div>
       <div class="sect"><span>冲突与关系</span></div>
       <div class="card"><span class="chip red">冲突</span><span style="font-size:13px">"review issues"与"flaky 清扫"都改了 internal/turn/queue.go · Planner 已让后者排后</span></div>
       <div class="sect"><span>Planner 最近的决定</span><span class="muted">全部 ›</span></div>
       <div class="card" style="font-size:13px">
-        <div>通知已有 session：把 #3666 交给"review issues"——同一模块、上下文 62k</div>
-        <div class="muted" style="margin-top:4px">理由来自：懂系统/在途 session · 可改判</div>
+        <div>通知已有会话：把 #3666 交给"review issues"——同一模块、上下文 62k</div>
+        <div class="muted" style="margin-top:4px">理由来自：懂系统/在途会话 · 可改判</div>
       </div>
     </div>
     <div class="tabbar">
@@ -274,7 +274,7 @@
       <div class="tab"><span class="ic">👤</span>我</div>
     </div>
   </div>
-  <p class="note">环境健康、在途 session、冲突、Planner 的决定与理由——全部来自事件流派生，Planner 只加批注。"为什么"总能点开看依据。</p>
+  <p class="note">环境健康、在途会话、冲突、Planner 的决定与理由——全部来自事件流派生，Planner 只加批注。"为什么"总能点开看依据。</p>
 </div>
 
 <!-- 6. 我 -->
