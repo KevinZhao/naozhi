@@ -392,21 +392,23 @@ function interruptSession() {
   }
 }
 
-// saveScrollPos / restoreScrollPos: 按 (key,node) 保存离开时的滚动位置，
-// 回到同一会话时恢复。用「距底距离」而不是 scrollTop，因为会话再进入时
-// 可能会多加载更早的事件导致 scrollHeight 变大，距底更稳定。atBottom 单
-// 独标记以便新消息到来时继续贴底（shell 式滚动），只有用户明确滚开时才
-// 进入「保持位置」分支。
+// saveScrollPos / restoreScrollPos: 按 (key,node) 快照滚动位置——切走时，以及
+// 同一会话整页重绘前（重订阅 / 全量拉取，见 event_stream.js）——之后恢复。锚点
+// 是压着视口顶部的气泡（uuid 可重复，记第几个）：重绘会换掉上方的分页、下方也
+// 可能多出新事件，锚点比「距底距离」稳；锚点不在新内容里才退回距底距离。atBottom
+// 单独标记，贴底的读者继续贴底，只有明确滚开才「保持位置」。
+const uuidBubbles = (el, uuid) => [...el.querySelectorAll(':scope > .event[data-uuid]')].filter(b => !uuid || b.getAttribute('data-uuid') === uuid);
 function saveScrollPos(key, node) {
   const el = document.getElementById('events-scroll');
   if (!el || !key) return;
-  // clientHeight === 0 发生在 events-scroll 还未 layout 完（极早期竞态），
-  // 这时算出来的 fromBottom=0、atBottom=true 会把之前真实保存的位置擦掉。
-  // 直接跳过，保留上一份快照。
+  // clientHeight === 0：还未 layout（极早期竞态），算出的 atBottom 会擦掉真实快照，跳过。
   if (el.clientHeight === 0) return;
   const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-  const atBottom = fromBottom <= 30;
-  perSession.scrollPos[sid(key, node || 'local')] = { fromBottom, atBottom };
+  const top = el.getBoundingClientRect().top;
+  const a = uuidBubbles(el).find(b => b.getBoundingClientRect().bottom > top);
+  const uuid = a ? a.getAttribute('data-uuid') : '';
+  perSession.scrollPos[sid(key, node || 'local')] = { fromBottom, atBottom: fromBottom <= 30, uuid,
+    nth: a ? uuidBubbles(el, uuid).indexOf(a) : 0, offset: a ? a.getBoundingClientRect().top - top : 0 };
 }
 
 // restoreScrollPos: 如果有保存的位置且不是贴底，则恢复并返回 true；
@@ -417,16 +419,13 @@ function restoreScrollPos(key, node) {
   const pos = perSession.scrollPos[sid(key, node || 'local')];
   if (!pos || pos.atBottom) return false;
   const apply = () => {
-    const target = Math.max(0, el.scrollHeight - el.clientHeight - pos.fromBottom);
-    el.scrollTop = target;
+    const a = pos.uuid && uuidBubbles(el, pos.uuid)[pos.nth];
+    if (a) el.scrollTop += a.getBoundingClientRect().top - el.getBoundingClientRect().top - pos.offset;
+    else el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - pos.fromBottom);
   };
   apply();
-  // 异步布局（图片 / mermaid / katex / "加载更早" 按钮注入）会改变
-  // scrollHeight，再跑两帧复位保持「距底距离」不变。
-  requestAnimationFrame(() => {
-    apply();
-    requestAnimationFrame(apply);
-  });
+  // 异步布局（图片 / mermaid / katex / "加载更早" 按钮注入）会挪动内容，再跑两帧复位。
+  requestAnimationFrame(() => { apply(); requestAnimationFrame(apply); });
   return true;
 }
 

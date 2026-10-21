@@ -13,7 +13,7 @@ import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.
 import { runPendingAsync } from './render_md.js';
 import { processEventsForDisplay } from './file_refs.js';
 import { navRebuild, navSync } from './msg_nav.js';
-import { applyEventToTurnState, idleTaskEvent, paintTurnElapsed, refreshBanner, resetTurnState, resetTurnStateForUserEcho, restoreScrollPos, scrollSlackPx, turnState, updateSendButton } from './running_banner.js';
+import { applyEventToTurnState, idleTaskEvent, paintTurnElapsed, refreshBanner, resetTurnState, resetTurnStateForUserEcho, restoreScrollPos, saveScrollPos, scrollSlackPx, turnState, updateSendButton } from './running_banner.js';
 import { rollbackOptimisticRunning } from './send_message.js';
 import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, MAX_LIVE_DOM_EVENTS, lastDividerTime, showAPIError, stickEventsBottom, timeDividerHtml } from './utilities.js';
 import { isInternalEvent, sid } from './session_ident.js';
@@ -373,6 +373,7 @@ export function renderEvents(events, hasMore) {
   // visible-bubble count; the length heuristic is only for an absent header.
   const showEarlier = (hasMore === true) ||
     (hasMore == null && events.length >= INITIAL_HISTORY_LIMIT);
+  if (el.querySelector('.event')) saveScrollPos(selection.key, selection.node); // see renderInitialHistory
   if (html) {
     el.innerHTML = html;
   } else if (events.length === 0) {
@@ -396,9 +397,7 @@ export function renderEvents(events, hasMore) {
   }
   runPendingAsync();
   navRebuild();
-  if (!restoreScrollPos(selection.key, selection.node)) {
-    stickEventsBottom();
-  }
+  if (!restoreScrollPos(selection.key, selection.node)) stickEventsBottom();
   // Safety net: if the page rendered to the all-internal placeholder (no
   // visible bubble) but events exist, transparently page back to real
   // messages. Bounded by AUTO_PAGEBACK_MAX. Covers the paths the server-side
@@ -495,7 +494,9 @@ export function appendEvents(events) {
 // the placeholder for an empty or all-internal page, the paging cursor and
 // "load earlier", then the scroll position.
 function renderInitialHistory(el, /** @type {WsFrames['history']} */ msg, events, display) {
-  // Full render replaces everything — remove any optimistic messages
+  // A repaint of the session on screen (a resubscribe; a switch paints an empty
+  // shell) puts its reader back where they stand, not at the bottom: snapshot.
+  if (el.querySelector('.event')) saveScrollPos(selection.key, selection.node);
   const html = renderEventsWithDividers(display, 0);
   // Decide "load earlier" BEFORE the all-internal placeholder so its copy never
   // invites a click on a button that won't appear. The server's has_more knows
@@ -533,10 +534,7 @@ function renderInitialHistory(el, /** @type {WsFrames['history']} */ msg, events
   }
   runPendingAsync();
   navRebuild();
-  // 若有上次切走时保存的滚动位置且不在底部，恢复它；否则照旧贴底。
-  if (!restoreScrollPos(selection.key, selection.node)) {
-    stickEventsBottom();
-  }
+  if (!restoreScrollPos(selection.key, selection.node)) stickEventsBottom();
   // Safety net: blank page despite events existing → page back to real
   // messages (bounded). Twin of renderEvents' maybeAutoPageBack call;
   // covers remote nodes whose subscribe predates the visible-aware read.

@@ -240,7 +240,7 @@
     "lateBindings": 0
   },
   "event_stream.js": {
-    "lines": 922,
+    "lines": 920,
     "maxFnLines": 68,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -396,7 +396,7 @@
     "lateBindings": 0
   },
   "running_banner.js": {
-    "lines": 524,
+    "lines": 523,
     "maxFnLines": 95,
     "maxIifeLines": 0,
     "fnOver100": 0,
