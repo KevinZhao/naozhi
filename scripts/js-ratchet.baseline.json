@@ -240,14 +240,14 @@
     "lateBindings": 0
   },
   "event_stream.js": {
-    "lines": 920,
+    "lines": 904,
     "maxFnLines": 68,
     "maxIifeLines": 0,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0,
     "deadInjections": 0,
-    "innerHTMLAssign": 7,
+    "innerHTMLAssign": 4,
     "htmlInsert": 6,
     "lateBindings": 0
   },
@@ -396,7 +396,7 @@
     "lateBindings": 0
   },
   "running_banner.js": {
-    "lines": 523,
+    "lines": 529,
     "maxFnLines": 95,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -612,7 +612,7 @@
     "lateBindings": 0
   },
   "_global": {
-    "htmlSinks": 175,
+    "htmlSinks": 172,
     "importCycles": 0,
     "unresolvedImports": 0,
     "reexports": 0,

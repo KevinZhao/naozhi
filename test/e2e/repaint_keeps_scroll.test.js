@@ -31,8 +31,9 @@ function page30(T) {
   return events;
 }
 
-// open selects KEY_A over a connected socket and paints its opening frame.
-async function open(browser, mock) {
+// open selects KEY_A over a connected socket and paints its opening frame
+// (`events`, else page30).
+async function open(browser, mock, events = page30(Date.now() + 60000)) {
   const ctx = await browser.newContext({ ...desktop });
   const page = await ctx.newPage();
   const errors = [];
@@ -45,7 +46,6 @@ async function open(browser, mock) {
   conn.send({ type: 'subscribed', key: KEY_A });
   await page.waitForFunction((key) => sessionStream.subscribedKey === key, KEY_A);
   await page.evaluate(() => debouncedFetchSessions());
-  const events = page30(Date.now() + 60000);
   conn.send({ type: 'history', key: KEY_A, initial: true, events });
   await page.waitForSelector('#events-scroll .event[data-uuid="a29"]');
   await frames(page);
@@ -74,6 +74,7 @@ const offsetOf = (page, uuid) => page.evaluate((u) => {
   return b ? Math.round(b.getBoundingClientRect().top - el.getBoundingClientRect().top) : null;
 }, uuid);
 
+const scrollTop = (page) => page.evaluate(() => /** @type {HTMLElement} */ (document.getElementById('events-scroll')).scrollTop);
 const atBottom = (page) => page.evaluate(() => {
   const el = /** @type {HTMLElement} */ (document.getElementById('events-scroll'));
   return el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
@@ -81,7 +82,8 @@ const atBottom = (page) => page.evaluate(() => {
 
 // resubscribeFromScratch drives the reaped-process chain: subscription_timeout,
 // then a sessions_update whose refetch resubscribes without a cursor. It
-// resolves once the opening frame `events` (plus `extra`) is painted.
+// resolves once the opening frame `events` (plus `extra`) is painted; every
+// frame here holds a29.
 async function resubscribeFromScratch(page, conn, events, extra) {
   const before = subs(conn, KEY_A).length;
   conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'ready', reason: 'subscription_timeout' });
@@ -113,15 +115,15 @@ test.describe('a full repaint of the session on screen keeps the reader\'s posit
     await ctx.close();
   });
 
-  test('events that arrived meanwhile do not shift a scrolled-up reader', async ({ browser }) => {
+  test('AI output that arrived meanwhile does not shift a scrolled-up reader', async ({ browser }) => {
     const { ctx, page, conn, errors, events } = await open(browser, mock);
     const anchor = await scrollUp(page);
     const T = events[events.length - 1].time + 1000;
     await resubscribeFromScratch(page, conn, events, [
-      { type: 'user', detail: 'later', summary: 'later', time: T, uuid: 'q30' },
-      { type: 'text', detail: 'later answer '.repeat(80), time: T + 1, uuid: 'a30' },
+      { type: 'text', detail: 'later answer '.repeat(80), time: T, uuid: 'a30' },
+      { type: 'text', detail: 'more '.repeat(80), time: T + 1, uuid: 'a31' },
     ]);
-    await page.waitForSelector('#events-scroll .event[data-uuid="a30"]');
+    await page.waitForSelector('#events-scroll .event[data-uuid="a31"]');
     expect(await offsetOf(page, anchor.uuid)).toBe(anchor.offset);
     expect(errors).toEqual([]);
     await ctx.close();
@@ -162,6 +164,55 @@ test.describe('a full repaint of the session on screen keeps the reader\'s posit
     await page.waitForSelector('#events-scroll .event[data-uuid="a29"]');
     await frames(page);
     expect(await offsetOf(page, anchor.uuid)).toBe(anchor.offset);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  test('a teammate\'s message the repaint brings pins the pane', async ({ browser }) => {
+    const { ctx, page, conn, errors, events } = await open(browser, mock);
+    await scrollUp(page);
+    const T = events[events.length - 1].time + 1000;
+    await resubscribeFromScratch(page, conn, events, [
+      { type: 'user', detail: 'from IM', summary: 'from IM', time: T, uuid: 'im-1' },
+    ]);
+    expect(await atBottom(page), 'a teammate\'s message must be visible').toBe(true);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  test('a reader in history the repaint no longer holds lands at its top, not the bottom', async ({ browser }) => {
+    // 60 pairs on screen (as after "load earlier"); the repaint holds the last 30.
+    const T = Date.now() + 60000;
+    const older = page30(T - 1000).map((e) => ({ ...e, uuid: 'old-' + e.uuid }));
+    const { ctx, page, conn, errors, events } = await open(browser, mock, older.concat(page30(T)));
+    await page.evaluate(() => { /** @type {HTMLElement} */ (document.getElementById('events-scroll')).scrollTop = 300; });
+    await resubscribeFromScratch(page, conn, events.slice(older.length));
+    expect(await scrollTop(page), 'the reader sits above everything repainted').toBe(0);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  test('an anchor among same-uuid bubbles survives the page cutting that group at the top', async ({ browser }) => {
+    // One entry rendered as three bubbles sharing a uuid, ahead of the pairs.
+    const T = Date.now() + 60000;
+    const group = [0, 1, 2].map((i) => ({ type: 'text', detail: ('part ' + i + ' ').repeat(200), time: T - 100 + i, uuid: 'grp' }));
+    const { ctx, page, conn, errors, events } = await open(browser, mock, group.concat(page30(T)));
+    // Park the viewport top inside the third member.
+    const offset = await page.evaluate(() => {
+      const el = /** @type {HTMLElement} */ (document.getElementById('events-scroll'));
+      const third = el.querySelectorAll(':scope > .event[data-uuid="grp"]')[2];
+      el.scrollTop += third.getBoundingClientRect().top - el.getBoundingClientRect().top + 20;
+      return Math.round(third.getBoundingClientRect().top - el.getBoundingClientRect().top);
+    });
+    // The new page starts at the second member.
+    await resubscribeFromScratch(page, conn, events.slice(1));
+    const now = await page.evaluate(() => {
+      const el = /** @type {HTMLElement} */ (document.getElementById('events-scroll'));
+      const members = el.querySelectorAll(':scope > .event[data-uuid="grp"]');
+      return { n: members.length, top: Math.round(members[members.length - 1].getBoundingClientRect().top - el.getBoundingClientRect().top) };
+    });
+    expect(now.n).toBe(2);
+    expect(now.top, 'the same (last) member stays where the reader had it').toBe(offset);
     expect(errors).toEqual([]);
     await ctx.close();
   });
