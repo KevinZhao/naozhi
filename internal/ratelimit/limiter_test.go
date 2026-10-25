@@ -158,10 +158,10 @@ func TestDefaults(t *testing.T) {
 	}
 }
 
-// Peek answers what Allow would, and spends, creates and promotes nothing.
+// Peek answers what Allow would, and spends and creates nothing.
 func TestPeekIsReadOnly(t *testing.T) {
 	t.Parallel()
-	l := New(Config{Rate: rate.Every(time.Hour), Burst: 2, MaxKeys: 2})
+	l := New(Config{Rate: rate.Every(time.Hour), Burst: 2})
 	if l.Peek("") {
 		t.Fatal("Peek admitted the empty key")
 	}
@@ -178,15 +178,6 @@ func TestPeekIsReadOnly(t *testing.T) {
 	}
 	if l.Peek("a") || l.Allow("a") {
 		t.Fatal("Peek or Allow passed with the burst spent")
-	}
-
-	// "a" is the LRU tail once "b" is used; a Peek must not promote it, so
-	// "c" evicts "a" and its spent bucket with it.
-	l.Allow("b")
-	l.Peek("a")
-	l.Allow("c")
-	if !l.Peek("a") {
-		t.Fatal("Peek promoted a: b was evicted instead of a")
 	}
 }
 

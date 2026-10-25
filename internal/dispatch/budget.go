@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/agentroute"
@@ -24,34 +23,11 @@ type BudgetGate interface {
 	Once(n budget.Notice, s budget.Subject) bool
 }
 
-// admitBudget reports whether o's session may take a turn under today's
-// budget. Commands never get here, so /stop and /new work in a refused chat.
-// A refused message gets no turn, is counted by scope, and the chat is told
-// at most once per budgetReplyWindow.
-func (d *Dispatcher) admitBudget(ctx context.Context, o *imOrigin) bool {
-	return d.admitBudgetKey(ctx, o.msg, o.key, o.lg)
-}
-
-// peekBudget is admitBudget for Admit, before msg's media is fetched: it
-// routes msg the way prepareInbound will, from the text it has so far. A
-// slash command, which admitBudget never sees, is left to the handler.
-func (d *Dispatcher) peekBudget(ctx context.Context, msg platform.IncomingMessage, trimmed string, lg *slog.Logger) bool {
-	if d.budget == nil {
-		return true
-	}
-	agentID, cleanText := agentroute.ResolveAgent(trimmed, d.agentCommands)
-	if agentID == "general" && strings.HasPrefix(cleanText, "/") {
-		return true
-	}
-	if msg.AgentID != "" && d.isKnownAgent(msg.AgentID) {
-		agentID = msg.AgentID
-	}
-	msg = d.openThread(msg)
-	key, _ := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, d.sessionChatID(msg), agentID)
-	return d.admitBudgetKey(ctx, msg, key, lg)
-}
-
-func (d *Dispatcher) admitBudgetKey(ctx context.Context, msg platform.IncomingMessage, key string, lg *slog.Logger) bool {
+// admitBudget reports whether key, the session msg routes to, may take a
+// turn under today's budget. Commands never get here, so /stop and /new work
+// in a refused chat. A refused message gets no turn, is counted by scope,
+// and the chat is told at most once per budgetReplyWindow.
+func (d *Dispatcher) admitBudget(ctx context.Context, msg platform.IncomingMessage, key string, lg *slog.Logger) bool {
 	if d.budget == nil {
 		return true
 	}
@@ -70,6 +46,15 @@ func (d *Dispatcher) admitBudgetKey(ctx context.Context, msg platform.IncomingMe
 	d.replyText(ctx, msg, "今日费用预算已用尽（"+imBudgetScope(v.Subject)+" "+v.Usage()+"），"+
 		v.ResetAt.Format("01-02 15:04")+" 重置；在此之前新消息不会处理。", lg)
 	return false
+}
+
+// peekBudget is admitBudget for Admit, before msg's media is fetched. The
+// budget subject is the parent chat's, or a bound project's planner for the
+// general agent, so the agent is all of the handler's routing it needs.
+func (d *Dispatcher) peekBudget(ctx context.Context, msg platform.IncomingMessage, trimmed string, lg *slog.Logger) bool {
+	agentID, _ := agentroute.ResolveAgent(trimmed, d.agentCommands)
+	key, _ := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+	return d.admitBudget(ctx, msg, key, lg)
 }
 
 // budgetWarnLine is the line a reply on key ends with when its chat, project

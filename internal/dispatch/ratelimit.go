@@ -91,26 +91,21 @@ func isStopCommand(trimmed string) bool {
 }
 
 // admitRate reports whether msg fits its sender's rate limit, spending a
-// token if so. /stop is never limited: it ends spend. A limited message is
-// counted and dropped; the sender is told at most once per
-// rateLimitReplyWindow.
-func (d *Dispatcher) admitRate(ctx context.Context, msg platform.IncomingMessage, trimmed string, lg *slog.Logger) bool {
-	return d.checkRate(ctx, msg, trimmed, lg, true)
-}
-
-// peekRate is admitRate without spending the token, for Admit: the handler
-// spends it on the same message after the download.
-func (d *Dispatcher) peekRate(ctx context.Context, msg platform.IncomingMessage, trimmed string, lg *slog.Logger) bool {
-	return d.checkRate(ctx, msg, trimmed, lg, false)
-}
-
-func (d *Dispatcher) checkRate(ctx context.Context, msg platform.IncomingMessage, trimmed string, lg *slog.Logger, spend bool) bool {
+// token if spend is set; Admit only peeks, as the handler spends the token
+// on the same message after the download. /stop is never limited: it ends
+// spend. A limited message is counted and dropped; the sender is told at
+// most once per rateLimitReplyWindow.
+func (d *Dispatcher) admitRate(ctx context.Context, msg platform.IncomingMessage, trimmed string, lg *slog.Logger, spend bool) bool {
 	in := d.inbound.Load()
 	if in == nil || isStopCommand(trimmed) {
 		return true
 	}
 	key := rateLimitKey(msg)
-	if spend && in.limiter.Allow(key) || !spend && in.limiter.Peek(key) {
+	allow := in.limiter.Allow
+	if !spend {
+		allow = in.limiter.Peek
+	}
+	if allow(key) {
 		return true
 	}
 	dispatchRateLimitedTotal.Add(1)

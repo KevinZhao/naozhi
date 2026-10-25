@@ -419,7 +419,7 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	// After authorization so a refused sender spends no tokens (authorize
 	// throttles its own replies), before commands so command spam is
 	// limited too.
-	if !d.admitRate(ctx, msg, trimmed, lg) {
+	if !d.admitRate(ctx, msg, trimmed, lg, true) {
 		return preparedInbound{}, false
 	}
 

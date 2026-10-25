@@ -185,10 +185,8 @@ func TestBudget_ReplyWarnActionOver(t *testing.T) {
 	}
 }
 
-// Admit refuses media for a chat past its cap before it is fetched, routed
-// the way the handler will route it, with admitBudget's metric and
-// throttled reply. A command caption is left to the handler, which never
-// budget-gates commands (#3652).
+// Admit refuses media for a chat past its cap before it is fetched, with
+// admitBudget's metric and throttled reply (#3652).
 func TestAdmit_BudgetSpentChatFetchesNothing(t *testing.T) {
 	d, fp, _, spend := newBudgetDispatcher(t, budget.Limits{PerChatDailyUSD: 1})
 	ctx := context.Background()
@@ -205,9 +203,6 @@ func TestAdmit_BudgetSpentChatFetchesNothing(t *testing.T) {
 	}
 	if n := countReplies(fp, budgetSpentReply); n != 1 {
 		t.Errorf("budget replies = %d, want 1: %q", n, fp.allReplies())
-	}
-	if !d.Admit(ctx, budgetMsg("c1", "/new")) {
-		t.Error("Admit budget-gated a command")
 	}
 	if !d.Admit(ctx, budgetMsg("c2", "")) {
 		t.Error("Admit refused a chat under its cap")

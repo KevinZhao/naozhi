@@ -90,7 +90,7 @@ func (d *Dispatcher) Admit(ctx context.Context, msg platform.IncomingMessage) bo
 	}
 	lg := d.inboundLogger(msg)
 	trimmed := strings.TrimSpace(msg.Text)
-	return d.authorize(ctx, msg, "", lg) && d.peekRate(ctx, msg, trimmed, lg) && d.peekBudget(ctx, msg, trimmed, lg)
+	return d.authorize(ctx, msg, "", lg) && d.admitRate(ctx, msg, trimmed, lg, false) && d.peekBudget(ctx, msg, trimmed, lg)
 }
 
 // unmentionedInGroup reports a group message that does not @mention the
