@@ -71,11 +71,10 @@ test.describe('dashboard rendered by the Go server', () => {
     // Console errors are kept only when they name what this page can break:
     // the policy or module loading. Engines log other noise at error level
     // (unstubbed API 404s, viewport keys WebKit does not know); a /static
-    // failure is caught on the responses below. require-sri-for is not a
-    // directive browsers implement; they warn on it.
+    // failure is caught on the responses below.
     page.on('console', (m) => {
       const text = m.text();
-      if (m.type() === 'error' && CONSOLE_ERROR_RE.test(text) && !/require-sri-for/.test(text)) errors.push(text);
+      if (m.type() === 'error' && CONSOLE_ERROR_RE.test(text)) errors.push(text);
     });
     /** @type {URL[]} */
     const statics = [];

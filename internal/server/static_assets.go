@@ -189,8 +189,8 @@ var filesViewJS embed.FS
 var faviconSVG embed.FS
 
 // Third-party release files, byte-identical to their npm dist (mermaid's bundle
-// gzipped) and kept under a versioned directory, so their SRI pins in
-// render_md.js stay valid and their responses can be cached as immutable. KaTeX
+// gzipped) and kept under a versioned directory, so their responses can be
+// cached as immutable. KaTeX
 // ships only its woff2 fonts: every browser the dashboard supports takes the
 // first src of each @font-face.
 //

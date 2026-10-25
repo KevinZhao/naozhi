@@ -80,9 +80,6 @@ const MOBILE = { width: 390, height: 844 };
 const IGNORED_CONSOLE = [
   /Failed to load resource.*manifest\.json/i, // PWA manifest is optional in headless
   /\[HMR\]/i,
-  // Browser doesn't recognize the deprecated `require-sri-for` CSP directive
-  // naozhi still emits; it prints on every page load and is not a regression.
-  /Unrecognized Content-Security-Policy directive 'require-sri-for'/i,
 ];
 
 // Console noise tolerated ONLY on the named view. The server-rendered login
