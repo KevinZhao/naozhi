@@ -178,19 +178,18 @@ func (s *Sender) Endpoints() int { return len(s.workers) }
 
 // Deliver enqueues ev for every endpoint subscribed to its type and
 // subsystem. Never blocks: a full queue drops the event and counts it.
-// After Close it drops and counts everything.
+// After Close it drops everything.
 func (s *Sender) Deliver(ev Event) {
 	if s == nil {
 		return
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.closed {
+		return
+	}
 	for _, w := range s.workers {
 		if !w.wants(ev) {
-			continue
-		}
-		if s.closed {
-			droppedTotal.Add(w.idx, 1)
 			continue
 		}
 		select {

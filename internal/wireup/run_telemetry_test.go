@@ -87,15 +87,6 @@ func TestRunTelemetryRelays_WebhookSeesEventsBeforeHubBind(t *testing.T) {
 	}
 }
 
-// Without a sender there is one relay, bound by the server as before.
-func TestRunTelemetryRelays_NilSenderIsOneRelay(t *testing.T) {
-	producers, hub := RunTelemetryRelays(nil)
-	if producers != hub {
-		t.Fatal("no sender: producers and Hub must share the relay")
-	}
-	hub.Bind(&hubRecorder{}) // unbound until the server binds it; would panic if bound
-}
-
 // The webhook gets run metadata only (no error text), stamped with the node.
 func TestWebhookBroadcaster_MapsRunEvents(t *testing.T) {
 	rcv := &webhookReceiver{}

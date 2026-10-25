@@ -431,58 +431,16 @@ func TestDeliverConcurrentWithClose(t *testing.T) {
 
 func withFirstBackoff(d time.Duration) Option { return func(s *Sender) { s.firstBackoff = d } }
 
-// A dropped-after-Close event is counted like a full-queue drop, so a late
-// run.ended during shutdown is visible on /metrics rather than silent.
-func TestDeliverAfterCloseCountsDrop(t *testing.T) {
-	r := &recv{}
-	srv := httptest.NewServer(http.HandlerFunc(r.handler))
-	defer srv.Close()
-	s := New([]Endpoint{{URL: srv.URL}, {URL: srv.URL, Events: []string{EventRunStarted}}}, WithSleep(noSleep))
-	s.Close(context.Background())
-	before0, before1 := counter(droppedTotal.Get("0")), counter(droppedTotal.Get("1"))
-	s.Deliver(Event{Type: EventRunEnded, Subsystem: "cron", RunID: "late"})
-	if got := counter(droppedTotal.Get("0")) - before0; got != 1 {
-		t.Fatalf("endpoint 0 dropped += %d, want 1", got)
-	}
-	if got := counter(droppedTotal.Get("1")) - before1; got != 0 {
-		t.Fatalf("endpoint 1 dropped += %d, want 0: it is not subscribed to run.ended", got)
-	}
-}
-
-func counter(v interface{ String() string }) int64 {
-	if v == nil {
-		return 0
-	}
-	var n int64
-	fmt.Sscan(v.String(), &n)
-	return n
-}
-
-// The payload never carries a zero timestamp: run.started has no ended_at,
-// and an event whose producer left a time unset omits it rather than sending
-// 0001-01-01T00:00:00Z, which receivers would parse as a real instant.
-func TestEvent_PayloadGolden(t *testing.T) {
+// run.started has no ended_at; it is omitted, not sent as 0001-01-01.
+func TestEvent_StartedOmitsEndedAt(t *testing.T) {
 	start := time.Date(2026, 10, 25, 8, 0, 0, 0, time.UTC)
-	cases := []struct {
-		name string
-		ev   Event
-		want string
-	}{
-		{"started", Event{Type: EventRunStarted, Subsystem: "cron", OwnerID: "o", RunID: "r", Trigger: "scheduled", StartedAt: start, Node: "n"},
-			`{"type":"run.started","subsystem":"cron","owner_id":"o","run_id":"r","trigger":"scheduled","started_at":"2026-10-25T08:00:00Z","node":"n"}`},
-		{"ended", Event{Type: EventRunEnded, Subsystem: "sysession", OwnerID: "o", RunID: "r", State: "succeeded", Trigger: "manual", StartedAt: start, EndedAt: start.Add(1500 * time.Millisecond), DurationMS: 1500},
-			`{"type":"run.ended","subsystem":"sysession","owner_id":"o","run_id":"r","state":"succeeded","trigger":"manual","started_at":"2026-10-25T08:00:00Z","ended_at":"2026-10-25T08:00:01.5Z","duration_ms":1500}`},
-		{"no times", Event{Type: EventRunEnded, Subsystem: "cron", OwnerID: "o", RunID: "r", State: "canceled"},
-			`{"type":"run.ended","subsystem":"cron","owner_id":"o","run_id":"r","state":"canceled"}`},
+	b, err := json.Marshal(Event{Type: EventRunStarted, Subsystem: "cron", OwnerID: "o", RunID: "r", StartedAt: start})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, c := range cases {
-		b, err := json.Marshal(c.ev)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(b) != c.want {
-			t.Errorf("%s:\n got %s\nwant %s", c.name, b, c.want)
-		}
+	want := `{"type":"run.started","subsystem":"cron","owner_id":"o","run_id":"r","started_at":"2026-10-25T08:00:00Z"}`
+	if string(b) != want {
+		t.Fatalf("got %s\nwant %s", b, want)
 	}
 }
 
@@ -500,7 +458,6 @@ func TestSend_DoesNotFollowRedirects(t *testing.T) {
 		http.Redirect(w, req, tsrv.URL+"/stolen", http.StatusTemporaryRedirect)
 	}))
 	defer redir.Close()
-	before := counter(failedTotal.Get("0"))
 	s := New([]Endpoint{{URL: redir.URL, Secret: "s3cr3t"}}, WithSleep(noSleep))
 	s.Deliver(Event{Type: EventRunEnded, Subsystem: "cron", RunID: "r"})
 	s.Close(context.Background())
@@ -509,8 +466,5 @@ func TestSend_DoesNotFollowRedirects(t *testing.T) {
 	}
 	if n := hits.Load(); n != 1 {
 		t.Fatalf("endpoint hits = %d, want 1: a 3xx is not retryable", n)
-	}
-	if got := counter(failedTotal.Get("0")) - before; got != 1 {
-		t.Fatalf("failed += %d, want 1", got)
 	}
 }

@@ -325,9 +325,7 @@ func main() {
 		webhooks = webhook.New(eps, webhook.WithNode(cfg.Workspace.ID))
 		slog.Info("outbound webhooks enabled", "endpoints", len(eps))
 	}
-	// cron and sysession run-events go to runTelemetry, already bound to the
-	// webhooks so none is lost while the schedulers run ahead of the server;
-	// the dashboard Hub, which does not exist yet, binds to hubTelemetry.
+	// Webhooks are bound first in wireup.RunTelemetryRelays; the server binds the Hub to hubTelemetry.
 	runTelemetry, hubTelemetry := wireup.RunTelemetryRelays(webhooks)
 	// One gate for IM and cron, fed by the ledger; nil when cost.budget is off.
 	budgetGate := budget.Attach(router.Runs().CostLedger(), cfg.BudgetLimits(), cfg.BudgetLocation(), nil)

@@ -9,14 +9,9 @@ import (
 )
 
 // RunTelemetryRelays returns the relay cron and sysession are built with
-// (producers) and the one the server binds the dashboard Hub to (hub).
-//
-// The schedulers start before the server, and a Relay drops what it sees
-// before its bind: harmless for the Hub, which has no client yet, but not for
-// a webhook — cron settles a run the previous process left in flight within
-// milliseconds of Start, and that run.ended is what an alerting receiver waits
-// for (#3691). So the webhook is bound here, before any producer exists, and
-// only the Hub waits behind the inner relay. With no sender they are one.
+// (producers) and the one the server binds the dashboard Hub to (hub); with
+// no sender they are one. The webhook is bound up front because the schedulers
+// start before the server and an unbound Relay drops events (#3691).
 func RunTelemetryRelays(webhooks *webhook.Sender) (producers, hub *runtelemetry.Relay) {
 	hub = &runtelemetry.Relay{}
 	if webhooks == nil {

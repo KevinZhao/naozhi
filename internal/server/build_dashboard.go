@@ -71,8 +71,7 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 
 	// cron and sysession share one relay, built in main.go before the Hub;
 	// per-subsystem WS payload selection happens inside hubBroadcaster.
-	// Outbound webhooks are bound in front of it there, not here: the
-	// schedulers start before the server, and an unbound relay drops (#3691).
+	// Outbound webhooks are bound first, in wireup.RunTelemetryRelays.
 	if hs.wiring.runTelemetry != nil {
 		hs.wiring.runTelemetry.Bind(newHubBroadcaster(hs.wiring.bcast))
 	}
