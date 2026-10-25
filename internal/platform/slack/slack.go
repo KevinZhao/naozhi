@@ -55,6 +55,8 @@ type Slack struct {
 	admit platform.AdmitFunc
 	// fileHTTP downloads uploads (slackFileHTTPClient outside tests).
 	fileHTTP *http.Client
+	// downloadTimeout overrides slackFileDownloadTimeout when non-zero.
+	downloadTimeout time.Duration
 }
 
 // slackHTTPClient is shared by all Slack adapters. The 10s Timeout matters

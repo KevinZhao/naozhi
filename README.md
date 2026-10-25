@@ -57,20 +57,23 @@ graph TD
 
 ### IM 平台接入
 
-| 平台 | 接入方式 | 私聊 | 群聊 | 消息编辑 | 提问按钮 | 文件 |
-|------|----------|------|------|----------|----------|------|
-| **飞书** | WebSocket 长连接 / Webhook | ✓ | ✓ | ✓ 流式更新 | ✓ | ✓ (仅私聊) |
-| **Slack** | Socket Mode | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ | ✓ (需 `files:read`) |
-| **Discord** | Gateway WebSocket | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ | ✓ (按文件名/类型预筛) |
-| **微信** | HTTP 长轮询 (iLink Bot) | ✓ | — | — | — | — |
+| 平台 | 接入方式 | 私聊 | 群聊 | 消息编辑 | 提问按钮 | 图片 | 文件 |
+|------|----------|------|------|----------|----------|------|------|
+| **飞书** | WebSocket 长连接 / Webhook | ✓ | ✓ | ✓ 流式更新 | ✓ | ✓ (仅私聊) | ✓ (仅私聊) |
+| **Slack** | Socket Mode | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ | ✓ (需 `files:read`) | ✓ (需 `files:read`) |
+| **Discord** | Gateway WebSocket | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ | ✓ | ✓ (按文件名/类型预筛) |
+| **微信** | HTTP 长轮询 (iLink Bot) | ✓ | — | — | — | — | — |
 
 「提问按钮」指 Claude 调用 AskUserQuestion 时把选项渲染成可点击的按钮；没有按钮的平台收到纯文本选项列表，直接回复文字作答。
+
+「图片」指用户发来的图片（单张上限 10 MiB），作为图片内容直接交给 Claude，不经过工作目录。微信 iLink 只转发文字，图片、语音等非文字消息会被忽略。
 
 「文件」指用户发来的 PDF 和 UTF-8 文本文件（`.txt` `.md` `.csv` `.json` `.log` `.yaml` `.yml`）。发送时文件写入会话工作目录的 `.naozhi/attachments/<日期>/`，Claude 用 Read 工具读取，与 Dashboard 上传的 PDF 是同一条路径。
 - 上限：单个文件 32 MiB；每条消息最多 5 个、合计 32 MiB，Slack 和 Discord 消息里的图片也计入（图片本身仍是 10 MiB）
 - docx / xlsx / zip 等其他类型、超限和下载失败的文件，bot 会回一条「以下文件未处理：」列出文件名和原因，消息里的文字和其余文件照常发送
-- Discord 在下载前先按文件名和类型筛选：PDF 需要 `.pdf` 文件名或 `application/pdf` 类型，文本文件需要上面列出的扩展名
-- 群聊里文件要和 @bot 在同一条消息里，否则与普通消息一样被忽略。飞书的文件消息没法 @bot，所以群里发的文件不处理，请私聊发送
+- Discord、Slack 和飞书在下载前先按文件名和类型筛选：PDF 需要 `.pdf` 文件名或 `application/pdf` 类型（飞书的文件消息不带类型，只看文件名），文本文件需要上面列出的扩展名
+- 一条消息里所有附件的下载共用 3 分钟预算，超时未下完的文件按下载失败告知
+- 群聊里图片和文件要和 @bot 在同一条消息里，否则与普通消息一样被忽略。飞书的图片和文件消息没法 @bot，所以群里发的图片和文件不处理，请私聊发送
 - 这些文件和 Dashboard 上传一样只按上传时间回收（`attachment-gc`，默认关闭），不开启就一直留在工作目录里
 
 所有平台开箱即用，**无需公网 IP**。
@@ -321,7 +324,7 @@ naozhi --config ~/.naozhi/config.yaml
 ### 飞书
 
 1. 飞书开放平台 → 创建企业自建应用 → 开启"机器人"能力
-2. 权限: `im:message`, `im:message:send_as_bot`, `im:message:patch`
+2. 权限: `im:message`, `im:message:send_as_bot`, `im:message:patch`。下载用户发来的图片、语音和文件（[获取消息中的资源文件](https://open.feishu.cn/document/server-docs/im-v1/message/get-2)）只要 `im:message` 就够，不需要另加权限；外部群（错误码 234009）和开启了保密模式的消息（234038）飞书不允许下载：文件会被告知下载失败，图片只在日志里记一条 `feishu download image failed`
 3. 事件订阅: 选择 "使用长连接接收事件"，订阅 `im.message.receive_v1`
 4. 发布应用版本
 5. 配置凭据并启动:
