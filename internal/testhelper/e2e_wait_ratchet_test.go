@@ -177,7 +177,7 @@ func e2eGateProblems(g e2eWaitGate, c e2eWaitCount) []string {
 	}
 	switch {
 	case c.exempt > g.exempt:
-		out = append(out, fmt.Sprintf("wait-ok exemptions on %s grew: %d > baseline %d; raising it needs an approved ledger entry (scripts/ratchet-raises.jsonl)", g.what, c.exempt, g.exempt))
+		out = append(out, fmt.Sprintf("wait-ok exemptions on %s grew: %d > baseline %d; raise the baseline by hand only for a deliberate addition", g.what, c.exempt, g.exempt))
 	case c.exempt < g.exempt:
 		out = append(out, fmt.Sprintf("wait-ok exemptions on %s dropped to %d (baseline %d): lower %s to %d", g.what, c.exempt, g.exempt, g.exemptName, c.exempt))
 	}

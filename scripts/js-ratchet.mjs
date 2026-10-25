@@ -49,14 +49,7 @@
 // below it (the improving PR must ship the tightened baseline — run --write),
 // and on an injection receiver outside the closed set (receiverProblems).
 // --write refuses to raise a value: deliberate growth requires hand-editing
-// scripts/js-ratchet.baseline.json and an approved scripts/ratchet-raises.jsonl
-// entry (tools/ratchet-raises). That tool also holds the sums across files
-// (lines, fnOver100, configureDeps, deadInjections, innerHTMLAssign,
-// htmlInsert, lateBindings), the maxima of maxFnLines and maxIifeLines and
-// every _global metric, so a new file cannot absorb growth; lines and the
-// injection / HTML / late-binding counts are judged only as sums there, since
-// moving code between files is a refactor, not a raise (js-ratchet --check
-// still holds every file's own values).
+// scripts/js-ratchet.baseline.json.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -280,22 +273,20 @@ function fnName(fn, parent, key) {
   return null;
 }
 
-// The analysis reads three lists from caps.json, where tools/ratchet-raises
-// sees them (as constants here, each could zero a count without a raise):
+// The analysis reads three lists from caps.json:
 //   lateBindingTables  the late-bound function tables, by the module that
 //                      exports each (nz_util.js nzViews; state.js hooks,
 //                      which must stay absent: the entry counts any revived
-//                      export); a dropped table is a raise there
+//                      export)
 //   injectionAllow     "file:fn" receivers that copy a parameter's fields
 //                      into module scope on purpose and are not dependency
 //                      injection (registerActions: the data-action registry).
 //                      Each must still match a receiver: a stale one fails
-//                      the check. A new entry is a raise there
-//   shellRoots         the modules allowed to registerShell (a new one is a
-//                      raise there)
+//                      the check
+//   shellRoots         the modules allowed to registerShell
 //   injectionLegacy    "file:fn" receivers of injected dependencies left over
-//                      from before shell.js, shrink-only (a new entry is a
-//                      raise there; a stale one fails the check). Any other
+//                      from before shell.js, shrink-only (a stale one
+//                      fails the check). Any other
 //                      receiver fails the check, whatever its count
 // NO_CAPS is the empty set of each, for analysing a fixture.
 export const NO_CAPS = Object.freeze({ lateBindingTables: {}, injectionAllow: [], injectionLegacy: [], shellRoots: [], leaves: [] });
@@ -1125,8 +1116,7 @@ export function loadCaps(capsPath = CAPS_PATH) {
   if (typeof raw.maxFnLines !== 'object' || raw.maxFnLines === null || Array.isArray(raw.maxFnLines)) {
     errors.push('caps.maxFnLines must be an object');
   } else {
-    // A safe integer, like the int64 tools/ratchet-raises decodes it into:
-    // 1e19 or 120.5 would otherwise pass here and read as anything there.
+    // A safe integer: 1e19 or 120.5 would otherwise pass here.
     if (!Number.isSafeInteger(raw.maxFnLines.default) || raw.maxFnLines.default < 1) {
       errors.push('caps.maxFnLines.default must be a positive safe integer');
     }
@@ -1150,8 +1140,7 @@ export function loadCaps(capsPath = CAPS_PATH) {
   if (!receiverList(raw.injectionAllow)) {
     errors.push('caps.injectionAllow must be an array of "file.js:function"');
   }
-  // Required even once drained ([]): a dropped section would come back as a
-  // new one, which tools/ratchet-raises records without a raise.
+  // Required even once drained ([]).
   if (!receiverList(raw.injectionLegacy)) {
     errors.push('caps.injectionLegacy must be an array of "file.js:function"');
   }
@@ -1308,7 +1297,7 @@ function write({ current, graph, problems: snapProblems }, caps, errors) {
     const raised = raisedMetrics(current, JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8')));
     if (raised.length) {
       for (const r of raised) {
-        console.error(`refusing to raise ${r}; growth requires hand-editing ${path.relative(ROOT, BASELINE_PATH)} and an approved scripts/ratchet-raises.jsonl entry`);
+        console.error(`refusing to raise ${r}; growth requires hand-editing ${path.relative(ROOT, BASELINE_PATH)}`);
       }
       return 1;
     }

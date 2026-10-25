@@ -195,7 +195,7 @@ func e2eShimSurfaceProblems(n int) []string {
 	case n > e2eShimSurfaceBaseline:
 		return []string{fmt.Sprintf("the e2e-shim surface grew: %d > baseline %d.\n"+
 			"Assert through the DOM, the mock server or a first-class hook instead of exposing another internal;\n"+
-			"raising the baseline needs an approved ledger entry (scripts/ratchet-raises.jsonl)", n, e2eShimSurfaceBaseline)}
+			"raise the baseline by hand only for a deliberate addition", n, e2eShimSurfaceBaseline)}
 	case n < e2eShimSurfaceBaseline:
 		return []string{fmt.Sprintf("the e2e-shim surface dropped to %d (baseline %d): lower e2eShimSurfaceBaseline to %d", n, e2eShimSurfaceBaseline, n)}
 	}

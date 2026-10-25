@@ -156,8 +156,7 @@ test('loadCaps fails closed when default is not a number', () => {
 });
 
 test('loadCaps fails closed on a default or a line cap that is not a safe integer', () => {
-  // 1e19 is a JSON number, but no int64 holds it: tools/ratchet-raises must
-  // not be the only side that notices (#3057 review).
+  // 1e19 is a JSON number, but no int64 holds it.
   for (const d of [1e19, 120.5, 0, -1]) {
     withCapsFile(
       JSON.stringify({ maxFnLines: { default: d, exempt: [] }, lines: {}, sideEffectLegacy: [], cycleLegacy: [], leaves: [], ...ANALYSIS_KEYS }),
@@ -476,8 +475,8 @@ test('lateBindings counts hooks.X / nzViews.X writes, an object literal by its k
   assert.equal(measureSource(src, undefined, '', REAL_CAPS).lateBindings, 11);
   // Not imported from state.js / nz_util.js: some other object called hooks.
   assert.equal(measureSource(js('const hooks = {};', 'hooks.x = 1;'), undefined, '', REAL_CAPS).lateBindings, 0);
-  // The tables come from caps.lateBindingTables, where ratchet-raises sees a
-  // dropped one: without them nothing is a late binding.
+  // The tables come from caps.lateBindingTables: without them nothing is a
+  // late binding.
   assert.equal(measureSource(src).lateBindings, 0);
   assert.deepEqual(REAL_CAPS.lateBindingTables, { hooks: 'state.js', nzViews: 'nz_util.js' });
 });
