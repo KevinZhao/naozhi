@@ -131,7 +131,7 @@ func (s *Slack) Start(handler platform.MessageHandler) error {
 
 	authResp, err := s.api.AuthTest()
 	if err != nil {
-		slog.Warn("slack auth test failed — all channel messages will be processed (no mention filtering)", "err", err)
+		slog.Warn("slack auth test failed — all channel messages will be processed (no mention filtering) and file uploads dropped until it recovers", "err", err)
 	} else {
 		s.botIDMu.Lock()
 		s.botID = authResp.UserID
@@ -462,6 +462,15 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 	// only user = the bot's user ID.
 	botID := s.botIDOrEmpty()
 	if botID != "" && ev.User == botID {
+		return
+	}
+	// With botID unknown that check cannot match, so an upload of ours would
+	// come back as a turn (and may attach a file again). Drop file_share
+	// until the self-heal learns the ID; plain text still fails open (#3653).
+	if botID == "" && ev.SubType == subtypeFileShare {
+		slog.Warn("slack file_share dropped: bot identity unknown, cannot tell own uploads apart",
+			"channel", ev.Channel)
+		s.maybeHealBotID()
 		return
 	}
 	var files []slack.File

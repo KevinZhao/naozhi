@@ -336,8 +336,8 @@ naozhi --config ~/.naozhi/config.yaml
 
 1. [api.slack.com/apps](https://api.slack.com/apps) → Create New App
 2. 开启 Socket Mode，获取 App-Level Token (`xapp-...`)
-3. Bot Token Scopes: `chat:write`, `app_mentions:read`, `files:read`（接收用户发来的图片和文件；缺少时文件会被告知下载失败）
-4. Event Subscriptions: `message.im`, `app_mention`
+3. Bot Token Scopes: `chat:write`, `im:history`, `channels:history`, `groups:history`, `mpim:history`, `files:read`（接收用户发来的图片和文件；缺少时文件会被告知下载失败）, `files:write`（回复里发图片）, `reactions:write`（消息上的处理状态表情）
+4. Event Subscriptions（Subscribe to bot events）: `message.im`, `message.channels`, `message.groups`（私有频道）, `message.mpim`（多人私聊）。频道里的 @bot 也经 `message.channels` / `message.groups` 送达，再按是否 @ 了 bot 过滤；不需要订阅 `app_mention`
 5. Interactivity & Shortcuts → 开启（Socket Mode 下不需要填 Request URL）。不开启时 AskUserQuestion 的按钮点了没反应，但仍可直接回复文字作答
 
 ### Discord
