@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -475,13 +474,8 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		case "post":
 			text, imageKeys, err := parsePostContent(event.Message.Content)
 			if err != nil {
-				if errors.Is(err, errPostTooLong) {
-					slog.Warn("feishu webhook: post exceeds limit, dropping",
-						"msg_id", osutil.SanitizeForLog(event.Message.MessageID, 64), "len", len(event.Message.Content))
-				} else {
-					slog.Debug("feishu webhook: post content unmarshal failed",
-						"err", err, "msg_id", osutil.SanitizeForLog(event.Message.MessageID, 64))
-				}
+				slog.Debug("feishu webhook: post dropped",
+					"err", err, "msg_id", osutil.SanitizeForLog(event.Message.MessageID, 64))
 				return
 			}
 			if text == "" && len(imageKeys) == 0 {

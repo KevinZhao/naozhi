@@ -428,13 +428,8 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 	case "post":
 		text, imageKeys, err := parsePostContent(*msg.Content)
 		if err != nil {
-			// Same log levels as the text branch: oversize warns, drift is debug.
-			if errors.Is(err, errPostTooLong) {
-				slog.Warn("feishu ws: post exceeds limit, dropping", "size", len(*msg.Content))
-			} else {
-				slog.Debug("feishu ws: post content unmarshal failed",
-					"err", err, "msg_id", osutil.SanitizeForLog(messageID, 64))
-			}
+			slog.Debug("feishu ws: post dropped",
+				"err", err, "msg_id", osutil.SanitizeForLog(messageID, 64))
 			return parsedEvent{}, false
 		}
 		if text == "" && len(imageKeys) == 0 {
