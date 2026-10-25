@@ -11,12 +11,12 @@ import (
 // chats carry these keys, so a renamed tag would make their clicks undecodable.
 func TestAskAnswerPayload_WireTags(t *testing.T) {
 	t.Parallel()
-	full := AskAnswerPayload{AgentID: "a", ChatType: "group", Header: "h", Kind: AskAnswerKind, Label: "l", ThreadID: "om_1", ToolUseID: "t"}
+	full := AskAnswerPayload{AgentID: "a", AskerID: "u", ChatType: "group", Header: "h", Kind: AskAnswerKind, Label: "l", ThreadID: "om_1", ToolUseID: "t"}
 	data, err := json.Marshal(full)
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = `{"agent_id":"a","chat_type":"group","header":"h","kind":"ask_answer","label":"l","thread_id":"om_1","tool_use_id":"t"}`
+	const want = `{"agent_id":"a","asker_id":"u","chat_type":"group","header":"h","kind":"ask_answer","label":"l","thread_id":"om_1","tool_use_id":"t"}`
 	if string(data) != want {
 		t.Errorf("Marshal = %s\nwant      %s", data, want)
 	}
@@ -29,8 +29,8 @@ func TestAskAnswerPayload_WireTags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s := string(data); strings.Contains(s, "agent_id") || strings.Contains(s, "chat_type") || strings.Contains(s, "thread_id") {
-		t.Errorf("empty agent_id/chat_type/thread_id must be omitted: %s", s)
+	if s := string(data); strings.Contains(s, "agent_id") || strings.Contains(s, "asker_id") || strings.Contains(s, "chat_type") || strings.Contains(s, "thread_id") {
+		t.Errorf("empty agent_id/asker_id/chat_type/thread_id must be omitted: %s", s)
 	}
 }
 
@@ -82,6 +82,20 @@ func TestNewAskAnswerPayload_ThreadID(t *testing.T) {
 	card.ThreadID = "om_" + strings.Repeat("x", AskIDMaxRunes)
 	if got := NewAskAnswerPayload(card, QuestionItem{}, QuestionOption{Label: "l"}).ThreadID; got != "" {
 		t.Errorf("over-long ThreadID = %q, want dropped", got)
+	}
+}
+
+// TestNewAskAnswerPayload_AskerID: the asker round-trips exactly; one too
+// long for the value is dropped, never clipped into another user's id.
+func TestNewAskAnswerPayload_AskerID(t *testing.T) {
+	t.Parallel()
+	card := QuestionCard{AskerID: "ou_asker"}
+	if got := NewAskAnswerPayload(card, QuestionItem{}, QuestionOption{Label: "l"}).AskerID; got != "ou_asker" {
+		t.Errorf("AskerID = %q, want ou_asker", got)
+	}
+	card.AskerID = strings.Repeat("u", AskIDMaxRunes+1)
+	if got := NewAskAnswerPayload(card, QuestionItem{}, QuestionOption{Label: "l"}).AskerID; got != "" {
+		t.Errorf("over-long AskerID = %q, want dropped", got)
 	}
 }
 
