@@ -994,6 +994,12 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 			return nil, spawnStart, true
 		}
 		state, errClass := classifyExecError(err, ErrClassSessionError)
+		if errClass == ErrClassTurnFailed {
+			// A CLI that exited at startup with a named cause (the adapter's
+			// TurnFailedError): no turn ran, so the run stays a session_error
+			// and only the notice names the cause.
+			errClass = ErrClassSessionError
+		}
 		if errors.Is(err, ErrSessionCapacity) {
 			// Contention, not a job fault: skipped keeps it out of the failure
 			// counters, and the notice can say what to change.

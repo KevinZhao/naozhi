@@ -96,8 +96,9 @@ type runOutcome struct {
 	// rune cap + truncation suffix + control-character filter) where the path
 	// produces one.
 	result string
-	// turnCause is why a turn_failed run's turn failed: it names the notice
-	// cause and decides whether the failure counts toward the streak.
+	// turnCause is why a turn_failed run's turn failed, or a session_error
+	// run's CLI exited at startup: it names the notice cause and, for a
+	// turn_failed run, decides whether the failure counts toward the streak.
 	turnCause TurnCause
 	// restartOrphan is set only by finishOrphanRun: the run ended because
 	// naozhi restarted under it, not because of the job, so it leaves the
