@@ -26,7 +26,7 @@ function sendEntries(res, page, headers = { 'Content-Type': 'application/json' }
 // A Go drift test (TestDashboardCSP_MockServerHeaderInSync) compares this
 // literal against the runtime header, so edit both together.
 const MOCK_DASHBOARD_CSP =
-  "default-src 'self'; script-src 'self' 'sha256-Dc5Mfm9TcKn7OwTLyG3/T2KjnRh7zV1Xc4ct4adm4/g='; connect-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font";
+  "default-src 'self'; script-src 'self' 'sha256-Dc5Mfm9TcKn7OwTLyG3/T2KjnRh7zV1Xc4ct4adm4/g='; connect-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
 /**
  * workflowReply answers GET /api/sessions/workflow for the fixture of one

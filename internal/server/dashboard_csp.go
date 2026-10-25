@@ -71,9 +71,9 @@ func buildDashboardCSP(page []byte) string {
 		"default-src 'self'",
 		"script-src 'self' " + hashes,
 		"connect-src 'self'",
-		// #2559 D6-3 dropped the last generated style="" attribute, so inline
-		// styles are no longer needed.
-		"style-src 'self'",
+		// KaTeX's renderToString and mermaid's SVG carry their layout and
+		// theme in style attributes and <style> elements.
+		"style-src 'self' 'unsafe-inline'",
 		"font-src 'self'",
 		"img-src 'self' data: blob:",
 		"frame-src 'self' blob:",
@@ -81,6 +81,5 @@ func buildDashboardCSP(page []byte) string {
 		"base-uri 'none'",
 		"form-action 'self'",
 		"frame-ancestors 'none'",
-		"require-sri-for script style font",
 	}, "; ")
 }
