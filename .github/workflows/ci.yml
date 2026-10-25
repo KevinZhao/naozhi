@@ -168,11 +168,11 @@ jobs:
             ./internal/eventlog/persist/... \
             ./internal/selfupdate/...
 
-  # Playwright mock-server suite (test/e2e). Offline and deterministic: the
-  # mock server stubs every API endpoint, and the live multibackend.* specs
-  # self-skip without NAOZHI_LIVE_E2E=1. This is the layer that catches real
-  # dashboard behaviour regressions in a browser. Phone-viewport specs build
-  # their own iPhone contexts and run here under chromium.
+  # Playwright smoke suite (test/e2e). Offline and deterministic: the mock
+  # server stubs every API endpoint the dashboard calls. A dozen specs cover
+  # the core views (sessions, transcript, sending, images, cron, workflows,
+  # projects, voice, nodes); release.yml's e2e-gate drives the real binary.
+  # Phone-viewport specs build their own iPhone contexts under chromium.
   # No workflow-level paths filter: a required check must report a status on
   # every PR, and a paths-filtered job stays "expected" forever on PRs that
   # don't touch the dashboard, blocking the merge.

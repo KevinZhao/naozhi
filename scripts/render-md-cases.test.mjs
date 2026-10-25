@@ -3,8 +3,7 @@
 // fences, table fallback, emphasis and the file-ref <code> rescue. Each one
 // renders a source and reads the HTML, so plain node runs them on the same
 // regex engine the browser would. Cases that need a real DOM, CSS, KaTeX,
-// mermaid or the CSP stay in test/e2e (markdown_lists, markdown_math_code,
-// markdown_csp_render). The stubs are render-md.test.mjs's.
+// mermaid or the CSP are out of reach here. The stubs are render-md.test.mjs's.
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 

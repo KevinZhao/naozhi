@@ -108,7 +108,7 @@ type Event struct {
 	// AskQuestion is populated for synthetic Type:"ask_question" events derived
 	// from an AskUserQuestion tool_use. Headless -p auto-rejects the tool, so
 	// this is observational: dispatch renders an interactive card and the
-	// answer returns as a normal user message. See docs/rfc/askuser-question.md.
+	// answer returns as a normal user message.
 	AskQuestion *AskQuestion `json:"ask_question,omitempty"`
 
 	// CodeChange is populated for a valid system/code_change_published frame

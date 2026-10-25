@@ -195,7 +195,7 @@ export async function fetchCronJobs() {
     }
     const freshJobs = keepRefetchedPrompts(cronStore.jobs, data.jobs || []);
     // Stale-clobber 保护：这个响应可能生成于一个 WS run_started / run_ended
-    // 帧之前、却落地于其后（e2e 用 compactCronListDelayMs 稳定复现）。整体替换
+    // 帧之前、却落地于其后。整体替换
     // 会让它冲掉更新的乐观补丁，逐行按 run 身份合并，见 reconcileCurrentRun。
     for (const nj of freshJobs) {
       const prev = nj && nj.id && (Array.isArray(cronStore.jobs) ? cronStore.jobs : []).find(o => o && o.id === nj.id);
@@ -241,8 +241,7 @@ export async function cronRefetchFullJob(id) {
   // by an earlier refetch. A spliced row carries a full body but says nothing
   // about whether the prompt has changed since, so trusting it let the editor
   // open — and Save — a stale prompt: open a drawer, have the prompt rewritten
-  // elsewhere, open the editor, and the old body goes back to disk. Measured in
-  // test/e2e/cron_compact_prompt.test.js before this guard existed.
+  // elsewhere, open the editor, and the old body goes back to disk.
   if (!cached.prompt_truncated && !cached.prompt_refetched) return { ok: true, job: cached };
   try {
     const headers = authHeaders();
