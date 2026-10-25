@@ -2022,14 +2022,5 @@ Planner 在 shutdown 时与普通 session 一致：等待 running 完成 → 保
 | 多节点聚合 (Direct + Reverse) | [multi-node-design.md](multi-node-design.md) | 已实现 |
 | Reverse 协议 (wire format) | [../rfc/reverse-protocol.md](../rfc/reverse-protocol.md) | 已实现 |
 | Shim 进程 (零中断热重启) | [shim-design.md](shim-design.md) | 已实现 |
-| server 包拆分 | [server-split-design.md](server-split-design.md) | Phase 1-2 已完成 |
 | 语音消息转写 | [voice-transcription.md](voice-transcription.md) | 已实现 |
 | 部署策略 | [../ops/deployment-strategy.md](../ops/deployment-strategy.md) | 部分实现 |
-
-未实现的设计提案：
-
-| 功能 | 设计文档 | 状态 |
-|------|---------|------|
-| 消息队列策略 | [rfc/message-queue.md](rfc/message-queue.md) | RFC，待实现 |
-| 自学习系统 | [rfc/learning-system.md](rfc/learning-system.md) | RFC，待实现 |
-| 7.7 | `/project` 解绑后 `/cd` 恢复 | 先 `/project off` 再 `/cd /tmp`：正常工作，无报错 |
