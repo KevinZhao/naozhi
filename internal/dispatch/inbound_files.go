@@ -16,12 +16,16 @@ const (
 	fileReasonUnsupported = "暂不支持该类型（支持 PDF 和 UTF-8 文本：txt/md/csv/json/log/yaml）"
 	fileReasonEmpty       = "文件为空"
 	fileReasonDownload    = "下载失败，请重新发送"
+
+	imageReasonUnsupported = "暂不支持该图片格式（支持 png/jpeg/gif/webp）"
 )
 
 var (
 	fileReasonTooMany  = "超过单条消息 " + strconv.Itoa(limits.MaxFileAttachmentsPerMessage) + " 个文件的上限"
 	fileReasonTooLarge = "文件过大（上限 " + strconv.Itoa(limits.MaxFileAttachmentBytes>>20) + " MB）"
 	fileReasonTotal    = "单条消息的文件合计超过 " + strconv.Itoa(limits.MaxFileAttachmentBytes>>20) + " MB"
+
+	imageReasonTooLarge = "图片过大（上限 " + strconv.Itoa(platform.MaxImageBytes>>20) + " MB）"
 )
 
 // fileAttachments turns msg.Files into file_ref attachments whose bytes
@@ -92,6 +96,10 @@ func adapterRejectReason(r platform.FileReject) string {
 		return fileReasonTooMany
 	case platform.FileRejectTotalTooLarge:
 		return fileReasonTotal
+	case platform.FileRejectImageTooLarge:
+		return imageReasonTooLarge
+	case platform.FileRejectImageUnsupported:
+		return imageReasonUnsupported
 	default:
 		return fileReasonUnsupported
 	}

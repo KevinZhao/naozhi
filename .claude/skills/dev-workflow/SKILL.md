@@ -222,7 +222,7 @@ Rules:
 
 - Never deploy by copying a locally built `naozhi` binary to a host (no `scp`, no `git pull && go build` on a target host). The only sanctioned path is `naozhi upgrade` pulling from a tagged release.
 - Tag versions follow semver: bug fixes bump patch, backwards-compatible features bump minor, breaking changes bump major.
-- For UI-touching changes, run `make release-gate` locally before tagging to catch a dashboard break pre-tag (the same gate CI enforces). `make release-gate-live` gates the running systemd instance after `make deploy`. See `docs/ops/release-gate.md`.
+- For UI-touching changes, run `make release-gate` locally before tagging to catch a dashboard break pre-tag (the same gate CI enforces). See `docs/ops/release-gate.md`.
 - If the release pipeline fails, fix the pipeline — do not work around it with a manual binary copy.
 - A PR that requires deployment to verify must call out the version it targets (`vX.Y.Z`) in the PR description so the tag step is not forgotten.
 

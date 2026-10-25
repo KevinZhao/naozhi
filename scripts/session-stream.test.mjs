@@ -1,5 +1,5 @@
 // node --test scripts/session-stream.test.mjs
-// session_stream.js is a leaf (check-ws-receivers R7): it and the modules it
+// session_stream.js is a leaf: it and the modules it
 // imports (contract, state, ws_manager) load in node with only WebSocket and
 // location stubbed, before the import. The frames it sends are read off a
 // fake open socket on wsm.

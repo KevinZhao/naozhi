@@ -1,7 +1,7 @@
 // platform.js — the browser services any dashboard module may need: the auth
 // token and its fetch headers, and the nz:-prefixed localStorage helpers. A
 // leaf with no imports and no load-time DOM access, so ws_manager.js and node
-// tests can import it (scripts/check-ws-receivers.mjs R7).
+// tests can import it.
 
 // RNEW-UX-004: unified localStorage helper. Use these for NEW keys only —
 // legacy 'nz_' / 'naozhi_' call sites are intentionally left alone to

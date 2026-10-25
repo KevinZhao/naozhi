@@ -9,22 +9,40 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 const maxImageFileSize = 10 * 1024 * 1024 // 10MB
 
 // safeImageDirs are the only directory prefixes from which image files may be read.
 // This prevents prompt-injection attacks that trick the CLI into emitting arbitrary paths.
-var safeImageDirs = []string{"/tmp/"}
+// /tmp also appears symlink-resolved, since candidates are compared after
+// EvalSymlinks: on macOS /tmp is a link to /private/tmp.
+var safeImageDirs = sync.OnceValue(func() []string {
+	dirs := []string{"/tmp/"}
+	if resolved, err := filepath.EvalSymlinks("/tmp"); err == nil && resolved != "/tmp" {
+		dirs = append(dirs, resolved+"/")
+	}
+	return dirs
+})
 
 // imagePathRe matches absolute file paths ending in common image extensions.
 var imagePathRe = regexp.MustCompile(`(/\S+\.(?:png|jpg|jpeg|gif|webp|bmp))`)
 
+// ImagePath is an image path found in text by ExtractImagePaths.
+type ImagePath struct {
+	// Text is the path as written in the text, for rewriting it there.
+	Text string
+	// Path is Text with symlinks resolved, the file that passed the safe-dir
+	// check; read this one, not Text.
+	Path string
+}
+
 // ExtractImagePaths finds local image file paths in text that actually exist on disk.
 // Only paths under safe directories (e.g., /tmp) are returned.
-func ExtractImagePaths(text string) []string {
+func ExtractImagePaths(text string) []ImagePath {
 	matches := imagePathRe.FindAllString(text, 10) // cap at 10 images
-	var valid []string
+	var valid []ImagePath
 	seen := make(map[string]bool)
 	for _, path := range matches {
 		// Clean trailing punctuation that regex may capture
@@ -47,14 +65,14 @@ func ExtractImagePaths(text string) []string {
 		if info.Size() > maxImageFileSize {
 			continue
 		}
-		valid = append(valid, cleaned)
+		valid = append(valid, ImagePath{Text: path, Path: cleaned})
 		seen[cleaned] = true
 	}
 	return valid
 }
 
 func isUnderSafeDir(path string) bool {
-	for _, dir := range safeImageDirs {
+	for _, dir := range safeImageDirs() {
 		if strings.HasPrefix(path, dir) {
 			return true
 		}

@@ -1,7 +1,7 @@
 // @ts-check
 // workflow_state.js — the dashboard's store of Workflow tool runs and the
 // client half of their wire protocol (docs/rfc/workflow-dashboard.md §6.1,
-// §7.1), a leaf (caps.leaves): it imports only session_ident.js. Every
+// §7.1), a leaf: it imports only session_ident.js. Every
 // function is pure over the store the caller hands in; none fetches. A
 // function that finds a fetch is due records it on the entry (want), and
 // needsFetch / startFetch turn that into one request at a time per task.
@@ -13,7 +13,7 @@
 import { sid as sidOf } from './session_ident.js';
 
 // The display of each wire status. Keys are exactly NZ_CONTRACT.ENUMS
-// WORKFLOW_STATUS / WORKFLOW_AGENT_STATE (scripts/check-enum-literals.mjs);
+// WORKFLOW_STATUS / WORKFLOW_AGENT_STATE;
 // code reads them here rather than spelling the values.
 export const WORKFLOW_STATUS_DISPLAY = {
   running: { glyph: '●', text: '运行中', tone: 'run', settled: false },

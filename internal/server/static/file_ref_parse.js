@@ -1,7 +1,7 @@
 // file_ref_parse.js — the path-shape tests shared by the file-ref scanner
 // (file_refs.js) and the markdown renderer (render_md.js): the candidate
 // regexes, path / line / note splitting, the fenced path-list classifier and
-// the <code> wrapper both emit. A leaf (caps.leaves) with no imports: it sits
+// the <code> wrapper both emit. A leaf with no imports: it sits
 // below both, so render_md need not import file_refs, which imports render_md.
 
 // Path candidate regex: accepts two shapes —

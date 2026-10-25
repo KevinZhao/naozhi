@@ -1,5 +1,5 @@
 // icons.js — the dashboard's glyph set: ICONS and the Clawd mascot SVG. A
-// leaf (caps.leaves) with no imports.
+// leaf with no imports.
 
 // "Clawd" pixel mascot for claude-backend assistant turns. Sourced from
 // the Custom Brand Icons set, icon `cbi:claude-clawd`
