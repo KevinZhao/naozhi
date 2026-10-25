@@ -142,3 +142,26 @@ func TestWriteTarget_BacksUpAndKeepsMode(t *testing.T) {
 		t.Errorf("written file still differs from the plan: %+v", diff)
 	}
 }
+
+// TestCCProbePath_MatchesSpawnResolution (#3632): a claude backend entry with
+// no path is auto-detected at spawn, so the probe must detect too rather than
+// borrow cli.path, which may point at another backend's binary.
+func TestCCProbePath_MatchesSpawnResolution(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+	detected := filepath.Join(home, ".local", "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(detected), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(detected, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Config{CLI: config.CLIConfig{Path: "/opt/kiro-cli", Backends: []config.CLIBackendConfig{
+		{ID: "claude"}, {ID: "kiro", Path: "/opt/kiro-cli"},
+	}}}
+	if got := ccProbePath(&cfg); got != detected {
+		t.Errorf("ccProbePath = %q, want %q", got, detected)
+	}
+}
