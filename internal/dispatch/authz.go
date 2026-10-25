@@ -46,9 +46,9 @@ func classifyCommand(trimmed string) imauth.Class {
 
 // authorize applies the access policy before any command or turn runs and
 // reports whether msg may proceed. A refusal is logged at Info (the line an
-// operator copies the sender ID from), counted, and answered only where that
-// cannot be farmed: an allowed user's admin attempt, or a direct chat at most
-// once per denyReplyWindow.
+// operator copies the sender ID from), counted, and answered at most once
+// per denyReplyWindow per sender, where that cannot be farmed: an allowed
+// user's admin attempt, or a direct chat.
 func (d *Dispatcher) authorize(ctx context.Context, msg platform.IncomingMessage, trimmed string, lg *slog.Logger) bool {
 	p := d.access.Load()
 	if p == nil {
@@ -61,28 +61,36 @@ func (d *Dispatcher) authorize(ctx context.Context, msg platform.IncomingMessage
 	}
 	lg.InfoContext(ctx, "im access denied", "reason", reason, "class", class.String())
 	dispatchDeniedTotal.Add(osutil.SanitizeForLog(msg.Platform, 32)+":"+reason, 1)
+	sender := msg.Platform + "\x00" + osutil.SanitizeForLog(msg.UserID, 256)
 	switch {
 	case reason == imauth.ReasonNotAdmin:
-		d.replyText(ctx, msg, notAdminReply, lg)
+		// An allowed sender spends no rate token here, so the throttle is
+		// all that bounds these replies.
+		if d.denyReplies.allow("admin\x00"+sender, time.Now()) {
+			d.replyText(ctx, msg, notAdminReply, lg)
+		}
 	case reason == imauth.ReasonEmptyUser || msg.ChatType != "direct":
 		// Nothing to onboard, or a group where replies would be spam.
-	case d.denyReplies.allow(msg.Platform+"\x00"+osutil.SanitizeForLog(msg.UserID, 256), time.Now()):
+	case d.denyReplies.allow(sender, time.Now()):
 		d.replyText(ctx, msg, denyReplyText(p, msg.UserID), lg)
 	}
 	return false
 }
 
 // Admit is the platform.AdmitFunc an adapter asks before downloading or
-// transcribing msg's media. It applies prepareInbound's group-mention gate
-// and the Chat-class policy decision, with authorize's log, metric and
-// throttled reply on a refusal. Admin is narrower than Chat, so a refusal
-// here refuses every class; an admitted message is judged again, with its
-// final text, by the handler. Dedup is neither consulted nor consumed.
+// transcribing msg's media. It applies prepareInbound's group-mention gate,
+// the Chat-class policy decision, the sender's rate limit and today's
+// budget, each with its log, metric and throttled reply on a refusal. Admin
+// is narrower than Chat, so a refusal here refuses every class; an admitted
+// message is judged again, with its final text, by the handler. Neither
+// dedup nor a rate token is consumed.
 func (d *Dispatcher) Admit(ctx context.Context, msg platform.IncomingMessage) bool {
 	if unmentionedInGroup(msg) {
 		return false
 	}
-	return d.authorize(ctx, msg, "", d.inboundLogger(msg))
+	lg := d.inboundLogger(msg)
+	trimmed := strings.TrimSpace(msg.Text)
+	return d.authorize(ctx, msg, "", lg) && d.admitRate(ctx, msg, trimmed, lg, false) && d.peekBudget(ctx, msg, trimmed, lg)
 }
 
 // unmentionedInGroup reports a group message that does not @mention the
