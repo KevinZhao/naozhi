@@ -75,10 +75,6 @@ func uploadOwnerOrFail(w http.ResponseWriter, r *http.Request, ah *auth.Handlers
 // POST /api/sessions/upload  (multipart/form-data, field "file")
 // Response: {"id": "<hex>", "kind": "image_inline"|"file_ref", "size": <bytes>, "name": "..."}
 func (h *SendHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
-	if h.uploadLimiter != nil && !h.uploadLimiter.AllowRequest(r) {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "upload rate limit exceeded"})
-		return
-	}
 	// PDF cap dominates the body size. MaxBytesReader gives a clean 413
 	// rather than the opaque "bad multipart form" that ParseMultipartForm
 	// returns when the body exceeds its own limit.

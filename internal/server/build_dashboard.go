@@ -7,10 +7,6 @@
 package server
 
 import (
-	"time"
-
-	"golang.org/x/time/rate"
-
 	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
 	"github.com/naozhi/naozhi/internal/turn"
@@ -29,14 +25,12 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 	s.hub = s.buildWSStack(hs.wiring)
 
 	hs.sendH = &SendHandler{
-		nodeAccess:    s.nodes,
-		engine:        hs.wiring.engine,
-		uploadStore:   s.uploadStore,
-		uploadLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, s.auth.TrustedProxy), // 10 uploads/min per IP
-		sendLimiter:   newIPLimiterWithProxy(rate.Every(2*time.Second), 30, s.auth.TrustedProxy), // 30 sends/min per IP (burst 30)
-		auth:          s.auth,
-		trustedProxy:  s.auth.TrustedProxy,
-		orient:        hs.wiring.orient,
+		nodeAccess:   s.nodes,
+		engine:       hs.wiring.engine,
+		uploadStore:  s.uploadStore,
+		auth:         s.auth,
+		trustedProxy: s.auth.TrustedProxy,
+		orient:       hs.wiring.orient,
 	}
 
 	// Scratch (ephemeral aside) API: pool built in buildServer; the sweeper
@@ -46,7 +40,6 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 			Broadcaster: hs.wiring.bcast,
 			Router:      scratchRouter{s.hub.router},
 			Pool:        s.scratchPool,
-			OpenLimit:   newIPLimiterWithProxy(rate.Every(12*time.Second), 5, s.auth.TrustedProxy),
 			Agents:      hs.wiring.agents,
 		})
 	}
@@ -58,7 +51,7 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 
 	// memory link preview (docs/rfc/memory-link-rendering.md).
 	if hs.memoryH == nil {
-		hs.memoryH = memory.New(resolveClaudeProjectsDir(), newIPLimiterWithProxy(memory.MemoryLimiterRate, memory.MemoryLimiterBurst, s.auth.TrustedProxy))
+		hs.memoryH = memory.New(resolveClaudeProjectsDir())
 	}
 
 	// Push session list changes to WS clients. The router is built in

@@ -41,8 +41,7 @@ Map 都登记过，没登记的会退回通用的 `key` 标签。空值是 `_emp
 | `naozhi_webhook_{delivered,failed,dropped}_total` | `endpoint`（配置里的下标） |
 | `naozhi_config_reload_total` | `outcome` |
 
-每个计数器的语义和告警线索见 [pprof.md](pprof.md) 的计数器表（doc-sync 测试保证
-那张表覆盖全部已注册指标）。
+每个计数器的语义和告警线索见 [pprof.md](pprof.md) 的计数器表。
 
 ## prometheus.yml 片段
 

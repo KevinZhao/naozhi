@@ -12,12 +12,6 @@ import (
 
 // HandleUpdate is the PATCH /api/cron endpoint.
 func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
-	// Per-IP rate limit: every call writes cron_jobs.json and mutates the
-	// scheduler map (loop-PATCH disk IO amplification). Nil-guarded for tests.
-	if h.deps.RateLimits.Write != nil && !h.deps.RateLimits.Write.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
-		return
-	}
 	if h.deps.Scheduler == nil {
 		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return

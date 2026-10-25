@@ -15,11 +15,6 @@ import (
 // Prompt to compactPromptPrefixBytes and stamps prompt_truncated; the default
 // keeps the full prompt for out-of-tree consumers (#494).
 func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
-	// Gate per-IP before scheduler/FS work (stolen-token enumeration).
-	if h.deps.RateLimits.List != nil && !h.deps.RateLimits.List.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron list rate limit exceeded"})
-		return
-	}
 	if h.deps.Scheduler == nil {
 		// Explicit empty slice (not nil) so json.Marshal emits `{"jobs":[]}`.
 		httputil.WriteJSON(w, cronListResp{Jobs: []cronJobView{}})
@@ -163,11 +158,6 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 // GET /api/cron/preview?schedule=...&count=N — validate schedule and return the
 // next N run times. count defaults to 1 and is clamped to [1, 10].
 func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
-	// Per-IP rate limit: parser + up to 10 next-run computations per call.
-	if h.deps.RateLimits.Write != nil && !h.deps.RateLimits.Write.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
-		return
-	}
 	schedule := r.URL.Query().Get("schedule")
 	if schedule == "" {
 		writeCronErr(w, http.StatusBadRequest, "schedule is required")

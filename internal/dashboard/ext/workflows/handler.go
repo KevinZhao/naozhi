@@ -14,17 +14,10 @@ import (
 
 // GET /api/sessions/workflow?key=&node=&task_id=[&rows=none | &since=&epoch=]
 //   → 200 WorkflowResponse | 400 bad param | 404 no such session, task or node
-//     | 429 rate limited
 //
 // 404 means only that the session, the task or the node does not exist: the
 // client drops its entry on one. A result file that cannot be read is a 200
 // with result_unavailable, never a 404.
-
-// Per-IP limiter parameters, shared with the memory preview (10 rps, burst 20).
-const (
-	LimiterRate  = 10
-	LimiterBurst = 20
-)
 
 // How the rows of the workflow are chosen (WorkflowResponse.RowsMode).
 const (
@@ -68,21 +61,16 @@ type WorkflowResult struct {
 
 // Handler serves the workflow endpoint.
 type Handler struct {
-	router  SessionLookup
-	limiter IPLimiter
+	router SessionLookup
 	// boardFor and now are test seams; production reads the session's board
 	// and the wall clock.
 	boardFor func(key string) Board
 	now      func() time.Time
 }
 
-// New constructs a Handler. The limiter is required: an endpoint reading
-// the disk must not run unlimited by omission.
+// New constructs a Handler.
 func New(d Deps) *Handler {
-	if d.Limiter == nil {
-		panic("workflows: limiter must be non-nil")
-	}
-	return &Handler{router: d.Router, limiter: d.Limiter, now: time.Now}
+	return &Handler{router: d.Router, now: time.Now}
 }
 
 // board is the board of key's session; nil when there is no session. A
@@ -141,11 +129,6 @@ func parseRows(r *http.Request) (rowQuery, bool) {
 // HandleWorkflow serves one workflow of a session: header, phases, counts
 // and the rows asked for, plus the result and logs once it has ended.
 func (h *Handler) HandleWorkflow(w http.ResponseWriter, r *http.Request) {
-	if !h.limiter.AllowRequest(r) {
-		w.Header().Set("Retry-After", "1")
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
-		return
-	}
 	q := r.URL.Query()
 	key := q.Get("key")
 	if err := session.ValidateSessionKey(key); err != nil {

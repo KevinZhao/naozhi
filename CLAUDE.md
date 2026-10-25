@@ -15,9 +15,9 @@ go test -run TestCandidatePaths ./internal/cli/...   # run a single test
 bin/naozhi --config config.yaml                      # run locally
 ```
 
-Ratchets only go down: the baselines in `*Baseline*` test constants fail CI
-when a count drops below them, so lower them in the same PR. To raise one,
-edit it in the PR that needs it.
+Ratchets only go down: the caps pinned in ratchet tests (e.g.
+`generatedOnclickCap`) fail CI when a count drops below them, so lower them in
+the same PR. To raise one, edit it in the PR that needs it.
 
 `config.yaml` is gitignored (environment-specific). Use `config.example.yaml`
 as the template: `cp config.example.yaml config.yaml` then fill in real values.
@@ -39,9 +39,7 @@ Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI, Kiro, or Codex) as
 
 ### Module Dependency
 
-`internal/` 每个顶层包一行、按层分组。本清单与磁盘目录的同步由
-`cmd/naozhi/claude_md_modules_test.go::TestClaudeMDModuleList_MatchesInternalPackages`
-把关——新增/删除顶层包必须同步更新这里，否则 CI fail。
+`internal/` 每个顶层包一行、按层分组。新增或删除顶层包时顺手更新这里。
 
 ```
 cmd/naozhi/main.go
@@ -109,7 +107,7 @@ cmd/naozhi/main.go
   -> osutil       Home/路径展开、进程 helpers、sd_notify、PID 复用防护、只收 regular file 的打开（OpenRegular：FIFO 不阻塞、不跟随 symlink；OpenRegularIn / OpenDirIn：os.Root 锚定）
   -> textutil     字符串工具：截断、脱敏、UUID 派生（依赖 osutil.IsLogInjectionRune，非零依赖叶子）
   -> netutil      Client-IP 提取（trusted-proxy 处理）
-  -> ratelimit    Per-key token-bucket 限流（login/WS/upload 等 HTTP 入口，及 dispatch 的 IM 按发送者限流 im_rate_limit）
+  -> ratelimit    Per-key token-bucket 限流（login/WS 握手/transcribe/node 等 HTTP 入口，及 dispatch 的 IM 按发送者限流 im_rate_limit）
   -> limits       跨包大小/数量上限常量
   -> sessionconst Session 调优常量
   -> sessionkey   Session key 前缀规范（router 命名空间）

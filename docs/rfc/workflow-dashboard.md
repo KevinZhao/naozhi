@@ -515,7 +515,7 @@
     之后）。新增导出 helper，用有界 `json.Decoder` 只解两个键。
 27. **HTTP 限流说法不实**（§10、§6.2）。`sendLimiter` 只挂在 send/bind/upload 上。新端点注入
     per-IP limiter（仿 `ext/memory`），终态结果文件解析一次后缓存，journal 查找建 key→offset
-    索引。
+    索引。（per-IP limiter 已随 #3722 删除：已鉴权 dashboard 接口统一不限流。）
 28. **claudeDir 只有一个来源**（§8.1、Q8）。`r.hist.claudeDir` 并非可配置，就是
     `$HOME/.claude`，Q8 不成立。所有 workflow 路径与 PR-4 的 tailer 共用 `agentevents.New`
     的那个 EvalSymlinks 后的 ProjectsRoot。
@@ -1994,7 +1994,7 @@ epoch 变化后）、`delta`（`since=rowsAt`）、`none`（`!rowsLoaded` 时的
 正确性：delta 携带 `rev > base` 的全部行（整行、最新值），header 与 phases 总是完整；**同一 epoch 内行不会被删除**
 （board 按 index 取并集，§5.8 第 4 步），所以 `base ≤ rowsAt` 时它覆盖 `rowsAt` 之后变化的所有行；HTTP 的 `since`
 响应同理（服务端只在 epoch 相同时给 delta，否则给 full）。`AgentsCapped` 只是显示提示，永不触发重拉；触发 HTTP 的只有：展开时的首拉、`rows_omitted`、
-版本缺口、`rowsAt` 落后、epoch 变化、无推送兜底与结果拉取。HTTP 走 per-IP 限流（§6.2.3），客户端对同一 task 的重拉做 1s 去抖。
+版本缺口、`rowsAt` 落后、epoch 变化、无推送兜底与结果拉取。HTTP 不做 per-IP 限流（§6.2.3），客户端对同一 task 的重拉做 1s 去抖。
 **回到一个 session**：`renderWorkflowPanel` 重建 `<details>` 时 toggle 触发 `ensureRows`，重订阅的 full 帧也同时到达——两者经 `needsFetch`
 合并，每个展开的 workflow 恰好一次请求（rows 与 result 已在切走时释放，§7.1，所以是一次 full，终态条目的结果随之取回）。
 
@@ -2060,10 +2060,9 @@ v4 的 `GET /api/sessions/workflow_agent`（per-agent 预览）连同它专用�
   3. `task_id` 过 `^[a-z0-9]{1,32}$`（同 `agentevents/handler.go:35`）、`rows` / `since` / `epoch`
      形态合法且不互斥冲突，否则 400；
   4. `router.SessionFor(key) == nil`、该 session 没有 board（nil，§5.8.1）或 board 里没有此 task → 404。
-- **限流**：`apiChain` 本身不限流（`sendLimiter` 只挂在 send/bind/upload，`build_dashboard.go:36`、
-  `dashboard_send.go:79,349`）。仿 `ext/memory`（`handler.go:41,68-69,144`）注入 `IPLimiter` 依赖，
-  per-IP 令牌桶（10 rps / burst 20，与 memory 同参），超限 429（PR-10：限流先于其余校验，响应带 `Retry-After: 1`，客户端的退避取它与自己的指数退避较大者；`New` 在没有 limiter 时 panic，不让一个读盘端点因漏接线而不限流）。没配 TrustedProxy 的反向代理后面，所有 tab 共用一个 IP 的桶；
-  客户端遇 429 的处理见 §6.1 客户端表（保持状态、退避重试）。
+- **限流**：不限流。原先的 per-IP 令牌桶（10 rps / burst 20，`New` 缺 limiter 时 panic）已随
+  "已鉴权 dashboard 接口不做 per-IP 限流"一并删除——持 token 的调用方只有 owner 本人。客户端遇 429 的
+  处理（§6.1 客户端表：保持状态、退避重试）保留，作为反向代理等外层返回 429 时的兜底。
 - **404 只表示"资源不存在"**（session、task、remote node，即上面的第 2、4 步）。校验之后的磁盘失败（RunDir 未解析、路径越界、
   文件缺失、不是 regular file、超限）**不是** 404：返回 200 不带 result / logs 并置 `result_unavailable:true`。v3 把它们一律折叠为 404，
   而客户端遇 404 会删除条目（§6.1）——一个可选的磁盘产物
@@ -2083,7 +2082,7 @@ v4 的 `GET /api/sessions/workflow_agent`（per-agent 预览）连同它专用�
 | contractjs ENUMS `WORKFLOW_STATUS` / `WORKFLOW_AGENT_STATE` | 新增；`check-enum-literals.mjs` 扩展两条：① `workflow_state.js` 的状态显示表（键不加引号）须**恰好**含这两个枚举的键（复用 `tableKeys`，加文件参数；仿 `DEATH_REASONS`）；② **只在 `workflow_state.js` 与 `workflow_view.js` 内**禁止这些值的整串字面量（`literalHits` 限定这两个文件）。**不做全仓禁令**：running / failed / completed / queued / done / unknown / stopped / skipped / paused 在现有十几个 static 文件里作为 session / cron / agent 状态被比较（如 `dashboard.js:335` `sd.state === 'running'`、`agent_view.js:67` `a.status === 'completed'`、`event_stream.js:807` `msg.status === 'queued'`），`literalHits` 分不清比较的是哪个字段，全仓禁令首跑即红——`SESSION_STATE` 不纳管也是这个原因（`check-enum-literals.mjs:14-18`、`contractjs.go:68-71`，归 #2909 的后续）。夹具进 `scripts/check-enum-literals.test.mjs` | `node scripts/check-enum-literals.mjs` + 其 test | PR-11 |
 | 前端 `wsm.on(NZ_CONTRACT.WS.workflow_state, …)` 与 `wsm.on(NZ_CONTRACT.WS.workflow_set, …)` 各一个 | `workflow_view.js` 模块顶层。帧字段由 tsc 对照生成的 `wire.d.ts` 检查（#3439）：`wsm.on` 按帧类型给 handler 的 `msg` 定型，读帧上没有的字段即 tsc 报错，参数名不受约束。handler 直接把 `msg` 交给叶子模块：`(msg) => applyFrame(store, msg)`，`applyFrame` 的入参写成 `/** @type {WsFrames['workflow_state']} */ frame`（`applySet` 同理用 `WsFrames['workflow_set']`）。帧（或它的 `{ ...msg }` 拷贝）交给未标类型的参数时，`scripts/ts-check.test.mjs` 的 wireReach 报错；逐字段拼出的普通对象不是帧类型，wireReach 认不出，所以不用这种写法 | `check-ws-contract.mjs`（帧类型集合双向一致）、`check-ws-receivers.mjs` R1-R5/R7、tsc（lint-js）、`scripts/ts-check.test.mjs`（`CHECKED` 列入 `workflow_view.js`；wireReach） | PR-11 |
 | `workflow_state.js` 读取嵌套字段的函数（`applyFrame` / `applyHttp` / `reconcileSummaries` 及其内部 helper） | 文件第一行 `// @ts-check`，加入 `scripts/ts-check.test.mjs` 的 `CHECKED`（`wire.d.ts` 的类型到达未开检查的文件时 wireReach 报错）。tsconfig 不开 `strict`，未标类型的参数是 `any`，读取不受检查，所以接收帧或 def 值的参数都要标类型：帧用 `WsFrames['workflow_state']`，helper 入参用 `wire.d.ts` 里的 def 短名（`workflow` → `WireView`、行 → `Agent`、phase → `Phase`、Summary → `Summary`；短名与既有 def 或 TypeScript lib 全局名冲突时在 Go 侧换类型名，`ts-check.test.mjs` 会拦与 lib 重名的），HTTP 响应用 PR-10 生成的 `RestResponse_*`。wireReach 只追帧，def 值交给未标类型的参数不会报错，这一条靠评审。`@param` 与行内 `@type` 都可以，一个文档块写几个 `@param` 都行。v3 把 `msg.workflow` 原样交给不带类型的参数，`source`、`agents[].rev`、`agents_capped`、`prev_agent_ids`、`phases[].counts` 等读取都不受检查，Go 侧改一个 json tag 浏览器里就静默失效 | tsc（lint-js）、`scripts/ts-check.test.mjs` | PR-11 |
-| `handlerSet` 字段、`build_server.go` 构造（注入 IPLimiter）、`registerDashboard` mount | 新增 | `routes_snapshot_test.go:195-212,406-427` | PR-10 |
+| `handlerSet` 字段、`build_server.go` 构造（原注入 IPLimiter，已随 #3722 删除）、`registerDashboard` mount | 新增 | `routes_snapshot_test.go:195-212,406-427` | PR-10 |
 | `testdata/routes.golden.json` | `UPDATE_GOLDEN=1 go test -run TestRoutesSnapshot ./internal/server/` | `TestRoutesSnapshot` | PR-10、PR-11（静态资源路由） |
 | workflow REST 响应类型 | `internal/dashboard/ext/workflows/rest_schema_test.go` + `testdata/rest.schema.json`（仿 session 包的 `restResponses` 生成器）；`tools/gen-contract` 与 `contractjs.BuildWireDTS` 改为也读这份 schema，重生成 `static/wire.d.ts`，前端经 `RestResponse_*` 类型使用；路径追加到 `scripts/check-mock-rest.test.mjs:13` 的 schema 读取 | 新包自己的 `TestRESTSchema_IsGenerated`、`TestWireDTS_Current`、tsc（lint-js） | PR-10 |
 | mock-server 的 workflow 路由 | 新增 `/workflow`，含三种行模式（`rows=none`、`since=` → delta / 退回 full）与 `result_unavailable`；**不**扩 `check-mock-rest.test.mjs:51-55` 的 `ROUTES`（那是 EventEntry 夹具专用），另写 workflow 响应的 schema 校验用例 | `check-mock-rest` | PR-10 |
@@ -2632,8 +2631,8 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
     （`ci.yml:436-457`），windows 上没有 `syscall.Mkfifo`。涉及的包：osutil（PR-3、PR-9）、subagent（PR-13）、session（PR-9 的 sweeper / R3a）、
     agentevents 与 server（PR-13）。
 - **DoS**：stream 解码有 10MiB 行上限（超过的快照行被跳过并置 `snapshot_dropped`，§5.7；shim 侧 10MB 的超长行会卡死 session，属既有行为，§13 R14），drill-in 首行解码 16MiB（`limits.MaxStreamJSONLine`）；Tracker 与 board 有 §5.3 的硬上限（含 phase 200、后台 I/O 在途 8）；磁盘扫描有目录数 / 文件尺寸上限；结果文件
-  每个终态只解析一次并缓存；WS 帧 ≤ 192KiB 且有背压跳过；**HTTP 由新端点自己的
-  per-IP limiter 覆盖**（`apiChain` 无限流，`sendLimiter` 只挂在 send 系 handler 上）。
+  每个终态只解析一次并缓存；WS 帧 ≤ 192KiB 且有背压跳过；**HTTP 端点不做 per-IP
+  限流**（已鉴权 dashboard 接口统一不限流，#3722），结果文件解析一次后缓存。
 - **XSS**：前端只用 `textContent` / `setAttribute`，不新增 HTML sink。
 
 ## 11. 测试计划
@@ -2716,9 +2715,8 @@ workflowPushLoop 与 board 发布、generation 变化并发。
 ### 11.5 闸门
 
 `gofmt -l` 为空；`go vet ./...`；**`GOOS=windows go vet ./...`**（必过的 `build-windows` job 的本地等价，`ci.yml:436-457`；FIFO 测试须在 `*_unix_test.go` + `//go:build unix`，§10）；`GOTOOLCHAIN=go1.26.6 make lint-staticcheck`；
-`lint-server-handlers -mode fail`（含 `hubOptionsFieldBaseline`）；**`go test ./internal/session -run TestRouterBudget`**
-（Router 字段 18 / 方法 98 / 类型引用 5，均为 ratchet 台账指标；本特性的 sweeper、resolver、R3 都不得新增 Router 方法或 `*Router`
-参数）；`node scripts/check-enum-literals.mjs` 与其 test；`node --test scripts/check-ws-receivers.test.mjs`；tsc 与 `node --test scripts/ts-check.test.mjs`；js-ratchet `--check`；
+`lint-server-handlers -mode fail`（含 `hubOptionsFieldBaseline`）；（本特性的 sweeper、resolver、R3 都不得新增 Router 方法或 `*Router`
+参数；原先钉住这些数的 `router_budget_test.go` 已于 #3720 删除）；`node scripts/check-enum-literals.mjs` 与其 test；`node --test scripts/check-ws-receivers.test.mjs`；tsc 与 `node --test scripts/ts-check.test.mjs`；js-ratchet `--check`；
 **`go run ./tools/ratchet-raises -base origin/master`**（必过 job 的本地等价）；`check-ws-contract`；
 `check-mock-rest`；`node --test scripts/workflow-state.test.mjs`；CLAUDE.md 模块清单测试；推送前全仓
 `go test ./...`。
@@ -2799,7 +2797,7 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
 - 测试：见 §11.2 reconnectVerdict 行，含"live result 紧随 startReadLoop 到达"、5MB JSONL fixture、末条记录 200KiB。
   （`ReconnectHooks` 用结构体：PR-7 加 `KnownWorkflowTasks` 字段时不再改 `SpawnReconnect` 的签名，§5.9 R1。）
 - 验收：空闲 + 后台 workflow 的 session 重启后为 Ready；前台长 Bash + 后台 workflow 洪水（ring 已绕回）
-  重启后仍为 Running；`reconnectVerdict` 不解码中性帧（计数）；`go test ./internal/session -run TestRouterBudget` 不变；`GOOS=windows go vet ./...` 绿。
+  重启后仍为 Running；`reconnectVerdict` 不解码中性帧（计数）；`GOOS=windows go vet ./...` 绿。
 - 依赖：无。
 
 ### PR-4 fix(server): agent tailer 的 allowedRoot 用共享 ProjectsRoot
@@ -2917,7 +2915,7 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   kill shim 连接（CLI 存活）时 workflow 保持 running + snapshot_stale、重接后恢复 live；**naozhi 运行中杀掉 shim 进程**（`shimOutlivedSocket`
   为假，`process_end.go:86-96`）→ 立即 interrupted（§5.6(6a)，不经 R4）；respawn（如 TTL 回收后再发消息）之后 workflow 帧继续到达同一个 board；
   重启（shim 存活）后摘要恢复，且**同一 epoch 内** version 不回退（重启后是新 board、新 epoch，跨 epoch 不比较版本；新 epoch 内 Ref 条目被版本更低的
-  Tracker 条目替换时 wire version 仍递增）；shim ring 已绕回的重启后名称仍是 Ref 里的真名、elapsed 仍显示；`TestRESTSchema_IsGenerated` 与 `TestRouterBudget` 绿。
+  Tracker 条目替换时 wire version 仍递增）；shim ring 已绕回的重启后名称仍是 Ref 里的真名、elapsed 仍显示；`TestRESTSchema_IsGenerated` 绿。
 - 依赖：PR-7、PR-4（`IsValidWorkflowRunID`、`ResolvedProjectsRoot`）。
 
 ### PR-9 feat(claudefs,session): workflow 磁盘定位、对账与 sweeper
@@ -2947,7 +2945,7 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   （Detach，Ref 里留下 running 条目）→ 杀掉 shim → 重启 naozhi，R0 恢复的条目无进程可重接，≤ 120s（90s + 一个 tick）由 R4 置 interrupted
   （v3 的"naozhi 运行中杀 shim"走的是 PR-8 的 (6a)，测不到 R4）；**R5**：同样的重启后 90s 内发一条消息 spawn 新 CLI，恢复的 running 条目
   ≤ 90s + 一个 tick 后变为 unknown、不再钉保活；没有 shim 的重启后展开一个恢复出来的终态 workflow 能看到全部行；在 run dir 里把 `wf_<runId>.json`
-  换成 FIFO 不卡住 sweeper；`TestRouterBudget` 绿；`GOOS=windows go vet ./...` 绿。
+  换成 FIFO 不卡住 sweeper；`GOOS=windows go vet ./...` 绿。
 - 依赖：PR-8、PR-4（`claudefs.ResolvedProjectsRoot`）、PR-3（`osutil.OpenRegular`）。
 
 ### PR-10 feat(dashboard/ext/workflows): HTTP 端点
@@ -2958,7 +2956,7 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   `Published()` 访问 board。v4 列在这里的 `ReadFirstLineIDs` 回到 PR-13，`ReadFirstPrompt` 与首行缓存删除。
 - 文件：新 `internal/dashboard/ext/workflows/{deps.go,routes.go,handler.go,rest_schema_test.go}` +
   `testdata/rest.schema.json` + tests、`internal/session/managed_workflow_api.go`（`Result`）与 `managed_workflow.go`（复用 PR-9 的读取路径）+ test、
-  `internal/server/handler_set.go`、`build_server.go`（注入 IPLimiter；PR-10：不注入 projects root——handler 只经 board，root 在 board 里）、
+  `internal/server/handler_set.go`、`build_server.go`（注入 IPLimiter，已随 #3722 删除；PR-10：不注入 projects root——handler 只经 board，root 在 board 里）、
   `routes.go`、`routes_snapshot_test.go`、`testdata/routes.golden.json`、`static/contract.js`（API 表 +1 行）、
   `scripts/js-ratchet.baseline.json`（`contract.js.lines` 112 → 113，手改；PR-10：v5 写时是 110，合入前 master 已到 112）、`scripts/ratchet-raises.jsonl`、
   `tools/gen-contract/main.go` + `internal/contractjs/wiredts.go`（多读一份 REST schema）、`static/wire.d.ts`（重生成）、`test/e2e/mock-server.js`（`/workflow` 路由，含三种行模式与 `result_unavailable`）、

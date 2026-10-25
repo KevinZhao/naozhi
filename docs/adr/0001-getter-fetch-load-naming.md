@@ -17,7 +17,7 @@ Go 惯用 getter 不带 `Get` 前缀（`io.Reader.Read`，而非 `GetRead`）。
 两条 source-of-truth 之间存在一处需要调和的矛盾：
 
 - RFC §3 草拟的规则把 `Fetch*/Load*` **一律**统一为 `Load*`。
-- 但活的护栏测试 [`internal/session/getter_surface_test.go`](../../internal/session/getter_surface_test.go) 的 `TestGetterSurfaceFrozen` scope note（第 33–40 行）已显式声明：`node.FetchSessions`（`internal/node/conn.go` `NodeFetcher`，`httpclient.go` / `reverseconn.go`）**故意保留 `Fetch` 动词**——它走 reverse-RPC / HTTP 传输做真实网络拉取，`Load` 会误导为内存/磁盘检索。
+- 但当时的护栏测试 `internal/session/getter_surface_test.go`（已于 #3720 删除）的 `TestGetterSurfaceFrozen` scope note 已显式声明：`node.FetchSessions`（`internal/node/conn.go` `NodeFetcher`，`httpclient.go` / `reverseconn.go`）**故意保留 `Fetch` 动词**——它走 reverse-RPC / HTTP 传输做真实网络拉取，`Load` 会误导为内存/磁盘检索。
 
 本 ADR 把这两处来源调和成**单一权威决策**，并确认 caller-visible rename 不满足 triage 的 "zero functional impact" 门槛，因此该项已从 `docs/cosmetic-backlog.md` 升级进 issue tracker（#463）。
 
@@ -60,7 +60,9 @@ rename 必须走 `gopls rename` **逐符号**执行，**绝不用 `sed`**：`Get
 
 ## Guard formalized
 
-`TestGetterSurfaceFrozen`（[`internal/session/getter_surface_test.go`](../../internal/session/getter_surface_test.go)）是本 ADR 形式化的**活护栏**：它用 AST walker 冻结 `internal/session` + `internal/cli` 生产文件里导出的 `Get*` / `Fetch*` accessor allowlist。
+> **2026-10 更新**：`getter_surface_test.go` 已在 #3720（项目减法）中删除，下面描述的护栏不再存在，命名约定改由 review 维持。
+
+`TestGetterSurfaceFrozen`（`internal/session/getter_surface_test.go`）曾是本 ADR 形式化的护栏：它用 AST walker 冻结 `internal/session` + `internal/cli` 生产文件里导出的 `Get*` / `Fetch*` accessor allowlist。
 
 - 本 ADR **不拓宽也不矛盾**该 allowlist——它只记录意图，不新增/不 rename 任何 accessor，因此护栏在本轮保持 GREEN。
 - 当未来某 PR 新增 `Get*` / `Fetch*` getter 时护栏 RED-fail，作者须按本 ADR 方向 rename，或在同一 PR 里有意识地扩 allowlist（把命名决策记录在案）。
@@ -80,5 +82,5 @@ rename 必须走 `gopls rename` **逐符号**执行，**绝不用 `sed`**：`Get
 ## References
 
 - [`docs/rfc/lifecycle-policy-and-naming.md`](../rfc/lifecycle-policy-and-naming.md) §1.2（问题陈述）/ §3（备选方案，含本 ADR 纠正的过宽 Fetch→Load 规则）/ §8（PR 切分与 ADR 门）
-- [`internal/session/getter_surface_test.go`](../../internal/session/getter_surface_test.go) `TestGetterSurfaceFrozen`（本 ADR 形式化的活护栏，含 `node.FetchSessions` scope 豁免）
+- `internal/session/getter_surface_test.go` `TestGetterSurfaceFrozen`（本 ADR 形式化的护栏，含 `node.FetchSessions` scope 豁免；已于 #3720 删除）
 - `internal/cron/agent_opts.go:62` `type Session interface`（决策 (d) 碰撞源）

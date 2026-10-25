@@ -128,7 +128,7 @@ func TestEntries_LimitClampedAndNewestFirst(t *testing.T) {
 	}
 }
 
-func TestGate_DisabledLedgerAndLimiter(t *testing.T) {
+func TestGate_DisabledLedger(t *testing.T) {
 	var nilStore *costledger.Store
 	h := New(Deps{Ledger: nilStore})
 	if rec := get(t, h.HandleSummary, "/api/cost/summary"); rec.Code != 503 {
@@ -138,16 +138,4 @@ func TestGate_DisabledLedgerAndLimiter(t *testing.T) {
 	if rec := get(t, h.HandleSummary, "/api/cost/summary"); rec.Code != 503 {
 		t.Fatalf("disabled ledger status %d", rec.Code)
 	}
-	h = New(Deps{Ledger: seeded(t), Limiter: denyAll{}})
-	if rec := get(t, h.HandleSummary, "/api/cost/summary"); rec.Code != 429 {
-		t.Fatalf("limited status %d", rec.Code)
-	}
-	if !h.HasLimiter() {
-		t.Fatal("HasLimiter must report the wired limiter")
-	}
 }
-
-type denyAll struct{}
-
-func (denyAll) Allow(string) bool               { return false }
-func (denyAll) AllowRequest(*http.Request) bool { return false }

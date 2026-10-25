@@ -10,9 +10,8 @@ import (
 // when the transcript concurrency semaphore is full, an additional
 // request returns 503 immediately without waiting for the request
 // context to expire. R243-SEC-12 (#798): without the gate, N
-// authenticated operators can each saturate their per-IP runsLimiter
-// and pile up N×(8 MB LimitReader + 256 KB scanner buffer) of
-// resident memory. The semaphore puts a process-wide ceiling on that
+// concurrent readers pile up N×(8 MB LimitReader + 256 KB scanner
+// buffer) of resident memory. The semaphore puts a process-wide ceiling on that
 // concurrency.
 //
 // The test fills the semaphore by hand (no real cron run needed) and

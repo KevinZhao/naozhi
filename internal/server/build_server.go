@@ -203,8 +203,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		ProjectsRoot: w.projectsRoot,
 	})
 	hs.workflowsH = workflows.New(workflows.Deps{
-		Router:  router,
-		Limiter: newIPLimiterWithProxy(workflows.LimiterRate, workflows.LimiterBurst, s.auth.TrustedProxy),
+		Router: router,
 	})
 
 	// StartupCtx lets SIGTERM during startup abort the --version probe.
@@ -223,8 +222,6 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	hs.healthH = buildHealthHandler(opts, s, w, router)
 
 	s.attachReverseNodeServer(opts.Remote.ReverseServer)
-
-	hs.checkLimiters(w.scheduler != nil)
 
 	// Server keeps the handlers that outlive registration (see
 	// handler_set.go for why each one does).

@@ -10,7 +10,8 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// ipLimiter is a thin server-package adapter over ratelimit.Limiter.
+// ipLimiter is a thin server-package adapter over ratelimit.Limiter, used
+// only by the transcribe endpoint (it guards outbound speech-to-text spend).
 // It keeps the trusted-proxy flag co-located with the limiter so
 // AllowRequest can resolve the real client IP without the caller
 // plumbing the flag through.
@@ -35,21 +36,6 @@ func newIPLimiterWithProxy(r rate.Limit, burst int, trustedProxy bool) *ipLimite
 			Burst:   burst,
 			MaxKeys: defaultIPLimiterMaxKeys,
 			TTL:     defaultIPLimiterTTL,
-		}),
-		trustedProxy: trustedProxy,
-	}
-}
-
-// newIPLimiterWithCap is a sibling of newIPLimiterWithProxy that pins the
-// underlying MaxKeys (LRU cap) and TTL explicitly for endpoints facing
-// DDoS-class abuse (#636). Pass MaxKeys=0/TTL=0 for ratelimit defaults.
-func newIPLimiterWithCap(r rate.Limit, burst, maxKeys int, ttl time.Duration, trustedProxy bool) *ipLimiter {
-	return &ipLimiter{
-		inner: ratelimit.New(ratelimit.Config{
-			Rate:    r,
-			Burst:   burst,
-			MaxKeys: maxKeys,
-			TTL:     ttl,
 		}),
 		trustedProxy: trustedProxy,
 	}

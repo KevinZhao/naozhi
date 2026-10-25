@@ -55,12 +55,6 @@ func buildOrientConfig(opts ServerOptions) *orientConfig {
 // in place. Best-effort: returns {"rotated":bool,"degrees":int}, with
 // rotated=false on every fail-safe path so the client keeps the original.
 func (h *SendHandler) handleOrient(w http.ResponseWriter, r *http.Request) {
-	// Orient fires once per uploaded image, so the upload limiter's budget fits.
-	if h.uploadLimiter != nil && !h.uploadLimiter.AllowRequest(r) {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
-		return
-	}
-
 	var req struct {
 		ID string `json:"id"`
 	}

@@ -13,7 +13,6 @@ reads `~/.claude/projects/<slug>/<sessionId>.jsonl`), a `cli.backend` value of
 `Codex` (the real values are `claude` / `kiro` / `codex`), a retired 6-step
 shutdown order, and an outdated `Protocol` signature.
 
-The root cause was governance, not wording: `CLAUDE.md` is CI-gated
-(`cmd/naozhi/claude_md_modules_test.go` keeps its Module Dependency list in
-sync with `internal/`), while nothing gated `AGENTS.md`. Any duplicate of a
-CI-gated file will drift, so fixing the prose would only have reset the clock.
+The root cause was governance, not wording: `CLAUDE.md` was CI-gated at the
+time (a test kept its Module Dependency list in sync with `internal/`), while
+nothing gated `AGENTS.md`. Any duplicate of a maintained file will drift, so fixing the prose would only have reset the clock.
