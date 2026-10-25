@@ -152,6 +152,31 @@ func TestHandleFile_Download(t *testing.T) {
 	}
 }
 
+// An upload ClassifyFile would refuse by name costs no download; it is still
+// forwarded, marked unsupported, so dispatch tells the user.
+func TestHandleFile_UnsupportedNotDownloaded(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"季度报告.docx", "clip.mp4", "src.zip", "README", ""} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			stub := &fileStub{body: pdfBytes}
+			f := newFileFeishu(t, Config{}, stub)
+			var h handled
+			f.handleFile(context.Background(), h.handler, mediaMsg, "om_1", "file_1", name)
+			got := h.all()
+			if len(got) != 1 || len(got[0].Files) != 1 {
+				t.Fatalf("handler got %+v, want one message with one file", got)
+			}
+			if file := got[0].Files[0]; file.Name != name || file.Reject != platform.FileRejectUnsupported || file.Data != nil {
+				t.Errorf("file = {%q %q %d bytes}, want {%q unsupported no bytes}", file.Name, file.Reject, len(file.Data), name)
+			}
+			if n := stub.hits.Load(); n != 0 {
+				t.Errorf("downloads = %d, want 0", n)
+			}
+		})
+	}
+}
+
 func TestHandleFile_RefusedOrCancelledForwardsNothing(t *testing.T) {
 	t.Parallel()
 	t.Run("refused sender", func(t *testing.T) {
