@@ -116,7 +116,7 @@ graph LR
 - **Watchdog 双超时**: 无输出超时 (默认 15min，工具运行时 Claude CLI 的 heartbeat 算作输出) + 总耗时超时 (默认 2h)，防止进程挂起
 - **容量管理**: 可配置最大并发进程数 (默认 3)，满载时自动驱逐最久空闲会话
 - **中断恢复**: 用户发送新消息时自动中断正在运行的 turn（软中断 control_request，ACP 回退 SIGINT）
-- **会话自动串联**: 同一项目的会话通过**项目级稳定 session key** 精确接续，Dashboard "load earlier" 可跨 session 边界回溯（`session.project_stable_key`，默认开启）。早期基于 "同 workspace + 时间窗" 猜测的 `session.auto_chain` 已下线 —— 它会把主题无关的 one-off 会话误串成历史上下文，详见 [`docs/rfc/project-stable-session-key.md`](docs/rfc/project-stable-session-key.md)
+- **会话自动串联**: 同一项目的会话通过**项目级稳定 session key** 精确接续，Dashboard "load earlier" 可跨 session 边界回溯（`session.project_stable_key`，默认开启），见 [`docs/rfc/project-stable-session-key.md`](docs/rfc/project-stable-session-key.md)
 
 ### 消息队列与抢占
 
@@ -239,15 +239,6 @@ graph RL
 - 显示会话概要（最后一条用户消息预览）
 - 一键接管：SIGTERM → 等待 → `--resume` 接入 Naozhi 管理
 - 自动首消息接管：检测到外部 session 时自动恢复
-
-### System Session 后台守护
-
-内置后台线程框架（`sysession`），用派生的 transient system session 执行周期性运维任务：
-
-- **auto-titler**: 自动为活跃会话生成标题（达到最小轮次后触发，带重命名节流）
-- **attachment-gc**: 回收超 TTL 且无引用的附件文件（默认 dry-run，先观察 would-remove 日志再开真删）
-
-每个 daemon 独立 `enabled` 开关 + 调度周期，总开关为 `sysession.enabled`。
 
 ### 事件日志持久化
 
@@ -392,135 +383,7 @@ Agent 命令通过 `agent_commands` 配置映射，可自定义。
 
 ## 配置参考
 
-```yaml
-server:
-  addr: ":8180"
-  dashboard_token: "${DASHBOARD_TOKEN}"   # Dashboard 访问密码 (可选)
-  trusted_proxy: false                    # ALB/CloudFront 终止 TLS 时设为 true
-
-cli:
-  backend: claude                         # "claude" | "kiro" | "codex"，单 backend 模式下的默认值
-  path: "~/.local/bin/claude"
-  model: "sonnet"                         # sonnet / opus / haiku
-  args: []                                # claude 协议自己加 --dangerously-skip-permissions，写在这里只会被丢弃并告警
-
-  # 可选：多 backend 并存（Claude / Kiro / Codex 同时启用）。dashboard "new session"
-  # 下拉菜单可以按会话选 backend，API 端通过 /api/sessions/send {"backend": ...}
-  # 覆盖。不设置 `backends` 时走单 backend 模式，使用上面的 cli.path/model/args；
-  # 每条 backend 的 model/args 省略时从顶层 cli.* 继承，path 不继承 cli.path，
-  # 省略时按 id 自动查找（~/.local/bin/<binary>、常见安装目录、$PATH）；`backend` 字段决定
-  # 默认 backend（同时也作为 dashboard 下拉第一项）。完整注释示例见
-  # config.example.yaml `cli.backends` 段。
-  # backends:
-  #   - id: claude
-  #   - id: kiro
-  #     path: "~/.local/bin/kiro"         # ACP 协议根据 id=kiro 自动选择，无需额外 flag
-  #   - id: codex
-  #     path: "codex"                     # codex app-server 协议根据 id=codex 自动选择
-  #     model: "openai.gpt-5.5"           # 须显式设置，否则继承上面 claude 的 sonnet；args 也写明，免得继承顶层 cli.args
-  #     args: ["-c", "model_reasoning_effort=high"]
-
-session:
-  cwd: "/home/user/projects"              # CLI 默认工作目录，亦作 /cd 的允许根路径
-  max_procs: 3                            # 最大并发 CLI 进程
-  ttl: "30m"                              # 空闲回收超时
-  watchdog:
-    no_output_timeout: "15m"              # 无输出超时；工具运行时 Claude CLI 每 30s 发 heartbeat，
-                                          # 所以这里只拦模型长时间静默生成或 CLI 卡死
-    total_timeout: "2h"                   # 单轮总超时
-  store_path: "~/.naozhi/sessions.json"
-  queue:                                  # 忙时消息策略
-    mode: "collect"                       # collect | interrupt | passthrough
-    max_depth: 20
-    collect_delay: "500ms"
-  # project_stable_key:                   # 项目级稳定 session key（默认开启）
-  #   enabled: true
-  # auto_chain 已在 schema v2 移除：残留的块会报 deprecated 并被忽略，请手动删掉。
-
-agents:                                   # 自定义 agent
-  code-reviewer:
-    model: "sonnet"
-    system_prompt: "You are a code reviewer..."  # 追加到 CLI 系统提示词
-  researcher:
-    model: "opus"
-
-agent_commands:                           # 命令 → agent 映射
-  review: code-reviewer
-  research: researcher
-
-cron:
-  store_path: "~/.naozhi/cron_jobs.json"
-  max_jobs: 50
-  execution_timeout: "8h"
-  timezone: "Asia/Shanghai"               # IANA 时区，解释 cron 表达式
-  jitter_max: "2m"                        # 调度抖动上限，拍平并发峰值
-  auto_pause_after_failures: 5            # 连续失败 N 次自动暂停；负数关闭
-
-sysession:                                # 后台守护进程框架
-  enabled: true
-  daemons:
-    auto-titler:                          # 自动会话标题
-      enabled: true
-    attachment-gc:                        # 附件回收（默认关闭 + dry-run）
-      enabled: false
-      dry_run: true
-
-# update:                                 # 自动更新（轮询 GitHub Releases）
-#   enabled: true
-#   mode: "download"                      # notify | download | auto
-#   interval: "6h"
-
-transcribe:                               # 语音转文字 (Amazon Transcribe)
-  enabled: true
-  region: "us-east-1"
-  language: "zh-CN,en-US"                 # BCP-47 列表，多语言自动检测
-
-projects:
-  root: "/home/user/projects"             # 项目扫描根目录
-
-reverse_nodes:                            # 多节点：接受远程拨入
-  my-workstation:
-    token: "${NODE_TOKEN}"
-    display_name: "Kevin's Mac"
-
-im_access:                                # IM 发送者白名单，见「部署 · IM 访问控制」
-  default_deny: false                     # true：没有条目的平台拒绝所有人
-  # deny_reply: ""                        # 替换私聊里的拒绝文案（默认附带对方 ID）
-  platforms:
-    feishu:
-      allowed_users: ["ou_xxxxxxxx"]      # 可以聊天；admin_users 也算
-      admin_users: ["ou_yyyyyyyy"]        # 可以用 /cd /project /cron；空 = 所有人都是管理员
-
-im_rate_limit:                            # 每个 IM 发送者的消息限流，见「部署 · IM 访问控制」
-  msgs_per_min: 10                        # 0 或不配 = 不限
-  burst: 3                                # 允许连发的条数；0 = 同 msgs_per_min
-
-cost:
-  budget:                                 # 每日费用预算（USD），见「部署 · IM 访问控制」
-    per_chat_daily_usd: 20                # 每个 IM 会话；0 或不配 = 不限
-    per_cron_job_daily_usd: 5             # 每个定时任务
-    daily_usd: 100                        # 整台机器（dashboard 的花费也算）
-
-# upstream:                               # 多节点：作为远程节点拨入
-#   url: "wss://primary.example.com/ws-node"
-#   node_id: "my-workstation"
-#   token: "${NODE_TOKEN}"
-
-platforms:
-  feishu:
-    app_id: "${FEISHU_APP_ID}"
-    app_secret: "${FEISHU_APP_SECRET}"
-    max_reply_length: 4000
-  # slack:
-  #   bot_token: "${SLACK_BOT_TOKEN}"
-  #   app_token: "${SLACK_APP_TOKEN}"
-  # discord:
-  #   bot_token: "${DISCORD_BOT_TOKEN}"
-  # weixin:
-  #   token: "${WEIXIN_BOT_TOKEN}"
-```
-
-环境变量通过 `${VAR_NAME}` 语法自动展开。
+完整的带注释示例见 [`config.example.yaml`](config.example.yaml)；环境变量通过 `${VAR_NAME}` 语法自动展开。
 
 ---
 
@@ -706,16 +569,6 @@ kill -HUP $(pidof naozhi)
   `~/.claude/settings.json` 的 `env` 在启动时先于首次加载写入。
 - 设计见 [`docs/rfc/config-hot-reload.md`](docs/rfc/config-hot-reload.md)。
 
-### 生产架构
-
-```
-CloudFront → ALB (SG: CloudFront-only) → EC2 :8180 → systemd
-```
-
-- ALB 安全组仅允许 CloudFront 前缀列表
-- EC2 通过 IAM 角色认证 Bedrock（无 AKSK）
-- 推荐 t4g.small ARM64 实例
-
 ### 发布
 
 ```bash
@@ -725,35 +578,7 @@ git push origin v0.1.0    # GitHub Actions 自动构建 6 平台二进制 + Rele
 
 ---
 
-## 项目结构
-
-```
-cmd/naozhi/              入口 + CLI 命令 (setup, install, doctor, upgrade, shim)
-internal/
-  cli/                   CLI 进程管理 + Protocol 接口 (stream-json / ACP)
-  session/               Session 路由 + 并发控制 + TTL 回收 + 持久化
-  dispatch/              消息处理 + slash 命令 + per-session 队列
-  server/                HTTP server + REST API + WebSocket hub
-  dashboard/             Dashboard 视图与资源
-  platform/              IM 平台统一接口 (feishu / slack / discord / weixin)
-  cron/                  定时任务调度器 (robfig/cron)
-  project/ projectapi/   项目发现 + Planner 路由 + 项目 API
-  sysession/             后台守护框架 (auto-titler / attachment-gc)
-  discovery/             外部 Claude 进程扫描 + 接管
-  transcribe/            语音转文字 (Amazon Transcribe Streaming)
-  attachment/            附件存储 + 引用计数 GC
-  eventlog/ history/     事件日志持久化 + 历史回放
-  node/ upstream/        多节点协议 + 反向连接（WebSocket hub 在 server/ 内）
-  selfupdate/            自动更新 (GitHub Releases 轮询 + 校验)
-  shim/                  零停机重启 sidecar 进程
-  metrics/ runtelemetry/ 指标 + 运行遥测
-  config/                YAML 配置 + 环境变量展开
-deploy/                  systemd service unit
-```
-
-## 设计文档
-
-完整架构设计见 [DESIGN.md](docs/design/DESIGN.md)。
+架构设计见 [DESIGN.md](docs/design/DESIGN.md)，开发约定见 [CLAUDE.md](CLAUDE.md)。
 
 ## License
 
