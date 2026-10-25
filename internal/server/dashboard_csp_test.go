@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -188,80 +187,10 @@ func TestDashboardCSP_FrameSrcBlob(t *testing.T) {
 	}
 }
 
-// TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow caps the inline event
-// handler surface in static/dashboard.html (R236-SEC-02 / #479, also tracked
-// as #922). The dashboard CSP still ships `script-src 'unsafe-inline'`
-// because the static HTML contains a fixed set of `onclick=` attributes on
-// header buttons (history, new session, cron panel,
-// sidebar-toggle resizer). Migrating to
-// hash/nonce CSP requires moving those handlers into dashboard.js as
-// addEventListener bindings.
-//
-// This test does NOT remove `'unsafe-inline'` (that is the NEEDS-DESIGN
-// bundle on #441 / #479). Instead it pins the current surface count so a
-// future feature that adds yet another inline handler trips a visible
-// failure and the author has to consider whether to keep growing the
-// 'unsafe-inline' justification. It also asserts no `onload=` /
-// `onerror=` attributes exist (those are the more dangerous inline handler
-// classes — neither is present today, so the gate is "stays at zero").
-func TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow(t *testing.T) {
-	t.Parallel()
-
-	_, self, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	htmlPath := filepath.Join(filepath.Dir(self), "static", "dashboard.html")
-	body, err := os.ReadFile(htmlPath)
-	if err != nil {
-		t.Fatalf("read %s: %v", htmlPath, err)
-	}
-	html := string(body)
-
-	// Cap on `onclick=` attributes. R249-SEC-9 (#922) migration: the static
-	// HTML's header/sidebar handlers (history, new-session, cron,
-	// sidebar-toggle) plus the
-	// quick-ask form's onsubmit were moved into dashboard.js as
-	// addEventListener binds (DOMContentLoaded header binder + wireQuickAskInput
-	// for the repaint-prone quick-ask form), driving the static surface to 0.
-	// The cap is now 0: any new inline `onclick=` in the static HTML is a
-	// regression that pushes the script-src 'unsafe-inline' migration backwards
-	// and must instead be wired via addEventListener.
-	//
-	// NOTE: this caps the STATIC dashboard.html only. dashboard.js still emits
-	// inline `onclick=` attributes inside innerHTML template strings for
-	// dynamically-rendered controls (session cards, project rows, history
-	// items, etc.); those keep script-src 'unsafe-inline' required and remain
-	// the NEEDS-DESIGN event-delegation rewrite tracked on #922 / #441 / #479.
-	const inlineOnclickCap = 0
-	onclickRe := regexp.MustCompile(`\bonclick\s*=`)
-	got := len(onclickRe.FindAllStringIndex(html, -1))
-	if got > inlineOnclickCap {
-		t.Errorf("R236-SEC-02 (#479): static/dashboard.html has %d inline `onclick=` attributes, "+
-			"cap is %d. Migrate one to addEventListener in dashboard.js before adding more, "+
-			"or this test bumps the cap as part of the same change. Goal: drive count to 0 "+
-			"so script-src 'unsafe-inline' can be dropped (#441 / #479 / #922 bundle).",
-			got, inlineOnclickCap)
-	}
-
-	// Stricter cap: dangerous inline handlers stay at zero. `onload` and
-	// `onerror` on <img>/<script>/<iframe> tags can fire on any successful
-	// load and are the easiest XSS vector even with `unsafe-inline`.
-	// `onsubmit=` is included now that the quick-ask form was migrated to an
-	// addEventListener('submit', …) bind (#922) — re-introducing it would
-	// push the script-src migration backwards just like a new onclick=.
-	for _, attr := range []string{"onload=", "onerror=", "onfocus=", "onmouseover=", "onsubmit="} {
-		if strings.Contains(html, attr) {
-			t.Errorf("static/dashboard.html contains inline `%s` handler — "+
-				"these auto-fire and are higher-risk than onclick (R236-SEC-02 #479)", attr)
-		}
-	}
-}
-
 // TestDashboardCSP_StaticHandlersWiredInJS pins the R249-SEC-9 (#922) migration
 // of the static header/sidebar inline handlers to addEventListener binds. The
 // HTML no longer carries `onclick=`/`onsubmit=` for these controls (asserted by
-// the cap=0 in TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow); this test
+// TestDashboardBundle_NoInlineHandlerAttributes); this test
 // asserts the *replacement* wiring exists in dashboard.js so the controls stay
 // functional. Without these binds the buttons would be inert — a silent
 // behaviour regression that a CSP-only test would not catch.
@@ -275,34 +204,9 @@ func TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow(t *testing.T) {
 func TestDashboardCSP_StaticHandlersWiredInJS(t *testing.T) {
 	t.Parallel()
 
-	_, self, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	dir := filepath.Join(filepath.Dir(self), "static")
-
-	htmlBytes, err := os.ReadFile(filepath.Join(dir, "dashboard.html"))
-	if err != nil {
-		t.Fatalf("read dashboard.html: %v", err)
-	}
-	html := string(htmlBytes)
-
-	jsBytes, err := os.ReadFile(filepath.Join(dir, "dashboard.js"))
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
+	html := string(rawDashboardHTML(t))
+	// Handler functions and binds may live in any bundle module.
 	js := readDashboardJS(t)
-	_ = jsBytes
-
-	// cron extraction (PR-1): the btn-cron bind stays in dashboard.js but its
-	// handler openCronPanel moved to cron_view.js. The handler-definition check
-	// below searches the union; the bind-reference check stays on dashboard.js.
-	cronJSBytes, err := os.ReadFile(filepath.Join(dir, "cron_view.js"))
-	if err != nil {
-		t.Fatalf("read cron_view.js: %v", err)
-	}
-	// #2558 D4: handler functions may live in any bundle module now.
-	jsAll := readDashboardJS(t) + "\n" + string(cronJSBytes)
 
 	// Each migrated control: the element id that must exist in the HTML, and
 	// the handler function name that must still be defined in the dashboard JS.
@@ -326,220 +230,58 @@ func TestDashboardCSP_StaticHandlersWiredInJS(t *testing.T) {
 				"the inline handler was removed from HTML (#922) but the replacement "+
 				"addEventListener bind is missing, so the control is inert", c.id)
 		}
-		if !strings.Contains(jsAll, "function "+c.handler+"(") {
+		if !strings.Contains(js, "function "+c.handler+"(") {
 			t.Errorf("dashboard JS missing handler function %q that the migrated control invokes (#922)", c.handler)
 		}
 	}
 }
 
-// TestDashboardCSP_ScriptSrcUnsafeInlineMigrationGate pins the R20260531A-SEC-10
-// (#1526) single-point invariant on the `script-src 'unsafe-inline'` posture.
-// Modelled on TestSetEscapeHTMLFalseScopedToPackage: lock the *current* state so
-// a refactor cannot silently land the half-migrated, worst-of-both-worlds form.
-//
-// Two coupled invariants:
-//
-//  1. script-src today still carries `'unsafe-inline'`. The dashboard ships a
-//     fixed set of inline `onclick=` handlers (see
-//     TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow), so dropping
-//     `'unsafe-inline'` *without* first migrating those handlers to
-//     addEventListener would brick every header button. This asserts the
-//     directive is present so an accidental removal fails loudly.
-//
-//  2. script-src does NOT yet carry `nonce-` or `strict-dynamic`. The full
-//     migration is NEEDS-DESIGN (#441 / #479 / #922). Crucially, per CSP3
-//     browsers *ignore* `'unsafe-inline'` once `nonce-`/`strict-dynamic` is
-//     present — so landing a nonce alongside the still-present `'unsafe-inline'`
-//     would silently disable the inline handlers (a functional break) while
-//     looking "more secure". This gate forces the nonce migration to drop
-//     `'unsafe-inline'` in the *same* change: adding nonce/strict-dynamic trips
-//     invariant (1)'s sibling failure here until `'unsafe-inline'` is removed,
-//     making the two changes atomic.
-//
-// This test deliberately does NOT remove `'unsafe-inline'` — that is the
-// NEEDS-DESIGN migration. It only fences the current state against silent drift.
-func TestDashboardCSP_ScriptSrcUnsafeInlineMigrationGate(t *testing.T) {
-	s := newTestServer(&mockPlatform{})
+// inlineHandlerAttrRe matches inline event-handler ATTRIBUTES (`onclick="…"`,
+// `onkeydown='…'`, incl. the escaped-quote form used inside JS template
+// strings). Element property assignments (`btn.onclick = fn`) are CSP-legal
+// and deliberately not matched — the preceding dot fails the \b…= shape here
+// because we require the quote right after `=`.
+var inlineHandlerAttrRe = regexp.MustCompile(`\bon[a-z]+\s*=\s*\\?["']`)
 
-	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
-	w := httptest.NewRecorder()
-	s.handleDashboard(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
-	}
-	csp := w.Header().Get("Content-Security-Policy")
-	if csp == "" {
-		t.Fatal("Content-Security-Policy header missing on /dashboard")
-	}
-
-	// Isolate the script-src directive so the assertions below cannot be
-	// satisfied (or tripped) by tokens that live in style-src / img-src / etc.
-	var scriptSrc string
-	for _, dir := range strings.Split(csp, ";") {
-		dir = strings.TrimSpace(dir)
-		if strings.HasPrefix(dir, "script-src ") || dir == "script-src" {
-			scriptSrc = dir
-			break
-		}
-	}
-	if scriptSrc == "" {
-		t.Fatalf("CSP missing script-src directive, got %q", csp)
-	}
-
-	// Invariant (1), flipped by #1980 PR-3: script-src must NOT ship
-	// 'unsafe-inline' anymore — the handler surface is data-action delegation
-	// and the only inline <script> (theme bootstrap) is hash-allowlisted.
-	if strings.Contains(scriptSrc, "'unsafe-inline'") {
-		t.Errorf("#1980: script-src re-introduced `'unsafe-inline'` — the inline handler "+
-			"surface is 0 (data-action delegation) and the theme bootstrap is hashed; "+
-			"widening back is a pure security regression. got script-src %q", scriptSrc)
-	}
-	// The theme-bootstrap hash must be present (computed at init in
-	// dashboard_csp.go, never hand-copied).
-	if !strings.Contains(scriptSrc, "'sha256-") {
-		t.Errorf("#1980: script-src must allowlist the theme bootstrap via 'sha256-…' "+
-			"(see buildDashboardCSP), got %q", scriptSrc)
-	}
-	// nonce/strict-dynamic still must not appear: they would make browsers
-	// ignore the hash-based allowlist model this page relies on being
-	// reviewable, and nothing generates nonces for the static page.
-	for _, tok := range []string{"'nonce-", "'strict-dynamic'"} {
-		if strings.Contains(scriptSrc, tok) {
-			t.Errorf("script-src unexpectedly carries %q — the dashboard is a static "+
-				"page with a hash-allowlisted bootstrap, got %q", tok, scriptSrc)
-		}
-	}
-}
-
-// generatedOnclickBundle lists every dashboard-bundle JS file whose template
-// strings can emit inline `onclick=` attributes into innerHTML. dashboard.html
-// loads all of these with <script defer>, so an `onclick=` emitted from any of
-// them is exactly as much a reason for script-src to keep `'unsafe-inline'` as
-// one emitted from dashboard.js. It is derived from static/ (dashboardModules)
-// rather than hand-listed, so code split out of dashboard.js into a new module
-// cannot fall out of these CSP/XSS scans without anything failing.
-func generatedOnclickBundle(t *testing.T) []string {
-	t.Helper()
-	return dashboardModules(t)
-}
-
-// generatedOnclickCap is the downward-only ratchet on the TOTAL number of inline
-// `onclick=` attributes that the dashboard JS bundle (generatedOnclickBundle)
-// emits into innerHTML template strings for dynamically-rendered controls
-// (session cards, project rows, cron cards, history items, etc.). Unlike the
-// STATIC dashboard.html surface (capped at 0 by
-// TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow), these JS-generated handlers
-// are the remaining reason script-src still needs `'unsafe-inline'` (the
-// NEEDS-DESIGN bundle on #441 / #479 / #922; phased landing tracked on #1734).
-//
-// This cap is a RATCHET: it must only ever be LOWERED. Each migration PR that
-// converts a batch of `onclick="fn(args)"` emissions to the existing
-// data-action dispatch idiom (see SIDEBAR_PROJECT_ACTIONS / CRON_MENU_ACTIONS
-// in dashboard.js) must drop this number to the new post-migration count in the
-// SAME change, so the test stays green and pins the reduction. Raising it is a
-// regression that pushes the script-src 'unsafe-inline' removal backwards and
-// must be rejected — add a data-action dispatch entry instead. (Pure file
-// splits that move handlers between bundle files leave the total unchanged.)
-//
-// 2 = event_stream.js 1 + msg_nav.js 1, both CSP-legal element-property
-// assignments (btn.onclick = …), not inline attributes — the attribute
-// surface went to 0 across the bundle in the #1980 PR-1/PR-2 data-action
-// migration.
-// It was 86 while two comments (dashboard.js, nz_util.js) still spelled out the
-// counted token — the count is textual, so prose inflated it by 2 and made
-// nz_util.js look like it had a handler when it had none. Both were reworded,
-// and TestDashboardCSP_RatchetCountsNoCommentTokens now fails if prose
-// reintroduces one, which would otherwise let this cap drift upward while the
-// real handler surface stood still.
-const generatedOnclickCap = 2
-
-// TestDashboardCSP_GeneratedHandlerSurfaceRatchet pins the JS-generated inline
-// `onclick=` surface across the whole dashboard JS bundle as a downward-only
-// ratchet (#922 / #1734). The static-HTML inline-handler surface is already at 0
-// (TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow); this test covers the
-// harder, larger surface that the bundle still emits inside template strings.
-//
-// Mirrors the inlineOnclickCap=0 idiom in
-// TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow but against the JS bundle and
-// with a non-zero cap that shrinks per migration PR. Driving the count to 0 is
-// the precondition for dropping script-src 'unsafe-inline' (gated atomically by
-// TestDashboardCSP_ScriptSrcUnsafeInlineMigrationGate).
-//
-// NOTE: the regexp counts every `onclick=` token in the file text, including
-// any that appear in comments. Keep comment prose free of the literal
-// `onclick=` token (write "inline click attributes" instead) so the ratchet
-// tracks real emitted handlers, not documentation. That rule is enforced by
-// TestDashboardCSP_RatchetCountsNoCommentTokens rather than left to reviewers.
-func TestDashboardCSP_GeneratedHandlerSurfaceRatchet(t *testing.T) {
+// TestDashboardBundle_NoInlineHandlerAttributes is the terminal gate of the
+// #1980 migration: the whole dashboard bundle (static HTML + every JS file
+// that emits innerHTML) carries ZERO inline event-handler attributes, for
+// every on* type. Handlers are wired through the nz.actions data-action
+// delegation; the CSP has no script-src 'unsafe-inline' to execute an inline
+// attribute anyway, so any new one is a silently dead control.
+func TestDashboardBundle_NoInlineHandlerAttributes(t *testing.T) {
 	t.Parallel()
-
-	_, self, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	staticDir := filepath.Join(filepath.Dir(self), "static")
-
-	onclickRe := regexp.MustCompile(`\bonclick\s*=`)
-	total := 0
-	bundle := generatedOnclickBundle(t)
-	perFile := make(map[string]int, len(bundle))
-	for _, name := range bundle {
-		body, err := os.ReadFile(filepath.Join(staticDir, name))
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
+	files := append([]string{"dashboard.html"}, dashboardModules(t)...)
+	for _, name := range files {
+		data := staticAssetBytes(name)
+		if data == nil {
+			t.Fatalf("%s not embedded", name)
 		}
-		n := len(onclickRe.FindAllStringIndex(string(body), -1))
-		perFile[name] = n
-		total += n
-	}
-
-	if total > generatedOnclickCap {
-		t.Errorf("dashboard JS bundle has %d inline `onclick=` attributes (per-file %v), ratchet cap is %d "+
-			"(#922 / #1734). This cap is downward-only: convert a batch of generated "+
-			"`onclick=\"fn(args)\"` emissions to the existing data-action dispatch "+
-			"(SIDEBAR_PROJECT_ACTIONS / CRON_MENU_ACTIONS) and LOWER the cap in the same "+
-			"change. Goal: drive the count to 0 so script-src 'unsafe-inline' can be dropped.",
-			total, perFile, generatedOnclickCap)
+		for _, m := range inlineHandlerAttrRe.FindAllStringIndex(string(data), -1) {
+			line := 1 + strings.Count(string(data)[:m[0]], "\n")
+			t.Errorf("%s:%d: inline event-handler attribute %q — wire it through "+
+				"nz.actions data-action delegation instead (#1980; the CSP would "+
+				"block it silently)", name, line, string(data)[m[0]:m[1]])
+		}
 	}
 }
 
-// TestDashboardCSP_RatchetCountsNoCommentTokens keeps generatedOnclickCap
-// honest. The ratchet above counts the `onclick=` token by TEXT, so a comment
-// that merely talks about inline handlers is counted as if it were one. That is
-// not cosmetic: it inflates the cap, and a file whose real handler surface is
-// already 0 can never be shown to have reached 0 — nz_util.js sat at a phantom
-// 1 for exactly this reason, and dashboard.js at 43 instead of 42.
-//
-// Enforcing it here (rather than in a NOTE asking reviewers to remember) means
-// the failure lands on whoever writes the prose, with the fix in the message.
-// Line-oriented: it flags the token appearing on a `//`-comment line, which is
-// how every occurrence so far has been written.
-func TestDashboardCSP_RatchetCountsNoCommentTokens(t *testing.T) {
+// TestDashboardCSP_MockServerHeaderInSync compares the Playwright mock
+// server's hard-coded CSP literal against the policy the server derives for
+// the page the mock serves, so the e2e suite always exercises the dashboard
+// under the production policy. The literal lives in test/e2e/mock-server.js
+// (MOCK_DASHBOARD_CSP); this test is the drift alarm the mock comment points at.
+func TestDashboardCSP_MockServerHeaderInSync(t *testing.T) {
 	t.Parallel()
-
-	_, self, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
+	data, err := os.ReadFile(filepath.Join("..", "..", "test", "e2e", "mock-server.js"))
+	if err != nil {
+		t.Fatalf("read mock-server.js: %v", err)
 	}
-	staticDir := filepath.Join(filepath.Dir(self), "static")
-
-	onclickRe := regexp.MustCompile(`\bonclick\s*=`)
-	lineCommentRe := regexp.MustCompile(`^\s*(//|\*|/\*)`)
-
-	for _, name := range generatedOnclickBundle(t) {
-		body, err := os.ReadFile(filepath.Join(staticDir, name))
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		for i, line := range strings.Split(string(body), "\n") {
-			if lineCommentRe.MatchString(line) && onclickRe.MatchString(line) {
-				t.Errorf("%s:%d: comment prose contains the literal `onclick=` token, "+
-					"which the generatedOnclickCap ratchet counts as a real inline handler "+
-					"(inflating the cap and hiding genuine progress toward 0). Reword to "+
-					"\"inline click attribute\" or similar:\n\t%s",
-					name, i+1, strings.TrimSpace(line))
-			}
-		}
+	m := regexp.MustCompile(`MOCK_DASHBOARD_CSP =\n  "([^"]+)";`).FindSubmatch(data)
+	if m == nil {
+		t.Fatal("mock-server.js: MOCK_DASHBOARD_CSP literal not found (regex drift?)")
+	}
+	if want := buildDashboardCSP(rawDashboardHTML(t)); string(m[1]) != want {
+		t.Errorf("mock-server.js MOCK_DASHBOARD_CSP is out of sync with the runtime header\nmock: %s\ngo:   %s", m[1], want)
 	}
 }
