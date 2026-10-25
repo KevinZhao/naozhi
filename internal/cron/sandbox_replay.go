@@ -76,7 +76,7 @@ func (s *Scheduler) ReplaySandboxRun(jobID, origRunID string) (string, error) {
 	if prompt == "" {
 		return "", ErrNoSnapshot
 	}
-	// The blob may predate the current containsCronUnsafe / validateCronPrompt
+	// The blob may predate the current containsCronUnsafe
 	// allowlist and write-edge validation does not re-run on reads, so scrub here
 	// before the payload is injected into the microVM (#2319). Idempotent on
 	// already-clean prompts.

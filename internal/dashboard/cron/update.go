@@ -62,27 +62,13 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		writeCronErr(w, http.StatusBadRequest, "at least one field must be provided")
 		return
 	}
-	if req.Prompt != nil {
-		if err := validateCronPrompt(*req.Prompt); err != nil {
-			writeCronErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-	if req.Title != nil {
-		if err := validateCronTitle(*req.Title); err != nil {
-			writeCronErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
+	if req.Prompt != nil && *req.Prompt == "" {
+		writeCronErr(w, http.StatusBadRequest, "prompt is required")
+		return
 	}
 	if req.Schedule != nil && len(*req.Schedule) > maxCronScheduleBytesDashboard {
 		writeCronErr(w, http.StatusBadRequest, "schedule too long")
 		return
-	}
-	if req.Schedule != nil {
-		if err := validateCronScheduleChars(*req.Schedule); err != nil {
-			writeCronErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
 	}
 	if req.Backend != nil {
 		if err := ValidateCronBackend(*req.Backend); err != nil {
@@ -90,23 +76,15 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.Placement != nil {
-		// Shape gate only: the sandbox guardrail (no work_dir) needs the EFFECTIVE
-		// post-patch values, so it lives in Scheduler.UpdateJob's critical section
-		// and surfaces here as ErrSandboxWorkDir.
-		if err := validateCronPlacement(*req.Placement, ""); err != nil {
-			writeCronErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
 
+	// Cap work_dir before validateWorkspace echoes it into Debug logs.
+	if req.WorkDir != nil && len(*req.WorkDir) > cronpkg.MaxWorkDirLen {
+		writeCronErr(w, http.StatusBadRequest, "work_dir too long")
+		return
+	}
 	// A cleared WorkDir falls back to the router default; 403 matches
 	// HandleCreate for boundary violations.
 	if req.WorkDir != nil && *req.WorkDir != "" {
-		if err := validateCronWorkDir(*req.WorkDir); err != nil {
-			writeCronErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
 		if h.deps.ValidateWS == nil {
 			writeCronErr(w, http.StatusInternalServerError, "cron work_dir validation not wired")
 			return
@@ -167,7 +145,7 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 			writeCronErr(w, http.StatusBadRequest, "notify_platform and notify_chat_id must be set together")
 			return
 		}
-		if err := validateNotifyTarget(p, c); err != nil {
+		if err := validateNotifyPlatform(p); err != nil {
 			writeCronErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -197,7 +175,7 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 			httpErrPersistFailed(w, "updated")
 		case errors.Is(err, cronpkg.ErrSandboxWorkDir):
 			// Effective placement×work_dir rejected inside UpdateJob.
-			writeCronErr(w, http.StatusBadRequest, "云沙箱暂不支持工作目录（Phase 1）：请先清空 work_dir 或改用本机运行")
+			writeCronErr(w, http.StatusBadRequest, sandboxWorkDirMsg)
 		default:
 			// Parser errors can leak internal field names / offsets; sanitize.
 			slog.Warn("cron UpdateJob rejected", "err", err, "id", osutil.SanitizeForLog(id, cronpkg.MaxIDLen))

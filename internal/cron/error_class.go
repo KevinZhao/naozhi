@@ -62,7 +62,7 @@ const (
 	// HTTP 400.
 	CodeIntervalTooShort ErrCode = "interval_too_short"
 
-	// CodeInvalidSchedule — ErrInvalidSchedule chain (parse or char-policy
+	// CodeInvalidSchedule — ErrInvalidSchedule chain (byte gate or parse
 	// failure). HTTP 400.
 	CodeInvalidSchedule ErrCode = "invalid_schedule"
 
