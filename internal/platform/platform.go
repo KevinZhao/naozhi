@@ -50,7 +50,46 @@ const (
 	// downloading at the per-message count or aggregate byte cap.
 	FileRejectTooMany       FileReject = "too_many"
 	FileRejectTotalTooLarge FileReject = "total_too_large"
+	// FileRejectImageTooLarge and FileRejectImageUnsupported are the image
+	// counterparts of FileRejectTooLarge and FileRejectUnsupported: an image
+	// over MaxImageBytes, or one whose bytes are not a SupportedImageMIME.
+	FileRejectImageTooLarge    FileReject = "image_too_large"
+	FileRejectImageUnsupported FileReject = "image_unsupported"
 )
+
+// MaxImageBytes caps one inbound image on every adapter.
+const MaxImageBytes = 10 << 20
+
+// SupportedImageMIME reports whether mime is an image type the model accepts
+// inline (png, jpeg, gif, webp); anything else, bmp included, is refused with
+// a 400 that fails the whole turn. Parameters and case are ignored.
+func SupportedImageMIME(mime string) bool {
+	base, _, _ := strings.Cut(mime, ";")
+	switch strings.ToLower(strings.TrimSpace(base)) {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		return true
+	}
+	return false
+}
+
+// IsImageMIME reports whether mime names an image type, supported or not, so
+// an adapter can refuse an unsupported image as an image rather than as a file.
+func IsImageMIME(mime string) bool {
+	mime = strings.TrimSpace(mime)
+	return len(mime) >= len("image/") && strings.EqualFold(mime[:len("image/")], "image/")
+}
+
+// SniffImageMIME returns the image type data's bytes sniff as, never an
+// uploader's or CDN's claim; ok is false when that is not a
+// SupportedImageMIME (or data is empty).
+func SniffImageMIME(data []byte) (mime string, ok bool) {
+	if len(data) == 0 {
+		return "", false
+	}
+	mime, _, _ = strings.Cut(http.DetectContentType(data), ";")
+	mime = strings.TrimSpace(mime)
+	return mime, SupportedImageMIME(mime)
+}
 
 // File is a non-image attachment downloaded by a platform. Data is unset when
 // Reject is; dispatch classifies the bytes (attachment.ClassifyFile), so an

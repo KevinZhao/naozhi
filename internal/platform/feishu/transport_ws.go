@@ -161,20 +161,38 @@ func (f *Feishu) routeParsed(ctx context.Context, handler platform.MessageHandle
 	}
 }
 
+// imageFileName names a refused image in dispatch's notice; Feishu image
+// messages carry no file name.
+const imageFileName = "图片"
+
 // handleImage downloads an image message's picture, then calls handler with
-// it attached. A sender refused by admission costs no download.
+// it attached. An image that cannot be delivered is forwarded as a File
+// carrying its FileReject, so dispatch tells the user; a sender refused by
+// admission costs no download and gets no reply.
 func (f *Feishu) handleImage(ctx context.Context, handler platform.MessageHandler, msg platform.IncomingMessage, messageID, imageKey string) {
 	if !f.admitted(ctx, msg) {
 		return
 	}
 	data, mime, err := f.DownloadImage(ctx, messageID, imageKey)
-	if err != nil {
-		// image_key is sender-controlled; sanitize before slog.
-		slog.Error("feishu download image failed", "err", err,
-			"key", osutil.SanitizeForLog(imageKey, 128))
+	if err == nil {
+		msg.Images = []platform.Image{{Data: data, MimeType: mime}}
+		handler(ctx, msg)
 		return
 	}
-	msg.Images = []platform.Image{{Data: data, MimeType: mime}}
+	if ctx.Err() != nil {
+		return // shutting down; no notice for a download we abandoned
+	}
+	// image_key is sender-controlled; sanitize before slog.
+	slog.Warn("feishu download image failed", "err", err,
+		"key", osutil.SanitizeForLog(imageKey, 128))
+	reject := platform.FileRejectDownloadFailed
+	switch {
+	case errors.Is(err, errResourceTooLarge):
+		reject = platform.FileRejectImageTooLarge
+	case errors.Is(err, errImageUnsupported):
+		reject = platform.FileRejectImageUnsupported
+	}
+	msg.Files = []platform.File{{Name: imageFileName, Reject: reject}}
 	handler(ctx, msg)
 }
 

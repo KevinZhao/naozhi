@@ -28,7 +28,7 @@ const subtypeFileShare = "file_share"
 const slackFileHost = "files.slack.com"
 
 // maxSlackImageBytes caps one inbound image, matching the other adapters.
-const maxSlackImageBytes = 10 << 20
+const maxSlackImageBytes = platform.MaxImageBytes
 
 // slackFileDownloadTimeout bounds one download, body included: a file at the
 // 32 MiB cap needs about 190 KB/s. Stop still cancels it through s.ctx.
@@ -50,15 +50,6 @@ var (
 	// page instead of the file when the token lacks the files:read scope.
 	errSlackFileHTMLPage = errors.New("slack served an HTML page instead of the file (missing files:read scope?)")
 )
-
-// isSlackImage reports a MIME type the model accepts as an inline image.
-func isSlackImage(mime string) bool {
-	switch mime {
-	case "image/png", "image/jpeg", "image/gif", "image/webp":
-		return true
-	}
-	return false
-}
 
 // slackFileName is the upload's file name, or its title when Slack sent none.
 func slackFileName(f slack.File) string {
@@ -83,14 +74,18 @@ func (s *Slack) attachFiles(ctx context.Context, msg *platform.IncomingMessage, 
 			reject(platform.FileRejectTooMany)
 			continue
 		}
-		isImage := isSlackImage(f.Mimetype)
-		perFile := limits.MaxFileAttachmentBytes
+		isImage := platform.SupportedImageMIME(f.Mimetype)
+		if !isImage && platform.IsImageMIME(f.Mimetype) {
+			reject(platform.FileRejectImageUnsupported)
+			continue
+		}
+		perFile, tooLarge := limits.MaxFileAttachmentBytes, platform.FileRejectTooLarge
 		if isImage {
-			perFile = maxSlackImageBytes
+			perFile, tooLarge = maxSlackImageBytes, platform.FileRejectImageTooLarge
 		}
 		remaining := limits.MaxFileAttachmentBytes - total
 		if f.Size > perFile {
-			reject(platform.FileRejectTooLarge)
+			reject(tooLarge)
 			continue
 		}
 		if f.Size > remaining {
@@ -107,7 +102,7 @@ func (s *Slack) attachFiles(ctx context.Context, msg *platform.IncomingMessage, 
 			case !errors.Is(err, errSlackFileTooLarge):
 				reject(platform.FileRejectDownloadFailed)
 			case perFile <= remaining:
-				reject(platform.FileRejectTooLarge)
+				reject(tooLarge)
 			default:
 				reject(platform.FileRejectTotalTooLarge)
 			}
@@ -119,10 +114,10 @@ func (s *Slack) attachFiles(ctx context.Context, msg *platform.IncomingMessage, 
 			continue
 		}
 		// Slack's mimetype is the uploader's claim; the bytes decide.
-		mime, _, _ := strings.Cut(http.DetectContentType(data), ";")
-		if !isSlackImage(mime) {
+		mime, ok := platform.SniffImageMIME(data)
+		if !ok {
 			total -= len(data)
-			reject(platform.FileRejectUnsupported)
+			reject(platform.FileRejectImageUnsupported)
 			continue
 		}
 		msg.Images = append(msg.Images, platform.Image{Data: data, MimeType: mime})

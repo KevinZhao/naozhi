@@ -337,6 +337,20 @@ func TestResolveImageContentType_SniffsImage(t *testing.T) {
 	}
 }
 
+// TestResolveImageContentType_UnsupportedImageRejected: bytes that sniff as
+// an image the model refuses (bmp, ico) are not forwarded as an image (#3624).
+func TestResolveImageContentType_UnsupportedImageRejected(t *testing.T) {
+	t.Parallel()
+	for name, body := range map[string][]byte{
+		"bmp": []byte("BM\x00\x00\x00\x00\x00\x00\x00\x00\x36\x00\x00\x00"),
+		"ico": []byte("\x00\x00\x01\x00\x01\x00\x10\x10"),
+	} {
+		if ct, err := resolveImageContentType(body); err == nil {
+			t.Errorf("%s body: got ct=%q, want an unsupported-image error", name, ct)
+		}
+	}
+}
+
 // TestResolveImageContentType_NonImageRejected verifies a non-empty, non-image
 // body is rejected on mime mismatch.
 func TestResolveImageContentType_NonImageRejected(t *testing.T) {

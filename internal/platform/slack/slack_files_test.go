@@ -21,6 +21,7 @@ var _ platform.Admitter = (*Slack)(nil)
 
 var (
 	testPDF = []byte("%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n")
+	testBMP = []byte("BM\x00\x00\x00\x00\x00\x00\x00\x00\x36\x00\x00\x00")
 	testPNG = []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00")
 )
 
@@ -264,9 +265,11 @@ func TestAttachFiles_Rejects(t *testing.T) {
 		wantFetch bool
 	}{
 		{"declared over file cap", stubResp{body: testPDF}, file("x.pdf", "application/pdf", limits.MaxFileAttachmentBytes+1), platform.FileRejectTooLarge, false},
-		{"declared over image cap", stubResp{body: testPNG}, file("x.png", "image/png", maxSlackImageBytes+1), platform.FileRejectTooLarge, false},
-		{"body over image cap despite declared size", stubResp{body: big}, file("x.png", "image/png", 10), platform.FileRejectTooLarge, true},
-		{"image bytes are not an image", stubResp{body: testPDF}, file("x.png", "image/png", len(testPDF)), platform.FileRejectUnsupported, true},
+		{"declared over image cap", stubResp{body: testPNG}, file("x.png", "image/png", maxSlackImageBytes+1), platform.FileRejectImageTooLarge, false},
+		{"body over image cap despite declared size", stubResp{body: big}, file("x.png", "image/png", 10), platform.FileRejectImageTooLarge, true},
+		{"image bytes are not an image", stubResp{body: testPDF}, file("x.png", "image/png", len(testPDF)), platform.FileRejectImageUnsupported, true},
+		{"image bytes are bmp", stubResp{body: testBMP}, file("x.png", "image/png", len(testBMP)), platform.FileRejectImageUnsupported, true},
+		{"bmp declared", stubResp{body: testBMP}, file("x.bmp", "image/bmp", len(testBMP)), platform.FileRejectImageUnsupported, false},
 		{"not found", stubResp{status: http.StatusNotFound}, file("x.pdf", "application/pdf", 10), platform.FileRejectDownloadFailed, true},
 		{"sign-in page", stubResp{ctype: "text/html; charset=utf-8", body: []byte("<html>")}, file("x.txt", "text/plain", 6), platform.FileRejectDownloadFailed, true},
 		{"sign-in page, mixed-case type", stubResp{ctype: "Text/HTML", body: []byte("<html>")}, file("x.txt", "text/plain", 6), platform.FileRejectDownloadFailed, true},
@@ -366,8 +369,8 @@ func TestAttachFiles_MessageCaps(t *testing.T) {
 			{Name: "fake.png", Mimetype: "image/png", Size: len(fake), URLPrivateDownload: slackURL("/a/fake.png")},
 			{Name: "b.txt", Size: textSize, URLPrivateDownload: slackURL("/a/b.txt")},
 		})
-		if len(msg.Images) != 0 || len(msg.Files) != 2 || msg.Files[0].Reject != platform.FileRejectUnsupported {
-			t.Fatalf("images = %d, files = %+v; want fake.png rejected as unsupported", len(msg.Images), len(msg.Files))
+		if len(msg.Images) != 0 || len(msg.Files) != 2 || msg.Files[0].Reject != platform.FileRejectImageUnsupported {
+			t.Fatalf("images = %d, files = %+v; want fake.png rejected as an unsupported image", len(msg.Images), len(msg.Files))
 		}
 		if b := msg.Files[1]; b.Reject != platform.FileRejectNone || len(b.Data) != textSize {
 			t.Errorf("b.txt reject %q with %d bytes; want it delivered, since fake.png's bytes do not count", b.Reject, len(b.Data))

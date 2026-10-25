@@ -112,6 +112,8 @@ func postDM(d *Discord, content string, atts ...*discordgo.MessageAttachment) {
 var (
 	testPNG = []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
 	testPDF = []byte("%PDF-1.7\n%%EOF\n")
+	// testBMP sniffs as image/bmp, an image the model refuses.
+	testBMP = []byte("BM\x00\x00\x00\x00\x00\x00\x00\x00\x36\x00\x00\x00")
 )
 
 // sized pads prefix with 'a' bytes to n bytes in total.
@@ -212,11 +214,11 @@ func TestAttachFiles_Rejects(t *testing.T) {
 		wantImgs int
 	}{
 		{"image declared over cap", cdnAtt("big.png", "image/png", imgCap+1),
-			cdnObject{body: testPNG}, "big.png=too_large/0", 0, 0},
+			cdnObject{body: testPNG}, "big.png=image_too_large/0", 0, 0},
 		{"file declared over cap", cdnAtt("big.pdf", "application/pdf", fileCap+1),
 			cdnObject{body: testPDF}, "big.pdf=too_large/0", 0, 0},
 		{"image body over cap is not truncated", cdnAtt("big.png", "image/png", 10),
-			cdnObject{body: sized(testPNG, imgCap+1)}, "big.png=too_large/0", 1, 0},
+			cdnObject{body: sized(testPNG, imgCap+1)}, "big.png=image_too_large/0", 1, 0},
 		{"file body over cap", cdnAtt("big.txt", "text/plain", 10),
 			cdnObject{body: sized(nil, fileCap+1)}, "big.txt=too_large/0", 1, 0},
 		{"image at cap", cdnAtt("cap.png", "image/png", imgCap),
@@ -226,9 +228,13 @@ func TestAttachFiles_Rejects(t *testing.T) {
 		{"redirect not followed", cdnAtt("r.pdf", "application/pdf", 10),
 			cdnObject{status: http.StatusFound, location: "http://169.254.169.254/"}, "r.pdf=download_failed/0", 1, 0},
 		{"image whose bytes are not an image", cdnAtt("fake.png", "image/png", 10),
-			cdnObject{body: testPDF}, "fake.png=unsupported/0", 1, 0},
+			cdnObject{body: testPDF}, "fake.png=image_unsupported/0", 1, 0},
+		{"image whose bytes are bmp", cdnAtt("fake.png", "image/png", len(testBMP)),
+			cdnObject{body: testBMP}, "fake.png=image_unsupported/0", 1, 0},
+		{"bmp declared", cdnAtt("x.bmp", "image/bmp", len(testBMP)),
+			cdnObject{body: testBMP}, "x.bmp=image_unsupported/0", 0, 0},
 		{"empty image", cdnAtt("empty.png", "image/png", 0),
-			cdnObject{}, "empty.png=unsupported/0", 1, 0},
+			cdnObject{}, "empty.png=image_unsupported/0", 1, 0},
 		{"host off the CDN allowlist", &discordgo.MessageAttachment{Filename: "x.pdf",
 			ContentType: "application/pdf", Size: 10, URL: "https://evil.example.com" + cdnPath("x.pdf")},
 			cdnObject{body: testPDF}, "x.pdf=download_failed/0", 0, 0},
@@ -296,7 +302,7 @@ func TestAttachFiles_MessageCaps(t *testing.T) {
 		{"rejected image frees its share", []upload{
 			up(cdnAtt("fake.png", "image/png", 10*mib), cdnObject{body: sized(testPDF, 10*mib)}),
 			up(txt("b.txt", 22*mib+1)),
-		}, "fake.png=unsupported/0 b.txt=ok/23068673", 2, 0},
+		}, "fake.png=image_unsupported/0 b.txt=ok/23068673", 2, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
