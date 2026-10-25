@@ -64,8 +64,7 @@ func rejectIfTooManyFields(w http.ResponseWriter, r *http.Request) bool {
 // a SendRouter view AND reached engine.router for writes — two handles on one
 // *session.Router, which is the exact "two views of one state" shape #2551
 // filed against the old hub+router pair. Reads and writes both go through
-// engine methods now; the handler touches no engine field directly, and the
-// send_engine_ownership lint rule keeps it that way.
+// engine methods now; the handler touches no engine field directly.
 type SendHandler struct {
 	nodeAccess   NodeAccessor
 	engine       *sendEngine

@@ -1,22 +1,21 @@
 # Dependabot v2 config (RNEW-OPS-413).
 #
 # Scope:
-#   - gomod:        weekly scan of go.mod / go.sum
-#   - github-actions: weekly scan of workflow files
+#   - gomod:        monthly scan of go.mod / go.sum
+#   - github-actions: monthly scan of workflow files
 #
 # Not enabled:
 #   - npm/yarn:     naozhi has no JS build (dashboard is hand-written vanilla JS).
 #   - docker:       no Dockerfile in this repo.
 #
-# Security fix PRs bypass the weekly cadence and open immediately; the
+# Security fix PRs bypass the monthly cadence and open immediately; the
 # schedule below only affects regular version-bump PRs.
 version: 2
 updates:
   - package-ecosystem: gomod
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
       time: "03:00"
       timezone: Asia/Shanghai
     open-pull-requests-limit: 5
@@ -37,8 +36,7 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
       time: "03:00"
       timezone: Asia/Shanghai
     open-pull-requests-limit: 3

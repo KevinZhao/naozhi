@@ -123,7 +123,7 @@ Hub 进入 Shutdown 流程后（`debounceClosed=true`）调用 `BroadcastSession
 1. **Cross-method invariant 必须在本文档显式写**——godoc 行内表达不了多方法时序的，进本文件
 2. **每个跨包接口都有锚点**：`#1.1`, `#1.2` 形式，CONTRACT 编号 `CT-MQ-1`, `CT-BC-1` 这种 `<scope>-<id>`，方便 godoc 反向引用
 3. **AST linter rule 4** (Phase 1 前) 自动验证：实现侧 godoc 中的 `satisfies: <pkg>.<Iface>` 必须在本文档有对应 §
-4. **接口加方法时**：本文件 + linter exemptions.yaml + 实现侧 godoc 三处必须同步更新（PR description 列出三处 diff 行号）
+4. **接口加方法时**：本文件 + 实现侧 godoc 两处必须同步更新（PR description 列出两处 diff 行号；linter exemptions.yaml 已随 #3723 删除）
 
 ---
 
