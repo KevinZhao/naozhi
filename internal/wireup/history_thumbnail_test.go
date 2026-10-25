@@ -1,7 +1,6 @@
 package wireup
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/discovery"
@@ -11,16 +10,14 @@ import (
 // discovery.ThumbnailFn nil, image blocks in rehydrated JSONL history are
 // silently dropped — no compile error, no warning, just missing pictures.
 //
-// The assignment moved from internal/history/claudejsonl's init() to this
-// package's init() (#2649 G1-d) and now to a Boot step (#2714): importing wireup
-// no longer wires anything, calling the step does. So the test calls it, which
-// also means the assertion covers the step rather than a package side effect.
+// Importing wireup wires nothing; main calls WireHistoryThumbnails, so the
+// test calls it too.
 func TestThumbnailHookIsWired(t *testing.T) {
 	prev := discovery.ThumbnailFn
 	t.Cleanup(func() { discovery.ThumbnailFn = prev })
 	discovery.ThumbnailFn = nil
 
-	NewBoot().WireHistoryThumbnails()
+	WireHistoryThumbnails()
 
 	if discovery.ThumbnailFn == nil {
 		t.Fatal("WireHistoryThumbnails left discovery.ThumbnailFn nil — image blocks in JSONL history would be dropped with no other symptom")
@@ -29,28 +26,6 @@ func TestThumbnailHookIsWired(t *testing.T) {
 	// returns "" would satisfy the nil check while dropping every image.
 	if got := discovery.ThumbnailFn(pngFixture(), 64); got == "" {
 		t.Error("ThumbnailFn returned empty for a valid PNG; the hook is wired to something that drops images")
-	}
-}
-
-// A process that forgets the step must not serve: nil ThumbnailFn has no
-// symptom other than missing images, which is exactly what Validate exists to
-// prevent (#1165 / #1579).
-// Not parallel: WireHistoryThumbnails writes the process-global hook.
-func TestValidate_RequiresTheThumbnailStep(t *testing.T) {
-	prev := discovery.ThumbnailFn
-	t.Cleanup(func() { discovery.ThumbnailFn = prev })
-	b := NewBoot()
-	b.EnsureCLIBackends()
-	b.RecordHistoryBackends()
-	if err := b.Validate(); err == nil {
-		t.Fatal("Validate passed without the thumbnail step; a nil ThumbnailFn would ship silently")
-	} else if !strings.Contains(err.Error(), "history-thumbnail") {
-		t.Errorf("Validate error %q must name the missing step", err)
-	}
-
-	b.WireHistoryThumbnails()
-	if err := b.Validate(); err != nil {
-		t.Errorf("Validate must pass once every step ran: %v", err)
 	}
 }
 

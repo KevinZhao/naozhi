@@ -29,7 +29,6 @@ RFC 是落地前的设计取舍与实测记录，**不是最终规范**——架
 | [direct-user-settings.md](direct-user-settings.md) | Draft v2（被 naozhi-owned-settings-v3 部分反转） | `--setting-sources user` |
 | [event-log-persistence.md](event-log-persistence.md) | v3 GA | EventLog 磁盘持久化 |
 | [evententry-versioning.md](evententry-versioning.md) | — | EventEntry schema 版本 |
-| [eventlog-subsystem-unify.md](eventlog-subsystem-unify.md) | Phase 1-2 已实施，余搁置 | eventlog 接口断言闸门 |
 | [key-resolver.md](key-resolver.md) | Phase 1-6 已实装 | planner/agent session key 派生 |
 | [kiro-effort-control.md](kiro-effort-control.md) | 已实现 | `cli.effort` → `acp --effort` |
 | [kiro-effort-visibility.md](kiro-effort-visibility.md) | 已实装 | kiro effort 透出到会话头部 |

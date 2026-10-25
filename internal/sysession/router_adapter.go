@@ -5,7 +5,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/session"
-	"github.com/naozhi/naozhi/internal/session/api"
 )
 
 // RawSystemSessionRouter is the producer-side router shape satisfied directly
@@ -14,8 +13,7 @@ import (
 // ONLY place in the package that mentions internal/cli: Config.Router accepts
 // it and NewManager wraps it in routerAdapter (#1370).
 type RawSystemSessionRouter interface {
-	// Shared streaming-read capability: one canonical VisitSessions signature (#791).
-	api.SessionVisitor
+	VisitSessions(fn func(session.SessionSnapshot) bool)
 	SetUserLabelWithOrigin(key, label, origin string) bool
 	ClearUserLabelOrigin(key string) bool
 	RegisterSystemStub(key, workspace, lastPrompt string)

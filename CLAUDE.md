@@ -66,7 +66,7 @@ cmd/naozhi/main.go
   -> upstream     Reverse-connect 客户端（NAT 穿透；拨号 primary naozhi）
 
   持久化 / 历史
-  -> eventlog     Event log 子系统（persist/schema/api 子包；append-only + crash recovery）
+  -> eventlog     Event log 子系统（persist/ring/schema 子包；append-only + crash recovery）
   -> history      后端无关历史加载接口；claudejsonl/kirojsonl/codexjsonl/naozhilog/merged 子包
   -> attachment   附件持久化 + refcount tracker 子包 + IM/dashboard 文件类型判定（ClassifyFile / MaybeSupported / ExtForMime）
   -> runlog       per-owner run 记录的磁盘布局层（根校验/目录守卫/原子写/owner 锁），cron 与 session/runhistory 共用
@@ -86,7 +86,6 @@ cmd/naozhi/main.go
   -> shim         零停机重启：outlive naozhi 的 sidecar 进程
   -> usermsg      用户消息分类
   -> gitinfo      读取目录的 git branch / worktree 状态
-  -> i18n         Locale 解析与消息渲染
   -> metrics      进程级计数器（expvar）
   -> runtelemetry 跨子系统 run 生命周期事件类型；Tee 把两个 Broadcaster 并列（Hub + webhook）
   -> webhook      出站 webhook 发送器（每端点一 goroutine + 有界队列、HMAC 签名、退避重试、Deliver 永不阻塞），server 经 webhookBroadcaster 挂到 runtelemetry 上；只依赖 promexport
@@ -95,7 +94,6 @@ cmd/naozhi/main.go
   -> budget       每日 USD 预算：订阅 cost 账本的内存日索引（IM 会话 / 项目 planner / cron job / 全局）+ Gate 判定；只依赖 costledger 与 sessionkey
   -> naozhisettings  naozhi 托管的 Claude settings 文件
   -> uiprefs      Dashboard 展示偏好持久化
-  -> registry     泛型 Typed 注册表（新闭集注册表的默认选择）
   -> envpolicy    共享 env 过滤原语
   -> wsproto      浏览器 WS 协议单一真相源（type 常量 + per-type frame）
   -> replyfmt     回复成形规则（单条截断标记 / [i/N] 页码 / 分页宽度预留 / 代码块感知的分段 SplitText），dispatch 与 cron 共用
@@ -108,7 +106,6 @@ cmd/naozhi/main.go
   -> netutil      Client-IP 提取（trusted-proxy 处理）
   -> ratelimit    Per-key token-bucket 限流（login/WS 握手/transcribe/node 等 HTTP 入口，及 dispatch 的 IM 按发送者限流 im_rate_limit）
   -> limits       跨包大小/数量上限常量
-  -> sessionconst Session 调优常量
   -> sessionkey   Session key 前缀规范（router 命名空间）
   -> tuningspec   model/effort 值校验（config 与 session 共享的 flag-injection 防线）
   -> backendid    Backend-ID 长度/格式校验
@@ -222,7 +219,7 @@ Naozhi supports aggregating sessions from multiple machines into a single dashbo
 
 ### Project Management
 
-When `projects.root` is configured, the `project.Manager` scans **every non-hidden subdirectory** (`os.ReadDir` + skip names starting with `.` or matching a `projects.exclude` basename glob). There is NO marker-file requirement — a bare directory is a valid project, pinned by `TestScan_PicksUpDirsWithoutCLAUDEMd`. Each project stores config in `.naozhi/project.yaml` (planner model, prompt, chat bindings); a project with no `.naozhi/project.yaml` simply uses defaults. Scan never writes into a project directory: `project.yaml` is created only by an explicit bind, favorite or config edit, and the sidebar order (`CreatedAt`) of projects whose yaml carries none lives in `<session state root>/projects-index.json` (`internal/project/index.go`), keyed by absolute path. Once per root, Scan removes the created_at-only stubs earlier versions wrote (`stub_cleanup.go`: byte-exact, sole file in `.naozhi/`, not tracked by git, only after the index holding that order is on disk) and records the root in the index's `stub_cleanup_done`, so a stub restored later is kept.
+When `projects.root` is configured, the `project.Manager` scans **every non-hidden subdirectory** (`os.ReadDir` + skip names starting with `.` or matching a `projects.exclude` basename glob). There is NO marker-file requirement — a bare directory is a valid project, pinned by `TestScan_PicksUpDirsWithoutCLAUDEMd`. Each project stores config in `.naozhi/project.yaml` (planner model, prompt, chat bindings); a project with no `.naozhi/project.yaml` simply uses defaults. Scan never writes into a project directory: `project.yaml` is created only by an explicit bind, favorite or config edit, and the sidebar order (`CreatedAt`) of projects whose yaml carries none lives in `<session state root>/projects-index.json` (`internal/project/index.go`), keyed by absolute path.
 
 Chat binding (`/project <name>`) routes plain messages to a planner session (`project:{name}:planner`) with the project directory as workspace. Agent commands still create per-chat sessions but use the project path. Planner sessions are exempt from TTL eviction and max_procs capacity.
 

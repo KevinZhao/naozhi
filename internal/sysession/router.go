@@ -1,7 +1,7 @@
 package sysession
 
 import (
-	"github.com/naozhi/naozhi/internal/session/api"
+	"github.com/naozhi/naozhi/internal/session"
 )
 
 // SystemEventEntry is the sysession-local mirror of the clievent.EventEntry
@@ -21,11 +21,11 @@ type SystemEventEntry struct {
 // satisfies it via routerAdapter. Daemons stay on the streaming VisitSessions
 // path; ListSessions is intentionally not exposed.
 type SystemSessionRouter interface {
-	// VisitSessions (embedded from api.SessionVisitor) streams every session
+	// VisitSessions streams every session
 	// through fn; fn returning false stops early. fn runs under RLock and MUST
 	// NOT call back into Router methods that take r.mu — copy the fields the
 	// daemon needs, then resume work after the visit returns (#791).
-	api.SessionVisitor
+	VisitSessions(fn func(session.SessionSnapshot) bool)
 
 	// SetUserLabelWithOrigin MUST re-read LabelOrigin under r.mu before
 	// writing, returning false when origin=="auto" but the live origin is
