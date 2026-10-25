@@ -480,14 +480,14 @@ cron → {session, platform, routing}，node → {cli, config}。routing 保持�
 
 - server 包现状：66 个非测试文件、~15.8k 非测试行，`go list` 实测 **42 个内部包依赖**（全仓最多），包测试 ~96s（全仓最慢）。它同时承担组装根（`buildServer`，server.go:286-650，构造 sessionGuard、msgQueue、nodeCache、scratchPool、8 组 dashboard handler、retiredStore 等）与业务逻辑（send.go、dashboard_send.go 1089 行、takeover.go）两种职责，是全仓变更放大器。
 - 本文档写作后的实际演化已**部分推翻**"不做的事情"清单：`internal/dashboard/{auth,cron,cronview,discovery,ext/*,httputil,project,session}` 子包已建立且运行良好（当年"拆出去需要巨大 interface"的顾虑被 Deps 结构体注入模式化解），但 server 内仍残留 6 个 `dashboard_*.go`。
-- `internal/wireup` 组装层已存在（backends / boot / cron adapters / history / registry / schedulers），证明"构造互连上移"的模式可行，但 `buildServer` 的主体构造段尚未承接过去。
+- `internal/wireup` 组装层已存在（backends / cron adapters / history / schedulers；原 boot / registry 启动步骤登记已由 #3728 删除），证明"构造互连上移"的模式可行，但 `buildServer` 的主体构造段尚未承接过去。
 
 ### 切片计划（每片独立 PR、可独立回滚）
 
 | 片 | 范围 | 破坏面 | 前置 |
 |---|---|---|---|
 | 4a | 清零 lint rule 1 计划外违规：`/api/settings` ×2 → `ext/uisettings`、`/api/access-profiles` ×2 → `ext/accessprofile`（**已完成**，PR #2367） | 低（模式已验证） | 无 |
-| 4b | `buildServer` 的构造互连段上移 `wireup/boot.go`：sessionGuard、msgQueue、nodeCache、scratchPool、retiredStore 的构造与注入；server 只接收成品 | 中（构造顺序敏感，需保持 StartupCtx 语义） | 4a；**需先与权威计划 §十五 的 4b/3f/4c/5 暂缓决策对账**（scratchPool 三角问题见其 §6.7） |
+| 4b | `buildServer` 的构造互连段上移 `internal/wireup`（原定的 `wireup/boot.go` 已随 #3728 删除，如重启此片需新建文件）：sessionGuard、msgQueue、nodeCache、scratchPool、retiredStore 的构造与注入；server 只接收成品 | 中（构造顺序敏感，需保持 StartupCtx 语义） | 4a；**需先与权威计划 §十五 的 4b/3f/4c/5 暂缓决策对账**（scratchPool 三角问题见其 §6.7） |
 | 4c | send.go / takeover.go 业务流改消费者接口（对齐 dispatch/consumer.go、cron/deps.go 的既有模式），server 不再 import 具体实现类型 | 中 | 4b |
 
 **终态**：server 只留 HTTP 管道（routes / middleware / hub / 静态资源 / 平台 webhook 注册），内部依赖数预期从 42 降到 ~25。

@@ -3,7 +3,7 @@
 > **状态**: Implemented v2（2026-06-10 订正：P0-P5 已全部落地，P6 实质完成，P7 经核实关闭 won't-do；#383/#600/#805/#580/#577 全部 CLOSED）
 > **作者**: naozhi team (cron-cr)
 > **创建**: 2026-06-04
-> **修订**: 2026-06-10（v2：按 master 实测把状态从 Draft 升为 Implemented；正文 §0-§8 保留为当时的设计路线图，"本轮不落地代码"等措辞是写作时点的承诺，已被后续 phase PR 兑现）
+> **修订**: 2026-06-10（v2：按 master 实测把状态从 Draft 升为 Implemented；正文 §0-§8 保留为当时的设计路线图，"本轮不落地代码"等措辞是写作时点的承诺，已被后续 phase PR 兑现）；2026-10-25：`internal/session/api`（含 `SessionVisitor` 与 `assert.go`）已由 #3728 整包删除，sysession 改为直接声明 `VisitSessions` 方法签名，正文中对该包的引用均为历史描述
 > **范围**: 合并五个 Router 拆分锚点为单一拆分路线图；~~本轮纯设计不落地代码~~（设计已评审通过并分 phase 落地，见 §0.1）
 > **关联 issue**: #383, #600, #805, #580, #577
 > **关联代码**: internal/session/router_*.go, managed.go; dispatch/cron/server/upstream consumer.go; internal/discovery, internal/sysession
@@ -218,7 +218,7 @@ Lookup/Lifecycle/Mutator/Router-union 共享 mixin，但 **#1600 已把它们全
   `router_known_ids_cap_test.go` / `router_restore_entry_test.go` 等。
 - **4 个 consumer 契约**：`internal/session/contract_test.go` 钉
   `var _ dispatch.SessionRouter = (*session.Router)(nil)` 等；
-  `internal/session/api/assert.go` 钉 `SessionVisitor`；
+  ~~`internal/session/api/assert.go` 钉 `SessionVisitor`~~（该包已由 #3728 删除）；
   各 consumer 包内的 fake-injection 测试。
 
 ### 4.2 每步迁移的绿条件（候选 A 下）
@@ -327,8 +327,8 @@ N/A 部分：无新增日志/trace——本轮纯结构重排，运行时行为�
 - `dispatch.SessionRouter`(8)、`cron.SessionRouter`(3)、
   `server.HubRouter`(14)/`ScratchRouter`(3)/`SendRouter`(2)、
   `upstream.{SessionLookup,SessionLifecycle,SessionMutator}`(2/5/2)、
-  `api.SessionVisitor`(1) 全部靠 Go 结构化 typing 隐式满足。
-- `internal/session/contract_test.go` + `internal/session/api/assert.go` 的
+  `api.SessionVisitor`(1，已由 #3728 删除) 全部靠 Go 结构化 typing 隐式满足。
+- `internal/session/contract_test.go`（原另有 `internal/session/api/assert.go`，已删）的
   编译期 `var _ X = (*session.Router)(nil)` 钉死签名——任一 phase 改了被这些
   接口覆盖的方法签名，**build 即红**。
 - 内部 helper（`indexAdd`/`indexDel`/`acquirePendingSpawnSlotLocked` 等）可改

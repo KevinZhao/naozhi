@@ -353,7 +353,6 @@
 - [R250531-PERF-13] notifySubscribers 有订阅者时每次 Append 取 subMu.RLock(已有 subCount==0 快路径) — internal/cli/eventlog_subscribe.go:95
 - [R250531-PERF-15] SinkFor batchJob.Key 按值复制入队列(key 串 ≤64B) — internal/eventlog/persist/persister.go:489
 - [R250531-ARCH-03] sysession 对 internal/session 仅半解耦(cli 已镜像 session 未镜像) — internal/sysession/auto_titler.go:14
-- [R250531-ARCH-05] registry.Typed[T] 已建但 0 生产采用(按迁移策略为有意) — internal/registry/registry.go
 - [R250531-SEC-8] feishu VerificationToken 比较后 raw token 留在 GC heap(理论内存泄露) — internal/platform/feishu/transport_hook.go:117
 - [R250531-SEC-10] APIError.Error() 的 e.Msg 用 %q 而非 SanitizeForLog(已防日志注入,仅一致性) — internal/platform/feishu/feishu.go:128
 - [R20260531-GO-5] server.go:465 fallback 用 deprecated cli.NewCLIBackendsHandler;已有 ctor 显式分支,churn-only — internal/server/server.go:465
@@ -412,7 +411,6 @@
 - [R20260602-GO-11] redactPathsInCronError 截断后冗余第二次 hasNoPathTrigger 扫描 — internal/cron/scheduler_finish.go:716
 - [R20260602-GO-12] sysession runner BinPath 绝对路径两次 os.Stat 重复校验 — internal/sysession/runner.go:137
 - [R20260602-ARCH-1] RedactSecrets 通用安全 util 错置 cron 域包，可移至 leaf textutil — internal/cron/redact_secrets.go:120
-- [R20260602-ARCH-2] wireup.Registry[T] 泛型零生产消费者，premature generalization — internal/wireup/registry.go:11
 - [R20260602-ARCH-3] 两处 typed-nil-interface collapse 逻辑重复，可抽 collapseTypedNil[T] — internal/dispatch/dispatch.go:514
 - [R20260602-GEN-6] IsDashboardProjectKey 生产声明但仅 test 调用，预留未用 — internal/sessionkey/key.go:98
 - [R20260602-GEN-7] retireAutoChainOnce 每次启动无条件 log complete 即使 cleaned=0 噪音 — internal/session/auto_chain_retire.go:92
@@ -502,7 +500,6 @@
 - [R100110-RACE-1] watchdogInterruptTimeoutAtomic package-level var t.Parallel 测试交叉覆写(测试基建,非生产) — internal/cron/scheduler_run.go:779
 - [R100110-CTX-1] NotifyCtx(nil,...) 三处传 nil parent(by-design,parent 故意忽略) — internal/dispatch/dispatch.go:1016
 - [R100110-LOOP-1] recountPersistedUserTurnsLocked 增量调用仍 O(n) 全扫(微优化) — internal/session/managed_query.go:346
-- [R20260603-ARCH-3] wireup package doc "no exported symbols" 已过时(现导出 Registry/BootStep/WireSchedulers) — internal/wireup/history_backends.go:13
 - [R20260603-SEC-2] dashboard CSP script-src 'unsafe-inline' 已是 accepted/tracked NEEDS-DESIGN(R242-SEC-1/R249-SEC-9) — internal/server/routes.go:522
 - [R20260603-SEC-4] reverseserver Capabilities slice 无元素数上限 (4KB+auth gate 已限) — internal/node/reverseserver.go:413
 - [R20260603-ARCH-5] hub_broadcaster switch 无 default arm 记录未知 subsystem (future-proof) — internal/server/hub_broadcaster.go:27
@@ -712,10 +709,7 @@
 - [R202606b-GO-009] scanUserPrompt 池切片在 bufio.Scanner 内部扩容后不回写,>16KiB 行失去池收益 — internal/discovery/scanner.go:754
 - [R202606b-ARCH-8] Scheduler 字段索引块与 per-field godoc 双份维护,必漂移 — internal/cron/scheduler.go:28-44
 - [R202606b-PERF-016] prepareInbound 每条入站消息 slog.With 分配新 logger(owner 路径丢弃) — internal/dispatch/dispatch.go:658-661
-- [R202606b-ARCH-7] internal/session/api 包仅 1 消费者(sysession),抽象成本>收益,可并入消费者 — internal/session/api/capabilities.go:1-42
-- [R202606c-GO-003] recordBootStep Get→Register 非原子 TOCTOU(init 期单线程实际无并发 trigger) — internal/wireup/boot.go:96
 - [R202606c-GO-005] selfupdate Checker.installed 无同步(单 goroutine Run 契约,无实际并发) — internal/selfupdate/checker.go:125
-- [R202606c-ARCH-8] wireup requiredBootSteps 缺 schedulers,scheduler 注册漏掉不被 Validate 捕获 — internal/wireup/boot.go:112
 - [R202606c-ARCH-5] attachment.Dir 是可变 package var 被 tracker 路径遍历安全守卫消费,应 const+WithDir — internal/attachment/store.go:43
 - [R202606c-CR-006] sysession renameOne 截断 title 不加省略号,clip 中途断词 — internal/sysession/auto_titler.go:685
 - [R202606d-SEC-4] HandleDirList 与 filesExistsLimiter 共享限流,深目录遍历可饿死上传 — internal/dashboard/project/dir_list.go
@@ -731,8 +725,6 @@
 - [R202606e-SEC-5] memory popover renderMd 允许 LLM 写的 http:// 可点链接(open-redirect/钓鱼向) — internal/server/static/dashboard.js:13216
 - [R202606e-SEC-6] reconcileSandboxPending os.ReadDir 无 entry 上限,对抗性目录可 startup IO 停顿 — internal/cron/sandbox_pending.go:155
 - [R202606e-PERF-006] ObserveCronExecutionDuration 遍历全 9 桶无早 break — internal/metrics/cron_histogram.go:85
-- [R202606e-ARCH-7] backend 注册双轨语义(panic vs once+recover)易踩,应迁 registry.Typed — internal/cli/backend/profile.go:232
-- [R202606e-GO-009] internal/registry 包零生产 importer,基础设施死代码 — internal/registry/registry.go:1
 - [R202606e-CR-008] TurnCostDelta raw<0 且 prev==0 首轮负读测试缺口 — internal/session/runhistory/cost_test.go:23
 - [R202606f-PERF-004] shim readStderr scanner.Text() 每行 3 分配,应仿 MarshalStdoutLine 加 MarshalStderrLine — internal/shim/server.go:759
 - [R202606f-PERF-009] dispatchProtocolEvent 每 passthrough 事件 make+copy slot 快照无 pool — internal/cli/process_readloop.go:714
@@ -757,7 +749,6 @@
 - [R202606j-PERF-005] formatToolUse 对 Bash/Grep/Glob/Agent 各 json.Unmarshal,单字段可手解析 — internal/dispatch/status.go:82
 - [R202606j-PERF-002] mergeStopAndValues 返回 mergedCtx 接口装箱致每 passthrough 消息逃逸堆 — internal/dispatch/passthrough_stopctx.go:35
 - [R202606j-GO-003] ManagedState 无锁读 s.exempt(write-once-at-construction 实际安全),宜 atomic.Bool 或文档化 — internal/session/managed_state.go:82
-- [R202606j-CR-005] i18n.compile 畸形占位符守卫查 { 不查 },{a}} 静默丢第二个 } — internal/i18n/printer.go:50
 - [R202606j-PERF-007] apierr.Localize 每 reply strings.ToLower(prefix) 分配,可 EqualFold 免分配 — internal/apierr/apierr.go:71
 - [R202606i-PERF-004] shim WriteStateFile 用 json.MarshalIndent,生产无人读应 json.Marshal(重复发现,见 R202606f-PERF-012) — internal/shim/state.go:83
 - [R202606i-CR-003] R202606-CORR-002 测试锚点无对应 tracking issue,traceability 缺失 — internal/server/unauth_unknownip_failclosed_test.go:124

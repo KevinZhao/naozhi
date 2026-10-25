@@ -75,7 +75,8 @@ var ErrTakeoverRaced = errors.New("concurrent session created during takeover")
 // field is zero.
 const (
 	// DefaultMaxProcs is the concurrent-process cap applied when
-	// RouterConfig.MaxProcs is not set.
+	// RouterConfig.MaxProcs is not set. Keep in sync with
+	// config.defaultSessionMaxProcs (internal/config/defaults.go).
 	DefaultMaxProcs = 3
 	// DefaultTTL is the idle-session eviction threshold applied when
 	// RouterConfig.TTL is not set.
