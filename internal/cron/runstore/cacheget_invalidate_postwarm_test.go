@@ -16,9 +16,7 @@ import (
 // being deleted, so a cache miss is the correct semantic.
 //
 // The race window is deterministic here via the cacheGetPostWarmHook test
-// seam, which fires between warmCache and the re-Load. This is the sibling
-// of TestCacheGet_ReLoadsAfterWarmCacheInvalidateRace (R247-GO-6 / #483),
-// which covers the invalidate landing BEFORE warmCache instead.
+// seam, which fires between warmCache and the re-Load.
 func TestCacheGet_MissesWhenInvalidateRacesPostWarm(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 10, time.Hour)

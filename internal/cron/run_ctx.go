@@ -90,7 +90,7 @@ type runOutcome struct {
 	errClass ErrorClass
 	errMsg   string
 	// errClass is the machine-readable class the dashboard picks its icon and
-	// i18n copy by; errMsg is only the expanded detail — human-readable, control
+	// display copy by; errMsg is only the expanded detail — human-readable, control
 	// characters escaped, absolute paths redacted, ≤ maxCronErrMsgRunes.
 	// result is the CLI's final text, already through sanitiseRunResult (4K
 	// rune cap + truncation suffix + control-character filter) where the path

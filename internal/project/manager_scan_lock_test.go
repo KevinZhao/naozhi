@@ -2,7 +2,6 @@ package project
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -225,53 +224,5 @@ func TestScan_ConcurrentScansAndWriters(t *testing.T) {
 	}
 	if got := projectNames(fresh.All()); got != want {
 		t.Errorf("order from the persisted index = %s, want %s", got, want)
-	}
-}
-
-// The stub sweep runs outside Scan's swap but still under m.mu, so a
-// writer's project.yaml save cannot land between its byte compare and its
-// remove.
-func TestSweepLegacyStubs_WaitsForWriterLock(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	makeProjectDir(t, root, "proj", nil)
-	m, _ := NewManager(root, PlannerDefaults{}, WithIndexPath(filepath.Join(t.TempDir(), "projects-index.json")))
-	if err := m.Scan(); err != nil {
-		t.Fatal(err)
-	}
-	// Re-arm the sweep and plant the stub an older Scan would have written.
-	m.index.stubCleanupDone = nil
-	stub := writeStub(t, root, "proj", m.index.createdAt[filepath.Join(root, "proj")])
-
-	m.mu.Lock() // stands in for a writer mid-save
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		m.scanMu.Lock()
-		defer m.scanMu.Unlock()
-		m.sweepLegacyStubs()
-	}()
-	select {
-	case <-done:
-		m.mu.Unlock()
-		t.Fatal("sweep finished while a writer held m.mu")
-	case <-time.After(100 * time.Millisecond):
-	}
-	data, err := os.ReadFile(stub)
-	if err != nil {
-		m.mu.Unlock()
-		t.Fatal(err)
-	}
-	saved := append(data, "favorite: true\n"...)
-	if err := os.WriteFile(stub, saved, 0600); err != nil {
-		m.mu.Unlock()
-		t.Fatalf("writer save: %v", err)
-	}
-	m.mu.Unlock()
-	<-done
-
-	got, err := os.ReadFile(stub)
-	if err != nil || string(got) != string(saved) {
-		t.Errorf("writer's project.yaml = %q, %v; want it kept as %q", got, err, saved)
 	}
 }

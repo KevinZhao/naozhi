@@ -107,3 +107,13 @@ func TestWebhook_CapHitEvictPositive_ReservesOneSlot(t *testing.T) {
 		t.Fatalf("seenNoncesCount = %d; want %d", got, maxSeenNonces-10+1)
 	}
 }
+
+// liveNonceCount counts the actual entries in seenNonces (test helper).
+func liveNonceCount(f *Feishu) int64 {
+	var n int64
+	f.seenNonces.Range(func(_, _ any) bool {
+		n++
+		return true
+	})
+	return n
+}

@@ -3,9 +3,8 @@
 // Eventlog tiers: ring.EventLog.ring (in-memory, lossy), persist.Persister
 // spool (durable, authoritative on restart, fed via this bridge's PersistSink),
 // naozhilog.Source (replay from the spool) and history/merged.Source (composed
-// read over the Claude-JSONL fallback). persist.Persister deliberately does not
-// implement eventlog/api.EventStore; it is fed via the per-key PersistSink
-// callback and read back via persist.Recover (#1570).
+// read over the Claude-JSONL fallback). persist.Persister is fed via the
+// per-key PersistSink callback and read back via persist.Recover.
 //
 // This bridge is the only place EventEntry → persist.Entry conversion lives.
 package session
