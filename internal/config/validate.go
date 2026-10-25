@@ -117,6 +117,9 @@ func validateArgvBearingFields(cfg *Config) error {
 	if err := validateEffortString("cli.effort", cfg.CLI.Effort); err != nil {
 		return err
 	}
+	if err := validatePermissionMode(cfg.CLI.PermissionMode); err != nil {
+		return err
+	}
 	for _, b := range cfg.CLI.Backends {
 		if err := validateArgvStrings(fmt.Sprintf("cli.backends[%s].args", b.ID), b.Args); err != nil {
 			return err
@@ -264,6 +267,18 @@ func validateArgvStrings(field string, args []string) error {
 // "pass no flag".
 func validateEffortString(field, value string) error {
 	return tuningspec.ValidateEffort(field, value)
+}
+
+// validatePermissionMode accepts only the cli.permission_mode values the
+// spawn path maps to a Claude permission mode; the CLI's other modes would
+// stall a headless turn or are not offered.
+func validatePermissionMode(value string) error {
+	switch value {
+	case "", PermissionModeBypass, PermissionModeAuto:
+		return nil
+	}
+	return fmt.Errorf("cli.permission_mode %q is not supported; use %q (default) or %q",
+		value, PermissionModeBypass, PermissionModeAuto)
 }
 
 // validateModelString gates a configured model identifier; empty is allowed

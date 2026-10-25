@@ -336,6 +336,45 @@ func TestExecuteGetSession_SessionErrorNotice(t *testing.T) {
 	}
 }
 
+// TestExecuteGetSession_SessionErrorNamesExitCause: a spawn whose CLI exited
+// at startup with a named cause (the adapter's TurnFailedError) stays
+// failed/session_error, for the dashboard's counts, and its notice names the
+// cause; an unnamed one keeps the bare sentence.
+func TestExecuteGetSession_SessionErrorNamesExitCause(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		cause TurnCause
+		want  string
+	}{
+		{TurnCauseBackendAuth, "启动会话失败（后端认证失败或凭证已过期），请联系管理员"},
+		{TurnCauseCLIConfig, "启动会话失败（CLI 配置错误，如 MCP 配置无效），请联系管理员"},
+		{TurnCauseCLIMissingRuntime, "启动会话失败（CLI 运行环境缺失），请联系管理员"},
+		{TurnCauseUnknown, "启动会话失败"},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.cause), func(t *testing.T) {
+			t.Parallel()
+			spawnErr := fmt.Errorf("%w: session cron:x: protocol init: cli exited during init (code 1)", &TurnFailedError{Cause: tc.cause})
+			s, rec, ns := newNoticeScheduler(t, &fakeRouter{getErr: spawnErr})
+			j := &Job{ID: "job-spawn-exit", Schedule: "@every 5m"}
+			s.putJobForTest(j)
+
+			s.executeGetSession(withNotify(newGetSessionArgs(t, s, j), "日报"))
+			ev := rec.endedAtCron(0)
+			if ev.State != RunStateFailed || ev.ErrorClass != ErrClassSessionError {
+				t.Errorf("ended = (%q, %q), want (failed, session_error)", ev.State, ev.ErrorClass)
+			}
+			if got := s.jobForTest(t, j.ID).LastErrorClass; got != ErrClassSessionError {
+				t.Errorf("persisted LastErrorClass = %q, want session_error", got)
+			}
+			want := "[Cron 日报] " + tc.want + " · run 9f8e7d6c"
+			if got := ns.noticesAfter(s); len(got) != 1 || got[0] != want {
+				t.Errorf("notices = %q, want [%q]", got, want)
+			}
+		})
+	}
+}
+
 // TestExecSendError_NoticeNamesCause: the send-error terminal names the cause,
 // and a deadline prints the job's budget.
 func TestExecSendError_NoticeNamesCause(t *testing.T) {

@@ -14,6 +14,7 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
+	"github.com/naozhi/naozhi/internal/attachment"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 )
@@ -180,13 +181,21 @@ func (f *Feishu) handleImage(ctx context.Context, handler platform.MessageHandle
 
 // handleFile downloads a file message's attachment and calls handler with it
 // in msg.Files. A failed download is still forwarded, marked with its
-// FileReject, so dispatch tells the user; a sender refused by admission costs
-// no download and gets no reply.
+// FileReject, so dispatch tells the user, as is a file whose name ClassifyFile
+// would refuse, without a download; a sender refused by admission costs no
+// download and gets no reply.
 func (f *Feishu) handleFile(ctx context.Context, handler platform.MessageHandler, msg platform.IncomingMessage, messageID, fileKey, fileName string) {
 	if !f.admitted(ctx, msg) {
 		return
 	}
 	file := platform.File{Name: fileName}
+	// Feishu sends no MIME type for a file message; the name alone decides.
+	if !attachment.MaybeSupported(fileName, "") {
+		file.Reject = platform.FileRejectUnsupported
+		msg.Files = []platform.File{file}
+		handler(ctx, msg)
+		return
+	}
 	data, err := f.DownloadFile(ctx, messageID, fileKey)
 	switch {
 	case err == nil:

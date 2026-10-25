@@ -200,24 +200,29 @@ func TestAutoPause_TransientBackendFailureDoesNotCount(t *testing.T) {
 		})
 	}
 	// An active job whose streak already sits at the threshold (as after the
-	// threshold was lowered) stays active, on the send and the spawn path.
-	for name, spawn := range map[string]bool{"at threshold send": false, "at threshold spawn": true} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			s, r, _, id := newAutoPauseScheduler(t, 2, "feishu")
-			s.editJobForTest(t, id, func(j *Job) { j.ConsecutiveFailures = 2 })
-			err := &TurnFailedError{Cause: TurnCauseBackendOverloaded}
-			if spawn {
-				r.set(err, nil)
-			} else {
-				r.set(nil, err)
-			}
-			runN(s, id, 1)
-			if j := s.jobForTest(t, id); j.Paused || j.ConsecutiveFailures != 2 || j.LastErrorClass != ErrClassTurnFailed {
-				t.Errorf("paused=%v streak=%d class=%q, want an active turn_failed job at streak 2", j.Paused, j.ConsecutiveFailures, j.LastErrorClass)
-			}
-		})
-	}
+	// threshold was lowered) stays active.
+	t.Run("at threshold", func(t *testing.T) {
+		t.Parallel()
+		s, r, _, id := newAutoPauseScheduler(t, 2, "feishu")
+		s.editJobForTest(t, id, func(j *Job) { j.ConsecutiveFailures = 2 })
+		r.set(nil, &TurnFailedError{Cause: TurnCauseBackendOverloaded})
+		runN(s, id, 1)
+		if j := s.jobForTest(t, id); j.Paused || j.ConsecutiveFailures != 2 || j.LastErrorClass != ErrClassTurnFailed {
+			t.Errorf("paused=%v streak=%d class=%q, want an active turn_failed job at streak 2", j.Paused, j.ConsecutiveFailures, j.LastErrorClass)
+		}
+	})
+	// A failed spawn ran no turn: its named cause (a CLI exit at startup)
+	// leaves it a session_error, and it counts.
+	t.Run("spawn counts", func(t *testing.T) {
+		t.Parallel()
+		s, r, _, id := newAutoPauseScheduler(t, 2, "feishu")
+		s.editJobForTest(t, id, func(j *Job) { j.ConsecutiveFailures = 1 })
+		r.set(&TurnFailedError{Cause: TurnCauseBackendAuth}, nil)
+		runN(s, id, 1)
+		if j := s.jobForTest(t, id); !j.Paused || j.ConsecutiveFailures != 2 || j.LastErrorClass != ErrClassSessionError {
+			t.Errorf("paused=%v streak=%d class=%q, want a paused session_error job at streak 2", j.Paused, j.ConsecutiveFailures, j.LastErrorClass)
+		}
+	})
 	t.Run("quota counts", func(t *testing.T) {
 		t.Parallel()
 		s, r, _, id := newAutoPauseScheduler(t, 1, "feishu")

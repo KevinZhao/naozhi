@@ -15,7 +15,7 @@ func TestSetupWriteConfig_NewFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 
-	if _, err := setupWriteConfig(path, "test-token-123", ""); err != nil {
+	if _, err := setupWriteConfig(path, "test-token-123", "", ""); err != nil {
 		t.Fatalf("setupWriteConfig: %v", err)
 	}
 
@@ -66,7 +66,7 @@ log:
 		t.Fatal(err)
 	}
 
-	if _, err := setupWriteConfig(path, "new-token-456", ""); err != nil {
+	if _, err := setupWriteConfig(path, "new-token-456", "", ""); err != nil {
 		t.Fatalf("setupWriteConfig: %v", err)
 	}
 
@@ -110,7 +110,7 @@ platforms:
 		t.Fatal(err)
 	}
 
-	if _, err := setupWriteConfig(path, "wx-token", ""); err != nil {
+	if _, err := setupWriteConfig(path, "wx-token", "", ""); err != nil {
 		t.Fatalf("setupWriteConfig: %v", err)
 	}
 
@@ -135,7 +135,7 @@ func TestSetupWriteConfig_CreateSubdirs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sub", "deep", "config.yaml")
 
-	if _, err := setupWriteConfig(path, "token", ""); err != nil {
+	if _, err := setupWriteConfig(path, "token", "", ""); err != nil {
 		t.Fatalf("setupWriteConfig: %v", err)
 	}
 
@@ -150,7 +150,7 @@ func TestUpdateWeixinToken_NoPlatforms(t *testing.T) {
 log:
   level: "info"
 `)
-	result, _, err := updateWeixinConfig(input, "my-token", "", false)
+	result, _, err := updateWeixinConfig(input, "my-token", "", "", false)
 	if err != nil {
 		t.Fatalf("updateWeixinConfig: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestSetupWriteConfig_LoadableByConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 
-	if _, err := setupWriteConfig(path, "wx-token", ""); err != nil {
+	if _, err := setupWriteConfig(path, "wx-token", "", "https://sh.ilinkai.weixin.qq.com"); err != nil {
 		t.Fatalf("setupWriteConfig: %v", err)
 	}
 
@@ -192,6 +192,9 @@ func TestSetupWriteConfig_LoadableByConfig(t *testing.T) {
 	if cfg.Platforms.Weixin == nil || cfg.Platforms.Weixin.Token != "wx-token" {
 		t.Errorf("weixin token round-trip: got %+v, want token=wx-token",
 			cfg.Platforms.Weixin)
+	}
+	if cfg.Platforms.Weixin != nil && cfg.Platforms.Weixin.BaseURL != "https://sh.ilinkai.weixin.qq.com" {
+		t.Errorf("weixin base_url round-trip: got %q", cfg.Platforms.Weixin.BaseURL)
 	}
 	if cfg.CLI.Path != "claude" {
 		t.Errorf("cli.path: got %q, want %q", cfg.CLI.Path, "claude")
@@ -216,7 +219,7 @@ func TestSetupWriteConfig_AppliesRuntimeDefaults(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 
-	if _, err := setupWriteConfig(path, "wx-token", ""); err != nil {
+	if _, err := setupWriteConfig(path, "wx-token", "", ""); err != nil {
 		t.Fatalf("setupWriteConfig: %v", err)
 	}
 
@@ -283,7 +286,7 @@ func TestSetupWriteConfig_TokenWithYAMLSpecials(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "config.yaml")
 
-			if _, err := setupWriteConfig(path, token, ""); err != nil {
+			if _, err := setupWriteConfig(path, token, "", ""); err != nil {
 				t.Fatalf("setupWriteConfig: %v", err)
 			}
 

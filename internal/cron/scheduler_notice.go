@@ -111,9 +111,9 @@ func escapeCronMarkdownPunct(s string) string {
 
 // failureNoticeBody is the IM body, sent to `to`, for a run of snap's job that
 // did not succeed: the cause named from errClass/state (and turnCause for a
-// failed turn), then the run id's first 8 hex chars (the same short form the
-// dashboard history shows). timeout is the run's wall-clock budget, printed on
-// the timed-out bodies. Never carries the raw error text.
+// failed turn or spawn), then the run id's first 8 hex chars (the same short
+// form the dashboard history shows). timeout is the run's wall-clock budget,
+// printed on the timed-out bodies. Never carries the raw error text.
 func failureNoticeBody(snap jobSnapshot, to NotifyTarget, errClass ErrorClass, turnCause TurnCause, state RunState, runID string, timeout time.Duration) string {
 	timedOut := state == RunStateTimedOut || errClass == ErrClassDeadlineExceeded
 	var cause string
@@ -127,7 +127,7 @@ func failureNoticeBody(snap jobSnapshot, to NotifyTarget, errClass ErrorClass, t
 	case errClass == ErrClassSessionCapacity:
 		cause = "定时任务会话数已达上限，本次已跳过；可错开执行时间或改为每次重置上下文"
 	case errClass == ErrClassSessionError:
-		cause = "启动会话失败"
+		cause = sessionErrorNotice(turnCause)
 	case errClass == ErrClassSendError:
 		cause = "执行失败（CLI 发送错误）"
 	case errClass == ErrClassTurnFailed && turnCause == TurnCauseContextTooLong && !snap.fresh:
@@ -173,6 +173,23 @@ var turnFailedNotices = map[TurnCause]string{
 	TurnCauseResumeUnavailable:  "执行失败（上次会话无法恢复），下次执行将尝试开启新会话",
 	TurnCauseCLIConfig:          "执行失败（CLI 配置错误导致启动失败，如 MCP 配置无效），请联系管理员",
 	TurnCauseCLIMissingRuntime:  "执行失败（CLI 运行环境缺失），请联系管理员",
+}
+
+// sessionErrorNotices words the causes of a CLI that exited at startup, for a
+// spawn that failed on one (session_error).
+var sessionErrorNotices = map[TurnCause]string{
+	TurnCauseBackendAuth:       "启动会话失败（后端认证失败或凭证已过期），请联系管理员",
+	TurnCauseCLIConfig:         "启动会话失败（CLI 配置错误，如 MCP 配置无效），请联系管理员",
+	TurnCauseCLIMissingRuntime: "启动会话失败（CLI 运行环境缺失），请联系管理员",
+}
+
+// sessionErrorNotice is the notice cause for a failed spawn; one with no
+// named cause gets the bare sentence.
+func sessionErrorNotice(c TurnCause) string {
+	if s, ok := sessionErrorNotices[c]; ok {
+		return s
+	}
+	return "启动会话失败"
 }
 
 // turnFailedNotice is the notice cause for a failed turn; a cause nobody
