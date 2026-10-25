@@ -2,8 +2,10 @@ package server
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/sha512"
 	"encoding/base64"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -42,7 +44,7 @@ func TestVendorAssets_SRIMatchesEmbedded(t *testing.T) {
 		}
 		want := p[2]
 		pinned[key] = true
-		b := staticAssetBytes(key)
+		b := vendorContent(t, key)
 		if b == nil {
 			t.Errorf("render_md.js loads /static/%s, which is not embedded", key)
 			continue
@@ -59,10 +61,28 @@ func TestVendorAssets_SRIMatchesEmbedded(t *testing.T) {
 	}
 }
 
+// vendorContent is the release file an asset key serves: its bytes, or the
+// decompression of a gzip-only asset's gz form.
+func vendorContent(t *testing.T, key string) []byte {
+	t.Helper()
+	a, ok := staticAssets[key]
+	if !ok || a.bytes != nil {
+		return a.bytes
+	}
+	raw, err := gunzip(a.gz)
+	if err != nil {
+		t.Fatalf("%s: gzip form does not decompress: %v", key, err)
+	}
+	return raw
+}
+
 // TestVendorAssets_LargeFilesPrecompressed: a raw bundle would be gzipped at
 // BestCompression during init, on every start (mermaid's 3 MB: 65-140ms against
 // 11-18ms to gunzip), and would weigh its full size in the binary. Anything
-// that large is embedded as <name>.gz instead, its gzip form served as is.
+// that large is embedded as <name>.gz instead, its gzip form served as is, and
+// only its gzip form stays in memory (#3662): decompressing it at init kept the
+// 3 MB raw bundle resident next to it for the few clients that send no
+// Accept-Encoding.
 func TestVendorAssets_LargeFilesPrecompressed(t *testing.T) {
 	t.Parallel()
 	err := fs.WalkDir(vendorFS, "static/vendor", func(name string, d fs.DirEntry, err error) error {
@@ -86,8 +106,15 @@ func TestVendorAssets_LargeFilesPrecompressed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a := staticAssets[key]; !bytes.Equal(a.gz, gz) || len(a.bytes) < 3<<20 {
-		t.Errorf("%s: gzip form is not the embedded .gz, or the raw form (%d bytes) is not its decompression", key, len(a.bytes))
+	a := staticAssets[key]
+	if !bytes.Equal(a.gz, gz) {
+		t.Errorf("%s: gzip form is not the embedded .gz", key)
+	}
+	if a.bytes != nil {
+		t.Errorf("%s keeps its %d-byte decompression resident, want only the gzip form", key, len(a.bytes))
+	}
+	if raw := vendorContent(t, key); len(raw) < 3<<20 {
+		t.Errorf("%s decompresses to %d bytes, want the 3 MB release bundle", key, len(raw))
 	}
 }
 
@@ -111,7 +138,7 @@ func TestVendorAssets_DirectoryNamesRelease(t *testing.T) {
 		"vendor/katex-0.16.21/katex.min.js":     "0.16.21",
 		"vendor/mermaid-11.14.0/mermaid.min.js": "11.14.0",
 	} {
-		if got := versionRe.FindAllStringSubmatch(string(staticAssetBytes(key)), -1); len(got) != 1 || got[0][1] != want {
+		if got := versionRe.FindAllStringSubmatch(string(vendorContent(t, key)), -1); len(got) != 1 || got[0][1] != want {
 			t.Errorf("%s declares versions %v, want exactly %s", key, got, want)
 		}
 	}
@@ -155,7 +182,7 @@ func TestVendorRoutes_ServeEmbeddedTree(t *testing.T) {
 		if got := w.Header().Get("Cache-Control"); got != "private, max-age=31536000, immutable" {
 			t.Errorf("GET /static/%s Cache-Control = %q, want immutable: the path names the release", key, got)
 		}
-		if w.Body.String() != string(staticAssetBytes(key)) {
+		if w.Body.String() != string(vendorContent(t, key)) {
 			t.Errorf("GET /static/%s body differs from the embedded file", key)
 		}
 		if strings.HasSuffix(key, ".woff2") {
@@ -165,7 +192,7 @@ func TestVendorRoutes_ServeEmbeddedTree(t *testing.T) {
 		req.Header.Set("Accept-Encoding", "gzip")
 		w = httptest.NewRecorder()
 		srv.mux.ServeHTTP(w, req)
-		if raw, err := gunzip(w.Body.Bytes()); w.Header().Get("Content-Encoding") != "gzip" || err != nil || !bytes.Equal(raw, staticAssetBytes(key)) {
+		if raw, err := gunzip(w.Body.Bytes()); w.Header().Get("Content-Encoding") != "gzip" || err != nil || !bytes.Equal(raw, vendorContent(t, key)) {
 			t.Errorf("GET /static/%s with gzip = %q encoding, err %v: want the gzip form of the embedded file", key, w.Header().Get("Content-Encoding"), err)
 		}
 	}
@@ -280,4 +307,13 @@ func TestDashboardHTML_DoesNotPreloadVendor(t *testing.T) {
 	if page := string(staticAssetBytes("dashboard.html")); strings.Contains(page, "/static/vendor/") {
 		t.Error("dashboard.html as served names a /static/vendor/ asset; vendored scripts load on demand")
 	}
+}
+
+// gunzip returns the decompressed form of b.
+func gunzip(b []byte) ([]byte, error) {
+	zr, err := gzip.NewReader(bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	return io.ReadAll(zr)
 }

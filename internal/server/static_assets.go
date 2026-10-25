@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -202,6 +203,9 @@ var vendorFS embed.FS
 // whole file on every call, so each asset is read+hashed exactly once at init
 // and handlers share the read-only slice (#1771).
 type staticAsset struct {
+	// bytes is nil for a gzip-only asset (a vendor file embedded as .gz): only
+	// gz stays resident, and the rare client that refuses gzip gets it
+	// decompressed per request (#3662).
 	bytes []byte
 	etag  string
 	// gz is the gzip.BestCompression form, precomputed once at init for
@@ -339,7 +343,7 @@ var staticAssets, servedAssetVersion = func() (map[string]staticAsset, string) {
 // compressed, so only scripts and stylesheets are gzipped. A file embedded as
 // <name>.gz (gzip -9n of the release file) is served as <name>, its embedded
 // bytes as the gzip form, so a multi-megabyte bundle costs no compression at
-// init.
+// init and no decompressed copy in memory.
 func addVendorAssets(out map[string]staticAsset) {
 	err := fs.WalkDir(vendorFS, "static/vendor", func(name string, d fs.DirEntry, err error) error {
 		key, gzipped := strings.CutSuffix(strings.TrimPrefix(name, "static/"), ".gz")
@@ -355,27 +359,15 @@ func addVendorAssets(out map[string]staticAsset) {
 			out[key] = newStaticAsset(b, ext != ".woff2")
 			return nil
 		}
-		raw, err := gunzip(b)
-		if err != nil {
-			return err
+		if _, err := gzip.NewReader(bytes.NewReader(b)); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
 		}
-		a := newStaticAsset(raw, false)
-		a.gz = b
-		out[key] = a
+		out[key] = newGzipOnlyAsset(b)
 		return nil
 	})
 	if err != nil {
 		panic("read static/vendor: " + err.Error())
 	}
-}
-
-// gunzip returns the decompressed form of b.
-func gunzip(b []byte) ([]byte, error) {
-	zr, err := gzip.NewReader(bytes.NewReader(b))
-	if err != nil {
-		return nil, err
-	}
-	return io.ReadAll(zr)
 }
 
 // newStaticAsset wraps b with its strong ETag (sha256, first 16 bytes, hex)
@@ -387,6 +379,22 @@ func newStaticAsset(b []byte, compress bool) staticAsset {
 		a.gz = precompressGzip(b)
 	}
 	return a
+}
+
+// newGzipOnlyAsset wraps the gzip form gz of an asset that keeps no
+// decompressed copy. Its ETag hashes gz: the file is gzip -9n output, so its
+// bytes change exactly when the content does, and init never decompresses it.
+func newGzipOnlyAsset(gz []byte) staticAsset {
+	sum := sha256.Sum256(gz)
+	return staticAsset{gz: gz, etag: `"` + hex.EncodeToString(sum[:16]) + `"`}
+}
+
+// hasStaticAsset reports whether key is in the embedded asset table. Use it,
+// not staticAssetBytes(key) != nil, to tell a miss: a gzip-only asset has no
+// bytes.
+func hasStaticAsset(key string) bool {
+	_, ok := staticAssets[key]
+	return ok
 }
 
 // staticAssetETags is the map[key]ETag view for callers/tests that only need
@@ -402,7 +410,8 @@ var staticAssetETags = func() map[string]string {
 
 // staticAssetBytes returns the cached, read-only bytes for an embedded asset.
 // Callers MUST NOT mutate the returned slice — it is shared across all
-// requests. Returns nil when the key is unknown (asset failed to embed).
+// requests. Returns nil when the key is unknown (asset failed to embed) and for
+// a gzip-only asset, which writeStaticAssetBody serves.
 func staticAssetBytes(key string) []byte {
 	return staticAssets[key].bytes
 }
@@ -421,6 +430,18 @@ func writeStaticAssetBody(w http.ResponseWriter, r *http.Request, key string) {
 		h.Del("Content-Length")
 		if _, err := w.Write(a.gz); err != nil {
 			slog.Debug("static asset gz write", "key", key, "err", err)
+		}
+		return
+	}
+	if a.bytes == nil && a.gz != nil {
+		// Gzip-only: stream the decompression rather than keep it resident.
+		// The headers are already out, so an error can only be logged.
+		zr, err := gzip.NewReader(bytes.NewReader(a.gz))
+		if err == nil {
+			_, err = io.Copy(w, zr)
+		}
+		if err != nil {
+			slog.Debug("static asset gunzip write", "key", key, "err", err)
 		}
 		return
 	}
