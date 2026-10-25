@@ -273,7 +273,7 @@ T=33.25s replay(B) → result 'B_DONE'
 
 ### 结论
 
-- **CLI 在 now 抢占时保留 commandQueue**（与 `passthrough-mode-cc-tui-analysis.md` §T5 的源码分析一致）：先跑 C，再让 B 以自己的 uuid replay 独立成轮。naozhi 因此不能在 aborted result 上让排队 slot 失败，它们要等自己的 replay（#3394 删除了 `reapAbortedPreempted`）
+- **CLI 在 now 抢占时保留 commandQueue**（与 `passthrough-mode-cc-tui-analysis.md` §T5 的源码分析一致；该文档已删除，可用 `git log -- docs/rfc/passthrough-mode-cc-tui-analysis.md` 找回）：先跑 C，再让 B 以自己的 uuid replay 独立成轮。naozhi 因此不能在 aborted result 上让排队 slot 失败，它们要等自己的 replay（#3394 删除了 `reapAbortedPreempted`）
 - 2.1.288 的 aborted result 是 `subtype=success` + `is_error=false` + `terminal_reason=aborted_tools|aborted_streaming`，不再是 V2/V5 记录的 `error_during_execution`
 - 阻塞中的 Bash 工具不会被立即打断：abort 要等工具返回（上例 C 写入后约 17s），纯生成则是 10ms 级
 - 用提交的脚本复跑（同日，`--bash` 与 `--gen`）两种模式均 PASS，事件顺序同上

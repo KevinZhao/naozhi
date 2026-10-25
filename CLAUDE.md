@@ -364,14 +364,12 @@ docs/
 ├── design/                       # 架构与已实现功能设计
 │   ├── DESIGN.md                 # 主设计文档 —— 架构层面事实以此为准
 │   ├── architecture.html         # 架构可视化
-│   └── ...                       # 各子系统设计（multi-node / shim / server-split / i18n / ...）
-├── adr/                          # Architecture Decision Records
+│   └── ...                       # 各子系统设计（multi-node / shim / voice-transcription / config-precedence / planner / ...）
 ├── rfc/                          # RFC 工作文档（proposal / 验证报告 / phase 报告）
 │   └── README.md                 # 索引 + 状态表（Draft / 已实装 / 已废弃）——先看这里
 ├── ops/                          # 部署与运维 playbook（deployment / release-gate / pprof / ...）
-├── review/                       # 代码评审批次原始记录（batch*-raw.md / cosmetic-backlog.md）
-└── guides/                       # 操作手册（weixin-test / shim-testing）
+└── guides/                       # 操作手册（shim-testing）
 ```
 
-待办事项不再放 `docs/TODO.md`，已迁移 GitHub Issues（见 `docs/rfc/todo-to-issues-migration.md`）。
+待办事项不再放 `docs/TODO.md`，一律走 GitHub Issues。
 RFC 不是最终规范——其中很多已实装或已废弃，状态以 `docs/rfc/README.md` 的表格为准。
