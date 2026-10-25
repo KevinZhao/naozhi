@@ -1,77 +1,54 @@
 # RFC 索引
 
-本目录收录 naozhi 的 RFC 工作文档（proposal / design notes / phase 报告），用于在落地前沉淀设计取舍与实测证据。**RFC 不是最终规范**——架构层面的事实请以 `../design/DESIGN.md` 为准，本目录文件可能处于 Draft / 已实装 / 已废弃等任意状态，请先看下表确认。
+RFC 是落地前的设计取舍与实测记录，**不是最终规范**——架构层面的事实以 `../design/DESIGN.md` 为准。状态以各 RFC 首屏的 Status / 状态为准，下表只是速查。已实施或废弃的历史 RFC 已删除，需要时用 `git log -- docs/rfc/<name>.md` 找回。
 
-## 命名约定
-
-- 普通文件名（如 `passthrough-mode.md`）是**当前有效**的那一份。
-- 带 `.v1-deprecated`、`*-legacy-removal` 等后缀或状态标注为"Superseded"的文件保留是为了给后续读者提供历史上下文，不应再作为实施依据。
-- Phase/验证报告（如 `passthrough-mode-validation.md`、`passthrough-mode-phase-c-report.md`）是实测快照，不是设计本身。
-
-## 当前 RFC
-
-| RFC | 状态 | 日期 | 范围 |
-|---|---|---|---|
-| [agent-team-ui.md](agent-team-ui.md) | Ready for implementation (v4) | 2026-05-10 | 并行 agent/team 可视化与内部过程查看（dashboard） |
-| [agentcore-cloud-sandbox.md](agentcore-cloud-sandbox.md) | **v2（Phase 0 实测通过）** | 2026-06-10 | AWS Bedrock AgentCore Runtime 接成**执行基底（placement 轴，与 backend flavor 正交）**：控制面/数据面分离 + run-once 作业模型（不 resume，debug 走 replay）；A1-a naozhi hold 流式连接（microVM 无需反向可达）；不新增 flavor/protocol_agentcore，Runner 抽象（localRunner/agentcoreRunner）复用 protocol_claude.go；§7 界面设计（cron placement 选择器+围栏校验 / ☁️ 徽标三态 / run 详情+replay / 副作用人工确认队列）；安全机制：runtimeSessionId=run_id、双跑三件套封堵、run record 排除 secrets、in-flight reconcile；PR-1 Runner seam 已合（#2003） |
-| [agentcore-cloud-sandbox-validation.md](agentcore-cloud-sandbox-validation.md) | Phase 0 实测报告 | 2026-06-10 | V1-V4+V8 全过：microVM 内 CC 完整 turn（含 Bash 工具）/ spawn→init 0.6-0.7s / 内存 ~250MB（无 MCP）/ 三态判定 + StopRuntimeSession 即焚实证 / 30.2min hold 流全程不断；6 个实现层发现（SDK hold 流、禁后台任务、sessionId ≥33 字符、非 root、专用执行角色、**F6 idle 按流静默判定→keepalive 硬前提**）（agentcore-cloud-sandbox.md 的支撑材料） |
-| [askuser-question.md](askuser-question.md) | Proposal | 2026-05-10 | CC `AskUserQuestion` 工具在 `-p` 模式下的替代交互方案 |
-| [auto-workspace-chain.md](auto-workspace-chain.md) | Draft v3（双独立评审通过） | 2026-05-23 | 同 workspace 多 session 自动接 prev_session_ids 让 dashboard 翻历史能跨 sessionID；启动一次性回填 + spawn 自动接，默认开启可配置 |
-| [attachment-gc-daemon.md](attachment-gc-daemon.md) | 已实现（v2.1 设计落地；默认 enabled:false + dry_run 待运维启用） | 2026-05-31 | 接活死代码:把 `GCWithRefs` 接进 sysession `attachment-gc` daemon（非 cron），删 legacy `GC`，修复附件磁盘无限增长（#1198）。v2 补三项框架增强（ctx + per-root cap + startup-tick）+ 枚举改扫已知 workspace 根 + 默认 enabled:false/dry-run + 先删 .meta 防孤儿 + refcount best-effort。v2.1 修枚举完整性:root 集合补 project workspace（E1）、规范化去重防 symlink（E2）、per-root cap + round-robin 防饥饿（E3）、dry-run 按原因分桶（E4）、附最小止血版（E5） |
-| [attachment-refcount.md](attachment-refcount.md) | v1 MVP 已落地（GC cron 待启用） | 2026-05-10 | 大图跨 TTL 可见：attachment 引用计数与双 TTL GC |
-| [direct-user-settings.md](direct-user-settings.md) | Draft v2（architect 评审通过修订；security 评审中） | 2026-05-30 | naozhi spawn cc 改 `--setting-sources user` 直接加载 `~/.claude/settings.json`，删 override 副本 + env 白名单，使 naozhi cc 与命令行 cc 行为一致、单一配置源；保留 `applyClaudeEnvSettings`（父进程 Bedrock 鉴权）与 sysession Runner 的 `--setting-sources ""`（防 AutoTitler 死循环） |
-| [cli-mcp-config.md](cli-mcp-config.md) | Draft | 2026-08-20 | 新增 `cli.mcp_config` → `SpawnOptions.MCPConfigFile` → `--mcp-config`，使开启 `naozhi_settings.enabled`（隔离 settings，`--setting-sources ""`）的部署仍能给 cc 挂 MCP server。实测确认 `--setting-sources ""` 下 `--mcp-config` 是唯一可用入口（settings 的 `mcpServers` 键 / project `.mcp.json` 均被屏蔽）；`--mcp-config` 保留在 `deniedExtraFlags` 不动，按注释指引走专用 SpawnOptions 字段；opt-in 默认关，空值时 argv 逐字节不变 |
-| [planner.md](planner.md) | Draft v6（设计决策已确认，未实施） | 2026-10-25 | 一个对话框 + 最懂你也最懂系统的规划 agent。核心模型：三个角色（你 / Planner / 执行会话）、两种流动（消息 / 事件流）、两份知识（懂你 / 懂系统），无 Task、无"驾驶者"。v6 新增：监控底座（会话台账 + 统一健康状态 + 四级分流 + 监控监控器，第一步落地）；Planner 工作循环与检查机制（检查点确定性识别、统一介入阶梯、指令四条件 + 可校验证据 + 申诉、转向锁、队列与降级、粘性污染、记录先于行动、回放与影子模式）；闸门 = 拒绝 + 放行票据（实测 hook 超时即放行）；协作提示词；自修改三道防线；三级停止；推送三级；§18 决策 D1–D59 |
-| [codex-backend.md](codex-backend.md) | Draft v2（Phase 0 已实测 2026-06-21） | 2026-05-20 | OpenAI Codex CLI 作为第三个 backend：走 `codex app-server` JSON-RPC 2.0 over stdio（**非** `codex proto` / `exec --json` / `mcp-server`），`protocol_codex.go` + `profile_codex.go` 已实现，`codexjsonl` 历史 source 待 phase1；实测纠正：codex 原生支持 Bedrock（gpt-oss，agentic 受限） |
-| [codex-backend-validation.md](codex-backend-validation.md) | 实测报告 ✅ | 2026-06-21 | codex 0.141.0 Phase 0：app-server 协议跑通、method 名命中、Bedrock mantle/responses + gpt-oss 连通 + 两个约束（路径 bug / namespace 工具被拒） |
-| [cost-ledger.md](cost-ledger.md) | Draft v2.1（两轮评审签认） | 2026-09-05 | #2286 统一 cost 归口层：`internal/costledger` 叶子包（按天 JSONL append-only + 低基数 rollup），run owner 写账（session turn / cron 本地+sandbox / sysession），cron 本地 run 经 session cost window 归属花费（#3401 取代 `CostTotals()` 前后差分）；`/api/cost/summary` 按 unit 分桶；同时修 10 项计费精度缺陷（modelUsage 贯通、cron persistent 累计重复计费、记账脱离 runStore、kiro metering 差分、costBasis 标注） |
-| [consumer-interfaces.md](consumer-interfaces.md) | Proposal v2 | 2026-05-11 | ARCH-CONSUMER-IF：dispatch/hub/upstream 以消费端小接口替换 `*session.Router` 具体指针（v1 因方法清单虚构已重写） |
-| [cron-v2-polish.md](cron-v2-polish.md) | 设计提案（未实现） | 2026-05-09 | Cron 面板 5 项增量打磨（name/jitter/missed/sort/next-run） |
-| [cron-run-history.md](cron-run-history.md) | 设计提案 → 实施中 | 2026-05-17 | Cron 执行历史与生命周期可见性：CronRun 实体 / runs/ 滚动 ring / runInflight / WS started/ended / 时间轴 UI |
-| [cron-panel-consolidation.md](cron-panel-consolidation.md) | 设计提案 | 2026-05-20 | 把 cron 当前执行 + 历史从 sidebar/mainShell 全部收编进「定时任务」面板（drawer 布局；`/api/sessions` 过滤 cron stub） |
-| [cron-panel-consolidation-ui.md](cron-panel-consolidation-ui.md) | 设计提案（UI/UX 详细） | 2026-05-20 | 配套 cron-panel-consolidation：响应式断点、列表选中态、抽屉 6 段结构、状态机、文案、a11y、像素级 mockup |
-| [cron-history-redesign.md](cron-history-redesign.md) | Draft v1（提案中） | 2026-05-21 | 修订 cron-panel-consolidation-ui v2：detail 默认进历史 view、run 详情独立 sheet（桌面右抽屉/移动 bottom sheet 共组件）、双栏取代三栏、移动 3 级 push view、状态信号收敛、URL deep-link |
-| [event-log-persistence.md](event-log-persistence.md) | v3 GA 就绪 | 2026-05-10 | EventLog 磁盘持久化，图片与历史事件跨重启可见 |
-| [config-hot-reload.md](config-hot-reload.md) | Phase 1 已实现（#3437） | 2026-10-06 | 配置热重载：`SIGHUP` / `POST /api/system/config/reload` / `naozhi config reload` 三入口，重读 config.yaml 后只应用 `im_access` / `im_rate_limit` / `log.level` / `cost.budget` 上限（Dispatcher 与 `budget.Gate` 的 atomic setter + `slog.LevelVar`），其它段差异对**启动基线**比对后列为 `restart_required`；校验失败进程不变；`/health` 指纹走 `ConfigFingerprint`，没有待重启段时才前进到新文件。非目标：agents / reverse_nodes / 平台凭据、fsnotify |
-| [outbound-webhooks.md](outbound-webhooks.md) | Phase 1 已实现（#3448 a） | 2026-10-06 | 出站 webhook：`integrations.webhooks` 配置端点，`runtelemetry.Tee` 把 `webhookBroadcaster` 与 dashboard Hub 并列在同一个 Relay 上；`internal/webhook` 叶子按端点独立 goroutine + 256 深队列、HMAC-SHA256 签名、408/429/5xx 退避重试 3 次、`Deliver` 永不阻塞；payload 只含 run 元数据。非目标：session turn 事件（无 Broadcaster 生产者）、动态注册、死信持久化、MCP server（#3448 b） |
-| [kiro-effort-control.md](kiro-effort-control.md) | 已实现 | 2026-08-01 | 从 naozhi 配置设置 kiro thinking effort 档位：`cli.effort` / `cli.backends[].effort` / `agents[].effort` → `SpawnOptions.Effort` → `acp --effort`，压过 kiro 自身的 `chat.modelDefaults` 默认且不污染交互式 kiro（实测 2.16.0，`session/new` 与 `session/load` 均生效）。范围限定纯配置：无 per-session 覆盖、无运行时改档、不落盘。§4.5.1 记录已验证的既有缺陷——drift 检测只看 backend 层，故 `agents[].effort`（与既有 `agents[].model` 同源）会被判为参数漂移 |
-| [kiro-effort-visibility.md](kiro-effort-visibility.md) | Draft v2（双独立评审通过并修订） | 2026-08-01 | kiro 每轮 `_kiro.dev/metadata.effort`（thinking effort 档位）端到端透出到 dashboard 会话头部：normalize 层新增 `EventMetadata.Effort` → `Process.effort` (`atomic.Pointer[string]`，存原始 string 保 forward-compat) → `SessionSnapshot.Effort`；前端走挂载点 + `fetchSessions` 重绘（**修复 `renderMainShell` 不在 turn 边界触发导致 chip 要切会话才刷新**，turn-timer 同样受此 pre-existing 缺陷影响）。只做「可见」不做「可控」——`--effort` 传参划为 non-goal |
-| [key-resolver.md](key-resolver.md) | Phase 1-6 已实装（PR #9）；Phase 7 dashboard buildSessionOpts 待 | 2026-05-14 | ARCH3：收敛 planner/agent session key 派生；chat-view / planner-view 双接口（v2 修 v1 漏掉 #6/#7 不继承 defaults 的语义；Phase 6 删 dispatch 侧 legacy nil-resolver 分支） |
-| [learning-system.md](learning-system.md) | 设计提案 | 2026-04-14 | 会话结束触发的闭环自学习（skills/MEMORY/USER） |
-| [lightbox-gallery-nav.md](lightbox-gallery-nav.md) | Draft v2（双评审通过修订） | 2026-06-10 | dashboard lightbox 多图导航：同消息图片组内左右切换（按钮/←→/swipe）+ 计数器 + 方向性预加载 + 工具栏 ± 缩放按钮 + 图片点击迁委托监听；纯前端零后端改动；测试主体 Playwright e2e |
-| [managed-session-split.md](managed-session-split.md) | Implemented (v2.3) | 2026-05-29 | ARCH-MANAGED-SPLIT：`session/managed.go`(2262 行 / 76 func)按职责拆 6 份，纯文件移动零语义改动（identity/lifecycle/send/history/query），与 router 家族风格对称；解 churn 单文件第 3 高的冲突面 + 解锁 ProcessSender/EventReader facet 拆分。5 phase 全部落地 build/vet/test-race 全绿、func 计数稳定 76；实施中发现 §6"测试零改动"被 2 个 source-introspecting 测试证伪（已修文件名字面量，断言意图不变）。同 process-split 手法 |
-| [message-queue.md](message-queue.md) | 设计提案（未实现） | 2026-04-14 | 替代 sessionGuard 丢消息的 per-session 消息队列策略 |
-| [multi-backend.md](multi-backend.md) | 设计提案 v2（基于实测修订） | 2026-05-18 | Claude + Kiro 多 backend 切换/并存：backend.Profile 抽象、kirojsonl 历史、ACP cancel notification、reverse cap 路由、per-session ReplyTag、Dashboard §8 26 项 UI 差异化规约 |
-| [multi-backend-validation.md](multi-backend-validation.md) | Phase 0 实测报告 | 2026-05-18 | V1-V12 验证点的脚本、原始输出与 2 个真 bug 复现（multi-backend.md 的支撑材料） |
-| [naozhi-owned-settings-v3.md](naozhi-owned-settings-v3.md) | **PR-1+PR-2 已交付**（opt-in 默认关闭）；PR-3/PR-4 未开始 | 2026-07-11 | naozhi 拥有一份与本地 ~/.claude/settings.json 彻底隔离的 settings：`--setting-sources "" --settings <file>` 双路径 + 一次性 bootstrap（剥 hooks/env）+ config 开关。反转 direct-user-settings.md 的共享决策，使 naozhi 可配成与本地不同档位且本地配错不波及。thinking 旋钮与 dashboard UI 待 PR-3/PR-4 |
-| [passthrough-mode.md](passthrough-mode.md) | v2.2 设计文档 | 2026-05-09 | 直通 CC CLI 原生 command queue，不做合并/节流 |
-| [passthrough-mode-cc-tui-analysis.md](passthrough-mode-cc-tui-analysis.md) | 分析报告 | 2026-05-09 | CC TUI mid-turn 机制的源码级分析，交叉验证实测数据 |
-| [passthrough-mode-validation.md](passthrough-mode-validation.md) | Phase 0 实测报告 | 2026-05-09 | V1-V9 验证点的脚本与原始日志汇总 |
-| [passthrough-mode-phase-c-report.md](passthrough-mode-phase-c-report.md) | Phase C 实测报告 | 2026-05-06 | Dashboard 路径灰度实测结果与修复的 2 个 bug |
-| [pdf-attachment.md](pdf-attachment.md) | 已实装（IM 入口见 #3451） | 2026-05-06 | Dashboard PDF 附件上传，走 workspace + Read 工具路径；IM 文件接收（#3451）复用同一路径 |
-| [process-split.md](process-split.md) | Proposal v2 | 2026-05-11 | ARCH-PROCESS-SPLIT：`cli/process.go` 2464 行按职责拆 7 份，纯文件移动零语义改动（v2 修正 shimMsg 归属、EventCallback 跨包使用、测试文件数） |
-| [session-run-metrics.md](session-run-metrics.md) | Draft v2（三路 review 签核） | 2026-06-16 | 普通 session 一次 run 的 naozhi 自测 wall-clock 耗时度量：`SessionRun` 实体（DurationMS+Outcome+FirstByteMS）落盘 `session-runs/<hash>/<run_id>.json`（无 index.json，内存 ring）、异步写盘、ErrorClass 复用 runtelemetry 叶子包、store 挂 Router；`/api/sessions/runs` + 时间轴/汇总/实时计时（复刻 cron 三条件 timer guard）+ 移动端折叠 |
-| [system-session.md](system-session.md) | 设计提案 Draft v2.1（已过三路 review + OQ 决议） | 2026-05-20 | naozhi 内置后台线程（System Session）统一抽象：`sys:` 命名空间、`internal/sysession/` Daemon+Manager+Runner（派生 transient system session 调 LLM）、AutoTitler MVP（中英双语 prompt、默认跳群聊、跟随 default backend）、`LabelOrigin` + ClearUserLabelOrigin、二段式 structured prompt + sweepOldJSONL on startup、cron/sys 共享 ExemptStub 注册路径。Phase 2 仅承诺浅归并不做接口归并 |
-| [todo-to-issues-migration.md](todo-to-issues-migration.md) | 已实施（PR #370/#464/#1063/#1064） | 2026-05-26 | docs/TODO.md 1054 finding 迁移到 GitHub Issues：`triage-findings` skill 三桶分流 + 21 label 体系 + 4 cron prompt 改造（v8 GitHub Issues 单源 + v3 PR Merge cron-mergeable + verify Closes #N） + 6 并行 agent 处理 1042 Round dump finding + 581 issue 落地 / 200 cosmetic-backlog / 372 audit-trail discarded |
-| [envpolicy-consolidation.md](envpolicy-consolidation.md) | Draft v1（待评审） | 2026-06-04 | #891：抽 `internal/envpolicy` 收敛三处分散的 Claude env 过滤策略；Phase 1 可落地（共享叶子校验器 + per-backend 凭据矩阵，行为零变化） |
-| [cron-runstore-facade.md](cron-runstore-facade.md) | Implemented v2 | 2026-06-04 | #509/#978：补全 runStore 半facade，4 个 scheduler 文件经 `*Scheduler` wrapper 访问 + AST gate 测试；Phase 1 可落地（包内 behavior-preserving forwarding）；v2：#3432 抽出 `internal/cron/runstore` 子包，包私有性取代 AST gate |
-| [cron-sysession-merge.md](cron-sysession-merge.md) | Implemented v5（2026-06-10 全 phase 落地） | 2026-05-26 | #1166/#1173/#1164/#734/#945/#1036/#746：cron+sysession 调度层合并 7 phase 全部完成。A1/A2/B/D-main Broadcaster 经 PR #1264+#1754；v4 订正识别的残留项同日清偿：SchedulerDeps (#746, PR #2002)、dispatch→cron import 切断 (#1164, PR #2004)、executeOpt 7-helper 拆分 (#734/#945, PR #2017，race gate -count=10/100 全绿) |
-| [sysession-telemetry-and-hardfail.md](sysession-telemetry-and-hardfail.md) | Draft v1（待评审） | 2026-06-04 | #1723/#1169/#1055：sysession 收敛到 `runtelemetry.Broadcaster` seam（复刻 cron 范式，删镜像结构体/hook_holders）；Phase 1 可落地；hard-fail 统一留后续 |
-| [cron-config-and-structs.md](cron-config-and-structs.md) | Draft v1（待评审） | 2026-06-04 | #776/#764/#1282/#1278/#837：cron config functional-options + Job god-struct 拆分 + 大文件拆 + Outbox saga；仅 #776 docstring+parity 测试可落地，余须先评审 |
-| [cron-notify-sender.md](cron-notify-sender.md) | Draft v1（待评审） | 2026-06-04 | #725：抽 NotifySender 接口斩 cron→platform 反向依赖；通知协议（chunk/retry/telemetry/stopCtx）迁移须先评审 |
-| [selfupdate-signing.md](selfupdate-signing.md) | Draft v1（待评审） | 2026-06-04 | #1738：自更新二进制加密签名（cosign keyless vs 自管 ed25519）；须先评审密钥信任模型，本轮不落地 |
-| [dashboard-csp-strict.md](dashboard-csp-strict.md) | Implemented v2（2026-10-06 订正） | 2026-06-04 | #1734/#922：dashboard CSP 去 `'unsafe-inline'`。选方案 A（sha256 hash + handler 外置），未走 nonce/strict-dynamic；script-src 由 #1980 PR-1..3 落地，style-src 由 #2559 D6-3 落地；#3441 内置 KaTeX/mermaid 后 CSP 不再列任何外部源 |
-| [csp-data-action.md](csp-data-action.md) | 已实施（#2592/#2593/#2594） | 2026-09-06 | #1980 D5：内联 `on*=` 迁 `data-action` 委托、主题引导 hash、workspace HTML 预览改服务端渲染响应，dashboard-csp-strict 方案 A 的执行计划 |
-| [router-god-object-split.md](router-god-object-split.md) | Implemented v2（2026-06-10 订正） | 2026-06-04 | #383/#600/#805/#580/#577：合并五个 session.Router 拆分锚点为单一路线图（单 mutex + 渐进 facet 抽取 P0-P7）。P0-P5 已分 PR 落地（#1762/#1796/#1802/#1837/#1804/#1841/#1852），P6 由 managed-session-split 交付，P7 经核实关闭 won't-do（#577） |
-| [lifecycle-policy-and-naming.md](lifecycle-policy-and-naming.md) | Draft v1（待评审） | 2026-06-04 | #870/#463/#729：lifecycle policy 接口（须等 restart RFC）/ Get*Fetch*Load* 165处 rename ADR / AutoTitler 持久进程（撞 SharedCLI 决策）；均须先评审 |
-| [node-pairing.md](node-pairing.md) | Draft v1（待评审） | 2026-06-19 | 节点配对机制：新增 `naozhi node add\|ls\|rm`（primary 生成 token+配对码）与 `naozhi join <code>`（worker 解码→写 upstream→注册服务→验连），把 reverse-connect 拓扑从"两端手写对齐 YAML+手搬 token"降到"复制一行配对码"。借鉴 tailscale `--authkey`。复用 yaml.Node 写入 / `runInstall` / `shim.GenerateToken`，不动 wire 协议。关键约束：reverse_nodes 启动时加载，新增 node 需重启 primary（§7.1，热重载列 follow-up）；MVP 配对码含明文 token（§5.1 警告），短时效短码端点列 §5.2 follow-up |
-| [workflow-dashboard.md](workflow-dashboard.md) | 已实现（v5；PR-1..PR-15 已合并，2026-10-07 真机验收） | 2026-10-05 | CC `Workflow` 工具（ultracode）后台 workflow 的 dashboard 实时进度：readLoop 单次 slim typed 解码 `workflow_progress`（无包装类型，类型错在 `ReadEventInto` 容错，身份字段类型错按 Failed 保留旧行；不声明 promptPreview/resultPreview）→ 进程侧 `internal/cli/workflow` Tracker（单写者 + immutable 发布，**快照不进 event ring / eventCh / readEventBuf / persist**；状态规范化先判终态、agentId 粘滞 + attempt 历史；先 redact 后截断并按原串记忆）→ session 侧 board（**锁序 表锁 → b.mu → Tracker.mu，通知异步、读者无锁**；唤醒式回调 + 版本守卫 + commit 后绑定；**board 统一分配 wire version / 行 rev + epoch**；有界 retained；只在 CLI 确实结束时合成 interrupted，shim 断联为 snapshot_stale；指针携带跨 respawn/rename；`SessionSnapshot.Workflows` 摘要 + `BumpVersion` 型 30s 节流；sessions.json Ref；`workflowPinned` 保活）；新 WS 帧 `workflow_state` + `workflow_set`（独立 `workflowPushLoop`、header-only 初始帧、区间判定 delta、每帧 ≤192KiB、两道队列深度门）+ `/api/sessions/workflow`（结果文件解析一次缓存）；transcript 上方独立面板（整体限高、无障碍、CSP 安全、400-agent 节流）；drill-in 复用 `agent_events`/tailer（board 先于 linker nil、未落盘 202）；重启：replay 逆序种子 → Ref → 磁盘对账（结果文件只按 taskId 校验）+ 30s sweeper（含 R4）；RunDir 只经 `claudefs.ResolveWorkflowRunDir`（**v4：锁外异步解析、复核后写入，按 projectsRoot 拼写重拼**）、run 目录文件只经 `osutil.OpenRegular` / root 锚定的 `OpenRegularIn`（防 FIFO 挂起，**含 tailer 的每次重新打开**）；后台 I/O 全局 ≤ 8 在途；**v4 另修**：respawn 先携带后绑定 board、board 上限只裁 retained、R5（有进程但无人认领 → unknown）、HTTP `rows=none` / `since=` 增量与"404 只表示不存在"、客户端 header 版本与行版本分离、suspended 订阅在进程出现时升级、超长行 `snapshot_dropped`；顺带修 hook 快路径（行首锚定）、Workflow Detail 泄漏脚本、`local_workflow` 白跑 linker、重启误判 midTurn（`unknown` 在 startReadLoop 前裁决）、tailer allowedRoot 错位、progress 冲刷 ring；**v5**：`Workflow.SessionID` 有了来源（帧上的 `session_id`，RunDir rel 的 `<sid>` 为准）、board 逐字段合并与行按 index 取并集、SeedFromReplay 逆序收集正序应用、board 跨包 API（nil 安全）、终态后按 `source=result_file` 拉结果、ProjectDir 先解析 symlink，删掉 per-agent 预览端点（及 journal 索引）与 `rows_gen`；15 个小 PR 实施计划（逐 PR ratchet 台账，含 Router 预算） |
-
-## 已废弃 / 已被取代
-
-| RFC | 状态 | 说明 |
+| RFC | 状态 | 范围 |
 |---|---|---|
-| [passthrough-mode.md.v1-deprecated](passthrough-mode.md.v1-deprecated) | Superseded by `passthrough-mode.md` | v1 误判 naozhi 需要节流/合并，基于对 CC CLI 内部队列行为的错误假设 |
-| [passthrough-mode-legacy-removal.md](passthrough-mode-legacy-removal.md) | Draft（未开始） | Passthrough 默认开启 + ACP fallback 并发 gate 的遗留代码移除计划 |
-
-> 状态标注以 RFC 文件内首屏（Status / 状态）为准；若 RFC 未写明状态，本表标 "unknown"。如发现表格与 RFC 本体不一致，请同步修正。
+| [agent-team-ui.md](agent-team-ui.md) | 已实装（drill-in / agent_events） | 并行 agent/team 可视化与内部过程查看 |
+| [agentcore-cloud-sandbox.md](agentcore-cloud-sandbox.md)（+ `-validation`） | v2，Phase 0 实测通过 | AgentCore Runtime 作为执行基底（run-once 作业模型） |
+| [attachment-gc-daemon.md](attachment-gc-daemon.md) | 已实现（默认关闭 + dry_run） | sysession `attachment-gc` daemon |
+| [attachment-refcount.md](attachment-refcount.md) | v1 MVP 已落地 | 附件引用计数与双 TTL GC |
+| [cc-asset-browser.md](cc-asset-browser.md) | Draft v6 | Claude Code 资产只读浏览器 |
+| [cli-mcp-config.md](cli-mcp-config.md) | 已实装 | `cli.mcp_config` → `--mcp-config` |
+| [codex-backend.md](codex-backend.md)（+ `-validation` / `-phase2-feasibility`） | Draft v2，Phase 0 实测 | Codex CLI app-server backend |
+| [config-hot-reload.md](config-hot-reload.md) | Phase 1 已实现 | SIGHUP / API / CLI 配置热重载 |
+| [consumer-interfaces.md](consumer-interfaces.md) | Implemented v3 | 消费端小接口替换 `*session.Router` 指针 |
+| [cost-ledger.md](cost-ledger.md) | Draft v2.1 | `internal/costledger` 统一 cost 归口 |
+| [cron-panel-consolidation.md](cron-panel-consolidation.md)（+ `-ui`） | 已实装 | cron 执行与历史收编进「定时任务」面板（抽屉状态机） |
+| [cron-run-adoption.md](cron-run-adoption.md) | 已实装 | 升级不吞掉正在跑的 cron run |
+| [cron-run-history.md](cron-run-history.md) | 已实装 | CronRun 实体 / runs ring / 时间轴 UI |
+| [cron-sysession-merge.md](cron-sysession-merge.md) | Implemented v5 | cron + sysession 调度层合并 |
+| [cron-v2-polish.md](cron-v2-polish.md) | 已实装 | cron name / jitter / missed / sort / next-run |
+| [csp-data-action.md](csp-data-action.md) | 已实施 | 内联 `on*=` 迁 `data-action` 委托 |
+| [dashboard-cron-view-extraction.md](dashboard-cron-view-extraction.md) | 已实装 | cron 视图从 dashboard.js 抽出 |
+| [dashboard-csp-strict.md](dashboard-csp-strict.md) | Implemented v2 | dashboard CSP 去 `'unsafe-inline'` |
+| [dashboard-es-modules.md](dashboard-es-modules.md) | — | static/*.js 原生 ES module 化 |
+| [dashboard-event-uuid-idempotent-render.md](dashboard-event-uuid-idempotent-render.md) | Draft v1 | 事件 uuid 幂等渲染 |
+| [dashboard-model-effort-control.md](dashboard-model-effort-control.md) | 已实装 | 会话级 model / effort 切换 |
+| [dashboard-update-notice.md](dashboard-update-notice.md) | 已实装 | 新版本发现与一键生效 |
+| [direct-user-settings.md](direct-user-settings.md) | Draft v2（被 naozhi-owned-settings-v3 部分反转） | `--setting-sources user` |
+| [event-log-persistence.md](event-log-persistence.md) | v3 GA | EventLog 磁盘持久化 |
+| [evententry-versioning.md](evententry-versioning.md) | — | EventEntry schema 版本 |
+| [key-resolver.md](key-resolver.md) | Phase 1-6 已实装 | planner/agent session key 派生 |
+| [kiro-effort-control.md](kiro-effort-control.md) | 已实现 | `cli.effort` → `acp --effort` |
+| [kiro-effort-visibility.md](kiro-effort-visibility.md) | 已实装 | kiro effort 透出到会话头部 |
+| [lightbox-gallery-nav.md](lightbox-gallery-nav.md) | 已实装 | lightbox 多图导航 |
+| [memory-link-rendering.md](memory-link-rendering.md) | Draft v1 | memory 链接渲染 |
+| [multi-backend.md](multi-backend.md)（+ `-validation`） | v2，基于实测 | Claude + Kiro 多 backend |
+| [naozhi-owned-settings-v3.md](naozhi-owned-settings-v3.md) | PR-1/PR-2 已交付 | naozhi 独立 settings |
+| [node-pairing.md](node-pairing.md) | Draft v1 | `naozhi node add` / `naozhi join` |
+| [outbound-webhooks.md](outbound-webhooks.md) | Phase 1 已实现 | run 生命周期出站 webhook |
+| [passthrough-mode.md](passthrough-mode.md)（+ `-validation`） | v2.2 | 直通 CC CLI 原生 command queue |
+| [pdf-attachment.md](pdf-attachment.md) | 已实装 | PDF 附件（dashboard + IM） |
+| [planner.md](planner.md) | Draft v6（未实施） | Planner 规划 agent，§18 决策 D1–D59 |
+| [project-access-profile.md](project-access-profile.md) | Draft v1 | 项目级默认访问方式 |
+| [project-stable-session-key.md](project-stable-session-key.md) | 已实装 | 项目级稳定 session key |
+| [reverse-protocol.md](reverse-protocol.md) | 已实现 | reverse-connect wire format |
+| [selfupdate-signing.md](selfupdate-signing.md) | Draft v1（#1738） | 自更新二进制签名 |
+| [send-engine-extraction.md](send-engine-extraction.md) | v2 | `sendEngine` 抽取及其不变量 |
+| [session-run-metrics.md](session-run-metrics.md) | Draft v2 | 普通 session run 耗时度量 |
+| [shim-golden-compat-drift.md](shim-golden-compat-drift.md) | — | shim 契约 golden 兼容矩阵 |
+| [sysession-telemetry-and-hardfail.md](sysession-telemetry-and-hardfail.md) | Draft v1 | sysession 接 runtelemetry Broadcaster |
+| [system-session.md](system-session.md) | Draft v2.1 | System Session 统一抽象 |
+| [workflow-dashboard.md](workflow-dashboard.md) | 已实现 v5 | Workflow 运行进度看板 |
+| [wsproto.md](wsproto.md) | — | WS type 常量与 per-type frame |

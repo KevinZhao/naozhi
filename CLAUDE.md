@@ -95,10 +95,9 @@ cmd/naozhi/main.go
   -> naozhisettings  naozhi 托管的 Claude settings 文件
   -> uiprefs      Dashboard 展示偏好持久化
   -> envpolicy    共享 env 过滤原语
-  -> wsproto      浏览器 WS 协议单一真相源（type 常量 + per-type frame + schema）
-  -> jsonschema   Go 类型 → 契约检查读取的 JSON schema（WS frame 与 REST 响应共用，嵌套结构体展开进 defs）
+  -> wsproto      浏览器 WS 协议单一真相源（type 常量 + per-type frame）
   -> replyfmt     回复成形规则（单条截断标记 / [i/N] 页码 / 分页宽度预留 / 代码块感知的分段 SplitText），dispatch 与 cron 共用
-  -> contractjs   生成 static/contract.js 的构建器（WS/API/ENUMS 三段；ENUMS 含 death_reason、session state 与 EventEntry kind 词表）与 static/wire.d.ts（由 WS/REST 两份 schema 生成的全局类型，供 tsc --checkJs）
+  -> contractjs   生成 static/contract.js 的构建器（WS/API/ENUMS 三段；ENUMS 含 death_reason、session state 与 EventEntry kind 词表）
   -> datadir      store 文件所在目录的布局策略（Layout 值类型，只派生 sibling）
 
   叶子工具
@@ -214,7 +213,7 @@ Command routing: `/review xxx` -> `code-reviewer` agent, `/research xxx` -> `res
 
 Naozhi supports aggregating sessions from multiple machines into a single dashboard:
 
-- **Primary node** (`nodes` config): Polls remote nodes via HTTP REST every 10s, caches results in `node.CacheManager` (`internal/node/cache.go`). The `/api/sessions` poll sends `If-None-Match` and reuses the last body on a 304. Never blocks dashboard API on unreachable nodes.
+- **Primary node** (`workspaces` config): Polls remote nodes via HTTP REST every 10s, caches results in `node.CacheManager` (`internal/node/cache.go`). The `/api/sessions` poll sends `If-None-Match` and reuses the last body on a 304. Never blocks dashboard API on unreachable nodes.
 - **Reverse-connect** (`upstream` config): Nodes behind NAT dial into the primary via WebSocket (`/ws-node`). The `internal/upstream` Connector handles reconnection with jittered exponential backoff (1s -> 30s, plus a circuit breaker). Its `send` RPC validates at the trust boundary and then hands the message to `server.Server.SubmitRelayed`, so a relayed send runs on the node's `turn.Orchestrator` like an IM or dashboard one (`/new` resets, sends coalesce, agent options apply; a failed turn is a `发送失败：` system event in the session's EventLog). The `node.ReverseServer` validates tokens with constant-time comparison. A dropped node stays registered for a 60s grace window: browser subscriptions are parked and handed to the node's next registration, which resubscribes each key from its newest seen event; only a node that stays away longer is deregistered (dashboard gets `node disconnected`).
 - **Protocol** (`node.ReverseMsg`, `internal/node/protocol.go`): JSON over WebSocket -- `register/registered`, `request/response` (fetch_sessions, fetch_projects, send), `subscribe/event` (real-time streaming), `ping/pong`. A node advertising the `subscribe-history` capability answers `subscribe{after, limit, want_history}` with its own opening page (`events{initial, has_more}`: the catch-up after `after`, else the visible-aware newest page); against older nodes the primary still fetches that page with `fetch_events`. `fetch_events{before, limit}` returns one page as `{events, has_more}` (the dashboard's opening or "load earlier" page); without them, or with `after`, it is the legacy bare array, which is all an older node ever returns. A history fetch that fails reaches the sink as `error{key, node, "history unavailable"}`, which the dashboard offers as a retry. The primary advertises `send-status` on `registered` (it reads the `send` result's `{status}`); without it a node answers a send it could not buffer with an RPC error instead of `{"status":"busy"}`.
 
@@ -231,12 +230,10 @@ The project list is rescanned every 60s. Scan reads disk without the manager loc
 The dashboard is an embedded PWA served at `/dashboard`: `internal/server/static/` holds `dashboard.html` plus JS modules (`dashboard.js`, `agent_view.js`, `cron_view.js`, `cron_live.js`, `asset_browser.js`, `files_view.js`, `nz_util.js`, and the leaves `ws_manager.js` / `session_stream.js` / `platform.js` / `features.js` / `session_ident.js` (session keys and labels, node connection status) / `icons.js` / `file_ref_parse.js` (the path-shape tests file refs and markdown share) / `shell.js` (the upcall table the root modules fill with `registerShell`) / `backend_catalog.js` (the CLI backends and access profiles a new session can pick, and their pickers) / `cron_state.js` (the cron view's jobs cache, drawer gate, trigger cooldown and the fetches that fill them) / `cron_format.js` (the cron view's text formatters) / `workflow_state.js` (the Workflow runs' store and the client half of their `workflow_set` / `workflow_state` frames and HTTP fetches) / `lightbox.js` (the image gallery overlay dashboard builds with `initLightbox`), `mem_popover.js` for the memory `[[slug]]` hover/click preview (dashboard starts it with `initMemPopover`), `aside_drawer.js` for the 追问 scratch drawer (`initAsideDrawer`; ask_card reads its session key from `selection.scratchKey`), `workflow_view.js` for the workflow panel above the transcript, the workflow frames' handlers and the fetches the store asks for, `event_render.js` / `ask_card.js` for transcript bubbles, `event_stream.js` for the transcript's fetch, paging and append and its history / event / send-ack frames, and `session_list.js` for the sidebar's session poll, cards and status bar and the subscription, error and session-state frames), `sw.js`, `manifest.json`, and `vendor/` (the release files of KaTeX 0.16.21 and mermaid 11.14.0, embedded and served at `/static/vendor/` as immutable, so the dashboard CSP names no outside origin; a bundle over 1 MiB is embedded as `<name>.gz` from `gzip -9n` and served as `<name>`; `render_md.js` pins their SRI, and changed bytes need a new versioned directory). Real-time updates use a WebSocket hub (`/ws`) with:
 
 - **Client messages** (dispatch switch: `internal/server/wsclient.go`): `auth`, `subscribe` (with optional `after` timestamp), `unsubscribe`, `send`, `interrupt`, `ping`, `agent_subscribe`, `agent_unsubscribe`
-- **Server messages**: `auth_ok`, `auth_fail`, `subscribed`, `unsubscribed`, `history`, `event`, `send_ack`, `pong`, `error`, `workflow_set` / `workflow_state` (a subscribed session's workflow board, pushed by `wshub_workflow.go`'s `workflowPushLoop`), plus agent/team streaming types -- see `internal/wsproto` (type constants, per-type frames, `wsproto.schema.json`). The dashboard receives each through a module-scope `wsm.on(NZ_CONTRACT.WS.<type>, handler[, when])` registration (a `when` makes it a claim, tried before the type's one unconditional handler); `wsm` (`ws_manager.js`) owns the connection, the dispatch table and `onReady`/`onStateChange`/`onAuthFail`; frames are not dispatched by hand-rolled `.type` switches
+- **Server messages**: `auth_ok`, `auth_fail`, `subscribed`, `unsubscribed`, `history`, `event`, `send_ack`, `pong`, `error`, `workflow_set` / `workflow_state` (a subscribed session's workflow board, pushed by `wshub_workflow.go`'s `workflowPushLoop`), plus agent/team streaming types -- see `internal/wsproto` (type constants, per-type frames). The dashboard receives each through a module-scope `wsm.on(NZ_CONTRACT.WS.<type>, handler[, when])` registration (a `when` makes it a claim, tried before the type's one unconditional handler); `wsm` (`ws_manager.js`) owns the connection, the dispatch table and `onReady`/`onStateChange`/`onAuthFail`; frames are not dispatched by hand-rolled `.type` switches
 - Remote node events are relayed transparently -- subscribe with `node` field to stream from a remote session.
 
 Dashboard modules layer base -> leaf -> view -> root: the base (`contract.js`, `state.js`, `nz_util.js`) and the leaves import only each other, views import downward, and the roots (`cron_view.js`, `dashboard.js`, `event_stream.js`, `session_list.js`) compose. A view that needs a root's function calls it as `shell.X`, which the root fills with one top-level `registerShell({ … })`; no module exports a `configureX` injection hook.
-
-Type checking is per file: a dashboard file whose first line is `// @ts-check` is checked by `tsc -p internal/server/static` (lint-js; `tsconfig.json` keeps `checkJs` off for the rest) against `wire.d.ts`, the generated global types (`EventEntry`, `SessionSnapshot`, `WsFrames`, `RestResponses`, ...), and must have zero errors. `wsm.on` types each handler's `msg` by its frame, and tsc is the only check on the fields a frame handler reads: `scripts/ts-check.test.mjs` lists the opted-in files (that list only grows) and fails when a wire type reaches a file without the pragma or a frame reaches an untyped parameter. Neither `wire.d.ts` nor `tsconfig.json` is served.
 
 REST API: ~80 method-prefixed routes registered in `internal/server/routes.go` (the authoritative list -- grep `HandleFunc` there rather than trusting any doc enumeration). Families: `/api/sessions/*` (list/send/events/runs/workflow/interrupt/resume/bind/label/upload/attachment/git...), `/api/cron/*` (CRUD + pause/resume/trigger/preview + runs history/replay), `/api/projects/*` (config/files/favorite/planner), `/api/discovered/*` (preview/takeover/close), `/api/scratch/*`, `/api/settings`, `/api/auth/*`, `/api/access-profiles`, `/api/cc/assets`, `/api/cli/backends`, `/api/system/*`, `/api/transcribe`, `/api/memory/{slug}`. WebSocket: `/ws` (dashboard), `/ws-node` (reverse-connect nodes). Health: `/health`, `/livez`, `/readyz`.
 
@@ -321,13 +318,13 @@ Each phase emits a `phase=` timing log line so a hung subsystem is attributable 
 - **cron**: `store_path`, `max_jobs`, `execution_timeout`
 - **projects**: `root` (scan directory), `planner_defaults.model`, `planner_defaults.prompt`
 - **workspace**: `id`, `name` (local node identity, defaults to hostname)
-- **nodes**: Map of node_id -> {url, token, display_name} (poll remote nodes via HTTP)
+- **workspaces**: Map of node_id -> {url, token, display_name} (poll remote nodes via HTTP)
 - **reverse_nodes**: Map of node_id -> {token, display_name} (accept incoming reverse connections)
 - **upstream**: `url` (ws://), `node_id`, `token`, `display_name` (connect to primary as reverse node)
 - **transcribe**: `enabled`, `region`, `language` (voice message STT). There is no `provider` key — the AWS Transcribe backend is the only implementation and is selected implicitly
 - **log**: `level` (debug/info/warn/error)
 
-Config describes schema v2 only. The v1 keys (`nodes`, `session.workspace`, `session.auto_chain`, `--append-system-prompt` in `agents[].args`) are understood solely by the migration chain (`internal/config/migrations.go`), which `Load` runs in memory from the file's own `schema_version` (absent = v1) and `naozhi config migrate -write` applies to the file, after keeping the original as `<config>.pre-migrate-v<N>` (0600, never overwritten); each rewrite is a `config-deprecated` diag. When both `nodes` and `workspaces` are present, `workspaces` wins. `cfg.Nodes` is the Go-side view `Config.Normalize` mirrors from `Workspaces`.
+Config describes schema v2 only; there is no migration chain. The v1 keys (`nodes`, `session.workspace`, `session.auto_chain`) are not read: `Load` still succeeds and `findDeprecatedKeys` (`internal/config/unknown_keys.go`) reports each as a `config-deprecated` diag naming the v2 replacement (not also as `config-unknown`); a v1 `--append-system-prompt` in `agents[].args` draws one `argv-denylist` diag (`validateArgvStrings`) naming `agents[<id>].system_prompt`. A `schema_version` newer than the binary is rejected. `cfg.Nodes` is the Go-side view `Config.Normalize` mirrors from `Workspaces`.
 
 ## Concurrency Patterns
 
@@ -364,14 +361,12 @@ docs/
 ├── design/                       # 架构与已实现功能设计
 │   ├── DESIGN.md                 # 主设计文档 —— 架构层面事实以此为准
 │   ├── architecture.html         # 架构可视化
-│   └── ...                       # 各子系统设计（multi-node / shim / server-split / ...）
-├── adr/                          # Architecture Decision Records
+│   └── ...                       # 各子系统设计（multi-node / shim / voice-transcription / config-precedence / planner / ...）
 ├── rfc/                          # RFC 工作文档（proposal / 验证报告 / phase 报告）
 │   └── README.md                 # 索引 + 状态表（Draft / 已实装 / 已废弃）——先看这里
 ├── ops/                          # 部署与运维 playbook（deployment / release-gate / pprof / ...）
-├── review/                       # 代码评审批次原始记录（batch*-raw.md / cosmetic-backlog.md）
-└── guides/                       # 操作手册（weixin-test / shim-testing）
+└── guides/                       # 操作手册（shim-testing）
 ```
 
-待办事项不再放 `docs/TODO.md`，已迁移 GitHub Issues（见 `docs/rfc/todo-to-issues-migration.md`）。
+待办事项不再放 `docs/TODO.md`，一律走 GitHub Issues。
 RFC 不是最终规范——其中很多已实装或已废弃，状态以 `docs/rfc/README.md` 的表格为准。

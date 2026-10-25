@@ -1,4 +1,3 @@
-// @ts-check
 // cron_live.js — the cron live stream (cron-live RFC): a second subscription
 // channel beside the session one (sessionStream). While a cron drawer is
 // open on a running job it subscribes 'cron:<jobId>' so the operator sees the

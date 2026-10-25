@@ -35,7 +35,7 @@ func TestValidateConfig_SectionOrderIsStable(t *testing.T) {
 platforms:
   slack:
     bot_token: ""
-nodes:
+workspaces:
   bad:
     url: ""
 `,
@@ -45,7 +45,7 @@ nodes:
 			// nodes before server
 			name: "node beats dashboard token",
 			body: `
-nodes:
+workspaces:
   bad:
     url: "ftp://example.com"
 server:

@@ -1,4 +1,3 @@
-// @ts-check
 // workflow_state.js — the dashboard's store of Workflow tool runs and the
 // client half of their wire protocol (docs/rfc/workflow-dashboard.md §6.1,
 // §7.1), a leaf: it imports only session_ident.js. Every

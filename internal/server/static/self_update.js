@@ -1,4 +1,3 @@
-// @ts-check
 // self_update.js — the dashboard's self-update chip and its version-skew
 // reload. It owns its poll timer and apply state machine, exposes nothing and
 // self-registers its bootstrap. Like every module dashboard.js imports, it

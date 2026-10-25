@@ -18,7 +18,7 @@ import (
 // DOMContentLoaded.
 func TestDashboardHTML_ScriptsDeferred(t *testing.T) {
 	t.Parallel()
-	html := readDashboardHTMLAndCSS(t)
+	html := string(rawDashboardHTML(t))
 	// Every view file is an ES module (D3, docs/rfc/dashboard-es-modules.md)
 	// — modules are deferred by definition and share the same in-tag-order
 	// execution queue. contract.js is a module too, reached by import rather

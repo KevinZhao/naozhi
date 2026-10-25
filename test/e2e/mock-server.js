@@ -13,31 +13,11 @@ const STATIC_DIR = path.join(__dirname, '..', '..', 'internal', 'server', 'stati
 // commit that regenerates contract.js (#2539). startMockServer listens only
 // once it has loaded.
 let NZ_CONTRACT;
-// The event routes answer only with entries the backend can send: each is
-// checked against the WS schema's EventEntry def (the wire view) before it
-// leaves, so a spec's fixture cannot carry a field or a type no server has.
-const WS_DEFS = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'internal', 'wsproto', 'wsproto.schema.json'), 'utf8')).defs;
-const WORKFLOW_SCHEMA = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'internal', 'dashboard', 'ext', 'workflows', 'testdata', 'rest.schema.json'), 'utf8'));
-let schemaViolations, EVENT_ENTRIES;
-const contractReady = Promise.all([
-  import(require('url').pathToFileURL(path.join(STATIC_DIR, 'contract.js')).href)
-    .then((m) => { NZ_CONTRACT = m.NZ_CONTRACT; }),
-  import(require('url').pathToFileURL(path.join(__dirname, '..', '..', 'scripts', 'check-mock-rest.mjs')).href)
-    .then((m) => { ({ schemaViolations, EVENT_ENTRIES } = m); }),
-]);
+const contractReady = import(require('url').pathToFileURL(path.join(STATIC_DIR, 'contract.js')).href)
+  .then((m) => { NZ_CONTRACT = m.NZ_CONTRACT; });
 
-// sendEntries answers an event route with page, or with 500 naming every
-// violation when an entry of fixture (the whole injected list, not just the
-// page a filter let through) is not a shape the backend produces.
-function sendEntries(res, route, fixture, page, headers = { 'Content-Type': 'application/json' }) {
-  const bad = schemaViolations(fixture, EVENT_ENTRIES, WS_DEFS, route, { strict: true });
-  if (bad.length) {
-    const error = `mock fixture is not an EventEntry the backend sends: ${bad.join(', ')}`;
-    console.error(`mock-server: ${error}`);
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error }));
-    return;
-  }
+// sendEntries answers an event route with page.
+function sendEntries(res, page, headers = { 'Content-Type': 'application/json' }) {
   res.writeHead(200, headers);
   res.end(JSON.stringify(page));
 }
@@ -54,9 +34,7 @@ const MOCK_DASHBOARD_CSP =
  * since=V&epoch=E → the rows with rev > V when E is the fixture's epoch and
  * V ≤ its version, else all of them; since with rows=none or a lone epoch
  * is a 400. The fixture is the response minus rows_mode and server_now; its
- * workflow.agents holds every row. The reply is checked against the
- * backend's REST schema, strictly, so a fixture cannot carry a field or a
- * mode no server has. Returns {status, body}.
+ * workflow.agents holds every row. Returns {status, body}.
  */
 function workflowReply(fx, params) {
   const has = (k) => params.has(k);
@@ -80,8 +58,6 @@ function workflowReply(fx, params) {
     rows = all.filter((a) => BigInt(a.rev) > since);
   }
   const body = { ...fx, server_now: Date.now(), rows_mode: rowsMode, workflow: { ...fx.workflow, agents: rows } };
-  const bad = schemaViolations(body, WORKFLOW_SCHEMA.responses.sessions_workflow, WORKFLOW_SCHEMA.defs, 'sessions_workflow', { strict: true });
-  if (bad.length) return { status: 500, body: { error: `mock fixture is not a workflow response the backend sends: ${bad.join(', ')}` } };
   return { status: 200, body };
 }
 
@@ -739,7 +715,7 @@ function startMockServer(overrides = {}) {
         // handlers.go default branch: the in-memory ring only.
         out = all.slice(-eventsRingSize);
       }
-      const reply = () => sendEntries(res, 'sessions_events', all, out, headers);
+      const reply = () => sendEntries(res, out, headers);
       if (after > 0 && eventsTailDelayMs > 0) setTimeout(reply, eventsTailDelayMs);
       else reply();
       return;
@@ -900,7 +876,7 @@ function startMockServer(overrides = {}) {
 
     if (pathname === NZ_CONTRACT.API.discovered_preview && req.method === 'GET') {
       if (!checkAuth()) return;
-      sendEntries(res, 'discovered_preview', discoveredPreview, discoveredPreview);
+      sendEntries(res, discoveredPreview);
       return;
     }
 
@@ -1046,7 +1022,7 @@ function startMockServer(overrides = {}) {
       // Inclusive, like the server: entries AT the watermark come back again,
       // and an entry with no time passes the filter on every page.
       const page = all.filter(e => !e?.time || e.time >= after).slice(0, limit);
-      sendEntries(res, 'sessions_agent_events', all, page);
+      sendEntries(res, page);
       return;
     }
 
