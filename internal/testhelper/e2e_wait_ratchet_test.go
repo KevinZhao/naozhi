@@ -44,10 +44,6 @@ var (
 	timerToken   = "set" + "Timeout("
 )
 
-// e2eWaitExcluded are scripts under test/e2e that are not tests: the
-// screenshot tool waits for animations to settle before capturing.
-var e2eWaitExcluded = map[string]bool{"take-screenshots.js": true}
-
 // e2eWaitGate is one form of fixed wait with its own pair of baselines.
 type e2eWaitGate struct {
 	what                     string // as it appears in failure messages
@@ -96,7 +92,7 @@ func countE2EWaits(dir string, gates []e2eWaitGate) (files int, counts []e2eWait
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".js") || e2eWaitExcluded[d.Name()] {
+		if !strings.HasSuffix(path, ".js") {
 			return nil
 		}
 		data, err := os.ReadFile(path)
@@ -233,9 +229,8 @@ func TestCountE2EWaits(t *testing.T) {
 		"a.test.js":               w + "\n" + w + " " + w + "\n",
 		"helpers/nav.js":          w + "\n",
 		"b.test.js":               w + " // wait-ok: measures the debounce window\n",
-		"take-screenshots.js":     w + "\n" + sleep + "\n",
 		"node_modules/x/index.js": w + "\n" + sleep + "\n",
-		"check-ws-contract.mjs":   w + "\n" + sleep + "\n",
+		"helper.mjs":              w + "\n" + sleep + "\n",
 		"notes/readme.md":         w + "\n" + sleep + "\n",
 		"quiet.test.js":           "await expect(page.locator('x')).toBeVisible();\n",
 		"sleeps.test.js": sleep + "\n" +
@@ -262,7 +257,7 @@ func TestCountE2EWaits(t *testing.T) {
 		t.Fatal(err)
 	}
 	if files != 6 {
-		t.Errorf("files=%d, want 6 (screenshot tool, node_modules and non-.js files excluded)", files)
+		t.Errorf("files=%d, want 6 (node_modules and non-.js files excluded)", files)
 	}
 	waits, sleeps := counts[0], counts[1]
 	if waits.bare != 5 || waits.exempt != 1 {
