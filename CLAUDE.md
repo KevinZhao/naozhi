@@ -184,7 +184,7 @@ Comments say *why* (the invariant, the non-obvious choice, what a caller must no
 
 ## Deployment
 
-macOS: a launchd job (label read from `XPC_SERVICE_NAME`); `naozhi upgrade` keeps the self-signed codesign identity (`docs/ops/macos-codesign.md`). Linux: `sudo naozhi install` writes the systemd unit (`cmd/naozhi/service.go::generateSystemdUnit`; `deploy/naozhi.service` is a manual reference kept in sync by `TestGenerateSystemdUnit_MatchesDeployTemplate`).
+macOS: a launchd job (label read from `XPC_SERVICE_NAME`); `naozhi upgrade` keeps the self-signed codesign identity (`docs/ops/macos-codesign.md`). Linux: `sudo naozhi install` writes the systemd unit (`cmd/naozhi/service_systemd.go::generateSystemdUnit`; `deploy/naozhi.service` is a manual reference kept in sync by `TestGenerateSystemdUnit_MatchesDeployTemplate`).
 
 ## Documentation
 

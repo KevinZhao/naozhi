@@ -45,7 +45,7 @@ graph TD
 | **0** | 零基础设施 | 所有平台均支持 WebSocket / 长轮询。无需公网 IP、域名或端口转发 |
 | **1** | 完整 Agent 能力 | 不是 API wrapper，是真正的 Claude Code CLI —— 工具调用、代码编辑、MCP 一个不少 |
 | **2** | 会话自动恢复 | 进程崩溃/回收后自动 `--resume`，对话上下文完整保留 |
-| **3** | 单二进制部署 | Go 编译，无容器、无依赖。6 平台预编译 release，内置自动更新 |
+| **3** | 单二进制部署 | Go 编译，无容器、无依赖。4 平台（linux/darwin × amd64/arm64）预编译 release，内置自动更新 |
 | **4** | 实时 Dashboard | 浏览器实时查看所有会话、事件流、费用统计 |
 | **5** | 多节点 NAT 穿越 | 远程机器反向拨入主节点，统一管理多台工作站 |
 | **6** | 消息队列与抢占 | 忙时消息自动排队/合并，支持 `/stop` 软中断与 `/urgent` 紧急抢占 |
@@ -403,7 +403,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bin/naozhi ./cmd/naozhi/
 scp bin/naozhi server:/usr/local/bin/
 
 # 安装 systemd service（推荐 `sudo naozhi install`，自动生成单元文件；
-# deploy/naozhi.service 是手动部署参考，与 cmd/naozhi/service.go 保持同步）
+# deploy/naozhi.service 是手动部署参考，与 cmd/naozhi/service_systemd.go 保持同步）
 sudo cp deploy/naozhi.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable naozhi
 
@@ -573,7 +573,7 @@ kill -HUP $(pidof naozhi)
 
 ```bash
 git tag v0.1.0
-git push origin v0.1.0    # GitHub Actions 自动构建 6 平台二进制 + Release
+git push origin v0.1.0    # GitHub Actions 自动构建 4 平台二进制 + Release
 ```
 
 ---
