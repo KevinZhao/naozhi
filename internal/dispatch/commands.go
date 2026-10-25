@@ -787,9 +787,9 @@ var smartQuoteNormalizer = strings.NewReplacer(
 	"\u2019", "\"", // RIGHT SINGLE QUOTATION MARK ’
 )
 
-// maxCronIDLen guards the `/cron <op> <id>` token; aliased from the leaf
-// textutil package so this edge doesn't import the cron domain package (#1707).
-const maxCronIDLen = textutil.MaxCronIDLen
+// maxCronIDLen guards the `/cron <op> <id>` token; equals cron.MaxIDLen
+// (dispatch does not import cron, #1164).
+const maxCronIDLen = 64
 
 // CronAddArgs is the parsed form of /cron add's arguments.
 type CronAddArgs struct {
@@ -813,20 +813,14 @@ func ParseCronAdd(args string) (CronAddArgs, error) {
 	if !ok {
 		return CronAddArgs{}, fmt.Errorf("missing closing quote for schedule")
 	}
-	// Shared with the dashboard edge so the two policies cannot drift (#1315).
-	if err := textutil.ValidateCronScheduleChars(schedule); err != nil {
-		return CronAddArgs{}, err
-	}
-	// Char screening alone passes an all-whitespace schedule; reject it clearly.
+	// Size / character policy is enforced by Scheduler.AddJob; reject an
+	// empty or all-whitespace schedule here with a clear message.
 	if strings.TrimSpace(schedule) == "" {
 		return CronAddArgs{}, fmt.Errorf("定时表达式不能为空")
 	}
 	prompt := strings.TrimSpace(tail)
-	// Same helper as dashboard validateCronPrompt / Scheduler.SetJobPrompt so
-	// IM and dashboard ingress never diverge (#1315). LF/Tab stay allowed for
-	// multi-line playbooks; CR is not rejected here unlike the dashboard.
-	if err := textutil.ValidateCronPromptStrict(prompt); err != nil {
-		return CronAddArgs{}, err
+	if prompt == "" {
+		return CronAddArgs{}, fmt.Errorf("提示词不能为空")
 	}
 	return CronAddArgs{Schedule: schedule, Prompt: prompt, KeepContext: keep}, nil
 }

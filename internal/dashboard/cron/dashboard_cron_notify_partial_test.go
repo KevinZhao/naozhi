@@ -18,7 +18,7 @@ import (
 // requires both sides set); this test pins the rejection.
 //
 // We exercise both half-set permutations + the all-empty (allowed) and
-// both-set (allowed up to the validateNotifyTarget allowlist) shapes so a
+// both-set (allowed up to the validateNotifyPlatform allowlist) shapes so a
 // future refactor that drops the gate would produce a measurable diff.
 func TestHandleCreate_NotifyHalfSetRejected(t *testing.T) {
 	t.Parallel()

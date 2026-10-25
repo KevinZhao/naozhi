@@ -65,7 +65,7 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		// Backend pins the CLI backend ("" = router default); see ValidateCronBackend.
 		Backend string `json:"backend,omitempty"`
 		// Placement: ""/"local" = this host, "sandbox" = AgentCore microVM
-		// (RFC §4.2); validateCronPlacement gates values and the sandbox guardrails.
+		// (RFC §4.2); the scheduler gates values and the sandbox guardrails.
 		Placement string `json:"placement,omitempty"`
 		// SideEffects declares external mutation (agentcore §6.2); nil = off.
 		SideEffects *bool `json:"side_effects,omitempty"`
@@ -79,29 +79,17 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		writeCronErr(w, http.StatusBadRequest, "schedule is required")
 		return
 	}
-	if err := validateCronTitle(req.Title); err != nil {
-		writeCronErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
 	// Cap schedule length before the robfig/cron parser: MaxBytesReader caps
 	// the body at 64 KB but a 63 KB schedule would still reach the parser.
 	if len(req.Schedule) > maxCronScheduleBytesDashboard {
 		writeCronErr(w, http.StatusBadRequest, "schedule too long")
 		return
 	}
-	if err := validateCronScheduleChars(req.Schedule); err != nil {
-		writeCronErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err := validateCronPrompt(req.Prompt); err != nil {
-		writeCronErr(w, http.StatusBadRequest, err.Error())
+	if req.Prompt == "" {
+		writeCronErr(w, http.StatusBadRequest, "prompt is required")
 		return
 	}
 	if err := ValidateCronBackend(req.Backend); err != nil {
-		writeCronErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err := validateCronPlacement(req.Placement, req.WorkDir); err != nil {
 		writeCronErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -109,10 +97,6 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	// work_dir must be under allowedRoot; 403 matches /api/sessions/send so
 	// clients see a uniform status for boundary violations.
 	if req.WorkDir != "" {
-		if err := validateCronWorkDir(req.WorkDir); err != nil {
-			writeCronErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
 		if h.deps.ValidateWS == nil {
 			writeCronErr(w, http.StatusInternalServerError, "cron work_dir validation not wired")
 			return
@@ -144,7 +128,7 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := validateNotifyTarget(req.NotifyPlatform, req.NotifyChatID); err != nil {
+	if err := validateNotifyPlatform(req.NotifyPlatform); err != nil {
 		writeCronErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -172,6 +156,10 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, cronpkg.ErrPersistFailed) {
 			slog.Error("cron AddJob persisted in-memory but store write failed", "err", err, "id", osutil.SanitizeForLog(job.ID, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "created")
+			return
+		}
+		if errors.Is(err, cronpkg.ErrSandboxWorkDir) {
+			writeCronErr(w, http.StatusBadRequest, sandboxWorkDirMsg)
 			return
 		}
 		// robfig/cron parser errors leak field offsets / parsed expressions;

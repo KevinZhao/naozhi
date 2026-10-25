@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"errors"
 	"fmt"
 	"unicode/utf8"
 
@@ -8,27 +9,37 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// ErrInvalidPrompt is returned by ValidatePromptStrict when a prompt fails
-// the shared cron-prompt safety policy (size cap / UTF-8 / C0 / DEL / C1 /
-// bidi / LS / PS). Alias of the textutil sentinel (same value) so IM dispatch
-// and dashboard callers' errors.Is checks keep matching (#1707).
-var ErrInvalidPrompt = textutil.ErrInvalidCronPrompt
+// ErrInvalidPrompt wraps every prompt rejection from ValidatePromptStrict.
+var ErrInvalidPrompt = errors.New("cron: invalid prompt")
 
-// ValidatePromptStrict enforces the shared cron-prompt size + character policy.
-// Thin alias of textutil.ValidateCronPromptStrict; see that function for the policy.
+// ErrInvalidSchedule wraps every schedule rejection from AddJob / UpdateJob.
+var ErrInvalidSchedule = errors.New("cron: invalid schedule")
+
+// ValidatePromptStrict is the one cron-prompt policy, enforced on the scheduler
+// write paths (AddJob / UpdateJob / SetJobPrompt): non-empty, at most
+// MaxPromptBytes, valid UTF-8, and no byte containsCronUnsafe rejects.
 func ValidatePromptStrict(prompt string) error {
-	return textutil.ValidateCronPromptStrict(prompt)
+	switch {
+	case prompt == "":
+		return fmt.Errorf("%w: must not be empty", ErrInvalidPrompt)
+	case len(prompt) > MaxPromptBytes:
+		return fmt.Errorf("%w: exceeds %d-byte limit", ErrInvalidPrompt, MaxPromptBytes)
+	case !utf8.ValidString(prompt) || containsCronUnsafe(prompt):
+		return fmt.Errorf("%w: contains invalid characters", ErrInvalidPrompt)
+	}
+	return nil
 }
 
-// ErrInvalidSchedule is returned by ValidateScheduleChars when a schedule
-// expression fails the shared char policy, and wraps every schedule rejection
-// from AddJob / UpdateJob. Alias of the textutil sentinel.
-var ErrInvalidSchedule = textutil.ErrInvalidCronSchedule
-
-// ValidateScheduleChars enforces the shared cron-schedule size + character
-// policy. Thin alias of textutil.ValidateCronScheduleChars.
-func ValidateScheduleChars(schedule string) error {
-	return textutil.ValidateCronScheduleChars(schedule)
+// checkJobField applies the shared length + UTF-8 + containsCronUnsafe guard
+// to one free-text Job field.
+func checkJobField(name, v string, maxLen int) error {
+	if len(v) > maxLen {
+		return fmt.Errorf("cron: %s too long: %d bytes > %d cap", name, len(v), maxLen)
+	}
+	if !utf8.ValidString(v) || containsCronUnsafe(v) {
+		return fmt.Errorf("cron: %s contains invalid bytes", name)
+	}
+	return nil
 }
 
 // MaxWorkDirLen caps Job.WorkDir on the AddJob write path. 4 KiB matches the
@@ -44,13 +55,13 @@ const MaxBackendLen = 64
 // write path; both flow into the dashboard broadcast and webhook URLs.
 const MaxNotifyTargetLen = 256
 
-// validateJobFields is the single complete write-path gate for AddJob: it
-// mirrors loadJobs's read-side validation so an internal caller bypassing the
-// dashboard / IM validators cannot persist arbitrary Title / Prompt / WorkDir /
-// Backend / Notify* bytes into cron_jobs.json (#1141, #1927). UpdateJob keeps
-// its per-field delta path. Empty values are allowed (dashboard creates jobs
-// with optional fields zero and a paused-with-empty-prompt state); only values
-// over the cap or carrying log-injection / non-UTF-8 bytes are rejected.
+// validateJobFields is the one write-path gate for AddJob (the dashboard and
+// IM edges do not re-check these fields): it mirrors loadJobs's read-side
+// validation so no caller can persist arbitrary Title / Prompt / WorkDir /
+// Backend / Notify* bytes into cron_jobs.json (#1141, #1927). UpdateJob checks
+// the same rules per patched field. Empty values are allowed (dashboard creates
+// paused-with-empty-prompt jobs); only values over the cap or carrying
+// log-injection / non-UTF-8 bytes are rejected.
 func validateJobFields(j *Job) error {
 	// Title 长度校验在 scheduler 层兜底，避免绕过 dashboard handler 把超长字符串持久化。
 	if n := utf8.RuneCountInString(j.Title); n > MaxCronTitleLen {
@@ -63,17 +74,11 @@ func validateJobFields(j *Job) error {
 			return err
 		}
 	}
-	if len(j.WorkDir) > MaxWorkDirLen {
-		return fmt.Errorf("cron: work_dir too long: %d bytes > %d cap", len(j.WorkDir), MaxWorkDirLen)
+	if err := checkJobField("work_dir", j.WorkDir, MaxWorkDirLen); err != nil {
+		return err
 	}
-	if !utf8.ValidString(j.WorkDir) || containsCronUnsafe(j.WorkDir) {
-		return fmt.Errorf("cron: work_dir contains invalid bytes")
-	}
-	if len(j.Backend) > MaxBackendLen {
-		return fmt.Errorf("cron: backend too long: %d bytes > %d cap", len(j.Backend), MaxBackendLen)
-	}
-	if !utf8.ValidString(j.Backend) || containsCronUnsafe(j.Backend) {
-		return fmt.Errorf("cron: backend contains invalid bytes")
+	if err := checkJobField("backend", j.Backend, MaxBackendLen); err != nil {
+		return err
 	}
 	if err := validatePlacement(j.Placement); err != nil {
 		return fmt.Errorf("cron: %w", err)
@@ -83,17 +88,11 @@ func validateJobFields(j *Job) error {
 	if placementIsSandbox(j.Placement) && j.WorkDir != "" {
 		return ErrSandboxWorkDir
 	}
-	if len(j.NotifyPlatform) > MaxNotifyTargetLen {
-		return fmt.Errorf("cron: notify_platform too long: %d bytes > %d cap", len(j.NotifyPlatform), MaxNotifyTargetLen)
+	if err := checkJobField("notify_platform", j.NotifyPlatform, MaxNotifyTargetLen); err != nil {
+		return err
 	}
-	if !utf8.ValidString(j.NotifyPlatform) || containsCronUnsafe(j.NotifyPlatform) {
-		return fmt.Errorf("cron: notify_platform contains invalid bytes")
-	}
-	if len(j.NotifyChatID) > MaxNotifyTargetLen {
-		return fmt.Errorf("cron: notify_chat_id too long: %d bytes > %d cap", len(j.NotifyChatID), MaxNotifyTargetLen)
-	}
-	if !utf8.ValidString(j.NotifyChatID) || containsCronUnsafe(j.NotifyChatID) {
-		return fmt.Errorf("cron: notify_chat_id contains invalid bytes")
+	if err := checkJobField("notify_chat_id", j.NotifyChatID, MaxNotifyTargetLen); err != nil {
+		return err
 	}
 	return nil
 }
@@ -106,15 +105,16 @@ func truncateWithSuffix(s string, maxRunes int) string {
 	return runstore.TruncateWithSuffix(s, maxRunes)
 }
 
-// Shared input bounds for cron-related trust boundaries (IM `/cron` commands
-// and dashboard HTTP endpoints). Both surfaces guard the same on-disk
-// cron_jobs.json schema, so the limits must stay in lockstep.
+// Input bounds for cron_jobs.json fields.
 const (
-	// Aliased from the leaf package internal/textutil so the IM dispatch and
-	// dashboard edges share the bounds without importing cron (#1707).
-	MaxPromptBytes   = textutil.MaxCronPromptBytes
-	MaxIDLen         = textutil.MaxCronIDLen
-	MaxScheduleBytes = textutil.MaxCronScheduleBytes
+	// MaxPromptBytes bounds a job prompt; every run replays it via the CLI.
+	// Defined in textutil so cron/sandboxstore (imported by cron) shares it.
+	MaxPromptBytes = textutil.MaxCronPromptBytes
+	// MaxIDLen bounds job IDs from IM commands and dashboard parameters.
+	// Generated IDs are 16-char hex; 64 leaves slack.
+	MaxIDLen = 64
+	// MaxScheduleBytes caps a schedule expression ("@every 30m", "0 9 * * *").
+	MaxScheduleBytes = 256
 
 	// maxStoredResultRunes bounds CronRun.Result + Job.LastResult after rune-safe
 	// truncation; the record is hard-capped at MaxRunRecordBytes downstream, but

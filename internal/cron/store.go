@@ -74,7 +74,7 @@ func loadJobs(path string) (map[string]*Job, error) {
 			continue
 		}
 		// Defensive prompt validation (the write paths already enforce
-		// validateCronPrompt, but cron_jobs.json can be edited offline): invalid UTF-8
+		// ValidatePromptStrict, but cron_jobs.json can be edited offline): invalid UTF-8
 		// corrupts every later json.Marshal and control bytes smuggle ANSI / log
 		// injection into every CronRun.Result. Drop the job rather than abort the load.
 		if !utf8.ValidString(j.Prompt) || containsCronUnsafe(j.Prompt) {
@@ -171,9 +171,9 @@ func loadJobs(path string) (map[string]*Job, error) {
 // (U+202A..U+202E, U+2066..U+2069) or LS/PS (U+2028/U+2029). Bidi codepoints
 // can visually reorder glyphs in IM / browser renderers so a tampered prompt
 // swaps "rm -rf /tmp/safe" for "rm -rf /etc/passwd" at display time; LS/PS
-// introduce hard line breaks. Matches what validateCronPrompt blocks on the
-// write paths. Inlined byte scan (no textutil regex) because loadJobs runs once
-// at startup and the ASCII path stays branchless.
+// introduce hard line breaks. This is the one character policy for
+// cron_jobs.json fields, on both the read and write paths; an inlined byte
+// scan so the ASCII path stays branchless.
 func containsCronUnsafe(s string) bool {
 	for i := 0; i < len(s); i++ {
 		b := s[i]

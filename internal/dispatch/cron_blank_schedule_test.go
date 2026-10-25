@@ -9,12 +9,6 @@ import (
 // schedule consisting only of whitespace with a clear, dedicated error rather
 // than letting it fall through to a confusing generic robfig parse error.
 // (R20260603-GEN-4)
-//
-// These schedules are all-whitespace: they pass cron.ValidateScheduleChars
-// (no forbidden characters) but are semantically empty, so the GEN-4 guard
-// must reject them with the dedicated Chinese message. (Empty "" and tab are
-// already rejected earlier by ValidateScheduleChars with different messages,
-// so they are out of scope for this specific guard.)
 func TestParseCronAddArgs_EmptySchedule(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

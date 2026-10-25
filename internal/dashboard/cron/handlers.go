@@ -6,14 +6,14 @@ import (
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
 )
 
-// Cron input bounds shared with the IM `/cron` path. Both surfaces feed the
-// same on-disk cron_jobs.json schema, so the limits must stay in lockstep —
-// see internal/cron/limits.go.
+// Cron input bounds, from internal/cron/limits.go.
 const (
-	maxCronPromptBytesDashboard   = cronpkg.MaxPromptBytes
 	maxCronIDLenDashboard         = cronpkg.MaxIDLen
 	maxCronScheduleBytesDashboard = cronpkg.MaxScheduleBytes
 )
+
+// sandboxWorkDirMsg answers cronpkg.ErrSandboxWorkDir on create and update.
+const sandboxWorkDirMsg = "云沙箱暂不支持工作目录（Phase 1）：请先清空 work_dir 或改用本机运行"
 
 // Handlers groups the cron job management API endpoints.
 //

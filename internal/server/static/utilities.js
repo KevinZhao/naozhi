@@ -454,7 +454,6 @@ const API_ERROR_HEADS = [
   ['work_dir does not exist', '工作目录不存在'],
   ['work_dir is not a directory', '路径不是目录'],
   ['work_dir is not a valid path', '工作目录路径不合法'],
-  ['work_dir must be an absolute path', '工作目录必须是绝对路径'],
   ['cron job quota reached', '定时任务数已达上限，请先删除不用的任务'],
   ['schedule interval below the 5m minimum', '执行间隔不能短于 5 分钟'],
   ['takeover refused: max concurrent processes reached', '进程数已满，外部进程未被终止；请先关闭一个空闲会话后重试'],
