@@ -3,8 +3,6 @@ package config
 import (
 	"fmt"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/sessionconst"
 )
 
 type SessionConfig struct {
@@ -141,7 +139,7 @@ func (c *Config) QueueMode() string {
 // out of applyDefaults (#2710 J11).
 func applySessionDefaults(cfg *Config) {
 	if cfg.Session.MaxProcs <= 0 {
-		cfg.Session.MaxProcs = sessionconst.DefaultMaxProcs
+		cfg.Session.MaxProcs = defaultSessionMaxProcs
 	}
 	if cfg.Session.TTL == "" {
 		cfg.Session.TTL = defaultSessionTTL.String()

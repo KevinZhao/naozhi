@@ -26,6 +26,9 @@ const (
 	defaultSessionCWD    = "~/.naozhi/workspace"
 	defaultQueueMode     = "collect"
 	defaultQueueMaxDepth = 20
+	// defaultSessionMaxProcs mirrors session.DefaultMaxProcs (config must not
+	// import internal/session).
+	defaultSessionMaxProcs = 3
 )
 
 // Duration defaults shared by applyDefaults (.String()) and parseDurations.

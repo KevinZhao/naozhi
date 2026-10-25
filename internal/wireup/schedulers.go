@@ -1,6 +1,6 @@
-// schedulers.go owns cron + sysession construction/Start. wireup owns exactly
-// the boot-time CONSTRUCTION + REGISTRATION set (cli-backends,
-// history-backends, schedulers); runtime lifecycle and shutdown ordering of
+// schedulers.go owns cron + sysession construction/Start. wireup owns the
+// boot-time construction and registration (cli-backends, history-backends,
+// schedulers); runtime lifecycle and shutdown ordering of
 // router / server / platforms stay in cmd/naozhi (#1372).
 
 package wireup
@@ -78,7 +78,7 @@ type Schedulers struct {
 // already running on return. A cron.Start error is terminal; a sysession
 // build failure is returned via Schedulers.SysessionBuildErr with nil err.
 // The caller records StartupPhaseSchedulerMs (wireup has no metrics dep).
-func (b *Boot) WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
+func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 	out := Schedulers{}
 	if deps.Cfg == nil {
 		return out, fmt.Errorf("WireSchedulers: nil Cfg")
@@ -138,13 +138,6 @@ func (b *Boot) WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 		return out, fmt.Errorf("start cron scheduler: %w", err)
 	}
 	out.Cron = scheduler
-
-	// Recorded after a successful cron.Start so the audit step reflects a live
-	// scheduler; not in requiredBootSteps because sysession is degradable (#2314).
-	b.recordStep("schedulers", BootStep{
-		Kind:   "schedulers",
-		Detail: "cron scheduler + sysession construction/Start",
-	})
 
 	// Degradable: a broken claude binary must not break startup.
 	if deps.BuildSysession != nil {

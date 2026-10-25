@@ -51,10 +51,6 @@ type Manager struct {
 	// scanDiskHook, when set (tests only), runs at the end of every scanDisk.
 	scanDiskHook func()
 
-	// stubProbe tells the stub sweep whether git tracks a project's
-	// project.yaml; gitTracksStub except in tests.
-	stubProbe func(projDir string) trackState
-
 	mu       sync.RWMutex
 	projects map[string]*Project // name -> project
 
@@ -126,7 +122,6 @@ func NewManager(root string, defaults PlannerDefaults, opts ...Option) (*Manager
 		defaults:     defaults,
 		projects:     make(map[string]*Project),
 		bindingIndex: make(map[string]string),
-		stubProbe:    gitTracksStub,
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -156,9 +151,8 @@ func dirModTimeMillis(entry os.DirEntry, path string) int64 {
 }
 
 // Scan discovers all subdirectories under root and loads their project configs.
-// It never writes into a project directory; only the projects index is saved
-// (plus a one-shot removal of legacy stubs, see sweepLegacyStubs). The disk
-// reads run without m.mu, so ProjectForChat and ResolveWorkspaces never wait
+// It never writes into a project directory; only the projects index is saved.
+// The disk reads run without m.mu, so ProjectForChat and ResolveWorkspaces never wait
 // on them; only the map swap takes the write lock. A writer that persisted
 // meanwhile (mutGen moved) may postdate those reads, so Scan then re-reads
 // under the lock: a swap never drops a binding, favorite or config edit.
@@ -192,7 +186,6 @@ func (m *Manager) Scan() error {
 	m.mu.Unlock()
 
 	m.index.replace(res.nextIndex)
-	m.sweepLegacyStubs()
 
 	level := slog.LevelDebug
 	if !m.scanLogged || m.scanCount != len(res.projects) {
