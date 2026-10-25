@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/cron"
@@ -215,6 +216,29 @@ func TestWrapCronSpawnErr_CapacityRefusals(t *testing.T) {
 	other := errors.New("spawn boom")
 	if got := wrapCronSpawnErr(other); got != other {
 		t.Errorf("non-capacity error rewrapped: got %v", got)
+	}
+}
+
+// TestWrapCronSpawnErr_NamesCLIExitCause: a spawn whose CLI exited in the
+// Init handshake with a named cause reaches cron carrying that cause, the
+// exit still in the chain; an unrecognised exit passes through.
+func TestWrapCronSpawnErr_NamesCLIExitCause(t *testing.T) {
+	t.Parallel()
+	for _, tc := range cliExitCauses {
+		exit := fmt.Errorf("session k: protocol init: acp session/new: %w", &clierr.ProcessExitedError{Code: 1, Class: tc.class})
+		err := wrapCronSpawnErr(exit)
+		var tf *cron.TurnFailedError
+		if !errors.As(err, &tf) || tf.Cause != tc.cause {
+			t.Errorf("wrapCronSpawnErr(class %d) = %v, want a TurnFailedError with %q", tc.class, err, tc.cause)
+		}
+		var pe *clierr.ProcessExitedError
+		if !errors.As(err, &pe) || pe.Class != tc.class || errors.Is(err, cron.ErrSessionCapacity) {
+			t.Errorf("wrapCronSpawnErr(class %d) = %v, want the exit kept and no capacity tag", tc.class, err)
+		}
+	}
+	unknown := fmt.Errorf("protocol init: %w", &clierr.ProcessExitedError{Code: 1})
+	if got := wrapCronSpawnErr(unknown); got != unknown {
+		t.Errorf("unrecognised exit rewrapped: got %v", got)
 	}
 }
 

@@ -11,13 +11,9 @@ import "github.com/naozhi/naozhi/internal/cli"
 // report side, it makes `config check` describe a spawn that never happens.
 //
 // The inputs are positional on purpose: a caller that forgets one does not
-// compile. Add new argv-bearing fields HERE, not at a call site.
-//
-// debugFile is a parameter because the callers need different side effects
-// (spawn pre-creates/hardens via cliDebugFileFor; drift and the report stay
-// read-only via cliDebugPathFor / CLIDebugPath). PermissionMode is absent: no
-// caller sets anything but the zero value.
-func ArgvSpawnOptions(model, effort, debugFile, systemPrompt string, extraArgs []string, settingsFile, mcpConfigFile string) cli.SpawnOptions {
+// compile. Add new argv-bearing fields HERE, not at a call site. debugFile is a
+// parameter because spawn hardens the file and the other two paths stay read-only.
+func ArgvSpawnOptions(model, effort, debugFile, systemPrompt string, extraArgs []string, settingsFile, mcpConfigFile string, permissionMode cli.PermissionMode) cli.SpawnOptions {
 	return cli.SpawnOptions{
 		Model:              model,
 		Effort:             effort,
@@ -29,11 +25,13 @@ func ArgvSpawnOptions(model, effort, debugFile, systemPrompt string, extraArgs [
 		SettingsFile: settingsFile,
 		// "" unless the operator configured cli.mcp_config; only ClaudeProtocol acts on it.
 		MCPConfigFile: mcpConfigFile,
+		// cli.permission_mode; only ClaudeProtocol acts on it.
+		PermissionMode: permissionMode,
 	}
 }
 
-// argvSpawnOptions is ArgvSpawnOptions with the two router-owned paths filled in
-// from the spawn facet.
+// argvSpawnOptions is ArgvSpawnOptions with the router-owned paths and
+// permission mode filled in from the spawn facet.
 func (c *spawnConfig) argvSpawnOptions(model, effort, debugFile, systemPrompt string, extraArgs []string) cli.SpawnOptions {
-	return ArgvSpawnOptions(model, effort, debugFile, systemPrompt, extraArgs, c.naozhiSettingsFile, c.mcpConfigFile)
+	return ArgvSpawnOptions(model, effort, debugFile, systemPrompt, extraArgs, c.naozhiSettingsFile, c.mcpConfigFile, c.permissionMode)
 }

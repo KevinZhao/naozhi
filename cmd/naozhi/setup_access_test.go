@@ -24,7 +24,7 @@ func writeSetup(t *testing.T, existing, userID string) (weixinAccess, *config.Co
 			t.Fatal(err)
 		}
 	}
-	access, err := setupWriteConfig(path, "wx-token", userID)
+	access, err := setupWriteConfig(path, "wx-token", userID, "")
 	if err != nil {
 		t.Fatalf("setupWriteConfig: %v", err)
 	}
@@ -297,7 +297,7 @@ func TestPrintWeixinManualConfig_NeverOpen(t *testing.T) {
 		{"bad\x00id", "<your ID>"},
 	} {
 		var buf bytes.Buffer
-		printWeixinManualConfig(&buf, "wx-token", tc.userID)
+		printWeixinManualConfig(&buf, "wx-token", tc.userID, "")
 		var yamlLines []string
 		for line := range strings.Lines(buf.String()) {
 			if strings.HasPrefix(line, "  ") {

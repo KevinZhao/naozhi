@@ -11,8 +11,8 @@ import (
 
 // TestNewRouter_SpawnCarriesTheConfiguredSpawnSettings pins the path from
 // RouterConfig through the spawn facet into a real spawn's options: both
-// timeouts and both router-owned argv paths reach the SpawnOptions the CLI is
-// started with. Values differ from every default so a dropped hop shows.
+// timeouts, both router-owned argv paths and the permission mode reach the
+// SpawnOptions the CLI is started with. Values differ from every default so a dropped hop shows.
 func TestNewRouter_SpawnCarriesTheConfiguredSpawnSettings(t *testing.T) {
 	dir := t.TempDir()
 	mcp, settings := filepath.Join(dir, "mcp.json"), filepath.Join(dir, "settings.json")
@@ -22,6 +22,7 @@ func TestNewRouter_SpawnCarriesTheConfiguredSpawnSettings(t *testing.T) {
 		TotalTimeout:       7 * time.Minute,
 		MCPConfigFile:      mcp,
 		NaozhiSettingsFile: settings,
+		PermissionMode:     cli.PermissionModeAuto,
 	})
 	t.Cleanup(r.Shutdown)
 	var got cli.SpawnOptions
@@ -39,5 +40,8 @@ func TestNewRouter_SpawnCarriesTheConfiguredSpawnSettings(t *testing.T) {
 	}
 	if got.MCPConfigFile != mcp || got.SettingsFile != settings {
 		t.Errorf("spawn paths = %q / %q, want %q / %q", got.MCPConfigFile, got.SettingsFile, mcp, settings)
+	}
+	if got.PermissionMode != cli.PermissionModeAuto {
+		t.Errorf("spawn PermissionMode = %d, want PermissionModeAuto", got.PermissionMode)
 	}
 }

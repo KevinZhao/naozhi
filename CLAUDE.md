@@ -18,16 +18,7 @@ bin/naozhi --config config.yaml                      # run locally
 Ratchets only go down: the baselines in `*Baseline*` test constants,
 `scripts/js-ratchet.baseline.json`, `scripts/js-deps-baseline.json` and
 `tools/lint-server-handlers/exemptions.yaml` fail CI when a count drops below
-them, so lower them in the same PR. Raising one needs a line appended to
-`scripts/ratchet-raises.jsonl` citing an issue labelled
-`ratchet-raise-approved`; `go run ./tools/ratchet-raises -base origin/master`
-prints the lines a change needs. A `*Baseline*` constant must be a plain
-integer literal; renaming or deleting one, or moving it to another package,
-is a raise to -1 that needs a ledger line too. So is removing the last code
-in its directory that uses one (deleting, commenting out or build-tagging
-away the comparison) while keeping the constant, or adding a new `t.Skip` to
-a file that declares or uses one (skips a file already had before it gained
-the reference don't count).
+them, so lower them in the same PR. To raise one, edit it in the PR that needs it.
 
 `config.yaml` is gitignored (environment-specific). Use `config.example.yaml`
 as the template: `cp config.example.yaml config.yaml` then fill in real values.
@@ -80,7 +71,7 @@ cmd/naozhi/main.go
   持久化 / 历史
   -> eventlog     Event log 子系统（persist/schema/api 子包；append-only + crash recovery）
   -> history      后端无关历史加载接口；claudejsonl/kirojsonl/codexjsonl/naozhilog/merged 子包
-  -> attachment   附件持久化 + refcount tracker 子包
+  -> attachment   附件持久化 + refcount tracker 子包 + IM/dashboard 文件类型判定（ClassifyFile / MaybeSupported / ExtForMime）
   -> runlog       per-owner run 记录的磁盘布局层（根校验/目录守卫/原子写/owner 锁），cron 与 session/runhistory 共用
   -> discovery    扫描 Claude CLI 磁盘工件（外部进程发现 / takeover）
   -> claudefs     Claude CLI 磁盘布局单一真相源（projects slug 编码 / transcript 路径 / session id 校验 / cost-state 与按消息 usage 读取 / 尾窗判定末轮是否结束 / workflow run dir 定位与校验）
@@ -103,7 +94,6 @@ cmd/naozhi/main.go
   -> runtelemetry 跨子系统 run 生命周期事件类型；Tee 把两个 Broadcaster 并列（Hub + webhook）
   -> webhook      出站 webhook 发送器（每端点一 goroutine + 有界队列、HMAC 签名、退避重试、Deliver 永不阻塞），server 经 webhookBroadcaster 挂到 runtelemetry 上；只依赖 promexport
   -> promexport   expvar → Prometheus 文本格式（naozhi_* 前缀；_total 为 counter，其余 gauge；Map 按注册的 label 名打标签，未注册退回 `key`；cron 延迟桶导出为 histogram），server 的 GET /metrics 用；叶子
-  -> runtelemetry 跨子系统 run 生命周期事件类型
   -> costledger   统一 cost 账本叶子包（按天 JSONL append-only + rollup + 累计差分 + 按模型学习 CLI 单价）
   -> budget       每日 USD 预算：订阅 cost 账本的内存日索引（IM 会话 / 项目 planner / cron job / 全局）+ Gate 判定；只依赖 costledger 与 sessionkey
   -> naozhisettings  naozhi 托管的 Claude settings 文件
@@ -120,7 +110,7 @@ cmd/naozhi/main.go
   -> osutil       Home/路径展开、进程 helpers、sd_notify、PID 复用防护、只收 regular file 的打开（OpenRegular：FIFO 不阻塞、不跟随 symlink；OpenRegularIn / OpenDirIn：os.Root 锚定）
   -> textutil     字符串工具：截断、脱敏、UUID 派生（依赖 osutil.IsLogInjectionRune，非零依赖叶子）
   -> netutil      Client-IP 提取（trusted-proxy 处理）
-  -> ratelimit    Per-key token-bucket 限流（login/WS/upload 用）
+  -> ratelimit    Per-key token-bucket 限流（login/WS/upload 等 HTTP 入口，及 dispatch 的 IM 按发送者限流 im_rate_limit）
   -> limits       跨包大小/数量上限常量
   -> sessionconst Session 调优常量
   -> sessionkey   Session key 前缀规范（router 命名空间）
@@ -247,10 +237,10 @@ The project list is rescanned every 60s. Scan reads disk without the manager loc
 The dashboard is an embedded PWA served at `/dashboard`: `internal/server/static/` holds `dashboard.html` plus JS modules (`dashboard.js`, `agent_view.js`, `cron_view.js`, `cron_live.js`, `asset_browser.js`, `files_view.js`, `nz_util.js`, and the leaves `ws_manager.js` / `session_stream.js` / `platform.js` / `features.js` / `session_ident.js` (session keys and labels, node connection status) / `icons.js` / `file_ref_parse.js` (the path-shape tests file refs and markdown share) / `shell.js` (the upcall table the root modules fill with `registerShell`) / `backend_catalog.js` (the CLI backends and access profiles a new session can pick, and their pickers) / `cron_state.js` (the cron view's jobs cache, drawer gate, trigger cooldown and the fetches that fill them) / `cron_format.js` (the cron view's text formatters) / `workflow_state.js` (the Workflow runs' store and the client half of their `workflow_set` / `workflow_state` frames and HTTP fetches) / `lightbox.js` (the image gallery overlay dashboard builds with `initLightbox`), `mem_popover.js` for the memory `[[slug]]` hover/click preview (dashboard starts it with `initMemPopover`), `aside_drawer.js` for the 追问 scratch drawer (`initAsideDrawer`; ask_card reads its session key from `selection.scratchKey`), `workflow_view.js` for the workflow panel above the transcript, the workflow frames' handlers and the fetches the store asks for, `event_render.js` / `ask_card.js` for transcript bubbles, `event_stream.js` for the transcript's fetch, paging and append and its history / event / send-ack frames, and `session_list.js` for the sidebar's session poll, cards and status bar and the subscription, error and session-state frames), `sw.js`, `manifest.json`, and `vendor/` (the release files of KaTeX 0.16.21 and mermaid 11.14.0, embedded and served at `/static/vendor/` as immutable, so the dashboard CSP names no outside origin; a bundle over 1 MiB is embedded as `<name>.gz` from `gzip -9n` and served as `<name>`; `render_md.js` pins their SRI, and changed bytes need a new versioned directory). Real-time updates use a WebSocket hub (`/ws`) with:
 
 - **Client messages** (dispatch switch: `internal/server/wsclient.go`): `auth`, `subscribe` (with optional `after` timestamp), `unsubscribe`, `send`, `interrupt`, `ping`, `agent_subscribe`, `agent_unsubscribe`
-- **Server messages**: `auth_ok`, `auth_fail`, `subscribed`, `unsubscribed`, `history`, `event`, `send_ack`, `pong`, `error`, `workflow_set` / `workflow_state` (a subscribed session's workflow board, pushed by `wshub_workflow.go`'s `workflowPushLoop`), plus agent/team streaming types -- see `internal/server/wshub_types.go`. The dashboard receives each through a module-scope `wsm.on(NZ_CONTRACT.WS.<type>, handler[, when])` registration (a `when` makes it a claim, tried before the type's one unconditional handler); `scripts/check-ws-receivers.mjs` (lint-js) refuses hand-rolled `.type` dispatch, holds `wsm` (`ws_manager.js`: connection, dispatch table, `onReady`/`onStateChange`/`onAuthFail`) to its core keys, `sessionStream` and `cronLive` to their declared keys, and keeps the three leaves free of other imports
+- **Server messages**: `auth_ok`, `auth_fail`, `subscribed`, `unsubscribed`, `history`, `event`, `send_ack`, `pong`, `error`, `workflow_set` / `workflow_state` (a subscribed session's workflow board, pushed by `wshub_workflow.go`'s `workflowPushLoop`), plus agent/team streaming types -- see `internal/wsproto` (type constants, per-type frames, `wsproto.schema.json`). The dashboard receives each through a module-scope `wsm.on(NZ_CONTRACT.WS.<type>, handler[, when])` registration (a `when` makes it a claim, tried before the type's one unconditional handler); `scripts/check-ws-receivers.mjs` (lint-js) refuses hand-rolled `.type` dispatch, holds `wsm` (`ws_manager.js`: connection, dispatch table, `onReady`/`onStateChange`/`onAuthFail`) to its core keys, `sessionStream` and `cronLive` to their declared keys, and keeps the three leaves free of other imports
 - Remote node events are relayed transparently -- subscribe with `node` field to stream from a remote session.
 
-Dashboard modules layer base -> leaf -> view -> root. The base (`contract.js`, `state.js`, `nz_util.js`) and the leaves (`caps.leaves` in `scripts/js-ratchet.caps.json`) import only each other, views import downward, and the roots (`caps.shellRoots`) compose. A view that needs a root's function calls it as `shell.X`, which the root fills with one top-level `registerShell({ … })` (besides `wsm.on`, the only load-time call `nz/no-module-side-effects` allows a `caps.shellRoots` file outside `caps.sideEffectLegacy`); `scripts/js-ratchet.mjs` holds every slot to three checks: a root registers it (ownership), its implementation uses the root's own code instead of forwarding an import, and the root reaches the caller through imports (a real upcall, else import it). Nothing else receives injected dependencies: besides `registerShell`, only `caps.injectionAllow` (`nz_util.js:registerActions`, the data-action registry) and `caps.injectionLegacy`, the shrink-only list of `configureX` receivers left from before `shell.js`, now empty (the key stays, so a re-added entry is a raise); eslint `nz/shell-bindings` refuses a new `configureX` export.
+Dashboard modules layer base -> leaf -> view -> root. The base (`contract.js`, `state.js`, `nz_util.js`) and the leaves (`caps.leaves` in `scripts/js-ratchet.caps.json`) import only each other, views import downward, and the roots (`caps.shellRoots`) compose. A view that needs a root's function calls it as `shell.X`, which the root fills with one top-level `registerShell({ … })` (besides `wsm.on`, the only load-time call `nz/no-module-side-effects` allows a `caps.shellRoots` file outside `caps.sideEffectLegacy`); `scripts/js-ratchet.mjs` holds every slot to three checks: a root registers it (ownership), its implementation uses the root's own code instead of forwarding an import, and the root reaches the caller through imports (a real upcall, else import it). Nothing else receives injected dependencies: besides `registerShell`, only `caps.injectionAllow` (`nz_util.js:registerActions`, the data-action registry) and `caps.injectionLegacy`, the shrink-only list of `configureX` receivers left from before `shell.js`, now empty (the key stays, so a re-added entry shows up in the caps diff); eslint `nz/shell-bindings` refuses a new `configureX` export.
 
 Type checking is per file: a dashboard file whose first line is `// @ts-check` is checked by `tsc -p internal/server/static` (lint-js; `tsconfig.json` keeps `checkJs` off for the rest) against `wire.d.ts`, the generated global types (`EventEntry`, `SessionSnapshot`, `WsFrames`, `RestResponses`, ...), and must have zero errors. `wsm.on` types each handler's `msg` by its frame, and tsc is the only check on the fields a frame handler reads: `scripts/ts-check.test.mjs` lists the opted-in files (that list only grows) and fails when a wire type reaches a file without the pragma or a frame reaches an untyped parameter. Neither `wire.d.ts` nor `tsconfig.json` is served.
 
@@ -329,7 +319,7 @@ Each phase emits a `phase=` timing log line so a hung subsystem is attributable 
 `config.yaml` supports `${ENV_VAR}` expansion. Key sections:
 
 - **server.addr**: Listen address (default `:8080`)
-- **cli**: `backend` (`claude`|`kiro`|`codex`), `path`, `model`, `args`, `effort`, `mcp_config` (absolute path to an MCP server definition file → `--mcp-config`; required to get MCP servers into a spawn when `naozhi_settings.enabled` is on, since that path's `--setting-sources ""` suppresses `~/.claude.json`'s `mcpServers` — see `docs/rfc/cli-mcp-config.md`). Multi-backend deployments use `cli.backends: [{id, path, model, args, effort}, ...]` so the dashboard picker can choose per-session — see `config.example.yaml` for the commented-out canonical example. `effort` (kiro only) also accepts a per-agent override via `agents[].effort`; precedence is `cli.effort < cli.backends[].effort < agents[].effort`
+- **cli**: `backend` (`claude`|`kiro`|`codex`), `path`, `model`, `args`, `effort`, `mcp_config` (absolute path to an MCP server definition file → `--mcp-config`; required to get MCP servers into a spawn when `naozhi_settings.enabled` is on, since that path's `--setting-sources ""` suppresses `~/.claude.json`'s `mcpServers` — see `docs/rfc/cli-mcp-config.md`), `permission_mode` (Claude only: `bypass` (default) → `--dangerously-skip-permissions`, `auto` → `--permission-mode auto`; any other value fails validation). Multi-backend deployments use `cli.backends: [{id, path, model, args, effort}, ...]` so the dashboard picker can choose per-session — see `config.example.yaml` for the commented-out canonical example. `effort` (kiro only) also accepts a per-agent override via `agents[].effort`; precedence is `cli.effort < cli.backends[].effort < agents[].effort`
 - **session**: `max_procs`, `ttl`, `cwd` (working directory), `store_path`, `watchdog.no_output_timeout`, `watchdog.total_timeout`
 - **agents**: Map of agent_id -> {model, args, backend, access_profile, effort, system_prompt}. `system_prompt` is passed as `--append-system-prompt` (Claude backend only); the flag itself is denylisted in `args`
 - **agent_commands**: Map of command -> agent_id for routing (e.g., `review: code-reviewer`)
@@ -366,7 +356,6 @@ Comments describe the *current* code: the invariant that holds, why a non-obviou
 - **No review anchors in code.** Never paste cron-cr finding IDs (`R<nnn>-<AREA>-<n>`) or issue titles into comments. Reference the issue/PR number once, at the end of the rationale. The commit message and PR body carry `(#N)`.
 - **Length limits.** In-function comment block ≤ 5 lines. Godoc on one identifier ≤ 10 lines. Package doc (`doc.go`) ≤ 60 lines. Longer means the function should be split or the design belongs in `docs/rfc/`.
 - **No comment-backed invariants.** If an invariant needs a CI lint to keep a comment honest, express it as a type or package boundary instead (#2495 / #2499 is the pattern). No lint or test checks that a comment's *content* matches the code. The one `// 读写:` note, on `cron.Scheduler`, states a lock discipline rather than a file list, which is an invariant worth writing down.
-- **The budget is counted.** `tools/comment-budget` counts the comments that break the rules above — in-function blocks over 5 lines, godoc over 10, package docs over 60, review anchors, history phrasing, duplicated adjacent comment blocks, godocs off the declaration they describe (opening with another name of the package or a stale one, or trailing a file's last declaration) — and its test ratchets each count down. It checks the shape of comments, never what they claim. `go run ./tools/comment-budget -list <Counter>` lists the offenders.
 - **Keep:** the godoc first sentence on exported identifiers, `//go:` directives, `//nolint`, build tags, `TODO` with an issue link, and security rationale that cannot be derived from the code.
 - **Automated fixers** (cron code-review / issue-fix agents) follow the same rules; a PR that adds anchors or history comments is a review BLOCK.
 

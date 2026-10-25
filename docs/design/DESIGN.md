@@ -65,6 +65,7 @@ claude -p \
 > 3. 通过 `session.cwd` 限制默认工作目录
 > 4. 考虑在容器或 VM 中运行以隔离文件系统
 > 5. 配置飞书等平台的机器人可见范围，限制可发送消息的用户
+> 6. Claude backend 可设 `cli.permission_mode: auto`，改传 `--permission-mode auto`：由 CLI 的分类器模型逐个审查工具调用，而不是全部放行（见 `config.example.yaml`）
 
 **hooks 隔离** (已验证):
 

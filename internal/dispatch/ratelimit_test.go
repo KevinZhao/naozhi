@@ -186,3 +186,40 @@ func TestInboundLimitConfig_TTLCoversRefill(t *testing.T) {
 		}
 	}
 }
+
+// Admit refuses a sender with no token left before the adapter fetches or
+// transcribes the media, with the same metric and throttled reply, and
+// spends nothing itself: the handler spends the one token (#3652).
+func TestAdmit_RateLimitedSenderFetchesNothing(t *testing.T) {
+	d, fp, _ := newRateLimitDispatcher(t, RateLimit{MsgsPerMin: 1, Burst: 1})
+	ctx := context.Background()
+	before := dispatchRateLimitedTotal.Value()
+
+	voice := rateMsg("alice", "c1", "")
+	for range 3 {
+		if !d.Admit(ctx, voice) {
+			t.Fatal("Admit refused a sender with a token left")
+		}
+	}
+	voice.Text = "transcribed"
+	if got := accepted(d, voice); !got[0] {
+		t.Fatal("the admitted message found its token spent by Admit")
+	}
+	for range 2 {
+		if d.Admit(ctx, rateMsg("alice", "c1", "")) {
+			t.Fatal("Admit let a rate-limited sender's media through")
+		}
+	}
+	if moved := dispatchRateLimitedTotal.Value() - before; moved != 2 {
+		t.Errorf("naozhi_dispatch_rate_limited_total moved by %d, want 2", moved)
+	}
+	if n := countReplies(fp, rateLimitedReply); n != 1 {
+		t.Errorf("rate-limit replies = %d, want 1: %q", n, fp.allReplies())
+	}
+	if !d.Admit(ctx, rateMsg("alice", "c1", "/stop")) {
+		t.Error("Admit limited /stop")
+	}
+	if !d.Admit(ctx, rateMsg("bob", "c1", "")) {
+		t.Error("Admit refused another sender with a full bucket")
+	}
+}

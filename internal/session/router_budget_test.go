@@ -44,8 +44,7 @@ const (
 // exemption that may only shrink; a file that sinks more than
 // routerLinesSlackBaseline below its exemption re-samples it, and one back
 // under the limit drops its exemption. routerLineExemptionsBaseline counts
-// the exemptions, so a new one is a raise the ratchet ledger sees, however
-// it is spelled. None is left.
+// the exemptions; none is left.
 const routerFileLinesTargetBaseline = 900
 
 const routerLineExemptionsBaseline = 0

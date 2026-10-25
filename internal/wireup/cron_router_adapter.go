@@ -97,12 +97,14 @@ func (a cronRouterAdapter) ReleaseProcess(key string) bool {
 }
 
 // wrapCronSpawnErr tags the router's capacity refusals with
-// cron.ErrSessionCapacity, keeping the session sentinel in the chain.
+// cron.ErrSessionCapacity, keeping the session sentinel in the chain, and
+// names the cause of a CLI that exited in the Init handshake as the Send path
+// does (exitFailure); cron keeps that run a session_error.
 func wrapCronSpawnErr(err error) error {
 	if errors.Is(err, session.ErrMaxExemptSessions) || errors.Is(err, session.ErrMaxProcs) {
 		return fmt.Errorf("%w: %w", cron.ErrSessionCapacity, err)
 	}
-	return err
+	return exitFailure(err)
 }
 
 // toSessionAgentOpts copies cron.AgentOpts → session.AgentOpts. ExtraArgs is

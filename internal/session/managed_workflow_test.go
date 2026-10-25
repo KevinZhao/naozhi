@@ -958,7 +958,8 @@ func TestWorkflowBoard_Subscribe(t *testing.T) {
 
 // TestRestoredWorkflow: sessions.json is hand-editable. A non-empty session
 // or run id must pass its check and the task id and status must be CC's;
-// empty ids are kept (not known yet). Running entries come back stale.
+// empty ids are kept (not known yet). Running entries come back stale, and
+// a missing or future last_observed_at comes back as the restore time.
 func TestRestoredWorkflow(t *testing.T) {
 	now := time.UnixMilli(wfT0)
 	ok := workflow.Ref{TaskID: "w113pvmto", Status: workflow.StatusRunning}
@@ -969,6 +970,7 @@ func TestRestoredWorkflow(t *testing.T) {
 	}{
 		{"empty ids", func(*workflow.Ref) {}, true},
 		{"valid ids", func(r *workflow.Ref) { r.SessionID, r.RunID = wfSID, wfRun }, true},
+		{"future observed at", func(r *workflow.Ref) { r.LastObservedAt = wfT0 + 24*time.Hour.Milliseconds() }, true},
 		{"bad session id", func(r *workflow.Ref) { r.SessionID = "../x" }, false},
 		{"bad run id", func(r *workflow.Ref) { r.RunID = "wf_../../x" }, false},
 		{"bad task id", func(r *workflow.Ref) { r.TaskID = "W/1" }, false},
