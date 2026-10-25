@@ -47,10 +47,7 @@ func TestNewWithOptions_NilMapsTolerated(t *testing.T) {
 	}
 }
 
-// TestNewWithOptions_NilRouterPanicsAtEntry pins the one place the "Router is
-// required" invariant is expressed (#3638). Without the entry check a nil
-// Router got as far as dashsession's InitStaticStats and panicked there, far
-// from the cause, while guards downstream pretended nil was survivable.
+// A nil Router panics at the constructor entry, naming the field (#3638).
 func TestNewWithOptions_NilRouterPanicsAtEntry(t *testing.T) {
 	defer func() {
 		r := recover()

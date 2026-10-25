@@ -17,6 +17,7 @@ import (
 // that keys on a section's presence does not see a zeroed store it cannot
 // tell from a healthy one.
 func TestRunStoresHealthProbe_OmitsWhenNothingPersists(t *testing.T) {
+	r := session.NewRouter(session.RouterConfig{MaxProcs: 1})
 	for _, tc := range []struct {
 		name string
 		fn   func() cron.RunStoreHealth
@@ -26,7 +27,7 @@ func TestRunStoresHealthProbe_OmitsWhenNothingPersists(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var auth healthAuthSection
-			runStoresHealthProbe(tc.fn, nil)(&auth)
+			runStoresHealthProbe(tc.fn, r)(&auth)
 			if auth.RunStores != nil {
 				t.Errorf("run_stores = %+v, want omitted", auth.RunStores)
 			}

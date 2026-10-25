@@ -79,10 +79,8 @@ func vendorContent(t *testing.T, key string) []byte {
 // TestVendorAssets_LargeFilesPrecompressed: a raw bundle would be gzipped at
 // BestCompression during init, on every start (mermaid's 3 MB: 65-140ms against
 // 11-18ms to gunzip), and would weigh its full size in the binary. Anything
-// that large is embedded as <name>.gz instead, its gzip form served as is, and
-// only its gzip form stays in memory (#3662): decompressing it at init kept the
-// 3 MB raw bundle resident next to it for the few clients that send no
-// Accept-Encoding.
+// that large is embedded as <name>.gz instead, its gzip form served as is and
+// the only form kept in memory (#3662).
 func TestVendorAssets_LargeFilesPrecompressed(t *testing.T) {
 	t.Parallel()
 	err := fs.WalkDir(vendorFS, "static/vendor", func(name string, d fs.DirEntry, err error) error {

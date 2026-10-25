@@ -15,7 +15,7 @@ import (
 
 // HealthHandler serves the /health endpoint with system status information.
 type HealthHandler struct {
-	router        healthRouter // nil interface when ServerOptions.Router is nil
+	router        healthRouter
 	auth          *auth.Handlers
 	startedAt     time.Time
 	workspaceID   string
@@ -232,11 +232,8 @@ func (h *HealthHandler) handleLivez(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok\n"))
 }
 
-// handleReadyz serves /readyz — Kubernetes-style readiness probe. A served
-// request means construction finished, and construction refuses a nil Router
-// (#3638), so there is no partial-wiring state left to report; never returns
-// stats/version so an unauthenticated probe cannot fingerprint the binary
-// (#609).
+// handleReadyz serves /readyz: ready once constructed (#3638); never returns
+// stats/version so an unauthenticated probe cannot fingerprint the binary (#609).
 func (h *HealthHandler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")

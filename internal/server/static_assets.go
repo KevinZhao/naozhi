@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
-	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -358,9 +357,6 @@ func addVendorAssets(out map[string]staticAsset) {
 		if !gzipped {
 			out[key] = newStaticAsset(b, ext != ".woff2")
 			return nil
-		}
-		if _, err := gzip.NewReader(bytes.NewReader(b)); err != nil {
-			return fmt.Errorf("%s: %w", name, err)
 		}
 		out[key] = newGzipOnlyAsset(b)
 		return nil
