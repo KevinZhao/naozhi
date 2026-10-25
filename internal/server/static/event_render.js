@@ -371,11 +371,10 @@ export function leadingTimeDivider(el) {
   return null;
 }
 
-// removeOptimisticMsg drops the optimistic user bubble a send rendered. With
-// a send id (the WS send_ack echoes the `id` the send frame carried) only that
-// send's bubble goes — a busy/error ack for the second of two in-flight sends
-// must not eat the first one's bubble (#2430). Without an id (legacy servers,
-// HTTP-path send_error) fall back to the oldest bubble on screen.
+// removeOptimisticMsg drops the optimistic user bubble a send rendered and says
+// whether one was there. A send id (echoed by the WS send_ack) picks that send's
+// bubble, so a busy/error ack for the 2nd of two sends keeps the 1st's (#2430);
+// without one (legacy server, HTTP send_error, the user echo) the oldest goes.
 export function removeOptimisticMsg(sendId) {
   const root = document.getElementById('events-scroll') || document;
   let opt;
@@ -386,4 +385,5 @@ export function removeOptimisticMsg(sendId) {
     opt = root.querySelector('.optimistic-msg');
   }
   if (opt) opt.remove();
+  return !!opt;
 }
