@@ -188,15 +188,29 @@ func TestFileAttachments_Caps(t *testing.T) {
 func TestAdapterRejectReason_EveryReject(t *testing.T) {
 	t.Parallel()
 	for r, want := range map[platform.FileReject]string{
-		platform.FileRejectNone:           "",
-		platform.FileRejectTooLarge:       fileReasonTooLarge,
-		platform.FileRejectUnsupported:    fileReasonUnsupported,
-		platform.FileRejectDownloadFailed: fileReasonDownload,
-		platform.FileRejectTooMany:        fileReasonTooMany,
-		platform.FileRejectTotalTooLarge:  fileReasonTotal,
+		platform.FileRejectNone:             "",
+		platform.FileRejectTooLarge:         fileReasonTooLarge,
+		platform.FileRejectUnsupported:      fileReasonUnsupported,
+		platform.FileRejectDownloadFailed:   fileReasonDownload,
+		platform.FileRejectTooMany:          fileReasonTooMany,
+		platform.FileRejectTotalTooLarge:    fileReasonTotal,
+		platform.FileRejectImageTooLarge:    imageReasonTooLarge,
+		platform.FileRejectImageUnsupported: imageReasonUnsupported,
 	} {
 		if got := adapterRejectReason(r); got != want {
 			t.Errorf("adapterRejectReason(%q) = %q, want %q", r, got, want)
 		}
+	}
+}
+
+// An image's notice names the image cap and formats, not the file ones
+// (#3624).
+func TestAdapterRejectReason_ImageWording(t *testing.T) {
+	t.Parallel()
+	if got := adapterRejectReason(platform.FileRejectImageTooLarge); !strings.Contains(got, "图片") || !strings.Contains(got, "10 MB") {
+		t.Errorf("image too large reason = %q, want it to name images and the 10 MB cap", got)
+	}
+	if got := adapterRejectReason(platform.FileRejectImageUnsupported); !strings.Contains(got, "png/jpeg/gif/webp") {
+		t.Errorf("unsupported image reason = %q, want it to list png/jpeg/gif/webp", got)
 	}
 }

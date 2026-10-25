@@ -347,3 +347,47 @@ func TestDownloadFile_DoesNotFollowRedirects(t *testing.T) {
 		t.Errorf("redirect followed %d times, want 0", n)
 	}
 }
+
+// An image message whose picture cannot be delivered is forwarded as a File
+// carrying an image-specific reject, so dispatch tells the user (#3624); a
+// delivered image carries the type its bytes sniff as.
+func TestHandleImage_Download(t *testing.T) {
+	t.Parallel()
+	png := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+	bmp := []byte("BM\x00\x00\x00\x00\x00\x00\x00\x00\x36\x00\x00\x00")
+	overCap := append(append([]byte(nil), png...), bytes.Repeat([]byte("a"), maxImageDownloadBytes)...)
+	cases := []struct {
+		name       string
+		stub       *fileStub
+		wantMIME   string
+		wantReject platform.FileReject
+	}{
+		{"png", &fileStub{body: png}, "image/png", platform.FileRejectNone},
+		{"bmp", &fileStub{body: bmp}, "", platform.FileRejectImageUnsupported},
+		{"over the cap", &fileStub{body: overCap}, "", platform.FileRejectImageTooLarge},
+		{"server error", &fileStub{status: http.StatusInternalServerError}, "", platform.FileRejectDownloadFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFileFeishu(t, Config{}, tc.stub)
+			var h handled
+			f.handleImage(context.Background(), h.handler, mediaMsg, "om_1", "img_1")
+
+			got := h.all()
+			if len(got) != 1 {
+				t.Fatalf("handler got %d messages, want one", len(got))
+			}
+			m := got[0]
+			if tc.wantReject == platform.FileRejectNone {
+				if len(m.Files) != 0 || len(m.Images) != 1 || m.Images[0].MimeType != tc.wantMIME {
+					t.Errorf("images %+v files %+v, want one %s image", m.Images, m.Files, tc.wantMIME)
+				}
+				return
+			}
+			if len(m.Images) != 0 || len(m.Files) != 1 || m.Files[0].Reject != tc.wantReject || m.Files[0].Name != imageFileName {
+				t.Errorf("images %d files %+v, want one %q file rejected %q", len(m.Images), m.Files, imageFileName, tc.wantReject)
+			}
+		})
+	}
+}
