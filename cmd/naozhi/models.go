@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/naozhi/naozhi/internal/ccmodels"
 	"github.com/naozhi/naozhi/internal/ccmodels/ccprobe"
 	"github.com/naozhi/naozhi/internal/claudefs"
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
@@ -168,7 +170,7 @@ func probeAliases(cfg *config.Config, snap ccmodels.Snapshot, base []byte, opt m
 		Observe:      func(v ccmodels.Verdict) { fmt.Println("  " + ccprobe.Describe(v)) },
 	}
 	if !opt.Quick {
-		p.CLIPath = claudeBackendPath(cfg)
+		p.CLIPath = ccProbePath(cfg, os.Stdout)
 	}
 	ctx := context.Background()
 	if snap.CredExport == "" {
@@ -183,15 +185,30 @@ func probeAliases(cfg *config.Config, snap ccmodels.Snapshot, base []byte, opt m
 	return p.Run(ctx, candidates)
 }
 
-// claudeBackendPath returns the cc binary to probe with: the claude backend's
-// own path, so the probe exercises the binary naozhi actually spawns.
-func claudeBackendPath(cfg *config.Config) string {
+// resolveCLIPath is cli.ResolveCLIPath, swappable so tests need no installed cc.
+var resolveCLIPath = cli.ResolveCLIPath
+
+// ccProbePath returns the cc binary to probe with, resolved exactly as spawn
+// resolves the claude backend (an entry without a path is auto-detected, not
+// filled from cli.path), so the probe exercises the binary naozhi runs. With no
+// claude backend enabled it is the detected local cc, whose settings are synced
+// regardless. It says which binary it picked, and when none was found, since
+// the prober skips the cc stage on an empty path without a word.
+func ccProbePath(cfg *config.Config, out io.Writer) string {
+	var configured string
 	for _, b := range cfg.EnabledBackends() {
-		if b.ID == "claude" && b.Path != "" {
-			return osutil.ExpandHome(b.Path)
+		if b.ID == "claude" {
+			configured = b.Path
+			break
 		}
 	}
-	return osutil.ExpandHome(cfg.CLI.Path)
+	path := resolveCLIPath(configured, "claude")
+	if path == "" {
+		fmt.Fprintln(out, "未找到 claude，跳过 CLI 验证。")
+	} else {
+		fmt.Fprintf(out, "CLI 验证使用 %s\n", path)
+	}
+	return path
 }
 
 // reportPlan prints what the probe concluded, before any file is touched.

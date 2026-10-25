@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/ccmodels"
@@ -140,5 +141,50 @@ func TestWriteTarget_BacksUpAndKeepsMode(t *testing.T) {
 	}
 	if !diff.Empty() {
 		t.Errorf("written file still differs from the plan: %+v", diff)
+	}
+}
+
+// TestCCProbePath_MatchesSpawnResolution (#3632): a claude backend entry with
+// no path is auto-detected at spawn, so the probe must detect too rather than
+// borrow cli.path, which may point at another backend's binary.
+func TestCCProbePath_MatchesSpawnResolution(t *testing.T) {
+	const detected = "/detected/claude"
+	orig := resolveCLIPath
+	t.Cleanup(func() { resolveCLIPath = orig })
+	resolveCLIPath = func(path, backend string) string {
+		if path != "" {
+			return path
+		}
+		if backend == "claude" {
+			return detected
+		}
+		return ""
+	}
+
+	cfg := config.Config{CLI: config.CLIConfig{Path: "/opt/kiro-cli", Backends: []config.CLIBackendConfig{
+		{ID: "claude"}, {ID: "kiro", Path: "/opt/kiro-cli"},
+	}}}
+	var out strings.Builder
+	if got := ccProbePath(&cfg, &out); got != detected {
+		t.Errorf("ccProbePath = %q, want %q", got, detected)
+	}
+	if !strings.Contains(out.String(), detected) {
+		t.Errorf("output %q does not name the binary used", out.String())
+	}
+}
+
+// TestCCProbePath_NotFoundIsAnnounced: an empty path silently skips the cc
+// stage in the prober, so the caller must say so.
+func TestCCProbePath_NotFoundIsAnnounced(t *testing.T) {
+	orig := resolveCLIPath
+	t.Cleanup(func() { resolveCLIPath = orig })
+	resolveCLIPath = func(string, string) string { return "" }
+
+	var out strings.Builder
+	if got := ccProbePath(&config.Config{}, &out); got != "" {
+		t.Fatalf("ccProbePath = %q, want empty", got)
+	}
+	if !strings.Contains(out.String(), "未找到 claude") {
+		t.Errorf("output %q does not announce the skipped cc stage", out.String())
 	}
 }

@@ -204,12 +204,20 @@ func (w *Wrapper) Probe(ctx context.Context) string {
 	return v
 }
 
-// newWrapperCommon is the shared constructor body for NewWrapper and NewWrapperLazy.
-func newWrapperCommon(cliPath string, proto Protocol, backend string) *Wrapper {
+// ResolveCLIPath is the binary a Wrapper built from (cliPath, backend) would
+// spawn: the configured path with ~ expanded, or detectCLI's pick when none is
+// configured. Exported so tools that run the CLI outside a Wrapper (`naozhi
+// models sync`) exercise the same binary; "" means nothing was found.
+func ResolveCLIPath(cliPath, backend string) string {
 	if cliPath == "" {
 		cliPath = detectCLI(backend)
 	}
-	cliPath = osutil.ExpandHome(cliPath)
+	return osutil.ExpandHome(cliPath)
+}
+
+// newWrapperCommon is the shared constructor body for NewWrapper and NewWrapperLazy.
+func newWrapperCommon(cliPath string, proto Protocol, backend string) *Wrapper {
+	cliPath = ResolveCLIPath(cliPath, backend)
 	// Defense-in-depth argv hygiene (cliPath goes straight to exec.Command).
 	// Warn-only: construction must succeed with a not-yet-installed CLI or a
 	// test-fixture path; enforceCLIPathSafe at spawn is the hard gate.
