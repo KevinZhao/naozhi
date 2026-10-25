@@ -32,6 +32,7 @@
 | [cron-history-redesign.md](cron-history-redesign.md) | Draft v1（提案中） | 2026-05-21 | 修订 cron-panel-consolidation-ui v2：detail 默认进历史 view、run 详情独立 sheet（桌面右抽屉/移动 bottom sheet 共组件）、双栏取代三栏、移动 3 级 push view、状态信号收敛、URL deep-link |
 | [event-log-persistence.md](event-log-persistence.md) | v3 GA 就绪 | 2026-05-10 | EventLog 磁盘持久化，图片与历史事件跨重启可见 |
 | [config-hot-reload.md](config-hot-reload.md) | Phase 1 已实现（#3437） | 2026-10-06 | 配置热重载：`SIGHUP` / `POST /api/system/config/reload` / `naozhi config reload` 三入口，重读 config.yaml 后只应用 `im_access` / `im_rate_limit` / `log.level` / `cost.budget` 上限（Dispatcher 与 `budget.Gate` 的 atomic setter + `slog.LevelVar`），其它段差异对**启动基线**比对后列为 `restart_required`；校验失败进程不变；`/health` 指纹走 `ConfigFingerprint`，没有待重启段时才前进到新文件。非目标：agents / reverse_nodes / 平台凭据、fsnotify |
+| [outbound-webhooks.md](outbound-webhooks.md) | Phase 1 已实现（#3448 a） | 2026-10-06 | 出站 webhook：`integrations.webhooks` 配置端点，`runtelemetry.Tee` 把 `webhookBroadcaster` 与 dashboard Hub 并列在同一个 Relay 上；`internal/webhook` 叶子按端点独立 goroutine + 256 深队列、HMAC-SHA256 签名、408/429/5xx 退避重试 3 次、`Deliver` 永不阻塞；payload 只含 run 元数据。非目标：session turn 事件（无 Broadcaster 生产者）、动态注册、死信持久化、MCP server（#3448 b） |
 | [kiro-effort-control.md](kiro-effort-control.md) | 已实现 | 2026-08-01 | 从 naozhi 配置设置 kiro thinking effort 档位：`cli.effort` / `cli.backends[].effort` / `agents[].effort` → `SpawnOptions.Effort` → `acp --effort`，压过 kiro 自身的 `chat.modelDefaults` 默认且不污染交互式 kiro（实测 2.16.0，`session/new` 与 `session/load` 均生效）。范围限定纯配置：无 per-session 覆盖、无运行时改档、不落盘。§4.5.1 记录已验证的既有缺陷——drift 检测只看 backend 层，故 `agents[].effort`（与既有 `agents[].model` 同源）会被判为参数漂移 |
 | [kiro-effort-visibility.md](kiro-effort-visibility.md) | Draft v2（双独立评审通过并修订） | 2026-08-01 | kiro 每轮 `_kiro.dev/metadata.effort`（thinking effort 档位）端到端透出到 dashboard 会话头部：normalize 层新增 `EventMetadata.Effort` → `Process.effort` (`atomic.Pointer[string]`，存原始 string 保 forward-compat) → `SessionSnapshot.Effort`；前端走挂载点 + `fetchSessions` 重绘（**修复 `renderMainShell` 不在 turn 边界触发导致 chip 要切会话才刷新**，turn-timer 同样受此 pre-existing 缺陷影响）。只做「可见」不做「可控」——`--effort` 传参划为 non-goal |
 | [key-resolver.md](key-resolver.md) | Phase 1-6 已实装（PR #9）；Phase 7 dashboard buildSessionOpts 待 | 2026-05-14 | ARCH3：收敛 planner/agent session key 派生；chat-view / planner-view 双接口（v2 修 v1 漏掉 #6/#7 不继承 defaults 的语义；Phase 6 删 dispatch 侧 legacy nil-resolver 分支） |
@@ -46,7 +47,7 @@
 | [passthrough-mode-cc-tui-analysis.md](passthrough-mode-cc-tui-analysis.md) | 分析报告 | 2026-05-09 | CC TUI mid-turn 机制的源码级分析，交叉验证实测数据 |
 | [passthrough-mode-validation.md](passthrough-mode-validation.md) | Phase 0 实测报告 | 2026-05-09 | V1-V9 验证点的脚本与原始日志汇总 |
 | [passthrough-mode-phase-c-report.md](passthrough-mode-phase-c-report.md) | Phase C 实测报告 | 2026-05-06 | Dashboard 路径灰度实测结果与修复的 2 个 bug |
-| [pdf-attachment.md](pdf-attachment.md) | 设计提案 → 实现中 | 2026-05-06 | Dashboard PDF 附件上传，走 workspace + Read 工具路径 |
+| [pdf-attachment.md](pdf-attachment.md) | 已实装（IM 入口见 #3451） | 2026-05-06 | Dashboard PDF 附件上传，走 workspace + Read 工具路径；IM 文件接收（#3451）复用同一路径 |
 | [process-split.md](process-split.md) | Proposal v2 | 2026-05-11 | ARCH-PROCESS-SPLIT：`cli/process.go` 2464 行按职责拆 7 份，纯文件移动零语义改动（v2 修正 shimMsg 归属、EventCallback 跨包使用、测试文件数） |
 | [session-run-metrics.md](session-run-metrics.md) | Draft v2（三路 review 签核） | 2026-06-16 | 普通 session 一次 run 的 naozhi 自测 wall-clock 耗时度量：`SessionRun` 实体（DurationMS+Outcome+FirstByteMS）落盘 `session-runs/<hash>/<run_id>.json`（无 index.json，内存 ring）、异步写盘、ErrorClass 复用 runtelemetry 叶子包、store 挂 Router；`/api/sessions/runs` + 时间轴/汇总/实时计时（复刻 cron 三条件 timer guard）+ 移动端折叠 |
 | [system-session.md](system-session.md) | 设计提案 Draft v2.1（已过三路 review + OQ 决议） | 2026-05-20 | naozhi 内置后台线程（System Session）统一抽象：`sys:` 命名空间、`internal/sysession/` Daemon+Manager+Runner（派生 transient system session 调 LLM）、AutoTitler MVP（中英双语 prompt、默认跳群聊、跟随 default backend）、`LabelOrigin` + ClearUserLabelOrigin、二段式 structured prompt + sweepOldJSONL on startup、cron/sys 共享 ExemptStub 注册路径。Phase 2 仅承诺浅归并不做接口归并 |
@@ -71,7 +72,6 @@
 | RFC | 状态 | 说明 |
 |---|---|---|
 | [passthrough-mode.md.v1-deprecated](passthrough-mode.md.v1-deprecated) | Superseded by `passthrough-mode.md` | v1 误判 naozhi 需要节流/合并，基于对 CC CLI 内部队列行为的错误假设 |
-| [outbound-webhooks.md](outbound-webhooks.md) | Phase 1 已实现（#3448 a） | 2026-10-06 | 出站 webhook：`integrations.webhooks` 配置端点，`runtelemetry.Tee` 把 `webhookBroadcaster` 与 dashboard Hub 并列在同一个 Relay 上；`internal/webhook` 叶子按端点独立 goroutine + 256 深队列、HMAC-SHA256 签名、408/429/5xx 退避重试 3 次、`Deliver` 永不阻塞；payload 只含 run 元数据。非目标：session turn 事件（无 Broadcaster 生产者）、动态注册、死信持久化、MCP server（#3448 b） |
 | [passthrough-mode-legacy-removal.md](passthrough-mode-legacy-removal.md) | Draft（未开始） | Passthrough 默认开启 + ACP fallback 并发 gate 的遗留代码移除计划 |
 
 > 状态标注以 RFC 文件内首屏（Status / 状态）为准；若 RFC 未写明状态，本表标 "unknown"。如发现表格与 RFC 本体不一致，请同步修正。
