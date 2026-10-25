@@ -50,7 +50,7 @@ vuln:
 test:
 	go test -race ./...
 
-# server-package contracts (server-split-phase4-design.md §六.2 / §九.2).
+# server-package contracts (lint-server-handlers).
 # 原计划 Phase 5 完工后切 fail，但 ADR-001 判定 4b 暂缓（Phase 5 依赖 4b），
 # 触发条件不再会到来。2026-07-31 清零存量后 CI 已切 lint-server-fail；
 # warn 模式保留供本地快速扫描。

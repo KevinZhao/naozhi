@@ -1,5 +1,5 @@
 // Command lint-server-handlers enforces naozhi's server-package contracts
-// (docs/design/server-split-phase4-design.md §六.2 / §九.2):
+// (design doc deleted; see git log -- docs/design/server-split-phase4-design.md):
 //
 //   - handle_decl: every HTTP handler declared in internal/server — matched by
 //     signature on any receiver, free functions, handler factories and
@@ -165,7 +165,7 @@ func main() {
 	vs = append(vs, typed...)
 
 	if os.Getenv("LINT_VERBOSE") == "1" {
-		fmt.Fprintln(os.Stderr, "lint-server-handlers: rule 3b partially landed — send-block slice is enforced (send_engine_ownership, #2551); the general AST field_block 对账 was owed to Phase 4b, which ADR-001 shelved. rule 4 method-set 对账 + rule 5 git tag 对账 due Phase 1 (server-split-phase4-design.md v0.6.1 §六.2.0.4)")
+		fmt.Fprintln(os.Stderr, "lint-server-handlers: rule 3b partially landed — send-block slice is enforced (send_engine_ownership, #2551); the general AST field_block 对账 was owed to Phase 4b, which ADR-001 shelved. rule 4 method-set 对账 + rule 5 git tag 对账 not implemented")
 	}
 
 	if *sarif {
@@ -332,7 +332,7 @@ func scanFileSize(dir string, limit int, exempt map[string]exemption) []Violatio
 		out = append(out, Violation{
 			Rule:    "file_size",
 			File:    rel,
-			Message: fmt.Sprintf("%d lines exceeds %d (no exemption); split per server-split-phase4-design.md §四", lines, limit),
+			Message: fmt.Sprintf("%d lines exceeds %d (no exemption); split the file or add an exemption in tools/lint-server-handlers/exemptions.yaml", lines, limit),
 		})
 		return nil
 	})
@@ -379,7 +379,7 @@ func emitSARIF(vs []Violation) {
 // assert on the rules[] block without capturing stdout.
 func sarifReport(vs []Violation) string {
 	var sb strings.Builder
-	sb.WriteString(`{"$schema":"https://docs.oasis-open.org/sarif/sarif/v2.1.0/cos02/schemas/sarif-schema-2.1.0.json","version":"2.1.0","runs":[{"tool":{"driver":{"name":"lint-server-handlers","informationUri":"https://github.com/naozhi/naozhi/blob/master/docs/design/server-split-phase4-design.md","rules":[`)
+	sb.WriteString(`{"$schema":"https://docs.oasis-open.org/sarif/sarif/v2.1.0/cos02/schemas/sarif-schema-2.1.0.json","version":"2.1.0","runs":[{"tool":{"driver":{"name":"lint-server-handlers","informationUri":"https://github.com/KevinZhao/naozhi/tree/master/tools/lint-server-handlers","rules":[`)
 	for i, id := range ruleIDs {
 		if i > 0 {
 			sb.WriteByte(',')

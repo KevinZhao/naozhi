@@ -2,7 +2,6 @@
 #
 # 数据来源：2026-07-31 fail 模式切换时按 master 实测重采（前一版基于
 # origin/master HEAD 5a7f04aa 2026-05-28）
-# 配套：docs/design/server-split-phase4-design.md v0.6.1 §6.2.0.4 + §0 事实速查表
 #
 # 规则：
 # - server 包文件硬上限 limit:500（不是 800）— 见 §9.2 file_size budget

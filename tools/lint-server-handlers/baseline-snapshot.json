@@ -3,7 +3,7 @@
     "Phase 0 baseline snapshot — captured 2026-05-25 on commit ff034155",
     "(server-split/phase0 branch HEAD).",
     "",
-    "Required by docs/design/server-split-phase4-design.md §六.2.0.6.",
+    "Originally required by the (since deleted) server-split phase-4 design.",
     "Each future Phase N PR must capture the same metrics post-merge and",
     "verify regressions don't exceed +10% (test wall time) or shrinkage",
     "tracks the planned phase removals.",

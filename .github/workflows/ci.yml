@@ -85,8 +85,7 @@ jobs:
   # server-package contracts (lint-server-handlers).
   # fail mode since 2026-07-31: 原计划"Phase 5 完工后切 fail"，但 ADR-001
   # 判定 4b 暂缓后该触发条件不再会到来，warn 模式事实上被永久化。存量已
-  # 清零（exemptions.yaml baseline 重采 + 补录），漂移即 exit 1 卡 PR
-  # — see docs/design/server-split-phase4-design.md §九.2 / §十五 ADR-001.
+  # 清零（exemptions.yaml baseline 重采 + 补录），漂移即 exit 1 卡 PR。
   lint-server:
     runs-on: ubuntu-latest
     timeout-minutes: 5
