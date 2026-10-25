@@ -1,4 +1,3 @@
-// @ts-check
 // session_list.js — the sidebar's session list: the /api/sessions poll and its
 // merge with pending (not yet sent) sessions, the cards and badges, the status
 // bar, the node helpers, and the WS state, subscription and session_state frames.

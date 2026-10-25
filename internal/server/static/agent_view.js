@@ -1,4 +1,3 @@
-// @ts-check
 // agent_view.js — RFC v4 agent-team-ui frontend module.
 //
 // Phase 2.5: moved the 5 banner helpers out of dashboard.js.

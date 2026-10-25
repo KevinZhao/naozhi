@@ -1,5 +1,5 @@
-// Command gen-contract writes internal/server/static/contract.js (#2539) and
-// wire.d.ts (#3439) from the contractjs builders. Run from the repo root:
+// Command gen-contract writes internal/server/static/contract.js (#2539) from
+// the contractjs builder. Run from the repo root:
 //
 //	go run ./tools/gen-contract
 package main
@@ -17,14 +17,6 @@ func main() {
 		fail(err)
 	}
 	write("internal/server/static/contract.js", out)
-
-	dts, err := contractjs.BuildWireDTS("internal/wsproto/wsproto.schema.json",
-		"internal/dashboard/session/testdata/rest.schema.json",
-		"internal/dashboard/ext/workflows/testdata/rest.schema.json")
-	if err != nil {
-		fail(err)
-	}
-	write("internal/server/static/wire.d.ts", dts)
 }
 
 func write(path, content string) {
