@@ -12,6 +12,7 @@
 //  - the attempt badge unfolds the earlier attempts, each drilling in;
 //  - a drill-in straight after another gets the whole 202 budget, and
 //    leaving the session moves the mark off;
+//  - the agent left, by another drill-in or the way back, is unsubscribed;
 //  - a settled row's breadcrumb shows its board duration as the row does, a
 //    running row's the tailer's live one, and a settled Task agent keeps
 //    task_done's (#3646).
@@ -109,6 +110,33 @@ test('a row drills in once with a crumb; the replay is not shown twice; Esc goes
     await expect(rowOf(page, 1)).not.toHaveClass(/wf-sel/);
     await expect(rowOf(page, 1).locator('.wf-row-btn')).not.toHaveAttribute('aria-current', 'true');
     expect((await switchCalls(page)).length).toBe(1);
+    expect(errors).toEqual([]);
+  } finally { mock.server.close(); }
+});
+
+// #3696: the tailer of an agent left behind keeps streaming to this tab and
+// holds one of the Hub-wide tailer slots until the agent ends.
+test('a drill-in straight into another agent, and the way back, unsubscribe the agent left', async ({ page }) => {
+  const { conn, mock, errors } = await open(page, [row(1, 'running'), row(2, 'running')], {
+    agentEvents: { a1: [text(T0, 'task one')], a2: [text(T0, 'task two')] },
+  });
+  const agentFrames = () => conn.messages.filter((m) => m.type === 'agent_subscribe' || m.type === 'agent_unsubscribe')
+    .map((m) => [m.type, m.task_id, m.key]);
+  try {
+    await rowOf(page, 1).locator('.wf-row-btn').click();
+    await expect.poll(() => subscribes(conn, 'a1').length).toBe(1);
+    await rowOf(page, 2).locator('.wf-row-btn').click();
+    await expect.poll(() => subscribes(conn, 'a2').length).toBe(1);
+    expect(agentFrames()).toEqual([['agent_subscribe', 'a1', A], ['agent_unsubscribe', 'a1', A], ['agent_subscribe', 'a2', A]]);
+    // The same agent again stays subscribed.
+    await rowOf(page, 2).locator('.wf-row-btn').click();
+    await expect.poll(() => subscribes(conn, 'a2').length).toBe(2);
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#agent-breadcrumb')).toBeHidden();
+    await expect.poll(agentFrames).toEqual([
+      ['agent_subscribe', 'a1', A], ['agent_unsubscribe', 'a1', A], ['agent_subscribe', 'a2', A],
+      ['agent_subscribe', 'a2', A], ['agent_unsubscribe', 'a2', A],
+    ]);
     expect(errors).toEqual([]);
   } finally { mock.server.close(); }
 });
