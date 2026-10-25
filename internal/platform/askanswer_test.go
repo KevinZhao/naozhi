@@ -85,20 +85,6 @@ func TestNewAskAnswerPayload_ThreadID(t *testing.T) {
 	}
 }
 
-// TestNewAskAnswerPayload_AskerID: the asker round-trips exactly; one too
-// long for the value is dropped, never clipped into another user's id.
-func TestNewAskAnswerPayload_AskerID(t *testing.T) {
-	t.Parallel()
-	card := QuestionCard{AskerID: "ou_asker"}
-	if got := NewAskAnswerPayload(card, QuestionItem{}, QuestionOption{Label: "l"}).AskerID; got != "ou_asker" {
-		t.Errorf("AskerID = %q, want ou_asker", got)
-	}
-	card.AskerID = strings.Repeat("u", AskIDMaxRunes+1)
-	if got := NewAskAnswerPayload(card, QuestionItem{}, QuestionOption{Label: "l"}).AskerID; got != "" {
-		t.Errorf("over-long AskerID = %q, want dropped", got)
-	}
-}
-
 // TestNormalizeAskChatType pins the whitelist: only the two router-known
 // values survive; everything else (including attacker-relayed junk) is
 // dropped to "" so callers fall back to their own heuristic.

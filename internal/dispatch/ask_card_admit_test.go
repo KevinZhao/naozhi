@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/budget"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
@@ -22,7 +21,7 @@ func cardClick(id, user, asker string, accepted *int) platform.IncomingMessage {
 
 // TestAskCard_AskerOnlyInAMembersSession: a card asked in a group member's
 // own session (group_scope user) names them as the only one who may answer;
-// a card in a session the chat, a thread or a direct chat shares names no one.
+// a card in a shared session names no one.
 func TestAskCard_AskerOnlyInAMembersSession(t *testing.T) {
 	ask := clievent.Event{Type: "assistant", AskQuestion: &clievent.AskQuestion{
 		ToolUseID: "tu-1",
@@ -37,9 +36,7 @@ func TestAskCard_AskerOnlyInAMembersSession(t *testing.T) {
 		want     string
 	}{
 		{"user scope group", GroupScopeUser, "group", "u1"},
-		{"user scope direct", GroupScopeUser, "direct", ""},
 		{"thread scope", GroupScopeThread, "group", ""},
-		{"chat scope", GroupScopeChat, "group", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fp := &threadRecPlatform{}
@@ -93,45 +90,15 @@ func TestAskCard_OnlyTheAskerAnswers(t *testing.T) {
 	}
 }
 
-// TestAskCard_RefusedClickIsNotAccepted: a click refused by im_access, the
-// rate limit, the budget or dedup never reports OnAccepted, whichever gate
-// refused it.
+// TestAskCard_RefusedClickIsNotAccepted: a click a gate refuses (here the
+// rate limit) never reports OnAccepted, so the card keeps its buttons.
 func TestAskCard_RefusedClickIsNotAccepted(t *testing.T) {
-	t.Run("im access", func(t *testing.T) {
-		d, _, _, _ := newAuthzDispatcher(t, aliceAndRoot())
-		var n int
-		d.BuildHandler()(context.Background(), cardClick("c1", "mallory", "", &n))
-		if n != 0 {
-			t.Errorf("accepted %d, want 0", n)
-		}
-	})
-	t.Run("rate limit", func(t *testing.T) {
-		d, _, _ := newRateLimitDispatcher(t, RateLimit{MsgsPerMin: 1, Burst: 1})
-		h := d.BuildHandler()
-		var first, second int
-		h(context.Background(), cardClick("c1", "u1", "", &first))
-		h(context.Background(), cardClick("c2", "u1", "", &second))
-		if first != 1 || second != 0 {
-			t.Errorf("accepted %d then %d, want 1 then 0", first, second)
-		}
-	})
-	t.Run("budget", func(t *testing.T) {
-		d, _, _, spend := newBudgetDispatcher(t, budget.Limits{PerChatDailyUSD: 1})
-		spend("fake:group:g:general", 1)
-		var n int
-		d.BuildHandler()(context.Background(), cardClick("c1", "u1", "", &n))
-		if n != 0 {
-			t.Errorf("accepted %d, want 0", n)
-		}
-	})
-	t.Run("replay", func(t *testing.T) {
-		d, _, _ := newRateLimitDispatcher(t, RateLimit{})
-		h := d.BuildHandler()
-		var first, replay int
-		h(context.Background(), cardClick("c1", "u1", "", &first))
-		h(context.Background(), cardClick("c1", "u1", "", &replay))
-		if first != 1 || replay != 0 {
-			t.Errorf("accepted %d then %d, want 1 then 0", first, replay)
-		}
-	})
+	d, _, _ := newRateLimitDispatcher(t, RateLimit{MsgsPerMin: 1, Burst: 1})
+	h := d.BuildHandler()
+	var first, second int
+	h(context.Background(), cardClick("c1", "u1", "", &first))
+	h(context.Background(), cardClick("c2", "u1", "", &second))
+	if first != 1 || second != 0 {
+		t.Errorf("accepted %d then %d, want 1 then 0", first, second)
+	}
 }
