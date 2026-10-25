@@ -25,12 +25,8 @@ func (s *Server) buildDispatcher(w *wiring) *dispatch.Dispatcher {
 	if w.scheduler != nil {
 		cronCommands = cronDispatchAdapter{s: w.scheduler}
 	}
-	// Same for the router and resolver: a nil pointer boxed into the
-	// interface field would defeat the dispatcher's nil checks.
-	var router dispatch.SessionRouter
-	if w.router != nil {
-		router = w.router
-	}
+	// Same for the resolver: a nil pointer boxed into the interface field
+	// would defeat the dispatcher's nil checks.
 	var resolver dispatch.KeyResolver
 	if w.resolver != nil {
 		resolver = w.resolver
@@ -41,7 +37,7 @@ func (s *Server) buildDispatcher(w *wiring) *dispatch.Dispatcher {
 		panic("server: buildDispatcher needs w.turns; buildDashboard must run first")
 	}
 	d, err := dispatch.NewDispatcher(dispatch.DispatcherConfig{
-		Router:                router,
+		Router:                w.router,
 		Platforms:             s.platforms,
 		Agents:                w.agents,
 		AgentCommands:         w.agentCommands,

@@ -15,7 +15,7 @@ import (
 
 // HealthHandler serves the /health endpoint with system status information.
 type HealthHandler struct {
-	router        healthRouter // nil interface when ServerOptions.Router is nil
+	router        healthRouter
 	auth          *auth.Handlers
 	startedAt     time.Time
 	workspaceID   string
@@ -232,19 +232,12 @@ func (h *HealthHandler) handleLivez(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok\n"))
 }
 
-// handleReadyz serves /readyz — Kubernetes-style readiness probe. 503 with a
-// short reason when not ready; never returns stats/version so an
-// unauthenticated probe cannot fingerprint the binary (#609).
+// handleReadyz serves /readyz: ready once constructed (#3638); never returns
+// stats/version so an unauthenticated probe cannot fingerprint the binary (#609).
 func (h *HealthHandler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	// router==nil means a partially-initialised HealthHandler; fail closed.
-	if h.router == nil {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte("not ready: router unavailable\n"))
-		return
-	}
 	_, _ = w.Write([]byte("ready\n"))
 }
 
