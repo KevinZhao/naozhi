@@ -498,6 +498,10 @@ type RouterConfig struct {
 	// `mcpServers` object) — cc refuses to start otherwise, turning a typo into
 	// a total spawn outage; cmd/naozhi's resolveMCPConfigFile passes "" on failure.
 	MCPConfigFile string
+	// PermissionMode is the router-global Claude permission mode
+	// (cli.permission_mode); the zero value keeps `--dangerously-skip-permissions`.
+	// ACP / codex backends ignore it.
+	PermissionMode cli.PermissionMode
 	// BackendDirs maps a backend ID to the directory that backend keeps its
 	// session transcripts in (backend.Profile.HistoryDir, expanded). A missing
 	// entry disables that backend's history fallback and resume check.
@@ -641,6 +645,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.spawn.cliDebugDir = resolveCLIDebugDir(cfg.EventLogDir)
 	r.spawn.naozhiSettingsFile = cfg.NaozhiSettingsFile
 	r.spawn.mcpConfigFile = cfg.MCPConfigFile
+	r.spawn.permissionMode = cfg.PermissionMode
 	// The history ctx is cancelled only by Shutdown so startup history loads and
 	// reconnect-time JSONL parses abort promptly on slow filesystems.
 	r.hist.ctx, r.hist.cancel = context.WithCancel(context.Background())
