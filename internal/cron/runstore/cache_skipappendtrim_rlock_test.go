@@ -75,8 +75,6 @@ func TestRunStore_SkipAppendTrim_RLockDoesNotBlockReaders(t *testing.T) {
 // TestRunStore_SkipAppendTrim_RaceWithCacheGet drives skipAppendTrim (under
 // jobLock) concurrently with cacheGet RLock readers on the same entry so the
 // race detector proves the RLock-only read path never aliases reader state.
-// Complements rwmutex_reader_race_test.go, which exercises the full
-// Append writer path rather than skipAppendTrim in isolation.
 func TestRunStore_SkipAppendTrim_RaceWithCacheGet(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()

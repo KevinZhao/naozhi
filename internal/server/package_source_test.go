@@ -14,21 +14,11 @@ import (
 // packageGoSource returns every non-test .go file in this package concatenated,
 // in filename order (#2560).
 //
-// A dozen contract tests here read source by HARD-CODED FILENAME —
-// os.ReadFile("send.go") and friends — to assert things like "the workspace
-// value passes through SanitizeForLog before it is logged". The assertion is
-// about the package's behaviour, but the lookup is about a filename, so moving a
-// function between files in the same package breaks the gate for no reason. That
-// cost is not theoretical: it fired three times in one day of refactoring
-// (#2551 moved sessionSend's receiver and hit log_level_test.go plus
-// send_sanitize_contract_test.go; #2554 moved the cross-origin warn out of
-// handlers.go and hit auth_log_sanitize_contract_test.go). Each time the "fix"
-// was to point the test at the new filename — which teaches nothing and leaves
-// the next move to pay again.
-//
-// Reading the whole package removes the failure mode. The gates still fail when
-// the SANITISER disappears, which is what they are for, and stop failing when
-// code merely relocates.
+// Source-level gates in this package read the whole package rather than a
+// hard-coded filename (os.ReadFile("send.go")), so moving a function between
+// files in the same package does not break the gate for no reason. The gates
+// still fail when the asserted code disappears, and stop failing when code
+// merely relocates.
 //
 // Where a test genuinely asserts file ownership ("this must be declared in
 // wshub.go so the field-block contract holds"), the filename IS the assertion

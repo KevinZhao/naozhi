@@ -20,7 +20,7 @@ import (
 // the write at all: runs/<jobID>/<runID>.json is written back for a job that
 // no longer exists in cron_jobs.json, and trimAll (which only walks known
 // jobs) never reclaims the orphaned directory. CI hit this for real (issue
-// #2479 quotes the TestFinishRun_DeleteRaceNoOrphanRunsDir failure).
+// #2479).
 //
 // The fix is a second, post-write re-check in finishRun: when the job is
 // gone after Append returned, runstore.Store.DropOrphanRun removes exactly the

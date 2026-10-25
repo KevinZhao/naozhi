@@ -4,12 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
-
-	"github.com/naozhi/naozhi/internal/leakcheck"
 )
 
 // TestWSRelay_NoGoroutineLeakAfterClose pins R247-ARCH-22 (#679) for
@@ -24,11 +23,22 @@ import (
 // to wg.Add for it would pass the existing tests and silently leak in
 // production.
 //
-// leakcheck.Check is the missing piece: it captures a baseline at the
-// top of the test and fails if the count grows beyond a small grace
-// window (DefaultGrace=2) by the time the deferred closure runs.
+// The test captures runtime.NumGoroutine at the top and fails if the
+// count is still above baseline plus a small grace (2: an HTTP idle-conn
+// reaper plus a cleanup helper) after a bounded settle window.
 func TestWSRelay_NoGoroutineLeakAfterClose(t *testing.T) {
-	defer leakcheck.Check(t)()
+	baseline := runtime.NumGoroutine()
+	defer func() {
+		deadline := time.Now().Add(250 * time.Millisecond)
+		for runtime.NumGoroutine() > baseline+2 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if n := runtime.NumGoroutine(); n > baseline+2 {
+			buf := make([]byte, 1<<16)
+			buf = buf[:runtime.Stack(buf, true)]
+			t.Errorf("goroutine leak: %d goroutines, baseline %d (+2 grace)\n%s", n, baseline, buf)
+		}
+	}()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -65,8 +75,7 @@ func TestWSRelay_NoGoroutineLeakAfterClose(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 
 	relay.Close()
-	// The deferred leakcheck.Check now waits up to DefaultSettleWindow
-	// for the count to fall back to the captured baseline + grace; if
-	// any goroutine started by the relay is still parked at that point
-	// it is reported as a leak with a full stack dump.
+	// The deferred check now waits for the count to fall back to the
+	// captured baseline + grace; any goroutine started by the relay that
+	// is still parked at that point is reported with a full stack dump.
 }
