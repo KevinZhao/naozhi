@@ -303,7 +303,7 @@ func (d *doctor) checkZeroDowntimeScopes() {
 	}
 	if count == 0 {
 		d.add("zero-downtime", "warn",
-			"0 naozhi-shim-*.scope units — sudoers hardening not active OR no shims alive yet (see docs/ops/sudoers-hardening.md)")
+			"0 naozhi-shim-*.scope units — sudoers hardening not active OR no shims alive yet (see deploy/naozhi-sudoers.example)")
 		return
 	}
 	d.add("zero-downtime", "pass", fmt.Sprintf("%d shim scope(s) active (sudoers hardening is working)", count))

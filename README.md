@@ -562,10 +562,13 @@ sudo systemctl start naozhi
 journalctl -u naozhi -f
 ```
 
-> **可选 · 零停机重启 sudoers 精确化**：若希望 `systemctl restart naozhi` 时 shim
-> 子进程不被 kill，参考 [`docs/ops/sudoers-hardening.md`](docs/ops/sudoers-hardening.md)
-> 安装 `deploy/naozhi-sudoers.example`。不装也能跑 —— 只是每次 restart 会打断正在运行
-> 的会话，journal 打 `WARN` 不致命。**切勿**为省事写 `NOPASSWD: ALL`。
+> **可选 · 零停机重启 sudoers**：若希望 `systemctl restart naozhi` 时 shim 子进程不被 kill，
+> 安装 [`deploy/naozhi-sudoers.example`](deploy/naozhi-sudoers.example)：
+> `cp deploy/naozhi-sudoers.example /tmp/naozhi` → 把 `ec2-user` 改成服务用户 →
+> `sudo visudo -c -f /tmp/naozhi` → `sudo install -m 440 -o root -g root /tmp/naozhi /etc/sudoers.d/naozhi`。
+> 验证：restart 后 `systemctl list-units --type=scope | grep naozhi-shim-` 数量不变（`naozhi doctor` 的 `zero-downtime` 项）。
+> 不装也能跑 —— 只是每次 restart 会打断正在运行的会话，journal 打 `WARN` 不致命。
+> **切勿**写 `NOPASSWD: ALL` 或放宽成 `NOPASSWD: /usr/bin/busctl`（服务用户就是 agent 跑 Bash 的用户，等于把 root 交给 agent）。
 
 > **在线 profile**：内存暴涨 / goroutine 泄漏 / CPU 热点排障，`ssh host` 后
 > 用 `curl -H "Authorization: Bearer $TOK" http://127.0.0.1:8180/api/debug/pprof/...`
