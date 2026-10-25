@@ -90,16 +90,22 @@ func isStopCommand(trimmed string) bool {
 	return t == "/stop" || strings.HasPrefix(t, "/stop ")
 }
 
-// admitRate reports whether msg fits its sender's rate limit. /stop is never
-// limited: it ends spend. A limited message is counted and dropped; the
-// sender is told at most once per rateLimitReplyWindow.
-func (d *Dispatcher) admitRate(ctx context.Context, msg platform.IncomingMessage, trimmed string, lg *slog.Logger) bool {
+// admitRate reports whether msg fits its sender's rate limit, spending a
+// token if spend is set; Admit only peeks, as the handler spends the token
+// on the same message after the download. /stop is never limited: it ends
+// spend. A limited message is counted and dropped; the sender is told at
+// most once per rateLimitReplyWindow.
+func (d *Dispatcher) admitRate(ctx context.Context, msg platform.IncomingMessage, trimmed string, lg *slog.Logger, spend bool) bool {
 	in := d.inbound.Load()
 	if in == nil || isStopCommand(trimmed) {
 		return true
 	}
 	key := rateLimitKey(msg)
-	if in.limiter.Allow(key) {
+	allow := in.limiter.Allow
+	if !spend {
+		allow = in.limiter.Peek
+	}
+	if allow(key) {
 		return true
 	}
 	dispatchRateLimitedTotal.Add(1)

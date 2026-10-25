@@ -1,20 +1,29 @@
-package server
+// run_telemetry.go builds the run-event relays cron, sysession, the dashboard
+// Hub and outbound webhooks share (docs/rfc/outbound-webhooks.md §3.3).
+
+package wireup
 
 import (
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/webhook"
 )
 
-// newWebhookBroadcaster adapts a webhook.Sender to the run-event Broadcaster.
-// nil in → nil out, so runtelemetry.Tee collapses to the Hub alone when no
-// webhook is set. ErrorMsg is not copied (RunEndedEvent's SECURITY note).
-func newWebhookBroadcaster(s *webhook.Sender) runtelemetry.Broadcaster {
-	if s == nil {
-		return nil
+// RunTelemetryRelays returns the relay cron and sysession are built with
+// (producers) and the one the server binds the dashboard Hub to (hub); with
+// no sender they are one. The webhook is bound up front because the schedulers
+// start before the server and an unbound Relay drops events (#3691).
+func RunTelemetryRelays(webhooks *webhook.Sender) (producers, hub *runtelemetry.Relay) {
+	hub = &runtelemetry.Relay{}
+	if webhooks == nil {
+		return hub, hub
 	}
-	return webhookBroadcaster{s: s}
+	producers = &runtelemetry.Relay{}
+	producers.Bind(runtelemetry.Tee(hub, webhookBroadcaster{s: webhooks}))
+	return producers, hub
 }
 
+// webhookBroadcaster adapts a webhook.Sender to the run-event Broadcaster.
+// ErrorMsg is not copied (RunEndedEvent's SECURITY note).
 type webhookBroadcaster struct{ s *webhook.Sender }
 
 func (b webhookBroadcaster) BroadcastRunStarted(ev runtelemetry.RunStartedEvent) {
