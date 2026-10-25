@@ -15,8 +15,7 @@ var updateRESTSchema = flag.Bool("update-rest-schema", false, "rewrite testdata/
 
 // restResponses are the REST response shapes this package serves, keyed by
 // the NZ_CONTRACT.API name of their route. testdata/rest.schema.json is their
-// rendering; test/e2e/check-ws-contract.mjs holds the dashboard's typed reads
-// to it and scripts/check-mock-rest.test.mjs the e2e mock's responses.
+// rendering.
 var restResponses = map[string]any{
 	"sessions_workflow": WorkflowResponse{},
 }

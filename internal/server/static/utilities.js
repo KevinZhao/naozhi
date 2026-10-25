@@ -1,6 +1,6 @@
 // utilities.js — extracted from dashboard.js (#2558 D4).
 //
-// A leaf (caps.leaves): it imports only contract.js, state.js, nz_util.js and
+// A leaf: it imports only contract.js, state.js, nz_util.js and
 // the other leaves, so any module can import it without forming a cycle.
 // Shared state is read from the state.js objects.
 import { NZ_CONTRACT } from './contract.js';

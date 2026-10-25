@@ -1,6 +1,6 @@
 // features.js — backend feature-flag lookups (Multi-Backend RFC §8.2/§8.3)
-// and which backend a session runs on before the server lists it. A leaf
-// (caps.leaves): no DOM access, no load-time side effects. Reads state.js,
+// and which backend a session runs on before the server lists it. A leaf:
+// no DOM access, no load-time side effects. Reads state.js,
 // and sid from session_ident.js.
 import { perSession, serverInfo, selection, sessionList } from './state.js';
 import { sid } from './session_ident.js';

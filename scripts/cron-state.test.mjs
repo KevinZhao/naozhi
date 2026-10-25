@@ -1,5 +1,5 @@
 // node --test scripts/cron-state.test.mjs
-// cron_state.js is a leaf (caps.leaves): it loads in node with window, a
+// cron_state.js is a leaf: it loads in node with window, a
 // MutationObserver and a bare document stubbed before the import. fetch is replaced per test by
 // one that holds the GET /api/cron response until the test releases it, and
 // Date.now by a clock the test advances, so "patched after the fetch started"

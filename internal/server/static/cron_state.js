@@ -1,4 +1,4 @@
-// cron_state.js — the cron view's shared state, a leaf (caps.leaves): the
+// cron_state.js — the cron view's shared state, a leaf: the
 // jobs cache and what the server says about it (cronStore), which job the
 // drawer shows, the per-job cost and frozen-run maps, the 立即执行 cooldown,
 // and the two fetches that fill the cache. The cron modules read these

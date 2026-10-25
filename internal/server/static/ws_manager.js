@@ -4,7 +4,7 @@
 // lives with its owner (session_stream.js, cron_live.js, dashboard.js), which
 // registers frame handlers with wsm.on and lifecycle callbacks with onReady /
 // onStateChange / onAuthFail. A leaf: it imports only contract.js and
-// platform.js, so any module and node can import it (check-ws-receivers R7).
+// platform.js, so any module and node can import it.
 import { NZ_CONTRACT } from './contract.js';
 import { getToken } from './platform.js';
 

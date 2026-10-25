@@ -25,23 +25,8 @@ dashboard?" and it blocks the GitHub Release when it fails.
 Plus a `/health` precondition: the gate polls `/health` until `status:ok`
 before driving any view.
 
-On `chat-desktop`, the first authenticated load (cold browser cache), it also
-checks how the page the binary renders loads its assets
-(`scripts/release-gate-static.mjs`, tested by
-`node --test scripts/release-gate-static.test.mjs` in CI's lint-js job):
-
-- the page carries exactly one import map and at least one inline module
-  loader, and no `securitypolicyviolation` fires;
-- the page names each `/static` path under one non-empty `?v=`, and every
-  `/static` request uses that URL;
-- each `/static` path is requested once, every requested module is in the
-  import map, and every entry module the loaders import is loaded;
-- every `/static` response is a 200 with
-  `Cache-Control: private, max-age=31536000, immutable`.
-
-The e2e suite's rendered-dashboard spec applies the same load rules on every
-PR against the mock, which serves `/static` itself and so cannot see the
-binary's `Cache-Control`.
+The `/static` load rules (import map, `?v=`, one request per path) are
+checked on every PR by the e2e suite's rendered-dashboard spec against the mock.
 
 Views: `login`, `chat-desktop`, `chat-mobile`, `assets`, `cron`, `system`,
 `settings`, `history` (asserts the popover, not the trigger button),
@@ -63,26 +48,17 @@ so a broken dashboard cannot reach an upgrading operator even though the tag
 already exists. Screenshots upload as the `release-gate-screenshots` artifact
 (`if: always()`).
 
-The CI runner cannot reach an operator's systemd instance, so it validates the
-binary's own embedded dashboard — which is byte-identical to what ships.
+The CI runner validates the binary's own embedded dashboard, which is
+byte-identical to what ships.
 
 ### Local — `make release-gate`
 
-Builds the binary and runs the same throwaway-instance gate with no systemd
-deployment required:
+Builds the binary and runs the same throwaway-instance gate:
 
 ```
 (cd test/e2e && npm install)   # one-time: install Playwright
 make release-gate
 ```
-
-### Local against a live instance — `make release-gate-live`
-
-Gates the already-running systemd instance on `127.0.0.1:8180` (e.g. after
-`make deploy`), reading the dashboard token from the systemd EnvironmentFile.
-This is the only variant that exercises the real deployment (systemd unit,
-credentials, real CLI), so it remains a useful pre-tag self-check even though
-it is not enforced.
 
 ## Throwaway instance details (`scripts/gate-instance.sh`)
 

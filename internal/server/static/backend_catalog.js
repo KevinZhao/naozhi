@@ -1,7 +1,7 @@
 // backend_catalog.js — what the server offers a new session: the CLI
 // backends manifest and the access profiles (both cached 60s in serverInfo),
 // the two <select> pickers built from them, and the access-profile chip label.
-// A leaf (caps.leaves): the new-session dialog, project settings and the cron
+// A leaf: the new-session dialog, project settings and the cron
 // editor all read it, and it imports only other leaves.
 import { NZ_CONTRACT } from './contract.js';
 import { serverInfo } from './state.js';

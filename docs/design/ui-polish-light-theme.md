@@ -2,7 +2,7 @@
 
 > 状态：设计定稿，待实施
 > 起因：2026-07-31 对 dashboard 全视图截图走查（桌面/移动 × 浅色/深色，12+3 张，
-> 脚本 `scripts/dashboard-screenshots.js` 同源方法）+ `dashboard.html` 样式通读。
+> Playwright 截图走查）+ `dashboard.html` 样式通读。
 > 结论：token 纪律、动效体系、a11y 底子好，不动；问题集中在
 > **双主色打架、首页信息过载、浅色阴影过重、侧栏视觉噪音**四类。
 
@@ -191,7 +191,7 @@ A、B 先行——都是 token 定义层，一次截图对比即可验收，且�
 
 ## 每 PR 验证清单
 
-1. `scripts/dashboard-screenshots.js` 前后截图（light + dark 各一轮；
+1. `make release-gate` 前后截图（tmp/release-gate/）（light + dark 各一轮；
    dark 需显式 `localStorage nz_theme=dark`，服务端 ui-settings 会覆盖 auto）。
 2. `cd test/e2e && npx playwright test`（改 DOM 的 PR 先
    `grep -rn "recent-panel\|recent-stat\|doctor-" test/e2e/` 同步断言）。
