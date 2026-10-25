@@ -148,6 +148,7 @@ func TestNextFailureStreak(t *testing.T) {
 		{RunStateFailed, ErrClassTurnFailed, TurnCauseBackendAuth, 3, 4, false},
 		{RunStateFailed, ErrClassTurnFailed, TurnCauseCLIConfig, 3, 4, false},
 		{RunStateFailed, ErrClassTurnFailed, TurnCauseCLIMissingRuntime, 3, 4, false},
+		{RunStateFailed, ErrClassTurnFailed, TurnCauseCLIAborted, 3, 4, false},
 		{RunStateFailed, ErrClassTurnFailed, TurnCauseMaxTurns, 3, 4, false},
 		{RunStateFailed, ErrClassTurnFailed, TurnCauseContextTooLong, 3, 4, false},
 		{RunStateFailed, ErrClassTurnFailed, TurnCauseUnknown, 3, 4, false},
