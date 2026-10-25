@@ -911,10 +911,22 @@ func (e *spawnInitError) Unwrap() []error { return []error{clierr.ErrSpawnInit, 
 
 // resumeRejected marks err, from the resume step of an Init handshake, as
 // clierr.ErrResumeRejected when the backend answered it with an RPC error or
-// exited; a timeout or a broken connection says nothing about the session.
+// exited on it; a timeout or a broken connection says nothing about the
+// session. Nor does an exit whose stderr names auth, MCP config or a missing
+// runtime: a fresh spawn fails the same way, so it stays a startup failure
+// and the resume is kept for the retry after the operator's fix, as for
+// claude's (session's startupFailure.dropsResume).
 func resumeRejected(err error) error {
-	if errors.Is(err, ErrACPRPC) || errors.Is(err, ErrCodexRPC) || errors.Is(err, errInitCLIExited) {
+	if errors.Is(err, ErrACPRPC) || errors.Is(err, ErrCodexRPC) || errors.Is(err, errInitCLIExited) && exitNamesSession(err) {
 		return fmt.Errorf("%w: %w", clierr.ErrResumeRejected, err)
 	}
 	return err
+}
+
+// exitNamesSession reports whether the exit err carries may be the resumed
+// session's own: a stale id, a cause stderr does not name, or no code to
+// classify.
+func exitNamesSession(err error) bool {
+	var pe *clierr.ProcessExitedError
+	return !errors.As(err, &pe) || pe.Class == clierr.ExitResumeNotFound || pe.Class == clierr.ExitUnknown
 }
