@@ -15,7 +15,7 @@ go test -run TestCandidatePaths ./internal/cli/...   # run a single test
 bin/naozhi --config config.yaml                      # run locally
 ```
 
-Ratchets only go down: the baselines in `*Baseline*` test constants and
+Ratchets only go down: the baselines in
 `tools/lint-server-handlers/exemptions.yaml` fail CI when a count drops below
 them, so lower them in the same PR. To raise one, edit it in the PR that needs it.
 
@@ -39,9 +39,7 @@ Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI, Kiro, or Codex) as
 
 ### Module Dependency
 
-`internal/` 每个顶层包一行、按层分组。本清单与磁盘目录的同步由
-`cmd/naozhi/claude_md_modules_test.go::TestClaudeMDModuleList_MatchesInternalPackages`
-把关——新增/删除顶层包必须同步更新这里，否则 CI fail。
+`internal/` 每个顶层包一行、按层分组。新增或删除顶层包时顺手更新这里。
 
 ```
 cmd/naozhi/main.go

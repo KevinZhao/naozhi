@@ -108,9 +108,7 @@ type siblingSrcFile struct {
 // eight scanSibling* checks to share. Factored out of scanSendEngineSibling
 // so the tests that exercise one check at a time (rule_send_engine_sibling_test.go)
 // can build the same []siblingSrcFile from an in-memory fixture without this
-// package's test files carrying their own go/parser read of disk — that
-// pattern is exactly what the source-anchor ratchet (#2716,
-// internal/testhelper/source_anchor_ratchet_test.go) exists to push back on.
+// package's test files carrying their own go/parser read of disk.
 func parseSiblingPkgDir(pkgDir string) (*token.FileSet, []siblingSrcFile, error) {
 	fset := token.NewFileSet()
 	var files []siblingSrcFile

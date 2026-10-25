@@ -25,10 +25,6 @@
 // server.SubmitRelayed since #3032): the most likely place for a new caller
 // to bypass the port unseen.
 //
-// G-c (the exported method sets of *turn.Orchestrator, dispatch.SessionRouter
-// and dispatch.Turns) lives in the queue_surface_test.go files of internal/turn
-// and internal/dispatch: it reads no source, so it runs under `go test`.
-//
 // dispatch, server and turn are required: an unreadable one is reported, so
 // a misconfigured -server-pkg cannot narrow the scope. upstream is scanned
 // only if present.
@@ -62,8 +58,7 @@ const turnQueueEscapeBaseline = 0
 // turnQueueTypeExportBaseline is G-b's second slice: exported declarations in
 // turn whose signature, reachable fields or value name the queue type or its
 // constructor. 0: an exported QueueOf(*Orchestrator) *queue would let server
-// call DiscardAndReturn or Cleanup on the queue past both G-b's call scan and
-// G-c's method set.
+// call DiscardAndReturn or Cleanup on the queue past G-b's call scan.
 const turnQueueTypeExportBaseline = 0
 
 // turnQueueTypeNames are the identifiers G-b's second slice looks for.
