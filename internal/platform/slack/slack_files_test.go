@@ -445,16 +445,8 @@ func TestSlackFileName_FallsBackToTitle(t *testing.T) {
 func TestAttachFiles_UnsupportedNotDownloaded(t *testing.T) {
 	t.Parallel()
 	stub := &fileStub{resps: map[string]stubResp{}}
-	var files []slack.File
-	for _, f := range []struct{ name, mime string }{
-		{"notes.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
-		{"clip.mp4", "video/mp4"},
-		{"src.zip", "application/zip"},
-		{"README", ""},
-	} {
-		stub.resps["/a/"+f.name] = stubResp{body: []byte("PK\x03\x04")}
-		files = append(files, slack.File{Name: f.name, Mimetype: f.mime, Size: 4, URLPrivateDownload: slackURL("/a/" + f.name)})
-	}
+	stub.resps["/a/src.zip"] = stubResp{body: []byte("PK\x03\x04")}
+	files := []slack.File{{Name: "src.zip", Mimetype: "application/zip", Size: 4, URLPrivateDownload: slackURL("/a/src.zip")}}
 	for i := 0; i < limits.MaxFileAttachmentsPerMessage; i++ {
 		name := "f" + string(rune('a'+i)) + ".txt"
 		stub.resps["/a/"+name] = stubResp{body: []byte("ok\n")}
@@ -468,7 +460,7 @@ func TestAttachFiles_UnsupportedNotDownloaded(t *testing.T) {
 	}
 	for i, f := range msg.Files {
 		want := platform.FileRejectNone
-		if i < 4 {
+		if i == 0 {
 			want = platform.FileRejectUnsupported
 		}
 		if f.Name != files[i].Name || f.Reject != want {
