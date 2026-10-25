@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
+	"github.com/slack-go/slack/socketmode"
 )
 
 var _ platform.RunnablePlatform = (*Slack)(nil)
@@ -249,6 +251,34 @@ func TestHandleMessage_EmptyBotIDFailsOpenForGroup(t *testing.T) {
 	}
 	if received.Text != "hello bot" {
 		t.Errorf("Text = %q, want 'hello bot'", received.Text)
+	}
+}
+
+// TestHandleSocketEvent_AppMentionIgnored pins #3625: channel messages,
+// mentions included, come in as MessageEvents, so an app_mention event is
+// acked and dropped (no duplicate turn) with a one-time misconfiguration warn.
+func TestHandleSocketEvent_AppMentionIgnored(t *testing.T) {
+	t.Parallel()
+	s := New(Config{BotToken: "xoxb-test", AppToken: "xapp-test"})
+	s.botID = "UBOT"
+	called := false
+	s.handler = func(_ context.Context, _ platform.IncomingMessage) { called = true }
+	client := socketmode.New(slack.New("xoxb-test"))
+	evt := socketmode.Event{
+		Type:    socketmode.EventTypeEventsAPI,
+		Request: &socketmode.Request{EnvelopeID: "E1"},
+		Data: slackevents.EventsAPIEvent{InnerEvent: slackevents.EventsAPIInnerEvent{
+			Type: "app_mention",
+			Data: &slackevents.AppMentionEvent{User: "U456", Channel: "C789", Text: "<@UBOT> hi", TimeStamp: "1234567890.000100"},
+		}},
+	}
+	s.handleSocketEvent(context.Background(), client, evt)
+	s.dispatch.Wait()
+	if called {
+		t.Error("app_mention reached the handler; the message.channels MessageEvent already carries it")
+	}
+	if !s.appMentionWarned.Load() {
+		t.Error("app_mention did not raise the misconfiguration warn")
 	}
 }
 

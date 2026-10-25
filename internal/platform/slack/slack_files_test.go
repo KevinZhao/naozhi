@@ -190,6 +190,31 @@ func TestHandleMessage_IgnoresOwnUploads(t *testing.T) {
 	}
 }
 
+// TestHandleMessage_DropsFileShareWhileBotIDUnknown (#3653): with botID
+// unknown the own-upload check above cannot match, so a file_share is dropped
+// outright rather than risking the bot's upload coming back as a turn. Plain
+// text still fails open (#1947).
+func TestHandleMessage_DropsFileShareWhileBotIDUnknown(t *testing.T) {
+	t.Parallel()
+	stub := &fileStub{resps: map[string]stubResp{"/a/shot.png": {body: testPNG}}}
+	s := newFileSlack(stub)
+	s.botID = ""
+	// Keep the self-heal from making a live auth.test call.
+	s.botHealAt = time.Now().Add(time.Hour)
+	ev := fileShare("", slack.File{Name: "shot.png", Mimetype: "image/png", URLPrivateDownload: slackURL("/a/shot.png")})
+	ev.User = "UBOT"
+	if got := deliver(s, ev); len(got) != 0 {
+		t.Errorf("handler called %d times for a file_share with botID unknown, want 0", len(got))
+	}
+	if n := len(stub.requests()); n != 0 {
+		t.Errorf("%d downloads, want 0", n)
+	}
+	text := &slackevents.MessageEvent{User: "U456", Channel: "D789", ChannelType: "im", Text: "hi", TimeStamp: "1234567890.000200"}
+	if got := deliver(s, text); len(got) != 1 {
+		t.Errorf("handler called %d times for plain text with botID unknown, want 1 (fail-open)", len(got))
+	}
+}
+
 // TestDownloadFile_HostWhitelist pins that the bot token is only ever sent to
 // https://files.slack.com: every other URL fails before any request.
 func TestDownloadFile_HostWhitelist(t *testing.T) {
