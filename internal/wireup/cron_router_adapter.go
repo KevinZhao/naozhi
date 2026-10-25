@@ -97,13 +97,32 @@ func (a cronRouterAdapter) ReleaseProcess(key string) bool {
 }
 
 // wrapCronSpawnErr tags the router's capacity refusals with
-// cron.ErrSessionCapacity, keeping the session sentinel in the chain.
+// cron.ErrSessionCapacity, keeping the session sentinel in the chain, and
+// names the cause of a CLI that exited in the Init handshake as the Send path
+// does (exitTurnCause); cron keeps that run a session_error.
 func wrapCronSpawnErr(err error) error {
 	if errors.Is(err, session.ErrMaxExemptSessions) || errors.Is(err, session.ErrMaxProcs) {
 		return fmt.Errorf("%w: %w", cron.ErrSessionCapacity, err)
 	}
+	var pe *clierr.ProcessExitedError
+	if errors.As(err, &pe) {
+		if cause, ok := exitTurnCause[pe.Class]; ok {
+			return &spawnExitError{tf: &cron.TurnFailedError{Cause: cause}, err: err}
+		}
+	}
 	return err
 }
+
+// spawnExitError is a spawn error carrying the cause its CLI's exit names: it
+// matches the cron.TurnFailedError and err, and reads as err, since no turn
+// ran for run history to call failed.
+type spawnExitError struct {
+	tf  *cron.TurnFailedError
+	err error
+}
+
+func (e *spawnExitError) Error() string   { return e.err.Error() }
+func (e *spawnExitError) Unwrap() []error { return []error{e.tf, e.err} }
 
 // toSessionAgentOpts copies cron.AgentOpts → session.AgentOpts. ExtraArgs is
 // cloned: the router treats AgentOpts.ExtraArgs as exclusively owned.
