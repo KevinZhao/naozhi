@@ -3,9 +3,24 @@
 ## 前提
 
 - 不需要安装 OpenClaw
-- 需要两个微信号（一个登录 bot，一个发消息测试）
+- 一个微信号就够：扫码的号自己就是测试号。登录响应里的 `ilink_user_id` 就是这个号发消息时的
+  `from_user_id`，把它加进 `im_access` 的白名单后，用这个号给 bot 发消息即可
 
-## 第一步：扫码获取 Token
+## 第一步：扫码登录（推荐 `naozhi setup weixin`）
+
+```bash
+bin/naozhi setup weixin --config config.yaml
+```
+
+用微信扫终端里打印的链接并在手机上确认。setup 会把 `bot_token` 写进
+`platforms.weixin.token`，并把扫码用户的 `ilink_user_id` 写进
+`im_access.platforms.weixin.allowed_users`（见 README「IM 访问控制」）。扫码过程中：
+
+- 手机上显示一串数字时（`need_verifycode`），按提示把数字输进终端；输错会让你重输，错太多次
+  （`verify_code_blocked`）setup 会退出，等一会儿再重跑
+- 扫码用户在其他机房时（`scaned_but_redirect`），setup 会自动换到响应里的 `redirect_host` 继续轮询
+
+### 手动获取 Token（可选）
 
 ```bash
 # 1. 获取二维码
@@ -17,30 +32,45 @@ curl -s "https://ilinkai.weixin.qq.com/ilink/bot/get_bot_qrcode?bot_type=3"
 # 3. 轮询登录状态（把 QRCODE 换成第 1 步返回的 qrcode 值）
 curl -s "https://ilinkai.weixin.qq.com/ilink/bot/get_qrcode_status?qrcode=QRCODE" \
   -H "iLink-App-ClientVersion: 1"
-# 扫码确认后返回 {"status":"confirmed","bot_token":"xxx","ilink_bot_id":"xxx",...}
+# 扫码确认后返回 {"status":"confirmed","bot_token":"xxx","ilink_bot_id":"xxx","ilink_user_id":"xxx@im.wechat",...}
+# 返回 need_verifycode 时，在 URL 后加 &verify_code=<手机上显示的数字> 再轮询；
+# 返回 scaned_but_redirect 时，把域名换成响应里的 redirect_host 再轮询
 
-# 4. 记下 bot_token
+# 4. 记下 bot_token 和 ilink_user_id
 ```
 
 ## 第二步：配置 config.yaml
+
+用 `naozhi setup weixin` 时这一步已经自动完成，检查一下即可。手动配置：
 
 ```yaml
 platforms:
   weixin:
     token: ${WEIXIN_BOT_TOKEN}   # 或直接填 bot_token
     # base_url: https://ilinkai.weixin.qq.com  # 默认值，可省略
+
+im_access:
+  platforms:
+    weixin:
+      allowed_users: ["xxx@im.wechat"]   # 登录响应里的 ilink_user_id
 ```
+
+不写 `im_access` 时，所有能给 bot 发消息的人都能在宿主机上跑命令。没拿到 `ilink_user_id`
+也没关系：先只写 `im_access: {default_deny: true}`（没有条目的平台一律拒绝，名单不能写空列表，
+config 校验会报错），发一条消息后 bot 会在私聊里回复你的 ID（日志里也有一行 `im access denied`），
+再按上面的格式填进去并 `naozhi config reload`。
 
 ## 第三步：启动
 
 ```bash
-export WEIXIN_BOT_TOKEN="上面拿到的bot_token"
+export WEIXIN_BOT_TOKEN="上面拿到的bot_token"   # 用 setup 写入的配置时不需要
 bin/naozhi --config config.yaml
 ```
 
 ## 第四步：发消息测试
 
-用另一个微信号给扫码登录的微信号发消息，naozhi 会通过 Claude CLI 处理后回复。
+用扫码的微信号给 bot 发消息，naozhi 会通过 Claude CLI 处理后回复。其他微信号发来的消息会被拒绝，
+对方会收到一条带自己 ID 的提示，要放行就把 ID 加进 `allowed_users`。
 
 ## 验证清单
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -31,8 +32,10 @@ const (
 	setupPollTimeout  = 5 * time.Minute
 )
 
-// setupHTTPClient has a timeout and never follows redirects so a compromised
-// DNS or misconfigured endpoint cannot pivot the QR-code identifier to another host.
+// setupHTTPClient has a timeout and never follows HTTP redirects so a compromised
+// DNS or misconfigured endpoint cannot pivot the QR-code identifier to another
+// host. The only host change is iLink's own scaned_but_redirect status, which
+// names the new host in the TLS-authenticated response body.
 var setupHTTPClient = &http.Client{
 	Timeout: 15 * time.Second,
 	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -116,7 +119,14 @@ func runSetupWeixin(args []string) {
 	fmt.Println("Waiting for confirmation...")
 
 	// Step 2: Poll for status
-	login, err := setupPollStatus(ctx, qr.QRCode)
+	poller := &qrPoller{
+		client:   setupHTTPClient,
+		baseURL:  setupBaseURL,
+		interval: setupPollInterval,
+		in:       bufio.NewReader(os.Stdin),
+		out:      os.Stdout,
+	}
+	login, err := poller.poll(ctx, qr.QRCode)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\nLogin failed: %v\n", err)
 		os.Exit(1)
@@ -149,13 +159,20 @@ type setupQRResp struct {
 	QRCodeImgContent string `json:"qrcode_img_content"`
 }
 
+// setupStatusResp is one get_qrcode_status reply. Status is one of "wait",
+// "scaned", "confirmed", "expired", "scaned_but_redirect", "need_verifycode",
+// "verify_code_blocked" or "binded_redirect" (the set openclaw-weixin's
+// docs/protocol.md lists); qrPoller.poll handles each.
 type setupStatusResp struct {
-	Status     string `json:"status"` // "wait" | "scaned" | "confirmed" | "expired"
+	Status     string `json:"status"`
 	BotToken   string `json:"bot_token,omitempty"`
 	ILinkBotID string `json:"ilink_bot_id,omitempty"`
 	// ILinkUserID is the WeChat user who scanned the QR code (...@im.wechat),
 	// the same ID space as an inbound message's from_user_id.
 	ILinkUserID string `json:"ilink_user_id,omitempty"`
+	// RedirectHost is the host to keep polling when Status is
+	// scaned_but_redirect (the scanning user lives in another IDC).
+	RedirectHost string `json:"redirect_host,omitempty"`
 }
 
 func setupGetQRCode(ctx context.Context) (*setupQRResp, error) {
@@ -191,16 +208,28 @@ func setupGetQRCode(ctx context.Context) (*setupQRResp, error) {
 	return &qr, nil
 }
 
-func setupPollStatus(ctx context.Context, qrcode string) (*setupStatusResp, error) {
-	ticker := time.NewTicker(setupPollInterval)
+// qrPoller polls get_qrcode_status until the scan is confirmed. The fields
+// are what tests replace with a fake iLink server and scripted input.
+type qrPoller struct {
+	client   *http.Client
+	baseURL  string // scaned_but_redirect moves it to the user's IDC
+	interval time.Duration
+	in       *bufio.Reader // answers to need_verifycode
+	out      io.Writer
+}
+
+func (p *qrPoller) poll(ctx context.Context, qrcode string) (*setupStatusResp, error) {
+	ticker := time.NewTicker(p.interval)
 	defer ticker.Stop()
 
+	verifyCode := "" // sent with every poll until iLink accepts or refuses it
+	reported := make(map[string]bool)
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, fmt.Errorf("timed out waiting for scan")
 		case <-ticker.C:
-			status, err := setupCheckStatus(ctx, qrcode)
+			status, err := p.check(ctx, qrcode, verifyCode)
 			if err != nil {
 				return nil, err
 			}
@@ -212,22 +241,100 @@ func setupPollStatus(ctx context.Context, qrcode string) (*setupStatusResp, erro
 				return status, nil
 			case "expired":
 				return nil, fmt.Errorf("QR code expired, please retry")
+			case "wait":
 			case "scaned":
-				fmt.Print(".")
+				verifyCode = "" // scaned after a submitted number means it matched
+				fmt.Fprint(p.out, ".")
+			case "need_verifycode":
+				prompt := "Enter the number WeChat shows on your phone: "
+				if verifyCode != "" {
+					prompt = "That number did not match, enter it again: "
+				}
+				fmt.Fprint(p.out, "\n"+prompt)
+				code, err := readLineCtx(ctx, p.in)
+				if err != nil {
+					return nil, fmt.Errorf("iLink asked for the number WeChat shows on your phone, but none could be read (%w); rerun 'naozhi setup weixin' in an interactive terminal", err)
+				}
+				verifyCode = code
+			case "verify_code_blocked":
+				return nil, fmt.Errorf("too many wrong numbers, iLink blocked the login (verify_code_blocked); wait a while, then rerun 'naozhi setup weixin'")
+			case "binded_redirect":
+				return nil, fmt.Errorf("iLink reports this WeChat account is already bound and issued no new token (binded_redirect); if your config already has platforms.weixin.token, start naozhi as usual")
+			case "scaned_but_redirect":
+				base, ok := redirectBaseURL(status.RedirectHost)
+				if !ok {
+					if !reported["redirect:"+status.RedirectHost] {
+						reported["redirect:"+status.RedirectHost] = true
+						fmt.Fprintf(p.out, "\niLink redirect without a usable redirect_host %q, still polling %s\n",
+							osutil.SanitizeForLog(status.RedirectHost, 128), p.baseURL)
+					}
+					continue
+				}
+				if base != p.baseURL {
+					fmt.Fprintf(p.out, "\nContinuing on %s\n", base)
+					p.baseURL = base
+				}
+			default:
+				if !reported[status.Status] {
+					reported[status.Status] = true
+					fmt.Fprintf(p.out, "\nunknown iLink QR status %q, still waiting\n",
+						osutil.SanitizeForLog(status.Status, 64))
+				}
 			}
 		}
 	}
 }
 
-func setupCheckStatus(ctx context.Context, qrcode string) (*setupStatusResp, error) {
-	u := setupBaseURL + "/ilink/bot/get_qrcode_status?qrcode=" + url.QueryEscape(qrcode)
+// redirectBaseURL turns a scaned_but_redirect redirect_host into the https
+// base URL to poll, refusing anything but a bare host[:port].
+func redirectBaseURL(host string) (string, bool) {
+	if host == "" {
+		return "", false
+	}
+	u, err := url.Parse("https://" + host)
+	if err != nil || u.Host != host || u.Hostname() == "" || u.User != nil ||
+		u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return "", false
+	}
+	return "https://" + host, true
+}
+
+// readLineCtx reads one trimmed line from r, giving up when ctx ends (the
+// reading goroutine then lingers until the line arrives or the process exits).
+func readLineCtx(ctx context.Context, r *bufio.Reader) (string, error) {
+	type result struct {
+		line string
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		line, err := r.ReadString('\n')
+		ch <- result{line, err}
+	}()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case res := <-ch:
+		line := strings.TrimSpace(res.line)
+		if line == "" && res.err != nil {
+			return "", res.err
+		}
+		return line, nil
+	}
+}
+
+func (p *qrPoller) check(ctx context.Context, qrcode, verifyCode string) (*setupStatusResp, error) {
+	u := p.baseURL + "/ilink/bot/get_qrcode_status?qrcode=" + url.QueryEscape(qrcode)
+	if verifyCode != "" {
+		u += "&verify_code=" + url.QueryEscape(verifyCode)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("iLink-App-ClientVersion", "1")
 
-	resp, err := setupHTTPClient.Do(req)
+	resp, err := p.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
