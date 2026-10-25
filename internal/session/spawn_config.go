@@ -13,10 +13,11 @@ import (
 )
 
 // spawnConfig is the spawn facet: the timeouts every CLI process gets, the
-// router-owned paths argvSpawnOptions writes into argv, and the hook tests
-// use to replace the spawn. Router holds it as the value field spawn, set in
-// NewRouter and read-only afterwards; the zero value spawns with the CLI's
-// default timeouts and no debug, settings or MCP files.
+// router-owned paths and permission mode argvSpawnOptions writes into argv,
+// and the hook tests use to replace the spawn. Router holds it as the value
+// field spawn, set in NewRouter and read-only afterwards; the zero value
+// spawns with the CLI's default timeouts, no debug, settings or MCP files,
+// and the default permission mode.
 type spawnConfig struct {
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
@@ -33,6 +34,9 @@ type spawnConfig struct {
 	// mcpConfigFile mirrors RouterConfig.MCPConfigFile ("" omits `--mcp-config`).
 	// Immutable after NewRouter; the shim arg-drift comparison must mirror the spawn argv exactly.
 	mcpConfigFile string
+	// permissionMode mirrors RouterConfig.PermissionMode. Immutable after
+	// NewRouter, and read only through argvSpawnOptions like the paths above.
+	permissionMode cli.PermissionMode
 
 	// hook, when set, replaces the CLI spawn in spawnProcess, so tests
 	// can hand back a process of their own at a moment of their choosing.

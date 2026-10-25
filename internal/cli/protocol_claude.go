@@ -121,13 +121,16 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 		args = append(args, "--setting-sources", "user")
 		p.settingsPath.Store(&localSettingsMarker)
 	}
-	// --dangerously-skip-permissions is required by naozhi's `-p` long-lived
-	// process model (headless mode has no interactive prompt surface), so the
-	// zero-value PermissionModeDefault emits it. Multi-tenant / untrusted
-	// deployments opt out per-spawn via PermissionModeStandard and accept that
-	// the turn stalls on the first permission prompt (#531).
-	if opts.PermissionMode == PermissionModeDefault {
+	// Headless `-p` has no prompt surface, so the zero-value PermissionModeDefault
+	// skips permissions and PermissionModeAuto hands each tool call to the CLI's
+	// classifier. PermissionModeStandard emits neither and accepts that the turn
+	// stalls on the first permission prompt (#531). `--permission-mode` stays in
+	// deniedExtraFlags; this field is its only argv site.
+	switch opts.PermissionMode {
+	case PermissionModeDefault:
 		args = append(args, "--dangerously-skip-permissions")
+	case PermissionModeAuto:
+		args = append(args, "--permission-mode", "auto")
 	}
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
