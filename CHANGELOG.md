@@ -5,6 +5,53 @@
 
 ## [Unreleased]
 
+## [0.1.48] - 2026-10-26
+
+这一版有两部分：一是对 10 月重构的 review 修复，二是一轮「做减法」。从 0.1.47 起 +7.8k / −120k 行，删掉的主要是自建治理工具、读源码的元测试、历史文档，以及几项没人用的功能。基本功能保持不变：dashboard、claude / kiro / codex 会话经 shim 跑且重启后存活、cron、agents、projects / planner、IM 收发（含图片与语音）、远程多节点、自升级。升级前请先看下面的 **Removed**。
+
+### Added
+
+- **`cli.permission_mode`**（#3686）：`""` / `bypass`（默认，argv 与之前逐字节相同）或 `auto`（渲染 `--permission-mode auto`，不再带 `--dangerously-skip-permissions`），可以试用 Claude auto mode，不行再切回。只对 Claude 生效，kiro / codex 不变。
+
+### Changed
+
+- **dashboard CSP**（#3737）：删除没有浏览器实现的 `require-sri-for` 和同源资源的 SRI pin；`style-src` 允许 `'unsafe-inline'`，KaTeX / mermaid 的样式直接生效。渲染 mermaid 时那 52 条 CSP 控制台报错没了（#3661）。`script-src` 仍然只允许 `'self'` 加 hash。
+- **cron 输入校验合成一层**（#3739），统一在 scheduler 写入路径上做。无效 prompt / schedule 的报错改为 `invalid prompt: ...` / `invalid schedule expression`，其他字段统一返回通用 400，不再逐字段给出提示。
+- **开发与 CI**，不影响运行：
+  - 删除 ratchet 审批账本、comment-budget、`lint-server-handlers`、JS 结构治理工具链、TS checkJs 与 JSON schema 快照层、读 Go / JS 源码的元测试、leakcheck（#3718 #3719 #3720 #3721 #3723 #3724 #3725 #3731 #3732）；
+  - Playwright 收缩到 12 个冒烟 spec（#3735）；
+  - CI 去掉 build-windows、e2e-mobile-safari 和 flaky 自动登记，必过检查收敛成一个聚合的 `test`；
+  - 删除零引用包与死代码（#3728 #3738）、历史文档（#3726）；CLAUDE.md / README 瘦身（#3741）。
+- 依赖：Go 依赖 minor / patch 升级（#3688 #3729）。
+
+### Fixed
+
+- **出站 webhook**（#3706）：
+  - 启动窗口内 cron / sysession 的 run 事件不再丢失，其中包括重启前被中断那次 run 的 `run.ended`（#3691）；
+  - 不再跟随重定向转发带签名的请求体；sysession 的 `run.ended` 不再带零值时间戳；Close 之后 Deliver 不再 panic（#3658）。
+- **会话 resume**（#3704）：ACP / codex 握手阶段 CLI 因为 auth、MCP 配置或缺运行时退出，不再被当成「resume 被拒」而永久丢掉 resume，修好登录后对话能接着来（#3692）。cron 在 spawn 阶段失败时，通知里写明原因（#3631）。
+- **IM 附件**：
+  - Slack 一条消息里的附件共享一个总下载预算，不再每个文件各等 3 分钟、占住 dispatch 槽约 15 分钟（#3700，#3693）；
+  - Slack 和飞书在下载前就拒收不支持的文件，例如 docx、zip、视频（#3695）；
+  - 拒收提示按原因区分；全仓使用同一份图片白名单，Discord 的 bmp / ico 不再发给模型导致 400；macOS 上 `/tmp` 实际解析为 `/private/tmp`，IM 出站图片因此一直失效，已修复（#3707，#3627）。
+- **Slack**（#3702）：bot ID 未知时，bot 自己上传文件产生的 `file_share` 不再作为入站消息回流（#3653）；README 改为订阅 `message.*` 事件（#3625）。
+- **飞书**（#3711）：能读取 post 富文本消息；其他不支持的类型会回复说明，不再静默丢弃（#3626）。
+- **IM 准入**：
+  - 媒体下载和语音转写也受 `im_rate_limit` / `cost.budget` 约束；`not_admin` 拒绝回复做节流；AskUserQuestion 回合不再把当天唯一一次预算提醒吃掉（#3703，#3652 #3694）；
+  - 提问卡片只在 dispatch 接受点击后才标为「已回答」，未授权用户不能再作废别人的提问（#3708，#3628）。
+- **dashboard**：
+  - 在 agent drill-in 里切走会话再切回，父会话不再跳到顶部；换 agent 或返回父会话时会退订 agent tailer；drill-in 期间父会话整页重绘不再覆盖 agent 面板（#3709，#3696 #3697 #3698）；
+  - 新会话首发被拒后保留所选的 backend / tuning；KaTeX 异步渲染完成后去掉 pending 样式；时长和字节在取整边界正确进位（1000ms、60s、1024 KiB）（#3710，#3633 #3634）。
+- **配置热重载**（#3712）：
+  - `workspace.id` 默认值在主机名变化时不再让每次重载都报 `restart_required`；
+  - 引用 settings.json env 键的 `${VAR}` 在启动时也会展开；
+  - doctor 不再把 `config_loaded_at` 当成进程启动时间（#3655 #3621 #3620）。
+- **cron**（#3715）：本地 run 的回合以未请求的 `aborted_*` 结束时记为失败，不再记成功（#3629）。
+- **session**（#3714）：恢复的 workflow 若带有未来时间的 `last_observed_at`，会截到当前时间，不再无限拉长会话空闲 TTL（#3657）。
+- **`naozhi models sync`**（#3713）：探测的 claude 和实际 spawn 的是同一个 binary（#3632）。
+- **server**（#3716）：mermaid 只常驻 gzip 形式，降低空闲 RSS（#3662）；Router 改在构造入口统一校验（#3638）。
+- **`naozhi setup weixin`**（#3701）：扫码轮询能处理 iLink 新增的 redirect / verifycode 状态（#3635）。
+
 ### Removed
 
 本轮减法里的 breaking 项。残留的已删配置键不会让服务起不来，只报一条 WARN（`config-deprecated`），但 `naozhi config check` 会因此退出 1，请手动删掉。
@@ -18,6 +65,7 @@
 - **BREAKING：删除 Prometheus 导出 `GET /metrics` 与配置键 `server.metrics_enabled`**（#3736）。`naozhi doctor` 的 `metrics` 检查一并移除。计数器仍在 `/api/debug/vars`（需开 `server.debug_mode`）以 expvar JSON 暴露，名称不变；抓取 `/metrics` 升级后会收到 404。
 - **BREAKING：删除五个没有调用方的 dashboard API**（#3734）：`GET /api/planner/stats`、`GET /api/cron/preview`、`GET /api/cost/entries`、`POST /api/system/labels/clear-origin`、`POST /api/auth/logout`。自己写脚本调用它们的会收到 404。
 - **已鉴权的 dashboard 接口不再按 IP 限流**（#3722）：发送、上传、cron、项目文件、cost、memory 等接口不再返回 429。登录、WS 握手、未鉴权入口的限流，以及 IM 的 `im_rate_limit` 不变。
+- **BREAKING：删除 cron 的 AgentCore 云沙箱放置**（#3740）。配置键 `cron.sandbox`（`runtime_arn` / `region`）不再读取，启动时报 `config-deprecated`；`POST` / `PATCH /api/cron` 去掉 `placement` / `side_effects` 字段，外部客户端仍带这两个字段会收到 400；已保存的 `placement: "sandbox"` 任务加载后为**暂停**状态（不会悄悄改在本机运行），下次保存时这个键会被去掉。本地 cron 执行路径不变。
 - **移除 v0.1.42 引入的一次性 `.naozhi/project.yaml` 桩文件清理**（#3728）：从 v0.1.40 之前的版本直接升级的用户，如仓库里残留只含 `created_at` 的 `.naozhi/project.yaml`，请手动删除；`projects-index.json` 里遗留的 `stub_cleanup_done` 字段会被忽略。
 
 ---
