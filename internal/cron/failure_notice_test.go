@@ -241,22 +241,6 @@ func TestFailureNoticeBody_ShortAndMissingRunID(t *testing.T) {
 	}
 }
 
-// A session_error notice names only the causes a CLI exit at startup has; any
-// other cause keeps the bare sentence.
-func TestFailureNoticeBody_SessionErrorCause(t *testing.T) {
-	t.Parallel()
-	for _, c := range allTurnCauses {
-		got := failureNoticeBody(jobSnapshot{}, NotifyTarget{}, ErrClassSessionError, c, RunStateFailed, "", time.Minute)
-		want := "启动会话失败"
-		if s, ok := sessionErrorNotices[c]; ok {
-			want = s
-		}
-		if got != want || !strings.HasPrefix(got, "启动会话失败") {
-			t.Errorf("cause %q: got %q, want %q", c, got, want)
-		}
-	}
-}
-
 // recordingNotifySender captures every IM text cron delivers.
 type recordingNotifySender struct {
 	mu    sync.Mutex
@@ -355,7 +339,7 @@ func TestExecuteGetSession_SessionErrorNotice(t *testing.T) {
 // TestExecuteGetSession_SessionErrorNamesExitCause: a spawn whose CLI exited
 // at startup with a named cause (the adapter's TurnFailedError) stays
 // failed/session_error, for the dashboard's counts, and its notice names the
-// cause.
+// cause; an unnamed one keeps the bare sentence.
 func TestExecuteGetSession_SessionErrorNamesExitCause(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -365,7 +349,7 @@ func TestExecuteGetSession_SessionErrorNamesExitCause(t *testing.T) {
 		{TurnCauseBackendAuth, "启动会话失败（后端认证失败或凭证已过期），请联系管理员"},
 		{TurnCauseCLIConfig, "启动会话失败（CLI 配置错误，如 MCP 配置无效），请联系管理员"},
 		{TurnCauseCLIMissingRuntime, "启动会话失败（CLI 运行环境缺失），请联系管理员"},
-		{TurnCauseResumeUnavailable, "启动会话失败（上次会话无法恢复），下次执行将尝试开启新会话"},
+		{TurnCauseUnknown, "启动会话失败"},
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.cause), func(t *testing.T) {

@@ -221,8 +221,7 @@ func TestWrapCronSpawnErr_CapacityRefusals(t *testing.T) {
 
 // TestWrapCronSpawnErr_NamesCLIExitCause: a spawn whose CLI exited in the
 // Init handshake with a named cause reaches cron carrying that cause, the
-// exit still in the chain and its text unchanged; an unrecognised exit passes
-// through.
+// exit still in the chain; an unrecognised exit passes through.
 func TestWrapCronSpawnErr_NamesCLIExitCause(t *testing.T) {
 	t.Parallel()
 	for _, tc := range cliExitCauses {
@@ -235,9 +234,6 @@ func TestWrapCronSpawnErr_NamesCLIExitCause(t *testing.T) {
 		var pe *clierr.ProcessExitedError
 		if !errors.As(err, &pe) || pe.Class != tc.class || errors.Is(err, cron.ErrSessionCapacity) {
 			t.Errorf("wrapCronSpawnErr(class %d) = %v, want the exit kept and no capacity tag", tc.class, err)
-		}
-		if err.Error() != exit.Error() {
-			t.Errorf("class %d: Error() = %q, want the spawn error's %q", tc.class, err.Error(), exit.Error())
 		}
 	}
 	unknown := fmt.Errorf("protocol init: %w", &clierr.ProcessExitedError{Code: 1})

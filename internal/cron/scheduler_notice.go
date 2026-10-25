@@ -181,7 +181,6 @@ var sessionErrorNotices = map[TurnCause]string{
 	TurnCauseBackendAuth:       "启动会话失败（后端认证失败或凭证已过期），请联系管理员",
 	TurnCauseCLIConfig:         "启动会话失败（CLI 配置错误，如 MCP 配置无效），请联系管理员",
 	TurnCauseCLIMissingRuntime: "启动会话失败（CLI 运行环境缺失），请联系管理员",
-	TurnCauseResumeUnavailable: "启动会话失败（上次会话无法恢复），下次执行将尝试开启新会话",
 }
 
 // sessionErrorNotice is the notice cause for a failed spawn; one with no
