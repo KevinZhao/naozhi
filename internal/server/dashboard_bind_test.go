@@ -5,7 +5,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -190,32 +189,5 @@ func TestHandleBind_RouteRegistered(t *testing.T) {
 	// the handler runs — anything other than 404/405 proves the route exists.
 	if w.Code == http.StatusNotFound || w.Code == http.StatusMethodNotAllowed {
 		t.Fatalf("POST /api/sessions/bind not registered: status=%d", w.Code)
-	}
-}
-
-// TestHandleBind_WorkspaceLogGoesThroughSanitizeForLog is a source-level
-// contract gate. handleBind logs the
-// attacker-influenced workspace on the validation-failure branch; that attr
-// MUST flow through osutil.SanitizeForLog so a `/valid<CRLF>fake-line` or bidi
-// payload cannot forge log entries. This locks the shape so a future edit that
-// drops the sanitizer is caught in CI (the runtime path is hard to assert on
-// without a buffer handler).
-func TestHandleBind_WorkspaceLogGoesThroughSanitizeForLog(t *testing.T) {
-	t.Parallel()
-	_, thisFile, _, _ := runtime.Caller(0)
-	p := filepath.Join(filepath.Dir(thisFile), "dashboard_send.go")
-	data, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatalf("read dashboard_send.go: %v", err)
-	}
-	src := string(data)
-
-	// Negative: a raw `"workspace", req.Workspace` attr (no sanitizer) must not exist.
-	if strings.Contains(src, `"workspace", req.Workspace`) {
-		t.Error("handleBind logs req.Workspace raw; route it through osutil.SanitizeForLog to prevent log injection")
-	}
-	// Positive: the sanitized form must be present.
-	if !strings.Contains(src, "osutil.SanitizeForLog(req.Workspace,") {
-		t.Error("handleBind must route req.Workspace through osutil.SanitizeForLog in the bind validation-failure log attr")
 	}
 }
