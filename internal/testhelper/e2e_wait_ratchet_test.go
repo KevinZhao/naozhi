@@ -30,7 +30,7 @@ const exemptE2EWaitBaseline = 0
 const e2eSleepBaseline = 12
 
 // exemptE2ESleepBaseline counts the `// wait-ok:` annotated promise sleeps.
-const exemptE2ESleepBaseline = 2
+const exemptE2ESleepBaseline = 1
 
 // e2eWaitFloor is far below the real file count; a scan that sees fewer files
 // has lost the suite.
