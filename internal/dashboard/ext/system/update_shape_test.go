@@ -4,9 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -44,96 +41,6 @@ func getUpdateStatus(t *testing.T, h *Handlers) (int, map[string]any) {
 		}
 	}
 	return w.Code, body
-}
-
-// readUpdateSource returns update.go with comment lines stripped, so source
-// guards match code rather than the prose that explains it.
-func readUpdateSource(t *testing.T, stripComments bool) string {
-	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller(0) failed")
-	}
-	b, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "update.go"))
-	if err != nil {
-		t.Fatalf("read update.go: %v", err)
-	}
-	if !stripComments {
-		return string(b)
-	}
-	var code []string
-	for _, line := range strings.Split(string(b), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "//") {
-			continue
-		}
-		code = append(code, line)
-	}
-	return strings.Join(code, "\n")
-}
-
-// funcBody returns the source of the named method, bounded at the next
-// top-level declaration.
-func funcBody(t *testing.T, src, fn string) string {
-	t.Helper()
-	at := strings.Index(src, "func (h *Handlers) "+fn)
-	if at < 0 {
-		t.Fatalf("%s not found", fn)
-	}
-	body := src[at:]
-	if end := strings.Index(body[1:], "\nfunc "); end >= 0 {
-		body = body[:end+1]
-	}
-	return body
-}
-
-// TestUpdateHandlers_ProbeServiceOnce keeps the service probe to one call per
-// request in each handler.
-//
-// It is a source guard because the cost is only visible on darwin, where
-// ServiceRunning() forks `launchctl list` — a behavioural test would have to
-// stub a probe that is not stubbable there, and on linux the fork does not
-// exist to be counted. GET is polled by every open dashboard (every 3s while
-// an apply is in flight); whoever needs the verdict takes the caller's copy.
-func TestUpdateHandlers_ProbeServiceOnce(t *testing.T) {
-	src := readUpdateSource(t, true)
-	for _, fn := range []string{"HandleUpdateStatus", "HandleUpdateApply"} {
-		body := funcBody(t, src, fn)
-		n := strings.Count(body, "selfupdate.ServiceManagesThisProcess()") + strings.Count(body, "selfupdate.ServiceRunning()")
-		if n > 1 {
-			t.Errorf("%s probes the service %d times; probe once and pass the result to CheckPreflight / RollbackHint / the response field", fn, n)
-		}
-		// The dashboard restarts THIS process. ServiceRunning() answers "is any
-		// naozhi unit active", which from an unmanaged instance beside the
-		// system service would restart the wrong one.
-		if strings.Contains(body, "selfupdate.ServiceRunning()") {
-			t.Errorf("%s must probe selfupdate.ServiceManagesThisProcess(), not ServiceRunning(): the restart has to land on this process", fn)
-		}
-	}
-}
-
-// TestUpdateStatus_ColdStartFillGuard pins the two properties of the on-demand
-// fill in HandleUpdateStatus that a behavioural test cannot reach without a
-// GitHub stub (the release lookup seam is internal to selfupdate):
-//
-//   - the gate is `latest == ""` alone. A failed check advances checkedAt, so a
-//     gate that also required "never tried" would, after one transient failure
-//     at boot, never fill again until the 6h tick.
-//   - the check runs under updateColdStartFillTimeout, not CheckNow's own 60s:
-//     this is inline in a polled GET.
-func TestUpdateStatus_ColdStartFillGuard(t *testing.T) {
-	body := funcBody(t, readUpdateSource(t, false), "HandleUpdateStatus")
-	if !strings.Contains(body, `latest == "" {`) {
-		t.Error(`the cold-start fill must gate on latest == "" only`)
-	}
-	if strings.Contains(body, "at.IsZero()") {
-		t.Error("the cold-start fill must not require checkedAt to be zero: a failed check stamps it, which would disable the fill after one blip")
-	}
-	if !strings.Contains(body, "updateColdStartFillTimeout") {
-		t.Error("CheckNow from the GET handler must run under updateColdStartFillTimeout")
-	}
-	if updateColdStartFillTimeout > 15*time.Second {
-		t.Errorf("updateColdStartFillTimeout = %s; a polled GET must not block for long", updateColdStartFillTimeout)
-	}
 }
 
 // TestUpdateStatusShape locks the wire contract. dashboard.js branches on

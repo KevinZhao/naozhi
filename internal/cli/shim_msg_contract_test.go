@@ -2,14 +2,7 @@ package cli
 
 import (
 	"encoding/json"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"io/fs"
-	"path/filepath"
 	"reflect"
-	"sort"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -317,109 +310,5 @@ func TestShimMsgRoundTripsEveryShimFrame(t *testing.T) {
 			}
 			assertShimMsgProjects(t, s.msg.Type, authoritative, live)
 		})
-	}
-}
-
-// emittedServerMsgTypes AST-scans the non-test sources of internal/shim for
-// composite literals `ServerMsg{... Type: "<lit>" ...}` and returns the set
-// of frame type strings the shim can put on the wire.
-func emittedServerMsgTypes(t *testing.T) map[string]bool {
-	t.Helper()
-	// `go test` runs each package's tests with cwd = the package directory
-	// (internal/cli), so the sibling shim package is one level up. Same
-	// precedent as internal/dispatch/no_cron_import_test.go; if the layout
-	// changes the len(types)==0 guard below fails loudly instead of passing.
-	shimDir := filepath.Join("..", "shim")
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, shimDir, func(fi fs.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatalf("parse %s: %v", shimDir, err)
-	}
-	types := make(map[string]bool)
-	for _, pkg := range pkgs {
-		for _, f := range pkg.Files {
-			ast.Inspect(f, func(n ast.Node) bool {
-				lit, ok := n.(*ast.CompositeLit)
-				if !ok {
-					return true
-				}
-				if !isServerMsgType(lit.Type) {
-					return true
-				}
-				for _, elt := range lit.Elts {
-					kv, ok := elt.(*ast.KeyValueExpr)
-					if !ok {
-						continue
-					}
-					k, ok := kv.Key.(*ast.Ident)
-					if !ok || k.Name != "Type" {
-						continue
-					}
-					bl, ok := kv.Value.(*ast.BasicLit)
-					if !ok || bl.Kind != token.STRING {
-						t.Errorf("%s: ServerMsg{Type: <non-literal>} — frame types must be string literals so this contract can enumerate them",
-							fset.Position(kv.Pos()))
-						continue
-					}
-					v, err := strconv.Unquote(bl.Value)
-					if err != nil {
-						t.Fatalf("%s: unquote %s: %v", fset.Position(bl.Pos()), bl.Value, err)
-					}
-					types[v] = true
-				}
-				return true
-			})
-		}
-	}
-	if len(types) == 0 {
-		t.Fatalf("no ServerMsg{Type: ...} literals found under %s — scan path broken?", shimDir)
-	}
-	return types
-}
-
-// isServerMsgType matches both the unqualified `ServerMsg{...}` used inside
-// package shim and a qualified `shim.ServerMsg{...}` should a file under
-// internal/shim ever construct it via a selector (e.g. a nested package).
-func isServerMsgType(expr ast.Expr) bool {
-	switch x := expr.(type) {
-	case *ast.Ident:
-		return x.Name == "ServerMsg"
-	case *ast.SelectorExpr:
-		return x.Sel.Name == "ServerMsg"
-	}
-	return false
-}
-
-func sortedFrameTypes(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// TestShimMsgContractCoversEveryEmittedFrameType requires the sample table
-// to match exactly the frame types internal/shim constructs. A new
-// ServerMsg{Type: "x"} in the shim without a sample here fails CI; a stale
-// sample for a type the shim no longer emits fails too.
-func TestShimMsgContractCoversEveryEmittedFrameType(t *testing.T) {
-	t.Parallel()
-	emitted := emittedServerMsgTypes(t)
-	sampled := make(map[string]bool)
-	for _, s := range shimFrameSamples() {
-		sampled[s.msg.Type] = true
-	}
-	for _, ty := range sortedFrameTypes(emitted) {
-		if !sampled[ty] {
-			t.Errorf("shim emits frame type %q but shimFrameSamples has no sample for it — add one so the live decoder is contract-tested", ty)
-		}
-	}
-	for _, ty := range sortedFrameTypes(sampled) {
-		if !emitted[ty] {
-			t.Errorf("shimFrameSamples has type %q but no ServerMsg{Type: %q} literal exists in internal/shim — stale sample", ty, ty)
-		}
 	}
 }

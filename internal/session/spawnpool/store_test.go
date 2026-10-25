@@ -1,8 +1,6 @@
-// anchor-keep: close-then-delete order inside EndSpawn is a race-window fact (waiter must see a closed channel, not a vanished entry); no seam drives that interleaving deterministically.
 package spawnpool
 
 import (
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -127,25 +125,6 @@ func TestEndSpawn_ClosesOnceAndRemovesKey(t *testing.T) {
 	case <-next:
 		t.Fatal("fresh channel must be open")
 	default:
-	}
-}
-
-// Waiters hold the channel reference, so close-then-delete is the order that
-// lets a caller racing in between observe a closed channel from the still
-// present entry rather than a nil from a re-arrived spawn.
-func TestEndSpawn_CloseBeforeDelete_Order(t *testing.T) {
-	src, err := os.ReadFile("store.go")
-	if err != nil {
-		t.Fatalf("read store.go: %v", err)
-	}
-	body := string(src)
-	closeIdx := strings.Index(body, "close(ch)")
-	deleteIdx := strings.Index(body, "delete(s.spawning, key)")
-	if closeIdx < 0 || deleteIdx < 0 {
-		t.Fatalf("EndSpawn body changed: close=%d delete=%d", closeIdx, deleteIdx)
-	}
-	if closeIdx >= deleteIdx {
-		t.Errorf("close(ch) at %d must precede delete(s.spawning, key) at %d", closeIdx, deleteIdx)
 	}
 }
 

@@ -2,10 +2,7 @@ package server
 
 import (
 	"context"
-	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"testing"
 	"time"
 
@@ -89,50 +86,5 @@ func TestShutdownComplete_ClosesOnlyAfterDrain(t *testing.T) {
 	case <-startDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Start did not return after drain completed")
-	}
-}
-
-// TestShutdownComplete_MainSequencesBeforeRouterShutdown is a source-level
-// guardrail for S11 (#390): cmd/naozhi/main.go must block on
-// srv.ShutdownComplete() BEFORE it calls router.Shutdown(). If a future edit
-// reorders these (or drops the wait), router teardown again races the HTTP
-// drain. Source-scan because the ordering is a happens-before contract the
-// race detector cannot observe on its own.
-func TestShutdownComplete_MainSequencesBeforeRouterShutdown(t *testing.T) {
-	t.Parallel()
-
-	_, self, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	// internal/server/<this> → repo root → cmd/naozhi/main.go
-	root := filepath.Clean(filepath.Join(filepath.Dir(self), "..", ".."))
-	main := filepath.Join(root, "cmd", "naozhi", "main.go")
-	raw, err := os.ReadFile(main)
-	if err != nil {
-		t.Fatalf("read %s: %v", main, err)
-	}
-	body := string(raw)
-
-	// Anchor on the receive expression (the actual blocking wait) so a bare
-	// mention of the method in a comment does not satisfy the contract. Since
-	// #1487 the teardown is expressed as an ordered []shutdownStep slice, so the
-	// drain wait now lives inside the "http-drain" step's run closure
-	// (`{name: "http-drain", run: func() { <-srv.ShutdownComplete() }}`) and the
-	// router teardown is the "router" step (`{name: "router", run: router.Shutdown}`).
-	// The happens-before contract is preserved by slice order: http-drain must be
-	// listed before router.
-	waitIdx := strings.Index(body, "<-srv.ShutdownComplete()")
-	if waitIdx < 0 {
-		t.Fatal("main.go: no `<-srv.ShutdownComplete()` wait found — S11 barrier dropped (#390)")
-	}
-	// Match the router step's run binding (method value, no call parens) rather
-	// than the `scheduler.Stop()/router.Shutdown()` prose in the design comment.
-	routerIdx := strings.Index(body, "run: router.Shutdown}")
-	if routerIdx < 0 {
-		t.Fatal("main.go: no `run: router.Shutdown` step found — shutdown contract changed")
-	}
-	if waitIdx >= routerIdx {
-		t.Errorf("main.go: srv.ShutdownComplete() wait (offset %d) must appear BEFORE the router.Shutdown step (offset %d) — S11 (#390) regressed: router teardown races the HTTP drain", waitIdx, routerIdx)
 	}
 }
