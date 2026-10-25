@@ -59,10 +59,11 @@ func TestEffortDriftCheck_MirrorsSpawn(t *testing.T) {
 	// shim persisted. Listing it here pins that it stays in the ONE literal
 	// rather than being spelled out at a call site.
 	//
+	// PermissionMode (cli.permission_mode) is router-global like MCPConfigFile.
+	//
 	// Still deliberately absent: ResumeID (session state, stripped from the
-	// stored argv by stripResumeArgs) and PermissionMode (both paths rely on the
-	// same zero value — see argvSpawnOptions).
-	required := []string{"Model", "ExtraArgs", "Effort", "SettingsFile", "MCPConfigFile", "DebugFile", "AppendSystemPrompt"}
+	// stored argv by stripResumeArgs).
+	required := []string{"Model", "ExtraArgs", "Effort", "SettingsFile", "MCPConfigFile", "PermissionMode", "DebugFile", "AppendSystemPrompt"}
 
 	got, literals := spawnOptionsLiteralFields(t, argvConstructorFile)
 	if literals == 0 {

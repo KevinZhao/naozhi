@@ -100,7 +100,10 @@ func EventEntriesFromEventAt(ev clievent.Event, nowMS int64) []clievent.EventEnt
 			"vcs_state_changed", "code_change_published",
 			// The slash-command list changed (plugin/MCP load); the frame carries
 			// nothing a timeline row could show.
-			"commands_changed":
+			"commands_changed",
+			// Auto-mode classifier progress (checking/done) for a tool call already
+			// on the timeline; no row-worthy payload. permission_denied stays a row.
+			"permission_check_status":
 			return nil
 		}
 		return []clievent.EventEntry{entry}

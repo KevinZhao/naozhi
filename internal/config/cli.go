@@ -60,11 +60,23 @@ type CLIConfig struct {
 	// is not supported. Recommended mode 0600: writers get arbitrary command
 	// execution in every session. Deliberately global, not per-backend/agent.
 	MCPConfig string `yaml:"mcp_config,omitempty"`
+	// PermissionMode picks how Claude spawns handle tool permissions: "" or
+	// PermissionModeBypass passes `--dangerously-skip-permissions`,
+	// PermissionModeAuto passes `--permission-mode auto` (the CLI's classifier
+	// reviews each tool call). Anything else fails validation. Other backends
+	// ignore it.
+	PermissionMode string `yaml:"permission_mode,omitempty"`
 	// Effort is the default thinking-effort tier for backends that accept one
 	// (kiro: low/medium/high/xhigh/max). Empty passes no flag so the backend
 	// keeps its own default (docs/rfc/kiro-effort-control.md).
 	Effort string `yaml:"effort,omitempty"`
 }
+
+// The cli.permission_mode values Validate accepts besides "".
+const (
+	PermissionModeBypass = "bypass"
+	PermissionModeAuto   = "auto"
+)
 
 // CLIBackendConfig configures one backend in a multi-backend deployment.
 // ID is required; Model/Args/Effort fall back to the top-level cli.* values.
