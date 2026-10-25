@@ -174,12 +174,8 @@ func applyClaudeEnvSettings(ctx context.Context) error {
 	return nil
 }
 
-// loadStartupConfig applies the settings.json env BEFORE the first Load, so
-// startup expands ${VAR} against the same process environment every later
-// hot reload does; the other order made a settings-only key read as a
-// restart-only edit on each reload (#3621). The settings error never blocks
-// startup and comes back apart from the Load error, for main to log once
-// logging is configured.
+// loadStartupConfig: settings env before Load so startup and reload expand ${VAR} alike (#3621).
+// settingsErr is returned for main to log; filter diagnostics go to the default stderr handler.
 func loadStartupConfig(ctx context.Context, path string) (cfg *config.Config, settingsErr, err error) {
 	settingsErr = applyClaudeEnvSettings(ctx)
 	cfg, err = config.Load(path)

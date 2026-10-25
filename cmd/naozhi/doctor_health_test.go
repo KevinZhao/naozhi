@@ -44,8 +44,7 @@ func TestDoctor_ServerState(t *testing.T) {
 	const up, justUp = "2h0m0s", "1m0s"
 	alive := `{"writer_alive":true,"channel_depth":0,"channel_cap":1024,"dropped_total":0}`
 	dead := `{"writer_alive":false,"channel_depth":900,"channel_cap":1024,"dropped_total":7}`
-	// config_loaded_at stays fresh: a hot reload moves it, so the quiet
-	// heuristic reads uptime (#3620).
+	// config_loaded_at stays fresh (a hot reload moves it); quiet reads uptime (#3620).
 	body := func(cli, platforms, eventlog, tracker, dispatch, uptime string) string {
 		b := `{"status":"ok","uptime":"` + uptime + `","version":"v9","cli_available":` + cli + `,"platforms":` + platforms
 		if eventlog != "" {
@@ -102,6 +101,9 @@ func TestDoctor_ServerState(t *testing.T) {
 			"dispatch": "warn|no inbound IM messages (slash commands not counted) since start 2h0m0s ago — feishu, slack may not be connected (inferred: no connection state reported)",
 		}},
 		{"quiet just started", body("true", feishu, alive, alive, quiet, justUp), map[string]string{
+			"dispatch": "pass|no inbound IM messages yet",
+		}},
+		{"quiet uptime unparsable", body("true", feishu, alive, alive, quiet, "two hours"), map[string]string{
 			"dispatch": "pass|no inbound IM messages yet",
 		}},
 		{"awaiting first reply", body("true", feishu, alive, alive, `{"message_count":1,"reply_error_count":0,"send_fail_count":0}`, up), map[string]string{
@@ -222,34 +224,6 @@ func TestDoctor_PlatformConn(t *testing.T) {
 			level, sub, _ := strings.Cut(tc.dispatch, "|")
 			if f := got["dispatch"]; f.Level != level || !strings.Contains(f.Detail, sub) {
 				t.Errorf("dispatch = %+v, want level %s with %q", f, level, sub)
-			}
-		})
-	}
-}
-
-// TestDoctor_DispatchQuietUptime: the dispatch quiet heuristic measures time
-// since start on /health's uptime. config_loaded_at moves on every clean hot
-// reload, so a fresh one must not hide a long-quiet process (#3620).
-func TestDoctor_DispatchQuietUptime(t *testing.T) {
-	t.Parallel()
-	loadedAt := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
-	tests := []struct {
-		name, uptime, level, detail string
-	}{
-		{"just started", "5m0s", "pass", "no inbound IM messages yet"},
-		{"reloaded after a long quiet run", "2h0m0s", "warn", "since start 2h0m0s ago — feishu may not be connected"},
-		{"unparsable uptime", "two hours", "pass", "no inbound IM messages yet"},
-		{"no uptime", "", "pass", "no inbound IM messages yet"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			srv, _ := authHealthServer(t, `{"status":"ok","uptime":"`+tc.uptime+`","cli_available":true,"platforms":{"feishu":"registered"},`+
-				`"dispatch":{"message_count":0,"reply_error_count":0,"send_fail_count":0},"config_loaded_at":"`+loadedAt+`"}`)
-			d := &doctor{addr: srv.URL, client: srv.Client(), token: "tok", timeout: 2 * time.Second}
-			d.checkServerState()
-			if f := findingsByCategory(d)["dispatch"]; f.Level != tc.level || !strings.Contains(f.Detail, tc.detail) {
-				t.Errorf("dispatch = %+v, want level %s with %q", f, tc.level, tc.detail)
 			}
 		})
 	}

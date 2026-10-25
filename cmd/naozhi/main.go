@@ -87,7 +87,6 @@ func main() {
 	configFP := server.NewConfigFingerprint(cfg.Fingerprint.SHA256, cfg.Fingerprint.LoadedAt)
 	reloader := newConfigReloader(absConfigPath(*configPath), cfg, logLevel, configFP)
 
-	// Logged only now, through the configured handler.
 	if settingsErr != nil {
 		switch claudeSettingsErrSeverity(settingsErr) {
 		case settingsErrSeverityCancel:

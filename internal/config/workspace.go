@@ -132,10 +132,7 @@ type AccessProfile struct {
 // resolveHostname is os.Hostname; tests swap it.
 var resolveHostname = os.Hostname
 
-// newProcessHostname resolves the hostname once per process: a hot reload
-// re-runs Load, and a hostname that moved meanwhile (macOS renames on network
-// changes) would otherwise read as a workspace edit nobody made and pin every
-// reload at restart_required (#3655).
+// newProcessHostname: resolved once so a reload never sees a moved hostname (#3655).
 func newProcessHostname() func() (string, error) {
 	return sync.OnceValues(func() (string, error) { return resolveHostname() })
 }
