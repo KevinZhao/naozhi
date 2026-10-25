@@ -6,10 +6,8 @@ import (
 )
 
 // Frames maps every outbound MsgType to an exemplar with every field of that
-// frame set non-zero. The schema generator reflects over these to emit
-// wsproto.schema.json, and the contract tests marshal them to assert the
-// wire shape — one registry, both consumers, so neither can drift from the
-// structs.
+// frame set non-zero. contract.js's WS section is built from its keys, and
+// the contract tests marshal the exemplars to assert the wire shape.
 var Frames = map[MsgType]any{
 	TypeAuthOK:   NewAuthOK(AuthOK{AssetVersion: "v"}),
 	TypeAuthFail: NewAuthFail(AuthFail{Error: "e", RetryAfter: 1}),

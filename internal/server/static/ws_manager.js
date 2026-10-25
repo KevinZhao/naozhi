@@ -1,4 +1,3 @@
-// @ts-check
 // ws_manager.js — the dashboard's WebSocket (S18, #3024): dial, auth, backoff
 // and reconnect, ping, send, and the receive dispatch table. Business state
 // lives with its owner (session_stream.js, cron_live.js, dashboard.js), which

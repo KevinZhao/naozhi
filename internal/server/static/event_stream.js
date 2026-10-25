@@ -1,4 +1,3 @@
-// @ts-check
 // event_stream.js — the main transcript's event list: the HTTP fetch and poll
 // tail, "load earlier" paging, the full render, the live append and its DOM
 // cap, and the history / event / send-ack WS frames that feed them.

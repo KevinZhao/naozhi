@@ -100,7 +100,7 @@ naozhi（单机阶段在 Mac；终态在 EC2 控制面）───────�
 ```
 
 - **不用第三方推送服务**：naozhi 直接向 APNs 发送，只需要出站访问 `api.push.apple.com`。`.p8` 密钥进 RFC §7.3 的凭证清单，只给网关读。
-- **协议复用**：app 与网页用同一套 REST / WS。naozhi 已有 `internal/jsonschema` 为 WS 帧与 REST 响应生成 schema（`contract.js`、`wire.d.ts` 的来源），可以再生成 Swift `Codable` 类型，保持单一真相源。
+- **协议复用**：app 与网页用同一套 REST / WS。WS 帧与 REST 响应的 Go 类型（`internal/wsproto` 等）是单一真相源，可以从它们生成 Swift `Codable` 类型。
 - **推送载荷最小化**：APNs 载荷经过 Apple，只放 ID 与一句已脱敏的标题；详情由 Notification Service Extension 拉取。拉不到时显示通用文案。
 - **认证**：网页 dashboard 上显示一次性配对二维码（服务器地址 + token），app 扫码后把 token 存进钥匙串；"我"里可撤销设备。
 - **连通性**：

@@ -6,10 +6,9 @@
 // backend literals, so a struct-tag or route change breaks a Go test, not
 // production (#2432/#2433/#2476 class).
 //
-// It is an ES module the dashboard's modules import; the `@type {const}` cast
-// and Object.freeze give tsc closed literal types. wire.d.ts (BuildWireDTS)
-// types the payloads. tools/gen-contract writes both; the tests byte-compare
-// each against its committed file, so a stale one fails CI.
+// It is an ES module the dashboard's modules import, frozen with
+// Object.freeze. tools/gen-contract writes it; the tests byte-compare it
+// against the committed file, so a stale one fails CI.
 package contractjs
 
 import (

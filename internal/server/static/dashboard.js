@@ -1,4 +1,3 @@
-// @ts-check
 import { NZ_CONTRACT } from './contract.js';
 import { getToken, lsGet, lsRemove, lsSet } from './platform.js';
 import { registerShell } from './shell.js';

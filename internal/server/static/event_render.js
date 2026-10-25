@@ -1,4 +1,3 @@
-// @ts-check
 // event_render.js — one EventEntry to one transcript bubble (eventHtml and its
 // EVENT_WHOLE/EVENT_CONTENT/EVENT_ICONS tables), plus the time-divider and
 // dedup helpers the transcript, cron and agent views share.
