@@ -267,7 +267,7 @@ function consumeSpawnFields(key, f, sendId) {
 }
 
 // restoreSpawnFields undoes it for send sendId once rejected before spawn (HTTP
-// 4xx/5xx, send_ack busy/error), so the retry carries the picks. Another
+// 4xx/5xx, send_ack error), so the retry carries the picks. Another
 // send's rejection, or a listed key, keeps them consumed (#3586).
 export function restoreSpawnFields(key, sendId) {
   const p = perSession.sentPicks[key];
@@ -295,10 +295,9 @@ function buildSendPayload(text, fileIDs, sendId) {
 // took the pre-uploaded attachments out of the uploadStore before rejecting
 // (post-TakeAll 4xx/5xx) — drop the now-dead ids and ask for a re-attach;
 // pre-TakeAll rejections never set the flag, so unsent attachments stay put.
-async function handleSendRejected(r, sentSid, text, input, sendId) {
+async function handleSendRejected(r, sentSid, text, input) {
   perSession.httpSendPending.delete(sentSid); // rejected synchronously — no async frame will follow
   if (input) setMsgValue(input, text);
-  restoreSpawnFields(selection.key, sendId);
   rollbackOptimisticRunning(selection.key, selection.node);
   // Some error paths still write text/plain; fall back to text() so we
   // always surface the real message instead of a generic "send failed".
@@ -409,7 +408,8 @@ async function sendComposerTurn(targetKey, targetNode) {
     perSession.httpSendPending.add(sentSid);
     const r = await fetch(NZ_CONTRACT.API.sessions_send, {method:'POST', headers, body: JSON.stringify(payload)});
     if (!r.ok) {
-      await handleSendRejected(r, sentSid, text, input, sendId);
+      restoreSpawnFields(targetKey, sendId);
+      await handleSendRejected(r, sentSid, text, input);
       return;
     }
     await finishHttpSend(r, sentSid, text, input);

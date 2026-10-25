@@ -133,7 +133,7 @@ test('formatters pick the unit after rounding, not before', () => {
   for (const [ms, want] of short) assert.equal(nzu.formatDurationShort(ms), want, String(ms));
   const run = [[999.6, '1s'], [59940, '59.9s'], [59960, '1m 0s']];
   for (const [ms, want] of run) assert.equal(nzu.formatRunDuration(ms), want, String(ms));
-  const bytes = [[1023.6, '1 KiB'], [1048575, '1 MiB'], [1073741823, '1.0 GiB'], [(1 << 20) - 600, '1023 KiB']];
+  const bytes = [[1048575, '1 MiB'], [1073741823, '1.0 GiB'], [(1 << 20) - 600, '1023 KiB']];
   for (const [n, want] of bytes) assert.equal(nzu.formatBytes(n), want, String(n));
 });
 

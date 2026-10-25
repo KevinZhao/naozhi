@@ -798,22 +798,22 @@ const sessionFrames = {
           lastOpt.appendChild(chip);
         }
       }
+      const ackKey = msg.key || selection.key;
+      // It got through: a failed turn's later error ack must not restore its picks.
+      if (perSession.sentPicks[ackKey]?.sendId === msg.id) delete perSession.sentPicks[ackKey].sendId;
       // Subscribe to the session we just sent to, unless we're already
       // subscribed or a subscribe is already pending for this exact key.
-      const ackKey = msg.key || selection.key;
       if (ackKey && sessionStream.subscribedKey !== ackKey && sessionStream._pendingSubscribeKey !== ackKey) {
         sessionStream.lastEventTimeWs = 0;
         sessionStream.subscribe(ackKey, selection.node);
       }
-      // An already-subscribed session must NOT re-subscribe: its eventPushLoop
-      // delivers the new events, and a history replay would duplicate them.
-      // A process restart (dead → running) is onSessionState's to handle.
+      // A subscribed session must NOT re-subscribe (a history replay would duplicate
+      // its eventPushLoop's events); a dead → running restart is onSessionState's.
     } else if (msg.status === 'busy') {
       // Queue disabled (MaxDepth<=0) and the session busy: the send was
       // dropped, so roll back and say so rather than silently eat it.
       showToast('会话正忙，消息未送达，请稍后重试', 'error');
       removeOptimisticMsg(msg.id);
-      restoreSpawnFields(msg.key || selection.key, msg.id);
       rollbackOptimisticRunning(msg.key || selection.key, msg.node || selection.node);
       // send 从未真正进入 turn，别把它当成「当前 turn 的输入」残留 —— 否则
       // 下次中断会把这条从未送达的文本回填上来。

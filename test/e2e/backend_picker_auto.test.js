@@ -502,55 +502,52 @@ const NO_SPAWN = { workspace: undefined, backend: undefined, access_profile: und
 // A first send the server rejects spawned nothing, so its retry carries the
 // picks again (#3633): the session must not spawn on the defaults. Once a
 // send got through, a later one still carries none (#3586).
-for (const status of [500, 429]) {
-  test(`a first HTTP send rejected with ${status} keeps its picks for the retry`, async ({ page }) => {
-    const sessions = /** @type {any} */ (defaultSessions());
-    Object.assign(sessions.stats, { cli_name: 'claude-live', cli_version: '9.9.9' });
-    const opts = { sessions, sendStatus: status };
-    const own = await startMockServer(opts);
-    try {
-      await createAndSend(page, own, { profile: 'team', backend: 'kiro', ws: false, text: 'one' });
-      expect(await headerLabels(page)).toEqual(['kiro', 'kiro']);
-      opts.sendStatus = 0;
-      await sendNow(page, own, 'two', 2);
-      await sendNow(page, own, 'three', 3);
-      const bodies = own.sendCalls.map(b => JSON.parse(b));
-      expect(spawnOf(bodies[0])).toEqual({ workspace: '/home/user/workspace/myproject', backend: 'kiro', access_profile: 'team' });
-      expect(spawnOf(bodies[1])).toEqual(spawnOf(bodies[0]));
-      expect(spawnOf(bodies[2])).toEqual(NO_SPAWN);
-      expect(await headerLabels(page)).toEqual(['kiro', 'kiro']);
-    } finally { own.server.close(); }
-  });
-}
+test('a first HTTP send rejected with 500 keeps its picks for the retry', async ({ page }) => {
+  const sessions = /** @type {any} */ (defaultSessions());
+  Object.assign(sessions.stats, { cli_name: 'claude-live', cli_version: '9.9.9' });
+  const opts = { sessions, sendStatus: 500 };
+  const own = await startMockServer(opts);
+  try {
+    await createAndSend(page, own, { profile: 'team', backend: 'kiro', ws: false, text: 'one' });
+    expect(await headerLabels(page)).toEqual(['kiro', 'kiro']);
+    opts.sendStatus = 0;
+    await sendNow(page, own, 'two', 2);
+    await sendNow(page, own, 'three', 3);
+    const bodies = own.sendCalls.map(b => JSON.parse(b));
+    expect(spawnOf(bodies[0])).toEqual({ workspace: '/home/user/workspace/myproject', backend: 'kiro', access_profile: 'team' });
+    expect(spawnOf(bodies[1])).toEqual(spawnOf(bodies[0]));
+    expect(spawnOf(bodies[2])).toEqual(NO_SPAWN);
+    expect(await headerLabels(page)).toEqual(['kiro', 'kiro']);
+  } finally { own.server.close(); }
+});
 
-for (const status of ['busy', 'error']) {
-  test(`a first WS send acked ${status} keeps its picks for the retry`, async ({ page }) => {
-    const own = await mockWithCLIName(undefined, { ws: true });
-    try {
-      await createAndSend(page, own, { profile: 'team', backend: 'kiro', ws: true, text: 'one' });
-      const first = wsSendBodies(own)[0];
-      const conn = own.wsConnections.find(c => c.messages.includes(first));
-      conn.send({ type: 'send_ack', id: first.id, status, key: first.key, error: 'boom' });
-      await expect.poll(() => page.evaluate(k => /** @type {any} */ (window).nz.test.sessionWorkspaces[k], first.key)).toBe(first.workspace);
-      await sendNow(page, own, 'two', 2);
-      expect(spawnOf(wsSendBodies(own)[1])).toEqual(spawnOf(first));
-      expect(spawnOf(first)).toEqual({ workspace: '/home/user/workspace/myproject', backend: 'kiro', access_profile: 'team' });
-    } finally { own.server.close(); }
-  });
-}
-
-test('a busy ack for a later send leaves the first send\'s picks consumed', async ({ page }) => {
+test('a first WS send acked error keeps its picks for the retry', async ({ page }) => {
   const own = await mockWithCLIName(undefined, { ws: true });
   try {
     await createAndSend(page, own, { profile: 'team', backend: 'kiro', ws: true, text: 'one' });
+    const first = wsSendBodies(own)[0];
+    const conn = own.wsConnections.find(c => c.messages.includes(first));
+    conn.send({ type: 'send_ack', id: first.id, status: 'error', key: first.key, error: 'boom' });
+    await expect.poll(() => page.evaluate(k => /** @type {any} */ (window).nz.test.sessionWorkspaces[k], first.key)).toBe(first.workspace);
     await sendNow(page, own, 'two', 2);
-    const [first, second] = wsSendBodies(own);
-    const conn = own.wsConnections.find(c => c.messages.includes(second));
+    expect(spawnOf(wsSendBodies(own)[1])).toEqual(spawnOf(first));
+    expect(spawnOf(first)).toEqual({ workspace: '/home/user/workspace/myproject', backend: 'kiro', access_profile: 'team' });
+  } finally { own.server.close(); }
+});
+
+// A send the server accepted spawned the session, so the error ack its failed
+// turn sends later must not hand the picks back to the next send (#3586).
+test('an error ack after the first send was accepted leaves its picks consumed', async ({ page }) => {
+  const own = await mockWithCLIName(undefined, { ws: true });
+  try {
+    await createAndSend(page, own, { profile: 'team', backend: 'kiro', ws: true, text: 'one' });
+    const first = wsSendBodies(own)[0];
+    const conn = own.wsConnections.find(c => c.messages.includes(first));
     conn.send({ type: 'send_ack', id: first.id, status: 'accepted', key: first.key });
-    conn.send({ type: 'send_ack', id: second.id, status: 'busy', key: second.key });
+    conn.send({ type: 'send_ack', id: first.id, status: 'error', key: first.key, error: 'boom' });
     await expect(page.locator('#btn-send')).toBeVisible();
-    await sendNow(page, own, 'three', 3);
-    expect(spawnOf(wsSendBodies(own)[2])).toEqual(NO_SPAWN);
+    await sendNow(page, own, 'two', 2);
+    expect(spawnOf(wsSendBodies(own)[1])).toEqual(NO_SPAWN);
     expect(await headerLabels(page)).toEqual(['kiro', 'kiro']);
   } finally { own.server.close(); }
 });

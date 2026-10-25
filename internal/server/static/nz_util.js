@@ -140,9 +140,9 @@ export function formatDurationShort(ms) {
 // A count that rounds to 1024 of a unit moves up one: 1048575 is 1 MiB.
 export function formatBytes(n) {
   if (!n || n < 0) return '';
-  if (n >= 1 << 30 || Math.round(n / (1 << 20)) >= 1024) return (n / (1 << 30)).toFixed(1) + ' GiB';
+  if (Math.round(n / (1 << 20)) >= 1024) return (n / (1 << 30)).toFixed(1) + ' GiB';
   if (Math.round(n / (1 << 10)) >= 1024) return Math.round(n / (1 << 20)) + ' MiB';
-  if (Math.round(n) >= 1024) return Math.round(n / (1 << 10)) + ' KiB';
+  if (n >= 1024) return Math.round(n / (1 << 10)) + ' KiB';
   return n + ' B';
 }
 // formatRunDuration —— 时间轴行 / 详情区"耗时"文案。>1000ms 用 "Xs"，否则 "Xms"。
