@@ -18,7 +18,8 @@ bin/naozhi setup weixin --config config.yaml
 
 - 手机上显示一串数字时（`need_verifycode`），按提示把数字输进终端；输错会让你重输，错太多次
   （`verify_code_blocked`）setup 会退出，等一会儿再重跑
-- 扫码用户在其他机房时（`scaned_but_redirect`），setup 会自动换到响应里的 `redirect_host` 继续轮询
+- 扫码用户在其他机房时（`scaned_but_redirect`），setup 会自动换到响应里的 `redirect_host` 继续轮询；
+  登录响应里的 `baseurl` 不是默认地址时，setup 会把它写进 `platforms.weixin.base_url`
 
 ### 手动获取 Token（可选）
 
@@ -36,7 +37,7 @@ curl -s "https://ilinkai.weixin.qq.com/ilink/bot/get_qrcode_status?qrcode=QRCODE
 # 返回 need_verifycode 时，在 URL 后加 &verify_code=<手机上显示的数字> 再轮询；
 # 返回 scaned_but_redirect 时，把域名换成响应里的 redirect_host 再轮询
 
-# 4. 记下 bot_token 和 ilink_user_id
+# 4. 记下 bot_token 和 ilink_user_id；baseurl 不是 https://ilinkai.weixin.qq.com 时也记下，填进 base_url
 ```
 
 ## 第二步：配置 config.yaml

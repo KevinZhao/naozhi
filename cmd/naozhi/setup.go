@@ -136,12 +136,17 @@ func runSetupWeixin(args []string) {
 	fmt.Println("\nLogin successful!")
 
 	// Step 3: Write config
-	access, err := setupWriteConfig(*configPath, token, login.ILinkUserID)
+	// confirmed carries the account's API host; the default needs no base_url.
+	apiBase := strings.TrimRight(login.BaseURL, "/")
+	if !strings.HasPrefix(apiBase, "https://") || apiBase == setupBaseURL {
+		apiBase = ""
+	}
+	access, err := setupWriteConfig(*configPath, token, login.ILinkUserID, apiBase)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to write config: %v\n", err)
 		fmt.Println()
 		fmt.Println("Add manually to config.yaml:")
-		printWeixinManualConfig(os.Stdout, token, login.ILinkUserID)
+		printWeixinManualConfig(os.Stdout, token, login.ILinkUserID, apiBase)
 		os.Exit(1)
 	}
 
@@ -160,9 +165,9 @@ type setupQRResp struct {
 }
 
 // setupStatusResp is one get_qrcode_status reply. Status is one of "wait",
-// "scaned", "confirmed", "expired", "scaned_but_redirect", "need_verifycode",
-// "verify_code_blocked" or "binded_redirect" (the set openclaw-weixin's
-// docs/protocol.md lists); qrPoller.poll handles each.
+// "scaned", "confirmed", "expired", "scaned_but_redirect", "need_verifycode"
+// or "verify_code_blocked" (from openclaw-weixin's docs/protocol.md; its
+// binded_redirect needs a local_token_list naozhi never sends).
 type setupStatusResp struct {
 	Status     string `json:"status"`
 	BotToken   string `json:"bot_token,omitempty"`
@@ -173,6 +178,8 @@ type setupStatusResp struct {
 	// RedirectHost is the host to keep polling when Status is
 	// scaned_but_redirect (the scanning user lives in another IDC).
 	RedirectHost string `json:"redirect_host,omitempty"`
+	// BaseURL is the account's API base URL, set on confirmed.
+	BaseURL string `json:"baseurl,omitempty"`
 }
 
 func setupGetQRCode(ctx context.Context) (*setupQRResp, error) {
@@ -251,75 +258,31 @@ func (p *qrPoller) poll(ctx context.Context, qrcode string) (*setupStatusResp, e
 					prompt = "That number did not match, enter it again: "
 				}
 				fmt.Fprint(p.out, "\n"+prompt)
-				code, err := readLineCtx(ctx, p.in)
-				if err != nil {
+				line, err := p.in.ReadString('\n')
+				code := strings.TrimSpace(line)
+				if code == "" && err != nil {
 					return nil, fmt.Errorf("iLink asked for the number WeChat shows on your phone, but none could be read (%w); rerun 'naozhi setup weixin' in an interactive terminal", err)
 				}
 				verifyCode = code
 			case "verify_code_blocked":
 				return nil, fmt.Errorf("too many wrong numbers, iLink blocked the login (verify_code_blocked); wait a while, then rerun 'naozhi setup weixin'")
-			case "binded_redirect":
-				return nil, fmt.Errorf("iLink reports this WeChat account is already bound and issued no new token (binded_redirect); if your config already has platforms.weixin.token, start naozhi as usual")
 			case "scaned_but_redirect":
-				base, ok := redirectBaseURL(status.RedirectHost)
-				if !ok {
-					if !reported["redirect:"+status.RedirectHost] {
-						reported["redirect:"+status.RedirectHost] = true
-						fmt.Fprintf(p.out, "\niLink redirect without a usable redirect_host %q, still polling %s\n",
-							osutil.SanitizeForLog(status.RedirectHost, 128), p.baseURL)
+				if status.RedirectHost != "" {
+					if base := "https://" + status.RedirectHost; base != p.baseURL {
+						fmt.Fprintf(p.out, "\nContinuing on %s\n", osutil.SanitizeForLog(base, 128))
+						p.baseURL = base
 					}
 					continue
 				}
-				if base != p.baseURL {
-					fmt.Fprintf(p.out, "\nContinuing on %s\n", base)
-					p.baseURL = base
-				}
+				fallthrough // no redirect_host: report it like an unknown status
 			default:
 				if !reported[status.Status] {
 					reported[status.Status] = true
-					fmt.Fprintf(p.out, "\nunknown iLink QR status %q, still waiting\n",
+					fmt.Fprintf(p.out, "\nunhandled iLink QR status %q, still waiting\n",
 						osutil.SanitizeForLog(status.Status, 64))
 				}
 			}
 		}
-	}
-}
-
-// redirectBaseURL turns a scaned_but_redirect redirect_host into the https
-// base URL to poll, refusing anything but a bare host[:port].
-func redirectBaseURL(host string) (string, bool) {
-	if host == "" {
-		return "", false
-	}
-	u, err := url.Parse("https://" + host)
-	if err != nil || u.Host != host || u.Hostname() == "" || u.User != nil ||
-		u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
-		return "", false
-	}
-	return "https://" + host, true
-}
-
-// readLineCtx reads one trimmed line from r, giving up when ctx ends (the
-// reading goroutine then lingers until the line arrives or the process exits).
-func readLineCtx(ctx context.Context, r *bufio.Reader) (string, error) {
-	type result struct {
-		line string
-		err  error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		line, err := r.ReadString('\n')
-		ch <- result{line, err}
-	}()
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case res := <-ch:
-		line := strings.TrimSpace(res.line)
-		if line == "" && res.err != nil {
-			return "", res.err
-		}
-		return line, nil
 	}
 }
 
@@ -359,7 +322,7 @@ func (p *qrPoller) check(ctx context.Context, qrcode, verifyCode string) (*setup
 // setupWriteConfig writes the weixin token to path, creating the file from
 // defaultConfigTemplate when absent, and reports what it did to im_access
 // for the scanning user userID (see ensureWeixinAccess).
-func setupWriteConfig(path, token, userID string) (weixinAccess, error) {
+func setupWriteConfig(path, token, userID, apiBase string) (weixinAccess, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return weixinAccessUnset, err
@@ -378,14 +341,14 @@ func setupWriteConfig(path, token, userID string) (weixinAccess, error) {
 			return weixinAccessUnset, err
 		}
 	}
-	updated, access, err := updateWeixinConfig(base, token, userID, fresh)
+	updated, access, err := updateWeixinConfig(base, token, userID, apiBase, fresh)
 	if err != nil {
 		return weixinAccessUnset, err
 	}
 	return access, osutil.WriteFileAtomic(path, updated, 0600)
 }
 
-func updateWeixinConfig(data []byte, token, userID string, fresh bool) ([]byte, weixinAccess, error) {
+func updateWeixinConfig(data []byte, token, userID, apiBase string, fresh bool) ([]byte, weixinAccess, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil, weixinAccessUnset, err
@@ -398,6 +361,9 @@ func updateWeixinConfig(data []byte, token, userID string, fresh bool) ([]byte, 
 	platforms := yamlFindOrCreateMap(root, "platforms")
 	weixin := yamlFindOrCreateMap(platforms, "weixin")
 	yamlSetScalar(weixin, "token", token)
+	if apiBase != "" {
+		yamlSetScalar(weixin, "base_url", apiBase)
+	}
 	access := ensureWeixinAccess(root, userID, fresh)
 
 	var buf bytes.Buffer
@@ -497,11 +463,14 @@ func printWeixinAccess(w io.Writer, access weixinAccess, userID string) {
 
 // printWeixinManualConfig prints the config to paste when writing it failed.
 // It always carries an im_access block, so the pasted bot is never open.
-func printWeixinManualConfig(w io.Writer, token, userID string) {
+func printWeixinManualConfig(w io.Writer, token, userID, apiBase string) {
 	id, _ := setupAccessID(userID)
 	fmt.Fprintln(w, "  platforms:")
 	fmt.Fprintln(w, "    weixin:")
 	fmt.Fprintf(w, "      token: \"%s\"\n", token)
+	if apiBase != "" {
+		fmt.Fprintf(w, "      base_url: %s\n", strconv.Quote(apiBase))
+	}
 	printWeixinAccessTemplate(w, id)
 }
 

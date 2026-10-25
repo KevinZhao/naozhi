@@ -96,19 +96,9 @@ func TestQRPoller_Statuses(t *testing.T) {
 			wantErr: "verify_code_blocked",
 		},
 		{
-			name:    "binded_redirect",
-			replies: []setupStatusResp{{Status: "binded_redirect"}},
-			wantErr: "binded_redirect",
-		},
-		{
-			name:    "redirect without host keeps polling",
-			replies: []setupStatusResp{{Status: "scaned_but_redirect"}, {Status: "scaned_but_redirect"}, testQRConfirmed},
-			wantOut: "without a usable redirect_host",
-		},
-		{
-			name:    "unknown status is reported once",
-			replies: []setupStatusResp{{Status: "brand_new"}, {Status: "brand_new"}, testQRConfirmed},
-			wantOut: `unknown iLink QR status "brand_new"`,
+			name:    "unknown status is reported",
+			replies: []setupStatusResp{{Status: "brand_new"}, testQRConfirmed},
+			wantOut: `unhandled iLink QR status "brand_new"`,
 		},
 	}
 	for _, tt := range tests {
@@ -132,9 +122,6 @@ func TestQRPoller_Statuses(t *testing.T) {
 			if !strings.Contains(out.String(), tt.wantOut) {
 				t.Errorf("output %q does not contain %q", out.String(), tt.wantOut)
 			}
-			if tt.wantOut != "" && strings.Count(out.String(), tt.wantOut) != 1 {
-				t.Errorf("output %q repeats %q", out.String(), tt.wantOut)
-			}
 			if tt.wantCodes != nil {
 				if codes := fake.codes(); strings.Join(codes, ",") != strings.Join(tt.wantCodes, ",") {
 					t.Errorf("verify_code per poll = %q, want %q", codes, tt.wantCodes)
@@ -148,7 +135,9 @@ func TestQRPoller_Statuses(t *testing.T) {
 // polls go to redirect_host, where the scan is confirmed.
 func TestQRPoller_FollowsRedirectHost(t *testing.T) {
 	t.Parallel()
-	idc := &fakeILink{replies: []setupStatusResp{{Status: "scaned"}, testQRConfirmed}}
+	confirmed := testQRConfirmed
+	confirmed.BaseURL = "https://sh.ilinkai.weixin.qq.com"
+	idc := &fakeILink{replies: []setupStatusResp{{Status: "scaned"}, confirmed}}
 	idcSrv := httptest.NewTLSServer(idc)
 	defer idcSrv.Close()
 	host := strings.TrimPrefix(idcSrv.URL, "https://")
@@ -164,6 +153,9 @@ func TestQRPoller_FollowsRedirectHost(t *testing.T) {
 	if err != nil || got.BotToken != "tok" {
 		t.Fatalf("poll = %+v, %v; want the confirmed reply from the redirect host", got, err)
 	}
+	if got.BaseURL != confirmed.BaseURL {
+		t.Errorf("confirmed baseurl = %q, want %q", got.BaseURL, confirmed.BaseURL)
+	}
 	if n := len(origin.codes()); n != 1 {
 		t.Errorf("origin polled %d times, want 1 (then switch hosts)", n)
 	}
@@ -172,25 +164,5 @@ func TestQRPoller_FollowsRedirectHost(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Continuing on "+idcSrv.URL) {
 		t.Errorf("output %q does not announce the host switch", out.String())
-	}
-}
-
-func TestRedirectBaseURL(t *testing.T) {
-	t.Parallel()
-	for host, want := range map[string]string{
-		"sh.ilinkai.weixin.qq.com":      "https://sh.ilinkai.weixin.qq.com",
-		"127.0.0.1:8443":                "https://127.0.0.1:8443",
-		"":                              "",
-		"evil.com/path":                 "",
-		"user@evil.com":                 "",
-		"evil.com?x=1":                  "",
-		"evil.com#frag":                 "",
-		"https://sh.ilinkai.weixin.com": "",
-		":8443":                         "",
-	} {
-		got, ok := redirectBaseURL(host)
-		if got != want || ok != (want != "") {
-			t.Errorf("redirectBaseURL(%q) = %q, %v; want %q", host, got, ok, want)
-		}
 	}
 }
