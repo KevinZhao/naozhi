@@ -174,6 +174,18 @@ func applyClaudeEnvSettings(ctx context.Context) error {
 	return nil
 }
 
+// loadStartupConfig applies the settings.json env BEFORE the first Load, so
+// startup expands ${VAR} against the same process environment every later
+// hot reload does; the other order made a settings-only key read as a
+// restart-only edit on each reload (#3621). The settings error never blocks
+// startup and comes back apart from the Load error, for main to log once
+// logging is configured.
+func loadStartupConfig(ctx context.Context, path string) (cfg *config.Config, settingsErr, err error) {
+	settingsErr = applyClaudeEnvSettings(ctx)
+	cfg, err = config.Load(path)
+	return cfg, settingsErr, err
+}
+
 // naozhiSettingsPath resolves where the naozhi-owned settings file lives,
 // without creating it, so read-only callers share one answer with the spawn path.
 //

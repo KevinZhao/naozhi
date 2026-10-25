@@ -71,7 +71,12 @@ func main() {
 	fs, configPath := newSubFlagSet("naozhi", "config.yaml")
 	fs.Parse(os.Args[1:])
 
-	cfg, err := config.Load(*configPath)
+	// Created before applyClaudeEnvSettings so readJSONWithRetry's sleeps
+	// honour ctx.Done() from the first use of the settings file.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg, settingsErr, err := loadStartupConfig(ctx, *configPath)
 	if err != nil {
 		slog.Error("load config", "err", err)
 		os.Exit(1)
@@ -82,19 +87,15 @@ func main() {
 	configFP := server.NewConfigFingerprint(cfg.Fingerprint.SHA256, cfg.Fingerprint.LoadedAt)
 	reloader := newConfigReloader(absConfigPath(*configPath), cfg, logLevel, configFP)
 
-	// Created before applyClaudeEnvSettings so readJSONWithRetry's sleeps
-	// honour ctx.Done() from the first use of the settings file.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	if err := applyClaudeEnvSettings(ctx); err != nil {
-		switch claudeSettingsErrSeverity(err) {
+	// Logged only now, through the configured handler.
+	if settingsErr != nil {
+		switch claudeSettingsErrSeverity(settingsErr) {
 		case settingsErrSeverityCancel:
-			slog.Warn("apply ~/.claude/settings.json env: aborted by ctx cancel", "err", err)
+			slog.Warn("apply ~/.claude/settings.json env: aborted by ctx cancel", "err", settingsErr)
 		case settingsErrSeverityMissing:
-			slog.Warn("apply ~/.claude/settings.json env: file missing", "err", err)
+			slog.Warn("apply ~/.claude/settings.json env: file missing", "err", settingsErr)
 		default:
-			slog.Error("apply ~/.claude/settings.json env: read or parse failed", "err", err)
+			slog.Error("apply ~/.claude/settings.json env: read or parse failed", "err", settingsErr)
 		}
 	}
 	// cc loads ~/.claude/settings.json itself via `--setting-sources user`; the
