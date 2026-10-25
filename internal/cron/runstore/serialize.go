@@ -71,7 +71,7 @@ func marshalRunPooled(run *CronRun) ([]byte, error) {
 // (#827). This guard matters because Get() takes a caller-supplied runID that
 // was never ReadDir-filtered; scan-based callers use readRunNoLstat instead.
 func (s *Store) readRun(path string) (*CronRun, error) {
-	// openRunFile is platform-specialised: Unix O_NOFOLLOW; Windows Lstat-then-Open best effort.
+	// openRunFile opens with O_NOFOLLOW (open_unix.go).
 	f, err := openRunFile(path)
 	if err != nil {
 		return nil, err

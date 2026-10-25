@@ -2,7 +2,7 @@
 
 > **Status**: 设计契约（v0.1，2026-05-25）
 > **Source**: [server-split-phase4-design.md](server-split-phase4-design.md) §六.2.0.5.1
-> **Enforcement**: `tools/lint-server-handlers/` AST linter + `make lint-server`
+> **Enforcement**: 约定，靠 review 把关（`tools/lint-server-handlers/` 与 `make lint-server` 已于 #3723 删除）
 
 每个 PR 在 description 中必须引用本文档相关条款，确保改动符合包契约。
 
@@ -63,7 +63,7 @@ cmd/naozhi/main.go
 
 **约束**：
 - `Server` struct ≤ 12 字段（addr / mux / startedAt / onReady / appCtx / router / hub / scheduler / projectMgr / nodes / nodesMu / reverseNodeServer）
-- 单文件 ≤ 500 行（exemptions.yaml 列出过渡期豁免）
+- 单文件 ≤ 500 行（约定；原 exemptions.yaml 豁免清单已随 #3723 删除）
 - 不允许新增 `func (s *Server) handle*` 方法（Phase 0 baseline 已锁定 7 个，新增 PR 必须移到 dashboard 子包）
 - 路由注册集中在 `routes.go`；任何改动同步更新 `testdata/routes.golden.json`
 
@@ -88,8 +88,8 @@ cmd/naozhi/main.go
 **约束**：
 - `Hub` struct 保单一（不拆三子 struct）；字段按 5 块物理分组（[§五](server-split-phase4-design.md#五hub-单-struct--方法分文件)）
 - 方法严格按文件分组：`hub_<block>.go` 只 WRITE 对应字段块
-- 跨块只读豁免：godoc 头部声明 `READS-ALSO: <block>` 时 linter rule 3 放行；写跨块永远禁止
-- 单文件 ≤ 500 行（exemptions.yaml 列豁免直到 Phase 4 抽完）
+- 跨块只读豁免：godoc 头部声明 `READS-ALSO: <block>` 时可跨块读（约定，review 把关）；写跨块永远禁止
+- 单文件 ≤ 500 行（约定；原 exemptions.yaml 豁免清单已随 #3723 删除）
 
 ---
 
@@ -101,7 +101,6 @@ cmd/naozhi/main.go
 ## Server-split Phase X PR
 
 - [ ] 本 PR 改动符合 server-packages-contract.md §<相关节>
-- [ ] AST linter `make lint-server` 输出无新违规（warn 模式）
 - [ ] routes_snapshot golden 同步更新（如有路由变化）
 - [ ] PR diff stat 中跨包字段引用减少数：__ ≥ 5
   ```bash
@@ -118,7 +117,7 @@ cmd/naozhi/main.go
 
 ## 4. 维护
 
-- **新增字段到 Server / Hub**：必须同步更新 `// 读写: <files>` 注释；linter rule 3 验证
+- **新增字段到 Server / Hub**：必须同步更新 `// 读写: <files>` 注释（约定，review 把关）
 - **新增跨包接口**：同步更新 [server-consumer-contracts.md](server-consumer-contracts.md) 的方法集 + 跨方法时序契约
 - **改动路由**：`UPDATE_GOLDEN=1 go test -run TestRoutesSnapshot` 重生 golden + PR description 说明
 - **超 800 行文件**：必须有 `until_phase` 豁免；豁免清单只能在 Phase 0 一次性添加，后续 phase 只能减不能增
