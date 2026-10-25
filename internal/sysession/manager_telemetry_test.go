@@ -139,6 +139,17 @@ func TestManager_EmitsSysessionSubsystem(t *testing.T) {
 	if e.ErrorClass != runtelemetry.ErrClassNone {
 		t.Errorf("ended ErrorClass = %q, want none", e.ErrorClass)
 	}
+	// run.ended carries the run's own times (outbound webhooks put them on the
+	// wire), and they agree with run.started and the duration.
+	if e.StartedAt.IsZero() || e.EndedAt.IsZero() {
+		t.Fatalf("ended StartedAt=%v EndedAt=%v, want both set", e.StartedAt, e.EndedAt)
+	}
+	if !e.StartedAt.Equal(s.StartedAt) {
+		t.Errorf("ended StartedAt = %v, started StartedAt = %v", e.StartedAt, s.StartedAt)
+	}
+	if got := e.EndedAt.Sub(e.StartedAt).Milliseconds(); got != e.DurationMS {
+		t.Errorf("EndedAt-StartedAt = %dms, DurationMS = %d", got, e.DurationMS)
+	}
 }
 
 // TestManager_NilBroadcasterIsSafe pins that a Manager built without a
