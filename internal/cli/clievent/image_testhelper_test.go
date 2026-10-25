@@ -2,29 +2,30 @@ package clievent
 
 import (
 	"os"
-	"runtime"
+	"path/filepath"
 	"testing"
 )
 
 // imageSafeTempDir returns a temp dir under /tmp so that ExtractImagePaths'
-// safeImageDirs allowlist ({"/tmp/"}) accepts fixture files.
-//
-// On macOS /tmp is itself a symlink to /private/tmp, and ExtractImagePaths
-// calls filepath.EvalSymlinks on each candidate path — the resolved result
-// therefore starts with /private/tmp/, which the allowlist does not match.
-// This only affects local test runs; Linux production keeps /tmp as a real
-// directory. Skip the affected suite on darwin rather than silently
-// masking the mismatch.
+// safeImageDirs allowlist accepts fixture files. The path is the literal
+// /tmp/... one; on macOS it resolves to /private/tmp/..., see resolvedPath.
 func imageSafeTempDir(t *testing.T) string {
 	t.Helper()
-	if runtime.GOOS == "darwin" {
-		t.Skip("macOS /tmp is a symlink to /private/tmp; ExtractImagePaths " +
-			"allowlist cannot match resolved paths here. Production is Linux.")
-	}
 	dir, err := os.MkdirTemp("/tmp", "naozhi-img-*")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
+}
+
+// resolvedPath is path with symlinks resolved, as ExtractImagePaths reports
+// it in ImagePath.Path.
+func resolvedPath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", path, err)
+	}
+	return resolved
 }

@@ -18,12 +18,14 @@ import (
 // <=10MiB, so the test creates small real placeholder files there and keys
 // the fakeImageReader (which drives the byte budget) by those same paths.
 func TestReadTurnImages_ByteBudget(t *testing.T) {
-	dir := t.TempDir()
-	// safeImageDirs only permits /tmp; t.TempDir() is under /tmp on Linux CI,
-	// but be defensive and skip if it ever isn't.
-	if !strings.HasPrefix(dir, "/tmp/") {
-		t.Skipf("TempDir %q not under /tmp; ExtractImagePaths safe-dir gate would reject", dir)
+	// safeImageDirs only permits /tmp. The reply names the literal /tmp
+	// path, which on macOS resolves to /private/tmp: the read goes to the
+	// resolved path, the rewrite to the written one (#3627).
+	dir, err := os.MkdirTemp("/tmp", "naozhi-turn-img-*")
+	if err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	const blob = 8 * 1024 * 1024 // 8 MiB per fake image
 
@@ -74,7 +76,11 @@ func TestReadTurnImages_ByteBudget(t *testing.T) {
 			reply.WriteString("here are images: ")
 			for _, spec := range tc.images {
 				p := mkImage(spec.name)
-				files[p] = make([]byte, spec.fakeBytes)
+				resolved, err := filepath.EvalSymlinks(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				files[resolved] = make([]byte, spec.fakeBytes)
 				reply.WriteString(p)
 				reply.WriteString(" ")
 			}
