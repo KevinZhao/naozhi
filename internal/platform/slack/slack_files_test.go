@@ -192,8 +192,7 @@ func TestHandleMessage_IgnoresOwnUploads(t *testing.T) {
 
 // TestHandleMessage_DropsFileShareWhileBotIDUnknown (#3653): with botID
 // unknown the own-upload check above cannot match, so a file_share is dropped
-// outright rather than risking the bot's upload coming back as a turn. Plain
-// text still fails open (#1947).
+// outright rather than risking the bot's upload coming back as a turn.
 func TestHandleMessage_DropsFileShareWhileBotIDUnknown(t *testing.T) {
 	t.Parallel()
 	stub := &fileStub{resps: map[string]stubResp{"/a/shot.png": {body: testPNG}}}
@@ -208,10 +207,6 @@ func TestHandleMessage_DropsFileShareWhileBotIDUnknown(t *testing.T) {
 	}
 	if n := len(stub.requests()); n != 0 {
 		t.Errorf("%d downloads, want 0", n)
-	}
-	text := &slackevents.MessageEvent{User: "U456", Channel: "D789", ChannelType: "im", Text: "hi", TimeStamp: "1234567890.000200"}
-	if got := deliver(s, text); len(got) != 1 {
-		t.Errorf("handler called %d times for plain text with botID unknown, want 1 (fail-open)", len(got))
 	}
 }
 

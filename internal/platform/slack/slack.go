@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -56,8 +55,6 @@ type Slack struct {
 	admit platform.AdmitFunc
 	// fileHTTP downloads uploads (slackFileHTTPClient outside tests).
 	fileHTTP *http.Client
-	// appMentionWarned makes the app_mention misconfiguration warn once.
-	appMentionWarned atomic.Bool
 }
 
 // slackHTTPClient is shared by all Slack adapters. The 10s Timeout matters
@@ -375,8 +372,6 @@ func (s *Slack) handleSocketEvent(_ context.Context, client *socketmode.Client, 
 		switch ev := eventsAPI.InnerEvent.Data.(type) {
 		case *slackevents.MessageEvent:
 			s.handleMessage(ev)
-		case *slackevents.AppMentionEvent:
-			s.noteAppMention()
 		}
 	case socketmode.EventTypeInteractive:
 		cb, ok := evt.Data.(slack.InteractionCallback)
@@ -418,16 +413,6 @@ func redactURLQuery(err error) error {
 	redacted := ue.URL[:i] + "?<redacted>"
 	msg := strings.ReplaceAll(err.Error(), strconv.Quote(ue.URL), strconv.Quote(redacted))
 	return errors.New(strings.ReplaceAll(msg, ue.URL, redacted))
-}
-
-// noteAppMention handles an app_mention event, which is ignored: channel
-// messages, @-mentions included, arrive as message.channels / message.groups
-// MessageEvents and the dispatcher's group gate checks the mention. An app
-// subscribed to app_mention alone sees no reply, so say so once (#3625).
-func (s *Slack) noteAppMention() {
-	if s.appMentionWarned.CompareAndSwap(false, true) {
-		slog.Warn("slack app_mention event ignored; subscribe message.channels / message.groups to receive channel messages")
-	}
 }
 
 // slackBotHealCooldown rate-limits the AuthTest self-heal while botID is unknown (#1947).
