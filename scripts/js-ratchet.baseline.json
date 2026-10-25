@@ -120,7 +120,7 @@
     "lateBindings": 0
   },
   "cron_format.js": {
-    "lines": 146,
+    "lines": 147,
     "maxFnLines": 20,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -192,7 +192,7 @@
     "lateBindings": 0
   },
   "cron_view.js": {
-    "lines": 2033,
+    "lines": 2032,
     "maxFnLines": 103,
     "maxIifeLines": 0,
     "fnOver100": 1,
