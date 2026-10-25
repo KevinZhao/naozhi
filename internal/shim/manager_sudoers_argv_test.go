@@ -142,6 +142,4 @@ func TestSudoersExampleMirrorsRuntimeLiterals(t *testing.T) {
 	}
 }
 
-// findRepoRoot moved to testhelper_test.go so cross-platform tests
-// (setwritedeadline_contract_test.go) can reuse it without dragging in the
-// Linux-only build tag of this file.
+// findRepoRoot lives in testhelper_test.go.

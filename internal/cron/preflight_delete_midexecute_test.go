@@ -64,10 +64,7 @@ func TestPreflightDeleteMidExecute_RefreshesStubBeforeGateRelease(t *testing.T) 
 	// exists, and the branch is reached precisely because it does not, so the call
 	// is a designed no-op ("run() re-checks existence, so for the steady-state
 	// delete it is a no-op" — scheduler_run.go). The observed sequence is
-	// [run-started reset run-ended]. That ordering therefore stays pinned by the
-	// narrowed source anchor in stub_refresh_before_finish_source_anchor_test.go:
-	// it guards a future refactor where the job could exist again at that point
-	// (delete → re-create inside the gate), which behaviour cannot reach today.
+	// [run-started reset run-ended].
 	if got := ord.events(); len(got) == 0 {
 		t.Errorf("no events recorded; the run did not reach finishRun")
 	}

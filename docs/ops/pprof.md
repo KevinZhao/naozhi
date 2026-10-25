@@ -291,7 +291,6 @@ ssh ec2-user@prod-host 'curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1
 ### 回归契约
 
 - `internal/metrics/metrics_test.go`: 锁 expvar 名 / Add 语义 / JSON shape
-- `internal/metrics/counter_wiring_contract_test.go`: source-grep 锁 call site + WSAuthFail 两分支 ≥2 次
 - `internal/server/debug_expvar_test.go`: 锁 auth 401 / 非 loopback 403 / loopback+auth 返 JSON 含已注册 counter + stdlib memstats
 - `cmd/naozhi/doctor_test.go`: `checkExpvar` 覆盖 pass/fail/warn/no-token 4 档
 
@@ -377,4 +376,3 @@ ssh ec2-user@prod-host 'curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1
 - `multibackend_test.go::TestACPCancelTotal_BackendLabel`: 锁 backend label 维度
 - `multibackend_test.go::TestRecordSessionActive_GaugeBookkeeping`: 锁 +1/-1 mirror 同步
 - `multibackend_test.go::TestLabelKey_OverlongCollapsesToOverflow`: 锁 cardinality bound
-- `counter_wiring_contract_test.go`: 锁 `metrics.RecordCLISpawn` source-grep 在 `wrapper.go`
