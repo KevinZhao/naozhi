@@ -149,7 +149,7 @@ func sleepRatchetProblems(bare, exempt int, bareByFile map[string]int) []string 
 	switch {
 	case exempt > exemptSleepBaseline:
 		out = append(out, fmt.Sprintf("sleep-ok exemptions grew: %d > baseline %d — exemptions are for genuinely "+
-			"time-based sleeps only; raising the baseline needs an approved ledger entry (scripts/ratchet-raises.jsonl)", exempt, exemptSleepBaseline))
+			"time-based sleeps only; raise the baseline by hand only for a deliberate addition", exempt, exemptSleepBaseline))
 	case exempt < exemptSleepBaseline:
 		out = append(out, fmt.Sprintf("sleep-ok exemptions dropped to %d (baseline %d): lower exemptSleepBaseline to %d", exempt, exemptSleepBaseline, exempt))
 	}

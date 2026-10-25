@@ -18,16 +18,7 @@ bin/naozhi --config config.yaml                      # run locally
 Ratchets only go down: the baselines in `*Baseline*` test constants,
 `scripts/js-ratchet.baseline.json`, `scripts/js-deps-baseline.json` and
 `tools/lint-server-handlers/exemptions.yaml` fail CI when a count drops below
-them, so lower them in the same PR. Raising one needs a line appended to
-`scripts/ratchet-raises.jsonl` citing an issue labelled
-`ratchet-raise-approved`; `go run ./tools/ratchet-raises -base origin/master`
-prints the lines a change needs. A `*Baseline*` constant must be a plain
-integer literal; renaming or deleting one, or moving it to another package,
-is a raise to -1 that needs a ledger line too. So is removing the last code
-in its directory that uses one (deleting, commenting out or build-tagging
-away the comparison) while keeping the constant, or adding a new `t.Skip` to
-a file that declares or uses one (skips a file already had before it gained
-the reference don't count).
+them, so lower them in the same PR. To raise one, edit it in the PR that needs it.
 
 `config.yaml` is gitignored (environment-specific). Use `config.example.yaml`
 as the template: `cp config.example.yaml config.yaml` then fill in real values.
@@ -366,7 +357,6 @@ Comments describe the *current* code: the invariant that holds, why a non-obviou
 - **No review anchors in code.** Never paste cron-cr finding IDs (`R<nnn>-<AREA>-<n>`) or issue titles into comments. Reference the issue/PR number once, at the end of the rationale. The commit message and PR body carry `(#N)`.
 - **Length limits.** In-function comment block ≤ 5 lines. Godoc on one identifier ≤ 10 lines. Package doc (`doc.go`) ≤ 60 lines. Longer means the function should be split or the design belongs in `docs/rfc/`.
 - **No comment-backed invariants.** If an invariant needs a CI lint to keep a comment honest, express it as a type or package boundary instead (#2495 / #2499 is the pattern). No lint or test checks that a comment's *content* matches the code. The one `// 读写:` note, on `cron.Scheduler`, states a lock discipline rather than a file list, which is an invariant worth writing down.
-- **The budget is counted.** `tools/comment-budget` counts the comments that break the rules above — in-function blocks over 5 lines, godoc over 10, package docs over 60, review anchors, history phrasing, duplicated adjacent comment blocks, godocs off the declaration they describe (opening with another name of the package or a stale one, or trailing a file's last declaration) — and its test ratchets each count down. It checks the shape of comments, never what they claim. `go run ./tools/comment-budget -list <Counter>` lists the offenders.
 - **Keep:** the godoc first sentence on exported identifiers, `//go:` directives, `//nolint`, build tags, `TODO` with an issue link, and security rationale that cannot be derived from the code.
 - **Automated fixers** (cron code-review / issue-fix agents) follow the same rules; a PR that adds anchors or history comments is a review BLOCK.
 

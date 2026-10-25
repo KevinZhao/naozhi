@@ -24,10 +24,8 @@
 // golden/pins.json holds each file's sha256 and every run checks the file
 // against its pin before comparing. UPDATE_GOLDEN=1 rewrites the golden files
 // and prints their new sha256 but never touches pins.json: a re-recorded
-// golden fails the next run until its pin is changed by hand, and
-// tools/ratchet-raises counts a changed pin as a raise that needs a ledger
-// entry (scripts/ratchet-raises.jsonl). So a rendering change cannot be
-// re-recorded quietly.
+// golden fails the next run until its pin is changed by hand, so a rendering
+// change cannot be re-recorded quietly.
 //
 // Determinism: the timezone is UTC and the clock is fixed, so formatTimeFull
 // and the cards' relative times do not depend on the machine; /static/vendor/
