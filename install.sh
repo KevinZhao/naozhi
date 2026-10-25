@@ -11,8 +11,7 @@
 #
 # Design notes:
 #   - Entire script wraps in main() + trailing invocation so a half-downloaded
-#     pipe cannot execute a truncated top-level statement. See README "Security
-#     considerations" for the `curl | bash` safety model.
+#     pipe cannot execute a truncated top-level statement.
 #   - No sudo, no writes outside $NAOZHI_PREFIX and ~/.naozhi.
 #   - No rc-file mutation: if PATH lacks the install dir we print instructions
 #     instead of silently patching .zshrc / .bashrc.
