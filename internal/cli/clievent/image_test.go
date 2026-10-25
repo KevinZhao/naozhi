@@ -20,11 +20,17 @@ func TestExtractImagePaths(t *testing.T) {
 	if len(paths) != 2 {
 		t.Fatalf("len(paths) = %d, want 2: %v", len(paths), paths)
 	}
-	if paths[0] != pngPath {
-		t.Errorf("paths[0] = %q, want %q", paths[0], pngPath)
+	for i, want := range []string{pngPath, jpgPath} {
+		if got := paths[i]; got != (ImagePath{Text: want, Path: resolvedPath(t, want)}) {
+			t.Errorf("paths[%d] = %+v, want Text %q resolved", i, got, want)
+		}
 	}
-	if paths[1] != jpgPath {
-		t.Errorf("paths[1] = %q, want %q", paths[1], jpgPath)
+}
+
+func TestIsUnderSafeDir(t *testing.T) {
+	t.Parallel()
+	if isUnderSafeDir("/tmpfoo/x.png") {
+		t.Error(`isUnderSafeDir("/tmpfoo/x.png") = true, want false`)
 	}
 }
 
@@ -95,8 +101,8 @@ func TestExtractImagePaths_TrailingPunctuation(t *testing.T) {
 	if len(paths) != 1 {
 		t.Fatalf("len(paths) = %d, want 1", len(paths))
 	}
-	if paths[0] != pngPath {
-		t.Errorf("paths[0] = %q, want %q", paths[0], pngPath)
+	if paths[0].Text != pngPath {
+		t.Errorf("paths[0].Text = %q, want %q", paths[0].Text, pngPath)
 	}
 }
 

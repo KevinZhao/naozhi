@@ -24,6 +24,11 @@ import (
 // its byte cap, so callers can tell "too large" from "download failed".
 var errResourceTooLarge = errors.New("payload exceeds the download limit")
 
+// errImageUnsupported is wrapped by DownloadImage when the bytes are not a
+// platform.SupportedImageMIME, so the user hears "unsupported image format"
+// rather than "download failed".
+var errImageUnsupported = errors.New("image bytes are not a supported image type")
+
 func (f *Feishu) sendImage(ctx context.Context, chatID, threadID string, img platform.Image) (string, error) {
 	imageKey, err := f.uploadImage(ctx, img.Data, img.MimeType)
 	if err != nil {
@@ -116,18 +121,23 @@ func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resTy
 		contentType = defaultMIME
 	}
 
-	// The Content-Type header is not authoritative; sniff the bytes. Go's
-	// WHATWG sniffer reports OGG as `application/ogg`, hence the explicit
+	// The Content-Type header is not authoritative; sniff the bytes. An image
+	// goes on as the supported type its bytes sniff as, or not at all.
+	if resType == "image" {
+		mime, ok := platform.SniffImageMIME(data)
+		if !ok {
+			return nil, "", fmt.Errorf("download image: %w (header=%s sniffed=%s)", errImageUnsupported, contentType, mime)
+		}
+		return data, mime, nil
+	}
+	// Go's WHATWG sniffer reports OGG as `application/ogg`, hence the explicit
 	// accept. Audio additionally passes the audioMagicOK allowlist so a
 	// crafted payload cannot widen the ffmpeg/Whisper attack surface just by
 	// looking audio/* to the sniffer.
 	if len(data) > 0 {
 		sniffed := http.DetectContentType(data)
 		ok := true
-		switch resType {
-		case "image":
-			ok = strings.HasPrefix(sniffed, "image/")
-		case "audio":
+		if resType == "audio" {
 			ok = (strings.HasPrefix(sniffed, "audio/") || sniffed == "application/ogg") && audioMagicOK(data)
 		}
 		if !ok {

@@ -18,7 +18,7 @@ import (
 )
 
 // maxDiscordImageBytes caps one inbound image, matching the other adapters.
-const maxDiscordImageBytes = 10 << 20
+const maxDiscordImageBytes = platform.MaxImageBytes
 
 var errDiscordTooLarge = errors.New("discord attachment exceeds the size cap")
 
@@ -44,24 +44,34 @@ func planAttachments(atts []*discordgo.MessageAttachment) []pendingAttachment {
 			continue
 		}
 		p := pendingAttachment{name: att.Filename, url: att.URL, size: att.Size,
-			image: isImageContentType(att.ContentType)}
+			image: platform.SupportedImageMIME(att.ContentType)}
 		perFile := limits.MaxFileAttachmentBytes
 		if p.image {
 			perFile = maxDiscordImageBytes
 		}
 		switch {
+		case !p.image && platform.IsImageMIME(att.ContentType):
+			p.reject = platform.FileRejectImageUnsupported
 		case !p.image && !attachment.MaybeSupported(att.Filename, att.ContentType):
 			p.reject = platform.FileRejectUnsupported
 		case downloads >= limits.MaxFileAttachmentsPerMessage:
 			p.reject = platform.FileRejectTooMany
 		case p.size > perFile:
-			p.reject = platform.FileRejectTooLarge
+			p.reject = p.tooLarge()
 		default:
 			downloads++
 		}
 		plan = append(plan, p)
 	}
 	return plan
+}
+
+// tooLarge is the reject for p over its per-attachment cap.
+func (p pendingAttachment) tooLarge() platform.FileReject {
+	if p.image {
+		return platform.FileRejectImageTooLarge
+	}
+	return platform.FileRejectTooLarge
 }
 
 // needsDownload reports whether any planned attachment is still to fetch.
@@ -117,7 +127,7 @@ func (d *Discord) attachFiles(ctx context.Context, msg *platform.IncomingMessage
 			case !errors.Is(err, errDiscordTooLarge):
 				reject(platform.FileRejectDownloadFailed)
 			case perFile <= remaining:
-				reject(platform.FileRejectTooLarge)
+				reject(p.tooLarge())
 			default:
 				reject(platform.FileRejectTotalTooLarge)
 			}
@@ -131,7 +141,7 @@ func (d *Discord) attachFiles(ctx context.Context, msg *platform.IncomingMessage
 		mime, err := resolveImageContentType(data)
 		if err != nil {
 			slog.Warn("discord attachment is not an image", "err", err, "channel", msg.ChatID)
-			reject(platform.FileRejectUnsupported)
+			reject(platform.FileRejectImageUnsupported)
 			continue
 		}
 		total += len(data)

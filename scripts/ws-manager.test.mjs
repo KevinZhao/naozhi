@@ -1,5 +1,5 @@
 // node --test scripts/ws-manager.test.mjs
-// ws_manager.js is a leaf (check-ws-receivers R7), so node imports it as is;
+// ws_manager.js is a leaf, so node imports it as is;
 // only WebSocket and location are stubbed, before the import (CI does not pin
 // a node version, and a newer one ships its own WebSocket). Each test takes a
 // fresh module instance, so registrations and state do not leak between them.

@@ -2,7 +2,7 @@
 // session_ident.js — how the dashboard names a session and labels it: the
 // (key, node) map key and node badge, the discovered-card key, the project,
 // node and type labels, a node's connection status, and the event kinds kept
-// out of the transcript. A leaf (caps.leaves): it imports only contract.js,
+// out of the transcript. A leaf: it imports only contract.js,
 // state.js, nz_util.js and ws_manager.js.
 import { NZ_CONTRACT } from './contract.js';
 import { sessionList } from './state.js';

@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -120,9 +119,6 @@ func TestThreadReply_EveryReplyKindStaysInTheThread(t *testing.T) {
 				}
 			}
 			if tc.imageReply {
-				if runtime.GOOS == "darwin" {
-					t.Skip("macOS /tmp resolves to /private/tmp, outside ExtractImagePaths' allowlist")
-				}
 				dir, err := os.MkdirTemp("/tmp", "naozhi-thread-img-*")
 				if err != nil {
 					t.Fatal(err)
@@ -190,8 +186,7 @@ func TestThreadReply_TopLevelMessageHasNoThread(t *testing.T) {
 	}
 }
 
-// TestSendOutboundImages_KeepsThread pins the image send itself; the
-// end-to-end image row above runs only where /tmp is not a symlink.
+// TestSendOutboundImages_KeepsThread pins the image send itself.
 func TestSendOutboundImages_KeepsThread(t *testing.T) {
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp)

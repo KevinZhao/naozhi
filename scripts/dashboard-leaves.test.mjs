@@ -1,6 +1,6 @@
 // node --test scripts/dashboard-leaves.test.mjs
 // The dashboard's pure leaf helpers: file_ref_parse.js, nz_util.js,
-// cron_format.js and session_ident.js (caps.leaves). They load in node with
+// cron_format.js and session_ident.js. They load in node with
 // window, a MutationObserver and a bare document stubbed before the import.
 // TZ is pinned to a zone with DST so the calendar-day and clock-time cases
 // are the same on every machine; Date.now is replaced per test where a

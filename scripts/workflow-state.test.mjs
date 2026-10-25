@@ -1,5 +1,5 @@
 // node --test scripts/workflow-state.test.mjs
-// workflow_state.js is a leaf (caps.leaves): the client half of the workflow
+// workflow_state.js is a leaf: the client half of the workflow
 // wire protocol (docs/rfc/workflow-dashboard.md §6.1), driven here frame by
 // frame and response by response. A "request" is what the view's fetch pump
 // would send: needsFetch says one is due, startFetch marks it in flight.

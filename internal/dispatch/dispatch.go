@@ -666,16 +666,18 @@ func (d *Dispatcher) readTurnImages(replyText string) ([]platform.Image, string)
 	// ReplaceAll loop beats strings.NewReplacer for the 1-2 paths typical
 	// here. Every path is replaced even when ReadFile fails or the budget
 	// is exhausted.
-	for _, path := range imagePaths {
-		data, err := d.imageReader.ReadFile(path)
+	for _, img := range imagePaths {
+		data, err := d.imageReader.ReadFile(img.Path)
 		if err == nil {
 			if turnImageBytes+len(data) <= maxTurnImageBytes {
-				outImages = append(outImages, platform.Image{Data: data, MimeType: clievent.MimeFromPath(path)})
+				outImages = append(outImages, platform.Image{Data: data, MimeType: clievent.MimeFromPath(img.Path)})
 				turnImageBytes += len(data)
 			}
 			// Over budget: skip the attachment but still rewrite the path.
 		}
-		replyText = strings.ReplaceAll(replyText, path, "[图片]")
+		// The text holds the path as written (/tmp/... on macOS), not the
+		// resolved /private/tmp/... one that was read.
+		replyText = strings.ReplaceAll(replyText, img.Text, "[图片]")
 	}
 	return outImages, replyText
 }

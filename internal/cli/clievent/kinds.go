@@ -47,7 +47,7 @@ type KindInfo struct {
 
 // kindTable is the single registry of kinds; kinds_test.go pins its sets. A
 // new kind that is not NoBubble also needs an EVENT_WHOLE or EVENT_CONTENT
-// entry in the dashboard (scripts/check-enum-literals.mjs fails until it has one).
+// entry in the dashboard.
 var kindTable = []KindInfo{
 	{Name: KindUser},
 	{Name: KindText},

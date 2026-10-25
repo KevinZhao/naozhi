@@ -52,13 +52,6 @@ func wsOnHandler(t *testing.T, js, key string, claim bool) string {
 	}
 }
 
-// TestDashboardJS_WSSwitchCoversBackendFrameTypes was here. It required every
-// type in internal/wsproto/wsproto.schema.json to have a `case '<type>':` in
-// wsm.onMessage. test/e2e/check-ws-contract.mjs does the same thing and more —
-// it checks BOTH directions, so a frontend case for a type the backend does not
-// declare also fails — and it runs in the lint-js CI job. Probed: renaming
-// `case 'daemon_run_started':` failed both, so the Go copy added nothing (#2547).
-
 // TestDashboardJS_DaemonRunFramesRefreshSystemDaemons pins that the sysession
 // branch of the unified run_started/run_ended dispatch (#2540) actually
 // re-fetches daemon state (the only path that updates the rail badge) rather

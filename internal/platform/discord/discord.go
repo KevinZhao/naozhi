@@ -676,14 +676,6 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 	}, "channel", m.ChannelID, "user", m.Author.ID)
 }
 
-func isImageContentType(ct string) bool {
-	switch strings.ToLower(strings.TrimSpace(ct)) {
-	case "image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp":
-		return true
-	}
-	return false
-}
-
 // discordDialTestBypass disables the private-IP dial guard for loopback
 // httptest servers. Set ONLY by discord_test.go; production MUST leave it false.
 var discordDialTestBypass bool
@@ -753,21 +745,15 @@ var discordCDNHosts = map[string]bool{
 
 // resolveImageContentType derives the forwarded Content-Type from the bytes,
 // never the CDN-controlled header or the uploader's claim (a malicious edge
-// could claim text/html for XSS on IM clients). An empty body is an error.
+// could claim text/html for XSS on IM clients). An empty body, or bytes that
+// are not a platform.SupportedImageMIME (bmp, ico, ...), is an error.
 func resolveImageContentType(data []byte) (string, error) {
 	if len(data) == 0 {
 		return "", errors.New("download: empty body")
 	}
-	sniffed := stripMIMEParams(http.DetectContentType(data))
-	if !strings.HasPrefix(sniffed, "image/") {
-		return "", fmt.Errorf("download: not an image (sniffed=%s)", sniffed)
+	sniffed, ok := platform.SniffImageMIME(data)
+	if !ok {
+		return "", fmt.Errorf("download: not a supported image (sniffed=%s)", sniffed)
 	}
 	return sniffed, nil
-}
-
-func stripMIMEParams(ct string) string {
-	if i := strings.IndexByte(ct, ';'); i >= 0 {
-		ct = ct[:i]
-	}
-	return strings.TrimSpace(ct)
 }

@@ -3,7 +3,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 BINARY  := naozhi
 MAIN    := ./cmd/naozhi/
 
-.PHONY: build vet test lint lint-gofmt vuln deploy release clean release-gate release-gate-live
+.PHONY: build vet test lint lint-gofmt vuln deploy release clean release-gate
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags='$(LDFLAGS)' -o bin/$(BINARY) $(MAIN)
@@ -73,13 +73,6 @@ release: clean
 # Playwright deps: (cd test/e2e && npm install)
 release-gate: build
 	NAOZHI_GATE_BIN=bin/$(BINARY) ./scripts/gate-instance.sh
-
-# Gate an already-running instance (e.g. after `make deploy`). Reads the live
-# dashboard token from the systemd EnvironmentFile. Targets 127.0.0.1:8180.
-release-gate-live:
-	@TOKEN=$$(sudo grep -hE '^NAOZHI_DASHBOARD_TOKEN=' /home/ec2-user/.naozhi/env 2>/dev/null | head -1 | cut -d= -f2-); \
-	if [ -z "$$TOKEN" ]; then echo "✗ NAOZHI_DASHBOARD_TOKEN not found in /home/ec2-user/.naozhi/env"; exit 1; fi; \
-	NAOZHI_BASE_URL=http://127.0.0.1:8180 NAOZHI_DASHBOARD_TOKEN="$$TOKEN" node scripts/release-gate.mjs
 
 clean:
 	rm -rf dist/

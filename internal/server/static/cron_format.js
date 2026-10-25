@@ -1,4 +1,4 @@
-// cron_format.js — the cron view's text formatters, a leaf (caps.leaves):
+// cron_format.js — the cron view's text formatters, a leaf:
 // titles, colloquial times, the running-elapsed label, the error-class names
 // and the per-job ledger figure. Pure functions of their arguments, apart from
 // cronJobLedgerCostHtml reading cron_state's cost cache.

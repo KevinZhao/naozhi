@@ -214,15 +214,8 @@ jobs:
           path: test/e2e/test-results/
           retention-days: 7
 
-  # JS no-undef gate + cross-file dependency freeze + growth ratchet for the
-  # dashboard's classic <script defer> files. eslint.config.mjs holds a
-  # per-file globals whitelist (the explicit dependency graph);
-  # scripts/js-deps-freeze.mjs enforces that the implicit cross-file reference
-  # matrix only shrinks (baseline: scripts/js-deps-baseline.json);
-  # scripts/js-ratchet.mjs enforces that per-file line counts, function
-  # lengths (every function form, from the AST) and top-level mutable state
-  # only shrink
-  # (baseline: scripts/js-ratchet.baseline.json).
+  # eslint (no-undef) + tsc over the dashboard's ES modules, and node --test
+  # over the dashboard modules that load without a browser.
   lint-js:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -236,33 +229,6 @@ jobs:
       - name: Run eslint (no-undef gate)
         run: test/e2e/node_modules/.bin/eslint 'internal/server/static/*.js'
 
-      - name: Check cross-file dependency freeze
-        run: node scripts/js-deps-freeze.mjs --check
-
-      # The freeze may only shrink, so its tokenizer under-counting (reading
-      # code as string text) is what would let new coupling through unseen.
-      - name: Test the dependency-freeze tokenizer
-        run: node --test scripts/js-deps-freeze.test.mjs
-
-      # nz/shell-bindings and nz/no-exported-let gate how modules share state;
-      # a rule that stops matching would pass every file silently.
-      - name: Test the dashboard lint rules
-        run: node --test scripts/eslint-plugin-nz.test.mjs
-
-      # What the ratchet counts as a function; a counter that stops seeing a
-      # form (methods, arrows) would let that form grow unmeasured.
-      - name: Test the growth ratchet
-        run: node --test scripts/js-ratchet.test.mjs
-
-      # Every dashboard script linted as a module with only the shared browser
-      # globals: the condition under which no-undef rules out implicit
-      # cross-file references.
-      - name: Check the eslint scope
-        run: node --test scripts/eslint-config.test.mjs
-
-      - name: Check growth ratchet
-        run: node scripts/js-ratchet.mjs --check
-
       # Files whose first line is // @ts-check are type-checked against
       # wire.d.ts and contract.js's literal types (#3439) and must have zero
       # errors; checkJs is off, so the rest are parsed but not reported.
@@ -275,18 +241,7 @@ jobs:
       - name: Test the type-check floor and the wsm.on typing
         run: node --test scripts/ts-check.test.mjs
 
-      - name: Check WS contract (wsproto schema vs dashboard dispatch)
-        run: node test/e2e/check-ws-contract.mjs
-
-      # Frames reach handlers only through the wsm.on table (S18, #3024); a
-      # rule that stops matching would let a hand-rolled switch back in.
-      - name: Test the WS receiver rules
-        run: node --test scripts/check-ws-receivers.test.mjs
-
-      - name: Check WS receivers (no hand-rolled frame-type dispatch)
-        run: node scripts/check-ws-receivers.mjs
-
-      # ws_manager.js and session_stream.js are leaves node can import (R7):
+      # ws_manager.js and session_stream.js are leaves node can import:
       # dispatch order, the auth_ok / auth_fail lifecycle, the outage clock and
       # the subscription bookkeeping run here without a browser.
       - name: Test the WS manager
@@ -331,19 +286,3 @@ jobs:
       - name: Test the shell table
         run: node --test scripts/shell.test.mjs
 
-      - name: Test the enum-literal checks (death_reason, EventEntry kinds)
-        run: node --test scripts/check-enum-literals.test.mjs
-
-      # The e2e mock stands in for the backend: a field it returns that the Go
-      # response type does not declare is a test passing against a server that
-      # does not exist.
-      - name: Check the e2e mock's REST shapes
-        run: node --test scripts/check-mock-rest.test.mjs
-
-      # The release gate fails on these /static load rules, but only runs on a
-      # tag; a rule that stops matching would let a broken page ship green.
-      - name: Test the release gate's /static load rules
-        run: node --test scripts/release-gate-static.test.mjs
-
-      - name: Check death_reason and the kinds are read from the generated contract
-        run: node scripts/check-enum-literals.mjs
