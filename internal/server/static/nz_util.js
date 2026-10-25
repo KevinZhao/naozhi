@@ -120,14 +120,15 @@ export function formatCostUSD(usd) {
 }
 // formatDurationShort renders a millisecond duration as a compact human
 // string suitable for KPI tiles: "850ms" / "12s" / "3m 15s" / "1h 02m".
-// Stays under ~8 chars so the .ck-value column doesn't overflow at narrow
-// drawer widths.
+// Stays under ~8 chars. The unit is picked after rounding: 999.6ms is 1.0s,
+// 9.96s is 10s and 59.6s is 1m 00s, not 1000ms / 10.0s / 60s.
 export function formatDurationShort(ms) {
   if (!ms || ms <= 0) return '—';
-  const s = ms / 1000;
-  if (s < 1) return Math.round(ms) + 'ms';
-  if (s < 60) return s.toFixed(s < 10 ? 1 : 0) + 's';
-  const t = Math.round(s), m = Math.floor(t / 60); // round first: 119.6s is 2m 00s
+  if (Math.round(ms) < 1000) return Math.round(ms) + 'ms';
+  const tenths = Math.round(ms / 100);
+  if (tenths < 100) return (tenths / 10).toFixed(1) + 's';
+  const t = Math.round(ms / 1000), m = Math.floor(t / 60); // round first: 119.6s is 2m 00s
+  if (m === 0) return t + 's';
   const rs = t - m * 60;
   if (m < 60) return m + 'm ' + (rs < 10 ? '0' + rs : rs) + 's';
   const h = Math.floor(m / 60);
@@ -136,21 +137,23 @@ export function formatDurationShort(ms) {
 }
 // formatBytes renders a byte count as a compact human size (KiB/MiB/GiB);
 // 0 / missing returns ''. Integer-ish display — these are coarse signals.
+// A count that rounds to 1024 of a unit moves up one: 1048575 is 1 MiB.
 export function formatBytes(n) {
   if (!n || n < 0) return '';
-  if (n >= 1 << 30) return (n / (1 << 30)).toFixed(1) + ' GiB';
-  if (n >= 1 << 20) return Math.round(n / (1 << 20)) + ' MiB';
-  if (n >= 1 << 10) return Math.round(n / (1 << 10)) + ' KiB';
+  if (n >= 1 << 30 || Math.round(n / (1 << 20)) >= 1024) return (n / (1 << 30)).toFixed(1) + ' GiB';
+  if (Math.round(n / (1 << 10)) >= 1024) return Math.round(n / (1 << 20)) + ' MiB';
+  if (Math.round(n) >= 1024) return Math.round(n / (1 << 10)) + ' KiB';
   return n + ' B';
 }
 // formatRunDuration —— 时间轴行 / 详情区"耗时"文案。>1000ms 用 "Xs"，否则 "Xms"。
 // 0 / 缺省返回 ''——running 状态没 duration_ms，调用方应传 0 跳过渲染。
+// 和 formatDurationShort 一样按取整后的值选单位：59960ms 是 "1m 0s" 而非 "60s"。
 export function formatRunDuration(ms) {
   if (!ms || ms <= 0) return '';
-  if (ms < 1000) return ms + 'ms';
-  const s = ms / 1000;
-  if (s < 60) return s.toFixed(1).replace(/\.0$/, '') + 's';
-  const t = Math.round(s), m = Math.floor(t / 60);
+  if (Math.round(ms) < 1000) return Math.round(ms) + 'ms';
+  const tenths = Math.round(ms / 100);
+  if (tenths < 600) return (tenths / 10).toFixed(1).replace(/\.0$/, '') + 's';
+  const t = Math.round(ms / 1000), m = Math.floor(t / 60);
   const ss = t - m * 60;
   return m + 'm ' + ss + 's';
 }

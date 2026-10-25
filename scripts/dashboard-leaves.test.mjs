@@ -126,6 +126,17 @@ test('formatDurationShort and formatRunDuration carry a rounded-up second into t
   assert.equal(nzu.formatRunDuration(179700), '3m 0s');
 });
 
+// The unit is picked off the rounded value (#3634): a duration that rounds
+// up to the next unit's first value is shown in that unit.
+test('formatters pick the unit after rounding, not before', () => {
+  const short = [[999.4, '999ms'], [999.6, '1.0s'], [9949, '9.9s'], [9960, '10s'], [59400, '59s'], [59600, '1m 00s']];
+  for (const [ms, want] of short) assert.equal(nzu.formatDurationShort(ms), want, String(ms));
+  const run = [[999.6, '1s'], [59940, '59.9s'], [59960, '1m 0s']];
+  for (const [ms, want] of run) assert.equal(nzu.formatRunDuration(ms), want, String(ms));
+  const bytes = [[1023.6, '1 KiB'], [1048575, '1 MiB'], [1073741823, '1.0 GiB'], [(1 << 20) - 600, '1023 KiB']];
+  for (const [n, want] of bytes) assert.equal(nzu.formatBytes(n), want, String(n));
+});
+
 test('formatRunDuration drops a .0 and has no unit past minutes', () => {
   const cases = [
     [undefined, ''], [0, ''], [-1, ''], [999, '999ms'], [1000, '1s'], [1500, '1.5s'], [59900, '59.9s'],
