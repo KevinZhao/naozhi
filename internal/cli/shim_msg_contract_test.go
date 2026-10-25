@@ -18,7 +18,7 @@ import (
 // json.Unmarshal would otherwise perform per cli_exited frame (R222-PERF-13).
 //
 // Nothing tied the two together: ARCH-1 (error frames carry text in `msg`,
-// shimMsg only had `line`) was the first silent drift. The four tests in
+// shimMsg only had `line`) was the first silent drift. The three tests in
 // this file are the contract that makes any future drift a CI failure:
 //
 //  1. TestShimMsgIsSubsetOfServerMsg — every shimMsg field's json tag must
@@ -36,10 +36,6 @@ import (
 //     check independent of sample values: every ServerMsg key is either
 //     decoded by shimMsg or declared ignored, so a new ServerMsg field is
 //     flagged the moment it is added.
-//  4. TestShimMsgContractCoversEveryEmittedFrameType — AST-scans
-//     internal/shim for `ServerMsg{Type: "..."}` literals and requires the
-//     sample table to cover exactly that set, so a new frame type cannot
-//     ship without a contract sample.
 //
 // Production code is intentionally untouched: shimMsg stays a separate
 // struct (perf) and is pinned to ServerMsg by these tests instead.

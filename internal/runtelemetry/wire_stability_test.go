@@ -7,8 +7,6 @@ import (
 )
 
 // The frozen wire string of every enum constant, one map per type.
-// TestEnumWireFreezeComplete pins that each map covers exactly the constants
-// state.go declares.
 var (
 	wireRunStates = map[RunState]string{
 		RunStateSucceeded: "succeeded",

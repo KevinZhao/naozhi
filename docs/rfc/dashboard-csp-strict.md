@@ -78,7 +78,7 @@ default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/n
 
 ### Non-goals
 - **不** vendoring CDN 资产到 `//go:embed`（mermaid/KaTeX ~6MB，`routes.go:444-468` 另案跟踪）。本 RFC 保留 `https://cdn.jsdelivr.net/npm/` allowlist + SRI 不变。
-- **不**收紧 `img-src data:`（`routes.go:472-488` 的 SEC-14 审计另案；`TestDashboardCSP_DataImgAuditPinned` 已 pin）。
+- **不**收紧 `img-src data:`（`routes.go:472-488` 的 SEC-14 审计另案；原有的源码守卫已删除）。
 - **不**改登录页 CSP（已是 hash-based，独立达标）。
 - **不**引入服务端模板引擎/SSR 渲染管线（dashboard 是 embed.FS 静态文件 + ETag，引入模板渲染是大改）——除非选中 nonce 方案，那时再权衡（见 §3）。
 - **不**改 `connect-src`、`frame-ancestors`、HSTS/COOP/CORP 等非 inline 相关 directive。

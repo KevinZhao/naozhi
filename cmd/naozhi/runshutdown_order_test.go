@@ -7,12 +7,10 @@ import (
 
 // TestRunShutdownSteps_PreservesContractOrder pins R20260530-ARCH-3 (#1487)
 // and R260528-ARCH-15 (#1376): the teardown sequence sysmgr → scheduler →
-// http-drain → router is a hard correctness contract. Unlike the existing
-// source-string pin (runshutdown_phase_timing_test.go), this is a behavioral
+// http-drain → router is a hard correctness contract. This is a behavioral
 // assertion on the ACTUAL call order — it executes the steps and records the
 // observed sequence, so a future subsystem inserted at the wrong index (or a
-// reorder that runs router before sysmgr) breaks loudly even if the slog
-// fragments happen to stay textually present.
+// reorder that runs router before sysmgr) breaks loudly.
 func TestRunShutdownSteps_PreservesContractOrder(t *testing.T) {
 	t.Parallel()
 
