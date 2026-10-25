@@ -162,9 +162,14 @@ test.describe('under WS-fallback polling', () => {
     const errors = pageErrors(page);
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
-    // Settle the boot churn (the first scanDiscovered zeroes lastVersion).
+    // Settle the boot churn: the first discovery scan to land zeroes
+    // lastVersion and schedules a debounced refresh. Once a scan of ours has
+    // landed the boot scan has scheduled it or never will, and
+    // debouncedFetchSessions joins it; left pending it could read a mock the
+    // test edits next and apply the body before the test's own fetch.
     await page.evaluate(async () => {
       await scanDiscovered();
+      await debouncedFetchSessions();
       await fetchSessions();
       await fetchSessions();
     });
@@ -199,6 +204,9 @@ test.describe('under WS-fallback polling', () => {
     const mock = await startMockServer({ sessionsETag: true });
     const { ctx, page, errors } = await openFallback(browser, mock);
     try {
+      // Only the test fetches: a 5 s tick between the edit and the call below
+      // would apply the body first and leave the call a 304.
+      await page.evaluate(() => { clearInterval(sessionPollTimer); sessionPollTimer = null; });
       const n = mock.sessionsValidators.length;
       mock.setSessionStateWithoutVersionBump(KEY_A, 'running');
       expect(await page.evaluate(() => fetchSessions()), 'the poll applied a body').toBe(true);
