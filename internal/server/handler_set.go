@@ -109,7 +109,6 @@ type wiring struct {
 	imBudget      *budget.Gate   // nil admits every IM turn
 	imAccess      *imauth.Policy // nil allows every IM sender
 	debugMode     bool           // gates /api/debug/pprof and /api/debug/vars
-	metricsOn     bool           // gates GET /metrics
 	resolver      *session.KeyResolver
 	sysessionMgr  *sysession.Manager
 	orient        *orientConfig // nil = image auto-orientation off

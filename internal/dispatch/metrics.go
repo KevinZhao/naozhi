@@ -1,10 +1,6 @@
 package dispatch
 
-import (
-	"expvar"
-
-	"github.com/naozhi/naozhi/internal/promexport"
-)
+import "expvar"
 
 // Process-wide expvar counters mirroring the per-Dispatcher atomic counters
 // so /debug/vars surfaces them without scraping /health (#892). They live in
@@ -30,16 +26,16 @@ var (
 	// dispatchTurnErrorResultTotal counts IM turns whose result was a
 	// failure, keyed by usermsg's turn class ("error_text" for an is_error
 	// answer that has text). Delivery still counts as a reply success.
-	dispatchTurnErrorResultTotal = promexport.NewMap("naozhi_dispatch_turn_error_result_total", "class")
+	dispatchTurnErrorResultTotal = expvar.NewMap("naozhi_dispatch_turn_error_result_total")
 
 	// dispatchDeniedTotal counts IM messages the access policy refused,
 	// keyed "<platform>:<reason>" (imauth.Reason*).
-	dispatchDeniedTotal = promexport.NewMap("naozhi_dispatch_denied_total", "platform_reason")
+	dispatchDeniedTotal = expvar.NewMap("naozhi_dispatch_denied_total")
 
 	// dispatchRateLimitedTotal counts IM messages dropped by im_rate_limit.
 	dispatchRateLimitedTotal = expvar.NewInt("naozhi_dispatch_rate_limited_total")
 
 	// dispatchBudgetBlockedTotal counts IM turns cost.budget refused, keyed
 	// by the scope that was spent: "chat", "project" or "global".
-	dispatchBudgetBlockedTotal = promexport.NewMap("naozhi_dispatch_budget_blocked_total", "scope")
+	dispatchBudgetBlockedTotal = expvar.NewMap("naozhi_dispatch_budget_blocked_total")
 )
