@@ -17,7 +17,7 @@ import (
 // resolveWorkspaceUnder
 // ---------------------------------------------------------------------------
 
-func TestResolveWorkspaceByParts_RealDir(t *testing.T) {
+func TestResolveWorkspaceUnder_RealDir(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	base := filepath.Join(root, "work", "proj")
@@ -63,7 +63,7 @@ func TestResolveWorkspaceUnder_StaysInsideRoot(t *testing.T) {
 	}
 }
 
-func TestResolveWorkspaceByParts_Cache(t *testing.T) {
+func TestResolveWorkspaceUnder_Cache(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	base := filepath.Join(root, "cached")
@@ -102,18 +102,18 @@ func TestResolveWorkspaceUnder_CacheIsScopedToRoot(t *testing.T) {
 	}
 }
 
-func TestResolveWorkspaceByParts_NonexistentPath(t *testing.T) {
+func TestResolveWorkspaceUnder_NonexistentPath(t *testing.T) {
 	t.Parallel()
 	if got := resolveWorkspaceUnder(t.TempDir(), "-nonexistent-path-that-cannot-exist-xyz987"); got != "" {
 		t.Errorf("expected empty for nonexistent path, got %q", got)
 	}
 }
 
-// TestResolveWorkspaceByParts_NegativeResultNotCached is a regression test for
+// TestResolveWorkspaceUnder_NegativeResultNotCached is a regression test for
 // #1994: a workspace dir absent during one scan (unmounted drive, worktree
 // mid-rebuild) must still resolve once it reappears, rather than being
 // permanently cached as unresolvable for the process lifetime.
-func TestResolveWorkspaceByParts_NegativeResultNotCached(t *testing.T) {
+func TestResolveWorkspaceUnder_NegativeResultNotCached(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	dir := filepath.Join(root, "reappearing-project")
@@ -140,11 +140,11 @@ func TestResolveWorkspaceByParts_NegativeResultNotCached(t *testing.T) {
 	}
 }
 
-// TestResolveWorkspaceByParts_ProductionRootIsSlash pins the one thing every
+// TestResolveWorkspaceUnder_ProductionRootIsSlash pins the one thing every
 // other test here now bypasses: the production entry point resolves from "/".
 // "/usr" exists on every Unix host and "-usr" resolves on pass 1 with a single
 // Stat — no ReadDir, so no walk into anything the host has mounted.
-func TestResolveWorkspaceByParts_ProductionRootIsSlash(t *testing.T) {
+func TestResolveWorkspaceUnder_ProductionRootIsSlash(t *testing.T) {
 	t.Parallel()
 	if fi, err := os.Stat("/usr"); err != nil || !fi.IsDir() {
 		t.Skip("no /usr on this host")
@@ -154,7 +154,7 @@ func TestResolveWorkspaceByParts_ProductionRootIsSlash(t *testing.T) {
 	}
 }
 
-func TestResolveWorkspaceByParts_EmptyAndNoLeadingDash(t *testing.T) {
+func TestResolveWorkspaceUnder_EmptyAndNoLeadingDash(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name  string

@@ -38,14 +38,6 @@ const PlannerKeySuffix = ":planner"
 // 16-char hex from cron.generateHexID).
 func CronKey(jobID string) string { return CronKeyPrefix + jobID }
 
-// SysKey returns the canonical router key for a system-session daemon ID.
-// Format: "sys:<daemonID>".
-func SysKey(daemonID string) string { return SysKeyPrefix + daemonID }
-
-// ScratchKey returns the canonical router key for a dashboard scratch
-// (follow-up drawer) session ID. Format: "scratch:<sessionID>".
-func ScratchKey(sessionID string) string { return ScratchKeyPrefix + sessionID }
-
 // IsCronKey reports whether s belongs to the cron namespace.
 func IsCronKey(s string) bool { return strings.HasPrefix(s, CronKeyPrefix) }
 
