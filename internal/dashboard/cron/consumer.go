@@ -2,11 +2,10 @@
 // (#2561).
 //
 // Deps named *cron.Scheduler, whose exported methods cover scheduling,
-// persistence, the sandbox runner and the notify plumbing. SchedulerView is the
-// MEASURED call surface — grep h.deps.Scheduler.<Method> across the package — at
-// 23 of the scheduler's 35: this package IS the cron UI, so it reads jobs, runs,
-// the inflight view, the sandbox attention queue and the snapshot blobs, and it
-// writes every job mutation the dashboard offers. What the interface buys is that
+// persistence and the notify plumbing. SchedulerView is the MEASURED call
+// surface — grep h.deps.Scheduler.<Method> across the package: this package IS
+// the cron UI, so it reads jobs, runs and the inflight view, and it writes
+// every job mutation the dashboard offers. What the interface buys is that
 // the rest — the tick loop, the store internals, the notify senders — can change
 // without touching the handlers, and that a test can fake the surface instead of
 // standing up a real Scheduler.
@@ -34,7 +33,6 @@ import (
 type SchedulerView interface {
 	JobStore
 	RunHistory
-	SandboxRuns
 	ScheduleFacts
 }
 
@@ -57,17 +55,6 @@ type RunHistory interface {
 	ListRuns(jobID string, limit int, before time.Time) []cronpkg.CronRunSummary
 	RecentRuns(jobID string, n int) []cronpkg.CronRunSummary
 	CurrentRun(jobID string) (cronpkg.RunInflightView, bool)
-}
-
-// SandboxRuns is the cloud sandbox's attention queue, replay and run
-// artefacts (docs/rfc/agentcore-cloud-sandbox.md §7.4).
-type SandboxRuns interface {
-	ListSandboxAttention() []cronpkg.SandboxAttentionItem
-	ConfirmSandboxRun(runID string) error
-	ReplaySandboxRun(jobID, origRunID string) (string, error)
-	SandboxRunEvents(jobID, runID string, maxLines int) ([][]byte, bool, error)
-	SandboxRunSnapshotManifest(jobID, runID string) (*cronpkg.SandboxRunSnapshot, bool, error)
-	SandboxRunSnapshotPrompt(blobHash string) (string, error)
 }
 
 // ScheduleFacts is the facts the payloads carry (timezone, notify default, start time).

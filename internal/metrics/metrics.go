@@ -187,16 +187,6 @@ var (
 	// consecutive-failure streak reached cron.auto_pause_after_failures.
 	CronAutoPausedTotal = expvar.NewInt("naozhi_cron_auto_paused_total")
 
-	// CronSandboxRunFailedTotal counts sandbox-placement runs ending in
-	// RunStateFailed (timed-out runs go to CronSandboxRunTimedOutTotal, #2091).
-	// Transport failures carry double-run risk, so operators alert on this
-	// specifically (agentcore-cloud-sandbox RFC §6.2).
-	CronSandboxRunFailedTotal = expvar.NewInt("naozhi_cron_sandbox_run_failed_total")
-
-	// CronSandboxRunTimedOutTotal counts sandbox-placement runs ending in
-	// RunStateTimedOut, isolated from local-run timeouts.
-	CronSandboxRunTimedOutTotal = expvar.NewInt("naozhi_cron_sandbox_run_timed_out_total")
-
 	// SysessionRunStartedTotal counts sysession daemon run starts (#1723 RFC §6
 	// Phase 1.5). Bumped inside emitRunStarted before the nil-broadcaster
 	// early return so it never drifts from the broadcast path.

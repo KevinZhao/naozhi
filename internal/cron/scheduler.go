@@ -28,7 +28,7 @@ import (
 // slowThreshold / execTimeout / maxJobs* / storePath / stopBudget) set in
 // NewScheduler and read lock-free; mu-guarded mutable state (jobs /
 // chatJobCount / jobsByChat / sortedJobIDs); independently synchronised state
-// (runningJobs, telemetry, store*, *Once, sandboxPending*) with own primitives.
+// (runningJobs, telemetry, store*, *Once) with own primitives.
 type Scheduler struct {
 	cron *robfigcron.Cron
 	// jobTable owns the registry (jobs + its three derived indices), the lock
@@ -49,11 +49,6 @@ type Scheduler struct {
 	configMapsPtr atomic.Pointer[cronConfigMaps]
 	storePath     string
 	maxJobs       int
-	// sandbox executes placement=sandbox jobs (agentcore-cloud-sandbox RFC
-	// §4.2). Set once from SchedulerDeps.Sandbox in NewScheduler, never
-	// reassigned — executeOpt reads it lock-free. nil = sandbox placement
-	// unavailable (jobs fail with ErrClassCronSandboxUnavailable).
-	sandbox SandboxRunner
 	// maxJobsPerChat is the resolved per-chat cap: SchedulerConfig
 	// MaxJobsPerChat when > 0, otherwise DefaultMaxJobsPerChat. Immutable
 	// after NewScheduler returns, so AddJob can read it lock-free.
@@ -180,17 +175,6 @@ type Scheduler struct {
 	// budget is checked before each run spawns; nil runs every job.
 	budget BudgetGate
 
-	// sandboxPendingMu guards sandboxPendingIndex, independent of s.tbl.mu so the
-	// hot delete path never contends with job CRUD. RWMutex so the pure-read
-	// lookup (lookupSandboxPendingIndex) does not serialize against reads.
-	sandboxPendingMu sync.RWMutex
-	// sandboxPendingIndex maps jobID → its in-flight §6.5 pending file path
-	// (set by writeSandboxPending, cleared at terminal remove) so
-	// stopSandboxRunsForJob resolves a deleted job's file with one lookup
-	// instead of scanning every run record (#2140). Tracks only records THIS
-	// process wrote; orphans from a previous boot go through reconcileSandboxPending.
-	sandboxPendingIndex map[string]string
-
 	// workDirCache memoises positive workDirResolveUnderRoot results so
 	// fast-firing jobs do not repeat the EvalSymlinks chain every tick.
 	// TTL-bounded (workDirResolveCacheTTL) so symlink retargets surface soon.
@@ -286,7 +270,6 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		maxJobsPerChat: maxPerChat,
 		autoPauseAfter: max(cfg.AutoPauseAfterFailures, 0),
 		execTimeout:    cfg.ExecTimeout,
-		sandbox:        deps.Sandbox,
 		// Seeded from the const; tests override per-instance via
 		// WithStopBudgetField so t.Parallel Stops cannot race a global (#947).
 		stopBudget:          defaultStopBudget,
@@ -308,9 +291,8 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 			KeepCount:  cfg.RunsKeepCount,
 			KeepWindow: cfg.RunsKeepWindow,
 		}),
-		ledger:              deps.Ledger,
-		budget:              deps.Budget,
-		sandboxPendingIndex: make(map[string]string),
+		ledger: deps.Ledger,
+		budget: deps.Budget,
 		// Tests swap a fake via the withClock seam.
 		clock: defaultClock,
 	}
@@ -465,9 +447,6 @@ func (s *Scheduler) Start() error {
 	// sending a second turn into the same live CLI (#2751). The run-store half
 	// of the reconcile stays async below.
 	inflight := s.claimRunInflight()
-	// Same for sandbox orphans: listed before this process starts runs of its
-	// own, so none of their pending records is taken for an orphan.
-	orphans := s.claimSandboxOrphans()
 	s.cron.Start()
 	// P1 cron-run-history: cold-start GC pass over 'runs/' tree to collect
 	// retention-policy violators that accumulated while this process was
@@ -481,18 +460,9 @@ func (s *Scheduler) Start() error {
 			slog.Info("cron run history: cold-start GC done")
 		})
 	}
-	// agentcore-cloud-sandbox §6.5: reconcile sandbox runs orphaned by the
-	// previous process (pending files whose streams died with it). Async
-	// like the GC pass above — each orphan costs a StopRuntimeSession
-	// network call and must not block Start. gcWG-tracked so Stop() waits.
-	s.goStartupPass("sandbox-pending-reconcile", func() { s.reconcileSandboxOrphans(orphans) })
-	// Blob GC for the snapshot store (#2682): manifest retention strands
-	// blobs, and nothing else ever deletes them. Not gated on the run store —
-	// snapshots are written by sandbox runs regardless of run-history state.
-	s.goStartupPass("sandbox-blob-gc", s.sandboxState().GCBlobs)
 	// Epic H #2546: the async half of the in-flight reconcile claimed above —
 	// write the interrupted records and start each adoption's wait. Async +
-	// gcWG-tracked for the same reason as the pass above: it touches the run
+	// gcWG-tracked for the same reason as the GC pass above: it touches the run
 	// store and an adoption can wait for minutes, neither of which may block Start.
 	s.goStartupPass("run-inflight-reconcile", func() { s.settleRunInflight(inflight) })
 	slog.Info("cron scheduler started", "jobs", jobCount)

@@ -7,7 +7,7 @@
 > **依赖 / 前置**:
 > - `docs/rfc/multi-backend.md`（backend.Profile 抽象、`/api/cli/backends`、new-session picker、per-session backend chip 已就位）
 > - `docs/rfc/envpolicy-consolidation.md`（`internal/envpolicy` 叶子校验器 + per-backend 凭据矩阵，本 RFC 在 §5 复用其 SSRF/profile guard 与 `DetectBackendFromEnv`）
-> - `docs/rfc/agentcore-cloud-sandbox.md`（`payload.Env map[string]string` per-invoke env 覆盖的既有先例，本 RFC §4 参照其形状）
+> - `docs/rfc/agentcore-cloud-sandbox.md`（已随云沙箱功能删除；`payload.Env map[string]string` per-invoke env 覆盖的既有先例，本 RFC §4 参照其形状）
 > **关联代码**:
 > - 认证/env：`cmd/naozhi/main_claude_settings.go`（`claudeEnvAllowedPrefixes` :44、`awsEnvDenyList` :85、`filterClaudeEnv` :185）· `internal/shim/manager.go`（`m.shimEnv` 快照 :260、`cmd.Env = m.shimEnv` :479、`shimEnvAllowedPrefixes` ~:1286、`filterShimEnv` ~:1303）· `internal/envpolicy/backend.go`（`DetectBackendFromEnv` :58、`EnvCredsForBackend`）· `internal/sysession/env.go`
 > - 解析链：`internal/session/router_lifecycle.go`（`AgentOpts` :305-311、`resolveSpawnParamsLocked` :473-569、`unregisterSessionLocked` :295）· `internal/session/routing.go`（`KeyResolver.ResolveForChat` :172-218）· `internal/session/router_backend.go`（`backendStore` :36-67、`SetSessionBackend` :296）

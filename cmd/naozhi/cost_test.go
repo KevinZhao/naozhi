@@ -39,7 +39,6 @@ func seedHistory(t *testing.T) backfillPaths {
 	cronDir := filepath.Join(dir, "cron", "runs", "0123456789abcdef")
 	writeJSON(t, filepath.Join(cronDir, "a.json"), cron.CronRun{RunID: "aaaaaaaaaaaaaaaa", JobID: "0123456789abcdef", StartedAt: now.Add(-3 * time.Hour), CostUSD: 0.2, Fresh: true, WorkDir: "/w/proj"})
 	writeJSON(t, filepath.Join(cronDir, "b.json"), cron.CronRun{RunID: "bbbbbbbbbbbbbbbb", JobID: "0123456789abcdef", StartedAt: now.Add(-4 * time.Hour), CostUSD: 0.5, Fresh: false})
-	writeJSON(t, filepath.Join(cronDir, "c.json"), cron.CronRun{RunID: "cccccccccccccccc", JobID: "0123456789abcdef", StartedAt: now.Add(-5 * time.Hour), SandboxMeta: &cron.SandboxRunMeta{CostUSD: 1.5}})
 	return backfillPaths{
 		SessionStorePath: filepath.Join(dir, "sessions.json"),
 		CronStorePath:    filepath.Join(dir, "cron", "cron_jobs.json"),
@@ -77,7 +76,7 @@ func TestBackfill_CronRunsFollowTheCronStoreNotTheSessionStore(t *testing.T) {
 	}
 	// Both roots were read: the cron records only exist under the cron root, and
 	// the session-runs records only under the session root.
-	if rep.CronLocal == 0 || rep.CronSandbox == 0 {
+	if rep.CronLocal == 0 {
 		t.Errorf("cron records not found under %s: %+v\n%s", cronRoot.RunsRoot(), rep, out.String())
 	}
 	if rep.SessionRuns == 0 {
@@ -92,7 +91,7 @@ func TestBackfill_ImportsDedupsAndSkipsUnreliable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.Imported != 3 || rep.SkippedCumulative != 1 || rep.SkippedOld != 1 || rep.Unreadable != 1 || rep.SessionRuns != 4 {
+	if rep.Imported != 2 || rep.SkippedCumulative != 1 || rep.SkippedOld != 1 || rep.Unreadable != 1 || rep.SessionRuns != 4 {
 		t.Fatalf("report = %+v\n%s", rep, out.String())
 	}
 	store := costledger.NewStore(filepath.Join(filepath.Dir(p.SessionStorePath), "cost"), costledger.Options{})
@@ -105,14 +104,14 @@ func TestBackfill_ImportsDedupsAndSkipsUnreliable(t *testing.T) {
 	for _, b := range sum.Buckets {
 		got[b.Key] = b.Amount
 	}
-	if got["session"] != 0.4 || got["cron_local"] != 0.2 || got["cron_sandbox"] != 1.5 || sum.Kinds["backfill"] != 3 {
+	if got["session"] != 0.4 || got["cron_local"] != 0.2 || sum.Kinds["backfill"] != 2 {
 		t.Fatalf("buckets = %v kinds=%v", got, sum.Kinds)
 	}
 	store.Close()
 
 	// Second run: everything is already there.
 	rep2, err := backfillLedger(p, false, &out)
-	if err != nil || rep2.Imported != 0 || rep2.Duplicate != 3 {
+	if err != nil || rep2.Imported != 0 || rep2.Duplicate != 2 {
 		t.Fatalf("second run = %+v err=%v", rep2, err)
 	}
 }
@@ -120,7 +119,7 @@ func TestBackfill_ImportsDedupsAndSkipsUnreliable(t *testing.T) {
 func TestBackfill_DryRunWritesNothing(t *testing.T) {
 	p := seedHistory(t)
 	rep, err := backfillLedger(p, true, &bytes.Buffer{})
-	if err != nil || rep.Imported != 3 {
+	if err != nil || rep.Imported != 2 {
 		t.Fatalf("dry run report = %+v err=%v", rep, err)
 	}
 	files, _ := filepath.Glob(filepath.Join(filepath.Dir(p.SessionStorePath), "cost", "*.jsonl"))

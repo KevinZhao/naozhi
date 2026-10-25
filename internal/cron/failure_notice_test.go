@@ -33,10 +33,6 @@ func TestFailureNoticeBody(t *testing.T) {
 		{"session capacity", ErrClassSessionCapacity, RunStateSkipped, 5 * time.Minute, "定时任务会话数已达上限，本次已跳过；可错开执行时间或改为每次重置上下文 · run 1a2b3c4d"},
 		{"workdir unreachable", ErrClassWorkDirUnreachable, RunStateFailed, 5 * time.Minute, "工作目录不可达，本次执行已跳过 · run 1a2b3c4d"},
 		{"workdir outside root", ErrClassWorkDirOutsideRoot, RunStateFailed, 5 * time.Minute, "工作目录超出允许根目录，本次执行已跳过 · run 1a2b3c4d"},
-		{"sandbox failed", ErrClassSandboxFailed, RunStateFailed, time.Hour, "云沙箱任务失败 · run 1a2b3c4d"},
-		{"sandbox unavailable", ErrClassSandboxUnavailable, RunStateFailed, time.Hour, "云沙箱未配置，任务无法执行 · run 1a2b3c4d"},
-		{"sandbox transport", ErrClassSandboxTransport, RunStateFailed, time.Hour, "云沙箱连接中断，任务状态未知，请检查执行历史 · run 1a2b3c4d"},
-		{"sandbox transport deadline", ErrClassSandboxTransport, RunStateTimedOut, time.Hour, "云沙箱运行超时（超过 1h），任务状态未知，请检查执行历史 · run 1a2b3c4d"},
 		{"unclassified", ErrClassPanic, RunStateFailed, 5 * time.Minute, "执行失败 · run 1a2b3c4d"},
 	}
 	for _, tc := range cases {
@@ -420,36 +416,5 @@ func TestFreshPreflight_WorkDirNoticeCarriesRunID(t *testing.T) {
 	want := "[Cron 日报] 工作目录不可达，本次执行已跳过 · run 9f8e7d6c"
 	if got := ns.noticesAfter(s); len(got) != 1 || got[0] != want {
 		t.Errorf("notices = %q, want [%q]", got, want)
-	}
-}
-
-// TestSandboxFailureNotice_NamesCause: sandbox terminals share the cause table,
-// and a sandbox deadline prints the clamped sandbox budget.
-func TestSandboxFailureNotice_NamesCause(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name        string
-		execTimeout time.Duration
-		state       RunState
-		class       ErrorClass
-		want        string
-	}{
-		{"failed", 7 * time.Minute, RunStateFailed, ErrClassSandboxFailed, "[Cron 日报] 云沙箱任务失败 · run 9f8e7d6c"},
-		{"transport deadline", 7 * time.Minute, RunStateTimedOut, ErrClassSandboxTransport, "[Cron 日报] 云沙箱运行超时（超过 7m），任务状态未知，请检查执行历史 · run 9f8e7d6c"},
-		{"deadline clamped", 2 * time.Hour, RunStateTimedOut, ErrClassSandboxTransport, "[Cron 日报] 云沙箱运行超时（超过 1h），任务状态未知，请检查执行历史 · run 9f8e7d6c"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			s, _, ns := newNoticeScheduler(t, &fakeRouter{})
-			s.execTimeout = tc.execTimeout
-			j := &Job{ID: "job-sbx-" + strings.ReplaceAll(tc.name, " ", "-"), Schedule: "@every 5m"}
-			s.putJobForTest(j)
-			ga := withNotify(newGetSessionArgs(t, s, j), "日报")
-			s.finishSandboxRun(sandboxExecArgs{runCtx: ga.runCtx}, tc.state, tc.class, "", "boom", nil)
-			if got := ns.noticesAfter(s); len(got) != 1 || got[0] != tc.want {
-				t.Errorf("notices = %q, want [%q]", got, tc.want)
-			}
-		})
 	}
 }

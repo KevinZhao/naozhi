@@ -5,7 +5,6 @@ RFC 是落地前的设计取舍与实测记录，**不是最终规范**——架
 | RFC | 状态 | 范围 |
 |---|---|---|
 | [agent-team-ui.md](agent-team-ui.md) | 已实装（drill-in / agent_events） | 并行 agent/team 可视化与内部过程查看 |
-| [agentcore-cloud-sandbox.md](agentcore-cloud-sandbox.md)（+ `-validation`） | v2，Phase 0 实测通过 | AgentCore Runtime 作为执行基底（run-once 作业模型） |
 | [attachment-gc-daemon.md](attachment-gc-daemon.md) | 已实现（默认关闭 + dry_run） | sysession `attachment-gc` daemon |
 | [attachment-refcount.md](attachment-refcount.md) | v1 MVP 已落地 | 附件引用计数与双 TTL GC |
 | [cc-asset-browser.md](cc-asset-browser.md) | Draft v6 | Claude Code 资产只读浏览器 |

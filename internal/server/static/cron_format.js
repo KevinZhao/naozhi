@@ -126,11 +126,6 @@ const CRON_ERROR_CLASS_LABELS = Object.freeze({
   // 结束了这次 run，不是重启本身 —— 与 interrupted 分开命名，操作员才
   // 知道该看的是自己改了什么，而不是找一个不存在的崩溃（#2749 语义）。
   config_drift: '配置变更中止（升级时改了模型/参数）',
-  // 云沙箱三态（agentcore-cloud-sandbox RFC §6.1/§7.2）。transport 是
-  // §6.2 双跑风险态：流断了但 microVM 状态未知，徽标走红色 + ⚠。
-  sandbox_failed: '云沙箱任务失败',
-  sandbox_transport: '云沙箱断流（状态未知）',
-  sandbox_unavailable: '云沙箱未配置',
 });
 export function cronErrorClassLabel(cls) {
   return Object.hasOwn(CRON_ERROR_CLASS_LABELS, cls) ? CRON_ERROR_CLASS_LABELS[cls] : (cls || '');

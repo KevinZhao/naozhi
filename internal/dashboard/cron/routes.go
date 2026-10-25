@@ -22,17 +22,9 @@ func (h *Handlers) Routes() []httputil.Route {
 		{Pattern: "POST /api/cron/pause", Handler: h.HandlePause},
 		{Pattern: "POST /api/cron/resume", Handler: h.HandleResume},
 		{Pattern: "POST /api/cron/trigger", Handler: h.HandleTrigger},
-		// Run history / transcript / events / snapshot share the run_id path
-		// param.
+		// Run history / transcript share the run_id path param.
 		{Pattern: "GET /api/cron/runs", Handler: h.HandleRunsList},
 		{Pattern: "GET /api/cron/runs/{run_id}", Handler: h.HandleRunDetail},
 		{Pattern: "GET /api/cron/runs/{run_id}/transcript", Handler: h.HandleRunTranscript},
-		{Pattern: "GET /api/cron/runs/{run_id}/events", Handler: h.HandleRunEvents},
-		{Pattern: "GET /api/cron/runs/{run_id}/snapshot", Handler: h.HandleRunSnapshot},
-		// Human confirmation queue (docs/rfc/agentcore-cloud-sandbox.md §7.4);
-		// confirm/replay are POSTs and replay stops the live run first.
-		{Pattern: "GET /api/cron/attention", Handler: h.HandleAttentionList},
-		{Pattern: "POST /api/cron/runs/{run_id}/confirm", Handler: h.HandleRunConfirm},
-		{Pattern: "POST /api/cron/runs/{run_id}/replay", Handler: h.HandleRunReplay},
 	}
 }

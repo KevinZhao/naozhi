@@ -17,11 +17,6 @@ import (
 // Callers should use errors.Is(err, cron.ErrJobNotFound) instead of string matching.
 var ErrJobNotFound = errors.New("cron: job not found")
 
-// ErrSandboxWorkDir rejects the placement=sandbox × work_dir≠"" combination
-// (agentcore-cloud-sandbox RFC §4.4 Phase 1 guardrail). Raised by both AddJob
-// and UpdateJob so the combination fails at save time, not at the first run.
-var ErrSandboxWorkDir = errors.New("cron: sandbox placement does not support work_dir (Phase 1)")
-
 // ErrAmbiguousPrefix is returned by findByPrefixLocked when an ID prefix matches
 // more than one job in the same chat scope; callers surface a "please
 // disambiguate" hint instead of a generic not-found.
@@ -54,30 +49,6 @@ var ErrPromptAlreadySet = errors.New("cron: job already has a prompt; use Update
 // rolled back, so callers MUST surface a 500-class error; a silent success
 // would let a restart replay the mutation's inverse (e.g. resurrect a deleted job).
 var ErrPersistFailed = errors.New("cron: persist jobs failed")
-
-// ErrJobNotSandbox is returned by ReplaySandboxRun when the target job is not
-// at placement=sandbox: a local job has no snapshot to replay and no microVM
-// to inject into (RFC §7.3). The dashboard maps it to 409 Conflict.
-var ErrJobNotSandbox = errors.New("cron: job is not at sandbox placement")
-
-// ErrNoSnapshot is returned by ReplaySandboxRun when the original run has no
-// input snapshot on disk (snapshots disabled, or a GC'd blob) — without it
-// there is no payload to re-inject (RFC §5.2).
-var ErrNoSnapshot = errors.New("cron: run has no input snapshot to replay")
-
-// ErrStopUnconfirmed is returned by ReplaySandboxRun when the §6.2 pre-replay
-// StopSession did not confirm the original microVM is terminated; replaying
-// anyway risks the double-run §6.2 exists to prevent (retry is safe).
-var ErrStopUnconfirmed = errors.New("cron: original microVM termination unconfirmed; cannot replay safely")
-
-// ErrSandboxUnavailable is returned by ReplaySandboxRun when sandbox placement
-// is not configured (no runner wired). Distinct from ErrJobNotSandbox: the job
-// IS a sandbox job, but this naozhi cannot run sandbox jobs right now.
-var ErrSandboxUnavailable = errors.New("cron: sandbox placement not configured")
-
-// ErrReplayInFlight is returned by ReplaySandboxRun when the job already has a
-// run in flight (the per-job CAS slot is taken); the dashboard maps it to 409.
-var ErrReplayInFlight = errors.New("cron: job already has a run in flight; cannot replay now")
 
 // ErrJobQuotaExceeded is returned by AddJob when the global or per-chat job
 // cap is full; the IM and dashboard edges answer with a quota hint rather
@@ -244,9 +215,9 @@ type SchedulerConfig struct {
 	// without losing the metric. Zero/negative fall back to the default (#519).
 	SlowThreshold time.Duration
 	// AutoPauseAfterFailures pauses a job after this many consecutive failed
-	// or timed-out runs, so a broken job stops notifying every tick; a sandbox
-	// run orphaned by a restart and a transient backend failure do not count,
-	// though this many transient ones spanning transientAutoPauseWindow do.
+	// or timed-out runs, so a broken job stops notifying every tick; a
+	// transient backend failure does not count, though this many transient
+	// ones spanning transientAutoPauseWindow do.
 	// Zero means defaultAutoPauseAfterFailures; negative disables auto-pause.
 	AutoPauseAfterFailures int
 	// AllowNilRouter opts the constructor out of the boot-time "router

@@ -64,11 +64,6 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		FreshContext   bool   `json:"fresh_context,omitempty"`
 		// Backend pins the CLI backend ("" = router default); see ValidateCronBackend.
 		Backend string `json:"backend,omitempty"`
-		// Placement: ""/"local" = this host, "sandbox" = AgentCore microVM
-		// (RFC §4.2); validateCronPlacement gates values and the sandbox guardrails.
-		Placement string `json:"placement,omitempty"`
-		// SideEffects declares external mutation (agentcore §6.2); nil = off.
-		SideEffects *bool `json:"side_effects,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64 KB
 	if err := httputil.DecodeJSONBody(r, &req); err != nil {
@@ -98,10 +93,6 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := ValidateCronBackend(req.Backend); err != nil {
-		writeCronErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err := validateCronPlacement(req.Placement, req.WorkDir); err != nil {
 		writeCronErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -162,8 +153,6 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		Notify:         req.Notify,
 		FreshContext:   req.FreshContext,
 		Backend:        req.Backend,
-		Placement:      req.Placement,
-		SideEffects:    req.SideEffects,
 		Paused:         req.Prompt == "", // auto-pause when no prompt
 	}
 	if err := h.deps.Scheduler.AddJob(job); err != nil {

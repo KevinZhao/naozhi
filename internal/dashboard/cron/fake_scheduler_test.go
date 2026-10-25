@@ -24,7 +24,6 @@ type fakeScheduler struct {
 	jobs      []cronpkg.JobWithNextRun
 	paused    []string
 	pauseErr  error
-	replayErr error
 	startedAt time.Time
 	loc       *time.Location
 }
@@ -56,16 +55,6 @@ func (f *fakeScheduler) RecentRuns(string, int) []cronpkg.CronRunSummary        
 func (f *fakeScheduler) CurrentRun(string) (cronpkg.RunInflightView, bool) {
 	return cronpkg.RunInflightView{}, false
 }
-func (f *fakeScheduler) ListSandboxAttention() []cronpkg.SandboxAttentionItem { return nil }
-func (f *fakeScheduler) ConfirmSandboxRun(string) error                       { return nil }
-func (f *fakeScheduler) ReplaySandboxRun(string, string) (string, error)      { return "", f.replayErr }
-func (f *fakeScheduler) SandboxRunEvents(string, string, int) ([][]byte, bool, error) {
-	return nil, false, nil
-}
-func (f *fakeScheduler) SandboxRunSnapshotManifest(string, string) (*cronpkg.SandboxRunSnapshot, bool, error) {
-	return nil, false, nil
-}
-func (f *fakeScheduler) SandboxRunSnapshotPrompt(string) (string, error) { return "", nil }
 func (f *fakeScheduler) Location() *time.Location {
 	if f.loc == nil {
 		return time.UTC

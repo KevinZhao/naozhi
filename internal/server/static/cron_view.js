@@ -15,10 +15,9 @@ import {
   parseCronToFreq,
   cronTimezoneSuffix,
 } from './cron_schedule.js';
-import { cronAttentionConfirm, cronAttentionRefresh } from './cron_attention.js';
 import { cronLive, ensureCronLiveSubscription, setCronLiveStatus } from './cron_live.js';
 import { cronDrawerState, cronFrozenRuns, cronRefetchFullJob, cronStore, cronTriggerCooldownClear, fetchCronJobs, noteCronRunCleared } from './cron_state.js';
-import { cronErrorClassLabel, firstNonEmptyLine, formatAgoColloquial, formatRunningElapsed, formatWhenColloquial } from './cron_format.js';
+import { firstNonEmptyLine, formatAgoColloquial, formatRunningElapsed, formatWhenColloquial } from './cron_format.js';
 import { registerShell } from './shell.js';
 import {
   closeCronDetail,
@@ -37,7 +36,6 @@ import {
   cronTimelineSelectRun,
   cronTimelineToggleShowAll,
   navigateExpandedRun,
-  renderOpenCronTimeline,
 } from './cron_timeline.js';
 import {
   esc,
@@ -239,7 +237,6 @@ function openCronCreateModal(backendHtml) {
   const wsBody = buildCronWorkspaceBody();
   const notifyHtml = buildCronNotifyToggleHtml('', false);
   const contextHtml = buildCronContextToggleHtml(false);
-  const placementHtml = buildCronPlacementHtml('', 'cron-placement');
 
   // Title + aria-label are inlined as literals (not passed through esc())
   // so the static UX contract test can grep the exact fragments in source.
@@ -252,7 +249,7 @@ function openCronCreateModal(backendHtml) {
       '</div>' +
       renderCronModalBody({
         scheduleHtml, wsBody, notifyHtml, contextHtml,
-        backendHtml, placementHtml,
+        backendHtml,
         promptId: 'cron-prompt',
         promptPlaceholder: '例如：总结昨天的代码变更，push 到日报频道',
       }) +
@@ -262,7 +259,6 @@ function openCronCreateModal(backendHtml) {
       '</div>' +
     '</div>';
   document.body.appendChild(overlay);
-  cronPlacementBindHint('cron-placement');
   trapFocus(overlay);
   overlay.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') overlay.remove();
@@ -318,8 +314,6 @@ function renderCronModalBody(opts) {
   // 区与 notify / fresh-context 同列，因为 backend 是 "怎么跑" 的运行时
   // 设定，与 work_dir（"在哪里"）的资源/路径含义不同。
   const backendBlock = opts.backendHtml ? opts.backendHtml : '';
-  // placement 选择器与 backend 同区（都是"怎么跑"的运行时设定，RFC §7.1）。
-  const placementBlock = opts.placementHtml ? opts.placementHtml : '';
   return '<div class="modal-body">' +
       '<div class="cron-modal-grid">' +
         titleField +
@@ -339,7 +333,6 @@ function renderCronModalBody(opts) {
           '<div class="cf-label">其他设置</div>' +
           '<div class="cron-more-stack">' +
             backendBlock +
-            placementBlock +
             opts.notifyHtml +
             opts.contextHtml +
           '</div>' +
@@ -359,47 +352,6 @@ function buildCronContextToggleHtml(initialFresh) {
         '<span class="ct-hint">勾选后每次运行前重置会话；不勾则复用会话并保留历史。</span>' +
       '</span>' +
     '</label>';
-}
-
-// buildCronPlacementHtml renders the 运行位置 selector (agentcore-cloud-
-// sandbox RFC §7.1): 本机 (default) / 云沙箱 ☁️. The sandbox option carries
-// the Phase 1 fence hint (≤60min / no work_dir / remote-only MCP). The
-// fence is enforced server-side (validateCronPlacement + ErrSandboxWorkDir);
-// the client mirrors the work_dir conflict check at submit time so the
-// user gets a precise toast instead of a 400 round-trip.
-function buildCronPlacementHtml(initialPlacement, selectId) {
-  const sandboxSel = initialPlacement === 'sandbox' ? ' selected' : '';
-  const localSel = sandboxSel ? '' : ' selected';
-  return '<div class="cron-placement-block nz-field">' +
-      '<label class="nz-field-label" for="' + escAttr(selectId) + '">运行位置</label>' +
-      '<select id="' + escAttr(selectId) + '" aria-label="运行位置" class="nz-input-block">' +
-        '<option value=""' + localSel + '>本机</option>' +
-        '<option value="sandbox"' + sandboxSel + '>云沙箱 ☁️</option>' +
-      '</select>' +
-      '<span class="ct-hint nz-cron-sandbox-hint' + (sandboxSel ? '' : ' nz-hidden') + '" id="' + escAttr(selectId) + '-hint">云沙箱为一次性隔离运行（跑完即焚）：限 60 分钟内任务，暂不支持工作目录与本地 MCP。</span>' +
-    '</div>';
-}
-
-// collectCronPlacementValue returns the placement value, or null when the
-// selector is absent.
-function collectCronPlacementValue(selectId) {
-  const el = /** @type {HTMLSelectElement} */ (document.getElementById(selectId));
-  if (!el) return null;
-  return el.value || '';
-}
-
-// cronPlacementBindHint toggles the fence hint under the selector when the
-// user flips to 云沙箱. Called once after the modal mounts.
-function cronPlacementBindHint(selectId) {
-  const el = /** @type {HTMLSelectElement} */ (document.getElementById(selectId));
-  const hint = document.getElementById(selectId + '-hint');
-  if (!el || !hint) return;
-  el.addEventListener('change', function() {
-    // Class toggle, not style.display: the hint ships with .nz-hidden from
-    // the renderer, so mixing the two would leave a stale inline value
-    // winning over the class (#2559 D6-3).
-    hint.classList.toggle('nz-hidden', el.value !== 'sandbox');
-  });
 }
 
 // collectCronContextValue returns the fresh_context flag, or null when the
@@ -642,13 +594,6 @@ async function doCreateCronJob() {
     const backendEl = /** @type {HTMLSelectElement} */ (document.getElementById('cron-backend'));
     const backendVal = backendEl && backendEl.value ? backendEl.value : '';
     if (backendVal) body.backend = backendVal;
-    // placement（RFC §7.1）：默认本机省略字段；云沙箱时前端先行围栏校验
-    // （与服务端 validateCronPlacement 同语义），给出精确 toast。
-    const placementVal = collectCronPlacementValue('cron-placement');
-    if (placementVal === 'sandbox') {
-      if (workDir) { showToast('云沙箱暂不支持工作目录：请清空"在哪里"或改用本机运行', 'warning'); return; }
-      body.placement = 'sandbox';
-    }
     let data;
     try {
       data = await fetchJSON(NZ_CONTRACT.API.cron, {timeoutMs: 10000, method: 'POST', headers, body: JSON.stringify(body)});
@@ -1140,9 +1085,7 @@ function cronJobSubRowHtml(j, when, isPaused, isMissed) {
   const scheduleChip = '<span class="cj-schedule" role="button" tabindex="0"' +
     ' data-action="cron-edit" data-action-keydown="cron-edit"' +
     ' title="点击修改时间">' + esc(humanizeCron(j.schedule) + cronTimezoneSuffix()) + '</span>';
-  // ☁️ placement 徽标（RFC §7.2）：第三个正交标识，排最前；
-  // last_error_class 提供 terminal 着色（transport 红+⚠）。
-  let iconGlyphs = cronPlacementBadgeHtml(j.placement || '', j.last_error_class || '');
+  let iconGlyphs = '';
   if (j.notify === false) {
     iconGlyphs += '<span class="cj-icon notify-off" title="IM 通知已关闭">&#128277;</span>';
   }
@@ -1218,63 +1161,6 @@ function cronStatsBadgeHtml(j) {
 // 这两个名字保留为薄委托，60+ 调用点与既有锚点不用动。
 function cronStateDotClass(state) { return runStateDot(state); }
 function cronStateLabel(state) { return runStateLabel(state); }
-
-// cronPlacementBadgeHtml —— ☁️ 云沙箱徽标（RFC §7.2）。placement 是与
-// backend pill / origin badge 正交的第三个标识：本机任务返回空串（零增量），
-// 云沙箱任务渲染 ☁️ pill；terminal 三态由 error_class 着色：
-//   success → 绿（默认 pill 色） / sandbox_failed → 黄 / sandbox_transport → 红+⚠
-// （禁止一键重放的引导属于 Phase 3 确认队列，这里只做视觉信号。）
-function cronPlacementBadgeHtml(placement, errorClass) {
-  if (placement !== 'sandbox') return '';
-  let cls = 'cj-placement-sandbox';
-  let label = '☁️ 沙箱';
-  if (errorClass === 'sandbox_transport') {
-    cls += ' pl-transport';
-    label = '☁️ 沙箱 ⚠';
-  } else if (errorClass === 'sandbox_failed' || errorClass === 'sandbox_unavailable') {
-    cls += ' pl-failed';
-  }
-  return '<span class="' + cls + '" title="' + escAttr('云沙箱运行（跑完即焚）' + (errorClass ? ' · ' + cronErrorClassLabel(errorClass) : '')) + '">' + label + '</span>';
-}
-
-// cronAttentionReplay triggers a replay from the queue card (§7.4 `确认未完成，
-// 重放`). The server embeds the §6.2 rule-1 Stop-confirm; a 409 means the
-// original microVM could not be confirmed dead — surface it and keep the card.
-async function cronAttentionReplay(jobId, runId) {
-  await cronReplayRunInner(jobId, runId, true);
-}
-
-// cronReplayRun is the §7.3 detail-view replay button handler (success /
-// failed-clean runs). Thin wrapper over the shared inner so both entry points
-// share the POST + error mapping.
-async function cronReplayRun(jobId, runId) {
-  await cronReplayRunInner(jobId, runId, false);
-}
-
-// cronReplayRunInner POSTs /replay and reconciles UI. fromQueue=true also
-// refreshes the queue banner after a successful replay (the card disappears).
-async function cronReplayRunInner(jobId, runId, fromQueue) {
-  try {
-    const headers = { 'Content-Type': 'application/json' };
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch(NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '/replay',
-      { method: 'POST', headers, body: JSON.stringify({ job_id: jobId }) });
-    if (!r.ok) {
-      const raw = await r.text().catch(() => '');
-      showAPIError('重放 run', r.status, raw);
-      return;
-    }
-  } catch (e) {
-    showAPIError('重放 run', 0, String(e));
-    return;
-  }
-  if (fromQueue) {
-    if (await cronAttentionRefresh()) renderOpenCronTimeline();
-  }
-  // Refresh the timeline so the new replay run shows up at the head.
-  if (cronDrawerState.jobId === jobId) cronTimelineRefreshHeadDebounced(jobId);
-}
 
 // cronEscClose — 全局 Esc 的 cron 分支委托入口。
 // dashboard.js 的 Global Esc handler 不再裸引用 cron 内部状态（cronExpandedRunId /
@@ -1706,7 +1592,6 @@ function openCronEditModal(id, job, backendHtml) {
   const hasOverride = !!(job.notify_platform && job.notify_chat_id);
   const notifyHtml = buildCronNotifyToggleHtml(notifyInitial, hasOverride, job.notify_platform, job.notify_chat_id);
   const contextHtml = buildCronContextToggleHtml(!!job.fresh_context);
-  const placementHtml = buildCronPlacementHtml(job.placement || '', 'edit-cron-placement');
 
   // Round-trip attempt: if the saved expression matches a v2 picker shape
   // we pre-fill the picker; otherwise render the default picker and add a
@@ -1737,7 +1622,7 @@ function openCronEditModal(id, job, backendHtml) {
       '</div>' +
       renderCronModalBody({
         scheduleHtml, wsBody, notifyHtml, contextHtml,
-        backendHtml, placementHtml,
+        backendHtml,
         promptId: 'edit-cron-prompt',
         promptPlaceholder: '这个任务要做什么？',
         titleId: 'edit-cron-title',
@@ -1748,7 +1633,6 @@ function openCronEditModal(id, job, backendHtml) {
       '</div>' +
     '</div>';
   document.body.appendChild(overlay);
-  cronPlacementBindHint('edit-cron-placement');
   trapFocus(overlay);
   fillCronPrompt('edit-cron-prompt', job.prompt);
   // 回填 title。用 value 属性赋值避开 HTML 特殊字符在模板插值中的风险，
@@ -1867,21 +1751,6 @@ async function doEditCronJob(id) {
     if (newBackend !== origBackend) body.backend = newBackend;
   }
 
-  // placement（RFC §7.1）：仅在变化时 PATCH；切到云沙箱时按 EFFECTIVE
-  // work_dir（本次编辑后的值，否则 job 现值）做前端围栏，与服务端
-  // UpdateJob 临界区的原子检查同语义。
-  const newPlacement = collectCronPlacementValue('edit-cron-placement');
-  if (newPlacement !== null) {
-    const origPlacement = job.placement || '';
-    if (newPlacement !== origPlacement) {
-      if (newPlacement === 'sandbox') {
-        const effWorkDir = ('work_dir' in body) ? body.work_dir : (job.work_dir || '');
-        if (effWorkDir) { showToast('云沙箱暂不支持工作目录：请先清空"在哪里"', 'warning'); return; }
-      }
-      body.placement = newPlacement;
-    }
-  }
-
   if (Object.keys(body).length === 0) { overlay.remove(); return; }
   if (body.schedule === '') { showToast('频率不能为空', 'warning'); return; }
 
@@ -1986,16 +1855,12 @@ registerActions({
   'cron-open': activate((el) => openCronDetail(cronIdOf(el), el)),
   'cron-tl-showall': (el) => cronTimelineToggleShowAll(el),
   'cron-tl-more': (el) => cronTimelineLoadMore(el.dataset.job),
-  'cron-att-confirm': (el) => cronAttentionConfirm(el.dataset.run).then((done) => done && renderOpenCronTimeline()),
-  'cron-att-replay': (el) => cronAttentionReplay(el.dataset.job, el.dataset.run),
   'cron-tl-select': activate((el, e) => {
-    // Guard: clicks inside the expanded .ctr-detail (input snapshot, replay
-    // buttons, text selection) must not collapse the row.
+    // Guard: clicks inside the expanded .ctr-detail (buttons, text
+    // selection) must not collapse the row.
     if (e.target instanceof Element && e.target.closest('.ctr-detail')) return;
     cronTimelineSelectRun(el.dataset.job, el.dataset.runId);
   }),
-  'cron-tl-jump': (el) => cronTimelineSelectRun(el.dataset.job, el.dataset.run),
-  'cron-replay': (el) => cronReplayRun(el.dataset.job, el.dataset.run),
   'cron-new': () => createNewCronJob(),
   'cron-detail-close': () => closeCronDetail(),
   'cron-resume': (el) => cronResume(cronIdOf(el)),

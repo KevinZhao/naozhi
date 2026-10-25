@@ -282,6 +282,10 @@ nodes:
 session:
   auto_chain:
     enabled: true
+cron:
+  sandbox:
+    runtime_arn: "arn:aws:bedrock-agentcore:us-east-1:1:runtime/x"
+    region: us-east-1
 agents:
   reviewer:
     args: ["--append-system-prompt=Be terse.", "--keep"]
@@ -292,6 +296,7 @@ agents:
 	want := map[string]string{
 		"nodes":              "workspaces",
 		"session.auto_chain": "remove",
+		"cron.sandbox":       "remove",
 	}
 	flagDiags := 0
 	for _, d := range diags {

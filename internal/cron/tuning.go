@@ -44,16 +44,3 @@ const minSendBudget = 30 * time.Second
 // webhook short-circuits when Stop fires (#799). Keep at 30s for symmetry
 // with stopBudget; if stopBudget is tightened, mirror the change here.
 const cronNotifyTimeout = 30 * time.Second
-
-// sandboxStopTimeout bounds a single sandbox StopSession (microVM teardown)
-// network call during pending reconcile / delete-stop / replay. 30s mirrors
-// cronNotifyTimeout / stopBudget so a hung Stop cannot outlive Stop()'s
-// systemd TimeoutStopSec window.
-const sandboxStopTimeout = 30 * time.Second
-
-// sandboxReconcileWorkers caps the concurrent orphan-Stop fan-out in
-// reconcileSandboxPending (#2142): each orphan's StopSession is an
-// independent ~30s network call, so serial N×30s could stall the startup
-// reconcile pass for minutes, while an unbounded fan-out could open too many
-// in-flight Stops at once. Caps peak concurrency only, not correctness.
-const sandboxReconcileWorkers = 4

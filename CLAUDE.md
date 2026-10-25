@@ -56,7 +56,7 @@ cmd/naozhi/main.go
   -> platform     Platform 接口 + feishu/slack/discord/weixin 子包
   -> server       HTTP server、路由注册、WebSocket hub、REST API
   -> dashboard    dashboard handler 子包群（auth/cron/cronview/discovery/project/session/ext/*，其中 ext/workflows 是 GET /api/sessions/workflow：经 session.WorkflowBoard 的 Published/Result 取 workflow 行与结果；httputil 叶子）
-  -> cron         定时任务调度（robfig/cron）；runstore 子包放运行历史（runs/ 记录、newest-first 缓存、保留期 GC、CronRun 记录类型）与 runinflight/ 在途标记的读写，sandboxstore 子包放 sandbox 的磁盘状态（确认队列/输入快照/事件日志），两者都不 import cron
+  -> cron         定时任务调度（robfig/cron）；runstore 子包放运行历史（runs/ 记录、newest-first 缓存、保留期 GC、CronRun 记录类型）与 runinflight/ 在途标记的读写，不 import cron
   -> sysession    内建后台 daemon 框架（system sessions）
   -> project      项目发现、chat 绑定、planner 路由
   -> projectapi   project 的零依赖契约类型
@@ -75,7 +75,6 @@ cmd/naozhi/main.go
   -> subagent     Task 工具子代理 ↔ JSONL transcript 的关联与读取（linker + reader）
 
   辅助域
-  -> agentcore    AgentCore 云沙箱 control-plane 客户端
   -> agentroute   "/command agentId" 解析的单一真相源
   -> imauth       IM 发送者授权策略（per-platform allowlist + admin 层，Decide 纯逻辑），config 构造、dispatch 执行；叶子
   -> assets       Dashboard "installed assets" 零依赖叶子

@@ -72,8 +72,6 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			Notify:          j.Notify,
 			FreshContext:    j.FreshContext,
 			Backend:         j.Backend,
-			Placement:       j.Placement,
-			SideEffects:     j.SideEffects,
 		}
 		v.PausedReason, v.ConsecutiveFailures = j.PausedReason, j.AutoPauseCount()
 		if j.PausedReason == cronpkg.PausedReasonAutoTransient && !j.LastRunAt.IsZero() && !j.TransientFailingSince.IsZero() {

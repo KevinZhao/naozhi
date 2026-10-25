@@ -47,7 +47,6 @@
    element ships with .nz-hidden and JS toggles the class instead, so the CSP
    needs no style-src 'unsafe-inline' (#2559 D6-3). */
 .nz-cron-ws-custom{padding:8px 0 0}
-.nz-cron-sandbox-hint{margin-top:4px}
 /* Static markup helpers used by dashboard.html (#2559 D6-3). */
 .nz-empty-body{color:var(--nz-text);font-size:var(--nz-fs-md)}
 .nz-empty-hint{font-size:var(--nz-fs-sm);color:var(--nz-text-dim)}

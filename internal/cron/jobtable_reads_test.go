@@ -1,7 +1,6 @@
 package cron
 
 import (
-	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -120,17 +119,6 @@ func TestEnsureStub_RegistersFromTheJobCopy(t *testing.T) {
 	}
 }
 
-// jobExists answers from the registry (the COR-001 TOCTOU re-check).
-func TestJobExists(t *testing.T) {
-	s := &Scheduler{tbl: newJobTable(nil)}
-	s.tbl.mu.Lock()
-	s.tbl.jobs["a"] = &Job{ID: "a"}
-	s.tbl.mu.Unlock()
-	if !s.jobExists("a") || s.jobExists("gone") {
-		t.Errorf("jobExists(a)=%v jobExists(gone)=%v, want true and false", s.jobExists("a"), s.jobExists("gone"))
-	}
-}
-
 // A job deleted between the dispatch CAS and the snapshot is not run: no
 // snapshot, no started frame.
 func TestExecSnapshotAndEmit_DeletedJobAborts(t *testing.T) {
@@ -142,16 +130,5 @@ func TestExecSnapshotAndEmit_DeletedJobAborts(t *testing.T) {
 	}
 	if n := rec.startedCount(); n != 0 {
 		t.Errorf("%d started frames for an aborted run, want 0", n)
-	}
-}
-
-// A replay whose job is gone by the time it snapshots gives the gate back.
-func TestDispatchReplay_DeletedJobReleasesTheGate(t *testing.T) {
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, AllowNilRouter: true}, SchedulerDeps{})
-	if _, err := s.dispatchReplay("gone", "p", "m", "orig"); !errors.Is(err, ErrJobNotFound) {
-		t.Fatalf("dispatchReplay = %v, want ErrJobNotFound", err)
-	}
-	if _, won := s.gate.acquire("gone"); !won {
-		t.Error("the gate was left held after the replay gave up")
 	}
 }

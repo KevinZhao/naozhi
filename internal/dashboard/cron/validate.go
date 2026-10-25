@@ -150,24 +150,6 @@ func ValidateCronBackend(backend string) error {
 	return nil
 }
 
-// validateCronPlacement gates placement at the HTTP edge: value shape
-// (""/"local"/"sandbox") and the Phase 1 sandbox guardrail (no work_dir until
-// clone-on-boot lands, RFC §4.4 B10-a). The scheduler re-validates; this copy
-// gives the dashboard a precise 400 instead of a generic save error.
-func validateCronPlacement(placement, workDir string) error {
-	switch placement {
-	case "", cronpkg.PlacementLocal:
-		return nil
-	case cronpkg.PlacementSandbox:
-		if workDir != "" {
-			return fmt.Errorf("云沙箱暂不支持工作目录（Phase 1）：请清空 work_dir 或改用本机运行")
-		}
-		return nil
-	default:
-		return fmt.Errorf("invalid placement %q", placement)
-	}
-}
-
 // validateCronTitle 是 Job.Title 在 handler 层的守门：单行、长度 256 rune、禁控制
 // 字符 + 日志注入 rune；空值合法（UI fallback 到 Prompt 首行）。
 // 通过 stringFieldPolicy{disallowLF: true} 复用 validateStringField。

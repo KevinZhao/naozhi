@@ -41,11 +41,9 @@ type JobInit struct {
 	Title          string
 	WorkDir        string
 	Backend        string
-	Placement      string
 	NotifyPlatform string
 	NotifyChatID   string
 	Notify         *bool
-	SideEffects    *bool
 	FreshContext   bool
 	Paused         bool
 }
@@ -76,11 +74,9 @@ func NewJobFull(in JobInit) *Job {
 		Title:          in.Title,
 		WorkDir:        in.WorkDir,
 		Backend:        in.Backend,
-		Placement:      in.Placement,
 		NotifyPlatform: in.NotifyPlatform,
 		NotifyChatID:   in.NotifyChatID,
 		Notify:         in.Notify,
-		SideEffects:    in.SideEffects,
 		FreshContext:   in.FreshContext,
 		Paused:         in.Paused,
 	}
@@ -116,18 +112,6 @@ type Job struct {
 	// to AgentOpts.Backend at execute time; validateBackend still gates
 	// shape-invalid input and wrapperFor falls back for unknown IDs.
 	Backend string `json:"backend,omitempty"`
-
-	// Placement selects WHERE the job runs: "" / "local" = this host via the
-	// session router; "sandbox" = run-once AgentCore microVM. validatePlacement
-	// gates every write path; executeOpt branches on it before touching the
-	// router. Sandbox guardrails are enforced by the sandbox executor, not here.
-	Placement string `json:"placement,omitempty"`
-
-	// SideEffects declares that this job mutates external state (pushes a
-	// branch, opens a PR…). Tri-state like Notify: nil = legacy default (false).
-	// A sandbox run ending failed-transport (microVM fate unknown) goes to the
-	// human confirmation queue instead of auto-replay when this is true.
-	SideEffects *bool `json:"side_effects,omitempty"`
 
 	// Optional notification target for dashboard-created jobs.
 	// When set, execution results are also sent to this IM channel.
@@ -250,10 +234,8 @@ var transientTurnCauses = map[TurnCause]bool{
 const transientAutoPauseWindow = 6 * time.Hour
 
 // streakEffect is how the run moves the failure streak. A success resets it.
-// Failures the job did not cause leave it alone: a run the restart reconciler
-// closed as an orphan, and a transient backend failure. So do skipped and
-// canceled runs. A live lost sandbox connection counts whichever end dropped
-// it: a microVM that crashes on every run is the job's problem.
+// Failures the job did not cause leave it alone: a transient backend failure.
+// So do skipped and canceled runs.
 func (o runOutcome) streakEffect() streakEffect {
 	switch o.state {
 	case RunStateSucceeded:
@@ -261,7 +243,7 @@ func (o runOutcome) streakEffect() streakEffect {
 	case RunStateTimedOut:
 		return streakExtend
 	case RunStateFailed:
-		if o.restartOrphan || o.transientBackendFailure() {
+		if o.transientBackendFailure() {
 			return streakKeep
 		}
 		return streakExtend
@@ -272,12 +254,11 @@ func (o runOutcome) streakEffect() streakEffect {
 // transientBackendFailure reports a turn failed by a transient backend cause,
 // which Job.TransientFailures counts instead of ConsecutiveFailures.
 func (o runOutcome) transientBackendFailure() bool {
-	return !o.restartOrphan && transientTurnFailure(o.state, o.errClass, o.turnCause)
+	return transientTurnFailure(o.state, o.errClass, o.turnCause)
 }
 
 // transientTurnFailure is transientBackendFailure from the fields a failure
-// notice carries. A restart orphan never auto-pauses, so for a run that did
-// the two agree.
+// notice carries.
 func transientTurnFailure(state RunState, errClass ErrorClass, cause TurnCause) bool {
 	return state == RunStateFailed && errClass == ErrClassTurnFailed && transientTurnCauses[cause]
 }
@@ -411,11 +392,6 @@ const (
 	// ErrClassPanic marks a run whose body panicked after it started; the run
 	// scaffold closes it through finishRun (runStarted).
 	ErrClassPanic = runtelemetry.ErrClassPanic
-	// Sandbox placement classes. Transport is the double-run-risk state
-	// (microVM fate unknown).
-	ErrClassSandboxFailed      = runtelemetry.ErrClassCronSandboxFailed
-	ErrClassSandboxTransport   = runtelemetry.ErrClassCronSandboxTransport
-	ErrClassSandboxUnavailable = runtelemetry.ErrClassCronSandboxUnavailable
 	// ErrClassInterrupted marks a run still executing when the process went away
 	// — a graceful shutdown that outran the drain budget, or a hard kill. The
 	// RunState stays canceled; this class is what distinguishes it from an

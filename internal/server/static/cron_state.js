@@ -20,9 +20,6 @@ export const cronStore = {
   // renderCronTimelineForJob uses it to tell "history fully in hand" (len <
   // cap) from "first page only" (len == cap) without a second literal here.
   recentRunsCap: 0,
-  // The §7.4 confirmation queue's last fetch (cron_attention.js), held so
-  // the banner renders synchronously inside cronTimelineHtml.
-  attention: { items: [], loaded: false },
 };
 // cron-panel-consolidation RFC §4.5: cronDrawerState.jobId is the only
 // state gate for the per-job drawer. null = drawer closed; otherwise the
