@@ -4,8 +4,8 @@
 # below are enforced today by the per-package _test.go guards (e.g.
 # internal/sessionkey/imports_test.go), which DO run in CI via go test.
 #
-# staticcheck, however, is now wired: `make lint-staticcheck` runs as a
-# warn-mode CI job (continue-on-error) — see .github/workflows/ci.yml. It is
+# staticcheck, however, is now wired: `make lint-staticcheck` runs in the
+# fail-mode `lint` CI job — see .github/workflows/ci.yml. It is
 # invoked directly rather than through golangci-lint, so the linters block
 # below does not gate it.
 #

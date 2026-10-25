@@ -1,7 +1,7 @@
 // turn_sender.go — turnSender is turn.Orchestrator's session side
 // (turn.Sender) for every entry, IM and dashboard: it creates and sends on
 // the router's sessions and tells the dashboard about each turn. It holds the
-// router and the broadcaster, never the Hub (send_engine_ownership check A).
+// router and the broadcaster, never the Hub.
 package server
 
 import (

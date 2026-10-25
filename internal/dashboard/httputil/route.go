@@ -3,10 +3,7 @@
 // Route registration used to live entirely in internal/server/routes.go: 68
 // /api/* patterns written out by hand, with the auth wrapper threaded into six
 // register*Routes helpers as a bare func(http.HandlerFunc) http.HandlerFunc.
-// Nothing in the type system said which package owned which path, so the
-// boundary was policed from outside by the api_route_owner lint rule (a few
-// hundred lines of AST tooling), with handle_decl guarding the neighbouring
-// edge that *Server grows no handlers of its own.
+// Nothing in the type system said which package owned which path.
 //
 // Now each sub-package returns its own []Route and the server applies the
 // middleware chain. Two consequences worth stating, because they are the point:

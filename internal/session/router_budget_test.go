@@ -98,7 +98,7 @@ func realRouterLimits() routerLimits {
 	}
 }
 
-// lineCount counts lines the way lint-server-handlers' file_size does.
+// lineCount counts lines: newlines, plus one for an unterminated last line.
 func lineCount(src []byte) int {
 	n := strings.Count(string(src), "\n")
 	if len(src) > 0 && src[len(src)-1] != '\n' {

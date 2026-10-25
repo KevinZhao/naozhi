@@ -16,9 +16,9 @@ bin/naozhi --config config.yaml                      # run locally
 ```
 
 Ratchets only go down: the baselines in `*Baseline*` test constants,
-`scripts/js-ratchet.baseline.json`, `scripts/js-deps-baseline.json` and
-`tools/lint-server-handlers/exemptions.yaml` fail CI when a count drops below
-them, so lower them in the same PR. To raise one, edit it in the PR that needs it.
+`scripts/js-ratchet.baseline.json` and `scripts/js-deps-baseline.json` fail
+CI when a count drops below them, so lower them in the same PR. To raise one,
+edit it in the PR that needs it.
 
 `config.yaml` is gitignored (environment-specific). Use `config.example.yaml`
 as the template: `cp config.example.yaml config.yaml` then fill in real values.
