@@ -14,7 +14,6 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/accessprofile"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/agentevents"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
-	"github.com/naozhi/naozhi/internal/dashboard/ext/planner"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/uisettings"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/workflows"
 	"github.com/naozhi/naozhi/internal/node"
@@ -148,9 +147,8 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	// then goes out of scope (#2553, handler_set.go). Only the four lifecycle
 	// participants get copied onto Server.
 	hs := &handlerSet{
-		wiring:   w,
-		systemH:  buildSystemHandlers(opts, router),
-		plannerH: planner.New(planner.Deps{Router: router}),
+		wiring:  w,
+		systemH: buildSystemHandlers(opts, router),
 		// Empty StateDir yields an in-memory prefs store (no persistence).
 		uiSettingsH: uisettings.New(uiprefs.New(opts.StateDir)),
 		// Empty ConfigPath keeps the create endpoint disabled (400).

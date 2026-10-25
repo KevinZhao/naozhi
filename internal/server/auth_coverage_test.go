@@ -64,7 +64,7 @@ func TestAPIUnauthenticatedRejected(t *testing.T) {
 			continue
 		}
 		// /api/auth/* GRANTS auth rather than consuming it (login, noscript
-		// form target); logout is idempotent and authenticated separately.
+		// form target).
 		if strings.HasPrefix(rt.Path, "/api/auth/") {
 			continue
 		}

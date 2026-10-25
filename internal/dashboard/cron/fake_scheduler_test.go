@@ -65,8 +65,7 @@ func (f *fakeScheduler) SandboxRunEvents(string, string, int) ([][]byte, bool, e
 func (f *fakeScheduler) SandboxRunSnapshotManifest(string, string) (*cronpkg.SandboxRunSnapshot, bool, error) {
 	return nil, false, nil
 }
-func (f *fakeScheduler) SandboxRunSnapshotPrompt(string) (string, error)   { return "", nil }
-func (f *fakeScheduler) PreviewScheduleN(string, int) ([]time.Time, error) { return nil, nil }
+func (f *fakeScheduler) SandboxRunSnapshotPrompt(string) (string, error) { return "", nil }
 func (f *fakeScheduler) Location() *time.Location {
 	if f.loc == nil {
 		return time.UTC

@@ -113,21 +113,6 @@ func TestSummary_FilterByJob(t *testing.T) {
 	}
 }
 
-func TestEntries_LimitClampedAndNewestFirst(t *testing.T) {
-	h := New(Deps{Ledger: seeded(t)})
-	rec := get(t, h.HandleEntries, "/api/cost/entries?limit=2")
-	var resp entriesResp
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || rec.Code != 200 {
-		t.Fatalf("status %d err %v", rec.Code, err)
-	}
-	if len(resp.Entries) != 2 || !resp.Entries[0].TS.After(resp.Entries[1].TS) {
-		t.Fatalf("entries = %+v", resp.Entries)
-	}
-	if rec := get(t, h.HandleEntries, "/api/cost/entries?limit=0"); rec.Code != 400 {
-		t.Errorf("limit=0 status %d", rec.Code)
-	}
-}
-
 func TestGate_DisabledLedger(t *testing.T) {
 	var nilStore *costledger.Store
 	h := New(Deps{Ledger: nilStore})

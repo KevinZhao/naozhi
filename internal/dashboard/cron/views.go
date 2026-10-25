@@ -198,17 +198,6 @@ type cronRunsListResp struct {
 	NextBefore int64                `json:"next_before,omitempty"`
 }
 
-// cronPreviewResp is the wire shape returned by GET /api/cron/preview; only
-// Error is set when Valid is false.
-type cronPreviewResp struct {
-	Valid         bool    `json:"valid"`
-	Error         string  `json:"error,omitempty"`
-	Timezone      string  `json:"timezone,omitempty"`
-	TimezoneLabel string  `json:"timezone_label,omitempty"`
-	NextRun       int64   `json:"next_run,omitempty"`
-	NextRuns      []int64 `json:"next_runs,omitempty"`
-}
-
 // cronUpdateResp is the wire shape returned by PATCH /api/cron.
 type cronUpdateResp struct {
 	Status string `json:"status"`

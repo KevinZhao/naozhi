@@ -39,7 +39,6 @@ import (
 	extccassets "github.com/naozhi/naozhi/internal/dashboard/ext/ccassets"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
-	"github.com/naozhi/naozhi/internal/dashboard/ext/planner"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/system"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/transcribe"
@@ -76,7 +75,6 @@ type handlerSet struct {
 	workflowsH      *workflows.Handler
 	uiSettingsH     *uisettings.Handler
 	systemH         *system.Handlers
-	plannerH        *planner.Handlers
 	accessProfilesH *accessprofile.Handler
 	// healthH serves the server-owned probes (/health, /livez, /readyz).
 	healthH *HealthHandler

@@ -47,7 +47,7 @@
 > - `internal/session/router_discovery.go` 提取 `registerStub` 共享路径 + 新增 `RegisterSystemStub`
 > - `internal/session/managed.go`（或 store.go）加 `LabelOrigin` 字段 + `SetUserLabelWithOrigin` / `ClearUserLabelOrigin`
 > - `internal/server/dashboard_session.go` sidebar 过滤位泛化
-> - `internal/server/`：新增 `/api/system/daemons` (GET) + `/api/system/labels/clear-origin` (POST) 端点 + dashboard "System" 抽屉
+> - `internal/server/`：新增 `/api/system/daemons` (GET) + `/api/system/labels/clear-origin` (POST，后因无调用方删除) 端点 + dashboard "System" 抽屉
 > - `internal/config/`：新增 `sysession` 配置节
 > - cron 不动
 
@@ -814,7 +814,7 @@ UI 文案区分"`process_started_at` 之后未跑过"与"从未跑过"——避�
 ### 9.3 LabelOrigin UI
 
 - AutoTitler 写入的 label 在 sidebar 上加一个小机器人图标（hover 显示"由 AutoTitler 自动命名"）。
-- 点击图标弹出菜单："恢复自动命名"——POST `/api/system/labels/clear-origin` body `{"key": "..."}`。
+- 点击图标弹出菜单："恢复自动命名"——原计划 POST `/api/system/labels/clear-origin`。该 UI 一直没做，端点无调用方，已删除（sub/dead-api-endpoints）；`Router.ClearUserLabelOrigin` 保留。
 - 操作员手改 label 时自动把图标摘掉（origin → "user"）。
 
 ### 9.4 WebSocket 事件
@@ -950,7 +950,7 @@ Manager 必须在 Router 之前停。v2 hard cancel + wg 保证 Manager 返回�
 | 7 | `config.go`：`sysession` 配置节 + Validate | +60 |
 | 8 | `cmd/naozhi/main.go`：构造 Manager、注入 router、Start/Stop 顺序 | +30 |
 | 9 | `dashboard_session.go:407`：过滤位泛化到 `IsReservedNamespace` | +1 |
-| 10 | `/api/system/daemons` (GET) + `/api/system/labels/clear-origin` (POST) + dashboard "System" 抽屉（只读 + 恢复自动命名按钮） | +250 |
+| 10 | `/api/system/daemons` (GET) + `/api/system/labels/clear-origin` (POST，已删除) + dashboard "System" 抽屉（只读 + 恢复自动命名按钮） | +250 |
 | 11 | WS `daemon_run_started` / `daemon_run_ended` 广播（不含 error_msg） | +60 |
 
 合计 ≈ 1.25K LOC，含测试。

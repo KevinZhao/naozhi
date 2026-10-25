@@ -22,7 +22,6 @@ func (h *Handlers) Routes() []httputil.Route {
 		{Pattern: "POST /api/cron/pause", Handler: h.HandlePause},
 		{Pattern: "POST /api/cron/resume", Handler: h.HandleResume},
 		{Pattern: "POST /api/cron/trigger", Handler: h.HandleTrigger},
-		{Pattern: "GET /api/cron/preview", Handler: h.HandlePreview},
 		// Run history / transcript / events / snapshot share the run_id path
 		// param.
 		{Pattern: "GET /api/cron/runs", Handler: h.HandleRunsList},

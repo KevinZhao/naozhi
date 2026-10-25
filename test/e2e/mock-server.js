@@ -588,15 +588,6 @@ function startMockServer(overrides = {}) {
       return;
     }
 
-    if (pathname === NZ_CONTRACT.API.auth_logout && req.method === 'POST') {
-      res.writeHead(200, {
-        'Content-Type': 'application/json',
-        'Set-Cookie': 'naozhi_auth=; Path=/; HttpOnly; Max-Age=0',
-      });
-      res.end(JSON.stringify({ ok: true }));
-      return;
-    }
-
     // Session routes
     if (pathname === NZ_CONTRACT.API.scratch_open && req.method === 'POST') {
       let body = '';
@@ -986,22 +977,6 @@ function startMockServer(overrides = {}) {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
-      return;
-    }
-
-    if (pathname === NZ_CONTRACT.API.cron_preview && req.method === 'GET') {
-      if (!checkAuth()) return;
-      const schedule = url.searchParams.get('schedule') || '';
-      const count = Math.min(Math.max(parseInt(url.searchParams.get('count') || '1', 10), 1), 10);
-      if (schedule) {
-        const base = Date.now() + 3600000;
-        const runs = Array.from({ length: count }, (_, i) => base + i * 3600000);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ valid: true, next_run: runs[0], next_runs: runs, timezone: 'UTC', timezone_label: 'UTC (UTC+00:00)' }));
-      } else {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ valid: false, error: 'empty schedule' }));
-      }
       return;
     }
 

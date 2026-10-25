@@ -60,7 +60,7 @@ func TestAPICrossOriginRejected(t *testing.T) {
 			continue
 		}
 		// /api/auth/* GRANTS auth rather than consuming it; HandleLogin does its
-		// own origin check (a different message), and logout is idempotent.
+		// own origin check (a different message).
 		if strings.HasPrefix(rt.Path, "/api/auth/") {
 			continue
 		}
