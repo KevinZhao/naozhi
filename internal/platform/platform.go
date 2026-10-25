@@ -244,8 +244,8 @@ type Reactor interface {
 	RemoveReaction(ctx context.Context, messageID string, reaction ReactionType) error
 }
 
-// QuestionCard is the platform-agnostic AskUserQuestion payload
-// (docs/rfc/askuser-question.md). SessionKey is intentionally absent: click
+// QuestionCard is the platform-agnostic AskUserQuestion payload.
+// SessionKey is intentionally absent: click
 // routing is re-derived from the chat context, never carried in the card.
 type QuestionCard struct {
 	// ToolUseID correlates the card action back to the assistant tool_use block.

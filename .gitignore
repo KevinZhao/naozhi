@@ -20,9 +20,6 @@ package-lock.json
 # Test & debug artifacts
 test-results/
 coverage.out
-# Live e2e cookie state seeded by playwright globalSetup; contains an
-# authenticated naozhi_auth cookie. Never commit.
-test/e2e/.multibackend-storage.json
 *.prof
 *.test
 *.log
@@ -55,9 +52,6 @@ preview-start.sh
 
 # Codegraph MCP index (large local SQLite db; also self-ignored via .codegraph/.gitignore)
 .codegraph/
-
-# Python bytecode cache (test/e2e/passthrough/*.py harness)
-__pycache__/
 
 # Local-only design notes (not for upstream)
 docs/design/competitor-distilled-2026-05.md

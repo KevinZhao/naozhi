@@ -14,8 +14,7 @@ import { handleFiles } from './composer_files.js';
 
 // --- Message navigation ---
 let navPopoverCloseHandler = null;
-// navState is the navigation position, exported for the e2e suite
-// (test/e2e/e2e-shim.js); this module is its only writer.
+// navState is the navigation position; this module is its only writer.
 export const navState = {
   userEls: [],
   // #1772: synchronous "is the nav popover mounted" flag. Set true the moment

@@ -43,8 +43,8 @@ test.describe('WebSocket connect path', () => {
     );
     // CONNECTED schedules a debounced /api/sessions refresh. One sent after
     // the push applies the mock's static 'ready' snapshot over it, which is
-    // correct (a later snapshot is how a dropped push heals, case (e) in
-    // session_state_stale_poll), so push only once that refresh has started.
+    // correct (a later snapshot is how a dropped push heals), so push only
+    // once that refresh has started.
     await page.evaluate(async () => {
       /** @type {any} */ (window).__timers = (await import('/static/state.js')).timers;
     });

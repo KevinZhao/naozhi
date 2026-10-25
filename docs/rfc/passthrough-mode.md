@@ -827,7 +827,7 @@ case "user":
 
 ## 7. 实测验证清单（Phase 0 — 已完成）
 
-**状态**: 全部 9 项验证通过。详细报告见 `passthrough-mode-validation.md`，测试脚本在 `test/e2e/passthrough/`。
+**状态**: 全部 9 项验证通过。详细报告见 `passthrough-mode-validation.md`，测试脚本原在 `test/e2e/passthrough/`（已于 #3735 删除，见 git 历史 `d9b1c86d`）。
 
 | ID | 场景 | 结果 | 关键发现 |
 |---|---|---|---|
