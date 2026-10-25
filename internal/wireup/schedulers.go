@@ -8,7 +8,6 @@ package wireup
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
 	"github.com/naozhi/naozhi/internal/budget"
 	"github.com/naozhi/naozhi/internal/config"
@@ -98,15 +97,6 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 		ChatID:   deps.Cfg.Cron.NotifyDefault.ChatID,
 	}
 
-	// Degradable: a bad sandbox config must not break startup; placement=sandbox
-	// jobs then fail per-run with ErrClassSandboxUnavailable.
-	sandboxRunner, sandboxErr := newAgentcoreSandboxRunner(deps.ParentCtx,
-		deps.Cfg.Cron.Sandbox.RuntimeARN, deps.Cfg.Cron.Sandbox.Region)
-	if sandboxErr != nil {
-		slog.Warn("cron sandbox placement unavailable; placement=sandbox jobs will fail until fixed",
-			"err", sandboxErr)
-	}
-
 	// A nil *Gate stays a nil interface, so cron skips the check entirely.
 	var budgetGate cron.BudgetGate
 	if deps.Budget != nil {
@@ -130,7 +120,6 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 		Agents:        deps.Agents,
 		AgentCommands: deps.Cfg.AgentCommands,
 		Telemetry:     deps.Telemetry,
-		Sandbox:       sandboxRunner,
 		Ledger:        deps.Router.Runs().CostLedger(),
 		Budget:        budgetGate,
 	})

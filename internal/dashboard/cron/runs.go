@@ -1,7 +1,6 @@
 package cron
 
 import (
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -11,7 +10,6 @@ import (
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/osutil"
-	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // runIDLenLimit caps run_id length; run IDs and job IDs share one generator and
@@ -154,153 +152,9 @@ func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 		ResultBytes: run.ResultBytes,
 		ErrorClass:  string(run.ErrorClass),
 		ErrorMsg:    run.ErrorMsg,
-		ReplayOf:    run.ReplayOf,
 	}
 	if !run.EndedAt.IsZero() {
 		out.EndedAt = run.EndedAt.UnixMilli()
 	}
-	if m := run.SandboxMeta; m != nil {
-		// RuntimeARN is non-secret, but sanitise in case of a hand-edited record.
-		out.Sandbox = &cronRunSandboxView{
-			RuntimeARN:      osutil.SanitizeForLog(m.RuntimeARN, 256),
-			ImageVersion:    osutil.SanitizeForLog(m.ImageVersion, 128),
-			ExitStatus:      m.ExitStatus,
-			CostUSD:         m.CostUSD,
-			DurationMS:      m.DurationMS,
-			MemoryPeakBytes: m.MemoryPeakBytes,
-		}
-	}
 	httputil.WriteJSON(w, out)
-}
-
-// sandboxEventsMaxResponse caps envelope frames returned by GET .../events; the
-// dashboard renders the run's opening with a truncated flag for the tail.
-const sandboxEventsMaxResponse = 2000
-
-// cronRunEventsResp is the wire shape for GET /api/cron/runs/{run}/events:
-// raw stream envelopes re-emitted verbatim so the dashboard reuses the
-// local-session event renderer (RFC §7.3).
-type cronRunEventsResp struct {
-	Events    []json.RawMessage `json:"events"`
-	Truncated bool              `json:"truncated,omitempty"`
-}
-
-// HandleRunEvents serves GET /api/cron/runs/{run_id}/events?job_id= — the
-// persisted sandbox event log (RFC §6.1/§7.3). Returns an empty events array
-// (not 404) for a run with no log so the dashboard renders consistently.
-func (h *Handlers) HandleRunEvents(w http.ResponseWriter, r *http.Request) {
-	if h.deps.Scheduler == nil {
-		httputil.WriteJSONStatus(w, http.StatusNotImplemented, map[string]string{"error": "cron not configured"})
-		return
-	}
-	runID := r.PathValue("run_id")
-	if runID == "" || len(runID) > runIDLenLimit || !cronpkg.IsValidID(runID) {
-		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid run_id"})
-		return
-	}
-	jobID := r.URL.Query().Get("job_id")
-	if jobID == "" || len(jobID) > maxCronIDLenDashboard || !cronpkg.IsValidID(jobID) {
-		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid job_id"})
-		return
-	}
-
-	lines, truncated, err := h.deps.Scheduler.SandboxRunEvents(jobID, runID, sandboxEventsMaxResponse)
-	if errors.Is(err, cronpkg.ErrSandboxEventsBusy) {
-		// Semaphore saturated: fail fast (503) rather than serve a partial stream.
-		httputil.WriteJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "cron run events busy"})
-		return
-	}
-	if err != nil {
-		// A scan error still returns the partial head; serve what we have.
-		slog.Warn("cron sandbox: run events read error", "job_id", jobID, "run_id", runID, "err", err)
-	}
-	// Redaction contract: every NDJSON line is scrubbed of secrets (tool-call
-	// input can echo API keys / Bearer tokens) and then of absolute host paths
-	// (filesystem layout leak), same order as sanitizeWireText. Both redactors
-	// can break JSON at the edges, so redactRawJSON re-applies per string value.
-	events := make([]json.RawMessage, len(lines))
-	for i, ln := range lines {
-		events[i] = redactRawJSON(string(ln), redactEventText)
-	}
-	httputil.WriteJSON(w, cronRunEventsResp{Events: events, Truncated: truncated})
-}
-
-// redactEventText is the per-string redaction chain for sandbox run events.
-func redactEventText(s string) string {
-	return osutil.RedactAbsolutePaths(textutil.RedactSecrets(s))
-}
-
-// cronRunSnapshotResp is the wire shape for GET /api/cron/runs/{run}/snapshot
-// (§7.3 input-snapshot panel). Secrets appear ONLY as reference names
-// (secret_refs), never values (§5.1 red line).
-type cronRunSnapshotResp struct {
-	Available    bool     `json:"available"`
-	Prompt       string   `json:"prompt,omitempty"`
-	PromptHash   string   `json:"prompt_hash,omitempty"`
-	Model        string   `json:"model,omitempty"`
-	ImageVersion string   `json:"image_version,omitempty"`
-	SecretRefs   []string `json:"secret_refs,omitempty"`
-}
-
-// HandleRunSnapshot serves GET /api/cron/runs/{run_id}/snapshot?job_id= (§7.3).
-// Returns {available:false} (not 404) for a run with no snapshot so the panel
-// renders a deterministic "unavailable" state.
-func (h *Handlers) HandleRunSnapshot(w http.ResponseWriter, r *http.Request) {
-	if h.deps.Scheduler == nil {
-		http.Error(w, "cron not configured", http.StatusNotImplemented)
-		return
-	}
-	runID := r.PathValue("run_id")
-	if runID == "" || len(runID) > runIDLenLimit || !cronpkg.IsValidID(runID) {
-		http.Error(w, "invalid run_id", http.StatusBadRequest)
-		return
-	}
-	jobID := r.URL.Query().Get("job_id")
-	if jobID == "" || len(jobID) > maxCronIDLenDashboard || !cronpkg.IsValidID(jobID) {
-		http.Error(w, "invalid job_id", http.StatusBadRequest)
-		return
-	}
-
-	man, ok, err := h.deps.Scheduler.SandboxRunSnapshotManifest(jobID, runID)
-	if err != nil {
-		slog.Warn("cron sandbox: snapshot manifest read error", "job_id", jobID, "run_id", runID, "err", err)
-		httputil.WriteJSON(w, cronRunSnapshotResp{Available: false})
-		return
-	}
-	if !ok {
-		httputil.WriteJSON(w, cronRunSnapshotResp{Available: false})
-		return
-	}
-	// Cross-ownership check, mirroring HandleRunDetail: path isolation already
-	// prevents cross-job reads, but a future path-convention change must not
-	// silently expose another job's snapshot.
-	if man.JobID != "" && man.JobID != jobID {
-		slog.Warn("cron snapshot: job_id mismatch", "url_job_id", jobID, "man_job_id", man.JobID, "run_id", runID)
-		httputil.WriteJSON(w, cronRunSnapshotResp{Available: false})
-		return
-	}
-	prompt, perr := h.deps.Scheduler.SandboxRunSnapshotPrompt(man.PromptHash)
-	if perr != nil {
-		slog.Warn("cron sandbox: snapshot prompt read error", "job_id", jobID, "run_id", runID, "err", perr)
-		// Still return the manifest metadata; prompt blob may have been GC'd.
-	}
-	// SanitizeForLog each secret ref name: a hand-edited manifest can carry
-	// control/bidi runes. Ref names are short identifiers; clamp to 256.
-	var secretRefs []string
-	if len(man.SecretRefs) > 0 {
-		secretRefs = make([]string, len(man.SecretRefs))
-		for i, ref := range man.SecretRefs {
-			secretRefs[i] = osutil.SanitizeForLog(ref, 256)
-		}
-	}
-	httputil.WriteJSON(w, cronRunSnapshotResp{
-		Available: true,
-		// Sanitise defensively in case the blob predates the write-edge policy.
-		Prompt: osutil.SanitizeForLog(prompt, cronpkg.MaxPromptBytes),
-		// PromptHash should be 64 hex chars but the manifest is hand-editable.
-		PromptHash:   osutil.SanitizeForLog(man.PromptHash, 64),
-		Model:        osutil.SanitizeForLog(man.Model, 128),
-		ImageVersion: osutil.SanitizeForLog(man.ImageVersion, 128),
-		SecretRefs:   secretRefs,
-	})
 }

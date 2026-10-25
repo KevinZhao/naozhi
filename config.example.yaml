@@ -430,14 +430,6 @@ cron:
   notify_default:
     platform: "feishu"
     chat_id: "${NAOZHI_CRON_NOTIFY_CHAT_ID}"
-  # AgentCore 云沙箱（可选）：placement=sandbox 的 cron job 在 AWS Bedrock
-  # AgentCore Runtime 的 microVM 里 run-once 执行（注入→跑一遍→焚毁），
-  # 不占本机会话槽位。两个字段都填才启用；运行时容器须为 naozhi bootstrap
-  # 镜像。AWS 凭证走标准链（env → IAM role → profile），绝不写在这里。
-  # 详见 docs/rfc/agentcore-cloud-sandbox.md。
-  # sandbox:
-  #   runtime_arn: "arn:aws:bedrock-agentcore:us-west-2:<account>:runtime/<id>"
-  #   region: "us-west-2"
   # 调度抖动上限：多个同 schedule 的 job 不再"整点同秒起跑"，而是在
   # [0, min(jitter_max, period/4)] 区间内随机延迟，拍平 CPU / API 并发峰值。
   # 默认 2m。"0" 关闭抖动（回退到 v1 行为）。上限硬编码 10m。TriggerNow
@@ -445,8 +437,7 @@ cron:
   jitter_max: "2m"
   # 连续失败（failed / timed_out）达到这个次数自动暂停该 job，避免坏掉的任务
   # 每个 tick 都刷一条失败通知；跳过（并发上限 / 上一轮未完）和取消不计数，
-  # 后端瞬时故障（过载 / 限流 / 连不上模型服务）和 naozhi 重启后收尾的孤儿
-  # 云沙箱 run 也不计数，运行中断开的云沙箱连接照常计数；成功、恢复、编辑都会
+  # 后端瞬时故障（过载 / 限流 / 连不上模型服务）也不计数；成功、恢复、编辑都会
   # 清零。瞬时故障单独计数：达到这个次数且距第一次已满 6 小时同样自动暂停，
   # 免得模型服务地址配错时永远不停。默认 5；负数关闭（两条规则都关）。
   # 恢复用 /cron resume <id> 或控制台。
@@ -554,9 +545,8 @@ platforms:
 # absent or 0 = off. A spent IM chat gets no new turns (commands still work)
 # and is told at most once a minute; a spent cron job's runs end skipped/
 # budget_exceeded without spawning (only the day's first is kept in history)
-# and never count toward auto-pause; a dashboard replay of a sandbox run gets
-# a 409. Admins are limited too. All chats bound to a project share its
-# planner's budget. The dashboard's own turns are never refused, but their
+# and never count toward auto-pause. Admins are limited too. All chats bound
+# to a project share its planner's budget. The dashboard's own turns are never refused, but their
 # spend counts toward daily_usd. A soft cap: a turn let in under the cap may
 # overshoot it. Spend metered in credits or tokens is not counted. Needs the
 # cost ledger on. Caps, warn_ratio and action reload without a restart; adding

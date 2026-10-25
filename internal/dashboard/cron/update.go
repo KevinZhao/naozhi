@@ -46,10 +46,6 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		FreshContext   *bool   `json:"fresh_context,omitempty"`
 		// Backend: pointer-to-"" clears the override (router default).
 		Backend *string `json:"backend,omitempty"`
-		// Placement: ""/"local" 本机；"sandbox" 云沙箱 (RFC §4.2)。
-		Placement *string `json:"placement,omitempty"`
-		// SideEffects: pointer 写显式三态（agentcore §6.2）。
-		SideEffects *bool `json:"side_effects,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
 	if err := httputil.DecodeJSONBody(r, &req); err != nil {
@@ -58,7 +54,7 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Schedule == nil && req.Prompt == nil && req.Title == nil && req.WorkDir == nil &&
 		req.Notify == nil && req.NotifyClear == nil && req.NotifyPlatform == nil && req.NotifyChatID == nil &&
-		req.FreshContext == nil && req.Backend == nil && req.Placement == nil && req.SideEffects == nil {
+		req.FreshContext == nil && req.Backend == nil {
 		writeCronErr(w, http.StatusBadRequest, "at least one field must be provided")
 		return
 	}
@@ -162,8 +158,6 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		NotifyChatID:   req.NotifyChatID,
 		FreshContext:   req.FreshContext,
 		Backend:        req.Backend,
-		Placement:      req.Placement,
-		SideEffects:    req.SideEffects,
 	})
 	if err != nil {
 		switch {
@@ -173,9 +167,6 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, cronpkg.ErrPersistFailed):
 			slog.Error("cron UpdateJob update not persisted", "err", err, "id", osutil.SanitizeForLog(id, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "updated")
-		case errors.Is(err, cronpkg.ErrSandboxWorkDir):
-			// Effective placement×work_dir rejected inside UpdateJob.
-			writeCronErr(w, http.StatusBadRequest, sandboxWorkDirMsg)
 		default:
 			// Parser errors can leak internal field names / offsets; sanitize.
 			slog.Warn("cron UpdateJob rejected", "err", err, "id", osutil.SanitizeForLog(id, cronpkg.MaxIDLen))

@@ -82,7 +82,7 @@ func jobGateShardIndex(jobID string) uint32 {
 // lazy inflight lookup, CAS. On true the caller owns the run and must
 // eventually Store(false) through its finalizer; on false another run is in
 // flight and the caller decides what an overlap means for its entry point
-// (execAcquireSlot broadcasts a skip; dispatchReplay returns a 409).
+// (execAcquireSlot broadcasts a skip).
 func (g *runGate) acquire(jobID string) (*runInflight, bool) {
 	if gateHook != nil {
 		gateHook()

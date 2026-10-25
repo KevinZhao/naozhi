@@ -141,7 +141,6 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	s.mux.HandleFunc("GET /static/cron_timeline.js", auth(serveStaticJS("cron_timeline.js")))
 	s.mux.HandleFunc("GET /static/cron_drawer.js", auth(serveStaticJS("cron_drawer.js")))
 	s.mux.HandleFunc("GET /static/cron_trigger.js", auth(serveStaticJS("cron_trigger.js")))
-	s.mux.HandleFunc("GET /static/cron_attention.js", auth(serveStaticJS("cron_attention.js")))
 	s.mux.HandleFunc("GET /static/cron_live.js", auth(serveStaticJS("cron_live.js")))
 	s.mux.HandleFunc("GET /static/platform.js", auth(serveStaticJS("platform.js")))
 	s.mux.HandleFunc("GET /static/ws_manager.js", auth(serveStaticJS("ws_manager.js")))

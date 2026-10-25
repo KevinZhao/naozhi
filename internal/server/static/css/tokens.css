@@ -226,7 +226,7 @@
   --nz-backend-chip-fg:#fff;
   --nz-backend-chip-shadow:0 1px 1px rgba(0,0,0,.35);
   --nz-backend-chip-border:rgba(0,0,0,.18);
-  /* Semantic status aliases (cj-placement-sandbox) — inherit the light remap
+  /* Semantic status aliases (workflow panel, exit chips) — inherit the light remap
      of green / amber / red, so no per-theme redefinition needed (#2434). */
   --nz-ok:var(--nz-green);--nz-warn:var(--nz-amber);--nz-err:var(--nz-red);
   /* history-popover project label gold (R20260610-UI-1). Was a bare #d4a017 in

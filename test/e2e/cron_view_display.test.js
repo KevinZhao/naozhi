@@ -116,7 +116,7 @@ test.describe('cron 面板展示回归', () => {
     await page.click('#cron-timeline-panel .ctr[data-run-id="run-five1"] .ctr-main');
     const detail = page.locator('#cron-timeline-panel .ctr[data-run-id="run-five1"] .ctr-detail');
     await expect(detail).toHaveCount(1);
-    // 点详情容器本身（对应线上点 <details> 输入快照 / 拖选文字）
+    // 点详情容器本身（对应线上拖选文字）
     await detail.click({ position: { x: 20, y: 10 } });
     await page.waitForTimeout(150);
     await expect(page.locator('#cron-timeline-panel .ctr[data-run-id="run-five1"]')).toHaveClass(/is-expanded/);

@@ -15,8 +15,7 @@ import { shell } from './shell.js';
 import { cronTimezoneSuffix, humanizeCron } from './cron_schedule.js';
 import { cronDrawerState, cronRefetchFullJob, cronStore, cronTriggerButtonState, fetchCronJobs } from './cron_state.js';
 import { firstNonEmptyLine, formatAgoColloquial, formatRunningElapsed, formatWhenColloquial } from './cron_format.js';
-import { cronAttentionRefresh } from './cron_attention.js';
-import { cronExpandedRunId, cronJobCostRefresh, renderCronTimelineForJob, renderOpenCronTimeline } from './cron_timeline.js';
+import { cronExpandedRunId, cronJobCostRefresh, renderCronTimelineForJob } from './cron_timeline.js';
 import { cronLive, ensureCronLiveSubscription, repaintCronLive, unsubscribeCronLive } from './cron_live.js';
 
 // _cronDrawerFetchedFor tracks per-jobId reconcile attempts inside the
@@ -413,7 +412,6 @@ function openCronDetail(jobId, originRow) {
     cronExpandedRunId.runId = null;
   }
   cronDrawerState.jobId = jobId;
-  cronAttentionRefresh().then((fresh) => fresh && renderOpenCronTimeline()).catch(() => {}); // §7.4: pull confirmation queue on open
   cronJobCostRefresh(jobId).catch(() => {});
   // shell.openCronPanel handles selectedKey reset / WS unsubscribe / mobile
   // shell push and triggers shell.renderCronPanel — that path repaints both

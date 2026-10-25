@@ -1,6 +1,6 @@
 package cli
 
-// Runner seam tests (agentcore-cloud-sandbox RFC §4.2). The localRunner is a
+// Runner seam tests (placement axis; only "local" exists). The localRunner is a
 // pure extraction of (*Wrapper).Spawn behind the placement interface — these
 // tests pin (1) the nil-receiver contract that session.spawnSession's
 // nil-wrapper guard relies on, (2) the placement constant, and (3) that

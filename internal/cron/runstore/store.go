@@ -591,7 +591,7 @@ func (s *Store) DropOrphanRun(jobID, runID string) {
 //
 // No test in this package can currently see the pairing go wrong: CronRunSummary
 // carries RunID, JobID, State, Trigger, StartedAt, EndedAt, DurationMS,
-// SessionID, ErrorClass, ReplayOf and CostUSD, none of which truncation changes.
+// SessionID, ErrorClass and CostUSD, none of which truncation changes.
 // TestAppend_OversizeRetry_DiskAndCacheAgree compares the whole cached summary
 // against the on-disk record's, so it arms itself the day a truncated field is
 // added — which is the future the regex anchor was aimed at and could not have

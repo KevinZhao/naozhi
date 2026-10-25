@@ -68,11 +68,6 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		FreshContext   bool   `json:"fresh_context,omitempty"`
 		// Backend pins the CLI backend ("" = router default); see ValidateCronBackend.
 		Backend string `json:"backend,omitempty"`
-		// Placement: ""/"local" = this host, "sandbox" = AgentCore microVM
-		// (RFC §4.2); the scheduler gates values and the sandbox guardrails.
-		Placement string `json:"placement,omitempty"`
-		// SideEffects declares external mutation (agentcore §6.2); nil = off.
-		SideEffects *bool `json:"side_effects,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64 KB
 	if err := httputil.DecodeJSONBody(r, &req); err != nil {
@@ -155,8 +150,6 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		Notify:         req.Notify,
 		FreshContext:   req.FreshContext,
 		Backend:        req.Backend,
-		Placement:      req.Placement,
-		SideEffects:    req.SideEffects,
 		Paused:         req.Prompt == "", // auto-pause when no prompt
 	}
 	if err := h.deps.Scheduler.AddJob(job); err != nil {
@@ -165,10 +158,6 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, cronpkg.ErrPersistFailed) {
 			slog.Error("cron AddJob persisted in-memory but store write failed", "err", err, "id", osutil.SanitizeForLog(job.ID, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "created")
-			return
-		}
-		if errors.Is(err, cronpkg.ErrSandboxWorkDir) {
-			writeCronErr(w, http.StatusBadRequest, sandboxWorkDirMsg)
 			return
 		}
 		// robfig/cron parser errors leak field offsets / parsed expressions;

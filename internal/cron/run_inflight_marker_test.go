@@ -149,7 +149,7 @@ func TestReconcileDropsUnusableMarkers(t *testing.T) {
 	s.putJobForTest(&Job{ID: jobID, Schedule: "@every 5m"})
 
 	dir := s.runMarkers().Dir()
-	if err := s.sandboxState().MkdirSubtree(dir); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	for name, body := range map[string]string{

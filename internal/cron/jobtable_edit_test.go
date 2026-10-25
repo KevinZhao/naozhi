@@ -100,14 +100,11 @@ func TestJobTableUpdate(t *testing.T) {
 	t.Run("failures restore the job", func(t *testing.T) {
 		tbl, active, _ := mutateTable(t)
 		before := *active
-		if _, err := tbl.update(active.ID, JobUpdate{Placement: str("sandbox"), WorkDir: str("/w")}); !errors.Is(err, ErrSandboxWorkDir) {
-			t.Errorf("sandbox+work_dir: err = %v", err)
-		}
 		failMarshal(tbl)
-		if _, err := tbl.update(active.ID, JobUpdate{Schedule: str("@every 1h"), Prompt: str("x")}); !errors.Is(err, ErrPersistFailed) {
+		if _, err := tbl.update(active.ID, JobUpdate{Schedule: str("@every 1h"), Prompt: str("x"), WorkDir: str("/w")}); !errors.Is(err, ErrPersistFailed) {
 			t.Errorf("persist failure: err = %v", err)
 		}
-		if active.Schedule != before.Schedule || active.Prompt != before.Prompt || active.entryID != 7 || active.Placement != "" || active.WorkDir != "" {
+		if active.Schedule != before.Schedule || active.Prompt != before.Prompt || active.entryID != 7 || active.WorkDir != "" {
 			t.Errorf("not restored: %+v", active)
 		}
 		if _, err := tbl.update("nope", JobUpdate{}); !errors.Is(err, ErrJobNotFound) {

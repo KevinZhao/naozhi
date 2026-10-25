@@ -15,6 +15,19 @@ import (
 // an empty state over the operator's real jobs.
 const maxCronStoreBytes = 16 * 1024 * 1024
 
+// storedJob is one cron_jobs.json entry as read: the Job plus the keys of
+// removed features that the load still acts on. Job itself carries none of
+// them, so the next persist drops them from the file.
+type storedJob struct {
+	Job
+	// LegacyPlacement is the removed "placement" key; "sandbox" named the
+	// AgentCore cloud sandbox.
+	LegacyPlacement string `json:"placement,omitempty"`
+}
+
+// legacyPlacementSandbox is the removed sandbox placement's on-disk value.
+const legacyPlacementSandbox = "sandbox"
+
 // loadJobs reads and parses the on-disk cron job store. Outcomes:
 //
 //   - (map, nil): normal read; a missing file yields a nil map (= empty).
@@ -35,7 +48,7 @@ const maxCronStoreBytes = 16 * 1024 * 1024
 //     symlink, or the corrupt-rename failed). Callers MUST abort: continuing
 //     with empty state would make the next persist clobber the real jobs (#469).
 func loadJobs(path string) (map[string]*Job, error) {
-	entries, out, err := jsonfile.Load[[]*Job](path, jsonfile.Options{
+	entries, out, err := jsonfile.Load[[]*storedJob](path, jsonfile.Options{
 		MaxBytes: maxCronStoreBytes,
 		Label:    "cron store",
 	})
@@ -56,12 +69,13 @@ func loadJobs(path string) (map[string]*Job, error) {
 	}
 
 	m := make(map[string]*Job, len(entries))
-	for _, j := range entries {
-		// json.Unmarshal of `[null, {...}]` yields nil *Job entries; drop them
+	for _, e := range entries {
+		// json.Unmarshal of `[null, {...}]` yields nil entries; drop them
 		// instead of panicking.
-		if j == nil {
+		if e == nil {
 			continue
 		}
+		j := &e.Job
 		if j.ID == "" {
 			continue
 		}
@@ -112,18 +126,13 @@ func loadJobs(path string) (map[string]*Job, error) {
 				"path", path, "cron_id", j.ID, "backend_bytes", len(j.Backend))
 			continue
 		}
-		// Placement: tampered/unknown values are normalised to local rather than
-		// dropping the job — a bad placement is a routing choice, not an injection
-		// vector. The sandbox×work_dir combination degrades the same way.
-		if err := validatePlacement(j.Placement); err != nil {
-			slog.Warn("cron store: normalising job with invalid placement to local",
-				"path", path, "cron_id", j.ID, "err", err)
-			j.Placement = ""
-		}
-		if placementIsSandbox(j.Placement) && j.WorkDir != "" {
-			slog.Warn("cron store: sandbox job carries work_dir (Phase 1 unsupported); normalising placement to local",
+		// The AgentCore cloud-sandbox placement was removed. A job written for
+		// it is paused rather than silently run on this host, which its author
+		// never chose; resuming it is the operator's explicit opt-in to local.
+		if e.LegacyPlacement == legacyPlacementSandbox && !j.Paused {
+			slog.Warn("cron store: pausing job written for the removed sandbox placement; resume it to run locally",
 				"path", path, "cron_id", j.ID)
-			j.Placement = ""
+			j.Paused = true
 		}
 		// Defensive Schedule / WorkDir validation for offline edits: control bytes
 		// would smuggle log injection into "could not chdir" lines and an over-long

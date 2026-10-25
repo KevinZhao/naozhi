@@ -183,35 +183,16 @@ func TestLocalRun_SessionWithoutCostWindowRecordsZero(t *testing.T) {
 	}
 }
 
-func TestAppendLedger_SandboxReceiptAndMetering(t *testing.T) {
+func TestAppendLedger_Metering(t *testing.T) {
 	ledger := costledger.NewStore(filepath.Join(t.TempDir(), "cost"), costledger.Options{})
 	s := &Scheduler{ledger: ledger}
-	job := &Job{ID: "job-sb", Backend: "claude"}
-	s.appendLedger(runCtx{jobID: job.ID, runID: "r1", snap: jobSnapshot{workDir: "/w/alpha", backend: job.Backend}}, runOutcome{sandboxMeta: &SandboxRunMeta{CostUSD: 1.25, Basis: costledger.BasisManaged,
-		Models: []costledger.ModelDelta{{Model: "m", CostUSD: 1.25, Tokens: costledger.Tokens{Output: 7}}}}, sandbox: true})
-	s.appendLedger(runCtx{jobID: job.ID, runID: "r2"}, runOutcome{sandboxMeta: &SandboxRunMeta{CostUSD: 0}, sandbox: true})
 	s.appendLedger(runCtx{jobID: "job-k", runID: "r3", snap: jobSnapshot{backend: "kiro"}}, runOutcome{costInc: costledger.Increment{Metered: map[costledger.Unit]float64{costledger.UnitCredits: 3}}})
 	ents := ledgerEntries(t, ledger)
-	if len(ents) != 2 {
+	if len(ents) != 1 {
 		t.Fatalf("entries = %d: %+v", len(ents), ents)
 	}
-	var receipt, metered *costledger.Entry
-	for i := range ents {
-		switch ents[i].Kind {
-		case costledger.KindReceipt:
-			receipt = &ents[i]
-		case costledger.KindMetering:
-			metered = &ents[i]
-		}
-	}
-	if receipt == nil || receipt.Source != costledger.SourceCronSandbox || receipt.Amount != 1.25 || receipt.Workspace != "alpha" || receipt.RunID != "r1" {
-		t.Fatalf("receipt = %+v", receipt)
-	}
-	if receipt.Basis != costledger.BasisManaged || len(receipt.Models) != 1 || receipt.Models[0].Output != 7 {
-		t.Fatalf("receipt drill-down = %+v", receipt)
-	}
-	if metered == nil || metered.Unit != costledger.UnitCredits || metered.Amount != 3 || metered.Backend != "kiro" {
-		t.Fatalf("metered = %+v", metered)
+	if m := ents[0]; m.Kind != costledger.KindMetering || m.Unit != costledger.UnitCredits || m.Amount != 3 || m.Backend != "kiro" {
+		t.Fatalf("metered = %+v", m)
 	}
 }
 
@@ -348,8 +329,8 @@ func TestEffectiveBackend(t *testing.T) {
 	}
 }
 
-// rc.backend outranks the snapshot's, which stays the fallback for sandbox
-// runs and pre-spawn finishes.
+// rc.backend outranks the snapshot's, which stays the fallback for
+// pre-spawn finishes.
 func TestAppendLedger_SessionBackendOutranksSnapshot(t *testing.T) {
 	ledger := costledger.NewStore(filepath.Join(t.TempDir(), "cost"), costledger.Options{})
 	s := &Scheduler{ledger: ledger, tbl: newJobTable(nil)}

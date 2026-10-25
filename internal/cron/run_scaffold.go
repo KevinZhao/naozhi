@@ -3,7 +3,7 @@ package cron
 import "github.com/naozhi/naozhi/internal/metrics"
 
 // runScaffold is the lifecycle envelope every CAS-owning cron run body executes
-// inside (shared by executeOpt and dispatchReplay, #2174):
+// inside (executeOpt, #2174):
 //
 //  1. metrics.CronRunInflight is +1'd before body and -1'd in a defer, so the
 //     gauge pairs on every exit path.

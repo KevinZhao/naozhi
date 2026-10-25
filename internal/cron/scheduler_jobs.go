@@ -57,10 +57,6 @@ func (s *Scheduler) deleteJobPostCleanup(jobID string, removeEntryID cronEntryID
 		s.cron.Remove(removeEntryID)
 	}
 	s.resetRouterStub(jobID)
-	// agentcore §6.2: a sandbox job deleted mid-run must Stop its microVM.
-	// Best-effort + idempotent; runs before deleteJobRuns so the pending file
-	// is resolved before the runs/ tree is swept.
-	s.stopSandboxRunsForJob(jobID)
 	s.deleteJobRuns(jobID)
 	s.gate.cleanupRunningJobIfIdle(jobID)
 }
@@ -97,14 +93,6 @@ type JobUpdate struct {
 	// pointer 到 "" 显式清空，回落到 router default。字符/长度由 dashboard
 	// handler 先行把关；未知 backend 不在此处拒绝（router wrapperFor 会 fallback）。
 	Backend *string
-	// Placement 是运行位置（agentcore-cloud-sandbox RFC §4.2）。nil 保持
-	// 原值；pointer 到 "" 或 "local" 回落本机；"sandbox" 走 AgentCore
-	// run-once。validatePlacement 在 UpdateJob 入口拒绝未知值。
-	Placement *string
-	// SideEffects 切换"任务有外部副作用"声明（agentcore §6.2 双跑围栏）。
-	// nil 保持原值；pointer 到 true/false 写显式三态。无 clear 语义——
-	// 与 Placement 一样属"运行属性"，不像 Notify 需要回 legacy-default。
-	SideEffects *bool
 }
 
 // JobChat is the IM chat that created a job.
@@ -150,13 +138,6 @@ func (upd JobUpdate) applyTo(j *Job) {
 	}
 	if upd.Backend != nil {
 		j.Backend = *upd.Backend
-	}
-	if upd.Placement != nil {
-		j.Placement = *upd.Placement
-	}
-	if upd.SideEffects != nil {
-		v := *upd.SideEffects
-		j.SideEffects = &v
 	}
 }
 
@@ -229,11 +210,6 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 			if err := checkJobField(f.name, *f.v, f.max); err != nil {
 				return nil, err
 			}
-		}
-	}
-	if upd.Placement != nil {
-		if err := validatePlacement(*upd.Placement); err != nil {
-			return nil, fmt.Errorf("cron: %w", err)
 		}
 	}
 

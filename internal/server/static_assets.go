@@ -110,9 +110,6 @@ var cronDrawerJS embed.FS
 //go:embed static/cron_trigger.js
 var cronTriggerJS embed.FS
 
-//go:embed static/cron_attention.js
-var cronAttentionJS embed.FS
-
 //go:embed static/cron_live.js
 var cronLiveJS embed.FS
 
@@ -290,7 +287,6 @@ var staticAssets, servedAssetVersion = func() (map[string]staticAsset, string) {
 		{"cron_timeline.js", cronTimelineJS, "static/cron_timeline.js", true},
 		{"cron_drawer.js", cronDrawerJS, "static/cron_drawer.js", true},
 		{"cron_trigger.js", cronTriggerJS, "static/cron_trigger.js", true},
-		{"cron_attention.js", cronAttentionJS, "static/cron_attention.js", true},
 		{"cron_live.js", cronLiveJS, "static/cron_live.js", true},
 		{"platform.js", platformJS, "static/platform.js", true},
 		{"ws_manager.js", wsManagerJS, "static/ws_manager.js", true},

@@ -216,7 +216,7 @@ func (s *Scheduler) applyJitterAndRecheck(jobID string, runID string, inflight *
 // CLI so the validated view matches the opened view. With allowedRoot unset a
 // best-effort EvalSymlinks (not bare Clean, which does not resolve symlinks) is
 // used, falling back to the cleaned raw input on error — losing resolution beats
-// refusing to run when sandbox is off by operator choice (#638).
+// refusing to run when allowedRoot is off by operator choice (#638).
 //
 // abort=true (after finishRun for the outside-root class) → caller MUST return.
 func (s *Scheduler) resolveCronWorkspace(rc runCtx) (workDirForCLI string, abort bool) {
@@ -305,10 +305,7 @@ func (s *Scheduler) executeOpt(jobID string, viaTriggerNow bool) {
 		if started.rc == nil {
 			return
 		}
-		// A sandbox-placement run is closed as one, like the replay recover, so
-		// the sandbox buckets stay a subset of the run totals (#2173).
-		sandbox := placementIsSandbox(started.rc.snap.placement)
-		if paused := s.finishRun(*started.rc, runOutcome{state: RunStateFailed, errClass: ErrClassPanic, errMsg: "the run panicked", sandbox: sandbox}); paused > 0 {
+		if paused := s.finishRun(*started.rc, runOutcome{state: RunStateFailed, errClass: ErrClassPanic, errMsg: "the run panicked"}); paused > 0 {
 			s.deliverFailureNotice(*started.rc, ErrClassPanic, TurnCauseUnknown, RunStateFailed, s.execTimeout, paused)
 		}
 	}}.run(func() {
@@ -344,8 +341,7 @@ func (s *Scheduler) executeAcquired(jobID string, viaTriggerNow bool, inflight *
 	}
 	started.rc = &rc
 
-	// Before the marker and the spawn, so a refused run leaves neither; sandbox
-	// runs are refused too.
+	// Before the marker and the spawn, so a refused run leaves neither.
 	if s.budgetSkipped(rc) {
 		return
 	}
@@ -355,13 +351,7 @@ func (s *Scheduler) executeAcquired(jobID string, viaTriggerNow bool, inflight *
 	// becomes a canceled record with ErrClassInterrupted. Written AFTER the
 	// snapshot so it carries the prompt/workDir the history row needs, and after
 	// the started event so a marker never outlives a run the dashboard never saw.
-	if !placementIsSandbox(snap.placement) {
-		// LOCAL runs only: a sandbox run's in-flight record is
-		// sandboxpending/<runID>.json, and only its reconciler stops the
-		// microVM and classifies the orphan. A second marker here let the
-		// local reconcile settle the run first, or finish it twice (#2970).
-		rc.markerPath = s.runMarkers().Write(rc.inflightMarker(), lg)
-	}
+	rc.markerPath = s.runMarkers().Write(rc.inflightMarker(), lg)
 
 	// Per-job timeout is always s.execTimeout: robfig/cron's SkipIfStillRunning
 	// chain wrapper drops a colliding tick instead of killing a long-running job,
@@ -373,11 +363,7 @@ func (s *Scheduler) executeAcquired(jobID string, viaTriggerNow bool, inflight *
 	ctx, spawnCancel := context.WithTimeout(s.stopCtx, jobTimeout)
 	defer spawnCancel()
 
-	// execPrepareSpawn also owns the sandbox placement fork: a sandbox job
-	// self-terminates via finishRun inside the helper and returns
-	// okSpawnPrep=false, so the same return covers it. inflight + spawnCancel
-	// let the helper release the spawn timer before the long sandbox invoke.
-	opts, key, cleanText, stubRefresh, okSpawnPrep := s.execPrepareSpawn(rc, spawnCancel)
+	opts, key, cleanText, stubRefresh, okSpawnPrep := s.execPrepareSpawn(rc)
 	if !okSpawnPrep {
 		return
 	}
@@ -559,14 +545,9 @@ func (s *Scheduler) execSnapshotAndEmit(jobID string, viaTriggerNow bool, runID 
 // execPrepareSpawn resolves the agent/backend/workspace options and runs the
 // fresh-context preflight for a run.
 //
-// ok=false → resolveCronWorkspace, freshContextPreflightP0, or the sandbox
-// placement fork already drove finishRun (and ran stubRefresh where
-// applicable); the caller must return.
-//
-// inflight + spawnCancel are threaded in for the sandbox fork only: a sandbox
-// job releases the spawn-phase timer up front and hands the in-flight handle to
-// the run-once microVM path, which never touches the session router.
-func (s *Scheduler) execPrepareSpawn(rc runCtx, spawnCancel context.CancelFunc) (opts AgentOpts, key, cleanText string, stubRefresh stubRefresher, ok bool) {
+// ok=false → resolveCronWorkspace or freshContextPreflightP0 already drove
+// finishRun (and ran stubRefresh where applicable); the caller must return.
+func (s *Scheduler) execPrepareSpawn(rc runCtx) (opts AgentOpts, key, cleanText string, stubRefresh stubRefresher, ok bool) {
 	// rc is the run's identity block, built once by executeAcquired (Epic H #2546).
 	snap := rc.snap
 	// agentCommands/agents are published once at construction and read
@@ -581,26 +562,6 @@ func (s *Scheduler) execPrepareSpawn(rc runCtx, spawnCancel context.CancelFunc) 
 	// at the router boundary still rejects shape-invalid input.
 	if snap.backend != "" {
 		opts.Backend = snap.backend
-	}
-
-	// Placement fork (agentcore-cloud-sandbox RFC §4.2): sandbox jobs are
-	// run-once microVM invocations that never touch the session router. Branch
-	// here, after agent resolution and before any router state, so the local
-	// path stays byte-identical; executeSandbox routes every terminal through
-	// finishRun and the caller's finalizer still releases the CAS gate.
-	if placementIsSandbox(snap.placement) {
-		// Release the spawn-phase timer now: the sandbox path derives its own
-		// budget, and keeping this ctx alive would hand later code a misleading one.
-		spawnCancel()
-		// rc itself, not a re-listed copy: the sandbox finish and the scaffold's
-		// recover must claim the same run guard, or a panic after the sandbox
-		// finish closes the run a second time.
-		s.executeSandbox(sandboxExecArgs{
-			runCtx: rc,
-			prompt: cleanText,
-			model:  opts.Model,
-		})
-		return AgentOpts{}, "", "", stubRefresher{}, false
 	}
 
 	if snap.workDir != "" {

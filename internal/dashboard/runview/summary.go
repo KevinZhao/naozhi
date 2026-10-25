@@ -4,8 +4,8 @@
 // outcome (a four-value vocabulary nothing else used), and a client rendering
 // "a run" had to know who ran it. The shape is the JSON projection of
 // runtelemetry.RunRecord — unix-ms timestamps because every consumer is
-// dashboard JS — plus the per-producer extras (replay_of, first_byte_ms) that
-// are meaningless outside their subsystem but harmless as omitempty.
+// dashboard JS — plus the per-producer extra (first_byte_ms) that is
+// meaningless outside its subsystem but harmless as omitempty.
 package runview
 
 import (
@@ -28,8 +28,6 @@ type Summary struct {
 	DurationMS int64  `json:"duration_ms,omitempty"`
 	SessionID  string `json:"session_id,omitempty"`
 	ErrorClass string `json:"error_class,omitempty"`
-	// ReplayOf links a cron replay run to its origin (agentcore §7.3).
-	ReplayOf string `json:"replay_of,omitempty"`
 	// FirstByteMS is session-run latency instrumentation.
 	FirstByteMS int64   `json:"first_byte_ms,omitempty"`
 	CostUSD     float64 `json:"cost_usd,omitempty"`

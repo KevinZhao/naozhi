@@ -67,9 +67,9 @@ const (
 	// ErrClassCronInterrupted marks a run that was still executing when the
 	// process went away — a graceful shutdown that outran the drain budget, or a
 	// hard kill. RunState stays "canceled" (it did not complete) and the class
-	// carries WHY, following the same split as the sandbox classes below: a new
-	// RunState would need a coordinated dashboard.js change, while an error class
-	// renders through the existing canceled badge with the detail attached.
+	// carries WHY: a new RunState would need a coordinated dashboard.js change,
+	// while an error class renders through the existing canceled badge with the
+	// detail attached.
 	// The next boot writes it to runs/ history from the run's leftover in-flight
 	// marker, unless the run is adopted and its turn completes (#2546).
 	ErrClassCronInterrupted ErrorClass = "interrupted"
@@ -82,17 +82,6 @@ const (
 	// was paused or deleted between dispatch and claiming its run slot.
 	ErrClassCronPausedConcurrent  ErrorClass = "paused_concurrent"
 	ErrClassCronDeletedConcurrent ErrorClass = "deleted_concurrent"
-
-	// cron sandbox placement (agentcore-cloud-sandbox RFC §6.1): distinct
-	// because they differ in replay safety — "sandbox_failed" is the CLI's
-	// attested failure (replay reasonably safe); "sandbox_transport" means
-	// the stream broke without attestation (§6.2 containment, red badge).
-	// RunState stays "failed"; the badge derives from error_class.
-	ErrClassCronSandboxFailed    ErrorClass = "sandbox_failed"
-	ErrClassCronSandboxTransport ErrorClass = "sandbox_transport"
-	// ErrClassCronSandboxUnavailable: placement=sandbox but no sandbox
-	// executor wired. Permanent config error, not a transient failure.
-	ErrClassCronSandboxUnavailable ErrorClass = "sandbox_unavailable"
 
 	// sysession-specific.
 	ErrClassSysessionUpstream   ErrorClass = "upstream"

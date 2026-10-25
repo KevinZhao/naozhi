@@ -43,12 +43,6 @@ type jobSnapshot struct {
 	lastSessionID string
 	notify        *bool // nil = unset
 	fresh         bool
-	// placement 是 snapshot 时刻的 Job.Placement（""≡local）。executeOpt
-	// 据此在 router 路径前分流到 sandbox 执行器（RFC §4.2 placement 轴）。
-	placement string
-	// sideEffects 是 snapshot 时刻的 Job.SideEffects（nil→false）。sandbox
-	// failed-transport 路径据此决定是否进人工确认队列（§6.2 双跑围栏）。
-	sideEffects bool
 }
 
 // cronNoticePrefixFmt is the IM-notice prefix template every cron-side
@@ -118,10 +112,6 @@ func failureNoticeBody(snap jobSnapshot, to NotifyTarget, errClass ErrorClass, t
 	timedOut := state == RunStateTimedOut || errClass == ErrClassDeadlineExceeded
 	var cause string
 	switch {
-	case errClass == ErrClassSandboxTransport && timedOut:
-		cause = "云沙箱运行超时（超过 " + formatNoticeBudget(timeout) + "），任务状态未知，请检查执行历史"
-	case errClass == ErrClassSandboxTransport:
-		cause = "云沙箱连接中断，任务状态未知，请检查执行历史"
 	case timedOut:
 		cause = "执行超时（超过 " + formatNoticeBudget(timeout) + "）"
 	case errClass == ErrClassSessionCapacity:
@@ -138,10 +128,6 @@ func failureNoticeBody(snap jobSnapshot, to NotifyTarget, errClass ErrorClass, t
 		cause = "工作目录不可达，本次执行已跳过"
 	case errClass == ErrClassWorkDirOutsideRoot:
 		cause = "工作目录超出允许根目录，本次执行已跳过"
-	case errClass == ErrClassSandboxFailed:
-		cause = "云沙箱任务失败"
-	case errClass == ErrClassSandboxUnavailable:
-		cause = "云沙箱未配置，任务无法执行"
 	default:
 		cause = "执行失败"
 	}
@@ -322,8 +308,6 @@ func snapshotJobLocked(j *Job) jobSnapshot {
 		fresh:         j.FreshContext,
 		schedule:      j.Schedule,
 		backend:       j.Backend,
-		placement:     j.Placement,
-		sideEffects:   j.SideEffects != nil && *j.SideEffects,
 		lastSessionID: j.LastSessionID,
 	}
 	// Alias j.Notify instead of deep-copying (#1931): UpdateJob only ever

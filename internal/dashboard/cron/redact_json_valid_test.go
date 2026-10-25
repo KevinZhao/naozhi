@@ -3,14 +3,9 @@ package cron
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	cronpkg "github.com/naozhi/naozhi/internal/cron"
 )
 
 // The secret/path redactors run over raw JSON in two dashboard handlers. When
@@ -76,63 +71,5 @@ func TestTranscript_ToolInputWithEnvAssignmentStillServes200Body(t *testing.T) {
 	}
 	if strings.Contains(string(resp.Turns[0].Input), "abc") {
 		t.Errorf("secret leaked in input: %s", resp.Turns[0].Input)
-	}
-}
-
-func TestHandleRunEvents_RedactionKeepsEveryLineValidJSON(t *testing.T) {
-	t.Parallel()
-	tmp := t.TempDir()
-	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{
-		StorePath:      filepath.Join(tmp, "cron_jobs.json"),
-		AllowNilRouter: true,
-	}, cronpkg.SchedulerDeps{})
-
-	jobID := strings.Repeat("a", 16)
-	runID := strings.Repeat("b", 16)
-	evDir := filepath.Join(tmp, "sandboxevents", jobID)
-	if err := os.MkdirAll(evDir, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	lines := `{"kind":"cli","line":{"command":"export ANTHROPIC_API_KEY=abc"}}` + "\n" +
-		`{"kind":"cli","cmd":"cat \"/tmp/f\""}` + "\n" +
-		`{"kind":"exit","code":0}` + "\n"
-	if err := os.WriteFile(filepath.Join(evDir, runID+".ndjson"), []byte(lines), 0o600); err != nil {
-		t.Fatalf("write events: %v", err)
-	}
-
-	h := &Handlers{deps: Deps{Scheduler: sched}}
-	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/events?job_id="+jobID, nil)
-	req.SetPathValue("run_id", runID)
-	w := httptest.NewRecorder()
-	h.HandleRunEvents(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
-	}
-	if w.Body.Len() == 0 {
-		t.Fatal("empty 200 body: run events encoding silently failed")
-	}
-	var resp struct {
-		Events []json.RawMessage `json:"events"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v body=%s", err, w.Body.String())
-	}
-	if len(resp.Events) != 3 {
-		t.Fatalf("events = %d, want 3", len(resp.Events))
-	}
-	for i, ev := range resp.Events {
-		if !json.Valid(ev) {
-			t.Errorf("event[%d] invalid JSON: %s", i, ev)
-		}
-		if strings.Contains(string(ev), "abc") {
-			t.Errorf("event[%d] leaked secret: %s", i, ev)
-		}
-		if strings.Contains(string(ev), "/tmp/f") {
-			t.Errorf("event[%d] leaked path: %s", i, ev)
-		}
-	}
-	if !strings.Contains(string(resp.Events[2]), `"exit"`) {
-		t.Errorf("clean trailing event lost: %s", resp.Events[2])
 	}
 }

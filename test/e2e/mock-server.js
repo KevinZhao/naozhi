@@ -730,16 +730,6 @@ function startMockServer(overrides = {}) {
       return;
     }
 
-    // /api/cron/runs/<run_id>/snapshot?job_id=… — §7.3 输入快照面板。
-    // 必须排在下面那条通配 /api/cron/runs/<id> 之前，否则 run_id 会被解析成
-    // "<id>/snapshot" 而 404。
-    if (pathname.startsWith('/api/cron/runs/') && pathname.endsWith('/snapshot') && req.method === 'GET') {
-      if (!checkAuth()) return;
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ available: false }));
-      return;
-    }
-
     // /api/cron/runs/<run_id>?job_id=… — 单条 run 详情（PR-1 sheet 用）
     if (pathname.startsWith('/api/cron/runs/') && req.method === 'GET') {
       if (!checkAuth()) return;

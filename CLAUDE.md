@@ -36,7 +36,7 @@ Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI, Kiro, or Codex) as
 - **Scheduling / projects**: `cron` (+ `runstore` run history), `sysession` (background daemons), `project` / `projectapi` (discovery, chat binding, planner).
 - **Multi-node**: `node` (protocol, HTTP/reverse clients), `upstream` (reverse-connect dialer).
 - **Persistence / history**: `eventlog`, `history` (claudejsonl/kirojsonl/codexjsonl/naozhilog/merged), `attachment`, `runlog`, `claudefs` (Claude CLI on-disk layout), `discovery`, `subagent`.
-- **Domain helpers**: `selfupdate`, `transcribe`, `imauth`, `costledger`, `budget`, `webhook`, `runtelemetry`, `naozhisettings`, `ccassets`, `ccmodels`, `agentcore`, `uiprefs`, `replyfmt`, `usermsg`, `gitinfo`, `metrics`.
+- **Domain helpers**: `selfupdate`, `transcribe`, `imauth`, `costledger`, `budget`, `webhook`, `runtelemetry`, `naozhisettings`, `ccassets`, `ccmodels`, `uiprefs`, `replyfmt`, `usermsg`, `gitinfo`, `metrics`.
 - **Leaves**: `osutil`, `textutil`, `netutil`, `ratelimit`, `limits`, `sessionkey`, `tuningspec`, `backendid`, `cliinfo`, `apierr`, `ctxutil`, `leakguard`, `spawndiag`, `envpolicy`, `datadir`, `imageorient`, `testhelper`.
 
 ### CLI Process Lifecycle
@@ -164,7 +164,7 @@ Each phase emits a `phase=` timing log line. A new subsystem MUST be inserted at
 - **cron**, **projects**, **sysession**, **transcribe**, **update**, **im_access**, **log**
 - **workspace** / **workspaces** / **reverse_nodes** / **upstream**: local node identity, polled nodes, accepted reverse nodes, dial-out to a primary
 
-Config describes schema v2 only; there is no migration chain. v1 keys (`nodes`, `session.workspace`, `session.auto_chain`) are not read and are reported as `config-deprecated` diags (`internal/config/unknown_keys.go`). A `schema_version` newer than the binary is rejected.
+Config describes schema v2 only; there is no migration chain. v1 keys (`nodes`, `session.workspace`, `session.auto_chain`) are not read and are reported as `config-deprecated` diags (`internal/config/unknown_keys.go`); so is the removed `cron.sandbox` block. A `schema_version` newer than the binary is rejected.
 
 ## Concurrency Patterns
 

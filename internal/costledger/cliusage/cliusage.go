@@ -2,10 +2,10 @@
 // J1 of #2548.
 //
 // This ten-field mapping existed three times, field for field:
-// internal/session/managed_cost.go, internal/sysession/runner_cost.go and
-// internal/agentcore/envelope.go. Each also carried its own mirror of the wire
-// struct — clievent.ModelUsage, sysession.resultModelUsage,
-// agentcore.modelUsageRow — with identical field names and identical JSON tags.
+// internal/session/managed_cost.go, internal/sysession/runner_cost.go and the
+// since-removed cloud-sandbox client. Each also carried its own mirror of the
+// wire struct — clievent.ModelUsage, sysession.resultModelUsage and the
+// sandbox's own row — with identical field names and identical JSON tags.
 //
 // Three copies of a field mapping is three places to forget a field. A new usage
 // dimension (thinkingTokens was one) lands in whichever copies the author

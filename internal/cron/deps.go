@@ -28,13 +28,8 @@ type SchedulerDeps struct {
 	// nil = no broadcast. cmd/naozhi passes a runtelemetry.Relay the server
 	// binds once the Hub exists.
 	Telemetry runtelemetry.Broadcaster
-	// Sandbox executes placement=sandbox jobs on AgentCore microVMs
-	// (agentcore-cloud-sandbox RFC §4.2); built by the wireup layer so cron
-	// never imports the AWS SDK. nil = such jobs terminate with
-	// ErrClassCronSandboxUnavailable instead of silently running locally.
-	Sandbox SandboxRunner
-	// Ledger receives one cost entry per run (local: the run's cost-window
-	// increment; sandbox: receipt). nil = no ledger.
+	// Ledger receives one cost entry per run (the run's cost-window
+	// increment). nil = no ledger.
 	Ledger CostLedger
 	// Budget refuses a run whose job or machine has spent its daily cap
 	// (budget.go). nil = no budget.

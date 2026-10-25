@@ -94,14 +94,6 @@ func validateJobFields(j *Job) error {
 	if err := checkJobField("backend", j.Backend, MaxBackendLen); err != nil {
 		return err
 	}
-	if err := validatePlacement(j.Placement); err != nil {
-		return fmt.Errorf("cron: %w", err)
-	}
-	// Phase 1 sandbox guardrail (RFC §4.4): cross-field combination gate,
-	// mirrored in UpdateJob's critical section for the patch path.
-	if placementIsSandbox(j.Placement) && j.WorkDir != "" {
-		return ErrSandboxWorkDir
-	}
 	if err := checkJobField("notify_platform", j.NotifyPlatform, MaxNotifyTargetLen); err != nil {
 		return err
 	}
@@ -122,7 +114,6 @@ func truncateWithSuffix(s string, maxRunes int) string {
 // Input bounds for cron_jobs.json fields.
 const (
 	// MaxPromptBytes bounds a job prompt; every run replays it via the CLI.
-	// Defined in textutil so cron/sandboxstore (imported by cron) shares it.
 	MaxPromptBytes = textutil.MaxCronPromptBytes
 	// MaxIDLen bounds job IDs from IM commands and dashboard parameters.
 	// Generated IDs are 16-char hex; 64 leaves slack.

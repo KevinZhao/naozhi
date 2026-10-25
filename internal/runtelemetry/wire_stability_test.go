@@ -34,9 +34,6 @@ var (
 		ErrClassCronRouterMissing:      "router_missing",
 		ErrClassCronPausedConcurrent:   "paused_concurrent",
 		ErrClassCronDeletedConcurrent:  "deleted_concurrent",
-		ErrClassCronSandboxFailed:      "sandbox_failed",
-		ErrClassCronSandboxTransport:   "sandbox_transport",
-		ErrClassCronSandboxUnavailable: "sandbox_unavailable",
 
 		ErrClassSysessionUpstream:   "upstream",
 		ErrClassSysessionValidation: "validation",

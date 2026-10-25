@@ -12,9 +12,6 @@ const (
 	maxCronScheduleBytesDashboard = cronpkg.MaxScheduleBytes
 )
 
-// sandboxWorkDirMsg answers cronpkg.ErrSandboxWorkDir on create and update.
-const sandboxWorkDirMsg = "云沙箱暂不支持工作目录（Phase 1）：请先清空 work_dir 或改用本机运行"
-
 // Handlers groups the cron job management API endpoints.
 //
 // Injected wiring lives in deps (one Deps value, #2635) rather than a private

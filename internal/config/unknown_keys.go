@@ -202,8 +202,9 @@ func reportUnknownKeys(expanded []byte, deprecated map[string]bool) {
 
 // findDeprecatedKeys lists the schema v1 key spellings (nodes,
 // session.workspace, session.auto_chain) as config-deprecated diags naming the
-// v2 replacement, plus removed features (server.metrics_enabled). None of
-// them has any effect any more: Load no longer rewrites them. The v1 `--append-system-prompt` inside agents[].args is not
+// v2 replacement, plus the keys of removed features (server.metrics_enabled,
+// cron.sandbox). None of them has any effect any more: Load no longer rewrites
+// them. The v1 `--append-system-prompt` inside agents[].args is not
 // listed here: validateArgvStrings already warns about it (argv-denylist) and
 // names agents[<id>].system_prompt.
 func findDeprecatedKeys(doc *yaml.Node) []spawndiag.Diag {
@@ -228,6 +229,9 @@ func findDeprecatedKeys(doc *yaml.Node) []spawndiag.Diag {
 		if hasYAMLKey(session, "auto_chain") {
 			add("session.auto_chain", "'session.auto_chain' has no effect; remove this block")
 		}
+	}
+	if cron := yamlChildMap(root, "cron"); cron != nil && hasYAMLKey(cron, "sandbox") {
+		add("cron.sandbox", "the AgentCore cloud sandbox placement was removed and 'cron.sandbox' has no effect; remove this block (jobs saved with placement=sandbox load paused)")
 	}
 	return diags
 }

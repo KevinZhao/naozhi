@@ -261,7 +261,7 @@ function buildCostHealthLines(c) {
 // estimate at list/contract price, never an invoice. A narrower `scope` marks
 // the dropped count ledger-wide: a lost entry has no owner to filter on.
 function costCardTitle(c, scope) {
-  let t = '近 30 天账本合计（' + (scope || '会话 + cron + 云沙箱') + '），CLI 估算口径，非账单';
+  let t = '近 30 天账本合计（' + (scope || '会话 + cron') + '），CLI 估算口径，非账单';
   if (c.unknown > 0) t += '；含 ' + c.unknown + ' 条未知定价（模型不在 CLI 价表，按默认模型估算）';
   if (c.dropped > 0) t += (scope ? '；整个账本曾丢弃 ' + c.dropped + ' 条（无法归到来源），此项可能偏低' : '；账本曾丢弃 ' + c.dropped + ' 条，金额可能偏低');
   return t;

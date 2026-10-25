@@ -61,7 +61,7 @@ type backfillPaths struct {
 
 // backfillReport counts what the import did.
 type backfillReport struct {
-	SessionRuns, CronLocal, CronSandbox                            int
+	SessionRuns, CronLocal                                         int
 	Imported, Duplicate, SkippedCumulative, SkippedOld, Unreadable int
 }
 
@@ -152,10 +152,6 @@ func backfillLedger(p backfillPaths, dryRun bool, out io.Writer) (backfillReport
 				base.Workspace = ""
 			}
 			switch {
-			case r.SandboxMeta != nil && r.SandboxMeta.CostUSD > 0:
-				rep.CronSandbox++
-				base.Source, base.Amount = costledger.SourceCronSandbox, r.SandboxMeta.CostUSD
-				emit(base)
 			case r.CostUSD > 0 && r.Fresh:
 				rep.CronLocal++
 				base.Source, base.Amount = costledger.SourceCronLocal, r.CostUSD
@@ -170,7 +166,7 @@ func backfillLedger(p backfillPaths, dryRun bool, out io.Writer) (backfillReport
 	if dryRun {
 		mode = "将导入（dry-run）"
 	}
-	fmt.Fprintf(out, "session run 记录 %d 条，cron 本地 run %d 条，云沙箱 run %d 条\n", rep.SessionRuns, rep.CronLocal, rep.CronSandbox)
+	fmt.Fprintf(out, "session run 记录 %d 条，cron 本地 run %d 条\n", rep.SessionRuns, rep.CronLocal)
 	fmt.Fprintf(out, "%s %d 条；已存在跳过 %d；persistent cron 累计值跳过 %d；超出保留期跳过 %d；不可读 %d\n",
 		mode, rep.Imported, rep.Duplicate, rep.SkippedCumulative, rep.SkippedOld, rep.Unreadable)
 	return rep, nil
