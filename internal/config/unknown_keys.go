@@ -202,8 +202,8 @@ func reportUnknownKeys(expanded []byte, deprecated map[string]bool) {
 
 // findDeprecatedKeys lists the schema v1 key spellings (nodes,
 // session.workspace, session.auto_chain) as config-deprecated diags naming the
-// v2 replacement. None of them has any effect any more: Load no longer
-// rewrites them. The v1 `--append-system-prompt` inside agents[].args is not
+// v2 replacement, plus removed features (server.metrics_enabled). None of
+// them has any effect any more: Load no longer rewrites them. The v1 `--append-system-prompt` inside agents[].args is not
 // listed here: validateArgvStrings already warns about it (argv-denylist) and
 // names agents[<id>].system_prompt.
 func findDeprecatedKeys(doc *yaml.Node) []spawndiag.Diag {
@@ -217,6 +217,9 @@ func findDeprecatedKeys(doc *yaml.Node) []spawndiag.Diag {
 	}
 	if hasYAMLKey(root, "nodes") {
 		add("nodes", "'nodes' is no longer read and its remote workspaces are NOT configured; rename it to 'workspaces'")
+	}
+	if server := yamlChildMap(root, "server"); server != nil && hasYAMLKey(server, "metrics_enabled") {
+		add("server.metrics_enabled", "'server.metrics_enabled' has no effect: GET /metrics (Prometheus export) was removed; counters stay at /api/debug/vars (server.debug_mode); remove this key")
 	}
 	if session := yamlChildMap(root, "session"); session != nil {
 		if hasYAMLKey(session, "workspace") {
