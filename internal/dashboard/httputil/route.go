@@ -3,10 +3,7 @@
 // Route registration used to live entirely in internal/server/routes.go: 68
 // /api/* patterns written out by hand, with the auth wrapper threaded into six
 // register*Routes helpers as a bare func(http.HandlerFunc) http.HandlerFunc.
-// Nothing in the type system said which package owned which path, so the
-// boundary was policed from outside by the api_route_owner lint rule (a few
-// hundred lines of AST tooling), with handle_decl guarding the neighbouring
-// edge that *Server grows no handlers of its own.
+// Nothing in the type system said which package owned which path.
 //
 // Now each sub-package returns its own []Route and the server applies the
 // middleware chain. Two consequences worth stating, because they are the point:
@@ -20,8 +17,8 @@
 //  2. Path ownership becomes a compile-time fact — the patterns for /api/cron
 //     live in internal/dashboard/cron. api_route_owner, which reconstructed
 //     this by scanning ASTs, no longer had a question to answer and was
-//     deleted (#2554). handle_decl was kept: whether internal/server sprouts a
-//     new handler is not answered by this type, only by that rule (#2636).
+//     deleted (#2554). Whether internal/server sprouts a new handler is not
+//     answered by this type; that is left to review.
 //
 // Patterns stay STRING LITERALS inside each package's Routes() method on
 // purpose: routes_snapshot_test.go reads them from the AST, and a computed

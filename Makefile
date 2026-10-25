@@ -3,7 +3,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 BINARY  := naozhi
 MAIN    := ./cmd/naozhi/
 
-.PHONY: build vet test lint lint-gofmt vuln deploy release clean lint-server lint-server-fail release-gate
+.PHONY: build vet test lint lint-gofmt vuln deploy release clean release-gate
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags='$(LDFLAGS)' -o bin/$(BINARY) $(MAIN)
@@ -49,20 +49,6 @@ vuln:
 
 test:
 	go test -race ./...
-
-# server-package contracts (server-split-phase4-design.md §六.2 / §九.2).
-# 原计划 Phase 5 完工后切 fail，但 ADR-001 判定 4b 暂缓（Phase 5 依赖 4b），
-# 触发条件不再会到来。2026-07-31 清零存量后 CI 已切 lint-server-fail；
-# warn 模式保留供本地快速扫描。
-lint-server:
-	go run ./tools/lint-server-handlers -mode warn
-
-lint-server-fail:
-	go run ./tools/lint-server-handlers -mode fail
-
-# Router 字段 `// 读写:` 注释漂移检测（router-split P0 安全网，RFC
-# router-god-object-split）。AST 解析 Router 结构每个字段的声明访问域，再扫
-# 所有 router_*.go 实际 r.<field> 访问对账，漂移即报。
 
 # Cross-compile all supported platforms. Windows omitted: internal/shim
 # depends on POSIX-only syscalls (Kill, Setsid) not present on windows/*.
