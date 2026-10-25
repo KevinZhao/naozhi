@@ -184,3 +184,52 @@ func TestBudget_ReplyWarnActionOver(t *testing.T) {
 		t.Errorf("reply over the global cap = %q", got)
 	}
 }
+
+// Admit refuses media for a chat past its cap before it is fetched, with
+// admitBudget's metric and throttled reply (#3652).
+func TestAdmit_BudgetSpentChatFetchesNothing(t *testing.T) {
+	d, fp, _, spend := newBudgetDispatcher(t, budget.Limits{PerChatDailyUSD: 1})
+	ctx := context.Background()
+	spend("fake:direct:c1:reviewer", 1)
+	before := blockedCount("chat")
+
+	for _, text := range []string{"", "look at this", "/review this"} {
+		if d.Admit(ctx, budgetMsg("c1", text)) {
+			t.Errorf("Admit let %q with media through a chat at its cap", text)
+		}
+	}
+	if moved := blockedCount("chat") - before; moved != 3 {
+		t.Errorf("naozhi_dispatch_budget_blocked_total[chat] moved by %d, want 3", moved)
+	}
+	if n := countReplies(fp, budgetSpentReply); n != 1 {
+		t.Errorf("budget replies = %d, want 1: %q", n, fp.allReplies())
+	}
+	if !d.Admit(ctx, budgetMsg("c2", "")) {
+		t.Error("Admit refused a chat under its cap")
+	}
+}
+
+// A reply the AskUserQuestion card replaces sends no text, so it must not
+// spend the day's warning: the next reply that goes out carries it (#3694).
+func TestBudget_AskQuestionKeepsWarning(t *testing.T) {
+	d, fp, _, spend := newBudgetDispatcher(t, budget.Limits{PerChatDailyUSD: 10})
+	key := "fake:direct:c1:general"
+	spend(key, 8)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	msg := budgetMsg("c1", "hello")
+	o := d.newIMOrigin(msg, slog.Default(), key, "general", session.AgentOpts{}, imMessage, len(msg.Text), 0)
+	dl := &imDelivery{o: o, p: fp, lg: slog.Default()}
+	dl.BeforeSession(ctx)
+	dl.tracker.askQuestionFired.Store(true)
+	dl.reply(ctx, &clievent.SendResult{Text: "bailout"}, nil)
+	dl.tracker.stop()
+	if got := fp.allReplies(); len(got) != 0 {
+		t.Fatalf("the ask_question turn sent %q", got)
+	}
+
+	if got := replyWithBudget(t, d, fp, key); !strings.HasSuffix(got, "⚠️ 今日费用已达预算的 80%（本会话 $8.00 / $10.00）") {
+		t.Errorf("reply after the card = %q, want the 80%% warning", got)
+	}
+}
