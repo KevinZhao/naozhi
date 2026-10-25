@@ -32,6 +32,5 @@ func (s *Server) buildAssetBrowser() *extccassets.Handler {
 		providers,
 		resolveClaudeDir(),
 		func(*http.Request) string { return "" }, // project scope deferred (RFC §9.3)
-		newIPLimiterWithProxy(extccassets.AssetsLimiterRate, extccassets.AssetsLimiterBurst, s.auth.TrustedProxy),
 	)
 }

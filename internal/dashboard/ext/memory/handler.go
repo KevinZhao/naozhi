@@ -38,7 +38,6 @@ const maxNegCacheEntries = 4096
 type Handler struct {
 	projectsDir    string
 	currentProject string
-	limiter        IPLimiter
 
 	// Resolved projectsDir prefix cached at construction so the lexical
 	// HasPrefix gate and the post-EvalSymlinks recheck share one immutable
@@ -64,21 +63,16 @@ var memoryProjectDirRE = regexp.MustCompile(`^-[a-zA-Z0-9_][a-zA-Z0-9._\-]{0,255
 // appears in this Go source file — the compiler rejects mid-file BOM.
 var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
-const (
-	MemoryLimiterRate  = 10
-	MemoryLimiterBurst = 20
-
-	// maxMemoryFileBytes caps a single memory .md read; larger files are
-	// truncated and the response carries Truncated:true so the client can
-	// show a "(已截断)" hint instead of silently losing the tail (#1044).
-	maxMemoryFileBytes = 256 * 1024
-)
+// maxMemoryFileBytes caps a single memory .md read; larger files are
+// truncated and the response carries Truncated:true so the client can
+// show a "(已截断)" hint instead of silently losing the tail (#1044).
+const maxMemoryFileBytes = 256 * 1024
 
 var errMemoryPathEscape = errors.New("path escapes projects dir")
 
-// New constructs a memory Handler. projectsDir and limiter are injected by
-// the server package so this sub-package never reverse-imports it.
-func New(projectsDir string, limiter IPLimiter) *Handler {
+// New constructs a memory Handler. projectsDir is injected by the server
+// package so this sub-package never reverse-imports it.
+func New(projectsDir string) *Handler {
 	dir := projectsDir
 	// Canonicalise projectsDir so the prefix check in tryRead compares the
 	// resolved leaf against a resolved root (symlinked ~/.claude etc.).
@@ -101,7 +95,6 @@ func New(projectsDir string, limiter IPLimiter) *Handler {
 	return &Handler{
 		projectsDir:         dir,
 		currentProject:      cur,
-		limiter:             limiter,
 		resolvedPrefix:      prefix,
 		resolvedPrefixNoSep: prefixNoSep,
 	}
@@ -141,10 +134,6 @@ type memoryResponse struct {
 }
 
 func (h *Handler) HandleGet(w http.ResponseWriter, r *http.Request) {
-	if !h.limiter.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
-		return
-	}
 	slug := r.PathValue("slug")
 	if !memorySlugRE.MatchString(slug) {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid_slug"})

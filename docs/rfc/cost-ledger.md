@@ -234,7 +234,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 - `GET /api/cost/entries?session_key=|job_id=|run_id=&from=&to=&limit=`：明细，调试/审计用。
 - `GET /api/cost/budget?session_key=|job_id=`（#3447）：今日花费对 `cost.budget` 上限，`{enabled, scope, subject, spent, limit, warn, over, blocked, day, reset_at}`；取 IM / cron 闸门对该 key 或任务会检查的那一档（两者都不带 = 整机）。未配置预算时 `enabled:false`，没有适用上限时 `scope` 为空。只读，不拦 dashboard。
 - 校验（对照 `dashboard/cron/handlers.go:36-99 validateStringField`）：`from/to` RFC3339 解析失败 → 400，`to<from` → 400，跨度 > 90 天且无 `allow_full_range` → 400；`group_by` 白名单；`limit` ∈ [1,1000] 默认 200；`session_key/job_id/run_id/workspace` 长度 ≤256、合法 UTF-8、禁 C0/DEL、禁 log-injection runes；`dropped>0` 时响应加 `"note":"amount may be underestimated"`。
-- 鉴权走既有 `auth()`；挂 `listLimiter`。可见性与 `/api/sessions` 同级（naozhi 单租户；`session_key` 含平台用户 id 与现有 sessions API 暴露面一致，不新增）。
+- 鉴权走既有 `auth()`；不做 per-IP 限流（已鉴权 dashboard 接口统一不限流）。可见性与 `/api/sessions` 同级（naozhi 单租户；`session_key` 含平台用户 id 与现有 sessions API 暴露面一致，不新增）。
 
 ## 8. Dashboard
 

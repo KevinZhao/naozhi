@@ -370,7 +370,7 @@ v1 只列了引擎内部的不变量，而 E1-b 要在 `handleSend` 里动 8 处
 
 | 不变量 | 行 |
 | :--- | :--- |
-| `sendLimiter` 先于一切；multipart 额外过 `uploadLimiter`（注释算过账：30 req/min × 5 × 10 MB = 1.5 GB/min 灌进 CLI stdin） | 231-233 · 247-250 |
+| ~~`sendLimiter` 先于一切；multipart 额外过 `uploadLimiter`~~（per-IP 限流已随 #3722 移除） | — |
 | `MaxBytesReader` 三档 22 MB / 12 MB / 2 MB；`handleBind` 64 KB | 255 · 256 · 291 · 539 |
 | `rejectIfTooManyFields`（`maxMultipartFields=32`）紧跟 `ParseMultipartForm` | 261-263 |
 | 内联 fan-out ≤2 + `maxFilesPerSend` **双检**（multipart 内 + 统一路径再一次） | 274-281 · 317-320 |

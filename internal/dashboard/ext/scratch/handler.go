@@ -27,7 +27,6 @@ type Handler struct {
 	broadcaster Broadcaster
 	router      ScratchRouter
 	pool        Pool
-	openLimit   IPLimiter
 	agents      map[string]sessionview.AgentOpts
 }
 
@@ -53,13 +52,8 @@ type openResponse struct {
 }
 
 // HandleOpen creates a scratch session seeded with the quote. Auth is
-// inherited from the router mux; a per-IP limiter stops an authenticated
-// script from exhausting the scratch pool or CLI process budget.
+// inherited from the router mux.
 func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
-	if h.openLimit != nil && !h.openLimit.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "open rate limit exceeded"})
-		return
-	}
 	r.Body = http.MaxBytesReader(w, r.Body, httputil.MaxRequestBodyBytes)
 	var req openRequest
 	if err := httputil.DecodeJSONBody(r, &req); err != nil {
@@ -353,7 +347,6 @@ type Deps struct {
 	Broadcaster Broadcaster
 	Router      ScratchRouter
 	Pool        Pool
-	OpenLimit   IPLimiter
 	Agents      map[string]sessionview.AgentOpts
 }
 
@@ -363,14 +356,9 @@ func New(d Deps) *Handler {
 		broadcaster: d.Broadcaster,
 		router:      d.Router,
 		pool:        d.Pool,
-		openLimit:   d.OpenLimit,
 		agents:      d.Agents,
 	}
 }
-
-// SetOpenLimitForTest lets server-package integration tests bypass the
-// open-rate gate. NOT for production use.
-func (h *Handler) SetOpenLimitForTest(l IPLimiter) { h.openLimit = l }
 
 // RouterIsWired reports whether the router field has been wired; used by the
 // server-package wiring-regression test.

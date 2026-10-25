@@ -343,7 +343,7 @@ type AgentOpts struct {
   | Planner model | text input（可选，占位显示 access profile 的 `default_model`） | `config.planner_model` |
   | Planner prompt | textarea（8192B 上限，前端计数） | `config.planner_prompt` |
 
-- **保存**：`PUT /api/projects/config`（已有 `ValidateConfig` gate + rate limit `configPutLimiter`）。校验失败（未知 backend / 未知 access profile）→ inline 红字提示，复用后端 diag 文案。
+- **保存**：`PUT /api/projects/config`（已有 `ValidateConfig` gate）。校验失败（未知 backend / 未知 access profile）→ inline 红字提示，复用后端 diag 文案。
 - **联动预览**：选定 access profile 后，面板底部只读展示「解析后生效链路」——如 `1P · Fable 5 → api.anthropic.com → claude-fable-5`，让用户看清「这个项目下一个会话会怎么跑」。**只展示 profile 名与非敏感字段（base-URL / model / backend），绝不显示 token 值或 `*_FILE` 内容。**
 
 ### 8.2 new-session access-profile picker（扩展现有 backend picker）

@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/session"
-	"golang.org/x/time/rate"
 )
 
 // mkProjDir creates a project subdir under root and returns its absolute path.
@@ -191,52 +190,6 @@ func TestHandleBind_RouteRegistered(t *testing.T) {
 	// the handler runs — anything other than 404/405 proves the route exists.
 	if w.Code == http.StatusNotFound || w.Code == http.StatusMethodNotAllowed {
 		t.Fatalf("POST /api/sessions/bind not registered: status=%d", w.Code)
-	}
-}
-
-// TestHandleBind_SharesSendRateLimiter pins the anti-flood invariant: /bind
-// must consume the SAME limiter as /send so it cannot be a cheaper
-// override-write flood vector. We swap in a burst-1 limiter and assert the
-// second bind from the same IP is rejected with 429 AND that a /send from the
-// same IP is then also throttled (proving a shared budget, not two pools).
-func TestHandleBind_SharesSendRateLimiter(t *testing.T) {
-	_, hs, router, root := newBindServer(t)
-	projDir := mkProjDir(t, root)
-	// burst 1, refill ~0 over the test window: the first request consumes the
-	// only token, every subsequent one (bind OR send) is throttled.
-	hs.sendH.sendLimiter = newIPLimiterWithProxy(rate.Limit(0.001), 1, false)
-
-	body := `{"key":"dashboard:pj:abc0123456789012:general","node":"local","workspace":"` + projDir + `"}`
-	bind := func() int {
-		req := httptest.NewRequest(http.MethodPost, "/api/sessions/bind", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		req.RemoteAddr = "203.0.113.9:5000"
-		w := httptest.NewRecorder()
-		hs.sendH.handleBind(w, req)
-		return w.Code
-	}
-
-	if code := bind(); code != http.StatusOK {
-		t.Fatalf("first bind status=%d want 200", code)
-	}
-	if code := bind(); code != http.StatusTooManyRequests {
-		t.Fatalf("second bind status=%d want 429 (burst-1 limiter must throttle)", code)
-	}
-	// Shared budget: a /send from the same IP is now also throttled, proving
-	// bind and send draw from one limiter instance rather than separate pools.
-	sreq := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
-		strings.NewReader(`{"key":"dashboard:pj:abc0123456789012:general","text":"hi"}`))
-	sreq.Header.Set("Content-Type", "application/json")
-	sreq.RemoteAddr = "203.0.113.9:5000"
-	sw := httptest.NewRecorder()
-	hs.sendH.handleSend(sw, sreq)
-	if sw.Code != http.StatusTooManyRequests {
-		t.Fatalf("send after bind exhausted the shared limiter: status=%d want 429", sw.Code)
-	}
-	// Sanity: the throttled binds wrote no override.
-	if got := router.Workspace("dashboard:pj:abc0123456789012"); got != projDir {
-		// The FIRST bind (200) did write it; throttled ones must not have changed it.
-		t.Fatalf("override=%q want %q (only the first, accepted bind should persist)", got, projDir)
 	}
 }
 

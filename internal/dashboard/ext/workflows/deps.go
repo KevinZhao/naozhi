@@ -7,12 +7,8 @@ import (
 	"context"
 
 	"github.com/naozhi/naozhi/internal/cli/workflow"
-	"github.com/naozhi/naozhi/internal/dashboard/contracts"
 	"github.com/naozhi/naozhi/internal/session"
 )
-
-// IPLimiter aliases the shared dashboard contract (#2285).
-type IPLimiter = contracts.IPLimiter
 
 // SessionLookup is the *session.Router surface the handler reads.
 type SessionLookup interface {
@@ -28,6 +24,5 @@ type Board interface {
 
 // Deps bundles all wiring for New.
 type Deps struct {
-	Router  SessionLookup
-	Limiter IPLimiter
+	Router SessionLookup
 }

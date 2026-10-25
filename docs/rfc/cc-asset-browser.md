@@ -468,7 +468,6 @@ type Handler struct {
     providers map[string]assets.Provider // backendID -> provider(仅含 provider!=nil 者)
     home      string         // resolveClaudeDir 的家目录(server 注入)
     repoRootFn func(*http.Request) string // 按请求解析当前工作区根(§9.3),无则 ""
-    limiter   IPLimiter      // 照抄 ext/memory/deps.go 的接口(Allow/AllowRequest)
 }
 
 // GET /api/cc/assets?backend=claude&kind=&repo=        -> Inventory（列表，不含原文）
@@ -483,9 +482,8 @@ type Handler struct {
 **职责边界【评审 E】**:provider 的 `Scan` **恒返回全量 Inventory**（含 Totals）;
 **按 `kind` 的切片在 handler 做**(从全量 Assets filter 出该 kind 再序列化)。
 这样缓存只缓全量(§3.4)、Totals 永远完整,handler 是无状态薄层。缓存与安全
-白名单都在 **provider 内部**(§3.4/§5)——handler 只做参数解析、限流、调
-`provider.Scan/ReadRaw`、切片、写 JSON。`IPLimiter` 接口照抄
-`ext/memory/deps.go`（核验确认其形状,handler.go:100-132 / deps.go:9-15）。
+白名单都在 **provider 内部**(§3.4/§5)——handler 只做参数解析、调
+`provider.Scan/ReadRaw`、切片、写 JSON（原有的 per-IP 限流已随 #3722 删除）。
 
 ### 3.4 缓存策略 —— 纯事件驱动（无 TTL、无后台轮询）
 
@@ -548,7 +546,7 @@ for _, p := range backend.All() {
     }
 }
 // repoRootFn 按请求解析当前工作区(§9.3);home 是 resolveClaudeDir 的家目录。
-s.ccAssetsH = extccassets.New(providers, claudeHome, s.repoRootForRequest, limiter)
+s.ccAssetsH = extccassets.New(providers, claudeHome, s.repoRootForRequest)
 ```
 
 无任何 provider 时三个路由仍注册,返回空 Inventory(不 404,前端据空列表
@@ -658,8 +656,8 @@ handler.go:273-309）:
    `HasPrefix`,挡 `../` 与 symlink 逃逸。照搬 `memory/handler.go` R242-SEC-7。
 3. **rel 参数白名单正则**:禁止绝对路径、`..`、控制字节。
 4. **大小/行数上限** + `ReadBounded`,防超大文件 OOM。
-5. **auth + 限流**:所有路由走现有 `auth()` + `IPLimiter`,与 `/api/memory`
-   一致。**只读 GET,无状态变更,无需 CSRF**(与项目既有约定一致)。
+5. **auth**:所有路由走现有 `auth()`,与 `/api/memory` 一致（per-IP 限流已随 #3722
+   删除）。**只读 GET,无状态变更,无需 CSRF**(与项目既有约定一致)。
 6. **绝对路径不出网**:前端只拿 `Ref` 三元组,永远拿不到服务端绝对路径。
 
 ---

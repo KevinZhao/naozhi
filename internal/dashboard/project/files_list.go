@@ -34,18 +34,12 @@ type listEntry struct {
 
 // HandleFilesList serves GET /api/projects/files/list?project=X&node=&dir=Y:
 // the immediate children of a workspace directory for the dashboard "文件"
-// browser. Same security posture as HandleFilesExists (rate-limit, project
-// name validation, symlink-escape / traversal guards). dir is
+// browser. Same security posture as HandleFilesExists (project name
+// validation, symlink-escape / traversal guards). dir is
 // workspace-relative; "" or "." is the root. All errors collapse to one 404
 // so a probing client gets no oracle; credential-named children are never
 // enumerated.
 func (h *Handlers) HandleFilesList(w http.ResponseWriter, r *http.Request) {
-	// Rate-limit before any filesystem work; shares HandleFilesExists' limiter
-	// since per-child Info() fan-out is the same DoS class.
-	if h.deps.FilesExistsLimiter != nil && !h.deps.FilesExistsLimiter.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "files/list rate limit exceeded"})
-		return
-	}
 	if h.deps.ProjectMgr == nil {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
 		return

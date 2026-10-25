@@ -24,7 +24,7 @@ func (h *Handlers) Routes() []httputil.Route {
 		{Pattern: "POST /api/cron/trigger", Handler: h.HandleTrigger},
 		{Pattern: "GET /api/cron/preview", Handler: h.HandlePreview},
 		// Run history / transcript / events / snapshot share the run_id path
-		// param and the same per-IP rate limit (RateLimits.Runs).
+		// param.
 		{Pattern: "GET /api/cron/runs", Handler: h.HandleRunsList},
 		{Pattern: "GET /api/cron/runs/{run_id}", Handler: h.HandleRunDetail},
 		{Pattern: "GET /api/cron/runs/{run_id}/transcript", Handler: h.HandleRunTranscript},

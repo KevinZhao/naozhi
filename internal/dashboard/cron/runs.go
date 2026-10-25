@@ -22,11 +22,6 @@ const runIDLenLimit = cronpkg.MaxIDLen
 // job, newest first. limit defaults to 50 (clamped to DefaultRunsKeepCount);
 // before is a unix-ms paging cursor. next_before is omitted on the last page.
 func (h *Handlers) HandleRunsList(w http.ResponseWriter, r *http.Request) {
-	// Gate per-IP before any scheduler / FS work (stolen-token enumeration).
-	if h.deps.RateLimits.Runs != nil && !h.deps.RateLimits.Runs.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
-		return
-	}
 	if h.deps.Scheduler == nil {
 		// Explicit empty slice so json.Marshal emits `[]`, not null.
 		httputil.WriteJSON(w, cronRunsListResp{Runs: []cronRunSummaryView{}})
@@ -92,11 +87,6 @@ func (h *Handlers) HandleRunsList(w http.ResponseWriter, r *http.Request) {
 // GET /api/cron/runs/{run_id}?job_id=... returns the full CronRun (Prompt +
 // Result + ErrorMsg): 404 when missing, 500 when the record is corrupt.
 func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
-	// Same per-IP bucket as HandleRunsList so the alternate URL cannot bypass it.
-	if h.deps.RateLimits.Runs != nil && !h.deps.RateLimits.Runs.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
-		return
-	}
 	if h.deps.Scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
@@ -199,17 +189,6 @@ type cronRunEventsResp struct {
 // persisted sandbox event log (RFC §6.1/§7.3). Returns an empty events array
 // (not 404) for a run with no log so the dashboard renders consistently.
 func (h *Handlers) HandleRunEvents(w http.ResponseWriter, r *http.Request) {
-	// The events path is I/O-heavy like the transcript endpoint, so it uses
-	// transcriptLimiter (sharing runsLimiter lets either starve the other);
-	// falls back to runsLimiter for fixtures without a transcriptLimiter.
-	limiter := h.deps.RateLimits.Transcript
-	if limiter == nil {
-		limiter = h.deps.RateLimits.Runs
-	}
-	if limiter != nil && !limiter.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron run events rate limit exceeded"})
-		return
-	}
 	if h.deps.Scheduler == nil {
 		httputil.WriteJSONStatus(w, http.StatusNotImplemented, map[string]string{"error": "cron not configured"})
 		return
@@ -267,10 +246,6 @@ type cronRunSnapshotResp struct {
 // Returns {available:false} (not 404) for a run with no snapshot so the panel
 // renders a deterministic "unavailable" state.
 func (h *Handlers) HandleRunSnapshot(w http.ResponseWriter, r *http.Request) {
-	if h.deps.RateLimits.Runs != nil && !h.deps.RateLimits.Runs.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
-		return
-	}
 	if h.deps.Scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
