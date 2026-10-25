@@ -44,7 +44,8 @@ type SpawnOptions struct {
 	// PermissionMode controls Claude CLI tool permissions. The zero value passes
 	// `--dangerously-skip-permissions` — required by the headless long-lived
 	// process model where nobody can approve a prompt mid-turn; untrusted-caller
-	// deployments opt out via PermissionModeStandard (#531). Claude-only.
+	// deployments opt out via PermissionModeStandard (#531), and cli.permission_mode
+	// "auto" selects PermissionModeAuto. Claude-only.
 	PermissionMode PermissionMode
 
 	// DebugFile, when non-empty, is passed as the Claude CLI's `--debug-file`
@@ -108,6 +109,11 @@ const (
 	// PermissionModeStandard omits the flag, deferring to the CLI's prompts;
 	// for untrusted deployments that accept the stalled-turn cost.
 	PermissionModeStandard PermissionMode = 1
+	// PermissionModeAuto renders `--permission-mode auto` instead of the skip
+	// flag: the CLI's classifier model approves or blocks each tool call, so no
+	// human prompt is needed. The classifier reads `autoMode.environment` from
+	// the settings the CLI loads to decide which repos and domains are trusted.
+	PermissionModeAuto PermissionMode = 2
 )
 
 // Wrapper manages spawning CLI processes via shim.

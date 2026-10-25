@@ -93,7 +93,8 @@ workspace:
 
 cli:
   path: "~/.local/bin/claude"
-  # --dangerously-skip-permissions is always applied by protocol_claude.go; no need to repeat here.
+  # Permission flags come from cli.permission_mode below; don't put
+  # --dangerously-skip-permissions or --permission-mode here (both are stripped).
   # Naozhi's dashboard markdown renderer escapes raw HTML as a security
   # measure (see dashboard.js renderMdUncached + inlineMd), so <details>,
   # <summary>, <kbd>, <sub>, <sup> etc. render as literal text instead of
@@ -136,6 +137,26 @@ cli:
   # interactive `claude` session via /mcp, which stores the token in
   # ~/.claude.json's mcpOAuth.
   # mcp_config: "~/.naozhi/mcp.json"
+
+  # Optional: how Claude sessions handle tool permissions. Claude backend only;
+  # kiro and codex ignore it.
+  #   "bypass" (default, same as leaving it unset): --dangerously-skip-permissions,
+  #            every tool call runs unreviewed.
+  #   "auto":  --permission-mode auto. A classifier model reviews each tool call
+  #            and blocks the risky ones instead of a human approving them.
+  # Any other value fails config validation. Switch back by editing this line.
+  #
+  # Before trying "auto", declare what the classifier may trust in
+  # `autoMode.environment` (trusted repos, domains, ...) in the settings file the
+  # CLI loads: the naozhi_settings file when naozhi_settings.enabled is true,
+  # otherwise ~/.claude/settings.json. Without it the classifier blocks things
+  # like pushing to repos other than the session's own. `claude auto-mode config`
+  # prints the effective auto mode config.
+  #
+  # The mode is a process start flag. After changing it, restart naozhi: each
+  # surviving session is detected as config-drifted once, shut down, and
+  # re-spawned under the new mode when its next message arrives.
+  # permission_mode: "auto"
 
   # Optional: multiple backends in one deployment.
   #

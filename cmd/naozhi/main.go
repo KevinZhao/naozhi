@@ -210,6 +210,7 @@ func main() {
 		DefaultAccessProfile: cfg.DefaultAccessProfile,
 		NaozhiSettingsFile:   naozhiSettingsFile,
 		MCPConfigFile:        mcpConfigFile,
+		PermissionMode:       cliPermissionMode(cfg),
 		Workspace:            workspace,
 		StorePath:            storePath,
 		CostLedger: session.CostLedgerConfig{

@@ -190,6 +190,26 @@ func TestHandleMessage_IgnoresOwnUploads(t *testing.T) {
 	}
 }
 
+// TestHandleMessage_DropsFileShareWhileBotIDUnknown (#3653): with botID
+// unknown the own-upload check above cannot match, so a file_share is dropped
+// outright rather than risking the bot's upload coming back as a turn.
+func TestHandleMessage_DropsFileShareWhileBotIDUnknown(t *testing.T) {
+	t.Parallel()
+	stub := &fileStub{resps: map[string]stubResp{"/a/shot.png": {body: testPNG}}}
+	s := newFileSlack(stub)
+	s.botID = ""
+	// Keep the self-heal from making a live auth.test call.
+	s.botHealAt = time.Now().Add(time.Hour)
+	ev := fileShare("", slack.File{Name: "shot.png", Mimetype: "image/png", URLPrivateDownload: slackURL("/a/shot.png")})
+	ev.User = "UBOT"
+	if got := deliver(s, ev); len(got) != 0 {
+		t.Errorf("handler called %d times for a file_share with botID unknown, want 0", len(got))
+	}
+	if n := len(stub.requests()); n != 0 {
+		t.Errorf("%d downloads, want 0", n)
+	}
+}
+
 // TestDownloadFile_HostWhitelist pins that the bot token is only ever sent to
 // https://files.slack.com: every other URL fails before any request.
 func TestDownloadFile_HostWhitelist(t *testing.T) {
@@ -436,5 +456,84 @@ func TestSlackFileName_FallsBackToTitle(t *testing.T) {
 	}
 	if got := slackFileName(slack.File{Name: "a.txt", Title: "ignored"}); !strings.HasPrefix(got, "a.txt") {
 		t.Errorf("slackFileName = %q, want the name", got)
+	}
+}
+
+// TestAttachFiles_UnsupportedNotDownloaded: an upload ClassifyFile would
+// refuse by name and type costs no download, and the user is still told;
+// it does not use up one of the message's downloads.
+func TestAttachFiles_UnsupportedNotDownloaded(t *testing.T) {
+	t.Parallel()
+	stub := &fileStub{resps: map[string]stubResp{}}
+	stub.resps["/a/src.zip"] = stubResp{body: []byte("PK\x03\x04")}
+	files := []slack.File{{Name: "src.zip", Mimetype: "application/zip", Size: 4, URLPrivateDownload: slackURL("/a/src.zip")}}
+	for i := 0; i < limits.MaxFileAttachmentsPerMessage; i++ {
+		name := "f" + string(rune('a'+i)) + ".txt"
+		stub.resps["/a/"+name] = stubResp{body: []byte("ok\n")}
+		files = append(files, slack.File{Name: name, Mimetype: "text/plain", Size: 3, URLPrivateDownload: slackURL("/a/" + name)})
+	}
+	s := newFileSlack(stub)
+	var msg platform.IncomingMessage
+	s.attachFiles(context.Background(), &msg, files)
+	if len(msg.Files) != len(files) {
+		t.Fatalf("files = %d, want %d", len(msg.Files), len(files))
+	}
+	for i, f := range msg.Files {
+		want := platform.FileRejectNone
+		if i == 0 {
+			want = platform.FileRejectUnsupported
+		}
+		if f.Name != files[i].Name || f.Reject != want {
+			t.Errorf("file %d = {%q %q}, want {%q %q}", i, f.Name, f.Reject, files[i].Name, want)
+		}
+	}
+	for _, r := range stub.requests() {
+		if !strings.HasSuffix(r.URL.Path, ".txt") {
+			t.Errorf("unsupported upload %s was downloaded", r.URL.Path)
+		}
+	}
+}
+
+// hangingFiles holds every request until its context ends.
+type hangingFiles struct {
+	mu   sync.Mutex
+	hits int
+}
+
+func (h *hangingFiles) RoundTrip(req *http.Request) (*http.Response, error) {
+	h.mu.Lock()
+	h.hits++
+	h.mu.Unlock()
+	<-req.Context().Done()
+	return nil, req.Context().Err()
+}
+
+// TestHandleMessage_DownloadBudgetBoundsMessage: a file host that never
+// answers costs the message its download budget once, not once per upload,
+// and the message is still forwarded with every download marked failed.
+func TestHandleMessage_DownloadBudgetBoundsMessage(t *testing.T) {
+	t.Parallel()
+	s := newFileSlack(&fileStub{})
+	hang := &hangingFiles{}
+	s.fileHTTP.Transport = hang
+	s.downloadTimeout = 50 * time.Millisecond
+	ev := fileShare("read these",
+		slack.File{Name: "a.pdf", Mimetype: "application/pdf", Size: 10, URLPrivateDownload: slackURL("/a/a.pdf")},
+		slack.File{Name: "b.pdf", Mimetype: "application/pdf", Size: 10, URLPrivateDownload: slackURL("/a/b.pdf")},
+	)
+	done := make(chan []platform.IncomingMessage, 1)
+	go func() { done <- deliver(s, ev) }()
+	select {
+	case got := <-done:
+		if len(got) != 1 {
+			t.Fatalf("handler called %d times, want 1", len(got))
+		}
+		if fs := got[0].Files; len(fs) != 2 || fs[0].Reject != platform.FileRejectDownloadFailed || fs[1].Reject != platform.FileRejectDownloadFailed {
+			t.Errorf("files = %+v, want both download_failed", fs)
+		}
+	case <-time.After(10 * time.Second):
+		hang.mu.Lock()
+		defer hang.mu.Unlock()
+		t.Fatalf("message still downloading after 10s with a 50ms budget (%d requests)", hang.hits)
 	}
 }
