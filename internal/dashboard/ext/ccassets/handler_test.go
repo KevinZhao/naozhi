@@ -12,18 +12,6 @@ import (
 	provider "github.com/naozhi/naozhi/internal/ccassets"
 )
 
-// allowAll is an IPLimiter that never rate-limits.
-type allowAll struct{}
-
-func (allowAll) Allow(string) bool               { return true }
-func (allowAll) AllowRequest(*http.Request) bool { return true }
-
-// denyAll always rate-limits.
-type denyAll struct{}
-
-func (denyAll) Allow(string) bool               { return false }
-func (denyAll) AllowRequest(*http.Request) bool { return false }
-
 func writeSkill(t *testing.T, root, name, content string) {
 	t.Helper()
 	dir := filepath.Join(root, name)
@@ -35,10 +23,10 @@ func writeSkill(t *testing.T, root, name, content string) {
 	}
 }
 
-func newTestHandler(t *testing.T, home, repo string, lim IPLimiter) *Handler {
+func newTestHandler(t *testing.T, home, repo string) *Handler {
 	t.Helper()
 	providers := map[string]assets.Provider{"claude": provider.NewClaudeProvider()}
-	return New(providers, home, func(*http.Request) string { return repo }, lim)
+	return New(providers, home, func(*http.Request) string { return repo })
 }
 
 func TestHandleList_OK(t *testing.T) {
@@ -47,7 +35,7 @@ func TestHandleList_OK(t *testing.T) {
 	writeSkill(t, filepath.Join(home, "skills"), "learned", "---\nname: learned\ndescription: x\n---\nb")
 	writeSkill(t, filepath.Join(repo, ".claude", "skills"), "dev-workflow", "---\nname: dev-workflow\ndescription: y\n---\nb")
 
-	h := newTestHandler(t, home, repo, allowAll{})
+	h := newTestHandler(t, home, repo)
 	rec := httptest.NewRecorder()
 	h.HandleList(rec, httptest.NewRequest(http.MethodGet, "/api/cc/assets", nil))
 
@@ -74,7 +62,7 @@ func TestHandleList_KindFilter(t *testing.T) {
 	home := t.TempDir()
 	writeSkill(t, filepath.Join(home, "skills"), "learned", "---\nname: learned\n---\nb")
 
-	h := newTestHandler(t, home, "", allowAll{})
+	h := newTestHandler(t, home, "")
 	rec := httptest.NewRecorder()
 	h.HandleList(rec, httptest.NewRequest(http.MethodGet, "/api/cc/assets?kind=agent", nil))
 
@@ -89,20 +77,11 @@ func TestHandleList_KindFilter(t *testing.T) {
 	}
 }
 
-func TestHandleList_RateLimited(t *testing.T) {
-	h := newTestHandler(t, t.TempDir(), "", denyAll{})
-	rec := httptest.NewRecorder()
-	h.HandleList(rec, httptest.NewRequest(http.MethodGet, "/api/cc/assets", nil))
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429", rec.Code)
-	}
-}
-
 func TestHandleRaw_OK(t *testing.T) {
 	home := t.TempDir()
 	writeSkill(t, filepath.Join(home, "skills"), "learned", "---\nname: learned\n---\nhello world body")
 
-	h := newTestHandler(t, home, "", allowAll{})
+	h := newTestHandler(t, home, "")
 	rec := httptest.NewRecorder()
 	h.HandleRaw(rec, httptest.NewRequest(http.MethodGet,
 		"/api/cc/assets/raw?kind=skill&source=user&rel=skills/learned/SKILL.md", nil))
@@ -128,7 +107,7 @@ func TestHandleRaw_Traversal404(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(home, "secret.txt"), []byte("SECRET"), 0o644)
 	writeSkill(t, filepath.Join(home, "skills"), "learned", "---\nname: learned\n---\nb")
 
-	h := newTestHandler(t, home, "", allowAll{})
+	h := newTestHandler(t, home, "")
 	rec := httptest.NewRecorder()
 	h.HandleRaw(rec, httptest.NewRequest(http.MethodGet,
 		"/api/cc/assets/raw?kind=skill&source=user&rel=skills/../../secret.txt", nil))

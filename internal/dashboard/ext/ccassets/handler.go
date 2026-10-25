@@ -13,15 +13,14 @@ type Handler struct {
 	providers  map[string]assets.Provider
 	home       string
 	repoRootFn func(*http.Request) string
-	limiter    IPLimiter
 }
 
 // New constructs a Handler; repoRootFn may return "" (no workspace root).
-func New(providers map[string]assets.Provider, home string, repoRootFn func(*http.Request) string, limiter IPLimiter) *Handler {
+func New(providers map[string]assets.Provider, home string, repoRootFn func(*http.Request) string) *Handler {
 	if repoRootFn == nil {
 		repoRootFn = func(*http.Request) string { return "" }
 	}
-	return &Handler{providers: providers, home: home, repoRootFn: repoRootFn, limiter: limiter}
+	return &Handler{providers: providers, home: home, repoRootFn: repoRootFn}
 }
 
 // providerFor resolves ?backend= to a provider; empty defaults to the sole
@@ -42,10 +41,6 @@ func (h *Handler) providerFor(r *http.Request) (assets.Provider, string) {
 // HandleList serves GET /api/cc/assets. Returns the full Inventory, optionally
 // sliced to ?kind=. Totals always reflects the full scan (D4/D5).
 func (h *Handler) HandleList(w http.ResponseWriter, r *http.Request) {
-	if !h.limiter.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
-		return
-	}
 	prov, _ := h.providerFor(r)
 	if prov == nil {
 		// No provider: empty inventory, not 404, so the frontend hides uniformly.
@@ -66,10 +61,6 @@ func (h *Handler) HandleList(w http.ResponseWriter, r *http.Request) {
 
 // HandleRaw serves GET /api/cc/assets/raw: raw asset bytes as text/plain.
 func (h *Handler) HandleRaw(w http.ResponseWriter, r *http.Request) {
-	if !h.limiter.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
-		return
-	}
 	prov, _ := h.providerFor(r)
 	if prov == nil {
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "no_backend"})

@@ -14,8 +14,7 @@ import (
 	"github.com/naozhi/naozhi/internal/claudefs"
 )
 
-// memoryTestHandler builds a handler with a temp projects dir + permissive
-// limiter so tests don't false-positive on rate limits.
+// memoryTestHandler builds a handler with a temp projects dir.
 //
 // projectsDir is canonicalised the same way New does it — without
 // this, on macOS t.TempDir() returns /var/folders/... which is a symlink to
@@ -41,7 +40,6 @@ func memoryTestHandler(t *testing.T, projectsDir, currentProject string) *Handle
 	return &Handler{
 		projectsDir:         projectsDir,
 		currentProject:      currentProject,
-		limiter:             alwaysAllowLimiter{},
 		resolvedPrefix:      prefix,
 		resolvedPrefixNoSep: prefixNoSep,
 	}

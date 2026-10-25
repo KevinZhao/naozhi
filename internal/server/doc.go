@@ -12,8 +12,4 @@
 // package, receives its collaborators through a Deps struct, and is
 // registered here as `auth(s.<sub>H.HandleX)`. An HTTP handler declared in
 // this package is therefore one of the pipe pieces above.
-//
-// Enforced by tools/lint-server-handlers rule 1 (handle_decl: no HTTP handler
-// declaration in this package, on any receiver or none, outside
-// exemptions.yaml handle_baseline).
 package server

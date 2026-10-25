@@ -10,7 +10,7 @@
 // Declared here rather than in internal/dashboard/contracts because these are
 // per-consumer shapes: dashsession uses 18 Router methods, this package uses 3,
 // and a shared interface would be the union, i.e. a wide type again. contracts
-// is for shapes several sub-packages genuinely share (IPLimiter).
+// is for shapes several sub-packages genuinely share (NodeAccessor).
 // docs/rfc/consumer-interfaces.md §3.1.
 //
 // CAUTION for the next conversion of this kind: these fields are nil-guarded

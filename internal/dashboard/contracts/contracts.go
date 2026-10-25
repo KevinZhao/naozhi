@@ -15,7 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 )
 
-// IPLimiter is the per-IP rate limiter subset the dashboard handlers use.
+// IPLimiter is the per-IP rate limiter subset the transcribe handler uses.
 // Allow gates on a raw remote address; AllowRequest additionally honours the
 // trusted-proxy header policy. The interface carries no nil-safety.
 type IPLimiter interface {

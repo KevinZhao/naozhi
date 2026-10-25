@@ -30,13 +30,6 @@ type existsEntry struct {
 // whether a path mentioned in a bubble gets preview/download buttons. Paths
 // that don't resolve or fall outside the workspace come back as {exists:false}.
 func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
-	// Rate-limit before any work: the endpoint fans out up to maxExistsPaths
-	// stats within fileStatTimeout, so a post-auth attacker targeting slow NFS
-	// mounts or symlink loops could tie up workers. Nil-guarded for tests.
-	if h.deps.FilesExistsLimiter != nil && !h.deps.FilesExistsLimiter.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "files/exists rate limit exceeded"})
-		return
-	}
 	if h.deps.ProjectMgr == nil {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
 		return

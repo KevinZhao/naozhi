@@ -1,9 +1,6 @@
 package cron
 
 import (
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -36,121 +33,6 @@ func TestFormatTZOffset(t *testing.T) {
 				t.Fatalf("formatTZOffset(%q, %d) = %q, want %q", tc.tz, tc.offset, got, tc.want)
 			}
 		})
-	}
-}
-
-// TestHandleTrigger_PerIPRateLimit pins R234-SEC-2 / #1007: POST
-// /api/cron/trigger MUST gate per-IP via writeLimiter before invoking the
-// scheduler. A token holder fan-out without this gate could drain shim/cli
-// capacity by looping triggers; we assert that once the burst is exhausted
-// the handler returns 429 Too Many Requests instead of falling through to
-// scheduler.TriggerNow.
-//
-// The test deliberately leaves scheduler nil — once the limiter rejects
-// the request we MUST not reach the scheduler-nil 501 branch. Comparing
-// against 429 (not 501) is the load-bearing assertion: an inverted gate
-// would 501 before 429.
-func TestHandleTrigger_PerIPRateLimit(t *testing.T) {
-	t.Parallel()
-	// Burst of 2 lets the first two requests through (modulo any rate
-	// recharge during the test loop), the third is forced to 429. We
-	// pick rate.Every(time.Hour) so the sustained refill is irrelevant
-	// over the test's microsecond-scale duration; only burst matters.
-	h := &Handlers{deps: Deps{RateLimits: RateLimits{Write: newPerIPBurstNLimiter(2)}}}
-
-	body := `{"id":"deadbeefdeadbeef"}`
-	doReq := func() int {
-		req := httptest.NewRequest(http.MethodPost, "/api/cron/trigger", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		req.RemoteAddr = "10.1.2.3:5555"
-		w := httptest.NewRecorder()
-		h.HandleTrigger(w, req)
-		return w.Code
-	}
-
-	// First two should NOT be 429 (limiter has burst=2). They will be
-	// 501 (scheduler nil) — anything except 429 confirms we didn't
-	// false-positive the limiter.
-	for i := 0; i < 2; i++ {
-		if got := doReq(); got == http.StatusTooManyRequests {
-			t.Fatalf("request %d 429ed early — burst budget exhausted prematurely", i+1)
-		}
-	}
-	// Third request MUST hit 429: limiter exhausted, no recharge in
-	// test window. Fail loudly if a future refactor drops the
-	// writeLimiter gate at the top of HandleTrigger.
-	if got := doReq(); got != http.StatusTooManyRequests {
-		t.Fatalf("3rd trigger after burst exhaustion: got %d, want 429 Too Many Requests; #1007 trigger rate-limit gate may be missing", got)
-	}
-}
-
-// TestHandleTrigger_NilLimiter_PassThrough sanity check: when no
-// writeLimiter is wired (test handler / forgotten injection), HandleTrigger
-// must NOT 429 — it nil-guards and falls through. Otherwise hand-built
-// Handlers in unrelated tests would 429 spuriously.
-func TestHandleTrigger_NilLimiter_PassThrough(t *testing.T) {
-	t.Parallel()
-	h := &Handlers{} // writeLimiter nil
-
-	req := httptest.NewRequest(http.MethodPost, "/api/cron/trigger", strings.NewReader(`{"id":"deadbeef"}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	h.HandleTrigger(w, req)
-	if w.Code == http.StatusTooManyRequests {
-		t.Fatalf("nil writeLimiter must not produce 429; got %d body=%q", w.Code, w.Body.String())
-	}
-}
-
-// TestHandleList_PerIPRateLimit pins R240-SEC-13 / #1045: GET /api/cron
-// MUST gate per-IP via listLimiter before fanning out scheduler reads
-// (ListAllJobsWithNextRun + RecentRuns(5) per job). A stolen dashboard
-// token without this gate could enumerate the entire cron config —
-// including full prompts up to 8 KiB × ~50 jobs — at unbounded rate.
-//
-// Burst=2 + rate.Every(time.Hour) means the third request inside the
-// test window MUST hit 429. The handler nil-guards scheduler so first
-// requests can pass through to the empty-list happy path; we just need
-// the limiter to reject the third request before reaching that path.
-func TestHandleList_PerIPRateLimit(t *testing.T) {
-	t.Parallel()
-	h := &Handlers{deps: Deps{RateLimits: RateLimits{List: newPerIPBurstNLimiter(2)}}}
-
-	doReq := func() int {
-		req := httptest.NewRequest(http.MethodGet, "/api/cron", nil)
-		req.RemoteAddr = "10.1.2.3:5555"
-		w := httptest.NewRecorder()
-		h.HandleList(w, req)
-		return w.Code
-	}
-
-	// First two requests should pass the limiter (burst=2). They will
-	// reach the scheduler-nil empty-list branch and return 200; either
-	// way they MUST NOT 429.
-	for i := 0; i < 2; i++ {
-		if got := doReq(); got == http.StatusTooManyRequests {
-			t.Fatalf("request %d 429ed early — burst budget exhausted prematurely", i+1)
-		}
-	}
-	// Third request MUST hit 429: limiter exhausted. Pins #1045 — a
-	// future refactor that drops the listLimiter gate would let a stolen
-	// token enumerate /api/cron at unbounded rate.
-	if got := doReq(); got != http.StatusTooManyRequests {
-		t.Fatalf("3rd /api/cron after burst exhaustion: got %d, want 429 Too Many Requests; #1045 list rate-limit gate may be missing", got)
-	}
-}
-
-// TestHandleList_NilLimiter_PassThrough mirrors TestHandleTrigger_NilLimiter_PassThrough
-// for HandleList: nil listLimiter must NOT 429, otherwise hand-built
-// Handlers in unrelated tests would 429 spuriously. R240-SEC-13 / #1045.
-func TestHandleList_NilLimiter_PassThrough(t *testing.T) {
-	t.Parallel()
-	h := &Handlers{} // listLimiter nil
-
-	req := httptest.NewRequest(http.MethodGet, "/api/cron", nil)
-	w := httptest.NewRecorder()
-	h.HandleList(w, req)
-	if w.Code == http.StatusTooManyRequests {
-		t.Fatalf("nil listLimiter must not produce 429; got %d body=%q", w.Code, w.Body.String())
 	}
 }
 

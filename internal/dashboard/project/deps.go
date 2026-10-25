@@ -10,7 +10,3 @@ import "github.com/naozhi/naozhi/internal/dashboard/contracts"
 // NodeAccessor aliases the shared dashboard contract so server's
 // *nodeAccessor can be passed in via Deps without reverse-importing server.
 type NodeAccessor = contracts.NodeAccessor
-
-// IPLimiter aliases the shared dashboard contract. Both Allow methods are
-// nil-safe via the calling sites' explicit nil-checks.
-type IPLimiter = contracts.IPLimiter

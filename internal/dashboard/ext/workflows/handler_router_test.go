@@ -53,7 +53,7 @@ func TestHandleWorkflow_RestoredRouter(t *testing.T) {
 		t.Fatal(err)
 	}
 	router := restoredRouter(t, filepath.Join(tmp, "claude"), filepath.Join(tmp, "sessions.json"), ws, []workflow.Ref{endedRef()})
-	h := New(Deps{Router: router, Limiter: allowAll{}})
+	h := New(Deps{Router: router})
 
 	resp, _ := decode(t, get(h, q("task_id", storeTask, "rows", "none")))
 	w := resp.Workflow

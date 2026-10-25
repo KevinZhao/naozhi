@@ -14,7 +14,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/budget"
 	"github.com/naozhi/naozhi/internal/costledger"
-	"github.com/naozhi/naozhi/internal/dashboard/contracts"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
@@ -26,25 +25,20 @@ type Ledger interface {
 	Entries(costledger.Query, int) ([]costledger.Entry, error)
 }
 
-// Deps wires the handlers. Limiter nil = unlimited (tests only); Budget nil,
-// or one a reload left without a cap, = cost.budget sets no cap.
+// Deps wires the handlers. Budget nil, or one a reload left without a cap,
+// = cost.budget sets no cap.
 type Deps struct {
-	Ledger  Ledger
-	Limiter contracts.IPLimiter
-	Budget  *budget.Gate
+	Ledger Ledger
+	Budget *budget.Gate
 }
 
 // Handlers serves /api/cost/*.
 type Handlers struct {
-	ledger  Ledger
-	limiter contracts.IPLimiter
-	budget  *budget.Gate
+	ledger Ledger
+	budget *budget.Gate
 }
 
-func New(d Deps) *Handlers { return &Handlers{ledger: d.Ledger, limiter: d.Limiter, budget: d.Budget} }
-
-// HasLimiter reports whether a rate limiter is wired (boot-time guard).
-func (h *Handlers) HasLimiter() bool { return h.limiter != nil }
+func New(d Deps) *Handlers { return &Handlers{ledger: d.Ledger, budget: d.Budget} }
 
 const (
 	defaultWindow    = 30 * 24 * time.Hour
@@ -138,10 +132,6 @@ func (h *Handlers) HandleEntries(w http.ResponseWriter, r *http.Request) {
 // project or job cap, and the machine-wide one), or the machine-wide cap
 // alone with neither. Read-only: the dashboard itself is never refused.
 func (h *Handlers) HandleBudget(w http.ResponseWriter, r *http.Request) {
-	if h.limiter != nil && !h.limiter.AllowRequest(r) {
-		writeErr(w, http.StatusTooManyRequests, "rate limited")
-		return
-	}
 	v := r.URL.Query()
 	key, job := v.Get("session_key"), v.Get("job_id")
 	if key != "" && job != "" {
@@ -171,13 +161,9 @@ func (h *Handlers) HandleBudget(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, resp)
 }
 
-// gate applies the rate limit and the enabled check; false means a response
-// was already written.
+// gate applies the enabled check; false means a response was already
+// written.
 func (h *Handlers) gate(w http.ResponseWriter, r *http.Request) bool {
-	if h.limiter != nil && !h.limiter.AllowRequest(r) {
-		writeErr(w, http.StatusTooManyRequests, "rate limited")
-		return false
-	}
 	if h.ledger == nil || !h.ledger.Enabled() {
 		writeErr(w, http.StatusServiceUnavailable, disabledErrorMsg)
 		return false

@@ -85,19 +85,6 @@ const (
 
 // GET /api/cron/runs/{run_id}/transcript?job_id=<jid>
 func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
-	// Use the dedicated transcriptLimiter rather than the shared runsLimiter:
-	// the transcript path fans out far more I/O (EvalSymlinks ×2 + 8 MB
-	// LimitReader + 256 KB scanner + per-line Unmarshal), so one shared bucket
-	// would let either endpoint starve the other (#1096). runsLimiter is the
-	// fallback for hand-rolled fixtures without a transcriptLimiter.
-	limiter := h.deps.RateLimits.Transcript
-	if limiter == nil {
-		limiter = h.deps.RateLimits.Runs
-	}
-	if limiter != nil && !limiter.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron transcript rate limit exceeded"})
-		return
-	}
 	// Cap concurrent in-flight transcript reads: each holds 256 KB of scanner
 	// buffer plus an 8 MB LimitReader budget, so N operators could park N×8 MB
 	// without this gate (#798). Non-blocking acquire fails "503 immediately"

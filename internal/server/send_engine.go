@@ -154,9 +154,9 @@ func (e *sendEngine) drain() {
 // Everything below exists so dashboard_send.go never reaches into an engine
 // field. Until #2632 the HTTP handler read h.engine.allowedRoot / .resolver /
 // .ctx / .notify / .router directly (8 sites) — the same "two views of one
-// state" shape #2551 set out to remove, just spelled differently. The
-// send_engine_ownership lint rule now fails on any `engine.<lowercase>` in
-// dashboard_send.go, so a new dependency has to arrive as a method here.
+// state" shape #2551 set out to remove, just spelled differently. A new
+// dependency of dashboard_send.go arrives as a method here, not as an
+// `engine.<lowercase>` field read.
 
 // remoteSendTimeout caps one HTTP-initiated remote-node Send RPC. Longer than
 // the WS path's remoteNodeProxyTimeout because the HTTP caller has already

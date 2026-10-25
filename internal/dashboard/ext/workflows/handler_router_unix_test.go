@@ -39,7 +39,7 @@ func TestHandleWorkflow_RestoredRouterRealRun(t *testing.T) {
 	}
 
 	router := restoredRouter(t, claudeDir, storePath, ws, []workflow.Ref{endedRef()})
-	h := New(Deps{Router: router, Limiter: allowAll{}})
+	h := New(Deps{Router: router})
 	var resp WorkflowResponse
 	testhelper.Eventually(t, func() bool {
 		resp, _ = decode(t, get(h, q("task_id", storeTask, "rows", "none")))
@@ -59,7 +59,7 @@ func TestHandleWorkflow_RestoredRouterRealRun(t *testing.T) {
 	if err := os.Remove(resultPath); err != nil {
 		t.Fatal(err)
 	}
-	h = New(Deps{Router: restoredRouter(t, claudeDir, storePath, ws, []workflow.Ref{endedRef()}), Limiter: allowAll{}})
+	h = New(Deps{Router: restoredRouter(t, claudeDir, storePath, ws, []workflow.Ref{endedRef()})})
 	gone, _ := decode(t, get(h, q("task_id", storeTask, "rows", "none")))
 	if !gone.ResultUnavailable || gone.Result != nil || gone.Workflow.Status != workflow.StatusCompleted {
 		t.Errorf("after the file was deleted: unavailable %v result %+v status %s", gone.ResultUnavailable, gone.Result, gone.Workflow.Status)

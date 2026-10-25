@@ -6,15 +6,7 @@
 // dependency direction one-way.
 package cron
 
-import (
-	"github.com/naozhi/naozhi/internal/backendid"
-	"github.com/naozhi/naozhi/internal/dashboard/contracts"
-)
-
-// IPLimiter aliases the shared dashboard contract (#2285) so server's
-// *ipLimiter is injected without a reverse import and the cron package keeps
-// its local name for Deps fields and tests.
-type IPLimiter = contracts.IPLimiter
+import "github.com/naozhi/naozhi/internal/backendid"
 
 // maxBackendIDLen / isValidBackendID alias the shared backendid leaf package's
 // length+charset gate so this package and internal/server enforce one contract

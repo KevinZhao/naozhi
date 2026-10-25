@@ -110,7 +110,7 @@ func TestBudget_ReloadedWithoutCapReadsOff(t *testing.T) {
 	}
 }
 
-func TestBudget_RejectsBadParamsAndLimits(t *testing.T) {
+func TestBudget_RejectsBadParams(t *testing.T) {
 	h := New(Deps{Budget: budgetGate(budget.Limits{DailyUSD: 1}, nil)})
 	for _, q := range []string{
 		"?session_key=feishu:group:oc_1:general&job_id=job1",
@@ -120,9 +120,5 @@ func TestBudget_RejectsBadParamsAndLimits(t *testing.T) {
 		if rec := get(t, h.HandleBudget, "/api/cost/budget"+q); rec.Code != 400 {
 			t.Errorf("%q: status %d, want 400", q, rec.Code)
 		}
-	}
-	h = New(Deps{Budget: budgetGate(budget.Limits{DailyUSD: 1}, nil), Limiter: denyAll{}})
-	if rec := get(t, h.HandleBudget, "/api/cost/budget"); rec.Code != 429 {
-		t.Fatalf("limited status %d", rec.Code)
 	}
 }

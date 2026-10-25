@@ -89,32 +89,6 @@ type handlerSet struct {
 	discoveryH *discovery.Handlers
 }
 
-// checkLimiters fails the boot rather than serving an endpoint whose rate
-// limiter was never wired. The cron and cost handlers nil-guard their limiters
-// so partially-constructed test fixtures work, which means a refactor that
-// forgets one would silently run unlimited — the fail-fast has to live at the
-// construction site, not in the handler.
-func (hs *handlerSet) checkLimiters(schedulerWired bool) {
-	if hs.costH != nil && !hs.costH.HasLimiter() {
-		panic("server: cost limiter must be non-nil")
-	}
-	if !schedulerWired || hs.cronH == nil {
-		return
-	}
-	if !hs.cronH.HasRunsLimiter() {
-		panic("server: runsLimiter must be non-nil when scheduler is wired")
-	}
-	if !hs.cronH.HasListLimiter() {
-		panic("server: listLimiter must be non-nil when scheduler is wired")
-	}
-	if !hs.cronH.HasWriteLimiter() {
-		panic("server: writeLimiter must be non-nil when scheduler is wired")
-	}
-	if !hs.cronH.HasTranscriptLimiter() {
-		panic("server: transcriptLimiter must be non-nil when scheduler is wired")
-	}
-}
-
 // wiring holds the dependencies buildServerWithHandlers creates for the build
 // steps alone — the dispatcher, the Hub, the dashboard handlers and route
 // registration read them, and once those hold their own references nothing on

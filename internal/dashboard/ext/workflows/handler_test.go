@@ -21,16 +21,6 @@ const (
 	nowMS     = int64(1_791_000_123_000)
 )
 
-type allowAll struct{}
-
-func (allowAll) Allow(string) bool               { return true }
-func (allowAll) AllowRequest(*http.Request) bool { return true }
-
-type denyAll struct{}
-
-func (denyAll) Allow(string) bool               { return false }
-func (denyAll) AllowRequest(*http.Request) bool { return false }
-
 // fakeBoard publishes what a test sets and answers Result as configured.
 // merge, when set, replaces the publication during Result, as a read that
 // merged the file's rows would; onResult runs inside Result.
@@ -85,7 +75,7 @@ func pub(wfs ...*workflow.Workflow) *workflow.Published {
 }
 
 func newHandler(b Board) *Handler {
-	h := New(Deps{Limiter: allowAll{}})
+	h := New(Deps{})
 	h.boardFor = func(string) Board { return b }
 	h.now = func() time.Time { return time.UnixMilli(nowMS) }
 	return h
@@ -242,7 +232,7 @@ func TestHandleWorkflow_RealSessions(t *testing.T) {
 	if router.SessionFor(stubKey) == nil {
 		t.Fatal("no discovery stub registered")
 	}
-	h := New(Deps{Router: router, Limiter: allowAll{}})
+	h := New(Deps{Router: router})
 	if rec := get(h, q()); rec.Code != http.StatusNotFound {
 		t.Errorf("session without a board: %d, want 404", rec.Code)
 	}
@@ -253,7 +243,7 @@ func TestHandleWorkflow_RealSessions(t *testing.T) {
 		t.Errorf("no such session: %d, want 404", rec.Code)
 	}
 	var nilRouter SessionLookup
-	if rec := get(New(Deps{Router: nilRouter, Limiter: allowAll{}}), q()); rec.Code != http.StatusNotFound {
+	if rec := get(New(Deps{Router: nilRouter}), q()); rec.Code != http.StatusNotFound {
 		t.Errorf("no router: %d, want 404", rec.Code)
 	}
 }
@@ -349,31 +339,8 @@ func TestHandleWorkflow_ServerNowAfterResult(t *testing.T) {
 	}
 }
 
-func TestHandleWorkflow_RateLimited(t *testing.T) {
-	board := &fakeBoard{pub: pub(wf("w1", workflow.StatusRunning, 1, nil))}
-	h := newHandler(board)
-	h.limiter = denyAll{}
-	rec := get(h, q())
-	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
-		t.Errorf("status %d Retry-After %q, want 429 with a Retry-After", rec.Code, rec.Header().Get("Retry-After"))
-	}
-	// Limited before anything is looked up, a bad request included.
-	if rec := get(h, "key=a%01b"); rec.Code != http.StatusTooManyRequests {
-		t.Errorf("bad request under the limit: %d, want 429", rec.Code)
-	}
-}
-
-func TestNewRequiresALimiter(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Error("New without a limiter did not panic")
-		}
-	}()
-	New(Deps{})
-}
-
 func TestRoutes(t *testing.T) {
-	routes := New(Deps{Limiter: allowAll{}}).Routes()
+	routes := New(Deps{}).Routes()
 	if len(routes) != 1 || routes[0].Pattern != "GET /api/sessions/workflow" {
 		t.Errorf("routes %+v, want the one workflow endpoint (v4's /workflow_agent is gone)", routes)
 	}

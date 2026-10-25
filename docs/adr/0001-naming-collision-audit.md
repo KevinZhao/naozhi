@@ -120,6 +120,8 @@ ADR 通用红线：rename 只动 Go 标识符。本审计涉及的全部符号�
 
 ## 护栏（lint）审阅结论
 
+> **2026-10 更新**：`getter_surface_test.go` 已在 #3720（项目减法）中删除，本节是当时的审阅记录。
+
 `internal/session/getter_surface_test.go` 的 `TestGetterSurfaceFrozen` 已是有效护栏：
 
 - **机制**：AST walker（`parser.ParseFile` + `ast.Inspect`）扫描 `internal/session` + `internal/cli` 生产文件，任何**新增**的导出 `Get*`/`Fetch*` 方法若不在冻结 allowlist 内即 RED-fail。已能阻止 PR-2/PR-3 之外悄悄新增 getter 债务。
@@ -133,5 +135,5 @@ ADR 通用红线：rename 只动 Go 标识符。本审计涉及的全部符号�
 
 - [`0001-getter-fetch-load-naming.md`](./0001-getter-fetch-load-naming.md) — 本 ADR（决策 (a)-(f)）
 - `internal/cron/agent_opts.go:62` — `type Session interface`（决策 (d) 碰撞源）
-- `internal/session/getter_surface_test.go` — `TestGetterSurfaceFrozen` 活护栏
+- `internal/session/getter_surface_test.go` — `TestGetterSurfaceFrozen` 护栏（已于 #3720 删除）
 - `internal/node/conn.go:46-50` — `NodeFetcher` 网络 `Fetch*` 族（决策 (c) 保留）
