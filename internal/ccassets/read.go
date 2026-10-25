@@ -14,7 +14,7 @@ const maxRawBytes = 1 << 20
 //
 // openNoFollow closes the TOCTOU window between resolveUnder's EvalSymlinks
 // and this open (a writer to ~/.claude could swap the final component for a
-// symlink). Unix uses O_NOFOLLOW; windows falls back to Lstat→Open.
+// symlink). Opens with O_NOFOLLOW (read_unix.go).
 func readCapped(path string, cap int64) ([]byte, error) {
 	f, err := openNoFollow(path)
 	if err != nil {
