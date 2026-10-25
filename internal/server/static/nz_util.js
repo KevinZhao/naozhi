@@ -288,9 +288,8 @@ export function patchCardExitChip(card, state, reason, detail, startup) {
 
 // data-nz-bg: the only styling JS computes per element is a node /
 // access-profile colour, which no class can express. The renderers put the value
-// in a data attribute and this observer applies it via CSSOM — a property
-// assignment, not an inline attribute — so style-src needs no 'unsafe-inline'.
-// Emitting style="" here would put it back.
+// in a data attribute and this observer applies it; reconcileChildren applies it
+// to incoming nodes too, so an unchanged card compares equal.
 function applyDataBg(root) {
   const els = root.querySelectorAll ? root.querySelectorAll('[data-nz-bg]') : [];
   for (const el of els) {

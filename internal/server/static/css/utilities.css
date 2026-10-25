@@ -1,8 +1,7 @@
 /* utilities.css — the class equivalents of the style="" attributes JS used
  * to emit (#2559 D6-3). Named for the role they play, not for the
  * declarations they carry, so a future token change edits one rule instead
- * of every call site. Dropping the inline attributes is what lets the CSP
- * lose style-src 'unsafe-inline'. */
+ * of every call site. */
 .nz-field{margin-bottom:12px}
 .nz-field-label{font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px}
 .nz-hidden{display:none}
@@ -44,8 +43,7 @@
 .nz-tuning-opt.is-active{font-weight:600;color:var(--nz-accent)}
 .nz-tuning-opt.is-reset{border-top:1px solid var(--nz-bg-2);color:var(--nz-text-mute)}
 /* Conditional visibility that JS used to write as style="display:…". The
-   element ships with .nz-hidden and JS toggles the class instead, so the CSP
-   needs no style-src 'unsafe-inline' (#2559 D6-3). */
+   element ships with .nz-hidden and JS toggles the class instead (#2559 D6-3). */
 .nz-cron-ws-custom{padding:8px 0 0}
 .nz-cron-sandbox-hint{margin-top:4px}
 /* Static markup helpers used by dashboard.html (#2559 D6-3). */
