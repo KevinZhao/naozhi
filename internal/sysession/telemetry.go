@@ -31,11 +31,11 @@ func (m *Manager) emitRunStarted(name, runID string, trigger DaemonTriggerKind, 
 	})
 }
 
-// emitRunEnded broadcasts a terminal run event tagged SubsystemSysession.
-// ErrorMsg is deliberately NOT forwarded so the no-leak invariant (RFC §9.4)
-// is local to the producer. Metric bump is unconditional; fired from
-// recordRun outside any lock.
-func (m *Manager) emitRunEnded(name, runID string, state DaemonRunState, durationMS int64, errorClass DaemonErrorClass, trigger DaemonTriggerKind) {
+// emitRunEnded broadcasts dr, the run just recorded, as a terminal run event
+// tagged SubsystemSysession. ErrorMsg is deliberately NOT forwarded so the
+// no-leak invariant (RFC §9.4) is local to the producer. Metric bump is
+// unconditional; fired from recordRun outside any lock.
+func (m *Manager) emitRunEnded(dr DaemonRun) {
 	metrics.SysessionRunEndedTotal.Add(1)
 	b := m.telemetry
 	if b == nil {
@@ -43,12 +43,14 @@ func (m *Manager) emitRunEnded(name, runID string, state DaemonRunState, duratio
 	}
 	b.BroadcastRunEnded(runtelemetry.RunEndedEvent{
 		Subsystem:  runtelemetry.SubsystemSysession,
-		OwnerID:    name,
-		RunID:      runID,
-		State:      mapSysessionRunState(state),
-		DurationMS: durationMS,
-		Trigger:    mapSysessionTrigger(trigger),
-		ErrorClass: mapSysessionErrorClass(errorClass),
+		OwnerID:    dr.Name,
+		RunID:      dr.RunID,
+		State:      mapSysessionRunState(dr.State),
+		StartedAt:  dr.StartedAt,
+		EndedAt:    dr.EndedAt,
+		DurationMS: dr.DurationMS,
+		Trigger:    mapSysessionTrigger(dr.Trigger),
+		ErrorClass: mapSysessionErrorClass(dr.ErrorClass),
 	})
 }
 

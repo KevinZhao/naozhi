@@ -76,7 +76,8 @@ func (e Endpoint) LogValue() slog.Value {
 }
 
 // Event is the payload. It carries run metadata only: no prompt, result or
-// error text (see the RFC's non-goals).
+// error text (see the RFC's non-goals). An unset time is left out rather than
+// sent as 0001-01-01, which a receiver would read as a real instant.
 type Event struct {
 	Type       string    `json:"type"`
 	Subsystem  string    `json:"subsystem"`
@@ -86,8 +87,8 @@ type Event struct {
 	Trigger    string    `json:"trigger,omitempty"`
 	ErrorClass string    `json:"error_class,omitempty"`
 	SessionID  string    `json:"session_id,omitempty"`
-	StartedAt  time.Time `json:"started_at"`
-	EndedAt    time.Time `json:"ended_at,omitempty"`
+	StartedAt  time.Time `json:"started_at,omitzero"`
+	EndedAt    time.Time `json:"ended_at,omitzero"`
 	DurationMS int64     `json:"duration_ms,omitempty"`
 	Node       string    `json:"node,omitempty"`
 }
@@ -150,7 +151,7 @@ func New(eps []Endpoint, opts ...Option) *Sender {
 			target: RedactURL(ep.URL),
 			urlID:  urlID(ep.URL),
 			queue:  make(chan Event, QueueDepth),
-			client: &http.Client{Timeout: timeout},
+			client: &http.Client{Timeout: timeout, CheckRedirect: noRedirect},
 			s:      s,
 			ctx:    ctx,
 			stop:   stop,
@@ -165,6 +166,12 @@ func New(eps []Endpoint, opts ...Option) *Sender {
 	}
 	return s
 }
+
+// noRedirect hands a 3xx back as the response, which send treats as a
+// non-retryable rejection. Following it would resend the signed body to any
+// host the receiver names, internal addresses (169.254.169.254, loopback)
+// included — the SSRF-via-redirect the platform clients also refuse.
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // Endpoints reports how many receivers are configured.
 func (s *Sender) Endpoints() int { return len(s.workers) }
