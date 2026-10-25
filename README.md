@@ -439,8 +439,7 @@ session:
     collect_delay: "500ms"
   # project_stable_key:                   # 项目级稳定 session key（默认开启）
   #   enabled: true
-  # auto_chain 已在 schema v2 移除：没有 schema_version 的旧文件仍可加载，
-  # 该块会报 deprecated 并被忽略；`naozhi config migrate` 会把它删掉。
+  # auto_chain 已在 schema v2 移除：残留的块会报 deprecated 并被忽略，请手动删掉。
 
 agents:                                   # 自定义 agent
   code-reviewer:

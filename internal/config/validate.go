@@ -238,8 +238,7 @@ func validatePlannerPrompt(field, prompt string) error {
 // validateArgvStrings rejects empty elements (YAML "- " typo), NUL and control
 // bytes in argv. It WARNS (not errors) on flags cli.BuildArgs would strip as
 // denied, naming the field so the operator can move the value to its dedicated
-// config key (#2493); `--append-system-prompt` under agents[].args was already
-// lifted into system_prompt by the migration chain (migrations.go).
+// config key (#2493), e.g. `--append-system-prompt` → agents[].system_prompt.
 func validateArgvStrings(field string, args []string) error {
 	for i, a := range args {
 		if a == "" {

@@ -10,14 +10,11 @@ import (
 // and applyDefaults derives the string form via .String(), so applyDefaults
 // and parseDurations cannot drift (#630).
 
-// CurrentSchemaVersion is the config schema this binary understands; an older
-// (or absent) one is migrated in memory at load, higher is rejected. Bump on
-// incompatible YAML shape changes — and add the matching entry to migrations
-// (migrations.go), which both Load and `naozhi config migrate` run.
-//
-// v2 (#2710): the four deprecated aliases — nodes, session.workspace,
-// session.auto_chain and --append-system-prompt inside agents[].args — leave
-// the file.
+// CurrentSchemaVersion is the config schema this binary understands; a higher
+// one is rejected at load. There is no migration chain: the v1 spellings
+// (nodes, session.workspace, session.auto_chain, --append-system-prompt inside
+// agents[].args) are not read and only draw a config-deprecated WARN
+// (findDeprecatedKeys).
 const CurrentSchemaVersion = 2
 
 const (

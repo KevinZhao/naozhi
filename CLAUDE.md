@@ -217,7 +217,7 @@ Command routing: `/review xxx` -> `code-reviewer` agent, `/research xxx` -> `res
 
 Naozhi supports aggregating sessions from multiple machines into a single dashboard:
 
-- **Primary node** (`nodes` config): Polls remote nodes via HTTP REST every 10s, caches results in `node.CacheManager` (`internal/node/cache.go`). The `/api/sessions` poll sends `If-None-Match` and reuses the last body on a 304. Never blocks dashboard API on unreachable nodes.
+- **Primary node** (`workspaces` config): Polls remote nodes via HTTP REST every 10s, caches results in `node.CacheManager` (`internal/node/cache.go`). The `/api/sessions` poll sends `If-None-Match` and reuses the last body on a 304. Never blocks dashboard API on unreachable nodes.
 - **Reverse-connect** (`upstream` config): Nodes behind NAT dial into the primary via WebSocket (`/ws-node`). The `internal/upstream` Connector handles reconnection with jittered exponential backoff (1s -> 30s, plus a circuit breaker). Its `send` RPC validates at the trust boundary and then hands the message to `server.Server.SubmitRelayed`, so a relayed send runs on the node's `turn.Orchestrator` like an IM or dashboard one (`/new` resets, sends coalesce, agent options apply; a failed turn is a `发送失败：` system event in the session's EventLog). The `node.ReverseServer` validates tokens with constant-time comparison. A dropped node stays registered for a 60s grace window: browser subscriptions are parked and handed to the node's next registration, which resubscribes each key from its newest seen event; only a node that stays away longer is deregistered (dashboard gets `node disconnected`).
 - **Protocol** (`node.ReverseMsg`, `internal/node/protocol.go`): JSON over WebSocket -- `register/registered`, `request/response` (fetch_sessions, fetch_projects, send), `subscribe/event` (real-time streaming), `ping/pong`. A node advertising the `subscribe-history` capability answers `subscribe{after, limit, want_history}` with its own opening page (`events{initial, has_more}`: the catch-up after `after`, else the visible-aware newest page); against older nodes the primary still fetches that page with `fetch_events`. `fetch_events{before, limit}` returns one page as `{events, has_more}` (the dashboard's opening or "load earlier" page); without them, or with `after`, it is the legacy bare array, which is all an older node ever returns. A history fetch that fails reaches the sink as `error{key, node, "history unavailable"}`, which the dashboard offers as a retry. The primary advertises `send-status` on `registered` (it reads the `send` result's `{status}`); without it a node answers a send it could not buffer with an RPC error instead of `{"status":"busy"}`.
 
@@ -324,13 +324,13 @@ Each phase emits a `phase=` timing log line so a hung subsystem is attributable 
 - **cron**: `store_path`, `max_jobs`, `execution_timeout`
 - **projects**: `root` (scan directory), `planner_defaults.model`, `planner_defaults.prompt`
 - **workspace**: `id`, `name` (local node identity, defaults to hostname)
-- **nodes**: Map of node_id -> {url, token, display_name} (poll remote nodes via HTTP)
+- **workspaces**: Map of node_id -> {url, token, display_name} (poll remote nodes via HTTP)
 - **reverse_nodes**: Map of node_id -> {token, display_name} (accept incoming reverse connections)
 - **upstream**: `url` (ws://), `node_id`, `token`, `display_name` (connect to primary as reverse node)
 - **transcribe**: `enabled`, `region`, `language` (voice message STT). There is no `provider` key — the AWS Transcribe backend is the only implementation and is selected implicitly
 - **log**: `level` (debug/info/warn/error)
 
-Config describes schema v2 only. The v1 keys (`nodes`, `session.workspace`, `session.auto_chain`, `--append-system-prompt` in `agents[].args`) are understood solely by the migration chain (`internal/config/migrations.go`), which `Load` runs in memory from the file's own `schema_version` (absent = v1) and `naozhi config migrate -write` applies to the file, after keeping the original as `<config>.pre-migrate-v<N>` (0600, never overwritten); each rewrite is a `config-deprecated` diag. When both `nodes` and `workspaces` are present, `workspaces` wins. `cfg.Nodes` is the Go-side view `Config.Normalize` mirrors from `Workspaces`.
+Config describes schema v2 only; there is no migration chain. The v1 keys (`nodes`, `session.workspace`, `session.auto_chain`, `--append-system-prompt` in `agents[].args`) are not read: `Load` still succeeds and `findDeprecatedKeys` (`internal/config/unknown_keys.go`) reports each as a `config-deprecated` diag naming the v2 replacement (not also as `config-unknown`). A `schema_version` newer than the binary is rejected. `cfg.Nodes` is the Go-side view `Config.Normalize` mirrors from `Workspaces`.
 
 ## Concurrency Patterns
 

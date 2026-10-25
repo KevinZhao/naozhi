@@ -8,7 +8,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/spawndiag"
 	"gopkg.in/yaml.v3"
 )
 
@@ -22,9 +21,9 @@ type Config struct {
 	// Populated by Load; zero for programmatically constructed configs.
 	Fingerprint Fingerprint `yaml:"-"`
 
-	// SchemaVersion pins the config schema this file targets. Load migrates an
-	// older (or absent/0) one in memory and then records CurrentSchemaVersion;
-	// newer than the binary is rejected.
+	// SchemaVersion pins the config schema this file targets. Absent/0 is
+	// recorded as CurrentSchemaVersion; newer than the binary is rejected.
+	// There is no migration: v1 keys only draw a config-deprecated WARN.
 	SchemaVersion int `yaml:"schema_version,omitempty"`
 
 	Server        ServerConfig           `yaml:"server"`
@@ -46,8 +45,8 @@ type Config struct {
 	// `--setting-sources user` (RFC naozhi-owned-settings-v3).
 	NaozhiSettings NaozhiSettingsConfig `yaml:"naozhi_settings,omitempty"`
 
-	// Workspaces is the remote-instance map (the deprecated `nodes` key is
-	// renamed to it by the migration chain). Consumers read cfg.Nodes, which
+	// Workspaces is the remote-instance map (the v1 `nodes` key is no longer
+	// read). Consumers read cfg.Nodes, which
 	// Normalize() (called by Load) points at the same entries — a Config
 	// literal built in tests MUST call it too or its entries are skipped.
 	Nodes        map[string]NodeConfig       `yaml:"-"`
@@ -163,10 +162,6 @@ func Load(path string) (*Config, error) {
 		slog.Debug("config yaml parse failed", "err", err)
 		return nil, fmt.Errorf("parse config: yaml syntax error (check naozhi logs for details)")
 	}
-	migrated, err := migrateLoaded(&doc)
-	if err != nil {
-		return nil, err
-	}
 	var cfg Config
 	if err := doc.Decode(&cfg); err != nil {
 		// The file parsed, so this is a type or duplicate-key error, not a
@@ -177,9 +172,10 @@ func Load(path string) (*Config, error) {
 	}
 	// The decode above ignores unknown keys, so report them before defaults are
 	// applied — a misspelled key is operator input that had no effect, same as a
-	// deprecated field or a denied flag (unknown_keys.go, #2639). Diagnostic
-	// only: cfg is already fully decoded and is not touched here.
-	reportUnknownKeys(expanded, migrated)
+	// deprecated field or a denied flag (unknown_keys.go, #2639). The schema v1
+	// spellings get their own config-deprecated diag naming the replacement.
+	// Diagnostic only: cfg is already fully decoded and is not touched here.
+	reportUnknownKeys(expanded, reportDeprecatedKeys(&doc))
 
 	applyDefaults(&cfg)
 	if err := parseDurations(&cfg); err != nil {
@@ -192,40 +188,6 @@ func Load(path string) (*Config, error) {
 
 	cfg.Fingerprint = fp
 	return &cfg, nil
-}
-
-// migrateLoaded runs the migration chain on the document Load just parsed and
-// reports each rewrite as a config-deprecated diag. It returns the rewritten
-// key paths, which the unknown-key report skips: Config has no field for them
-// any more. A schema newer than this binary is not a shape the chain knows; it
-// runs no migration and is left for validateConfig to reject.
-func migrateLoaded(doc *yaml.Node) (map[string]bool, error) {
-	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
-		return nil, nil
-	}
-	root := doc.Content[0]
-	from, err := documentSchemaVersion(root)
-	if err != nil {
-		return nil, err
-	}
-	if from > CurrentSchemaVersion {
-		return nil, nil
-	}
-	_, changes, err := runMigrations(root)
-	if err != nil {
-		return nil, err
-	}
-	if len(changes) == 0 {
-		return nil, nil
-	}
-	migrated := make(map[string]bool, len(changes))
-	diags := make([]spawndiag.Diag, 0, len(changes))
-	for _, c := range changes {
-		migrated[c.Key] = true
-		diags = append(diags, c.diag())
-	}
-	spawndiag.Emit("config", diags)
-	return migrated, nil
 }
 
 // Normalize mirrors the Workspaces map into Nodes, the field consumers read,

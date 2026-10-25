@@ -12,9 +12,6 @@ import (
 // cliinfo.MaxAppendSystemPromptBytes (64 KiB).
 const MaxAgentSystemPromptBytes = 32 * 1024
 
-// legacySystemPromptFlag is the flag Load lifts out of agents[].args (#2493).
-const legacySystemPromptFlag = "--append-system-prompt"
-
 // validateSystemPrompt gates agents[<id>].system_prompt. Unlike
 // validatePlannerPrompt it ALLOWS LF (multi-line block scalars reach the shim
 // as one argv element, where LF is inert); NUL, other C0 incl. CR, DEL, C1,
@@ -42,35 +39,4 @@ func validateSystemPrompt(field, prompt string) error {
 		}
 	}
 	return nil
-}
-
-// splitLegacySystemPromptArgs finds legacySystemPromptFlag in args (`--flag
-// value` and `--flag=value`, mirroring cli.filterDeniedFlags). It returns the
-// indices of the items that stay and of the items it consumed, the joined
-// values, and whether the flag occurred. Indices rather than strings let the
-// migration keep the operator's own yaml nodes (comments, quoting) for what
-// stays.
-func splitLegacySystemPromptArgs(args []string) (keptIdx, liftedIdx []int, lifted string, found bool) {
-	var vals []string
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if v, isEq := strings.CutPrefix(a, legacySystemPromptFlag+"="); isEq {
-			vals = append(vals, v)
-			liftedIdx = append(liftedIdx, i)
-			continue
-		}
-		if a == legacySystemPromptFlag {
-			liftedIdx = append(liftedIdx, i)
-			// Same rule as cli.filterDeniedFlags: the next token is the value
-			// unless it looks like another flag.
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				vals = append(vals, args[i+1])
-				liftedIdx = append(liftedIdx, i+1)
-				i++
-			}
-			continue
-		}
-		keptIdx = append(keptIdx, i)
-	}
-	return keptIdx, liftedIdx, strings.Join(vals, "\n\n"), len(liftedIdx) > 0
 }

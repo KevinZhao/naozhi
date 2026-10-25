@@ -267,3 +267,54 @@ func TestUnknownKeysNeverFatal(t *testing.T) {
 		}()
 	}
 }
+
+// TestDeprecatedKeysReported: the schema v1 spellings are no longer rewritten,
+// so each must still load (a failing Load would take an upgraded service down)
+// with exactly one config-deprecated diag naming the replacement, no duplicate
+// config-unknown one, and no effect on the decoded config.
+func TestDeprecatedKeysReported(t *testing.T) {
+	diags, cfg, err := collectLoadDiags(t, writeCfg(t, `
+nodes:
+  mac:
+    url: "https://mac.example.com"
+session:
+  auto_chain:
+    enabled: true
+agents:
+  reviewer:
+    args: ["--append-system-prompt=Be terse.", "--keep"]
+`))
+	if err != nil {
+		t.Fatalf("Load with v1 keys must not fail: %v", err)
+	}
+	want := map[string]string{
+		"nodes":                 "workspaces",
+		"session.auto_chain":    "remove",
+		"agents[reviewer].args": "agents[reviewer].system_prompt",
+	}
+	for _, d := range diags {
+		switch d.Layer {
+		case "config-unknown":
+			t.Errorf("unexpected config-unknown diag %+v", d)
+		case "config-deprecated":
+			hint, ok := want[d.Key]
+			if !ok {
+				t.Errorf("unexpected config-deprecated diag %+v", d)
+				continue
+			}
+			if !strings.Contains(d.Reason, hint) {
+				t.Errorf("%s reason %q does not name %q", d.Key, d.Reason, hint)
+			}
+			delete(want, d.Key)
+		}
+	}
+	for k := range want {
+		t.Errorf("no config-deprecated diag for %s", k)
+	}
+	if len(cfg.Nodes) != 0 {
+		t.Errorf("nodes must not be read any more, got %v", cfg.Nodes)
+	}
+	if got := cfg.Agents["reviewer"].SystemPrompt; got != "" {
+		t.Errorf("--append-system-prompt must not be lifted any more, got %q", got)
+	}
+}
