@@ -244,7 +244,7 @@ function cronTimelineRowHtml(jobId, r, st) {
 
   // 行 click/keydown 走 cron-tl-select（同 run 二次点击 = collapse）。
   // .ctr-detail 嵌在行内，handler 里有 closest('.ctr-detail') 守卫——否则点
-  // <details> 输入快照 / ↩ 重放自 / ↻ 重放 / 拖选文字都会把行折起来。
+  // 按钮 / 拖选文字都会把行折起来。
   return '<div class="ctr' + (isExpanded ? ' is-selected is-expanded' : '') + '" data-run-id="' + escAttr(runId) + '"' +
       ' data-action="cron-tl-select" data-action-keydown="cron-tl-select" data-job="' + escAttr(jobId) + '"' +
       ' role="button" tabindex="0" aria-pressed="' + (isExpanded ? 'true' : 'false') + '" aria-expanded="' + (isExpanded ? 'true' : 'false') + '">' +

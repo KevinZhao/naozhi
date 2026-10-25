@@ -136,7 +136,7 @@ export function cronErrorClassLabel(cls) {
 export function cronJobLedgerCostHtml(jobId) {
   const c = cronJobCostCache[jobId];
   if (!c || !(c.usd > 0)) return '';
-  const title = '近 30 天账本合计：' + c.entries + ' 条账本记录（本地 / 云沙箱运行，及运行窗口外由会话记的账），CLI 估算口径' +
+  const title = '近 30 天账本合计：' + c.entries + ' 条账本记录（cron 运行，及运行窗口外由会话记的账），CLI 估算口径' +
     (c.dropped > 0 ? '；账本曾丢弃 ' + c.dropped + ' 条，可能偏低' : '');
   return '<span class="ct-cost-ledger" title="' + escAttr(title) + '">30 天 ' + esc(formatCostUSD(c.usd)) + '</span>';
 }

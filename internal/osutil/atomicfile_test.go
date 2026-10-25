@@ -38,8 +38,8 @@ func TestWriteFileAtomic_CreatesAndReplaces(t *testing.T) {
 // TestWriteFileAtomic_SyncDirFailureIsSoft pins R202606e-GO-003 (#2279): the
 // os.Rename has already succeeded by the time SyncDir runs, so a dir-fsync
 // failure must NOT propagate as a hard error — the data is durably in place.
-// A hard error here made callers (cron sandbox_pending) treat a fully written
-// file as a write failure and skip restart-reconcile index registration.
+// A hard error here made callers treat a fully written file as a write
+// failure (e.g. skipping restart-reconcile bookkeeping).
 func TestWriteFileAtomic_SyncDirFailureIsSoft(t *testing.T) {
 	// Not parallel: mutates the package-level syncDirFn.
 	orig := syncDirFn

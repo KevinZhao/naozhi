@@ -550,9 +550,8 @@ platforms:
 # absent or 0 = off. A spent IM chat gets no new turns (commands still work)
 # and is told at most once a minute; a spent cron job's runs end skipped/
 # budget_exceeded without spawning (only the day's first is kept in history)
-# and never count toward auto-pause; a dashboard replay of a sandbox run gets
-# a 409. Admins are limited too. All chats bound to a project share its
-# planner's budget. The dashboard's own turns are never refused, but their
+# and never count toward auto-pause. Admins are limited too. All chats bound
+# to a project share its planner's budget. The dashboard's own turns are never refused, but their
 # spend counts toward daily_usd. A soft cap: a turn let in under the cap may
 # overshoot it. Spend metered in credits or tokens is not counted. Needs the
 # cost ledger on. Caps, warn_ratio and action reload without a restart; adding
