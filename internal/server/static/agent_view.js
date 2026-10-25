@@ -16,7 +16,7 @@ import { esc, escAttr, showToast, nzBus, nzViews } from './nz_util.js';
 import { fetchEvents } from './event_stream.js';
 import { eventHtml, renderEventsWithDividers } from './event_render.js';
 import { wsm } from './ws_manager.js';
-import { fmtDuration, refreshBanner, turnState } from './running_banner.js';
+import { fmtDuration, refreshBanner, saveScrollPos, turnState } from './running_banner.js';
 import { sid } from './session_ident.js';
 
 (function () {
@@ -184,6 +184,11 @@ import { sid } from './session_ident.js';
   // Every change of the drilled agent is announced on nzBus as 'agent:view'.
   function switchTo(taskID, opts) {
     var seq = ++state.switchSeq;
+    // Unsubscribe the agent left, or its tailer keeps streaming here and holds
+    // a Hub-wide slot until it ends (#3696). On the way in, snapshot the parent
+    // pane: the way back and a switch away restore it, not the agent's (#3697).
+    if (state.activeTaskID && state.activeTaskID !== (taskID || '')) unsubscribeCurrent();
+    if (!state.activeTaskID && taskID) saveScrollPos(selection.key, selection.node);
     // Each drill-in gets the whole 202 budget; seq retires the old loop.
     state.retries = 0;
     state.activeKey = selection.key || '';
@@ -205,7 +210,6 @@ import { sid } from './session_ident.js';
     if (!taskID) {
       hideBreadcrumb();
       // Back to parent view: re-render the ring-buffered parent events.
-      unsubscribeCurrent();
       el.innerHTML = '';
       transcript.lastEventTime = 0;
       fetchEvents(true);
@@ -682,16 +686,11 @@ import { sid } from './session_ident.js';
   });
 
   // ─── Session change hook ───────────────────────────────────────────
-  // When the user picks a different session, any open drill-in on the
-  // previous session must close — otherwise agent_event messages for the
-  // now-inactive taskID would leak into the new session's event list.
-  //
-  // Called by dashboard.js's selectSession *before* it mutates selection.key
-  // (so saveScrollPos still keys off the old session). We therefore accept
-  // the target key/node as arguments rather than comparing against the now-
-  // stale global. When onSessionSwitch is called with no args (legacy call
-  // sites), fall back to unconditional cleanup — any call site that did not
-  // pass a target is by construction changing sessions.
+  // Picking a different session closes the drill-in, or the now-inactive
+  // task's agent_event messages would leak into the new session's list.
+  // dashboard.js's selectSession calls it *before* it mutates selection.key,
+  // so the target key/node come as arguments; no arguments (legacy call
+  // sites) means a session change by construction: unconditional cleanup.
   function onSessionSwitch(targetKey, targetNode) {
     if (!state.activeTaskID) return;
     var tKey = targetKey == null ? null : targetKey;

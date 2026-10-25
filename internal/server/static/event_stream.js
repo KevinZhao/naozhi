@@ -375,6 +375,7 @@ export function renderEvents(events, hasMore) {
 // is the server's "older history exists"; null (a legacy server or relayed node
 // omitted it) leaves the call to the length heuristic.
 function paintWholePane(el, events, display, hasMore) {
+  if (drilledIn()) return;
   const kept = keepReader(el);
   const html = renderEventsWithDividers(display, 0);
   // Decide "load earlier" BEFORE the all-internal placeholder so its copy never
@@ -416,14 +417,17 @@ function paintWholePane(el, events, display, hasMore) {
   if (!html && events.length > 0) maybeAutoPageBack();
 }
 
+// drilledIn: an agent drill-in owns the pane (agent-team-ui §3.6.2): the session's
+// frames feed turnState and the cursors only; the way back repaints (#3698).
+const drilledIn = () => !!nzViews.agent?.activeTaskID();
+
 // keepReader / placeRepaint bracket a whole-pane paint. A repaint of the session
 // on screen (a resubscribe, the REST full fetch; a switch paints an empty shell)
 // puts its reader back where they stand, but pins one who was at the bottom or a
 // teammate's new message, as appendEvents does — not this tab's echo, which
-// replaces an optimistic bubble (#3687). A hidden pane has no position to keep;
-// an agent drill-in's pane is not the session's.
+// replaces an optimistic bubble (#3687). A hidden pane has no position to keep.
 function keepReader(el) {
-  if (!el.querySelector('.event') || (nzViews.agent && nzViews.agent.activeTaskID())) return null;
+  if (!el.querySelector('.event')) return null;
   if (el.clientHeight) saveScrollPos(selection.key, selection.node);
   else delete perSession.scrollPos[sid(selection.key, selection.node)];
   return { user: lastUserUuid(el), echo: !!el.querySelector('.optimistic-msg') };
@@ -464,7 +468,7 @@ export function trimEventsScroll(el) {
 
 export function appendEvents(events) {
   const el = document.getElementById('events-scroll');
-  if (!el) return;
+  if (!el || drilledIn()) return;
   const empty = el.querySelector('.empty-state');
   if (empty) empty.remove();
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
@@ -528,6 +532,7 @@ function renderInitialHistory(el, /** @type {WsFrames['history']} */ msg, events
 // appendHistoryBackfill appends a frame that is not the opening one, skipping
 // what an earlier frame already painted.
 function appendHistoryBackfill(el, display) {
+  if (drilledIn()) return;
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
   // Remove stale "no events yet" before processing incremental events
   const emptyEl = el.querySelector('.empty-state');
@@ -765,12 +770,7 @@ const sessionFrames = {
       applyEventToTurnState(ev);
       refreshBanner();
     }
-    if (isInternalEvent(ev)) return;
-    // RFC v4 agent-team-ui §3.6.2 — when the user has drilled into an
-    // agent, the events-scroll pane belongs to that agent; parent events
-    // still feed into turnState / banner (handled above) but must not
-    // land in the DOM until the user returns.
-    if (nzViews.agent && nzViews.agent.activeTaskID()) return;
+    if (isInternalEvent(ev) || drilledIn()) return;
     appendLiveEvent(ev);
   },
 

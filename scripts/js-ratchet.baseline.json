@@ -1,8 +1,8 @@
 {
   "agent_view.js": {
-    "lines": 743,
+    "lines": 742,
     "maxFnLines": 62,
-    "maxIifeLines": 722,
+    "maxIifeLines": 721,
     "fnOver100": 0,
     "topLevelLetVar": 0,
     "configureDeps": 0,
@@ -204,7 +204,7 @@
     "lateBindings": 1
   },
   "dashboard.js": {
-    "lines": 1699,
+    "lines": 1698,
     "maxFnLines": 93,
     "maxIifeLines": 61,
     "fnOver100": 0,
