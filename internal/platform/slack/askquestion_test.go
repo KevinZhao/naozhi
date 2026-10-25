@@ -297,7 +297,8 @@ func clickCallback(channel, user, actionID string, val any) slack.InteractionCal
 }
 
 // clickAdapter returns an adapter whose handler records every dispatched
-// message; call s.dispatch.Wait before reading them.
+// message and, like a dispatcher taking it, reports it accepted; the
+// returned func waits on s.dispatch before reading them.
 func clickAdapter(t *testing.T) (*Slack, *fakeWebAPI, func() []platform.IncomingMessage) {
 	t.Helper()
 	s, api := newAPIAdapter(t)
@@ -307,6 +308,9 @@ func clickAdapter(t *testing.T) (*Slack, *fakeWebAPI, func() []platform.Incoming
 		mu.Lock()
 		got = append(got, msg)
 		mu.Unlock()
+		if msg.OnAccepted != nil {
+			msg.OnAccepted()
+		}
 	}
 	return s, api, func() []platform.IncomingMessage {
 		s.dispatch.Wait()
@@ -477,6 +481,33 @@ func TestHandleBlockActions_DroppedAnswerKeepsButtons(t *testing.T) {
 	}
 }
 
+// TestHandleBlockActions_RefusedAnswerKeepsButtons: a click dispatch does
+// not take (im_access, rate limit, budget, not the asker) leaves the card
+// as it was, so the asker can still answer it (#3628).
+func TestHandleBlockActions_RefusedAnswerKeepsButtons(t *testing.T) {
+	t.Parallel()
+	s, api, msgs := clickAdapter(t)
+	s.handler = func(context.Context, platform.IncomingMessage) {}
+	s.handleBlockActions(clickCallback("C1", "U9", askActionIDPrefix+"0", answer("group")))
+	msgs()
+	if calls := api.recorded(); len(calls) != 0 {
+		t.Errorf("card edited although the answer was refused: %+v", calls)
+	}
+}
+
+// TestHandleBlockActions_CarriesAsker: the card's asker reaches dispatch,
+// which refuses anyone else's click.
+func TestHandleBlockActions_CarriesAsker(t *testing.T) {
+	t.Parallel()
+	s, _, msgs := clickAdapter(t)
+	val := answer("group")
+	val.AskerID = "U1"
+	s.handleBlockActions(clickCallback("C1", "U9", askActionIDPrefix+"0", val))
+	if got := msgs(); len(got) != 1 || got[0].AskerID != "U1" || got[0].UserID != "U9" {
+		t.Errorf("dispatched %+v, want AskerID U1 from user U9", got)
+	}
+}
+
 // TestSocketMode_BlockActionsAckedAndAnswered drives a button click through
 // the real socket mode client: the envelope is acked, the answer dispatched
 // and the card's buttons replaced.
@@ -486,7 +517,10 @@ func TestSocketMode_BlockActionsAckedAndAnswered(t *testing.T) {
 	api := &fakeWebAPI{}
 	f.mux.Handle("/chat.update", api.handler())
 	got := make(chan platform.IncomingMessage, 1)
-	f.handler = func(_ context.Context, msg platform.IncomingMessage) { got <- msg }
+	f.handler = func(_ context.Context, msg platform.IncomingMessage) {
+		got <- msg
+		msg.OnAccepted()
+	}
 	s := f.adapter()
 	t.Cleanup(func() { _ = s.Stop() })
 	f.start(t, s)

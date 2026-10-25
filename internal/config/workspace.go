@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/naozhi/naozhi/internal/project"
 )
@@ -128,13 +129,23 @@ type AccessProfile struct {
 	DefaultBackend string `yaml:"default_backend,omitempty"`
 }
 
+// resolveHostname is os.Hostname; tests swap it.
+var resolveHostname = os.Hostname
+
+// newProcessHostname: resolved once so a reload never sees a moved hostname (#3655).
+func newProcessHostname() func() (string, error) {
+	return sync.OnceValues(func() (string, error) { return resolveHostname() })
+}
+
+var processHostname = newProcessHostname()
+
 // applyWorkspaceDefaults fills THIS INSTANCE's identity (hostname, then
 // "local") and lowercases the agent_commands keys — CJK mobile IMEs
 // auto-capitalize "/Review". Not to be confused with Config.Workspaces, the
 // remote-node map Normalize reconciles. Split out of applyDefaults (#2710 J11).
 func applyWorkspaceDefaults(cfg *Config) {
 	if cfg.Workspace.ID == "" {
-		if h, err := os.Hostname(); err == nil {
+		if h, err := processHostname(); err == nil {
 			cfg.Workspace.ID = h
 		} else {
 			cfg.Workspace.ID = "local"

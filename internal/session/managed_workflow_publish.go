@@ -391,8 +391,9 @@ func restoredWorkflow(ref workflow.Ref, now time.Time) (*workflow.Workflow, bool
 		StartedAt: ref.StartedAt, EndedAt: ref.EndedAt, LastObservedAt: ref.LastObservedAt,
 		Counts: ref.Counts, Tokens: ref.Tokens, Source: workflow.SourceRef,
 	}
-	if w.LastObservedAt == 0 {
-		w.LastObservedAt = now.UnixMilli()
+	// A future stamp (hand edit, clock step back) would hold off idle expiry.
+	if nowMs := now.UnixMilli(); w.LastObservedAt == 0 || w.LastObservedAt > nowMs {
+		w.LastObservedAt = nowMs
 	}
 	if workflow.IsRunning(w.Status) {
 		w.Degraded = workflow.DegradedSnapshotStale

@@ -120,7 +120,7 @@
     "lateBindings": 0
   },
   "cron_format.js": {
-    "lines": 146,
+    "lines": 147,
     "maxFnLines": 20,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -192,7 +192,7 @@
     "lateBindings": 0
   },
   "cron_view.js": {
-    "lines": 2033,
+    "lines": 2032,
     "maxFnLines": 103,
     "maxIifeLines": 0,
     "fnOver100": 1,
@@ -240,7 +240,7 @@
     "lateBindings": 0
   },
   "event_stream.js": {
-    "lines": 904,
+    "lines": 896,
     "maxFnLines": 68,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -252,7 +252,7 @@
     "lateBindings": 0
   },
   "features.js": {
-    "lines": 52,
+    "lines": 53,
     "maxFnLines": 7,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -360,7 +360,7 @@
     "lateBindings": 0
   },
   "nz_util.js": {
-    "lines": 397,
+    "lines": 400,
     "maxFnLines": 39,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -384,7 +384,7 @@
     "lateBindings": 0
   },
   "render_md.js": {
-    "lines": 1021,
+    "lines": 1023,
     "maxFnLines": 89,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -420,7 +420,7 @@
     "lateBindings": 0
   },
   "send_message.js": {
-    "lines": 561,
+    "lines": 557,
     "maxFnLines": 52,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -456,7 +456,7 @@
     "lateBindings": 0
   },
   "session_list.js": {
-    "lines": 1135,
+    "lines": 1136,
     "maxFnLines": 93,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -516,7 +516,7 @@
     "lateBindings": 0
   },
   "state.js": {
-    "lines": 252,
+    "lines": 253,
     "maxFnLines": 0,
     "maxIifeLines": 0,
     "fnOver100": 0,
@@ -540,7 +540,7 @@
     "lateBindings": 0
   },
   "tuning.js": {
-    "lines": 491,
+    "lines": 493,
     "maxFnLines": 112,
     "maxIifeLines": 0,
     "fnOver100": 1,

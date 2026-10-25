@@ -173,6 +173,7 @@ var turnFailedNotices = map[TurnCause]string{
 	TurnCauseResumeUnavailable:  "执行失败（上次会话无法恢复），下次执行将尝试开启新会话",
 	TurnCauseCLIConfig:          "执行失败（CLI 配置错误导致启动失败，如 MCP 配置无效），请联系管理员",
 	TurnCauseCLIMissingRuntime:  "执行失败（CLI 运行环境缺失），请联系管理员",
+	TurnCauseCLIAborted:         "执行未完成（被 CLI 中途中断，仅有部分回复），请检查执行历史",
 }
 
 // sessionErrorNotices words the causes of a CLI that exited at startup, for a

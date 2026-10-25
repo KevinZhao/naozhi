@@ -14,7 +14,7 @@ import { runPendingAsync } from './render_md.js';
 import { processEventsForDisplay } from './file_refs.js';
 import { navRebuild, navSync } from './msg_nav.js';
 import { applyEventToTurnState, idleTaskEvent, paintTurnElapsed, refreshBanner, resetTurnState, resetTurnStateForUserEcho, restoreScrollPos, saveScrollPos, scrollSlackPx, turnState, updateSendButton } from './running_banner.js';
-import { rollbackOptimisticRunning } from './send_message.js';
+import { restoreSpawnFields, rollbackOptimisticRunning } from './send_message.js';
 import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, MAX_LIVE_DOM_EVENTS, lastDividerTime, showAPIError, stickEventsBottom, timeDividerHtml } from './utilities.js';
 import { isInternalEvent, sid } from './session_ident.js';
 import { isCronSessionFrozen } from './cron_state.js';
@@ -788,11 +788,8 @@ const sessionFrames = {
     if (msg.status === 'accepted' || msg.status === 'queued') {
       flashSendBtn();
       if (msg.status === 'queued') {
-        // Attach an inline chip to the optimistic user bubble instead of a
-        // top-of-screen toast. The chip is bound to the bubble, so when the
-        // real "user" event replaces it (see the .optimistic-msg removal
-        // path in onEvent) the chip disappears along with the bubble — no
-        // separate lifecycle to manage.
+        // An inline chip on the optimistic bubble, not a toast: it goes with
+        // the bubble when the real "user" event replaces it (onEvent).
         const lastOpt = document.querySelector('#events-scroll .event.user.optimistic-msg:last-of-type .event-content');
         if (lastOpt && !lastOpt.querySelector('.msg-queued-chip')) {
           const chip = document.createElement('div');
@@ -801,26 +798,20 @@ const sessionFrames = {
           lastOpt.appendChild(chip);
         }
       }
+      const ackKey = msg.key || selection.key;
+      // It got through: a failed turn's later error ack must not restore its picks.
+      if (perSession.sentPicks[ackKey]?.sendId === msg.id) delete perSession.sentPicks[ackKey].sendId;
       // Subscribe to the session we just sent to, unless we're already
       // subscribed or a subscribe is already pending for this exact key.
-      const ackKey = msg.key || selection.key;
       if (ackKey && sessionStream.subscribedKey !== ackKey && sessionStream._pendingSubscribeKey !== ackKey) {
         sessionStream.lastEventTimeWs = 0;
         sessionStream.subscribe(ackKey, selection.node);
       }
-      // Re-subscribe is NOT needed here for already-subscribed sessions.
-      // The existing eventPushLoop is still connected to the process's event
-      // log and will deliver new events (including the user message we just
-      // sent). Re-subscribing would cause a history replay that overlaps with
-      // events already pushed by the running eventPushLoop, resulting in
-      // duplicate user messages in the UI.
-      // For process restarts (dead → running), onSessionState
-      // handles re-subscription exclusively.
+      // A subscribed session must NOT re-subscribe (a history replay would duplicate
+      // its eventPushLoop's events); a dead → running restart is onSessionState's.
     } else if (msg.status === 'busy') {
-      // Queue is disabled (MaxDepth<=0) and the session is currently
-      // processing another message, so our send was dropped rather than
-      // enqueued. Roll back the optimistic bubble and tell the operator
-      // to retry — otherwise the UI silently eats the message.
+      // Queue disabled (MaxDepth<=0) and the session busy: the send was
+      // dropped, so roll back and say so rather than silently eat it.
       showToast('会话正忙，消息未送达，请稍后重试', 'error');
       removeOptimisticMsg(msg.id);
       rollbackOptimisticRunning(msg.key || selection.key, msg.node || selection.node);
@@ -834,6 +825,7 @@ const sessionFrames = {
       showAPIError('发送消息', 500, msg.error || '');
       // Remove this send's optimistic message on send failure
       removeOptimisticMsg(msg.id);
+      restoreSpawnFields(msg.key || selection.key, msg.id);
       rollbackOptimisticRunning(msg.key || selection.key, msg.node || selection.node);
       delete perSession.lastSent[sid(msg.key || selection.key, msg.node || selection.node)];
     }

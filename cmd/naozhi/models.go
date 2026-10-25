@@ -12,6 +12,7 @@ import (
 	"github.com/naozhi/naozhi/internal/ccmodels"
 	"github.com/naozhi/naozhi/internal/ccmodels/ccprobe"
 	"github.com/naozhi/naozhi/internal/claudefs"
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
@@ -168,7 +169,7 @@ func probeAliases(cfg *config.Config, snap ccmodels.Snapshot, base []byte, opt m
 		Observe:      func(v ccmodels.Verdict) { fmt.Println("  " + ccprobe.Describe(v)) },
 	}
 	if !opt.Quick {
-		p.CLIPath = claudeBackendPath(cfg)
+		p.CLIPath = ccProbePath(cfg)
 	}
 	ctx := context.Background()
 	if snap.CredExport == "" {
@@ -183,15 +184,21 @@ func probeAliases(cfg *config.Config, snap ccmodels.Snapshot, base []byte, opt m
 	return p.Run(ctx, candidates)
 }
 
-// claudeBackendPath returns the cc binary to probe with: the claude backend's
-// own path, so the probe exercises the binary naozhi actually spawns.
-func claudeBackendPath(cfg *config.Config) string {
+// ccProbePath resolves the claude backend's binary the way spawn does, and
+// says so when none is found (the prober skips the CLI stage on "").
+func ccProbePath(cfg *config.Config) string {
+	var configured string
 	for _, b := range cfg.EnabledBackends() {
-		if b.ID == "claude" && b.Path != "" {
-			return osutil.ExpandHome(b.Path)
+		if b.ID == "claude" {
+			configured = b.Path
+			break
 		}
 	}
-	return osutil.ExpandHome(cfg.CLI.Path)
+	path := cli.ResolveCLIPath(configured, "claude")
+	if path == "" {
+		fmt.Println("未找到 claude，跳过 CLI 验证。")
+	}
+	return path
 }
 
 // reportPlan prints what the probe concluded, before any file is touched.

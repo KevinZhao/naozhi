@@ -83,8 +83,8 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	s.mux.HandleFunc("POST /api/auth/logout", s.apiChain()(s.auth.HandleLogout))
 	// Health probes are server-owned (no sub-package) and unauthenticated at
 	// the route level: /health gates its stats section on auth internally,
-	// /livez is a no-deps liveness probe, /readyz gates on minimal wiring
-	// (#609). Registered here rather than in Start since #2633 — nothing
+	// /livez is a no-deps liveness probe, /readyz answers once construction
+	// has finished (#609). Registered here rather than in Start since #2633 — nothing
 	// they read is Start-time state any more.
 	s.mux.HandleFunc("GET /health", hs.healthH.handleHealth)
 	s.mux.HandleFunc("GET /livez", hs.healthH.handleLivez)

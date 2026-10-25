@@ -189,7 +189,7 @@ func (d *doctor) checkServerState() {
 	unobserved := d.platformsFinding(p, now)
 	d.writerFinding("eventlog writer", p.EventLog, "events are not reaching disk")
 	d.writerFinding("attachment tracker", p.AttachmentTracker, "attachment metadata is not being recorded")
-	d.dispatchFinding(p, unobserved, now)
+	d.dispatchFinding(p, unobserved)
 }
 
 // levelRank orders finding levels so the platforms line can take the worst.
@@ -284,8 +284,7 @@ func (d *doctor) writerFinding(category string, w *healthWriterStats, consequenc
 // dispatchFinding reports IM reply health. For the unobserved platforms
 // (those without a connection state) a long quiet stretch is the only hint
 // that one never connected; observable ones are graded on the platforms line.
-// now is the server's clock, as for platformsFinding.
-func (d *doctor) dispatchFinding(p healthPayload, unobserved []string, now time.Time) {
+func (d *doctor) dispatchFinding(p healthPayload, unobserved []string) {
 	ds := p.Dispatch
 	if ds == nil {
 		d.add("dispatch", "pass", "skipped (process reports no dispatch stats)")
@@ -302,14 +301,22 @@ func (d *doctor) dispatchFinding(p healthPayload, unobserved []string, now time.
 	case len(unobserved) == 0:
 		d.add("dispatch", "pass", "no inbound IM messages yet · "+counts)
 	default:
-		// config is loaded once at startup, so its load time is the start time.
-		loadedAt, err := time.Parse(time.RFC3339, p.ConfigLoadedAt)
-		if err == nil && now.Sub(loadedAt) > dispatchQuietWarnAfter {
-			d.addRemote("dispatch", "warn", "no inbound IM messages (slash commands not counted) since start at "+p.ConfigLoadedAt+" — "+strings.Join(unobserved, ", ")+" may not be connected (inferred: no connection state reported)")
+		// uptime, not config_loaded_at: a clean hot reload moves the latter
+		// (#3620). Unparsable uptime infers nothing.
+		up, ok := healthUptime(p)
+		if ok && up > dispatchQuietWarnAfter {
+			d.addRemote("dispatch", "warn", "no inbound IM messages (slash commands not counted) since start "+up.String()+" ago — "+strings.Join(unobserved, ", ")+" may not be connected (inferred: no connection state reported)")
 			return
 		}
 		d.add("dispatch", "pass", "no inbound IM messages yet · "+counts)
 	}
+}
+
+// healthUptime parses /health's uptime (a Go duration string). This is a
+// server reply, not a config value, so it is not parsed in internal/config.
+func healthUptime(p healthPayload) (time.Duration, bool) {
+	up, err := time.ParseDuration(p.Uptime)
+	return up, err == nil
 }
 
 // addRemote adds a finding whose detail carries server-supplied text.

@@ -162,9 +162,10 @@ test.describe('under WS-fallback polling', () => {
     const errors = pageErrors(page);
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
-    // Settle the boot churn (the first scanDiscovered zeroes lastVersion).
+    // Drain the debounced refresh the first discovery scan schedules.
     await page.evaluate(async () => {
       await scanDiscovered();
+      await debouncedFetchSessions();
       await fetchSessions();
       await fetchSessions();
     });
@@ -180,8 +181,7 @@ test.describe('under WS-fallback polling', () => {
       const n = mock.sessionsValidators.length;
       const notModified = mock.sessionsNotModified;
       expect(await page.evaluate(async () => (await fetchSessions()) === undefined)).toBe(true);
-      // The 5 s interval revalidates the same way: of the next polls at most
-      // one is a boot-time debounced fetch.
+      // The 5 s interval revalidates the same way.
       await expect.poll(() => mock.sessionsValidators.length, { timeout: 12000 }).toBeGreaterThanOrEqual(n + 3);
       const sent = validatorsSince(mock, n);
       expect(sent.every((v) => v !== ''), 'every poll revalidated').toBe(true);
@@ -199,6 +199,8 @@ test.describe('under WS-fallback polling', () => {
     const mock = await startMockServer({ sessionsETag: true });
     const { ctx, page, errors } = await openFallback(browser, mock);
     try {
+      // A 5 s tick landing between the edit and the fetch would take the body.
+      await page.evaluate(() => { clearInterval(sessionPollTimer); sessionPollTimer = null; });
       const n = mock.sessionsValidators.length;
       mock.setSessionStateWithoutVersionBump(KEY_A, 'running');
       expect(await page.evaluate(() => fetchSessions()), 'the poll applied a body').toBe(true);

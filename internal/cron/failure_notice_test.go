@@ -60,7 +60,7 @@ var allTurnCauses = []TurnCause{
 	TurnCauseContextTooLong, TurnCauseQuota, TurnCausePermission, TurnCauseBackendOverloaded,
 	TurnCauseBackendRateLimited, TurnCauseBackendAuth, TurnCauseBackendInvalid,
 	TurnCauseBackendUnreachable, TurnCauseResumeUnavailable, TurnCauseCLIConfig,
-	TurnCauseCLIMissingRuntime,
+	TurnCauseCLIMissingRuntime, TurnCauseCLIAborted,
 }
 
 // TestFailureNoticeBody_TurnCause pins the turn_failed body per cause for a
@@ -90,6 +90,7 @@ func TestFailureNoticeBody_TurnCause(t *testing.T) {
 		{TurnCauseResumeUnavailable, "执行失败（上次会话无法恢复），下次执行将尝试开启新会话 · run 1a2b3c4d"},
 		{TurnCauseCLIConfig, "执行失败（CLI 配置错误导致启动失败，如 MCP 配置无效），请联系管理员 · run 1a2b3c4d"},
 		{TurnCauseCLIMissingRuntime, "执行失败（CLI 运行环境缺失），请联系管理员 · run 1a2b3c4d"},
+		{TurnCauseCLIAborted, "执行未完成（被 CLI 中途中断，仅有部分回复），请检查执行历史 · run 1a2b3c4d"},
 		{TurnCause("from_a_newer_binary"), "执行失败（后端报告本轮出错），请检查执行历史 · run 1a2b3c4d"},
 	}
 	for _, tc := range cases {

@@ -141,7 +141,7 @@ func mrkdwnContext(text string) *slack.ContextBlock {
 
 // handleBlockActions answers an AskUserQuestion button click: the decoded
 // value becomes a synthetic text message pinned to the asking agent, and the
-// card's buttons are replaced by the chosen answer.
+// card's buttons are replaced by the chosen answer once dispatch takes it.
 func (s *Slack) handleBlockActions(cb slack.InteractionCallback) {
 	var act *slack.BlockAction
 	for _, a := range cb.ActionCallback.BlockActions {
@@ -210,15 +210,17 @@ func (s *Slack) handleBlockActions(cb slack.InteractionCallback) {
 		AgentID: osutil.SanitizeForLog(val.AgentID, platform.AskIDMaxRunes),
 		// An explicit click on the bot's card bypasses mention_only gating.
 		MentionMe: true,
+		AskerID:   val.AskerID,
 	}
-	// A dropped answer keeps its buttons so the user can click again.
-	if !s.dispatch.TryGo("slack", func() { s.handler(s.ctx, msg) },
-		"chat", msg.ChatID, "user", msg.UserID) {
-		return
-	}
+	// A dropped or refused answer keeps its buttons so the user, or the
+	// asker, can click again (#3628).
 	if msgTs != "" {
-		s.dispatch.Go("slack ask card edit", func() { s.markQuestionAnswered(channel, msgTs, text) })
+		msg.OnAccepted = func() {
+			s.dispatch.Go("slack ask card edit", func() { s.markQuestionAnswered(channel, msgTs, text) })
+		}
 	}
+	s.dispatch.TryGo("slack", func() { s.handler(s.ctx, msg) },
+		"chat", msg.ChatID, "user", msg.UserID)
 }
 
 // markQuestionAnswered replaces the card's blocks so its buttons disappear.

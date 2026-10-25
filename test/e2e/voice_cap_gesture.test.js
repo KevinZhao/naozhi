@@ -17,7 +17,6 @@ const { installTouch } = require('./touch');
 
 let mock;
 const SESSION = 'dashboard:direct:2026-01-01-120000-1:myproject';
-const TRANSCRIBE_DELAY_MS = 800;
 
 test.beforeAll(async () => { mock = await startMockServer(); });
 test.afterAll(async () => { await new Promise(r => mock.server.close(r)); });
@@ -82,8 +81,12 @@ test('30s cap: trailing swipe/lift cannot cancel, hide the overlay or re-toast; 
   const page = await ctx.newPage();
   await page.addInitScript(stubMedia);
   mock.resetCalls();
+  // The transcription is held until the overlay checks below are done: a
+  // fixed delay let it land mid-check on a loaded runner, hiding the overlay.
+  let releaseTranscribe = () => {};
+  const transcribeGate = new Promise((r) => { releaseTranscribe = r; });
   await page.route('**/api/transcribe', async (route) => {
-    await new Promise(r => setTimeout(r, TRANSCRIBE_DELAY_MS)); // wait-ok: simulated transcribe latency
+    await transcribeGate;
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ text: '语音内容' }) });
   });
 
@@ -129,6 +132,7 @@ test('30s cap: trailing swipe/lift cannot cancel, hide the overlay or re-toast; 
   expect(await page.$eval('#btn-hold-talk', el => el.classList.contains('active'))).toBe(false);
   expect(await page.$eval('#vo-hint', el => el.textContent)).toBe('正在识别...');
 
+  releaseTranscribe();
   // Transcription lands: exactly one send, draft + transcript, overlay gone.
   await expect.poll(() => mock.sendCalls.length, { timeout: 5000 }).toBe(1);
   expect(JSON.parse(mock.sendCalls[0]).text).toBe('草稿 语音内容');

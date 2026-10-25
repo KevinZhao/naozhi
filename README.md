@@ -76,6 +76,8 @@ graph TD
 - 群聊里图片和文件要和 @bot 在同一条消息里，否则与普通消息一样被忽略。飞书的图片和文件消息没法 @bot，所以群里发的图片和文件不处理，请私聊发送
 - 这些文件和 Dashboard 上传一样只按上传时间回收（`attachment-gc`，默认关闭），不开启就一直留在工作目录里
 
+飞书的富文本消息（带格式的文字、粘贴的代码、文字里夹图片）按纯文本加图片处理：链接保留地址，代码块保留成 Markdown 代码块，内嵌图片每条最多 5 张。表情包、视频等暂不支持的消息类型，bot 会回一条「暂不支持此类消息」（同一会话每分钟最多一次），群里只在 @bot 时回。
+
 所有平台开箱即用，**无需公网 IP**。
 
 ### 多 Agent 路由
@@ -90,7 +92,7 @@ graph TD
 
 Agent 命令、模型、system prompt 均可在 `config.yaml` 中自定义。
 
-群聊里，Slack 话题串和飞书话题各用一个独立会话，不在话题里的消息共用频道的会话；`session.group_scope` 可改为 `chat`（整个群一个会话）或 `user`（每个成员一个会话）。`/cd`、`/project`、`/cron` 始终按整个群生效。开启 `session.thread_auto_open` 后，顶层的 @bot 提问会在以它为根的新话题里回答，话题里的追问接着同一个会话。
+群聊里，Slack 话题串和飞书话题各用一个独立会话，不在话题里的消息共用频道的会话；`session.group_scope` 可改为 `chat`（整个群一个会话）或 `user`（每个成员一个会话；此时 Claude 的提问卡片只有提问者本人能点选作答）。`/cd`、`/project`、`/cron` 始终按整个群生效。开启 `session.thread_auto_open` 后，顶层的 @bot 提问会在以它为根的新话题里回答，话题里的追问接着同一个会话。
 
 ### 会话生命周期
 
@@ -707,6 +709,7 @@ kill -HUP $(pidof naozhi)
   `/health.config_reloaded_sha256` 始终是最近一次加载或重载读到的文件，此后磁盘上
   再改而没有重载，doctor 照样报 `not applied`，同时列出待重启段。
 - `${VAR}` 按 naozhi 进程当前的环境变量展开，改了 EnvironmentFile 仍要重启。
+  `~/.claude/settings.json` 的 `env` 在启动时先于首次加载写入。
 - 设计见 [`docs/rfc/config-hot-reload.md`](docs/rfc/config-hot-reload.md)。
 
 ### 生产架构

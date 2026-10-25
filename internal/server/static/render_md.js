@@ -839,6 +839,8 @@ function runKatex() {
     if (awaitingLoad(katexPending, id, el, katexLoad)) return;
     try {
       window.katex.render(info.tex, el, { displayMode: info.display, throwOnError: false });
+      // Rendered: drop the placeholder's source styling, as renderToString's has none.
+      el.classList.remove('katex-pending');
     } catch(_) {
       el.textContent = (info.display ? '$$' : '$') + info.tex + (info.display ? '$$' : '$');
     }

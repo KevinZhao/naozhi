@@ -328,9 +328,6 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		}
 
 		msgType := event.Message.MessageType
-		if msgType != "text" && msgType != "image" && msgType != "audio" && msgType != "file" {
-			return
-		}
 
 		// v1 events carry no Header.EventID; fabricate one from ts+nonce so
 		// Dedup.Seen is not a no-op and rapid retries do not leak through.
@@ -473,6 +470,28 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			f.dispatch.TryGo("feishu file", func() {
 				f.handleFile(f.stopCtx, handler, msg, event.Message.MessageID, content.FileKey, content.FileName)
 			})
+
+		case "post":
+			text, imageKeys, err := parsePostContent(event.Message.Content)
+			if err != nil {
+				slog.Debug("feishu webhook: post dropped",
+					"err", err, "msg_id", osutil.SanitizeForLog(event.Message.MessageID, 64))
+				return
+			}
+			if text == "" && len(imageKeys) == 0 {
+				return
+			}
+			msg.Text = text
+			if len(imageKeys) == 0 {
+				f.dispatch.TryGo("feishu text", func() { handler(f.stopCtx, msg) })
+				return
+			}
+			f.dispatch.TryGo("feishu post", func() {
+				f.handlePost(f.stopCtx, handler, msg, event.Message.MessageID, imageKeys)
+			})
+
+		default:
+			f.noticeUnsupported(msg, msgType)
 		}
 	})
 }

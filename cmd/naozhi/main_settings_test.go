@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/config"
 )
 
 // seedClaudeHome creates a fake ~/.claude/settings.json under t.TempDir and
@@ -260,5 +262,33 @@ func TestReadJSONWithRetry_ctxCancelAbortsRetry(t *testing.T) {
 	// to keep the test robust on slow CI while still proving early exit.
 	if elapsed >= 300*time.Millisecond {
 		t.Fatalf("ctx cancel should abort retry sleep early, took %v (want < 300ms)", elapsed)
+	}
+}
+
+// Startup and a hot reload expand ${VAR} against the same environment: a key
+// set only in settings.json env must not read as a restart-only edit on the
+// first reload after boot (#3621).
+func TestLoadStartupConfig_reloadSeesSameExpansion(t *testing.T) {
+	seedClaudeHome(t, `{"env": {"NO_PROXY": "localhost"}}`)
+	t.Setenv("NO_PROXY", "")
+	os.Unsetenv("NO_PROXY")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("workspace:\n  id: w1\n  name: ${NO_PROXY}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, settingsErr, err := loadStartupConfig(context.Background(), path)
+	if err != nil || settingsErr != nil {
+		t.Fatalf("loadStartupConfig: err=%v settingsErr=%v", err, settingsErr)
+	}
+	if cfg.Workspace.Name != "localhost" {
+		t.Errorf("startup Workspace.Name = %q, want the settings.json value", cfg.Workspace.Name)
+	}
+	next, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.RestartRequired(next); got != nil {
+		t.Errorf("RestartRequired after a no-op reload = %v, want none", got)
 	}
 }
