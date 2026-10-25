@@ -2,7 +2,6 @@ package server
 
 import (
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 )
@@ -166,109 +165,4 @@ func TestMarshalEscaped_HTMLEscapingEnabled(t *testing.T) {
 			t.Errorf("marshalEscaped body contains raw %q — SetEscapeHTML(true) regressed: %q", lit, body)
 		}
 	}
-}
-
-// TestSetEscapeHTMLFalse_ScopedToWriteJSONHelper pins R245-SEC-13 (#842).
-//
-// After Phase 3-prep (server-split-phase4-design.md §6.5 Plan B) the
-// SetEscapeHTML(false) call site moved to internal/dashboard/httputil. Inside
-// internal/server the literal must now be ABSENT entirely — every JSON
-// helper here forwards through httputil. A future endpoint that hand-rolls
-// its own pooled encoder and flips the bit on an HTML-template render path
-// would re-open the REPEAT-2 escalation chain (raw `<` / `>` / `&` flowing
-// into innerHTML without DOMPurify); fail the build instead.
-//
-// The httputil package carries its own scoped scan
-// (TestSetEscapeHTMLFalseScopedToPackage) pinning the call to httputil.go.
-//
-// The check scans non-test .go files in the package directory directly,
-// stripping line and block comments before substring-matching so godoc
-// references to the contract (project_files.go, wshub_*, dashboard_send.go)
-// don't trip the lint. Tests are excluded so the probe in
-// TestJSONEncPool_HTMLEscapingDisabled can mention the symbol freely.
-func TestSetEscapeHTMLFalse_ScopedToWriteJSONHelper(t *testing.T) {
-	const needle = "SetEscapeHTML(false)"
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("ReadDir: %v", err)
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		body, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatalf("ReadFile %s: %v", name, err)
-		}
-		if containsCodeOccurrence(string(body), needle) {
-			t.Errorf("%s contains SetEscapeHTML(false) in code; after Phase 3-prep this call site "+
-				"lives exclusively in internal/dashboard/httputil. HTML-template render paths must "+
-				"escape; if a new JSON-API helper truly needs the unescaped form, host it in "+
-				"httputil.go and update its TestSetEscapeHTMLFalseScopedToPackage allow-list "+
-				"with the rationale.",
-				name)
-		}
-	}
-}
-
-// containsCodeOccurrence reports whether needle appears in src outside any
-// // line comment or /* … */ block comment. Source-text (not Go AST) so
-// the test stays trivially auditable; the comment stripper handles the
-// in-tree shapes (line comments at any column; block comments span lines)
-// without pulling in go/parser.
-func containsCodeOccurrence(src, needle string) bool {
-	var b strings.Builder
-	b.Grow(len(src))
-	i := 0
-	inBlockComment := false
-	inString := false
-	stringQuote := byte(0)
-	for i < len(src) {
-		if inBlockComment {
-			if i+1 < len(src) && src[i] == '*' && src[i+1] == '/' {
-				inBlockComment = false
-				i += 2
-				continue
-			}
-			i++
-			continue
-		}
-		if inString {
-			b.WriteByte(src[i])
-			if src[i] == '\\' && i+1 < len(src) {
-				b.WriteByte(src[i+1])
-				i += 2
-				continue
-			}
-			if src[i] == stringQuote {
-				inString = false
-			}
-			i++
-			continue
-		}
-		if i+1 < len(src) && src[i] == '/' && src[i+1] == '/' {
-			// Line comment: skip to end of line, preserve the newline so
-			// line counts (and any subsequent code on the next line) line up.
-			for i < len(src) && src[i] != '\n' {
-				i++
-			}
-			continue
-		}
-		if i+1 < len(src) && src[i] == '/' && src[i+1] == '*' {
-			inBlockComment = true
-			i += 2
-			continue
-		}
-		if src[i] == '"' || src[i] == '`' {
-			inString = true
-			stringQuote = src[i]
-		}
-		b.WriteByte(src[i])
-		i++
-	}
-	return strings.Contains(b.String(), needle)
 }

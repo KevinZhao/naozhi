@@ -1,8 +1,7 @@
 # golangci-lint configuration.
 #
-# Status: golangci-lint itself is still not run in CI — the depguard rules
-# below are enforced today by the per-package _test.go guards (e.g.
-# internal/sessionkey/imports_test.go), which DO run in CI via go test.
+# Status: golangci-lint itself is still not run in CI, so the depguard rules
+# below are advisory only.
 #
 # staticcheck, however, is now wired: `make lint-staticcheck` runs in the
 # fail-mode `lint` CI job — see .github/workflows/ci.yml. It is
@@ -41,8 +40,7 @@ linters:
         # internal/sessionkey is a leaf vocabulary package shared by cron /
         # session / sysession / scratch. Adding a deeper internal/* import
         # here creates a cycle (cron → session ← sessionkey ← cron) and
-        # defeats the whole point of the package. The matching go-test
-        # guard lives in internal/sessionkey/imports_test.go.
+        # defeats the whole point of the package.
         sessionkey-isolated:
           list-mode: lax
           files:

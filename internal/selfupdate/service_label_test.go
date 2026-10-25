@@ -1,7 +1,6 @@
 package selfupdate
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -122,22 +121,6 @@ func TestLaunchdJobRunsPath(t *testing.T) {
 			t.Error("empty launchctl output must not be treated as a match")
 		}
 	})
-}
-
-// funcBody returns the text from `decl` up to the next top-level closing brace.
-func funcBody(t *testing.T, src, decl string) string {
-	t.Helper()
-	i := strings.Index(src, decl)
-	if i < 0 {
-		t.Fatalf("could not find %q in source", decl)
-	}
-	rest := src[i:]
-	// A top-level func body ends at the first "\n}" — no nested block in these
-	// functions is indented to column zero.
-	if j := strings.Index(rest, "\n}"); j >= 0 {
-		return rest[:j]
-	}
-	return rest
 }
 
 // TestRestartLaunchdUsesKickstart and TestServiceRunningUsesResolvedLabel used to

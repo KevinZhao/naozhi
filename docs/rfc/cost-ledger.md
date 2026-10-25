@@ -82,7 +82,7 @@
 ## 4. 数据模型
 
 ```go
-// internal/costledger/entry.go —— 叶子包：不 import 任何 internal/*（照抄 runtelemetry/imports_test.go 的 TestPackageIsLeaf）
+// internal/costledger/entry.go —— 叶子包：不 import 任何 internal/*
 type Source string // "session" | "cron_local" | "cron_sandbox" | "sysession"
 type Unit   string // "USD" | "credits" | "tokens"
 type Kind   string // 采集方式："turn"(CLI 累计差分) | "receipt"(sandbox 回执) | "metering"(kiro/codex) | "backfill" | "partial" | "adjust"(对账修正，可为负)
@@ -284,7 +284,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 ## 12. 测试策略
 
-- 单测：`costledger.Delta`（乱序 / 新 model / 新 Unit / 字段回退 / 16 上限）；`Append` 拒空、枚举校验、字符串消毒；rollup / retention / 半行恢复 / symlink 拒绝；summary 每档 `group_by` + unit 分桶不混算 + 窗口上限；`TestPackageIsLeaf`。
+- 单测：`costledger.Delta`（乱序 / 新 model / 新 Unit / 字段回退 / 16 上限）；`Append` 拒空、枚举校验、字符串消毒；rollup / retention / 半行恢复 / symlink 拒绝；summary 每档 `group_by` + unit 分桶不混算 + 窗口上限。
 - 集成：session finishRun → 1 条 entry；runStore=nil 时 costSpent 仍累进（P4 回归，旧代码 FAIL）；cron persistent 两次 run delta（P2 回归，旧代码 FAIL）；cron 窗口内的 turn 不写 session ledger、窗口外的迟到 result 与 partial 写 session ledger；sandbox 三种 outcome 各 1 条（CostUSD>0 时）、replay 另起 1 条；dashboard 对 cron key 在 run 窗口外发送 → `Source=session` entry；kiro metering 差分（两 turn 各 2 credits → 两条 amount=2，旧逻辑第二条会是 4）；sysession json 三态；leak-recovery 拷贝 ModelUsage。
 - 基准：`BenchmarkReadEvent_NonResultFrame` allocs 不变；`BenchmarkAccountTurnCost_16Models`。
 - 前端：Home 卡 / cron per-job 聚合契约测试。

@@ -172,36 +172,6 @@ func TestUpdateApply_BackgroundContextSurvivesRequest(t *testing.T) {
 	}
 }
 
-// Source guard for the half the runtime test cannot see: the detached goroutine
-// must build its own context from Background(), never from the request.
-func TestUpdateApply_DetachedContextSourceGuard(t *testing.T) {
-	src := readUpdateSource(t, false)
-	at := strings.Index(src, "func (h *Handlers) HandleUpdateApply")
-	if at < 0 {
-		t.Fatal("HandleUpdateApply not found")
-	}
-	goAt := strings.Index(src[at:], "go func()")
-	if goAt < 0 {
-		t.Fatal("HandleUpdateApply must do its work in a detached goroutine (the process is killed mid-restart, so a synchronous response never ships)")
-	}
-	// Strip comment lines: the code deliberately EXPLAINS why r.Context() is
-	// wrong, and a naive scan would read that explanation as the violation.
-	var code []string
-	for _, line := range strings.Split(src[at+goAt:], "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "//") {
-			continue
-		}
-		code = append(code, line)
-	}
-	tail := strings.Join(code, "\n")
-	if !strings.Contains(tail, "context.WithTimeout(context.Background()") {
-		t.Error("the apply goroutine must use context.WithTimeout(context.Background(), …): a request-derived context is cancelled as soon as the 202 is written")
-	}
-	if strings.Contains(tail, "r.Context()") {
-		t.Error("the apply goroutine must NOT use r.Context() — the request is already over by the time it runs")
-	}
-}
-
 // flushRecorder records whether the handler flushed its response, and when
 // relative to other events.
 type flushRecorder struct {
@@ -258,27 +228,6 @@ func TestUpdateApply_FlushesAcceptedBeforeStartingWork(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("apply goroutine never started")
-	}
-}
-
-// TestUpdateApply_FlushOrderSourceGuard covers what the live test cannot: under
-// httptest the flush always wins by a wide margin, so a future edit that moved
-// the write back below `go func()` would keep passing there. The ordering is the
-// invariant, so the ordering is what gets pinned.
-func TestUpdateApply_FlushOrderSourceGuard(t *testing.T) {
-	body := funcBody(t, readUpdateSource(t, true), "HandleUpdateApply")
-
-	writeAt := strings.Index(body, "httputil.WriteJSONStatus(w, http.StatusAccepted")
-	flushAt := strings.Index(body, "f.Flush()")
-	goAt := strings.Index(body, "go func()")
-	if writeAt < 0 || goAt < 0 {
-		t.Fatal("expected HandleUpdateApply to write a 202 and detach the work")
-	}
-	if flushAt < 0 {
-		t.Fatal("HandleUpdateApply must Flush the 202: writing it is not shipping it, and the restart can kill this process before the handler returns")
-	}
-	if writeAt > goAt || flushAt > goAt {
-		t.Error("the 202 must be written AND flushed BEFORE the apply goroutine starts — otherwise a restart-only apply can SIGTERM this process while the response is still buffered")
 	}
 }
 

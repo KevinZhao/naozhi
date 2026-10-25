@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -142,6 +143,26 @@ func TestSudoersExampleMirrorsRuntimeLiterals(t *testing.T) {
 	}
 }
 
-// findRepoRoot moved to testhelper_test.go so cross-platform tests
-// (setwritedeadline_contract_test.go) can reuse it without dragging in the
-// Linux-only build tag of this file.
+// findRepoRoot walks upward from this test file until it finds go.mod.
+// Used by the sudoers policy diff to locate the project root regardless
+// of where `go test` is invoked from.
+func findRepoRoot(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller unavailable")
+	}
+	dir := filepath.Dir(thisFile)
+	for i := 0; i < 10; i++ {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	t.Fatalf("go.mod not found walking up from %s", thisFile)
+	return ""
+}

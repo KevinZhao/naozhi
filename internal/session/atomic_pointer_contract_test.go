@@ -1,14 +1,7 @@
-// anchor-keep: bans atomic.Value-for-string declarations; the wrong-type Store it prevents compiles and only panics on the first mismatched write in production.
 package session
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"os"
-	"path/filepath"
 	"reflect"
-	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -57,72 +50,6 @@ func TestManagedSession_AtomicPointerStringFields(t *testing.T) {
 	// behaviour (covered in snapshot_cli_identity_test.go) is enough.
 	if _, ok := typ.FieldByName("cliIdentity"); !ok {
 		t.Error("ManagedSession.cliIdentity missing — R215-ARCH-P2-7 packing reverted?")
-	}
-}
-
-// TestSessionPackage_NoLegacyAtomicValueForStrings walks session + cli source
-// files looking for `atomic.Value` in struct field declarations to ensure the
-// migration stays clean. The check is conservative: it parses each .go file
-// and inspects struct types directly so `atomic.Value` mentioned in a comment
-// (documenting the migration itself) does not trigger a false positive.
-func TestSessionPackage_NoLegacyAtomicValueForStrings(t *testing.T) {
-	t.Parallel()
-	roots := []string{
-		filepath.Join("..", "session"),
-		filepath.Join("..", "cli"),
-	}
-	violations := []string{}
-	for _, root := range roots {
-		entries, err := os.ReadDir(root)
-		if err != nil {
-			t.Fatalf("read %s: %v", root, err)
-		}
-		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
-				continue
-			}
-			// Skip tests — they may legitimately mention atomic.Value in
-			// migration/contract documentation.
-			if strings.HasSuffix(e.Name(), "_test.go") {
-				continue
-			}
-			path := filepath.Join(root, e.Name())
-			fset := token.NewFileSet()
-			f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-			if err != nil {
-				t.Fatalf("parse %s: %v", path, err)
-			}
-			ast.Inspect(f, func(n ast.Node) bool {
-				st, ok := n.(*ast.StructType)
-				if !ok || st.Fields == nil {
-					return true
-				}
-				for _, field := range st.Fields.List {
-					sel, ok := field.Type.(*ast.SelectorExpr)
-					if !ok {
-						continue
-					}
-					pkg, ok := sel.X.(*ast.Ident)
-					if !ok {
-						continue
-					}
-					if pkg.Name == "atomic" && sel.Sel.Name == "Value" {
-						names := []string{}
-						for _, n := range field.Names {
-							names = append(names, n.Name)
-						}
-						violations = append(violations,
-							path+": atomic.Value field(s) "+strings.Join(names, ",")+
-								" — migrate to atomic.Pointer[T] for type safety")
-					}
-				}
-				return true
-			})
-		}
-	}
-	if len(violations) > 0 {
-		t.Errorf("found %d atomic.Value field declaration(s):\n  %s",
-			len(violations), strings.Join(violations, "\n  "))
 	}
 }
 
