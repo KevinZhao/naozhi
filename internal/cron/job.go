@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	robfigcron "github.com/robfig/cron/v3"
 
@@ -678,8 +679,14 @@ func hasMissedScheduleImpl(j *Job, cached robfigcron.Schedule, cachedPeriod time
 // minimum interval. loc is the timezone the scheduler will evaluate the
 // schedule in (WithLocation); seeding the probe in the same frame keeps DST /
 // month-end forms from passing here but firing faster at runtime (#1321).
-// nil falls back to time.Local for callers without a location yet.
+// nil falls back to time.Local for callers without a location yet. The byte
+// gate matches loadJobs's read path so the parser never sees an oversized or
+// control-character expression.
 func validateSchedule(schedule string, loc *time.Location) error {
+	if schedule == "" || len(schedule) > MaxScheduleBytes || !utf8.ValidString(schedule) ||
+		strings.ContainsAny(schedule, "\t\n\r") || containsCronUnsafe(schedule) {
+		return fmt.Errorf("empty, oversized or contains invalid characters")
+	}
 	sched, err := cronParser.Parse(schedule)
 	if err != nil {
 		return err

@@ -74,7 +74,7 @@ func loadJobs(path string) (map[string]*Job, error) {
 			continue
 		}
 		// Defensive prompt validation (the write paths already enforce
-		// validateCronPrompt, but cron_jobs.json can be edited offline): invalid UTF-8
+		// ValidatePromptStrict, but cron_jobs.json can be edited offline): invalid UTF-8
 		// corrupts every later json.Marshal and control bytes smuggle ANSI / log
 		// injection into every CronRun.Result. Drop the job rather than abort the load.
 		if !utf8.ValidString(j.Prompt) || containsCronUnsafe(j.Prompt) {
@@ -167,13 +167,14 @@ func loadJobs(path string) (map[string]*Job, error) {
 }
 
 // containsCronUnsafe reports whether s contains any byte the cron field-safety
-// policy rejects: C0 controls other than \t \n \r, DEL, Unicode bidi overrides
+// policy rejects: C0 controls other than \t \n \r, DEL, C1 controls
+// (U+0080..U+009F; U+009B is CSI on some terminals), Unicode bidi overrides
 // (U+202A..U+202E, U+2066..U+2069) or LS/PS (U+2028/U+2029). Bidi codepoints
 // can visually reorder glyphs in IM / browser renderers so a tampered prompt
 // swaps "rm -rf /tmp/safe" for "rm -rf /etc/passwd" at display time; LS/PS
-// introduce hard line breaks. Matches what validateCronPrompt blocks on the
-// write paths. Inlined byte scan (no textutil regex) because loadJobs runs once
-// at startup and the ASCII path stays branchless.
+// introduce hard line breaks. This is the one character policy for
+// cron_jobs.json fields, on both the read and write paths; an inlined byte
+// scan so the ASCII path stays branchless.
 func containsCronUnsafe(s string) bool {
 	for i := 0; i < len(s); i++ {
 		b := s[i]
@@ -183,7 +184,11 @@ func containsCronUnsafe(s string) bool {
 		if b < 0x20 || b == 0x7F {
 			return true
 		}
-		// All guarded codepoints are 3-byte sequences with an E2 80 / E2 81 prefix
+		// C1 controls encode as C2 80..C2 9F.
+		if b == 0xC2 && i+1 < len(s) && s[i+1] >= 0x80 && s[i+1] <= 0x9F {
+			return true
+		}
+		// The remaining guarded codepoints are 3-byte sequences with an E2 80 / E2 81 prefix
 		// (U+2028..U+202E → E2 80 A8..AE, U+2066..U+2069 → E2 81 A6..A9).
 		if b == 0xE2 && i+2 < len(s) {
 			b1 := s[i+1]

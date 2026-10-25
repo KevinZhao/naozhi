@@ -84,7 +84,7 @@ func formatCronNotice(label, body string) string {
 	label = osutil.SanitizeForLog(label, MaxCronTitleLen*4)
 	// Replace markdown link-syntax `[` `]` `(` `)` with full-width look-alikes
 	// so an attacker-controlled Title or result body cannot smuggle
-	// `[text](url)` clickable links into IM notices (#1095). validateCronTitle
+	// `[text](url)` clickable links into IM notices (#1095). The write path
 	// blocks bidi / C0 but lets ASCII punctuation through, so this is the
 	// safety bottom line.
 	label = escapeCronMarkdownPunct(label)

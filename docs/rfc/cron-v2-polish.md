@@ -122,7 +122,7 @@ func (s *Scheduler) SetJobTitle(id, title string) error
 
 - `POST /api/cron/jobs`：`{...existing, "title": "..."}`（可选）
 - `PATCH /api/cron/jobs/:id`：追加 `title` 可选字段
-- 后端校验：长度 ≤ 256、UTF-8 有效、不含 C0/C1 控制字符（沿用 `validateCronWorkDir` 已有 rune 扫）
+- 后端校验：长度 ≤ 256、UTF-8 有效、不含 C0/C1 控制字符（沿用 scheduler 写路径的 `containsCronUnsafe` 扫描）
 - 错误返回 `invalid title` + 400，统一 handler
 
 #### 3.1.5 UI 改动

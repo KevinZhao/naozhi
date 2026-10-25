@@ -364,7 +364,7 @@ function buildCronContextToggleHtml(initialFresh) {
 // buildCronPlacementHtml renders the 运行位置 selector (agentcore-cloud-
 // sandbox RFC §7.1): 本机 (default) / 云沙箱 ☁️. The sandbox option carries
 // the Phase 1 fence hint (≤60min / no work_dir / remote-only MCP). The
-// fence is enforced server-side (validateCronPlacement + ErrSandboxWorkDir);
+// fence is enforced server-side (cron.ErrSandboxWorkDir);
 // the client mirrors the work_dir conflict check at submit time so the
 // user gets a precise toast instead of a 400 round-trip.
 function buildCronPlacementHtml(initialPlacement, selectId) {
@@ -643,7 +643,7 @@ async function doCreateCronJob() {
     const backendVal = backendEl && backendEl.value ? backendEl.value : '';
     if (backendVal) body.backend = backendVal;
     // placement（RFC §7.1）：默认本机省略字段；云沙箱时前端先行围栏校验
-    // （与服务端 validateCronPlacement 同语义），给出精确 toast。
+    // （与服务端 ErrSandboxWorkDir 同语义），给出精确 toast。
     const placementVal = collectCronPlacementValue('cron-placement');
     if (placementVal === 'sandbox') {
       if (workDir) { showToast('云沙箱暂不支持工作目录：请清空"在哪里"或改用本机运行', 'warning'); return; }
