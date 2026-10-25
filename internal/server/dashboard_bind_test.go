@@ -194,13 +194,12 @@ func TestHandleBind_RouteRegistered(t *testing.T) {
 }
 
 // TestHandleBind_WorkspaceLogGoesThroughSanitizeForLog is a source-level
-// contract gate mirroring send_sanitize_contract_test.go. handleBind logs the
+// contract gate. handleBind logs the
 // attacker-influenced workspace on the validation-failure branch; that attr
 // MUST flow through osutil.SanitizeForLog so a `/valid<CRLF>fake-line` or bidi
 // payload cannot forge log entries. This locks the shape so a future edit that
 // drops the sanitizer is caught in CI (the runtime path is hard to assert on
-// without a buffer handler; the source contract matches the four sibling
-// sanitize-sink tests in this package).
+// without a buffer handler).
 func TestHandleBind_WorkspaceLogGoesThroughSanitizeForLog(t *testing.T) {
 	t.Parallel()
 	_, thisFile, _, _ := runtime.Caller(0)
