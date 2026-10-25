@@ -9,28 +9,19 @@ on:
       - master
   # The merge queue builds candidate merge commits on
   # refs/heads/gh-readonly-queue/master/*; the required checks must report on
-  # those or every queue entry times out. The master-only side effects
-  # (flaky-report, vuln issues) key on refs/heads/master and stay quiet here.
+  # those or every queue entry times out. The master-only side effect
+  # (vuln issues) keys on refs/heads/master and stays quiet here.
   merge_group:
     branches:
       - master
-  # flaky_probe forces a synthetic failure so the flaky-report job can be
-  # exercised end-to-end without a real master red (#2537).
   workflow_dispatch:
-    inputs:
-      flaky_probe:
-        description: force a synthetic failure to exercise flaky-report
-        type: boolean
-        default: false
 
 permissions:
   contents: read
   issues: write   # needed by the vuln job to open/comment on security issues
 
 # Cancel in-progress runs on the same ref to save CI budget. The event is part
-# of the key: a flaky_probe dispatch shares master's ref, and without it that
-# dispatch cancels the push run for the commit it is probing — master ends up
-# with no completed CI for a commit that was in fact tested.
+# of the key so a manual dispatch on master does not cancel the push run.
 concurrency:
   group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
@@ -57,8 +48,6 @@ jobs:
 
       - name: Test
         # go test -race implicitly builds and vets the packages it runs.
-        # Tests quarantined in .github/quarantine.txt (#2537) are skipped here
-        # and run in the non-blocking test-quarantined job instead.
         run: scripts/ci-test-shard.sh ${{ matrix.shard }}
 
   # The branch-protection required check. It passes only when every shard
@@ -206,12 +195,7 @@ jobs:
 
       - name: Test platform packages
         run: |
-          pattern=$(grep -v '^#' .github/quarantine.txt 2>/dev/null | grep -v '^$' | paste -sd'|' -)
-          skip=""
-          if [ -n "$pattern" ]; then
-            skip="-skip $pattern"
-          fi
-          go test -race -timeout 300s -short $skip \
+          go test -race -timeout 300s -short \
             ./internal/osutil/... \
             ./internal/shim/... \
             ./internal/discovery/... \
@@ -221,8 +205,8 @@ jobs:
   # Playwright mock-server suite (test/e2e). Offline and deterministic: the
   # mock server stubs every API endpoint, and the live multibackend.* specs
   # self-skip without NAOZHI_LIVE_E2E=1. This is the layer that catches real
-  # dashboard behaviour regressions in a browser. The iPhone-13 project runs
-  # in e2e-mobile-safari below.
+  # dashboard behaviour regressions in a browser. Phone-viewport specs build
+  # their own iPhone contexts and run here under chromium.
   # No workflow-level paths filter: a required check must report a status on
   # every PR, and a paths-filtered job stays "expected" forever on PRs that
   # don't touch the dashboard, blocking the merge.
@@ -261,47 +245,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: playwright-e2e-test-results
-          path: test/e2e/test-results/
-          retention-days: 7
-
-  # The iPhone-13 project (webkit). Phone-only paths (visual-viewport drawers,
-  # voice gestures, mobile nav) otherwise ship without a CI run. Deliberately
-  # not a required check (#3109): a red here does not block a merge, but
-  # flaky-report still waits for it and files its master failures.
-  e2e-mobile-safari:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-
-      # rendered_dashboard.test.js boots the page the Go server renders;
-      # it fails rather than skips under CI when Go is missing.
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Render the dashboard page and CSP
-        run: go run ./tools/render-dashboard -out "$RUNNER_TEMP/rendered-dashboard"
-
-      - name: Install Playwright + webkit
-        working-directory: test/e2e
-        # npm install (not ci): repo policy gitignores package-lock.json.
-        run: |
-          npm install
-          npx playwright install --with-deps webkit
-
-      - name: Run mock-server suite (mobile-safari)
-        working-directory: test/e2e
-        env:
-          NAOZHI_RENDERED_DASHBOARD_DIR: ${{ runner.temp }}/rendered-dashboard
-        run: npx playwright test --project=mobile-safari
-
-      - name: Upload traces on failure
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: playwright-mobile-safari-test-results
           path: test/e2e/test-results/
           retention-days: 7
 
@@ -439,12 +382,6 @@ jobs:
       - name: Check death_reason and the kinds are read from the generated contract
         run: node scripts/check-enum-literals.mjs
 
-      # The flaky-report regexes fail open — a pattern that stops matching files
-      # nothing and the job still goes green, which is indistinguishable from a
-      # quiet week. This replays real log lines through them.
-      - name: Check flaky-report log parsing
-        run: node scripts/check-flaky-report-parse.mjs
-
   # RNEW-TEST-432: Windows compile-only job. Not a supported runtime — the
   # gate exists to surface regressions in packages that must compile on
   # all platforms. Vet type-checks _test.go files too, so a POSIX-only call
@@ -466,151 +403,3 @@ jobs:
 
       - name: Vet (windows hard gate)
         run: go vet ./...
-
-  # Non-blocking runner for quarantined tests (#2537): they stay visible (a
-  # fix can be verified here) without holding the merge queue hostage.
-  test-quarantined:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Run quarantined tests
-        run: |
-          run=$(grep -v '^#' .github/quarantine.txt 2>/dev/null | grep -v '^$' | paste -sd'|' -)
-          if [ -z "$run" ]; then
-            echo "quarantine list empty — nothing to run"
-            exit 0
-          fi
-          go test -race -timeout 300s -run "$run" ./...
-
-  # Synthetic failure for exercising flaky-report end-to-end (#2537); only
-  # runs on a manual dispatch with flaky_probe=true, skipped otherwise. Emits
-  # one line of each shape the reporter parses — `go test`'s and Playwright's —
-  # so a single dispatch proves both extractors, not just the Go one.
-  probe-fail:
-    if: github.event_name == 'workflow_dispatch' && inputs.flaky_probe
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - name: Synthetic failure
-        run: |
-          echo "--- FAIL: TestFlakyProbeSynthetic (0.00s)"
-          echo "  ✘  1 [desktop-chrome] › probe_synthetic.test.js:1:1 › flaky probe synthetic spec (0.1s)"
-          exit 1
-
-  # master red → auto-file a [flaky] issue per failing test (#2537): the last
-  # 40 master runs had 4 reds, all flaky, none registered. Reads the failed
-  # jobs' logs and dedupes by issue title. Every job that runs tests must be
-  # in needs, directly or through an aggregate; check-flaky-report-parse.mjs
-  # enforces it.
-  flaky-report:
-    needs: [test, test-macos, e2e, e2e-mobile-safari, probe-fail]
-    if: always() && contains(join(needs.*.result, ','), 'failure') && github.ref == 'refs/heads/master'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      issues: write
-      actions: read
-      contents: read
-    steps:
-      - uses: actions/github-script@v9
-        with:
-          script: |
-            const { data: jobsResp } = await github.rest.actions.listJobsForWorkflowRun({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              run_id: context.runId,
-              per_page: 100,
-            });
-            // collectFailures adds each failing test in one job's log to
-            // failures (name -> { job, subtests }). check-flaky-report-parse.mjs
-            // cuts this function out of ci.yml and runs it over real log lines.
-            function collectFailures(log, jobName, failures) {
-              const add = (name, subtest) => {
-                if (!failures.has(name)) failures.set(name, { job: jobName, subtests: new Set() });
-                if (subtest) failures.get(name).subtests.add(subtest);
-              };
-              // Runner logs carry ANSI colour, which Playwright emits around
-              // the ✘ marker.
-              const clean = log.replace(/\u001b\[[0-9;]*m/g, '');
-              // Keyed by the top-level test: a failing subtest fails its parent
-              // too and Go prints a FAIL line for each, so keying by the
-              // full path would file one issue per level for one flake. Go
-              // turns spaces in subtest names into `_`, so the name runs to
-              // the space before the duration.
-              for (const m of clean.matchAll(/--- FAIL: (Test\w+)(?:\/(\S+))?/g)) {
-                add(m[1], m[2]);
-              }
-              // The e2e job produces no `--- FAIL:` lines: Playwright's list
-              // reporter marks each failed spec with ✘. The line:column is
-              // dropped from the name so editing anything above a test does
-              // not file a second issue for the same test.
-              for (const m of clean.matchAll(/✘\s+\d+\s+(?:\[[^\]\n]+\]\s+›\s+)?(\S+?):\d+:\d+\s+›\s+([^\n]+)/g)) {
-                // The trailing quote is the runner echoing the step's own script:
-                // that line matches too, and without dropping the quote it
-                // normalises to a second name for the same test.
-                add(m[1] + ' › ' + m[2].replace(/\s*\(\d+(?:\.\d+)?\s*m?s\)"?\s*$/, '').trim());
-              }
-            }
-            // issueBody is the issue (or comment) text for one failing test.
-            function issueBody(sha, jobName, runURL, subtests) {
-              let body = `master red on ${sha.slice(0, 8)} — job \`${jobName}\`, [run](${runURL}).`;
-              if (subtests.size > 0) body += `\n\nFailed subtests: ${[...subtests].map(s => `\`${s}\``).join(', ')}.`;
-              return body;
-            }
-            const failures = new Map();
-            for (const job of jobsResp.jobs) {
-              if (job.conclusion !== 'failure') continue;
-              let log = '';
-              try {
-                const resp = await github.request('GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs', {
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  job_id: job.id,
-                });
-                log = String(resp.data);
-              } catch (e) {
-                core.warning(`fetch logs for ${job.name}: ${e}`);
-                continue;
-              }
-              collectFailures(log, job.name, failures);
-            }
-            if (failures.size === 0) {
-              core.info('no test-failure lines found in failed job logs');
-              return;
-            }
-            const runURL = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const { data: open } = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              labels: 'flaky,automated',
-              per_page: 100,
-            });
-            for (const [test, { job: jobName, subtests }] of failures) {
-              const title = `[flaky] ${test}`;
-              const body = issueBody(context.sha, jobName, runURL, subtests);
-              const existing = open.find(i => i.title === title);
-              if (existing) {
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: existing.number,
-                  body,
-                });
-              } else {
-                await github.rest.issues.create({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  title,
-                  body: body + '\n\nAuto-filed by the flaky-report CI job (#2537). Deflake or quarantine via .github/quarantine.txt.',
-                  labels: ['flaky', 'automated'],
-                });
-              }
-            }
-
