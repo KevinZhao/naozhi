@@ -716,7 +716,7 @@ function selectSession(key, node) {
   // (RFC v4 agent-team-ui §3.6.6). Its pane is the agent's: the session keeps
   // the scroll snapshot switchTo took on the way in (#3697).
   const drilledIn = !!nzViews.agent?.activeTaskID();
-  if (nzViews.agent) nzViews.agent.onSessionSwitch(key, node);
+  if (nzViews.agent) nzViews.agent.onSessionSwitch();
   // Recent session card click → trigger resume flow
   // Discovered session card click → trigger preview flow
   // Save draft for current session before switching

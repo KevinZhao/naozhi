@@ -251,6 +251,20 @@ test.describe('an agent drill-in keeps the session\'s pane and position apart', 
     await ctx.close();
   });
 
+  test('re-picking the session while drilled in goes back to it', async ({ browser }) => {
+    const { ctx, page, conn, errors, events } = await open(browser, mock);
+    await drillIn(page);
+    await page.click(`.session-card[data-key="${KEY_A}"]`);
+    await expect.poll(() => subs(conn, KEY_A).length).toBe(2);
+    conn.send({ type: 'subscribed', key: KEY_A });
+    conn.send({ type: 'history', key: KEY_A, initial: true, events });
+    await page.waitForSelector('#events-scroll .event[data-uuid="a29"]');
+    await expect(page.locator('#agent-breadcrumb')).toBeHidden();
+    expect(conn.messages.filter((m) => m.type === 'agent_unsubscribe' && m.task_id === 't1').length).toBe(1);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
   test('a resubscribe while drilled in does not paint the session over the agent (#3698)', async ({ browser }) => {
     const { ctx, page, conn, errors, events } = await open(browser, mock);
     await drillIn(page);

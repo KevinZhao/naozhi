@@ -686,23 +686,11 @@ import { sid } from './session_ident.js';
   });
 
   // ─── Session change hook ───────────────────────────────────────────
-  // Picking a different session closes the drill-in, or the now-inactive
-  // task's agent_event messages would leak into the new session's list.
-  // dashboard.js's selectSession calls it *before* it mutates selection.key,
-  // so the target key/node come as arguments; no arguments (legacy call
-  // sites) means a session change by construction: unconditional cleanup.
-  function onSessionSwitch(targetKey, targetNode) {
+  // Picking a session, the current one included, closes the drill-in: the
+  // now-inactive task's agent_event messages would leak into the new list, and
+  // selectSession rebuilds #main (pane and breadcrumb) either way.
+  function onSessionSwitch() {
     if (!state.activeTaskID) return;
-    var tKey = targetKey == null ? null : targetKey;
-    var tNode = targetNode == null ? null : targetNode;
-    if (tKey !== null) {
-      var curNode = state.activeKey ? (selection.node || 'local') : '';
-      if (tKey === state.activeKey &&
-          (tNode === null || tNode === (curNode || 'local'))) {
-        // Same session re-click — keep drill-in alive.
-        return;
-      }
-    }
     unsubscribeCurrent();
     stopHttpPoll();
     state.activeTaskID = '';
