@@ -76,20 +76,3 @@ func TestHealthHandler_FakeRouterDrivesSections(t *testing.T) {
 		t.Errorf("/readyz = %d %q, want 200 ready", w.Code, w.Body.String())
 	}
 }
-
-// routerViews is buildServerWithHandlers' one typed-nil unwrap. A nil
-// *session.Router boxed straight into the views would read non-nil: /readyz
-// would answer "ready" with no router and projectScanTick's BumpVersion guard
-// would call through nil.
-func TestRouterViews_NilRouterGivesNilInterfaces(t *testing.T) {
-	t.Parallel()
-	srvRouter, healthR := routerViews(nil)
-	if srvRouter != nil || healthR != nil {
-		t.Fatalf("routerViews(nil) = %#v, %#v; want nil interfaces", srvRouter, healthR)
-	}
-	w := httptest.NewRecorder()
-	(&HealthHandler{router: healthR}).handleReadyz(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("/readyz with no router = %d %q, want 503", w.Code, w.Body.String())
-	}
-}

@@ -47,6 +47,23 @@ func TestNewWithOptions_NilMapsTolerated(t *testing.T) {
 	}
 }
 
+// TestNewWithOptions_NilRouterPanicsAtEntry pins the one place the "Router is
+// required" invariant is expressed (#3638). Without the entry check a nil
+// Router got as far as dashsession's InitStaticStats and panicked there, far
+// from the cause, while guards downstream pretended nil was survivable.
+func TestNewWithOptions_NilRouterPanicsAtEntry(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("buildServerWithHandlers(ServerOptions{}) did not panic")
+		}
+		if msg, _ := r.(string); !strings.Contains(msg, "Router is required") {
+			t.Fatalf("panic = %v, want it to name the missing Router", r)
+		}
+	}()
+	buildServerWithHandlers(ServerOptions{Addr: ":0"})
+}
+
 // TestNewWithOptions_FieldsRoundTrip pins the contract that ServerOptions
 // fields surface verbatim on the resulting *Server. Replaces the prior
 // dual-constructor equivalence test now that the legacy positional-arg
