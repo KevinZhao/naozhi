@@ -43,11 +43,11 @@ func TestContractJS_KnownAnchors(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, anchor := range []string{
-		"sessions_update: 'sessions_update'",                               // WS enum
-		"run_started: 'run_started'",                                       // WS enum, unified run frames (#2540)
-		"subscribe: 'subscribe'",                                           // WS enum, inbound (send-side check reads these)
-		"sessions: '/api/sessions'",                                        // API table
-		"export const NZ_CONTRACT = Object.freeze(/** @type {const} */ ({", // the export every consumer imports, closed literal types for tsc
+		"sessions_update: 'sessions_update'",         // WS enum
+		"run_started: 'run_started'",                 // WS enum, unified run frames (#2540)
+		"subscribe: 'subscribe'",                     // WS enum, inbound (send-side check reads these)
+		"sessions: '/api/sessions'",                  // API table
+		"export const NZ_CONTRACT = Object.freeze({", // the export every consumer imports
 	} {
 		if !strings.Contains(out, anchor) {
 			t.Errorf("contract.js lacks anchor %q", anchor)
