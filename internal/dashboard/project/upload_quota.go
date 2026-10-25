@@ -5,9 +5,10 @@ import "sync"
 // uploadQuota bounds the cumulative bytes the upload endpoint accepts per
 // project within a process lifetime (#2311): without it the 256 MiB
 // per-file cap alone left any authenticated caller a disk-fill primitive
-// against every other tenant on a shared box. The counter is in-memory and per process — it resets on restart and
-// does not count pre-existing files — so it is a fill-rate ceiling, not a
-// filesystem quota. A zero or negative limit disables enforcement.
+// against every other tenant on a shared box. The counter is in-memory and
+// per process — it resets on restart and does not count pre-existing
+// files — so it is a fill-rate ceiling, not a filesystem quota. A zero or
+// negative limit disables enforcement.
 type uploadQuota struct {
 	mu       sync.Mutex
 	limit    int64

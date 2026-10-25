@@ -18,8 +18,9 @@ import (
 
 // maxUploadFileBytes caps a single uploaded file. 256 MiB is deliberately
 // generous (build artefacts / archives / model files pushed to a remote box).
-// This byte cap and the per-project uploadQuota are the only DoS guards; there is no GC reaper,
-// so uploaded files persist until the operator deletes them.
+// This byte cap and the per-project uploadQuota are the only DoS guards;
+// there is no GC reaper, so uploaded files persist until the operator
+// deletes them.
 const maxUploadFileBytes = 256 << 20
 
 // uploadBodyOverhead is multipart envelope slack (field names, boundaries,
