@@ -8,9 +8,8 @@
 package clievent
 
 // The kinds an EventEntry.Type may hold. Outside this package spell a kind
-// with one of these (or copy another entry's Type): the lint-server rule
-// evententry_kind rejects a string literal in every kind position it traces
-// (its godoc lists the forms it cannot), so a typo there cannot become a kind.
+// with one of these (or copy another entry's Type) rather than a string
+// literal, so a typo cannot become a kind.
 const (
 	KindUser         = "user"
 	KindText         = "text"
