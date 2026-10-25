@@ -53,24 +53,16 @@ function clearMsg(el) { if (el) el.textContent = ''; }
 // `await awaitPendingOrients()` — the composer stays editable during that wait,
 // so text and attachments captured before the await can be stale (#2405).
 function validateComposerForSend(text) {
-  // Multi-Backend RFC §8.3 D9 — `/urgent` requires the backend's
-  // `passthrough` feature (preempt the running turn with a fresh user
-  // message). kiro / ACP backends don't preempt; the server-side
-  // dispatcher would either error or queue the message confusingly.
-  // Toast and abort send so the operator is told *why* before they
-  // wonder where their preemption went. Title-attr on /urgent button
-  // would be ideal but /urgent is a text prefix typed in the input;
-  // detect at send time instead.
+  // Multi-Backend RFC §8.3 D9 — `/urgent` preempts the running turn, which
+  // needs the backend's `passthrough` feature (kiro / ACP have none; the
+  // server would error or queue it). It is typed text, so check at send time.
   if (text && /^\s*\/urgent\b/.test(text) && !featureForCurrent('passthrough')) {
     showToast('当前后端不支持 /urgent 抢占（请用 Esc 中断后再发）', 'warning');
     return false;
   }
 
-  // Multi-Backend RFC §8.3 D13 — `@-mention` embedded context only
-  // works when the backend reads file paths from inside the prompt
-  // (claude does; kiro doesn't). Strip-and-warn would silently change
-  // the prompt; better to abort + toast so the operator can paste the
-  // absolute path or content explicitly.
+  // Multi-Backend RFC §8.3 D13 — `@-mention` needs a backend that reads paths
+  // in the prompt (claude, not kiro). Abort rather than silently strip it.
   if (text && /(?:^|\s)@[\w./-]/.test(text) && !featureForCurrent('embedded_context')) {
     showToast('当前后端不支持 @ 文件 mention，请粘贴绝对路径或文件内容', 'warning');
     return false;
@@ -85,9 +77,8 @@ function validateComposerForSend(text) {
     return false;
   }
 
-  // Block send while any attachment is still uploading or errored —
-  // we only reference file_ids on the server, so partial uploads would
-  // silently drop images. User can retry or remove the bad one.
+  // A send references file_ids only, so one mid-upload would silently drop
+  // the image (errored uploads: composerSendBlocked).
   if (composer.pendingFiles.some(f => f.status === 'uploading')) {
     showToast('图片上传中，请稍候…', 'warning');
     return false;
@@ -182,15 +173,10 @@ async function sendMessage() {
   if (!text && composer.pendingFiles.length === 0) return;
   if (!validateComposerForSend(text)) return;
 
-  // #2405 — close the reentrancy gate BEFORE the first await. sendComposerTurn
-  // starts with `await awaitPendingOrients()`, which can block for up to
-  // ORIENT_MAX_WAIT_MS while the composer stays editable. With the gate set
-  // only after that await, every Enter pressed during the wait spawned another
-  // sendMessage that captured the same text; once orient settled, waiter #1
-  // sent text+file_ids and cleared the composer while #2..N each fired a
-  // text-only ghost over WS. The `.sending` class is the visible cue that the
-  // click registered. The finally is the ONLY reset — every exit path of the
-  // gated half goes through it.
+  // #2405 — close the reentrancy gate BEFORE the first await: sendComposerTurn
+  // can wait up to ORIENT_MAX_WAIT_MS on orients while the composer stays
+  // editable, and every Enter in that wait used to fire a text-only ghost
+  // send. `.sending` is the visible cue; the finally is the ONLY reset.
   composer.sending = true;
   const btn = document.getElementById('btn-send');
   if (btn) btn.classList.add('sending');
@@ -245,7 +231,7 @@ function trySendViaWS(text, fileIDs, input) {
   if (!wsm.send(Object.assign(sendMsg, spawn))) return false;
   // Consume only now that the frame is out: a failed wsm.send above falls
   // through to HTTP, which must still see them.
-  consumeSpawnFields(selection.key, spawn);
+  consumeSpawnFields(selection.key, spawn, id);
   // Optimistic render: show the user message immediately without waiting
   // for the CLI to echo it back as a "user" event.
   renderOptimisticUserMsg(text, id);
@@ -270,23 +256,36 @@ function spawnFields(key) {
   return f;
 }
 
-// consumeSpawnFields forgets the fields a send carried: the server reads them
-// once, at spawn, so no later send (or retry of this POST) may carry them.
-// The backend/profile pick moves to sentPicks, display-only, until listed.
-function consumeSpawnFields(key, f) {
+// consumeSpawnFields forgets the fields send sendId carried: the server reads
+// them once, at spawn, so no later send may carry them. They move to
+// sentPicks, display-only until listed, and restoreSpawnFields' source.
+function consumeSpawnFields(key, f, sendId) {
+  if (f.workspace || f.backend || f.access_profile) perSession.sentPicks[key] = { backend: f.backend || '', accessProfile: f.access_profile || '', workspace: f.workspace || '', node: perSession.nodes[key] || '', sendId };
   if (f.workspace) { delete perSession.workspaces[key]; delete perSession.nodes[key]; }
-  if (f.workspace || f.backend || f.access_profile) perSession.sentPicks[key] = { backend: f.backend || '', accessProfile: f.access_profile || '' };
   delete perSession.backends[key];
   delete perSession.accessProfiles[key];
 }
 
+// restoreSpawnFields undoes it for send sendId once rejected before spawn (HTTP
+// 4xx/5xx, send_ack busy/error), so the retry carries the picks. Another
+// send's rejection, or a listed key, keeps them consumed (#3586).
+export function restoreSpawnFields(key, sendId) {
+  const p = perSession.sentPicks[key];
+  if (!p || p.sendId !== sendId || sessionList.sessionsData[sid(key, p.node || 'local')]) return;
+  if (p.workspace) { perSession.workspaces[key] = p.workspace; if (p.node) perSession.nodes[key] = p.node; }
+  if (p.backend) perSession.backends[key] = p.backend;
+  if (p.accessProfile) perSession.accessProfiles[key] = p.accessProfile;
+  delete perSession.sentPicks[key];
+  persistPending();
+}
+
 // buildSendPayload builds the HTTP POST body, consuming the spawn fields.
-function buildSendPayload(text, fileIDs) {
+function buildSendPayload(text, fileIDs, sendId) {
   const payload = { key: selection.key, text: text };
   if (fileIDs.length > 0) payload.file_ids = fileIDs;
   if (selection.node && selection.node !== 'local') payload.node = selection.node;
   const spawn = spawnFields(selection.key);
-  consumeSpawnFields(selection.key, spawn);
+  consumeSpawnFields(selection.key, spawn, sendId);
   return Object.assign(payload, spawn);
 }
 
@@ -296,9 +295,10 @@ function buildSendPayload(text, fileIDs) {
 // took the pre-uploaded attachments out of the uploadStore before rejecting
 // (post-TakeAll 4xx/5xx) — drop the now-dead ids and ask for a re-attach;
 // pre-TakeAll rejections never set the flag, so unsent attachments stay put.
-async function handleSendRejected(r, sentSid, text, input) {
+async function handleSendRejected(r, sentSid, text, input, sendId) {
   perSession.httpSendPending.delete(sentSid); // rejected synchronously — no async frame will follow
   if (input) setMsgValue(input, text);
+  restoreSpawnFields(selection.key, sendId);
   rollbackOptimisticRunning(selection.key, selection.node);
   // Some error paths still write text/plain; fall back to text() so we
   // always surface the real message instead of a generic "send failed".
@@ -399,7 +399,8 @@ async function sendComposerTurn(targetKey, targetNode) {
   // HTTP POST fallback — JSON only; files already on server.
   try {
     const headers = { 'Content-Type': 'application/json', ...authHeaders() };
-    const payload = buildSendPayload(text, fileIDs);
+    const sendId = 'h' + (++wsm.sendCounter);
+    const payload = buildSendPayload(text, fileIDs, sendId);
 
     // Mark this tab as the originator BEFORE the request leaves (text or
     // image-only alike): a send_error for this turn can arrive over the WS
@@ -408,7 +409,7 @@ async function sendComposerTurn(targetKey, targetNode) {
     perSession.httpSendPending.add(sentSid);
     const r = await fetch(NZ_CONTRACT.API.sessions_send, {method:'POST', headers, body: JSON.stringify(payload)});
     if (!r.ok) {
-      await handleSendRejected(r, sentSid, text, input);
+      await handleSendRejected(r, sentSid, text, input, sendId);
       return;
     }
     await finishHttpSend(r, sentSid, text, input);
@@ -421,14 +422,11 @@ async function sendComposerTurn(targetKey, targetNode) {
 }
 
 // renderOptimisticUserMsg appends the just-sent text as an optimistic user
-// bubble at the bottom of the events scroller. The real "user" event pushed
-// by the server (onHistory/onEvent) removes the `.optimistic-msg` element
-// when it arrives. Shared by the WS send path and the HTTP send path used
-// for file-bearing sends (owner-divergence fix) — both run under a live WS
-// subscription, which is what guarantees the removal side fires. No-op when
-// text is empty (image-only sends have no text to echo; the thumbnails
-// arrive with the real user event). `sendId` (WS path) is stamped on the
-// bubble so a busy/error send_ack can roll back exactly this send.
+// bubble; the server's real "user" event (onHistory/onEvent) removes the
+// `.optimistic-msg`, which is why both callers (WS sends, HTTP sends while WS
+// is live) need a live subscription. No-op without text (an image-only send's
+// thumbnails come with the real event). `sendId` (WS path) lets a busy/error
+// send_ack roll back exactly this send.
 function renderOptimisticUserMsg(text, sendId) {
   const el = document.getElementById('events-scroll');
   if (!el || !text) return;
@@ -442,10 +440,8 @@ function renderOptimisticUserMsg(text, sendId) {
   el.insertAdjacentHTML('beforeend', html);
   el.lastElementChild.classList.add('optimistic-msg');
   if (sendId) el.lastElementChild.setAttribute('data-send-id', sendId);
-  // Always force-bottom after a send: the user just posted something and
-  // expects to see it, even if they had scrolled up to browse earlier
-  // history. stickEventsBottom handles async layout changes from input-area
-  // collapse and lazy images.
+  // Always force-bottom after a send, even if scrolled up; stickEventsBottom
+  // outlasts the input-area collapse and lazy images.
   stickEventsBottom();
   navSync();
 }
