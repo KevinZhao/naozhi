@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	robfigcron "github.com/robfig/cron/v3"
 
@@ -537,7 +538,7 @@ const (
 
 // schedulePeriod 估算给定 cron 表达式在 now 附近的周期（sched.Next 两次外推）。
 // 无法解析 / 不等间隔（DST 切换窗口）时返回 0。now 必须由调用方显式提供，
-// 与 HasMissedSchedule / previousTickBefore 读取的"现在"完全同步，避免跨
+// 与 HasMissedSchedule / previousTickBeforeFromSched 读取的"现在"完全同步，避免跨
 // 越 DST/NTP 校正瞬间把 period 估成 23h/25h 而误判 missed。
 func schedulePeriod(schedule string, now time.Time) time.Duration {
 	sched, err := cronParser.Parse(schedule)
@@ -545,23 +546,6 @@ func schedulePeriod(schedule string, now time.Time) time.Duration {
 		return 0
 	}
 	return schedulePeriodFromSched(sched, now)
-}
-
-// previousTickBefore 算给定 schedule 在 now 之前最近一次应该触发的时刻。
-// robfig/cron 只有 Next()：从 now - 3×period 起反复 Next 直到超过 now，
-// 上一个值即为答案。窗口乘 3 是给 DST / 月份 / 闰年这类非等间隔形态留裕量。
-// 无法解析的 schedule 返回零值 time。生产路径走 previousTickBeforeFromSched
-// 复用已 Parse 的 sched；本字符串入口仅供包内测试直测回推逻辑。
-func previousTickBefore(schedule string, now time.Time) time.Time {
-	sched, err := cronParser.Parse(schedule)
-	if err != nil {
-		return time.Time{}
-	}
-	period := schedulePeriodFromSched(sched, now)
-	if period <= 0 {
-		return time.Time{}
-	}
-	return previousTickBeforeFromSched(sched, period, now)
 }
 
 // schedulePeriodFromSched 同 schedulePeriod，但接受已解析的 robfigcron.Schedule，
@@ -572,8 +556,10 @@ func schedulePeriodFromSched(sched robfigcron.Schedule, now time.Time) time.Dura
 	return second.Sub(first)
 }
 
-// previousTickBeforeFromSched 同 previousTickBefore，但接受已解析的 sched +
-// 已知 period。previousTickMaxIter 足以覆盖任何合法 schedule 在 3×period
+// previousTickBeforeFromSched 算 sched 在 now 之前最近一次应该触发的时刻。
+// robfig/cron 只有 Next()：从 now - 3×period 起反复 Next 直到超过 now，
+// 上一个值即为答案。窗口乘 3 是给 DST / 月份 / 闰年这类非等间隔形态留裕量。
+// 调用方传入已 Parse 的 sched + 已知 period。previousTickMaxIter 足以覆盖任何合法 schedule 在 3×period
 // 窗口内的迭代次数。
 func previousTickBeforeFromSched(sched robfigcron.Schedule, period time.Duration, now time.Time) time.Time {
 	if period <= 0 {
@@ -669,8 +655,14 @@ func hasMissedScheduleImpl(j *Job, cached robfigcron.Schedule, cachedPeriod time
 // minimum interval. loc is the timezone the scheduler will evaluate the
 // schedule in (WithLocation); seeding the probe in the same frame keeps DST /
 // month-end forms from passing here but firing faster at runtime (#1321).
-// nil falls back to time.Local for callers without a location yet.
+// nil falls back to time.Local for callers without a location yet. The byte
+// gate matches loadJobs's read path so the parser never sees an oversized or
+// control-character expression.
 func validateSchedule(schedule string, loc *time.Location) error {
+	if schedule == "" || len(schedule) > MaxScheduleBytes || !utf8.ValidString(schedule) ||
+		strings.ContainsAny(schedule, "\t\n\r") || containsCronUnsafe(schedule) {
+		return fmt.Errorf("empty, oversized or contains invalid characters")
+	}
 	sched, err := cronParser.Parse(schedule)
 	if err != nil {
 		return err

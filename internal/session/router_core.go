@@ -734,12 +734,6 @@ func (r *Router) NotifyIdle() {
 	r.ss.Update(func(tx sessTx) { tx.Broadcast() })
 }
 
-// ChatKey builds a chat-level key (without agent suffix) for workspace
-// overrides; see sessionkey.ChatKey.
-func ChatKey(platform, chatType, chatID string) string {
-	return sessionkey.ChatKey(platform, chatType, chatID)
-}
-
 // DefaultWorkspace returns the router's default working directory.
 func (r *Router) DefaultWorkspace() string {
 	return r.defaultCWD

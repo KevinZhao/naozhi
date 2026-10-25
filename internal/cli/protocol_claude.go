@@ -205,9 +205,6 @@ func invalidAppendSystemPrompt(p string) string {
 // cannot be safely cut.
 const maxExtraArgsBytes = 128 * 1024
 
-// IsDeniedExtraFlag is cliinfo.IsDeniedExtraFlag (see there).
-func IsDeniedExtraFlag(arg string) bool { return cliinfo.IsDeniedExtraFlag(arg) }
-
 // capExtraArgsBytes guards against a runaway caller (or stacked scratch
 // contexts) producing an argv that exceeds ARG_MAX, then strips CLI-behaviour-
 // altering flags (#653) that must never be smuggled in via ExtraArgs — an

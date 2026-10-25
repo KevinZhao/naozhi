@@ -397,12 +397,12 @@ func (p *Process) Kill()
 |---|---|---|---|---|---|---|
 | `cron:` | `session.CronKeyPrefix` | `internal/cron` | `cron:{jobID}` | ✓ | ✓ | ✓（cron 面板） |
 | `project:` | `session.ProjectKeyPrefix` | `internal/project` | `project:{name}:planner` | ✓ | ✓ | ✓（planner 行） |
-| `scratch:` | `session.ScratchKeyPrefix` | `internal/session/scratch.go` | `scratch:{id}:general:{sourceAgentID}` | ✗ | ✗（ephemeral） | ✗（抽屉独立 UI） |
+| `scratch:` | `sessionkey.ScratchKeyPrefix` | `internal/session/scratch.go` | `scratch:{id}:general:{sourceAgentID}` | ✗ | ✗（ephemeral） | ✗（抽屉独立 UI） |
 
 判定规则（`internal/session/key.go`）：
 - `IsReservedNamespace(key)` — 任一保留前缀命中
-- `IsCronKey(key)` — cron 专有路径
-- `IsScratchKey(key)` — scratch 专有路径（定义于 `scratch.go`）
+- `sessionkey.IsCronKey(key)` — cron 专有路径
+- `sessionkey.IsScratchKey(key)` — scratch 专有路径
 - `project.IsPlannerKey(key)` — 要求 `project:` 前缀且 `:planner` 后缀（更严格）
 
 所有前缀都带 trailing colon，避免 `cronographer:` / `projectile:` 这类子串误判。

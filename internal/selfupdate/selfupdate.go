@@ -270,20 +270,6 @@ func Replace(newBin, installPath string) (backupPath string, err error) {
 	return backupPath, nil
 }
 
-// Rollback restores backupPath → installPath (re-applying 0755, the backup is
-// 0600) and removes the backup. An explicit recovery primitive; the upgrade
-// flow never auto-rolls-back on a restart-confirmation timeout.
-func Rollback(installPath, backupPath string) error {
-	if err := copyFile(backupPath, installPath); err != nil {
-		return fmt.Errorf("rollback restore: %w", err)
-	}
-	if err := os.Chmod(installPath, 0o755); err != nil {
-		return fmt.Errorf("rollback chmod: %w", err)
-	}
-	_ = os.Remove(backupPath)
-	return nil
-}
-
 // SelfPath returns the absolute path of the running executable.
 func SelfPath() (string, error) {
 	p, err := os.Executable()

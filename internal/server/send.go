@@ -131,7 +131,7 @@ func (e *sendEngine) prepareSend(p sendParams) (cmd turn.Cmd, reset bool, err er
 	if p.Backend != "" {
 		// Shared isValidBackendID / maxBackendIDLen so HTTP, WS dispatch and
 		// node selection accept the same IDs; error text aligned with
-		// dashboard_cron.validateCronBackend for dashboard JS substring matching.
+		// dashboard/cron.ValidateCronBackend for dashboard JS substring matching.
 		if len(p.Backend) > maxBackendIDLen {
 			return cmd, false, fmt.Errorf("backend exceeds %d-byte limit", maxBackendIDLen)
 		}

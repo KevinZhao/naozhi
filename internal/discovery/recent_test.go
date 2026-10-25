@@ -14,10 +14,10 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// resolveWorkspaceByParts
+// resolveWorkspaceUnder
 // ---------------------------------------------------------------------------
 
-func TestResolveWorkspaceByParts_RealDir(t *testing.T) {
+func TestResolveWorkspaceUnder_RealDir(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	base := filepath.Join(root, "work", "proj")
@@ -63,7 +63,7 @@ func TestResolveWorkspaceUnder_StaysInsideRoot(t *testing.T) {
 	}
 }
 
-func TestResolveWorkspaceByParts_Cache(t *testing.T) {
+func TestResolveWorkspaceUnder_Cache(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	base := filepath.Join(root, "cached")
@@ -102,18 +102,18 @@ func TestResolveWorkspaceUnder_CacheIsScopedToRoot(t *testing.T) {
 	}
 }
 
-func TestResolveWorkspaceByParts_NonexistentPath(t *testing.T) {
+func TestResolveWorkspaceUnder_NonexistentPath(t *testing.T) {
 	t.Parallel()
 	if got := resolveWorkspaceUnder(t.TempDir(), "-nonexistent-path-that-cannot-exist-xyz987"); got != "" {
 		t.Errorf("expected empty for nonexistent path, got %q", got)
 	}
 }
 
-// TestResolveWorkspaceByParts_NegativeResultNotCached is a regression test for
+// TestResolveWorkspaceUnder_NegativeResultNotCached is a regression test for
 // #1994: a workspace dir absent during one scan (unmounted drive, worktree
 // mid-rebuild) must still resolve once it reappears, rather than being
 // permanently cached as unresolvable for the process lifetime.
-func TestResolveWorkspaceByParts_NegativeResultNotCached(t *testing.T) {
+func TestResolveWorkspaceUnder_NegativeResultNotCached(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	dir := filepath.Join(root, "reappearing-project")
@@ -140,21 +140,21 @@ func TestResolveWorkspaceByParts_NegativeResultNotCached(t *testing.T) {
 	}
 }
 
-// TestResolveWorkspaceByParts_ProductionRootIsSlash pins the one thing every
+// TestResolveWorkspaceUnder_ProductionRootIsSlash pins the one thing every
 // other test here now bypasses: the production entry point resolves from "/".
 // "/usr" exists on every Unix host and "-usr" resolves on pass 1 with a single
 // Stat — no ReadDir, so no walk into anything the host has mounted.
-func TestResolveWorkspaceByParts_ProductionRootIsSlash(t *testing.T) {
+func TestResolveWorkspaceUnder_ProductionRootIsSlash(t *testing.T) {
 	t.Parallel()
 	if fi, err := os.Stat("/usr"); err != nil || !fi.IsDir() {
 		t.Skip("no /usr on this host")
 	}
-	if got := resolveWorkspaceByParts("-usr"); got != "/usr" {
-		t.Errorf(`resolveWorkspaceByParts("-usr") = %q, want "/usr" — production must resolve from the real root`, got)
+	if got := resolveWorkspaceUnder(fsRoot, "-usr"); got != "/usr" {
+		t.Errorf(`resolveWorkspaceUnder(fsRoot, "-usr") = %q, want "/usr" — production must resolve from the real root`, got)
 	}
 }
 
-func TestResolveWorkspaceByParts_EmptyAndNoLeadingDash(t *testing.T) {
+func TestResolveWorkspaceUnder_EmptyAndNoLeadingDash(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name  string
@@ -551,7 +551,7 @@ func TestExtractFirstPrompt_SkipsNonUserLines(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// RecentSessions
+// RecentSessionsCtx
 // ---------------------------------------------------------------------------
 
 // makeWorkspace creates a real workspace directory below a fresh resolution
@@ -593,7 +593,7 @@ func TestRecentSessions_EmptyDir(t *testing.T) {
 
 func TestRecentSessions_EmptyClaudeDir(t *testing.T) {
 	t.Parallel()
-	got := RecentSessions("", 10, 7*24*time.Hour, nil, nil)
+	got := RecentSessionsCtx(context.Background(), "", 10, 7*24*time.Hour, nil, nil)
 	if got != nil {
 		t.Errorf("expected nil for empty claudeDir, got %v", got)
 	}
@@ -1065,7 +1065,7 @@ func TestRecentSessionsCtx_CancelledReturnsEarly(t *testing.T) {
 }
 
 // TestRecentSessionsCtx_BackgroundCtxEquivalent confirms a live context
-// leaves behaviour identical to the legacy RecentSessions path.
+// returns the same sessions as an uncancelled scan.
 func TestRecentSessionsCtx_BackgroundCtxEquivalent(t *testing.T) {
 	t.Parallel()
 	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
@@ -1093,7 +1093,7 @@ func TestRecentSessionsCtx_BackgroundCtxEquivalent(t *testing.T) {
 		}
 	}
 	if !saw {
-		t.Errorf("background ctx must behave like RecentSessions; session missing: %s", sid)
+		t.Errorf("background ctx dropped a session: %s", sid)
 	}
 }
 

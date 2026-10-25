@@ -146,7 +146,7 @@ func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 		DurationMS:  run.DurationMS,
 		SessionID:   osutil.SanitizeForLog(run.SessionID, 64),
 		Prompt:      osutil.SanitizeForLog(run.Prompt, cronpkg.MaxPromptBytes),
-		WorkDir:     osutil.SanitizeForLog(run.WorkDir, maxCronWorkDirBytesDashboard),
+		WorkDir:     osutil.SanitizeForLog(run.WorkDir, cronpkg.MaxWorkDirLen),
 		Fresh:       run.Fresh,
 		Result:      run.Result,
 		ResultBytes: run.ResultBytes,

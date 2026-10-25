@@ -12,7 +12,7 @@
 
 | 记账点 | 位置 | 语义 | 单位 |
 |---|---|---|---|
-| (a) session `costSpent` / `lastCumulativeCost` | `internal/session/managed_runmetric.go:48-92` finishRun → `runhistory.TurnCostDelta`（`runhistory/cost.go:13`） | CLI `total_cost_usd`（**进程内累计值**）差分成 per-turn delta 后累进；落盘 `session-runs/<hash>/<run>.json` 与 `sessions.json`（`store.go:194`） | USD |
+| (a) session `costSpent` / `lastCumulativeCost` | `internal/session/managed_runmetric.go:48-92` finishRun → `costledger.Delta`（`internal/costledger/delta.go`，原 `runhistory.TurnCostDelta` 已并入） | CLI `total_cost_usd`（**进程内累计值**）差分成 per-turn delta 后累进；落盘 `session-runs/<hash>/<run>.json` 与 `sessions.json`（`store.go:194`） | USD |
 | (b) cron `CronRun.CostUSD` / `SandboxRunMeta.CostUSD` | `internal/cron/run.go:50`、`cron/sandbox.go:88`、`scheduler_run.go:826`、`wireup/cron_router_adapter.go:123` | 本地 run 直接透传 `cli.SendResult.CostUSD`（**未差分的进程累计值**）；sandbox run 用 agentcore envelope 的 `total_cost_usd` | USD |
 | (c) backend `Profile.CostUnit` | `profile_claude.go:32` USD / `profile_kiro.go:31` credits / `profile_codex.go:36` tokens | 仅 UI 标签 | 标签 |
 
@@ -52,7 +52,7 @@
 | P5 | 无 result 的 turn（timeout/cancel/进程死亡）成本丢失或错配 | `managed_runmetric.go:77` 仅 `result != nil` 计费 | 同进程下并入下一 turn（总额对、per-turn 错）；进程死亡则永久丢失 |
 | P6 | 单位异构无字段承载；kiro credits / codex tokens 不落盘 | `SessionRun.CostUSD` 只有 USD；credits 只在 header snapshot（`managed_query.go:236`）；`protocol_acp.go` 无 CostUSD → kiro `SessionRun.CostUSD=0` | kiro/codex 消耗不进任何持久账 |
 | P7 | 无 `costBasis` 记录 | 同 P1 | `dashboard.js:4016-4020` 注释因"Bedrock 常读 $0"删掉了 cost chip，是旧 CLI 行为；现已非 0 但仍是 list 估算，UI 无法诚实标注 |
-| P8 | passthrough 合并/乱序 turn 的 per-turn 归属近似 | `passthrough.go:329` follower `CostUSD:0`；`TurnCostDelta` 把增长全给先到者 | 总额正确、per-turn 近似——**接受，不在本 RFC 修** |
+| P8 | passthrough 合并/乱序 turn 的 per-turn 归属近似 | `passthrough.go:329` follower `CostUSD:0`；`costledger.Delta` 把增长全给先到者 | 总额正确、per-turn 近似——**接受，不在本 RFC 修** |
 | P9 | Home 总花费 = 前端 live session 求和 | `dashboard.js:9199` | 不含已删 session / cron / sysession |
 | P10 | cron 时间轴成本小字 = 前端对**已加载** run 求和（初始种子 `recent_runs`，cap=5：`dashboard/cron/handlers.go:571`） | `cron_view.js:2335`；UI 已标注"非全量账单" | 没有任何 per-job 聚合口径；`scheduler_run.go:825` 注释里的 "monthly aggregates" 在代码中不存在 |
 
@@ -120,7 +120,7 @@ type ModelDelta struct {
     Input, Output, CacheRead, CacheWrite, Thinking, WebSearch int64
 }
 
-// Cumulative 是"某进程 incarnation 的累计视图"，Delta 只记正增长（同 TurnCostDelta 规则）。
+// Cumulative 是"某进程 incarnation 的累计视图"，Delta 只记正增长（沿用原 runhistory.TurnCostDelta 的规则）。
 type Cumulative struct {
     USD     float64
     Models  map[string]ModelUsage   // key = raw model
@@ -234,7 +234,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 - 同一 `key` 不同 `unit` 是不同 bucket；前端按 unit 分别渲染。
 - ~~`GET /api/cost/entries`~~：明细端点没有前端调用方，已删除（sub/dead-api-endpoints）；明细仍可直接读账本文件。
 - `GET /api/cost/budget?session_key=|job_id=`（#3447）：今日花费对 `cost.budget` 上限，`{enabled, scope, subject, spent, limit, warn, over, blocked, day, reset_at}`；取 IM / cron 闸门对该 key 或任务会检查的那一档（两者都不带 = 整机）。未配置预算时 `enabled:false`，没有适用上限时 `scope` 为空。只读，不拦 dashboard。
-- 校验（对照 `dashboard/cron/handlers.go:36-99 validateStringField`）：`from/to` RFC3339 解析失败 → 400，`to<from` → 400，跨度 > 90 天且无 `allow_full_range` → 400；`group_by` 白名单；`session_key/job_id/run_id/workspace` 长度 ≤256、合法 UTF-8、禁 C0/DEL、禁 log-injection runes；`dropped>0` 时响应加 `"note":"amount may be underestimated"`。
+- 校验：`from/to` RFC3339 解析失败 → 400，`to<from` → 400，跨度 > 90 天且无 `allow_full_range` → 400；`group_by` 白名单；`session_key/job_id/run_id/workspace` 长度 ≤256、合法 UTF-8、禁 C0/DEL、禁 log-injection runes；`dropped>0` 时响应加 `"note":"amount may be underestimated"`。
 - 鉴权走既有 `auth()`；不做 per-IP 限流（已鉴权 dashboard 接口统一不限流）。可见性与 `/api/sessions` 同级（naozhi 单租户；`session_key` 含平台用户 id 与现有 sessions API 暴露面一致，不新增）。
 
 ## 8. Dashboard

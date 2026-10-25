@@ -120,33 +120,3 @@ func TestJSONEncPoolHTMLEscapingDisabled(t *testing.T) {
 	}
 	check("MarshalPooled body", string(raw))
 }
-
-// TestMarshalEscapedHTMLEscapingEnabled pins R238-SEC-5 (#821): MarshalEscaped
-// is the HTML-safe counterpart to MarshalPooled. Future call sites that splice
-// JSON into HTML templates / innerHTML-without-DOMPurify paths MUST use this
-// helper, and a regression that flipped its escape bit would silently re-open
-// the XSS escalation that motivated providing the helper.
-func TestMarshalEscapedHTMLEscapingEnabled(t *testing.T) {
-	probe := map[string]string{
-		"v": "<a href=\"x\">&</a>",
-	}
-	raw, err := MarshalEscaped(probe)
-	if err != nil {
-		t.Fatalf("MarshalEscaped: %v", err)
-	}
-	body := string(raw)
-
-	escLT := string([]byte{'\\', 'u', '0', '0', '3', 'c'})
-	escGT := string([]byte{'\\', 'u', '0', '0', '3', 'e'})
-	escAmp := string([]byte{'\\', 'u', '0', '0', '2', '6'})
-	for _, esc := range []string{escLT, escGT, escAmp} {
-		if !strings.Contains(body, esc) {
-			t.Errorf("MarshalEscaped body missing escape %q (HTML escaping unexpectedly disabled?): %q", esc, body)
-		}
-	}
-	for _, lit := range []string{"<", ">"} {
-		if strings.Contains(body, lit) {
-			t.Errorf("MarshalEscaped body contains raw %q — SetEscapeHTML(true) regressed: %q", lit, body)
-		}
-	}
-}

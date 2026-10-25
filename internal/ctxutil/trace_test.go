@@ -1,11 +1,7 @@
 package ctxutil
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"log/slog"
-	"strings"
 	"testing"
 )
 
@@ -21,7 +17,7 @@ func TestWithTraceID_RoundTrip(t *testing.T) {
 }
 
 // TestWithTraceID_EmptyIsNoop documents the contract that an empty id
-// must not pollute the context. Otherwise downstream LoggerWithTrace
+// must not pollute the context. Otherwise the trace-aware slog Handler
 // would emit `trace_id=""` for every untraced request, defeating the
 // log-grep that motivated the feature.
 func TestWithTraceID_EmptyIsNoop(t *testing.T) {
@@ -49,41 +45,6 @@ func TestTraceID_NilCtx(t *testing.T) {
 	//lint:ignore SA1012 intentional nil ctx: pins the defensive nil-ctx fallback under test
 	if got := TraceID(nil); got != "" {
 		t.Fatalf("TraceID(nil) = %q; want \"\"", got)
-	}
-}
-
-// TestLoggerWithTrace_AddsField is the load-bearing observability
-// contract: a logger derived from a traced ctx must emit trace_id on
-// every record it produces, and the field must show up in the standard
-// slog JSON output.
-func TestLoggerWithTrace_AddsField(t *testing.T) {
-	t.Parallel()
-	var buf bytes.Buffer
-	base := slog.New(slog.NewJSONHandler(&buf, nil))
-	ctx := WithTraceID(context.Background(), "trace-xyz")
-	derived := LoggerWithTrace(ctx, base)
-	derived.Info("hello")
-
-	var rec map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &rec); err != nil {
-		t.Fatalf("invalid JSON log record: %v\n%s", err, buf.String())
-	}
-	if rec["trace_id"] != "trace-xyz" {
-		t.Fatalf("log record missing trace_id field: %v", rec)
-	}
-}
-
-// TestLoggerWithTrace_NoTraceNoField protects against a regression
-// that would always inject a trace_id field, polluting every log line
-// in code paths that have no request context.
-func TestLoggerWithTrace_NoTraceNoField(t *testing.T) {
-	t.Parallel()
-	var buf bytes.Buffer
-	base := slog.New(slog.NewJSONHandler(&buf, nil))
-	derived := LoggerWithTrace(context.Background(), base)
-	derived.Info("hello")
-	if strings.Contains(buf.String(), "trace_id") {
-		t.Fatalf("untraced ctx must not emit trace_id field: %s", buf.String())
 	}
 }
 

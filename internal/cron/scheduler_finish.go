@@ -288,7 +288,7 @@ func sanitiseRunResult(s string) string {
 	// Redact BEFORE SanitizeForLog so a leaked token never lands on disk or the
 	// WS broadcast (#1006). Idempotent: [REDACTED] starts with no registered
 	// prefix.
-	s = redactSecretsInResult(s)
+	s = textutil.RedactSecrets(s)
 	return osutil.SanitizeForLog(s, maxStoredResultRunes+len(truncatedSuffix))
 }
 
@@ -304,7 +304,7 @@ func localizeNotice(s string) string { return apierr.Localize(sanitiseRunResult(
 func sanitiseRunErrMsg(s string) string {
 	s = redactPathsInCronError(s)
 	// Secrets BEFORE SanitizeForLog, mirroring sanitiseRunResult.
-	s = redactSecretsInResult(s)
+	s = textutil.RedactSecrets(s)
 	return osutil.SanitizeForLog(s, maxCronErrMsgRunes)
 }
 
@@ -418,8 +418,8 @@ func (s *Scheduler) recordTerminalResult(jobID string, out runOutcome, endedAt t
 	// THEN SanitizeForLog, so a token's surrounding control bytes are still
 	// stripped and no plaintext token reaches Job.LastResult / LastError →
 	// cron_jobs.json or the WS broadcast (#1006).
-	result = redactSecretsInResult(result)
-	errMsg = redactSecretsInResult(errMsg)
+	result = textutil.RedactSecrets(result)
+	errMsg = textutil.RedactSecrets(errMsg)
 	errMsg = redactPathsInCronError(errMsg)
 	// Extend SanitizeForLog's byte cap by the suffix length so an
 	// already-truncated result keeps its trailing marker intact.

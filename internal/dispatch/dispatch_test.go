@@ -227,13 +227,6 @@ func TestParseCronAdd(t *testing.T) {
 		{"no quote", `@every 30m check`, "", "", true},
 		{"missing close quote", `"@every 30m check`, "", "", true},
 		{"empty prompt", `"@every 30m" `, "", "", true},
-		// R20260527122801-ARCH-3 (#1315): schedule + prompt validation is now
-		// delegated to cron.ValidateScheduleChars / cron.ValidatePromptStrict.
-		// These cases pin that the shared validators are actually wired through
-		// ParseCronAdd so the IM edge cannot drift from the dashboard edge.
-		{"schedule control char", "\"@every \x0030m\" check", "", "", true},
-		{"prompt control char", "\"@every 30m\" che\x00ck", "", "", true},
-		{"prompt bidi override", "\"@every 30m\" che\u202eck", "", "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1237,62 +1230,24 @@ func TestBuildHandler_GroupChatGate(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // stubCaps is a Capabilities implementation whose ReplyFooter names it, so
-// the precedence test can identify which wiring path the dispatcher resolved.
+// the test can identify which wiring the dispatcher installed.
 type stubCaps struct{ id string }
 
 func (stubCaps) Takeover(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false }
 func (s stubCaps) ReplyFooter(_ string) string                                     { return "stubCaps:" + s.id }
 func (s stubCaps) BackendIDs() []string                                            { return nil }
 
-// TestNewDispatcher_CapabilitiesPrecedence pins the three-way precedence
-// resolution in NewDispatcher:
-//
-//  1. cfg.Capabilities wins when set, even if a legacy *Fn closure is also
-//     provided; the closure is silently shadowed.
-//  2. Only a legacy closure (no Capabilities) → closureCapabilities adapter.
-//  3. Both unset → NoopCapabilities{} (covered by R248-TEST-6 below).
-func TestNewDispatcher_CapabilitiesPrecedence(t *testing.T) {
+// TestNewDispatcher_CapabilitiesUsedDirectly pins that a set cfg.Capabilities
+// is installed as-is (both-unset → NoopCapabilities{} is covered by
+// R248-TEST-6 below).
+func TestNewDispatcher_CapabilitiesUsedDirectly(t *testing.T) {
 	t.Parallel()
-
-	legacyFooter := func(string) string { return "legacy-footer-fn" }
-	cases := []struct {
-		name string
-		cfg  DispatcherConfig
-		want string // d.caps.ReplyFooter's result
-	}{
-		{
-			name: "only ReplyFooterFn → closureCapabilities adapter",
-			cfg:  DispatcherConfig{ReplyFooterFn: legacyFooter},
-			want: "legacy-footer-fn",
-		},
-		{
-			name: "only Capabilities → used directly",
-			cfg:  DispatcherConfig{Capabilities: stubCaps{id: "caps-only"}},
-			want: "stubCaps:caps-only",
-		},
-		{
-			name: "both set → Capabilities wins (closure shadowed)",
-			cfg:  DispatcherConfig{Capabilities: stubCaps{id: "caps-wins"}, ReplyFooterFn: legacyFooter},
-			want: "stubCaps:caps-wins",
-		},
+	d, err := NewDispatcher(DispatcherConfig{Turns: testTurns(), Capabilities: stubCaps{id: "caps-only"}})
+	if err != nil {
+		t.Fatalf("NewDispatcher: %v", err)
 	}
-
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			tc.cfg.Turns = testTurns()
-			d, err := NewDispatcher(tc.cfg)
-			if err != nil {
-				t.Fatalf("NewDispatcher: %v", err)
-			}
-			if d.caps == nil {
-				t.Fatal("d.caps is nil — constructor must always install a Capabilities implementation")
-			}
-			if got := d.caps.ReplyFooter("claude"); got != tc.want {
-				t.Errorf("d.caps.ReplyFooter = %q, want %q (precedence resolved to wrong wiring)", got, tc.want)
-			}
-		})
+	if got, want := d.caps.ReplyFooter("claude"), "stubCaps:caps-only"; got != want {
+		t.Errorf("d.caps.ReplyFooter = %q, want %q", got, want)
 	}
 }
 

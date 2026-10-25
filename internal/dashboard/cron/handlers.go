@@ -6,11 +6,8 @@ import (
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
 )
 
-// Cron input bounds shared with the IM `/cron` path. Both surfaces feed the
-// same on-disk cron_jobs.json schema, so the limits must stay in lockstep —
-// see internal/cron/limits.go.
+// Cron input bounds, from internal/cron/limits.go.
 const (
-	maxCronPromptBytesDashboard   = cronpkg.MaxPromptBytes
 	maxCronIDLenDashboard         = cronpkg.MaxIDLen
 	maxCronScheduleBytesDashboard = cronpkg.MaxScheduleBytes
 )

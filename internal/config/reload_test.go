@@ -89,7 +89,7 @@ func TestHotSections_AreYAMLKeys(t *testing.T) {
 			names = append(names, n)
 		}
 	}
-	for _, h := range HotSections() {
+	for _, h := range hotSections {
 		key, _, _ := cutDot(h)
 		found := false
 		for _, n := range names {

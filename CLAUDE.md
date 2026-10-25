@@ -100,7 +100,7 @@ cmd/naozhi/main.go
 
   叶子工具
   -> osutil       Home/路径展开、进程 helpers、sd_notify、PID 复用防护、只收 regular file 的打开（OpenRegular：FIFO 不阻塞、不跟随 symlink；OpenRegularIn / OpenDirIn：os.Root 锚定）
-  -> textutil     字符串工具：截断、脱敏、UUID 派生（依赖 osutil.IsLogInjectionRune，非零依赖叶子）
+  -> textutil     字符串工具：截断、脱敏、UUID 派生（零依赖叶子）
   -> netutil      Client-IP 提取（trusted-proxy 处理）
   -> ratelimit    Per-key token-bucket 限流（login/WS 握手/transcribe/node 等 HTTP 入口，及 dispatch 的 IM 按发送者限流 im_rate_limit）
   -> limits       跨包大小/数量上限常量

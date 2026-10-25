@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
-	"unicode/utf8"
 )
 
 // AddJob validates, registers, and persists a new cron job.
@@ -16,22 +15,6 @@ func (s *Scheduler) AddJob(j *Job) error {
 	if err := validateSchedule(j.Schedule, s.previewLocation()); err != nil {
 		return fmt.Errorf("%w %q: %w", ErrInvalidSchedule, j.Schedule, err)
 	}
-	// Title 长度校验在 scheduler 层兜底，避免绕过 dashboard handler（例如
-	// store 直接加载被篡改的 cron_jobs.json）把超长字符串持久化进内存。
-	if n := utf8.RuneCountInString(j.Title); n > MaxCronTitleLen {
-		return fmt.Errorf("title too long: %d runes > %d cap", n, MaxCronTitleLen)
-	}
-	// Mirror SetJobPrompt's strict validation so non-dashboard callers cannot
-	// persist multi-MB / log-injection prompts. Empty is allowed: the dashboard
-	// creates paused-with-empty-prompt jobs filled in via SetJobPrompt (#889).
-	if j.Prompt != "" {
-		if err := ValidatePromptStrict(j.Prompt); err != nil {
-			return err
-		}
-	}
-	// Defence-in-depth: the caps loadJobs applies on the read path run on the
-	// write path too, so no internal caller can persist an oversized WorkDir
-	// or log-injection NotifyChatID bytes (#1141).
 	if err := validateJobFields(j); err != nil {
 		return err
 	}
@@ -191,11 +174,8 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	// persisting a path execute() will refuse at runtime.
 	if upd.WorkDir != nil {
 		v := *upd.WorkDir
-		if len(v) > MaxWorkDirLen {
-			return nil, fmt.Errorf("cron: work_dir too long: %d bytes > %d cap", len(v), MaxWorkDirLen)
-		}
-		if !utf8.ValidString(v) || containsCronUnsafe(v) {
-			return nil, fmt.Errorf("cron: work_dir contains invalid bytes")
+		if err := checkJobField("work_dir", v, MaxWorkDirLen); err != nil {
+			return nil, err
 		}
 		if v != "" && s.allowedRoot != "" {
 			if !workDirUnderRoot(v, s.allowedRoot, s.allowedRootResolved) {
@@ -204,8 +184,8 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 		}
 	}
 	if upd.Title != nil {
-		if n := utf8.RuneCountInString(*upd.Title); n > MaxCronTitleLen {
-			return nil, fmt.Errorf("title too long: %d runes > %d cap", n, MaxCronTitleLen)
+		if err := validateTitle(*upd.Title); err != nil {
+			return nil, err
 		}
 	}
 	// Mirror SetJobPrompt's strict policy so non-dashboard callers cannot
@@ -216,34 +196,20 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 			return nil, err
 		}
 	}
-	// Mirror validateJobFields' length + UTF-8 + containsCronUnsafe guards so
-	// non-dashboard callers cannot write oversized / log-injection bytes.
-	if upd.NotifyPlatform != nil {
-		v := *upd.NotifyPlatform
-		if len(v) > MaxNotifyTargetLen {
-			return nil, fmt.Errorf("cron: notify_platform too long: %d bytes > %d cap", len(v), MaxNotifyTargetLen)
-		}
-		if !utf8.ValidString(v) || containsCronUnsafe(v) {
-			return nil, fmt.Errorf("cron: notify_platform contains invalid bytes")
-		}
-	}
-	if upd.NotifyChatID != nil {
-		v := *upd.NotifyChatID
-		if len(v) > MaxNotifyTargetLen {
-			return nil, fmt.Errorf("cron: notify_chat_id too long: %d bytes > %d cap", len(v), MaxNotifyTargetLen)
-		}
-		if !utf8.ValidString(v) || containsCronUnsafe(v) {
-			return nil, fmt.Errorf("cron: notify_chat_id contains invalid bytes")
-		}
-	}
-	// Same guards as validateJobFields for Backend.
-	if upd.Backend != nil {
-		v := *upd.Backend
-		if len(v) > MaxBackendLen {
-			return nil, fmt.Errorf("cron: backend too long: %d bytes > %d cap", len(v), MaxBackendLen)
-		}
-		if !utf8.ValidString(v) || containsCronUnsafe(v) {
-			return nil, fmt.Errorf("cron: backend contains invalid characters")
+	// Same per-field guards as validateJobFields.
+	for _, f := range []struct {
+		name string
+		v    *string
+		max  int
+	}{
+		{"notify_platform", upd.NotifyPlatform, MaxNotifyTargetLen},
+		{"notify_chat_id", upd.NotifyChatID, MaxNotifyTargetLen},
+		{"backend", upd.Backend, MaxBackendLen},
+	} {
+		if f.v != nil {
+			if err := checkJobField(f.name, *f.v, f.max); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -331,13 +297,6 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 	if err := ValidatePromptStrict(prompt); err != nil {
 		return err
 	}
-	// Bound prompt size here too: SetJobPrompt is exposed via Scheduler, so a
-	// caller bypassing the dashboard validator would otherwise write an
-	// unbounded prompt to disk and amplify it across LastResult records.
-	if len(prompt) > MaxPromptBytes {
-		return fmt.Errorf("prompt too large: %d bytes (cap %d)", len(prompt), MaxPromptBytes)
-	}
-
 	// Entry-lifecycle writer: the empty-prompt fill may resume the job, which
 	// swaps its cron entry. Taken unconditionally (before s.tbl.mu, per the lock
 	// order) rather than peeking at Paused first — the peek would be its own

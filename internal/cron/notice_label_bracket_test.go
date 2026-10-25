@@ -10,7 +10,7 @@ import (
 // 必须替换为全角等价物，避免 cronNoticePrefixFmt 模板 "[Cron %s] %s"
 // 被攻击者借 Title 内嵌 `](http://attacker)` 折叠成可点链接。
 //
-// 防御深度：dashboard 的 validateCronTitle 拦截 bidi / C0 控制字符，
+// 防御深度：scheduler 写路径拦截 bidi / C0 控制字符，
 // 但 ASCII `]` `[` `(` `)` 都是合法字符不会被拒；操作员手编
 // cron_jobs.json 也能走到这里。所以在格式化时强制替换是底线。
 func TestFormatCronNotice_StripsCloseBracketInLabel(t *testing.T) {

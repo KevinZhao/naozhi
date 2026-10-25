@@ -168,34 +168,6 @@ func TestEnsureBootstrapped_MissingLocalIsNonFatal(t *testing.T) {
 	}
 }
 
-func TestReBootstrap_Overwrites(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "naozhi-settings.json")
-	if err := os.WriteFile(path, []byte(`{"model":"old"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	local := filepath.Join(dir, "local.json")
-	if err := os.WriteFile(local, []byte(`{"model":"new","env":{"K":"v"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	seeded, err := ReBootstrap(path, local)
-	if err != nil {
-		t.Fatalf("ReBootstrap: %v", err)
-	}
-	if !seeded {
-		t.Error("seeded should be true")
-	}
-	top := unmarshalTop(t, mustRead(t, path))
-	var model string
-	_ = json.Unmarshal(top["model"], &model)
-	if model != "new" {
-		t.Errorf("model = %q, want new (overwrite)", model)
-	}
-	if _, has := top["env"]; has {
-		t.Error("env must be stripped on re-bootstrap too")
-	}
-}
-
 // TestEnsureBootstrapped_CreatesMissingParentDir locks F1/F4: a first-run host
 // whose data dir does not yet exist must still get a written naozhi file — the
 // package owns the MkdirAll, callers must not have to pre-create the dir.

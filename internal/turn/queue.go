@@ -150,24 +150,9 @@ func (r *msgRing) drainInto(dst []Msg) []Msg {
 }
 
 // drainAll returns the queued messages in a freshly allocated slice (FIFO
-// order) and resets the ring. Equivalent to drainInto(nil).
+// order) and empties the ring. Equivalent to drainInto(nil).
 func (r *msgRing) drainAll() []Msg {
 	return r.drainInto(nil)
-}
-
-// reset empties the ring without returning the contents.
-// Keeps the backing array allocated for reuse; zeroes live slots for GC.
-func (r *msgRing) reset() {
-	if r.used == 0 {
-		return
-	}
-	c := cap(r.buf)
-	for i := 0; i < r.used; i++ {
-		idx := (r.head + i) % c
-		r.buf[idx] = Msg{}
-	}
-	r.head = 0
-	r.used = 0
 }
 
 // queue implements per-session message queuing: when a session is busy,

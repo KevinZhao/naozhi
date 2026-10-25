@@ -19,6 +19,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -217,7 +218,7 @@ func firstArgvDivergence(oldArgs, newArgs []string) (string, string) {
 // anomaly) and keys failing validation, mirroring validateKeyForShim: a
 // malformed key on a shim state file is evidence of tampering, not a session.
 func adoptableShimKey(key string) bool {
-	if IsSysKey(key) || IsScratchKey(key) {
+	if sessionkey.IsSysKey(key) || sessionkey.IsScratchKey(key) {
 		return false
 	}
 	return ValidateSessionKey(key) == nil

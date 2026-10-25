@@ -150,9 +150,9 @@ func TestExtractText(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := extractText(json.RawMessage(tc.raw))
+			got, _ := extractTextAndImages(json.RawMessage(tc.raw))
 			if got != tc.want {
-				t.Errorf("extractText(%s) = %q, want %q", tc.raw, got, tc.want)
+				t.Errorf("extractTextAndImages(%s) = %q, want %q", tc.raw, got, tc.want)
 			}
 		})
 	}

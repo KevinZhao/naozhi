@@ -66,7 +66,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	}
 	defaultBackend := opts.Backend
 	// Fallback footer tag for sessions whose Backend() is empty; per-session
-	// ReplyFooterFn reads session.Backend() at reply time.
+	// serverCaps.ReplyFooter reads session.Backend() at reply time.
 	defaultTag := replyTagForBackend(defaultBackend)
 	tag := defaultTag
 	// "" when UserHomeDir fails; downstream sites nil-check claudeDir.

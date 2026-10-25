@@ -323,7 +323,7 @@ func (s *ManagedSession) injectHistory(entries []clievent.EventEntry, onlyIfEmpt
 	// persistedUserTurns is maintained incrementally (#1644): oldCount +
 	// usersInBatch - usersInTrimmedPrefix, O(batch+trimmed) rather than an O(n)
 	// rescan. The proc==nil sort below only permutes order and leaves the total
-	// unchanged. Equivalence with recountPersistedUserTurnsLocked is asserted in
+	// unchanged. Equivalence with a full countUserTurns rescan is asserted in
 	// persisted_user_turns_incremental_test.go.
 	userTurns := s.persistedUserTurns.Load()
 	for i := range entries {

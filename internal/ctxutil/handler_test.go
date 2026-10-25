@@ -50,7 +50,7 @@ func TestHandler_AddsCorrelationFromCtx(t *testing.T) {
 	}
 }
 
-// A field the call site or a derived logger (LoggerWithTrace, cron's
+// A field the call site or a derived logger (logger.With, cron's
 // explicit run_id) already set is not written a second time.
 func TestHandler_NoDuplicateField(t *testing.T) {
 	t.Parallel()
@@ -59,7 +59,7 @@ func TestHandler_NoDuplicateField(t *testing.T) {
 	ctx := WithRunID(WithTraceID(context.Background(), "ctx-trace"), "ctx-run")
 
 	lg.InfoContext(ctx, "record attr", "run_id", "own-run")
-	LoggerWithTrace(WithTraceID(context.Background(), "with-trace"), lg).InfoContext(ctx, "derived")
+	lg.With("trace_id", "with-trace").InfoContext(ctx, "derived")
 
 	out := buf.String()
 	if n := strings.Count(out, `"run_id"`); n != 2 {

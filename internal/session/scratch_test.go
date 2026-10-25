@@ -7,6 +7,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 func TestSanitizeQuote(t *testing.T) {
@@ -121,7 +122,7 @@ func TestScratchPool_OpenRegistersByKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if !strings.HasPrefix(sc.Key, ScratchKeyPrefix) {
+	if !strings.HasPrefix(sc.Key, sessionkey.ScratchKeyPrefix) {
 		t.Errorf("key %q missing prefix", sc.Key)
 	}
 	opts, ok := p.OptsForKey(sc.Key)
@@ -197,18 +198,6 @@ func TestScratchPool_CloseUnknown(t *testing.T) {
 	p := NewScratchPool(nil, 5, time.Minute)
 	if err := p.Close("00000000000000000000000000000000"); err != ErrScratchNotFound {
 		t.Errorf("got %v, want ErrScratchNotFound", err)
-	}
-}
-
-func TestIsScratchKey(t *testing.T) {
-	if !IsScratchKey("scratch:abc:general:general") {
-		t.Error("scratch-prefixed key not recognised")
-	}
-	if IsScratchKey("feishu:group:chat:general") {
-		t.Error("normal key falsely recognised")
-	}
-	if IsScratchKey("") {
-		t.Error("empty key falsely recognised")
 	}
 }
 

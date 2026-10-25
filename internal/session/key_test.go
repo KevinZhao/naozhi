@@ -1,6 +1,10 @@
 package session
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/naozhi/naozhi/internal/sessionkey"
+)
 
 // TestReservedNamespacePrefixes locks the canonical reserved prefix set.
 // Adding a new namespace (e.g. future "gemini:") requires updating this
@@ -10,7 +14,7 @@ func TestReservedNamespacePrefixes(t *testing.T) {
 	t.Parallel()
 	// Sanity: canonical constants carry their trailing colon so substring
 	// checks cannot accidentally match "cronographer:" or "projectile:".
-	for _, p := range []string{CronKeyPrefix, ProjectKeyPrefix, ScratchKeyPrefix, SysKeyPrefix} {
+	for _, p := range []string{CronKeyPrefix, ProjectKeyPrefix, sessionkey.ScratchKeyPrefix, SysKeyPrefix} {
 		if p == "" {
 			t.Errorf("empty reserved prefix in set")
 		}
@@ -23,10 +27,10 @@ func TestReservedNamespacePrefixes(t *testing.T) {
 	// constant; drifting here is exactly the foot-gun R176-ARCH-M1 was
 	// meant to prevent.
 	wantSet := map[string]bool{
-		CronKeyPrefix:    true,
-		ProjectKeyPrefix: true,
-		ScratchKeyPrefix: true,
-		SysKeyPrefix:     true,
+		CronKeyPrefix:               true,
+		ProjectKeyPrefix:            true,
+		sessionkey.ScratchKeyPrefix: true,
+		SysKeyPrefix:                true,
 	}
 	for _, p := range reservedKeyPrefixes {
 		if !wantSet[p] {
@@ -73,56 +77,6 @@ func TestIsReservedNamespace(t *testing.T) {
 			t.Parallel()
 			if got := IsReservedNamespace(tt.key); got != tt.want {
 				t.Errorf("IsReservedNamespace(%q) = %v, want %v", tt.key, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestIsCronKey(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		key  string
-		want bool
-	}{
-		{"empty", "", false},
-		{"cron job", "cron:job-abc", true},
-		{"cron bare prefix", "cron:", true},
-		{"project", "project:myrepo:planner", false},
-		{"feishu", "feishu:group:chat:general", false},
-		{"cronographer false positive", "cronographer:x", false},
-	}
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := IsCronKey(tt.key); got != tt.want {
-				t.Errorf("IsCronKey(%q) = %v, want %v", tt.key, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestIsSysKey(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		key  string
-		want bool
-	}{
-		{"empty", "", false},
-		{"sys daemon", "sys:auto-titler", true},
-		{"sys bare prefix", "sys:", true},
-		{"cron", "cron:job-1", false},
-		{"feishu", "feishu:group:chat:general", false},
-		{"systemic false positive", "systemic:x", false},
-	}
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := IsSysKey(tt.key); got != tt.want {
-				t.Errorf("IsSysKey(%q) = %v, want %v", tt.key, got, tt.want)
 			}
 		})
 	}

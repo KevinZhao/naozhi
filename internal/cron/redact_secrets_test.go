@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // The pure secret-redactor table tests now live in internal/textutil
@@ -69,9 +71,9 @@ func TestRedactSecretsInResult(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := redactSecretsInResult(tc.in)
+			got := textutil.RedactSecrets(tc.in)
 			if got != tc.want {
-				t.Errorf("redactSecretsInResult(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
+				t.Errorf("textutil.RedactSecrets(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -123,9 +125,9 @@ func TestRedactSecretsInResult_StripeRestrictedKey(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := redactSecretsInResult(tc.in)
+			got := textutil.RedactSecrets(tc.in)
 			if got != tc.want {
-				t.Errorf("redactSecretsInResult(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
+				t.Errorf("textutil.RedactSecrets(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -166,19 +168,10 @@ func TestSanitiseRunResult_RedactsSecrets(t *testing.T) {
 	}
 }
 
-// TestRedactSecrets_AliasDelegates confirms the deprecated cron.RedactSecrets
-// alias still scrubs (it now delegates to textutil.RedactSecrets). #1571.
-func TestRedactSecrets_AliasDelegates(t *testing.T) {
-	got := RedactSecrets("token sk-ant-api03-abcdef0123456789 here")
-	if got != "token [REDACTED] here" {
-		t.Errorf("cron.RedactSecrets alias diverged: %q", got)
-	}
-}
-
 // TestRecordTerminalResult_ErrMsgSecretRedacted is the integration guard for
 // R090135-GO-2: a token (sk-ant-/ghp_/AKIA…) embedded in the errMsg argument
 // must not survive into Job.LastError → cron_jobs.json. Before the fix only
-// the result branch called redactSecretsInResult; the errMsg branch only called
+// the result branch called textutil.RedactSecrets; the errMsg branch only called
 // redactPathsInCronError (path-redaction only), leaving tokens intact.
 func TestRecordTerminalResult_ErrMsgSecretRedacted(t *testing.T) {
 	t.Parallel()
