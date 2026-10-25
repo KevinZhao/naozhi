@@ -148,7 +148,11 @@ func TestDashboardWiring_RegistersPprof(t *testing.T) {
 // TestNoParseDurationInMain: config.Load parses every duration once and
 // reports an unusable one, so `config check` sees it. A time.ParseDuration
 // call here would read a config string again, behind the check's back (#3012).
+// parseDurationOK names the functions that parse something other than config.
 func TestNoParseDurationInMain(t *testing.T) {
+	parseDurationOK := map[string]bool{
+		"healthUptime": true, // doctor: /health's uptime, a server reply (#3620)
+	}
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatal(err)
@@ -166,6 +170,9 @@ func TestNoParseDurationInMain(t *testing.T) {
 		}
 		scanned++
 		ast.Inspect(f, func(n ast.Node) bool {
+			if fd, ok := n.(*ast.FuncDecl); ok && fd.Recv == nil && parseDurationOK[fd.Name.Name] {
+				return false
+			}
 			sel, ok := n.(*ast.SelectorExpr)
 			if !ok || sel.Sel.Name != "ParseDuration" {
 				return true

@@ -41,11 +41,12 @@ func findingsByCategory(d *doctor) map[string]finding {
 func TestDoctor_ServerState(t *testing.T) {
 	t.Parallel()
 	recent := time.Now().UTC().Format(time.RFC3339)
-	const old = "2020-01-01T00:00:00Z"
+	const up, justUp = "2h0m0s", "1m0s"
 	alive := `{"writer_alive":true,"channel_depth":0,"channel_cap":1024,"dropped_total":0}`
 	dead := `{"writer_alive":false,"channel_depth":900,"channel_cap":1024,"dropped_total":7}`
-	body := func(cli, platforms, eventlog, tracker, dispatch, loadedAt string) string {
-		b := `{"status":"ok","uptime":"2h","version":"v9","cli_available":` + cli + `,"platforms":` + platforms
+	// config_loaded_at stays fresh (a hot reload moves it); quiet reads uptime (#3620).
+	body := func(cli, platforms, eventlog, tracker, dispatch, uptime string) string {
+		b := `{"status":"ok","uptime":"` + uptime + `","version":"v9","cli_available":` + cli + `,"platforms":` + platforms
 		if eventlog != "" {
 			b += `,"eventlog":` + eventlog
 		}
@@ -55,7 +56,7 @@ func TestDoctor_ServerState(t *testing.T) {
 		if dispatch != "" {
 			b += `,"dispatch":` + dispatch
 		}
-		return b + `,"config_loaded_at":"` + loadedAt + `"}`
+		return b + `,"config_loaded_at":"` + recent + `"}`
 	}
 	replied := `{"message_count":5,"reply_error_count":0,"send_fail_count":0,"last_reply_success_ago":"3m0s"}`
 	quiet := `{"message_count":0,"reply_error_count":0,"send_fail_count":0}`
@@ -66,43 +67,46 @@ func TestDoctor_ServerState(t *testing.T) {
 		body string
 		want map[string]string // category → level, with a detail substring after "|"
 	}{
-		{"healthy", body("true", feishu, alive, alive, replied, old), map[string]string{
+		{"healthy", body("true", feishu, alive, alive, replied, up), map[string]string{
 			"cli runtime":        "pass|cli_available=true",
 			"platforms":          "pass|registered: feishu, slack",
 			"eventlog writer":    "pass|writer alive",
 			"attachment tracker": "pass|writer alive",
 			"dispatch":           "pass|last successful reply 3m0s ago",
 		}},
-		{"cli missing", body("false", feishu, alive, alive, replied, old), map[string]string{
+		{"cli missing", body("false", feishu, alive, alive, replied, up), map[string]string{
 			"cli runtime": "fail|cli_available=false",
 		}},
-		{"eventlog stalled", body("true", feishu, dead, alive, replied, old), map[string]string{
+		{"eventlog stalled", body("true", feishu, dead, alive, replied, up), map[string]string{
 			"eventlog writer":    "fail|queue 900/1024, dropped 7",
 			"attachment tracker": "pass|writer alive",
 		}},
-		{"tracker stalled", body("true", feishu, alive, dead, replied, old), map[string]string{
+		{"tracker stalled", body("true", feishu, alive, dead, replied, up), map[string]string{
 			"eventlog writer":    "pass|writer alive",
 			"attachment tracker": "fail|writer stalled",
 		}},
-		{"sections disabled", body("true", feishu, "", "", "", old), map[string]string{
+		{"sections disabled", body("true", feishu, "", "", "", up), map[string]string{
 			"eventlog writer":    "pass|skipped (disabled",
 			"attachment tracker": "pass|skipped (disabled",
 			"dispatch":           "pass|skipped (process reports no dispatch stats)",
 		}},
-		{"dashboard only", body("true", "{}", alive, alive, quiet, old), map[string]string{
+		{"dashboard only", body("true", "{}", alive, alive, quiet, up), map[string]string{
 			"platforms": "warn|dashboard-only",
 			"dispatch":  "pass|no reply sent yet",
 		}},
-		{"only failures", body("true", feishu, alive, alive, `{"message_count":3,"reply_error_count":2,"send_fail_count":1}`, old), map[string]string{
+		{"only failures", body("true", feishu, alive, alive, `{"message_count":3,"reply_error_count":2,"send_fail_count":1}`, up), map[string]string{
 			"dispatch": "warn|only failures · messages=3 reply_errors=2 send_fails=1",
 		}},
-		{"quiet since start", body("true", feishu, alive, alive, quiet, old), map[string]string{
-			"dispatch": "warn|no inbound IM messages (slash commands not counted) since start at " + old + " — feishu, slack may not be connected (inferred: no connection state reported)",
+		{"quiet since start", body("true", feishu, alive, alive, quiet, up), map[string]string{
+			"dispatch": "warn|no inbound IM messages (slash commands not counted) since start 2h0m0s ago — feishu, slack may not be connected (inferred: no connection state reported)",
 		}},
-		{"quiet just started", body("true", feishu, alive, alive, quiet, recent), map[string]string{
+		{"quiet just started", body("true", feishu, alive, alive, quiet, justUp), map[string]string{
 			"dispatch": "pass|no inbound IM messages yet",
 		}},
-		{"awaiting first reply", body("true", feishu, alive, alive, `{"message_count":1,"reply_error_count":0,"send_fail_count":0}`, old), map[string]string{
+		{"quiet uptime unparsable", body("true", feishu, alive, alive, quiet, "two hours"), map[string]string{
+			"dispatch": "pass|no inbound IM messages yet",
+		}},
+		{"awaiting first reply", body("true", feishu, alive, alive, `{"message_count":1,"reply_error_count":0,"send_fail_count":0}`, up), map[string]string{
 			"dispatch": "pass|no reply sent yet",
 		}},
 	}
@@ -138,12 +142,11 @@ func TestDoctor_ServerState(t *testing.T) {
 // against the reply's Date header, pinned far from the local clock.
 func TestDoctor_PlatformConn(t *testing.T) {
 	t.Parallel()
-	const old = "2020-01-01T00:00:00Z"
 	serverNow := time.Date(2021, 6, 1, 12, 0, 0, 0, time.UTC)
 	quiet := `{"message_count":0,"reply_error_count":0,"send_fail_count":0}`
 	body := func(platforms, conn string) string {
-		return `{"status":"ok","cli_available":true,"platforms":` + platforms + `,"platform_conn":` + conn +
-			`,"dispatch":` + quiet + `,"config_loaded_at":"` + old + `"}`
+		return `{"status":"ok","uptime":"2h0m0s","cli_available":true,"platforms":` + platforms + `,"platform_conn":` + conn +
+			`,"dispatch":` + quiet + `}`
 	}
 	entry := func(state, ago, lastError string) string {
 		d, err := time.ParseDuration(ago)
@@ -192,7 +195,7 @@ func TestDoctor_PlatformConn(t *testing.T) {
 			"slack suspended for 1m0s — unknown state (doctor older than the server?)", ""},
 		{"mixed with registered", body(`{"slack":"connected","feishu":"registered","weixin":"registered"}`, `{"slack":`+entry("connected", "3m0s", "")+`}`), "pass",
 			"slack connected for 3m0s; registered: feishu, weixin (registration only, not a connection state)",
-			"warn|since start at " + old + " — feishu, weixin may not be connected (inferred"},
+			"warn|since start 2h0m0s ago — feishu, weixin may not be connected (inferred"},
 		{"worst platform wins", body(`{"discord":"connected","slack":"failed","weixin":"connecting"}`,
 			`{"discord":`+entry("connected", "9m0s", "")+`,"slack":`+entry("failed", "2m0s", "invalid_auth")+`,"weixin":`+entry("connecting", "10s", "")+`}`), "fail",
 			"discord connected for 9m0s; slack failed for 2m0s (last error: invalid_auth) — needs operator action: fix the cause, then restart unless it reconnects by itself; weixin connecting for 10s — retrying",
@@ -221,38 +224,6 @@ func TestDoctor_PlatformConn(t *testing.T) {
 			level, sub, _ := strings.Cut(tc.dispatch, "|")
 			if f := got["dispatch"]; f.Level != level || !strings.Contains(f.Detail, sub) {
 				t.Errorf("dispatch = %+v, want level %s with %q", f, level, sub)
-			}
-		})
-	}
-}
-
-// TestDoctor_DispatchQuietServerClock: the dispatch quiet heuristic measures
-// time since start on the reply's Date header, not the local clock.
-func TestDoctor_DispatchQuietServerClock(t *testing.T) {
-	t.Parallel()
-	serverNow := time.Date(2021, 6, 1, 12, 0, 0, 0, time.UTC)
-	tests := []struct {
-		name  string
-		ago   time.Duration
-		level string
-	}{
-		{"just started", time.Minute, "pass"},
-		{"quiet past the threshold", dispatchQuietWarnAfter + time.Minute, "warn"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			loadedAt := serverNow.Add(-tc.ago).Format(time.RFC3339)
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Date", serverNow.Format(http.TimeFormat))
-				_, _ = w.Write([]byte(`{"status":"ok","cli_available":true,"platforms":{"feishu":"registered"},` +
-					`"dispatch":{"message_count":0,"reply_error_count":0,"send_fail_count":0},"config_loaded_at":"` + loadedAt + `"}`))
-			}))
-			t.Cleanup(srv.Close)
-			d := &doctor{addr: srv.URL, client: srv.Client(), token: "tok", timeout: 2 * time.Second}
-			d.checkServerState()
-			if f := findingsByCategory(d)["dispatch"]; f.Level != tc.level {
-				t.Errorf("dispatch = %+v, want level %s", f, tc.level)
 			}
 		})
 	}

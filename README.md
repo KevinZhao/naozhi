@@ -709,6 +709,7 @@ kill -HUP $(pidof naozhi)
   `/health.config_reloaded_sha256` 始终是最近一次加载或重载读到的文件，此后磁盘上
   再改而没有重载，doctor 照样报 `not applied`，同时列出待重启段。
 - `${VAR}` 按 naozhi 进程当前的环境变量展开，改了 EnvironmentFile 仍要重启。
+  `~/.claude/settings.json` 的 `env` 在启动时先于首次加载写入。
 - 设计见 [`docs/rfc/config-hot-reload.md`](docs/rfc/config-hot-reload.md)。
 
 ### 生产架构
