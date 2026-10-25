@@ -2,10 +2,14 @@ package dispatch
 
 import (
 	"context"
+	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/agentroute"
 	"github.com/naozhi/naozhi/internal/budget"
+	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
@@ -25,23 +29,46 @@ type BudgetGate interface {
 // A refused message gets no turn, is counted by scope, and the chat is told
 // at most once per budgetReplyWindow.
 func (d *Dispatcher) admitBudget(ctx context.Context, o *imOrigin) bool {
+	return d.admitBudgetKey(ctx, o.msg, o.key, o.lg)
+}
+
+// peekBudget is admitBudget for Admit, before msg's media is fetched: it
+// routes msg the way prepareInbound will, from the text it has so far. A
+// slash command, which admitBudget never sees, is left to the handler.
+func (d *Dispatcher) peekBudget(ctx context.Context, msg platform.IncomingMessage, trimmed string, lg *slog.Logger) bool {
 	if d.budget == nil {
 		return true
 	}
-	v := d.budget.CheckKey(o.key)
+	agentID, cleanText := agentroute.ResolveAgent(trimmed, d.agentCommands)
+	if agentID == "general" && strings.HasPrefix(cleanText, "/") {
+		return true
+	}
+	if msg.AgentID != "" && d.isKnownAgent(msg.AgentID) {
+		agentID = msg.AgentID
+	}
+	msg = d.openThread(msg)
+	key, _ := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, d.sessionChatID(msg), agentID)
+	return d.admitBudgetKey(ctx, msg, key, lg)
+}
+
+func (d *Dispatcher) admitBudgetKey(ctx context.Context, msg platform.IncomingMessage, key string, lg *slog.Logger) bool {
+	if d.budget == nil {
+		return true
+	}
+	v := d.budget.CheckKey(key)
 	if !v.Blocked {
 		return true
 	}
 	dispatchBudgetBlockedTotal.Add(v.Subject.Kind(), 1)
-	chat := sessionkey.ChatKey(o.msg.Platform, o.msg.ChatType, o.msg.ChatID)
+	chat := sessionkey.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
 	if !d.budgetReplies.allow(chat, time.Now()) {
-		o.lg.DebugContext(ctx, "im turn refused: daily budget spent")
+		lg.DebugContext(ctx, "im turn refused: daily budget spent")
 		return false
 	}
-	o.lg.InfoContext(ctx, "im turn refused: daily budget spent",
+	lg.InfoContext(ctx, "im turn refused: daily budget spent",
 		"subject", string(v.Subject), "spent_usd", v.Spent, "limit_usd", v.Limit)
-	d.replyText(ctx, o.msg, "今日费用预算已用尽（"+imBudgetScope(v.Subject)+" "+v.Usage()+"），"+
-		v.ResetAt.Format("01-02 15:04")+" 重置；在此之前新消息不会处理。", o.lg)
+	d.replyText(ctx, msg, "今日费用预算已用尽（"+imBudgetScope(v.Subject)+" "+v.Usage()+"），"+
+		v.ResetAt.Format("01-02 15:04")+" 重置；在此之前新消息不会处理。", lg)
 	return false
 }
 

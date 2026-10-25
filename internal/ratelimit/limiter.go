@@ -114,6 +114,30 @@ func (l *Limiter) Allow(key string) bool {
 	return ent.limiter.Allow()
 }
 
+// Peek reports whether Allow(key) would pass now, without spending a token,
+// refreshing last-seen, promoting the entry or creating one. Empty keys are
+// rejected like Allow's.
+func (l *Limiter) Peek(key string) bool {
+	if key == "" {
+		return false
+	}
+	now := l.now()
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	el, ok := l.entries[key]
+	if !ok {
+		return l.cfg.Burst >= 1
+	}
+	ent := el.Value.(*entry)
+	if now.Sub(ent.lastSeen) > l.cfg.TTL {
+		// Allow would reset this bucket to a full burst.
+		return l.cfg.Burst >= 1
+	}
+	return ent.limiter.Tokens() >= 1
+}
+
 // Len returns the number of tracked keys (tests / observability).
 func (l *Limiter) Len() int {
 	l.mu.Lock()

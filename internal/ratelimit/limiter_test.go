@@ -157,3 +157,59 @@ func TestDefaults(t *testing.T) {
 		t.Fatalf("TTL default = %v, want %v", l.cfg.TTL, defaultTTL)
 	}
 }
+
+// Peek answers what Allow would, and spends, creates and promotes nothing.
+func TestPeekIsReadOnly(t *testing.T) {
+	t.Parallel()
+	l := New(Config{Rate: rate.Every(time.Hour), Burst: 2, MaxKeys: 2})
+	if l.Peek("") {
+		t.Fatal("Peek admitted the empty key")
+	}
+	for range 5 {
+		if !l.Peek("a") {
+			t.Fatal("Peek refused an untouched key")
+		}
+	}
+	if n := l.Len(); n != 0 {
+		t.Fatalf("Peek created %d entries", n)
+	}
+	if !l.Allow("a") || !l.Peek("a") || !l.Allow("a") {
+		t.Fatal("Peek spent a token: the burst of 2 ran out early")
+	}
+	if l.Peek("a") || l.Allow("a") {
+		t.Fatal("Peek or Allow passed with the burst spent")
+	}
+
+	// "a" is the LRU tail once "b" is used; a Peek must not promote it, so
+	// "c" evicts "a" and its spent bucket with it.
+	l.Allow("b")
+	l.Peek("a")
+	l.Allow("c")
+	if !l.Peek("a") {
+		t.Fatal("Peek promoted a: b was evicted instead of a")
+	}
+}
+
+// A bucket idle past the TTL is one Allow would reset, so Peek admits it.
+func TestPeekSeesTTLReset(t *testing.T) {
+	t.Parallel()
+	const ttl = time.Minute
+	l := New(Config{Rate: rate.Every(time.Hour), Burst: 1, TTL: ttl})
+	var mu sync.Mutex
+	nowVal := time.Now()
+	l.nowFn = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return nowVal
+	}
+	l.Allow("a")
+	if l.Peek("a") {
+		t.Fatal("Peek admitted a spent bucket")
+	}
+	mu.Lock()
+	nowVal = nowVal.Add(ttl + 1)
+	mu.Unlock()
+	if !l.Peek("a") {
+		t.Fatal("Peek refused a bucket Allow would reset")
+	}
+}
