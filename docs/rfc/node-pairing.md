@@ -53,7 +53,7 @@ token 即身份(primary 侧只按 token 值匹配,同 token 的多个 node_id �
 
 ### 非目标
 - **不改 reverse-connect 的 wire 协议**(register/registered 帧、token 走第一帧、SHA-256 + 常数时间比较 `reverseserver.go:346-365`)。配对只是"把正确的值填到正确的位置"的编排层。
-- **不做 forward/pull 模式(`nodes:` / `internal/node/relay.go`)的配对** —— 那条路径需要 primary 能反向 HTTP 直达 worker,与"本机在 NAT 后"的核心场景相悖。MVP 只覆盖 reverse 模式。
+- **不做 forward/pull 模式(`workspaces:`,v1 叫 `nodes:`;`internal/node/relay.go`)的配对** —— 那条路径需要 primary 能反向 HTTP 直达 worker,与"本机在 NAT 后"的核心场景相悖。MVP 只覆盖 reverse 模式。
 - **不引入中心化的注册服务器 / 账号体系**。配对码是 primary 与 worker 之间的点对点凭据,不经第三方。
 - **不替代 `naozhi install`**;join 在内部复用它,不是平行实现。
 - **不做 `naozhi init` 角色向导 / install.sh 衔接 / 凭据统一**(原分析的方案 B/C/D)。它们都能在本 RFC 之上增量叠加,见 §12 相关工作,本 RFC 不实现。

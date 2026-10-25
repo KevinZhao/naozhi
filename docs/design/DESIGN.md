@@ -761,7 +761,7 @@ projects:
   root: "/home/ec2-user/workspace"  # 项目根目录, 子目录自动成为项目
 
 # 多节点聚合 (可选)
-nodes:
+workspaces:
   macbook:
     url: "http://10.0.0.2:8180"
     token: "shared-secret"
@@ -1734,8 +1734,7 @@ projects:
 **术语链**：`workspace` (实例) → `project` (目录) → `session` (会话)
 
 **向后兼容**：
-- `session.workspace` 仍可用，加载时自动映射到 `session.cwd`
-- `nodes` 仍可用，加载时自动映射到 `workspaces`
+- `session.workspace`、`nodes` 已不再读取（只报 `config-deprecated` 告警），须手动改名为 `session.cwd`、`workspaces`
 - 不配置 `workspace.id` 时默认取 hostname
 
 ---
@@ -1786,8 +1785,8 @@ node:
   id: "ec2-prod"           # 本机唯一标识（默认 hostname）
   display_name: "EC2 Prod"  # 展示名（默认同 id）
 
-# 远程实例仍用 nodes（不改名，不破坏现有配置）
-nodes:
+# 远程实例
+workspaces:
   macbook:
     url: "http://192.168.1.101:8180"
     display_name: "MacBook Pro"

@@ -26,8 +26,8 @@ func TestSchemaVersion_ExplicitPreserved(t *testing.T) {
 }
 
 // TestSchemaVersion_RejectsNewer verifies a config declaring a schema newer
-// than the binary supports is rejected by validateConfig — the hook the
-// config/v1 migration entry will build on.
+// than the binary supports is rejected by validateConfig, so an older binary
+// never runs a config written for a newer one.
 func TestSchemaVersion_RejectsNewer(t *testing.T) {
 	t.Parallel()
 	cfg := &Config{SchemaVersion: CurrentSchemaVersion + 1}

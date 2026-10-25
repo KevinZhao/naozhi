@@ -239,7 +239,7 @@ func TestLoadDefaults(t *testing.T) {
 func TestLoadNodeConfig(t *testing.T) {
 	tmpFile := t.TempDir() + "/config.yaml"
 	os.WriteFile(tmpFile, []byte(`
-nodes:
+workspaces:
   macbook:
     url: "https://10.0.0.2:8180"
     token: "secret"
@@ -268,7 +268,7 @@ nodes:
 func TestLoadNodeConfig_HTTPWithToken(t *testing.T) {
 	tmpFile := t.TempDir() + "/config.yaml"
 	os.WriteFile(tmpFile, []byte(`
-nodes:
+workspaces:
   bad:
     url: "http://10.0.0.2:8180"
     token: "secret"
@@ -283,7 +283,7 @@ nodes:
 func TestLoadNodeConfig_TrailingSlash(t *testing.T) {
 	tmpFile := t.TempDir() + "/config.yaml"
 	os.WriteFile(tmpFile, []byte(`
-nodes:
+workspaces:
   bad:
     url: "http://10.0.0.2:8180/"
 `), 0600)
@@ -297,7 +297,7 @@ nodes:
 func TestLoadNodeConfig_InvalidScheme(t *testing.T) {
 	tmpFile := t.TempDir() + "/config.yaml"
 	os.WriteFile(tmpFile, []byte(`
-nodes:
+workspaces:
   bad:
     url: "ftp://10.0.0.2:8180"
 `), 0600)
@@ -311,7 +311,7 @@ nodes:
 func TestLoadNodeConfig_MissingURL(t *testing.T) {
 	tmpFile := t.TempDir() + "/config.yaml"
 	os.WriteFile(tmpFile, []byte(`
-nodes:
+workspaces:
   bad:
     token: "secret"
 `), 0600)

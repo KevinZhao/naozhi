@@ -44,14 +44,13 @@
 #   `naozhi config check -config config.yaml`    validate without booting;
 #       -effective also prints each backend's final spawn argv and (masked)
 #       env, -json emits machine-readable output.
-#   `naozhi config migrate -config config.yaml`  show the schema upgrade this
-#       file needs; -write applies it in place, keeping comments.
 #   `naozhi doctor`                              health checks: binary,
 #       state dir and this file's server settings even while naozhi is down,
 #       plus /health, auth and config drift when an instance is reachable.
 #
-# Deprecated spellings. Load still accepts them and logs a config-deprecated
-# WARN; `naozhi config migrate -write` rewrites them:
+# Removed schema v1 spellings. They are NOT read: Load still starts but logs a
+# WARN (config-deprecated; argv-denylist for the agents[].args flag), and the
+# setting has no effect until renamed by hand:
 #   - `nodes:`                                  → `workspaces:`
 #   - `session.workspace`                       → `session.cwd`
 #   - `--append-system-prompt` in agents[].args → `agents[].system_prompt`
@@ -61,8 +60,8 @@
 # `projects:` (the project root) are separate tables.
 # ============================================================================
 
-# The config schema this file is written for; `naozhi config migrate` upgrades
-# an older file (one without this key is migrated from version 1).
+# The config schema this file is written for; a version newer than the binary
+# is rejected at load.
 schema_version: 2
 
 server:
@@ -293,10 +292,9 @@ session:
   # auto_chain — REMOVED (schema v2). It joined sessions in the same
   # workspace by guessing that "same slug + 7d window" meant one conversation,
   # which stitched unrelated one-off sessions together as each other's history
-  # (docs/rfc/project-stable-session-key.md §9). A file without schema_version
-  # still loads with the block, reported as deprecated and ignored; `naozhi
-  # config migrate` removes it. Precise continuation is the project-level
-  # stable session key below, which is default-on.
+  # (docs/rfc/project-stable-session-key.md §9). A leftover block still
+  # loads, reported as deprecated and ignored; delete it. Precise continuation
+  # is the project-level stable session key below, which is default-on.
   #
   # project_stable_key — project-level stable session key. Default-on;
   # set enabled: false to fall back to the legacy timestamp-key path for
