@@ -22,7 +22,6 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/routerrelay"
-	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/selfupdate"
 	"github.com/naozhi/naozhi/internal/server"
 	"github.com/naozhi/naozhi/internal/session"
@@ -319,16 +318,17 @@ func main() {
 			"platform", cfg.Cron.NotifyDefault.Platform,
 			"chat_id_suffix", chatIDSuffix(cfg.Cron.NotifyDefault.ChatID))
 	}
-	// cron and sysession run-events reach the dashboard Hub, which does not
-	// exist yet; the server binds it to this relay.
-	runTelemetry := &runtelemetry.Relay{}
-	// Outbound webhooks ride the same relay as the dashboard Hub
+	// Outbound webhooks receive the same run events as the dashboard Hub
 	// (docs/rfc/outbound-webhooks.md); nil when none is configured.
 	var webhooks *webhook.Sender
 	if eps := cfg.WebhookEndpoints(); len(eps) > 0 {
 		webhooks = webhook.New(eps, webhook.WithNode(cfg.Workspace.ID))
 		slog.Info("outbound webhooks enabled", "endpoints", len(eps))
 	}
+	// cron and sysession run-events go to runTelemetry, already bound to the
+	// webhooks so none is lost while the schedulers run ahead of the server;
+	// the dashboard Hub, which does not exist yet, binds to hubTelemetry.
+	runTelemetry, hubTelemetry := wireup.RunTelemetryRelays(webhooks)
 	// One gate for IM and cron, fed by the ledger; nil when cost.budget is off.
 	budgetGate := budget.Attach(router.Runs().CostLedger(), cfg.BudgetLimits(), cfg.BudgetLocation(), nil)
 	if budgetGate != nil {
@@ -497,8 +497,7 @@ func main() {
 		},
 		Relays: server.RelayOptions{
 			Router:       routerEvents,
-			RunTelemetry: runTelemetry,
-			Webhooks:     webhooks,
+			RunTelemetry: hubTelemetry,
 		},
 	})
 	metrics.StartupPhaseServerMs.Set(time.Since(t0).Milliseconds())

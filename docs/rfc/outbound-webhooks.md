@@ -76,11 +76,20 @@ func (s *Sender) Close(ctx)           // 等队列排空或 ctx 到期
 ### 3.3 接线
 
 `runtelemetry.Tee(a, b Broadcaster) Broadcaster` 把两个 Broadcaster 串成一个。
-`server.buildDashboard` 处 `runTelemetry.Bind(hubBroadcaster)` 改为
-`Bind(Tee(hubBroadcaster, webhookBroadcaster))`，webhook 为 nil 时退回原样。
+`wireup.RunTelemetryRelays(sender)` 返回两个 Relay：cron / sysession 拿外层，外层在
+构造时就 `Bind(Tee(内层, webhookBroadcaster))`；`server.buildDashboard` 只把
+hubBroadcaster 绑到内层。不能像最初那样在 `buildDashboard` 里绑 Tee：调度器早于
+server 启动，Relay 绑定前的事件直接丢弃，而 cron `Start` 后几毫秒内就会把上个进程
+留下的在途 run 记为 canceled 并发 run.ended，正是告警方要的那条（#3691）。
+webhook 为 nil 时两者是同一个 Relay，与原来一样。
 `webhookBroadcaster` 把 `RunStartedEvent` / `RunEndedEvent` 映射到 `webhook.Event`
-并调 `Deliver`。Sender 由 main 构造并挂进 `ServerOptions.Webhooks`；shutdown 序列里
-在 `scheduler.Stop` 之后、HTTP drain 之前 `Close`（最后一批 run.ended 还要发出去）。
+并调 `Deliver`。Sender 由 main 构造；shutdown 序列里
+在 `scheduler.Stop` 之后、HTTP drain 之前 `Close`（最后一批 run.ended 还要发出去），
+`Close` 之后的事件丢弃并计入 `_dropped_total`。
+
+HTTP client 不跟随重定向：3xx 按不可重试的拒绝处理，否则签名后的 body 会被转发到
+接收方指定的任意主机（含 169.254.169.254、loopback）。payload 里未设置的时间字段
+省略（`omitzero`），不发 `0001-01-01T00:00:00Z`。
 
 ## 4. 不变量
 
@@ -88,6 +97,7 @@ func (s *Sender) Close(ctx)           // 等队列排空或 ctx 到期
   且在 cron 的锁外调用，但仍不能让 HTTP 延迟进入调度器）
 - payload 不含用户内容字段
 - 未配置 `integrations.webhooks` 时，`Bind` 的参数与现在完全相同
+- 调度器启动后发出的每个事件都能到达 webhook，不受 server 构造时机影响
 
 ## 5. 测试
 
@@ -95,4 +105,4 @@ func (s *Sender) Close(ctx)           // 等队列排空或 ctx 到期
   队列满丢弃并计数；Close 排空；慢端点不阻塞另一端点
 - runtelemetry：Tee 两边都收到；一边 nil 等价于另一边
 - config：校验矩阵
-- server：配置两个 endpoint 时 Bind 的是 Tee；无配置时仍是 hubBroadcaster（类型断言）
+- wireup：Hub 绑定前发出的 run.ended 仍到达 webhook，Hub 只收到绑定之后的；无 sender 时只有一个 Relay
