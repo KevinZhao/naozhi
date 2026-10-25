@@ -82,6 +82,10 @@ func questionAdapter(t *testing.T) (*Discord, *restRecorder, func() []platform.I
 		mu.Lock()
 		got = append(got, m)
 		mu.Unlock()
+		// Taken, as a dispatcher would report it.
+		if m.OnAccepted != nil {
+			m.OnAccepted()
+		}
 	}
 	return d, rec, func() []platform.IncomingMessage {
 		d.dispatch.Wait()
@@ -509,6 +513,59 @@ func TestOnInteractionCreate_DroppedAnswerKeepsButtons(t *testing.T) {
 	}
 }
 
+// TestOnInteractionCreate_RefusedAnswerKeepsButtons: a click dispatch does
+// not take (im_access, rate limit, budget, not the asker) gets no response,
+// so the card stays clickable for the asker (#3628).
+func TestOnInteractionCreate_RefusedAnswerKeepsButtons(t *testing.T) {
+	t.Parallel()
+	d, rec, msgs := questionAdapter(t)
+	d.handler = func(context.Context, platform.IncomingMessage) {}
+	ms, err := buildQuestionMessage(oneQuestion(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.onInteractionCreate(nil, click(deliveredCard(t, ms, "bot-1"), "naq:0:reviewer", true))
+	msgs()
+	if calls := rec.recorded(); len(calls) != 0 {
+		t.Errorf("card edited although the answer was refused: %+v", calls)
+	}
+}
+
+// TestQuestionCard_AskerRoundTrips: a card asked in one member's session
+// names them in each button's custom_id, and their click carries it to
+// dispatch; a card without one, or posted before asker ids, names no one.
+func TestQuestionCard_AskerRoundTrips(t *testing.T) {
+	t.Parallel()
+	card := oneQuestion(2)
+	card.AskerID = "U1"
+	withAsker, err := buildQuestionMessage(card)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id := buttons(t, withAsker)[1].CustomID; id != "naq:1-U1:reviewer" {
+		t.Fatalf("custom_id = %q, want naq:1-U1:reviewer", id)
+	}
+	open, err := buildQuestionMessage(oneQuestion(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		ms       *discordgo.MessageSend
+		customID string
+		want     string
+	}{
+		{withAsker, "naq:1-U1:reviewer", "U1"},
+		{open, "naq:1:reviewer", ""},
+	} {
+		d, _, msgs := questionAdapter(t)
+		d.onInteractionCreate(nil, click(deliveredCard(t, tc.ms, "bot-1"), tc.customID, true))
+		got := msgs()
+		if len(got) != 1 || got[0].AskerID != tc.want || got[0].AgentID != "reviewer" {
+			t.Errorf("%s: dispatched %+v, want AskerID %q for agent reviewer", tc.customID, got, tc.want)
+		}
+	}
+}
+
 // TestOnInteractionCreate_FailedEditStillAnswers: the card edit is best
 // effort; a rejected response must not lose the answer.
 func TestOnInteractionCreate_FailedEditStillAnswers(t *testing.T) {
@@ -534,7 +591,10 @@ func TestGateway_InteractionCreateAnswered(t *testing.T) {
 	d := newGatewayAdapter(t, g)
 	got := make(chan platform.IncomingMessage, 1)
 	g.hello <- struct{}{}
-	if err := d.Start(func(_ context.Context, m platform.IncomingMessage) { got <- m }); err != nil {
+	if err := d.Start(func(_ context.Context, m platform.IncomingMessage) {
+		got <- m
+		m.OnAccepted()
+	}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = d.Stop() })

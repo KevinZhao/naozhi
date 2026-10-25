@@ -35,6 +35,9 @@ type replyTracker struct {
 	// agentID is embedded into AskUserQuestion cards so the answer routes back
 	// to the asking agent session rather than "general" (#2148).
 	agentID string
+	// askerID is embedded into AskUserQuestion cards so a click by anyone
+	// else is refused (askerOf); set before the turn's first event.
+	askerID string
 	// thinkingMsgID is written by the banner goroutine postBanner spawns and
 	// read by editLoop/imDelivery; on ctx cancel waitReady may return before
 	// msgIDReady closes, so the read races the write — hence atomic.
@@ -226,6 +229,7 @@ func (t *replyTracker) sendAskQuestionCard(aq *clievent.AskQuestion) {
 				ChatType:  t.chatType,
 				AgentID:   t.agentID,
 				ThreadID:  to.ThreadID,
+				AskerID:   t.askerID,
 				Items:     questionItems(aq),
 			}
 			if _, err := sender.SendQuestionCard(rctx, to.ChatID, card); err != nil {

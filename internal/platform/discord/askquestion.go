@@ -18,7 +18,8 @@ import (
 )
 
 // askCustomIDPrefix marks naozhi's AskUserQuestion buttons. The full id is
-// "naq:<option index>:<agent id>"; the index only keeps ids unique.
+// "naq:<option index>:<agent id>", or "naq:<option index>-<asker id>:<agent
+// id>" when only the asker may answer; the index only keeps ids unique.
 const askCustomIDPrefix = "naq:"
 
 // Discord message limits a question card must respect; past them the send is
@@ -83,6 +84,10 @@ func buildQuestionMessage(card platform.QuestionCard) (*discordgo.MessageSend, e
 		return nil, errors.New("question exceeds the embed description limit")
 	}
 	agentID := textutil.TruncateRunesNoEllipsis(card.AgentID, platform.AskIDMaxRunes)
+	asker := ""
+	if card.AskerID != "" {
+		asker = "-" + card.AskerID
+	}
 	var desc strings.Builder
 	desc.WriteString(question)
 	var rows []discordgo.MessageComponent
@@ -91,7 +96,7 @@ func buildQuestionMessage(card platform.QuestionCard) (*discordgo.MessageSend, e
 		if opt.Label == "" || utf8.RuneCountInString(opt.Label) > discordButtonLabelMaxRunes {
 			return nil, fmt.Errorf("option %d label does not fit a %d-rune button", i, discordButtonLabelMaxRunes)
 		}
-		id := askCustomIDPrefix + strconv.Itoa(i) + ":" + agentID
+		id := askCustomIDPrefix + strconv.Itoa(i) + asker + ":" + agentID
 		if len(id) > discordCustomIDMaxBytes {
 			return nil, fmt.Errorf("option %d custom_id is %d bytes, over the %d-byte limit", i, len(id), discordCustomIDMaxBytes)
 		}
@@ -138,8 +143,8 @@ func escapeMarkdown(s string) string { return markdownEscaper.Replace(s) }
 // onInteractionCreate answers an AskUserQuestion button click. Everything it
 // trusts comes from the bot's own card as Discord delivers it: the label from
 // the clicked button, the header from the embed title, the agent id from the
-// button's custom_id. The card is replaced by the answer in the interaction
-// response, which also stops a second click.
+// button's custom_id. Once dispatch takes the answer the card is replaced
+// by it in the interaction response, which also stops a second click.
 func (d *Discord) onInteractionCreate(_ *discordgo.Session, ic *discordgo.InteractionCreate) {
 	if ic == nil || ic.Interaction == nil || ic.Type != discordgo.InteractionMessageComponent {
 		return
@@ -162,7 +167,8 @@ func (d *Discord) onInteractionCreate(_ *discordgo.Session, ic *discordgo.Intera
 	if i.Message.Author.ID != botID {
 		return
 	}
-	_, agentID, _ := strings.Cut(strings.TrimPrefix(data.CustomID, askCustomIDPrefix), ":")
+	index, agentID, _ := strings.Cut(strings.TrimPrefix(data.CustomID, askCustomIDPrefix), ":")
+	_, asker, _ := strings.Cut(index, "-")
 	header := ""
 	if len(i.Message.Embeds) > 0 && i.Message.Embeds[0] != nil {
 		header = i.Message.Embeds[0].Title
@@ -191,14 +197,15 @@ func (d *Discord) onInteractionCreate(_ *discordgo.Session, ic *discordgo.Intera
 		AgentID: osutil.SanitizeForLog(agentID, platform.AskIDMaxRunes),
 		// An explicit click on the bot's card bypasses mention_only gating.
 		MentionMe: true,
+		AskerID:   asker,
+		OnAccepted: func() {
+			d.dispatch.Go("discord ask card edit", func() { d.markQuestionAnswered(i, text) })
+		},
 	}
-	// A dropped answer gets no response: Discord shows the click as failed
-	// and the buttons stay for another try.
-	if !d.dispatch.TryGo("discord", func() { d.handler(d.stopCtx, msg) },
-		"channel", msg.ChatID, "user", msg.UserID) {
-		return
-	}
-	d.markQuestionAnswered(i, text)
+	// A dropped or refused answer gets no response: Discord shows the click
+	// as failed and the buttons stay for another try (#3628).
+	d.dispatch.TryGo("discord", func() { d.handler(d.stopCtx, msg) },
+		"channel", msg.ChatID, "user", msg.UserID)
 }
 
 // markQuestionAnswered replaces the card with the chosen answer and removes

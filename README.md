@@ -90,7 +90,7 @@ graph TD
 
 Agent 命令、模型、system prompt 均可在 `config.yaml` 中自定义。
 
-群聊里，Slack 话题串和飞书话题各用一个独立会话，不在话题里的消息共用频道的会话；`session.group_scope` 可改为 `chat`（整个群一个会话）或 `user`（每个成员一个会话）。`/cd`、`/project`、`/cron` 始终按整个群生效。开启 `session.thread_auto_open` 后，顶层的 @bot 提问会在以它为根的新话题里回答，话题里的追问接着同一个会话。
+群聊里，Slack 话题串和飞书话题各用一个独立会话，不在话题里的消息共用频道的会话；`session.group_scope` 可改为 `chat`（整个群一个会话）或 `user`（每个成员一个会话；此时 Claude 的提问卡片只有提问者本人能点选作答）。`/cd`、`/project`、`/cron` 始终按整个群生效。开启 `session.thread_auto_open` 后，顶层的 @bot 提问会在以它为根的新话题里回答，话题里的追问接着同一个会话。
 
 ### 会话生命周期
 
