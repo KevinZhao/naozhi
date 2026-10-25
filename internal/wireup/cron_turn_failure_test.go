@@ -14,10 +14,11 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// TestTurnFailure: a result the backend flagged as an error becomes
-// cron.ErrTurnFailed with run-history detail and the cause the notice words;
-// a healthy turn and an abort naozhi requested stay nil, whether claude
-// reports it as an aborted_* terminal_reason or error_during_execution.
+// TestTurnFailure: a result the backend flagged as an error, or one claude
+// aborted unasked, becomes cron.ErrTurnFailed with run-history detail and the
+// cause the notice words; a healthy turn and an abort naozhi requested stay
+// nil, whether claude reports it as an aborted_* terminal_reason or
+// error_during_execution.
 func TestTurnFailure(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -31,8 +32,18 @@ func TestTurnFailure(t *testing.T) {
 		{name: "error subtype without is_error", r: clievent.SendResult{SubType: "error_max_turns"}},
 		{name: "own abort", r: clievent.SendResult{SubType: "error_during_execution", IsError: true, Aborted: true}},
 		{name: "own abort 2.1.288", r: clievent.SendResult{SubType: "success", Aborted: true, TerminalReason: "aborted_tools"}},
-		{name: "unrequested aborted_tools", r: clievent.SendResult{SubType: "success", TerminalReason: "aborted_tools"}},
 		{name: "own aborted_* flagged is_error", r: clievent.SendResult{SubType: "success", IsError: true, Aborted: true, TerminalReason: "aborted_streaming", Text: "partial"}},
+		{
+			// claude 2.1.288's own abort: subtype success, is_error false.
+			name:   "unrequested aborted_tools",
+			r:      clievent.SendResult{SubType: "success", TerminalReason: "aborted_tools"},
+			failed: true, detail: []string{"aborted_tools"}, cause: cron.TurnCauseCLIAborted,
+		},
+		{
+			name:   "unrequested aborted_streaming keeps the partial text",
+			r:      clievent.SendResult{SubType: "success", TerminalReason: "aborted_streaming", Text: "half an essay"},
+			failed: true, detail: []string{"aborted_streaming", "half an essay"}, cause: cron.TurnCauseCLIAborted,
+		},
 		{
 			name:   "unrequested aborted_* flagged is_error",
 			r:      clievent.SendResult{SubType: "success", IsError: true, TerminalReason: "aborted_streaming", Text: "partial"},

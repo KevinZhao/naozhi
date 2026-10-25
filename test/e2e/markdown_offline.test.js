@@ -145,11 +145,13 @@ test('a failed KaTeX load heals on the retry, stylesheet included', async ({ bro
     return route.fulfill(asset === 'katex' ? fulfill('application/javascript', katexJS) : fulfill('text/css', katexCSS));
   });
   try {
-    const ktx = page.locator('#events-scroll .katex-pending').first();
+    // By id: the slot drops .katex-pending once it renders.
+    const ktx = page.locator('#' + await page.locator('#events-scroll .katex-pending').first().getAttribute('id'));
     await expect(ktx).toHaveClass(/md-render-unavailable/);
     await page.clock.fastForward(RETRY);
     await expect(ktx.locator('.katex')).toBeVisible();
     await expect(ktx).not.toHaveClass(/md-render-unavailable/);
+    await expect(ktx).not.toHaveClass(/katex-pending/);
     await expect(ktx).toHaveAttribute('title', '');
     await expect.poll(() => ({ ...requests })).toEqual({ katex: 2, katexCSS: 2, mermaid: 2 });
     // The stylesheet is live: the MathML copy is clipped out of view.
@@ -172,7 +174,7 @@ test('a KaTeX retry re-requests only the asset that failed', async ({ browser })
     return route.abort();
   });
   try {
-    const ktx = page.locator('#events-scroll .katex-pending').first();
+    const ktx = page.locator('#' + await page.locator('#events-scroll .katex-pending').first().getAttribute('id'));
     await expect(ktx).toHaveClass(/md-render-unavailable/);
     await page.clock.fastForward(RETRY);
     await expect(ktx.locator('.katex')).toBeVisible();

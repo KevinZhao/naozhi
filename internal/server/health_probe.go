@@ -18,10 +18,10 @@ type HealthProbe func(auth *healthAuthSection)
 
 // EventLogHealthProbe returns a HealthProbe that populates the
 // eventlog auth-section field from the router-attached EventLog
-// subsystem. No-op when the router is nil or EventLog is disabled.
+// subsystem. No-op when EventLog is disabled.
 func EventLogHealthProbe(router healthRouter) HealthProbe {
 	return func(auth *healthAuthSection) {
-		if router == nil || auth == nil {
+		if auth == nil {
 			return
 		}
 		el := router.History().EventLogStats()
@@ -108,7 +108,7 @@ func healthPlatformConnOf(cs platform.ConnState, now time.Time) healthPlatformCo
 // field is exactly "is session state reaching disk right now".
 func sessionStoreHealthProbe(router healthRouter) HealthProbe {
 	return func(auth *healthAuthSection) {
-		if router == nil || auth == nil {
+		if auth == nil {
 			return
 		}
 		blocked := router.StoreWriteBlocks()
@@ -146,13 +146,11 @@ func runStoresHealthProbe(cronRunStore func() cron.RunStoreHealth, router health
 				}
 			}
 		}
-		if router != nil {
-			if sr := router.Runs().Health(); sr.Enabled {
-				rs.Session = &healthSessionRunStore{
-					WriteFailedDiskFull: sr.WriteFailedDiskFull,
-					WriteFailedOther:    sr.WriteFailedOther,
-					AsyncDropped:        sr.AsyncDropped,
-				}
+		if sr := router.Runs().Health(); sr.Enabled {
+			rs.Session = &healthSessionRunStore{
+				WriteFailedDiskFull: sr.WriteFailedDiskFull,
+				WriteFailedOther:    sr.WriteFailedOther,
+				AsyncDropped:        sr.AsyncDropped,
 			}
 		}
 		if rs.Cron == nil && rs.Session == nil {
@@ -205,7 +203,7 @@ func dispatchHealthProbe(metrics func() (int64, int64, int64, time.Time)) Health
 // semantics as EventLogHealthProbe.
 func AttachmentTrackerHealthProbe(router healthRouter) HealthProbe {
 	return func(auth *healthAuthSection) {
-		if router == nil || auth == nil {
+		if auth == nil {
 			return
 		}
 		at := router.History().AttachmentTrackerStats()

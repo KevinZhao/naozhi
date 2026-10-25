@@ -147,3 +147,29 @@ func TestIMAccessOpened(t *testing.T) {
 		})
 	}
 }
+
+// A hostname that moves between startup and a reload is not a workspace edit:
+// the default id is resolved once per process (#3655). Not parallel — it swaps
+// package vars Load reads.
+func TestReloadDiff_HostnameMoved(t *testing.T) {
+	prevResolve, prevProcess := resolveHostname, processHostname
+	t.Cleanup(func() { resolveHostname, processHostname = prevResolve, prevProcess })
+	names := []string{"mac.local", "mac.lan"}
+	resolveHostname = func() (string, error) {
+		h := names[0]
+		if len(names) > 1 {
+			names = names[1:]
+		}
+		return h, nil
+	}
+	processHostname = newProcessHostname()
+
+	const body = "cli:\n  model: sonnet\n"
+	cur, next := loadBody(t, body), loadBody(t, body)
+	if cur.Workspace.ID != "mac.local" {
+		t.Fatalf("Workspace.ID = %q, want the startup hostname", cur.Workspace.ID)
+	}
+	if got := cur.RestartRequired(next); got != nil {
+		t.Errorf("RestartRequired = %v, want none", got)
+	}
+}

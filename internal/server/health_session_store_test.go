@@ -12,10 +12,6 @@ import (
 // file is writable, so a monitor can key on its presence alone (#2972).
 func TestSessionStoreHealthProbe_OmitsWhenNothingIsBlocked(t *testing.T) {
 	var auth healthAuthSection
-	sessionStoreHealthProbe(nil)(&auth)
-	if auth.SessionStore != nil {
-		t.Errorf("session_store = %+v with no router, want omitted", auth.SessionStore)
-	}
 	r := session.NewRouter(session.RouterConfig{MaxProcs: 1})
 	sessionStoreHealthProbe(r)(&auth)
 	if auth.SessionStore != nil {

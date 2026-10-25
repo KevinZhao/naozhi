@@ -354,9 +354,10 @@ func TestParseSDKEvent_UnsupportedType(t *testing.T) {
 			},
 		},
 	}
-	_, ok := (&Feishu{}).parseSDKEvent(event)
-	if ok {
-		t.Error("expected ok=false for unsupported message type")
+	// Parsed rather than dropped, so routeParsed can tell the user (#3626).
+	pe, ok := (&Feishu{}).parseSDKEvent(event)
+	if !ok || pe.Unsupported != "sticker" || pe.MediaType != "" {
+		t.Errorf("parseSDKEvent(sticker) = %+v, %v; want Unsupported=sticker", pe, ok)
 	}
 }
 

@@ -487,10 +487,122 @@ test('re-creating a sent, not yet listed key starts from its new picks', async (
     await sendNow(page, own, 'hello', 1);
     expect(await headerLabels(page)).toEqual(['kiro', 'kiro']);
     // The same continued key on 自动 under solo must not inherit the kiro
-    // pick the first send left behind. The key was already sent from here, so
-    // with no display copy it shows the router default's stats name.
+    // pick the first send left behind. The key was already sent from here,
+    // but it is pending again, so 自动 resolves under solo (#3633) rather
+    // than falling back to the router default's stats name.
     await create('', 'solo');
-    expect(await headerLabels(page)).toEqual(['claude-live', 'claude-live']);
+    expect(await headerLabels(page)).toEqual(['claude-code', 'claude-code']);
+  } finally { own.server.close(); }
+});
+
+/** @param {any} b */
+const spawnOf = b => ({ workspace: b.workspace, backend: b.backend, access_profile: b.access_profile });
+const NO_SPAWN = { workspace: undefined, backend: undefined, access_profile: undefined };
+
+// A first send the server rejects spawned nothing, so its retry carries the
+// picks again (#3633): the session must not spawn on the defaults. Once a
+// send got through, a later one still carries none (#3586).
+test('a first HTTP send rejected with 500 keeps its picks for the retry', async ({ page }) => {
+  const sessions = /** @type {any} */ (defaultSessions());
+  Object.assign(sessions.stats, { cli_name: 'claude-live', cli_version: '9.9.9' });
+  const opts = { sessions, sendStatus: 500 };
+  const own = await startMockServer(opts);
+  try {
+    await createAndSend(page, own, { profile: 'team', backend: 'kiro', ws: false, text: 'one' });
+    expect(await headerLabels(page)).toEqual(['kiro', 'kiro']);
+    opts.sendStatus = 0;
+    await sendNow(page, own, 'two', 2);
+    await sendNow(page, own, 'three', 3);
+    const bodies = own.sendCalls.map(b => JSON.parse(b));
+    expect(spawnOf(bodies[0])).toEqual({ workspace: '/home/user/workspace/myproject', backend: 'kiro', access_profile: 'team' });
+    expect(spawnOf(bodies[1])).toEqual(spawnOf(bodies[0]));
+    expect(spawnOf(bodies[2])).toEqual(NO_SPAWN);
+    expect(await headerLabels(page)).toEqual(['kiro', 'kiro']);
+  } finally { own.server.close(); }
+});
+
+test('a first WS send acked error keeps its picks for the retry', async ({ page }) => {
+  const own = await mockWithCLIName(undefined, { ws: true });
+  try {
+    await createAndSend(page, own, { profile: 'team', backend: 'kiro', ws: true, text: 'one' });
+    const first = wsSendBodies(own)[0];
+    const conn = own.wsConnections.find(c => c.messages.includes(first));
+    conn.send({ type: 'send_ack', id: first.id, status: 'error', key: first.key, error: 'boom' });
+    await expect.poll(() => page.evaluate(k => /** @type {any} */ (window).nz.test.sessionWorkspaces[k], first.key)).toBe(first.workspace);
+    await sendNow(page, own, 'two', 2);
+    expect(spawnOf(wsSendBodies(own)[1])).toEqual(spawnOf(first));
+    expect(spawnOf(first)).toEqual({ workspace: '/home/user/workspace/myproject', backend: 'kiro', access_profile: 'team' });
+  } finally { own.server.close(); }
+});
+
+// A send the server accepted spawned the session, so the error ack its failed
+// turn sends later must not hand the picks back to the next send (#3586).
+test('an error ack after the first send was accepted leaves its picks consumed', async ({ page }) => {
+  const own = await mockWithCLIName(undefined, { ws: true });
+  try {
+    await createAndSend(page, own, { profile: 'team', backend: 'kiro', ws: true, text: 'one' });
+    const first = wsSendBodies(own)[0];
+    const conn = own.wsConnections.find(c => c.messages.includes(first));
+    conn.send({ type: 'send_ack', id: first.id, status: 'accepted', key: first.key });
+    conn.send({ type: 'send_ack', id: first.id, status: 'error', key: first.key, error: 'boom' });
+    await expect(page.locator('#btn-send')).toBeVisible();
+    await sendNow(page, own, 'two', 2);
+    expect(spawnOf(wsSendBodies(own)[1])).toEqual(NO_SPAWN);
+    expect(await headerLabels(page)).toEqual(['kiro', 'kiro']);
+  } finally { own.server.close(); }
+});
+
+// The header falls back to a pending session's model/effort pick while the
+// key has no server row. A sent key's pick goes once the server lists it, so
+// re-creating that key after a dismiss starts with no model (#3633).
+test('a listed, dismissed and re-created key does not show the old pending model', async ({ page }) => {
+  /** @type {any} */
+  let sessions;
+  const own = await mockWithCLIName(s => { sessions = s; });
+  try {
+    await page.goto(own.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    const key = 'dashboard:pj:abc:general';
+    const create = () => page.evaluate(k => /** @type {any} */ (window).nz.test.doCreateInProject(
+      '/home/user/workspace/myproject', 'myproject', 'local', '', 'general', { mode: 'continue', stableKey: k, accessProfile: 'team' }), key);
+    const tuning = () => page.evaluate(async k => (await import('/static/state.js')).perSession.pendingTuning[k], key);
+    const model = () => page.evaluate(() => {
+      /** @type {any} */ (window).nz.test.renderMainShell();
+      return /** @type {HTMLElement} */ (document.getElementById('header-model')).textContent;
+    });
+    await create();
+    await page.evaluate(async k => { (await import('/static/state.js')).perSession.pendingTuning[k] = { model: 'stale-model', effort: 'high' }; }, key);
+    expect(await model()).toBe('· stale-model');
+    await sendNow(page, own, 'hello', 1);
+    expect(await model(), 'shown until listed').toBe('· stale-model');
+
+    sessions.sessions.push({ key, state: 'ready', platform: 'dashboard', agent: 'general', workspace: '/home/user/workspace/myproject', last_active: Date.now(), node: 'local', project: 'myproject' });
+    sessions.stats.version++;
+    await page.evaluate(() => /** @type {any} */ (window).nz.test.fetchSessions());
+    expect(await tuning()).toBeUndefined();
+
+    await page.evaluate(k => /** @type {any} */ (window).nz.test.dismissSession(k, 'local'), key);
+    await expect.poll(() => sessions.sessions.some((/** @type {any} */ x) => x.key === key)).toBe(false);
+    await page.evaluate(() => /** @type {any} */ (window).nz.test.fetchSessions());
+    await create();
+    expect(await model()).toBe('· (模型未配置)');
+  } finally { own.server.close(); }
+});
+
+// A sent key the user dismisses before the server lists it: DELETE drops the
+// server's parked tuning, so the mirror goes with it.
+test('dismissing a sent, not yet listed key drops its pending model', async ({ page }) => {
+  const own = await mockWithCLIName();
+  try {
+    await page.goto(own.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    const key = 'dashboard:pj:abc:general';
+    await page.evaluate(k => /** @type {any} */ (window).nz.test.doCreateInProject(
+      '/home/user/workspace/myproject', 'myproject', 'local', '', 'general', { mode: 'continue', stableKey: k }), key);
+    await page.evaluate(async k => { (await import('/static/state.js')).perSession.pendingTuning[k] = { model: 'stale-model' }; }, key);
+    await sendNow(page, own, 'hello', 1);
+    await page.evaluate(k => /** @type {any} */ (window).nz.test.dismissSession(k, 'local'), key);
+    expect(await page.evaluate(async k => (await import('/static/state.js')).perSession.pendingTuning[k], key)).toBeUndefined();
   } finally { own.server.close(); }
 });
 

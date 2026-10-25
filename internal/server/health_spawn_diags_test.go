@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/spawndiag"
 )
 
@@ -16,7 +17,7 @@ func TestHealthProbe_SpawnDiags(t *testing.T) {
 		"value fails its guard: http://value-sentinel-7")
 	// Through the handler's probe list, so an unregistered probe fails too.
 	auth := &healthAuthSection{}
-	h := &HealthHandler{dispatcherMetrics: func() (int64, int64, int64, time.Time) { return 0, 0, 0, time.Time{} }}
+	h := &HealthHandler{router: session.NewRouter(session.RouterConfig{MaxProcs: 1}), dispatcherMetrics: func() (int64, int64, int64, time.Time) { return 0, 0, 0, time.Time{} }}
 	for _, probe := range h.subsystemProbes() {
 		probe(auth)
 	}

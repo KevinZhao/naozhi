@@ -41,12 +41,13 @@ export function autoBackendID(backendsData, profileID) {
 // pendingBackendID is the backend a session this browser created will spawn
 // on, or did spawn on until the server lists it (sentPicks): the explicit pick
 // (any node), else 自动. '' once listed (sess.backend rules), sent with no
-// sentPicks entry (a key not created here), with one backend, or for 自动 on a
-// remote node, whose manifest and profiles are not the ones cached here.
+// sentPicks entry and no pending workspace (a key not created here, or not
+// re-created since), with one backend, or for 自动 on a remote node, whose
+// manifest and profiles are not the ones cached here.
 export function pendingBackendID(key, node) {
   const sent = perSession.sentPicks[key], pick = perSession.backends[key] || (sent && sent.backend);
-  if (pick) return pick;
   const n = node || perSession.nodes[key] || 'local', m = serverInfo.cliBackends, s = sid(key, n);
-  if (!key || n !== 'local' || sessionList.sessionsData[s] || (!sent && (perSession.lastSent[s] || perSession.httpSendPending.has(s))) || !m || !Array.isArray(m.backends) || m.backends.length < 2) return '';
+  const sentElsewhere = !sent && perSession.workspaces[key] === undefined && (perSession.lastSent[s] || perSession.httpSendPending.has(s));
+  if (pick || !key || n !== 'local' || sessionList.sessionsData[s] || sentElsewhere || !m || !Array.isArray(m.backends) || m.backends.length < 2) return pick || '';
   return autoBackendID(m, sent ? sent.accessProfile : perSession.accessProfiles[key]);
 }

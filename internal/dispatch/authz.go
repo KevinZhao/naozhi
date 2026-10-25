@@ -22,6 +22,7 @@ const (
 	denyReplyCap = 1024
 
 	notAdminReply = "该命令需要管理员权限。"
+	notAskerReply = "这个问题只有提问者可以回答。"
 )
 
 // SetAccessPolicy replaces the IM access policy; the next message is judged

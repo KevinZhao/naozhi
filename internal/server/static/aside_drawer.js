@@ -119,8 +119,8 @@ function matchesPendingEcho(ev) {
   return false;
 }
 
-// isNearBottom mirrors the main transcript's wasBottom check (dashboard.js
-// around line 1242 + 4604). 30px slack absorbs sub-pixel layout jitter.
+// isNearBottom mirrors the main transcript's wasBottom check (appendEvents in
+// event_stream.js). 30px slack absorbs sub-pixel layout jitter.
 function isNearBottom() {
   if (!ad.elMsgs) return true;
   return ad.elMsgs.scrollTop + ad.elMsgs.clientHeight >= ad.elMsgs.scrollHeight - 30;

@@ -31,7 +31,7 @@ import (
 // earns (staticCacheControl), then the ETag short-circuit before the body.
 func serveStaticJS(name string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if staticAssetBytes(name) == nil {
+		if !hasStaticAsset(name) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -61,7 +61,7 @@ var stylesheetTypes = map[string]string{
 func handleDashboardCSS(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/static/")
 	typ := stylesheetTypes[path.Ext(name)]
-	if typ == "" || staticAssetBytes(name) == nil {
+	if typ == "" || !hasStaticAsset(name) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}

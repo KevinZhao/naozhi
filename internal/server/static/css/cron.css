@@ -432,27 +432,8 @@
 .cron-drawer-header .cdh-row2 .cj-schedule{cursor:pointer}
 .cron-drawer-header .cdh-chip{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:1px 6px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cron-drawer-header .cdh-chip.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
-/* cron-dashboard-redesign P1 §4.3 — KPI cockpit row at top of drawer.
- * Four equal columns by default; collapses to 2x2 on narrow widths so the
- * primary "下次运行" tile keeps its full numeric width. The .primary
- * variant carries the accent gradient/border that anchors the eye. */
-.cron-drawer-cockpit{padding:14px 20px;border-bottom:1px solid var(--nz-border);display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr;gap:10px;background:linear-gradient(180deg,rgba(31,111,235,.04),transparent)}
-.cron-kpi{padding:10px 12px;border-radius:var(--nz-radius-md);border:1px solid var(--nz-border);background:var(--nz-bg-1);min-width:0}
-.cron-kpi.primary{background:linear-gradient(135deg,rgba(31,111,235,.12),rgba(31,111,235,.04));border-color:rgba(31,111,235,.4)}
-.cron-kpi .ck-label{font-size:var(--nz-fs-2xs);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.cron-kpi .ck-value{font-size:var(--nz-fs-lg);color:var(--nz-text-strong);font-weight:600;font-variant-numeric:tabular-nums;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.cron-kpi.primary .ck-value{color:var(--nz-accent)}
-.cron-kpi.ok .ck-value{color:var(--nz-green)}
-.cron-kpi.warn .ck-value{color:var(--nz-amber)}
-.cron-kpi.bad .ck-value{color:var(--nz-red)}
-.cron-kpi.run .ck-value{color:var(--nz-accent)}
-.cron-kpi .ck-sub{font-size:var(--nz-fs-xs);color:var(--nz-text-faint);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-@media(max-width:720px){
-  .cron-drawer-cockpit{grid-template-columns:1fr 1fr}
-}
-
-/* cron-dashboard-redesign P1 §4.3 — running banner replaces the cockpit
- * when the job is currently in flight. High-contrast accent treatment so
+/* cron-dashboard-redesign P1 §4.3 — running banner at the top of the
+ * drawer while the job is currently in flight. High-contrast accent treatment so
  * the live elapsed clock + state are the focal point; old .cdc-* classes
  * retained below for any test that greps the v2 surface. */
 .cron-drawer-running{padding:14px 20px;border-bottom:1px solid rgba(31,111,235,.4);background:linear-gradient(135deg,rgba(31,111,235,.18),rgba(31,111,235,.06));display:flex;align-items:center;gap:14px}
@@ -555,7 +536,7 @@
  * as the rest of the drawer (--nz-bg-1 cards on --nz-bg-0 page, with
  * --nz-border outlines), so the section feels native — no new gradients,
  * no extra colour weight, no chrome that competes with the existing
- * cockpit / running banner / actions row.
+ * running banner / actions row.
  *
  * Mobile responsiveness:
  *   - Cards stack vertically by default (display:block on the section).

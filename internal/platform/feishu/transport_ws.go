@@ -29,9 +29,15 @@ const (
 type parsedEvent struct {
 	Msg       platform.IncomingMessage
 	MessageID string
-	MediaType string // "" | "image" | "audio" | "file"
+	MediaType string // "" | "image" | "audio" | "file" | "post"
 	MediaKey  string // imageKey or fileKey
 	MediaName string // file_name of a "file" message
+	// ImageKeys are a "post" message's inline pictures; MediaType is "post"
+	// only when there is at least one.
+	ImageKeys []string
+	// Unsupported is the msg_type of a message naozhi cannot read; set alone,
+	// it routes to noticeUnsupported.
+	Unsupported string
 }
 
 func (f *Feishu) startWebSocket() error {
@@ -144,6 +150,10 @@ func (f *Feishu) dispatchCardActionTracked(
 // the dispatch pool. TryGo does wg.Add(1) on this goroutine before `go`, so a
 // concurrent Stop()/Wait() cannot observe counter=0 mid-dispatch.
 func (f *Feishu) routeParsed(ctx context.Context, handler platform.MessageHandler, pe parsedEvent) {
+	if pe.Unsupported != "" {
+		f.noticeUnsupported(pe.Msg, pe.Unsupported)
+		return
+	}
 	switch pe.MediaType {
 	case "image":
 		f.dispatch.TryGo("feishu ws image", func() {
@@ -156,6 +166,10 @@ func (f *Feishu) routeParsed(ctx context.Context, handler platform.MessageHandle
 	case "file":
 		f.dispatch.TryGo("feishu ws file", func() {
 			f.handleFile(ctx, handler, pe.Msg, pe.MessageID, pe.MediaKey, pe.MediaName)
+		})
+	case "post":
+		f.dispatch.TryGo("feishu ws post", func() {
+			f.handlePost(ctx, handler, pe.Msg, pe.MessageID, pe.ImageKeys)
 		})
 	default:
 		f.dispatch.TryGo("feishu ws text", func() { handler(ctx, pe.Msg) })
@@ -301,10 +315,6 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 	}
 
 	msgType := *msg.MessageType
-	if msgType != "text" && msgType != "image" && msgType != "audio" && msgType != "file" {
-		return parsedEvent{}, false
-	}
-
 	if msg.Content == nil {
 		return parsedEvent{}, false
 	}
@@ -424,7 +434,23 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 		}
 		return pe, true
 
+	case "post":
+		text, imageKeys, err := parsePostContent(*msg.Content)
+		if err != nil {
+			slog.Debug("feishu ws: post dropped",
+				"err", err, "msg_id", osutil.SanitizeForLog(messageID, 64))
+			return parsedEvent{}, false
+		}
+		if text == "" && len(imageKeys) == 0 {
+			return parsedEvent{}, false
+		}
+		result.Text = text
+		if len(imageKeys) == 0 {
+			return parsedEvent{Msg: result}, true
+		}
+		return parsedEvent{Msg: result, MessageID: messageID, MediaType: "post", ImageKeys: imageKeys}, true
+
 	default:
-		return parsedEvent{}, false
+		return parsedEvent{Msg: result, Unsupported: msgType}, true
 	}
 }
