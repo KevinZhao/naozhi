@@ -44,16 +44,11 @@ func RelUnderRoot(resolved, root string) (string, bool) {
 	return rel, true
 }
 
-// sameFileAncestor reports whether root names the same inode as resolved or
+// sameFileAncestorAt reports whether root names the same inode as resolved or
 // any of its ancestors — the case-insensitive-filesystem fallback after the
-// byte-wise prefix check fails. Any Lstat error returns false so a failed
-// probe never weakens the byte-wise gate's negative result.
-func sameFileAncestor(resolved, root string) bool {
-	_, ok := sameFileAncestorAt(resolved, root)
-	return ok
-}
-
-// sameFileAncestorAt is sameFileAncestor returning the matching ancestor.
+// byte-wise prefix check fails — and returns the matching ancestor. Any Lstat
+// error returns false so a failed probe never weakens the byte-wise gate's
+// negative result.
 func sameFileAncestorAt(resolved, root string) (string, bool) {
 	// Lstat, not Stat: never follow a symlink at the final component when
 	// probing inode identity, so a crafted final-component symlink cannot make

@@ -186,17 +186,6 @@ func EnsureBootstrapped(path, localSettingsPath string) (existed, seededFromLoca
 	return false, seededFromLocal, diagErr
 }
 
-// ReBootstrap unconditionally re-seeds path from localSettingsPath, discarding
-// naozhi's current isolated config; MUST be gated behind an explicit operator
-// confirmation. Error semantics match EnsureBootstrapped.
-func ReBootstrap(path, localSettingsPath string) (seededFromLocal bool, err error) {
-	doc, seededFromLocal, diagErr := bootstrapFromFile(localSettingsPath)
-	if writeErr := writeDoc(path, doc); writeErr != nil {
-		return false, writeErr
-	}
-	return seededFromLocal, diagErr
-}
-
 // writeDoc creates the parent dir (0700) if needed and atomically writes doc at
 // 0600, so a first-run host without a data dir still gets a settings file.
 func writeDoc(path string, doc []byte) error {

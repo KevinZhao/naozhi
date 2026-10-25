@@ -6,30 +6,6 @@ import (
 	"testing"
 )
 
-func TestPathUnderRoot(t *testing.T) {
-	sep := string(filepath.Separator)
-	root := sep + "data" + sep + "ws"
-	cases := []struct {
-		name     string
-		resolved string
-		want     bool
-	}{
-		{"equal", root, true},
-		{"child", root + sep + "proj", true},
-		{"deep child", root + sep + "a" + sep + "b", true},
-		{"sibling prefix not under", root + "-evil", false},
-		{"outside", sep + "etc", false},
-		{"parent", sep + "data", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := PathUnderRoot(tc.resolved, root); got != tc.want {
-				t.Errorf("PathUnderRoot(%q, %q) = %v, want %v", tc.resolved, root, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestResolveWorkspaceUnderRoot(t *testing.T) {
 	sep := string(filepath.Separator)
 	root := sep + "data" + sep + "ws"

@@ -14,7 +14,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// resolveWorkspaceByParts
+// resolveWorkspaceUnder
 // ---------------------------------------------------------------------------
 
 func TestResolveWorkspaceByParts_RealDir(t *testing.T) {
@@ -149,8 +149,8 @@ func TestResolveWorkspaceByParts_ProductionRootIsSlash(t *testing.T) {
 	if fi, err := os.Stat("/usr"); err != nil || !fi.IsDir() {
 		t.Skip("no /usr on this host")
 	}
-	if got := resolveWorkspaceByParts("-usr"); got != "/usr" {
-		t.Errorf(`resolveWorkspaceByParts("-usr") = %q, want "/usr" — production must resolve from the real root`, got)
+	if got := resolveWorkspaceUnder(fsRoot, "-usr"); got != "/usr" {
+		t.Errorf(`resolveWorkspaceUnder(fsRoot, "-usr") = %q, want "/usr" — production must resolve from the real root`, got)
 	}
 }
 
@@ -551,7 +551,7 @@ func TestExtractFirstPrompt_SkipsNonUserLines(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// RecentSessions
+// RecentSessionsCtx
 // ---------------------------------------------------------------------------
 
 // makeWorkspace creates a real workspace directory below a fresh resolution
@@ -593,7 +593,7 @@ func TestRecentSessions_EmptyDir(t *testing.T) {
 
 func TestRecentSessions_EmptyClaudeDir(t *testing.T) {
 	t.Parallel()
-	got := RecentSessions("", 10, 7*24*time.Hour, nil, nil)
+	got := RecentSessionsCtx(context.Background(), "", 10, 7*24*time.Hour, nil, nil)
 	if got != nil {
 		t.Errorf("expected nil for empty claudeDir, got %v", got)
 	}
@@ -1065,7 +1065,7 @@ func TestRecentSessionsCtx_CancelledReturnsEarly(t *testing.T) {
 }
 
 // TestRecentSessionsCtx_BackgroundCtxEquivalent confirms a live context
-// leaves behaviour identical to the legacy RecentSessions path.
+// returns the same sessions as an uncancelled scan.
 func TestRecentSessionsCtx_BackgroundCtxEquivalent(t *testing.T) {
 	t.Parallel()
 	root, claudeDir, workspace, encodedDir := makeWorkspace(t)
@@ -1093,7 +1093,7 @@ func TestRecentSessionsCtx_BackgroundCtxEquivalent(t *testing.T) {
 		}
 	}
 	if !saw {
-		t.Errorf("background ctx must behave like RecentSessions; session missing: %s", sid)
+		t.Errorf("background ctx dropped a session: %s", sid)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/turn"
 )
 
@@ -174,7 +175,7 @@ func TestGroupScope_CdInAThreadMovesTheChat(t *testing.T) {
 	if !strings.Contains(fp.lastReply(), "已切换") {
 		t.Fatalf("/cd reply = %q, want the workspace-changed reply", fp.lastReply())
 	}
-	if got := d.router.Workspace(session.ChatKey("fake", "group", "g")); got != dir {
+	if got := d.router.Workspace(sessionkey.ChatKey("fake", "group", "g")); got != dir {
 		t.Errorf("channel workspace after /cd in a thread = %q, want %q", got, dir)
 	}
 }

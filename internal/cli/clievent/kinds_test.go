@@ -68,7 +68,7 @@ func TestKindTable(t *testing.T) {
 		want []string
 	}{
 		{"activity", IsActivityType, nil, []string{"tool_use", "thinking", "agent", "task_start", "task_progress", "todo"}},
-		{"internal", IsInternalEventType, InternalKinds(), []string{"tool_use", "result", "agent", "task_start", "task_progress", "task_done"}},
+		{"internal", func(t string) bool { return kindByName[t].Internal }, InternalKinds(), []string{"tool_use", "result", "agent", "task_start", "task_progress", "task_done"}},
 		{"no-bubble", nil, NoBubbleKinds(), []string{"thinking"}},
 		{"markdown-ignore", nil, MarkdownIgnoreKinds(), []string{"tool_use", "result", "agent", "task_start", "task_progress", "task_done", "thinking", "ask_question"}},
 	}
@@ -105,7 +105,7 @@ func TestKindTable(t *testing.T) {
 		noBubble[k] = true
 	}
 	for _, k := range append(AllKinds(), "", "init", "unknown_kind") {
-		internal := IsInternalEventType(k)
+		internal := kindByName[k].Internal
 		if internal && noBubble[k] {
 			t.Errorf("%q is both Internal and NoBubble", k)
 		}

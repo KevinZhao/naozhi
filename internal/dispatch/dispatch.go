@@ -177,19 +177,9 @@ type DispatcherConfig struct {
 	AllowedRoot string
 	ClaudeDir   string
 
-	// Capabilities groups the host-supplied hooks (Takeover / ReplyFooter).
-	// Wins over the legacy *Fn closures when both are set; nil falls back to
-	// the closures, then NoopCapabilities{}.
+	// Capabilities groups the host-supplied hooks (Takeover / ReplyFooter);
+	// nil means NoopCapabilities{}.
 	Capabilities Capabilities
-
-	// ReplyFooterFn returns the per-session reply tag (e.g. "cc" / "kiro")
-	// for a backend ID; empty backend means "not pinned yet". nil means no
-	// footer.
-	//
-	// Deprecated: prefer DispatcherConfig.Capabilities. Removal, together
-	// with TakeoverFn / closureCapabilities, is gated on test migrations
-	// (#374).
-	ReplyFooterFn func(backendID string) string
 
 	NoOutputTimeout       time.Duration
 	TotalTimeout          time.Duration
@@ -199,12 +189,6 @@ type DispatcherConfig struct {
 	// ImageReader resolves outbound image paths to bytes. Optional —
 	// defaults to osImageReader{}; tests inject a fake (#884).
 	ImageReader ImageReader
-
-	// TakeoverFn is the optional auto-takeover hook invoked on the first
-	// message of every chat. nil is treated as "return false".
-	//
-	// Deprecated: prefer DispatcherConfig.Capabilities (#374).
-	TakeoverFn func(ctx context.Context, chatKey, key string, opts sessionview.AgentOpts) bool
 
 	// StopCtx is the process-shutdown context the passthrough goroutine
 	// observes. Optional — nil falls back to context.Background() (#1320).
@@ -242,23 +226,9 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		router = cfg.Router
 	}
 	resolver := resolveOrFabricateKeyResolver(cfg)
-	// Capabilities precedence: cfg.Capabilities, else legacy *Fn closures
-	// wrapped in closureCapabilities, else NoopCapabilities{}.
 	caps := cfg.Capabilities
 	if caps == nil {
-		if cfg.TakeoverFn != nil || cfg.ReplyFooterFn != nil {
-			caps = closureCapabilities{
-				takeover:    cfg.TakeoverFn,
-				replyFooter: cfg.ReplyFooterFn,
-			}
-		} else {
-			caps = NoopCapabilities{}
-		}
-	}
-	if cfg.Capabilities != nil && (cfg.TakeoverFn != nil || cfg.ReplyFooterFn != nil) {
-		slog.Warn("dispatch: DispatcherConfig.Capabilities set; legacy TakeoverFn/ReplyFooterFn ignored",
-			"takeover_fn_set", cfg.TakeoverFn != nil,
-			"reply_footer_fn_set", cfg.ReplyFooterFn != nil)
+		caps = NoopCapabilities{}
 	}
 	// Collapse a typed-nil CronCommands (nil pointer boxed into the
 	// interface) so `d.scheduler != nil` gates behave (#1178).

@@ -2,19 +2,7 @@ package osutil
 
 import (
 	"path/filepath"
-	"strings"
 )
-
-// PathUnderRoot reports whether resolved is identical to rootResolved or a
-// path strictly under it (rootResolved + separator prefix). Both arguments
-// must already be symlink-resolved, cleaned absolute paths. Single shared
-// lexical containment check so a fix lands in one place (#1316).
-func PathUnderRoot(resolved, rootResolved string) bool {
-	if resolved == rootResolved {
-		return true
-	}
-	return strings.HasPrefix(resolved, rootResolved+string(filepath.Separator))
-}
 
 // ResolveWorkspaceUnderRoot is the shared EvalSymlinks → resolve-root →
 // containment check for cron and the HTTP server (#1316). resolveSymlinks is
@@ -47,7 +35,7 @@ func ResolveWorkspaceUnderRoot(
 		}
 		rootResolved = allowedRootResolved
 	}
-	// PathContainedInRoot (not the byte-wise PathUnderRoot): its inode-walk
+	// PathContainedInRoot (not a byte-wise prefix check): its inode-walk
 	// fallback admits a legitimate child on a case-insensitive fs. Both args
 	// are EvalSymlinks-resolved above, so symlink-escape rejection holds and
 	// the cron WorkDir boundary matches the server / dispatch / transcript gates.

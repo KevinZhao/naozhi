@@ -122,7 +122,7 @@ func TestPathContainedInRoot_SymlinkEscapeStaysRejected(t *testing.T) {
 	}
 }
 
-// TestSameFileAncestor_SymlinkMidPath pins R112714-SEC-2: sameFileAncestor
+// TestSameFileAncestor_SymlinkMidPath pins R112714-SEC-2: sameFileAncestorAt
 // must use os.Lstat (not os.Stat) when walking the ancestor chain so a
 // symlink planted at an intermediate path component cannot redirect the
 // inode comparison to an attacker-controlled directory.
@@ -168,14 +168,14 @@ func TestSameFileAncestor_SymlinkMidPath(t *testing.T) {
 	}
 
 	// A file path through the symlink component (allowed/link/x.jsonl).
-	// sameFileAncestor walks the LEXICAL parents of the input, not symlink
+	// sameFileAncestorAt walks the LEXICAL parents of the input, not symlink
 	// targets: it Lstats allowed/link/x.jsonl (no-exist → err), climbs to
 	// allowed/link (a symlink inode ≠ rootInfo), then to allowed/ (inode ==
 	// rootInfo → true). With Stat, 'allowed/link' would resolve to 'outside'
 	// and could match an attacker-planted inode; Lstat does not follow it.
 	symlinkChildPath := filepath.Join(linkPath, "x.jsonl")
-	if !sameFileAncestor(symlinkChildPath, allowed) {
-		t.Errorf("sameFileAncestor(%q, %q) = false; expected true because the "+
+	if _, ok := sameFileAncestorAt(symlinkChildPath, allowed); !ok {
+		t.Errorf("sameFileAncestorAt(%q, %q) = false; expected true because the "+
 			"lexical path is under 'allowed/' even though an intermediate "+
 			"component is a symlink pointing outside", symlinkChildPath, allowed)
 	}
@@ -185,8 +185,8 @@ func TestSameFileAncestor_SymlinkMidPath(t *testing.T) {
 	if err := os.WriteFile(outsideFile, []byte("y"), 0o600); err != nil {
 		t.Fatalf("write outside file: %v", err)
 	}
-	if sameFileAncestor(outsideFile, allowed) {
-		t.Errorf("sameFileAncestor(%q, %q) = true; path outside root must be rejected",
+	if _, ok := sameFileAncestorAt(outsideFile, allowed); ok {
+		t.Errorf("sameFileAncestorAt(%q, %q) = true; path outside root must be rejected",
 			outsideFile, allowed)
 	}
 }

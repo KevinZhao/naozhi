@@ -174,7 +174,7 @@ func DecodeJSONBody(r *http.Request, dst any) error {
 //
 // HTML escaping is disabled (see jsonEncPool), so the WriteJSON CLIENT-SIDE
 // CONTRACT applies; a consumer that renders the payload via innerHTML must
-// switch to MarshalEscaped (#821).
+// escape it itself (json.Marshal escapes HTML by default).
 func MarshalPooled(v any) ([]byte, error) {
 	e := getJSONEnc()
 	defer putJSONEnc(e)
@@ -183,26 +183,5 @@ func MarshalPooled(v any) ([]byte, error) {
 	}
 	out := make([]byte, e.buf.Len())
 	copy(out, e.buf.Bytes())
-	return out, nil
-}
-
-// MarshalEscaped is the HTML-safe counterpart to MarshalPooled for payloads
-// spliced into HTML templates, <script type="application/json">, or any
-// non-DOMPurify innerHTML path (#821). Intentionally a fresh encoder per call:
-// call sites are rare and off the hot path, and a second pool would invite
-// the same configuration-mutation hazard as jsonEncPool.
-func MarshalEscaped(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(true)
-	if err := enc.Encode(v); err != nil {
-		return nil, err
-	}
-	raw := buf.Bytes()
-	if n := len(raw); n > 0 && raw[n-1] == '\n' {
-		raw = raw[:n-1]
-	}
-	out := make([]byte, len(raw))
-	copy(out, raw)
 	return out, nil
 }

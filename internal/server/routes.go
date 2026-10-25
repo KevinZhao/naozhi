@@ -19,15 +19,10 @@ import (
 // contract documented there).
 func marshalPooled(v any) ([]byte, error) { return httputil.MarshalPooled(v) }
 
-// marshalEscaped forwards to httputil.MarshalEscaped — the HTML-safe variant
-// for payloads spliced into HTML templates / innerHTML render paths.
-func marshalEscaped(v any) ([]byte, error) { return httputil.MarshalEscaped(v) }
-
-// writeJSON / writeOK / decodeJSONBody / writeJSONStatus thin-wrap httputil;
+// writeJSON / decodeJSONBody / writeJSONStatus thin-wrap httputil;
 // rendering contract, cache-control headers and the DisallowUnknownFields
 // mass-assignment guard are documented on the underlying helpers.
 func writeJSON(w http.ResponseWriter, v any) { httputil.WriteJSON(w, v) }
-func writeOK(w http.ResponseWriter)          { httputil.WriteOK(w) }
 func decodeJSONBody(r *http.Request, dst any) error {
 	return httputil.DecodeJSONBody(r, dst)
 }

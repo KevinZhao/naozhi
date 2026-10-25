@@ -30,8 +30,7 @@ type Increment struct {
 	Basis   Basis // worst basis among models that grew; "" when none did
 }
 
-// Delta charges only positive growth per field (same rule as
-// runhistory.TurnCostDelta): raw <= prev means "no new spend or an
+// Delta charges only positive growth per field: raw <= prev means "no new spend or an
 // out-of-order earlier result", so the delta is 0 and the baseline keeps the
 // higher value. Models present in prev but absent from raw stay in the
 // baseline untouched. The returned baseline never aliases raw's maps.

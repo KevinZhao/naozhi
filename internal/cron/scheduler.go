@@ -295,9 +295,8 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		notifyDefault:       cfg.NotifyDefault,
 		allowedRoot:         cfg.AllowedRoot,
 		allowedRootResolved: allowedRootResolved,
-		// Must stay byte-for-byte identical to workDirResolveCacheKey(workDir,
-		// allowedRoot, allowedRootResolved) minus the leading workDir,
-		// otherwise cache lookups miss (#1225).
+		// Cache key = workDir + this suffix; `\x00` (invalid in paths) keeps
+		// distinct (workDir, root, resolved) triples from colliding (#1225).
 		workDirCacheKeySuffix: "\x00" + cfg.AllowedRoot + "\x00" + allowedRootResolved,
 		jitterMax:             cfg.JitterMax,
 		slowThreshold:         cfg.SlowThreshold,

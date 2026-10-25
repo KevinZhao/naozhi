@@ -21,7 +21,7 @@
 // The JS/Go internal-kind parity that file's first test checked is
 // structural: session_ident.js builds INTERNAL_EVENT_TYPES from
 // NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL, which contractjs generates from the
-// clievent kindTable column IsInternalEventType reads.
+// clievent kindTable Internal column.
 //
 // 跑法：cd test/e2e && npx playwright test auto_pageback.test.js --project=desktop-chrome
 

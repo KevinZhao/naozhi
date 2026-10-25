@@ -162,7 +162,7 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 	// the authoritative total. spent==0 also covers legacy stores without
 	// cost_spent and the pre-first-turn window after resume, so fall back to
 	// sessCost there; a zero-spend session's sessCost is ~0 too, so the
-	// ambiguity is benign. See runhistory.TurnCostDelta and finishRun.
+	// ambiguity is benign. See costledger.Delta and finishRun.
 	spent := loadTotalCost(&s.costSpent)
 	if spent <= 0 {
 		spent = sessCost
@@ -313,14 +313,6 @@ func (s *ManagedSession) hasInjectedHistory() bool {
 	s.historyMu.RLock()
 	defer s.historyMu.RUnlock()
 	return len(s.persistedHistory) > 0
-}
-
-// recountPersistedUserTurnsLocked recomputes persistedUserTurns from the
-// current persistedHistory slice. Caller MUST hold s.historyMu (read or
-// write — the scan only reads the slice, the result is stored atomically)
-// so the proc==nil snapshot branch can read the count lock-free (#1644).
-func (s *ManagedSession) recountPersistedUserTurnsLocked() {
-	s.persistedUserTurns.Store(countUserTurns(s.persistedHistory))
 }
 
 // EventEntries returns the event log entries for this session.

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // TestHandleCdCommand_WorkspacePersistedAfterReset is a regression guard for
@@ -38,7 +38,7 @@ func TestHandleCdCommand_WorkspacePersistedAfterReset(t *testing.T) {
 	// chat so the next spawned session uses tmpDir. If ResetChat runs AFTER
 	// SetWorkspace it silently deletes the override, and Workspace returns
 	// "" (the router default) instead of tmpDir.
-	chatKey := session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
+	chatKey := sessionkey.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
 	got := d.router.Workspace(chatKey)
 	if got != tmpDir {
 		t.Errorf("router.Workspace(%q) = %q, want %q — SetWorkspace override was deleted by ResetChat (R20260607-CR-020)",
@@ -69,7 +69,7 @@ func TestHandleCdCommand_WorkspaceReplacesExistingOverride(t *testing.T) {
 	msg2 := incomingMsg("/cd " + dir2)
 	d.handleCdCommand(context.Background(), msg2, "/cd "+dir2, slog.Default())
 
-	chatKey := session.ChatKey(msg1.Platform, msg1.ChatType, msg1.ChatID)
+	chatKey := sessionkey.ChatKey(msg1.Platform, msg1.ChatType, msg1.ChatID)
 	got := d.router.Workspace(chatKey)
 	if got != dir2 {
 		t.Errorf("second /cd: router.Workspace(%q) = %q, want %q", chatKey, got, dir2)

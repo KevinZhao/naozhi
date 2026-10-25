@@ -15,11 +15,6 @@ import (
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
-// ScratchKeyPrefix re-exports sessionkey.ScratchKeyPrefix.
-//
-// Deprecated: use sessionkey.ScratchKeyPrefix.
-const ScratchKeyPrefix = sessionkey.ScratchKeyPrefix
-
 // MaxScratchQuoteBytes caps the quoted context passed to --append-system-prompt;
 // 8 KiB keeps the spawn arg list from bloating NDJSON frames on ACP protocols
 // that mirror CLI args into control messages.
@@ -272,7 +267,7 @@ func (p *ScratchPool) Open(opts OpenOptions) (*Scratch, error) {
 	// Key stays 4 segments so every {platform}:{chatType}:{id}:{agentID} parser
 	// keeps working; "general" is a fixed chat-ID filler and the agent slot
 	// records the source agent for telemetry + promote.
-	key := ScratchKeyPrefix + id + ":general:" + sanitizeKeyComponent(agentID)
+	key := sessionkey.ScratchKeyPrefix + id + ":general:" + sanitizeKeyComponent(agentID)
 
 	// Quote takes priority; the context block gets what is left of the budget.
 	contextBudget := MaxScratchContextBytes - len(clean)
@@ -436,11 +431,6 @@ func (p *ScratchPool) ForceExpireForTest(id string, t time.Time) {
 
 // SweepForTest runs one eviction pass synchronously.
 func (p *ScratchPool) SweepForTest(now time.Time) { p.sweep(now) }
-
-// IsScratchKey reports whether a session key belongs to the scratch pool.
-//
-// Deprecated: use sessionkey.IsScratchKey.
-func IsScratchKey(key string) bool { return sessionkey.IsScratchKey(key) }
 
 // SanitizeQuote strips control characters and invisible Unicode formatting
 // codepoints from s, truncating at MaxScratchQuoteBytes on a valid UTF-8
