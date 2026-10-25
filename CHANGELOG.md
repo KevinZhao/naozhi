@@ -32,7 +32,7 @@
 
 ### Changed
 
-- **BREAKING：删除 config schema 迁移链与 `naozhi config migrate` 子命令**。`Load` 不再在内存里改写 schema v1 旧键，`naozhi config migrate [-write]` 已移除（现在是 usage 错误，退出 2），也不再生成 `<config>.pre-migrate-v<N>` 备份。下列旧键仍能加载、不会让服务起不来，但**不再生效**，只报一条 `config-deprecated` WARN（`config check` 退出 1），升级前请手动改名：
+- **BREAKING：删除 config schema 迁移链与 `naozhi config migrate` 子命令**。`Load` 不再在内存里改写 schema v1 旧键，`naozhi config migrate [-write]` 已移除（现在是 usage 错误，退出 2），也不再生成 `<config>.pre-migrate-v<N>` 备份。下列旧键仍能加载、不会让服务起不来，但**不再生效**，只报一条 WARN（`config-deprecated`；`agents[].args` 里的 flag 报的是已有的 `argv-denylist`，并指向 `agents[<id>].system_prompt`；`config check` 退出 1），升级前请手动改名：
   - `nodes:` → `workspaces:`（不改的话远程节点不会被配置）
   - `session.workspace` → `session.cwd`（不改则回落到默认 cwd）
   - `agents[].args` 里的 `--append-system-prompt` → `agents[<id>].system_prompt`（不改则该 agent 没有 system prompt，同时 `system_prompt` 与 args 并存不再被拒绝）

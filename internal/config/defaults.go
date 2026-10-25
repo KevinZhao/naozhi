@@ -12,9 +12,9 @@ import (
 
 // CurrentSchemaVersion is the config schema this binary understands; a higher
 // one is rejected at load. There is no migration chain: the v1 spellings
-// (nodes, session.workspace, session.auto_chain, --append-system-prompt inside
-// agents[].args) are not read and only draw a config-deprecated WARN
-// (findDeprecatedKeys).
+// (nodes, session.workspace, session.auto_chain) are not read and only draw a
+// config-deprecated WARN (findDeprecatedKeys); a v1 --append-system-prompt
+// inside agents[].args draws the argv-denylist WARN (validateArgvStrings).
 const CurrentSchemaVersion = 2
 
 const (

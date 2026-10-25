@@ -235,6 +235,10 @@ func validatePlannerPrompt(field, prompt string) error {
 	return nil
 }
 
+// appendSystemPromptFlag is the denied flag schema v1 agents[].args used for
+// what is now agents[<id>].system_prompt.
+const appendSystemPromptFlag = "--append-system-prompt"
+
 // validateArgvStrings rejects empty elements (YAML "- " typo), NUL and control
 // bytes in argv. It WARNS (not errors) on flags cli.BuildArgs would strip as
 // denied, naming the field so the operator can move the value to its dedicated
@@ -250,9 +254,14 @@ func validateArgvStrings(field string, args []string) error {
 			}
 		}
 		if cliinfo.IsDeniedExtraFlag(a) {
+			hint := "the dedicated config field"
+			if agent, ok := strings.CutSuffix(field, ".args"); ok && strings.HasPrefix(agent, "agents[") &&
+				(a == appendSystemPromptFlag || strings.HasPrefix(a, appendSystemPromptFlag+"=")) {
+				hint = agent + ".system_prompt"
+			}
 			spawndiag.Emit("config", []spawndiag.Diag{{
 				Layer: "argv-denylist", Key: a, Action: "dropped",
-				Reason: fmt.Sprintf("%s[%d]: the spawn pipeline strips this flag; it will NOT reach the CLI — use the dedicated config field instead", field, i),
+				Reason: fmt.Sprintf("%s[%d]: the spawn pipeline strips this flag; it will NOT reach the CLI — use %s instead", field, i, hint),
 			}})
 		}
 	}

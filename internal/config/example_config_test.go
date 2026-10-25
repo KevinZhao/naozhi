@@ -32,9 +32,9 @@ func readExampleRoot(t *testing.T) *yaml.Node {
 }
 
 // TestExampleConfig_NoDeprecatedKeys: an operator copies the template, so any
-// schema v1 spelling left in it (`nodes:`, `session.workspace`, the
-// agents[].args --append-system-prompt) is a config-deprecated WARN on first
-// boot and a setting that silently does nothing.
+// schema v1 key spelling left in it (`nodes:`, `session.workspace`,
+// `session.auto_chain`) is a config-deprecated WARN on first boot and a
+// setting that silently does nothing.
 func TestExampleConfig_NoDeprecatedKeys(t *testing.T) {
 	doc := &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{readExampleRoot(t)}}
 	for _, d := range findDeprecatedKeys(doc) {

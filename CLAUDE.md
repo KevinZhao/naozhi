@@ -330,7 +330,7 @@ Each phase emits a `phase=` timing log line so a hung subsystem is attributable 
 - **transcribe**: `enabled`, `region`, `language` (voice message STT). There is no `provider` key — the AWS Transcribe backend is the only implementation and is selected implicitly
 - **log**: `level` (debug/info/warn/error)
 
-Config describes schema v2 only; there is no migration chain. The v1 keys (`nodes`, `session.workspace`, `session.auto_chain`, `--append-system-prompt` in `agents[].args`) are not read: `Load` still succeeds and `findDeprecatedKeys` (`internal/config/unknown_keys.go`) reports each as a `config-deprecated` diag naming the v2 replacement (not also as `config-unknown`). A `schema_version` newer than the binary is rejected. `cfg.Nodes` is the Go-side view `Config.Normalize` mirrors from `Workspaces`.
+Config describes schema v2 only; there is no migration chain. The v1 keys (`nodes`, `session.workspace`, `session.auto_chain`) are not read: `Load` still succeeds and `findDeprecatedKeys` (`internal/config/unknown_keys.go`) reports each as a `config-deprecated` diag naming the v2 replacement (not also as `config-unknown`); a v1 `--append-system-prompt` in `agents[].args` draws one `argv-denylist` diag (`validateArgvStrings`) naming `agents[<id>].system_prompt`. A `schema_version` newer than the binary is rejected. `cfg.Nodes` is the Go-side view `Config.Normalize` mirrors from `Workspaces`.
 
 ## Concurrency Patterns
 

@@ -49,7 +49,8 @@
 #       plus /health, auth and config drift when an instance is reachable.
 #
 # Removed schema v1 spellings. They are NOT read: Load still starts but logs a
-# config-deprecated WARN, and the setting has no effect until renamed by hand:
+# WARN (config-deprecated; argv-denylist for the agents[].args flag), and the
+# setting has no effect until renamed by hand:
 #   - `nodes:`                                  → `workspaces:`
 #   - `session.workspace`                       → `session.cwd`
 #   - `--append-system-prompt` in agents[].args → `agents[].system_prompt`

@@ -36,7 +36,6 @@ import (
 	"slices"
 	"sort"
 	"strconv"
-	"strings"
 
 	"github.com/naozhi/naozhi/internal/spawndiag"
 	"gopkg.in/yaml.v3"
@@ -201,14 +200,12 @@ func reportUnknownKeys(expanded []byte, deprecated map[string]bool) {
 	spawndiag.Emit("config", diags)
 }
 
-// appendSystemPromptFlag is the agents[].args flag schema v1 configs used for
-// what is now agents[<id>].system_prompt.
-const appendSystemPromptFlag = "--append-system-prompt"
-
-// findDeprecatedKeys lists the schema v1 spellings (nodes, session.workspace,
-// session.auto_chain, --append-system-prompt in agents[].args) as
-// config-deprecated diags naming the v2 replacement. None of them has any
-// effect any more: Load no longer rewrites them.
+// findDeprecatedKeys lists the schema v1 key spellings (nodes,
+// session.workspace, session.auto_chain) as config-deprecated diags naming the
+// v2 replacement. None of them has any effect any more: Load no longer
+// rewrites them. The v1 `--append-system-prompt` inside agents[].args is not
+// listed here: validateArgvStrings already warns about it (argv-denylist) and
+// names agents[<id>].system_prompt.
 func findDeprecatedKeys(doc *yaml.Node) []spawndiag.Diag {
 	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
 		return nil
@@ -227,21 +224,6 @@ func findDeprecatedKeys(doc *yaml.Node) []spawndiag.Diag {
 		}
 		if hasYAMLKey(session, "auto_chain") {
 			add("session.auto_chain", "'session.auto_chain' has no effect; remove this block")
-		}
-	}
-	if agents := yamlChildMap(root, "agents"); agents != nil {
-		for i := 0; i+1 < len(agents.Content); i += 2 {
-			args := agents.Content[i+1]
-			if args = yamlChild(args, "args"); args == nil || args.Kind != yaml.SequenceNode {
-				continue
-			}
-			for _, a := range args.Content {
-				if a.Value == appendSystemPromptFlag || strings.HasPrefix(a.Value, appendSystemPromptFlag+"=") {
-					field := fmt.Sprintf("agents[%s]", agents.Content[i].Value)
-					add(field+".args", fmt.Sprintf("%s under args is stripped at spawn, so this agent has no system prompt; move its text to %s.system_prompt", appendSystemPromptFlag, field))
-					break
-				}
-			}
 		}
 	}
 	return diags

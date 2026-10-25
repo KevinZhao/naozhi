@@ -270,8 +270,10 @@ func TestUnknownKeysNeverFatal(t *testing.T) {
 
 // TestDeprecatedKeysReported: the schema v1 spellings are no longer rewritten,
 // so each must still load (a failing Load would take an upgraded service down)
-// with exactly one config-deprecated diag naming the replacement, no duplicate
-// config-unknown one, and no effect on the decoded config.
+// with exactly one diag naming the replacement, no duplicate config-unknown
+// one, and no effect on the decoded config. The v1 --append-system-prompt in
+// agents[].args gets a single argv-denylist diag, not a second
+// config-deprecated one.
 func TestDeprecatedKeysReported(t *testing.T) {
 	diags, cfg, err := collectLoadDiags(t, writeCfg(t, `
 nodes:
@@ -288,11 +290,18 @@ agents:
 		t.Fatalf("Load with v1 keys must not fail: %v", err)
 	}
 	want := map[string]string{
-		"nodes":                 "workspaces",
-		"session.auto_chain":    "remove",
-		"agents[reviewer].args": "agents[reviewer].system_prompt",
+		"nodes":              "workspaces",
+		"session.auto_chain": "remove",
 	}
+	flagDiags := 0
 	for _, d := range diags {
+		if strings.HasPrefix(d.Key, "--append-system-prompt") || strings.Contains(d.Key, "agents[reviewer]") {
+			flagDiags++
+			if d.Layer != "argv-denylist" || !strings.Contains(d.Reason, "agents[reviewer].system_prompt") {
+				t.Errorf("--append-system-prompt diag %+v: want argv-denylist naming agents[reviewer].system_prompt", d)
+			}
+			continue
+		}
 		switch d.Layer {
 		case "config-unknown":
 			t.Errorf("unexpected config-unknown diag %+v", d)
@@ -310,6 +319,9 @@ agents:
 	}
 	for k := range want {
 		t.Errorf("no config-deprecated diag for %s", k)
+	}
+	if flagDiags != 1 {
+		t.Errorf("--append-system-prompt in agents[].args drew %d diags, want exactly 1", flagDiags)
 	}
 	if len(cfg.Nodes) != 0 {
 		t.Errorf("nodes must not be read any more, got %v", cfg.Nodes)
