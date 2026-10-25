@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestTriggerNow_RejectsAfterStop pins R20260610-085718-LB-7 (#2012):
@@ -55,4 +56,18 @@ func TestTriggerNow_RejectsAfterStop(t *testing.T) {
 	case <-timeoutAfter(t):
 		t.Fatal("triggerWG non-zero after TriggerNow-post-Stop; the stopped gate added a slot it must not have")
 	}
+}
+
+// timeoutAfter returns a channel that fires if Wait does not complete in a
+// reasonable amount of time.
+func timeoutAfter(t *testing.T) <-chan struct{} {
+	t.Helper()
+	ch := make(chan struct{})
+	go func() {
+		timer := time.NewTimer(3 * time.Second)
+		defer timer.Stop()
+		<-timer.C
+		close(ch)
+	}()
+	return ch
 }
