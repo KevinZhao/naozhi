@@ -6,9 +6,8 @@ import (
 	"testing"
 )
 
-// TestRemoteHistoryFrames_MarkOpeningPage is the node-side half of the
-// ServerMsg.Initial contract (the primary-side half lives in
-// internal/server/static_subscription_recovery_contract_test.go).
+// TestRemoteHistoryFrames_MarkOpeningPage pins the node side of the
+// ServerMsg.Initial contract.
 //
 // The dashboard treats Initial as authoritative when deciding whether a history
 // frame replaces the whole events pane. That makes these two files the exact

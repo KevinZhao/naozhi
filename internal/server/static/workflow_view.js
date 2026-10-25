@@ -1,4 +1,3 @@
-// @ts-check
 // workflow_view.js — the workflow panel (docs/rfc/workflow-dashboard.md
 // §7.1-7.5, §7.7): the workflow_set / workflow_state handlers, which hand each
 // frame to workflow_state.js's store as it came, the fetches that store asks
