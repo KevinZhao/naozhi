@@ -246,8 +246,7 @@ function defaultGitStates() {
  *   workflow: WireView with every row in agents, result?, logs?, logs_truncated?, result_unavailable?});
  *   the route applies rows=none / since=&epoch= to it and 404s task ids not listed. A test may edit
  *   the object in place; each request reads it then.
- * @param {number} [overrides.workflowDelayMs] - Hold GET /api/sessions/workflow answers this long
- *   (setWorkflowDelayMs changes it mid-test).
+ * @param {number} [overrides.workflowDelayMs] - Hold GET /api/sessions/workflow answers this long.
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
  *   (timezone / timezone_abbr / timezone_label ...). recent_runs_cap defaults to 5 like the backend.
@@ -300,7 +299,7 @@ function startMockServer(overrides = {}) {
   const cronListMeta = Object.assign({ recent_runs_cap: 5 }, overrides.cronListMeta || {});
   const gitStates = defaultGitStates();
   const workflows = overrides.workflows || {};
-  let workflowDelayMs = overrides.workflowDelayMs || 0;
+  const workflowDelayMs = overrides.workflowDelayMs || 0;
   // Every GET /api/sessions/workflow, as its query parameters.
   const workflowCalls = [];
   const requireAuth = overrides.requireAuth || false;
@@ -961,18 +960,6 @@ function startMockServer(overrides = {}) {
         get favoriteCalls() { return favoriteCalls; },
         get wsConnections() { return wsConnections; },
         get workflowCalls() { return workflowCalls; },
-        setWorkflowDelayMs(ms) { workflowDelayMs = ms; },
-        // Replaces a session's workflows[] (sessionview.SessionSnapshot's
-        // Summaries). bump advances stats.version, as the server's workflow
-        // board does for every change it reports; false changes the payload
-        // under an unchanged version.
-        setSessionWorkflows(key, workflows, bump = true) {
-          const s = (sessionsData.sessions || []).find(x => x.key === key);
-          if (s) s.workflows = workflows;
-          if (bump && sessionsData.stats && typeof sessionsData.stats.version === 'number') {
-            sessionsData.stats.version++;
-          }
-        },
         resetCalls() { sendCalls = []; bindCalls = []; loginCalls = []; favoriteCalls = []; },
       });
     }));

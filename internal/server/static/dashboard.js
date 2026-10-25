@@ -1693,5 +1693,6 @@ registerActions({
   ...workflowActions,
 });
 
-// Read by the e2e suite through test/e2e/e2e-shim.js.
+// maybeShowOnboarding, selectSession and toggleHistory are read by the e2e
+// suite through test/e2e/e2e-shim.js; the other names have no outside importer.
 export { maybeShowOnboarding, renderMainShell, selectSession, sessionCardKey, toggleHistory, updateHeaderCLI };

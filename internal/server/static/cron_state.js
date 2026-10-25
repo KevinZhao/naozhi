@@ -195,7 +195,7 @@ export async function fetchCronJobs() {
     }
     const freshJobs = keepRefetchedPrompts(cronStore.jobs, data.jobs || []);
     // Stale-clobber 保护：这个响应可能生成于一个 WS run_started / run_ended
-    // 帧之前、却落地于其后（e2e 用 compactCronListDelayMs 稳定复现）。整体替换
+    // 帧之前、却落地于其后。整体替换
     // 会让它冲掉更新的乐观补丁，逐行按 run 身份合并，见 reconcileCurrentRun。
     for (const nj of freshJobs) {
       const prev = nj && nj.id && (Array.isArray(cronStore.jobs) ? cronStore.jobs : []).find(o => o && o.id === nj.id);

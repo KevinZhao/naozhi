@@ -2,7 +2,7 @@
 
 > **CLI 版本**: claude 2.1.126 (opus-4-6 via Bedrock)
 > **日期**: 2026-05-06
-> **测试目录**: `test/e2e/passthrough/`
+> **测试目录**: `test/e2e/passthrough/`（下文各节的 `v*.py` 脚本已于 #3735 删除，见 git 历史 `d9b1c86d`）
 > **原始 ndjson**: `/tmp/v*.ndjson`
 
 本文档记录 RFC §7 的 9 个验证点（V1-V9）的实测结果，每个场景都有脚本 + 原始日志可复现。
