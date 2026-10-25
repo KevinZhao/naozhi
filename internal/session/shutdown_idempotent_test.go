@@ -15,9 +15,8 @@ import (
 // as Shutdown's body, and the comment "intentionally left running".
 //
 // The first two are the same invariant — Shutdown runs its body once — and that
-// is observable: call it repeatedly and count. The third is a comment check,
-// which CLAUDE.md's own rule rules out ("do not add new lints that validate
-// comments", and a source-scanning test is the same tax with a different label).
+// is observable: call it repeatedly and count. The third is a comment check; a
+// test that validates comment content is a maintenance tax, not a guard.
 // The comment is worth keeping, but a test is not what keeps it: the godoc on
 // Shutdown and the reasoning in this file's header are.
 //
