@@ -950,7 +950,7 @@ Manager 必须在 Router 之前停。v2 hard cancel + wg 保证 Manager 返回�
 | 7 | `config.go`：`sysession` 配置节 + Validate | +60 |
 | 8 | `cmd/naozhi/main.go`：构造 Manager、注入 router、Start/Stop 顺序 | +30 |
 | 9 | `dashboard_session.go:407`：过滤位泛化到 `IsReservedNamespace` | +1 |
-| 10 | `/api/system/daemons` (GET) + `/api/system/labels/clear-origin` (POST，已删除) + dashboard "System" 抽屉（只读 + 恢复自动命名按钮） | +250 |
+| 10 | `/api/system/daemons` (GET) + `/api/system/labels/clear-origin` (POST，已删除) + dashboard "System" 抽屉（只读；恢复自动命名按钮未实现，见 §9.3） | +250 |
 | 11 | WS `daemon_run_started` / `daemon_run_ended` 广播（不含 error_msg） | +60 |
 
 合计 ≈ 1.25K LOC，含测试。

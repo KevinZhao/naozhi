@@ -61,9 +61,6 @@
 .cron-sort-select:focus{outline:none;border-color:var(--nz-rust);color:var(--nz-text)}
 .cron-filter-empty{padding:24px 16px;text-align:center;color:var(--nz-text-dim);font-size:var(--nz-fs-sm)}
 .cron-filter-empty .cfe-hint{display:block;margin-top:6px;color:var(--nz-text-faint);font-size:var(--nz-fs-xs)}
-.cron-preview-hint{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);margin-top:4px;min-height:16px}
-.cron-preview-hint.ok{color:var(--nz-green)}
-.cron-preview-hint.err{color:var(--nz-red)}
 .cc-notify{font-size:var(--nz-fs-xs);padding:1px 6px;border-radius:var(--nz-radius-xs)}
 .cc-notify.on{background:rgba(46,160,67,.15);color:var(--nz-green)}
 .cc-notify.off{background:rgba(139,148,158,.15);color:var(--nz-text-mute)}
@@ -708,8 +705,6 @@
 .cron-notify-target input{flex:1;padding:6px 10px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text);font-size:var(--nz-fs-sm);outline:none;min-width:0}
 .cron-notify-target input:focus{border-color:var(--nz-rust)}
 .cron-notify-target input:first-child{flex:0 0 90px}
-/* Tighten freq preview in the new grid */
-.cron-modal .freq-preview{margin-top:12px}
 
 /* Mobile: tighten padding, sheet + textarea grow-on-focus. 单列布局本身
  * 已经对小屏友好，不用再重复覆盖 grid 规则。 */
