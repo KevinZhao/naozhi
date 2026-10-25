@@ -15,9 +15,9 @@ go test -run TestCandidatePaths ./internal/cli/...   # run a single test
 bin/naozhi --config config.yaml                      # run locally
 ```
 
-Ratchets only go down: the baselines in
-`tools/lint-server-handlers/exemptions.yaml` fail CI when a count drops below
-them, so lower them in the same PR. To raise one, edit it in the PR that needs it.
+Ratchets only go down: the caps pinned in ratchet tests (e.g.
+`generatedOnclickCap`) fail CI when a count drops below them, so lower them in
+the same PR. To raise one, edit it in the PR that needs it.
 
 `config.yaml` is gitignored (environment-specific). Use `config.example.yaml`
 as the template: `cp config.example.yaml config.yaml` then fill in real values.

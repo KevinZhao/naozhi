@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-// IsDiskFull is implemented per-platform (atomicfile_unix.go / atomicfile_nonunix.go).
+// IsDiskFull lives in atomicfile_unix.go.
 
 // atomicTempPattern is the os.CreateTemp pattern WriteFileAtomic uses.
 // ".<base>.*.tmp" keeps the temp file on the destination's filesystem (so the

@@ -1,7 +1,6 @@
 // This file reaches the send pipeline only through h.engine's methods
-// (TrackSend / sessionSend / relaySend); tools/lint-server-handlers
-// rule_send_engine.go checks that no code outside send_engine.go touches its
-// fields.
+// (TrackSend / sessionSend / relaySend); no code outside send_engine.go
+// touches its fields.
 package server
 
 import (

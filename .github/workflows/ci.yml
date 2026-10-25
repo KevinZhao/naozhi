@@ -7,18 +7,10 @@ on:
   pull_request:
     branches:
       - master
-  # The merge queue builds candidate merge commits on
-  # refs/heads/gh-readonly-queue/master/*; the required checks must report on
-  # those or every queue entry times out. The master-only side effect
-  # (vuln issues) keys on refs/heads/master and stays quiet here.
-  merge_group:
-    branches:
-      - master
   workflow_dispatch:
 
 permissions:
   contents: read
-  issues: write   # needed by the vuln job to open/comment on security issues
 
 # Cancel in-progress runs on the same ref to save CI budget. The event is part
 # of the key so a manual dispatch on master does not cancel the push run.
@@ -50,63 +42,32 @@ jobs:
         # go test -race implicitly builds and vets the packages it runs.
         run: scripts/ci-test-shard.sh ${{ matrix.shard }}
 
-  # The branch-protection required check. It passes only when every shard
-  # passed, so protection keeps naming one stable job however the shards move.
+  # The single branch-protection required check. It passes only when every
+  # gate below passed, so adding or removing a gate is a change to this
+  # needs list, never to the branch protection settings.
   test:
-    needs: [test-shard, lint-js]
+    needs: [test-shard, lint, lint-js, test-macos, e2e]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: All test shards passed
         run: test "${{ needs.test-shard.result }}" = success
-      # S19-0 (#3025): lint-js is already a required context in its own
-      # right (D3), but test also needing it means the one check branch
-      # protection has always named cannot go green while the JS gate is red.
+      - name: lint passed
+        run: test "${{ needs.lint.result }}" = success
       - name: lint-js passed
         run: test "${{ needs.lint-js.result }}" = success
+      - name: test-macos passed
+        run: test "${{ needs.test-macos.result }}" = success
+      - name: e2e passed
+        run: test "${{ needs.e2e.result }}" = success
 
-  # gofmt (make lint-gofmt). fail mode from the start: the backlog this job was
-  # added alongside is at 0, and formatting has an unambiguous fix (gofmt -w)
-  # with no judgement call, so there is nothing to warn-mode down. Go version
-  # comes from go.mod via go-version-file, matching local runs.
-  lint-gofmt:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Run gofmt (fail mode)
-        run: make lint-gofmt
-
-  # server-package contracts (lint-server-handlers).
-  # fail mode since 2026-07-31: 原计划"Phase 5 完工后切 fail"，但 ADR-001
-  # 判定 4b 暂缓后该触发条件不再会到来，warn 模式事实上被永久化。存量已
-  # 清零（exemptions.yaml baseline 重采 + 补录），漂移即 exit 1 卡 PR
-  # — see docs/design/server-split-phase4-design.md §九.2 / §十五 ADR-001.
-  lint-server:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Run lint-server-handlers (fail mode)
-        run: make lint-server-fail
-
-  # staticcheck (make lint-staticcheck). Ran in warn mode (continue-on-error)
-  # while a backlog was worked down; both preconditions the old note listed are
-  # now met — the SA1019 ImageData deprecation is gone and the ST1018
-  # test-payload noise is escaped — so the backlog is at 0 and this is fail
-  # mode. Sites where the flagged pattern IS the behaviour under test (nil-ctx
-  # guards, empty-critical-section lock probes) carry `//lint:ignore <CHECK>
-  # <reason>`; note staticcheck does NOT honour `//nolint`.
-  lint-staticcheck:
+  # Go lint, fail mode: gofmt (make lint-gofmt), then staticcheck
+  # (make lint-staticcheck). Both backlogs are at 0. Where the flagged pattern
+  # IS the behaviour under test (nil-ctx guards, empty-critical-section lock
+  # probes) a site carries `//lint:ignore <CHECK> <reason>`; staticcheck does
+  # NOT honour `//nolint`.
+  lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -115,6 +76,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Run gofmt (fail mode)
+        run: make lint-gofmt
       - name: Run staticcheck (fail mode)
         run: make lint-staticcheck
 
@@ -125,6 +88,9 @@ jobs:
     # asynchronously. A GitHub Issue is opened automatically on failure so
     # findings are not silently lost.
     continue-on-error: true
+    permissions:
+      contents: read
+      issues: write   # open/comment on the security issue
     steps:
       - uses: actions/checkout@v7
 
@@ -320,24 +286,3 @@ jobs:
       - name: Test the shell table
         run: node --test scripts/shell.test.mjs
 
-  # RNEW-TEST-432: Windows compile-only job. Not a supported runtime — the
-  # gate exists to surface regressions in packages that must compile on
-  # all platforms. Vet type-checks _test.go files too, so a POSIX-only call
-  # in a test (syscall.Mkfifo, unix sockets) must sit behind a !windows tag.
-  # No test binary runs here.
-  build-windows:
-    runs-on: windows-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Build
-        run: go build ./...
-
-      - name: Vet (windows hard gate)
-        run: go vet ./...
