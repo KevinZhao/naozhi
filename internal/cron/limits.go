@@ -3,6 +3,7 @@ package cron
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cron/runstore"
@@ -42,6 +43,20 @@ func checkJobField(name, v string, maxLen int) error {
 	return nil
 }
 
+// validateTitle gates Job.Title on the write paths: at most MaxCronTitleLen
+// runes, single line, and the same UTF-8 + containsCronUnsafe policy loadJobs
+// applies on read, so a title accepted here is never dropped at the next boot.
+// Empty is allowed (the UI falls back to the prompt's first line).
+func validateTitle(title string) error {
+	if n := utf8.RuneCountInString(title); n > MaxCronTitleLen {
+		return fmt.Errorf("cron: title too long: %d runes > %d cap", n, MaxCronTitleLen)
+	}
+	if !utf8.ValidString(title) || strings.ContainsAny(title, "\n\r") || containsCronUnsafe(title) {
+		return fmt.Errorf("cron: title contains invalid characters")
+	}
+	return nil
+}
+
 // MaxWorkDirLen caps Job.WorkDir on the AddJob write path. 4 KiB matches the
 // de-facto Linux PATH_MAX; longer values cannot reach a real filesystem.
 // loadJobs applies the same cap on the read path.
@@ -63,9 +78,8 @@ const MaxNotifyTargetLen = 256
 // paused-with-empty-prompt jobs); only values over the cap or carrying
 // log-injection / non-UTF-8 bytes are rejected.
 func validateJobFields(j *Job) error {
-	// Title 长度校验在 scheduler 层兜底，避免绕过 dashboard handler 把超长字符串持久化。
-	if n := utf8.RuneCountInString(j.Title); n > MaxCronTitleLen {
-		return fmt.Errorf("title too long: %d runes > %d cap", n, MaxCronTitleLen)
+	if err := validateTitle(j.Title); err != nil {
+		return err
 	}
 	// Empty prompts are permitted: the dashboard creates paused jobs to be filled
 	// in via SetJobPrompt.

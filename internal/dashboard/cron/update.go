@@ -77,6 +77,11 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Cap work_dir before validateWorkspace echoes it into Debug logs.
+	if req.WorkDir != nil && len(*req.WorkDir) > cronpkg.MaxWorkDirLen {
+		writeCronErr(w, http.StatusBadRequest, "work_dir too long")
+		return
+	}
 	// A cleared WorkDir falls back to the router default; 403 matches
 	// HandleCreate for boundary violations.
 	if req.WorkDir != nil && *req.WorkDir != "" {

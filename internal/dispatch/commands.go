@@ -385,8 +385,8 @@ func (d *Dispatcher) handleCronAdd(msg platform.IncomingMessage, parts []string,
 	})
 	if err != nil {
 		// Never echo err.Error(): it leaks the normalized schedule and parser
-		// internals. Log (sanitized — ParseCronAdd only gates ASCII C0/DEL) for
-		// operators, reply by error class.
+		// internals. Log sanitized (ParseCronAdd does no character filtering;
+		// Scheduler.AddJob owns that policy) for operators, reply by error class.
 		log.Warn("cron AddJob rejected", "err", err,
 			"schedule", osutil.SanitizeForLog(schedule, 256))
 		reply(cronAddErrReply(d.scheduler.ClassifyError(err)))

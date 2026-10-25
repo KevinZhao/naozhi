@@ -449,3 +449,42 @@ func TestFormatCronNotice_StripsBidi(t *testing.T) {
 		})
 	}
 }
+
+// TestTitle_WritePathMatchesReadPath pins that AddJob / UpdateJob reject every
+// title loadJobs would drop at boot (control bytes, C1, bidi, LS/PS, invalid
+// UTF-8) plus newlines, and that an accepted title survives a reload.
+func TestTitle_WritePathMatchesReadPath(t *testing.T) {
+	t.Parallel()
+	storePath := t.TempDir() + "/cron.json"
+	s := NewScheduler(SchedulerConfig{StorePath: storePath, MaxJobs: 5}, SchedulerDeps{Router: &jitterStubRouter{}})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { s.Stop() })
+
+	bad := []string{"a\x01b", "a\x7fb", "a\u0085b", "a\u009bb", "a\u202eb", "a\u2066b", "a\u2028b", "a\nb", "a\rb", "a\xffb"}
+	for _, title := range bad {
+		if err := s.AddJob(&Job{Schedule: "@every 30m", Prompt: "p", Title: title}); err == nil {
+			t.Errorf("AddJob accepted title %q", title)
+		}
+	}
+
+	good := &Job{Schedule: "@every 30m", Prompt: "p", Title: "日报\t汇总"}
+	if err := s.AddJob(good); err != nil {
+		t.Fatalf("AddJob clean title: %v", err)
+	}
+	for _, title := range bad {
+		title := title
+		if _, err := s.UpdateJob(good.ID, JobUpdate{Title: &title}); err == nil {
+			t.Errorf("UpdateJob accepted title %q", title)
+		}
+	}
+
+	loaded, err := loadJobs(storePath)
+	if err != nil {
+		t.Fatalf("loadJobs: %v", err)
+	}
+	if got, ok := loaded[good.ID]; !ok || got.Title != good.Title {
+		t.Fatalf("reloaded job = %+v (present=%v), want title %q", got, ok, good.Title)
+	}
+}

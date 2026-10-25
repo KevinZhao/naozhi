@@ -31,16 +31,20 @@ func writeCronErr(w http.ResponseWriter, status int, msg string) {
 }
 
 // writeAddUpdateRejection answers an AddJob / UpdateJob rejection that no
-// handler-specific branch claimed. A full job table and a too-frequent
-// schedule get their own status and message; anything else is a 400 with
-// fallback, never err.Error() (parser details leak field offsets). The two
-// messages are keys of static/utilities.js API_ERROR_HEADS.
+// handler-specific branch claimed. A full job table, a too-frequent schedule,
+// a bad prompt and a bad schedule get their own message; anything else is a
+// 400 with fallback, never err.Error() (parser details leak field offsets).
+// The four messages are keys of static/utilities.js API_ERROR_HEADS.
 func writeAddUpdateRejection(w http.ResponseWriter, err error, fallback string) {
 	switch code := cronpkg.ClassifyError(err); code {
 	case cronpkg.CodeJobQuotaExceeded:
 		writeCronErr(w, code.HTTPStatus(), "cron job quota reached")
 	case cronpkg.CodeIntervalTooShort:
 		writeCronErr(w, code.HTTPStatus(), "schedule interval below the 5m minimum")
+	case cronpkg.CodeInvalidPrompt:
+		writeCronErr(w, code.HTTPStatus(), "invalid prompt: empty, too long or contains control characters")
+	case cronpkg.CodeInvalidSchedule:
+		writeCronErr(w, code.HTTPStatus(), "invalid schedule expression")
 	default:
 		writeCronErr(w, http.StatusBadRequest, fallback)
 	}
@@ -94,6 +98,11 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cap work_dir before validateWorkspace echoes it into Debug logs.
+	if len(req.WorkDir) > cronpkg.MaxWorkDirLen {
+		writeCronErr(w, http.StatusBadRequest, "work_dir too long")
+		return
+	}
 	// work_dir must be under allowedRoot; 403 matches /api/sessions/send so
 	// clients see a uniform status for boundary violations.
 	if req.WorkDir != "" {
@@ -164,7 +173,7 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		// robfig/cron parser errors leak field offsets / parsed expressions;
 		// log the detail for operators, return a sanitized message.
-		slog.Warn("cron AddJob rejected", "err", err, "schedule", job.Schedule)
+		slog.Warn("cron AddJob rejected", "err", err, "schedule", osutil.SanitizeForLog(job.Schedule, cronpkg.MaxScheduleBytes))
 		writeAddUpdateRejection(w, err, "invalid schedule or job fields")
 		return
 	}

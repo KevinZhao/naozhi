@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
-	"unicode/utf8"
 )
 
 // AddJob validates, registers, and persists a new cron job.
@@ -204,8 +203,8 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 		}
 	}
 	if upd.Title != nil {
-		if n := utf8.RuneCountInString(*upd.Title); n > MaxCronTitleLen {
-			return nil, fmt.Errorf("title too long: %d runes > %d cap", n, MaxCronTitleLen)
+		if err := validateTitle(*upd.Title); err != nil {
+			return nil, err
 		}
 	}
 	// Mirror SetJobPrompt's strict policy so non-dashboard callers cannot
