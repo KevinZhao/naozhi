@@ -426,6 +426,8 @@ async function dismissSession(key, node, opts) {
     await dismissDiscovered(key, node);
     return;
   }
+  // DELETE drops the parked tuning server-side; a never-sent key's (above) stays.
+  delete perSession.pendingTuning[key];
   dismissManaged(key, node);
 }
 
