@@ -13,7 +13,7 @@ import { hydrateAskAnsweredFromHistory, lockRenderedAskCards } from './ask_card.
 import { runPendingAsync } from './render_md.js';
 import { processEventsForDisplay } from './file_refs.js';
 import { navRebuild, navSync } from './msg_nav.js';
-import { applyEventToTurnState, idleTaskEvent, paintTurnElapsed, refreshBanner, resetTurnState, resetTurnStateForUserEcho, restoreScrollPos, scrollSlackPx, turnState, updateSendButton } from './running_banner.js';
+import { applyEventToTurnState, idleTaskEvent, paintTurnElapsed, refreshBanner, resetTurnState, resetTurnStateForUserEcho, restoreScrollPos, saveScrollPos, scrollSlackPx, turnState, updateSendButton } from './running_banner.js';
 import { rollbackOptimisticRunning } from './send_message.js';
 import { EARLIER_PAGE_LIMIT, EVENT_DIVIDER_GAP_MS, MAX_LIVE_DOM_EVENTS, lastDividerTime, showAPIError, stickEventsBottom, timeDividerHtml } from './utilities.js';
 import { isInternalEvent, sid } from './session_ident.js';
@@ -366,17 +366,30 @@ export function renderEvents(events, hasMore) {
   // Poll-fallback twin of onHistory's pre-render hydrate: rebuild the
   // answered-set so replayed AskUserQuestion cards render locked (#2430).
   hydrateAskAnsweredFromHistory(events);
-  const display = processEventsForDisplay(events);
+  paintWholePane(el, events, processEventsForDisplay(events), hasMore);
+}
+
+// paintWholePane replaces the pane with a full page (a subscribe's opening
+// frame, the REST full fetch): the placeholder for an empty or all-internal
+// page, the paging cursor and "load earlier", then the scroll position. hasMore
+// is the server's "older history exists"; null (a legacy server or relayed node
+// omitted it) leaves the call to the length heuristic.
+function paintWholePane(el, events, display, hasMore) {
+  const kept = keepReader(el);
   const html = renderEventsWithDividers(display, 0);
   // Decide "load earlier" BEFORE the all-internal placeholder so its copy never
-  // promises a missing button. The server's hasMore knows the slice was cut by
-  // visible-bubble count; the length heuristic is only for an absent header.
-  const showEarlier = (hasMore === true) ||
-    (hasMore == null && events.length >= INITIAL_HISTORY_LIMIT);
+  // invites a click on a button that won't appear: the server's has_more knows
+  // the page was cut by visible-bubble count (DefaultVisibleTarget).
+  const showEarlier = (hasMore === true) || (hasMore == null && events.length >= INITIAL_HISTORY_LIMIT);
   if (html) {
     el.innerHTML = html;
   } else if (events.length === 0) {
-    el.innerHTML = '<div class="empty-state">暂无事件</div>';
+    // A running session's events are on their way (eventPushLoop): "loading",
+    // not a "no events yet" that flashes before them.
+    const sd = sessionList.sessionsData[sid(selection.key, selection.node)];
+    el.innerHTML = (sd && sd.state === 'running')
+      ? '<div class="empty-state loading-indicator">正在加载事件…</div>'
+      : '<div class="empty-state">暂无事件</div>';
   } else {
     // Every event was internal (an agent team's tail). Invite "click below"
     // only when the button will mount; otherwise there is nothing older.
@@ -384,27 +397,43 @@ export function renderEvents(events, hasMore) {
       ? '<div class="empty-state">该会话最近仅有 agent 活动，点击下方加载更早的消息</div>'
       : '<div class="empty-state">该会话仅有 agent 活动，暂无对话消息</div>';
   }
-  if (events.length > 0) {
-    const last = events[events.length - 1];
-    if (last.time) transcript.lastRenderedEventTime = last.time;
-    // Wholesale replace: the cursor restarts at this page's head; an older one
-    // kept across a WS reconnect / fallback full fetch would skip the gap.
-    seedEarlierCursor(events);
-  }
-  if (showEarlier) {
-    ensureEarlierButton();
-  }
+  // 水位无条件重置：整页替换后 lastRenderedEventTime 只能描述"这一页渲染了
+  // 什么"。空 Initial 帧（running 会话刚起进程，completeSubscribe 的空帧臂）
+  // 也必须把水位归零 —— 否则被顶替订阅的 stale 增量帧先到把水位推高、空
+  // Initial 帧把面板重置成加载占位符但水位没动，新 pushLoop 推同批事件时
+  // 全部撞上 `e.time <= lastRenderedEventTime` 被整批丢弃。
+  transcript.lastRenderedEventTime = events.length ? (events[events.length - 1].time || 0) : 0;
+  // Full replace: the cursor restarts at this page's head; an older one kept
+  // across a WS reconnect / fallback full fetch would skip the gap.
+  seedEarlierCursor(events);
+  if (showEarlier) ensureEarlierButton();
   runPendingAsync();
   navRebuild();
-  if (!restoreScrollPos(selection.key, selection.node)) {
-    stickEventsBottom();
-  }
-  // Safety net: if the page rendered to the all-internal placeholder (no
-  // visible bubble) but events exist, transparently page back to real
-  // messages. Bounded by AUTO_PAGEBACK_MAX. Covers the paths the server-side
-  // visible-aware read can't (remote nodes, disk-exhausted sessions).
+  placeRepaint(el, kept);
+  // Safety net: a blank page despite events → page back to real messages
+  // (bounded by AUTO_PAGEBACK_MAX), for what the server's visible-aware read
+  // can't cover (remote nodes, disk-exhausted sessions).
   if (!html && events.length > 0) maybeAutoPageBack();
 }
+
+// keepReader / placeRepaint bracket a whole-pane paint. A repaint of the session
+// on screen (a resubscribe, the REST full fetch; a switch paints an empty shell)
+// puts its reader back where they stand, but pins one who was at the bottom or a
+// teammate's new message, as appendEvents does — not this tab's echo, which
+// replaces an optimistic bubble (#3687). A hidden pane has no position to keep;
+// an agent drill-in's pane is not the session's.
+function keepReader(el) {
+  if (!el.querySelector('.event') || (nzViews.agent && nzViews.agent.activeTaskID())) return null;
+  if (el.clientHeight) saveScrollPos(selection.key, selection.node);
+  else delete perSession.scrollPos[sid(selection.key, selection.node)];
+  return { user: lastUserUuid(el), echo: !!el.querySelector('.optimistic-msg') };
+}
+function placeRepaint(el, kept) {
+  const user = lastUserUuid(el);
+  const teammate = kept && !kept.echo && user && user !== kept.user;
+  if (teammate || !restoreScrollPos(selection.key, selection.node)) stickEventsBottom();
+}
+const lastUserUuid = (el) => [...el.querySelectorAll(':scope > .event.user[data-uuid]')].pop()?.getAttribute('data-uuid') || '';
 
 // trimEventsScroll bounds the live DOM (#398): drop oldest top children once the
 // scroller exceeds MAX_LIVE_DOM_EVENTS. Preserves a pinned "load earlier" button
@@ -443,12 +472,14 @@ export function appendEvents(events) {
   // An ask_question followed by a user event inside this same batch must
   // render already locked (mirrors onHistory's pre-render hydrate).
   hydrateAskAnsweredFromHistory(events);
-  // Force-bottom when a "user" event arrives: either the local operator just
-  // hit send, or a teammate posted through the IM channel — in both cases the
-  // message must be visible, even if the viewport was scrolled up.
+  // Force-bottom when a teammate's "user" event arrives (IM channel): it must be
+  // visible even if scrolled up. The echo of this tab's send (it replaces the
+  // optimistic bubble) does not: the send pinned already, and a queued send
+  // echoes after the running turn's result, when the reader may be scrolled up.
   let sawUser = false;
   events.forEach(e => {
     if (isInternalEvent(e)) return;
+    let echo = false;
     // Deduplicate: drop strictly-older events. Same-ms events are legitimate
     // siblings (thinking + text from one frame, two text blocks) and are only
     // dropped when their uuid is already on screen — same rule as onHistory.
@@ -464,8 +495,7 @@ export function appendEvents(events) {
         if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
         return;
       }
-      const opt = el.querySelector('.optimistic-msg');
-      if (opt) opt.remove();
+      echo = removeOptimisticMsg();
       // Lock cards already on screen before this user bubble is appended.
       lockRenderedAskCards(el);
     }
@@ -477,7 +507,7 @@ export function appendEvents(events) {
     el.insertAdjacentHTML('beforeend', h);
     if (t) prevT = t;
     if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
-    if (e.type === 'user') sawUser = true;
+    if (e.type === 'user' && !echo) sawUser = true;
   });
   // Bound the live DOM before scroll/scan so a long streaming session can't
   // grow #events-scroll without limit and OOM the tab (#398).
@@ -490,56 +520,9 @@ export function appendEvents(events) {
 
 /* ===== Session-stream frames: history, event and the send / interrupt acks ===== */
 
-// renderInitialHistory paints a subscribe's opening frame over the whole pane:
-// the placeholder for an empty or all-internal page, the paging cursor and
-// "load earlier", then the scroll position.
+// renderInitialHistory paints a subscribe's opening frame over the whole pane.
 function renderInitialHistory(el, /** @type {WsFrames['history']} */ msg, events, display) {
-  // Full render replaces everything — remove any optimistic messages
-  const html = renderEventsWithDividers(display, 0);
-  // Decide "load earlier" BEFORE the all-internal placeholder so its copy never
-  // invites a click on a button that won't appear. The server's has_more knows
-  // the frame was cut by visible-bubble count (DefaultVisibleTarget); the length
-  // heuristic is only for servers / relayed nodes that omit it.
-  const wsHasMore = (typeof msg.has_more === 'boolean') ? msg.has_more : null;
-  const showEarlier = (wsHasMore === true) ||
-    (wsHasMore == null && events.length >= INITIAL_HISTORY_LIMIT);
-  // Only show "no events yet" when the server returned zero events and the session
-  // is idle. For running sessions, show "loading events..." since eventPushLoop will
-  // deliver events shortly (fixes blank-then-"no events yet" flash on click).
-  if (html) {
-    el.innerHTML = html;
-  } else if (events.length === 0) {
-    const sd = sessionList.sessionsData[sid(selection.key, selection.node)];
-    el.innerHTML = (sd && sd.state === 'running')
-      ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>'
-      : '<div class="empty-state">\u6682\u65e0\u4e8b\u4ef6</div>';
-  } else {
-    // Every event was internal: same placeholder rule as renderEvents.
-    el.innerHTML = showEarlier
-      ? '<div class="empty-state">\u8be5\u4f1a\u8bdd\u6700\u8fd1\u4ec5\u6709 agent \u6d3b\u52a8\uff0c\u70b9\u51fb\u4e0b\u65b9\u52a0\u8f7d\u66f4\u65e9\u7684\u6d88\u606f</div>'
-      : '<div class="empty-state">\u8be5\u4f1a\u8bdd\u4ec5\u6709 agent \u6d3b\u52a8\uff0c\u6682\u65e0\u5bf9\u8bdd\u6d88\u606f</div>';
-  }
-  // 水位无条件重置：整页替换后 lastRenderedEventTime 只能描述"这一页渲染了
-  // 什么"。空 Initial 帧（running 会话刚起进程，completeSubscribe 的空帧臂）
-  // 也必须把水位归零 —— 否则被顶替订阅的 stale 增量帧先到把水位推高、空
-  // Initial 帧把面板重置成加载占位符但水位没动，新 pushLoop 推同批事件时
-  // 全部撞上 `e.time <= lastRenderedEventTime` 被整批丢弃。
-  transcript.lastRenderedEventTime = events.length ? (events[events.length - 1].time || 0) : 0;
-  // Full replace: the cursor restarts at this frame's head (see renderEvents).
-  seedEarlierCursor(events);
-  if (showEarlier) {
-    ensureEarlierButton();
-  }
-  runPendingAsync();
-  navRebuild();
-  // 若有上次切走时保存的滚动位置且不在底部，恢复它；否则照旧贴底。
-  if (!restoreScrollPos(selection.key, selection.node)) {
-    stickEventsBottom();
-  }
-  // Safety net: blank page despite events existing → page back to real
-  // messages (bounded). Twin of renderEvents' maybeAutoPageBack call;
-  // covers remote nodes whose subscribe predates the visible-aware read.
-  if (!html && events.length > 0) maybeAutoPageBack();
+  paintWholePane(el, events, display, typeof msg.has_more === 'boolean' ? msg.has_more : null);
 }
 
 // appendHistoryBackfill appends a frame that is not the opening one, skipping
@@ -550,9 +533,8 @@ function appendHistoryBackfill(el, display) {
   const emptyEl = el.querySelector('.empty-state');
   if (emptyEl) emptyEl.remove();
   let prevT = lastDividerTime(el);
-  // Force-bottom when a "user" event arrives: either the local operator
-  // just hit send, or a teammate posted through the IM channel — in both
-  // cases the message must be visible even if the viewport was scrolled up.
+  // Force-bottom on a teammate's "user" event, not on this tab's own echo —
+  // the same rule as appendEvents.
   let sawUser = false;
   display.forEach(e => {
     // Strictly-older events were rendered by an earlier frame. Same-ms
@@ -577,9 +559,7 @@ function appendHistoryBackfill(el, display) {
         if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
         return;
       }
-      const opt = el.querySelector('.optimistic-msg');
-      if (opt) opt.remove();
-      sawUser = true;
+      if (!removeOptimisticMsg()) sawUser = true;
       lockRenderedAskCards(el);
     }
     const h = eventHtml(e);
@@ -683,6 +663,7 @@ function appendLiveEvent(ev) {
   const empty = el.querySelector('.empty-state');
   if (empty) empty.remove();
   const isUser = ev.type === 'user';
+  let echo = false;
   if (isUser) {
     // uuid idempotency (user bubbles only): a duplicate push or a re-subscribe
     // replay must not paint the same user message twice; advance the cursor so
@@ -694,12 +675,11 @@ function appendLiveEvent(ev) {
       return;
     }
     // First arrival of the real user event: drop the optimistic placeholder.
-    const opt = el.querySelector('.optimistic-msg');
-    if (opt) opt.remove();
+    echo = removeOptimisticMsg();
   }
   // An 80px slack band so a small natural scroll doesn't leave auto-stick.
-  // User events always pin; AI chunks / result events only stick when the
-  // user is in the band, so reading earlier history keeps its position.
+  // A teammate's user event always pins; AI chunks, results and this tab's own
+  // echo stick only in the band, so reading earlier history keeps its position.
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - scrollSlackPx;
   const prevT = lastDividerTime(el);
   const evT = ev.time || 0;
@@ -714,8 +694,7 @@ function appendLiveEvent(ev) {
   // can't grow #events-scroll without limit and OOM the tab (#398). Must run
   // before the scrollHeight reads below, matching appendEvents.
   trimEventsScroll(el);
-  // User events always force-bottom; AI output only sticks when already at bottom.
-  if (isUser) stickEventsBottom();
+  if (isUser && !echo) stickEventsBottom();
   else if (wasBottom) el.scrollTop = el.scrollHeight;
   runPendingAsync();
   if (ev.type === 'user') navSync();
