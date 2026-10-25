@@ -15,6 +15,8 @@ import (
 // "zero-dependency leaf" 描述），靠 grep 人肉同步必漏——与
 // TestGenerateSystemdUnit_MatchesDeployTemplate 同理，用测试把文档
 // 钉在磁盘事实上。只对账顶层包名；描述文字与子包列举不在 gate 范围。
+// 清单约定每个顶层包一行：同一包出现两次也 fail（#3448 曾留下 runtelemetry
+// 的新旧两条描述，集合比较会把重复行静默合并）。
 func TestClaudeMDModuleList_MatchesInternalPackages(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "CLAUDE.md"))
 	if err != nil {
@@ -27,6 +29,9 @@ func TestClaudeMDModuleList_MatchesInternalPackages(t *testing.T) {
 	mentionRE := regexp.MustCompile(`(?m)^\s*-> ([a-z][a-z0-9]*)\b`)
 	mentioned := make(map[string]bool)
 	for _, m := range mentionRE.FindAllStringSubmatch(section, -1) {
+		if mentioned[m[1]] {
+			t.Errorf("CLAUDE.md Module Dependency 清单里 %q 出现了不止一次——每个顶层包只留一行，合并描述后删掉多余的", m[1])
+		}
 		mentioned[m[1]] = true
 	}
 	if len(mentioned) == 0 {
