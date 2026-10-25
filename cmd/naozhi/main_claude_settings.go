@@ -174,6 +174,14 @@ func applyClaudeEnvSettings(ctx context.Context) error {
 	return nil
 }
 
+// loadStartupConfig: settings env before Load so startup and reload expand ${VAR} alike (#3621).
+// settingsErr is returned for main to log; filter diagnostics go to the default stderr handler.
+func loadStartupConfig(ctx context.Context, path string) (cfg *config.Config, settingsErr, err error) {
+	settingsErr = applyClaudeEnvSettings(ctx)
+	cfg, err = config.Load(path)
+	return cfg, settingsErr, err
+}
+
 // naozhiSettingsPath resolves where the naozhi-owned settings file lives,
 // without creating it, so read-only callers share one answer with the spawn path.
 //

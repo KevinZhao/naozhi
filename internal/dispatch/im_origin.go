@@ -52,7 +52,7 @@ func (d *Dispatcher) submit(ctx context.Context, o *imOrigin, r turn.Request) {
 		o.lg.ErrorContext(ctx, "unknown platform")
 		return
 	}
-	if !d.admitBudget(ctx, o) {
+	if !d.admitBudget(ctx, o.msg, o.key, o.lg) {
 		return
 	}
 	r.Origin = o
@@ -97,9 +97,13 @@ func (o *imOrigin) SessionOpts(string) sessionview.AgentOpts { return o.opts }
 // log line when the queue is disabled. A queued request whose ⏳ fails gets a
 // rate-limited notice instead; one that runs now or detached does not, its
 // reply is the ack, and its ⏳ goes on in the background so the turn does not
-// wait for the IM API (#3329). Every clear waits for that add (#1963).
+// wait for the IM API (#3329). Every clear waits for that add (#1963). A
+// message that will get a turn first tells its adapter (OnAccepted).
 func (o *imOrigin) Admitted(ctx context.Context, a turn.Ack) {
 	d := o.d
+	if o.msg.OnAccepted != nil && (a == turn.AckOwner || a == turn.AckDetached || a == turn.AckQueued) {
+		o.msg.OnAccepted()
+	}
 	switch a {
 	case turn.AckOwner:
 		o.lg.InfoContext(ctx, "message received", "agent", o.agentID, "text_len", o.textLen, "images", o.images)
@@ -207,6 +211,7 @@ func (dl *imDelivery) Blocking() bool { return true }
 func (dl *imDelivery) BeforeSession(ctx context.Context) {
 	o := dl.o
 	dl.tracker = newIMEventTracker(ctx, dl.p, replyDestOf(o.msg), o.msg.ChatType, o.agentID)
+	dl.tracker.askerID = o.d.askerOf(o.msg, o.key)
 	if dl.info.Role == turn.RoleHead && o.ackDone != nil {
 		dl.tracker.armFallbackBanner(o.d.fallbackBannerDelay, o.awaitAck)
 	}
@@ -324,9 +329,6 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 	d.markReplySuccess()
 
 	replyText := d.decorateReplyText(ctx, result, sess)
-	if replyText != "" {
-		replyText += d.budgetWarnLine(o.key)
-	}
 	outImages, replyText := d.readTurnImages(replyText)
 
 	// Passthrough turns are bound to d.stopCtx; if SIGTERM lands between
@@ -354,6 +356,9 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 		}
 		dl.lg.InfoContext(ctx, "ask_question suppressed redundant reply", "result_len", len(result.Text))
 	} else if replyText != "" {
+		// Only a reply that goes out carries the budget warning: it is
+		// spent once a day per subject (#3694).
+		replyText += d.budgetWarnLine(o.key)
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			d.replyIntoBanner(ctx, p, replyDestOf(o.msg), msgID, replyText)
 		} else {

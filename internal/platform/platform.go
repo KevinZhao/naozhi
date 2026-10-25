@@ -126,6 +126,17 @@ type IncomingMessage struct {
 	// resolution) for synthetic messages such as an AskUserQuestion card click
 	// (#2148). The dispatcher whitelist-validates it before honouring it.
 	AgentID string
+	// AskerID, set on a question card click, is the only user the card's
+	// answer may come from: the card was asked in that user's own session
+	// (session.group_scope: user), where anyone else's click would answer
+	// in theirs. Empty lets anyone in the chat answer.
+	AskerID string
+	// OnAccepted, when set, is called once if the dispatcher takes the
+	// message as a turn's input (run, or queued behind one), after every
+	// gate that can refuse it. A question card is marked answered from
+	// here, so a refused click leaves its buttons. It runs on the handler's
+	// goroutine and must not block.
+	OnAccepted func()
 }
 
 // OutgoingMessage is the platform-agnostic outbound message. A non-empty
@@ -248,6 +259,9 @@ type QuestionCard struct {
 	// ThreadID is the thread the question was asked in: the card is posted
 	// there, and adapters whose click callback cannot recover it embed it.
 	ThreadID string
+	// AskerID is the user whose own session asked; adapters embed it and
+	// return it as IncomingMessage.AskerID. Empty when the chat shares it.
+	AskerID string
 	// Items is one or more questions, each rendered as its own block.
 	Items []QuestionItem
 }

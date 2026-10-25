@@ -62,6 +62,9 @@ test('KaTeX and mermaid render with their styles under the CSP', async ({ browse
     });
     await page.locator(`.session-card[data-key="${KEY_A}"]`).click();
     await expect(page.locator('#events-scroll .katex').first()).toBeVisible({ timeout: 15000 });
+    // The placeholder rendered in place drops its source styling (#3634), so
+    // it looks like a formula from the sync path.
+    await expect(page.locator('#events-scroll .katex-pending')).toHaveCount(0);
     await expect(page.locator('#events-scroll .mermaid svg')).toBeVisible({ timeout: 30000 });
 
     // Mermaid: the diagram's theme sheet applies. Unstyled SVG shapes fill black.

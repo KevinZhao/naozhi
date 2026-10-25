@@ -416,9 +416,17 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 	if !d.authorize(ctx, msg, trimmed, lg) {
 		return preparedInbound{}, false
 	}
-	// After authorization so a refused sender spends no tokens, before
-	// commands so command spam is limited too.
-	if !d.admitRate(ctx, msg, trimmed, lg) {
+	// After authorization so a refused sender spends no tokens (authorize
+	// throttles its own replies), before commands so command spam is
+	// limited too.
+	if !d.admitRate(ctx, msg, trimmed, lg, true) {
+		return preparedInbound{}, false
+	}
+	// A card asked in one member's own session is answered only by them:
+	// anyone else's click would land in their own session instead (#3628).
+	if msg.AskerID != "" && msg.UserID != msg.AskerID {
+		lg.InfoContext(ctx, "question card click refused: not the asker")
+		d.replyText(ctx, msg, notAskerReply, lg)
 		return preparedInbound{}, false
 	}
 

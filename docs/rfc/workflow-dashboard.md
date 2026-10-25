@@ -1,6 +1,8 @@
 # RFC: Workflow 运行进度看板（dashboard）
 
 - 状态：已实现（v5；PR-1..PR-15 已合并，2026-10-07 真机验收通过，见 #3475）
+- 注：ratchet-raise 台账（`tools/ratchet-raises`、`scripts/ratchet-raises.jsonl`、
+  `ratchet-raises` job、`ratchet-raise-approved` 标签）已在 #3718 删除，下文涉及台账的步骤仅为历史记录
 - 日期：2026-10-05（v1）；2026-10-05（v2）；2026-10-05（v3）；2026-10-05（v4）；2026-10-05（v5）
 - 作者：Kevin Zhao
 - 范围：naozhi 托管的 Claude Code session 通过 `Workflow` 工具（ultracode）跑的后台

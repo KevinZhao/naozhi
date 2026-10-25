@@ -57,21 +57,26 @@ graph TD
 
 ### IM 平台接入
 
-| 平台 | 接入方式 | 私聊 | 群聊 | 消息编辑 | 提问按钮 | 文件 |
-|------|----------|------|------|----------|----------|------|
-| **飞书** | WebSocket 长连接 / Webhook | ✓ | ✓ | ✓ 流式更新 | ✓ | ✓ (仅私聊) |
-| **Slack** | Socket Mode | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ | ✓ (需 `files:read`) |
-| **Discord** | Gateway WebSocket | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ | ✓ (按文件名/类型预筛) |
-| **微信** | HTTP 长轮询 (iLink Bot) | ✓ | — | — | — | — |
+| 平台 | 接入方式 | 私聊 | 群聊 | 消息编辑 | 提问按钮 | 图片 | 文件 |
+|------|----------|------|------|----------|----------|------|------|
+| **飞书** | WebSocket 长连接 / Webhook | ✓ | ✓ | ✓ 流式更新 | ✓ | ✓ (仅私聊) | ✓ (仅私聊) |
+| **Slack** | Socket Mode | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ | ✓ (需 `files:read`) | ✓ (需 `files:read`) |
+| **Discord** | Gateway WebSocket | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ | ✓ | ✓ (按文件名/类型预筛) |
+| **微信** | HTTP 长轮询 (iLink Bot) | ✓ | — | — | — | — | — |
 
 「提问按钮」指 Claude 调用 AskUserQuestion 时把选项渲染成可点击的按钮；没有按钮的平台收到纯文本选项列表，直接回复文字作答。
+
+「图片」指用户发来的图片（单张上限 10 MiB），作为图片内容直接交给 Claude，不经过工作目录。微信 iLink 只转发文字，图片、语音等非文字消息会被忽略。
 
 「文件」指用户发来的 PDF 和 UTF-8 文本文件（`.txt` `.md` `.csv` `.json` `.log` `.yaml` `.yml`）。发送时文件写入会话工作目录的 `.naozhi/attachments/<日期>/`，Claude 用 Read 工具读取，与 Dashboard 上传的 PDF 是同一条路径。
 - 上限：单个文件 32 MiB；每条消息最多 5 个、合计 32 MiB，Slack 和 Discord 消息里的图片也计入（图片本身仍是 10 MiB）
 - docx / xlsx / zip 等其他类型、超限和下载失败的文件，bot 会回一条「以下文件未处理：」列出文件名和原因，消息里的文字和其余文件照常发送
-- Discord 在下载前先按文件名和类型筛选：PDF 需要 `.pdf` 文件名或 `application/pdf` 类型，文本文件需要上面列出的扩展名
-- 群聊里文件要和 @bot 在同一条消息里，否则与普通消息一样被忽略。飞书的文件消息没法 @bot，所以群里发的文件不处理，请私聊发送
+- Discord、Slack 和飞书在下载前先按文件名和类型筛选：PDF 需要 `.pdf` 文件名或 `application/pdf` 类型（飞书的文件消息不带类型，只看文件名），文本文件需要上面列出的扩展名
+- 一条消息里所有附件的下载共用 3 分钟预算，超时未下完的文件按下载失败告知
+- 群聊里图片和文件要和 @bot 在同一条消息里，否则与普通消息一样被忽略。飞书的图片和文件消息没法 @bot，所以群里发的图片和文件不处理，请私聊发送
 - 这些文件和 Dashboard 上传一样只按上传时间回收（`attachment-gc`，默认关闭），不开启就一直留在工作目录里
+
+飞书的富文本消息（带格式的文字、粘贴的代码、文字里夹图片）按纯文本加图片处理：链接保留地址，代码块保留成 Markdown 代码块，内嵌图片每条最多 5 张。表情包、视频等暂不支持的消息类型，bot 会回一条「暂不支持此类消息」（同一会话每分钟最多一次），群里只在 @bot 时回。
 
 所有平台开箱即用，**无需公网 IP**。
 
@@ -87,7 +92,7 @@ graph TD
 
 Agent 命令、模型、system prompt 均可在 `config.yaml` 中自定义。
 
-群聊里，Slack 话题串和飞书话题各用一个独立会话，不在话题里的消息共用频道的会话；`session.group_scope` 可改为 `chat`（整个群一个会话）或 `user`（每个成员一个会话）。`/cd`、`/project`、`/cron` 始终按整个群生效。开启 `session.thread_auto_open` 后，顶层的 @bot 提问会在以它为根的新话题里回答，话题里的追问接着同一个会话。
+群聊里，Slack 话题串和飞书话题各用一个独立会话，不在话题里的消息共用频道的会话；`session.group_scope` 可改为 `chat`（整个群一个会话）或 `user`（每个成员一个会话；此时 Claude 的提问卡片只有提问者本人能点选作答）。`/cd`、`/project`、`/cron` 始终按整个群生效。开启 `session.thread_auto_open` 后，顶层的 @bot 提问会在以它为根的新话题里回答，话题里的追问接着同一个会话。
 
 ### 会话生命周期
 
@@ -321,7 +326,7 @@ naozhi --config ~/.naozhi/config.yaml
 ### 飞书
 
 1. 飞书开放平台 → 创建企业自建应用 → 开启"机器人"能力
-2. 权限: `im:message`, `im:message:send_as_bot`, `im:message:patch`
+2. 权限: `im:message`, `im:message:send_as_bot`, `im:message:patch`。下载用户发来的图片、语音和文件（[获取消息中的资源文件](https://open.feishu.cn/document/server-docs/im-v1/message/get-2)）只要 `im:message` 就够，不需要另加权限；外部群（错误码 234009）和开启了保密模式的消息（234038）飞书不允许下载：文件会被告知下载失败，图片只在日志里记一条 `feishu download image failed`
 3. 事件订阅: 选择 "使用长连接接收事件"，订阅 `im.message.receive_v1`
 4. 发布应用版本
 5. 配置凭据并启动:
@@ -335,8 +340,8 @@ naozhi --config ~/.naozhi/config.yaml
 
 1. [api.slack.com/apps](https://api.slack.com/apps) → Create New App
 2. 开启 Socket Mode，获取 App-Level Token (`xapp-...`)
-3. Bot Token Scopes: `chat:write`, `app_mentions:read`, `files:read`（接收用户发来的图片和文件；缺少时文件会被告知下载失败）
-4. Event Subscriptions: `message.im`, `app_mention`
+3. Bot Token Scopes: `chat:write`, `im:history`, `channels:history`, `groups:history`, `mpim:history`, `files:read`（接收用户发来的图片和文件；缺少时文件会被告知下载失败）, `files:write`（回复里发图片）, `reactions:write`（消息上的处理状态表情）
+4. Event Subscriptions（Subscribe to bot events）: `message.im`, `message.channels`, `message.groups`（私有频道）, `message.mpim`（多人私聊）。频道里的 @bot 也经 `message.channels` / `message.groups` 送达，再按是否 @ 了 bot 过滤；不需要订阅 `app_mention`
 5. Interactivity & Shortcuts → 开启（Socket Mode 下不需要填 Request URL）。不开启时 AskUserQuestion 的按钮点了没反应，但仍可直接回复文字作答
 
 ### Discord
@@ -607,15 +612,15 @@ im_access:
   Discord 卡片上的 AskUserQuestion 按钮回答。被拒的消息不会触发任何命令，也不会进
   CLI。注意卡片在鉴权之前就会变成"已回答"：名单外的人、被限流或超预算的点击同样会让
   按钮消失，此时有权限的人请直接回复文字作答（与飞书一致）。飞书的语音、图片和文件，
-  Slack 上传的图片和文件，Discord 的附件都在下载前就判定：名单外的人发来的语音不下载、
-  不转写（不产生 Transcribe 费用），图片和文件不下载；群里的飞书语音、图片和文件因为
-  没法 @bot 也不下载。
+  Slack 上传的图片和文件，Discord 的附件都在下载前就判定：名单外的人、已被限流的人、
+  当天额度已用尽的会话发来的语音不下载、不转写（不产生 Transcribe 费用），图片和文件
+  不下载；群里的飞书语音、图片和文件因为没法 @bot 也不下载。
 - **怎么拿用户 ID**：被拒的消息会在 Info 级别打一行 `im access denied`，`user`
   字段就是要填的 ID（飞书 open_id `ou_...`、Slack `U...`、Discord 用户 ID、微信
   `from`）。私聊里被拒的人也会收到带自己 ID 的提示，同一人 10 分钟最多一次；群里
   对名单外的人不回复，免得刷屏。拒绝次数记在 expvar `naozhi_dispatch_denied_total`。
 - `/cd`、`/project`、`/cron` 只有 `admin_users` 能用；名单内的非管理员用这些命令
-  时（私聊和群里都一样）会收到「该命令需要管理员权限。」。`admin_users` 为空时所有
+  时（私聊和群里都一样）会收到「该命令需要管理员权限。」，同一人 10 分钟最多一次。`admin_users` 为空时所有
   `allowed_users` 都算管理员，所以只开白名单不会少功能。
 - 已有的定时任务不受影响：把某人移出名单后，他创建过的 cron 任务照常运行，要在
   dashboard 里手动删除。
@@ -633,7 +638,8 @@ im_rate_limit:
 ```
 
 - 斜杠命令也计数（`/cron add` 刷屏一样被挡），`/stop` 不计：它只会停下花费。
-- 超限的消息直接丢弃，不进 CLI；发送者每分钟最多收到一次「消息过于频繁」提示。
+- 超限的消息直接丢弃，不进 CLI，带语音、图片或文件的也不下载（同时到达的几条可能共用
+  最后一个额度）；发送者每分钟最多收到一次「消息过于频繁」提示。
   丢弃次数记在 expvar `naozhi_dispatch_rate_limited_total`。
 - 在 `im_access` 之后检查，所以被拒的人不消耗额度；没 @bot 的群消息也不消耗。
 - 管理员同样受限；改配置不用重启，`naozhi config reload` 即时生效（只在
@@ -703,6 +709,7 @@ kill -HUP $(pidof naozhi)
   `/health.config_reloaded_sha256` 始终是最近一次加载或重载读到的文件，此后磁盘上
   再改而没有重载，doctor 照样报 `not applied`，同时列出待重启段。
 - `${VAR}` 按 naozhi 进程当前的环境变量展开，改了 EnvironmentFile 仍要重启。
+  `~/.claude/settings.json` 的 `env` 在启动时先于首次加载写入。
 - 设计见 [`docs/rfc/config-hot-reload.md`](docs/rfc/config-hot-reload.md)。
 
 ### 生产架构

@@ -97,12 +97,14 @@ func (a cronRouterAdapter) ReleaseProcess(key string) bool {
 }
 
 // wrapCronSpawnErr tags the router's capacity refusals with
-// cron.ErrSessionCapacity, keeping the session sentinel in the chain.
+// cron.ErrSessionCapacity, keeping the session sentinel in the chain, and
+// names the cause of a CLI that exited in the Init handshake as the Send path
+// does (exitFailure); cron keeps that run a session_error.
 func wrapCronSpawnErr(err error) error {
 	if errors.Is(err, session.ErrMaxExemptSessions) || errors.Is(err, session.ErrMaxProcs) {
 		return fmt.Errorf("%w: %w", cron.ErrSessionCapacity, err)
 	}
-	return err
+	return exitFailure(err)
 }
 
 // toSessionAgentOpts copies cron.AgentOpts → session.AgentOpts. ExtraArgs is
@@ -172,11 +174,23 @@ var exitTurnCause = map[clierr.ExitClass]cron.TurnCause{
 // failed rather than succeeding with empty or raw-error text; nil for a
 // healthy turn. An abort naozhi requested (the cron watchdog's interrupt) is
 // not a failure, whether claude reports it as error_during_execution or an
-// aborted_* terminal_reason. The detail is for run history; the IM notice only
-// ever shows the cause.
+// aborted_* terminal_reason. One claude made on its own without is_error
+// (2.1.288's shape) is TurnCauseCLIAborted: its text is only part of an
+// answer. The detail is for run history; the IM notice only ever shows the
+// cause.
 func turnFailure(r *clievent.SendResult) error {
-	if !r.IsError || (r.Aborted && (r.SubType == "error_during_execution" || r.CLIAborted())) {
+	if r.Aborted && (r.SubType == "error_during_execution" || r.CLIAborted()) {
 		return nil
+	}
+	if !r.IsError {
+		if !r.CLIAborted() {
+			return nil
+		}
+		tf := &cron.TurnFailedError{Cause: cron.TurnCauseCLIAborted}
+		if r.Text != "" {
+			return fmt.Errorf("%w (%s): %s", tf, r.TerminalReason, r.Text)
+		}
+		return fmt.Errorf("%w (%s)", tf, r.TerminalReason)
 	}
 	tf := &cron.TurnFailedError{Cause: turnCause(r)}
 	if be := r.BackendError; be != nil {

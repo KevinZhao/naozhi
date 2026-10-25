@@ -22,7 +22,6 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/routerrelay"
-	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/selfupdate"
 	"github.com/naozhi/naozhi/internal/server"
 	"github.com/naozhi/naozhi/internal/session"
@@ -71,7 +70,12 @@ func main() {
 	fs, configPath := newSubFlagSet("naozhi", "config.yaml")
 	fs.Parse(os.Args[1:])
 
-	cfg, err := config.Load(*configPath)
+	// Created before applyClaudeEnvSettings so readJSONWithRetry's sleeps
+	// honour ctx.Done() from the first use of the settings file.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg, settingsErr, err := loadStartupConfig(ctx, *configPath)
 	if err != nil {
 		slog.Error("load config", "err", err)
 		os.Exit(1)
@@ -82,19 +86,14 @@ func main() {
 	configFP := server.NewConfigFingerprint(cfg.Fingerprint.SHA256, cfg.Fingerprint.LoadedAt)
 	reloader := newConfigReloader(absConfigPath(*configPath), cfg, logLevel, configFP)
 
-	// Created before applyClaudeEnvSettings so readJSONWithRetry's sleeps
-	// honour ctx.Done() from the first use of the settings file.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	if err := applyClaudeEnvSettings(ctx); err != nil {
-		switch claudeSettingsErrSeverity(err) {
+	if settingsErr != nil {
+		switch claudeSettingsErrSeverity(settingsErr) {
 		case settingsErrSeverityCancel:
-			slog.Warn("apply ~/.claude/settings.json env: aborted by ctx cancel", "err", err)
+			slog.Warn("apply ~/.claude/settings.json env: aborted by ctx cancel", "err", settingsErr)
 		case settingsErrSeverityMissing:
-			slog.Warn("apply ~/.claude/settings.json env: file missing", "err", err)
+			slog.Warn("apply ~/.claude/settings.json env: file missing", "err", settingsErr)
 		default:
-			slog.Error("apply ~/.claude/settings.json env: read or parse failed", "err", err)
+			slog.Error("apply ~/.claude/settings.json env: read or parse failed", "err", settingsErr)
 		}
 	}
 	// cc loads ~/.claude/settings.json itself via `--setting-sources user`; the
@@ -211,6 +210,7 @@ func main() {
 		DefaultAccessProfile: cfg.DefaultAccessProfile,
 		NaozhiSettingsFile:   naozhiSettingsFile,
 		MCPConfigFile:        mcpConfigFile,
+		PermissionMode:       cliPermissionMode(cfg),
 		Workspace:            workspace,
 		StorePath:            storePath,
 		CostLedger: session.CostLedgerConfig{
@@ -319,16 +319,15 @@ func main() {
 			"platform", cfg.Cron.NotifyDefault.Platform,
 			"chat_id_suffix", chatIDSuffix(cfg.Cron.NotifyDefault.ChatID))
 	}
-	// cron and sysession run-events reach the dashboard Hub, which does not
-	// exist yet; the server binds it to this relay.
-	runTelemetry := &runtelemetry.Relay{}
-	// Outbound webhooks ride the same relay as the dashboard Hub
+	// Outbound webhooks receive the same run events as the dashboard Hub
 	// (docs/rfc/outbound-webhooks.md); nil when none is configured.
 	var webhooks *webhook.Sender
 	if eps := cfg.WebhookEndpoints(); len(eps) > 0 {
 		webhooks = webhook.New(eps, webhook.WithNode(cfg.Workspace.ID))
 		slog.Info("outbound webhooks enabled", "endpoints", len(eps))
 	}
+	// Webhooks are bound first in wireup.RunTelemetryRelays; the server binds the Hub to hubTelemetry.
+	runTelemetry, hubTelemetry := wireup.RunTelemetryRelays(webhooks)
 	// One gate for IM and cron, fed by the ledger; nil when cost.budget is off.
 	budgetGate := budget.Attach(router.Runs().CostLedger(), cfg.BudgetLimits(), cfg.BudgetLocation(), nil)
 	if budgetGate != nil {
@@ -497,8 +496,7 @@ func main() {
 		},
 		Relays: server.RelayOptions{
 			Router:       routerEvents,
-			RunTelemetry: runTelemetry,
-			Webhooks:     webhooks,
+			RunTelemetry: hubTelemetry,
 		},
 	})
 	metrics.StartupPhaseServerMs.Set(time.Since(t0).Milliseconds())

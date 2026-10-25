@@ -29,6 +29,8 @@ type AskAnswerPayload struct {
 	// AgentID routes the answer back to the asking agent session; the
 	// dispatcher whitelist-validates it before it can influence routing (#2148).
 	AgentID string `json:"agent_id,omitempty"`
+	// AskerID carries QuestionCard.AskerID; omitted when anyone may answer.
+	AskerID string `json:"asker_id,omitempty"`
 	// ChatType ("direct"/"group") is whitelisted on read, for callbacks that
 	// carry no chat type of their own.
 	ChatType string `json:"chat_type,omitempty"`
@@ -46,18 +48,19 @@ type AskAnswerPayload struct {
 func NewAskAnswerPayload(card QuestionCard, item QuestionItem, opt QuestionOption) AskAnswerPayload {
 	return AskAnswerPayload{
 		AgentID:   textutil.TruncateRunesNoEllipsis(card.AgentID, AskIDMaxRunes),
+		AskerID:   askExactID(card.AskerID),
 		ChatType:  NormalizeAskChatType(card.ChatType),
 		Header:    textutil.TruncateRunesNoEllipsis(item.Header, AskHeaderMaxRunes),
 		Kind:      AskAnswerKind,
 		Label:     textutil.TruncateRunesNoEllipsis(opt.Label, AskLabelMaxRunes),
-		ThreadID:  askThreadID(card.ThreadID),
+		ThreadID:  askExactID(card.ThreadID),
 		ToolUseID: textutil.TruncateRunesNoEllipsis(card.ToolUseID, AskIDMaxRunes),
 	}
 }
 
-// askThreadID drops an over-long thread id rather than clipping it: a
-// clipped id names a different thread, or none.
-func askThreadID(id string) string {
+// askExactID drops an over-long thread or user id rather than clipping it:
+// a clipped id names a different thread or user, or none.
+func askExactID(id string) string {
 	if len(id) > AskIDMaxRunes {
 		return ""
 	}

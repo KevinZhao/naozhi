@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	dashcost "github.com/naozhi/naozhi/internal/dashboard/cost"
 	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
@@ -79,12 +78,8 @@ func buildCronHandlers(opts ServerOptions, claudeDir string) *dashcron.Handlers 
 // buildCostHandlers serves the cost ledger read API at the dashboard's 1 Hz
 // poll budget (2/s, burst 30); the ledger may be nil/disabled (503).
 func buildCostHandlers(opts ServerOptions, router *session.Router) *dashcost.Handlers {
-	var ledger *costledger.Store
-	if router != nil {
-		ledger = router.Runs().CostLedger()
-	}
 	return dashcost.New(dashcost.Deps{
-		Ledger: ledger,
+		Ledger: router.Runs().CostLedger(),
 		Budget: opts.IMBudget,
 		Limiter: newIPLimiterWithCap(
 			rate.Every(500*time.Millisecond), 30,
@@ -207,10 +202,6 @@ func buildProjectHandlers(
 	if opts.ProjectManager != nil {
 		projectStore = opts.ProjectManager
 	}
-	var projectRouterView dashproject.RouterView
-	if opts.Router != nil {
-		projectRouterView = projectRouter{opts.Router}
-	}
 	var plannerResolver dashproject.PlannerKeyResolver
 	if resolver != nil {
 		plannerResolver = resolver
@@ -218,7 +209,7 @@ func buildProjectHandlers(
 	return dashproject.New(dashproject.Deps{
 		BaseCtx:            baseCtx,
 		ProjectMgr:         projectStore,
-		Router:             projectRouterView,
+		Router:             projectRouter{opts.Router},
 		Resolver:           plannerResolver,
 		NodeAccess:         nodeAccess,
 		NodeCache:          nodeCache,

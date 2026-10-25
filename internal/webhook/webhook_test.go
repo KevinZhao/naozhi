@@ -430,3 +430,41 @@ func TestDeliverConcurrentWithClose(t *testing.T) {
 }
 
 func withFirstBackoff(d time.Duration) Option { return func(s *Sender) { s.firstBackoff = d } }
+
+// run.started has no ended_at; it is omitted, not sent as 0001-01-01.
+func TestEvent_StartedOmitsEndedAt(t *testing.T) {
+	start := time.Date(2026, 10, 25, 8, 0, 0, 0, time.UTC)
+	b, err := json.Marshal(Event{Type: EventRunStarted, Subsystem: "cron", OwnerID: "o", RunID: "r", StartedAt: start})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"type":"run.started","subsystem":"cron","owner_id":"o","run_id":"r","started_at":"2026-10-25T08:00:00Z"}`
+	if string(b) != want {
+		t.Fatalf("got %s\nwant %s", b, want)
+	}
+}
+
+// A 3xx is the receiver's answer, not an instruction: following it would
+// resend the signed body to whatever host the Location names (an internal
+// address included). The redirect target never sees a request, and the
+// delivery fails without retrying.
+func TestSend_DoesNotFollowRedirects(t *testing.T) {
+	target := &recv{}
+	tsrv := httptest.NewServer(http.HandlerFunc(target.handler))
+	defer tsrv.Close()
+	var hits atomic.Int32
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		hits.Add(1)
+		http.Redirect(w, req, tsrv.URL+"/stolen", http.StatusTemporaryRedirect)
+	}))
+	defer redir.Close()
+	s := New([]Endpoint{{URL: redir.URL, Secret: "s3cr3t"}}, WithSleep(noSleep))
+	s.Deliver(Event{Type: EventRunEnded, Subsystem: "cron", RunID: "r"})
+	s.Close(context.Background())
+	if n := target.hits.Load(); n != 0 {
+		t.Fatalf("redirect target got %d requests; the signed body must not follow a 3xx", n)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("endpoint hits = %d, want 1: a 3xx is not retryable", n)
+	}
+}

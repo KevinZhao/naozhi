@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/attachment"
 	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -30,8 +31,9 @@ const slackFileHost = "files.slack.com"
 // maxSlackImageBytes caps one inbound image, matching the other adapters.
 const maxSlackImageBytes = platform.MaxImageBytes
 
-// slackFileDownloadTimeout bounds one download, body included: a file at the
-// 32 MiB cap needs about 190 KB/s. Stop still cancels it through s.ctx.
+// slackFileDownloadTimeout bounds all of one message's downloads, bodies
+// included, so a slow file host holds a dispatch slot at most this long: the
+// 32 MiB aggregate cap needs about 190 KB/s. Stop still cancels through s.ctx.
 const slackFileDownloadTimeout = 3 * time.Minute
 
 // slackFileHTTPClient downloads uploads. It is separate from slackHTTPClient
@@ -60,23 +62,35 @@ func slackFileName(f slack.File) string {
 }
 
 // attachFiles downloads a file_share message's uploads under the per-message
-// count and aggregate byte caps. Supported images go to msg.Images; other
-// files go to msg.Files for dispatch to classify. Every upload that is not
-// delivered becomes a File carrying its Reject reason, so the user is told.
+// count and aggregate byte caps. Supported images go to msg.Images; files
+// ClassifyFile may accept go to msg.Files for dispatch to classify, and the
+// rest are refused without a download. Every upload that is not delivered
+// becomes a File carrying its Reject reason, so the user is told; downloads
+// still running when the per-message budget runs out fail.
 func (s *Slack) attachFiles(ctx context.Context, msg *platform.IncomingMessage, files []slack.File) {
-	total := 0
-	for i, f := range files {
+	budget := s.downloadTimeout
+	if budget <= 0 {
+		budget = slackFileDownloadTimeout
+	}
+	dlCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	total, downloads := 0, 0
+	for _, f := range files {
 		name := slackFileName(f)
 		reject := func(r platform.FileReject) {
 			msg.Files = append(msg.Files, platform.File{Name: name, Reject: r})
 		}
-		if i >= limits.MaxFileAttachmentsPerMessage {
-			reject(platform.FileRejectTooMany)
-			continue
-		}
 		isImage := platform.SupportedImageMIME(f.Mimetype)
 		if !isImage && platform.IsImageMIME(f.Mimetype) {
 			reject(platform.FileRejectImageUnsupported)
+			continue
+		}
+		if !isImage && !attachment.MaybeSupported(name, f.Mimetype) {
+			reject(platform.FileRejectUnsupported)
+			continue
+		}
+		if downloads >= limits.MaxFileAttachmentsPerMessage {
+			reject(platform.FileRejectTooMany)
 			continue
 		}
 		perFile, tooLarge := limits.MaxFileAttachmentBytes, platform.FileRejectTooLarge
@@ -92,7 +106,8 @@ func (s *Slack) attachFiles(ctx context.Context, msg *platform.IncomingMessage, 
 			reject(platform.FileRejectTotalTooLarge)
 			continue
 		}
-		data, err := s.downloadFile(ctx, f, min(perFile, remaining))
+		downloads++
+		data, err := s.downloadFile(dlCtx, f, min(perFile, remaining))
 		if err != nil {
 			if ctx.Err() != nil {
 				return

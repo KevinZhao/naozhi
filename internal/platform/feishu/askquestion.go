@@ -305,27 +305,32 @@ func (f *Feishu) dispatchCardAction(
 		AgentID: osutil.SanitizeForLog(val.AgentID, platform.AskIDMaxRunes),
 		// The user explicitly clicked the bot's card: bypass mention_only gating.
 		MentionMe: true,
+		AskerID:   val.AskerID,
 	}
-	// Best-effort edit of the original card; failures never block the answer.
+	// Best-effort edit of the original card once dispatch takes the answer;
+	// a refused click keeps the buttons (#3628), and a failed edit never
+	// blocks the answer.
 	if messageID != "" && f.cfg.AppID != "" {
 		// escapeMarkdown covers emphasis only, not C1/bidi/LS/PS.
 		safeText := osutil.SanitizeForLog(text, 1024)
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					slog.Debug("feishu card_action: edit panic recovered",
-						"msg_id", osutil.SanitizeForLog(messageID, 64), "panic", r)
+		msg.OnAccepted = func() {
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Debug("feishu card_action: edit panic recovered",
+							"msg_id", osutil.SanitizeForLog(messageID, 64), "panic", r)
+					}
+				}()
+				// Detached from the callback ctx, which may be cancelled as soon as
+				// the transport's outer handler returns.
+				editCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if err := f.EditMessage(editCtx, messageID, "✅ 已回答：**"+escapeMarkdown(safeText)+"**"); err != nil {
+					slog.Debug("feishu card_action: edit original card failed",
+						"msg_id", osutil.SanitizeForLog(messageID, 64), "err", err)
 				}
 			}()
-			// Detached from the callback ctx, which may be cancelled as soon as
-			// the transport's outer handler returns.
-			editCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := f.EditMessage(editCtx, messageID, "✅ 已回答：**"+escapeMarkdown(safeText)+"**"); err != nil {
-				slog.Debug("feishu card_action: edit original card failed",
-					"msg_id", osutil.SanitizeForLog(messageID, 64), "err", err)
-			}
-		}()
+		}
 	}
 	handler(ctx, msg)
 }

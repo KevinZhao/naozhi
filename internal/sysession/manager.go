@@ -540,7 +540,7 @@ func (m *Manager) recordRun(rec *daemonRecord, runID string, trigger DaemonTrigg
 		// counters alone.
 	}
 
-	m.emitRunEnded(rec.daemon.Name(), runID, dr.State, dr.DurationMS, dr.ErrorClass, dr.Trigger)
+	m.emitRunEnded(dr)
 }
 
 // flattenTickReport converts a TickReport into the Stats map shape

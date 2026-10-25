@@ -7,7 +7,6 @@
 package server
 
 import (
-	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -72,11 +71,9 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 
 	// cron and sysession share one relay, built in main.go before the Hub;
 	// per-subsystem WS payload selection happens inside hubBroadcaster.
+	// Outbound webhooks are bound first, in wireup.RunTelemetryRelays.
 	if hs.wiring.runTelemetry != nil {
-		hs.wiring.runTelemetry.Bind(runtelemetry.Tee(
-			newHubBroadcaster(hs.wiring.bcast),
-			newWebhookBroadcaster(hs.wiring.webhooks),
-		))
+		hs.wiring.runTelemetry.Bind(newHubBroadcaster(hs.wiring.bcast))
 	}
 }
 
@@ -88,12 +85,7 @@ func (s *Server) buildDashboard(hs *handlerSet) {
 // the other build steps, so nothing reaches them back through the Hub.
 func (s *Server) buildWSStack(w *wiring) *Hub {
 	w.bcast = newWSBroadcaster(newSubscriberRegistry())
-	// A nil *session.Router boxed into the interface would read non-nil.
-	var router turnRouter
-	if w.router != nil {
-		router = w.router
-	}
-	w.turns = turn.New(w.queue, turnSender{router: router, notify: w.bcast, prompts: w.scheduler})
+	w.turns = turn.New(w.queue, turnSender{router: w.router, notify: w.bcast, prompts: w.scheduler})
 	w.engine = newSendEngine(sendEngineOpts{
 		Turns:       w.turns,
 		Ctx:         s.appCtx,

@@ -143,13 +143,19 @@ func TestAuthz_AdminCommands(t *testing.T) {
 	ctx := context.Background()
 	before := deniedCount("fake:not_admin")
 
-	for _, text := range []string{`/cron add "@every 1h" ping`, "/CRON del abc", "/cd /tmp", "/project off"} {
+	// Only the first refusal is answered: these spend no rate token, so the
+	// deny throttle is what keeps a non-admin from farming replies (#3652).
+	for i, text := range []string{`/cron add "@every 1h" ping`, "/CRON del abc", "/cd /tmp", "/project off"} {
 		fp.replies = nil
 		if _, ok := d.prepareInbound(ctx, authzMsg("alice", "direct", text)); ok {
 			t.Errorf("%q from a non-admin was accepted", text)
 		}
-		if got := fp.lastReply(); got != notAdminReply {
-			t.Errorf("%q: reply = %q, want %q", text, got, notAdminReply)
+		want := ""
+		if i == 0 {
+			want = notAdminReply
+		}
+		if got := fp.lastReply(); got != want {
+			t.Errorf("%q: reply = %q, want %q", text, got, want)
 		}
 	}
 	if cron.addJobCalls+cron.deleteJobCalls != 0 {
@@ -314,6 +320,29 @@ func TestAdmit_DoesNotConsumeDedupAndNilPolicyAdmits(t *testing.T) {
 	open, _, _, _ := newAuthzDispatcher(t, nil)
 	if !open.Admit(ctx, authzMsg("", "direct", "")) {
 		t.Error("Admit refused with no policy")
+	}
+}
+
+// A non-admin's admin commands are answered once per window in a group
+// too, and the throttle is per sender: another allowed user is still told.
+func TestAuthz_NotAdminReplyThrottled(t *testing.T) {
+	p := aliceAndRoot()
+	p.Rules["fake"].Allowed["bob"] = struct{}{}
+	d, fp, _, cron := newAuthzDispatcher(t, p)
+	ctx := context.Background()
+
+	for range 5 {
+		d.prepareInbound(ctx, authzMsg("alice", "group", "/cron list"))
+	}
+	if n := countReplies(fp, notAdminReply); n != 1 {
+		t.Errorf("5 non-admin /cron got %d replies, want 1: %q", n, fp.allReplies())
+	}
+	d.prepareInbound(ctx, authzMsg("bob", "direct", "/cron list"))
+	if n := countReplies(fp, notAdminReply); n != 2 {
+		t.Errorf("bob's refusal was not answered: %q", fp.allReplies())
+	}
+	if cron.listJobsCalls != 0 {
+		t.Error("a non-admin /cron list reached the scheduler")
 	}
 }
 
