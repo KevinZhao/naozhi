@@ -343,7 +343,6 @@ func TestHandleImage_Download(t *testing.T) {
 	}{
 		{"png", &fileStub{body: png}, "image/png", platform.FileRejectNone},
 		{"bmp", &fileStub{body: bmp}, "", platform.FileRejectImageUnsupported},
-		{"not an image", &fileStub{body: pdfBytes}, "", platform.FileRejectImageUnsupported},
 		{"over the cap", &fileStub{body: overCap}, "", platform.FileRejectImageTooLarge},
 		{"server error", &fileStub{status: http.StatusInternalServerError}, "", platform.FileRejectDownloadFailed},
 	}

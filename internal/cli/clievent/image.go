@@ -16,14 +16,18 @@ const maxImageFileSize = 10 * 1024 * 1024 // 10MB
 
 // safeImageDirs are the only directory prefixes from which image files may be read.
 // This prevents prompt-injection attacks that trick the CLI into emitting arbitrary paths.
-// Each also appears symlink-resolved, since candidates are compared after
-// EvalSymlinks: on macOS /tmp is a link to /private/tmp. Resolved on first
-// use rather than at package init.
-var safeImageDirs = sync.OnceValue(func() []string { return resolveSafeDirs([]string{"/tmp/"}) })
+// /tmp also appears symlink-resolved, since candidates are compared after
+// EvalSymlinks: on macOS /tmp is a link to /private/tmp.
+var safeImageDirs = sync.OnceValue(func() []string {
+	dirs := []string{"/tmp/"}
+	if resolved, err := filepath.EvalSymlinks("/tmp"); err == nil && resolved != "/tmp" {
+		dirs = append(dirs, resolved+"/")
+	}
+	return dirs
+})
 
-// imagePathRe matches absolute file paths ending in the image extensions the
-// model accepts (png/jpeg/gif/webp, as platform.SupportedImageMIME).
-var imagePathRe = regexp.MustCompile(`(/\S+\.(?:png|jpg|jpeg|gif|webp))`)
+// imagePathRe matches absolute file paths ending in common image extensions.
+var imagePathRe = regexp.MustCompile(`(/\S+\.(?:png|jpg|jpeg|gif|webp|bmp))`)
 
 // ImagePath is an image path found in text by ExtractImagePaths.
 type ImagePath struct {
@@ -67,24 +71,6 @@ func ExtractImagePaths(text string) []ImagePath {
 	return valid
 }
 
-// resolveSafeDirs returns dirs (each ending in "/") followed by the
-// symlink-resolved form of each that differs, also ending in "/" so /tmpfoo
-// never matches /tmp. A dir that does not resolve keeps only its literal form.
-func resolveSafeDirs(dirs []string) []string {
-	out := append([]string(nil), dirs...)
-	for _, dir := range dirs {
-		resolved, err := filepath.EvalSymlinks(dir)
-		if err != nil {
-			continue
-		}
-		resolved = strings.TrimSuffix(resolved, "/") + "/"
-		if resolved != dir {
-			out = append(out, resolved)
-		}
-	}
-	return out
-}
-
 func isUnderSafeDir(path string) bool {
 	for _, dir := range safeImageDirs() {
 		if strings.HasPrefix(path, dir) {
@@ -108,6 +94,8 @@ func MimeFromPath(path string) string {
 		return "image/gif"
 	case ".webp":
 		return "image/webp"
+	case ".bmp":
+		return "image/bmp"
 	default:
 		return "image/png"
 	}
