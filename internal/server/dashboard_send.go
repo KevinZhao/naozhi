@@ -67,37 +67,21 @@ func rejectIfTooManyFields(w http.ResponseWriter, r *http.Request) bool {
 // engine methods now; the handler touches no engine field directly, and the
 // send_engine_ownership lint rule keeps it that way.
 type SendHandler struct {
-	nodeAccess    NodeAccessor
-	engine        *sendEngine
-	uploadStore   *uploadStore
-	uploadLimiter *ipLimiter     // per-IP upload rate limiter (10/min)
-	sendLimiter   *ipLimiter     // per-IP send rate limiter (30/min)
-	auth          *auth.Handlers // for isSecure(r) when minting the nz_anon cookie in no-token mode
-	trustedProxy  bool           // whether to trust X-Forwarded-For for client IP
-	orient        *orientConfig  // image auto-orientation; nil = feature off
+	nodeAccess   NodeAccessor
+	engine       *sendEngine
+	uploadStore  *uploadStore
+	auth         *auth.Handlers // for isSecure(r) when minting the nz_anon cookie in no-token mode
+	trustedProxy bool           // whether to trust X-Forwarded-For for client IP
+	orient       *orientConfig  // image auto-orientation; nil = feature off
 }
 
 func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
-	if h.sendLimiter != nil && !h.sendLimiter.AllowRequest(r) {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": sendRateLimitedMsg})
-		return
-	}
-
 	var key, text, node, workspace, resumeID, backend, accessProfile string
 	var images []clievent.Attachment
 	var fileIDs []string
 
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
-		// Inline multipart uploads bypass the uploadStore per-owner quota;
-		// gate them behind the dedicated uploadLimiter so a burst of
-		// multipart sends can't slip past at the (looser) sendLimiter rate.
-		// Without this, 30 req/min × 5 files × 10 MB = 1.5 GB/min of inline
-		// file bytes would be funneled into CLI stdin.
-		if h.uploadLimiter != nil && !h.uploadLimiter.AllowRequest(r) {
-			writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": uploadRateLimitedMsg})
-			return
-		}
 		// Shrink body cap to 22 MB (2× max inline file 10 MB + form overhead)
 		// and drop inline fan-out from 5→2 so authenticated users uploading
 		// many attachments per turn must route through /api/sessions/upload
@@ -344,15 +328,10 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 // Binding at creation time means a reload or a second browser before the first
 // send still spawns in the chosen cwd instead of the workspace root.
 //
-// Security parity with handleSend: same send rate limiter (so /bind is not a
-// cheaper override-flood vector), session key validation, allowedRoot
+// Security parity with handleSend: session key validation, allowedRoot
 // validation before persisting, and an empty chat-key prefix (":agent") is
 // refused. Remote-node sessions are a no-op.
 func (h *SendHandler) handleBind(w http.ResponseWriter, r *http.Request) {
-	if h.sendLimiter != nil && !h.sendLimiter.AllowRequest(r) {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": sendRateLimitedMsg})
-		return
-	}
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	var req struct {
 		Key       string `json:"key"`

@@ -40,38 +40,9 @@ type Handlers struct {
 	tzLabelHasVal bool
 
 	// transcriptSem is a process-wide cap on concurrent transcript requests
-	// (#798): each holds a 256 KB scanner buffer plus an 8 MB read budget, so the
-	// per-IP limiter alone lets N operators park N×8 MB. Excess requests get 503.
+	// (#798): each holds a 256 KB scanner buffer plus an 8 MB read budget, so
+	// without it N concurrent readers park N×8 MB. Excess requests get 503.
 	transcriptSem chan struct{}
-}
-
-// HasRunsLimiter / HasListLimiter / HasWriteLimiter / HasTranscriptLimiter
-// expose limiter nil-state for server's boot-time invariant check.
-func (h *Handlers) HasRunsLimiter() bool       { return h.deps.RateLimits.Runs != nil }
-func (h *Handlers) HasListLimiter() bool       { return h.deps.RateLimits.List != nil }
-func (h *Handlers) HasWriteLimiter() bool      { return h.deps.RateLimits.Write != nil }
-func (h *Handlers) HasTranscriptLimiter() bool { return h.deps.RateLimits.Transcript != nil }
-
-// RateLimits are the four per-IP budgets the cron endpoints need. They stay
-// FOUR limiters, not one: each guards a different cost shape, and sharing a
-// bucket would let one endpoint starve another into 429 — the reason
-// transcriptLimiter was split out of runsLimiter in the first place. What #2554
-// collapses is the Deps SURFACE (4 flat fields → 1 named group), not the
-// budgets.
-//
-// A nil limiter disables that gate, which is how partially-constructed test
-// fixtures work; the server's handlerSet.checkLimiters panics at boot if a
-// production wiring leaves one nil.
-type RateLimits struct {
-	// Runs caps /api/cron/runs and /runs/{run_id}.
-	Runs IPLimiter
-	// List caps GET /api/cron, whose cost grows with the number of jobs.
-	List IPLimiter
-	// Transcript has its own budget so transcript reads and run reads cannot
-	// starve each other.
-	Transcript IPLimiter
-	// Write caps the cron write/control endpoints (trigger, pause, delete, …).
-	Write IPLimiter
 }
 
 // Deps bundles all wiring for New.
@@ -81,9 +52,6 @@ type Deps struct {
 	// ClaudeDir is the absolute path to ~/.claude, used by HandleRunTranscript
 	// to locate a run's JSONL. Empty disables the endpoint (fallback:"missing").
 	ClaudeDir string
-	// RateLimits are the four per-IP budgets; a nil limiter disables that
-	// gate (test fixtures). See RateLimits for why they stay four.
-	RateLimits RateLimits
 	// TranscriptSemCap sizes transcriptSem; 0 leaves the cap off.
 	TranscriptSemCap int
 	// ValidateWS / ClassifyWSErr inject internal/server's validateWorkspace +

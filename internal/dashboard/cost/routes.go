@@ -9,7 +9,7 @@ package cost
 import "github.com/naozhi/naozhi/internal/dashboard/httputil"
 
 // Routes returns the endpoints this package owns. Cost ledger read API
-// (docs/rfc/cost-ledger.md §7): unit-bucketed and rate limited.
+// (docs/rfc/cost-ledger.md §7): unit-bucketed.
 //
 // Patterns must stay string literals: routes_snapshot_test.go reads them from
 // the AST as the anti-drift gate.

@@ -18,8 +18,7 @@ import (
 
 // maxUploadFileBytes caps a single uploaded file. 256 MiB is deliberately
 // generous (build artefacts / archives / model files pushed to a remote box).
-// The per-IP rate limiter (shared with files/exists) plus this byte cap and
-// the per-project uploadQuota are the only DoS guards; there is no GC reaper,
+// This byte cap and the per-project uploadQuota are the only DoS guards; there is no GC reaper,
 // so uploaded files persist until the operator deletes them.
 const maxUploadFileBytes = 256 << 20
 
@@ -140,11 +139,6 @@ func validUploadLeaf(raw string) (string, bool) {
 // Query: overwrite=1 replaces in place (O_TRUNC) instead of 409 (O_EXCL);
 // O_NOFOLLOW applies in both modes. Remote nodes are unsupported → 400.
 func (h *Handlers) HandleFilesUpload(w http.ResponseWriter, r *http.Request) {
-	// Rate-limit first — before parsing the (potentially 256 MiB) body.
-	if h.deps.FilesExistsLimiter != nil && !h.deps.FilesExistsLimiter.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "files/upload rate limit exceeded"})
-		return
-	}
 	if h.deps.ProjectMgr == nil {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
 		return

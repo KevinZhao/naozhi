@@ -34,10 +34,6 @@ type cronAttentionListResp struct {
 // queue (failed-transport / orphaned runs of side-effecting jobs). Returns an
 // empty items array (not 404) when the queue is empty.
 func (h *Handlers) HandleAttentionList(w http.ResponseWriter, r *http.Request) {
-	if h.deps.RateLimits.Runs != nil && !h.deps.RateLimits.Runs.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
-		return
-	}
 	if h.deps.Scheduler == nil {
 		httputil.WriteJSON(w, cronAttentionListResp{Items: []cronAttentionItemView{}})
 		return
@@ -61,10 +57,6 @@ func (h *Handlers) HandleAttentionList(w http.ResponseWriter, r *http.Request) {
 // HandleRunConfirm serves POST /api/cron/runs/{run_id}/confirm — the §7.4
 // `确认已完成` action: marks the run resolved without replaying. Idempotent.
 func (h *Handlers) HandleRunConfirm(w http.ResponseWriter, r *http.Request) {
-	if h.deps.RateLimits.Write != nil && !h.deps.RateLimits.Write.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
-		return
-	}
 	if h.deps.Scheduler == nil {
 		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
@@ -94,10 +86,6 @@ type cronReplayResp struct {
 // Stop-before-replay, so a run whose microVM cannot be confirmed dead returns
 // 409 (ErrStopUnconfirmed) and does NOT replay.
 func (h *Handlers) HandleRunReplay(w http.ResponseWriter, r *http.Request) {
-	if h.deps.RateLimits.Write != nil && !h.deps.RateLimits.Write.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
-		return
-	}
 	if h.deps.Scheduler == nil {
 		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return

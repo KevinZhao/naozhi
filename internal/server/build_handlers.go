@@ -34,12 +34,7 @@ func buildAuthHandlers(opts ServerOptions, cookieSecret []byte, cookieGen string
 	return auth.New(opts.DashboardToken, cookieSecret, cookieGen, opts.TrustedProxy)
 }
 
-// buildCronHandlers constructs CronHandlers with per-IP limiters gating the
-// cron endpoints: runs (1/s, burst 60 — a stolen token must not enumerate
-// the whole run history), list (2/s, burst 30 — the 1 Hz dashboard poll),
-// write/trigger/preview (1 per 2s, burst 6), transcript. All use
-// newIPLimiterWithCap so the LRU cap / idle TTL are pinned explicitly
-// (see cronLimiterMaxKeys).
+// buildCronHandlers constructs the dashboard cron handlers.
 func buildCronHandlers(opts ServerOptions, claudeDir string) *dashcron.Handlers {
 	// A nil Scheduler is the documented "cron disabled" state and dashcron
 	// nil-guards it in 16 places, so the typed nil must not be boxed (#2561).
@@ -48,59 +43,27 @@ func buildCronHandlers(opts ServerOptions, claudeDir string) *dashcron.Handlers 
 		sched = opts.Scheduler
 	}
 	return dashcron.New(dashcron.Deps{
-		Scheduler:   sched,
-		AllowedRoot: opts.AllowedRoot,
-		ClaudeDir:   claudeDir,
-		RateLimits: dashcron.RateLimits{
-			Runs: newIPLimiterWithCap(
-				rate.Every(time.Second), 60,
-				cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
-			),
-			List: newIPLimiterWithCap(
-				rate.Every(500*time.Millisecond), 30,
-				cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
-			),
-			Write: newIPLimiterWithCap(
-				rate.Every(2*time.Second), 6,
-				cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
-			),
-			Transcript: newIPLimiterWithCap(
-				rate.Every(10*time.Second), 12,
-				cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
-			),
-		},
+		Scheduler:        sched,
+		AllowedRoot:      opts.AllowedRoot,
+		ClaudeDir:        claudeDir,
 		TranscriptSemCap: cronTranscriptSemCap,
 		ValidateWS:       validateWorkspace,
 		ClassifyWSErr:    classifyWorkspaceErr,
 	})
 }
 
-// buildCostHandlers serves the cost ledger read API at the dashboard's 1 Hz
-// poll budget (2/s, burst 30); the ledger may be nil/disabled (503).
+// buildCostHandlers serves the cost ledger read API; the ledger may be
+// nil/disabled (503).
 func buildCostHandlers(opts ServerOptions, router *session.Router) *dashcost.Handlers {
 	return dashcost.New(dashcost.Deps{
 		Ledger: router.Runs().CostLedger(),
 		Budget: opts.IMBudget,
-		Limiter: newIPLimiterWithCap(
-			rate.Every(500*time.Millisecond), 30,
-			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
-		),
 	})
 }
 
 // cronTranscriptSemCap caps in-flight cron transcript reads; the audio
 // transcribe path keeps its own semaphore.
 const cronTranscriptSemCap = 8
-
-// cronLimiterMaxKeys / cronLimiterTTL pin the LRU cap + idle TTL for the
-// cron-handler limiters. A small LRU is a DDoS soft floor: a burst of fresh
-// (XFF-spoofed) IPs evicts the oldest — i.e. legitimately rate-limited —
-// entries, which come back unthrottled. 8192 keys ≈ 1 MiB worst case; 5m
-// idle is well above the 1 Hz poll cadence (#636).
-const (
-	cronLimiterMaxKeys = 8192
-	cronLimiterTTL     = 5 * time.Minute
-)
 
 // buildTranscribeHandler constructs the speech-to-text handler with a
 // per-IP rate limiter (5/min) and a fixed-cap concurrency semaphore, so a
@@ -180,10 +143,7 @@ func (a takeoverLeaseAdapter) Takeover(ctx context.Context, sessionID, cwd strin
 func (a takeoverLeaseAdapter) Release() { a.lease.Release() }
 
 // buildProjectHandlers wires the dashboard project-config + project-files
-// endpoints. Both per-IP limiters are tighter than the cron set because both
-// paths touch disk on every call: files/exists 10/min burst 10 (same DoS
-// class as upload); PUT config 5/s burst 5 (persists to disk + WS fan-out).
-// The Hub does not exist yet at this point; registerDashboard wires the
+// endpoints. The Hub does not exist yet at this point; registerDashboard wires the
 // base context at construction via Deps.BaseCtx (#650, #2552).
 func buildProjectHandlers(
 	opts ServerOptions,
@@ -207,14 +167,12 @@ func buildProjectHandlers(
 		plannerResolver = resolver
 	}
 	return dashproject.New(dashproject.Deps{
-		BaseCtx:            baseCtx,
-		ProjectMgr:         projectStore,
-		Router:             projectRouter{opts.Router},
-		Resolver:           plannerResolver,
-		NodeAccess:         nodeAccess,
-		NodeCache:          nodeCache,
-		FilesExistsLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, opts.TrustedProxy),
-		ConfigPutLimiter:   newIPLimiterWithProxy(rate.Every(200*time.Millisecond), 5, opts.TrustedProxy),
+		BaseCtx:    baseCtx,
+		ProjectMgr: projectStore,
+		Router:     projectRouter{opts.Router},
+		Resolver:   plannerResolver,
+		NodeAccess: nodeAccess,
+		NodeCache:  nodeCache,
 		// Process-local (resets on restart); not a filesystem quota.
 		UploadQuotaBytes: defaultUploadQuotaBytes,
 		PublicTmpEnabled: opts.Features.PublicTmp,

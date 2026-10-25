@@ -80,16 +80,6 @@ type Deps struct {
 	Resolver   PlannerKeyResolver
 	NodeAccess NodeAccessor
 	NodeCache  NodeCacheReader
-	// FilesExistsLimiter caps /api/projects/files/exists per caller: the
-	// endpoint fans out up to maxExistsPaths stats within fileStatTimeout, so
-	// unmetered calls let a post-auth attacker tie up workers on slow trees.
-	// Mirrors the uploadLimiter policy (≈10/min). Nil in hand-built test
-	// Handlers; HandleFilesExists nil-guards.
-	FilesExistsLimiter IPLimiter
-	// ConfigPutLimiter caps PUT /api/projects/config per IP: each write hits
-	// disk and fans out a WS update to every dashboard client. 5/sec burst 5
-	// is far above interactive saves but below abuse rates. Nil-safe in tests.
-	ConfigPutLimiter IPLimiter
 	// PublicTmpEnabled gates the __public_tmp__ pseudo-project (#646). When
 	// false (default) it is rejected as "project not found" like any missing
 	// project, so multi-user deployments cannot enumerate / preview arbitrary
@@ -234,13 +224,6 @@ func (h *Handlers) HandleConfigGet(w http.ResponseWriter, r *http.Request) {
 
 // HandleConfigPut serves PUT /api/projects/config?name=...
 func (h *Handlers) HandleConfigPut(w http.ResponseWriter, r *http.Request) {
-	// Rate-limit before any work: disk write + dashboard-wide WS fan-out is
-	// otherwise unmetered for any authenticated caller. Nil-guarded for tests.
-	if h.deps.ConfigPutLimiter != nil && !h.deps.ConfigPutLimiter.AllowRequest(r) {
-		w.Header().Set("Retry-After", "1")
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "config update rate limit exceeded"})
-		return
-	}
 	name := r.URL.Query().Get("name")
 	if err := validateProjectName(name); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -411,12 +394,6 @@ func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) 
 	slog.Info("planner restarted", "project", name)
 
 	httputil.WriteJSON(w, map[string]string{"status": "restarted"})
-}
-
-// HasFilesExistsLimiter reports whether FilesExistsLimiter has been wired;
-// exposed for the server-package test pinning that server.New wires it.
-func (h *Handlers) HasFilesExistsLimiter() bool {
-	return h.deps.FilesExistsLimiter != nil
 }
 
 // ContractProjectsEntry exposes the /api/projects entry wire struct for

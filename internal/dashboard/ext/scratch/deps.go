@@ -6,7 +6,6 @@ import (
 	"context"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/dashboard/contracts"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
@@ -35,6 +34,3 @@ type SourceSession interface {
 	EventEntriesSince(afterMS int64) []clievent.EventEntry
 	EventLastN(n int) []clievent.EventEntry
 }
-
-// IPLimiter aliases the shared dashboard contract (#2285).
-type IPLimiter = contracts.IPLimiter

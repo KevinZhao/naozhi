@@ -20,13 +20,10 @@ import (
 func newScratchTestServer(t *testing.T) (*Server, *handlerSet) {
 	t.Helper()
 	srv, hs := newTestServerHS(&mockPlatform{})
-	// Construction already created the pool + handler; override the rate
-	// limiter with a permissive one so open/close/promote cycles in a single
-	// test don't hit the 5/min cap.
+	// Construction already created the pool + handler.
 	if hs.scratchH == nil {
 		t.Fatal("expected scratch handler to be wired by buildServer")
 	}
-	hs.scratchH.SetOpenLimitForTest(nil)
 	return srv, hs
 }
 

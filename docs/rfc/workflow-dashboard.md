@@ -2060,10 +2060,9 @@ v4 的 `GET /api/sessions/workflow_agent`（per-agent 预览）连同它专用�
   3. `task_id` 过 `^[a-z0-9]{1,32}$`（同 `agentevents/handler.go:35`）、`rows` / `since` / `epoch`
      形态合法且不互斥冲突，否则 400；
   4. `router.SessionFor(key) == nil`、该 session 没有 board（nil，§5.8.1）或 board 里没有此 task → 404。
-- **限流**：`apiChain` 本身不限流（`sendLimiter` 只挂在 send/bind/upload，`build_dashboard.go:36`、
-  `dashboard_send.go:79,349`）。仿 `ext/memory`（`handler.go:41,68-69,144`）注入 `IPLimiter` 依赖，
-  per-IP 令牌桶（10 rps / burst 20，与 memory 同参），超限 429（PR-10：限流先于其余校验，响应带 `Retry-After: 1`，客户端的退避取它与自己的指数退避较大者；`New` 在没有 limiter 时 panic，不让一个读盘端点因漏接线而不限流）。没配 TrustedProxy 的反向代理后面，所有 tab 共用一个 IP 的桶；
-  客户端遇 429 的处理见 §6.1 客户端表（保持状态、退避重试）。
+- **限流**：不限流。原先的 per-IP 令牌桶（10 rps / burst 20，`New` 缺 limiter 时 panic）已随
+  "已鉴权 dashboard 接口不做 per-IP 限流"一并删除——持 token 的调用方只有 owner 本人。客户端遇 429 的
+  处理（§6.1 客户端表：保持状态、退避重试）保留，作为反向代理等外层返回 429 时的兜底。
 - **404 只表示"资源不存在"**（session、task、remote node，即上面的第 2、4 步）。校验之后的磁盘失败（RunDir 未解析、路径越界、
   文件缺失、不是 regular file、超限）**不是** 404：返回 200 不带 result / logs 并置 `result_unavailable:true`。v3 把它们一律折叠为 404，
   而客户端遇 404 会删除条目（§6.1）——一个可选的磁盘产物

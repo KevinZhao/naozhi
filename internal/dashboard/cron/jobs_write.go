@@ -48,12 +48,6 @@ func writeAddUpdateRejection(w http.ResponseWriter, err error, fallback string) 
 
 // POST /api/cron — create a new cron job from dashboard.
 func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
-	// Per-IP rate limit: mutations write cron_jobs.json and mutate the scheduler
-	// map, so a stolen token must not amplify IO damage. Nil-guarded for tests.
-	if h.deps.RateLimits.Write != nil && !h.deps.RateLimits.Write.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
-		return
-	}
 	if h.deps.Scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
@@ -193,11 +187,6 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 
 // DELETE /api/cron?id=xxx — delete a cron job by exact ID.
 func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
-	// Per-IP write rate limit (see HandleCreate). Nil-guarded for tests.
-	if h.deps.RateLimits.Write != nil && !h.deps.RateLimits.Write.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
-		return
-	}
 	if h.deps.Scheduler == nil {
 		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
@@ -243,11 +232,6 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/cron/pause — pause a cron job by exact ID.
 func (h *Handlers) HandlePause(w http.ResponseWriter, r *http.Request) {
-	// Per-IP write rate limit (see HandleCreate). Nil-guarded for tests.
-	if h.deps.RateLimits.Write != nil && !h.deps.RateLimits.Write.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
-		return
-	}
 	if h.deps.Scheduler == nil {
 		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
@@ -295,11 +279,6 @@ func (h *Handlers) HandlePause(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/cron/resume — resume a paused cron job by exact ID.
 func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
-	// Per-IP write rate limit (see HandleCreate). Nil-guarded for tests.
-	if h.deps.RateLimits.Write != nil && !h.deps.RateLimits.Write.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
-		return
-	}
 	if h.deps.Scheduler == nil {
 		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
@@ -346,12 +325,6 @@ func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/cron/trigger — manually trigger a cron job execution (for debugging).
 func (h *Handlers) HandleTrigger(w http.ResponseWriter, r *http.Request) {
-	// Per-IP rate limit: each call spawns the job's claude CLI subprocess and
-	// may emit IM notifications — a loop-trigger amplification vector.
-	if h.deps.RateLimits.Write != nil && !h.deps.RateLimits.Write.AllowRequest(r) {
-		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
-		return
-	}
 	if h.deps.Scheduler == nil {
 		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
