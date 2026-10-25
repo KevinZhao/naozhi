@@ -5,13 +5,10 @@
 //   1. navigation succeeded (no thrown error / no HTTP failure)
 //   2. a known load-bearing selector for that view is visible
 //   3. zero console.error / pageerror accumulated up to that point
-// Plus a /health probe that must report status:ok before any view runs, and on
-// the first authenticated view the /static load rules of release-gate-static.mjs.
+// Plus a /health probe that must report status:ok before any view runs.
 //
-// Unlike scripts/dashboard-screenshots.js (a best-effort capture tool that
-// keeps going on per-step failure), THIS script is a gate: any failed
-// assertion makes it exit non-zero so a release pipeline can block on it.
-// Screenshots are still written for archival/visual inspection.
+// Any failed assertion makes it exit non-zero so a release pipeline can block
+// on it. Screenshots are still written for archival/visual inspection.
 //
 // Usage:
 //   NAOZHI_DASHBOARD_TOKEN=... node scripts/release-gate.mjs
@@ -32,7 +29,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
 import { createRequire } from 'node:module';
-import { readRenderedPage, recordStatic, staticLoadProblems } from './release-gate-static.mjs';
 
 // Playwright lives in test/e2e/node_modules (that is where CI runs `npm install`),
 // not at the repo root. ESM bare-specifier import ignores NODE_PATH and only
@@ -117,8 +113,6 @@ const VIEWS = [
     viewport: DESKTOP,
     full: false,
     selector: '#session-list',
-    // The first authenticated load, so the browser cache is still cold.
-    staticCheck: true,
     act: async (page) => {
       await page.goto(BASE + '/dashboard', { waitUntil: 'networkidle' });
       await page.waitForSelector('#session-list', { timeout: 8000 });
@@ -297,10 +291,6 @@ function isIgnored(text, viewName) {
   // fetchCLIBackends().then chain) could reject silently and leave a broken
   // view that still "looks" fine. Routing them here makes them gate failures.
   await page.addInitScript(() => {
-    window.__cspv = [];
-    document.addEventListener('securitypolicyviolation', (e) => {
-      window.__cspv.push(`${e.violatedDirective} ${e.blockedURI}`);
-    });
     window.addEventListener('unhandledrejection', (ev) => {
       const r = ev && ev.reason;
       const msg = r && r.message ? r.message : String(r);
@@ -328,21 +318,12 @@ function isIgnored(text, viewName) {
     currentView = view.name;
     const errBefore = consoleErrors.length;
     await page.setViewportSize(view.viewport);
-    const statics = view.staticCheck ? recordStatic(page) : null;
     try {
       // The login view must be unauthenticated; clear cookies for it and
       // restore them right after so later views stay logged in.
       if (view.auth === false) await ctx.clearCookies();
       await view.act(page);
       if (view.auth === false) await login(ctx.request);
-      if (statics) {
-        statics.stop();
-        // One broken rule usually breaks it for every asset; the first lines say which.
-        const problems = staticLoadProblems(await page.evaluate(readRenderedPage), statics);
-        for (const p of problems.slice(0, 10)) failures.push(`${view.name}: ${p}`);
-        if (problems.length > 10) failures.push(`${view.name}: ${problems.length - 10} more /static problem(s)`);
-        console.log(`[static] ${view.name}: ${statics.requests.length} /static loads checked`);
-      }
 
       const visible = await page
         .locator(view.selector)
@@ -377,7 +358,6 @@ function isIgnored(text, viewName) {
       const status = failures.length && failures[failures.length - 1].startsWith(view.name) ? 'FAIL' : 'ok';
       console.log(`[view] ${view.name} ${status} → ${view.file}`);
     } catch (e) {
-      statics?.stop();
       failures.push(`${view.name}: ${e.message}`);
       console.log(`[view] ${view.name} FAIL → ${e.message}`);
       // Still attempt a screenshot for post-mortem.

@@ -1,10 +1,8 @@
 // shell.js — the upcall table: the root modules' orchestration functions
 // that a module they import needs to call back into (a plain import would be
-// a cycle). A leaf (caps.leaves) with no imports. Each root fills its own
+// a cycle). A leaf with no imports. Each root fills its own
 // group of slots once at load with registerShell({...}); a lower module calls
-// shell.X(...). js-ratchet holds each slot to a root's own top-level
-// function or const that does more than forward, and each user to a module
-// the root reaches through imports (else it should import the function).
+// shell.X(...).
 export const shell = Object.seal({
   renderMainHeader: null,
   renderMainShell: null,

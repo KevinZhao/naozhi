@@ -86,7 +86,7 @@ test('the table is sealed: no slot can be added past registerShell', async () =>
 test("each shell root registers exactly one group, and every group has its root", async () => {
   const fs = await import('node:fs');
   const { SHELL_GROUPS } = await fresh();
-  const roots = JSON.parse(fs.readFileSync(new URL('./js-ratchet.caps.json', import.meta.url), 'utf8')).shellRoots;
+  const roots = ['cron_view.js', 'dashboard.js', 'event_stream.js', 'session_list.js'];
   const registered = roots.map((f) => {
     const src = fs.readFileSync(new URL('../internal/server/static/' + f, import.meta.url), 'utf8');
     const calls = [...src.matchAll(/^registerShell\(\{([^}]*)\}\);$/gm)];
