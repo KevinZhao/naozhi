@@ -57,3 +57,14 @@ func (d *Dispatcher) scopedSession(msg platform.IncomingMessage, key string) boo
 	chatID := d.sessionChatID(msg)
 	return chatID != msg.ChatID && strings.HasPrefix(key, sessionkey.ChatKey(msg.Platform, msg.ChatType, chatID)+":")
 }
+
+// askerOf is who alone may answer a question card asked on key for msg:
+// its sender when key is that member's own session (GroupScopeUser), where
+// anyone else's click would route to their own; "" when the session is
+// shared, by the chat, a thread or a project's planner.
+func (d *Dispatcher) askerOf(msg platform.IncomingMessage, key string) string {
+	if d.groupScope != GroupScopeUser || !d.scopedSession(msg, key) {
+		return ""
+	}
+	return msg.UserID
+}

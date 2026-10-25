@@ -48,6 +48,12 @@ func buildServer(opts ServerOptions) *Server {
 // test a different object. This is the seam for that, and the only reason it
 // returns two values.
 func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
+	// The one statement of "Router is required" (#3638): nothing below
+	// nil-checks the router, so fail here, before any side effect, rather than
+	// at the first dereference deep in a build step.
+	if opts.Router == nil {
+		panic("server: ServerOptions.Router is required")
+	}
 	addr := opts.Addr
 	router := opts.Router
 	platforms := opts.Platforms
@@ -117,17 +123,12 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		runTelemetry:  opts.Relays.RunTelemetry,
 	}
 
-	// The one typed-nil unwrap for the runtime router views: a nil
-	// *session.Router boxed into serverRouter / healthRouter would read
-	// non-nil and defeat every `router != nil` guard behind them.
-	srvRouter, healthR := routerViews(router)
-
 	s := &Server{
 		addr:             addr,
 		mux:              http.NewServeMux(),
 		shutdownComplete: make(chan struct{}),
 		platforms:        platforms,
-		router:           srvRouter,
+		router:           router,
 		logger:           opts.Logger,
 		claudeDir:        claudeDir,
 		noOutputTimeout:  opts.Watchdog.NoOutput,
@@ -219,7 +220,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	// argument rather than a field back-filled from Start.
 	s.dispatcher = s.buildDispatcher(w)
 
-	hs.healthH = buildHealthHandler(opts, s, w, healthR)
+	hs.healthH = buildHealthHandler(opts, s, w, router)
 
 	s.attachReverseNodeServer(opts.Remote.ReverseServer)
 
@@ -236,15 +237,6 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	s.registerDashboard(hs)
 
 	return s, hs
-}
-
-// routerViews boxes r into the runtime router interfaces, leaving both nil
-// interfaces when r is nil.
-func routerViews(r *session.Router) (serverRouter, healthRouter) {
-	if r == nil {
-		return nil, nil
-	}
-	return r, r
 }
 
 // warnUnsetAllowedRoot reports an unset allowed_root, the one
@@ -268,7 +260,6 @@ func warnUnsetAllowedRoot(opts ServerOptions) {
 // handlers exist, so the fan-out is never half-wired while WarmHistoryCache
 // runs.
 func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore *discovery.RetiredStore, agentIDs []string, tag string) *dashsession.Handlers {
-	router := w.router
 	// Typed-nil unwrap before the interface boxing (#2561). dashsession's Deps
 	// fields became consumer-side interfaces, and dashsession nil-guards three
 	// of them (projectMgr ×3, retiredStore ×5, router ×1). Assigning a nil
@@ -285,14 +276,10 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 	if retiredStore != nil {
 		retiredReader = retiredStore
 	}
-	var routerView dashsession.RouterView
-	if router != nil {
-		routerView = sessionRouterView{router}
-	}
 	sessionH := dashsession.New(dashsession.Deps{
 		// /api/sessions snapshot enrichment goes through the hub's tailer registry.
 		SnapshotEnricher: s.hub.enrichSnapshot,
-		Router:           routerView,
+		Router:           sessionRouterView{w.router},
 		ProjectMgr:       projectSrc,
 		Scheduler:        w.scheduler,
 		CronSessions:     w.scheduler,

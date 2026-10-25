@@ -217,3 +217,74 @@ test.describe('a full repaint of the session on screen keeps the reader\'s posit
     await ctx.close();
   });
 });
+
+// An agent drill-in owns the pane: the session's snapshot is taken on the way
+// in and nothing the session's stream paints may land in the agent's pane.
+test.describe('an agent drill-in keeps the session\'s pane and position apart', () => {
+  let mock;
+  const agentPage = page30(Date.now()).map((e) => ({ ...e, uuid: 'ag-' + e.uuid }));
+  test.beforeAll(async () => { mock = await startMockServer({ ws: true, agentEvents: { t1: agentPage } }); });
+  test.afterAll(() => mock.server.close());
+
+  // drillIn opens agent t1 and parks the reader up in its pane.
+  async function drillIn(page) {
+    await page.evaluate(() => /** @type {any} */ (window).nz.views.agent.switchTo('t1'));
+    await page.waitForSelector('#events-scroll .event[data-uuid="ag-a29"]');
+    await page.evaluate(() => { /** @type {HTMLElement} */ (document.getElementById('events-scroll')).scrollTop = 300; });
+  }
+
+  test('a session left while drilled in comes back where its reader was (#3697)', async ({ browser }) => {
+    const { ctx, page, conn, errors, events } = await open(browser, mock);
+    const anchor = await scrollUp(page);
+    await drillIn(page);
+    await page.click(`.session-card[data-key="${KEY_B}"]`);
+    await expect.poll(() => subs(conn, KEY_B).length).toBe(1);
+    await page.click(`.session-card[data-key="${KEY_A}"]`);
+    await expect.poll(() => subs(conn, KEY_A).length).toBe(2);
+    conn.send({ type: 'subscribed', key: KEY_A });
+    conn.send({ type: 'history', key: KEY_A, initial: true, events });
+    await page.waitForSelector('#events-scroll .event[data-uuid="a29"]');
+    await frames(page);
+    expect(await scrollTop(page), 'not the top an agent anchor missing from the page sends it to').toBeGreaterThan(0);
+    expect(await offsetOf(page, anchor.uuid)).toBe(anchor.offset);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  test('re-picking the session while drilled in goes back to it', async ({ browser }) => {
+    const { ctx, page, conn, errors, events } = await open(browser, mock);
+    await drillIn(page);
+    await page.click(`.session-card[data-key="${KEY_A}"]`);
+    await expect.poll(() => subs(conn, KEY_A).length).toBe(2);
+    conn.send({ type: 'subscribed', key: KEY_A });
+    conn.send({ type: 'history', key: KEY_A, initial: true, events });
+    await page.waitForSelector('#events-scroll .event[data-uuid="a29"]');
+    await expect(page.locator('#agent-breadcrumb')).toBeHidden();
+    expect(conn.messages.filter((m) => m.type === 'agent_unsubscribe' && m.task_id === 't1').length).toBe(1);
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+
+  test('a resubscribe while drilled in does not paint the session over the agent (#3698)', async ({ browser }) => {
+    const { ctx, page, conn, errors, events } = await open(browser, mock);
+    await drillIn(page);
+    const before = subs(conn, KEY_A).length;
+    conn.send({ type: 'session_state', key: KEY_A, node: 'local', state: 'ready', reason: 'subscription_timeout' });
+    await page.waitForFunction(() => sessionStream.subscribedKey === null);
+    conn.send({ type: 'sessions_update' });
+    await expect.poll(() => subs(conn, KEY_A).length).toBe(before + 1);
+    conn.send({ type: 'subscribed', key: KEY_A });
+    conn.send({ type: 'history', key: KEY_A, initial: true, events });
+    await page.waitForFunction(() => !sessionStream._initialSubscribe);
+    const T = events[events.length - 1].time + 1000;
+    conn.send({ type: 'history', key: KEY_A, events: [{ type: 'text', detail: 'backfill', time: T, uuid: 'a30' }] });
+    conn.send({ type: 'agent_event', key: KEY_A, task_id: 't1', event: { type: 'text', detail: 'agent live', time: T + 1, uuid: 'ag-live' } });
+    await page.waitForSelector('#events-scroll .event[data-uuid="ag-live"]');
+    await frames(page);
+    expect(await page.locator('#events-scroll .event[data-uuid^="a"]:not([data-uuid^="ag-"])').count(), 'no session bubble in the agent pane').toBe(0);
+    await expect(page.locator('#events-scroll > .event[data-uuid="ag-a0"]')).toHaveCount(1);
+    await expect(page.locator('#agent-breadcrumb')).toBeVisible();
+    expect(errors).toEqual([]);
+    await ctx.close();
+  });
+});

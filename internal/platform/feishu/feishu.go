@@ -238,6 +238,9 @@ type Feishu struct {
 	botOpenID          string
 	lastBotInfoFetchNs int64 // unix nanos of the last fetch attempt; rate-limits self-heal
 
+	// unsupportedNotices rate-limits the unsupported-message-type notice per chat.
+	unsupportedNotices noticeThrottle
+
 	// insecureWebhookWarnOnce emits one runtime SECURITY error on the first
 	// live delivery in verification_token-only mode — traffic-correlated and
 	// harder to miss than the boot Warn; Once prevents log amplification (#1724).

@@ -713,11 +713,10 @@ function selectSession(key, node) {
   node = node || 'local';
   resetTurnState();
   // Close any open agent drill-in view before the selectedKey flips
-  // (RFC v4 agent-team-ui §3.6.6). Must run BEFORE saveScrollPos so the
-  // agent-view scroll snapshot still keys off the old session id.
-  if (nzViews.agent) {
-    nzViews.agent.onSessionSwitch(key, node);
-  }
+  // (RFC v4 agent-team-ui §3.6.6). Its pane is the agent's: the session keeps
+  // the scroll snapshot switchTo took on the way in (#3697).
+  const drilledIn = !!nzViews.agent?.activeTaskID();
+  if (nzViews.agent) nzViews.agent.onSessionSwitch();
   // Recent session card click → trigger resume flow
   // Discovered session card click → trigger preview flow
   // Save draft for current session before switching
@@ -727,7 +726,7 @@ function selectSession(key, node) {
     if (draft) perSession.drafts[selection.key] = draft;
     else delete perSession.drafts[selection.key];
     // 同时快照当前会话的滚动位置，回来时恢复
-    saveScrollPos(selection.key, selection.node);
+    if (!drilledIn) saveScrollPos(selection.key, selection.node);
   }
   if (isDiscoveredKey(key)) {
     const d = findDiscovered(parseDiscoveredPid(key), node);

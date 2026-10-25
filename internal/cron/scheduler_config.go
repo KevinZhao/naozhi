@@ -152,6 +152,9 @@ const (
 	TurnCauseResumeUnavailable  TurnCause = "resume_unavailable"
 	TurnCauseCLIConfig          TurnCause = "cli_config"
 	TurnCauseCLIMissingRuntime  TurnCause = "cli_missing_runtime"
+	// TurnCauseCLIAborted is a turn claude ended as aborted_* without naozhi
+	// asking: the result text, if any, is only part of an answer.
+	TurnCauseCLIAborted TurnCause = "cli_aborted"
 )
 
 // TurnFailedError is ErrTurnFailed with the cause the session side found;

@@ -47,6 +47,20 @@ func TestNewWithOptions_NilMapsTolerated(t *testing.T) {
 	}
 }
 
+// A nil Router panics at the constructor entry, naming the field (#3638).
+func TestNewWithOptions_NilRouterPanicsAtEntry(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("buildServerWithHandlers(ServerOptions{}) did not panic")
+		}
+		if msg, _ := r.(string); !strings.Contains(msg, "Router is required") {
+			t.Fatalf("panic = %v, want it to name the missing Router", r)
+		}
+	}()
+	buildServerWithHandlers(ServerOptions{Addr: ":0"})
+}
+
 // TestNewWithOptions_FieldsRoundTrip pins the contract that ServerOptions
 // fields surface verbatim on the resulting *Server. Replaces the prior
 // dual-constructor equivalence test now that the legacy positional-arg

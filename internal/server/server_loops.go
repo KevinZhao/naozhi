@@ -93,9 +93,7 @@ func (s *Server) projectScanTick() {
 		s.log().Info("project list changed", "count", len(newNames))
 		// The dashboard gates its re-render on stats.version, so bump before
 		// broadcasting or the sidebar never picks up the change.
-		if s.router != nil {
-			s.router.BumpVersion()
-		}
+		s.router.BumpVersion()
 		s.hub.bcast.BroadcastSessionsUpdate()
 	}
 }

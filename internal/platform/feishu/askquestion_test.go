@@ -6,9 +6,11 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 func TestBuildQuestionCardJSON_Shape(t *testing.T) {
@@ -503,5 +505,32 @@ func TestDispatchCardAction_CarriesAgentID(t *testing.T) {
 	f.dispatchCardAction(context.Background(), payload, "oc_123", "", "direct", "ou_user", handler)
 	if got.AgentID != "code-reviewer" {
 		t.Errorf("IncomingMessage.AgentID = %q, want code-reviewer (#2148)", got.AgentID)
+	}
+}
+
+// TestDispatchCardAction_EditsCardOnlyOnceAccepted: the card is marked
+// answered only when dispatch reports the click accepted; a click it refuses
+// (im_access, rate limit, budget, not the asker) leaves the buttons (#3628).
+// The asker in the value reaches dispatch, which judges it.
+func TestDispatchCardAction_EditsCardOnlyOnceAccepted(t *testing.T) {
+	t.Parallel()
+	f, rec := newSendFeishu(t, 0)
+	var got platform.IncomingMessage
+	val := platform.AskAnswerPayload{Kind: platform.AskAnswerKind, Label: "A", AskerID: "ou_asker"}
+	f.dispatchCardAction(context.Background(), val, "oc_1", "om_card", "group", "ou_other",
+		func(_ context.Context, m platform.IncomingMessage) { got = m })
+	if got.AskerID != "ou_asker" || got.UserID != "ou_other" {
+		t.Errorf("dispatched asker %q user %q, want ou_asker / ou_other", got.AskerID, got.UserID)
+	}
+	if posts := rec.all(); len(posts) != 0 {
+		t.Fatalf("card edited before dispatch accepted the click: %+v", posts)
+	}
+	if got.OnAccepted == nil {
+		t.Fatal("no OnAccepted: the card cannot wait for dispatch's verdict")
+	}
+	got.OnAccepted()
+	testhelper.Eventually(t, func() bool { return len(rec.all()) == 1 }, 5*time.Second, "card edit after acceptance")
+	if p := rec.all()[0]; p.path != "/open-apis/im/v1/messages/om_card" {
+		t.Errorf("edit went to %q, want the card", p.path)
 	}
 }

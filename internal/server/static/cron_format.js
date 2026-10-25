@@ -72,7 +72,8 @@ export function formatWhenColloquial(ms) {
 
 // formatAgoColloquial — past epoch-ms → short Chinese "刚刚 / 3 分钟前 /
 // 2 小时前 / 昨天 HH:MM / 3 天前". Uses calendar days so "昨天" means
-// yesterday's date, not 24-48h ago (a 25h-old run from 01:00 is 前天).
+// yesterday's date, not 24-48h ago (at 01:00 a 25h-old run is from 00:00
+// yesterday, so 昨天 00:00); two or more days back is "N 天前".
 export function formatAgoColloquial(ms) {
   if (!ms) return '';
   const now = Date.now();

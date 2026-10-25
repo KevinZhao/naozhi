@@ -1506,11 +1506,10 @@ function renderCronPanel() {
 // drags the sidebar resizer, opens devtools, rotates the device, or
 // resizes the window, so the layout always reflects reality.
 //
-// Idempotent: stores the observer on the body element via a Symbol-
-// keyed property so re-mounts (renderCronPanel after fetchCronJobs)
-// don't pile up observers. Falls back to a one-shot resize listener
-// in browsers without ResizeObserver (none we ship today, but cheap
-// insurance).
+// Idempotent: stores the observer on the body element as `_cronLayoutObs`
+// so re-mounts (renderCronPanel after fetchCronJobs) don't pile up
+// observers. Falls back to a one-shot resize listener in browsers without
+// ResizeObserver (none we ship today, but cheap insurance).
 function setupCronLayoutObserver() {
   const body = /** @type {HTMLElement & {_cronLayoutObs?: ResizeObserver}} */ (document.querySelector('.cron-detail-body'));
   if (!body) return;

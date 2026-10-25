@@ -51,23 +51,6 @@ func TestHandleReadyz_OKWhenWired(t *testing.T) {
 	}
 }
 
-// TestHandleReadyz_FailsWhenRouterNil verifies the readiness gate fails
-// closed when the constructor-level wiring is incomplete — operators
-// must see a 503 (LB withdraws traffic) rather than a misleading 200.
-func TestHandleReadyz_FailsWhenRouterNil(t *testing.T) {
-	h := &HealthHandler{router: nil}
-	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
-	w := httptest.NewRecorder()
-	h.handleReadyz(w, req)
-
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("status = %d, want 503", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "not ready") {
-		t.Errorf("body = %q, want contains \"not ready\"", w.Body.String())
-	}
-}
-
 // TestHandleLivez_NoAuthRequired confirms /livez bypasses the auth gate —
 // the K8s liveness probe carries no credentials and a 401/403 here would
 // trigger a restart loop the same way a 5xx would.
