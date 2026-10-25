@@ -1,7 +1,7 @@
+// @ts-check
 // ask_card.js — the AskUserQuestion card: its renderer, the option-toggle and
-// submit handlers, and the answered-lock that history and live user events
-// apply. event_render.js imports the renderer; dashboard.js registers the two
-// data-action handlers.
+// submit handlers, and the answered-lock history and live user events apply.
+// event_render.js imports the renderer; dashboard.js registers the handlers.
 import { NZ_CONTRACT } from './contract.js';
 import { getToken } from './platform.js';
 import { selection, transcript } from './state.js';
@@ -61,7 +61,7 @@ export function lockRenderedAskCards(scrollEl) {
   });
 }
 
-export function renderAskQuestionCard(e) {
+export function renderAskQuestionCard(/** @type {EventEntry} */ e) {
   const aq = e.ask_question;
   if (!aq || !Array.isArray(aq.items) || aq.items.length === 0) {
     // Defensive: if payload missing, fall back to a plain status bubble.

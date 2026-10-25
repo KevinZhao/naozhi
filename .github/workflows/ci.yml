@@ -390,8 +390,8 @@ jobs:
         run: test/e2e/node_modules/.bin/tsc -p internal/server/static
 
       # The opted-in list may only grow, a handler registered through wsm.on
-      # sees its own frame's fields, and no frame reaches an unchecked file or
-      # an untyped parameter: tsc is the field check on frames.
+      # sees its own frame's fields, and no wire value reaches an unchecked file or
+      # an untyped parameter: tsc is the field check on wire types.
       - name: Test the type-check floor and the wsm.on typing
         run: node --test scripts/ts-check.test.mjs
 

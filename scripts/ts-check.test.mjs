@@ -7,7 +7,7 @@
 // @ts-nocheck without failing here, and a new opt-in is listed too. The
 // probes prove wire.d.ts reaches a handler through wsm.on; the plants prove
 // the annotations type the frames and bodies the modules read; wireReach
-// keeps tsc the whole field check on frames.
+// keeps tsc the whole field check on every wire.d.ts type.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -24,11 +24,14 @@ const PRAGMA = '// @ts-check\n';
 
 const CHECKED = [
   'agent_view.js',
+  'ask_card.js',
   'cron_live.js',
   'cron_view.js',
   'dashboard.js',
   'event_render.js',
   'event_stream.js',
+  'nz_util.js',
+  'running_banner.js',
   'self_update.js',
   'session_ident.js',
   'session_list.js',
@@ -178,11 +181,12 @@ test('the modules type their frame handlers and session fetches', () => {
   }
 });
 
-// wireReach type-checks dir and returns what would let a frame field go
+// wireReach type-checks dir and returns what would let a wire field go
 // unchecked: a file a wire.d.ts type reaches without the pragma (tsc reports
-// nothing there), and a WS frame (or a spread copy of one) handed to an
-// untyped parameter, as an argument or as the frame of a handler passed by
-// name (its reads are `any`).
+// nothing there), and a value of any wire.d.ts type (a frame, a spread copy of
+// one, an EventEntry, a REST body, a nested def) handed to an untyped
+// parameter, as an argument or as the frame of a handler passed by name (its
+// reads are `any`).
 // typed counts the wire-typed identifiers in opted-in files.
 function wireReach(dir) {
   const ts = createRequire(path.join(ROOT, 'test', 'e2e', 'package.json'))('typescript');
@@ -191,14 +195,15 @@ function wireReach(dir) {
   const checker = program.getTypeChecker();
   const wire = path.join(dir, 'wire.d.ts');
   const ours = (f) => path.dirname(f) === dir && f.endsWith('.js');
-  const wireName = (t, frame, seen = new Set()) => {
+  // wireName names the wire.d.ts type t is (or has as a union/intersection
+  // member); spread also names the frame a spread copy came from.
+  const wireName = (t, spread, seen = new Set()) => {
     if (!t || seen.has(t)) return null;
     seen.add(t);
-    if (t.isUnionOrIntersection()) return t.types.map((x) => wireName(x, frame, seen)).find(Boolean) || null;
+    if (t.isUnionOrIntersection()) return t.types.map((x) => wireName(x, spread, seen)).find(Boolean) || null;
     const sym = t.aliasSymbol || t.getSymbol();
-    const ok = sym && sym.declarations?.some((d) => d.getSourceFile().fileName === wire) && (!frame || sym.name.startsWith('WsFrame_'));
-    if (ok) return sym.name;
-    if (!frame) return null;
+    if (sym && sym.declarations?.some((d) => d.getSourceFile().fileName === wire)) return sym.name;
+    if (!spread) return null;
     // A spread copy is an anonymous type whose fields keep their frame declarations.
     const owner = t.getProperties().flatMap((p) => p.declarations ?? [])
       .map((d) => d.parent).find((o) => o && o.getSourceFile().fileName === wire && ts.isInterfaceDeclaration(o) && o.name.text.startsWith('WsFrame_'));
@@ -226,8 +231,8 @@ function wireReach(dir) {
           if (!p) return;
           const want = checker.getTypeOfSymbolAtLocation(p, n);
           const got = checker.getTypeAtLocation(arg);
-          const frame = wireName(got, true);
-          if (frame && isAny(want) && declaredHere(p)) problems.push(`${at(arg)}: a ${frame} reaches untyped parameter ${p.name}`);
+          const name = wireName(got, true);
+          if (name && isAny(want) && declaredHere(p)) problems.push(`${at(arg)}: a ${name} reaches untyped parameter ${p.name}`);
           const [ws, gs] = [want.getCallSignatures()[0], got.getCallSignatures()[0]];
           ws?.parameters.forEach((wp, j) => {
             const gp = gs?.parameters[j];
@@ -244,13 +249,13 @@ function wireReach(dir) {
   return { problems, typed };
 }
 
-test('every frame read is typed: wire types reach only opted-in files, and no frame reaches an untyped parameter', () => {
+test('every wire read is typed: wire types reach only opted-in files, and no wire value reaches an untyped parameter', () => {
   const { problems, typed } = wireReach(STATIC);
   assert.deepEqual(problems, []);
   assert.ok(typed > 0, 'no wire-typed identifier in an opted-in file: the reach check has gone blind');
 });
 
-test('wireReach catches an untyped forward, a spread copy, a handler passed by name and an unchecked consumer', () => {
+test('wireReach catches an untyped forward, a spread copy, a handler passed by name, a nested def and an unchecked consumer', () => {
   const dir = staticCopy('nz-ts-reach-');
   try {
     const av = path.join(dir, 'agent_view.js');
@@ -263,11 +268,14 @@ test('wireReach catches an untyped forward, a spread copy, a handler passed by n
       'function onPong(m) { return m.nope; }\nwsm.on(NZ_CONTRACT.WS.pong, onPong);\n');
     fs.writeFileSync(path.join(dir, 'probe_unchecked.js'), head +
       'wsm.on(NZ_CONTRACT.WS.pong, (msg) => msg.nope);\n');
+    fs.writeFileSync(path.join(dir, 'probe_entry.js'), PRAGMA + head +
+      'function title(e) { return e.nope; }\nwsm.on(NZ_CONTRACT.WS.event, (msg) => title(msg.event));\n');
     fs.writeFileSync(path.join(dir, 'probe_spread.js'), PRAGMA + head +
       'function onRun(m) { return m.nope; }\nwsm.on(NZ_CONTRACT.WS.run_started, (msg) => onRun({ ...msg, job_id: msg.owner_id }));\n');
     const { problems } = wireReach(dir);
     const want = [
       /^agent_view\.js:\d+: a WsFrame_agent_event reaches untyped parameter msg$/,
+      /^probe_entry\.js:5: a EventEntry reaches untyped parameter e$/,
       /^probe_named\.js:5: a WsFrame_pong reaches untyped parameter m$/,
       /^probe_spread\.js:5: a WsFrame_run_started reaches untyped parameter m$/,
       /^probe_unchecked\.js:3: msg has a wire\.d\.ts type but probe_unchecked\.js has no \/\/ @ts-check$/,

@@ -470,7 +470,7 @@ function paintPhase(v, taskId, p, rows, seen) {
     box.textContent = '';
     return pd;
   }
-  const rank = (a) => (WORKFLOW_AGENT_DISPLAY[a.state] || WORKFLOW_AGENT_DISPLAY.unknown).rank;
+  const rank = (/** @type {Agent} */ a) => (WORKFLOW_AGENT_DISPLAY[a.state] || WORKFLOW_AGENT_DISPLAY.unknown).rank;
   const sorted = rows.slice().sort((x, y) => rank(x) - rank(y) || x.index - y.index);
   const limit = v.limit.get(key) || PHASE_PAGE;
   const kids = sorted.slice(0, limit).map((a) => { seen.add(a.index); return rowEl(v, taskId, a); });

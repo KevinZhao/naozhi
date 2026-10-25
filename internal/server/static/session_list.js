@@ -96,9 +96,9 @@ async function fetchSessionsPayload() {
 // never advance it: over a live socket session_state covers them, but under
 // WS-fallback polling REST is the only state source, so the short-circuit
 // applies only while connected (#2431); idempotent renderSidebar runs every 5 s.
-function sessionsUnchanged(data, wsConnected) {
+function sessionsUnchanged(/** @type {RestResponses['sessions'] | RestResponses['sessions_multi']} */ data, wsConnected) {
   const version = (data.stats && data.stats.version) || 0;
-  const nodesHash = JSON.stringify(data.nodes || {});
+  const nodesHash = JSON.stringify(('nodes' in data && data.nodes) || {});
   if (wsConnected && version === sessionList.lastVersion && version > 0 && nodesHash === sessionList.lastNodesJSON) return true;
   sessionList.lastVersion = version;
   sessionList.lastNodesJSON = nodesHash;
@@ -120,8 +120,8 @@ function syncHistory(tag) {
   }, () => { sessionList.lastETag = null; });
 }
 
-function applySessionsStats(data) {
-  if (data.nodes) sessionList.nodesData = data.nodes;
+function applySessionsStats(/** @type {RestResponses['sessions'] | RestResponses['sessions_multi']} */ data) {
+  if ('nodes' in data && data.nodes) sessionList.nodesData = data.nodes;
   if (data.stats.default_workspace) serverInfo.defaultWorkspace = data.stats.default_workspace;
   if (data.stats.projects) sessionList.projectsData = data.stats.projects;
   if (data.stats.cli_name) serverInfo.defaultCLIName = data.stats.cli_name;
@@ -314,7 +314,7 @@ function sidebarRowKey(el) {
   return null;
 }
 
-export function renderSidebar(data) {
+export function renderSidebar(/** @type {RestResponses['sessions'] | RestResponses['sessions_multi']} */ data) {
   const st = data.stats;
   updateStatusBar();
   if (st.default_workspace) serverInfo.defaultWorkspace = st.default_workspace;
@@ -343,8 +343,8 @@ export function renderSidebar(data) {
 // a node badge), oldest first. It sorts in place the list it caches as
 // allSessionsCache, whose order msg_nav walks. Cron stubs never reach it: the
 // server filters them (cron-panel-consolidation RFC §4.2).
-function buildSidebarItems(data) {
-  const items = (data.sessions || []).map(s => {
+function buildSidebarItems(/** @type {RestResponses['sessions'] | RestResponses['sessions_multi']} */ data) {
+  const items = /** @type {any[]} */ (data.sessions || []).map(s => {
     if (!s.source) s.source = 'managed';
     return s;
   });
@@ -978,7 +978,7 @@ function paintSessionCardState(/** @type {WsFrames['session_state']} */ msg, msg
     const stateSpan = meta.querySelectorAll('span')[1]; // [0]=dot, [1]=state text
     if (stateSpan && !stateSpan.classList.contains('sc-node')) stateSpan.textContent = displayState;
   }
-  patchCardExitChip(card, msg.state, msg.reason);
+  patchCardExitChip(card, msg.state, msg.reason, '', null); // the frame has no detail or startup_failure
   // Sync the unread chip in place. fetchSessions re-renders from template
   // and reads sessionUnread directly; this path keeps the bubble fresh
   // between polls (WS state arrives faster than the sessions poll tick).

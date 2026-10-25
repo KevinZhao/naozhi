@@ -460,7 +460,7 @@ import { sid } from './session_ident.js';
     if (el) el.style.display = 'none';
   }
 
-  function refreshBreadcrumbStat(patch) {
+  function refreshBreadcrumbStat(/** @type {AgentMetaPatch} */ patch) {
     if (!state.activeTaskID) return;
     var st = document.getElementById('bc-agent-stat');
     if (!st) return;

@@ -1,3 +1,4 @@
+// @ts-check
 // nz_util.js — the shared utility layer every view (chat / cron / agent /
 // asset) consumes: pure functions and pure-DOM helpers. Its only import is
 // contract.js, so it stays a leaf of the module graph.
@@ -10,7 +11,6 @@
 // escapers drift and reintroduce XSS. Always reuse this layer. (escJs was
 // deleted with the last JS-string-literal sink, #1980 — inline handlers are
 // gone; do not resurrect it without resurrecting the review that guarded it.)
-
 import { NZ_CONTRACT } from './contract.js';
 
 // esc() escapes the three structural HTML characters only. We deliberately
@@ -55,7 +55,7 @@ export async function fetchJSON(url, opts = {}) {
       try { onResponse(r); } catch (_) { /* caller hook must not break the fetch */ }
     }
     const text = await r.text();
-    if (!r.ok) { const err = new Error('HTTP ' + r.status + ': ' + text.slice(0, 500)); err.status = r.status; throw err; }
+    if (!r.ok) { const err = /** @type {Error & {status?: number}} */ (new Error('HTTP ' + r.status + ': ' + text.slice(0, 500))); err.status = r.status; throw err; }
     return text ? JSON.parse(text) : null;
   } catch (e) {
     clearTimeout(timer);
@@ -65,7 +65,7 @@ export async function fetchJSON(url, opts = {}) {
 }
 
 export function showToast(msg, type, duration) {
-  const el = document.getElementById('toast');
+  const el = /** @type {HTMLElement & {_tid?: number}} */ (document.getElementById('toast'));
   el.textContent = msg;
   el.className = 'toast show' + (type ? ' ' + type : '');
   clearTimeout(el._tid);
@@ -78,7 +78,7 @@ export function showToast(msg, type, duration) {
 export function trapFocus(overlay) {
   if (!overlay || overlay._trapped) return;
   overlay._trapped = true;
-  const prevActive = document.activeElement;
+  const prevActive = /** @type {HTMLElement | null} */ (document.activeElement);
   const FOCUSABLE = 'button, [href], input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
   const onKey = (e) => {
     if (e.key === 'Escape') {
@@ -105,7 +105,7 @@ export function trapFocus(overlay) {
 }
 
 // Single root namespace (RFC §2.5.4): window.nz.{util,render,core,views}.
-const nz = (window.nz = window.nz || {});
+const nz = /** @type {Record<string, any>} */ (/** @type {any} */ (window).nz ||= {});
 nz.util = { esc, escAttr, fetchJSON, showToast, trapFocus };
 
 // Formatters / predicates dashboard and cron both use; hosting them here
@@ -223,7 +223,7 @@ const DEATH_REASONS = {
 // sessionExit describes why a session has no process, or null when it is not
 // dead (a timeout can leave death_reason on a live session). The title adds
 // what the next send does (startup: startup_failure) and detail (death_detail).
-export function sessionExit(state, reason, detail, startup) {
+export function sessionExit(state, reason, detail, /** @type {StartupFailureView} */ startup) {
   if (state !== 'dead') return null;
   const info = deathReasonInfo(reason);
   return { crashed: info.crashed, text: info.text, title: info.text + '，' + nextSendText(startup) + (detail ? '\n' + detail : '') };
@@ -239,7 +239,7 @@ const STARTUP_FAILURE_TEXT = {
 };
 
 // nextSendText is what the next send to a dead session does, by its startup_failure f.
-function nextSendText(f) {
+function nextSendText(/** @type {StartupFailureView} */ f) {
   if (f && f.retry_at > Date.now()) return 'CLI 连续启动失败（' + f.streak + ' 次），已暂停自动重试；' + new Date(f.retry_at).toTimeString().slice(0, 8) + ' 后可重试，或发送 /new 立即重试';
   if (f && f.new_session) return '下次发送将开启新会话（上次会话无法恢复）';
   const cause = f && Object.prototype.hasOwnProperty.call(STARTUP_FAILURE_TEXT, f.class) && STARTUP_FAILURE_TEXT[f.class];
@@ -261,7 +261,7 @@ function deathReasonInfo(reason) {
 // sessionExitChipHtml is the chip sidebar cards and the session header show
 // for a dead session: a warning for an abnormal exit, a muted note for a
 // reclaim. '' when the session is not dead.
-export function sessionExitChipHtml(state, reason, detail, startup) {
+export function sessionExitChipHtml(state, reason, detail, /** @type {StartupFailureView} */ startup) {
   const x = sessionExit(state, reason, detail, startup);
   if (!x) return '';
   const cls = x.crashed ? 'sc-exit sc-exit-crashed' : 'sc-exit sc-exit-reclaimed';
@@ -272,7 +272,7 @@ export function sessionExitChipHtml(state, reason, detail, startup) {
 // patchCardExitChip brings a rendered session card's exit chip in line with
 // state / reason, for the paths that patch a card in place between renders;
 // it produces the markup sessionCardHtml renders, right after the state text.
-export function patchCardExitChip(card, state, reason, detail, startup) {
+export function patchCardExitChip(card, state, reason, detail, /** @type {StartupFailureView} */ startup) {
   const meta = card && card.querySelector('.sc-meta');
   if (!meta) return;
   const old = meta.querySelector('.sc-exit');
@@ -344,7 +344,7 @@ export function reconcileChildren(parent, html, keyOf) {
 
 new MutationObserver((records) => {
   for (const r of records) {
-    for (const n of r.addedNodes) {
+    for (const n of /** @type {Iterable<HTMLElement>} */ (r.addedNodes)) {
       if (n.nodeType !== 1) continue;
       if (n.hasAttribute('data-nz-bg')) {
         const v = n.dataset.nzBg;

@@ -1,11 +1,10 @@
+// @ts-check
 // running_banner.js — the running banner, the turn timer, the send/stop buttons
-// and the transcript scroll position.
-//
-// Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects.
-// session_list imports this module, so session_list's debouncedFetchSessions
-// (the turn watchdog's tick) is a shell slot.
+// and the transcript scroll position. Layering (D4-1 rule): a module dashboard
+// imports must NOT import dashboard back — that cycle puts dashboard's own
+// top-level consts in TDZ while this module evaluates. Shared state is read
+// from the state.js objects. session_list imports this module, so its
+// debouncedFetchSessions (the turn watchdog's tick) is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList, timers } from './state.js';
 import { escAttr, nzViews, showToast } from './nz_util.js';
@@ -234,20 +233,20 @@ function updateSidebarAgentBadge() {
 
 // taskReportEvent reports whether ev is a task's lifecycle report, which may
 // come from a task an earlier turn left running in the background.
-function taskReportEvent(ev) {
+function taskReportEvent(/** @type {EventEntry} */ ev) {
   return ev.type === 'task_start' || ev.type === 'task_progress' || ev.type === 'task_done';
 }
 
 // idleTaskEvent reports whether ev is a background task's report arriving
 // while the session on screen is not running: it starts no turn, so it must
 // not anchor the next one's timer (startTurnTimer keeps its first anchor).
-function idleTaskEvent(ev) {
+function idleTaskEvent(/** @type {EventEntry} */ ev) {
   if (!taskReportEvent(ev)) return false;
   const sess = sessionList.sessionsData[sid(selection.key, selection.node)];
   return !(sess && sess.state === 'running');
 }
 
-function applyEventToTurnState(ev) {
+function applyEventToTurnState(/** @type {EventEntry} */ ev) {
   if (!idleTaskEvent(ev)) startTurnTimer();
   // A real turn event ends the "已发送，正在处理…" window. A task report is not
   // one: the send already flipped the session to running, so idleTaskEvent

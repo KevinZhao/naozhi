@@ -112,12 +112,12 @@ function stripLeakedToolCalls(text) {
 // a plain object: an unlisted e.type like 'constructor' must resolve to
 // undefined, not an inherited Object.prototype member (#3025 S19-2; same
 // reason for EVENT_CONTENT/EVENT_ICONS).
-const EVENT_WHOLE = new Map([['ask_question', renderAskQuestionCard]]);
+const EVENT_WHOLE = /** @type {Map<string, (e: EventEntry) => string>} */ (new Map([['ask_question', renderAskQuestionCard]]));
 
 // EVENT_CONTENT fills div.event-content for a type still using the generic
 // wrapper. agent/result/task_* are plain escaped text (defaultTextContentHtml);
 // persist_gap shares the unrecognised-type chip (defaultEventChip).
-const EVENT_CONTENT = new Map([
+const EVENT_CONTENT = /** @type {Map<string, (e: EventEntry, cleanRaw: string) => string>} */ (new Map([
   ['system', (e) => esc(e.summary || e.type)],
   ['text', textOrUserContentHtml],
   ['user', textOrUserContentHtml],
@@ -130,7 +130,7 @@ const EVENT_CONTENT = new Map([
   ['task_progress', defaultTextContentHtml],
   ['task_done', defaultTextContentHtml],
   ['persist_gap', defaultEventChip],
-]);
+]));
 
 // EVENT_ICONS: the .event-icon glyph for a handful of known types; anything
 // else (including the clawd-mascot override in eventIconHtml, which is
@@ -146,8 +146,8 @@ const EVENT_ICONS = new Map([
 // NO_BUBBLE kind in every view (the server's visible count skips the same
 // kindTable column), an internal type without includeInternal, injected
 // system XML, and the CLI's own SIGINT interrupt marker.
-const NO_BUBBLE_EVENT_TYPES = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_NO_BUBBLE);
-function shouldHideEvent(e, includeInternal) {
+const NO_BUBBLE_EVENT_TYPES = /** @type {Set<string>} */ (new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_NO_BUBBLE));
+function shouldHideEvent(/** @type {EventEntry} */ e, includeInternal) {
   if (NO_BUBBLE_EVENT_TYPES.has(e.type) || (!includeInternal && isInternalEvent(e))) return true;
   const raw = e.detail || e.summary || '';
   if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) return true;
@@ -157,7 +157,7 @@ function shouldHideEvent(e, includeInternal) {
 
 // eventIconHtml: EVENT_ICONS, plus the clawd mascot for a claude-backend
 // assistant turn in place of the default glyph (other backends keep theirs).
-function eventIconHtml(e) {
+function eventIconHtml(/** @type {EventEntry} */ e) {
   let icon = EVENT_ICONS.get(e.type) || '';
   if (e.type === 'text') {
     const sess = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
@@ -170,7 +170,7 @@ function eventIconHtml(e) {
 // defaultEventChip: the fallback .event-content for persist_gap and any
 // unrecognised type — a chip with the literal type string, its title the
 // detail/summary, and the summary repeated after so it stays visible.
-function defaultEventChip(e) {
+function defaultEventChip(/** @type {EventEntry} */ e) {
   const title = escAttr(e.detail || e.summary || '');
   const tail = e.summary ? ' ' + esc(e.summary) : '';
   return '<span class="event-chip" title="' + title + '">' + esc(e.type || '') + '</span>' + tail;
@@ -178,14 +178,14 @@ function defaultEventChip(e) {
 
 // defaultTextContentHtml: plain-text content for a known type with no
 // structure of its own (agent, result, task_*).
-function defaultTextContentHtml(e) {
+function defaultTextContentHtml(/** @type {EventEntry} */ e) {
   return esc(e.detail || e.summary || e.type);
 }
 
 // textOrUserContentHtml folds a leaked tool-call block (the model wrote
 // <invoke …> into a text turn) behind a collapsed warning instead of
 // breaking the bubble; esc() keeps it inert.
-function textOrUserContentHtml(e, cleanRaw) {
+function textOrUserContentHtml(/** @type {EventEntry} */ e, cleanRaw) {
   const leak = stripLeakedToolCalls(cleanRaw);
   if (!leak) return renderMd(cleanRaw || e.type);
   return renderMd(leak.prose || e.type) +
@@ -197,7 +197,7 @@ function textOrUserContentHtml(e, cleanRaw) {
 // toolUseHtml: the ACP rich tool progress row (kiro, includeInternal-only).
 // Output extraction tries the kiro {items:[{Json:{stdout}}]} shape first,
 // then falls back to pretty-printed JSON.
-function toolUseHtml(e) {
+function toolUseHtml(/** @type {EventEntry} */ e) {
   const tc = e.tool_call;
   const status = tc.status || '';
   const kind = tc.kind || '';
@@ -235,7 +235,7 @@ function toolUseHtml(e) {
 
 // toolResultHtml folds long outputs by default; a <persisted-output> Tool
 // field of "persisted:tool-results/<id>.ext" gets a fetch-full button.
-function toolResultHtml(e) {
+function toolResultHtml(/** @type {EventEntry} */ e) {
   const summary = e.summary || '(tool result)';
   const detail = e.detail || '';
   let persistedPath = '';
@@ -259,7 +259,7 @@ function toolResultHtml(e) {
 // full-size attachment URL when image_paths is populated, else the data URI;
 // `?v=<time>` cache-busts a GC'd attachment. Click handling is delegated
 // (lightbox.js), so it survives innerHTML re-renders.
-function eventImagesHtml(e) {
+function eventImagesHtml(/** @type {EventEntry} */ e) {
   if (!e.images || e.images.length === 0) return '';
   const paths = e.image_paths || [];
   const cacheBust = e.time ? ('&v=' + e.time) : '';
@@ -278,7 +278,7 @@ function eventImagesHtml(e) {
 
 // eventActionsHtml: copy / ask-aside buttons, one shared >500-char gate so
 // they cannot drift apart (both hover-revealed via .hover-only).
-function eventActionsHtml(e, cleanRaw) {
+function eventActionsHtml(/** @type {EventEntry} */ e, cleanRaw) {
   const isLong = !!cleanRaw && cleanRaw.length > 500;
   const copyBtn = isLong && (e.type === 'text' || e.type === 'user')
     ? '<button class="event-copy-btn hover-only" type="button" data-raw="' + escAttr(cleanRaw) + '" data-action="event-copy" title="复制" aria-label="复制消息">复制</button>'

@@ -630,7 +630,7 @@ function applyBackfillToTurn(events) {
 }
 
 // applyTurnResult ends the turn a result event closes, on either frame path.
-function applyTurnResult(ev) {
+function applyTurnResult(/** @type {EventEntry} */ ev) {
   const sKey = sid(selection.key, selection.node);
   if (ev.cost) {
     // ev.cost is the CLI's per-incarnation cumulative total, which RESETS on
@@ -655,7 +655,7 @@ function applyTurnResult(ev) {
 
 // appendLiveEvent appends a pushed event's bubble: a user replay is dropped by
 // uuid, then the time divider, the cursor, the DOM cap and the scroll stick.
-function appendLiveEvent(ev) {
+function appendLiveEvent(/** @type {EventEntry} */ ev) {
   const html = eventHtml(ev);
   if (!html) return;
   const el = document.getElementById('events-scroll');
