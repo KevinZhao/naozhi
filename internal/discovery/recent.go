@@ -33,10 +33,10 @@ type RecentSession struct {
 	Project   string `json:"project,omitempty"` // filled by server
 }
 
-// RecentSessionsFilter is the consumer-facing hook RecentSessions calls before
+// RecentSessionsFilter is the consumer-facing hook RecentSessionsCtx calls before
 // returning a session. Both methods are best-effort (false = unfiltered),
 // MUST be safe for concurrent reads (the dashboard 1Hz poll calls
-// RecentSessions from multiple goroutines) and should snapshot state at
+// RecentSessionsCtx from multiple goroutines) and should snapshot state at
 // construction — they run O(N) times per scan.
 type RecentSessionsFilter interface {
 	// SkipWorkspace reports whether all sessions under the given resolved
@@ -55,18 +55,13 @@ type noopRecentFilter struct{}
 func (noopRecentFilter) SkipWorkspace(string) bool { return false }
 func (noopRecentFilter) SkipSessionID(string) bool { return false }
 
-// RecentSessions scans ~/.claude/projects/* for recent sessions, returning up
+// RecentSessionsCtx scans ~/.claude/projects/* for recent sessions, returning up
 // to `limit` sessions modified within `maxAge` (limit <= 0 returns all).
 // Filtering, in order: (1) directories that cannot be mapped back to a real
 // workspace on disk are skipped; (2) workspaces with a dot-prefixed component
 // (automated tools) are skipped, except git worktrees under ".claude/worktrees";
 // (3) filter.SkipWorkspace, then excludeSessionIDs / filter.SkipSessionID.
-// filter may be nil; excludeSessionIDs is always honoured.
-func RecentSessions(claudeDir string, limit int, maxAge time.Duration, excludeSessionIDs map[string]bool, filter RecentSessionsFilter) []RecentSession {
-	return RecentSessionsCtx(context.Background(), claudeDir, limit, maxAge, excludeSessionIDs, filter)
-}
-
-// RecentSessionsCtx is RecentSessions with cancellation support: the walk
+// filter may be nil; excludeSessionIDs is always honoured. The walk
 // checks ctx before each project directory and returns the (still sorted and
 // trimmed) partial result once cancelled, so a hung NFS/FUSE home cannot
 // block every poll waiting on the singleflight leader (#2134).
@@ -450,7 +445,7 @@ func recentFromParsedIndex(idx *sessionsIndex, projDir, workspace string, exclud
 	return out
 }
 
-// dfsPathCache caches successful resolveWorkspaceByParts results; encoded
+// dfsPathCache caches successful resolveWorkspaceUnder results; encoded
 // names never change, so a mapping is stable for the process lifetime.
 // Negative results ("") are NOT cached: a workspace may be temporarily absent
 // (unmounted drive, worktree mid-rebuild) and caching "" would hide the
@@ -463,19 +458,14 @@ var dfsPathCache sync.Map // dfsCacheKey(root, dirName) → resolved workspace p
 // production "/" entry.
 func dfsCacheKey(root, dirName string) string { return root + "\x00" + dirName }
 
-// resolveWorkspaceByParts reconstructs a workspace path from an encoded
-// project directory name, where every non-[A-Za-z0-9] character became "-"
-// (see claudefs.ProjectSlug). Pass 1, tryResolveParts, splits on "-" and
-// DFS-joins parts with os.Stat, resolving any ordinary workspace; pass 2,
-// resolveByDirScan, re-encodes real child names per level for segments that
-// held ".", "_" or spaces — what makes ".claude/worktrees" sessions visible (#2370).
-func resolveWorkspaceByParts(dirName string) string {
-	return resolveWorkspaceUnder(fsRoot, dirName)
-}
-
-// resolveWorkspaceUnder is resolveWorkspaceByParts with the walk rooted at
-// root instead of "/". Every path it returns lies inside root: both passes only
-// ever join real child names onto root.
+// resolveWorkspaceUnder reconstructs a workspace path under root (production
+// passes fsRoot, "/") from an encoded project directory name, where every
+// non-[A-Za-z0-9] character became "-" (see claudefs.ProjectSlug). Pass 1,
+// tryResolveParts, splits on "-" and DFS-joins parts with os.Stat, resolving
+// any ordinary workspace; pass 2, resolveByDirScan, re-encodes real child names
+// per level for segments that held ".", "_" or spaces — what makes
+// ".claude/worktrees" sessions visible (#2370). Every path it returns lies
+// inside root: both passes only ever join real child names onto root.
 func resolveWorkspaceUnder(root, dirName string) string {
 	key := dfsCacheKey(root, dirName)
 	if v, ok := dfsPathCache.Load(key); ok {

@@ -18,26 +18,20 @@ func countVisible(entries []clievent.EventEntry) int {
 	return n
 }
 
-func TestIsInternalEventType(t *testing.T) {
+func TestIsVisibleEntry_InternalKinds(t *testing.T) {
 	t.Parallel()
 	internal := []string{"tool_use", "result", "agent", "task_start", "task_progress", "task_done"}
 	for _, ty := range internal {
-		if !clievent.IsInternalEventType(ty) {
-			t.Errorf("clievent.IsInternalEventType(%q) = false, want true", ty)
-		}
 		if clievent.IsVisibleEntry(clievent.EventEntry{Type: ty}) {
 			t.Errorf("clievent.IsVisibleEntry(%q) = true, want false", ty)
 		}
 	}
 	// thinking is not internal, yet the dashboard draws no bubble for it.
-	if clievent.IsInternalEventType("thinking") || clievent.IsVisibleEntry(clievent.EventEntry{Type: "thinking"}) {
-		t.Errorf("thinking: want not internal and not visible")
+	if clievent.IsVisibleEntry(clievent.EventEntry{Type: "thinking"}) {
+		t.Errorf("thinking: want not visible")
 	}
 	visible := []string{"user", "text", "init", "system", "todo", "ask_question"}
 	for _, ty := range visible {
-		if clievent.IsInternalEventType(ty) {
-			t.Errorf("clievent.IsInternalEventType(%q) = true, want false", ty)
-		}
 		if !clievent.IsVisibleEntry(clievent.EventEntry{Type: ty}) {
 			t.Errorf("clievent.IsVisibleEntry(%q) = false, want true", ty)
 		}

@@ -32,13 +32,6 @@ type Handler struct {
 	nodeAccess NodeAccessor         // nil in single-node / test deployments
 }
 
-// NewCLIBackendsHandler pre-computes the backend probe with context.Background().
-//
-// Deprecated: prefer NewCLIBackendsHandlerCtx.
-func NewCLIBackendsHandler(router *session.Router) *Handler {
-	return NewCLIBackendsHandlerCtx(context.Background(), router, nil)
-}
-
 // NewCLIBackendsHandlerCtx threads ctx into DetectBackendsCtx so SIGTERM
 // during startup aborts the --version probe instead of waiting 5s×N.
 func NewCLIBackendsHandlerCtx(ctx context.Context, router *session.Router, nodeAccess NodeAccessor) *Handler {

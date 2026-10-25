@@ -136,7 +136,7 @@ const (
 	// Fits common error classifiers while keeping a defensive ceiling (#1115).
 	redactFastPathMaxLen = 256
 
-	// previousTickMaxIter caps previousTickBefore's sched.Next loop; 1000 leaves
+	// previousTickMaxIter caps previousTickBeforeFromSched's sched.Next loop; 1000 leaves
 	// ~3× margin over the worst legitimate case (~365 iterations for a daily
 	// schedule across DST/leap-month).
 	previousTickMaxIter = 1000

@@ -74,30 +74,6 @@ func TestMsgRing_WrapAroundIndices(t *testing.T) {
 	}
 }
 
-// TestMsgRing_ResetClearsRefs asserts reset zeroes the live slots so any
-// retained image data becomes GC-eligible (the previous slice memmove path
-// also zeroed the freed slot — we must not regress).
-func TestMsgRing_ResetClearsRefs(t *testing.T) {
-	t.Parallel()
-	var r msgRing
-	canary := []byte{1, 2, 3}
-	r.push(Msg{Text: "X", Images: nil, Origin: newOrigin(newRecorder(), "a", "ws:a")}, 4)
-	// Place a large-ish payload via Images so we can detect retention.
-	r.push(Msg{Text: "Y"}, 4)
-	r.reset()
-	if r.len() != 0 {
-		t.Fatalf("post-reset len = %d, want 0", r.len())
-	}
-	// The backing buf must be fully zeroed across the previously-live
-	// indices.
-	for i := 0; i < cap(r.buf); i++ {
-		if r.buf[i].Text != "" || r.buf[i].Origin != nil {
-			t.Fatalf("post-reset buf[%d] not zeroed: %#v", i, r.buf[i])
-		}
-	}
-	_ = canary
-}
-
 // TestMsgRing_DrainInto_ReusesScratch asserts drainInto writes into the
 // supplied dst when it has capacity (no fresh allocation) and preserves FIFO
 // order + ring reset. R20260606-PERF-3 (#1827).
@@ -156,7 +132,7 @@ func TestMsgRing_DrainInto_EmptyReturnsNil(t *testing.T) {
 
 // TestMsgRing_DrainInto_ZeroesConsumedSlots guards the GC-hygiene contract:
 // drainInto must zero the ring's backing slots so retained Images become
-// GC-eligible (matches drainAll/reset).
+// GC-eligible (matches drainAll).
 func TestMsgRing_DrainInto_ZeroesConsumedSlots(t *testing.T) {
 	t.Parallel()
 	var r msgRing

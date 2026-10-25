@@ -25,12 +25,6 @@ func ResolvedFileKey(fileKey string) (string, bool) {
 	return k, ok
 }
 
-// IsOverlayFileKey reports whether key is a recognised "*_FILE" indirection key.
-func IsOverlayFileKey(key string) bool {
-	_, ok := overlayFileKeys[key]
-	return ok
-}
-
 // ValidateOverlayEntry validates a single access-profile env entry against
 // the Table's SourceOverlay column: the key must be overlay-allowed, and the
 // value must pass the key's overlay guard (SSRF/redirect for *BASE_URL,

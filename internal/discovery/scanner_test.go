@@ -112,44 +112,6 @@ func makeSessionFile(t *testing.T, sessDir string, sf sessionFile) {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// jsonlMtime
-// ---------------------------------------------------------------------------
-
-func TestJsonlMtime_Fallback(t *testing.T) {
-	t.Parallel()
-	claudeDir := makeClaudeDir(t)
-	// JSONL does not exist: should return startedAt fallback
-	got := jsonlMtime(claudeDir, "/nonexistent/path", "00000000-0000-0000-0000-000000000001", 12345)
-	if got != 12345 {
-		t.Errorf("jsonlMtime fallback = %d, want 12345", got)
-	}
-}
-
-func TestJsonlMtime_ReadsFile(t *testing.T) {
-	t.Parallel()
-	claudeDir := makeClaudeDir(t)
-	cwd := "/tmp/test-mtime"
-	sessionID := "00000000-0000-0000-0000-000000000002"
-	dirName := claudefs.ProjectSlug(cwd)
-	projDir := filepath.Join(claudeDir, "projects", dirName)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	jsonlPath := filepath.Join(projDir, sessionID+".jsonl")
-	if err := os.WriteFile(jsonlPath, []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	beforeMs := time.Now().UnixMilli()
-	got := jsonlMtime(claudeDir, cwd, sessionID, 0)
-	afterMs := time.Now().UnixMilli()
-
-	if got < beforeMs-1000 || got > afterMs+1000 {
-		t.Errorf("jsonlMtime = %d, expected value around %d", got, beforeMs)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // LookupSummaries
 // ---------------------------------------------------------------------------
 
@@ -583,37 +545,6 @@ func TestExtractLastPrompt_CacheInvalidatedOnMtimeChange(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// findJSONLPath
-// ---------------------------------------------------------------------------
-
-func TestFindJSONLPath(t *testing.T) {
-	t.Parallel()
-	claudeDir := makeClaudeDir(t)
-	cwd := "/tmp/find-jsonl"
-	sessionID := "ddddeeee-0000-0000-0000-000000000001"
-	dirName := claudefs.ProjectSlug(cwd)
-	projDir := filepath.Join(claudeDir, "projects", dirName)
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	expected := filepath.Join(projDir, sessionID+".jsonl")
-	if err := os.WriteFile(expected, []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	got := findJSONLPath(claudeDir, cwd, sessionID)
-	if got != expected {
-		t.Errorf("findJSONLPath = %q, want %q", got, expected)
-	}
-
-	// Missing file
-	got2 := findJSONLPath(claudeDir, "/nonexistent/cwd", "missing-session")
-	if got2 != "" {
-		t.Errorf("expected empty for missing file, got %q", got2)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // evictPromptCache and evictSummaryCache
 // ---------------------------------------------------------------------------
 
@@ -791,7 +722,7 @@ func TestNewScanner_PromptSemReused(t *testing.T) {
 
 // R20260603-PERF-2: RefreshDynamic reuses the mtime captured during prompt
 // extraction. When the JSONL is missing, LastActive must fall back to
-// StartedAt (matching the old jsonlMtime behaviour).
+// StartedAt.
 func TestRefreshDynamic_MissingJSONLFallsBackToStartedAt(t *testing.T) {
 	t.Parallel()
 	sc := NewScanner()
@@ -866,7 +797,7 @@ func TestRefreshDynamic_SummaryUpdated(t *testing.T) {
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// JSONL needed so jsonlMtime works
+	// JSONL needed so the mtime lookup works
 	jsonlPath := filepath.Join(projDir, sessionID+".jsonl")
 	makeJSONLWithUserPrompts(t, jsonlPath, []string{"hello"})
 

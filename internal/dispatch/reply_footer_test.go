@@ -12,10 +12,8 @@ import (
 // session in a claude-default deployment must still get [kiro] at the
 // bottom of its IM replies.
 //
-// Post R243-ARCH-10 the closure-as-DI was collapsed to Capabilities; the
-// nil-fn case becomes NoopCapabilities (returns "" so no footer is
-// appended) and the explicit-fn cases are wrapped in closureCapabilities
-// to keep the existing assertions intact.
+// The nil-fn case uses NoopCapabilities (returns "" so no footer is
+// appended); the explicit-fn cases wrap fn in footerFnCaps.
 func TestDispatcher_ReplyFooter_PerBackend(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -52,7 +50,7 @@ func TestDispatcher_ReplyFooter_PerBackend(t *testing.T) {
 			if c.fn == nil {
 				caps = NoopCapabilities{}
 			} else {
-				caps = closureCapabilities{replyFooter: c.fn}
+				caps = footerFnCaps{fn: c.fn}
 			}
 			d := &Dispatcher{caps: caps}
 			body := "hello"
@@ -72,3 +70,11 @@ func TestDispatcher_ReplyFooter_PerBackend(t *testing.T) {
 		})
 	}
 }
+
+// footerFnCaps is a Capabilities whose ReplyFooter delegates to fn.
+type footerFnCaps struct {
+	NoopCapabilities
+	fn func(string) string
+}
+
+func (c footerFnCaps) ReplyFooter(backendID string) string { return c.fn(backendID) }

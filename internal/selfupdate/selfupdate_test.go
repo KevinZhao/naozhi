@@ -101,9 +101,9 @@ func TestVerifyChecksum_MissingEntry(t *testing.T) {
 	}
 }
 
-// ----- Replace + Rollback ---------------------------------------------------
+// ----- Replace ------------------------------------------------------------
 
-func TestReplace_And_Rollback(t *testing.T) {
+func TestReplace_BacksUpOld(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
@@ -133,17 +133,6 @@ func TestReplace_And_Rollback(t *testing.T) {
 	bak, _ := os.ReadFile(backupPath)
 	if string(bak) != "old binary" {
 		t.Errorf("backup = %q, want %q", bak, "old binary")
-	}
-
-	if err := Rollback(installPath, backupPath); err != nil {
-		t.Fatalf("Rollback: %v", err)
-	}
-	got, _ = os.ReadFile(installPath)
-	if string(got) != "old binary" {
-		t.Errorf("after Rollback, installPath = %q, want %q", got, "old binary")
-	}
-	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
-		t.Errorf("backup file should be removed after Rollback")
 	}
 }
 

@@ -6,9 +6,10 @@ import (
 )
 
 // TestCountExemptCombined pins R20260603-PERF-1 (#1673): the single-pass
-// combined counter must return exactly what the former back-to-back
-// countExemptByKind + countExempt sweep produced, including the kind=="" case
-// where perKind is 0 but the global total still counts every exempt session.
+// combined counter must agree with the standalone per-kind sweep, including
+// the kind=="" case where perKind is 0 but the global total still counts
+// every exempt session (only cron stubs exist here, so the global total equals
+// the cron count).
 func TestCountExemptCombined(t *testing.T) {
 	t.Parallel()
 	r := newTestRouter(3)
@@ -19,13 +20,12 @@ func TestCountExemptCombined(t *testing.T) {
 
 	r.ss.View(func(v sessView) {
 
-		// kind set: perKind must equal the standalone per-kind sweep; total must
-		// equal the standalone global sweep.
+		// kind set: perKind must equal the standalone per-kind sweep.
 		perKind, total := countExemptCombined(v, "cron")
 		if want := countExemptByKind(v, "cron"); perKind != want {
 			t.Errorf("countExemptCombined(cron) perKind = %d, want %d", perKind, want)
 		}
-		if want := countExempt(v); total != want {
+		if want := countExemptByKind(v, "cron"); total != want {
 			t.Errorf("countExemptCombined(cron) total = %d, want %d", total, want)
 		}
 
@@ -34,7 +34,7 @@ func TestCountExemptCombined(t *testing.T) {
 		if perKind0 != 0 {
 			t.Errorf("countExemptCombined(\"\") perKind = %d, want 0", perKind0)
 		}
-		if want := countExempt(v); total0 != want {
+		if want := countExemptByKind(v, "cron"); total0 != want {
 			t.Errorf("countExemptCombined(\"\") total = %d, want %d", total0, want)
 		}
 	})

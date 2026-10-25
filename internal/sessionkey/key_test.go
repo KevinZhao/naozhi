@@ -31,10 +31,6 @@ func TestKeyConstructors(t *testing.T) {
 	}{
 		{"CronKey/typical", CronKey("abc123"), "cron:abc123"},
 		{"CronKey/empty id", CronKey(""), "cron:"},
-		{"SysKey/typical", SysKey("auto_titler"), "sys:auto_titler"},
-		{"SysKey/empty id", SysKey(""), "sys:"},
-		{"ScratchKey/typical", ScratchKey("s_42"), "scratch:s_42"},
-		{"ScratchKey/empty id", ScratchKey(""), "scratch:"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

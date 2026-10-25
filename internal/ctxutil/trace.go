@@ -9,7 +9,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"log/slog"
 )
 
 // traceIDKey is an unexported sentinel type so foreign packages cannot collide
@@ -33,19 +32,6 @@ func TraceID(ctx context.Context) string {
 	}
 	v, _ := ctx.Value(traceIDKey{}).(string)
 	return v
-}
-
-// LoggerWithTrace returns logger with a `trace_id` attribute when ctx carries
-// one, otherwise logger unchanged.
-func LoggerWithTrace(ctx context.Context, logger *slog.Logger) *slog.Logger {
-	if logger == nil {
-		return nil
-	}
-	id := TraceID(ctx)
-	if id == "" {
-		return logger
-	}
-	return logger.With("trace_id", id)
 }
 
 // NewTraceID returns a fresh 16-char hex id (8 bytes of crypto/rand: enough to

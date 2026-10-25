@@ -6,35 +6,6 @@ import (
 	"testing"
 )
 
-// TestWriteOK locks the wire format of the pre-marshaled `{"status":"ok"}`
-// body so refactors cannot quietly drop the trailing newline (which breaks
-// bash pipelines expecting NDJSON framing) or flip the key name.
-// R64-PERF-M4 regression.
-func TestWriteOK(t *testing.T) {
-	w := httptest.NewRecorder()
-	writeOK(w)
-
-	if got, want := w.Code, 200; got != want {
-		t.Errorf("status = %d, want %d", got, want)
-	}
-	if got, want := w.Header().Get("Content-Type"), "application/json"; got != want {
-		t.Errorf("Content-Type = %q, want %q", got, want)
-	}
-	if got, want := w.Header().Get("X-Content-Type-Options"), "nosniff"; got != want {
-		t.Errorf("X-Content-Type-Options = %q, want %q", got, want)
-	}
-	if got, want := w.Header().Get("Cache-Control"), "no-store"; got != want {
-		t.Errorf("Cache-Control = %q, want %q", got, want)
-	}
-	body := w.Body.String()
-	if !strings.HasSuffix(body, "\n") {
-		t.Errorf("body missing trailing newline: %q", body)
-	}
-	if trimmed := strings.TrimSuffix(body, "\n"); trimmed != `{"status":"ok"}` {
-		t.Errorf("body = %q, want %q", trimmed, `{"status":"ok"}`)
-	}
-}
-
 // TestWriteJSON_SetsNoStoreCache locks the R58-PERF-001 contract that
 // authenticated dashboard JSON responses carry Cache-Control: no-store, so no
 // intermediate proxy or browser bfcache retains last_prompt / PID / cost state
@@ -127,42 +98,4 @@ func TestJSONEncPool_HTMLEscapingDisabled(t *testing.T) {
 		t.Fatalf("marshalPooled: %v", err)
 	}
 	check("marshalPooled body", string(raw))
-}
-
-// TestMarshalEscaped_HTMLEscapingEnabled pins R238-SEC-5 (#821): marshalEscaped
-// is the HTML-safe counterpart to marshalPooled. Future call sites that splice
-// JSON into HTML templates / innerHTML-without-DOMPurify paths MUST use this
-// helper, and a regression that flipped its escape bit would silently re-open
-// the XSS escalation that motivated providing the helper. We assert the
-// JSON-`\uXXXX` form for `<`/`>`/`&` is in the wire and the literal bytes are
-// absent — the inverse of TestJSONEncPool_HTMLEscapingDisabled.
-func TestMarshalEscaped_HTMLEscapingEnabled(t *testing.T) {
-	probe := map[string]string{
-		"v": "<a href=\"x\">&</a>",
-	}
-	raw, err := marshalEscaped(probe)
-	if err != nil {
-		t.Fatalf("marshalEscaped: %v", err)
-	}
-	body := string(raw)
-
-	// Escaped forms must appear.
-	escLT := string([]byte{'\\', 'u', '0', '0', '3', 'c'})
-	escGT := string([]byte{'\\', 'u', '0', '0', '3', 'e'})
-	escAmp := string([]byte{'\\', 'u', '0', '0', '2', '6'})
-	for _, esc := range []string{escLT, escGT, escAmp} {
-		if !strings.Contains(body, esc) {
-			t.Errorf("marshalEscaped body missing escape %q (HTML escaping unexpectedly disabled?): %q", esc, body)
-		}
-	}
-	// Raw `<` / `>` chars must NOT appear (the `&` literal can leak via
-	// the JSON quoting of the surrounding `"` so we only check `<` / `>`
-	// for unescaped presence — the escape forms above are the load-bearing
-	// assertion). Asserting `<`/`>` literals are absent is the inverse of
-	// TestJSONEncPool_HTMLEscapingDisabled and pins the bit.
-	for _, lit := range []string{"<", ">"} {
-		if strings.Contains(body, lit) {
-			t.Errorf("marshalEscaped body contains raw %q — SetEscapeHTML(true) regressed: %q", lit, body)
-		}
-	}
 }

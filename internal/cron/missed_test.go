@@ -413,3 +413,17 @@ func TestHasMissedScheduleCached_CachedPeriodMatchesRecomputed(t *testing.T) {
 		})
 	}
 }
+
+// previousTickBefore 是 previousTickBeforeFromSched 的字符串入口，供测试直测
+// 回推逻辑；无法解析的 schedule 返回零值 time。
+func previousTickBefore(schedule string, now time.Time) time.Time {
+	sched, err := cronParser.Parse(schedule)
+	if err != nil {
+		return time.Time{}
+	}
+	period := schedulePeriodFromSched(sched, now)
+	if period <= 0 {
+		return time.Time{}
+	}
+	return previousTickBeforeFromSched(sched, period, now)
+}

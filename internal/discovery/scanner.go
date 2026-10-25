@@ -286,13 +286,6 @@ func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[stri
 	return DefaultScanner().Scan(claudeDir, excludePIDs, excludeSessionIDs, managedCWDs)
 }
 
-// ScanContext is the cancellation-aware variant of Scan: the prompt-extraction
-// fan-out does unbounded filesystem IO, so a hung NFS/FUSE mount could stall
-// shutdown past systemd TimeoutStopSec without a SIGTERM-derived ctx (#2244).
-func ScanContext(ctx context.Context, claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
-	return DefaultScanner().ScanContext(ctx, claudeDir, excludePIDs, excludeSessionIDs, managedCWDs)
-}
-
 // Scan reads ~/.claude/sessions/*.json and returns live Claude CLI processes
 // not managed by naozhi (excludePIDs), with SessionID taken verbatim from each
 // {pid}.json. excludeSessionIDs and managedCWDs are retained for call-site
@@ -301,8 +294,9 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 	return s.ScanContext(context.Background(), claudeDir, excludePIDs, excludeSessionIDs, managedCWDs)
 }
 
-// ScanContext is the cancellation-aware variant of (*Scanner).Scan; see the
-// package-level ScanContext.
+// ScanContext is the cancellation-aware variant of Scan: the prompt-extraction
+// fan-out does unbounded filesystem IO, so a hung NFS/FUSE mount could stall
+// shutdown past systemd TimeoutStopSec without a SIGTERM-derived ctx (#2244).
 func (s *Scanner) ScanContext(ctx context.Context, claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
 	sessDir := claudefs.LiveSessionsDir(claudeDir)
 	entries, err := os.ReadDir(sessDir)
@@ -444,17 +438,6 @@ func processAlive(pid int) bool {
 	return osutil.PidAlive(pid)
 }
 
-// jsonlMtime returns the JSONL conversation file's mtime as unix ms.
-// Falls back to startedAt if the file is not found.
-func jsonlMtime(claudeDir, cwd, sessionID string, startedAt int64) int64 {
-	jsonlPath := claudefs.SessionJSONL(claudeDir, cwd, sessionID)
-	info, err := os.Stat(jsonlPath)
-	if err != nil {
-		return startedAt
-	}
-	return info.ModTime().UnixMilli()
-}
-
 // sessionsIndex mirrors the sessions-index.json schema.
 type sessionsIndex struct {
 	OriginalPath string               `json:"originalPath"`
@@ -476,7 +459,7 @@ func (s *Scanner) extractLastPrompt(claudeDir, cwd, sessionID string) string {
 
 // extractLastPromptWithMtime returns the last prompt plus the JSONL mtime (unix
 // ms) and whether the file exists, so RefreshDynamic can reuse this single Stat
-// for lastActive instead of a second os.Stat via jsonlMtime.
+// for lastActive instead of a second os.Stat.
 func (s *Scanner) extractLastPromptWithMtime(claudeDir, cwd, sessionID string) (string, int64, bool) {
 	// One Stat resolves both existence and mtime.
 	path := claudefs.SessionJSONL(claudeDir, cwd, sessionID)
@@ -709,15 +692,6 @@ func extractUserText(raw json.RawMessage) string {
 	return ""
 }
 
-// findJSONLPath locates the JSONL for a session, trying the CWD-based path first.
-func findJSONLPath(claudeDir, cwd, sessionID string) string {
-	candidate := claudefs.SessionJSONL(claudeDir, cwd, sessionID)
-	if _, err := os.Stat(candidate); err == nil {
-		return candidate
-	}
-	return ""
-}
-
 // LookupSummaries is the package-level wrapper over DefaultScanner.
 func LookupSummaries(claudeDir string, sessions map[string]string) map[string]string {
 	return DefaultScanner().LookupSummaries(claudeDir, sessions)
@@ -858,12 +832,6 @@ func RefreshDynamic(claudeDir string, sessions []DiscoveredSession) bool {
 	return DefaultScanner().RefreshDynamic(claudeDir, sessions)
 }
 
-// RefreshDynamicContext is the cancellation-aware variant of RefreshDynamic;
-// like ScanContext it guards the promptSem fan-out against a hung FS (#2244).
-func RefreshDynamicContext(ctx context.Context, claudeDir string, sessions []DiscoveredSession) bool {
-	return DefaultScanner().RefreshDynamicContext(ctx, claudeDir, sessions)
-}
-
 // RefreshDynamic deliberately does NOT advance the cache generations — Scan is
 // the sole authority for aging. Advancing here too would double-tick gen when
 // both run in one cycle, halving cache lifetime and re-parsing JSONLs.
@@ -871,8 +839,8 @@ func (s *Scanner) RefreshDynamic(claudeDir string, sessions []DiscoveredSession)
 	return s.RefreshDynamicContext(context.Background(), claudeDir, sessions)
 }
 
-// RefreshDynamicContext is the cancellation-aware variant of
-// (*Scanner).RefreshDynamic; see the package-level RefreshDynamicContext.
+// RefreshDynamicContext is the cancellation-aware variant of RefreshDynamic;
+// like ScanContext it guards the promptSem fan-out against a hung FS (#2244).
 func (s *Scanner) RefreshDynamicContext(ctx context.Context, claudeDir string, sessions []DiscoveredSession) bool {
 	if claudeDir == "" || len(sessions) == 0 {
 		return false

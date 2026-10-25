@@ -49,7 +49,7 @@ IM 网关和 dashboard WebSocket 也要重连。对 `im_access` / `im_rate_limit
 `internal/config/reload.go`：
 
 ```go
-func HotSections() []string                     // {"im_access","im_rate_limit","log.level","cost.budget"}
+var hotSections = []string{...}               // 包内变量（导出的 HotSections() 已删除）：{"im_access","im_rate_limit","log.level","cost.budget"}
 func (c *Config) HotChanged(next *Config) []string      // H 中哪些段不同
 func (c *Config) RestartRequired(next *Config) []string // H 之外哪些顶层段不同
 ```

@@ -108,8 +108,8 @@ type healthRouter interface {
 // frame to authenticated WS clients" surface producers (the router observer's SessionsChanged,
 // send paths, cron / sysession run-lifecycle hooks, node register/deregister)
 // reach for. *wsBroadcaster satisfies it structurally; consumer_contract_test.go guards
-// the binding. Prefer the narrower subsets (SessionsBus.Publish,
-// scratch.Broadcaster) when only part of this surface is needed.
+// the binding. Prefer the narrower subsets (scratch.Broadcaster)
+// when only part of this surface is needed.
 type HubBroadcaster interface {
 	BroadcastSessionReady(key string)
 	BroadcastSessionsUpdate()

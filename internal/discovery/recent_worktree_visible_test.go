@@ -17,12 +17,12 @@ import (
 // Two independent defects hid it:
 //  1. RecentSessions skipped any directory whose *encoded* name contained
 //     "--", a pre-decode heuristic meant for tool dirs like claude-mem.
-//  2. resolveWorkspaceByParts could not decode the name anyway: splitting on
+//  2. resolveWorkspaceUnder could not decode the name anyway: splitting on
 //     "-" and Stat-ing candidates cannot recover the leading dot of
 //     ".claude", so the workspace resolved to "" and the unresolvable-
 //     workspace layer dropped it.
 //
-// Verified red against the pre-fix tree: both TestResolveWorkspaceByParts_
+// Verified red against the pre-fix tree: both TestResolveWorkspaceUnder_
 // WorktreeDotClaude ("" instead of the path) and TestRecentSessions_
 // IncludesWorktreeSession ("got 0 sessions") failed.
 //
@@ -44,11 +44,11 @@ func makeWorktreeWorkspace(t *testing.T, name string) (root, claudeDir, workspac
 	return root, claudeDir, workspace, encodedDir
 }
 
-// TestResolveWorkspaceByParts_WorktreeDotClaude is the unit-level half: the
+// TestResolveWorkspaceUnder_WorktreeDotClaude is the unit-level half: the
 // encoded name must decode back to the real worktree path. Pre-fix this
 // returned "" because tryResolveParts can only rejoin hyphen-split segments
 // and never produces the "." of ".claude".
-func TestResolveWorkspaceByParts_WorktreeDotClaude(t *testing.T) {
+func TestResolveWorkspaceUnder_WorktreeDotClaude(t *testing.T) {
 	root, _, workspace, encodedDir := makeWorktreeWorkspace(t, "dashboard-pw-replay")
 
 	got := resolveWorkspaceUnder(root, encodedDir)
@@ -57,10 +57,10 @@ func TestResolveWorkspaceByParts_WorktreeDotClaude(t *testing.T) {
 	}
 }
 
-// TestResolveWorkspaceByParts_DirScanCaches pins that the second (ReadDir)
+// TestResolveWorkspaceUnder_DirScanCaches pins that the second (ReadDir)
 // pass populates the same positive cache as the first, so the expensive walk
 // is paid once per encoded name rather than on every 1Hz sidebar poll.
-func TestResolveWorkspaceByParts_DirScanCaches(t *testing.T) {
+func TestResolveWorkspaceUnder_DirScanCaches(t *testing.T) {
 	root, _, workspace, encodedDir := makeWorktreeWorkspace(t, "cached-wt")
 
 	if got := resolveWorkspaceUnder(root, encodedDir); got != workspace {

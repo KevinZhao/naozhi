@@ -659,20 +659,20 @@ func (s *Server) selectNodeForBackend(targetNode, backendID string) (*node.Conn,
 type DispatcherConfig struct {
     ...
     // 旧：ReplyFooter string
-    ReplyFooterFn func(backendID string) string  // 入参为 session 的 backend ID
+    // 现：ReplyFooterFn 已删除，由 Capabilities 取代（#374）
+    Capabilities Capabilities  // Capabilities.ReplyFooter(backendID string) string；nil 时用 NoopCapabilities
 }
 ```
 
-`dispatch.Dispatcher.replyFooter` → `replyFooterFn`。所有调用点（IM fanout / cron 通知 / dashboard reply）取 `sess.Backend()` 传进去；缺失时传 `""`，fn 返回 default tag。
+`dispatch.Dispatcher` 通过 `Capabilities.ReplyFooter` 取 tag。所有调用点（IM fanout / cron 通知 / dashboard reply）取 `sess.Backend()` 传进去；缺失时传 `""`，返回 default tag。
 
 #### 7.2.2 Server 实现
 
 ```go
-// server/server.go buildServer
-opts.ReplyFooterFn = func(backend string) string {
-    if backend == "" { backend = router.DefaultBackend() }
-    if p, ok := backendpkg.Get(backend); ok { return p.DefaultTag }
-    return "cc"
+// internal/server/send_dispatch_adapter.go（build_dispatch.go 里 Capabilities: serverCaps{s: s}）
+func (c serverCaps) ReplyFooter(backendID string) string {
+    if backendID == "" { backendID = c.s.router.Backends().DefaultBackend() }
+    return replyTagForBackend(backendID)
 }
 ```
 
