@@ -213,3 +213,28 @@ func TestAdmit_BudgetSpentChatFetchesNothing(t *testing.T) {
 		t.Error("Admit refused a chat under its cap")
 	}
 }
+
+// A reply the AskUserQuestion card replaces sends no text, so it must not
+// spend the day's warning: the next reply that goes out carries it (#3694).
+func TestBudget_AskQuestionKeepsWarning(t *testing.T) {
+	d, fp, _, spend := newBudgetDispatcher(t, budget.Limits{PerChatDailyUSD: 10})
+	key := "fake:direct:c1:general"
+	spend(key, 8)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	msg := budgetMsg("c1", "hello")
+	o := d.newIMOrigin(msg, slog.Default(), key, "general", session.AgentOpts{}, imMessage, len(msg.Text), 0)
+	dl := &imDelivery{o: o, p: fp, lg: slog.Default()}
+	dl.BeforeSession(ctx)
+	dl.tracker.askQuestionFired.Store(true)
+	dl.reply(ctx, &clievent.SendResult{Text: "bailout"}, nil)
+	dl.tracker.stop()
+	if got := fp.allReplies(); len(got) != 0 {
+		t.Fatalf("the ask_question turn sent %q", got)
+	}
+
+	if got := replyWithBudget(t, d, fp, key); !strings.HasSuffix(got, "⚠️ 今日费用已达预算的 80%（本会话 $8.00 / $10.00）") {
+		t.Errorf("reply after the card = %q, want the 80%% warning", got)
+	}
+}

@@ -324,9 +324,6 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 	d.markReplySuccess()
 
 	replyText := d.decorateReplyText(ctx, result, sess)
-	if replyText != "" {
-		replyText += d.budgetWarnLine(o.key)
-	}
 	outImages, replyText := d.readTurnImages(replyText)
 
 	// Passthrough turns are bound to d.stopCtx; if SIGTERM lands between
@@ -354,6 +351,9 @@ func (dl *imDelivery) reply(ctx context.Context, result *clievent.SendResult, se
 		}
 		dl.lg.InfoContext(ctx, "ask_question suppressed redundant reply", "result_len", len(result.Text))
 	} else if replyText != "" {
+		// Only a reply that goes out carries the budget warning: it is
+		// spent once a day per subject (#3694).
+		replyText += d.budgetWarnLine(o.key)
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			d.replyIntoBanner(ctx, p, replyDestOf(o.msg), msgID, replyText)
 		} else {
