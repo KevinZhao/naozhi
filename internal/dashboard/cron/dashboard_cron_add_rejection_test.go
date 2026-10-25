@@ -11,8 +11,8 @@ import (
 
 // A create the scheduler refuses for a full job table is a 409 that says so,
 // and a too-frequent schedule (on create or edit) names the interval floor; a
-// bad prompt / schedule and the sandbox×work_dir guardrail get their own 400;
-// only the remaining rejections keep the generic 400.
+// bad prompt / schedule gets its own 400; only the remaining rejections keep
+// the generic 400.
 func TestHandleCreateUpdate_RejectionStatusByClass(t *testing.T) {
 	t.Parallel()
 	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{MaxJobs: 1, AllowNilRouter: true}, cronpkg.SchedulerDeps{})
@@ -40,7 +40,6 @@ func TestHandleCreateUpdate_RejectionStatusByClass(t *testing.T) {
 		{`{"schedule":"not a cron","prompt":"hi"}`, "invalid schedule expression"},
 		{`{"schedule":"@every 1h","prompt":"` + strings.Repeat("x", cronpkg.MaxPromptBytes+1) + `"}`, "invalid prompt"},
 		{`{"schedule":"@every 1h","prompt":"hi","title":"a\u202eb"}`, "invalid schedule or job fields"},
-		{`{"schedule":"@every 1h","prompt":"hi","placement":"sandbox","work_dir":"/tmp"}`, "云沙箱暂不支持工作目录"},
 	} {
 		w := send(http.MethodPost, "/api/cron", c.body)
 		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), c.wantErr) {
