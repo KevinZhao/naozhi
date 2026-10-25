@@ -16,11 +16,6 @@
   },
   {
     "method": "POST",
-    "path": "/api/auth/logout",
-    "handler_type": "*auth.Handlers"
-  },
-  {
-    "method": "POST",
     "path": "/api/auth/noscript",
     "handler_type": "*auth.Handlers"
   },
@@ -42,11 +37,6 @@
   {
     "method": "GET",
     "path": "/api/cost/budget",
-    "handler_type": "*dashcost.Handlers"
-  },
-  {
-    "method": "GET",
-    "path": "/api/cost/entries",
     "handler_type": "*dashcost.Handlers"
   },
   {
@@ -82,11 +72,6 @@
   {
     "method": "POST",
     "path": "/api/cron/pause",
-    "handler_type": "*dashcron.Handlers"
-  },
-  {
-    "method": "GET",
-    "path": "/api/cron/preview",
     "handler_type": "*dashcron.Handlers"
   },
   {
@@ -178,11 +163,6 @@
     "method": "GET",
     "path": "/api/memory/{slug}",
     "handler_type": "*memory.Handler"
-  },
-  {
-    "method": "GET",
-    "path": "/api/planner/stats",
-    "handler_type": "*planner.Handlers"
   },
   {
     "method": "GET",
@@ -352,11 +332,6 @@
   {
     "method": "GET",
     "path": "/api/system/daemons",
-    "handler_type": "*system.Handlers"
-  },
-  {
-    "method": "POST",
-    "path": "/api/system/labels/clear-origin",
     "handler_type": "*system.Handlers"
   },
   {

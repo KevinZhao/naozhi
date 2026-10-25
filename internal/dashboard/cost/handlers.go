@@ -1,5 +1,5 @@
 // Package cost serves the dashboard's read-only view of the cost ledger
-// (docs/rfc/cost-ledger.md §7): unit-bucketed summaries, audit entries and
+// (docs/rfc/cost-ledger.md §7): unit-bucketed summaries and
 // today's spend against cost.budget.
 package cost
 
@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -22,7 +21,6 @@ import (
 type Ledger interface {
 	Enabled() bool
 	Summarize(costledger.Query) (costledger.Summary, error)
-	Entries(costledger.Query, int) ([]costledger.Entry, error)
 }
 
 // Deps wires the handlers. Budget nil, or one a reload left without a cap,
@@ -43,8 +41,6 @@ func New(d Deps) *Handlers { return &Handlers{ledger: d.Ledger, budget: d.Budget
 const (
 	defaultWindow    = 30 * 24 * time.Hour
 	maxFilterLen     = 256
-	defaultEntries   = 200
-	maxEntries       = 1000
 	underReportNote  = "amount may be underestimated: ledger dropped entries"
 	disabledErrorMsg = "cost ledger disabled"
 )
@@ -52,11 +48,6 @@ const (
 type summaryResp struct {
 	costledger.Summary
 	Note string `json:"note,omitempty"`
-}
-
-type entriesResp struct {
-	Entries []costledger.Entry `json:"entries"`
-	Dropped int64              `json:"dropped"`
 }
 
 // budgetResp is today's spend against the cap nearest its limit. Scope is ""
@@ -94,37 +85,6 @@ func (h *Handlers) HandleSummary(w http.ResponseWriter, r *http.Request) {
 		resp.Note = underReportNote
 	}
 	httputil.WriteJSON(w, resp)
-}
-
-// HandleEntries serves GET /api/cost/entries?...&limit= (newest first).
-func (h *Handlers) HandleEntries(w http.ResponseWriter, r *http.Request) {
-	if !h.gate(w, r) {
-		return
-	}
-	q, err := parseQuery(r, costledger.GroupByDay)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	limit := defaultEntries
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		n, perr := strconv.Atoi(raw)
-		if perr != nil || n < 1 {
-			writeErr(w, http.StatusBadRequest, "limit must be a positive integer")
-			return
-		}
-		limit = min(n, maxEntries)
-	}
-	ents, err := h.ledger.Entries(q, limit)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid query window")
-		return
-	}
-	var dropped int64
-	if s, ok := h.ledger.(interface{ Dropped() int64 }); ok {
-		dropped = s.Dropped()
-	}
-	httputil.WriteJSON(w, entriesResp{Entries: ents, Dropped: dropped})
 }
 
 // HandleBudget serves GET /api/cost/budget?session_key=|job_id=: what IM

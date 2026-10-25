@@ -1,12 +1,11 @@
 // Package system hosts the dashboard /api/system/* endpoints: the sysession
-// daemon status list, the label-origin reset, and the self-update state /
-// apply pair. All sit behind the /api/* auth middleware.
+// daemon status list, the self-update state / apply pair, and config reload.
+// All sit behind the /api/* auth middleware.
 //
-//	GET  /api/system/daemons             read-only daemon status list
-//	POST /api/system/labels/clear-origin reset a session's LabelOrigin
-//	GET  /api/system/update              version state + what the operator can do
-//	POST /api/system/update/apply        carry it out (install and/or restart)
-//	POST /api/system/config/reload       re-read config.yaml, apply hot sections
+//	GET  /api/system/daemons        read-only daemon status list
+//	GET  /api/system/update         version state + what the operator can do
+//	POST /api/system/update/apply   carry it out (install and/or restart)
+//	POST /api/system/config/reload  re-read config.yaml, apply hot sections
 package system
 
 import (
@@ -23,7 +22,6 @@ import (
 // so the sub-package never imports internal/server.
 type Router interface {
 	ListSessions() []session.SessionSnapshot
-	ClearUserLabelOrigin(key string) bool
 }
 
 // DaemonInspector is the consumer-side subset of *sysession.Manager. A nil

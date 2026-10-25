@@ -70,9 +70,8 @@ type SandboxRuns interface {
 	SandboxRunSnapshotPrompt(blobHash string) (string, error)
 }
 
-// ScheduleFacts is the schedule preview and the facts the payloads carry.
+// ScheduleFacts is the facts the payloads carry (timezone, notify default, start time).
 type ScheduleFacts interface {
-	PreviewScheduleN(schedule string, n int) ([]time.Time, error)
 	Location() *time.Location
 	NotifyDefault() cronpkg.NotifyTarget
 	StartedAt() time.Time

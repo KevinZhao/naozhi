@@ -55,10 +55,9 @@ func TestBuildAttachmentETagSeed_MillisecondPrecision(t *testing.T) {
 // (which supersedes the R247-SEC-15 / #514 7-day floor): the nz_anon MaxAge
 // MUST equal the nz_auth session lifetime (1h). Previously the label lived 7
 // days — 7× the auth session — so on a shared device a second user arriving
-// after the first user's auth cookie expired (but before logout, which #2157
-// wires to clear nz_anon) could inherit the first user's uploadOwner bucket
-// and TakeAll their pending uploads. Bounding the label to the auth session
-// closes that reuse window.
+// after the first user's auth cookie expired could inherit the first user's
+// uploadOwner bucket and TakeAll their pending uploads. Bounding the label to
+// the auth session closes that reuse window.
 //
 // We assert the constant directly so a future refactor that re-introduces a
 // longer MaxAge (e.g. a "remember me" UX request) is forced to update the

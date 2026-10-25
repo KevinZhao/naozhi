@@ -205,7 +205,6 @@ var routeDeclOwners = map[string]string{
 	"../dashboard/ext/system/routes.go":        "*system.Handlers",
 	"../dashboard/ext/uisettings/routes.go":    "*uisettings.Handler",
 	"../dashboard/ext/accessprofile/routes.go": "*accessprofile.Handler",
-	"../dashboard/ext/planner/routes.go":       "*planner.Handlers",
 	"../dashboard/ext/memory/routes.go":        "*memory.Handler",
 	"../dashboard/ext/transcribe/routes.go":    "*transcribe.Handler",
 	"../dashboard/ext/cli/routes.go":           "*cli.Handler",
@@ -319,7 +318,7 @@ func handlerTypeOf(e ast.Expr) string {
 		}
 		// s.apiChain()(...) — the chain is a value now (#2554), so the wrapper is
 		// a call on a call. Resolve the wrapped handler when it names one
-		// (s.auth.HandleLogout → *AuthHandlers); fall back to *AuthHandlers when
+		// (s.auth.HandleX → *AuthHandlers); fall back to *AuthHandlers when
 		// it does not, which keeps the pre-#2554 answer for debug_pprof /
 		// debug_expvar. Those two pass closure-typed `handler` vars this
 		// lightweight walker cannot type, and the old s.auth.requireAuth(handler)
@@ -428,7 +427,6 @@ var serverFieldType = map[string]string{
 	"ccAssetsH":         "*extccassets.Handler",
 	"healthH":           "*HealthHandler",
 	"systemH":           "*system.Handlers",
-	"plannerH":          "*planner.Handlers",
 	"auth":              "*auth.Handlers",
 	"hub":               "*Hub",
 	"reverseNodeServer": "*node.ReverseServer",

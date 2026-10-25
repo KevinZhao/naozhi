@@ -69,7 +69,6 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	s.mountRoutes(hs.sendH.Routes())
 	s.mountRoutes(hs.discoveryH.Routes())
 	s.mountRoutes(hs.projectH.Routes())
-	s.mountRoutes(hs.plannerH.Routes())
 	s.mountRoutes(hs.transcribeH.Routes())
 	s.mountRoutes(hs.cronH.Routes())
 	s.mountRoutes(hs.systemH.Routes())
@@ -80,7 +79,6 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	if hs.scratchH != nil {
 		s.mountRoutes(hs.scratchH.Routes())
 	}
-	s.mux.HandleFunc("POST /api/auth/logout", s.apiChain()(s.auth.HandleLogout))
 	// Health probes are server-owned (no sub-package) and unauthenticated at
 	// the route level: /health gates its stats section on auth internally,
 	// /livez is a no-deps liveness probe, /readyz answers once construction

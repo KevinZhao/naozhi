@@ -35,54 +35,6 @@ func TestHandleDaemons_DisabledReturnsEmptyArray(t *testing.T) {
 	}
 }
 
-func TestHandleClearLabelOrigin_RequiresKey(t *testing.T) {
-	t.Parallel()
-	h := newDaemonHandlers()
-
-	cases := []struct {
-		name string
-		body string
-		want int
-	}{
-		{"empty body", "", http.StatusBadRequest},
-		{"missing key field", `{}`, http.StatusBadRequest},
-		{"empty key", `{"key":""}`, http.StatusBadRequest},
-		{"reserved (cron) key rejected", `{"key":"cron:foo"}`, http.StatusBadRequest},
-		{"reserved (sys) key rejected", `{"key":"sys:auto-titler"}`, http.StatusBadRequest},
-		{"reserved (project) key rejected", `{"key":"project:foo:planner"}`, http.StatusBadRequest},
-	}
-	for _, c := range cases {
-		c := c
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
-			r := httptest.NewRequest(http.MethodPost,
-				"/api/system/labels/clear-origin",
-				strings.NewReader(c.body))
-			r.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
-			h.HandleClearLabelOrigin(w, r)
-			if w.Code != c.want {
-				t.Errorf("status = %d, want %d; body=%q", w.Code, c.want, w.Body.String())
-			}
-		})
-	}
-}
-
-func TestHandleClearLabelOrigin_UnknownKeyReturns404(t *testing.T) {
-	t.Parallel()
-	h := newDaemonHandlers()
-
-	body := `{"key":"feishu:direct:nobody:general"}`
-	r := httptest.NewRequest(http.MethodPost,
-		"/api/system/labels/clear-origin", strings.NewReader(body))
-	r.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	h.HandleClearLabelOrigin(w, r)
-	if w.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404; body=%q", w.Code, w.Body.String())
-	}
-}
-
 // TestHandleDaemons_JSONShape sanity-checks the top-level shape: the response
 // is a JSON array (empty in unconfigured tests). A real Manager is exercised
 // by the sysession package tests; this only locks the HTTP-layer contract.
