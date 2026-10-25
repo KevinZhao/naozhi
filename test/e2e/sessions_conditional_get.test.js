@@ -162,11 +162,7 @@ test.describe('under WS-fallback polling', () => {
     const errors = pageErrors(page);
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
-    // Settle the boot churn: the first discovery scan to land zeroes
-    // lastVersion and schedules a debounced refresh. Once a scan of ours has
-    // landed the boot scan has scheduled it or never will, and
-    // debouncedFetchSessions joins it; left pending it could read a mock the
-    // test edits next and apply the body before the test's own fetch.
+    // Drain the debounced refresh the first discovery scan schedules.
     await page.evaluate(async () => {
       await scanDiscovered();
       await debouncedFetchSessions();
@@ -185,8 +181,7 @@ test.describe('under WS-fallback polling', () => {
       const n = mock.sessionsValidators.length;
       const notModified = mock.sessionsNotModified;
       expect(await page.evaluate(async () => (await fetchSessions()) === undefined)).toBe(true);
-      // The 5 s interval revalidates the same way: of the next polls at most
-      // one is a boot-time debounced fetch.
+      // The 5 s interval revalidates the same way.
       await expect.poll(() => mock.sessionsValidators.length, { timeout: 12000 }).toBeGreaterThanOrEqual(n + 3);
       const sent = validatorsSince(mock, n);
       expect(sent.every((v) => v !== ''), 'every poll revalidated').toBe(true);
@@ -204,8 +199,7 @@ test.describe('under WS-fallback polling', () => {
     const mock = await startMockServer({ sessionsETag: true });
     const { ctx, page, errors } = await openFallback(browser, mock);
     try {
-      // Only the test fetches: a 5 s tick between the edit and the call below
-      // would apply the body first and leave the call a 304.
+      // A 5 s tick landing between the edit and the fetch would take the body.
       await page.evaluate(() => { clearInterval(sessionPollTimer); sessionPollTimer = null; });
       const n = mock.sessionsValidators.length;
       mock.setSessionStateWithoutVersionBump(KEY_A, 'running');
