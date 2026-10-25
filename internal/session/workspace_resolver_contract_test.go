@@ -157,3 +157,24 @@ var h = func(opts AgentOpts) string { var workspace = opts.Model; return workspa
 		t.Errorf("sites = %v, want %v", got, want)
 	}
 }
+
+// recvBase is the type name a receiver names: T, *T, T[P], *T[P]; "" for a
+// qualified or unnamed type.
+func recvBase(e ast.Expr) string {
+	for {
+		switch x := e.(type) {
+		case *ast.StarExpr:
+			e = x.X
+		case *ast.ParenExpr:
+			e = x.X
+		case *ast.IndexExpr:
+			e = x.X
+		case *ast.IndexListExpr:
+			e = x.X
+		case *ast.Ident:
+			return x.Name
+		default:
+			return ""
+		}
+	}
+}

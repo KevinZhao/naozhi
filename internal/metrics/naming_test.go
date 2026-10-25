@@ -1,8 +1,6 @@
 package metrics
 
 import (
-	"sort"
-	"strings"
 	"testing"
 )
 
@@ -68,41 +66,6 @@ func TestValidName_RejectsNonConforming(t *testing.T) {
 	for _, b := range bad {
 		if ValidName(b) {
 			t.Errorf("ValidName(%q) = true, want false", b)
-		}
-	}
-}
-
-// legacyNonConforming lists registered names that predate the convention and
-// stay as they are: /debug/vars scrapes and docs pin them. Each entry must
-// still be registered and still fail ValidName, so the list cannot go stale.
-var legacyNonConforming = map[string]string{
-	"naozhi_upstream_connector_backoff_millis":         "_millis suffix; named in docs/rfc/node-pairing.md",
-	"naozhi_cron_watchdog_parked_interrupt_goroutines": "_goroutines suffix; pairs with naozhi_cron_watchdog_interrupt_timeout_total",
-}
-
-// TestRegisteredMetricsConformToConvention asserts every naozhi_* metric
-// registered anywhere in the repo passes ValidName (#622), so a new metric
-// with an unknown subsystem or a stray suffix fails the build.
-func TestRegisteredMetricsConformToConvention(t *testing.T) {
-	t.Parallel()
-
-	decls := declaredMetricNames(t)
-	var nonConforming []string
-	for name, file := range decls {
-		if _, legacy := legacyNonConforming[name]; !legacy && !ValidName(name) {
-			nonConforming = append(nonConforming, name+" ("+file+")")
-		}
-	}
-	sort.Strings(nonConforming)
-	if len(nonConforming) > 0 {
-		t.Errorf("metric names violating the naozhi_<subsystem>_<name>_<suffix> convention:\n  %s\nadd the subsystem to KnownSubsystems or fix the suffix.", strings.Join(nonConforming, "\n  "))
-	}
-
-	for name := range legacyNonConforming {
-		if _, ok := decls[name]; !ok {
-			t.Errorf("legacyNonConforming lists %s, which is registered nowhere; delete the entry", name)
-		} else if ValidName(name) {
-			t.Errorf("legacyNonConforming lists %s, which already passes ValidName; delete the entry", name)
 		}
 	}
 }

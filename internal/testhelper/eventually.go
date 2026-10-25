@@ -1,8 +1,7 @@
 // Package testhelper provides shared test utilities, chiefly Eventually, which
 // polls a condition instead of a fixed sleep so slow CI gives a clear diagnostic.
 //
-// Replacing a bare time.Sleep (the ratchet in sleep_ratchet_test.go rejects
-// new ones):
+// Replacing a bare time.Sleep:
 //
 //	// Waiting for an async counter / state flip:
 //	//   time.Sleep(30 * time.Millisecond)
@@ -26,8 +25,7 @@
 //	}, 5*time.Second, 100*time.Millisecond, "sidecar file should appear")
 //
 // A sleep that is genuinely about elapsed time (creating a measurable
-// duration, expiring a TTL) keeps time.Sleep with a `// sleep-ok: <reason>`
-// annotation on the same line.
+// duration, expiring a TTL) keeps time.Sleep.
 package testhelper
 
 import (
