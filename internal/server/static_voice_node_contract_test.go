@@ -494,3 +494,36 @@ func TestDashboardJS_SubscribedAckKeepsNodeForNonPendingTab(t *testing.T) {
 		t.Error("subscribed handler must not fall straight back to 'local' when not pending — see rationale above")
 	}
 }
+
+// TestDashboardJS_RemoteExportPagesHistory: a remote session's node serves the
+// before= pages, so the export pager walks them too and every cursor request
+// keeps carrying &node=; returning early for remote drops older history.
+func TestDashboardJS_RemoteExportPagesHistory(t *testing.T) {
+	t.Parallel()
+	pager := jsFuncBody(t, readDashboardJS(t), "fetchAllSessionEvents")
+	if !strings.Contains(pager, "(remote ? '&node=' + encodeURIComponent(node) : '')") {
+		t.Error("fetchAllSessionEvents must carry &node= on a remote session's requests")
+	}
+	if !strings.Contains(pager, "base + '&before='") {
+		t.Error("fetchAllSessionEvents before= pages must be built from the node-carrying base URL")
+	}
+	if strings.Contains(pager, "if (remote) return") {
+		t.Error("fetchAllSessionEvents returns a remote session's ring without paging — its node serves before= pages, so older history is dropped")
+	}
+}
+
+// TestDashboardJS_LoadEarlierStaleGuardIncludesNode: the same key on another
+// node is a different session, so a node switch while a page is in flight
+// must drop the page instead of grafting it into the new transcript.
+func TestDashboardJS_LoadEarlierStaleGuardIncludesNode(t *testing.T) {
+	t.Parallel()
+	body := jsFuncBody(t, readDashboardJS(t), "loadEarlierEvents")
+	for _, want := range []string{
+		"const node = selection.node;",
+		"const stale = () => selection.key !== key || selection.node !== node || gen !== transcript.earlierGen;",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("loadEarlierEvents missing stale guard piece: %q", want)
+		}
+	}
+}
