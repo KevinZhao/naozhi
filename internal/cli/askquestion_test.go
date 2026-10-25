@@ -8,8 +8,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
-// askUserQuestionLine is a stream line captured from claude CLI 2.1.132
-// (protocol notes in docs/rfc/askuser-question.md).
+// askUserQuestionLine is a stream line captured from claude CLI 2.1.132.
 // Trimmed non-essential fields (model id, signatures, session_id) for clarity.
 const askUserQuestionLine = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_bdrk_013M2ngbuySW8zMNotxACh9U","name":"AskUserQuestion","input":{"questions":[{"question":"Which error handling approach do you want to use?","header":"Error style","multiSelect":false,"options":[{"label":"Return an error","description":"Propagate the error to the caller."},{"label":"Log and continue","description":"Log and keep running."},{"label":"Panic","description":"Crash immediately."}]},{"question":"Which function do you want to add error handling to?","header":"Target","multiSelect":false,"options":[{"label":"I'll paste the code","description":"You'll share the snippet."},{"label":"Point me to a file","description":"You'll give a path."}]}]}}]},"session_id":"s1","uuid":"u1"}`
 

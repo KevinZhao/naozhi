@@ -80,8 +80,7 @@ type ToolCall struct {
 	OutputJSON string `json:"output_json,omitempty"` // raw JSON of rawOutput
 }
 
-// AskQuestion mirrors the shape of AskUserQuestion.input (see
-// docs/rfc/askuser-question.md). ToolUseID correlates
+// AskQuestion mirrors the shape of AskUserQuestion.input. ToolUseID correlates
 // dashboard + IM renderings of the same question.
 type AskQuestion struct {
 	ToolUseID string            `json:"tool_use_id"`
