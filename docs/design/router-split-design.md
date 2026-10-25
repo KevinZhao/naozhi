@@ -553,7 +553,7 @@ v3 → v4 删除的错误描述：
 
 ## S12 的结果（epic #2897，#3023）
 
-S12 没有整体拆 Router（epic 决议 D1），而是把不碰会话表的方法按职责移到值字段 facet 上，再把两个大文件按文件拆开。实测口径是 `internal/session/router_budget_test.go`：统计 session 根包全部非测试文件（含 `//go:build !release` 的 testutil.go），字段名按个数算（嵌入字段算 1），方法按 receiver 为 Router/*Router（以及别名、嵌入、基于 Router 的新类型）算。
+S12 没有整体拆 Router（epic 决议 D1），而是把不碰会话表的方法按职责移到值字段 facet 上，再把两个大文件按文件拆开。实测口径是 `internal/session/router_budget_test.go`（已于 #3720 删除，以下为当时的口径）：统计 session 根包全部非测试文件（含 `//go:build !release` 的 testutil.go），字段名按个数算（嵌入字段算 1），方法按 receiver 为 Router/*Router（以及别名、嵌入、基于 Router 的新类型）算。
 
 | PR | 内容 | 字段 | 方法 |
 |---|---|---|---|

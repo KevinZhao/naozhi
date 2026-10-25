@@ -2716,9 +2716,8 @@ workflowPushLoop 与 board 发布、generation 变化并发。
 ### 11.5 闸门
 
 `gofmt -l` 为空；`go vet ./...`；**`GOOS=windows go vet ./...`**（必过的 `build-windows` job 的本地等价，`ci.yml:436-457`；FIFO 测试须在 `*_unix_test.go` + `//go:build unix`，§10）；`GOTOOLCHAIN=go1.26.6 make lint-staticcheck`；
-`lint-server-handlers -mode fail`（含 `hubOptionsFieldBaseline`）；**`go test ./internal/session -run TestRouterBudget`**
-（Router 字段 18 / 方法 98 / 类型引用 5，均为 ratchet 台账指标；本特性的 sweeper、resolver、R3 都不得新增 Router 方法或 `*Router`
-参数）；`node scripts/check-enum-literals.mjs` 与其 test；`node --test scripts/check-ws-receivers.test.mjs`；tsc 与 `node --test scripts/ts-check.test.mjs`；js-ratchet `--check`；
+`lint-server-handlers -mode fail`（含 `hubOptionsFieldBaseline`）；（本特性的 sweeper、resolver、R3 都不得新增 Router 方法或 `*Router`
+参数；原先钉住这些数的 `router_budget_test.go` 已于 #3720 删除）；`node scripts/check-enum-literals.mjs` 与其 test；`node --test scripts/check-ws-receivers.test.mjs`；tsc 与 `node --test scripts/ts-check.test.mjs`；js-ratchet `--check`；
 **`go run ./tools/ratchet-raises -base origin/master`**（必过 job 的本地等价）；`check-ws-contract`；
 `check-mock-rest`；`node --test scripts/workflow-state.test.mjs`；CLAUDE.md 模块清单测试；推送前全仓
 `go test ./...`。
@@ -2799,7 +2798,7 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
 - 测试：见 §11.2 reconnectVerdict 行，含"live result 紧随 startReadLoop 到达"、5MB JSONL fixture、末条记录 200KiB。
   （`ReconnectHooks` 用结构体：PR-7 加 `KnownWorkflowTasks` 字段时不再改 `SpawnReconnect` 的签名，§5.9 R1。）
 - 验收：空闲 + 后台 workflow 的 session 重启后为 Ready；前台长 Bash + 后台 workflow 洪水（ring 已绕回）
-  重启后仍为 Running；`reconnectVerdict` 不解码中性帧（计数）；`go test ./internal/session -run TestRouterBudget` 不变；`GOOS=windows go vet ./...` 绿。
+  重启后仍为 Running；`reconnectVerdict` 不解码中性帧（计数）；`GOOS=windows go vet ./...` 绿。
 - 依赖：无。
 
 ### PR-4 fix(server): agent tailer 的 allowedRoot 用共享 ProjectsRoot
@@ -2917,7 +2916,7 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   kill shim 连接（CLI 存活）时 workflow 保持 running + snapshot_stale、重接后恢复 live；**naozhi 运行中杀掉 shim 进程**（`shimOutlivedSocket`
   为假，`process_end.go:86-96`）→ 立即 interrupted（§5.6(6a)，不经 R4）；respawn（如 TTL 回收后再发消息）之后 workflow 帧继续到达同一个 board；
   重启（shim 存活）后摘要恢复，且**同一 epoch 内** version 不回退（重启后是新 board、新 epoch，跨 epoch 不比较版本；新 epoch 内 Ref 条目被版本更低的
-  Tracker 条目替换时 wire version 仍递增）；shim ring 已绕回的重启后名称仍是 Ref 里的真名、elapsed 仍显示；`TestRESTSchema_IsGenerated` 与 `TestRouterBudget` 绿。
+  Tracker 条目替换时 wire version 仍递增）；shim ring 已绕回的重启后名称仍是 Ref 里的真名、elapsed 仍显示；`TestRESTSchema_IsGenerated` 绿。
 - 依赖：PR-7、PR-4（`IsValidWorkflowRunID`、`ResolvedProjectsRoot`）。
 
 ### PR-9 feat(claudefs,session): workflow 磁盘定位、对账与 sweeper
@@ -2947,7 +2946,7 @@ per-file `lines` 只改基线）；**其余每个指标都是 per-file 键** `js
   （Detach，Ref 里留下 running 条目）→ 杀掉 shim → 重启 naozhi，R0 恢复的条目无进程可重接，≤ 120s（90s + 一个 tick）由 R4 置 interrupted
   （v3 的"naozhi 运行中杀 shim"走的是 PR-8 的 (6a)，测不到 R4）；**R5**：同样的重启后 90s 内发一条消息 spawn 新 CLI，恢复的 running 条目
   ≤ 90s + 一个 tick 后变为 unknown、不再钉保活；没有 shim 的重启后展开一个恢复出来的终态 workflow 能看到全部行；在 run dir 里把 `wf_<runId>.json`
-  换成 FIFO 不卡住 sweeper；`TestRouterBudget` 绿；`GOOS=windows go vet ./...` 绿。
+  换成 FIFO 不卡住 sweeper；`GOOS=windows go vet ./...` 绿。
 - 依赖：PR-8、PR-4（`claudefs.ResolvedProjectsRoot`）、PR-3（`osutil.OpenRegular`）。
 
 ### PR-10 feat(dashboard/ext/workflows): HTTP 端点
