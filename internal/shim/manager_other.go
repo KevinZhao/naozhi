@@ -12,7 +12,7 @@ import (
 
 // moveToShimsCgroup is a no-op: shim lifecycle separation is only implemented
 // on Linux (cgroup/systemd scope) and Darwin (launchd reparenting).
-func moveToShimsCgroup(_ context.Context, _, _ int, _ string) {}
+func moveToShimsCgroup(_ context.Context, _, _ int) {}
 
 // shimPIDBinaryMismatch returns an error on unsupported platforms; callers
 // treat err != nil as "skip the gate" (PID-reuse detection disabled here).
