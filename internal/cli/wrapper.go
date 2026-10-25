@@ -205,9 +205,7 @@ func (w *Wrapper) Probe(ctx context.Context) string {
 }
 
 // ResolveCLIPath is the binary a Wrapper built from (cliPath, backend) would
-// spawn: the configured path with ~ expanded, or detectCLI's pick when none is
-// configured. Exported so tools that run the CLI outside a Wrapper (`naozhi
-// models sync`) exercise the same binary; "" means nothing was found.
+// spawn; "" means nothing was found.
 func ResolveCLIPath(cliPath, backend string) string {
 	if cliPath == "" {
 		cliPath = detectCLI(backend)

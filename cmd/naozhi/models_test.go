@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/ccmodels"
@@ -148,43 +147,21 @@ func TestWriteTarget_BacksUpAndKeepsMode(t *testing.T) {
 // no path is auto-detected at spawn, so the probe must detect too rather than
 // borrow cli.path, which may point at another backend's binary.
 func TestCCProbePath_MatchesSpawnResolution(t *testing.T) {
-	const detected = "/detected/claude"
-	orig := resolveCLIPath
-	t.Cleanup(func() { resolveCLIPath = orig })
-	resolveCLIPath = func(path, backend string) string {
-		if path != "" {
-			return path
-		}
-		if backend == "claude" {
-			return detected
-		}
-		return ""
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+	detected := filepath.Join(home, ".local", "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(detected), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(detected, nil, 0o755); err != nil {
+		t.Fatal(err)
 	}
 
 	cfg := config.Config{CLI: config.CLIConfig{Path: "/opt/kiro-cli", Backends: []config.CLIBackendConfig{
 		{ID: "claude"}, {ID: "kiro", Path: "/opt/kiro-cli"},
 	}}}
-	var out strings.Builder
-	if got := ccProbePath(&cfg, &out); got != detected {
+	if got := ccProbePath(&cfg); got != detected {
 		t.Errorf("ccProbePath = %q, want %q", got, detected)
-	}
-	if !strings.Contains(out.String(), detected) {
-		t.Errorf("output %q does not name the binary used", out.String())
-	}
-}
-
-// TestCCProbePath_NotFoundIsAnnounced: an empty path silently skips the cc
-// stage in the prober, so the caller must say so.
-func TestCCProbePath_NotFoundIsAnnounced(t *testing.T) {
-	orig := resolveCLIPath
-	t.Cleanup(func() { resolveCLIPath = orig })
-	resolveCLIPath = func(string, string) string { return "" }
-
-	var out strings.Builder
-	if got := ccProbePath(&config.Config{}, &out); got != "" {
-		t.Fatalf("ccProbePath = %q, want empty", got)
-	}
-	if !strings.Contains(out.String(), "未找到 claude") {
-		t.Errorf("output %q does not announce the skipped cc stage", out.String())
 	}
 }

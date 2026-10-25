@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -170,7 +169,7 @@ func probeAliases(cfg *config.Config, snap ccmodels.Snapshot, base []byte, opt m
 		Observe:      func(v ccmodels.Verdict) { fmt.Println("  " + ccprobe.Describe(v)) },
 	}
 	if !opt.Quick {
-		p.CLIPath = ccProbePath(cfg, os.Stdout)
+		p.CLIPath = ccProbePath(cfg)
 	}
 	ctx := context.Background()
 	if snap.CredExport == "" {
@@ -185,16 +184,9 @@ func probeAliases(cfg *config.Config, snap ccmodels.Snapshot, base []byte, opt m
 	return p.Run(ctx, candidates)
 }
 
-// resolveCLIPath is cli.ResolveCLIPath, swappable so tests need no installed cc.
-var resolveCLIPath = cli.ResolveCLIPath
-
-// ccProbePath returns the cc binary to probe with, resolved exactly as spawn
-// resolves the claude backend (an entry without a path is auto-detected, not
-// filled from cli.path), so the probe exercises the binary naozhi runs. With no
-// claude backend enabled it is the detected local cc, whose settings are synced
-// regardless. It says which binary it picked, and when none was found, since
-// the prober skips the cc stage on an empty path without a word.
-func ccProbePath(cfg *config.Config, out io.Writer) string {
+// ccProbePath resolves the claude backend's binary the way spawn does, and
+// says so when none is found (the prober skips the CLI stage on "").
+func ccProbePath(cfg *config.Config) string {
 	var configured string
 	for _, b := range cfg.EnabledBackends() {
 		if b.ID == "claude" {
@@ -202,11 +194,9 @@ func ccProbePath(cfg *config.Config, out io.Writer) string {
 			break
 		}
 	}
-	path := resolveCLIPath(configured, "claude")
+	path := cli.ResolveCLIPath(configured, "claude")
 	if path == "" {
-		fmt.Fprintln(out, "未找到 claude，跳过 CLI 验证。")
-	} else {
-		fmt.Fprintf(out, "CLI 验证使用 %s\n", path)
+		fmt.Println("未找到 claude，跳过 CLI 验证。")
 	}
 	return path
 }
