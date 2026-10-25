@@ -5,8 +5,7 @@
 //
 // Sentinel→Code matching lives in classify.go (the ONLY file importing
 // internal/cli + internal/session) and turn-result matching in turn.go; the
-// Code→text table here has no such dependency so it can move to
-// internal/i18n (#631).
+// Code→text table here has no such dependency.
 package usermsg
 
 import (

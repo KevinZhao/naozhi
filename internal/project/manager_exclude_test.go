@@ -6,8 +6,7 @@ import (
 )
 
 // projects.exclude hides a matching directory as completely as a leading dot:
-// no project, no binding, no index entry, and the legacy-stub sweep leaves its
-// files alone. Matching is a case-sensitive basename glob.
+// no project, no binding, no index entry. Matching is a case-sensitive basename glob.
 func TestScan_ExcludeSkipsMatchingDirs(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -18,7 +17,7 @@ func TestScan_ExcludeSkipsMatchingDirs(t *testing.T) {
 	makeProjectDir(t, root, "tmp-1", &ProjectConfig{
 		ChatBindings: []ChatBinding{{Platform: "feishu", ChatType: "group", ChatID: "oc_1"}},
 	})
-	stub := writeStub(t, root, "tmp-x", 100)
+	makeProjectDir(t, root, "tmp-x", nil)
 	indexPath := filepath.Join(t.TempDir(), "projects-index.json")
 
 	m, err := NewManager(root, PlannerDefaults{},
@@ -42,10 +41,6 @@ func TestScan_ExcludeSkipsMatchingDirs(t *testing.T) {
 			t.Errorf("index has excluded %s (created_at %d)", name, ms)
 		}
 	}
-	if len(f.StubCleanupDone) != 1 {
-		t.Fatalf("stub_cleanup_done = %q, want the sweep to have run", f.StubCleanupDone)
-	}
-	assertExists(t, stub, true)
 }
 
 // An excluded subdirectory no longer claims the root's basename, so

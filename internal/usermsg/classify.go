@@ -1,8 +1,7 @@
 // classify.go is the ONLY file in internal/usermsg that imports the
 // implementation packages (cli + session). It maps their sentinel errors
 // onto a presentation-neutral Code enum; usermsg.go maps Code → Chinese text
-// with zero cli/session dependency, so the text tables can move to
-// internal/i18n (#631) untouched.
+// with zero cli/session dependency.
 package usermsg
 
 import (

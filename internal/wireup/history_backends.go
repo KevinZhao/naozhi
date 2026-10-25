@@ -20,19 +20,7 @@ import (
 // WireHistoryThumbnails installs discovery.ThumbnailFn, which turns raw image
 // bytes from a rehydrated JSONL transcript into a small JPEG data URI. The hook
 // is a process-global with no build-time enforcement: leave it nil and image
-// blocks in history are silently dropped — no compile error, no warning, just
-// missing pictures.
-//
-// The assignment lived in internal/history/claudejsonl's init() (its last reason
-// to import internal/cli — a JSONL reader pulling in the subprocess manager for
-// one function pointer), then in this package's init(). An init() here made the
-// guarantee invisible at the call site and re-broke the "wireup has no init()"
-// property #2552 established, so it is a Boot step: main states it, Validate
-// refuses to serve without it.
-func (b *Boot) WireHistoryThumbnails() {
+// blocks in history are silently dropped. main calls it once at boot.
+func WireHistoryThumbnails() {
 	discovery.ThumbnailFn = cli.MakeThumbnail
-	b.recordStep("history-thumbnail", BootStep{
-		Kind:   "history-thumbnail",
-		Detail: "discovery.ThumbnailFn = cli.MakeThumbnail",
-	})
 }

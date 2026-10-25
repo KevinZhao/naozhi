@@ -32,10 +32,10 @@ func TestHistoryBackends_ClaudeFactoryRegistered(t *testing.T) {
 // history factory boots fine, then only logs a runtime Warn
 // (history.WarnMissingFactory) while every session's history shows empty.
 func TestHistoryBackends_EveryProfileHasFactory(t *testing.T) {
-	NewBoot().EnsureCLIBackends()
+	RegisterCLIBackends()
 	profiles := backend.All()
 	if len(profiles) == 0 {
-		t.Fatal("backend.All() is empty after EnsureCLIBackends; nothing to check")
+		t.Fatal("backend.All() is empty after RegisterCLIBackends; nothing to check")
 	}
 	for _, p := range profiles {
 		if history.PickFactory(p.ID) == nil {

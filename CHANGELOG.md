@@ -32,6 +32,7 @@
 
 ### Changed
 
+- **移除 v0.1.42 引入的一次性 `.naozhi/project.yaml` 桩文件清理**（#3728）：从 v0.1.40 之前的版本直接升级的用户，如仓库里残留只含 `created_at` 的 `.naozhi/project.yaml`（未跟踪的 `.naozhi/` 目录），请手动删除；`projects-index.json` 里遗留的 `stub_cleanup_done` 字段会被忽略，下次保存时自动丢弃。
 - **BREAKING：删除 config schema 迁移链与 `naozhi config migrate` 子命令**。`Load` 不再在内存里改写 schema v1 旧键，`naozhi config migrate [-write]` 已移除（现在是 usage 错误，退出 2），也不再生成 `<config>.pre-migrate-v<N>` 备份。下列旧键仍能加载、不会让服务起不来，但**不再生效**，只报一条 WARN（`config-deprecated`；`agents[].args` 里的 flag 报的是已有的 `argv-denylist`，并指向 `agents[<id>].system_prompt`；`config check` 退出 1），升级前请手动改名：
   - `nodes:` → `workspaces:`（不改的话远程节点不会被配置）
   - `session.workspace` → `session.cwd`（不改则回落到默认 cwd）
