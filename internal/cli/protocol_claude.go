@@ -496,7 +496,7 @@ func (p *ClaudeProtocol) ReadEventInto(line string, buf []clievent.Event) ([]cli
 	}
 	// AskUserQuestion surfacing: in `claude -p` the CLI auto-injects an
 	// is_error tool_result ~3ms after the tool_use and the model falls back to
-	// text in the same turn (test/e2e/askuser/). We observe the tool_use so
+	// text in the same turn (docs/rfc/askuser-question.md). We observe the tool_use so
 	// dispatch can render an interactive card. The raw-line substring check
 	// keeps the per-block walk off the common path (#1008).
 	if ev.Type == "assistant" && ev.Message != nil &&
@@ -598,7 +598,7 @@ func parseWorkflowLaunch(line string) *clievent.WorkflowLaunch {
 }
 
 // askUserQuestionInput matches the `input` of an AskUserQuestion tool_use
-// block (keys as observed in test/e2e/askuser logs).
+// block (keys as documented in docs/rfc/askuser-question.md).
 type askUserQuestionInput struct {
 	Questions []struct {
 		Question    string `json:"question"`

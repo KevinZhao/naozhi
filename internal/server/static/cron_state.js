@@ -241,8 +241,7 @@ export async function cronRefetchFullJob(id) {
   // by an earlier refetch. A spliced row carries a full body but says nothing
   // about whether the prompt has changed since, so trusting it let the editor
   // open — and Save — a stale prompt: open a drawer, have the prompt rewritten
-  // elsewhere, open the editor, and the old body goes back to disk. Measured in
-  // test/e2e/cron_compact_prompt.test.js before this guard existed.
+  // elsewhere, open the editor, and the old body goes back to disk.
   if (!cached.prompt_truncated && !cached.prompt_refetched) return { ok: true, job: cached };
   try {
     const headers = authHeaders();

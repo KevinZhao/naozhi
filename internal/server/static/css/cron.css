@@ -19,8 +19,8 @@
 .cron-new-btn:hover{background:var(--nz-border);color:var(--nz-text-strong)}
 .cron-new-btn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 /* Cron card outer (anchor) — v3 row uses .cj-row for the visual; the
- * .cron-card class remains as an E2E selector anchor (e2e/dashboard.test.js,
- * multibackend.round3/5.test.js) but is otherwise visually inert.
+ * .cron-card class remains as an E2E selector anchor (e2e/dashboard.test.js)
+ * but is otherwise visually inert.
  *
  * cron-dashboard-redesign P0 (2026-05-22): the legacy v2 padding/border/
  * margin/background made each row look like an individual card despite the

@@ -7,14 +7,6 @@ import (
 )
 
 // leakSample is one detection-boundary case from testdata/samples.json.
-//
-// The file is shared with test/e2e/leaked_toolcall_fold.test.js, which drives
-// the same texts through the dashboard and checks whether the bubble folded.
-// Both sides reading one file is what makes JS ⇄ Go parity behavioural: the
-// retired internal/server/static_leaked_toolcall_test.go established it by
-// asserting that leakguard.Anchor appeared verbatim inside dashboard.js, which
-// is satisfied by an identical regex literal that is never applied, and broken
-// by a JS rewrite that is exactly equivalent (#2547).
 type leakSample struct {
 	Name string `json:"name"`
 	Text string `json:"text"`

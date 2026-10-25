@@ -81,7 +81,7 @@ type ToolCall struct {
 }
 
 // AskQuestion mirrors the shape of AskUserQuestion.input (see
-// test/e2e/askuser/aq1_aq2_trigger_and_schema.py). ToolUseID correlates
+// docs/rfc/askuser-question.md). ToolUseID correlates
 // dashboard + IM renderings of the same question.
 type AskQuestion struct {
 	ToolUseID string            `json:"tool_use_id"`
