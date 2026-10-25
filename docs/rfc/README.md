@@ -20,7 +20,6 @@ RFC 是落地前的设计取舍与实测记录，**不是最终规范**——架
 | [cron-v2-polish.md](cron-v2-polish.md) | 已实装 | cron name / jitter / missed / sort / next-run |
 | [csp-data-action.md](csp-data-action.md) | 已实施 | 内联 `on*=` 迁 `data-action` 委托 |
 | [dashboard-cron-view-extraction.md](dashboard-cron-view-extraction.md) | 已实装 | cron 视图从 dashboard.js 抽出 |
-| [dashboard-csp-strict.md](dashboard-csp-strict.md) | Implemented v2 | dashboard CSP 去 `'unsafe-inline'` |
 | [dashboard-es-modules.md](dashboard-es-modules.md) | — | static/*.js 原生 ES module 化 |
 | [dashboard-event-uuid-idempotent-render.md](dashboard-event-uuid-idempotent-render.md) | Draft v1 | 事件 uuid 幂等渲染 |
 | [dashboard-model-effort-control.md](dashboard-model-effort-control.md) | 已实装 | 会话级 model / effort 切换 |

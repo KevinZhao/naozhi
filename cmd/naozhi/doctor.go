@@ -181,7 +181,6 @@ func (d *doctor) run() {
 	d.checkConfigDrift()
 	d.checkPprof()
 	d.checkExpvar()
-	d.checkMetrics()
 	d.checkStateDir()
 	d.checkCLIBackends()
 	d.checkTranscribe()

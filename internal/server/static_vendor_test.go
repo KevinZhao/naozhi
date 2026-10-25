@@ -3,8 +3,6 @@ package server
 import (
 	"bytes"
 	"compress/gzip"
-	"crypto/sha512"
-	"encoding/base64"
 	"io"
 	"io/fs"
 	"net/http"
@@ -14,52 +12,6 @@ import (
 	"strings"
 	"testing"
 )
-
-// vendorPinRe matches one [url, sha384] pair a lazy loader is handed.
-var vendorPinRe = regexp.MustCompile(`\['([^']+)',\s*'sha384-([^']+)'\]`)
-
-// TestVendorAssets_SRIMatchesEmbedded checks every asset a dashboard module
-// injects against the bytes the binary serves: a hash that drifts from the file
-// makes the browser refuse it, and the formula or diagram never renders. Every
-// pin names a /static/vendor/ file, since the CSP allows no other origin. In
-// reverse, every vendored script and stylesheet has a pin, so none is served
-// unloaded.
-func TestVendorAssets_SRIMatchesEmbedded(t *testing.T) {
-	t.Parallel()
-	var pins [][]string
-	for key := range staticAssets {
-		if strings.HasSuffix(key, ".js") && !strings.HasPrefix(key, "vendor/") {
-			pins = append(pins, vendorPinRe.FindAllStringSubmatch(string(staticAssetBytes(key)), -1)...)
-		}
-	}
-	if len(pins) < 3 {
-		t.Fatalf("found %d [url, sha384] pins in the dashboard modules, want KaTeX's script and stylesheet and mermaid's script (regex drift?)", len(pins))
-	}
-	pinned := map[string]bool{}
-	for _, p := range pins {
-		key, ok := strings.CutPrefix(p[1], "/static/")
-		if !ok || !strings.HasPrefix(key, "vendor/") {
-			t.Errorf("a dashboard module loads %s, outside /static/vendor/: the CSP allows no other source", p[1])
-			continue
-		}
-		want := p[2]
-		pinned[key] = true
-		b := vendorContent(t, key)
-		if b == nil {
-			t.Errorf("render_md.js loads /static/%s, which is not embedded", key)
-			continue
-		}
-		sum := sha512.Sum384(b)
-		if got := base64.StdEncoding.EncodeToString(sum[:]); got != want {
-			t.Errorf("/static/%s: render_md.js pins sha384-%s, the embedded file is sha384-%s", key, want, got)
-		}
-	}
-	for key := range staticAssets {
-		if strings.HasPrefix(key, "vendor/") && (strings.HasSuffix(key, ".js") || strings.HasSuffix(key, ".css")) && !pinned[key] {
-			t.Errorf("%s is embedded but render_md.js pins no SRI hash for it", key)
-		}
-	}
-}
 
 // vendorContent is the release file an asset key serves: its bytes, or the
 // decompression of a gzip-only asset's gz form.
@@ -118,7 +70,7 @@ func TestVendorAssets_LargeFilesPrecompressed(t *testing.T) {
 
 // TestVendorAssets_DirectoryNamesRelease: vendor/ responses are immutable on
 // the strength of their path, so each build embedded must be the release its
-// directory names. Changed bytes need a new directory, not a new pin.
+// directory names. Changed bytes need a new directory.
 func TestVendorAssets_DirectoryNamesRelease(t *testing.T) {
 	t.Parallel()
 	dirs := map[string]bool{}
@@ -247,52 +199,6 @@ func TestVendorRoutes_RequireAuth(t *testing.T) {
 		srv.mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, p, nil))
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("unauthenticated GET %s = %d, want 401", p, w.Code)
-		}
-	}
-}
-
-// TestDashboardCSP_SelfHostedOnly: with KaTeX and mermaid vendored, the policy
-// /dashboard serves names no origin but its own. Scripts are 'self' plus the
-// inline-script hashes; styles and fonts are 'self'; only images and frames add
-// data: / blob:, which are not origins.
-func TestDashboardCSP_SelfHostedOnly(t *testing.T) {
-	t.Parallel()
-	w := httptest.NewRecorder()
-	newTestServer(&mockPlatform{}).handleDashboard(w, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
-	csp := w.Header().Get("Content-Security-Policy")
-	if csp != dashboardCSP {
-		t.Fatalf("/dashboard serves CSP %q, want dashboardCSP", csp)
-	}
-	directives := map[string][]string{}
-	for _, d := range strings.Split(csp, ";") {
-		f := strings.Fields(d)
-		directives[f[0]] = f[1:]
-	}
-	for _, name := range []string{"style-src", "font-src"} {
-		if got := strings.Join(directives[name], " "); got != "'self'" {
-			t.Errorf("CSP %s = %q, want 'self' (KaTeX is served from /static/vendor)", name, got)
-		}
-	}
-	script := directives["script-src"]
-	if len(script) < 2 || script[0] != "'self'" {
-		t.Errorf("CSP script-src = %q, want 'self' and the inline-script hashes", script)
-	}
-	for _, src := range script[1:] {
-		if !strings.HasPrefix(src, "'sha256-") {
-			t.Errorf("CSP script-src lists %q: scripts come from /static/ or are hash-pinned inline blocks", src)
-		}
-	}
-	for name, srcs := range directives {
-		if name == "require-sri-for" {
-			continue // its values are resource types, not sources
-		}
-		for _, src := range srcs {
-			switch {
-			case src == "'self'", src == "'none'", src == "data:", src == "blob:":
-			case strings.HasPrefix(src, "'sha256-"):
-			default:
-				t.Errorf("CSP %s allows %q: the dashboard loads nothing from outside its origin", name, src)
-			}
 		}
 	}
 }

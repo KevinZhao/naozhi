@@ -674,15 +674,15 @@ const LOAD_RETRY_MS = 60000;
 const mermaidLoad = { ready: false, busy: false, failures: 0, loaded: new Set() };
 const katexLoad = { ready: false, busy: false, failures: 0, loaded: new Set() };
 
-// lazyLoad appends each lazily loaded asset ([url, sha384]) under its SRI
-// pin; st is ready once all of them have loaded. A failed attempt is retried
+// lazyLoad appends each lazily loaded asset (a /static/vendor/ url); st is
+// ready once all of them have loaded. A failed attempt is retried
 // once, LOAD_RETRY_MS later, re-appending only the assets that did not load,
 // then not until the page reloads. rerun runs when an attempt settles and when
 // the retry falls due; meanwhile runMermaid / runKatex leave the source showing.
 function lazyLoad(st, assets, rerun) {
   if (st.ready || st.busy) return;
   st.busy = true;
-  const todo = assets.filter(([url]) => !st.loaded.has(url));
+  const todo = assets.filter(url => !st.loaded.has(url));
   let left = todo.length, failed = false;
   const settle = () => {
     if (--left > 0) return;
@@ -690,11 +690,10 @@ function lazyLoad(st, assets, rerun) {
     else if (++st.failures === 1) setTimeout(() => { st.busy = false; rerun(); }, LOAD_RETRY_MS);
     rerun();
   };
-  todo.forEach(([url, integrity]) => {
+  todo.forEach(url => {
     const css = url.endsWith('.css');
     document.head.appendChild(Object.assign(document.createElement(css ? 'link' : 'script'),
       css ? { rel: 'stylesheet', href: url } : { src: url }, {
-        integrity, crossOrigin: 'anonymous',
         onload: () => { st.loaded.add(url); settle(); },
         onerror: () => { failed = true; settle(); },
       }));
@@ -716,8 +715,7 @@ function awaitingLoad(pending, id, el, st) {
 }
 
 function loadMermaid() {
-  lazyLoad(mermaidLoad, [['/static/vendor/mermaid-11.14.0/mermaid.min.js',
-    'sha384-1CMXl090wj8Dd6YfnzSQUOgWbE6suWCaenYG7pox5AX7apTpY3PmJMeS2oPql4Gk']], () => {
+  lazyLoad(mermaidLoad, ['/static/vendor/mermaid-11.14.0/mermaid.min.js'], () => {
     if (mermaidLoad.ready) window.mermaid.initialize(mermaidConfig());
     runMermaid();
   });
@@ -739,62 +737,11 @@ function runMermaid() {
     // Re-initialise per run so diagrams rendered after a theme switch pick
     // up the current theme (already-rendered SVGs are left as-is).
     window.mermaid.initialize(mermaidConfig());
+    // A diagram that fails to parse draws mermaid's own error diagram; the
+    // rejection must not reach the global-error toast.
     Promise.resolve(window.mermaid.run({ nodes: document.querySelectorAll('.mermaid') }))
-      .then(adoptMermaidStyles, adoptMermaidStyles);
+      .catch(() => {});
   }
-}
-
-// The dashboard CSP has no style-src 'unsafe-inline', so the browser refuses
-// style attributes and <style> elements that arrive as markup — which is how
-// KaTeX's renderToString and mermaid's SVG carry their layout and theme. CSSOM
-// writes are not markup and are not refused, so the same declarations are
-// applied again through el.style and constructed style sheets. Only KaTeX and
-// mermaid output goes through here; renderMd escapes every author-supplied tag.
-
-// applyMarkupStyles re-applies the style attribute of root and its descendants.
-function applyMarkupStyles(root) {
-  const els = root.matches('[style]') ? [root] : [];
-  root.querySelectorAll('[style]').forEach(el => els.push(el));
-  els.forEach(el => { el.style.cssText = el.getAttribute('style'); });
-}
-
-// applyKatexStyles styles every KaTeX tree not yet handled. renderToString
-// output reaches the DOM as markup; katex.render (the pending path) builds
-// nodes through CSSOM already and needs nothing.
-function applyKatexStyles() {
-  document.querySelectorAll('.katex:not([data-nz-styled])').forEach(k => {
-    applyMarkupStyles(k);
-    k.setAttribute('data-nz-styled', '');
-  });
-}
-
-// mermaidSheets holds the constructed sheet of each rendered diagram, keyed by
-// its svg id. Mermaid scopes every rule under that id, so adopting the sheet at
-// document level styles only its own diagram. mermaidAdopted is the set last
-// written to document.adoptedStyleSheets, so sheets other code adopts survive.
-const mermaidSheets = new Map();
-const mermaidAdopted = new Set();
-
-function adoptMermaidStyles() {
-  document.querySelectorAll('.mermaid svg[id]').forEach(svg => {
-    if (mermaidSheets.has(svg.id)) return;
-    let css = '';
-    svg.querySelectorAll('style').forEach(st => { css += st.textContent; });
-    const sheet = new CSSStyleSheet();
-    sheet.replaceSync(css);
-    mermaidSheets.set(svg.id, sheet);
-    applyMarkupStyles(svg);
-  });
-  // A diagram that left the DOM takes its sheet with it.
-  for (const id of mermaidSheets.keys()) {
-    if (!document.getElementById(id)) mermaidSheets.delete(id);
-  }
-  const live = [...mermaidSheets.values()];
-  document.adoptedStyleSheets = document.adoptedStyleSheets
-    .filter(sh => !mermaidAdopted.has(sh))
-    .concat(live);
-  mermaidAdopted.clear();
-  live.forEach(sh => mermaidAdopted.add(sh));
 }
 
 // mermaidThemeName maps the resolved dashboard theme (data-theme, with
@@ -820,14 +767,11 @@ let katexCounter = 0;
 const katexPending = {};
 
 // Formulas wait for the stylesheet as well as the script: without it KaTeX
-// markup shows its MathML and HTML copies side by side. Both are vendored, and
-// TestVendorAssets_SRIMatchesEmbedded checks each SRI pin (R219-SEC-4).
+// markup shows its MathML and HTML copies side by side. Both are vendored.
 function loadKatex() {
   lazyLoad(katexLoad, [
-    ['/static/vendor/katex-0.16.21/katex.min.css',
-      'sha384-zh0CIslj+VczCZtlzBcjt5ppRcsAmDnRem7ESsYwWwg3m/OaJ2l4x7YBZl9Kxxib'],
-    ['/static/vendor/katex-0.16.21/katex.min.js',
-      'sha384-Rma6DA2IPUwhNxmrB/7S3Tno0YY7sFu9WSYMCuulLhIqYSGZ2gKCJWIqhBWqMQfh'],
+    '/static/vendor/katex-0.16.21/katex.min.css',
+    '/static/vendor/katex-0.16.21/katex.min.js',
   ], runKatex);
 }
 
@@ -906,7 +850,6 @@ function renderKatex(tex, displayMode) {
 function runPendingAsync() {
   runMermaid();
   runKatex();
-  applyKatexStyles();
 }
 
 // renderRich — unified rich-text entrypoint. Single source of truth for

@@ -94,9 +94,6 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 		s.registerPprof()
 		s.registerExpvar()
 	}
-	if hs.wiring.metricsOn {
-		s.registerMetrics()
-	}
 
 	// Server-owned routes: the dashboard shell, static assets and the WS
 	// upgrade. These stay here because they are not a feature's API surface —
@@ -204,11 +201,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	// CSP: built once at init in dashboard_csp.go. Neither script-src nor
-	// style-src admits unsafe-inline — events are wired through data-action
-	// delegation plus a hash for the theme bootstrap, and the per-element colours
-	// JS still computes go through data attributes applied via CSSOM (nz_util.js
-	// applyDataBg) rather than style="" attributes. No outside origin is
+	// CSP: built once at init in dashboard_csp.go. script-src admits no
+	// unsafe-inline — events are wired through data-action delegation plus
+	// hashes for the inline scripts; style-src does, for the style attributes
+	// KaTeX and mermaid output carries. No outside origin is
 	// listed: KaTeX and mermaid are vendored; connect-src 'self' covers the
 	// same-origin ws/wss upgrade; frame-src blob: is for sandboxed previews.
 	w.Header().Set("Content-Security-Policy", dashboardCSP)
