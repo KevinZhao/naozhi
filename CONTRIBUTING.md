@@ -74,8 +74,7 @@ naozhi 的定位是"轻量 IM -> Claude Code CLI 网关"：用最少的代码把
 - Gemini CLI 接入（必须走 ACP `Protocol` 实现，不要硬编码）
 - 大规模依赖升级（dependabot 自动开的 PR 优先合并）
 
-待办不再维护 `docs/TODO.md`（该文件已删除），一律走 GitHub Issues；历史 `Rxxx-`
-条目到 issue 的映射见 `docs/rfc/todo-to-issues-migration.md`。
+待办不再维护 `docs/TODO.md`（该文件已删除），一律走 GitHub Issues。
 
 ## Questions
 

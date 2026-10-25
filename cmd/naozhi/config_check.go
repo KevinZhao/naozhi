@@ -32,8 +32,6 @@ func runConfig(args []string) {
 	switch args[0] {
 	case "check":
 		os.Exit(configCheck(args[1:], os.Stdout))
-	case "migrate":
-		os.Exit(configMigrate(args[1:], os.Stdout))
 	case "reload":
 		os.Exit(configReload(args[1:], os.Stdout))
 	default:
@@ -43,7 +41,6 @@ func runConfig(args []string) {
 }
 
 const configUsage = "usage: naozhi config check [-config config.yaml] [-effective] [-json]\n" +
-	"       naozhi config migrate [-config config.yaml] [-write]\n" +
 	"       naozhi config reload [-addr URL] [-token T] [-timeout D] [-json]"
 
 // backendDiag is one gate decision attributed to the backend whose spawn

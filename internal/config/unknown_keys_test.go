@@ -267,3 +267,66 @@ func TestUnknownKeysNeverFatal(t *testing.T) {
 		}()
 	}
 }
+
+// TestDeprecatedKeysReported: the schema v1 spellings are no longer rewritten,
+// so each must still load (a failing Load would take an upgraded service down)
+// with exactly one diag naming the replacement, no duplicate config-unknown
+// one, and no effect on the decoded config. The v1 --append-system-prompt in
+// agents[].args gets a single argv-denylist diag, not a second
+// config-deprecated one.
+func TestDeprecatedKeysReported(t *testing.T) {
+	diags, cfg, err := collectLoadDiags(t, writeCfg(t, `
+nodes:
+  mac:
+    url: "https://mac.example.com"
+session:
+  auto_chain:
+    enabled: true
+agents:
+  reviewer:
+    args: ["--append-system-prompt=Be terse.", "--keep"]
+`))
+	if err != nil {
+		t.Fatalf("Load with v1 keys must not fail: %v", err)
+	}
+	want := map[string]string{
+		"nodes":              "workspaces",
+		"session.auto_chain": "remove",
+	}
+	flagDiags := 0
+	for _, d := range diags {
+		if strings.HasPrefix(d.Key, "--append-system-prompt") || strings.Contains(d.Key, "agents[reviewer]") {
+			flagDiags++
+			if d.Layer != "argv-denylist" || !strings.Contains(d.Reason, "agents[reviewer].system_prompt") {
+				t.Errorf("--append-system-prompt diag %+v: want argv-denylist naming agents[reviewer].system_prompt", d)
+			}
+			continue
+		}
+		switch d.Layer {
+		case "config-unknown":
+			t.Errorf("unexpected config-unknown diag %+v", d)
+		case "config-deprecated":
+			hint, ok := want[d.Key]
+			if !ok {
+				t.Errorf("unexpected config-deprecated diag %+v", d)
+				continue
+			}
+			if !strings.Contains(d.Reason, hint) {
+				t.Errorf("%s reason %q does not name %q", d.Key, d.Reason, hint)
+			}
+			delete(want, d.Key)
+		}
+	}
+	for k := range want {
+		t.Errorf("no config-deprecated diag for %s", k)
+	}
+	if flagDiags != 1 {
+		t.Errorf("--append-system-prompt in agents[].args drew %d diags, want exactly 1", flagDiags)
+	}
+	if len(cfg.Nodes) != 0 {
+		t.Errorf("nodes must not be read any more, got %v", cfg.Nodes)
+	}
+	if got := cfg.Agents["reviewer"].SystemPrompt; got != "" {
+		t.Errorf("--append-system-prompt must not be lifted any more, got %q", got)
+	}
+}

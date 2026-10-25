@@ -12,8 +12,6 @@
 // stay identical through the migration (relay passes frames through as raw
 // bytes; byte identity is the cheap way to prove ~100 mechanical call-site
 // rewrites changed nothing).
-//
-//go:generate go run ./gen
 package wsproto
 
 import (

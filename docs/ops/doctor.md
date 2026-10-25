@@ -111,7 +111,7 @@ $ naozhi doctor
 
 `zero-downtime` 检查通过 `systemctl list-units --type=scope | grep naozhi-shim-` 数 scope 数量。
 
-- **有 scope**：说明 sudoers hardening 生效（或曾经生效，scope 一旦建立就持续存在直到 shim 退出）。[`docs/ops/sudoers-hardening.md`](sudoers-hardening.md) 是否安装决定未来 restart 能否新增 scope
+- **有 scope**：说明 sudoers hardening 生效（或曾经生效，scope 一旦建立就持续存在直到 shim 退出）。[`deploy/naozhi-sudoers.example`](../../deploy/naozhi-sudoers.example)（安装步骤见 README）是否安装决定未来 restart 能否新增 scope
 - **0 scope**：sudoers 没配 / 尚无任何活跃 shim。发一条消息让 shim spawn 一次再跑 doctor 即可分辨两者
 - **`systemctl list-units` 失败**：通常非 Linux 或 systemd 用户空间不可达
 

@@ -31,16 +31,14 @@ func readExampleRoot(t *testing.T) *yaml.Node {
 	return doc.Content[0]
 }
 
-// TestExampleConfig_NeedsNoMigration: an operator copies the template, so any
-// deprecated form left in it (the legacy agents[].args --append-system-prompt,
-// `nodes:`, `session.workspace`) prints a config-deprecated WARN on first boot.
-func TestExampleConfig_NeedsNoMigration(t *testing.T) {
-	_, changes, err := runMigrations(readExampleRoot(t))
-	if err != nil {
-		t.Fatalf("runMigrations(config.example.yaml): %v", err)
-	}
-	for _, c := range changes {
-		t.Errorf("config.example.yaml still uses a deprecated form: %s %s (%s)", c.Key, c.Action, c.Reason)
+// TestExampleConfig_NoDeprecatedKeys: an operator copies the template, so any
+// schema v1 key spelling left in it (`nodes:`, `session.workspace`,
+// `session.auto_chain`) is a config-deprecated WARN on first boot and a
+// setting that silently does nothing.
+func TestExampleConfig_NoDeprecatedKeys(t *testing.T) {
+	doc := &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{readExampleRoot(t)}}
+	for _, d := range findDeprecatedKeys(doc) {
+		t.Errorf("config.example.yaml still uses a deprecated form: %s (%s)", d.Key, d.Reason)
 	}
 }
 

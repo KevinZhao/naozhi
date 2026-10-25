@@ -1,4 +1,3 @@
-// @ts-check
 import { NZ_CONTRACT } from './contract.js';
 import { selection, serverInfo, sessionList, timers, ui } from './state.js';
 import { fetchCLIBackends, renderBackendPicker } from './backend_catalog.js';
