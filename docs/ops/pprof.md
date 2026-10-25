@@ -271,22 +271,12 @@ ssh ec2-user@prod-host 'curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1
 }'
 ```
 
-### OpenMetrics / Prometheus 兼容度（RNEW-OPS-416）
-
-切到 Prometheus scraper 前需知道 expvar 层面的几条已知限制：
-
-1. **`*_total` 后缀下 int 值不保证单调**：每次进程重启会归零；Prometheus `rate()`/`increase()` 在重启 window 会看到"倒退"。scraper 端通常由 `resets()` 补偿，naozhi 侧无额外保证。
-2. **只发 `int64`，不发 `float64`**：counter 值永远是整数；未来若有需要 fractional 累加（如 latency sum）要改用 `expvar.Float` 或升级到 Prometheus `CounterVec`。
-3. **无 labels**：按 IM 平台 / node_id / backend 等维度拆分**只能**通过新增独立 counter 实现（如 `ws_auth_fail_*` 已按 rate_limited / invalid_token 拆了两个子 counter）。这是刻意设计（防 label cardinality 爆炸），但迁移 Prometheus 时需要重新定义 CounterVec 的 label schema。
-4. **无 OpenMetrics 元数据**：expvar JSON 不发 `# HELP` / `# TYPE counter` 标签，scrape 方需要知道"`*_total` 是 counter 而非 gauge"才能正确聚合。本表（docs/ops/pprof.md）是当前唯一的语义来源。
-5. **命名规范**：`*_total` 后缀在 OpenMetrics 规范里是强约定（counter 语义），现有名字可直接保留；但未来 gauge 类指标（如 R172-ARCH-D10 追踪的当前 backoff 值 —— 函数在 `internal/upstream/backoff.go::jitterBackoff`，被 connector 调用）不能再套 `_total` 后缀，应用 `_seconds` / `_ratio` 等。
-
 ### 与 `/health` 的分工
 
 - `/health`: 少量高层状态（status / uptime / watchdog kills），前端 dashboard 会持续 poll
 - `/api/debug/vars`: 运维场景下按需拉取的完整计数器 + stdlib 的 memstats/cmdline
 
-两者不重复 counter；watchdog kills 暂时保留在 `/health` 兼容既有 dashboard，未来若升级 Prometheus 会迁到 metrics 包。
+两者不重复 counter；watchdog kills 暂时保留在 `/health` 兼容既有 dashboard。
 
 ### 回归契约
 
@@ -298,7 +288,7 @@ ssh ec2-user@prod-host 'curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1
 
 ### 升级路径
 
-Prometheus 文本导出已由 `server.metrics_enabled` 的 `GET /metrics` 提供（[metrics.md](metrics.md)），仍保持零依赖：`internal/promexport` 手写 0.0.4 文本格式，label 名在注册 map 时登记。若将来要 OTLP / 直方图原生类型，再把 `expvar.NewInt` 换成 client 库并保留变量名别名，call sites 不动。
+计数器只走 expvar（`/api/debug/vars`），不内置 Prometheus / OTLP 导出。真需要抓取时再加 exporter，把 `expvar.NewInt` 换成 client 库并保留变量名别名，call sites 不动。
 
 ---
 

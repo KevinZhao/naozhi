@@ -279,6 +279,8 @@ func TestDeprecatedKeysReported(t *testing.T) {
 nodes:
   mac:
     url: "https://mac.example.com"
+server:
+  metrics_enabled: true
 session:
   auto_chain:
     enabled: true
@@ -290,8 +292,9 @@ agents:
 		t.Fatalf("Load with v1 keys must not fail: %v", err)
 	}
 	want := map[string]string{
-		"nodes":              "workspaces",
-		"session.auto_chain": "remove",
+		"nodes":                  "workspaces",
+		"session.auto_chain":     "remove",
+		"server.metrics_enabled": "remove",
 	}
 	flagDiags := 0
 	for _, d := range diags {

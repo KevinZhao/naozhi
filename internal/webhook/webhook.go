@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"expvar"
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
@@ -20,8 +21,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/promexport"
 )
 
 // Event types an endpoint may subscribe to.
@@ -43,10 +42,11 @@ const (
 	userAgent    = "naozhi-webhook/1"
 )
 
+// Delivery counters, keyed by endpoint.
 var (
-	deliveredTotal = promexport.NewMap("naozhi_webhook_delivered_total", "endpoint")
-	failedTotal    = promexport.NewMap("naozhi_webhook_failed_total", "endpoint")
-	droppedTotal   = promexport.NewMap("naozhi_webhook_dropped_total", "endpoint")
+	deliveredTotal = expvar.NewMap("naozhi_webhook_delivered_total")
+	failedTotal    = expvar.NewMap("naozhi_webhook_failed_total")
+	droppedTotal   = expvar.NewMap("naozhi_webhook_dropped_total")
 )
 
 // Endpoint is one configured receiver. Empty Events / Subsystems mean all.
