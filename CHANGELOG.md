@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING：删除飞书 webhook 接入模式，只保留 WebSocket 长连接**（#3767）。`POST /webhook/feishu` 不再注册；配置键 `platforms.feishu.connection_mode` 与 `platforms.feishu.allow_insecure_webhook` 不再读取，启动时报 `config-deprecated`（服务照常启动，飞书始终走长连接），环境变量 `NAOZHI_ALLOW_INSECURE_WEBHOOK` 也不再生效。原先用 `connection_mode: webhook` 的部署，请在飞书开发者后台把事件订阅和卡片回调都改成「使用长连接接收」，否则收不到消息；然后删掉这两个键。`verification_token` / `encrypt_key` 保留。
+
 ## [0.1.48] - 2026-10-26
 
 这一版有两部分：一是对 10 月重构的 review 修复，二是一轮「做减法」。从 0.1.47 起 +7.8k / −120k 行，删掉的主要是自建治理工具、读源码的元测试、历史文档，以及几项没人用的功能。基本功能保持不变：dashboard、claude / kiro / codex 会话经 shim 跑且重启后存活、cron、agents、projects / planner、IM 收发（含图片与语音）、远程多节点、自升级。升级前请先看下面的 **Removed**。
