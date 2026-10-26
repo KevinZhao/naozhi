@@ -122,6 +122,12 @@ func TestRedactSecrets_Negative(t *testing.T) {
 			t.Errorf("RedactSecrets(%q) altered benign input → %q", in, got)
 		}
 	}
+	// Zero-alloc fast path (#1976): the prescan must reject prefix-free text.
+	for _, in := range []string{"", "402 ok", "quit + lib"} {
+		if mayContainSecretPrefix(in) {
+			t.Errorf("mayContainSecretPrefix(%q) = true, want false", in)
+		}
+	}
 }
 
 // TestRedactSecrets_Idempotent confirms re-running the redactor on

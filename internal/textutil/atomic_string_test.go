@@ -17,6 +17,9 @@ func TestStoreAtomicString_RoundTrip(t *testing.T) {
 	}
 	StoreAtomicString(&v, "Bash")
 	first := v.Load()
+	if first == nil || *first != "Bash" {
+		t.Fatalf("after Store(\"Bash\"), Load = %v, want \"Bash\"", first)
+	}
 	StoreAtomicString(&v, "Bash")
 	if got := v.Load(); got != first {
 		t.Errorf("redundant Store reallocated *string: first=%p got=%p", first, got)
