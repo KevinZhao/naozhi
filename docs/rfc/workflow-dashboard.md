@@ -1998,7 +1998,7 @@ epoch 变化后）、`delta`（`since=rowsAt`）、`none`（`!rowsLoaded` 时的
 **回到一个 session**：`renderWorkflowPanel` 重建 `<details>` 时 toggle 触发 `ensureRows`，重订阅的 full 帧也同时到达——两者经 `needsFetch`
 合并，每个展开的 workflow 恰好一次请求（rows 与 result 已在切走时释放，§7.1，所以是一次 full，终态条目的结果随之取回）。
 
-- **多 tab 合并**：可选，仿 `historyMarshalCache`（`wshub_eventpush_cache.go:39-140`），键
+- **多 tab 合并**：可选，仿已删除的 `historyMarshalCache`（history 帧现在每个订阅者各自 marshal），键
   `(key, task_id, epoch, version, base_version)`——现有指纹基于时间戳，不适合可变快照。
 - Hub 通过 `*ManagedSession` 取 board（`WorkflowBoard()`），**不**给 `HubRouter` 加方法（14 个，
   godoc 说到 15 要重新设计）、**不**加 `HubOptions` 字段（`hubOptionsFieldBaseline = 16`，`tools/lint-server-handlers/rule_server_fields.go:33`）。

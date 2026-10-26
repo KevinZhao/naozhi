@@ -138,8 +138,7 @@ func (l *EventLog) Count() int {
 // Single backward scan into a reverse buffer; slices.Reverse runs OUTSIDE
 // l.mu so a large initial subscribe cannot block a concurrent Append (#685).
 // Returns []EventEntry, never pre-marshaled JSON: EventLog is wire-format
-// agnostic, and the per-notify marshal cache lives in the WS hub
-// (internal/server/wshub_eventpush_cache.go). Do NOT add a JSON cache here.
+// agnostic; the WS hub marshals history frames. Do NOT add a JSON cache here.
 func (l *EventLog) EntriesSince(afterMS int64) []clievent.EventEntry {
 	return l.EntriesSinceAppend(nil, afterMS)
 }
