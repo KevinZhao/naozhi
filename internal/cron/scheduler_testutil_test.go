@@ -40,3 +40,20 @@ func WithGCBudgetField(s *Scheduler, d time.Duration) func() {
 	s.gcBudget = d
 	return func() { s.gcBudget = orig }
 }
+
+// makeRun builds a non-zero CronRun with a unique RunID under the given JobID.
+// Caller can override fields after the helper returns.
+func makeRun(jobID string, startedAt time.Time) *CronRun {
+	return &CronRun{
+		RunID:      mustGenerateRunID(),
+		JobID:      jobID,
+		State:      RunStateSucceeded,
+		Trigger:    TriggerScheduled,
+		StartedAt:  startedAt,
+		EndedAt:    startedAt.Add(time.Second),
+		DurationMS: 1000,
+		Prompt:     "hello",
+		WorkDir:    "/tmp/wd",
+		Result:     "ok",
+	}
+}

@@ -143,17 +143,14 @@ func (a takeoverLeaseAdapter) Takeover(ctx context.Context, sessionID, cwd strin
 func (a takeoverLeaseAdapter) Release() { a.lease.Release() }
 
 // buildProjectHandlers wires the dashboard project-config + project-files
-// endpoints. The Hub does not exist yet at this point; registerDashboard wires the
-// base context at construction via Deps.BaseCtx (#650, #2552).
+// endpoints.
 func buildProjectHandlers(
 	opts ServerOptions,
-	resolver *session.KeyResolver,
 	nodeAccess *nodeRegistry,
 	nodeCache *node.CacheManager,
-	baseCtx context.Context,
 ) *dashproject.Handlers {
 	// Typed-nil unwraps before the interface boxing (#2561). dashproject
-	// nil-guards projectMgr (×9), router (×2) and resolver (×1) because each is
+	// nil-guards projectMgr and router because each is
 	// optional; handing an interface field a nil CONCRETE pointer makes every
 	// one of those guards read TRUE and the next call dereferences nil. The
 	// concrete types are only visible here. Checklist for the next conversion:
@@ -162,15 +159,9 @@ func buildProjectHandlers(
 	if opts.ProjectManager != nil {
 		projectStore = opts.ProjectManager
 	}
-	var plannerResolver dashproject.PlannerKeyResolver
-	if resolver != nil {
-		plannerResolver = resolver
-	}
 	return dashproject.New(dashproject.Deps{
-		BaseCtx:    baseCtx,
 		ProjectMgr: projectStore,
 		Router:     projectRouter{opts.Router},
-		Resolver:   plannerResolver,
 		NodeAccess: nodeAccess,
 		NodeCache:  nodeCache,
 		// Process-local (resets on restart); not a filesystem quota.

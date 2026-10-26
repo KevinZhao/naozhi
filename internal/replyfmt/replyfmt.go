@@ -4,8 +4,7 @@
 //
 // # Why a package and not a helper in one of them
 //
-// internal/cron must NOT import internal/platform — #725, pinned by
-// no_platform_import_test.go — so it reaches its platforms through the narrow
+// internal/cron must NOT import internal/platform (#725), so it reaches its platforms through the narrow
 // PlatformReplier adapter. That rules out the shared entry point #2548 sketched
 // (`SplitReply(ctx, platform.Platform, …)`); anything both sides can call has to
 // be free of platform. This package imports internal/textutil and nothing else.

@@ -95,7 +95,7 @@ func TestValidateConfig(t *testing.T) {
 }
 
 // R181-SEC-P2-2: ValidateProjectName is shared between the dashboard
-// HTTP path and the reverse-RPC update_config / restart_planner worker.
+// HTTP path and the reverse-RPC update_config / set_favorite worker.
 // Locks the policy so a future relaxation has to update both trust
 // boundaries together.
 func TestValidateProjectName(t *testing.T) {

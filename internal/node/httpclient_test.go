@@ -424,40 +424,6 @@ func TestHTTPClient_ProxyCloseDiscovered_errorStatus(t *testing.T) {
 	}
 }
 
-// ---- ProxyRestartPlanner ----
-
-func TestHTTPClient_ProxyRestartPlanner_ok(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/projects/planner/restart" {
-			http.Error(w, "unexpected", http.StatusBadRequest)
-			return
-		}
-		if r.URL.Query().Get("name") != "my-project" {
-			http.Error(w, "wrong name", http.StatusBadRequest)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	if err := c.ProxyRestartPlanner(context.Background(), "my-project"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestHTTPClient_ProxyRestartPlanner_errorStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "internal", http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	if err := c.ProxyRestartPlanner(context.Background(), "proj"); err == nil {
-		t.Fatal("expected error on 500")
-	}
-}
-
 // ---- ProxyUpdateConfig ----
 
 func TestHTTPClient_ProxyUpdateConfig_ok(t *testing.T) {

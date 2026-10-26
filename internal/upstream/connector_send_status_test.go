@@ -68,7 +68,7 @@ func sendThroughFakeHub(t *testing.T, c *Connector, caps []string) node.ReverseM
 // the node reports it as the pre-status error instead. The flag follows each
 // register, so a reconnect to such a primary loses what the last one said.
 func TestRunOnce_BusySendFollowsTheHubsSendStatusCap(t *testing.T) {
-	c := New(&Config{NodeID: "n", Token: "t"}, testRouter(makeRouter()), nil, nil, Discovery{}, &fakeSubmitter{status: "busy"})
+	c := New(&Config{NodeID: "n", Token: "t"}, testRouter(makeRouter()), nil, Discovery{}, &fakeSubmitter{status: "busy"})
 	steps := []struct {
 		name   string
 		caps   []string
@@ -111,7 +111,7 @@ func TestReverseLink_BusySendIsAStatus(t *testing.T) {
 func TestHandleRequest_Send_StatusByHubCap(t *testing.T) {
 	for _, status := range []string{"accepted", "queued", "reset", "busy"} {
 		for _, hubReads := range []bool{false, true} {
-			c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(makeRouter()), nil, nil, Discovery{}, &fakeSubmitter{status: status})
+			c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(makeRouter()), nil, Discovery{}, &fakeSubmitter{status: status})
 			c.hubSendStatus.Store(hubReads)
 			result, err := c.handleRequest(context.Background(), context.Background(), sendReq(t, map[string]string{"key": sendStatusKey, "text": "hi"}), &sync.WaitGroup{})
 			if status == "busy" && !hubReads {
