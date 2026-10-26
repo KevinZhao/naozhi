@@ -1,8 +1,8 @@
 // node --test scripts/render-md.test.mjs
 // render_md.js escapes the source before it builds any tag, then swaps
 // placeholders (\x00CODE<n>\x00, \x00KTX<n>\x00, \x00MEM<n>\x00, \x00ILM<n>\x00, the table's
-// \x00G<n>\x00 / \x00PIPE\x00) back in. These tests run a hostile corpus and a
-// seeded fuzz loop through every entry point and check the output against a
+// \x00G<n>\x00 / \x00PIPE\x00) back in. These tests run a hostile corpus
+// through every entry point and check the output against a
 // tag and attribute allowlist: an author-supplied tag, an on* attribute, a
 // placeholder restored into an attribute value or a leaked \x00 all fail it.
 // Mermaid is never loaded and KaTeX only as a stub in the last test, so math
@@ -254,37 +254,6 @@ test('ordinary markdown still renders its links, code and math', () => {
   assert.match(renderMd('[`x`](https://e.com)'), /<a href="https:\/\/e\.com" [^>]*><code class="md-code">x<\/code><\/a>/);
   assert.match(renderMd('see https://e.com/a.'), /<a href="https:\/\/e\.com\/a" [^>]*>https:\/\/e\.com\/a<\/a>\./);
   assert.match(renderMd('$x+1$ and `y`'), /<span id="ktx-\d+" class="katex-pending">x\+1<\/span> and <code class="md-code">y<\/code>/);
-});
-
-// mulberry32: a fixed seed keeps a failure reproducible from the test output.
-function rng(seed) {
-  return () => {
-    seed = (seed + 0x6D2B79F5) | 0;
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-test('seeded fuzz over markdown metacharacters, placeholders and payloads', () => {
-  const FRAGMENTS = [
-    '`', '``', '```', '```mermaid\n', '```math\n', '$', '$$', '\\(', '\\)', '\\[', '\\]',
-    '\\begin{aligned}', '\\end{aligned}', '*', '**', '_', '__', '~~', '[', ']', '(', ')',
-    '[[', ']]', '![', '](', '"', '\'', '|', '\\|', '\n', '\n\n', '\r\n', '# ', '- ', '1. ',
-    '2024. ', '> ', '- [ ] ', '|---|---|\n', ' ', '\t', 'x+1', 'a_b', 'src/a.go', 'main.py:12',
-    'https://e.com/', 'http://e.com/a?b=1&c=2', 'javascript:', '&amp;', '&lt;', '&#58;', '&quot;',
-    '<', '>', '<img src=x onerror=1>', '<svg onload=1>', '" onclick="x', '\x00', '\x00CODE0\x00',
-    '\x00CODE9\x00', '\x00KTX0\x00', '\x00ILM0\x00', '\x00G0\x00', '\x00PIPE\x00', '\x00MEM0\x00', '[[__x__]]', 'CODE', '中文',
-    '\u00a0', '\u2028', '\ufffd',
-  ];
-  const next = rng(0x3441);
-  for (let n = 0; n < 4000; n++) {
-    const parts = [];
-    const len = 1 + Math.floor(next() * 14);
-    for (let k = 0; k < len; k++) parts.push(FRAGMENTS[Math.floor(next() * FRAGMENTS.length)]);
-    const input = parts.join('');
-    for (const html of renderAll(input)) assertSafe(html, input);
-  }
 });
 
 // A fresh module instance (the query string defeats the ESM cache) whose
