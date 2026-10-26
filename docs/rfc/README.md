@@ -24,7 +24,7 @@ RFC 是落地前的设计取舍与实测记录，**不是最终规范**——架
 | [node-pairing.md](node-pairing.md) | Draft v1 | `naozhi node add` / `naozhi join` |
 | [outbound-webhooks.md](outbound-webhooks.md) | Phase 1 已实现 | run 生命周期出站 webhook |
 | [passthrough-mode.md](passthrough-mode.md)（+ `-validation`） | v2.2 | 直通 CC CLI 原生 command queue |
-| [planner.md](planner.md)（+ `planner-landscape`） | Draft v7（未实施） | Planner 规划 agent：全局唯一 Planner + 按需工作区幕僚、设计原则（确定性放网关 / 先信任后惊喜）、三种主动、信任阶梯与治理减法；§18 决策 D1–D72；`planner-landscape.md` 是两代 agent 产品调研与对照 |
+| [planner.md](planner.md)（+ `planner-landscape`） | Draft v7（未实施） | Planner 规划 agent：全局唯一 Planner + 按需工作区幕僚、设计原则（确定性放网关 / 先信任后惊喜）、三种主动、信任阶梯与治理减法、三个面与工作台面；§18 决策 D1–D74；`planner-landscape.md` 是两代 agent 产品调研与对照 |
 | [project-access-profile.md](project-access-profile.md) | Draft v1 | 项目级默认访问方式 |
 | [project-stable-session-key.md](project-stable-session-key.md) | 已实装 | 项目级稳定 session key |
 | [reverse-protocol.md](reverse-protocol.md) | 已实现 | reverse-connect wire format |
