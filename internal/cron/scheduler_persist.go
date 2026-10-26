@@ -65,7 +65,7 @@ func jobIDCmpForSort(a, b *Job) int {
 // (see withFailingMarshal) to exercise persist-failure paths; atomic because
 // parallel tests would otherwise race concurrent marshalLocked readers,
 // per-Scheduler so one test's failing marshal cannot leak into another
-// instance. Pinned by TestMarshalJobs_PerSchedulerIsolation.
+// instance.
 type marshalJobsFn func(any) ([]byte, error)
 
 // defaultMarshalJobs is the production serializer plumbed into every

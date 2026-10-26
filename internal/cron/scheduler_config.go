@@ -158,8 +158,7 @@ type ProcessReleaser interface {
 // SchedulerConfig holds the value/scalar configuration for the cron
 // scheduler; injected components live in SchedulerDeps (deps.go, #746). The
 // scheduler stays struct-config rather than functional-options (#776), and
-// the REQUIRED/OPTIONAL split below is API contract pinned by
-// scheduler_config_construction_test.go.
+// the REQUIRED/OPTIONAL split below is API contract.
 //
 // REQUIRED: SchedulerDeps.Router (no default; nil without AllowNilRouter →
 // boot-time slog.Error). StorePath "" = in-memory only (valid for tests).

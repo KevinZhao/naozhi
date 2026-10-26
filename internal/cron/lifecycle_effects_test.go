@@ -1,7 +1,9 @@
 package cron
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,4 +176,16 @@ func TestTriggerNow_RefusesOrRuns(t *testing.T) {
 	if j, _ := s.tbl.snapshot(runnable); j.RunCounters.Total != 1 || j.LastRunAt.IsZero() {
 		t.Errorf("after TriggerNow: counters %+v, last run %v; want one recorded run", j.RunCounters, j.LastRunAt)
 	}
+}
+
+// withCapturedSlog redirects the package-default slog to an in-memory
+// buffer for the duration of the test, returning a func to read what was
+// logged. NOT t.Parallel-safe — slog.SetDefault is process-global; tests
+// using this helper run serially (no t.Parallel inside the cases below).
+func withCapturedSlog(t *testing.T) (read func() string, restore func()) {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelError})))
+	return func() string { return buf.String() }, func() { slog.SetDefault(prev) }
 }
