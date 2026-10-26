@@ -120,7 +120,7 @@ projects:
 		}
 	}
 	// The correctly spelled keys must NOT be reported, or the report is noise.
-	for _, unwanted := range []string{"server.debug_mode ", "projects.public_tmp "} {
+	for _, unwanted := range []string{"projects.public_tmp "} {
 		if strings.Contains(s, unwanted) {
 			t.Errorf("real key %q reported as unknown:\n%s", unwanted, s)
 		}

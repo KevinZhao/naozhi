@@ -43,10 +43,6 @@ server:
   # is refused with 400 and the rate-limited endpoints fail closed. The client
   # IP is the last X-Forwarded-For hop, the one that proxy appends.
   trusted_proxy: false
-  # debug_mode registers /api/debug/pprof (auth-gated, loopback-only, refused
-  # when dashboard_token is empty). Turn on only while capturing a profile;
-  # see docs/ops/pprof.md.
-  # debug_mode: false
 
 workspace:
   id: "your-node-id"

@@ -22,7 +22,7 @@ func TestLoadDecodeErrorDoesNotEchoSecret(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("NAOZHI_TEST_DECODE_SECRET", tc.secret)
-			for _, field := range []string{"cron:\n  auto_pause_after_failures", "server:\n  debug_mode"} {
+			for _, field := range []string{"cron:\n  auto_pause_after_failures", "server:\n  trusted_proxy"} {
 				_, err := Load(writeCfg(t, field+": ${NAOZHI_TEST_DECODE_SECRET}\n"))
 				if err == nil {
 					t.Fatalf("%s: Load succeeded, want a decode error", field)

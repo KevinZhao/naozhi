@@ -975,7 +975,7 @@ Cron 编辑器加 backend 下拉（与 new-session picker 同款），用 `/api/
 
 ## 11. Config Validate + doctor
 
-> **状态**：Sprint 6d 已实施 — `internal/config/validate.go` + `cmd/naozhi/doctor.go renderBackendsSection` 已上线，主程序在 `RegisterDefaults()` 之后调用 `cfg.Validate()` 并把每条诊断 slog.Warn / slog.Error 出来（不阻断启动，符合本节"warn 级别"决策）。
+> **状态**：Sprint 6d 已实施 — `internal/config/validate.go` + `cmd/naozhi/doctor.go renderBackendsSection` 已上线（renderBackendsSection 后于 2026-10 删除，backend 信息改看 `GET /api/cli/backends`），主程序在 `RegisterDefaults()` 之后调用 `cfg.Validate()` 并把每条诊断 slog.Warn / slog.Error 出来（不阻断启动，符合本节"warn 级别"决策）。
 
 ### 11.1 Validate
 

@@ -122,37 +122,6 @@ func (d *doctor) checkAuth() {
 	}
 }
 
-func (d *doctor) checkPprof() {
-	if d.token == "" {
-		d.add("pprof", "warn", "no token; pprof reachability not verified")
-		return
-	}
-	url := d.addr + "/api/debug/pprof/"
-	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		d.add("pprof", "fail", "request build: "+err.Error())
-		return
-	}
-	req.Header.Set("Authorization", "Bearer "+d.token)
-	resp, err := d.httpClient().Do(req)
-	if err != nil {
-		d.add("pprof", "fail", "request failed: "+err.Error())
-		return
-	}
-	defer resp.Body.Close()
-	switch resp.StatusCode {
-	case http.StatusOK:
-		d.add("pprof", "pass", "reachable at "+url)
-	case http.StatusForbidden:
-		d.add("pprof", "warn",
-			"403 — non-loopback (doctor not running on the naozhi host?) or hardening works as intended")
-	default:
-		d.add("pprof", "warn", fmt.Sprintf("unexpected status %d", resp.StatusCode))
-	}
-}
-
 func (d *doctor) checkStateDir() {
 	home, err := os.UserHomeDir()
 	if err != nil {
