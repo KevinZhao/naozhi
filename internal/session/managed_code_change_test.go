@@ -57,7 +57,7 @@ func TestCodeChangesPersist_RoundTripAndLoadFilter(t *testing.T) {
 	key := "dash:direct:pr:general"
 	src := newSessionWithID(key, "sess-pr-1")
 	src.recordCodeChange(testPR)
-	if err := saveStore(storePath, map[string]*ManagedSession{key: src}); err != nil {
+	if err := saveStore(storePath, []*ManagedSession{src}); err != nil {
 		t.Fatalf("saveStore: %v", err)
 	}
 

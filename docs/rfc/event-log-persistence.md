@@ -202,7 +202,6 @@ const DefaultLoadLatestLimit = 500
 ```
 ~/.naozhi/
   sessions.json                    # 现有
-  sessions.meta.json               # 现有
   events/                          # 新增
     <keyhash>.log                  # append-only framed records
     <keyhash>.idx                  # (seq, byteOffset, timeMS) 稀疏索引

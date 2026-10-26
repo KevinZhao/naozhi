@@ -446,7 +446,7 @@ func (r *Router) dirtySaveSnapshot(v sessView) saveSnapshot {
 // only when no mutation happened since the snapshot.
 func (r *Router) saveDirty(snap saveSnapshot) {
 	if snap.sessions != nil {
-		if err := saveStoreSlice(snap.storePath, snap.sessions); err != nil {
+		if err := saveStore(snap.storePath, snap.sessions); err != nil {
 			logStoreSaveFailure("periodic session save failed", err)
 		} else {
 			r.ss.Update(func(tx sessTx) {
@@ -653,7 +653,7 @@ func (r *Router) shutdown() {
 		r.stopped.Store(true)
 
 		// Snapshot sessions for saving outside the transaction, as a value
-		// slice: saveStoreSlice only iterates values, so no map copy is needed.
+		// slice: saveStore only iterates values, so no map copy is needed.
 		sessionsCopy = make([]*ManagedSession, 0, tx.Len())
 		for _, v := range tx.All() {
 			sessionsCopy = append(sessionsCopy, v)
@@ -683,7 +683,7 @@ func (r *Router) shutdown() {
 	// under the table lock).
 	// disk_full lets monitoring page on ENOSPC separately; each error chain is
 	// walked once since the three saves are independent.
-	if err := saveStoreSlice(storePath, sessionsCopy); err != nil {
+	if err := saveStore(storePath, sessionsCopy); err != nil {
 		slog.Error("save session store on shutdown", "err", err, "disk_full", osutil.IsDiskFull(err))
 	}
 	if knownIDsMarshalErr != nil {

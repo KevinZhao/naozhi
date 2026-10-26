@@ -131,7 +131,7 @@ The `discovery` package scans `~/.claude/projects/<slug>/<sessionId>.jsonl` (Cla
 ### Session Persistence
 
 Sessions are persisted to `~/.naozhi/sessions.json` at shutdown:
-- Each entry stores `key`, `session_id`, `workspace`, `total_cost`; a sibling `sessions.meta.json` sidecar records `{version, written_at, generator}`
+- Each entry stores `key`, `session_id`, `workspace`, `total_cost`
 - On restart, dead sessions are loaded and history is async-loaded (naozhi event log first, Claude JSONL fallback)
 - Next message to a dead session resumes via `--resume`
 - Captures session_id under sendMu to avoid Send() data races

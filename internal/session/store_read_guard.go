@@ -1,18 +1,14 @@
 package session
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
-	"os"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
 )
 
 // jsonfile.Load's contract: a non-nil error means the file is still on disk and
@@ -21,58 +17,19 @@ import (
 // consequence: "Callers MUST NOT continue with empty state in that case: the
 // next atomic save would clobber the real file."
 //
-// The four session-store loaders did exactly that: slog.Warn + return nil, and
-// the next WriteFileAtomic replaced the operator's sessions.json with a fresh,
+// The session-store loaders did exactly that: slog.Warn + return nil, and the
+// next WriteFileAtomic replaced the operator's sessions.json with a fresh,
 // near-empty one (#2680). #469 fixed the same shape in cron by aborting startup;
 // a chat service that refuses to boot over one oversized file is a worse trade,
 // so this takes the other option from the issue — start, but refuse to write the
-// files whose contents are unknown.
+// files whose contents are unknown, for the life of the process. The loaders run
+// once, in NewRouter, so the fix is to repair or move the file aside and restart.
 //
-// Lifting the block (#2972). The loaders run once, in NewRouter, so no later
-// load can clear a block set at startup; every blocked write re-probes the
-// path instead:
-//
-//   - gone, or truncated to 0 bytes — the operator moved it aside, which is what
-//     the hint asks for. Nothing left to clobber; the block lifts and the write
-//     proceeds.
-//   - readable again with content — repaired in place, or the I/O fault passed.
-//     Its contents were never loaded, so writing would still replace them with
-//     the state of a process that started empty. The block stays, and the reason
-//     changes to say a restart (or moving the file aside) is what lifts it.
-//   - still unreadable — nothing changes.
-//
-// The probe is one Lstat per blocked write; the read happens only when size or
-// mtime moved since the last probe.
-//
-// State is keyed by absolute path rather than held on Router because the four
-// loaders are package functions with one production call site each and 38 test
-// call sites between them. Threading a receiver through would rewrite those
-// tests without making the guard any harder to bypass, and test paths come from
-// t.TempDir(), so two tests cannot collide on a key.
-var storeReadBlocked sync.Map // path -> *storeBlock
-
-// storeBlock is one blocked path's state. Reads and writes of the mutable
-// fields go through mu; the sync.Map only hands out the pointer.
-type storeBlock struct {
-	mu     sync.Mutex
-	label  string
-	reason string
-	since  time.Time
-	// probeSize / probeMod are the file as last probed, so a blocked write
-	// tick re-reads only when the file changed.
-	probeSize   int64
-	probeMod    time.Time
-	probed      bool
-	needRestart bool
-	// lastWarn throttles the per-tick "save failed" warning: the first one is
-	// immediate, the rest one per storeBlockedWarnEvery.
-	lastWarn time.Time
-}
-
-// storeBlockedWarnEvery is how often a blocked save repeats its warning. The
-// first failure warns at once; the 30s tick then produced ~2,880 identical
-// lines a day, which buried the one that mattered.
-const storeBlockedWarnEvery = time.Hour
+// State is keyed by absolute path rather than held on Router because the
+// loaders are package functions with one production call site each and many
+// test call sites. Test paths come from t.TempDir(), so two tests cannot
+// collide on a key.
+var storeReadBlocked sync.Map // path -> StoreBlock
 
 // StoreBlock is the operator-facing view of one blocked store file, served on
 // authenticated /health so "my sessions are not being persisted" is visible
@@ -82,77 +39,25 @@ type StoreBlock struct {
 	Label  string    `json:"label"`
 	Reason string    `json:"reason"`
 	Since  time.Time `json:"since"`
-	// NeedRestart is set once the file has been seen readable again: its
-	// contents were not loaded, so a restart (or moving it aside) is the fix.
-	NeedRestart bool `json:"need_restart"`
 }
 
 // markStoreReadUnreadable records that path could not be read while still on
 // disk, so writers must leave it alone. It is idempotent and emits the operator
-// signal once per (path, reason): the diag lands in the process-wide spawndiag
-// summary that authenticated /health serves as spawn_diags, and the live block
-// list is served there as session_store.blocked.
+// signal (an Error log plus a store-unreadable spawn diag) once per path.
 func markStoreReadUnreadable(path, label string, err error) {
 	if path == "" || err == nil {
 		return
 	}
-	reason, hint := storeUnreadableText(label, err)
-	b := &storeBlock{label: label, reason: reason, since: time.Now()}
-	if prev, loaded := storeReadBlocked.LoadOrStore(path, b); loaded {
-		pb := prev.(*storeBlock)
-		pb.mu.Lock()
-		same := pb.reason == reason
-		if !same {
-			pb.reason = reason
-			pb.needRestart = false
-			pb.probed = false
-		}
-		pb.mu.Unlock()
-		if same {
-			return
-		}
+	reason := fmt.Sprintf("%s could not be read (%v); the file is still on disk and naozhi holds no copy of it", label, err)
+	b := StoreBlock{Path: path, Label: label, Reason: reason, Since: time.Now()}
+	if _, loaded := storeReadBlocked.LoadOrStore(path, b); loaded {
+		return
 	}
 	slog.Error("session store: refusing to overwrite a file naozhi could not read",
 		"path", path,
 		"label", label,
 		"err", err,
-		"hint", hint)
-	cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
-		Layer:  "store-unreadable",
-		Key:    label,
-		Action: "ignored",
-		Reason: reason,
-	}})
-}
-
-// storeUnreadableText is the block reason and the operator hint for a blocked
-// file. A symlink gets its own wording: the file is fine, naozhi just will not
-// open it, so "fix the file" would send the operator looking for corruption.
-func storeUnreadableText(label string, err error) (reason, hint string) {
-	if errors.Is(err, jsonfile.ErrSymlink) {
-		return fmt.Sprintf("%s is a symlink; naozhi does not follow a symlinked store file and holds no copy of its target", label),
-			"stop naozhi, mv the real file over the symlink, then start naozhi; or point session.store_path at the real location (bind-mounting its directory also works; a bind-mounted file cannot be renamed over). Deleting the symlink while naozhi runs resumes saves of the in-memory state to that path, so do not put the real file back there without stopping naozhi first"
-	}
-	return fmt.Sprintf("%s could not be read (%v); the file is still on disk and naozhi holds no copy of it", label, err),
-		"fix or move the file aside; until then changes to it are not persisted"
-}
-
-// markStoreReadUnreadableReportOnly reports an unreadable file without blocking
-// writes to it. Used for the meta sidecar: it is machine-written, a missing one
-// reads as legacy, and blocking it would freeze the version number while
-// sessions.json keeps advancing.
-func markStoreReadUnreadableReportOnly(path, label string, err error) {
-	if path == "" || err == nil {
-		return
-	}
-	reason := fmt.Sprintf("%s could not be read (%v); it will be regenerated", label, err)
-	hint := "this file is regenerated on the next save; no operator data is at risk"
-	if errors.Is(err, jsonfile.ErrSymlink) {
-		reason = fmt.Sprintf("%s is a symlink; naozhi does not follow it and the next save replaces it with a regular file", label)
-		hint = "the symlink target is left untouched; point session.store_path at the real location if the store should live there"
-	}
-	slog.Warn("session store: file could not be read",
-		"path", path, "label", label, "err", err, "hint", hint)
+		"hint", "stop naozhi, fix or move the file aside (a symlink: replace it with the real file, or point session.store_path at the real location), then start naozhi; until then changes to it are not persisted")
 	cli.EmitSpawnDiags("config", []cli.SpawnDiag{{
 		Layer:  "store-unreadable",
 		Key:    label,
@@ -162,55 +67,29 @@ func markStoreReadUnreadableReportOnly(path, label string, err error) {
 }
 
 // clearStoreReadUnreadable lifts the block after a read that leaves naozhi in
-// possession of the path: Parsed (we have the data), Absent (nothing there) and
-// CorruptPreserved (the bad file was renamed away, so the path is now free) all
-// qualify. Called on every successful load; at runtime the same lift happens
-// from blockedIfUnreadable when a probe finds the file gone.
+// possession of the path: Parsed, Absent and CorruptPreserved all qualify.
 func clearStoreReadUnreadable(path string) {
-	if path == "" {
-		return
-	}
-	if _, had := storeReadBlocked.LoadAndDelete(path); had {
-		slog.Info("session store: file is readable again; resuming saves", "path", path)
-	}
+	storeReadBlocked.Delete(path)
 }
 
-// errStoreReadBlocked is returned by every writer whose target is blocked. It
-// carries the reason so the caller's warning says why, and the callers already
-// treat a save error as "keep the dirty flag set", which is the behaviour we
-// want: the in-memory state stays authoritative and retries on the next tick.
+// errStoreReadBlocked is returned by every writer whose target is blocked. The
+// callers treat a save error as "keep the dirty flag set", so the in-memory
+// state stays authoritative and retries on the next tick.
 type errStoreReadBlocked struct {
 	path   string
 	reason string
-	block  *storeBlock
 }
 
 func (e *errStoreReadBlocked) Error() string {
 	return "refusing to overwrite an unreadable session store file: " + e.reason
 }
 
-// warnDue reports whether the caller should log this failure at Warn (true) or
-// demote it to Debug: the first failure per path warns, then one per
-// storeBlockedWarnEvery.
-func (e *errStoreReadBlocked) warnDue() bool {
-	if e.block == nil {
-		return true
-	}
-	e.block.mu.Lock()
-	defer e.block.mu.Unlock()
-	now := time.Now()
-	if !e.block.lastWarn.IsZero() && now.Sub(e.block.lastWarn) < storeBlockedWarnEvery {
-		return false
-	}
-	e.block.lastWarn = now
-	return true
-}
-
-// logStoreSaveFailure logs a save error at the right level: a blocked store
-// throttles itself (see errStoreReadBlocked.warnDue), everything else warns.
+// logStoreSaveFailure logs a save error: a blocked store was already reported
+// at Error when it was blocked, so the per-tick repeat is Debug (#2972: at Warn
+// the 30s tick produced ~2,880 identical lines a day); everything else warns.
 func logStoreSaveFailure(msg string, err error) {
 	var blocked *errStoreReadBlocked
-	if errors.As(err, &blocked) && !blocked.warnDue() {
+	if errors.As(err, &blocked) {
 		slog.Debug(msg, "err", err)
 		return
 	}
@@ -219,8 +98,6 @@ func logStoreSaveFailure(msg string, err error) {
 
 // blockedIfUnreadable returns a non-nil error when path must not be written.
 // Every writer in store.go calls it first; that is the whole enforcement point.
-// A blocked path is re-probed on the way (see the package comment), so an
-// operator who moves the file aside gets persistence back on the next tick.
 func blockedIfUnreadable(path string) error {
 	if path == "" {
 		return nil
@@ -229,100 +106,22 @@ func blockedIfUnreadable(path string) error {
 	if !ok {
 		return nil
 	}
-	b := v.(*storeBlock)
-	if reprobeStoreBlock(path, b) {
-		clearStoreReadUnreadable(path)
-		return nil
-	}
-	b.mu.Lock()
-	reason := b.reason
-	b.mu.Unlock()
-	return &errStoreReadBlocked{path: path, reason: reason, block: b}
-}
-
-// reprobeStoreBlock looks at the blocked file again and reports whether the
-// block can lift. Only "nothing left on disk to clobber" lifts it.
-func reprobeStoreBlock(path string, b *storeBlock) bool {
-	fi, err := os.Lstat(path)
-	if err != nil {
-		// Gone: the operator moved it aside. Any other Lstat failure leaves
-		// the verdict as it was.
-		return errors.Is(err, fs.ErrNotExist)
-	}
-	if fi.Mode().IsRegular() && fi.Size() == 0 {
-		// Truncated: nothing in it to preserve, same as jsonfile.Load's own
-		// reading of an empty file.
-		return true
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.probed && fi.Size() == b.probeSize && fi.ModTime().Equal(b.probeMod) {
-		return false
-	}
-	b.probed = true
-	b.probeSize = fi.Size()
-	b.probeMod = fi.ModTime()
-	// LeaveCorrupt: a probe from a save tick must not rename anything.
-	_, out, loadErr := jsonfile.Load[json.RawMessage](path, jsonfile.Options{
-		MaxBytes: maxStoreFileBytes,
-		Label:    b.label,
-		Corrupt:  jsonfile.LeaveCorrupt,
-	})
-	if loadErr != nil || out != jsonfile.Parsed {
-		return false
-	}
-	if !b.needRestart {
-		b.needRestart = true
-		b.reason = fmt.Sprintf("%s is readable again but its contents were not loaded (naozhi started without them); restart naozhi to load the file, or move it aside", b.label)
-		slog.Warn("session store: file is readable again but was never loaded; saves stay blocked",
-			"path", path, "label", b.label,
-			"hint", "restart naozhi to load it, or move the file aside to resume saves with the current in-memory state")
-	}
-	return false
-}
-
-// StoreBlocks snapshots every blocked store file, sorted by path. Empty when
-// every store file is writable.
-func StoreBlocks() []StoreBlock {
-	var out []StoreBlock
-	storeReadBlocked.Range(func(k, v any) bool {
-		path, _ := k.(string)
-		b, _ := v.(*storeBlock)
-		if b == nil {
-			return true
-		}
-		b.mu.Lock()
-		out = append(out, StoreBlock{
-			Path:        path,
-			Label:       b.label,
-			Reason:      b.reason,
-			Since:       b.since,
-			NeedRestart: b.needRestart,
-		})
-		b.mu.Unlock()
-		return true
-	})
-	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	return out
+	return &errStoreReadBlocked{path: path, reason: v.(StoreBlock).Reason}
 }
 
 // StoreWriteBlocks is the Router-scoped view for /health: only the blocks on
-// this Router's own store files, so a test harness with several Routers in one
-// process does not see its neighbours'.
+// this Router's own store files, sorted by path, so a test harness with several
+// Routers in one process does not see its neighbours'.
 func (r *Router) StoreWriteBlocks() []StoreBlock {
 	if r == nil || r.storePath == "" {
 		return nil
 	}
-	mine := map[string]bool{
-		r.storePath:                         true,
-		knownIDsPath(r.storePath):           true,
-		workspaceOverridesPath(r.storePath): true,
-	}
 	var out []StoreBlock
-	for _, b := range StoreBlocks() {
-		if mine[b.Path] {
-			out = append(out, b)
+	for _, p := range []string{r.storePath, knownIDsPath(r.storePath), workspaceOverridesPath(r.storePath)} {
+		if v, ok := storeReadBlocked.Load(p); ok {
+			out = append(out, v.(StoreBlock))
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out
 }

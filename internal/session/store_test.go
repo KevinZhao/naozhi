@@ -5,16 +5,18 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/session/knownids"
 )
 
 func TestSaveAndLoadStore(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sessions.json")
 
-	sessions := map[string]*ManagedSession{
-		"feishu:direct:alice:general": newSessionWithID("feishu:direct:alice:general", "sess-111"),
-		"feishu:group:xxx:general":    newSessionWithID("feishu:group:xxx:general", "sess-222"),
-		"feishu:direct:bob:general":   {key: "feishu:direct:bob:general"}, // empty session ID should be skipped
+	sessions := []*ManagedSession{
+		newSessionWithID("feishu:direct:alice:general", "sess-111"),
+		newSessionWithID("feishu:group:xxx:general", "sess-222"),
+		{key: "feishu:direct:bob:general"}, // empty session ID should be skipped
 	}
 
 	if err := saveStore(path, sessions); err != nil {
@@ -41,10 +43,7 @@ func TestSaveAndLoadUserLabel(t *testing.T) {
 	labeled.SetUserLabel("重构会话")
 	unlabeled := newSessionWithID("feishu:group:xxx:general", "sess-222")
 
-	sessions := map[string]*ManagedSession{
-		labeled.key:   labeled,
-		unlabeled.key: unlabeled,
-	}
+	sessions := []*ManagedSession{labeled, unlabeled}
 	if err := saveStore(path, sessions); err != nil {
 		t.Fatalf("saveStore() error: %v", err)
 	}
@@ -81,9 +80,7 @@ func TestSaveStoreCreatesDirectory(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sub", "dir", "sessions.json")
 
-	sessions := map[string]*ManagedSession{
-		"test:key": newSessionWithID("test:key", "sess-1"),
-	}
+	sessions := []*ManagedSession{newSessionWithID("test:key", "sess-1")}
 	if err := saveStore(path, sessions); err != nil {
 		t.Fatalf("saveStore() error: %v", err)
 	}
@@ -176,7 +173,7 @@ func TestSaveAndLoadPrevSessionIDs(t *testing.T) {
 	s := newSessionWithID("test:key", "sess-3")
 	s.prevSessionIDs = []string{"sess-1", "sess-2"}
 
-	sessions := map[string]*ManagedSession{"test:key": s}
+	sessions := []*ManagedSession{s}
 	if err := saveStore(path, sessions); err != nil {
 		t.Fatalf("saveStore() error: %v", err)
 	}
@@ -206,7 +203,7 @@ func TestSaveAndLoadPrevSessionOrigins(t *testing.T) {
 	s.prevSessionIDs = []string{"sess-1", "sess-2", "sess-3"}
 	s.prevSessionOrigins = []string{"manual", "auto-spawn", "auto-backfill"}
 
-	sessions := map[string]*ManagedSession{"auto:k": s}
+	sessions := []*ManagedSession{s}
 	if err := saveStore(path, sessions); err != nil {
 		t.Fatalf("saveStore: %v", err)
 	}
@@ -267,198 +264,32 @@ func TestLoadStore_LegacyMissingOrigins(t *testing.T) {
 	}
 }
 
-// TestStoreMetaPath pins the sidecar path derivation — sessions.json →
-// sessions.meta.json in the same directory. Locking this keeps storeMetaPath
-// separate from any ad-hoc callers that might otherwise drift.
-func TestStoreMetaPath(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		in, want string
-	}{
-		{"", ""},
-		{"/var/naozhi/sessions.json", "/var/naozhi/sessions.meta.json"},
-		// Non-.json suffix: callers only ever pass *.json, but the derivation
-		// stays sensible if it's e.g. *.store (future-proofing).
-		{"/tmp/custom.store", "/tmp/custom.meta.store"},
-		{"bare.json", "bare.meta.json"},
-	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.in, func(t *testing.T) {
-			t.Parallel()
-			got := storeMetaPath(tc.in)
-			if got != tc.want {
-				t.Errorf("storeMetaPath(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}
+// TestSaveLoadKnownIDs_RoundTripSorted verifies saveKnownIDs (taking the
+// pre-sorted SortedSnapshot) round-trips through loadKnownIDs unchanged.
+func TestSaveLoadKnownIDs_RoundTripSorted(t *testing.T) {
+	tmp := t.TempDir()
+	storePath := filepath.Join(tmp, "sessions.json")
 
-// TestSaveStore_WritesMetaSidecar pins that a successful saveStore also
-// writes sessions.meta.json with the current version. Operators can
-// inspect the meta for drift detection, and a future naozhi upgrade can
-// key migration decisions on the stored version.
-func TestSaveStore_WritesMetaSidecar(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "sessions.json")
+	var kid knownids.Store
+	for _, id := range []string{"zeta", "alpha", "mike"} {
+		kid.Track(id)
+	}
+	sorted := kid.SortedSnapshot()
 
-	sessions := map[string]*ManagedSession{
-		"k": newSessionWithID("k", "sess-1"),
+	if err := saveKnownIDs(storePath, sorted); err != nil {
+		t.Fatalf("saveKnownIDs: %v", err)
 	}
-	if err := saveStore(path, sessions); err != nil {
-		t.Fatalf("saveStore: %v", err)
+	loaded := loadKnownIDs(storePath)
+	if loaded == nil {
+		t.Fatal("loadKnownIDs returned nil")
 	}
-
-	metaPath := filepath.Join(dir, "sessions.meta.json")
-	data, err := os.ReadFile(metaPath)
-	if err != nil {
-		t.Fatalf("meta file not written: %v", err)
-	}
-	var m storeMeta
-	if err := json.Unmarshal(data, &m); err != nil {
-		t.Fatalf("meta unmarshal: %v", err)
-	}
-	if m.Version != storeFormatVersion {
-		t.Errorf("meta.Version = %d, want %d", m.Version, storeFormatVersion)
-	}
-	if m.WrittenAt <= 0 {
-		t.Errorf("meta.WrittenAt = %d, want > 0", m.WrittenAt)
-	}
-}
-
-// TestLoadStore_WithoutMetaSidecar pins the back-compat path: an on-disk
-// sessions.json from a pre-sidecar naozhi (no .meta.json next to it) must
-// still load without warning-level noise preventing startup. This is the
-// primary reason the sidecar was picked over embedding version in the
-// array file itself — zero risk of breaking every existing deployment.
-func TestLoadStore_WithoutMetaSidecar(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "sessions.json")
-
-	// Hand-write a legacy-shape sessions.json without any meta file.
-	legacy := `[{"key":"legacy:k","session_id":"sess-old"}]`
-	if err := os.WriteFile(path, []byte(legacy), 0600); err != nil {
-		t.Fatalf("write legacy store: %v", err)
-	}
-	// Confirm meta is NOT present.
-	if _, err := os.Stat(filepath.Join(dir, "sessions.meta.json")); !os.IsNotExist(err) {
-		t.Fatalf("meta file unexpectedly present before test: err=%v", err)
-	}
-
-	restored := loadStore(path)
-	if restored == nil {
-		t.Fatal("loadStore returned nil on legacy-shape file")
-	}
-	if restored["legacy:k"] == nil || restored["legacy:k"].SessionID != "sess-old" {
-		t.Errorf("legacy entry not restored; got %+v", restored["legacy:k"])
-	}
-}
-
-// TestLoadStore_HonoursMetaVersionSignal covers the "future downgrade"
-// scenario: operator downgrades naozhi to a binary with an older
-// storeFormatVersion; loadStore still returns the entries (the array is
-// parsed on its own), but the warning log line gives the operator a
-// heads-up that the on-disk format was written by a newer version. We
-// can't assert the log line directly without plumbing a logger sink, but
-// the test at minimum verifies no panic / no parse abort on this branch.
-func TestLoadStore_HonoursMetaVersionSignal(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "sessions.json")
-	metaPath := filepath.Join(dir, "sessions.meta.json")
-
-	// Future-shape sessions.json (stored as legacy array so our current
-	// parser still handles it).
-	body := `[{"key":"k","session_id":"sess-x"}]`
-	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
-		t.Fatalf("write store: %v", err)
-	}
-	// Claim version 99 — far above storeFormatVersion.
-	future, _ := json.Marshal(storeMeta{Version: 99, WrittenAt: 123456789})
-	if err := os.WriteFile(metaPath, future, 0600); err != nil {
-		t.Fatalf("write meta: %v", err)
-	}
-
-	restored := loadStore(path)
-	if restored == nil {
-		t.Fatal("loadStore should still return entries on future-version meta")
-	}
-	if restored["k"] == nil || restored["k"].SessionID != "sess-x" {
-		t.Errorf("entry = %+v, want session_id=sess-x", restored["k"])
-	}
-}
-
-// TestReadStoreMeta_MalformedMetaIsTolerated pins that a corrupt
-// sessions.meta.json does not tank load — we treat it as "missing", same
-// as the legacy path. This matters because the meta file is written
-// atomically but a bad sysadmin could hand-edit it; failing hard would
-// lose all sessions on the next startup.
-func TestReadStoreMeta_MalformedMetaIsTolerated(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "sessions.json")
-	metaPath := filepath.Join(dir, "sessions.meta.json")
-
-	if err := os.WriteFile(path, []byte(`[]`), 0600); err != nil {
-		t.Fatalf("write store: %v", err)
-	}
-	if err := os.WriteFile(metaPath, []byte("not-json"), 0600); err != nil {
-		t.Fatalf("write meta: %v", err)
-	}
-
-	_, ok := readStoreMeta(path)
-	if ok {
-		t.Error("readStoreMeta should report ok=false on malformed meta")
-	}
-	// Load should still succeed (empty but non-nil map — actually nil for
-	// empty array, but the important thing is no panic).
-	restored := loadStore(path)
-	// restored may be an empty map — just ensure no panic occurred.
-	_ = restored
-}
-
-// TestWriteStoreMeta_AtomicNoLeftoverTmp pins R233B-ARCH-6 (#1023): the
-// sidecar must be written via the atomic primitive, leaving zero `*.tmp`
-// or partial files in the store directory after a successful write. If a
-// future regression swaps WriteFileAtomic back to os.WriteFile, the stray
-// half-line guarantee disappears and a power-loss crash mid-write produces
-// a corrupt meta that readStoreMeta then warns on every load.
-func TestWriteStoreMeta_AtomicNoLeftoverTmp(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "sessions.json")
-
-	// Drive saveStore so the meta sidecar is produced via the production
-	// path (not by hand-crafting the file).
-	if err := saveStore(path, map[string]*ManagedSession{
-		"feishu:direct:alice:general": newSessionWithID("feishu:direct:alice:general", "sess-meta"),
-	}); err != nil {
-		t.Fatalf("saveStore: %v", err)
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("readdir: %v", err)
-	}
-	for _, e := range entries {
-		name := e.Name()
-		// WriteFileAtomic uses ".<base>.*.tmp" pattern; assert no leftover
-		// after the rename completed. Any leading-dot tmp file means the
-		// atomic primitive was bypassed or the rename leaked.
-		if len(name) > 0 && name[0] == '.' {
-			t.Errorf("unexpected hidden tmp file %q in store dir after saveStore", name)
+	for _, id := range []string{"zeta", "alpha", "mike"} {
+		if !loaded[id] {
+			t.Errorf("loaded set missing %q", id)
 		}
 	}
-
-	// Round-trip: meta must parse cleanly.
-	meta, ok := readStoreMeta(path)
-	if !ok {
-		t.Fatalf("readStoreMeta: ok=false after saveStore")
-	}
-	if meta.Version != storeFormatVersion {
-		t.Errorf("meta.Version = %d, want %d", meta.Version, storeFormatVersion)
+	if len(loaded) != 3 {
+		t.Errorf("loaded %d IDs, want 3", len(loaded))
 	}
 }
 

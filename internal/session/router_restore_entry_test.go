@@ -32,7 +32,7 @@ func TestRestoreSessionFromEntry_AllFields(t *testing.T) {
 	src.prevSessionOrigins = []string{"manual", "resume"}
 	src.historyMu.Unlock()
 
-	if err := saveStore(storePath, map[string]*ManagedSession{key: src}); err != nil {
+	if err := saveStore(storePath, []*ManagedSession{src}); err != nil {
 		t.Fatalf("saveStore: %v", err)
 	}
 
@@ -96,7 +96,7 @@ func TestRestoreSessionFromEntry_CostSpentLegacyFallback(t *testing.T) {
 	storeTotalCost(&src.totalCost, 9.99)
 	// costSpent deliberately left at zero (pre-feature store shape).
 
-	if err := saveStore(storePath, map[string]*ManagedSession{key: src}); err != nil {
+	if err := saveStore(storePath, []*ManagedSession{src}); err != nil {
 		t.Fatalf("saveStore: %v", err)
 	}
 
@@ -127,7 +127,7 @@ func TestRestoreSessionFromEntry_CreatedAtFallback(t *testing.T) {
 	src.lastActive.Store(1_500_000_000_000_000_000)
 	// createdAt deliberately left at zero (pre-feature store shape).
 
-	if err := saveStore(storePath, map[string]*ManagedSession{key: src}); err != nil {
+	if err := saveStore(storePath, []*ManagedSession{src}); err != nil {
 		t.Fatalf("saveStore: %v", err)
 	}
 

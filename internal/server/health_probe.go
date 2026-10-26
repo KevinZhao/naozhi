@@ -103,9 +103,10 @@ func healthPlatformConnOf(cs platform.ConnState, now time.Time) healthPlatformCo
 }
 
 // sessionStoreHealthProbe populates session_store with the store files whose
-// writes are currently refused. The section is omitted while there are none:
-// the router's saves are the only thing that lifts or sets a block, so the
-// field is exactly "is session state reaching disk right now".
+// writes are currently refused. The section is omitted while there are none.
+// A block is set when the startup load finds an unreadable file and is lifted
+// only by a successful load after a restart, so the field is exactly "is
+// session state reaching disk right now".
 func sessionStoreHealthProbe(router healthRouter) HealthProbe {
 	return func(auth *healthAuthSection) {
 		if auth == nil {
