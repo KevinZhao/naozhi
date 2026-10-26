@@ -294,12 +294,12 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 | Phase | PR | 内容 | 修复 |
 |---|---|---|---|
-| **0** | PR-1 | `cli.Event/SendResult.ModelUsage` + leak-recovery 拷贝 + 基准；`internal/costledger`（entry/Delta/store/rollup/summary/leaf 测试） | P1 |
+| **0** | PR-1 | `cli.Event/SendResult.ModelUsage` + leak-recovery 拷贝 + 基准；`internal/costledger`（entry/Delta/store/summary/leaf 测试） | P1 |
 | **0** | PR-2a | session：`accountTurnCost` 拆分 + `lastCumulative` + `CostTotals()` + ledger 写入（**含 cron key，暂以 `Source=session` 入账**）+ kiro/codex 差分 | P4 P6 P7 |
 | **0** | PR-2b | cron：`CostTotals` 前后差分 + `CronRun.CostUSD` 改增量 + cron_local/cron_sandbox 写入 + **同一 PR 内注入 `ownedByRun` 门**（门与写入同进同退，避免 2a→2b 之间或 2b 回滚期间 cron 成本真空；#3401 以 cost window 取代该门）+ 删 `cron.SendResult.CostUSD` | P2 |
 | **0** | PR-3 | `/api/cost/summary|entries` + 服务概览卡 + cron per-job 聚合（config 已随 PR-2a 落地） | P9 P10 |
 | 1 | PR-4 | sysession json runner + 写入（Runner 经 ctx `RunInfo` 归属到 Manager 的 runID） | P3 |
-| 2 | PR-5 | `naozhi cost backfill`；rollup 覆盖整个保留期（取代月度 rollup 文件）；服务概览健康条 dropped/unknown 告警 | — |
+| 2 | PR-5 | `naozhi cost backfill`；summary 覆盖整个保留期（不另设月度 rollup 文件；内存 rollup 已于 round-3 移除，统一扫日分片）；服务概览健康条 dropped/unknown 告警 | — |
 | 3 | PR-6 | 5.6 影子 token 账（进程死亡的 turn 记 `Kind=partial` entry，按 CLI 实测单价估算金额；服务概览健康条提示 partial 计数） | P5 |
 | 3 | PR-7 | `naozhi cost reconcile`：`Kind=adjust`（可为负）冲回 `--resume` 恢复额，按天补齐 transcript 与账本的残差（§9） | — |
 
