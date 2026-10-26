@@ -969,7 +969,7 @@ Cron 编辑器加 backend 下拉（与 new-session picker 同款），用 `/api/
 
 ### 10.3 兼容性
 
-如果 dashboards/alerts 已经在用旧 metric 名查询，**双写一个迁移期**（4 周）：保留旧 int + 新 vector。`docs/ops/pprof.md` 同步更新 jq 模板。
+如果 dashboards/alerts 已经在用旧 metric 名查询，**双写一个迁移期**（4 周）：保留旧 int + 新 vector。`docs/ops/pprof.md`（已于 #3780 删除）同步更新 jq 模板。
 
 ---
 
@@ -1009,6 +1009,8 @@ type ValidationDiag struct {
 启动时打印 diags（实际实现：error → slog.Error，warn → slog.Warn，**均不阻断启动**，决策点 §14 第 3 项已选 "[]ValidationDiag 不阻断" 而非 "error 立即退出"）。
 
 ### 11.2 doctor
+
+> 状态：下述 `=== CLI Backends === / === Reverse Nodes ===` 段已于 #3780 从 `naozhi doctor` 删除，backend 探测结果改看 `GET /api/cli/backends`。
 
 `naozhi --doctor` 在现有 effective config dump 之外加一段：
 
