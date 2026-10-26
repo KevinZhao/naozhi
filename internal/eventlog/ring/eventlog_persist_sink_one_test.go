@@ -126,6 +126,15 @@ func TestAppendBatch_Len1_SinkPair_UsesSingleSink(t *testing.T) {
 	if replay {
 		t.Errorf("single sink replayPhase = true, want false for live AppendBatch")
 	}
+	// The sinkOne scalar branch must also land in the ring with the same
+	// UUID the sink saw (merge dedup keys on UUID) and a defaulted Time.
+	ring := l.Entries()
+	if len(ring) != 1 || ring[0].UUID == "" || ring[0].UUID != got.UUID {
+		t.Errorf("ring = %+v, want one entry with UUID %q", ring, got.UUID)
+	}
+	if got.Time == 0 {
+		t.Errorf("single sink entry Time = 0, want defaulted")
+	}
 }
 
 // TestEventLog_SetPersistSinkPair_FallbackWhenSingleNil verifies that
