@@ -17,11 +17,13 @@ func TestAcceptsGzip(t *testing.T) {
 	}{
 		{"gzip", true},
 		{"GZIP", true},
+		{"deflate, gzip;q=1.0, *;q=0.5", true},
 		{"deflate", false},
 		{"", false},
 		// Explicitly disabled gzip via q=0 must NOT be accepted (R229-PERF).
 		{"gzip;q=0", false},
 		{"gzip; q=0.0", false},
+		{"deflate, gzip;q=0", false},
 		// q=0 on a sibling token shouldn't disable gzip.
 		{"gzip, br;q=0", true},
 	}
@@ -38,6 +40,7 @@ func TestIsCompressibleType(t *testing.T) {
 		want bool
 	}{
 		{"application/json; charset=utf-8", true},
+		{"application/manifest+json", true},
 		{"text/html; charset=utf-8", true},
 		{"application/javascript", true},
 		{"image/png", false},

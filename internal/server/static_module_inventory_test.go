@@ -18,6 +18,16 @@ func TestStaticJS_ModuleInventory(t *testing.T) {
 
 	modules := dashboardModules(t)
 
+	// static/ is embedded wholesale, so a stray copy of the e2e shim (or any
+	// nzTest hook) would ship in the binary; it belongs in test/e2e/e2e-shim.js.
+	for key, a := range staticAssets {
+		for _, marker := range []string{"nzTest", "nz.test"} {
+			if bytes.Contains(a.bytes, []byte(marker)) {
+				t.Errorf("%s contains %q: the e2e test surface belongs in test/e2e/e2e-shim.js", key, marker)
+			}
+		}
+	}
+
 	const token = "module-inventory-token"
 	srv := newTestServerWithToken(&mockPlatform{}, token)
 
