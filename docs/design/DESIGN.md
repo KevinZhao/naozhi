@@ -308,7 +308,7 @@ Protocol 实现应直接提供 `Capabilities() Caps`，调用方也应优先读
 | RPC ID 类型 | n/a | **必须** `json.RawMessage`（kiro 用 UUID 字符串，不是 int） |
 | 历史持久化 | `~/.claude/projects/**/*.jsonl` | `~/.kiro/sessions/cli/<sid>.{json,jsonl}`（kiro 自带，按消息聚合） |
 
-> **多 backend 共存与切换**：见 [`docs/rfc/multi-backend.md`](../rfc/multi-backend.md) 与实测报告 [`multi-backend-validation.md`](../rfc/multi-backend-validation.md)。
+> **多 backend 共存与切换**：见 [`docs/rfc/multi-backend.md`](../rfc/multi-backend.md)（实测报告 `multi-backend-validation.md` 已删除，需要时用 git log 找回）。
 > 后端的 DisplayName / DefaultBinary / Protocol 工厂 / DetectInProc / RequiredNodeCaps 收敛到
 > `internal/cli/backend.Profile` 注册表，其他模块禁止 switch backend ID。
 

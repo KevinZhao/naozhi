@@ -155,7 +155,7 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_cron_stop_budget_exceeded_drain_total` | Scheduler.Stop() cron drain 阶段超过 `stopBudget`（30s）的累计次数（R250-GO-20 / #1083） | 非零 = 在途 cron tick 没在预算内退出；持续增长说明热点 job 在 shutdown 路径占用太久，参考 slog.Warn "cron scheduler: stop deadline exceeded before cron.Stop drained" |
 | `naozhi_cron_stop_budget_exceeded_trigger_total` | Scheduler.Stop() triggerWG 等待阶段超过剩余预算的累计次数（R250-GO-20 / #1083） | 非零 = 手动 TriggerNow 引发的 goroutine 拖到 stopBudget 末尾；对照 slog.Warn "cron scheduler: stop deadline exceeded during triggerWG wait" 排查 webhook / notify 阻塞 |
 | `naozhi_cron_notify_partial_total` | cron 完成通知未发完全部 chunk 的累计次数：要么 replyCtx 超时（cronNotifyTimeout 30s）中途中断，要么某 chunk ReplyWithRetry 失败后 abort（R249-CR-26 / #966） | 持续增长 = IM 收件端在看截断的 cron 输出（webhook 慢/失败）；对照 slog.Warn "cron notify ... dropped" 找 platform/chat，建议引导用户改看 dashboard run-detail 面板 |
-| `naozhi_cron_run_started_total` | cron run 开始计数（CAS gate 通过后；docs/rfc/cron-run-history.md P0） | 与 `_ended_total` 差值远大于 inflight gauge = 进程崩溃打断在途 run；查 panic 日志 |
+| `naozhi_cron_run_started_total` | cron run 开始计数（CAS gate 通过后） | 与 `_ended_total` 差值远大于 inflight gauge = 进程崩溃打断在途 run；查 panic 日志 |
 | `naozhi_cron_run_ended_total` | cron run 终态计数（聚合 succeeded/failed/skipped/timed_out/canceled） | 与 `_started_total` 配合判断"开了但没收尾"的 run 数 |
 | `naozhi_sysession_run_started_total` | sysession daemon run 开始计数（CAS gate 通过后；#1723 RFC §6 Phase 1.5，对称于 cron 的 `_started_total`） | 与 `naozhi_sysession_run_ended_total` 差值远大于在途 = 进程崩溃打断在途 run；查 panic 日志 |
 | `naozhi_sysession_run_ended_total` | sysession daemon run 终态计数（聚合所有终态） | 与 `naozhi_sysession_run_started_total` 配合判断"开了但没收尾"的 run 数 |
