@@ -10,7 +10,6 @@
 import { NZ_CONTRACT } from './contract.js';
 import { cronDrawerState, cronJobCostCache, cronStore, fetchCronJobs } from './cron_state.js';
 import { cronErrorClassLabel, cronJobLedgerCostHtml } from './cron_format.js';
-import { authHeaders } from './platform.js';
 import { renderMd, runPendingAsync } from './render_md.js';
 import { costBudgetChipHtml, fetchCostBudget, fetchCostSummary, formatAbsTime, showAPIError, showAuthModal, showNetworkError } from './utilities.js';
 import {
@@ -455,7 +454,7 @@ function cssEscapeAttr(s) {
 async function cronTimelineFetchDetail(jobId, runId) {
   const st = getCronTimelineState(jobId);
   try {
-    const headers = authHeaders();
+    const headers = {};
     const url = NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '?job_id=' + encodeURIComponent(jobId);
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
     // Preserve the sticky __transcript annotation across a collapse→re-expand
@@ -497,7 +496,7 @@ async function cronTimelineFetchDetail(jobId, runId) {
 async function cronTimelineFetchTranscript(jobId, runId) {
   const st = getCronTimelineState(jobId);
   try {
-    const headers = authHeaders();
+    const headers = {};
     const url = NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '/transcript?job_id=' + encodeURIComponent(jobId);
     const data = await fetchJSON(url, { headers, timeoutMs: 12000 });
     if (st.details && st.details[runId]) {
@@ -559,7 +558,7 @@ function cronTimelineLoadMore(jobId, onDone) {
   (async () => {
     let loaded = false;
     try {
-      const headers = authHeaders();
+      const headers = {};
       let url = NZ_CONTRACT.API.cron_runs + '?job_id=' + encodeURIComponent(jobId) + '&limit=50';
       if (st.nextBefore) url += '&before=' + st.nextBefore;
       const data = await fetchJSON(url, { headers, timeoutMs: 10000 });
@@ -647,7 +646,7 @@ async function cronTimelineRefreshHead(jobId) {
   const token = (st._refreshToken || 0) + 1;
   st._refreshToken = token;
   try {
-    const headers = authHeaders();
+    const headers = {};
     const url = NZ_CONTRACT.API.cron_runs + '?job_id=' + encodeURIComponent(jobId) + '&limit=10';
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
     // 过期请求：开始 fetch 之后又有更新一轮 refreshHead 启动了，丢弃本次结果。

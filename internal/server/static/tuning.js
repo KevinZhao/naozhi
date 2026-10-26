@@ -13,7 +13,6 @@ import { perSession, selection, serverInfo, sessionList } from './state.js';
 import { esc, escAttr, fetchJSON, isCronSessionKey, showToast } from './nz_util.js';
 import { sessionStream } from './session_stream.js';
 import { mainEmptyHtml, promptDialog, removePendingSession, removeSidebarCard, showAPIError, showNetworkError, stopPreviewPolling } from './utilities.js';
-import { getToken } from './platform.js';
 import { dropDiscovered, findDiscovered, isDiscoveredKey, parseDiscoveredPid, sameDiscovered, sid } from './session_ident.js';
 import { gitChipHtml, gitStateCache, setHeaderGitChip } from './session_header.js';
 import { wireQuickAskInput } from './auth_modal.js';
@@ -204,8 +203,6 @@ async function postTuningOverride(kind, value) {
   const restore = () => { if (chip) chip.style.opacity = ''; };
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
     const body = { key };
     body[kind] = value;
     const resp = await fetch(NZ_CONTRACT.API.sessions_override, {
@@ -264,8 +261,6 @@ async function fetchGitState(key, node) {
   const cacheKey = sid(key, node);
   try {
     const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
     const resp = await fetch(NZ_CONTRACT.API.sessions_git + '?key=' + encodeURIComponent(key), { headers });
     // The cache entry is per-session so dropping it is always right; the
     // header chip is only cleared when this session is still the selected one.
@@ -317,8 +312,6 @@ async function dismissDiscovered(key, node) {
   if (!d) { showToast('未找到该外部会话', 'warning'); return; }
   try {
     const headers = {'Content-Type': 'application/json'};
-    const token = getToken();
-    if (token) headers['Authorization'] = 'Bearer ' + token;
     try {
       await fetchJSON(NZ_CONTRACT.API.discovered_close, {
         timeoutMs: 10000,
@@ -356,8 +349,6 @@ function dismissManaged(key, node) {
   removeSidebarCard(key);
 
   const headers = {'Content-Type': 'application/json'};
-  const token = getToken();
-  if (token) headers['Authorization'] = 'Bearer ' + token;
   const body = {key: key};
   if (node && node !== 'local') body.node = node;
   // Fire-and-forget: do NOT await — the UI is already updated. On failure we
@@ -454,8 +445,6 @@ async function renameSession() {
   const next = input.trim();
   if (next === current) return;
   const headers = {'Content-Type': 'application/json'};
-  const token = getToken();
-  if (token) headers['Authorization'] = 'Bearer ' + token;
   const body = {key: selection.key, label: next};
   if (selection.node && selection.node !== 'local') body.node = selection.node;
   try {

@@ -8,7 +8,6 @@
 import { NZ_CONTRACT } from './contract.js';
 import { wsm } from './ws_manager.js';
 import { selection, sessionList } from './state.js';
-import { authHeaders } from './platform.js';
 import { fetchJSON, nzBus, nzViews } from './nz_util.js';
 import { sid } from './session_ident.js';
 import { announce, isMobile } from './utilities.js';
@@ -119,7 +118,6 @@ async function fetchEntry(s, e, mode, now) {
   let retryAfter = 0;
   try {
     const resp = /** @type {RestResponses['sessions_workflow']} */ (await fetchJSON(NZ_CONTRACT.API.sessions_workflow + '?' + qs, {
-      headers: authHeaders(),
       onResponse: (r) => { retryAfter = Number(r.headers.get('Retry-After')) || 0; },
     }));
     noteServerNow(resp.server_now);

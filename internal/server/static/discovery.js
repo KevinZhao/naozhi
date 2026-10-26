@@ -12,7 +12,6 @@ import { sessionStream } from './session_stream.js';
 import { discoveredKey, isInternalEvent, sessionTypeTag } from './session_ident.js';
 import { EVENT_DIVIDER_GAP_MS, lastDividerTime, mobileEnterChat, setActiveSessionCard, showAPIError, showNetworkError, stickEventsBottom, stopPreviewPolling, timeDividerHtml } from './utilities.js';
 import { ICONS } from './icons.js';
-import { getToken } from './platform.js';
 import { eventHtml, renderEventsWithDividers } from './event_render.js';
 import { navRebuild, navSync } from './msg_nav.js';
 import { processEventsForDisplay } from './file_refs.js';
@@ -23,8 +22,6 @@ import { shell } from './shell.js';
 async function scanDiscovered() {
   try {
     const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
     // RNEW-UX-003: 10s timeout — /api/discovered walks the filesystem, so a
     // stalled disk shouldn't wedge the scan button forever.
     const data = await fetchJSON(NZ_CONTRACT.API.discovered, { headers, timeoutMs: 10000 });
@@ -107,8 +104,6 @@ function startPreviewPolling(gen, url) {
     previewInFlight = true;
     try {
       const headers = {};
-      const t = getToken();
-      if (t) headers['Authorization'] = 'Bearer ' + t;
       const r = await fetch(url, { headers });
       if (!r.ok) return;
       const all = await r.json();
@@ -159,8 +154,6 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, typeL
     const cwdParam = cwd ? '&cwd=' + encodeURIComponent(cwd) : '';
     const url = NZ_CONTRACT.API.discovered_preview + '?session_id=' + encodeURIComponent(sessionId) + nodeParam + cwdParam;
     const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
     // RNEW-UX-003: 10s timeout — a hung JSONL read shouldn't trap the user
     // on a "加载中..." splash indefinitely.
     let events;

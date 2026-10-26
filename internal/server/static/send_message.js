@@ -13,7 +13,6 @@ import { fetchJSON, showToast, patchCardExitChip } from './nz_util.js';
 import { wsm } from './ws_manager.js';
 import { featureForCurrent } from './features.js';
 import { EVENT_DIVIDER_GAP_MS, getMsgValue, lastDividerTime, persistPending, removeSidebarCard, setMsgValue, showAPIError, showAuthModal, showNetworkError, stickEventsBottom, timeDividerHtml } from './utilities.js';
-import { authHeaders } from './platform.js';
 import { discoveredKey, dropDiscovered, sid } from './session_ident.js';
 import { eventHtml } from './event_render.js';
 import { awaitPendingOrients, renderFilePreviews } from './composer_files.js';
@@ -111,7 +110,7 @@ async function takeoverThenSend(input, text) {
   const pd = selection.pendingDiscovered;
   try {
     const r = await fetch(NZ_CONTRACT.API.discovered_takeover, {
-      method: 'POST', headers: {'Content-Type': 'application/json', ...authHeaders()},
+      method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({pid: pd.pid, session_id: pd.sessionId, cwd: pd.cwd, proc_start_time: pd.procStartTime || 0, node: pd.node || ''})
     });
     if (!r.ok) {
@@ -138,7 +137,7 @@ async function takeoverThenSend(input, text) {
       await new Promise(resolve => setTimeout(resolve, 500));
       sessionList.lastVersion = 0;
       const [, st] = await Promise.all([shell.fetchSessions(),
-        statusURL && fetchJSON(statusURL, { headers: authHeaders(), timeoutMs: 2000 }).catch(() => null)]);
+        statusURL && fetchJSON(statusURL, { timeoutMs: 2000 }).catch(() => null)]);
       if (st && st.state) own = st;
       ready = (own.state === 'ready' || own.state === 'unknown') && !!sessionList.sessionsData[sid(takenKey, takenNode)];
     }
@@ -290,8 +289,8 @@ function buildSendPayload(text, fileIDs, sendId) {
 }
 
 // handleSendRejected runs the !r.ok branch: restores the composer and the
-// optimistic-running flip, then surfaces 401/403 (auth modal), 429 (rate
-// limiter) or the generic API error. files_consumed means the server already
+// optimistic-running flip, then surfaces 401/403 (auth modal) or the
+// generic API error. files_consumed means the server already
 // took the pre-uploaded attachments out of the uploadStore before rejecting
 // (post-TakeAll 4xx/5xx) — drop the now-dead ids and ask for a re-attach;
 // pre-TakeAll rejections never set the flag, so unsent attachments stay put.
@@ -314,11 +313,6 @@ async function handleSendRejected(r, sentSid, text, input) {
   }
   if (r.status === 401 || r.status === 403) {
     showAuthModal();
-    return;
-  }
-  if (r.status === 429) {
-    // The server names the limiter that fired; there is no queue-full 429 here.
-    showToast(detail || '请求过于频繁，请稍后重试', 'warning');
     return;
   }
   showAPIError('发送消息', r.status, detail);
@@ -397,7 +391,7 @@ async function sendComposerTurn(targetKey, targetNode) {
 
   // HTTP POST fallback — JSON only; files already on server.
   try {
-    const headers = { 'Content-Type': 'application/json', ...authHeaders() };
+    const headers = { 'Content-Type': 'application/json' };
     const sendId = 'h' + (++wsm.sendCounter);
     const payload = buildSendPayload(text, fileIDs, sendId);
 

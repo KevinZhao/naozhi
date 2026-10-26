@@ -1,5 +1,5 @@
 import { NZ_CONTRACT } from './contract.js';
-import { getToken, lsGet, lsRemove, lsSet } from './platform.js';
+import { lsGet, lsRemove, lsSet } from './platform.js';
 import { registerShell } from './shell.js';
 import { sessionStream } from './session_stream.js';
 import { WS_STATES, wsm } from './ws_manager.js';
@@ -149,8 +149,6 @@ function applyTheme(theme, persist) {
 // toast, since the change isn't lost — only un-synced to other devices.
 function persistTheme(theme) {
   const headers = { 'Content-Type': 'application/json' };
-  const t = getToken();
-  if (t) headers['Authorization'] = 'Bearer ' + t;
   fetchJSON(NZ_CONTRACT.API.settings, { method: 'PUT', headers, body: JSON.stringify({ theme: theme }), timeoutMs: 10000 })
     .catch(function (err) {
       showToast('主题已应用，但未能保存到服务器', 'error');
@@ -162,8 +160,6 @@ function persistTheme(theme) {
 // re-persisting). On error/no-store we keep whatever localStorage gave us.
 function syncThemeFromServer() {
   const headers = {};
-  const t = getToken();
-  if (t) headers['Authorization'] = 'Bearer ' + t;
   fetchJSON(NZ_CONTRACT.API.settings, { headers, timeoutMs: 8000 })
     .then(function (s) {
       const srv = s && s.theme;
@@ -525,8 +521,6 @@ async function resumeRecentById(sessionId, workspace, lastPrompt) {
 
   try {
     const headers = {'Content-Type': 'application/json'};
-    const token = getToken();
-    if (token) headers['Authorization'] = 'Bearer ' + token;
     const r = await fetch(NZ_CONTRACT.API.sessions_resume, {
       method: 'POST', headers,
       body: JSON.stringify({session_id: sessionId, workspace: workspace || '', last_prompt: lastPrompt || ''})
@@ -554,8 +548,6 @@ async function resumeRecentById(sessionId, workspace, lastPrompt) {
 async function previewRecentSession(expectedKey, sessionId, cwd) {
   try {
     const headers = {};
-    const token = getToken();
-    if (token) headers['Authorization'] = 'Bearer ' + token;
     // Pass cwd (the resumed session's workspace) so the backend hits the
     // O(1) CWD-derived path lookup and skips the findSessionJSONL negative
     // cache — see previewDiscovered for the full rationale.
@@ -967,8 +959,6 @@ async function downloadSessionMarkdown() {
   const node = selection.node;
   try {
     const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
     const res = await fetchAllSessionEvents(key, node, headers);
     if (res.status) {
       showAPIError('导出会话', res.status, '');

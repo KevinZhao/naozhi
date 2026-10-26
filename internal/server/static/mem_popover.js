@@ -17,7 +17,6 @@
 //
 // docs/rfc/memory-link-rendering.md
 import { NZ_CONTRACT } from './contract.js';
-import { authHeaders } from './platform.js';
 import { esc, escAttr, fetchJSON } from './nz_util.js';
 import { renderMd, runPendingAsync } from './render_md.js';
 
@@ -137,9 +136,7 @@ async function fetchMemory(slug) {
   // returns `undefined` (preserves caller's "transient — retry next
   // hover" semantics).
   try {
-    const data = await fetchJSON(NZ_CONTRACT.API.memory_slug.replace('{slug}', encodeURIComponent(slug)), {
-      headers: authHeaders(),
-    });
+    const data = await fetchJSON(NZ_CONTRACT.API.memory_slug.replace('{slug}', encodeURIComponent(slug)));
     if (!data || !data.found) {
       memCache.set(slug, NOT_FOUND);
       markBroken(slug);

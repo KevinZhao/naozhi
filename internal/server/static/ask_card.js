@@ -3,7 +3,6 @@
 // apply. event_render.js imports the renderer; dashboard.js registers the two
 // data-action handlers.
 import { NZ_CONTRACT } from './contract.js';
-import { getToken } from './platform.js';
 import { selection, transcript } from './state.js';
 import { esc, escAttr } from './nz_util.js';
 import { featureForCurrent } from './features.js';
@@ -263,8 +262,6 @@ async function sendAskAnswerViaAPI(text, card) {
   }
   if (!key) throw new Error('no active session');
   const headers = { 'Content-Type': 'application/json' };
-  const token = getToken();
-  if (token) headers['Authorization'] = 'Bearer ' + token;
   const payload = { key: key, text: text };
   if (node && node !== 'local') payload.node = node;
   const r = await fetch(NZ_CONTRACT.API.sessions_send, { method: 'POST', headers, body: JSON.stringify(payload) });

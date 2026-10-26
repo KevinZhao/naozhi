@@ -8,7 +8,6 @@ import { composer } from './state.js';
 import { esc, escAttr, showToast } from './nz_util.js';
 import { featureForCurrent } from './features.js';
 import { ICONS } from './icons.js';
-import { getToken } from './platform.js';
 import { formatFileSize, showAuthModal } from './utilities.js';
 
 // --- File handling ---
@@ -192,8 +191,6 @@ async function uploadEntry(entry) {
     const fd = new FormData();
     fd.append('file', file);
     const headers = {};
-    const token = getToken();
-    if (token) headers['Authorization'] = 'Bearer ' + token;
     const r = await fetch(NZ_CONTRACT.API.sessions_upload, { method: 'POST', headers, body: fd });
     if (r.status === 401 || r.status === 403) { showAuthModal(); throw new Error('unauthorized'); }
     if (!r.ok) {
@@ -256,8 +253,6 @@ async function maybeAutoOrient(entry) {
   const timer = setTimeout(() => ctrl.abort(), ORIENT_MAX_WAIT_MS);
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const token = getToken();
-    if (token) headers['Authorization'] = 'Bearer ' + token;
     const r = await fetch(NZ_CONTRACT.API.sessions_orient, {
       method: 'POST', headers, body: JSON.stringify({ id: entry.id }), signal: ctrl.signal,
     });

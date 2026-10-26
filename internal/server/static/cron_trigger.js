@@ -9,7 +9,6 @@
 // clears the cooldown through cron_state's cronTriggerCooldownClear.
 
 import { NZ_CONTRACT } from './contract.js';
-import { getToken } from './platform.js';
 import { showToast } from './nz_util.js';
 import { showAPIError, showNetworkError } from './utilities.js';
 import { renderCronDrawer } from './cron_drawer.js';
@@ -114,8 +113,6 @@ async function cronTriggerNow(id) {
   if (cronDrawerState.jobId === id) renderCronDrawer();
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
     const r = await fetch(NZ_CONTRACT.API.cron_trigger, { method: 'POST', headers, body: JSON.stringify({ id }) });
     if (!r.ok) {
       // Failure — clear the cooldown immediately so the user can retry.

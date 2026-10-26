@@ -12,7 +12,6 @@
 .nz-accent{color:var(--nz-accent)}
 .nz-mute{color:var(--nz-text-mute)}
 .nz-hint-faint{color:var(--nz-text-faint);font-weight:normal;font-size:11px}
-.nz-input-block{width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px}
 .nz-tighten-top{margin-top:-4px}
 .nz-hint{font-size:12px;color:var(--nz-text-mute)}
 .nz-dim{color:var(--nz-text-dim)}

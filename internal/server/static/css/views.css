@@ -154,8 +154,6 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .asset-from{color:var(--nz-clawd-rust);background:rgba(217,119,87,.12);border:1px solid rgba(217,119,87,.35);border-radius:var(--nz-radius-pill);padding:1px 8px}
 .asset-rel{font-family:var(--nz-font-mono)}
 .asset-main-body{flex:1;overflow-y:auto;padding:20px;max-width:900px;width:100%;margin:0 auto}
-.asset-main-body .afm{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-left:3px solid var(--nz-accent);border-radius:var(--nz-radius-ms);padding:10px 12px;font-family:var(--nz-font-mono);font-size:var(--nz-fs-sm);color:var(--nz-text-mute);margin-bottom:14px;white-space:pre-wrap}
-.asset-main-body .afm .k{color:var(--nz-accent)}
 .asset-main-body .araw{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);padding:14px;font-family:var(--nz-font-mono);font-size:var(--nz-fs-sm);color:var(--nz-text);overflow-x:auto;white-space:pre-wrap;word-break:break-word;line-height:1.6;margin:0}
 .asset-anchor-note{font-size:var(--nz-fs-xs);color:var(--nz-amber);background:rgba(210,153,34,.1);border:1px solid rgba(210,153,34,.3);border-radius:var(--nz-radius-ms);padding:7px 10px;margin-bottom:12px}
 
@@ -274,7 +272,6 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    hardcoded dark-blue #1f2937 that looked alien in light theme) + rust left
    edge as the brand selection marker. R20260606. */
 .session-card.active{background:var(--nz-selected-bg);border-left-color:var(--nz-selected-bar)}
-.session-card.dead-card{opacity:.6}
 /* .btn-close — canonical close/dismiss affordance class (#2027). One marker
    for every "close this surface" button so the family is greppable and shares
    a baseline (transparent chrome, pointer, no inherited button box). Per-site
@@ -293,7 +290,6 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 
 .badge.new{background:var(--nz-blue);color:#fff;border:1px dashed var(--nz-accent)}
 .badge.paused{background:var(--nz-text-faint);color:var(--nz-text)}
-.death-tag{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);background:var(--nz-bg-2);padding:1px 4px;border-radius:var(--nz-radius-sm)}
 
 .main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;position:relative}
 .main-header{padding:8px 20px;border-bottom:1px solid var(--nz-border);flex-shrink:0;display:flex;align-items:center;gap:8px}
@@ -336,14 +332,6 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
    contrast (the chip uses dark text on light backgrounds via color-mix),
    and the always-on outline so dark mode keeps it readable. */
 .sc-backend-chip,.sc-access-profile-chip{display:inline-flex;align-items:center;padding:1px 6px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;letter-spacing:.2px;flex-shrink:0;color:var(--nz-backend-chip-fg);text-shadow:var(--nz-backend-chip-shadow);border:1px solid var(--nz-backend-chip-border);max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-
-/* RFC §8.3 D6 — context usage bar. Three thresholds: <80% green
-   (--nz-text-mute fill), <95% amber (--nz-amber), >=95% red. Width
-   driven inline so the bar animates as kiro emits new metadata. */
-.main-header .ctx-bar{display:inline-flex;align-items:center;width:48px;height:6px;background:var(--nz-bg-2);border-radius:var(--nz-radius-xs);overflow:hidden;flex-shrink:0}
-.main-header .ctx-bar-fill{height:100%;background:var(--nz-text-mute);transition:width .3s ease-out}
-.main-header .ctx-bar.mid .ctx-bar-fill{background:var(--nz-amber)}
-.main-header .ctx-bar.high .ctx-bar-fill{background:#e85a4f}
 
 /* RFC §8.3 D7 — turn duration timer. Tabular nums so digits don't jitter
    between turns. */
@@ -631,7 +619,6 @@ body.nz-view-system .system-main{display:flex;flex-direction:column;flex:1;min-w
 .btn-stop:hover{background:#b62324}
 .btn-mic{font-size:var(--nz-fs-md);position:relative}
 .btn-mic.recording{background:var(--nz-red);border-color:var(--nz-red);color:#fff;animation:pulse var(--nz-dur-loop) ease-in-out infinite}
-.rec-badge{position:absolute;top:-6px;right:-6px;background:var(--nz-red);color:#fff;font-size:var(--nz-fs-2xs);min-width:18px;height:18px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-family:var(--nz-font-mono);pointer-events:none}
 .btn-mic.transcribing{opacity:.5;pointer-events:none}
 
 /* Voice input mode (WeChat-style hold-to-talk) */

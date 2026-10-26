@@ -11,7 +11,6 @@
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList } from './state.js';
 import { esc, escAttr, formatCostUSD, formatDurationShort, formatRunDuration, runStateDot, runStateLabel } from './nz_util.js';
-import { authHeaders } from './platform.js';
 import { sid } from './session_ident.js';
 import { costBudgetChipHtml, fetchCostBudget, formatAbsTime } from './utilities.js';
 
@@ -150,7 +149,7 @@ async function fetchSessionRuns(key, node) {
   // previously-selected local session's "N 轮" overview.
   if (node && node !== 'local') { panel.hidden = true; setHeaderRunStats(''); return; }
   try {
-    const [resp, budget] = await Promise.all([fetch(NZ_CONTRACT.API.sessions_runs + '?key=' + encodeURIComponent(key), { headers: authHeaders() }),
+    const [resp, budget] = await Promise.all([fetch(NZ_CONTRACT.API.sessions_runs + '?key=' + encodeURIComponent(key)),
       fetchCostBudget('session_key=' + encodeURIComponent(key))]);
     // Stale-check the error branch too: the header we would clear belongs to
     // whichever session is selected NOW, not the one this fetch was for.

@@ -2,7 +2,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { selection, serverInfo, sessionList, timers, ui } from './state.js';
 import { fetchCLIBackends, renderBackendPicker } from './backend_catalog.js';
 import { setActivityView } from './dashboard.js';
-import { authHeaders, getToken, lsGet, lsSet } from './platform.js';
+import { lsGet, lsSet } from './platform.js';
 import { sessionStream } from './session_stream.js';
 import { wsm } from './ws_manager.js';
 import { mobileBack } from './mobile_nav.js';
@@ -575,8 +575,6 @@ async function doCreateCronJob() {
   if (wdInput && wdInput.value.trim()) workDir = wdInput.value.trim();
   try {
     const headers = {'Content-Type': 'application/json'};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
     const body = {schedule};
     if (prompt) body.prompt = prompt;
     if (title) body.title = title;
@@ -1453,8 +1451,6 @@ async function cronPause(id) {
   // failures and route to showNetworkError.
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
     await fetchJSON(NZ_CONTRACT.API.cron_pause, { method: 'POST', headers, body: JSON.stringify({ id }) });
     fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
   } catch (e) {
@@ -1467,8 +1463,6 @@ async function cronResume(id) {
   // RNEW-UX-003 (#444): see cronPause godoc for fetchJSON migration rationale.
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
     await fetchJSON(NZ_CONTRACT.API.cron_resume, { method: 'POST', headers, body: JSON.stringify({ id }) });
     fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
   } catch (e) {
@@ -1526,8 +1520,6 @@ async function cronDelete(id) {
   // confirm flow above so a deterministic timeout is the right surface.
   try {
     const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
     await fetchJSON(NZ_CONTRACT.API.cron + '?id=' + encodeURIComponent(id), { method: 'DELETE', headers });
     // R220-FE-2: 释放该 job 在前端持有的 timeline 状态（runs / details / pagination
     // 游标 / fetched 标记），避免 cronTimelineState 累积已删除 job 的内存。
@@ -1755,7 +1747,7 @@ async function doEditCronJob(id) {
   if (body.schedule === '') { showToast('频率不能为空', 'warning'); return; }
 
   try {
-    const headers = Object.assign({ 'Content-Type': 'application/json' }, authHeaders());
+    const headers = { 'Content-Type': 'application/json' };
     const r = await fetch(NZ_CONTRACT.API.cron + '?id=' + encodeURIComponent(id), {
       method: 'PATCH', headers, body: JSON.stringify(body),
     });

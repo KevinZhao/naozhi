@@ -11,11 +11,11 @@
 // reassign the primitives.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList, transcript } from './state.js';
-import { esc, escAttr, showToast, nzBus, nzViews } from './nz_util.js';
+import { esc, escAttr, formatDurationShort, showToast, nzBus, nzViews } from './nz_util.js';
 import { fetchEvents } from './event_stream.js';
 import { eventHtml, renderEventsWithDividers } from './event_render.js';
 import { wsm } from './ws_manager.js';
-import { fmtDuration, refreshBanner, saveScrollPos, turnState } from './running_banner.js';
+import { refreshBanner, saveScrollPos, turnState } from './running_banner.js';
 import { sid } from './session_ident.js';
 
 (function () {
@@ -87,7 +87,7 @@ import { sid } from './session_ident.js';
     // Stats.
     var stat = '';
     if (a.toolUses > 0) stat += a.toolUses + ' calls';
-    if (a.durationMs > 0) stat += (stat ? ' · ' : '') + fmtDuration(a.durationMs);
+    if (a.durationMs > 0) stat += (stat ? ' · ' : '') + formatDurationShort(a.durationMs);
     if (isDone) stat += (stat ? ' · ' : '') + '✓';
     if (stat) parts += '<span class="sa-stat">· ' + stat + '</span>';
     parts += '</div>';
@@ -225,7 +225,7 @@ import { sid } from './session_ident.js';
       state.activeAgentName = row.name || '';
       state.activeTeamName = row.teamName || '';
       state.activeStatus = row.status || '';
-      if (settledMs(row) > 0) state.fixedDur = fmtDuration(row.durationMs);
+      if (settledMs(row) > 0) state.fixedDur = formatDurationShort(row.durationMs);
     }
     showBreadcrumb();
     el.innerHTML = '<div class="empty-state loading-indicator">加载中…</div>';
@@ -469,7 +469,7 @@ import { sid } from './session_ident.js';
     if (!st) return;
     var pieces = [];
     if (patch && patch.tool_uses > 0) pieces.push(patch.tool_uses + ' calls');
-    var dur = state.fixedDur || (patch && patch.duration_ms > 0 ? fmtDuration(patch.duration_ms) : '');
+    var dur = state.fixedDur || (patch && patch.duration_ms > 0 ? formatDurationShort(patch.duration_ms) : '');
     if (dur) pieces.push(dur);
     if (pieces.length > 0) st.textContent = pieces.join(' · ');
   }

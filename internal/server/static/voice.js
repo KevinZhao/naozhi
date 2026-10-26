@@ -12,7 +12,6 @@ import { NZ_CONTRACT } from './contract.js';
 import { composer, selection, sessionList } from './state.js';
 import { showToast } from './nz_util.js';
 import { ICONS } from './icons.js';
-import { getToken } from './platform.js';
 import { sid } from './session_ident.js';
 import { getMsgValue, setMsgValue } from './utilities.js';
 import { updateSendButton } from './running_banner.js';
@@ -354,8 +353,6 @@ function transcribeAudio(blob, autoSend) {
   const fd = new FormData();
   fd.append('audio', blob, 'recording.' + (blob.type.includes('webm') ? 'webm' : blob.type.includes('ogg') ? 'ogg' : 'mp4'));
   const headers = {};
-  const token = getToken();
-  if (token) headers['Authorization'] = 'Bearer ' + token;
   const ac = new AbortController();
   const timeoutId = setTimeout(() => ac.abort(), TRANSCRIBE_TIMEOUT_MS);
   // Tag fetch-level failures so .catch can distinguish network from server.

@@ -3,7 +3,6 @@
 // sends messages, and can promote it into a sidebar-visible session. Drawer
 // DOM lives in dashboard.html; dashboard's module body runs initAsideDrawer().
 import { NZ_CONTRACT } from './contract.js';
-import { getToken } from './platform.js';
 import { selection, sessionList } from './state.js';
 import { showToast } from './nz_util.js';
 import { eventHtml } from './event_render.js';
@@ -39,15 +38,6 @@ const ad = {
 function setScratch(s) {
   ad.state = s;
   selection.scratchKey = s ? s.key : '';
-}
-
-function authHeaders(extra) {
-  const h = Object.assign({}, extra || {});
-  try {
-    const t = getToken();
-    if (t) h['Authorization'] = 'Bearer ' + t;
-  } catch (_) {}
-  return h;
 }
 
 function clearMessages() {
@@ -88,7 +78,7 @@ async function closeScratch(silent) {
   if (!id) return;
   try {
     await fetch(NZ_CONTRACT.API.scratch_id.replace('{id}', encodeURIComponent(id)), {
-      method: 'DELETE', headers: authHeaders(),
+      method: 'DELETE',
     });
   } catch (_) { /* best effort */ }
 }
@@ -252,7 +242,7 @@ async function pollOnce() {
     let url = NZ_CONTRACT.API.sessions_events + '?key=' + encodeURIComponent(ad.state.key);
     if (ad.state.lastEventTime > 0) url += '&after=' + ad.state.lastEventTime;
     else url += '&limit=50';
-    const r = await fetch(url, { headers: authHeaders() });
+    const r = await fetch(url);
     if (!r.ok) {
       // 404 = the scratch session has no persisted events yet (brand-new,
       // first turn not landed). That is an expected empty state, not an
@@ -312,7 +302,7 @@ async function openScratch(quote, agentId, sourceKey, sourceMsgTime) {
   try {
     const r = await fetch(NZ_CONTRACT.API.scratch_open, {
       method: 'POST',
-      headers: authHeaders({'Content-Type': 'application/json'}),
+      headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         source_key: sourceKey,
         source_message_id: String(sourceMsgTime || ''),
@@ -406,7 +396,7 @@ async function sendInScratch() {
   try {
     const r = await fetch(NZ_CONTRACT.API.sessions_send, {
       method: 'POST',
-      headers: authHeaders({'Content-Type': 'application/json'}),
+      headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({key: ad.state.key, text}),
     });
     if (!r.ok) {
@@ -443,7 +433,7 @@ export async function promoteScratch() {
   const id = ad.state.scratchId;
   try {
     const r = await fetch(NZ_CONTRACT.API.scratch_id_promote.replace('{id}', encodeURIComponent(id)), {
-      method: 'POST', headers: authHeaders(),
+      method: 'POST',
     });
     if (!r.ok) {
       const txt = await r.text().catch(() => '');

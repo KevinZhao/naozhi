@@ -2,7 +2,7 @@
 // merge with pending (not yet sent) sessions, the cards and badges, the status
 // bar, the node helpers, and the WS state, subscription and session_state frames.
 import { NZ_CONTRACT } from './contract.js';
-import { authHeaders, lsGet } from './platform.js';
+import { lsGet } from './platform.js';
 import { sessionStream } from './session_stream.js';
 import { WS_STATES, wsm } from './ws_manager.js';
 import { perSession, selection, serverInfo, sessionList, timers, transcript } from './state.js';
@@ -72,7 +72,7 @@ export function restorePending() {
 // 8 s timeout: RNEW-UX-003.
 const NOT_MODIFIED = 'not-modified';
 async function fetchSessionsPayload() {
-  const headers = authHeaders();
+  const headers = {};
   const v = sessionList.lastETag;
   if (v && sessionList.lastVersion > 0 && (!v.unpainted || wsm.state === WS_STATES.CONNECTED)) headers['If-None-Match'] = v.etag;
   let etag = '';
@@ -111,7 +111,7 @@ function sessionsUnchanged(data, wsConnected) {
 function syncHistory(tag) {
   sessionList.historyPollTag = tag;
   if (tag === sessionList.historyTag) return;
-  const load = /** @type {Promise<RestResponses['sessions_history'] | null>} */ (tag ? fetchJSON(NZ_CONTRACT.API.sessions_history, { headers: authHeaders(), timeoutMs: 8000 }) : Promise.resolve(null));
+  const load = /** @type {Promise<RestResponses['sessions_history'] | null>} */ (tag ? fetchJSON(NZ_CONTRACT.API.sessions_history, { timeoutMs: 8000 }) : Promise.resolve(null));
   load.then(h => {
     sessionList.historySessionsData = (h && h.history_sessions) || [];
     sessionList.historyTag = (h && h.history_tag) || '';

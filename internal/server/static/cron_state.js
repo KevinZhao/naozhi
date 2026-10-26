@@ -5,7 +5,6 @@
 // objects and write their fields in place; no binding here is reassigned.
 
 import { NZ_CONTRACT } from './contract.js';
-import { authHeaders } from './platform.js';
 import { fetchJSON } from './nz_util.js';
 import { setCronTimezoneMeta } from './cron_schedule.js';
 
@@ -176,7 +175,7 @@ export async function fetchCronJobs() {
   // 不偏晚（把新补丁误判为旧）。
   const fetchStartedAt = Date.now();
   try {
-    const headers = authHeaders();
+    const headers = {};
     // RNEW-UX-003: 8s timeout, so a hung disk/fs call releases before the next fetch.
     //
     // R236-SEC-08 (#494): the poll asks for compact rows, `prompt` clipped to
@@ -241,7 +240,7 @@ export async function cronRefetchFullJob(id) {
   // elsewhere, open the editor, and the old body goes back to disk.
   if (!cached.prompt_truncated && !cached.prompt_refetched) return { ok: true, job: cached };
   try {
-    const headers = authHeaders();
+    const headers = {};
     // No compact param: there is no per-job GET, so the full list is pulled.
     // It shares the list route's rate limiter with the poll, but an editor
     // open is once per user action, not a hot path.

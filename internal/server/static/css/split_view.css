@@ -201,7 +201,6 @@
 .modal.prompt-dialog .prompt-input{margin-top:4px}
 .modal textarea{width:100%;padding:8px 12px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:var(--nz-radius-ms);color:var(--nz-text);font-size:var(--nz-fs-base);font-family:inherit;outline:none;resize:vertical}
 .modal textarea:focus{border-color:var(--nz-rust)}
-.modal-section-label{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);margin-bottom:6px}
 /* Auth modal hint: tells first-time operators where the token lives so the
    dashboard isn't a dead-end for someone with the URL but no prior context.
    Inline <code> spans use the same pill treatment as .md-code for visual
@@ -275,13 +274,6 @@
 .toast.success{background:#238636}
 .toast.error{background:#8e1519}
 
-.node-badge{display:inline-block;padding:1px 5px;border-radius:var(--nz-radius-sm);font-size:var(--nz-fs-2xs);font-weight:600;letter-spacing:.3px;color:#fff;vertical-align:middle;margin-right:4px}
-.node-dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin:0 1px 0 6px;vertical-align:middle}
-.node-dot:first-child{margin-left:0}
-.node-dot.ok{background:var(--nz-green)}
-.node-dot.error{background:var(--nz-red)}
-.node-info{color:var(--nz-text-mute);font-size:var(--nz-fs-sm2)}
-
 /* History popover/sheet backdrop. Before R20260605 the popover had no
    backdrop, so its fixed box silently sat on top of the node switcher and
    session list: clicking those covered controls only dismissed the popover
@@ -316,7 +308,6 @@
 .history-popover-item .hp-prompt{font-size:var(--nz-fs-sm2);color:var(--nz-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .history-popover-item .hp-meta{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);margin-top:3px;display:flex;align-items:center;gap:6px}
 .history-popover-item .hp-meta .hp-project{color:var(--nz-project-label-fg);font-weight:500}
-.history-popover-item .hp-meta .hp-tool{color:var(--nz-accent)}
 .history-popover-item .hp-meta .hp-dot{color:var(--nz-border)}
 /* Day group header inside the history popover. Dropped text-transform:uppercase
    in Round 129 — the browser returns "Wed, Apr 29" for English locales and
@@ -393,7 +384,6 @@
    .tex/.latex files. Visually close to .fv-lined <pre> so switching
    between file types doesn't jolt the reader. */
 .rich-plain{margin:0 0 8px 0;padding:0;white-space:pre-wrap;word-break:break-word;font-family:'SF Mono',Consolas,monospace;color:var(--nz-text);background:transparent;border:none}
-.ts-subagent{display:inline-block;background:var(--nz-chip-info-bg);color:var(--nz-chip-info-fg);padding:0 5px;border-radius:var(--nz-radius-sm);font-size:var(--nz-fs-xs);font-weight:600;margin-left:2px}
 
 
 
@@ -407,13 +397,8 @@
 .hdr-btn:hover{background:var(--nz-bg-2);color:var(--nz-text);border-color:var(--nz-text-faint)}
 .hdr-btn.active{background:var(--nz-bg-2);color:var(--nz-accent);border-color:var(--nz-accent)}
 .hdr-btn svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-/* Header badges (history count, cron attention count) are neutral by
-   default — red is opt-in via .is-alert (see Track D variants below).
-   Before Round 127 this rule hard-coded --nz-red, then a later Track D
-   rule at ~L800 shadowed the color. Two rules with different intents
-   for the same selector made future refactors error-prone; canonical
-   definition is consolidated here and Track D now only owns the
-   attention / warn variants. */
+/* Header badges (history count, cron attention count) are neutral; the
+   colour tokens live in mobile_polish.css (Track D). */
 .hdr-badge{position:absolute;top:-5px;right:-5px;background:var(--nz-badge-info);color:var(--nz-badge-info-text);border:1px solid var(--nz-border);font-size:9px;min-width:15px;height:15px;border-radius:var(--nz-radius-md);display:flex;align-items:center;justify-content:center;font-weight:700;line-height:1}
 /* Self-update chip (docs/rfc/dashboard-update-notice.md §3.4): a width-auto
    .hdr-btn variant carrying an icon + the target version tag. Hidden by
@@ -467,7 +452,6 @@
    500 weight, meta/time = mute (set below). R20260606. */
 .session-card .sc-prompt{font-size:15px;color:var(--nz-text-strong);font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .session-card.new-card{border-left-style:dashed;border-left-color:var(--nz-accent)}
-.session-card.active.dead-card{opacity:1}
 .session-card .sc-meta{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);display:flex;align-items:center;gap:4px;margin-top:3px;overflow:hidden;white-space:nowrap}
 /* R110-P1: dim 30-rune assistant response preview slotted between prompt and meta. */
 .session-card .sc-response{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.3}

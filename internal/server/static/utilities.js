@@ -7,7 +7,7 @@ import { NZ_CONTRACT } from './contract.js';
 import { composer, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
 import { esc, escAttr, showToast, trapFocus, sessionExitChipHtml } from './nz_util.js';
 import { wsm } from './ws_manager.js';
-import { authHeaders, getToken, lsSet } from './platform.js';
+import { lsSet } from './platform.js';
 import { sid } from './session_ident.js';
 import { featureForBackend, pendingBackendID } from './features.js';
 
@@ -303,13 +303,13 @@ async function fetchCostSummary(query) {
   const to = new Date();
   const from = new Date(to.getTime() - 30 * 24 * 3600 * 1000);
   const resp = await fetch(NZ_CONTRACT.API.cost_summary + '?' + query + '&from=' + encodeURIComponent(from.toISOString()) +
-    '&to=' + encodeURIComponent(to.toISOString()), { headers: authHeaders() });
+    '&to=' + encodeURIComponent(to.toISOString()));
   return resp.ok ? resp.json() : null;
 }
 
 // fetchCostBudget resolves /api/cost/budget for `query` (an encoded
 // session_key= or job_id=), or null when the request fails.
-const fetchCostBudget = (query) => fetch(NZ_CONTRACT.API.cost_budget + '?' + query, { headers: authHeaders() })
+const fetchCostBudget = (query) => fetch(NZ_CONTRACT.API.cost_budget + '?' + query)
   .then((r) => (r.ok ? r.json() : null)).catch(() => null);
 
 // costBudgetChipHtml renders a /api/cost/budget answer as "今日 $x / $y",
@@ -550,14 +550,28 @@ function reconnectNow() {
   wsm.connect();
 }
 
-function fallbackCopy(text) {
+// copyText writes text to the clipboard and resolves whether it worked:
+// navigator.clipboard where it exists (secure contexts), else a textarea and
+// execCommand for plain-HTTP LAN access. The textarea is always detached.
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (_) { /* fall through */ }
   const ta = document.createElement('textarea');
-  ta.value = text;
-  ta.style.cssText = 'position:fixed;left:-9999px';
-  document.body.appendChild(ta);
-  ta.select();
-  document.execCommand('copy');
-  document.body.removeChild(ta);
+  try {
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;left:-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    return document.execCommand('copy');
+  } catch (_) {
+    return false;
+  } finally {
+    if (ta.parentNode) ta.parentNode.removeChild(ta);
+  }
 }
 
 // Flash a button to "copied!" state for ~1.5s then revert.
@@ -567,16 +581,8 @@ function flashCopyButton(btn) {
   setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1500);
 }
 
-// Shared clipboard helper for in-line buttons — uses navigator.clipboard with
-// an execCommand fallback for non-HTTPS / older browsers.
 function copyWithFeedback(btn, text) {
-  const done = () => flashCopyButton(btn);
-  if (navigator.clipboard) {
-    navigator.clipboard.writeText(text).then(done).catch(() => { fallbackCopy(text); done(); });
-  } else {
-    fallbackCopy(text);
-    done();
-  }
+  copyText(text).then(() => flashCopyButton(btn));
 }
 
 function copyCodeBlock(btn) {
@@ -1273,8 +1279,6 @@ export function eagerBindWorkspace(key, workspace, node) {
   if (nd !== 'local') return;
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const token = getToken();
-    if (token) headers['Authorization'] = 'Bearer ' + token;
     fetch(NZ_CONTRACT.API.sessions_bind, {
       method: 'POST', headers,
       body: JSON.stringify({ key: key, node: nd, workspace: workspace }),
@@ -1383,6 +1387,7 @@ export {
   confirmDialog,
   copyCodeBlock,
   copyEventContent,
+  copyText,
   costBudgetChipHtml,
   costCardTitle,
   decodeEscEntities,

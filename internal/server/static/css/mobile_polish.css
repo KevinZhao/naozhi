@@ -26,7 +26,6 @@
      reliably on a phone right after a WS blip. Only grow the hit-box on
      coarse pointers so desktop keeps the compact 11px / 22px chrome. */
   .sidebar-status .status-reconnect{min-width:44px;min-height:44px;padding:8px 12px;font-size:var(--nz-fs-sm2)}
-  .empty-cta-btn{min-height:44px}
   /* R20260610-UI-8: cron-job kebab + cron-drawer header icon buttons were
      28/32px hard targets with no coarse bump — below the WCAG 2.5.5 floor.
      Widen only the hit-box on touch; the glyph/footprint is unchanged. */
@@ -40,7 +39,6 @@
 
 /* ---- Track B: font-size floors to prevent iOS Safari auto-zoom on focus ---- */
 /* Any editable control needs >=16px computed font-size or Safari zooms in. */
-.login-panel input[type="password"]{font-size:var(--nz-fs-md)}
 @media(max-width:768px){
   .freq-num,.freq-time,.freq-select{font-size:var(--nz-fs-md)}
   /* Todo chips / task metadata shouldn't overpower the message body on narrow screens. */
@@ -62,19 +60,14 @@
   .btn-mobile-back{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:40px;height:40px;background:none;border:none;color:var(--nz-text-mute);font-size:var(--nz-fs-lg);cursor:pointer;padding:0;border-radius:var(--nz-radius-ms);-webkit-tap-highlight-color:transparent}
 }
 
-/* ---- Track D: semantic badge colors — red only means "needs attention" ---- */
-/* Tokens are consumed by the canonical .hdr-badge rule earlier in this
-   file (base=neutral). Alert / warn variants stay here so the "opt-in
-   red" intent is obvious at the point of definition: JS adds .is-alert
-   when attention > 0, never by default. */
+/* ---- Track D: badge colour tokens ---- */
+/* Read by .hdr-badge (split_view.css) and the header's spawn-diag /
+   overlay-drift tags. */
 :root{
   --nz-badge-info:#30363d;       /* neutral count */
   --nz-badge-info-text:#c9d1d9;
   --nz-badge-warn:#d29922;       /* amber */
-  --nz-badge-danger:#da3633;     /* unchanged red, opt-in */
 }
-.hdr-badge.is-alert{background:var(--nz-badge-danger);color:#fff;border-color:transparent}
-.hdr-badge.is-warn{background:var(--nz-badge-warn);color:#1b1b1b;border-color:transparent}
 
 /* ==========================================================================
    UX sweep vol.2 — high-resolution desktop layout (2026-04-27)

@@ -11,7 +11,6 @@ import { perSession, selection, sessionList, timers } from './state.js';
 import { escAttr, nzViews, showToast } from './nz_util.js';
 import { wsm } from './ws_manager.js';
 import { ICONS } from './icons.js';
-import { getToken } from './platform.js';
 import { sid } from './session_ident.js';
 import { announce, getMsgValue, setMsgValue, showNetworkError } from './utilities.js';
 import { shell } from './shell.js';
@@ -94,12 +93,6 @@ function trackTool(name) {
     turnState.toolOrder.push(name);
   }
   turnState.toolCounts[name]++;
-}
-
-function fmtDuration(ms) {
-  if (ms < 1000) return ms + 'ms';
-  var s = ms / 1000;
-  return s < 60 ? s.toFixed(1) + 's' : Math.floor(s / 60) + 'm' + Math.floor(s % 60) + 's';
 }
 
 // R110-P2 tool verb localization — these labels surface in the running-
@@ -378,8 +371,6 @@ function interruptSession() {
   } else {
     // HTTP fallback when WebSocket is disconnected
     const headers = {'Content-Type': 'application/json'};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
     const body = { key: selection.key };
     if (targetNode) body.node = targetNode;
     fetch(NZ_CONTRACT.API.sessions_interrupt, {
@@ -512,7 +503,6 @@ function updateSendButton(state, opts) {
 
 export {
   applyEventToTurnState,
-  fmtDuration,
   idleTaskEvent,
   interruptSession,
   paintTurnElapsed,

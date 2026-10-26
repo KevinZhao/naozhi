@@ -2,7 +2,6 @@
 // tail, "load earlier" paging, the full render, the live append and its DOM
 // cap, and the history / event / send-ack WS frames that feed them.
 import { NZ_CONTRACT } from './contract.js';
-import { authHeaders } from './platform.js';
 import { INITIAL_HISTORY_LIMIT, sessionStream } from './session_stream.js';
 import { wsm } from './ws_manager.js';
 import { perSession, selection, sessionList, transcript } from './state.js';
@@ -42,7 +41,7 @@ export async function fetchEvents(full) {
       url += '&limit=' + INITIAL_HISTORY_LIMIT;
     }
 
-    const headers = authHeaders();
+    const headers = {};
     // RNEW-UX-003: 5s timeout — events poll fallback ticks every 1s, so
     // a hung response must release well before the next tick or the UI
     // falls behind the live stream.
@@ -194,7 +193,7 @@ async function loadEarlierEvents(maxPages) {
   const stale = () => selection.key !== key || selection.node !== node || gen !== transcript.earlierGen;
   transcript.earlierLoading = true;
   try {
-    const headers = authHeaders();
+    const headers = {};
     let steppedPast = false;
     for (let n = 1; ; n++) {
       // Per page: prependEvents re-mounts the button in its 'ready' state.
