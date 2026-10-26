@@ -1,8 +1,11 @@
 package config
 
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // TestLoadDecodeErrorDoesNotEchoSecret is the reason the description is built
@@ -34,5 +37,22 @@ func TestLoadDecodeErrorDoesNotEchoSecret(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Shapes Load cannot easily produce: each must drop the file-derived text,
+// which after ${VAR} expansion may be a secret.
+func TestDescribeDecodeErrorDropsFileText(t *testing.T) {
+	for _, err := range []error{
+		&yaml.TypeError{Errors: []string{"line 5: cannot unmarshal !sk-TAG `v` into bool"}},
+		&yaml.TypeError{Errors: []string{`line 9: mapping key "sk-KEY" already defined at line 7`}},
+		&yaml.TypeError{Errors: []string{"line 6: something new `sk-NEW`"}},
+		&yaml.TypeError{Errors: []string{"line 6: cannot unmarshal !!str `v` into sk-`BAD`"}},
+		&yaml.TypeError{Errors: []string{"sk-NOLINE"}},
+		errors.New("yaml: cannot decode !!str `sk-PLAIN` as a !!null"),
+	} {
+		if got := describeDecodeError(err); strings.Contains(got, "sk-") {
+			t.Errorf("describeDecodeError(%q) = %q echoes file text", err, got)
+		}
 	}
 }
