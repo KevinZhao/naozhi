@@ -300,9 +300,6 @@ type Deps struct {
 	// reverse import.
 	ValidateWS   func(ws, root string) (string, error)
 	SystemInfoFn func() map[string]any
-	// ProjectStableKeyEnabled toggles the stableKey field in stats.projects
-	// (same switch as the /api/projects list).
-	ProjectStableKeyEnabled bool
 }
 
 // New constructs a Handlers from injected deps. Deps is stored as-is; the

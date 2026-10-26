@@ -7,6 +7,12 @@
 
 ### Removed
 
+- **BREAKING：删除没人改的配置开关**（#3782）。下面这些键不再读取，行为固定为原默认值；配置里还留着时启动报 `config-deprecated`（服务照常启动，`naozhi config check` 以 1 退出），删掉即可：
+  - `projects.public_tmp` 与 `__public_tmp__` 伪项目：dashboard 从来没有入口，只能手工调 API。现在这个名字按普通项目处理（不存在则 404）。`include_root` 的 UID / 敏感文件名 / 非常规文件类型闸门和审计日志不变；
+  - `session.project_stable_key`：项目级稳定 session key 始终开启，`/api/projects` 与 `stats.projects` 始终带 `stableKey`；
+  - `session.shim.buffer_size` / `max_buffer_bytes` / `disconnect_watchdog` / `max_shims`：固定为 10000 行 / 50MB / 30m / 50 个 shim。`session.shim.state_dir` 与 `idle_timeout` 保留；
+  - `log.format`（始终输出 JSON）、`log.stdio_max_size`（stdout / stderr 文件始终按 64MB 截断）；
+  - `sysession.tick_timeout`（固定 30s）、`sysession.runner.jsonl_max_age`（sys-session 日志固定保留 7 天）。
 - **BREAKING：删除 `GET /api/debug/pprof` 与配置键 `server.debug_mode`**（#3780）。在线 profile 端点不再注册，请求会收到 404；配置里还留着 `server.debug_mode` 时启动报 `config-deprecated`（服务照常启动），删掉这一键即可。`docs/ops/pprof.md` 一并删除。`naozhi doctor` 去掉了 `pprof` 检查和末尾的 `=== CLI Backends === / === Reverse Nodes ===` 段；各 backend 的 `cli backend <id>` 检查保留，协议与能力改看 `GET /api/cli/backends`。
 - **BREAKING：删除 `GET /api/debug/vars` 与全部 expvar 计数器**（#3770）。`internal/metrics` 包和各包自带的 `naozhi_*` 计数器 / gauge（session、cron、dispatch、webhook、upstream、node、workflow、eventlog、attachment 等）一并移除，`naozhi doctor` 的 `expvar` 检查也去掉了。`/health` 里的统计（eventlog、attachment_tracker、dispatch、active 等）不受影响，数值不变。抓取 `/api/debug/vars` 的脚本升级后会收到 404。
 - **BREAKING：删除飞书 webhook 接入模式，只保留 WebSocket 长连接**（#3767）。`POST /webhook/feishu` 不再注册；配置键 `platforms.feishu.connection_mode` 与 `platforms.feishu.allow_insecure_webhook` 不再读取，启动时报 `config-deprecated`（服务照常启动，飞书始终走长连接），环境变量 `NAOZHI_ALLOW_INSECURE_WEBHOOK` 也不再生效。原先用 `connection_mode: webhook` 的部署，请在飞书开发者后台把事件订阅和卡片回调都改成「使用长连接接收」，否则收不到消息；然后删掉这两个键。`verification_token` / `encrypt_key` 保留。

@@ -676,12 +676,12 @@ const (
 # config.yaml
 sysession:
   enabled: true                 # 全局开关
-  tick_timeout: 30s             # Manager 给每个 Tick 的 budget；与 Runner 单次 25s 留 5s 余量
+  tick_timeout: 30s             # 已在 #3782 删除并写死为 30s；Manager 给每个 Tick 的 budget；与 Runner 单次 25s 留 5s 余量
   runner:
     # backend 不在配置中——Runner 自动跟随 router.defaultBackend（§6.4）
     model: claude-haiku-4-5-20251001
     work_dir: ""                # 空则用 dataDir/sys-sessions/，0700 权限
-    jsonl_max_age: 168h         # sweepOldJSONL 阈值（7 天）
+    jsonl_max_age: 168h         # 已在 #3782 删除并写死为 7 天；sweepOldJSONL 阈值（7 天）
   daemons:
     auto_titler:
       enabled: false            # 默认关，灰度

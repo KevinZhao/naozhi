@@ -288,7 +288,7 @@ func (a *attachmentGC) Configure(cfg DaemonConfig) error {
 ```
 
 ⚠️ **配置陷阱明示**(写入 config 注释):
-- `upload_ttl: "0"` → `v>0` 守卫使其回落默认 7d,**不是**"立即删"或"禁用"(与 Runner 的 `jsonl_max_age:"0"=禁用` 语义相反,易混淆)。
+- `upload_ttl: "0"` → `v>0` 守卫使其回落默认 7d,**不是**"立即删"或"禁用"(与 Runner 曾有的 `jsonl_max_age:"0"=禁用` 语义相反,易混淆;该键已在 #3782 删除)。
 - `tick` 设下限:对大目录,过短 tick(如 30s)每轮全量 walk → 持续 IO。建议 `Configure` clamp tick floor(如 ≥1h),防误配(对照 auto-titler clamp batch)。
 
 `config.yaml` 示例段(接在 `auto-titler:` 之后):

@@ -60,8 +60,7 @@ func TestPassRemovesOnlyOldFilesOfItsExtension(t *testing.T) {
 }
 
 // TestPassNoOpInputs: an empty dir, a missing dir, and a non-positive MaxAge are
-// all no-ops rather than errors — callers pass config values through unguarded,
-// and "0 disables" is the existing convention for jsonl_max_age.
+// all no-ops rather than errors.
 func TestPassNoOpInputs(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

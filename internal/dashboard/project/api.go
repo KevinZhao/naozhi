@@ -69,17 +69,9 @@ type Deps struct {
 	Router     RouterView
 	NodeAccess NodeAccessor
 	NodeCache  NodeCacheReader
-	// PublicTmpEnabled gates the __public_tmp__ pseudo-project (#646). When
-	// false (default) it is rejected as "project not found" like any missing
-	// project, so multi-user deployments cannot enumerate / preview arbitrary
-	// /tmp paths merely because the naozhi process has DAC read access.
-	PublicTmpEnabled bool
 	// UploadQuotaBytes caps cumulative per-project upload bytes within a
 	// process (#2311). <=0 disables enforcement.
 	UploadQuotaBytes int64
-	// ProjectStableKeyEnabled toggles the StableKey field in the list
-	// response. Production wires cfg.Session.ProjectStableKey.ResolvedEnabled(true).
-	ProjectStableKeyEnabled bool
 }
 
 // New constructs a Handlers from injected deps.
@@ -136,11 +128,6 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			plannerState = snap.State
 		}
 
-		var stableKey string
-		if h.deps.ProjectStableKeyEnabled {
-			stableKey = sessionkey.ProjectStableKey(p.Path, "general")
-		}
-
 		result = append(result, projectsListEntry{
 			Name:         p.Name,
 			Path:         p.Path,
@@ -152,7 +139,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			GitHub:       p.IsGitHub,
 			IsRoot:       p.IsRoot,
 			DirModTime:   p.DirModTime,
-			StableKey:    stableKey,
+			StableKey:    sessionkey.ProjectStableKey(p.Path, "general"),
 		})
 	}
 

@@ -24,23 +24,12 @@ type ProjectsConfig struct {
 	// directly under root get preview/download buttons. Default false.
 	// SECURITY: the root project spans the whole tree (sibling projects
 	// included) and the dashboard token is the only barrier — SINGLE-OPERATOR
-	// feature. The file endpoints treat it like the __public_tmp__ pseudo-project
-	// (UID / denied-name / irregular-type / credential-name gates, audit log).
+	// feature. The file endpoints treat it as a restricted root (UID /
+	// denied-name / irregular-type / credential-name gates, audit log).
 	IncludeRoot bool `yaml:"include_root,omitempty"`
 	// Exclude lists basename globs (filepath.Match) of root subdirectories
 	// that are not projects; matched like the leading-dot rule.
 	Exclude []string `yaml:"exclude,omitempty"`
-	// PublicTmp opts the __public_tmp__ pseudo-project in (#646). Default
-	// false: that pseudo-project is a plain "project not found".
-	//
-	// SECURITY: MUST stay false on any shared / multi-operator deployment, or
-	// anywhere the dashboard token is shared. Enabled, every authenticated
-	// dashboard user can read non-credential files anywhere under /tmp — the
-	// credential allowlist and the foreign-private-UID gate block secrets and
-	// sockets, not general content. Accesses are audit-logged at Info
-	// ("public_tmp file access"). Same single-operator caveat as IncludeRoot
-	// above, and the same file-endpoint gates.
-	PublicTmp bool `yaml:"public_tmp,omitempty"`
 }
 
 // validateProjects rejects malformed projects.exclude globs at load, so a
@@ -112,7 +101,7 @@ var processHostname = newProcessHostname()
 // applyWorkspaceDefaults fills THIS INSTANCE's identity (hostname, then
 // "local") and lowercases the agent_commands keys — CJK mobile IMEs
 // auto-capitalize "/Review". Not to be confused with Config.Workspaces, the
-// remote-node map Normalize reconciles. Split out of applyDefaults (#2710 J11).
+// remote-node map. Split out of applyDefaults (#2710 J11).
 func applyWorkspaceDefaults(cfg *Config) {
 	if cfg.Workspace.ID == "" {
 		if h, err := processHostname(); err == nil {

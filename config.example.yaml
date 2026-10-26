@@ -147,10 +147,6 @@ session:
   # thread (Feishu topic) under it. If Feishu refuses to open the topic, the
   # answer is posted in the group instead.
   thread_auto_open: false
-  # project_stable_key is default-on; enabled: false falls back to
-  # timestamp keys for dashboard "continue".
-  # project_stable_key:
-  #   enabled: true
   shim:
     idle_timeout: "8h"
   queue:
@@ -254,7 +250,6 @@ cron:
 # 每个 daemon 还有自己的 enabled。
 sysession:
   enabled: true
-  tick_timeout: 30s
   runner:
     # 推荐 haiku（Anthropic API 与 Bedrock 都能解析）。留空则不传 --model，
     # CLI 用内置默认，通常是贵得多的主力模型。凭证无权调用 haiku 时改成留空
@@ -262,7 +257,6 @@ sysession:
     model: haiku
     # 留空默认 <dataDir>/sys-sessions/。
     work_dir: ""
-    jsonl_max_age: 168h  # 启动 sweep 保留窗口; "0" 关闭 sweep。
   daemons:
     # 名字必须与 internal/sysession/registry.go 注册的完全一致，否则静默不跑。
     auto-titler:
@@ -352,10 +346,6 @@ platforms:
 
 log:
   level: "info"
-  # Size cap for the files launchd / systemd redirect stdout/stderr into;
-  # checked hourly, an oversized file is truncated in place to its newest
-  # lines. "0" disables.
-  stdio_max_size: "64MB"
 
 transcribe:
   enabled: true
@@ -369,15 +359,11 @@ projects:
   # Every non-hidden subdirectory of root is a project. exclude drops more by
   # basename glob (filepath.Match, case-sensitive, no "/").
   # exclude: ["tmp-*", "archive"]
-  # Two SINGLE-OPERATOR opt-ins, both default false. Leave them off wherever
-  # the dashboard token is shared: both widen what an authenticated dashboard
-  # user can read.
-  #   include_root — register projects.root itself as a project (spans the
-  #                  whole tree, sibling projects included).
-  #   public_tmp   — the __public_tmp__ pseudo-project: read non-credential
-  #                  files anywhere under /tmp.
+  # include_root registers projects.root itself as a project (spans the whole
+  # tree, sibling projects included). SINGLE-OPERATOR opt-in, default false:
+  # leave it off wherever the dashboard token is shared, since it widens what
+  # an authenticated dashboard user can read.
   # include_root: false
-  # public_tmp: false
 
 # Auto-update: polls GitHub Releases and reuses the verified `naozhi upgrade`
 # flow (download → SHA-256 → atomic swap). Enabled by default in "download"

@@ -192,10 +192,6 @@ func (h *Handlers) HandleFilesUpload(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "project is required"})
 		return
 	}
-	if project == publicTmpProject {
-		httputil.WriteJSONStatus(w, http.StatusForbidden, map[string]string{"error": "upload is not allowed for this scope"})
-		return
-	}
 	if err := validateProjectName(project); err != nil {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
 		return
