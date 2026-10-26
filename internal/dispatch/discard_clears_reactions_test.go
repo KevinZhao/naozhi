@@ -71,15 +71,30 @@ func wantRemoved(t *testing.T, rp *fakeReactorPlatform, want ...string) {
 	}
 }
 
-// TestReset_ClearsQueuedReactions covers the /new + /clear path.
+// TestReset_ClearsQueuedReactions covers the /new + /clear path. #2185: /new
+// must discard the queue BEFORE the session reset, because the reset fires the
+// observer's KeyRetired -> Orchestrator.Retire, which deletes the queue ring;
+// the Sender models that side effect so a reversed order would see an empty
+// ring and clear nothing. The reset then leaves the key idle.
 func TestReset_ClearsQueuedReactions(t *testing.T) {
-	d, rp := newReactorDispatcher(t, turn.QueueOptions{MaxDepth: 8}, &testSender{})
+	resets := 0
+	var d *Dispatcher
+	d, rp := newReactorDispatcher(t, turn.QueueOptions{MaxDepth: 8}, &testSender{
+		reset: func(key string, _ bool) {
+			resets++
+			d.turns.(*turn.Orchestrator).Retire(context.Background(), key)
+		},
+	})
 	holdKey(t, d, reactorKey) // the running owner
 	queueIM(t, d, "m1", "m2")
 
 	d.BuildHandler()(context.Background(), reactorMsg("m3", "/new"))
 
+	if resets != 1 {
+		t.Fatalf("session resets = %d, want 1", resets)
+	}
 	wantRemoved(t, rp, "m1", "m2")
+	holdKey(t, d, reactorKey) // the next message becomes the owner
 }
 
 // TestRemovedKey_ClearsReactionsAndNoticesEachChatOnce (#3297): a message
