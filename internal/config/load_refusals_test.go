@@ -1,9 +1,24 @@
 package config
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 )
+
+// captureSlog redirects the default slog logger to an in-memory buffer for
+// the duration of fn, restoring the previous default afterwards. Returns the
+// captured text output.
+func captureSlog(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+	fn()
+	return buf.String()
+}
 
 // A dashboard_token under minDashboardTokenLen is refused by Load, so the
 // refusal reaches `config check` and every subcommand before the server has
@@ -128,6 +143,24 @@ func TestWarnDashboardToken(t *testing.T) {
 				} else if !strings.Contains(out, tc.want) {
 					t.Errorf("%s logged %q, want it to contain %q", src, out, tc.want)
 				}
+			}
+		})
+	}
+}
+
+// An enabled platform block without its credential, and a notify target that
+// names an unconfigured platform, are both refused at Load instead of failing
+// later at connect or notification time.
+func TestLoad_PlatformRefusals(t *testing.T) {
+	cases := []struct{ name, body, want string }{
+		{"slack without bot_token", "platforms:\n  slack:\n    bot_token: \"\"\n", "slack bot_token is required"},
+		{"notify_default unknown platform", "cron:\n  notify_default:\n    platform: \"nosuchplatform\"\n", "cron.notify_default.platform"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeCfg(t, tc.body))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Load err = %v, want it to contain %q", err, tc.want)
 			}
 		})
 	}

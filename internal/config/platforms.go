@@ -45,32 +45,10 @@ type FeishuConfig struct {
 	AllowInsecureWebhook bool `yaml:"allow_insecure_webhook"`
 }
 
-// LogValue implements slog.LogValuer so the Feishu credentials never land in logs.
-func (c FeishuConfig) LogValue() slog.Value {
-	return slog.GroupValue(
-		slog.String("app_id", c.AppID),
-		slog.String("app_secret", redactSecret(c.AppSecret)),
-		slog.String("connection_mode", c.ConnectionMode),
-		slog.String("verification_token", redactSecret(c.VerificationToken)),
-		slog.String("encrypt_key", redactSecret(c.EncryptKey)),
-		slog.Int("max_reply_length", c.MaxReplyLength),
-		slog.Bool("allow_insecure_webhook", c.AllowInsecureWebhook),
-	)
-}
-
 type SlackConfig struct {
 	BotToken       string `yaml:"bot_token"`
 	AppToken       string `yaml:"app_token"` // xapp- token for Socket Mode
 	MaxReplyLength int    `yaml:"max_reply_length"`
-}
-
-// LogValue implements slog.LogValuer so the Slack tokens never land in logs.
-func (c SlackConfig) LogValue() slog.Value {
-	return slog.GroupValue(
-		slog.String("bot_token", redactSecret(c.BotToken)),
-		slog.String("app_token", redactSecret(c.AppToken)),
-		slog.Int("max_reply_length", c.MaxReplyLength),
-	)
 }
 
 type DiscordConfig struct {
@@ -78,27 +56,10 @@ type DiscordConfig struct {
 	MaxReplyLength int    `yaml:"max_reply_length"`
 }
 
-// LogValue implements slog.LogValuer so the Discord bot token never lands in logs.
-func (c DiscordConfig) LogValue() slog.Value {
-	return slog.GroupValue(
-		slog.String("bot_token", redactSecret(c.BotToken)),
-		slog.Int("max_reply_length", c.MaxReplyLength),
-	)
-}
-
 type WeixinConfig struct {
 	Token          string `yaml:"token"`
 	BaseURL        string `yaml:"base_url"`
 	MaxReplyLength int    `yaml:"max_reply_length"`
-}
-
-// LogValue implements slog.LogValuer so the WeCom token never lands in logs.
-func (c WeixinConfig) LogValue() slog.Value {
-	return slog.GroupValue(
-		slog.String("token", redactSecret(c.Token)),
-		slog.String("base_url", c.BaseURL),
-		slog.Int("max_reply_length", c.MaxReplyLength),
-	)
 }
 
 type TranscribeConfig struct {
