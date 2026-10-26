@@ -17,7 +17,6 @@ import (
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/dispatch"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
@@ -63,10 +62,6 @@ func main() {
 		return
 	}
 
-	// t0 anchors every startup phase gauge; captured after subcommand dispatch
-	// so setup/install/doctor do not pollute the boot histogram.
-	t0 := time.Now()
-
 	fs, configPath := newSubFlagSet("naozhi", "config.yaml")
 	fs.Parse(os.Args[1:])
 
@@ -80,7 +75,6 @@ func main() {
 		slog.Error("load config", "err", err)
 		os.Exit(1)
 	}
-	metrics.StartupPhaseConfigMs.Set(time.Since(t0).Milliseconds())
 
 	logLevel := setupLogging(cfg)
 	configFP := server.NewConfigFingerprint(cfg.Fingerprint.SHA256, cfg.Fingerprint.LoadedAt)
@@ -213,10 +207,8 @@ func main() {
 		EventLogDir:       eventLogDir,
 		EventLogGenerator: "naozhi",
 	})
-	metrics.StartupPhaseRouterMs.Set(time.Since(t0).Milliseconds())
 
 	router.ReconnectShimsCtx(ctx)
-	metrics.StartupPhaseShimReconnectMs.Set(time.Since(t0).Milliseconds())
 
 	router.StartCleanupLoop(ctx, cfg.ParseTTL()/2)
 	router.StartShimReconcileLoop(ctx, 30*time.Second)
@@ -288,10 +280,8 @@ func main() {
 
 	agents, cronAgents := buildAgentOpts(cfg)
 
-	metrics.StartupPhasePlatformsMs.Set(time.Since(t0).Milliseconds())
-
 	// Cron + sysession orchestration lives in wireup.WireSchedulers; main keeps
-	// the operator-facing logs and the metrics (wireup has no metrics dep).
+	// the operator-facing logs.
 	cronLoc := cfg.ParseCronTimezone()
 	slog.Info("cron timezone", "location", cronLoc.String())
 	if cfg.Cron.NotifyDefault.Platform != "" && cfg.Cron.NotifyDefault.ChatID != "" {
@@ -345,7 +335,6 @@ func main() {
 	if sysWorkDir == "" {
 		sysWorkDir = sysSessionsWorkDir(cfg, storePath)
 	}
-	metrics.StartupPhaseSchedulerMs.Set(time.Since(t0).Milliseconds())
 
 	nodes := buildRemoteNodes(cfg)
 	if len(nodes) > 0 {
@@ -480,7 +469,6 @@ func main() {
 			RunTelemetry: hubTelemetry,
 		},
 	})
-	metrics.StartupPhaseServerMs.Set(time.Since(t0).Milliseconds())
 
 	// Upstream connector: this node connects to a primary.
 	if cfg.Upstream != nil {
@@ -599,7 +587,7 @@ func main() {
 	// discover it from an audit trail later. Logged next to the token warnings
 	// because the token IS the barrier for both.
 	if cfg.Server.DebugMode {
-		slog.Warn("server.debug_mode is ON — /api/debug/pprof and /api/debug/vars are registered; goroutine stacks carry file paths and queue contents",
+		slog.Warn("server.debug_mode is ON — /api/debug/pprof is registered; goroutine stacks carry file paths and queue contents",
 			"gates", "requireAuth + loopback-only + refused entirely when dashboard_token is empty",
 			"hint", "turn it off once the profile is captured")
 	}
@@ -624,8 +612,6 @@ func main() {
 	// Best-effort and error-swallowing so a failed check never disturbs the
 	// gateway; dev builds self-skip.
 	startUpdateChecker(ctx, updateChecker)
-
-	metrics.StartupPhaseReadyMs.Set(time.Since(t0).Milliseconds())
 
 	select {
 	case err := <-serverErr:

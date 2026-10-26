@@ -78,7 +78,6 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 		if r := recover(); r != nil {
 			// Mirror readPump: counter first, cause at Error, stack at Debug (avoid
 			// leaking internal paths to aggregated logs); tag with the key.
-			serverMetrics.PanicRecovered()
 			slog.Error("panic in ws eventPushLoop (recovered)",
 				"key", key, "panic", fmt.Sprintf("%v", r))
 			slog.Debug("panic in ws eventPushLoop: stack",

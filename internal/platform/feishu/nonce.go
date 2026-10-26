@@ -7,8 +7,6 @@ import (
 	"runtime/debug"
 	"slices"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // nonce.go — webhook replay protection: the seen-nonce set, its TTL sweep and
@@ -59,7 +57,6 @@ func (f *Feishu) cleanupNonces(ctx context.Context) {
 func (f *Feishu) cleanupNoncesTick() {
 	defer func() {
 		if r := recover(); r != nil {
-			metrics.PanicRecoveredTotal.Add(1)
 			slog.Error("feishu: cleanupNonces tick panic recovered; replay protection continues on next tick",
 				"panic", r, "stack", string(debug.Stack()))
 		}

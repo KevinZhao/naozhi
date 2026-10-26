@@ -73,11 +73,11 @@ server:
   # is refused with 400 and the rate-limited endpoints fail closed. The client
   # IP is the last X-Forwarded-For hop, the one that proxy appends.
   trusted_proxy: false
-  # debug_mode registers /api/debug/pprof and /api/debug/vars (default false:
-  # both 404 even for loopback+auth callers, so a leaked dashboard token cannot
-  # enumerate goroutine stacks or expvar counters). Turn it on only while
-  # capturing a profile; the endpoints stay auth-gated + loopback-only and
-  # refuse to serve at all when dashboard_token is empty. Runbook:
+  # debug_mode registers /api/debug/pprof (default false: 404 even for
+  # loopback+auth callers, so a leaked dashboard token cannot enumerate
+  # goroutine stacks). Turn it on only while capturing a profile; the endpoint
+  # stays auth-gated + loopback-only and refuses to serve at all when
+  # dashboard_token is empty. Runbook:
   # docs/ops/pprof.md. Startup logs a WARN while this is on.
   # debug_mode: false
 
@@ -511,8 +511,8 @@ platforms:
 # metadata only (ids, state, duration, error_class) — never prompt / result /
 # error text. Signed with HMAC-SHA256 when `secret` is set (X-Naozhi-Signature:
 # sha256=…); X-Naozhi-Delivery is an idempotency key. Retries 408/429/5xx with
-# 1s/2s/4s backoff; a full per-endpoint queue drops (counted in
-# naozhi_webhook_dropped_total). Absent = off.
+# 1s/2s/4s backoff; a full per-endpoint queue drops the event (logged as a
+# WARN). Absent = off.
 # integrations:
 #   webhooks:
 #     - url: https://ci.example.com/hooks/naozhi

@@ -2,7 +2,6 @@ package system
 
 import (
 	"context"
-	"expvar"
 	"log/slog"
 	"net/http"
 	"time"
@@ -18,9 +17,6 @@ import (
 // (docs/rfc/config-hot-reload.md §3.4); nil means no file path is known and
 // the endpoint answers 501.
 type ConfigReloader func(ctx context.Context) (config.ReloadResult, error)
-
-// configReloadTotal counts reload attempts by outcome ("ok" / "error").
-var configReloadTotal = expvar.NewMap("naozhi_config_reload_total")
 
 // configReloadKey is the single bucket of the reload limiter.
 const configReloadKey = "config-reload"
@@ -46,12 +42,10 @@ func (h *Handlers) HandleConfigReload(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := h.configReload(r.Context())
 	if err != nil {
-		configReloadTotal.Add("error", 1)
 		// Load errors quote file content (unknown keys, bad values).
 		http.Error(w, "config reload failed: "+osutil.SanitizeForLog(err.Error(), 2048), http.StatusUnprocessableEntity)
 		return
 	}
-	configReloadTotal.Add("ok", 1)
 	slog.Info("config reloaded via api", "applied", res.Applied, "restart_required", res.RestartRequired)
 	httputil.WriteJSON(w, res)
 }

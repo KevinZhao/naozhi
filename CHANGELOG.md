@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING：删除 `GET /api/debug/vars` 与全部 expvar 计数器**（#PRNUM）。`internal/metrics` 包和各包自带的 `naozhi_*` 计数器 / gauge（session、cron、dispatch、webhook、upstream、node、workflow、eventlog、attachment 等）一并移除，`naozhi doctor` 的 `expvar` 检查也去掉了。`/api/debug/pprof` 与 `server.debug_mode` 不变；`/health` 里的统计（eventlog、attachment_tracker、dispatch、active 等）不受影响，数值不变。抓取 `/api/debug/vars` 的脚本升级后会收到 404。
+
 ## [0.1.48] - 2026-10-26
 
 这一版有两部分：一是对 10 月重构的 review 修复，二是一轮「做减法」。从 0.1.47 起 +7.8k / −120k 行，删掉的主要是自建治理工具、读源码的元测试、历史文档，以及几项没人用的功能。基本功能保持不变：dashboard、claude / kiro / codex 会话经 shim 跑且重启后存活、cron、agents、projects / planner、IM 收发（含图片与语音）、远程多节点、自升级。升级前请先看下面的 **Removed**。

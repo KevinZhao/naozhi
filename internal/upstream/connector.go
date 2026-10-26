@@ -131,7 +131,6 @@ func New(cfg *Config, router SessionRouter, projMgr *project.Manager, resolver P
 // success clears it. The per-attempt "connector disconnected" WARN still fires.
 func (c *Connector) Run(ctx context.Context) {
 	backoff := time.Second
-	connectorBackoffMillis.Set(backoff.Milliseconds())
 	consecutiveFailures := 0
 	circuitTripped := false
 	for {
@@ -151,7 +150,6 @@ func (c *Connector) Run(ctx context.Context) {
 				circuitTripped = false
 			}
 			backoff = time.Second
-			connectorBackoffMillis.Set(backoff.Milliseconds())
 		} else {
 			consecutiveFailures++
 			if consecutiveFailures >= circuitBreakerThreshold {
@@ -164,7 +162,6 @@ func (c *Connector) Run(ctx context.Context) {
 				}
 				if backoff < circuitBreakerBackoff {
 					backoff = circuitBreakerBackoff
-					connectorBackoffMillis.Set(backoff.Milliseconds())
 				}
 			}
 		}
@@ -180,7 +177,6 @@ func (c *Connector) Run(ctx context.Context) {
 			// pinned at circuitBreakerBackoff until the next successful connect.
 			if backoff < circuitBreakerBackoff {
 				backoff = min(backoff*2, reconnectBackoffCeiling)
-				connectorBackoffMillis.Set(backoff.Milliseconds())
 			}
 		}
 	}

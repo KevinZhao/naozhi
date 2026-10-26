@@ -5,7 +5,6 @@ import (
 	"slices"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // SnapshotChainIDs returns the session-ID chain (oldest → newest). The current
@@ -60,7 +59,6 @@ func (s *ManagedSession) SetPrevSessionOrigins(ids []string, origin string) {
 	start := len(s.prevSessionIDs) - len(ids)
 	driftLonger := len(s.prevSessionOrigins) > len(s.prevSessionIDs)
 	if start < 0 || driftLonger {
-		metrics.AutoChainOriginsLengthMismatch.Add(1)
 		slog.Warn("auto-chain: prev_session_origins length drift; rebuilding to manual",
 			"key", s.key,
 			"prev_ids_len", len(s.prevSessionIDs),

@@ -136,7 +136,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		projectMgr:       opts.ProjectManager,
 		nodes:            nodes,
 
-		// auth stays on Server: debug_expvar / debug_pprof / ccassets wrap
+		// auth stays on Server: debug_pprof / ccassets wrap
 		// through it and RotateDashboardSessions reaches for it at runtime.
 		// Handler-group literals live in build_handlers.go (limiter rationale there).
 		auth: buildAuthHandlers(opts, cookieSecret, cookieGen),

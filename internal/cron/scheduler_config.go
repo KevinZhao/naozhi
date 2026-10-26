@@ -209,10 +209,9 @@ type SchedulerConfig struct {
 	// values fall back to the default.
 	RunsKeepWindow time.Duration
 	// SlowThreshold overrides defaultCronSlowThreshold (30s) when > 0: a
-	// successful execution exceeding it is counted as "slow"
-	// (metrics.CronExecutionSlowTotal + warn). Raise it toward ExecTimeout
-	// on deployments running 300s+ batch jobs so the daily false alarm stops
-	// without losing the metric. Zero/negative fall back to the default (#519).
+	// successful execution exceeding it logs a "cron execution slow" warning.
+	// Raise it toward ExecTimeout on deployments running 300s+ batch jobs so
+	// the daily false alarm stops. Zero/negative fall back to the default (#519).
 	SlowThreshold time.Duration
 	// AutoPauseAfterFailures pauses a job after this many consecutive failed
 	// or timed-out runs, so a broken job stops notifying every tick; a

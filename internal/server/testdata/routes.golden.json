@@ -106,11 +106,6 @@
   },
   {
     "method": "GET",
-    "path": "/api/debug/vars",
-    "handler_type": "*AuthHandlers"
-  },
-  {
-    "method": "GET",
     "path": "/api/discovered",
     "handler_type": "*discovery.Handlers"
   },

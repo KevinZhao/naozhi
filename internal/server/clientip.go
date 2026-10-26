@@ -14,7 +14,7 @@ func clientIP(r *http.Request, trustedProxy bool) string {
 }
 
 // isLoopbackClient reports whether the request's *real* client is on the
-// loopback interface, for the pprof/expvar loopback gate.
+// loopback interface, for the pprof loopback gate.
 //
 // Behind a trusted proxy r.RemoteAddr is always the proxy's (loopback) IP, so
 // the gate must use the XFF last hop instead; a request with no usable XFF

@@ -448,10 +448,8 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 		return preparedInbound{}, false
 	}
 
-	// Accepted messages only (post-dedup, post-command). Feeds /health and
-	// /debug/vars (#892).
+	// Accepted messages only (post-dedup, post-command). Feeds /health (#892).
 	d.messageCount.Add(1)
-	dispatchMessageTotal.Add(1)
 
 	msg = d.openThread(msg)
 
@@ -557,7 +555,6 @@ func (d *Dispatcher) handleSendError(
 	// stay here because the IM side owns that configuration.
 	if primary {
 		d.replyErrorCount.Add(1)
-		dispatchReplyErrorTotal.Add(1)
 		switch {
 		case errors.Is(err, clierr.ErrNoOutputTimeout):
 			d.watchdogNoOutputKills.Add(1)
@@ -579,7 +576,6 @@ func (d *Dispatcher) handleSendError(
 	}
 	if _, err := platform.ReplyWithRetry(replyCtx, p, replyDestOf(msg).text(errMsg), limits.PlatformReplyMaxAttempts); err != nil {
 		d.sendFailCount.Add(1)
-		dispatchSendFailTotal.Add(1)
 		lg.WarnContext(ctx, "error reply also failed", "chat", msg.ChatID, "err", err)
 	}
 }
@@ -612,7 +608,6 @@ func (d *Dispatcher) sendOutboundImages(ctx context.Context, p platform.Platform
 		}, limits.PlatformReplyMaxAttempts); err != nil {
 			// Failed image sends must show in /health like text failures.
 			d.sendFailCount.Add(1)
-			dispatchSendFailTotal.Add(1)
 			slog.WarnContext(ctx, "send image failed", "err", err)
 		}
 	}
@@ -741,7 +736,6 @@ func (d *Dispatcher) sendChunks(ctx context.Context, p platform.Platform, to Rep
 	for i, chunk := range chunks {
 		if _, err := platform.ReplyWithRetry(ctx, p, to.text(chunk), limits.PlatformReplyMaxAttempts); err != nil {
 			d.sendFailCount.Add(1)
-			dispatchSendFailTotal.Add(1)
 			slog.ErrorContext(ctx, "reply chunk failed after retries", "chat", to.ChatID, "chunk", i+1, "err", err)
 		} else {
 			d.markReplySuccess()

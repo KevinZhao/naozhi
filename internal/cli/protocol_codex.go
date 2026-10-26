@@ -15,7 +15,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -230,8 +229,6 @@ func (p *CodexProtocol) WriteInterrupt(w io.Writer, _ string) error {
 	if _, err := w.Write(append(data, '\n')); err != nil {
 		return fmt.Errorf("codex write turn/interrupt: %w", err)
 	}
-	// Only successful cancels count; the pre-handshake return never reached the agent.
-	metrics.RecordACPCancel(p.BackendID)
 	return nil
 }
 
@@ -324,9 +321,8 @@ func (p *CodexProtocol) ReadEvent(line string) ([]clievent.Event, bool, error) {
 
 	// The only id-bearing response on the readLoop is the deferred turn/start
 	// reply. Success carries nothing visible, but an ERROR must close the turn
-	// and be recorded or the session hangs in state=running (mirrors ACP).
+	// or the session hangs in state=running (mirrors ACP).
 	if msg.IsResponse() && msg.Error != nil {
-		metrics.RecordProtocolRPCError(p.BackendID, "turn/start", strconv.Itoa(msg.Error.Code))
 		// Discard partial text and surface a synthetic error so readLoop closes the turn.
 		p.mu.Lock()
 		p.textBuf.Reset()
@@ -531,11 +527,7 @@ func (p *CodexProtocol) sendAndWaitResponse(rw *JSONRW, req RPCRequest) (*RPCMes
 	if err := rw.WriteLine(data); err != nil {
 		return nil, err
 	}
-	resp, err := p.readUntilResponse(rw, req.ID)
-	if err != nil {
-		metrics.RecordProtocolRPCError(p.BackendID, req.Method, "")
-	}
-	return resp, err
+	return p.readUntilResponse(rw, req.ID)
 }
 
 // readUntilResponse reads lines until the response with the matching id

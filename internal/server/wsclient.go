@@ -152,7 +152,6 @@ func (c *wsClient) readPump() {
 		if r := recover(); r != nil {
 			// Bump the panic counter before logging so observers see the rate
 			// even when stack output is truncated.
-			serverMetrics.PanicRecovered()
 			// Cause at Error, verbose stack at Debug — stack frames would ship
 			// internal paths and function names to journald / log aggregators.
 			slog.Error("panic in ws readPump (recovered)",
@@ -294,7 +293,6 @@ func (c *wsClient) writePump() {
 	defer func() {
 		if r := recover(); r != nil {
 			// Mirror readPump: counter first, cause at Error, stack at Debug.
-			serverMetrics.PanicRecovered()
 			slog.Error("panic in ws writePump (recovered)",
 				"remote", c.remoteIP, "panic", fmt.Sprintf("%v", r))
 			slog.Debug("panic in ws writePump: stack",
