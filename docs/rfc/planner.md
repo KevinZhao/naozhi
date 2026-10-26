@@ -1,7 +1,7 @@
 # RFC: Planner —— 一个对话框，最懂你也最懂系统的规划 agent
 
 - 状态: Draft v7（设计决策已与 owner 确认，未实施）
-- 日期: 2026-10-26（v1 名 conductor.md；v2 改名 Planner；v3 加入监护；v4 收敛为两类 session；v5 重写核心模型；v6 加入监控底座（会话台账与健康状态）、Planner 工作循环与检查机制、闸门、协作提示词、三级停止，并吸收第二轮四路评审的实测与订正；10-25 补新旧对照表 §1.1 与重审待定问题 §17.1；v7 吸收两代产品调研：全局唯一 Planner + 工作区幕僚、设计原则 §2.1、三种主动、先回执再干活、带建议的选择默认执行、对话代替配置，D60–D67；治理减法与信任阶梯，D68；全局 passthrough 与后端降级，D69–D70）
+- 日期: 2026-10-26（v1 名 conductor.md；v2 改名 Planner；v3 加入监护；v4 收敛为两类 session；v5 重写核心模型；v6 加入监控底座（会话台账与健康状态）、Planner 工作循环与检查机制、闸门、协作提示词、三级停止，并吸收第二轮四路评审的实测与订正；10-25 补新旧对照表 §1.1 与重审待定问题 §17.1；v7 吸收两代产品调研：全局唯一 Planner + 工作区幕僚、设计原则 §2.1、三种主动、先回执再干活、带建议的选择默认执行、对话代替配置，D60–D67；治理减法与信任阶梯，D68；全局 passthrough 与后端降级，D69–D70；P1 里程碑，D71；key 与持久化布局，D72）
 - 范围: 把 naozhi 的交互从"用户逐个操作 session"改为"用户只面对一个对话框：执行 session 和用户一起做事，Planner 理解用户与整个系统、替用户管注意力、在用户前面把事情准备好、在执行跑偏时提出修改意见，并把大任务派给执行 session 完成"。同时定义权限与凭证、多节点调度与现有功能的迁移。
 - 相关: #3448(b)（naozhi 作为 MCP server）、#3449（per-session git worktree）、#3686（`cli.permission_mode`）、`passthrough-mode.md`、`cli-mcp-config.md`、`system-session.md`、`workflow-dashboard.md`、`node-pairing.md`
 
@@ -64,7 +64,7 @@ owner 使用实测（附录 B）：dashboard-only、单机；一个话题一个 
 | 消息身份 | 只有 IM 发送者授权 | 发送方 / 代表谁 / 根来源；权威只认网关元数据 | 新增 |
 | 用户偏好 | CC auto-memory 与 CLAUDE.md，naozhi 不管 | 懂你（偏好、先例、授权、关注点、边界） | 新增 |
 | 系统状态 | 分散在快照、事件日志、运行记录、cron 历史、节点缓存；`/health` 写死 ok | 懂系统 + 会话台账 + 健康状态 + 覆盖率 | 新增 |
-| 持久化 | `sessions.json`、`events/`、`cron_jobs.json`、`project.yaml` | 另加 `~/.naozhi/planner/`（全局）与 `~/.naozhi/planner/workspaces/<工作区>/`；`sessions.json` 扩字段 | 新增 |
+| 持久化 | `sessions.json`、`events/`、`cron_jobs.json`、`project.yaml` | 另加 `~/.naozhi/planner/`（全局）与 `~/.naozhi/planner/workspaces/<工作区 ID>/`；会话新字段放旁路文件，现有文件不改（D72） | 新增 |
 | 消息投递 | 每 key 一个队列，**默认 collect 合并**；passthrough 只能全局开 | 你的消息 passthrough（按会话设置）；Planner / 网关消息在回合边界；转向锁 | 改造 |
 | 容量 | `max_procs` 3；豁免配额 20 已分满；TTL 30 分钟 | 新增 `task:` 配额、`max_workers`、主机级上限 | 改造 |
 | 生命周期 | 活着 / 死亡，`--resume` 复活；记录永不修剪 | 六态，寿命跟产物走，复活有条件 | 改造 |
@@ -85,7 +85,7 @@ owner 使用实测（附录 B）：dashboard-only、单机；一个话题一个 
 | 类别 | 内容 |
 |---|---|
 | 基本不动 | CLI 封装与 Protocol、shim、事件日志、会话路由与会话表、cron 调度、dashboard 的 WS / REST、成本账本、平台适配器、终端会话发现与接管、文件浏览与预览 |
-| 要改 | `turn.Orchestrator`（优先级、按会话模式）；每会话启动规格进 `SpawnOverlay`；key 前缀语义；`sessions.json` 字段；`/health`；运行遥测补普通会话；Kiro / Codex 能力位 |
+| 要改 | `turn.Orchestrator`（优先级、按会话模式）；每会话启动规格进 `SpawnOverlay`；新增 `task:` / `planner:` 两个保留前缀；`/health`；运行遥测补普通会话；Kiro / Codex 能力位 |
 | 新写 | 会话台账与健康状态机、消息与事件日志、懂你 / 懂系统、naozhi MCP、判权 hook 与放行记录、托管 L0、Planner 工作循环、推送与收件箱、协作提示词、新版 dashboard 与 iOS app |
 | 降级或删除 | 侧边栏、斜杠命令、新建对话框（专家视图）；M4 删 scratch 抽屉、`/review` `/research` 绑定、planner 专属路由分支（约 1.5–2.5k 行） |
 
@@ -166,7 +166,7 @@ owner 使用实测（附录 B）：dashboard-only、单机；一个话题一个 
 
 | 字段 | 含义 |
 |---|---|
-| `key` | 只表示来源命名空间（`dashboard:` / IM / `task:` / `cron:`），**不编码谁在用它**；段数与现有 4 段解析器一致（仿 scratch 补齐） |
+| `key` | 会话的永久身份，只表示来源命名空间（`dashboard:` / IM / `cron:` / `task:` / `planner:`），**不编码属性**（D72，见下） |
 | `workspace` / `node` / `backend` / `model` / `effort` | 启动规格 |
 | `mounts` | 启动时挂载的能力（MCP 清单、透传的 env、可读路径），由 session 的用途决定（§7） |
 | `contract`（可选） | 目标、验收标准、`origin`（根来源，写入后不可改）、`focus_ref`、自主度、`blocked_by`、`workflow` 策略 |
@@ -176,6 +176,12 @@ owner 使用实测（附录 B）：dashboard-only、单机；一个话题一个 
 | `taint` | 是否读进过外部不可信内容（由网关按工具事件确定性标记，§7.4） |
 | `state` | 生命周期状态（§5.2） |
 | `health` | 健康状态（§3.8），由网关确定性评估，带证据与起始时间 |
+
+**key 规则**（D72）：key 是会话的永久身份——会话事件日志与运行历史的文件名是 `sha256(key)`（`eventlog/persist/keyhash.go:31`、`runhistory/store.go:158`），`sessions.json`、成本与预算归属、IM 绑定都按 key 关联，改 key 等于丢历史。
+
+- **现有 key 一律不改**：IM / dashboard 的 4 段 key、`cron:`、`sys:`、`scratch:`、`local:takeover:` 照旧；工作区幕僚直接沿用 `project:<名>:planner`，不迁移。
+- **新增两个不透明前缀**：Planner 本身 `planner:main`；Planner 派出的会话 `task:<随机 ID>`。工作区、派出者、用途、配额类别都放在会话元数据里（§3.7 旁路文件），随时可改，key 不变。两个前缀登记为保留命名空间，各有一条解析路径（与 `cron:` 相同的处理方式）。
+- **新前缀的行为全部由元数据决定**，不新增按前缀的判断；现有约 136 处按前缀的判断以后可逐步改为按属性，key 本身不动，所以永远不需要搬数据。
 
 ### 3.3 消息（D36）
 
@@ -270,15 +276,25 @@ Message{ id, from, on_behalf_of, origin, chain[], to, kind, session?, body, refs
 
 | 状态 | 位置 | 写者 | 进 git |
 |---|---|---|---|
-| 消息日志、事件流 | `~/.naozhi/planner/log/` append-only（带工作区字段） | 网关 | 否 |
-| 懂你（偏好、先例、授权、关注点、边界、写作风格） | `~/.naozhi/planner/user/`（全局一份）；权威副本在仓库外 | 你 / 网关 | 否 |
+| 消息日志、事件流（健康转移、承诺、检查记录） | `~/.naozhi/planner/log/<YYYY-MM>.jsonl`，只追加，每行带格式版本号与工作区 ID | 网关 | 否 |
+| 工作区登记表 | `~/.naozhi/planner/workspaces.json`：工作区 ID ↔ 名字 ↔ 各节点上的路径 | 网关（你可改名） | 否 |
+| 懂你：偏好、先例、关注点、写作风格 | `~/.naozhi/planner/user/*.md`（全局一份，Markdown，宽松解析你手改的内容） | 你 / 网关 | 否（可自行 git 管理） |
+| 懂你：授权、边界 | `~/.naozhi/planner/user/grants.json`、`bounds.json`（只经 UI 卡片写入） | 只有你 | 否 |
 | 承诺、闹钟、收件箱状态 | `~/.naozhi/planner/` | 网关 | 否 |
-| 懂系统：项目长期知识 | `~/.naozhi/planner/workspaces/<工作区>/knowledge/`，可选导出到仓库 | Planner / 工作区幕僚提议，网关写入 | 可选 |
-| charter / duties | `~/.naozhi/planner/workspaces/<工作区>/planner.yaml`（权威）；仓库内 `.naozhi/planner.yaml` 只作初始导入 | 只有你 | 否 |
-| 路径锁 | `~/.naozhi/planner/workspaces/<工作区>/` | 网关 | 否 |
-| session 元数据（契约、血缘、产物、托管） | 现有 `sessions.json` 扩字段 | 网关 | 否 |
+| 会话新字段（契约、血缘、产物、托管、污染、所属工作区、用途） | **旁路文件** `~/.naozhi/planner/sessions/`，按 key 索引；`sessions.json` 不改 | 网关 | 否 |
+| 懂系统：项目长期知识 | `~/.naozhi/planner/workspaces/<工作区 ID>/knowledge/`，可选导出到仓库 | Planner / 工作区幕僚提议，网关写入 | 可选 |
+| charter / duties | `~/.naozhi/planner/workspaces/<工作区 ID>/planner.yaml`（权威）；仓库内 `.naozhi/planner.yaml` 只作初始导入 | 只有你 | 否 |
+| 路径锁 | `~/.naozhi/planner/workspaces/<工作区 ID>/` | 网关 | 否 |
 
-charter 与"懂你"的权威副本放在仓库外：Planner 派出的 session 改的就是这个仓库，任何一次合并都不能改写自己的边界（评审发现）。没有仓库的工作区（邮箱、个人杂事）同样放在 `~/.naozhi/planner/workspaces/<name>/`。
+charter 与"懂你"的权威副本放在仓库外：Planner 派出的 session 改的就是这个仓库，任何一次合并都不能改写自己的边界（评审发现）。没有仓库的工作区（邮箱、个人杂事）同样登记 ID、放在 `~/.naozhi/planner/workspaces/<工作区 ID>/`。
+
+**布局规则**（D72）：
+
+- **工作区用稳定 ID 标识**，首次登记时生成；改名、挪目录、加节点只改登记表。不用名字（改名就断、同名冲突），也不用路径哈希（挪目录就断；macOS 大小写折叠曾导致历史记录标签失配；多节点上同一仓库路径不同）。路径匹配沿用 `osutil.PathContainedInRoot` 的 inode 兜底。
+- **会话新字段放旁路文件**：旧版 naozhi 读 `sessions.json` 会忽略不认识的字段，但写回时会丢掉它们——回退一次版本就会丢光契约、血缘与托管。
+- **新事件类型只写 Planner 自己的日志**，不写进会话事件日志，旧版本读会话日志不会碰到不认识的事件。
+- **一键回退**：Planner 新增的全部状态都在 `~/.naozhi/planner/` 下，现有文件一个字节不改；关掉 `planner.enabled` 并删除该目录，即回到今天的 naozhi。新路径统一登记在 `internal/datadir/layout.go`。
+- **定稿时机**：P1 开工前定稿（P1 的会话台账要用工作区归属，健康转移要写日志）；不需要实验。
 
 ### 3.8 监控底座：会话台账与健康状态（D45）
 
@@ -891,7 +907,7 @@ duties:
 | `group_scope: thread` + `thread_auto_open` | IM 话题 = 执行 session | 只有 Slack、飞书支持；不开 auto_open 时顶层进群级 session |
 | `PermissionMode`（Default / Standard） | 新增 Auto（#3686） | 仍在分支上 |
 | node / upstream `send` | `send-backend` → `fetch_manifest` → `dispatch-v1` | `send` 无 backend、不幂等 |
-| 4 段 key 解析器（`routing.go:162`、`routes.go:310` 等约 10 处前缀判断） | `task:` 补齐为 4 段 | 3 段会被拒收 |
+| 4 段 key 解析器（`routing.go:156、189`、`routes.go:237`；约 136 处按前缀判断） | `task:` / `planner:` 登记为保留命名空间，各有解析路径；不补齐为 4 段（D72） | 现有 key 不改 |
 
 第二轮评审补充核实（基于 `82300694`）：
 
@@ -996,7 +1012,7 @@ duties:
 
 ④ **规模与里程碑。** 新增 2.5–3.5 万行。P1 监控底座不依赖 Planner、能单独产生价值。（**已定 10-26 → D71**：P1 是可单独验收的里程碑，用一段时间后再决定 P2 以后）
 
-⑤ **难以回退的选择在 P0 定死**：key 语义、持久化布局、消息投递模式、权限模式。（建议 P0 用实验 + 迁移方案先定）
+⑤ **难以回退的选择在 P0 定死**：key 语义、持久化布局、消息投递模式、权限模式。（**已定 10-26 → D72**：投递模式见 D69、权限模式见 #3686；key 用不透明前缀、布局用稳定工作区 ID + 旁路文件 + 一键回退，P1 开工前定稿，见 §3.2、§3.7）
 
 ⑥ **v6 的治理环节与"做减法"如何取舍。**（**已定 10-26 → D68**：按下列建议执行并扩展为 14 项，见 §16.1；保留的安全底线：判权 hook 出错即拒绝、硬 deny + 需人决定清单、污染不能直接对外写、来源只认网关元数据、混合轮按最低身份、防循环、三级停止、出口脱敏） 2026-10-25 起的方向是保基本功能、砍不必要的安全 / 测试 / 治理，不加配置、闸门与 meta-test；而 v6 里有不少治理性设计。候选的减法（建议先不做、需要时再加）：
 - 监控监控器里的金丝雀、外部死人开关、覆盖率指标（保留心跳与 `/health` 降级）；
@@ -1116,6 +1132,7 @@ duties:
 | D69 | 10-26 | queue mode 全局改为 passthrough，老会话重启 naozhi 即生效（存活 Claude 进程早已带 `--replay-user-messages`）；Kiro / Codex 自动退回 collect；Planner / 网关消息另走回合边界投递 | owner 确认；与 CC 终端行为一致，纠偏更快 |
 | D70 | 10-26 | Kiro / Codex 先作为二等公民：照常供你直接使用并受监控底座覆盖；Planner 派出、托管、协作约定只用 Claude；能力位缺失时启动拒绝 | owner 确认；协作能力依赖 Claude 的 hook 与追加提示词，后续再评估等价物 |
 | D71 | 10-26 | P1 监控底座是可单独验收的里程碑，验收标准见 §15；用一段时间后再决定是否进入 P2 | owner 确认；P1 不依赖 Planner、单独就有价值，控制 2.5–3.5 万行的节奏风险 |
+| D72 | 10-26 | key 与持久化布局：现有 key 一律不改，新增不透明前缀 `planner:main` / `task:<随机 ID>`，属性放元数据、新前缀行为全部按属性；工作区用稳定 ID + 登记表；懂你用 Markdown（授权、边界用 JSON）；会话新字段放旁路文件不动 `sessions.json`；新事件只写 Planner 日志；全部状态在 `~/.naozhi/planner/` 下可一键回退；P1 开工前定稿 | owner 确认；key 是事件日志与运行历史的文件名，改 key 等于丢历史；旧版写回 `sessions.json` 会丢未知字段 |
 
 ## 附录 A. auto mode 实测（2026-10-16）
 
