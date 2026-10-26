@@ -47,7 +47,7 @@ func TestLoadStore_OversizedFileIsNotOverwritten(t *testing.T) {
 	// Any save attempt must refuse rather than write.
 	err := saveStore(path, []*ManagedSession{{key: "dashboard:direct:abc:general"}})
 	if err == nil {
-		t.Fatal("saveStoreSlice succeeded against an unreadable file; the operator's data was just overwritten")
+		t.Fatal("saveStore succeeded against an unreadable file; the operator's data was just overwritten")
 	}
 	var blocked *errStoreReadBlocked
 	if !errors.As(err, &blocked) {

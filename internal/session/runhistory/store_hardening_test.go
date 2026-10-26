@@ -45,3 +45,24 @@ func TestWriteFailedTotals_CountsDroppedRecords(t *testing.T) {
 		t.Errorf("counters = (diskFull=%d, other=%d), want (0,1) — a dropped record with no counter is invisible", full, other)
 	}
 }
+
+// TestNewStore_SymlinkedRootIsDisabled pins the wiring to runlog's layout
+// guard: a symlinked root must yield a disabled Store, not one that writes
+// through the link.
+func TestNewStore_SymlinkedRootIsDisabled(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	elsewhere := filepath.Join(base, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(base, "session-runs")
+	if err := os.Symlink(elsewhere, root); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	s := NewStore(root, 5, time.Hour)
+	defer s.Close()
+	if s.Enabled() {
+		t.Fatal("NewStore on a symlinked root returned an enabled Store")
+	}
+}
