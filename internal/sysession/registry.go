@@ -58,8 +58,7 @@ type DaemonDeps struct {
 // startup order so tests are deterministic. It is deliberately a static slice
 // literal, NOT an init()-driven registry like cli/history: every daemon is
 // compiled into this package, so there is no import cycle to break and no
-// external plugin surface. TestBuiltinDaemonsSliceLiteralInvariant pins this
-// (#1055).
+// external plugin surface (#1055).
 var builtinDaemons = []builtinDaemonFactory{
 	{
 		Name: DaemonAutoTitler,
