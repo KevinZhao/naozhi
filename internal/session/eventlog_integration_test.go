@@ -17,17 +17,16 @@ import (
 // with the event-log persister enabled against a fresh tmpdir.
 // Returns the router and the events directory so tests can inspect
 // on-disk state.
-func newEventLogRouter(t *testing.T, devMode bool) (*Router, string) {
+func newEventLogRouter(t *testing.T) (*Router, string) {
 	t.Helper()
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "sessions.json")
 	eventLogDir := filepath.Join(tmp, "events")
 	r := NewRouter(RouterConfig{
-		MaxProcs:        4,
-		TTL:             time.Hour,
-		StorePath:       storePath,
-		EventLogDir:     eventLogDir,
-		EventLogDevMode: devMode,
+		MaxProcs:    4,
+		TTL:         time.Hour,
+		StorePath:   storePath,
+		EventLogDir: eventLogDir,
 	})
 	t.Cleanup(r.Shutdown)
 	return r, eventLogDir
@@ -38,7 +37,7 @@ func newEventLogRouter(t *testing.T, devMode bool) (*Router, string) {
 // persister. Without this we'd lose visibility into a future
 // regression where NewPersister silently errors out.
 func TestEventLogIntegration_PersisterStartsWhenDirSet(t *testing.T) {
-	r, dir := newEventLogRouter(t, false)
+	r, dir := newEventLogRouter(t)
 	if r.hist.persister == nil {
 		t.Fatal("eventLogPersister is nil despite EventLogDir set")
 	}
@@ -53,7 +52,7 @@ func TestEventLogIntegration_PersisterStartsWhenDirSet(t *testing.T) {
 // "EventEntry → disk → EventEntry" round-trip, which router-level
 // tests build on.
 func TestEventLogIntegration_DirectSinkWorks(t *testing.T) {
-	r, dir := newEventLogRouter(t, false)
+	r, dir := newEventLogRouter(t)
 	sinkBuilder := r.hist.persister.SinkFor("k")
 	// Tests construct the sink with a nil tracker and empty keyhash
 	// to exercise the persist path in isolation. Integration through
@@ -96,7 +95,7 @@ func TestEventLogIntegration_DirectSinkWorks(t *testing.T) {
 // session → the persister files for that key disappear. This is the
 // production path Dashboard × button hits.
 func TestEventLogIntegration_RouterDropKeyRemovesFiles(t *testing.T) {
-	r, dir := newEventLogRouter(t, false)
+	r, dir := newEventLogRouter(t)
 	key := "dashboard:direct:alice:general"
 
 	// Direct sink so we don't need a full cli.Process — the Router's
@@ -188,15 +187,14 @@ func TestEventLogIntegration_RestartLoadsLatest(t *testing.T) {
 // violating the "SetPersistSink after InjectHistory" ordering is
 // observable via the persister's ReplayLeak counter (Stats). R242-GO-11
 // replaced the DevMode-only panic with a slog.Error + counter signal
-// so the bug is visible without taking down the process. Production
-// (DevMode=false) is tested separately via TestEventLogIntegration_DirectSinkWorks.
+// so the bug is visible without taking down the process.
 func TestEventLogIntegration_ReplayLeakObservable(t *testing.T) {
-	r, _ := newEventLogRouter(t, true)
+	r, _ := newEventLogRouter(t)
 	sink := newEventLogSink(r.hist.persister.SinkFor("k"), nil, "")
 
 	defer func() {
 		if rec := recover(); rec != nil {
-			t.Errorf("DevMode replay should not panic post-R242-GO-11, got: %v", rec)
+			t.Errorf("replay-phase leak should not panic post-R242-GO-11, got: %v", rec)
 		}
 	}()
 	sink([]clievent.EventEntry{{UUID: "aa", Time: 1, Type: "user"}}, true)

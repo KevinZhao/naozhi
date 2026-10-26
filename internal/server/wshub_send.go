@@ -14,6 +14,7 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
@@ -40,7 +41,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	// interrupt) applies: reject C1/bidi/newline bytes and cap length at
 	// MaxSessionKeyBytes before the key reaches the dispatch queue, slog attrs,
 	// or sessions.json.
-	if err := session.ValidateSessionKey(key); err != nil {
+	if err := sessionkey.ValidateSessionKey(key); err != nil {
 		c.SendJSON(wsproto.NewSendAck(wsproto.SendAck{ID: msg.ID, Status: "error", Error: "invalid key"}))
 		return
 	}
@@ -143,7 +144,7 @@ func (h *Hub) handleInterrupt(c *wsClient, msg node.ClientMsg) {
 	}
 	// Same policy as handleSubscribe / HTTP handlers: reject C1 / bidi /
 	// multi-KB keys before they reach router lookup + slog attrs.
-	if err := session.ValidateSessionKey(key); err != nil {
+	if err := sessionkey.ValidateSessionKey(key); err != nil {
 		c.SendJSON(wsproto.NewInterruptAck(wsproto.InterruptAck{ID: msg.ID, Status: "error", Error: "invalid key"}))
 		return
 	}

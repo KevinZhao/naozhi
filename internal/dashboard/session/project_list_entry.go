@@ -12,7 +12,7 @@ import (
 
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/project"
-	sessionpkg "github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // projectListEntry is the per-project element in /api/sessions
@@ -68,7 +68,7 @@ func (h *Handlers) projectListLocalAt(now time.Time) []projectListEntry {
 	for _, p := range projects {
 		var stableKey string
 		if h.deps.ProjectStableKeyEnabled {
-			stableKey = sessionpkg.ProjectStableKey(p.Path, "general")
+			stableKey = sessionkey.ProjectStableKey(p.Path, "general")
 		}
 		entries = append(entries, projectListEntry{
 			Name:       p.Name,

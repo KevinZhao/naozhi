@@ -267,21 +267,10 @@ func loadKnownIDs(storePath string) map[string]bool {
 	return m
 }
 
-// saveKnownIDs persists the set of all session IDs ever used by naozhi.
-// PRECONDITION: sortedIDs is ALREADY sorted ascending
-// (knownids.Store.SortedSnapshot). Deterministic on-disk order keeps
-// backup/audit diffs noise-free; this does NOT re-sort.
-func saveKnownIDs(storePath string, sortedIDs []string) error {
-	data, err := json.Marshal(sortedIDs)
-	if err != nil {
-		return fmt.Errorf("marshal known IDs: %w", err)
-	}
-	return saveKnownIDsBytes(storePath, data)
-}
-
-// saveKnownIDsBytes persists already-marshaled known-ID JSON. The save paths
-// hand it the gen-memoised bytes from knownids.Store.ClaimSave /
-// MarshalSnapshot; saveKnownIDs is the marshal+delegate wrapper for []string callers.
+// saveKnownIDsBytes persists the set of all session IDs ever used by naozhi,
+// already marshaled (sorted ascending) by knownids.Store.ClaimSave /
+// MarshalSnapshot. Deterministic on-disk order keeps backup/audit diffs
+// noise-free.
 func saveKnownIDsBytes(storePath string, data []byte) error {
 	path := knownIDsPath(storePath)
 	if path == "" {

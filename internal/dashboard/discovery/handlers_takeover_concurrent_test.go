@@ -17,6 +17,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
@@ -100,7 +101,7 @@ func TestHandleTakeover_SecondTakeoverOfKeyKeepsItsCLI(t *testing.T) {
 	}, 5*time.Second, "the child never installed its SIGTERM trap")
 	cmd2, reap2 := startSleeper(t)
 	cwd := t.TempDir()
-	key := session.TakeoverKey(session.SanitizeCWDKey(cwd))
+	key := sessionkey.TakeoverKey(sessionkey.SanitizeCWDKey(cwd))
 
 	router := session.NewRouter(session.RouterConfig{MaxProcs: 3})
 	appCtx, cancel := context.WithCancel(context.Background())
@@ -171,7 +172,7 @@ func TestHandleTakeover_PidReuseReleasesTheKey(t *testing.T) {
 		t.Fatalf("takeover of a reused PID = %d %q, want 409", rec.Code, rec.Body.String())
 	}
 	h.Wait()
-	lease, err := router.ReserveTakeover(session.TakeoverKey(session.SanitizeCWDKey(cwd)), session.AgentOpts{})
+	lease, err := router.ReserveTakeover(sessionkey.TakeoverKey(sessionkey.SanitizeCWDKey(cwd)), session.AgentOpts{})
 	if errors.Is(err, session.ErrSpawnInFlight) {
 		t.Fatal("the refused takeover kept its reservation of the key")
 	}
@@ -212,7 +213,7 @@ func TestHandleTakeover_TermFailureReleasesTheKey(t *testing.T) {
 		t.Fatalf("takeover with a refused SIGTERM = %d %q, want 500", rec.Code, rec.Body.String())
 	}
 	h.Wait()
-	lease, err := router.ReserveTakeover(session.TakeoverKey(session.SanitizeCWDKey(cwd)), session.AgentOpts{})
+	lease, err := router.ReserveTakeover(sessionkey.TakeoverKey(sessionkey.SanitizeCWDKey(cwd)), session.AgentOpts{})
 	if err != nil {
 		t.Fatalf("ReserveTakeover after the refused SIGTERM: %v", err)
 	}

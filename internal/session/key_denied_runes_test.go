@@ -1,6 +1,10 @@
 package session
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/naozhi/naozhi/internal/sessionkey"
+)
 
 // TestDeniedKeyRuneRanges_PinsSet locks the codepoint classes
 // ValidateSessionKey rejects. The dashboard's client-side sanitizeKeySlug
@@ -18,9 +22,9 @@ func TestDeniedKeyRuneRanges_PinsSet(t *testing.T) {
 		{0x202A, 0x202E},
 		{0xFEFF, 0xFEFF},
 	}
-	got := DeniedKeyRuneRanges()
+	got := sessionkey.DeniedKeyRuneRanges()
 	if len(got) != len(want) {
-		t.Fatalf("DeniedKeyRuneRanges() = %v, want %v", got, want)
+		t.Fatalf("sessionkey.DeniedKeyRuneRanges() = %v, want %v", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
@@ -37,8 +41,8 @@ func TestDeniedKeyRuneRanges_PinsSet(t *testing.T) {
 		}
 		prevHi = r[1]
 		for c := r[0]; c <= r[1]; c++ {
-			if err := ValidateSessionKey("a:b:c" + string(c) + ":d"); err == nil {
-				t.Errorf("ValidateSessionKey accepted U+%04X, which DeniedKeyRuneRanges lists", c)
+			if err := sessionkey.ValidateSessionKey("a:b:c" + string(c) + ":d"); err == nil {
+				t.Errorf("sessionkey.ValidateSessionKey accepted U+%04X, which sessionkey.DeniedKeyRuneRanges lists", c)
 			}
 		}
 	}
@@ -48,12 +52,12 @@ func TestDeniedKeyRuneRanges_PinsSet(t *testing.T) {
 // mutation: the exported accessor must hand out a fresh slice.
 func TestDeniedKeyRuneRanges_ReturnsCopy(t *testing.T) {
 	t.Parallel()
-	a := DeniedKeyRuneRanges()
+	a := sessionkey.DeniedKeyRuneRanges()
 	a[0] = [2]rune{0x41, 0x41} // 'A'
-	if err := ValidateSessionKey("A:b:c:d"); err != nil {
+	if err := sessionkey.ValidateSessionKey("A:b:c:d"); err != nil {
 		t.Fatalf("mutating the returned slice leaked into the validator: %v", err)
 	}
-	if b := DeniedKeyRuneRanges(); b[0] != [2]rune{0x0000, 0x001F} {
+	if b := sessionkey.DeniedKeyRuneRanges(); b[0] != [2]rune{0x0000, 0x001F} {
 		t.Fatalf("second call observed mutation: %v", b[0])
 	}
 }

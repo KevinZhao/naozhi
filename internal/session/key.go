@@ -93,22 +93,3 @@ func isPlannerKey(key string) bool {
 func plannerNameFromKey(key string) string {
 	return sessionkey.PlannerNameFromKey(key)
 }
-
-// DeniedKeyRuneRanges returns the inclusive [lo, hi] codepoint ranges that
-// ValidateSessionKey rejects, as a fresh slice so callers cannot mutate the
-// table. Exposed for cross-layer contract tests; production code should call
-// ValidateSessionKey. The table is owned by internal/sessionkey (denyset.go)
-// and shared with shim.validateKeyForShim / sanitizeKeyComponent /
-// SanitizeQuote (#2301); the dashboard's sanitizeKeySlug must strip the same
-// set, which the internal/server contract test checks against this accessor (#2429).
-func DeniedKeyRuneRanges() [][2]rune {
-	return sessionkey.DeniedKeyRuneRanges()
-}
-
-// MaxSessionKeyBytes caps the byte length of a session key accepted over any
-// trust boundary; see sessionkey.MaxSessionKeyBytes.
-const MaxSessionKeyBytes = sessionkey.MaxSessionKeyBytes
-
-// ValidateSessionKey rejects keys that are unsafe to cross a trust boundary;
-// see sessionkey.ValidateSessionKey.
-func ValidateSessionKey(k string) error { return sessionkey.ValidateSessionKey(k) }

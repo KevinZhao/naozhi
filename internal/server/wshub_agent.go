@@ -8,6 +8,7 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/subagent"
 	"github.com/naozhi/naozhi/internal/wsproto"
 )
@@ -99,7 +100,7 @@ func (h *Hub) wireLinker(key string, linker agentlink.AgentLinker, taskDone agen
 var agentTaskIDRe = regexp.MustCompile(`^[a-z0-9]{1,32}$`)
 
 func (h *Hub) handleAgentSubscribe(c *wsClient, msg node.ClientMsg) {
-	if err := session.ValidateSessionKey(msg.Key); err != nil {
+	if err := sessionkey.ValidateSessionKey(msg.Key); err != nil {
 		c.SendJSON(wsproto.NewError(wsproto.Error{Error: "invalid key"}))
 		return
 	}
@@ -215,7 +216,7 @@ func workflowAgentDone(b *session.WorkflowBoard, agentID string) func() (string,
 }
 
 func (h *Hub) handleAgentUnsubscribe(c *wsClient, msg node.ClientMsg) {
-	if err := session.ValidateSessionKey(msg.Key); err != nil {
+	if err := sessionkey.ValidateSessionKey(msg.Key); err != nil {
 		return
 	}
 	if !agentTaskIDRe.MatchString(msg.TaskID) {

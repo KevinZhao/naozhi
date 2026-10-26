@@ -44,29 +44,9 @@ func (s *ManagedSession) isAlive() bool {
 	return p != nil && p.Alive()
 }
 
-// ReattachProcess safely injects a reconnected shim process into this session.
-// Called by Router.ReconnectShimsCtx after naozhi restart.
-func (s *ManagedSession) ReattachProcess(proc processIface, sessionID string) {
-	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
-
-	snapshot := s.attachProcessAndSnapshotPersisted(proc)
-	s.setSessionID(sessionID)
-	storeAtomicString(&s.deathReason, "")
-	s.lastActive.Store(time.Now().UnixNano())
-
-	// len(snapshot) > 0 implies proc != nil (snapshot is nil for nil proc).
-	if len(snapshot) > 0 {
-		proc.InjectHistory(snapshot)
-	}
-
-	if s.onSessionID != nil && sessionID != "" {
-		s.onSessionID(sessionID)
-	}
-}
-
-// ReattachProcessNoCallback is like ReattachProcess but skips the onSessionID
-// callback; for callers that already hold the table lock (onSessionID acquires it).
+// ReattachProcessNoCallback injects a reconnected shim process into this
+// session without invoking the onSessionID callback; for callers that already
+// hold the table lock (onSessionID acquires it).
 // Does NOT acquire sendMu: the lock order is sendMu → the table lock and the caller
 // holds the table lock, so taking sendMu here would risk ABBA deadlock with Send()
 // (sendMu → onSessionID → the table lock).

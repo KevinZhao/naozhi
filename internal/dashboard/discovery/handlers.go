@@ -21,6 +21,7 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // CacheView is the subset of the server's discovery cache this package needs.
@@ -314,8 +315,8 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	cwdKey := session.SanitizeCWDKey(cwd)
-	key := session.TakeoverKey(cwdKey)
+	cwdKey := sessionkey.SanitizeCWDKey(cwd)
+	key := sessionkey.TakeoverKey(cwdKey)
 
 	if req.ProcStartTime == 0 {
 		http.Error(w, "proc_start_time is required", http.StatusBadRequest)

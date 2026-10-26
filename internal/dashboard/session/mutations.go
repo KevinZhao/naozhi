@@ -10,6 +10,8 @@ import (
 
 	"github.com/naozhi/naozhi/internal/claudefs"
 	sessionpkg "github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 
 	"github.com/naozhi/naozhi/internal/dashboard/contracts"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
@@ -41,7 +43,7 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	// Same gate as HandleEvents: reject multi-KB / control-byte keys before
 	// they reach the slog.Warn attr below; also caps at MaxSessionKeyBytes.
-	if err := sessionpkg.ValidateSessionKey(req.Key); err != nil {
+	if err := sessionkey.ValidateSessionKey(req.Key); err != nil {
 		http.Error(w, "invalid key parameter", http.StatusBadRequest)
 		return
 	}
@@ -99,12 +101,12 @@ func (h *Handlers) HandleSetLabel(w http.ResponseWriter, r *http.Request) {
 	}
 	// Gate req.Key before it reaches slog attrs or router lookups (same policy
 	// as HandleEvents / HandleDelete).
-	if err := sessionpkg.ValidateSessionKey(req.Key); err != nil {
+	if err := sessionkey.ValidateSessionKey(req.Key); err != nil {
 		http.Error(w, "invalid key parameter", http.StatusBadRequest)
 		return
 	}
 
-	label, err := sessionpkg.ValidateUserLabel(req.Label)
+	label, err := sessionview.ValidateUserLabel(req.Label)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -124,9 +126,9 @@ func (h *Handlers) HandleSetLabel(w http.ResponseWriter, r *http.Request) {
 			// malicious remote build can echo CR/LF or bidi runes in its RPC error
 			// string, fragmenting the local slog audit trail (#820).
 			slog.Warn("remote set session label failed",
-				"node", sessionpkg.SanitizeLogAttr(req.Node),
-				"key", sessionpkg.SanitizeLogAttr(req.Key),
-				"err", sessionpkg.SanitizeLogAttr(err.Error()))
+				"node", sessionkey.SanitizeLogAttr(req.Node),
+				"key", sessionkey.SanitizeLogAttr(req.Key),
+				"err", sessionkey.SanitizeLogAttr(err.Error()))
 			if contracts.IsUnknownRPCMethodErr(err) {
 				http.Error(w, "remote node needs upgrade to support this action", http.StatusConflict)
 				return
@@ -141,8 +143,8 @@ func (h *Handlers) HandleSetLabel(w http.ResponseWriter, r *http.Request) {
 		// Parallel audit entry with the local-path slog.Info so journalctl shows
 		// every label change regardless of owning node; sanitised as above (#820).
 		slog.Info("session label updated",
-			"node", sessionpkg.SanitizeLogAttr(req.Node),
-			"key", sessionpkg.SanitizeLogAttr(req.Key),
+			"node", sessionkey.SanitizeLogAttr(req.Node),
+			"key", sessionkey.SanitizeLogAttr(req.Key),
 			"label_len", len(label))
 		// Don't echo label — attacker-influenced text is a latent reflected-XSS
 		// vector if a future caller renders the response via innerHTML. Client
@@ -159,7 +161,7 @@ func (h *Handlers) HandleSetLabel(w http.ResponseWriter, r *http.Request) {
 	// SanitizeLogAttr on key keeps the audit-log byte class uniform with the
 	// remote path (#820).
 	slog.Info("session label updated", "node", "local",
-		"key", sessionpkg.SanitizeLogAttr(req.Key), "label_len", len(label))
+		"key", sessionkey.SanitizeLogAttr(req.Key), "label_len", len(label))
 	// Don't echo label — reflected-XSS precaution matches the remote-path
 	// above. Client patches its cache from its own optimistic value.
 	httputil.WriteOK(w)
@@ -252,7 +254,7 @@ func (h *Handlers) HandleInterrupt(w http.ResponseWriter, r *http.Request) {
 	}
 	// Gate req.Key before it reaches slog attrs / router lookup (same policy as
 	// the other session handlers).
-	if err := sessionpkg.ValidateSessionKey(req.Key); err != nil {
+	if err := sessionkey.ValidateSessionKey(req.Key); err != nil {
 		http.Error(w, "invalid key parameter", http.StatusBadRequest)
 		return
 	}

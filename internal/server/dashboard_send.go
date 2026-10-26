@@ -10,7 +10,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/osutil"
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // Upload size ceilings. The PDF cap honours Anthropic's 32 MB document-block
@@ -172,7 +172,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	// Validate key at the HTTP boundary so the raw attacker-controlled string
 	// (C1 / bidi / non-UTF-8) never reaches slog attrs before sessionSend's
 	// own validation.
-	if err := session.ValidateSessionKey(key); err != nil {
+	if err := sessionkey.ValidateSessionKey(key); err != nil {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid key"})
 		return
 	}
@@ -224,7 +224,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		validatedWS, err := h.engine.resolveAttachmentWorkspace(key, workspace)
 		if err != nil {
 			slog.Warn("attachment workspace validation failed",
-				"key", session.SanitizeLogAttr(key), "err", err)
+				"key", sessionkey.SanitizeLogAttr(key), "err", err)
 			writeSendError(w, http.StatusBadRequest, "invalid workspace", filesConsumed)
 			return
 		}
@@ -308,7 +308,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		cleanup()
 		// Forward only the localised label: the raw error may embed workspace
 		// paths or internal session keys.
-		slog.Warn("dashboard sessionSend rejected", "key", session.SanitizeLogAttr(key), "err", err)
+		slog.Warn("dashboard sessionSend rejected", "key", sessionkey.SanitizeLogAttr(key), "err", err)
 		writeSendError(w, http.StatusForbidden, asyncErrorMessage(err), filesConsumed)
 		return
 	}
@@ -342,7 +342,7 @@ func (h *SendHandler) handleBind(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
-	if err := session.ValidateSessionKey(req.Key); err != nil {
+	if err := sessionkey.ValidateSessionKey(req.Key); err != nil {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid key"})
 		return
 	}

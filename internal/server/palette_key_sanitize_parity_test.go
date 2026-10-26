@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // Regression tests for #2429 (command palette P2 items):
@@ -17,7 +17,7 @@ import (
 //     .active class, or Enter opens a different row than the highlighted one;
 //  2. path highlight ranges must be computed on the rendered (shortPath)
 //     string, not the raw path, or every <mark> is shifted / out of range;
-//  3. sanitizeKeySlug must strip every codepoint session.ValidateSessionKey
+//  3. sanitizeKeySlug must strip every codepoint sessionkey.ValidateSessionKey
 //     rejects, or a project directory with e.g. a zero-width space yields a
 //     key the server 400s on first send.
 //
@@ -185,10 +185,10 @@ func decodeRune(s string) (rune, int) {
 // enumerator Go can call, and the check is cheap and catches real drift. Both
 // assert on values, not on how the code is spelled — one parses the character
 // classes sanitizeKeySlug actually strips, the other runs the real JS under node
-// and feeds its output to session.ValidateSessionKey.
+// and feeds its output to sessionkey.ValidateSessionKey.
 //
 // TestDashboardJS_SanitizeKeySlug_CoversServerDenySet is the cross-layer
-// contract: every codepoint session.ValidateSessionKey rejects must appear
+// contract: every codepoint sessionkey.ValidateSessionKey rejects must appear
 // in one of sanitizeKeySlug's strip classes. Static parse, always runs.
 func TestDashboardJS_SanitizeKeySlug_CoversServerDenySet(t *testing.T) {
 	t.Parallel()
@@ -198,10 +198,10 @@ func TestDashboardJS_SanitizeKeySlug_CoversServerDenySet(t *testing.T) {
 	if len(covered) == 0 {
 		t.Fatal("no character classes parsed from sanitizeKeySlug")
 	}
-	for _, rg := range session.DeniedKeyRuneRanges() {
+	for _, rg := range sessionkey.DeniedKeyRuneRanges() {
 		for r := rg[0]; r <= rg[1]; r++ {
 			if !covered[r] {
-				t.Errorf("sanitizeKeySlug does not strip U+%04X but session.ValidateSessionKey rejects it — a project dir containing it would 400 on first send (#2429)", r)
+				t.Errorf("sanitizeKeySlug does not strip U+%04X but sessionkey.ValidateSessionKey rejects it — a project dir containing it would 400 on first send (#2429)", r)
 			}
 		}
 	}
@@ -215,7 +215,7 @@ func TestDashboardJS_SanitizeKeySlug_OutputPassesValidateSessionKey(t *testing.T
 	t.Parallel()
 	js := readDashboardJS(t)
 	var cps []int
-	for _, rg := range session.DeniedKeyRuneRanges() {
+	for _, rg := range sessionkey.DeniedKeyRuneRanges() {
 		for r := rg[0]; r <= rg[1]; r++ {
 			cps = append(cps, int(r))
 		}
@@ -234,7 +234,7 @@ func TestDashboardJS_SanitizeKeySlug_OutputPassesValidateSessionKey(t *testing.T
 		t.Fatalf("got %d keys for %d codepoints", len(keys), len(cps))
 	}
 	for i, k := range keys {
-		if err := session.ValidateSessionKey(k); err != nil {
+		if err := sessionkey.ValidateSessionKey(k); err != nil {
 			t.Errorf("U+%04X: client key %q rejected by server: %v", cps[i], k, err)
 		}
 		if strings.ContainsRune(k, rune(cps[i])) {

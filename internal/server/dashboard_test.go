@@ -19,6 +19,7 @@ import (
 	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
 // ─── handleAPISessionEvents ──────────────────────────────────────────────────
@@ -55,7 +56,7 @@ func TestHandleAPISessionEvents_SessionNotFound(t *testing.T) {
 
 // TestHandleAPISessionEvents_RejectsInvalidKey covers R172-SEC-L2: the
 // reverse-RPC fetch_events worker in internal/upstream/connector.go
-// already runs session.ValidateSessionKey on every inbound key, but the
+// already runs sessionkey.ValidateSessionKey on every inbound key, but the
 // dashboard HTTP surface used to forward authenticated-user input
 // straight into GetSession and slog without a length / control-char
 // gate. Keys containing embedded NUL/CR or multi-KB filler must fail
@@ -63,7 +64,7 @@ func TestHandleAPISessionEvents_SessionNotFound(t *testing.T) {
 func TestHandleAPISessionEvents_RejectsInvalidKey(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 
-	// Build a key that exceeds session.MaxSessionKeyBytes (~520 B).
+	// Build a key that exceeds sessionkey.MaxSessionKeyBytes (~520 B).
 	tooLong := "test:direct:" + strings.Repeat("a", 4*1024) + ":general"
 	cases := map[string]string{
 		"embedded_LF":  "test:direct:abc\ndef:general",
@@ -96,7 +97,7 @@ func TestHandleAPISessionEvents_RejectsInvalidKey(t *testing.T) {
 // /api/sessions/interrupt dashboard handlers historically trusted the
 // authenticated-operator-supplied JSON body and forwarded req.Key straight
 // into Router methods + slog.Warn attrs on failure. handleEvents already
-// enforces session.ValidateSessionKey (Round 173 R172-SEC-L2); this test
+// enforces sessionkey.ValidateSessionKey (Round 173 R172-SEC-L2); this test
 // locks the same gate into the three other session-lifecycle handlers so
 // they reject multi-KB keys, embedded NUL/CR/LF, and bidi-override
 // characters uniformly.
@@ -658,7 +659,7 @@ func TestHandleAPISend_RejectControlInKey(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
 	}
-	// R175-SEC-P1: switched to session.ValidateSessionKey; response text
+	// R175-SEC-P1: switched to sessionkey.ValidateSessionKey; response text
 	// collapsed to "invalid key" (covers C0/C1/bidi/non-UTF-8 uniformly).
 	if !strings.Contains(w.Body.String(), "invalid key") {
 		t.Errorf("body = %q, want 'invalid key'", w.Body.String())
@@ -1024,8 +1025,8 @@ func TestHandleAPISessions_NodeAggregation(t *testing.T) {
 	}
 }
 
-// ─── session.ValidateUserLabel ──────────────────────────────────────────────
-// Validation logic lives in the session package (session.ValidateUserLabel)
+// ─── sessionview.ValidateUserLabel ──────────────────────────────────────────────
+// Validation logic lives in the session package (sessionview.ValidateUserLabel)
 // so the dashboard HTTP path and the reverse-RPC worker share one rule set.
 // Tab is rejected (slog.TextHandler uses it as key/value separator) and C1
 // control range is rejected. R64-GO-H2 / L2.
@@ -1053,7 +1054,7 @@ func TestValidateUserLabel(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := session.ValidateUserLabel(c.in)
+			got, err := sessionview.ValidateUserLabel(c.in)
 			if (err != nil) != c.wantErr {
 				t.Fatalf("err = %v, wantErr = %v", err, c.wantErr)
 			}
@@ -1105,12 +1106,12 @@ func TestHandleSetLabel_EmptyClears(t *testing.T) {
 	}
 }
 
-// TestHandleSetLabel_TooLong rejects labels above session.MaxUserLabelBytes.
+// TestHandleSetLabel_TooLong rejects labels above sessionview.MaxUserLabelBytes.
 func TestHandleSetLabel_TooLong(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 	key := seedEventSession(t, srv, 1000)
 
-	label := strings.Repeat("a", session.MaxUserLabelBytes+1)
+	label := strings.Repeat("a", sessionview.MaxUserLabelBytes+1)
 	body := `{"key":"` + key + `","label":"` + label + `"}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
 	w := httptest.NewRecorder()

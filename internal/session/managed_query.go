@@ -329,24 +329,6 @@ func (s *ManagedSession) EventEntries() []clievent.EventEntry {
 	return out
 }
 
-// EventEntriesAppend is the buffer-reusing variant of EventEntries: it appends
-// this session's full event log onto dst and returns the grown slice, so
-// callers iterating O(N) dead sessions can reuse one pooled buffer (#1885).
-//
-// Ownership mirrors EventEntriesSinceAppend: the caller must not retain dst
-// across calls; the returned slice shares the backing array with dst. dst's
-// prefix is preserved in every branch.
-func (s *ManagedSession) EventEntriesAppend(dst []clievent.EventEntry) []clievent.EventEntry {
-	proc := s.loadProcess()
-	if proc != nil {
-		return append(dst, proc.EventEntries()...)
-	}
-	s.historyMu.RLock()
-	dst = append(dst, s.persistedHistory...)
-	s.historyMu.RUnlock()
-	return dst
-}
-
 // SubagentLinker returns the SubagentLinker owned by the live *cli.Process,
 // or nil when the session is not backed by one (fake test process, dead
 // process, ACP protocol). Callers must guard the nil return.

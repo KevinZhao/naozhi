@@ -14,7 +14,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"sync"
 	"sync/atomic"
 
 	"github.com/naozhi/naozhi/internal/attachment/tracker"
@@ -136,52 +135,21 @@ func (s *ManagedSession) withGapFill(page []clievent.EventEntry, before int64) [
 	return append(out, add[j:]...)
 }
 
-// bridgeEncBuf pools a bytes.Buffer + json.Encoder pair so the bridge hot path
-// (≥5 events/s × N sessions) avoids the encodeState allocation json.Marshal
-// performs per call. Mirrors jsonEncPool in internal/server/dashboard.go.
-type bridgeEncBuf struct {
-	buf *bytes.Buffer
-	enc *json.Encoder
+// encodeEntry marshals one EventEntry for the persist tier. HTML escaping is
+// disabled (the persist tier reads back via json.Unmarshal, which accepts
+// unescaped HTML) and the Encoder's trailing '\n' is stripped, so the bytes
+// match the on-disk format. A failure is logged and reported as ok=false.
+func encodeEntry(e clievent.EventEntry) ([]byte, bool) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(e); err != nil {
+		slog.Warn("eventlog bridge: marshal entry failed",
+			"uuid", e.UUID, "type", e.Type, "err", err)
+		return nil, false
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte{'\n'}), true
 }
-
-var bridgeEncPool = sync.Pool{
-	New: func() any {
-		buf := new(bytes.Buffer)
-		enc := json.NewEncoder(buf)
-		// The persist tier reads back via json.Unmarshal, which accepts
-		// unescaped HTML; disabling escape avoids needless byte expansion.
-		enc.SetEscapeHTML(false)
-		return &bridgeEncBuf{buf: buf, enc: enc}
-	},
-}
-
-// bridgeEncMaxCap caps buffer reuse so a one-off oversized event does not
-// permanently pin a large heap buffer.
-const bridgeEncMaxCap = 64 * 1024
-
-// span records a [start,end) byte range inside the shared pooled encode buffer
-// for one EventEntry plus that entry's TimeMS. Package-scoped so batchScratch
-// can carry a reusable []span across AppendBatch calls (#1629, #1619).
-type span struct {
-	start, end int
-	timeMS     int64
-}
-
-// batchScratch pools the two per-AppendBatch helper slices so their backing
-// arrays survive across calls instead of escaping to the heap per batch
-// (#1629). Mirrors the bridgeEncPool idiom.
-type batchScratch struct {
-	out   []persist.Entry
-	spans []span
-}
-
-var batchScratchPool = sync.Pool{
-	New: func() any { return &batchScratch{} },
-}
-
-// batchScratchMaxCap caps slice reuse so a one-off huge batch does not pin
-// large backing arrays in the pool forever (same rationale as bridgeEncMaxCap).
-const batchScratchMaxCap = 4096
 
 // newEventLogSink translates a per-key persist.PersistSink (persist.Entry
 // batches) into the ring.PersistSink contract (clievent.EventEntry batches);
@@ -198,45 +166,13 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 		if len(entries) == 0 {
 			return
 		}
-
-		// Single-entry fast path shares persistOneEntry with the
-		// ring.PersistSinkOne path so marshal / refcount logic lives in one
-		// place (#410). The bytes and slice header DO escape because
-		// persisterSink retains entries; a byte-slice pool would need a
-		// copy-on-take re-contract of every sink, so none is attempted.
-		if len(entries) == 1 {
-			persistOneEntry(persisterSink, attachTracker, keyhash, entries[0], replayPhase)
-			return
-		}
-
-		// Helper slices come from a pool (#1629), reset to [:0] and returned
-		// at every exit path. `out`'s persist.Entry values alias the pooled
-		// encode buffer, but persisterSink copies the bytes into its own arena
-		// synchronously, so both may be recycled once it returns.
-		bs := batchScratchPool.Get().(*batchScratch)
-		out := bs.out[:0]
-		eb := bridgeEncPool.Get().(*bridgeEncBuf)
-		// Explicit Put before each return (no defer) keeps the hot path cheap.
-		// All entries are encoded into ONE pooled buffer without Resetting
-		// between them; persist gets a borrowed sub-slice per entry (#1524).
-		// Offsets are resolved after the encode pass because the buffer may
-		// grow (and move) mid-loop.
-		eb.buf.Reset()
-		spans := bs.spans[:0]
+		out := make([]persist.Entry, 0, len(entries))
 		for _, e := range entries {
-			start := eb.buf.Len()
-			if err := eb.enc.Encode(e); err != nil {
-				slog.Warn("eventlog bridge: marshal entry failed",
-					"uuid", e.UUID, "type", e.Type, "err", err)
-				eb.buf.Truncate(start) // drop the partial encode
+			raw, ok := encodeEntry(e)
+			if !ok {
 				continue
 			}
-			end := eb.buf.Len()
-			// json.Encoder appends a trailing '\n'; strip it from the span.
-			if end > start && eb.buf.Bytes()[end-1] == '\n' {
-				end--
-			}
-			spans = append(spans, span{start: start, end: end, timeMS: e.Time})
+			out = append(out, persist.Entry{JSON: raw, TimeMS: e.Time})
 
 			// Refcount bump for every attachment path the entry carries.
 			// Replay batches are excluded: replay restores from the persist
@@ -246,79 +182,19 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 				attachTracker.OnPersistedEntry(keyhash, e.ImagePaths, e.Time)
 			}
 		}
-		// Scratch return is inlined at both exits (a captured closure would
-		// heap-allocate per batch). The possibly-reallocated headers are
-		// written back so grown capacity is kept; slices wider than
-		// batchScratchMaxCap are left for GC instead of pinning an outsized array.
-		if len(spans) == 0 {
-			if cap(out) <= batchScratchMaxCap && cap(spans) <= batchScratchMaxCap {
-				bs.out = out[:0]
-				bs.spans = spans[:0]
-				batchScratchPool.Put(bs)
-			}
-			if eb.buf.Cap() <= bridgeEncMaxCap {
-				bridgeEncPool.Put(eb)
-			}
-			return
+		if len(out) > 0 {
+			persisterSink(out, replayPhase)
 		}
-		all := eb.buf.Bytes()
-		for _, sp := range spans {
-			out = append(out, persist.Entry{JSON: all[sp.start:sp.end], TimeMS: sp.timeMS})
-		}
-		// persisterSink copies the borrowed bytes synchronously, so eb and the
-		// scratch slices may be returned only AFTER it returns (out's JSON
-		// fields alias eb.buf).
-		persisterSink(out, replayPhase)
-		if cap(out) <= batchScratchMaxCap && cap(spans) <= batchScratchMaxCap {
-			bs.out = out[:0]
-			bs.spans = spans[:0]
-			batchScratchPool.Put(bs)
-		}
-		if eb.buf.Cap() <= bridgeEncMaxCap {
-			bridgeEncPool.Put(eb)
-		}
-	}
-}
-
-// persistOneEntry marshals a single EventEntry through bridgeEncPool and
-// forwards it to persisterSink. Shared by newEventLogSink's len==1 fast path
-// and newEventLogSinkOne so the encode/copy/refcount logic lives in exactly one
-// place (#410).
-func persistOneEntry(persisterSink persist.PersistSink, attachTracker *tracker.Tracker, keyhash string, e clievent.EventEntry, replayPhase bool) {
-	eb := bridgeEncPool.Get().(*bridgeEncBuf)
-	eb.buf.Reset()
-	if err := eb.enc.Encode(e); err != nil {
-		slog.Warn("eventlog bridge: marshal entry failed",
-			"uuid", e.UUID, "type", e.Type, "err", err)
-		if eb.buf.Cap() <= bridgeEncMaxCap {
-			bridgeEncPool.Put(eb)
-		}
-		return
-	}
-	raw := eb.buf.Bytes()
-	if n := len(raw); n > 0 && raw[n-1] == '\n' {
-		raw = raw[:n-1]
-	}
-	// persisterSink copies the bytes it retains (pooled per-batch arena), so
-	// it gets the borrowed encoder slice directly (#1524). eb is returned to
-	// the pool only AFTER persisterSink returns, because raw aliases eb.buf.
-	var stackArr [1]persist.Entry
-	out := append(stackArr[:0], persist.Entry{JSON: raw, TimeMS: e.Time})
-	if !replayPhase && attachTracker != nil && keyhash != "" && len(e.ImagePaths) > 0 {
-		attachTracker.OnPersistedEntry(keyhash, e.ImagePaths, e.Time)
-	}
-	persisterSink(out, replayPhase)
-	if eb.buf.Cap() <= bridgeEncMaxCap {
-		bridgeEncPool.Put(eb)
 	}
 }
 
 // newEventLogSinkOne is the ring.PersistSinkOne counterpart to newEventLogSink,
-// wiring Append's single-entry fast path to the per-key persister without a
-// `[]EventEntry{e}` slice literal. Both paths share persistOneEntry so the wire
-// format and attachment-tracker behaviour are identical (#410).
+// wiring Append's single-entry fast path to the per-key persister. It shares
+// newEventLogSink so the wire format and attachment-tracker behaviour are
+// identical (#410).
 func newEventLogSinkOne(persisterSink persist.PersistSink, attachTracker *tracker.Tracker, keyhash string) ring.PersistSinkOne {
+	sink := newEventLogSink(persisterSink, attachTracker, keyhash)
 	return func(e clievent.EventEntry, replayPhase bool) {
-		persistOneEntry(persisterSink, attachTracker, keyhash, e, replayPhase)
+		sink([]clievent.EventEntry{e}, replayPhase)
 	}
 }

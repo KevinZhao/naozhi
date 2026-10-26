@@ -18,6 +18,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/session/backendstore"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
@@ -1818,11 +1819,11 @@ func TestValidateSessionKey(t *testing.T) {
 		{"BOM rejected", "a:b:c\uFEFF:d", true},
 		{"LSEP rejected", "a:b:c\u2028:d", true},
 		{"invalid utf-8 rejected", "a:b:\xc3\x28:d", true},
-		{"oversized rejected", strings.Repeat("a", MaxSessionKeyBytes+1), true},
+		{"oversized rejected", strings.Repeat("a", sessionkey.MaxSessionKeyBytes+1), true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := ValidateSessionKey(c.in)
+			err := sessionkey.ValidateSessionKey(c.in)
 			if (err != nil) != c.wantErr {
 				t.Fatalf("err = %v, wantErr = %v", err, c.wantErr)
 			}

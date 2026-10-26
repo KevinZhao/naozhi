@@ -106,11 +106,11 @@ func TestSaveIfDirty_KnownIDsThrottleCommit(t *testing.T) {
 }
 
 // TestSaveIfDirty_KnownIDsSaveFailure_ResetsThrottle pins R20260603-CODE-4:
-// when saveKnownIDs fails, knownIDsSavedAt must be reset to the zero value so
+// when saveKnownIDsBytes fails, knownIDsSavedAt must be reset to the zero value so
 // the throttle gate re-opens on the very next tick instead of blocking for a
 // full knownIDsSaveInterval.
 func TestSaveIfDirty_KnownIDsSaveFailure_ResetsThrottle(t *testing.T) {
-	// Force saveKnownIDs to fail by placing a regular file where the
+	// Force saveKnownIDsBytes to fail by placing a regular file where the
 	// session-ids.json target must live. WriteFileAtomic calls os.CreateTemp
 	// in the same directory as the target; if that directory is itself a
 	// file the write fails with ENOTDIR, simulating a disk/permission error

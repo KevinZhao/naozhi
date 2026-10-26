@@ -6,7 +6,7 @@ import (
 )
 
 // TestValidateKeyForShim_Contract pins the rule set documented on
-// validateKeyForShim's godoc as a contract with session.ValidateSessionKey.
+// validateKeyForShim's godoc as a contract with sessionkey.ValidateSessionKey.
 // R237-CR-12 (#719): the two validators were kept in lockstep "via comment
 // only" -- without an executable assertion any future drift in either side
 // would slip past code review.
@@ -22,7 +22,7 @@ import (
 // ASCII; Go rejects raw BOM in source files (illegal byte order mark) and
 // raw bidi/zero-width payloads break some terminal renderings.
 func TestValidateKeyForShim_Contract(t *testing.T) {
-	const maxKeyBytes = 515 // matches session.MaxSessionKeyBytes
+	const maxKeyBytes = 515 // matches sessionkey.MaxSessionKeyBytes
 
 	cases := []struct {
 		name    string
@@ -84,7 +84,7 @@ func TestValidateKeyForShim_AcceptsKeyspecShape(t *testing.T) {
 // 0x202E to 0x202F).
 //
 // R237-CR-12 (#719): the cross-package "keep in sync" guarantee with
-// session.ValidateSessionKey now has TWO layers — the existing
+// sessionkey.ValidateSessionKey now has TWO layers — the existing
 // TestValidateKeyForShim_Contract sample table plus this boundary
 // table. A unilateral edit to validateKeyForShim that only adjusts a
 // single bound (e.g. drops the C1 reject) will fail this test

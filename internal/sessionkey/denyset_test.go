@@ -138,7 +138,7 @@ func TestSanitizeKeyRune(t *testing.T) {
 
 // TestDeniedKeyRuneRanges_PinsTable locks the exact table (values AND order):
 // the dashboard's sanitizeKeySlug is held to this table by a contract test in
-// internal/server (#2429), and session.DeniedKeyRuneRanges delegates here.
+// internal/server (#2429).
 func TestDeniedKeyRuneRanges_PinsTable(t *testing.T) {
 	t.Parallel()
 	want := [][2]rune{

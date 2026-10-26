@@ -7,8 +7,8 @@ import (
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/dashboard/runview"
-	sessionpkg "github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/runhistory"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // maxRunsPageLimit caps the run-history page size (matches the store's
@@ -36,7 +36,7 @@ func (h *Handlers) HandleRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	// Same key validation as the events endpoint: caps length and rejects
 	// control bytes before the key reaches slog / the store.
-	if err := sessionpkg.ValidateSessionKey(key); err != nil {
+	if err := sessionkey.ValidateSessionKey(key); err != nil {
 		http.Error(w, "invalid key parameter", http.StatusBadRequest)
 		return
 	}

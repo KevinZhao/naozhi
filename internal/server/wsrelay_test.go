@@ -450,7 +450,7 @@ func TestHub_RemoteUnsubscribe_NoRelay(t *testing.T) {
 }
 
 // TestHub_Unsubscribe_RejectInvalidKey covers R176-SEC-P1: handleSubscribe
-// and handleInterrupt already run session.ValidateSessionKey; handleUnsubscribe
+// and handleInterrupt already run sessionkey.ValidateSessionKey; handleUnsubscribe
 // did not, so an authenticated WS client could echo a key with embedded
 // NUL / C1 / bidi / multi-KB payload straight into the
 // `{"type":"unsubscribed","key":...}` reply (and any log attr a future

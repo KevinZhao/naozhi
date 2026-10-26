@@ -16,7 +16,7 @@ import (
 	"time"
 
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // attachmentDirPrefix is the workspace-relative prefix every path served
@@ -84,7 +84,7 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "key and path are required"})
 		return
 	}
-	if err := session.ValidateSessionKey(key); err != nil {
+	if err := sessionkey.ValidateSessionKey(key); err != nil {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid key"})
 		return
 	}

@@ -22,6 +22,7 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/turn"
 )
 
@@ -186,7 +187,7 @@ func (e *sendEngine) remoteSend(nc node.Conn, nodeID, key, text, workspace strin
 		if err != nil {
 			slog.Error("remote send",
 				"node", osutil.SanitizeForLog(nodeID, 128),
-				"key", session.SanitizeLogAttr(key), "err", err)
+				"key", sessionkey.SanitizeLogAttr(key), "err", err)
 			e.notify.broadcastSendError(key, asyncErrorMessage(err))
 		} else if status == string(sendAckBusy) {
 			e.notify.broadcastSendError(key, errSendBusy.Error())
