@@ -358,7 +358,7 @@ func headPromptAnchor(ctx context.Context, f *os.File, off int64) headAnchor {
 			carry = append(carry[:0], buf...)
 		}
 		if len(carry) > maxLineBytes {
-			// Longer than the forward scanner accepts; stop growing the fragment.
+			// Longer than ReadJSONLLine accepts; stop growing the fragment.
 			carry = carry[:0]
 		}
 		pos = chunkStart

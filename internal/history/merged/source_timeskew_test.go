@@ -458,9 +458,9 @@ func TestMerged_ContentlessEntries_NotCrossMatched(t *testing.T) {
 	}
 }
 
-// TestMerged_ClockSkew_SlowPath: the same skew tolerance must hold when a
+// TestMerged_ClockSkew_Unsorted: the same skew tolerance must hold when a
 // source returns entries out of (Time, UUID) order.
-func TestMerged_ClockSkew_SlowPath(t *testing.T) {
+func TestMerged_ClockSkew_Unsorted(t *testing.T) {
 	const a, b = "second turn", "first turn"
 	m := &Source{
 		Local: &stubSource{entries: []clievent.EventEntry{

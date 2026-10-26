@@ -288,10 +288,10 @@ func TestMerged_NilSources(t *testing.T) {
 	}
 }
 
-// TestMerged_FastPathSortedInputs: both sources return chronological
+// TestMerged_SortedInputs: both sources return chronological
 // slices. Asserts interleaved ordering + UUID-based dedup in the same pass;
 // fails on the dedup check if `seen` stops being seeded from local.
-func TestMerged_FastPathSortedInputs(t *testing.T) {
+func TestMerged_SortedInputs(t *testing.T) {
 	m := &Source{
 		Local: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "aa", Time: 100, Summary: "l-aa"},
@@ -321,11 +321,11 @@ func TestMerged_FastPathSortedInputs(t *testing.T) {
 	}
 }
 
-// TestMerged_FastPathFallbackWithEmptyUUID: empty-UUID entries from
+// TestMerged_FallbackWithEmptyUUID: empty-UUID entries from
 // fallback must pass through the merge without being swallowed by
 // the dedup map lookup. Covers the legacy-JSONL entry path that
 // survives the migration window.
-func TestMerged_FastPathFallbackWithEmptyUUID(t *testing.T) {
+func TestMerged_FallbackWithEmptyUUID(t *testing.T) {
 	m := &Source{
 		Local: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "aa", Time: 100},
@@ -341,9 +341,9 @@ func TestMerged_FastPathFallbackWithEmptyUUID(t *testing.T) {
 	}
 }
 
-// TestMerged_SlowPathUnsortedInputs feeds descending-time entries and
+// TestMerged_UnsortedInputs feeds descending-time entries and
 // asserts the output is re-sorted ascending.
-func TestMerged_SlowPathUnsortedInputs(t *testing.T) {
+func TestMerged_UnsortedInputs(t *testing.T) {
 	m := &Source{
 		Local: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "z", Time: 500}, // descending
@@ -368,9 +368,9 @@ func TestMerged_SlowPathUnsortedInputs(t *testing.T) {
 	}
 }
 
-// TestMerged_FastPathBeforeMSFilter: beforeMS filtering applies to both
+// TestMerged_BeforeMSFilter: beforeMS filtering applies to both
 // tiers; missing it on either would leak "too new" entries.
-func TestMerged_FastPathBeforeMSFilter(t *testing.T) {
+func TestMerged_BeforeMSFilter(t *testing.T) {
 	m := &Source{
 		Local: &stubSource{entries: []clievent.EventEntry{
 			{UUID: "a", Time: 100},
@@ -462,9 +462,9 @@ func TestMerged_CrossSourceContentDedup_DistinctNotCollapsed(t *testing.T) {
 	}
 }
 
-// TestMerged_CrossSourceContentDedup_SlowPath: the same cross-source
+// TestMerged_CrossSourceContentDedup_Unsorted: the same cross-source
 // dedup must hold for unsorted inputs.
-func TestMerged_CrossSourceContentDedup_SlowPath(t *testing.T) {
+func TestMerged_CrossSourceContentDedup_Unsorted(t *testing.T) {
 	m := &Source{
 		Local: &stubSource{entries: []clievent.EventEntry{
 			// Descending Time: out-of-contract input.
