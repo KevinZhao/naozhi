@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>naozhi dashboard 新原型 —— 精简版（对应 docs/rfc/planner.md v7，D75）</title>
+<title>naozhi dashboard —— 新增 Planner 页面（对应 docs/rfc/planner.md v7，D77）</title>
 <style>
   :root {
     --bg0:#ffffff; --bg1:#f6f8fa; --bg2:#eaeef2; --line:#d0d7de; --text:#1f2328; --muted:#656d76;
@@ -122,184 +122,220 @@
   .sbs { display:grid; grid-template-columns:1fr 1fr; font:12px/1.55 ui-monospace,Menlo,monospace; border:1px solid var(--line); border-radius:8px; overflow:hidden; background:#fff; }
   .sbs > div { white-space:pre; padding:0 10px; } .sbs .hd { background:var(--bg1); font-family:-apple-system,"PingFang SC",sans-serif; font-weight:600; color:var(--muted); padding:5px 10px; border-bottom:1px solid var(--line); }
   .sbs .d { background:#ffebe9; } .sbs .a { background:#e6ffec; } .sbs .e { background:#f6f8fa; }
+
+  .ab { width:56px; flex:none; background:var(--bg1); border-right:1px solid var(--line); display:flex; flex-direction:column; align-items:center; padding:10px 0; gap:4px; }
+  .ab .it { width:48px; padding:6px 0 4px; border-radius:8px; text-align:center; font-size:10.5px; color:var(--muted); position:relative; }
+  .ab .it .g { font-size:18px; display:block; line-height:22px; }
+  .ab .it.on { background:var(--chip-info-bg); color:var(--chip-info-fg); font-weight:600; }
+  .ab .it .count { position:absolute; top:0; right:2px; }
+  .ab .bot { margin-top:auto; }
+  .new { outline:2px dashed #fb8f44; outline-offset:2px; border-radius:8px; position:relative; }
+  .newtag { position:absolute; top:-9px; right:6px; background:#fb8f44; color:#fff; font-size:10.5px; font-weight:700; padding:0 6px; border-radius:6px; line-height:16px; z-index:3; }
+  .pcol { width:250px; flex:none; background:var(--bg1); border-right:1px solid var(--line); padding:12px 10px; overflow:hidden; }
+  .pcol .h { font-size:12px; font-weight:600; color:#333; margin:4px 4px 8px; display:flex; justify-content:space-between; }
+  .wcard { background:#fff; border:1px solid #ffcecb; border-left:3px solid var(--red); border-radius:7px; padding:8px 10px; margin-bottom:8px; font-size:12.5px; }
+  .ccard { background:#fff; border:1px solid var(--line); border-left:3px solid var(--purple); border-radius:7px; padding:8px 10px; margin-bottom:8px; font-size:12.5px; }
+  .crumb { font-size:13px; color:var(--muted); } .crumb b { color:var(--text); }
+  .sbar { width:300px; flex:none; background:var(--bg1); border-right:1px solid var(--line); padding:10px; overflow:hidden; }
+  .srow { padding:7px 8px; border-radius:6px; font-size:13px; } .srow.on { background:#fff; border:1px solid var(--line); }
+  .srow .m { font-size:11.5px; color:var(--muted); }
+  .modal { position:absolute; left:50%; top:90px; transform:translateX(-50%); width:520px; background:#fff; border:1px solid var(--line); border-radius:10px; box-shadow:0 16px 40px rgba(0,0,0,.25); padding:18px; z-index:6; }
+  .code { font:600 22px/1.2 ui-monospace,Menlo,monospace; letter-spacing:2px; background:var(--bg1); border:1px solid var(--line); border-radius:8px; padding:10px; text-align:center; margin:10px 0; }
+  .cmd { font:12.5px/1.5 ui-monospace,Menlo,monospace; background:#0d1117; color:#c9d1d9; border-radius:8px; padding:8px 10px; display:flex; justify-content:space-between; }
+  .shade { position:absolute; inset:0; background:rgba(0,0,0,.18); z-index:5; }
+  .setnav { width:200px; flex:none; border-right:1px solid var(--line); padding:14px 10px; background:var(--bg1); }
+  .setnav div { padding:7px 10px; border-radius:6px; font-size:13.5px; } .setnav .on { background:#fff; border:1px solid var(--line); font-weight:600; }
+  .syscard { background:#fff; border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:10px; font-size:13px; }
+  .pill { font-size:11px; padding:1px 8px; border-radius:10px; background:#dafbe1; color:var(--green); }
 </style>
 </head>
 <body>
-<h1>naozhi dashboard 新原型 —— 精简版</h1>
-<p class="sub">对应 <code>docs/rfc/planner.md</code> v7 与 D75：<b>一个主屏 + 一个状态页</b>，没有顶层导航，也不再有专家视图模式。主屏三栏：左栏会话列表（等你 · Planner · 按工作区分组）、中间对话、右栏工作台（预览 · 产出 · 文件 · 详情；默认关闭，有可预览产物时自动打开并收起左栏；不放代码 diff）。三个面仍在：对话面 = 中栏，监督面 = 列表里的"等你"与 Planner + 状态页，工作台面 = 右栏。所有内容均为示意数据。</p>
+<h1>naozhi dashboard —— 新增 Planner 页面</h1>
+<p class="sub">对应 <code>docs/rfc/planner.md</code> v7 与 D77：<b>现有视图全部保留，活动栏新增一个"Planner"页面</b>。橙色虚线框 = 相对现有 dashboard 新增的部分。Planner 页面三栏：左栏只有"等你"与"答应你的"，中栏 Planner 对话（会话卡片在本页打开），右栏工作台（默认关闭，有产出时自动打开并收起左栏）。所有内容均为示意数据。</p>
 
 <div class="shot">
-<h2>① 主屏 · 和会话结对：左栏列表 + 对话，右栏关闭</h2>
-<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#s=jd-arch</span></div><div class="top"><span class="logo">naozhi</span><span class="sp"></span><span class="health">⚠ Midway 2 小时后过期</span><span class="avatar">我</span></div><div class="body"><div class="list"><div class="lhead"><span class="btn">＋ 新话题</span><span class="btn" style="flex:none">🔍</span></div><div class="grp"><span>等你 · 2</span></div><div class="li wait"><div class="l1"><span class="dot d-wait"></span><b>发版 v0.1.46？</b><span class="ic"></span></div><div class="l2">naozhi · 每次确认 · 12 分钟</div></div><div class="li wait"><div class="l1"><span class="dot d-wait"></span><b>副本数 2 → 3？</b><span class="ic"></span></div><div class="l2">ClickHouse 压测 · 40 分钟</div></div><div class="grp"><span>　</span></div><div class="li"><div class="l1"><span class="dot d-pl"></span><b>🧭 Planner</b><span class="ic"></span></div><div class="l2">早报 · 答应你的 2 · 提议 1</div></div><div class="grp"><span>naozhi</span><span>3</span></div><div class="li"><div class="l1"><span class="dot d-run"></span><b>处理 review issues</b><span class="ic">⚙🧭</span></div><div class="l2">正在跑测试 · 第 3/5 项验收</div></div><div class="li"><div class="l1"><span class="dot d-idle"></span><b>flaky 清扫</b><span class="ic">🧭</span></div><div class="l2">提议 2 · 等你审阅</div></div><div class="grp"><span>JD 客户</span><span>2</span></div><div class="li on"><div class="l1"><span class="dot d-run"></span><b>网络架构图</b><span class="ic"></span></div><div class="l2">正在改 arch.html · 1/2</div></div><div class="li"><div class="l1"><span class="dot d-wait"></span><b>ClickHouse 压测</b><span class="ic"></span></div><div class="l2">等你回复 · 40 分钟</div></div><div class="grp"><span>你的一天</span></div><div class="li"><div class="l1"><span class="dot d-ok"></span><b>收件箱巡检</b><span class="ic"></span></div><div class="l2">例行任务 · 下次 12:00</div></div><div class="grp"><span>终端里的</span></div><div class="li"><div class="l1"><span class="dot d-quiet"></span><b>claude · ~/Workspace/tmp</b><span class="btn" style="padding:1px 8px;font-size:11.5px">接管</span></div></div></div>
-<div class="center">
-  <div class="chead">网络架构图 <span class="muted" style="font-weight:400">JD 客户</span><span class="sp"></span><span class="btn">⋯</span></div>
-  <div class="stream">
-    <div class="msg"><span class="av me">我</span><div class="mbody"><div class="h">你 · 10:02</div>TGW 方案图里，把共享 VPC 去掉，换成网络账号集中出口</div></div>
-    <div class="msg"><span class="av gw">S</span><div class="mbody"><div class="h">10:04</div>已改 <u>arch.html</u>：移除共享 VPC，新增 Network 账号与 TGW 集中出口，出口路由表按 BU 隔离。</div></div>
-    <div class="msg"><span class="av pl">P</span><div class="mbody"><div class="h">Planner · 旁注（只给你看）</div>
-      <div class="card advice" style="margin:0">上周三你和客户确认过"出口按 BU 分账"，集中出口后 NAT 费用会落在网络账号。要在图上标出分摊方式吗？<div class="muted" style="margin-top:4px">依据：10/21 会议纪要 · <u>转达给会话</u> · <u>忽略</u></div></div></div></div>
-    <div class="msg"><span class="av me">我</span><div class="mbody"><div class="h">你 · 10:06</div>要，加一行注释，费用按 BU 用量分摊</div></div>
-    <div class="msg"><span class="av gw">S</span><div class="mbody"><div class="h">进行中</div><span class="muted">正在改 arch.html · 第 1/2 步</span></div></div>
-  </div>
-  <div class="menu" style="right:18px;top:44px;width:250px">
-    <div class="hi"><span>模型与 effort</span><span class="muted">opus 5.5 · high</span></div><div><span>后端</span><span class="muted">claude</span></div><div><span>节点</span><span class="muted">Mac</span></div>
-    <div class="sep2"></div><div><span>原始记录</span></div><div><span>工作流与 agent</span></div><div><span>托管</span><span class="muted">关</span></div>
-    <div class="sep2"></div><div><span style="color:var(--red)">关闭会话</span></div>
-  </div>
-  <div class="menu" style="left:22px;bottom:104px;width:300px">
-    <div class="hi"><span>/model</span><span class="muted">切换模型</span></div><div><span>/effort</span><span class="muted">调整思考强度</span></div><div><span>/cd</span><span class="muted">切换工作目录</span></div><div><span>/new</span><span class="muted">新话题</span></div><div><span>/cron</span><span class="muted">例行任务</span></div>
-  </div>
-  <div class="composer">
-    <div class="target"><span>→ 网络架构图 ▾</span><span>交给 Planner</span></div>
-    <div class="input"><span>说点什么… 输入 / 查看命令</span><span>📷 🎙 ↑</span></div>
-  </div>
-</div></div></div>
-<p class="note">左栏就是会话列表：顶部"等你"是等你的事唯一的位置，下面是置顶的 Planner 和按工作区分组的会话（圆点 = 运行 / 等你 / 空闲 / 失败，⚙ = 托管，🧭 = Planner 派出），"终端里的"会话可直接接管。顶栏只有一个健康指示和头像。原专家视图的能力：斜杠命令在输入框打 / 补全（左下），tuning、后端、节点、git、原始记录、工作流在会话"⋯"菜单（右上）。</p>
+<h2>① Planner 页面 · 常态：左栏只有"等你"和"答应你的"，中栏是 Planner 对话</h2>
+<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#planner</span></div><div class="body" style="position:relative"><div class="ab"><div class="it on new"><span class="newtag" style="right:-14px;top:-10px">新增</span><span class="g">🧭</span>Planner<span class="count">2</span></div><div class="it"><span class="g">💬</span>会话</div><div class="it"><span class="g">▦</span>资产</div><div class="it"><span class="g">📁</span>文件</div><div class="it"><span class="g">⏰</span>自动化</div><div class="it"><span class="g">🖥</span>系统</div><div class="it bot"><span class="g">⚙</span>设置</div></div><div class="pcol">
+  <div class="h"><span>等你 · 2</span></div>
+  <div class="wcard"><b>发版 v0.1.46？</b><div class="muted">naozhi · 每次确认 · 12 分钟</div><div class="btns" style="margin-top:6px"><span class="btn pri">发版</span><span class="btn">稍后</span></div></div>
+  <div class="wcard"><b>副本数 2 → 3？</b><div class="muted">ClickHouse 压测 · 40 分钟</div><div class="muted">不可逆，等你决定 · <u>打开</u></div></div>
+  <div class="h" style="margin-top:14px"><span>答应你的 · 2</span></div>
+  <div class="ccard">全部合并后告诉你<div class="muted">review issues · 18/24</div></div>
+  <div class="ccard">周五前整理 JD 会前材料<div class="muted" style="color:var(--amber)">今天到期 · 草稿已备好</div></div>
 </div>
-
-<div class="shot">
-<h2>② 主屏 · 会话产出可预览的东西：右栏自动打开，左栏收成窄条</h2>
-<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#s=jd-arch&panel=preview</span></div><div class="top"><span class="logo">naozhi</span><span class="sp"></span><span class="health">⚠ Midway 2 小时后过期</span><span class="avatar">我</span></div><div class="body"><div class="strip"><span class="b">☰</span><span class="b">📥<span class="count">2</span></span><span class="b">🧭<span class="dot d-pl" style="position:absolute;top:-2px;right:-6px"></span></span></div>
 <div class="center">
-  <div class="chead">网络架构图 <span class="muted" style="font-weight:400">JD 客户</span><span class="sp"></span><span class="btn">⋯</span></div>
-  <div class="stream">
-    <div class="msg"><span class="av me">我</span><div class="mbody"><div class="h">你 · 10:02</div>TGW 方案图里，把共享 VPC 去掉，换成网络账号集中出口</div></div>
-    <div class="msg"><span class="av gw">S</span><div class="mbody"><div class="h">10:04</div>已改 <u>arch.html</u>：移除共享 VPC，新增 Network 账号与 TGW 集中出口，出口路由表按 BU 隔离。</div></div>
-    <div class="msg"><span class="av pl">P</span><div class="mbody"><div class="h">Planner · 旁注（只给你看）</div>
-      <div class="card advice" style="margin:0">上周三你和客户确认过"出口按 BU 分账"，集中出口后 NAT 费用会落在网络账号。要在图上标出分摊方式吗？<div class="muted" style="margin-top:4px">依据：10/21 会议纪要 · <u>转达给会话</u> · <u>忽略</u></div></div></div></div>
-    <div class="msg"><span class="av me">我</span><div class="mbody"><div class="h">你 · 10:06</div>要，加一行注释，费用按 BU 用量分摊</div></div>
-    <div class="msg"><span class="av gw">S</span><div class="mbody"><div class="h">10:07</div>已在图上加注释"NAT 费用按 BU 用量分摊"。右侧预览已刷新。</div></div>
-  </div>
-  <div class="composer">
-    <div class="target"><span>→ 网络架构图 ▾</span><span>交给 Planner</span></div>
-    <div class="input"><span>说点什么… 输入 / 查看命令</span><span>📷 🎙 ↑</span></div>
-  </div>
-</div>
-<div class="rp" style="width:600px">
-  <div class="rph"><span class="on">预览</span><span>产出 3</span><span>文件</span><span>详情</span><span class="sp"></span><span class="muted">⤢ 放大</span><span class="muted">✕</span></div>
-  <div class="sbody">
-    <div class="prev"><div class="bar2"><span>arch.html · 目录级预览 · 跟随刷新</span><span>↗ 新窗口</span></div>
-      <div style="padding:28px 14px;text-align:center">
-        <div class="archbox" style="border-color:#0969da;padding:10px 18px">Network 账号<br><b>TGW · 集中出口</b></div><br><br>
-        <div class="archbox" style="border-color:#1a7f37;padding:10px 18px">BU-A VPC</div><div class="archbox" style="border-color:#1a7f37;padding:10px 18px">BU-B VPC</div><div class="archbox" style="border-color:#1a7f37;padding:10px 18px">BU-C VPC</div><br><br>
-        <div class="archbox" style="border-color:#9a6700">注：NAT 费用按 BU 用量分摊</div>
-        <div class="muted" style="margin-top:18px">CSS / 图片等相对路径资源可加载，可交互</div>
-      </div></div>
-  </div>
-</div></div></div>
-<p class="note">右栏默认关闭；会话产出可预览的东西时自动打开（与现在的逻辑一致），同时左栏收成 48px 窄条，只留展开、"等你"角标、Planner 状态点，视线集中在对话和预览上；关掉右栏，左栏自动恢复。右栏四个页签：预览 · 产出（这个会话做出来的东西）· 文件 · 详情（契约、血缘、计数、工作流、agent 下钻）。不放代码 diff：审阅交给 agent 的评审与 CI。</p>
-</div>
-
-<div class="shot">
-<h2>③ 主屏 · Planner 对话：早报、回执、派出的会话、意见、提议</h2>
-<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#planner</span></div><div class="top"><span class="logo">naozhi</span><span class="sp"></span><span class="health">⚠ Midway 2 小时后过期</span><span class="avatar">我</span></div><div class="body"><div class="list"><div class="lhead"><span class="btn">＋ 新话题</span><span class="btn" style="flex:none">🔍</span></div><div class="grp"><span>等你 · 2</span></div><div class="li wait"><div class="l1"><span class="dot d-wait"></span><b>发版 v0.1.46？</b><span class="ic"></span></div><div class="l2">naozhi · 每次确认 · 12 分钟</div></div><div class="li wait"><div class="l1"><span class="dot d-wait"></span><b>副本数 2 → 3？</b><span class="ic"></span></div><div class="l2">ClickHouse 压测 · 40 分钟</div></div><div class="grp"><span>　</span></div><div class="li on"><div class="l1"><span class="dot d-pl"></span><b>🧭 Planner</b><span class="ic"></span></div><div class="l2">早报 · 答应你的 2 · 提议 1</div></div><div class="grp"><span>naozhi</span><span>3</span></div><div class="li"><div class="l1"><span class="dot d-run"></span><b>处理 review issues</b><span class="ic">⚙🧭</span></div><div class="l2">正在跑测试 · 第 3/5 项验收</div></div><div class="li"><div class="l1"><span class="dot d-idle"></span><b>flaky 清扫</b><span class="ic">🧭</span></div><div class="l2">提议 2 · 等你审阅</div></div><div class="grp"><span>JD 客户</span><span>2</span></div><div class="li"><div class="l1"><span class="dot d-run"></span><b>网络架构图</b><span class="ic"></span></div><div class="l2">正在改 arch.html · 1/2</div></div><div class="li"><div class="l1"><span class="dot d-wait"></span><b>ClickHouse 压测</b><span class="ic"></span></div><div class="l2">等你回复 · 40 分钟</div></div><div class="grp"><span>你的一天</span></div><div class="li"><div class="l1"><span class="dot d-ok"></span><b>收件箱巡检</b><span class="ic"></span></div><div class="l2">例行任务 · 下次 12:00</div></div><div class="grp"><span>终端里的</span></div><div class="li"><div class="l1"><span class="dot d-quiet"></span><b>claude · ~/Workspace/tmp</b><span class="btn" style="padding:1px 8px;font-size:11.5px">接管</span></div></div></div>
-<div class="center">
-  <div class="chead">🧭 Planner <span class="muted" style="font-weight:400">只出意见 · 空闲</span><span class="sp"></span><span class="btn">⋯</span></div>
+  <div class="chead">🧭 Planner <span class="muted" style="font-weight:400">只出意见 · 空闲</span></div>
   <div class="stream">
     <div class="msg"><span class="av gw">⚙</span><div class="mbody"><div class="h">早报 · 08:30</div><div class="card" style="margin:0">昨晚合并 9 个 PR · <b>1 件事等你</b> · <b>1 个承诺今天到期</b>（JD 会前材料） <u>展开</u></div></div></div>
     <div class="msg"><span class="av me">我</span><div class="mbody"><div class="h">你 · 09:12</div>交给你：剩下的 review issue 都处理完，每个 issue 一个 PR，我出去一趟</div></div>
     <div class="msg"><span class="av pl">P</span><div class="mbody"><div class="h">回执 · 1 秒内</div><span class="rcpt">收到 · 交给 naozhi 工作区 · 已登记承诺"全部合并后告诉你"</span></div></div>
     <div class="msg"><span class="av pl">P</span><div class="mbody"><div class="h">09:13</div>
-      <div class="card sess" style="margin:0"><div class="t">处理 review issues <span class="ic">⚙🧭</span><span class="sp"></span><span class="muted">打开 ›</span></div>
+      <div class="card sess" style="margin:0"><div class="t">处理 review issues <span class="ic">⚙</span><span class="sp"></span><span class="muted">打开 ›</span></div>
         <div class="muted" style="margin-top:4px">正在跑测试 · 第 3/5 项验收 · 18/24 PR</div>
         <div class="undo">⚙ 已按建议执行：方案 A（2 分钟无回应）· 撤回</div></div></div></div>
     <div class="msg"><span class="av pl">P</span><div class="mbody"><div class="h">意见 · 08:05</div>
       <div class="card advice" style="margin:0">#3664 在改症状，根因在出队顺序（工作区幕僚评审）。已发给会话，它接受了。<span class="muted">依据：<u>queue.go:88@a41f</u> · <u>CI #9123</u></span></div></div></div>
     <div class="msg"><span class="av pl">P</span><div class="mbody"><div class="h">提议 · 09:40</div>
-      <div class="card inline-card" style="margin:0">CI 已绿、12 个 PR 已合并。你过去 9 次合并后都发版，v0.1.46 的 changelog 已备好。<span class="chip red">每次确认</span><div class="btns"><span class="btn pri">发版</span><span class="btn">看 changelog</span><span class="btn">今天不发</span><span class="muted" style="align-self:center">18 分钟后过期</span></div></div></div></div>
-  </div>
-  <div class="menu" style="right:14px;top:-4px;width:220px">
-    <div class="hi"><span>状态与懂你</span><span class="muted">›</span></div><div><span>资产（skills / agents）</span><span class="muted">›</span></div>
-    <div class="sep2"></div><div><span>暂停推送</span><span class="muted">1 小时 ▾</span></div><div><span>暂停托管</span></div><div><span style="color:var(--red);font-weight:600">急停</span></div>
-  </div>
-  <div class="composer">
-    <div class="target"><span>→ Planner</span><span class="muted">@工作区 限定范围 · 一句话改设置："晚上别推""可以替我继续"</span></div>
-    <div class="input"><span>交代、追问、改设置…</span><span>🎙 ↑</span></div>
-  </div>
+      <div class="card inline-card" style="margin:0">CI 已绿、12 个 PR 已合并。你过去 9 次合并后都发版，v0.1.46 的 changelog 已备好。<span class="chip red">每次确认</span><div class="btns"><span class="btn pri">发版</span><span class="btn">看 changelog</span><span class="btn">今天不发</span></div></div></div></div></div>
+  <div class="composer"><div class="target"><span>→ Planner</span><span class="muted">@工作区 限定范围 · 一句话改设置："晚上别推""可以替我继续"</span></div><div class="input"><span>交代、追问、改设置…</span><span>🎙 ↑</span></div></div>
 </div></div></div>
-<p class="note">Planner 是列表里置顶的一项，不再单独占一个页面：早报、回执、派出的会话卡片、意见、提议、答应你的事都在它的对话里。"等你"里的卡片点开即跳到所属对话原地处理。右上头像菜单（图中展开）只有：状态与懂你、资产、三级停止。</p>
+<p class="note">活动栏最上面新增"Planner"一项，角标是"等你"的数量；现有的会话 · 资产 · 文件 · 自动化 · 系统 · 设置都不动。Planner 页面左栏只有两组：等你（需要你决定的事，可以直接点按钮）和答应你的（Planner 登记的承诺）。没有"Planner"条目（页面本身就是）、没有"最近"、没有"全部会话"——完整会话列表在现有"会话"视图里。</p>
 </div>
 
 <div class="shot">
-<h2>④ 右栏放大：全屏看产物</h2>
-<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#s=jd-arch&amp;panel=outputs&amp;full=1</span></div><div class="top"><span class="logo">naozhi</span><span class="sp"></span><span class="health">⚠ Midway 2 小时后过期</span><span class="avatar">我</span></div><div class="body">
-<div class="rp" style="flex:1;border-left:none">
-  <div class="rph"><span class="muted">网络架构图 ·</span><span>预览</span><span class="on">产出 3</span><span>文件</span><span>详情</span><span class="sp"></span><span class="muted">⤡ 还原</span><span class="muted">✕</span></div>
-  <div style="flex:1;display:flex;min-height:0">
-    <div style="width:260px;flex:none;border-right:1px solid var(--line);padding:10px;background:var(--bg1)">
-      <div class="tree">
-        <div class="r">这个会话的产出</div>
-        <div class="on">📐 arch.html　<span class="muted">10:07 更新</span></div>
-        <div>📝 会前材料.md　<span class="muted">10:12</span></div>
-        <div>📊 NAT 费用估算.xlsx　<span class="muted">10:15</span></div>
-        <div class="r">所有会话 · 成品库</div>
-        <div>📄 PR #3701 修 flaky　<span class="chip">待审</span></div>
-        <div>🖼 dashboard 截图 ×3</div>
-        <div>📑 Q4 架构评审.pptx</div>
+<h2>② Planner 页面 · 点开会话卡片：在本页中栏打开，一键返回</h2>
+<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#planner/s=review-issues</span></div><div class="body" style="position:relative"><div class="ab"><div class="it on new"><span class="newtag" style="right:-14px;top:-10px">新增</span><span class="g">🧭</span>Planner<span class="count">2</span></div><div class="it"><span class="g">💬</span>会话</div><div class="it"><span class="g">▦</span>资产</div><div class="it"><span class="g">📁</span>文件</div><div class="it"><span class="g">⏰</span>自动化</div><div class="it"><span class="g">🖥</span>系统</div><div class="it bot"><span class="g">⚙</span>设置</div></div><div class="pcol">
+  <div class="h"><span>等你 · 2</span></div>
+  <div class="wcard"><b>发版 v0.1.46？</b><div class="muted">naozhi · 每次确认 · 12 分钟</div><div class="btns" style="margin-top:6px"><span class="btn pri">发版</span><span class="btn">稍后</span></div></div>
+  <div class="wcard"><b>副本数 2 → 3？</b><div class="muted">ClickHouse 压测 · 40 分钟</div><div class="muted">不可逆，等你决定 · <u>打开</u></div></div>
+  <div class="h" style="margin-top:14px"><span>答应你的 · 2</span></div>
+  <div class="ccard">全部合并后告诉你<div class="muted">review issues · 18/24</div></div>
+  <div class="ccard">周五前整理 JD 会前材料<div class="muted" style="color:var(--amber)">今天到期 · 草稿已备好</div></div>
+</div>
+<div class="center">
+  <div class="chead"><span class="crumb">🧭 Planner › <b>处理 review issues</b></span><span class="ic">⚙</span><span class="sp"></span><span class="muted" style="font-weight:400">‹ 返回 Planner</span><span class="btn">⋯</span></div>
+  <div class="stream">
+    <div class="card" style="background:#f3f8ff;border-color:#b6d7ff"><div class="stl">正在跑测试 · 第 3/5 项验收</div><div class="bar"><i style="width:72%"></i></div><div class="muted">18/24 PR · 最近一次检查 08:05 · 健康：活跃 · <u>原始记录</u></div></div>
+    <div class="tl">
+      <div class="ev ok">阶段 3 完成 · 14 个 PR 已合并 <span class="muted">07:12</span></div>
+      <div class="ev auto">⚙ 已按建议执行：方案 A（2 分钟无回应）<span class="muted">07:40</span> <span class="undo">撤回</span></div>
+      <div class="ev adv">🧭 意见：#3664 在改症状，根因在出队顺序 <span class="muted">08:05</span></div>
+      <div class="ev">会话回应：接受，已改为调整出队顺序 <span class="muted">08:09</span></div>
+      <div class="ev auto">⚙ 地区 400 · 退避 2 分钟后恢复 <span class="muted">08:31</span></div>
+      <div class="ev ok">验证通过：#3688–#3705 全部 CI 绿 <span class="muted">09:02</span></div>
+      <div class="ev">阶段 4 进行中 · 18/24 <span class="muted">09:38</span></div>
+    </div>
+  </div>
+  <div class="composer"><div class="target"><span>→ 处理 review issues</span><span>交给 Planner</span></div><div class="input"><span>追问或调整方向…（直通 CC 队列）</span><span>↑</span></div></div>
+</div></div></div>
+<p class="note">Planner 对话里的会话卡片点开后，就在本页中栏打开，顶部是面包屑"Planner › 会话名"，"‹ 返回 Planner"回到对话；不用切到"会话"视图，也就不需要在左栏再列一遍会话。会话内容只看里程碑（状态三层），"原始记录"展开工具调用。</p>
+</div>
+
+<div class="shot">
+<h2>③ Planner 页面 · 有产出可预览：右栏自动打开，左栏收成窄条</h2>
+<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#planner&panel=outputs</span></div><div class="body" style="position:relative"><div class="ab"><div class="it on new"><span class="newtag" style="right:-14px;top:-10px">新增</span><span class="g">🧭</span>Planner<span class="count">2</span></div><div class="it"><span class="g">💬</span>会话</div><div class="it"><span class="g">▦</span>资产</div><div class="it"><span class="g">📁</span>文件</div><div class="it"><span class="g">⏰</span>自动化</div><div class="it"><span class="g">🖥</span>系统</div><div class="it bot"><span class="g">⚙</span>设置</div></div><div class="strip"><span class="b">☰</span><span class="b">⏳<span class="count">2</span></span><span class="b">🤝<span class="dot d-pl" style="position:absolute;top:-2px;right:-6px"></span></span></div>
+<div class="center">
+  <div class="chead">🧭 Planner <span class="muted" style="font-weight:400">只出意见 · 空闲</span></div>
+  <div class="stream">
+    <div class="msg"><span class="av me">我</span><div class="mbody"><div class="h">你 · 10:20</div>JD 周五的会前材料弄好了吗</div></div>
+    <div class="msg"><span class="av pl">P</span><div class="mbody"><div class="h">10:20</div>草稿已备好，在右边。按你的写作风格写的：先结论后细节。客户上周提的两个问题（出口分账、跨区容灾）都覆盖了。<div class="btns"><span class="btn">发给客户…</span><span class="btn">改一下：加上费用估算</span></div></div></div>
+  </div>
+  <div class="composer"><div class="target"><span>→ Planner</span></div><div class="input"><span>交代、追问、改设置…</span><span>🎙 ↑</span></div></div>
+</div>
+<div class="rp" style="width:560px">
+  <div class="rph"><span class="on">预览</span><span>产出 2</span><span>文件</span><span>详情</span><span class="sp"></span><span class="muted">⤢ 放大</span><span class="muted">✕</span></div>
+  <div class="sbody">
+    <div class="prev"><div class="bar2"><span>JD 会前材料.md · Markdown 渲染</span><span>↗　⬇</span></div>
+      <div style="padding:14px 16px;font-size:13px;line-height:1.6">
+        <b style="font-size:16px">JD 网络架构评审 · 会前材料</b>
+        <div style="margin-top:8px"><b>结论</b>：建议采用网络账号集中出口（TGW），NAT 费用按 BU 用量分摊。</div>
+        <div style="margin-top:6px"><b>回应上周的两个问题</b></div>
+        <div>1. 出口分账：按 BU 的出口流量计量，月度分摊……</div>
+        <div>2. 跨区容灾：主备区域各一套 TGW，故障切换 &lt; 5 分钟……</div>
+        <div style="margin-top:6px"><b>附</b>：<u>arch.html</u>（架构图）</div>
+      </div></div>
+  </div>
+</div></div></div>
+<p class="note">右栏工作台的逻辑和现有一致：默认关闭，有可预览的产出时自动打开；打开时 Planner 页面的左栏收成 48px 窄条（展开、等你角标、答应你的状态点），关掉恢复。页签：预览 · 产出 · 文件 · 详情；不放代码 diff。</p>
+</div>
+
+<div class="shot">
+<h2>④ 现有"会话"视图：只加两处——Planner 旁注、"交给 Planner"</h2>
+<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#chat&s=jd-arch</span></div><div class="body" style="position:relative"><div class="ab"><div class="it new"><span class="newtag" style="right:-14px;top:-10px">新增</span><span class="g">🧭</span>Planner<span class="count">2</span></div><div class="it on"><span class="g">💬</span>会话</div><div class="it"><span class="g">▦</span>资产</div><div class="it"><span class="g">📁</span>文件</div><div class="it"><span class="g">⏰</span>自动化</div><div class="it"><span class="g">🖥</span>系统</div><div class="it bot"><span class="g">⚙</span>设置</div></div>
+<div class="sbar">
+  <div class="row" style="justify-content:space-between;margin-bottom:8px"><b style="font-size:13px">会话</b><span class="btn">＋ 新建会话</span></div>
+  <div class="muted" style="margin:6px 4px">JD 客户</div>
+  <div class="srow on">网络架构图<div class="m">正在改 arch.html</div></div>
+  <div class="srow">ClickHouse 压测<div class="m">等你回复 · 40 分钟</div></div>
+  <div class="muted" style="margin:10px 4px 6px">naozhi</div>
+  <div class="srow">升级 cc<div class="m">空闲</div></div>
+  <div class="srow">处理 review issues<div class="m">运行中 · Planner 派出</div></div>
+  <div class="muted" style="margin:10px 4px 6px">终端里发现的</div>
+  <div class="srow">claude · ~/Workspace/tmp<div class="m">可接管</div></div>
+  <div class="muted" style="margin-top:12px;font-size:11.5px">（现有会话列表，原样保留）</div>
+</div>
+<div class="center">
+  <div class="chead">网络架构图 <span class="chip">JD 客户</span><span class="sp"></span><span class="muted" style="font-weight:400">opus 5.5 · high</span></div>
+  <div class="stream">
+    <div class="msg"><span class="av me">我</span><div class="mbody"><div class="h">你 · 10:02</div>TGW 方案图里，把共享 VPC 去掉，换成网络账号集中出口</div></div>
+    <div class="msg"><span class="av gw">S</span><div class="mbody"><div class="h">10:04</div>已改 <u>arch.html</u>：移除共享 VPC，新增 Network 账号与 TGW 集中出口，出口路由表按 BU 隔离。</div></div>
+    <div class="msg new" style="padding:4px"><span class="newtag">新增</span><span class="av pl">P</span><div class="mbody"><div class="h">Planner · 旁注（只给你看，不进会话上下文）</div>
+      <div class="card advice" style="margin:0">上周三你和客户确认过"出口按 BU 分账"，集中出口后 NAT 费用会落在网络账号。要在图上标出分摊方式吗？<div class="muted" style="margin-top:4px">依据：10/21 会议纪要 · <u>转达给会话</u> · <u>忽略</u></div></div></div></div>
+    <div class="msg"><span class="av me">我</span><div class="mbody"><div class="h">你 · 10:06</div>要，加一行注释，费用按 BU 用量分摊</div></div>
+  </div>
+  <div class="composer"><div class="target"><span>→ 网络架构图</span><span class="new" style="padding:0 6px"><span class="newtag" style="top:-12px;right:-10px">新增</span>交给 Planner</span></div><div class="input"><span>说点什么…（斜杠命令照常可用）</span><span>📷 🎙 ↑</span></div></div>
+</div></div></div>
+<p class="note">现有"会话"视图原样保留：会话列表、新建会话、斜杠命令、tuning、工作流面板都不变。只加两处：Planner 的旁注插在对话流里（只给你看，不进会话上下文）；输入框旁一个"交给 Planner"，把这件事整个交出去。</p>
+</div>
+
+<div class="shot">
+<h2>⑤ 现有"系统"视图：新增"节点"与"全会话健康"两块（图中打开了"连接一台机器"）</h2>
+<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#system</span></div><div class="body" style="position:relative"><div class="ab"><div class="it new"><span class="newtag" style="right:-14px;top:-10px">新增</span><span class="g">🧭</span>Planner<span class="count">2</span></div><div class="it"><span class="g">💬</span>会话</div><div class="it"><span class="g">▦</span>资产</div><div class="it"><span class="g">📁</span>文件</div><div class="it"><span class="g">⏰</span>自动化</div><div class="it on"><span class="g">🖥</span>系统</div><div class="it bot"><span class="g">⚙</span>设置</div></div>
+<div class="center">
+  <div class="chead">系统</div>
+  <div class="page">
+    <div class="grid2">
+      <div>
+        <div class="sect"><span>系统任务（内置后台守护，现有）</span></div>
+        <div class="syscard"><b>AutoTitler</b> <span class="pill">已启用</span><div class="muted">周期 5 分钟 · 累计运行 1,204 次 · 最近一次 2 分钟前</div></div>
+        <div class="syscard"><b>attachment-gc</b> <span class="pill">已启用</span><div class="muted">每天 04:00 · 最近一次 成功</div></div>
+        <div class="new" style="margin-top:18px;padding:2px"><span class="newtag">新增</span>
+          <div class="sect" style="margin-top:6px"><span>全会话健康</span><span class="muted">无人负责 0 · 心跳正常</span></div>
+          <div class="syscard"><div class="kv"><span>处理 review issues ⚙</span><span class="chip blue">活跃</span></div><div class="kv"><span>ClickHouse 压测</span><span class="chip red">等你</span></div><div class="kv"><span>claude · ~/Workspace/tmp（终端）</span><span class="chip amber">安静 12 分钟</span></div><div class="muted" style="margin-top:4px">Planner 检查记录 · <u>查看</u></div></div>
+        </div>
+      </div>
+      <div class="new" style="padding:2px"><span class="newtag">新增</span>
+        <div class="sect" style="margin-top:6px"><span>节点</span><span class="btn pri">＋ 连接一台机器</span></div>
+        <div class="syscard"><div class="kv"><span><b>本机 Mac</b>（主控）</span><span class="chip green">在线</span></div><div class="muted">claude · kiro · codex · 仓库 6 · 凭证新鲜 · 磁盘 78%</div></div>
+        <div class="syscard"><div class="kv"><span><b>ec2-dev</b>（us-east-1）</span><span class="chip green">在线</span></div><div class="muted">claude · 仓库 2 · 适合长跑任务 · 2 个会话在跑</div></div>
+        <div class="syscard"><div class="kv"><span><b>home-nuc</b></span><span class="chip">离线 3 天</span></div><div class="muted">上次在线 10-23 · <u>移除</u></div></div>
       </div>
     </div>
-    <div style="flex:1;padding:16px 20px;min-width:0;display:flex;flex-direction:column;gap:12px">
-      <div class="prev" style="flex:1"><div class="bar2"><span>arch.html · 目录级预览 · 跟随刷新</span><span>↗ 新窗口　⬇ 下载</span></div>
-        <div style="padding:60px 14px;text-align:center">
-          <div class="archbox" style="border-color:#0969da;padding:14px 26px;font-size:14px">Network 账号<br><b>TGW · 集中出口</b></div><br><br><br>
-          <div class="archbox" style="border-color:#1a7f37;padding:14px 26px;font-size:14px">BU-A VPC</div><div class="archbox" style="border-color:#1a7f37;padding:14px 26px;font-size:14px">BU-B VPC</div><div class="archbox" style="border-color:#1a7f37;padding:14px 26px;font-size:14px">BU-C VPC</div><br><br><br>
-          <div class="archbox" style="border-color:#9a6700;font-size:13px">注：NAT 费用按 BU 用量分摊</div>
-        </div></div>
-      <div class="row"><span class="btn">对这个产出说："把出口改成双活"</span><span class="btn">发给客户…</span></div>
-    </div>
   </div>
-</div></div></div>
-<p class="note">右栏点"⤢ 放大"后占满窗口，专心看产物：左侧是这个会话的产出与所有会话的成品库，中间是全尺寸预览（HTML 目录级可交互、Markdown、图片、PDF、幻灯片）。对产出的修改直接说给会话；"发给客户"这类对外动作会走外发确认卡片。"⤡ 还原"回到②。</p>
 </div>
-<div class="shot">
-<h2>⑤ 状态页 · 运行状况（从头像菜单进入，平时很少来）</h2>
-<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#status</span></div><div class="top"><span class="logo">naozhi</span><span class="sp"></span><span class="health">⚠ Midway 2 小时后过期</span><span class="avatar">我</span></div><div class="body">
-<div class="center">
-  <div class="chead">状态 <span class="sp"></span><span class="tabs"><span class="on">运行状况</span><span>懂你</span><span>资产</span></span><span class="sp"></span><span class="muted">‹ 回到对话</span></div>
-  <div class="page">
-    <div class="grid4"><div class="tile warn"><div class="k">Midway</div><div class="v">2 小时后过期</div></div><div class="tile good"><div class="k">Bedrock / 网络</div><div class="v">正常 · us-east-1</div></div><div class="tile good"><div class="k">master CI</div><div class="v">绿</div></div><div class="tile"><div class="k">Planner</div><div class="v">空闲 · 只出意见</div></div></div>
-    <div class="sect" style="margin-top:14px"><span>全会话健康（含未托管、终端外部、远程节点）</span><span class="muted">无人负责 0 · 心跳正常</span></div>
-    <table><tr><th>会话</th><th>工作区</th><th>健康</th><th>最后活动</th><th>上次检查</th></tr>
-      <tr><td>处理 review issues ⚙🧭</td><td>naozhi</td><td><span class="chip blue">活跃</span></td><td>刚刚</td><td>08:05 · 意见 1 条</td></tr>
-      <tr><td>ClickHouse 压测</td><td>JD 客户</td><td><span class="chip red">等你</span></td><td>40 分钟前</td><td>—</td></tr>
-      <tr><td>claude · ~/Workspace/tmp（终端）</td><td>—</td><td><span class="chip amber">安静 12 分钟</span></td><td>12 分钟前</td><td>只有快照</td></tr>
-    </table>
-    <div class="grid2" style="margin-top:14px">
-      <div class="card"><b>例行任务</b><span class="muted">（原 cron 面板）· 一句话即可新建</span><div class="kv"><span>flaky 清扫</span><span class="v">每天 03:00 · 提议</span></div><div class="kv"><span>收件箱巡检</span><span class="v">10–19 点每 3 小时</span></div><div class="kv"><span>早报</span><span class="v">工作日 08:30</span></div></div>
-      <div class="card"><b>Planner 检查记录</b><div style="font-size:13px;margin-top:6px">08:05 被"第一份 diff"唤醒 → 派工作区幕僚评审 → 给会话一条意见</div><div class="muted">依据 2 条 · <u>这不对</u> · <u>全部记录</u></div><div class="kv" style="margin-top:6px"><span>naozhi 新版本 v0.1.47</span><span class="v"><u>查看并生效</u></span></div></div>
-    </div>
-  </div>
+<div class="modal" style="left:auto;right:30px;transform:none;top:330px;width:560px">
+  <div style="display:flex;justify-content:space-between"><b style="font-size:15px">连接一台机器</b><span class="muted">✕</span></div>
+  <div class="muted" style="margin-top:4px">在那台机器上运行下面这行命令。它会安装 naozhi（已装则跳过）、写好配置、注册服务，并主动连回这里——那台机器在 NAT 后面也可以。</div>
+  <div class="code" style="font-size:18px;padding:6px">NZ-7K4Q-29XM</div>
+  <div class="cmd" style="font-size:11.5px"><span>curl -fsSL https://raw.githubusercontent.com/…/install.sh | bash &amp;&amp; naozhi join NZ-7K4Q-29XM</span><span style="margin-left:8px;white-space:nowrap">复制</span></div>
+  <div class="kv" style="margin-top:10px"><span>节点名</span><span class="v">ec2-batch（可改）</span></div>
+  <div class="kv"><span>这台机器能做的</span><span class="v">只接受派活（dispatch_only）</span></div>
+  <div class="muted" style="margin-top:8px">⏳ 等待连接… 配对码 14:32 后过期，只能用一次</div>
 </div></div></div>
-<p class="note">状态页从头像菜单进入，三个页签：运行状况 / 懂你 / 资产。运行状况放全会话健康、例行任务（原 cron 面板）、Planner 检查记录与自更新提示——都是"偶尔看一眼"的东西，所以不占主屏。</p>
+<p class="note">现有"系统"视图里的系统任务不变。新增两块：全会话健康（含 Planner 派出、终端里的外部会话），以及节点。"＋ 连接一台机器"弹出配对码与一行命令，在那台机器上粘贴即可：安装、写配置、注册服务并反向连回主控，NAT 后的机器也能连；配对码 15 分钟过期、一次有效。节点默认"只接受派活"。</p>
 </div>
 
 <div class="shot">
-<h2>⑥ 状态页 · 懂你：只有你能改，一句话设置都在这里回显</h2>
-<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#status=me</span></div><div class="top"><span class="logo">naozhi</span><span class="sp"></span><span class="health">⚠ Midway 2 小时后过期</span><span class="avatar">我</span></div><div class="body">
+<h2>⑥ 现有"设置"视图：新增"懂你"分组</h2>
+<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#settings=me</span></div><div class="body" style="position:relative"><div class="ab"><div class="it new"><span class="newtag" style="right:-14px;top:-10px">新增</span><span class="g">🧭</span>Planner<span class="count">2</span></div><div class="it"><span class="g">💬</span>会话</div><div class="it"><span class="g">▦</span>资产</div><div class="it"><span class="g">📁</span>文件</div><div class="it"><span class="g">⏰</span>自动化</div><div class="it"><span class="g">🖥</span>系统</div><div class="it bot on"><span class="g">⚙</span>设置</div></div>
+<div class="setnav">
+  <div>主题</div><div>关于</div><div>系统任务 ›</div>
+  <div class="on new"><span class="newtag" style="right:-6px">新增</span>懂你</div>
+</div>
 <div class="center">
-  <div class="chead">状态 <span class="sp"></span><span class="tabs"><span>运行状况</span><span class="on">懂你</span><span>资产</span></span><span class="sp"></span><span class="muted">‹ 回到对话</span></div>
+  <div class="chead">设置 · 懂你 <span class="sp"></span><span class="muted" style="font-weight:400">平时一句话就能改，这里只是查看与撤销</span></div>
   <div class="page">
     <div class="grid2">
       <div>
         <div class="sect"><span>关注点</span><span class="muted">编辑 ›</span></div>
         <div class="card" style="font-size:13px"><div><span class="chip green">Now</span> Planner 托管 MVP；监控底座</div><div style="margin-top:6px"><span class="chip blue">Next</span> iOS app；工作台面</div><div style="margin-top:6px"><span class="chip">Not-now</span> 多节点；邮箱接入</div></div>
-        <div class="sect"><span>最近的一句话设置</span><span class="muted">可撤销</span></div>
-        <div class="card"><div class="echo" style="margin-top:0">"晚上别推了" → 22:30–08:00 只推紧急 · <u>撤销</u></div><div class="echo">"收件箱每 3 小时看一次就行" → 巡检改为 10–19 点每 3 小时 · <u>撤销</u></div></div>
+        <div class="sect"><span>最近的一句话设置</span></div>
+        <div class="card"><div class="echo" style="margin-top:0">"晚上别推了" → 22:30–08:00 只推紧急 · <u>撤销</u></div><div class="echo">"收件箱每 3 小时看一次就行" → 巡检 10–19 点每 3 小时 · <u>撤销</u></div></div>
         <div class="sect"><span>写作风格</span><span class="muted">从 33 封已发邮件提炼</span></div>
-        <div class="card" style="font-size:13px">中文为主、先结论后细节、不用客套开头；英文邮件用短句。<span class="muted">· 查看 · 修改</span></div>
+        <div class="card" style="font-size:13px">中文为主、先结论后细节、不用客套开头。<span class="muted">· 查看 · 修改</span></div>
       </div>
       <div>
-        <div class="sect"><span>信任阶梯</span><span class="muted">说"可以替我继续"即升一级</span></div>
+        <div class="sect"><span>信任阶梯</span></div>
         <div class="card"><div class="lvl"><span class="on">1 只出意见</span><span>2 代办</span><span>3 指令</span><span>4 执行型主动</span></div></div>
         <div class="sect"><span>授权</span></div>
         <div class="card"><div class="kv"><span>修 flaky 并开 PR</span><span class="v">剩 17 次 · 撤销</span></div><div class="kv"><span>发版 / 对外发信 / 删除远程资源</span><span class="v"><span class="chip red">每次确认</span></span></div></div>
         <div class="sect"><span>Planner 对你的推断</span><span class="muted">没有隐形画像</span></div>
-        <div class="card" style="font-size:13px"><div class="kv"><span>合并后通常发版（9/9）</span><span class="v">来源：先例 · 删除</span></div><div class="kv"><span>回复间隔中位 3.9 分钟</span><span class="v">来源：事件流 · 删除</span></div></div>
+        <div class="card" style="font-size:13px"><div class="kv"><span>合并后通常发版（9/9）</span><span class="v">删除</span></div><div class="kv"><span>回复间隔中位 3.9 分钟</span><span class="v">删除</span></div></div>
       </div>
     </div>
   </div>
 </div></div></div>
-<p class="note">懂你只有一份。平时用一句话设置，这里只是查看与撤销；授权、边界、关注点的修改仍要卡片确认。资产页签是原来的 CC 资产浏览器与记忆。</p>
+<p class="note">现有"设置"视图加一个"懂你"分组：关注点、最近的一句话设置（可撤销）、写作风格、信任阶梯、授权、Planner 对你的推断。三级停止放在 Planner 页面的"⋯"菜单与手机控制中心。</p>
 </div>
 
 </body>
