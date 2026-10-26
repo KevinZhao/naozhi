@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
 )
 
 // WireVersion is the schema version of Record envelopes and <keyhash>.log
@@ -66,41 +65,17 @@ type FileHeader struct {
 	Generator string `json:"gen,omitempty"`
 }
 
-// marshalRecordBufPool reuses bytes.Buffer instances so MarshalRecord avoids
-// json.Marshal's per-call backing-array alloc.
-var marshalRecordBufPool = sync.Pool{
-	New: func() any {
-		return bytes.NewBuffer(make([]byte, 0, 4*1024))
-	},
-}
-
-// marshalRecordPoolMaxCap drops oversized buffers from the pool so a
-// one-off MaxRecordBytes record does not pin memory across the
-// process lifetime.
-const marshalRecordPoolMaxCap = 64 * 1024
-
 // MarshalRecord validates r and serializes it to JSON; the persist layer
 // pairs the bytes with length-prefix framing. Returns ErrRecordTooLarge
-// when the encoding exceeds MaxRecordBytes.
-//
-// The returned []byte is a fresh copy: the pooled buffer is re-filed by the
-// defer, so returning its bytes directly would let the next pool user
-// overwrite a slice a caller still holds (#996). Hot-path callers avoid the
-// copy via MarshalRecordInto.
+// when the encoding exceeds MaxRecordBytes. HTML escaping is OFF here (file
+// headers), unlike MarshalRecordInto; keep both as-is so on-disk bytes do
+// not change.
 func MarshalRecord(r *Record) ([]byte, error) {
 	if err := r.Validate(); err != nil {
 		return nil, err
 	}
-	buf := marshalRecordBufPool.Get().(*bytes.Buffer)
-	defer func() {
-		if buf.Cap() > marshalRecordPoolMaxCap {
-			return
-		}
-		buf.Reset()
-		marshalRecordBufPool.Put(buf)
-	}()
-	buf.Reset()
-	enc := json.NewEncoder(buf)
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(r); err != nil {
 		return nil, fmt.Errorf("marshal record: %w", err)
@@ -113,16 +88,14 @@ func MarshalRecord(r *Record) ([]byte, error) {
 		return nil, fmt.Errorf("record seq=%d size=%d: %w",
 			r.Seq, len(body), ErrRecordTooLarge)
 	}
-	out := make([]byte, len(body))
-	copy(out, body)
-	return out, nil
+	return body, nil
 }
 
 // MarshalRecordInto encodes r and appends it to buf, returning the slice of
 // buf holding the record. buf MUST be empty or already flushed since
 // callers treat the returned slice as a self-contained body. Same
-// validation and ErrRecordTooLarge contract as MarshalRecord, minus the
-// per-call alloc — Persister.handleBatch pools the destination buffer.
+// validation and ErrRecordTooLarge contract as MarshalRecord; on error buf
+// is left untouched.
 func MarshalRecordInto(buf *bytes.Buffer, r *Record) ([]byte, error) {
 	if err := r.Validate(); err != nil {
 		return nil, err
@@ -130,59 +103,19 @@ func MarshalRecordInto(buf *bytes.Buffer, r *Record) ([]byte, error) {
 	if buf == nil {
 		return nil, fmt.Errorf("marshal record: nil buffer")
 	}
-	startLen := buf.Len()
-	// json.NewEncoder allocates an encodeState per call, so borrow a pooled
-	// encoder bound to its own buffer (Encoder has no Reset) and copy the
-	// finished body into buf (#1537).
-	enc := recordEncPool.Get().(*recordEnc)
-	enc.buf.Reset()
 	// Default HTML escaping stays ON: on-disk output must remain
 	// byte-identical to earlier entry records (#1537).
-	if err := enc.enc.Encode(r); err != nil {
-		putRecordEnc(enc)
+	body, err := json.Marshal(r)
+	if err != nil {
 		return nil, fmt.Errorf("marshal record: %w", err)
 	}
-	enc.buf.Truncate(enc.buf.Len() - 1) // Encode always appends one '\n'
-	if enc.buf.Len() > MaxRecordBytes {
-		size := enc.buf.Len()
-		putRecordEnc(enc)
+	if len(body) > MaxRecordBytes {
 		return nil, fmt.Errorf("record seq=%d size=%d: %w",
-			r.Seq, size, ErrRecordTooLarge)
+			r.Seq, len(body), ErrRecordTooLarge)
 	}
-	// Copy into buf so the returned slice outlives the pooled encoder.
-	buf.Write(enc.buf.Bytes())
-	putRecordEnc(enc)
+	startLen := buf.Len()
+	buf.Write(body)
 	return buf.Bytes()[startLen:], nil
-}
-
-// recordEnc pairs a bytes.Buffer with a json.Encoder bound to it so the
-// encodeState scratch is reused across MarshalRecordInto calls.
-type recordEnc struct {
-	buf *bytes.Buffer
-	enc *json.Encoder
-}
-
-var recordEncPool = sync.Pool{
-	New: func() any {
-		buf := bytes.NewBuffer(make([]byte, 0, 4*1024))
-		// HTML escaping stays ON; see MarshalRecordInto.
-		return &recordEnc{buf: buf, enc: json.NewEncoder(buf)}
-	},
-}
-
-// recordEncMaxCap caps buffer reuse so a one-off oversize record does not
-// permanently pin a large heap allocation in the pool.
-const recordEncMaxCap = 64 * 1024
-
-func putRecordEnc(e *recordEnc) {
-	if e == nil {
-		return
-	}
-	if e.buf.Cap() > recordEncMaxCap {
-		return
-	}
-	e.buf.Reset()
-	recordEncPool.Put(e)
 }
 
 // UnmarshalRecord parses one JSON record. Returns ErrUnsupportedVersion for

@@ -8,7 +8,7 @@ import (
 )
 
 // TestMarshalRecordInto_ParsesBackIdentically pins R20260531070014-PERF-3
-// (#1537): swapping the per-call json.NewEncoder for a pooled encoder MUST
+// (#1537): the encoder choice behind MarshalRecordInto MUST
 // NOT change the decoded record. We assert the encoded body round-trips to
 // an equal Record (the on-disk format is consumed only via UnmarshalRecord,
 // so HTML-escape choices are functionally transparent). Plain and
@@ -52,7 +52,7 @@ func TestMarshalRecordInto_ParsesBackIdentically(t *testing.T) {
 }
 
 // TestMarshalRecordInto_StableOutput pins that repeated marshals of the
-// same record produce byte-identical output — the pooled encoder must not
+// same record produce byte-identical output — the encoder must not
 // drift (e.g. carry escape-mode or buffer state) between calls.
 func TestMarshalRecordInto_StableOutput(t *testing.T) {
 	p := []byte(`{"time":1700000002000,"uuid":"bb00","type":"assistant","summary":"a<b>c&d"}`)
@@ -70,30 +70,6 @@ func TestMarshalRecordInto_StableOutput(t *testing.T) {
 		}
 		if !bytes.Equal(got, wantCopy) {
 			t.Fatalf("iter %d output drifted:\n got=%q\nwant=%q", i, got, wantCopy)
-		}
-	}
-}
-
-// TestMarshalRecordInto_PooledEncoderReuse drives many calls through the
-// shared recordEncPool to prove the pooled encoder's scratch buffer is
-// reset between records — a missed Reset would prepend a prior record's
-// bytes to the next one.
-func TestMarshalRecordInto_PooledEncoderReuse(t *testing.T) {
-	const payload = `{"time":1700000000000,"uuid":"cc00","type":"user","summary":"reuse"}`
-	for i := 0; i < 64; i++ {
-		var buf bytes.Buffer
-		got, err := MarshalRecordInto(&buf, NewEntry(uint64(i+1), []byte(payload)))
-		if err != nil {
-			t.Fatalf("iter %d MarshalRecordInto: %v", i, err)
-		}
-		rec, err := UnmarshalRecord(got)
-		if err != nil {
-			t.Fatalf("iter %d UnmarshalRecord: %v", i, err)
-		}
-		// payload has no HTML-escapable chars, so raw bytes match verbatim.
-		if rec.Seq != uint64(i+1) || string(rec.Entry) != payload {
-			t.Fatalf("iter %d pooled-encoder reuse corrupted output: seq=%d entry=%q",
-				i, rec.Seq, rec.Entry)
 		}
 	}
 }

@@ -51,7 +51,7 @@
 //     lets flushScratch be reused without synchronisation.
 //   - flush.go     — when writers are flushed and closed, plus flushScratch.
 //   - writer.go    — the per-key writer: open, flush, close, remove its files.
-//   - pools.go     — the buffer/arena pools the write path reuses.
+//   - pools.go     — log bufio.Writer construction and the test-only logFileWriterHook.
 //   - rotate.go / recovery.go / idx.go / framing.go / keyhash.go / entry.go —
 //     already separate before J9.
 //

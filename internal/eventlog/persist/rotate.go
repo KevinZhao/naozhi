@@ -129,8 +129,8 @@ func (p *Persister) rotate(key, stem string, w *perKeyWriter) error {
 		return fmt.Errorf("reopen idx post-rotate: %w", err)
 	}
 	w.logFile = logFile
-	// close() nilled w.logBuf; rebuild it from the shared pool (#995) or the
-	// next handleBatch nil-derefs it.
+	// close() nilled w.logBuf; rebuild it or the next handleBatch nil-derefs
+	// it.
 	w.logBuf = acquireLogBuf(logFile)
 	w.idxWriter = idxWriter
 	w.bytes = newLogSize
@@ -249,11 +249,8 @@ func spliceLog(srcPath, dstPath string, idxEntries []schema.IdxEntry, cutIdx int
 			return 0, nil, fmt.Errorf("read src frame: %w", err)
 		}
 		if _, err := WriteRecordRaw(dst, body); err != nil {
-			ReleaseFramedBody(body)
 			return 0, nil, fmt.Errorf("write tmp frame: %w", err)
 		}
-		// WriteRecordRaw has consumed body; return it to the pool.
-		ReleaseFramedBody(body)
 
 		// Defensive: skip idx entries pointing between record boundaries
 		// (malformed or sparser-than-expected idx).

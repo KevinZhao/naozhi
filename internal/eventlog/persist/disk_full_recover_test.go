@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -352,3 +353,64 @@ func TestFlush_IdxSyncFailure_Poisons(t *testing.T) {
 		}
 	}
 }
+
+// TestFlushAll_ReportsOneFailingWriterAmongParallelFlushes: with more than
+// two dirty writers flushAllLocked fans out over parallelFsync workers. A
+// failure in one of them must come back from Flush wrapped with that writer's
+// key, and must not stick: the next Flush after the disk recovers succeeds.
+// Not parallel: logFileWriterHook is package-global.
+func TestFlushAll_ReportsOneFailingWriterAmongParallelFlushes(t *testing.T) {
+	p, dir := newTestPersister(t, func(o *Options) { o.FlushInterval = time.Hour })
+	const n = 4
+	const failKey = "errkey-02"
+	full := new(atomic.Bool)
+	failPath := LogPath(dir, failKey)
+	logFileWriterHook = func(f *os.File) io.Writer {
+		if f.Name() != failPath {
+			return f
+		}
+		return fullDisk{f: f, full: full}
+	}
+	t.Cleanup(func() { logFileWriterHook = nil })
+
+	write := func(round int64) {
+		for i := 0; i < n; i++ {
+			key := fmt.Sprintf("errkey-%02d", i)
+			p.SinkFor(key)([]Entry{entry(t, 1700000002000+round*100+int64(i), fmt.Sprintf("r%d-%d", round, i))}, false)
+		}
+	}
+
+	write(0)
+	full.Store(true)
+	err := flushOrFail(t, p)
+	if !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("Flush with one writer on a full disk: err=%v, want ENOSPC", err)
+	}
+	if want := "flush " + failKey + ":"; !strings.Contains(err.Error(), want) {
+		t.Errorf("Flush error %q does not name the failing writer (want %q)", err, want)
+	}
+
+	full.Store(false)
+	write(1)
+	if err := flushOrFail(t, p); err != nil {
+		t.Fatalf("Flush after the disk recovered: %v", err)
+	}
+}
+
+// captureWarnHandler is a minimal slog.Handler that calls onWarn for
+// Warn-level records and forwards everything else to the default handler.
+type captureWarnHandler struct {
+	onWarn func(msg string)
+}
+
+func (h *captureWarnHandler) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= slog.LevelWarn
+}
+func (h *captureWarnHandler) Handle(_ context.Context, r slog.Record) error {
+	if r.Level == slog.LevelWarn && h.onWarn != nil {
+		h.onWarn(r.Message)
+	}
+	return nil
+}
+func (h *captureWarnHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h *captureWarnHandler) WithGroup(_ string) slog.Handler      { return h }

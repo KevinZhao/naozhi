@@ -56,41 +56,16 @@ func (s *sessionSink) accept(entries []Entry, replayPhase bool) {
 	gapN := s.pendingGap.Swap(0)
 
 	// Entry.JSON and the entries slice are borrowed — the producer may reuse
-	// them as soon as accept returns — so copy every body into one pooled
-	// arena and materialise our own headers (#1524). Two passes: append all
-	// bytes first (the buffer may grow and move), then resolve sub-slices.
-	// owned/spans come from the same arena rather than make() (#1630).
-	arena := entryArenaPool.Get().(*batchArena)
-	n := len(entries)
-	owned := arena.owned
-	if cap(owned) >= n {
-		owned = owned[:n]
-	} else {
-		owned = make([]Entry, n)
-	}
-	spans := arena.spans
-	if cap(spans) >= n {
-		spans = spans[:n]
-	} else {
-		spans = make([]arenaSpan, n)
-	}
-	arena.owned = owned
-	arena.spans = spans
+	// them as soon as accept returns — so copy every body and materialise our
+	// own headers (#1524).
+	owned := make([]Entry, len(entries))
 	for i, e := range entries {
-		start := arena.buf.Len()
-		arena.buf.Write(e.JSON)
-		spans[i] = arenaSpan{start: start, end: arena.buf.Len()}
-		owned[i] = Entry{TimeMS: e.TimeMS}
+		owned[i] = Entry{JSON: bytes.Clone(e.JSON), TimeMS: e.TimeMS}
 	}
-	all := arena.buf.Bytes()
-	for i := range owned {
-		owned[i].JSON = all[spans[i].start:spans[i].end]
-	}
-	job := batchJob{Key: s.key, Stem: s.stem, Entries: owned, arena: arena, gapN: gapN}
+	job := batchJob{Key: s.key, Stem: s.stem, Entries: owned, gapN: gapN}
 	select {
 	case p.in <- job:
 	default:
-		putEntryArena(arena)
 		p.droppedCnt.Add(int64(len(entries)))
 		// The swapped-out gap count rides back in plus this batch: the drop
 		// tally survives until a batch finally gets through and materialises
@@ -113,9 +88,8 @@ func (s *sessionSink) accept(entries []Entry, replayPhase bool) {
 // covers lastDrainNS.
 func (p *Persister) handleBatch(job batchJob, now time.Time) {
 	// Stem mid-removal: defer into the per-stem FIFO instead of blocking on
-	// the unlink. The deferred job keeps its arena (the replaying handleBatch
-	// returns it), so return WITHOUT the defer below. Overflow past the cap
-	// takes the channel-full drop path (#1848).
+	// the unlink. Overflow past the cap takes the channel-full drop path
+	// (#1848).
 	if ds, ok := p.dropping[job.Stem]; ok {
 		if len(ds.pending) >= droppingPendingMaxBatches {
 			p.dropDeferral(ds, job)
@@ -125,9 +99,6 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 		return
 	}
 
-	// Return the arena owning this batch's Entry.JSON once every entry is
-	// handled; the defer covers every early return. nil-safe (#1524).
-	defer putEntryArena(job.arena)
 	w, err := p.writerFor(job.Key, job.Stem)
 	if err != nil {
 		p.holdGap(job.Key, gapTally{n: job.gapN, cause: gapChannelFull})
@@ -136,9 +107,8 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 		return
 	}
 
-	// One pooled buffer for the whole batch amortises json's encodeState alloc.
-	encBuf := recordBufPool.Get().(*bytes.Buffer)
-	defer putRecordBuf(encBuf)
+	// One buffer for the whole batch, reset per record.
+	encBuf := new(bytes.Buffer)
 	// One Record reused per entry: MarshalRecordInto only reads it
 	// synchronously and never retains the pointer (#2088).
 	var rec schema.Record
@@ -267,7 +237,6 @@ func (p *Persister) writeGapRecord(job batchJob, w *perKeyWriter, encBuf *bytes.
 // lost events come after every deferred batch, so the tally waits on ds and
 // joins key's gap only once those batches are replayed.
 func (p *Persister) dropDeferral(ds *dropState, job batchJob) {
-	putEntryArena(job.arena)
 	n := len(job.Entries)
 	p.droppedCnt.Add(int64(n))
 	ds.gapKey = job.Key

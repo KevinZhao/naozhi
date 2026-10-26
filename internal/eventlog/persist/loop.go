@@ -112,7 +112,7 @@ func (p *Persister) run() {
 				default:
 					// Replay batches still deferred behind an unlink whose opDropDone
 					// never landed (its goroutine took the closeCh branch); recreating
-					// the file matches the live drop-then-recreate path and frees arenas.
+					// the file matches the live drop-then-recreate path.
 					p.replayDroppingPending()
 					p.shutdownAll()
 					return
@@ -124,7 +124,7 @@ func (p *Persister) run() {
 
 // replayDroppingPending drains every dropState.pending FIFO into
 // handleBatch during Stop's shutdown drain so deferred batches are
-// persisted (and their arenas returned). Run-goroutine only (#1848).
+// persisted. Run-goroutine only (#1848).
 func (p *Persister) replayDroppingPending() {
 	if len(p.dropping) == 0 {
 		return
@@ -186,10 +186,6 @@ func (p *Persister) shutdownAll() {
 // slow disks, so a small bounded pool is intentional.
 const parallelFsyncMaxWorkers = 8
 
-// parallelFsyncWorkers is a test hook pinning the worker count (1 for
-// deterministic ordering); 0 = auto-size up to parallelFsyncMaxWorkers.
-var parallelFsyncWorkers = 0
-
 // parallelFsync fans fn over (keys[i], ws[i]) with a bounded worker pool;
 // 1-2 writers run serially. fn MUST NOT mutate state shared across writer
 // indices (persister-global state must be atomic / mutex-guarded). Joins
@@ -206,19 +202,7 @@ func (p *Persister) parallelFsync(keys []string, ws []*perKeyWriter, fn func(str
 		}
 		return
 	}
-	workers := parallelFsyncWorkers
-	if workers <= 0 {
-		workers = parallelFsyncMaxWorkers
-	}
-	if workers > n {
-		workers = n
-	}
-	if workers == 1 {
-		for i := range ws {
-			fn(keys[i], ws[i])
-		}
-		return
-	}
+	workers := min(parallelFsyncMaxWorkers, n)
 	var idx atomic.Int64
 	var wg sync.WaitGroup
 	wg.Add(workers)

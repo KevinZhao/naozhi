@@ -7,7 +7,7 @@ package persist
 //
 // Entry.JSON is BORROWED (#1524): the producer may reuse its backing array
 // as soon as the PersistSink call returns. Persister.SinkFor's sink copies
-// every Entry.JSON into a pooled per-batch arena before queuing; a custom
+// every Entry.JSON before queuing; a custom
 // sink that retains entries past its own return MUST copy them itself.
 type Entry struct {
 	// JSON is the EventEntry JSON; the Persister wraps it in a schema.Record.
