@@ -2,12 +2,15 @@ package project
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -212,7 +215,7 @@ func TestPreviewableByExt_DoesNotIncludeDotEnv(t *testing.T) {
 // TestIsSensitiveDownloadName covers each matching branch of
 // isSensitiveDownloadName (exact table incl. case folding, the .env-prefix
 // rule R242-SEC-9, the archive-suffix scan R233B-SEC-5, the substring scan
-// #1680) plus the look-alikes that must keep previewing.
+// #1680, the key-material extensions) plus the look-alikes that must keep previewing.
 func TestIsSensitiveDownloadName(t *testing.T) {
 	blocked := []string{
 		// Exact table (R232-SEC-4 / R233B-SEC-5), case-insensitive.
@@ -229,6 +232,8 @@ func TestIsSensitiveDownloadName(t *testing.T) {
 		"db_password.txt",
 		"aws_credentials.txt",
 		"my_private_key.txt",
+		// Key-material extensions.
+		"deploy.pem",
 	}
 	for _, name := range blocked {
 		if !isSensitiveDownloadName(name) {
@@ -1409,7 +1414,7 @@ func TestHandleFileGet_Download(t *testing.T) {
 // ─── HandleFileGet: ETag / 304 ────────────────────────────────────────────────
 
 func TestHandleFileGet_ETag304(t *testing.T) {
-	h, proj, _ := newProjectHandlersForTest(t, map[string]string{
+	h, proj, projDir := newProjectHandlersForTest(t, map[string]string{
 		"a.txt": "hello",
 	})
 
@@ -1421,6 +1426,15 @@ func TestHandleFileGet_ETag304(t *testing.T) {
 	etag := w1.Header().Get("ETag")
 	if etag == "" {
 		t.Fatal("first response missing ETag")
+	}
+	// #418: without FileETagSalt the ETag would be this probe-recoverable hash.
+	info, err := os.Stat(filepath.Join(projDir, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsalted := sha256.Sum256([]byte(strconv.FormatInt(info.Size(), 10) + "|" + strconv.FormatInt(info.ModTime().UnixMilli(), 10) + "|"))
+	if etag == `"`+hex.EncodeToString(unsalted[:12])+`"` {
+		t.Errorf("ETag %s equals the unsalted hash; FileETagSalt dropped from the seed", etag)
 	}
 
 	// Second request with matching If-None-Match → 304.
