@@ -427,7 +427,7 @@ func TestQueue_CleanupReturnsTheQueuedMessages(t *testing.T) {
 		t.Fatalf("Cleanup returned %+v, want f1 then f2", got)
 	}
 	if dropped := q.DiscardAndReturn("k"); dropped != nil {
-		t.Fatalf("discard after Cleanup reported %+v, want nothing (ring already gone)", dropped)
+		t.Fatalf("discard after Cleanup reported %+v, want nothing (queue already gone)", dropped)
 	}
 	q.Enqueue("idle", Msg{Text: "owner"})
 	for _, key := range []string{"idle", "never-seen"} {
@@ -647,7 +647,7 @@ func TestConcurrent_EnqueueDrain(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ShouldNotify dropNotifyTimes path
+// ShouldNotify dropNotify path
 // ---------------------------------------------------------------------------
 //
 // These construct a Queue directly and never touch a Dispatcher.
@@ -672,6 +672,9 @@ func TestShouldNotify_DropPath_Eviction(t *testing.T) {
 	}
 	if q.ShouldNotify("overflow-key") {
 		t.Fatal("overflow key should be cooled down after it fired")
+	}
+	if !q.ShouldNotify("key-0") {
+		t.Fatal("a key evicted at capacity should fire again")
 	}
 	q.mu.Lock()
 	size := len(q.dropNotify)

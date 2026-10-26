@@ -98,7 +98,8 @@ type queue struct {
 }
 
 // dropNotifyMaxKeys bounds dropNotify; inserting past it first drops the
-// entries whose cooldown expired, then everything if none had.
+// entries whose cooldown expired, then everything if none had. A full table
+// still all in cooldown therefore costs at most one extra receipt per key.
 const dropNotifyMaxKeys = 1024
 
 // evictWarnCooldownNs rate-limits the per-key "queue full" eviction Warn so a
@@ -267,9 +268,8 @@ func takeMsgs(sq *sessionQueue) []Msg {
 // giving the entry a fresh generation so a stale owner loop stops on its next
 // DoneOrDrain (/new, /clear, a detached turn's panic, Submit's shutdown
 // drop when Admit fails). The entry is kept; deleting it would be equally
-// safe. The
-// discarded messages come back FIFO so each origin can be told (#2013); nil
-// when nothing was queued.
+// safe. The discarded messages come back FIFO so each origin can be told
+// (#2013); nil when nothing was queued.
 func (q *queue) DiscardAndReturn(key string) []Msg {
 	q.mu.Lock()
 	defer q.mu.Unlock()
