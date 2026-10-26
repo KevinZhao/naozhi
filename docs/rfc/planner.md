@@ -1083,7 +1083,7 @@ naozhi 是这台电脑（及以后的远程节点、沙箱）的入口，界面�
 - 可选的仓库侧缓解（immutable releases、push protection、CODEOWNERS）是否做。
 - 全局 Planner 容量：在真实回放数据上复核"串行不成瓶颈"；工作区幕僚升级常驻的具体阈值。
 - 带建议的选择默认执行：等待窗口（默认 2 分钟 / 你回到会话时）是否合适；可逆动作类别清单的初版。
-- `docs/design/` 下的对象模型图与原型按 v7 更新（全局 Planner、工作区幕僚、承诺、早报）。
+- ~~`docs/design/` 下的对象模型图与原型按 v7 更新~~（10-26 已完成：`planner-object-model.*`、`ios-app-mockup.html` 7 屏、`dashboard-v2-mockup.html` 8 屏、`ios-app.md`）。
 - `defer` 是否可作为长时间等待的默认方式（P0 ③）。
 - 介入配置里各场景的检查清单（先只做默认与 PR 两份）。
 - **手机推送渠道**：候选方案为原生 iOS app（可操作通知 + Live Activity，需付费开发者账号），设计草案见 `docs/design/ios-app.md` 与 `docs/design/ios-app-mockup.html`；过渡方案为 PWA Web Push（iOS 上无通知按钮）或飞书 bot 单聊。
