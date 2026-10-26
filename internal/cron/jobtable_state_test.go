@@ -42,7 +42,7 @@ func TestJobTableRecordResult(t *testing.T) {
 	active.LastSessionID = "old"
 	end := time.Unix(1700000000, 0)
 	c, ok := tbl.recordResult(active.ID, terminalRecord{endedAt: end, result: "r", errMsg: "e", sessionID: "new", errClass: ErrorClass("x"), state: RunStateFailed})
-	if !ok || !c.sessionChanged || c.prev.LastSessionID != "old" {
+	if !ok || c.prev.LastSessionID != "old" {
 		t.Fatalf("record: ok=%v change=%+v", ok, c)
 	}
 	if !active.LastRunAt.Equal(end) || active.LastResult != "r" || active.LastError != "e" || active.LastErrorClass != "x" ||
@@ -52,12 +52,10 @@ func TestJobTableRecordResult(t *testing.T) {
 	if len(c.snap.entries) != 2 || c.snap.seq != 1 || c.snap.entries[0].LastResult != "r" {
 		t.Errorf("snapshot: %d entries, seq %d; want 2 carrying the result at seq 1", len(c.snap.entries), c.snap.seq)
 	}
-	// No session id keeps the old one and is no change; the same one is none either.
-	if c, _ := tbl.recordResult(active.ID, terminalRecord{}); c.sessionChanged || active.LastSessionID != "new" {
-		t.Errorf("empty session id: changed=%v session=%q", c.sessionChanged, active.LastSessionID)
-	}
-	if c, _ := tbl.recordResult(active.ID, terminalRecord{sessionID: "new"}); c.sessionChanged {
-		t.Error("the same session id reported as a change")
+	// No session id keeps the old one.
+	tbl.recordResult(active.ID, terminalRecord{})
+	if active.LastSessionID != "new" {
+		t.Errorf("empty session id: session=%q", active.LastSessionID)
 	}
 	if _, ok := tbl.recordResult("nope", terminalRecord{}); ok {
 		t.Error("record on a missing job reported ok")

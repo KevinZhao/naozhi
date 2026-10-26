@@ -73,12 +73,10 @@ type terminalRecord struct {
 }
 
 // resultChange is what recordResult did: the detached snapshot to marshal off
-// the lock (#1923), the state to restore if that fails, and whether the job's
-// session id moved.
+// the lock (#1923) and the state to restore if that fails.
 type resultChange struct {
-	snap           jobsSnapshot
-	prev           JobState
-	sessionChanged bool
+	snap jobsSnapshot
+	prev JobState
 }
 
 // recordResult writes rec onto job jobID. ok is false when the job was deleted
@@ -101,7 +99,6 @@ func (t *jobTable) recordResult(jobID string, rec terminalRecord) (c resultChang
 	j.RunCounters.addRun(rec.state)
 	j.recordStreaks(rec.streak, rec.transient, rec.endedAt)
 	c.snap = t.snapshotForSaveLocked()
-	c.sessionChanged = rec.sessionID != "" && rec.sessionID != c.prev.LastSessionID
 	return c, true
 }
 

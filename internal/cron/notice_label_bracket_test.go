@@ -7,7 +7,7 @@ import (
 
 // TestFormatCronNotice_StripsCloseBracketInLabel pins R250-SEC-6 (#1095)
 // + R260528-SEC-8: label 中的 markdown link-syntax 字符 `]` `[` `(` `)`
-// 必须替换为全角等价物，避免 cronNoticePrefixFmt 模板 "[Cron %s] %s"
+// 必须替换为全角等价物，避免通知模板 "[Cron <label>] <body>"
 // 被攻击者借 Title 内嵌 `](http://attacker)` 折叠成可点链接。
 //
 // 防御深度：scheduler 写路径拦截 bidi / C0 控制字符，

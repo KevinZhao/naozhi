@@ -688,35 +688,12 @@ func TestRedactPathsInCronError(t *testing.T) {
 			}
 		})
 	}
-}
 
-// TestRedactPathsInCronError_PoolRecycle pins #872 / R245-PERF-17: the
-// strings.Builder pool added in this fix must NOT poison the next call
-// with residual bytes from the previous call. Drive two consecutive
-// redactions and verify each returns the expected output independently.
-func TestRedactPathsInCronError_PoolRecycle(t *testing.T) {
-	t.Parallel()
-	got1 := redactPathsInCronError("workspace /home/u/proj: permission denied")
-	got2 := redactPathsInCronError("error opening /tmp/scratch: timeout")
-	got3 := redactPathsInCronError("session error: context canceled") // fast-path, bypasses pool
-
-	if got1 != "workspace <path>: permission denied" {
-		t.Errorf("got1 = %q", got1)
-	}
-	if got2 != "error opening <path>: timeout" {
-		t.Errorf("got2 = %q", got2)
-	}
-	if got3 != "session error: context canceled" {
-		t.Errorf("got3 = %q (fast-path should bypass pool)", got3)
-	}
-
-	// Drive a ~1KB input to exercise the oversize-drop branch (Cap below
-	// pool max, so the pool keeps it; this is just a smoke test that the
-	// large slow-path doesn't truncate or alias prior buffer content).
+	// Inputs past redactFastPathMaxLen take the slow path; a long path
+	// must still be redacted there.
 	long := "open /a/" + strings.Repeat("x", 800) + ": denied"
-	gotLong := redactPathsInCronError(long)
-	if !strings.HasPrefix(gotLong, "open <path>: denied") {
-		t.Errorf("long path not redacted: got %q", gotLong)
+	if got := redactPathsInCronError(long); !strings.HasPrefix(got, "open <path>: denied") {
+		t.Errorf("long path not redacted: got %q", got)
 	}
 }
 
@@ -928,70 +905,6 @@ func TestSchedulerConfig_RunsKeepPlumbing(t *testing.T) {
 	}
 	if got := dflt.runs.KeepWindow(); got != DefaultRunsKeepWindow {
 		t.Errorf("default keepWindow: got %v, want %v", got, DefaultRunsKeepWindow)
-	}
-}
-
-// TestKnownSessionIDs_TTLCache verifies the TTL snapshot kicks in:
-// the first call rebuilds; subsequent calls within the TTL serve the
-// same content without re-reading job state. We cannot peek inside the
-// build pipeline, so we proxy "did we hit the cache" by checking the
-// recorded `generatedAt` does not advance on the second call.
-// R250-PERF-7.
-func TestKnownSessionIDs_TTLCache(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{
-		StorePath: filepath.Join(dir, "cron.json"),
-		MaxJobs:   5,
-	}, SchedulerDeps{})
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer s.Stop()
-
-	job := &Job{Schedule: "@every 1h", Prompt: "p", Platform: "feishu", ChatID: "c", ChatType: "direct"}
-	if err := s.AddJob(job); err != nil {
-		t.Fatalf("AddJob: %v", err)
-	}
-	s.editJobForTest(t, job.ID, func(j *Job) { j.LastSessionID = "11111111-aaaa-bbbb-cccc-000000000001" })
-
-	// First call populates cache.
-	first := s.KnownSessionIDs()
-	if _, ok := first["11111111-aaaa-bbbb-cccc-000000000001"]; !ok {
-		t.Fatalf("first call missing seeded session id: %v", first)
-	}
-
-	s.knownSessionsCache.mu.Lock()
-	gen1 := s.knownSessionsCache.generatedAt
-	s.knownSessionsCache.mu.Unlock()
-	if gen1.IsZero() {
-		t.Fatalf("generatedAt must be populated after first call")
-	}
-
-	// Mutate LastSessionID *without* invalidating — the cache should
-	// still serve the old snapshot until it expires or is invalidated.
-	s.editJobForTest(t, job.ID, func(j *Job) { j.LastSessionID = "22222222-aaaa-bbbb-cccc-000000000002" })
-
-	cached := s.KnownSessionIDs()
-	if _, ok := cached["11111111-aaaa-bbbb-cccc-000000000001"]; !ok {
-		t.Errorf("TTL cache did not serve stale snapshot: %v", cached)
-	}
-	if _, ok := cached["22222222-aaaa-bbbb-cccc-000000000002"]; ok {
-		t.Errorf("fresh value leaked into TTL window: %v", cached)
-	}
-
-	s.knownSessionsCache.mu.Lock()
-	gen2 := s.knownSessionsCache.generatedAt
-	s.knownSessionsCache.mu.Unlock()
-	if !gen2.Equal(gen1) {
-		t.Errorf("generatedAt advanced on cached read; cache miss when fresh: %v vs %v", gen1, gen2)
-	}
-
-	// Explicit invalidation drops the snapshot; the next call rebuilds.
-	s.invalidateKnownSessionsCache()
-	rebuilt := s.KnownSessionIDs()
-	if _, ok := rebuilt["22222222-aaaa-bbbb-cccc-000000000002"]; !ok {
-		t.Errorf("invalidate+rebuild did not pick up new session id: %v", rebuilt)
 	}
 }
 
