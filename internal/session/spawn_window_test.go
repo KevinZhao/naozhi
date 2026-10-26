@@ -62,7 +62,7 @@ func spawnRouter(t *testing.T, maxProcs int, hook func(context.Context, cli.Spaw
 	t.Helper()
 	// A wrapper the spawn never runs (spawn.hook replaces it), for the CLI
 	// name and version the new session records.
-	r := NewRouter(RouterConfig{MaxProcs: maxProcs, Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
+	r := NewRouter(RouterConfig{MaxProcs: maxProcs, Wrapper: cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
 	r.spawn.hook = hook
 	t.Cleanup(r.Shutdown)
 	return r
@@ -633,7 +633,7 @@ func TestSpawnSession_FailedSpawnKeepsTheTuningPick(t *testing.T) {
 // its snapshot no spawn starts a process.
 func TestSpawnSession_ShutdownGateRefusesLateSpawns(t *testing.T) {
 	called := false
-	r := NewRouter(RouterConfig{MaxProcs: 4, Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
+	r := NewRouter(RouterConfig{MaxProcs: 4, Wrapper: cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
 	r.spawn.hook = func(context.Context, cli.SpawnOptions) (processIface, error) {
 		called = true
 		return newIdleProc(), nil

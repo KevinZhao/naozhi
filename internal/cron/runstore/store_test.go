@@ -14,8 +14,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/runtelemetry"
-
-	"github.com/naozhi/naozhi/internal/runlog"
 )
 
 // store_test.go covers internal/cron/runstore (RFC: docs/rfc/cron-run-history.md).
@@ -524,15 +522,12 @@ func TestRunStore_ListSkipsCorruptEntries(t *testing.T) {
 	}
 }
 
-// TestRunStore_DecodeParallel_UnreadableCountedSeparately pins R20260603-CR-1
-// (#1693): a slot whose file is unreadable (EACCES) must NOT be reflected in
+// TestRunStore_DiskList_UnreadableCountedSeparately pins R20260603-CR-1
+// (#1693): a file that is unreadable (EACCES) must NOT be reflected in
 // corruptCount — it must be tracked in the separate unreadableCount return so
 // warmCache can log a distinct message for I/O errors vs data corruption.
 // We use chmod 0000 to simulate a transient IO barrier.
-//
-// diskDecodeParallelThreshold == 16, so we need > 16 candidates to reach
-// decodeRunsParallel. We append 18 runs and make one unreadable.
-func TestRunStore_DecodeParallel_UnreadableCountedSeparately(t *testing.T) {
+func TestRunStore_DiskList_UnreadableCountedSeparately(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow: skipped in -short")
 	}
@@ -544,8 +539,6 @@ func TestRunStore_DecodeParallel_UnreadableCountedSeparately(t *testing.T) {
 	s.enableTrimGC = false
 	jobID := mustGenerateID()
 
-	// Append 18 runs (> diskDecodeParallelThreshold=16) so that
-	// diskListNewestFirst fans out via decodeRunsParallel.
 	const total = 18
 	now := time.Now()
 	runIDs := make([]string, total)
@@ -562,8 +555,7 @@ func TestRunStore_DecodeParallel_UnreadableCountedSeparately(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(unreadablePath, 0o600) })
 
-	// Call diskListNewestFirst directly — bypasses the in-memory cache and
-	// exercises the decodeRunsParallel worker path.
+	// Call diskListNewestFirst directly — bypasses the in-memory cache.
 	rows, corruptCount, unreadableCount := s.diskListNewestFirst(jobID, 100, time.Time{})
 	if corruptCount != 0 {
 		t.Fatalf("corruptCount=%d want 0 (EACCES is not ErrCorruptRun)", corruptCount)
@@ -693,54 +685,6 @@ func TestRunStore_TrimAllScansAllJobs(t *testing.T) {
 	dir := filepath.Join(s.Dir(), target)
 	if n := countJSONFiles(t, dir); n != 3 {
 		t.Fatalf("trimAll on aged job: %d files want 3", n)
-	}
-}
-
-// TestRunStore_MarshalRunPooledMatchesStdlib — #1043 / R240-PERF-6:
-// the pooled marshal helper must produce byte-identical output to
-// json.Marshal so on-disk records are unchanged. Drives the helper
-// across two consecutive runs to exercise the pool-recycle path.
-func TestRunStore_MarshalRunPooledMatchesStdlib(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	cases := []*CronRun{
-		makeRun("0123456789abcdef", now),
-		{
-			JobID:     "fedcba9876543210",
-			RunID:     "abc123",
-			StartedAt: now,
-			Result:    "html-escape <script>tag</script>&friend",
-			Prompt:    "p",
-		},
-	}
-	for _, r := range cases {
-		want, err := json.Marshal(r)
-		if err != nil {
-			t.Fatalf("stdlib json.Marshal: %v", err)
-		}
-		got, err := marshalRunPooled(r)
-		if err != nil {
-			t.Fatalf("marshalRunPooled: %v", err)
-		}
-		if string(want) != string(got) {
-			t.Fatalf("byte mismatch\nwant: %s\n got: %s", want, got)
-		}
-		// Second pass exercises the pool-recycled buffer.
-		got2, err := marshalRunPooled(r)
-		if err != nil {
-			t.Fatalf("marshalRunPooled (recycle): %v", err)
-		}
-		if string(want) != string(got2) {
-			t.Fatalf("byte mismatch on recycled buf\nwant: %s\n got: %s", want, got2)
-		}
-		// Returned slice must be independent of the pooled buffer:
-		// mutating got1 must not corrupt got2.
-		if len(got) > 0 {
-			got[0] = 'X'
-		}
-		if string(want) != string(got2) {
-			t.Fatalf("returned slice not independent of pool buffer")
-		}
 	}
 }
 
@@ -880,191 +824,6 @@ func TestRunStore_ListHonoursConfiguredKeepCount(t *testing.T) {
 	sids := s.RecentSessionIDs(jobID, keep)
 	if len(sids) != total {
 		t.Fatalf("RecentSessionIDs(n=%d) returned %d ids; want %d", keep, len(sids), total)
-	}
-}
-
-// newEntryFromRows builds a warm recentCacheEntry whose ring is seeded
-// from rows (newest-first). Pure test helper for R242-GO-8 — production
-// code seeds via ringSeed inside warmCache.
-func newEntryFromRows(rows []CronRunSummary) *recentCacheEntry {
-	e := &recentCacheEntry{warm: true}
-	// Cap the ring to len(rows) at minimum so iteration works; production
-	// uses keepCount, but skipAppendTrim only reads count and ringRead
-	// which both honour cap(ring).
-	cap := len(rows)
-	if cap == 0 {
-		cap = 1
-	}
-	e.ringSeed(rows, cap)
-	return e
-}
-
-// TestRunStore_SkipAppendTrim_Conditions covers the four return branches of
-// Store.skipAppendTrim, the optimisation introduced by R232-PERF-8 that
-// lets Append skip the per-call ReadDir when the cache shows we're well
-// under keepCount and keepWindow. R233B-CR-7 flagged these branches as
-// untested; this table-driven test pins them explicitly so a future tweak
-// to the heuristic cannot silently regress.
-//
-// Each case constructs a minimal *Store + recentCacheEntry directly (no
-// disk I/O) and asserts the boolean result. appendTrimBatch survives only
-// as the capSafe headroom margin; the per-call force-trim counter was
-// removed in R20260607-COR-002 (#1901).
-func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
-	now := time.Now()
-
-	// "happy" entry: cache warm, comfortably under keepCount, oldest row is
-	// inside keepWindow (newer than cutoff). All three skip conditions pass.
-	//
-	// R242-GO-8: cache storage is now a ring buffer (entry.ring + head +
-	// count). The newEntryFromRows helper centralises the slice → ring
-	// translation so test cases keep their declarative shape.
-	makeHappyEntry := func() *recentCacheEntry {
-		return newEntryFromRows([]CronRunSummary{
-			{RunID: "a", EndedAt: now.Add(-1 * time.Minute)},
-			{RunID: "b", EndedAt: now.Add(-2 * time.Minute)},
-		})
-	}
-
-	cases := []struct {
-		name       string
-		entry      *recentCacheEntry
-		notWarm    bool
-		keepCount  int
-		keepWindow time.Duration
-		wantSkip   bool
-	}{
-		{
-			name:       "cold cache forces full trim",
-			entry:      &recentCacheEntry{warm: false},
-			keepCount:  100,
-			keepWindow: 24 * time.Hour,
-			wantSkip:   false,
-		},
-		{
-			name:       "warm + headroom + within window: skip",
-			entry:      makeHappyEntry(),
-			keepCount:  100,
-			keepWindow: 24 * time.Hour,
-			wantSkip:   true,
-		},
-		{
-			name: "near keepCount cap: do not skip",
-			entry: newEntryFromRows(func() []CronRunSummary {
-				// keepCount=15 + appendTrimBatch(=10) → 15-10+1 = 6 rows triggers gate
-				r := make([]CronRunSummary, 6)
-				for i := range r {
-					r[i] = CronRunSummary{EndedAt: now.Add(-time.Duration(i) * time.Minute)}
-				}
-				return r
-			}()),
-			keepCount:  15,
-			keepWindow: 24 * time.Hour,
-			wantSkip:   false,
-		},
-		{
-			name: "oldest row beyond keepWindow: do not skip",
-			entry: newEntryFromRows([]CronRunSummary{
-				{RunID: "a", EndedAt: now.Add(-30 * time.Second)},
-				{RunID: "b", EndedAt: now.Add(-2 * time.Hour)}, // older than keepWindow
-			}),
-			keepCount:  100,
-			keepWindow: 1 * time.Hour, // cutoff = now-1h, oldest at now-2h is older
-			wantSkip:   false,
-		},
-		{
-			// R20260527-PERF-24 (#1295): cap+window both safe → skip, even
-			// though count is small. The old per-call force-trim counter
-			// would have paid ReadDir+Stat periodically with nothing to
-			// evict; it was removed in R20260607-COR-002 (#1901).
-			name:       "small clean cache: skip",
-			entry:      newEntryFromRows([]CronRunSummary{{EndedAt: now}}),
-			keepCount:  100,
-			keepWindow: 24 * time.Hour,
-			wantSkip:   true,
-		},
-		{
-			// Window proof fails → do not skip, regardless of count. The
-			// reason for trimming here is age-based eviction for jobs that
-			// never approach keepCount.
-			name: "oldest beyond window (clean cap): do not skip",
-			entry: newEntryFromRows([]CronRunSummary{
-				{EndedAt: now.Add(-30 * time.Second)},
-				{EndedAt: now.Add(-2 * time.Hour)},
-			}),
-			keepCount:  100,
-			keepWindow: 1 * time.Hour,
-			wantSkip:   false,
-		},
-		{
-			// R090031-CR-3: capSafe used < instead of <=; when
-			// count+appendTrimBatch == keepCount the cache can still
-			// prove no removal is needed (trimJobLocked only removes
-			// when len(items) > keepCount), so we must skip.
-			name: "count+appendTrimBatch == keepCount: capSafe boundary skip",
-			entry: newEntryFromRows(func() []CronRunSummary {
-				// keepCount=10, appendTrimBatch=10 → count=0: 0+10==10 → capSafe
-				r := make([]CronRunSummary, 0)
-				return r
-			}()),
-			keepCount:  appendTrimBatch,
-			keepWindow: 24 * time.Hour,
-			wantSkip:   true,
-		},
-		{
-			// count+appendTrimBatch exactly == keepCount with rows present.
-			// With <= semantics capSafe=true; windowSafe=true → skip.
-			name: "count+appendTrimBatch == keepCount with fresh rows: skip",
-			entry: newEntryFromRows(func() []CronRunSummary {
-				// keepCount=15, count=5: 5+10==15 → capSafe with <=
-				r := make([]CronRunSummary, 5)
-				for i := range r {
-					r[i] = CronRunSummary{EndedAt: now.Add(-time.Duration(i+1) * time.Minute)}
-				}
-				return r
-			}()),
-			keepCount:  15,
-			keepWindow: 24 * time.Hour,
-			wantSkip:   true,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			s := &Store{
-				// A disabled layout still owns real per-job locks, which is
-				// what this cache-only test needs; a nil layout would be a
-				// state production never constructs.
-				layout:     runlog.New(runlog.Options{}),
-				keepCount:  tc.keepCount,
-				keepWindow: tc.keepWindow,
-			}
-			s.recentCache.Store("job", tc.entry)
-			// R239-GO-5: skipAppendTrim contract requires caller hold
-			// jobLock; the production callsite (Append) does. Match
-			// here so the assertJobLockHeld guard inside doesn't fire.
-			lock := s.jobLock("job")
-			lock.Lock()
-			got := s.skipAppendTrim("job", now)
-			lock.Unlock()
-			if got != tc.wantSkip {
-				t.Errorf("skipAppendTrim = %v, want %v", got, tc.wantSkip)
-			}
-		})
-	}
-}
-
-// TestRunStore_SkipAppendTrim_MissingEntry asserts the missing-jobID branch:
-// when the cache has no entry for the given job, skipAppendTrim must return
-// false (forcing a full trim) and not panic on the nil load.
-func TestRunStore_SkipAppendTrim_MissingEntry(t *testing.T) {
-	s := &Store{layout: runlog.New(runlog.Options{}), keepCount: 100, keepWindow: 24 * time.Hour}
-	// R239-GO-5: skipAppendTrim contract requires caller hold jobLock.
-	lock := s.jobLock("never-seen")
-	lock.Lock()
-	defer lock.Unlock()
-	if s.skipAppendTrim("never-seen", time.Now()) {
-		t.Error("expected false for unknown jobID")
 	}
 }
 

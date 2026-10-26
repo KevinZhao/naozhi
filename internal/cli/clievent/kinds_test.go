@@ -54,7 +54,7 @@ func TestKindTable(t *testing.T) {
 	consts := []string{KindUser, KindText, KindThinking, KindToolUse, KindToolResult, KindAgent, KindTodo,
 		KindAskQuestion, KindTaskStart, KindTaskProgress, KindTaskDone, KindResult, KindSystem, KindPersistGap}
 	for _, k := range consts {
-		if !IsKnownKind(k) {
+		if _, ok := kindByName[k]; !ok {
 			t.Errorf("constant %q has no kindTable row", k)
 		}
 	}
@@ -76,7 +76,7 @@ func TestKindTable(t *testing.T) {
 		want := map[string]bool{}
 		for _, w := range s.want {
 			want[w] = true
-			if !IsKnownKind(w) {
+			if _, ok := kindByName[w]; !ok {
 				t.Errorf("%s: %q is not a registered kind", s.name, w)
 			}
 		}
@@ -111,11 +111,6 @@ func TestKindTable(t *testing.T) {
 		}
 		if got, want := IsVisibleEntry(EventEntry{Type: k}), !internal && !noBubble[k]; got != want {
 			t.Errorf("IsVisibleEntry(%q) = %v, want %v", k, got, want)
-		}
-	}
-	for _, bad := range []string{"", "init", "txt", "Text"} {
-		if IsKnownKind(bad) {
-			t.Errorf("IsKnownKind(%q) = true", bad)
 		}
 	}
 }

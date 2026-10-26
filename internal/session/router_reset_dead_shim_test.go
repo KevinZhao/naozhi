@@ -52,7 +52,7 @@ func newResetShimRouter(t *testing.T, key string, cliAlive, lateFrames bool) (*R
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
+	w := cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
 	w.ShimManager = mgr
 	r := NewRouter(RouterConfig{Wrapper: w})
 	t.Cleanup(r.Shutdown)

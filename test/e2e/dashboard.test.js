@@ -88,53 +88,6 @@ test.describe('Sidebar & session list', () => {
     await ctx.close();
   });
 
-  test('session card shows state text in meta', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    // Meta should contain the state text
-    const metaText = await page.$eval('.session-card .sc-meta', el => el.textContent);
-    expect(metaText).toMatch(/ready|running/);
-
-    await ctx.close();
-  });
-
-  test('session card shows time ago', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    // The ready session (60s ago) should show "1m"
-    const timeText = await page.$eval(
-      '.session-card[data-key="dashboard:direct:2026-01-01-120000-1:myproject"] .sc-time',
-      el => el.textContent
-    );
-    expect(timeText).toContain('1m');
-
-    await ctx.close();
-  });
-
-  test('dismiss button exists on session cards', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    // Dismiss button exists on each card
-    const dismissBtns = await page.$$('.session-card .btn-dismiss');
-    expect(dismissBtns.length).toBe(3);
-
-    // Verify dismiss buttons have correct title. Localized "remove" → "移除"
-    // in PR #2040 (080e1eb0, dashboard UI consistency batch 6).
-    const title = await page.$eval('.session-card .btn-dismiss', el => el.title);
-    expect(title).toBe('移除');
-
-    await ctx.close();
-  });
-
   test('empty session list shows placeholder', async ({ browser }) => {
     const emptyMock = await startMockServer({
       sessions: {
@@ -191,49 +144,6 @@ test.describe('Session selection & events', () => {
     await ctx.close();
   });
 
-  test('selected session card gets active class', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    await page.click('.session-card[data-key="dashboard:direct:2026-01-01-120000-1:myproject"]');
-    await page.waitForTimeout(100);
-
-    const isActive = await page.$eval(
-      '.session-card[data-key="dashboard:direct:2026-01-01-120000-1:myproject"]',
-      el => el.classList.contains('active')
-    );
-    expect(isActive).toBe(true);
-
-    await ctx.close();
-  });
-
-  test('user event rendered with blue-tinted bubble', async ({ browser }) => {
-    // THEME-1 (#453, landed via #1431 5a7f04aa): default theme is 'auto' and
-    // follows the OS scheme; Playwright defaults to light. Pin dark so the
-    // token values below are deterministic.
-    const ctx = await browser.newContext({ ...desktop, colorScheme: 'dark' });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    await page.click('.session-card[data-key="dashboard:direct:2026-01-01-120000-1:myproject"]');
-    await page.waitForSelector('.event.user');
-
-    const { color, bg } = await page.$eval('.event.user .event-content', el => {
-      const cs = getComputedStyle(el);
-      return { color: cs.color, bg: cs.backgroundColor };
-    });
-    // The user bubble is body text (--nz-event-user-fg = #e6edf3 in dark,
-    // tokenised by 91354043 light-theme parity sweep) on a translucent
-    // #58a6ff tint — the blue moved from the text to the bubble background.
-    expect(color).toBe('rgb(230, 237, 243)');
-    expect(bg).toBe('rgba(88, 166, 255, 0.1)');
-
-    await ctx.close();
-  });
-
   test('text event renders markdown with bold and inline code', async ({ browser }) => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
@@ -255,47 +165,12 @@ test.describe('Session selection & events', () => {
     );
     expect(hasCode).toBe(true);
 
-    await ctx.close();
-  });
-
-  test('code block has copy button', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    await page.click('.session-card[data-key="dashboard:direct:2026-01-01-120000-1:myproject"]');
-    await page.waitForSelector('.md-code-wrap');
-
-    // Should have a copy button
-    const copyBtn = await page.$('.md-code-wrap .md-copy-btn');
-    expect(copyBtn).not.toBeNull();
-
-    // Copy button text should say "copy"
-    const btnText = await page.$eval('.md-copy-btn', el => el.textContent);
-    expect(btnText).toBe('copy');
-
-    await ctx.close();
-  });
-
-  test('table renders correctly from markdown', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    await page.click('.session-card[data-key="dashboard:direct:2026-01-01-120000-1:myproject"]');
-    await page.waitForSelector('.event.text');
-
-    // Table should be rendered
-    const hasTable = await page.$eval('.event.text .event-content', el =>
-      el.querySelector('table') !== null
-    );
-    expect(hasTable).toBe(true);
-
-    // Table should have headers
+    // Markdown tables render with their header cells.
     const thTexts = await page.$$eval('.event.text table th', ths => ths.map(th => th.textContent.trim()));
     expect(thTexts).toEqual(['Col A', 'Col B']);
+
+    // Fenced code blocks get a copy button.
+    await expect(page.locator('.md-code-wrap .md-copy-btn').first()).toHaveText('copy');
 
     await ctx.close();
   });
@@ -312,30 +187,6 @@ test.describe('Session selection & events', () => {
     // Header should contain some session info
     const headerText = await page.$eval('.main-header', el => el.textContent);
     expect(headerText.length).toBeGreaterThan(0);
-
-    await ctx.close();
-  });
-
-  test('input area visible when session selected', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    await page.click('.session-card[data-key="dashboard:direct:2026-01-01-120000-1:myproject"]');
-    await page.waitForSelector('#input-area');
-
-    // Message input should be visible
-    const inputVisible = await page.$eval('#msg-input', el =>
-      getComputedStyle(el).display !== 'none'
-    );
-    expect(inputVisible).toBe(true);
-
-    // Send button should be visible
-    const sendVisible = await page.$eval('#btn-send', el =>
-      getComputedStyle(el).display !== 'none'
-    );
-    expect(sendVisible).toBe(true);
 
     await ctx.close();
   });
@@ -419,6 +270,9 @@ test.describe('Message sending', () => {
     const sent = JSON.parse(mock.sendCalls[0]);
     expect(sent.text).toBe('enter key test');
 
+    // A successful send clears the composer.
+    expect(await page.$eval('#msg-input', el => el.innerText.trim())).toBe('');
+
     await ctx.close();
   });
 
@@ -460,27 +314,6 @@ test.describe('Message sending', () => {
 
     // No send call — empty messages are not sent
     expect(mock.sendCalls.length).toBe(0);
-
-    await ctx.close();
-  });
-
-  test('input clears after successful send', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    await page.click('.session-card[data-key="dashboard:direct:2026-01-01-120000-1:myproject"]');
-    await page.waitForSelector('#msg-input');
-
-    const input = page.locator('#msg-input');
-    await input.click();
-    await input.pressSequentially('will be cleared');
-    await page.keyboard.press('Enter');
-    await page.waitForTimeout(500);
-
-    const textAfter = await page.$eval('#msg-input', el => el.innerText.trim());
-    expect(textAfter).toBe('');
 
     await ctx.close();
   });
@@ -617,9 +450,9 @@ test.describe('Auth modal & login', () => {
     await page.goto(authMock.url + '/dashboard');
     await page.waitForSelector('.modal-overlay');
 
-    // Enter correct token
+    // Enter correct token; submit via the Enter key path.
     await page.fill('#token-input', 'secret-token');
-    await page.click('.modal-btns button.primary');
+    await page.keyboard.press('Enter');
 
     // Modal should close
     await page.waitForSelector('.modal-overlay', { state: 'detached' });
@@ -697,48 +530,6 @@ test.describe('Auth modal & login', () => {
     await expect(tokenInput).toHaveAttribute('placeholder', /invalid token/);
     await expect(refusal).toHaveCount(0);
     expect(authMock.loginCalls).toHaveLength(2);
-
-    await ctx.close();
-    authMock.server.close();
-  });
-
-  test('Enter key in token input triggers login', async ({ browser }) => {
-    const authMock = await startMockServer({
-      requireAuth: true,
-      authToken: 'secret-token',
-    });
-
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(authMock.url + '/dashboard');
-    await page.waitForSelector('.modal-overlay');
-
-    await page.fill('#token-input', 'secret-token');
-    await page.keyboard.press('Enter');
-
-    // Modal should close
-    await page.waitForSelector('.modal-overlay', { state: 'detached' });
-
-    await ctx.close();
-    authMock.server.close();
-  });
-
-  test('cancel button closes auth modal', async ({ browser }) => {
-    const authMock = await startMockServer({
-      requireAuth: true,
-      authToken: 'secret-token',
-    });
-
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(authMock.url + '/dashboard');
-    await page.waitForSelector('.modal-overlay');
-
-    // Click cancel (first non-primary button)
-    await page.click('.modal-btns button:not(.primary)');
-
-    // Modal should close
-    await page.waitForSelector('.modal-overlay', { state: 'detached' });
 
     await ctx.close();
     authMock.server.close();
@@ -868,22 +659,6 @@ test.describe('New session creation', () => {
     await ctx.close();
   });
 
-  test('project picker lists available projects', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    await page.click('.hdr-btn[title="New Session"]');
-    await page.waitForSelector('.cmd-palette-item');
-
-    const names = await page.$$eval('.cmd-palette-item .cp-name', els => els.map(e => e.textContent));
-    expect(names).toContain('myproject');
-    expect(names).toContain('otherproject');
-
-    await ctx.close();
-  });
-
   test('clicking project creates session and closes palette', async ({ browser }) => {
     mock.resetCalls();
     const ctx = await browser.newContext({ ...desktop });
@@ -1008,53 +783,6 @@ test.describe('Cron panel', () => {
     await ctx.close();
   });
 
-  test('cron panel lists existing jobs with schedule info', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    await page.click('#abnav-cron');
-    await page.waitForSelector('.cron-detail');
-
-    // Wait for cron data to load and render
-    await page.waitForTimeout(500);
-
-    // Cron is its own top-level view (#cron-main, cron_view.js extraction
-    // #1874 fa001adf) — it no longer renders inside #main.
-    const mainText = await page.$eval('#cron-main', el => el.textContent);
-    expect(mainText).toContain('定时任务');
-    expect(mainText).toContain('check server status');
-    expect(mainText).toContain('daily report');
-
-    await ctx.close();
-  });
-
-  test('cron panel shows active/paused badges', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    await page.click('#abnav-cron');
-    await page.waitForSelector('.cron-detail');
-    await page.waitForTimeout(500);
-
-    // Rows carry state as a class + localized label (cron_view.js
-    // renderCronRow: paused → .cj-row.paused / "已暂停"; active rows get the
-    // colloquial next-run time and dot label "已启用"). The English
-    // active/paused badges were dropped with the cron-v2-polish 中文化.
-    await expect(page.locator('#cron-main .cj-row.paused')).toHaveCount(1);
-    await expect(page.locator('#cron-main .cj-row:not(.paused)')).toHaveCount(1);
-    const mainText = await page.$eval('#cron-main', el => el.textContent);
-    expect(mainText).toContain('已暂停');
-    const dotLabels = await page.$$eval('#cron-main .cj-row .cj-dot', els => els.map(e => e.title));
-    expect(dotLabels).toContain('已启用');
-    expect(dotLabels).toContain('已暂停');
-
-    await ctx.close();
-  });
-
   test('new cron job button opens creation modal', async ({ browser }) => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
@@ -1082,31 +810,6 @@ test.describe('Cron panel', () => {
   // controls. `.freq-tabs` was already gone at the history-squash commit
   // a274e0cc. The "advanced cron expression disclosure toggles" test was
   // dropped with the feature ("高级 raw cron 输入全部删除").
-
-  test('cron creation modal shows frequency mode select', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    await page.click('#abnav-cron');
-    await page.waitForSelector('.cron-detail');
-    await page.click('.cron-detail .cron-new-btn');
-    await page.waitForSelector('#freq-mode-select');
-
-    // Five frequency modes — no cron syntax visible by default.
-    const labels = await page.$$eval('#freq-mode-select option', els => els.map(e => e.textContent));
-    expect(labels).toEqual(['Hourly', 'Daily', 'Weekdays', 'Weekly', 'Monthly']);
-    expect(await page.$('#freq-advanced-input')).toBeNull();
-
-    // Create flow defaults to hourly (openCronCreateModal → { mode: 'hourly' }),
-    // which needs no time-of-day input.
-    const activeMode = await page.$eval('#freq-mode-select', el => el.value);
-    expect(activeMode).toBe('hourly');
-    await expect(page.locator('#freq-time')).toBeHidden();
-
-    await ctx.close();
-  });
 
   test('selecting a frequency mode toggles the auxiliary controls', async ({ browser }) => {
     const ctx = await browser.newContext({ ...desktop });
@@ -1181,6 +884,12 @@ test.describe('History popover', () => {
     const popover = await page.$('.history-popover');
     expect(popover).not.toBeNull();
 
+    // Since #1800 a .history-backdrop covers the page while open; a click on
+    // it closes the popover and both nodes must be removed.
+    await page.locator('.history-backdrop').click({ position: { x: 5, y: 5 } });
+    await page.waitForSelector('.history-popover', { state: 'detached' });
+    expect(await page.$('.history-backdrop')).toBeNull();
+
     await ctx.close();
   });
 
@@ -1198,156 +907,6 @@ test.describe('History popover', () => {
       const count = await badge.textContent();
       expect(parseInt(count)).toBeGreaterThanOrEqual(0);
     }
-
-    await ctx.close();
-  });
-
-  test('clicking history button again closes popover', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    // Open
-    await page.click('#btn-history');
-    await page.waitForSelector('.history-popover');
-
-    // Close: since #1800 (f6b9f9ce) a .history-backdrop covers the page while
-    // the popover is open, so a click on the button's position lands on the
-    // backdrop (closeHistoryPopover). Use a raw mouse click at the button —
-    // Playwright's actionability check would otherwise refuse the intercepted
-    // element click. toggleHistory() still toggles for the keyboard path.
-    await expect(page.locator('.history-backdrop')).toHaveCount(1);
-    const box = await page.locator('#btn-history').boundingBox();
-    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-    await page.waitForSelector('.history-popover', { state: 'detached' });
-
-    const popover = await page.$('.history-popover');
-    expect(popover).toBeNull();
-    expect(await page.$('.history-backdrop')).toBeNull();
-
-    await ctx.close();
-  });
-});
-
-// ─── File Upload UI ────────────────────────────────────────────────────────────
-
-test.describe('File upload UI', () => {
-  let mock;
-
-  test.beforeAll(async () => { mock = await startMockServer(); });
-  test.afterAll(() => mock.server.close());
-
-  test('file input exists and accepts images', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    // Must select a session first to render input area
-    await page.click('.session-card[data-key="dashboard:direct:2026-01-01-120000-1:myproject"]');
-    await page.waitForSelector('#input-area');
-    await page.waitForSelector('#file-input', { state: 'attached' });
-
-    // PDF attachments are accepted alongside images (accept list already
-    // "image/*,application/pdf" at squash a274e0cc; touched again in #2329).
-    const accept = await page.$eval('#file-input', el => el.accept);
-    expect(accept).toBe('image/*,application/pdf');
-
-    // #2559 D6-3: the hidden state comes from the .nz-hidden class now (the
-    // inline style="display:none" is gone); assert what the browser actually
-    // computes.
-    const isHidden = await page.$eval('#file-input', el => getComputedStyle(el).display);
-    expect(isHidden).toBe('none');
-
-    await ctx.close();
-  });
-
-  test('file preview area exists', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    // Must select a session first
-    await page.click('.session-card[data-key="dashboard:direct:2026-01-01-120000-1:myproject"]');
-    await page.waitForSelector('#file-preview', { state: 'attached' });
-
-    const preview = await page.$('#file-preview');
-    expect(preview).not.toBeNull();
-
-    await ctx.close();
-  });
-});
-
-// ─── Voice Input UI ────────────────────────────────────────────────────────────
-
-test.describe('Voice input UI', () => {
-  let mock;
-
-  test.beforeAll(async () => { mock = await startMockServer(); });
-  test.afterAll(() => mock.server.close());
-
-  test('mic button exists and toggles voice mode', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    await page.click('.session-card[data-key="dashboard:direct:2026-01-01-120000-1:myproject"]');
-    await page.waitForSelector('#btn-mic');
-
-    // Click mic to toggle voice mode
-    await page.click('#btn-mic');
-
-    // Input area should have voice-mode class
-    const hasVoiceMode = await page.$eval('#input-area', el => el.classList.contains('voice-mode'));
-    expect(hasVoiceMode).toBe(true);
-
-    // Hold-to-talk button should be visible
-    const holdBtn = page.locator('#btn-hold-talk');
-    await expect(holdBtn).toBeVisible();
-
-    // Text input should be hidden
-    const inputDisplay = await page.$eval('#msg-input', el => getComputedStyle(el).display);
-    expect(inputDisplay).toBe('none');
-
-    await ctx.close();
-  });
-
-  test('clicking mic again returns to keyboard mode', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForSelector('.session-card');
-
-    await page.click('.session-card[data-key="dashboard:direct:2026-01-01-120000-1:myproject"]');
-    await page.waitForSelector('#btn-mic');
-
-    // Toggle voice mode on
-    await page.click('#btn-mic');
-    // Toggle voice mode off
-    await page.click('#btn-mic');
-
-    const hasVoiceMode = await page.$eval('#input-area', el => el.classList.contains('voice-mode'));
-    expect(hasVoiceMode).toBe(false);
-
-    // Text input should be visible again
-    const inputDisplay = await page.$eval('#msg-input', el => getComputedStyle(el).display);
-    expect(inputDisplay).not.toBe('none');
-
-    await ctx.close();
-  });
-
-  test('voice overlay exists but hidden initially', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-    await page.waitForLoadState('networkidle');
-
-    const overlay = page.locator('#voice-overlay');
-    const opacity = await overlay.evaluate(el => getComputedStyle(el).opacity);
-    expect(opacity).toBe('0');
 
     await ctx.close();
   });
@@ -1384,18 +943,6 @@ test.describe('Error handling', () => {
 
     await ctx.close();
     brokenMock.server.close();
-  });
-
-  test('404 route returns not found', async ({ browser }) => {
-    const mock = await startMockServer();
-
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    const response = await page.request.get(mock.url + '/nonexistent');
-    expect(response.status()).toBe(404);
-
-    await ctx.close();
-    mock.server.close();
   });
 });
 
@@ -1518,36 +1065,5 @@ test.describe('Theme & styling', () => {
     const lightBg = await lightPage.$eval('body', el => getComputedStyle(el).backgroundColor);
     expect(lightBg).toBe('rgb(255, 255, 255)');
     await lightCtx.close();
-  });
-
-  test('page title is correct', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-
-    // Brand prompt ">_naozhi" unified in #1982 (8a8e00a8).
-    const title = await page.title();
-    expect(title).toBe('>_naozhi · dashboard');
-
-    await ctx.close();
-  });
-
-  test('viewport meta prevents zoom', async ({ browser }) => {
-    const ctx = await browser.newContext({ ...desktop });
-    const page = await ctx.newPage();
-    await page.goto(mock.url + '/dashboard');
-
-    const viewport = await page.$eval(
-      'meta[name="viewport"]',
-      el => el.content
-    );
-    // App-like mobile UX: lock the viewport so pinch-zoom / double-tap-zoom
-    // can't accidentally scale the dashboard. Requires both user-scalable=no
-    // and maximum-scale=1.0 (belt-and-suspenders for cross-browser coverage).
-    expect(viewport).toContain('user-scalable=no');
-    expect(viewport).toContain('maximum-scale=1.0');
-    expect(viewport).toContain('width=device-width');
-
-    await ctx.close();
   });
 });

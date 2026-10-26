@@ -19,7 +19,7 @@ import (
 func newStoppedGateRouter() *Router {
 	return NewRouter(RouterConfig{
 		MaxProcs: 3,
-		Wrapper:  cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude"),
+		Wrapper:  cli.NewWrapperLazy("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude"),
 	})
 }
 
@@ -109,7 +109,7 @@ func newResumeGuardRouter(t *testing.T) *Router {
 	t.Helper()
 	r := NewRouter(RouterConfig{
 		MaxProcs:  3,
-		Wrapper:   cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude"),
+		Wrapper:   cli.NewWrapperLazy("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude"),
 		ClaudeDir: t.TempDir(),
 	})
 	t.Cleanup(r.Shutdown)

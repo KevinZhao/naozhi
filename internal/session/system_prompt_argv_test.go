@@ -38,8 +38,8 @@ func mkSystemPromptRouter(t *testing.T) *Router {
 		defaultCWD: "/default/ws",
 	}
 	r.setWrappersForTest(map[string]*cli.Wrapper{
-		"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
-		"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
+		"claude": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+		"kiro":   cli.NewWrapperLazy("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
 	})
 	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
 	stateOf(r).picks.backend = make(map[string]string)

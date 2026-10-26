@@ -72,4 +72,12 @@ func TestFFmpegPath_Override(t *testing.T) {
 	if got, err := FFmpegPath(); err == nil {
 		t.Errorf("FFmpegPath() = %q, nil for a missing override; want an error", got)
 	}
+	// R100110-INJ-7: a relative-path override must be rejected up front rather
+	// than degrading into a PATH search inside exec.LookPath.
+	for _, rel := range []string{"ffmpeg", "bin/ffmpeg", "./ffmpeg", "../ffmpeg"} {
+		t.Setenv(ffmpegPathEnv, rel)
+		if got, err := FFmpegPath(); err == nil {
+			t.Errorf("FFmpegPath() = %q, nil for relative override %q; want an error", got, rel)
+		}
+	}
 }

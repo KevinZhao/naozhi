@@ -67,12 +67,12 @@ func TestFactory_ClaudeReturnsClaudejsonlSource(t *testing.T) {
 
 // TestInit_RegistersClaudeBackend confirms the package-level init()
 // registered "claude" with history.RegisterFactory. Without this
-// registration, NewWrapper(... "claude" ...) would never wire a
+// registration, NewWrapperLazy(... "claude" ...) would never wire a
 // history.Source and the dashboard would silently lose Claude JSONL
 // fallback after upgrade.
 func TestInit_RegistersClaudeBackend(t *testing.T) {
 	t.Parallel()
-	w := cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude")
+	w := cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude")
 	src := w.NewHistorySource(&stubSession{ws: "/tmp"}, history.Wiring{ClaudeDir: "/claude/dir"})
 	if _, ok := src.(*Source); !ok {
 		t.Errorf("wrapper(claude).NewHistorySource = %T; want *Source — init() registration regressed", src)

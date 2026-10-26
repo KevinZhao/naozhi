@@ -17,7 +17,7 @@ func TestNewRouter_SpawnCarriesTheConfiguredSpawnSettings(t *testing.T) {
 	dir := t.TempDir()
 	mcp, settings := filepath.Join(dir, "mcp.json"), filepath.Join(dir, "settings.json")
 	r := NewRouter(RouterConfig{
-		Wrapper:            cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude"),
+		Wrapper:            cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude"),
 		NoOutputTimeout:    3 * time.Minute,
 		TotalTimeout:       7 * time.Minute,
 		MCPConfigFile:      mcp,

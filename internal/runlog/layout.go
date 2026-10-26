@@ -8,8 +8,7 @@
 //
 //	internal/cron            root symlink refusal, 0700 correction, per-owner
 //	                         dir symlink guard, root fsync on a fresh subdir,
-//	                         containment re-check, split write-failure counters,
-//	                         a lock-held assertion under `go test`
+//	                         containment re-check, split write-failure counters
 //	internal/session/runhistory  MkdirAll and a bare WriteFileAtomic
 //
 // None of those differences are decisions — the session store simply never had
@@ -35,7 +34,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"testing"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 )
@@ -284,23 +282,6 @@ func (l *Layout) Lock(owner string) *sync.Mutex {
 	m := &sync.Mutex{}
 	actual, _ := l.locks.LoadOrStore(owner, m)
 	return actual.(*sync.Mutex)
-}
-
-// AssertLockHeld warns when Lock(owner) is currently free — the signature of a
-// caller that violated a *Locked-suffix contract. Best-effort by design: it
-// warns rather than panics because run history must never take the process
-// down, false negatives under contention are accepted, and the TryLock probe
-// only runs under `go test` since it sits on the append hot path (#961).
-func (l *Layout) AssertLockHeld(owner string) {
-	if !testing.Testing() || !l.Enabled() {
-		return
-	}
-	lock := l.Lock(owner)
-	if lock.TryLock() {
-		lock.Unlock()
-		slog.Warn(l.label+": owner lock not held by caller; *Locked-suffix contract violated",
-			"owner", osutil.SanitizeForLog(owner, 128))
-	}
 }
 
 // OwnerLockCount reports how many owner locks are currently live. The bound

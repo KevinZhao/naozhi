@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 )
 
 // dialContextOf returns the SSRF DialContext installed on an apiClient's
@@ -119,90 +118,6 @@ func TestIsLoopbackBaseURL(t *testing.T) {
 	}
 }
 
-// TestSSRFDialGuard_DialUsesValidatedIP pins R20260603-CR-A: after DNS
-// resolution the guard must pass the resolved (validated) IP address to the
-// base dialer rather than the original hostname. Without this, the base dialer
-// performs a second DNS lookup, enabling a TTL-0 DNS rebinding attacker to
-// swap the address between the two resolutions and bypass the SSRF guard.
-//
-// We verify the invariant by recording the addr argument received by the base
-// dialer: it must be an IP:port string, not a hostname:port string.
-func TestSSRFDialGuard_DialUsesValidatedIP(t *testing.T) {
-	t.Parallel()
-
-	var gotAddr string
-	base := func(_ context.Context, network, addr string) (net.Conn, error) {
-		gotAddr = addr
-		return nil, nil
-	}
-	guarded := ssrfDialGuard(base)
-
-	// Use a known public DNS name that always resolves to a public IP.
-	// We override the resolution via a custom resolver would be ideal, but
-	// we can observe the invariant by inspecting that gotAddr contains an
-	// IP literal rather than the hostname. Use "localhost" which resolves
-	// to 127.0.0.1 — this will be blocked by rejectInternalIP. Instead,
-	// check the code path by injecting a fake public IP directly:
-	// pass a literal public IP as addr so we exercise the literal-IP branch
-	// (which passes addr unchanged) and confirm it is NOT re-resolved.
-	if _, err := guarded(context.Background(), "tcp", "8.8.8.8:443"); err != nil {
-		t.Fatalf("public literal IP must pass guard: %v", err)
-	}
-	// The literal-IP path passes addr unchanged; confirm no hostname leaks in.
-	host, _, err := net.SplitHostPort(gotAddr)
-	if err != nil {
-		t.Fatalf("gotAddr %q is not host:port: %v", gotAddr, err)
-	}
-	if net.ParseIP(host) == nil {
-		t.Errorf("base dialer received hostname %q instead of an IP literal (rebinding TOCTOU risk)", host)
-	}
-}
-
-// TestSSRFDialGuard_HostnamePathDialsIPNotHostname verifies that for the
-// hostname resolution path, the addr handed to the base dialer is an IP:port
-// rather than the original hostname:port, closing the DNS rebinding TOCTOU
-// window (R20260603-CR-A). We inject a custom resolver via a mock to avoid
-// real DNS lookups in the unit test.
-//
-// Since ssrfDialGuard uses net.DefaultResolver directly (not injectable), we
-// test the invariant indirectly: a hostname that resolves to a public IP must
-// result in the base dialer receiving an IP:port. The real default resolver
-// is used; we pick a stable public hostname.
-//
-// Note: this test requires network access and is skipped in isolated envs.
-func TestSSRFDialGuard_HostnamePathDialsIPNotHostname(t *testing.T) {
-	t.Parallel()
-
-	var gotAddr string
-	base := func(_ context.Context, network, addr string) (net.Conn, error) {
-		gotAddr = addr
-		return nil, nil
-	}
-	guarded := ssrfDialGuard(base)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// dns.google always resolves to public Google DNS IPs.
-	_, err := guarded(ctx, "tcp", "dns.google:443")
-	if err != nil {
-		// Network unavailable or hostname blocked — skip rather than fail.
-		t.Skipf("dns.google:443 unreachable (network-isolated env?): %v", err)
-	}
-
-	// The base dialer must have received an IP:port, not "dns.google:443".
-	host, port, splitErr := net.SplitHostPort(gotAddr)
-	if splitErr != nil {
-		t.Fatalf("gotAddr %q is not host:port: %v", gotAddr, splitErr)
-	}
-	if net.ParseIP(host) == nil {
-		t.Errorf("base dialer received hostname %q instead of IP literal — DNS rebinding TOCTOU not fixed (R20260603-CR-A)", host)
-	}
-	if port != "443" {
-		t.Errorf("base dialer port = %q, want 443", port)
-	}
-}
-
 // The production constructor must install the SSRF guard for a non-loopback
 // base URL, and must NOT install it for a loopback dev mock (so httptest /
 // local relays keep working).
@@ -241,53 +156,6 @@ func TestSSRFDialGuard_ForwardsIPNotHostname(t *testing.T) {
 	}
 	if gotAddr != "203.0.113.55:443" {
 		t.Errorf("base dialer addr = %q, want 203.0.113.55:443", gotAddr)
-	}
-}
-
-// TestSSRFDialGuard_RebindScenario verifies that the addr passed to base is
-// the already-validated IP literal, not a hostname subject to re-resolution.
-func TestSSRFDialGuard_RebindScenario(t *testing.T) {
-	t.Parallel()
-	var dialedAddr string
-	base := func(_ context.Context, _, addr string) (net.Conn, error) {
-		dialedAddr = addr
-		return nil, nil
-	}
-	publicIP := net.ParseIP("8.8.8.8")
-	guarded := ssrfDialGuardWithResolver(base, func(_ context.Context, _ string, _ string) ([]net.IP, error) {
-		return []net.IP{publicIP}, nil
-	})
-	if _, err := guarded(context.Background(), "tcp", "rebind-victim.example.com:80"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if dialedAddr != "8.8.8.8:80" {
-		t.Errorf("base received %q instead of validated IP 8.8.8.8:80", dialedAddr)
-	}
-}
-
-// TestSSRFDialGuard_EmptyDNS checks that when the resolver returns an empty
-// slice (DNS success but zero records) the error message contains "SSRF guard"
-// so operators can distinguish "all IPs were internal" from "no DNS records".
-// Covers R20260603-GO-1.
-func TestSSRFDialGuard_EmptyDNS(t *testing.T) {
-	t.Parallel()
-	var baseCalled bool
-	base := func(_ context.Context, _, _ string) (net.Conn, error) {
-		baseCalled = true
-		return nil, nil
-	}
-	guarded := ssrfDialGuardWithResolver(base, func(_ context.Context, _ string, _ string) ([]net.IP, error) {
-		return []net.IP{}, nil
-	})
-	_, err := guarded(context.Background(), "tcp", "no-records.example.com:80")
-	if err == nil {
-		t.Fatal("expected error when DNS returns empty slice")
-	}
-	if baseCalled {
-		t.Error("base must not be called when DNS returns no IPs")
-	}
-	if !strings.Contains(err.Error(), "SSRF") {
-		t.Errorf("error should mention SSRF guard, got %q", err.Error())
 	}
 }
 

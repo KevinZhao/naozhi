@@ -1,12 +1,23 @@
 package platform
 
 import (
+	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// fakePlat is a minimal Platform stub with no optional capabilities.
+type fakePlat struct{}
+
+func (fakePlat) Name() string                                               { return "fake" }
+func (fakePlat) RegisterRoutes(_ *http.ServeMux, _ MessageHandler)          {}
+func (fakePlat) Reply(_ context.Context, _ OutgoingMessage) (string, error) { return "", nil }
+func (fakePlat) EditMessage(_ context.Context, _ string, _ string) error    { return nil }
+func (fakePlat) MaxReplyLength() int                                        { return DefaultMaxReplyLen }
 
 // connPlat satisfies ConnStateReporter with a canned answer.
 type connPlat struct {

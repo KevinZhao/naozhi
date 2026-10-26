@@ -10,7 +10,7 @@ import (
 // TestServerCaps_ReplyFooterDefaultsToRouterBackend: a session that pinned no
 // backend is tagged with the router's default backend, not claude's.
 func TestServerCaps_ReplyFooterDefaultsToRouterBackend(t *testing.T) {
-	w := cli.NewWrapper("/nonexistent/kiro-cli", &cli.ClaudeProtocol{}, "kiro")
+	w := cli.NewWrapperLazy("/nonexistent/kiro-cli", &cli.ClaudeProtocol{}, "kiro")
 	r := session.NewRouter(session.RouterConfig{Wrapper: w, MaxProcs: 1})
 	t.Cleanup(r.Shutdown)
 	c := serverCaps{s: &Server{router: r}}

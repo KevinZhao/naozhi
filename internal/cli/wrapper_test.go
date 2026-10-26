@@ -205,7 +205,7 @@ func TestDetectCLI_FindsExistingBinary(t *testing.T) {
 
 func TestNewWrapper_ExplicitPathTakesPrecedence(t *testing.T) {
 	t.Parallel()
-	w := NewWrapper("/custom/path/claude", &ClaudeProtocol{}, "claude")
+	w := NewWrapperLazy("/custom/path/claude", &ClaudeProtocol{}, "claude")
 	if w.CLIPath != "/custom/path/claude" {
 		t.Errorf("explicit path should be used, got %q", w.CLIPath)
 	}
@@ -239,7 +239,7 @@ func TestNewWrapper_EmptyPathAutoDetects(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // avoid native installer hit at ~/.local/bin/claude
 	t.Setenv("PATH", dir)
 
-	w := NewWrapper("", &ClaudeProtocol{}, "claude")
+	w := NewWrapperLazy("", &ClaudeProtocol{}, "claude")
 	if w.CLIPath == "" {
 		t.Error("auto-detect should produce a non-empty path when binary exists on PATH")
 	}
@@ -277,7 +277,7 @@ func TestNewWrapper_DisplayNameMatchesNormalizedID(t *testing.T) {
 		tc := tc
 		t.Run(tc.in, func(t *testing.T) {
 			t.Parallel()
-			w := NewWrapper("/definitely/not/a/real/path/claude-xyz", &ClaudeProtocol{}, tc.in)
+			w := NewWrapperLazy("/definitely/not/a/real/path/claude-xyz", &ClaudeProtocol{}, tc.in)
 			if w.BackendID != tc.wantBackendID {
 				t.Errorf("BackendID = %q, want %q", w.BackendID, tc.wantBackendID)
 			}
@@ -290,12 +290,15 @@ func TestNewWrapper_DisplayNameMatchesNormalizedID(t *testing.T) {
 
 func TestNewWrapper_UnavailableBinaryLeavesVersionEmpty(t *testing.T) {
 	t.Parallel()
-	// Use an absolute path that cannot exist so detectVersion's exec.Command
-	// fails immediately with ENOENT. We intentionally do not tamper with PATH
-	// or HOME here because NewWrapper runs detectVersion against the given
-	// path without falling back; a non-existent absolute path is the
-	// clearest way to simulate "binary not installed".
-	w := NewWrapper("/definitely/not/a/real/path/claude-xyz", &ClaudeProtocol{}, "claude")
+	// Use an absolute path that cannot exist so Probe's exec.Command fails
+	// immediately with ENOENT. We intentionally do not tamper with PATH or
+	// HOME here because Probe runs --version against the given path without
+	// falling back; a non-existent absolute path is the clearest way to
+	// simulate "binary not installed".
+	w := NewWrapperLazy("/definitely/not/a/real/path/claude-xyz", &ClaudeProtocol{}, "claude")
+	if v := w.Probe(context.Background()); v != "" {
+		t.Errorf("Probe for missing binary should return empty, got %q", v)
+	}
 	if w.CLIVersion != "" {
 		t.Errorf("CLIVersion for missing binary should be empty, got %q", w.CLIVersion)
 	}

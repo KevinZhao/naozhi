@@ -119,7 +119,7 @@ func TestNewHistorySource_ClaudeWithEmptyDirReturnsNoop(t *testing.T) {
 		}
 		return nil
 	})
-	w := NewWrapper("/bin/false", &ClaudeProtocol{}, "cli-test-claude-empty")
+	w := NewWrapperLazy("/bin/false", &ClaudeProtocol{}, "cli-test-claude-empty")
 	// Sanity: factory was registered before NewWrapper.
 	// R240-ARCH-28: lookup happens at NewHistorySource call time, so we
 	// confirm the registry side rather than a Wrapper field.
@@ -165,7 +165,7 @@ func TestNewHistorySource_DepsRoundTrip(t *testing.T) {
 		return history.Noop{}
 	})
 
-	w := NewWrapper("/bin/false", &ClaudeProtocol{}, "cli-test-deps-rt")
+	w := NewWrapperLazy("/bin/false", &ClaudeProtocol{}, "cli-test-deps-rt")
 	// R240-ARCH-28: registry lookup at NewHistorySource time replaces
 	// the previous w.historyFactory cache. Confirm the registry binding.
 	if history.PickFactory(w.BackendID) == nil {

@@ -157,19 +157,9 @@ func (w *Wrapper) EffectiveVersion() string {
 	return w.CLIVersion
 }
 
-// NewWrapper creates a Wrapper with the given CLI path and protocol (empty path
-// auto-detects). It synchronously runs `<cli> --version` with a 5s timeout, so
-// construction is blocking IO; callers that want SIGTERM to abort the probe
-// should use NewWrapperLazy + Probe(ctx).
-func NewWrapper(cliPath string, proto Protocol, backend string) *Wrapper {
-	w := newWrapperCommon(cliPath, proto, backend)
-	// Eager probe (blocks up to 5s); the legacy startup path logs CLIVersion right after.
-	w.CLIVersion = detectVersion(w.CLIPath)
-	return w
-}
-
-// NewWrapperLazy constructs the Wrapper without running `<cli> --version`;
-// CLIVersion stays "" until Probe(ctx).
+// NewWrapperLazy constructs the Wrapper with the given CLI path and protocol
+// (empty path auto-detects) without running `<cli> --version`; CLIVersion
+// stays "" until Probe(ctx).
 func NewWrapperLazy(cliPath string, proto Protocol, backend string) *Wrapper {
 	return newWrapperCommon(cliPath, proto, backend)
 }
@@ -196,7 +186,7 @@ func ResolveCLIPath(cliPath, backend string) string {
 	return osutil.ExpandHome(cliPath)
 }
 
-// newWrapperCommon is the shared constructor body for NewWrapper and NewWrapperLazy.
+// newWrapperCommon is the constructor body behind NewWrapperLazy.
 func newWrapperCommon(cliPath string, proto Protocol, backend string) *Wrapper {
 	cliPath = ResolveCLIPath(cliPath, backend)
 	id := normalizeBackendID(backend)
@@ -276,15 +266,8 @@ func enforceCLIPathSafe(cliPath string) error {
 	return fmt.Errorf("not a regular file or symlink (mode=%s)", mode.String())
 }
 
-// detectVersion runs "<cli> --version" with a Background-derived 5s timeout.
-// Production MUST use NewWrapperLazy + Probe(ctx) so SIGTERM aborts the probe;
-// this survives only for in-package tests without a shutdown ctx (#803).
-func detectVersion(cliPath string) string {
-	return detectVersionCtx(context.Background(), cliPath)
-}
-
-// detectVersionCtx is the context-aware detectVersion: the caller's ctx is
-// chained with a hard 5s subprocess timeout, whichever fires first.
+// detectVersionCtx runs "<cli> --version" under the caller's ctx chained with
+// a hard 5s subprocess timeout, whichever fires first.
 func detectVersionCtx(parent context.Context, cliPath string) string {
 	// Already-cancelled ctx: don't fork a subprocess just to SIGKILL it.
 	if err := parent.Err(); err != nil {

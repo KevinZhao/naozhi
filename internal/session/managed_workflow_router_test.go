@@ -110,7 +110,7 @@ func wfSnapshot(task string, states ...string) clievent.Event {
 
 func wfRouter(t *testing.T) *Router {
 	t.Helper()
-	r := NewRouter(RouterConfig{Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
+	r := NewRouter(RouterConfig{Wrapper: cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
 	t.Cleanup(r.Shutdown)
 	return r
 }

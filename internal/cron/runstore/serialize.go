@@ -1,66 +1,12 @@
 package runstore
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"sync"
 )
-
-// appendMarshalScratch pairs a bytes.Buffer with the json.Encoder bound to it,
-// pooled via appendMarshalBufPool so Store.Append avoids json.Marshal's
-// per-call encodeState alloc (#1043). The encoder is pooled together with the
-// buffer because a json.Encoder only caches its encodeState across Encode
-// calls on the same encoder.
-type appendMarshalScratch struct {
-	buf *bytes.Buffer
-	enc *json.Encoder
-}
-
-var appendMarshalBufPool = sync.Pool{
-	New: func() any {
-		buf := bytes.NewBuffer(make([]byte, 0, 4*1024))
-		return &appendMarshalScratch{buf: buf, enc: json.NewEncoder(buf)}
-	},
-}
-
-// appendMarshalPoolMaxCap drops oversized buffers from the pool so a
-// one-off near-MaxRecordBytes record does not pin memory for the
-// process lifetime. Sized at 2× MaxRecordBytes for headroom.
-const appendMarshalPoolMaxCap = 2 * MaxRecordBytes
-
-// marshalRunPooled encodes run via a pooled bytes.Buffer + json.Encoder.
-// Returns a freshly-copied []byte (independent of the pooled buffer) so
-// callers may retain it after the buffer is recycled. Behaviourally
-// identical to json.Marshal(run) except for json.Encoder's trailing
-// '\n' which is stripped to match Marshal output.
-func marshalRunPooled(run *CronRun) ([]byte, error) {
-	sc := appendMarshalBufPool.Get().(*appendMarshalScratch)
-	buf := sc.buf
-	defer func() {
-		if buf.Cap() > appendMarshalPoolMaxCap {
-			return
-		}
-		buf.Reset()
-		appendMarshalBufPool.Put(sc)
-	}()
-	buf.Reset()
-	// Encoder keeps json.Marshal's HTML-escape default so on-disk bytes stay
-	// indistinguishable from json.Marshal output.
-	if err := sc.enc.Encode(run); err != nil {
-		return nil, err
-	}
-	body := buf.Bytes()
-	if n := len(body); n > 0 && body[n-1] == '\n' {
-		body = body[:n-1]
-	}
-	out := make([]byte, len(body))
-	copy(out, body)
-	return out, nil
-}
 
 // readRun parses a single run file. Returns ErrCorruptRun on parse failure
 // or oversize; fs.ErrNotExist propagates unchanged.

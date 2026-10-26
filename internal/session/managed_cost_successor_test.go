@@ -84,7 +84,7 @@ func TestRespawn_SpendBookedAfterTheCommitIsForwarded(t *testing.T) {
 // (a Send that was still in flight) is differenced against the renamed
 // session's baseline: booked once, there, and not again by its next turn.
 func TestRename_ReadingOnTheOldSessionIsTheNewSessionsToDifference(t *testing.T) {
-	r := NewRouter(RouterConfig{Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
+	r := NewRouter(RouterConfig{Wrapper: cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
 	t.Cleanup(r.Shutdown)
 	ledger := costledger.NewStore(t.TempDir(), costledger.Options{})
 	t.Cleanup(ledger.Close)

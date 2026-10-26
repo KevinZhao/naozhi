@@ -36,7 +36,7 @@ type endFixture struct {
 func newEndFixture(t *testing.T) *endFixture {
 	t.Helper()
 	f := &endFixture{claudeDir: t.TempDir(), ws: t.TempDir(), t0: time.Now().Add(-time.Hour).Truncate(time.Millisecond)}
-	f.r = NewRouter(RouterConfig{Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude"), ClaudeDir: f.claudeDir})
+	f.r = NewRouter(RouterConfig{Wrapper: cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude"), ClaudeDir: f.claudeDir})
 	t.Cleanup(f.r.Shutdown)
 	f.ledger = costledger.NewStore(t.TempDir(), costledger.Options{})
 	t.Cleanup(f.ledger.Close)
@@ -377,7 +377,7 @@ func TestReconnectShims_ReattachedProcessBooksItsEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
+	w := cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
 	w.ShimManager = mgr
 	r := NewRouter(RouterConfig{Wrapper: w, ClaudeDir: filepath.Join(dir, "claude"), HistoryLoader: &racingHistoryLoader{}})
 	t.Cleanup(r.Shutdown)

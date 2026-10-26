@@ -150,7 +150,7 @@ func TestWireSchedulers_BudgetReachesScheduler(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(out.Cron.Stop)
-	j := cron.NewJob("@every 10m", "ping", cron.JobIMContext{Platform: "feishu", ChatID: "c1"})
+	j := cron.NewJobFull(cron.JobInit{Schedule: "@every 10m", Prompt: "ping", IM: cron.JobIMContext{Platform: "feishu", ChatID: "c1"}})
 	if err := out.Cron.AddJob(j); err != nil {
 		t.Fatal(err)
 	}

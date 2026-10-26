@@ -22,7 +22,7 @@ func resumeRouter(t *testing.T, key string, first *clievent.SendResult, lines ..
 	t.Helper()
 	claudeDir, ws := t.TempDir(), t.TempDir()
 	r := NewRouter(RouterConfig{
-		Wrapper:   cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude"),
+		Wrapper:   cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude"),
 		ClaudeDir: claudeDir,
 	})
 	t.Cleanup(r.Shutdown)

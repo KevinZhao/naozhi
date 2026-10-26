@@ -13,8 +13,8 @@ import (
 func twoBackendRouter() *Router {
 	r := &Router{ss: newSessionTable(), defaultCWD: "/default/ws"}
 	r.setWrappersForTest(map[string]*cli.Wrapper{
-		"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
-		"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
+		"claude": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+		"kiro":   cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
 	})
 	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
 	stateOf(r).picks.backend = make(map[string]string)
@@ -71,8 +71,8 @@ func TestAgentDefaultBackend_SpawnAndTakeover(t *testing.T) {
 	r := NewRouter(RouterConfig{
 		MaxProcs: 4,
 		BackendRuntimes: map[string]BackendRuntime{
-			"claude": {Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")},
-			"kiro":   {Wrapper: cli.NewWrapper("/nonexistent/kiro", &cli.ClaudeProtocol{}, "kiro")},
+			"claude": {Wrapper: cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")},
+			"kiro":   {Wrapper: cli.NewWrapperLazy("/nonexistent/kiro", &cli.ClaudeProtocol{}, "kiro")},
 		},
 		DefaultBackend: "claude",
 	})

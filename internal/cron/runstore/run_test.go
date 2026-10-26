@@ -44,7 +44,7 @@ const (
 
 func TestCronRun_WireFormatGolden(t *testing.T) {
 	t.Parallel()
-	got, err := marshalRunPooled(goldenCronRun())
+	got, err := json.Marshal(goldenCronRun())
 	if err != nil {
 		t.Fatal(err)
 	}

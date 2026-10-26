@@ -117,8 +117,8 @@ func TestResolveSpawnParams_EffortPrecedence(t *testing.T) {
 			defaultCWD: "/default/ws",
 		}
 		r.setWrappersForTest(map[string]*cli.Wrapper{
-			"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
-			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+			"kiro":   cli.NewWrapperLazy("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
+			"claude": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 		})
 		r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "kiro" })
 		stateOf(r).picks.backend = make(map[string]string)

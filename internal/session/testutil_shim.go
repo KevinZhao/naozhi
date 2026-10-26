@@ -49,7 +49,7 @@ func StartFakeShimForTest(t testing.TB, key string, firstSeq int64, backlog []st
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
+	w := cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
 	w.ShimManager = mgr
 	f := &FakeShim{
 		Config:   RouterConfig{Wrapper: w},

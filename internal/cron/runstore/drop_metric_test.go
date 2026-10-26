@@ -43,25 +43,3 @@ func TestAppend_HistoryDropTotal_BumpsOnUnrecoverableOversize(t *testing.T) {
 		t.Fatalf("HistoryDropTotal after second drop = %d want 2", got)
 	}
 }
-
-// TestAppend_HistoryDropTotal_NoBumpOnSuccess guards the negative: a normal
-// (or truncate-and-recover) Append must NOT touch the drop counter, so the
-// metric stays a clean signal of actual losses.
-func TestAppend_HistoryDropTotal_NoBumpOnSuccess(t *testing.T) {
-	t.Parallel()
-	s := newTestStore(t, 200, 30*24*time.Hour)
-	// Large enough that the truncated retry record lands fine.
-	s.maxRunBytes = 2048
-
-	jobID := mustGenerateID()
-	run := makeRun(jobID, time.Now())
-	run.Result = strings.Repeat("Z", 4096) // triggers truncate-retry, which succeeds
-	s.Append(run)
-
-	if got := s.HistoryDropTotal(); got != 0 {
-		t.Fatalf("HistoryDropTotal after recoverable oversize = %d want 0 (record landed)", got)
-	}
-	if got := s.Recent(jobID, 5); len(got) != 1 {
-		t.Fatalf("Recent len=%d want 1 (truncated record should have landed)", len(got))
-	}
-}

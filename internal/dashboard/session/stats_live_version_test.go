@@ -17,7 +17,7 @@ import (
 // naozhi) rather than staying frozen at the spawn-time value baked into the
 // static stats block at startup.
 func TestHandleList_CLIVersion_TracksLiveUpgrade(t *testing.T) {
-	w := cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
+	w := cli.NewWrapperLazy("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
 	w.CLIVersion = "2.1.100" // spawn-time detection at startup
 	r := sessionpkg.NewRouter(sessionpkg.RouterConfig{Wrapper: w, MaxProcs: 3})
 
