@@ -90,7 +90,16 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 		p.slots.mu.Unlock()
 		// stdinWriter (shimWriter) would re-acquire the write lock and
 		// deadlock, so write through a helper that uses sendLocked.
-		return p.writeUserMessageUnderShimLock(slot.uuid, text, images, priority)
+		if err := p.writeUserMessageUnderShimLock(slot.uuid, text, images, priority); err != nil {
+			return err
+		}
+		// Mirror Send's user-entry Append so a later subscribe can re-render
+		// the bubble (readLoop filters the CLI's replay echo out of
+		// ring.EventLog). Inside the write lock so two quick sends land in
+		// the log in the order they hit the shim; after the write so a
+		// rejected write leaves no ghost entry.
+		p.eventLog.Append(buildUserEntry(text, images, slot.runID))
+		return nil
 	})
 	if !queued {
 		return nil, clierr.ErrTooManyPending
@@ -109,11 +118,6 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []cli
 		}
 		return nil, fmt.Errorf("passthrough write: %w", writeErr)
 	}
-
-	// Mirror Send's user-entry Append so a later subscribe can re-render the
-	// bubble (readLoop filters the CLI's replay echo out of ring.EventLog). After
-	// the successful write so a rejected write leaves no ghost entry.
-	p.eventLog.Append(buildUserEntry(text, images, slot.runID))
 
 	return p.awaitSlot(ctx, slot)
 }
