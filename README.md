@@ -16,40 +16,15 @@
 
 大多数 "AI 聊天机器人" 只是 API wrapper。Naozhi 不同 —— 它直接 spawn 本机 AI CLI（Claude Code、Kiro 或 Codex）作为长生命周期子进程，通过 stdin/stdout 进行原生协议通信，**保留 CLI 的全部能力**：
 
-- 读写文件、执行 Bash、Git 操作、子 agent 编排
-- 所有已配置的 MCP servers
+- 读写文件、执行 Bash、Git 操作、子 agent 编排，以及所有已配置的 MCP servers
 - 自定义 system prompt 和 per-agent 模型选择
-- 可插拔 Protocol：Claude `stream-json`（NDJSON）、Kiro `ACP`（JSON-RPC 2.0）或 Codex `app-server`（JSON-RPC 2.0）
+- 可插拔 Protocol：Claude `stream-json`（NDJSON）、Kiro `ACP`（JSON-RPC 2.0）或 Codex `app-server`（JSON-RPC 2.0），同一实例按会话切换
 
-```mermaid
-graph TD
-    IM["飞书 / Slack / Discord / 微信"]
-    GW["Naozhi Gateway<br/>(Go, 单二进制)"]
-    CLI["AI CLI<br/>(Claude / Kiro / Codex, 长生命周期进程)"]
-    TOOLS["Bash · Read · Edit · Grep<br/>Glob · Agent · MCP servers"]
-
-    IM -- "WebSocket / Socket Mode<br/>Gateway / HTTP 长轮询" --> GW
-    GW -- "stdin/stdout<br/>(stream-json / ACP / app-server JSON-RPC)" --> CLI
-    CLI --- TOOLS
-
-    style IM fill:#e8f4fd,stroke:#4a90d9
-    style GW fill:#fff3cd,stroke:#d4a017
-    style CLI fill:#d4edda,stroke:#28a745
-    style TOOLS fill:#f8f9fa,stroke:#6c757d,stroke-dasharray: 5 5
+```
+飞书 / Slack / Discord / 微信  --WebSocket / 长轮询-->  Naozhi Gateway (Go, 单二进制)  --stdin/stdout-->  AI CLI (长生命周期进程)
 ```
 
-### 核心优势
-
-| | 特性 | 说明 |
-|---|---|---|
-| **0** | 零基础设施 | 所有平台均支持 WebSocket / 长轮询。无需公网 IP、域名或端口转发 |
-| **1** | 完整 Agent 能力 | 不是 API wrapper，是真正的 Claude Code CLI —— 工具调用、代码编辑、MCP 一个不少 |
-| **2** | 会话自动恢复 | 进程崩溃/回收后自动 `--resume`，对话上下文完整保留 |
-| **3** | 单二进制部署 | Go 编译，无容器、无依赖。4 平台（linux/darwin × amd64/arm64）预编译 release，内置自动更新 |
-| **4** | 实时 Dashboard | 浏览器实时查看所有会话、事件流、费用统计 |
-| **5** | 多节点 NAT 穿越 | 远程机器反向拨入主节点，统一管理多台工作站 |
-| **6** | 消息队列与抢占 | 忙时消息自动排队/合并，支持 `/stop` 软中断与 `/urgent` 紧急抢占 |
-| **7** | 多 Backend | 同一实例可并存 Claude（stream-json）、Kiro（ACP）与 Codex（app-server），按会话切换 |
+此外：零基础设施（无需公网 IP、域名或端口转发）、进程回收后自动 `--resume` 恢复会话、单二进制 + 内置自动更新、实时 Dashboard、多节点 NAT 穿越、忙时消息排队与 `/stop` / `/urgent` 抢占 —— 详见下方功能一览。
 
 ---
 
@@ -445,8 +420,7 @@ journalctl -u naozhi -f
 ### IM 访问控制
 
 IM 消息会交给 CLI 执行，CLI 跳过权限确认（`--dangerously-skip-permissions`），
-所以**能给 bot 发消息就等于能在宿主机上跑命令**。dashboard 和反向节点都有 token，
-IM 入口靠的是 `im_access`：
+所以**能给 bot 发消息就等于能在宿主机上跑命令**。IM 入口靠 `im_access` 把关：
 
 ```yaml
 im_access:
@@ -458,35 +432,17 @@ im_access:
       allowed_users: ["U012ABCDEF"]           # Slack user ID
 ```
 
-- **不配置 = 所有人都能用**（兼容旧配置）。启动日志、`naozhi config check`、
-  `naozhi doctor` 会对每个没有条目的平台告警，`config check` 因此退出码为 1。
-  `default_deny: true` 会拒绝所有没有条目的平台。
-- `naozhi setup weixin` 会把扫码的微信用户写进 `im_access.platforms.weixin`。登录
-  响应没给用户 ID 时，新建的配置文件写 `default_deny: true`（先发一条消息拿到自己的
-  ID 再加进去）；已有的配置文件里不写 `default_deny`，免得把其他平台关在外面。已有的
-  `im_access.platforms.weixin` 条目不会被改动。
-- 平台一旦有条目，名单外的人和没有用户 ID 的消息都会被拒绝，包括飞书 / Slack /
-  Discord 卡片上的 AskUserQuestion 按钮回答。被拒的消息不会触发任何命令，也不会进
-  CLI。注意卡片在鉴权之前就会变成"已回答"：名单外的人、被限流或超预算的点击同样会让
-  按钮消失，此时有权限的人请直接回复文字作答（与飞书一致）。飞书的语音、图片和文件，
-  Slack 上传的图片和文件，Discord 的附件都在下载前就判定：名单外的人、已被限流的人、
-  当天额度已用尽的会话发来的语音不下载、不转写（不产生 Transcribe 费用），图片和文件
-  不下载；群里的飞书语音、图片和文件因为没法 @bot 也不下载。
-- **怎么拿用户 ID**：被拒的消息会在 Info 级别打一行 `im access denied`，`user`
-  字段就是要填的 ID（飞书 open_id `ou_...`、Slack `U...`、Discord 用户 ID、微信
-  `from`）。私聊里被拒的人也会收到带自己 ID 的提示，同一人 10 分钟最多一次；群里
-  对名单外的人不回复，免得刷屏。
-- `/cd`、`/project`、`/cron` 只有 `admin_users` 能用；名单内的非管理员用这些命令
-  时（私聊和群里都一样）会收到「该命令需要管理员权限。」，同一人 10 分钟最多一次。`admin_users` 为空时所有
-  `allowed_users` 都算管理员，所以只开白名单不会少功能。
-- 已有的定时任务不受影响：把某人移出名单后，他创建过的 cron 任务照常运行，要在
-  dashboard 里手动删除。
-- 改名单不用重启：`naozhi config reload`（或 `systemctl reload naozhi` / `kill -HUP`）
-  即时生效，见 [配置热重载](#配置热重载)。
-- 把自己关在外面时，dashboard 不受 `im_access` 影响，可以从那里继续操作。
+- **不配置 = 所有人都能用**。启动日志、`naozhi config check`、`naozhi doctor` 会对没有条目的
+  平台告警；`default_deny: true` 拒绝所有没有条目的平台。平台一旦有条目，名单外的人和没有
+  用户 ID 的消息都被拒绝（含卡片按钮回答），语音、图片和文件在下载前就判定。
+- **怎么拿用户 ID**：被拒的消息会在 Info 级别打一行 `im access denied`，`user` 字段就是要填
+  的 ID；私聊里被拒的人也会收到带自己 ID 的提示。
+- `/cd`、`/project`、`/cron` 只有 `admin_users` 能用；`admin_users` 为空时所有 `allowed_users`
+  都算管理员。
+- 改名单不用重启：`naozhi config reload` 即时生效。把自己关在外面时，dashboard 不受
+  `im_access` 影响，可以从那里继续操作。
 
-`im_rate_limit` 限制每个发送者发消息的频率（令牌桶，按平台 + 用户 ID 分桶；平台没给
-用户 ID 时按会话分桶），防止有人刷屏把账单打穿：
+`im_rate_limit` 按平台 + 用户 ID 做令牌桶限流，防止刷屏把账单打穿：
 
 ```yaml
 im_rate_limit:
@@ -494,46 +450,23 @@ im_rate_limit:
   burst: 3           # 可以连发的条数；0 = 同 msgs_per_min
 ```
 
-- 斜杠命令也计数（`/cron add` 刷屏一样被挡），`/stop` 不计：它只会停下花费。
-- 超限的消息直接丢弃，不进 CLI，带语音、图片或文件的也不下载（同时到达的几条可能共用
-  最后一个额度）；发送者每分钟最多收到一次「消息过于频繁」提示。
-- 在 `im_access` 之后检查，所以被拒的人不消耗额度；没 @bot 的群消息也不消耗。
-- 管理员同样受限；改配置不用重启，`naozhi config reload` 即时生效（只在
-  `im_rate_limit` 真的变了时才重建令牌桶）。
+斜杠命令也计数，`/stop` 不计；超限的消息直接丢弃；管理员同样受限。
 
 `cost.budget` 按 cost 账本限制每天的花费（USD），三档上限各自独立，0 或不配 = 不限：
 
 ```yaml
 cost:
   budget:
-    per_chat_daily_usd: 20       # 每个 IM 会话（同一会话的各个 agent 合计）
+    per_chat_daily_usd: 20       # 每个 IM 会话
     per_cron_job_daily_usd: 5    # 每个定时任务
-    daily_usd: 100               # 整台机器：IM、定时任务、dashboard、系统会话合计
-    warn_ratio: 0.8              # 到这个比例时提醒；默认 0.8
-    action: block                # block（默认）= 用尽后拒绝；warn = 只提醒不拒绝
-    timezone: "Asia/Shanghai"    # 「一天」按这个时区的 0 点切换；默认同 cron.timezone
+    daily_usd: 100               # 整台机器合计
+    warn_ratio: 0.8              # 到这个比例时提醒
+    action: block                # block = 用尽后拒绝；warn = 只提醒
 ```
 
-- **IM**：会话或整机的额度用尽后，新消息不进 CLI，会话每分钟最多收到一次「今日费用预算已
-  用尽（$X / $Y），… 重置」。斜杠命令不受影响，`/stop`、`/new` 照常可用。绑定项目的会话走项目
-  planner，同一项目的所有会话共用一份额度。管理员（`admin_users`）同样受限：名单为空时
-  每个放行的用户都算管理员，豁免管理员等于让会话额度失效。
-- **定时任务**：任务或整机的额度用尽后，到点的运行（包括手动「立即执行」）直接记为
-  `skipped / budget_exceeded`，不启动会话、不计入自动暂停的连续失败次数；每个任务每天只有
-  第一次跳过写进运行历史并通知会话，之后的跳过不再占历史条数。
-- 到 `warn_ratio` 时，IM 回复末尾追加一行「⚠️ 今日费用已达预算的 80%」，定时任务发一条提示；
-  每个 scope 每天各一次。整机额度的提醒每天只发给最先碰到它的那个会话或任务（额度用尽后的
-  拒绝提示则每个会话、每个任务都会收到）。`action: warn` 时超过上限也照常执行，只再提醒一次。
-- dashboard 不受预算限制（它是已登录的 owner），但它的花费计入整机额度。会话头部的运行统计
-  和定时任务时间轴头部会显示「今日 $X / $Y」（取离上限最近的那一档，到 `warn_ratio` 加 ⚠，
-  超过上限标红，悬停可看 scope 和重置时间）；数据来自 `GET /api/cost/budget?session_key=|job_id=`。
-- 这是软上限：放行时还没超的那一轮可能把花费推过上限；花费在账本落盘后（约 1 秒内）才
-  计入。只统计以 USD 计价的花费，按 credits / tokens 计量的 backend 不计入。
-- 需要 cost 账本开着（`cost.enabled` 不能为 false）。改上限、`warn_ratio`、`action`
-  不用重启，`naozhi config reload` 即时生效，当天已花的钱照算；改了之后上面「每天一次」的
-  提醒和跳过记录重新计，新上限下再碰到会再提醒、再记一次。下面两种仍要重启（会列在
-  `restart_required` 里）：启动时没配任何上限、现在要加上（`cost.budget`），以及「一天」
-  的时区变了（`cost.budget.timezone`）。
+用尽后 IM 新消息不进 CLI（`/stop`、`/new` 照常可用），定时任务记为 `skipped / budget_exceeded`；
+dashboard 不受限但花费计入整机额度。这是**软上限**，依赖 cost 账本（`cost.enabled` 不能为 false）。
+各字段细节见 `config.example.yaml` 的注释。
 
 ### 配置热重载
 

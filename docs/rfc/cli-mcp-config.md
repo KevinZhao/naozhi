@@ -264,4 +264,4 @@ claude -p --output-format stream-json --verbose \
   缓存在该 server 自己的进程侧，**不经 cc 的 `~/.claude.json` `mcpOAuth`**，因此与
   `--setting-sources ""` 是否共享 OAuth 无关。远程 http server 的该问题仍未验证。
 
-发布：合入 master 后按 `docs/ops/deployment-strategy.md` 打 tag，各机 `naozhi upgrade`。本机 launchd 实例可先本地构建验证（开发用途），但分发必须走 release pipeline。
+发布：合入 master 后按 `.claude/skills/dev-workflow/SKILL.md` 的 Releasing 流程打 tag，各机 `naozhi upgrade`。本机 launchd 实例可先本地构建验证（开发用途），但分发必须走 release pipeline。
