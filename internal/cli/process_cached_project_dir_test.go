@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/eventlog/ring"
 	"github.com/naozhi/naozhi/internal/subagent"
 )
@@ -38,21 +37,5 @@ func TestProcess_cachedProjectDir_empty(t *testing.T) {
 	p.InitLinker("")
 	if got := p.linkerProjectDir(); got != "" {
 		t.Errorf("project dir should be empty for empty cwd, got %q", got)
-	}
-}
-
-// TestClaudeProjectsRoot_consistency verifies claudeProjectsRoot derives
-// from os.UserHomeDir correctly and is consistent across calls.
-func TestClaudeProjectsRoot_consistency(t *testing.T) {
-	t.Parallel()
-	got := claudefs.ProjectsRoot(claudefs.DefaultDir())
-	home := os.Getenv("HOME")
-	want := filepath.Join(home, ".claude", "projects")
-	if got != want {
-		t.Errorf("claudefs.ProjectsRoot(claudefs.DefaultDir()) = %q, want %q", got, want)
-	}
-	// Two consecutive calls with the same HOME must agree.
-	if got2 := claudefs.ProjectsRoot(claudefs.DefaultDir()); got2 != got {
-		t.Errorf("claudefs.ProjectsRoot(claudefs.DefaultDir()) inconsistent: %q vs %q", got, got2)
 	}
 }

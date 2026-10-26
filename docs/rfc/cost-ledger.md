@@ -158,7 +158,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 - `cli.Event` 新增 `ModelUsage map[string]ModelUsage \`json:"modelUsage,omitempty"\``；`ModelUsage` 字段对齐 CLI schema（inputTokens/outputTokens/cacheReadInputTokens/cacheCreationInputTokens/webSearchRequests/thinkingTokens/costUSD/canonicalModel/provider/costBasis）。
 - `cli.SendResult` 新增 `ModelUsage map[string]ModelUsage`（累计快照，语义同 `CostUSD`）。`process_send.go:233`、`passthrough.go:317` head 填充；follower 零值；`leak_recovery.go:104-110` 重建时**必须拷贝**（加注释 + 测试）。
-- `ClaudeProtocol.ReadEvent` 是整 Event unmarshal（`protocol_claude.go:493`，pooled `*Event`）：`encoding/json` 仅在 JSON 中出现 `modelUsage` 键时才分配 map，非 result 帧零额外分配；pool 复位 `*ev = Event{}` 已覆盖新字段。新增 `BenchmarkReadEvent_NonResultFrame` 锁定 allocs/op 与现值相等，`BenchmarkReadEvent_ResultWithModelUsage` 记录新基线。
+- `ClaudeProtocol.ReadEvent` 是整 Event unmarshal（`protocol_claude.go:493`，pooled `*Event`）：`encoding/json` 仅在 JSON 中出现 `modelUsage` 键时才分配 map，非 result 帧零额外分配；pool 复位 `*ev = Event{}` 已覆盖新字段。由 `TestReadEvent_NonResultFrameHasNilModelUsage` 断言非 result 帧 `ModelUsage` 为 nil（原 `BenchmarkReadEvent*` 基准已在第 3 轮减法中删除）。
 - ACP/codex 不填 `ModelUsage`。`EventEntry.Cost` 不变。
 
 ### 5.2 session 层：统一累计快照 + 脱离 runStore
@@ -279,7 +279,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 - 单测：`costledger.Delta`（乱序 / 新 model / 新 Unit / 字段回退 / 16 上限）；`Append` 拒空、枚举校验、字符串消毒；retention / 半行恢复 / symlink 拒绝；summary 每档 `group_by` + unit 分桶不混算 + 窗口上限。
 - 集成：session finishRun → 1 条 entry；runStore=nil 时 costSpent 仍累进（P4 回归，旧代码 FAIL）；cron persistent 两次 run delta（P2 回归，旧代码 FAIL）；cron 窗口内的 turn 不写 session ledger、窗口外的迟到 result 与 partial 写 session ledger；sandbox 三种 outcome 各 1 条（CostUSD>0 时）、replay 另起 1 条；dashboard 对 cron key 在 run 窗口外发送 → `Source=session` entry；kiro metering 差分（两 turn 各 2 credits → 两条 amount=2，旧逻辑第二条会是 4）；sysession json 三态；leak-recovery 拷贝 ModelUsage。
-- 基准：`BenchmarkReadEvent_NonResultFrame` allocs 不变；`BenchmarkAccountTurnCost_16Models`。
+- 非 result 帧零分配：`TestReadEvent_NonResultFrameHasNilModelUsage`（`BenchmarkReadEvent*` 已在第 3 轮减法中删除）；`BenchmarkAccountTurnCost_16Models`。
 - 前端：Home 卡 / cron per-job 聚合契约测试。
 - 手工：线上升级后对比 `summary(24h)` 与 `sessions.json` costSpent 增量一致；kiro 实机确认 `_kiro.dev/metadata` 先于 `session/prompt` 响应到达（否则 Metered 差分错位到下一 turn，需在 PR-2a 改为 result 后再读一次）。
 
