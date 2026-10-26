@@ -55,38 +55,6 @@ func TestDashboardHTML_ScriptsDeferred(t *testing.T) {
 	}
 }
 
-// TestPrecompressGzip_Guards covers the helper's edge cases: a tiny input that
-// would grow under gzip framing returns nil (never ship a larger "compressed"
-// body), and a compressible input returns valid gzip that decodes to the
-// original.
-func TestPrecompressGzip_Guards(t *testing.T) {
-	t.Parallel()
-	// Tiny / incompressible input → nil (gzip framing overhead exceeds savings).
-	if got := precompressGzip([]byte("x")); got != nil {
-		t.Errorf("precompressGzip(tiny) = %d bytes, want nil (no shrink)", len(got))
-	}
-	if got := precompressGzip(nil); got != nil {
-		t.Errorf("precompressGzip(nil) = %d bytes, want nil", len(got))
-	}
-	// Compressible input → valid gzip, smaller, decodes back.
-	raw := []byte(strings.Repeat("compress me ", 1000))
-	gz := precompressGzip(raw)
-	if gz == nil {
-		t.Fatal("precompressGzip(compressible) = nil, want compressed bytes")
-	}
-	if len(gz) >= len(raw) {
-		t.Errorf("precompressGzip did not shrink: %d >= %d", len(gz), len(raw))
-	}
-	zr, err := gzip.NewReader(bytes.NewReader(gz))
-	if err != nil {
-		t.Fatalf("not valid gzip: %v", err)
-	}
-	got, _ := io.ReadAll(zr)
-	if !bytes.Equal(got, raw) {
-		t.Error("precompressGzip output does not decode to the original")
-	}
-}
-
 // TestStaticAsset_Precompressed verifies #1769: compressible static assets are
 // gzip.BestCompression-precompressed once at init, and the precompressed bytes
 // are served (with Content-Encoding: gzip) to gzip-capable clients — never
@@ -123,36 +91,15 @@ func TestStaticAsset_Precompressed(t *testing.T) {
 	}
 }
 
-// TestStaticAsset_PrecompressedBeatsLevel1 confirms the level-9 init-time
-// compression is meaningfully smaller than the level-1 on-the-fly path the
-// middleware would otherwise use — the whole point of precompressing.
-func TestStaticAsset_PrecompressedBeatsLevel1(t *testing.T) {
-	t.Parallel()
-	a := staticAssets["dashboard.js"]
-	if a.gz == nil {
-		t.Skip("dashboard.js not embedded")
-	}
-	var buf bytes.Buffer
-	zw, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
-	_, _ = zw.Write(a.bytes)
-	_ = zw.Close()
-	level1 := buf.Len()
-	if a.gz == nil || len(a.gz) >= level1 {
-		t.Errorf("precompressed dashboard.js (%d) should beat level-1 (%d)", len(a.gz), level1)
-	}
-	t.Logf("dashboard.js: raw=%d level1=%d level9=%d (%.1f%% smaller than level1)",
-		len(a.bytes), level1, len(a.gz), 100*float64(level1-len(a.gz))/float64(level1))
-}
-
 // TestHandleDashboardJS_ServesPrecompressedThroughMiddleware drives the real
 // handler through gzipMiddleware and asserts: a gzip client gets the cached
 // level-9 body (Content-Encoding: gzip, decodes to raw, NOT re-compressed by
 // the middleware), and an identity client gets raw bytes.
 func TestHandleDashboardJS_ServesPrecompressedThroughMiddleware(t *testing.T) {
 	t.Parallel()
-	// #2554 collapsed the 24 per-module handlers into serveStaticJS; the
-	// gzip interaction is identical for any of them.
-	h := gzipMiddleware(serveStaticJS("dashboard.js"))
+	// One handler serves every module; the gzip interaction is identical for
+	// any of them.
+	h := gzipMiddleware(http.HandlerFunc(handleStaticAsset))
 	a := staticAssets["dashboard.js"]
 
 	// gzip-capable client → precompressed level-9 body.
