@@ -220,8 +220,8 @@ func (r *Router) SetSessionTuning(ctx context.Context, key string, model, effort
 		// existing suspended→spawn path (RFC §6 R6).
 		storeAtomicString(&sess.deathReason, "tuning_respawn")
 		proc.Close()
-		// Recount (not activeCount.Add(-1)) so the per-backend gauge and total
-		// stay in lockstep with the map; otherwise every tuning respawn leaks
+		// Recount (not activeCount.Add(-1)) so the total stays in lockstep
+		// with the map; otherwise every tuning respawn leaks
 		// one slot. Broadcast in a transaction so Shutdown's wait predicate
 		// cannot re-evaluate between Close and the wakeup.
 		r.ss.Update(func(tx sessTx) {

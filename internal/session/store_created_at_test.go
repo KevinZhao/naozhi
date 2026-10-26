@@ -22,7 +22,7 @@ func TestSaveLoadStore_CreatedAtRoundTrip(t *testing.T) {
 	s.createdAt.Store(stamp)
 	s.lastActive.Store(stamp + int64(time.Hour))
 
-	if err := saveStore(path, map[string]*ManagedSession{s.key: s}); err != nil {
+	if err := saveStore(path, []*ManagedSession{s}); err != nil {
 		t.Fatalf("saveStore: %v", err)
 	}
 	restored := loadStore(path)

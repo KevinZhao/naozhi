@@ -3,8 +3,6 @@ package turn
 import (
 	"context"
 	"testing"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // TestDetached_PassthroughModeRunsEachRequestAlone: in ModePassthrough every
@@ -83,7 +81,7 @@ func TestDetached_UrgentPreemptsInCollectMode(t *testing.T) {
 }
 
 // TestDetached_PanicRecovered (#3004 分叉 9): a panicking detached turn is
-// recovered and counted, its origin is told, and key's queue is discarded
+// recovered, its origin is told, and key's queue is discarded
 // as for an owner-loop panic.
 func TestDetached_PanicRecovered(t *testing.T) {
 	h := newHarness(8, ModeCollect)
@@ -91,7 +89,6 @@ func TestDetached_PanicRecovered(t *testing.T) {
 	release := h.hold()
 	adm := &fakeAdmission{rec: h.rec, async: true}
 	u, q := newOrigin(h.rec, "u", "im:x"), newOrigin(h.rec, "q", "ws:q")
-	before := metrics.PanicRecoveredTotal.Value()
 
 	h.submit("m1", newOrigin(h.rec, "a", "im:x"), adm)
 	h.rec.waitFor(t, "send:k:m1", 1)
@@ -102,9 +99,6 @@ func TestDetached_PanicRecovered(t *testing.T) {
 	h.rec.waitFor(t, "idle", 1)
 	adm.wg.Wait()
 
-	if d := metrics.PanicRecoveredTotal.Value() - before; d != 1 {
-		t.Fatalf("PanicRecoveredTotal moved by %d, want 1", d)
-	}
 	if h.rec.count("dropped:q:panic") != 1 {
 		t.Fatalf("queued origin not dropped on the detached panic: %v", h.rec.snapshot())
 	}

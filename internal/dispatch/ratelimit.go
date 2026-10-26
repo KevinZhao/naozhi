@@ -108,7 +108,6 @@ func (d *Dispatcher) admitRate(ctx context.Context, msg platform.IncomingMessage
 	if allow(key) {
 		return true
 	}
-	dispatchRateLimitedTotal.Add(1)
 	if !d.rateLimitReplies.allow(key, time.Now()) {
 		lg.DebugContext(ctx, "im message rate limited")
 		return false

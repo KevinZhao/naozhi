@@ -96,21 +96,22 @@ func TestSubscribe_ReplayThenLiveDeliversEachEntryOnce(t *testing.T) {
 	}
 }
 
-// A read-only (or closed) store replays what is on disk and registers
-// nothing; a disabled or nil store never calls fn.
-func TestSubscribe_ReadOnlyReplaysDisabledNever(t *testing.T) {
+// A closed store replays what is on disk and registers nothing; a disabled
+// or nil store never calls fn.
+func TestSubscribe_ClosedReplaysDisabledNever(t *testing.T) {
 	s, dir := newTestStore(t, t0)
 	s.Append(tagged(t0, "a"))
 	s.Close()
 
-	ro := OpenReadOnly(dir, Options{Now: func() time.Time { return t0 }})
+	ro := NewStore(dir, Options{Now: func() time.Time { return t0 }})
+	ro.Close()
 	got := &tally{n: map[string]int{}}
 	ro.Subscribe(t0.Add(-time.Hour), got.add)
 	if have := got.snapshot(); len(have) != 1 || have["a"] != 1 {
-		t.Errorf("read-only replay = %v, want a once", have)
+		t.Errorf("closed replay = %v, want a once", have)
 	}
 	if len(ro.subs) != 0 {
-		t.Errorf("read-only store registered %d subscribers; nothing will ever feed them", len(ro.subs))
+		t.Errorf("closed store registered %d subscribers; nothing will ever feed them", len(ro.subs))
 	}
 
 	called := false

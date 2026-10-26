@@ -25,7 +25,7 @@ const (
 	dropLogEvery = time.Minute
 
 	// rateSeedDays is how far back the rate book learns from at open, capped
-	// by the rollup window (warmRollup reads no older day file).
+	// by the retention window.
 	rateSeedDays = 30
 
 	DefaultRetentionDays = 400
@@ -35,19 +35,17 @@ const (
 // Options tunes a Store; zero values take the package defaults.
 type Options struct {
 	RetentionDays int
-	RollupDays    int
 	Now           func() time.Time
 }
 
 // Store is the on-disk ledger: one JSONL file per UTC day under dir, written
-// by a single worker fed from a bounded queue, plus an in-memory rollup of
-// the most recent RollupDays for cheap low-cardinality summaries. A nil or
-// disabled Store accepts every call as a no-op so producers never nil-check.
+// by a single worker fed from a bounded queue; summaries stream the day
+// files in their window. A nil or disabled Store accepts every call as a
+// no-op so producers never nil-check.
 type Store struct {
 	dir       string
 	disabled  bool
 	retention time.Duration
-	rollupWin time.Duration
 	now       func() time.Time
 
 	ch        chan Entry
@@ -57,8 +55,7 @@ type Store struct {
 	dropped   atomic.Int64
 	lastDrop  atomic.Int64 // unix nanos of the last drop warn
 
-	rollup *rollup
-	rates  *RateBook
+	rates *RateBook
 
 	// subMu orders a Subscribe replay against the worker's batch writes, so
 	// a subscriber sees each durable entry exactly once.
@@ -74,13 +71,12 @@ type Store struct {
 }
 
 // NewStore opens (or creates) the ledger directory. Empty dir disables the
-// store. Recent day files are folded into the rollup synchronously so the
-// first summary after startup is complete.
+// store. The rate book is seeded synchronously from the recent day files.
 func NewStore(dir string, opts Options) *Store {
 	if dir == "" {
 		return &Store{disabled: true}
 	}
-	rd, ru := clampDays(opts.RetentionDays, opts.RollupDays)
+	rd := clampRetention(opts.RetentionDays)
 	now := opts.Now
 	if now == nil {
 		now = time.Now
@@ -88,53 +84,25 @@ func NewStore(dir string, opts Options) *Store {
 	s := &Store{
 		dir:       dir,
 		retention: time.Duration(rd) * 24 * time.Hour,
-		rollupWin: time.Duration(ru) * 24 * time.Hour,
 		now:       now,
 		ch:        make(chan Entry, queueDepth),
-		rollup:    newRollup(),
 		rates:     NewRateBook(),
 	}
 	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		slog.Error("costledger: mkdir failed; ledger disabled", "dir", dir, "err", err)
 		return &Store{disabled: true}
 	}
-	s.warmRollup()
+	s.seedRates()
 	s.sweep()
 	s.wg.Add(1)
 	go s.worker()
 	return s
 }
 
-// OpenReadOnly opens the ledger at dir for Scan, Entries and Summarize
-// without creating, sweeping or writing anything: Append always returns
-// false. Summaries stream the day files, as no rollup is warmed.
-func OpenReadOnly(dir string, opts Options) *Store {
-	if dir == "" {
-		return &Store{disabled: true}
-	}
-	rd, ru := clampDays(opts.RetentionDays, opts.RollupDays)
-	now := opts.Now
-	if now == nil {
-		now = time.Now
-	}
-	s := &Store{
-		dir:       dir,
-		retention: time.Duration(rd) * 24 * time.Hour,
-		rollupWin: time.Duration(ru) * 24 * time.Hour,
-		now:       now,
-		ch:        make(chan Entry),
-		rollup:    newRollup(),
-		rates:     NewRateBook(),
-	}
-	s.closed.Store(true)
-	return s
-}
-
-// clampDays applies the documented ranges: retention [1, MaxRetentionDays],
-// rollup [1, retention] defaulting to the whole retention window (the
-// per-day low-cardinality aggregates are tiny, so a full-window summary
-// never has to scan files); out-of-range values warn and clamp, never fail.
-func clampDays(retention, rollup int) (int, int) {
+// clampRetention applies the documented range [1, MaxRetentionDays]
+// (0 = DefaultRetentionDays); an out-of-range value warns and clamps, never
+// fails.
+func clampRetention(retention int) int {
 	if retention <= 0 {
 		retention = DefaultRetentionDays
 	}
@@ -142,14 +110,7 @@ func clampDays(retention, rollup int) (int, int) {
 		slog.Warn("costledger: retention_days above cap, clamping", "requested", retention, "cap", MaxRetentionDays)
 		retention = MaxRetentionDays
 	}
-	if rollup <= 0 {
-		rollup = retention
-	}
-	if rollup > retention {
-		slog.Warn("costledger: rollup_days above retention_days, clamping", "requested", rollup, "retention", retention)
-		rollup = retention
-	}
-	return retention, rollup
+	return retention
 }
 
 // Rates is the per-model price book, seeded from the recent CLI-priced turn
@@ -249,9 +210,9 @@ func (s *Store) worker() {
 }
 
 // writeBatch appends the batch to its day file(s), fsyncs once per file
-// touched and folds every entry into the rollup and the subscribers only
-// after the bytes are durable, so summaries never claim what disk does not
-// hold. The caller holds subMu.
+// touched and hands every entry to the subscribers only after the bytes are
+// durable, so subscribers never see what disk does not hold. The caller
+// holds subMu.
 func (s *Store) writeBatch(batch []Entry) {
 	var buf []byte
 	written := batch[:0:0]
@@ -284,8 +245,8 @@ func (s *Store) writeBatch(batch []Entry) {
 	s.syncCur()
 }
 
-// flushBuf writes buf to the current file and, on success, folds the pending
-// entries into the rollup and hands them to the subscribers. Callers hand
+// flushBuf writes buf to the current file and, on success, hands the pending
+// entries to the subscribers. Callers hand
 // over the pending list so a failed write drops exactly those entries.
 func (s *Store) flushBuf(buf *[]byte, pending *[]Entry) {
 	if len(*buf) == 0 || s.cur == nil {
@@ -297,7 +258,6 @@ func (s *Store) flushBuf(buf *[]byte, pending *[]Entry) {
 		s.dropped.Add(int64(len(*pending)))
 	} else {
 		for _, e := range *pending {
-			s.rollup.add(e)
 			for _, fn := range s.subs {
 				fn(e)
 			}
@@ -367,24 +327,18 @@ func (s *Store) sweep() {
 	}
 }
 
-// warmRollup folds the last RollupDays of day files into memory and seeds
-// the rate book from the last min(rateSeedDays, RollupDays) of them. It runs
-// synchronously at open so the first summary is complete; a slow warm (many
-// large day files) is logged so operators can lower rollup_days.
-func (s *Store) warmRollup() {
-	start := time.Now()
-	since := s.now().UTC().Add(-s.rollupWin).Format(dayLayout)
-	seedFrom := s.now().UTC().Add(-rateSeedDays * 24 * time.Hour).Format(dayLayout)
-	n := 0
+// seedRates feeds the rate book from the CLI-priced turn rows of the last
+// min(rateSeedDays, retention) days. It runs synchronously at open, before
+// the first sweep.
+func (s *Store) seedRates() {
+	win := min(s.retention, rateSeedDays*24*time.Hour)
+	since := s.now().UTC().Add(-win).Format(dayLayout)
 	for _, d := range s.dayFiles() {
 		if d < since {
 			continue
 		}
-		n++
-		seed := d >= seedFrom
 		s.scanDay(d, func(e Entry) bool {
-			s.rollup.add(e)
-			if seed && e.Kind == KindTurn && e.Unit == UnitUSD {
+			if e.Kind == KindTurn && e.Unit == UnitUSD {
 				for _, m := range e.Models {
 					s.rates.Observe(m)
 				}
@@ -392,12 +346,6 @@ func (s *Store) warmRollup() {
 			return true
 		})
 	}
-	if took := time.Since(start); took > time.Second {
-		slog.Info("costledger: rollup warm took a while; consider a smaller cost.rollup_days", "days", n, "took", took)
-	}
-	// Set even when no file was loaded: every day >= since is now covered
-	// (possibly empty), so summaries over that range may use the rollup.
-	s.rollup.warmedFrom = since
 }
 
 // scanDay streams one day file through fn (stop when fn returns false). A

@@ -4,13 +4,13 @@
 > **作者**: naozhi team
 > **创建**: 2026-07-11
 > **前身讨论**: `docs/rfc/project-access-profile.md`（v1 auth overlay，已落地）· `docs/rfc/profile-config-v2.md`（v2 配置分层探讨，本 RFC 取代其 thinking/settings 部分）
-> **一句话**: 今天 naozhi spawn 的 claude 通过 `--setting-sources user` **直接读操作者的 `~/.claude/settings.json`**（`direct-user-settings.md` 的决策）。本 RFC 反转该决策：让 naozhi 拥有**一份自己的、与本地彻底隔离的 settings**（首次从本地拷贝作种子，之后脱钩），使 naozhi 能配成与本地不同的档位（如 naozhi=thinking max、本地=high），且本地配错不波及 naozhi。UI 显式告知"naozhi 使用独立配置"并可查看 diff。
+> **一句话**: 今天 naozhi spawn 的 claude 通过 `--setting-sources user` **直接读操作者的 `~/.claude/settings.json`**（direct-user-settings RFC 的决策；该 RFC 已删除，需要时用 git log 找回）。本 RFC 反转该决策：让 naozhi 拥有**一份自己的、与本地彻底隔离的 settings**（首次从本地拷贝作种子，之后脱钩），使 naozhi 能配成与本地不同的档位（如 naozhi=thinking max、本地=high），且本地配错不波及 naozhi。UI 显式告知"naozhi 使用独立配置"并可查看 diff。
 
 ---
 
 ## 0. TL;DR
 
-**现状**（已核实 `protocol_claude.go:106`）：naozhi 的 claude 子进程 `--setting-sources user`，即和命令行 `claude` **共用同一份** `~/.claude/settings.json`，单一配置源、零 naozhi 侧配置——这是 `direct-user-settings.md` PR1 的刻意设计（当时删掉了历史的 `writeClaudeSettingsOverride` 拷贝机制）。
+**现状**（已核实 `protocol_claude.go:106`）：naozhi 的 claude 子进程 `--setting-sources user`，即和命令行 `claude` **共用同一份** `~/.claude/settings.json`，单一配置源、零 naozhi 侧配置——这是 direct-user-settings PR1 的刻意设计（当时删掉了历史的 `writeClaudeSettingsOverride` 拷贝机制）。
 
 **问题**：这份共享意味着 (1) naozhi 无法配成与本地不同——想让后台任务用更深的 thinking，会连带改操作者交互式 claude 的行为；(2) 本地 settings 被改坏，naozhi 下一个 session 立刻跟着崩，无隔离、无测试缓冲。
 
@@ -36,7 +36,7 @@ naozhi spawn claude:
      └─ claude 自己读 ~/.claude/settings.json（与命令行 claude 完全一致）
 ```
 
-`direct-user-settings.md` PR1 的目标原话："naozhi 内的 cc 与命令行 cc 行为**完全一致**、单一配置源、零额外配置"，为此**删除**了历史的 `writeClaudeSettingsOverride`（逐字拷贝本地 settings→过滤→`--settings <override>` 加载）。
+direct-user-settings PR1 的目标原话："naozhi 内的 cc 与命令行 cc 行为**完全一致**、单一配置源、零额外配置"，为此**删除**了历史的 `writeClaudeSettingsOverride`（逐字拷贝本地 settings→过滤→`--settings <override>` 加载）。
 
 > 例外（保留不动）：`internal/sysession/runner.go:277` / `vision_runner.go:61` 的内部 Runner 仍用 `--setting-sources ""`（无 entry-auth，AutoTitler 可能触发本地 hook 死循环）。本 RFC 只改**面向用户会话**的 claude spawn，不碰 sysession Runner。
 
@@ -48,7 +48,7 @@ naozhi spawn claude:
 
 ### 1.3 反转要重新扛起的两个历史代价（正视）
 
-`direct-user-settings` 删拷贝不是随意的。方案 C 要主动接受：
+direct-user-settings 删拷贝不是随意的。方案 C 要主动接受：
 
 | 当年的问题 | 方案 C 的处置 |
 |---|---|

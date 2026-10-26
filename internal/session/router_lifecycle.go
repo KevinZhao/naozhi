@@ -22,7 +22,6 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/history"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/shim"
 )
@@ -837,15 +836,6 @@ func (r *Router) installFreshSession(tx sessTx,
 
 	tx.MarkChanged()
 	logSessionLifecycle("spawned", key, "active", tx.Active(), "exempt", exempt)
-	// Counters bumped inside the write-lock at the authoritative "spawn
-	// succeeded" point. Exempt sessions are excluded: they don't consume a
-	// slot and planner/scratch churn would muddy the signal.
-	if !exempt {
-		metrics.SessionCreateTotal.Add(1)
-		// Per-backend mirror of activeCount; decremented at every site that
-		// decrements activeCount.
-		metrics.RecordSessionActive(s.Backend(), 1)
-	}
 	return s
 }
 

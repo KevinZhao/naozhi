@@ -47,7 +47,7 @@ func dashboardModules(t *testing.T) []string {
 // rendered page, whose URLs carry ?v= and whose head carries generated tags.
 func rawDashboardHTML(t *testing.T) []byte {
 	t.Helper()
-	data, err := dashboardHTML.ReadFile("static/dashboard.html")
+	data, err := staticFS.ReadFile("static/dashboard.html")
 	if err != nil {
 		t.Fatalf("read embedded dashboard.html: %v", err)
 	}

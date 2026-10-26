@@ -15,7 +15,6 @@ import (
 type CostConfig struct {
 	Enabled       *bool            `yaml:"enabled,omitempty"`
 	RetentionDays int              `yaml:"retention_days,omitempty"`
-	RollupDays    int              `yaml:"rollup_days,omitempty"`
 	Budget        CostBudgetConfig `yaml:"budget,omitempty"`
 }
 

@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/costledger"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 
@@ -91,7 +89,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 		})
 		return noopRefresh, false
 	}
-	if !s.workDirReachableCached(snap.workDir) {
+	if !workDirReachable(snap.workDir) {
 		lg.Warn("cron fresh spawn aborted: work_dir unreachable",
 			"work_dir", snap.workDir)
 		paused := s.finishRun(args.runCtx, runOutcome{
@@ -101,10 +99,9 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 		s.deliverFailureNotice(args.runCtx, ErrClassWorkDirUnreachable, TurnCauseUnknown, RunStateFailed, s.execTimeout, paused)
 		return noopRefresh, false
 	}
-	// Containment re-check BEFORE the destructive Reset: resolveCronWorkspace
-	// used the TTL-cached view, so a symlink retargeted outside allowedRoot
-	// within that TTL would otherwise reach here and blow away a live session
-	// for a run that can never succeed. The uncached workDirUnderRoot fails the
+	// Containment check BEFORE the destructive Reset: a symlink retargeted
+	// outside allowedRoot would otherwise reach here and blow away a live
+	// session for a run that can never succeed. workDirUnderRoot fails the
 	// run without tearing down the existing session.
 	if s.allowedRoot != "" && snap.workDir != "" &&
 		!workDirUnderRoot(snap.workDir, s.allowedRoot, s.allowedRootResolved) {
@@ -225,8 +222,8 @@ func (s *Scheduler) resolveCronWorkspace(rc runCtx) (workDirForCLI string, abort
 	// Both containment failures below fail the run identically — same state, same
 	// class, same message — differing only in which gate caught it, which is a log
 	// detail. One helper so the two cannot drift apart.
-	failOutsideRoot := func(why string) (string, bool) {
-		lg.Warn("cron job work_dir outside allowed root"+why+"; aborting run",
+	failOutsideRoot := func() (string, bool) {
+		lg.Warn("cron job work_dir outside allowed root; aborting run",
 			"work_dir", snap.workDir)
 		// This branch sends no per-run notice; only a pause is worth one.
 		if paused := s.finishRun(rc, runOutcome{
@@ -238,19 +235,11 @@ func (s *Scheduler) resolveCronWorkspace(rc runCtx) (workDirForCLI string, abort
 		return "", true
 	}
 	if s.allowedRoot != "" {
-		// Cached EvalSymlinks (TTL workDirResolveCacheTTL) so fast-firing jobs
-		// don't repeat the resolve; a retarget surfaces within one TTL.
-		resolved, ok := s.workDirResolveUnderRootCached(snap.workDir)
+		// Resolved per run so a symlink retargeted outside allowedRoot never
+		// launches a CLI (#1730).
+		resolved, ok := workDirResolveUnderRoot(snap.workDir, s.allowedRoot, s.allowedRootResolved)
 		if !ok {
-			return failOutsideRoot("")
-		}
-		// The cached gate can pass on a stale-positive within the TTL (symlink
-		// retargeted outside allowedRoot after the cache warmed); re-run the
-		// uncached gate so no CLI launches under the retargeted path (#1730).
-		// On success keep the cached-resolved path to avoid double-EvalSymlinks
-		// semantic divergence.
-		if !workDirUnderRoot(snap.workDir, s.allowedRoot, s.allowedRootResolved) {
-			return failOutsideRoot(" (uncached recheck)")
+			return failOutsideRoot()
 		}
 		return resolved, false
 	}
@@ -624,13 +613,10 @@ func (s *Scheduler) execSend(a execSendArgs) (result SendResult, costInc costled
 	defer win.close()
 	// Structured signal when spawn already consumed >spawnElapsedWarnRatio of
 	// jobTimeout: the wall-clock doubling is intentional but operators of 300s+
-	// jobs need an event to alert on (counter + slog pair).
+	// jobs need an event to alert on.
 	spawnWarnBudget := time.Duration(float64(a.jobTimeout) * spawnElapsedWarnRatio)
 	// spawnElapsed excludes jitter (captured right after executeGetSession).
 	if a.spawnElapsed > spawnWarnBudget {
-		metrics.CronSendBudgetDoubledTotal.Add(1)
-		// Message string preserved for runbook grep — see docs/ops/pprof.md
-		// + internal/metrics/metrics.go CronSendBudgetDoubledTotal godoc.
 		a.lg.Warn("cron send budget exceeds job/2",
 			"job_id", a.snap.jobID,
 			"spawn_elapsed_ms", a.spawnElapsed.Milliseconds(),
@@ -882,15 +868,11 @@ func (s *Scheduler) observeSuccessLatency(elapsed time.Duration, result SendResu
 	lg.Info("cron job completed",
 		"result_len", len(result.Text),
 		"elapsed_ms", elapsed.Milliseconds())
-	// Histogram buckets straddle slowThreshold so the histogram and the slow
-	// counter below stay consistent (#392).
-	metrics.ObserveCronExecutionDuration(elapsed.Milliseconds())
 	slowThreshold := s.slowThreshold
 	if slowThreshold <= 0 {
 		slowThreshold = defaultCronSlowThreshold
 	}
 	if elapsed > slowThreshold {
-		metrics.CronExecutionSlowTotal.Add(1)
 		lg.Warn("cron execution slow",
 			"job_id", snap.jobID,
 			"elapsed_ms", elapsed.Milliseconds(),

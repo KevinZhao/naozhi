@@ -18,7 +18,6 @@ type manualClock struct {
 
 type manualTimer struct {
 	c        *manualClock
-	d        time.Duration // duration the watchdog asked for
 	deadline time.Duration
 	f        func()
 	done     bool // stopped or fired
@@ -43,7 +42,7 @@ func newManualWatchdog(timeout time.Duration, onFire func()) (*Watchdog, *manual
 func (c *manualClock) afterFunc(d time.Duration, f func()) watchdogTimer {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	t := &manualTimer{c: c, d: d, deadline: c.now + d, f: f}
+	t := &manualTimer{c: c, deadline: c.now + d, f: f}
 	c.timers = append(c.timers, t)
 	return t
 }

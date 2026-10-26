@@ -11,38 +11,6 @@ import (
 	"time"
 )
 
-// Observer receives real-time counter increments from the Persister;
-// implementations typically forward to expvar / Prometheus. Methods are
-// called from the writer goroutine or the PersistSink closure and MUST be
-// non-blocking and thread-safe.
-//
-// The only production implementation is eventLogMetricsObserver in
-// internal/session/eventlog_metrics.go, wired via Options.Observer. A new
-// persister site must pass the same instance or metrics silently fall
-// through to noopObserver; this cannot be enforced at compile time (#1171).
-type Observer interface {
-	// OnWrite is called once per EventEntry that reaches disk.
-	OnWrite(n int)
-	// OnDrop is called once per EventEntry dropped (channel full etc).
-	OnDrop(n int)
-	// OnFsync is called each time the persister fsyncs log or idx.
-	OnFsync()
-	// OnMalformed is called when schema.MarshalRecord rejects an entry.
-	OnMalformed()
-	// OnReplayLeak is called with the batch size when a replayPhase=true
-	// batch reaches the sink (SetPersistSink-after-InjectHistory violated).
-	OnReplayLeak(n int)
-}
-
-// noopObserver discards every counter tick; used when Options.Observer is nil.
-type noopObserver struct{}
-
-func (noopObserver) OnWrite(int)      {}
-func (noopObserver) OnDrop(int)       {}
-func (noopObserver) OnFsync()         {}
-func (noopObserver) OnMalformed()     {}
-func (noopObserver) OnReplayLeak(int) {}
-
 // Options configures a Persister. Defaults apply for zero-valued
 // fields so callers only have to set what they want to override.
 type Options struct {
@@ -78,9 +46,6 @@ type Options struct {
 	// DevMode tags the replay-leak slog.Error with dev_mode=true so broken
 	// SetPersistSink ordering surfaces in dev/CI logs. Production sets false.
 	DevMode bool
-
-	// Observer receives Persister counter increments. nil → noop.
-	Observer Observer
 }
 
 // Default tuning knobs. DefaultChannelBuffer absorbs a 50-session × 50-batch
@@ -201,9 +166,6 @@ func NewPersister(opts Options) (*Persister, error) {
 	}
 	if opts.Clock == nil {
 		opts.Clock = time.Now
-	}
-	if opts.Observer == nil {
-		opts.Observer = noopObserver{}
 	}
 	if err := os.MkdirAll(opts.Dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create events dir %s: %w", opts.Dir, err)

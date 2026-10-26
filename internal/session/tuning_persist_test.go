@@ -23,7 +23,7 @@ func TestTuningPersist_RoundTrip(t *testing.T) {
 	src.SetTuningModel("claude-haiku-4.5")
 	src.SetTuningEffort("low")
 
-	if err := saveStore(storePath, map[string]*ManagedSession{key: src}); err != nil {
+	if err := saveStore(storePath, []*ManagedSession{src}); err != nil {
 		t.Fatalf("saveStore: %v", err)
 	}
 

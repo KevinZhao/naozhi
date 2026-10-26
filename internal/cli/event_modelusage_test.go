@@ -42,16 +42,3 @@ func TestReadEvent_NonResultFrameHasNilModelUsage(t *testing.T) {
 		t.Fatalf("assistant frame must not allocate clievent.ModelUsage, got %v", evs[0].ModelUsage)
 	}
 }
-
-// BenchmarkReadEvent_ResultWithModelUsage records the baseline for the one
-// frame per turn that now decodes the per-model map; BenchmarkReadEvent
-// (assistant frame) stays the guard that non-result frames pay nothing extra.
-func BenchmarkReadEvent_ResultWithModelUsage(b *testing.B) {
-	p := &ClaudeProtocol{}
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		if _, _, err := p.ReadEvent(resultFrameWithModelUsage); err != nil {
-			b.Fatal(err)
-		}
-	}
-}

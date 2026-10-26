@@ -1,15 +1,11 @@
 package cron
 
-import "github.com/naozhi/naozhi/internal/metrics"
-
 // runScaffold is the lifecycle envelope every CAS-owning cron run body executes
 // inside (executeOpt, #2174):
 //
-//  1. metrics.CronRunInflight is +1'd before body and -1'd in a defer, so the
-//     gauge pairs on every exit path.
-//  2. finalizer.finalize() runs in that same defer, after any finalize the body
+//  1. finalizer.finalize() runs in a defer, after any finalize the body
 //     already performed via finishRun (idempotent).
-//  3. When onPanic is set, a completed-guarded recover finalizes FIRST, then
+//  2. When onPanic is set, a completed-guarded recover finalizes FIRST, then
 //     calls onPanic: a concurrent CurrentRun(jobID) must never observe the run
 //     inflight once cron_run_ended has been broadcast (#2094).
 type runScaffold struct {
@@ -26,14 +22,9 @@ type runScaffold struct {
 }
 
 // run executes body inside the scaffold envelope. Do not reorder the two
-// defers or move the gauge +1 below anything that can return early.
+// defers.
 func (sc runScaffold) run(body func()) {
-	defer func() {
-		// Nested defer: the gauge -1 must land even if finalize() panics; the
-		// panic itself still reaches the caller's boundary.
-		defer metrics.CronRunInflight.Add(-1)
-		sc.finalizer.finalize()
-	}()
+	defer sc.finalizer.finalize()
 	// completed flips true only when body returns normally (it has already driven
 	// finishRun → emitRunEnded), so a panic after a normal finish can never
 	// double-emit an ended frame (#2064).
@@ -51,7 +42,6 @@ func (sc runScaffold) run(body func()) {
 			}
 		}
 	}()
-	metrics.CronRunInflight.Add(1)
 	body()
 	completed = true
 }

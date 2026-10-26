@@ -1,10 +1,6 @@
 package cron
 
-import (
-	"testing"
-
-	"github.com/naozhi/naozhi/internal/metrics"
-)
+import "testing"
 
 // newScaffoldFixture returns an inflight gate that has "won" the CAS (the
 // precondition every runScaffold caller establishes) plus its finalizer.
@@ -15,17 +11,11 @@ func newScaffoldFixture() (*runInflight, *runFinalizer) {
 	return inflight, &runFinalizer{inflight: inflight}
 }
 
-// TestRunScaffold_NormalPath pins the happy-path envelope (#2174): the gauge
-// is +1 while body runs and back to baseline afterwards, finalize released
-// the CAS gate exactly once, and onPanic never fires.
-//
-// Not t.Parallel: metrics.CronRunInflight is a process-global gauge and the
-// during-body assertion reads it as an absolute delta.
+// TestRunScaffold_NormalPath pins the happy-path envelope (#2174): finalize
+// released the CAS gate exactly once, and onPanic never fires.
 func TestRunScaffold_NormalPath(t *testing.T) {
 	inflight, finalizer := newScaffoldFixture()
-	base := metrics.CronRunInflight.Value()
 
-	var during int64
 	bodyCalls, panicCalls := 0, 0
 	runScaffold{
 		finalizer: finalizer,
@@ -33,7 +23,6 @@ func TestRunScaffold_NormalPath(t *testing.T) {
 		onPanic:   func(any) { panicCalls++ },
 	}.run(func() {
 		bodyCalls++
-		during = metrics.CronRunInflight.Value() - base
 		if finalizer.done {
 			t.Error("finalizer must not be finalized while body is running")
 		}
@@ -41,12 +30,6 @@ func TestRunScaffold_NormalPath(t *testing.T) {
 
 	if bodyCalls != 1 {
 		t.Fatalf("body ran %d times, want 1", bodyCalls)
-	}
-	if during != 1 {
-		t.Errorf("CronRunInflight during body = base%+d, want base+1", during)
-	}
-	if got := metrics.CronRunInflight.Value() - base; got != 0 {
-		t.Errorf("CronRunInflight after run = base%+d, want base+0 (gauge must pair)", got)
 	}
 	if !finalizer.done {
 		t.Error("finalizer.finalize() must have run in the scaffold defer")
@@ -69,7 +52,6 @@ func TestRunScaffold_NormalPath(t *testing.T) {
 // re-acquired (R246-GO-3 / #689).
 func TestRunScaffold_BodyFinalizedViaFinishRun(t *testing.T) {
 	inflight, finalizer := newScaffoldFixture()
-	base := metrics.CronRunInflight.Value()
 
 	runScaffold{finalizer: finalizer, jobID: "job-prefinalized"}.run(func() {
 		finalizer.finalize()
@@ -78,9 +60,6 @@ func TestRunScaffold_BodyFinalizedViaFinishRun(t *testing.T) {
 		inflight.populate(runInflightView{RunID: "r2", Phase: PhaseQueued})
 	})
 
-	if got := metrics.CronRunInflight.Value() - base; got != 0 {
-		t.Errorf("CronRunInflight after run = base%+d, want 0", got)
-	}
 	if !inflight.running.Load() {
 		t.Error("scaffold defer clobbered run-B's CAS gate; finalize must be idempotent per finalizer")
 	}
@@ -92,15 +71,13 @@ func TestRunScaffold_BodyFinalizedViaFinishRun(t *testing.T) {
 // TestRunScaffold_PanicWithHook pins the replay-style panic path (#2064 /
 // #2094): the panic is recovered, onPanic fires exactly once, and at the
 // instant onPanic runs the slot is ALREADY finalized (finalize-before-
-// broadcast). Afterwards the gauge is back to baseline.
+// broadcast).
 func TestRunScaffold_PanicWithHook(t *testing.T) {
 	inflight, finalizer := newScaffoldFixture()
-	base := metrics.CronRunInflight.Value()
 
 	panicCalls := 0
 	var gotPanic any
 	var finalizedAtHook, gateHeldAtHook bool
-	var gaugeAtHook int64
 
 	func() {
 		defer func() {
@@ -116,7 +93,6 @@ func TestRunScaffold_PanicWithHook(t *testing.T) {
 				gotPanic = r
 				finalizedAtHook = finalizer.done
 				gateHeldAtHook = inflight.running.Load()
-				gaugeAtHook = metrics.CronRunInflight.Value() - base
 			},
 		}.run(func() {
 			panic("boom in body")
@@ -135,16 +111,6 @@ func TestRunScaffold_PanicWithHook(t *testing.T) {
 	if gateHeldAtHook {
 		t.Error("CAS gate still held when onPanic ran; a concurrent CurrentRun could observe the run inflight after cron_run_ended")
 	}
-	// The gauge -1 lives in the OUTER defer, which fires after the recover
-	// defer — so at hook time the run still counts as inflight for the
-	// gauge. Pin that ordering so a reorder that moves Add(-1) ahead of the
-	// broadcast is caught.
-	if gaugeAtHook != 1 {
-		t.Errorf("CronRunInflight at onPanic = base%+d, want base+1 (gauge -1 belongs to the outer defer)", gaugeAtHook)
-	}
-	if got := metrics.CronRunInflight.Value() - base; got != 0 {
-		t.Errorf("CronRunInflight after panic = base%+d, want 0", got)
-	}
 	if !finalizer.done || inflight.running.Load() {
 		t.Error("slot not released after panic path")
 	}
@@ -153,21 +119,18 @@ func TestRunScaffold_PanicWithHook(t *testing.T) {
 // TestRunScaffold_PanicWithoutHookPropagates pins the executeOpt-style
 // contract: with onPanic == nil the scaffold does NOT recover — the panic
 // reaches the caller's own boundary (executeIfNotDeletedOrPaused / robfig
-// Recover) — but the finalize + gauge defer still fires first, so the slot
-// is released and the gauge balanced by the time the caller sees the panic.
+// Recover) — but the finalize defer still fires first, so the slot is
+// released by the time the caller sees the panic.
 func TestRunScaffold_PanicWithoutHookPropagates(t *testing.T) {
 	inflight, finalizer := newScaffoldFixture()
-	base := metrics.CronRunInflight.Value()
 
 	var caught any
 	var finalizedAtCatch, gateHeldAtCatch bool
-	var gaugeAtCatch int64
 	func() {
 		defer func() {
 			caught = recover()
 			finalizedAtCatch = finalizer.done
 			gateHeldAtCatch = inflight.running.Load()
-			gaugeAtCatch = metrics.CronRunInflight.Value() - base
 		}()
 		runScaffold{finalizer: finalizer, jobID: "job-propagate"}.run(func() {
 			panic("boom propagates")
@@ -183,22 +146,15 @@ func TestRunScaffold_PanicWithoutHookPropagates(t *testing.T) {
 	if gateHeldAtCatch {
 		t.Error("CAS gate leaked across a propagated panic")
 	}
-	if gaugeAtCatch != 0 {
-		t.Errorf("CronRunInflight when caller caught panic = base%+d, want 0", gaugeAtCatch)
-	}
 }
 
 // TestRunScaffold_NilFinalizerSafe: finalize() is documented nil-safe; the
 // scaffold must not NPE on a nil finalizer (defensive — every real caller
 // passes a non-nil one).
 func TestRunScaffold_NilFinalizerSafe(t *testing.T) {
-	base := metrics.CronRunInflight.Value()
 	ran := false
 	runScaffold{jobID: "job-nil"}.run(func() { ran = true })
 	if !ran {
 		t.Fatal("body did not run")
-	}
-	if got := metrics.CronRunInflight.Value() - base; got != 0 {
-		t.Errorf("CronRunInflight after run = base%+d, want 0", got)
 	}
 }

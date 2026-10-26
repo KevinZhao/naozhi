@@ -41,9 +41,8 @@ func (s *sessionSink) accept(entries []Entry, replayPhase bool) {
 	}
 	if replayPhase {
 		p.replayLeakCnt.Add(int64(len(entries)))
-		p.opts.Observer.OnReplayLeak(len(entries))
 		// Log rather than panic so the ordering bug is observable via
-		// replayLeakCnt / OnReplayLeak without crashing the process.
+		// replayLeakCnt without crashing the process.
 		slog.Error("event log persist: replay-phase entries reached sink",
 			"key", s.key, "count", len(entries),
 			"dev_mode", p.opts.DevMode)
@@ -97,7 +96,6 @@ func (s *sessionSink) accept(entries []Entry, replayPhase bool) {
 		// tally survives until a batch finally gets through and materialises
 		// the gap record on disk.
 		s.pendingGap.Add(gapN + int64(len(entries)))
-		p.opts.Observer.OnDrop(len(entries))
 		// channel_used distinguishes a wedged writer from an instantaneous
 		// burst overrun (#1184).
 		slog.Warn("event log persist: channel full; dropping batch",
@@ -157,12 +155,10 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 		case errors.Is(err, errMarshalRecord):
 			// Over-size / malformed — count and drop just this entry.
 			p.malformedCnt.Add(1)
-			p.opts.Observer.OnMalformed()
 			slog.Warn("event log persist: marshal entry failed",
 				"key", job.Key, "seq", w.nextSeq, "err", err)
 		case recordRejected(err):
 			p.droppedCnt.Add(1)
-			p.opts.Observer.OnDrop(1)
 			slog.Warn("event log persist: write entry failed",
 				"key", job.Key, "seq", w.nextSeq, "err", err)
 		default:
@@ -174,7 +170,6 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 	}
 	if written > 0 {
 		p.writtenCnt.Add(int64(written))
-		p.opts.Observer.OnWrite(written)
 	}
 	if !w.dirty {
 		w.dirty = true
@@ -275,7 +270,6 @@ func (p *Persister) dropDeferral(ds *dropState, job batchJob) {
 	putEntryArena(job.arena)
 	n := len(job.Entries)
 	p.droppedCnt.Add(int64(n))
-	p.opts.Observer.OnDrop(n)
 	ds.gapKey = job.Key
 	ds.gap.add(gapTally{n: job.gapN + int64(n), cause: gapChannelFull})
 	slog.Warn("event log persist: dropping-stem pending cap reached; dropping batch",

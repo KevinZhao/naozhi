@@ -54,7 +54,7 @@ func sendReq(t *testing.T, params map[string]string) node.ReverseMsg {
 // with the pipeline's status.
 func TestHandleRequest_Send_SubmitsToTheTurnPipeline(t *testing.T) {
 	sub := &fakeSubmitter{status: "queued"}
-	c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(makeRouter()), nil, nil, Discovery{}, sub)
+	c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(makeRouter()), nil, Discovery{}, sub)
 	appCtx := context.Background()
 	connCtx := context.WithValue(context.Background(), connCtxMarker{}, "conn")
 
@@ -89,7 +89,7 @@ func TestHandleRequest_Send_PassesTheSanitizedWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	sub := &fakeSubmitter{status: "accepted"}
-	c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(makeRouter()), nil, nil, Discovery{}, sub)
+	c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(makeRouter()), nil, Discovery{}, sub)
 	c.defaultWorkspace = root
 
 	if _, err := c.handleRequest(context.Background(), context.Background(), sendReq(t, map[string]string{"key": "feishu:direct:alice:general", "text": "hi", "workspace": proj + "/"}), &sync.WaitGroup{}); err != nil {
@@ -104,7 +104,7 @@ func TestHandleRequest_Send_PassesTheSanitizedWorkspace(t *testing.T) {
 func TestHandleRequest_Send_PipelineErrorIsTheRPCError(t *testing.T) {
 	boom := errors.New("会话正忙，消息未送达，请稍后重试")
 	sub := &fakeSubmitter{err: boom}
-	c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(makeRouter()), nil, nil, Discovery{}, sub)
+	c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(makeRouter()), nil, Discovery{}, sub)
 
 	_, err := c.handleRequest(context.Background(), context.Background(), sendReq(t, map[string]string{"key": "feishu:direct:alice:general", "text": "hi"}), &sync.WaitGroup{})
 	if !errors.Is(err, boom) {
@@ -115,7 +115,7 @@ func TestHandleRequest_Send_PipelineErrorIsTheRPCError(t *testing.T) {
 // Without a pipeline the connector refuses to send rather than start a turn
 // of its own.
 func TestHandleRequest_Send_NoPipelineRefuses(t *testing.T) {
-	c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
+	c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(makeRouter()), nil, Discovery{}, nil)
 
 	_, err := c.handleRequest(context.Background(), context.Background(), sendReq(t, map[string]string{"key": "feishu:direct:alice:general", "text": "hi"}), &sync.WaitGroup{})
 	if err == nil || !strings.Contains(err.Error(), "send unavailable") {
@@ -134,7 +134,7 @@ func TestHandleRequest_Send_RejectsBeforeThePipeline(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			sub := &fakeSubmitter{status: "accepted"}
-			c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(makeRouter()), nil, nil, Discovery{}, sub)
+			c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(makeRouter()), nil, Discovery{}, sub)
 			if _, err := c.handleRequest(context.Background(), context.Background(), sendReq(t, params), &sync.WaitGroup{}); err == nil {
 				t.Fatal("send accepted, want a rejection")
 			}
@@ -156,7 +156,7 @@ func TestHandleRequest_Send_RejectsWorkspaceOutsideRootBeforeThePipeline(t *test
 		t.Fatal(err)
 	}
 	sub := &fakeSubmitter{status: "accepted"}
-	c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(makeRouter()), nil, nil, Discovery{}, sub)
+	c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(makeRouter()), nil, Discovery{}, sub)
 	c.defaultWorkspace = root
 	if _, err := c.handleRequest(context.Background(), context.Background(), sendReq(t, map[string]string{"key": "feishu:direct:alice:general", "text": "hi", "workspace": outside}), &sync.WaitGroup{}); err == nil {
 		t.Fatal("workspace outside the root accepted")

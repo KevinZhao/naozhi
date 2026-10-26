@@ -416,7 +416,7 @@ type AgentOpts struct {
 
 ### 11.2 刻意保留的非对称
 
-cc child 走 `--setting-sources user` 直接读 `~/.claude/settings.json`（`direct-user-settings.md §7.1` 记录的有意非对称）。access profile overlay 作用于**子进程 env**，与 settings.json 的 `env` 段是两条路径：overlay 的 env 优先级**高于** settings.json（因为它在 cmd.Env 上覆盖）。需在文档明确：**access profile 覆盖 settings.json 的同名 env**（这正是我们要的——让项目档压过全局默认）。
+cc child 走 `--setting-sources user` 直接读 `~/.claude/settings.json`（direct-user-settings RFC §7.1 记录的有意非对称）。access profile overlay 作用于**子进程 env**，与 settings.json 的 `env` 段是两条路径：overlay 的 env 优先级**高于** settings.json（因为它在 cmd.Env 上覆盖）。需在文档明确：**access profile 覆盖 settings.json 的同名 env**（这正是我们要的——让项目档压过全局默认）。
 
 ### 11.3 未来：多账号 Bedrock（非本轮）
 

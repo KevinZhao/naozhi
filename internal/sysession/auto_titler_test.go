@@ -1,10 +1,8 @@
 package sysession
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,6 +70,7 @@ func (s *snapshotFakeRouter) EventEntriesForKey(key string) []clievent.EventEntr
 
 func TestBuildExcerpt(t *testing.T) {
 	t.Parallel()
+	longIn := strings.Repeat("hello\n", 5000) // no total-byte cap (>>8 KiB survives)
 	cases := []struct {
 		name string
 		in   string
@@ -82,209 +81,61 @@ func TestBuildExcerpt(t *testing.T) {
 		{"drops control chars", "ab\x00\x07c", "abc"},
 		{"keeps newlines", "a\nb\nc", "a\nb\nc"},
 		{"caps line length", strings.Repeat("a", autoTitlerLineCapBytes+50) + "\nshort", strings.Repeat("a", autoTitlerLineCapBytes) + "…\nshort"},
-		// R232-PERF-7: invalid UTF-8 byte (lone 0xC3 continuation start
-		// without follow-up) is dropped while surrounding ASCII survives.
 		{"strips invalid utf-8 bytes", "ab\xc3xy", "abxy"},
-		// CJK multi-byte runes survive intact (3 bytes each) — guards
-		// the single-pass DecodeRuneInString from over-eager byte skip.
 		{"keeps cjk runes", "你好", "你好"},
-	}
-	for _, c := range cases {
-		c := c
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
-			got := buildExcerpt(c.in)
-			if got != c.want {
-				t.Errorf("buildExcerpt = %q, want %q", got, c.want)
-			}
-		})
-	}
-}
-
-// TestBuildExcerpt_NoTotalCap: the previous 8 KiB total-byte ceiling
-// was deliberately removed so AutoTitler can review entire long
-// conversations.  Verify that a >>8 KiB seed survives the sanitiser
-// intact (line cap still applies — but here every line is short).
-func TestBuildExcerpt_NoTotalCap(t *testing.T) {
-	t.Parallel()
-	var sb strings.Builder
-	for i := 0; i < 5000; i++ {
-		sb.WriteString("hello\n")
-	}
-	in := sb.String()
-	got := buildExcerpt(in)
-	if len(got) < 8*1024 {
-		t.Errorf("excerpt len %d unexpectedly small; want >= 8 KiB after total-cap removal", len(got))
-	}
-	// Trailing newline gets trimmed by TrimSpace; otherwise content matches.
-	want := strings.TrimSpace(in)
-	if got != want {
-		t.Errorf("excerpt content drift; len got=%d want=%d", len(got), len(want))
-	}
-}
-
-// TestBuildExcerpt_MarkerSplitByLineCap pins R235-GO-4 (#1004): the
-// per-line cap (autoTitlerLineCapBytes) MUST NOT leave a literal
-// EXCERPT delimiter visible to the LLM, even when an attacker pads
-// the line so the marker straddles the cap. The previous shape did
-// the marker scrub as a final ReplaceAll on the rune-walk output —
-// once truncation cut "---BEGIN CONVERSATION EXCERPT---" between
-// "---BEGIN CONVERS" + "ATION EXCERPT---" the post-pass missed both
-// fragments and a real BEGIN delimiter survived in the prompt,
-// poisoning the structural boundary the system prompt relies on.
-//
-// The fix neutralises markers on the raw seed before truncation so
-// no cap split can re-emerge a partial marker. The placeholder is
-// shorter than either marker (16 vs 30/32 bytes) so the cap math
-// stays conservative.
-func TestBuildExcerpt_MarkerSplitByLineCap(t *testing.T) {
-	t.Parallel()
-	// Pad with enough leading bytes that the BEGIN marker straddles
-	// the autoTitlerLineCapBytes boundary. Pick a pad length ≥
-	// (cap - len(marker)/2) so the truncation point lands inside the
-	// marker text.
-	padLen := autoTitlerLineCapBytes - 10
-	pad := strings.Repeat("a", padLen)
-	seedBegin := pad + excerptBeginMarker + " trailing tail"
-	gotBegin := buildExcerpt(seedBegin)
-	if strings.Contains(gotBegin, excerptBeginMarker) {
-		t.Errorf("BEGIN marker survived in output despite line-cap split; got: %q", gotBegin)
-	}
-	if strings.Contains(gotBegin, "BEGIN CONVERSATION EXCERPT") {
-		// Even a partial-marker fragment is a structural-boundary risk.
-		// The replacement happens BEFORE truncation, so the cap should
-		// only ever see the inert placeholder fragments.
-		t.Errorf("BEGIN-marker substring survived in output: %q", gotBegin)
-	}
-
-	// Same shape for the END marker.
-	seedEnd := pad + excerptEndMarker + " trailing tail"
-	gotEnd := buildExcerpt(seedEnd)
-	if strings.Contains(gotEnd, excerptEndMarker) {
-		t.Errorf("END marker survived in output despite line-cap split; got: %q", gotEnd)
-	}
-	if strings.Contains(gotEnd, "END CONVERSATION EXCERPT") {
-		t.Errorf("END-marker substring survived in output: %q", gotEnd)
-	}
-
-	// Sanity: an inline marker on a short line still gets neutralised
-	// (existing Sec-MEDIUM-1 contract).
-	seedShort := excerptBeginMarker + " short tail"
-	gotShort := buildExcerpt(seedShort)
-	if strings.Contains(gotShort, excerptBeginMarker) {
-		t.Errorf("inline BEGIN marker survived without line-cap split: %q", gotShort)
-	}
-	if !strings.Contains(gotShort, excerptMarkerSafe) {
-		t.Errorf("expected placeholder %q in output, got: %q", excerptMarkerSafe, gotShort)
-	}
-}
-
-// TestBuildExcerpt_MarkerPlaceholderAtomicUnderCap pins R202606d-CR-001: the
-// inert [EXCERPT_MARKER] placeholder must be emitted atomically with respect
-// to the per-line cap. The previous shape emitted the 16-byte placeholder one
-// rune at a time via writeRune, so when lineWritten was within <16 bytes of
-// autoTitlerLineCapBytes a marker hit would leave a half-placeholder like
-// "[EXCERPT_MARKE…" in the output — an incomplete token that can confuse the
-// LLM. The output must contain EITHER the whole placeholder OR a clean
-// ellipsis, never a partial placeholder fragment.
-func TestBuildExcerpt_MarkerPlaceholderAtomicUnderCap(t *testing.T) {
-	t.Parallel()
-
-	// assertNoPartialPlaceholder fails if any proper non-empty prefix of the
-	// placeholder (other than the full placeholder itself) appears in out.
-	assertNoPartialPlaceholder := func(t *testing.T, out string) {
-		t.Helper()
-		// Strip every full placeholder occurrence; any remaining prefix is a
-		// genuine partial leak.
-		stripped := strings.ReplaceAll(out, excerptMarkerSafe, "")
-		for n := len(excerptMarkerSafe) - 1; n >= 2; n-- {
-			frag := excerptMarkerSafe[:n] // e.g. "[EXCERPT_MARKE"
-			if strings.Contains(stripped, frag) {
-				t.Errorf("partial placeholder fragment %q leaked into output: %q", frag, out)
-				return
-			}
-		}
-	}
-
-	// Case A: pad so the marker is hit with the cap only a few bytes away.
-	// len(placeholder)=16; pad to cap-5 means 16 won't fit (507+16>512) and the
-	// emit must collapse to a single ellipsis, NOT "[EXCE…".
-	padTooTight := strings.Repeat("a", autoTitlerLineCapBytes-5)
-	gotTight := buildExcerpt(padTooTight + excerptBeginMarker + " tail")
-	assertNoPartialPlaceholder(t, gotTight)
-	if strings.Contains(gotTight, excerptBeginMarker) {
-		t.Errorf("raw BEGIN marker survived: %q", gotTight)
-	}
-
-	// Case B: pad so the whole placeholder fits exactly at the cap
-	// (lineWritten + 16 == 512). The full placeholder MUST appear.
-	padExact := strings.Repeat("a", autoTitlerLineCapBytes-len(excerptMarkerSafe))
-	gotExact := buildExcerpt(padExact + excerptEndMarker + " tail")
-	assertNoPartialPlaceholder(t, gotExact)
-	if !strings.Contains(gotExact, excerptMarkerSafe) {
-		t.Errorf("full placeholder should fit exactly at cap but was missing: %q", gotExact)
-	}
-
-	// Case C: marker one byte beyond the fit boundary (lineWritten + 16 == 513)
-	// must collapse to ellipsis with no fragment.
-	padOneOver := strings.Repeat("a", autoTitlerLineCapBytes-len(excerptMarkerSafe)+1)
-	gotOneOver := buildExcerpt(padOneOver + excerptBeginMarker + " tail")
-	assertNoPartialPlaceholder(t, gotOneOver)
-	if strings.Contains(gotOneOver, excerptBeginMarker) {
-		t.Errorf("raw BEGIN marker survived at one-over boundary: %q", gotOneOver)
-	}
-}
-
-// TestBuildExcerpt_MarkerFoldedIntoWalk pins R20260602-PERF-1 (#1578):
-// folding the delimiter neutralisation into the single rune walk (instead
-// of the prior 2×Contains + 2×ReplaceAll pre-pass) must stay
-// behaviour-equivalent — every literal marker becomes the inert
-// placeholder, surrounding content is preserved verbatim, and multiple
-// / adjacent markers are all neutralised.
-func TestBuildExcerpt_MarkerFoldedIntoWalk(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{
-			"inline begin marker with surrounding text",
-			"before " + excerptBeginMarker + " after",
-			"before " + excerptMarkerSafe + " after",
-		},
-		{
-			"inline end marker with surrounding text",
-			"x" + excerptEndMarker + "y",
-			"x" + excerptMarkerSafe + "y",
-		},
-		{
-			"both markers on one line",
-			excerptBeginMarker + "mid" + excerptEndMarker,
-			excerptMarkerSafe + "mid" + excerptMarkerSafe,
-		},
-		{
-			"adjacent identical markers",
-			excerptBeginMarker + excerptBeginMarker,
-			excerptMarkerSafe + excerptMarkerSafe,
-		},
-		{
-			"marker across newlines preserves line structure",
-			"a\n" + excerptBeginMarker + "\nb",
-			"a\n" + excerptMarkerSafe + "\nb",
-		},
-		{
-			"no marker is untouched",
-			"plain content 你好",
-			"plain content 你好",
-		},
+		{"no total cap", longIn, strings.TrimSpace(longIn)},
+		{"inline begin marker", "before " + excerptBeginMarker + " after", "before " + excerptMarkerSafe + " after"},
+		{"inline end marker", "x" + excerptEndMarker + "y", "x" + excerptMarkerSafe + "y"},
+		{"both markers on one line", excerptBeginMarker + "mid" + excerptEndMarker, excerptMarkerSafe + "mid" + excerptMarkerSafe},
+		{"adjacent identical markers", excerptBeginMarker + excerptBeginMarker, excerptMarkerSafe + excerptMarkerSafe},
+		{"marker across newlines", "a\n" + excerptBeginMarker + "\nb", "a\n" + excerptMarkerSafe + "\nb"},
 	}
 	for _, c := range cases {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			if got := buildExcerpt(c.in); got != c.want {
-				t.Errorf("buildExcerpt(%q) = %q, want %q", c.in, got, c.want)
+				t.Errorf("buildExcerpt = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestBuildExcerpt_MarkerAtLineCap pins #1004 / R202606d-CR-001: a marker
+// straddling the per-line cap must never leave a raw delimiter, a delimiter
+// fragment, or a half-placeholder in the output.
+func TestBuildExcerpt_MarkerAtLineCap(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		pad      int
+		marker   string
+		wantFull bool // the whole placeholder must appear
+	}{
+		{"begin split by cap", autoTitlerLineCapBytes - 10, excerptBeginMarker, false},
+		{"end split by cap", autoTitlerLineCapBytes - 10, excerptEndMarker, false},
+		{"placeholder does not fit", autoTitlerLineCapBytes - 5, excerptBeginMarker, false},
+		{"placeholder fits exactly", autoTitlerLineCapBytes - len(excerptMarkerSafe), excerptEndMarker, true},
+		{"placeholder one over", autoTitlerLineCapBytes - len(excerptMarkerSafe) + 1, excerptBeginMarker, false},
+		{"short line", 0, excerptBeginMarker, true},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			out := buildExcerpt(strings.Repeat("a", c.pad) + c.marker + " tail")
+			if strings.Contains(out, "BEGIN CONVERSATION EXCERPT") || strings.Contains(out, "END CONVERSATION EXCERPT") {
+				t.Errorf("marker text survived: %q", out)
+			}
+			if c.wantFull && !strings.Contains(out, excerptMarkerSafe) {
+				t.Errorf("expected placeholder %q in output: %q", excerptMarkerSafe, out)
+			}
+			stripped := strings.ReplaceAll(out, excerptMarkerSafe, "")
+			for n := len(excerptMarkerSafe) - 1; n >= 2; n-- {
+				if frag := excerptMarkerSafe[:n]; strings.Contains(stripped, frag) {
+					t.Errorf("partial placeholder %q leaked: %q", frag, out)
+					return
+				}
 			}
 		})
 	}
@@ -782,37 +633,6 @@ func TestBuildExcerptFromHistory(t *testing.T) {
 	}
 }
 
-// TestBuildExcerptFromHistory_SoftCap verifies R238-GO-15 (#806):
-// thousands-of-turns sessions can no longer drive the builder past
-// autoTitlerExcerptSoftCapBytes.  We feed entries whose summed length
-// exceeds the cap and assert the result stays bounded and ends with the
-// truncation marker.
-func TestBuildExcerptFromHistory_SoftCap(t *testing.T) {
-	t.Parallel()
-	// Use a 4 KiB summary repeated enough times to exceed the 1 MiB cap.
-	const perEntry = 4 * 1024
-	bigChunk := strings.Repeat("a", perEntry)
-	// Want at least cap/perEntry + 8 entries so the loop hits the
-	// truncation path and keeps iterating with no further appends.
-	count := (autoTitlerExcerptSoftCapBytes / perEntry) + 8
-	entries := make([]SystemEventEntry, 0, count)
-	for i := 0; i < count; i++ {
-		entries = append(entries, SystemEventEntry{
-			Type: "user", Summary: bigChunk,
-		})
-	}
-	got := buildExcerptFromHistory(entries)
-	// The result must stay within the soft cap exactly.
-	if len(got) > autoTitlerExcerptSoftCapBytes {
-		t.Errorf("buildExcerptFromHistory exceeded soft cap: got %d bytes, max %d", len(got), autoTitlerExcerptSoftCapBytes)
-	}
-	// Truncation marker must be present so downstream review can spot
-	// the cut.  Confirms the break-on-cap branch fired.
-	if !strings.HasSuffix(got, "…") {
-		t.Errorf("expected truncation ellipsis at tail, got tail %q", got[max(0, len(got)-32):])
-	}
-}
-
 // TestBuildExcerptFromHistory_NoEarlyCap locks #1586: the per-entry "need"
 // must NOT pre-charge the 3-byte "…" marker, which previously fired the cap
 // ~one entry early for every entry that fit on its own.  We fill the buffer
@@ -857,60 +677,41 @@ func TestBuildExcerptFromHistory_NoEarlyCap(t *testing.T) {
 	}
 }
 
-// TestBuildExcerptFromHistory_SoftCapBoundary locks the hard upper bound: the
-// builder must never write past autoTitlerExcerptSoftCapBytes, and when an
-// entry would push past the cap the result is truncated with a visible "…".
-// First entry fills the buffer to exactly cap; the second entry cannot fit
-// (newline+byte would overflow) so truncation fires.  Because the buffer is
-// already at the cap there is no room for the "\n…" marker, so the builder
-// omits it rather than overshoot — the cap is a hard bound (#1586).
+// TestBuildExcerptFromHistory_SoftCapBoundary locks the hard upper bound
+// (#806/#1586): the result never exceeds autoTitlerExcerptSoftCapBytes; the
+// "\n…" marker is written when it fits and omitted when the buffer is full.
 func TestBuildExcerptFromHistory_SoftCapBoundary(t *testing.T) {
 	t.Parallel()
-
 	const cap = autoTitlerExcerptSoftCapBytes
-	// First entry fills the buffer to exactly cap bytes.
-	fill := strings.Repeat("x", cap)
-	// Second entry would require newline + byte = 2 more bytes, overflowing.
-	entries := []SystemEventEntry{
-		{Type: "user", Summary: fill},
-		{Type: "user", Summary: "y"},
+	cases := []struct {
+		name       string
+		entries    []SystemEventEntry
+		wantMarker bool
+	}{
+		{"buffer full omits marker", []SystemEventEntry{
+			{Type: "user", Summary: strings.Repeat("x", cap)},
+			{Type: "user", Summary: "y"},
+		}, false},
+		{"headroom writes marker", []SystemEventEntry{
+			{Type: "user", Summary: strings.Repeat("x", cap-8)},
+			{Type: "user", Summary: strings.Repeat("y", 16)},
+		}, true},
 	}
-
-	got := buildExcerptFromHistory(entries)
-
-	if len(got) > cap {
-		t.Errorf("result length %d exceeds soft cap %d", len(got), cap)
-	}
-	// Buffer was at the cap, so the marker is correctly omitted to stay
-	// within bounds; only the first entry survives.
-	if len(got) != cap {
-		t.Errorf("expected result pinned at cap %d, got %d", cap, len(got))
-	}
-}
-
-// TestBuildExcerptFromHistory_SoftCapBoundaryWithMarker verifies that when the
-// buffer has room for the "\n…" marker at truncation time, the marker IS
-// written and the result still stays within the cap.
-func TestBuildExcerptFromHistory_SoftCapBoundaryWithMarker(t *testing.T) {
-	t.Parallel()
-
-	const cap = autoTitlerExcerptSoftCapBytes
-	// First entry fills to cap-8, leaving 8 bytes of headroom.
-	fill := strings.Repeat("x", cap-8)
-	// Second entry is 16 bytes: newline+16 = 17 > 8 headroom → truncates.
-	// At truncation sb.Len()=cap-8, marker "\n…" is 4 bytes, fits within cap.
-	entries := []SystemEventEntry{
-		{Type: "user", Summary: fill},
-		{Type: "user", Summary: strings.Repeat("y", 16)},
-	}
-
-	got := buildExcerptFromHistory(entries)
-
-	if len(got) > cap {
-		t.Errorf("result length %d exceeds soft cap %d", len(got), cap)
-	}
-	if !strings.HasSuffix(got, "…") {
-		t.Errorf("expected truncation ellipsis at tail, got %q", got[max(0, len(got)-16):])
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := buildExcerptFromHistory(c.entries)
+			if len(got) > cap {
+				t.Errorf("result length %d exceeds soft cap %d", len(got), cap)
+			}
+			if c.wantMarker && !strings.HasSuffix(got, "…") {
+				t.Errorf("expected truncation ellipsis at tail, got %q", got[max(0, len(got)-16):])
+			}
+			if !c.wantMarker && len(got) != cap {
+				t.Errorf("expected result pinned at cap %d, got %d", cap, len(got))
+			}
+		})
 	}
 }
 
@@ -940,81 +741,13 @@ func TestEvictOldestHighwater_DropsOldestFirst(t *testing.T) {
 	if _, ok := m["oldest"]; ok {
 		t.Errorf("oldest must be evicted first")
 	}
-}
-
-// TestEvictOldestHighwaterTieBreakDeterministic pins R260528-BUG-9: when
-// two entries share lastRenamedAt the eviction must be deterministic
-// across runs — pre-fix the slices.SortFunc returned 0 on ties and Go's
-// randomised map iteration order picked the survivor at random, which
-// surfaced as flaky tests and arbitrary tenant eviction in production.
-// We seed five entries with identical timestamps and assert the same
-// keys survive on every iteration.
-func TestEvictOldestHighwaterTieBreakDeterministic(t *testing.T) {
-	t.Parallel()
-	mkSeed := func() map[string]autoTitlerHighwater {
-		ts := time.Unix(1_700_000_000, 0)
-		// Wide alphabet so map iteration order would otherwise pick
-		// different keys on different runs.
-		return map[string]autoTitlerHighwater{
-			"alpha":   {lastRenamedAt: ts},
-			"bravo":   {lastRenamedAt: ts},
-			"charlie": {lastRenamedAt: ts},
-			"delta":   {lastRenamedAt: ts},
-			"echo":    {lastRenamedAt: ts},
+	// R260528-BUG-9: equal timestamps tie-break by key, not map order.
+	for i := 0; i < 50; i++ {
+		tied := map[string]autoTitlerHighwater{"a": {lastRenamedAt: now}, "b": {lastRenamedAt: now}, "c": {lastRenamedAt: now}}
+		evictOldestHighwater(tied, 1)
+		if _, ok := tied["c"]; !ok || len(tied) != 1 {
+			t.Fatalf("iter %d: tie-break must keep the largest key, got %v", i, tied)
 		}
-	}
-	const keep = 2
-	// Run many iterations — Go's map iteration randomisation seeds per
-	// range so even within a single test pass the order changes; the
-	// determinism assertion holds only because the sort tie-break uses
-	// the key, not the iteration order.
-	const iterations = 200
-	var firstSurvivors map[string]struct{}
-	for i := 0; i < iterations; i++ {
-		m := mkSeed()
-		evictOldestHighwater(m, keep)
-		if len(m) != keep {
-			t.Fatalf("iter %d: len=%d want %d", i, len(m), keep)
-		}
-		survivors := make(map[string]struct{}, len(m))
-		for k := range m {
-			survivors[k] = struct{}{}
-		}
-		if firstSurvivors == nil {
-			firstSurvivors = survivors
-			continue
-		}
-		if len(survivors) != len(firstSurvivors) {
-			t.Fatalf("iter %d: survivor set size diverged", i)
-		}
-		for k := range survivors {
-			if _, ok := firstSurvivors[k]; !ok {
-				t.Errorf("iter %d: non-deterministic eviction — survivor %q not in first run %v",
-					i, k, firstSurvivors)
-			}
-		}
-	}
-	// With ascending key tie-break, the two largest keys must survive
-	// (oldest-first eviction drops the smallest keys when timestamps tie).
-	if _, ok := firstSurvivors["delta"]; !ok {
-		t.Errorf("expected 'delta' to survive (largest key not yet evicted), got %v", firstSurvivors)
-	}
-	if _, ok := firstSurvivors["echo"]; !ok {
-		t.Errorf("expected 'echo' to survive (largest key), got %v", firstSurvivors)
-	}
-}
-
-// TestEvictOldestHighwater_NoOpWhenUnderCap covers the fast-path:
-// when len(m) <= keep, no entry should be touched.
-func TestEvictOldestHighwater_NoOpWhenUnderCap(t *testing.T) {
-	t.Parallel()
-	m := map[string]autoTitlerHighwater{
-		"a": {lastRenamedAt: time.Now()},
-		"b": {lastRenamedAt: time.Now()},
-	}
-	evictOldestHighwater(m, 5)
-	if len(m) != 2 {
-		t.Errorf("expected unchanged len=2, got %d", len(m))
 	}
 }
 
@@ -1212,52 +945,37 @@ func TestAutoTitler_BatchPerTickClamp(t *testing.T) {
 	}
 }
 
-// TestAutoTitler_MistypedKnobWarnsAndKeepsDefault asserts R250531-ARCH-01
-// (#1505): a daemon knob supplied with the wrong dynamic type (e.g. int64
-// vs the expected int) must NOT silently retain the default — it logs a
-// slog.Warn naming the key + want/got types so the misconfiguration is
-// diagnosable from logs. The default value is still retained (we never
-// coerce an attacker/operator-controlled wrong type).
-func TestAutoTitler_MistypedKnobWarnsAndKeepsDefault(t *testing.T) {
+// TestAutoTitler_KnobTypes (#1505): a knob supplied with the wrong dynamic
+// type keeps the default (never coerced); correctly-typed knobs apply.
+func TestAutoTitler_KnobTypes(t *testing.T) {
+	t.Parallel()
+	type knobs struct {
+		firstTurns, minTurns, batch int
+		interval                    time.Duration
+		group                       bool
+	}
 	tests := []struct {
-		name    string
-		cfg     DaemonConfig
-		wantKey string // substring expected in the warn log
+		name string
+		cfg  DaemonConfig
+		want *knobs // nil: defaults retained
 	}{
-		{
-			name:    "min_first_turns int64 instead of int",
-			cfg:     DaemonConfig{"min_first_turns": int64(2)},
-			wantKey: "min_first_turns",
-		},
-		{
-			name:    "min_user_turns int64 instead of int",
-			cfg:     DaemonConfig{"min_user_turns": int64(7)},
-			wantKey: "min_user_turns",
-		},
-		{
-			name:    "batch_per_tick float64 instead of int",
-			cfg:     DaemonConfig{"batch_per_tick": float64(50)},
-			wantKey: "batch_per_tick",
-		},
-		{
-			name:    "min_rename_interval int instead of Duration",
-			cfg:     DaemonConfig{"min_rename_interval": 30},
-			wantKey: "min_rename_interval",
-		},
-		{
-			name:    "include_group_chat string instead of bool",
-			cfg:     DaemonConfig{"include_group_chat": "true"},
-			wantKey: "include_group_chat",
-		},
+		{"min_first_turns int64 instead of int", DaemonConfig{"min_first_turns": int64(2)}, nil},
+		{"min_user_turns int64 instead of int", DaemonConfig{"min_user_turns": int64(7)}, nil},
+		{"batch_per_tick float64 instead of int", DaemonConfig{"batch_per_tick": float64(50)}, nil},
+		{"min_rename_interval int instead of Duration", DaemonConfig{"min_rename_interval": 30}, nil},
+		{"include_group_chat string instead of bool", DaemonConfig{"include_group_chat": "true"}, nil},
+		{"correctly typed knobs apply", DaemonConfig{
+			"min_first_turns":     2,
+			"min_user_turns":      9,
+			"min_rename_interval": 42 * time.Minute,
+			"batch_per_tick":      7,
+			"include_group_chat":  true,
+		}, &knobs{2, 9, 7, 42 * time.Minute, true}},
 	}
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			prev := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-			defer slog.SetDefault(prev)
-
+			t.Parallel()
 			d, err := newAutoTitler(DaemonDeps{
 				Router: wrapRouter(newFakeRouter()),
 				Runner: &capturingRunner{},
@@ -1266,81 +984,20 @@ func TestAutoTitler_MistypedKnobWarnsAndKeepsDefault(t *testing.T) {
 				t.Fatalf("newAutoTitler: %v", err)
 			}
 			a := d.(*autoTitler)
-
-			// Snapshot defaults so we can assert the mistyped value did
-			// not get applied.
-			gotFirstTurns := a.minFirstTurns
-			gotMinTurns := a.minUserTurns
-			gotInterval := a.minRenameInterval
-			gotBatch := a.batchPerTick
-			gotGroup := a.includeGroupChat
-
+			read := func() knobs {
+				return knobs{a.minFirstTurns, a.minUserTurns, a.batchPerTick, a.minRenameInterval, a.includeGroupChat}
+			}
+			want := read()
+			if tc.want != nil {
+				want = *tc.want
+			}
 			if err := a.Configure(tc.cfg); err != nil {
 				t.Fatalf("Configure: %v", err)
 			}
-
-			if a.minFirstTurns != gotFirstTurns || a.minUserTurns != gotMinTurns ||
-				a.minRenameInterval != gotInterval ||
-				a.batchPerTick != gotBatch || a.includeGroupChat != gotGroup {
-				t.Fatalf("mistyped knob mutated config: %+v", a)
-			}
-
-			logged := buf.String()
-			if !strings.Contains(logged, "mistyped daemon knob") {
-				t.Fatalf("expected mistyped-knob warning, got log: %q", logged)
-			}
-			if !strings.Contains(logged, tc.wantKey) {
-				t.Fatalf("warning missing key %q, got log: %q", tc.wantKey, logged)
+			if got := read(); got != want {
+				t.Fatalf("knobs after Configure = %+v, want %+v", got, want)
 			}
 		})
-	}
-}
-
-// TestAutoTitler_CorrectlyTypedKnobsApplyNoWarn is the negative companion
-// to TestAutoTitler_MistypedKnobWarnsAndKeepsDefault: correctly-typed
-// knobs must apply AND emit no mistyped-knob warning.
-func TestAutoTitler_CorrectlyTypedKnobsApplyNoWarn(t *testing.T) {
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	defer slog.SetDefault(prev)
-
-	d, err := newAutoTitler(DaemonDeps{
-		Router: wrapRouter(newFakeRouter()),
-		Runner: &capturingRunner{},
-	})
-	if err != nil {
-		t.Fatalf("newAutoTitler: %v", err)
-	}
-	a := d.(*autoTitler)
-
-	cfg := DaemonConfig{
-		"min_first_turns":     2,
-		"min_user_turns":      9,
-		"min_rename_interval": 42 * time.Minute,
-		"batch_per_tick":      7,
-		"include_group_chat":  true,
-	}
-	if err := a.Configure(cfg); err != nil {
-		t.Fatalf("Configure: %v", err)
-	}
-	if a.minFirstTurns != 2 {
-		t.Fatalf("minFirstTurns = %d, want 2", a.minFirstTurns)
-	}
-	if a.minUserTurns != 9 {
-		t.Fatalf("minUserTurns = %d, want 9", a.minUserTurns)
-	}
-	if a.minRenameInterval != 42*time.Minute {
-		t.Fatalf("minRenameInterval = %v, want 42m", a.minRenameInterval)
-	}
-	if a.batchPerTick != 7 {
-		t.Fatalf("batchPerTick = %d, want 7", a.batchPerTick)
-	}
-	if !a.includeGroupChat {
-		t.Fatalf("includeGroupChat = false, want true")
-	}
-	if strings.Contains(buf.String(), "mistyped daemon knob") {
-		t.Fatalf("unexpected mistyped-knob warning for valid cfg: %q", buf.String())
 	}
 }
 

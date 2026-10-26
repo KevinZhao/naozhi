@@ -463,7 +463,7 @@ func TestRouterStoreRestoreUserLabel(t *testing.T) {
 
 	labeled := newSessionWithID("feishu:direct:alice:general", "sess-111")
 	labeled.SetUserLabel("alpha")
-	if err := saveStore(storePath, map[string]*ManagedSession{labeled.key: labeled}); err != nil {
+	if err := saveStore(storePath, []*ManagedSession{labeled}); err != nil {
 		t.Fatalf("saveStore: %v", err)
 	}
 
@@ -494,9 +494,9 @@ func TestNewRouterStoreRestore(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "sessions.json")
 
-	saved := map[string]*ManagedSession{
-		"feishu:direct:alice:general": newSessionWithID("feishu:direct:alice:general", "sess-111"),
-		"feishu:direct:bob:general":   newSessionWithID("feishu:direct:bob:general", "sess-222"),
+	saved := []*ManagedSession{
+		newSessionWithID("feishu:direct:alice:general", "sess-111"),
+		newSessionWithID("feishu:direct:bob:general", "sess-222"),
 	}
 	if err := saveStore(storePath, saved); err != nil {
 		t.Fatalf("saveStore: %v", err)

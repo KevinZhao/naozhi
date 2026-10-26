@@ -4,13 +4,9 @@ package cron
 //
 // freshContextPreflightP0 calls s.router.Reset(key) — which destroys the
 // cron:<jobID> session, its CLI process, and its history — before the run
-// proceeds. resolveCronWorkspace (in executeOpt) already aborts outside-root
-// runs, but it consults the TTL-cached workDirResolveUnderRootCached view; a
-// symlink retargeted outside allowedRoot within that TTL would pass there as a
-// stale-positive and let the run reach this preflight, blowing away a live
-// session for a run that can never succeed. The fix adds an uncached
-// workDirUnderRoot early-check BEFORE the Reset so an outside-root workDir
-// fails the run WITHOUT tearing down the existing session.
+// proceeds. A workDir that resolves outside allowedRoot must fail the run
+// WITHOUT tearing down the existing session, so freshContextPreflightP0 runs
+// its own workDirUnderRoot check BEFORE the Reset.
 //
 // These tests drive freshContextPreflightP0 directly (bypassing the upstream
 // resolveCronWorkspace gate) so the new branch is exercised in isolation.

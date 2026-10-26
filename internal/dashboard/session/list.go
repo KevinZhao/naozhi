@@ -131,58 +131,17 @@ func filterAndCountSnapshots(snapshots []sessionpkg.SessionSnapshot, now time.Ti
 	return snapshots[:n], running, ready
 }
 
-// borrowWorkspaces returns a recycled []string with cap >= want and len
-// 0. The returned slice header MUST be returned via returnWorkspaces;
-// callers that escape the slice into a struct field MUST copy first.
-func borrowWorkspaces(want int) *[]string {
-	p := workspacesPool.Get().(*[]string)
-	s := *p
-	if cap(s) < want {
-		// Grow once to the request size rather than letting append's geometric
-		// growth allocate on each call.
-		s = make([]string, 0, want)
-	} else {
-		s = s[:0]
-	}
-	*p = s
-	return p
-}
-
-// returnWorkspaces hands the slice back to the pool, dropping oversized
-// backing arrays so one big poll cannot inflate every entry's footprint.
-func returnWorkspaces(p *[]string) {
-	if p == nil {
-		return
-	}
-	const maxRetainCap = 4096
-	if cap(*p) > maxRetainCap {
-		return
-	}
-	// Clear element references so the pool doesn't GC-pin workspace strings
-	// past the request.
-	s := *p
-	for i := range s {
-		s[i] = ""
-	}
-	*p = s[:0]
-	workspacesPool.Put(p)
-}
-
 // fillProjectAndSummary stamps each snapshot with its project name (from
 // ProjectManager + planner-key fallback) and any persisted Summary from
 // sessions-index.json. Mutates snapshots in place.
 func (h *Handlers) fillProjectAndSummary(snapshots []sessionpkg.SessionSnapshot) {
 	if h.deps.ProjectMgr != nil {
-		// Pooled scratch buffer (#616); ResolveWorkspaces never retains it.
-		wsPtr := borrowWorkspaces(len(snapshots))
-		defer returnWorkspaces(wsPtr)
-		workspaces := *wsPtr
+		workspaces := make([]string, 0, len(snapshots))
 		for i := range snapshots {
 			if !project.IsPlannerKey(snapshots[i].Key) && snapshots[i].Workspace != "" {
 				workspaces = append(workspaces, snapshots[i].Workspace)
 			}
 		}
-		*wsPtr = workspaces
 		wsMap := h.deps.ProjectMgr.ResolveWorkspaces(workspaces)
 
 		for i := range snapshots {
@@ -234,7 +193,7 @@ func (h *Handlers) buildSessionStats(now time.Time, version uint64, running, rea
 		Total:              total,
 		Version:            version,
 		VersionTag:         h.deps.VersionTag,
-		Uptime:             h.uptimeStringAt(now),
+		Uptime:             now.Sub(h.deps.StartedAt).Round(time.Second).String(),
 		Watchdog: watchdogStats{
 			NoOutputKills: h.deps.WatchdogNoOut.Load(),
 			TotalKills:    h.deps.WatchdogTotal.Load(),

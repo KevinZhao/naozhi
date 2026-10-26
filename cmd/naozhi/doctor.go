@@ -180,7 +180,6 @@ func (d *doctor) run() {
 	d.checkServerState()
 	d.checkConfigDrift()
 	d.checkPprof()
-	d.checkExpvar()
 	d.checkStateDir()
 	d.checkCLIBackends()
 	d.checkTranscribe()

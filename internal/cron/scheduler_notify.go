@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"unicode/utf8"
 
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/replyfmt"
 )
@@ -251,7 +250,6 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 			text = replyfmt.TruncateForSingleReply(text, maxLen)
 		}
 		if _, err := r.Reply(replyCtx, chatID, text); err != nil {
-			metrics.CronNotifyPartialTotal.Add(1)
 			slog.Warn("cron notify: single-use reply send failed",
 				"platform", plat, "chat", osutil.SanitizeForLog(chatID, 64), "err", err) // chatID is attacker-influenced
 		}
@@ -282,9 +280,6 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		// Short-circuit on the shared replyCtx deadline so a long chunk list
 		// cannot run past cronNotifyTimeout when each Reply consumes budget.
 		if err := replyCtx.Err(); err != nil {
-			// Partial-delivery counter (#966): a rising delta means recipients
-			// are seeing truncated cron output.
-			metrics.CronNotifyPartialTotal.Add(1)
 			// Fold the cap-dropped tail into "remaining" so the WARN reports
 			// the full undelivered tail, not just the post-cap subset.
 			slog.Warn("cron notify target deadline reached; remaining chunks dropped",
@@ -301,10 +296,7 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		// r.Reply passes replyCtx through unchanged (#725), so the #799 stopCtx
 		// chain still short-circuits a hung webhook on Stop.
 		if _, err := r.Reply(replyCtx, chatID, chunk); err != nil {
-			// Abort on first chunk failure (#1151); same partial-delivery
-			// counter as the deadline branch (#966) — operators alert on the
-			// aggregate.
-			metrics.CronNotifyPartialTotal.Add(1)
+			// Abort on first chunk failure (#1151).
 			// Report the ORIGINAL chunk count (len(chunks)+dropped) as total so
 			// a cap-truncated message that then fails does not under-report.
 			slog.Warn("cron notify partial: chunks dropped after send failure",

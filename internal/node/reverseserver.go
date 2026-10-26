@@ -3,7 +3,6 @@ package node
 import (
 	"crypto/sha256"
 	"crypto/subtle"
-	"expvar"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -19,12 +18,6 @@ import (
 	"github.com/naozhi/naozhi/internal/ratelimit"
 	"golang.org/x/time/rate"
 )
-
-// insecureReverseUpgradeTotal counts reverse-node upgrades accepted over plain
-// HTTP from a non-loopback host (bearer token in cleartext on the first
-// frame). The once-per-process warn cannot show ongoing exposure; this
-// /debug/vars counter can (#1026).
-var insecureReverseUpgradeTotal = expvar.NewInt("naozhi_node_insecure_reverse_upgrade_total")
 
 // truncateLabelUTF8 truncates s to at most max bytes without producing invalid
 // UTF-8 and strips C0/C1/bidi/LS-PS codepoints: a compromised reverse node
@@ -78,8 +71,6 @@ var reverseUpgrader = websocket.Upgrader{
 		if isLoopbackHost(r.Host) {
 			return true
 		}
-		// Plain-HTTP, non-loopback: count every occurrence, not just the first.
-		insecureReverseUpgradeTotal.Add(1)
 		// Private LAN: cleartext token is exposed only to that segment (the
 		// documented no-TLS sidecar topology) — allow with a one-time warn.
 		// Public/routable Host: the token would cross the open internet, so

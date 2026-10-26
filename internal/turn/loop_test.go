@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
@@ -581,19 +580,15 @@ func TestOwnerLoop_NilOriginIsSilent(t *testing.T) {
 }
 
 // TestOwnerLoop_PanicInFirstTurn: the loop's recover keeps the panic from
-// reaching the Admission, counts it, tells the owner, releases the key, and
+// reaching the Admission, tells the owner, releases the key, and
 // only then reports idle.
 func TestOwnerLoop_PanicInFirstTurn(t *testing.T) {
 	h := newHarness(8, ModeCollect)
 	h.s.panicIf = func(string) bool { return true }
 	a := newOrigin(h.rec, "a", "ws:a")
-	before := metrics.PanicRecoveredTotal.Value()
 
 	h.submit("m1", a, &fakeAdmission{rec: h.rec})
 
-	if d := metrics.PanicRecoveredTotal.Value() - before; d != 1 {
-		t.Fatalf("PanicRecoveredTotal moved by %d, want 1", d)
-	}
 	h.rec.assertOrder(t, "send:k:m1", "finish:a:send+panic", "idle")
 	if n := h.rec.count("after:k"); n != 0 {
 		t.Fatalf("AfterTurn ran %d times on a turn that panicked in Send", n)
@@ -614,7 +609,6 @@ func TestOwnerLoop_PanicInDrainTurn(t *testing.T) {
 	adm := &fakeAdmission{rec: h.rec, async: true}
 	a := newOrigin(h.rec, "a", "ws:a")
 	b, c, d := newOrigin(h.rec, "b", "ws:b"), newOrigin(h.rec, "c", "ws:c"), newOrigin(h.rec, "d", "ws:d")
-	before := metrics.PanicRecoveredTotal.Value()
 
 	h.submit("m1", a, adm)
 	h.rec.waitFor(t, "send:k:m1", 1)
@@ -627,9 +621,6 @@ func TestOwnerLoop_PanicInDrainTurn(t *testing.T) {
 	h.rec.waitFor(t, "idle", 1)
 	adm.wg.Wait()
 
-	if delta := metrics.PanicRecoveredTotal.Value() - before; delta != 1 {
-		t.Fatalf("PanicRecoveredTotal moved by %d, want 1", delta)
-	}
 	for _, ev := range []string{"finish:b:send+panic", "finish:c:send+panic", "finish:a:send+panic", "dropped:d:panic"} {
 		if h.rec.count(ev) != 1 {
 			t.Fatalf("missing %s: %v", ev, h.rec.snapshot())
@@ -748,7 +739,6 @@ func TestOwnerLoop_PanicDuringRecovery(t *testing.T) {
 			// finish: Send panics, then b's first Finish panics in the recovery.
 			// begin: b's Begin panics the turn, then c's in the recovery.
 			b.panicIn, c.panicIn = hook, map[string]string{"finish": "", "begin": "begin"}[hook]
-			before := metrics.PanicRecoveredTotal.Value()
 
 			h.submit("m1", a, adm)
 			h.rec.waitFor(t, "send:k:m1", 1)
@@ -762,9 +752,6 @@ func TestOwnerLoop_PanicDuringRecovery(t *testing.T) {
 			h.rec.waitFor(t, "idle", 1)
 			adm.wg.Wait()
 
-			if delta := metrics.PanicRecoveredTotal.Value() - before; delta != 2 {
-				t.Fatalf("PanicRecoveredTotal moved by %d, want 2 (the turn and the hook in recovery)", delta)
-			}
 			stage := map[string]string{"finish": "send", "begin": "session"}[hook]
 			for _, name := range []string{"d", "a"} {
 				if ev := "finish:" + name + ":" + stage + "+panic"; h.rec.count(ev) != 1 {

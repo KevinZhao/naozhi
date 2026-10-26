@@ -297,21 +297,17 @@ func (r *tailerRegistry) attach(tk tailerKey, c *wsClient) bool {
 		t.subs[c] = struct{}{}
 		t.refCount.Add(1)
 	}
-	// Snapshot the ring into a pooled buffer so the replay below runs
-	// lock-free (#926). Empty buffer skips the pool entirely; meta is still
-	// snapshotted so the late-meta nudge stays correct.
+	// Snapshot the ring so the replay below runs lock-free; meta is
+	// snapshotted too so the late-meta nudge stays correct.
 	var buffered []clievent.EventEntry
-	var bufferedHandle tailerBufferedHandle
 	if len(t.buffered) > 0 {
-		buffered, bufferedHandle = acquireTailerBufferedSlice(len(t.buffered))
-		buffered = append(buffered, t.buffered...)
+		buffered = append(make([]clievent.EventEntry, 0, len(t.buffered)), t.buffered...)
 	}
 	meta := t.meta
 	t.mu.Unlock()
 
 	// Replay outside the lock so a slow client cannot stall other
-	// subscribers; release (nil-handle-safe) deferred until after replay.
-	defer releaseTailerBufferedSlice(buffered, bufferedHandle)
+	// subscribers.
 	for i := range buffered {
 		e := buffered[i]
 		c.SendJSON(wsproto.NewAgentEvent(wsproto.AgentEvent{

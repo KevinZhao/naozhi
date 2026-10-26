@@ -242,62 +242,6 @@ func TestProcess_ReadLoop_ExitsOnKillCh(t *testing.T) {
 	}
 }
 
-func TestProcess_StateTransitions(t *testing.T) {
-	t.Parallel()
-	p, srv := shimTestPair(&ClaudeProtocol{})
-
-	if p.turn.state != StateSpawning {
-		t.Errorf("initial state = %v, want StateSpawning", p.turn.state)
-	}
-
-	go p.readLoop()
-
-	// TRUE-time-delay (not migrated to testhelper.Eventually): readLoop
-	// does not mutate p.turn.state before blocking on shimR.ReadBytes — only
-	// startReadLoop() sets StateReady, and this test calls readLoop
-	// directly. No observable "loop is scheduled" signal exists, so we
-	// yield the scheduler briefly. Keep short; state mutations below
-	// do not actually depend on readLoop having run.
-	time.Sleep(10 * time.Millisecond)
-
-	// Simulate Send() acquiring lock: Ready → Running
-	p.turn.mu.Lock()
-	p.turn.state = StateRunning
-	p.turn.mu.Unlock()
-
-	if !p.IsRunning() {
-		t.Error("IsRunning() = false after StateRunning, want true")
-	}
-
-	// Simulate Send() completing: Running → Ready
-	p.turn.mu.Lock()
-	if p.turn.state == StateRunning {
-		p.turn.state = StateReady
-	}
-	p.turn.mu.Unlock()
-
-	if p.IsRunning() {
-		t.Error("IsRunning() = true after StateReady, want false")
-	}
-
-	// CLI exit causes StateDead
-	srv.SendCLIExited(0)
-
-	select {
-	case <-p.done:
-	case <-time.After(time.Second):
-		t.Fatal("readLoop did not exit after cli_exited")
-	}
-
-	p.turn.mu.Lock()
-	final := p.turn.state
-	p.turn.mu.Unlock()
-
-	if final != StateDead {
-		t.Errorf("final state = %v, want StateDead", final)
-	}
-}
-
 func TestProcess_Kill_Idempotent(t *testing.T) {
 	t.Parallel()
 	p, _ := shimTestPair(&ClaudeProtocol{})

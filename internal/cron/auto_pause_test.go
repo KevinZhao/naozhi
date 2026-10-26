@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
@@ -229,12 +228,11 @@ func TestAutoPause_TransientBackendFailureDoesNotCount(t *testing.T) {
 
 // TestAutoPause_DefaultThresholdPausesOnFifthFailure drives real runs: four
 // failures keep the job active with plain notices, the fifth pauses it —
-// entry removed, state and reason persisted, metric bumped, and the notice
+// entry removed, state and reason persisted, and the notice
 // says how to resume. A further trigger is refused.
 func TestAutoPause_DefaultThresholdPausesOnFifthFailure(t *testing.T) {
 	s, r, ns, id := newAutoPauseScheduler(t, 0, "feishu")
 	r.set(nil, errStreakSend)
-	before := metrics.CronAutoPausedTotal.Value()
 
 	runN(s, id, 4)
 	if j := s.jobForTest(t, id); j.Paused || j.ConsecutiveFailures != 4 {
@@ -259,9 +257,6 @@ func TestAutoPause_DefaultThresholdPausesOnFifthFailure(t *testing.T) {
 	}
 	if disk := persistedJob(t, s, id); !disk.Paused || disk.PausedReason != PausedReasonAutoFailures || disk.ConsecutiveFailures != 5 {
 		t.Errorf("persisted = paused:%v reason:%q streak:%d", disk.Paused, disk.PausedReason, disk.ConsecutiveFailures)
-	}
-	if got := metrics.CronAutoPausedTotal.Value() - before; got != 1 {
-		t.Errorf("CronAutoPausedTotal delta = %d, want 1", got)
 	}
 	last := pausingNotice(t, ns.noticesAfter(s))
 	wantSuffix := "；已连续失败 5 次，任务已自动暂停，修复后发送 /cron resume " + id + " 恢复"

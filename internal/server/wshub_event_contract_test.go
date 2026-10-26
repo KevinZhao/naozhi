@@ -3,11 +3,10 @@ package server
 // wshub_event_contract_test.go — backend→frontend event contract
 // regressions:
 //
-//  1. historyMarshalCache fingerprint must include entry identity (UUID), not
-//     just (watermark, latestTime, count). With ≥2 subscribers the ACP
-//     turn-end shape (three same-millisecond entries arriving in three notify
-//     waves) produced identical fingerprints for wave 2 `[e2(T)]` and wave 3
-//     `[e3(T)]`, so wave 3 returned e2's cached bytes and e3 was never sent.
+//  1. With ≥2 subscribers, the ACP turn-end shape (three same-millisecond
+//     entries arriving in three notify waves) must deliver every wave to every
+//     subscriber; a since-removed shared marshal cache once served wave 2's
+//     bytes for wave 3, so e3 was never sent.
 //  2. Reconnect `subscribe{after}` must re-admit the `after` millisecond so a
 //     later same-ms sibling of the last delivered entry is not lost forever;
 //     the dashboard dedups same-ms replays by UUID (onHistory / cron-live).
@@ -49,8 +48,8 @@ func TestEventPush_MultiSubscriber_SameMsWaves_DistinctUUIDs(t *testing.T) {
 		}
 		conns = append(conns, conn)
 	}
-	if hub.singleSubscriber("test:d:u:general") {
-		t.Fatal("test setup: expected 2 subscribers so the marshal cache path is exercised")
+	if n := subscriberCountOf(hub, "test:d:u:general"); n != 2 {
+		t.Fatalf("test setup: %d subscribers, want 2", n)
 	}
 
 	// ACP turn-end shape: three entries, one millisecond, three notify waves.
@@ -62,9 +61,7 @@ func TestEventPush_MultiSubscriber_SameMsWaves_DistinctUUIDs(t *testing.T) {
 		for i, conn := range conns {
 			deadline := time.Now().Add(3 * time.Second)
 			if _, ok := readUntilHistoryWith(t, conn, uuid, deadline); !ok {
-				t.Fatalf("#2432 regression: subscriber %d never received %s — "+
-					"historyMarshalCache fingerprint (watermark, latestTime, count) "+
-					"collided across same-millisecond waves and served stale bytes", i, uuid)
+				t.Fatalf("#2432 regression: subscriber %d never received same-millisecond wave %s", i, uuid)
 			}
 		}
 	}

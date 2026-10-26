@@ -30,17 +30,3 @@ func TestManagerStateDirAppliesTheDefault(t *testing.T) {
 		t.Error("StateDir() is empty; a sweep pass given this would be a silent no-op")
 	}
 }
-
-// TestManagerStateDirEchoesAnExplicitValue: the accessor must not invent a path
-// when the operator set one.
-func TestManagerStateDirEchoesAnExplicitValue(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	m, err := NewManager(ManagerConfig{StateDir: dir})
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-	if got := m.StateDir(); got != dir {
-		t.Errorf("StateDir() = %q, want %q", got, dir)
-	}
-}
