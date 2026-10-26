@@ -15,7 +15,7 @@ import (
 //
 // Two distinct concepts share the word "workspace" and are NOT
 // interchangeable: Config.Workspace (this instance's identity) and
-// Config.Workspaces (the remote-nodes map, mirrored into Nodes).
+// Config.Workspaces (the remote-nodes map).
 type Config struct {
 	// Fingerprint is the raw-bytes identity of the loaded file (#2538).
 	// Populated by Load; zero for programmatically constructed configs.
@@ -46,10 +46,7 @@ type Config struct {
 	NaozhiSettings NaozhiSettingsConfig `yaml:"naozhi_settings,omitempty"`
 
 	// Workspaces is the remote-instance map (the v1 `nodes` key is no longer
-	// read). Consumers read cfg.Nodes, which
-	// Normalize() (called by Load) points at the same entries — a Config
-	// literal built in tests MUST call it too or its entries are skipped.
-	Nodes        map[string]NodeConfig       `yaml:"-"`
+	// read).
 	Workspaces   map[string]NodeConfig       `yaml:"workspaces"`
 	ReverseNodes map[string]ReverseNodeEntry `yaml:"reverse_nodes"`
 	Upstream     *UpstreamConfig             `yaml:"upstream"`
@@ -190,19 +187,6 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// Normalize mirrors the Workspaces map into Nodes, the field consumers read,
-// and fills Workspaces from Nodes for a Config built in code. Load calls it;
-// programmatic Config construction MUST call it too. When both are set
-// Workspaces wins. Idempotent.
-func (cfg *Config) Normalize() {
-	switch {
-	case len(cfg.Workspaces) > 0:
-		cfg.Nodes = cfg.Workspaces
-	case len(cfg.Nodes) > 0:
-		cfg.Workspaces = cfg.Nodes
-	}
-}
-
 func applyDefaults(cfg *Config) {
 	if cfg.SchemaVersion == 0 {
 		cfg.SchemaVersion = CurrentSchemaVersion
@@ -211,7 +195,6 @@ func applyDefaults(cfg *Config) {
 	applyServerDefaults(cfg)
 	applySessionDefaults(cfg)
 	applyUpdateDefaults(cfg)
-	cfg.Normalize()
 	applyWorkspaceDefaults(cfg)
 }
 

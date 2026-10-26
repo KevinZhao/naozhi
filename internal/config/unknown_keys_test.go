@@ -216,8 +216,8 @@ agents:
 	if flagDiags != 1 {
 		t.Errorf("--append-system-prompt in agents[].args drew %d diags, want exactly 1", flagDiags)
 	}
-	if len(cfg.Nodes) != 0 {
-		t.Errorf("nodes must not be read any more, got %v", cfg.Nodes)
+	if len(cfg.Workspaces) != 0 {
+		t.Errorf("nodes must not be read any more, got %v", cfg.Workspaces)
 	}
 	if got := cfg.Agents["reviewer"].SystemPrompt; got != "" {
 		t.Errorf("--append-system-prompt must not be lifted any more, got %q", got)

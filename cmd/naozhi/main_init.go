@@ -88,13 +88,13 @@ func startWatchdogLoop(ctx context.Context, hc func() bool) {
 }
 
 // buildRemoteNodes constructs the multi-node aggregation client map from
-// cfg.Nodes; nil when none are configured (server treats nil and empty alike).
+// cfg.Workspaces; nil when none are configured (server treats nil and empty alike).
 func buildRemoteNodes(cfg *config.Config) map[string]node.Conn {
-	if len(cfg.Nodes) == 0 {
+	if len(cfg.Workspaces) == 0 {
 		return nil
 	}
-	nodes := make(map[string]node.Conn, len(cfg.Nodes))
-	for id, nc := range cfg.Nodes {
+	nodes := make(map[string]node.Conn, len(cfg.Workspaces))
+	for id, nc := range cfg.Workspaces {
 		nodes[id] = node.NewHTTPClient(id, nc.URL, nc.Token, nc.DisplayName)
 	}
 	return nodes
