@@ -15,7 +15,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cron"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/turn"
@@ -283,21 +282,6 @@ func TestTurnParity10_Dash_NotifyIdleAfterPanicHandling(t *testing.T) {
 		t.Fatalf("dashboard owner-loop panic order = %q, want %q (NotifyIdle runs after the recover)", got, want)
 	}
 	onlyErrorAck(t, ws.errorAcks(), "w1", parityPanicReply)
-}
-
-// Row 11 flipped in D: a dashboard turn's panic is counted.
-func TestTurnParity11_Dash_PanicIsCounted(t *testing.T) {
-	h := newParityHarness(t, parityOpts{})
-	turns := h.session(parityKey, false)
-	ws := h.ws()
-	before := metrics.PanicRecoveredTotal.Value()
-	ws.send("w1", "first")
-	turns.turn(t, "owner turn", parityOutcome{Panic: "parity: owner turn panic"})
-	ws.waitFor(t, "panic ack", func(f parityFrame) bool { return f.Type == "send_ack" && f.Status == "error" })
-	h.waitEngineIdle()
-	if got := metrics.PanicRecoveredTotal.Value() - before; got != 1 {
-		t.Fatalf("PanicRecoveredTotal moved by %d on a dashboard owner-loop panic, want 1", got)
-	}
 }
 
 // Row 12 flipped in D: a drain turn's panic reaches the send it carried and

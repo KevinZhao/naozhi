@@ -24,7 +24,6 @@ func BenchmarkHandleBatch_RecordAlloc(b *testing.B) {
 			Dir:          b.TempDir(),
 			IdxStride:    4,
 			MaxFileBytes: 1 << 30, // avoid the post-batch rotate gate (FS ops)
-			Observer:     noopObserver{},
 			Clock:        func() time.Time { return time.Unix(1700000000, 0) },
 		},
 		in:      make(chan batchJob, 4),

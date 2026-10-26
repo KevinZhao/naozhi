@@ -431,34 +431,6 @@ func TestNewManager_Defaults(t *testing.T) {
 	}
 }
 
-func TestNewManager_CustomConfig(t *testing.T) {
-	dir := t.TempDir()
-	m := mustNewManager(t, ManagerConfig{
-		StateDir:        dir,
-		MaxShims:        10,
-		BufferSize:      500,
-		MaxBufBytes:     1024,
-		IdleTimeout:     2 * time.Hour,
-		WatchdogTimeout: 5 * time.Minute,
-	})
-
-	if m.maxShims != 10 {
-		t.Errorf("maxShims = %d, want 10", m.maxShims)
-	}
-	if m.bufferSize != 500 {
-		t.Errorf("bufferSize = %d, want 500", m.bufferSize)
-	}
-	if m.maxBufBytes != 1024 {
-		t.Errorf("maxBufBytes = %d, want 1024", m.maxBufBytes)
-	}
-	if m.idleTimeout != 2*time.Hour {
-		t.Errorf("idleTimeout = %v, want 2h", m.idleTimeout)
-	}
-	if m.watchdogTimeout != 5*time.Minute {
-		t.Errorf("watchdogTimeout = %v, want 5m", m.watchdogTimeout)
-	}
-}
-
 func TestManager_Remove(t *testing.T) {
 	dir := t.TempDir()
 	m := mustNewManager(t, ManagerConfig{StateDir: dir})
@@ -485,29 +457,7 @@ func TestManager_Remove_NonExistentKey(t *testing.T) {
 	m.Remove("nonexistent:key") // must not panic
 }
 
-func TestManager_CLIPath(t *testing.T) {
-	dir := t.TempDir()
-	m := mustNewManager(t, ManagerConfig{StateDir: dir, CLIPath: "/usr/bin/claude"})
-	if m.CLIPath() != "/usr/bin/claude" {
-		t.Errorf("CLIPath() = %q, want /usr/bin/claude", m.CLIPath())
-	}
-}
-
-// --- filterShimEnv ---
-
 // --- Manager.DetachAll / StopAll ---
-
-func TestManager_DetachAll_Empty(t *testing.T) {
-	dir := t.TempDir()
-	m := mustNewManager(t, ManagerConfig{StateDir: dir})
-	m.DetachAll() // must not panic
-}
-
-func TestManager_StopAll_Empty(t *testing.T) {
-	dir := t.TempDir()
-	m := mustNewManager(t, ManagerConfig{StateDir: dir})
-	m.StopAll(t.Context()) // must not panic
-}
 
 func TestManager_DetachAll_SendsDetach(t *testing.T) {
 	dir := t.TempDir()

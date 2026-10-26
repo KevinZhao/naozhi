@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -27,7 +26,6 @@ func TestServerOptions_GroupsReachTheirConsumers(t *testing.T) {
 		Backend:        "claude",
 		Identity:       IdentityOptions{WorkspaceID: "ws-id", WorkspaceName: "ws-name", Version: "v9.8.7"},
 		Watchdog:       WatchdogOptions{NoOutput: 3 * time.Minute, Total: 7 * time.Minute},
-		Features:       FeatureOptions{PublicTmp: true},
 		Queue:          QueueOptions{MaxDepth: 3, CollectDelay: 70 * time.Millisecond, Mode: "interrupt"},
 	})
 
@@ -72,14 +70,5 @@ func TestServerOptions_GroupsReachTheirConsumers(t *testing.T) {
 	}
 	if update.Current != "v9.8.7" {
 		t.Errorf("update status current = %q, want the build version", update.Current)
-	}
-
-	// With PublicTmp on, the pseudo-project is served rather than refused as
-	// an invalid project name.
-	rec = httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"project":"__public_tmp__","paths":["naozhi-s8b-absent"]}`)
-	hs.projectH.HandleFilesExists(rec, httptest.NewRequest(http.MethodPost, "/api/projects/files/exists", body))
-	if rec.Code != http.StatusOK {
-		t.Errorf("public tmp files/exists = %d %s, want 200", rec.Code, rec.Body)
 	}
 }

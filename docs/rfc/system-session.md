@@ -31,11 +31,6 @@
 > - `internal/cron/run.go`（`CronRun` / `RunState` / `ErrorClass`）
 > - `internal/server/dashboard_session.go:407`（`IsCronKey` 过滤）
 >
-> 关联 RFC：
-> - `cron-panel-consolidation.md` —— sidebar 不展示 exempt stub 的过滤思路
-> - `cron-run-history.md` —— `CronRun` / `runStore` 历史持久化范式；本 RFC 的 `DaemonRun` 字段命名对齐
-> - `consumer-interfaces.md` —— 消费端小接口约定
->
 > 关联 memory：
 > - [project_sidebar_lifecycle.md] —— sidebar Remove 即真删；sys session 永不进 sidebar
 > - 项目铁律：`--setting-sources ""` 隔离宿主 hooks 防死循环（Runner 沿用）
@@ -180,7 +175,7 @@ var exemptKeyPrefixes = []string{
 ### 3.4 持久化策略
 
 - **`sessions.json` 永不持久化 sys 条目**——`saveStore` 在现有 `IsScratchKey` skip 旁边加 `IsSysKey` skip。即便未来某 daemon 调 `RegisterSystemStub` 留了内存 stub，也不写盘。理由：daemon stub 跨重启自动重新注册，没必要写；写了反而增加被外部篡改 sessions.json 注入恶意 sys 条目的风险面（§14）。
-- **不持久化 daemon 历史**——`DaemonRun` 只在内存留最近 50 条（per daemon），重启即丢。这是 Phase 2 才考虑的事，对应复用 cron-run-history 的 `runStore` 模型。
+- **不持久化 daemon 历史**——`DaemonRun` 只在内存留最近 50 条（per daemon），重启即丢。这是 Phase 2 才考虑的事，对应复用 `internal/cron/runstore` 的 `runStore` 模型。
 - **`saveStore` skip 与 `isExemptKey` 不重复**——经核对 `internal/session/store.go:124`，现有 `saveStore` 跳过的是 `IsScratchKey`，**没有**因为 `isExemptKey` 自动跳过 cron/project；cron 和 project 仍然写盘（cron stub 需要恢复 LastSessionID，project planner 需要恢复 workspace）。所以 §3.4 的 `IsSysKey` skip 是必要的独立 guard，不是冗余。注释里要明说"sys 条目跨重启自动重生，不需要、也不应该持久化"。
 
 ---
@@ -681,12 +676,12 @@ const (
 # config.yaml
 sysession:
   enabled: true                 # 全局开关
-  tick_timeout: 30s             # Manager 给每个 Tick 的 budget；与 Runner 单次 25s 留 5s 余量
+  tick_timeout: 30s             # 已在 #3782 删除并写死为 30s；Manager 给每个 Tick 的 budget；与 Runner 单次 25s 留 5s 余量
   runner:
     # backend 不在配置中——Runner 自动跟随 router.defaultBackend（§6.4）
     model: claude-haiku-4-5-20251001
     work_dir: ""                # 空则用 dataDir/sys-sessions/，0700 权限
-    jsonl_max_age: 168h         # sweepOldJSONL 阈值（7 天）
+    jsonl_max_age: 168h         # 已在 #3782 删除并写死为 7 天；sweepOldJSONL 阈值（7 天）
   daemons:
     auto_titler:
       enabled: false            # 默认关，灰度
@@ -873,7 +868,7 @@ type DaemonRun struct {
 }
 ```
 
-类型与 `cron-run-history.md` 的 `CronRun` / `RunState` / `ErrorClass` 平行命名；常量前缀加 `Daemon` 防与 `cron.ErrorClass` 撞名（v1 review 指出）。
+类型与 `internal/cron/runstore` 的 `CronRun` / `RunState` / `ErrorClass` 平行命名；常量前缀加 `Daemon` 防与 `cron.ErrorClass` 撞名（v1 review 指出）。
 
 ---
 

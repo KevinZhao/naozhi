@@ -3,65 +3,35 @@
 # ============================================================================
 # Where configuration comes from
 # ============================================================================
-# Built-in defaults fill whatever this file leaves out. The only override of
-# a key set here is a project's own .naozhi/project.yaml, for that project's
-# sessions; the other sources feed settings this file does not have.
-#
-#   Built-in defaults        a key left out here takes its default from
-#                            internal/config (applyDefaults).
-#   This file                `naozhi -config config.yaml` (-config is the
-#                            server's only flag). `${VAR}` placeholders are
-#                            expanded from the environment at load time. A
-#                            placeholder whose variable is unset, or refused by
-#                            the expansion policy, stays literal, and a literal
-#                            placeholder left in dashboard_token, a feishu
-#                            credential, a slack/discord bot_token, the weixin
-#                            token, upstream.url / node_id / token or a
-#                            reverse_nodes token fails the load.
-#   ~/.claude/settings.json  its `env` block, minus keys the env policy
-#                            refuses, is copied into naozhi's own process env
-#                            unless the shell already set the key. That feeds
-#                            transcription and the sysession Bedrock auth, and
-#                            every key the shim also forwards reaches each
-#                            session CLI as well: the Anthropic and AWS
-#                            credentials, AWS_REGION, ANTHROPIC_MODEL,
-#                            CLAUDE_CODE_USE_BEDROCK, ANTHROPIC_BASE_URL and
-#                            more. Proxy keys skip session CLIs (only the
-#                            sysession runner's `claude -p` gets them).
-#                            Spawned cc also reads the file itself, unless
-#                            naozhi_settings.enabled points it at an isolated
-#                            copy without `env` (the process env still flows).
-#   .naozhi/project.yaml     one per project directory under projects.root.
-#                            Overrides projects.planner_defaults (model,
-#                            prompt), the default backend and the access
-#                            profile NAME, and adds chat bindings and display
-#                            name/emoji. It never carries env values.
-#   Process environment      a few runtime knobs are read directly, e.g. TZ,
-#                            HOME, NAOZHI_ALLOW_INSECURE_WEBHOOK and
+#   Built-in defaults        fill every key left out here (internal/config
+#                            applyDefaults).
+#   This file                `naozhi -config config.yaml`. `${VAR}` placeholders
+#                            are expanded from the environment at load time; an
+#                            unset or refused one stays literal, and a literal
+#                            placeholder left in a credential (dashboard_token,
+#                            feishu/slack/discord/weixin tokens, upstream.*,
+#                            reverse_nodes tokens) fails the load.
+#   ~/.claude/settings.json  its `env` block (minus keys the env policy refuses)
+#                            is copied into naozhi's process env unless the shell
+#                            already set the key; the shim forwards the Anthropic
+#                            / AWS / Bedrock keys on to each session CLI. Spawned
+#                            cc also reads the file itself, unless
+#                            naozhi_settings.enabled points it at an isolated copy.
+#   .naozhi/project.yaml     one per project under projects.root. Overrides the
+#                            planner model/prompt, default backend and access
+#                            profile NAME for that project's sessions. Never
+#                            carries env values.
+#   Process environment      a few knobs, e.g. TZ, HOME and
 #                            NAOZHI_ALLOW_PRIVATE_BASE_URL.
 #
 # Commands:
-#   `naozhi config check -config config.yaml`    validate without booting;
-#       -effective also prints each backend's final spawn argv and (masked)
-#       env, -json emits machine-readable output.
-#   `naozhi doctor`                              health checks: binary,
-#       state dir and this file's server settings even while naozhi is down,
-#       plus /health, auth and config drift when an instance is reachable.
-#
-# Removed schema v1 spellings. They are NOT read: Load still starts but logs a
-# WARN (config-deprecated; argv-denylist for the agents[].args flag), and the
-# setting has no effect until renamed by hand:
-#   - `nodes:`                                  → `workspaces:`
-#   - `session.workspace`                       → `session.cwd`
-#   - `--append-system-prompt` in agents[].args → `agents[].system_prompt`
-#   - `session.auto_chain`                      → removed, no effect
-# Not aliases: `workspace:` (this instance) and `workspaces:` (remote
-# instances) are different keys; `reverse_nodes:` (inbound node auth) and
-# `projects:` (the project root) are separate tables.
+#   `naozhi config check -config config.yaml`  validate without booting;
+#       -effective prints each backend's spawn argv and (masked) env.
+#   `naozhi doctor`                            health checks, with or without a
+#       running instance.
 # ============================================================================
 
-# The config schema this file is written for; a version newer than the binary
-# is rejected at load.
+# A version newer than the binary is rejected at load.
 schema_version: 2
 
 server:
@@ -73,13 +43,6 @@ server:
   # is refused with 400 and the rate-limited endpoints fail closed. The client
   # IP is the last X-Forwarded-For hop, the one that proxy appends.
   trusted_proxy: false
-  # debug_mode registers /api/debug/pprof and /api/debug/vars (default false:
-  # both 404 even for loopback+auth callers, so a leaked dashboard token cannot
-  # enumerate goroutine stacks or expvar counters). Turn it on only while
-  # capturing a profile; the endpoints stay auth-gated + loopback-only and
-  # refuse to serve at all when dashboard_token is empty. Runbook:
-  # docs/ops/pprof.md. Startup logs a WARN while this is on.
-  # debug_mode: false
 
 workspace:
   id: "your-node-id"
@@ -89,165 +52,74 @@ cli:
   path: "~/.local/bin/claude"
   # Permission flags come from cli.permission_mode below; don't put
   # --dangerously-skip-permissions or --permission-mode here (both are stripped).
-  # Naozhi's dashboard markdown renderer escapes raw HTML as a security
-  # measure (see dashboard.js renderMdUncached + inlineMd), so <details>,
-  # <summary>, <kbd>, <sub>, <sup> etc. render as literal text instead of
-  # collapsible widgets. Instruct the model to stick to pure Markdown.
   args: []
 
-  # Optional: MCP servers for naozhi-spawned Claude sessions (RFC
-  # docs/rfc/cli-mcp-config.md). Empty (the default) passes no flag.
+  # Optional: MCP servers for naozhi-spawned Claude sessions
+  # (docs/rfc/cli-mcp-config.md). Only needed when naozhi_settings.enabled is
+  # true: that path spawns cc with `--setting-sources ""`, so ~/.claude.json's
+  # mcpServers is not read and sessions see no MCP servers. On the default path
+  # cc already reads ~/.claude.json; leave this empty.
   #
-  # When you need this: only if naozhi_settings.enabled is true. That path
-  # spawns cc with `--setting-sources ""`, which suppresses every external
-  # config source -- including the `mcpServers` block of ~/.claude.json -- so
-  # sessions see zero MCP servers. `--mcp-config` is the only remaining way in
-  # (a `mcpServers` key inside the settings file and a workspace `.mcp.json`
-  # are both ignored; measured on cc 2.1.235). On the default
-  # `--setting-sources user` path cc already reads ~/.claude.json, so leave
-  # this empty unless you specifically want an extra, naozhi-only server set.
-  #
-  # Format: an ABSOLUTE path to a file shaped like ~/.claude.json's mcpServers:
+  # Must be an ABSOLUTE path to a file shaped like
   #   {"mcpServers": {"asana": {"type": "http", "url": "https://..."}}}
-  # Inline JSON (which the CLI flag also accepts) is deliberately NOT supported
-  # -- file-only keeps permissions checkable.
-  #
-  # chmod 600 it. Whoever can write this file can add a stdio server, i.e. run
-  # arbitrary commands in every session. naozhi warns at startup if the file is
-  # group/other-writable.
-  #
-  # naozhi validates the envelope (regular file / plausible size / parses as
-  # JSON / has an `mcpServers` object) at startup and falls back to "no MCP"
-  # with a slog.Error if any check fails -- because cc REFUSES TO START on a bad
-  # --mcp-config, an unvalidated path would turn one stray comma in this file
-  # into a total spawn outage.
-  #
-  # RESTART NAOZHI AFTER EDITING THIS FILE. The validation above runs once at
-  # startup, but cc re-reads the file on every spawn, so breaking it while
-  # naozhi is running means new sessions fail to start until you fix it. A
-  # restart re-validates and degrades to "no MCP" instead.
-  #
-  # OAuth for remote servers is NOT managed by naozhi: authorize once in an
-  # interactive `claude` session via /mcp, which stores the token in
-  # ~/.claude.json's mcpOAuth.
+  # (inline JSON is not supported). chmod 600 it: whoever can write it can add
+  # a stdio server, i.e. run arbitrary commands in every session; naozhi warns
+  # if it is group/other-writable. The file is validated at startup and a bad
+  # one degrades to "no MCP", but cc re-reads it on every spawn and refuses to
+  # start on a bad file, so RESTART NAOZHI AFTER EDITING IT. OAuth for remote
+  # servers: authorize once via /mcp in an interactive `claude` session.
   # mcp_config: "~/.naozhi/mcp.json"
 
-  # Optional: how Claude sessions handle tool permissions. Claude backend only;
-  # kiro and codex ignore it.
-  #   "bypass" (default, same as leaving it unset): --dangerously-skip-permissions,
-  #            every tool call runs unreviewed.
-  #   "auto":  --permission-mode auto. A classifier model reviews each tool call
-  #            and blocks the risky ones instead of a human approving them.
-  # Any other value fails config validation. Switch back by editing this line.
-  #
-  # Before trying "auto", declare what the classifier may trust in
-  # `autoMode.environment` (trusted repos, domains, ...) in the settings file the
-  # CLI loads: the naozhi_settings file when naozhi_settings.enabled is true,
-  # otherwise ~/.claude/settings.json. Without it the classifier blocks things
-  # like pushing to repos other than the session's own. `claude auto-mode config`
-  # prints the effective auto mode config.
-  #
-  # The mode is a process start flag. After changing it, restart naozhi: each
-  # surviving session is detected as config-drifted once, shut down, and
-  # re-spawned under the new mode when its next message arrives.
+  # Optional: how Claude sessions handle tool permissions (kiro/codex ignore it).
+  #   "bypass" (default): --dangerously-skip-permissions, tools run unreviewed.
+  #   "auto":  --permission-mode auto, a classifier blocks risky tool calls.
+  # Before using "auto", declare what the classifier may trust in
+  # `autoMode.environment` of the settings file the CLI loads (the
+  # naozhi_settings file, else ~/.claude/settings.json); `claude auto-mode
+  # config` prints it. After changing the mode, restart naozhi: each surviving
+  # session is detected as config-drifted, shut down, and re-spawned under the
+  # new mode when its next message arrives.
   # permission_mode: "auto"
 
-  # Optional: multiple backends in one deployment.
-  #
-  # When to use: you want a single naozhi instance to spawn more than one
-  # CLI flavor (Claude stream-json + Kiro ACP, or Claude + Gemini) so the
-  # dashboard "new session" picker can choose per-session which backend
-  # runs each conversation. The per-request override travels via
-  # /api/cli/backends + the `backend` field on /api/sessions/send; when
-  # omitted the router falls back to the default below.
-  #
-  # Authority: pick one layout per deployment — either the legacy
-  # single-backend (cli.path + cli.model + cli.args above, with no
-  # `backends:` block) OR the multi-backend form (cli.backends + optional
-  # cli.backend for the default). Leaving both populated is legal — an
-  # entry's omitted model/args/effort inherit the top-level cli.* values —
-  # but mixing them makes the effective config hard to reason about. If you
-  # enable `backends:`, treat cli.model/args as inheritable defaults only;
-  # cli.path is not inherited and picks no entry's binary.
-  #
-  # Runtime selection:
-  #   - Dashboard "new session" dropdown picks backend per session
-  #   - API: POST /api/sessions/send {"backend": "kiro", ...}
-  #   - Omitted => cli.backend (or first entry in `backends:`)
-  #
-  # Per-backend model/args are optional and fall back to cli.* above. An
-  # omitted path is auto-detected by id (~/.local/bin/<binary>, then the
-  # usual install dirs, then $PATH); it does not fall back to cli.path.
-  # The protocol follows the id — stream-json for "claude", ACP for "kiro",
-  # codex app-server for "codex" — no extra flag needed.
+  # Optional: multiple backends in one deployment. The dashboard "new session"
+  # picker (or `backend` on POST /api/sessions/send) chooses per session;
+  # omitted => cli.backend, else the first entry. An entry's omitted
+  # model/args/effort inherit cli.*; an omitted path is auto-detected by id
+  # (~/.local/bin/<binary>, the usual install dirs, then $PATH) and never falls
+  # back to cli.path. The protocol follows the id: stream-json for "claude",
+  # ACP for "kiro", app-server for "codex".
   #
   #backend: "claude"
   #backends:
   #  - id: "claude"
-  #    # model/args inherit from cli.* above; path auto-detects by id.
   #  - id: "kiro"
   #    path: "~/.local/bin/kiro-cli"
-  #    # Model ID forwarded as `kiro-cli acp --model <id>` at spawn time.
-  #    # List available IDs with: kiro-cli chat --list-models
-  #    # Common values (kiro 2.3.0): auto, claude-opus-4.8 (preview),
-  #    # claude-opus-4.7 (preview), claude-opus-4.6, claude-sonnet-4.6,
-  #    # claude-haiku-4.5, deepseek-3.2, glm-5, qwen3-coder-next.
-  #    # Omit / leave empty => kiro picks its own default ("auto").
+  #    # Forwarded as `kiro-cli acp --model <id>`; list ids with
+  #    # `kiro-cli chat --list-models`. Empty => kiro's own default.
   #    model: "claude-sonnet-4.6"
-  #    # Thinking-effort tier, forwarded as `kiro-cli acp --effort <tier>`.
-  #    # One of: low | medium | high | xhigh | max.
-  #    #
-  #    # Omit / leave empty => kiro applies its OWN configured default, i.e.
-  #    # chat.modelDefaults[<model>].output_config.effort in
-  #    # ~/.kiro/settings/cli.json. Setting it here makes naozhi authoritative
-  #    # instead, so the gateway and your interactive kiro can differ.
-  #    #
-  #    # Applies from the next spawn onward — it is a process start flag, so
-  #    # already-running sessions keep the tier they started with. Concretely:
-  #    # edit this, restart naozhi, and each surviving session is detected as
-  #    # config-drifted, shut down, and re-spawned on the new tier when its
-  #    # next message arrives. Restarting naozhi alone does NOT re-tier a
-  #    # session (it normally just reconnects to the running process).
-  #    #
-  #    # In a multi-node deployment this is per-node: the primary's setting does
-  #    # not reach remote nodes, so configure each node that runs kiro.
-  #    #
-  #    # claude and ACP-protocol backends (kiro) accept a tier. On claude it is
-  #    # forwarded as `claude --effort <tier>` (CLI 2.1.226+), which also pins
-  #    # the tier over ~/.claude/settings.json `effortLevel` for that process.
-  #    # codex does NOT: its knob is a different axis, set via that backend's
-  #    # args (`-c model_reasoning_effort=<tier>`). Configuring effort on codex
-  #    # logs a warning and is ignored.
-  #    #
-  #    # Note the tier is NOT settable through `args` on claude: --effort is in
-  #    # the protocol's denied-extra-flags list (this field owns that argv slot),
-  #    # so `args: ["--effort", "high"]` is stripped at spawn.
+  #    # Thinking-effort tier: low | medium | high | xhigh | max. claude gets
+  #    # `--effort <tier>` (pins it over settings.json effortLevel), kiro
+  #    # `--effort <tier>`; empty => the CLI's own default. --effort in args is
+  #    # stripped (this field owns it). codex does NOT take effort: it logs a
+  #    # warning; use `-c model_reasoning_effort=<tier>` in its args.
+  #    # A process start flag: after editing, restart naozhi; each surviving
+  #    # session is detected as config-drifted and re-spawned on the new tier at
+  #    # its next message. Per node: remote nodes need their own setting.
   #    effort: "xhigh"
   #    args: []
-  #    # Optional: the model list the dashboard's per-session model popover
-  #    # offers for this backend (click the model name in the chat header to
-  #    # switch a session's model at runtime — an override that persists for
-  #    # that session and outranks the config chain).
-  #    #
-  #    # For kiro this is only a cold-start fallback: the agent reports its
-  #    # real availableModels on every session start, and that list wins.
-  #    # For claude the CLI reports no manifest, so declare the aliases /
-  #    # canonical ids you want offered here (the popover also accepts free
-  #    # input; claude validates unknown names itself and the dashboard
-  #    # surfaces its rejection).
-  #    # docs/rfc/dashboard-model-effort-control.md §4.2.
+  #    # Optional: models the dashboard's per-session model popover offers.
+  #    # kiro reports its own list at session start, which wins; claude reports
+  #    # none, so declare the aliases you want (free input also works).
   #    models: ["sonnet", "opus", "haiku"]
   #  - id: "codex"
   #    path: "codex"
-  #    # Set model and args explicitly: when omitted they inherit cli.model /
+  #    # Set model and args explicitly: omitted, they inherit cli.model /
   #    # cli.args, i.e. claude's model name and flags. The model name follows
   #    # model_provider in ~/.codex/config.toml (this one is amazon-bedrock).
   #    model: "openai.gpt-5.5"
-  #    # Reasoning effort rides on args, not `effort` (see above).
   #    args: ["-c", "model_reasoning_effort=high"]
   #
-  # A top-level cli.effort works as an inheritable default for every backend
-  # that supports one, exactly like cli.model:
+  # A top-level cli.effort is an inheritable default, like cli.model:
   #effort: "high"
 
 session:
@@ -256,12 +128,10 @@ session:
   prune_ttl: "72h"
   cwd: "/path/to/your/workspace"
   watchdog:
-    # Defaults. With the Claude backend a running tool does not trip
-    # no_output_timeout (the CLI emits a tool_progress heartbeat every 30s), so
-    # this only catches a model that stays silent (a long thinking block, a huge
-    # Write) or a hung CLI. Other backends have no heartbeat: a silent tool
-    # there must finish within the 15m budget.
-    # Workflows whose turns run for hours can raise both, e.g. "1800s"/"14400s".
+    # With the Claude backend a running tool emits a heartbeat every 30s, so
+    # no_output_timeout only catches a silent model or a hung CLI. Other
+    # backends have no heartbeat: a silent tool must finish within it.
+    # Workflows whose turns run for hours can raise both.
     no_output_timeout: "15m"
     total_timeout: "2h"
   store_path: "~/.naozhi/sessions.json"
@@ -270,45 +140,21 @@ session:
   #                      a message outside any thread uses the channel's
   #   chat             — the whole channel or group shares one session
   #   user             — each member of the group gets their own session
-  # The channel still owns /cd, the project binding and /cron; /new and /stop
-  # act on the thread's (or member's) session. Discord threads are separate
-  # channels and WeChat has only direct chats, so neither is affected.
-  # Under thread, replying in the thread of a top-level bot answer starts a
-  # fresh session without the channel's context; use chat to keep one.
+  # The channel still owns /cd, the project binding and /cron. Discord threads
+  # are separate channels and WeChat has only direct chats.
   group_scope: "thread"
   # Answer a Slack / Feishu group @mention posted outside any thread in a new
-  # thread (Feishu topic) under it; under group_scope thread that thread is
-  # also its own session, which the follow-ups posted there continue. Slash
-  # commands still answer where they were posted. Discord is not covered, nor
-  # is a Feishu quote reply. If Feishu refuses to open the topic (e.g. the app
-  # lacks permission), the answer is posted in the group instead and each
-  # such mention starts a session without the earlier context.
+  # thread (Feishu topic) under it. If Feishu refuses to open the topic, the
+  # answer is posted in the group instead.
   thread_auto_open: false
-  # auto_chain — REMOVED (schema v2). It joined sessions in the same
-  # workspace by guessing that "same slug + 7d window" meant one conversation,
-  # which stitched unrelated one-off sessions together as each other's history
-  # (docs/rfc/project-stable-session-key.md §9). A leftover block still
-  # loads, reported as deprecated and ignored; delete it. Precise continuation
-  # is the project-level stable session key below, which is default-on.
-  #
-  # project_stable_key — project-level stable session key. Default-on;
-  # set enabled: false to fall back to the legacy timestamp-key path for
-  # dashboard "continue".
-  # project_stable_key:
-  #   enabled: true
   shim:
     idle_timeout: "8h"
   queue:
-    # Message queuing when a session is busy. Three modes:
-    #   collect     (default) — queue new messages, wait for current turn,
-    #                 merge into a single follow-up prompt after a settle delay
-    #   interrupt   — auto-abort the current turn on every new message; burns
-    #                 tokens but minimizes response latency
-    #   passthrough — forward every message directly to the CLI; each message
-    #                 gets its own result (or a merged group result with
-    #                 head/follower IM fan-out). Requires stream-json backend
-    #                 (Claude CLI). ACP backends silently fall back to collect.
-    #                 Enables /urgent <msg> for priority:"now" preemption.
+    # When a session is busy:
+    #   collect     (default) — queue messages, merge into one follow-up prompt
+    #   interrupt   — abort the current turn on every new message
+    #   passthrough — forward each message to the CLI (stream-json/claude only;
+    #                 ACP falls back to collect); enables /urgent <msg>
     mode: "collect"
     max_depth: 20
     collect_delay: "500ms"
@@ -320,35 +166,19 @@ agents:
   researcher:
     model: "opus"
     system_prompt: "You are a deep research expert. Decompose questions, search from multiple angles, and synthesize findings."
-    # Optional: run this agent's sessions and cron jobs under a named access
-    # profile (defined under access_profiles below) and on a given backend
-    # (which must be listed in cli.backends), e.g. keep it on claude when
-    # cli.backend is kiro. backend applies only to a key with no session yet;
-    # access_profile also reaches an existing session that recorded no profile,
-    # at its next spawn or resume. A project's own access_profile / backend pin
-    # outranks them; a project planner reads neither. A session pinned to a
-    # profile this way never runs on a remote node. A profile's env holds
-    # Claude Code settings, so pair it with claude; on kiro, model must be a
-    # kiro model id.
+    # Optional: run this agent under a named access profile (see
+    # access_profiles below) and/or a backend listed in cli.backends. A
+    # project's own pin outranks them; project planners read neither. A
+    # profile-pinned session never runs on a remote node.
     #access_profile: "bedrock"
     #backend: "claude"
     #
-    # Optional, claude- and kiro-backed sessions only: overrides the backend's
-    # thinking-effort tier for this agent — e.g. run a cheap tier for a
-    # frequently-scheduled cron agent while the default stays higher.
+    # Optional (claude/kiro): effort tier for this agent.
     # Precedence: cli.effort < cli.backends[].effort < agents[].effort.
-    #
-    # Applies to sessions routed to THIS agent id. Project planner sessions are
-    # not one of them, even when started from a "general" chat: a planner's
-    # opts come from project config only and never read agents[*], so set the
-    # tier on the backend if you want planners covered.
-    #
-    # Caveat: naozhi's shim config-drift check only compares BACKEND-level
-    # args, so a session using this per-agent override is re-detected as
-    # drifted on every restart and re-spawned on its next message. Sessions
-    # are not lost, but their sidebar history starts empty. The same already
-    # applies to agents[].model. Set the tier on the backend instead if you
-    # need long-lived sessions to survive restarts untouched.
+    # Caveat: the shim drift check compares backend-level args only, so a
+    # per-agent effort (or model) is re-detected as drifted on every restart
+    # and re-spawned on its next message. Set it on the backend instead if
+    # sessions must survive restarts untouched.
     #effort: "max"
 
 agent_commands:
@@ -356,7 +186,7 @@ agent_commands:
   research: "researcher"
 
 # Optional: access profiles, named bundles of "how a session reaches the
-# model" (RFC docs/rfc/project-access-profile.md). Without any, every session
+# model" (docs/rfc/project-access-profile.md). Without any, every session
 # runs on the ~/.claude/settings.json baseline.
 #
 # env is overlaid on that baseline for the profile's sessions. Only the overlay
@@ -364,32 +194,16 @@ agent_commands:
 # AWS_REGION, AWS_DEFAULT_REGION, ANTHROPIC_MODEL, ANTHROPIC_BASE_URL,
 # ANTHROPIC_BEDROCK_BASE_URL and the Anthropic credentials. Any other key,
 # AWS_PROFILE and the AWS access keys included, fails the load. A *_FILE value
-# is an absolute host path read at spawn; its contents become the matching
-# credential (ANTHROPIC_AUTH_TOKEN_FILE → ANTHROPIC_AUTH_TOKEN), and a missing
-# file fails the spawn instead of falling back to the baseline. The values live
-# only in this file: a project.yaml names a profile but never carries env.
+# is an absolute host path read at spawn (ANTHROPIC_AUTH_TOKEN_FILE →
+# ANTHROPIC_AUTH_TOKEN); a missing file fails the spawn.
 #
-# Which profile a session gets, highest first: the profile the session already
-# recorded (a resume never moves such a session to another account) > the
-# dashboard pick > the project's access_profile pin > agents[].access_profile >
-# default_access_profile > none. A project planner skips the agents[] tier.
-# An existing session that recorded no profile is resolved again: adding
-# default_access_profile or an agent/project pin moves it onto that profile
-# at its next spawn or resume.
-#
-# default_model: cli.backends[].model / cli.model < default_model <
-# agents[].model or the project planner_model < the dashboard per-session
-# model pick.
-#
-# default_backend applies only to a key with no session yet: an explicit
-# request, the project backend pin and the dashboard backend pick >
-# agents[].backend > default_backend > cli.backend. It must be an enabled
-# backend. The dashboard "new session" picker defaults to 自动, which sends
-# no backend and leaves the choice to this chain; picking a backend there
-# overrides it.
-#
-# `naozhi config check -effective` prints each agent's spawn argv under the
-# backend it lands on, and each profile's merged env (masked).
+# Which profile a session gets, highest first: the profile it already recorded
+# (a resume never switches accounts) > the dashboard pick > the project pin >
+# agents[].access_profile > default_access_profile > none. A session that
+# recorded no profile is resolved again at its next spawn or resume.
+# default_model sits between cli.backends[].model / cli.model and
+# agents[].model; default_backend applies only to a new session key and must
+# be an enabled backend.
 #
 #default_access_profile: "bedrock"
 #access_profiles:
@@ -407,87 +221,63 @@ agent_commands:
 #      CLAUDE_CODE_USE_BEDROCK: "0"
 #      ANTHROPIC_AUTH_TOKEN_FILE: "/home/ec2-user/.secrets/anthropic-1p.token"
 #    default_model: "sonnet"
-#    # Anthropic credentials only work on claude, so keep this profile's
-#    # sessions there even when cli.backend is another CLI.
+#    # Anthropic credentials only work on claude.
 #    default_backend: "claude"
 
 cron:
   store_path: "~/.naozhi/cron_jobs.json"
   max_jobs: 50
-  # Per-run hard ceiling for any cron job. Independent of schedule period —
-  # an hourly job that takes 70 minutes will NOT be killed; the next scheduled
-  # tick is dropped (robfig/cron SkipIfStillRunning) and the tick after that
-  # picks up cleanly. Only purpose of this cap is to prevent a wedged claude
-  # CLI from holding an inflight slot forever. Set to the longest tolerable
-  # single-run wall-clock for your workload.
+  # Per-run hard ceiling, independent of the schedule: a run that overlaps the
+  # next tick just makes that tick skip. Only stops a wedged CLI from holding
+  # a slot forever.
   execution_timeout: "8h"
-  # IANA timezone for interpreting cron expressions (e.g. "0 9 * * *" = 9am in this zone).
-  # Empty / "Local" uses the system local time (respects $TZ). Examples: "Asia/Shanghai", "UTC".
+  # IANA timezone for cron expressions; empty / "Local" = system local ($TZ).
   timezone: "Asia/Shanghai"
-  # Fallback IM target for jobs that opt into completion notifications via the
-  # dashboard toggle but don't specify a per-job target. Both fields required.
-  # Leave empty to disable the default (per-job targets still work).
+  # Fallback IM target for jobs that turn on completion notifications without
+  # a per-job target. Both fields required; leave empty to disable.
   notify_default:
     platform: "feishu"
     chat_id: "${NAOZHI_CRON_NOTIFY_CHAT_ID}"
-  # 调度抖动上限：多个同 schedule 的 job 不再"整点同秒起跑"，而是在
-  # [0, min(jitter_max, period/4)] 区间内随机延迟，拍平 CPU / API 并发峰值。
-  # 默认 2m。"0" 关闭抖动（回退到 v1 行为）。上限硬编码 10m。TriggerNow
-  # （dashboard 的 "run now" 按钮）始终跳过抖动立即执行。
+  # 同 schedule 的 job 在 [0, min(jitter_max, period/4)] 内随机延迟起跑。
+  # "0" 关闭；上限 10m；dashboard 的 "run now" 不抖动。
   jitter_max: "2m"
-  # 连续失败（failed / timed_out）达到这个次数自动暂停该 job，避免坏掉的任务
-  # 每个 tick 都刷一条失败通知；跳过（并发上限 / 上一轮未完）和取消不计数，
-  # 后端瞬时故障（过载 / 限流 / 连不上模型服务）也不计数；成功、恢复、编辑都会
-  # 清零。瞬时故障单独计数：达到这个次数且距第一次已满 6 小时同样自动暂停，
-  # 免得模型服务地址配错时永远不停。默认 5；负数关闭（两条规则都关）。
+  # 连续失败（failed / timed_out）这么多次自动暂停；跳过、取消、后端瞬时故障
+  # 不计数（瞬时故障达到次数且持续满 6 小时同样暂停）。负数关闭。
   # 恢复用 /cron resume <id> 或控制台。
   auto_pause_after_failures: 5
 
-# System Session daemons: naozhi 内置后台线程框架 (docs/rfc/system-session.md)。
-# enabled 是总开关; 每个 daemon 还有自己的 enabled。
+# System Session daemons (docs/rfc/system-session.md)。enabled 是总开关，
+# 每个 daemon 还有自己的 enabled。
 sysession:
   enabled: true
-  tick_timeout: 30s
   runner:
-    # daemon 的调用都是短小的提炼任务 (如 auto-titler 起标题), 推荐 haiku:
-    # 这个别名在 Anthropic API 与 Bedrock 上都能解析。留空则不传 --model,
-    # claude CLI 用它的内置默认, 通常是贵得多的主力模型 —— runner 以
-    # --setting-sources "" 启动, 不读 user/project/local settings 里的 model。
-    # 部署凭证无权调用 haiku 时 tick 会报错, 改成留空或其它可用模型; 组织的
-    # managed 策略限制模型时 CLI 则不报错、静默换回默认模型。实际所用模型
-    # 见 cost ledger 里 sys:<daemon> 的 model 键。
+    # 推荐 haiku（Anthropic API 与 Bedrock 都能解析）。留空则不传 --model，
+    # CLI 用内置默认，通常是贵得多的主力模型。凭证无权调用 haiku 时改成留空
+    # 或其它可用模型；实际所用模型见 cost ledger 里 sys:<daemon> 的 model。
     model: haiku
-    # 派生的 transient system session 的工作目录; 留空默认 <dataDir>/sys-sessions/。
+    # 留空默认 <dataDir>/sys-sessions/。
     work_dir: ""
-    jsonl_max_age: 168h  # 启动 sweep 保留窗口; "0" 关闭 sweep。
   daemons:
-    # daemon name 必须与 internal/sysession/registry.go 注册的 kebab-case
-    # name 完全一致, 否则 NewManager 找不到 factory, 静默不跑。
+    # 名字必须与 internal/sysession/registry.go 注册的完全一致，否则静默不跑。
     auto-titler:
       enabled: true
       tick: 30s
-      # min_first_turns: 首次自动命名门槛。会话累计到这么多轮即可命名,
-      # 默认 1 —— 即"不管多短都先给个标题"。设 0 或留空走默认 1。
-      min_first_turns: 1
-      # min_user_turns: 重命名节流。首次命名后, 必须再新增这么多轮才会
-      # 重新提炼标题, 默认 3, 防止标题随每条追问反复抖动 + 抑制 claude -p 频次。
-      min_user_turns: 3
+      min_first_turns: 1   # 累计这么多轮即首次命名
+      min_user_turns: 3    # 首次命名后再新增这么多轮才重命名
       min_rename_interval: 5m
       batch_per_tick: 1
       include_group_chat: false
-    # attachment-gc: 回收超 TTL 且无引用的附件文件 (docs/rfc/attachment-gc-daemon.md)。
-    # 默认关闭; 关闭时 dry_run 也不跑。开启步骤: 先 enabled: true 且保持
-    # dry_run: true 跑几个周期, 看 dashboard「系统」视图 attachment-gc 卡片的
-    # 可回收分桶/体积 (或 `attachment-gc: sweep summary` 日志), 重点看
-    # meta_no_refs 桶; 确认风险后再改 dry_run: false 开真删。
+    # attachment-gc: 回收超 TTL 且无引用的附件 (docs/rfc/attachment-gc-daemon.md)。
+    # 先 enabled: true + dry_run: true 跑几个周期，在 dashboard「系统」视图看
+    # 可回收分桶（重点 meta_no_refs），确认后再改 dry_run: false。
     attachment-gc:
       enabled: false
-      tick: 6h            # 低频清理; <1h 会被钉到 1h 下限
-      run_on_start: true  # 启动即跑一次
-      upload_ttl: 168h    # 7d ("0"/留空 = 用默认, 非禁用)
-      ref_ttl: 720h       # 30d
+      tick: 6h            # <1h 会被钉到 1h 下限
+      run_on_start: true
+      upload_ttl: 168h    # "0"/留空 = 用默认, 非禁用
+      ref_ttl: 720h
       per_root_cap: 500   # 每个 workspace 根单 Tick 删除上限
-      dry_run: true       # 只记不删; 观察无误后改 false
+      dry_run: true       # 只记不删
 
 platforms:
   feishu:
@@ -500,31 +290,13 @@ platforms:
 # IM sender access. Anyone who can message the bot can run commands on this
 # host, so restrict every platform you enable. Absent = every sender allowed
 # (startup and `naozhi config check` warn per open platform). A refused sender
-# is logged at Info as "im access denied" with the user ID to copy here; in a
-# direct chat they are also told their ID, at most once per 10 minutes. IDs:
-# Feishu open_id (ou_...), Slack user ID (U...), Discord user ID, Weixin from.
-# admin_users alone may run /cron, /cd and /project; leave it empty and every
-# allowed user is an admin. Changes need a restart. `naozhi setup weixin`
-# writes the weixin entry for the WeChat user who scanned the login QR code.
-# Outbound webhooks (docs/rfc/outbound-webhooks.md): POST run lifecycle events
-# of cron jobs and system-session daemons to your own endpoints. Payload is run
-# metadata only (ids, state, duration, error_class) — never prompt / result /
-# error text. Signed with HMAC-SHA256 when `secret` is set (X-Naozhi-Signature:
-# sha256=…); X-Naozhi-Delivery is an idempotency key. Retries 408/429/5xx with
-# 1s/2s/4s backoff; a full per-endpoint queue drops (counted in
-# naozhi_webhook_dropped_total). Absent = off.
-# integrations:
-#   webhooks:
-#     - url: https://ci.example.com/hooks/naozhi
-#       secret: "${NAOZHI_WEBHOOK_SECRET}"
-#       events: [run.ended]          # run.started | run.ended; empty = both
-#       subsystems: [cron]           # cron | sysession; empty = both
-#       timeout: 10s
-
-# allowed user is an admin. Reload without a restart: `naozhi config reload`
-# (or `systemctl reload naozhi`); see docs/rfc/config-hot-reload.md.
-# `naozhi setup weixin` writes the weixin entry for the WeChat user who
-# scanned the login QR code.
+# is logged as "im access denied" with the user ID to copy here; in a direct
+# chat they are also told their ID. IDs: Feishu open_id (ou_...), Slack user
+# ID (U...), Discord user ID, Weixin from. admin_users alone may run /cron, /cd
+# and /project; leave it empty and every allowed user is an admin.
+# Reloads without a restart: `naozhi config reload` (or `systemctl reload
+# naozhi`); see docs/rfc/config-hot-reload.md. `naozhi setup weixin` writes
+# the weixin entry for the WeChat user who scanned the login QR code.
 # im_access:
 #   default_deny: false     # true refuses every platform without an entry
 #   deny_reply: ""          # replaces the direct-chat refusal text
@@ -533,24 +305,36 @@ platforms:
 #       allowed_users: ["ou_xxxxxxxx"]
 #       admin_users: ["ou_yyyyyyyy"]
 
-# Per-sender IM message rate limit (token bucket keyed by platform + user ID,
-# or by chat when the platform sends no user ID). Slash commands count; /stop
-# does not. A limited message is dropped and the sender told at most once a
-# minute. Absent or 0 = unlimited. Reloads without a restart.
+# Per-sender IM message rate limit (token bucket per platform + user ID).
+# Slash commands count; /stop does not. A limited message is dropped and the
+# sender told at most once a minute. Absent or 0 = unlimited. Reloads without
+# a restart.
 # im_rate_limit:
 #   msgs_per_min: 10        # sustained rate per sender
 #   burst: 3                # back-to-back allowance; 0 = msgs_per_min
 
-# Daily USD budgets counted from the cost ledger; each cap is independent and
-# absent or 0 = off. A spent IM chat gets no new turns (commands still work)
-# and is told at most once a minute; a spent cron job's runs end skipped/
-# budget_exceeded without spawning (only the day's first is kept in history)
-# and never count toward auto-pause. Admins are limited too. All chats bound
-# to a project share its planner's budget. The dashboard's own turns are never refused, but their
-# spend counts toward daily_usd. A soft cap: a turn let in under the cap may
-# overshoot it. Spend metered in credits or tokens is not counted. Needs the
-# cost ledger on. Caps, warn_ratio and action reload without a restart; adding
-# a cap where naozhi started with none, or moving the timezone, needs one.
+# Outbound webhooks (docs/rfc/outbound-webhooks.md): POST run lifecycle events
+# of cron jobs and system-session daemons. Payload is run metadata only (ids,
+# state, duration, error_class), never prompt / result / error text. Signed
+# with HMAC-SHA256 when `secret` is set (X-Naozhi-Signature: sha256=…);
+# X-Naozhi-Delivery is an idempotency key. Absent = off.
+# integrations:
+#   webhooks:
+#     - url: https://ci.example.com/hooks/naozhi
+#       secret: "${NAOZHI_WEBHOOK_SECRET}"
+#       events: [run.ended]          # run.started | run.ended; empty = both
+#       subsystems: [cron]           # cron | sysession; empty = both
+#       timeout: 10s
+
+# Daily USD budgets from the cost ledger; each cap is independent, absent or
+# 0 = off. A spent IM chat gets no new turns (commands still work); a spent
+# cron job's runs end skipped/budget_exceeded and never count toward
+# auto-pause. Admins are limited too; chats bound to a project share its
+# planner's budget. Dashboard turns are never refused but count toward
+# daily_usd. A soft cap: a turn let in under it may overshoot. Spend metered in
+# credits or tokens (kiro) is not counted. Needs the cost ledger on. Caps,
+# warn_ratio and action reload without a restart; adding the first cap or
+# moving the timezone needs one.
 # cost:
 #   budget:
 #     per_chat_daily_usd: 20      # each IM chat, across its agents
@@ -562,12 +346,6 @@ platforms:
 
 log:
   level: "info"
-  # Size cap for the files launchd (StandardOutPath/StandardErrorPath) or
-  # systemd (StandardOutput=append:) redirect stdout/stderr into. Checked hourly
-  # and at startup; an oversized file is truncated in place to its newest lines
-  # (never renamed: the init system keeps writing to the fd it opened). Pipes,
-  # journald and terminals are left alone. "0" disables. Default: "64MB".
-  stdio_max_size: "64MB"
 
 transcribe:
   enabled: true
@@ -578,56 +356,40 @@ projects:
   root: "/path/to/your/workspace"
   planner_defaults:
     model: "sonnet"
-  # Every non-hidden subdirectory of root is a project. exclude opts more out:
-  # basename globs (filepath.Match: * ? [a-z]; no "/"), matched case-sensitively
-  # against each direct subdirectory. A discovery filter only: include_root
-  # still spans excluded directories.
+  # Every non-hidden subdirectory of root is a project. exclude drops more by
+  # basename glob (filepath.Match, case-sensitive, no "/").
   # exclude: ["tmp-*", "archive"]
-  # Two SINGLE-OPERATOR opt-ins, both default false. Leave them off on any
-  # shared / multi-operator deployment or wherever the dashboard token is
-  # shared: the token is the only barrier, and both widen what an
-  # authenticated dashboard user can read. File endpoints apply the same gates
-  # either way (UID / denied-name / irregular-type / credential-name, audit
-  # log at Info); startup logs a WARN while public_tmp is on.
-  #   include_root — also register the projects root itself as a project so
-  #                  files directly under root get preview/download buttons.
-  #                  The root project spans the whole tree, sibling projects
-  #                  included.
-  #   public_tmp   — enable the __public_tmp__ pseudo-project (#646): every
-  #                  authenticated dashboard user can read non-credential
-  #                  files anywhere under /tmp.
+  # include_root registers projects.root itself as a project (spans the whole
+  # tree, sibling projects included). SINGLE-OPERATOR opt-in, default false:
+  # leave it off wherever the dashboard token is shared, since it widens what
+  # an authenticated dashboard user can read.
   # include_root: false
-  # public_tmp: false
 
-# Auto-update: a background goroutine polls GitHub Releases and reuses the
-# same verified flow as `naozhi upgrade` (download → SHA-256 → atomic swap).
-# Defaults to enabled with mode "download" (stage the new binary, apply on
-# next restart). Set enabled: false to turn it off entirely.
+# Auto-update: polls GitHub Releases and reuses the verified `naozhi upgrade`
+# flow (download → SHA-256 → atomic swap). Enabled by default in "download"
+# mode.
 #update:
-#  enabled: true          # default true; set false to disable the checker
+#  enabled: true          # false disables the checker
 #  mode: "download"       # notify | download | auto
 #                         #   notify   — log + IM notice only
 #                         #   download — replace binary, apply on next restart
 #                         #   auto     — replace binary AND restart now
 #  interval: "6h"         # check cadence (>=1h floor)
 #  check_on_start: false  # run one check ~30s after startup
-#  dashboard_install: true  # default true; the dashboard's version chip can
-#                           # apply the update (install and/or restart THIS
-#                           # node). false keeps the chip read-only — it still
-#                           # reports the version, the apply endpoint 403s.
+#  dashboard_install: true  # false keeps the dashboard's version chip
+#                           # read-only (the apply endpoint 403s)
 #  notify:                # optional IM target for update notices
 #    platform: "feishu"
 #    chat_id: "oc_xxxxx"
 
 # Reverse-connect nodes: remote machines dial in to this primary (NAT traversal).
-# Each entry is node_id: {token, display_name}. Token must match upstream.token on the remote.
+# Token must match upstream.token on the remote.
 #reverse_nodes:
 #  pc:
 #    token: "${PC_REVERSE_TOKEN}"
 #    display_name: "Remote PC"
 
-# Upstream: this node dials a primary naozhi instance (reverse-connect mode).
-# Use when this machine is behind NAT and cannot be reached by the primary directly.
+# Upstream: this node dials a primary naozhi instance (use behind NAT).
 #upstream:
 #  url: "wss://primary.example.com/ws-node"
 #  node_id: "macbook"

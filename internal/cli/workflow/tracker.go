@@ -132,10 +132,7 @@ func (t *Tracker) observeLocked(ev *clievent.Event, kind frameKind, ms int64, sr
 	b := t.builders[id]
 	if b == nil {
 		if t.unsettledLocked(false) >= maxTracked {
-			if t.ids[id]&flagUntracked == 0 {
-				t.ids[id] |= flagUntracked
-				untrackedTotal.Add(1)
-			}
+			t.ids[id] |= flagUntracked
 			return false
 		}
 		b = newBuilder(id, src)
@@ -232,7 +229,6 @@ func (t *Tracker) applySnapshotLocked(b *builder, w *Workflow, ev *clievent.Even
 	switch {
 	case ev.WorkflowDecode == clievent.WorkflowDecodeFailed:
 		b.decodeErr = true
-		itemsIdentityTotal.Add(1)
 		return
 	case ev.WorkflowProgress == nil:
 		return
@@ -247,9 +243,6 @@ func (t *Tracker) applySnapshotLocked(b *builder, w *Workflow, ev *clievent.Even
 	}
 	b.tooMany, b.phasesCapped, b.dropped = !b.rows, s.phasesCapped, false
 	b.decodeErr = ev.WorkflowDecode == clievent.WorkflowDecodePartial
-	if b.decodeErr {
-		itemsPartialTotal.Add(1)
-	}
 	pruneMemos(w, b.memos, b.phaseMemos)
 	w.SnapshotSeq++
 	if s.earliest > 0 {

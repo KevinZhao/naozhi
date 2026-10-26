@@ -44,7 +44,7 @@ type Capabilities struct {
 	// Runnable: needs background goroutines started (Start/Stop). Type assertion.
 	Runnable bool `json:"runnable"`
 	// ConnState: reports its live connection state (ConnStateReporter). An
-	// adapter may still decline per mode, e.g. feishu over webhook. Type assertion.
+	// adapter may still decline at runtime (e.g. before it starts). Type assertion.
 	ConnState bool `json:"conn_state"`
 	// MaxReplyLength is the platform's per-message rune cap. Reported because it
 	// is what decides whether a reply is chunked at all; 0 means unset, which for

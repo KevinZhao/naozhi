@@ -124,8 +124,7 @@ var (
 // shim column reproduces the former shim allowlist, the overlay column the
 // former access-profile allowlist, the settings column the former
 // settings.json prefix-allow/deny lists, and the expansion column the former
-// config.yaml deny/allow prefix + deny-suffix lists. The table-driven tests
-// in table_test.go pin every cell against copies of the retired lists.
+// config.yaml deny/allow prefix + deny-suffix lists.
 var Table = []Rule{
 	// ── system essentials (shim-forwarded plumbing) ────────────────────────
 	{Pattern: "HOME", Specified: SourceShim | SourceSysession, Allowed: SourceShim | SourceSysession},

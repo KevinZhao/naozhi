@@ -101,8 +101,8 @@ var (
 
 // RegisterFactory binds a backend ID to its history-source factory, intended
 // for a backend package's init(). backendID "" is ignored (it means "router
-// default" and never reaches a wrapper). Re-registering overwrites; tests rely
-// on this to inject failing factories. backend.Register panics on a duplicate
+// default" and never reaches a wrapper). Re-registering overwrites (last
+// write wins). backend.Register panics on a duplicate
 // instead, on purpose: a duplicate profile is a programmer error.
 func RegisterFactory(backendID string, fn FactoryFn) {
 	if backendID == "" || fn == nil {

@@ -237,12 +237,7 @@ func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 
-	// The last subscriber leaving drops the cached "history" marshal slot so
-	// its payload is GC'd.
-	dropMarshalCache := h.subs.unsubscribe(c, key, time.Now().UnixNano())
-	if dropMarshalCache {
-		h.historyMarshalCache.drop(key)
-	}
+	h.subs.unsubscribe(c, key, time.Now().UnixNano())
 	c.SendJSON(wsproto.NewUnsubscribed(wsproto.Unsubscribed{Key: key}))
 }
 

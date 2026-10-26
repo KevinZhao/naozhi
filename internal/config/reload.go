@@ -86,7 +86,7 @@ func (c *Config) imAccessOpen(platform string) bool {
 
 // RestartRequired lists the top-level yaml sections, hot ones excluded, whose
 // value differs between c and next. Fields without a yaml name (derived
-// caches, Nodes, Fingerprint) are not compared: they follow the named ones.
+// caches, Fingerprint) are not compared: they follow the named ones.
 func (c *Config) RestartRequired(next *Config) []string {
 	var out []string
 	cv, nv := reflect.ValueOf(*c), reflect.ValueOf(*next)

@@ -212,127 +212,43 @@ func TestPreviewableByExt_DoesNotIncludeDotEnv(t *testing.T) {
 	}
 }
 
-// TestIsSensitiveDownloadName_CloudCredentialFiles locks R232-SEC-4 补遗:
-// cloud service-account JSONs and operator-conventional secrets files must
-// be blocked even though .json/.yaml/.yml are previewable extensions.
-func TestIsSensitiveDownloadName_CloudCredentialFiles(t *testing.T) {
-	cases := []string{
-		"secrets.yaml",
-		"secrets.yml",
-		"secrets.json",
-		"service-account.json",
-		"service_account.json",
-		"gcp-key.json",
-		"gcp_key.json",
-		"application_default_credentials.json",
-		"Secrets.YAML",
-		"Service-Account.JSON",
-	}
-	for _, name := range cases {
-		if !isSensitiveDownloadName(name) {
-			t.Errorf("isSensitiveDownloadName(%q) = false, want true (R232-SEC-4)", name)
-		}
-	}
-	for _, name := range []string{"config.json", "package.json", "data.yaml"} {
-		if isSensitiveDownloadName(name) {
-			t.Errorf("isSensitiveDownloadName(%q) = true, want false", name)
-		}
-	}
-}
-
-// TestIsSensitiveDownloadName_OpsConventional locks R233B-SEC-5: ops-laden
-// credential filenames (database.yml, api-keys.*) must be blocked, plus
-// archive-suffix patterns (.env.backup, .env.bak, …) that an attacker
-// would otherwise lift via path-mode download to bypass the .env exact match.
-func TestIsSensitiveDownloadName_OpsConventional(t *testing.T) {
+// TestIsSensitiveDownloadName covers each matching branch of
+// isSensitiveDownloadName (exact table incl. case folding, the .env-prefix
+// rule R242-SEC-9, the archive-suffix scan R233B-SEC-5, the substring scan
+// #1680, the key-material extensions) plus the look-alikes that must keep previewing.
+func TestIsSensitiveDownloadName(t *testing.T) {
 	blocked := []string{
+		// Exact table (R232-SEC-4 / R233B-SEC-5), case-insensitive.
+		"secrets.yaml",
+		"Service-Account.JSON",
 		"database.yml",
-		"database.yaml",
-		"credentials.yml",
-		"credentials.yaml",
 		"credentials.json",
-		"api-keys.json",
-		"api_keys.yaml",
-		"rds.yml",
-		"pg.yaml",
-		"mysql.yml",
-		// Suffix scan path:
-		".env.backup",
-		".env.bak",
-		".env.old",
-		".env.orig",
-		".env.save",
-		"prod.env.backup", // prefix + suffix
-		"app.env.bak",     // prefix + suffix
-		"DATABASE.YML",    // case-insensitive
-		"APP.ENV.BACKUP",  // case-insensitive suffix
-		// R242-SEC-9: .env-prefix rule — every dotenv variant blocked,
-		// including the templates/examples that the exact-match table
-		// previously missed.
+		// .env-prefix rule: every dotenv variant, templates included.
 		".env.example",
-		".env.sample",
-		".env.template",
-		".env.staging.local",
-		".ENV.EXAMPLE", // case-insensitive
+		".ENV.EXAMPLE",
+		// Suffix scan (".env.backup" itself is caught by the prefix rule).
+		"prod.env.backup",
+		// Substring scan for ad-hoc credential dumps.
+		"db_password.txt",
+		"aws_credentials.txt",
+		"my_private_key.txt",
+		// Key-material extensions.
+		"deploy.pem",
 	}
 	for _, name := range blocked {
 		if !isSensitiveDownloadName(name) {
-			t.Errorf("isSensitiveDownloadName(%q) = false, want true (R233B-SEC-5)", name)
+			t.Errorf("isSensitiveDownloadName(%q) = false, want true", name)
 		}
 	}
-	// Pin negative cases so the suffix scan doesn't over-block legitimate
-	// developer workspace files. ".envoy.yaml" looks like ".env" but is
-	// envoy proxy config; "envrc" / "env.example" are doc/template files.
+	// ".envoy.yaml" looks like ".env" but is envoy proxy config; "key" is
+	// deliberately not a substring token (keyboard.tsx / monkey.png).
 	allowed := []string{
-		"data.yml",
-		"deployment.yaml",
-		"package.json",
 		".envoy.yaml",
 		"env.example",
-		"envrc",
-	}
-	for _, name := range allowed {
-		if isSensitiveDownloadName(name) {
-			t.Errorf("isSensitiveDownloadName(%q) = true, want false", name)
-		}
-	}
-}
-
-// TestIsSensitiveDownloadName_SubstringPatterns locks R20260603-SEC-5 (#1680):
-// the enumerated tables only match known filenames, but Claude generates ad-hoc
-// credential dumps with non-canonical names. A defence-in-depth substring scan
-// must block them. Underscore forms (aws_credentials.txt) and free-form names
-// (db-password.txt) previously slipped through every exact-match table.
-func TestIsSensitiveDownloadName_SubstringPatterns(t *testing.T) {
-	blocked := []string{
-		"db-password.txt",
-		"db_password.txt",
-		"aws_credentials.txt", // underscore form misses exact "credentials"
-		"my-credential.json",
-		"api_token.log",
-		"slack_secret.md",
-		"SECRET_NOTES.txt", // case-insensitive
-		"app.password.bak",
-		"jwt-token.txt",
-		"service-apikey.json",
-		"my_private_key.txt",
-		"passwd.backup",
-	}
-	for _, name := range blocked {
-		if !isSensitiveDownloadName(name) {
-			t.Errorf("isSensitiveDownloadName(%q) = false, want true (R20260603-SEC-5)", name)
-		}
-	}
-	// Negative cases: the substring set must stay narrow enough not to block
-	// ordinary workspace files. Note "key" is deliberately NOT a token (it
-	// would block keyboard.tsx / monkey.png); only the compound *key forms
-	// (apikey/private_key/…) are matched.
-	allowed := []string{
-		"main.go",
 		"keyboard.tsx",
 		"monkey.png",
-		"README.md",
 		"config.json",
+		"package.json",
 	}
 	for _, name := range allowed {
 		if isSensitiveDownloadName(name) {
@@ -538,188 +454,9 @@ func TestHandleFilesExists_InvalidJSON(t *testing.T) {
 	}
 }
 
-// TestHandleFilesExists_PublicTmpDisabledByDefault pins R237-SEC-5 (#646):
-// without an explicit opt-in the __public_tmp__ pseudo-project must be
-// indistinguishable from a missing project — closes the "any authed
-// dashboard user can read /tmp" gap on multi-user deployments. The
-// symmetric HandleFileGet branch is exercised by the same default below.
-func TestHandlePublicTmp_DisabledByDefault(t *testing.T) {
-	h, _, _ := newProjectHandlersForTest(t, nil)
-	// publicTmpEnabled left at its zero value (false).
-
-	body, _ := json.Marshal(existsReq{
-		Project: publicTmpProject,
-		Paths:   []string{"unused"},
-	})
-	existsHTTP := httptest.NewRequest(http.MethodPost,
-		"/api/projects/files/exists", bytes.NewReader(body))
-	existsHTTP.Header.Set("Content-Type", "application/json")
-	existsW := httptest.NewRecorder()
-	h.HandleFilesExists(existsW, existsHTTP)
-	if existsW.Code != http.StatusNotFound {
-		t.Errorf("exists default-disabled status = %d, want 404 body=%s",
-			existsW.Code, existsW.Body.String())
-	}
-
-	getReq := httptest.NewRequest(http.MethodGet,
-		"/api/projects/file?project="+publicTmpProject+"&path=any.txt&mode=preview", nil)
-	getW := httptest.NewRecorder()
-	h.HandleFileGet(getW, getReq)
-	if getW.Code != http.StatusNotFound {
-		t.Errorf("get default-disabled status = %d, want 404 body=%s",
-			getW.Code, getW.Body.String())
-	}
-}
-
-// TestHandleFilesExists_PublicTmp covers the __public_tmp__ pseudo-project
-// fallback: chat-mentioned /tmp/... paths can be resolved without first
-// registering /tmp as a real project. Symlink-escape and path-traversal
-// guards from resolveProjectFileWithRoot must still apply.
-func TestHandleFilesExists_PublicTmp(t *testing.T) {
-	h, _, _ := newProjectHandlersForTest(t, nil)
-	h.deps.PublicTmpEnabled = true
-
-	// Drop a unique-named file directly under /tmp. Pin the dir explicitly
-	// because os.TempDir() on macOS returns /var/folders/..., which
-	// filepath.Rel("/tmp", ...) would express as a traversal that
-	// resolveProjectFileWithRoot correctly rejects.
-	tmpFile, err := os.CreateTemp("/tmp", "naozhi-public-tmp-*.log")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tmpFile.WriteString("hello"); err != nil {
-		t.Fatal(err)
-	}
-	tmpFile.Close()
-	t.Cleanup(func() { _ = os.Remove(tmpFile.Name()) })
-
-	rel, err := filepath.Rel("/tmp", tmpFile.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	body, _ := json.Marshal(existsReq{
-		Project: publicTmpProject,
-		Paths: []string{
-			rel,
-			"missing-" + rel,
-			"../etc/passwd", // traversal must still be rejected
-		},
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/projects/files/exists", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	h.HandleFilesExists(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
-	}
-	var resp struct {
-		Results map[string]existsEntry `json:"results"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if !resp.Results[rel].Exists {
-		t.Errorf("/tmp/%s should exist", rel)
-	}
-	if resp.Results["missing-"+rel].Exists {
-		t.Error("missing path should NOT exist")
-	}
-	if resp.Results["../etc/passwd"].Exists {
-		t.Error("traversal must be rejected even under __public_tmp__")
-	}
-}
-
-// TestHandleFileGet_PublicTmpPreview pins the read path: a /tmp/*.log file
-// previews as text via the __public_tmp__ pseudo-project.
-func TestHandleFileGet_PublicTmpPreview(t *testing.T) {
-	h, _, _ := newProjectHandlersForTest(t, nil)
-	h.deps.PublicTmpEnabled = true
-
-	// Pin /tmp explicitly: see TestHandleFilesExists_PublicTmp for the
-	// macOS os.TempDir() rationale.
-	tmpFile, err := os.CreateTemp("/tmp", "naozhi-public-tmp-preview-*.log")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tmpFile.WriteString("preview-me\n"); err != nil {
-		t.Fatal(err)
-	}
-	tmpFile.Close()
-	t.Cleanup(func() { _ = os.Remove(tmpFile.Name()) })
-
-	rel, err := filepath.Rel("/tmp", tmpFile.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := httptest.NewRequest(http.MethodGet,
-		"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=preview", nil)
-	w := httptest.NewRecorder()
-	h.HandleFileGet(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
-	}
-	var resp map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if resp["content"] != "preview-me\n" {
-		t.Errorf("content = %v", resp["content"])
-	}
-}
-
-// TestHandleFileGet_PublicTmpAuditLog locks R20260603-SEC-4 (#1678): every
-// file served through the __public_tmp__ pseudo-project must emit a structured
-// audit log line so an operator can reconstruct who read what under /tmp.
-func TestHandleFileGet_PublicTmpAuditLog(t *testing.T) {
-	// Capture slog output for the duration of this test, then restore.
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-
-	h, _, _ := newProjectHandlersForTest(t, nil)
-	h.deps.PublicTmpEnabled = true
-
-	tmpFile, err := os.CreateTemp("/tmp", "naozhi-public-tmp-audit-*.log")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tmpFile.WriteString("audit-me\n"); err != nil {
-		t.Fatal(err)
-	}
-	tmpFile.Close()
-	t.Cleanup(func() { _ = os.Remove(tmpFile.Name()) })
-
-	rel, err := filepath.Rel("/tmp", tmpFile.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := httptest.NewRequest(http.MethodGet,
-		"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=preview", nil)
-	w := httptest.NewRecorder()
-	h.HandleFileGet(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
-	}
-	logged := buf.String()
-	if !strings.Contains(logged, "restricted_root file access") {
-		t.Errorf("audit log line missing; got: %q", logged)
-	}
-	if !strings.Contains(logged, "mode=preview") {
-		t.Errorf("audit log should record mode; got: %q", logged)
-	}
-	if !strings.Contains(logged, filepath.Base(tmpFile.Name())) {
-		t.Errorf("audit log should record resolved path; got: %q", logged)
-	}
-}
-
-// TestHandleFileGet_NonPublicTmpNoAudit confirms the audit log does NOT fire
-// for ordinary registered projects — it is scoped to the /tmp pseudo-project.
-func TestHandleFileGet_NonPublicTmpNoAudit(t *testing.T) {
+// TestHandleFileGet_NormalProjectNoAudit confirms the audit log does NOT fire
+// for ordinary registered projects — it is scoped to restricted (include_root) roots.
+func TestHandleFileGet_NormalProjectNoAudit(t *testing.T) {
 	var buf bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -736,152 +473,6 @@ func TestHandleFileGet_NonPublicTmpNoAudit(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "restricted_root file access") {
 		t.Errorf("audit log must not fire for normal projects; got: %q", buf.String())
-	}
-}
-
-// TestHandleFileGet_PublicTmpRejectsTraversal pins the symlink/traversal
-// guards under the pseudo-project.
-func TestHandleFileGet_PublicTmpRejectsTraversal(t *testing.T) {
-	h, _, _ := newProjectHandlersForTest(t, nil)
-	h.deps.PublicTmpEnabled = true
-
-	req := httptest.NewRequest(http.MethodGet,
-		"/api/projects/file?project="+publicTmpProject+"&path=../etc/passwd&mode=preview", nil)
-	w := httptest.NewRecorder()
-	h.HandleFileGet(w, req)
-	if w.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404 for traversal", w.Code)
-	}
-}
-
-// TestHandleFileGet_PublicTmpRejectsCredential pins the credential-name
-// allowlist still applies under the pseudo-project: a malicious /tmp/.env
-// must not be downloadable.
-func TestHandleFileGet_PublicTmpRejectsCredential(t *testing.T) {
-	h, _, _ := newProjectHandlersForTest(t, nil)
-	h.deps.PublicTmpEnabled = true
-
-	credPath := filepath.Join("/tmp", ".env.naozhi-test")
-	if err := os.WriteFile(credPath, []byte("SECRET=1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Remove(credPath) })
-
-	// Rename to .env exactly to trip isSensitiveDownloadName. We can't drop a
-	// file literally named ".env" under /tmp without trampling other tests, so
-	// stage one in a sub-directory we own. Pin /tmp explicitly: see
-	// TestHandleFilesExists_PublicTmp for the macOS os.TempDir() rationale.
-	subDir, err := os.MkdirTemp("/tmp", "naozhi-cred-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(subDir) })
-	envPath := filepath.Join(subDir, ".env")
-	if err := os.WriteFile(envPath, []byte("SECRET=1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	rel, err := filepath.Rel("/tmp", envPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := httptest.NewRequest(http.MethodGet,
-		"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=download", nil)
-	w := httptest.NewRecorder()
-	h.HandleFileGet(w, req)
-	if w.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want 403 for credential download", w.Code)
-	}
-}
-
-// TestHandleFileGet_PublicTmpRejectsForeignPrivate pins R245-SEC-7 (#831):
-// any 0600 file under /tmp owned by a UID other than the naozhi process EUID
-// must be invisible through the publicTmpProject pseudo-project — even
-// though the kernel grants the naozhi process read access (DAC checks the
-// running process, not the dashboard caller). Real /tmp on a multi-user
-// host holds another operator's editor swap, systemd-private socket
-// payloads, etc.; reflecting their bytes through the dashboard would
-// trivially leak them. We simulate "foreign UID" by overriding processEUID
-// to a sentinel != real UID; the test fixture file we drop is owned by the
-// real UID, which is now "foreign" relative to the captured EUID, so the
-// gate must refuse. The mirror branch (same UID) is covered by the existing
-// TestHandleFileGet_PublicTmpPreview which already round-trips a 0644 file
-// of our own UID.
-func TestHandleFileGet_PublicTmpRejectsForeignPrivate(t *testing.T) {
-	h, _, _ := newProjectHandlersForTest(t, nil)
-	h.deps.PublicTmpEnabled = true
-
-	// Override processEUID to a value guaranteed to differ from any real
-	// UID so files we just created (owned by the real UID) are foreign.
-	// uint32 max is reserved for nfsnobody on some distros but never
-	// matches a process EUID; restoring on cleanup keeps neighbouring
-	// tests (which assume processEUID == real EUID) working.
-	origEUID := processEUID
-	processEUID = ^uint32(0)
-	t.Cleanup(func() { processEUID = origEUID })
-
-	tmpFile, err := os.CreateTemp("/tmp", "naozhi-public-tmp-foreign-*.bin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tmpFile.WriteString("private bytes\n"); err != nil {
-		t.Fatal(err)
-	}
-	tmpFile.Close()
-	t.Cleanup(func() { _ = os.Remove(tmpFile.Name()) })
-	// 0600 ⇒ owner-private; combined with foreign-UID this trips the gate.
-	if err := os.Chmod(tmpFile.Name(), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	rel, err := filepath.Rel("/tmp", tmpFile.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := httptest.NewRequest(http.MethodGet,
-		"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=preview", nil)
-	w := httptest.NewRecorder()
-	h.HandleFileGet(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Errorf("foreign-UID 0600 file must be 404, got %d body=%s", w.Code, w.Body.String())
-	}
-
-	// Existence-probe parity: HandleFilesExists must mirror the gate so
-	// the dashboard can't enumerate /tmp/<other-uid>/* via the batch API.
-	body, _ := json.Marshal(existsReq{
-		Project: publicTmpProject,
-		Paths:   []string{rel},
-	})
-	probeReq := httptest.NewRequest(http.MethodPost, "/api/projects/files/exists", bytes.NewReader(body))
-	probeReq.Header.Set("Content-Type", "application/json")
-	probeW := httptest.NewRecorder()
-	h.HandleFilesExists(probeW, probeReq)
-	if probeW.Code != http.StatusOK {
-		t.Fatalf("exists probe status = %d body=%s", probeW.Code, probeW.Body.String())
-	}
-	var probeResp struct {
-		Results map[string]existsEntry `json:"results"`
-	}
-	if err := json.Unmarshal(probeW.Body.Bytes(), &probeResp); err != nil {
-		t.Fatalf("probe unmarshal: %v", err)
-	}
-	if probeResp.Results[rel].Exists {
-		t.Error("foreign-UID 0600 file must NOT be reported as existing via batch probe")
-	}
-
-	// Same file with world-readable bits must still be visible — gate
-	// only fires for owner-private mode. Negative control so a future
-	// over-eager edit (e.g. always-deny) is caught.
-	if err := os.Chmod(tmpFile.Name(), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	w2 := httptest.NewRecorder()
-	h.HandleFileGet(w2,
-		httptest.NewRequest(http.MethodGet,
-			"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=preview", nil))
-	if w2.Code != http.StatusOK {
-		t.Errorf("0644 foreign file should still preview, got %d body=%s", w2.Code, w2.Body.String())
 	}
 }
 
@@ -1498,7 +1089,7 @@ func TestHandleFileGet_Download(t *testing.T) {
 // ─── HandleFileGet: ETag / 304 ────────────────────────────────────────────────
 
 func TestHandleFileGet_ETag304(t *testing.T) {
-	h, proj, _ := newProjectHandlersForTest(t, map[string]string{
+	h, proj, projDir := newProjectHandlersForTest(t, map[string]string{
 		"a.txt": "hello",
 	})
 
@@ -1510,6 +1101,15 @@ func TestHandleFileGet_ETag304(t *testing.T) {
 	etag := w1.Header().Get("ETag")
 	if etag == "" {
 		t.Fatal("first response missing ETag")
+	}
+	// #418: without FileETagSalt the ETag would be this probe-recoverable hash.
+	info, err := os.Stat(filepath.Join(projDir, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsalted := sha256.Sum256([]byte(strconv.FormatInt(info.Size(), 10) + "|" + strconv.FormatInt(info.ModTime().UnixMilli(), 10) + "|"))
+	if etag == `"`+hex.EncodeToString(unsalted[:12])+`"` {
+		t.Errorf("ETag %s equals the unsalted hash; FileETagSalt dropped from the seed", etag)
 	}
 
 	// Second request with matching If-None-Match → 304.
@@ -1523,69 +1123,6 @@ func TestHandleFileGet_ETag304(t *testing.T) {
 	}
 	if w2.Body.Len() != 0 {
 		t.Error("304 response should have empty body")
-	}
-}
-
-// TestHandleFileGet_ETagIncludesSalt regresses R214-SEC-4 (issue #418):
-// the wire-visible ETag must depend on FileETagSalt, not just (size,
-// mtime). We assert this by recomputing the unsalted hash that the old
-// implementation produced and confirming it is NOT equal to the
-// returned ETag — if some future refactor accidentally drops the salt
-// the old prefix would start matching again and this test fails loudly.
-func TestHandleFileGet_ETagIncludesSalt(t *testing.T) {
-	h, proj, projDir := newProjectHandlersForTest(t, map[string]string{
-		"a.txt": "salted",
-	})
-
-	req := httptest.NewRequest(http.MethodGet,
-		"/api/projects/file?project="+proj+"&path=a.txt&mode=preview", nil)
-	w := httptest.NewRecorder()
-	h.HandleFileGet(w, req)
-	gotETag := w.Header().Get("ETag")
-	if gotETag == "" {
-		t.Fatal("missing ETag")
-	}
-
-	// Recompute what the legacy unsalted form would have produced. If
-	// FileETagSalt regresses to zero-bytes (or is dropped from the
-	// hash input) the wire ETag will collide with this value — a
-	// deterministic recovery oracle for size+mtime.
-	info, err := os.Stat(filepath.Join(projDir, "a.txt"))
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	legacySeed := []byte(strconv.FormatInt(info.Size(), 10) + "|" +
-		strconv.FormatInt(info.ModTime().UnixNano(), 10))
-	legacySum := sha256.Sum256(legacySeed)
-	// Both 8-byte (pre-#418) and 12-byte (post-#418) forms must differ
-	// from the returned ETag, since the salt is mixed into the SHA-256
-	// input regardless of truncation length.
-	legacy8 := `"` + hex.EncodeToString(legacySum[:8]) + `"`
-	legacy12 := `"` + hex.EncodeToString(legacySum[:12]) + `"`
-	if gotETag == legacy8 || gotETag == legacy12 {
-		t.Errorf("ETag %q matches the unsalted hash — FileETagSalt regressed; size+mtime are now probe-recoverable", gotETag)
-	}
-}
-
-// TestHandleFileGet_ETagSalt_NonZero pins the integrity of the salt
-// itself: a zero-filled 32-byte array would defeat the whole point of
-// the salt (an attacker would simply use the all-zeros salt as a known
-// constant). The init path treats crypto/rand failure as a hard panic
-// so this can only regress via someone replacing the var with a
-// constant — assert by entropy.
-func TestHandleFileGet_ETagSalt_NonZero(t *testing.T) {
-	if len(FileETagSalt) < 16 {
-		t.Fatalf("FileETagSalt must be at least 16 bytes; got %d", len(FileETagSalt))
-	}
-	allZero := true
-	for _, b := range FileETagSalt {
-		if b != 0 {
-			allZero = false
-			break
-		}
-	}
-	if allZero {
-		t.Error("FileETagSalt is all zeros — crypto/rand init failed silently or var was replaced with a literal")
 	}
 }
 

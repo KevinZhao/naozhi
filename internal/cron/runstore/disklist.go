@@ -194,7 +194,7 @@ var decodeSlotPool = sync.Pool{
 }
 
 // decodeSlotPoolMaxCap drops oversized backing arrays from the pool so an
-// operator who raised RunsKeepCount well above the default for one job does
+// Options.KeepCount raised well above the default for one job does
 // not pin an outsized array for the process lifetime. Sized at 2× the default
 // cap for headroom around the common case.
 const decodeSlotPoolMaxCap = 2 * DefaultKeepCount

@@ -67,7 +67,6 @@ func (f *Feishu) fetchBotInfo(ctx context.Context) error {
 
 // isBotMentioned reports whether any mention targets this bot; when botOpenID
 // is unknown any mention counts, so a degraded Start does not drop responses.
-// The extractor closure lets the webhook and WebSocket schemas share the logic.
 func (f *Feishu) isBotMentioned(count int, openIDAt func(i int) string) bool {
 	f.botInfoMu.RLock()
 	botID := f.botOpenID

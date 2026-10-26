@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -120,81 +119,6 @@ func (d *doctor) checkAuth() {
 		d.add("auth", "fail", fmt.Sprintf("token rejected (%d); check NAOZHI_DASHBOARD_TOKEN", resp.StatusCode))
 	default:
 		d.add("auth", "warn", fmt.Sprintf("unexpected status %d on /api/sessions", resp.StatusCode))
-	}
-}
-
-func (d *doctor) checkPprof() {
-	if d.token == "" {
-		d.add("pprof", "warn", "no token; pprof reachability not verified")
-		return
-	}
-	url := d.addr + "/api/debug/pprof/"
-	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		d.add("pprof", "fail", "request build: "+err.Error())
-		return
-	}
-	req.Header.Set("Authorization", "Bearer "+d.token)
-	resp, err := d.httpClient().Do(req)
-	if err != nil {
-		d.add("pprof", "fail", "request failed: "+err.Error())
-		return
-	}
-	defer resp.Body.Close()
-	switch resp.StatusCode {
-	case http.StatusOK:
-		d.add("pprof", "pass", "reachable at "+url)
-	case http.StatusForbidden:
-		d.add("pprof", "warn",
-			"403 — non-loopback (doctor not running on the naozhi host?) or hardening works as intended")
-	default:
-		d.add("pprof", "warn", fmt.Sprintf("unexpected status %d", resp.StatusCode))
-	}
-}
-
-// checkExpvar probes /api/debug/vars (auth + loopback-only; a 403 from
-// outside the host is the hardening working).
-func (d *doctor) checkExpvar() {
-	if d.token == "" {
-		d.add("expvar", "warn", "no token; expvar reachability not verified")
-		return
-	}
-	url := d.addr + "/api/debug/vars"
-	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		d.add("expvar", "fail", "request build: "+err.Error())
-		return
-	}
-	req.Header.Set("Authorization", "Bearer "+d.token)
-	resp, err := d.httpClient().Do(req)
-	if err != nil {
-		d.add("expvar", "fail", "request failed: "+err.Error())
-		return
-	}
-	defer resp.Body.Close()
-	switch resp.StatusCode {
-	case http.StatusOK:
-		// Spot-check one naozhi_* counter so a misrouted stdlib /debug/vars
-		// mount fails instead of passing; read errors are reported distinctly.
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		if readErr != nil {
-			d.add("expvar", "fail", "read body failed: "+readErr.Error())
-			return
-		}
-		if !strings.Contains(string(body), "naozhi_session_create_total") {
-			d.add("expvar", "fail", "reachable but counter missing from payload — routing wrong?")
-			return
-		}
-		d.add("expvar", "pass", "reachable at "+url)
-	case http.StatusForbidden:
-		d.add("expvar", "warn",
-			"403 — non-loopback (doctor not running on the naozhi host?) or hardening works as intended")
-	default:
-		d.add("expvar", "warn", fmt.Sprintf("unexpected status %d", resp.StatusCode))
 	}
 }
 

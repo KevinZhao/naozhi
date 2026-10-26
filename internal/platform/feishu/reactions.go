@@ -76,7 +76,7 @@ func (f *Feishu) AddReaction(ctx context.Context, messageID string, r platform.R
 		return fmt.Errorf("feishu reaction api: code=%d msg=%q", result.Code, result.Msg)
 	}
 	if result.Data.ReactionID != "" {
-		// Expiry lets cleanupNoncesTick GC entries that never see RemoveReaction.
+		// Expiry lets cleanupReactionsTick GC entries that never see RemoveReaction.
 		f.reactionIDs.Store(reactionCacheKey(messageID, emojiType), reactionCacheEntry{
 			id:     result.Data.ReactionID,
 			expiry: time.Now().Add(reactionCacheTTL).UnixNano(),

@@ -605,7 +605,6 @@ func NewRouter(cfg RouterConfig) *Router {
 	if cfg.StorePath != "" && !cfg.CostLedger.Disabled {
 		ledger = costledger.NewStore(datadir.ForStore(cfg.StorePath).CostRoot(), costledger.Options{
 			RetentionDays: cfg.CostLedger.RetentionDays,
-			RollupDays:    cfg.CostLedger.RollupDays,
 		})
 	}
 	r.runs.cost = newCostAccounting(ledger)
@@ -626,7 +625,6 @@ func NewRouter(cfg RouterConfig) *Router {
 			Dir:       cfg.EventLogDir,
 			Generator: cfg.EventLogGenerator,
 			DevMode:   cfg.EventLogDevMode,
-			Observer:  eventLogMetricsObserver{},
 		})
 		if err != nil {
 			slog.Error("event log persister init failed; disabling event log persistence",

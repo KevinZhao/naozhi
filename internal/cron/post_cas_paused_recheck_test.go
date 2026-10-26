@@ -55,8 +55,8 @@ func TestExecuteOpt_PostCASPausedRecheck_EmitsSyntheticSkipped(t *testing.T) {
 	if got.ErrorClass != ErrClassPausedConcurrent {
 		t.Errorf("error_class: want paused_concurrent, got %q", got.ErrorClass)
 	}
-	if got.JobID != jobID {
-		t.Errorf("job_id: want %q, got %q", jobID, got.JobID)
+	if got.OwnerID != jobID {
+		t.Errorf("job_id: want %q, got %q", jobID, got.OwnerID)
 	}
 	if got.Trigger != TriggerManual {
 		t.Errorf("trigger: want manual, got %q", got.Trigger)

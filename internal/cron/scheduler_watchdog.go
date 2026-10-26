@@ -8,12 +8,8 @@ package cron
 import (
 	"context"
 	"errors"
-	"expvar"
 	"log/slog"
-	"sync/atomic"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // abortResult bundles the watchdog's exit signal: fired reports whether the
@@ -43,26 +39,8 @@ type deadlineInterrupter interface {
 // write) blocks `<-abortCh` forever, finishRun never runs, and
 // inflight.running=true makes every later tick skip the job until restart.
 // The call itself is not aborted (no underlying ctx); it leaks until session
-// teardown, bounded per-run and drained on session.Reset. The effective value
-// is per-Scheduler (watchdogInterruptTimeoutNanos, #1904).
+// teardown, bounded per-run and drained on session.Reset.
 const watchdogInterruptTimeoutDefault = 3 * time.Second
-
-// watchdogParkedInterruptGoroutines is a LIVE gauge of inner
-// InterruptViaControl goroutines that outlived their watchdog after the
-// interrupt-call timeout and are still parked on a wedged stdin write
-// (#1632). Unlike the cumulative metrics.CronWatchdogInterruptTimeoutTotal it
-// distinguishes "fired N times, all drained" from "N still leaked now": a
-// persistent (non-fresh) job that never reaches session.Reset accumulates
-// parked goroutines permanently. Incremented when the timeout branch parks
-// the goroutine, decremented when it eventually returns.
-var watchdogParkedInterruptGoroutines = expvar.NewInt("naozhi_cron_watchdog_parked_interrupt_goroutines")
-
-// watchdogInterruptTimeout reads this Scheduler's active interrupt-call
-// timeout. Production callers see watchdogInterruptTimeoutDefault unless a test
-// has overridden it on this instance.
-func (s *Scheduler) watchdogInterruptTimeout() time.Duration {
-	return time.Duration(s.watchdogInterruptTimeoutNanos.Load())
-}
 
 // runDeadlineWatchdog arranges for sess.InterruptViaControl to fire exactly
 // when ctx ends with DeadlineExceeded. It must run concurrently with sess.Send,
@@ -117,20 +95,8 @@ func fireBoundedInterrupt(sess deadlineInterrupter, timeout time.Duration) abort
 		timeout = watchdogInterruptTimeoutDefault
 	}
 	done := make(chan InterruptOutcome, 1)
-	// state resolves the leak-gauge race between the inner goroutine and the
-	// timeout branch (#1632): 0 = neither acted, 1 = inner returned first
-	// (must NOT be counted as parked), 2 = watchdog fired first and parked it
-	// (gauge +1; inner decrements on exit). Exactly one CAS(0→1)/CAS(0→2)
-	// wins, so the gauge moves at most once per direction per park.
-	var state atomic.Int32
 	go func() {
-		outcome := sess.InterruptViaControl()
-		if !state.CompareAndSwap(0, 1) {
-			// Watchdog already parked us (state==2) and bumped the gauge;
-			// the wedged write finally unblocked — undo the increment.
-			watchdogParkedInterruptGoroutines.Add(-1)
-		}
-		done <- outcome
+		done <- sess.InterruptViaControl()
 	}()
 	// NewTimer + defer Stop: time.After would leak the timer slot until
 	// expiry on the fast path.
@@ -142,13 +108,7 @@ func fireBoundedInterrupt(sess deadlineInterrupter, timeout time.Duration) abort
 	case <-t.C:
 		// The inner goroutine stays parked on InterruptViaControl until the
 		// wedged stdin write unblocks (typically the next session.Reset; for
-		// non-fresh jobs maybe never). Surface via counter + Warn (#1327).
-		metrics.CronWatchdogInterruptTimeoutTotal.Add(1)
-		// CAS(0→2) only wins if the inner goroutine has not yet returned;
-		// the matching Add(-1) is in its lost-race branch (#1632).
-		if state.CompareAndSwap(0, 2) {
-			watchdogParkedInterruptGoroutines.Add(1)
-		}
+		// non-fresh jobs maybe never) (#1327).
 		slog.Warn("cron watchdog: InterruptViaControl timeout exceeded; inner goroutine parked until session reset",
 			"timeout", timeout)
 		return abortResult{outcome: InterruptError, fired: true}
@@ -164,11 +124,11 @@ func fireBoundedInterrupt(sess deadlineInterrupter, timeout time.Duration) abort
 // Caller contract: sendCtx must be a deadline-bearing ctx (the watchdog fires
 // on ctx.Err()==DeadlineExceeded; a Background ctx silently never fires), and
 // sendCancel is called here exactly once after Send returns (the caller's
-// `defer sendCancel()` is a harmless no-op). Method for the per-instance timeout (#1904).
+// `defer sendCancel()` is a harmless no-op).
 func (s *Scheduler) sendWithWatchdog(sendCtx context.Context, sendCancel context.CancelFunc, sess Session, text string) (SendResult, abortResult, error) {
 	// Watchdog must fire BEFORE Send returns (see runDeadlineWatchdog),
 	// otherwise Process.State is already Ready and the interrupt is a no-op.
-	abortCh, stopWatchdog := runDeadlineWatchdog(sendCtx, sess, s.watchdogInterruptTimeout())
+	abortCh, stopWatchdog := runDeadlineWatchdog(sendCtx, sess, watchdogInterruptTimeoutDefault)
 
 	// Direct Send, not through turnSender — cron jobs notify via the IM
 	// deliverNotice path and the cron_run_ended WS frame.
@@ -187,7 +147,7 @@ func (s *Scheduler) sendWithWatchdog(sendCtx context.Context, sendCancel context
 		// synchronously so the CLI turn is still aborted and abort.fired
 		// reflects reality (#2021).
 		if errors.Is(sendCtx.Err(), context.DeadlineExceeded) {
-			return result, fireBoundedInterrupt(sess, s.watchdogInterruptTimeout()), err
+			return result, fireBoundedInterrupt(sess, watchdogInterruptTimeoutDefault), err
 		}
 		return result, abortResult{}, err
 	}

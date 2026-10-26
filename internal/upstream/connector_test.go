@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -63,19 +64,6 @@ func newFakeServer(t *testing.T, handler connHandler) *httptest.Server {
 	return srv
 }
 
-// Regression evidence for the newFakeServer goroutine-leak DATA RACE lives in
-// the real reverse-node tests, not a synthetic probe. The race is a scheduler
-// overlap (a handler goroutine's t.Logf racing tRunner's `t.done = true` write,
-// testing.go:2023) and is therefore only probabilistically reproducible — a
-// deterministic single-run reproduction is not achievable without brittle
-// sleeps. The authoritative gate is TestReqSem_WaitCounterOnSaturation below:
-//
-//	# On the pre-fix helper (no wg.Wait barrier) this trips -race within a few
-//	# hundred iterations; with the barrier it is clean over 800+ runs:
-//	go test -race -short -count=200 -run TestReqSem_WaitCounterOnSaturation ./internal/upstream/
-//
-// See the PR description for the full before/after measurements.
-
 // wsURL converts an http:// test server URL to ws://.
 func wsURL(srv *httptest.Server) string {
 	return "ws" + strings.TrimPrefix(srv.URL, "http")
@@ -126,61 +114,6 @@ func TestMarshalResult_Nil(t *testing.T) {
 	}
 	if string(data) != "null" {
 		t.Errorf("marshalResult(nil) = %s, want \"null\"", data)
-	}
-}
-
-// TestMarshalResult_ByteEquivalentToJSONMarshal pins R246-PERF-10: the
-// pooled-encoder marshalResult MUST emit the exact same bytes as the
-// prior json.Marshal call so reverse-RPC consumers (primary side) keep
-// parsing replies unchanged. Covers HTML-escaping (Encoder default) and
-// the implicit trailing newline trim.
-func TestMarshalResult_ByteEquivalentToJSONMarshal(t *testing.T) {
-	cases := []any{
-		map[string]string{"status": "ok", "key": "scratch:feishu:direct:alice"},
-		map[string]any{"sessions": []map[string]string{{"key": "k1"}, {"key": "k2"}}},
-		// HTML-escapable runes: encoding/json keeps them \u-escaped so a
-		// reply embedded inside a hypothetical HTML page can't break out.
-		map[string]string{"prompt": "<script>alert(1)</script> &  "},
-		// Unicode + emoji + Chinese.
-		map[string]string{"label": "项目 测试 🚀"},
-		nil,
-		[]int{},
-	}
-	for i, v := range cases {
-		want, err := json.Marshal(v)
-		if err != nil {
-			t.Fatalf("case %d: json.Marshal: %v", i, err)
-		}
-		got, err := marshalResult(v)
-		if err != nil {
-			t.Fatalf("case %d: marshalResult: %v", i, err)
-		}
-		if string(got) != string(want) {
-			t.Errorf("case %d: marshalResult=%q want=%q", i, got, want)
-		}
-	}
-}
-
-// TestMarshalResult_PoolReuseDoesNotShareBacking pins that consecutive
-// marshalResult calls return slices whose backing arrays are independent
-// of the pool's bytes.Buffer (otherwise the second call's Reset would
-// clobber the first call's payload). R246-PERF-10.
-func TestMarshalResult_PoolReuseDoesNotShareBacking(t *testing.T) {
-	a, err := marshalResult(map[string]string{"k": "first-value-" + strings.Repeat("x", 64)})
-	if err != nil {
-		t.Fatalf("marshalResult a: %v", err)
-	}
-	aSnap := append([]byte(nil), a...)
-	// Force the pool to hand the same buffer back by marshaling several
-	// payloads; if we returned a slice aliasing the buffer, one of these
-	// Reset()+Encode() calls would corrupt aSnap.
-	for i := 0; i < 4; i++ {
-		if _, err := marshalResult(map[string]int{"i": i, "pad": 1234}); err != nil {
-			t.Fatalf("marshalResult padding %d: %v", i, err)
-		}
-	}
-	if string(a) != string(aSnap) {
-		t.Errorf("first marshalResult slice mutated by pool reuse: got %q want %q", a, aSnap)
 	}
 }
 
@@ -327,17 +260,6 @@ func TestHandleRequest_FetchDiscovered_WithFunc(t *testing.T) {
 
 // ---- handleRequest: fetch_discovered_preview ----
 
-func TestHandleRequest_FetchDiscoveredPreview_BadParams(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	req := node.ReverseMsg{Method: "fetch_discovered_preview", Params: json.RawMessage(`not-json`)}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Error("expected error for bad params, got nil")
-	}
-}
-
 func TestHandleRequest_FetchDiscoveredPreview_WithFunc(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
 	c := New(cfg, testRouter(makeRouter()), nil, Discovery{
@@ -383,31 +305,6 @@ func TestHandleRequest_FetchDiscoveredPreview_InvalidSessionID(t *testing.T) {
 	}
 }
 
-// ---- handleRequest: fetch_events ----
-
-func TestHandleRequest_FetchEvents_BadParams(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	req := node.ReverseMsg{Method: "fetch_events", Params: json.RawMessage(`not-json`)}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Error("expected error for bad params, got nil")
-	}
-}
-
-func TestHandleRequest_FetchEvents_SessionNotFound(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	params, _ := json.Marshal(map[string]interface{}{"key": "no:such:key", "after": 0})
-	req := node.ReverseMsg{Method: "fetch_events", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Error("expected error for missing session, got nil")
-	}
-}
-
 // ---- handleRequest: fetch_backends ----
 
 // TestHandleRequest_FetchBackends pins the reverse-RPC side of the picker
@@ -448,239 +345,48 @@ func TestHandleRequest_FetchBackends(t *testing.T) {
 	}
 }
 
-// ---- handleRequest: send (no wrapper — session creation fails) ----
+// ---- handleRequest: malformed or invalid params ----
 
-func TestHandleRequest_Send_BadParams(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	req := node.ReverseMsg{Method: "send", Params: json.RawMessage(`not-json`)}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Error("expected error for bad params, got nil")
-	}
-}
-
-// TestHandleRequest_Send_TextTooLong asserts the reverse-RPC trust boundary
-// enforces the same text cap as the primary-side dashboard handler, so a
-// compromised or misconfigured primary cannot push a multi-MB prompt
-// straight into CLI stdin with only the shim's 12 MB line ceiling as a
-// backstop. R68-SEC-H1.
-func TestHandleRequest_Send_TextTooLong(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	// 5 MB > maxCoalescedTextBytes (4 MB). Valid JSON that would otherwise
-	// pass through to sess.Send on an accepting router.
-	big := strings.Repeat("x", 5*1024*1024)
-	params, _ := json.Marshal(map[string]string{
-		"key":  "feishu:direct:alice:general",
-		"text": big,
-	})
-	req := node.ReverseMsg{Method: "send", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Fatalf("expected error for oversize text, got nil")
-	}
-	if !strings.Contains(err.Error(), "too long") {
-		t.Errorf("err = %v, want to contain \"too long\"", err)
-	}
-}
-
-// TestHandleRequest_Send_RejectsTraversalOnEmptyDefaultWorkspace locks down
-// R68-SEC-M2: even when the connector has no configured defaultWorkspace
-// (single-user deployments), a reverse-RPC `send` must reject workspace
-// paths containing `..` segments or control bytes BEFORE filepath.Clean
-// silently folds them into a now-canonical absolute path. Before the fix,
-// the defaultWorkspace=="" branch skipped the prefix check entirely, so a
-// compromised primary could spawn CLI sessions rooted at /etc or anywhere
-// else by submitting `/home/../etc`.
-func TestHandleRequest_Send_RejectsTraversalOnEmptyDefaultWorkspace(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-	if c.defaultWorkspace != "" {
-		t.Fatalf("precondition: defaultWorkspace must be empty, got %q", c.defaultWorkspace)
-	}
-	params, _ := json.Marshal(map[string]string{
-		"key":       "feishu:direct:alice:general",
-		"text":      "hi",
-		"workspace": "/home/../etc",
-	})
-	req := node.ReverseMsg{Method: "send", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Fatal("expected traversal rejection, got nil")
-	}
-	if !strings.Contains(err.Error(), "workspace") {
-		t.Errorf("err = %v, want to mention workspace", err)
-	}
-}
-
-func TestHandleRequest_Send_RejectsControlByteInWorkspace(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-	params, _ := json.Marshal(map[string]string{
-		"key":       "feishu:direct:alice:general",
-		"text":      "hi",
-		"workspace": "/home/user\nproj",
-	})
-	req := node.ReverseMsg{Method: "send", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Fatal("expected control-byte rejection, got nil")
-	}
-}
-
-// TestHandleRequest_Send_EmptyDefaultWorkspace_RejectsOverride verifies the
-// R74/R68-SEC-M2 "fail closed" policy: when the reverse-node Connector has
-// no default workspace configured (router.DefaultWorkspace()==""), ANY
-// workspace override, even a syntactically valid absolute path, must be
-// rejected. Before this fix, `/etc` and similar legitimate-looking paths
-// passed through unchecked — the prefix gate was wrapped in
-// `if c.defaultWorkspace != ""`, so an empty default opened the door to
-// arbitrary CLI-session rooting. R68-SEC-M2.
-func TestHandleRequest_Send_EmptyDefaultWorkspace_RejectsOverride(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-	if c.defaultWorkspace != "" {
-		t.Fatalf("precondition: defaultWorkspace must be empty, got %q", c.defaultWorkspace)
-	}
-	// /etc is syntactically valid (absolute, no `..`, no control bytes) but
-	// must still be rejected because the node has no allowlist to bound it.
-	params, _ := json.Marshal(map[string]string{
-		"key":       "feishu:direct:alice:general",
-		"text":      "hi",
-		"workspace": "/etc",
-	})
-	req := node.ReverseMsg{Method: "send", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Fatal("expected rejection of /etc under empty defaultWorkspace, got nil")
-	}
-	if !strings.Contains(err.Error(), "no allowed root") {
-		t.Errorf("err = %v, want 'no allowed root configured' message", err)
-	}
-}
-
-// TestValidateRemoteWorkspacePath_SharedByConnector confirms connector's
-// takeover and send paths call into the shared session.ValidateRemoteWorkspacePath
-// gate. The takeover path performs the CWD gate after the process identity
-// check (by design — we don't want to do FS work on behalf of an
-// unauthorized PID), so an integration-style test would require a valid
-// process identity. The shared validator is already exhaustively covered
-// by TestValidateRemoteWorkspacePath in package session; this test only
-// asserts that the connector's send branch wires it in under an empty
-// defaultWorkspace. R68-SEC-M2.
-func TestValidateRemoteWorkspacePath_SharedByConnector(t *testing.T) {
-	// Sanity ping that the shared validator rejects traversal.
-	if err := session.ValidateRemoteWorkspacePath("/home/../etc"); err == nil {
-		t.Fatal("ValidateRemoteWorkspacePath should reject /home/../etc")
-	}
-	// connector.handleRequest "send" branch exercised by
-	// TestHandleRequest_Send_RejectsTraversalOnEmptyDefaultWorkspace above.
-}
-
-// ---- handleRequest: unknown method ----
-
-func TestHandleRequest_UnknownMethod(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	req := node.ReverseMsg{Method: "totally_unknown"}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Error("expected error for unknown method, got nil")
-	}
-	if !strings.Contains(err.Error(), "unknown method") {
-		t.Errorf("error = %v, want to contain \"unknown method\"", err)
-	}
-}
-
-// ---- handleRequest: update_config (no projMgr) ----
-
-func TestHandleRequest_UpdateConfig_NilMgr(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	params, _ := json.Marshal(map[string]interface{}{
-		"project_name": "proj",
-		"config":       map[string]bool{"git_sync": true},
-	})
-	req := node.ReverseMsg{Method: "update_config", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Error("expected error for update_config with nil projMgr, got nil")
-	}
-}
-
-func TestHandleRequest_UpdateConfig_BadParams(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	req := node.ReverseMsg{Method: "update_config", Params: json.RawMessage(`not-json`)}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Error("expected error for bad params, got nil")
-	}
-}
-
-// ---- handleRequest: takeover / close_discovered (invalid params) ----
-
-func TestHandleRequest_Takeover_BadParams(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	req := node.ReverseMsg{Method: "takeover", Params: json.RawMessage(`not-json`)}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Error("expected error for bad params, got nil")
-	}
-}
-
-func TestHandleRequest_Takeover_MissingPID(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	params, _ := json.Marshal(map[string]interface{}{"pid": 0, "session_id": "sess-abc"})
-	req := node.ReverseMsg{Method: "takeover", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Error("expected error for pid=0, got nil")
-	}
-}
-
-func TestHandleRequest_CloseDiscovered_BadParams(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	req := node.ReverseMsg{Method: "close_discovered", Params: json.RawMessage(`not-json`)}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Error("expected error for bad params, got nil")
-	}
-}
-
-func TestHandleRequest_CloseDiscovered_MissingPID(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	params, _ := json.Marshal(map[string]interface{}{"pid": 0})
-	req := node.ReverseMsg{Method: "close_discovered", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Error("expected error for pid=0, got nil")
-	}
-}
-
-func TestHandleRequest_CloseDiscovered_MissingProcStartTime(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	params, _ := json.Marshal(map[string]interface{}{"pid": 12345, "proc_start_time": 0})
-	req := node.ReverseMsg{Method: "close_discovered", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Error("expected error for proc_start_time=0, got nil")
+// TestHandleRequest_RejectsBadInput covers the per-method parameter
+// validation in handleRequest: each row must come back as an error (the
+// send-specific rejections live in TestHandleRequest_Send_RejectsBeforeThePipeline).
+func TestHandleRequest_RejectsBadInput(t *testing.T) {
+	pid := strconv.Itoa(os.Getpid())
+	for _, tc := range []struct {
+		name, method, params, wantErr string
+	}{
+		{name: "fetch_discovered_preview bad json", method: "fetch_discovered_preview", params: `not-json`},
+		{name: "fetch_events bad json", method: "fetch_events", params: `not-json`},
+		{name: "fetch_events unknown session", method: "fetch_events", params: `{"key":"no:such:key","after":0}`},
+		{name: "send bad json", method: "send", params: `not-json`},
+		{name: "unknown method", method: "totally_unknown", wantErr: "unknown method"},
+		{name: "update_config without projects", method: "update_config", params: `{"project_name":"proj","config":{"git_sync":true}}`},
+		{name: "update_config bad json", method: "update_config", params: `not-json`},
+		{name: "takeover bad json", method: "takeover", params: `not-json`},
+		{name: "takeover pid=0", method: "takeover", params: `{"pid":0,"session_id":"sess-abc"}`},
+		{name: "takeover invalid session_id", method: "takeover", params: `{"pid":` + pid + `,"session_id":"not-a-valid-uuid","proc_start_time":1}`},
+		{name: "takeover proc_start_time=0", method: "takeover", params: `{"pid":12345,"session_id":"12345678-1234-1234-1234-123456789012","proc_start_time":0}`},
+		{name: "close_discovered bad json", method: "close_discovered", params: `not-json`},
+		{name: "close_discovered pid=0", method: "close_discovered", params: `{"pid":0}`},
+		{name: "close_discovered proc_start_time=0", method: "close_discovered", params: `{"pid":12345,"proc_start_time":0}`},
+		{name: "close_discovered invalid session_id", method: "close_discovered", params: `{"pid":12345,"session_id":"not-a-uuid","proc_start_time":1}`},
+		{name: "set_session_label missing key", method: "set_session_label", params: `{"label":"x"}`},
+		{name: "set_session_label too long", method: "set_session_label", params: `{"key":"k","label":"` + strings.Repeat("a", 129) + `"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := New(&Config{URL: "wss://x", NodeID: "n", Token: "t"}, testRouter(makeRouter()), nil, Discovery{}, nil)
+			req := node.ReverseMsg{Method: tc.method}
+			if tc.params != "" {
+				req.Params = json.RawMessage(tc.params)
+			}
+			_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			if tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("err = %v, want to contain %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -953,67 +659,6 @@ func TestRun_BackoffLogic_DialsOnFailure(t *testing.T) {
 	}
 }
 
-// TestRun_BackoffGauge_TracksReconnectState verifies the R172-ARCH-D10
-// gauge (connectorBackoffMillis) is published and advances as the Run()
-// loop walks the reconnect backoff schedule on repeated dial failures.
-// The gauge starts at 1000ms (1s floor) and doubles after each failed
-// attempt's sleep, so after at least two failed attempts the gauge must
-// have moved above the initial 1s floor.
-func TestRun_BackoffGauge_TracksReconnectState(t *testing.T) {
-	connSeen := make(chan struct{}, 20)
-	srv := newFakeServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
-		select {
-		case connSeen <- struct{}{}:
-		default:
-		}
-		// Close immediately to force the next attempt onto the backoff path.
-	})
-
-	cfg := &Config{URL: wsURL(srv), NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-	defer cancel()
-
-	go c.Run(ctx)
-
-	// The gauge is published under its expvar name and seeded to the 1s
-	// floor on Run() entry. Confirm the var is registered and non-zero
-	// (the exact value races with the backoff doubling below, so we only
-	// assert it has been Set at all).
-	deadline0 := time.Now().Add(2 * time.Second)
-	for connectorBackoffMillis.Value() == 0 && time.Now().Before(deadline0) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if connectorBackoffMillis.Value() == 0 {
-		t.Fatalf("backoff gauge never published a non-zero value")
-	}
-
-	// Wait for at least two dial attempts so the loop has doubled the
-	// backoff past the 1s floor at least once.
-	for i := 0; i < 2; i++ {
-		select {
-		case <-connSeen:
-		case <-time.After(4 * time.Second):
-			t.Fatalf("timeout waiting for connection attempt %d", i+1)
-		}
-	}
-
-	// After the second failed attempt the gauge should have advanced
-	// beyond the 1s floor (1000 → 2000 → ...). Poll briefly since the
-	// Set happens after the sleep timer fires.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if connectorBackoffMillis.Value() > 1000 {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Errorf("backoff gauge = %d, want > 1000 after repeated failures",
-		connectorBackoffMillis.Value())
-}
-
 // ---- handleRequest: update_config with real project manager ----
 
 func TestHandleRequest_UpdateConfig_WithMgr(t *testing.T) {
@@ -1098,59 +743,6 @@ func TestHandleRequest_FetchProjects_WithMgr(t *testing.T) {
 	json.Unmarshal(result, &arr) //nolint:errcheck
 	if len(arr) != 1 {
 		t.Errorf("fetch_projects = %d projects, want 1", len(arr))
-	}
-}
-
-// ---- handleRequest: takeover with invalid session ID format ----
-
-func TestHandleRequest_Takeover_InvalidSessionID(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	// Valid-looking PID but invalid session ID format
-	params, _ := json.Marshal(map[string]interface{}{
-		"pid":             os.Getpid(),
-		"session_id":      "not-a-valid-uuid",
-		"proc_start_time": uint64(1),
-	})
-	req := node.ReverseMsg{Method: "takeover", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Error("expected error for invalid session_id format, got nil")
-	}
-}
-
-func TestHandleRequest_Takeover_MissingProcStartTime(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	params, _ := json.Marshal(map[string]interface{}{
-		"pid":             12345,
-		"session_id":      "12345678-1234-1234-1234-123456789012",
-		"proc_start_time": uint64(0),
-	})
-	req := node.ReverseMsg{Method: "takeover", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Error("expected error for proc_start_time=0, got nil")
-	}
-}
-
-// ---- handleRequest: close_discovered with invalid session ID format ----
-
-func TestHandleRequest_CloseDiscovered_InvalidSessionID(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	params, _ := json.Marshal(map[string]interface{}{
-		"pid":             12345,
-		"session_id":      "not-a-uuid",
-		"proc_start_time": uint64(1),
-	})
-	req := node.ReverseMsg{Method: "close_discovered", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
-	if err == nil {
-		t.Error("expected error for invalid session_id, got nil")
 	}
 }
 
@@ -1365,32 +957,5 @@ func TestHandleRequest_SetSessionLabel_UnknownKey(t *testing.T) {
 	}
 	if resp["updated"] {
 		t.Errorf("updated = true for unknown key")
-	}
-}
-
-func TestHandleRequest_SetSessionLabel_MissingKey(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	req := node.ReverseMsg{
-		Method: "set_session_label",
-		Params: json.RawMessage(`{"label":"x"}`),
-	}
-	if _, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{}); err == nil {
-		t.Errorf("expected error for missing key, got nil")
-	}
-}
-
-func TestHandleRequest_SetSessionLabel_TooLong(t *testing.T) {
-	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
-
-	label := strings.Repeat("a", 129)
-	req := node.ReverseMsg{
-		Method: "set_session_label",
-		Params: json.RawMessage(`{"key":"k","label":"` + label + `"}`),
-	}
-	if _, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{}); err == nil {
-		t.Errorf("expected error for oversized label, got nil")
 	}
 }

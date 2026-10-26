@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -88,87 +89,171 @@ func TestReverseConn_Accessors(t *testing.T) {
 	}
 }
 
-// ---- FetchSessions via RPC ----
+// ---- Per-RPC wire method, params and result ----
 
-func TestReverseConn_FetchSessions(t *testing.T) {
+// TestReverseConn_RPCs checks, for every method, the wire method name and
+// params it sends and how it decodes the node's result.
+func TestReverseConn_RPCs(t *testing.T) {
 	rc, wsConn, cleanup := setupReverseConnPair(t)
 	defer cleanup()
 
-	// Simulate the remote node handling the RPC.
-	go func() {
-		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var req ReverseMsg
-		if err := wsConn.ReadJSON(&req); err != nil {
-			return
-		}
-		result, _ := json.Marshal([]map[string]any{{"session_id": "s1"}})
-		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
-	}()
+	for _, tc := range []struct {
+		name   string
+		method string
+		params map[string]any // nil: no params
+		result string         // raw JSON result; "" sends none
+		call   func(context.Context) (any, error)
+		want   any
+	}{
+		{
+			name: "FetchSessions", method: "fetch_sessions",
+			result: `[{"session_id":"s1"}]`,
+			call:   func(ctx context.Context) (any, error) { s, err := rc.FetchSessions(ctx); return len(s), err },
+			want:   1,
+		},
+		{
+			name: "FetchEvents", method: "fetch_events",
+			params: map[string]any{"key": "key", "after": 0.0},
+			result: `[{"time":1000,"type":"text"}]`,
+			call:   func(ctx context.Context) (any, error) { e, err := rc.FetchEvents(ctx, "key", 0); return len(e), err },
+			want:   1,
+		},
+		{
+			// A response with no result is a node that took the send.
+			name: "Send", method: "send",
+			params: map[string]any{"key": "key", "text": "hello"},
+			call:   func(ctx context.Context) (any, error) { return rc.Send(ctx, "key", "hello", "") },
+			want:   "accepted",
+		},
+		{
+			name: "ProxyTakeover", method: "takeover",
+			params: map[string]any{"pid": 99.0, "session_id": "sess-x", "cwd": "/cwd", "proc_start_time": 12345.0},
+			result: `{"key":"feishu:group:42"}`,
+			call:   func(ctx context.Context) (any, error) { return rc.ProxyTakeover(ctx, 99, "sess-x", "/cwd", 12345) },
+			want:   "feishu:group:42",
+		},
+		{
+			name: "ProxyCloseDiscovered", method: "close_discovered",
+			params: map[string]any{"pid": 1.0, "session_id": "s", "cwd": "/", "proc_start_time": 0.0},
+			call:   func(ctx context.Context) (any, error) { return nil, rc.ProxyCloseDiscovered(ctx, 1, "s", "/", 0) },
+		},
+		{
+			name: "ProxyUpdateConfig", method: "update_config",
+			params: map[string]any{"project_name": "proj", "config": map[string]any{"model": "c4"}},
+			call: func(ctx context.Context) (any, error) {
+				return nil, rc.ProxyUpdateConfig(ctx, "proj", json.RawMessage(`{"model":"c4"}`))
+			},
+		},
+		{
+			name: "ProxyRemoveSession", method: "remove_session",
+			params: map[string]any{"key": "feishu:group:abc"},
+			result: `{"removed":true}`,
+			call:   func(ctx context.Context) (any, error) { return rc.ProxyRemoveSession(ctx, "feishu:group:abc") },
+			want:   true,
+		},
+		{
+			name: "ProxyRemoveSession not found", method: "remove_session",
+			params: map[string]any{"key": "k"},
+			result: `{"removed":false}`,
+			call:   func(ctx context.Context) (any, error) { return rc.ProxyRemoveSession(ctx, "k") },
+			want:   false,
+		},
+		{
+			name: "ProxyInterruptSession", method: "interrupt_session",
+			params: map[string]any{"key": "k"},
+			result: `{"interrupted":true}`,
+			call:   func(ctx context.Context) (any, error) { return rc.ProxyInterruptSession(ctx, "k") },
+			want:   true,
+		},
+		{
+			name: "ProxyInterruptSession not running", method: "interrupt_session",
+			params: map[string]any{"key": "k"},
+			result: `{"interrupted":false}`,
+			call:   func(ctx context.Context) (any, error) { return rc.ProxyInterruptSession(ctx, "k") },
+			want:   false,
+		},
+		{
+			name: "ProxySetSessionLabel", method: "set_session_label",
+			params: map[string]any{"key": "feishu:direct:alice:general", "label": "my-label"},
+			result: `{"updated":true}`,
+			call: func(ctx context.Context) (any, error) {
+				return rc.ProxySetSessionLabel(ctx, "feishu:direct:alice:general", "my-label")
+			},
+			want: true,
+		},
+		{
+			name: "ProxySetSessionLabel unknown key", method: "set_session_label",
+			params: map[string]any{"key": "k", "label": "x"},
+			result: `{"updated":false}`,
+			call:   func(ctx context.Context) (any, error) { return rc.ProxySetSessionLabel(ctx, "k", "x") },
+			want:   false,
+		},
+		{
+			name: "FetchDiscoveredPreview", method: "fetch_discovered_preview",
+			params: map[string]any{"session_id": "sess-1"},
+			result: `[{"time":100,"type":"text"}]`,
+			call: func(ctx context.Context) (any, error) {
+				e, err := rc.FetchDiscoveredPreview(ctx, "sess-1")
+				return len(e), err
+			},
+			want: 1,
+		},
+		{
+			name: "FetchProjects", method: "fetch_projects",
+			result: `[{"name":"proj1"}]`,
+			call:   func(ctx context.Context) (any, error) { p, err := rc.FetchProjects(ctx); return len(p), err },
+			want:   1,
+		},
+		{
+			name: "FetchDiscovered", method: "fetch_discovered",
+			result: `[{"pid":100}]`,
+			call:   func(ctx context.Context) (any, error) { d, err := rc.FetchDiscovered(ctx); return len(d), err },
+			want:   1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seen := make(chan ReverseMsg, 1)
+			go func() {
+				wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+				var req ReverseMsg
+				if err := wsConn.ReadJSON(&req); err != nil {
+					close(seen)
+					return
+				}
+				resp := ReverseMsg{Type: "response", ReqID: req.ReqID}
+				if tc.result != "" {
+					resp.Result = json.RawMessage(tc.result)
+				}
+				wsConn.WriteJSON(resp)
+				seen <- req // after the write, so the next row's goroutine never overlaps it
+			}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	sessions, err := rc.FetchSessions(ctx)
-	if err != nil {
-		t.Fatalf("FetchSessions: %v", err)
-	}
-	if len(sessions) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(sessions))
-	}
-}
-
-// ---- FetchEvents via RPC ----
-
-func TestReverseConn_FetchEvents(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	go func() {
-		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var req ReverseMsg
-		if err := wsConn.ReadJSON(&req); err != nil {
-			return
-		}
-		result, _ := json.Marshal([]clievent.EventEntry{{Time: 1000, Type: "text"}})
-		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	entries, err := rc.FetchEvents(ctx, "key", 0)
-	if err != nil {
-		t.Fatalf("FetchEvents: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(entries))
-	}
-}
-
-// ---- Send via RPC ----
-
-func TestReverseConn_Send(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	go func() {
-		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var req ReverseMsg
-		if err := wsConn.ReadJSON(&req); err != nil {
-			return
-		}
-		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	status, err := rc.Send(ctx, "key", "hello", "")
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if status != "accepted" {
-		t.Errorf("a response with no result is a node that took the send: status = %q, want accepted", status)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			got, err := tc.call(ctx)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("result = %#v, want %#v", got, tc.want)
+			}
+			req, ok := <-seen
+			if !ok {
+				t.Fatal("node never read the request")
+			}
+			if req.Method != tc.method {
+				t.Errorf("wire method = %q, want %q", req.Method, tc.method)
+			}
+			var params map[string]any
+			if len(req.Params) > 0 {
+				if err := json.Unmarshal(req.Params, &params); err != nil {
+					t.Fatalf("params %s: %v", req.Params, err)
+				}
+			}
+			if !reflect.DeepEqual(params, tc.params) {
+				t.Errorf("params = %v, want %v", params, tc.params)
+			}
+		})
 	}
 }
 
@@ -428,349 +513,6 @@ func TestReverseConn_Close_idempotent(t *testing.T) {
 	defer cleanup()
 	rc.Close()
 	rc.Close() // must not panic
-}
-
-// ---- ProxyTakeover ----
-
-func TestReverseConn_ProxyTakeover(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	go func() {
-		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var req ReverseMsg
-		if err := wsConn.ReadJSON(&req); err != nil {
-			return
-		}
-		result, _ := json.Marshal(map[string]string{"key": "feishu:group:42"})
-		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	key, err := rc.ProxyTakeover(ctx, 99, "sess-x", "/cwd", 12345)
-	if err != nil {
-		t.Fatalf("ProxyTakeover: %v", err)
-	}
-	if key != "feishu:group:42" {
-		t.Errorf("expected key 'feishu:group:42', got %q", key)
-	}
-}
-
-// ---- ProxyCloseDiscovered ----
-
-func TestReverseConn_ProxyCloseDiscovered(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	go func() {
-		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var req ReverseMsg
-		if err := wsConn.ReadJSON(&req); err != nil {
-			return
-		}
-		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	if err := rc.ProxyCloseDiscovered(ctx, 1, "s", "/", 0); err != nil {
-		t.Fatalf("ProxyCloseDiscovered: %v", err)
-	}
-}
-
-// ---- ProxyUpdateConfig ----
-
-func TestReverseConn_ProxyUpdateConfig(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	go func() {
-		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var req ReverseMsg
-		if err := wsConn.ReadJSON(&req); err != nil {
-			return
-		}
-		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	if err := rc.ProxyUpdateConfig(ctx, "proj", json.RawMessage(`{"model":"c4"}`)); err != nil {
-		t.Fatalf("ProxyUpdateConfig: %v", err)
-	}
-}
-
-// ---- ProxyRemoveSession ----
-
-func TestReverseConn_ProxyRemoveSession(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	var gotMethod string
-	go func() {
-		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var req ReverseMsg
-		if err := wsConn.ReadJSON(&req); err != nil {
-			return
-		}
-		gotMethod = req.Method
-		result, _ := json.Marshal(map[string]bool{"removed": true})
-		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	removed, err := rc.ProxyRemoveSession(ctx, "feishu:group:abc")
-	if err != nil {
-		t.Fatalf("ProxyRemoveSession: %v", err)
-	}
-	if !removed {
-		t.Error("expected removed=true")
-	}
-	if gotMethod != "remove_session" {
-		t.Errorf("expected method 'remove_session', got %q", gotMethod)
-	}
-}
-
-func TestReverseConn_ProxyRemoveSession_notFound(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	go func() {
-		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var req ReverseMsg
-		if err := wsConn.ReadJSON(&req); err != nil {
-			return
-		}
-		result, _ := json.Marshal(map[string]bool{"removed": false})
-		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	removed, err := rc.ProxyRemoveSession(ctx, "k")
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if removed {
-		t.Error("expected removed=false")
-	}
-}
-
-// ---- ProxyInterruptSession ----
-
-func TestReverseConn_ProxyInterruptSession(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	var gotMethod string
-	go func() {
-		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var req ReverseMsg
-		if err := wsConn.ReadJSON(&req); err != nil {
-			return
-		}
-		gotMethod = req.Method
-		result, _ := json.Marshal(map[string]bool{"interrupted": true})
-		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	interrupted, err := rc.ProxyInterruptSession(ctx, "k")
-	if err != nil {
-		t.Fatalf("ProxyInterruptSession: %v", err)
-	}
-	if !interrupted {
-		t.Error("expected interrupted=true")
-	}
-	if gotMethod != "interrupt_session" {
-		t.Errorf("expected method 'interrupt_session', got %q", gotMethod)
-	}
-}
-
-func TestReverseConn_ProxyInterruptSession_notRunning(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	go func() {
-		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var req ReverseMsg
-		if err := wsConn.ReadJSON(&req); err != nil {
-			return
-		}
-		result, _ := json.Marshal(map[string]bool{"interrupted": false})
-		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	interrupted, err := rc.ProxyInterruptSession(ctx, "k")
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if interrupted {
-		t.Error("expected interrupted=false")
-	}
-}
-
-// ---- ProxySetSessionLabel ----
-
-func TestReverseConn_ProxySetSessionLabel(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	var gotMethod string
-	var gotParams map[string]string
-	go func() {
-		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var req ReverseMsg
-		if err := wsConn.ReadJSON(&req); err != nil {
-			return
-		}
-		gotMethod = req.Method
-		_ = json.Unmarshal(req.Params, &gotParams)
-		result, _ := json.Marshal(map[string]bool{"updated": true})
-		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	updated, err := rc.ProxySetSessionLabel(ctx, "feishu:direct:alice:general", "my-label")
-	if err != nil {
-		t.Fatalf("ProxySetSessionLabel: %v", err)
-	}
-	if !updated {
-		t.Error("expected updated=true")
-	}
-	if gotMethod != "set_session_label" {
-		t.Errorf("method = %q, want set_session_label", gotMethod)
-	}
-	if gotParams["key"] != "feishu:direct:alice:general" {
-		t.Errorf("params[key] = %q, want feishu:direct:alice:general", gotParams["key"])
-	}
-	if gotParams["label"] != "my-label" {
-		t.Errorf("params[label] = %q, want my-label", gotParams["label"])
-	}
-}
-
-func TestReverseConn_ProxySetSessionLabel_unknownKey(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	go func() {
-		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var req ReverseMsg
-		if err := wsConn.ReadJSON(&req); err != nil {
-			return
-		}
-		result, _ := json.Marshal(map[string]bool{"updated": false})
-		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	updated, err := rc.ProxySetSessionLabel(ctx, "k", "x")
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if updated {
-		t.Error("expected updated=false")
-	}
-}
-
-// ---- FetchDiscoveredPreview ----
-
-func TestReverseConn_FetchDiscoveredPreview(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	go func() {
-		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var req ReverseMsg
-		if err := wsConn.ReadJSON(&req); err != nil {
-			return
-		}
-		result, _ := json.Marshal([]clievent.EventEntry{{Time: 100, Type: "text"}})
-		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	entries, err := rc.FetchDiscoveredPreview(ctx, "sess-1")
-	if err != nil {
-		t.Fatalf("FetchDiscoveredPreview: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(entries))
-	}
-}
-
-// ---- FetchProjects ----
-
-func TestReverseConn_FetchProjects(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	go func() {
-		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var req ReverseMsg
-		if err := wsConn.ReadJSON(&req); err != nil {
-			return
-		}
-		result, _ := json.Marshal([]map[string]any{{"name": "proj1"}})
-		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	projs, err := rc.FetchProjects(ctx)
-	if err != nil {
-		t.Fatalf("FetchProjects: %v", err)
-	}
-	if len(projs) != 1 {
-		t.Fatalf("expected 1 project, got %d", len(projs))
-	}
-}
-
-// ---- FetchDiscovered ----
-
-func TestReverseConn_FetchDiscovered(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	go func() {
-		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var req ReverseMsg
-		if err := wsConn.ReadJSON(&req); err != nil {
-			return
-		}
-		result, _ := json.Marshal([]map[string]any{{"pid": 100}})
-		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	disc, err := rc.FetchDiscovered(ctx)
-	if err != nil {
-		t.Fatalf("FetchDiscovered: %v", err)
-	}
-	if len(disc) != 1 {
-		t.Fatalf("expected 1, got %d", len(disc))
-	}
 }
 
 // ---- markDisconnected sets status to error ----

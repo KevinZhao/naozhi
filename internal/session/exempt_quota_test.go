@@ -126,6 +126,21 @@ func TestExemptCapFor(t *testing.T) {
 	if got := exemptCapFor("unknown"); got != maxExemptSessions {
 		t.Errorf("exemptCapFor(unknown) = %d, want %d (global fallback)", got, maxExemptSessions)
 	}
+	// Every exempt namespace needs its own kind and sub-quota; an empty or
+	// unmapped kind silently falls back to maxExemptSessions (R242-ARCH-2).
+	seen := make(map[string]string)
+	for _, ns := range keyNamespaces {
+		if !ns.exempt {
+			continue
+		}
+		if prior, dup := seen[ns.kind]; ns.kind == "" || dup {
+			t.Errorf("exempt namespace %q has empty or duplicate kind %q (also %q)", ns.prefix, ns.kind, prior)
+		}
+		seen[ns.kind] = ns.prefix
+		if exemptCapFor(ns.kind) == maxExemptSessions {
+			t.Errorf("exempt namespace %q (kind %q) has no sub-quota in exemptCapFor", ns.prefix, ns.kind)
+		}
+	}
 }
 
 // TestExemptSubQuotasFitGlobalCeiling guards the design invariant

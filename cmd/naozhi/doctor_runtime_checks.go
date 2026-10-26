@@ -38,8 +38,7 @@ type backendProbe struct {
 }
 
 // probeBackends runs the startup --version probe on cfg's enabled backends
-// once per run: checkCLIBackends grades the results and renderBackendsSection
-// prints them, so the two cannot disagree. path is the resolved CLI path.
+// once per run for checkCLIBackends. path is the resolved CLI path.
 func (d *doctor) probeBackends(cfg *config.Config) []backendProbe {
 	if d.backends != nil {
 		return *d.backends

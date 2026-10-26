@@ -12,8 +12,7 @@ import (
 )
 
 // NodeAccessor is the 1-method subset of contracts.NodeAccessor used to proxy
-// /api/cli/backends?node=<id>; kept narrow for the test doubles and asserted a
-// strict subset by TestDashboardContractsDeclaredOnce (#2285). Nil in
+// /api/cli/backends?node=<id>; kept narrow for the test doubles (#2285). Nil in
 // single-node deployments.
 type NodeAccessor interface {
 	LookupNode(w http.ResponseWriter, id string) (node.Conn, bool)

@@ -215,7 +215,7 @@ shim 的价值是持久进程复用（避免每次 spawn 冷启动）。但**不
 
 **对已知问题 `project_shim_map_leak_max_shims`（`max shims reached(50)`）的影响**：分片会让 idle shim 池按 access profile 碎片化，更快触顶。缓解：
 - access profile 数通常极小（个人环境 2-3 个），碎片化有限；
-- `max_shims` 上限提为 per-（backend,profile）而非全局，或整体上调 + 依赖 PR#2353 已修的 reaper（identity-check 删除死 shim）；
+- shim 数量上限（`max_shims` 配置键已在 #3782 删除，写死在 shim.NewManager，默认 50）提为 per-（backend,profile）而非全局，或整体上调 + 依赖 PR#2353 已修的 reaper（identity-check 删除死 shim）；
 - doctor / metrics 暴露 per-profile shim 计数，便于观测。
 
 > **决策点 D3**（§13）：分片 key 是否也要含 model？否——model 是 `--model` CLI arg 而非 env，不影响进程 env，同一 shim 可跨 model 复用。分片只按 `(backend, accessProfileID)`。
@@ -397,7 +397,7 @@ type AgentOpts struct {
 |---|---|---|
 | overlay 成为白名单后门 | overlay 注入任意 env | overlay 不豁免任何 gate；`mergeShimEnv` 后仍过 filterShimEnv 精确集合 + 值校验（§4.2/§5）；pin 测试守住 |
 | resume 串账 | dead session 按新 project 档重解析 | §7 session record 锁定 (backend, accessProfileID)；测试 `ResumeLocksAccessProfile` |
-| shim 池碎片化触顶 max_shims | 多档 + 多 backend | §4.4 per-(backend,profile) 分片 + 上限调整 + reaper（PR#2353 已修）+ doctor 计数 |
+| shim 池碎片化触顶 shim 上限（50，已写死） | 多档 + 多 backend | §4.4 per-(backend,profile) 分片 + 上限调整 + reaper（PR#2353 已修）+ doctor 计数 |
 | secret 泄漏 | token 明文进 git / chip 显示 | `*_FILE` 间接引用；project.yaml 只存档名；UI 绝不显示 env value（§8.4） |
 | 静默降级 | 未知档 / `*_FILE` 读失败 悄悄用了 Bedrock | ValidateConfig error 级 diag（不阻断启动但显式 warn）；spawn 时 `*_FILE` 读失败 → 该 session 失败并明确报错，不 fallback |
 | 单档部署被打扰 | 只有 claude/无档的用户看到多余 UI | picker/chip/面板字段全部 `≤1` 时隐藏（与 backend picker 同规则） |
@@ -416,7 +416,7 @@ type AgentOpts struct {
 
 ### 11.2 刻意保留的非对称
 
-cc child 走 `--setting-sources user` 直接读 `~/.claude/settings.json`（`direct-user-settings.md §7.1` 记录的有意非对称）。access profile overlay 作用于**子进程 env**，与 settings.json 的 `env` 段是两条路径：overlay 的 env 优先级**高于** settings.json（因为它在 cmd.Env 上覆盖）。需在文档明确：**access profile 覆盖 settings.json 的同名 env**（这正是我们要的——让项目档压过全局默认）。
+cc child 走 `--setting-sources user` 直接读 `~/.claude/settings.json`（direct-user-settings RFC §7.1 记录的有意非对称）。access profile overlay 作用于**子进程 env**，与 settings.json 的 `env` 段是两条路径：overlay 的 env 优先级**高于** settings.json（因为它在 cmd.Env 上覆盖）。需在文档明确：**access profile 覆盖 settings.json 的同名 env**（这正是我们要的——让项目档压过全局默认）。
 
 ### 11.3 未来：多账号 Bedrock（非本轮）
 

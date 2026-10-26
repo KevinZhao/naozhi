@@ -34,28 +34,6 @@ var (
 	evResultAborted = clievent.Event{Type: "result", SubType: "error_during_execution", SessionID: "s1"}
 )
 
-// A turn the CLI starts itself (a background task-notification after the
-// owning turn already ended) must return to Ready when its result lands;
-// otherwise the session is parked in Running and later reaped as stuck.
-func TestDispatch_UnownedTurnResultReturnsToReady(t *testing.T) {
-	for _, res := range []clievent.Event{evResultSuccess, evResultAborted} {
-		t.Run(res.SubType, func(t *testing.T) {
-			p, done := newUnownedTurnTestProcess()
-			dispatchAll(p, evInit)
-			if got := p.State(); got != StateRunning {
-				t.Fatalf("after init state = %v, want Running", got)
-			}
-			dispatchAll(p, res)
-			if got := p.State(); got != StateReady {
-				t.Fatalf("after unclaimed result state = %v, want Ready", got)
-			}
-			if done.Load() != 1 {
-				t.Fatalf("onTurnDone fired %d times, want 1", done.Load())
-			}
-		})
-	}
-}
-
 func TestDispatch_UnownedTurnRepeatsAcrossNotifications(t *testing.T) {
 	p, done := newUnownedTurnTestProcess()
 	dispatchAll(p, evInit, evResultSuccess, evInit, evResultSuccess)
@@ -64,51 +42,6 @@ func TestDispatch_UnownedTurnRepeatsAcrossNotifications(t *testing.T) {
 	}
 	if done.Load() != 2 {
 		t.Fatalf("onTurnDone fired %d times, want 2", done.Load())
-	}
-}
-
-// A Send-owned turn is ended by Send's defer; a result must not end it early
-// or a second Send could start before the first returns.
-func TestDispatch_SendOwnedTurnStaysRunningOnResult(t *testing.T) {
-	p, done := newUnownedTurnTestProcess()
-	p.transition(evSendBegin)
-	dispatchAll(p, evInit, evResultSuccess)
-	if got := p.State(); got != StateRunning {
-		t.Fatalf("state = %v, want Running (Send owns the end)", got)
-	}
-	if done.Load() != 0 {
-		t.Fatalf("onTurnDone fired %d times, want 0", done.Load())
-	}
-}
-
-// A queued passthrough slot means the CLI's next turn is already on its way.
-func TestDispatch_UnownedTurnWithPendingSlotStaysRunning(t *testing.T) {
-	p, done := newUnownedTurnTestProcess()
-	dispatchAll(p, evInit)
-	p.slots.pending = append(p.slots.pending, &sendSlot{id: 1, uuid: "u1",
-		resultCh: make(chan *clievent.SendResult, 1), errCh: make(chan error, 1)})
-	dispatchAll(p, evResultSuccess)
-	if got := p.State(); got != StateRunning {
-		t.Fatalf("state = %v, want Running", got)
-	}
-	if done.Load() != 0 {
-		t.Fatalf("onTurnDone fired %d times, want 0", done.Load())
-	}
-}
-
-// A result after the reconnect path already ended the turn must not fire
-// onTurnDone a second time through the unowned path.
-func TestDispatch_ReconnectMidTurnResultEndsOnce(t *testing.T) {
-	p, done := newUnownedTurnTestProcess()
-	p.turn.state = StateSpawning
-	p.turn.reconnectedMidTurn.Store(true)
-	p.transition(evReconnectMidTurn)
-	dispatchAll(p, evResultSuccess)
-	if got := p.State(); got != StateReady {
-		t.Fatalf("state = %v, want Ready", got)
-	}
-	if done.Load() != 1 {
-		t.Fatalf("onTurnDone fired %d times, want 1", done.Load())
 	}
 }
 

@@ -75,9 +75,6 @@ type ServerOptions struct {
 	// Lifecycle groups the startup hooks (S8, #2987).
 	Lifecycle LifecycleOptions
 
-	// Features groups the opt-in feature switches (S8, #2987).
-	Features FeatureOptions
-
 	// === Core dependencies ===
 	//
 	// The legacy New(addr, router, ..., opts) wrapper *overrides* matching
@@ -122,32 +119,6 @@ type IdentityOptions struct {
 type WatchdogOptions struct {
 	NoOutput time.Duration
 	Total    time.Duration
-}
-
-// FeatureOptions are the opt-in feature switches.
-type FeatureOptions struct {
-	// Debug gates registration of /api/debug/pprof and /api/debug/vars.
-	// Default false: both are 404 even for loopback+auth callers, so a leaked
-	// dashboard token cannot enumerate goroutine stacks (file paths, queue
-	// contents) or expvar counters. Set `server.debug_mode: true` only while
-	// capturing a profile.
-	Debug bool
-
-	// PublicTmp opts the __public_tmp__ pseudo-project in (#646). When
-	// false (default) that pseudo-project is a regular "project not found".
-	//
-	// SECURITY: MUST stay false on any shared / multi-operator deployment or
-	// where the dashboard token is shared. When enabled every authenticated
-	// dashboard user can read non-credential files anywhere under /tmp (the
-	// credential allowlist and foreign-private-UID gate block secrets and
-	// sockets, not general content). Accesses are audit-logged at Info
-	// ("public_tmp file access") (#1678).
-	PublicTmp bool
-
-	// ProjectStableKey toggles the per-project StableKey field in the
-	// /api/projects list response (docs/rfc/project-stable-session-key.md §4.2).
-	// When false the dashboard falls back to the timestamp-key "continue" path.
-	ProjectStableKey bool
 }
 
 // LifecycleOptions are the startup hooks.

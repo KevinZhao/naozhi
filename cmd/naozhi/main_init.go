@@ -39,19 +39,12 @@ func resolveLogLevel(level string) slog.Level {
 	}
 }
 
-// newLogHandler builds the slog.Handler for the configured format and level:
-// "text" selects a TextHandler, anything else (incl. default "json") a JSONHandler.
+// newLogHandler builds the JSON slog.Handler for the configured level.
 func newLogHandler(w *os.File, cfg *config.Config, level slog.Leveler) slog.Handler {
 	if level == nil {
 		level = resolveLogLevel(cfg.Log.Level)
 	}
-	opts := &slog.HandlerOptions{Level: level}
-	var h slog.Handler
-	if cfg.Log.Format == "text" {
-		h = slog.NewTextHandler(w, opts)
-	} else {
-		h = slog.NewJSONHandler(w, opts)
-	}
+	h := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level})
 	// trace_id / run_id / session_key from the ctx on every *Context log (#3436).
 	return ctxutil.NewHandler(h)
 }
@@ -88,13 +81,13 @@ func startWatchdogLoop(ctx context.Context, hc func() bool) {
 }
 
 // buildRemoteNodes constructs the multi-node aggregation client map from
-// cfg.Nodes; nil when none are configured (server treats nil and empty alike).
+// cfg.Workspaces; nil when none are configured (server treats nil and empty alike).
 func buildRemoteNodes(cfg *config.Config) map[string]node.Conn {
-	if len(cfg.Nodes) == 0 {
+	if len(cfg.Workspaces) == 0 {
 		return nil
 	}
-	nodes := make(map[string]node.Conn, len(cfg.Nodes))
-	for id, nc := range cfg.Nodes {
+	nodes := make(map[string]node.Conn, len(cfg.Workspaces))
+	for id, nc := range cfg.Workspaces {
 		nodes[id] = node.NewHTTPClient(id, nc.URL, nc.Token, nc.DisplayName)
 	}
 	return nodes

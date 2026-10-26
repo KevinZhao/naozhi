@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/apierr"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -177,8 +177,8 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) (pausedAfter int) {
 		// a no-op and can never reset a racing run-B's freshly-installed metadata.
 		// Broadcast last so hub locks aren't held while we hold s.tbl.mu.
 		rc.finalizer.finalize()
-		s.emitRunEnded(RunEndedEvent{
-			JobID:      rc.jobID,
+		s.emitRunEnded(runtelemetry.RunEndedEvent{
+			OwnerID:    rc.jobID,
 			RunID:      rc.runID,
 			State:      out.state,
 			StartedAt:  rc.startedAt,
@@ -189,7 +189,6 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) (pausedAfter int) {
 			ErrorMsg:   msg,
 			Trigger:    rc.trigger,
 		})
-		metrics.CronRunEndedTotal.Add(1)
 	}()
 	jobPersistOK := false
 	if !out.skipPersist {
@@ -199,14 +198,6 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) (pausedAfter int) {
 		persistedErrMsg = sanitiseRunErrMsg(persistedErrMsg)
 	}
 	errMsgSettled = true
-
-	// Bump per-state metric only AFTER persistence settles, so a marshal-failure
-	// rollback never leaves CronRunSucceededTotal +1 against a reverted Job.
-	// skipPersist paths bump unconditionally (no Job rollback is possible; the
-	// metric is their only durable record).
-	if out.skipPersist || jobPersistOK {
-		s.bumpRunStateMetrics(out.state)
-	}
 
 	// CronRun history 写盘条件：skipPersist=false、jobPersistOK=true、run store
 	// 启用。两步写盘非事务（#992）：先 cron_jobs.json 成功才 Append runs/；崩溃
@@ -338,8 +329,8 @@ func (s *Scheduler) emitSyntheticSkipped(jobID string, viaTriggerNow bool, errCl
 	if viaTriggerNow {
 		trigger = TriggerManual
 	}
-	s.emitRunStarted(RunStartedEvent{
-		JobID:     jobID,
+	s.emitRunStarted(runtelemetry.RunStartedEvent{
+		OwnerID:   jobID,
 		RunID:     runID,
 		StartedAt: startedAt,
 		Trigger:   trigger,

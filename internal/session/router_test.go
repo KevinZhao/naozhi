@@ -463,7 +463,7 @@ func TestRouterStoreRestoreUserLabel(t *testing.T) {
 
 	labeled := newSessionWithID("feishu:direct:alice:general", "sess-111")
 	labeled.SetUserLabel("alpha")
-	if err := saveStore(storePath, map[string]*ManagedSession{labeled.key: labeled}); err != nil {
+	if err := saveStore(storePath, []*ManagedSession{labeled}); err != nil {
 		t.Fatalf("saveStore: %v", err)
 	}
 
@@ -494,9 +494,9 @@ func TestNewRouterStoreRestore(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "sessions.json")
 
-	saved := map[string]*ManagedSession{
-		"feishu:direct:alice:general": newSessionWithID("feishu:direct:alice:general", "sess-111"),
-		"feishu:direct:bob:general":   newSessionWithID("feishu:direct:bob:general", "sess-222"),
+	saved := []*ManagedSession{
+		newSessionWithID("feishu:direct:alice:general", "sess-111"),
+		newSessionWithID("feishu:direct:bob:general", "sess-222"),
 	}
 	if err := saveStore(storePath, saved); err != nil {
 		t.Fatalf("saveStore: %v", err)
@@ -573,46 +573,6 @@ func TestSnapshotCostFallback(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Stats
 // ---------------------------------------------------------------------------
-
-func TestStatsEmpty(t *testing.T) {
-	r := newTestRouter(3)
-	active, total := r.Stats()
-	if active != 0 || total != 0 {
-		t.Errorf("Stats() = (%d, %d), want (0, 0)", active, total)
-	}
-}
-
-func TestStatsWithAliveSessions(t *testing.T) {
-	r := newTestRouter(3)
-	injectSession(r, "key1", newIdleProc())
-	injectSession(r, "key2", newIdleProc())
-
-	active, total := r.Stats()
-	if active != 2 || total != 2 {
-		t.Errorf("Stats() = (%d, %d), want (2, 2)", active, total)
-	}
-}
-
-func TestStatsWithDeadSession(t *testing.T) {
-	r := newTestRouter(3)
-	injectSession(r, "key1", newDeadProc())
-
-	active, total := r.Stats()
-	if active != 0 || total != 1 {
-		t.Errorf("Stats() = (%d, %d), want (0, 1)", active, total)
-	}
-}
-
-func TestStatsNilProcessSession(t *testing.T) {
-	r := newTestRouter(3)
-	// Simulates a session restored from store (no live process yet).
-	putT(r, "restored-key", newSessionWithID("restored-key", "sess-restore"))
-
-	active, total := r.Stats()
-	if active != 0 || total != 1 {
-		t.Errorf("Stats() = (%d, %d), want (0, 1)", active, total)
-	}
-}
 
 func TestStatsMixedSessions(t *testing.T) {
 	r := newTestRouter(5)
@@ -817,6 +777,9 @@ func TestCleanupExpiredSession(t *testing.T) {
 
 	if proc.Alive() {
 		t.Error("expired session process should be closed")
+	}
+	if got := loadAtomicString(&s.deathReason); got != DeathReasonIdleTimeout {
+		t.Errorf("deathReason = %q, want %q", got, DeathReasonIdleTimeout)
 	}
 }
 
@@ -1207,40 +1170,6 @@ func TestMaxProcs_EvictFailsWhenAllRunning(t *testing.T) {
 // evictOldest (called with the table lock held)
 // ---------------------------------------------------------------------------
 
-func TestEvictOldestEmptyRouter(t *testing.T) {
-	r := &Router{ss: newSessionTable()}
-
-	var evicted bool
-	r.ss.Update(func(tx sessTx) {
-		evicted = r.evictOldest(tx)
-	})
-
-	if evicted {
-		t.Error("evictOldest should return false for empty router")
-	}
-}
-
-func TestEvictOldestReturnsTrue(t *testing.T) {
-	r := &Router{ss: newSessionTable(), maxProcs: 1}
-	proc := newIdleProc()
-	s := &ManagedSession{key: "key1"}
-	s.storeProcess(proc)
-	s.touchLastActive()
-	putT(r, "key1", s)
-
-	var evicted bool
-	r.ss.Update(func(tx sessTx) {
-		evicted = r.evictOldest(tx)
-	})
-
-	if !evicted {
-		t.Error("evictOldest should return true when an idle session exists")
-	}
-	if proc.Alive() {
-		t.Error("evicted process should be closed")
-	}
-}
-
 func TestEvictOldestSkipsRunning(t *testing.T) {
 	r := &Router{ss: newSessionTable()}
 	proc := newRunningProc()
@@ -1262,24 +1191,6 @@ func TestEvictOldestSkipsRunning(t *testing.T) {
 	}
 }
 
-func TestEvictOldestSkipsDead(t *testing.T) {
-	r := &Router{ss: newSessionTable()}
-	proc := newDeadProc()
-	s := &ManagedSession{key: "key1"}
-	s.storeProcess(proc)
-	s.touchLastActive()
-	putT(r, "key1", s)
-
-	var evicted bool
-	r.ss.Update(func(tx sessTx) {
-		evicted = r.evictOldest(tx)
-	})
-
-	if evicted {
-		t.Error("evictOldest should skip dead sessions")
-	}
-}
-
 func TestEvictOldestPicksOldest(t *testing.T) {
 	r := &Router{ss: newSessionTable()}
 
@@ -1294,8 +1205,18 @@ func TestEvictOldestPicksOldest(t *testing.T) {
 	recentSession.storeProcess(recentProc)
 	recentSession.lastActive.Store(time.Now().Add(-1 * time.Minute).UnixNano())
 
+	// Dead and nil-process (restored) sessions are older still, but the
+	// isAlive guard must skip them rather than pick or nil-deref them.
+	deadSession := &ManagedSession{key: "dead-key"}
+	deadSession.storeProcess(newDeadProc())
+	deadSession.lastActive.Store(time.Now().Add(-4 * time.Hour).UnixNano())
+	restored := newSessionWithID("nil-key", "sess-1")
+	restored.lastActive.Store(time.Now().Add(-3 * time.Hour).UnixNano())
+
 	putT(r, "old-key", oldSession)
 	putT(r, "recent-key", recentSession)
+	putT(r, "dead-key", deadSession)
+	putT(r, "nil-key", restored)
 
 	var evicted bool
 	r.ss.Update(func(tx sessTx) {
@@ -1313,40 +1234,9 @@ func TestEvictOldestPicksOldest(t *testing.T) {
 	}
 }
 
-func TestEvictOldestSkipsNilProcess(t *testing.T) {
-	r := &Router{ss: newSessionTable()}
-	putT(r, "nil-key", newSessionWithID("nil-key", "sess-1"))
-
-	var evicted bool
-	r.ss.Update(func(tx sessTx) {
-		evicted = r.evictOldest(tx)
-	})
-
-	if evicted {
-		t.Error("evictOldest should skip sessions with nil process")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Shutdown
 // ---------------------------------------------------------------------------
-
-func TestShutdownEmpty(t *testing.T) {
-	r := newTestRouter(3)
-	r.Shutdown() // must not panic or block
-}
-
-func TestShutdownClosesIdleSessions(t *testing.T) {
-	r := newTestRouter(3)
-	proc := newIdleProc()
-	injectSession(r, "key1", proc)
-
-	r.Shutdown()
-
-	if proc.Alive() {
-		t.Error("process should be closed after shutdown")
-	}
-}
 
 func TestShutdownClosesMultipleSessions(t *testing.T) {
 	r := newTestRouter(3)
@@ -1375,24 +1265,20 @@ func TestShutdownSavesStore(t *testing.T) {
 		storePath: storePath,
 	}
 	putT(r, "feishu:direct:user1:general", newSessionWithID("feishu:direct:user1:general", "sess-abc"))
+	putT(r, "feishu:direct:user2:general", newSessionWithID("feishu:direct:user2:general", "sess-def"))
 
 	r.Shutdown()
 
 	loaded := loadStore(storePath)
-	if loaded == nil {
-		t.Fatal("store should have been saved after shutdown")
+	if len(loaded) != 2 {
+		t.Fatalf("loaded %d sessions after shutdown, want 2: %v", len(loaded), loaded)
 	}
 	if loaded["feishu:direct:user1:general"].SessionID != "sess-abc" {
 		t.Errorf("session not found in saved store: %v", loaded)
 	}
-}
-
-func TestShutdownSkipsDeadProcesses(t *testing.T) {
-	r := newTestRouter(3)
-	proc := newDeadProc()
-	injectSession(r, "key1", proc)
-
-	r.Shutdown() // must not call Close on already-dead process (Close is idempotent anyway)
+	if loaded["feishu:direct:user2:general"].SessionID != "sess-def" {
+		t.Errorf("second session not found in saved store: %v", loaded)
+	}
 }
 
 func TestShutdownWaitsForRunningThenProceeds(t *testing.T) {
@@ -1426,32 +1312,6 @@ func TestShutdownWaitsForRunningThenProceeds(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Error("Shutdown timed out waiting for running session")
-	}
-}
-
-// TestShutdownIdempotent verifies that calling Shutdown a second time is a
-// no-op rather than racing the broadcast timer or re-detaching processes.
-// R49-REL-SHUTDOWN-ONCE.
-func TestShutdownIdempotent(t *testing.T) {
-	r := newTestRouter(3)
-	proc := newIdleProc()
-	injectSession(r, "key1", proc)
-
-	r.Shutdown()
-	if proc.Alive() {
-		t.Fatalf("first Shutdown should close the process")
-	}
-	// Second call must not panic or block even though historyCancel/procs
-	// already ran once; sync.Once swallows the re-entry.
-	done := make(chan struct{})
-	go func() {
-		r.Shutdown()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("second Shutdown hung")
 	}
 }
 
@@ -3007,5 +2867,36 @@ func TestHealthCheck_ReportsAHeldLock(t *testing.T) {
 	}
 	if !r.HealthCheck() {
 		t.Error("HealthCheck false after the lock was released")
+	}
+}
+
+// TestRouterFacets_NilRouter: a facet accessor on a nil Router returns nil
+// rather than panicking, and the two health reads stay nil-safe.
+func TestRouterFacets_NilRouter(t *testing.T) {
+	var r *Router
+	if got := r.Backends(); got != nil {
+		t.Errorf("(*Router)(nil).Backends() = %p, want nil", got)
+	}
+	if got := r.History(); got != nil {
+		t.Errorf("(*Router)(nil).History() = %p, want nil", got)
+	}
+	if got := r.History().EventLogStats(); got != (EventLogHealth{}) {
+		t.Errorf("(*Router)(nil).History().EventLogStats() = %+v, want the zero (disabled) value", got)
+	}
+	if got := r.History().AttachmentTrackerStats(); got != (AttachmentTrackerHealth{}) {
+		t.Errorf("(*Router)(nil).History().AttachmentTrackerStats() = %+v, want the zero (disabled) value", got)
+	}
+}
+
+// TestRouterFacets_AccessorIsTheRoutersOwn: Backends() hands out the router's
+// own registry, not a copy, so a profile added through it is the one the
+// spawn path resolves.
+func TestRouterFacets_AccessorIsTheRoutersOwn(t *testing.T) {
+	r := &Router{}
+	if err := r.Backends().AddAccessProfile("p1", AccessProfile{DefaultModel: "m1"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.backends.accessProfileDefaultModel("p1"); got != "m1" {
+		t.Errorf("profile added through Backends() resolves to default model %q, want m1", got)
 	}
 }

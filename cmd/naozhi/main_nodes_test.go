@@ -6,7 +6,7 @@ import (
 	"github.com/naozhi/naozhi/internal/config"
 )
 
-// TestBuildRemoteNodes covers the cfg.Nodes → node.Conn map construction
+// TestBuildRemoteNodes covers the cfg.Workspaces → node.Conn map construction
 // extracted from main() in R237-ARCH-8 (#590): no nodes yields nil (so the
 // server's nil/empty equivalence holds and the "multi-node configured" log
 // stays silent), and each configured node produces exactly one client keyed
@@ -19,7 +19,7 @@ func TestBuildRemoteNodes(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		Nodes: map[string]config.NodeConfig{
+		Workspaces: map[string]config.NodeConfig{
 			"alpha": {URL: "https://a.example", Token: "t1", DisplayName: "Alpha"},
 			"beta":  {URL: "https://b.example", Token: "t2"},
 		},

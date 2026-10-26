@@ -1,7 +1,6 @@
 package upstream
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -126,7 +125,6 @@ func New(cfg *Config, router SessionRouter, projMgr *project.Manager, discovery 
 // success clears it. The per-attempt "connector disconnected" WARN still fires.
 func (c *Connector) Run(ctx context.Context) {
 	backoff := time.Second
-	connectorBackoffMillis.Set(backoff.Milliseconds())
 	consecutiveFailures := 0
 	circuitTripped := false
 	for {
@@ -146,7 +144,6 @@ func (c *Connector) Run(ctx context.Context) {
 				circuitTripped = false
 			}
 			backoff = time.Second
-			connectorBackoffMillis.Set(backoff.Milliseconds())
 		} else {
 			consecutiveFailures++
 			if consecutiveFailures >= circuitBreakerThreshold {
@@ -159,7 +156,6 @@ func (c *Connector) Run(ctx context.Context) {
 				}
 				if backoff < circuitBreakerBackoff {
 					backoff = circuitBreakerBackoff
-					connectorBackoffMillis.Set(backoff.Milliseconds())
 				}
 			}
 		}
@@ -175,7 +171,6 @@ func (c *Connector) Run(ctx context.Context) {
 			// pinned at circuitBreakerBackoff until the next successful connect.
 			if backoff < circuitBreakerBackoff {
 				backoff = min(backoff*2, reconnectBackoffCeiling)
-				connectorBackoffMillis.Set(backoff.Milliseconds())
 			}
 		}
 	}
@@ -310,16 +305,6 @@ func pingOnce(conn *websocket.Conn, writeMu *sync.Mutex) bool {
 	return true
 }
 
-// marshalResultBufPool reuses bytes.Buffer + json.Encoder scratch across
-// reverse-RPC replies (a busy primary fans out 5-50 calls/s). Buffers above
-// marshalResultMaxRetainBytes are dropped on Put so one large payload cannot
-// pin retained heap for steady-state small replies.
-var marshalResultBufPool = sync.Pool{
-	New: func() any { return new(bytes.Buffer) },
-}
-
-const marshalResultMaxRetainBytes = 64 * 1024
-
 // sanitizeWorkspacePath validates and canonicalises a remote-supplied
 // workspace / cwd path: EvalSymlinks + Clean + IsAbs + allowed-root prefix
 // gate shared by the send / takeover / close_discovered branches (#709).
@@ -351,32 +336,5 @@ func (c *Connector) sanitizeWorkspacePath(raw, kind string, tolerateMissing bool
 }
 
 func marshalResult(v any) (json.RawMessage, error) {
-	buf := marshalResultBufPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	enc := json.NewEncoder(buf)
-	// Encode appends a trailing '\n' the RPC reader does not expect; trimmed below.
-	if err := enc.Encode(v); err != nil {
-		// Reset clears partial output, so the buffer is safe to return to the
-		// pool (same oversized-drop policy as the happy path).
-		buf.Reset()
-		if buf.Cap() <= marshalResultMaxRetainBytes {
-			marshalResultBufPool.Put(buf)
-		} else {
-			marshalResultBufPool.Put(new(bytes.Buffer))
-		}
-		return nil, err
-	}
-	out := buf.Bytes()
-	if n := len(out); n > 0 && out[n-1] == '\n' {
-		out = out[:n-1]
-	}
-	// Copy out so the returned RawMessage is decoupled from the pooled
-	// buffer (the next Put would clobber it via Reset).
-	cp := append(json.RawMessage(nil), out...)
-	if buf.Cap() <= marshalResultMaxRetainBytes {
-		marshalResultBufPool.Put(buf)
-	} else {
-		marshalResultBufPool.Put(new(bytes.Buffer))
-	}
-	return cp, nil
+	return json.Marshal(v)
 }

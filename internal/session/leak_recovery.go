@@ -8,7 +8,6 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/envpolicy"
 	"github.com/naozhi/naozhi/internal/leakguard"
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // leakRecoveryEnvVar is the operator opt-in for auto-continuing a turn that
@@ -62,10 +61,6 @@ func (s *ManagedSession) recoverLeakedToolcall(
 		return result
 	}
 
-	// Detection fires regardless of the flag so the counter quantifies the
-	// true model-regression rate even while recovery is dark-launched off.
-	metrics.ToolCallLeakDetectedTotal.Add(1)
-
 	if !leakRecoveryEnabled() {
 		return result
 	}
@@ -82,13 +77,11 @@ func (s *ManagedSession) recoverLeakedToolcall(
 	rec, err := resend(ctx, leakContinuePrompt)
 	if err != nil {
 		// Process died mid-recovery: hand back the original body, XML stripped.
-		metrics.ToolCallLeakRecoveryFailedTotal.Add(1)
 		slog.Warn("leak-recovery: re-send failed", "key", s.key, "err", err)
 		return strippedResult(result)
 	}
 	if rec == nil || rec.Text == "" || leakguard.Detect(rec.Text) {
 		// Second-order leak (or empty). cap=1: do NOT retry.
-		metrics.ToolCallLeakRecoveryFailedTotal.Add(1)
 		slog.Warn("leak-recovery: model leaked again on retry (cap=1, giving up)",
 			"key", s.key)
 		if rec == nil || rec.Text == "" {
@@ -99,7 +92,6 @@ func (s *ManagedSession) recoverLeakedToolcall(
 		return strippedResult(rec)
 	}
 
-	metrics.ToolCallLeakRecoveredTotal.Add(1)
 	slog.Info("leak-recovery: recovered", "key", s.key)
 	// The retry's result is the turn's answer, every field of it: its CostUSD
 	// and ModelUsage are cumulative and already include the leaked turn, so

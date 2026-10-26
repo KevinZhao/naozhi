@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
@@ -287,5 +288,48 @@ func TestReattachProcess_PersistedHistoryCapTrim(t *testing.T) {
 		if n != 1 {
 			t.Errorf("summary %q appeared %d times; cap-trim must not duplicate", sum, n)
 		}
+	}
+}
+
+// TestInjectHistory_ForwardSliceIsDefensiveCopy: the slice handed to
+// proc.InjectHistory must not alias the persistedHistory backing array,
+// because proc consumes the slice across goroutine boundaries.
+func TestInjectHistory_ForwardSliceIsDefensiveCopy(t *testing.T) {
+	s := &ManagedSession{key: "test:defensive"}
+	captured := make(chan []clievent.EventEntry, 1)
+	s.storeProcess(&capturingProc{fakeProcess: newIdleProc(), captured: captured})
+
+	s.InjectHistory([]clievent.EventEntry{
+		{Type: "user", Summary: "first", Time: 1},
+		{Type: "text", Summary: "reply", Time: 2},
+	})
+
+	select {
+	case got := <-captured:
+		if len(got) != 2 {
+			t.Fatalf("forwarded len=%d, want 2", len(got))
+		}
+		got[0].Summary = "MUTATED"
+		s.historyMu.RLock()
+		stored := s.persistedHistory[0].Summary
+		s.historyMu.RUnlock()
+		if stored == "MUTATED" {
+			t.Error("forwarded slice aliased persistedHistory backing array")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("proc.InjectHistory was never called")
+	}
+}
+
+// capturingProc records the slice handed to InjectHistory.
+type capturingProc struct {
+	*fakeProcess
+	captured chan []clievent.EventEntry
+}
+
+func (c *capturingProc) InjectHistory(entries []clievent.EventEntry) {
+	select {
+	case c.captured <- entries:
+	default:
 	}
 }

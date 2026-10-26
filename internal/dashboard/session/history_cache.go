@@ -83,27 +83,6 @@ func historyContentTag(list []discovery.RecentSession) string {
 	return hex.EncodeToString(sum.Sum(b[:0])[:16])
 }
 
-// uptimeSnapshot is the value cached by uptimeCache: Bucket is whole seconds
-// since startedAt, Str the pre-formatted rendering at that resolution.
-type uptimeSnapshot struct {
-	Bucket int64
-	Str    string
-}
-
-// uptimeStringAt returns time.Since(startedAt).Round(time.Second).String()
-// memoised per 1-second bucket. Concurrent misses may format the same value;
-// last-writer-wins via unconditional Store is intentional.
-func (h *Handlers) uptimeStringAt(now time.Time) string {
-	d := now.Sub(h.deps.StartedAt).Round(time.Second)
-	bucket := int64(d / time.Second)
-	if cur := h.uptimeCache.Load(); cur != nil && cur.Bucket == bucket {
-		return cur.Str
-	}
-	s := d.String()
-	h.uptimeCache.Store(&uptimeSnapshot{Bucket: bucket, Str: s})
-	return s
-}
-
 // InitStaticStats pre-builds the immutable subset of /api/sessions stats so
 // HandleList only overlays the dynamic counters per poll. The Once guards
 // against a re-run racing with concurrent HandleList readers.
@@ -269,16 +248,13 @@ func (h *Handlers) loadHistorySessionsCtx(ctx context.Context) []discovery.Recen
 		all = mergePartialHistory(all, prev, excludeIDs, filter, cutoff, historyLimit)
 	}
 
-	// Resolve project names in batch using the pooled scratch slice (#616).
+	// Resolve project names in batch.
 	if h.deps.ProjectMgr != nil && len(all) > 0 {
-		wsPtr := borrowWorkspaces(len(all))
-		workspaces := *wsPtr
+		workspaces := make([]string, 0, len(all))
 		for _, rs := range all {
 			workspaces = append(workspaces, rs.Workspace)
 		}
-		*wsPtr = workspaces
 		wsMap := h.deps.ProjectMgr.ResolveWorkspaces(workspaces)
-		returnWorkspaces(wsPtr)
 		for i := range all {
 			all[i].Project = wsMap[all[i].Workspace]
 		}

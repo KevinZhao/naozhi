@@ -80,7 +80,6 @@ func (p *Persister) noteRunDrop(key string, n int, cause gapCause) {
 		return
 	}
 	p.droppedCnt.Add(int64(n))
-	p.opts.Observer.OnDrop(n)
 	p.holdGap(key, gapTally{n: int64(n), cause: cause})
 }
 

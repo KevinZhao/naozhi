@@ -55,8 +55,8 @@ func TestOverlapSkip_EmitsPairedStartedEnded(t *testing.T) {
 	}
 
 	ended := rec.endedAtCron(0)
-	if ended.JobID != j.ID {
-		t.Errorf("ended.JobID = %q, want %q", ended.JobID, j.ID)
+	if ended.OwnerID != j.ID {
+		t.Errorf("ended.OwnerID = %q, want %q", ended.OwnerID, j.ID)
 	}
 	if ended.State != RunStateSkipped {
 		t.Errorf("ended.State = %v, want RunStateSkipped", ended.State)
@@ -67,11 +67,6 @@ func TestOverlapSkip_EmitsPairedStartedEnded(t *testing.T) {
 	if ended.Trigger != TriggerManual {
 		t.Errorf("ended.Trigger = %v, want TriggerManual (viaTriggerNow=true)", ended.Trigger)
 	}
-
-	// Note: CronRunStartedTotal / CronRunSkippedTotal are process-global
-	// expvars; asserting an absolute delta here would race the other parallel
-	// cron tests. The per-test recordingBroadcaster frame counts above are the
-	// isolated, deterministic signal for this pin.
 
 	// Match the started/ended frame's RunID so the dashboard can correlate
 	// the pair — they must share the synthesised RunID.

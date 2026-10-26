@@ -139,14 +139,13 @@ func (r *subscriberRegistry) removeAuthLocked(c *wsClient) {
 }
 
 // remove unregisters c. It returns c's unsubscribe closures for the caller to
-// run, the keys that c's departure left with no subscriber, and whether c was
-// registered at all (a second remove is a no-op).
-func (r *subscriberRegistry) remove(c *wsClient) (unsubs []func(), emptied []string, removed bool) {
+// run and whether c was registered at all (a second remove is a no-op).
+func (r *subscriberRegistry) remove(c *wsClient) (unsubs []func(), removed bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cs, ok := r.clients[c]
 	if !ok {
-		return nil, nil, false
+		return nil, false
 	}
 	delete(r.clients, c)
 	r.authMu.Lock()
@@ -156,12 +155,10 @@ func (r *subscriberRegistry) remove(c *wsClient) (unsubs []func(), emptied []str
 		unsubs = make([]func(), 0, n)
 		for key, unsub := range cs.unsubs {
 			unsubs = append(unsubs, unsub)
-			if r.leaveLocked(c, key) {
-				emptied = append(emptied, key)
-			}
+			r.leaveLocked(c, key)
 		}
 	}
-	return unsubs, emptied, true
+	return unsubs, true
 }
 
 // drain unregisters every client for Shutdown, returning them and all their
@@ -206,9 +203,8 @@ func (r *subscriberRegistry) joinLocked(c *wsClient, key string) {
 	r.setCountFastLocked(key, len(set))
 }
 
-// leaveLocked removes c from key's subscriber set, reporting whether the key
-// is left with none. Caller holds mu.
-func (r *subscriberRegistry) leaveLocked(c *wsClient, key string) bool {
+// leaveLocked removes c from key's subscriber set. Caller holds mu.
+func (r *subscriberRegistry) leaveLocked(c *wsClient, key string) {
 	set := r.byKey[key]
 	delete(set, c)
 	if len(set) == 0 {
@@ -217,10 +213,9 @@ func (r *subscriberRegistry) leaveLocked(c *wsClient, key string) bool {
 		if set != nil && len(r.spareSets) < maxSpareSets {
 			r.spareSets = append(r.spareSets, set)
 		}
-		return true
+		return
 	}
 	r.setCountFastLocked(key, len(set))
-	return false
 }
 
 func (r *subscriberRegistry) setCountFastLocked(key string, n int) {
@@ -332,37 +327,37 @@ func (r *subscriberRegistry) install(c *wsClient, key string, unsub func(), admi
 	return cs.gen[key], true
 }
 
-// unsubscribe ends c's subscription to key, running its closure under mu. It
-// reports whether key is left with no subscriber.
-func (r *subscriberRegistry) unsubscribe(c *wsClient, key string, nowNanos int64) bool {
+// unsubscribe ends c's subscription to key, running its closure under mu.
+func (r *subscriberRegistry) unsubscribe(c *wsClient, key string, nowNanos int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cs, ok := r.clients[c]
 	if !ok {
-		return false
+		return
 	}
 	unsub, ok := cs.unsubs[key]
 	if !ok {
-		return false
+		return
 	}
 	unsub()
-	return r.dropLocked(c, cs, key, nowNanos)
+	r.dropLocked(c, cs, key, nowNanos)
 }
 
 // expire ends c's subscription to key like unsubscribe, but hands the closure
 // back for the caller to run after mu is released.
-func (r *subscriberRegistry) expire(c *wsClient, key string, nowNanos int64) (stale func(), emptied bool) {
+func (r *subscriberRegistry) expire(c *wsClient, key string, nowNanos int64) func() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cs, ok := r.clients[c]
 	if !ok {
-		return nil, false
+		return nil
 	}
-	stale, ok = cs.unsubs[key]
+	stale, ok := cs.unsubs[key]
 	if !ok {
-		return nil, false
+		return nil
 	}
-	return stale, r.dropLocked(c, cs, key, nowNanos)
+	r.dropLocked(c, cs, key, nowNanos)
+	return stale
 }
 
 // dropLocked removes key from c's subscriptions, advances its generation and
@@ -374,16 +369,15 @@ func (r *subscriberRegistry) expire(c *wsClient, key string, nowNanos int64) (st
 // answers. Advancing the generation is what tells it the key was given up.
 // gen[key] itself stays until the retention passes, so a fresh subscribe does
 // not restart at a value a parked loop remembers.
-func (r *subscriberRegistry) dropLocked(c *wsClient, cs *clientSubs, key string, nowNanos int64) bool {
+func (r *subscriberRegistry) dropLocked(c *wsClient, cs *clientSubs, key string, nowNanos int64) {
 	delete(cs.unsubs, key)
 	cs.gen[key]++
-	emptied := r.leaveLocked(c, key)
+	r.leaveLocked(c, key)
 	if cs.releaseAt == nil {
 		cs.releaseAt = make(map[string]int64)
 	}
 	cs.releaseAt[key] = nowNanos + subGenRetentionNanos
 	cs.sweepExpired(nowNanos)
-	return emptied
 }
 
 // sweepExpired reclaims generations whose retention has passed. It scans at
@@ -483,10 +477,4 @@ func (r *subscriberRegistry) count(key string) int32 {
 		return 0
 	}
 	return v.(*atomic.Int32).Load()
-}
-
-// singleSubscriber reports whether key has exactly one subscriber; 0 is
-// false, so only the strict single-tab case takes the fast path.
-func (r *subscriberRegistry) singleSubscriber(key string) bool {
-	return r.count(key) == 1
 }

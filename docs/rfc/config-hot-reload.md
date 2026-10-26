@@ -169,7 +169,7 @@ IM 和 cron 共用一个 `budget.Gate`，上限放在 `atomic.Pointer[Limits]` �
 ## 5. 测试
 
 - config：`HotChanged` / `RestartRequired` 表驱动（只改 `log.level` → 只在 hot
-  集；改 `log.format` → restart；改 `cli.model` → restart；改 `im_rate_limit` →
+  集；改 `log.format` → restart（该键已在 #3782 删除）；改 `cli.model` → restart；改 `im_rate_limit` →
   hot；派生 `yaml:"-"` 字段差异不计入）；`cost.budget` 改上限 / action → hot，
   启动无上限时加上限、改时区 → restart，`cost` 其它字段 → restart
 - budget：`SetLimits` 调低 / 改 action / 清空 / 再加回，及与检查并发（`-race`）

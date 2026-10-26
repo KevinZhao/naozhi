@@ -43,12 +43,8 @@ const (
 // Defaults for the values resolveFallbackValues caches; the accessors apply
 // them to a zero (unset or unusable) cached value.
 const (
-	defaultShimIdleTimeout      = 4 * time.Hour
-	defaultShimWatchdogTimeout  = 30 * time.Minute
-	defaultShimMaxBufferBytes   = 50 << 20
-	defaultStdioMaxSize         = 64 << 20 // about eleven days of INFO-level stdout
-	defaultSysessionTick        = 30 * time.Second
-	defaultSysessionJSONLMaxAge = 7 * 24 * time.Hour
+	defaultShimIdleTimeout = 4 * time.Hour
+	defaultSysessionTick   = 30 * time.Second
 )
 
 // orDefault returns v, or def when v is zero.
