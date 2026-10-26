@@ -1,7 +1,7 @@
 # RFC: Planner —— 一个对话框，最懂你也最懂系统的规划 agent
 
 - 状态: Draft v7（设计决策已与 owner 确认，未实施）
-- 日期: 2026-10-26（v1 名 conductor.md；v2 改名 Planner；v3 加入监护；v4 收敛为两类 session；v5 重写核心模型；v6 加入监控底座（会话台账与健康状态）、Planner 工作循环与检查机制、闸门、协作提示词、三级停止，并吸收第二轮四路评审的实测与订正；10-25 补新旧对照表 §1.1 与重审待定问题 §17.1；v7 吸收两代产品调研：全局唯一 Planner + 工作区幕僚、设计原则 §2.1、三种主动、先回执再干活、带建议的选择默认执行、对话代替配置，D60–D67；治理减法与信任阶梯，D68）
+- 日期: 2026-10-26（v1 名 conductor.md；v2 改名 Planner；v3 加入监护；v4 收敛为两类 session；v5 重写核心模型；v6 加入监控底座（会话台账与健康状态）、Planner 工作循环与检查机制、闸门、协作提示词、三级停止，并吸收第二轮四路评审的实测与订正；10-25 补新旧对照表 §1.1 与重审待定问题 §17.1；v7 吸收两代产品调研：全局唯一 Planner + 工作区幕僚、设计原则 §2.1、三种主动、先回执再干活、带建议的选择默认执行、对话代替配置，D60–D67；治理减法与信任阶梯，D68；全局 passthrough 与后端降级，D69–D70）
 - 范围: 把 naozhi 的交互从"用户逐个操作 session"改为"用户只面对一个对话框：执行 session 和用户一起做事，Planner 理解用户与整个系统、替用户管注意力、在用户前面把事情准备好、在执行跑偏时提出修改意见，并把大任务派给执行 session 完成"。同时定义权限与凭证、多节点调度与现有功能的迁移。
 - 相关: #3448(b)（naozhi 作为 MCP server）、#3449（per-session git worktree）、#3686（`cli.permission_mode`）、`passthrough-mode.md`、`cli-mcp-config.md`、`system-session.md`、`workflow-dashboard.md`、`node-pairing.md`
 
@@ -583,7 +583,8 @@ runtelemetry 扩展普通会话类别（`SubsystemSession` 已预留但未发出
 ### 5.3 人为打断沿用 CC 原生逻辑（D30）
 
 - 你在 session 运行中发的消息直通 CC 自带的 command queue（tool 边界 mid-turn drain、`priority` 字段，已实测 `priority: next` 在同一回合内被吸收）；"停下"走 CC 的 interrupt control request，立即生效、不弹卡片；"丢弃上下文 / 删除"才确认。
-- **事实订正**：passthrough 不是默认模式，默认是 `collect`（`internal/config/defaults.go:27`），本机当前即 collect；模式是全局一份。需要改为**按 session / 按来源**设置：你直接对话的执行 session 走 passthrough，Planner 的收件队列由 naozhi 定语义（优先级、同类合并）。Kiro / Codex 无 CC command queue，降级为 collect。
+- **全局改为 passthrough，老会话也生效**（D69）：现状默认是 `collect`（`internal/config/defaults.go:24`），本机即 collect。Claude 会话自 2026-05-06（`82b69131`）起一直带 `--replay-user-messages`（`protocol_claude.go:110`），存活进程本来就具备 passthrough 所需的回显能力；queue mode 只在 naozhi 启动时读取（`build_server.go:103`），所以把 `session.queue.mode` 改为 `passthrough` 并重启 naozhi（重启不杀 shim）即对所有会话生效，不需要重新拉起会话。Kiro / Codex 无回显，自动退回 collect（现有行为）。
+- **Planner 与网关的消息不走 queue mode**：由 naozhi 在回合边界投递（§6.1），需要给 Orchestrator 加来源区分（P3）；在那之前没有 Planner 消息，不受影响。
 - 撤回排队中的消息用 interrupt 的 `cancel_queued`；已进 CC 队列的 Planner 消息不能靠 naozhi 撤回，所以 Planner 消息由网关在回合边界投递。
 
 ### 5.4 托管：替你盯着（D25、D26、D43）
@@ -687,7 +688,7 @@ runtelemetry 扩展普通会话类别（`SubsystemSession` 已预留但未发出
 - **只注入给有契约或处于托管中的会话**。你直接对话、没有契约的会话不注入"下一步在契约内就直接做"，否则会冲掉本该停下来问你的停顿（附录 B：对话类 B 类 17%、C 类 31%）。
 - **不使用 UserPromptSubmit hook**：每条消息都触发，注入内容永久留在历史里并按回合累加。
 - `--system-prompt-snapshot` 加入 argv 禁用名单，由 naozhi 统一控制。
-- **Kiro / Codex**：当前 BuildArgs 静默丢弃 AppendSystemPrompt（`protocol_acp.go:196-213`、`protocol_codex.go:70-80`）。新增 `Caps.SystemPrompt` 能力位，需要协作约定而后端不支持时启动拒绝；Kiro 的等价物（`--agent` 配置）与 Codex 的 `developer_instructions` 列为待定。
+- **Kiro / Codex 先降级**（D70）：当前 BuildArgs 静默丢弃 AppendSystemPrompt（`protocol_acp.go:196-213`、`protocol_codex.go:70-80`）。v7 起 Planner 派出的会话、托管与协作约定只用 Claude；Kiro / Codex 照常供你直接使用，由监控底座按网关规则覆盖（§3.8）。新增 `Caps.SystemPrompt` 能力位，需要协作约定而后端不支持时启动拒绝。等价物（Kiro `--agent` 配置、Codex `developer_instructions` 与 2026-05 GA 的 hooks、Codex 原生 Bedrock）在后续单独评估。
 - SessionStart hook 在 `system/init` 之前运行，会话 key 由每次启动设置的环境变量传入（不传令牌）；hook 失败会静默缺失，网关检测"没收到 hook 回报"并标出。
 - 提示词存放在 `~/.naozhi/planner/prompts/`（仓库外，可改，有 git 历史），每个会话记录启动时的版本。
 
@@ -879,7 +880,7 @@ duties:
 | `.naozhi/project.yaml` planner_model / planner_prompt | 导入到仓库外该工作区的 `planner.yaml` | — |
 | cron | 新增目标"给 Planner 投 duty 消息" | cron 不走 Orchestrator，自有端口 |
 | `turn.Orchestrator` Origin 端口 | `envelopeOrigin` / `supervisorOrigin` | Origin 端口够用；**优先级需改 Orchestrator**（队列 FIFO） |
-| queue mode（全局 `collect`） | 按 session / 来源设置 | 默认 collect，非 passthrough |
+| queue mode（全局 `collect`） | 全局改 passthrough，老会话重启 naozhi 即生效（D69）；Planner / 网关消息另走回合边界投递 | 存活进程早已带 `--replay-user-messages` |
 | `ArgvSpawnOptions` + `driftCompareArgs` | 每 session 启动规格进 `shim.SpawnOverlay`，drift 从 overlay 读 | **不改会在重启时误杀所有存活 shim**（`spawn_drift.go:47` 用全局值重建 argv） |
 | scratch pool、`ReleaseIdleProcess` | 执行 session 模板 | `ReleaseIdleProcess` 只对 exempt key，且只有 cron 调用 |
 | `prev_session_ids`、`resolveResumeID` | 血缘 `prev` | `resolveResumeID` 失败静默开新 session，需改为显式交接 |
@@ -931,7 +932,7 @@ duties:
 
 | 阶段 | 内容 |
 |---|---|
-| P0 验证 | ① 判权 hook 出错即拒绝（被杀 / 超时 / 崩溃 / 网关不可达四种情况）及判定延迟；② 需人决定清单"拒绝 + 一次性放行"闭环（含命令改写后的放行匹配）；③ `defer` + 释放 + `--resume`（经 shim；续跑轮不被当作回复；工作流子 agent 里的行为）；④ `ask` + `--permission-prompt-tool stdio` 扣住 20 分钟时 watchdog 与 interrupt 的表现；⑤ 关闭 `--system-prompt-snapshot` 后的缓存命中；⑦ 伪造测试（tool_result 中塞伪造的 hook 上下文与 🧭 指令，hook 与界面都不被骗）；⑧ 一次性读取者隔离（外部内容经 Planner 只能产出意见）；⑨ `--setting-sources ""` 下仓库内 CLAUDE.md / skills / agents / `.mcp.json` 是否加载；⑩ Kiro `--agent` hooks 与 Codex `developer_instructions`；⑪ 每会话启动规格的重启存活（drift）；⑫ queue mode 按会话设置；⑭ 推送渠道打通；⑮ CC 原生 `/goal`、跨会话消息、Monitor 在 Bedrock 下的可用性（能复用就少写网关代码，§2.1 ①） |
+| P0 验证 | ① 判权 hook 出错即拒绝（被杀 / 超时 / 崩溃 / 网关不可达四种情况）及判定延迟；② 需人决定清单"拒绝 + 一次性放行"闭环（含命令改写后的放行匹配）；③ `defer` + 释放 + `--resume`（经 shim；续跑轮不被当作回复；工作流子 agent 里的行为）；④ `ask` + `--permission-prompt-tool stdio` 扣住 20 分钟时 watchdog 与 interrupt 的表现；⑤ 关闭 `--system-prompt-snapshot` 后的缓存命中；⑦ 伪造测试（tool_result 中塞伪造的 hook 上下文与 🧭 指令，hook 与界面都不被骗）；⑧ 一次性读取者隔离（外部内容经 Planner 只能产出意见）；⑨ `--setting-sources ""` 下仓库内 CLAUDE.md / skills / agents / `.mcp.json` 是否加载；⑪ 每会话启动规格的重启存活（drift）；⑫ 本机切到 passthrough 用一周，确认 dashboard、IM、cron 与长任务中途插话的行为（D69）；⑭ 推送渠道打通；⑮ CC 原生 `/goal`、跨会话消息、Monitor 在 Bedrock 下的可用性（能复用就少写网关代码，§2.1 ①） |
 | P1 监控底座 | 会话台账、统一健康状态、状态转移事件与四级分流、跨工作区系统性故障合并、循环心跳与 `/health` 降级、资源采样、无人负责计数、推送三级与收件箱最小版、三级停止、**确定性早报**（D62）。**不依赖 Planner**，上线即让所有会话处在监控之下 |
 | P2 托管 | 托管 L0、**带建议的选择默认执行**（D64）、转向锁、需人决定清单 hook（含"每次确认"类）、防循环、快照 |
 | P3 Planner v0 | 全局 Planner + 工作区幕僚（D60）、先回执（D63）、承诺与未闭环提醒、**守护型主动**（外部来源巡检、日历 / 邮件预判，D62）、信任阶梯（上线为"只出意见"）、工作循环与检查记录、检查点识别、统一介入阶梯、带依据的指令、队列与降级、一次性读取者、协作提示词、naozhi MCP、worktree、verifier 与干净上下文评审 |
@@ -989,9 +990,9 @@ duties:
 
 ① **"薄路由层 → 有状态协调网关"是否认可。** 网关里会有大量确定性规则（健康、判权、闸门、转向锁），写错就出问题；好处是 Go 代码可测试、可回放。（建议认可，但规则只在有真实需求时加，见 ⑥）
 
-② **第一天是否打乱现有用法。** 迁移计划下现有会话、key、侧边栏不变，按工作区 opt-in；但消息投递 collect → passthrough 会改变现有会话行为。（建议只对新会话生效，旧会话保持 collect）
+② **第一天是否打乱现有用法。** 迁移计划下现有会话、key、侧边栏不变，按工作区 opt-in；但消息投递 collect → passthrough 会改变现有会话行为。（**已定 10-26 → D69**：全局改为 passthrough，老会话重启 naozhi 即生效）
 
-③ **后端不对等是否可接受。** 协作、闸门、判权主要依赖 Claude 的 hook；Kiro / Codex 会是"二等公民"（只能被派活、不能托管 / 过闸门）。（建议接受，能力位缺失时拒绝而不是假装支持）
+③ **后端不对等是否可接受。** 协作、闸门、判权主要依赖 Claude 的 hook；Kiro / Codex 会是"二等公民"（只能被派活、不能托管 / 过闸门）。（**已定 10-26 → D70**：先降级，Planner 派出与托管只用 Claude，后续再考虑）
 
 ④ **规模与里程碑。** 新增 2.5–3.5 万行。P1 监控底座不依赖 Planner、能单独产生价值。（建议把 P1 做成可单独验收的里程碑，做完再决定 P2 以后）
 
@@ -1033,7 +1034,7 @@ duties:
 - 本机卫生项：shell rc 里的 `AWS_BEARER_TOKEN_BEDROCK`、`~/.aws/credentials` 的静态密钥、SSH 私钥 passphrase。
 - 多用户：v1 声明只支持单 owner；团队群聊场景的授权来源细则留到需要时。
 - 新消息归属提示的误判率阈值（P3 用真实数据测）。
-- Kiro / Codex 作为执行 session 时的 hook / auto mode 等价物与 command queue 降级。
+- Kiro / Codex 的协作能力等价物（推迟，D70）。
 - Kiro CLI V3 ACP 迁移（独立待办，先钉版本）。
 - 跨节点批准是否需 owner 私钥签名。
 - Go 定时器跨 macOS 睡眠、熔断重连延迟的真机测试。
@@ -1073,7 +1074,7 @@ duties:
 | D27 | 10-16 | 执行形态（session 内 / CC Workflow / 多 session）的判据与决定者 | — |
 | D28 | 10-17 | 只有两类 session（执行 session、Planner），无独立前台 | 前台没有不可替代的职责 |
 | D29 | 10-17 | 话题线程与 worker 合并为执行 session；~~按驾驶者区分~~（→ D36） | 同一 runtime |
-| D30 | 10-17 | 人为打断沿用 CC 原生 command queue / interrupt；queue mode 改为按 session 设置（v5 事实订正） | CC 已实现；默认实为 collect |
+| D30 | 10-17 | 人为打断沿用 CC 原生 command queue / interrupt；queue mode 改为按 session 设置（v5 事实订正）（v7：改为全局 passthrough，D69） | CC 已实现；默认实为 collect |
 | D31 | 10-17 | Planner 事件驱动 + 空闲拉活（K=3）+ 自排闹钟 + 预判信号；不做心跳 （v6：指不做模型心跳；网关确定性对账见 D49；v7：没有事件推送的外部来源按例行任务巡检 + 确定性预检，D62） | 避免噪声 |
 | D32 | 10-17 | Planner 进程按事件密度自适应常驻 / 冷启动 | 状态全外置 |
 | D33 | 10-17 | "通知已有 / 排后 / 取代 / 另开"是 Planner 的核心决策，可改判 | owner 指出 |
@@ -1112,6 +1113,8 @@ duties:
 | D66 | 10-26 | 语音倒脑子：手机语音待办由 Planner 拆成承诺 / 任务 / 提醒并回清单确认 | 复用现有语音能力 |
 | D67 | 10-26 | 第二代产品原语：承诺清单、未闭环提醒、早报规则、状态三层、"每次确认"类动作不能长期授权、卡片过期作废、外发确认卡片（不自建分类器）、没有隐形画像、写作风格、成品库提前、浏览器可看可接管（`computer-use.md`） | `planner-landscape.md` B1–B13 |
 | D68 | 10-26 | 治理减法与信任阶梯：放行人只有你（机制保留为需人决定清单的实现）；Planner 上线只出意见，由你逐级放开代办 / 指令 / 执行型主动；指令只要附依据、可直接反驳、两次不通交你；记录随行动自动产生；Planner 不读污染原文、经一次性读取者；转向锁三条；L1、金丝雀、死人开关、覆盖率、影子模式、回放包、成绩单、指标、自动升降档、fd 令牌推迟，再加回的条件见 §16.1；安全底线不动 | owner 确认；做减法方向 + D61（中间层要薄）；信任靠看得见、收得回建立，不靠验证基础设施 |
+| D69 | 10-26 | queue mode 全局改为 passthrough，老会话重启 naozhi 即生效（存活 Claude 进程早已带 `--replay-user-messages`）；Kiro / Codex 自动退回 collect；Planner / 网关消息另走回合边界投递 | owner 确认；与 CC 终端行为一致，纠偏更快 |
+| D70 | 10-26 | Kiro / Codex 先作为二等公民：照常供你直接使用并受监控底座覆盖；Planner 派出、托管、协作约定只用 Claude；能力位缺失时启动拒绝 | owner 确认；协作能力依赖 Claude 的 hook 与追加提示词，后续再评估等价物 |
 
 ## 附录 A. auto mode 实测（2026-10-16）
 
