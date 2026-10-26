@@ -66,16 +66,6 @@ type NodeConfig struct {
 	Insecure    bool   `yaml:"insecure"` // allow plaintext HTTP without authentication
 }
 
-// LogValue implements slog.LogValuer so the bearer Token never lands in logs.
-func (c NodeConfig) LogValue() slog.Value {
-	return slog.GroupValue(
-		slog.String("url", c.URL),
-		slog.String("token", redactSecret(c.Token)),
-		slog.String("display_name", c.DisplayName),
-		slog.Bool("insecure", c.Insecure),
-	)
-}
-
 // UpstreamConfig configures this node to connect as a reverse node to a primary.
 type UpstreamConfig struct {
 	URL         string `yaml:"url"`
@@ -83,26 +73,6 @@ type UpstreamConfig struct {
 	Token       string `yaml:"token"`
 	DisplayName string `yaml:"display_name"`
 	Insecure    bool   `yaml:"insecure"`
-}
-
-// LogValue implements slog.LogValuer so the bearer Token never lands in logs.
-func (c UpstreamConfig) LogValue() slog.Value {
-	return slog.GroupValue(
-		slog.String("url", c.URL),
-		slog.String("node_id", c.NodeID),
-		slog.String("token", redactSecret(c.Token)),
-		slog.String("display_name", c.DisplayName),
-		slog.Bool("insecure", c.Insecure),
-	)
-}
-
-// redactSecret returns a fixed placeholder for non-empty secrets and "" for
-// unset ones, so logs distinguish "configured" from "absent" without leaking length.
-func redactSecret(s string) string {
-	if s == "" {
-		return ""
-	}
-	return "[REDACTED]"
 }
 
 // AccessProfile is a NAMED bundle of "how to reach the model": a whitelisted
