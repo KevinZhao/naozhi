@@ -117,9 +117,8 @@ const (
 
 // Wrapper manages spawning CLI processes via shim.
 //
-// ShimManager conflates protocol with transport; until a cli.Transport
-// interface splits them, treat it as the *only* transport (nil disables
-// Spawn). Wrapper is otherwise immutable after NewWrapper.
+// ShimManager is the only transport (nil disables Spawn). Wrapper is
+// otherwise immutable after NewWrapper.
 type Wrapper struct {
 	BackendID   string // "claude" | "kiro" | future backends
 	CLIPath     string
@@ -175,27 +174,6 @@ func NewWrapperLazy(cliPath string, proto Protocol, backend string) *Wrapper {
 	return newWrapperCommon(cliPath, proto, backend)
 }
 
-// Manager returns the wrapper's transport (today *shim.Manager); prefer it over
-// the ShimManager field, which goes unexported once cli.Transport lands (#721).
-// Nil-safe on a nil receiver or an unset manager.
-func (w *Wrapper) Manager() *shim.Manager {
-	if w == nil {
-		return nil
-	}
-	return w.ShimManager
-}
-
-// WithManager injects the transport and returns the receiver for fluent
-// construction. It is the forward-compatible write path (#405): when the field
-// goes unexported behind cli.Transport (#721) only this body changes. Nil-safe.
-func (w *Wrapper) WithManager(m *shim.Manager) *Wrapper {
-	if w == nil {
-		return nil
-	}
-	w.ShimManager = m
-	return w
-}
-
 // Probe runs `<cli> --version` under the caller's context (still capped at 5s
 // internally) and stores the parsed result in w.CLIVersion, also returning it.
 // Safe to call repeatedly; intended for NewWrapperLazy callers once a stopCtx
@@ -221,10 +199,6 @@ func ResolveCLIPath(cliPath, backend string) string {
 // newWrapperCommon is the shared constructor body for NewWrapper and NewWrapperLazy.
 func newWrapperCommon(cliPath string, proto Protocol, backend string) *Wrapper {
 	cliPath = ResolveCLIPath(cliPath, backend)
-	// Defense-in-depth argv hygiene (cliPath goes straight to exec.Command).
-	// Warn-only: construction must succeed with a not-yet-installed CLI or a
-	// test-fixture path; enforceCLIPathSafe at spawn is the hard gate.
-	validateCLIPath(cliPath)
 	id := normalizeBackendID(backend)
 	// Warn on unrecognised ids (a typo like "claud" would otherwise only fail at
 	// spawn); warn-only so test fixtures / experimental backends still construct.
@@ -272,51 +246,8 @@ func normalizeBackendID(backend string) string {
 	}
 }
 
-// validateCLIPath Warns when cliPath fails argv hygiene (non-absolute, or
-// non-regular / non-executable when the file exists). Empty path and ENOENT are
-// NOT warnings: the CLI may not be installed yet and the spawn-time error covers
-// that. Warn-only because NewWrapper runs at startup before any IM request can
-// arrive and failing would block test fixtures / uninstalled deployments.
-func validateCLIPath(cliPath string) {
-	if cliPath == "" {
-		return
-	}
-	if !filepath.IsAbs(cliPath) {
-		slog.Warn("cli: cliPath is not absolute; argv hygiene risk",
-			"path", osutil.SanitizeForLog(cliPath, 256))
-		return
-	}
-	fi, err := os.Lstat(cliPath)
-	if err != nil {
-		// ENOENT is fine (not installed yet); other errors — symlink loops,
-		// permission denied — are real surface to operators.
-		if !os.IsNotExist(err) {
-			slog.Warn("cli: cliPath Lstat failed",
-				"path", osutil.SanitizeForLog(cliPath, 256),
-				"err", err)
-		}
-		return
-	}
-	mode := fi.Mode()
-	// Regular file or symlink (resolved at exec time). FIFOs, devices, sockets
-	// are argv-injection vectors when the kernel re-interprets the file type.
-	if !mode.IsRegular() && mode&os.ModeSymlink == 0 {
-		slog.Warn("cli: cliPath is not a regular file or symlink",
-			"path", osutil.SanitizeForLog(cliPath, 256),
-			"mode", mode.String())
-		return
-	}
-	// Executable bit on user/group/other. Symlinks don't carry it reliably, so
-	// skip them — exec.Command surfaces a non-exec target.
-	if mode.IsRegular() && mode.Perm()&0o111 == 0 {
-		slog.Warn("cli: cliPath has no executable bit set",
-			"path", osutil.SanitizeForLog(cliPath, 256),
-			"mode", mode.String())
-	}
-}
-
-// enforceCLIPathSafe is the spawn-time hard gate behind validateCLIPath: it
-// errors iff cliPath is non-absolute or a dangerous file type (FIFO, device,
+// enforceCLIPathSafe is the spawn-time hard gate on cliPath: it errors iff
+// cliPath is non-absolute or a dangerous file type (FIFO, device,
 // socket, directory). By now an attacker-controllable IM session key has
 // triggered the spawn, and a relative name would be re-resolved against the
 // live PATH / CWD by exec.Command — a PATH-poisoning vector. Empty path and
@@ -486,9 +417,8 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 		return nil, fmt.Errorf("cwd contains NUL byte")
 	}
 
-	// Spawn-time argv hygiene: validateCLIPath is warn-only, but an IM message is
-	// now in flight, so refuse FIFO / device / socket / dir here. ENOENT and empty
-	// path still pass — the shim spawn produces the more diagnostic error.
+	// Spawn-time argv hygiene: refuse relative paths and FIFO / device / socket /
+	// dir. ENOENT and empty path pass — the shim spawn gives the better error.
 	if err := enforceCLIPathSafe(w.CLIPath); err != nil {
 		return nil, fmt.Errorf("cli path unsafe: %w", err)
 	}
@@ -517,28 +447,6 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 	if err != nil {
 		handle.Close()
 		return nil, fmt.Errorf("drain replay: %w", err)
-	}
-
-	// Warn on protocol_version mismatch (hot-upgrade may mix an older shim with a
-	// newer naozhi; silent mismatch shows up as cryptic framing bugs). Not fatal:
-	// older shims emit 0, so refusing would break every forward migration.
-	if hv := handle.Hello.ProtocolVersion; hv != shim.ProtocolVersion {
-		slog.Warn("shim protocol_version mismatch",
-			"shim", hv,
-			"naozhi", shim.ProtocolVersion,
-			"key", opts.Key,
-		)
-		// Error (still non-fatal) when outside [MinSupportedProtocolVersion,
-		// ProtocolVersion] so a rolling-deploy mismatch is loud in journalctl; v0
-		// ("field absent") is the pre-v1 bootstrap shape and must keep attaching.
-		if hv > 0 && (hv < shim.MinSupportedProtocolVersion || hv > shim.ProtocolVersion) {
-			slog.Error("shim protocol_version outside supported range; reattach may misframe",
-				"shim", hv,
-				"min_supported", shim.MinSupportedProtocolVersion,
-				"max_supported", shim.ProtocolVersion,
-				"key", opts.Key,
-			)
-		}
 	}
 
 	cliPID := 0

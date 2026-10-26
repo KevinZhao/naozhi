@@ -1,15 +1,11 @@
-/* mobile_polish.css — extracted verbatim from dashboard.html's inline <style> block
- * (#2559 D6). The split is sequential: each file is a contiguous slice of the
- * original block and dashboard.html links them in the same order, so the
- * cascade (later rule wins at equal specificity, @media position) is
- * unchanged. Edit a view's rules here, next to the module that renders it.
- */
+/* mobile_polish.css — dashboard.html links the css files in a fixed order that the
+ * cascade depends on (later rule wins at equal specificity); keep it. */
 /* ---- Track A: touch-target sizing on coarse pointers (mobile + tablet) ---- */
 /* WCAG 2.5.5 Target Size — minimum 44x44 on touch input.
    Uses (pointer:coarse) so mouse-driven desktops keep their compact sizes. */
 @media (pointer: coarse){
   .btn-icon,.btn-send,.btn-stop{min-width:44px;min-height:44px}
-  /* R110-P1 touch-target: bump to WCAG AAA 44x44 baseline (matched to
+  /* touch-target: bump to WCAG AAA 44x44 baseline (matched to
      .btn-icon / .btn-send) so three header icons packed in a 390px
      viewport stop being sub-Fitts targets. Paired with .hdr-btns gap
      bump below so adjacent 44px targets don't overlap the 8px fuzzy
@@ -17,17 +13,16 @@
   .hdr-btn{min-width:44px;min-height:44px}
   .hdr-btns{gap:8px}
   .section-header .sh-btn{min-width:32px;min-height:32px;padding:6px}
-  /* RNEW-UX-011: bumped from 40 to 44 to hit the WCAG 2.5.5 AA floor for
+  /* bumped from 40 to 44 to hit the WCAG 2.5.5 AA floor for
      touch targets. The visual footprint stays the same (padding + icon
      are unchanged); only the hit-box widens. */
   .session-card .btn-dismiss{min-width:44px;min-height:44px;padding:8px;font-size:19px;opacity:.75}
   .btn-mobile-back{min-width:44px;min-height:44px}
-  /* RNEW-UX-011: manual-reconnect chip was 22px tall — impossible to tap
+  /* manual-reconnect chip was 22px tall — impossible to tap
      reliably on a phone right after a WS blip. Only grow the hit-box on
      coarse pointers so desktop keeps the compact 11px / 22px chrome. */
   .sidebar-status .status-reconnect{min-width:44px;min-height:44px;padding:8px 12px;font-size:var(--nz-fs-sm2)}
-  .empty-cta-btn{min-height:44px}
-  /* R20260610-UI-8: cron-job kebab + cron-drawer header icon buttons were
+  /* cron-job kebab + cron-drawer header icon buttons were
      28/32px hard targets with no coarse bump — below the WCAG 2.5.5 floor.
      Widen only the hit-box on touch; the glyph/footprint is unchanged. */
   .cj-menu-btn,.cron-drawer-header .cdh-btn-icon{min-width:44px;min-height:44px}
@@ -40,7 +35,6 @@
 
 /* ---- Track B: font-size floors to prevent iOS Safari auto-zoom on focus ---- */
 /* Any editable control needs >=16px computed font-size or Safari zooms in. */
-.login-panel input[type="password"]{font-size:var(--nz-fs-md)}
 @media(max-width:768px){
   .freq-num,.freq-time,.freq-select{font-size:var(--nz-fs-md)}
   /* Todo chips / task metadata shouldn't overpower the message body on narrow screens. */
@@ -62,19 +56,14 @@
   .btn-mobile-back{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:40px;height:40px;background:none;border:none;color:var(--nz-text-mute);font-size:var(--nz-fs-lg);cursor:pointer;padding:0;border-radius:var(--nz-radius-ms);-webkit-tap-highlight-color:transparent}
 }
 
-/* ---- Track D: semantic badge colors — red only means "needs attention" ---- */
-/* Tokens are consumed by the canonical .hdr-badge rule earlier in this
-   file (base=neutral). Alert / warn variants stay here so the "opt-in
-   red" intent is obvious at the point of definition: JS adds .is-alert
-   when attention > 0, never by default. */
+/* ---- Track D: badge colour tokens ---- */
+/* Read by .hdr-badge (split_view.css) and the header's spawn-diag /
+   overlay-drift tags. */
 :root{
   --nz-badge-info:#30363d;       /* neutral count */
   --nz-badge-info-text:#c9d1d9;
   --nz-badge-warn:#d29922;       /* amber */
-  --nz-badge-danger:#da3633;     /* unchanged red, opt-in */
 }
-.hdr-badge.is-alert{background:var(--nz-badge-danger);color:#fff;border-color:transparent}
-.hdr-badge.is-warn{background:var(--nz-badge-warn);color:#1b1b1b;border-color:transparent}
 
 /* ==========================================================================
    UX sweep vol.2 — high-resolution desktop layout (2026-04-27)
@@ -183,7 +172,7 @@
    disappear behind the notch / home indicator. */
 @media (max-width: 768px){
   /* top/height follow --vv-* like .main so the soft keyboard shrinks the
-     drawer instead of covering .ad-input-area (#2434). */
+     drawer instead of covering .ad-input-area. */
   .aside-drawer{width:100%;max-width:100vw;border-left:none;top:var(--vv-top,0);height:var(--vv-height,100%);bottom:auto}
   .aside-drawer .ad-header{padding:max(10px,env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) 10px max(14px,env(safe-area-inset-left))}
   .aside-drawer .ad-messages .event{padding:6px 20px}
@@ -195,7 +184,7 @@
 }
 /* Landscape phones (769–950px, coarse pointer) are above the ≤768 breakpoint
    but still get the soft keyboard; mirror the .main/.sidebar landscape block
-   so both drawers follow --vv-* there too (#2434). Sits after both drawers'
+   so both drawers follow --vv-* there too. Sits after both drawers'
    base rules so it wins the same-specificity cascade. */
 @media (max-width: 950px) and (orientation: landscape) and (pointer: coarse){
   .fv-drawer,.aside-drawer{top:var(--vv-top,0);height:var(--vv-height,100%);bottom:auto}

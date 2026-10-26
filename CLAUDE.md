@@ -37,7 +37,7 @@ Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI, Kiro, or Codex) as
 - **Multi-node**: `node` (protocol, HTTP/reverse clients), `upstream` (reverse-connect dialer).
 - **Persistence / history**: `eventlog`, `history` (claudejsonl/kirojsonl/codexjsonl/naozhilog/merged), `attachment`, `runlog`, `claudefs` (Claude CLI on-disk layout), `discovery`, `subagent`.
 - **Domain helpers**: `selfupdate`, `transcribe`, `imauth`, `costledger`, `budget`, `webhook`, `runtelemetry`, `naozhisettings`, `ccassets`, `ccmodels`, `uiprefs`, `replyfmt`, `usermsg`, `gitinfo`.
-- **Leaves**: `osutil`, `textutil`, `netutil`, `ratelimit`, `limits`, `sessionkey`, `tuningspec`, `backendid`, `cliinfo`, `apierr`, `ctxutil`, `leakguard`, `spawndiag`, `envpolicy`, `datadir`, `imageorient`, `testhelper`.
+- **Leaves**: `osutil`, `textutil`, `netutil`, `ratelimit`, `limits`, `sessionkey`, `tuningspec`, `backendid`, `cliinfo`, `apierr`, `ctxutil`, `spawndiag`, `envpolicy`, `datadir`, `imageorient`, `testhelper`.
 
 ### CLI Process Lifecycle
 
@@ -46,7 +46,7 @@ Each CLI process is long-lived (stdin/stdout stay open across turns). The Wrappe
 - `kiro`: `ACPProtocol` -- JSON-RPC 2.0 Agent Client Protocol, session ID from `session/new` response
 - `codex`: `CodexProtocol` -- codex app-server JSON-RPC 2.0 over stdio (see `docs/rfc/codex-backend.md`)
 
-Multi-backend deployments use `cli.backends: [{id, path, model, args, effort}, ...]` so dashboard / IM / cron / reverse-node can pick backend per session (`docs/rfc/multi-backend.md`). `effort` is the kiro thinking-effort tier, forwarded as `acp --effort`. ACP gotchas (`docs/rfc/multi-backend-validation.md`):
+Multi-backend deployments use `cli.backends: [{id, path, model, args, effort}, ...]` so dashboard / IM / cron / reverse-node can pick backend per session (`docs/rfc/multi-backend.md`). `effort` is the kiro thinking-effort tier, forwarded as `acp --effort`. ACP gotchas:
 - ACP `session/cancel` is a **notification** (no id), not a request
 - ACP RPC ID can be **string UUID** (kiro `permission_request`), not always int — use `json.RawMessage`
 - ACP permission `optionId` is `allow_once / allow_always / reject_once` (underscore, not hyphen) — read from request `options[].optionId`, do not hardcode
@@ -188,4 +188,4 @@ macOS: a launchd job (label read from `XPC_SERVICE_NAME`); `naozhi upgrade` keep
 
 ## Documentation
 
-`docs/design/` (`DESIGN.md` is the architecture source of truth), `docs/rfc/` (working RFCs; status table in `docs/rfc/README.md`), `docs/ops/` (deployment / release / pprof playbooks), `docs/guides/`. TODOs go to GitHub Issues.
+`docs/design/` (`DESIGN.md` is the architecture source of truth), `docs/rfc/` (working RFCs; status table in `docs/rfc/README.md`), `docs/ops/` (deployment / release / doctor playbooks), `docs/guides/`. TODOs go to GitHub Issues.

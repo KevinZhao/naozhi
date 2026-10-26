@@ -11,7 +11,7 @@ import (
 // plaintext-http node carrying a bearer token is refused outright; without a
 // token it needs an explicit insecure opt-in. Split out of validateConfig (#2710).
 func validateNodes(cfg *Config) error {
-	for id, nc := range cfg.Nodes {
+	for id, nc := range cfg.Workspaces {
 		if nc.URL == "" {
 			return fmt.Errorf("node %q: url is required", id)
 		}

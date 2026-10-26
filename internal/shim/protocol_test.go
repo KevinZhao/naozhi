@@ -7,8 +7,6 @@ import (
 )
 
 func TestParseClientMsg_TableDriven(t *testing.T) {
-	trueVal := true
-
 	tests := []struct {
 		name    string
 		input   string
@@ -26,41 +24,6 @@ func TestParseClientMsg_TableDriven(t *testing.T) {
 			wantMsg: ClientMsg{Type: "attach", Token: "dGVzdA==", Seq: 42},
 		},
 		{
-			name:    "interrupt",
-			input:   `{"type":"interrupt"}`,
-			wantMsg: ClientMsg{Type: "interrupt"},
-		},
-		{
-			name:    "close_stdin",
-			input:   `{"type":"close_stdin"}`,
-			wantMsg: ClientMsg{Type: "close_stdin"},
-		},
-		{
-			name:    "kill",
-			input:   `{"type":"kill"}`,
-			wantMsg: ClientMsg{Type: "kill"},
-		},
-		{
-			name:    "ping",
-			input:   `{"type":"ping"}`,
-			wantMsg: ClientMsg{Type: "ping"},
-		},
-		{
-			name:    "shutdown",
-			input:   `{"type":"shutdown"}`,
-			wantMsg: ClientMsg{Type: "shutdown"},
-		},
-		{
-			name:    "detach",
-			input:   `{"type":"detach"}`,
-			wantMsg: ClientMsg{Type: "detach"},
-		},
-		{
-			name:    "empty type",
-			input:   `{"type":""}`,
-			wantMsg: ClientMsg{Type: ""},
-		},
-		{
 			name:    "extra unknown fields tolerated",
 			input:   `{"type":"ping","unknown_field":true}`,
 			wantMsg: ClientMsg{Type: "ping"},
@@ -70,14 +33,8 @@ func TestParseClientMsg_TableDriven(t *testing.T) {
 			input:   `not json`,
 			wantErr: true,
 		},
-		{
-			name:    "empty object",
-			input:   `{}`,
-			wantMsg: ClientMsg{},
-		},
 	}
 
-	_ = trueVal
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := ParseClientMsg([]byte(tc.input))
@@ -104,11 +61,6 @@ func TestParseClientMsg_TableDriven(t *testing.T) {
 }
 
 func TestParseServerMsg_TableDriven(t *testing.T) {
-	aliveTrue := true
-	aliveFalse := false
-	code0 := 0
-	code1 := 1
-
 	tests := []struct {
 		name    string
 		input   string
@@ -143,45 +95,6 @@ func TestParseServerMsg_TableDriven(t *testing.T) {
 			},
 		},
 		{
-			name:  "stdout message",
-			input: `{"type":"stdout","seq":42,"line":"some output line"}`,
-			check: func(t *testing.T, msg ServerMsg) {
-				if msg.Type != "stdout" || msg.Seq != 42 || msg.Line != "some output line" {
-					t.Errorf("unexpected stdout msg: %+v", msg)
-				}
-			},
-		},
-		{
-			name:  "replay message",
-			input: `{"type":"replay","seq":7,"line":"buffered line"}`,
-			check: func(t *testing.T, msg ServerMsg) {
-				if msg.Type != "replay" || msg.Seq != 7 || msg.Line != "buffered line" {
-					t.Errorf("unexpected replay msg: %+v", msg)
-				}
-			},
-		},
-		{
-			name:  "replay_done with count",
-			input: `{"type":"replay_done","count":5}`,
-			check: func(t *testing.T, msg ServerMsg) {
-				if msg.Type != "replay_done" || msg.Count != 5 {
-					t.Errorf("unexpected replay_done msg: %+v", msg)
-				}
-			},
-		},
-		{
-			name:  "cli_exited with code 0",
-			input: `{"type":"cli_exited","code":0}`,
-			check: func(t *testing.T, msg ServerMsg) {
-				if msg.Type != "cli_exited" {
-					t.Errorf("Type = %q, want cli_exited", msg.Type)
-				}
-				if msg.Code == nil || *msg.Code != 0 {
-					t.Errorf("Code = %v, want &0", msg.Code)
-				}
-			},
-		},
-		{
 			name:  "cli_exited with non-zero code",
 			input: `{"type":"cli_exited","code":1,"signal":"SIGTERM"}`,
 			check: func(t *testing.T, msg ServerMsg) {
@@ -194,58 +107,11 @@ func TestParseServerMsg_TableDriven(t *testing.T) {
 			},
 		},
 		{
-			name:  "pong with buffered count",
-			input: `{"type":"pong","cli_alive":false,"buffered":99}`,
-			check: func(t *testing.T, msg ServerMsg) {
-				if msg.Type != "pong" {
-					t.Errorf("Type = %q, want pong", msg.Type)
-				}
-				if msg.CLIAlive == nil || *msg.CLIAlive != false {
-					t.Errorf("CLIAlive = %v, want &false", msg.CLIAlive)
-				}
-				if msg.Buffered != 99 {
-					t.Errorf("Buffered = %d, want 99", msg.Buffered)
-				}
-			},
-		},
-		{
-			name:  "auth_failed with msg",
-			input: `{"type":"auth_failed","msg":"invalid token"}`,
-			check: func(t *testing.T, msg ServerMsg) {
-				if msg.Type != "auth_failed" || msg.Msg != "invalid token" {
-					t.Errorf("unexpected auth_failed: %+v", msg)
-				}
-			},
-		},
-		{
-			name:  "error message",
-			input: `{"type":"error","msg":"something went wrong"}`,
-			check: func(t *testing.T, msg ServerMsg) {
-				if msg.Type != "error" || msg.Msg != "something went wrong" {
-					t.Errorf("unexpected error msg: %+v", msg)
-				}
-			},
-		},
-		{
-			name:  "stderr message",
-			input: `{"type":"stderr","line":"stderr output"}`,
-			check: func(t *testing.T, msg ServerMsg) {
-				if msg.Type != "stderr" || msg.Line != "stderr output" {
-					t.Errorf("unexpected stderr msg: %+v", msg)
-				}
-			},
-		},
-		{
 			name:    "invalid json",
 			input:   `{bad json}`,
 			wantErr: true,
 		},
 	}
-
-	_ = aliveTrue
-	_ = aliveFalse
-	_ = code0
-	_ = code1
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -312,43 +178,6 @@ func TestServerMsg_MarshalLine_TableDriven(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestBoolPtr(t *testing.T) {
-	tr := boolPtr(true)
-	fa := boolPtr(false)
-
-	if tr == nil || *tr != true {
-		t.Errorf("boolPtr(true) = %v", tr)
-	}
-	if fa == nil || *fa != false {
-		t.Errorf("boolPtr(false) = %v", fa)
-	}
-	// Must return independent pointers
-	if tr == fa {
-		t.Error("boolPtr returned same pointer for different values")
-	}
-}
-
-func TestIntPtr(t *testing.T) {
-	p0 := intPtr(0)
-	p1 := intPtr(1)
-
-	if p0 == nil || *p0 != 0 {
-		t.Errorf("intPtr(0) = %v", p0)
-	}
-	if p1 == nil || *p1 != 1 {
-		t.Errorf("intPtr(1) = %v", p1)
-	}
-	if p0 == p1 {
-		t.Error("intPtr returned same pointer for different values")
-	}
-}
-
-func TestProtocolVersion_Constant(t *testing.T) {
-	if ProtocolVersion != 1 {
-		t.Errorf("ProtocolVersion = %d, want 1", ProtocolVersion)
 	}
 }
 

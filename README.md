@@ -116,7 +116,7 @@ graph LR
 - **Watchdog 双超时**: 无输出超时 (默认 15min，工具运行时 Claude CLI 的 heartbeat 算作输出) + 总耗时超时 (默认 2h)，防止进程挂起
 - **容量管理**: 可配置最大并发进程数 (默认 3)，满载时自动驱逐最久空闲会话
 - **中断恢复**: 用户发送新消息时自动中断正在运行的 turn（软中断 control_request，ACP 回退 SIGINT）
-- **会话自动串联**: 同一项目的会话通过**项目级稳定 session key** 精确接续，Dashboard "load earlier" 可跨 session 边界回溯（`session.project_stable_key`，默认开启），见 [`docs/rfc/project-stable-session-key.md`](docs/rfc/project-stable-session-key.md)
+- **会话自动串联**: 同一项目的会话通过**项目级稳定 session key** 精确接续，Dashboard "load earlier" 可跨 session 边界回溯，见 [`docs/rfc/project-stable-session-key.md`](docs/rfc/project-stable-session-key.md)
 
 ### 消息队列与抢占
 
@@ -428,17 +428,12 @@ journalctl -u naozhi -f
 > 不装也能跑 —— 只是每次 restart 会打断正在运行的会话，journal 打 `WARN` 不致命。
 > **切勿**写 `NOPASSWD: ALL` 或放宽成 `NOPASSWD: /usr/bin/busctl`（服务用户就是 agent 跑 Bash 的用户，等于把 root 交给 agent）。
 
-> **在线 profile**：内存暴涨 / goroutine 泄漏 / CPU 热点排障，`ssh host` 后
-> 用 `curl -H "Authorization: Bearer $TOK" http://127.0.0.1:8180/api/debug/pprof/...`
-> 拉 heap / goroutine / CPU profile。端点受 token + **loopback-only** 双重防护，远端
-> 请求（ALB / CloudFront）一律 403。详见 [`docs/ops/pprof.md`](docs/ops/pprof.md)。
-
 > **事件推送**：`integrations.webhooks` 把 cron / sysession 的 `run.started` / `run.ended`
 > POST 到你的端点（HMAC 签名、重试、不阻塞调度器），用于 CI 联动或告警；payload 只含
 > run 元数据，不含 prompt / 结果文本。见 [`docs/rfc/outbound-webhooks.md`](docs/rfc/outbound-webhooks.md)。
 
 > **一键排障**：`naozhi doctor` 聚合 binary / codesign / systemd / HTTP / auth /
-> 服务端子系统 / 配置漂移 / pprof / 状态目录 / CLI backend / 语音转写 / 安全配置等检查，
+> 服务端子系统 / 配置漂移 / 状态目录 / CLI backend / 语音转写 / 安全配置等检查，
 > 任一 fail 退出码 1。CI 友好，支持 `--json` 输出。完整检查项见
 > [`docs/ops/doctor.md`](docs/ops/doctor.md)。
 

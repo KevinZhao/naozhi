@@ -14,12 +14,7 @@ import (
 	"github.com/naozhi/naozhi/internal/selfupdate"
 )
 
-const (
-	systemdUnitPath = "/etc/systemd/system/naozhi.service"
-	// systemdUnitBackupSuffix forms the rollback target next to the unit (not
-	// /tmp) so a crashing installer leaves evidence where operators look first.
-	systemdUnitBackupSuffix = ".naozhi-install.bak"
-)
+const systemdUnitPath = "/etc/systemd/system/naozhi.service"
 
 // launchdLabel and launchdPlistPath are authoritative in internal/selfupdate
 // so that naozhi install and naozhi upgrade always operate on the same plist.

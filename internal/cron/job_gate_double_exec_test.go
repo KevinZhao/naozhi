@@ -35,15 +35,6 @@ func (s concurrencySession) Send(ctx context.Context, text string) (SendResult, 
 func (s concurrencySession) SessionID() string                     { return "sess" }
 func (s concurrencySession) InterruptViaControl() InterruptOutcome { return InterruptUnsupported }
 
-type concurrencyRouter struct{ sess concurrencySession }
-
-func (r concurrencyRouter) RegisterCronStubWithChain(key, workspace, lastPrompt string, chain []string) {
-}
-func (r concurrencyRouter) Reset(key string) {}
-func (r concurrencyRouter) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (Session, SessionStatus, error) {
-	return r.sess, SessionExisting, nil
-}
-
 // TestJobGateLock_SameJobIDSharesMutex pins the precondition the fix rests on:
 // executeOpt and cleanupRunningJobIfIdle must take the SAME mutex for a given
 // jobID (otherwise serialising them is meaningless). Sharding by hash means
@@ -128,7 +119,7 @@ func TestJobGate_NoDoubleExecutionUnderDeleteTriggerRace(t *testing.T) {
 	t.Parallel()
 
 	var cur, peak atomic.Int32
-	router := concurrencyRouter{sess: concurrencySession{cur: &cur, peak: &peak, hold: 100 * time.Microsecond}}
+	router := &reapRouter{sess: concurrencySession{cur: &cur, peak: &peak, hold: 100 * time.Microsecond}}
 	rec := &recordingBroadcaster{}
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 

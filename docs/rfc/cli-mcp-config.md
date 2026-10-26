@@ -146,7 +146,7 @@ G4 是明确正确性契约（漏传 → 升级后重启所有存活会话），
 
 | 风险 | 评级 | 缓解 |
 |---|---|---|
-| MCP 配置文件成为高权限注入面：谁能写该文件，就能给所有 cc 会话装任意工具（含 stdio server = 任意命令执行） | **P1** | 路径来自 operator config，非 prompt / agent 可控（NG2 锁死无 per-agent 覆盖）。**机制而非口头约定**（评审 F4）：resolve 时 stat 文件，mode 含 group/other 写位则 `slog.Warn` —— 只告警不失败，因多用户场景可能有合理例外，硬失败会把权限判断问题引入启动路径。**注意**：cc 自带 Bash + `--dangerously-skip-permissions`，本就能执行任意命令，故此面是"持久化通道"而非新增"代码执行"面 —— 与 `direct-user-settings.md:128` 记录的同类残余风险同构。 |
+| MCP 配置文件成为高权限注入面：谁能写该文件，就能给所有 cc 会话装任意工具（含 stdio server = 任意命令执行） | **P1** | 路径来自 operator config，非 prompt / agent 可控（NG2 锁死无 per-agent 覆盖）。**机制而非口头约定**（评审 F4）：resolve 时 stat 文件，mode 含 group/other 写位则 `slog.Warn` —— 只告警不失败，因多用户场景可能有合理例外，硬失败会把权限判断问题引入启动路径。**注意**：cc 自带 Bash + `--dangerously-skip-permissions`，本就能执行任意命令，故此面是"持久化通道"而非新增"代码执行"面 —— 与已删除的 `direct-user-settings` RFC（git log 可找回）记录的同类残余风险同构。 |
 | **配错的 MCP 文件把"MCP 不可用"升级为"naozhi 完全不可用"** | **P1** | 评审 F7 提出、§4.1 实测确认为真：文件缺失 / JSON 非法 / 缺 `mcpServers` 键三种情形下 cc **拒绝启动**（无 `system/init`）。缓解即 G5 —— resolve 做信封预校验，任一不通过则置空该字段，退化为"无 MCP"而非阻断 spawn。由 §4.3 的三个"G5 关键格"钉住。 |
 | `--mcp-config` 从 denylist 被未来某次改动误删 | P2 | `TestBuildArgs_MCPConfigStillDeniedInExtraArgs` 钉住 |
 | 配置了路径但文件不可用 → operator 无线索 | P2 | 同上 G5 路径：置空并发 `slog.Error`，**绝不**在"看起来启用了"的同时实际没生效；BuildArgs 的静默丢弃仅作 defence-in-depth 兜底 |

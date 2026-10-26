@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -20,31 +22,6 @@ func newTestHTTPClient(t *testing.T, srv *httptest.Server, token string) *HTTPCl
 
 // ---- FetchSessions ----
 
-func TestHTTPClient_FetchSessions_ok(t *testing.T) {
-	want := []map[string]any{
-		{"session_id": "abc", "state": "idle"},
-		{"session_id": "def", "state": "busy"},
-	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/api/sessions" {
-			http.Error(w, "unexpected", http.StatusBadRequest)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"sessions": want})
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "tok")
-	got, err := c.FetchSessions(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("expected 2 sessions, got %d", len(got))
-	}
-}
-
 func TestHTTPClient_FetchSessions_authHeader(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer my-token" {
@@ -58,19 +35,6 @@ func TestHTTPClient_FetchSessions_authHeader(t *testing.T) {
 	c := newTestHTTPClient(t, srv, "my-token")
 	if _, err := c.FetchSessions(context.Background()); err != nil {
 		t.Fatalf("expected success with correct token, got: %v", err)
-	}
-}
-
-func TestHTTPClient_FetchSessions_errorStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "internal", http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	_, err := c.FetchSessions(context.Background())
-	if err == nil {
-		t.Fatal("expected error on 500 status")
 	}
 }
 
@@ -143,479 +107,216 @@ func TestHTTPClient_FetchSessions_badJSON(t *testing.T) {
 	}
 }
 
-// ---- FetchEvents ----
+// ---- Per-RPC request shape and result ----
 
-func TestHTTPClient_FetchEvents_ok(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/sessions/events" {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		if r.URL.Query().Get("key") != "feishu:group:123" {
-			http.Error(w, "missing key", http.StatusBadRequest)
-			return
-		}
-		json.NewEncoder(w).Encode([]map[string]any{
-			{"time": 1000, "type": "text", "summary": "hello"},
+// httpRPCCase is one HTTPClient method: the request it must send and how a
+// successful reply maps to its return value.
+type httpRPCCase struct {
+	name   string
+	method string
+	path   string
+	query  map[string]string
+	body   map[string]any // nil: no body expected
+	status int            // reply status on success; 0 means 200
+	reply  string
+	call   func(*HTTPClient) (any, error)
+	want   any
+}
+
+type seenRequest struct {
+	method, path, query string
+	body                map[string]any
+}
+
+func httpRPCCases() []httpRPCCase {
+	ctx := context.Background()
+	return []httpRPCCase{
+		{
+			name: "FetchSessions", method: http.MethodGet, path: "/api/sessions",
+			reply: `{"sessions":[{"session_id":"abc","state":"idle"},{"session_id":"def","state":"busy"}]}`,
+			call:  func(c *HTTPClient) (any, error) { s, err := c.FetchSessions(ctx); return len(s), err },
+			want:  2,
+		},
+		{
+			name: "FetchEvents", method: http.MethodGet, path: "/api/sessions/events",
+			query: map[string]string{"key": "feishu:group:123"},
+			reply: `[{"time":1000,"type":"text","summary":"hello"}]`,
+			call: func(c *HTTPClient) (any, error) {
+				e, err := c.FetchEvents(ctx, "feishu:group:123", 0)
+				return len(e), err
+			},
+			want: 1,
+		},
+		{
+			name: "FetchEvents after", method: http.MethodGet, path: "/api/sessions/events",
+			query: map[string]string{"key": "k", "after": "9999"},
+			reply: `[]`,
+			call:  func(c *HTTPClient) (any, error) { e, err := c.FetchEvents(ctx, "k", 9999); return len(e), err },
+			want:  0,
+		},
+		{
+			// A 200 with no body is a node that took the send.
+			name: "Send", method: http.MethodPost, path: "/api/sessions/send",
+			body: map[string]any{"key": "feishu:group:123", "text": "hi"},
+			call: func(c *HTTPClient) (any, error) { return c.Send(ctx, "feishu:group:123", "hi", "") },
+			want: "accepted",
+		},
+		{
+			name: "Send workspace", method: http.MethodPost, path: "/api/sessions/send",
+			body:   map[string]any{"key": "k", "text": "text", "workspace": "/home/user/project"},
+			status: http.StatusAccepted,
+			call:   func(c *HTTPClient) (any, error) { return c.Send(ctx, "k", "text", "/home/user/project") },
+			want:   "accepted",
+		},
+		{
+			name: "FetchProjects", method: http.MethodGet, path: "/api/projects",
+			reply: `[{"name":"proj1"}]`,
+			call:  func(c *HTTPClient) (any, error) { p, err := c.FetchProjects(ctx); return len(p), err },
+			want:  1,
+		},
+		{
+			name: "FetchDiscovered", method: http.MethodGet, path: "/api/discovered",
+			reply: `[{"pid":12345}]`,
+			call:  func(c *HTTPClient) (any, error) { d, err := c.FetchDiscovered(ctx); return len(d), err },
+			want:  1,
+		},
+		{
+			name: "FetchDiscoveredPreview", method: http.MethodGet, path: "/api/discovered/preview",
+			query: map[string]string{"session_id": "sess-abc"},
+			reply: `[{"time":1,"type":"text"}]`,
+			call: func(c *HTTPClient) (any, error) {
+				e, err := c.FetchDiscoveredPreview(ctx, "sess-abc")
+				return len(e), err
+			},
+			want: 1,
+		},
+		{
+			name: "ProxyTakeover", method: http.MethodPost, path: "/api/discovered/takeover",
+			body:  map[string]any{"pid": 42.0, "session_id": "sess-1", "cwd": "/cwd", "proc_start_time": 12345.0},
+			reply: `{"key":"feishu:group:123"}`,
+			call:  func(c *HTTPClient) (any, error) { return c.ProxyTakeover(ctx, 42, "sess-1", "/cwd", 12345) },
+			want:  "feishu:group:123",
+		},
+		{
+			name: "ProxyCloseDiscovered", method: http.MethodPost, path: "/api/discovered/close",
+			body: map[string]any{"pid": 42.0, "session_id": "sess-1", "cwd": "/", "proc_start_time": 0.0},
+			call: func(c *HTTPClient) (any, error) { return nil, c.ProxyCloseDiscovered(ctx, 42, "sess-1", "/", 0) },
+		},
+		{
+			name: "ProxyUpdateConfig", method: http.MethodPut, path: "/api/projects/config",
+			query: map[string]string{"name": "my-proj"},
+			body:  map[string]any{"model": "claude-4"},
+			call: func(c *HTTPClient) (any, error) {
+				return nil, c.ProxyUpdateConfig(ctx, "my-proj", json.RawMessage(`{"model":"claude-4"}`))
+			},
+		},
+		{
+			name: "ProxyRemoveSession", method: http.MethodDelete, path: "/api/sessions",
+			body: map[string]any{"key": "feishu:group:abc"},
+			call: func(c *HTTPClient) (any, error) { return c.ProxyRemoveSession(ctx, "feishu:group:abc") },
+			want: true,
+		},
+		{
+			name: "ProxyInterruptSession", method: http.MethodPost, path: "/api/sessions/interrupt",
+			body:  map[string]any{"key": "k"},
+			reply: `{"status":"ok"}`,
+			call:  func(c *HTTPClient) (any, error) { return c.ProxyInterruptSession(ctx, "k") },
+			want:  true,
+		},
+		{
+			name: "ProxySetSessionLabel", method: http.MethodPatch, path: "/api/sessions/label",
+			body:  map[string]any{"key": "feishu:direct:alice:general", "label": "my-label"},
+			reply: `{"status":"ok","label":"my-label"}`,
+			call: func(c *HTTPClient) (any, error) {
+				return c.ProxySetSessionLabel(ctx, "feishu:direct:alice:general", "my-label")
+			},
+			want: true,
+		},
+	}
+}
+
+// TestHTTPClient_RPCs checks every method's HTTP verb, path, query and JSON
+// body, then the value it decodes from a successful reply.
+func TestHTTPClient_RPCs(t *testing.T) {
+	for _, tc := range httpRPCCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			seen := make(chan seenRequest, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				req := seenRequest{method: r.Method, path: r.URL.Path, query: r.URL.Query().Encode()}
+				_ = json.NewDecoder(r.Body).Decode(&req.body)
+				seen <- req
+				if tc.status != 0 {
+					w.WriteHeader(tc.status)
+				}
+				_, _ = w.Write([]byte(tc.reply))
+			}))
+			defer srv.Close()
+
+			got, err := tc.call(newTestHTTPClient(t, srv, ""))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("result = %#v, want %#v", got, tc.want)
+			}
+			req := <-seen
+			if req.method != tc.method || req.path != tc.path {
+				t.Errorf("request = %s %s, want %s %s", req.method, req.path, tc.method, tc.path)
+			}
+			wantQuery := url.Values{}
+			for k, v := range tc.query {
+				wantQuery.Set(k, v)
+			}
+			if req.query != wantQuery.Encode() {
+				t.Errorf("query = %q, want %q", req.query, wantQuery.Encode())
+			}
+			if !reflect.DeepEqual(req.body, tc.body) {
+				t.Errorf("body = %v, want %v", req.body, tc.body)
+			}
 		})
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	entries, err := c.FetchEvents(context.Background(), "feishu:group:123", 0)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
 }
 
-func TestHTTPClient_FetchEvents_withAfter(t *testing.T) {
+// TestHTTPClient_RPCs_errorStatus: each method checks the status code itself,
+// so every one must turn a 500 into an error.
+func TestHTTPClient_RPCs_errorStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		after := r.URL.Query().Get("after")
-		if after != "9999" {
-			http.Error(w, "bad after param", http.StatusBadRequest)
-			return
+		http.Error(w, "internal", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	c := newTestHTTPClient(t, srv, "")
+	for _, tc := range httpRPCCases() {
+		if _, err := tc.call(c); err == nil {
+			t.Errorf("%s: expected error on 500", tc.name)
 		}
-		json.NewEncoder(w).Encode([]map[string]any{})
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	_, err := c.FetchEvents(context.Background(), "k", 9999)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestHTTPClient_FetchEvents_errorStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "gone", http.StatusGone)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	_, err := c.FetchEvents(context.Background(), "k", 0)
-	if err == nil {
-		t.Fatal("expected error on non-200")
-	}
-}
-
-// ---- Send ----
-
-func TestHTTPClient_Send_ok(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/sessions/send" {
-			http.Error(w, "unexpected", http.StatusBadRequest)
-			return
-		}
-		var body map[string]string
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "bad body", http.StatusBadRequest)
-			return
-		}
-		if body["key"] != "feishu:group:123" || body["text"] != "hi" {
-			http.Error(w, "wrong payload", http.StatusBadRequest)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	status, err := c.Send(context.Background(), "feishu:group:123", "hi", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if status != "accepted" {
-		t.Errorf("a 200 with no body is a node that took the send: status = %q, want accepted", status)
-	}
-}
-
-func TestHTTPClient_Send_withWorkspace(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]string
-		json.NewDecoder(r.Body).Decode(&body)
-		if body["workspace"] != "/home/user/project" {
-			http.Error(w, "missing workspace", http.StatusBadRequest)
-			return
-		}
-		w.WriteHeader(http.StatusAccepted)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	if _, err := c.Send(context.Background(), "k", "text", "/home/user/project"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestHTTPClient_Send_errorStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "busy", http.StatusTooManyRequests)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	if _, err := c.Send(context.Background(), "k", "t", ""); err == nil {
-		t.Fatal("expected error on non-2xx")
-	}
-}
-
-// ---- FetchProjects ----
-
-func TestHTTPClient_FetchProjects_ok(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/projects" {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		json.NewEncoder(w).Encode([]map[string]any{{"name": "proj1"}})
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	projs, err := c.FetchProjects(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(projs) != 1 {
-		t.Fatalf("expected 1 project, got %d", len(projs))
-	}
-}
-
-func TestHTTPClient_FetchProjects_errorStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	_, err := c.FetchProjects(context.Background())
-	if err == nil {
-		t.Fatal("expected error on 403")
-	}
-}
-
-// ---- FetchDiscovered ----
-
-func TestHTTPClient_FetchDiscovered_ok(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/discovered" {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		json.NewEncoder(w).Encode([]map[string]any{{"pid": 12345}})
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	disc, err := c.FetchDiscovered(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(disc) != 1 {
-		t.Fatalf("expected 1, got %d", len(disc))
-	}
-}
-
-func TestHTTPClient_FetchDiscovered_errorStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "unavailable", http.StatusServiceUnavailable)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	_, err := c.FetchDiscovered(context.Background())
-	if err == nil {
-		t.Fatal("expected error on 503")
-	}
-}
-
-// ---- FetchDiscoveredPreview ----
-
-func TestHTTPClient_FetchDiscoveredPreview_ok(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/discovered/preview" {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		if r.URL.Query().Get("session_id") != "sess-abc" {
-			http.Error(w, "missing session_id", http.StatusBadRequest)
-			return
-		}
-		json.NewEncoder(w).Encode([]map[string]any{{"time": 1, "type": "text"}})
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	entries, err := c.FetchDiscoveredPreview(context.Background(), "sess-abc")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(entries))
-	}
-}
-
-// ---- ProxyTakeover ----
-
-func TestHTTPClient_ProxyTakeover_ok(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/discovered/takeover" {
-			http.Error(w, "unexpected", http.StatusBadRequest)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"key": "feishu:group:123"})
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	key, err := c.ProxyTakeover(context.Background(), 42, "sess-1", "/cwd", 12345)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if key != "feishu:group:123" {
-		t.Fatalf("expected key 'feishu:group:123', got %q", key)
-	}
-}
-
-func TestHTTPClient_ProxyTakeover_errorStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "conflict", http.StatusConflict)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	_, err := c.ProxyTakeover(context.Background(), 1, "s", "/", 0)
-	if err == nil {
-		t.Fatal("expected error on 409")
-	}
-}
-
-// ---- ProxyCloseDiscovered ----
-
-func TestHTTPClient_ProxyCloseDiscovered_ok(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/discovered/close" {
-			http.Error(w, "unexpected", http.StatusBadRequest)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	if err := c.ProxyCloseDiscovered(context.Background(), 42, "sess-1", "/", 0); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestHTTPClient_ProxyCloseDiscovered_errorStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not found", http.StatusNotFound)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	if err := c.ProxyCloseDiscovered(context.Background(), 1, "s", "/", 0); err == nil {
-		t.Fatal("expected error on 404")
-	}
-}
-
-// ---- ProxyUpdateConfig ----
-
-func TestHTTPClient_ProxyUpdateConfig_ok(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPut || r.URL.Path != "/api/projects/config" {
-			http.Error(w, "unexpected", http.StatusBadRequest)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	cfg := json.RawMessage(`{"model":"claude-4"}`)
-	if err := c.ProxyUpdateConfig(context.Background(), "my-proj", cfg); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestHTTPClient_ProxyUpdateConfig_errorStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	if err := c.ProxyUpdateConfig(context.Background(), "proj", json.RawMessage(`{}`)); err == nil {
-		t.Fatal("expected error on 403")
-	}
-}
-
-// ---- ProxyRemoveSession ----
-
-func TestHTTPClient_ProxyRemoveSession_ok(t *testing.T) {
-	var gotBody map[string]string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete || r.URL.Path != "/api/sessions" {
-			http.Error(w, "unexpected", http.StatusBadRequest)
-			return
-		}
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	removed, err := c.ProxyRemoveSession(context.Background(), "feishu:group:abc")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !removed {
-		t.Fatal("expected removed=true on 200")
-	}
-	if gotBody["key"] != "feishu:group:abc" {
-		t.Errorf("expected key in body, got %v", gotBody)
-	}
-}
-
-func TestHTTPClient_ProxyRemoveSession_notFound(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not found", http.StatusNotFound)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	removed, err := c.ProxyRemoveSession(context.Background(), "k")
-	if err != nil {
-		t.Fatalf("expected nil err on 404, got %v", err)
-	}
-	if removed {
-		t.Fatal("expected removed=false on 404")
-	}
-}
-
-func TestHTTPClient_ProxyRemoveSession_errorStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "boom", http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	if _, err := c.ProxyRemoveSession(context.Background(), "k"); err == nil {
-		t.Fatal("expected error on 500")
-	}
-}
-
-// ---- ProxyInterruptSession ----
-
-func TestHTTPClient_ProxyInterruptSession_ok(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/sessions/interrupt" {
-			http.Error(w, "unexpected", http.StatusBadRequest)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	interrupted, err := c.ProxyInterruptSession(context.Background(), "k")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !interrupted {
-		t.Fatal("expected interrupted=true on status=ok")
-	}
-}
-
-func TestHTTPClient_ProxyInterruptSession_notRunning(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]string{"status": "not_running"})
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	interrupted, err := c.ProxyInterruptSession(context.Background(), "k")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if interrupted {
-		t.Fatal("expected interrupted=false when remote reports not_running")
-	}
-}
-
-func TestHTTPClient_ProxyInterruptSession_errorStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "boom", http.StatusBadGateway)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	if _, err := c.ProxyInterruptSession(context.Background(), "k"); err == nil {
-		t.Fatal("expected error on 502")
-	}
-}
-
-// ---- ProxySetSessionLabel ----
-
-func TestHTTPClient_ProxySetSessionLabel_ok(t *testing.T) {
-	var gotBody map[string]string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPatch || r.URL.Path != "/api/sessions/label" {
-			http.Error(w, "unexpected", http.StatusBadRequest)
-			return
-		}
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "label": gotBody["label"]})
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	updated, err := c.ProxySetSessionLabel(context.Background(), "feishu:direct:alice:general", "my-label")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !updated {
-		t.Fatal("expected updated=true on 200")
-	}
-	if gotBody["key"] != "feishu:direct:alice:general" {
-		t.Errorf("key in body = %q, want feishu:direct:alice:general", gotBody["key"])
-	}
-	if gotBody["label"] != "my-label" {
-		t.Errorf("label in body = %q, want my-label", gotBody["label"])
-	}
-}
-
-func TestHTTPClient_ProxySetSessionLabel_notFound(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not found", http.StatusNotFound)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	updated, err := c.ProxySetSessionLabel(context.Background(), "k", "x")
-	if err != nil {
-		t.Fatalf("expected nil err on 404, got %v", err)
-	}
-	if updated {
-		t.Fatal("expected updated=false on 404")
-	}
-}
-
-func TestHTTPClient_ProxySetSessionLabel_errorStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "boom", http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	c := newTestHTTPClient(t, srv, "")
-	if _, err := c.ProxySetSessionLabel(context.Background(), "k", "x"); err == nil {
-		t.Fatal("expected error on 500")
+// TestHTTPClient_RPCs_notApplied: replies that mean "nothing to do" come back
+// as false with no error.
+func TestHTTPClient_RPCs_notApplied(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		status int
+		reply  string
+		call   func(*HTTPClient) (bool, error)
+	}{
+		{"ProxyRemoveSession 404", http.StatusNotFound, "not found", func(c *HTTPClient) (bool, error) { return c.ProxyRemoveSession(ctx, "k") }},
+		{"ProxySetSessionLabel 404", http.StatusNotFound, "not found", func(c *HTTPClient) (bool, error) { return c.ProxySetSessionLabel(ctx, "k", "x") }},
+		{"ProxyInterruptSession not_running", http.StatusOK, `{"status":"not_running"}`, func(c *HTTPClient) (bool, error) { return c.ProxyInterruptSession(ctx, "k") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.reply))
+			}))
+			defer srv.Close()
+			ok, err := tc.call(newTestHTTPClient(t, srv, ""))
+			if err != nil || ok {
+				t.Errorf("got (%v, %v), want (false, nil)", ok, err)
+			}
+		})
 	}
 }
 

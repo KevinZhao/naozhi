@@ -165,13 +165,9 @@ type ProcessReleaser interface {
 // OPTIONAL: MaxJobs <=0 → defaultMaxJobs, clamped to maxJobsHardCap;
 // ExecTimeout <=0 → defaultExecTimeout; the rest per field (applyDefaults).
 type SchedulerConfig struct {
-	StorePath string
-	MaxJobs   int
-	// MaxJobsPerChat overrides DefaultMaxJobsPerChat when > 0. Zero/negative
-	// fall back to the default deliberately, so operators cannot accidentally
-	// disable the cap and let one chat starve the exempt-session pool.
-	MaxJobsPerChat int
-	ExecTimeout    time.Duration
+	StorePath   string
+	MaxJobs     int
+	ExecTimeout time.Duration
 	// Location is the timezone in which schedule expressions are evaluated;
 	// nil = time.Local. DST caveats (robfig/cron v3): a spring-forward
 	// expression in the skipped hour fires zero times that day; a fall-back
@@ -199,19 +195,6 @@ type SchedulerConfig struct {
 	// to min(JitterMax, period/4) so short schedules are not swallowed.
 	// TriggerNow bypasses jitter. See docs/rfc/cron-v2-polish.md §3.2.
 	JitterMax time.Duration
-	// RunsKeepCount overrides DefaultRunsKeepCount when > 0: the per-job cap
-	// on retained run-history records (newest N kept). Zero (and negative)
-	// values fall back to the default.
-	RunsKeepCount int
-	// RunsKeepWindow overrides DefaultRunsKeepWindow when > 0. Records
-	// older than the window are trimmed at GC time. Zero (and negative)
-	// values fall back to the default.
-	RunsKeepWindow time.Duration
-	// SlowThreshold overrides defaultCronSlowThreshold (30s) when > 0: a
-	// successful execution exceeding it logs a "cron execution slow" warning.
-	// Raise it toward ExecTimeout on deployments running 300s+ batch jobs so
-	// the daily false alarm stops. Zero/negative fall back to the default (#519).
-	SlowThreshold time.Duration
 	// AutoPauseAfterFailures pauses a job after this many consecutive failed
 	// or timed-out runs, so a broken job stops notifying every tick; a
 	// transient backend failure does not count, though this many transient
@@ -260,8 +243,7 @@ const defaultExecTimeout = 5 * time.Minute
 // DefaultMaxJobsPerChat bounds how many cron jobs a single chat (platform +
 // chat_id) may own so one loud group cannot consume the global MaxJobs quota
 // nor, when its runs overlap, the session.maxCronExempt sub-quota.
-// Overridable via SchedulerConfig.MaxJobsPerChat; zero falls back here — the
-// cap cannot be disabled. See docs/rfc/cron-v2-polish.md for sizing rationale.
+// See docs/rfc/cron-v2-polish.md for sizing rationale.
 const DefaultMaxJobsPerChat = 10
 
 // defaultAutoPauseAfterFailures is the failure streak that auto-pauses a job
@@ -278,11 +260,6 @@ func (cfg *SchedulerConfig) applyDefaults() {
 	}
 	if cfg.MaxJobs > maxJobsHardCap {
 		cfg.MaxJobs = maxJobsHardCap
-	}
-	// <= 0 maps to the default so a zero struct field cannot silently
-	// disable the per-chat cap.
-	if cfg.MaxJobsPerChat <= 0 {
-		cfg.MaxJobsPerChat = DefaultMaxJobsPerChat
 	}
 	if cfg.ExecTimeout <= 0 {
 		cfg.ExecTimeout = defaultExecTimeout

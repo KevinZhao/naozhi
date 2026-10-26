@@ -181,7 +181,7 @@ import { nzViews } from './nz_util.js';
     if (state.wired) return; state.wired = true;
     buildKindTabs();
 
-    // #1772: pending search-input debounce handle (declared before the tab
+    // pending search-input debounce handle (declared before the tab
     // handler so a tab switch can cancel it — otherwise a queued keystroke
     // render could fire ~150ms after the switch and redundantly re-render).
     var searchDebounce = null;
@@ -200,7 +200,7 @@ import { nzViews } from './nz_util.js';
       render();
     });
 
-    // #1772: debounce the search input. render() does a full O(N) filter +
+    // debounce the search input. render() does a full O(N) filter +
     // group + innerHTML rebuild over state.inv.assets (which can be 1000+
     // entries in a real ECC env); firing it on every keystroke produces >50ms
     // long tasks and input lag on mobile soft keyboards. 150ms debounce

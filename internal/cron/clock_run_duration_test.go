@@ -2,29 +2,9 @@ package cron
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 )
-
-// stepClock advances by a fixed delta on every Now() call. A full executeOpt
-// run reads the clock twice for the lifecycle anchors that bound DurationMS:
-// startedAt (executeOpt) and endedAt (finishRun). With a 250ms step the run's
-// reported DurationMS is therefore a deterministic multiple of the step,
-// independent of real wall-clock — exactly the sleep-free determinism #643
-// introduces the clock to enable.
-type stepClock struct {
-	mu   sync.Mutex
-	cur  time.Time
-	step time.Duration
-}
-
-func (c *stepClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.cur = c.cur.Add(c.step)
-	return c.cur
-}
 
 // okSession is a stub Session whose Send always succeeds instantly.
 type okSession struct{ id string }
@@ -34,15 +14,6 @@ func (s okSession) Send(ctx context.Context, text string) (SendResult, error) {
 }
 func (s okSession) SessionID() string                     { return s.id }
 func (s okSession) InterruptViaControl() InterruptOutcome { return InterruptUnsupported }
-
-// okRouter hands back a ready okSession so executeOpt reaches the success path.
-type okRouter struct{ sid string }
-
-func (r okRouter) RegisterCronStubWithChain(key, workspace, lastPrompt string, chain []string) {}
-func (r okRouter) Reset(key string)                                                            {}
-func (r okRouter) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (Session, SessionStatus, error) {
-	return okSession{id: r.sid}, SessionExisting, nil
-}
 
 // TestRunDurationDeterministicUnderClock pins #643: a full
 // executeOpt run computes DurationMS purely from the injected clock, so a
@@ -54,11 +25,11 @@ func TestRunDurationDeterministicUnderClock(t *testing.T) {
 	t.Parallel()
 
 	rec := &recordingBroadcaster{}
-	clk := &stepClock{cur: time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC), step: 250 * time.Millisecond}
+	clk := &fakeClock{now: time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC), step: 250 * time.Millisecond}
 	s := NewScheduler(SchedulerConfig{
 		MaxJobs: 5,
 	}, SchedulerDeps{
-		Router:    okRouter{sid: "sess-1"},
+		Router:    &reapRouter{sid: "sess-1"},
 		Telemetry: rec,
 	})
 	s.clock = clk

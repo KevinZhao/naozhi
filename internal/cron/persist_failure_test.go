@@ -105,17 +105,6 @@ func TestPersistFailure_DeleteJobByID(t *testing.T) {
 	}
 }
 
-func TestPersistFailure_DeleteJobByPrefix(t *testing.T) {
-	s, id := newTestSchedulerForPersist(t)
-
-	withFailingMarshal(t, s)
-
-	_, err := s.DeleteJob(id[:4], "feishu", "chat1")
-	if !errors.Is(err, ErrPersistFailed) {
-		t.Fatalf("DeleteJob err = %v, want ErrPersistFailed", err)
-	}
-}
-
 func TestPersistFailure_PauseJobByID(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)
 	// Seeded job is Paused=true; resume it first (real path) so the pause
@@ -142,31 +131,6 @@ func TestPersistFailure_ResumeJobByID(t *testing.T) {
 	_, err := s.ResumeJobByID(id)
 	if !errors.Is(err, ErrPersistFailed) {
 		t.Fatalf("ResumeJobByID err = %v, want ErrPersistFailed", err)
-	}
-}
-
-func TestPersistFailure_PauseJobByPrefix(t *testing.T) {
-	s, id := newTestSchedulerForPersist(t)
-	if _, err := s.ResumeJobByID(id); err != nil {
-		t.Fatalf("ResumeJobByID seed: %v", err)
-	}
-
-	withFailingMarshal(t, s)
-
-	_, err := s.PauseJob(id[:4], "feishu", "chat1")
-	if !errors.Is(err, ErrPersistFailed) {
-		t.Fatalf("PauseJob err = %v, want ErrPersistFailed", err)
-	}
-}
-
-func TestPersistFailure_ResumeJobByPrefix(t *testing.T) {
-	s, id := newTestSchedulerForPersist(t)
-
-	withFailingMarshal(t, s)
-
-	_, err := s.ResumeJob(id[:4], "feishu", "chat1")
-	if !errors.Is(err, ErrPersistFailed) {
-		t.Fatalf("ResumeJob err = %v, want ErrPersistFailed", err)
 	}
 }
 

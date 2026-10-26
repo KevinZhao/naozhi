@@ -66,10 +66,6 @@ func (h *Handlers) projectListLocalAt(now time.Time) []projectListEntry {
 	projects := h.deps.ProjectMgr.All()
 	entries := make([]projectListEntry, 0, len(projects))
 	for _, p := range projects {
-		var stableKey string
-		if h.deps.ProjectStableKeyEnabled {
-			stableKey = sessionpkg.ProjectStableKey(p.Path, "general")
-		}
 		entries = append(entries, projectListEntry{
 			Name:       p.Name,
 			Path:       p.Path,
@@ -78,7 +74,7 @@ func (h *Handlers) projectListLocalAt(now time.Time) []projectListEntry {
 			CreatedAt:  p.Config.CreatedAt,
 			Config:     p.Config,
 			DirModTime: p.DirModTime,
-			StableKey:  stableKey,
+			StableKey:  sessionpkg.ProjectStableKey(p.Path, "general"),
 			// Strip embedded userinfo (PAT) before the URL reaches any dashboard
 			// client; /api/sessions is polled constantly so a leak here is worse
 			// than on /api/projects.

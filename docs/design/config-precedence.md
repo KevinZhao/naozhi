@@ -21,7 +21,7 @@ narrow places where they overlap.
 | Field / concern | Source of truth | Override order | Notes |
 |-----------------|-----------------|----------------|-------|
 | Server addr, log, session policy, channels | `config.yaml` | yaml only | `applyDefaults()` fills gaps; see `config.go`. |
-| Remote node pool (`nodes` / `workspaces`) | `config.yaml` | `workspaces` wins over `nodes` | `Config.Normalize()` reconciles the alias; conflict logs via `slog.Warn`. R71-ARCH-L1. |
+| Remote node pool (`workspaces`) | `config.yaml` | only `workspaces` is read | A leftover v1 `nodes` key draws a config-deprecated WARN and is ignored. |
 | `${VAR}` placeholders inside `config.yaml` | process env | env expands into yaml at load | Secret-prefixed vars (`ANTHROPIC_`, `AWS_`, `GITHUB_TOKEN`, …) are **refused** so credentials never enter the in-memory Config. R240-SEC-16 / #1047, see `envExpansionDenyPrefixes`. |
 | Claude / Bedrock env (`ANTHROPIC_MODEL`, `AWS_REGION`, `CLAUDE_CODE_USE_BEDROCK`, …) | `~/.claude/settings.json` `env` block | **shell env wins** — `applyClaudeEnvSettings` only sets a var when it is not already present in the process env | An operator who exports the var in the shell keeps control; the settings file is the default, not an override. See `main_settings_test.go` (`from-shell` case). |
 | `CLAUDE_PROJECTS_DIR` (transcripts root) | process env, else `~/.claude/projects` | env wins | Single resolver: `resolveClaudeProjectsDir()` in `internal/server/claude_paths.go`. R222-ARCH-9 / #724. |

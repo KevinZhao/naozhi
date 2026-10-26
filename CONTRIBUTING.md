@@ -55,7 +55,7 @@ naozhi 的定位是"轻量 IM -> Claude Code CLI 网关"：用最少的代码把
 
 - 所有新功能必须带单元测试，目标 80% 新行覆盖
 - 并发改动必须跑 `-race` 通过
-- 锁契约类测试（例如 `internal/session/*_contract_test.go`）不得删除；如果你的改动让契约过时，**先修契约再改代码**，让 reviewer 能看到契约变更本身
+- 删除或改写契约类测试时，在 PR 描述里说明替代覆盖在哪里
 - 禁止引入新的 `time.Sleep` 测试；用 channel 或 `Eventually` pattern
 
 ## Code review

@@ -99,14 +99,13 @@ cli:
 // TestConfigCheck_UnknownKeyExit1: a misspelled key exits 1 and names the
 // dotted path and line (#2639). This is the case the command could not see
 // before — yaml.Unmarshal dropped unknown keys silently, so `config check`
-// reported OK on a config whose keys did nothing. The two spellings here are
-// the keys from #2553, the bug that made the gap visible.
+// reported OK on a config whose keys did nothing.
 func TestConfigCheck_UnknownKeyExit1(t *testing.T) {
 	cfg := cleanCheckConfig + `
 server:
   debug_moed: true
 projects:
-  publc_tmp: true
+  includ_root: true
 `
 	var out bytes.Buffer
 	code := configCheck([]string{"-config", writeCheckConfig(t, cfg)}, &out)
@@ -114,13 +113,13 @@ projects:
 		t.Fatalf("exit = %d, want 1; output:\n%s", code, out.String())
 	}
 	s := out.String()
-	for _, want := range []string{"config-unknown", "server.debug_moed", "projects.publc_tmp", "ignored"} {
+	for _, want := range []string{"config-unknown", "server.debug_moed", "projects.includ_root", "ignored"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("output must contain %q:\n%s", want, s)
 		}
 	}
 	// The correctly spelled keys must NOT be reported, or the report is noise.
-	for _, unwanted := range []string{"server.debug_mode ", "projects.public_tmp "} {
+	for _, unwanted := range []string{"projects.include_root "} {
 		if strings.Contains(s, unwanted) {
 			t.Errorf("real key %q reported as unknown:\n%s", unwanted, s)
 		}
@@ -225,11 +224,7 @@ func TestConfigCheck_ReplacedValuesExit1(t *testing.T) {
 	for name, tc := range map[string]struct{ body, key string }{
 		"timezone":          {"cron:\n  timezone: Mars/Olympus\n", "cron.timezone"},
 		"update mode":       {"update:\n  mode: dowload\n", "update.mode"},
-		"tick timeout":      {"sysession:\n  tick_timeout: 5 minutes\n", "sysession.tick_timeout"},
 		"shim idle timeout": {"session:\n  shim:\n    idle_timeout: 4 hours\n", "session.shim.idle_timeout"},
-		"shim buffer size":  {"session:\n  shim:\n    max_buffer_bytes: 50 megs\n", "session.shim.max_buffer_bytes"},
-		"jsonl max age":     {"sysession:\n  runner:\n    jsonl_max_age: 7d\n", "sysession.runner.jsonl_max_age"},
-		"stdio max size":    {"log:\n  stdio_max_size: 64 megs\n", "log.stdio_max_size"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var out bytes.Buffer

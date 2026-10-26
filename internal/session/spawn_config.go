@@ -49,12 +49,12 @@ type spawnConfig struct {
 type spawnerFunc func(context.Context, cli.SpawnOptions) (*cli.Process, error)
 
 // spawnProcess starts the session's CLI process: hook when a test set
-// one, otherwise the backend's runner under panicSafeSpawn.
+// one, otherwise the backend's wrapper under panicSafeSpawn.
 func (c *spawnConfig) spawnProcess(ctx context.Context, wrapper *cli.Wrapper, opts cli.SpawnOptions, key, backendID string) (processIface, error) {
 	if c.hook != nil {
 		return c.hook(ctx, opts)
 	}
-	proc, err := panicSafeSpawn(ctx, wrapper.Runner(), opts, key, backendID)
+	proc, err := panicSafeSpawn(ctx, wrapper, opts, key, backendID)
 	if err != nil {
 		// Never a typed-nil *cli.Process inside a non-nil interface.
 		return nil, err
@@ -62,25 +62,22 @@ func (c *spawnConfig) spawnProcess(ctx context.Context, wrapper *cli.Wrapper, op
 	return proc, nil
 }
 
-// panicSafeSpawn invokes the runner's Spawn inside a deferred recover so a
+// panicSafeSpawn invokes the wrapper's Spawn inside a deferred recover so a
 // panic from the spawn path cannot leave pendingSpawns stranded (which would make every subsequent GetOrCreate fail with
 // ErrMaxProcs until restart). The panic becomes a regular error so the
 // caller's standard "spawn process: %w" wrap applies.
-//
-// Takes cli.Runner (the placement seam) rather than *cli.Wrapper;
-// (*cli.Wrapper)(nil).Runner() returns nil, which is checked here.
 func panicSafeSpawn(
 	ctx context.Context,
-	r cli.Runner,
+	w *cli.Wrapper,
 	opts cli.SpawnOptions,
 	key, backendID string,
 ) (*cli.Process, error) {
-	if r == nil {
-		// Wrap ErrNoCLIWrapper so error classification treats a nil runner
-		// identically to the nil-wrapper guard upstream.
-		return nil, fmt.Errorf("no runner for backend %q: %w", backendID, ErrNoCLIWrapper)
+	if w == nil {
+		// Wrap ErrNoCLIWrapper so error classification treats a nil wrapper
+		// here identically to the nil-wrapper guard upstream.
+		return nil, fmt.Errorf("no CLI wrapper for backend %q: %w", backendID, ErrNoCLIWrapper)
 	}
-	return panicSafeSpawnFn(ctx, r.Spawn, opts, key, backendID)
+	return panicSafeSpawnFn(ctx, w.Spawn, opts, key, backendID)
 }
 
 // panicSafeSpawnFn is the testable core: tests inject a spawnerFunc that

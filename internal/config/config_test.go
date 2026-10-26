@@ -250,10 +250,10 @@ workspaces:
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	if len(cfg.Nodes) != 1 {
-		t.Fatalf("expected 1 node, got %d", len(cfg.Nodes))
+	if len(cfg.Workspaces) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(cfg.Workspaces))
 	}
-	n := cfg.Nodes["macbook"]
+	n := cfg.Workspaces["macbook"]
 	if n.URL != "https://10.0.0.2:8180" {
 		t.Errorf("url = %q", n.URL)
 	}

@@ -295,9 +295,6 @@ type Deps struct {
 	RetiredStore RetiredReader
 	// ValidateWS injects the server-package helper without a reverse import.
 	ValidateWS func(ws, root string) (string, error)
-	// ProjectStableKeyEnabled toggles the stableKey field in stats.projects
-	// (same switch as the /api/projects list).
-	ProjectStableKeyEnabled bool
 }
 
 // New constructs a Handlers from injected deps. Deps is stored as-is; the

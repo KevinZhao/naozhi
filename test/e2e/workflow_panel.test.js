@@ -1,5 +1,3 @@
-// @ts-check
-//
 // The workflow panel (docs/rfc/workflow-dashboard.md §7.2-7.5, §7.7, §11.4a):
 // one <details> per workflow above the transcript, fed by workflow_set /
 // workflow_state frames and GET /api/sessions/workflow, rows only while open.

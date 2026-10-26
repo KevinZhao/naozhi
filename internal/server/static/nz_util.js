@@ -163,7 +163,7 @@ export function isCronSessionKey(key) {
   return typeof key === 'string' && key.indexOf('cron:') === 0;
 }
 
-// nz.bus (#2557 PR-E1): the cross-module notification channel. dashboard
+// nz.bus: the cross-module notification channel. dashboard
 // dispatches cron-view commands here (WS frames reach the cron modules
 // through their own wsm.on registrations) — the reverse dashboard→view edge
 // must not become an import (a dashboard→cron import would invert module
@@ -171,7 +171,7 @@ export function isCronSessionKey(key) {
 export const nzBus = new EventTarget();
 nz.bus = nzBus;
 
-// nz.views (#2557 PR-E3): view-module entry points. dashboard cannot import
+// nz.views: view-module entry points. dashboard cannot import
 // the views (they import dashboard — an import back would create a cycle and
 // invert execution order), so each view registers its public surface here at
 // module init and dashboard reaches it at call time.

@@ -19,7 +19,7 @@ import (
 //  2. Supply OnHardFail that bumps a counter then panics.
 //  3. Call Stop with an already-expired stopCtx.
 //  4. Assert Stop returns within a reasonable budget (no goroutine leak
-//     tied to the panic) and OnHardFail was invoked exactly once.
+//     tied to the panic) and OnHardFail was invoked exactly once, with code 2.
 func TestManager_StopOnHardFailPanicRecovered(t *testing.T) {
 	pulse, tickFn := pulseTicker()
 
@@ -37,7 +37,7 @@ func TestManager_StopOnHardFailPanicRecovered(t *testing.T) {
 		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
 	})
 
-	var hardFailCalls atomic.Int32
+	var hardFailCalls, hardFailCode atomic.Int32
 	router := newFakeRouter()
 	m, err := NewManager(Config{
 		Enabled:     true,
@@ -49,6 +49,7 @@ func TestManager_StopOnHardFailPanicRecovered(t *testing.T) {
 		NewTicker: tickFn,
 		OnHardFail: func(code int) {
 			hardFailCalls.Add(1)
+			hardFailCode.Store(int32(code))
 			panic("simulated OnHardFail panic")
 		},
 	})
@@ -108,5 +109,8 @@ func TestManager_StopOnHardFailPanicRecovered(t *testing.T) {
 	}
 	if got := hardFailCalls.Load(); got != 1 {
 		t.Errorf("OnHardFail call count = %d, want 1", got)
+	}
+	if got := hardFailCode.Load(); got != 2 {
+		t.Errorf("OnHardFail code = %d, want 2", got)
 	}
 }

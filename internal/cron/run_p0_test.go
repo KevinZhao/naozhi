@@ -66,8 +66,8 @@ func TestP0_OverlapSkippedEmitsTerminalEvent(t *testing.T) {
 	if got.ErrorClass != ErrClassOverlapSkipped {
 		t.Errorf("error_class: want overlap_skipped, got %q", got.ErrorClass)
 	}
-	if got.JobID != "job-overlap" {
-		t.Errorf("job_id: want job-overlap, got %q", got.JobID)
+	if got.OwnerID != "job-overlap" {
+		t.Errorf("job_id: want job-overlap, got %q", got.OwnerID)
 	}
 	if got.Trigger != TriggerManual {
 		t.Errorf("trigger: want manual, got %q", got.Trigger)

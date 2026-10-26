@@ -4,8 +4,7 @@
 // reverse-importing internal/server (#2285); sub-packages alias them locally.
 //
 // contracts imports only internal/node, never internal/server; server's
-// concrete types satisfy these shapes. TestDashboardContractsDeclaredOnce
-// pins the single-declaration invariant.
+// concrete types satisfy these shapes.
 package contracts
 
 import (

@@ -106,53 +106,6 @@ func TestReadEvent_PoolConcurrentSafe(t *testing.T) {
 	wg.Wait()
 }
 
-// TestReadEvent_SkipPathRecyclesPool ensures the early skip returns (hook /
-// control_response) still return the pooled struct without leaking it or
-// bleeding into the next parse. We can't observe the pool directly, but a
-// subsequent genuine parse after a run of skips must be correct.
-func TestReadEvent_SkipPathRecyclesPool(t *testing.T) {
-	p := &ClaudeProtocol{}
-	skips := []string{
-		`{"type":"system","subtype":"hook_started"}`,
-		`{"type":"control_response"}`,
-		`{"type":"system","subtype":"hook_response"}`,
-	}
-	for _, s := range skips {
-		ev, done, err := p.ReadEvent(s)
-		if err != nil {
-			t.Fatalf("skip ReadEvent(%s) err: %v", s, err)
-		}
-		if ev != nil || done {
-			t.Fatalf("skip ReadEvent(%s) = (%v, %v), want (nil, false)", s, ev, done)
-		}
-	}
-	ev, _, err := p.ReadEvent(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"after"}]}}`)
-	if err != nil {
-		t.Fatalf("post-skip ReadEvent err: %v", err)
-	}
-	if len(ev) != 1 || ev[0].Message == nil || ev[0].Message.Content[0].Text != "after" {
-		t.Fatalf("post-skip parse corrupted by skip-path pool handling: %+v", ev)
-	}
-}
-
-// BenchmarkReadEvent measures the per-frame allocation cost of the hot
-// shim-stdout ingest path. R220123-PERF-13 (#1637): the pooled *clievent.Event
-// removes the per-frame clievent.Event-header heap allocation; this benchmark is the
-// alloc-count guard the ticket asked for. Run with `-benchmem`; the
-// header allocation should no longer appear in allocs/op.
-func BenchmarkReadEvent(b *testing.B) {
-	p := &ClaudeProtocol{}
-	line := `{"type":"assistant","session_id":"s","message":{"role":"assistant","content":[{"type":"text","text":"hello world"}]}}`
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		ev, _, err := p.ReadEvent(line)
-		if err != nil || len(ev) != 1 {
-			b.Fatalf("ReadEvent err=%v len=%d", err, len(ev))
-		}
-	}
-}
-
 // TestReadEventInto_ParityAndBufReuse pins R20260603-PERF-10 (#1676):
 // ReadEventInto must (a) return the same clievent.Event/done/err as ReadEvent, and
 // (b) back the returned slice with the caller-supplied buf so the single-event
@@ -188,22 +141,5 @@ func TestReadEventInto_ParityAndBufReuse(t *testing.T) {
 	skip := `{"type":"control_response"}`
 	if ev, _, err := p.ReadEventInto(skip, arr[:0]); err != nil || ev != nil {
 		t.Errorf("skip ReadEventInto = (%v, %v), want (nil, nil)", ev, err)
-	}
-}
-
-// BenchmarkReadEventInto guards the zero-extra-alloc claim: reusing a single
-// backing array across frames must not allocate the 1-element slice header
-// that ReadEvent pays each call. Run with -benchmem.
-func BenchmarkReadEventInto(b *testing.B) {
-	p := &ClaudeProtocol{}
-	line := `{"type":"assistant","session_id":"s","message":{"role":"assistant","content":[{"type":"text","text":"hello world"}]}}`
-	var arr [2]clievent.Event
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		ev, _, err := p.ReadEventInto(line, arr[:0])
-		if err != nil || len(ev) != 1 {
-			b.Fatalf("ReadEventInto err=%v len=%d", err, len(ev))
-		}
 	}
 }

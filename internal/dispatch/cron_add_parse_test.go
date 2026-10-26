@@ -101,13 +101,17 @@ func TestHandleCronAdd_ContextMode(t *testing.T) {
 }
 
 // /cron list marks kept-context jobs, so a chat can tell which of its jobs
-// carry a growing conversation; fresh jobs stay unmarked.
+// carry a growing conversation; fresh jobs stay unmarked. An auto-paused job
+// is told apart from a manually paused one, and a backend-outage pause apart
+// from the job's own failure streak.
 func TestHandleCronList_MarksKeptContext(t *testing.T) {
 	d := newTestDispatcher(&fakePlatform{})
 	d.scheduler = &fakeCronScheduler{listJobsResult: []CronJob{
 		{ID: "fresh01", Schedule: "@hourly", Prompt: "a", FreshContext: true},
 		{ID: "kept002", Schedule: "@hourly", Prompt: "b"},
 		{ID: "kept003", Schedule: "@hourly", Prompt: "c", Paused: true},
+		{ID: "auto004", Schedule: "@hourly", Prompt: "d", Paused: true, AutoPaused: true},
+		{ID: "outa005", Schedule: "@hourly", Prompt: "e", FreshContext: true, Paused: true, AutoPaused: true, AutoPauseTransient: true},
 	}}
 	var got string
 	d.handleCronList(incomingMsg("/cron list"), func(s string) { got = s })
@@ -126,5 +130,11 @@ func TestHandleCronList_MarksKeptContext(t *testing.T) {
 	}
 	if l := lines["kept003"]; !strings.HasSuffix(l, " [保留上下文] [暂停]") {
 		t.Errorf("paused kept job line = %q, want both marks", l)
+	}
+	if l := lines["auto004"]; !strings.HasSuffix(l, " d [保留上下文] [自动暂停：连续失败]") {
+		t.Errorf("auto-paused job line = %q, want the failure-streak mark instead of [暂停]", l)
+	}
+	if l := lines["outa005"]; !strings.HasSuffix(l, " e [自动暂停：后端持续故障]") {
+		t.Errorf("outage-paused job line = %q, want the backend-outage mark", l)
 	}
 }

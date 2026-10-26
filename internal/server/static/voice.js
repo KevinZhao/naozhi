@@ -1,18 +1,10 @@
-// voice.js — hold-to-talk voice input (#2558 D4-2).
-//
-// Verbatim move out of dashboard.js (`git diff --color-moved` shows a pure
-// move; the import lines and escCloseVoiceOverlay are the only
-// additions). Owns the MediaRecorder lifecycle, the persistent mic stream,
-// the touch/mouse hold gesture, the 30 s cap timer and the transcription
-// round-trip.
-//
-// Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back. Shared state is read from the state.js objects.
+// voice.js — hold-to-talk voice input: the MediaRecorder lifecycle, the
+// persistent mic stream, the touch/mouse hold gesture, the 30 s cap timer and
+// the transcription round-trip. Layering: never import dashboard.js back.
 import { NZ_CONTRACT } from './contract.js';
 import { composer, selection, sessionList } from './state.js';
 import { showToast } from './nz_util.js';
 import { ICONS } from './icons.js';
-import { getToken } from './platform.js';
 import { sid } from './session_ident.js';
 import { getMsgValue, setMsgValue } from './utilities.js';
 import { updateSendButton } from './running_banner.js';
@@ -36,7 +28,7 @@ export const voiceRec = {
   // state is the recording lifecycle, independent of the finger gesture
   // (voiceActive): 'idle' → 'recording' (MediaRecorder started) →
   // 'finalizing' (recorder stopped, onstop / transcription pending) → 'idle'.
-  // #2435: the 30s cap stops the recorder while the finger is still down;
+  // the 30s cap stops the recorder while the finger is still down;
   // without this state the trailing swipe/lift re-ran the send/cancel logic
   // against a recorder that was already finalized.
   state: 'idle',
@@ -152,7 +144,7 @@ function voiceTouchCancel() {
 // on the mic) it stops the recorder, composer.sending or cancelling per the gesture.
 // Once the recording was already finalized by the MAX_REC_SECS cap it only
 // clears the pressed look: the "正在识别" overlay stays up until transcription
-// settles, and the lift/swipe can neither cancel nor re-send it (#2435).
+// settles, and the lift/swipe can neither cancel nor re-send it.
 function finishVoiceGesture(shouldSend) {
   if (voiceRec.state !== 'finalizing') {
     stopVoiceRecording(shouldSend);
@@ -340,7 +332,7 @@ function updateVoiceTimer() {
   el.textContent = secs + 's';
   if (secs >= MAX_REC_SECS && voiceRec.state === 'recording') {
     // stopVoiceRecording clears voiceRec.timer, so this toast fires once
-    // instead of on every 200ms tick until onstop lands (#2435).
+    // instead of on every 200ms tick until onstop lands.
     stopVoiceRecording(true);
     showToast('\u5df2\u8fbe\u6700\u957f' + MAX_REC_SECS + '\u79d2');
   }
@@ -354,8 +346,6 @@ function transcribeAudio(blob, autoSend) {
   const fd = new FormData();
   fd.append('audio', blob, 'recording.' + (blob.type.includes('webm') ? 'webm' : blob.type.includes('ogg') ? 'ogg' : 'mp4'));
   const headers = {};
-  const token = getToken();
-  if (token) headers['Authorization'] = 'Bearer ' + token;
   const ac = new AbortController();
   const timeoutId = setTimeout(() => ac.abort(), TRANSCRIBE_TIMEOUT_MS);
   // Tag fetch-level failures so .catch can distinguish network from server.
@@ -380,7 +370,7 @@ function transcribeAudio(blob, autoSend) {
     if (input && data.text) {
       // Append to (never replace) whatever is in the composer: in voice mode
       // the textarea is hidden, so an auto-sent transcript used to silently
-      // overwrite a typed draft (#2435).
+      // overwrite a typed draft.
       const cur = getMsgValue(input);
       setMsgValue(input, cur ? cur + ' ' + data.text : data.text);
       if (autoSend) {
@@ -438,9 +428,8 @@ function describeTranscribeError(err) {
 }
 
 
-// escCloseVoiceOverlay — the Esc-key escape hatch for a stuck recording
-// (R20260610-UI-3). Moved here with the overlay logic it drives; dashboard's
-// global Esc handler calls it and uses the boolean to decide whether the key
+// escCloseVoiceOverlay — the Esc-key escape hatch for a stuck recording.
+// dashboard's global Esc handler calls it and uses the boolean to decide whether the key
 // was consumed.
 export function escCloseVoiceOverlay() {
   const voiceOv = document.getElementById('voice-overlay');

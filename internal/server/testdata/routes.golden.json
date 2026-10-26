@@ -96,16 +96,6 @@
   },
   {
     "method": "GET",
-    "path": "/api/debug/pprof",
-    "handler_type": "*AuthHandlers"
-  },
-  {
-    "method": "GET",
-    "path": "/api/debug/pprof/",
-    "handler_type": "*AuthHandlers"
-  },
-  {
-    "method": "GET",
     "path": "/api/discovered",
     "handler_type": "*discovery.Handlers"
   },

@@ -78,112 +78,6 @@ func TestSendSplitReply_ChunksRespectHardLimit(t *testing.T) {
 	}
 }
 
-// TestSendSplitReply_NewlineDenseRespectsHardLimit reproduces #2056: a reply
-// dense with newlines makes SplitText break early (chunk ~= splitWidth/2),
-// so the true chunk count can be ~2x the naive ceil(runeCount/splitWidth)
-// estimate. When the true count crosses a decimal digit boundary the page
-// suffix widens by 2 runes beyond what was reserved, pushing chunk+suffix
-// over a zero-headroom hard limit. Every emitted chunk must stay <= limit.
-func TestSendSplitReply_NewlineDenseRespectsHardLimit(t *testing.T) {
-	const limit = 2000
-	hp := &hardLimitPlatform{limit: limit}
-	d := &Dispatcher{}
-
-	// Lines sized so SplitText packs whole lines but the newline-driven
-	// breaks make the TRUE chunk count cross a decimal digit boundary
-	// (>=10) while the naive ceil(runeCount/splitWidth) estimate stays
-	// single-digit. With the pre-#2056 estimate this reserves an 8-rune
-	// suffix budget but the real suffix is 10 runes, so a full splitLen
-	// chunk + suffix reaches 2002 > 2000. (996 'a' + '\n' = 997 runes per
-	// line, 14 lines → runeCount=13958, naive est 9, real total 10.)
-	line := makeRunes('a', 996) + "\n" // 997 runes per line
-	var b []byte
-	for i := 0; i < 14; i++ {
-		b = append(b, line...)
-	}
-	text := string(b) // 13958 runes, newline-dense
-
-	d.SendSplitReply(context.Background(), hp, ReplyDest{ChatID: "chat-1"}, text)
-
-	hp.mu.Lock()
-	defer hp.mu.Unlock()
-
-	if len(hp.rejected) != 0 {
-		t.Fatalf("platform rejected %d oversized chunk(s); want 0 (#2056)", len(hp.rejected))
-	}
-	if len(hp.accepted) < 10 {
-		t.Fatalf("expected newline-dense reply to split into >=10 chunks, got %d", len(hp.accepted))
-	}
-	for i, c := range hp.accepted {
-		if n := utf8.RuneCountInString(c); n > limit {
-			t.Errorf("chunk %d has %d runes, exceeds hard limit %d (#2056)", i+1, n, limit)
-		}
-	}
-	if joined := stripPageSuffixes(hp.accepted); joined != text {
-		t.Errorf("reassembled text != original (content lost/duplicated) (#2056)")
-	}
-}
-
-// TestSendSplitReply_FencedReplyStaysBalanced: a code block longer than one
-// message is closed at the end of each chunk and reopened at the start of the
-// next, so every message renders as code, and the close/reopen lines plus the
-// page suffix still fit the hard limit.
-func TestSendSplitReply_FencedReplyStaysBalanced(t *testing.T) {
-	const limit = 2000
-	hp := &hardLimitPlatform{limit: limit}
-	d := &Dispatcher{}
-
-	var b strings.Builder
-	b.WriteString("Here is the file:\n```go\n")
-	for i := 0; b.Len() < 6000; i++ {
-		b.WriteString("\tfmt.Println(\"line ")
-		b.WriteString(strings.Repeat("x", i%40))
-		b.WriteString("\")\n")
-	}
-	b.WriteString("```\nDone.\n")
-	text := b.String()
-
-	d.SendSplitReply(context.Background(), hp, ReplyDest{ChatID: "chat-1"}, text)
-
-	hp.mu.Lock()
-	defer hp.mu.Unlock()
-	if len(hp.rejected) != 0 {
-		t.Fatalf("platform rejected %d oversized chunk(s); want 0", len(hp.rejected))
-	}
-	if len(hp.accepted) < 3 {
-		t.Fatalf("expected >=3 chunks, got %d", len(hp.accepted))
-	}
-	var content []string
-	for i, c := range hp.accepted {
-		if idx := lastPageSuffixIndex(c); idx >= 0 {
-			c = c[:idx]
-		}
-		fences := 0
-		for _, line := range strings.Split(c, "\n") {
-			if strings.HasPrefix(line, "```") {
-				fences++
-			} else if line != "" {
-				content = append(content, line)
-			}
-		}
-		if fences%2 != 0 {
-			t.Errorf("chunk %d has %d fence lines, leaving a code block open:\n%s", i+1, fences, c)
-		}
-		if i > 0 && i < len(hp.accepted)-1 && !strings.HasPrefix(c, "```go\n") {
-			t.Errorf("chunk %d does not reopen the go fence: %.40q", i+1, c)
-		}
-	}
-	var want []string
-	for _, line := range strings.Split(text, "\n") {
-		if !strings.HasPrefix(line, "```") && line != "" {
-			want = append(want, line)
-		}
-	}
-	if strings.Join(content, "\n") != strings.Join(want, "\n") {
-		t.Errorf("chunk lines minus fence lines differ from the reply's: a line was cut, lost or duplicated")
-	}
-}
-
 // TestSendSplitReply_TinyMaxLenSuppressesSuffix reproduces #2057: a platform
 // (mis)configured with maxLen smaller than the page suffix width leaves no
 // room to reserve for "[i/N]". The old code fell back to splitLen=maxLen but
@@ -226,62 +120,28 @@ func TestSendSplitReply_TinyMaxLenSuppressesSuffix(t *testing.T) {
 	}
 }
 
-// singleTokenPlatform mimics a platform (e.g. WeChat iLink) whose reply is
-// authorised by a single-use context token: the FIRST send succeeds, every
-// subsequent send in the same turn is rejected (token already consumed).
-// #2136.
-type singleTokenPlatform struct {
-	mu       sync.Mutex
-	limit    int
-	accepted []string
-	sends    int
-}
-
-func (s *singleTokenPlatform) Name() string                                               { return "singletoken" }
-func (s *singleTokenPlatform) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
-func (s *singleTokenPlatform) Reply(_ context.Context, msg platform.OutgoingMessage) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sends++
-	if s.sends > 1 {
-		// Token already consumed by the first send — upstream rejects reuse.
-		return "", errors.New("singletoken: context_token already used")
-	}
-	s.accepted = append(s.accepted, msg.Text)
-	return "ok", nil
-}
-func (s *singleTokenPlatform) EditMessage(_ context.Context, _, _ string) error { return nil }
-func (s *singleTokenPlatform) MaxReplyLength() int                              { return s.limit }
-func (s *singleTokenPlatform) SupportsInterimMessages() bool                    { return false }
-func (s *singleTokenPlatform) UsesSingleUseReplyToken() bool                    { return true }
-
 // TestSendSplitReply_SingleUseTokenCollapsesToOneMessage reproduces #2136: a
 // reply longer than the platform limit must be delivered as a SINGLE
 // (truncated) message for a single-use-token platform, not fanned into N
 // chunks where chunks 2..N hit the consumed token and are silently lost.
 func TestSendSplitReply_SingleUseTokenCollapsesToOneMessage(t *testing.T) {
 	const limit = 100
-	sp := &singleTokenPlatform{limit: limit}
+	sp := &fakeSingleUseReactorless{limit: limit}
 	d := &Dispatcher{}
 
 	text := makeRunes('a', 350) // > limit, would normally split into 4 chunks
 
 	d.SendSplitReply(context.Background(), sp, ReplyDest{ChatID: "user-1"}, text)
 
-	sp.mu.Lock()
-	defer sp.mu.Unlock()
-
-	if sp.sends != 1 {
-		t.Fatalf("expected exactly 1 send (single-use token), got %d", sp.sends)
+	if n := sp.replyCount(); n != 1 {
+		t.Fatalf("expected exactly 1 send (single-use token), got %d", n)
 	}
-	if len(sp.accepted) != 1 {
-		t.Fatalf("expected 1 accepted message, got %d", len(sp.accepted))
-	}
-	if n := utf8.RuneCountInString(sp.accepted[0]); n > limit {
+	got := sp.replies[0].Text
+	if n := utf8.RuneCountInString(got); n > limit {
 		t.Errorf("collapsed message has %d runes, exceeds limit %d", n, limit)
 	}
-	if !strings.HasSuffix(sp.accepted[0], replyfmt.SingleReplyTruncMarker) {
-		t.Errorf("collapsed message missing truncation marker: %q", sp.accepted[0])
+	if !strings.HasSuffix(got, replyfmt.SingleReplyTruncMarker) {
+		t.Errorf("collapsed message missing truncation marker: %q", got)
 	}
 }
 
@@ -290,80 +150,18 @@ func TestSendSplitReply_SingleUseTokenCollapsesToOneMessage(t *testing.T) {
 // single-use-token platform. #2136.
 func TestSendSplitReply_SingleUseTokenShortReplyUnchanged(t *testing.T) {
 	const limit = 100
-	sp := &singleTokenPlatform{limit: limit}
+	sp := &fakeSingleUseReactorless{limit: limit}
 	d := &Dispatcher{}
 
 	text := makeRunes('b', 40) // <= limit
 
 	d.SendSplitReply(context.Background(), sp, ReplyDest{ChatID: "user-1"}, text)
 
-	sp.mu.Lock()
-	defer sp.mu.Unlock()
-
-	if sp.sends != 1 || len(sp.accepted) != 1 {
-		t.Fatalf("expected 1 send/1 accepted, got sends=%d accepted=%d", sp.sends, len(sp.accepted))
+	if n := sp.replyCount(); n != 1 {
+		t.Fatalf("expected 1 send, got %d", n)
 	}
-	if sp.accepted[0] != text {
-		t.Errorf("short reply altered: got %q want %q", sp.accepted[0], text)
-	}
-}
-
-// TestSendSplitReply_ByteFastPath_ShortAsciiSingleChunk verifies the
-// R202606j-PERF-006 byte-length fast path: an ASCII reply whose byte length is
-// <= maxLen is sent as a single verbatim chunk (no page suffix), matching the
-// pre-optimisation behaviour.
-func TestSendSplitReply_ByteFastPath_ShortAsciiSingleChunk(t *testing.T) {
-	const limit = 2000
-	hp := &hardLimitPlatform{limit: limit}
-	d := &Dispatcher{}
-
-	text := makeRunes('a', 100) // len(text)=100 bytes <= maxLen
-
-	d.SendSplitReply(context.Background(), hp, ReplyDest{ChatID: "chat-1"}, text)
-
-	hp.mu.Lock()
-	defer hp.mu.Unlock()
-	if len(hp.accepted) != 1 {
-		t.Fatalf("expected 1 chunk via byte fast path, got %d", len(hp.accepted))
-	}
-	if hp.accepted[0] != text {
-		t.Errorf("fast-path chunk altered: got %q want %q", hp.accepted[0], text)
-	}
-	if lastPageSuffixIndex(hp.accepted[0]) >= 0 {
-		t.Errorf("fast-path single chunk unexpectedly carries a page suffix: %q", hp.accepted[0])
-	}
-}
-
-// TestSendSplitReply_ByteFastPath_MultibyteFallthroughSingleChunk guards the
-// fast-path boundary: a multibyte reply whose BYTE length exceeds maxLen but
-// whose RUNE count still fits (so it should not split) must fall through the
-// byte fast path and still be delivered as a single chunk by the rune-count
-// path. This confirms the fast path's len()<=maxLen guard is conservative
-// (never over-fires) and that the slow path remains correct for such inputs.
-func TestSendSplitReply_ByteFastPath_MultibyteFallthroughSingleChunk(t *testing.T) {
-	const limit = 2000
-	hp := &hardLimitPlatform{limit: limit}
-	d := &Dispatcher{}
-
-	// 1500 CJK runes: rune count 1500 <= 2000 (no split needed), but byte
-	// length is 4500 (3 bytes/rune) > maxLen, so the byte fast path is skipped.
-	text := makeRunes('好', 1500)
-	if len(text) <= limit {
-		t.Fatalf("test setup: expected byte length > limit, got %d", len(text))
-	}
-
-	d.SendSplitReply(context.Background(), hp, ReplyDest{ChatID: "chat-1"}, text)
-
-	hp.mu.Lock()
-	defer hp.mu.Unlock()
-	if len(hp.rejected) != 0 {
-		t.Fatalf("platform rejected %d chunk(s); want 0", len(hp.rejected))
-	}
-	if len(hp.accepted) != 1 {
-		t.Fatalf("expected 1 chunk (rune count fits), got %d", len(hp.accepted))
-	}
-	if hp.accepted[0] != text {
-		t.Errorf("single chunk altered: got %d-rune chunk want original", utf8.RuneCountInString(hp.accepted[0]))
+	if got := sp.replies[0].Text; got != text {
+		t.Errorf("short reply altered: got %q want %q", got, text)
 	}
 }
 

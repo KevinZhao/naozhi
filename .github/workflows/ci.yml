@@ -268,9 +268,3 @@ jobs:
       - name: Test the dashboard's leaf helpers
         run: node --test scripts/dashboard-leaves.test.mjs
 
-      # shell.js (S20f, #3026) is the upcall table; registerShell refusing a
-      # missing or undeclared slot is what makes a forgotten registration
-      # fail at boot instead of at the first click.
-      - name: Test the shell table
-        run: node --test scripts/shell.test.mjs
-

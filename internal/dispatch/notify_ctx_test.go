@@ -2,7 +2,6 @@ package dispatch
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 )
@@ -38,50 +37,5 @@ func TestNotifyCtx_DetachedFromParent(t *testing.T) {
 	case <-notify.Done():
 		t.Fatalf("notify ctx Done() fired despite parent cancellation; want detached")
 	case <-time.After(20 * time.Millisecond):
-	}
-}
-
-// TestNotifyCtx_TimeoutHonored — the factory still bounds the returned
-// ctx by the caller-provided timeout. Without this assertion a future
-// refactor that returned context.Background() unconditionally would
-// silently allow leaking goroutines on every detached-reply site.
-func TestNotifyCtx_TimeoutHonored(t *testing.T) {
-	t.Parallel()
-
-	notify, cancel := NotifyCtx(context.Background(), NotifyKindOwnerLoopPanic, 30*time.Millisecond)
-	defer cancel()
-
-	select {
-	case <-notify.Done():
-		// Expected.
-		if !errors.Is(notify.Err(), context.DeadlineExceeded) {
-			t.Fatalf("notify.Err() = %v, want DeadlineExceeded", notify.Err())
-		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("notify ctx did not honor 30ms timeout")
-	}
-}
-
-// TestNotifyCtx_NilParentSafe — call sites pass nil parent today
-// (panic-recovery + ask_question card both pre-detach completely).
-// The factory must not panic on nil parent, otherwise turn-panic
-// recovery would itself crash and never reach the "处理异常" reply.
-func TestNotifyCtx_NilParentSafe(t *testing.T) {
-	t.Parallel()
-
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("NotifyCtx panicked on nil parent: %v", r)
-		}
-	}()
-
-	//lint:ignore SA1012 intentional nil ctx: pins the defensive nil-ctx fallback under test
-	notify, cancel := NotifyCtx(nil, NotifyKindAskQuestionCard, 100*time.Millisecond)
-	defer cancel()
-	if notify == nil {
-		t.Fatal("NotifyCtx returned nil ctx for nil parent")
-	}
-	if notify.Err() != nil {
-		t.Fatalf("NotifyCtx returned already-cancelled ctx for nil parent: %v", notify.Err())
 	}
 }

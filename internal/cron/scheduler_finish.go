@@ -16,6 +16,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -167,8 +168,8 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) (pausedAfter int) {
 		// a no-op and can never reset a racing run-B's freshly-installed metadata.
 		// Broadcast last so hub locks aren't held while we hold s.tbl.mu.
 		rc.finalizer.finalize()
-		s.emitRunEnded(RunEndedEvent{
-			JobID:      rc.jobID,
+		s.emitRunEnded(runtelemetry.RunEndedEvent{
+			OwnerID:    rc.jobID,
 			RunID:      rc.runID,
 			State:      out.state,
 			StartedAt:  rc.startedAt,
@@ -319,8 +320,8 @@ func (s *Scheduler) emitSyntheticSkipped(jobID string, viaTriggerNow bool, errCl
 	if viaTriggerNow {
 		trigger = TriggerManual
 	}
-	s.emitRunStarted(RunStartedEvent{
-		JobID:     jobID,
+	s.emitRunStarted(runtelemetry.RunStartedEvent{
+		OwnerID:   jobID,
 		RunID:     runID,
 		StartedAt: startedAt,
 		Trigger:   trigger,

@@ -1,6 +1,5 @@
 // cron_trigger.js — the 立即执行 (TriggerNow) flow and its visual-feedback
-// cooldown state machine (#2715 D4 follow-up: cron_view.js four-region
-// split, region 4).
+// cooldown state machine.
 //
 // Owns the 200ms cooldown tick that walks sending → sent → clear. The
 // per-jobId trigger timestamps (cronJustTriggered) and the primary button's
@@ -9,7 +8,6 @@
 // clears the cooldown through cron_state's cronTriggerCooldownClear.
 
 import { NZ_CONTRACT } from './contract.js';
-import { getToken } from './platform.js';
 import { showToast } from './nz_util.js';
 import { showAPIError, showNetworkError } from './utilities.js';
 import { renderCronDrawer } from './cron_drawer.js';
@@ -114,8 +112,6 @@ async function cronTriggerNow(id) {
   if (cronDrawerState.jobId === id) renderCronDrawer();
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
     const r = await fetch(NZ_CONTRACT.API.cron_trigger, { method: 'POST', headers, body: JSON.stringify({ id }) });
     if (!r.ok) {
       // Failure — clear the cooldown immediately so the user can retry.

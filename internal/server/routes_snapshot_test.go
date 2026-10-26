@@ -48,7 +48,7 @@ func TestRoutesSnapshot(t *testing.T) {
 	// Scanning BOTH is the point: when the patterns moved out of routes.go this
 	// gate briefly saw only 36 of 95 routes, i.e. it would have gone quietly
 	// green while two thirds of the API left its field of view.
-	routes, err := scanRoutes("routes.go", "server.go", "debug_pprof.go", "static_assets.go", "static_js_handlers.go")
+	routes, err := scanRoutes("routes.go", "server.go", "static_assets.go", "static_js_handlers.go")
 	if err != nil {
 		t.Fatalf("scanRoutes: %v", err)
 	}
@@ -298,7 +298,7 @@ func handlerTypeOf(e ast.Expr) string {
 		}
 		// e.g. s.auth.requireAuth(handler) — the *outer* call is the
 		// auth wrapper; report it as *AuthHandlers regardless of the
-		// inline handler-arg shape (debug_pprof passes a
+		// inline handler-arg shape (a wrapper passed a
 		// closure-typed `handler` var whose type can't be
 		// resolved by this lightweight AST walker). Recognise the
 		// shape `<recv>.auth.<method>(...)`.
@@ -310,10 +310,9 @@ func handlerTypeOf(e ast.Expr) string {
 		// s.apiChain()(...) — the chain is a value now (#2554), so the wrapper is
 		// a call on a call. Resolve the wrapped handler when it names one
 		// (s.auth.HandleX → *AuthHandlers); fall back to *AuthHandlers when
-		// it does not, which keeps the pre-#2554 answer for debug_pprof. It
-		// passes a closure-typed `handler` var this
-		// lightweight walker cannot type, and the old s.auth.requireAuth(handler)
-		// shape reported the wrapper for exactly that reason.
+		// it does not (e.g. a closure-typed `handler` var this lightweight
+		// walker cannot type), matching the old s.auth.requireAuth(handler)
+		// shape.
 		if wrapped, ok := call.Fun.(*ast.CallExpr); ok {
 			if sel, ok := wrapped.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "apiChain" {
 				if t := handlerTypeOf(call.Args[0]); !strings.HasPrefix(t, "<") {

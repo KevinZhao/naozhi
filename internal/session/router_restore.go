@@ -48,12 +48,11 @@ func (r *Router) restoreSessionFromEntry(tx sessTx, key string, entry *storeEntr
 		cliVersion = restoreWrapper.CLIVersion
 	}
 	s := &ManagedSession{
-		key:                key,
-		prevSessionIDs:     entry.PrevSessionIDs,
-		prevSessionOrigins: entry.PrevSessionOrigins,
-		exempt:             isExemptKey(key),
-		runStore:           r.runs.runs,
-		costAcct:           r.runs.cost,
+		key:            key,
+		prevSessionIDs: entry.PrevSessionIDs,
+		exempt:         isExemptKey(key),
+		runStore:       r.runs.runs,
+		costAcct:       r.runs.cost,
 	}
 	storeTotalCost(&s.totalCost, entry.TotalCost)
 	// Legacy stores (predating cost_spent) seed costSpent from TotalCost so the

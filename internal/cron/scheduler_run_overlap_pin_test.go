@@ -55,8 +55,8 @@ func TestOverlapSkip_EmitsPairedStartedEnded(t *testing.T) {
 	}
 
 	ended := rec.endedAtCron(0)
-	if ended.JobID != j.ID {
-		t.Errorf("ended.JobID = %q, want %q", ended.JobID, j.ID)
+	if ended.OwnerID != j.ID {
+		t.Errorf("ended.OwnerID = %q, want %q", ended.OwnerID, j.ID)
 	}
 	if ended.State != RunStateSkipped {
 		t.Errorf("ended.State = %v, want RunStateSkipped", ended.State)

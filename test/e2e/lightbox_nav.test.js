@@ -1,4 +1,3 @@
-// @ts-check
 // Lightbox gallery navigation E2E (RFC lightbox-gallery-nav).
 // Covers: group collection from .event-images, n/N counter, prev/next
 // buttons with boundary aria-disabled, ←/→ keyboard nav, Escape close, and
@@ -143,7 +142,7 @@ test.describe('Lightbox gallery navigation', () => {
     await expect.poll(async () =>
       page.$eval('.lightbox-overlay img', el => el.src)
     ).toContain('data:image/png');
-    const w = await page.$eval('.lightbox-overlay img', el => /** @type {HTMLImageElement} */(el).naturalWidth);
+    const w = await page.$eval('.lightbox-overlay img', el => el.naturalWidth);
     expect(w).toBeGreaterThan(0);
 
     await page.keyboard.press('Escape');

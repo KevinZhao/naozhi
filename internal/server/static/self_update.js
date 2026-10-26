@@ -343,7 +343,7 @@ const SKEW_BUSY = '.modal-overlay, .cmd-palette-overlay, .lightbox-overlay.activ
 const skew = { server: '', lastInputAt: 0 };
 
 function skewIdle() {
-  const texts = [.../** @type {NodeListOf<HTMLElement & {value?: string}>} */ (document.querySelectorAll('#msg-input, textarea'))].map((el) => el.value ?? el.innerText);
+  const texts = [...document.querySelectorAll('#msg-input, textarea')].map((el) => el.value ?? el.innerText);
   if (texts.concat(Object.values(perSession.drafts)).some((t) => (t || '').trim()) || composer.sending) return false;
   if (composer.pendingFiles.length || ui.activePopover || document.querySelector(SKEW_BUSY)) return false;
   if (document.hidden) return true;
@@ -363,7 +363,7 @@ function maybeSkewReload() {
 }
 
 wsm.onReady((msg) => {
-  const meta = /** @type {HTMLMetaElement} */ (document.querySelector('meta[name="nz-asset-version"]'));
+  const meta = document.querySelector('meta[name="nz-asset-version"]');
   if (!meta || !msg.asset_version || msg.asset_version === meta.content) return;
   if (!skew.server) {
     skew.lastInputAt = Date.now();

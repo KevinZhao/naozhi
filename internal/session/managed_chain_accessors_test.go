@@ -25,7 +25,7 @@ func TestSnapshotPrevSessionIDs_DefensiveClone(t *testing.T) {
 }
 
 // TestSnapshotPrevSessionIDs_EmptyReturnsNil keeps the no-zero-len-alloc
-// contract that matches SnapshotPrevSessionOrigins.
+// contract.
 func TestSnapshotPrevSessionIDs_EmptyReturnsNil(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{}

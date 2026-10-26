@@ -1,17 +1,12 @@
 // running_banner.js — the running banner, the turn timer, the send/stop buttons
 // and the transcript scroll position.
-//
-// Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects.
-// session_list imports this module, so session_list's debouncedFetchSessions
-// (the turn watchdog's tick) is a shell slot.
+// Layering: never import dashboard.js back. session_list imports this module,
+// so debouncedFetchSessions (the turn watchdog's tick) is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList, timers } from './state.js';
 import { escAttr, nzViews, showToast } from './nz_util.js';
 import { wsm } from './ws_manager.js';
 import { ICONS } from './icons.js';
-import { getToken } from './platform.js';
 import { sid } from './session_ident.js';
 import { announce, getMsgValue, setMsgValue, showNetworkError } from './utilities.js';
 import { shell } from './shell.js';
@@ -31,7 +26,7 @@ const turnState = {
 // the elapsed anchor (turnStartTime/timerId) and the justSent flag: used when
 // the server echoes back the user message this client just sent, so the
 // timer started at send time survives the turn-boundary reset instead of
-// being cleared and re-anchored at the first streamed event (#2435).
+// being cleared and re-anchored at the first streamed event.
 function resetTurnState(opts) {
   const keepTimer = !!(opts && opts.keepTimer);
   const kept = keepTimer
@@ -43,7 +38,7 @@ function resetTurnState(opts) {
     thinkingSummary: '', toolCounts: {}, toolOrder: [], turnStartTime: kept.turnStartTime, isWriting: false,
     timerId: kept.timerId, justSent: kept.justSent
   });
-  // #2435: blank the elapsed chip so the next banner does not open showing
+  // blank the elapsed chip so the next banner does not open showing
   // the previous turn's final time until its first 1s tick lands.
   if (!keepTimer) {
     const elapsedEl = document.getElementById('rb-elapsed');
@@ -96,12 +91,6 @@ function trackTool(name) {
   turnState.toolCounts[name]++;
 }
 
-function fmtDuration(ms) {
-  if (ms < 1000) return ms + 'ms';
-  var s = ms / 1000;
-  return s < 60 ? s.toFixed(1) + 's' : Math.floor(s / 60) + 'm' + Math.floor(s % 60) + 's';
-}
-
 // R110-P2 tool verb localization — these labels surface in the running-
 // banner line-1 via refreshBanner → actEl.textContent. Mapping is strict
 // whitelist on Claude's tool names; unknown tools fall back to "使用 X"
@@ -131,7 +120,7 @@ function toolVerb(tool, summary) {
 // event's detail. FormatToolInput on the server prefixes the detail with the
 // tool name ("Bash ls", "mcp__x__y: {...}"), and toolVerb already leads with
 // the (localized) tool name, so the prefix is dropped here — otherwise MCP
-// tools render as "使用 mcp__x__y mcp__x__y: {...}" (#2435).
+// tools render as "使用 mcp__x__y mcp__x__y: {...}".
 function toolSummaryLine(tool, detail) {
   if (!detail) return '';
   let line = detail.split('\n')[0];
@@ -378,8 +367,6 @@ function interruptSession() {
   } else {
     // HTTP fallback when WebSocket is disconnected
     const headers = {'Content-Type': 'application/json'};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
     const body = { key: selection.key };
     if (targetNode) body.node = targetNode;
     fetch(NZ_CONTRACT.API.sessions_interrupt, {
@@ -512,7 +499,6 @@ function updateSendButton(state, opts) {
 
 export {
   applyEventToTurnState,
-  fmtDuration,
   idleTaskEvent,
   interruptSession,
   paintTurnElapsed,

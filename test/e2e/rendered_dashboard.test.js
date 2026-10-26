@@ -1,4 +1,3 @@
-// @ts-check
 // Boots the dashboard from the page the Go server renders (#3330), not the raw
 // file the rest of the suite gets: entry modules become inline loaders, an
 // import map pins every module to its ?v= URL, modulepreload links fetch them
@@ -28,7 +27,7 @@ function renderedDashboard() {
       csp: fs.readFileSync(path.join(dir, 'dashboard.csp'), 'utf8'),
     };
   } catch (e) {
-    if (/** @type {NodeJS.ErrnoException} */ (e).code === 'ENOENT' && !given && !process.env.CI) return null;
+    if (e.code === 'ENOENT' && !given && !process.env.CI) return null;
     throw e;
   } finally {
     if (!given) fs.rmSync(dir, { recursive: true, force: true });
@@ -43,7 +42,6 @@ const ENTRY_MODULES = [...fs.readFileSync(path.join(REPO, 'internal', 'server', 
 const CONSOLE_ERROR_RE = /Content.Security.Policy|Refused to|import ?map|modulepreload|module specifier|does not resolve|resolve module|dynamically imported module|SyntaxError/i;
 
 test.describe('dashboard rendered by the Go server', () => {
-  /** @type {{html: string, csp: string} | null} */
   let rendered;
   let mock;
 
@@ -61,9 +59,9 @@ test.describe('dashboard rendered by the Go server', () => {
     const ctx = await browser.newContext();
     const page = await ctx.newPage();
     await page.addInitScript(() => {
-      /** @type {any} */ (window).__cspv = [];
+      window.__cspv = [];
       document.addEventListener('securitypolicyviolation', (e) => {
-        /** @type {any} */ (window).__cspv.push(`${e.violatedDirective} ${e.blockedURI}`);
+        window.__cspv.push(`${e.violatedDirective} ${e.blockedURI}`);
       });
     });
     const errors = [];
@@ -76,7 +74,6 @@ test.describe('dashboard rendered by the Go server', () => {
       const text = m.text();
       if (m.type() === 'error' && CONSOLE_ERROR_RE.test(text)) errors.push(text);
     });
-    /** @type {URL[]} */
     const statics = [];
     page.on('request', (r) => {
       const u = new URL(r.url());
@@ -92,8 +89,8 @@ test.describe('dashboard rendered by the Go server', () => {
       await page.goto(mock.url + '/dashboard');
       // A blocked loader leaves the page without its modules: report the
       // violation rather than time out waiting for a card.
-      await page.waitForFunction(() => document.querySelector('.session-card') || /** @type {any} */ (window).__cspv.length);
-      expect(await page.evaluate(() => /** @type {any} */ (window).__cspv)).toEqual([]);
+      await page.waitForFunction(() => document.querySelector('.session-card') || window.__cspv.length);
+      expect(await page.evaluate(() => window.__cspv)).toEqual([]);
       await page.waitForSelector('.session-card');
       await page.waitForLoadState('networkidle');
 
@@ -104,7 +101,7 @@ test.describe('dashboard rendered by the Go server', () => {
         for (const el of document.querySelectorAll('[href^="/static/"], [src^="/static/"]')) {
           urls.push(el.getAttribute('href') || el.getAttribute('src'));
         }
-        return { maps: maps.length, imports, urls, nz: typeof (/** @type {any} */ (window).nz), cspv: /** @type {any} */ (window).__cspv };
+        return { maps: maps.length, imports, urls, nz: typeof (window.nz), cspv: window.__cspv };
       });
 
       // The raw page has no import map: this guards against serving it.
@@ -115,7 +112,6 @@ test.describe('dashboard rendered by the Go server', () => {
       expect(failed, '/static requests that did not answer 200').toEqual([]);
 
       // The one ?v= the page names for each /static path.
-      /** @type {Map<string, Set<string>>} */
       const versionOf = new Map();
       for (const raw of named.urls) {
         const u = new URL(raw, mock.url);
@@ -132,7 +128,6 @@ test.describe('dashboard rendered by the Go server', () => {
       }).map((u) => u.pathname + u.search);
       expect(unversioned, '/static requests without the version the page names').toEqual([]);
 
-      /** @type {Map<string, number>} */
       const count = new Map();
       for (const u of statics) count.set(u.pathname, (count.get(u.pathname) || 0) + 1);
       const twice = [...count].filter(([, n]) => n > 1).map(([p, n]) => `${p} x${n}`);

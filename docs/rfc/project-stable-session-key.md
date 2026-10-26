@@ -329,7 +329,7 @@ dashboard 提供两个入口：
 
 ### 回滚
 
-- **配置回滚**：`session.project_stable_key.enabled: false` 的精确语义（v2.1 明确）：
+- **配置回滚**（已过时：该开关已在 #3782 删除，稳定 key 始终开启，旧配置里的键只报 config-deprecated）：`session.project_stable_key.enabled: false` 的精确语义（v2.1 明确）：
   - 后端仍可在项目列表 API 返回 stableKey 字段（无害），**前端不消费**——continue 入口回退到生成时间戳 key（与今天完全一致）。即"前端是否走稳定 key"由该开关单点控制，无需后端配合下线。
   - **已存在的稳定 key 会话**：自然老化，不主动清理。用户若再点该项目，因前端改走时间戳 key，会**新建**一条时间戳 key 会话；旧稳定 key 仍可从侧边栏/历史访问，直到正常退休。不会卡在损坏状态。
   - auto-chain **不因此开关复活**（§9 下线是独立、不可逆的清理，与本开关解耦）。

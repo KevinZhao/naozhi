@@ -1,4 +1,3 @@
-// @ts-check
 // E2E: project section-header favorite + GitHub icons.
 const { test, expect } = require('@playwright/test');
 const { startMockServer } = require('./mock-server');
