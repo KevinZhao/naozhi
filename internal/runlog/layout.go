@@ -260,8 +260,7 @@ func (l *Layout) WriteRecord(owner, recordID string, payload []byte) error {
 	return nil
 }
 
-// WriteFailedTotals returns the split write-failure counters for /health and
-// doctor.
+// WriteFailedTotals returns the split write-failure counters.
 func (l *Layout) WriteFailedTotals() (diskFull, other int64) {
 	if l == nil {
 		return 0, 0

@@ -33,7 +33,12 @@ func TestCustomMaxReplyLen(t *testing.T) {
 }
 
 // Verify Feishu implements RunnablePlatform at compile time.
-var _ platform.RunnablePlatform = (*Feishu)(nil)
+var (
+	_ platform.RunnablePlatform   = (*Feishu)(nil)
+	_ platform.Reactor            = (*Feishu)(nil)
+	_ platform.QuestionCardSender = (*Feishu)(nil)
+	_ platform.ConnStateReporter  = (*Feishu)(nil)
+)
 
 // --- Start/Stop lifecycle tests ---
 

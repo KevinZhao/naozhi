@@ -100,7 +100,7 @@ type sessionStatsStatic struct {
 // sessionStats is the "stats" sub-object of GET /api/sessions. Static fields
 // are promoted flat via the embed; the JSON key set is a wire contract with
 // dashboard.js (stats.agents / default_workspace / projects / cli_* /
-// workspace_* / system / version).
+// workspace_* / version).
 type sessionStats struct {
 	sessionStatsStatic
 	Active  int    `json:"active"`
