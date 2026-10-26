@@ -7,7 +7,7 @@
 
 ### Removed
 
-- **BREAKING：删除 `GET /api/debug/vars` 与全部 expvar 计数器**（#PRNUM）。`internal/metrics` 包和各包自带的 `naozhi_*` 计数器 / gauge（session、cron、dispatch、webhook、upstream、node、workflow、eventlog、attachment 等）一并移除，`naozhi doctor` 的 `expvar` 检查也去掉了。`/api/debug/pprof` 与 `server.debug_mode` 不变；`/health` 里的统计（eventlog、attachment_tracker、dispatch、active 等）不受影响，数值不变。抓取 `/api/debug/vars` 的脚本升级后会收到 404。
+- **BREAKING：删除 `GET /api/debug/vars` 与全部 expvar 计数器**（#3770）。`internal/metrics` 包和各包自带的 `naozhi_*` 计数器 / gauge（session、cron、dispatch、webhook、upstream、node、workflow、eventlog、attachment 等）一并移除，`naozhi doctor` 的 `expvar` 检查也去掉了。`/api/debug/pprof` 与 `server.debug_mode` 不变；`/health` 里的统计（eventlog、attachment_tracker、dispatch、active 等）不受影响，数值不变。抓取 `/api/debug/vars` 的脚本升级后会收到 404。
 
 ## [0.1.48] - 2026-10-26
 
