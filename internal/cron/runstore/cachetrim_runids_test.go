@@ -159,8 +159,9 @@ func TestCacheTrimAfterDisk_RunIDsNoEviction(t *testing.T) {
 }
 
 // TestCacheTrimAfterDisk_RunIDsWrapHead checks that the runIDs cleanup works
-// correctly when the ring head is not at position 0 (wrap case), matching the
-// wrap-clear test pattern in cachetrim_wrap_clear_test.go.
+// correctly when the ring head is not at position 0 (wrap case): with head=5
+// the evicted range physically wraps around the end of the ring. It is the
+// only test covering the head!=0 trim path.
 func TestCacheTrimAfterDisk_RunIDsWrapHead(t *testing.T) {
 	t.Parallel()
 

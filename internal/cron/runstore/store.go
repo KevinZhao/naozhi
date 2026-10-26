@@ -306,8 +306,10 @@ func (s *Store) Append(run *CronRun) {
 	}
 
 	// Cache push + trim run under jobLock so cacheHeadPush / cacheGetBefore /
-	// trimJobLocked stay serialised per job; the critical section is now
-	// O(µs) ring updates, not O(fsync). cacheHeadPush no-ops on a cold cache.
+	// trimJobLocked stay serialised per job. The critical section excludes the
+	// fsync but includes one per-job ReadDir+Stat trim scan (up to keepCount
+	// entries), so a concurrent List/cacheGetBefore on the same job waits for
+	// it. cacheHeadPush no-ops on a cold cache.
 	lock := s.jobLock(run.JobID)
 	lock.Lock()
 	defer lock.Unlock()
