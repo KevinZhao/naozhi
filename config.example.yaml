@@ -341,9 +341,10 @@ platforms:
 # cron job's runs end skipped/budget_exceeded and never count toward
 # auto-pause. Admins are limited too; chats bound to a project share its
 # planner's budget. Dashboard turns are never refused but count toward
-# daily_usd. A soft cap: a turn let in under it may overshoot. Caps, warn_ratio
-# and action reload without a restart; adding the first cap or moving the
-# timezone needs one.
+# daily_usd. A soft cap: a turn let in under it may overshoot. Spend metered in
+# credits or tokens (kiro) is not counted. Needs the cost ledger on. Caps,
+# warn_ratio and action reload without a restart; adding the first cap or
+# moving the timezone needs one.
 # cost:
 #   budget:
 #     per_chat_daily_usd: 20      # each IM chat, across its agents
