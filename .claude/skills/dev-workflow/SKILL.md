@@ -9,7 +9,7 @@ description: Engineering workflow for the naozhi repo — every code change goes
 
 1. Open a fresh worktree from the `master` tip (`EnterWorktree`, or `git worktree add .claude/worktrees/<topic> -b <branch> origin/master`). One task per worktree/branch; never edit on `master` and never push to it directly.
 2. Implement with tests. A bug fix should come with a test that fails on the old code. Never make CI green by deleting a failing test.
-3. Before pushing run `go build ./...`, `go vet ./...`, `gofmt -l .` (must be empty) and the full `go test ./...`.
+3. Before pushing run `go build ./...`, `go vet ./...`, `gofmt -l .` (must be empty) and the full `go test -race ./...` (same as `make test` and CI).
 4. Open a PR (conventional-commit title). Merge once the aggregate `test` check is green.
 
 ## Releasing & upgrading naozhi
