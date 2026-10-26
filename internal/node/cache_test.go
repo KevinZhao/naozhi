@@ -61,7 +61,6 @@ func (s *stubConn) ProxyTakeover(_ context.Context, _ int, _, _ string, _ uint64
 func (s *stubConn) ProxyCloseDiscovered(_ context.Context, _ int, _, _ string, _ uint64) error {
 	return nil
 }
-func (s *stubConn) ProxyRestartPlanner(_ context.Context, _ string) error { return nil }
 func (s *stubConn) ProxyUpdateConfig(_ context.Context, _ string, _ json.RawMessage) error {
 	return nil
 }

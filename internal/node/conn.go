@@ -118,11 +118,10 @@ func sendHistoryPage(cl EventSink, nodeID, key string, p EventsPage) {
 }
 
 // NodeProxy forwards state-mutating dashboard RPCs (takeover / close /
-// restart / config / favorite / remove / interrupt / label) to a remote node.
+// config / favorite / remove / interrupt / label) to a remote node.
 type NodeProxy interface {
 	ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStart uint64) (string, error)
 	ProxyCloseDiscovered(ctx context.Context, pid int, sessionID, cwd string, procStart uint64) error
-	ProxyRestartPlanner(ctx context.Context, projectName string) error
 	ProxyUpdateConfig(ctx context.Context, projectName string, cfg json.RawMessage) error
 	ProxySetFavorite(ctx context.Context, projectName string, favorite bool) error
 	// ProxyRemoveSession: (true, nil) removed; (false, nil) remote 404;

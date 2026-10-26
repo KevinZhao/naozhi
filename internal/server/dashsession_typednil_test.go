@@ -53,8 +53,8 @@ func TestDashboardDeps_NilStayNilInterfaces(t *testing.T) {
 		"dashsession.ProjectMgr":   srv.sessionH.ProjectSourceForTest(),
 		"dashsession.RetiredStore": srv.sessionH.RetiredStoreForTest(),
 	}
-	// dashproject carries the largest guard count of the three (projectMgr ×9,
-	// router ×2, resolver ×1), so it is checked here too rather than trusted.
+	// dashproject's nil-guarded deps (projectMgr, router) are checked here too
+	// rather than trusted.
 	_, hs := buildServerWithHandlers(ServerOptions{
 		Addr:   ":0",
 		Router: session.NewRouter(session.RouterConfig{}),

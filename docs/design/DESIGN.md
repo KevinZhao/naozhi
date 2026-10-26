@@ -1673,7 +1673,6 @@ File:   .naozhi/MEMORY.md   (14.2 KB)
 |----------|--------|------|
 | `/api/projects` | GET | 列出所有项目及 planner 状态 |
 | `/api/projects/{name}/config` | GET/PUT | 读写 project.yaml |
-| `/api/projects/{name}/planner/restart` | POST | 重启 planner |
 
 ---
 
@@ -1749,7 +1748,7 @@ Phase 7 分为四个子阶段，逐步从单机 project 组织演进到跨 works
 - ManagedSession.Exempt + Router 三处跳过 (countActive/evictOldest/Cleanup)
 - `/project` 命令、planner 路由、`/cd` 互斥、`/new` 区分 planner/agent
 - Dashboard 侧边栏按 project 分组，planner 置顶紫色标识
-- `/api/projects`、`/api/projects/config`、`/api/projects/planner/restart` 端点
+- `/api/projects`、`/api/projects/config` 端点
 
 #### Phase 7.1: Discovered Sessions 合并进 Folder [待实现]
 
@@ -1996,7 +1995,6 @@ Planner 在 shutdown 时与普通 session 一致：等待 running 完成 → 保
 | 6.2 | 更新项目配置 | naozhi 存在 | `PUT /api/projects/naozhi/config` 带 `{"planner_model":"opus"}` | `.naozhi/project.yaml` 被更新，返回 200 |
 | 6.3 | 添加 IM 绑定 | naozhi 存在 | `PUT /api/projects/naozhi/config` 添加 chat_binding | `project.yaml` 写入新绑定，后续该 chat 消息走 planner |
 | 6.4 | 删除 IM 绑定 | naozhi 有一个绑定 | `PUT /api/projects/naozhi/config` 移除 binding | 绑定生效解除，该 chat 消息恢复默认路由 |
-| 6.5 | 重启 planner | planner 在运行 | `POST /api/projects/naozhi/planner/restart` | 当前 planner 进程被 kill，新进程用最新配置启动 |
 | 6.6 | 不存在的项目 | 无 xxx 项目 | `GET /api/projects/xxx/config` | 返回 404 |
 
 #### 七、与现有功能兼容性

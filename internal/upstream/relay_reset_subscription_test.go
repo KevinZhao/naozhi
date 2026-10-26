@@ -61,7 +61,7 @@ func reverseLinkWith(t *testing.T, r *session.Router, turns TurnSubmitter) *node
 	rs.OnRegister = func(_ string, rc *node.ReverseConn) { registered <- rc }
 	srv := httptest.NewServer(http.HandlerFunc(rs.ServeHTTP))
 
-	c := New(&Config{URL: wsURL(srv), NodeID: "n", Token: "t"}, testRouter(r), nil, nil, Discovery{}, turns)
+	c := New(&Config{URL: wsURL(srv), NodeID: "n", Token: "t"}, testRouter(r), nil, Discovery{}, turns)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -154,7 +154,7 @@ func scriptedPrimary(t *testing.T, r *session.Router) (chan<- node.ReverseMsg, <
 			}
 		}
 	})
-	c := New(&Config{URL: wsURL(srv), NodeID: "n", Token: "t"}, testRouter(r), nil, nil, Discovery{}, nil)
+	c := New(&Config{URL: wsURL(srv), NodeID: "n", Token: "t"}, testRouter(r), nil, Discovery{}, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
