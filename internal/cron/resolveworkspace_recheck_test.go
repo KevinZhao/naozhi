@@ -2,14 +2,11 @@ package cron
 
 // #1730 regression tests.
 //
-// resolveCronWorkspace's fresh=false branch used to consult only the TTL-cached
-// workDirResolveUnderRootCached view when s.allowedRoot != "". An operator could
-// point a WorkDir symlink at an allowed path, let the cache warm, then retarget
-// it outside allowedRoot; within the cache TTL the next fresh=false tick would
-// launch the CLI under the retargeted path. The fix adds an uncached
-// workDirUnderRoot re-check after the cached gate passes, mirroring the
-// fresh-path containment handling (RunStateFailed / ErrClassWorkDirOutsideRoot,
-// no subprocess launch).
+// An operator could point a WorkDir symlink at an allowed path, let one run
+// pass, then retarget it outside allowedRoot. resolveCronWorkspace's
+// fresh=false branch must resolve the path on every run so the next tick
+// fails (RunStateFailed / ErrClassWorkDirOutsideRoot) instead of launching the
+// CLI under the retargeted path.
 //
 // These tests drive resolveCronWorkspace directly and assert on its
 // (workDirForCLI, abort) return and the resulting job state.
@@ -74,10 +71,9 @@ func registerResolveJob(t *testing.T, s *Scheduler, j *Job) {
 }
 
 // TestResolveWorkspace_RetargetAfterCacheWarmAborts is the core regression:
-// the symlink resolves inside allowedRoot on the first call (warming the TTL
-// cache as a positive), is then retargeted outside allowedRoot, and the next
-// fresh=false call must abort (uncached re-check) rather than return a launch
-// path — even though the cached gate would still say "ok".
+// the symlink resolves inside allowedRoot on the first call, is then
+// retargeted outside allowedRoot, and the next fresh=false call must abort
+// rather than return a launch path.
 func TestResolveWorkspace_RetargetAfterCacheWarmAborts(t *testing.T) {
 	t.Parallel()
 	root := evalTempDir(t)
@@ -96,8 +92,8 @@ func TestResolveWorkspace_RetargetAfterCacheWarmAborts(t *testing.T) {
 	j := &Job{ID: "job-retarget", Schedule: "@hourly", Prompt: "hi", Platform: "p", ChatID: "c", WorkDir: link}
 	registerResolveJob(t, s, j)
 
-	// First call: symlink points inside root -> resolves, warms the cache,
-	// returns a launch path with abort=false.
+	// First call: symlink points inside root -> resolves and returns a launch
+	// path with abort=false.
 	gotPath, abort := runResolveWorkspace(s, j, link)
 	if abort {
 		t.Fatalf("first call abort=true; want false for in-root symlink")
@@ -106,9 +102,7 @@ func TestResolveWorkspace_RetargetAfterCacheWarmAborts(t *testing.T) {
 		t.Fatalf("first call path = %q, want under root %q", gotPath, root)
 	}
 
-	// Retarget the symlink outside allowedRoot. The cached gate is still
-	// positive within workDirResolveCacheTTL; the uncached re-check must catch
-	// this and abort.
+	// Retarget the symlink outside allowedRoot; the next call must abort.
 	if err := os.Remove(link); err != nil {
 		t.Fatalf("remove link: %v", err)
 	}
@@ -118,7 +112,7 @@ func TestResolveWorkspace_RetargetAfterCacheWarmAborts(t *testing.T) {
 
 	gotPath, abort = runResolveWorkspace(s, j, link)
 	if !abort {
-		t.Fatalf("after retarget abort=false (path=%q); want true (uncached re-check must catch retarget)", gotPath)
+		t.Fatalf("after retarget abort=false (path=%q); want true (retarget must be caught)", gotPath)
 	}
 	if gotPath != "" {
 		t.Errorf("after retarget path = %q, want empty on abort", gotPath)
@@ -135,8 +129,8 @@ func TestResolveWorkspace_RetargetAfterCacheWarmAborts(t *testing.T) {
 }
 
 // TestResolveWorkspace_OutsideRootAborts covers the simpler shape: a
-// workDir that is outside allowedRoot from the start must abort (cached gate
-// itself rejects), no subprocess path returned.
+// workDir that is outside allowedRoot from the start must abort, no subprocess
+// path returned.
 func TestResolveWorkspace_OutsideRootAborts(t *testing.T) {
 	t.Parallel()
 	root := evalTempDir(t)
@@ -162,7 +156,7 @@ func TestResolveWorkspace_OutsideRootAborts(t *testing.T) {
 
 // TestResolveWorkspace_UnderRootResolves is the happy path: an in-root
 // workDir must NOT abort and must return a launch path under root, so the
-// uncached re-check does not over-fire and suppress legitimate runs.
+// containment check does not over-fire and suppress legitimate runs.
 func TestResolveWorkspace_UnderRootResolves(t *testing.T) {
 	t.Parallel()
 	root := evalTempDir(t)

@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/apierr"
@@ -251,9 +250,6 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) (pausedAfter int) {
 			slog.Info("cron run: job deleted during history write; dropped orphan run record",
 				"job_id", rc.jobID, "run_id", rc.runID)
 		}
-		// A new run record may introduce a SessionID the cache does not know
-		// about; drop the snapshot so the next KnownSessionIDs() call rebuilds.
-		s.invalidateKnownSessionsCache()
 	}
 
 	// The ledger is independent of run-record persistence: money was spent
@@ -447,10 +443,6 @@ func (s *Scheduler) recordTerminalResult(jobID string, out runOutcome, endedAt t
 			"job_id", jobID, "err", perr)
 		return result, errMsg, false
 	}
-	// Invalidate the KnownSessionIDs TTL cache exactly when the set shifted.
-	if c.sessionChanged {
-		s.invalidateKnownSessionsCache()
-	}
 	save()
 	return result, errMsg, true
 }
@@ -528,26 +520,6 @@ func redactAddrInCronError(s string) string {
 	return s
 }
 
-// redactPathsBuilderPool reuses strings.Builder scratch space across
-// redactPathsInCronError slow-path invocations (hot: every cron tick + every
-// TriggerNow). Empty / no-path fast-path inputs do not touch the pool. The pool
-// only elides the Builder + initial backing-slice alloc; b.String() still
-// copies, which is unavoidable for any non-aliasing implementation (#872).
-var redactPathsBuilderPool = sync.Pool{
-	New: func() any {
-		// 512B initial capacity: most cron error messages are small.
-		b := &strings.Builder{}
-		b.Grow(512)
-		return b
-	},
-}
-
-// redactPathsBuilderPoolMaxCap drops oversized buffers from the pool so a
-// near-maxRedactErrLen input does not pin memory for the process lifetime.
-// Sized at 4× maxRedactErrLen to allow worst-case Grow(len(s)) headroom
-// without recycling.
-const redactPathsBuilderPoolMaxCap = 4 * maxRedactErrLen
-
 // hasNoPathTrigger reports whether s contains none of the three bytes that can
 // begin a redactable path token: a POSIX slash, a Windows backslash, or a
 // tilde-home shorthand. Shared by both fast-path gates in
@@ -568,7 +540,7 @@ func redactPathsInCronError(s string) string {
 		return s
 	}
 	// Hot fast-path: short no-path-trigger strings skip truncation AND the
-	// Builder pool and are returned aliased (#1115). IP:port redaction still
+	// Builder and are returned aliased (#1115). IP:port redaction still
 	// runs — "dial tcp 192.168.1.5:4012" has no slash so hasNoPathTrigger is
 	// true, and the addr would otherwise leak through.
 	if len(s) <= redactFastPathMaxLen && hasNoPathTrigger(s) {
@@ -586,26 +558,12 @@ func redactPathsInCronError(s string) string {
 	if hasNoPathTrigger(s) {
 		return redactAddrInCronError(s)
 	}
-	b := redactPathsBuilderPool.Get().(*strings.Builder)
-	// Reset BEFORE Grow on the pooled instance: strings.Builder.Reset() drops
-	// the internal slice entirely, and without it the prior call's residual
-	// bytes would prefix this output. Only the *Builder header comes from the
-	// pool; the backing []byte and the final String() still allocate per call.
-	defer func() {
-		// Drop oversized buffers so a one-off near-maxRedactErrLen input
-		// does not pin memory for the process lifetime.
-		if b.Cap() > redactPathsBuilderPoolMaxCap {
-			return
-		}
-		b.Reset()
-		redactPathsBuilderPool.Put(b)
-	}()
-	b.Reset()
+	var b strings.Builder
 	b.Grow(len(s))
 	// Path detection policy (POSIX / Windows drive / ~/ home, bare-root
 	// pass-through, whitespace/`:` delimiters) lives in osutil so sysession can
-	// reuse it (#983); writing into the pooled Builder keeps cron's alloc profile.
-	osutil.RedactAbsolutePathsInto(b, s)
+	// reuse it (#983).
+	osutil.RedactAbsolutePathsInto(&b, s)
 	// Strip IP:port patterns that survive the path pass (no slash/backslash/tilde).
 	return redactAddrInCronError(b.String())
 }

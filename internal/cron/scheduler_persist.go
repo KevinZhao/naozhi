@@ -8,50 +8,10 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
-	"sync"
 
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
-
-// marshalEntriesPool reuses the []*Job snapshot slice that marshalLocked
-// builds on every mutation — the dominant transient alloc on the finishRun →
-// persist hot path. The JSON payload still allocates fresh because
-// saveMarshaledSeq holds the bytes across the async storeMu write. Put drops
-// slices whose cap exceeds marshalEntriesCapDrop so a burst cannot pin a
-// large backing array forever (#551).
-var marshalEntriesPool = sync.Pool{
-	New: func() any {
-		// Sized for the common 50-job case; larger schedulers grow on first use.
-		s := make([]*Job, 0, 64)
-		return &s
-	},
-}
-
-// marshalEntriesCapDrop is the cap threshold above which Put refuses
-// to recycle a slice. Keeps the pool's working set bounded even after
-// a transient burst inflated one slot far past steady-state.
-const marshalEntriesCapDrop = 4 * maxJobsHardCap // 2000 *Job slots
-
-// putMarshalEntries returns the slice to the pool. Nil-checked so the
-// fallback path in marshalLocked (where a brand-new slice was used
-// because the pool was empty) stays safe.
-func putMarshalEntries(s *[]*Job) {
-	if s == nil {
-		return
-	}
-	if cap(*s) > marshalEntriesCapDrop {
-		// Drop oversize slices rather than pin the inflated backing array via the pool.
-		return
-	}
-	// Zero element pointers so the pool doesn't keep deleted *Job values
-	// reachable; keep cap so the next Get appends without realloc.
-	for i := range *s {
-		(*s)[i] = nil
-	}
-	*s = (*s)[:0]
-	marshalEntriesPool.Put(s)
-}
 
 // jobIDCmpForSort is the package-level comparator for marshalLocked's
 // drift fallback, hoisted so the persist hot path does not allocate a closure
@@ -84,9 +44,6 @@ func (s *Scheduler) save(m marshaledJobs) { s.saveMarshaledSeq(m.data, m.seq) }
 type jobsSnapshot struct {
 	entries []*Job
 	seq     uint64
-	// pooled, when non-nil, is the marshalEntriesPool handle backing entries;
-	// persistSnapshot returns it via putMarshalEntries after marshal (#1975).
-	pooled *[]*Job
 }
 
 // persistSnapshot marshals a detached snapshot taken by
@@ -102,9 +59,6 @@ func (s *Scheduler) persistSnapshot(snap jobsSnapshot) (func(), error) {
 	} else {
 		data, err = defaultMarshalJobs(snap.entries)
 	}
-	// data is independent of snap.entries now, so return the pooled slice on both
-	// success and failure paths.
-	putMarshalEntries(snap.pooled)
 	if err != nil {
 		slog.Error("marshal cron store", "err", err)
 		return nil, fmt.Errorf("%w: %w", ErrPersistFailed, err)

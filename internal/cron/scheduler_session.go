@@ -2,33 +2,13 @@
 
 package cron
 
-import "sync"
-
 // knownSessionIDsRecentCap bounds how many recent runs per job we walk when
 // building the known-IDs set. Cron JSONLs are co-located with regular dashboard
 // sessions under ~/.claude/projects/<workspace>/, so hiding them from the
 // history panel works per-session-ID; recentCap covers the full history-panel
 // window (200 entries × 7d) without rereading every JSONL. Busier crons accept
-// that older rotations may briefly resurface until their JSONL ages out. The
-// knownSessionsCache TTL snapshot means this cap only governs cold-rebuild cost.
+// that older rotations may briefly resurface until their JSONL ages out.
 const knownSessionIDsRecentCap = 200
-
-// jobIDsScratchPool reuses the []string scratch slice buildKnownSessionsSet
-// fills under s.tbl.mu RLock and walks after RUnlock; cold rebuilds can be frequent
-// in busy deployments, so pooling removes the per-rebuild backing-array alloc.
-var jobIDsScratchPool = sync.Pool{
-	New: func() any {
-		// Default seed sized for the common 50-job case.
-		s := make([]string, 0, 64)
-		return &s
-	},
-}
-
-// jobIDsScratchCapDrop is the cap threshold above which Put refuses to
-// recycle the scratch slice, mirroring the marshalEntriesCapDrop policy
-// in scheduler_persist.go. Prevents a one-off burst from pinning a
-// large backing array indefinitely.
-const jobIDsScratchCapDrop = 4 * maxJobsHardCap // 2000 string slots
 
 // KnownSessionIDs returns the set of Claude session IDs (UUID-style) spawned
 // by cron jobs known to this Scheduler. The dashboard history panel uses it as
@@ -36,39 +16,23 @@ const jobIDsScratchCapDrop = 4 * maxJobsHardCap // 2000 string slots
 // sessions" list. Sources: Job.LastSessionID for every job, in-flight runs, and
 // the last knownSessionIDsRecentCap runs per job from the run store.
 //
-// The returned map is READ-ONLY and shared: callers MUST NOT mutate or persist
-// it. The set is only ever replaced wholesale or dropped by
-// invalidateKnownSessionsCache, so handing it out is race-free for read-only
-// consumers. Returns an empty (non-nil) map on a nil Scheduler or no jobs.
+// The set is built fresh on every call (the dashboard history cache upstream
+// already coalesces calls). Returns an empty (non-nil) map on a nil Scheduler
+// or no jobs.
 func (s *Scheduler) KnownSessionIDs() map[string]struct{} {
 	if s == nil {
 		return map[string]struct{}{}
 	}
-
-	if set, ok := s.knownSessionsCache.lookupFresh(); ok {
-		return set
-	}
-
-	// Snapshot the generation before reading source data so a concurrent
-	// invalidate() during the build is not lost to our publish; the freshly
-	// built set is still returned even when publish is rejected (#1811).
-	buildGen := s.knownSessionsCache.beginBuild()
-	set := s.buildKnownSessionsSet()
-	s.knownSessionsCache.publish(set, buildGen)
-
-	return set
+	return s.buildKnownSessionsSet()
 }
 
-// buildKnownSessionsSet does the actual O(jobs × recentCap) walk that
-// KnownSessionIDs serves out of cache.
+// buildKnownSessionsSet does the O(jobs × recentCap) walk behind
+// KnownSessionIDs.
 func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
-	jobIDsPtr := jobIDsScratchPool.Get().(*[]string)
-	jobIDs := (*jobIDsPtr)[:0]
-
 	// Allocate the map before the lock window, so make() does not run inside
 	// it; a fixed initial capacity trades a few rehashes for a shorter hold.
 	out := make(map[string]struct{}, 32)
-	jobIDs = s.tbl.sessionIDs(jobIDs, out)
+	jobIDs := s.tbl.sessionIDs(nil, out)
 
 	// In-flight runs may have a SessionID set even before the run
 	// terminates (set by setSessionID after GetOrCreate returns).
@@ -88,25 +52,5 @@ func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
 		}
 	}
 
-	// Put only after all reads are complete; drop oversize slices to avoid
-	// pinning a burst-inflated backing array.
-	if cap(jobIDs) <= jobIDsScratchCapDrop {
-		// Clear string references to prevent pinning stale job ID strings.
-		clear(jobIDs)
-		*jobIDsPtr = jobIDs[:0]
-		jobIDsScratchPool.Put(jobIDsPtr)
-	}
-
 	return out
-}
-
-// invalidateKnownSessionsCache clears the TTL snapshot so the next
-// KnownSessionIDs call rebuilds. Called from mutator paths that can change
-// the set: LastSessionID writes and run-record appends. Cheap, so callers can
-// invoke unconditionally.
-func (s *Scheduler) invalidateKnownSessionsCache() {
-	if s == nil {
-		return
-	}
-	s.knownSessionsCache.invalidate()
 }

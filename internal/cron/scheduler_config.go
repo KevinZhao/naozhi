@@ -300,8 +300,8 @@ func (cfg *SchedulerConfig) applyDefaults() {
 // resolveAllowedRoot sanitises cfg.AllowedRoot (clearing NUL-bearing values
 // loudly) and returns its EvalSymlinks-resolved form; empty on either side
 // means "no root constraint". Kept off applyDefaults because EvalSymlinks is
-// a syscall. A NUL byte would tokenise workDirCacheKeySuffix incorrectly and
-// alias unrelated workDirs onto one cache slot, so it is cleared (#1297).
+// a syscall. A NUL byte is never valid in a path, so a NUL-bearing root is
+// cleared (#1297).
 func (cfg *SchedulerConfig) resolveAllowedRoot() string {
 	if strings.ContainsRune(cfg.AllowedRoot, 0) {
 		slog.Error("cron.NewScheduler: cfg.AllowedRoot contains NUL byte; clearing to disable root constraint",
