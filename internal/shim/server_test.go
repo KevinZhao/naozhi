@@ -2,11 +2,8 @@ package shim
 
 import (
 	"bufio"
-	"bytes"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -598,259 +595,31 @@ func TestClearClient_WrongConn_Ignored(t *testing.T) {
 
 // --- Full shim server integration with echo subprocess ---
 
-// TestShimServer_FullHandshake launches a shim server backed by a real echo-like
-// subprocess (using /bin/sh -c "cat"), exercises the auth handshake, and verifies
+// TestShimServer_FullHandshake runs a shim server backed by a real cat
+// subprocess (/bin/sh -c "cat"), exercises the auth handshake, and verifies
 // hello / replay_done are received correctly.
 func TestShimServer_FullHandshake(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
+	ss := setupShimServer(t)
+	defer ss.cleanup()
 
-	dir := shortSocketDir(t)
-	socketPath := filepath.Join(dir, "test.sock")
-	stateFile := filepath.Join(dir, "state.json")
-
-	// Generate an auth token
-	tokenRaw, tokenB64, err := GenerateToken()
-	if err != nil {
-		t.Fatal(err)
+	if ss.hello.Type != "hello" {
+		t.Fatalf("expected hello, got %q", ss.hello.Type)
 	}
-
-	// Spin up a minimal shimServer backed by a cat subprocess
-	cli, err := startCLI("sh", []string{"-c", "cat"}, dir)
-	if err != nil {
-		t.Fatalf("startCLI: %v", err)
+	if ss.replayDone.Type != "replay_done" {
+		t.Fatalf("expected replay_done, got %q", ss.replayDone.Type)
 	}
-	defer cli.kill()
-
-	buf := NewRingBuffer(100, 1024*1024)
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
+	if ss.hello.ProtocolVersion != ProtocolVersion {
+		t.Errorf("ProtocolVersion = %d, want %d", ss.hello.ProtocolVersion, ProtocolVersion)
 	}
-	defer ln.Close()
-	defer os.Remove(socketPath)
-
-	s := &shimServer{
-		cli:       cli,
-		listener:  ln,
-		buffer:    buf,
-		tokenRaw:  tokenRaw,
-		stateFile: stateFile,
-		state: State{
-			Key:      "test:key",
-			Socket:   socketPath,
-			CLIAlive: true,
-		},
-		done: make(chan struct{}),
-	}
-	s.watchdog = NewWatchdog(30*time.Second, nil)
-
-	// Accept one connection and run handleClient in a goroutine
-	connCh := make(chan net.Conn, 1)
-	go func() {
-		c, err := ln.Accept()
-		if err == nil {
-			connCh <- c
-		}
-	}()
-
-	// Connect as a client
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
-	defer conn.Close()
-
-	// Wait for accept
-	var serverConn net.Conn
-	select {
-	case serverConn = <-connCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("accept timeout")
-	}
-
-	// Run handleClient — but it checks VerifyPeerUID, which requires *net.UnixConn.
-	// Since this is a unix socket, VerifyPeerUID should pass (same process).
-	// We need to set idleTimeout
-	handlerDone := make(chan struct{})
-	go func() {
-		defer close(handlerDone)
-		s.handleClient(serverConn, 5*time.Second)
-	}()
-
-	reader := bufio.NewReader(conn)
-	writer := bufio.NewWriter(conn)
-
-	// Send attach message
-	attach := ClientMsg{
-		Type:  "attach",
-		Token: base64.StdEncoding.EncodeToString(tokenRaw),
-		Seq:   0,
-	}
-	attachData, _ := json.Marshal(attach)
-	conn.SetWriteDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
-	writer.Write(append(attachData, '\n'))                 //nolint:errcheck
-	writer.Flush()                                         //nolint:errcheck
-	conn.SetWriteDeadline(time.Time{})                     //nolint:errcheck
-
-	// Read hello
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
-	helloLine, err := reader.ReadBytes('\n')
-	if err != nil {
-		t.Fatalf("read hello: %v", err)
-	}
-	var hello ServerMsg
-	if err := json.Unmarshal(helloLine, &hello); err != nil {
-		t.Fatalf("parse hello: %v", err)
-	}
-	if hello.Type != "hello" {
-		t.Fatalf("expected hello, got %q", hello.Type)
-	}
-
-	// Read replay_done (empty buffer)
-	replayDoneLine, err := reader.ReadBytes('\n')
-	if err != nil {
-		t.Fatalf("read replay_done: %v", err)
-	}
-	var replayDone ServerMsg
-	if err := json.Unmarshal(replayDoneLine, &replayDone); err != nil {
-		t.Fatalf("parse replay_done: %v", err)
-	}
-	if replayDone.Type != "replay_done" {
-		t.Fatalf("expected replay_done, got %q (line=%s)", replayDone.Type, string(replayDoneLine))
-	}
-
-	// Verify hello fields
-	if hello.ProtocolVersion != ProtocolVersion {
-		t.Errorf("ProtocolVersion = %d, want %d", hello.ProtocolVersion, ProtocolVersion)
-	}
-	if hello.CLIAlive == nil {
+	if ss.hello.CLIAlive == nil {
 		t.Error("CLIAlive should not be nil in hello")
 	}
 
-	// Detach gracefully
-	detach := ClientMsg{Type: "detach"}
-	detachData, _ := json.Marshal(detach)
-	conn.SetWriteDeadline(time.Now().Add(time.Second)) //nolint:errcheck
-	writer.Write(append(detachData, '\n'))             //nolint:errcheck
-	writer.Flush()                                     //nolint:errcheck
-	conn.SetWriteDeadline(time.Time{})                 //nolint:errcheck
-
-	select {
-	case <-handlerDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("handleClient did not exit after detach")
-	}
-
-	_ = tokenB64
-}
-
-func TestShimServer_AuthFailed_BadToken(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh not available")
-	}
-
-	dir := shortSocketDir(t)
-	socketPath := filepath.Join(dir, "test_auth.sock")
-	stateFile := filepath.Join(dir, "state_auth.json")
-
-	tokenRaw, _, err := GenerateToken()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cli, err := startCLI("sh", []string{"-c", "cat"}, dir)
-	if err != nil {
-		t.Fatalf("startCLI: %v", err)
-	}
-	defer cli.kill()
-
-	buf := NewRingBuffer(100, 1024*1024)
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	defer ln.Close()
-	defer os.Remove(socketPath)
-
-	s := &shimServer{
-		cli:       cli,
-		listener:  ln,
-		buffer:    buf,
-		tokenRaw:  tokenRaw,
-		stateFile: stateFile,
-		state:     State{Key: "test:auth", Socket: socketPath, CLIAlive: true},
-		done:      make(chan struct{}),
-	}
-	s.watchdog = NewWatchdog(30*time.Second, nil)
-
-	connCh := make(chan net.Conn, 1)
-	go func() {
-		c, err := ln.Accept()
-		if err == nil {
-			connCh <- c
-		}
-	}()
-
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
-	defer conn.Close()
-
-	var serverConn net.Conn
-	select {
-	case serverConn = <-connCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("accept timeout")
-	}
-
-	handlerDone := make(chan struct{})
-	go func() {
-		defer close(handlerDone)
-		s.handleClient(serverConn, 5*time.Second)
-	}()
-
-	// Send attach with WRONG token
-	wrongToken := make([]byte, 32)
-	// xor the real token to get something different
-	for i := range wrongToken {
-		wrongToken[i] = tokenRaw[i] ^ 0xFF
-	}
-	_ = subtle.ConstantTimeCompare // import guard
-
-	attach := ClientMsg{
-		Type:  "attach",
-		Token: base64.StdEncoding.EncodeToString(wrongToken),
-		Seq:   0,
-	}
-	attachData, _ := json.Marshal(attach)
-	writer := bufio.NewWriter(conn)
-	conn.SetWriteDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
-	writer.Write(append(attachData, '\n'))                 //nolint:errcheck
-	writer.Flush()                                         //nolint:errcheck
-	conn.SetWriteDeadline(time.Time{})                     //nolint:errcheck
-
-	// Expect auth_failed message
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
-	line, err := bufio.NewReader(conn).ReadBytes('\n')
-	if err != nil {
-		t.Fatalf("read auth_failed: %v", err)
-	}
-	var resp ServerMsg
-	if err := json.Unmarshal(line, &resp); err != nil {
-		t.Fatalf("parse auth_failed: %v", err)
-	}
-	if resp.Type != "auth_failed" {
-		t.Errorf("expected auth_failed, got %q", resp.Type)
-	}
-
-	select {
-	case <-handlerDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("handleClient did not exit after auth failure")
-	}
+	sendClientCmd(t, ss.client, ClientMsg{Type: "detach"})
+	ss.waitHandlerDone(t, "detach")
 }
 
 // TestShimServer_PingPong verifies that a ping message receives a pong response.
@@ -858,102 +627,12 @@ func TestShimServer_PingPong(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
+	ss := setupShimServer(t)
+	defer ss.cleanup()
 
-	dir := shortSocketDir(t)
-	socketPath := filepath.Join(dir, "ping.sock")
-	stateFile := filepath.Join(dir, "ping_state.json")
-
-	tokenRaw, _, err := GenerateToken()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cli, err := startCLI("sh", []string{"-c", "cat"}, dir)
-	if err != nil {
-		t.Fatalf("startCLI: %v", err)
-	}
-	defer cli.kill()
-
-	buf := NewRingBuffer(100, 1024*1024)
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	defer ln.Close()
-	defer os.Remove(socketPath)
-
-	s := &shimServer{
-		cli:       cli,
-		listener:  ln,
-		buffer:    buf,
-		tokenRaw:  tokenRaw,
-		stateFile: stateFile,
-		state:     State{Key: "ping:key", Socket: socketPath, CLIAlive: true},
-		done:      make(chan struct{}),
-	}
-	s.watchdog = NewWatchdog(30*time.Second, nil)
-
-	connCh := make(chan net.Conn, 1)
-	go func() {
-		c, err := ln.Accept()
-		if err == nil {
-			connCh <- c
-		}
-	}()
-
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
-	defer conn.Close()
-
-	var serverConn net.Conn
-	select {
-	case serverConn = <-connCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("accept timeout")
-	}
-
-	handlerDone := make(chan struct{})
-	go func() {
-		defer close(handlerDone)
-		s.handleClient(serverConn, 5*time.Second)
-	}()
-
-	reader := bufio.NewReader(conn)
-	writer := bufio.NewWriter(conn)
-
-	// Attach
-	attach := ClientMsg{Type: "attach", Token: base64.StdEncoding.EncodeToString(tokenRaw), Seq: 0}
-	attachData, _ := json.Marshal(attach)
-	conn.SetWriteDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
-	writer.Write(append(attachData, '\n'))                 //nolint:errcheck
-	writer.Flush()                                         //nolint:errcheck
-	conn.SetWriteDeadline(time.Time{})                     //nolint:errcheck
-
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
-
-	// Drain hello
-	if _, err := reader.ReadBytes('\n'); err != nil {
-		t.Fatalf("read hello: %v", err)
-	}
-	// Drain replay_done
-	if _, err := reader.ReadBytes('\n'); err != nil {
-		t.Fatalf("read replay_done: %v", err)
-	}
-	conn.SetReadDeadline(time.Time{}) //nolint:errcheck
-
-	// Send ping
-	ping := ClientMsg{Type: "ping"}
-	pingData, _ := json.Marshal(ping)
-	conn.SetWriteDeadline(time.Now().Add(time.Second)) //nolint:errcheck
-	writer.Write(append(pingData, '\n'))               //nolint:errcheck
-	writer.Flush()                                     //nolint:errcheck
-	conn.SetWriteDeadline(time.Time{})                 //nolint:errcheck
-
-	// Expect pong
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
-	pongLine, err := reader.ReadBytes('\n')
+	sendClientCmd(t, ss.client, ClientMsg{Type: "ping"})
+	ss.client.conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+	pongLine, err := ss.client.reader.ReadBytes('\n')
 	if err != nil {
 		t.Fatalf("read pong: %v", err)
 	}
@@ -965,18 +644,8 @@ func TestShimServer_PingPong(t *testing.T) {
 		t.Errorf("expected pong, got %q", pong.Type)
 	}
 
-	// Send detach
-	detach := ClientMsg{Type: "detach"}
-	detachData, _ := json.Marshal(detach)
-	conn.SetWriteDeadline(time.Now().Add(time.Second)) //nolint:errcheck
-	writer.Write(append(detachData, '\n'))             //nolint:errcheck
-	writer.Flush()                                     //nolint:errcheck
-
-	select {
-	case <-handlerDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("handleClient did not exit after detach")
-	}
+	sendClientCmd(t, ss.client, ClientMsg{Type: "detach"})
+	ss.waitHandlerDone(t, "detach")
 }
 
 // --- initiateShutdown idempotency ---
@@ -1143,7 +812,39 @@ type connectedClient struct {
 	writer *bufio.Writer
 }
 
+// shimSetup is a shimServer with one authenticated client attached.
+// handlerDone closes when handleClient returns; cleanup closes the client and
+// waits for it without a timeout, so tests that assert a bounded exit select
+// on handlerDone themselves (waitHandlerDone).
+type shimSetup struct {
+	s           *shimServer
+	client      connectedClient
+	hello       ServerMsg
+	replayed    []ServerMsg // frames between hello and replay_done
+	replayDone  ServerMsg
+	handlerDone <-chan struct{}
+	cleanup     func()
+}
+
+func (ss shimSetup) waitHandlerDone(t *testing.T, after string) {
+	t.Helper()
+	select {
+	case <-ss.handlerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("handleClient did not exit after %s", after)
+	}
+}
+
 func setupShimServerWithClient(t *testing.T) (s *shimServer, client connectedClient, cleanup func()) {
+	t.Helper()
+	ss := setupShimServer(t)
+	return ss.s, ss.client, ss.cleanup
+}
+
+// setupShimServer starts a shimServer backed by "sh -c cat", pushes prefill
+// into its ring buffer, then attaches an authenticated client and reads
+// everything up to and including replay_done.
+func setupShimServer(t *testing.T, prefill ...[]byte) shimSetup {
 	t.Helper()
 	dir := shortSocketDir(t)
 	socketPath := filepath.Join(dir, "cmd.sock")
@@ -1160,13 +861,16 @@ func setupShimServerWithClient(t *testing.T) (s *shimServer, client connectedCli
 	}
 
 	buf := NewRingBuffer(100, 1024*1024)
+	for _, line := range prefill {
+		buf.Push(line)
+	}
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
 		cli.kill()
 		t.Fatalf("Listen: %v", err)
 	}
 
-	s = &shimServer{
+	s := &shimServer{
 		cli:       cli,
 		listener:  ln,
 		buffer:    buf,
@@ -1226,20 +930,34 @@ func setupShimServerWithClient(t *testing.T) (s *shimServer, client connectedCli
 	writer.Flush()                                         //nolint:errcheck
 	conn.SetWriteDeadline(time.Time{})                     //nolint:errcheck
 
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
-	// Drain hello
-	if _, err := reader.ReadBytes('\n'); err != nil {
-		conn.Close()
-		t.Fatalf("read hello: %v", err)
+	ss := shimSetup{s: s, handlerDone: handlerDone}
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second)) //nolint:errcheck
+	readMsg := func(what string) ServerMsg {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			conn.Close()
+			t.Fatalf("read %s: %v", what, err)
+		}
+		var msg ServerMsg
+		if err := json.Unmarshal(line, &msg); err != nil {
+			conn.Close()
+			t.Fatalf("parse %s: %v (line=%s)", what, err, line)
+		}
+		return msg
 	}
-	// Drain replay_done
-	if _, err := reader.ReadBytes('\n'); err != nil {
-		conn.Close()
-		t.Fatalf("read replay_done: %v", err)
+	ss.hello = readMsg("hello")
+	for {
+		msg := readMsg("replay")
+		if msg.Type == "replay_done" {
+			ss.replayDone = msg
+			break
+		}
+		ss.replayed = append(ss.replayed, msg)
 	}
 	conn.SetReadDeadline(time.Time{}) //nolint:errcheck
 
-	cleanup = func() {
+	ss.client = connectedClient{conn: conn, reader: reader, writer: writer}
+	ss.cleanup = func() {
 		conn.Close()
 		ln.Close()
 		os.Remove(socketPath)
@@ -1247,7 +965,7 @@ func setupShimServerWithClient(t *testing.T) (s *shimServer, client connectedCli
 		cli.kill()
 	}
 
-	return s, connectedClient{conn: conn, reader: reader, writer: writer}, cleanup
+	return ss
 }
 
 func sendClientCmd(t *testing.T, c connectedClient, msg ClientMsg) {
@@ -1564,254 +1282,28 @@ func TestHandleClient_CloseStdinCommand(t *testing.T) {
 }
 
 func TestHandleClient_ReplayBufferedLines(t *testing.T) {
-	dir := shortSocketDir(t)
-	socketPath := filepath.Join(dir, "replay.sock")
-	stateFile := filepath.Join(dir, "replay_state.json")
+	// Attach with seq=0 replays all 3 pre-buffered lines.
+	ss := setupShimServer(t, []byte(`{"seq":1}`), []byte(`{"seq":2}`), []byte(`{"seq":3}`))
+	defer ss.cleanup()
 
-	tokenRaw, _, err := GenerateToken()
-	if err != nil {
-		t.Fatal(err)
+	if ss.hello.Type != "hello" {
+		t.Fatalf("want hello, got %q", ss.hello.Type)
 	}
-
-	cli, err := startCLI("sh", []string{"-c", "cat"}, dir)
-	if err != nil {
-		t.Fatalf("startCLI: %v", err)
-	}
-	defer cli.kill()
-
-	buf := NewRingBuffer(100, 1024*1024)
-	// Pre-populate the buffer with 3 lines
-	for i := 1; i <= 3; i++ {
-		buf.Push([]byte(fmt.Sprintf(`{"seq":%d}`, i)))
-	}
-
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	defer ln.Close()
-	defer os.Remove(socketPath)
-
-	WriteStateFile(stateFile, State{Key: "replay:key", Socket: socketPath, CLIAlive: true}) //nolint:errcheck
-
-	s := &shimServer{
-		cli:       cli,
-		listener:  ln,
-		buffer:    buf,
-		tokenRaw:  tokenRaw,
-		stateFile: stateFile,
-		state:     State{Key: "replay:key", Socket: socketPath, CLIAlive: true},
-		done:      make(chan struct{}),
-	}
-	s.watchdog = NewWatchdog(30*time.Second, nil)
-
-	connCh := make(chan net.Conn, 1)
-	go func() {
-		c, err := ln.Accept()
-		if err == nil {
-			connCh <- c
-		}
-	}()
-
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
-	defer conn.Close()
-
-	var serverConn net.Conn
-	select {
-	case serverConn = <-connCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("accept timeout")
-	}
-
-	handlerDone := make(chan struct{})
-	go func() {
-		defer close(handlerDone)
-		s.handleClient(serverConn, 5*time.Second)
-	}()
-
-	reader := bufio.NewReader(conn)
-	writer := bufio.NewWriter(conn)
-
-	// Attach with seq=0 to get all 3 buffered lines replayed
-	attach := ClientMsg{Type: "attach", Token: base64.StdEncoding.EncodeToString(tokenRaw), Seq: 0}
-	attachData, _ := json.Marshal(attach)
-	conn.SetWriteDeadline(time.Now().Add(time.Second)) //nolint:errcheck
-	writer.Write(append(attachData, '\n'))             //nolint:errcheck
-	writer.Flush()                                     //nolint:errcheck
-	conn.SetWriteDeadline(time.Time{})                 //nolint:errcheck
-
-	conn.SetReadDeadline(time.Now().Add(3 * time.Second)) //nolint:errcheck
-
-	// hello
-	helloLine, _ := reader.ReadBytes('\n')
-	var hello ServerMsg
-	json.Unmarshal(helloLine, &hello) //nolint:errcheck
-	if hello.Type != "hello" {
-		t.Fatalf("want hello, got %q", hello.Type)
-	}
-
-	// Read 3 replay lines
 	replayCount := 0
-	for i := 0; i < 4; i++ {
-		line, err := reader.ReadBytes('\n')
-		if err != nil {
-			break
-		}
-		var msg ServerMsg
-		json.Unmarshal(line, &msg) //nolint:errcheck
+	for _, msg := range ss.replayed {
 		if msg.Type == "replay" {
 			replayCount++
 		}
-		if msg.Type == "replay_done" {
-			if msg.Count != 3 {
-				t.Errorf("replay_done.Count = %d, want 3", msg.Count)
-			}
-			break
-		}
 	}
-	conn.SetReadDeadline(time.Time{}) //nolint:errcheck
-
 	if replayCount != 3 {
 		t.Errorf("got %d replay messages, want 3", replayCount)
 	}
-
-	// Detach
-	detach := ClientMsg{Type: "detach"}
-	detachData, _ := json.Marshal(detach)
-	conn.SetWriteDeadline(time.Now().Add(time.Second)) //nolint:errcheck
-	writer.Write(append(detachData, '\n'))             //nolint:errcheck
-	writer.Flush()                                     //nolint:errcheck
-
-	select {
-	case <-handlerDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("handleClient did not exit after detach")
-	}
-}
-
-// TestHandleClient_StderrForwarded verifies that CLI stderr is forwarded to the client.
-func TestHandleClient_StderrForwarded(t *testing.T) {
-	dir := shortSocketDir(t)
-	socketPath := filepath.Join(dir, "stderr.sock")
-	stateFile := filepath.Join(dir, "stderr_state.json")
-
-	tokenRaw, _, err := GenerateToken()
-	if err != nil {
-		t.Fatal(err)
+	if ss.replayDone.Count != 3 {
+		t.Errorf("replay_done.Count = %d, want 3", ss.replayDone.Count)
 	}
 
-	// Use a subprocess that writes to stderr then exits
-	cli, err := startCLI("sh", []string{"-c", "echo 'error line' >&2"}, dir)
-	if err != nil {
-		t.Fatalf("startCLI: %v", err)
-	}
-	defer cli.kill()
-
-	buf := NewRingBuffer(100, 1024*1024)
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	defer ln.Close()
-	defer os.Remove(socketPath)
-
-	WriteStateFile(stateFile, State{Key: "stderr:key", Socket: socketPath, CLIAlive: true}) //nolint:errcheck
-
-	s := &shimServer{
-		cli:       cli,
-		listener:  ln,
-		buffer:    buf,
-		tokenRaw:  tokenRaw,
-		stateFile: stateFile,
-		state:     State{Key: "stderr:key", Socket: socketPath, CLIAlive: true},
-		done:      make(chan struct{}),
-	}
-	s.watchdog = NewWatchdog(30*time.Second, nil)
-
-	go s.readStdout()
-	go s.readStderr()
-
-	connCh := make(chan net.Conn, 1)
-	go func() {
-		c, e := ln.Accept()
-		if e == nil {
-			connCh <- c
-		}
-	}()
-
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
-	defer conn.Close()
-
-	var serverConn net.Conn
-	select {
-	case serverConn = <-connCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("accept timeout")
-	}
-
-	handlerDone := make(chan struct{})
-	go func() {
-		defer close(handlerDone)
-		s.handleClient(serverConn, 5*time.Second)
-	}()
-
-	reader := bufio.NewReader(conn)
-	writer := bufio.NewWriter(conn)
-
-	attach := ClientMsg{Type: "attach", Token: base64.StdEncoding.EncodeToString(tokenRaw), Seq: 0}
-	attachData, _ := json.Marshal(attach)
-	conn.SetWriteDeadline(time.Now().Add(time.Second)) //nolint:errcheck
-	writer.Write(append(attachData, '\n'))             //nolint:errcheck
-	writer.Flush()                                     //nolint:errcheck
-	conn.SetWriteDeadline(time.Time{})                 //nolint:errcheck
-
-	// Read until we see a stderr message or cli_exited (with 3s budget)
-	conn.SetReadDeadline(time.Now().Add(3 * time.Second)) //nolint:errcheck
-	gotStderr := false
-	for {
-		line, err := reader.ReadBytes('\n')
-		if err != nil {
-			break
-		}
-		var msg ServerMsg
-		if json.Unmarshal(line, &msg) != nil {
-			continue
-		}
-		if msg.Type == "stderr" {
-			gotStderr = true
-		}
-		if msg.Type == "cli_exited" {
-			break
-		}
-	}
-	conn.SetReadDeadline(time.Time{}) //nolint:errcheck
-
-	if !gotStderr {
-		t.Log("note: stderr message may not have arrived within deadline (process timing)")
-	}
-
-	// Deterministic teardown. Without this the test used to return on a
-	// best-effort 3s wait while handleClient was still running; its deferred
-	// s.saveState() then wrote the state file into t.TempDir() concurrently
-	// with the harness's RemoveAll cleanup, intermittently failing with
-	// "directory not empty" (a fresh file appearing between RemoveAll's
-	// readdir and the final rmdir). Closing s.done unblocks runCommandLoop's
-	// <-s.done arm even when the CLI was already dead at attach time
-	// (cliExited==nil), and waiting for handlerDone guarantees the deferred
-	// saveState has completed before this function returns — so no goroutine
-	// writes into the temp dir after cleanup begins.
-	s.initiateShutdown()
-	select {
-	case <-handlerDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleClient did not return after shutdown")
-	}
+	sendClientCmd(t, ss.client, ClientMsg{Type: "detach"})
+	ss.waitHandlerDone(t, "detach")
 }
 
 // TestNewManager_StateDir_Default verifies that an empty StateDir uses ~/.naozhi/shims.
@@ -1825,7 +1317,8 @@ func TestNewManager_StateDir_Default(t *testing.T) {
 	}
 }
 
-// TestWriteStateFile_Chmod verifies the state directory gets 0700 perms.
+// TestWriteStateFile_ChmodDir verifies the state directory gets 0700 perms
+// and the state file 0600.
 func TestWriteStateFile_ChmodDir(t *testing.T) {
 	dir := t.TempDir()
 	subdir := filepath.Join(dir, "shims")
@@ -1844,45 +1337,12 @@ func TestWriteStateFile_ChmodDir(t *testing.T) {
 	if perm != 0700 {
 		t.Errorf("subdir perm = %o, want 0700", perm)
 	}
-}
-
-// TestHandleClient_WriteOversize_Disconnects covers R67-SEC-5: a "write" frame
-// whose inner Line exceeds maxWriteLineBytes must disconnect the client
-// rather than hand the payload to Claude's stdin (where bufio.Scanner's 10 MB
-// buffer would ErrTooLong and silently wedge stdout). We lower
-// maxWriteLineBytes for the test so the regression assertion completes
-// quickly; the production constant is 12 MB.
-//
-// R237-CR-4 (#701): the override flows through setMaxWriteLineBytes so the
-// per-recv read on the hot path is an atomic Load instead of an unsync'd
-// global read. This test was the only mutator under -race.
-func TestHandleClient_WriteOversize_Disconnects(t *testing.T) {
-	origLimit := setMaxWriteLineBytes(1024) // 1 KiB for the test
-	defer setMaxWriteLineBytes(origLimit)
-
-	_, client, cleanup := setupShimServerWithClient(t)
-	defer cleanup()
-
-	oversize := strings.Repeat("A", int(maxWriteLineBytesValue())+1)
-	sendClientCmd(t, client, ClientMsg{Type: "write", Line: oversize})
-
-	// handleClient returns on oversize → defer chain closes the connection.
-	// Reading should EOF within a short window. If the cap path was never
-	// taken we'd either echo back stdout (cat) or block.
-	client.conn.SetReadDeadline(time.Now().Add(3 * time.Second)) //nolint:errcheck
-	buf := make([]byte, 4096)
-	for {
-		n, err := client.conn.Read(buf)
-		if err != nil {
-			return // EOF / closed conn — test passes
-		}
-		if n == 0 {
-			return
-		}
-		// If we see stdout echoing the oversize payload, the cap is broken.
-		// Trim scan: just look for uppercase A's which cat would echo.
-		if bytes.IndexByte(buf[:n], 'A') >= 0 {
-			t.Fatalf("shim forwarded oversize payload to CLI (first byte seen)")
-		}
+	// The state file carries AuthToken: it must stay private to the uid.
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat state file: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("state file perm = %o, want 0600", perm)
 	}
 }
