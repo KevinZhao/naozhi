@@ -36,6 +36,9 @@ func TestMutate_Delete(t *testing.T) {
 	if _, ok := tbl.jobs[active.ID]; ok || slices.Contains(tbl.sortedJobIDs, active.ID) || tbl.chatJobCount[chatKeyFor("p", "c")] != 1 {
 		t.Error("deleted job still indexed")
 	}
+	if left := tbl.forChat(chatKeyFor("p", "c")); len(left) != 1 || left[0].ID != "bbbb2222" {
+		t.Errorf("jobsByChat after delete = %+v, want only bbbb2222", left)
+	}
 	if strings.Contains(string(r.snap.data), active.ID) || !strings.Contains(string(r.snap.data), "bbbb2222") {
 		t.Errorf("snapshot = %s, want only the remaining job", r.snap.data)
 	}
