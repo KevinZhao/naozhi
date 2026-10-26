@@ -1,11 +1,7 @@
-// anchor-keep: asserts the per-RPC cancelOnClose watcher goroutine pattern stays gone; the leak it caused is a goroutine-lifetime fact behaviour cannot see while behaviour still passes.
 package node
 
 import (
 	"context"
-	"os"
-	"regexp"
-	"strings"
 	"testing"
 	"time"
 
@@ -128,66 +124,4 @@ func TestReverseConn_SubscribeHistoryAbortsOnClose(t *testing.T) {
 	if elapsed > 3*time.Second {
 		t.Errorf("Close→baseCtx.Done took %v, suggests goroutine not anchored to baseCtx", elapsed)
 	}
-}
-
-// TestReverseConn_SubscribeNoCancelOnCloseWatcher is a source-level
-// regression gate. The earlier code shape was:
-//
-//	cancelOnClose := make(chan struct{})
-//	go func() {
-//	    select {
-//	    case <-c.done:
-//	        cancel()
-//	    case <-cancelOnClose:
-//	    }
-//	}()
-//	defer close(cancelOnClose)
-//
-// which spawned an additional goroutine per Subscribe call that held `c`
-// references without WG tracking. This test asserts the pattern is gone.
-// If someone re-introduces the watcher, the test fails even if behavior
-// still passes (the structural contract is what H7 pins).
-func TestReverseConn_SubscribeNoCancelOnCloseWatcher(t *testing.T) {
-	data, err := os.ReadFile("reverseconn.go")
-	if err != nil {
-		t.Fatalf("read reverseconn.go: %v", err)
-	}
-	src := string(data)
-
-	// Locate Subscribe function body.
-	start := strings.Index(src, "func (c *ReverseConn) Subscribe(")
-	if start == -1 {
-		t.Fatal("Subscribe function not found")
-	}
-	// Grab up to the next top-level func (best-effort bound — no Go parser).
-	tail := src[start:]
-	end := strings.Index(tail, "\nfunc ")
-	if end == -1 {
-		end = len(tail)
-	}
-	body := tail[:end]
-
-	for _, forbidden := range []string{
-		"cancelOnClose",
-		"context.WithTimeout(context.Background()",
-	} {
-		if strings.Contains(body, forbidden) {
-			t.Errorf("Subscribe body should not contain %q (H7: ctx must derive from baseCtx, not a hand-rolled watcher)", forbidden)
-		}
-	}
-
-	// Positive assertion: Subscribe's timeout contexts must derive from
-	// baseCtx, or the cancellation fix is silently undone.
-	if !strings.Contains(body, "context.WithTimeout(c.baseCtx") {
-		t.Error(`Subscribe body must call context.WithTimeout(c.baseCtx, ...) so RPC unwinds on disconnect`)
-	}
-
-	// Regression gate: the legacy shape spawned a per-RPC watcher goroutine
-	// on top of the main fetch goroutine. Counting the exact number of
-	// `go func()` calls was brittle (two branches × one goroutine, but the
-	// refactor may collapse them). The invariant that matters is "no watcher
-	// shape" — asserting the forbidden patterns above already covers that,
-	// so we drop the structural goroutine count. Keep `regexp` imported
-	// via at least one use so unused-import lint stays quiet.
-	_ = regexp.MustCompile(`go func\(\)`)
 }

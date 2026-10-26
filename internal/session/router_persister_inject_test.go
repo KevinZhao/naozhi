@@ -22,7 +22,6 @@ func TestRouter_InjectedPersister_Wins(t *testing.T) {
 		Dir:       eventLogDir,
 		Generator: "test-injected",
 		DevMode:   false,
-		Observer:  eventLogMetricsObserver{},
 	})
 	if err != nil {
 		t.Fatalf("NewPersister: %v", err)

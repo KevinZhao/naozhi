@@ -1,7 +1,9 @@
 package session
 
 import (
+	"maps"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -13,7 +15,7 @@ func bootRouterWithStore(t *testing.T, sessions map[string]*ManagedSession) *Rou
 	t.Helper()
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "sessions.json")
-	if err := saveStore(storePath, sessions); err != nil {
+	if err := saveStore(storePath, slices.Collect(maps.Values(sessions))); err != nil {
 		t.Fatalf("saveStore: %v", err)
 	}
 	r := NewRouter(RouterConfig{MaxProcs: 3, StorePath: storePath})

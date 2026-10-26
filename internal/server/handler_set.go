@@ -11,7 +11,7 @@
 // it, and lets it fall out of scope. Server keeps a pointer only to the three
 // handlers something OTHER than registration needs:
 //
-//	auth        — debug_expvar / debug_pprof / ccassets wrappers, RotateDashboardSessions
+//	auth        — ccassets wrappers, RotateDashboardSessions
 //	sessionH    — retired-store flusher loop, WarmHistory + Flush on shutdown
 //	discoveryH  — Wait() drains takeover goroutines during shutdown
 //
@@ -108,7 +108,6 @@ type wiring struct {
 	imAutoThread  bool
 	imBudget      *budget.Gate   // nil admits every IM turn
 	imAccess      *imauth.Policy // nil allows every IM sender
-	debugMode     bool           // gates /api/debug/pprof and /api/debug/vars
 	resolver      *session.KeyResolver
 	sysessionMgr  *sysession.Manager
 	orient        *orientConfig // nil = image auto-orientation off

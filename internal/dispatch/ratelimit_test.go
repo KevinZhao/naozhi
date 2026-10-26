@@ -57,7 +57,6 @@ func countReplies(fp *fakePlatform, substr string) int {
 // full bucket of its own.
 func TestRateLimit_BurstThenSilentDrops(t *testing.T) {
 	d, fp, _ := newRateLimitDispatcher(t, RateLimit{MsgsPerMin: 1, Burst: 2})
-	before := dispatchRateLimitedTotal.Value()
 
 	got := accepted(d,
 		rateMsg("alice", "c1", "one"), rateMsg("alice", "c1", "two"),
@@ -67,9 +66,6 @@ func TestRateLimit_BurstThenSilentDrops(t *testing.T) {
 	}
 	if n := countReplies(fp, rateLimitedReply); n != 1 {
 		t.Errorf("rate-limit replies = %d, want 1: %q", n, fp.allReplies())
-	}
-	if moved := dispatchRateLimitedTotal.Value() - before; moved != 2 {
-		t.Errorf("naozhi_dispatch_rate_limited_total moved by %d, want 2", moved)
 	}
 	if got := accepted(d, rateMsg("bob", "c1", "hi"), rateMsg("bob", "c1", "hi")); !slices.Equal(got, []bool{true, true}) {
 		t.Errorf("bob accepted = %v, alice's bucket leaked into his", got)
@@ -193,7 +189,6 @@ func TestInboundLimitConfig_TTLCoversRefill(t *testing.T) {
 func TestAdmit_RateLimitedSenderFetchesNothing(t *testing.T) {
 	d, fp, _ := newRateLimitDispatcher(t, RateLimit{MsgsPerMin: 1, Burst: 1})
 	ctx := context.Background()
-	before := dispatchRateLimitedTotal.Value()
 
 	voice := rateMsg("alice", "c1", "")
 	for range 3 {
@@ -209,9 +204,6 @@ func TestAdmit_RateLimitedSenderFetchesNothing(t *testing.T) {
 		if d.Admit(ctx, rateMsg("alice", "c1", "")) {
 			t.Fatal("Admit let a rate-limited sender's media through")
 		}
-	}
-	if moved := dispatchRateLimitedTotal.Value() - before; moved != 2 {
-		t.Errorf("naozhi_dispatch_rate_limited_total moved by %d, want 2", moved)
 	}
 	if n := countReplies(fp, rateLimitedReply); n != 1 {
 		t.Errorf("rate-limit replies = %d, want 1: %q", n, fp.allReplies())

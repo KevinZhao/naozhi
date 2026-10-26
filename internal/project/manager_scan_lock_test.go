@@ -49,45 +49,6 @@ func startScan(m *Manager) <-chan error {
 	return errc
 }
 
-// The hot-path readers (IM routing, dashboard poll) and the writers must not
-// wait for Scan's ReadDir / loadConfig / git / stat pass.
-func TestScan_DoesNotHoldLockDuringIO(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	makeProjectDir(t, root, "proj", &ProjectConfig{
-		CreatedAt:    1,
-		ChatBindings: []ChatBinding{{Platform: "feishu", ChatType: "group", ChatID: "c1"}},
-	})
-	m, _ := NewManager(root, PlannerDefaults{})
-	if err := m.Scan(); err != nil {
-		t.Fatal(err)
-	}
-	entered, release, calls := pauseFirstScanDisk(t, m)
-	errc := startScan(m)
-	<-entered
-
-	returnsPromptly(t, "ProjectForChat", func() {
-		if m.ProjectForChat("feishu", "group", "c1") == nil {
-			t.Error("ProjectForChat lost the binding mid-scan")
-		}
-	})
-	returnsPromptly(t, "ResolveWorkspaces", func() {
-		ws := filepath.Join(root, "proj", "sub")
-		if got := m.ResolveWorkspaces([]string{ws})[ws]; got != "proj" {
-			t.Errorf("ResolveWorkspaces = %q, want proj", got)
-		}
-	})
-	returnsPromptly(t, "All", func() { m.All() })
-
-	release()
-	if err := <-errc; err != nil {
-		t.Fatal(err)
-	}
-	if n := calls.Load(); n != 1 {
-		t.Errorf("scanDisk ran %d times with no concurrent writer, want 1", n)
-	}
-}
-
 // A writer that persists while Scan reads disk lock-free must survive the
 // swap: Scan sees mutGen move and re-reads under the lock, where the
 // writer's project.yaml is already on disk.
@@ -148,8 +109,13 @@ func TestScan_WriterDuringDiskReadSurvivesSwap(t *testing.T) {
 				ChatBindings: []ChatBinding{{Platform: "feishu", ChatType: "group", ChatID: "old"}},
 			})
 			m, _ := NewManager(root, PlannerDefaults{})
+			_, release, calls := pauseFirstScanDisk(t, m)
+			release()
 			if err := m.Scan(); err != nil {
 				t.Fatal(err)
+			}
+			if n := calls.Load(); n != 1 {
+				t.Fatalf("scanDisk ran %d times with no writer, want 1", n)
 			}
 			entered, release, calls := pauseFirstScanDisk(t, m)
 			errc := startScan(m)

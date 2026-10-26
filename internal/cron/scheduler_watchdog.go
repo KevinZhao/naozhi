@@ -10,8 +10,6 @@ import (
 	"errors"
 	"log/slog"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // abortResult bundles the watchdog's exit signal: fired reports whether the
@@ -110,8 +108,7 @@ func fireBoundedInterrupt(sess deadlineInterrupter, timeout time.Duration) abort
 	case <-t.C:
 		// The inner goroutine stays parked on InterruptViaControl until the
 		// wedged stdin write unblocks (typically the next session.Reset; for
-		// non-fresh jobs maybe never). Surface via counter + Warn (#1327).
-		metrics.CronWatchdogInterruptTimeoutTotal.Add(1)
+		// non-fresh jobs maybe never) (#1327).
 		slog.Warn("cron watchdog: InterruptViaControl timeout exceeded; inner goroutine parked until session reset",
 			"timeout", timeout)
 		return abortResult{outcome: InterruptError, fired: true}

@@ -5,8 +5,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // blockingInterrupter is a deadlineInterrupter test stub that blocks
@@ -19,8 +17,7 @@ type blockingInterrupter struct {
 	outcome InterruptOutcome
 	// returned is closed by InterruptViaControl just before it returns so
 	// tests can deterministically wait for the parked inner goroutine to
-	// drain (and its gauge decrement to land) instead of leaving async
-	// residue that races sibling gauge assertions (R20260602-GO-005).
+	// drain.
 	returned chan struct{}
 }
 
@@ -34,10 +31,7 @@ func (b *blockingInterrupter) InterruptViaControl() InterruptOutcome {
 }
 
 // waitDrained blocks until the inner InterruptViaControl goroutine has
-// returned (release must already be closed). It does not guarantee the
-// gauge decrement in runDeadlineWatchdog's inner goroutine has landed —
-// that decrement runs after InterruptViaControl returns — so callers that
-// assert on the gauge should poll, but waitDrained bounds the window.
+// returned (release must already be closed).
 func (b *blockingInterrupter) waitDrained(t *testing.T) {
 	t.Helper()
 	if b.returned == nil {
@@ -88,41 +82,6 @@ func TestRunDeadlineWatchdog_TimeoutOnWedgedInterrupt(t *testing.T) {
 
 	if got := bi.calls.Load(); got != 1 {
 		t.Fatalf("InterruptViaControl call count = %d, want 1", got)
-	}
-}
-
-// TestRunDeadlineWatchdog_TimeoutBumpsMetric is the regression test for
-// R20260527122801-SEC-3 (#1327). The watchdog timeout branch publishes
-// CronWatchdogInterruptTimeoutTotal so operators can alert on wedged
-// InterruptViaControl events; pre-fix the timeout fired silently and the
-// only signal was a slow-rising goroutine count. NOT t.Parallel() — reads the
-// shared metric counter (which other tests may also touch but only via strict
-// deltas around this test). The timeout is now a per-call parameter (#1904).
-func TestRunDeadlineWatchdog_TimeoutBumpsMetric(t *testing.T) {
-	// NOT t.Parallel() — reads the shared CronWatchdogInterruptTimeoutTotal
-	// counter with a strict delta assertion. The timeout itself is now a
-	// per-call parameter (#1904), so the metric — not a global timeout — is the
-	// only remaining reason this test stays serial.
-
-	before := metrics.CronWatchdogInterruptTimeoutTotal.Value()
-
-	bi := &blockingInterrupter{release: make(chan struct{}), returned: make(chan struct{}), outcome: InterruptSent}
-	defer bi.waitDrained(t)
-	defer close(bi.release)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
-	defer cancel()
-
-	chBI, _ := runDeadlineWatchdog(ctx, bi, 50*time.Millisecond)
-	abort := <-chBI
-	if !abort.fired || abort.outcome != InterruptError {
-		t.Fatalf("abort = {fired:%v outcome:%v}, want {fired:true outcome:InterruptError}",
-			abort.fired, abort.outcome)
-	}
-
-	after := metrics.CronWatchdogInterruptTimeoutTotal.Value()
-	if got := after - before; got != 1 {
-		t.Fatalf("CronWatchdogInterruptTimeoutTotal delta = %d, want 1 (single timeout event)", got)
 	}
 }
 

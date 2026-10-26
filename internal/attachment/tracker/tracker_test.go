@@ -7,24 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/attachment"
 )
-
-// countingObs records every Observer callback count so tests can
-// assert on metrics without reaching into the Tracker's private
-// counters. -race safe.
-type countingObs struct {
-	bump, clear, drop, errs atomic.Int64
-}
-
-func (c *countingObs) OnReferenceBump(n int)          { c.bump.Add(int64(n)) }
-func (c *countingObs) OnReferenceClear(n int)         { c.clear.Add(int64(n)) }
-func (c *countingObs) OnMetaWriteError(string, error) { c.errs.Add(1) }
-func (c *countingObs) OnDrop(n int)                   { c.drop.Add(int64(n)) }
 
 // writeAttachment drops a (payload, meta) pair for a workspace + key.
 // The resulting path is what EventEntry.ImagePaths would record:
@@ -53,14 +40,13 @@ func writeAttachment(t *testing.T, workspace, date, stem string, meta attachment
 // newTracker spins up a Tracker against a single workspace for use
 // in tests. Tight coalesce + small buffer so the worker exercises
 // the real debounce path without blowing up test duration.
-func newTracker(t *testing.T, workspace string, obs Observer) *Tracker {
+func newTracker(t *testing.T, workspace string) *Tracker {
 	t.Helper()
 	tr, err := NewTracker(Options{
 		Workspaces: func(string) string { return workspace },
 		// Tiny window so assertions can land sub-second.
 		CoalesceWindow: 100 * time.Millisecond,
 		ChannelBuffer:  64,
-		Observer:       obs,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -91,8 +77,7 @@ func TestOnPersistedEntry_BumpsMeta(t *testing.T) {
 	rel, metaPath := writeAttachment(t, ws, date, "a1",
 		attachment.Meta{UploadedAt: time.Now()})
 
-	obs := &countingObs{}
-	tr := newTracker(t, ws, obs)
+	tr := newTracker(t, ws)
 	tr.OnPersistedEntry("sess-hash-1", []string{rel}, 1700000000000)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -115,8 +100,8 @@ func TestOnPersistedEntry_BumpsMeta(t *testing.T) {
 	if m.LastReferencedAt != 1700000000000 {
 		t.Errorf("LastReferencedAt=%d, want 1700000000000", m.LastReferencedAt)
 	}
-	if obs.bump.Load() != 1 {
-		t.Errorf("OnReferenceBump=%d, want 1", obs.bump.Load())
+	if tr.Stats().Written != 1 {
+		t.Errorf("OnReferenceBump=%d, want 1", tr.Stats().Written)
 	}
 }
 
@@ -129,8 +114,7 @@ func TestOnPersistedEntry_CoalescesDuplicates(t *testing.T) {
 	rel, metaPath := writeAttachment(t, ws, date, "a2",
 		attachment.Meta{UploadedAt: time.Now()})
 
-	obs := &countingObs{}
-	tr := newTracker(t, ws, obs)
+	tr := newTracker(t, ws)
 	for i := 0; i < 10; i++ {
 		tr.OnPersistedEntry("sess", []string{rel}, int64(1700000000000+i))
 	}
@@ -139,8 +123,8 @@ func TestOnPersistedEntry_CoalescesDuplicates(t *testing.T) {
 	defer cancel()
 	_ = tr.Flush(ctx)
 
-	if obs.bump.Load() != 1 {
-		t.Errorf("OnReferenceBump=%d, want 1 (coalesced)", obs.bump.Load())
+	if tr.Stats().Written != 1 {
+		t.Errorf("OnReferenceBump=%d, want 1 (coalesced)", tr.Stats().Written)
 	}
 	// LastReferencedAt must reflect the HIGHEST observed timeMS.
 	raw, _ := os.ReadFile(metaPath)
@@ -161,16 +145,15 @@ func TestOnPersistedEntry_MultipleKeysDistinctPaths(t *testing.T) {
 	rel1, _ := writeAttachment(t, ws, date, "x1", attachment.Meta{UploadedAt: time.Now()})
 	rel2, _ := writeAttachment(t, ws, date, "x2", attachment.Meta{UploadedAt: time.Now()})
 
-	obs := &countingObs{}
-	tr := newTracker(t, ws, obs)
+	tr := newTracker(t, ws)
 	tr.OnPersistedEntry("sA", []string{rel1}, 10)
 	tr.OnPersistedEntry("sB", []string{rel2}, 20)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	_ = tr.Flush(ctx)
 
-	if obs.bump.Load() != 2 {
-		t.Errorf("bumps=%d, want 2", obs.bump.Load())
+	if tr.Stats().Written != 2 {
+		t.Errorf("bumps=%d, want 2", tr.Stats().Written)
 	}
 }
 
@@ -183,8 +166,7 @@ func TestOnPersistedEntry_SharedAttachment(t *testing.T) {
 	rel, metaPath := writeAttachment(t, ws, date, "shared",
 		attachment.Meta{UploadedAt: time.Now()})
 
-	obs := &countingObs{}
-	tr := newTracker(t, ws, obs)
+	tr := newTracker(t, ws)
 	tr.OnPersistedEntry("sB", []string{rel}, 10)
 	tr.OnPersistedEntry("sA", []string{rel}, 20)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -208,8 +190,7 @@ func TestOnPersistedEntry_SharedAttachment(t *testing.T) {
 // rewrite operator files.
 func TestOnPersistedEntry_EscapedPathRejected(t *testing.T) {
 	ws := t.TempDir()
-	obs := &countingObs{}
-	tr := newTracker(t, ws, obs)
+	tr := newTracker(t, ws)
 	// Absolute path outside the attachment subtree.
 	tr.OnPersistedEntry("s", []string{"/etc/passwd"}, 1)
 	// ".." traversal rejected too.
@@ -222,11 +203,11 @@ func TestOnPersistedEntry_EscapedPathRejected(t *testing.T) {
 	defer cancel()
 	_ = tr.Flush(ctx)
 
-	if obs.bump.Load() != 0 {
-		t.Errorf("bumps=%d, expected 0 (all escapes rejected)", obs.bump.Load())
+	if tr.Stats().Written != 0 {
+		t.Errorf("bumps=%d, expected 0 (all escapes rejected)", tr.Stats().Written)
 	}
-	if obs.errs.Load() != 0 {
-		t.Errorf("errs=%d (should silently drop, not error)", obs.errs.Load())
+	if tr.Stats().Errors != 0 {
+		t.Errorf("errs=%d (should silently drop, not error)", tr.Stats().Errors)
 	}
 }
 
@@ -239,12 +220,10 @@ func TestOnPersistedEntry_UnknownKeyhash(t *testing.T) {
 	rel, metaPath := writeAttachment(t, ws, date, "u",
 		attachment.Meta{UploadedAt: time.Now()})
 
-	obs := &countingObs{}
 	tr, err := NewTracker(Options{
 		Workspaces:     func(k string) string { return "" },
 		CoalesceWindow: 100 * time.Millisecond,
 		ChannelBuffer:  64,
-		Observer:       obs,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -271,8 +250,7 @@ func TestOnSessionRemoved_ClearsRefs(t *testing.T) {
 	rel1, meta1 := writeAttachment(t, ws, date, "r1", attachment.Meta{UploadedAt: time.Now()})
 	rel2, meta2 := writeAttachment(t, ws, date, "r2", attachment.Meta{UploadedAt: time.Now()})
 
-	obs := &countingObs{}
-	tr := newTracker(t, ws, obs)
+	tr := newTracker(t, ws)
 	tr.OnPersistedEntry("sessX", []string{rel1, rel2}, 100)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -300,8 +278,8 @@ func TestOnSessionRemoved_ClearsRefs(t *testing.T) {
 			t.Errorf("reference still present in %s", mp)
 		}
 	}
-	if obs.clear.Load() != 2 {
-		t.Errorf("OnReferenceClear=%d, want 2", obs.clear.Load())
+	if tr.Stats().Cleared != 2 {
+		t.Errorf("OnReferenceClear=%d, want 2", tr.Stats().Cleared)
 	}
 }
 
@@ -316,8 +294,7 @@ func TestHandleClear_AbortsOnClose(t *testing.T) {
 	seed.AddReference("sessX")
 	_, meta1 := writeAttachment(t, ws, date, "k1", seed)
 
-	obs := &countingObs{}
-	tr := newTracker(t, ws, obs)
+	tr := newTracker(t, ws)
 
 	// Stop closes closeCh and drains the worker. A subsequent clear
 	// sweep must short-circuit immediately.
@@ -338,8 +315,8 @@ func TestHandleClear_AbortsOnClose(t *testing.T) {
 	if !m.HasReference("sessX") {
 		t.Errorf("reference removed despite aborted sweep in %s", meta1)
 	}
-	if obs.clear.Load() != 0 {
-		t.Errorf("OnReferenceClear=%d after aborted sweep, want 0", obs.clear.Load())
+	if tr.Stats().Cleared != 0 {
+		t.Errorf("OnReferenceClear=%d after aborted sweep, want 0", tr.Stats().Cleared)
 	}
 }
 
@@ -353,16 +330,15 @@ func TestOnSessionRemoved_UnknownSession(t *testing.T) {
 		ReferencingKeyHashes: []string{"otherSess"},
 	})
 
-	obs := &countingObs{}
-	tr := newTracker(t, ws, obs)
+	tr := newTracker(t, ws)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := tr.OnSessionRemoved(ctx, "ghostSess", ws); err != nil {
 		t.Fatalf("OnSessionRemoved: %v", err)
 	}
-	if obs.clear.Load() != 0 {
-		t.Errorf("OnReferenceClear=%d, want 0", obs.clear.Load())
+	if tr.Stats().Cleared != 0 {
+		t.Errorf("OnReferenceClear=%d, want 0", tr.Stats().Cleared)
 	}
 }
 
@@ -374,7 +350,6 @@ func TestChannelFull_Drops(t *testing.T) {
 	date := time.Now().Format("2006-01-02")
 	rel, _ := writeAttachment(t, ws, date, "q",
 		attachment.Meta{UploadedAt: time.Now()})
-	obs := &countingObs{}
 	// Workspace resolver that sleeps — forces handleBump to stall
 	// on the very first job, backing up the in channel.
 	tr, err := NewTracker(Options{
@@ -384,7 +359,6 @@ func TestChannelFull_Drops(t *testing.T) {
 		},
 		ChannelBuffer:  1,
 		CoalesceWindow: 500 * time.Millisecond,
-		Observer:       obs,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -398,12 +372,12 @@ func TestChannelFull_Drops(t *testing.T) {
 	// At least one should have been dropped.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if obs.drop.Load() > 0 {
+		if tr.Stats().Dropped > 0 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Errorf("no drops recorded under channel pressure (drop=%d)", obs.drop.Load())
+	t.Errorf("no drops recorded under channel pressure (drop=%d)", tr.Stats().Dropped)
 }
 
 // TestStop_DrainsPendingBumps: pending bumps not yet past coalesce
@@ -414,12 +388,10 @@ func TestStop_DrainsPendingBumps(t *testing.T) {
 	rel, metaPath := writeAttachment(t, ws, date, "drain",
 		attachment.Meta{UploadedAt: time.Now()})
 
-	obs := &countingObs{}
 	tr, err := NewTracker(Options{
 		Workspaces:     func(string) string { return ws },
 		ChannelBuffer:  8,
 		CoalesceWindow: 1 * time.Hour, // never auto-flush
-		Observer:       obs,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -461,7 +433,7 @@ func TestStop_Idempotent(t *testing.T) {
 // must not panic or write.
 func TestOnPersistedEntry_AfterStop_NoOp(t *testing.T) {
 	ws := t.TempDir()
-	tr := newTracker(t, ws, nil /* no obs — check no write */)
+	tr := newTracker(t, ws)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	_ = tr.Stop(ctx)
@@ -478,7 +450,7 @@ func TestWriterAlive_Lifecycle(t *testing.T) {
 	date := time.Now().Format("2006-01-02")
 	rel, _ := writeAttachment(t, ws, date, "alive",
 		attachment.Meta{UploadedAt: time.Now()})
-	tr := newTracker(t, ws, nil)
+	tr := newTracker(t, ws)
 	// Idle (never drained, channel empty) must be alive — a fresh
 	// tracker with no image events is still healthy.
 	if !tr.WriterAlive() {
@@ -506,8 +478,7 @@ func TestResolve_AbsolutePathUnderWorkspace(t *testing.T) {
 		attachment.Meta{UploadedAt: time.Now()})
 	absPath := filepath.Join(ws, filepath.FromSlash(rel))
 
-	obs := &countingObs{}
-	tr := newTracker(t, ws, obs)
+	tr := newTracker(t, ws)
 	tr.OnPersistedEntry("s", []string{absPath}, 99)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -530,8 +501,7 @@ func TestConcurrent_Bumps(t *testing.T) {
 	rel, _ := writeAttachment(t, ws, date, "conc",
 		attachment.Meta{UploadedAt: time.Now()})
 
-	obs := &countingObs{}
-	tr := newTracker(t, ws, obs)
+	tr := newTracker(t, ws)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 16; i++ {
@@ -548,13 +518,13 @@ func TestConcurrent_Bumps(t *testing.T) {
 	defer cancel()
 	_ = tr.Flush(ctx)
 
-	if obs.bump.Load() != 1 {
-		t.Errorf("bumps=%d, want 1 (coalesce across goroutines)", obs.bump.Load())
+	if tr.Stats().Written != 1 {
+		t.Errorf("bumps=%d, want 1 (coalesce across goroutines)", tr.Stats().Written)
 	}
 }
 
 // TestErrWriteFailure: a bump on an attachment whose .meta was
-// deleted → UpdateMetaFile returns error → Observer OnMetaWriteError
+// deleted → UpdateMetaFile returns error → errorCnt
 // called exactly once.
 func TestErrWriteFailure(t *testing.T) {
 	ws := t.TempDir()
@@ -565,18 +535,17 @@ func TestErrWriteFailure(t *testing.T) {
 	// "meta sidecar missing" from UpdateMetaFile.
 	os.Remove(metaPath)
 
-	obs := &countingObs{}
-	tr := newTracker(t, ws, obs)
+	tr := newTracker(t, ws)
 	tr.OnPersistedEntry("s", []string{rel}, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	_ = tr.Flush(ctx)
 
-	if obs.errs.Load() != 1 {
-		t.Errorf("errs=%d, want 1 (missing sidecar)", obs.errs.Load())
+	if tr.Stats().Errors != 1 {
+		t.Errorf("errs=%d, want 1 (missing sidecar)", tr.Stats().Errors)
 	}
-	if obs.bump.Load() != 0 {
-		t.Errorf("bump counter incremented despite error: %d", obs.bump.Load())
+	if tr.Stats().Written != 0 {
+		t.Errorf("bump counter incremented despite error: %d", tr.Stats().Written)
 	}
 }
 
@@ -597,7 +566,6 @@ func TestErrTrackerClosed_Import(t *testing.T) {
 // under -race; safe to run without the flag too (will pass).
 func TestStatsPendingNoRace(t *testing.T) {
 	ws := t.TempDir()
-	obs := &countingObs{}
 	tr, err := NewTracker(Options{
 		Workspaces:    func(string) string { return ws },
 		ChannelBuffer: 100000,
@@ -605,7 +573,6 @@ func TestStatsPendingNoRace(t *testing.T) {
 		// reader observes a non-zero map under the writer.
 		CoalesceWindow: 1 * time.Hour,
 		Clock:          time.Now,
-		Observer:       obs,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -672,7 +639,6 @@ func TestHandleBump_DoesNotDeferFlushDeadline(t *testing.T) {
 		CoalesceWindow: window,
 		ChannelBuffer:  64,
 		Clock:          clock,
-		Observer:       &countingObs{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -741,13 +707,11 @@ func TestPendingSize_TracksMapLen(t *testing.T) {
 	rel2, _ := writeAttachment(t, ws, date, "p2",
 		attachment.Meta{UploadedAt: time.Now()})
 
-	obs := &countingObs{}
 	tr, err := NewTracker(Options{
 		Workspaces: func(string) string { return ws },
 		// Long window so entries stay in pending until Flush.
 		CoalesceWindow: 1 * time.Hour,
 		ChannelBuffer:  64,
-		Observer:       obs,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -801,7 +765,7 @@ func TestPendingSize_TracksMapLen(t *testing.T) {
 // in-flight call that passed its guard before Stop by resetting closed.
 func TestOnSessionRemoved_SecondSelectHonorsClose(t *testing.T) {
 	ws := t.TempDir()
-	tr := newTracker(t, ws, &countingObs{})
+	tr := newTracker(t, ws)
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer stopCancel()
@@ -835,7 +799,7 @@ func TestOnSessionRemoved_SecondSelectHonorsClose(t *testing.T) {
 // shares the identical second-select shape (R20260605B-CORR-16).
 func TestFlush_SecondSelectHonorsClose(t *testing.T) {
 	ws := t.TempDir()
-	tr := newTracker(t, ws, &countingObs{})
+	tr := newTracker(t, ws)
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer stopCancel()

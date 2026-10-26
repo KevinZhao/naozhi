@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
@@ -171,49 +170,6 @@ func TestManager_NilBroadcasterIsSafe(t *testing.T) {
 	// broadcaster) — the absence of a panic is the primary assertion.
 	testhelper.Eventually(t, func() bool { return lastRunRecorded(m) }, 2*time.Second,
 		"no run recorded with nil broadcaster (or it panicked)")
-}
-
-// TestManager_RunCountersBumpBroadcastIndependent pins that the symmetric
-// run-count expvar counters (naozhi_sysession_run_{started,ended}_total) each
-// increment by exactly 1 per driven Tick EVEN WITH A NIL BROADCASTER. This is
-// the whole point of placing the .Add before the nil-broadcaster early return
-// in emitRun{Started,Ended}: the counter must track run lifecycle, not the
-// broadcast path, mirroring cron's R230C-GO-15. Snapshots the global counters
-// before/after rather than asserting absolutes (expvar.Int is process-global).
-func TestManager_RunCountersBumpBroadcastIndependent(t *testing.T) {
-	const name = "auto-titler"
-	startBefore := metrics.SysessionRunStartedTotal.Value()
-	endBefore := metrics.SysessionRunEndedTotal.Value()
-
-	m := newTelemetryManager(t, name, func() (TickReport, error) {
-		return TickReport{Acted: 1}, nil
-	}, nil)
-	// Deliberately no Telemetry — the broadcaster stays nil so
-	// the broadcast path is never taken, isolating the counter bump.
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	m.Start(ctx)
-	defer m.Stop(context.Background())
-
-	// recordRun appends the run before emitRunEnded, so a visible LastRun
-	// does not mean the ended counter has moved: wait on the counter itself.
-	testhelper.Eventually(t, func() bool {
-		return metrics.SysessionRunEndedTotal.Value()-endBefore >= 1
-	}, 2*time.Second, "run_ended counter never bumped")
-	// Stop waits for the loop goroutine to return, so no further bump can
-	// land after this point and the exact-1 checks below catch a double bump.
-	m.Stop(context.Background())
-
-	if !lastRunRecorded(m) {
-		t.Error("no run recorded")
-	}
-	if got := metrics.SysessionRunStartedTotal.Value() - startBefore; got != 1 {
-		t.Errorf("SysessionRunStartedTotal delta = %d, want 1 (must bump with nil broadcaster)", got)
-	}
-	if got := metrics.SysessionRunEndedTotal.Value() - endBefore; got != 1 {
-		t.Errorf("SysessionRunEndedTotal delta = %d, want 1 (must bump with nil broadcaster)", got)
-	}
 }
 
 // TestManager_TimeoutMapsToDeadlineExceeded drives a daemon whose Tick exceeds

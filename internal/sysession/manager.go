@@ -14,11 +14,6 @@ import (
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
-// osExit is the legacy test hook for the Stop hard-fail path. The default
-// OnHardFail binds os.Exit directly, so swapping this var only affects
-// Managers whose cfg.OnHardFail explicitly routes through it (#1287).
-var osExit = os.Exit
-
 // StopPolicyForceExit names the Stop-overflow strategy this Manager
 // honours: when stopCtx expires with daemons still in flight, Stop fires
 // OnHardFail (default os.Exit(2)) rather than leaking goroutines that
@@ -191,9 +186,7 @@ func NewManager(cfg Config) (*Manager, error) {
 	if cfg.TickTimeout <= 0 {
 		cfg.TickTimeout = defaultTickTimeout
 	}
-	// Default hard-fail hook binds os.Exit directly (not the osExit var) so
-	// a test swapping osExit can't leak into Managers that left OnHardFail
-	// unset (#1287).
+	// Default hard-fail hook is os.Exit (#1287).
 	if cfg.OnHardFail == nil {
 		cfg.OnHardFail = os.Exit
 	}

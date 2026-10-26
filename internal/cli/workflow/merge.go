@@ -149,9 +149,7 @@ func mergeResult(w *Workflow, rf *ResultFile, memos map[int]*agentMemo, phaseMem
 		for i := 0; i < len(rf.Phases) && i < maxPhases; i++ {
 			phases = append(phases, Phase{Index: i + 1, Title: clip(rf.Phases[i].Title, maxLabelRunes)})
 		}
-		if s.phasesCapped = len(rf.Phases) > maxPhases; s.phasesCapped {
-			phasesCappedTotal.Add(1)
-		}
+		s.phasesCapped = len(rf.Phases) > maxPhases
 	}
 	if len(phases) == 0 {
 		phases = n.Phases

@@ -6,8 +6,6 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"sync"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // The reset family. Every variant removes the key(s) from the table in one
@@ -48,9 +46,6 @@ func (r *Router) ResetChatAndSetWorkspace(chatKeyPrefix, path string) {
 			if tx.AddActive(-int64(closedActive)) < 0 {
 				tx.SetActive(0)
 			}
-			// Reconcile the per-backend labeled gauge by batched recount;
-			// O(n) but only on the rare chat-prefix reset.
-			r.reconcileActiveByBackend(tx.View)
 		}
 		// Delete marks the store dirty so the removal survives a crash before
 		// any other path flips the flag.
@@ -130,7 +125,6 @@ func (r *Router) releaseKeys(keys []releasedKey) {
 				defer wg.Done()
 				defer func() {
 					if rec := recover(); rec != nil {
-						metrics.PanicRecoveredTotal.Add(1)
 						slog.Error("reset: releasing a key panicked",
 							"key", keys[i].key, "panic", rec, "stack", string(debug.Stack()))
 					}
@@ -174,14 +168,12 @@ func (r *Router) resetEntry(tx sessTx, key string) (processIface, string, bool) 
 	}
 	proc := s.loadProcess()
 	wasActive := !s.exempt && proc != nil && proc.Alive()
-	backend := s.Backend()
 	sessionID := s.SessionID()
 	r.unregisterSession(tx, key, s, false)
 	if wasActive {
 		if tx.AddActive(-1) < 0 {
 			tx.SetActive(0)
 		}
-		metrics.RecordSessionActive(backend, -1)
 	}
 	tx.MarkChanged()
 	return proc, sessionID, true
@@ -276,7 +268,6 @@ func (r *Router) resetAndRecreateOnce(ctx context.Context, key string, opts Agen
 			hadOld = true
 			proc := s.loadProcess()
 			wasActive := !s.exempt && proc != nil && proc.Alive()
-			oldBackend := s.Backend()
 			// keepBackendOverride=true: the new opts may carry its own
 			// backend, and the spawn below consumes and clears the override.
 			r.unregisterSession(tx, key, s, true)
@@ -284,9 +275,6 @@ func (r *Router) resetAndRecreateOnce(ctx context.Context, key string, opts Agen
 				if tx.AddActive(-1) < 0 {
 					tx.SetActive(0)
 				}
-				// The spawn below Incs the gauge for the (possibly
-				// different) new backend.
-				metrics.RecordSessionActive(oldBackend, -1)
 			}
 			tx.MarkChanged()
 

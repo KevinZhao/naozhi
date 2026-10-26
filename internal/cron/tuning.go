@@ -13,7 +13,7 @@ import "time"
 // reply cannot outlive Stop()'s systemd TimeoutStopSec window.
 
 // defaultCronSlowThreshold is the wall-clock budget beyond which a successful
-// cron execution is counted as "slow" (metrics.CronExecutionSlowTotal): an
+// cron execution logs a "cron execution slow" warning: an
 // order of magnitude above a typical interactive agent turn.
 const defaultCronSlowThreshold = 30 * time.Second
 

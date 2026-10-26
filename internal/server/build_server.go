@@ -112,7 +112,6 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		imBudget:      opts.IMBudget,
 		imGroupScope:  opts.IMGroupScope,
 		imAutoThread:  opts.IMThreadAutoOpen,
-		debugMode:     opts.Features.Debug,
 		resolver:      resolver,
 		sysessionMgr:  opts.Sysession.Manager,
 		orient:        buildOrientConfig(opts),
@@ -136,7 +135,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 		projectMgr:       opts.ProjectManager,
 		nodes:            nodes,
 
-		// auth stays on Server: debug_expvar / debug_pprof / ccassets wrap
+		// auth stays on Server: ccassets wraps
 		// through it and RotateDashboardSessions reaches for it at runtime.
 		// Handler-group literals live in build_handlers.go (limiter rationale there).
 		auth: buildAuthHandlers(opts, cookieSecret, cookieGen),

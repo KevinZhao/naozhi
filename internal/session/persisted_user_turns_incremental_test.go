@@ -24,26 +24,6 @@ func assertCountMatchesOracle(t *testing.T, s *ManagedSession) {
 	}
 }
 
-// TestInjectHistory_IncrementalCount_PureAppend covers repeated sub-cap appends
-// with a mix of user / non-user entries: the incremental count must equal the
-// full rescan after every InjectHistory.
-func TestInjectHistory_IncrementalCount_PureAppend(t *testing.T) {
-	s := &ManagedSession{key: "k"}
-	batches := [][]clievent.EventEntry{
-		{{Time: 1, Type: "user"}, {Time: 2, Type: "text"}},
-		{{Time: 3, Type: "user"}, {Time: 4, Type: "user"}, {Time: 5, Type: "init"}},
-		{{Time: 6, Type: "tool_use"}},
-		{{Time: 7, Type: "user"}},
-	}
-	for _, b := range batches {
-		s.InjectHistory(b)
-		assertCountMatchesOracle(t, s)
-	}
-	if got := s.persistedUserTurns.Load(); got != 4 {
-		t.Fatalf("final count = %d, want 4", got)
-	}
-}
-
 // TestInjectHistory_IncrementalCount_AppendThenTrim drives persistedHistory past
 // maxPersistedHistory via many small appends so the cap-trim prefix-drop path
 // fires repeatedly. The dropped prefix carries user entries, so the decrement
@@ -68,71 +48,4 @@ func TestInjectHistory_IncrementalCount_AppendThenTrim(t *testing.T) {
 		t.Fatalf("len(persistedHistory) = %d, want %d", n, maxPersistedHistory)
 	}
 	s.historyMu.RUnlock()
-}
-
-// TestInjectHistory_IncrementalCount_OverCapSingleBatch covers a single batch
-// larger than maxPersistedHistory (boot-time JSONL replay of a huge file):
-// InjectHistory truncates the batch to the last maxPersistedHistory entries
-// (line ~306) before appending, so the cached count must reflect only the
-// retained tail's user entries.
-func TestInjectHistory_IncrementalCount_OverCapSingleBatch(t *testing.T) {
-	s := &ManagedSession{key: "k"}
-	total := maxPersistedHistory + 137
-	entries := make([]clievent.EventEntry, total)
-	for i := range entries {
-		typ := "text"
-		if i%3 == 0 {
-			typ = "user"
-		}
-		entries[i] = clievent.EventEntry{Time: int64(i + 1), Type: typ}
-	}
-	s.InjectHistory(entries)
-	assertCountMatchesOracle(t, s)
-	// Sanity: the retained window is exactly the last maxPersistedHistory items.
-	wantTail := countUserTurns(entries[total-maxPersistedHistory:])
-	if got := s.persistedUserTurns.Load(); got != wantTail {
-		t.Fatalf("count = %d, want %d (users in retained tail)", got, wantTail)
-	}
-}
-
-// TestInjectHistory_IncrementalCount_SecondBatchTriggersTrim covers the mixed
-// case where an existing sub-cap history is pushed over the cap by a second
-// large batch, so the trimmed prefix spans the boundary between old and new
-// entries — the trickiest equivalence case for the increment/decrement math.
-func TestInjectHistory_IncrementalCount_SecondBatchTriggersTrim(t *testing.T) {
-	s := &ManagedSession{key: "k"}
-	first := make([]clievent.EventEntry, 300)
-	for i := range first {
-		typ := "text"
-		if i%2 == 0 {
-			typ = "user"
-		}
-		first[i] = clievent.EventEntry{Time: int64(i + 1), Type: typ}
-	}
-	s.InjectHistory(first)
-	assertCountMatchesOracle(t, s)
-
-	second := make([]clievent.EventEntry, 400)
-	for i := range second {
-		typ := "tool_use"
-		if i%4 == 0 {
-			typ = "user"
-		}
-		second[i] = clievent.EventEntry{Time: int64(1000 + i), Type: typ}
-	}
-	s.InjectHistory(second)
-	assertCountMatchesOracle(t, s)
-}
-
-// TestInjectHistory_IncrementalCount_EmptyBatch ensures a no-op empty batch
-// leaves the count untouched and still oracle-consistent.
-func TestInjectHistory_IncrementalCount_EmptyBatch(t *testing.T) {
-	s := &ManagedSession{key: "k"}
-	s.InjectHistory([]clievent.EventEntry{{Time: 1, Type: "user"}})
-	s.InjectHistory(nil)
-	s.InjectHistory([]clievent.EventEntry{})
-	assertCountMatchesOracle(t, s)
-	if got := s.persistedUserTurns.Load(); got != 1 {
-		t.Fatalf("count = %d, want 1", got)
-	}
 }

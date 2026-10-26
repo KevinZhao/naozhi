@@ -59,7 +59,7 @@ graph TD
 
 | 平台 | 接入方式 | 私聊 | 群聊 | 消息编辑 | 提问按钮 | 图片 | 文件 |
 |------|----------|------|------|----------|----------|------|------|
-| **飞书** | WebSocket 长连接 / Webhook | ✓ | ✓ | ✓ 流式更新 | ✓ | ✓ (仅私聊) | ✓ (仅私聊) |
+| **飞书** | WebSocket 长连接 | ✓ | ✓ | ✓ 流式更新 | ✓ | ✓ (仅私聊) | ✓ (仅私聊) |
 | **Slack** | Socket Mode | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ | ✓ (需 `files:read`) | ✓ (需 `files:read`) |
 | **Discord** | Gateway WebSocket | ✓ | ✓ (mention) | ✓ 流式更新 | ✓ | ✓ | ✓ (按文件名/类型预筛) |
 | **微信** | HTTP 长轮询 (iLink Bot) | ✓ | — | — | — | — | — |
@@ -428,17 +428,12 @@ journalctl -u naozhi -f
 > 不装也能跑 —— 只是每次 restart 会打断正在运行的会话，journal 打 `WARN` 不致命。
 > **切勿**写 `NOPASSWD: ALL` 或放宽成 `NOPASSWD: /usr/bin/busctl`（服务用户就是 agent 跑 Bash 的用户，等于把 root 交给 agent）。
 
-> **在线 profile**：内存暴涨 / goroutine 泄漏 / CPU 热点排障，`ssh host` 后
-> 用 `curl -H "Authorization: Bearer $TOK" http://127.0.0.1:8180/api/debug/pprof/...`
-> 拉 heap / goroutine / CPU profile。端点受 token + **loopback-only** 双重防护，远端
-> 请求（ALB / CloudFront）一律 403。详见 [`docs/ops/pprof.md`](docs/ops/pprof.md)。
-
 > **事件推送**：`integrations.webhooks` 把 cron / sysession 的 `run.started` / `run.ended`
 > POST 到你的端点（HMAC 签名、重试、不阻塞调度器），用于 CI 联动或告警；payload 只含
 > run 元数据，不含 prompt / 结果文本。见 [`docs/rfc/outbound-webhooks.md`](docs/rfc/outbound-webhooks.md)。
 
 > **一键排障**：`naozhi doctor` 聚合 binary / codesign / systemd / HTTP / auth /
-> 服务端子系统 / 配置漂移 / pprof / 状态目录 / CLI backend / 语音转写 / 安全配置等检查，
+> 服务端子系统 / 配置漂移 / 状态目录 / CLI backend / 语音转写 / 安全配置等检查，
 > 任一 fail 退出码 1。CI 友好，支持 `--json` 输出。完整检查项见
 > [`docs/ops/doctor.md`](docs/ops/doctor.md)。
 
@@ -475,7 +470,7 @@ im_access:
 - **怎么拿用户 ID**：被拒的消息会在 Info 级别打一行 `im access denied`，`user`
   字段就是要填的 ID（飞书 open_id `ou_...`、Slack `U...`、Discord 用户 ID、微信
   `from`）。私聊里被拒的人也会收到带自己 ID 的提示，同一人 10 分钟最多一次；群里
-  对名单外的人不回复，免得刷屏。拒绝次数记在 expvar `naozhi_dispatch_denied_total`。
+  对名单外的人不回复，免得刷屏。
 - `/cd`、`/project`、`/cron` 只有 `admin_users` 能用；名单内的非管理员用这些命令
   时（私聊和群里都一样）会收到「该命令需要管理员权限。」，同一人 10 分钟最多一次。`admin_users` 为空时所有
   `allowed_users` 都算管理员，所以只开白名单不会少功能。
@@ -497,7 +492,6 @@ im_rate_limit:
 - 斜杠命令也计数（`/cron add` 刷屏一样被挡），`/stop` 不计：它只会停下花费。
 - 超限的消息直接丢弃，不进 CLI，带语音、图片或文件的也不下载（同时到达的几条可能共用
   最后一个额度）；发送者每分钟最多收到一次「消息过于频繁」提示。
-  丢弃次数记在 expvar `naozhi_dispatch_rate_limited_total`。
 - 在 `im_access` 之后检查，所以被拒的人不消耗额度；没 @bot 的群消息也不消耗。
 - 管理员同样受限；改配置不用重启，`naozhi config reload` 即时生效（只在
   `im_rate_limit` 真的变了时才重建令牌桶）。
@@ -516,8 +510,7 @@ cost:
 ```
 
 - **IM**：会话或整机的额度用尽后，新消息不进 CLI，会话每分钟最多收到一次「今日费用预算已
-  用尽（$X / $Y），… 重置」。斜杠命令不受影响，`/stop`、`/new` 照常可用。被拒次数按
-  scope 记在 expvar `naozhi_dispatch_budget_blocked_total`。绑定项目的会话走项目
+  用尽（$X / $Y），… 重置」。斜杠命令不受影响，`/stop`、`/new` 照常可用。绑定项目的会话走项目
   planner，同一项目的所有会话共用一份额度。管理员（`admin_users`）同样受限：名单为空时
   每个放行的用户都算管理员，豁免管理员等于让会话额度失效。
 - **定时任务**：任务或整机的额度用尽后，到点的运行（包括手动「立即执行」）直接记为

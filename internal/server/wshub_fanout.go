@@ -37,22 +37,19 @@ func informationalSendErr(err error) bool {
 // for unwatched sessions. Shared by broadcastSessionSystemEvent and
 // broadcastSendError.
 func (b *wsBroadcaster) fanOutToSubscribers(key string, build func() any) {
-	// Zero-subscriber fast path before any pool round trip or marshal. The
+	// Zero-subscriber fast path before any snapshot or marshal. The
 	// lock-free count is at most one critical section stale; a false "0" only
 	// suppresses a best-effort notice no live subscriber could have received.
 	if b.recipients.count(key) == 0 {
 		return
 	}
-	snapPtr := broadcastClientSnapPool.Get().(*[]*wsClient)
-	snap := b.recipients.subscribersOf(key, (*snapPtr)[:0])
-
-	if len(snap) > 0 {
-		if data, err := marshalPooled(build()); err == nil {
-			for _, c := range snap {
-				c.SendRaw(data)
-			}
+	snap := b.recipients.subscribersOf(key, nil)
+	if len(snap) == 0 {
+		return
+	}
+	if data, err := marshalPooled(build()); err == nil {
+		for _, c := range snap {
+			c.SendRaw(data)
 		}
 	}
-
-	releaseBroadcastSnap(snapPtr, snap)
 }

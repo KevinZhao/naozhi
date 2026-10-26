@@ -15,7 +15,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli/workflow"
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // workflowSummaryMinInterval spaces count-only sessions_update per board.
@@ -280,7 +279,6 @@ func (b *WorkflowBoard) runJob(job ioJob) {
 func guardWorkflowIO(f func()) {
 	defer func() {
 		if r := recover(); r != nil {
-			metrics.PanicRecoveredTotal.Add(1)
 			slog.Error("workflow board I/O panic recovered", "panic", r, "stack", string(debug.Stack()))
 		}
 	}()

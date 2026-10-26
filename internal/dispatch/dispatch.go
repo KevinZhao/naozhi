@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -74,11 +75,6 @@ type Dispatcher struct {
 	watchdogNoOutputKills *atomic.Int64
 	watchdogTotalKills    *atomic.Int64
 
-	// imageReader resolves cli-extracted image paths for outbound
-	// platform.Image payloads; tests inject an in-memory fake (#884).
-	// Always non-nil after NewDispatcher.
-	imageReader ImageReader
-
 	// stopCtx is the process-shutdown context. The passthrough send branch
 	// detaches from the per-webhook ctx but must still observe SIGTERM via
 	// this; NewDispatcher defaults it to context.Background() (#1320).
@@ -100,10 +96,6 @@ type Dispatcher struct {
 	// non-nil after NewDispatcher (Capabilities, wrapped legacy *Fn closures,
 	// or NoopCapabilities{}).
 	caps Capabilities
-
-	// inboundLogCache memoizes the per-(platform,user,chat) logger built in
-	// prepareInbound (#2233). Zero value ready; see inbound_logcache.go.
-	inboundLogCache inboundLogCache
 
 	// reactionFailLogged holds each platform name whose ⏳ add has failed
 	// once; later failures log at Debug (ackQueuedWithReaction).
@@ -185,10 +177,6 @@ type DispatcherConfig struct {
 	TotalTimeout          time.Duration
 	WatchdogNoOutputKills *atomic.Int64
 	WatchdogTotalKills    *atomic.Int64
-
-	// ImageReader resolves outbound image paths to bytes. Optional —
-	// defaults to osImageReader{}; tests inject a fake (#884).
-	ImageReader ImageReader
 
 	// StopCtx is the process-shutdown context the passthrough goroutine
 	// observes. Optional — nil falls back to context.Background() (#1320).
@@ -290,11 +278,6 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	if d.dedup == nil {
 		d.dedup = platform.NewDedup(0)
 	}
-	if cfg.ImageReader != nil {
-		d.imageReader = cfg.ImageReader
-	} else {
-		d.imageReader = osImageReader{}
-	}
 	// Background (never cancels) for headless / test wiring (#1320).
 	if cfg.StopCtx != nil {
 		d.stopCtx = cfg.StopCtx
@@ -337,20 +320,13 @@ type preparedInbound struct {
 }
 
 // inboundLogger returns the logger carrying msg's platform/user/chat attrs.
-// Those fields are adversary-controlled, so they are sanitized before slog;
-// the logger is memoized on the sanitized triple (#2233), so the cache key
-// cannot diverge from the attr values.
+// Those fields are adversary-controlled, so they are sanitized before slog.
 func (d *Dispatcher) inboundLogger(msg platform.IncomingMessage) *slog.Logger {
-	sp := sessionkey.SanitizeLogAttr(msg.Platform)
-	su := sessionkey.SanitizeLogAttr(msg.UserID)
-	sc := sessionkey.SanitizeLogAttr(msg.ChatID)
-	logKey := sp + "\x00" + su + "\x00" + sc
-	lg := d.inboundLogCache.get(logKey)
-	if lg == nil {
-		lg = slog.With("platform", sp, "user", su, "chat", sc)
-		d.inboundLogCache.put(logKey, lg)
-	}
-	return lg
+	return slog.With(
+		"platform", sessionkey.SanitizeLogAttr(msg.Platform),
+		"user", sessionkey.SanitizeLogAttr(msg.UserID),
+		"chat", sessionkey.SanitizeLogAttr(msg.ChatID),
+	)
 }
 
 // prepareInbound runs the front-matter common to every dispatch strategy
@@ -359,7 +335,7 @@ func (d *Dispatcher) inboundLogger(msg platform.IncomingMessage) *slog.Logger {
 // resolution, image conversion). Returns false when the message was fully
 // handled or dropped here.
 func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMessage) (preparedInbound, bool) {
-	// Dedup first: platform retries (e.g. Feishu webhook re-delivery) must
+	// Dedup first: platform retries (e.g. IM event re-delivery) must
 	// not double-dispatch. Empty EventID (#1310) falls back to a composite
 	// minute-bucketed key since Seen("") never records. The ID is consumed
 	// even if the message is later gated/dropped — benign in practice.
@@ -448,10 +424,8 @@ func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMe
 		return preparedInbound{}, false
 	}
 
-	// Accepted messages only (post-dedup, post-command). Feeds /health and
-	// /debug/vars (#892).
+	// Accepted messages only (post-dedup, post-command). Feeds /health (#892).
 	d.messageCount.Add(1)
-	dispatchMessageTotal.Add(1)
 
 	msg = d.openThread(msg)
 
@@ -557,7 +531,6 @@ func (d *Dispatcher) handleSendError(
 	// stay here because the IM side owns that configuration.
 	if primary {
 		d.replyErrorCount.Add(1)
-		dispatchReplyErrorTotal.Add(1)
 		switch {
 		case errors.Is(err, clierr.ErrNoOutputTimeout):
 			d.watchdogNoOutputKills.Add(1)
@@ -579,7 +552,6 @@ func (d *Dispatcher) handleSendError(
 	}
 	if _, err := platform.ReplyWithRetry(replyCtx, p, replyDestOf(msg).text(errMsg), limits.PlatformReplyMaxAttempts); err != nil {
 		d.sendFailCount.Add(1)
-		dispatchSendFailTotal.Add(1)
 		lg.WarnContext(ctx, "error reply also failed", "chat", msg.ChatID, "err", err)
 	}
 }
@@ -612,7 +584,6 @@ func (d *Dispatcher) sendOutboundImages(ctx context.Context, p platform.Platform
 		}, limits.PlatformReplyMaxAttempts); err != nil {
 			// Failed image sends must show in /health like text failures.
 			d.sendFailCount.Add(1)
-			dispatchSendFailTotal.Add(1)
 			slog.WarnContext(ctx, "send image failed", "err", err)
 		}
 	}
@@ -637,7 +608,7 @@ func (d *Dispatcher) readTurnImages(replyText string) ([]platform.Image, string)
 	// here. Every path is replaced even when ReadFile fails or the budget
 	// is exhausted.
 	for _, img := range imagePaths {
-		data, err := d.imageReader.ReadFile(img.Path)
+		data, err := os.ReadFile(img.Path)
 		if err == nil {
 			if turnImageBytes+len(data) <= maxTurnImageBytes {
 				outImages = append(outImages, platform.Image{Data: data, MimeType: clievent.MimeFromPath(img.Path)})
@@ -741,7 +712,6 @@ func (d *Dispatcher) sendChunks(ctx context.Context, p platform.Platform, to Rep
 	for i, chunk := range chunks {
 		if _, err := platform.ReplyWithRetry(ctx, p, to.text(chunk), limits.PlatformReplyMaxAttempts); err != nil {
 			d.sendFailCount.Add(1)
-			dispatchSendFailTotal.Add(1)
 			slog.ErrorContext(ctx, "reply chunk failed after retries", "chat", to.ChatID, "chunk", i+1, "err", err)
 		} else {
 			d.markReplySuccess()

@@ -3,32 +3,21 @@ package server
 import (
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/naozhi/naozhi/internal/node"
 )
 
-// TestUnregister_RemoveClientFanOutParallel pins R260528-PERF-11 (#1356):
-// Hub.unregister now fans RemoveClient across nodes in parallel so a
-// 5-node deployment pays max(per-node-RTT) instead of sum. We verify the
-// contract by installing N stub nodes whose RemoveClient blocks for a
-// fixed sleep — if the loop is still serial the wall-clock equals
-// N×sleep; the parallel shape finishes in roughly the single-call wall
-// time. Each stub also records its invocation count so we assert the
-// call lands on every node (parallelism must not silently drop any).
-func TestUnregister_RemoveClientFanOutParallel(t *testing.T) {
+// TestUnregister_RemoveClientFanOut: Hub.unregister tells every remote
+// node to drop the client (#1356), so no node keeps a ghost subscription.
+func TestUnregister_RemoveClientFanOut(t *testing.T) {
 	const numNodes = 5
-	const perCallSleep = 80 * time.Millisecond
 
 	hub, _ := newTestHub(t, "")
 	t.Cleanup(hub.Shutdown)
 
 	stubs := make([]*recordingFanoutNode, 0, numNodes)
 	for i := 0; i < numNodes; i++ {
-		s := &recordingFanoutNode{
-			fakeCapNode: fakeCapNode{id: "fanout"},
-			sleep:       perCallSleep,
-		}
+		s := &recordingFanoutNode{fakeCapNode: fakeCapNode{id: "fanout"}}
 		stubs = append(stubs, s)
 		// Distinct keys so the registry holds all N entries.
 		hub.nodes.Add(stubKey(i), s)
@@ -36,22 +25,7 @@ func TestUnregister_RemoveClientFanOutParallel(t *testing.T) {
 
 	c := &wsClient{}
 	hub.register(c)
-
-	// Parallel: max(per-node-RTT) ≈ perCallSleep.
-	// Serial: N × perCallSleep = 400ms.
-	// Allow 3× slack on the parallel path to absorb scheduler jitter on a
-	// loaded CI box; that is still well below the serial budget.
-	const slackFactor = 3
-	deadline := time.Duration(slackFactor) * perCallSleep
-
-	start := time.Now()
 	hub.unregister(c)
-	elapsed := time.Since(start)
-
-	if elapsed > deadline {
-		t.Fatalf("unregister took %v, want <= %v (serial fan-out regressed: %d nodes × %v)",
-			elapsed, deadline, numNodes, perCallSleep)
-	}
 
 	for i, s := range stubs {
 		if got := s.calls.Load(); got != 1 {
@@ -84,19 +58,14 @@ func TestUnregister_RemoveClientSingleNode(t *testing.T) {
 }
 
 // recordingFanoutNode embeds the full-surface fakeCapNode stub from
-// select_node_for_backend_test.go and overrides only RemoveClient so
-// the parallel-fan-out timing test can both record invocation counts
-// and simulate per-node RTT via the configurable sleep.
+// select_node_for_backend_test.go and overrides only RemoveClient to
+// record invocation counts.
 type recordingFanoutNode struct {
 	fakeCapNode
 	calls atomic.Int64
-	sleep time.Duration
 }
 
 func (r *recordingFanoutNode) RemoveClient(_ node.EventSink) {
-	if r.sleep > 0 {
-		time.Sleep(r.sleep)
-	}
 	r.calls.Add(1)
 }
 

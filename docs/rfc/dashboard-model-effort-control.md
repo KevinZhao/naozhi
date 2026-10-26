@@ -5,13 +5,13 @@
 - 作者：Kevin Zhao
 - 范围：在 dashboard 会话 header 的现有 model / effort chip 上提供运行中切换能力，
   per-session 覆盖并持久化；不做 backend 切换，不改 new-session 弹窗
-- 前置：`kiro-effort-visibility.md`（chip 只读透出）、`kiro-effort-control.md`
-  （配置驱动的 effort 链路，本 RFC 解除其 NG1/NG2）
+- 前置：kiro-effort-visibility（chip 只读透出）、kiro-effort-control
+  （配置驱动的 effort 链路，本 RFC 解除其 NG1/NG2）；两篇 RFC 已删除，需要时用 git log 找回
 
 ## 1. Background & problem
 
-`kiro-effort-visibility.md` 让操作者能**看见**当前会话的 model / effort，
-`kiro-effort-control.md` 让部署者能在 `config.yaml` 里**配置**它们。但两者都
+kiro-effort-visibility 让操作者能**看见**当前会话的 model / effort，
+kiro-effort-control 让部署者能在 `config.yaml` 里**配置**它们。但两者都
 回答不了操作者最高频的诉求：**"这个会话，现在，换个模型 / 档位"**——
 
 1. 改配置 + 重启 naozhi 影响所有会话，粒度错了；

@@ -25,7 +25,7 @@ type BudgetGate interface {
 
 // admitBudget reports whether key, the session msg routes to, may take a
 // turn under today's budget. Commands never get here, so /stop and /new work
-// in a refused chat. A refused message gets no turn, is counted by scope,
+// in a refused chat. A refused message gets no turn,
 // and the chat is told at most once per budgetReplyWindow.
 func (d *Dispatcher) admitBudget(ctx context.Context, msg platform.IncomingMessage, key string, lg *slog.Logger) bool {
 	if d.budget == nil {
@@ -35,7 +35,6 @@ func (d *Dispatcher) admitBudget(ctx context.Context, msg platform.IncomingMessa
 	if !v.Blocked {
 		return true
 	}
-	dispatchBudgetBlockedTotal.Add(v.Subject.Kind(), 1)
 	chat := sessionkey.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
 	if !d.budgetReplies.allow(chat, time.Now()) {
 		lg.DebugContext(ctx, "im turn refused: daily budget spent")

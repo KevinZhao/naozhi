@@ -15,7 +15,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -51,14 +50,11 @@ func (r *Router) unregisterAndSnapshot(key string) (snap removeSnapshot, ok bool
 		// root while notifyKeyRetired needs the UUID to stamp retired_at.
 		snap = removeSnapshot{proc: proc, workspace: s.Workspace(), retiredSessionID: s.SessionID(),
 			retiring: r.hist.beginRetire(key, s)}
-		backend := s.Backend()
 		r.unregisterSession(tx, key, s, false)
 		if wasActive {
 			if tx.AddActive(-1) < 0 {
 				tx.SetActive(0)
 			}
-			// Per-backend gauge mirror (Multi-Backend RFC §10).
-			metrics.RecordSessionActive(backend, -1)
 		}
 		tx.MarkChanged()
 	})
@@ -74,7 +70,6 @@ func (r *Router) notifyKeyRetired(key, sessionID string) {
 	}
 	defer func() {
 		if rec := recover(); rec != nil {
-			metrics.PanicRecoveredTotal.Add(1)
 			slog.Error("session retire: KeyRetired consumer panicked",
 				"key", key, "panic", rec, "stack", string(debug.Stack()))
 		}
@@ -160,7 +155,6 @@ func (r *Router) RemoveAsync(key string) bool {
 		// chain has no caller to recover it. Swallow + count it.
 		defer func() {
 			if rec := recover(); rec != nil {
-				metrics.PanicRecoveredTotal.Add(1)
 				slog.Error("async session remove: teardown panicked",
 					"key", key, "panic", rec, "stack", string(debug.Stack()))
 			}
@@ -382,11 +376,10 @@ func (r *Router) Cleanup() {
 		if listedRunPruned {
 			tx.BumpGen()
 		}
-		// Recompute the per-backend gauge and the alive total in one reconcile
-		// walk; skip the O(N) walk when nothing changed.
+		// Recompute the alive total; skip the O(N) walk when nothing changed.
 		var aliveTotal int64
 		if closedCount > 0 || pruned > 0 {
-			aliveTotal = r.reconcileActiveByBackend(tx.View)
+			aliveTotal = countAlive(tx.View)
 		} else {
 			aliveTotal = tx.Active()
 		}
@@ -453,7 +446,7 @@ func (r *Router) dirtySaveSnapshot(v sessView) saveSnapshot {
 // only when no mutation happened since the snapshot.
 func (r *Router) saveDirty(snap saveSnapshot) {
 	if snap.sessions != nil {
-		if err := saveStoreSlice(snap.storePath, snap.sessions); err != nil {
+		if err := saveStore(snap.storePath, snap.sessions); err != nil {
 			logStoreSaveFailure("periodic session save failed", err)
 		} else {
 			r.ss.Update(func(tx sessTx) {
@@ -660,7 +653,7 @@ func (r *Router) shutdown() {
 		r.stopped.Store(true)
 
 		// Snapshot sessions for saving outside the transaction, as a value
-		// slice: saveStoreSlice only iterates values, so no map copy is needed.
+		// slice: saveStore only iterates values, so no map copy is needed.
 		sessionsCopy = make([]*ManagedSession, 0, tx.Len())
 		for _, v := range tx.All() {
 			sessionsCopy = append(sessionsCopy, v)
@@ -690,7 +683,7 @@ func (r *Router) shutdown() {
 	// under the table lock).
 	// disk_full lets monitoring page on ENOSPC separately; each error chain is
 	// walked once since the three saves are independent.
-	if err := saveStoreSlice(storePath, sessionsCopy); err != nil {
+	if err := saveStore(storePath, sessionsCopy); err != nil {
 		slog.Error("save session store on shutdown", "err", err, "disk_full", osutil.IsDiskFull(err))
 	}
 	if knownIDsMarshalErr != nil {
@@ -714,7 +707,6 @@ func (r *Router) shutdown() {
 			// cleanup in main. Swallow so naozhi still exits cleanly.
 			defer func() {
 				if r := recover(); r != nil {
-					metrics.PanicRecoveredTotal.Add(1)
 					slog.Error("session shutdown: detach panicked",
 						"panic", r, "stack", string(debug.Stack()))
 				}

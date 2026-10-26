@@ -16,7 +16,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
@@ -167,20 +166,7 @@ func (r *Router) InterruptSessionViaControl(key string) InterruptOutcome {
 	if s == nil {
 		return InterruptNoSession
 	}
-	outcome := s.InterruptViaControl()
-	// NoSession is deliberately NOT counted (an unknown key says nothing about
-	// interrupt behaviour); Sent gives operators the denominator.
-	switch outcome {
-	case InterruptSent:
-		metrics.InterruptSentTotal.Add(1)
-	case InterruptNoTurn:
-		metrics.InterruptNoTurnTotal.Add(1)
-	case InterruptUnsupported:
-		metrics.InterruptUnsupportedTotal.Add(1)
-	case InterruptError:
-		metrics.InterruptErrorTotal.Add(1)
-	}
-	return outcome
+	return s.InterruptViaControl()
 }
 
 // DiscoveryExcludeIDs returns session IDs to exclude from filesystem discovery.
@@ -525,7 +511,7 @@ func (r *Router) Takeover(ctx context.Context, lease *TakeoverLease, sessionID s
 			// Mirror reset: only non-exempt AND alive sessions contributed to
 			// activeCount, so only those get a -1 (no O(n) countActive recount).
 			if p := s.loadProcess(); p != nil && p.Alive() {
-				oldBackend, oldExempt := s.Backend(), s.exempt
+				oldExempt := s.exempt
 				tx.Unlocked(func() {
 					p.Close()
 					// The spawn below will StartShim against the same socket
@@ -542,7 +528,6 @@ func (r *Router) Takeover(ctx context.Context, lease *TakeoverLease, sessionID s
 						if tx.AddActive(-1) < 0 {
 							tx.SetActive(0)
 						}
-						metrics.RecordSessionActive(oldBackend, -1)
 					}
 				} else if cur != nil && cur.isAlive() {
 					// A live session reached the key during Close() without a

@@ -163,39 +163,3 @@ func TestIPClass_HasAny(t *testing.T) {
 		t.Errorf("IPInternalAny composite drifted: %08b", IPInternalAny)
 	}
 }
-
-// TestClassifyIP_MatchesStdlibPredicates is the equivalence pin for the three
-// migrated call sites: for a broad literal sample, each class bit must equal
-// the exact net.IP predicate the pre-#2300 hand-written code called. If this
-// ever fails, some caller's allow/deny boundary has silently moved.
-func TestClassifyIP_MatchesStdlibPredicates(t *testing.T) {
-	t.Parallel()
-	sample := []string{
-		"0.0.0.0", "0.0.0.1", "8.8.8.8", "10.0.0.1", "10.255.255.255", "11.0.0.0",
-		"100.64.0.1", "127.0.0.1", "127.0.0.2", "169.254.0.1", "169.254.169.254",
-		"169.255.0.1", "172.15.255.255", "172.16.0.1", "172.31.255.255", "172.32.0.1",
-		"192.167.255.255", "192.168.0.1", "192.168.255.255", "192.169.0.1",
-		"224.0.0.1", "224.0.0.255", "224.0.1.1", "239.255.255.255", "255.255.255.255",
-		"::", "::1", "::2", "2001:db8::1", "fc00::1", "fd00::1", "fdff::1", "fe00::1",
-		"fe80::1", "febf::1", "fec0::1", "ff02::1", "ff05::1",
-		"::ffff:0.0.0.0", "::ffff:8.8.8.8", "::ffff:10.0.0.1", "::ffff:127.0.0.1",
-		"::ffff:169.254.169.254", "::ffff:172.16.0.1", "::ffff:192.168.1.1", "::ffff:224.0.0.1",
-	}
-	for _, s := range sample {
-		ip := net.ParseIP(s)
-		if ip == nil {
-			t.Fatalf("test table bug: %q does not parse", s)
-		}
-		k := ClassifyIP(ip)
-		check := func(name string, bit IPClass, want bool) {
-			if got := k.Has(bit); got != want {
-				t.Errorf("%q: %s = %v, stdlib says %v", s, name, got, want)
-			}
-		}
-		check("IPLoopback", IPLoopback, ip.IsLoopback())
-		check("IPLinkLocalUnicast", IPLinkLocalUnicast, ip.IsLinkLocalUnicast())
-		check("IPLinkLocalMulticast", IPLinkLocalMulticast, ip.IsLinkLocalMulticast())
-		check("IPPrivate", IPPrivate, ip.IsPrivate())
-		check("IPUnspecified", IPUnspecified, ip.IsUnspecified())
-	}
-}

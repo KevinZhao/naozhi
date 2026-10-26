@@ -8,7 +8,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/ctxutil"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
@@ -243,7 +242,6 @@ func joinCallbacks(cbs []clievent.EventCallback) clievent.EventCallback {
 // usual place. A receiver whose Begin was never reached is begun here; one
 // whose Begin or Finish panicked is not called again.
 func (o *Orchestrator) recovered(ctx context.Context, key string, owner Origin, t *inflight, r any, gen uint64) {
-	metrics.PanicRecoveredTotal.Add(1)
 	if t != nil && t.ctx != nil {
 		ctx = t.ctx
 	}

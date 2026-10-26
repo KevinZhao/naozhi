@@ -152,113 +152,21 @@ func TestPersister_DropsReplayPhase(t *testing.T) {
 
 // TestPersister_DevMode_ReplayLeakObserved guarantees that in DevMode
 // (and in prod) a replay-phase batch leaking into the sink is observable
-// via the OnReplayLeak Observer hook + replayLeakCnt counter, not via a
+// via the replayLeakCnt counter, not via a
 // goroutine-context panic. R242-GO-11: dropped the DevMode-only panic
 // in favour of a slog.Error + counter signal so tests/alerting can
 // observe the bug without taking down the process.
 func TestPersister_DevMode_ReplayLeakObserved(t *testing.T) {
-	leakObs := &replayLeakObserver{}
 	p, _ := newTestPersister(t, func(o *Options) {
 		o.DevMode = true
-		o.Observer = leakObs
 	})
 	sink := p.SinkFor("dashboard:direct:alice:general")
 
 	// Must not panic; must increment the leak counter.
 	sink([]Entry{entry(t, 1, "u"), entry(t, 2, "u")}, true /* replay */)
 
-	if leakObs.count != 2 {
-		t.Errorf("OnReplayLeak observed=%d want=2", leakObs.count)
-	}
 	if got := p.replayLeakCnt.Load(); got != 2 {
 		t.Errorf("replayLeakCnt=%d want=2", got)
-	}
-}
-
-// replayLeakObserver counts OnReplayLeak invocations; other Observer
-// methods are no-ops via embedded noopObserver.
-type replayLeakObserver struct {
-	noopObserver
-	count int
-}
-
-func (o *replayLeakObserver) OnReplayLeak(n int) { o.count += n }
-
-// countingObserver is the contract-test fake for the Observer interface.
-// Each method bumps a counter so TestPersister_ObserverWiring_*
-// can verify the persist run loop / sink closure invokes Observer at the
-// right life-cycle points without depending on metrics package internals.
-type countingObserver struct {
-	mu                                                         sync.Mutex
-	written, dropped, fsyncs, malformed, replayLeak, totalEnts int
-}
-
-func (o *countingObserver) OnWrite(n int) {
-	o.mu.Lock()
-	o.written++
-	o.totalEnts += n
-	o.mu.Unlock()
-}
-func (o *countingObserver) OnDrop(n int) {
-	o.mu.Lock()
-	o.dropped += n
-	o.mu.Unlock()
-}
-func (o *countingObserver) OnFsync() {
-	o.mu.Lock()
-	o.fsyncs++
-	o.mu.Unlock()
-}
-func (o *countingObserver) OnMalformed() {
-	o.mu.Lock()
-	o.malformed++
-	o.mu.Unlock()
-}
-func (o *countingObserver) OnReplayLeak(n int) {
-	o.mu.Lock()
-	o.replayLeak += n
-	o.mu.Unlock()
-}
-func (o *countingObserver) snapshot() (written, dropped, fsyncs int) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return o.written, o.dropped, o.fsyncs
-}
-
-// TestPersister_ObserverWiring_OnWriteOnFsync pins the R250-ARCH-8 / #1171
-// contract: once a real Observer is plugged into Options.Observer, the
-// persister calls OnWrite when entries reach disk AND OnFsync when Flush
-// runs. The session layer's eventLogMetricsObserver depends on this; if
-// some future refactor drops one of the call sites the metrics path goes
-// silent without anyone noticing, so the wiring is pinned at this leaf.
-func TestPersister_ObserverWiring_OnWriteOnFsync(t *testing.T) {
-	t.Parallel()
-	obs := &countingObserver{}
-	p, _ := newTestPersister(t, func(o *Options) {
-		o.Observer = obs
-	})
-	defer func() {
-		_ = p.Stop(context.Background())
-	}()
-
-	sink := p.SinkFor("dashboard:direct:alice:general")
-	sink([]Entry{entry(t, 1, "u1"), entry(t, 2, "u2")}, false)
-
-	ctx, cancel := context.WithTimeout(context.Background(), opGuard)
-	defer cancel()
-	if err := p.Flush(ctx); err != nil {
-		t.Fatalf("Flush: %v", err)
-	}
-
-	written, dropped, fsyncs := obs.snapshot()
-	if written == 0 {
-		t.Errorf("OnWrite never invoked; metrics path is dead")
-	}
-	if fsyncs == 0 {
-		t.Errorf("OnFsync never invoked; flush metrics dead")
-	}
-	if dropped != 0 {
-		t.Errorf("unexpected drops in steady-state path: %d", dropped)
 	}
 }
 

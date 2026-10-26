@@ -61,7 +61,6 @@ func (d *Dispatcher) authorize(ctx context.Context, msg platform.IncomingMessage
 		return true
 	}
 	lg.InfoContext(ctx, "im access denied", "reason", reason, "class", class.String())
-	dispatchDeniedTotal.Add(osutil.SanitizeForLog(msg.Platform, 32)+":"+reason, 1)
 	sender := msg.Platform + "\x00" + osutil.SanitizeForLog(msg.UserID, 256)
 	switch {
 	case reason == imauth.ReasonNotAdmin:

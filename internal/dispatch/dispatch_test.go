@@ -227,6 +227,8 @@ func TestParseCronAdd(t *testing.T) {
 		{"no quote", `@every 30m check`, "", "", true},
 		{"missing close quote", `"@every 30m check`, "", "", true},
 		{"empty prompt", `"@every 30m" `, "", "", true},
+		{"blank schedule", `" " run now`, "", "", true},
+		{"spaces schedule", `"   " do thing`, "", "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1009,108 +1011,24 @@ func TestDispatchCommand_Project_Handled(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// handleCronCommand — via dispatchCommand with real scheduler
+// handleCronCommand — via dispatchCommand
 // ---------------------------------------------------------------------------
 
-func makeTestScheduler(t *testing.T) CronCommands {
-	t.Helper()
-	// #1164: previously stood up a real *cron.Scheduler (StorePath tempdir
-	// + Start/Stop lifecycle). The handler tests below only exercise
-	// dispatch-side parsing / usage-reply branches that never depend on
-	// real scheduling, so the projection-typed fake suffices and the
-	// dispatch test suite no longer imports internal/cron. The real
-	// adapter→scheduler integration is covered by
-	// internal/server/cron_dispatch_adapter_test.go.
-	return &fakeCronScheduler{}
-}
-
-func TestHandleCronCommand_Help(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	d.scheduler = makeTestScheduler(t)
-
-	d.dispatchCommand(context.Background(), incomingMsg("/cron"), "/cron", slog.Default())
-	if !strings.Contains(fp.lastReply(), "add") {
-		t.Errorf("expected cron usage, got %q", fp.lastReply())
-	}
-}
-
-func TestHandleCronCommand_List_Empty(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	d.scheduler = makeTestScheduler(t)
-
-	d.dispatchCommand(context.Background(), incomingMsg("/cron list"), "/cron list", slog.Default())
-	if !strings.Contains(fp.lastReply(), "没有") {
-		t.Errorf("expected empty-list message, got %q", fp.lastReply())
-	}
-}
-
-func TestHandleCronCommand_Add_InvalidFormat(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	d.scheduler = makeTestScheduler(t)
-
-	d.dispatchCommand(context.Background(), incomingMsg("/cron add"), "/cron add", slog.Default())
-	if !strings.Contains(fp.lastReply(), "用法") {
-		t.Errorf("expected add-usage message, got %q", fp.lastReply())
-	}
-}
-
-func TestHandleCronCommand_Del_MissingID(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	d.scheduler = makeTestScheduler(t)
-
-	d.dispatchCommand(context.Background(), incomingMsg("/cron del"), "/cron del", slog.Default())
-	if !strings.Contains(fp.lastReply(), "用法") {
-		t.Errorf("expected del-usage message, got %q", fp.lastReply())
-	}
-}
-
-func TestHandleCronCommand_Del_NotFound(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	d.scheduler = makeTestScheduler(t)
-
-	d.dispatchCommand(context.Background(), incomingMsg("/cron del"), "/cron del nosuchjob", slog.Default())
-	if !strings.Contains(fp.lastReply(), "失败") || !strings.Contains(fp.lastReply(), "用法") {
-		// Either "not found" error or usage message — both acceptable
-	}
-}
-
-func TestHandleCronCommand_Pause_MissingID(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	d.scheduler = makeTestScheduler(t)
-
-	d.dispatchCommand(context.Background(), incomingMsg("/cron pause"), "/cron pause", slog.Default())
-	if !strings.Contains(fp.lastReply(), "用法") {
-		t.Errorf("expected pause-usage message, got %q", fp.lastReply())
-	}
-}
-
-func TestHandleCronCommand_Resume_MissingID(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	d.scheduler = makeTestScheduler(t)
-
-	d.dispatchCommand(context.Background(), incomingMsg("/cron resume"), "/cron resume", slog.Default())
-	if !strings.Contains(fp.lastReply(), "用法") {
-		t.Errorf("expected resume-usage message, got %q", fp.lastReply())
-	}
-}
-
-func TestHandleCronCommand_Add_InvalidSchedule(t *testing.T) {
-	fp := &fakePlatform{}
-	d := newTestDispatcher(fp)
-	d.scheduler = makeTestScheduler(t)
-
-	// Valid format but invalid cron expression for robfig/cron
-	d.handleCronCommand(context.Background(), incomingMsg("/cron add"), `/cron add "@not-a-valid-schedule" check it`, slog.Default())
-	// Should get either error or success — check it ran without panic
-	if fp.replyCount() == 0 {
-		t.Error("expected at least one reply")
+func TestHandleCronCommand_UsageAndEmptyList(t *testing.T) {
+	for _, tc := range []struct{ text, want string }{
+		{"/cron list", "没有"},
+		{"/cron add", "用法"},
+		{"/cron del", "用法"},
+		{"/cron pause", "用法"},
+		{"/cron resume", "用法"},
+	} {
+		fp := &fakePlatform{}
+		d := newTestDispatcher(fp)
+		d.scheduler = &fakeCronScheduler{}
+		d.dispatchCommand(context.Background(), incomingMsg(tc.text), tc.text, slog.Default())
+		if got := fp.lastReply(); !strings.Contains(got, tc.want) {
+			t.Errorf("%s reply = %q, want substring %q", tc.text, got, tc.want)
+		}
 	}
 }
 

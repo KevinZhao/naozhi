@@ -154,7 +154,7 @@ func (p *Persister) replayDeferred(ds *dropState) {
 // shutdownAll flushes then closes every writer so a clean Stop loses no
 // debounce window. Fan-out is parallel (#1408): each perKeyWriter is
 // independent and the only shared state flush()/close() touch is the
-// fsyncCnt atomic and the thread-safe Observer. The map is copied to
+// fsyncCnt atomic. The map is copied to
 // slices first so workers never touch p.writers concurrently.
 func (p *Persister) shutdownAll() {
 	if len(p.writers) == 0 {
