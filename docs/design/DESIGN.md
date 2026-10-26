@@ -113,20 +113,15 @@ claude -p \
 
 ```
 飞书服务器
-  | POST /webhook/feishu (签名 + JSON body)
+  | WebSocket 长连接 (naozhi 出站连接, 无需公网 IP)
   v
-nginx :443
-  | proxy_pass
-  v
-server.Server :8080
+feishu adapter (lark-ws SDK)
   |
-  +-> [mux 路由到 feishu.RegisterRoutes 注册的 handler]
+  +-> [OnP2MessageReceiveV1 回调]
       |
-      +-> feishu 内部: Verify(r)           // 签名校验, challenge 直接返回
-      +-> feishu 内部: ParseEvent(r)       // -> IncomingMessage{EventID, UserID, ChatID, Text}
-      +-> w.WriteHeader(200)               // 立即返回 (飞书要求 3s 内)
+      +-> parseSDKEvent(event)         // -> IncomingMessage{EventID, UserID, ChatID, Text}
       |
-      +-> go handler(ctx, msg)             // feishu 内部启 goroutine, 以下异步
+      +-> go handler(ctx, msg)         // feishu 内部启 goroutine, 以下异步
           |
           +-> dedup.Seen(msg.EventID)      // 幂等检查
           |
@@ -160,7 +155,7 @@ server.Server :8080
 ```
 
 关键约束：
-- 飞书 webhook 要求 3s 内返回 200，否则重试。所以步骤 3a 必须立即响应，实际处理异步进行
+- 事件回调必须尽快返回，否则平台会重投。所以收到消息后立即返回，实际处理异步进行
 - 同一 session 的消息必须串行（排队），避免 claude 上下文混乱
 - 进程崩溃时通过 `--resume` 恢复，对用户透明 (已验证：SIGKILL 后 resume 上下文完整保留)
 
@@ -511,7 +506,7 @@ type RunnablePlatform interface {
 
 | 平台 | 接收方式 | 接口类型 | 验证 | 消息限制 | 状态 |
 |------|---------|----------|------|---------|------|
-| 飞书 | WebSocket (默认) / HTTP webhook | `RunnablePlatform` | 签名 + challenge | 4000 字符 | **已实现** |
+| 飞书 | WebSocket 长连接 | `RunnablePlatform` | app_id + app_secret | 4000 字符 | **已实现** |
 | Slack | Socket Mode (WebSocket) | `RunnablePlatform` | Bot/App token | 4000 字符 | **已实现** |
 | Discord | WebSocket gateway | `RunnablePlatform` | Bot token | 2000 字符 | **已实现** |
 | Telegram | Long polling / webhook | `RunnablePlatform` | Bot token | 4096 字符 | 计划中 |
@@ -574,7 +569,6 @@ HTTP 入口层。webhook 路由由各 Platform 的 `RegisterRoutes` 注册，Ser
 
 ```go
 // 路由由 Platform.RegisterRoutes 注册:
-//   feishu -> POST /webhook/feishu
 //   slack  -> POST /webhook/slack
 // Server 自身只注册:
 //   GET /health -> {"status":"ok","sessions":3,"uptime":"2h"}
@@ -665,7 +659,7 @@ internal/
 │   ├── project_files.go            项目文件浏览/预览（沙箱）
 │   └── health.go                   /health 端点
 ├── platform/                       Channel Adapter
-│   ├── feishu/                     ws + webhook 双通道，签名/nonce/反向代理
+│   ├── feishu/                     WebSocket 长连接
 │   ├── slack/                      Events API + Web API
 │   ├── discord/                    discordgo session
 │   └── weixin/                     企业微信 webhook
@@ -794,9 +788,8 @@ platforms:
   feishu:
     app_id: "${IM_APP_ID}"
     app_secret: "${IM_APP_SECRET}"
-    connection_mode: "webhook"        # "websocket" (default) | "webhook"
-    verification_token: "${IM_VERIFICATION_TOKEN}"
-    encrypt_key: "${IM_ENCRYPT_KEY}"   # 可选, 用于 v2 签名校验 (SHA-256)
+    verification_token: "${IM_VERIFICATION_TOKEN}"   # 可选, 传给长连接 SDK 的事件分发器
+    encrypt_key: "${IM_ENCRYPT_KEY}"   # 可选, 同上
     max_reply_length: 4000                    # 超过则分割
 
   slack:
@@ -823,12 +816,8 @@ log:
   - 启动时校验：所有 agent_commands 中的 agentId 必须在 agents 中定义
 
 **Feishu 配置说明**：
-- `connection_mode`: 传输模式
-  - `websocket`: 使用飞书 WebSocket 网关（推荐，无需公网 IP）
-  - `webhook`: HTTP webhook（需要公网 IP + HTTPS）
-- `encrypt_key`: v2 签名校验密钥
-  - 若配置，使用 SHA-256 校验 `X-Lark-Signature` 头
-  - 若不配置，跳过签名校验
+- 只走飞书 WebSocket 长连接（无需公网 IP），飞书开发者后台的事件订阅和卡片回调都要选「使用长连接接收」。
+- HTTP webhook 模式已移除；残留的 `connection_mode` / `allow_insecure_webhook` 只报 `config-deprecated` WARN，不再生效。
 
 ## 与 OpenClaw 架构对比 (参考分析)
 
@@ -1366,7 +1355,7 @@ deploy/
    - Watchdog（无输出超时 + 总超时）
    - Session 持久化到 sessions.json，支持重启恢复
    - Graceful shutdown（等待 running → 保存 → 关闭）
-   - Feishu v2 签名验证 + WebSocket/Webhook 双传输
+   - Feishu v2 签名验证 + WebSocket/Webhook 双传输（webhook 传输后来已移除）
    - 并发控制（信号量 + LRU 驱逐）
 
 3. Phase 3: Agent 路由 **[已完成]**
@@ -1673,7 +1662,6 @@ File:   .naozhi/MEMORY.md   (14.2 KB)
 |----------|--------|------|
 | `/api/projects` | GET | 列出所有项目及 planner 状态 |
 | `/api/projects/{name}/config` | GET/PUT | 读写 project.yaml |
-| `/api/projects/{name}/planner/restart` | POST | 重启 planner |
 
 ---
 
@@ -1749,7 +1737,7 @@ Phase 7 分为四个子阶段，逐步从单机 project 组织演进到跨 works
 - ManagedSession.Exempt + Router 三处跳过 (countActive/evictOldest/Cleanup)
 - `/project` 命令、planner 路由、`/cd` 互斥、`/new` 区分 planner/agent
 - Dashboard 侧边栏按 project 分组，planner 置顶紫色标识
-- `/api/projects`、`/api/projects/config`、`/api/projects/planner/restart` 端点
+- `/api/projects`、`/api/projects/config` 端点
 
 #### Phase 7.1: Discovered Sessions 合并进 Folder [待实现]
 
@@ -1857,7 +1845,6 @@ type nodeCache struct {
 | 查看 sessions/events | ✅ 已有 | ✅ 已有 |
 | 发送消息 | ✅ 已有 | ✅ 已有 |
 | takeover discovered | ✅ 已有 | 新增 proxy |
-| planner restart | ✅ 已有 | 新增 proxy |
 | project config CRUD | ✅ 已有 | 新增 proxy |
 | /project bind (IM) | ✅ | ❌ 只影响本机路由 |
 
@@ -1865,7 +1852,6 @@ type nodeCache struct {
 
 ```go
 func (n *NodeClient) Takeover(ctx, pid, sessionID, cwd string) error
-func (n *NodeClient) RestartPlanner(ctx, projectName string) error
 func (n *NodeClient) UpdateProjectConfig(ctx, name string, cfg ProjectConfig) error
 ```
 
@@ -1996,7 +1982,6 @@ Planner 在 shutdown 时与普通 session 一致：等待 running 完成 → 保
 | 6.2 | 更新项目配置 | naozhi 存在 | `PUT /api/projects/naozhi/config` 带 `{"planner_model":"opus"}` | `.naozhi/project.yaml` 被更新，返回 200 |
 | 6.3 | 添加 IM 绑定 | naozhi 存在 | `PUT /api/projects/naozhi/config` 添加 chat_binding | `project.yaml` 写入新绑定，后续该 chat 消息走 planner |
 | 6.4 | 删除 IM 绑定 | naozhi 有一个绑定 | `PUT /api/projects/naozhi/config` 移除 binding | 绑定生效解除，该 chat 消息恢复默认路由 |
-| 6.5 | 重启 planner | planner 在运行 | `POST /api/projects/naozhi/planner/restart` | 当前 planner 进程被 kill，新进程用最新配置启动 |
 | 6.6 | 不存在的项目 | 无 xxx 项目 | `GET /api/projects/xxx/config` | 返回 404 |
 
 #### 七、与现有功能兼容性

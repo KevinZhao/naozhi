@@ -1,10 +1,7 @@
-// list_snapshot_pool_test.go: regression coverage for two cron-list snapshot
-// invariants that pair across the same code surface (scheduler_jobs.go).
+// list_snapshot_pool_test.go: regression coverage for cron-list snapshot
+// invariants (scheduler_jobs_list.go).
 //
-//   - R247-PERF-4 (#530) / R250-PERF-15 (#1118): ListAllJobsWithNextRun
-//     pools its transient entryID slice + nextByID map. The pool must be
-//     reset cleanly between calls so a "second poll" sees no leakage from
-//     the first.
+//   - R250-PERF-15 (#1118): ListAllJobsWithNextRun returns value copies.
 //   - R242-GO-3 (#548): mutateByID returns a value-copy *Job. A caller
 //     that mutates the returned pointer's fields must NOT influence the
 //     scheduler's in-memory state (the live *Job in s.tbl.jobs).
@@ -21,70 +18,6 @@ import (
 	"testing"
 	"time"
 )
-
-// TestListAllJobsWithNextRun_PoolReusable poll-loops the dashboard list
-// API and asserts each call returns a self-consistent snapshot regardless
-// of how many prior calls have warmed the sync.Pool path. Without
-// `clear(nextByID)` before Put, a smaller second snapshot could observe
-// stale EntryID keys from a larger first snapshot — but that map is
-// keyed by entryID returned from `s.cron.Entries()` so a stale key is
-// unreachable from the recorded entryID slice. This test pins that property as a regression
-// guard so future refactors don't reintroduce a leak via a different key
-// shape (e.g. switching to job ID).
-func TestListAllJobsWithNextRun_PoolReusable(t *testing.T) {
-	dir := t.TempDir()
-	s := NewScheduler(SchedulerConfig{
-		StorePath: filepath.Join(dir, "cron.json"),
-		MaxJobs:   16,
-	}, SchedulerDeps{})
-	if err := s.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	t.Cleanup(s.Stop)
-
-	// Seed three jobs (paused, so no real cron entries get scheduled — we
-	// only care about snapshot fidelity, not run-time dispatch).
-	for i := 0; i < 3; i++ {
-		j := &Job{
-			Schedule: "@every 1h",
-			Prompt:   "p",
-			Platform: "feishu",
-			ChatID:   "chat",
-			ChatType: "direct",
-			Paused:   true,
-		}
-		if err := s.AddJob(j); err != nil {
-			t.Fatalf("AddJob[%d]: %v", i, err)
-		}
-	}
-
-	// Two sequential polls: cap of pooled pairs grows on the first call;
-	// the second call must still produce a slice of length 3.
-	got1 := s.ListAllJobsWithNextRun()
-	got2 := s.ListAllJobsWithNextRun()
-	if len(got1) != 3 || len(got2) != 3 {
-		t.Fatalf("snapshot len: got1=%d got2=%d, want 3 / 3", len(got1), len(got2))
-	}
-
-	// Concurrent pollers must each see a valid snapshot — pool Get/Put is
-	// not racy under sync.Pool's own contract, but our defer-Put dance
-	// must remain race-free.
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 32; j++ {
-				snap := s.ListAllJobsWithNextRun()
-				if len(snap) != 3 {
-					t.Errorf("concurrent snapshot len = %d, want 3", len(snap))
-					return
-				}
-			}
-		}()
-	}
-	wg.Wait()
-}
 
 // TestListAllJobsWithNextRun_ValueCopyIsolated guards R250-PERF-15 (#1118).
 // The single-copy refactor (Job copied straight into the result slice under

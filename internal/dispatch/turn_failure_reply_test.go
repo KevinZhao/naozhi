@@ -114,28 +114,6 @@ func TestDecorateReplyText_PartialReplyChip(t *testing.T) {
 	}
 }
 
-// TestDecorateReplyText_CountsTurnFailureByClass: each failed result bumps
-// its class in naozhi_dispatch_turn_error_result_total; an answer does not.
-func TestDecorateReplyText_CountsTurnFailureByClass(t *testing.T) {
-	d := &Dispatcher{caps: NoopCapabilities{}}
-	count := func(class string) int64 {
-		if v := dispatchTurnErrorResultTotal.Get(class); v != nil {
-			return v.(interface{ Value() int64 }).Value()
-		}
-		return 0
-	}
-	before, beforeText := count("max_budget"), count("error_text")
-	d.decorateReplyText(context.Background(), &clievent.SendResult{SubType: "error_max_budget_usd", IsError: true}, nil)
-	d.decorateReplyText(context.Background(), &clievent.SendResult{Text: "Execution error", IsError: true}, nil)
-	d.decorateReplyText(context.Background(), &clievent.SendResult{Text: "fine", SubType: "success"}, nil)
-	if got := count("max_budget") - before; got != 1 {
-		t.Errorf("max_budget count moved by %d, want 1", got)
-	}
-	if got := count("error_text") - beforeText; got != 1 {
-		t.Errorf("error_text count moved by %d, want 1", got)
-	}
-}
-
 // deliverWithBanner runs imDelivery.reply on a turn that posted a progress
 // banner and returns the banner edits and the replies after the banner.
 func deliverWithBanner(t *testing.T, r *clievent.SendResult) (edits, replies []string) {

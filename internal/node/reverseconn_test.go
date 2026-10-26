@@ -481,29 +481,6 @@ func TestReverseConn_ProxyCloseDiscovered(t *testing.T) {
 	}
 }
 
-// ---- ProxyRestartPlanner ----
-
-func TestReverseConn_ProxyRestartPlanner(t *testing.T) {
-	rc, wsConn, cleanup := setupReverseConnPair(t)
-	defer cleanup()
-
-	go func() {
-		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		var req ReverseMsg
-		if err := wsConn.ReadJSON(&req); err != nil {
-			return
-		}
-		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	if err := rc.ProxyRestartPlanner(ctx, "my-proj"); err != nil {
-		t.Fatalf("ProxyRestartPlanner: %v", err)
-	}
-}
-
 // ---- ProxyUpdateConfig ----
 
 func TestReverseConn_ProxyUpdateConfig(t *testing.T) {

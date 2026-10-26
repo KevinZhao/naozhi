@@ -22,7 +22,7 @@ func TestSessionStoreHealthProbe_OmitsWhenNothingIsBlocked(t *testing.T) {
 // The section's keys are what an operator greps for; pin them.
 func TestHealthSessionStore_WireShape(t *testing.T) {
 	auth := healthAuthSection{SessionStore: &healthSessionStore{Blocked: []session.StoreBlock{{
-		Path: "/data/sessions.json", Label: "session store", Reason: "r", Since: time.Unix(0, 0).UTC(), NeedRestart: true,
+		Path: "/data/sessions.json", Label: "session store", Reason: "r", Since: time.Unix(0, 0).UTC(),
 	}}}}
 	raw, err := json.Marshal(auth)
 	if err != nil {
@@ -40,7 +40,7 @@ func TestHealthSessionStore_WireShape(t *testing.T) {
 		t.Fatalf("blocked = %v", got.SessionStore.Blocked)
 	}
 	b := got.SessionStore.Blocked[0]
-	for _, k := range []string{"path", "label", "reason", "since", "need_restart"} {
+	for _, k := range []string{"path", "label", "reason", "since"} {
 		if _, ok := b[k]; !ok {
 			t.Errorf("session_store.blocked[0] lacks %q: %v", k, b)
 		}

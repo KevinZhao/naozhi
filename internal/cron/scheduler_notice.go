@@ -45,17 +45,9 @@ type jobSnapshot struct {
 	fresh         bool
 }
 
-// cronNoticePrefixFmt is the IM-notice prefix template every cron-side
-// deliverNotice call funnels through; new notice sites should compose via
-// formatCronNotice rather than inline a copy. The formatter inlines the shape
-// ("[Cron <label>] <body>") via strings.Builder, so a template change must
-// touch both this literal and the segment consts below —
-// notice_label_bracket_test pins the byte sequence.
-const cronNoticePrefixFmt = "[Cron %s] %s"
-
-// cronNoticePrefix / cronNoticeMid are the literal segments stitched into
-// formatCronNotice's strings.Builder output; kept as separate consts so a
-// template change cannot silently desync from cronNoticePrefixFmt.
+// cronNoticePrefix / cronNoticeMid are the literal segments of the IM-notice
+// shape "[Cron <label>] <body>" every cron-side deliverNotice call funnels
+// through formatCronNotice; notice_label_bracket_test pins the byte sequence.
 const (
 	cronNoticePrefix = "[Cron "
 	cronNoticeMid    = "] "

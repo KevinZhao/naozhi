@@ -2,7 +2,6 @@ package dispatch
 
 import (
 	"context"
-	"expvar"
 	"log/slog"
 	"strings"
 	"testing"
@@ -42,14 +41,6 @@ func budgetMsg(chatID, text string) platform.IncomingMessage {
 	return rateMsg("alice", chatID, text)
 }
 
-// blockedCount reads one scope of naozhi_dispatch_budget_blocked_total.
-func blockedCount(scope string) int64 {
-	if v, ok := dispatchBudgetBlockedTotal.Get(scope).(*expvar.Int); ok {
-		return v.Value()
-	}
-	return 0
-}
-
 // A chat at its cap gets no turn, for a message, /urgent or another agent,
 // and is told once per window; commands still work there, and another chat
 // is unaffected.
@@ -57,7 +48,6 @@ func TestBudget_ChatAtCapIsRefused(t *testing.T) {
 	d, fp, ct, spend := newBudgetDispatcher(t, budget.Limits{PerChatDailyUSD: 1})
 	spend("fake:direct:c1:general", 0.6)
 	spend("fake:direct:c1:reviewer", 0.4) // the same chat through another agent
-	before := blockedCount("chat")
 	h := d.BuildHandler()
 
 	h(context.Background(), budgetMsg("c1", "hello"))
@@ -73,9 +63,6 @@ func TestBudget_ChatAtCapIsRefused(t *testing.T) {
 	want := "今日费用预算已用尽（本会话 $1.00 / $1.00），09-07 00:00 重置；在此之前新消息不会处理。"
 	if got := fp.allReplies(); len(got) == 0 || got[0] != want {
 		t.Errorf("first reply = %q, want %q", got, want)
-	}
-	if moved := blockedCount("chat") - before; moved != 4 {
-		t.Errorf("naozhi_dispatch_budget_blocked_total[chat] moved by %d, want 4", moved)
 	}
 
 	h(context.Background(), budgetMsg("c1", "/new"))
@@ -191,15 +178,11 @@ func TestAdmit_BudgetSpentChatFetchesNothing(t *testing.T) {
 	d, fp, _, spend := newBudgetDispatcher(t, budget.Limits{PerChatDailyUSD: 1})
 	ctx := context.Background()
 	spend("fake:direct:c1:reviewer", 1)
-	before := blockedCount("chat")
 
 	for _, text := range []string{"", "look at this", "/review this"} {
 		if d.Admit(ctx, budgetMsg("c1", text)) {
 			t.Errorf("Admit let %q with media through a chat at its cap", text)
 		}
-	}
-	if moved := blockedCount("chat") - before; moved != 3 {
-		t.Errorf("naozhi_dispatch_budget_blocked_total[chat] moved by %d, want 3", moved)
 	}
 	if n := countReplies(fp, budgetSpentReply); n != 1 {
 		t.Errorf("budget replies = %d, want 1: %q", n, fp.allReplies())

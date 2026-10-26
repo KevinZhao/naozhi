@@ -67,38 +67,6 @@ type storeEntry struct {
 	// Workflows is the header of each workflow on the session's board, so a
 	// restart shows runs the shim replay no longer holds; re-validated on load.
 	Workflows []workflow.Ref `json:"workflows,omitempty"`
-
-	// prevGen is ManagedSession.prevHistoryGen when the chain slices above were
-	// snapshotted (unexported: never hits disk). Bumped under historyMu on every
-	// chain mutation, so equal gen ⇒ identical chains; see equalStoreEntry (#2346).
-	prevGen uint64
-}
-
-// storeFormatVersion is the schema version for `sessions.json`; bump only for
-// changes older binaries cannot parse (additive `omitempty` fields need none).
-// It lives in the sidecar `sessions.meta.json` (sessions.json stays a bare
-// array for back-compat); loadStore warns on a newer version and never fails
-// on a missing sidecar (treated as v1).
-const storeFormatVersion = 1
-
-// storeMeta is the sessions.meta.json payload.
-type storeMeta struct {
-	Version   int    `json:"version"`
-	WrittenAt int64  `json:"written_at"`          // unix nano when saveStore last succeeded
-	Generator string `json:"generator,omitempty"` // human-readable "naozhi <tag>"; omitempty for test paths
-}
-
-// storeMetaPath derives the sidecar path: `.../sessions.json` → `.../sessions.meta.json`.
-func storeMetaPath(storePath string) string {
-	if storePath == "" {
-		return ""
-	}
-	base := filepath.Base(storePath)
-	ext := filepath.Ext(base)
-	stem := base[:len(base)-len(ext)]
-	// The NAME follows the configured file (mystore.json → mystore.meta.json);
-	// only the directory comes from the layout.
-	return datadir.ForStore(storePath).Join(stem + ".meta" + ext)
 }
 
 // sessionToStoreEntry converts a ManagedSession to its on-disk storeEntry,
@@ -145,11 +113,7 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 	// SetPrevSessionOrigins cannot publish a half-mutated pair.
 	var prevIDs []string
 	var prevOrigins []string
-	var prevGen uint64
 	s.historyMu.RLock()
-	// Read prevHistoryGen inside the same RLock so the (gen, slices) pair is
-	// mutually consistent: a writer that bumps gen holds historyMu.Lock (#2346).
-	prevGen = s.prevHistoryGen.Load()
 	if len(s.prevSessionIDs) > 0 {
 		prevIDs = slices.Clone(s.prevSessionIDs)
 	}
@@ -162,7 +126,6 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 		SessionID:          sid,
 		PrevSessionIDs:     prevIDs,
 		PrevSessionOrigins: prevOrigins,
-		prevGen:            prevGen,
 		TotalCost:          cost,
 		CostSpent:          loadTotalCost(&s.costSpent),
 		LastCumulativeCost: loadTotalCost(&s.lastCumulativeCost),
@@ -181,139 +144,11 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 	}, true
 }
 
-// equalStoreEntry reports whether two storeEntry values are identical; used by
-// the per-session marshal cache to decide whether cached JSON can be reused.
-// The chain slices are compared via prevGen (bumped under historyMu on every
-// chain mutation, so equal gen ⇒ identical contents); both entries come from
-// sessionToStoreEntry, so both carry a populated prevGen (#2346).
-func equalStoreEntry(a, b storeEntry) bool {
-	return a.Key == b.Key &&
-		a.SessionID == b.SessionID &&
-		a.TotalCost == b.TotalCost &&
-		a.CostSpent == b.CostSpent &&
-		a.LastCumulativeCost == b.LastCumulativeCost &&
-		a.Workspace == b.Workspace &&
-		a.Backend == b.Backend &&
-		a.AccessProfile == b.AccessProfile &&
-		a.LastActive == b.LastActive &&
-		a.CreatedAt == b.CreatedAt &&
-		a.UserLabel == b.UserLabel &&
-		a.LabelOrigin == b.LabelOrigin &&
-		a.Model == b.Model &&
-		a.TuningModel == b.TuningModel &&
-		a.TuningEffort == b.TuningEffort &&
-		slices.Equal(a.CodeChanges, b.CodeChanges) &&
-		slices.Equal(a.Workflows, b.Workflows) &&
-		a.prevGen == b.prevGen
-}
-
-// encodeStoreEntryCached returns the JSON encoding of s's current storeEntry,
-// reusing the per-session memo when unchanged since the last save. Returns
-// (_, false) when the session is not persisted. The returned slice is owned by
-// the cache and must NOT be mutated by the caller.
-//
-// CONTRACT mirrors sessionToStoreEntry: callers MUST hold no Router-level lock.
-// The cache pointer is only touched on the single-goroutine save path
-// (cleanup loop), so it needs no synchronisation.
-func encodeStoreEntryCached(s *ManagedSession) ([]byte, bool) {
-	entry, ok := sessionToStoreEntry(s)
-	if !ok {
-		return nil, false
-	}
-	if c := s.storeMarshalCache.Load(); c != nil && equalStoreEntry(c.entry, entry) {
-		return c.data, true
-	}
-	data, err := json.Marshal(entry)
-	if err != nil {
-		// Cannot fail in practice (plain scalars + string slices). Drop the cache
-		// and skip this entry rather than poison the whole save; log the drop.
-		slog.Error("encodeStoreEntryCached: marshal failed, session dropped from persistence", "key", s.key, "err", err)
-		s.storeMarshalCache.Store(nil)
-		return nil, false
-	}
-	s.storeMarshalCache.Store(&storeEntryCache{entry: entry, data: data})
-	return data, true
-}
-
-// marshalStoreEntries builds the sessions.json array by concatenating each
-// session's cached encoding — on-the-wire equal to json.Marshal([]storeEntry)
-// but skipping unchanged sessions (#1523). Map order is fine: loadStore is order-insensitive.
-func marshalStoreEntries(sessions map[string]*ManagedSession) ([]byte, error) {
-	return marshalStoreEntriesFunc(len(sessions), func(yield func(*ManagedSession)) {
-		for _, s := range sessions {
-			yield(s)
-		}
-	})
-}
-
-// marshalStoreEntriesSlice is the slice-input twin of marshalStoreEntries so the
-// periodic save path avoids allocating a map every tick (#1606). Output is identical.
-func marshalStoreEntriesSlice(sessions []*ManagedSession) ([]byte, error) {
-	return marshalStoreEntriesFunc(len(sessions), func(yield func(*ManagedSession)) {
-		for _, s := range sessions {
-			yield(s)
-		}
-	})
-}
-
-// storeMarshalBufPool recycles the assembly buffer of marshalStoreEntriesFunc
-// so the steady-state save tick is allocation-free (#2073). Safe because the
-// buffer is fully consumed before return: save paths hand it to writeStoreData
-// (synchronous WriteFileAtomic that does not retain the slice), then call
-// putStoreMarshalBuf. Mirrors bridgeEncPool in eventlog_bridge.go.
-var storeMarshalBufPool = sync.Pool{
-	New: func() any {
-		b := make([]byte, 0, 4096)
-		return &b
-	},
-}
-
-// storeMarshalBufMaxCap caps buffer reuse so a one-off oversized store does not
-// permanently pin a large backing array in the pool. Same rationale as bridgeEncMaxCap.
-const storeMarshalBufMaxCap = 256 * 1024
-
-// storeMarshalBufRecyclable is the cap gate as a pure predicate, testable
-// without sync.Pool (whose Get/Put give no reuse guarantee under GC).
-func storeMarshalBufRecyclable(capacity int) bool {
-	return capacity <= storeMarshalBufMaxCap
-}
-
-// putStoreMarshalBuf returns an assembly buffer to the pool once writeStoreData
-// has copied the bytes to disk. Buffers that grew past the cap are dropped.
-func putStoreMarshalBuf(buf []byte) {
-	if !storeMarshalBufRecyclable(cap(buf)) {
-		return
-	}
-	b := buf[:0]
-	storeMarshalBufPool.Put(&b)
-}
-
-// marshalStoreEntriesFunc assembles the JSON array from each session's cached
-// encoding, driven by an iteration closure shared by the map and slice inputs.
-// The returned slice is borrowed from storeMarshalBufPool; the caller MUST
-// return it via putStoreMarshalBuf once written (not returning it only
-// forfeits reuse).
-func marshalStoreEntriesFunc(n int, iter func(yield func(*ManagedSession))) ([]byte, error) {
-	bufp := storeMarshalBufPool.Get().(*[]byte)
-	buf := (*bufp)[:0]
-	buf = append(buf, '[')
-	first := true
-	iter(func(s *ManagedSession) {
-		data, ok := encodeStoreEntryCached(s)
-		if !ok {
-			return
-		}
-		if !first {
-			buf = append(buf, ',')
-		}
-		first = false
-		buf = append(buf, data...)
-	})
-	buf = append(buf, ']')
-	return buf, nil
-}
-
-func saveStore(path string, sessions map[string]*ManagedSession) error {
+// saveStore persists sessions as the sessions.json array. Each entry is
+// marshalled on its own so one that cannot be encoded (e.g. a NaN cost) is
+// dropped and logged instead of failing the whole save. An empty input writes
+// `[]`. Order is irrelevant: loadStore is order-insensitive.
+func saveStore(path string, sessions []*ManagedSession) error {
 	if path == "" {
 		return nil
 	}
@@ -322,35 +157,23 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 	if err := blockedIfUnreadable(path); err != nil {
 		return err
 	}
-	// Per-session cached encodings: per tick O(changed), not O(N) (#1523).
-	data, err := marshalStoreEntries(sessions)
-	if err != nil {
-		return fmt.Errorf("marshal session store: %w", err)
+	buf := []byte{'['}
+	for _, s := range sessions {
+		entry, ok := sessionToStoreEntry(s)
+		if !ok {
+			continue
+		}
+		data, err := json.Marshal(entry)
+		if err != nil {
+			slog.Error("saveStore: marshal failed, session dropped from persistence", "key", s.key, "err", err)
+			continue
+		}
+		if len(buf) > 1 {
+			buf = append(buf, ',')
+		}
+		buf = append(buf, data...)
 	}
-	// data is a pooled buffer; writeStoreData copies it synchronously and does
-	// not retain it, so recycling after the write returns is safe either way.
-	writeErr := writeStoreData(path, data)
-	putStoreMarshalBuf(data)
-	return writeErr
-}
-
-// saveStoreSlice persists a slice snapshot of sessions (periodic Cleanup /
-// saveIfDirty paths, #1606). On-disk output is identical to saveStore.
-func saveStoreSlice(path string, sessions []*ManagedSession) error {
-	if path == "" {
-		return nil
-	}
-	if err := blockedIfUnreadable(path); err != nil {
-		return err
-	}
-	data, err := marshalStoreEntriesSlice(sessions)
-	if err != nil {
-		return fmt.Errorf("marshal session store: %w", err)
-	}
-	// See saveStore: data is a pooled buffer that writeStoreData does not retain.
-	writeErr := writeStoreData(path, data)
-	putStoreMarshalBuf(data)
-	return writeErr
+	return writeStoreData(path, append(buf, ']'))
 }
 
 // storeDirEnsured memoizes, per store directory, that datadir.EnsureDir has
@@ -359,14 +182,8 @@ func saveStoreSlice(path string, sessions []*ManagedSession) error {
 // A failed EnsureDir is NOT recorded, so a later save retries.
 var storeDirEnsured sync.Map // map[string]struct{}
 
-// storeMetaWritten tracks store paths whose advisory version sidecar was
-// written in this process; its content is a compile-time constant, so once per
-// path suffices. writeStoreMeta is best-effort (no error return), so the path
-// is recorded after the first attempt regardless of outcome.
-var storeMetaWritten sync.Map // map[string]struct{}
-
-// writeStoreData ensures the store directory exists, atomically writes the
-// pre-marshalled bytes, then writes the advisory version sidecar.
+// writeStoreData ensures the store directory exists and atomically writes the
+// pre-marshalled bytes.
 func writeStoreData(path string, data []byte) error {
 	if err := blockedIfUnreadable(path); err != nil {
 		return err
@@ -384,75 +201,12 @@ func writeStoreData(path string, data []byte) error {
 	if err := osutil.WriteFileAtomic(path, data, 0600); err != nil {
 		return fmt.Errorf("save session store: %w", err)
 	}
-	// Best-effort sidecar: a failure does NOT fail the save (main store is
-	// already durable; meta is advisory). Written once per path; see storeMetaWritten.
-	if _, done := storeMetaWritten.Load(path); !done {
-		writeStoreMeta(path)
-		storeMetaWritten.Store(path, struct{}{})
-	}
 	return nil
-}
-
-// writeStoreMeta writes the version sidecar after the main store is durable so
-// the two stay correlated. Uses WriteFileAtomic so a crash mid-write leaves the
-// previous or the new meta, never a torn one that would make readStoreMeta warn
-// on every load (#1023). Its fsyncs run after the main write, so save latency is unaffected.
-func writeStoreMeta(storePath string) {
-	metaPath := storeMetaPath(storePath)
-	if metaPath == "" {
-		return
-	}
-	meta := storeMeta{
-		Version:   storeFormatVersion,
-		WrittenAt: time.Now().UnixNano(),
-	}
-	data, err := json.Marshal(meta)
-	if err != nil {
-		slog.Warn("marshal session store meta failed", "err", err)
-		return
-	}
-	if err := osutil.WriteFileAtomic(metaPath, data, 0600); err != nil {
-		slog.Warn("write session store meta failed", "path", metaPath, "err", err)
-	}
-}
-
-// readStoreMeta loads the sidecar, reporting whether one was present. A missing
-// sidecar is "legacy" — the caller treats it as v1 so sessions.json from any
-// prior naozhi version stays readable.
-func readStoreMeta(storePath string) (storeMeta, bool) {
-	metaPath := storeMetaPath(storePath)
-	if metaPath == "" {
-		return storeMeta{}, false
-	}
-	m, out, err := jsonfile.Load[storeMeta](metaPath, jsonfile.Options{
-		MaxBytes: maxStoreFileBytes,
-		Label:    "session store meta",
-	})
-	if err != nil {
-		// The sidecar is machine-written, so losing it costs nothing — a missing
-		// meta reads as legacy. Report it so it is not silent (#2680), but do not
-		// block writes: blocking would freeze the sidecar while sessions.json
-		// advances, and a stale version number is worse than a rewritten one.
-		markStoreReadUnreadableReportOnly(metaPath, "session store meta", err)
-		return storeMeta{}, false
-	}
-	clearStoreReadUnreadable(metaPath)
-	return m, out == jsonfile.Parsed
 }
 
 func loadStore(path string) map[string]*storeEntry {
 	if path == "" {
 		return nil
-	}
-	// Warn about a future-version downgrade BEFORE the main parse: it may still
-	// succeed (schema grows additively) while silently dropping fields the
-	// newer binary wrote. Missing meta is the legacy case.
-	if meta, ok := readStoreMeta(path); ok && meta.Version > storeFormatVersion {
-		slog.Warn("session store was written by a newer naozhi; downgrade in progress?",
-			"path", path,
-			"observed_version", meta.Version,
-			"supported_version", storeFormatVersion,
-			"written_at_ns", meta.WrittenAt)
 	}
 	entries, out, err := jsonfile.Load[[]storeEntry](path, jsonfile.Options{
 		MaxBytes: maxStoreFileBytes,
@@ -475,42 +229,6 @@ func loadStore(path string) map[string]*storeEntry {
 	}
 	slog.Info("loaded session store", "count", len(m), "path", path)
 	return m
-}
-
-// StoredSessionIDs maps each key in the session store at path to the CLI
-// session ids it has held, oldest first and the current one last. It only
-// reads: a missing, unreadable or corrupt store yields nil and stays put.
-func StoredSessionIDs(path string) map[string][]string {
-	entries, out, err := jsonfile.Load[[]storeEntry](path, jsonfile.Options{
-		MaxBytes: maxStoreFileBytes, Label: "session store", Corrupt: jsonfile.LeaveCorrupt,
-	})
-	if err != nil || out != jsonfile.Parsed {
-		return nil
-	}
-	m := make(map[string][]string, len(entries))
-	for _, e := range entries {
-		if e.Key != "" && e.SessionID != "" {
-			m[e.Key] = append(slices.Clone(e.PrevSessionIDs), e.SessionID)
-		}
-	}
-	return m
-}
-
-// StoredKnownIDs lists every CLI session id naozhi has used, from the
-// known-ids file beside the session store at storePath. Like
-// StoredSessionIDs it only reads: a corrupt file yields nil and stays put.
-func StoredKnownIDs(storePath string) []string {
-	path := knownIDsPath(storePath)
-	if path == "" {
-		return nil
-	}
-	ids, out, err := jsonfile.Load[[]string](path, jsonfile.Options{
-		MaxBytes: maxStoreFileBytes, Label: "known session IDs", Corrupt: jsonfile.LeaveCorrupt,
-	})
-	if err != nil || out != jsonfile.Parsed {
-		return nil
-	}
-	return ids
 }
 
 // knownIDsPath derives the known session IDs path (sessions.json → session-ids.json).

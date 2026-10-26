@@ -20,7 +20,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/shim"
 )
@@ -588,10 +587,6 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 	}
 
 	proc.startReadLoop()
-	// Counts fresh CLI spawns only (SpawnReconnect forks no CLI child).
-	// RecordCLISpawn double-writes the legacy unlabeled counter and the
-	// per-backend vector so existing pprof.md jq queries keep working (RFC §10).
-	metrics.RecordCLISpawn(w.BackendID)
 	return proc, nil
 }
 

@@ -17,7 +17,6 @@ func (h *Handlers) Routes() []httputil.Route {
 		{Pattern: "GET /api/projects", Handler: h.HandleList},
 		{Pattern: "GET /api/projects/config", Handler: h.HandleConfigGet},
 		{Pattern: "PUT /api/projects/config", Handler: h.HandleConfigPut},
-		{Pattern: "POST /api/projects/planner/restart", Handler: h.HandlePlannerRestart},
 		{Pattern: "POST /api/projects/favorite", Handler: h.HandleFavoriteToggle},
 		{Pattern: "POST /api/projects/files/exists", Handler: h.HandleFilesExists},
 		{Pattern: "GET /api/projects/file", Handler: h.HandleFileGet},

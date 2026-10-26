@@ -10,7 +10,6 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/costledger/cliusage"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -39,7 +38,6 @@ type resultEnvelope struct {
 func parseResultEnvelope(stdout []byte) (resultEnvelope, error) {
 	var env resultEnvelope
 	if err := json.Unmarshal(bytes.TrimSpace(stdout), &env); err != nil || env.Type != "result" {
-		metrics.SysessionRunnerParseFailTotal.Add(1)
 		return resultEnvelope{}, fmt.Errorf("sysession: claude -p returned no parsable json result (head: %s)",
 			osutil.SanitizeForLog(string(stdout), 100))
 	}

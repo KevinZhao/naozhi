@@ -31,7 +31,6 @@ func TestDrainInChannel_RefreshesClockMidBurst(t *testing.T) {
 			Dir:          t.TempDir(),
 			IdxStride:    4,
 			MaxFileBytes: 1 << 30, // avoid the post-batch rotate gate (FS ops)
-			Observer:     noopObserver{},
 			// Each read advances 1s so we can detect refreshes by the
 			// timestamp delta on the writer's lastActivity.
 			Clock: func() time.Time {
@@ -103,7 +102,6 @@ func TestDrainInChannel_SingleClockReadForSmallBurst(t *testing.T) {
 			Dir:          t.TempDir(),
 			IdxStride:    4,
 			MaxFileBytes: 1 << 30, // avoid the post-batch rotate gate (FS ops)
-			Observer:     noopObserver{},
 			Clock: func() time.Time {
 				clockReads.Add(1)
 				return time.Unix(1700000000, 0)

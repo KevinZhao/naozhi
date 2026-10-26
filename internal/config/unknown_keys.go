@@ -165,10 +165,9 @@ func keyPathsByLine(expanded []byte) map[leafKey]string {
 }
 
 // reportUnknownKeys emits one diag per unknown key, through the same
-// EmitSpawnDiags path the deprecated-field reports use. That buys three things
+// EmitSpawnDiags path the deprecated-field reports use. That buys two things
 // no bespoke warning would: `naozhi config check` sees them via its observer
-// and exits 1, naozhi_spawn_diag_total{layer="config-unknown"} makes a typo
-// countable instead of log-greppable, and the wording lands beside the other
+// and exits 1, and the wording lands beside the other
 // "you configured this and it did nothing" findings. A path in deprecated was
 // already reported by reportDeprecatedKeys and is skipped.
 func reportUnknownKeys(expanded []byte, deprecated map[string]bool) {
@@ -203,7 +202,8 @@ func reportUnknownKeys(expanded []byte, deprecated map[string]bool) {
 // findDeprecatedKeys lists the schema v1 key spellings (nodes,
 // session.workspace, session.auto_chain) as config-deprecated diags naming the
 // v2 replacement, plus the keys of removed features (server.metrics_enabled,
-// cron.sandbox). None of them has any effect any more: Load no longer rewrites
+// cron.sandbox, the feishu webhook mode's connection_mode /
+// allow_insecure_webhook). None of them has any effect any more: Load no longer rewrites
 // them. The v1 `--append-system-prompt` inside agents[].args is not
 // listed here: validateArgvStrings already warns about it (argv-denylist) and
 // names agents[<id>].system_prompt.
@@ -220,7 +220,7 @@ func findDeprecatedKeys(doc *yaml.Node) []spawndiag.Diag {
 		add("nodes", "'nodes' is no longer read and its remote workspaces are NOT configured; rename it to 'workspaces'")
 	}
 	if server := yamlChildMap(root, "server"); server != nil && hasYAMLKey(server, "metrics_enabled") {
-		add("server.metrics_enabled", "'server.metrics_enabled' has no effect: GET /metrics (Prometheus export) was removed; counters stay at /api/debug/vars (server.debug_mode); remove this key")
+		add("server.metrics_enabled", "'server.metrics_enabled' has no effect: GET /metrics (Prometheus export) was removed; remove this key")
 	}
 	if session := yamlChildMap(root, "session"); session != nil {
 		if hasYAMLKey(session, "workspace") {
@@ -232,6 +232,22 @@ func findDeprecatedKeys(doc *yaml.Node) []spawndiag.Diag {
 	}
 	if cron := yamlChildMap(root, "cron"); cron != nil && hasYAMLKey(cron, "sandbox") {
 		add("cron.sandbox", "the AgentCore cloud sandbox placement was removed and 'cron.sandbox' has no effect; remove this block (jobs saved with placement=sandbox load paused)")
+	}
+	var feishu *yaml.Node
+	if platforms := yamlChildMap(root, "platforms"); platforms != nil {
+		feishu = yamlChildMap(platforms, "feishu")
+	}
+	if feishu != nil {
+		if mode := yamlChild(feishu, "connection_mode"); mode != nil {
+			reason := "'platforms.feishu.connection_mode' has no effect: feishu always uses the websocket long connection; remove this key"
+			if mode.Value == "webhook" {
+				reason = "the feishu webhook mode was removed and naozhi now connects over the websocket long connection; switch event subscription (and card callbacks) in the Feishu developer console to long connection or no events arrive, then remove 'platforms.feishu.connection_mode'"
+			}
+			add("platforms.feishu.connection_mode", reason)
+		}
+		if hasYAMLKey(feishu, "allow_insecure_webhook") {
+			add("platforms.feishu.allow_insecure_webhook", "'platforms.feishu.allow_insecure_webhook' has no effect: the feishu webhook mode was removed; remove this key")
+		}
 	}
 	return diags
 }

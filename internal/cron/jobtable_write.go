@@ -188,16 +188,8 @@ func (t *jobTable) findByPrefixLocked(idPrefix, plat, chatID string) (*Job, erro
 // still holds t.mu. Safe because json.Marshal only reads Job fields and the
 // output []byte is independent of t.jobs, so the caller can drop t.mu
 // immediately. The unexported entryID never leaks into cron_jobs.json.
-// The entries slice comes from marshalEntriesPool; the output bytes are fresh
-// each call because saveMarshaledSeq holds them across the async storeMu write.
 func (t *jobTable) marshalLocked() ([]byte, error) {
-	entriesPtr := marshalEntriesPool.Get().(*[]*Job)
-	defer putMarshalEntries(entriesPtr)
-	entries := *entriesPtr
-	// Grow when the pooled cap is below the job count; the grown slice circulates back.
-	if cap(entries) < len(t.jobs) {
-		entries = make([]*Job, 0, len(t.jobs))
-	}
+	entries := make([]*Job, 0, len(t.jobs))
 	// Emit in t.sortedJobIDs order so on-disk JSON stays deterministic without an
 	// O(N log N) sort inside the t.mu critical section (#1598). t.jobs remains the
 	// source of truth: if the hint drifted (a test helper poking t.jobs directly)
@@ -223,7 +215,6 @@ func (t *jobTable) marshalLocked() ([]byte, error) {
 			slices.SortFunc(entries, jobIDCmpForSort)
 		}
 	}
-	*entriesPtr = entries
 	var fn *marshalJobsFn
 	if t.marshal != nil {
 		fn = t.marshal.Load()
@@ -245,15 +236,7 @@ func (t *jobTable) marshalLocked() ([]byte, error) {
 // sorted-ID hint and drift fallback mirror marshalLocked so the on-disk
 // ordering is byte-identical regardless of which persist path ran.
 func (t *jobTable) snapshotForSaveLocked() jobsSnapshot {
-	// Pooled outer slice (same pool as marshalLocked), returned by
-	// persistSnapshot after marshal (#1975).
-	entriesPtr := marshalEntriesPool.Get().(*[]*Job)
-	entries := *entriesPtr
-	if cap(entries) < len(t.jobs) {
-		entries = make([]*Job, 0, len(t.jobs))
-	} else {
-		entries = entries[:0]
-	}
+	entries := make([]*Job, 0, len(t.jobs))
 	useHint := len(t.sortedJobIDs) == len(t.jobs)
 	if useHint {
 		for _, id := range t.sortedJobIDs {
@@ -286,10 +269,7 @@ func (t *jobTable) snapshotForSaveLocked() jobsSnapshot {
 			slices.SortFunc(entries, jobIDCmpForSort)
 		}
 	}
-	// Write the (possibly grown) slice back into the pooled handle so a grow
-	// circulates through the pool.
-	*entriesPtr = entries
-	return jobsSnapshot{entries: entries, seq: t.saveSeq.Add(1), pooled: entriesPtr}
+	return jobsSnapshot{entries: entries, seq: t.saveSeq.Add(1)}
 }
 
 // applyEntry writes a committed robfig registration onto job p.jobID and

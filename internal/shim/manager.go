@@ -20,7 +20,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/envpolicy"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/spawndiag"
@@ -442,10 +441,6 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	if oldHandle != nil {
 		oldHandle.Close()
 	}
-
-	// Counts fresh shim births only; Reconnect reattaches to an existing
-	// process and is not counted.
-	metrics.ShimRestartTotal.Add(1)
 	return handle, nil
 }
 

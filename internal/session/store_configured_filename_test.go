@@ -16,9 +16,6 @@ func TestStorePathsFollowTheConfiguredFilename(t *testing.T) {
 	dir := t.TempDir()
 	store := filepath.Join(dir, "mystore.json")
 
-	if got, want := storeMetaPath(store), filepath.Join(dir, "mystore.meta.json"); got != want {
-		t.Errorf("storeMetaPath = %q, want %q — the sidecar name must follow the configured file", got, want)
-	}
 	if got, want := knownIDsPath(store), filepath.Join(dir, "session-ids.json"); got != want {
 		t.Errorf("knownIDsPath = %q, want %q", got, want)
 	}
@@ -27,7 +24,7 @@ func TestStorePathsFollowTheConfiguredFilename(t *testing.T) {
 	}
 
 	// And the write actually lands on the configured name, not on sessions.json.
-	if err := saveStore(store, map[string]*ManagedSession{}); err != nil {
+	if err := saveStore(store, []*ManagedSession{}); err != nil {
 		t.Fatalf("saveStore: %v", err)
 	}
 	if _, err := os.Stat(store); err != nil {
@@ -42,9 +39,6 @@ func TestStorePathsFollowTheConfiguredFilename(t *testing.T) {
 // sidecars into writes at the filesystem root. Each of these guarded on
 // storePath == "" before the layout was introduced and must still do so.
 func TestStorePathsEmptyStoreStaysEmpty(t *testing.T) {
-	if got := storeMetaPath(""); got != "" {
-		t.Errorf("storeMetaPath(\"\") = %q, want empty", got)
-	}
 	if got := knownIDsPath(""); got != "" {
 		t.Errorf("knownIDsPath(\"\") = %q, want empty", got)
 	}

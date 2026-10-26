@@ -199,7 +199,6 @@ type snapshot struct {
 func normalizeItems(items []clievent.WorkflowItem, memos map[int]*agentMemo, phaseMemos map[int]*memo, withRows bool) snapshot {
 	var s snapshot
 	var phaseOrder, agentOrder indexOrder
-	unknown := false
 	perPhase := map[int]*Counts{}
 	for i := range items {
 		it := &items[i]
@@ -221,12 +220,7 @@ func normalizeItems(items []clievent.WorkflowItem, memos map[int]*agentMemo, pha
 					s.earliest = t
 				}
 			}
-		default:
-			unknown = true
 		}
-	}
-	if unknown {
-		itemsUnknownTotal.Add(1)
 	}
 	if phaseOrder.n > 0 {
 		s.phases = make([]Phase, 0, min(phaseOrder.n, maxPhases))
@@ -243,9 +237,6 @@ func normalizeItems(items []clievent.WorkflowItem, memos map[int]*agentMemo, pha
 		}
 		s.phases = append(s.phases, p)
 	})
-	if s.phasesCapped {
-		phasesCappedTotal.Add(1)
-	}
 	if !withRows {
 		s.capped = agentOrder.n > maxAgents
 		return s

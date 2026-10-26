@@ -103,7 +103,7 @@ func TestSnapshotAuthenticated_ReturnsTheAuthenticatedSet(t *testing.T) {
 	pending := &wsClient{hub: hub, send: make(chan []byte, 4), done: make(chan struct{})}
 	hub.register(pending) // handshake still pending
 
-	snapPtr, snap := hub.bcast.snapshotAuthenticated()
+	snap := hub.bcast.snapshotAuthenticated()
 	seen := map[*wsClient]bool{}
 	for _, c := range snap {
 		seen[c] = true
@@ -115,7 +115,6 @@ func TestSnapshotAuthenticated_ReturnsTheAuthenticatedSet(t *testing.T) {
 	if snap[0] == nil || snap[1] == nil {
 		t.Fatal("removing a client mutated an existing snapshot")
 	}
-	releaseBroadcastSnap(snapPtr, snap)
 }
 
 // TestAuthSet_ConcurrentChurn: register / unregister churn beside a

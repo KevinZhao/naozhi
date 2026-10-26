@@ -12,8 +12,7 @@ import (
 )
 
 // cronCommandScheduler is the slash-command subset of *cron.Scheduler that
-// the dispatch adapter consumes. *cron.Scheduler satisfies it implicitly
-// (pinned in cronview_contract_test.go).
+// the dispatch adapter consumes. *cron.Scheduler satisfies it implicitly.
 type cronCommandScheduler interface {
 	AddJob(j *cron.Job) error
 	NextRun(j *cron.Job) time.Time

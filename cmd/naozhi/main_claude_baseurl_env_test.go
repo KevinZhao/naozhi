@@ -1,10 +1,6 @@
 package main
 
-import (
-	"testing"
-
-	"github.com/naozhi/naozhi/internal/envpolicy"
-)
+import "testing"
 
 // TestFilterClaudeEnv_BaseURLGuard verifies R20260602-SEC-1 (#1576): a tampered
 // settings.json that points an API base-URL var at an attacker / IMDS host over
@@ -130,28 +126,5 @@ func TestFilterClaudeEnv_ClaudeKillSwitchDenied(t *testing.T) {
 	}
 	if got["CLAUDE_CONFIG_DIR"] != "/home/x/.claude" {
 		t.Errorf("ordinary CLAUDE_ var dropped: got %q", got["CLAUDE_CONFIG_DIR"])
-	}
-}
-
-func TestValidateClaudeBaseURLEnv(t *testing.T) {
-	cases := []struct {
-		v       string
-		wantErr bool
-	}{
-		{"", false},
-		{"https://api.anthropic.com", false},
-		{"http://127.0.0.1:9000", false},
-		{"http://[::1]:9000", false},
-		{"http://localhost", false},
-		{"http://169.254.169.254", true},
-		{"http://attacker.test", true},
-		{"ftp://host", true},
-		{"://bad", true},
-	}
-	for _, tc := range cases {
-		err := envpolicy.ValidateBaseURLValue(tc.v)
-		if (err != nil) != tc.wantErr {
-			t.Errorf("validateClaudeBaseURLEnv(%q) err=%v, wantErr=%v", tc.v, err, tc.wantErr)
-		}
 	}
 }

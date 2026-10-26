@@ -11,8 +11,8 @@ import (
 // TestServerOptions_DebugModeAndPublicTmpReachConfig closes a plumbing gap found
 // while auditing #2553: ServerOptions.DebugMode and ServerOptions.PublicTmpEnabled
 // were READ by internal/server (server.go, build_handlers.go) but assigned
-// NOWHERE in the repo. No config key existed, so /api/debug/pprof,
-// /api/debug/vars and the __public_tmp__ pseudo-project were unreachable no
+// NOWHERE in the repo. No config key existed, so /api/debug/pprof and the
+// __public_tmp__ pseudo-project were unreachable no
 // matter what an operator wrote in config.yaml.
 //
 // Worse than a missing feature, both were recorded as done: R244-SEC-P3-1's

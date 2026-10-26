@@ -199,7 +199,6 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 		// the whole service down, and reply "error" so the dashboard sees it.
 		defer func() {
 			if r := recover(); r != nil {
-				serverMetrics.PanicRecovered()
 				// Panic cause at Error, verbose stack at Debug — stack
 				// frames leak internal paths to journald/log aggregators.
 				slog.Error("remote ws interrupt goroutine panic",
@@ -311,7 +310,6 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		// a malformed RPC response must not take the whole service down.
 		defer func() {
 			if r := recover(); r != nil {
-				serverMetrics.PanicRecovered()
 				// Same split as handleRemoteInterrupt: cause at Error,
 				// stack at Debug. Stack frames expose internal layout.
 				slog.Error("remote ws send goroutine panic",

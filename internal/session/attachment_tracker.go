@@ -6,46 +6,12 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/attachment/tracker"
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // attachmentTracker is a type alias to the exported tracker.Tracker
 // so router.go can hold a field typed by a short local name without
 // adding another import.
 type attachmentTracker = tracker.Tracker
-
-// attachmentMetricsObserver forwards tracker callbacks to the
-// process-wide expvar counters in internal/metrics. Lives in the
-// session package so the tracker package stays independent of any
-// metrics library.
-type attachmentMetricsObserver struct{}
-
-func (attachmentMetricsObserver) OnReferenceBump(n int) {
-	if n <= 0 {
-		return
-	}
-	metrics.AttachmentRefBumpTotal.Add(int64(n))
-}
-
-func (attachmentMetricsObserver) OnReferenceClear(n int) {
-	if n <= 0 {
-		return
-	}
-	metrics.AttachmentRefClearTotal.Add(int64(n))
-}
-
-func (attachmentMetricsObserver) OnMetaWriteError(path string, err error) {
-	metrics.AttachmentRefMetaErrorTotal.Add(1)
-	slog.Warn("attachment tracker: meta write failed",
-		"path", path, "err", err)
-}
-
-func (attachmentMetricsObserver) OnDrop(n int) {
-	if n <= 0 {
-		return
-	}
-	metrics.AttachmentRefDropTotal.Add(int64(n))
-}
 
 // workspaceResolverForTracker returns a WorkspaceResolver closure keyed by
 // session key-hash. Matches the tracker's contract: empty string on unknown
@@ -86,7 +52,6 @@ func (h *HistoryIO) startAttachmentTracker(workspaces tracker.WorkspaceResolver)
 	}
 	t, err := tracker.NewTracker(tracker.Options{
 		Workspaces: workspaces,
-		Observer:   attachmentMetricsObserver{},
 	})
 	if err != nil {
 		slog.Error("attachment tracker init failed; refcount disabled",

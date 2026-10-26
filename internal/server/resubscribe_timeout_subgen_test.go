@@ -15,9 +15,8 @@ func TestResubscribeTimeout_SchedulesGenerationReclaim(t *testing.T) {
 	r.install(c, "k", func() {}, func() bool { return true })
 
 	const now = int64(7_000_000_000)
-	stale, emptied := r.expire(c, "k", now)
-	if stale == nil || !emptied {
-		t.Fatalf("expire = (closure=%v, emptied=%v), want the closure and emptied", stale != nil, emptied)
+	if stale := r.expire(c, "k", now); stale == nil {
+		t.Fatal("expire did not hand back the closure")
 	}
 	cs := r.clients[c]
 	if got, ok := cs.releaseAt["k"]; !ok || got != now+subGenRetentionNanos {
@@ -26,7 +25,7 @@ func TestResubscribeTimeout_SchedulesGenerationReclaim(t *testing.T) {
 	if _, ok := cs.unsubs["k"]; ok {
 		t.Error("expire left the subscription in place")
 	}
-	if again, _ := r.expire(c, "k", now); again != nil {
+	if again := r.expire(c, "k", now); again != nil {
 		t.Error("a second expire handed back a closure")
 	}
 }

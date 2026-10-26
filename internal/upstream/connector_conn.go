@@ -148,25 +148,18 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 							"panic", r, "stack", string(debug.Stack()))
 					}
 				}()
-				// Non-blocking try first so the uncontended path pays nothing;
-				// only the contended path counts WaitTotal.
+				// Non-blocking try first: with ctx already done a bare two-case
+				// select would pick at random and could drop an uncontended request.
 				select {
 				case reqSem <- struct{}{}:
 				default:
-					reqSemReqWaitTotal.Add(1)
 					select {
 					case reqSem <- struct{}{}:
 					case <-ctx.Done():
 						return
 					}
 				}
-				// Register the release defer BEFORE the inflight increment so a
-				// panic between them cannot desync counter and semaphore.
-				defer func() {
-					<-reqSem
-					reqSemReqInflight.Add(-1)
-				}()
-				reqSemReqInflight.Add(1)
+				defer func() { <-reqSem }()
 				result, err := c.handleRequest(ctx, connCtx, req, &wg)
 				resp := node.ReverseMsg{Type: "response", ReqID: req.ReqID}
 				if err != nil {

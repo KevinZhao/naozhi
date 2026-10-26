@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
@@ -120,25 +119,6 @@ func TestNotifyTargetAbortsOnFirstChunkFailure(t *testing.T) {
 	got := fp.uniqueChunks()
 	if got != fp.failAt+1 {
 		t.Errorf("unique chunks attempted = %d, want %d (loop must abort on first failure, not move on to remaining chunks)", got, fp.failAt+1)
-	}
-}
-
-// TestNotifyTargetPartialMetric pins #966: the send-failure abort
-// path bumps metrics.CronNotifyPartialTotal exactly once so operators can
-// alert on a rising delta. expvar counters are process-global and other
-// parallel tests in this package also drive partial deliveries, so we assert
-// the counter advanced by at least one rather than an exact delta (the
-// per-call increment is exercised exactly once below; concurrent tests can
-// only push the observed delta higher, never below 1).
-func TestNotifyTargetPartialMetric(t *testing.T) {
-	before := metrics.CronNotifyPartialTotal.Value()
-	fp := &fakePartialPlatform{failAt: 2, maxLen: 8}
-	s := &Scheduler{}
-	storeFakeNotifySender(s, map[string]platform.Platform{"fake-notify": fp})
-	long := buildDistinctChunks(10, 8)
-	s.notifyTarget("fake-notify", "chat-x", long)
-	if delta := metrics.CronNotifyPartialTotal.Value() - before; delta < 1 {
-		t.Errorf("CronNotifyPartialTotal delta = %d, want >= 1 (partial delivery must bump counter)", delta)
 	}
 }
 

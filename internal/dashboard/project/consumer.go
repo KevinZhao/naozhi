@@ -2,19 +2,19 @@
 // (#2561).
 //
 // Deps named concrete types: *session.Router (54 exported methods when measured),
-// *session.KeyResolver, *project.Manager, *node.CacheManager. Each interface
+// *project.Manager, *node.CacheManager. Each interface
 // below is the MEASURED call surface — grep h.<field>.<Method> across the
-// package — and the result is the point: this package needed 3 Router methods
-// out of 54 and one KeyResolver method.
+// package — and the result is the point: this package needed 2 Router methods
+// out of 54.
 //
 // Declared here rather than in internal/dashboard/contracts because these are
-// per-consumer shapes: dashsession uses 18 Router methods, this package uses 3,
+// per-consumer shapes: dashsession uses 18 Router methods, this package uses 2,
 // and a shared interface would be the union, i.e. a wide type again. contracts
 // is for shapes several sub-packages genuinely share (NodeAccessor).
 // docs/rfc/consumer-interfaces.md §3.1.
 //
 // CAUTION for the next conversion of this kind: these fields are nil-guarded
-// downstream (projectMgr ×9, router ×2, resolver ×1) because each is optional.
+// downstream (projectMgr, router) because each is optional.
 // Handing an interface field a nil CONCRETE pointer makes `!= nil` read true and
 // the guard useless — see TestProjectHandlers_NilDepsStayNilInterfaces and the
 // same hazard in #377 / #2551 / #2561's dashsession conversion. The wiring site
@@ -22,8 +22,6 @@
 package project
 
 import (
-	"context"
-
 	projectpkg "github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
@@ -38,16 +36,13 @@ type ProjectStore interface {
 	EffectivePlannerModel(p *projectpkg.Project) string
 }
 
-// RouterView is the 3 *session.Router methods this package calls, out of 54 when measured:
-// the planner-restart path (look up, recreate) plus the version bump that makes
-// the dashboard re-render. The router's own methods return the concrete
+// RouterView is the 2 *session.Router methods this package calls, out of 54 when measured:
+// the planner-session lookup plus the version bump that makes the dashboard
+// re-render. The router's own methods return the concrete
 // session; the adapter where this package is wired converts to these shapes.
 type RouterView interface {
 	// SessionFor returns nil (a nil interface) when no session has the key.
 	SessionFor(key string) PlannerSession
-	// ResetAndRecreate restarts the session under key; the new session itself
-	// is not needed here.
-	ResetAndRecreate(ctx context.Context, key string, opts sessionview.AgentOpts) error
 	BumpVersion()
 }
 
@@ -56,19 +51,13 @@ type PlannerSession interface {
 	Snapshot() sessionview.SessionSnapshot
 }
 
-// PlannerKeyResolver is the one *session.KeyResolver method this package needs:
-// project name → planner session key + opts.
-type PlannerKeyResolver interface {
-	ResolveForPlannerKey(projectName string) (key string, opts sessionview.AgentOpts, ok bool)
-}
-
 // NodeCacheReader is the *node.CacheManager surface: the cached remote-node
 // project list folded into /api/projects.
 type NodeCacheReader interface {
 	Projects() map[string][]map[string]any
 }
 
-// DepsForTest exposes the three nil-guarded interface deps so the wiring side
+// DepsForTest exposes the two nil-guarded interface deps so the wiring side
 // can assert none of them is an interface wrapping a nil pointer (#2561; see
 // TestDashboardDeps_NilStayNilInterfaces). Keyed by name so the failure message
 // can say which one.
@@ -76,6 +65,5 @@ func (h *Handlers) DepsForTest() map[string]any {
 	return map[string]any{
 		"dashproject.ProjectMgr": h.deps.ProjectMgr,
 		"dashproject.Router":     h.deps.Router,
-		"dashproject.Resolver":   h.deps.Resolver,
 	}
 }

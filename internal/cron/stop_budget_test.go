@@ -25,8 +25,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // withShortStopBudget shortens a Scheduler's per-instance stop budget for
@@ -65,12 +63,8 @@ func TestStop_BudgetCapsTotalDuration(t *testing.T) {
 	}()
 
 	// Stop's wall clock also covers waitGCDrain and the final fsync'd
-	// persist, so the budget mechanism is proven by the breach counters, not
-	// by elapsed time. Either budget arm (drain or trigger) skipping the held
-	// triggerWG satisfies the contract; exactly one must fire. Not
-	// t.Parallel: the counters are process-global expvars.
-	drain0 := metrics.CronStopBudgetExceededDrainTotal.Value()
-	trigger0 := metrics.CronStopBudgetExceededTriggerTotal.Value()
+	// persist. Either budget arm (drain or trigger) skipping the held
+	// triggerWG satisfies the contract.
 	// waitGCDrain may legitimately spend its whole budget under heavy IO.
 	ceiling := s.gcBudget + 2*time.Second
 	start := time.Now()
@@ -86,11 +80,6 @@ func TestStop_BudgetCapsTotalDuration(t *testing.T) {
 	}
 	elapsed := time.Since(start)
 
-	breaches := metrics.CronStopBudgetExceededDrainTotal.Value() - drain0 +
-		metrics.CronStopBudgetExceededTriggerTotal.Value() - trigger0
-	if breaches != 1 {
-		t.Errorf("stop budget breaches = %d, want 1 (the held triggerWG must trip exactly one budget arm)", breaches)
-	}
 	// Loose guard against the old ExecTimeout-derived budget (>= 1h).
 	if elapsed > ceiling {
 		t.Errorf("Stop took %v, want < %v (budget=%v)", elapsed, ceiling, s.stopBudget)
