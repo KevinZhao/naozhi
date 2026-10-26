@@ -29,7 +29,7 @@ import (
 //
 // Context rule: connCtx is cancelled when handleConn returns (WS drop, ping
 // timeout, shutdown) — use it for work that is meaningless once this
-// connection ends (send's session spawn, fetch_events, restart_planner) so
+// connection ends (send's session spawn, fetch_events) so
 // reconnects do not leak goroutines. appCtx is cancelled only when the
 // Connector shuts down — takeover and close_discovered use it because the
 // CLI child must survive a reconnect while WaitAndCleanup / Takeover run.
@@ -326,34 +326,6 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		}()
 		return marshalResult(map[string]string{"status": "ok"})
 
-	case "restart_planner":
-		var p struct {
-			ProjectName string `json:"project_name"`
-		}
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return nil, fmt.Errorf("restart_planner params: %w", err)
-		}
-		// Validate project_name at the trust boundary so bidi/C1/newline bytes
-		// never reach ErrNotFound / slog attrs on the miss path.
-		if err := project.ValidateProjectName(p.ProjectName); err != nil {
-			return nil, fmt.Errorf("restart_planner: %w", err)
-		}
-		// The resolver is the only source of planner opts
-		// (docs/rfc/key-resolver.md §2.2, #7); production always wires one.
-		if c.resolver == nil {
-			return nil, fmt.Errorf("projects not configured")
-		}
-		plannerKey, opts, ok := c.resolver.ResolveForPlannerKey(p.ProjectName)
-		if !ok {
-			// %q so bytes in the primary-supplied name cannot forge
-			// structured-log fields when the remote side logs this error.
-			return nil, fmt.Errorf("project not found: %q", p.ProjectName)
-		}
-		if _, err := c.router.ResetAndRecreate(connCtx, plannerKey, opts); err != nil {
-			return nil, fmt.Errorf("restart planner: %w", err)
-		}
-		return marshalResult(map[string]string{"status": "restarted"})
-
 	case "update_config":
 		var p struct {
 			ProjectName string          `json:"project_name"`
@@ -444,8 +416,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("set_favorite params: %w", err)
 		}
-		// Validate project_name at the trust boundary (mirrors restart_planner
-		// / update_config).
+		// Validate project_name at the trust boundary (mirrors update_config).
 		if err := project.ValidateProjectName(p.ProjectName); err != nil {
 			return nil, fmt.Errorf("set_favorite: %w", err)
 		}
