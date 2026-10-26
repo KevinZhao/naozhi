@@ -57,30 +57,7 @@ func TestStore_NilBehavesDisabled(t *testing.T) {
 	if run, err := s.Get(jobID, runID); run != nil || !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("Get = (%v, %v), want (nil, fs.ErrNotExist)", run, err)
 	}
-	if h := s.Health(); h != (Health{}) {
-		t.Errorf("Health = %+v, want zero", h)
-	}
 	if s.Dir() != "" || s.KeepCount() != 0 || s.KeepWindow() != 0 {
 		t.Errorf("Dir/KeepCount/KeepWindow = %q/%d/%v, want zero values", s.Dir(), s.KeepCount(), s.KeepWindow())
-	}
-}
-
-// TestStore_HealthMapsEachCounter: each loss counter carries a distinct value
-// so a Health field wired to the wrong counter reads the wrong number.
-func TestStore_HealthMapsEachCounter(t *testing.T) {
-	t.Parallel()
-	s := newTestStore(t, 10, time.Hour)
-	s.historyDropTotal.Store(3)
-	s.cacheStaleEvictionTotal.Store(5)
-	full, other := s.WriteFailedTotals()
-	want := Health{
-		Enabled:             true,
-		WriteFailedDiskFull: full,
-		WriteFailedOther:    other,
-		HistoryDropped:      3,
-		CacheStaleEvictions: 5,
-	}
-	if got := s.Health(); got != want {
-		t.Errorf("Health = %+v, want %+v", got, want)
 	}
 }

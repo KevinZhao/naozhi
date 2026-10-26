@@ -11,7 +11,11 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
-var _ platform.RunnablePlatform = (*Discord)(nil)
+var (
+	_ platform.RunnablePlatform  = (*Discord)(nil)
+	_ platform.Reactor           = (*Discord)(nil)
+	_ platform.ConnStateReporter = (*Discord)(nil)
+)
 
 func TestNew_Defaults(t *testing.T) {
 	t.Parallel()

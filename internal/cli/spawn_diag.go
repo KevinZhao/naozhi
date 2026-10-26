@@ -15,7 +15,7 @@ import (
 // SpawnDiag is one gate decision that altered or ignored configured input.
 type SpawnDiag = spawndiag.Diag
 
-// EmitSpawnDiags logs and counts diags under scope (the session key on spawn
+// EmitSpawnDiags logs diags under scope (the session key on spawn
 // paths, "config" for load-time diags).
 func EmitSpawnDiags(scope string, diags []SpawnDiag) { spawndiag.Emit(scope, diags) }
 

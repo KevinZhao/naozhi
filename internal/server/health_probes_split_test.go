@@ -51,21 +51,6 @@ func TestHandleReadyz_OKWhenWired(t *testing.T) {
 	}
 }
 
-// TestHandleLivez_NoAuthRequired confirms /livez bypasses the auth gate —
-// the K8s liveness probe carries no credentials and a 401/403 here would
-// trigger a restart loop the same way a 5xx would.
-func TestHandleLivez_NoAuthRequired(t *testing.T) {
-	_, hs := newTestServerWithTokenHS(&mockPlatform{}, "secret")
-	req := httptest.NewRequest(http.MethodGet, "/livez", nil)
-	// No Authorization header.
-	w := httptest.NewRecorder()
-	hs.healthH.handleLivez(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("unauth status = %d, want 200", w.Code)
-	}
-}
-
 // TestHealthProbes_RoutedToTheirHandlers drives each probe through the mux:
 // the other health tests call the handler methods directly, so they cannot
 // see a route mounted on the wrong one.

@@ -26,12 +26,6 @@ type EventLogHealth struct {
 	Fsyncs         int64
 	Malformed      int64
 	ReplayLeak     int64
-
-	// FSType / FSSupported mirror the Persister's cached filesystem
-	// detection (RFC §5.4). FSSupported==false is the signal that
-	// doctor / dashboard banner should render a warning.
-	FSType      string
-	FSSupported bool
 }
 
 // EventLogStats returns a snapshot of the persister's observability state;
@@ -58,8 +52,6 @@ func (h *HistoryIO) EventLogStats() EventLogHealth {
 		Fsyncs:         s.Fsyncs,
 		Malformed:      s.Malformed,
 		ReplayLeak:     s.ReplayLeak,
-		FSType:         s.FSType,
-		FSSupported:    s.FSSupported,
 	}
 }
 

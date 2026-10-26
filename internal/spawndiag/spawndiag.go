@@ -2,7 +2,7 @@
 // Every layer that silently strips or ignores operator configuration (argv
 // denylist, argv validator, env filter, capability gate, deprecated config
 // fields) reports what it did as a Diag instead of a one-off slog.Warn, so the
-// rejection reaches metrics, the session snapshot (/api/sessions spawn_diags)
+// rejection reaches the log, the session snapshot (/api/sessions spawn_diags)
 // and the dashboard — a flag being stripped for months with only a log line as
 // evidence (#2412, #2493) is the failure mode this exists to end.
 //
@@ -38,8 +38,7 @@ type Diag struct {
 // first occurrence logs at Warn, repeats (the 30s shim reconcile heartbeat
 // re-deriving argv, respawns of the same session, an env filter that runs on
 // every spawn) log at Debug so the signal is not drowned by its own
-// repetition. Metrics count first occurrences only, so the counter reads
-// "distinct ineffective configs observed", not "heartbeat ticks".
+// repetition.
 var seen sync.Map
 
 // observer, when non-nil, receives every emitted diag before the dedup/log
@@ -55,7 +54,7 @@ func Observe(fn func(scope string, d Diag)) (restore func()) {
 	return func() { observer.Store(nil) }
 }
 
-// Emit logs and counts diags. scope groups the dedup — the session key on
+// Emit logs diags. scope groups the dedup — the session key on
 // spawn paths, "config" for load-time diags. The "config" scope skips dedup
 // entirely: config loading is one-shot per process, and every finding there
 // deserves its Warn (repeats only happen when a test re-runs the loader).
@@ -70,7 +69,6 @@ func Emit(scope string, diags []Diag) {
 			_, repeat = seen.LoadOrStore(dedupKey, struct{}{})
 		}
 		if !repeat {
-			record(d)
 			slog.Warn("spawn gate: configured input had no effect",
 				"layer", d.Layer, "key", d.Key, "action", d.Action, "reason", d.Reason, "scope", scope)
 			continue
