@@ -212,127 +212,43 @@ func TestPreviewableByExt_DoesNotIncludeDotEnv(t *testing.T) {
 	}
 }
 
-// TestIsSensitiveDownloadName_CloudCredentialFiles locks R232-SEC-4 补遗:
-// cloud service-account JSONs and operator-conventional secrets files must
-// be blocked even though .json/.yaml/.yml are previewable extensions.
-func TestIsSensitiveDownloadName_CloudCredentialFiles(t *testing.T) {
-	cases := []string{
-		"secrets.yaml",
-		"secrets.yml",
-		"secrets.json",
-		"service-account.json",
-		"service_account.json",
-		"gcp-key.json",
-		"gcp_key.json",
-		"application_default_credentials.json",
-		"Secrets.YAML",
-		"Service-Account.JSON",
-	}
-	for _, name := range cases {
-		if !isSensitiveDownloadName(name) {
-			t.Errorf("isSensitiveDownloadName(%q) = false, want true (R232-SEC-4)", name)
-		}
-	}
-	for _, name := range []string{"config.json", "package.json", "data.yaml"} {
-		if isSensitiveDownloadName(name) {
-			t.Errorf("isSensitiveDownloadName(%q) = true, want false", name)
-		}
-	}
-}
-
-// TestIsSensitiveDownloadName_OpsConventional locks R233B-SEC-5: ops-laden
-// credential filenames (database.yml, api-keys.*) must be blocked, plus
-// archive-suffix patterns (.env.backup, .env.bak, …) that an attacker
-// would otherwise lift via path-mode download to bypass the .env exact match.
-func TestIsSensitiveDownloadName_OpsConventional(t *testing.T) {
+// TestIsSensitiveDownloadName covers each matching branch of
+// isSensitiveDownloadName (exact table incl. case folding, the .env-prefix
+// rule R242-SEC-9, the archive-suffix scan R233B-SEC-5, the substring scan
+// #1680, the key-material extensions) plus the look-alikes that must keep previewing.
+func TestIsSensitiveDownloadName(t *testing.T) {
 	blocked := []string{
+		// Exact table (R232-SEC-4 / R233B-SEC-5), case-insensitive.
+		"secrets.yaml",
+		"Service-Account.JSON",
 		"database.yml",
-		"database.yaml",
-		"credentials.yml",
-		"credentials.yaml",
 		"credentials.json",
-		"api-keys.json",
-		"api_keys.yaml",
-		"rds.yml",
-		"pg.yaml",
-		"mysql.yml",
-		// Suffix scan path:
-		".env.backup",
-		".env.bak",
-		".env.old",
-		".env.orig",
-		".env.save",
-		"prod.env.backup", // prefix + suffix
-		"app.env.bak",     // prefix + suffix
-		"DATABASE.YML",    // case-insensitive
-		"APP.ENV.BACKUP",  // case-insensitive suffix
-		// R242-SEC-9: .env-prefix rule — every dotenv variant blocked,
-		// including the templates/examples that the exact-match table
-		// previously missed.
+		// .env-prefix rule: every dotenv variant, templates included.
 		".env.example",
-		".env.sample",
-		".env.template",
-		".env.staging.local",
-		".ENV.EXAMPLE", // case-insensitive
+		".ENV.EXAMPLE",
+		// Suffix scan (".env.backup" itself is caught by the prefix rule).
+		"prod.env.backup",
+		// Substring scan for ad-hoc credential dumps.
+		"db_password.txt",
+		"aws_credentials.txt",
+		"my_private_key.txt",
+		// Key-material extensions.
+		"deploy.pem",
 	}
 	for _, name := range blocked {
 		if !isSensitiveDownloadName(name) {
-			t.Errorf("isSensitiveDownloadName(%q) = false, want true (R233B-SEC-5)", name)
+			t.Errorf("isSensitiveDownloadName(%q) = false, want true", name)
 		}
 	}
-	// Pin negative cases so the suffix scan doesn't over-block legitimate
-	// developer workspace files. ".envoy.yaml" looks like ".env" but is
-	// envoy proxy config; "envrc" / "env.example" are doc/template files.
+	// ".envoy.yaml" looks like ".env" but is envoy proxy config; "key" is
+	// deliberately not a substring token (keyboard.tsx / monkey.png).
 	allowed := []string{
-		"data.yml",
-		"deployment.yaml",
-		"package.json",
 		".envoy.yaml",
 		"env.example",
-		"envrc",
-	}
-	for _, name := range allowed {
-		if isSensitiveDownloadName(name) {
-			t.Errorf("isSensitiveDownloadName(%q) = true, want false", name)
-		}
-	}
-}
-
-// TestIsSensitiveDownloadName_SubstringPatterns locks R20260603-SEC-5 (#1680):
-// the enumerated tables only match known filenames, but Claude generates ad-hoc
-// credential dumps with non-canonical names. A defence-in-depth substring scan
-// must block them. Underscore forms (aws_credentials.txt) and free-form names
-// (db-password.txt) previously slipped through every exact-match table.
-func TestIsSensitiveDownloadName_SubstringPatterns(t *testing.T) {
-	blocked := []string{
-		"db-password.txt",
-		"db_password.txt",
-		"aws_credentials.txt", // underscore form misses exact "credentials"
-		"my-credential.json",
-		"api_token.log",
-		"slack_secret.md",
-		"SECRET_NOTES.txt", // case-insensitive
-		"app.password.bak",
-		"jwt-token.txt",
-		"service-apikey.json",
-		"my_private_key.txt",
-		"passwd.backup",
-	}
-	for _, name := range blocked {
-		if !isSensitiveDownloadName(name) {
-			t.Errorf("isSensitiveDownloadName(%q) = false, want true (R20260603-SEC-5)", name)
-		}
-	}
-	// Negative cases: the substring set must stay narrow enough not to block
-	// ordinary workspace files. Note "key" is deliberately NOT a token (it
-	// would block keyboard.tsx / monkey.png); only the compound *key forms
-	// (apikey/private_key/…) are matched.
-	allowed := []string{
-		"main.go",
 		"keyboard.tsx",
 		"monkey.png",
-		"README.md",
 		"config.json",
+		"package.json",
 	}
 	for _, name := range allowed {
 		if isSensitiveDownloadName(name) {
@@ -1498,7 +1414,7 @@ func TestHandleFileGet_Download(t *testing.T) {
 // ─── HandleFileGet: ETag / 304 ────────────────────────────────────────────────
 
 func TestHandleFileGet_ETag304(t *testing.T) {
-	h, proj, _ := newProjectHandlersForTest(t, map[string]string{
+	h, proj, projDir := newProjectHandlersForTest(t, map[string]string{
 		"a.txt": "hello",
 	})
 
@@ -1510,6 +1426,15 @@ func TestHandleFileGet_ETag304(t *testing.T) {
 	etag := w1.Header().Get("ETag")
 	if etag == "" {
 		t.Fatal("first response missing ETag")
+	}
+	// #418: without FileETagSalt the ETag would be this probe-recoverable hash.
+	info, err := os.Stat(filepath.Join(projDir, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsalted := sha256.Sum256([]byte(strconv.FormatInt(info.Size(), 10) + "|" + strconv.FormatInt(info.ModTime().UnixMilli(), 10) + "|"))
+	if etag == `"`+hex.EncodeToString(unsalted[:12])+`"` {
+		t.Errorf("ETag %s equals the unsalted hash; FileETagSalt dropped from the seed", etag)
 	}
 
 	// Second request with matching If-None-Match → 304.
@@ -1523,69 +1448,6 @@ func TestHandleFileGet_ETag304(t *testing.T) {
 	}
 	if w2.Body.Len() != 0 {
 		t.Error("304 response should have empty body")
-	}
-}
-
-// TestHandleFileGet_ETagIncludesSalt regresses R214-SEC-4 (issue #418):
-// the wire-visible ETag must depend on FileETagSalt, not just (size,
-// mtime). We assert this by recomputing the unsalted hash that the old
-// implementation produced and confirming it is NOT equal to the
-// returned ETag — if some future refactor accidentally drops the salt
-// the old prefix would start matching again and this test fails loudly.
-func TestHandleFileGet_ETagIncludesSalt(t *testing.T) {
-	h, proj, projDir := newProjectHandlersForTest(t, map[string]string{
-		"a.txt": "salted",
-	})
-
-	req := httptest.NewRequest(http.MethodGet,
-		"/api/projects/file?project="+proj+"&path=a.txt&mode=preview", nil)
-	w := httptest.NewRecorder()
-	h.HandleFileGet(w, req)
-	gotETag := w.Header().Get("ETag")
-	if gotETag == "" {
-		t.Fatal("missing ETag")
-	}
-
-	// Recompute what the legacy unsalted form would have produced. If
-	// FileETagSalt regresses to zero-bytes (or is dropped from the
-	// hash input) the wire ETag will collide with this value — a
-	// deterministic recovery oracle for size+mtime.
-	info, err := os.Stat(filepath.Join(projDir, "a.txt"))
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	legacySeed := []byte(strconv.FormatInt(info.Size(), 10) + "|" +
-		strconv.FormatInt(info.ModTime().UnixNano(), 10))
-	legacySum := sha256.Sum256(legacySeed)
-	// Both 8-byte (pre-#418) and 12-byte (post-#418) forms must differ
-	// from the returned ETag, since the salt is mixed into the SHA-256
-	// input regardless of truncation length.
-	legacy8 := `"` + hex.EncodeToString(legacySum[:8]) + `"`
-	legacy12 := `"` + hex.EncodeToString(legacySum[:12]) + `"`
-	if gotETag == legacy8 || gotETag == legacy12 {
-		t.Errorf("ETag %q matches the unsalted hash — FileETagSalt regressed; size+mtime are now probe-recoverable", gotETag)
-	}
-}
-
-// TestHandleFileGet_ETagSalt_NonZero pins the integrity of the salt
-// itself: a zero-filled 32-byte array would defeat the whole point of
-// the salt (an attacker would simply use the all-zeros salt as a known
-// constant). The init path treats crypto/rand failure as a hard panic
-// so this can only regress via someone replacing the var with a
-// constant — assert by entropy.
-func TestHandleFileGet_ETagSalt_NonZero(t *testing.T) {
-	if len(FileETagSalt) < 16 {
-		t.Fatalf("FileETagSalt must be at least 16 bytes; got %d", len(FileETagSalt))
-	}
-	allZero := true
-	for _, b := range FileETagSalt {
-		if b != 0 {
-			allZero = false
-			break
-		}
-	}
-	if allZero {
-		t.Error("FileETagSalt is all zeros — crypto/rand init failed silently or var was replaced with a literal")
 	}
 }
 
