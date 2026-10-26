@@ -114,8 +114,8 @@ type AskQuestionOpt struct {
 //   - Additive fields with omitempty → NO bump; readers ignore unknowns.
 //   - Renaming/removing a field, changing a field's meaning, or changing
 //     its JSON shape → bump, together with the paired constants (the
-//     linkage tests in eventlog/schema, internal/node and internal/upstream
-//     go red until every pairing is updated deliberately).
+//     linkage tests in eventlog/schema and clievent go red until every
+//     pairing is updated deliberately).
 const SchemaVersion = 1
 
 // SchemaCap is the capability tag both sides of the reverse-node link advertise
