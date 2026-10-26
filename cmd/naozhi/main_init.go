@@ -39,19 +39,12 @@ func resolveLogLevel(level string) slog.Level {
 	}
 }
 
-// newLogHandler builds the slog.Handler for the configured format and level:
-// "text" selects a TextHandler, anything else (incl. default "json") a JSONHandler.
+// newLogHandler builds the JSON slog.Handler for the configured level.
 func newLogHandler(w *os.File, cfg *config.Config, level slog.Leveler) slog.Handler {
 	if level == nil {
 		level = resolveLogLevel(cfg.Log.Level)
 	}
-	opts := &slog.HandlerOptions{Level: level}
-	var h slog.Handler
-	if cfg.Log.Format == "text" {
-		h = slog.NewTextHandler(w, opts)
-	} else {
-		h = slog.NewJSONHandler(w, opts)
-	}
+	h := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level})
 	// trace_id / run_id / session_key from the ctx on every *Context log (#3436).
 	return ctxutil.NewHandler(h)
 }

@@ -79,12 +79,8 @@ type Config struct {
 
 	// Values whose consumers fall back to a default, populated once in Load by
 	// resolveFallbackValues; zero means unset or unusable.
-	cachedShimIdleTimeout     time.Duration      `yaml:"-"`
-	cachedShimWatchdogTimeout time.Duration      `yaml:"-"`
-	cachedShimMaxBufferBytes  int64              `yaml:"-"`
-	cachedStdioMaxSize        int64              `yaml:"-"`
-	stdioCapOff               bool               `yaml:"-"`
-	cachedSysession           sysessionDurations `yaml:"-"`
+	cachedShimIdleTimeout time.Duration      `yaml:"-"`
+	cachedSysession       sysessionDurations `yaml:"-"`
 }
 
 // Fingerprint identifies WHICH config file bytes a process loaded: sha256 of

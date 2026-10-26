@@ -16,20 +16,19 @@ func loadBody(t *testing.T, body string) *Config {
 
 func TestReloadDiff(t *testing.T) {
 	t.Parallel()
-	base := "cli:\n  model: sonnet\nlog:\n  level: info\n  format: json\n"
+	base := "cli:\n  model: sonnet\nlog:\n  level: info\n"
 	cases := []struct {
 		name          string
 		next          string
 		wantHot, want []string
 	}{
 		{"identical", base, nil, nil},
-		{"log.level only", "cli:\n  model: sonnet\nlog:\n  level: debug\n  format: json\n", []string{"log.level"}, nil},
-		{"log.format", "cli:\n  model: sonnet\nlog:\n  level: info\n  format: text\n", nil, []string{"log"}},
-		{"cli.model", "cli:\n  model: opus\nlog:\n  level: info\n  format: json\n", nil, []string{"cli"}},
+		{"log.level only", "cli:\n  model: sonnet\nlog:\n  level: debug\n", []string{"log.level"}, nil},
+		{"cli.model", "cli:\n  model: opus\nlog:\n  level: info\n", nil, []string{"cli"}},
 		{"im_access added", base + "im_access:\n  platforms:\n    feishu:\n      allowed_users: [ou_1]\n", []string{"im_access"}, nil},
 		{"im_rate_limit added", base + "im_rate_limit:\n  msgs_per_min: 5\n", []string{"im_rate_limit"}, nil},
-		{"mixed", "cli:\n  model: opus\nlog:\n  level: warn\n  format: text\nim_rate_limit:\n  msgs_per_min: 5\n",
-			[]string{"im_rate_limit", "log.level"}, []string{"cli", "log"}},
+		{"mixed", "cli:\n  model: opus\nlog:\n  level: warn\nim_rate_limit:\n  msgs_per_min: 5\n",
+			[]string{"im_rate_limit", "log.level"}, []string{"cli"}},
 	}
 	cur := loadBody(t, base)
 	for _, tc := range cases {

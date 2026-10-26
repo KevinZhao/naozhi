@@ -7,14 +7,13 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/datadir"
 )
 
-// TestStdioCapsUseTheConfiguredSize drives addStdioCaps with regular O_APPEND
-// files standing in for the init system's: the default cap leaves a file just
-// under 64MB alone, and a configured cap truncates.
-func TestStdioCapsUseTheConfiguredSize(t *testing.T) {
+// TestStdioCapsUse64MB drives addStdioCaps with regular O_APPEND files
+// standing in for the init system's: the 64MB cap leaves a file just under it
+// alone and truncates one at it.
+func TestStdioCapsUse64MB(t *testing.T) {
 	newLog := func(size int64) *os.File {
 		f, err := os.OpenFile(filepath.Join(t.TempDir(), "out.log"), os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o600)
 		if err != nil {
@@ -37,27 +36,17 @@ func TestStdioCapsUseTheConfiguredSize(t *testing.T) {
 		return info.Size()
 	}
 
-	const defaultStdioMaxSize = 64 << 20
-	if got := (&config.Config{}).LogStdioMaxSize(); got != defaultStdioMaxSize {
-		t.Fatalf("LogStdioMaxSize default = %d, want 64MB", got)
+	if stdioMaxSize != 64<<20 {
+		t.Fatalf("stdioMaxSize = %d, want 64MB", stdioMaxSize)
 	}
-	under, over := newLog(defaultStdioMaxSize-100), newLog(defaultStdioMaxSize)
+	under, over := newLog(stdioMaxSize-100), newLog(stdioMaxSize)
 	s := datadir.NewSweeper(0)
-	addStdioCaps(s, &config.Config{}, under, over)
+	addStdioCaps(s, under, over)
 	s.RunOnce()
-	if got := size(under); got != defaultStdioMaxSize-100+10 {
-		t.Errorf("a file under the 64MB default was changed: size %d", got)
+	if got := size(under); got != stdioMaxSize-100+10 {
+		t.Errorf("a file under the 64MB cap was changed: size %d", got)
 	}
-	if got := size(over); got >= defaultStdioMaxSize {
-		t.Errorf("a file over the 64MB default was not truncated: size %d", got)
-	}
-
-	small := newLog(2 << 20)
-	cfg := loadConfigBody(t, "log:\n  stdio_max_size: 1MB\n")
-	s = datadir.NewSweeper(0)
-	addStdioCaps(s, cfg, small, small)
-	s.RunOnce()
-	if got := size(small); got >= 1<<20 {
-		t.Errorf("stdio_max_size \"1MB\" left a 2MB file at %d bytes", got)
+	if got := size(over); got >= stdioMaxSize {
+		t.Errorf("a file over the 64MB cap was not truncated: size %d", got)
 	}
 }

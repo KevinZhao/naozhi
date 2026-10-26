@@ -51,8 +51,7 @@ type Pass struct {
 	// Dir is swept non-recursively. A missing directory is not an error: the
 	// tree may not have been created yet.
 	Dir string
-	// MaxAge bounds a file's mtime. Zero or negative disables the pass entirely,
-	// matching the existing "0 disables" convention for sysession's jsonl_max_age.
+	// MaxAge bounds a file's mtime. Zero or negative disables the pass entirely.
 	MaxAge time.Duration
 	// Ext restricts the sweep to one extension, including the dot (".log"). It
 	// is required: sweeping every file in a directory would remove files a future

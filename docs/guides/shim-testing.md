@@ -147,11 +147,7 @@ PID 已死或 JSON 损坏的 state file 只计数在末行。`shim list` 和 `sh
 ```yaml
 session:
   shim:
-    buffer_size: 10000
-    max_buffer_bytes: "50MB"
     idle_timeout: "4h"
-    disconnect_watchdog: "30m"
-    max_shims: 6
     state_dir: "~/.naozhi/shims"
 ```
 
@@ -290,9 +286,9 @@ grep -i shim /path/to/naozhi.log
 | 症状 | 可能原因 | 排查方法 |
 |------|---------|---------|
 | 重启后没有重连 | shim 已退出 | `naozhi shim list`，检查 state files |
-| 重启后重连但丢事件 | buffer 溢出 | 增大 `buffer_size` / `max_buffer_bytes` |
+| 重启后重连但丢事件 | buffer 溢出（10000 行 / 50MB） | 检查断连期间的输出量 |
 | shim 启动失败 | socket 残留 | 删除 `~/.naozhi/run/shim-*.sock` |
-| "max shims reached" | shim 数量超限 | `naozhi shim stop --all`，增大 `max_shims` |
+| "max shims reached" | shim 数量超限（50） | `naozhi shim stop --all` |
 | "shim config drifted" | config 变更后重连 | 正常行为：旧 shim 被关闭，新消息创建新 shim |
 | "shim auth failed" | token 不匹配 | 通常是 state file 与 shim 不一致，重启 shim |
 | heartbeat 超时 | shim 卡死 | 检查 shim 进程 CPU 使用，可能需要 `kill -USR2` |

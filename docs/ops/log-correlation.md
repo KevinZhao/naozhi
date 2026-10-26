@@ -51,8 +51,6 @@ journalctl -u naozhi --since today -o cat \
   | jq -r 'select(.session_key=="feishu:direct:ou_1:general" and .msg=="turn: start") | .run_id'
 ```
 
-`log.format: text` 时字段以 `key=value` 形式出现在行尾，`grep run_id=...` 即可。
-
 ## 覆盖范围（当前）
 
 已带 ctx 的日志：dispatch 的入站 / 拒绝 / 限流 / 预算 / 回复 / 出错各行（含

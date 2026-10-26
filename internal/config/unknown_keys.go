@@ -204,8 +204,8 @@ func reportUnknownKeys(expanded []byte, deprecated map[string]bool) {
 // session.workspace, session.auto_chain) as config-deprecated diags naming the
 // v2 replacement, plus the keys of removed features (server.metrics_enabled,
 // server.debug_mode, cron.sandbox, the feishu webhook mode's connection_mode /
-// allow_insecure_webhook). None of them has any effect any more: Load no longer rewrites
-// them. The v1 `--append-system-prompt` inside agents[].args is not
+// allow_insecure_webhook) and the hard-wired tuning knobs in removedKeys. None
+// of them has any effect any more: Load no longer rewrites them. The v1 `--append-system-prompt` inside agents[].args is not
 // listed here: validateArgvStrings already warns about it (argv-denylist) and
 // names agents[<id>].system_prompt.
 func findDeprecatedKeys(doc *yaml.Node) []spawndiag.Diag {
@@ -266,17 +266,13 @@ func findDeprecatedKeys(doc *yaml.Node) []spawndiag.Diag {
 			continue
 		}
 		path := strings.Join(append(slices.Clone(k.parent), k.key), ".")
-		reason := k.reason
-		if reason == "" {
-			reason = "the built-in default now always applies"
-		}
-		add(path, fmt.Sprintf("'%s' was removed and has no effect: %s; remove this key", path, reason))
+		add(path, fmt.Sprintf("'%s' was removed and has no effect: %s; remove this key", path, k.reason))
 	}
 	return diags
 }
 
-// removedKeys are leaf keys whose setting was dropped and hard-wired to its
-// default. An empty reason means "the built-in default now always applies".
+// removedKeys are leaf keys whose setting was dropped; reason says what now
+// happens instead.
 var removedKeys = []struct {
 	parent []string
 	key    string
@@ -284,6 +280,14 @@ var removedKeys = []struct {
 }{
 	{[]string{"projects"}, "public_tmp", "the __public_tmp__ pseudo-project was removed"},
 	{[]string{"session"}, "project_stable_key", "project-level stable session keys are always on"},
+	{[]string{"session", "shim"}, "buffer_size", "the shim ring buffer always holds 10000 lines"},
+	{[]string{"session", "shim"}, "max_buffer_bytes", "the shim ring buffer is always capped at 50MB"},
+	{[]string{"session", "shim"}, "disconnect_watchdog", "the shim disconnect watchdog always fires after 30m"},
+	{[]string{"session", "shim"}, "max_shims", "at most 50 shims run at once"},
+	{[]string{"log"}, "format", "logs are always JSON"},
+	{[]string{"log"}, "stdio_max_size", "stdout/stderr files are always capped at 64MB"},
+	{[]string{"sysession"}, "tick_timeout", "a daemon tick is always capped at 30s"},
+	{[]string{"sysession", "runner"}, "jsonl_max_age", "sys-session logs are always kept for 7 days"},
 }
 
 // reportDeprecatedKeys emits findDeprecatedKeys and returns the reported key

@@ -537,13 +537,12 @@ naozhi 重启后自动重连。
 ```yaml
 session:
   shim:
-    buffer_size: 10000               # ring buffer 行数上限
-    max_buffer_bytes: "50MB"         # ring buffer 字节上限
     idle_timeout: "4h"               # 无 naozhi 连接后自动退出
-    disconnect_watchdog: "30m"       # 断连时 CLI 无输出超时
-    max_shims: 6                     # 最大 shim 数量
     state_dir: "~/.naozhi/shims"
 ```
+
+其余参数写死为 `shim.NewManager` 的默认值：ring buffer 10000 行 / 50MB，断连
+watchdog 30m，最多 50 个 shim。
 
 没有 `enabled` 开关。shim 是架构，不是功能。
 
@@ -650,7 +649,7 @@ shim 同一时刻只接受一个连接。新连接踢掉旧连接（last-writer-
 | State file 0600 | 防读取 token |
 | socket 路径验证 | 必须在预期目录内，防 state file 篡改 |
 | /proc/pid/exe 检查 | 确认 shim PID 是 naozhi 二进制 |
-| max_shims | 防资源耗尽 |
+| shim 数量上限（50） | 防资源耗尽 |
 | Ring buffer 字节上限 | 50MB 防内存爆炸 |
 | SIGTERM 30s 宽限期 | 可管理，不会成为不可杀进程 |
 

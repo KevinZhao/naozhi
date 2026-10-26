@@ -33,41 +33,25 @@ func TestResolveLogLevel(t *testing.T) {
 	}
 }
 
-// TestNewLogHandler_FormatSelection verifies that "text" selects a
-// TextHandler and any other value (including the default "json") selects a
-// JSONHandler, and that the resolved level gates Enabled(). R237-ARCH-8.
-func TestNewLogHandler_FormatSelection(t *testing.T) {
+// TestNewLogHandler_JSONAndLevel verifies the handler is a ctx-correlating
+// JSONHandler and that the resolved level gates Enabled(). R237-ARCH-8.
+func TestNewLogHandler_JSONAndLevel(t *testing.T) {
 	t.Parallel()
 
-	unwrap := func(h slog.Handler) slog.Handler {
-		// Every handler is wrapped for ctx correlation (#3436); the format
-		// lives one level down.
-		w, ok := h.(*ctxutil.Handler)
-		if !ok {
-			t.Fatalf("got %T, want the *ctxutil.Handler wrapper", h)
-		}
-		return w.Unwrap()
+	h := newLogHandler(nil, &config.Config{Log: config.LogConfig{Level: "warn"}}, nil)
+	// Every handler is wrapped for ctx correlation (#3436).
+	w, ok := h.(*ctxutil.Handler)
+	if !ok {
+		t.Fatalf("got %T, want the *ctxutil.Handler wrapper", h)
 	}
-	text := newLogHandler(nil, &config.Config{Log: config.LogConfig{Format: "text", Level: "debug"}}, nil)
-	if _, ok := unwrap(text).(*slog.TextHandler); !ok {
-		t.Fatalf("format=text: got %T, want *slog.TextHandler", text)
+	if _, ok := w.Unwrap().(*slog.JSONHandler); !ok {
+		t.Fatalf("got %T, want *slog.JSONHandler", w.Unwrap())
 	}
-	if !text.Enabled(context.Background(), slog.LevelDebug) {
-		t.Errorf("level=debug handler should enable Debug")
-	}
-
-	js := newLogHandler(nil, &config.Config{Log: config.LogConfig{Format: "json", Level: "warn"}}, nil)
-	if _, ok := unwrap(js).(*slog.JSONHandler); !ok {
-		t.Fatalf("format=json: got %T, want *slog.JSONHandler", js)
-	}
-	if js.Enabled(context.Background(), slog.LevelInfo) {
+	if h.Enabled(context.Background(), slog.LevelInfo) {
 		t.Errorf("level=warn handler must not enable Info")
 	}
-
-	// Empty format defaults to JSON (matches the legacy else-branch).
-	def := newLogHandler(nil, &config.Config{Log: config.LogConfig{Format: ""}}, nil)
-	if _, ok := unwrap(def).(*slog.JSONHandler); !ok {
-		t.Fatalf("format empty: got %T, want *slog.JSONHandler (default)", def)
+	if !newLogHandler(nil, &config.Config{Log: config.LogConfig{Level: "debug"}}, nil).Enabled(context.Background(), slog.LevelDebug) {
+		t.Errorf("level=debug handler should enable Debug")
 	}
 }
 

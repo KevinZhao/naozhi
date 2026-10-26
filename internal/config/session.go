@@ -57,12 +57,8 @@ type QueueConfig struct {
 }
 
 type ShimConfig struct {
-	BufferSize      int    `yaml:"buffer_size"`         // ring buffer max lines (default: 10000)
-	MaxBufferBytes  string `yaml:"max_buffer_bytes"`    // ring buffer max bytes (default: "50MB")
-	IdleTimeout     string `yaml:"idle_timeout"`        // shim exits after no connection (default: "4h")
-	WatchdogTimeout string `yaml:"disconnect_watchdog"` // disconnect no-output timeout (default: "30m")
-	MaxShims        int    `yaml:"max_shims"`           // max concurrent shims (default: 6)
-	StateDir        string `yaml:"state_dir"`           // shim state directory (default: ~/.naozhi/shims)
+	IdleTimeout string `yaml:"idle_timeout"` // shim exits after no connection (default: "4h")
+	StateDir    string `yaml:"state_dir"`    // shim state directory (default: ~/.naozhi/shims)
 }
 
 type WatchdogConfig struct {
@@ -73,16 +69,6 @@ type WatchdogConfig struct {
 // ShimIdleTimeout is how long a shim lives without a client (default 4h).
 func (c *Config) ShimIdleTimeout() time.Duration {
 	return orDefault(c.cachedShimIdleTimeout, defaultShimIdleTimeout)
-}
-
-// ShimWatchdogTimeout is the shim's disconnect watchdog (default 30m).
-func (c *Config) ShimWatchdogTimeout() time.Duration {
-	return orDefault(c.cachedShimWatchdogTimeout, defaultShimWatchdogTimeout)
-}
-
-// ShimMaxBufferBytes is the shim ring buffer's byte cap (default 50MB).
-func (c *Config) ShimMaxBufferBytes() int64 {
-	return orDefault(c.cachedShimMaxBufferBytes, defaultShimMaxBufferBytes)
 }
 
 // ParseTTL returns the TTL duration (cached after Load).

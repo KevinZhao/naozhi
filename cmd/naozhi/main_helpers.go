@@ -272,15 +272,12 @@ func sysSessionsWorkDir(cfg *config.Config, storePath string) string {
 	return lay.SysSessionsRoot()
 }
 
-// shimManagerConfig is the shim.Manager configuration main starts with.
+// shimManagerConfig is the shim.Manager configuration main starts with. The
+// watchdog, ring buffer and shim cap take shim.NewManager's defaults.
 func shimManagerConfig(cfg *config.Config) shim.ManagerConfig {
 	return shim.ManagerConfig{
-		StateDir:        osutil.ExpandHome(cfg.Session.Shim.StateDir),
-		IdleTimeout:     cfg.ShimIdleTimeout(),
-		WatchdogTimeout: cfg.ShimWatchdogTimeout(),
-		BufferSize:      cfg.Session.Shim.BufferSize,
-		MaxBufBytes:     cfg.ShimMaxBufferBytes(),
-		MaxShims:        cfg.Session.Shim.MaxShims,
+		StateDir:    osutil.ExpandHome(cfg.Session.Shim.StateDir),
+		IdleTimeout: cfg.ShimIdleTimeout(),
 	}
 }
 
@@ -325,11 +322,10 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 	}
 
 	mgr, err := sysession.NewManager(sysession.Config{
-		Enabled:     true,
-		TickTimeout: cfg.SysessionTickTimeout(),
-		Runner:      runner,
-		Router:      router,
-		Daemons:     sysessionDaemons(cfg),
+		Enabled: true,
+		Runner:  runner,
+		Router:  router,
+		Daemons: sysessionDaemons(cfg),
 		// attachment-gc sweeps these roots; nil-safe inside the lister.
 		WorkspaceRoots: workspaceRootLister{router: router, projectMgr: projectMgr},
 		Telemetry:      telemetry,
@@ -519,9 +515,9 @@ func backendHistoryDirs() map[string]string {
 //     keeps anything whose pid still resolves. The 24h age is a diagnosis grace
 //     period — a shim that just died keeps its log for a day, which is when it
 //     is worth reading.
-//   - sys-sessions/*.jsonl keeps its configured window (jsonl_max_age).
+//   - sys-sessions/*.jsonl is kept for sysSessionsMaxAge.
 //   - stdout/stderr, when an init system redirected them into files, are capped
-//     by size (log.stdio_max_size) rather than age; see addStdioCaps.
+//     by size (stdioMaxSize) rather than age; see addStdioCaps.
 func newDataDirSweeper(cfg *config.Config, layout datadir.Layout, shimMgr *shim.Manager, sysWorkDir string) *datadir.Sweeper {
 	idle := cfg.ShimIdleTimeout()
 	cliDebugMaxAge := 7 * 24 * time.Hour
@@ -561,23 +557,27 @@ func newDataDirSweeper(cfg *config.Config, layout datadir.Layout, shimMgr *shim.
 			Name:   "sys-sessions",
 			Dir:    sysWorkDir,
 			Ext:    ".jsonl",
-			MaxAge: cfg.SysessionJSONLMaxAge(),
+			MaxAge: sysSessionsMaxAge,
 		})
 	}
-	addStdioCaps(s, cfg, os.Stdout, os.Stderr)
+	addStdioCaps(s, os.Stdout, os.Stderr)
 	return s
 }
+
+const (
+	// sysSessionsMaxAge is the sys-sessions/*.jsonl retention window.
+	sysSessionsMaxAge = 7 * 24 * time.Hour
+	// stdioMaxSize caps the files launchd/systemd redirect stdout and stderr
+	// into (#3154): about eleven days of INFO-level stdout.
+	stdioMaxSize = 64 << 20
+)
 
 // addStdioCaps registers the stdout and stderr size caps. Taking the files
 // lets tests hand in regular files; production passes os.Stdout and os.Stderr,
 // which the cap leaves alone unless they are O_APPEND regular files.
-func addStdioCaps(s *datadir.Sweeper, cfg *config.Config, stdout, stderr *os.File) {
-	maxSize := cfg.LogStdioMaxSize()
-	if maxSize <= 0 {
-		return
-	}
-	s.AddFunc("stdio-stdout", datadir.StdioTask(stdout, "stdout", maxSize))
-	s.AddFunc("stdio-stderr", datadir.StdioTask(stderr, "stderr", maxSize))
+func addStdioCaps(s *datadir.Sweeper, stdout, stderr *os.File) {
+	s.AddFunc("stdio-stdout", datadir.StdioTask(stdout, "stdout", stdioMaxSize))
+	s.AddFunc("stdio-stderr", datadir.StdioTask(stderr, "stderr", stdioMaxSize))
 }
 
 // dataDirSweepInterval is how often the shared sweeper runs. Hourly: the trees

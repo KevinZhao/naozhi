@@ -154,6 +154,18 @@ session:
     enabled: true
   project_stable_key:
     enabled: false
+  shim:
+    buffer_size: 10
+    max_buffer_bytes: 1MB
+    disconnect_watchdog: 5m
+    max_shims: 3
+log:
+  format: text
+  stdio_max_size: "0"
+sysession:
+  tick_timeout: 45s
+  runner:
+    jsonl_max_age: "0"
 cron:
   sandbox:
     runtime_arn: "arn:aws:bedrock-agentcore:us-east-1:1:runtime/x"
@@ -185,6 +197,15 @@ agents:
 
 		"projects.public_tmp":        "__public_tmp__",
 		"session.project_stable_key": "always on",
+
+		"session.shim.buffer_size":         "10000 lines",
+		"session.shim.max_buffer_bytes":    "50MB",
+		"session.shim.disconnect_watchdog": "30m",
+		"session.shim.max_shims":           "50 shims",
+		"log.format":                       "JSON",
+		"log.stdio_max_size":               "64MB",
+		"sysession.tick_timeout":           "30s",
+		"sysession.runner.jsonl_max_age":   "7 days",
 	}
 	flagDiags := 0
 	for _, d := range diags {
