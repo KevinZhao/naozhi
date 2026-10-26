@@ -1,16 +1,12 @@
-/* split_view.css — extracted verbatim from dashboard.html's inline <style> block
- * (#2559 D6). The split is sequential: each file is a contiguous slice of the
- * original block and dashboard.html links them in the same order, so the
- * cascade (later rule wins at equal specificity, @media position) is
- * unchanged. Edit a view's rules here, next to the module that renders it.
- */
+/* split_view.css — dashboard.html links the css files in a fixed order that the
+ * cascade depends on (later rule wins at equal specificity); keep it. */
 /* ===== Split view (desktop) =====
    When a preview / 追问 drawer opens, instead of overlaying the transcript we
    dock it as a right-hand split: the .container reserves `--nz-split-w` of
    right padding so the flex children (activity-bar + sidebar + main) compress
    into the remaining width, and the fixed drawer fills the reserved strip.
-   The transcript stays fully visible (and keeps showing its latest progress —
-   see syncSplitScroll in dashboard.js). A draggable #split-resizer sits on the
+   The transcript stays fully visible and keeps showing its latest progress.
+   A draggable #split-resizer sits on the
    seam. Phone (≤768px) keeps the original full-width slide-over overlay, so
    every rule here is gated behind the ≥769px breakpoint. */
 /* --nz-split-w defaults to half the viewport at runtime (set by the JS
@@ -40,8 +36,8 @@
   /* Draggable seam. Sits exactly on the left edge of the reserved strip;
      the 6px hit area straddles the seam (margin-right:-3px), so it must paint
      above BOTH panes — including the .nz-split-front one at 202 — or the 3px
-     overlapping the front drawer are swallowed and the drag target halves
-     (#2434). Background stays transparent until hover, so the higher z-index
+     overlapping the front drawer are swallowed and the drag target halves.
+     Background stays transparent until hover, so the higher z-index
      has no visual cost. */
   body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) #split-resizer{display:block;position:fixed;top:0;bottom:0;right:var(--nz-split-w);width:6px;margin-right:-3px;cursor:col-resize;z-index:var(--nz-z-split-resizer);background:transparent;transition:background .15s}
   body.nz-split-open #split-resizer:hover,#split-resizer.dragging{background:var(--nz-accent)}
@@ -69,12 +65,12 @@
 .voice-overlay.transcribing .vo-wave span{animation:none;height:4px;background:var(--nz-accent)}
 .voice-overlay.transcribing .vo-hint{color:var(--nz-accent)}
 
-/* ui-polish-light-theme D5: the keyboard cheat line only matters while
+/* the keyboard cheat line only matters while
    composing — fade it in on focus instead of narrating full-time. Reserved
    height stays (opacity, not display) so the input area doesn't jump. */
 .input-hints{font-size:var(--nz-fs-xs);color:var(--nz-text-faint);margin-top:4px;text-align:right;user-select:none;opacity:0;transition:opacity var(--nz-dur) var(--nz-ease)}
 .input-area:focus-within .input-hints{opacity:1}
-/* ui-polish-light-theme D5: the banner is a high-frequency companion, not an
+/* the banner is a high-frequency companion, not an
    alert — full-width tinted strip + accent text shouted. Quiet chrome: plain
    border, muted text; the pulsing dot alone signals "running". Click-to-
    scroll behaviour unchanged. */
@@ -141,12 +137,12 @@
    the modal tier and stays reachable while a dialog is open. */
 .asset-skew-banner{position:fixed;top:max(12px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);z-index:calc(var(--nz-z-modal) + 1)}
 .asset-skew-banner button{padding:8px 16px;border:none;border-radius:var(--nz-radius-pill);background:var(--nz-blue);color:#fff;font-size:var(--nz-fs-base);cursor:pointer;box-shadow:var(--nz-shadow-2)}
-/* RNEW-UX-010 — visually hidden live region for assistive tech. Uses the
+/* visually hidden live region for assistive tech. Uses the
    standard "sr-only" recipe: in flow but clipped to 1x1, so screen readers
    pick it up but sighted users never see it. Display:none would suppress
    announcement, hence the clip() trick instead. */
 .sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
-/* RNEW-UX-012 — skeleton placeholders while the first sessions fetch is in
+/* skeleton placeholders while the first sessions fetch is in
    flight. Matches .session-card metrics (padding 12x16, ~54px tall) so the
    transition to real cards doesn't shift layout. Shimmer is a left-to-right
    gradient sweep over ~1.4s — fast enough to read as "loading", slow enough
@@ -159,8 +155,8 @@
 
 /* Auth modal */
 /* Modal scrim: 0.75 matches macOS / Material Design spec for system-level
-   modals — 0.6 (pre-Round 128) let 40% of the main content bleed through,
-   competing for attention with the dialog. Modal body itself is opaque
+   modals — lower lets the main content bleed through and compete with the
+   dialog. Modal body itself is opaque
    (background:var(--nz-bg-1)) so this value only controls the dim behind
    the card. Don't push above 0.8 — that reads as "page has crashed / is
    disabled" rather than "focus on this dialog". */
@@ -178,14 +174,14 @@
 .modal .modal-btns button.danger{background:var(--nz-red);border-color:var(--nz-red);color:#fff}
 .modal .modal-btns button.danger:hover{filter:brightness(1.1)}
 .modal.confirm-dialog p{margin:8px 0 4px;color:var(--nz-text);line-height:1.5}
-/* Round 2 R-12: .confirm-msg honours newlines for multi-paragraph
+/* .confirm-msg honours newlines for multi-paragraph
  * destructive copy (RFC §7.5). Default <p> styling collapses them, so
  * white-space:pre-wrap is required. Other dialogs that pass single-line
  * `message` strings render identically because pre-wrap is a superset
  * of normal whitespace handling. */
 .modal.confirm-dialog .confirm-msg{white-space:pre-wrap;word-break:break-word}
 .modal.confirm-dialog .confirm-detail{color:var(--nz-text-mute);font-size:var(--nz-fs-sm2);margin-top:8px;word-break:break-all}
-/* Round 2 R-12: countdown disables the destructive primary for N s; the
+/* countdown disables the destructive primary for N s; the
  * built-in [disabled] dimming reads as "waiting" but isn't directional.
  * A subtle pulse on the disabled state communicates "tick…tick…tick" so
  * fat-finger Enter doesn't feel like a broken button. */
@@ -194,7 +190,7 @@
 @media (prefers-reduced-motion:reduce){
   .modal.confirm-dialog .modal-btns button.danger[disabled]{animation:none}
 }
-/* RNEW-UX-013 prompt-dialog shares modal shell with confirm-dialog but has an
+/* prompt-dialog shares modal shell with confirm-dialog but has an
    input. Message above the input uses the mute colour so the input itself
    stays the primary focal point. */
 .modal.prompt-dialog .prompt-message{margin:8px 0 10px;color:var(--nz-text-mute);font-size:var(--nz-fs-sm2);line-height:1.5}
@@ -207,7 +203,7 @@
    parity with the rest of the UI's inline code. */
 .modal .auth-hint{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);margin:-4px 0 10px 0;line-height:1.5}
 .modal .auth-hint code{background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:var(--nz-radius-sm);padding:0 5px;font-size:var(--nz-fs-xs);color:var(--nz-text);font-family:'SF Mono',ui-monospace,monospace}
-/* R110-P3 登录页 brand lockup: a small mark + wordmark anchors the auth modal
+/* 登录页 brand lockup: a small mark + wordmark anchors the auth modal
    so first-time operators recognize they're on the right service. Using text
    characters (naozhi) avoids shipping a logo asset — the bracket mark
    matches the `>_` motif used in the empty state. Keep subtle: bigger than
@@ -217,7 +213,7 @@
 .modal .auth-brand .ab-wordmark{display:flex;flex-direction:column;line-height:1.2}
 .modal .auth-brand .ab-wordmark .ab-name{font-size:15px;color:var(--nz-text-strong);font-weight:600}
 .modal .auth-brand .ab-wordmark .ab-tag{font-size:var(--nz-fs-xs);color:var(--nz-text-mute)}
-/* R110-P1 long-press context menu: surfaces session-card actions (rename /
+/* long-press context menu: surfaces session-card actions (rename /
    delete / copy key) on touch devices where hover-only buttons are invisible.
    Rendered as an overlay + positioned menu pair so click-outside-to-close is
    cheap to implement. The overlay sits one step below --nz-z-menu (211),
@@ -259,7 +255,7 @@
 .cmd-palette-item .cp-path{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,monospace}
 .cmd-palette-item .cp-node{font-size:var(--nz-fs-2xs);padding:1px 5px;border-radius:var(--nz-radius-xs);color:#fff;flex-shrink:0}
 .cmd-palette-item .cp-icon{color:var(--nz-text-mute);font-size:var(--nz-fs-base);flex-shrink:0;width:16px;text-align:center}
-/* R110-P3 palette favorite indicator: gold star at the row icon slot.
+/* palette favorite indicator: gold star at the row icon slot.
    Same slot as the default ▸ glyph so layout doesn't shift. Color matches
    the sidebar .section-header .sh-btn.star-on treatment (--nz-star-fg) so the
    two "this project is starred" surfaces read as the same state. */
@@ -274,12 +270,9 @@
 .toast.success{background:#238636}
 .toast.error{background:#8e1519}
 
-/* History popover/sheet backdrop. Before R20260605 the popover had no
-   backdrop, so its fixed box silently sat on top of the node switcher and
-   session list: clicking those covered controls only dismissed the popover
-   (the document-level outside-click handler) without actuating the control,
-   and there was no visual "a layer is open" cue. The backdrop captures that
-   click explicitly (→ closeHistoryPopover) and dims the background a touch.
+/* History popover/sheet backdrop: it captures the click on covered controls
+   (node switcher, session list) explicitly (→ closeHistoryPopover) and dims
+   the background a touch.
    Lighter than .modal-overlay's .75 scrim because a history list is a
    transient popover, not a blocking modal. z-index 99 sits just under the
    desktop .history-popover (100); the mobile sheet (200) gets the heavier
@@ -292,7 +285,7 @@
 .history-popover-header{padding:8px 12px;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);border-bottom:1px solid var(--nz-bg-2);font-weight:600;letter-spacing:.3px;background:var(--nz-bg-0);border-radius:var(--nz-radius-md) 8px 0 0}
 .history-popover-header .hp-count{color:var(--nz-text-dim);font-weight:500;margin-left:4px}
 .history-popover-header .hp-subtitle{display:block;margin-top:3px;font-size:var(--nz-fs-2xs);font-weight:400;letter-spacing:0;color:var(--nz-text-mute)}
-/* R110-P1 history-drawer search: the input sits between the header and
+/* history-drawer search: the input sits between the header and
    the items list. Not sticky because the `.hp-day-header` rule already
    uses position:sticky with top:0 relative to the popover scroll
    container; adding a second sticky element at the same anchor would
@@ -309,11 +302,8 @@
 .history-popover-item .hp-meta{font-size:var(--nz-fs-xs);color:var(--nz-text-dim);margin-top:3px;display:flex;align-items:center;gap:6px}
 .history-popover-item .hp-meta .hp-project{color:var(--nz-project-label-fg);font-weight:500}
 .history-popover-item .hp-meta .hp-dot{color:var(--nz-border)}
-/* Day group header inside the history popover. Dropped text-transform:uppercase
-   in Round 129 — the browser returns "Wed, Apr 29" for English locales and
-   中文 weekdays like "周三" for CJK locales; uppercase made the former shout
-   ("WED, APR 29") and did nothing for the latter, creating a mixed-register
-   look. Typography now reads naturally in both locales. */
+/* Day group header inside the history popover. No text-transform: the label
+   is a locale date ("Wed, Apr 29" / "周三") and uppercase would shout. */
 .hp-day-header{padding:6px 12px 4px;font-size:var(--nz-fs-2xs);color:var(--nz-text-mute);font-weight:600;letter-spacing:.3px;background:var(--nz-bg-0);border-bottom:1px solid var(--nz-bg-2);position:sticky;top:0;z-index:1}
 .history-popover-empty{padding:16px;text-align:center;color:var(--nz-text-dim);font-size:var(--nz-fs-sm)}
 .history-popover-empty .hp-empty-hint{display:inline-block;margin-top:6px;color:var(--nz-text-faint);font-size:var(--nz-fs-xs)}
@@ -441,7 +431,7 @@
 .section-header-fallback{background:transparent;color:var(--nz-text-faint)}
 .section-header-fallback .sh-name{font-style:italic;font-weight:500}
 /* Session card v2 (two-line flat, IM-style) */
-/* ui-polish-light-theme D4: 18px inline mark inside .sc-meta (was a 36px
+/* 18px inline mark inside .sc-meta (was a 36px
    dedicated column that out-shouted the card title). */
 .sc-cli-icon{width:18px;height:18px;flex-shrink:0;border-radius:var(--nz-radius-xs)}
 .sc-body{flex:1;min-width:0}
@@ -449,11 +439,11 @@
 /* Title uses --nz-text-strong (theme-adaptive) — was hardcoded near-white
    #e6edf3 which is nearly invisible in light theme (root cause of the
    "list titles look disabled" finding). Hierarchy now: title = strong +
-   500 weight, meta/time = mute (set below). R20260606. */
+   500 weight, meta/time = mute (set below). */
 .session-card .sc-prompt{font-size:15px;color:var(--nz-text-strong);font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .session-card.new-card{border-left-style:dashed;border-left-color:var(--nz-accent)}
 .session-card .sc-meta{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);display:flex;align-items:center;gap:4px;margin-top:3px;overflow:hidden;white-space:nowrap}
-/* R110-P1: dim 30-rune assistant response preview slotted between prompt and meta. */
+/* dim 30-rune assistant response preview slotted between prompt and meta. */
 .session-card .sc-response{font-size:var(--nz-fs-sm);color:var(--nz-text-mute);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.3}
 .sc-dot{display:inline-block;width:6px;height:6px;border-radius:50%;flex-shrink:0}
 .dot-running{background:var(--nz-status-running);animation:pulse var(--nz-dur-loop) ease-in-out infinite}
@@ -472,7 +462,7 @@
    the palette's .cp-node badge. */
 .sc-node{font-size:var(--nz-fs-2xs);padding:1px 5px;border-radius:var(--nz-radius-xs);color:#fff;flex-shrink:0;line-height:1.3;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
-/* UI Round 5 R5-3: spawn-time model label rendered inline next to the
+/* spawn-time model label rendered inline next to the
    cli identity in the main header detail row. Mute-tone keeps cli name
    primary; the unset variant uses the dim foreground + italic so
    "(模型未配置)" reads as a hint, not an error. */
@@ -496,14 +486,14 @@
    they shed the mute downgrade. Weight + colour only — a high tier is a
    deliberate setting, not a fault, and --nz-amber already means "running". */
 .main-header .detail-effort .effort-hot{color:var(--nz-text);font-weight:600}
-/* Spawn-gate warning chip (#2532): configured input the spawn pipeline
+/* Spawn-gate warning chip: configured input the spawn pipeline
    dropped/ignored. A fault signal, so it takes the warn badge tokens; :empty
    collapses it when everything took effect. */
 .main-header .detail-spawndiag{display:inline-flex;align-items:center;flex-shrink:0;white-space:nowrap;font-size:var(--nz-fs-sm)}
 .main-header .detail-spawndiag:empty{display:none}
 .main-header .detail-spawndiag .spawn-diag-tag{color:var(--nz-badge-warn);cursor:help}
 .main-header .detail-spawndiag .spawn-diag-tag::before{content:"·";margin-right:4px;opacity:.45;color:var(--nz-text-mute)}
-/* Overlay-drift chip (#2543): live argv differs from a fresh spawn under the
+/* Overlay-drift chip: live argv differs from a fresh spawn under the
    current config; restart the session to apply. Warn badge tokens, :empty
    collapses when there is no drift. */
 .main-header .detail-overlaydrift{display:inline-flex;align-items:center;flex-shrink:0;white-space:nowrap;font-size:var(--nz-fs-sm)}
@@ -568,20 +558,20 @@
 .sc-wf{display:inline-flex;align-items:center;gap:2px;padding:1px 5px;border-radius:var(--nz-radius-xs);font-size:var(--nz-fs-2xs);font-weight:600;font-variant-numeric:tabular-nums;color:var(--nz-status-running);background:var(--nz-bg-2);flex-shrink:0;margin-left:auto}
 .sc-agents+.sc-wf{margin-left:0}
 .session-card.active .sc-wf{display:none}
-/* R110-P1 Home panel (idle main area): "最近会话" compact list that appears
+/* Home panel (idle main area): "最近会话" compact list that appears
    below the cold-start CTA when sessionsData has entries. Keeps density low
    (max 5 rows, 36px each) so it doesn't dominate the empty state, but gives
    users a direct click target to their recent work without going through the
    sidebar. Zero-session cold-start stays untouched (the wrap renders empty). */
 .recent-panel-wrap{width:100%;max-width:480px}
-/* ui-polish-light-theme D3: the Home panel dropped its card chrome along
+/* the Home panel dropped its card chrome along
    with the stats/health strips (now 系统 view .svc-*) — a border around the
    sole remaining list read as a third nesting level under the empty-state.
    Rows carry their own hover affordance. */
 .recent-panel{margin-top:8px}
 .recent-panel-title{font-size:var(--nz-fs-xs);color:var(--nz-text-mute);text-transform:none;letter-spacing:.2px;margin-bottom:8px;font-weight:600}
 .recent-panel-list{display:flex;flex-direction:column;gap:4px}
-/* 服务概览 (系统 view, ui-polish-light-theme D3) — the aggregate stats +
+/* 服务概览 (系统 view) — the aggregate stats +
    health strip + doctor panel that used to crowd the Home empty-state.
    Stats render as bare figures (no per-stat card border: the section
    already sits inside the system-body flow, boxes-in-boxes read heavy).
@@ -606,7 +596,7 @@
 .recent-dot.dot-new{background:var(--nz-status-new);border:1px dashed var(--nz-accent)}
 .recent-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .recent-time{color:var(--nz-text-dim);font-size:var(--nz-fs-xs);flex-shrink:0;font-variant-numeric:tabular-nums}
-/* R110-P3 IM-origin chip: shared structure, per-platform hue variants. The
+/* IM-origin chip: shared structure, per-platform hue variants. The
    base rule stays muted so unrecognized/future platforms still render safely
    (originBadgeHtml returns '' for unknowns, but defence in depth). Platform
    hues pick brand-adjacent colors; keep alpha conservative so the chip

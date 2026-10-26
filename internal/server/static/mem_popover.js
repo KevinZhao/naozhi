@@ -129,7 +129,7 @@ async function fetchMemory(slug) {
   const cached = memCache.get(slug);
   if (cached === NOT_FOUND) return null;
   if (cached) return cached;
-  // RNEW-UX-003 (#444): fetchJSON wraps fetch with AbortController +
+  // fetchJSON wraps fetch with AbortController +
   // 10s timeout. Memory popovers are click-to-open so a hung backend
   // (NAT idle drop) leaves the user staring at a never-resolving
   // popover; fetchJSON guarantees a deterministic failure path that

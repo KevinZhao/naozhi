@@ -1,9 +1,7 @@
-// file_refs.js — extracted from dashboard.js (#2558 D4).
-//
-// Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects; the path
-// parsing it shares with render_md.js lives in the file_ref_parse.js leaf.
+// file_refs.js — file references in the transcript: existence checks, the
+// file preview drawer and avatar regrouping. Layering: never import
+// dashboard.js back; the path parsing shared with render_md.js lives in the
+// file_ref_parse.js leaf.
 import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList } from './state.js';
 import { esc, fetchJSON, showToast } from './nz_util.js';
@@ -253,7 +251,7 @@ async function flushFileRefBatch() {
   const paths = Array.from(batch.paths.keys());
   try {
     const headers = { 'Content-Type': 'application/json' };
-    // RNEW-UX-003: 10s timeout — batch exists-check touches the FS for every
+    // 10s timeout — batch exists-check touches the FS for every
     // path; a stalled disk shouldn't leak pending renders forever.
     let data;
     try {

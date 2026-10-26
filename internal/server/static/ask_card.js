@@ -34,7 +34,7 @@ export function hydrateAskAnsweredFromHistory(events) {
 // screen was answered on some surface (Feishu, the input box, another tab), so
 // it must lock now — not only after a reload replays history. Without this the
 // stale card stayed submittable and pushed an out-of-date answer into the
-// next turn (#2430). Idempotent: cards onAskSubmit already locked are skipped
+// next turn. Idempotent: cards onAskSubmit already locked are skipped
 // via the existing .ask-status marker.
 export function lockRenderedAskCards(scrollEl) {
   if (!scrollEl) return;

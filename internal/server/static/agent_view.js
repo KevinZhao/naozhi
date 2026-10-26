@@ -145,7 +145,7 @@ import { sid } from './session_ident.js';
   };
 
   var MAX_SWITCH_RETRIES = 20; // §R14: 5 s retry ceiling
-  // #2030: the "no internal record" toast was copied verbatim at 3 call sites
+  // the "no internal record" toast was copied verbatim at 3 call sites
   // (HTTP 202 ceiling / HTTP 404 / WS subscribe rejected). Single source of
   // truth so the wording can't drift between paths.
   var TOAST_NO_RECORD = '该 agent 暂无内部记录';
@@ -184,8 +184,8 @@ import { sid } from './session_ident.js';
   function switchTo(taskID, opts) {
     var seq = ++state.switchSeq;
     // Unsubscribe the agent left, or its tailer keeps streaming here and holds
-    // a Hub-wide slot until it ends (#3696). On the way in, snapshot the parent
-    // pane: the way back and a switch away restore it, not the agent's (#3697).
+    // a Hub-wide slot until it ends. On the way in, snapshot the parent
+    // pane: the way back and a switch away restore it, not the agent's.
     if (state.activeTaskID && state.activeTaskID !== (taskID || '')) unsubscribeCurrent();
     if (!state.activeTaskID && taskID) saveScrollPos(selection.key, selection.node);
     // Each drill-in gets the whole 202 budget; seq retires the old loop.
@@ -573,7 +573,7 @@ import { sid } from './session_ident.js';
   // reuses its untimed set): the newest real time shown (afterMS), the keys
   // shown at that ms (seenKeys) and those of every entry shown with no time
   // (untimed), which passes every time filter. The server re-admits the
-  // watermark ms (#2432 item 5) and the WS tailer replays from the start.
+  // watermark ms and the WS tailer replays from the start.
   function dedupAgentPollBatch(events, cursor) {
     var afterMS = cursor ? cursor.afterMS : 0;
     var prev = cursor ? cursor.seenKeys : [];
@@ -711,7 +711,7 @@ import { sid } from './session_ident.js';
   wsm.on(NZ_CONTRACT.WS.agent_subscribe_rejected, (msg) => onAgentSubscribeRejected(msg));
   // ─── Exports ───────────────────────────────────────────────────────
 
-  // nz.views.agent — the view's public surface (#2557 PR-E3). dashboard
+  // nz.views.agent — the view's public surface. dashboard
   // reaches it at call time; it cannot import this module (that would
   // create an import cycle and invert execution order).
   nzViews.agent = {

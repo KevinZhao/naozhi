@@ -1,11 +1,7 @@
 // mobile_nav.js — mobile shell navigation: viewport tracking, list/chat
 // switching, swipe-back, long-press session actions, and the desktop
-// sidebar fully-collapse helpers that share its drawer bookkeeping
-// (#2558 D4-3).
-//
-// Verbatim move out of dashboard.js; only the import lines are new.
-// Layering (D4-1 rule): never import dashboard back — selectSession is
-// reached through shell.js.
+// sidebar fully-collapse helpers that share its drawer bookkeeping.
+// Layering: never import dashboard.js back; selectSession is a shell slot.
 import { selection } from './state.js';
 import { esc, showToast } from './nz_util.js';
 import { ICONS } from './icons.js';
@@ -34,7 +30,7 @@ function mobileShowList() {
 
 // In-app back button / swipe-back. Flips the view synchronously, then pops
 // the history entry mobileEnterChat pushed so the browser stack stays in
-// step (#2431); the popstate below sees list view already and no-ops.
+// step; the popstate below sees list view already and no-ops.
 function mobileBack() {
   const ownsEntry = isMobile() && history.state && history.state.view === 'chat';
   mobileShowList();
@@ -253,7 +249,7 @@ function initSwipeDelete() {
       if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
       if (Math.abs(dy) >= Math.abs(dx)) { card = null; return; }
       tracking = true;
-      // #1772: cache the card width once, here — before any transform write
+      // cache the card width once, here — before any transform write
       // this gesture. Reading card.offsetWidth inside the per-frame transform
       // write below is a getter that the browser must keep coherent with
       // pending style writes; caching it (the width can't change mid-swipe)

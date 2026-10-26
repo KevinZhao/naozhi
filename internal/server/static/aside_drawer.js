@@ -18,7 +18,7 @@ import { fetchSessions } from './session_list.js';
 // hammered that 404 at 1Hz forever, flooding the browser network log and
 // wasting requests. We instead back off 1s→2s→4s→…→POLL_MAX_MS while the
 // session is still empty/unreachable, and snap back to POLL_BASE_MS the
-// moment a real poll succeeds. R20260605.
+// moment a real poll succeeds.
 const POLL_BASE_MS = 1000;
 const POLL_MAX_MS = 8000;
 

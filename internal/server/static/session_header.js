@@ -1,13 +1,6 @@
-// session_header.js — the chat header's run-history panel and status chips
-// (#2558 D4-3).
-//
-// Verbatim move out of dashboard.js (two adjacent regions: the run-history
-// timeline from docs/rfc/session-run-metrics.md §8, and the git / effort /
-// overlay-drift / spawn-diag chips). Only the import + dep-wiring lines are
-// new.
-//
-// Layering (D4-1 rule): never import dashboard back — shared state is read
-// from the state.js objects, its helpers are imported.
+// session_header.js — the chat header's run-history panel
+// (docs/rfc/session-run-metrics.md §8) and its git / effort / overlay-drift /
+// spawn-diag chips. Layering: never import dashboard.js back.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, sessionList } from './state.js';
 import { esc, escAttr, formatCostUSD, formatDurationShort, formatRunDuration, runStateDot, runStateLabel } from './nz_util.js';
@@ -19,7 +12,7 @@ import { costBudgetChipHtml, fetchCostBudget, formatAbsTime } from './utilities.
 // Best-effort: a fetch failure or empty history just leaves the panel hidden;
 // the conversation surface is never blocked on it.
 
-// sessionRunStateMeta maps the common run state (#2540) to its dot class +
+// sessionRunStateMeta maps the common run state to its dot class +
 // Chinese label via the shared vocabulary in nz_util. The runs API used to
 // speak a private outcome enum (completed/error/timeout/canceled) and this
 // file kept its own copy of the colour table; both are gone — the wire says
@@ -338,7 +331,7 @@ function setHeaderSpawnDiagChip(sessions) {
 
 // overlayDriftChipHtml renders the "配置漂移" chip for a session whose live
 // argv no longer matches what a fresh spawn under the current config would
-// use (#2543). The remedy is restarting the session — nothing auto-restarts
+// use. The remedy is restarting the session — nothing auto-restarts
 // a live session over drift.
 function overlayDriftChipHtml(drift) {
   if (!drift || !drift.length) return '';

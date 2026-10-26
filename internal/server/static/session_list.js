@@ -69,7 +69,6 @@ export function restorePending() {
 // lastVersion > 0 (the sites that need a repaint zero it) and, for a body the
 // sidebar has not painted, only over a live socket. A header rebuild, which
 // paints the chips from cache, drops the validator (setHeaderEffortChip).
-// 8 s timeout: RNEW-UX-003.
 const NOT_MODIFIED = 'not-modified';
 async function fetchSessionsPayload() {
   const headers = {};
@@ -94,7 +93,7 @@ async function fetchSessionsPayload() {
 // version and compare as JSON. State flips (running↔ready, last_response)
 // never advance it: over a live socket session_state covers them, but under
 // WS-fallback polling REST is the only state source, so the short-circuit
-// applies only while connected (#2431); idempotent renderSidebar runs every 5 s.
+// applies only while connected; idempotent renderSidebar runs every 5 s.
 function sessionsUnchanged(data, wsConnected) {
   const version = (data.stats && data.stats.version) || 0;
   const nodesHash = JSON.stringify(data.nodes || {});
@@ -152,7 +151,7 @@ function mergeBackendSessions(polled, backendKeys, pushesBefore) {
     // Keep the optimistic 'running' flip while the REST snapshot lags the send,
     // or the banner hides until the push catches up. The returned copy keeps it
     // too, or a re-render from the cached payload (project collapse, sidebar
-    // search) paints the card idle under a running banner (#2431).
+    // search) paints the card idle under a running banner.
     if (perSession.optimisticRunning[sKey] && s.state !== 'running') {
       s = Object.assign({}, s, { state: 'running' });
     }
@@ -211,13 +210,13 @@ function pendingCardFor(key) {
   // On the default backend the live version (from system/init, refreshed
   // every poll) beats the manifest, which is cached up to 60 s and would flash
   // the pre-upgrade version; another backend has no live source, and the
-  // default's version would mislabel it. R20260613-pending-version.
+  // default's version would mislabel it.
   const isDefaultBackend = !pendingBackend || (serverInfo.cliBackends !== null && pendingBackend === serverInfo.cliBackends.default);
   const pendingCLIVersion = isDefaultBackend
     ? (serverInfo.defaultCLIVersion || backendDisplayVersion(pendingBackend))
     : (backendDisplayVersion(pendingBackend) || serverInfo.defaultCLIVersion);
   // Mirror the server's project/project_fallback shape, so an unregistered
-  // workspace groups under its basename from the first paint (#2431).
+  // workspace groups under its basename from the first paint.
   const pendingWS = perSession.workspaces[key];
   const pendingProject = matchProject(pendingWS);
   const pendingFallback = pendingProject ? '' : workspaceFallbackName(pendingWS);
@@ -263,7 +262,6 @@ export async function fetchSessions() {
     // The effort tier, spawn diagnosis and overlay drift change at turn
     // boundaries, which do not advance stats.version, and renderMainShell does
     // not run on turn completion: they repaint here, before the short-circuit.
-    // docs/rfc/kiro-effort-visibility.md §5.1 / R1b
     if (selection.key) setHeaderEffortChip(data.sessions);
     if (selection.key) setHeaderSpawnDiagChip(data.sessions);
     if (selection.key) setHeaderOverlayDriftChip(data.sessions);
@@ -321,7 +319,7 @@ export function renderSidebar(data) {
   if (st.projects) sessionList.projectsData = st.projects;
 
   const list = document.getElementById('session-list');
-  // R110-P2 empty-state CTA: the "no sessions" text E2E asserts + the header `+` action.
+  // Empty state: the "no sessions" text + the header `+` action.
   const html = sidebarHtml(buildSidebarItems(data)) || '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" data-action="session-new">+ 开启你的第一个会话</button></div>';
   // Keyed reconcile: only rows whose markup changed are replaced, so a poll
   // with nothing new touches no DOM, in-place patches (state dot, unread chip,
@@ -334,7 +332,7 @@ export function renderSidebar(data) {
     setActiveSessionCard(selection.key, selection.node);
   }
 
-  // The Home panel's 最近会话 list mirrors every repaint (R110-P1).
+  // The Home panel's 最近会话 list mirrors every repaint.
   renderRecentSessionsPanel();
 }
 
@@ -492,19 +490,10 @@ function workspaceFallbackName(ws) {
 }
 
 // PLATFORM_ORIGINS maps the first component of a session key (the platform
-// tag emitted by session.SessionKey in internal/session/managed.go) to the
-// user-facing Chinese label shown on the IM-origin badge. Adding a new IM
-// platform means extending this map PLUS picking a CSS variant in
-// dashboard.html `.sc-origin.kind-*` PLUS wiring the adapter in
-// cmd/naozhi/main.go initPlatforms — see R230-ARCH-11 (#1021) for the
-// `GET /api/platforms` proposal that would let the dashboard hydrate this
-// list at boot instead of hardcoding it. Non-IM prefixes (dashboard, local,
-// cron, scratch_*, planner) intentionally do NOT appear here — originBadgeInfo
-// returns null for them so those sessions don't grow a misleading "外部
-// 来源" chip. The two dashboard-local sources of truth (this map and the
-// `.sc-origin.kind-*` CSS) are cross-checked by
-// TestDashboardJS_R230ARCH11_PlatformOriginsAndCSSStayInSync so a partial
-// addition fails CI.
+// tag emitted by session.SessionKey) to the label on the IM-origin badge. A
+// new IM platform needs this map, a `.sc-origin.kind-*` CSS variant and the
+// adapter in cmd/naozhi initPlatforms. Non-IM prefixes (dashboard, local,
+// cron, scratch_*, planner) are deliberately absent so they get no badge.
 const PLATFORM_ORIGINS = {
   feishu:  { name: '飞书',    kind: 'feishu' },
   slack:   { name: 'Slack',   kind: 'slack' },
@@ -516,15 +505,7 @@ const PLATFORM_ORIGINS = {
 // Returns null when the key doesn't come from a real IM platform — that's
 // the common case (dashboard-created sessions, cron jobs, scratch drawers,
 // planner sessions, local takeovers) and those should render without a
-// badge. Pure function, no DOM touch, so it's easy to unit-test from a
-// contract test that loads dashboard.js as text.
-//
-// R110-P3: scope of this helper is intentionally "platform + 私聊/群"
-// only; it does NOT attempt to display the opaque chat_id nor a jump-back
-// URL because those require backend schema changes (see TODO R110-P3-IM
-// 来源指示 residual scope). Surfacing platform alone already tells the
-// operator "this is a real IM thread, not a dashboard-local conversation",
-// which is the 80% case.
+// badge. Scope is "platform + 私聊/群" only; the opaque chat_id is not shown.
 function originBadgeInfo(key) {
   if (typeof key !== 'string' || !key) return null;
   const colon = key.indexOf(':');
@@ -562,7 +543,7 @@ function cliIcon(name) {
   // Inlined here so the asset works offline + survives CSP. Compressed to
   // the essential shapes: rounded purple bg + white ghost body + 2 black
   // eyes. The original 1200×1200 is recoordinatized for the 16×16 viewbox
-  // sidebar / header sc-cli-icon slot. UI Round 5 R5-1.
+  // sidebar / header sc-cli-icon slot.
   if (name === 'kiro') return '<svg class="sc-cli-icon" viewBox="0 0 1200 1200" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="1200" height="1200" rx="260" fill="#9046FF"/><path d="M398.554 818.914C316.315 1001.03 491.477 1046.74 620.672 940.156C658.687 1059.66 801.052 970.473 852.234 877.795C964.787 673.567 919.318 465.357 907.64 422.374C827.637 129.443 427.623 128.946 358.8 423.865C342.651 475.544 342.402 534.18 333.458 595.051C328.986 625.86 325.507 645.488 313.83 677.785C306.873 696.424 297.68 712.819 282.773 740.645C259.915 783.881 269.604 867.113 387.87 823.883L399.051 818.914H398.554Z" fill="white"/><ellipse cx="636" cy="487" rx="40" ry="63" fill="black"/><ellipse cx="771" cy="487" rx="40" ry="63" fill="black"/></svg>';
   // codex: official OpenAI logomark (Simple Icons, MIT/brand path, 24×24).
   // Inlined for offline + CSP. Single path filled with the OpenAI brand green
@@ -616,7 +597,7 @@ function sessionCardHtml(s) {
   const typeTag = s.source === 'terminal' ? sessionTypeTag(s.type_label) : '';
   const agentCount = (isActive && turnState.agents.length) || (s.subagents ? s.subagents.length : 0);
   const agentBadge = agentCount > 0 ? '<span class="sc-agents">' + ICONS.robot + '\u00D7' + agentCount + '</span>' : '';
-  // R110-P3 IM origin: show a small chip for sessions sourced from feishu /
+  // IM origin: show a small chip for sessions sourced from feishu /
   // slack / discord / weixin so operators can eyeball which cards are real
   // IM threads vs dashboard-local conversations. originBadgeHtml returns ''
   // for non-IM prefixes so the meta line stays clean for those.
@@ -627,10 +608,7 @@ function sessionCardHtml(s) {
   // personal 1P or the company Bedrock account?"). Empty for single-auth mode /
   // global default so deployments that don't use profiles see no change.
   const accessProfileChip = accessProfileChipHtml(s.access_profile);
-  // ui-polish-light-theme D4: the cli icon rides inside the meta line at
-  // 18px instead of a dedicated 36px column — at 36px every card led with
-  // a saturated brand mark that outweighed its own title, while the icon
-  // only carries one low-entropy bit (which backend). Title owns line 1.
+  // The cli icon rides inside the meta line at 18px so the title owns line 1.
   const metaHtml = icon +
     '<span class="sc-dot ' + dotCls + '"></span>' +
     '<span>' + esc(displayState) + '</span>' + sessionExitChipHtml(s.state, s.death_reason, s.death_detail, s.startup_failure) +
@@ -640,7 +618,7 @@ function sessionCardHtml(s) {
     typeTag +
     agentBadge + workflowBadgeHtml(s, sNode);
 
-  // R110-P1: dim 30-rune preview of last assistant text reply. Skipped when
+  // Dim 30-rune preview of last assistant text reply. Skipped when
   // empty (omitempty hides it for brand-new sessions / runs that have not
   // produced an assistant text block yet — tool-only turns intentionally
   // leave the slot blank rather than echoing the prompt). Server already
@@ -778,7 +756,7 @@ export function updateStatusBar() {
     ? '<button type="button" class="status-reconnect" data-action="ws-reconnect" title="立即重连" aria-label="立即重连">重连</button>'
     : '';
 
-  // R110-P1 outage duration hint: only when we have a stamped disconnect
+  // Outage duration hint: only when we have a stamped disconnect
   // timestamp (live outage) AND the state is not CONNECTED. A stale non-zero
   // timestamp on CONNECTED would be a bug elsewhere; the state gate is
   // defensive. Empty string from formatOutageDuration means "< 5s, suppress"
@@ -837,7 +815,7 @@ export function updateStatusBar() {
 function wsStateChanged(s, prev) {
   updateStatusBar();
   if (s === WS_STATES.CONNECTED) {
-    // RNEW-UX-010 — sighted users see the dot flip; AT users get the
+    // Sighted users see the dot flip; AT users get the
     // transition announced politely. Only announce when it's a real
     // transition (prev !== CONNECTED) to avoid re-announcing on no-op
     // state refreshes.
@@ -846,16 +824,16 @@ function wsStateChanged(s, prev) {
     if (timers.sessionPoll) { clearInterval(timers.sessionPoll); timers.sessionPoll = null; }
     // Reduce discovered scan frequency
     if (timers.discoveredPoll) { clearInterval(timers.discoveredPoll); timers.discoveredPoll = null; }
-    // #2431: a hidden tab has had its pollers suspended by stopPollers;
+    // A hidden tab has had its pollers suspended by stopPollers;
     // re-arming here would undo that. startPollers re-arms on return.
     if (!document.hidden) timers.discoveredPoll = setInterval(scanDiscovered, 30000);
     // Pull fresh node/session state immediately to clear stale data
     debouncedFetchSessions();
   } else if (s === WS_STATES.DISCONNECTED) {
-    // RNEW-UX-010 — announce only on real transitions from connected, so
+    // Announce only on real transitions from connected, so
     // initial cold boot (OFF→CONNECTING→DISCONNECTED retry) stays silent.
     if (prev === WS_STATES.CONNECTED) announce('连接已断开，正在重试');
-    // WS lost: start fallback polling — unless the tab is hidden (#2431):
+    // WS lost: start fallback polling — unless the tab is hidden:
     // stopPollers already suspended everything and startPollers re-arms on
     // visibilitychange from the then-current WS state.
     const visible = !document.hidden;
@@ -1086,7 +1064,7 @@ wsm.on(NZ_CONTRACT.WS.error, (msg) => {
 });
 wsm.on(NZ_CONTRACT.WS.session_state, (msg) => onSessionState(msg));
 wsm.on(NZ_CONTRACT.WS.sessions_update, () => {
-  // RNEW-UX-010 — snapshot pre-update session-key set so we can spot
+  // Snapshot the pre-update session-key set so we can spot
   // a newly-added key after the fetch completes. Comparing sizes is
   // not enough (delete+create at the same tick would net to zero).
   const prevSessKeys = new Set(Object.keys(sessionList.sessionsData || {}));

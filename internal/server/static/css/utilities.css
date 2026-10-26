@@ -1,5 +1,5 @@
 /* utilities.css — the class equivalents of the style="" attributes JS used
- * to emit (#2559 D6-3). Named for the role they play, not for the
+ * to emit. Named for the role they play, not for the
  * declarations they carry, so a future token change edits one rule instead
  * of every call site. */
 .nz-field{margin-bottom:12px}
@@ -31,20 +31,20 @@
 .nz-hint-dim{font-size:12px;color:var(--nz-text-dim)}
 /* Picker <select> chrome. Was the PICKER_SELECT_STYLE / _ONLY_STYLE string
    constants spliced into style="" at five call sites; the -only variant adds
-   the custom-arrow treatment on top (#2559 D6-3). */
+   the custom-arrow treatment on top. */
 .nz-picker-select{width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px}
 .nz-picker-select-only{appearance:none;-webkit-appearance:none;padding-right:26px;cursor:pointer;font:inherit;font-size:var(--nz-fs-sm2)}
 /* Textarea variant of the picker chrome (workspace / prompt fields). */
 .nz-picker-textarea{width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px;resize:vertical}
-/* Tuning popover rows (#2559 D6-3: was three concatenated style strings). */
+/* Tuning popover rows. */
 .nz-tuning-input{width:100%;box-sizing:border-box;background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:6px;padding:5px 8px;color:var(--nz-text);font-size:12px}
 .nz-tuning-opt{padding:7px 12px;cursor:pointer;color:var(--nz-text)}
 .nz-tuning-opt.is-active{font-weight:600;color:var(--nz-accent)}
 .nz-tuning-opt.is-reset{border-top:1px solid var(--nz-bg-2);color:var(--nz-text-mute)}
 /* Conditional visibility that JS used to write as style="display:…". The
-   element ships with .nz-hidden and JS toggles the class instead (#2559 D6-3). */
+   element ships with .nz-hidden and JS toggles the class instead. */
 .nz-cron-ws-custom{padding:8px 0 0}
-/* Static markup helpers used by dashboard.html (#2559 D6-3). */
+/* Static markup helpers used by dashboard.html. */
 .nz-empty-body{color:var(--nz-text);font-size:var(--nz-fs-md)}
 .nz-empty-hint{font-size:var(--nz-fs-sm);color:var(--nz-text-dim)}
 .nz-meta-faint{font-size:var(--nz-fs-xs);color:var(--nz-text-faint)}

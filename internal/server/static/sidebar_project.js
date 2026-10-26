@@ -1,13 +1,7 @@
-// sidebar_project.js — extracted from dashboard.js (#2558 D4).
-//
-// Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block and the export block below are the only additions.
-//
-// Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects and helpers are
-// imported. session_list.js imports this module, so the session_list functions
-// it calls back are shell slots.
+// sidebar_project.js — the sidebar's project sections: headers, favorites,
+// collapse state, git remote and the project settings modal.
+// Layering: never import dashboard.js back. session_list.js imports this
+// module, so the session_list functions it calls are shell slots.
 import { NZ_CONTRACT } from './contract.js';
 import { serverInfo, sessionList } from './state.js';
 import { esc, escAttr, fetchJSON, showToast, trapFocus } from './nz_util.js';
@@ -122,7 +116,7 @@ function sectionHeaderHtml(p) {
 // own dataset. This is the data-action dispatch idiom already used by the
 // cron menu (CRON_MENU_ACTIONS / handleCronMenuClick) — it lets the section
 // header buttons drop their inline click attributes, shrinking the
-// script-src 'unsafe-inline' surface (#922 / #1734) without changing
+// script-src 'unsafe-inline' surface without changing
 // behaviour. Keys must match the data-action values emitted in
 // sectionHeaderHtml / sectionHeaderFallbackHtml.
 // #1980 PR-2: the project-header buttons' scoped #session-list delegation

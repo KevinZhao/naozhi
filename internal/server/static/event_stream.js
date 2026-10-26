@@ -42,7 +42,7 @@ export async function fetchEvents(full) {
     }
 
     const headers = {};
-    // RNEW-UX-003: 5s timeout — events poll fallback ticks every 1s, so
+    // 5s timeout — events poll fallback ticks every 1s, so
     // a hung response must release well before the next tick or the UI
     // falls behind the live stream.
     let events;
@@ -362,7 +362,7 @@ export function renderEvents(events, hasMore) {
     }
   } catch (_) { /* getSelection unavailable — proceed with refresh */ }
   // Poll-fallback twin of onHistory's pre-render hydrate: rebuild the
-  // answered-set so replayed AskUserQuestion cards render locked (#2430).
+  // answered-set so replayed AskUserQuestion cards render locked.
   hydrateAskAnsweredFromHistory(events);
   paintWholePane(el, events, processEventsForDisplay(events), hasMore);
 }
@@ -416,14 +416,14 @@ function paintWholePane(el, events, display, hasMore) {
 }
 
 // drilledIn: an agent drill-in owns the pane (agent-team-ui §3.6.2): the session's
-// frames feed turnState and the cursors only; the way back repaints (#3698).
+// frames feed turnState and the cursors only; the way back repaints.
 const drilledIn = () => !!nzViews.agent?.activeTaskID();
 
 // keepReader / placeRepaint bracket a whole-pane paint. A repaint of the session
 // on screen (a resubscribe, the REST full fetch; a switch paints an empty shell)
 // puts its reader back where they stand, but pins one who was at the bottom or a
 // teammate's new message, as appendEvents does — not this tab's echo, which
-// replaces an optimistic bubble (#3687). A hidden pane has no position to keep.
+// replaces an optimistic bubble. A hidden pane has no position to keep.
 function keepReader(el) {
   if (!el.querySelector('.event')) return null;
   if (el.clientHeight) saveScrollPos(selection.key, selection.node);
@@ -437,7 +437,7 @@ function placeRepaint(el, kept) {
 }
 const lastUserUuid = (el) => [...el.querySelectorAll(':scope > .event.user[data-uuid]')].pop()?.getAttribute('data-uuid') || '';
 
-// trimEventsScroll bounds the live DOM (#398): drop oldest top children once the
+// trimEventsScroll bounds the live DOM: drop oldest top children once the
 // scroller exceeds MAX_LIVE_DOM_EVENTS. Preserves a pinned "load earlier" button
 // (it always lives at the top) and moves oldestFetchedEventTime to the new head
 // so a later loadEarlierEvents re-fetches whatever we just evicted, gap-free.
@@ -492,7 +492,7 @@ export function appendEvents(events) {
       // uuid is already on screen is a replay, and the first arrival of the
       // real user event replaces the optimistic bubble the send rendered.
       // Without this a send that left over WS and was echoed by the poll
-      // (socket dropped in between) painted the message twice (#2430).
+      // (socket dropped in between) painted the message twice.
       if (eventAlreadyRendered(el, e.uuid)) {
         if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
         return;
@@ -512,7 +512,7 @@ export function appendEvents(events) {
     if (e.type === 'user' && !echo) sawUser = true;
   });
   // Bound the live DOM before scroll/scan so a long streaming session can't
-  // grow #events-scroll without limit and OOM the tab (#398).
+  // grow #events-scroll without limit and OOM the tab.
   trimEventsScroll(el);
   if (sawUser) stickEventsBottom();
   else if (wasBottom) el.scrollTop = el.scrollHeight;
@@ -576,7 +576,7 @@ function appendHistoryBackfill(el, display) {
     }
     if (e.time && e.time > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = e.time;
   });
-  // Bound the live DOM on the incremental WS history path too (#398);
+  // Bound the live DOM on the incremental WS history path too;
   // mirror appendEvents — trim before the scrollHeight reads below.
   trimEventsScroll(el);
   if (sawUser) stickEventsBottom();
@@ -691,10 +691,10 @@ function appendLiveEvent(ev) {
   }
   el.insertAdjacentHTML('beforeend', html);
   // Advance the cursor on first render too, like appendEvents and onHistory: a
-  // uuid-less entry this push painted is otherwise admitted again (#2063).
+  // uuid-less entry this push painted is otherwise admitted again.
   if (evT && evT > transcript.lastRenderedEventTime) transcript.lastRenderedEventTime = evT;
   // Bound the live DOM so a long streaming session over the WS push path
-  // can't grow #events-scroll without limit and OOM the tab (#398). Must run
+  // can't grow #events-scroll without limit and OOM the tab. Must run
   // before the scrollHeight reads below, matching appendEvents.
   trimEventsScroll(el);
   if (isUser && !echo) stickEventsBottom();
@@ -760,7 +760,7 @@ const sessionFrames = {
       }
       resetTurnStateForUserEcho();
       // A user message after an AskUserQuestion means it was answered on some
-      // surface — lock the card before the bubble lands (#2430).
+      // surface — lock the card before the bubble lands.
       lockRenderedAskCards(document.getElementById('events-scroll'));
     } else if (ev.type === 'result') {
       applyTurnResult(ev);

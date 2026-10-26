@@ -1,9 +1,5 @@
-/* cron.css — extracted verbatim from dashboard.html's inline <style> block
- * (#2559 D6). The split is sequential: each file is a contiguous slice of the
- * original block and dashboard.html links them in the same order, so the
- * cascade (later rule wins at equal specificity, @media position) is
- * unchanged. Edit a view's rules here, next to the module that renders it.
- */
+/* cron.css — dashboard.html links the css files in a fixed order that the
+ * cascade depends on (later rule wins at equal specificity); keep it. */
 /* ===== Cron tab ===== */
 .cron-detail{flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden}
 .cron-detail-body{padding:16px 20px;overflow-y:auto;flex:1;min-height:0}
@@ -40,7 +36,7 @@
 .cron-empty-sub{color:var(--nz-text-faint);font-size:var(--nz-fs-sm);margin-bottom:16px;max-width:320px;margin-left:auto;margin-right:auto;line-height:1.5}
 .cron-empty-cta{padding:10px 22px;border-radius:var(--nz-radius-ms);border:1px solid var(--nz-blue);background:rgba(31,111,235,.12);color:var(--nz-accent);cursor:pointer;font-size:var(--nz-fs-sm2);font-family:inherit;min-height:40px}
 .cron-empty-cta:hover{background:rgba(31,111,235,.2)}
-/* R110-P2 cron filter bar (Round 139). The search input lives inside the
+/* cron filter bar. The search input lives inside the
    cron-detail-body but *outside* #cron-list-items so paint-the-list updates
    (keystroke-driven) don't clobber input value/focus. Chips mirror the
    sidebar-search aesthetic for consistency. */
@@ -387,7 +383,7 @@
 .cron-drawer-actions .cda-btn.primary:hover:not([disabled]){background:rgba(31,111,235,.12)}
 .cron-drawer-actions .cda-btn.danger{margin-left:auto;color:var(--nz-red);border-color:rgba(218,54,51,.45);background:transparent}
 .cron-drawer-actions .cda-btn.danger:hover{background:rgba(218,54,51,.12)}
-/* Round 2 R-4 — trigger button visual feedback states (RFC §4.3.1).
+/* trigger button visual feedback states (RFC §4.3.1).
  * is-running: pulse the same accent ring as cdc-card so the disabled
  *             button reads as "actively waiting", not just "greyed".
  * is-sending: 1 s spinner orbiting the ▷ glyph; opacity stays full so
@@ -500,7 +496,7 @@
 .cj-row.is-active.is-error{box-shadow:inset 4px 0 0 var(--nz-selected-bar),inset 0 0 0 1px rgba(218,54,51,.45)}
 .cj-row.is-active.is-missed{box-shadow:inset 4px 0 0 var(--nz-selected-bar),inset 0 0 0 1px rgba(210,153,34,.45)}
 .cj-row.is-active.is-running{background:var(--nz-row-active-running-bg);box-shadow:inset 4px 0 0 var(--nz-selected-bar)}
-/* cron-panel-consolidation-ui RFC §2 (Round 2 R-1) — responsive collapse
+/* cron-panel-consolidation-ui RFC §2 — responsive collapse
  * gated on the *main column width* rather than the viewport width. The
  * sidebar can occupy 200–60vw, so 1280px viewport with a 720px sidebar
  * leaves only ~560px for main; a viewport @media query miscategorises
@@ -612,8 +608,8 @@
      overflow-y:auto is the fallback for modals WITHOUT a .modal-body (every
      dashboard.js modal: 新建会话 / 项目设置 / API token / confirm / prompt /
      onboarding / cheatsheet …): their content would otherwise spill past the
-     85dvh cap with no scroll container, leaving .modal-btns unreachable
-     (#2434). Cron modals keep a .modal-body scroller: it shrinks to fit (a
+     85dvh cap with no scroll container, leaving .modal-btns unreachable.
+     Cron modals keep a .modal-body scroller: it shrinks to fit (a
      scroll container's min-height:auto resolves to 0), so the outer box never
      overflows and no second scrollbar appears. */
   .modal{max-height:85dvh;display:flex;flex-direction:column;overflow-y:auto}
@@ -650,8 +646,7 @@
 .modal.cheatsheet .ks-section{grid-column:1/-1;font-size:var(--nz-fs-xs);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-top:2px}
 /* Cheatsheet "好的" confirm is informational (dismiss), not a submit/save
    action — align it with the global primary blue (--nz-blue) instead of
-   the green used for send/save across the rest of the app (R110-P2 report:
-   "green #22c55e clashes with blue #4a9eff everywhere else"). Other modals
+   the green used for send/save across the rest of the app. Other modals
    keep green because their primary button semantically commits data. */
 .modal.cheatsheet .modal-btns button.primary{background:var(--nz-blue);border-color:var(--nz-blue)}
 

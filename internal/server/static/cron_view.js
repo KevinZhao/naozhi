@@ -61,12 +61,8 @@ import {
   showAPIError,
   showNetworkError,
 } from './utilities.js';
-// cron_view.js — Cron (定时任务) dashboard view.
-//
-// RFC docs/rfc/dashboard-cron-view-extraction.md (PR-1). Extracted verbatim
-// from dashboard.js (the "===== Cron Tab =====" region, ~3960 lines): job
-// list / drawer / create+edit forms / cron-expression parsing / run timeline
-// + transcript / live event subscription / context menus.
+// cron_view.js — Cron (定时任务) dashboard view: job list / drawer /
+// create+edit forms / run timeline / live event subscription / context menus.
 //
 // This module imports dashboard.js, so dashboard evaluates first: the
 // cronSortOrder initializer below finds lsGet ready, and the wsm.on
@@ -77,27 +73,14 @@ import {
 
 /* ===== Cron Tab ===== */
 
-// resize-fallback listener dedup flag (was a window property pre-#2557-E3).
+// resize-fallback listener dedup flag.
 let cronLayoutWindowListener = null;
 
-
-
-// cron-panel-consolidation RFC §4.2: sidebar / mainShell are now reserved
-// for human conversation surfaces and never paint cron-scheduler sessions.
-// The previous `cronVisibleKeys` whitelist + markCronSessionVisible plumbing
-// were UI bandages on top of /api/sessions returning cron stubs; PR2 moves
-// that filter into the server (internal/server/dashboard_session.go), so
-// the dashboard can simply assume no cron rows ever arrive. The single
-// helper retained from the old block was `isCronSessionKey`, kept for the
-// dismissSession safety check — moved to nz_util (#2557 PR-E1, imported
-// above). New cron-detail visibility lives in `cronDrawerState.jobId`
-// (PR4 / cronDrawerState.jobId state machine).
-// R110-P2 cron filter state — module-level so renderCronList can read the
-// live values each paint without a closure. Mirrors the sidebar-search
-// approach (cronFilterQuery is the substring, cronFilterStatus is one of
-// 'all' | 'active' | 'attention'). 'attention' matches paused-or-last_error,
-// aligning with the header cron-badge's attention definition so the filter
-// "what needs my eyeballs" dovetails with the top-level signal.
+// The sidebar never shows cron-scheduler sessions: the server filters them
+// out of /api/sessions (dashboard_session.go).
+// Cron filter state: cronFilterQuery is the substring, cronFilterStatus one
+// of 'all' | 'active' | 'attention' ('attention' = paused or last_error, the
+// header cron-badge's definition).
 let cronFilterQuery = '';
 let cronFilterStatus = 'all';
 
@@ -126,17 +109,10 @@ function cronSortComparatorsHasKey(k) {
 }
 
 // cronSortOrder 控制 cron 面板列表的排序模式。保存在 localStorage 里，
-// 切回页面保留用户偏好。四种模式见 cronSortComparators。cron-v2-polish §3.4。
-// R202606-CR-1: this initializer must run AFTER cronSortComparators (and the
-// cronSortComparatorsHasKey helper that closes over it) are defined. When the
-// IIFE sat above those definitions, a saved localStorage preference made it
-// call cronSortComparatorsHasKey while cronSortComparators was still in its
-// TDZ, throwing "Cannot access 'cronSortComparators' before initialization"
-// and crashing the whole cron panel on load. Keep it below this line.
+// 切回页面保留用户偏好。四种模式见 cronSortComparators。
+// Must stay below cronSortComparators: a saved preference calls
+// cronSortComparatorsHasKey, which would otherwise hit its TDZ.
 let cronSortOrder = (function() {
-  // RNEW-UX-004 demo: migrated to unified lsGet helper. Keyspace changed
-  // from 'nz_cron_sort' to 'nz:cron_sort' — one-time loss of the saved
-  // preference is acceptable (falls back to 'created_desc').
   const saved = lsGet('cron_sort', '');
   if (saved && cronSortComparatorsHasKey(saved)) return saved;
   return 'created_desc';
@@ -533,8 +509,8 @@ function toggleCronWsCustom() {
   const form = document.getElementById('cron-ws-custom-form');
   const toggle = document.getElementById('cron-ws-custom-toggle');
   if (!form) return;
-  // .nz-hidden is the single source of truth for this form's visibility
-  // (#2559 D6-3) — the renderer ships it and every toggle site flips the class.
+  // .nz-hidden is the single source of truth for this form's visibility —
+  // the renderer ships it and every toggle site flips the class.
   if (form.classList.contains('nz-hidden')) {
     form.classList.remove('nz-hidden');
     if (toggle) toggle.classList.add('nz-hidden');
@@ -639,8 +615,7 @@ function openCronPanel() {
   fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
 }
 
-// filterCronJobs is the pure match step for the R110-P2 cron panel filter.
-// Extracted so unit tests exercise the predicate without driving DOM. Match
+// filterCronJobs is the pure match step for the cron panel filter. Match
 // surface for the substring arm: title, prompt, work_dir, schedule, id (all
 // case-insensitive). title 放在最前，匹配优先 —— 人们搜索 cron 时最先想到
 // 的就是自己给任务起的那个名字。
@@ -797,11 +772,10 @@ function toggleCronMenu(id) {
 }
 
 // cronApplyRunStarted optimistically patches the in-memory cronStore.jobs row so
-// the "运行中" badge renders without a list refetch. P0 cron-run-history
-// (RFC §7.2 / §8.1) — the run-ended event triggers the authoritative
-// refetch a few seconds later. Tolerates an unknown job_id (we may receive
-// a started event for a freshly created job before the local list pulls
-// it; in that case the next fetchCronJobs reconciles).
+// the "运行中" badge renders without a list refetch; the run-ended event
+// triggers the authoritative refetch a few seconds later. Tolerates an unknown
+// job_id (we may receive a started event for a freshly created job before the
+// local list pulls it; in that case the next fetchCronJobs reconciles).
 function cronApplyRunStarted(msg) {
   if (!msg || !msg.job_id) return;
   const list = Array.isArray(cronStore.jobs) ? cronStore.jobs : [];
@@ -825,7 +799,7 @@ function cronApplyRunStarted(msg) {
   // 清掉 frozen 标记让用户能再次看到实时事件。否则 hourly 任务下一次
   // 跑时前端仍然会丢事件，看起来像 bug。
   cronFrozenRuns.delete(msg.job_id);
-  // Round 2 R-4: WS-confirmed run start clears the optimistic cooldown
+  // A WS-confirmed run start clears the optimistic cooldown
   // lock — the disabled-running label takes over from this point. If the
   // started event came from a non-manual trigger (scheduled/catchup), the
   // cooldown lock was never set so this is a no-op.
@@ -893,13 +867,13 @@ function cronApplyRunEnded(msg) {
 // least one job is running. Idle when no jobs are running.
 let cronRunningTickTimer = null;
 
-// cronRunningTickPaintScoped is the 1Hz tick body (#813). A full
-// renderCronPanel per second rebuilt every row just to advance one label, so
-// the tick only rewrites elapsed text: the running rows' .cj-when.running /
-// .cj-when-inline and the open drawer's .cdr-clock. Rows gaining or losing
-// is-running, and the banner itself appearing or going, stay with
-// run_started / run_ended → renderCronPanel. The drawer can show a running
-// job whose row a filter has hidden, so no running rows is not an early exit.
+// cronRunningTickPaintScoped is the 1Hz tick body. It only rewrites elapsed
+// text (a full renderCronPanel per second would rebuild every row): the running
+// rows' .cj-when.running / .cj-when-inline and the open drawer's .cdr-clock.
+// Rows gaining or losing is-running, and the banner itself appearing or going,
+// stay with run_started / run_ended → renderCronPanel. The drawer can show a
+// running job whose row a filter has hidden, so no running rows is not an early
+// exit.
 function cronRunningTickPaintScoped() {
   const host = document.getElementById('cron-list-items');
   if (!host) return;
@@ -946,7 +920,6 @@ function ensureCronRunningTick() {
   //   - 无 running job
   //   - 当前选中了某个 session（renderCronPanel 第一行就 return,timer 等于在浪费 CPU）
   //   - cron-list-items DOM 已不在文档（用户切到非 cron 视图）
-  // R220-FE-1: 修复 timer 永不停的内存/CPU 泄漏。
   const cronListMounted = !!document.getElementById('cron-list-items');
   const shouldRun = anyRunning && !selection.key && cronListMounted;
   if (shouldRun && !cronRunningTickTimer) {
@@ -958,8 +931,6 @@ function ensureCronRunningTick() {
         cronRunningTickTimer = null;
         return;
       }
-      // R243-PERF-8 / #813: scoped text update instead of full
-      // renderCronPanel rebuild. See cronRunningTickPaintScoped godoc.
       try { cronRunningTickPaintScoped(); } catch (_) {}
     }, 1000);
   } else if (!shouldRun && cronRunningTickTimer) {
@@ -981,10 +952,8 @@ function ensureCronRunningTick() {
 function cronJobCardHtml(j) {
   const titleStr = (j.title || '').trim() || firstNonEmptyLine(j.prompt || '', 60);
   const hasTitle = !!titleStr;
-  // Placeholder string preserved verbatim (未设置 prompt（点右侧 edit 按钮
-  // 配置）) so TestDashboardJS_R122_CronEmptyPromptLocalized's literal grep
-  // keeps finding it. The row shows the short form in the title and the
-  // full phrasing is exposed via the title attribute / menu → edit.
+  // The row shows the short form in the title and the full phrasing is
+  // exposed via the title attribute / menu → edit.
   const emptyPromptHint = '未设置 prompt（点右侧 edit 按钮配置）';
   const displayTitle = hasTitle ? titleStr : '未设置 prompt';
 
@@ -1154,8 +1123,7 @@ function cronStatsBadgeHtml(j) {
 // cronStateDotClass / cronStateLabel —— 单一状态色 / 文案表，详情页时间轴 +
 // 列表 tooltip 共用，避免两处不一致。RFC §8.2 配色：
 //   succeeded 绿 / failed 红 / skipped 灰 / timed_out 橙 / canceled 紫 / running 蓝脉动
-// 词表本体在 nz_util.runStateDot / runStateLabel（#2540 统一 run 词表）；
-// 这两个名字保留为薄委托，60+ 调用点与既有锚点不用动。
+// 词表本体在 nz_util.runStateDot / runStateLabel，这两个名字是薄委托。
 function cronStateDotClass(state) { return runStateDot(state); }
 function cronStateLabel(state) { return runStateLabel(state); }
 
@@ -1366,8 +1334,7 @@ function renderCronPanel() {
   // flips route through renderCronList directly without touching the shell.
   renderCronList();
   renderCronDrawer();
-  // cron-panel-consolidation-ui RFC §2 (Round 2 R-1) — wire the layout
-  // observer once the shell is in the DOM. The CSS rules key off
+  // Wire the layout observer once the shell is in the DOM. The CSS rules key off
   // `[data-cron-layout]` on `.cron-detail-body`; this writes that
   // attribute based on the *element's actual width*, not the viewport.
   setupCronLayoutObserver();
@@ -1443,11 +1410,9 @@ function setupCronLayoutObserver() {
 }
 
 async function cronPause(id) {
-  // RNEW-UX-003 (#444): fetchJSON wraps fetch with AbortController + 10s
-  // timeout so a NAT-dropped TCP connection no longer hangs the pause
-  // button silently. err.status carries the HTTP status for the existing
-  // showAPIError surface; thrown errors without err.status are network
-  // failures and route to showNetworkError.
+  // fetchJSON's 10s timeout keeps a NAT-dropped connection from hanging the
+  // button. err.status carries the HTTP status for showAPIError; errors
+  // without it are network failures and route to showNetworkError.
   try {
     const headers = { 'Content-Type': 'application/json' };
     await fetchJSON(NZ_CONTRACT.API.cron_pause, { method: 'POST', headers, body: JSON.stringify({ id }) });
@@ -1459,7 +1424,6 @@ async function cronPause(id) {
 }
 
 async function cronResume(id) {
-  // RNEW-UX-003 (#444): see cronPause godoc for fetchJSON migration rationale.
   try {
     const headers = { 'Content-Type': 'application/json' };
     await fetchJSON(NZ_CONTRACT.API.cron_resume, { method: 'POST', headers, body: JSON.stringify({ id }) });
@@ -1471,7 +1435,7 @@ async function cronResume(id) {
 }
 
 async function cronDelete(id) {
-  // Round 2 R-12 (RFC §7.5): destructive flow rewrite.
+  // Destructive flow:
   // - Statistic in title ("32 次执行记录") so user weighs the loss
   // - Mention JSONL preservation + how to find session_id without
   //   leaking the raw `claude --resume` command at the L1/L2 user
@@ -1513,14 +1477,10 @@ async function cronDelete(id) {
     countdownSecs: 3,
   });
   if (!ok) return;
-  // RNEW-UX-003 (#444): fetchJSON wraps fetch with AbortController + 10s
-  // timeout so a NAT-dropped TCP connection no longer hangs the destructive
-  // delete flow silently. The button is already disabled by the modal
-  // confirm flow above so a deterministic timeout is the right surface.
   try {
     const headers = {};
     await fetchJSON(NZ_CONTRACT.API.cron + '?id=' + encodeURIComponent(id), { method: 'DELETE', headers });
-    // R220-FE-2: 释放该 job 在前端持有的 timeline 状态（runs / details / pagination
+    // 释放该 job 在前端持有的 timeline 状态（runs / details / pagination
     // 游标 / fetched 标记），避免 cronTimelineState 累积已删除 job 的内存。
     if (cronTimelineState[id]) delete cronTimelineState[id];
     // cron-panel-consolidation RFC §4.5 state-machine row "G. 删除中":
@@ -1542,14 +1502,9 @@ async function cronDelete(id) {
 // custom expression by hand), we surface the raw expression in the advanced
 // disclosure so it can still be edited without loss.
 function editCronJob(id) {
-  // R236-SEC-08 (#494): the poll fetches with ?compact=1 so j.prompt
-  // may be truncated to 256 bytes for any job whose full body exceeds
-  // that. Refetch the full job before opening the editor — if we
-  // skipped this, saving the modal would persist the truncated prompt
-  // back to disk, silently destroying the user's data. The refetch
-  // helper returns { ok, ... } so we can refuse to open the editor on
-  // a fetch failure rather than handing the user a 256-byte preview
-  // that Save would happily commit back to disk (R251-FOLLOWUP / #494).
+  // The poll fetches with ?compact=1, so j.prompt may be truncated to 256
+  // bytes. Refetch the full job before opening the editor, and refuse to
+  // open on a fetch failure: saving a truncated prompt would destroy it.
   cronRefetchFullJob(id).then(res => {
     if (!res || !res.ok) {
       const reason = res && res.reason;
@@ -1590,7 +1545,6 @@ function openCronEditModal(id, job, backendHtml) {
   // schedule (UI shows Daily/09:00 default which is a visual lie without
   // the hint). _cronScheduleTouched stays false so "save without touching
   // the frequency controls" preserves the legacy expression intact.
-  // 关联 Issue #1（Round ? review）。
   const initialDesc = parseCronToFreq(job.schedule);
   const scheduleHtml = buildScheduleSection(
     initialDesc || { mode: 'daily', time: '09:00' },
@@ -1782,7 +1736,7 @@ document.addEventListener('keydown', function(e) {
   if (!cronExpandedRunId || !cronExpandedRunId.runId) return;
   if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
   if (e.metaKey || e.ctrlKey || e.altKey) return;
-  // #2435: the expanded run survives leaving the cron view / opening a modal,
+  // The expanded run survives leaving the cron view / opening a modal,
   // so gate on the live view + no overlay, or ↑↓ would preventDefault and
   // silently switch an invisible run. activeView is dashboard.js top-level
   // state (same pattern as renderCronPanel's guard above).
@@ -1799,19 +1753,13 @@ document.addEventListener('keydown', function(e) {
 fetchCronJobs();
 
 
-// ─── data-action registry (#1980, docs/rfc/csp-data-action.md) ─────────────
+// ─── data-action registry (docs/rfc/csp-data-action.md) ────────────────────
 // Every handler the cron view's generated HTML wires via data-action(-<type>)
 // attributes. Parameters ride sibling data-* attributes (escAttr, always
-// double-quoted); keys are code literals by contract.
-//
-// stopPropagation note: the pre-#1980 inline handlers on nested controls
-// (schedule chip / run / menu inside a clickable row) used
-// event.stopPropagation() to keep the row's open handler from firing. The
-// dispatcher's closest()-single-dispatch makes that structural: a click on
-// the button resolves to the button's action only, so the calls are dropped.
-// Document-level closers (cron menu / dashboard popovers) now see these
-// clicks — each has its own provenance guard (menu.contains, closest
-// checks), audited per RFC.
+// double-quoted); keys are code literals by contract. The dispatcher's
+// closest() single dispatch means a click on a nested button fires only its
+// own action, so no stopPropagation is needed; document-level closers see
+// these clicks and guard by provenance (menu.contains, closest).
 
 // cronIdOf resolves a job id for row-scoped actions: explicit data-id on the
 // element (drawer buttons) or the enclosing row's data-cron-id.
@@ -1867,7 +1815,7 @@ registerActions({
 });
 
 // ─── WS run frames and nz.bus subscriptions ────────────────────────────────
-// Run frames (#2540) from subsystem cron: the handlers key on job_id, so
+// Run frames from subsystem cron: the handlers key on job_id, so
 // owner_id is projected onto it here, once, at the wire boundary.
 const cronRun = (msg) => msg.subsystem === 'cron';
 wsm.on(NZ_CONTRACT.WS.run_started, (msg) => cronApplyRunStarted(Object.assign({}, msg, { job_id: msg.owner_id })), cronRun);
@@ -1883,5 +1831,5 @@ wsm.on(NZ_CONTRACT.WS.run_ended, (msg) => {
 // A reconnect with no live stream to resume re-checks whether the open drawer
 // should start one; cron_live's own onReady (registered first) resumes one.
 wsm.onReady(() => { if (!cronLive.jobId) ensureCronLiveSubscription(); });
-// dashboard cannot import cron_view (#2557 PR-E1), so it opens the panel over nz.bus.
+// dashboard cannot import cron_view, so it opens the panel over nz.bus.
 nzBus.addEventListener('cron:open-panel', () => openCronPanel());

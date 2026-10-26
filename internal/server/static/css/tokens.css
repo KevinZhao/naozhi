@@ -1,9 +1,5 @@
-/* tokens.css — extracted verbatim from dashboard.html's inline <style> block
- * (#2559 D6). The split is sequential: each file is a contiguous slice of the
- * original block and dashboard.html links them in the same order, so the
- * cascade (later rule wins at equal specificity, @media position) is
- * unchanged. Edit a view's rules here, next to the module that renders it.
- */
+/* tokens.css — dashboard.html links the css files in a fixed order that the
+ * cascade depends on (later rule wins at equal specificity); keep it. */
 :root{
   --nz-bg-0:#0d1117;--nz-bg-1:#161b22;--nz-bg-2:#21262d;--nz-border:#30363d;
   --nz-text:#c9d1d9;--nz-text-strong:#f0f6fc;--nz-text-mute:#8b949e;
@@ -23,12 +19,9 @@
      fill stays consistent with any future Anthropic-tinted accents. */
   --nz-clawd-rust:#d97757;
   --nz-focus:#58a6ff;
-  /* R110-P1 status-dot palette: side-bar session cards render three
-     states via .dot-running / .dot-ready / .dot-new. Before Round 126
-     running was solid green and ready was solid blue — similar hue
-     weights at 6px made it hard to scan which session was actively
-     working. Running now maps to --nz-amber (matching the already-
-     established .sidebar-status .connecting convention) plus the
+  /* status-dot palette: side-bar session cards render three
+     states via .dot-running / .dot-ready / .dot-new. Running maps to
+     --nz-amber (the .sidebar-status .connecting convention) plus the
      global @keyframes pulse so it draws attention; ready stays a
      steady green; new stays dashed blue. Both animations degrade to
      static under `prefers-reduced-motion` via the site-wide guard
@@ -37,7 +30,7 @@
   --nz-status-running:var(--nz-amber);
   --nz-status-ready:var(--nz-green);
   --nz-status-new:var(--nz-blue);
-  /* R110-P2 font stack: the body stack above (system-ui + PingFang / Noto CJK
+  /* font stack: the body stack above (system-ui + PingFang / Noto CJK
      + sans-serif) handles CJK well. For tabular / code-ish surfaces we
      canonicalize here so future code can use var(--nz-font-mono) instead of
      copy-pasting the stack. Existing `.fv-*` / `.md-*` rules still hard-code
@@ -45,12 +38,8 @@
      visually equivalent. A bare `monospace` fallback keeps compatibility
      with browsers that don't know ui-monospace yet. */
   --nz-font-mono:'SF Mono',SFMono-Regular,ui-monospace,Consolas,'Liberation Mono',Menlo,monospace;
-  /* ---------- R20260606 design-system scales ----------
-     Type / radius / space were previously ad-hoc literals (15 distinct
-     font-size values, 15 distinct border-radius values, off-grid padding).
-     These tokens mirror the colour-token discipline above so future rules
-     reference a scale instead of a magic number. New rules MUST use these;
-     a CI guard (check-style-literals) fails the build on fresh
+  /* ---------- design-system scales ----------
+     Type / radius / space scales: new rules reference these instead of
      font-size:Npx / border-radius:Npx literals. */
   --nz-fs-2xs:10px;      /* micro meta / dense chip count (below fs-xs) */
   --nz-fs-xs:11px;       /* badge / timestamp / meta (mono small) */
@@ -61,7 +50,7 @@
   --nz-fs-lg:20px;       /* section / drawer title */
   --nz-fs-xl:28px;       /* page title / empty-state heading */
   --nz-fs-display:40px;  /* stat big number / login heading */
-  /* R20260610-UI-4: 10px/13px and 3px/6px were the two highest-volume
+  /* 10px/13px and 3px/6px were the two highest-volume
      off-scale literals. Rather than reflow the UI by snapping them to an
      adjacent token, they're adopted into the scale as their own steps
      (sm2 / 2xs, radius-xs / radius-ms) so migration is a pure literal→token
@@ -94,7 +83,7 @@
   --nz-ease:cubic-bezier(.2,.8,.2,1);
   --nz-ease-out:cubic-bezier(.16,1,.3,1);
   --nz-dur:.15s;
-  /* R20260610-UI-9 loading/activity loop cadence. Before, indicator pulses
+  /* loading/activity loop cadence. Before, indicator pulses
      ran at a grab-bag of rates (1.4s/1.5s/.6s) so a spinner and a running-dot
      on screen together beat out of sync. --nz-dur-loop is the single cadence
      for "I'm working" pulses (skeleton shimmer, status / running dots, cron
@@ -103,7 +92,7 @@
   --nz-dur-loop:1.5s;
   --nz-dur-spin:.75s;
   --nz-selection-bar:3px; /* single source for the selected-row left edge */
-  /* ---------- Selection accent (ui-polish-light-theme D1) ----------
+  /* ---------- Selection accent ----------
      "Selected / active" rows previously spoke two colour languages: the
      session card used brand rust while palette / cron / agent rows used a
      blue wash + accent inset bar. One semantic, one colour: selection is
@@ -113,7 +102,7 @@
      automatically. New selected/active states MUST use these tokens. */
   --nz-selected-bg:var(--nz-rust-subtle);
   --nz-selected-bar:var(--nz-rust);
-  /* ---------- Overlay z-index scale (R20260610-UI-2) ----------
+  /* ---------- Overlay z-index scale ----------
      Overlays previously each picked an ad-hoc z-index (lightbox shipped a
      wild 9999), so multi-layer stacking order was unpredictable. These tokens
      give a single ordered scale; rules reference the token nearest their tier
@@ -131,12 +120,11 @@
        toast    (transient status — the TOPMOST tier. A toast is a
                  pointer-events:none notification that must stay readable
                  while the voice overlay or the lightbox is open, e.g. the
-                 "录音失败" / "下载失败" error it reports about them. #2434)
+                 "录音失败" / "下载失败" error it reports about them.)
      Sub-steps (+1/+2) stay as literal offsets at the rule (e.g. ctx-menu sits
      one above its overlay) to avoid a token per micro-layer. */
   /* Below the popover tier: surfaces that must clear the page chrome but stay
-     under any popover/drawer. #2559 D6-2 replaced these literals in place —
-     values are unchanged, only the name is new.
+     under any popover/drawer.
        rail      mobile activity bar pinned to the viewport bottom (was 30)
        chip-pop  hover card anchored to a list row, e.g. cj-stats-pop (was 50)
        backdrop  transparent click-away layer under the history popover (99);
@@ -157,14 +145,14 @@
   --nz-z-overlay:300;
   --nz-z-lightbox:400;
   --nz-z-toast:450;
-  /* Blocking-modal scrim (R20260610-UI-3). modal / voice / cmd-palette each
+  /* Blocking-modal scrim. modal / voice / cmd-palette each
      dimmed the background at a different opacity (.75 / .75 / .6), giving the
      same "a blocking layer is open" cue inconsistent weight. One token unifies
      them at .75. NOT applied to the lightbox (.85 — image viewing wants a
      darker theatre) or the mobile history sheet (.4 — a transient popover, not
      a blocking modal); those keep their intentional values. */
   --nz-scrim:rgba(0,0,0,.75);
-  /* ---------- Elevation shadows (ui-polish-light-theme D2) ----------
+  /* ---------- Elevation shadows ----------
      Floating surfaces each hand-tuned a black shadow for the dark theme
      (alpha .4–.6); on the light theme those never got an override, so every
      popover/menu/drawer cast a heavy black halo on white. Four tiers replace
@@ -179,7 +167,7 @@
   --nz-shadow-2:0 8px 24px rgba(0,0,0,.5);       /* popover / menu / tooltip-pop */
   --nz-shadow-3:0 16px 48px rgba(0,0,0,.5);      /* modal / command palette */
   --nz-shadow-drawer:-2px 0 12px rgba(0,0,0,.4); /* right-hand drawer */
-  /* ---------- Light-theme parity tokens (R20260608) ----------
+  /* ---------- Light-theme parity tokens ----------
      #453 shipped light theme as a "minimal scaffold": many component rules
      still hard-coded GitHub-Dark hex (near-white text, dark-blue fills) that
      never got a light override, so on a white bg they fell to <2:1 contrast
@@ -222,20 +210,20 @@
   --nz-memlink-reference-bg:#3a1a3a;    /* [[reference]] memory chip */
   --nz-memlink-reference-fg:#d97af7;
   /* Backend / access-profile chip text on the inline chip_color fill: white +
-     shadow on dark; light swaps to dark text, no shadow (#2434). */
+     shadow on dark; light swaps to dark text, no shadow. */
   --nz-backend-chip-fg:#fff;
   --nz-backend-chip-shadow:0 1px 1px rgba(0,0,0,.35);
   --nz-backend-chip-border:rgba(0,0,0,.18);
   /* Semantic status aliases (workflow panel, exit chips) — inherit the light remap
-     of green / amber / red, so no per-theme redefinition needed (#2434). */
+     of green / amber / red, so no per-theme redefinition needed. */
   --nz-ok:var(--nz-green);--nz-warn:var(--nz-amber);--nz-err:var(--nz-red);
-  /* history-popover project label gold (R20260610-UI-1). Was a bare #d4a017 in
+  /* history-popover project label gold. Was a bare #d4a017 in
      the .hp-project rule with no light override; on a white surface the dark
      gold dropped below AA. Tokenised here (dark default preserves the original)
      so the light blocks remap it to a deeper gold that clears AA. */
   --nz-project-label-fg:#d4a017;
 }
-/* THEME-1 (#453) — light theme + system follow modes. The dashboard was
+/* THEME-1 — light theme + system follow modes. The dashboard was
    GitHub-Dark hardcoded; users who prefer light or want to follow OS now
    have an explicit toggle (sidebar header gear icon, JS cycles auto→light
    →dark and persists `nz_theme` to localStorage). The token list below is
@@ -254,7 +242,7 @@
   --nz-text:#1f2328;--nz-text-strong:#0d1117;--nz-text-mute:#656d76;
   /* text-dim was #8b949e copied from dark theme, where it clears AA on a dark
      bg; on #fff it lands ~3.0:1 and fails AA for body-sized text. #6e7781
-     gives ~4.6:1. text-faint stays decorative/disabled-only. R20260606. */
+     gives ~4.6:1. text-faint stays decorative/disabled-only. */
   --nz-text-dim:#6e7781;--nz-text-faint:#afb8c1;
   /* AA-compliant placeholder on light --nz-bg-1 (#f6f8fa); faint #afb8c1
      is only ~2.0:1 here, so placeholders use this dedicated token. */
@@ -268,7 +256,7 @@
   --nz-status-new:var(--nz-blue);
   --nz-rust-fg:#bc4c2e;--nz-rust:#d97757;--nz-rust-emphasis:#a8421f;
   --nz-rust-subtle:rgba(217,119,87,.12);
-  /* Light-theme parity (R20260608): remap the dark literals tokenised in
+  /* Light-theme parity: remap the dark literals tokenised in
      :root above to values that clear AA on a white/near-white surface. */
   --nz-event-agent-fg:#0a3069;          /* deep blue, ~9:1 on white */
   --nz-event-user-fg:#0d1117;           /* user bubble sits on pale blue tint */
@@ -315,7 +303,7 @@
     --nz-status-new:var(--nz-blue);
     --nz-rust-fg:#bc4c2e;--nz-rust:#d97757;--nz-rust-emphasis:#a8421f;
     --nz-rust-subtle:rgba(217,119,87,.12);
-    /* Light-theme parity (R20260608) — mirror of the explicit light block. */
+    /* Light-theme parity — mirror of the explicit light block. */
     --nz-event-agent-fg:#0a3069;
     --nz-event-user-fg:#0d1117;
     --nz-code-fg:#1f2328;

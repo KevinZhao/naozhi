@@ -1,4 +1,4 @@
-// render_md.js — markdown / KaTeX / mermaid rendering (#2558 D4).
+// render_md.js — markdown / KaTeX / mermaid rendering.
 //
 // The dashboard's XSS-critical surface: every renderer here routes untrusted
 // text through esc()/escAttr()/safeUrl(); static_sanitize_test.go,
@@ -268,7 +268,7 @@ function renderProse(part) {
   // Alternation puts single-line `code` spans first so a `\(...\)` written
   // inside backticks (e.g. a regex like `\(\d+\)`) is skipped here and
   // reaches inlineMd intact, where the code-span pass claims it before the
-  // math pass (#2428). Code spans are returned verbatim — no placeholder —
+  // math pass. Code spans are returned verbatim — no placeholder —
   // so nothing new can leak into later markdown stages. `[^`\n]` mirrors
   // inlineMd's per-line code-span scope; a stray backtick pair spanning
   // lines is not a code span there either.
@@ -745,7 +745,7 @@ function runMermaid() {
 }
 
 // mermaidThemeName maps the resolved dashboard theme (data-theme, with
-// 'auto' following prefers-color-scheme) to a mermaid theme name (#2429).
+// 'auto' following prefers-color-scheme) to a mermaid theme name.
 function mermaidThemeName() {
   const t = document.documentElement.dataset.theme;
   if (t === 'light') return 'default';
@@ -806,7 +806,7 @@ function isMathInline(tex) {
   if (/[\\^_{}]/.test(tex)) return true;
   // Bare 1-2 letter variable / segment name (`$x$`, `$AB$`): no digit,
   // operator, or call shape to hint on, but the outer `$` guard already
-  // rejected the alphanumeric-adjacent prose case, so accept it (#2428).
+  // rejected the alphanumeric-adjacent prose case, so accept it.
   // 3+ letters (`$USD$`) still fall through to the hint check below.
   if (/^[a-zA-Z]{1,2}$/.test(tex)) return true;
   if (!/^[\s\d+\-*/=<>≤≥≠±·×÷!().,;\[\]|a-zA-Z]+$/.test(tex)) return false;
@@ -819,7 +819,7 @@ function isMathInline(tex) {
 // BLOCK_SPLIT_RE (`tex` is the inner text, `$$` already stripped). Shell
 // prose uses `$$` for the current PID, so two of them on one line
 // (`echo $$ then kill $$`) form a syntactically valid display-math pair
-// whose "formula" is the prose in between (#2428). Accept when:
+// whose "formula" is the prose in between. Accept when:
 //   1) an unambiguous LaTeX / equation char is present (\ ^ _ { } =)
 //   2) the block spans multiple lines — a deliberately fenced formula block
 //   3) otherwise the same heuristic as inline `$...$` (isMathInline)
@@ -909,7 +909,7 @@ function renderTexDoc(src) {
    the initial history, plus nav rebuilds, plus preview polls. */
 const _mdCache = new Map();
 const _MD_CACHE_MAX = 500;
-// Cacheable inputs are under 2000 chars (#454): short stable replies are what
+// Cacheable inputs are under 2000 chars: short stable replies are what
 // re-render unchanged on nav rebuild and preview poll. A longer input is a
 // final reply rendered once or a streaming event whose key changes on every
 // push; caching it never hits and evicts the short bubbles that would.
@@ -917,7 +917,7 @@ const _MD_CACHE_INPUT_MAX = 2000;
 // Any construct that can mint a unique DOM id (mmd-N via ```mermaid, ktx-N
 // via $ / \[ / \( / \begin{env}) must bypass the cache: a cached pending
 // span keeps a `ktx-N` id whose katexPending entry is deleted on first
-// flush, so later cache hits would show raw TeX forever (#2428). Every
+// flush, so later cache hits would show raw TeX forever. Every
 // alternative in BLOCK_SPLIT_RE plus inlineMd's inline math triggers is
 // mirrored here; keep them in sync.
 const _MD_UNCACHEABLE_RE = /```|\$|\\\[|\\\(|\\begin\{/;
@@ -940,7 +940,7 @@ function renderMd(s) {
   return out;
 }
 
-// ─── exports (#2558 D4) ─────────────────────────────────────────────────────
+// ─── exports ─────────────────────────────────────────────────────
 export {
   BLOCK_SPLIT_RE,
   LIST_ITEM_RE,

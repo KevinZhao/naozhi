@@ -1,6 +1,5 @@
 // cron_trigger.js — the 立即执行 (TriggerNow) flow and its visual-feedback
-// cooldown state machine (#2715 D4 follow-up: cron_view.js four-region
-// split, region 4).
+// cooldown state machine.
 //
 // Owns the 200ms cooldown tick that walks sending → sent → clear. The
 // per-jobId trigger timestamps (cronJustTriggered) and the primary button's

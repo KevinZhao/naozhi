@@ -1,10 +1,7 @@
-// discovery.js — extracted from dashboard.js (#2558 D4).
-//
-// Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects and helpers are
-// imported. session_list.js imports this module, so debouncedFetchSessions is a
-// shell slot.
+// discovery.js — scanning, previewing and taking over the terminal sessions
+// found on disk.
+// Layering: never import dashboard.js back. session_list.js imports this
+// module, so debouncedFetchSessions is a shell slot.
 import { NZ_CONTRACT } from './contract.js';
 import { selection, sessionList, timers, transcript } from './state.js';
 import { esc, fetchJSON } from './nz_util.js';
@@ -22,11 +19,11 @@ import { shell } from './shell.js';
 async function scanDiscovered() {
   try {
     const headers = {};
-    // RNEW-UX-003: 10s timeout — /api/discovered walks the filesystem, so a
+    // 10s timeout — /api/discovered walks the filesystem, so a
     // stalled disk shouldn't wedge the scan button forever.
     const data = await fetchJSON(NZ_CONTRACT.API.discovered, { headers, timeoutMs: 10000 });
     sessionList.discoveredItems = data || [];
-    // #1770: only force a full sidebar re-render when the discovered set
+    // only force a full sidebar re-render when the discovered set
     // actually changed (the nodesHash/historyHash pattern fetchSessions uses).
     const discoveredHash = JSON.stringify(sessionList.discoveredItems);
     if (discoveredHash === sessionList.lastDiscoveredJSON) return;
@@ -93,7 +90,7 @@ function appendPreviewEvents(el, fresh) {
 // arms it, after its generation check, and any older generation's interval
 // was cleared by the stopPreviewPolling() in its prologue.
 function startPreviewPolling(gen, url) {
-  // #1770: a fetch can outlast the 2s interval on a slow link; without this
+  // a fetch can outlast the 2s interval on a slow link; without this
   // flag consecutive ticks pile up concurrent requests.
   let previewInFlight = false;
   timers.preview = setInterval(async () => {
@@ -154,7 +151,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, typeL
     const cwdParam = cwd ? '&cwd=' + encodeURIComponent(cwd) : '';
     const url = NZ_CONTRACT.API.discovered_preview + '?session_id=' + encodeURIComponent(sessionId) + nodeParam + cwdParam;
     const headers = {};
-    // RNEW-UX-003: 10s timeout — a hung JSONL read shouldn't trap the user
+    // 10s timeout — a hung JSONL read shouldn't trap the user
     // on a "加载中..." splash indefinitely.
     let events;
     try {

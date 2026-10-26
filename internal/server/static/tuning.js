@@ -1,13 +1,8 @@
-// tuning.js — extracted from dashboard.js (#2558 D4).
-//
-// Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block and the export block below are the only additions.
-//
-// Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects and helpers are
-// imported. session_list.js imports this module, so the session_list functions
-// it calls back are shell slots, as is dashboard's renderMainHeader.
+// tuning.js — per-session tuning: the tuning popover, rename, dismiss and
+// the git-state chip.
+// Layering: never import dashboard.js back. session_list.js imports this
+// module, so the session_list functions it calls are shell slots, as is
+// dashboard's renderMainHeader.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, serverInfo, sessionList } from './state.js';
 import { esc, escAttr, fetchJSON, isCronSessionKey, showToast } from './nz_util.js';
@@ -430,7 +425,7 @@ async function renameSession() {
   if (!selection.key) return;
   const s = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
   const current = s.user_label || '';
-  // RNEW-UX-013: replaced window.prompt with themed promptDialog so the
+  // replaced window.prompt with themed promptDialog so the
   // rename flow matches the rest of the dashboard (dark theme, trapFocus,
   // Esc/backdrop cancel) and doesn't block the event loop on mobile.
   const input = await promptDialog({

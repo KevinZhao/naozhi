@@ -75,7 +75,7 @@ import { formatFileSize } from './utilities.js';
       // project — rather than a shortest-path heuristic. The old heuristic
       // (shortest .path wins) could pick an unrelated short-path project
       // (e.g. "/x" beating "/home/user/workspace"), landing the operator in
-      // the wrong tree on multi-project deployments (#2282).
+      // the wrong tree on multi-project deployments.
       var root = null;
       state.roots.forEach(function (p) {
         if (p.is_root) root = p;

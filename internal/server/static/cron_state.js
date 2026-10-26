@@ -176,9 +176,9 @@ export async function fetchCronJobs() {
   const fetchStartedAt = Date.now();
   try {
     const headers = {};
-    // RNEW-UX-003: 8s timeout, so a hung disk/fs call releases before the next fetch.
+    // 8s timeout, so a hung disk/fs call releases before the next fetch.
     //
-    // R236-SEC-08 (#494): the poll asks for compact rows, `prompt` clipped to
+    // The poll asks for compact rows, `prompt` clipped to
     // 256 UTF-8 bytes per job (full prompts scale to 8 KiB × N every tick) and
     // `prompt_truncated:true` where clipped. The editor and drawer refetch the
     // full job (cronRefetchFullJob) when they need the bytes.
@@ -217,7 +217,7 @@ export async function fetchCronJobs() {
 }
 
 // cronRefetchFullJob refills `cronStore.jobs[i].prompt` for a single job from
-// the non-compact /api/cron endpoint (R236-SEC-08 / #494). The poll path
+// the non-compact /api/cron endpoint. The poll path
 // uses ?compact=1 which clips prompts to 256 bytes — that's fine for the
 // list view but the editor / drawer detail need the full body before the
 // user can save without truncating their own data.

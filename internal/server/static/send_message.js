@@ -1,11 +1,8 @@
-// send_message.js — extracted from dashboard.js (#2558 D4).
-//
-// Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects and helpers are
-// imported. event_stream.js and session_list.js import this module, so
-// fetchEvents and fetchSessions are shell slots, as is dashboard's
-// selectSession.
+// send_message.js — sending from the composer: the WS / HTTP send paths, the
+// optimistic user bubble and running flip, and their rollback.
+// Layering: never import dashboard.js back. event_stream.js and
+// session_list.js import this module, so fetchEvents and fetchSessions are
+// shell slots, as is dashboard's selectSession.
 import { NZ_CONTRACT } from './contract.js';
 import { composer, perSession, selection, sessionList, timers } from './state.js';
 import { interruptSession, startTurnTimer, turnState, updateSendButton } from './running_banner.js';
@@ -50,7 +47,7 @@ function clearMsg(el) { if (el) el.textContent = ''; }
 // uploads). Toasts and returns false when the send must abort. sendMessage
 // calls it twice: once before closing the reentrancy gate and again after
 // `await awaitPendingOrients()` — the composer stays editable during that wait,
-// so text and attachments captured before the await can be stale (#2405).
+// so text and attachments captured before the await can be stale.
 function validateComposerForSend(text) {
   // Multi-Backend RFC §8.3 D9 — `/urgent` preempts the running turn, which
   // needs the backend's `passthrough` feature (kiro / ACP have none; the
@@ -267,7 +264,7 @@ function consumeSpawnFields(key, f, sendId) {
 
 // restoreSpawnFields undoes it for send sendId once rejected before spawn (HTTP
 // 4xx/5xx, send_ack error), so the retry carries the picks. Another
-// send's rejection, or a listed key, keeps them consumed (#3586).
+// send's rejection, or a listed key, keeps them consumed.
 export function restoreSpawnFields(key, sendId) {
   const p = perSession.sentPicks[key];
   if (!p || p.sendId !== sendId || sessionList.sessionsData[sid(key, p.node || 'local')]) return;

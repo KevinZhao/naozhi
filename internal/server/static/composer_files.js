@@ -1,8 +1,6 @@
 // composer_files.js — composer attachments: file picker, upload queue,
-// thumbnail drag-reorder and the HEIC/orientation pre-pass (#2558 D4-3).
-//
-// Verbatim move out of dashboard.js; only the import + dep-wiring lines are
-// new. Layering (D4-1 rule): never import dashboard back.
+// thumbnail drag-reorder and the HEIC/orientation pre-pass.
+// Layering: never import dashboard.js back.
 import { NZ_CONTRACT } from './contract.js';
 import { composer } from './state.js';
 import { esc, escAttr, showToast } from './nz_util.js';

@@ -23,7 +23,7 @@ export function nodeColor(id) {
 }
 
 // Discovered-card identity is (pid, node): pids repeat across nodes, so every
-// key/lookup/removal goes through these helpers (#2431). Key shape is
+// key/lookup/removal goes through these helpers. Key shape is
 // '_discovered:<pid>:<node>' — pid stays in slot 1 for parseDiscoveredPid.
 export function discoveredKey(pid, node) {
   return '_discovered:' + pid + ':' + (node || 'local');

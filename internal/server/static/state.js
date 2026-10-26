@@ -3,7 +3,7 @@
 // Every object here is exported as a const and changed field by field, never
 // replaced, so a module that imports it always sees the current values: no
 // copy taken at startup can go stale, and no write can land on a property
-// nobody reads (#2550). A module owns the fields it writes; others read them.
+// nobody reads. A module owns the fields it writes; others read them.
 //
 // This module imports nothing, so any module can import it without a cycle.
 
@@ -25,7 +25,7 @@ export const selection = {
   key: null,
   // Initialized in dashboard.js at load.
   node: null,
-  // #2431: last (session, state) pushed through updateSendButton — the main-area
+  // last (session, state) pushed through updateSendButton — the main-area
   // state that is actually on screen, whichever path (WS push, optimistic flip,
   // renderMainShell, REST reconcile) applied it. The fetchSessions reconcile
   // compares against this so a 5 s fallback poll only re-applies a state that
@@ -76,7 +76,7 @@ export const transcript = {
   // because the next tick will pick up any accumulated events via `after=`
   // anyway.
   //
-  // A `full` fetch must NOT be coalesced (#2430): it is the session-switch
+  // A `full` fetch must NOT be coalesced: it is the session-switch
   // render. Dropping it left the new session to the next tick, which ran with
   // lastEventTime=0 and no `limit` → the server's legacy default branch handed
   // back the whole ring, appendEvents grafted ≤500 bubbles in one shot, and
@@ -144,7 +144,7 @@ export const sessionList = {
   lastSidebarData: null,
   // discovered sessions, merged into sidebar
   discoveredItems: [],
-  // #1770: last /api/discovered payload, to skip forced re-render when unchanged
+  // last /api/discovered payload, to skip forced re-render when unchanged
   lastDiscoveredJSON: '',
   sessionCounter: 0,
   // [{name, path, node}] from API
