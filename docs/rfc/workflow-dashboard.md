@@ -11,8 +11,8 @@
   parent session 空闲时照常更新
 - 关联：`agent-team-ui.md`（Agent 工具子代理可视化 + drill-in，本 RFC 复用其
   TranscriptReader / tailer）、`event-log-persistence.md`（ring + persist）、
-  `wsproto.md`（WS 协议单一真相源）、`kiro-effort-visibility.md`（`SessionSnapshot`
-  透出字段的范式）
+  `wsproto.md`（WS 协议单一真相源）、kiro-effort-visibility（`SessionSnapshot`
+  透出字段的范式；该 RFC 已删除，需要时用 git log 找回）
 - 基线：worktree `/Users/zhaokm/workspace/naozhi-wfdash` @ `f08594f6`；CC 2.1.288
   （`~/.toolbox/tools/claude-code/2.1.288.1084/claude`）
 

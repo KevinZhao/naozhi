@@ -7,7 +7,7 @@
 | 创建日期 | 2026-05-26 |
 | 修订日期 | 2026-06-10（v5：残留 phase 全部落地，状态升 Implemented；v4：按 master 实测订正实施状态；v3：按 H1-H17 修订；v2：按 F1-F13 + G1-G10 修订） |
 | 关联代码 | `internal/cron/scheduler.go`<br/>`internal/cron/scheduler_run.go`<br/>`internal/cron/scheduler_callbacks.go`<br/>`internal/cron/scheduler_finish.go`<br/>`internal/sysession/manager.go`<br/>`internal/sysession/run.go`<br/>`internal/server/wshub_broadcast.go`<br/>`internal/server/dashboard.go:405-435`<br/>`internal/dispatch/commands.go:13`<br/>`internal/session/router_lifecycle.go:265`<br/>`internal/session/key.go` |
-| 关联 RFC | `docs/rfc/consumer-interfaces.md`（同样的 IoC 思路）<br/>`docs/rfc/cron-run-history.md`（cron 终态与 RunState 来源）<br/>`docs/rfc/system-session.md`（sysession 设计） |
+| 关联 RFC | `docs/rfc/system-session.md`（sysession 设计）<br/>`internal/cron/runstore`（cron 终态与 RunState 来源） |
 | 关联 issue | #1166 (runtelemetry) · #1173 (cron→session) · #1164 (dispatch→cron) · #734/#945 (executeOpt) · #1036 (RegisterBroadcaster) · #746 (SchedulerDeps) · #583 (prefix DRY，撤出 RFC) |
 
 ## 0. 修订历史
@@ -919,7 +919,7 @@ type DispatcherConfig struct {
 赋给 `CronCommands` 字段即满足接口（accept interfaces, return concrete）。
 `commands.go` 内 `dispatcher.scheduler.AddJob` 改为 `dispatcher.cron.AddJob`。
 
-注意 typed-nil 陷阱（参见 `docs/rfc/consumer-interfaces.md` v3 经验）：
+注意 typed-nil 陷阱（consumer-interfaces v3 经验）：
 ```go
 var sched *cron.Scheduler // nil
 cfg.Cron = sched           // typed-nil interface!

@@ -11,7 +11,7 @@
 > - `docs/rfc/event-log-persistence.md`（naozhilog 持久化，本 RFC 在 §3.4 复用）
 > - `docs/rfc/reverse-protocol.md`（capability 字段已定义，本 RFC §6 落地路由）
 > **关联代码**: `internal/cli/wrapper.go` · `internal/cli/protocol_acp.go` · `internal/cli/protocol_claude.go` · `internal/cli/detect.go` · `internal/cli/rpc_types.go` · `internal/session/router.go` · `internal/server/server.go` · `internal/dispatch/dispatch.go` · `internal/discovery/proc_*.go` · `internal/node/caps.go` · `internal/node/reverseserver.go`
-> **可行性验证**: `docs/rfc/multi-backend-validation.md`（V1-V12 实测脚本与日志）
+> **可行性验证**: `multi-backend-validation.md`（V1-V12 实测脚本与日志；已删除，需要时用 git log 找回）
 
 ---
 
@@ -40,7 +40,7 @@ naozhi 已经把多 backend 的**基础设施**搭齐了 70%（config schema、P
 
 ### 1.2 实证驱动的 gap 分析
 
-2026-05-18 在本地装好 kiro-cli 2.3.0 后跑 12 项 PoC（V1-V12，详见 `multi-backend-validation.md`），结果：
+2026-05-18 在本地装好 kiro-cli 2.3.0 后跑 12 项 PoC（V1-V12），结果：
 
 | 维度 | 实证结果 | 对方案影响 |
 |---|---|---|
@@ -1118,4 +1118,4 @@ node "android" caps: []
 
 ## 16. 验证依据（实测原始数据）
 
-详见 `docs/rfc/multi-backend-validation.md`：12 项 PoC 脚本（probe1_handshake.sh ~ probe10_startup.py）+ 输出快照 + bug 复现脚本（naozhi_id_check.go）。本 RFC 任何"实证 / 实测"标注均指向该文件相应章节。
+详见已删除的 `multi-backend-validation.md`（git log 可找回）：12 项 PoC 脚本（probe1_handshake.sh ~ probe10_startup.py）+ 输出快照 + bug 复现脚本（naozhi_id_check.go）。本 RFC 任何"实证 / 实测"标注均指向该文件相应章节。
