@@ -33,8 +33,8 @@ func goldenCronRun() *CronRun {
 	}
 }
 
-// Run files on disk outlive any build: cmd/naozhi's cost reconcile and the
-// dashboard read records an older binary wrote. These goldens were captured
+// Run files on disk outlive any build: the dashboard reads records an older
+// binary wrote. These goldens were captured
 // from the record types before they moved into this package, so a tag, field
 // order or encoder change that alters the bytes fails here.
 const (

@@ -61,72 +61,32 @@ var (
 // exist; rows come in first-seen model order.
 func SessionUsage(projectDir, sessionID string, w UsageWindow) (usage []ModelTokens, found bool, err error) {
 	acc := newUsageAcc(w)
-	found, _, err = readSessionUsage(projectDir, sessionID, w, acc)
+	found, err = readSessionUsage(projectDir, sessionID, w, acc)
 	if err != nil || !found {
 		return nil, found, err
 	}
 	return acc.totals(), true, nil
 }
 
-// MessageUsage is one API message's usage, timed and tagged by its first line.
-type MessageUsage struct {
-	ModelTokens
-	At time.Time
-	// Entrypoint is the line's "entrypoint": "cli" for an interactive
-	// terminal, "sdk-cli" for a headless (-p) process, "" when absent.
-	Entrypoint string
-}
-
-// SessionMessages is a session's transcript usage message by message.
-type SessionMessages struct {
-	// Messages come in first-seen order; messages with no tokens are left out.
-	Messages []MessageUsage
-	// Truncated is set when the session has more agent transcripts than one
-	// call reads, so the figures are a lower bound.
-	Truncated bool
-}
-
-// SessionMessageUsage is SessionUsage over a session's whole history, per
-// message. A message whose id is in counted was already counted for another
-// session (a fork copies its parent's lines) and is skipped; the ids counted
-// here are added to counted.
-func SessionMessageUsage(projectDir, sessionID string, counted map[string]bool) (u SessionMessages, found bool, err error) {
-	acc := newUsageAcc(UsageWindow{})
-	acc.skip = counted
-	found, u.Truncated, err = readSessionUsage(projectDir, sessionID, UsageWindow{}, acc)
-	if err != nil || !found {
-		return SessionMessages{}, found, err
-	}
-	for id := range acc.msgs {
-		counted[id] = true
-	}
-	for _, r := range acc.rows {
-		if r.Input != 0 || r.Output != 0 || r.CacheRead != 0 || r.CacheWrite != 0 {
-			u.Messages = append(u.Messages, MessageUsage{ModelTokens: r.ModelTokens, At: time.UnixMilli(r.ms).UTC(), Entrypoint: r.entrypoint})
-		}
-	}
-	return u, true, nil
-}
-
 // readSessionUsage feeds the session's main transcript and its agent
-// transcripts to acc. truncated reports agent transcripts left unread.
-func readSessionUsage(projectDir, sessionID string, w UsageWindow, acc *usageAcc) (found, truncated bool, err error) {
+// transcripts to acc.
+func readSessionUsage(projectDir, sessionID string, w UsageWindow, acc *usageAcc) (found bool, err error) {
 	if projectDir == "" || !IsValidSessionID(sessionID) {
-		return false, false, nil
+		return false, nil
 	}
 	f, err := os.Open(TranscriptIn(projectDir, sessionID))
 	if errors.Is(err, fs.ErrNotExist) {
-		return false, false, nil
+		return false, nil
 	}
 	if err != nil {
-		return false, false, err
+		return false, err
 	}
 	err = readUsageFrom(f, w.MainOffset, w.Since, acc)
 	f.Close()
 	if err != nil {
-		return true, false, err
+		return true, err
 	}
-	paths, truncated := agentTranscripts(SubagentsDir(projectDir, sessionID), w.Since)
+	paths := agentTranscripts(SubagentsDir(projectDir, sessionID), w.Since)
 	for _, p := range paths {
 		f, err := os.Open(p)
 		if err != nil {
@@ -135,10 +95,10 @@ func readSessionUsage(projectDir, sessionID string, w UsageWindow, acc *usageAcc
 		err = readUsageFrom(f, 0, w.Since, acc)
 		f.Close()
 		if err != nil {
-			return true, truncated, err
+			return true, err
 		}
 	}
-	return true, truncated, nil
+	return true, nil
 }
 
 // readUsageFrom feeds f's lines from usageStart on to acc.
@@ -199,12 +159,11 @@ func probeUsage(f *os.File, from int64) (at, ms int64, ok bool) {
 }
 
 // agentTranscripts lists the sub-agent and workflow-agent transcripts under
-// dir modified at or after since, at most maxUsageFiles of them; truncated
-// reports that more qualified. Only regular files count, so a symlink planted
+// dir modified at or after since, at most maxUsageFiles of them. Only regular files count, so a symlink planted
 // in the tree is never followed.
-func agentTranscripts(dir string, since time.Time) (out []string, truncated bool) {
+func agentTranscripts(dir string, since time.Time) (out []string) {
 	if dir == "" {
-		return nil, false
+		return nil
 	}
 	add := func(d string) {
 		ents, _ := os.ReadDir(d)
@@ -217,7 +176,6 @@ func agentTranscripts(dir string, since time.Time) (out []string, truncated bool
 				continue
 			}
 			if len(out) >= maxUsageFiles {
-				truncated = true
 				return
 			}
 			out = append(out, filepath.Join(d, name))
@@ -230,7 +188,7 @@ func agentTranscripts(dir string, since time.Time) (out []string, truncated bool
 			add(filepath.Join(WorkflowRunsDir(dir), wf.Name()))
 		}
 	}
-	return out, truncated
+	return out
 }
 
 // usageAcc keeps the usage last seen per API message in the window.
@@ -238,15 +196,12 @@ type usageAcc struct {
 	sinceMS, untilMS int64
 	msgs             map[string]int // message id -> index in rows
 	rows             []usageRow
-	skip             map[string]bool // message ids counted elsewhere
 }
 
-// usageRow is one message's usage and the time and entrypoint of its first
-// line.
+// usageRow is one message's usage and the time of its first line.
 type usageRow struct {
 	ModelTokens
-	ms         int64
-	entrypoint string
+	ms int64
 }
 
 func newUsageAcc(w UsageWindow) *usageAcc {
@@ -263,9 +218,6 @@ func (a *usageAcc) line(b []byte) {
 	if !ok || row.ms <= a.sinceMS || (a.untilMS != 0 && row.ms > a.untilMS) {
 		return
 	}
-	if id != "" && a.skip[id] {
-		return
-	}
 	if i, ok := a.msgs[id]; ok && id != "" {
 		r := &a.rows[i]
 		r.Input, r.Output = max(r.Input, row.Input), max(r.Output, row.Output)
@@ -279,16 +231,15 @@ func (a *usageAcc) line(b []byte) {
 }
 
 // decodeUsage decodes b if it is a timestamped assistant line with usage:
-// the line's usage, time and entrypoint, and its message id.
+// the line's usage and time, and its message id.
 func decodeUsage(b []byte) (row usageRow, id string, ok bool) {
 	if !bytes.Contains(b, assistantMarker) || !bytes.Contains(b, usageMarker) {
 		return usageRow{}, "", false
 	}
 	var v struct {
-		Type       string `json:"type"`
-		Timestamp  string `json:"timestamp"`
-		Entrypoint string `json:"entrypoint"`
-		Message    struct {
+		Type      string `json:"type"`
+		Timestamp string `json:"timestamp"`
+		Message   struct {
 			ID    string `json:"id"`
 			Model string `json:"model"`
 			Usage *struct {
@@ -308,7 +259,7 @@ func decodeUsage(b []byte) (row usageRow, id string, ok bool) {
 	}
 	u := v.Message.Usage
 	t := ModelTokens{Model: v.Message.Model, Input: u.Input, Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite}
-	return usageRow{ModelTokens: t, ms: ts, entrypoint: v.Entrypoint}, v.Message.ID, true
+	return usageRow{ModelTokens: t, ms: ts}, v.Message.ID, true
 }
 
 // totals sums the messages per model.
@@ -317,23 +268,6 @@ func (a *usageAcc) totals() []ModelTokens {
 	idx := make(map[string]int)
 	for _, r := range a.rows {
 		out = addTokens(out, idx, r.ModelTokens)
-	}
-	return out
-}
-
-// DayTotals sums msgs per UTC day (2006-01-02) and model, in first-seen
-// model order.
-func DayTotals(msgs []MessageUsage) map[string][]ModelTokens {
-	out := make(map[string][]ModelTokens)
-	idx := make(map[string]map[string]int)
-	for _, m := range msgs {
-		day := m.At.UTC().Format(time.DateOnly)
-		if idx[day] == nil {
-			idx[day] = make(map[string]int)
-		}
-		if rows := addTokens(out[day], idx[day], m.ModelTokens); len(rows) > 0 {
-			out[day] = rows
-		}
 	}
 	return out
 }

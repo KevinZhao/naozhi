@@ -100,8 +100,8 @@ func (r *KeyResolver) ResolveForChat(platform, chatType, chatID, agentID string)
 	return plannerKeyFor(b.Name), plannerOpts(b)
 }
 
-// ResolveForPlannerKey is the "planner-view" path used by administrative
-// restart flows: from a project name, return the planner key and opts.
+// ResolveForPlannerKey is the "planner-view" path behind ResolveForKey's
+// planner branch: from a project name, return the planner key and opts.
 // Like ResolveForChat's planner branch it returns plannerOpts, which layers
 // only project configuration (docs/rfc/key-resolver.md §2.2).
 // Returns ok=false when the project cannot be found; callers must NOT fall back

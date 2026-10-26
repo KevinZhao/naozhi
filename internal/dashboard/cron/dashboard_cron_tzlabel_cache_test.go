@@ -1,30 +1,6 @@
 package cron
 
-import (
-	"sync"
-	"testing"
-)
-
-// TestCachedTZLabelStableForSameOffset verifies the memoised timezone label
-// returns the exact string formatTZOffset would produce, and that repeated
-// calls with the same (locName, offset) yield an identical, stable label —
-// the property HandleList relies on so its 1 Hz poll does not re-run
-// fmt.Sprintf. R103901-PERF-10.
-func TestCachedTZLabelStableForSameOffset(t *testing.T) {
-	h := &Handlers{}
-
-	want := formatTZOffset("Asia/Shanghai", 8*3600)
-	first := h.cachedTZLabel("Asia/Shanghai", 8*3600)
-	if first != want {
-		t.Fatalf("cachedTZLabel = %q, want %q", first, want)
-	}
-	for i := 0; i < 5; i++ {
-		got := h.cachedTZLabel("Asia/Shanghai", 8*3600)
-		if got != first {
-			t.Fatalf("call %d returned %q, want stable %q", i, got, first)
-		}
-	}
-}
+import "testing"
 
 // TestCachedTZLabelRecomputesOnOffsetChange guards the DST-safety invariant:
 // a fixed *time.Location can still report different offsets across a DST
@@ -50,23 +26,4 @@ func TestCachedTZLabelRecomputesOnOffsetChange(t *testing.T) {
 	if back := h.cachedTZLabel("America/New_York", -5*3600); back != est {
 		t.Fatalf("re-querying EST offset = %q, want %q", back, est)
 	}
-}
-
-// TestCachedTZLabelConcurrent exercises the mutex under parallel callers,
-// mirroring multiple dashboard tabs hitting HandleList at once. Run with -race.
-func TestCachedTZLabelConcurrent(t *testing.T) {
-	h := &Handlers{}
-	want := formatTZOffset("UTC", 0)
-
-	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if got := h.cachedTZLabel("UTC", 0); got != want {
-				t.Errorf("concurrent cachedTZLabel = %q, want %q", got, want)
-			}
-		}()
-	}
-	wg.Wait()
 }

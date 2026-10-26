@@ -8,6 +8,7 @@
 ### Removed
 
 - **BREAKING：删除飞书 webhook 接入模式，只保留 WebSocket 长连接**（#3767）。`POST /webhook/feishu` 不再注册；配置键 `platforms.feishu.connection_mode` 与 `platforms.feishu.allow_insecure_webhook` 不再读取，启动时报 `config-deprecated`（服务照常启动，飞书始终走长连接），环境变量 `NAOZHI_ALLOW_INSECURE_WEBHOOK` 也不再生效。原先用 `connection_mode: webhook` 的部署，请在飞书开发者后台把事件订阅和卡片回调都改成「使用长连接接收」，否则收不到消息；然后删掉这两个键。`verification_token` / `encrypt_key` 保留。
+- **BREAKING：删除 `naozhi cost backfill` 与 `naozhi cost reconcile` 子命令**（#3765）。这两个是一次性修账工具（导入历史 run 为 `Kind=backfill`、追加 `Kind=adjust` 冲回 #3097 之前 `--resume` 恢复额），账本已修过一次，之后的记账不会再产生这类偏差。`naozhi cost ...` 现在是未知子命令。账本读写、已写入的 backfill / adjust 行、`/api/cost/*` 与 `cost.budget` 不变；配置键无变化。
 
 ## [0.1.48] - 2026-10-26
 
