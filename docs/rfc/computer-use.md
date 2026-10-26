@@ -3,7 +3,7 @@
 - 状态: Draft v1（方向已与 owner 确认，未实施）
 - 日期: 2026-10-25
 - 范围: 给 naozhi 的执行会话加上两项能力——**把桌面截图交给 CC 作为上下文**，以及**操作这台 Mac 上的浏览器和桌面应用**（含需要 Midway 认证的内网站点）。云端浏览器（AgentCore Browser）与自建的 Bedrock computer use 循环列为候选，未决定。
-- 相关: `docs/rfc/planner.md`（PR #3685：执行会话、事件流、污染标记、需人决定清单、按会话挂载、工作台面）、`docs/rfc/cli-mcp-config.md`、`docs/rfc/attachment-refcount.md`、`docs/rfc/dashboard-csp-strict.md`
+- 相关: `docs/rfc/planner.md`（PR #3685：执行会话、事件流、污染标记、需人决定清单、按会话挂载、工作台面）、`docs/rfc/cli-mcp-config.md`、`docs/rfc/attachment-refcount.md`、`internal/server/dashboard_csp.go`（dashboard CSP 现状；原 `dashboard-csp-strict.md` 已随 #3737 删除）
 
 ## 1. 背景
 
