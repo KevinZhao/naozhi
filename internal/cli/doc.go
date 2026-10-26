@@ -29,8 +29,8 @@
 //   - subagent.Linker — subagent_link.go + subagent_transcript.go: resolves
 //     internal_agent_id for Task tool calls by tailing ~/.claude project
 //     JSONLs; resolveSem bounds concurrent disk scans.
-//   - Wrapper / Runner — wrapper.go, runner.go: backend-aware spawn helper
-//     over the shim transport (internal/shim) and the Runner placement seam.
+//   - Wrapper — wrapper.go: backend-aware spawn helper over the shim
+//     transport (internal/shim).
 //   - passthrough — passthrough.go: uuid/slot-matched concurrent Send path
 //     that lets the CLI's own command queue order turns.
 //   - Payload helpers — image*.go, thumbnail.go, todo.go, uuid.go.
