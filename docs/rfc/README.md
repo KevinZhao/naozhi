@@ -10,6 +10,7 @@ RFC 是落地前的设计取舍与实测记录，**不是最终规范**——架
 | [cc-asset-browser.md](cc-asset-browser.md) | Draft v6 | Claude Code 资产只读浏览器 |
 | [cli-mcp-config.md](cli-mcp-config.md) | 已实装 | `cli.mcp_config` → `--mcp-config` |
 | [codex-backend.md](codex-backend.md)（+ `-validation` / `-phase2-feasibility`） | Draft v2，Phase 0 实测 | Codex CLI app-server backend |
+| [computer-use.md](computer-use.md) | Draft v1（方向已确认，未实施） | 计算机使用：桌面截图进 CC 上下文 + 以 MCP 操作这台 Mac（浏览器专用配置 + 域名白名单、桌面 AX 优先），决策 CU1–CU8 |
 | [config-hot-reload.md](config-hot-reload.md) | Phase 1 已实现 | SIGHUP / API / CLI 配置热重载 |
 | [consumer-interfaces.md](consumer-interfaces.md) | Implemented v3 | 消费端小接口替换 `*session.Router` 指针 |
 | [cost-ledger.md](cost-ledger.md) | Draft v2.1 | `internal/costledger` 统一 cost 归口 |
