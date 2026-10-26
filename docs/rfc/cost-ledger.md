@@ -75,7 +75,7 @@
 | 方案 | 说明 | 结论 |
 |---|---|---|
 | A. 只读聚合器 | 不新增存储，查询时扫 `session-runs/` + `runs/` 求和 | ❌ sysession 无处落；runhistory `keepCount` 淘汰（`runhistory/store.go:197-203`）让总额随时间缩水；无 unit/model 字段；O(文件数) 扫描 |
-| **B. 独立 ledger（选定）** | `internal/costledger`：按天分片 JSONL append-only + 内存 rollup；各 run owner 调同一 `Append` | ✅ 与 runhistory / cron runs 正交，不动其格式；"永不丢"层唯一；字段完整 |
+| **B. 独立 ledger（选定）** | `internal/costledger`：按天分片 JSONL append-only；各 run owner 调同一 `Append` | ✅ 与 runhistory / cron runs 正交，不动其格式；"永不丢"层唯一；字段完整 |
 | C. SQLite | 单文件库 | ❌ 违反"不引入外部组件、状态文件化"原则 |
 | D. 扩展 `runhistory.SessionRun` | 加 tokens/model 字段并让 cron/sysession 也写 SessionRun | ❌ SessionRun 语义是"一次 session 往返"；`keepCount` 淘汰与账本"永不丢"冲突 |
 | E. 复用 `runtelemetry` 事件层 | `RunEndedEvent`（`runtelemetry/event.go:40-53`）加 cost 字段 + 一个订阅者写盘 | ❌ `Subsystem` 只有 Cron/Sysession（`event.go:12-15`），没有 session 这一类；它是 WS 广播层不是存储层；ordinary session 的 turn 没有 Run 事件。**但 ledger 可作为 runtelemetry 的消费者复用 RunID/OwnerID 契约**（§5.4 / §5.5 直接引用其 RunID） |
@@ -101,7 +101,7 @@ type Entry struct {
     Unit       Unit         `json:"unit"`
     Amount     float64      `json:"amount"`                // 本 entry 增量，唯一权威金额
     Basis      Basis        `json:"basis,omitempty"`
-    Models     []ModelDelta `json:"models,omitempty"`      // 分模型下钻，仅供展示/诊断，不参与 rollup 求和
+    Models     []ModelDelta `json:"models,omitempty"`      // 分模型下钻，仅供展示/诊断，不参与非模型维度求和
     Mark       *SessionMark `json:"mark,omitempty"`        // 仅会话自己差分记的行：记账后的会话状态，供崩溃后 restore 用，不是金额
 }
 
@@ -131,7 +131,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 约束（全部有单测）：
 
-- `Amount` 是 **delta**，永不为累计值；`Amount<=0 && len(Models)==0` 的 entry 被 `Append` 拒绝（返回 false，不计 dropped）。唯一例外是 `Kind=adjust`：它的 `Amount` 与 `Models[]` 各字段可以为负（`Amount==0` 且无 `Models` 仍拒绝），其余 kind 的负 `Amount` 归 0。rollup 与汇总直接相加，修正自然抵消。
+- `Amount` 是 **delta**，永不为累计值；`Amount<=0 && len(Models)==0` 的 entry 被 `Append` 拒绝（返回 false，不计 dropped）。唯一例外是 `Kind=adjust`：它的 `Amount` 与 `Models[]` 各字段可以为负（`Amount==0` 且无 `Models` 仍拒绝），其余 kind 的负 `Amount` 归 0。汇总直接相加，修正自然抵消。
 - `Amount` 是唯一权威；`Models[].CostUSD` 之和与 `Amount` 的偏差 > max(1%, $0.001) 时 warn（每模型去重）而**不是**断言——`total_cost_usd` 与 `modelUsage.costUSD` 是 CLI 两个独立累加器。
 - `Source/Kind/Unit/Basis` 为类型化枚举；写入时校验，非法 `Basis` → `unknown`，非法 `Source/Kind/Unit` → 拒绝 + dropped 计数。
 - `Model/RawModel/Provider`：来自 CLI 输出，视为不可信：长度 ≤128、合法 UTF-8、禁 C0/DEL、禁换行；违规替换为 `<invalid>` 并 warn（每 raw 值去重）。
@@ -205,17 +205,17 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 - `cli.Process` 在每个 assistant 帧的 `message.usage`（`model` 一并记录）上累计"影子 token 账"（`ShadowUsage`），result 帧到达即清零（其 `modelUsage` 覆盖同一批 token）。
 - 记账点是进程结束，不是 Send 的错误（#3210）：`cli.Process.SetOnEnd` 在 readLoop 退出时恰好投递一次 `ProcessEnd`（接管时刻、最后一个 result 帧的接收时刻、结束时刻、session id、影子账；晚绑定的 hook 也能收到，rename 重绑不会重投）。会话在有界 goroutine 上为窗口 (max(接管时刻, 最后 result), 结束时刻] 写一条 `Kind=partial`、每个规范模型一行 `Models[]` 的 entry（只差 `[1m]` 后缀的 raw id 合并为一行，`raw_model` 取先出现的那个；`workspace` 与 `Kind=turn` 行同规则，无目录的会话记空串）（金额按下一条估算）；没有 run 记录与它共用 `RunID`，所以 `RunID` 写成 `end:<cli-session-id>:<id>`，带上这笔花费所属的 CLI session id（passthrough 进程自己不知道 session id，取会话持有的那个）。claude 的用量读 transcript：主 JSONL 加 `subagents/agent-*.jsonl` 与 `subagents/workflows/*/agent-*.jsonl`，按 `message.id` 去重、各字段取最大；主 JSONL 从 spawn 前记下的文件大小读起，子文件按 mtime 过滤。读不到 transcript（还没有 session id、非 claude backend）退回影子账（只含主循环）。这样 Send 看不到的中断也记账：stuck_running / pid_gone 杀掉的无主 turn（后台任务、workflow）、`/new` 的 `ErrSessionReset`、进程自己退出。Detach（naozhi 重启，CLI 继续跑）不记；socket 断开而 shim 进程仍活着（没收到 `cli_exited`，也不是 naozhi 的 Kill / Close）同样不记（`ProcessEnd.ShimLive`）：reconcile 循环会重新接管同一个 CLI，它下一个 result 的累计会报这批 token。partial 一律由会话记一条 `Kind=partial`，cron 窗口开着时也不计入窗口（#3401），所以 cron key 上被 Reset / 释放 / 杀掉的进程同样记账。`finishRun` 不再记 partial，一次中断只记一次；窗口从最后一个 result 起算，与 result 的累计差分不重叠。
-- 金额按 CLI 实测单价估算（#3210，取代原"不估算、`Amount` 保持 0"）：naozhi 不维护价表，`costledger.RateBook` 从 CLI 自己定价过的 `Kind=turn` 行（`Models[].cost_usd` 对其 token）按模型学习单价。模型键去掉 provider 前缀（`global.`/`us.`/`anthropic.` 等）、`[1m]` 后缀、Bedrock `-vN:M`、Vertex `@日期` 与 `-YYYYMMDD`。同一模型累计 ≥8 行时对 input / output / cache_read / cache_write 四列做最小二乘，四个单价都非负且拟合总额与实测总额相差 ≤5% 才采用（CLI 的 costUSD 是 token 的线性函数，拟合能还原价表；opus-5-5 的 cache_read 是 input 的 0.05×，固定比例会偏 ~17%）；否则按固定比例 1 / 5 / 0.1 / 1.25 把实测总额摊到 token 上。启动时从最近 30 天（`cost.rollup_days` 更小时取其值：播种复用 rollup 预热的扫描）的日分片播种，此后每个 turn 的 `inc.Models` 实时喂入；`Kind=partial` 行自身的估算不回灌。
+- 金额按 CLI 实测单价估算（#3210，取代原"不估算、`Amount` 保持 0"）：naozhi 不维护价表，`costledger.RateBook` 从 CLI 自己定价过的 `Kind=turn` 行（`Models[].cost_usd` 对其 token）按模型学习单价。模型键去掉 provider 前缀（`global.`/`us.`/`anthropic.` 等）、`[1m]` 后缀、Bedrock `-vN:M`、Vertex `@日期` 与 `-YYYYMMDD`。同一模型累计 ≥8 行时对 input / output / cache_read / cache_write 四列做最小二乘，四个单价都非负且拟合总额与实测总额相差 ≤5% 才采用（CLI 的 costUSD 是 token 的线性函数，拟合能还原价表；opus-5-5 的 cache_read 是 input 的 0.05×，固定比例会偏 ~17%）；否则按固定比例 1 / 5 / 0.1 / 1.25 把实测总额摊到 token 上。启动时从最近 30 天（`retention_days` 更小时取其值）的日分片播种，此后每个 turn 的 `inc.Models` 实时喂入；`Kind=partial` 行自身的估算不回灌。
 - partial entry 的 `Amount` 与每行 `cost_usd` 取估算值，`basis` 取学习样本里最差的那个；从未见过的模型只记 token、`basis` 留空（`unknown` 专指"CLI 按默认模型猜价"，这里没有任何定价），并按模型 warn 一次。估算额计入会话 `costSpent`，不计入 run-history `CostUSD`：记账发生在进程结束后，那时 run 记录已经写完（`lastCumulative` 不动：死进程不会再报这批 token）。UI 的 `kinds.partial` 计数提示"进程中断的轮次（按 CLI 实测单价估算）"。
 
 ## 6. 存储与聚合
 
 - 目录 `<stateDir>/cost/`（`MkdirAll 0700`），文件 `YYYY-MM-DD.jsonl`（UTC 日切，`0600`，`O_WRONLY|O_APPEND|O_CREATE|O_NOFOLLOW`，打开前 `Lstat` 拒绝 symlink），每行一 Entry。
 - 写路径：`Append` 非阻塞投递到有界 channel（**cap 4096**，≈ 40 s 的 100 turn/s 突发），单 worker 批量写 + 每 1 s 或 64 条 fsync（复用 `runhistory.Store` 的 AppendAsync/DropTotal 模式 `store.go:80-128`）。满 → 丢弃 + `dropped` 计数 + 每分钟一条 warn。**任何路径不阻塞 turn**。
-- 内存 rollup：**只预聚合低基数维度** `(day, unit, source, backend, model, basis)`；`session_key / job_id / workspace / run_id` 维度的查询走窗口内日分片顺序扫描（700 KB/天 < 10 ms）。启动加载最近 `rollup_days`（默认 = `retention_days`，即整个保留期：低基数日聚合体积极小，全窗口 summary 不必扫文件）。
-- 查询窗口：默认最大 **90 天**；`retention_days` 全窗需 `allow_full_range=1`。全窗口低基数 summary 走内存 rollup（覆盖整个保留期），高基数维度才扫日分片。
+- 聚合：所有 summary 都按窗口顺序扫描日分片（700 KB/天 < 10 ms），按条目时间戳精确过滤，不做内存预聚合。
+- 查询窗口：默认最大 **90 天**；`retention_days` 全窗需 `allow_full_range=1`（会读全部日分片）。
 - 保留：`retention_days` 默认 400，启动 + 每日 sweep 删过期分片。
-- 容量：2000 turn/天 × 350 B ≈ 700 KB/天，1 年 ≈ 250 MB；rollup 内存 O(models × days) < 1 MB。
+- 容量：2000 turn/天 × 350 B ≈ 700 KB/天，1 年 ≈ 250 MB。
 - 崩溃一致性：尾部半行加载时跳过并 warn（同 eventlog）。
 
 ## 7. API
@@ -253,7 +253,6 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
   cost:
     enabled: true        # false = 不写 ledger，/api/cost/* 返回 503
     retention_days: 400  # [1, 3650]
-    rollup_days: 400     # [1, retention_days]，默认 = retention_days；启动同步加载，慢于 1s 会打 Info 日志
   ```
 - 一次性修账子命令 `naozhi cost backfill`（导入 `Kind=backfill`）与 `naozhi cost reconcile`（#3210，追加 `Kind=adjust` 冲回 #3097 之前 `--resume` 恢复额并补按天残差）已删除（PR #3765）：账本已修过一次，之后的记账不再产生这两类偏差。两种 kind 保留，用于解析已写入的旧行。
 
@@ -278,7 +277,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 ## 12. 测试策略
 
-- 单测：`costledger.Delta`（乱序 / 新 model / 新 Unit / 字段回退 / 16 上限）；`Append` 拒空、枚举校验、字符串消毒；rollup / retention / 半行恢复 / symlink 拒绝；summary 每档 `group_by` + unit 分桶不混算 + 窗口上限。
+- 单测：`costledger.Delta`（乱序 / 新 model / 新 Unit / 字段回退 / 16 上限）；`Append` 拒空、枚举校验、字符串消毒；retention / 半行恢复 / symlink 拒绝；summary 每档 `group_by` + unit 分桶不混算 + 窗口上限。
 - 集成：session finishRun → 1 条 entry；runStore=nil 时 costSpent 仍累进（P4 回归，旧代码 FAIL）；cron persistent 两次 run delta（P2 回归，旧代码 FAIL）；cron 窗口内的 turn 不写 session ledger、窗口外的迟到 result 与 partial 写 session ledger；sandbox 三种 outcome 各 1 条（CostUSD>0 时）、replay 另起 1 条；dashboard 对 cron key 在 run 窗口外发送 → `Source=session` entry；kiro metering 差分（两 turn 各 2 credits → 两条 amount=2，旧逻辑第二条会是 4）；sysession json 三态；leak-recovery 拷贝 ModelUsage。
 - 基准：`BenchmarkReadEvent_NonResultFrame` allocs 不变；`BenchmarkAccountTurnCost_16Models`。
 - 前端：Home 卡 / cron per-job 聚合契约测试。
@@ -288,12 +287,12 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 | Phase | PR | 内容 | 修复 |
 |---|---|---|---|
-| **0** | PR-1 | `cli.Event/SendResult.ModelUsage` + leak-recovery 拷贝 + 基准；`internal/costledger`（entry/Delta/store/rollup/summary/leaf 测试） | P1 |
+| **0** | PR-1 | `cli.Event/SendResult.ModelUsage` + leak-recovery 拷贝 + 基准；`internal/costledger`（entry/Delta/store/summary/leaf 测试） | P1 |
 | **0** | PR-2a | session：`accountTurnCost` 拆分 + `lastCumulative` + `CostTotals()` + ledger 写入（**含 cron key，暂以 `Source=session` 入账**）+ kiro/codex 差分 | P4 P6 P7 |
 | **0** | PR-2b | cron：`CostTotals` 前后差分 + `CronRun.CostUSD` 改增量 + cron_local/cron_sandbox 写入 + **同一 PR 内注入 `ownedByRun` 门**（门与写入同进同退，避免 2a→2b 之间或 2b 回滚期间 cron 成本真空；#3401 以 cost window 取代该门）+ 删 `cron.SendResult.CostUSD` | P2 |
 | **0** | PR-3 | `/api/cost/summary|entries` + 服务概览卡 + cron per-job 聚合（config 已随 PR-2a 落地） | P9 P10 |
 | 1 | PR-4 | sysession json runner + 写入（Runner 经 ctx `RunInfo` 归属到 Manager 的 runID） | P3 |
-| 2 | PR-5 | `naozhi cost backfill`（已删除）；rollup 覆盖整个保留期（取代月度 rollup 文件）；服务概览健康条 dropped/unknown 告警 | — |
+| 2 | PR-5 | `naozhi cost backfill`（已删除）；summary 覆盖整个保留期（不另设月度 rollup 文件；内存 rollup 已于 round-3 移除，统一扫日分片）；服务概览健康条 dropped/unknown 告警 | — |
 | 3 | PR-6 | 5.6 影子 token 账（进程死亡的 turn 记 `Kind=partial` entry，按 CLI 实测单价估算金额；服务概览健康条提示 partial 计数） | P5 |
 | 3 | PR-7 | `naozhi cost reconcile`（已删除）：`Kind=adjust`（可为负）冲回 `--resume` 恢复额，按天补齐 transcript 与账本的残差（§9） | — |
 
@@ -325,7 +324,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 | 架构 | 差分函数与类型分居两包 | 成立 | 全部收进 `costledger`，session 侧做 cli→costledger 转换 |
 | 性能 | 非 result 帧 map 分配 | **不成立**（`encoding/json` 键缺失不分配）但需基准锚定 | §5.1 基准 |
 | 性能 | 差分无上限 | 成立 | §4 Models ≤16 |
-| 性能 | channel 1024 太小 / 高基数 rollup / 400 天扫描 | 成立 | §6 cap 4096、低基数预聚合、90 天默认上限 |
+| 性能 | channel 1024 太小 / 高基数 rollup / 400 天扫描 | 成立 | §6 cap 4096、90 天默认上限 |
 | 安全 | API 校验、字符串消毒、枚举、文件权限、config 范围、warn 去重 | 成立 | §4 / §6 / §7 / §9 / §10 |
 | 安全 | 多租户隔离 | 单租户，与 `/api/sessions` 同级 | §7 注明 |
 | 事实 | `carryOverIdentity` 不存在 → `RenameSession`；`SandboxRunMeta` 在 `sandbox.go:88`；P10 无"月花费"概念 | 成立 | §1.1 / §1.3 / §5.2 已改 |

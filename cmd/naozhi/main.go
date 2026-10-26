@@ -192,7 +192,6 @@ func main() {
 		CostLedger: session.CostLedgerConfig{
 			Disabled:      !cfg.Cost.IsEnabled(),
 			RetentionDays: cfg.Cost.RetentionDays,
-			RollupDays:    cfg.Cost.RollupDays,
 		},
 		NoOutputTimeout: noOutputTimeout,
 		TotalTimeout:    totalTimeout,
