@@ -30,7 +30,7 @@ type Project struct {
 
 	// IsRoot marks the synthetic project for the projects root itself
 	// (ProjectsConfig.IncludeRoot). Its Path is the whole workspace tree, so
-	// the file endpoints apply the __public_tmp__ pseudo-project gates and
+	// the file endpoints apply the restricted-root gates and
 	// Scan never persists a CreatedAt for it.
 	IsRoot bool `json:"is_root,omitempty"`
 }

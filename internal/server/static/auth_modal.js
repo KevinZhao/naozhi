@@ -1,13 +1,8 @@
-// auth_modal.js — extracted from dashboard.js (#2558 D4).
-//
-// Verbatim region move: `git diff --color-moved` shows the body as a pure
-// move; the import block and the export block below are the only additions.
-//
-// Layering (D4-1 rule): a module dashboard imports must NOT import dashboard
-// back — that cycle puts dashboard's own top-level consts in TDZ while this
-// module evaluates. Shared state is read from the state.js objects and helpers are
-// imported. session_list.js imports this module, so the session_list functions
-// it calls back are shell slots, as is dashboard's renderMainShell.
+// auth_modal.js — the token login modal, the new-session modal (node picker,
+// project palette, quick ask) and the backend / access-profile chips.
+// Layering: never import dashboard.js back. session_list.js imports this
+// module, so the session_list functions it calls are shell slots, as is
+// dashboard's renderMainShell.
 import { NZ_CONTRACT } from './contract.js';
 import { perSession, selection, serverInfo, sessionList, transcript } from './state.js';
 import { esc, escAttr, showToast, trapFocus } from './nz_util.js';
@@ -105,7 +100,7 @@ function startLoginRetryCountdown(seconds) {
 // of the way on mobile) rather than a toast. Triggered by an
 // auth_fail(Error="too many attempts") message that carries a retry_after
 // hint. On expiry the gate clears and wsm.connect() fires once so the user
-// doesn't have to click anything — matches the UX-P1 auto-recover spec.
+// doesn't have to click anything.
 //
 // Idempotent: calling twice (e.g. a second in-flight reconnect that races
 // through before the gate armed) clears the prior tick interval so the
@@ -180,12 +175,9 @@ function getSelectedBackend() {
 
 // backendDisplayName resolves a backend ID ("claude" / "kiro" / ...) to the
 // CLI display name surfaced by /api/cli/backends ("claude-code" / "kiro").
-// Used to populate cli_name on dashboard-only pending sessions BEFORE the
-// server has spawned the wrapper — without this, the sidebar icon
-// (cliIcon) and header label (shell.renderMainShell / updateHeaderCLI) fall
-// through to defaultCLIName ("claude-code") and a kiro session shows the
-// claude logomark + "claude-code v..." until the first message lands and
-// the server-side SetCLIName broadcasts the correct value.
+// Used to populate cli_name on dashboard-only pending sessions before the
+// server has spawned the wrapper, so a kiro session's icon and header label
+// are right before its first message.
 //
 // Resolution order:
 //   1. serverInfo.cliBackends cache (canonical: dashboard already paid for this fetch
@@ -220,12 +212,10 @@ function backendDisplayVersion(backendID) {
 
 // renderNodePicker returns an HTML fragment for a connection (node) <select>,
 // or an empty string when only the local node is connected (no meaningful
-// choice to offer). It took over the modal slot the agent picker used to
-// occupy: the sidebar node selector was removed, so choosing which connection
-// a new session lives on now happens here, at creation time. Mirrors
-// renderBackendPicker's shape — single <select id="new-node"> consumed by
-// getSelectedNode() at submit time — and pre-selects the current selection.node
-// so the picker matches whatever the operator was last working on.
+// choice to offer). Choosing which connection a new session lives on happens
+// here, at creation time. Mirrors renderBackendPicker's shape — a single
+// <select id="new-node"> read by getSelectedNode() at submit time — and
+// pre-selects the current selection.node.
 //
 // 'local' is always pinned first (defensive: even if the server's nodes
 // payload omits it). Remotes follow, ordered by display name.
@@ -293,16 +283,11 @@ function getSelectedAgent() {
   return 'general';
 }
 
-// R110-P3 key schema (Round 167) — dashboard sessions historically used
-//   'dashboard:direct:<ts>:<projectName>'
-// which collides with the 4-segment SessionKey contract: buildSessionOpts
-// reads parts[3] as the agentID, so projectName was silently getting looked
-// up in the agents registry (returning zero AgentOpts{}) and AgentOpts was
-// never actually applied. This helper emits the correct shape:
+// Dashboard session keys follow the 4-segment SessionKey contract
+// (buildSessionOpts reads parts[3] as the agentID):
 //   'dashboard:direct:<ts>-<slug>:<agentID>'
 // where `<slug>` is the sanitized project/folder name and `<agentID>` maps
-// to config.yaml's agents entries. Matches the shape scratch sessions already
-// use (dashboard_session.go:860 — 'dashboard:direct:r<hex>:general').
+// to config.yaml's agents entries — the shape scratch sessions use too.
 //
 // The sanitizer strips colons and control bytes (sanitizeKeyComponent on the
 // server rejects them) and normalizes whitespace so the key remains readable
@@ -315,7 +300,7 @@ function sanitizeKeySlug(s) {
   // project folder containing e.g. 'foo：bar' cannot survive as a
   // colon-like byte into the 4-segment key that strings.SplitN(":",4)
   // relies on server-side. Also strips every non-ASCII codepoint the
-  // server-side session.ValidateSessionKey rejects (#2429): C1 controls
+  // server-side session.ValidateSessionKey rejects: C1 controls
   // (U+0080-U+009F), zero-width / LTR-RTL marks (U+200B-U+200F), bidi
   // override / embedding (U+202A-U+202E), Unicode line separators
   // (U+2028/U+2029) and the BOM (U+FEFF), plus the directional isolates
@@ -338,9 +323,8 @@ function sanitizeKeySlug(s) {
 }
 
 // localDateStamp renders a Date as YYYY-MM-DD-HHMMSS in LOCAL time for
-// session-key timestamps. The previous toISOString (UTC date) +
-// toTimeString (local time) mix dated keys created 00:00–08:00 UTC+8 as
-// yesterday (#2429).
+// session-key timestamps (a UTC date would date early-morning keys as
+// yesterday).
 function localDateStamp(d) {
   const p = n => String(n).padStart(2, '0');
   return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + '-' +
@@ -387,19 +371,11 @@ function resolveSessionKey(mode, stableKey, projectOrFolder, agentID, timestamp)
 }
 
 // keyTailDisplay returns the most informative human-readable fallback for a
-// session key's trailing display label. Historically dashboard.js used
-// `parts[parts.length - 1]` directly, which made sense when the last segment
-// was the projectName under the legacy `dashboard:direct:<ts>:<projectName>`
-// schema. The Round 167 schema moves the agentID into that slot, so showing
-// the bare agentID ('general', 'sonnet', …) as a session label would
-// regress the UX: every pending session would read "general" in the header.
-//
-// The helper looks at the chatID segment (parts[2]) and, when it matches the
-// dashboard key shape `<ts>-<slug>` (ts = `YYYY-MM-DD-HHMMSS-N`), prefers the
-// trailing slug piece over the terminal agentID. For non-dashboard keys
-// (IM platforms, scratch, cron) parts[2] is an opaque chat ID, so we retain
-// the legacy tail-segment behaviour. Both behaviours are covered by contract
-// tests in static_ux_contract_test.go.
+// session key's trailing display label. The last segment is the agentID
+// ('general', …), so when the chatID segment (parts[2]) matches the
+// dashboard key shape `<ts>-<slug>` (ts = `YYYY-MM-DD-HHMMSS-N`) the slug is
+// preferred. For non-dashboard keys (IM platforms, scratch, cron) parts[2] is
+// an opaque chat ID, so the tail segment is used.
 function keyTailDisplay(keyParts) {
   if (!Array.isArray(keyParts) || keyParts.length === 0) return '';
   // Dashboard-shaped keys: platform:chatType:chatID:agentID with chatID of
@@ -496,9 +472,8 @@ function createNewSession() {
         refreshBackendPicker('new-backend-slot');
       });
       wireProfileRelabel('new-backend-slot');
-      // First-open path: a failed REMOTE manifest arrives here as null and
-      // renderBackendPicker(null) painted an empty slot. Route through
-      // refreshBackendPicker so the retry notice shows on open too (#2429).
+      // First-open path: a failed REMOTE manifest arrives here as null; route
+      // through refreshBackendPicker so the retry notice shows on open too.
       if (!backendsData && (selection.node || 'local') !== 'local') refreshBackendPicker('new-backend-slot');
       setTimeout(() => document.getElementById('new-workspace').focus(), 100);
       return;
@@ -545,9 +520,8 @@ function openProjectPalette(backendsData, profilesData) {
   const accessProfilePicker = renderAccessProfilePicker(profilesData || serverInfo.accessProfiles);
   const nodePicker = renderNodePicker();
   // The access-profile + backend + connection pickers sit inline above the
-  // search box so the operator can pick them before choosing a project. The
-  // connection picker replaced the agent picker that used to live here;
-  // switching it re-filters the project list to that node's projects (see
+  // search box so the operator can pick them before choosing a project.
+  // Switching the connection re-filters the project list to that node's projects (see
   // nodeFilteredProjects).
   // The backend slot is always emitted (even empty) so a node switch that
   // moves from a single-backend node to a multi-backend one can inject the
@@ -595,7 +569,7 @@ function openProjectPalette(backendsData, profilesData) {
   });
   wireProfileRelabel('cp-backend-slot');
   // First-open path: see the no-projects modal above — a null remote
-  // manifest must surface the retry notice, not an empty slot (#2429).
+  // manifest must surface the retry notice, not an empty slot.
   if (!backendsData && (selection.node || 'local') !== 'local') refreshBackendPicker('cp-backend-slot');
   renderPaletteList(state, '');
   setTimeout(() => input.focus(), 50);
@@ -629,9 +603,7 @@ function fuzzyMatch(query, text) {
 // matchProjectPath fuzzy-matches the query against the path AS RENDERED
 // (shortPath: home prefix collapsed to ~, long paths truncated) so the
 // returned ranges index into the same string buildProjectRow highlights.
-// Matching the raw path and then painting the ranges onto the short path
-// shifted every <mark> by the collapsed prefix length (and could run past
-// the end of the string) - #2429. If the visible text does not match but
+// If the visible text does not match but
 // the full path does (e.g. the user typed the collapsed /home/<user>
 // prefix), the row still qualifies with the full-path score but no
 // highlight, so the result set is never narrower than before.
@@ -681,12 +653,8 @@ function renderPaletteList(state, query) {
   if (q) {
     scored.sort((a, b) => b.score - a.score);
   } else {
-    // R110-P3 palette idle-state ordering: two-tier sort on empty query.
-    //   Tier 0: favorites — surface "pinned" projects first. Users already
-    //           star projects via the sidebar section-header ⭐ button,
-    //           which persists to the backend projects config. Reusing
-    //           that signal avoids a second "palette-pin" concept (which
-    //           would split the mental model and duplicate state).
+    // Palette idle-state ordering: two-tier sort on empty query.
+    //   Tier 0: favorites (the sidebar section-header ⭐) first.
     //   Tier 1: everything else by directory filesystem mtime, most-recently-
     //           modified first (dir_mtime, unix ms, stamped by the backend at
     //           scan time). The folder you last touched on disk surfaces at
@@ -721,14 +689,10 @@ function renderPaletteList(state, query) {
   state.items = items;
   state.activeIdx = 0;
 
-  // Hover must move the keyboard cursor too (#2429), but only on a REAL
-  // pointer move. Chrome re-dispatches mouseenter to whatever row lands under
-  // a stationary pointer whenever the list re-renders (palette opening under
-  // the cursor, every keystroke re-filtering). Binding activeIdx to
-  // mouseenter therefore made Enter open the project row that happened to
-  // sit under the mouse instead of row 0 (快速新建), which surfaced as
-  // "new session resumes the folder's existing session". mousemove is only
-  // fired for actual pointer motion, so drive the cursor from it instead.
+  // Hover moves the keyboard cursor, but only on a REAL pointer move: Chrome
+  // re-dispatches mouseenter to whatever row lands under a stationary pointer
+  // on every re-render, which would make Enter open that row instead of row 0
+  // (快速新建). mousemove fires only for actual pointer motion.
   wirePaletteHover(list, state);
 
   if (!scored.length && q) {
@@ -785,23 +749,17 @@ function buildProjectRow(s, idx) {
   const nodeBadge = nodeId !== 'local'
     ? '<span class="cp-node" data-nz-bg="' + escAttr(nodeColor(nodeId)) + '">' + esc(nodeId) + '</span>'
     : '';
-  // R110-P3 palette favorite indicator: replace the leading ▸ glyph with
-  // a ★ when the project is favorited so the tier-0 ranking is visually
-  // explicit. Screen readers see the label via a title on the row icon
-  // so the distinction isn't purely visual. Non-favorite projects keep
-  // their original ▸ for continuity.
+  // Favorited projects lead with ★ instead of ▸ (titled for screen readers).
   const icon = p.favorite
     ? '<span class="cp-icon cp-icon-fav" title="已收藏" aria-label="已收藏">★</span>'
     : '<span class="cp-icon">▸</span>';
-  // R110-P2 / #448: if the project has a configured emoji, render it
-  // before the name so palette rows match the sidebar headers. The
-  // raw `p.name` is still the search target (highlighted via
-  // s.nameRanges below) so fuzzy queries don't have to know about
-  // display_name; the visible label just gets a friendlier prefix.
-  // display_name itself is appended as a small parenthetical hint
-  // when it differs from the directory name — keeps the dirname
-  // visible for operators who think in paths but adds the human
-  // label for the rest.
+  // If the project has a configured emoji, render it before the name so palette
+  // rows match the sidebar headers. The raw `p.name` is still the search target
+  // (highlighted via s.nameRanges below) so fuzzy queries don't have to know
+  // about display_name; the visible label just gets a friendlier prefix.
+  // display_name itself is appended as a small parenthetical hint when it
+  // differs from the directory name — keeps the dirname visible for operators
+  // who think in paths but adds the human label for the rest.
   const emojiPrefix = projectDisplayPrefix(p);
   const displayName = projectDisplayLabel(p);
   const dispHint = (displayName && displayName !== p.name)
@@ -821,7 +779,7 @@ function buildProjectRow(s, idx) {
 // quickRowHint is the 「快速新建」 subtitle for the selected node. Only the
 // LOCAL default workspace is known client-side (stats.default_workspace);
 // a remote node resolves its own default on dispatch, so name the node
-// instead of echoing the local path (#2429).
+// instead of echoing the local path.
 function quickRowHint(node) {
   if (!node || node === 'local') return serverInfo.defaultWorkspace ? shortPath(serverInfo.defaultWorkspace) : '';
   return getNodeDisplayName(node) + ' · 默认工作区';
@@ -924,7 +882,7 @@ function pickPaletteProject(p) {
   const agent = getSelectedAgent();
   // The palette is the "New Session" entry point: a project row always starts
   // a fresh timestamp-keyed session (mode:'new'), never the folder's
-  // project-stable conversation, which its sidebar card continues (#2476).
+  // project-stable conversation, which its sidebar card continues.
   doCreateInProject(p.path, p.name, p.node || 'local', backend, agent,
     { mode: 'new', accessProfile: accessProfile });
 }
@@ -950,8 +908,7 @@ function pickPaletteCustom(initialValue) {
   // the per-node cache (serverInfo.cliBackendsByNode) for the currently-selected node,
   // falling back to the local serverInfo.cliBackends for the boot window before the
   // per-node fetch resolves; refreshBackendPicker below repaints it against
-  // the authoritative manifest and on every node switch (picker node-aware
-  // fix).
+  // the authoritative manifest and on every node switch.
   const accessProfilePicker = renderAccessProfilePicker(serverInfo.accessProfiles, { selectedId: preselectedProfile });
   const seedBackends = (selection.node && selection.node !== 'local' && serverInfo.cliBackendsByNode[selection.node])
     ? serverInfo.cliBackendsByNode[selection.node].data
@@ -1015,7 +972,7 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   // backend-supplied dashboard:pj: stableKey, RFC §4.4) currently has no
   // production caller — it is kept for a future explicit "继续对话" entry.
   // Do NOT flip the default back: with stableKey present that resumes the
-  // folder's running session from the "New Session" button (#2476).
+  // folder's running session from the "New Session" button.
   const mode = opts.mode || 'new';
   const stableKey = opts.stableKey || '';
   const overlay = document.querySelector('.modal-overlay, .cmd-palette-overlay');
@@ -1034,8 +991,7 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opt
   if (accessProfile) perSession.accessProfiles[key] = accessProfile;
   delete perSession.sentPicks[key]; // a continued stable key must not inherit an earlier send's
   // Durably persist the pending workspace and eagerly bind it server-side so a
-  // reload-before-first-send (the proven cwd-fallback trigger) no longer drops
-  // the workspace. This is the primary fix path (project palette open).
+  // reload-before-first-send keeps the workspace.
   persistPending();
   eagerBindWorkspace(key, projectPath, nodeId);
 
@@ -1069,7 +1025,7 @@ function doCreateSession() {
   sessionList.sessionCounter++;
   const now = new Date();
   const ts = localDateStamp(now) + '-' + sessionList.sessionCounter;
-  // R110-P3 key schema (see buildDashboardSessionKey godoc): 4 segments
+  // Key schema (see buildDashboardSessionKey godoc): 4 segments
   // with agentID as the terminal segment so buildSessionOpts picks up the
   // right AgentOpts entry.
   const key = buildDashboardSessionKey(ts, folderName, agent);
@@ -1116,11 +1072,6 @@ function doCreateSession() {
 // optional `onTextStranded` callback so the caller can re-enable its own
 // input and surface a toast — prevents silent message loss if a future
 // shell.renderMainShell refactor becomes async or conditional.
-//
-// Rationale: the modal + palette are the right default for project work, but
-// they add 2-3 clicks to the common "quick lookup" case. Surfacing this
-// entry point — paired with the empty-state quick-ask input — lets the
-// palette stay rich without penalising quick queries.
 function createQuickSession(initialText, onTextStranded) {
   // Close any lingering modal/palette so repeated entry-point triggers don't
   // stack overlays (e.g. a quick-ask fired while a modal was still mounted).
@@ -1220,12 +1171,10 @@ function submitQuickAsk(e) {
 // because the user may already be mid-click on the sidebar to switch to
 // another session — grabbing focus 50ms later would intercept keystrokes.
 function wireQuickAskInput(autofocus) {
-  // Submit binding (#922 / #479): the empty-state form was migrated off the
-  // inline `onsubmit=` attribute so script-src no longer needs it. The form is
-  // (re)painted via innerHTML on cold start AND on every mainEmptyHtml()
-  // repaint, so the DOMContentLoaded header-button binder cannot catch it —
-  // wireQuickAskInput is the designated re-wire hook called on all those
-  // paths, so the submit handler is bound here. Guarded by a dataset marker
+  // Submit binding: the empty-state form is (re)painted via innerHTML on cold
+  // start AND on every mainEmptyHtml() repaint, so the DOMContentLoaded binder
+  // cannot catch it — wireQuickAskInput, called on all those paths, binds the
+  // submit handler here. Guarded by a dataset marker
   // to stay idempotent across repeated calls on the same node.
   const form = document.getElementById('quick-ask-form');
   if (form && form.dataset.wired !== '1') {

@@ -1,5 +1,3 @@
-// @ts-check
-//
 // The backend catalog (backend_catalog.js) as its readers see it, against
 // /api/cli/backends, /api/access-profiles and /api/projects/config answered
 // by page.route (the mock server serves none of them):
@@ -37,7 +35,6 @@ const PROFILES = {
   default: '',
 };
 
-/** @param {object} body */
 function json(body) {
   return { status: 200, contentType: 'application/json', body: JSON.stringify(body) };
 }
@@ -61,7 +58,6 @@ test.afterAll(async () => {
 });
 
 test('a backends manifest that lands after the session opened still gates the image button', async ({ page }) => {
-  /** @type {() => void} */
   let release = () => {};
   const held = new Promise(r => { release = () => r(undefined); });
   await page.route(url => url.pathname === '/api/cli/backends', async route => {

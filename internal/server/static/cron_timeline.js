@@ -1,6 +1,5 @@
 // cron_timeline.js — the per-job run timeline: rows, inline expand, detail /
-// transcript fetches, load-more and head-refresh reconcilers
-// (#2715 D4 follow-up: cron_view.js four-region split, region 2).
+// transcript fetches, load-more and head-refresh reconcilers.
 //
 // Owns cronTimelineState (per-job window/cache) and cronExpandedRunId (the
 // single inline-expanded row). Which job the drawer shows and the jobs array
@@ -10,7 +9,6 @@
 import { NZ_CONTRACT } from './contract.js';
 import { cronDrawerState, cronJobCostCache, cronStore, fetchCronJobs } from './cron_state.js';
 import { cronErrorClassLabel, cronJobLedgerCostHtml } from './cron_format.js';
-import { authHeaders } from './platform.js';
 import { renderMd, runPendingAsync } from './render_md.js';
 import { costBudgetChipHtml, fetchCostBudget, fetchCostSummary, formatAbsTime, showAPIError, showAuthModal, showNetworkError } from './utilities.js';
 import {
@@ -36,21 +34,19 @@ const cronTimelineState = Object.create(null);
 const cronExpandedRunId = { jobId: null, runId: null };
 
 // CRON_TIMELINE_FRESH_MS — 超过此 TTL 的 timeline 缓存视为陈旧，下次进入
-// cron session 详情时清掉强制重拉。R220-FE-3：用户切走再切回中间可能有
-// 新 run，但本地状态仍 stale，timeline 不主动刷新。
+// cron session 详情时清掉强制重拉（切走再切回期间可能有新 run）。
 const CRON_TIMELINE_FRESH_MS = 30 * 1000;
 
-// R20260610-CR-005: cap the per-job timeline cache. Entries are only
+// Cap the per-job timeline cache. Entries are only
 // evicted on cronDelete otherwise, so browsing many jobs accumulates
 // runs/details/lastRenderedHtml without bound. LRU by lastAccess.
 const CRON_TIMELINE_MAX_ENTRIES = 20;
 
-// R20260610-CR-007 (#1998): cap st.runs after the refreshHead merge.
-// Without a cap, deep loadMore paging (50/page) followed by repeated WS
-// run_ended refreshes grows the merged array without bound, and every
-// WS event pays an O(n log n) sort + full re-render over it. When the cap
-// truncates the tail, pagination is re-armed (done=false, nextBefore=
-// new oldest started_at) so loadMore can still page past the cut.
+// Cap st.runs after the refreshHead merge. Without a cap, deep loadMore paging
+// (50/page) followed by repeated WS run_ended refreshes grows the merged array
+// without bound, and every WS event pays an O(n log n) sort + full re-render
+// over it. When the cap truncates the tail, pagination is re-armed (done=false,
+// nextBefore= new oldest started_at) so loadMore can still page past the cut.
 const CRON_TIMELINE_MAX_RUNS = 500;
 
 function getCronTimelineState(jobId) {
@@ -71,23 +67,16 @@ function getCronTimelineState(jobId) {
       showAll: false,      // true = 用户已展开 5 行折叠（查看全部 / 展开第 ≥6 行），重绘不再折回
       loading: false,
       details: Object.create(null),
-      lastMountAt: 0,       // 上次 mount 渲染的 ms 时戳；renderCronTimelineForSession 用来判 stale
+      lastMountAt: 0,       // 上次 mount 渲染的 ms 时戳；renderCronTimelineForJob 用来判 stale
       lastAccess: 0,        // LRU 时戳，每次 getCronTimelineState 命中更新
-      // R243-PERF-12 (#817): cache the last innerHTML written by
-      // renderCronTimelinePanel so a no-op re-render (e.g. WS broadcast
-      // arrives but no run changed) skips the full innerHTML rewrite.
-      // Stored on the per-job state so it is reset together with
-      // runs/details when CRON_TIMELINE_FRESH_MS evicts the cache.
+      // The last innerHTML painted, so a no-op re-render skips the rewrite;
+      // reset with runs/details when CRON_TIMELINE_FRESH_MS evicts the cache.
       lastRenderedHtml: '',
     };
   }
   cronTimelineState[jobId].lastAccess = Date.now();
   return cronTimelineState[jobId];
 }
-
-// renderCronTimelineForJob is the canonical drawer-side entry point.
-// renderCronTimelineForSession (the legacy mainShell-coupled variant) has
-// been removed — see cronDrawerHtml above.
 
 // cronTimelineHtml — 渲染整个"执行历史"section 的内层 HTML。
 // 头部：简洁标题"最近运行"+ 总次数小标签（cron-dashboard-redesign P3 §4：
@@ -403,10 +392,8 @@ function navigateExpandedRun(direction) {
   else if (direction === 'next') nextIdx = idx + 1;
   else return;
   if (nextIdx < 0) return; // already at the newest run; nothing above it.
-  // R20260614-LOGIC-8 (#2090): ↓ past the last loaded run on a multi-page
-  // timeline used to hit the bounds guard and silently no-op, so the keyboard
-  // could never reach older runs beyond the first page. When more pages exist
-  // (!st.done), load the next page and expand the target once it arrives.
+  // ↓ past the last loaded run: when more pages exist (!st.done), load the
+  // next page and expand the target once it arrives.
   if (nextIdx >= st.runs.length) {
     if (direction !== 'next' || st.done || st.loading) return; // genuinely at the end
     cronTimelineLoadMore(jobId, () => {
@@ -455,11 +442,11 @@ function cssEscapeAttr(s) {
 async function cronTimelineFetchDetail(jobId, runId) {
   const st = getCronTimelineState(jobId);
   try {
-    const headers = authHeaders();
+    const headers = {};
     const url = NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '?job_id=' + encodeURIComponent(jobId);
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
     // Preserve the sticky __transcript annotation across a collapse→re-expand
-    // re-fetch: wholesale replacement would drop it (review PR-4 F5). The
+    // re-fetch: wholesale replacement would drop it. The
     // annotation fetcher below re-stashes fresh data.
     const prevDetail = st.details[runId];
     st.details[runId] = data || { __error: 'empty response' };
@@ -470,7 +457,7 @@ async function cronTimelineFetchDetail(jobId, runId) {
     // renderer falls back to the raw view automatically.
     cronTimelineFetchTranscript(jobId, runId).catch(() => {});
   } catch (err) {
-    // R220-FE-5: 401/403 走 authModal，与 fetchSessions 等其它路径保持一致；
+    // 401/403 走 authModal，与 fetchSessions 等其它路径保持一致；
     // 单 cron 详情失败不应让用户看到 "HTTP 401" 字样而不知所措。
     if (err && (err.status === 401 || err.status === 403)) {
       showAuthModal();
@@ -497,7 +484,7 @@ async function cronTimelineFetchDetail(jobId, runId) {
 async function cronTimelineFetchTranscript(jobId, runId) {
   const st = getCronTimelineState(jobId);
   try {
-    const headers = authHeaders();
+    const headers = {};
     const url = NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '/transcript?job_id=' + encodeURIComponent(jobId);
     const data = await fetchJSON(url, { headers, timeoutMs: 12000 });
     if (st.details && st.details[runId]) {
@@ -521,17 +508,9 @@ function renderCronTimelinePanel(jobId) {
   if (!host) return;
   const job = (cronStore.jobs || []).find(x => x && x.id === jobId);
   const st = getCronTimelineState(jobId);
-  // R243-PERF-12 (#817): identity-check the rendered HTML against the
-  // last paint for this job. cronTimelineHtml builds up to ~200 row
-  // strings on each call; when the WS poll fires and nothing changed
-  // (the common case at idle), the resulting HTML is byte-identical to
-  // the previous paint and re-assigning innerHTML would discard and
-  // rebuild every row's DOM nodes for nothing — including blowing away
-  // any in-flight katex/mermaid async-render placeholders inside
-  // expanded run details. A string-equality check is cheap (~1 µs for
-  // a 100 KB blob in V8) compared to the parse + DOM-rebuild cost it
-  // saves. The cache is stored on the per-job state so the
-  // CRON_TIMELINE_FRESH_MS eviction path naturally resets it.
+  // Skip the innerHTML write when the HTML equals the last paint: a rewrite
+  // would rebuild every row and drop in-flight katex/mermaid placeholders
+  // inside expanded run details.
   const html = cronTimelineHtml(jobId, job, st);
   if (html === st.lastRenderedHtml && host.innerHTML !== '') {
     return;
@@ -548,7 +527,7 @@ function renderCronTimelinePanel(jobId) {
 // GET /api/cron/runs?job_id=&limit=50&before=<oldest started_at>
 //
 // onDone (optional): called once after a SUCCESSFUL page load (st.runs may
-// have grown), used by keyboard navigation (#2090) to expand the next run
+// have grown), used by keyboard navigation to expand the next run
 // once it becomes available. Not called when the request errors or when the
 // load was skipped because one is already in flight / the list is done.
 function cronTimelineLoadMore(jobId, onDone) {
@@ -559,7 +538,7 @@ function cronTimelineLoadMore(jobId, onDone) {
   (async () => {
     let loaded = false;
     try {
-      const headers = authHeaders();
+      const headers = {};
       let url = NZ_CONTRACT.API.cron_runs + '?job_id=' + encodeURIComponent(jobId) + '&limit=50';
       if (st.nextBefore) url += '&before=' + st.nextBefore;
       const data = await fetchJSON(url, { headers, timeoutMs: 10000 });
@@ -578,7 +557,7 @@ function cronTimelineLoadMore(jobId, onDone) {
       }
       loaded = true;
     } catch (err) {
-      // R220-FE-5: 401/403 走 authModal；showAPIError 仅做 toast 提示，不会
+      // 401/403 走 authModal；showAPIError 仅做 toast 提示，不会
       // 把用户带回登录态——这里要主动唤起 modal。
       if (err && (err.status === 401 || err.status === 403)) {
         showAuthModal();
@@ -595,7 +574,7 @@ function cronTimelineLoadMore(jobId, onDone) {
       // populated for next time, so no information is lost.
       if (cronDrawerState.jobId === jobId) renderCronTimelinePanel(jobId);
       // Fire the post-load hook after st.loading is cleared and the panel is
-      // re-rendered, so a callback that expands a run (#2090) operates on the
+      // re-rendered, so a callback that expands a run operates on the
       // settled state. Guarded to a successful load and isolated so a throwing
       // callback cannot leave st.loading stuck (already reset above).
       if (loaded && typeof onDone === 'function') {
@@ -629,25 +608,21 @@ function cronTimelineRefreshHeadDebounced(jobId) {
 // cronTimelineRefreshHead — WS run_ended（cron）触发。如果当前 drawer 打开
 // 的就是该 job（cronDrawerState.jobId === jobId），fetch /api/cron/runs?limit=10
 // 替换头 10 条；否则直接返回——列表 stats 由 cron_view 的 run_ended handler
-// 刷新（fetchCronJobs + renderCronPanel）。
-//
-// cron-panel-consolidation RFC §4.6: 路由门由 selectedKey 切到
-// cronDrawerState.jobId — cron 面板下 selectedKey 始终为 null（openCronPanel 已
-// 清空），不再适合做"当前看的是哪条 cron"判定。
+// 刷新（fetchCronJobs + renderCronPanel）。cron 面板下 selectedKey 始终为
+// null，所以按 cronDrawerState.jobId 判定。
 //
 // 调用方应优先走 cronTimelineRefreshHeadDebounced（rAF-debounced wrapper）以
-// 在 bursty run_ended 序列下避免 N 次 sort+innerHTML 重建（R243-PERF-7
-// / #812）。直接调用本函数仍合法（手动 trigger / 测试路径）。
+// 在 bursty run_ended 序列下避免 N 次 sort+innerHTML 重建。
 async function cronTimelineRefreshHead(jobId) {
   if (cronDrawerState.jobId !== jobId) return;
   const st = getCronTimelineState(jobId);
-  // R220-FE-4: in-flight guard。用户快速触发多次 TriggerNow 时 run_ended
+  // In-flight guard。用户快速触发多次 TriggerNow 时 run_ended
   // 会连续到达，每次都启动 fetch；后返回的请求覆盖先返回的 → 顺序取决于
   // 网络。用 token 保证只有最新一次请求的结果会被写回 st.runs。
   const token = (st._refreshToken || 0) + 1;
   st._refreshToken = token;
   try {
-    const headers = authHeaders();
+    const headers = {};
     const url = NZ_CONTRACT.API.cron_runs + '?job_id=' + encodeURIComponent(jobId) + '&limit=10';
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
     // 过期请求：开始 fetch 之后又有更新一轮 refreshHead 启动了，丢弃本次结果。
@@ -672,7 +647,7 @@ async function cronTimelineRefreshHead(jobId) {
       }
     }
     merged.sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
-    // R20260610-CR-007 (#1998): cap the merged list so repeated
+    // Cap the merged list so repeated
     // loadMore + WS refresh cycles can't grow st.runs without bound.
     // Truncating drops the oldest tail, so re-arm pagination: the
     // cursor moves to the new oldest entry and done resets to false
@@ -691,12 +666,8 @@ async function cronTimelineRefreshHead(jobId) {
   }
 }
 
-
-// renderCronTimelineForJob is a thin wrapper around the legacy
-// renderCronTimelineForSession that uses cronDrawerState.jobId-keyed reconcile
-// instead of selectedKey. It re-uses the same #cron-timeline-panel host
-// (now living inside the drawer instead of mainShell), so cronTimelineHtml
-// / cronTimelineRowHtml / cronTimelineDetailHtml work unchanged.
+// renderCronTimelineForJob is the drawer-side entry point: it paints the
+// drawer's #cron-timeline-panel host, reconciling by jobId.
 function renderCronTimelineForJob(jobId) {
   const host = document.getElementById('cron-timeline-panel');
   if (!host) return;

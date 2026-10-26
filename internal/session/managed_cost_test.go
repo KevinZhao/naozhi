@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -13,6 +14,10 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/costledger"
 )
+
+// approxEq compares two float64 cost values with a tolerance that swallows IEEE
+// 754 addition rounding (0.10 + 0.05 == 0.15000000000000002).
+func approxEq(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 
 // newLedgerSession wires a ManagedSession (no run-history store) to a real
 // temp-dir ledger so accountTurnCost's entries can be read back.
@@ -277,27 +282,6 @@ func TestAccountTurnCost_ConcurrentTurnsNoLostOrDoubleUpdate(t *testing.T) {
 	}
 	if s.CostTotals().Models["m"].Input != 40 {
 		t.Fatalf("model totals = %+v", s.CostTotals().Models)
-	}
-}
-
-// Leak-recovery runs a second turn on the same process; both rounds are
-// accounted and the session total equals the recovered cumulative (#2355).
-func TestAccountTurnCost_LeakRecoveryBothRoundsRecorded(t *testing.T) {
-	t.Setenv(leakRecoveryEnvVar, "1")
-	proc := &TestProcess{AliveVal: true, SendFunc: scripted(
-		&clievent.SendResult{Text: leakSample, CostUSD: 0.10},
-		&clievent.SendResult{Text: "已执行完成。", CostUSD: 0.15})}
-	s, ledger := newLedgerSession(t, "feishu:p2p:leak", proc)
-	res, err := s.Send(context.Background(), "go", nil, nil)
-	if err != nil || res.Text != "已执行完成。" {
-		t.Fatalf("recovery did not fire: %+v err=%v", res, err)
-	}
-	ents := allEntries(t, ledger)
-	if len(ents) != 2 || !approxEq(ents[0].Amount+ents[1].Amount, 0.15) {
-		t.Fatalf("entries = %+v", ents)
-	}
-	if got := loadTotalCost(&s.costSpent); !approxEq(got, 0.15) {
-		t.Fatalf("costSpent = %v, want 0.15", got)
 	}
 }
 

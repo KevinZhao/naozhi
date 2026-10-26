@@ -74,7 +74,7 @@ naozhi 的 slog 写 stdout,Go runtime 的 panic trace 写 stderr。它们落到�
 init 系统决定,不在 `~/.naozhi/` 的任何受管目录里;每条 INFO 都会进去,不设上限
 时一台机器三个月可涨到几百 MB。
 
-**内建上限**:`log.stdio_max_size`(默认 `"64MB"`,`"0"` 关闭)。启动时及之后
+**内建上限**:64 MB(写死,不可配置)。启动时及之后
 每小时检查一次 fd 1/2:只有当它是 **O_APPEND 打开的普通文件** 且超过上限时,原地
 `ftruncate` 到 0,再写回一条 JSON 标记行和最新的若干整行(上限的 1/8,最多
 4 MB),并打一条 INFO `stdio log truncated`(含 `stream` / `bytes_before` /
@@ -95,7 +95,7 @@ init 系统决定,不在 `~/.naozhi/` 的任何受管目录里;每条 INFO 都�
 `stdout path` / `stderr path`;Linux 上 `systemctl show naozhi -p StandardOutput`。
 
 已知取舍:截断那一刻(读尾部到 `ftruncate` 之间的微秒级窗口)写入的行会丢失;
-需要完整历史的部署把 `stdio_max_size` 设为 `"0"`,自己负责轮转。
+需要完整历史的部署让输出进 journald 或管道(内建上限不碰它们),自己负责轮转。
 
 ## 跟进
 

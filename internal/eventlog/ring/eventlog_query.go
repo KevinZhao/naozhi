@@ -16,7 +16,7 @@ import (
 // Entries returns a copy of all entries in chronological order.
 //
 // It allocates up to maxSize (~140KB) per call; hot loops (dashboard poll,
-// agent_tailer fan-in) should use LastN with a bounded n or EntriesAppend
+// agent_tailer fan-in) should use LastN with a bounded n or LastNAppend
 // with a pooled buffer. Entries is the one-shot convenience for tests and
 // history dumps.
 func (l *EventLog) Entries() []clievent.EventEntry {
@@ -29,18 +29,12 @@ func (l *EventLog) LastN(n int) []clievent.EventEntry {
 	return l.LastNAppend(nil, n)
 }
 
-// EntriesAppend copies all entries in chronological order into `dst`,
-// reslicing it (growing only if cap is short) so a sync.Pool buffer makes the
-// hot path alloc-free. Pass dst[:0] when reusing; nil behaves like Entries().
-// The returned slice is owned by the caller and never retained by the
-// EventLog; callers that hand it to a channel must not recycle it until the
-// consumer is done.
-func (l *EventLog) EntriesAppend(dst []clievent.EventEntry) []clievent.EventEntry {
-	return l.LastNAppend(dst, 0)
-}
-
-// LastNAppend is the buffer-reusing variant of LastN. See EntriesAppend
-// for the lifetime contract; pass `n<=0` for "all entries" semantics.
+// LastNAppend is the buffer-reusing variant of LastN: entries are copied in
+// chronological order into `dst`, reslicing it (growing only if cap is short)
+// so a sync.Pool buffer makes the hot path alloc-free. Pass dst[:0] when
+// reusing; nil behaves like LastN. The returned slice is owned by the caller
+// and never retained by the EventLog; callers that hand it to a channel must
+// not recycle it until the consumer is done. Pass `n<=0` for "all entries".
 func (l *EventLog) LastNAppend(dst []clievent.EventEntry, n int) []clievent.EventEntry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -82,7 +76,7 @@ func (l *EventLog) LastNVisible(visibleTarget, maxTotal int) []clievent.EventEnt
 // are appended into dst[:0] so a pooled caller avoids the per-subscribe
 // allocation of a maxTotal-cap slice (#1631). slices.Reverse runs OUTSIDE
 // l.mu so a long walk never blocks a concurrent Append beyond the scan.
-// Lifetime as EntriesAppend; nil dst returns nil on an empty ring.
+// Lifetime as LastNAppend; nil dst returns nil on an empty ring.
 func (l *EventLog) LastNVisibleAppend(dst []clievent.EventEntry, visibleTarget, maxTotal int) []clievent.EventEntry {
 	l.mu.RLock()
 	count := l.count
@@ -147,7 +141,7 @@ func (l *EventLog) EntriesSince(afterMS int64) []clievent.EventEntry {
 // are appended into dst[:0] so streaming-tail callers (1Hz × tabs × sessions,
 // 1-5 matches each) avoid the per-poll allocation (#937). nil dst keeps
 // EntriesSince's lazy-allocate behaviour and returns nil on no match.
-// Lifetime as EntriesAppend.
+// Lifetime as LastNAppend.
 func (l *EventLog) EntriesSinceAppend(dst []clievent.EventEntry, afterMS int64) []clievent.EventEntry {
 	l.mu.RLock()
 	if l.count == 0 {
@@ -263,11 +257,6 @@ func (l *EventLog) EntriesBeforeAppend(dst []clievent.EventEntry, beforeMS int64
 	}
 	slices.Reverse(rev)
 	return rev
-}
-
-// LastPromptSummary returns the summary of the most recent "user" entry.
-func (l *EventLog) LastPromptSummary() string {
-	return loadAtomicString(&l.lastPromptSummary)
 }
 
 // LastActivitySummary returns the summary of the most recent "tool_use" or "thinking" entry.

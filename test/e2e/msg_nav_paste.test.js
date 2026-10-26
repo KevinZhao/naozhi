@@ -1,4 +1,3 @@
-// @ts-check
 // msg_nav.js's composer paste handler. An image on the clipboard goes to
 // composer_files' handleFiles, so it becomes a pending attachment instead of
 // an <img> pasted into the contenteditable. No other spec pastes into the
@@ -23,7 +22,6 @@ test('pasting an image into the composer attaches it instead of embedding it', a
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   try {
     const page = await ctx.newPage();
-    /** @type {string[]} */
     const pageErrors = [];
     page.on('pageerror', (e) => pageErrors.push(String(e)));
     await page.goto(mock.url + '/dashboard');
@@ -35,13 +33,13 @@ test('pasting an image into the composer attaches it instead of embedding it', a
       const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
       const dt = new DataTransfer();
       dt.items.add(new File([bytes], 'shot.png', { type: 'image/png' }));
-      const input = /** @type {HTMLElement} */ (document.getElementById('msg-input'));
+      const input = document.getElementById('msg-input');
       input.focus();
       return input.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
     }, PNG_1X1);
 
     expect(notPrevented, 'the browser must not also paste the image into the input').toBe(false);
-    await expect.poll(() => page.evaluate(() => (/** @type {any} */ (window)).nz.test.pendingFiles.length)).toBe(1);
+    await expect.poll(() => page.evaluate(() => window.nz.test.pendingFiles.length)).toBe(1);
     await expect(page.locator('#file-preview .file-thumb')).toHaveCount(1);
     await expect(page.locator('#msg-input img')).toHaveCount(0);
     expect(pageErrors).toEqual([]);

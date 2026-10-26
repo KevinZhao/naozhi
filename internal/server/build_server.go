@@ -292,9 +292,6 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 		WatchdogTotal:    w.watchdog.totalPtr(),
 		RetiredStore:     retiredReader,
 		ValidateWS:       validateWorkspace,
-		SystemInfoFn:     systemInfo,
-
-		ProjectStableKeyEnabled: opts.Features.ProjectStableKey,
 	})
 	sessionH.InitStaticStats()
 	sessionH.WarmHistoryCache()
@@ -318,29 +315,18 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 // constructor argument (#2633).
 func buildHealthHandler(opts ServerOptions, s *Server, w *wiring, router healthRouter) *HealthHandler {
 	return &HealthHandler{
-		dispatcherMetrics:  s.dispatcher.Metrics,
-		router:             router,
-		auth:               s.auth,
-		startedAt:          w.startedAt,
-		workspaceID:        opts.Identity.WorkspaceID,
-		workspaceName:      opts.Identity.WorkspaceName,
-		version:            opts.Identity.Version,
-		noOutputTimeout:    opts.Watchdog.NoOutput,
-		totalTimeout:       opts.Watchdog.Total,
-		noOutputTimeoutStr: opts.Watchdog.NoOutput.String(),
-		totalTimeoutStr:    opts.Watchdog.Total.String(),
-		watchdogNoOut:      w.watchdog.noOutPtr(),
-		watchdogTotal:      w.watchdog.totalPtr(),
-		nodeAccess:         s.nodes,
-		configSHA256:       opts.Config.SHA256,
-		configLoadedAt:     opts.Config.LoadedAt,
-		configLive:         opts.Config.Live,
-		configPath:         opts.Config.Path,
-		platforms:          s.platforms,
-		platformCaps:       platform.CapabilityMatrix(s.platforms),
-		hubDropped:         s.hub.DroppedMessages,
-		// A method value on a nil *cron.Scheduler is fine: RunStoreHealth
-		// reports disabled for a nil receiver and the probe omits the section.
-		cronRunStore: opts.Scheduler.RunStoreHealth,
+		dispatcherMetrics: s.dispatcher.Metrics,
+		router:            router,
+		auth:              s.auth,
+		startedAt:         w.startedAt,
+		workspaceID:       opts.Identity.WorkspaceID,
+		workspaceName:     opts.Identity.WorkspaceName,
+		version:           opts.Identity.Version,
+		nodeAccess:        s.nodes,
+		configSHA256:      opts.Config.SHA256,
+		configLoadedAt:    opts.Config.LoadedAt,
+		configLive:        opts.Config.Live,
+		configPath:        opts.Config.Path,
+		platforms:         s.platforms,
 	}
 }

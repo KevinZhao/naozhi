@@ -166,7 +166,7 @@ func TestEventLog_AppendBatch_FiltersInvalidImages(t *testing.T) {
 	t.Parallel()
 
 	l := NewEventLog(8)
-	l.AppendBatch([]clievent.EventEntry{
+	in := []clievent.EventEntry{
 		{
 			Type: "user",
 			Images: []string{
@@ -186,7 +186,14 @@ func TestEventLog_AppendBatch_FiltersInvalidImages(t *testing.T) {
 				"data:image/webp;base64,B",
 			},
 		},
-	})
+	}
+	l.AppendBatch(in)
+
+	// Only the UUID stamp may touch the caller's slice; Time default and
+	// image sanitize land on the ring/sink copies.
+	if len(in[0].Images) != 2 || in[0].Time != 0 {
+		t.Errorf("caller slice mutated: %+v", in[0])
+	}
 
 	entries := l.Entries()
 	if len(entries) != 3 {

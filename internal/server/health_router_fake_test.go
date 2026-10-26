@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,8 +12,8 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// fakeHealthRouter is a healthRouter with canned answers; History and Runs
-// return nil facets, which read as disabled.
+// fakeHealthRouter is a healthRouter with canned answers; History returns a
+// nil facet, which reads as disabled.
 type fakeHealthRouter struct {
 	active, total int
 	blocks        []session.StoreBlock
@@ -23,7 +22,6 @@ type fakeHealthRouter struct {
 func (f fakeHealthRouter) Stats() (int, int)                      { return f.active, f.total }
 func (fakeHealthRouter) Backends() *session.BackendRegistry       { return &session.BackendRegistry{} }
 func (fakeHealthRouter) History() *session.HistoryIO              { return nil }
-func (fakeHealthRouter) Runs() *session.RunLedger                 { return nil }
 func (f fakeHealthRouter) StoreWriteBlocks() []session.StoreBlock { return f.blocks }
 
 // HealthHandler reads the router only through healthRouter, so a fake drives
@@ -37,8 +35,6 @@ func TestHealthHandler_FakeRouterDrivesSections(t *testing.T) {
 	h := &HealthHandler{
 		router:            fake,
 		auth:              &auth.Handlers{}, // no token: every request is authenticated
-		watchdogNoOut:     new(atomic.Int64),
-		watchdogTotal:     new(atomic.Int64),
 		nodeAccess:        newNodeRegistry(nil),
 		dispatcherMetrics: func() (int64, int64, int64, time.Time) { return 0, 0, 0, time.Time{} },
 	}

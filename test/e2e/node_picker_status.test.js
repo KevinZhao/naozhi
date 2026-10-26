@@ -1,5 +1,3 @@
-// @ts-check
-//
 // The New Session connection picker (#new-node, auth_modal.js renderNodePicker)
 // labels every node with getNodeStatus (session_ident.js): 'local' follows the
 // WebSocket state machine (connected, still authenticating, or no socket at
@@ -30,7 +28,6 @@ function multiNodeSessions() {
   return sessions;
 }
 
-/** @type {Awaited<ReturnType<typeof startMockServer>> | null} */
 let mock = null;
 // The page holds the WebSocket open, and server.close() waits for it.
 test.afterEach(async ({ page }) => {
@@ -40,7 +37,6 @@ test.afterEach(async ({ page }) => {
 });
 
 /**
- * @param {import('@playwright/test').Page} page
  * @param {string} wsState - the WS_STATES value to wait for before opening the picker
  * @param {{reload?: boolean}} [opts] - reload:false keeps the already-loaded page
  */

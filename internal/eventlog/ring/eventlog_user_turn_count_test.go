@@ -42,7 +42,7 @@ func TestEventLog_UserTurnCount_Append(t *testing.T) {
 // TestEventLog_UserTurnCount_AppendBatch locks the batch-merge contract:
 // a single AppendBatch of N user entries records a single atomic.Add(N)
 // rather than N separate increments. Both are functionally equivalent for
-// callers, but the batched form matches the lastPromptSummary single-store
+// callers, but the batched form matches the summary single-store
 // pattern so concurrent Snapshot observes the batch as one event.
 func TestEventLog_UserTurnCount_AppendBatch(t *testing.T) {
 	t.Parallel()

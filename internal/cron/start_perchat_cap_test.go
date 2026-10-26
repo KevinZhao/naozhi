@@ -21,7 +21,7 @@ func TestStart_PerChatCapEnforced(t *testing.T) {
 	path := filepath.Join(dir, "cron.json")
 
 	// Phase 1: persist 3 jobs in chat (p, c) at a generous per-chat cap.
-	s1 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 100, MaxJobsPerChat: 10}, SchedulerDeps{})
+	s1 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 100}, SchedulerDeps{})
 	if err := s1.Start(); err != nil {
 		t.Fatalf("phase 1 Start: %v", err)
 	}
@@ -37,9 +37,10 @@ func TestStart_PerChatCapEnforced(t *testing.T) {
 	}
 	s1.Stop()
 
-	// Phase 2: restart with MaxJobsPerChat=2. The third persisted entry must
-	// be skipped (logged as over-per-chat) and the loaded count clamps at 2.
-	s2 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 100, MaxJobsPerChat: 2}, SchedulerDeps{})
+	// Phase 2: restart with a per-chat cap of 2. The third persisted entry
+	// must be skipped (logged as over-per-chat) and the loaded count clamps at 2.
+	s2 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 100}, SchedulerDeps{})
+	s2.maxJobsPerChat = 2
 	if err := s2.Start(); err != nil {
 		t.Fatalf("phase 2 Start: %v", err)
 	}
@@ -47,7 +48,7 @@ func TestStart_PerChatCapEnforced(t *testing.T) {
 
 	jobs := s2.ListJobs("p", "c")
 	if len(jobs) != 2 {
-		t.Fatalf("after restart with MaxJobsPerChat=2: loaded %d jobs, want 2", len(jobs))
+		t.Fatalf("after restart with per-chat cap 2: loaded %d jobs, want 2", len(jobs))
 	}
 	if n := s2.tbl.countForChat(chatKeyFor("p", "c")); n != 2 {
 		t.Fatalf("chatJobCount after clamp = %d, want 2", n)
@@ -73,7 +74,7 @@ func TestStart_PerChatCapAllowsExactlyAtCap(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
 
-	s1 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 100, MaxJobsPerChat: 10}, SchedulerDeps{})
+	s1 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 100}, SchedulerDeps{})
 	if err := s1.Start(); err != nil {
 		t.Fatalf("phase 1 Start: %v", err)
 	}
@@ -84,13 +85,14 @@ func TestStart_PerChatCapAllowsExactlyAtCap(t *testing.T) {
 	}
 	s1.Stop()
 
-	s2 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 100, MaxJobsPerChat: 3}, SchedulerDeps{})
+	s2 := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 100}, SchedulerDeps{})
+	s2.maxJobsPerChat = 3
 	if err := s2.Start(); err != nil {
 		t.Fatalf("phase 2 Start: %v", err)
 	}
 	defer s2.Stop()
 
 	if jobs := s2.ListJobs("p", "c"); len(jobs) != 3 {
-		t.Fatalf("MaxJobsPerChat=3 with 3 persisted: loaded %d, want 3", len(jobs))
+		t.Fatalf("per-chat cap 3 with 3 persisted: loaded %d, want 3", len(jobs))
 	}
 }

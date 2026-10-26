@@ -292,7 +292,7 @@ function eventActionsHtml(e, cleanRaw) {
 // opts.includeInternal=true keeps tool_use/task_*/agent/result events the
 // parent view hides — agent_view.js's sub-agent panel needs them, since a
 // team member's work is almost entirely tool_use.
-export function eventHtml(/** @type {EventEntry} */ e, opts) {
+export function eventHtml(e, opts) {
   const includeInternal = !!(opts && opts.includeInternal);
   if (shouldHideEvent(e, includeInternal)) return '';
   if (EVENT_WHOLE.has(e.type)) return EVENT_WHOLE.get(e.type)(e);
@@ -372,7 +372,7 @@ export function leadingTimeDivider(el) {
 
 // removeOptimisticMsg drops the optimistic user bubble a send rendered and says
 // whether one was there. A send id (echoed by the WS send_ack) picks that send's
-// bubble, so a busy/error ack for the 2nd of two sends keeps the 1st's (#2430);
+// bubble, so a busy/error ack for the 2nd of two sends keeps the 1st's;
 // without one (legacy server, HTTP send_error, the user echo) the oldest goes.
 export function removeOptimisticMsg(sendId) {
   const root = document.getElementById('events-scroll') || document;

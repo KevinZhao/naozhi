@@ -2,6 +2,8 @@ package cron
 
 import (
 	"context"
+	"errors"
+	"slices"
 	"sync"
 	"testing"
 
@@ -10,10 +12,13 @@ import (
 
 // reapRouter records Reset + RegisterCronStubWithChain calls so the
 // fresh-context reap contract (#1829) can be asserted after a full
-// executeOpt success run. GetOrCreate always returns a ready okSession.
+// executeOpt run. GetOrCreate returns getErr when set, else sess when set,
+// else a ready okSession{id: sid}.
 type reapRouter struct {
 	mu            sync.Mutex
 	sid           string
+	sess          Session
+	getErr        error
 	resetCalls    []string
 	registerCalls []stubCall
 	// order, when set, receives "reset" / "register-stub" in the shared sequence
@@ -36,6 +41,12 @@ func (r *reapRouter) Reset(key string) {
 }
 
 func (r *reapRouter) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (Session, SessionStatus, error) {
+	if r.getErr != nil {
+		return nil, SessionExisting, r.getErr
+	}
+	if r.sess != nil {
+		return r.sess, SessionExisting, nil
+	}
 	return okSession{id: r.sid}, SessionExisting, nil
 }
 
@@ -44,6 +55,28 @@ func (r *reapRouter) snapshot() (resets []string, regs []stubCall) {
 	defer r.mu.Unlock()
 	return append([]string(nil), r.resetCalls...), append([]stubCall(nil), r.registerCalls...)
 }
+
+// errSendSession is a stub Session whose Send always returns a fixed error.
+// Used to drive the send-error branch of executeOpt without a real CLI.
+type errSendSession struct {
+	sendErr error
+}
+
+func (s errSendSession) Send(_ context.Context, _ string) (SendResult, error) {
+	return SendResult{}, s.sendErr
+}
+func (s errSendSession) SessionID() string                     { return "" }
+func (s errSendSession) InterruptViaControl() InterruptOutcome { return InterruptUnsupported }
+
+// cancelSendSession is a stub Session whose Send returns context.Canceled.
+// Drives the cancel branch of executeOpt's error handling.
+type cancelSendSession struct{}
+
+func (s cancelSendSession) Send(_ context.Context, _ string) (SendResult, error) {
+	return SendResult{}, context.Canceled
+}
+func (s cancelSendSession) SessionID() string                     { return "" }
+func (s cancelSendSession) InterruptViaControl() InterruptOutcome { return InterruptUnsupported }
 
 // deleteOnResetRouter deletes the job from the scheduler when the reap
 // Reset (the 2nd Reset of a fresh success run: preflight is 1st) fires,
@@ -74,81 +107,111 @@ func (r *deleteOnResetRouter) Reset(key string) {
 	}
 }
 
-// TestFreshContextReapsSessionAfterSuccess pins #1829: a fresh_context cron
-// job that finishes successfully MUST tear down its exempt session
-// (Reset(cronKey)) and re-register a suspended sidebar stub chained to the
-// run's session ID — so the idle CLI + MCP subprocess tree (~1.6 GB) is
-// reclaimed immediately instead of squatting until the next tick. A
-// regression that drops the post-success Reset reintroduces the exempt-
-// session leak diagnosed 2026-06-06.
-func TestFreshContextReapsSessionAfterSuccess(t *testing.T) {
+// TestFreshReap_ResetBeforeFinishRun pins #1829, #1956 and
+// R20260608133928-GO-7 on every way a run can end. A fresh_context job MUST tear
+// down its exempt session (Reset(cronKey)) and re-register its sidebar stub
+// before the finishRun that releases the CAS gate: a dropped reap leaks the idle
+// CLI + MCP subprocess tree (~1.6 GB) until the next tick, and a reap that runs
+// after the gate drops can tear down the fresh session a concurrent TriggerNow
+// just won. run-ended is emitted by that same finishRun, so ordering against it
+// is ordering against the gate release (this replaced a regexp over
+// scheduler_run.go, R050103A-COUPLING-1 #1911).
+//
+// A persistent-mode job is never Reset: its session is reused across ticks to
+// carry conversational context.
+func TestFreshReap_ResetBeforeFinishRun(t *testing.T) {
 	t.Parallel()
-
-	ord := &orderRecorder{}
-	rec := &recordingBroadcaster{order: ord}
-	router := &reapRouter{sid: "sess-fresh-1", order: ord}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
-
-	j := &Job{ID: "job-fresh-reap", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
-	s.putJobForTest(j)
-
-	s.executeOpt(j.ID, true /* viaTriggerNow: skip jitter */)
-
-	if rec.endedCount() != 1 {
-		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
+	cases := []struct {
+		name   string
+		sid    string
+		sess   Session
+		getErr error
+		fresh  bool
+		want   []RunState
+		// wantChain, when set, is the session ID the post-success reap stub must chain.
+		wantChain string
+	}{
+		{name: "fresh success", sid: "sess-fresh-1", fresh: true,
+			want: []RunState{RunStateSucceeded}, wantChain: "sess-fresh-1"},
+		{name: "fresh send error", sess: errSendSession{sendErr: errors.New("send failed: connection reset")}, fresh: true,
+			want: []RunState{RunStateFailed}},
+		{name: "fresh send cancel", sess: cancelSendSession{}, fresh: true,
+			want: []RunState{RunStateCanceled}},
+		{name: "fresh GetOrCreate error", getErr: errors.New("session backend unavailable"), fresh: true,
+			want: []RunState{RunStateFailed, RunStateSkipped}},
+		{name: "fresh GetOrCreate cancel", getErr: context.Canceled, fresh: true,
+			want: []RunState{RunStateCanceled}},
+		{name: "persistent success", sid: "sess-persist-1",
+			want: []RunState{RunStateSucceeded}},
+		{name: "persistent GetOrCreate error", getErr: errors.New("session backend unavailable"),
+			want: []RunState{RunStateFailed, RunStateSkipped}},
 	}
-	if got := rec.endedAtCron(0); got.State != RunStateSucceeded {
-		t.Fatalf("state: want succeeded, got %q (err=%q)", got.State, got.ErrorClass)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ord := &orderRecorder{}
+			rec := &recordingBroadcaster{order: ord}
+			router := &reapRouter{sid: tc.sid, sess: tc.sess, getErr: tc.getErr, order: ord}
+			s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
+			j := &Job{ID: "job-reap", Schedule: "@every 5m", Prompt: "ping", FreshContext: tc.fresh}
+			s.putJobForTest(j)
 
-	wantKey := sessionkey.CronKey(j.ID)
-	resets, regs := router.snapshot()
+			s.executeOpt(j.ID, true /* viaTriggerNow: skip jitter */)
 
-	// Two Reset(cronKey) calls happen on a fresh success run:
-	//   1. preflight Reset (run start) — destroys any prior session.
-	//   2. post-success reap Reset (#1829) — releases the session we just used.
-	resetCount := 0
-	for _, k := range resets {
-		if k == wantKey {
-			resetCount++
-		}
-	}
-	if resetCount < 2 {
-		t.Errorf("Reset(%q) count = %d, want >=2 (preflight + post-success reap); resets=%v",
-			wantKey, resetCount, resets)
-	}
-	// Ordering, which used to live in a regexp over scheduler_run.go
-	// (TestExecuteOpt_FreshReap_SourceAnchor, R050103A-COUPLING-1 #1911): the reap
-	// must run BEFORE the finishRun that releases the CAS gate, or a concurrent
-	// TriggerNow can win the gate and have its fresh session torn down by this
-	// run's late Reset. run-ended is emitted by that same finishRun.
-	//
-	// >=2 rather than "some reset first": the preflight Reset alone satisfies the
-	// weaker form, so a reap moved into a deferred closure would pass it while
-	// running after the gate drops.
-	ord.assertCountBefore(t, "reset", 2, "run-ended",
-		"success path must reap the fresh session while the CAS gate is held (R050103A-COUPLING-1 #1911)")
-	// The stub re-register is part of the same reap unit and must also precede
-	// the gate release — a stub refreshed afterwards reopens the phantom-stub
-	// race (R202606h-GO-009).
-	ord.assertCountBefore(t, "register-stub", 1, "run-ended",
-		"the reap's stub re-register must happen while the CAS gate is held (R202606h-GO-009)")
+			if rec.endedCount() != 1 {
+				t.Fatalf("want 1 ended event, got %d", rec.endedCount())
+			}
+			if got := rec.endedAtCron(0); !slices.Contains(tc.want, got.State) {
+				t.Fatalf("state: want one of %v, got %q (err=%q)", tc.want, got.State, got.ErrorClass)
+			}
 
-	// The reap must re-register a suspended stub chained to the run's
-	// session ID so the sidebar row + JSONL history survive the idle gap.
-	var reapStub *stubCall
-	for i := len(regs) - 1; i >= 0; i-- {
-		if regs[i].key == wantKey {
-			reapStub = &regs[i]
-			break
-		}
-	}
-	if reapStub == nil {
-		t.Fatalf("no stub re-registered for %q after reap; regs=%v", wantKey, regs)
-	}
-	if len(reapStub.chainIDs) != 1 || reapStub.chainIDs[0] != "sess-fresh-1" {
-		t.Errorf("reap stub chainIDs = %v, want [sess-fresh-1] so prior-run history stays clickable",
-			reapStub.chainIDs)
+			wantKey := sessionkey.CronKey(j.ID)
+			resets, regs := router.snapshot()
+			resetCount := 0
+			for _, k := range resets {
+				if k == wantKey {
+					resetCount++
+				}
+			}
+			if !tc.fresh {
+				if resetCount != 0 {
+					t.Errorf("persistent-mode job must not be Reset; got Reset(%q) in %v", wantKey, resets)
+				}
+				return
+			}
+			// Preflight Reset (run start) + the reap Reset = at least 2.
+			if resetCount < 2 {
+				t.Errorf("Reset(%q) count = %d, want >=2 (preflight + reap); resets=%v", wantKey, resetCount, resets)
+			}
+			// >=2 rather than "some reset first": the preflight Reset alone
+			// satisfies the weaker form, so a reap moved into a deferred closure
+			// would pass it while running after the gate drops.
+			ord.assertCountBefore(t, "reset", 2, "run-ended",
+				"the reap must Reset the fresh session while the CAS gate is held (#1911, #1956)")
+			// The stub re-register is part of the same reap unit; a stub refreshed
+			// after the gate drops reopens the phantom-stub race (R202606h-GO-009).
+			ord.assertCountBefore(t, "register-stub", 1, "run-ended",
+				"the reap's stub re-register must happen while the CAS gate is held (R202606h-GO-009)")
+
+			if tc.wantChain == "" {
+				return
+			}
+			// The success reap re-registers a suspended stub chained to the run's
+			// session ID so the sidebar row + JSONL history survive the idle gap.
+			var reapStub *stubCall
+			for i := len(regs) - 1; i >= 0; i-- {
+				if regs[i].key == wantKey {
+					reapStub = &regs[i]
+					break
+				}
+			}
+			if reapStub == nil {
+				t.Fatalf("no stub re-registered for %q after reap; regs=%v", wantKey, regs)
+			}
+			if len(reapStub.chainIDs) != 1 || reapStub.chainIDs[0] != tc.wantChain {
+				t.Errorf("reap stub chainIDs = %v, want [%s] so prior-run history stays clickable", reapStub.chainIDs, tc.wantChain)
+			}
+		})
 	}
 }
 
@@ -248,36 +311,5 @@ func TestFreshReapEmptySessionIDRegistersChainlessStub(t *testing.T) {
 	}
 	if len(reapStub.chainIDs) != 0 {
 		t.Errorf("empty session ID must yield a chain-less stub; got chainIDs=%v", reapStub.chainIDs)
-	}
-}
-
-// TestPersistentContextNotReapedAfterSuccess pins the negative half of #1829:
-// a persistent-mode (FreshContext=false) cron job must NOT be torn down after
-// a successful run — its session is deliberately reused across ticks to carry
-// conversational context. A regression that reaps persistent sessions would
-// destroy that context every tick.
-func TestPersistentContextNotReapedAfterSuccess(t *testing.T) {
-	t.Parallel()
-
-	rec := &recordingBroadcaster{}
-	router := &reapRouter{sid: "sess-persist-1"}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
-
-	j := &Job{ID: "job-persist", Schedule: "@every 5m", Prompt: "ping", FreshContext: false}
-	s.putJobForTest(j)
-
-	s.executeOpt(j.ID, true)
-
-	if got := rec.endedAtCron(0); got.State != RunStateSucceeded {
-		t.Fatalf("state: want succeeded, got %q (err=%q)", got.State, got.ErrorClass)
-	}
-
-	wantKey := sessionkey.CronKey(j.ID)
-	resets, _ := router.snapshot()
-	for _, k := range resets {
-		if k == wantKey {
-			t.Errorf("persistent-mode job must not be Reset after success; got Reset(%q) in %v",
-				wantKey, resets)
-		}
 	}
 }

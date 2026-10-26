@@ -8,10 +8,10 @@ import (
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
-// releaseRouter is errSendRouter plus the ProcessReleaser capability: each
+// releaseRouter is reapRouter plus the ProcessReleaser capability: each
 // ReleaseProcess is recorded as "release" in the shared order.
 type releaseRouter struct {
-	errSendRouter
+	reapRouter
 	relMu    sync.Mutex
 	released []string
 }
@@ -38,7 +38,7 @@ func runReleaseCase(t *testing.T, sess Session, fresh bool) (*releaseRouter, *or
 	t.Helper()
 	ord := &orderRecorder{}
 	rec := &recordingBroadcaster{order: ord}
-	router := &releaseRouter{errSendRouter: errSendRouter{reapRouter: reapRouter{order: ord}, sess: sess}}
+	router := &releaseRouter{reapRouter: reapRouter{order: ord, sess: sess}}
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: router, Telemetry: rec})
 	j := &Job{ID: "job-release", Schedule: "@every 5m", Prompt: "ping", FreshContext: fresh}
 	s.putJobForTest(j)

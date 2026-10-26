@@ -152,6 +152,20 @@ server:
 session:
   auto_chain:
     enabled: true
+  project_stable_key:
+    enabled: false
+  shim:
+    buffer_size: 10
+    max_buffer_bytes: 1MB
+    disconnect_watchdog: 5m
+    max_shims: 3
+log:
+  format: text
+  stdio_max_size: "0"
+sysession:
+  tick_timeout: 45s
+  runner:
+    jsonl_max_age: "0"
 cron:
   sandbox:
     runtime_arn: "arn:aws:bedrock-agentcore:us-east-1:1:runtime/x"
@@ -162,6 +176,8 @@ platforms:
     app_secret: s
     connection_mode: webhook
     allow_insecure_webhook: true
+projects:
+  public_tmp: true
 agents:
   reviewer:
     args: ["--append-system-prompt=Be terse.", "--keep"]
@@ -178,6 +194,18 @@ agents:
 
 		"platforms.feishu.connection_mode":        "long connection",
 		"platforms.feishu.allow_insecure_webhook": "remove",
+
+		"projects.public_tmp":        "__public_tmp__",
+		"session.project_stable_key": "always on",
+
+		"session.shim.buffer_size":         "10000 lines",
+		"session.shim.max_buffer_bytes":    "50MB",
+		"session.shim.disconnect_watchdog": "30m",
+		"session.shim.max_shims":           "50 shims",
+		"log.format":                       "JSON",
+		"log.stdio_max_size":               "64MB",
+		"sysession.tick_timeout":           "30s",
+		"sysession.runner.jsonl_max_age":   "7 days",
 	}
 	flagDiags := 0
 	for _, d := range diags {
@@ -209,8 +237,8 @@ agents:
 	if flagDiags != 1 {
 		t.Errorf("--append-system-prompt in agents[].args drew %d diags, want exactly 1", flagDiags)
 	}
-	if len(cfg.Nodes) != 0 {
-		t.Errorf("nodes must not be read any more, got %v", cfg.Nodes)
+	if len(cfg.Workspaces) != 0 {
+		t.Errorf("nodes must not be read any more, got %v", cfg.Workspaces)
 	}
 	if got := cfg.Agents["reviewer"].SystemPrompt; got != "" {
 		t.Errorf("--append-system-prompt must not be lifted any more, got %q", got)

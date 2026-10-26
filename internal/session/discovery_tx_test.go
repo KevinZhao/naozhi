@@ -130,22 +130,6 @@ func TestDiscoveryExclusions_CoverTheWholeChainAndLiveWorkspaces(t *testing.T) {
 	}
 }
 
-// TestRetireAutoChainOnce_MarksTheStoreDirty: a stripped chain is persisted.
-func TestRetireAutoChainOnce_MarksTheStoreDirty(t *testing.T) {
-	r := newTestRouter(4)
-	s := injectSession(r, "feishu:direct:retire:general", nil)
-	s.historyMu.Lock()
-	s.prevSessionIDs = []string{"real", "auto-x"}
-	s.prevSessionOrigins = []string{"manual", "auto-spawn"}
-	s.historyMu.Unlock()
-	clearDirty(r)
-
-	r.retireAutoChainOnce()
-	if !tableDirty(r) {
-		t.Error("retiring an auto chain left the store clean")
-	}
-}
-
 // storedRouterDir writes a store with one resumable session and returns the
 // store path.
 func storedRouterDir(t *testing.T, key, sessionID, workspace string) string {

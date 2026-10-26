@@ -50,8 +50,8 @@ func (b *blockingInterrupter) waitDrained(t *testing.T) {
 // finishRun was never invoked, leaving inflight.running=true so every
 // subsequent tick silently skipped the job until process restart.
 //
-// The test substitutes the production watchdogInterruptTimeout for a
-// short value so we don't burn 3s in CI, asserts abort is delivered
+// The test passes a short interrupt timeout instead of the production
+// watchdogInterruptTimeoutDefault so we don't burn 3s in CI, asserts abort is delivered
 // promptly with fired=true and outcome=InterruptError, and finally
 // releases the stub so the inner goroutine drains cleanly.
 func TestRunDeadlineWatchdog_TimeoutOnWedgedInterrupt(t *testing.T) {

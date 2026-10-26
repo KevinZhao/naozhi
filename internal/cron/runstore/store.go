@@ -137,22 +137,6 @@ func (s *Store) KeepWindow() time.Duration {
 	return s.keepWindow
 }
 
-// Health snapshots the loss counters. A nil or disabled store reports
-// Enabled=false with zero counters.
-func (s *Store) Health() Health {
-	if !s.Enabled() {
-		return Health{}
-	}
-	full, other := s.WriteFailedTotals()
-	return Health{
-		Enabled:             true,
-		WriteFailedDiskFull: full,
-		WriteFailedOther:    other,
-		HistoryDropped:      s.HistoryDropTotal(),
-		CacheStaleEvictions: s.CacheStaleEvictionTotal(),
-	}
-}
-
 // ErrCorruptRun is returned when a run JSON file fails to parse or
 // exceeds the size cap. Treated identically to "missing": list APIs
 // skip the entry, GC removes it.
@@ -371,7 +355,7 @@ func (s *Store) List(jobID string, limit int, before time.Time) []CronRunSummary
 		limit = 50
 	}
 	// Clamp to the configured retention cap, not the package default, so an
-	// operator-raised RunsKeepCount can be paged (#969).
+	// raised Options.KeepCount can be paged (#969).
 	if limit > s.keepCount {
 		limit = s.keepCount
 	}

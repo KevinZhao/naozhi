@@ -19,7 +19,7 @@ func TestLocalRun_RecordsFreshSnapshotThroughFinishRun(t *testing.T) {
 		{"persistent context", "00000000000f0e50", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s, _ := newCostScheduler(t, costRouter{sess: &costSession{cumulative: []float64{0.1}}})
+			s, _ := newCostScheduler(t, &reapRouter{sess: &costSession{cumulative: []float64{0.1}}})
 			j := &Job{ID: tc.id, Schedule: "@every 5m", Prompt: "ping", WorkDir: "/home/u/proj", FreshContext: tc.fresh}
 			s.putJobForTest(j)
 

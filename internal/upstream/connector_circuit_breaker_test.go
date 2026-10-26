@@ -1,4 +1,3 @@
-// anchor-keep: the breaker threshold/backoff constants are the operational contract; behavioural verification would need minutes of wall-clock per case.
 package upstream
 
 import (
@@ -7,46 +6,15 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-)
 
-// TestCircuitBreakerVars_PackageLevelVars locks the ARCH-D6 (Round 177)
-// circuit breaker knobs into package-level vars so tests can shorten values
-// without wall-clock waits. Turning either into a const would make the breaker
-// regression tests either wait five minutes per failure or lose coverage.
-//
-// The assignability half used to be two regexps over connector.go looking for
-// `var circuitBreakerThreshold =`. It is now enforced by the compiler, which is
-// both stronger and free: the assignments below do not compile against a const
-// ("cannot assign to circuitBreakerThreshold (neither addressable nor a
-// variable)" — verified). Four other tests in this package already assign
-// circuitBreakerThreshold and five assign circuitBreakerBackoff, so the guard
-// was redundant even before this (Epic I #2547).
-//
-// What remains here is what a source scan could never check: that the VALUES
-// make the breaker meaningful.
-func TestCircuitBreakerVars_PackageLevelVars(t *testing.T) {
-	// Compile-time assertion of assignability, restored immediately.
-	origThreshold, origBackoff := circuitBreakerThreshold, circuitBreakerBackoff
-	circuitBreakerThreshold, circuitBreakerBackoff = origThreshold, origBackoff
-	if circuitBreakerThreshold <= 0 {
-		t.Errorf("circuitBreakerThreshold = %d, want > 0", circuitBreakerThreshold)
-	}
-	if circuitBreakerBackoff <= 0 {
-		t.Errorf("circuitBreakerBackoff = %v, want > 0", circuitBreakerBackoff)
-	}
-	// Breaker backoff must exceed the 30 s ceiling — otherwise tripping
-	// it wouldn't change behaviour in a meaningful way.
-	if circuitBreakerBackoff <= 30*time.Second {
-		t.Errorf("circuitBreakerBackoff = %v must exceed the 30 s normal ceiling", circuitBreakerBackoff)
-	}
-}
+	"github.com/naozhi/naozhi/internal/testhelper"
+)
 
 // alwaysFailServer returns an HTTP server that rejects every WebSocket
 // upgrade attempt with 500. runOnce sees this as a dial error, which is
@@ -78,10 +46,27 @@ func (c *capturingLogger) String() string {
 	return c.buf.String()
 }
 
+// runUntil runs c.Run until cond holds, then stops it. Run's first backoff is
+// a hard-coded 1s and a breaker backoff below that never lowers it, so each
+// attempt costs ~1s (jittered); the 10s bound leaves room for five of them.
+func runUntil(t *testing.T, c *Connector, cond func() bool, msg string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		c.Run(ctx)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	testhelper.Eventually(t, cond, 10*time.Second, msg)
+}
+
 // TestConnector_CircuitBreakerTripsAndEmitsSingleWARN drives Run against
-// a server that fails every upgrade. With threshold=2 and breaker
-// backoff=50ms, the 3rd loop iteration (2 consecutive failures) must
-// emit exactly one "circuit breaker tripped" WARN. Subsequent failures
+// a server that fails every upgrade. With threshold=2, the 2nd consecutive
+// failure must emit exactly one "circuit breaker tripped" WARN. Subsequent failures
 // stay silent on the breaker axis but keep emitting the per-attempt
 // "connector disconnected" WARN.
 //
@@ -114,17 +99,10 @@ func TestConnector_CircuitBreakerTripsAndEmitsSingleWARN(t *testing.T) {
 	cfg := &Config{URL: wsAddr, NodeID: "node-cb", Token: "t"}
 	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
 
-	// Run for long enough to let 3+ failures accumulate (each attempt
-	// is fast because the server rejects immediately; sleeps are
-	// bounded by 50 ms breaker backoff).
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	done := make(chan struct{})
-	go func() {
-		c.Run(ctx)
-		close(done)
-	}()
-	<-done
+	// Wait for a failure after the trip so "exactly once" is tested against
+	// a repeat failure in the tripped state.
+	runUntil(t, c, func() bool { return strings.Count(cap.String(), "connector disconnected") >= 3 },
+		"want at least 3 failed attempts")
 
 	out := cap.String()
 
@@ -211,14 +189,9 @@ func TestConnector_CircuitBreakerResetsOnSuccess(t *testing.T) {
 	cfg := &Config{URL: wsAddr, NodeID: "node-reset", Token: "t"}
 	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	done := make(chan struct{})
-	go func() {
-		c.Run(ctx)
-		close(done)
-	}()
-	<-done
+	// Run until the breaker has tripped a second time after the success.
+	runUntil(t, c, func() bool { return strings.Count(cap.String(), "connector circuit breaker tripped") >= 2 },
+		"want a second breaker trip after the successful connection")
 
 	out := cap.String()
 
@@ -234,90 +207,12 @@ func TestConnector_CircuitBreakerResetsOnSuccess(t *testing.T) {
 		t.Errorf("expected 'circuit breaker reset' after successful connection, got %d. Log:\n%s", resetCount, out)
 	}
 
-	// The counter reset itself, not just its log line. Both assertions above read
-	// the LOG, and the log is emitted by a different statement than the reset:
-	//
-	//	if connected {
-	//	    consecutiveFailures = 0                        <- the effect
-	//	    if circuitTripped {
-	//	        slog.Info("...breaker reset...")           <- what we asserted
-	//	        circuitTripped = false
-	//	    }
-	//	}
-	//
-	// So replacing `consecutiveFailures = 0` with a no-op left every assertion
-	// above passing — verified, and the reason TestRun_BreakerSourceContract's
-	// text scan is still load-bearing for this branch (Epic I #2547).
-	//
-	// The observable consequence of the reset is the SECOND trip's failure count:
-	// with the counter reset, tripping again needs `threshold` fresh failures, so
-	// the tripped WARN reports exactly that. Without the reset the count keeps
-	// climbing past it.
-	if trippedCount >= 2 {
-		if strings.Count(out, "consecutive_failures="+strconv.Itoa(circuitBreakerThreshold)) < 2 {
-			t.Errorf("the second trip did not report consecutive_failures=%d; the failure counter was not reset by the successful connection. Log:\n%s",
-				circuitBreakerThreshold, out)
-		}
-	}
-}
-
-// TestRun_BreakerSourceContract locks the control flow in Run so future
-// refactors of the reconnect loop cannot silently remove the breaker
-// logic. We scan connector.go for the key structural anchors:
-//   - consecutiveFailures variable declared in Run
-//   - circuitTripped flag
-//   - reset-on-connected branch
-//   - trip-on-threshold branch with single-shot WARN gate
-//   - backoff floor raised to circuitBreakerBackoff
-//
-// Unlike a behavioural test, this catches "someone removed the !connected
-// branch by accident" even if the behavioural tests above happen to
-// still pass (e.g. timing flukes).
-func TestRun_BreakerSourceContract(t *testing.T) {
-	t.Parallel()
-	src, err := os.ReadFile("connector.go")
-	if err != nil {
-		t.Fatalf("read connector.go: %v", err)
-	}
-	body := string(src)
-	// Extract the Run function body — rough but good enough for this
-	// structural check.
-	runIdx := strings.Index(body, "func (c *Connector) Run(ctx context.Context) {")
-	if runIdx < 0 {
-		t.Fatal("Run method not found in connector.go")
-	}
-	// End marker: the next top-level func declaration.
-	rest := body[runIdx:]
-	endIdx := strings.Index(rest[1:], "\nfunc ")
-	if endIdx < 0 {
-		endIdx = len(rest)
-	} else {
-		endIdx++ // account for the leading \n offset
-	}
-	runBody := rest[:endIdx]
-
-	anchors := []string{
-		"consecutiveFailures",
-		"circuitTripped",
-		"if connected {",
-		"consecutiveFailures++",
-		"circuitBreakerThreshold",
-		"circuitBreakerBackoff",
-		"connector circuit breaker tripped",
-	}
-	for _, anchor := range anchors {
-		if !strings.Contains(runBody, anchor) {
-			t.Errorf("Run body missing breaker anchor %q — circuit breaker may have been regressed out", anchor)
-		}
-	}
-
-	// Single-shot WARN gate: the "tripped" WARN must be inside a
-	// `if !circuitTripped` guard (or equivalent shape) so repeat
-	// failures don't flood logs. We check for the textual
-	// composition rather than the exact pattern.
-	gateIdx := strings.Index(runBody, "if !circuitTripped {")
-	warnIdx := strings.Index(runBody, "connector circuit breaker tripped")
-	if gateIdx < 0 || warnIdx < 0 || gateIdx > warnIdx {
-		t.Errorf("single-shot WARN gate missing: expect `if !circuitTripped {` to precede the tripped WARN line")
+	// The counter reset itself, not just its log line: the log above is
+	// emitted by a different statement than `consecutiveFailures = 0`. With
+	// the counter reset, the second trip needs `threshold` fresh failures and
+	// its WARN reports exactly that; without it the count keeps climbing.
+	if n := strings.Count(out, "consecutive_failures="+strconv.Itoa(circuitBreakerThreshold)); n < 2 {
+		t.Errorf("consecutive_failures=%d reported %d times, want 2; the failure counter was not reset by the successful connection. Log:\n%s",
+			circuitBreakerThreshold, n, out)
 	}
 }

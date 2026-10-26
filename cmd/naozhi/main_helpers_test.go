@@ -105,12 +105,8 @@ func TestMain_DispatchesDiagnosticSubcommands(t *testing.T) {
 // every value differs from its default so a swapped or dropped accessor shows.
 func TestShimManagerConfig(t *testing.T) {
 	stateDir := t.TempDir()
-	cfg := loadConfigBody(t, "session:\n  shim:\n    state_dir: "+stateDir+"\n    idle_timeout: 2h\n"+
-		"    disconnect_watchdog: 45m\n    buffer_size: 123\n    max_buffer_bytes: 1gb\n    max_shims: 3\n")
-	want := shim.ManagerConfig{
-		StateDir: stateDir, IdleTimeout: 2 * time.Hour, WatchdogTimeout: 45 * time.Minute,
-		BufferSize: 123, MaxBufBytes: 1 << 30, MaxShims: 3,
-	}
+	cfg := loadConfigBody(t, "session:\n  shim:\n    state_dir: "+stateDir+"\n    idle_timeout: 2h\n")
+	want := shim.ManagerConfig{StateDir: stateDir, IdleTimeout: 2 * time.Hour}
 	if got := shimManagerConfig(cfg); !reflect.DeepEqual(got, want) {
 		t.Errorf("shimManagerConfig = %+v, want %+v", got, want)
 	}

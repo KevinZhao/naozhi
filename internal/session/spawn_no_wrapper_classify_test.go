@@ -1,12 +1,10 @@
 package session
 
 // Pins the classification contract of the UPSTREAM nil-wrapper guard in
-// the spawn (router_lifecycle.go). Review of the Runner-seam PR found an
-// asymmetry: the new nil-runner guard in panicSafeSpawn has a test asserting
-// it wraps ErrNoCLIWrapper (panic_safe_spawn_runner_test.go), but the
-// pre-existing guard it mirrors had none — a silent edit there (wrapping a
-// different sentinel, or dropping the %w) would divert usermsg/classify to a
-// generic error code without failing any test. The two guards must stay
+// the spawn (router_lifecycle.go). The nil-wrapper guard in panicSafeSpawn
+// has a matching test (panic_safe_spawn_nil_test.go); a silent edit here
+// (wrapping a different sentinel, or dropping the %w) would divert
+// usermsg/classify to a generic error code. The two guards must stay
 // classification-equivalent: both mean "no spawnable backend".
 
 import (

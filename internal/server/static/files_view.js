@@ -75,7 +75,7 @@ import { formatFileSize } from './utilities.js';
       // project — rather than a shortest-path heuristic. The old heuristic
       // (shortest .path wins) could pick an unrelated short-path project
       // (e.g. "/x" beating "/home/user/workspace"), landing the operator in
-      // the wrong tree on multi-project deployments (#2282).
+      // the wrong tree on multi-project deployments.
       var root = null;
       state.roots.forEach(function (p) {
         if (p.is_root) root = p;
@@ -179,8 +179,6 @@ import { formatFileSize } from './utilities.js';
     wrap.innerHTML = html;
   }
 
-  function fmtSize(n) { return formatFileSize(n); }
-
   function renderList(res) {
     var box = $('files-list');
     if (!box) return;
@@ -198,7 +196,7 @@ import { formatFileSize } from './utilities.js';
     }
     entries.forEach(function (e) {
       var icon = e.is_dir ? '📁' : (e.symlink ? '🔗' : '📄');
-      var meta = e.is_dir ? '' : (e.symlink ? '链接' : fmtSize(e.size));
+      var meta = e.is_dir ? '' : (e.symlink ? '链接' : formatFileSize(e.size));
       var cls = 'files-row' + (e.is_dir ? ' files-dir' : '') + (e.symlink ? ' files-link' : '');
       var kind = e.symlink ? 'symlink' : (e.is_dir ? 'dir' : 'file');
       html += '<div class="' + cls + '" role="listitem" data-kind="' + kind + '" data-name="' + escAttr(e.name) + '">' +

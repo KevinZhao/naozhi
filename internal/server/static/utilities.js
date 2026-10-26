@@ -1,13 +1,11 @@
-// utilities.js — extracted from dashboard.js (#2558 D4).
-//
-// A leaf: it imports only contract.js, state.js, nz_util.js and
-// the other leaves, so any module can import it without forming a cycle.
-// Shared state is read from the state.js objects.
+// utilities.js — shared dashboard helpers. A leaf: it imports only contract.js,
+// state.js, nz_util.js and the other leaves, so any module can import it
+// without forming a cycle. Shared state is read from the state.js objects.
 import { NZ_CONTRACT } from './contract.js';
 import { composer, perSession, selection, serverInfo, sessionList, timers, transcript, ui } from './state.js';
 import { esc, escAttr, showToast, trapFocus, sessionExitChipHtml } from './nz_util.js';
 import { wsm } from './ws_manager.js';
-import { authHeaders, getToken, lsSet } from './platform.js';
+import { lsSet } from './platform.js';
 import { sid } from './session_ident.js';
 import { featureForBackend, pendingBackendID } from './features.js';
 
@@ -39,22 +37,15 @@ function mainEmptyHtml() {
         '</svg></button>' +
     '</form>' +
     '<div class="nz-hint-dim">默认目录 · general agent · 随时 <code>/cd</code> 切换目录，或用上方 <b>+</b> 开项目会话</div>' +
-    // R110-P1 空闲态 Home 仪表 MVP 占位：renderRecentSessionsPanel()
+    // 空闲态 Home：renderRecentSessionsPanel()
     // 按需注入"最近会话"缩略列表；零 session 时渲染为空字符串，保留冷启动
     // 简洁空态不退化。Helper 外部调用，不嵌在本 HTML 里以保持 pure 可读。
     '<div id="recent-sessions-panel" class="recent-panel-wrap"></div>' +
   '</div>';
 }
 
-// computeHomeStats aggregates sessionList.allSessionsCache into the two stats surfaced
-// on the idle Home panel. Pure function so a contract test can exercise the
-// "today" boundary and cost summation without driving the DOM.
-//
-// Scope is deliberately conservative: the TODO lists 4 metrics (today active
-// / prompts processed / tokens / cost), but prompts and tokens require an
-// event-log scan or a backend aggregator that doesn't exist yet. The two
-// metrics here (today active count, total cost) are already shipped in
-// /api/sessions per-session fields.
+// computeHomeStats aggregates sessionList.allSessionsCache into the stats
+// surfaced on the idle Home panel, from /api/sessions per-session fields.
 //
 //   todayActive — sessions whose last_active >= local-midnight today. Uses
 //                 the JS Date constructor so the user's browser timezone
@@ -62,14 +53,8 @@ function mainEmptyHtml() {
 //   totalCost   — sum of s.total_cost across all cached sessions (not gated
 //                 by today, because a cron-heavy workspace accumulates cost
 //                 overnight and wiping at midnight would hide it).
-//   totalPrompts — sum of s.message_count across all cached sessions. The
-//                 SessionSnapshot already ships message_count (the cumulative
-//                 "user" turn count observed by the live process event log),
-//                 so the "已处理 prompt 数" card (R110-P1 #445) is derivable
-//                 client-side without the deferred /api/stats/aggregate
-//                 backend scan. Cumulative tokens still need that backend
-//                 endpoint (no per-session token field exists yet), so the
-//                 token card stays out of scope here.
+//   totalPrompts — sum of s.message_count (the cumulative "user" turn
+//                 count) across all cached sessions.
 //
 // Input shape tolerant: missing last_active / total_cost / message_count on a
 // session contributes zero / is skipped rather than NaN-poisoning the totals.
@@ -125,9 +110,8 @@ function buildHomeHealthLines(stats) {
   let line1 = '运行中 ' + running + ' · 就绪 ' + ready + ' · 总 ' + total;
   if (stats.uptime) line1 += ' · 已运行 ' + stats.uptime;
   lines.push({ text: line1, kind: 'info' });
-  // claude 子进程容量 (R110-P1 #445 "claude 子进程数"): max_procs ships in the
-  // /api/sessions stats static block already, so surface live-vs-capacity
-  // without the deferred /api/stats backend scan. Only when max_procs > 0
+  // claude 子进程容量: live vs max_procs from the /api/sessions stats block.
+  // Only when max_procs > 0
   // (a 0/missing cap means "uncapped" — no ratio to show). Warn when the
   // pool is saturated so operators notice spawn back-pressure.
   const maxProcs = typeof stats.max_procs === 'number' ? stats.max_procs : 0;
@@ -144,15 +128,12 @@ function buildHomeHealthLines(stats) {
     if (stats.cli_version) cli += ' ' + stats.cli_version;
     lines.push({ text: cli, kind: 'info' });
   }
-  // naozhi build tag (R110-P1 #445 service-health): version_tag already ships
-  // in the /api/sessions stats block (omitempty when the -X ldflag is unset)
-  // and the backend struct doc promises a "naozhi v1.2.3-dirty" footer that
-  // was never wired client-side. Surface it so operators can confirm the
-  // running build straight from the Home health strip.
+  // naozhi build tag from the /api/sessions stats block (omitempty when the
+  // -X ldflag is unset), so operators can confirm the running build.
   if (stats.version_tag) {
     lines.push({ text: 'naozhi ' + stats.version_tag, kind: 'info' });
   }
-  // Multi-Backend RFC §8.3 D22: when ≥2 backends are configured, show a
+  // When ≥2 backends are configured, show a
   // one-liner summarizing per-backend availability + version. The rich
   // per-feature table lives in the doctor status panel (built by
   // renderBackendsDoctorPanel below) — this line is just the at-a-glance
@@ -303,13 +284,13 @@ async function fetchCostSummary(query) {
   const to = new Date();
   const from = new Date(to.getTime() - 30 * 24 * 3600 * 1000);
   const resp = await fetch(NZ_CONTRACT.API.cost_summary + '?' + query + '&from=' + encodeURIComponent(from.toISOString()) +
-    '&to=' + encodeURIComponent(to.toISOString()), { headers: authHeaders() });
+    '&to=' + encodeURIComponent(to.toISOString()));
   return resp.ok ? resp.json() : null;
 }
 
 // fetchCostBudget resolves /api/cost/budget for `query` (an encoded
 // session_key= or job_id=), or null when the request fails.
-const fetchCostBudget = (query) => fetch(NZ_CONTRACT.API.cost_budget + '?' + query, { headers: authHeaders() })
+const fetchCostBudget = (query) => fetch(NZ_CONTRACT.API.cost_budget + '?' + query)
   .then((r) => (r.ok ? r.json() : null)).catch(() => null);
 
 // costBudgetChipHtml renders a /api/cost/budget answer as "今日 $x / $y",
@@ -373,7 +354,7 @@ function renderServiceOverviewHtml() {
           '<div class="svc-health-line ' + esc(l.kind || 'info') + '">' + esc(l.text) + '</div>'
         ).join('') +
       '</div>';
-  // Multi-Backend RFC §8.3 D22: doctor status panel — clickable details
+  // Doctor status panel — clickable details
   // block listing each enabled backend's caps + features. Single-backend
   // mode skips it (renderBackendsDoctorPanel returns '').
   const doctorHtml = renderBackendsDoctorPanel();
@@ -384,11 +365,11 @@ function renderServiceOverviewHtml() {
 }
 
 // renderBackendsDoctorPanel builds a foldable <details> panel listing each
-// enabled backend with its protocol caps + user-feature flags. Multi-Backend
-// RFC §8.3 D22. Returns '' for single-backend deployments / when serverInfo.cliBackends
-// is unavailable so the cold-start home page doesn't show a half-empty
-// section. The output includes a small "▼" affordance and a screen-reader
-// label so keyboard users know the section is expandable.
+// enabled backend with its protocol caps + user-feature flags. Returns '' for
+// single-backend deployments / when serverInfo.cliBackends is unavailable so
+// the cold-start home page doesn't show a half-empty section. The output
+// includes a small "▼" affordance and a screen-reader label so keyboard users
+// know the section is expandable.
 function renderBackendsDoctorPanel() {
   if (!serverInfo.cliBackends || !Array.isArray(serverInfo.cliBackends.backends)) return '';
   if (serverInfo.cliBackends.backends.length <= 1) return '';
@@ -402,8 +383,7 @@ function renderBackendsDoctorPanel() {
       ? '<span class="doctor-status doctor-status-ok">●</span>'
       : '<span class="doctor-status doctor-status-bad" title="binary missing or --version probe failed">○</span>';
     // !Array.isArray gate: typeof [] is 'object', so without this an array-typed
-    // features field would render numeric-keyed pills like "0", "1". Review
-    // (PR #121) catch — server contract says object{flag:bool}, but be defensive.
+    // features field would render numeric-keyed pills like "0", "1".
     const features = b.features && typeof b.features === 'object' && !Array.isArray(b.features)
       ? b.features
       : {};
@@ -430,7 +410,7 @@ function renderBackendsDoctorPanel() {
   '</details>';
 }
 
-// RNEW-UX-010 — polite announcement into #sr-announce for screen readers.
+// Polite announcement into #sr-announce for screen readers.
 // Used for signals that don't surface as a toast (WS connect/disconnect,
 // new-session arrival, cron completion). We clear the textContent after a
 // short tick so an identical follow-up message still re-triggers the AT
@@ -550,14 +530,28 @@ function reconnectNow() {
   wsm.connect();
 }
 
-function fallbackCopy(text) {
+// copyText writes text to the clipboard and resolves whether it worked:
+// navigator.clipboard where it exists (secure contexts), else a textarea and
+// execCommand for plain-HTTP LAN access. The textarea is always detached.
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (_) { /* fall through */ }
   const ta = document.createElement('textarea');
-  ta.value = text;
-  ta.style.cssText = 'position:fixed;left:-9999px';
-  document.body.appendChild(ta);
-  ta.select();
-  document.execCommand('copy');
-  document.body.removeChild(ta);
+  try {
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;left:-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    return document.execCommand('copy');
+  } catch (_) {
+    return false;
+  } finally {
+    if (ta.parentNode) ta.parentNode.removeChild(ta);
+  }
 }
 
 // Flash a button to "copied!" state for ~1.5s then revert.
@@ -567,16 +561,8 @@ function flashCopyButton(btn) {
   setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1500);
 }
 
-// Shared clipboard helper for in-line buttons — uses navigator.clipboard with
-// an execCommand fallback for non-HTTPS / older browsers.
 function copyWithFeedback(btn, text) {
-  const done = () => flashCopyButton(btn);
-  if (navigator.clipboard) {
-    navigator.clipboard.writeText(text).then(done).catch(() => { fallbackCopy(text); done(); });
-  } else {
-    fallbackCopy(text);
-    done();
-  }
+  copyText(text).then(() => flashCopyButton(btn));
 }
 
 function copyCodeBlock(btn) {
@@ -615,10 +601,7 @@ function copyEventContent(btn) {
 }
 
 function shortPath(p) {
-  // Collapse the OS home prefix to ~. Previously only Linux (/home/<user>/)
-  // matched, so on macOS every palette row repeated the full
-  // /Users/<user>/… prefix and the project name drowned in boilerplate
-  // (ui-polish-light-theme D6).
+  // Collapse the OS home prefix (/home/<user>/ or /Users/<user>/) to ~.
   for (const home of ['/home/', '/Users/']) {
     const i = p.indexOf(home);
     if (i >= 0) {
@@ -630,16 +613,9 @@ function shortPath(p) {
   return p.length > 40 ? '...' + p.substring(p.length - 37) : p;
 }
 
-// historyDayLabel formats a Date as the history drawer's day-group
-// label. Today and yesterday collapse to \u4e2d\u6587 "\u4eca\u5929" / "\u6628\u5929" so the
-// most common buckets read instantly without parsing a date. Older
-// entries defer to the browser locale so CJK users see "4\u670829\u65e5 \u5468\u4e09"
-// and EN users see "Wed, Apr 29" \u2014 both read naturally now that the
-// .hp-day-header uppercase was dropped in Round 129.
-//
-// Exposed at module scope (not inside renderHistoryPopover) so the
-// Round 129 contract test can assert its existence and both branches
-// are easy to eyeball in the source.
+// historyDayLabel formats a Date as the history drawer's day-group label:
+// "今天" / "昨天" for today and yesterday, else the browser-locale date
+// ("4月29日 周三" / "Wed, Apr 29").
 function historyDayLabel(d) {
   if (!d || isNaN(d.getTime())) return '';
   const today = new Date();
@@ -694,10 +670,8 @@ function timeAgo(ms, future) {
 
 // formatAbsTime renders an epoch-ms timestamp in local time as
 // "YYYY-MM-DD HH:MM:SS (TZ)" for use inside title attributes on the various
-// "3m ago" / "next 2h" relative labels. The goal is R110-P3: keep the
-// compact relative form in the UI, but let hover reveal the exact instant
-// so operators can reason about long-running jobs / stale sessions without
-// doing mental arithmetic. Falls back to '' on falsy input so callers can
+// "3m ago" / "next 2h" relative labels, so hover reveals the exact instant.
+// Falls back to '' on falsy input so callers can
 // safely gate the title attribute with a truthy check.
 function formatAbsTime(ms) {
   if (!ms) return '';
@@ -753,10 +727,8 @@ function confirmDialog(opts) {
     const cancelText = (opts && opts.cancelText) || '取消';
     const variant = (opts && opts.variant) || 'danger';
     const confirmClass = variant === 'danger' ? 'danger' : 'primary';
-    // Round 2 R-12: optional countdown (seconds) before the confirm
-    // button activates. Used by destructive flows to insert a "速度带"
-    // — short enough to not annoy, long enough to catch fat-fingered
-    // double-Enter. Default 0 = no countdown (legacy behaviour).
+    // Optional countdown (seconds) before the confirm button activates, so
+    // destructive flows catch a fat-fingered double-Enter. Default 0.
     const countdownSecs = (opts && typeof opts.countdownSecs === 'number') ? Math.max(0, Math.floor(opts.countdownSecs)) : 0;
 
     const overlay = document.createElement('div');
@@ -832,7 +804,7 @@ function confirmDialog(opts) {
   });
 }
 
-// RNEW-UX-013: promptDialog is the themed replacement for native window.prompt().
+// promptDialog is the themed replacement for native window.prompt().
 // Matches confirmDialog shape (overlay + .modal-btns) so the two share styling,
 // trapFocus, Esc/backdrop-cancel semantics, and XSS-safe rendering. Returns a
 // Promise that resolves to the trimmed input string on confirm, or null on
@@ -944,10 +916,7 @@ function showAuthModal(opts) {
   overlay.className = 'modal-overlay';
   overlay.innerHTML =
     '<div class="modal" role="dialog" aria-modal="true" aria-label="Dashboard API token">' +
-      // R110-P3 brand lockup: `>_` mark + `naozhi` wordmark anchors the
-      // login screen so operators recognize they're on the right service.
-      // Mirrors the `>_` glyph used in the empty state; pure text (no image
-      // asset) keeps the static bundle tiny.
+      // Brand lockup: `>_` mark + `naozhi` wordmark, pure text.
       '<div class="auth-brand">' +
         '<div class="ab-mark" aria-hidden="true">&gt;_</div>' +
         '<div class="ab-wordmark">' +
@@ -956,10 +925,8 @@ function showAuthModal(opts) {
         '</div>' +
       '</div>' +
       '<h3>Dashboard API Token</h3>' +
-      // R110-P3 brand/onboarding hint: first-time operators often don't know
-      // where the token comes from. Points them at the one configuration
-      // surface (dashboard_token in config.yaml). Kept concise; full docs live
-      // in README.md and docs/ops/ so the modal stays task-focused.
+      // Onboarding hint: points first-time operators at dashboard_token in
+      // config.yaml.
       '<div class="auth-hint">token 配置于 <code>config.yaml</code> 的 <code>dashboard_token</code> 字段</div>' +
       '<input id="token-input" type="password" placeholder="请输入 dashboard token…" data-action-keydown="token-input-key">' +
       '<div class="modal-btns">' +
@@ -999,15 +966,9 @@ const AVATAR_GROUP_GAP_MS = 30 * 1000;
 
 const EARLIER_PAGE_LIMIT = 100;
 
-// UX3 (#398): the live-push path (appendEvents) does insertAdjacentHTML('beforeend')
-// once per event with no upper bound, so a long-running session that streams
-// thousands of events grows #events-scroll without limit and eventually OOMs the
-// tab. The historical-load path is already paginated (INITIAL_HISTORY_LIMIT +
-// "load earlier"); this cap is the live half of the same budget. We keep a
-// generous tail (matching a few "load earlier" pages) and trim the oldest DOM
-// nodes from the top once exceeded. Trimming only drops rendered DOM — the
-// server still holds full history, and "load earlier" re-fetches if the operator
-// scrolls back up. Mirrors the existing CRON_LIVE_MAX_EVENTS top-trim precedent.
+// Cap on live-pushed event DOM nodes: appendEvents trims the oldest from the
+// top once exceeded so a long-streaming session cannot grow #events-scroll
+// without bound. Only rendered DOM goes; "load earlier" re-fetches.
 const MAX_LIVE_DOM_EVENTS = 600;
 
 // cron-live RFC §5: cron live 容器内最多保留 200 条事件。后端
@@ -1039,7 +1000,7 @@ function formatTimeShort(ms) {
   const isYesterday = d.getFullYear() === yesterday.getFullYear() && d.getMonth() === yesterday.getMonth() && d.getDate() === yesterday.getDate();
   if (isYesterday) return '昨天 ' + hm;
   // Local calendar-day difference (not floor(ms/24h)): an event 6d23.5h ago
-  // is the same weekday as today and must not get a weekday label (#2429).
+  // is the same weekday as today and must not get a weekday label.
   const dayStart = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
   const diffDays = Math.round((dayStart(now) - dayStart(d)) / 86400000);
   if (diffDays < 7 && diffDays >= 0) {
@@ -1067,18 +1028,10 @@ function timeDividerHtml(ms) {
 // SECURITY: nz_util.js is the single source of truth for HTML/attr/JS escaping
 // (esc / escAttr / escJs); never re-define a local copy here or in a view module.
 
-// URL schemes that are safe to embed in <a href>.
-// RNEW-SEC-007: Only https?: and fragment-only URLs (#...) are accepted.
-// Previously the allowlist also matched mailto:, absolute paths (/...),
-// and query-only URLs (?...). Those introduced defence-in-depth gaps:
-//   - mailto: can trigger unexpected behaviour in Electron/extension hosts
-//     and is never present in LLM-rendered markdown anchor targets today.
-//   - A single leading "/" lets any string starting with a slash pass the
-//     check; if a caller ever forgot to esc() the capture first, a payload
-//     like "/"+"><script>..." would reach href and bypass the scheme
-//     gate. The stricter regex fails closed in that scenario.
-// Internal links should be constructed against absolute /api/... paths in
-// code, not routed through safeUrl.
+// URL schemes that are safe to embed in <a href>: only https?: and
+// fragment-only URLs (#...). No mailto:, absolute paths or query-only URLs —
+// a leading "/" would let an un-escaped capture reach href, so the strict
+// regex fails closed. Internal links are built in code, not via safeUrl.
 // Anything else (javascript:, data:, vbscript:, file:, about:) -> '#'.
 function safeUrl(u) {
   if (!u) return '#';
@@ -1212,7 +1165,7 @@ export function isMobile() { return mobileQuery().matches; }
 
 export function mobileEnterChat() {
   if (!isMobile()) return;
-  // #2431: switching sessions while already in chat view must not stack
+  // Switching sessions while already in chat view must not stack
   // another entry — replace ours so a single back press leaves chat.
   if (history.state && history.state.view === 'chat') history.replaceState({ view: 'chat' }, '');
   else history.pushState({ view: 'chat' }, '');
@@ -1231,16 +1184,11 @@ export function removeSidebarCard(key) {
   if (card) card.remove();
 }
 
-// Pending-session persistence (#cwd-fallback fix). The three pending maps
-// (sessionWorkspaces/sessionNodes/sessionBackends) used to live ONLY in JS
-// memory, so a page reload before the first send dropped the chosen workspace.
-// The next send then carried no `workspace`, the backend never wrote a
-// per-chat override (send.go gates SetWorkspace on a non-empty workspace), and
-// the spawn fell through to defaultCWD = workspace root — the session landed in
-// the wrong directory. We mirror the maps into localStorage so a reload (or
-// even a never-sent session) rehydrates the workspace and the first send still
-// carries it. This only re-hydrates state the user authored in THIS browser —
-// no fuzzy cross-session guessing (the semantics #1567 deliberately removed).
+// Pending-session persistence: the three pending maps (sessionWorkspaces /
+// sessionNodes / sessionBackends) are mirrored into localStorage so a reload
+// before the first send still carries the chosen workspace (without it the
+// spawn falls back to the workspace root). Only state authored in THIS
+// browser is rehydrated — no cross-session guessing.
 export const PENDING_LS_KEY = 'pending_sessions';
 const PENDING_LS_MAX = 64; // bound localStorage size — far above realistic un-sent backlog
 
@@ -1273,8 +1221,6 @@ export function eagerBindWorkspace(key, workspace, node) {
   if (nd !== 'local') return;
   try {
     const headers = { 'Content-Type': 'application/json' };
-    const token = getToken();
-    if (token) headers['Authorization'] = 'Bearer ' + token;
     fetch(NZ_CONTRACT.API.sessions_bind, {
       method: 'POST', headers,
       body: JSON.stringify({ key: key, node: nd, workspace: workspace }),
@@ -1293,11 +1239,7 @@ export function removePendingSession(key) {
 // applyFeatureGates updates the input-area controls to reflect the
 // active session's backend features. Called after every renderMainShell
 // / selectSession / cliBackends fetch — cheap, just toggles aria + class.
-// Multi-Backend RFC §8.3 D9 / D11-D15.
-//
-// Important: NEVER silently disable. Per RFC §8.7: "all gated controls
-// must have a hover/aria tooltip explaining why" — the title attribute
-// carries the operator-readable reason.
+// Never silently disable: the title attribute carries the reason.
 export function applyFeatureGates() {
   if (!serverInfo.cliBackends || !Array.isArray(serverInfo.cliBackends.backends)) return;
   if (serverInfo.cliBackends.backends.length <= 1) return; // single-backend mode
@@ -1309,10 +1251,10 @@ export function applyFeatureGates() {
     return (e && (e.display_name || e.id)) || backendID || 'this backend';
   })();
 
-  // D14 image_input: file picker accepts both images + PDF; if image is
+  // image_input: file picker accepts both images + PDF; if image is
   // disabled but PDF still works, leave the button enabled — most kiro
   // deployments support image so this branch rarely hits in practice.
-  // Audio is governed separately (D15) by the voice button.
+  // Audio is governed separately by the voice button.
   const imageOK = featureForBackend(backendID, 'image_input');
   const filePickBtn = document.querySelector('button[data-action="file-picker"]');
   if (filePickBtn) {
@@ -1320,12 +1262,8 @@ export function applyFeatureGates() {
       filePickBtn.classList.add('feat-disabled');
       filePickBtn.title = '当前后端 (' + backendName + ') 不支持图片上传';
       filePickBtn.setAttribute('aria-disabled', 'true');
-      // Review #118 HIGH-1: rely on the native disabled property as the
-      // hard gate, not just CSS — `cursor:not-allowed` is cosmetic and
-      // a keyboard activation (Enter/Space on focus) would still fire
-      // onclick. Browsers skip click events on disabled buttons entirely,
-      // and `applyFeatureGates` is the single re-entry point so the
-      // pair stays in sync.
+      // The native disabled property is the hard gate (CSS alone would still
+      // let Enter/Space fire the click).
       filePickBtn.disabled = true;
     } else {
       filePickBtn.classList.remove('feat-disabled');
@@ -1335,17 +1273,15 @@ export function applyFeatureGates() {
     }
   }
 
-  // D15 audio_input: kiro acp 申报 audio:false 但 naozhi 后端会先转写
+  // audio_input: kiro acp 申报 audio:false 但 naozhi 后端会先转写
   // 再喂 prompt — 所以这里**不真正 disable**，只把 tooltip 改成提示性
   // 文案，让用户知道音频会经过转写阶段。
   const audioOK = featureForBackend(backendID, 'audio_input');
   const micBtn = document.getElementById('btn-mic');
   const holdBtn = document.getElementById('btn-hold-talk');
-  // Review #118 HIGH-2: when audio is supported again (e.g. user switches
-  // from kiro back to claude in the same browser session), we MUST reset
-  // titles to their template defaults — otherwise the kiro-era hint
-  // ("会先转写为文字") sticks forever. Default titles mirror
-  // renderMainShell template (line ~2152 / ~2154).
+  // When audio is supported again (e.g. kiro → claude), reset the titles to
+  // the renderMainShell template defaults so the transcription hint does not
+  // stick.
   const micDefaultTitle = composer.voiceInputMode ? '切换键盘' : '切换语音';
   const holdDefaultTitle = '按住说话改录音';
   if (!audioOK) {
@@ -1383,6 +1319,7 @@ export {
   confirmDialog,
   copyCodeBlock,
   copyEventContent,
+  copyText,
   costBudgetChipHtml,
   costCardTitle,
   decodeEscEntities,

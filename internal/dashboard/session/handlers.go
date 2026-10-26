@@ -85,25 +85,22 @@ type watchdogStats struct {
 // sessionStatsStatic holds the /api/sessions.stats fields that are immutable
 // after startup. Built once by initStaticStats and embedded by value into
 // sessionStats on every poll; embedding keeps the JSON flat and byte-identical
-// to the earlier map shape. System stays a map[string]any because it must be
-// deep-copied from the process-wide callSystemInfo() singleton (see
-// doInitStaticStats).
+// to the earlier map shape.
 type sessionStatsStatic struct {
-	Backend          string         `json:"backend"`
-	CLIName          string         `json:"cli_name"`
-	CLIVersion       string         `json:"cli_version"`
-	MaxProcs         int            `json:"max_procs"`
-	DefaultWorkspace string         `json:"default_workspace"`
-	WorkspaceID      string         `json:"workspace_id"`
-	WorkspaceName    string         `json:"workspace_name"`
-	System           map[string]any `json:"system"`
-	Agents           []string       `json:"agents"`
+	Backend          string   `json:"backend"`
+	CLIName          string   `json:"cli_name"`
+	CLIVersion       string   `json:"cli_version"`
+	MaxProcs         int      `json:"max_procs"`
+	DefaultWorkspace string   `json:"default_workspace"`
+	WorkspaceID      string   `json:"workspace_id"`
+	WorkspaceName    string   `json:"workspace_name"`
+	Agents           []string `json:"agents"`
 }
 
 // sessionStats is the "stats" sub-object of GET /api/sessions. Static fields
 // are promoted flat via the embed; the JSON key set is a wire contract with
 // dashboard.js (stats.agents / default_workspace / projects / cli_* /
-// workspace_* / system / version).
+// workspace_* / version).
 type sessionStats struct {
 	sessionStatsStatic
 	Active  int    `json:"active"`
@@ -296,13 +293,8 @@ type Deps struct {
 	// carry retired_at (dashboard sorts by retired_at || last_active). nil
 	// disables; ordering degrades to last_active only.
 	RetiredStore RetiredReader
-	// ValidateWS / SystemInfoFn inject server-package helpers without a
-	// reverse import.
-	ValidateWS   func(ws, root string) (string, error)
-	SystemInfoFn func() map[string]any
-	// ProjectStableKeyEnabled toggles the stableKey field in stats.projects
-	// (same switch as the /api/projects list).
-	ProjectStableKeyEnabled bool
+	// ValidateWS injects the server-package helper without a reverse import.
+	ValidateWS func(ws, root string) (string, error)
 }
 
 // New constructs a Handlers from injected deps. Deps is stored as-is; the

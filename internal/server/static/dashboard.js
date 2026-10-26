@@ -1,5 +1,5 @@
 import { NZ_CONTRACT } from './contract.js';
-import { getToken, lsGet, lsRemove, lsSet } from './platform.js';
+import { lsGet, lsRemove, lsSet } from './platform.js';
 import { registerShell } from './shell.js';
 import { sessionStream } from './session_stream.js';
 import { WS_STATES, wsm } from './ws_manager.js';
@@ -108,18 +108,10 @@ selection.node = (function() {
   catch(_) { return 'local'; }
 })();
 
-// THEME-1 (#453) — theme cycler. The dashboard was GitHub-Dark hardcoded
-// before this; users with a light-mode preference (or who want to follow
-// OS) now get a 3-state toggle in the sidebar header. State is persisted
-// to localStorage('nz_theme') as 'light' / 'dark' / 'auto' (default).
+// Theme: 'light' / 'dark' / 'auto' (default) in localStorage('nz_theme').
 // The inline early-paint applier in dashboard.html sets data-theme before
-// stylesheet evaluation to avoid FOUC; this helper updates the same
-// attribute + writes localStorage on each click. CSS handles the rest
-// via :root[data-theme="..."] token overrides — no class toggling, no
-// per-element repaint needed. Note: we deliberately do NOT use the
-// LS_PREFIX'd lsSet here because the early-paint script reads the raw
-// 'nz_theme' key directly (no JSON wrapper, no prefix) for minimum work
-// in the critical path.
+// stylesheet evaluation to avoid FOUC; CSS keys off :root[data-theme]. The
+// key is raw (not lsSet's prefixed JSON) because that early script reads it.
 const THEME_LS_KEY = 'nz_theme';
 const THEME_ORDER = ['auto', 'light', 'dark'];
 const THEME_LABELS = { auto: '跟随系统', light: '浅色', dark: '深色' };
@@ -149,8 +141,6 @@ function applyTheme(theme, persist) {
 // toast, since the change isn't lost — only un-synced to other devices.
 function persistTheme(theme) {
   const headers = { 'Content-Type': 'application/json' };
-  const t = getToken();
-  if (t) headers['Authorization'] = 'Bearer ' + t;
   fetchJSON(NZ_CONTRACT.API.settings, { method: 'PUT', headers, body: JSON.stringify({ theme: theme }), timeoutMs: 10000 })
     .catch(function (err) {
       showToast('主题已应用，但未能保存到服务器', 'error');
@@ -162,8 +152,6 @@ function persistTheme(theme) {
 // re-persisting). On error/no-store we keep whatever localStorage gave us.
 function syncThemeFromServer() {
   const headers = {};
-  const t = getToken();
-  if (t) headers['Authorization'] = 'Bearer ' + t;
   fetchJSON(NZ_CONTRACT.API.settings, { headers, timeoutMs: 8000 })
     .then(function (s) {
       const srv = s && s.theme;
@@ -209,29 +197,22 @@ try {
 document.addEventListener('DOMContentLoaded', function () {
   // Rehydrate pending-session workspaces from localStorage BEFORE the first
   // fetchSessions/send so a reload-before-first-send still carries the chosen
-  // workspace (#cwd-fallback fix). Idempotent via _pendingRestored.
+  // workspace. Idempotent via _pendingRestored.
   restorePending();
   applyTheme(getCurrentTheme());
   // Reconcile with the server-persisted theme (cross-device source of truth).
   // Runs after the localStorage-based applyTheme above so first paint is
   // instant and a differing server value re-applies once it resolves.
   syncThemeFromServer();
-  // Activity-bar view switch (codex-style rail). Wired here (not inline
-  // onclick) to keep the script-src inline-handler surface from growing
-  // (R236-SEC-02 cap). Each abnav-* routes through the top-level
+  // Activity-bar view switch (codex-style rail). Each abnav-* routes through the top-level
   // setActivityView() which toggles the matching body.nz-view-* class and
   // swaps the chat sidebar/main for the target view's panels in place.
   ['abnav-chat', 'abnav-assets', 'abnav-files', 'abnav-cron', 'abnav-system', 'abnav-settings'].forEach(function (id) {
     const el = document.getElementById(id);
     if (el) el.addEventListener('click', function () { setActivityView(el.dataset.view); });
   });
-  // Header/sidebar controls (#922 / #479 / #441): migrated from inline click /
-  // submit attributes to addEventListener so the dashboard's script-src no
-  // longer needs `'unsafe-inline'` on account of these handlers. (Prose avoids
-  // the literal token the CSP ratchet counts — see generatedOnclickCap.)
-  // Each bind is guarded so a missing element is a no-op (defensive parity
-  // with the theme/nav binds above). Keeps R236-SEC-02 inline-handler count
-  // trending to 0.
+  // Header/sidebar controls. Each bind is guarded so a missing element is a
+  // no-op.
   const bindClick = function (id, fn) {
     const el = document.getElementById(id);
     if (el) el.addEventListener('click', fn);
@@ -313,7 +294,7 @@ function reconcileMainStateAfterPoll(wsConnected) {
   if (sd && (!wsConnected || (sd.state !== 'running' && !perSession.optimisticRunning[sKey]))) {
     // updateSendButton is not idempotent ('running' re-seeds agent rows,
     // 'ready' resets turn state and scroll) and this runs every 5 s under
-    // fallback: re-apply only what differs from the last applied state (#2431).
+    // fallback: re-apply only what differs from the last applied state.
     // The exit chip is idempotent and the poll may bring the death_detail a
     // 'dead' push left out, so it repaints either way.
     const applied = selection.lastAppliedMainState;
@@ -341,7 +322,7 @@ onSessionsApplied(onSessionsRefreshed);
 
 
 document.addEventListener('click', function(e) {
-  if (ui.activePopover && !ui.activePopover.contains(/** @type {Node} */ (e.target)) && !/** @type {Element} */ (e.target).closest('#btn-history')) {
+  if (ui.activePopover && !ui.activePopover.contains(e.target) && !e.target.closest('#btn-history')) {
     closeHistoryPopover();
   }
 });
@@ -388,7 +369,7 @@ function toggleHistory() {
   // control like the node switcher dismisses the popover cleanly instead of
   // being silently swallowed) and gives a "a layer is open" cue. The mobile
   // sheet gets a dimmed variant; the desktop popover stays transparent so it
-  // reads as a lightweight popover, not a blocking modal. R20260605.
+  // reads as a lightweight popover, not a blocking modal.
   const backdrop = document.createElement('div');
   backdrop.className = isMobile() ? 'history-backdrop is-sheet' : 'history-backdrop';
   backdrop.addEventListener('click', closeHistoryPopover);
@@ -415,7 +396,7 @@ function toggleHistory() {
   // might disable inline event handlers on the items HTML.
   const searchInput = document.getElementById('hp-search');
   if (searchInput) {
-    searchInput.addEventListener('input', e => applyHistoryFilter(merged, /** @type {HTMLInputElement} */ (e.target).value));
+    searchInput.addEventListener('input', e => applyHistoryFilter(merged, e.target.value));
     // Auto-focus on desktop only; mobile focus pops the keyboard and
     // pushes the sheet up, which is annoying if the user just wanted to
     // eyeball the list.
@@ -425,11 +406,8 @@ function toggleHistory() {
   }
 }
 
-// filterHistoryEntries is the pure filtering step extracted for unit
-// testability. Query is case-insensitive and matched as a substring
-// against (prompt, project). Empty query returns the full list. Kept
-// as a standalone function so a contract test can assert the match
-// surface without driving the DOM.
+// filterHistoryEntries: case-insensitive substring match against (prompt,
+// project). Empty query returns the full list.
 function filterHistoryEntries(merged, query) {
   const q = (query || '').trim().toLowerCase();
   if (!q) return merged;
@@ -455,8 +433,8 @@ function applyHistoryFilter(merged, query) {
     // "Filtered" count uses the x/total shape so the user knows the
     // denominator hasn't shrunk — e.g. "(3 / 47)" after typing. When
     // the query is empty keep the compact "(47)" form. Decide on the same
-    // trimmed query filterHistoryEntries matches on (#2431: whitespace-only
-    // input is not a filter, so no "(N / N)").
+    // trimmed query filterHistoryEntries matches on (whitespace-only input is
+    // not a filter, so no "(N / N)").
     countEl.textContent = (query || '').trim()
       ? '(' + filtered.length + ' / ' + merged.length + ')'
       : '(' + merged.length + ')';
@@ -469,15 +447,9 @@ function applyHistoryFilter(merged, query) {
     itemsEl.innerHTML = '<div class="history-popover-empty">没有匹配的历史<br><span class="hp-empty-hint">调整关键词，或清空搜索框查看全部</span></div>';
     return;
   }
-  // Group by day. Round 129: label today / yesterday in 中文 so the most
-  // common buckets don't require parsing a date — "今天" / "昨天" / older
-  // entries keep the browser-locale formatted date (e.g. "Wed, Apr 29"
-  // or "4月29日 周三" depending on navigator.language). Day headers are
-  // recomputed on filter because a 3-entry result may span fewer days
-  // than the full list.
-  // Group by the SAME key the list is sorted on (retired_at || last_active,
-  // see the merged.sort above). Grouping by last_active alone while sorting
-  // by retired_at interleaved days and repeated day headers.
+  // Group by day ("今天" / "昨天" / locale date), recomputed on filter, and by
+  // the SAME key the list is sorted on (retired_at || last_active) so days
+  // never interleave.
   let currentDay = '';
   itemsEl.innerHTML = filtered.map(s => {
     let dayHeader = '';
@@ -525,8 +497,6 @@ async function resumeRecentById(sessionId, workspace, lastPrompt) {
 
   try {
     const headers = {'Content-Type': 'application/json'};
-    const token = getToken();
-    if (token) headers['Authorization'] = 'Bearer ' + token;
     const r = await fetch(NZ_CONTRACT.API.sessions_resume, {
       method: 'POST', headers,
       body: JSON.stringify({session_id: sessionId, workspace: workspace || '', last_prompt: lastPrompt || ''})
@@ -554,14 +524,12 @@ async function resumeRecentById(sessionId, workspace, lastPrompt) {
 async function previewRecentSession(expectedKey, sessionId, cwd) {
   try {
     const headers = {};
-    const token = getToken();
-    if (token) headers['Authorization'] = 'Bearer ' + token;
     // Pass cwd (the resumed session's workspace) so the backend hits the
     // O(1) CWD-derived path lookup and skips the findSessionJSONL negative
     // cache — see previewDiscovered for the full rationale.
     const cwdParam = cwd ? '&cwd=' + encodeURIComponent(cwd) : '';
-    // RNEW-UX-003: 5s timeout — this is a best-effort snapshot after
-    // resume; if the backend stalls, drop the preview rather than hang.
+    // 5s timeout — this is a best-effort snapshot after resume; if the
+    // backend stalls, drop the preview rather than hang.
     let entries;
     try {
       entries = await fetchJSON(NZ_CONTRACT.API.discovered_preview + '?session_id=' + encodeURIComponent(sessionId) + cwdParam, { headers, timeoutMs: 5000 });
@@ -664,7 +632,7 @@ function dismissCheatsheet() {
 // Global "?" shortcut: open the cheatsheet when not typing in an input
 // and no other modal is already open. The same Shift+/ also fires "?"
 // on US layouts, so the `key === '?'` check covers both.
-document.addEventListener('keydown', function(/** @type {KeyboardEvent & {target: HTMLElement}} */ e) {
+document.addEventListener('keydown', function(e) {
   if (e.key !== '?') return;
   const tag = (e.target.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
@@ -675,8 +643,7 @@ document.addEventListener('keydown', function(/** @type {KeyboardEvent & {target
   showCheatsheet();
 });
 
-// R110-P3 Cmd/Ctrl+K opens the command palette — a widely-understood
-// convention (GitHub, Slack, Linear). Fires even from inside the message
+// Cmd/Ctrl+K opens the command palette. Fires even from inside the message
 // input / textareas because switching sessions mid-typing is a common
 // flow; the palette's trapFocus and input field take over focus so the
 // prior draft remains saved via sessionDrafts per selectSession contract.
@@ -690,11 +657,11 @@ document.addEventListener('keydown', function(e) {
 });
 
 // Global Esc: close the voice overlay, the history popover, the nav list and
-// cron's inline expand / drawer when no modal or input has focus. Four independent ifs, not else-if: one Esc closes every one
-// that is open. cron goes through nzViews.cron, absent when cron_view.js is not
-// loaded (dashboard-cron-view-extraction §2.6 B1); its own priority (expanded
-// row before drawer) lives in cron_view.js's cronEscClose.
-document.addEventListener('keydown', function(/** @type {KeyboardEvent & {target: HTMLElement}} */ e) {
+// cron's inline expand / drawer when no modal or input has focus. Four
+// independent ifs, not else-if: one Esc closes every one that is open. cron
+// goes through nzViews.cron; its own priority (expanded row before drawer)
+// lives in cron_view.js's cronEscClose.
+document.addEventListener('keydown', function(e) {
   if (e.key !== 'Escape') return;
   // Overlays with their own Esc trapFocus handling take precedence.
   if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
@@ -711,9 +678,9 @@ document.addEventListener('keydown', function(/** @type {KeyboardEvent & {target
 function selectSession(key, node) {
   node = node || 'local';
   resetTurnState();
-  // Close any open agent drill-in view before the selectedKey flips
-  // (RFC v4 agent-team-ui §3.6.6). Its pane is the agent's: the session keeps
-  // the scroll snapshot switchTo took on the way in (#3697).
+  // Close any open agent drill-in view before the selectedKey flips. Its pane
+  // is the agent's: the session keeps the scroll snapshot switchTo took on the
+  // way in.
   const drilledIn = !!nzViews.agent?.activeTaskID();
   if (nzViews.agent) nzViews.agent.onSessionSwitch();
   // Recent session card click → trigger resume flow
@@ -730,7 +697,7 @@ function selectSession(key, node) {
   if (isDiscoveredKey(key)) {
     const d = findDiscovered(parseDiscoveredPid(key), node);
     if (d) {
-      // #2431: same as the managed path below — leave assets/cron/settings
+      // Same as the managed path below — leave assets/cron/settings
       // first, or the preview panel is written into a hidden #main while the
       // previous session has already been unsubscribed.
       if (ui.activeView !== 'chat') setActivityView('chat');
@@ -889,13 +856,12 @@ function formatSessionMarkdown(meta, events) {
   return lines.join('\n');
 }
 
-// Export pager bounds (#2430). A bare `/api/sessions/events?key=` only returns
-// the in-memory ring (server default 500), so a long session's export silently
-// dropped its early history while the toast claimed "已导出 N 条". The pager
-// walks backward with the same `before=` cursor loadEarlierEvents uses (which
-// falls through to the on-disk JSONL when the ring is exhausted).
-// EXPORT_PAGE_LIMIT mirrors the server's maxEventsPageLimit; EXPORT_MAX_PAGES
-// is the hard stop (20k events) so a runaway session can't hang the tab.
+// Export pager bounds. A bare `/api/sessions/events?key=` only returns the
+// in-memory ring (server default 500), so the pager walks backward with the
+// same `before=` cursor loadEarlierEvents uses (which falls through to the
+// on-disk JSONL when the ring is exhausted). EXPORT_PAGE_LIMIT mirrors the
+// server's maxEventsPageLimit; EXPORT_MAX_PAGES is the hard stop (20k events)
+// so a runaway session can't hang the tab.
 const EXPORT_PAGE_LIMIT = 500;
 const EXPORT_MAX_PAGES = 40;
 
@@ -967,8 +933,6 @@ async function downloadSessionMarkdown() {
   const node = selection.node;
   try {
     const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
     const res = await fetchAllSessionEvents(key, node, headers);
     if (res.status) {
       showAPIError('导出会话', res.status, '');
@@ -1019,7 +983,7 @@ async function downloadSessionMarkdown() {
 // detail line with the empty #header-git / #header-effort / #header-runstats
 // mounts) for session snapshot `s`. Shared by renderMainShell (full shell) and
 // renderMainHeader (header-only repaint) so the two can never drift.
-function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
+function mainHeaderHtml(s) {
   const keyParts = (selection.key || '').split(':');
   const agentIsGeneric = !s.agent || s.agent === 'general';
   // Primary title: user_label (operator-set rename) > summary > latest prompt
@@ -1092,11 +1056,11 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
         // change lands without waiting for a header rebuild; collapses via
         // :empty for backends that report no effort.
         '<span class="detail-effort" id="header-effort"></span>' +
-        // Spawn-gate warnings (#2532). Built empty and filled by
+        // Spawn-gate warnings. Built empty and filled by
         // setHeaderSpawnDiagChip (same lifecycle as the effort chip);
         // collapses via :empty when every configured input took effect.
         '<span class="detail-spawndiag" id="header-spawndiag"></span>' +
-        // Overlay drift (#2543): live argv vs a fresh spawn under current
+        // Overlay drift: live argv vs a fresh spawn under current
         // config. Same lifecycle as the spawn-diag chip; :empty collapses.
         '<span class="detail-overlaydrift" id="header-overlaydrift"></span>' +
         turnTimerHtml +
@@ -1109,12 +1073,9 @@ function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
     '</div>';
 }
 
-// renderMainHeader repaints ONLY the header of the current session's shell.
-// renameSession used to call renderMainShell, which rebuilds #events-scroll
-// empty — and nothing on the rename path refetches history (the WS stays
-// subscribed with its cursor advanced; the poll cursor lastEventTime is not
-// reset), so the conversation vanished until the session was re-selected.
-// Falls back to a full rebuild when no shell is mounted yet.
+// renderMainHeader repaints ONLY the header of the current session's shell
+// (renameSession must not rebuild #events-scroll: nothing on that path
+// refetches history). Falls back to a full rebuild when no shell is mounted.
 function renderMainHeader() {
   const main = document.getElementById('main');
   const header = main ? main.querySelector(':scope > .main-header') : null;
@@ -1131,11 +1092,9 @@ function renderMainHeader() {
   fetchSessionRuns(selection.key, selection.node);
 }
 
-// #2437: the cli label carries a fixed id so updateHeaderCLI can refresh it
-// in place. It used to rewrite .detail-left wholesale, which wiped the
-// sibling #header-model span (the tuning popover anchor) on every poll that
-// passed fetchSessions' version short-circuit. The span is always emitted
-// (empty when no backend name is known yet) so a later poll has a target.
+// The cli label carries a fixed id so updateHeaderCLI can refresh it in
+// place without touching the sibling #header-model span (the tuning popover
+// anchor). It is always emitted, empty when no backend name is known yet.
 function headerCLILabelHtml(name, version) {
   const title = (name && version) ? ' title="' + escAttr(name + ' v' + version) + '"' : '';
   return '<span id="header-cli"' + title + '>' + esc(name || '') + '</span>';
@@ -1147,14 +1106,9 @@ function renderMainShell() {
 
   main.innerHTML =
     mainHeaderHtml(s) +
-    // cron-panel-consolidation RFC §4.2: cron timeline used to mount here
-    // (#cron-timeline-panel placeholder above the events scroll). It now
-    // lives entirely inside the 定时任务 panel's per-job drawer; mainShell
-    // is reserved for human conversation surfaces.
-    // session-run-metrics RFC §8.2: the run-history timeline is a NEW sibling
-    // node here (not the relocated cron one). Hidden until renderSessionRunsPanel
-    // populates it; :empty/[hidden] keeps it out of layout when a session has
-    // no recorded runs.
+    // The run-history timeline (session-run-metrics RFC §8.2). Hidden until
+    // renderSessionRunsPanel populates it; :empty/[hidden] keeps it out of
+    // layout when a session has no recorded runs.
     '<div class="workflow-panel nz-hidden" id="workflow-panel"></div>' +
     '<details class="session-runs-panel" id="session-runs-panel" hidden></details>' +
     '<div class="events" id="events-scroll" role="log" aria-live="off">' + (s.state === 'running' ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>' : '') + '</div>' +
@@ -1208,19 +1162,15 @@ function renderMainShell() {
   renderWorkflowPanel();
   // Double-tap events feed → focus input (mobile)
   let lastTapMs = 0;
-  document.getElementById('events-scroll').addEventListener('touchend', (/** @type {TouchEvent & {target: Element}} */ e) => {
+  document.getElementById('events-scroll').addEventListener('touchend', (e) => {
     if (!isMobile() || e.target.closest('a,button,code,pre')) return;
     const now = Date.now();
     if (now - lastTapMs < 300) { document.getElementById('msg-input')?.focus(); lastTapMs = 0; }
     else lastTapMs = now;
   }, {passive:true});
 
-  // cron-panel-consolidation RFC §4.2: the cron timeline mount hook that
-  // used to live here (renderCronTimelineForSession on selectedKey ===
-  // 'cron:<id>') is gone. cron drawer rendering happens inside the 定时任务
-  // panel itself, keyed off cronDetailJobId rather than selectedKey.
 
-  // Multi-Backend RFC §8.3 D9-D15: gray out input controls that the
+  // Gray out input controls that the
   // active session's backend doesn't support. Single-backend deployments
   // short-circuit inside applyFeatureGates so this is a no-op there.
   applyFeatureGates();
@@ -1249,11 +1199,8 @@ function renderSettingsView() {
       '" data-theme="' + esc(t) + '" aria-pressed="' + (t === cur ? 'true' : 'false') + '">' +
       esc(THEME_LABELS[t]) + '</button>';
   }).join('');
-  // 关于 section (ui-polish-light-theme D3/D8): build identity moved here
-  // from the Home health strip — version tags answer "what am I running",
-  // a settings question, not a "问点什么" one. Sourced from the same
-  // /api/sessions stats snapshot; rows render only when the field is
-  // present so a cold view before the first poll stays clean.
+  // 关于 section: build identity from the /api/sessions stats snapshot; rows
+  // render only when the field is present so a cold view stays clean.
   const s = serverInfo.lastStatsSnapshot || {};
   const aboutRows = [];
   if (s.version_tag) aboutRows.push(['naozhi', s.version_tag]);
@@ -1269,8 +1216,7 @@ function renderSettingsView() {
         return '<div class="settings-about-line"><span class="settings-about-key">' + esc(r[0]) + '</span><span>' + esc(r[1]) + '</span></div>';
       }).join('') +
     '</section>';
-  // 系统任务 entry (ui-polish-light-theme D9): the mobile tab bar drops the
-  // 系统 tab (6 tabs was over budget for 390px) — this row is its replacement
+  // 系统任务 entry: the mobile tab bar has no 系统 tab, so this row is its
   // entry point. Hidden on desktop via CSS (.settings-syslink) where the rail
   // tab remains.
   const sysLinkHtml =
@@ -1287,8 +1233,8 @@ function renderSettingsView() {
       sysLinkHtml +
     '</div>';
   const grp = document.getElementById('settings-theme-group');
-  if (grp) grp.addEventListener('click', function (/** @type {MouseEvent & {target: Element}} */ e) {
-    const b = /** @type {HTMLElement} */ (e.target.closest('.settings-theme-opt'));
+  if (grp) grp.addEventListener('click', function (e) {
+    const b = e.target.closest('.settings-theme-opt');
     if (!b) return;
     applyTheme(b.dataset.theme, true); // persist=true: user-initiated → save to server
     renderSettingsView(); // refresh active state
@@ -1322,14 +1268,14 @@ wsm.onAuthFail((msg) => {
 // System-daemon run boundary. fetchSystemDaemons is the only path that
 // updates the 系统 rail attention badge; without this a daemon failing in
 // the background never lit the badge until the operator opened the view.
-// Honour the RNEW-UX-014 hidden-tab suspension.
+// Honour the hidden-tab suspension.
 const daemonRun = () => {
   if (document.hidden) return;
   fetchSystemDaemons().then(() => {
     if (ui.activeView === 'system') renderSystemView();
   }).catch(() => {});
 };
-const sysRun = (/** @type {WsFrames['run_started' | 'run_ended']} */ msg) => msg.subsystem === 'sysession';
+const sysRun = (msg) => msg.subsystem === 'sysession';
 wsm.on(NZ_CONTRACT.WS.run_started, daemonRun, sysRun);
 wsm.on(NZ_CONTRACT.WS.run_ended, daemonRun, sysRun);
 
@@ -1337,7 +1283,7 @@ wsm.on(NZ_CONTRACT.WS.run_ended, daemonRun, sysRun);
 
 function updateHeaderCLI() {
   const s = sessionList.sessionsData[sid(selection.key, selection.node)] || {};
-  // #2437: only touch the #header-cli span painted by headerCLILabelHtml.
+  // Only touch the #header-cli span painted by headerCLILabelHtml.
   // Never rewrite the whole left container — #header-model lives next door.
   const el = document.getElementById('header-cli');
   if (!el) return;
@@ -1345,7 +1291,7 @@ function updateHeaderCLI() {
   // the server does not list yet.
   const name = s.cli_name || backendDisplayName(pendingBackendID(selection.key, selection.node)) || serverInfo.defaultCLIName;
   const version = s.cli_version || backendDisplayVersion(pendingBackendID(selection.key, selection.node)) || serverInfo.defaultCLIVersion;
-  // Same display rule as renderMainShell (D5): version lives in the hover
+  // Same display rule as renderMainShell: version lives in the hover
   // title only, the text is just the backend name.
   const text = name || '';
   const title = (name && version) ? name + ' v' + version : '';
@@ -1364,16 +1310,13 @@ function updateHeaderCLI() {
 /* ===== Sidebar resizer (desktop only) ===== */
 (function(){
   const resizer = document.getElementById('resizer');
-  const sidebar = /** @type {HTMLElement} */ (document.querySelector('.sidebar'));
-  // RNEW-UX-004 demo: migrated 'naozhi_sidebar_w' -> 'nz:sidebar_w' via
-  // unified helper. One-time loss of saved width acceptable (defaults to
-  // CSS width).
+  const sidebar = document.querySelector('.sidebar');
   const LS_SIDEBAR_W = 'sidebar_w';
   const saved = parseFloat(lsGet(LS_SIDEBAR_W, 0));
   if (saved >= 200) sidebar.style.width = saved + 'px';
 
   let startX, startW;
-  resizer.addEventListener('mousedown', function(/** @type {MouseEvent & {target: Element}} */ e) {
+  resizer.addEventListener('mousedown', function(e) {
     // Mid-line collapse handle lives inside the resizer; let its click run
     // without starting a drag. Also skip when collapsed (nothing to resize).
     if (e.target && e.target.closest && e.target.closest('.resizer-handle')) return;
@@ -1399,7 +1342,7 @@ function updateHeaderCLI() {
     document.removeEventListener('mouseup', onUp);
     lsSet(LS_SIDEBAR_W, Math.round(sidebar.getBoundingClientRect().width));
   }
-  resizer.addEventListener('dblclick', function(/** @type {MouseEvent & {target: Element}} */ e) {
+  resizer.addEventListener('dblclick', function(e) {
     if (e.target && e.target.closest && e.target.closest('.resizer-handle')) return;
     if (document.body.classList.contains('sidebar-collapsed')) return;
     sidebar.style.width = '360px';
@@ -1467,8 +1410,7 @@ function showOnboarding() {
   // Dismissal is also persisted when Esc is pressed inside trapFocus — the
   // trap's teardown removes the overlay, and the next maybeShowOnboarding
   // call checks localStorage first. Eagerly set the key here so an Esc
-  // removal does not leave the flag unwritten (the MutationObserver that
-  // did this before duplicated the observer installed by trapFocus).
+  // removal does not leave the flag unwritten.
   try { localStorage.setItem(ONBOARDING_LS_KEY, '1'); } catch (_) {}
   document.body.appendChild(overlay);
   trapFocus(overlay);
@@ -1501,26 +1443,18 @@ fetchSystemDaemons().catch(function () {}); // prime the 系统 rail badge
 startSidebarTimeTick();
 wsm.connect();
 
-// RNEW-UX-014: suspend background pollers when the tab is hidden. 1-5s
-// setInterval loops on a backgrounded tab burn battery, mobile data, and
-// server bandwidth for no user-visible benefit. Resume on visibility
-// change so the first thing a returning user sees is fresh state.
-// WS event delivery is not affected — the socket stays open in hidden
-// tabs and delivers live updates instantly when the user returns.
-//
-// Extended gate also covers:
-//   - eventTimer (1s polling fallback when WS isn't connected) — stopped
-//     when hidden; resumed only if a session is selected AND WS is not
-//     already delivering live events, to avoid double-fetching.
-// (Issue #434: _statusTickTimer was removed — it was a 1s no-op since
-// the #sidebar-status DOM no longer exists.)
+// Suspend background pollers while the tab is hidden (battery, mobile data,
+// server bandwidth) and resume on visibility change so a returning user sees
+// fresh state. The WS stays open in hidden tabs. eventTimer (the 1s fallback
+// poll) resumes only if a session is selected and WS is not already
+// delivering live events, to avoid double-fetching.
 (function () {
   const stopPollers = () => {
     if (timers.sessionPoll) { clearInterval(timers.sessionPoll); timers.sessionPoll = null; }
     if (timers.discoveredPoll) { clearInterval(timers.discoveredPoll); timers.discoveredPoll = null; }
     if (timers.events) { clearInterval(timers.events); timers.events = null; }
     stopSidebarTimeTick();
-    // #1770: also pause the WS keep-alive ping while the tab is hidden. The
+    // Also pause the WS keep-alive ping while the tab is hidden. The
     // 30s app-level ping wakes the mobile radio every 30s for nothing —
     // connection liveness is independently maintained by the server's
     // protocol-level Ping/Pong (writePump, wsPingPeriod≈54s), so dropping the
@@ -1529,15 +1463,14 @@ wsm.connect();
   };
   const startPollers = () => {
     if (!timers.sessionPoll) {
-      // #2431: a half-open socket (lid close / network switch) still reports
+      // A half-open socket (lid close / network switch) still reports
       // CONNECTED, so no frames arrive and no fallback poll is armed below;
       // the version gate would then short-circuit this one-shot fetch too.
       // Zero lastVersion so returning to the tab always repaints once.
       sessionList.lastVersion = 0;
       fetchSessions(); // immediate refresh on resume so UI is not stale
-      // #2431: the 5 s sessions poll is a WS-outage fallback. Over a live
-      // socket session_state pushes already drive the sidebar; arming the
-      // interval here made it run alongside WS until the next reconnect.
+      // The 5 s sessions poll is a WS-outage fallback: over a live socket
+      // session_state pushes already drive the sidebar.
       if (!(wsm.state === WS_STATES.CONNECTED)) {
         timers.sessionPoll = setInterval(fetchSessions, 5000);
       }
@@ -1563,7 +1496,7 @@ wsm.connect();
       fetchEvents(false);
       timers.events = setInterval(() => fetchEvents(false), 1000);
     }
-    // #1770: re-arm the WS ping we paused in stopPollers, but only when the
+    // Re-arm the WS ping we paused in stopPollers, but only when the
     // socket is actually live — a dropped/offline socket has no ping to keep
     // and will re-arm via auth_ok on reconnect.
     if (!wsm.pingTimer && wsm.conn && wsm.conn.readyState === WebSocket.OPEN) {
@@ -1626,7 +1559,7 @@ initMemPopover();
 
 export { setActivityView };
 
-// ─── data-action registry (#1980 PR-2, docs/rfc/csp-data-action.md) ────────
+// ─── data-action registry (docs/rfc/csp-data-action.md) ────────────────────
 // Every handler the dashboard's generated HTML wires via data-action(-<type>)
 // attributes, plus the absorbed project-header / tuning-chip / modal-close
 // dispatch maps. Parameters ride data-* attributes; keys are code literals.

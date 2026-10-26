@@ -2609,7 +2609,7 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
   func OpenDirIn(root *os.Root, rel string) (*os.File, error)                                   // 再加 O_DIRECTORY；R3a 的 ReadDir 用它
   ```
 
-  （regular file 上 O_NONBLOCK 对读无影响；同仓先例：`files_publictmp.go:87-94` 拒收 socket / FIFO / 设备，#1688。非 unix 平台
+  （regular file 上 O_NONBLOCK 对读无影响；同仓先例：`files_restricted.go` 的 `isRestrictedIrregularType` 拒收 socket / FIFO / 设备，#1688。非 unix 平台
   按 `atomicfile_unix.go` / `atomicfile_nonunix.go` 的分法给一个 Lstat + Open + Fstat 的退化实现。）PR-9 先用测试确认 `Root.OpenFile`
   把 O_NONBLOCK 透传给最后一个分量（FIFO 不阻塞）；若不透传，`OpenRegularIn` 退回"`OpenRegular(filepath.Join(projectsRoot, rel))` 前再对
   `filepath.Dir` 做一次 EvalSymlinks 并要求等于已解析的父目录"，剩下的竞态窗口记为已知限制。
