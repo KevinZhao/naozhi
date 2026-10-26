@@ -10,7 +10,7 @@ import (
 // TestAccept_CopiesBorrowedBytes pins R20260531A-PERF-3 (#1524): the
 // PersistSink contract now lets producers hand over BORROWED Entry.JSON
 // and reuse the backing array the moment the sink returns. accept() must
-// take ownership by copying into its pooled arena before queueing the
+// take ownership by copying (bytes.Clone) before queueing the
 // async batch — otherwise the producer's reuse would corrupt what lands
 // on disk.
 //

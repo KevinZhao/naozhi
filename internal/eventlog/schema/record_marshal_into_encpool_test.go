@@ -8,7 +8,7 @@ import (
 )
 
 // TestMarshalRecordInto_ParsesBackIdentically pins R20260531070014-PERF-3
-// (#1537): swapping the per-call json.NewEncoder for a pooled encoder MUST
+// (#1537): the encoder choice behind MarshalRecordInto MUST
 // NOT change the decoded record. We assert the encoded body round-trips to
 // an equal Record (the on-disk format is consumed only via UnmarshalRecord,
 // so HTML-escape choices are functionally transparent). Plain and
@@ -52,7 +52,7 @@ func TestMarshalRecordInto_ParsesBackIdentically(t *testing.T) {
 }
 
 // TestMarshalRecordInto_StableOutput pins that repeated marshals of the
-// same record produce byte-identical output — the pooled encoder must not
+// same record produce byte-identical output — the encoder must not
 // drift (e.g. carry escape-mode or buffer state) between calls.
 func TestMarshalRecordInto_StableOutput(t *testing.T) {
 	p := []byte(`{"time":1700000002000,"uuid":"bb00","type":"assistant","summary":"a<b>c&d"}`)

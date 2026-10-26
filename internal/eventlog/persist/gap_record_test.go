@@ -94,6 +94,39 @@ func TestGapRecord_DroppedBatchLeavesDurableMark(t *testing.T) {
 	}
 }
 
+// TestGapRecord_DropDuringCarryRestoresCount: if the batch carrying the gap is
+// itself dropped, the swapped-out count must ride back (plus the new batch) —
+// otherwise the tally vanishes and the eventual gap record under-reports.
+func TestGapRecord_DropDuringCarryRestoresCount(t *testing.T) {
+	t.Parallel()
+	// ChannelBuffer 0 is not allowed; use 1 and pre-fill it so accept's
+	// non-blocking send loses.
+	p, _ := newTestPersister(t, func(o *Options) { o.ChannelBuffer = 1 })
+	const key = "feishu:p2p:gap-refill"
+	s := &sessionSink{p: p, key: key, stem: KeyHash(key)}
+
+	// Own the channel state outright: Stop() makes the drain goroutine exit
+	// (wg.Wait guarantees it is gone), then the closed latch is flipped back so
+	// accept still runs. A stuffed channel alone is not enough — the drain can
+	// dequeue the blocker between the stuff and the accept, the non-blocking
+	// send then wins, and the assertion reads a consumed counter.
+	if err := p.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	p.closed.Store(false)
+	// Restore the latch before the constructor's cleanup calls Stop again —
+	// its CompareAndSwap must lose, or closeCh gets closed twice.
+	defer p.closed.Store(true)
+	p.in <- batchJob{Key: "other", Stem: KeyHash("other")} // fills the cap-1 channel; nothing drains it now
+
+	s.pendingGap.Add(5)
+	s.accept([]Entry{{TimeMS: 1, JSON: []byte(`{"time":1,"type":"text"}`)}}, false)
+
+	if got := s.pendingGap.Load(); got != 6 {
+		t.Fatalf("pendingGap after drop-during-carry = %d, want 6 (5 restored + 1 new)", got)
+	}
+}
+
 // blockOpen makes writerFor fail for key until the returned func runs: a
 // directory where the log file belongs fails Recover's truncate and the open.
 func blockOpen(t *testing.T, dir, key string) (unblock func()) {
