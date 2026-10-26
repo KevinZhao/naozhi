@@ -7,7 +7,7 @@
 
 ### Removed
 
-- **BREAKING：删除没人改的配置开关**（#PRNUM）。下面这些键不再读取，行为固定为原默认值；配置里还留着时启动报 `config-deprecated`（服务照常启动，`naozhi config check` 以 1 退出），删掉即可：
+- **BREAKING：删除没人改的配置开关**（#3782）。下面这些键不再读取，行为固定为原默认值；配置里还留着时启动报 `config-deprecated`（服务照常启动，`naozhi config check` 以 1 退出），删掉即可：
   - `projects.public_tmp` 与 `__public_tmp__` 伪项目：dashboard 从来没有入口，只能手工调 API。现在这个名字按普通项目处理（不存在则 404）。`include_root` 的 UID / 敏感文件名 / 非常规文件类型闸门和审计日志不变；
   - `session.project_stable_key`：项目级稳定 session key 始终开启，`/api/projects` 与 `stats.projects` 始终带 `stableKey`；
   - `session.shim.buffer_size` / `max_buffer_bytes` / `disconnect_watchdog` / `max_shims`：固定为 10000 行 / 50MB / 30m / 50 个 shim。`session.shim.state_dir` 与 `idle_timeout` 保留；
