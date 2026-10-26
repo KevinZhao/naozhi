@@ -109,7 +109,7 @@ func TestScan_WriterDuringDiskReadSurvivesSwap(t *testing.T) {
 				ChatBindings: []ChatBinding{{Platform: "feishu", ChatType: "group", ChatID: "old"}},
 			})
 			m, _ := NewManager(root, PlannerDefaults{})
-			entered, release, calls := pauseFirstScanDisk(t, m)
+			_, release, calls := pauseFirstScanDisk(t, m)
 			release()
 			if err := m.Scan(); err != nil {
 				t.Fatal(err)
@@ -117,7 +117,7 @@ func TestScan_WriterDuringDiskReadSurvivesSwap(t *testing.T) {
 			if n := calls.Load(); n != 1 {
 				t.Fatalf("scanDisk ran %d times with no writer, want 1", n)
 			}
-			entered, release, calls = pauseFirstScanDisk(t, m)
+			entered, release, calls := pauseFirstScanDisk(t, m)
 			errc := startScan(m)
 			<-entered
 
