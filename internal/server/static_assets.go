@@ -16,183 +16,14 @@ import (
 	"strings"
 )
 
-//go:embed static/dashboard.html
-var dashboardHTML embed.FS
-
-// The dashboard's stylesheets, split out of the inline <style> block (#2559).
-// One embed for the directory: the asset table below registers each file, and
-// they are all served by handleDashboardCSS.
+// The whole static/ tree, registered into staticAssets by fs.WalkDir at init.
+// Third-party files under static/vendor are byte-identical to their npm dist
+// (mermaid's bundle gzipped) and kept under a versioned directory, so their
+// responses can be cached as immutable. KaTeX ships only its woff2 fonts: every
+// browser the dashboard supports takes the first src of each @font-face.
 //
-//go:embed static/css
-var dashboardCSS embed.FS
-
-//go:embed static/manifest.json
-var manifestJSON embed.FS
-
-//go:embed static/sw.js
-var swJS embed.FS
-
-//go:embed static/nz_util.js
-var nzUtilJS embed.FS
-
-//go:embed static/state.js
-var stateJS embed.FS
-
-//go:embed static/contract.js
-var contractJS embed.FS
-
-//go:embed static/dashboard.js
-var dashboardJS embed.FS
-
-//go:embed static/render_md.js
-var renderMdJS embed.FS
-
-//go:embed static/self_update.js
-var selfUpdateJS embed.FS
-
-//go:embed static/voice.js
-var voiceJS embed.FS
-
-//go:embed static/session_header.js
-var sessionHeaderJS embed.FS
-
-//go:embed static/composer_files.js
-var composerFilesJS embed.FS
-
-//go:embed static/mobile_nav.js
-var mobileNavJS embed.FS
-
-//go:embed static/split_view.js
-var splitViewJS embed.FS
-
-//go:embed static/system_view.js
-var systemViewJS embed.FS
-
-//go:embed static/running_banner.js
-var runningBannerJS embed.FS
-
-//go:embed static/file_refs.js
-var fileRefsJS embed.FS
-
-//go:embed static/utilities.js
-var utilitiesJS embed.FS
-
-//go:embed static/discovery.js
-var discoveryJS embed.FS
-
-//go:embed static/tuning.js
-var tuningJS embed.FS
-
-//go:embed static/msg_nav.js
-var msgNavJS embed.FS
-
-//go:embed static/sidebar_project.js
-var sidebarProjectJS embed.FS
-
-//go:embed static/auth_modal.js
-var authModalJS embed.FS
-
-//go:embed static/send_message.js
-var sendMessageJS embed.FS
-
-//go:embed static/cron_view.js
-var cronViewJS embed.FS
-
-//go:embed static/cron_schedule.js
-var cronScheduleJS embed.FS
-
-//go:embed static/cron_timeline.js
-var cronTimelineJS embed.FS
-
-//go:embed static/cron_drawer.js
-var cronDrawerJS embed.FS
-
-//go:embed static/cron_trigger.js
-var cronTriggerJS embed.FS
-
-//go:embed static/cron_live.js
-var cronLiveJS embed.FS
-
-//go:embed static/platform.js
-var platformJS embed.FS
-
-//go:embed static/ws_manager.js
-var wsManagerJS embed.FS
-
-//go:embed static/session_stream.js
-var sessionStreamJS embed.FS
-
-//go:embed static/features.js
-var featuresJS embed.FS
-
-//go:embed static/event_render.js
-var eventRenderJS embed.FS
-
-//go:embed static/ask_card.js
-var askCardJS embed.FS
-
-//go:embed static/event_stream.js
-var eventStreamJS embed.FS
-
-//go:embed static/session_list.js
-var sessionListJS embed.FS
-
-//go:embed static/session_ident.js
-var sessionIdentJS embed.FS
-
-//go:embed static/icons.js
-var iconsJS embed.FS
-
-//go:embed static/file_ref_parse.js
-var fileRefParseJS embed.FS
-
-//go:embed static/shell.js
-var shellJS embed.FS
-
-//go:embed static/backend_catalog.js
-var backendCatalogJS embed.FS
-
-//go:embed static/cron_state.js
-var cronStateJS embed.FS
-
-//go:embed static/cron_format.js
-var cronFormatJS embed.FS
-
-//go:embed static/workflow_state.js
-var workflowStateJS embed.FS
-
-//go:embed static/workflow_view.js
-var workflowViewJS embed.FS
-
-//go:embed static/lightbox.js
-var lightboxJS embed.FS
-
-//go:embed static/mem_popover.js
-var memPopoverJS embed.FS
-
-//go:embed static/aside_drawer.js
-var asideDrawerJS embed.FS
-
-//go:embed static/agent_view.js
-var agentViewJS embed.FS
-
-//go:embed static/asset_browser.js
-var assetBrowserJS embed.FS
-
-//go:embed static/files_view.js
-var filesViewJS embed.FS
-
-//go:embed static/favicon.svg
-var faviconSVG embed.FS
-
-// Third-party release files, byte-identical to their npm dist (mermaid's bundle
-// gzipped) and kept under a versioned directory, so their responses can be
-// cached as immutable. KaTeX
-// ships only its woff2 fonts: every browser the dashboard supports takes the
-// first src of each @font-face.
-//
-//go:embed static/vendor
-var vendorFS embed.FS
+//go:embed static
+var staticFS embed.FS
 
 // staticAsset is the once-read, immutable view of an embedded dashboard asset:
 // its bytes and precomputed strong-form ETag. embed.FS.ReadFile copies the
@@ -239,87 +70,28 @@ func precompressGzip(b []byte) []byte {
 // ETag and gzip form are those of the bytes actually served.
 // servedAssetVersion is the nz-asset-version that page carries.
 var staticAssets, servedAssetVersion = func() (map[string]staticAsset, string) {
-	read := func(fsys embed.FS, name string, compress bool) (staticAsset, bool) {
-		b, err := fsys.ReadFile(name)
-		if err != nil {
-			return staticAsset{}, false
-		}
-		return newStaticAsset(b, compress), true
-	}
 	out := map[string]staticAsset{}
-	for _, e := range []struct {
-		key      string
-		fsys     embed.FS
-		name     string
-		compress bool
-	}{
-		{"dashboard.html", dashboardHTML, "static/dashboard.html", true},
-		{"css/tokens.css", dashboardCSS, "static/css/tokens.css", true},
-		{"css/views.css", dashboardCSS, "static/css/views.css", true},
-		{"css/split_view.css", dashboardCSS, "static/css/split_view.css", true},
-		{"css/responsive.css", dashboardCSS, "static/css/responsive.css", true},
-		{"css/cron.css", dashboardCSS, "static/css/cron.css", true},
-		{"css/mobile_polish.css", dashboardCSS, "static/css/mobile_polish.css", true},
-		{"css/utilities.css", dashboardCSS, "static/css/utilities.css", true},
-		{"nz_util.js", nzUtilJS, "static/nz_util.js", true},
-		{"state.js", stateJS, "static/state.js", true},
-		{"contract.js", contractJS, "static/contract.js", true},
-		{"dashboard.js", dashboardJS, "static/dashboard.js", true},
-		{"render_md.js", renderMdJS, "static/render_md.js", true},
-		{"self_update.js", selfUpdateJS, "static/self_update.js", true},
-		{"voice.js", voiceJS, "static/voice.js", true},
-		{"session_header.js", sessionHeaderJS, "static/session_header.js", true},
-		{"composer_files.js", composerFilesJS, "static/composer_files.js", true},
-		{"mobile_nav.js", mobileNavJS, "static/mobile_nav.js", true},
-		{"split_view.js", splitViewJS, "static/split_view.js", true},
-		{"system_view.js", systemViewJS, "static/system_view.js", true},
-		{"running_banner.js", runningBannerJS, "static/running_banner.js", true},
-		{"file_refs.js", fileRefsJS, "static/file_refs.js", true},
-		{"utilities.js", utilitiesJS, "static/utilities.js", true},
-		{"discovery.js", discoveryJS, "static/discovery.js", true},
-		{"tuning.js", tuningJS, "static/tuning.js", true},
-		{"msg_nav.js", msgNavJS, "static/msg_nav.js", true},
-		{"sidebar_project.js", sidebarProjectJS, "static/sidebar_project.js", true},
-		{"auth_modal.js", authModalJS, "static/auth_modal.js", true},
-		{"send_message.js", sendMessageJS, "static/send_message.js", true},
-		{"cron_view.js", cronViewJS, "static/cron_view.js", true},
-		{"cron_schedule.js", cronScheduleJS, "static/cron_schedule.js", true},
-		{"cron_timeline.js", cronTimelineJS, "static/cron_timeline.js", true},
-		{"cron_drawer.js", cronDrawerJS, "static/cron_drawer.js", true},
-		{"cron_trigger.js", cronTriggerJS, "static/cron_trigger.js", true},
-		{"cron_live.js", cronLiveJS, "static/cron_live.js", true},
-		{"platform.js", platformJS, "static/platform.js", true},
-		{"ws_manager.js", wsManagerJS, "static/ws_manager.js", true},
-		{"session_stream.js", sessionStreamJS, "static/session_stream.js", true},
-		{"features.js", featuresJS, "static/features.js", true},
-		{"event_render.js", eventRenderJS, "static/event_render.js", true},
-		{"ask_card.js", askCardJS, "static/ask_card.js", true},
-		{"event_stream.js", eventStreamJS, "static/event_stream.js", true},
-		{"session_list.js", sessionListJS, "static/session_list.js", true},
-		{"session_ident.js", sessionIdentJS, "static/session_ident.js", true},
-		{"icons.js", iconsJS, "static/icons.js", true},
-		{"file_ref_parse.js", fileRefParseJS, "static/file_ref_parse.js", true},
-		{"shell.js", shellJS, "static/shell.js", true},
-		{"backend_catalog.js", backendCatalogJS, "static/backend_catalog.js", true},
-		{"cron_state.js", cronStateJS, "static/cron_state.js", true},
-		{"cron_format.js", cronFormatJS, "static/cron_format.js", true},
-		{"workflow_state.js", workflowStateJS, "static/workflow_state.js", true},
-		{"workflow_view.js", workflowViewJS, "static/workflow_view.js", true},
-		{"lightbox.js", lightboxJS, "static/lightbox.js", true},
-		{"mem_popover.js", memPopoverJS, "static/mem_popover.js", true},
-		{"aside_drawer.js", asideDrawerJS, "static/aside_drawer.js", true},
-		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
-		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
-		{"files_view.js", filesViewJS, "static/files_view.js", true},
-		{"manifest.json", manifestJSON, "static/manifest.json", false},
-		{"sw.js", swJS, "static/sw.js", false},
-		{"favicon.svg", faviconSVG, "static/favicon.svg", true},
-	} {
-		if a, ok := read(e.fsys, e.name, e.compress); ok {
-			out[e.key] = a
+	err := fs.WalkDir(staticFS, "static", func(name string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
 		}
+		key := strings.TrimPrefix(name, "static/")
+		if strings.HasPrefix(key, "vendor/") {
+			return addVendorAsset(out, name, key)
+		}
+		switch {
+		case key == "manifest.json", key == "sw.js":
+			return addStaticAsset(out, name, key, false)
+		case key == "dashboard.html", key == "favicon.svg",
+			path.Ext(key) == ".js" && !strings.Contains(key, "/"),
+			path.Ext(key) == ".css" && path.Dir(key) == "css":
+			return addStaticAsset(out, name, key, true)
+		}
+		return nil // package.json and anything else under static/ is not served
+	})
+	if err != nil {
+		panic("read static/: " + err.Error())
 	}
-	addVendorAssets(out)
 	raw, ok := out["dashboard.html"]
 	if !ok {
 		return out, ""
@@ -333,33 +105,36 @@ var staticAssets, servedAssetVersion = func() (map[string]staticAsset, string) {
 	return out, version
 }()
 
-// addVendorAssets registers every servable file under static/vendor by its path
+func addStaticAsset(out map[string]staticAsset, name, key string, compress bool) error {
+	b, err := staticFS.ReadFile(name)
+	if err != nil {
+		return err
+	}
+	out[key] = newStaticAsset(b, compress)
+	return nil
+}
+
+// addVendorAsset registers a servable file under static/vendor by its path
 // below static/, the key its /static/vendor/ URL maps to. Fonts are already
 // compressed, so only scripts and stylesheets are gzipped. A file embedded as
 // <name>.gz (gzip -9n of the release file) is served as <name>, its embedded
 // bytes as the gzip form, so a multi-megabyte bundle costs no compression at
 // init and no decompressed copy in memory.
-func addVendorAssets(out map[string]staticAsset) {
-	err := fs.WalkDir(vendorFS, "static/vendor", func(name string, d fs.DirEntry, err error) error {
-		key, gzipped := strings.CutSuffix(strings.TrimPrefix(name, "static/"), ".gz")
-		ext := path.Ext(key)
-		if err != nil || d.IsDir() || (ext != ".js" && stylesheetTypes[ext] == "") {
-			return err
-		}
-		b, err := vendorFS.ReadFile(name)
-		if err != nil {
-			return err
-		}
-		if !gzipped {
-			out[key] = newStaticAsset(b, ext != ".woff2")
-			return nil
-		}
-		out[key] = newGzipOnlyAsset(b)
+func addVendorAsset(out map[string]staticAsset, name, key string) error {
+	key, gzipped := strings.CutSuffix(key, ".gz")
+	if staticTypes[path.Ext(key)] == "" {
 		return nil
-	})
-	if err != nil {
-		panic("read static/vendor: " + err.Error())
 	}
+	b, err := staticFS.ReadFile(name)
+	if err != nil {
+		return err
+	}
+	if gzipped {
+		out[key] = newGzipOnlyAsset(b)
+	} else {
+		out[key] = newStaticAsset(b, path.Ext(key) != ".woff2")
+	}
+	return nil
 }
 
 // newStaticAsset wraps b with its strong ETag (sha256, first 16 bytes, hex)
@@ -388,17 +163,6 @@ func hasStaticAsset(key string) bool {
 	_, ok := staticAssets[key]
 	return ok
 }
-
-// staticAssetETags is the map[key]ETag view for callers/tests that only need
-// the ETag; derived from staticAssets. Combined with `Cache-Control: no-cache,
-// must-revalidate` the ETag enables the 304 fast-path.
-var staticAssetETags = func() map[string]string {
-	out := map[string]string{}
-	for k, a := range staticAssets {
-		out[k] = a.etag
-	}
-	return out
-}()
 
 // staticAssetBytes returns the cached, read-only bytes for an embedded asset.
 // Callers MUST NOT mutate the returned slice — it is shared across all

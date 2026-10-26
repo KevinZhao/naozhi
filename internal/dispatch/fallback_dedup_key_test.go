@@ -11,7 +11,7 @@ import (
 // adapter-side empty-EventID retries (#1310). Two events with identical
 // (Platform, ChatID, MessageID) within the same wall-clock minute must
 // produce the same fallback key so platform.Dedup.Seen short-circuits the
-// second pass — without this, a Feishu webhook retry whose adapter dropped
+// second pass — without this, a platform retry whose adapter dropped
 // event_id would re-enter BuildHandler, double-charge tokens, and queue
 // "正在处理上一条消息" noise.
 func TestFallbackDedupKey_StableWithinMinute(t *testing.T) {

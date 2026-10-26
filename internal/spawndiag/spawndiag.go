@@ -15,8 +15,6 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // Diag is one gate decision that altered or ignored configured input.
@@ -72,7 +70,6 @@ func Emit(scope string, diags []Diag) {
 			_, repeat = seen.LoadOrStore(dedupKey, struct{}{})
 		}
 		if !repeat {
-			metrics.RecordSpawnDiag(d.Layer, d.Action)
 			record(d)
 			slog.Warn("spawn gate: configured input had no effect",
 				"layer", d.Layer, "key", d.Key, "action", d.Action, "reason", d.Reason, "scope", scope)

@@ -11,8 +11,8 @@
   parent session 空闲时照常更新
 - 关联：`agent-team-ui.md`（Agent 工具子代理可视化 + drill-in，本 RFC 复用其
   TranscriptReader / tailer）、`event-log-persistence.md`（ring + persist）、
-  `wsproto.md`（WS 协议单一真相源）、`kiro-effort-visibility.md`（`SessionSnapshot`
-  透出字段的范式）
+  `wsproto.md`（WS 协议单一真相源）、kiro-effort-visibility（`SessionSnapshot`
+  透出字段的范式；该 RFC 已删除，需要时用 git log 找回）
 - 基线：worktree `/Users/zhaokm/workspace/naozhi-wfdash` @ `f08594f6`；CC 2.1.288
   （`~/.toolbox/tools/claude-code/2.1.288.1084/claude`）
 
@@ -1998,7 +1998,7 @@ epoch 变化后）、`delta`（`since=rowsAt`）、`none`（`!rowsLoaded` 时的
 **回到一个 session**：`renderWorkflowPanel` 重建 `<details>` 时 toggle 触发 `ensureRows`，重订阅的 full 帧也同时到达——两者经 `needsFetch`
 合并，每个展开的 workflow 恰好一次请求（rows 与 result 已在切走时释放，§7.1，所以是一次 full，终态条目的结果随之取回）。
 
-- **多 tab 合并**：可选，仿 `historyMarshalCache`（`wshub_eventpush_cache.go:39-140`），键
+- **多 tab 合并**：可选，仿已删除的 `historyMarshalCache`（history 帧现在每个订阅者各自 marshal），键
   `(key, task_id, epoch, version, base_version)`——现有指纹基于时间戳，不适合可变快照。
 - Hub 通过 `*ManagedSession` 取 board（`WorkflowBoard()`），**不**给 `HubRouter` 加方法（14 个，
   godoc 说到 15 要重新设计）、**不**加 `HubOptions` 字段（`hubOptionsFieldBaseline = 16`，`tools/lint-server-handlers/rule_server_fields.go:33`）。
@@ -2088,7 +2088,7 @@ v4 的 `GET /api/sessions/workflow_agent`（per-agent 预览）连同它专用�
 | `testdata/routes.golden.json` | `UPDATE_GOLDEN=1 go test -run TestRoutesSnapshot ./internal/server/` | `TestRoutesSnapshot` | PR-10、PR-11（静态资源路由） |
 | workflow REST 响应类型 | `internal/dashboard/ext/workflows/rest_schema_test.go` + `testdata/rest.schema.json`（仿 session 包的 `restResponses` 生成器）；`tools/gen-contract` 与 `contractjs.BuildWireDTS` 改为也读这份 schema，重生成 `static/wire.d.ts`，前端经 `RestResponse_*` 类型使用；路径追加到 `scripts/check-mock-rest.test.mjs:13` 的 schema 读取 | 新包自己的 `TestRESTSchema_IsGenerated`、`TestWireDTS_Current`、tsc（lint-js） | PR-10 |
 | mock-server 的 workflow 路由 | 新增 `/workflow`，含三种行模式（`rows=none`、`since=` → delta / 退回 full）与 `result_unavailable`；**不**扩 `check-mock-rest.test.mjs:51-55` 的 `ROUTES`（那是 EventEntry 夹具专用），另写 workflow 响应的 schema 校验用例 | `check-mock-rest` | PR-10 |
-| 新 ES module 资产 | `static_assets.go` `//go:embed` + 资产表行、`routes.go` 静态路由 + golden | `TestStaticJS_ModuleInventory`（`static_module_inventory_test.go:13-21`）、`TestDashboardPage_ImportMapAndPreload`（`static_versioning_test.go:78`） | PR-11 |
+| 新 ES module 资产 | 放进 `static/` 即自动嵌入并由 `GET /static/{file...}` 服务（#3748 起无需登记 embed、资产表或路由） | `TestStaticJS_ModuleInventory`（`static_module_inventory_test.go:13-21`）、`TestDashboardPage_ImportMapAndPreload`（`static_versioning_test.go:78`） | PR-11 |
 | lint-server-handlers | `-mode fail`；新 server 文件 ≤ 500 行，**不抬基线** | CI | PR-10/11 |
 
 `scripts/js-deps-freeze.mjs` 的 LOAD_ORDER 与 `js-deps-baseline.json` 只覆盖 7 个历史
@@ -2130,7 +2130,7 @@ classic→module 文件（`:36-44`），新 ES module **不**登记在那里。
     `registerActions` 并入——新模块不能顶层调用 `registerActions`，同理也不能顶层调 `onSessionsApplied`：由 `dashboard.js` 在
     :346-347 那组旁加一行 `onSessionsApplied(onSessionsRefreshed)`）。
   - 不 import dashboard.js（D4-1，js-ratchet 的 `importCycles` 必须为 0）。
-- 新文件登记：`static_assets.go` 的 `//go:embed` + 资产表行、`routes.go` 静态路由 + golden、js-ratchet
+- 新文件登记：放进 `static/` 即自动嵌入和路由（#3748）、js-ratchet
   baseline 行、CLAUDE.md:242 模块段落。闸门是 `TestStaticJS_ModuleInventory` 与
   `TestDashboardPage_ImportMapAndPreload`（§6.3）。**由谁 import**：`dashboard.js`（v3 写"dashboard.html 或 event_stream.js"，而 §7.6
   又说 event_stream.js 不碰，PR-11 的文件清单里两者都没有——模块从不被执行，`wsm.on` handler 从不注册；import map 与 modulepreload
@@ -2686,7 +2686,7 @@ workflow agent 的映射只存在 board 里，不进 linker 的 `byTaskID/byName
 | HTTP | 未鉴权 401（自动）；非法 key 400；`rows=none` 与 `since` 同时给 → 400；`SessionFor == nil` 404；nil board 404；task 不在 board 404；remote node 404；**结果文件缺失 / 是 FIFO / RunDir 未解析 → 200 + `result_unavailable`**（不是 404）；`rows=none` 不带行、但终态且有结果时照样带 result / logs；`since=V` 只带 `rev > V` 的行、epoch 不符时 `rows_mode:"full"`；重启后缓存缺失的终态 workflow 首次 GET 即返回行（`MergeResultFile` 经 `Result` 路径）；取不到全局 I/O 槽位时立即返回 `result_unavailable`、不等待；结果/日志截断（logs 合计 ≤ 64KiB）；结果文件只解析一次（计数）；taskId 不匹配不返回 result；响应带 `server_now`；限流 429；路由表里没有 `/workflow_agent`（v5 删除） |
 | drill-in | board 命中先于 linker nil（无进程的 session 可 drill）；transcript 未落盘 → 202 / `pending`；transcript 是 FIFO → 404 且不阻塞；**tail 中途把 agent jsonl rm + mkfifo**：下一次零字节轮询不阻塞、`Close()` 立即返回、registry 的其他 tailer 照常推进（`pollLoop` 串行，带超时断言）；既有 Agent tailer 同样受保护（默认 opener）；RunDir 未解析 → 202；首行 > 32KiB 仍校验通过；**首行 sessionId 与 RunDir rel 的 `<sid>` 比较**：`Workflow.SessionID` 只有等级 1 的值（或为空）时也能 drill-in，首行 sessionId/agentId 不符 → 404；历史 attempt agentId 可 drill 且 doneFn 立即 done；tailer 用共享 ProjectsRoot allowedRoot（新增生产配置用例，修 `newTailerRegistry("")` 盲区）；**WS 订阅一个已有 tailer 的 agent**：校验用的 fd 已关闭（fd 计数不增）、返回共享 tailer；新 tailer 的首次打开经注入的 opener（计数接缝）；**harness 框架剥离**：探针 agent jsonl 首行显示为 `Reply with just the number 2+2`，没有框架标记的首行原样显示，HTTP 分页与 WS tail 一致；done 时 `agent_done`；WS `pending` → 客户端回退 3s poll |
 | 前端 `workflow_state.js`（node --test） | §6.1 客户端表逐行：`workflow_set` 删掉不在列表 / epoch 不同的条目（`/new` 后清空）；full 在 epoch 变化时丢 rows、**相同时保留 rows**（内容未变的重订阅零请求，`rowsAt` 落后时恰一次 `since`）；fetch 在途时到达的 full 不另发请求、HTTP 响应 `H < version` 时 header 与 version **不倒退**；`version ≤ local` 忽略 header；`base > local` 触发 fetch；`base ≤ rowsAt < version` 合并行；`base > rowsAt` → `since` 拉取；fetch 在途时缓存并在 HTTP 落地后重放；`ensureRows` 与 full 帧同时触发时只发一次；兜底刷新：`!rowsLoaded` → `rows=none`、`rowsLoaded` → `since`（WS 断开 5s 轮询下折叠的 workflow 从不拉全量行）；**结果拉取**：展开中的条目收到终态 + `source:"result_file"` 的 delta 后恰好一次请求（`rowsLoaded` → `since`，否则 `rows=none`）、响应带 result 后不再请求、折叠中的条目不请求、`result_unavailable` 按退避重试至多 5 次、`source` 不是 `result_file` 的终态（如 interrupted）不请求；HTTP 之后的非终态 delta 不再触发重拉（无限重拉回归）；`agents_capped` 不触发 fetch，`rows_omitted` 只触发一次；epoch 变化；429 保持状态、按退避（含 Retry-After）重试；404 删除条目；Summary 兜底判定（node 非 local 跳过、无 `workflow_set` 时以 Summary 裁剪、**unknown 条目不被裁掉**）；`visibleWorkflows` 含 unknown；兜底 LRU 不淘汰最近 `workflow_set` 列出的条目（37 个 live 条目全部保留）；`releaseRows` 后 `rowsLoaded=false`、`resultLoaded=false` |
-| bench | `BenchmarkReadEvent_WorkflowSnapshot398`：`-count≥5` 中位数 ≤ 2.0ms 且 ≤ 400KB/op，按 `go.mod` 的工具链（go1.26.6）测（M 系列本机；CI 不跑，PR 描述贴数，含跳过路径对照）。go1.26.6 实测 1.67ms，跳过路径 1.81ms，时间几乎全在 encoding/json v1 对整行的 `checkValid` 预扫描上，workflow 解码本身不增加时间；go1.27 下是 0.79ms。`go.mod` 升到 ≥ 1.27 时把预算收回 ≤ 1.5ms（#3678）。**`BenchmarkObserve_Snapshot398`**（解码 + `Observe` + board `wake`，真实 398-agent 快照，稳态：上一张与本张只差几行）中位数 ≤ 2.5ms；**`BenchmarkObserve_Snapshot2000Eq`**（2000 行、lastToolSummary 全含 `=`）首张 ≤ 25ms、稳态 ≤ 5ms——稳态预算靠 §4.3 的记忆化达成，PR-6 / PR-8 实测后在 PR 描述里定稿。PR-6 实测（负载下）：PR-5 的解码本身每张 ~12ms，已超过 5ms，Tracker 的稳态份额约 0.4ms（CPU profile 里 `Observe` 占 ~3%）；所以 2000Eq 的稳态 5ms 只能不含解码，PR-8 定稿时按"Observe + wake ≤ 5ms"写，或连解码一起上调。PR-8 实测（M 系列本机，`-count=5` 中位数，不含解码）：`BenchmarkWorkflowBoard_Wake398`（`Observe` + `wake`）≈0.15ms、415KB、421 allocs；`BenchmarkWorkflowBoard_Wake2000Eq` 稳态 ≈3.3ms、1.5MB——按"Observe + wake ≤ 5ms"定稿 |
+| bench | `BenchmarkReadEvent_WorkflowSnapshot398`：`-count≥5` 中位数 ≤ 2.0ms 且 ≤ 400KB/op，按 `go.mod` 的工具链（go1.26.6）测（M 系列本机；CI 不跑，PR 描述贴数，含跳过路径对照）。go1.26.6 实测 1.67ms，跳过路径 1.81ms，时间几乎全在 encoding/json v1 对整行的 `checkValid` 预扫描上，workflow 解码本身不增加时间；go1.27 下是 0.79ms。`go.mod` 升到 ≥ 1.27 时把预算收回 ≤ 1.5ms（#3678）。**`BenchmarkObserve_Snapshot398`**（解码 + `Observe` + board `wake`，真实 398-agent 快照，稳态：上一张与本张只差几行）中位数 ≤ 2.5ms；**`BenchmarkObserve_Snapshot2000Eq`**（2000 行、lastToolSummary 全含 `=`）首张 ≤ 25ms、稳态 ≤ 5ms——稳态预算靠 §4.3 的记忆化达成，PR-6 / PR-8 实测后在 PR 描述里定稿。PR-6 实测（负载下）：PR-5 的解码本身每张 ~12ms，已超过 5ms，Tracker 的稳态份额约 0.4ms（CPU profile 里 `Observe` 占 ~3%）；所以 2000Eq 的稳态 5ms 只能不含解码，PR-8 定稿时按"Observe + wake ≤ 5ms"写，或连解码一起上调。PR-8 实测（M 系列本机，`-count=5` 中位数，不含解码）：`BenchmarkWorkflowBoard_Wake398`（`Observe` + `wake`）≈0.15ms、415KB、421 allocs；`BenchmarkWorkflowBoard_Wake2000Eq` 稳态 ≈3.3ms、1.5MB——按"Observe + wake ≤ 5ms"定稿（这两个 WorkflowBoard benchmark 已在 round 3 删除，数字只作历史记录） |
 
 ### 11.3 Race
 

@@ -12,7 +12,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"expvar"
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
@@ -40,13 +39,6 @@ const (
 	firstBackoff = time.Second
 	maxBackoff   = 30 * time.Second
 	userAgent    = "naozhi-webhook/1"
-)
-
-// Delivery counters, keyed by endpoint.
-var (
-	deliveredTotal = expvar.NewMap("naozhi_webhook_delivered_total")
-	failedTotal    = expvar.NewMap("naozhi_webhook_failed_total")
-	droppedTotal   = expvar.NewMap("naozhi_webhook_dropped_total")
 )
 
 // Endpoint is one configured receiver. Empty Events / Subsystems mean all.
@@ -195,7 +187,6 @@ func (s *Sender) Deliver(ev Event) {
 		select {
 		case w.queue <- ev:
 		default:
-			droppedTotal.Add(w.idx, 1)
 			slog.Warn("webhook queue full; event dropped", "endpoint", w.idx, "target", w.target, "url_id", w.urlID, "type", ev.Type)
 		}
 	}
@@ -275,12 +266,10 @@ func (w *worker) abort() { w.stop() }
 func (w *worker) send(ev Event) {
 	body, err := json.Marshal(ev)
 	if err != nil {
-		failedTotal.Add(w.idx, 1)
 		return
 	}
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if w.ctx.Err() != nil {
-			failedTotal.Add(w.idx, 1)
 			return
 		}
 		ctx, cancel := context.WithCancel(w.ctx)
@@ -288,15 +277,12 @@ func (w *worker) send(ev Event) {
 		cancel()
 		switch {
 		case err == nil && status/100 == 2:
-			deliveredTotal.Add(w.idx, 1)
 			return
 		case err == nil && !retryable(status):
-			failedTotal.Add(w.idx, 1)
 			slog.Warn("webhook rejected", "endpoint", w.idx, "target", w.target, "url_id", w.urlID, "status", status, "type", ev.Type, "run_id", ev.RunID)
 			return
 		}
 		if attempt == maxAttempts {
-			failedTotal.Add(w.idx, 1)
 			slog.Warn("webhook delivery failed", "endpoint", w.idx, "target", w.target, "url_id", w.urlID, "status", status, "err", redactErr(err, w.ep.URL), "attempts", attempt, "type", ev.Type, "run_id", ev.RunID)
 			return
 		}

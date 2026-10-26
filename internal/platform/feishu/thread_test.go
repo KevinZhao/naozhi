@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 
@@ -75,42 +74,6 @@ func TestParseSDKEvent_Topic(t *testing.T) {
 		if !ok || pe.Msg.ThreadID != tc.want || pe.Msg.SelfThread != tc.wantSelf {
 			t.Errorf("%s: parsed %+v, %v; want ThreadID %q, SelfThread %q", tc.name, pe.Msg, ok, tc.want, tc.wantSelf)
 		}
-	}
-}
-
-func TestWebhook_Topic(t *testing.T) {
-	t.Parallel()
-	for _, tc := range topicCases {
-		f := makeWebhookFeishu(Config{AppID: "id", AppSecret: "secret"})
-		got := make(chan platform.IncomingMessage, 1)
-		mux := http.NewServeMux()
-		f.registerWebhook(mux, func(_ context.Context, msg platform.IncomingMessage) { got <- msg })
-		message := map[string]any{
-			"message_id": "om_self", "chat_id": "oc_1", "chat_type": "group",
-			"message_type": "text", "content": `{"text":"hi"}`,
-		}
-		if tc.threadID != "" {
-			message["thread_id"] = tc.threadID
-		}
-		if tc.rootID != "" {
-			message["root_id"] = tc.rootID
-		}
-		body, _ := json.Marshal(map[string]any{
-			"schema": "2.0",
-			"header": map[string]any{"event_id": "ev_" + tc.name, "event_type": "im.message.receive_v1", "token": "test_token"},
-			"event":  map[string]any{"sender": map[string]any{"sender_id": map[string]any{"open_id": "ou_1"}}, "message": message},
-		})
-		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, buildTokenRequest(body))
-		select {
-		case m := <-got:
-			if m.ThreadID != tc.want || m.SelfThread != tc.wantSelf {
-				t.Errorf("%s: ThreadID, SelfThread = %q, %q; want %q, %q", tc.name, m.ThreadID, m.SelfThread, tc.want, tc.wantSelf)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("%s: no message dispatched (status %d)", tc.name, w.Code)
-		}
-		_ = f.Stop()
 	}
 }
 

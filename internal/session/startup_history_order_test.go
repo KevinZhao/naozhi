@@ -15,7 +15,6 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -183,21 +182,18 @@ func (l *timedHistoryLoader) LoadHistoryChainTail(_ context.Context, _ string, i
 
 // TestStartupHistory_ShimGraceWait: a shim-managed session with no event-log
 // rows reads its JSONL only after the grace wait and only if nothing filled it
-// meanwhile, and the grace backfill counter counts that read alone; a session
-// no shim manages reads without the wait.
+// meanwhile; a session no shim manages reads without the wait.
 func TestStartupHistory_ShimGraceWait(t *testing.T) {
-	// Not parallel: reads a process-global expvar counter.
 	if runtime.GOOS == "windows" {
 		t.Skip("shim discovery needs unix PID liveness")
 	}
 	const grace = time.Second
 	for _, tc := range []struct {
-		name      string
-		fill      bool
-		wantGrace int64
+		name string
+		fill bool
 	}{
-		{"still empty after the wait", false, 1},
-		{"filled during the wait", true, 0},
+		{"still empty after the wait", false},
+		{"filled during the wait", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := shortTempDir(t)
@@ -222,8 +218,6 @@ func TestStartupHistory_ShimGraceWait(t *testing.T) {
 			if !r.backends.shimManagedKeys()[shimmed.key] {
 				t.Fatal("precondition: the shim state is not live")
 			}
-			before := metrics.ShimReconnectGraceBackfillTotal.Value()
-
 			loader.start = time.Now()
 			r.startBackgroundHistoryLoaders(grace)
 			if tc.fill {
@@ -235,9 +229,6 @@ func TestStartupHistory_ShimGraceWait(t *testing.T) {
 			shimAt, shimRead := loader.at[fmt.Sprint(shimmed.SnapshotChainIDs())]
 			if !plainRead || plainAt >= grace {
 				t.Errorf("unmanaged session JSONL read = %v at %v, want a read before the %v grace", plainRead, plainAt, grace)
-			}
-			if got := metrics.ShimReconnectGraceBackfillTotal.Value() - before; got != tc.wantGrace {
-				t.Errorf("grace backfills = %d, want %d", got, tc.wantGrace)
 			}
 			want := loader.jsonl
 			if tc.fill {

@@ -153,7 +153,7 @@ func storedRouterDir(t *testing.T, key, sessionID, workspace string) string {
 	storePath := filepath.Join(t.TempDir(), "sessions.json")
 	s := newSessionWithID(key, sessionID)
 	s.setWorkspace(workspace)
-	if err := saveStoreSlice(storePath, []*ManagedSession{s}); err != nil {
+	if err := saveStore(storePath, []*ManagedSession{s}); err != nil {
 		t.Fatal(err)
 	}
 	return storePath

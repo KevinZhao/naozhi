@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// TestIsLoopbackClient pins R20260604-SEC-5: the pprof/expvar loopback gate
+// TestIsLoopbackClient pins R20260604-SEC-5: the pprof loopback gate
 // must resolve the *real* client IP in trustedProxy mode rather than trusting
 // r.RemoteAddr, which is always the proxy's loopback IP behind a reverse proxy.
 func TestIsLoopbackClient(t *testing.T) {

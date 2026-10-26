@@ -26,7 +26,7 @@ Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI, Kiro, or Codex) as
 
 **Request flow**: IM platform -> message handler -> async goroutine -> session router -> CLI stdin -> read stdout until turn complete -> platform reply API.
 
-**Key constraint**: Feishu requires 200 response within 3s. The webhook handler returns 200 immediately and processes asynchronously via `go handler(context.Background(), msg)`.
+**Key constraint**: IM webhooks (Slack HTTP mode, WeChat) must answer fast, so handlers return 200 immediately and process asynchronously via `go handler(context.Background(), msg)`.
 
 ### Module Layers
 
@@ -36,7 +36,7 @@ Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI, Kiro, or Codex) as
 - **Scheduling / projects**: `cron` (+ `runstore` run history), `sysession` (background daemons), `project` / `projectapi` (discovery, chat binding, planner).
 - **Multi-node**: `node` (protocol, HTTP/reverse clients), `upstream` (reverse-connect dialer).
 - **Persistence / history**: `eventlog`, `history` (claudejsonl/kirojsonl/codexjsonl/naozhilog/merged), `attachment`, `runlog`, `claudefs` (Claude CLI on-disk layout), `discovery`, `subagent`.
-- **Domain helpers**: `selfupdate`, `transcribe`, `imauth`, `costledger`, `budget`, `webhook`, `runtelemetry`, `naozhisettings`, `ccassets`, `ccmodels`, `uiprefs`, `replyfmt`, `usermsg`, `gitinfo`, `metrics`.
+- **Domain helpers**: `selfupdate`, `transcribe`, `imauth`, `costledger`, `budget`, `webhook`, `runtelemetry`, `naozhisettings`, `ccassets`, `ccmodels`, `uiprefs`, `replyfmt`, `usermsg`, `gitinfo`.
 - **Leaves**: `osutil`, `textutil`, `netutil`, `ratelimit`, `limits`, `sessionkey`, `tuningspec`, `backendid`, `cliinfo`, `apierr`, `ctxutil`, `leakguard`, `spawndiag`, `envpolicy`, `datadir`, `imageorient`, `testhelper`.
 
 ### CLI Process Lifecycle
@@ -46,7 +46,7 @@ Each CLI process is long-lived (stdin/stdout stay open across turns). The Wrappe
 - `kiro`: `ACPProtocol` -- JSON-RPC 2.0 Agent Client Protocol, session ID from `session/new` response
 - `codex`: `CodexProtocol` -- codex app-server JSON-RPC 2.0 over stdio (see `docs/rfc/codex-backend.md`)
 
-Multi-backend deployments use `cli.backends: [{id, path, model, args, effort}, ...]` so dashboard / IM / cron / reverse-node can pick backend per session (`docs/rfc/multi-backend.md`). `effort` is the kiro thinking-effort tier, forwarded as `acp --effort`. ACP gotchas (`docs/rfc/multi-backend-validation.md`):
+Multi-backend deployments use `cli.backends: [{id, path, model, args, effort}, ...]` so dashboard / IM / cron / reverse-node can pick backend per session (`docs/rfc/multi-backend.md`). `effort` is the kiro thinking-effort tier, forwarded as `acp --effort`. ACP gotchas:
 - ACP `session/cancel` is a **notification** (no id), not a request
 - ACP RPC ID can be **string UUID** (kiro `permission_request`), not always int — use `json.RawMessage`
 - ACP permission `optionId` is `allow_once / allow_always / reject_once` (underscore, not hyphen) — read from request `options[].optionId`, do not hardcode
@@ -91,7 +91,7 @@ Platforms needing background goroutines implement `RunnablePlatform` with `Start
 
 | Platform | Transport | Interface |
 |----------|-----------|-----------|
-| Feishu   | WebSocket (default) or HTTP webhook | `RunnablePlatform` |
+| Feishu   | WebSocket long connection | `RunnablePlatform` |
 | Slack    | Socket Mode (WebSocket) | `RunnablePlatform` |
 | Discord  | WebSocket gateway | `RunnablePlatform` |
 | WeChat   | iLink Bot HTTP long-poll | `RunnablePlatform` |
@@ -120,7 +120,7 @@ When `projects.root` is configured, `project.Manager` scans every non-hidden sub
 
 ### Dashboard & WebSocket
 
-Embedded PWA at `/dashboard`: `internal/server/static/` (`dashboard.html`, ES modules, `vendor/` KaTeX + mermaid served from `/static/vendor/`). Every module must be listed in the embed inventory (`static_module_inventory_test.go`) or the dashboard loads blank; no inline `onclick` handlers (CSP).
+Embedded PWA at `/dashboard`: `internal/server/static/` (`dashboard.html`, ES modules, `vendor/` KaTeX + mermaid served from `/static/vendor/`). Everything under `static/` is embedded and served from `/static/` by one auth-gated route (`static_module_inventory_test.go` checks every module answers 401/200); no inline `onclick` handlers (CSP).
 `/ws` frame types live in `internal/wsproto` and `contract.js`; the dashboard registers handlers via `wsm.on(NZ_CONTRACT.WS.<type>, ...)` (`ws_manager.js`). Remote node events are relayed with a `node` field.
 REST routes: `internal/server/routes.go` is the authoritative list (grep `HandleFunc`). Health: `/health`, `/livez`, `/readyz`.
 
@@ -131,7 +131,7 @@ The `discovery` package scans `~/.claude/projects/<slug>/<sessionId>.jsonl` (Cla
 ### Session Persistence
 
 Sessions are persisted to `~/.naozhi/sessions.json` at shutdown:
-- Each entry stores `key`, `session_id`, `workspace`, `total_cost`; a sibling `sessions.meta.json` sidecar records `{version, written_at, generator}`
+- Each entry stores `key`, `session_id`, `workspace`, `total_cost`
 - On restart, dead sessions are loaded and history is async-loaded (naozhi event log first, Claude JSONL fallback)
 - Next message to a dead session resumes via `--resume`
 - Captures session_id under sendMu to avoid Send() data races

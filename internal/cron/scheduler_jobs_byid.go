@@ -8,8 +8,6 @@ package cron
 
 import (
 	"log/slog"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // finishMutation runs the side effects of a mutation the table already made,
@@ -104,7 +102,6 @@ func (s *Scheduler) autoPauseIfDue(id string, transient bool) int {
 		slog.Warn("cron: auto-pause not persisted; job stays active", "job_id", id, "err", err)
 		return 0
 	}
-	metrics.CronAutoPausedTotal.Add(1)
 	slog.Warn("cron job auto-paused after consecutive failures",
 		"job_id", id, "consecutive_failures", r.job.ConsecutiveFailures,
 		"transient", transient, "transient_failures", r.job.TransientFailures)

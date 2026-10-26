@@ -85,3 +85,36 @@ func TestRemove_ReconnectKMReinsertAfterRace(t *testing.T) {
 			"expected a freshly-created one")
 	}
 }
+
+// TestReconnect_PerKeyMutexConcurrentSafe pins R51-CONCUR-005: Reconnect
+// serialises per key, so concurrent reconnectKey calls for one key must all
+// get the same mutex (and different keys different ones). Otherwise two
+// Reconnects can each dial and Close the handle the other attached to Router.
+func TestReconnect_PerKeyMutexConcurrentSafe(t *testing.T) {
+	t.Parallel()
+	m := &Manager{
+		shims:       make(map[string]*ShimHandle),
+		reconnectKM: make(map[string]*sync.Mutex),
+	}
+
+	const goroutines = 32
+	results := make([]*sync.Mutex, goroutines)
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(i int) {
+			defer wg.Done()
+			results[i] = m.reconnectKey("shared-key")
+		}(i)
+	}
+	wg.Wait()
+
+	for i, mu := range results {
+		if mu != results[0] {
+			t.Fatalf("goroutine %d got a different mutex for the same key", i)
+		}
+	}
+	if m.reconnectKey("other-key") == results[0] {
+		t.Error("different keys share one reconnect mutex")
+	}
+}

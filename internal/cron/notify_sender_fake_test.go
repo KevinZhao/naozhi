@@ -18,8 +18,8 @@ import (
 // limits.PlatformReplyMaxAttempts and the DefaultMaxReplyLen fallback), so the
 // chunk-loop / partial-telemetry / stopCtx / empty-text behaviour under test
 // is identical to production. The platform import here is test-only and does
-// NOT re-introduce the production cron→platform edge that
-// no_platform_import_test.go pins (`go list -deps` excludes _test.go imports).
+// NOT re-introduce the production cron→platform edge (#725); _test.go imports
+// stay out of the production import graph.
 
 // fakeNotifySender maps platform names to platform.Platform fakes and exposes
 // them through cron.NotifySender.

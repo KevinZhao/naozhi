@@ -81,7 +81,6 @@ func (r *RunLedger) Health() SessionRunsHealth {
 type CostLedgerConfig struct {
 	Disabled      bool
 	RetentionDays int
-	RollupDays    int
 }
 
 // CostLedger exposes the shared ledger for the dashboard cost API; nil when

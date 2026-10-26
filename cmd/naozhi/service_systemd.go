@@ -75,51 +75,6 @@ var systemctlIsActive = func(name string) bool {
 	return cmd.Run() == nil
 }
 
-// rewriteUnitWithRollback snapshots the current unit, writes renderedUnit and
-// runs daemon-reload; on reload failure it restores the snapshot and reloads
-// again. Even a successful rollback returns the original reload error so the
-// installer aborts enable/start — systemd may be in a transient bad state and
-// re-running install is the safer recovery. I/O is injected for tests.
-func rewriteUnitWithRollback(unitPath, renderedUnit, existingUnit string, readErr error, writeFile func(name string, data []byte, perm os.FileMode) error, removeFile func(string) error, daemonReload func() error) error {
-	backupPath := unitPath + systemdUnitBackupSuffix
-	hadExisting := readErr == nil
-	if hadExisting {
-		// A rollback we cannot honour is worse than none: propagate.
-		if err := writeFile(backupPath, []byte(existingUnit), 0644); err != nil {
-			return fmt.Errorf("snapshot existing unit to %s: %w", backupPath, err)
-		}
-	}
-
-	if err := writeFile(unitPath, []byte(renderedUnit), 0644); err != nil {
-		// Leave any backup in place for manual inspection/restore.
-		return fmt.Errorf("write unit file: %w", err)
-	}
-
-	reloadErr := daemonReload()
-	if reloadErr == nil {
-		if hadExisting {
-			_ = removeFile(backupPath)
-		}
-		return nil
-	}
-
-	// Fresh install: nothing to restore, leave the new unit and surface the error.
-	if !hadExisting {
-		return fmt.Errorf("daemon-reload: %w (no prior unit to restore)", reloadErr)
-	}
-	if restoreErr := writeFile(unitPath, []byte(existingUnit), 0644); restoreErr != nil {
-		return fmt.Errorf("daemon-reload: %w (rollback ALSO failed: %v; inspect %s and %s manually)",
-			reloadErr, restoreErr, unitPath, backupPath)
-	}
-	// Second reload so systemd's in-memory view matches the restored bytes.
-	if secondReloadErr := daemonReload(); secondReloadErr != nil {
-		return fmt.Errorf("daemon-reload: %w (unit rolled back to prior contents but second reload failed: %v; try `sudo systemctl daemon-reload` manually)",
-			reloadErr, secondReloadErr)
-	}
-	_ = removeFile(backupPath)
-	return fmt.Errorf("daemon-reload: %w (unit rolled back to prior contents; re-run `sudo naozhi install` after fixing the underlying issue)", reloadErr)
-}
-
 func installSystemd(binary, configPath string, dryRun, force bool) {
 	if !dryRun && os.Getuid() != 0 {
 		fatalf("systemd install requires root. Run: sudo naozhi install")
@@ -147,17 +102,11 @@ func installSystemd(binary, configPath string, dryRun, force bool) {
 	}
 
 	if plan.UnitChanged {
-		reloadErr := rewriteUnitWithRollback(
-			systemdUnitPath,
-			unit,
-			string(existingBytes),
-			existingErr,
-			os.WriteFile,
-			os.Remove,
-			func() error { return run("systemctl", "daemon-reload") },
-		)
-		if reloadErr != nil {
-			fatalf("%v\n\n%s", reloadErr, recoveryHint())
+		if err := os.WriteFile(systemdUnitPath, []byte(unit), 0644); err != nil {
+			fatalf("write unit file: %v\n\n%s", err, recoveryHint())
+		}
+		if err := run("systemctl", "daemon-reload"); err != nil {
+			fatalf("systemctl daemon-reload: %v\n\n%s", err, recoveryHint())
 		}
 	} else {
 		fmt.Println("unit file unchanged; skipping daemon-reload")
@@ -219,7 +168,7 @@ func recoveryHint() string {
 		"  1. Inspect journal:   sudo journalctl -u naozhi --since '5 min ago'",
 		"  2. Check unit file:   sudo cat " + systemdUnitPath,
 		"  3. Remove if stuck:   sudo naozhi uninstall",
-		"  4. Re-run install:    sudo naozhi install",
+		"  4. Re-run install:    sudo naozhi install -force",
 	}, "\n")
 }
 

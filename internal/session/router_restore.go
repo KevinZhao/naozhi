@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/costledger"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/tuningspec"
 )
@@ -199,9 +198,6 @@ func (h *HistoryIO) loadStartupHistory(s *ManagedSession, sem chan struct{}, jso
 		if s.hasInjectedHistory() {
 			return false
 		}
-		// Counted after the short-circuit so only the fallback branch
-		// (short-lived-shim race) increments.
-		metrics.ShimReconnectGraceBackfillTotal.Add(1)
 		slog.Info("shim-managed session missing history after reconnect grace, falling back to JSONL load",
 			"key", s.key)
 	}

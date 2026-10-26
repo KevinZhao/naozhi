@@ -23,28 +23,6 @@ const (
 	DefaultIdleCloseAfter = 10 * time.Minute
 )
 
-// Observer receives tracker-level lifecycle callbacks. Matches the shape of
-// internal/eventlog/persist.Observer so the session layer can forward both
-// into internal/metrics without translating.
-type Observer interface {
-	// OnReferenceBump fires once per .meta rewrite (coalesced, not per event).
-	// n is the number of references folded into this write.
-	OnReferenceBump(n int)
-	// OnReferenceClear fires once per .meta rewrite during session removal.
-	OnReferenceClear(n int)
-	// OnMetaWriteError fires when UpdateMetaFile failed; path is the .meta path.
-	OnMetaWriteError(path string, err error)
-	// OnDrop fires when the ingest channel is full and the event is discarded.
-	OnDrop(n int)
-}
-
-type noopObserver struct{}
-
-func (noopObserver) OnReferenceBump(int)            {}
-func (noopObserver) OnReferenceClear(int)           {}
-func (noopObserver) OnMetaWriteError(string, error) {}
-func (noopObserver) OnDrop(int)                     {}
-
 // WorkspaceResolver maps a session key-hash to its absolute workspace path
 // (session.Router owns the table). Return "" for an unknown session — the
 // tracker then drops the bump rather than walk an arbitrary filesystem.
@@ -64,9 +42,6 @@ type Options struct {
 
 	// Clock is injected for deterministic tests; nil uses time.Now.
 	Clock func() time.Time
-
-	// Observer receives metric callbacks. nil → noop.
-	Observer Observer
 }
 
 // Tracker is the exported type. See package godoc for lifecycle.
@@ -137,9 +112,6 @@ func NewTracker(opts Options) (*Tracker, error) {
 	if opts.Clock == nil {
 		opts.Clock = time.Now
 	}
-	if opts.Observer == nil {
-		opts.Observer = noopObserver{}
-	}
 	t := &Tracker{
 		opts:    opts,
 		in:      make(chan trackerJob, opts.ChannelBuffer),
@@ -171,7 +143,6 @@ func (t *Tracker) OnPersistedEntry(keyhash string, absPaths []string, timeMS int
 	case t.in <- job:
 	default:
 		t.droppedCnt.Add(1)
-		t.opts.Observer.OnDrop(1)
 		slog.Warn("attachment tracker: channel full; dropping bump",
 			"keyhash", keyhash, "paths", len(absPaths),
 			"channel_cap", cap(t.in))
@@ -456,7 +427,8 @@ func (t *Tracker) handleClear(job trackerJob) error {
 			)
 			if err != nil {
 				t.errorCnt.Add(1)
-				t.opts.Observer.OnMetaWriteError(metaPath, err)
+				slog.Warn("attachment tracker: meta write failed",
+					"path", metaPath, "err", err)
 				continue
 			}
 			if changed {
@@ -466,7 +438,6 @@ func (t *Tracker) handleClear(job trackerJob) error {
 	}
 	if cleared > 0 {
 		t.clearCnt.Add(int64(cleared))
-		t.opts.Observer.OnReferenceClear(cleared)
 	}
 	return nil
 }
@@ -508,7 +479,7 @@ func (t *Tracker) flushAll() {
 }
 
 // applyBump performs the single-attachment read-modify-write. Errors are
-// counted and surfaced to the Observer, never logged at ERROR (a file
+// counted and logged at WARN, never at ERROR (a file
 // deleted between persist and bump is legitimate churn).
 func (t *Tracker) applyBump(key coalesceKey, bump pendingBump) {
 	metaPath := attachment.MetaPathFor(key.absPath)
@@ -524,12 +495,12 @@ func (t *Tracker) applyBump(key coalesceKey, bump pendingBump) {
 	})
 	if err != nil {
 		t.errorCnt.Add(1)
-		t.opts.Observer.OnMetaWriteError(metaPath, err)
+		slog.Warn("attachment tracker: meta write failed",
+			"path", metaPath, "err", err)
 		return
 	}
 	if changed {
 		t.writtenCnt.Add(1)
-		t.opts.Observer.OnReferenceBump(1)
 	}
 }
 

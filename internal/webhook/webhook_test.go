@@ -128,7 +128,7 @@ func TestDeliver_NeverBlocksAndSlowEndpointIsIsolated(t *testing.T) {
 		t.Fatal("Deliver blocked on a full queue")
 	}
 	// The slow endpoint holds its first event forever, so its queue fills and
-	// the overflow is dropped; the fast endpoint keeps receiving meanwhile.
+	// Deliver must not block; the fast endpoint keeps receiving meanwhile.
 	// (Its own queue may also overflow briefly, so assert a floor, not equality.)
 	close(release)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -136,9 +136,6 @@ func TestDeliver_NeverBlocksAndSlowEndpointIsIsolated(t *testing.T) {
 	s.Close(ctx)
 	if n := fast.hits.Load(); n < int32(QueueDepth) {
 		t.Fatalf("fast endpoint received %d, want at least %d", n, QueueDepth)
-	}
-	if dropped := droppedTotal.Get("0"); dropped == nil || dropped.String() == "0" {
-		t.Fatal("slow endpoint's overflow should be counted as dropped")
 	}
 }
 

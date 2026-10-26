@@ -444,12 +444,6 @@ type ManagedSession struct {
 	// detected, metric'd and rebuilt to all-"manual", never left misaligned.
 	prevSessionOrigins []string
 
-	// prevHistoryGen increments on every mutation of prevSessionIDs /
-	// prevSessionOrigins (under historyMu) so equalStoreEntry compares an
-	// O(1) counter instead of slices.Equal (#2346). Atomic so readers holding
-	// only historyMu.RLock observe a torn-free value.
-	prevHistoryGen atomic.Uint64
-
 	// exempt marks this session as exempt from TTL cleanup, eviction, and activeCount.
 	// Used for planner sessions that should persist indefinitely.
 	exempt bool
@@ -467,21 +461,6 @@ type ManagedSession struct {
 	// rename shares it with the new struct (publishSession, RenameSession),
 	// so a fill tier 1 stores into a replaced struct still reaches the live one.
 	gapFill atomic.Pointer[gapFillCell]
-
-	// storeMarshalCache memoizes the last (storeEntry → JSON) result so
-	// saveStore skips re-marshalling unchanged sessions (#1523). Keyed on the
-	// storeEntry value via equalStoreEntry, so any persisted-field change
-	// invalidates it without per-site bookkeeping. Atomic because Shutdown's
-	// final saveStore can overlap an in-flight periodic save.
-	storeMarshalCache atomic.Pointer[storeEntryCache]
-}
-
-// storeEntryCache is the per-session memo behind storeMarshalCache: entry
-// produced data, a standalone JSON object (NOT array-wrapped) ready to be
-// concatenated into the sessions.json array.
-type storeEntryCache struct {
-	entry storeEntry
-	data  []byte
 }
 
 // historySourceBox wraps history.Source so atomic.Pointer (which requires a

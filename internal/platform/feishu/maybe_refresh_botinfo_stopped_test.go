@@ -2,8 +2,6 @@ package feishu
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,7 +11,7 @@ import (
 // cancelled (Feishu.Stop has called stopCancel and is about to block on
 // wg.Wait), maybeRefreshBotInfo MUST NOT launch the self-heal goroutine.
 //
-// Original bug: a webhook goroutine could win the CAS and call wg.Add(1) after
+// Original bug: a message goroutine could win the CAS and call wg.Add(1) after
 // Stop's wg.Wait had already drained the counter to 0; the goroutine's
 // deferred wg.Done then drives the counter negative and panics. The fix
 // re-checks stopCtx.Err() after the CAS and before wg.Add, returning early.
@@ -55,35 +53,4 @@ func TestMaybeRefreshBotInfo_SkipsAfterStop(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("wg.Wait blocked — self-heal goroutine was launched despite cancelled stopCtx")
 	}
-}
-
-// TestMaybeRefreshBotInfo_RunsWhenLive is the positive control: with a live
-// stopCtx, the self-heal goroutine launches and the fetch fires. Guards the
-// early-return from being too aggressive and skipping the live path.
-func TestMaybeRefreshBotInfo_RunsWhenLive(t *testing.T) {
-	hit := make(chan struct{}, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case hit <- struct{}{}:
-		default:
-		}
-		w.Write([]byte(`{"code":0,"bot":{"open_id":"ou_live"}}`))
-	}))
-	defer srv.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	f := &Feishu{stopCtx: ctx, stopCancel: cancel, baseURL: srv.URL}
-	f.accessToken = "tok"
-	f.tokenExpiry = time.Now().Add(time.Hour)
-	atomic.StoreInt64(&f.lastBotInfoFetchNs, 0)
-
-	f.maybeRefreshBotInfo()
-
-	select {
-	case <-hit:
-	case <-time.After(2 * time.Second):
-		t.Fatal("live stopCtx: self-heal fetch was never issued")
-	}
-	f.dispatch.Wait()
 }

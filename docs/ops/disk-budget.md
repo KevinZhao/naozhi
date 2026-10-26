@@ -40,8 +40,7 @@ daemon 关闭时 dry-run 也不会跑):
    「可回收体积」(所有 workspace 根的合计);逐根明细见每个根一条的
    `attachment-gc: sweep summary` Info 日志(`files` / `bytes` / 各分桶),
    逐文件明细见 `attachment GC: would remove`。重点看 `meta_no_refs` 桶(可能含
-   tracker 尚未 bump 的活跃引用)。`server.debug_mode` 打开时
-   `/api/debug/vars` 的 `naozhi_attachment_gc_would_reap_*` 计数器也可参考。
+   tracker 尚未 bump 的活跃引用)。
 2. 风险可接受后,把 `dry_run` 设 false 开启真删。之后卡片上同一组分桶显示为
    「已回收·…」/「已回收体积」,统计的是该次 tick 尝试删除的文件(删除失败的
    也计入,另有 Warn 日志);实际删掉的条数以「执行」为准。

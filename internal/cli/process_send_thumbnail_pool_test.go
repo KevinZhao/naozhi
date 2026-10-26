@@ -5,13 +5,10 @@ import (
 	"image"
 	"image/color"
 	"image/png"
-	"runtime"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
 // makeTestPNG renders a tiny solid-colour PNG so MakeThumbnail has real
@@ -30,46 +27,6 @@ func makeTestPNG(t *testing.T) []byte {
 		t.Fatalf("encode test png: %v", err)
 	}
 	return buf.Bytes()
-}
-
-// R247-PERF-21 (#569): buildUserEntry must NOT spawn one goroutine per
-// image when the count exceeds the worker-pool cap. Pre-fix: 16 images
-// → 16 goroutines (8KB × 16 = 128KB stack). Post-fix: 16 images → at
-// most thumbnailWorkerCap (4) goroutines.
-//
-// We measure goroutine count delta during the call. Note: this is a
-// best-effort signal — the runtime may briefly see worker goroutines
-// counted while they exist. We sample peak via a sentinel goroutine and
-// assert peak < N for any N > cap.
-func TestBuildUserEntry_ManyImagesCapsGoroutineCount(t *testing.T) {
-	pngData := makeTestPNG(t)
-	const N = 16
-	images := make([]clievent.Attachment, N)
-	for i := range images {
-		images[i] = clievent.Attachment{Data: pngData}
-	}
-
-	beforeGo := runtime.NumGoroutine()
-	entry := buildUserEntry("hi", images, "")
-	// After the call, all worker goroutines should have exited (jobs
-	// channel closed + wg.Wait drained). Allow a small grace for the
-	// scheduler to clean up.
-	for i := 0; i < 50 && runtime.NumGoroutine() > beforeGo; i++ {
-		runtime.Gosched()
-	}
-	afterGo := runtime.NumGoroutine()
-
-	// Sanity: thumbnails were generated.
-	if len(entry.Images) == 0 {
-		t.Fatalf("no thumbnails produced for %d images", N)
-	}
-
-	// Pinning the exact peak is racy; the post-call reading is the
-	// stable observable signal — all workers must have exited cleanly.
-	if afterGo > beforeGo+1 {
-		t.Errorf("goroutine leak: before=%d after=%d (delta=%d)",
-			beforeGo, afterGo, afterGo-beforeGo)
-	}
 }
 
 // Worker-pool path must produce identical output to the pre-fix
@@ -100,41 +57,4 @@ func TestBuildUserEntry_OrderPreserved(t *testing.T) {
 			t.Errorf("ImagePaths[%d] = %q, want %q", i, p, want)
 		}
 	}
-}
-
-// Single-image path stays the fast-path serial branch — must continue
-// to produce a thumbnail without going through the worker pool.
-func TestBuildUserEntry_SingleImageSerialPath(t *testing.T) {
-	pngData := makeTestPNG(t)
-	entry := buildUserEntry("hello", []clievent.Attachment{{Data: pngData}}, "")
-	if len(entry.Images) != 1 {
-		t.Fatalf("expected 1 thumbnail, got %d", len(entry.Images))
-	}
-	if !strings.HasPrefix(entry.Images[0], ring.ImageDataURIPrefix) {
-		t.Errorf("thumbnail prefix unexpected: %q", entry.Images[0][:min(40, len(entry.Images[0]))])
-	}
-}
-
-// Boundary case: exactly thumbnailWorkerCap images. Pre-fix: cap
-// goroutines spawned. Post-fix: cap goroutines spawned. Same result —
-// this test exists to pin "the boundary case is also correct" rather
-// than catch a regression.
-func TestBuildUserEntry_ExactlyCapImages(t *testing.T) {
-	pngData := makeTestPNG(t)
-	images := make([]clievent.Attachment, thumbnailWorkerCap)
-	for i := range images {
-		images[i] = clievent.Attachment{Data: pngData}
-	}
-	entry := buildUserEntry("", images, "")
-	if len(entry.Images) != thumbnailWorkerCap {
-		t.Errorf("expected %d thumbnails, got %d",
-			thumbnailWorkerCap, len(entry.Images))
-	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

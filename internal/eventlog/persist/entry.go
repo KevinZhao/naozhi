@@ -25,5 +25,5 @@ type Entry struct {
 //   - replayPhase=true marks a replay from historical storage
 //     (InjectHistory, shim reconnect); the sink discards it to avoid the
 //     RFC §3.3 self-amplification loop and reports the violation via
-//     slog.Error + Observer.OnReplayLeak + replayLeakCnt.
+//     slog.Error + replayLeakCnt.
 type PersistSink func(entries []Entry, replayPhase bool)
