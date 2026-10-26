@@ -166,7 +166,7 @@ type CronView = cronview.CronView
 // once per call so the in-loop predicate is O(1) per session.
 type historyFilter struct {
 	skipWorkspace string              // sys-sessions absolute path; "" disables
-	skipSessions  map[string]struct{} // cron known IDs; nil disables. READ-ONLY: shared cache snapshot (#1544).
+	skipSessions  map[string]struct{} // cron known IDs; nil disables. READ-ONLY.
 }
 
 func (f historyFilter) SkipWorkspace(ws string) bool {

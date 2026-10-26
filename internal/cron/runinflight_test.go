@@ -269,3 +269,43 @@ func TestRunInflight_FinalizeNilSafe(t *testing.T) {
 		t.Errorf("finalize must still reset view")
 	}
 }
+
+// TestRunInflight_PopulateClearsPhaseInt32 ensures populate's int32 reset
+// prevents prior-run setPhase values from leaking into the new run before
+// the new run's first setPhase fires.
+func TestRunInflight_PopulateClearsPhaseInt32(t *testing.T) {
+	t.Parallel()
+	inf := &runInflight{}
+	inf.running.Store(true)
+	inf.populate(runInflightView{RunID: "run1", Phase: PhaseQueued})
+	inf.setPhase(PhaseSending)
+	if v, _ := inf.snapshot(); v.Phase != PhaseSending {
+		t.Fatalf("precondition: setPhase(Sending) must take effect, got %q", v.Phase)
+	}
+
+	inf.populate(runInflightView{RunID: "run2", Phase: PhaseQueued})
+	if v, _ := inf.snapshot(); v.Phase != PhaseQueued {
+		t.Errorf("populate did not reset phase int32: snapshot Phase=%q, want %q (RunID=%q)",
+			v.Phase, PhaseQueued, v.RunID)
+	}
+}
+
+// TestPhaseStringRoundTrip pins the int32<->string mapping of the on-wire
+// phase values (the dashboard badge reads them); unknown strings and
+// non-canonical ints render as "".
+func TestPhaseStringRoundTrip(t *testing.T) {
+	t.Parallel()
+	for _, s := range []string{PhaseQueued, PhaseJittering, PhaseSpawning, PhaseSending} {
+		if got := phaseFromString(s).String(); got != s {
+			t.Errorf("round-trip %q: got %q", s, got)
+		}
+	}
+	if got := phaseFromString("garbage").String(); got != "" {
+		t.Errorf("phaseFromString(garbage).String() = %q, want \"\"", got)
+	}
+	for _, i := range []runPhase{0, 5} {
+		if got := i.String(); got != "" {
+			t.Errorf("runPhase(%d).String() = %q, want \"\"", i, got)
+		}
+	}
+}

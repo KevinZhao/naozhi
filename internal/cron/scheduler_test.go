@@ -687,6 +687,13 @@ func TestRedactPathsInCronError(t *testing.T) {
 			}
 		})
 	}
+
+	// Inputs past redactFastPathMaxLen take the slow path; a long path
+	// must still be redacted there.
+	long := "open /a/" + strings.Repeat("x", 800) + ": denied"
+	if got := redactPathsInCronError(long); !strings.HasPrefix(got, "open <path>: denied") {
+		t.Errorf("long path not redacted: got %q", got)
+	}
 }
 
 // TestRedactPathsInCronError_FastPathNoAlloc pins R250-PERF-12 / #1115:

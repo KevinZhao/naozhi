@@ -62,3 +62,43 @@ func TestSnapshotJobsForSaveLocked_Detached(t *testing.T) {
 		t.Fatalf("snapshot Notify = %v, want true (Notify must be deep-copied)", rt[0].Notify)
 	}
 }
+
+// TestSnapshotJobsForSaveLocked_MatchesMarshalLocked pins on-disk byte parity
+// between the off-lock snapshot+marshal path and the in-lock marshalLocked
+// path. cron_jobs.json shape must not drift regardless of which persist path
+// produced it.
+func TestSnapshotJobsForSaveLocked_MatchesMarshalLocked(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := NewScheduler(SchedulerConfig{
+		StorePath: filepath.Join(dir, "cron.json"),
+		MaxJobs:   10,
+	}, SchedulerDeps{})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+
+	notify := true
+	for _, j := range []*Job{
+		{Schedule: "@every 1h", Prompt: "zeta", Platform: "feishu", ChatID: "c1", ChatType: "direct", Paused: true},
+		{Schedule: "@every 2h", Prompt: "alpha", Platform: "feishu", ChatID: "c2", ChatType: "direct", Paused: true, Notify: &notify},
+		{Schedule: "@every 3h", Prompt: "mike", Platform: "feishu", ChatID: "c3", ChatType: "direct", Paused: true},
+	} {
+		if err := s.AddJob(j); err != nil {
+			t.Fatalf("AddJob: %v", err)
+		}
+	}
+
+	wantBytes, err := s.marshalForTest()
+	if err != nil {
+		t.Fatalf("marshalForTest: %v", err)
+	}
+	gotBytes, err := s.marshalJobsSnapshotForTest(s.snapshotForSaveForTest())
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	if string(gotBytes) != string(wantBytes) {
+		t.Fatalf("snapshot marshal diverged from in-lock marshal:\n got=%s\nwant=%s", gotBytes, wantBytes)
+	}
+}
