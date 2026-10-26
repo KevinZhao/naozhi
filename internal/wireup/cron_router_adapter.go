@@ -32,6 +32,10 @@ import (
 // compile error beats a panic in a customer's process. wireup must not carry
 // init() blocks at all: they make boot order implicit, which is what #2552 is
 // unwinding.
+//
+// The pins only cover existing members: appending a value (e.g. after
+// InterruptError) to one side still compiles, so add it to both enums and pin
+// it here in the same change.
 const (
 	// InterruptOutcome (5 values)
 	_ = uint(int(cron.InterruptSent) - int(session.InterruptSent))

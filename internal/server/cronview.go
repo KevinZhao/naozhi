@@ -15,7 +15,7 @@ type CronView = cronview.CronView
 
 // cronScheduler is the server-package consumer view of *cron.Scheduler: the
 // two interfaces the value is forwarded into. *cron.Scheduler satisfies it
-// implicitly (pinned by cronview_contract_test.go) (#1648).
+// implicitly; the build_server.go assignment checks it at compile time (#1648).
 type cronScheduler interface {
 	cronview.CronView
 	cronCommandScheduler
