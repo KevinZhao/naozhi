@@ -8,12 +8,12 @@ import (
 
 // TestRunDeadlineWatchdog_FastPathReleasesTimerSlot is the regression
 // test for R20260527122801-GO-001. Pre-fix, the watchdog used
-// time.After(watchdogInterruptTimeout()) which leaks a *Timer slot
+// time.After(<interrupt timeout>) which leaks a *Timer slot
 // until expiry on the success path; mirroring scheduler.go:1337's
 // NewTimer + defer Stop pattern releases timer state deterministically
 // when InterruptViaControl returns first.
 //
-// The test pumps a long watchdogInterruptTimeout (so the timer slot
+// The test passes a long interrupt timeout (so the timer slot
 // would persist visibly if it leaked) and verifies the abort channel
 // delivers the real InterruptSent outcome promptly, before the timeout
 // could possibly fire — proving the success branch wins and the
