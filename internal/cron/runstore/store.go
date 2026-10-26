@@ -371,7 +371,7 @@ func (s *Store) List(jobID string, limit int, before time.Time) []CronRunSummary
 		limit = 50
 	}
 	// Clamp to the configured retention cap, not the package default, so an
-	// operator-raised RunsKeepCount can be paged (#969).
+	// raised Options.KeepCount can be paged (#969).
 	if limit > s.keepCount {
 		limit = s.keepCount
 	}

@@ -39,16 +39,8 @@ type deadlineInterrupter interface {
 // write) blocks `<-abortCh` forever, finishRun never runs, and
 // inflight.running=true makes every later tick skip the job until restart.
 // The call itself is not aborted (no underlying ctx); it leaks until session
-// teardown, bounded per-run and drained on session.Reset. The effective value
-// is per-Scheduler (watchdogInterruptTimeoutNanos, #1904).
+// teardown, bounded per-run and drained on session.Reset.
 const watchdogInterruptTimeoutDefault = 3 * time.Second
-
-// watchdogInterruptTimeout reads this Scheduler's active interrupt-call
-// timeout. Production callers see watchdogInterruptTimeoutDefault unless a test
-// has overridden it on this instance.
-func (s *Scheduler) watchdogInterruptTimeout() time.Duration {
-	return time.Duration(s.watchdogInterruptTimeoutNanos.Load())
-}
 
 // runDeadlineWatchdog arranges for sess.InterruptViaControl to fire exactly
 // when ctx ends with DeadlineExceeded. It must run concurrently with sess.Send,
@@ -132,11 +124,11 @@ func fireBoundedInterrupt(sess deadlineInterrupter, timeout time.Duration) abort
 // Caller contract: sendCtx must be a deadline-bearing ctx (the watchdog fires
 // on ctx.Err()==DeadlineExceeded; a Background ctx silently never fires), and
 // sendCancel is called here exactly once after Send returns (the caller's
-// `defer sendCancel()` is a harmless no-op). Method for the per-instance timeout (#1904).
+// `defer sendCancel()` is a harmless no-op).
 func (s *Scheduler) sendWithWatchdog(sendCtx context.Context, sendCancel context.CancelFunc, sess Session, text string) (SendResult, abortResult, error) {
 	// Watchdog must fire BEFORE Send returns (see runDeadlineWatchdog),
 	// otherwise Process.State is already Ready and the interrupt is a no-op.
-	abortCh, stopWatchdog := runDeadlineWatchdog(sendCtx, sess, s.watchdogInterruptTimeout())
+	abortCh, stopWatchdog := runDeadlineWatchdog(sendCtx, sess, watchdogInterruptTimeoutDefault)
 
 	// Direct Send, not through turnSender — cron jobs notify via the IM
 	// deliverNotice path and the cron_run_ended WS frame.
@@ -155,7 +147,7 @@ func (s *Scheduler) sendWithWatchdog(sendCtx context.Context, sendCancel context
 		// synchronously so the CLI turn is still aborted and abort.fired
 		// reflects reality (#2021).
 		if errors.Is(sendCtx.Err(), context.DeadlineExceeded) {
-			return result, fireBoundedInterrupt(sess, s.watchdogInterruptTimeout()), err
+			return result, fireBoundedInterrupt(sess, watchdogInterruptTimeoutDefault), err
 		}
 		return result, abortResult{}, err
 	}

@@ -13,7 +13,7 @@ import (
 //
 // Tests that previously did:
 //
-//	s.SetOnRunEnded(func(ev RunEndedEvent) { got = ev })
+//	s.SetOnRunEnded(func(ev runtelemetry.RunEndedEvent) { got = ev })
 //
 // now do:
 //
@@ -21,10 +21,6 @@ import (
 //	s := NewScheduler(SchedulerConfig{Telemetry: rec, ...})
 //	... drive the run ...
 //	got := rec.endedAtCron(0) // single ended event captured
-//
-// recordingBroadcaster also exposes the converted cron-local view via
-// endedAtCron so tests keep asserting on RunEndedEvent shape (not the
-// runtelemetry shape).
 type recordingBroadcaster struct {
 	mu      sync.Mutex
 	started []runtelemetry.RunStartedEvent
@@ -64,24 +60,11 @@ func (r *recordingBroadcaster) startedCount() int {
 	return len(r.started)
 }
 
-// endedAtCron returns the i-th captured RunEnded translated back to the
-// cron-local RunEndedEvent shape. Panics if i is out of range so tests
-// fail loudly on capture-count mismatch instead of silently asserting a
-// zero value.
-func (r *recordingBroadcaster) endedAtCron(i int) RunEndedEvent {
+// endedAtCron returns the i-th captured RunEnded. Panics if i is out of
+// range so tests fail loudly on capture-count mismatch instead of silently
+// asserting a zero value.
+func (r *recordingBroadcaster) endedAtCron(i int) runtelemetry.RunEndedEvent {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	ev := r.ended[i]
-	return RunEndedEvent{
-		JobID:      ev.OwnerID,
-		RunID:      ev.RunID,
-		State:      ev.State,
-		StartedAt:  ev.StartedAt,
-		EndedAt:    ev.EndedAt,
-		DurationMS: ev.DurationMS,
-		SessionID:  ev.SessionID,
-		ErrorClass: ev.ErrorClass,
-		ErrorMsg:   ev.ErrorMsg,
-		Trigger:    ev.Trigger,
-	}
+	return r.ended[i]
 }
