@@ -10,7 +10,7 @@ RFC 是落地前的设计取舍与实测记录，**不是最终规范**——架
 | [cc-asset-browser.md](cc-asset-browser.md) | Draft v6 | Claude Code 资产只读浏览器 |
 | [cli-mcp-config.md](cli-mcp-config.md) | 已实装 | `cli.mcp_config` → `--mcp-config` |
 | [codex-backend.md](codex-backend.md)（+ `-validation` / `-phase2-feasibility`） | Draft v2，Phase 0 实测 | Codex CLI app-server backend |
-| [computer-use.md](computer-use.md) | Draft v1（方向已确认，未实施） | 计算机使用：桌面截图进 CC 上下文 + 以 MCP 操作这台 Mac（浏览器专用配置 + 域名白名单、桌面 AX 优先），决策 CU1–CU8 |
+| [computer-use.md](computer-use.md) | Draft v1（方向已确认，未实施） | 计算机使用：桌面截图进 CC 上下文 + 以 MCP 操作这台 Mac（浏览器专用配置 + 域名白名单、桌面 AX 优先），决策 CU1–CU9 |
 | [config-hot-reload.md](config-hot-reload.md) | Phase 1 已实现 | SIGHUP / API / CLI 配置热重载 |
 | [cost-ledger.md](cost-ledger.md) | Draft v2.1 | `internal/costledger` 统一 cost 归口 |
 | [cron-run-adoption.md](cron-run-adoption.md) | 已实装 | 升级不吞掉正在跑的 cron run |
@@ -24,7 +24,7 @@ RFC 是落地前的设计取舍与实测记录，**不是最终规范**——架
 | [node-pairing.md](node-pairing.md) | Draft v1 | `naozhi node add` / `naozhi join` |
 | [outbound-webhooks.md](outbound-webhooks.md) | Phase 1 已实现 | run 生命周期出站 webhook |
 | [passthrough-mode.md](passthrough-mode.md)（+ `-validation`） | v2.2 | 直通 CC CLI 原生 command queue |
-| [planner.md](planner.md) | Draft v6（未实施） | Planner 规划 agent，§18 决策 D1–D59 |
+| [planner.md](planner.md)（+ `planner-landscape`） | Draft v7（未实施） | Planner 规划 agent：全局唯一 Planner + 按需工作区幕僚、设计原则（确定性放网关 / 先信任后惊喜）、三种主动；§18 决策 D1–D67；`planner-landscape.md` 是两代 agent 产品调研与对照 |
 | [project-access-profile.md](project-access-profile.md) | Draft v1 | 项目级默认访问方式 |
 | [project-stable-session-key.md](project-stable-session-key.md) | 已实装 | 项目级稳定 session key |
 | [reverse-protocol.md](reverse-protocol.md) | 已实现 | reverse-connect wire format |
