@@ -60,19 +60,6 @@ func (r *Router) reconcileActiveByBackend(v sessView) int64 {
 	return total
 }
 
-// countExempt returns the total number of alive exempt sessions across
-// all namespaces (the global-cap relief valve in spawn). Per-namespace gating
-// goes through countExemptByKind.
-func countExempt(v sessView) int {
-	count := 0
-	for _, s := range v.All() {
-		if s.exempt && s.isAlive() {
-			count++
-		}
-	}
-	return count
-}
-
 // countExemptByKind returns the alive exempt-session count for a single
 // namespace ("cron" / "project" / "sys") so a noisy cron chat cannot push
 // planner / sys stubs out of the global pool. kind == "" returns 0 (an exempt

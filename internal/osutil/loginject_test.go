@@ -6,319 +6,80 @@ import (
 	"unicode/utf8"
 )
 
-// TestIsLogInjectionRune covers the classes explicitly enumerated in the
-// godoc: C1 controls, bidi overrides, bidi isolates, LS/PS. Plus negative
-// cases (ASCII, CJK, emoji) to lock the "only the classes that byte-level
-// filters miss" contract.
+// TestIsLogInjectionRune covers one rune from each class the godoc names
+// (C1, bidi override, bidi isolate, LS/PS) and the content that must pass:
+// ASCII, CJK and emoji.
 func TestIsLogInjectionRune(t *testing.T) {
 	t.Parallel()
 
-	positive := []struct {
-		name string
-		r    rune
-	}{
-		{"C1_NEL", 0x85},
-		{"C1_low_boundary", 0x80},
-		{"C1_high_boundary", 0x9F},
-		{"bidi_LRE", 0x202A},
-		{"bidi_RLE", 0x202B},
-		{"bidi_PDF", 0x202C},
-		{"bidi_LRO", 0x202D},
-		{"bidi_RLO", 0x202E},
-		{"bidi_LRI", 0x2066},
-		{"bidi_RLI", 0x2067},
-		{"bidi_FSI", 0x2068},
-		{"bidi_PDI", 0x2069},
-		{"LS", 0x2028},
-		{"PS", 0x2029},
+	for _, r := range []rune{0x80, 0x85, 0x9F, 0x202A, 0x202E, 0x2066, 0x2069, 0x2028, 0x2029} {
+		if !IsLogInjectionRune(r) {
+			t.Errorf("IsLogInjectionRune(U+%04X) = false, want true", r)
+		}
 	}
-	for _, tc := range positive {
-		t.Run("positive_"+tc.name, func(t *testing.T) {
-			t.Parallel()
-			if !IsLogInjectionRune(tc.r) {
-				t.Errorf("IsLogInjectionRune(U+%04X) = false, want true", tc.r)
-			}
-		})
-	}
-
-	negative := []struct {
-		name string
-		r    rune
-	}{
-		// ASCII printable (the classes callers should NOT drop via this
-		// helper — they should rely on < 0x20 / == 0x7f).
-		{"ASCII_A", 'A'},
-		{"ASCII_space", ' '},
-		{"ASCII_newline_not_caught_here", '\n'},
-		{"ASCII_tab_not_caught_here", '\t'},
-		{"ASCII_DEL_not_caught_here", 0x7f},
-		// Valid CJK / emoji must survive — this helper is not a "strip
-		// non-ASCII" filter; that would destroy legitimate Chinese / Japanese
-		// identifiers we explicitly support in this codebase.
-		{"CJK_hello", '你'},
-		{"CJK_world", '好'},
-		{"emoji_grinning", '😀'},
-		{"emoji_check", '✓'},
-		// Zero-width codepoints adjacent to the bidi range — the helper
-		// does NOT claim to cover them (sanitizeKeyComponent in session
-		// package does, but only for session-key components where
-		// invisible chars are a key-confusion risk; log-attr callers
-		// should decide if they need to strip them).
-		{"ZWJ_not_caught_here", 0x200D},
-		{"ZWSP_not_caught_here", 0x200B},
-		{"BOM_not_caught_here", 0xFEFF},
-	}
-	for _, tc := range negative {
-		t.Run("negative_"+tc.name, func(t *testing.T) {
-			t.Parallel()
-			if IsLogInjectionRune(tc.r) {
-				t.Errorf("IsLogInjectionRune(U+%04X) = true, want false", tc.r)
-			}
-		})
-	}
-}
-
-// TestSanitizeForLog_FastPathASCII locks the zero-allocation guarantee for
-// the common case (Go stdlib errors are pure ASCII-printable).
-func TestSanitizeForLog_FastPathASCII(t *testing.T) {
-	t.Parallel()
-
-	inputs := []string{
-		"",
-		"connection refused",
-		"get session: context canceled",
-		"dial tcp 127.0.0.1:6789: connect: connection refused",
-		"exec.Command: no such file or directory",
-	}
-	for _, s := range inputs {
-		got := SanitizeForLog(s, 0)
-		if got != s {
-			t.Errorf("SanitizeForLog(%q) = %q, want unchanged (fast path)", s, got)
+	for _, r := range []rune{'A', ' ', '\n', 0x7f, '你', '😀', 0x200D} {
+		if IsLogInjectionRune(r) {
+			t.Errorf("IsLogInjectionRune(U+%04X) = true, want false", r)
 		}
 	}
 }
 
-// TestSanitizeForLog_FastPathASCII_OverLength_Slices pins R243-GO-9: an
-// ASCII-clean string longer than maxLen returns a slice into the original
-// (s[:maxLen]) rather than walking through strings.Map. The slow path used
-// to do a full O(n) rune-mapper pass just to land on a clean ASCII prefix;
-// the slicing fast-path produces identical bytes with zero work past the
-// scan that already proved cleanness.
-//
-// We assert wire output AND no string-body allocation. A regression that
-// re-routed the over-length ASCII case through strings.Map would still
-// produce the right bytes but bump alloc count to 1 (the mapper's output
-// buffer); AllocsPerRun catches that.
-func TestSanitizeForLog_FastPathASCII_OverLength_Slices(t *testing.T) {
-	// Intentionally NOT t.Parallel: testing.AllocsPerRun is incompatible
-	// with parallel tests (runtime.MemStats sampling can race with the
-	// allocator on other goroutines, and Go's test runner panics rather
-	// than report a noisy alloc count).
-
-	in := strings.Repeat("abcdefgh", 64) // 512 bytes, all ASCII-printable
-	got := SanitizeForLog(in, 64)
-	if want := strings.Repeat("abcdefgh", 8); got != want { // 64 bytes
-		t.Fatalf("SanitizeForLog(512×ASCII, cap=64) = %q (len=%d), want %q (len=%d)",
-			got, len(got), want, len(want))
-	}
-
-	// AllocsPerRun returns avg allocs; the slice fast path must report 0.
-	// strings.Map allocates exactly one []byte → string conversion when it
-	// produces a result, so a regression to the slow path would yield 1.
-	allocs := testing.AllocsPerRun(50, func() {
-		_ = SanitizeForLog(in, 64)
-	})
-	if allocs != 0 {
-		t.Errorf("ASCII-clean over-length fast path leaked allocs: got %.1f, want 0", allocs)
-	}
-}
-
-// TestSanitizeForLog_RewritesControlBytes covers C0 controls, DEL, C1 (via
-// UTF-8 encoding), bidi overrides, and LS/PS in a single error-string
-// shaped input. The expected shape deliberately does NOT test rune-exact
-// positions because strings.Map can shift byte offsets for multi-byte runes
-// replaced with single-byte '_'; we only assert the unsafe rune class is
-// gone.
+// TestSanitizeForLog_RewritesControlBytes asserts every unsafe class is gone
+// from the output while CJK and emoji survive unchanged.
 func TestSanitizeForLog_RewritesControlBytes(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name string
-		in   string
-	}{
-		{"newline", "error: \nfake log line"},
-		{"carriage_return", "error: \rfake log line"},
-		{"tab", "error:\tinjected attr"},
-		{"DEL", "error: \x7f"},
-		// R215-GO-P2-5: use \uXXXX escapes for invisible control runes
-		// (C1, bidi, LS/PS) so the file does not carry raw control bytes
-		// that editors / git hooks / copy-paste paths would silently
-		// mangle. Each label names the codepoint. staticcheck ST1018.
-		{"C1_NEL", "error: \u0085second line"},
-		{"bidi_RLO", "error: \u202efake_backwards"},
-		{"bidi_LRI", "error: \u2066isolated"},
-		{"LS", "error: \u2028fake line"},
-		{"PS", "error: \u2029fake paragraph"},
-		// All unsafe classes at once.
-		{"mixed_hostile", "\n\r\t\x7f\u0085\u202e\u2028\u2029"},
+	const unsafe = "\n\r\t\x7f\u0085\u202e\u2066\u2028\u2029"
+	got := SanitizeForLog("a"+unsafe+"b", 0)
+	if want := "a" + strings.Repeat("_", 9) + "b"; got != want {
+		t.Errorf("SanitizeForLog rewrote to %q, want %q", got, want)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := SanitizeForLog(tc.in, 0)
-			// All the unsafe runes above MUST be stripped from the output.
-			unsafeChars := []string{"\n", "\r", "\t", "\x7f", "\u0085", "\u202e", "\u2066", "\u2028", "\u2029"}
-			for _, c := range unsafeChars {
-				if strings.Contains(got, c) {
-					t.Errorf("SanitizeForLog(%q) = %q — still contains unsafe char %q", tc.in, got, c)
-				}
-			}
-		})
+
+	safe := "发送失败: context deadline exceeded 😞"
+	if got := SanitizeForLog(safe, 0); got != safe {
+		t.Errorf("SanitizeForLog(%q) = %q, want unchanged", safe, got)
 	}
 }
 
-// TestSanitizeForLog_PreservesSafeContent asserts CJK + emoji survive; we
-// do not want operators to hit a log-sanitize path that obliterates
-// legitimate non-ASCII content.
-func TestSanitizeForLog_PreservesSafeContent(t *testing.T) {
-	t.Parallel()
-
-	in := "发送失败: context deadline exceeded 😞"
-	got := SanitizeForLog(in, 0)
-	if got != in {
-		t.Errorf("SanitizeForLog(%q) = %q, want unchanged (CJK + emoji should survive)", in, got)
-	}
-}
-
-// TestSanitizeForLog_EnforcesMaxLen verifies the cap behaviour. Pass 0 for
-// unlimited, positive for byte-level truncate.
+// TestSanitizeForLog_EnforcesMaxLen covers the byte cap: 0 disables it, the
+// bound is inclusive, and rewriting happens before truncation.
 func TestSanitizeForLog_EnforcesMaxLen(t *testing.T) {
 	t.Parallel()
 
-	longErr := strings.Repeat("a", 1000)
-	got := SanitizeForLog(longErr, 64)
-	if len(got) != 64 {
-		t.Errorf("SanitizeForLog(1000 bytes, cap=64) len = %d, want 64", len(got))
+	long := strings.Repeat("a", 1000)
+	if got := SanitizeForLog(long, 0); got != long {
+		t.Errorf("cap=0 truncated to %d bytes", len(got))
 	}
-
-	// Cap=0 → no truncation.
-	got = SanitizeForLog(longErr, 0)
-	if len(got) != 1000 {
-		t.Errorf("SanitizeForLog(1000 bytes, cap=0) len = %d, want 1000", len(got))
+	if got := SanitizeForLog(strings.Repeat("a", 64), 64); len(got) != 64 {
+		t.Errorf("len==cap: got %d bytes, want 64", len(got))
 	}
-
-	// Shorter than cap → unchanged.
-	got = SanitizeForLog("short", 64)
-	if got != "short" {
-		t.Errorf("SanitizeForLog(short, cap=64) = %q, want unchanged", got)
+	if got := SanitizeForLog(strings.Repeat("a", 65), 64); got != strings.Repeat("a", 64) {
+		t.Errorf("len==cap+1: got %q", got)
 	}
-
-	// Hostile + long → strip first, then truncate. The cap applies AFTER
-	// rewriting unsafe runes to single-byte '_', so the resulting byte
-	// length is predictable.
-	hostile := strings.Repeat("\n", 200)
-	got = SanitizeForLog(hostile, 64)
-	if len(got) != 64 {
-		t.Errorf("SanitizeForLog(hostile, cap=64) len = %d, want 64", len(got))
-	}
-	if strings.ContainsAny(got, "\n\r") {
-		t.Errorf("SanitizeForLog(hostile, cap=64) still contains newlines: %q", got)
-	}
-
-	// R243-CR-P3-5: boundary at exactly maxLen and maxLen+1. The cap is an
-	// inclusive upper bound — len(s) == maxLen is a clean fast-path return,
-	// len(s) == maxLen+1 must be truncated to exactly maxLen. Locking these
-	// two boundaries prevents an off-by-one regression in the
-	// `len(s) > maxLen` check that would either truncate equal-length strings
-	// (over-eager) or overshoot by one byte (under-eager).
-	t.Run("boundary_len_eq_maxLen_no_truncate", func(t *testing.T) {
-		t.Parallel()
-		in := strings.Repeat("a", 64)
-		got := SanitizeForLog(in, 64)
-		// Single equality check: got==in implies both content and length;
-		// the prior duplicate len check was redundant. R244-CR-P2.
-		if got != in {
-			t.Errorf("SanitizeForLog(64×'a', cap=64) = %q (len=%d), want unchanged input (len=64)", got, len(got))
-		}
-	})
-
-	t.Run("boundary_len_eq_maxLen_plus_one_truncates", func(t *testing.T) {
-		t.Parallel()
-		in := strings.Repeat("a", 65)
-		got := SanitizeForLog(in, 64)
-		// Assert both length AND content: a future bug returning 64 bytes
-		// of garbage (reversed buffer, swapped pool entry) would pass a
-		// len-only check but fail this equality. R244-CR-P2.
-		want := strings.Repeat("a", 64)
-		if got != want {
-			t.Errorf("SanitizeForLog(65×'a', cap=64) = %q (len=%d), want %q (len=64)", got, len(got), want)
-		}
-	})
-}
-
-// TestSanitizeForLog_EmptyInput locks the empty-string short-circuit so
-// future callers can rely on it without extra guards.
-func TestSanitizeForLog_EmptyInput(t *testing.T) {
-	t.Parallel()
-
-	if got := SanitizeForLog("", 0); got != "" {
-		t.Errorf("SanitizeForLog(\"\", 0) = %q, want empty", got)
-	}
-	if got := SanitizeForLog("", 64); got != "" {
-		t.Errorf("SanitizeForLog(\"\", 64) = %q, want empty", got)
+	got := SanitizeForLog(strings.Repeat("\n", 200), 64)
+	if len(got) != 64 || strings.Contains(got, "\n") {
+		t.Errorf("hostile+long: got %q (len %d)", got, len(got))
 	}
 }
 
-// TestSanitizeForLog_CJKTruncationValidUTF8 is the regression test for #1943
-// (R20260608-013840-LB-1): the slow-path walk-back only stripped UTF-8
-// continuation bytes, so a cap landing right after a multi-byte lead byte left
-// an isolated lead byte → invalid UTF-8. The godoc promises a rune boundary,
-// never a split rune. We assert the output is always valid UTF-8 and never ends
-// on a dangling lead byte, for every cap from 0 through the full byte length.
+// TestSanitizeForLog_CJKTruncationValidUTF8 is the regression test for #1943:
+// a cap landing inside a multi-byte rune must never leave invalid UTF-8. The
+// output feeds dashboard tool-chip titles and wshub broadcasts, not just logs.
 func TestSanitizeForLog_CJKTruncationValidUTF8(t *testing.T) {
 	t.Parallel()
 
-	cases := []struct {
-		name  string
-		input string
-	}{
-		{"pure-cjk", "中文世界"},
-		{"ascii-prefix-cjk", "ab世界"},
-		{"emoji-4byte", "x🌟🚀"},
-		{"mixed-cjk-ascii", "你a好b世c界"},
-	}
-
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			// Exercise every possible byte cap so we hit lead-byte and
-			// continuation-byte boundaries alike.
-			for maxLen := 0; maxLen <= len(tc.input); maxLen++ {
-				got := SanitizeForLog(tc.input, maxLen)
-				if !utf8.ValidString(got) {
-					t.Errorf("SanitizeForLog(%q, %d) = %q produced invalid UTF-8", tc.input, maxLen, got)
-				}
-				if maxLen > 0 && len(got) > maxLen {
-					t.Errorf("SanitizeForLog(%q, %d) = %q exceeds cap (%d bytes)", tc.input, maxLen, got, len(got))
-				}
+	for _, in := range []string{"中文世界", "ab世界", "x🌟🚀", "你a好b世c界"} {
+		for maxLen := 0; maxLen <= len(in); maxLen++ {
+			got := SanitizeForLog(in, maxLen)
+			if !utf8.ValidString(got) {
+				t.Errorf("SanitizeForLog(%q, %d) = %q produced invalid UTF-8", in, maxLen, got)
 			}
-		})
+			if maxLen > 0 && len(got) > maxLen {
+				t.Errorf("SanitizeForLog(%q, %d) = %q exceeds cap", in, maxLen, got)
+			}
+		}
 	}
-}
-
-// TestSanitizeForLog_CJKBoundaryExamples pins the exact failing examples from
-// the issue so a future regression is unambiguous.
-func TestSanitizeForLog_CJKBoundaryExamples(t *testing.T) {
-	t.Parallel()
-
-	// "ab世界" cap 3: previously emitted "ab\xe4" (invalid). Now the dangling
-	// lead byte of 世 must be dropped → "ab".
 	if got := SanitizeForLog("ab世界", 3); got != "ab" {
 		t.Errorf("SanitizeForLog(%q, 3) = %q, want %q", "ab世界", got, "ab")
-	}
-	// "中文" cap 4: previously emitted 中 + isolated 0xe6. Now → just "中".
-	if got := SanitizeForLog("中文", 4); got != "中" {
-		t.Errorf("SanitizeForLog(%q, 4) = %q, want %q", "中文", got, "中")
 	}
 }

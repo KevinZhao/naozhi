@@ -5,6 +5,13 @@ import (
 	"testing"
 )
 
+// redactPaths runs RedactAbsolutePathsInto into a fresh Builder.
+func redactPaths(s string) string {
+	var b strings.Builder
+	RedactAbsolutePathsInto(&b, s)
+	return b.String()
+}
+
 func TestRedactAbsolutePaths(t *testing.T) {
 	cases := []struct {
 		name string
@@ -24,8 +31,8 @@ func TestRedactAbsolutePaths(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := RedactAbsolutePaths(tc.in); got != tc.want {
-				t.Errorf("RedactAbsolutePaths(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
+			if got := redactPaths(tc.in); got != tc.want {
+				t.Errorf("RedactAbsolutePathsInto(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
 			}
 		})
 	}

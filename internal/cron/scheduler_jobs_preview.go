@@ -1,6 +1,5 @@
-// scheduler_jobs_preview.go: schedule-preview / timezone helpers
-// (previewLocation, PreviewScheduleN, Location). These do
-// ZERO locking — they only read Scheduler.location and parse cron expressions.
+// scheduler_jobs_preview.go: timezone helpers (previewLocation, Location).
+// These do ZERO locking — they only read Scheduler.location.
 
 package cron
 
@@ -23,32 +22,10 @@ func (s *Scheduler) previewLocation() *time.Location {
 	return s.location
 }
 
-// PreviewScheduleN returns the next n run times for a schedule expression, in
-// the scheduler's configured timezone, for the dashboard's "接下来会在这些
-// 时间运行" preview. Parse failure returns a validation error; n is clamped to
-// a sane range by the caller. Safe on a nil *Scheduler (UTC).
-func (s *Scheduler) PreviewScheduleN(schedule string, n int) ([]time.Time, error) {
-	sched, err := cronParser.Parse(schedule)
-	if err != nil {
-		return nil, err
-	}
-	if n <= 0 {
-		n = 1
-	}
-	out := make([]time.Time, 0, n)
-	t := time.Now().In(s.previewLocation())
-	for i := 0; i < n; i++ {
-		t = sched.Next(t)
-		out = append(out, t)
-	}
-	return out, nil
-}
-
 // Location returns the timezone the scheduler uses to evaluate cron
-// expressions, so the dashboard can surface it alongside preview/next-run
+// expressions, so the dashboard can surface it alongside next-run
 // timestamps. Delegates to previewLocation so the nil→UTC / unset→Local
-// policy has a single source of truth and preview and Location never diverge
-// (#835).
+// policy has a single source of truth (#835).
 func (s *Scheduler) Location() *time.Location {
 	return s.previewLocation()
 }

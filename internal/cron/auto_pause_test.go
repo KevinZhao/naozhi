@@ -4,14 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
@@ -127,40 +125,35 @@ func persistedJob(t *testing.T, s *Scheduler, id string) *Job {
 func TestNextFailureStreak(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		state  RunState
-		class  ErrorClass
-		cause  TurnCause
-		in     int
-		want   int
-		orphan bool
+		state RunState
+		class ErrorClass
+		cause TurnCause
+		in    int
+		want  int
 	}{
-		{RunStateFailed, ErrClassSendError, "", 0, 1, false},
-		{RunStateFailed, ErrClassSessionError, "", 2, 3, false},
-		{RunStateTimedOut, ErrClassDeadlineExceeded, "", 3, 4, false},
-		{RunStateTimedOut, ErrClassSandboxTransport, "", 3, 4, false},
-		// A live lost sandbox stream counts; only a restart orphan does not.
-		{RunStateFailed, ErrClassSandboxTransport, "", 3, 4, false},
-		{RunStateFailed, ErrClassSandboxTransport, "", 3, 3, true},
-		{RunStateFailed, ErrClassTurnFailed, TurnCauseBackendOverloaded, 3, 3, false},
-		{RunStateFailed, ErrClassTurnFailed, TurnCauseBackendRateLimited, 3, 3, false},
-		{RunStateFailed, ErrClassTurnFailed, TurnCauseBackendUnreachable, 3, 3, false},
-		{RunStateFailed, ErrClassTurnFailed, TurnCauseQuota, 3, 4, false},
-		{RunStateFailed, ErrClassTurnFailed, TurnCauseBackendAuth, 3, 4, false},
-		{RunStateFailed, ErrClassTurnFailed, TurnCauseCLIConfig, 3, 4, false},
-		{RunStateFailed, ErrClassTurnFailed, TurnCauseCLIMissingRuntime, 3, 4, false},
-		{RunStateFailed, ErrClassTurnFailed, TurnCauseMaxTurns, 3, 4, false},
-		{RunStateFailed, ErrClassTurnFailed, TurnCauseContextTooLong, 3, 4, false},
-		{RunStateFailed, ErrClassTurnFailed, TurnCauseUnknown, 3, 4, false},
+		{RunStateFailed, ErrClassSendError, "", 0, 1},
+		{RunStateFailed, ErrClassSessionError, "", 2, 3},
+		{RunStateTimedOut, ErrClassDeadlineExceeded, "", 3, 4},
+		{RunStateFailed, ErrClassTurnFailed, TurnCauseBackendOverloaded, 3, 3},
+		{RunStateFailed, ErrClassTurnFailed, TurnCauseBackendRateLimited, 3, 3},
+		{RunStateFailed, ErrClassTurnFailed, TurnCauseBackendUnreachable, 3, 3},
+		{RunStateFailed, ErrClassTurnFailed, TurnCauseQuota, 3, 4},
+		{RunStateFailed, ErrClassTurnFailed, TurnCauseBackendAuth, 3, 4},
+		{RunStateFailed, ErrClassTurnFailed, TurnCauseCLIConfig, 3, 4},
+		{RunStateFailed, ErrClassTurnFailed, TurnCauseCLIMissingRuntime, 3, 4},
+		{RunStateFailed, ErrClassTurnFailed, TurnCauseMaxTurns, 3, 4},
+		{RunStateFailed, ErrClassTurnFailed, TurnCauseContextTooLong, 3, 4},
+		{RunStateFailed, ErrClassTurnFailed, TurnCauseUnknown, 3, 4},
 		// A transient cause only exempts a failed turn, not another class.
-		{RunStateFailed, ErrClassSendError, TurnCauseBackendOverloaded, 3, 4, false},
-		{RunStateSucceeded, ErrClassNone, "", 4, 0, false},
-		{RunStateSkipped, ErrClassSessionCapacity, "", 4, 4, false},
-		{RunStateCanceled, ErrClassInterrupted, "", 4, 4, false},
+		{RunStateFailed, ErrClassSendError, TurnCauseBackendOverloaded, 3, 4},
+		{RunStateSucceeded, ErrClassNone, "", 4, 0},
+		{RunStateSkipped, ErrClassSessionCapacity, "", 4, 4},
+		{RunStateCanceled, ErrClassInterrupted, "", 4, 4},
 	}
 	for _, tc := range cases {
-		out := runOutcome{state: tc.state, errClass: tc.class, turnCause: tc.cause, restartOrphan: tc.orphan}
+		out := runOutcome{state: tc.state, errClass: tc.class, turnCause: tc.cause}
 		if got := nextFailureStreak(tc.in, out.streakEffect()); got != tc.want {
-			t.Errorf("nextFailureStreak(%d, %q/%q/%q orphan=%v) = %d, want %d", tc.in, tc.state, tc.class, tc.cause, tc.orphan, got, tc.want)
+			t.Errorf("nextFailureStreak(%d, %q/%q/%q) = %d, want %d", tc.in, tc.state, tc.class, tc.cause, got, tc.want)
 		}
 	}
 }
@@ -634,8 +627,8 @@ func TestAutoPause_ManualPauseClearsStaleReason(t *testing.T) {
 }
 
 // TestAutoPause_OtherNoticePathsCarrySuffix covers the terminal paths the
-// executeOpt-driven tests do not reach: the fresh-mode work_dir preflight,
-// the sandbox finish and the panic recovery.
+// executeOpt-driven tests do not reach: the fresh-mode work_dir preflight
+// and the panic recovery.
 func TestAutoPause_OtherNoticePathsCarrySuffix(t *testing.T) {
 	t.Parallel()
 	suffix := func(id string) string {
@@ -652,17 +645,6 @@ func TestAutoPause_OtherNoticePathsCarrySuffix(t *testing.T) {
 			t.Fatal("unreachable work_dir must fail the preflight")
 		}
 		want := "[Cron 日报] 工作目录不可达，本次执行已跳过 · run 9f8e7d6c" + suffix(id)
-		if got := ns.noticesAfter(s); len(got) != 1 || got[0] != want {
-			t.Errorf("notices = %q, want [%q]", got, want)
-		}
-	})
-	t.Run("sandbox", func(t *testing.T) {
-		t.Parallel()
-		s, _, ns, id := newAutoPauseScheduler(t, 1, "feishu")
-		rc := withNotify(newGetSessionArgs(t, s, &Job{ID: id}), "日报").runCtx
-		rc.snap.platName, rc.snap.chatID = rc.notifyTo.Platform, rc.notifyTo.ChatID
-		s.finishSandboxRun(sandboxExecArgs{runCtx: rc}, RunStateFailed, ErrClassSandboxFailed, "", "boom", nil)
-		want := "[Cron 日报] 云沙箱任务失败 · run 9f8e7d6c" + suffix(id)
 		if got := ns.noticesAfter(s); len(got) != 1 || got[0] != want {
 			t.Errorf("notices = %q, want [%q]", got, want)
 		}
@@ -723,121 +705,5 @@ func TestAutoPause_BelowThresholdSkipsEntryMu(t *testing.T) {
 	}
 	if got := s.jobForTest(t, id).ConsecutiveFailures; got != 1 {
 		t.Errorf("streak = %d, want 1", got)
-	}
-}
-
-// pausingSandboxScheduler is a sandbox scheduler whose dashboard job pauses
-// on its first failure and notifies a recording sender.
-func pausingSandboxScheduler(t *testing.T, runner SandboxRunner) (*Scheduler, *recordingBroadcaster, *recordingNotifySender, *Job) {
-	t.Helper()
-	storePath := filepath.Join(t.TempDir(), "cron_jobs.json")
-	s, rec := sandboxTestScheduler(t, runner, storePath)
-	s.autoPauseAfter = 1
-	ns := &recordingNotifySender{}
-	s.configMapsPtr.Store(&cronConfigMaps{notifySender: ns})
-	j := sideEffectsJob(t, s)
-	s.editJobForTest(t, j.ID, func(j *Job) { j.NotifyPlatform, j.NotifyChatID = "feishu", "chat-1" })
-	return s, rec, ns, j
-}
-
-// TestAutoPause_SandboxClosesWithoutNoticeAnnouncePause: a panicking replay
-// sends no per-run notice; the close that pauses the job still announces it.
-func TestAutoPause_SandboxClosesWithoutNoticeAnnouncePause(t *testing.T) {
-	t.Parallel()
-	const suffix = "；已连续失败 1 次，任务已自动暂停，修复后在控制台恢复"
-	s, rec, ns, j := pausingSandboxScheduler(t, &panicReplayRunner{})
-	s.sandboxState().WriteSnapshot(j.ID, "feedfacefeedface", "replay this prompt", "haiku", "img-v1", nil, slog.Default())
-	if _, err := s.ReplaySandboxRun(j.ID, "feedfacefeedface"); err != nil {
-		t.Fatalf("ReplaySandboxRun: %v", err)
-	}
-	waitEnded(t, rec)
-	got := ns.noticesAfter(s)
-	if len(got) != 1 || !strings.HasPrefix(got[0], "[Cron push a PR] 执行失败 · run ") || !strings.HasSuffix(got[0], suffix) {
-		t.Errorf("notices = %q, want one pausing panic notice", got)
-	}
-}
-
-// sandboxStreakScheduler is a pausingSandboxScheduler with threshold 2 whose
-// job's streak already sits at seed.
-func sandboxStreakScheduler(t *testing.T, seed int) (*Scheduler, *recordingNotifySender, *Job) {
-	t.Helper()
-	s, _, ns, j := pausingSandboxScheduler(t, &fakeSandboxRunner{})
-	s.autoPauseAfter = 2
-	s.editJobForTest(t, j.ID, func(j *Job) { j.ConsecutiveFailures = seed })
-	return s, ns, j
-}
-
-// TestAutoPause_SandboxOrphanLeavesStreak: a run the restart reconciler closes
-// as an orphan is a failed sandbox_transport run that neither extends nor
-// resets the streak, even one already at the threshold, and sends no notice.
-func TestAutoPause_SandboxOrphanLeavesStreak(t *testing.T) {
-	t.Parallel()
-	s, ns, j := sandboxStreakScheduler(t, 2)
-	writePendingFixture(t, s.storePath, sandboxstore.Pending{
-		JobID: j.ID, RunID: "abcabcabc0000110",
-		RuntimeSessionID: "run-abcabcabc0000110-1234567890123456789",
-		StartedAtMS:      time.Now().Add(-2 * time.Minute).UnixMilli(),
-	})
-	s.reconcileSandboxPending()
-	got := s.jobForTest(t, j.ID)
-	if got.Paused || got.ConsecutiveFailures != 2 {
-		t.Errorf("paused=%v streak=%d, want active with streak 2", got.Paused, got.ConsecutiveFailures)
-	}
-	if got.LastErrorClass != ErrClassSandboxTransport || got.RunCounters.Failed != 1 {
-		t.Errorf("class=%q failed=%d, want one failed sandbox_transport run", got.LastErrorClass, got.RunCounters.Failed)
-	}
-	if n := ns.noticesAfter(s); len(n) != 0 {
-		t.Errorf("notices = %q, want none", n)
-	}
-}
-
-// TestAutoPause_SandboxLiveTransportCounts: a live run whose sandbox stream
-// was lost extends the streak like any other failure, so the run that reaches
-// the threshold pauses the job and its one notice announces the pause.
-func TestAutoPause_SandboxLiveTransportCounts(t *testing.T) {
-	t.Parallel()
-	s, ns, j := sandboxStreakScheduler(t, 1)
-	rc := withNotify(newGetSessionArgs(t, s, j), "日报").runCtx
-	s.finishSandboxRun(sandboxExecArgs{runCtx: rc}, RunStateFailed, ErrClassSandboxTransport, "", "stream lost", nil)
-	got := s.jobForTest(t, j.ID)
-	if !got.Paused || got.PausedReason != PausedReasonAutoFailures || got.ConsecutiveFailures != 2 {
-		t.Errorf("paused=%v reason=%q streak=%d, want auto-paused at streak 2", got.Paused, got.PausedReason, got.ConsecutiveFailures)
-	}
-	want := "[Cron 日报] 云沙箱连接中断，任务状态未知，请检查执行历史 · run 9f8e7d6c" +
-		"；已连续失败 2 次，任务已自动暂停，修复后在控制台恢复"
-	if n := ns.noticesAfter(s); len(n) != 1 || n[0] != want {
-		t.Errorf("notices = %q, want [%q]", n, want)
-	}
-}
-
-// TestAutoPause_SandboxTransportBoundsSideEffectRepeats: a side-effecting job
-// whose microVM loses the stream on every run is paused by the run that
-// reaches the threshold, leaving one attention record per run and no more.
-func TestAutoPause_SandboxTransportBoundsSideEffectRepeats(t *testing.T) {
-	t.Parallel()
-	const threshold = 3
-	runner := &fakeSandboxRunner{outcome: SandboxOutcome{State: SandboxStateFailedTransport, ErrMsg: "stream reset"}}
-	s, rec := sandboxTestScheduler(t, runner, filepath.Join(t.TempDir(), "cron_jobs.json"))
-	s.autoPauseAfter = threshold
-	j := sideEffectsJob(t, s)
-	for i := 1; i <= threshold; i++ {
-		s.executeOpt(j.ID, false)
-		if n := rec.endedCount(); n != i {
-			t.Fatalf("run %d: ended frames = %d, want %d", i, n, i)
-		}
-		if got := s.jobForTest(t, j.ID); got.Paused != (i == threshold) || got.ConsecutiveFailures != i {
-			t.Fatalf("after run %d: paused=%v streak=%d, want paused=%v streak=%d", i, got.Paused, got.ConsecutiveFailures, i == threshold, i)
-		}
-	}
-	if got := s.jobForTest(t, j.ID).PausedReason; got != PausedReasonAutoFailures {
-		t.Errorf("PausedReason = %q, want %q", got, PausedReasonAutoFailures)
-	}
-	// The next tick finds the job paused and never reaches the microVM.
-	s.executeOpt(j.ID, false)
-	runner.mu.Lock()
-	invoked := len(runner.gotJobs)
-	runner.mu.Unlock()
-	if n := s.sandboxState().AttentionCount(); invoked != threshold || n != threshold {
-		t.Errorf("sandbox invocations = %d, attention records = %d, want %d each", invoked, n, threshold)
 	}
 }

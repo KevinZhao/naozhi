@@ -48,7 +48,7 @@ type keyNamespace struct {
 var keyNamespaces = []keyNamespace{
 	{prefix: CronKeyPrefix, exempt: true, kind: "cron"},
 	{prefix: ProjectKeyPrefix, exempt: true, kind: "project"},
-	{prefix: ScratchKeyPrefix, exempt: false, kind: ""},
+	{prefix: sessionkey.ScratchKeyPrefix, exempt: false, kind: ""},
 	{prefix: SysKeyPrefix, exempt: true, kind: "sys"},
 }
 
@@ -63,7 +63,7 @@ var reservedKeyPrefixes = func() []string {
 }()
 
 // IsReservedNamespace reports whether the given key belongs to any reserved
-// namespace. Prefer IsCronKey / project.IsPlannerKey / IsScratchKey when the
+// namespace. Prefer sessionkey.IsCronKey / IsPlannerKey / IsScratchKey when the
 // specific namespace matters.
 func IsReservedNamespace(key string) bool {
 	for _, prefix := range reservedKeyPrefixes {
@@ -73,21 +73,6 @@ func IsReservedNamespace(key string) bool {
 	}
 	return false
 }
-
-// IsCronKey reports whether the key belongs to the cron namespace.
-//
-// Deprecated: use sessionkey.IsCronKey.
-func IsCronKey(key string) bool { return sessionkey.IsCronKey(key) }
-
-// CronKey synthesises the session key for a cron job.
-//
-// Deprecated: use sessionkey.CronKey.
-func CronKey(id string) string { return sessionkey.CronKey(id) }
-
-// IsSysKey reports whether the key belongs to the system-daemon namespace.
-//
-// Deprecated: use sessionkey.IsSysKey.
-func IsSysKey(key string) bool { return sessionkey.IsSysKey(key) }
 
 // plannerKeyFor builds the planner key shape. Unexported: external callers use
 // internal/project's API; KeyResolver needs the constructor without importing

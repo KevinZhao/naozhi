@@ -7,6 +7,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/tuningspec"
 )
 
@@ -19,7 +20,7 @@ func (r *Router) restoreStore(tx sessTx, restored map[string]*storeEntry, marks 
 		// sessions.json; resurrecting it would let an attacker pre-seed a
 		// ManagedSession with chosen label_origin etc. Daemons re-register
 		// stubs at startup, so dropping the persisted copy is safe.
-		if IsSysKey(key) {
+		if sessionkey.IsSysKey(key) {
 			slog.Warn("session store: dropping unexpected sys: entry",
 				"key", key,
 				"hint", "sys entries should never persist; possible sessions.json tampering")

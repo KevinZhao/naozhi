@@ -3,7 +3,6 @@ package runstore
 import (
 	"time"
 
-	"github.com/naozhi/naozhi/internal/costledger"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
@@ -40,19 +39,8 @@ type CronRun struct {
 	ErrorClass  runtelemetry.ErrorClass `json:"error_class,omitempty"`
 	ErrorMsg    string                  `json:"error_msg,omitempty"`
 
-	// ReplayOf links a replay run to the original it re-executed. Empty for
-	// original runs; also carried on CronRunSummary for the list-view badge.
-	ReplayOf string `json:"replay_of,omitempty"`
-
-	// SandboxMeta is the cloud-execution receipt for placement=sandbox runs.
-	// Pointer + omitempty so local runs persist NO sandbox_meta key; summary()
-	// drops it to keep list payloads small.
-	SandboxMeta *SandboxRunMeta `json:"sandbox_meta,omitempty"`
-
-	// CostUSD is the LOCAL run's spend increment: what was booked while the
-	// run's Send was live (cost window, docs/rfc/cost-ledger.md §5.0); sandbox
-	// runs carry cost in SandboxMeta and leave this 0. summary() prefers
-	// SandboxMeta.CostUSD.
+	// CostUSD is the run's spend increment: what was booked while the run's
+	// Send was live (cost window, docs/rfc/cost-ledger.md §5.0).
 	CostUSD float64 `json:"cost_usd,omitempty"`
 }
 
@@ -70,12 +58,9 @@ type CronRunSummary struct {
 	DurationMS int64                    `json:"duration_ms,omitempty"`
 	SessionID  string                   `json:"session_id,omitempty"`
 	ErrorClass runtelemetry.ErrorClass  `json:"error_class,omitempty"`
-	// ReplayOf surfaces the replay chain in list/recent_runs views too — the
-	// dashboard draws a "replay of …" badge directly off the summary.
-	ReplayOf string `json:"replay_of,omitempty"`
 	// CostUSD is carried in the slim summary so the per-run cost and per-job
 	// monthly aggregate (front-end sum over recent_runs) need no detail fetch.
-	// 0/omitted for local runs and sandbox runs that produced no cost.
+	// 0/omitted for runs that produced no cost.
 	CostUSD float64 `json:"cost_usd,omitempty"`
 }
 
@@ -93,42 +78,8 @@ func (r *CronRun) summary() CronRunSummary {
 		DurationMS: r.DurationMS,
 		SessionID:  r.SessionID,
 		ErrorClass: r.ErrorClass,
-		ReplayOf:   r.ReplayOf,
-	}
-	if r.SandboxMeta != nil {
-		s.CostUSD = r.SandboxMeta.CostUSD
-	} else {
-		// Local runs have no receipt; fall back to the captured cost so monthly
-		// aggregates count them (#2280).
-		s.CostUSD = r.CostUSD
+		// Monthly aggregates sum this off recent_runs (#2280).
+		CostUSD: r.CostUSD,
 	}
 	return s
-}
-
-// SandboxRunMeta is the cloud-execution receipt for one sandbox run. It is
-// declared here, not imported, so cron stays independent of the AWS SDK; the wireup
-// adapter maps agentcore.RunResult → this struct. Every field omitempty so a
-// partial receipt persists only what it knows. NO secrets, NO AWS-internal IDs.
-type SandboxRunMeta struct {
-	RuntimeARN   string `json:"runtime_arn,omitempty"`
-	ImageVersion string `json:"image_version,omitempty"`
-	// ExitStatus has NO omitempty: exit 0 is the meaningful "success" value and a
-	// missing key would be indistinguishable from "exit unknown". The enclosing
-	// *SandboxRunMeta is itself omitempty, so local runs carry no exit_status.
-	ExitStatus      int     `json:"exit_status"`
-	CostUSD         float64 `json:"cost_usd,omitempty"`
-	DurationMS      int64   `json:"duration_ms,omitempty"`
-	MemoryPeakBytes int64   `json:"memory_peak_bytes,omitempty"`
-	// Models / Basis are the CLI result's per-model drill-down and worst
-	// price basis, carried into the ledger receipt.
-	Models []costledger.ModelDelta `json:"models,omitempty"`
-	Basis  costledger.Basis        `json:"basis,omitempty"`
-}
-
-// IsZero reports whether the receipt carries no information (every field
-// at its zero value) — used to decide whether to attach it to the run
-// record at all, so non-sandbox runs never grow a `sandbox_meta` key.
-func (m SandboxRunMeta) IsZero() bool {
-	return m.RuntimeARN == "" && m.ImageVersion == "" && m.ExitStatus == 0 && m.CostUSD == 0 &&
-		m.DurationMS == 0 && m.MemoryPeakBytes == 0 && len(m.Models) == 0 && m.Basis == ""
 }

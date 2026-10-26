@@ -1,5 +1,7 @@
 package session
 
+import "github.com/naozhi/naozhi/internal/sessionkey"
+
 // SessionRole tags the semantic role of a ManagedSession (#728): callers that
 // want a structural test ("is this a cron stub?") switch on Role() instead of
 // re-deriving the `IsCronKey || ...` prefix expression locally.
@@ -55,11 +57,11 @@ func (r SessionRole) String() string {
 // is added, update both sides AND the keyNamespaces table.
 func classifyKey(key string) SessionRole {
 	switch {
-	case IsCronKey(key):
+	case sessionkey.IsCronKey(key):
 		return RoleCron
-	case IsScratchKey(key):
+	case sessionkey.IsScratchKey(key):
 		return RoleScratch
-	case IsSysKey(key):
+	case sessionkey.IsSysKey(key):
 		return RoleSys
 	case isPlannerKey(key):
 		return RoleProject

@@ -18,6 +18,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // SetUserLabel is the human-driven label setter (dashboard rename, IM /label,
@@ -267,7 +268,7 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 // 查 JSONL 要用 chain（cron 即 cron.Job.LastSessionID，最近一次执行留下的 session），否则
 // fresh_context=true 每次 Reset 后 dashboard 只能看到空白事件面板。nil 表示没有链。
 func (r *Router) RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string) {
-	if !IsCronKey(key) {
+	if !sessionkey.IsCronKey(key) {
 		panic(fmt.Sprintf("session: RegisterCronStubWithChain called with non-cron key %q", key))
 	}
 	r.registerStub(key, workspace, lastPrompt, chainIDs)
@@ -279,7 +280,7 @@ func (r *Router) RegisterCronStubWithChain(key, workspace, lastPrompt string, ch
 // existing 分支下如果 workspace/lastPrompt 没变就 no-op（避免每 tick 强刷
 // 触发不必要的 saveIfDirty + WS fanout）。
 func (r *Router) RegisterSystemStub(key, workspace, lastPrompt string) {
-	if !IsSysKey(key) {
+	if !sessionkey.IsSysKey(key) {
 		panic(fmt.Sprintf("session: RegisterSystemStub called with non-sys key %q", key))
 	}
 	r.registerStub(key, workspace, lastPrompt, nil)

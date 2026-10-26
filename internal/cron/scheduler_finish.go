@@ -109,17 +109,6 @@ func (s *Scheduler) deleteJobRuns(jobID string) {
 		return
 	}
 	s.runs.DeleteJob(jobID)
-	// agentcore §5.1: also drop this job's input-snapshot manifests. Blobs are
-	// content-addressed and shared across jobs, so they are NOT removed here.
-	// TODO(agentcore §5.2): blob GC pass (refcount or mark-sweep against live
-	// manifests) for the runsnapshots/blobs/ tree.
-	s.sandboxState().DeleteJobSnapshots(jobID)
-	// Drop sandbox event logs written by the sandbox event sink (§6.1); a 60-minute
-	// sandbox run can accumulate several MB.
-	s.sandboxState().DeleteJobEvents(jobID)
-	// §7.4: drop unresolved confirmation-queue records — a deleted job has
-	// nothing left to confirm or replay.
-	s.sandboxState().DeleteJobAttention(jobID)
 }
 
 // finishRun is the single terminal hook for every cron execution path:
@@ -215,10 +204,9 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) (pausedAfter int) {
 	// Bump per-state metric only AFTER persistence settles, so a marshal-failure
 	// rollback never leaves CronRunSucceededTotal +1 against a reverted Job.
 	// skipPersist paths bump unconditionally (no Job rollback is possible; the
-	// metric is their only durable record). The sandbox buckets sit behind the
-	// SAME gate (#2173) so they remain a strict subset of the generic ones.
+	// metric is their only durable record).
 	if out.skipPersist || jobPersistOK {
-		s.bumpRunStateMetrics(out.state, out.sandbox)
+		s.bumpRunStateMetrics(out.state)
 	}
 
 	// CronRun history 写盘条件：skipPersist=false、jobPersistOK=true、run store
@@ -255,11 +243,7 @@ func (s *Scheduler) finishRun(rc runCtx, out runOutcome) (pausedAfter int) {
 			ResultBytes: len(persistedResult),
 			ErrorClass:  out.errClass,
 			ErrorMsg:    persistedErrMsg,
-			ReplayOf:    out.replayOf,
-			// nil for local runs, so their record carries no sandbox_meta key.
-			SandboxMeta: out.sandboxMeta,
-			// local-run cost increment; 0 for sandbox runs, which report via SandboxMeta.
-			CostUSD: out.costInc.USD,
+			CostUSD:     out.costInc.USD,
 		})
 		// #2479 (2): post-write re-check; see above.
 		if !s.jobStillExists(rc.jobID) {
@@ -304,14 +288,14 @@ func sanitiseRunResult(s string) string {
 	// Redact BEFORE SanitizeForLog so a leaked token never lands on disk or the
 	// WS broadcast (#1006). Idempotent: [REDACTED] starts with no registered
 	// prefix.
-	s = redactSecretsInResult(s)
+	s = textutil.RedactSecrets(s)
 	return osutil.SanitizeForLog(s, maxStoredResultRunes+len(truncatedSuffix))
 }
 
 // localizeNotice is the canonical notice-pipeline helper: sanitise (truncate /
 // redact secrets) then localize API-error envelopes before text reaches any IM
-// channel. Single definition shared by scheduler_run.go and sandbox.go so the
-// privacy-critical pipeline cannot diverge between call sites.
+// channel. Single definition shared by every notice call site so the
+// privacy-critical pipeline cannot diverge between them.
 func localizeNotice(s string) string { return apierr.Localize(sanitiseRunResult(s)) }
 
 // sanitiseRunErrMsg applies the cron error-redaction + log-injection scrub used
@@ -320,7 +304,7 @@ func localizeNotice(s string) string { return apierr.Localize(sanitiseRunResult(
 func sanitiseRunErrMsg(s string) string {
 	s = redactPathsInCronError(s)
 	// Secrets BEFORE SanitizeForLog, mirroring sanitiseRunResult.
-	s = redactSecretsInResult(s)
+	s = textutil.RedactSecrets(s)
 	return osutil.SanitizeForLog(s, maxCronErrMsgRunes)
 }
 
@@ -434,8 +418,8 @@ func (s *Scheduler) recordTerminalResult(jobID string, out runOutcome, endedAt t
 	// THEN SanitizeForLog, so a token's surrounding control bytes are still
 	// stripped and no plaintext token reaches Job.LastResult / LastError →
 	// cron_jobs.json or the WS broadcast (#1006).
-	result = redactSecretsInResult(result)
-	errMsg = redactSecretsInResult(errMsg)
+	result = textutil.RedactSecrets(result)
+	errMsg = textutil.RedactSecrets(errMsg)
 	errMsg = redactPathsInCronError(errMsg)
 	// Extend SanitizeForLog's byte cap by the suffix length so an
 	// already-truncated result keeps its trailing marker intact.

@@ -103,7 +103,7 @@ var (
 // for a backend package's init(). backendID "" is ignored (it means "router
 // default" and never reaches a wrapper). Re-registering overwrites; tests rely
 // on this to inject failing factories. backend.Register panics on a duplicate
-// instead, on purpose; internal/registry's doc explains the split.
+// instead, on purpose: a duplicate profile is a programmer error.
 func RegisterFactory(backendID string, fn FactoryFn) {
 	if backendID == "" || fn == nil {
 		return

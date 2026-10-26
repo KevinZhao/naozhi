@@ -104,16 +104,10 @@ func IsKnownKind(t string) bool {
 }
 
 // IsActivityType reports whether an entry of type t updates the lastActivity
-// summary (KindInfo.Activity). Distinct from IsInternalEventType: thinking and
+// summary (KindInfo.Activity). Distinct from KindInfo.Internal: thinking and
 // todo are activity yet not internal, result and task_done are internal yet not
 // activity — do NOT conflate the two sets.
 func IsActivityType(t string) bool { return kindByName[t].Activity }
-
-// IsInternalEventType mirrors the dashboard's isInternalEvent(): true means the
-// UI filters the entry out of the main transcript (KindInfo.Internal).
-// contractjs generates that column into ENUMS.EVENT_TYPE_INTERNAL, which the
-// dashboard's INTERNAL_EVENT_TYPES is built from.
-func IsInternalEventType(t string) bool { return kindByName[t].Internal }
 
 // IsVisibleEntry reports whether the dashboard would render this entry as a
 // visible chat bubble in the main transcript: neither Internal nor NoBubble.

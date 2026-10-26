@@ -10,8 +10,6 @@ package metrics
 import (
 	"expvar"
 	"strconv"
-
-	"github.com/naozhi/naozhi/internal/promexport"
 )
 
 // cronLatencyBucketsMs are the cumulative upper bounds in ms, straddling the
@@ -31,10 +29,6 @@ func buildCronLatencyBucketKeys() []string {
 	}
 	keys[len(cronLatencyBucketsMs)] = "+Inf"
 	return keys
-}
-
-func init() {
-	promexport.RegisterHistogram("naozhi_cron_execution_duration_ms", cronLatencyBucketKeys)
 }
 
 var (

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cron/runstore"
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
@@ -25,13 +26,6 @@ import (
 // it reaches any terminal state, and reconciled at the next boot. Any marker
 // still present at startup belonged to a run whose process died, so it becomes a
 // canceled record with ErrClassInterrupted.
-//
-// This is deliberately the same shape as sandbox_pending.go, which has had
-// restart reconciliation since agentcore-cloud-sandbox §6.5 — the local path was
-// simply never given one. The two stay separate files because they answer
-// different questions: a sandbox orphan needs its microVM stopped over the
-// network, while a local orphan's process is already gone and only its history
-// row is missing.
 
 // inflightMarker is the marker for the run rc identifies.
 func (rc runCtx) inflightMarker() runstore.InflightMarker {
@@ -50,7 +44,7 @@ func (rc runCtx) inflightMarker() runstore.InflightMarker {
 // ("" root, persistence disabled, for every store-less test fixture). It does
 // not depend on the run store being enabled.
 func (s *Scheduler) runMarkers() runstore.Markers {
-	return runstore.Markers{Root: s.sandboxState().Root}
+	return runstore.Markers{Root: datadir.ForStore(s.storePath).Root()}
 }
 
 // stampSendWatermark records sess's watermark in rc's marker, just before the
@@ -149,18 +143,6 @@ func (s *Scheduler) claimRunInflight() inflightSettlement {
 			if err := markers.RemovePath(path); err != nil {
 				slog.Warn("cron: corrupt run-inflight marker remove failed", "path", path, "err", err)
 			}
-			continue
-		}
-		// A marker whose run also has a sandbox pending record (left by an
-		// older binary) belongs to the sandbox reconciler: only that pass
-		// stops the microVM and classifies the orphan. Settling it here
-		// recorded the run interrupted first, or finished it twice (#2970).
-		if s.sandboxState().HasPending(m.RunID) {
-			if err := markers.RemovePath(path); err != nil {
-				slog.Warn("cron: run-inflight marker remove failed during reconcile", "path", path, "err", err)
-			}
-			slog.Info("cron: run-inflight marker belongs to a sandbox run; left to the sandbox reconciler",
-				"job_id", m.JobID, "run_id", m.RunID)
 			continue
 		}
 		// The adoption verdict, before anything is deleted: a live CLI behind

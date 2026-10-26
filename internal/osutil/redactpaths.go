@@ -68,16 +68,3 @@ func RedactAbsolutePathsInto(b *strings.Builder, s string) {
 		i = j
 	}
 }
-
-// RedactAbsolutePaths is the convenience string→string form of
-// RedactAbsolutePathsInto for callers without a pooled Builder. Returns s
-// unchanged (no allocation) when it contains no path-trigger byte.
-func RedactAbsolutePaths(s string) string {
-	if s == "" || HasNoPathTrigger(s) {
-		return s
-	}
-	var b strings.Builder
-	b.Grow(len(s))
-	RedactAbsolutePathsInto(&b, s)
-	return b.String()
-}

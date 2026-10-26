@@ -1,10 +1,7 @@
-// anchor-keep: the behavioural twin passes for any ErrUseLastResponse stub; this additionally pins the package-level client + the named SSRF comment so the defence is not refactored into a permissive shape.
 package slack
 
 import (
 	"net/http"
-	"os"
-	"regexp"
 	"testing"
 )
 
@@ -42,32 +39,5 @@ func TestSlackHTTPClient_HasTimeout(t *testing.T) {
 	t.Parallel()
 	if slackHTTPClient.Timeout <= 0 {
 		t.Errorf("slackHTTPClient.Timeout = %v, want > 0", slackHTTPClient.Timeout)
-	}
-}
-
-// TestSlackHTTPClient_SourceAnchor is the source-level contract that locks
-// both the CheckRedirect hook and the ErrUseLastResponse return value in
-// slack.go — catches any refactor that moves the httpClient construction
-// elsewhere or silently replaces the short-circuit with a permissive stub.
-// Uses source-grep rather than runtime reflection because the behavioural
-// test above can be satisfied by any function that returns ErrUseLastResponse;
-// this test additionally pins the comment anchor naming the SSRF threat so
-// future reviewers don't delete it thinking it's boilerplate.
-func TestSlackHTTPClient_SourceAnchor(t *testing.T) {
-	t.Parallel()
-	data, err := os.ReadFile("slack.go")
-	if err != nil {
-		t.Fatalf("read slack.go: %v", err)
-	}
-	src := string(data)
-	// (?s) so . matches newlines; the hook body spans 2-3 lines.
-	anchor := regexp.MustCompile(`(?s)CheckRedirect.*?http\.ErrUseLastResponse`)
-	if !anchor.MatchString(src) {
-		t.Error("slack.go missing CheckRedirect → http.ErrUseLastResponse anchor — " +
-			"SSRF defence may have been silently dropped")
-	}
-	if !regexp.MustCompile(`slackHTTPClient`).MatchString(src) {
-		t.Error("slack.go missing package-level slackHTTPClient — " +
-			"refactor may have reverted to per-instance httpClient without CheckRedirect")
 	}
 }

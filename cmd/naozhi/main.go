@@ -102,28 +102,10 @@ func main() {
 	// shim column also allows reach spawned CLIs via baselineShimEnv.
 	slog.Info("claude settings: loading user settings directly", "mode", "user")
 
-	// boot is the wireup composition root for this process: it performs the
-	// boot-time steps and records what ran. A value rather than package-level
-	// state (#2552), so the steps are visible here in order instead of being
-	// spread across init() blocks.
-	boot := wireup.NewBoot()
-
-	// Register built-in backend profiles before any consumer looks them up.
-	// Explicit rather than init()-driven so a missing import fails loudly (#1165).
-	boot.EnsureCLIBackends()
-	// The blank-imported history factories are linked in; this was an init()
-	// inside wireup until #2552 and is now stated at the call site.
-	boot.RecordHistoryBackends()
-	// Image blocks in rehydrated JSONL history need discovery.ThumbnailFn; nil
-	// drops them with no other symptom, so the assignment is a stated step too.
-	boot.WireHistoryThumbnails()
-
-	// A dropped blank-import or no-op'd helper aborts startup here instead of
-	// degrading silently to empty history / missing profiles.
-	if err := boot.Validate(); err != nil {
-		slog.Error("wireup validation failed", "err", err)
-		os.Exit(1)
-	}
+	// Register built-in backend profiles before any consumer looks them up, and
+	// install the history thumbnail hook (nil silently drops images in history).
+	wireup.RegisterCLIBackends()
+	wireup.WireHistoryThumbnails()
 
 	// Fail-soft: error-level diags do NOT abort startup (docs/rfc/multi-backend.md §11.1).
 	logConfigValidationDiagnostics(cfg)
@@ -333,7 +315,7 @@ func main() {
 	if budgetGate != nil {
 		slog.Info("cost budget enforced", "location", cfg.BudgetLocation().String(), "action", cmp.Or(cfg.Cost.Budget.Action, string(budget.ActionBlock)))
 	}
-	schedulers, err := boot.WireSchedulers(wireup.SchedulersDeps{
+	schedulers, err := wireup.WireSchedulers(wireup.SchedulersDeps{
 		Cfg:           cfg,
 		Router:        router,
 		Platforms:     platforms,
@@ -477,7 +459,6 @@ func main() {
 		},
 		Features: server.FeatureOptions{
 			Debug:     cfg.Server.DebugMode,
-			Metrics:   cfg.Server.MetricsEnabled,
 			PublicTmp: cfg.Projects.PublicTmp,
 			// Default-on; opt-out via session.project_stable_key.enabled: false.
 			ProjectStableKey: cfg.Session.ProjectStableKey.ResolvedEnabled(true),

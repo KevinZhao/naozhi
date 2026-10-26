@@ -19,15 +19,10 @@ import (
 // contract documented there).
 func marshalPooled(v any) ([]byte, error) { return httputil.MarshalPooled(v) }
 
-// marshalEscaped forwards to httputil.MarshalEscaped — the HTML-safe variant
-// for payloads spliced into HTML templates / innerHTML render paths.
-func marshalEscaped(v any) ([]byte, error) { return httputil.MarshalEscaped(v) }
-
-// writeJSON / writeOK / decodeJSONBody / writeJSONStatus thin-wrap httputil;
+// writeJSON / decodeJSONBody / writeJSONStatus thin-wrap httputil;
 // rendering contract, cache-control headers and the DisallowUnknownFields
 // mass-assignment guard are documented on the underlying helpers.
 func writeJSON(w http.ResponseWriter, v any) { httputil.WriteJSON(w, v) }
-func writeOK(w http.ResponseWriter)          { httputil.WriteOK(w) }
 func decodeJSONBody(r *http.Request, dst any) error {
 	return httputil.DecodeJSONBody(r, dst)
 }
@@ -69,7 +64,6 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	s.mountRoutes(hs.sendH.Routes())
 	s.mountRoutes(hs.discoveryH.Routes())
 	s.mountRoutes(hs.projectH.Routes())
-	s.mountRoutes(hs.plannerH.Routes())
 	s.mountRoutes(hs.transcribeH.Routes())
 	s.mountRoutes(hs.cronH.Routes())
 	s.mountRoutes(hs.systemH.Routes())
@@ -80,7 +74,6 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	if hs.scratchH != nil {
 		s.mountRoutes(hs.scratchH.Routes())
 	}
-	s.mux.HandleFunc("POST /api/auth/logout", s.apiChain()(s.auth.HandleLogout))
 	// Health probes are server-owned (no sub-package) and unauthenticated at
 	// the route level: /health gates its stats section on auth internally,
 	// /livez is a no-deps liveness probe, /readyz answers once construction
@@ -95,9 +88,6 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	if hs.wiring.debugMode {
 		s.registerPprof()
 		s.registerExpvar()
-	}
-	if hs.wiring.metricsOn {
-		s.registerMetrics()
 	}
 
 	// Server-owned routes: the dashboard shell, static assets and the WS
@@ -151,7 +141,6 @@ func (s *Server) registerDashboard(hs *handlerSet) {
 	s.mux.HandleFunc("GET /static/cron_timeline.js", auth(serveStaticJS("cron_timeline.js")))
 	s.mux.HandleFunc("GET /static/cron_drawer.js", auth(serveStaticJS("cron_drawer.js")))
 	s.mux.HandleFunc("GET /static/cron_trigger.js", auth(serveStaticJS("cron_trigger.js")))
-	s.mux.HandleFunc("GET /static/cron_attention.js", auth(serveStaticJS("cron_attention.js")))
 	s.mux.HandleFunc("GET /static/cron_live.js", auth(serveStaticJS("cron_live.js")))
 	s.mux.HandleFunc("GET /static/platform.js", auth(serveStaticJS("platform.js")))
 	s.mux.HandleFunc("GET /static/ws_manager.js", auth(serveStaticJS("ws_manager.js")))
@@ -207,11 +196,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	// CSP: built once at init in dashboard_csp.go. Neither script-src nor
-	// style-src admits unsafe-inline — events are wired through data-action
-	// delegation plus a hash for the theme bootstrap, and the per-element colours
-	// JS still computes go through data attributes applied via CSSOM (nz_util.js
-	// applyDataBg) rather than style="" attributes. No outside origin is
+	// CSP: built once at init in dashboard_csp.go. script-src admits no
+	// unsafe-inline — events are wired through data-action delegation plus
+	// hashes for the inline scripts; style-src does, for the style attributes
+	// KaTeX and mermaid output carries. No outside origin is
 	// listed: KaTeX and mermaid are vendored; connect-src 'self' covers the
 	// same-origin ws/wss upgrade; frame-src blob: is for sandboxed previews.
 	w.Header().Set("Content-Security-Policy", dashboardCSP)

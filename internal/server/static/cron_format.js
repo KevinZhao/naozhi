@@ -126,11 +126,6 @@ const CRON_ERROR_CLASS_LABELS = Object.freeze({
   // 结束了这次 run，不是重启本身 —— 与 interrupted 分开命名，操作员才
   // 知道该看的是自己改了什么，而不是找一个不存在的崩溃（#2749 语义）。
   config_drift: '配置变更中止（升级时改了模型/参数）',
-  // 云沙箱三态（agentcore-cloud-sandbox RFC §6.1/§7.2）。transport 是
-  // §6.2 双跑风险态：流断了但 microVM 状态未知，徽标走红色 + ⚠。
-  sandbox_failed: '云沙箱任务失败',
-  sandbox_transport: '云沙箱断流（状态未知）',
-  sandbox_unavailable: '云沙箱未配置',
 });
 export function cronErrorClassLabel(cls) {
   return Object.hasOwn(CRON_ERROR_CLASS_LABELS, cls) ? CRON_ERROR_CLASS_LABELS[cls] : (cls || '');
@@ -141,7 +136,7 @@ export function cronErrorClassLabel(cls) {
 export function cronJobLedgerCostHtml(jobId) {
   const c = cronJobCostCache[jobId];
   if (!c || !(c.usd > 0)) return '';
-  const title = '近 30 天账本合计：' + c.entries + ' 条账本记录（本地 / 云沙箱运行，及运行窗口外由会话记的账），CLI 估算口径' +
+  const title = '近 30 天账本合计：' + c.entries + ' 条账本记录（cron 运行，及运行窗口外由会话记的账），CLI 估算口径' +
     (c.dropped > 0 ? '；账本曾丢弃 ' + c.dropped + ' 条，可能偏低' : '');
   return '<span class="ct-cost-ledger" title="' + escAttr(title) + '">30 天 ' + esc(formatCostUSD(c.usd)) + '</span>';
 }

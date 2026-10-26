@@ -10,9 +10,8 @@
 //
 // Nothing executes, the CLI emits a normal end_turn, and the turn stalls.
 // Anchor is kept byte-for-byte in lockstep with LEAKED_TOOLCALL_RE in
-// internal/server/static/event_render.js; testdata/samples.json pins the two
-// to the same verdicts (samples_test.go here, leaked_toolcall_fold.test.js in
-// the e2e suite).
+// internal/server/static/event_render.js; testdata/samples.json pins the Go
+// side's verdicts (samples_test.go).
 package leakguard
 
 import (

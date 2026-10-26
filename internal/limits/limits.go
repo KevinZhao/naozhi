@@ -15,8 +15,8 @@ const MaxCoalescedText = 4 * 1024 * 1024
 // MaxStreamJSONLine is the cap on a single claude stream-json / tool-result
 // line (16 MiB, the CLI's own stdout line ceiling). Every transport carrying
 // those lines — node ReverseConn, upstream connector frames, agentevents
-// persisted tool results, agentcore SSE (plus its own envelope headroom) —
-// bounds a frame/read/file at this value so it cannot drift (#2084).
+// persisted tool results — bounds a frame/read/file at this value so it
+// cannot drift (#2084).
 const MaxStreamJSONLine = 16 << 20
 
 // PlatformReplyMaxAttempts is the retry count for platform.ReplyWithRetry on

@@ -8,7 +8,7 @@ import (
 
 // TestRedactSecrets_EnvAssignmentInsideJSONStringKeepsJSONValid pins the
 // dashboard "200 empty body" regression: RedactSecrets is run over raw JSON
-// (cron transcript tool_use.input, sandbox run-event NDJSON lines). The bare
+// (cron transcript tool_use.input). The bare
 // `KEY=value` branch used to consume `\S+`, which swallowed the closing `"}`
 // of the enclosing JSON string and produced unencodable output.
 func TestRedactSecrets_EnvAssignmentInsideJSONStringKeepsJSONValid(t *testing.T) {

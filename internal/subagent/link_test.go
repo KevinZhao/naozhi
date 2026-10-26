@@ -496,59 +496,33 @@ func TestAppendNamedLink_CapsHistory(t *testing.T) {
 	}
 }
 
-// TestAppendNamedLink_HardCapsBackingArray pins R20260531-CR-004: the
-// incremental-growth test above never lets the backing array balloon far past
-// the cap, so the in-place copy-down trim alone looks bounded. But if byName
-// already holds a slice whose backing array grew large in an earlier turn
-// (e.g. cap 256), an in-place copy-down would keep that whole 256-element
-// backing array alive for the rest of the session. This test seeds such an
-// oversized backing array, appends past the cap, and asserts the trim
-// re-allocates a tightly-sized array so the oversized store can be GC'd.
-func TestAppendNamedLink_HardCapsBackingArray(t *testing.T) {
+// TestLinker_Resolve_AgentTypeFilter verifies that only candidates whose
+// meta agentType matches the requested one are considered, and that among
+// the matches the newest (mtime-desc) is selected.
+func TestLinker_Resolve_AgentTypeFilter(t *testing.T) {
 	t.Parallel()
-	l := NewLinker()
-	const name = "orchestrator"
+	const sessionID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+	l, subagentDir := newLinkerForTest(t, sessionID)
 
-	// Seed byName[name] with a slice whose backing array capacity is large
-	// (well beyond maxNamedLinkHistory*2) but whose length is already at the
-	// cap, mimicking a slice that ballooned in a prior turn then sat trimmed.
-	large := make([]LinkInfo, maxNamedLinkHistory, 256)
-	for i := 0; i < maxNamedLinkHistory; i++ {
-		large[i] = LinkInfo{FirstPromptID: "seed" + strconv.Itoa(i)}
-	}
-	l.mu.Lock()
-	l.byName[name] = large
-	// One more append pushes len past the cap and triggers the trim branch.
-	for i := 0; i < 200; i++ {
-		l.appendNamedLink(name, LinkInfo{FirstPromptID: "p" + strconv.Itoa(i)})
-	}
-	got := l.byName[name]
-	l.mu.Unlock()
+	oldTime := time.Now().Add(-2 * time.Hour)
+	newTime := time.Now()
 
-	if len(got) != maxNamedLinkHistory {
-		t.Fatalf("len = %d, want %d (capped)", len(got), maxNamedLinkHistory)
-	}
-	if c := cap(got); c > maxNamedLinkHistory*2 {
-		t.Errorf("backing array cap = %d not hard-capped (want <= %d)", c, maxNamedLinkHistory*2)
-	}
-	// Newest entry must survive the re-allocation intact.
-	if want := "p199"; got[len(got)-1].FirstPromptID != want {
-		t.Errorf("newest retained FirstPromptID = %q, want %q", got[len(got)-1].FirstPromptID, want)
-	}
-}
+	writeAgentFiles(t, subagentDir, "0000000000000001a", "multi-worker", sessionID, "p_old", oldTime)
+	writeAgentFiles(t, subagentDir, "0000000000000002b", "multi-worker", sessionID, "p_new", newTime)
 
-// TestAppendNamedLink_BelowCapKeepsAll verifies the common case (fewer than
-// the cap) retains every entry untouched.
-func TestAppendNamedLink_BelowCapKeepsAll(t *testing.T) {
-	t.Parallel()
-	l := NewLinker()
-	l.mu.Lock()
-	for i := 0; i < 5; i++ {
-		l.appendNamedLink("worker", LinkInfo{FirstPromptID: "p" + strconv.Itoa(i)})
+	// Add a file with a different agentType that should NOT appear in candidates.
+	writeAgentFiles(t, subagentDir, "0000000000000003c", "other-type", sessionID, "p_other", newTime)
+
+	toolUseTime := newTime.Add(-50 * time.Millisecond).UnixMilli()
+	info, resolved := l.Resolve(context.Background(), "t_multi", "toolu_M", "multi-worker", "", toolUseTime)
+	if !resolved {
+		t.Fatalf("Resolve failed")
 	}
-	got := l.byName["worker"]
-	l.mu.Unlock()
-	if len(got) != 5 {
-		t.Fatalf("len = %d, want 5", len(got))
+	if info.InternalAgentID != "agent-0000000000000002b" {
+		t.Errorf("expected newest candidate, got InternalAgentID=%q", info.InternalAgentID)
+	}
+	// Verify the other-type candidate was NOT picked.
+	if info.JSONLPath == filepath.Join(subagentDir, "agent-0000000000000003c.jsonl") {
+		t.Error("other-type candidate was picked despite agentType mismatch")
 	}
 }

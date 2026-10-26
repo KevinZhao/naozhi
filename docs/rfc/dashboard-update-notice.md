@@ -584,8 +584,8 @@ error 但**有意不动 `phase`** 的路径：release lookup 失败（`noteCheck
 `TestUpdateApply_RespondsBeforeWorkCompletes` 抓不到这个：它用 channel 把 apply
 卡住，顺序问题被掩盖。新增两条覆盖：行为测试（自定义 `flushRecorder`，断言
 apply 进入时 flush 已发生）+ 源码顺序守卫（httptest 下 flush 永远大幅领先，
-所以真正的不变量是**源码顺序**，与 `TestUpdateApply_DetachedContextSourceGuard`
-同法）。两条都经过反向验证：把 write+flush 移回 goroutine 之后，二者同时失败。
+所以真正的不变量是**源码顺序**）。两条都经过反向验证：把 write+flush 移回 goroutine 之后，二者同时失败。
+（2026-10 注：源码顺序守卫已删除，只保留行为测试。）
 
 **(c) `install_enabled` 补进 GET 形状契约的 required 列表。** 前端
 `updateCanApply` 要求 `can_apply && install_enabled` 同时为真才渲染按钮，所以
@@ -603,8 +603,8 @@ GET 会独立探测**三遍**同一个不会变的事实：`CheckPreflight` 里�
 改为接受该事实，由 handler 探测一次后分发：GET 3→1 次，POST 2→1 次（POST 本来
 就要为 `restart` 参数算一遍）。**特意没有加缓存**：缓存会让刚配好的 launchd job
 在一个 TTL 内隐形，在 POST 路径上等于拒掉一次本可以成功的 apply。
-`TestUpdateHandlers_ProbeServiceOnce` 是源码守卫——这个成本只在 darwin 上存在，
-而 darwin 上那个 probe 无法 stub，行为测试数不到。
+当时用源码守卫锁住——这个成本只在 darwin 上存在，而 darwin 上那个 probe 无法
+stub，行为测试数不到（2026-10 注：该源码守卫已删除）。
 
 签名改动顺带修好了两个测试的可达性：`TestRollbackHint` 的 no-service 分支此前
 在"本机恰好由 launchd 托管"时被 skip，`TestRollbackHint_IncludesRestartWhenServiceRuns`
@@ -680,7 +680,7 @@ stub）并**断言 restart 未被调用**；新增 `TestInstallLatest_StagedRest
 MainPID 就是主进程，实机核对 `/proc/<MainPID>/exe` 亦为 naozhi 本体；darwin 沿用
 `verifiedLaunchdLabel`，两者重合）。dashboard 两个 handler、`InstallLatest` 的降级、
 `restartOnly`、`restartSystemdNoWait` 全部改用后者；`upgrade.go` 不动。
-`TestUpdateHandlers_ProbeServiceOnce` 同时守住"handler 不得再用 `ServiceRunning()`"。
+"handler 不得再用 `ServiceRunning()`" 原由源码守卫锁住，该守卫已于 2026-10 删除。
 
 **F3 · P2 手工命令按浏览器 OS 猜且硬编码 dev 机 label。** `dashboard.js` 用
 `navigator.platform` 判 Mac/Linux，并写死 `com.naozhi.agent`——那是操作者笔记本的
@@ -706,8 +706,7 @@ OS 与某一台 dev 机的 label，与被升级的节点无关。修法：GET �
 而 `noteCheck` 失败也推进 `checkedAt`，启动时一次网络抖动就让补检永久失效直到 6h
 tick。放宽为 `latest==""`；`CheckNow` 自带 15min 全局节流（`checkMu` 内、网络调用
 **前**盖章），放宽不会打爆 GitHub。同时给 GET 侧的 `CheckNow` 套 10s
-`updateColdStartFillTimeout`，替代原本可能吃满的 60s。`TestUpdateStatus_ColdStartFillGuard`
-源码守卫。
+`updateColdStartFillTimeout`，替代原本可能吃满的 60s。（原有的源码守卫已于 2026-10 删除。）
 
 **顺带：`enabled` 恒为 true。** 原为 `s.updateStatus != nil`，但 main.go 无条件建
 Status，生产永远 true。改为 `s.updateChecker != nil`（真正反映 `update.enabled`），

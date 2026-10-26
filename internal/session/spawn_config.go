@@ -68,9 +68,8 @@ func (c *spawnConfig) spawnProcess(ctx context.Context, wrapper *cli.Wrapper, op
 // ErrMaxProcs until restart). The panic becomes a regular error so the
 // caller's standard "spawn process: %w" wrap applies.
 //
-// Takes cli.Runner (the placement seam) rather than *cli.Wrapper so sandbox
-// placements reuse the same protection; (*cli.Wrapper)(nil).Runner() returns
-// nil, which is checked here.
+// Takes cli.Runner (the placement seam) rather than *cli.Wrapper;
+// (*cli.Wrapper)(nil).Runner() returns nil, which is checked here.
 func panicSafeSpawn(
 	ctx context.Context,
 	r cli.Runner,

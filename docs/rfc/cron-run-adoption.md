@@ -192,7 +192,6 @@ type InFlightAdopter interface {
 
 ## 5. 明确的非目标
 
-- **不收养 sandbox run**：`sandbox_pending.go` 自有重启对账（方向相反：它要关掉 microVM）。
 - **不做跨 CLI 进程的收养**：CLI 死了就是 interrupted。shim 活着是前提。
 - **不对抗 drift 关停**：一次同时改了 model/effort/extra_args 的升级会在 `main.go:229` 关掉 mid-turn 的 shim（`router_shim.go:388-395`），收养随之落到 interrupted。这是**正确的**——argv 真的变了——但它是 §8 验收场景的前提条件，必须在验收步骤里写明"不改这三项"，否则测试会以为收养坏了。已记为 §9.1。
 - **不修成本归属**：见 §6。

@@ -45,7 +45,7 @@ graph TD
 | **0** | 零基础设施 | 所有平台均支持 WebSocket / 长轮询。无需公网 IP、域名或端口转发 |
 | **1** | 完整 Agent 能力 | 不是 API wrapper，是真正的 Claude Code CLI —— 工具调用、代码编辑、MCP 一个不少 |
 | **2** | 会话自动恢复 | 进程崩溃/回收后自动 `--resume`，对话上下文完整保留 |
-| **3** | 单二进制部署 | Go 编译，无容器、无依赖。6 平台预编译 release，内置自动更新 |
+| **3** | 单二进制部署 | Go 编译，无容器、无依赖。4 平台（linux/darwin × amd64/arm64）预编译 release，内置自动更新 |
 | **4** | 实时 Dashboard | 浏览器实时查看所有会话、事件流、费用统计 |
 | **5** | 多节点 NAT 穿越 | 远程机器反向拨入主节点，统一管理多台工作站 |
 | **6** | 消息队列与抢占 | 忙时消息自动排队/合并，支持 `/stop` 软中断与 `/urgent` 紧急抢占 |
@@ -116,7 +116,7 @@ graph LR
 - **Watchdog 双超时**: 无输出超时 (默认 15min，工具运行时 Claude CLI 的 heartbeat 算作输出) + 总耗时超时 (默认 2h)，防止进程挂起
 - **容量管理**: 可配置最大并发进程数 (默认 3)，满载时自动驱逐最久空闲会话
 - **中断恢复**: 用户发送新消息时自动中断正在运行的 turn（软中断 control_request，ACP 回退 SIGINT）
-- **会话自动串联**: 同一项目的会话通过**项目级稳定 session key** 精确接续，Dashboard "load earlier" 可跨 session 边界回溯（`session.project_stable_key`，默认开启）。早期基于 "同 workspace + 时间窗" 猜测的 `session.auto_chain` 已下线 —— 它会把主题无关的 one-off 会话误串成历史上下文，详见 [`docs/rfc/project-stable-session-key.md`](docs/rfc/project-stable-session-key.md)
+- **会话自动串联**: 同一项目的会话通过**项目级稳定 session key** 精确接续，Dashboard "load earlier" 可跨 session 边界回溯（`session.project_stable_key`，默认开启），见 [`docs/rfc/project-stable-session-key.md`](docs/rfc/project-stable-session-key.md)
 
 ### 消息队列与抢占
 
@@ -173,7 +173,7 @@ cli:
 - 创建后可在创建该任务的会话发送 `/cron mode <id> fresh|keep` 切换，下次执行生效（正在执行的那次不受影响），连续失败计数清零
 - 每 chat 10 个 / 全局 50 个配额
 - 执行结果自动回推到聊天
-- 连续失败 5 次自动暂停（`cron.auto_pause_after_failures` 可调；重启后收尾的孤儿云沙箱 run 不计，后端瞬时故障也不计，但同样次数的瞬时故障持续满 6 小时也会暂停），修复后在创建该任务的会话发送 `/cron resume <id>`，或在控制台恢复
+- 连续失败 5 次自动暂停（`cron.auto_pause_after_failures` 可调；后端瞬时故障不计，但同样次数的瞬时故障持续满 6 小时也会暂停），修复后在创建该任务的会话发送 `/cron resume <id>`，或在控制台恢复
 
 ### 语音转文字
 
@@ -240,22 +240,9 @@ graph RL
 - 一键接管：SIGTERM → 等待 → `--resume` 接入 Naozhi 管理
 - 自动首消息接管：检测到外部 session 时自动恢复
 
-### System Session 后台守护
-
-内置后台线程框架（`sysession`），用派生的 transient system session 执行周期性运维任务：
-
-- **auto-titler**: 自动为活跃会话生成标题（达到最小轮次后触发，带重命名节流）
-- **attachment-gc**: 回收超 TTL 且无引用的附件文件（默认 dry-run，先观察 would-remove 日志再开真删）
-
-每个 daemon 独立 `enabled` 开关 + 调度周期，总开关为 `sysession.enabled`。
-
 ### 事件日志持久化
 
 除 `sessions.json` 会话目录外，第二层持久化 `~/.naozhi/events/<keyhash>.log`/`.idx` 记录每一条事件 —— 包括 Claude 自身 JSONL 无法恢复的字段：图片缩略图、附件路径、AskQuestion 卡片、agent-team 关联 ID。配合附件引用计数（`.meta` sidecar 记录引用会话哈希 + 最后引用时间），支持基于双 TTL 的精确回收。
-
-### 多语言 (i18n)（规划中）
-
-中英双语（`zh-CN` / `en-US`）文案框架的纯逻辑内核已落地：按平台 locale 提示 + 消息内容 CJK 比例启发式解析语言（默认 `zh-CN`），用户锁定的语言不会被自动来源覆盖。运行时接线（catalog 加载、配置接入、dashboard 文案渲染）尚未完成，对应设计见 #631 的 follow-up slice，当前用户可见文案仍以中文为主。
 
 ### 自动更新
 
@@ -396,136 +383,7 @@ Agent 命令通过 `agent_commands` 配置映射，可自定义。
 
 ## 配置参考
 
-```yaml
-server:
-  addr: ":8180"
-  dashboard_token: "${DASHBOARD_TOKEN}"   # Dashboard 访问密码 (可选)
-  trusted_proxy: false                    # ALB/CloudFront 终止 TLS 时设为 true
-
-cli:
-  backend: claude                         # "claude" | "kiro" | "codex"，单 backend 模式下的默认值
-  path: "~/.local/bin/claude"
-  model: "sonnet"                         # sonnet / opus / haiku
-  args: []                                # claude 协议自己加 --dangerously-skip-permissions，写在这里只会被丢弃并告警
-
-  # 可选：多 backend 并存（Claude / Kiro / Codex 同时启用）。dashboard "new session"
-  # 下拉菜单可以按会话选 backend，API 端通过 /api/sessions/send {"backend": ...}
-  # 覆盖。不设置 `backends` 时走单 backend 模式，使用上面的 cli.path/model/args；
-  # 每条 backend 的 model/args 省略时从顶层 cli.* 继承，path 不继承 cli.path，
-  # 省略时按 id 自动查找（~/.local/bin/<binary>、常见安装目录、$PATH）；`backend` 字段决定
-  # 默认 backend（同时也作为 dashboard 下拉第一项）。完整注释示例见
-  # config.example.yaml `cli.backends` 段。
-  # backends:
-  #   - id: claude
-  #   - id: kiro
-  #     path: "~/.local/bin/kiro"         # ACP 协议根据 id=kiro 自动选择，无需额外 flag
-  #   - id: codex
-  #     path: "codex"                     # codex app-server 协议根据 id=codex 自动选择
-  #     model: "openai.gpt-5.5"           # 须显式设置，否则继承上面 claude 的 sonnet；args 也写明，免得继承顶层 cli.args
-  #     args: ["-c", "model_reasoning_effort=high"]
-
-session:
-  cwd: "/home/user/projects"              # CLI 默认工作目录，亦作 /cd 的允许根路径
-  max_procs: 3                            # 最大并发 CLI 进程
-  ttl: "30m"                              # 空闲回收超时
-  watchdog:
-    no_output_timeout: "15m"              # 无输出超时；工具运行时 Claude CLI 每 30s 发 heartbeat，
-                                          # 所以这里只拦模型长时间静默生成或 CLI 卡死
-    total_timeout: "2h"                   # 单轮总超时
-  store_path: "~/.naozhi/sessions.json"
-  queue:                                  # 忙时消息策略
-    mode: "collect"                       # collect | interrupt | passthrough
-    max_depth: 20
-    collect_delay: "500ms"
-  # project_stable_key:                   # 项目级稳定 session key（默认开启）
-  #   enabled: true
-  # auto_chain 已在 schema v2 移除：没有 schema_version 的旧文件仍可加载，
-  # 该块会报 deprecated 并被忽略；`naozhi config migrate` 会把它删掉。
-
-agents:                                   # 自定义 agent
-  code-reviewer:
-    model: "sonnet"
-    system_prompt: "You are a code reviewer..."  # 追加到 CLI 系统提示词
-  researcher:
-    model: "opus"
-
-agent_commands:                           # 命令 → agent 映射
-  review: code-reviewer
-  research: researcher
-
-cron:
-  store_path: "~/.naozhi/cron_jobs.json"
-  max_jobs: 50
-  execution_timeout: "8h"
-  timezone: "Asia/Shanghai"               # IANA 时区，解释 cron 表达式
-  jitter_max: "2m"                        # 调度抖动上限，拍平并发峰值
-  auto_pause_after_failures: 5            # 连续失败 N 次自动暂停；负数关闭
-
-sysession:                                # 后台守护进程框架
-  enabled: true
-  daemons:
-    auto-titler:                          # 自动会话标题
-      enabled: true
-    attachment-gc:                        # 附件回收（默认关闭 + dry-run）
-      enabled: false
-      dry_run: true
-
-# update:                                 # 自动更新（轮询 GitHub Releases）
-#   enabled: true
-#   mode: "download"                      # notify | download | auto
-#   interval: "6h"
-
-transcribe:                               # 语音转文字 (Amazon Transcribe)
-  enabled: true
-  region: "us-east-1"
-  language: "zh-CN,en-US"                 # BCP-47 列表，多语言自动检测
-
-projects:
-  root: "/home/user/projects"             # 项目扫描根目录
-
-reverse_nodes:                            # 多节点：接受远程拨入
-  my-workstation:
-    token: "${NODE_TOKEN}"
-    display_name: "Kevin's Mac"
-
-im_access:                                # IM 发送者白名单，见「部署 · IM 访问控制」
-  default_deny: false                     # true：没有条目的平台拒绝所有人
-  # deny_reply: ""                        # 替换私聊里的拒绝文案（默认附带对方 ID）
-  platforms:
-    feishu:
-      allowed_users: ["ou_xxxxxxxx"]      # 可以聊天；admin_users 也算
-      admin_users: ["ou_yyyyyyyy"]        # 可以用 /cd /project /cron；空 = 所有人都是管理员
-
-im_rate_limit:                            # 每个 IM 发送者的消息限流，见「部署 · IM 访问控制」
-  msgs_per_min: 10                        # 0 或不配 = 不限
-  burst: 3                                # 允许连发的条数；0 = 同 msgs_per_min
-
-cost:
-  budget:                                 # 每日费用预算（USD），见「部署 · IM 访问控制」
-    per_chat_daily_usd: 20                # 每个 IM 会话；0 或不配 = 不限
-    per_cron_job_daily_usd: 5             # 每个定时任务
-    daily_usd: 100                        # 整台机器（dashboard 的花费也算）
-
-# upstream:                               # 多节点：作为远程节点拨入
-#   url: "wss://primary.example.com/ws-node"
-#   node_id: "my-workstation"
-#   token: "${NODE_TOKEN}"
-
-platforms:
-  feishu:
-    app_id: "${FEISHU_APP_ID}"
-    app_secret: "${FEISHU_APP_SECRET}"
-    max_reply_length: 4000
-  # slack:
-  #   bot_token: "${SLACK_BOT_TOKEN}"
-  #   app_token: "${SLACK_APP_TOKEN}"
-  # discord:
-  #   bot_token: "${DISCORD_BOT_TOKEN}"
-  # weixin:
-  #   token: "${WEIXIN_BOT_TOKEN}"
-```
-
-环境变量通过 `${VAR_NAME}` 语法自动展开。
+完整的带注释示例见 [`config.example.yaml`](config.example.yaml)；环境变量通过 `${VAR_NAME}` 语法自动展开。
 
 ---
 
@@ -545,7 +403,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bin/naozhi ./cmd/naozhi/
 scp bin/naozhi server:/usr/local/bin/
 
 # 安装 systemd service（推荐 `sudo naozhi install`，自动生成单元文件；
-# deploy/naozhi.service 是手动部署参考，与 cmd/naozhi/service.go 保持同步）
+# deploy/naozhi.service 是手动部署参考，与 cmd/naozhi/service_systemd.go 保持同步）
 sudo cp deploy/naozhi.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable naozhi
 
@@ -562,10 +420,13 @@ sudo systemctl start naozhi
 journalctl -u naozhi -f
 ```
 
-> **可选 · 零停机重启 sudoers 精确化**：若希望 `systemctl restart naozhi` 时 shim
-> 子进程不被 kill，参考 [`docs/ops/sudoers-hardening.md`](docs/ops/sudoers-hardening.md)
-> 安装 `deploy/naozhi-sudoers.example`。不装也能跑 —— 只是每次 restart 会打断正在运行
-> 的会话，journal 打 `WARN` 不致命。**切勿**为省事写 `NOPASSWD: ALL`。
+> **可选 · 零停机重启 sudoers**：若希望 `systemctl restart naozhi` 时 shim 子进程不被 kill，
+> 安装 [`deploy/naozhi-sudoers.example`](deploy/naozhi-sudoers.example)：
+> `cp deploy/naozhi-sudoers.example /tmp/naozhi` → 把 `ec2-user` 改成服务用户 →
+> `sudo visudo -c -f /tmp/naozhi` → `sudo install -m 440 -o root -g root /tmp/naozhi /etc/sudoers.d/naozhi`。
+> 验证：restart 后 `systemctl list-units --type=scope | grep naozhi-shim-` 数量不变（`naozhi doctor` 的 `zero-downtime` 项）。
+> 不装也能跑 —— 只是每次 restart 会打断正在运行的会话，journal 打 `WARN` 不致命。
+> **切勿**写 `NOPASSWD: ALL` 或放宽成 `NOPASSWD: /usr/bin/busctl`（服务用户就是 agent 跑 Bash 的用户，等于把 root 交给 agent）。
 
 > **在线 profile**：内存暴涨 / goroutine 泄漏 / CPU 热点排障，`ssh host` 后
 > 用 `curl -H "Authorization: Bearer $TOK" http://127.0.0.1:8180/api/debug/pprof/...`
@@ -575,10 +436,6 @@ journalctl -u naozhi -f
 > **事件推送**：`integrations.webhooks` 把 cron / sysession 的 `run.started` / `run.ended`
 > POST 到你的端点（HMAC 签名、重试、不阻塞调度器），用于 CI 联动或告警；payload 只含
 > run 元数据，不含 prompt / 结果文本。见 [`docs/rfc/outbound-webhooks.md`](docs/rfc/outbound-webhooks.md)。
-> **监控接入**：`server.metrics_enabled: true` 后 `GET /metrics`（Bearer dashboard token）
-> 以 Prometheus 文本格式导出全部 `naozhi_*` 计数器，不限 loopback，可被另一台机器上的
-> Prometheus / CloudWatch agent 抓取。字段含义仍以 [`docs/ops/pprof.md`](docs/ops/pprof.md)
-> 的计数器表为准，抓取配置见 [`docs/ops/metrics.md`](docs/ops/metrics.md)。
 
 > **一键排障**：`naozhi doctor` 聚合 binary / codesign / systemd / HTTP / auth /
 > 服务端子系统 / 配置漂移 / pprof / 状态目录 / CLI backend / 语音转写 / 安全配置等检查，
@@ -665,8 +522,7 @@ cost:
   每个放行的用户都算管理员，豁免管理员等于让会话额度失效。
 - **定时任务**：任务或整机的额度用尽后，到点的运行（包括手动「立即执行」）直接记为
   `skipped / budget_exceeded`，不启动会话、不计入自动暂停的连续失败次数；每个任务每天只有
-  第一次跳过写进运行历史并通知会话，之后的跳过不再占历史条数。沙箱任务在 dashboard 上的
-  「重放」也算一次新运行：额度用尽时返回 409、不启动 microVM，待处理条目留到重置后再重放。
+  第一次跳过写进运行历史并通知会话，之后的跳过不再占历史条数。
 - 到 `warn_ratio` 时，IM 回复末尾追加一行「⚠️ 今日费用已达预算的 80%」，定时任务发一条提示；
   每个 scope 每天各一次。整机额度的提醒每天只发给最先碰到它的那个会话或任务（额度用尽后的
   拒绝提示则每个会话、每个任务都会收到）。`action: warn` 时超过上限也照常执行，只再提醒一次。
@@ -712,55 +568,16 @@ kill -HUP $(pidof naozhi)
   `~/.claude/settings.json` 的 `env` 在启动时先于首次加载写入。
 - 设计见 [`docs/rfc/config-hot-reload.md`](docs/rfc/config-hot-reload.md)。
 
-### 生产架构
-
-```
-CloudFront → ALB (SG: CloudFront-only) → EC2 :8180 → systemd
-```
-
-- ALB 安全组仅允许 CloudFront 前缀列表
-- EC2 通过 IAM 角色认证 Bedrock（无 AKSK）
-- 推荐 t4g.small ARM64 实例
-
 ### 发布
 
 ```bash
 git tag v0.1.0
-git push origin v0.1.0    # GitHub Actions 自动构建 6 平台二进制 + Release
+git push origin v0.1.0    # GitHub Actions 自动构建 4 平台二进制 + Release
 ```
 
 ---
 
-## 项目结构
-
-```
-cmd/naozhi/              入口 + CLI 命令 (setup, install, doctor, upgrade, shim)
-internal/
-  cli/                   CLI 进程管理 + Protocol 接口 (stream-json / ACP)
-  session/               Session 路由 + 并发控制 + TTL 回收 + 持久化
-  dispatch/              消息处理 + slash 命令 + per-session 队列
-  server/                HTTP server + REST API + WebSocket hub
-  dashboard/             Dashboard 视图与资源
-  platform/              IM 平台统一接口 (feishu / slack / discord / weixin)
-  cron/                  定时任务调度器 (robfig/cron)
-  project/ projectapi/   项目发现 + Planner 路由 + 项目 API
-  sysession/             后台守护框架 (auto-titler / attachment-gc)
-  discovery/             外部 Claude 进程扫描 + 接管
-  transcribe/            语音转文字 (Amazon Transcribe Streaming)
-  attachment/            附件存储 + 引用计数 GC
-  eventlog/ history/     事件日志持久化 + 历史回放
-  node/ upstream/        多节点协议 + 反向连接（WebSocket hub 在 server/ 内）
-  selfupdate/            自动更新 (GitHub Releases 轮询 + 校验)
-  shim/                  零停机重启 sidecar 进程
-  i18n/                  多语言文案解析（纯逻辑内核，运行时未接线 · 规划中）
-  metrics/ runtelemetry/ 指标 + 运行遥测
-  config/                YAML 配置 + 环境变量展开
-deploy/                  systemd service unit
-```
-
-## 设计文档
-
-完整架构设计见 [DESIGN.md](docs/design/DESIGN.md)。
+架构设计见 [DESIGN.md](docs/design/DESIGN.md)，开发约定见 [CLAUDE.md](CLAUDE.md)。
 
 ## License
 

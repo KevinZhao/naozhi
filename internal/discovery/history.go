@@ -386,13 +386,6 @@ func intToA(n int) string {
 	return string(out)
 }
 
-// extractText handles content that is either a plain string or []block; thin
-// wrapper over extractTextAndImages for callers that only want text.
-func extractText(raw json.RawMessage) string {
-	text, _ := extractTextAndImages(raw)
-	return text
-}
-
 // extractTextAndImages decodes message content (a plain string or []block)
 // into its concatenated text plus thumbnail data URIs of any image blocks;
 // an image that cannot be thumbnailed is skipped without dropping the text.

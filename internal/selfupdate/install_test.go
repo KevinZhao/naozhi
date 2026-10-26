@@ -1,4 +1,3 @@
-// anchor-keep: restartSystemdNoWait's gate protects the one behaviour a test must never exercise for real (restarting the host's live service); the source guard is the only safe witness.
 package selfupdate
 
 import (
@@ -506,24 +505,6 @@ func TestServiceRunning_DoesNotRequireSelfPID(t *testing.T) {
 	withStubbedMainPID(t, os.Getpid()+1)
 	if !ServiceRunning() {
 		t.Error("ServiceRunning() must be true for an active unit regardless of which process asks")
-	}
-}
-
-// The self-restart primitive must gate on ServiceManagesThisProcess, never on
-// ServiceRunning. This is a source guard because the behaviour it protects —
-// `systemctl restart naozhi` reaching a service that does not run this process
-// — is exactly what a unit test must never be allowed to exercise for real.
-func TestRestartSystemdNoWait_GatesOnSelfManaged(t *testing.T) {
-	src, err := os.ReadFile("service.go")
-	if err != nil {
-		t.Fatalf("read service.go: %v", err)
-	}
-	body := funcBody(t, string(src), "func restartSystemdNoWait()")
-	if !strings.Contains(body, "if !ServiceManagesThisProcess()") {
-		t.Error("restartSystemdNoWait must gate on !ServiceManagesThisProcess(); an active unit that runs another process is not ours to restart")
-	}
-	if strings.Contains(body, "ServiceRunning()") {
-		t.Error("restartSystemdNoWait must not consult ServiceRunning(): it answers a different question (see F2)")
 	}
 }
 

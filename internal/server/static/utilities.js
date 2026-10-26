@@ -261,7 +261,7 @@ function buildCostHealthLines(c) {
 // estimate at list/contract price, never an invoice. A narrower `scope` marks
 // the dropped count ledger-wide: a lost entry has no owner to filter on.
 function costCardTitle(c, scope) {
-  let t = '近 30 天账本合计（' + (scope || '会话 + cron + 云沙箱') + '），CLI 估算口径，非账单';
+  let t = '近 30 天账本合计（' + (scope || '会话 + cron') + '），CLI 估算口径，非账单';
   if (c.unknown > 0) t += '；含 ' + c.unknown + ' 条未知定价（模型不在 CLI 价表，按默认模型估算）';
   if (c.dropped > 0) t += (scope ? '；整个账本曾丢弃 ' + c.dropped + ' 条（无法归到来源），此项可能偏低' : '；账本曾丢弃 ' + c.dropped + ' 条，金额可能偏低');
   return t;
@@ -454,9 +454,10 @@ const API_ERROR_HEADS = [
   ['work_dir does not exist', '工作目录不存在'],
   ['work_dir is not a directory', '路径不是目录'],
   ['work_dir is not a valid path', '工作目录路径不合法'],
-  ['work_dir must be an absolute path', '工作目录必须是绝对路径'],
   ['cron job quota reached', '定时任务数已达上限，请先删除不用的任务'],
   ['schedule interval below the 5m minimum', '执行间隔不能短于 5 分钟'],
+  ['invalid prompt: empty, too long or contains control characters', '提示词为空、过长或含控制字符'],
+  ['invalid schedule expression', '定时表达式不合法'],
   ['takeover refused: max concurrent processes reached', '进程数已满，外部进程未被终止；请先关闭一个空闲会话后重试'],
   ['takeover already in progress', '该会话正在被接管，请稍候'],
   ['takeover refused: router is shutting down', '服务正在重启，外部进程未被终止，请稍后重试'],

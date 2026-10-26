@@ -2,6 +2,7 @@ package system
 
 import (
 	"context"
+	"expvar"
 	"log/slog"
 	"net/http"
 	"time"
@@ -9,7 +10,6 @@ import (
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/osutil"
-	"github.com/naozhi/naozhi/internal/promexport"
 	"github.com/naozhi/naozhi/internal/ratelimit"
 	"golang.org/x/time/rate"
 )
@@ -20,7 +20,7 @@ import (
 type ConfigReloader func(ctx context.Context) (config.ReloadResult, error)
 
 // configReloadTotal counts reload attempts by outcome ("ok" / "error").
-var configReloadTotal = promexport.NewMap("naozhi_config_reload_total", "outcome")
+var configReloadTotal = expvar.NewMap("naozhi_config_reload_total")
 
 // configReloadKey is the single bucket of the reload limiter.
 const configReloadKey = "config-reload"

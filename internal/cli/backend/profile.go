@@ -126,7 +126,7 @@ var (
 
 // Register adds a Profile to the registry. Panics on duplicate ID: silent
 // last-write-wins would mask programmer error. history.RegisterFactory
-// overwrites instead, on purpose; internal/registry's doc explains the split.
+// overwrites instead, on purpose: it is the seam tests use to inject factories.
 func Register(p Profile) {
 	registryMu.Lock()
 	defer registryMu.Unlock()

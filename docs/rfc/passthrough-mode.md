@@ -12,10 +12,10 @@
 > - §5.2 readLoop 不记录 replay user 事件到 EventLog
 > - §5.2 ctx cancel 用 tombstone 策略，保留 FIFO 完整性
 >
-> **前身**: `passthrough-mode.md.v1-deprecated`（假设 naozhi 需要节流、节流目的是避免 CLI 合并。v1 的根本错误是误解了 CC CLI 的内部队列行为）
+> **前身**: `passthrough-mode.md.v1-deprecated`（已删除，可用 `git log -- docs/rfc/passthrough-mode.md.v1-deprecated` 找回）（假设 naozhi 需要节流、节流目的是避免 CLI 合并。v1 的根本错误是误解了 CC CLI 的内部队列行为）
 >
 > **配套文档**:
-> - `passthrough-mode-cc-tui-analysis.md` — CC TUI 代码级分析
+> - `passthrough-mode-cc-tui-analysis.md` — CC TUI 代码级分析（已删除，可用 `git log -- docs/rfc/passthrough-mode-cc-tui-analysis.md` 找回）
 > - `passthrough-mode-validation.md` — Phase 0 实测报告（V1-V9 全部通过）
 >
 > **核心论点**: Claude CLI 进程内部已经实现了完整的 command queue（`commandQueue` 单例 + `priority` 字段 + tool-边界 mid-turn drain + `wrapMessagesInSystemReminder`）。naozhi 只需要做透传，不要做合并、不要做节流、不要 coalesce。
@@ -35,7 +35,7 @@
 
 ## 2. CC CLI 已有的能力（实测 + 代码验证）
 
-> 以下事实均在 CC 2.1.126 源码 + `/tmp/test_*.py` 实测确认。详见 `passthrough-mode-cc-tui-analysis.md`。
+> 以下事实均在 CC 2.1.126 源码 + `/tmp/test_*.py` 实测确认。详见 `passthrough-mode-cc-tui-analysis.md`（已删除，可用 `git log -- docs/rfc/passthrough-mode-cc-tui-analysis.md` 找回）。
 
 | 能力 | 代码位置 | 对 naozhi 的意义 |
 |---|---|---|
@@ -827,7 +827,7 @@ case "user":
 
 ## 7. 实测验证清单（Phase 0 — 已完成）
 
-**状态**: 全部 9 项验证通过。详细报告见 `passthrough-mode-validation.md`，测试脚本在 `test/e2e/passthrough/`。
+**状态**: 全部 9 项验证通过。详细报告见 `passthrough-mode-validation.md`，测试脚本原在 `test/e2e/passthrough/`（已于 #3735 删除，见 git 历史 `d9b1c86d`）。
 
 | ID | 场景 | 结果 | 关键发现 |
 |---|---|---|---|

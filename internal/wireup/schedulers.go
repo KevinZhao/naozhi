@@ -1,6 +1,6 @@
-// schedulers.go owns cron + sysession construction/Start. wireup owns exactly
-// the boot-time CONSTRUCTION + REGISTRATION set (cli-backends,
-// history-backends, schedulers); runtime lifecycle and shutdown ordering of
+// schedulers.go owns cron + sysession construction/Start. wireup owns the
+// boot-time construction and registration (cli-backends, history-backends,
+// schedulers); runtime lifecycle and shutdown ordering of
 // router / server / platforms stay in cmd/naozhi (#1372).
 
 package wireup
@@ -8,7 +8,6 @@ package wireup
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
 	"github.com/naozhi/naozhi/internal/budget"
 	"github.com/naozhi/naozhi/internal/config"
@@ -78,7 +77,7 @@ type Schedulers struct {
 // already running on return. A cron.Start error is terminal; a sysession
 // build failure is returned via Schedulers.SysessionBuildErr with nil err.
 // The caller records StartupPhaseSchedulerMs (wireup has no metrics dep).
-func (b *Boot) WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
+func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 	out := Schedulers{}
 	if deps.Cfg == nil {
 		return out, fmt.Errorf("WireSchedulers: nil Cfg")
@@ -96,15 +95,6 @@ func (b *Boot) WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 	notifyDefault := cron.NotifyTarget{
 		Platform: deps.Cfg.Cron.NotifyDefault.Platform,
 		ChatID:   deps.Cfg.Cron.NotifyDefault.ChatID,
-	}
-
-	// Degradable: a bad sandbox config must not break startup; placement=sandbox
-	// jobs then fail per-run with ErrClassSandboxUnavailable.
-	sandboxRunner, sandboxErr := newAgentcoreSandboxRunner(deps.ParentCtx,
-		deps.Cfg.Cron.Sandbox.RuntimeARN, deps.Cfg.Cron.Sandbox.Region)
-	if sandboxErr != nil {
-		slog.Warn("cron sandbox placement unavailable; placement=sandbox jobs will fail until fixed",
-			"err", sandboxErr)
 	}
 
 	// A nil *Gate stays a nil interface, so cron skips the check entirely.
@@ -130,7 +120,6 @@ func (b *Boot) WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 		Agents:        deps.Agents,
 		AgentCommands: deps.Cfg.AgentCommands,
 		Telemetry:     deps.Telemetry,
-		Sandbox:       sandboxRunner,
 		Ledger:        deps.Router.Runs().CostLedger(),
 		Budget:        budgetGate,
 	})
@@ -138,13 +127,6 @@ func (b *Boot) WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 		return out, fmt.Errorf("start cron scheduler: %w", err)
 	}
 	out.Cron = scheduler
-
-	// Recorded after a successful cron.Start so the audit step reflects a live
-	// scheduler; not in requiredBootSteps because sysession is degradable (#2314).
-	b.recordStep("schedulers", BootStep{
-		Kind:   "schedulers",
-		Detail: "cron scheduler + sysession construction/Start",
-	})
 
 	// Degradable: a broken claude binary must not break startup.
 	if deps.BuildSysession != nil {

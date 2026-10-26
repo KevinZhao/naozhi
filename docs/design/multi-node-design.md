@@ -28,7 +28,7 @@ Prerequisite: primary can reach remote nodes via HTTP (WG, Tailscale, LAN, SSH t
 
 ```yaml
 # Primary node config.yaml
-nodes:
+workspaces:
   macbook:
     url: "http://10.0.0.2:8180"
     token: "shared-secret"        # remote node's dashboard_token
@@ -410,7 +410,7 @@ dashboard_token: "test-secret"
 # config-node-a.yaml (primary)
 server:
   addr: ":8180"
-nodes:
+workspaces:
   node-b:
     url: "http://localhost:8181"
     token: "test-secret"

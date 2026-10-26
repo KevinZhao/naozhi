@@ -2071,6 +2071,8 @@ v4 的 `GET /api/sessions/workflow_agent`（per-agent 预览）连同它专用�
 
 ### 6.3 注册清单（一次做齐，否则 CI 必红）
 
+> 注（#3724）：表中的 tsc / `wire.d.ts` / `// @ts-check` / `scripts/ts-check.test.mjs`（wireReach）、`wsproto.schema.json` 与 `rest.schema.json`（含 `TestRESTSchema_IsGenerated`、`TestSchema_IsGenerated`、`TestWireDTS_Current`）、`check-mock-rest`、`check-ws-*` 闸门均已删除，本表仅作历史记录。JSDoc 里残留的 `WsFrames[...]` / `RestResponses[...]` 只是说明性注释，已无类型定义。
+
 | 产物 | 动作 | 闸门 | PR |
 |---|---|---|---|
 | `SessionSnapshot.Workflows` | 重生成 `internal/dashboard/session/testdata/rest.schema.json`（`-update-rest-schema`） | `TestRESTSchema_IsGenerated` | PR-8 |

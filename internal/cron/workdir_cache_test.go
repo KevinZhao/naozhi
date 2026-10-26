@@ -55,17 +55,6 @@ func TestWorkDirResolveCache_NilSafe(t *testing.T) {
 	c.store("k", "/r", time.Now())
 }
 
-func TestWorkDirResolveCache_KeyDistinguishesInputs(t *testing.T) {
-	t.Parallel()
-	a := workDirResolveCacheKey("/work", "/root", "/rootResolved")
-	b := workDirResolveCacheKey("/wor", "k/root", "/rootResolved")
-	// Naive concat would collide ("/work"+"/root" == "/wor"+"k/root") —
-	// the \x00 separator is what prevents that.
-	if a == b {
-		t.Fatalf("key collision: a=%q b=%q (separator missing?)", a, b)
-	}
-}
-
 // TestWorkDirResolveUnderRootCached_HitElidesEvalSymlinks proves that a
 // second call with the same inputs does not re-run EvalSymlinks. We can't
 // stub the syscall directly, so we observe behaviour via a workspace

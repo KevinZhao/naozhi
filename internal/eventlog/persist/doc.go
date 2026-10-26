@@ -55,8 +55,6 @@
 //   - rotate.go / recovery.go / idx.go / framing.go / keyhash.go / entry.go /
 //     fstype*.go — already separate before J9.
 //
-// Persister implements none of the internal/eventlog/api interfaces
-// (EventStore = Appender + Reader + Subscriber): it is driven by the per-key
-// PersistSink (SinkFor) and read back via Recover. The adapter is deferred
-// to #1570.
+// Persister is driven by the per-key PersistSink (SinkFor) and read back via
+// Recover.
 package persist

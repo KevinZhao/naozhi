@@ -17,9 +17,6 @@ import (
 // boundary (see budgetRestartRequired).
 var hotSections = []string{"im_access", "im_rate_limit", "log.level", "cost.budget"}
 
-// HotSections lists the sections a reload applies without a restart.
-func HotSections() []string { return slices.Clone(hotSections) }
-
 // ReloadResult is what a reload reports: the file now in force and which of
 // its sections took effect now versus need a restart.
 type ReloadResult struct {

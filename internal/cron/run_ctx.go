@@ -12,7 +12,7 @@ import (
 // the outcome it ends with. Epic H #2546, direction 1.
 //
 // The execution-phase argument structs (preflightArgs, getSessionArgs,
-// execSendArgs, sandboxExecArgs) all carry {job, runID, startedAt, trigger,
+// execSendArgs) all carry {job, runID, startedAt, trigger,
 // finalizer}, and most also {snap, lg, notifyTo, key, inflight}. That shared
 // block is runCtx, embedded rather than re-spelled per phase.
 //
@@ -24,7 +24,7 @@ import (
 //	    errClass: ErrClassCanceled, errMsg: err.Error(), skipPersist: true})
 //
 // The two callers that are not on the execution path — the restart reconciler
-// (sandbox_pending.go) and the synthetic skip (scheduler_finish.go) — build a
+// (run_inflight_marker.go) and the synthetic skip (scheduler_finish.go) — build a
 // runCtx holding only the identity they have. A zero snap there is the same
 // "prompt/workDir/fresh are zero before snapshotJob" contract every
 // pre-snapshot failure branch already relies on; the dashboard falls back to
@@ -45,8 +45,8 @@ type runCtx struct {
 	// key is the router session key (`cron:<jobID>`).
 	key string
 	// backend is the backend the run's session runs on, set once the session
-	// is obtained; "" before that and on sandbox runs, where the ledger falls
-	// back to snap.backend.
+	// is obtained; "" before that, where the ledger falls back to
+	// snap.backend.
 	backend string
 	// runID pairs the terminal event with the started event already broadcast;
 	// the dashboard hub matches started→ended frames on it.
@@ -90,7 +90,7 @@ type runOutcome struct {
 	errClass ErrorClass
 	errMsg   string
 	// errClass is the machine-readable class the dashboard picks its icon and
-	// i18n copy by; errMsg is only the expanded detail — human-readable, control
+	// display copy by; errMsg is only the expanded detail — human-readable, control
 	// characters escaped, absolute paths redacted, ≤ maxCronErrMsgRunes.
 	// result is the CLI's final text, already through sanitiseRunResult (4K
 	// rune cap + truncation suffix + control-character filter) where the path
@@ -100,10 +100,6 @@ type runOutcome struct {
 	// run's CLI exited at startup: it names the notice cause and, for a
 	// turn_failed run, decides whether the failure counts toward the streak.
 	turnCause TurnCause
-	// restartOrphan is set only by finishOrphanRun: the run ended because
-	// naozhi restarted under it, not because of the job, so it leaves the
-	// failure streak alone.
-	restartOrphan bool
 	// sessionID is the CLI session_id this run's result frame named; empty
 	// when no result arrived (spawn/preflight failure, transport error, or a
 	// deadline/cancel before the result).
@@ -120,21 +116,11 @@ type runOutcome struct {
 	// instead of completing across the restart. Every other terminal state
 	// still clears the marker.
 	keepInflightMarker bool
-	// costInc is a local run's spend; sandbox runs carry cost via sandboxMeta.
+	// costInc is the run's spend.
 	costInc costledger.Increment
 	// endedAt, when non-zero, overrides finishRun's own clock read so a caller
 	// that already read it (observeSuccessLatency) shares the reading.
 	endedAt time.Time
-	// sandboxMeta is the cloud-execution receipt; nil for local runs.
-	sandboxMeta *SandboxRunMeta
-	// sandbox marks a placement=sandbox run even when no receipt exists yet
-	// (pre-invoke failures), so bumpRunStateMetrics also advances the
-	// CronSandboxRun{Failed,TimedOut}Total buckets and they stay a strict
-	// subset of the run totals (#2173). Deliberately separate from
-	// sandboxMeta != nil for that reason.
-	sandbox bool
-	// replayOf links this run to the one it re-executes; "" normally.
-	replayOf string
 }
 
 // runTerm records that a run's terminal protocol has begun.

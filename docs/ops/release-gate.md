@@ -18,9 +18,8 @@ dashboard?" and it blocks the GitHub Release when it fails.
 3. **Zero console errors** — `console.error` + `pageerror` + surfaced
    `unhandledrejection` (an init script re-throws rejections so Playwright sees
    them). A short, documented allow-list covers known non-regressions (PWA
-   manifest 404 in headless, the deprecated `require-sri-for` CSP directive, and
-   the login page's one CSP-blocked inline style — the last scoped to the login
-   view only).
+   manifest 404 in headless, and the login page's one CSP-blocked inline style,
+   scoped to the login view only).
 
 Plus a `/health` precondition: the gate polls `/health` until `status:ok`
 before driving any view.

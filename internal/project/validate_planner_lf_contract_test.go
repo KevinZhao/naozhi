@@ -9,7 +9,7 @@ import (
 // TestValidateConfig_PlannerPromptRejectsLF locks R222-SEC-6 contract:
 // ValidateConfig MUST reject PlannerPrompt that contains a literal LF (\n)
 // or CR (\r), regardless of whatever relaxation the cron-prompt validator
-// (validateCronPrompt in internal/server/dashboard_cron.go) introduces.
+// (cron.ValidatePromptStrict) introduces.
 //
 // Why this is contract-grade and not just one row in TestValidateConfig:
 //
@@ -17,7 +17,7 @@ import (
 //     The shell exec layer treats "\n" as an argv terminator on some
 //     parser paths, and our shim writes argv into a single-line proto
 //     frame.  If a future maintainer copy-pastes the LF-allowed branch
-//     from validateCronPrompt (which is safe because cron prompts go
+//     from cron.ValidatePromptStrict (which is safe because cron prompts go
 //     through stdin / stream-json, not argv), the argv path silently
 //     breaks framing or — worse — splits one prompt into two arguments.
 //

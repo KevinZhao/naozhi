@@ -38,14 +38,12 @@ func TestTransientBackendFailure(t *testing.T) {
 		{runOutcome{state: RunStateFailed, errClass: ErrClassTurnFailed, turnCause: TurnCauseQuota}, false},
 		{runOutcome{state: RunStateFailed, errClass: ErrClassSendError, turnCause: TurnCauseBackendOverloaded}, false},
 		{runOutcome{state: RunStateTimedOut, errClass: ErrClassTurnFailed, turnCause: TurnCauseBackendOverloaded}, false},
-		{runOutcome{state: RunStateFailed, errClass: ErrClassTurnFailed, turnCause: TurnCauseBackendOverloaded, restartOrphan: true}, false},
-		{runOutcome{state: RunStateFailed, errClass: ErrClassSandboxTransport, restartOrphan: true}, false},
 	}
 	for _, tc := range cases {
 		if got := tc.out.transientBackendFailure(); got != tc.want {
 			t.Errorf("transientBackendFailure(%+v) = %v, want %v", tc.out, got, tc.want)
 		}
-		if got := transientTurnFailure(tc.out.state, tc.out.errClass, tc.out.turnCause); !tc.out.restartOrphan && got != tc.want {
+		if got := transientTurnFailure(tc.out.state, tc.out.errClass, tc.out.turnCause); got != tc.want {
 			t.Errorf("transientTurnFailure(%+v) = %v, want %v", tc.out, got, tc.want)
 		}
 	}

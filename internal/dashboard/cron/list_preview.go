@@ -2,9 +2,7 @@ package cron
 
 import (
 	"fmt"
-	"log/slog"
 	"net/http"
-	"strconv"
 	"time"
 
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
@@ -74,8 +72,6 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			Notify:          j.Notify,
 			FreshContext:    j.FreshContext,
 			Backend:         j.Backend,
-			Placement:       j.Placement,
-			SideEffects:     j.SideEffects,
 		}
 		v.PausedReason, v.ConsecutiveFailures = j.PausedReason, j.AutoPauseCount()
 		if j.PausedReason == cronpkg.PausedReasonAutoTransient && !j.LastRunAt.IsZero() && !j.TransientFailingSince.IsZero() {
@@ -151,74 +147,6 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			Platform: def.Platform,
 			ChatID:   maskNotifyChatID(def.ChatID),
 		}
-	}
-	httputil.WriteJSON(w, resp)
-}
-
-// GET /api/cron/preview?schedule=...&count=N — validate schedule and return the
-// next N run times. count defaults to 1 and is clamped to [1, 10].
-func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
-	schedule := r.URL.Query().Get("schedule")
-	if schedule == "" {
-		writeCronErr(w, http.StatusBadRequest, "schedule is required")
-		return
-	}
-	// Cap schedule length so the parser cannot be DoS'd with a megabyte query param.
-	if len(schedule) > maxCronScheduleBytesDashboard {
-		writeCronErr(w, http.StatusBadRequest, "schedule too long")
-		return
-	}
-	if err := validateCronScheduleChars(schedule); err != nil {
-		writeCronErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	count := 1
-	if raw := r.URL.Query().Get("count"); raw != "" {
-		// Reject huge inputs before Atoi.
-		if len(raw) > 3 {
-			writeCronErr(w, http.StatusBadRequest, "count must be a positive integer")
-			return
-		}
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 {
-			writeCronErr(w, http.StatusBadRequest, "count must be a positive integer")
-			return
-		}
-		if n > 10 {
-			n = 10
-		}
-		count = n
-	}
-
-	// PreviewScheduleN / Location are nil-receiver-safe (UTC before wiring).
-	runs, err := h.deps.Scheduler.PreviewScheduleN(schedule, count)
-	loc := h.deps.Scheduler.Location()
-	tzName := loc.String()
-	tzLabel := ""
-	if n, offset := time.Now().In(loc).Zone(); n != "" {
-		tzLabel = formatTZOffset(tzName, offset)
-	}
-	if err != nil {
-		// Don't echo the raw parser error: field offsets / token names help an
-		// attacker enumerate accepted grammar. Log the detail instead.
-		slog.Debug("cron preview parse failed", "err", err)
-		httputil.WriteJSON(w, cronPreviewResp{Valid: false, Error: "invalid schedule expression"})
-		return
-	}
-
-	resp := cronPreviewResp{
-		Valid:         true,
-		Timezone:      tzName,
-		TimezoneLabel: tzLabel, // omitempty drops the empty-zone case
-	}
-	if len(runs) > 0 {
-		resp.NextRun = runs[0].UnixMilli()
-		nextRuns := make([]int64, len(runs))
-		for i, t := range runs {
-			nextRuns[i] = t.UnixMilli()
-		}
-		resp.NextRuns = nextRuns
 	}
 	httputil.WriteJSON(w, resp)
 }

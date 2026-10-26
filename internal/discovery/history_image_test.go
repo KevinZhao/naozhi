@@ -173,7 +173,7 @@ func TestExtractTextAndImages_ThumbnailReturnsEmpty(t *testing.T) {
 func TestExtractText_BackwardCompat(t *testing.T) {
 	setThumbnailFn(t, stubThumb)
 	raw := `[{"type":"text","text":"hi"},{"type":"image","source":{"type":"base64","data":"` + b64("x") + `"}}]`
-	if got := extractText(json.RawMessage(raw)); got != "hi" {
+	if got, _ := extractTextAndImages(json.RawMessage(raw)); got != "hi" {
 		t.Errorf("extractText = %q, want %q", got, "hi")
 	}
 }

@@ -67,6 +67,8 @@ case 按字面量分发。#2474/#2476/#2432/#2406 全是"后端字段语义变�
 
 ### 5. schema 生成与两端一致性
 
+> 注（#3724）：`wsproto.schema.json`、其生成器与契约测试、`check-ws-contract.mjs` 均已删除；本节仅作历史记录。现行契约只剩 `wsproto.Frames` 与由它生成的 `contract.js`。
+
 - `go generate ./internal/wsproto` 跑包内零依赖 reflect 生成器，产出
   `internal/wsproto/wsproto.schema.json`：每 type 的 properties/required/
   Go 类型映射 + MsgType 枚举全集。生成结果进仓，drift 由契约测试对比

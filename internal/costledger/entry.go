@@ -1,5 +1,5 @@
 // Package costledger is the single append-only ledger every cost producer in
-// naozhi writes to (session turns, cron local/sandbox runs, sysession runs)
+// naozhi writes to (session turns, cron runs, sysession runs)
 // and the only place "what did this machine / job / model spend" is answered
 // from. Leaf package: it must not import any internal/* package.
 // See docs/rfc/cost-ledger.md.
@@ -26,7 +26,7 @@ type Basis string
 const (
 	SourceSession     Source = "session"
 	SourceCronLocal   Source = "cron_local"
-	SourceCronSandbox Source = "cron_sandbox"
+	SourceCronSandbox Source = "cron_sandbox" // removed cloud sandbox; kept so older ledger rows still load
 	SourceSysession   Source = "sysession"
 
 	UnitUSD     Unit = "USD"
@@ -34,7 +34,7 @@ const (
 	UnitTokens  Unit = "tokens"
 
 	KindTurn     Kind = "turn"     // CLI cumulative differenced per turn
-	KindReceipt  Kind = "receipt"  // sandbox execution receipt
+	KindReceipt  Kind = "receipt"  // removed cloud sandbox's receipt; read-only legacy
 	KindMetering Kind = "metering" // backend metering rows (kiro/codex)
 	KindBackfill Kind = "backfill"
 	KindPartial  Kind = "partial" // turn ended without a result frame

@@ -6,10 +6,9 @@ import (
 	"github.com/naozhi/naozhi/internal/costledger"
 )
 
-// appendLedger writes the run's cost entries: a sandbox run contributes its
-// receipt, a local run the session-side increment (one USD row with the
-// per-model drill-down plus one row per backend metering unit). cron is the
-// run owner for both, so the session layer does not also write them. Rows
+// appendLedger writes the run's cost entries: the session-side increment (one
+// USD row with the per-model drill-down plus one row per backend metering
+// unit). cron is the run owner, so the session layer does not also write them. Rows
 // carry the backend the session ran on, else the job's own, else "claude".
 func (s *Scheduler) appendLedger(rc runCtx, out runOutcome) {
 	if s.ledger == nil || !s.ledger.Enabled() {
@@ -26,15 +25,6 @@ func (s *Scheduler) appendLedger(rc runCtx, out runOutcome) {
 	}
 	if base.Backend == "" {
 		base.Backend = "claude"
-	}
-	if out.sandboxMeta != nil {
-		if out.sandboxMeta.CostUSD > 0 {
-			e := base
-			e.Source, e.Kind, e.Unit, e.Amount = costledger.SourceCronSandbox, costledger.KindReceipt, costledger.UnitUSD, out.sandboxMeta.CostUSD
-			e.Models, e.Basis = out.sandboxMeta.Models, out.sandboxMeta.Basis
-			s.ledger.Append(e)
-		}
-		return
 	}
 	inc := out.costInc
 	if inc.USD > 0 || len(inc.Models) > 0 {

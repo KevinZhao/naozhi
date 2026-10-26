@@ -110,9 +110,6 @@ var cronDrawerJS embed.FS
 //go:embed static/cron_trigger.js
 var cronTriggerJS embed.FS
 
-//go:embed static/cron_attention.js
-var cronAttentionJS embed.FS
-
 //go:embed static/cron_live.js
 var cronLiveJS embed.FS
 
@@ -189,8 +186,8 @@ var filesViewJS embed.FS
 var faviconSVG embed.FS
 
 // Third-party release files, byte-identical to their npm dist (mermaid's bundle
-// gzipped) and kept under a versioned directory, so their SRI pins in
-// render_md.js stay valid and their responses can be cached as immutable. KaTeX
+// gzipped) and kept under a versioned directory, so their responses can be
+// cached as immutable. KaTeX
 // ships only its woff2 fonts: every browser the dashboard supports takes the
 // first src of each @font-face.
 //
@@ -290,7 +287,6 @@ var staticAssets, servedAssetVersion = func() (map[string]staticAsset, string) {
 		{"cron_timeline.js", cronTimelineJS, "static/cron_timeline.js", true},
 		{"cron_drawer.js", cronDrawerJS, "static/cron_drawer.js", true},
 		{"cron_trigger.js", cronTriggerJS, "static/cron_trigger.js", true},
-		{"cron_attention.js", cronAttentionJS, "static/cron_attention.js", true},
 		{"cron_live.js", cronLiveJS, "static/cron_live.js", true},
 		{"platform.js", platformJS, "static/platform.js", true},
 		{"ws_manager.js", wsManagerJS, "static/ws_manager.js", true},

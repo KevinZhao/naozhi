@@ -27,7 +27,6 @@ import (
 	"github.com/naozhi/naozhi/internal/session/sessiontable"
 	"github.com/naozhi/naozhi/internal/session/spawnpool"
 	"github.com/naozhi/naozhi/internal/session/workspacestore"
-	"github.com/naozhi/naozhi/internal/sessionconst"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
@@ -73,20 +72,19 @@ var ErrSpawnInFlight = errors.New("a spawn for this key is already in flight")
 var ErrTakeoverRaced = errors.New("concurrent session created during takeover")
 
 // Router defaults applied by NewRouter when the corresponding RouterConfig
-// field is zero. The source of truth lives in internal/sessionconst so
-// internal/config can read it without importing internal/session; these
-// re-exports keep session.DefaultTTL etc. compiling.
+// field is zero.
 const (
 	// DefaultMaxProcs is the concurrent-process cap applied when
-	// RouterConfig.MaxProcs is not set.
-	DefaultMaxProcs = sessionconst.DefaultMaxProcs
+	// RouterConfig.MaxProcs is not set. Keep in sync with
+	// config.defaultSessionMaxProcs (internal/config/defaults.go).
+	DefaultMaxProcs = 3
 	// DefaultTTL is the idle-session eviction threshold applied when
 	// RouterConfig.TTL is not set.
-	DefaultTTL = sessionconst.DefaultTTL
+	DefaultTTL = 30 * time.Minute
 	// DefaultPruneTTL is the "keep metadata for long-idle session" threshold
 	// applied when RouterConfig.PruneTTL is not set. Entries older than this
 	// are pruned from the store even when exempt.
-	DefaultPruneTTL = sessionconst.DefaultPruneTTL
+	DefaultPruneTTL = 72 * time.Hour
 )
 
 const (
@@ -734,12 +732,6 @@ func (r *Router) notifyChange() {
 // are end-of-turn only, so the extra lock round-trip is free.
 func (r *Router) NotifyIdle() {
 	r.ss.Update(func(tx sessTx) { tx.Broadcast() })
-}
-
-// ChatKey builds a chat-level key (without agent suffix) for workspace
-// overrides; see sessionkey.ChatKey.
-func ChatKey(platform, chatType, chatID string) string {
-	return sessionkey.ChatKey(platform, chatType, chatID)
 }
 
 // DefaultWorkspace returns the router's default working directory.

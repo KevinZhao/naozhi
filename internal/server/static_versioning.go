@@ -137,8 +137,7 @@ func renderDashboardHTML(raw []byte, assets map[string]staticAsset) ([]byte, err
 // page rendered by the previous build during a restart), revalidates, so no
 // URL is ever pinned to bytes other than the ones its hash names. private: the
 // assets are auth-gated, so a shared cache must not serve them. A vendor/ path
-// names its release version, and its bytes are pinned by SRI, so it is always
-// immutable.
+// names its release version, so it is always immutable.
 func staticCacheControl(r *http.Request, key string) string {
 	if v := r.URL.Query().Get("v"); strings.HasPrefix(key, "vendor/") || v != "" && v == assetURLVersion(staticAssets[key].etag) {
 		return "private, max-age=31536000, immutable"

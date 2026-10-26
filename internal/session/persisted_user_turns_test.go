@@ -60,42 +60,6 @@ func TestRecountPersistedUserTurns_AfterAppend(t *testing.T) {
 	}
 }
 
-// TestInstallFreshSessionLocked_RecountsPersistedUserTurns guards
-// R20260603040203-CODE-002: installFreshSession must seed
-// persistedUserTurns from the restored oldHistory so snapshot().MessageCount
-// and the AutoTitler min-turn gate report the correct count before any new
-// turn arrives. Tested via the same locking pattern the production code uses
-// (struct construction + historyMu-protected recount).
-func TestInstallFreshSessionLocked_RecountsPersistedUserTurns(t *testing.T) {
-	t.Parallel()
-	oldHistory := []clievent.EventEntry{
-		{Time: 1, Type: "user", Summary: "q1"},
-		{Time: 2, Type: "text", Summary: "a1"},
-		{Time: 3, Type: "user", Summary: "q2"},
-	}
-
-	// Replicate the construction pattern from installFreshSession:
-	// create the ManagedSession, set persistedHistory, then call
-	// recountPersistedUserTurnsLocked under historyMu.
-	s := &ManagedSession{
-		key:              "feishu:direct:alice:general",
-		persistedHistory: oldHistory,
-	}
-	if len(oldHistory) > 0 {
-		s.historyMu.Lock()
-		s.recountPersistedUserTurnsLocked()
-		s.historyMu.Unlock()
-	}
-
-	if got := s.persistedUserTurns.Load(); got != 2 {
-		t.Errorf("persistedUserTurns = %d, want 2 (2 user entries in oldHistory)", got)
-	}
-	snap := s.Snapshot()
-	if snap.MessageCount != 2 {
-		t.Errorf("Snapshot().MessageCount = %d, want 2", snap.MessageCount)
-	}
-}
-
 // TestRenameSession_RecountsPersistedUserTurns guards R20260603040203-CODE-002:
 // after RenameSession the renamed session must report the correct
 // persistedUserTurns count so AutoTitler's min-turn gate is not starved.

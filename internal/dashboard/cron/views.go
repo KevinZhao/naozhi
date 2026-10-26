@@ -29,7 +29,6 @@ func cronSummaryToView(r cronpkg.CronRunSummary) cronRunSummaryView {
 		DurationMS: r.DurationMS,
 		SessionID:  osutil.SanitizeForLog(r.SessionID, 64),
 		ErrorClass: string(r.ErrorClass),
-		ReplayOf:   r.ReplayOf,
 		CostUSD:    r.CostUSD,
 	}
 	if !r.EndedAt.IsZero() {
@@ -80,22 +79,6 @@ type cronRunDetailView struct {
 	ResultBytes int    `json:"result_bytes,omitempty"`
 	ErrorClass  string `json:"error_class,omitempty"`
 	ErrorMsg    string `json:"error_msg,omitempty"`
-	// ReplayOf links a replay run to its origin (§7.3 chain badge).
-	ReplayOf string `json:"replay_of,omitempty"`
-	// Sandbox is the cloud-execution receipt (RFC §7.3 meta bar), present only
-	// for placement=sandbox runs; nil renders no meta bar.
-	Sandbox *cronRunSandboxView `json:"sandbox,omitempty"`
-}
-
-// cronRunSandboxView is the dashboard projection of cronpkg.SandboxRunMeta (§7.3
-// meta bar); a separate type so the cron package stays free of server concerns.
-type cronRunSandboxView struct {
-	RuntimeARN      string  `json:"runtime_arn,omitempty"`
-	ImageVersion    string  `json:"image_version,omitempty"`
-	ExitStatus      int     `json:"exit_status"`
-	CostUSD         float64 `json:"cost_usd,omitempty"`
-	DurationMS      int64   `json:"duration_ms,omitempty"`
-	MemoryPeakBytes int64   `json:"memory_peak_bytes,omitempty"`
 }
 
 // cronJobView is the per-job element inside cronListResp.Jobs.
@@ -122,10 +105,6 @@ type cronJobView struct {
 	// Notify is a pointer to preserve the tri-state; nil renders as "legacy default".
 	Notify       *bool `json:"notify,omitempty"`
 	FreshContext bool  `json:"fresh_context,omitempty"`
-	// Placement 是运行位置（RFC §7.2 徽标数据源）：""/"local" 本机；"sandbox" 云沙箱。
-	Placement string `json:"placement,omitempty"`
-	// SideEffects 是"有外部副作用"声明（agentcore §6.2）；tri-state 同 Notify。
-	SideEffects *bool `json:"side_effects,omitempty"`
 	// PausedReason is "auto_failures" when the failure streak paused the job,
 	// "auto_transient" when a lasting backend outage did, "" for a manual
 	// pause; ConsecutiveFailures is the count behind that reason
@@ -196,17 +175,6 @@ func maskNotifyChatID(id string) string {
 type cronRunsListResp struct {
 	Runs       []cronRunSummaryView `json:"runs"`
 	NextBefore int64                `json:"next_before,omitempty"`
-}
-
-// cronPreviewResp is the wire shape returned by GET /api/cron/preview; only
-// Error is set when Valid is false.
-type cronPreviewResp struct {
-	Valid         bool    `json:"valid"`
-	Error         string  `json:"error,omitempty"`
-	Timezone      string  `json:"timezone,omitempty"`
-	TimezoneLabel string  `json:"timezone_label,omitempty"`
-	NextRun       int64   `json:"next_run,omitempty"`
-	NextRuns      []int64 `json:"next_runs,omitempty"`
 }
 
 // cronUpdateResp is the wire shape returned by PATCH /api/cron.

@@ -7,7 +7,7 @@
 > **依赖 / 前置**:
 > - `docs/rfc/multi-backend.md`（backend.Profile 抽象、`/api/cli/backends`、new-session picker、per-session backend chip 已就位）
 > - `docs/rfc/envpolicy-consolidation.md`（`internal/envpolicy` 叶子校验器 + per-backend 凭据矩阵，本 RFC 在 §5 复用其 SSRF/profile guard 与 `DetectBackendFromEnv`）
-> - `docs/rfc/agentcore-cloud-sandbox.md`（`payload.Env map[string]string` per-invoke env 覆盖的既有先例，本 RFC §4 参照其形状）
+> - `docs/rfc/agentcore-cloud-sandbox.md`（已随云沙箱功能删除；`payload.Env map[string]string` per-invoke env 覆盖的既有先例，本 RFC §4 参照其形状）
 > **关联代码**:
 > - 认证/env：`cmd/naozhi/main_claude_settings.go`（`claudeEnvAllowedPrefixes` :44、`awsEnvDenyList` :85、`filterClaudeEnv` :185）· `internal/shim/manager.go`（`m.shimEnv` 快照 :260、`cmd.Env = m.shimEnv` :479、`shimEnvAllowedPrefixes` ~:1286、`filterShimEnv` ~:1303）· `internal/envpolicy/backend.go`（`DetectBackendFromEnv` :58、`EnvCredsForBackend`）· `internal/sysession/env.go`
 > - 解析链：`internal/session/router_lifecycle.go`（`AgentOpts` :305-311、`resolveSpawnParamsLocked` :473-569、`unregisterSessionLocked` :295）· `internal/session/routing.go`（`KeyResolver.ResolveForChat` :172-218）· `internal/session/router_backend.go`（`backendStore` :36-67、`SetSessionBackend` :296）
@@ -73,7 +73,7 @@ naozhi 主进程 os.Environ()
 5. **父进程注入侧 `awsEnvDenyList`（`main_claude_settings.go:85-94`）故意屏蔽 `AWS_PROFILE` / `AWS_ROLE_ARN` / `AWS_SHARED_CREDENTIALS_FILE`**（防认证源劫持）。→ Bedrock 侧**不靠切 AWS profile 区分账号**（见 §3 决策）。
 6. **proxy 无 header 路由**，纯 Bedrock 网关，无「直连 api.anthropic.com」旁路。→ 1P 链路**不经过** proxy，直接指 `api.anthropic.com`；这恰好落在 access profile 的 env 覆盖上，proxy 不改。
 7. **`PUT /api/projects/config` 已存在**（`api.go:317`，带 `ValidateConfig` + rate limit），**但零 dashboard UI**——今天 project 配置只能经 CLI 会话内 `update_config` 工具改。→ UI 地基已就绪。
-8. **agentcore sandbox 已有 per-invoke env 先例**（`payload.Env map[string]string`）——per-call env overlay 在本仓已验证的形状。
+8. **agentcore sandbox 曾有 per-invoke env 先例**（`payload.Env map[string]string`，已随云沙箱删除）——per-call env overlay 的参照形状。
 
 ### 1.3 范围
 

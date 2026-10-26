@@ -2,6 +2,8 @@ package session
 
 import (
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // TestKeyNamespaces_DriveDerivedSlices pins the R239-ARCH-L invariant:
@@ -76,7 +78,7 @@ func TestKeyNamespaces_DriveDerivedSlices(t *testing.T) {
 	// route through this test plus DESIGN.md.
 	scratchExempt := false
 	for _, ns := range keyNamespaces {
-		if ns.prefix == ScratchKeyPrefix {
+		if ns.prefix == sessionkey.ScratchKeyPrefix {
 			scratchExempt = ns.exempt
 			break
 		}

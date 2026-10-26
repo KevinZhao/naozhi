@@ -7,8 +7,7 @@ import (
 
 // TestVoiceNoticeConstants pins R247-ARCH-19 (#631): the voice-pipeline
 // user-facing notices are centralised as named constants instead of inline
-// literals scattered through the audio handler, so the future i18n catalog
-// has a single hook point. Guards that both stay non-empty and bracketed
+// literals scattered through the audio handler. Guards that both stay non-empty and bracketed
 // (the "[…]" form the dashboard / IM renders as a system notice rather than
 // model output) so a refactor can't silently blank them.
 func TestVoiceNoticeConstants(t *testing.T) {

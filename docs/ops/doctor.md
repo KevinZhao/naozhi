@@ -42,7 +42,6 @@ naozhi doctor --timeout 2s
 | `config-drift` | 磁盘 `config.yaml` 的 sha256 与进程上报的 `config_sha256` 一致（显示前 12 位和 `loaded_at`）；无 token、配置读不出、进程不可达、`/health` 非 200 或 token 不被接受时 skipped | 不一致（not applied，显示 mtime 与 `loaded_at`，提示跑 `naozhi config reload`）；`/health` 有 `config_restart_required`（上次重载留下的待重启段，报 `restart required for: ...`，此时指纹停在上一份完整应用的文件；磁盘与 `config_reloaded_sha256` 不一致说明重载之后又改过，同一行先报 not applied）；进程不上报指纹（早于 #2538）或指纹格式不对；`/health` JSON 解析失败 | - |
 | `pprof` | `/api/debug/pprof/` 200 | 无 token；403（远端调用 / hardening 生效）或意外码 | 请求构造或发送失败 |
 | `expvar` | `/api/debug/vars` 200 且 payload 含 `naozhi_session_create_total` | 无 token；403（远端调用 / hardening 生效）或意外码 | 请求构造或发送失败；读 body 失败；200 但没有该计数器（路由挂错） |
-| `metrics` | `/metrics` 200 且是含 `# TYPE naozhi_session_create_total counter` 的 Prometheus 文本；未启用（404，`server.metrics_enabled` 关）也算 pass | 无 token；403（服务端没配 `dashboard_token`）；401（token 被拒）或意外码 | 请求构造或发送失败；读 body 失败；200 但不是 naozhi 的 Prometheus 文本（路由挂错） |
 | `state dir` | `~/.naozhi` 可写 | 目录不存在（首次运行） | 存在但不可写 / 非目录 |
 | `cli backend <id>` | 配置的路径 `--version` 成功（显示版本与路径） | 非默认 backend 探测失败；或非默认 id 未注册（启动时跳过）；或默认 id 没有可用 runtime（未注册或不在 `cli.backends` 里），默认路由的会话改落到第一个已注册的 backend 且它探测成功 | 默认 backend 探测失败（没有健康的兄弟 backend 时启动直接拒绝；有则默认路由的会话起不来）；默认 id 没有可用 runtime，且没有任何已注册 backend 探测成功（启动拒绝），或兜底的那个 backend 探测失败 |
 | `transcribe creds` | `transcribe.enabled` 时 AWS 凭证链取得到凭证（显示来源）；未启用则 skipped | 取不到凭证，语音消息会失败 | - |
@@ -111,7 +110,7 @@ $ naozhi doctor
 
 `zero-downtime` 检查通过 `systemctl list-units --type=scope | grep naozhi-shim-` 数 scope 数量。
 
-- **有 scope**：说明 sudoers hardening 生效（或曾经生效，scope 一旦建立就持续存在直到 shim 退出）。[`docs/ops/sudoers-hardening.md`](sudoers-hardening.md) 是否安装决定未来 restart 能否新增 scope
+- **有 scope**：说明 sudoers hardening 生效（或曾经生效，scope 一旦建立就持续存在直到 shim 退出）。[`deploy/naozhi-sudoers.example`](../../deploy/naozhi-sudoers.example)（安装步骤见 README）是否安装决定未来 restart 能否新增 scope
 - **0 scope**：sudoers 没配 / 尚无任何活跃 shim。发一条消息让 shim spawn 一次再跑 doctor 即可分辨两者
 - **`systemctl list-units` 失败**：通常非 Linux 或 systemd 用户空间不可达
 
@@ -119,4 +118,3 @@ $ naozhi doctor
 
 - 深度探测（JSON 结构校验 /api/sessions 响应形状、cron job 执行历史）—— doctor 保持"顶层快照"语义，深度分析走 pprof + journalctl
 - 自动拉 pprof heap/goroutine snapshot —— 想要就用 [`docs/ops/pprof.md`](pprof.md)
-- 监控级集成（Prometheus exporter）—— 单独立项

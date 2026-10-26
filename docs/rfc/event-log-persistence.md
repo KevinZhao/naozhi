@@ -852,8 +852,6 @@ rotate 期间 Persister goroutine 串行:
 - `naozhi_eventlog_persist_malformed_lines_total`
 - **`naozhi_eventlog_persist_replay_leak_total`**(blocker 1):生产稳态应为 0
 
-`counter_wiring_contract_test.go` 锁每个 Inc 点。
-
 `/health` 响应(blocker 3 修复):
 
 ```json

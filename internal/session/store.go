@@ -17,6 +17,7 @@ import (
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/osutil/jsonfile"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // maxStoreFileBytes caps how much Load reads from any session-store file so a
@@ -112,13 +113,13 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 	// Scratch (ephemeral aside) sessions must not persist, or loadStore would
 	// resurrect a zombie whose quoted-context system prompt is gone and whose
 	// dashboard tab is closed. The pool TTL sweeper handles live cleanup.
-	if IsScratchKey(s.key) {
+	if sessionkey.IsScratchKey(s.key) {
 		return storeEntry{}, false
 	}
 	// System daemon stubs (sys:{name}) are register-on-startup. Independent of
 	// isExemptKey (TTL/LRU only): persisting them would leave dangling entries
 	// and broaden the sessions.json tampering surface (system-session RFC §14).
-	if IsSysKey(s.key) {
+	if sessionkey.IsSysKey(s.key) {
 		return storeEntry{}, false
 	}
 	// getSessionID avoids a data race with concurrent Send; fall back to the

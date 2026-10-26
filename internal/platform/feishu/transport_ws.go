@@ -19,7 +19,7 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
-// Voice-pipeline user-facing notices, centralised as the future i18n seam.
+// Voice-pipeline user-facing notices, centralised here.
 const (
 	msgVoiceDownloadFailed   = "[语音消息下载失败，请重试]"
 	msgVoiceTranscribeFailed = "[语音消息转写失败，请发送文字消息]"

@@ -3,6 +3,7 @@
 - 状态：Draft v2.1（v1 经 5 路独立评审：架构 / Go 可行性 / 性能 / 安全 / 事实核查；v2 经架构 + Go 二轮复审均 APPROVE-WITH-CHANGES；全部 BLOCKING/SHOULD-FIX 已吸收，见 §14）
 - 日期：2026-09-05
 - Issue：#2286 [R202606e-ARCH-6]
+- 注：cron 云沙箱（AgentCore）placement 已删除；文中 sandbox / `SandboxMeta` / agentcore 回执相关条目仅作历史记录，`cron_sandbox` 来源与 `receipt` 类型只保留枚举以读取旧账本。
 - 相关：#2276（per-turn delta）、#2280（本地 cron cost）、#2284（孤儿 session delta）、#2345（kiro credits）、#2355（leak-recovery 重复计费）
 
 ## 1. 背景与问题
@@ -11,7 +12,7 @@
 
 | 记账点 | 位置 | 语义 | 单位 |
 |---|---|---|---|
-| (a) session `costSpent` / `lastCumulativeCost` | `internal/session/managed_runmetric.go:48-92` finishRun → `runhistory.TurnCostDelta`（`runhistory/cost.go:13`） | CLI `total_cost_usd`（**进程内累计值**）差分成 per-turn delta 后累进；落盘 `session-runs/<hash>/<run>.json` 与 `sessions.json`（`store.go:194`） | USD |
+| (a) session `costSpent` / `lastCumulativeCost` | `internal/session/managed_runmetric.go:48-92` finishRun → `costledger.Delta`（`internal/costledger/delta.go`，原 `runhistory.TurnCostDelta` 已并入） | CLI `total_cost_usd`（**进程内累计值**）差分成 per-turn delta 后累进；落盘 `session-runs/<hash>/<run>.json` 与 `sessions.json`（`store.go:194`） | USD |
 | (b) cron `CronRun.CostUSD` / `SandboxRunMeta.CostUSD` | `internal/cron/run.go:50`、`cron/sandbox.go:88`、`scheduler_run.go:826`、`wireup/cron_router_adapter.go:123` | 本地 run 直接透传 `cli.SendResult.CostUSD`（**未差分的进程累计值**）；sandbox run 用 agentcore envelope 的 `total_cost_usd` | USD |
 | (c) backend `Profile.CostUnit` | `profile_claude.go:32` USD / `profile_kiro.go:31` credits / `profile_codex.go:36` tokens | 仅 UI 标签 | 标签 |
 
@@ -51,7 +52,7 @@
 | P5 | 无 result 的 turn（timeout/cancel/进程死亡）成本丢失或错配 | `managed_runmetric.go:77` 仅 `result != nil` 计费 | 同进程下并入下一 turn（总额对、per-turn 错）；进程死亡则永久丢失 |
 | P6 | 单位异构无字段承载；kiro credits / codex tokens 不落盘 | `SessionRun.CostUSD` 只有 USD；credits 只在 header snapshot（`managed_query.go:236`）；`protocol_acp.go` 无 CostUSD → kiro `SessionRun.CostUSD=0` | kiro/codex 消耗不进任何持久账 |
 | P7 | 无 `costBasis` 记录 | 同 P1 | `dashboard.js:4016-4020` 注释因"Bedrock 常读 $0"删掉了 cost chip，是旧 CLI 行为；现已非 0 但仍是 list 估算，UI 无法诚实标注 |
-| P8 | passthrough 合并/乱序 turn 的 per-turn 归属近似 | `passthrough.go:329` follower `CostUSD:0`；`TurnCostDelta` 把增长全给先到者 | 总额正确、per-turn 近似——**接受，不在本 RFC 修** |
+| P8 | passthrough 合并/乱序 turn 的 per-turn 归属近似 | `passthrough.go:329` follower `CostUSD:0`；`costledger.Delta` 把增长全给先到者 | 总额正确、per-turn 近似——**接受，不在本 RFC 修** |
 | P9 | Home 总花费 = 前端 live session 求和 | `dashboard.js:9199` | 不含已删 session / cron / sysession |
 | P10 | cron 时间轴成本小字 = 前端对**已加载** run 求和（初始种子 `recent_runs`，cap=5：`dashboard/cron/handlers.go:571`） | `cron_view.js:2335`；UI 已标注"非全量账单" | 没有任何 per-job 聚合口径；`scheduler_run.go:825` 注释里的 "monthly aggregates" 在代码中不存在 |
 
@@ -82,7 +83,7 @@
 ## 4. 数据模型
 
 ```go
-// internal/costledger/entry.go —— 叶子包：不 import 任何 internal/*（照抄 runtelemetry/imports_test.go 的 TestPackageIsLeaf）
+// internal/costledger/entry.go —— 叶子包：不 import 任何 internal/*
 type Source string // "session" | "cron_local" | "cron_sandbox" | "sysession"
 type Unit   string // "USD" | "credits" | "tokens"
 type Kind   string // 采集方式："turn"(CLI 累计差分) | "receipt"(sandbox 回执) | "metering"(kiro/codex) | "backfill" | "partial" | "adjust"(对账修正，可为负)
@@ -119,7 +120,7 @@ type ModelDelta struct {
     Input, Output, CacheRead, CacheWrite, Thinking, WebSearch int64
 }
 
-// Cumulative 是"某进程 incarnation 的累计视图"，Delta 只记正增长（同 TurnCostDelta 规则）。
+// Cumulative 是"某进程 incarnation 的累计视图"，Delta 只记正增长（沿用原 runhistory.TurnCostDelta 的规则）。
 type Cumulative struct {
     USD     float64
     Models  map[string]ModelUsage   // key = raw model
@@ -146,7 +147,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 |---|---|---|---|
 | `session` | `ManagedSession.accountTurnCost`（§5.2） | 每次 `Send/SendPassthrough` 回合结束（含 leak-recovery 的第二回合，各记一条） | `Delta(proc 累计视图, lastCumulative)` |
 | `cron_local` | `cron.Scheduler.finishRun` | run 终态 | cron 在所持会话上开关的 cost window 收集到的增量（§5.3） |
-| `cron_sandbox` | `cron.Scheduler.finishRun` | run 终态且 `SandboxMeta.CostUSD>0` | `SandboxMeta.CostUSD`（§5.4） |
+| `cron_sandbox` | （已随云沙箱删除，仅保留枚举供读取旧账本） | — | — |
 | `sysession` | `sysession.Manager.runOnce` | 每次 daemon Tick 的 Runner 调用返回 | result 帧 `total_cost_usd`（独立进程，无需差分）（§5.5） |
 
 规则：cron 在 Send 前对所持的 `*ManagedSession` 调 `BeginCostWindow`，Send 返回处立即调 `EndCostWindow`（#3401）。窗口开着时，`accountTurnCost` 把本会话自己差分出的增量**累进 costSpent 并收进窗口，不写 ledger**——此刻 cron 是 run owner，`EndCostWindow` 返回的就是 run 的增量；窗口外的读数（Send 返回后才到的迟到 result、dashboard 对 cron key 的手动发送、进程结束 partial、沿 `successor` 链转来的花费）一律以 `Source=session` 入账，保证永不漏账。"窗口是否开着"与差分、累进在同一段 `costMu` 内判定，所以每个读数要么在 run 的增量里、要么是一条 session 行，不会两边都记、也不会两边都漏。窗口未关又被重开时，前一个窗口收集的增量没有 owner 会认领，直接以 `Source=session` 入账。唯一刻意接受的漏账：Send panic 时 `execSend` 的 defer 关窗但没有 `finishRun` 去记（run 记录本身也一并丢失，与旧门控一致）。旧的按 key 判定的 `ownedByRun` 门（run 在途期间一直持有，比 cron 的测量区间长：Send 返回到 `finalize` 之间到达的 result 与 deadline 路径 Reset 杀掉进程的 partial 两边都不记）已删除。`IsSysKey` 的 session 不经 ManagedSession（Runner 直接 exec），无此分支。passthrough 合并的 N 个 turn 只有 head 有非零增量 → 1 条 entry（P8 已接受）。
@@ -187,7 +188,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 - `cronSessionAdapter.Send` 不再透传 `r.CostUSD`；`cron.SendResult.CostUSD` 字段删除（仅 cron 内部使用，grep 确认无其他消费者后删）。
 - 回归测试：persistent 模式连续两次 Send，进程累计 0.3 → 0.5，断言两条 `CronRun.CostUSD` 为 0.3 / 0.2（旧代码为 0.3 / 0.5 FAIL）；leak-recovery 双回合 cron run 记 delta 总和。
 
-### 5.4 cron sandbox run
+### 5.4 cron sandbox run（已随云沙箱删除）
 
 - `finishRun` 中 `ledger.Append` **放在 `scheduler_finish.go:304` 的持久化 if 之外**，只受 `cost.enabled` 控制（否则 `StorePath` 为空时 sandbox 成本全丢，是 P4 上移一层）；`dropOrphanRun`（`:331`）删 CronRun 时 ledger entry 保留（钱确实花了）。
 - `Meta.CostUSD>0` 即入账（含 `FailedTransport`：microVM 里的 CLI 确实花了钱），`Kind=receipt`、`Basis=""`，entry 可带 sandbox state 供诊断；replay 是**重新执行**（`run.go:38` 新 RunID → 新 `RuntimeSessionID`，`sandbox.go:188`），另起 entry，不是双记，无需去重。
@@ -231,9 +232,9 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 ```
 
 - 同一 `key` 不同 `unit` 是不同 bucket；前端按 unit 分别渲染。
-- `GET /api/cost/entries?session_key=|job_id=|run_id=&from=&to=&limit=`：明细，调试/审计用。
+- ~~`GET /api/cost/entries`~~：明细端点没有前端调用方，已删除（sub/dead-api-endpoints）；明细仍可直接读账本文件。
 - `GET /api/cost/budget?session_key=|job_id=`（#3447）：今日花费对 `cost.budget` 上限，`{enabled, scope, subject, spent, limit, warn, over, blocked, day, reset_at}`；取 IM / cron 闸门对该 key 或任务会检查的那一档（两者都不带 = 整机）。未配置预算时 `enabled:false`，没有适用上限时 `scope` 为空。只读，不拦 dashboard。
-- 校验（对照 `dashboard/cron/handlers.go:36-99 validateStringField`）：`from/to` RFC3339 解析失败 → 400，`to<from` → 400，跨度 > 90 天且无 `allow_full_range` → 400；`group_by` 白名单；`limit` ∈ [1,1000] 默认 200；`session_key/job_id/run_id/workspace` 长度 ≤256、合法 UTF-8、禁 C0/DEL、禁 log-injection runes；`dropped>0` 时响应加 `"note":"amount may be underestimated"`。
+- 校验：`from/to` RFC3339 解析失败 → 400，`to<from` → 400，跨度 > 90 天且无 `allow_full_range` → 400；`group_by` 白名单；`session_key/job_id/run_id/workspace` 长度 ≤256、合法 UTF-8、禁 C0/DEL、禁 log-injection runes；`dropped>0` 时响应加 `"note":"amount may be underestimated"`。
 - 鉴权走既有 `auth()`；不做 per-IP 限流（已鉴权 dashboard 接口统一不限流）。可见性与 `/api/sessions` 同级（naozhi 单租户；`session_key` 含平台用户 id 与现有 sessions API 暴露面一致，不新增）。
 
 ## 8. Dashboard
@@ -284,7 +285,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 
 ## 12. 测试策略
 
-- 单测：`costledger.Delta`（乱序 / 新 model / 新 Unit / 字段回退 / 16 上限）；`Append` 拒空、枚举校验、字符串消毒；rollup / retention / 半行恢复 / symlink 拒绝；summary 每档 `group_by` + unit 分桶不混算 + 窗口上限；`TestPackageIsLeaf`。
+- 单测：`costledger.Delta`（乱序 / 新 model / 新 Unit / 字段回退 / 16 上限）；`Append` 拒空、枚举校验、字符串消毒；rollup / retention / 半行恢复 / symlink 拒绝；summary 每档 `group_by` + unit 分桶不混算 + 窗口上限。
 - 集成：session finishRun → 1 条 entry；runStore=nil 时 costSpent 仍累进（P4 回归，旧代码 FAIL）；cron persistent 两次 run delta（P2 回归，旧代码 FAIL）；cron 窗口内的 turn 不写 session ledger、窗口外的迟到 result 与 partial 写 session ledger；sandbox 三种 outcome 各 1 条（CostUSD>0 时）、replay 另起 1 条；dashboard 对 cron key 在 run 窗口外发送 → `Source=session` entry；kiro metering 差分（两 turn 各 2 credits → 两条 amount=2，旧逻辑第二条会是 4）；sysession json 三态；leak-recovery 拷贝 ModelUsage。
 - 基准：`BenchmarkReadEvent_NonResultFrame` allocs 不变；`BenchmarkAccountTurnCost_16Models`。
 - 前端：Home 卡 / cron per-job 聚合契约测试。
@@ -299,7 +300,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
 | **0** | PR-2b | cron：`CostTotals` 前后差分 + `CronRun.CostUSD` 改增量 + cron_local/cron_sandbox 写入 + **同一 PR 内注入 `ownedByRun` 门**（门与写入同进同退，避免 2a→2b 之间或 2b 回滚期间 cron 成本真空；#3401 以 cost window 取代该门）+ 删 `cron.SendResult.CostUSD` | P2 |
 | **0** | PR-3 | `/api/cost/summary|entries` + 服务概览卡 + cron per-job 聚合（config 已随 PR-2a 落地） | P9 P10 |
 | 1 | PR-4 | sysession json runner + 写入（Runner 经 ctx `RunInfo` 归属到 Manager 的 runID） | P3 |
-| 2 | PR-5 | `naozhi cost backfill`；rollup 覆盖整个保留期（取代月度 rollup 文件）；agentcore 回执带 modelUsage；服务概览健康条 dropped/unknown 告警 | — |
+| 2 | PR-5 | `naozhi cost backfill`；rollup 覆盖整个保留期（取代月度 rollup 文件）；服务概览健康条 dropped/unknown 告警 | — |
 | 3 | PR-6 | 5.6 影子 token 账（进程死亡的 turn 记 `Kind=partial` entry，按 CLI 实测单价估算金额；服务概览健康条提示 partial 计数） | P5 |
 | 3 | PR-7 | `naozhi cost reconcile`：`Kind=adjust`（可为负）冲回 `--resume` 恢复额，按天补齐 transcript 与账本的残差（§9） | — |
 

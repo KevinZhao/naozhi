@@ -3,7 +3,6 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -63,47 +62,9 @@ func TestValidateConfig_AgentSystemPrompt(t *testing.T) {
 	}
 }
 
-// TestSplitLegacySystemPromptArgs covers both flag shapes. The indices are the
-// contract: the migration keeps the nodes at keptIdx and re-homes the comments
-// of those at liftedIdx, so every item must land in exactly one of them.
-func TestSplitLegacySystemPromptArgs(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name       string
-		in         []string
-		wantKept   []int
-		wantLifted []int
-		wantLift   string
-		wantFound  bool
-	}{
-		{"absent", []string{"--keep", "x"}, []int{0, 1}, nil, "", false},
-		{"bare form", []string{"--append-system-prompt", "P", "--keep"}, []int{2}, []int{0, 1}, "P", true},
-		{"equals form", []string{"--keep", "--append-system-prompt=P"}, []int{0}, []int{1}, "P", true},
-		{"both forms join in order", []string{"--append-system-prompt", "A", "--append-system-prompt=B"}, nil, []int{0, 1, 2}, "A\n\nB", true},
-		{"trailing bare flag no value", []string{"--keep", "--append-system-prompt"}, []int{0}, []int{1}, "", true},
-		{"next token is a flag so no value", []string{"--append-system-prompt", "--keep"}, []int{1}, []int{0}, "", true},
-		{"only the flag leaves nothing kept", []string{"--append-system-prompt", "P"}, nil, []int{0, 1}, "P", true},
-		{"value-looking item after the value is kept", []string{"--append-system-prompt", "P", "3"}, []int{2}, []int{0, 1}, "P", true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			kept, liftedIdx, lifted, found := splitLegacySystemPromptArgs(tc.in)
-			if found != tc.wantFound || lifted != tc.wantLift || !slices.Equal(kept, tc.wantKept) || !slices.Equal(liftedIdx, tc.wantLifted) {
-				t.Fatalf("got (kept=%v liftedIdx=%v lifted=%q found=%v), want (kept=%v liftedIdx=%v lifted=%q found=%v)",
-					kept, liftedIdx, lifted, found, tc.wantKept, tc.wantLifted, tc.wantLift, tc.wantFound)
-			}
-			if len(kept)+len(liftedIdx) != len(tc.in) {
-				t.Errorf("%d kept + %d lifted indices for %d args: every item must be accounted for once", len(kept), len(liftedIdx), len(tc.in))
-			}
-		})
-	}
-}
-
 // TestLoad_AgentSystemPrompt is the operator-facing end to end: a YAML block
-// scalar system_prompt loads verbatim, and a legacy `--append-system-prompt`
-// under args is lifted by Load so the config that never worked (#2493) now
-// yields the intended prompt.
+// scalar system_prompt loads verbatim and a bad one is rejected with its field
+// path.
 func TestLoad_AgentSystemPrompt(t *testing.T) {
 	t.Parallel()
 	write := func(t *testing.T, body string) string {
@@ -130,39 +91,6 @@ agents:
 		}
 		if got := cfg.Agents["reviewer"].SystemPrompt; got != "You are a code review expert.\nAnswer in Chinese." {
 			t.Errorf("SystemPrompt = %q", got)
-		}
-	})
-
-	t.Run("legacy args flag lifted", func(t *testing.T) {
-		t.Parallel()
-		cfg, err := Load(write(t, `
-agents:
-  reviewer:
-    model: sonnet
-    args: ["--append-system-prompt", "You are a code review expert.", "--keep"]
-`))
-		if err != nil {
-			t.Fatalf("Load: %v", err)
-		}
-		got := cfg.Agents["reviewer"]
-		if got.SystemPrompt != "You are a code review expert." {
-			t.Errorf("legacy flag not lifted: SystemPrompt = %q", got.SystemPrompt)
-		}
-		if !slices.Equal(got.Args, []string{"--keep"}) {
-			t.Errorf("legacy flag left in args: %q", got.Args)
-		}
-	})
-
-	t.Run("legacy flag plus explicit field is rejected", func(t *testing.T) {
-		t.Parallel()
-		_, err := Load(write(t, `
-agents:
-  reviewer:
-    system_prompt: explicit
-    args: ["--append-system-prompt", "legacy"]
-`))
-		if err == nil || !strings.Contains(err.Error(), "system_prompt") {
-			t.Fatalf("Load error = %v, want conflict mentioning system_prompt", err)
 		}
 	})
 

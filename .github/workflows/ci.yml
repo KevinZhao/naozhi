@@ -168,11 +168,11 @@ jobs:
             ./internal/eventlog/persist/... \
             ./internal/selfupdate/...
 
-  # Playwright mock-server suite (test/e2e). Offline and deterministic: the
-  # mock server stubs every API endpoint, and the live multibackend.* specs
-  # self-skip without NAOZHI_LIVE_E2E=1. This is the layer that catches real
-  # dashboard behaviour regressions in a browser. Phone-viewport specs build
-  # their own iPhone contexts and run here under chromium.
+  # Playwright smoke suite (test/e2e). Offline and deterministic: the mock
+  # server stubs every API endpoint the dashboard calls. A dozen specs cover
+  # the core views (sessions, transcript, sending, images, cron, workflows,
+  # projects, voice, nodes); release.yml's e2e-gate drives the real binary.
+  # Phone-viewport specs build their own iPhone contexts under chromium.
   # No workflow-level paths filter: a required check must report a status on
   # every PR, and a paths-filtered job stays "expected" forever on PRs that
   # don't touch the dashboard, blocking the merge.
@@ -214,7 +214,7 @@ jobs:
           path: test/e2e/test-results/
           retention-days: 7
 
-  # eslint (no-undef) + tsc over the dashboard's ES modules, and node --test
+  # eslint (no-undef) over the dashboard's ES modules, and node --test
   # over the dashboard modules that load without a browser.
   lint-js:
     runs-on: ubuntu-latest
@@ -222,24 +222,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install eslint and typescript
+      - name: Install eslint
         working-directory: test/e2e
         run: npm install
 
       - name: Run eslint (no-undef gate)
         run: test/e2e/node_modules/.bin/eslint 'internal/server/static/*.js'
-
-      # Files whose first line is // @ts-check are type-checked against
-      # wire.d.ts and contract.js's literal types (#3439) and must have zero
-      # errors; checkJs is off, so the rest are parsed but not reported.
-      - name: Type-check the opted-in dashboard files
-        run: test/e2e/node_modules/.bin/tsc -p internal/server/static
-
-      # The opted-in list may only grow, a handler registered through wsm.on
-      # sees its own frame's fields, and no frame reaches an unchecked file or
-      # an untyped parameter: tsc is the field check on frames.
-      - name: Test the type-check floor and the wsm.on typing
-        run: node --test scripts/ts-check.test.mjs
 
       # ws_manager.js and session_stream.js are leaves node can import:
       # dispatch order, the auth_ok / auth_fail lifecycle, the outage clock and

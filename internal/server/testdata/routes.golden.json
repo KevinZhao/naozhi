@@ -16,11 +16,6 @@
   },
   {
     "method": "POST",
-    "path": "/api/auth/logout",
-    "handler_type": "*auth.Handlers"
-  },
-  {
-    "method": "POST",
     "path": "/api/auth/noscript",
     "handler_type": "*auth.Handlers"
   },
@@ -42,11 +37,6 @@
   {
     "method": "GET",
     "path": "/api/cost/budget",
-    "handler_type": "*dashcost.Handlers"
-  },
-  {
-    "method": "GET",
-    "path": "/api/cost/entries",
     "handler_type": "*dashcost.Handlers"
   },
   {
@@ -75,18 +65,8 @@
     "handler_type": "*dashcron.Handlers"
   },
   {
-    "method": "GET",
-    "path": "/api/cron/attention",
-    "handler_type": "*dashcron.Handlers"
-  },
-  {
     "method": "POST",
     "path": "/api/cron/pause",
-    "handler_type": "*dashcron.Handlers"
-  },
-  {
-    "method": "GET",
-    "path": "/api/cron/preview",
     "handler_type": "*dashcron.Handlers"
   },
   {
@@ -102,26 +82,6 @@
   {
     "method": "GET",
     "path": "/api/cron/runs/{run_id}",
-    "handler_type": "*dashcron.Handlers"
-  },
-  {
-    "method": "POST",
-    "path": "/api/cron/runs/{run_id}/confirm",
-    "handler_type": "*dashcron.Handlers"
-  },
-  {
-    "method": "GET",
-    "path": "/api/cron/runs/{run_id}/events",
-    "handler_type": "*dashcron.Handlers"
-  },
-  {
-    "method": "POST",
-    "path": "/api/cron/runs/{run_id}/replay",
-    "handler_type": "*dashcron.Handlers"
-  },
-  {
-    "method": "GET",
-    "path": "/api/cron/runs/{run_id}/snapshot",
     "handler_type": "*dashcron.Handlers"
   },
   {
@@ -178,11 +138,6 @@
     "method": "GET",
     "path": "/api/memory/{slug}",
     "handler_type": "*memory.Handler"
-  },
-  {
-    "method": "GET",
-    "path": "/api/planner/stats",
-    "handler_type": "*planner.Handlers"
   },
   {
     "method": "GET",
@@ -355,11 +310,6 @@
     "handler_type": "*system.Handlers"
   },
   {
-    "method": "POST",
-    "path": "/api/system/labels/clear-origin",
-    "handler_type": "*system.Handlers"
-  },
-  {
     "method": "GET",
     "path": "/api/system/update",
     "handler_type": "*system.Handlers"
@@ -447,11 +397,6 @@
   {
     "method": "GET",
     "path": "/static/contract.js",
-    "handler_type": "http.HandlerFunc"
-  },
-  {
-    "method": "GET",
-    "path": "/static/cron_attention.js",
     "handler_type": "http.HandlerFunc"
   },
   {

@@ -13,31 +13,11 @@ const STATIC_DIR = path.join(__dirname, '..', '..', 'internal', 'server', 'stati
 // commit that regenerates contract.js (#2539). startMockServer listens only
 // once it has loaded.
 let NZ_CONTRACT;
-// The event routes answer only with entries the backend can send: each is
-// checked against the WS schema's EventEntry def (the wire view) before it
-// leaves, so a spec's fixture cannot carry a field or a type no server has.
-const WS_DEFS = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'internal', 'wsproto', 'wsproto.schema.json'), 'utf8')).defs;
-const WORKFLOW_SCHEMA = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'internal', 'dashboard', 'ext', 'workflows', 'testdata', 'rest.schema.json'), 'utf8'));
-let schemaViolations, EVENT_ENTRIES;
-const contractReady = Promise.all([
-  import(require('url').pathToFileURL(path.join(STATIC_DIR, 'contract.js')).href)
-    .then((m) => { NZ_CONTRACT = m.NZ_CONTRACT; }),
-  import(require('url').pathToFileURL(path.join(__dirname, '..', '..', 'scripts', 'check-mock-rest.mjs')).href)
-    .then((m) => { ({ schemaViolations, EVENT_ENTRIES } = m); }),
-]);
+const contractReady = import(require('url').pathToFileURL(path.join(STATIC_DIR, 'contract.js')).href)
+  .then((m) => { NZ_CONTRACT = m.NZ_CONTRACT; });
 
-// sendEntries answers an event route with page, or with 500 naming every
-// violation when an entry of fixture (the whole injected list, not just the
-// page a filter let through) is not a shape the backend produces.
-function sendEntries(res, route, fixture, page, headers = { 'Content-Type': 'application/json' }) {
-  const bad = schemaViolations(fixture, EVENT_ENTRIES, WS_DEFS, route, { strict: true });
-  if (bad.length) {
-    const error = `mock fixture is not an EventEntry the backend sends: ${bad.join(', ')}`;
-    console.error(`mock-server: ${error}`);
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error }));
-    return;
-  }
+// sendEntries answers an event route with page.
+function sendEntries(res, page, headers = { 'Content-Type': 'application/json' }) {
   res.writeHead(200, headers);
   res.end(JSON.stringify(page));
 }
@@ -46,7 +26,7 @@ function sendEntries(res, route, fixture, page, headers = { 'Content-Type': 'app
 // A Go drift test (TestDashboardCSP_MockServerHeaderInSync) compares this
 // literal against the runtime header, so edit both together.
 const MOCK_DASHBOARD_CSP =
-  "default-src 'self'; script-src 'self' 'sha256-Dc5Mfm9TcKn7OwTLyG3/T2KjnRh7zV1Xc4ct4adm4/g='; connect-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font";
+  "default-src 'self'; script-src 'self' 'sha256-Dc5Mfm9TcKn7OwTLyG3/T2KjnRh7zV1Xc4ct4adm4/g='; connect-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
 /**
  * workflowReply answers GET /api/sessions/workflow for the fixture of one
@@ -54,9 +34,7 @@ const MOCK_DASHBOARD_CSP =
  * since=V&epoch=E → the rows with rev > V when E is the fixture's epoch and
  * V ≤ its version, else all of them; since with rows=none or a lone epoch
  * is a 400. The fixture is the response minus rows_mode and server_now; its
- * workflow.agents holds every row. The reply is checked against the
- * backend's REST schema, strictly, so a fixture cannot carry a field or a
- * mode no server has. Returns {status, body}.
+ * workflow.agents holds every row. Returns {status, body}.
  */
 function workflowReply(fx, params) {
   const has = (k) => params.has(k);
@@ -80,8 +58,6 @@ function workflowReply(fx, params) {
     rows = all.filter((a) => BigInt(a.rev) > since);
   }
   const body = { ...fx, server_now: Date.now(), rows_mode: rowsMode, workflow: { ...fx.workflow, agents: rows } };
-  const bad = schemaViolations(body, WORKFLOW_SCHEMA.responses.sessions_workflow, WORKFLOW_SCHEMA.defs, 'sessions_workflow', { strict: true });
-  if (bad.length) return { status: 500, body: { error: `mock fixture is not a workflow response the backend sends: ${bad.join(', ')}` } };
   return { status: 200, body };
 }
 
@@ -264,103 +240,30 @@ function defaultGitStates() {
  * @param {boolean} [overrides.shim] - false serves dashboard.html without the e2e shim, as production does.
  * @param {object} [overrides.sessions] - Custom sessions response. A `history_sessions` key
  *   in it is not served there: like the backend, /api/sessions carries stats.history_tag and
- *   GET /api/sessions/history serves the list (unless overrides.historySessions is given).
- * @param {object[]} [overrides.historySessions] - GET /api/sessions/history's list. Requests
- *   are counted in `historyGetCalls`; `setHistorySessions(list)` replaces it mid-test and
- *   `failNextHistory(n)` answers the next n requests with a 500; `staleNextHistory(list)`
- *   answers the next request with that list instead, as an older fetch resolving last would.
- *   `historyTag` is the tag of the current list.
+ *   GET /api/sessions/history serves the list.
  * @param {object[]} [overrides.events] - Custom events response.
- * @param {object} [overrides.eventsByKey] - session key → events array; keys not listed fall back to `events`.
- * @param {number} [overrides.eventsTailDelayMs] - Hold `after=` (tail poll) responses this long so a test can
- *   race a session switch against an in-flight poll (#2430 fetchEvents(full) gate).
- * @param {number} [overrides.eventsRingSize] - Bare `?key=` (no after/before/limit) returns only the last N
- *   events, mirroring the server's in-memory ring (EventEntries, default 500).
- * @param {boolean} [overrides.eventsBeforeLegacy] - `before=` pages omit X-Events-Has-More, as an
- *   older server does (the dashboard then reads a short page as exhausted).
- * @param {boolean} [overrides.eventsBeforeMemoryOnly] - `before=` pages reach only the last eventsRingSize
- *   events and carry X-Events-Paging: memory-only, as the primary relays a remote node too old to
- *   page (its has-more covers that node's memory ring).
- * @param {number} [overrides.eventsBeforeFailCount] - The first N `before=` requests answer `[]` with
- *   has-more "1": the server's fail-open reply to a degraded disk read or a cancelled request.
  * @param {object} [overrides.workflows] - task_id → GET /api/sessions/workflow fixture ({epoch, version,
  *   workflow: WireView with every row in agents, result?, logs?, logs_truncated?, result_unavailable?});
  *   the route applies rows=none / since=&epoch= to it and 404s task ids not listed. A test may edit
  *   the object in place; each request reads it then.
- * @param {number} [overrides.workflowDelayMs] - Hold GET /api/sessions/workflow answers this long
- *   (setWorkflowDelayMs changes it mid-test).
- * @param {object} [overrides.agentEventsPending] - task_id → how many GET /api/sessions/agent_events
- *   answer 202 {"status":"pending"} before the entries do, as for a workflow agent whose transcript
- *   is not on disk yet. Every request lands in `agentEventsCalls`.
+ * @param {number} [overrides.workflowDelayMs] - Hold GET /api/sessions/workflow answers this long.
  * @param {object[]} [overrides.cronJobs] - Custom cron jobs response.
  * @param {object} [overrides.cronListMeta] - Extra top-level fields merged into GET /api/cron
  *   (timezone / timezone_abbr / timezone_label ...). recent_runs_cap defaults to 5 like the backend.
- * @param {object} [overrides.memories] - slug → GET /api/memory/{slug} payload. Slugs not listed 404;
- *   without it the route is absent (404).
- * @param {object[]} [overrides.systemDaemons] - GET /api/system/daemons payload (an array).
- *   Without it the route is absent (404). `systemDaemonsGetCount` counts requests.
- * @param {object} [overrides.cronTrigger] - Enables POST /api/cron/trigger: { status } (default 200).
- *   Bodies land in `cronTriggerCalls`.
- * @param {Function} [overrides.costSummary] - (searchParams) => GET /api/cost/summary payload,
- *   or null for a 404. Without it the route is absent (404). Calls land in `costSummaryCalls`
- *   as {group_by, job_id, session_key}.
- * @param {Function} [overrides.costBudget] - (searchParams) => GET /api/cost/budget payload, or
- *   null for a 404. Without it the route is absent (404). Calls land in `costBudgetCalls`
- *   as {job_id, session_key}.
- * @param {object[]} [overrides.cronAttention] - §7.4 queue items for GET /api/cron/attention.
- *   POST /api/cron/runs/<id>/confirm records the id in `cronConfirmCalls` and drops the item;
- *   POST /api/cron/runs/<id>/replay does the same with `cronReplayCalls` (the {job_id} body).
- *   Without it the route is absent (404), as for a scheduler with no queue.
- * @param {object} [overrides.projectFiles] - Workspace file browser data, keyed by project name:
- *   { [project]: { dirs: { [dir]: entries[] }, previews: { [relPath]: previewJSON },
- *                  exists: { [relPath]: {exists, size, mime, is_dir} } } }.
- *   `dir` is '' for the project root. GET /api/projects/files/list answers from `dirs`
- *   (an unknown dir answers 404 with `listErrors[dir]` as the error text when given);
- *   GET /api/projects/file?mode=preview answers from `previews`. Requests land in
- *   `fileRequests` as {mode, project, path, dir}.
  * @param {boolean} [overrides.requireAuth] - If true, require bearer token.
  * @param {string} [overrides.authToken] - Expected token value.
- * @param {Function} [overrides.onSend] - Callback when POST /api/sessions/send is called.
- * @param {Function} [overrides.onCronCreate] - Callback when POST /api/cron is called.
- * @param {boolean} [overrides.cronCreateAppends] - If true, POST /api/cron also appends
- *   the created job (fixed id cron-new-001) to the served list, so the dashboard's
- *   post-create refetch sees it - the drawer-opens-on-created-job flow needs that.
+ * @param {string} [overrides.loginStatus400] - The FIRST POST /api/auth/login answers 400 with
+ *   this string as the JSON "error" (the trusted_proxy XFF refusal); later logins take the
+ *   normal token check.
  * @param {number} [overrides.sendStatus] - Status code for POST /api/sessions/send.
- * @param {number} [overrides.sendReplyDelayMs] - Hold POST /api/sessions/send answers this long after
- *   recording the body in sendCalls, as a loaded server would.
- * @param {object} [overrides.sessionRuns] - session key → GET /api/sessions/runs payload ({runs, stats}); unknown keys 404 (header runstats stay empty).
- * @param {object[]} [overrides.discovered] - GET /api/discovered payload (default: none).
- * @param {object[]} [overrides.discoveredPreview] - GET /api/discovered/preview entries (default: none).
- * POST /api/scratch/open always succeeds with a fixed scratch session (the
- * 追问 drawer's open path); its event polling rides the sessions_events route.
- * @param {string} [overrides.scratchPromoteKey] - Enables POST /api/scratch/<id>/promote,
- *   answering {key: scratchPromoteKey}; the ids land in `scratchPromoteCalls`.
- * @param {number} [overrides.sessionsDelayMs] - Hold GET /api/sessions responses
- *   this long. Lets a spec prove an optimistic DOM patch happened locally, by pushing
- *   the list-refetch repaint (which would mask it) out of the assertion window.
- * @param {number} [overrides.sessionsDelayAfterCalls] - Apply sessionsDelayMs only
- *   after this many GET /api/sessions calls have been answered (so the initial page
- *   load stays fast and only the poll/refetch traffic is held).
- *   Every GET /api/sessions, held or not, is counted in `sessionsGetCalls`.
- * @param {boolean} [overrides.sessionsETag] - Serve GET /api/sessions with a content
- *   ETag and answer a matching If-None-Match with a bodyless 304, as the real server
- *   does (sessionsDelayMs does not apply). Each GET's If-None-Match ('' when absent)
- *   is recorded in `sessionsValidators`; 304s are counted in `sessionsNotModified`.
- * @param {object} [overrides.systemUpdate] - GET /api/system/update payload (the
- *   self-update chip's poll). Default: no route, the endpoint 404s and the chip
- *   keeps its hidden cold-start default.
  * @param {boolean} [overrides.ws] - If true, accept /ws upgrades with a minimal
- *   WebSocket server (auth → auth_ok, everything else recorded). Default keeps
- *   the historical behavior: no upgrade listener, so the dashboard falls back
- *   to polling and the whole existing suite keeps exercising that path.
+ *   WebSocket server (auth → auth_ok, everything else recorded). Default: no
+ *   upgrade listener, so the dashboard falls back to polling.
  * @param {boolean} [overrides.wsHoldAuth] - With ws:true, record the dashboard's
  *   {type:'auth'} but never answer it, so wsm stays in AUTH (authenticating).
- * @param {string} [overrides.assetVersion] - Serve the page with this nz-asset-version
- *   meta, as the Go server's rendered page carries (the raw file has none).
- * @param {string} [overrides.wsAssetVersion] - With ws:true, auth_ok carries this asset_version.
  * @param {{html: string, csp: string}} [overrides.dashboardPage] - Serve this page
  *   and CSP at /dashboard instead of the raw file and MOCK_DASHBOARD_CSP: the
- *   page Go renders, written by tools/render-dashboard. assetVersion is ignored.
+ *   page Go renders, written by tools/render-dashboard.
  * @returns {Promise<{server: http.Server, port: number, url: string}>}
  */
 function startMockServer(overrides = {}) {
@@ -371,20 +274,14 @@ function startMockServer(overrides = {}) {
   // overrides.shim === false serves the page exactly as production does.
   const rendered = overrides.dashboardPage;
   const page = rendered ? rendered.html : fs.readFileSync(path.join(STATIC_DIR, 'dashboard.html'), 'utf8');
-  const versioned = overrides.assetVersion && !rendered
-    ? page.replace('</head>', `<meta name="nz-asset-version" content="${overrides.assetVersion}">\n</head>`)
-    : page;
   const dashboardCSP = rendered ? rendered.csp : MOCK_DASHBOARD_CSP;
   const html = overrides.shim === false
-    ? versioned
-    : versioned.replace('</body>', '<script type="module" src="/e2e-shim.js"></script>\n</body>');
+    ? page
+    : page.replace('</body>', '<script type="module" src="/e2e-shim.js"></script>\n</body>');
   const manifest = fs.readFileSync(path.join(STATIC_DIR, 'manifest.json'), 'utf8');
 
   const sessionsData = overrides.sessions || defaultSessions();
-  let historyData = overrides.historySessions || sessionsData.history_sessions || [];
-  let historyGetCalls = 0;
-  let historyFailsLeft = 0;
-  let historyStaleNext = null;
+  const historyData = sessionsData.history_sessions || [];
   // historyTag mirrors historyContentTag: the list's content hash, '' for none.
   const tagOf = list => list.length ? crypto.createHash('sha256').update(JSON.stringify(list)).digest('hex').slice(0, 32) : '';
   const historyTag = () => tagOf(historyData);
@@ -394,95 +291,25 @@ function startMockServer(overrides = {}) {
     const tag = historyTag();
     return tag && body.stats ? { ...body, stats: { ...body.stats, history_tag: tag } } : body;
   };
-  let sessionsGetCalls = 0;
-  const sessionsValidators = [];
-  let sessionsNotModified = 0;
   const eventsData = overrides.events || defaultEvents();
-  const eventsByKey = overrides.eventsByKey || {};
-  const eventsTailDelayMs = overrides.eventsTailDelayMs || 0;
-  const eventsRingSize = overrides.eventsRingSize || 500;
-  const eventsCalls = [];
-  let eventsBeforeFailsLeft = overrides.eventsBeforeFailCount || 0;
+  // The server's in-memory ring (EventEntries, default 500).
+  const eventsRingSize = 500;
   const cronJobsData = overrides.cronJobs || defaultCronJobs();
   // 与后端 cronListResp 对齐：recent_runs_cap 恒为 recentRunsPerJob(5)；时区字段按需注入。
   const cronListMeta = Object.assign({ recent_runs_cap: 5 }, overrides.cronListMeta || {});
-  const gitStates = overrides.gitStates || defaultGitStates();
-  const sessionRuns = overrides.sessionRuns || {};
-  // runSnapshots: run_id -> §7.3 input-snapshot payload. Absent ids answer
-  // {available:false}, which is what a local (non-sandbox) run really returns.
-  const runSnapshots = overrides.runSnapshots || {};
-  // runDetailPatch: run_id -> fields merged over the synthesized run detail,
-  // for detail payloads that disagree with their summary. An undefined value
-  // drops the field from the JSON.
-  const runDetailPatch = overrides.runDetailPatch || {};
-  const costSummary = overrides.costSummary || null;
-  const costBudget = overrides.costBudget || null;
-  const cronTrigger = overrides.cronTrigger || null;
-  const systemDaemons = overrides.systemDaemons || null;
-  const memories = overrides.memories || null;
-  let systemDaemonsGetCount = 0;
-  const cronTriggerCalls = [];
-  const costSummaryCalls = [];
-  const costBudgetCalls = [];
-  const cronAttention = overrides.cronAttention ? overrides.cronAttention.slice() : null;
-  const cronConfirmCalls = [];
-  const cronReplayCalls = [];
-  const projectFiles = overrides.projectFiles || null;
-  const fileRequests = [];
-  // agentEvents: task_id -> ordered transcript entries. The real handler filters
-  // `Time >= after` (INCLUSIVE), which is what makes the watermark ms replay on
-  // every poll page — the behaviour dedupAgentPollBatch exists to absorb. The
-  // mock reproduces that inclusivity deliberately; a `>` here would hide the bug.
-  const agentEvents = overrides.agentEvents || {};
-  const agentEventsPending = { ...overrides.agentEventsPending };
-  const agentEventsCalls = [];
+  const gitStates = defaultGitStates();
   const workflows = overrides.workflows || {};
-  let workflowDelayMs = overrides.workflowDelayMs || 0;
+  const workflowDelayMs = overrides.workflowDelayMs || 0;
   // Every GET /api/sessions/workflow, as its query parameters.
   const workflowCalls = [];
-  // compactPromptLimit: when set, GET /api/cron?compact=1 clips each prompt to
-  // this many characters and marks the row prompt_truncated, like the real
-  // R236-SEC-08 (#494) wire shape. Without it the poll returns full prompts and
-  // the whole lazy-refetch path is unreachable from e2e.
-  const compactPromptLimit = overrides.compactPromptLimit || 0;
-  // fullCronListStatus lets a test fail the NON-compact list fetch — the one
-  // cronRefetchFullJob uses — so the editor's refuse-to-open path is reachable.
-  const fullCronListStatus = overrides.fullCronListStatus || 200;
-  // fullCronListCalls records every non-compact list GET so a test can prove a
-  // refetch really happened rather than inferring it from the DOM.
-  const fullCronListCalls = [];
-  // PATCH /api/cron?id=... capture: {id, body} per call, so an edit spec can
-  // assert which fields the dashboard actually sent (schedule/work_dir must be
-  // ABSENT when untouched - the diff-only contract).
-  const cronPatchCalls = [];
-  // DELETE /api/cron?id=... capture, in call order.
-  const cronDeleteCalls = [];
-  // Every GET /api/cron, compact or not - for specs that watch for runaway refetch loops.
-  let cronListGetCount = 0;
-  // compactCronListDelayMs delays the COMPACT list response only. It exists so a
-  // test can open a drawer and then the editor with no background refresh landing
-  // in between — the window where a spliced cache row would otherwise be trusted.
-  const compactCronListDelayMs = overrides.compactCronListDelayMs || 0;
-  const discoveredData = overrides.discovered || [];
-  const discoveredPreview = overrides.discoveredPreview || [];
-  let discoveredCloseCalls = [];
   const requireAuth = overrides.requireAuth || false;
   const authToken = overrides.authToken || 'test-token-123';
-  // loginStatus400: when set, the FIRST POST /api/auth/login answers 400 with
-  // this string as the JSON "error" (the trusted_proxy XFF refusal); later
-  // logins take the normal token check.
   const loginStatus400 = overrides.loginStatus400 || '';
-  // deleteStatus lets a test force DELETE /api/sessions to fail (e.g. 500)
-  // so the dismiss-failure re-sync path can be exercised.
-  const deleteStatus = overrides.deleteStatus || 200;
 
   let sendCalls = [];
-  const scratchPromoteCalls = [];
   let bindCalls = [];
-  let cronCreateCalls = [];
   let loginCalls = [];
   let favoriteCalls = [];
-  let labelCalls = [];
   let authedCookies = new Set();
 
   const server = http.createServer((req, res) => {
@@ -612,15 +439,6 @@ function startMockServer(overrides = {}) {
       return;
     }
 
-    if (pathname === NZ_CONTRACT.API.auth_logout && req.method === 'POST') {
-      res.writeHead(200, {
-        'Content-Type': 'application/json',
-        'Set-Cookie': 'naozhi_auth=; Path=/; HttpOnly; Max-Age=0',
-      });
-      res.end(JSON.stringify({ ok: true }));
-      return;
-    }
-
     // Session routes
     if (pathname === NZ_CONTRACT.API.scratch_open && req.method === 'POST') {
       let body = '';
@@ -638,44 +456,8 @@ function startMockServer(overrides = {}) {
       return;
     }
 
-    if (overrides.scratchPromoteKey && pathname.startsWith('/api/scratch/') && pathname.endsWith('/promote') && req.method === 'POST') {
-      scratchPromoteCalls.push(decodeURIComponent(pathname.slice('/api/scratch/'.length, -'/promote'.length)));
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ key: overrides.scratchPromoteKey }));
-      return;
-    }
-
-    if (pathname === NZ_CONTRACT.API.system_update && req.method === 'GET' && overrides.systemUpdate) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(overrides.systemUpdate));
-      return;
-    }
-
     if (pathname === NZ_CONTRACT.API.sessions && req.method === 'GET') {
       if (!checkAuth()) return;
-      sessionsGetCalls++;
-      if (overrides.sessionsETag) {
-        const body = JSON.stringify(sessionsBody());
-        const etag = 'W/"b' + crypto.createHash('sha256').update(body).digest('hex').slice(0, 32) + '"';
-        const inm = req.headers['if-none-match'] || '';
-        sessionsValidators.push(inm);
-        if (inm === etag) {
-          sessionsNotModified++;
-          res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-store' });
-          res.end();
-          return;
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json', ETag: etag, 'Cache-Control': 'no-store' });
-        res.end(body);
-        return;
-      }
-      if (overrides.sessionsDelayMs && sessionsGetCalls > (overrides.sessionsDelayAfterCalls || 0)) {
-        setTimeout(() => {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(sessionsBody()));
-        }, overrides.sessionsDelayMs);
-        return;
-      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(sessionsBody()));
       return;
@@ -683,15 +465,7 @@ function startMockServer(overrides = {}) {
 
     if (pathname === NZ_CONTRACT.API.sessions_history && req.method === 'GET') {
       if (!checkAuth()) return;
-      historyGetCalls++;
-      if (historyFailsLeft > 0) {
-        historyFailsLeft--;
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'history scan failed' }));
-        return;
-      }
-      const list = historyStaleNext || historyData;
-      historyStaleNext = null;
+      const list = historyData;
       const tag = tagOf(list);
       const headers = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' };
       if (tag) {
@@ -711,12 +485,10 @@ function startMockServer(overrides = {}) {
       if (!checkAuth()) return;
       // Mirror EventLog.EntriesSince: `after` is strictly greater-than, so the
       // 1 s poll never re-delivers the watermark millisecond.
-      const evKey = url.searchParams.get('key') || '';
-      const all = eventsByKey[evKey] || eventsData;
+      const all = eventsData;
       const after = Number(url.searchParams.get('after') || 0);
       const before = Number(url.searchParams.get('before') || 0);
       const limit = Number(url.searchParams.get('limit') || 0);
-      eventsCalls.push(url.search);
       const headers = { 'Content-Type': 'application/json' };
       let out;
       if (after > 0) {
@@ -725,12 +497,9 @@ function startMockServer(overrides = {}) {
       } else if (before > 0) {
         // events.go `before` branch: strictly older, newest `limit` of them,
         // chronological, and whether the page left any of them out.
-        const pool = overrides.eventsBeforeMemoryOnly ? all.slice(-eventsRingSize) : all;
-        const older = pool.filter(e => e?.time && e.time < before);
-        if (overrides.eventsBeforeMemoryOnly) headers['X-Events-Paging'] = 'memory-only';
+        const older = all.filter(e => e?.time && e.time < before);
         out = limit > 0 && older.length > limit ? older.slice(-limit) : older;
-        if (eventsBeforeFailsLeft > 0) { eventsBeforeFailsLeft--; out = []; headers['X-Events-Has-More'] = '1'; }
-        else if (!overrides.eventsBeforeLegacy) headers['X-Events-Has-More'] = older.length > out.length ? '1' : '0';
+        headers['X-Events-Has-More'] = older.length > out.length ? '1' : '0';
       } else if (limit > 0) {
         // handlers.go initial-page branch: tail N + authoritative has-more header.
         out = all.slice(-limit);
@@ -739,9 +508,7 @@ function startMockServer(overrides = {}) {
         // handlers.go default branch: the in-memory ring only.
         out = all.slice(-eventsRingSize);
       }
-      const reply = () => sendEntries(res, 'sessions_events', all, out, headers);
-      if (after > 0 && eventsTailDelayMs > 0) setTimeout(reply, eventsTailDelayMs);
-      else reply();
+      sendEntries(res, out, headers);
       return;
     }
 
@@ -752,7 +519,6 @@ function startMockServer(overrides = {}) {
       let body = '';
       req.on('data', c => (body += c));
       req.on('end', () => {
-        labelCalls.push(body);
         try {
           const b = JSON.parse(body || '{}');
           const s = (sessionsData.sessions || []).find(x => x.key === b.key);
@@ -775,24 +541,6 @@ function startMockServer(overrides = {}) {
       const state = gitStates[key] || { is_repo: false };
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(state));
-      return;
-    }
-
-    // Run-history overview ("N 轮 · 共 X · 花费 $Y") that renderSessionRunsPanel
-    // promotes into the header's .detail-runstats. Only served for keys a
-    // test opted into; the default 404 mirrors a session with no recorded
-    // runs (dashboard hides the panel and leaves the header slot empty).
-    if (pathname === NZ_CONTRACT.API.sessions_runs && req.method === 'GET') {
-      if (!checkAuth()) return;
-      const key = url.searchParams.get('key') || '';
-      const payload = sessionRuns[key];
-      if (!payload) {
-        res.writeHead(404);
-        res.end();
-        return;
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(payload));
       return;
     }
 
@@ -823,21 +571,16 @@ function startMockServer(overrides = {}) {
       req.on('data', c => (body += c));
       req.on('end', () => {
         sendCalls.push(body);
-        if (overrides.onSend) overrides.onSend(body);
-        const reply = () => {
-          if (status === 429) {
-            res.writeHead(429, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'message queue full' }));
-          } else if (status >= 400) {
-            res.writeHead(status, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'send failed' }));
-          } else {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true }));
-          }
-        };
-        if (overrides.sendReplyDelayMs) setTimeout(reply, overrides.sendReplyDelayMs);
-        else reply();
+        if (status === 429) {
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'message queue full' }));
+        } else if (status >= 400) {
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'send failed' }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        }
       });
       return;
     }
@@ -856,11 +599,6 @@ function startMockServer(overrides = {}) {
 
     if (pathname === NZ_CONTRACT.API.sessions && req.method === 'DELETE') {
       if (!checkAuth()) return;
-      if (deleteStatus !== 200) {
-        res.writeHead(deleteStatus, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'mock delete failure' }));
-        return;
-      }
       // Like the backend, a 200 means the key is already gone from the list:
       // the client's post-DELETE re-sync must not bring the card back.
       let body = '';
@@ -894,13 +632,13 @@ function startMockServer(overrides = {}) {
     if (pathname === NZ_CONTRACT.API.discovered && req.method === 'GET') {
       if (!checkAuth()) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(discoveredData));
+      res.end(JSON.stringify([]));
       return;
     }
 
     if (pathname === NZ_CONTRACT.API.discovered_preview && req.method === 'GET') {
       if (!checkAuth()) return;
-      sendEntries(res, 'discovered_preview', discoveredPreview, discoveredPreview);
+      sendEntries(res, []);
       return;
     }
 
@@ -909,7 +647,6 @@ function startMockServer(overrides = {}) {
       let body = '';
       req.on('data', c => (body += c));
       req.on('end', () => {
-        discoveredCloseCalls.push(body);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
       });
@@ -919,35 +656,9 @@ function startMockServer(overrides = {}) {
     // Cron routes
     if (pathname === NZ_CONTRACT.API.cron && req.method === 'GET') {
       if (!checkAuth()) return;
-      cronListGetCount++;
-      const compact = url.searchParams.get('compact') === '1';
-      if (!compact) {
-        fullCronListCalls.push(url.search);
-        if (fullCronListStatus !== 200) {
-          res.writeHead(fullCronListStatus, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'forced failure' }));
-          return;
-        }
-      }
-      let jobs = cronJobsData;
-      if (compact && compactPromptLimit > 0) {
-        jobs = cronJobsData.map(j => {
-          const full = j.prompt || '';
-          if (full.length <= compactPromptLimit) return j;
-          return Object.assign({}, j, {
-            prompt: full.slice(0, compactPromptLimit),
-            prompt_truncated: true,
-          });
-        });
-      }
-      const body = JSON.stringify(Object.assign({ jobs }, cronListMeta));
-      const send = () => {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        // Dashboard expects { jobs: [...] } format (+ recent_runs_cap / timezone meta)
-        res.end(body);
-      };
-      if (compact && compactCronListDelayMs > 0) setTimeout(send, compactCronListDelayMs);
-      else send();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      // Dashboard expects { jobs: [...] } format (+ recent_runs_cap / timezone meta)
+      res.end(JSON.stringify(Object.assign({ jobs: cronJobsData }, cronListMeta)));
       return;
     }
 
@@ -956,23 +667,6 @@ function startMockServer(overrides = {}) {
       let body = '';
       req.on('data', c => (body += c));
       req.on('end', () => {
-        cronCreateCalls.push(body);
-        if (overrides.onCronCreate) overrides.onCronCreate(body);
-        if (overrides.cronCreateAppends) {
-          let parsed = {};
-          try { parsed = JSON.parse(body); } catch { /* keep {} */ }
-          cronJobsData.push({
-            id: 'cron-new-001',
-            schedule: parsed.schedule || '0 9 * * *',
-            prompt: parsed.prompt || '',
-            work_dir: parsed.work_dir || '/home/user/workspace/myproject',
-            paused: false,
-            created_at: Date.now(),
-            next_run: Date.now() + 3600000,
-            recent_runs: [],
-            stats: { total: 0, succeeded: 0 },
-          });
-        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ id: 'cron-new-001', ok: true }));
       });
@@ -984,7 +678,6 @@ function startMockServer(overrides = {}) {
       let body = '';
       req.on('data', c => (body += c));
       req.on('end', () => {
-        cronPatchCalls.push({ id: url.searchParams.get('id') || '', body });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
       });
@@ -993,7 +686,6 @@ function startMockServer(overrides = {}) {
 
     if (pathname === NZ_CONTRACT.API.cron && req.method === 'DELETE') {
       if (!checkAuth()) return;
-      cronDeleteCalls.push(url.searchParams.get('id') || '');
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
       return;
@@ -1013,40 +705,10 @@ function startMockServer(overrides = {}) {
       return;
     }
 
-    if (pathname === NZ_CONTRACT.API.cron_preview && req.method === 'GET') {
-      if (!checkAuth()) return;
-      const schedule = url.searchParams.get('schedule') || '';
-      const count = Math.min(Math.max(parseInt(url.searchParams.get('count') || '1', 10), 1), 10);
-      if (schedule) {
-        const base = Date.now() + 3600000;
-        const runs = Array.from({ length: count }, (_, i) => base + i * 3600000);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ valid: true, next_run: runs[0], next_runs: runs, timezone: 'UTC', timezone_label: 'UTC (UTC+00:00)' }));
-      } else {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ valid: false, error: 'empty schedule' }));
-      }
-      return;
-    }
-
     // /api/sessions/agent_events?key=&node=&task_id=&after=&limit=
     if (pathname === NZ_CONTRACT.API.sessions_agent_events && req.method === 'GET') {
       if (!checkAuth()) return;
-      const taskId = url.searchParams.get('task_id') || '';
-      const after = Number(url.searchParams.get('after') || 0);
-      const limit = Number(url.searchParams.get('limit') || 200);
-      agentEventsCalls.push(Object.fromEntries(url.searchParams));
-      if (agentEventsPending[taskId] > 0) {
-        agentEventsPending[taskId]--;
-        res.writeHead(202, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'pending' }));
-        return;
-      }
-      const all = agentEvents[taskId] || [];
-      // Inclusive, like the server: entries AT the watermark come back again,
-      // and an entry with no time passes the filter on every page.
-      const page = all.filter(e => !e?.time || e.time >= after).slice(0, limit);
-      sendEntries(res, 'sessions_agent_events', all, page);
+      sendEntries(res, []);
       return;
     }
 
@@ -1065,52 +727,6 @@ function startMockServer(overrides = {}) {
         res.writeHead(status, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(body));
       }, workflowDelayMs);
-      return;
-    }
-
-    // §7.4 人工确认队列：opt-in，未配置时走到末尾的 404。
-    if (cronAttention && pathname === NZ_CONTRACT.API.cron_attention && req.method === 'GET') {
-      if (!checkAuth()) return;
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ items: cronAttention }));
-      return;
-    }
-    if (cronAttention && pathname.startsWith('/api/cron/runs/') && pathname.endsWith('/confirm') && req.method === 'POST') {
-      if (!checkAuth()) return;
-      const runId = decodeURIComponent(pathname.slice('/api/cron/runs/'.length, -'/confirm'.length));
-      cronConfirmCalls.push(runId);
-      const i = cronAttention.findIndex(it => it.run_id === runId);
-      if (i >= 0) cronAttention.splice(i, 1);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok' }));
-      return;
-    }
-    // The §7.4 `确认未完成，重放` action: the server stops the original run,
-    // replays it and resolves the queue item (cronReplayResp).
-    if (cronAttention && pathname.startsWith('/api/cron/runs/') && pathname.endsWith('/replay') && req.method === 'POST') {
-      if (!checkAuth()) return;
-      const runId = decodeURIComponent(pathname.slice('/api/cron/runs/'.length, -'/replay'.length));
-      let body = '';
-      req.on('data', c => (body += c));
-      req.on('end', () => {
-        cronReplayCalls.push({ run_id: runId, job_id: JSON.parse(body || '{}').job_id });
-        const i = cronAttention.findIndex(it => it.run_id === runId);
-        if (i >= 0) cronAttention.splice(i, 1);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', new_run_id: 'replay-' + runId }));
-      });
-      return;
-    }
-
-    // /api/cron/runs/<run_id>/snapshot?job_id=… — §7.3 输入快照面板。
-    // 必须排在下面那条通配 /api/cron/runs/<id> 之前，否则 run_id 会被解析成
-    // "<id>/snapshot" 而 404。
-    if (pathname.startsWith('/api/cron/runs/') && pathname.endsWith('/snapshot') && req.method === 'GET') {
-      if (!checkAuth()) return;
-      const runId = decodeURIComponent(
-        pathname.slice('/api/cron/runs/'.length, -'/snapshot'.length));
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(runSnapshots[runId] || { available: false }));
       return;
     }
 
@@ -1151,7 +767,6 @@ function startMockServer(overrides = {}) {
       } else if (summary.state === 'skipped') {
         detail.error_msg = 'previous run still in progress';
       }
-      Object.assign(detail, runDetailPatch[runId] || {});
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(detail));
       return;
@@ -1176,59 +791,6 @@ function startMockServer(overrides = {}) {
       res.end(JSON.stringify(defaultProjects()));
       return;
     }
-    // Workspace file browser: opt-in via overrides.projectFiles.
-    if (projectFiles && pathname === NZ_CONTRACT.API.projects_files_list && req.method === 'GET') {
-      if (!checkAuth()) return;
-      const project = url.searchParams.get('project') || '';
-      const dir = url.searchParams.get('dir') || '';
-      fileRequests.push({ mode: 'list', project, dir, path: '' });
-      const tree = projectFiles[project] || {};
-      const entries = tree.dirs && tree.dirs[dir];
-      if (!entries) {
-        const msg = (tree.listErrors && tree.listErrors[dir]) || 'not found';
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: msg }));
-        return;
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ entries }));
-      return;
-    }
-    if (projectFiles && pathname === NZ_CONTRACT.API.projects_files_exists && req.method === 'POST') {
-      if (!checkAuth()) return;
-      let raw = '';
-      req.on('data', (c) => { raw += c; });
-      req.on('end', () => {
-        let body = {};
-        try { body = JSON.parse(raw || '{}'); } catch (_) { /* answer empty */ }
-        const tree = projectFiles[body.project] || {};
-        const results = {};
-        for (const p of (Array.isArray(body.paths) ? body.paths : [])) {
-          results[p] = (tree.exists && tree.exists[p]) || { exists: false };
-        }
-        fileRequests.push({ mode: 'exists', project: body.project || '', path: '', dir: '' });
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ results }));
-      });
-      return;
-    }
-    if (projectFiles && pathname === NZ_CONTRACT.API.projects_file && req.method === 'GET') {
-      if (!checkAuth()) return;
-      const project = url.searchParams.get('project') || '';
-      const path = url.searchParams.get('path') || '';
-      const mode = url.searchParams.get('mode') || '';
-      fileRequests.push({ mode, project, path, dir: '' });
-      const tree = projectFiles[project] || {};
-      const prev = mode === 'preview' && tree.previews && tree.previews[path];
-      if (!prev) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'not found' }));
-        return;
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(prev));
-      return;
-    }
     if (pathname === NZ_CONTRACT.API.projects_favorite && req.method === 'POST') {
       if (!checkAuth()) return;
       const name = url.searchParams.get('name');
@@ -1246,68 +808,6 @@ function startMockServer(overrides = {}) {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ok', favorite: fav }));
-      return;
-    }
-
-    // Memory popover: opt-in via overrides.memories.
-    const memPrefix = NZ_CONTRACT.API.memory_slug.replace('{slug}', '');
-    if (memories && pathname.startsWith(memPrefix) && req.method === 'GET') {
-      if (!checkAuth()) return;
-      const mem = memories[decodeURIComponent(pathname.slice(memPrefix.length))];
-      res.writeHead(mem ? 200 : 404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(mem || { error: 'not found' }));
-      return;
-    }
-
-    // 系统 view daemons: opt-in via overrides.systemDaemons.
-    if (systemDaemons && pathname === NZ_CONTRACT.API.system_daemons && req.method === 'GET') {
-      if (!checkAuth()) return;
-      systemDaemonsGetCount++;
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(systemDaemons));
-      return;
-    }
-
-    // Cron 立即执行: opt-in via overrides.cronTrigger.
-    if (cronTrigger && pathname === NZ_CONTRACT.API.cron_trigger && req.method === 'POST') {
-      if (!checkAuth()) return;
-      let raw = '';
-      req.on('data', (c) => { raw += c; });
-      req.on('end', () => {
-        let body = {};
-        try { body = JSON.parse(raw || '{}'); } catch (_) { /* record as {} */ }
-        cronTriggerCalls.push(body);
-        const status = cronTrigger.status || 200;
-        res.writeHead(status, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(status < 300 ? { status: 'ok' } : { error: 'upstream unavailable' }));
-      });
-      return;
-    }
-
-    // Cost ledger summary: opt-in via overrides.costSummary.
-    if (costSummary && pathname === NZ_CONTRACT.API.cost_summary && req.method === 'GET') {
-      if (!checkAuth()) return;
-      costSummaryCalls.push({
-        group_by: url.searchParams.get('group_by') || '',
-        job_id: url.searchParams.get('job_id') || '',
-        session_key: url.searchParams.get('session_key') || '',
-      });
-      const payload = costSummary(url.searchParams);
-      res.writeHead(payload ? 200 : 404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(payload || { error: 'not found' }));
-      return;
-    }
-
-    // Cost budget status: opt-in via overrides.costBudget.
-    if (costBudget && pathname === NZ_CONTRACT.API.cost_budget && req.method === 'GET') {
-      if (!checkAuth()) return;
-      costBudgetCalls.push({
-        job_id: url.searchParams.get('job_id') || '',
-        session_key: url.searchParams.get('session_key') || '',
-      });
-      const payload = costBudget(url.searchParams);
-      res.writeHead(payload ? 200 : 404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(payload || { error: 'not found' }));
       return;
     }
 
@@ -1404,7 +904,7 @@ function startMockServer(overrides = {}) {
           try { msg = JSON.parse(payload.toString('utf8')); } catch { continue; }
           conn.messages.push(msg);
           if (msg.type === NZ_CONTRACT.WS.auth && !overrides.wsHoldAuth) {
-            conn.send({ type: NZ_CONTRACT.WS.auth_ok, ...(overrides.wsAssetVersion && { asset_version: overrides.wsAssetVersion }) });
+            conn.send({ type: NZ_CONTRACT.WS.auth_ok });
           }
         }
       });
@@ -1420,87 +920,15 @@ function startMockServer(overrides = {}) {
         port,
         url: `http://127.0.0.1:${port}`,
         get sendCalls() { return sendCalls; },
-        get scratchPromoteCalls() { return scratchPromoteCalls; },
-        get eventsCalls() { return eventsCalls; },
         get bindCalls() { return bindCalls; },
-        get cronCreateCalls() { return cronCreateCalls; },
-        get cronPatchCalls() { return cronPatchCalls; },
-        get cronDeleteCalls() { return cronDeleteCalls; },
-        get cronConfirmCalls() { return cronConfirmCalls; },
-        get cronReplayCalls() { return cronReplayCalls; },
-        get fileRequests() { return fileRequests; },
-        get fullCronListCalls() { return fullCronListCalls; },
-        get cronListGetCount() { return cronListGetCount; },
-        get costSummaryCalls() { return costSummaryCalls; },
-        get costBudgetCalls() { return costBudgetCalls; },
-        get sessionsGetCalls() { return sessionsGetCalls; },
-        get sessionsValidators() { return sessionsValidators; },
-        get sessionsNotModified() { return sessionsNotModified; },
-        get historyGetCalls() { return historyGetCalls; },
-        setHistorySessions(list) { historyData = list; },
-        failNextHistory(n) { historyFailsLeft = n; },
-        staleNextHistory(list) { historyStaleNext = list; },
-        get historyTag() { return historyTag(); },
-        get cronTriggerCalls() { return cronTriggerCalls; },
-        get systemDaemonsGetCount() { return systemDaemonsGetCount; },
-        // Replace the served cron jobs mid-test (in place - GET closes over the array).
-        setCronJobs(next) { cronJobsData.length = 0; cronJobsData.push(...next); },
         get loginCalls() { return loginCalls; },
         get favoriteCalls() { return favoriteCalls; },
-        get labelCalls() { return labelCalls; },
-        get discoveredCloseCalls() { return discoveredCloseCalls; },
-        get fullCronListCalls() { return fullCronListCalls; },
         get wsConnections() { return wsConnections; },
         get workflowCalls() { return workflowCalls; },
-        get agentEventsCalls() { return agentEventsCalls; },
-        setWorkflowDelayMs(ms) { workflowDelayMs = ms; },
-        // Mutators for tests that need the snapshot to CHANGE mid-run (e.g. a
-        // /cd that moves a session's workspace). Bumping stats.version is what
-        // makes the dashboard's version short-circuit re-render.
-        setSessionWorkspace(key, workspace) {
-          const s = (sessionsData.sessions || []).find(x => x.key === key);
-          if (s) s.workspace = workspace;
-          if (sessionsData.stats && typeof sessionsData.stats.version === 'number') {
-            sessionsData.stats.version++;
-          }
-        },
-        // Replaces a session's workflows[] (sessionview.SessionSnapshot's
-        // Summaries). bump advances stats.version, as the server's workflow
-        // board does for every change it reports; false changes the payload
-        // under an unchanged version.
-        setSessionWorkflows(key, workflows, bump = true) {
-          const s = (sessionsData.sessions || []).find(x => x.key === key);
-          if (s) s.workflows = workflows;
-          if (bump && sessionsData.stats && typeof sessionsData.stats.version === 'number') {
-            sessionsData.stats.version++;
-          }
-        },
-        // Rewrites a job's prompt so the next compact poll clips the NEW body:
-        // the prefix guard in keepRefetchedPrompts must then drop the cached
-        // full copy instead of resurrecting it.
-        setCronPrompt(id, prompt) {
-          const j = cronJobsData.find(x => x.id === id);
-          if (j) j.prompt = prompt;
-        },
-        setGitState(key, state) { gitStates[key] = state; },
-        // Deliberately does NOT bump stats.version — that is exactly what the
-        // real server does when a turn completes: the effort tier changes on
-        // the Process, but storeGen only advances on session add/remove/
-        // rename/reset. Tests use this to prove the dashboard still repaints.
-        setSessionEffortWithoutVersionBump(key, effort) {
-          const s = (sessionsData.sessions || []).find(x => x.key === key);
-          if (s) s.effort = effort;
-        },
-        // Same contract for process state (#2431): running↔ready flips never
-        // bump storeGen, so a WS-fallback poll must repaint the card anyway.
-        setSessionStateWithoutVersionBump(key, state) {
-          const s = (sessionsData.sessions || []).find(x => x.key === key);
-          if (s) s.state = state;
-        },
-        resetCalls() { sendCalls = []; bindCalls = []; cronCreateCalls = []; loginCalls = []; favoriteCalls = []; labelCalls = []; discoveredCloseCalls = []; },
+        resetCalls() { sendCalls = []; bindCalls = []; loginCalls = []; favoriteCalls = []; },
       });
     }));
   });
 }
 
-module.exports = { startMockServer, defaultSessions, defaultEvents, defaultCronJobs };
+module.exports = { startMockServer, defaultSessions };

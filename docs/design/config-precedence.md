@@ -38,9 +38,9 @@ narrow places where they overlap.
 3. A direct `os.Getenv` is acceptable **only** for genuinely OS-level vars
    (table row 7) or a documented override that has a single resolver function
    (rows 5–6). Do not scatter ad-hoc `os.Getenv` reads of naozhi config across
-   call sites — that is the bypass ARCH5 / #385 tracks. The
-   `internal/server` package enforces this with a regression test
-   (`TestNoStrayConfigGetenv`).
+   call sites — that is the bypass ARCH5 / #385 tracks. (The source-scan
+   regression test that used to enforce this was deleted in 2026-10; this
+   is now a review convention.)
 
 ## Why no global override stack?
 

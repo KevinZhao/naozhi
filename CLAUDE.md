@@ -15,19 +15,10 @@ go test -run TestCandidatePaths ./internal/cli/...   # run a single test
 bin/naozhi --config config.yaml                      # run locally
 ```
 
-Ratchets only go down: the caps pinned in ratchet tests (e.g.
-`generatedOnclickCap`) fail CI when a count drops below them, so lower them in
-the same PR. To raise one, edit it in the PR that needs it.
-
 `config.yaml` is gitignored (environment-specific). Use `config.example.yaml`
 as the template: `cp config.example.yaml config.yaml` then fill in real values.
 
-Cross-compile for deployment target (ARM64 Linux):
-```bash
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bin/naozhi ./cmd/naozhi/
-```
-
-Deploy: `cmd/naozhi/service.go::generateSystemdUnit` is authoritative for `sudo naozhi install`; `deploy/naozhi.service` is a manual-deploy reference kept in sync (regression gate: `TestGenerateSystemdUnit_MatchesDeployTemplate`).
+Cross-compile for ARM64 Linux: `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bin/naozhi ./cmd/naozhi/`.
 
 ## Architecture
 
@@ -37,91 +28,16 @@ Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI, Kiro, or Codex) as
 
 **Key constraint**: Feishu requires 200 response within 3s. The webhook handler returns 200 immediately and processes asynchronously via `go handler(context.Background(), msg)`.
 
-### Module Dependency
+### Module Layers
 
-`internal/` 每个顶层包一行、按层分组。新增或删除顶层包时顺手更新这里。
-
-```
-cmd/naozhi/main.go
-  组合根
-  -> wireup       组合根装配：backend 注册、config 校验、cron+sysession 调度器装配、server 与 upstream 共用的 KeyResolver
-  -> config       YAML 加载、${ENV_VAR} 展开、校验
-
-  核心链路（IM 消息 → CLI 进程）
-  -> cli          Protocol 接口（stream-json/ACP）+ spawn/manage CLI 进程 + watchdog；子包 clievent/backend/procmeter/workflow
-  -> session      Session router、并发控制、TTL、持久化恢复；子包 agentlink/api/backendstore/runhistory/sessiontable/sessionview/spawnpool/workspacestore/knownids
-  -> routerrelay  Router 通知的一次性绑定转发器（断开 router↔hub 构造环）
-  -> dispatch     IM 消息处理 + slash 命令；每条消息经 Turns 端口交给 turn.Orchestrator（IM origin/delivery 在 im_origin.go）
-  -> turn         Orchestrator（Submit/Reset/ShouldNotify/Retire：owner loop、按 Sink 去重投递、detached 轮、panic 恢复；端口 Origin/Delivery/Sender/Admission）+ 它独占的 per-session 消息队列（非导出，`turn.New` 按 QueueOptions 构造；Msg/Mode/ParseMode/Coalesce）+ /new /clear /urgent 解析（Parse）；dispatch 和 server 的 dashboard 发送（dash_origin.go 的 wsOrigin/httpOrigin）共用同一个 Orchestrator；server 的 turnSender 实现 Sender；不 import dispatch/server/platform/session
-  -> platform     Platform 接口 + feishu/slack/discord/weixin 子包
-  -> server       HTTP server、路由注册、WebSocket hub、REST API
-  -> dashboard    dashboard handler 子包群（auth/cron/cronview/discovery/project/session/ext/*，其中 ext/workflows 是 GET /api/sessions/workflow：经 session.WorkflowBoard 的 Published/Result 取 workflow 行与结果；httputil 叶子）
-  -> cron         定时任务调度（robfig/cron）；runstore 子包放运行历史（runs/ 记录、newest-first 缓存、保留期 GC、CronRun 记录类型）与 runinflight/ 在途标记的读写，sandboxstore 子包放 sandbox 的磁盘状态（确认队列/输入快照/事件日志），两者都不 import cron
-  -> sysession    内建后台 daemon 框架（system sessions）
-  -> project      项目发现、chat 绑定、planner 路由
-  -> projectapi   project 的零依赖契约类型
-
-  多节点
-  -> node         WebSocket 协议类型 + HTTP/reverse node 客户端
-  -> upstream     Reverse-connect 客户端（NAT 穿透；拨号 primary naozhi）
-
-  持久化 / 历史
-  -> eventlog     Event log 子系统（persist/schema/api 子包；append-only + crash recovery）
-  -> history      后端无关历史加载接口；claudejsonl/kirojsonl/codexjsonl/naozhilog/merged 子包
-  -> attachment   附件持久化 + refcount tracker 子包 + IM/dashboard 文件类型判定（ClassifyFile / MaybeSupported / ExtForMime）
-  -> runlog       per-owner run 记录的磁盘布局层（根校验/目录守卫/原子写/owner 锁），cron 与 session/runhistory 共用
-  -> discovery    扫描 Claude CLI 磁盘工件（外部进程发现 / takeover）
-  -> claudefs     Claude CLI 磁盘布局单一真相源（projects slug 编码 / transcript 路径 / session id 校验 / cost-state 与按消息 usage 读取 / 尾窗判定末轮是否结束 / workflow run dir 定位与校验）
-  -> subagent     Task 工具子代理 ↔ JSONL transcript 的关联与读取（linker + reader）
-
-  辅助域
-  -> agentcore    AgentCore 云沙箱 control-plane 客户端
-  -> agentroute   "/command agentId" 解析的单一真相源
-  -> imauth       IM 发送者授权策略（per-platform allowlist + admin 层，Decide 纯逻辑），config 构造、dispatch 执行；叶子
-  -> assets       Dashboard "installed assets" 零依赖叶子
-  -> ccassets     Claude Code 资产浏览 provider（dashboard 用）
-  -> ccmodels     toolbox 推荐模型清单 ↔ cc settings 的对账（纯逻辑；子包 ccprobe 负责实跑验证）
-  -> transcribe   语音转写（Amazon Transcribe Streaming）
-  -> selfupdate   GitHub Releases 自升级 + 校验（macOS 上保留自签名身份，见 docs/ops/macos-codesign.md）
-  -> shim         零停机重启：outlive naozhi 的 sidecar 进程
-  -> usermsg      用户消息分类
-  -> gitinfo      读取目录的 git branch / worktree 状态
-  -> i18n         Locale 解析与消息渲染
-  -> metrics      进程级计数器（expvar）
-  -> runtelemetry 跨子系统 run 生命周期事件类型；Tee 把两个 Broadcaster 并列（Hub + webhook）
-  -> webhook      出站 webhook 发送器（每端点一 goroutine + 有界队列、HMAC 签名、退避重试、Deliver 永不阻塞），server 经 webhookBroadcaster 挂到 runtelemetry 上；只依赖 promexport
-  -> promexport   expvar → Prometheus 文本格式（naozhi_* 前缀；_total 为 counter，其余 gauge；Map 按注册的 label 名打标签，未注册退回 `key`；cron 延迟桶导出为 histogram），server 的 GET /metrics 用；叶子
-  -> costledger   统一 cost 账本叶子包（按天 JSONL append-only + rollup + 累计差分 + 按模型学习 CLI 单价）
-  -> budget       每日 USD 预算：订阅 cost 账本的内存日索引（IM 会话 / 项目 planner / cron job / 全局）+ Gate 判定；只依赖 costledger 与 sessionkey
-  -> naozhisettings  naozhi 托管的 Claude settings 文件
-  -> uiprefs      Dashboard 展示偏好持久化
-  -> registry     泛型 Typed 注册表（新闭集注册表的默认选择）
-  -> envpolicy    共享 env 过滤原语
-  -> wsproto      浏览器 WS 协议单一真相源（type 常量 + per-type frame + schema）
-  -> jsonschema   Go 类型 → 契约检查读取的 JSON schema（WS frame 与 REST 响应共用，嵌套结构体展开进 defs）
-  -> replyfmt     回复成形规则（单条截断标记 / [i/N] 页码 / 分页宽度预留 / 代码块感知的分段 SplitText），dispatch 与 cron 共用
-  -> contractjs   生成 static/contract.js 的构建器（WS/API/ENUMS 三段；ENUMS 含 death_reason、session state 与 EventEntry kind 词表）与 static/wire.d.ts（由 WS/REST 两份 schema 生成的全局类型，供 tsc --checkJs）
-  -> datadir      store 文件所在目录的布局策略（Layout 值类型，只派生 sibling）
-
-  叶子工具
-  -> osutil       Home/路径展开、进程 helpers、sd_notify、PID 复用防护、只收 regular file 的打开（OpenRegular：FIFO 不阻塞、不跟随 symlink；OpenRegularIn / OpenDirIn：os.Root 锚定）
-  -> textutil     字符串工具：截断、脱敏、UUID 派生（依赖 osutil.IsLogInjectionRune，非零依赖叶子）
-  -> netutil      Client-IP 提取（trusted-proxy 处理）
-  -> ratelimit    Per-key token-bucket 限流（login/WS 握手/transcribe/node 等 HTTP 入口，及 dispatch 的 IM 按发送者限流 im_rate_limit）
-  -> limits       跨包大小/数量上限常量
-  -> sessionconst Session 调优常量
-  -> sessionkey   Session key 前缀规范（router 命名空间）
-  -> tuningspec   model/effort 值校验（config 与 session 共享的 flag-injection 防线）
-  -> backendid    Backend-ID 长度/格式校验
-  -> apierr       Claude API 错误检测与本地化
-  -> ctxutil      context.Context helpers：trace_id（IM / HTTP 入口）/ run_id + session_key（turn）随 ctx 传递，Handler 把它们附到每条 *Context 日志上
-  -> leakguard    "leaked tool" 检测的单一真相源
-  -> spawndiag    spawn 门禁拒绝的上报（metrics + 日志 + observer）；位于 cli 之下，envpolicy 才能上报
-  -> cliinfo      CLI 词汇的零依赖叶子（进程状态 / death reason / watchdog 默认值 / backend 与 model 行 / argv denylist），cli 重导出；只命名这些词汇的包 import 它而不是 cli
-  -> imageorient  无 EXIF 图片的自动转正（视觉模型询问 + 解析 + JPEG 旋转），叶子
-  -> leakcheck    测试用泄漏断言 helper
-  -> testhelper   共享测试工具
-```
+- **Composition root**: `cmd/naozhi` + `wireup` (backend registration, config validation, scheduler wiring); `config` loads YAML and expands `${ENV_VAR}`.
+- **Core path (IM -> CLI)**: `platform` (feishu/slack/discord/weixin) -> `dispatch` (IM handling, slash commands; `agentroute` parses `/command agentId`) -> `turn` (per-session owner loop and queue, shared by IM and dashboard sends) -> `session` (router, TTL, persistence; `routerrelay` breaks the router↔hub cycle) -> `cli` (Protocol, process spawn, watchdog) -> `shim` (sidecar that outlives naozhi restarts).
+- **HTTP / dashboard**: `server` (routes, WebSocket hub, REST), `dashboard/*` handler packages, `wsproto` (browser WS frames), `contractjs` (generates `static/contract.js`), `assets`.
+- **Scheduling / projects**: `cron` (+ `runstore` run history), `sysession` (background daemons), `project` / `projectapi` (discovery, chat binding, planner).
+- **Multi-node**: `node` (protocol, HTTP/reverse clients), `upstream` (reverse-connect dialer).
+- **Persistence / history**: `eventlog`, `history` (claudejsonl/kirojsonl/codexjsonl/naozhilog/merged), `attachment`, `runlog`, `claudefs` (Claude CLI on-disk layout), `discovery`, `subagent`.
+- **Domain helpers**: `selfupdate`, `transcribe`, `imauth`, `costledger`, `budget`, `webhook`, `runtelemetry`, `naozhisettings`, `ccassets`, `ccmodels`, `uiprefs`, `replyfmt`, `usermsg`, `gitinfo`, `metrics`.
+- **Leaves**: `osutil`, `textutil`, `netutil`, `ratelimit`, `limits`, `sessionkey`, `tuningspec`, `backendid`, `cliinfo`, `apierr`, `ctxutil`, `leakguard`, `spawndiag`, `envpolicy`, `datadir`, `imageorient`, `testhelper`.
 
 ### CLI Process Lifecycle
 
@@ -130,7 +46,7 @@ Each CLI process is long-lived (stdin/stdout stay open across turns). The Wrappe
 - `kiro`: `ACPProtocol` -- JSON-RPC 2.0 Agent Client Protocol, session ID from `session/new` response
 - `codex`: `CodexProtocol` -- codex app-server JSON-RPC 2.0 over stdio (see `docs/rfc/codex-backend.md`)
 
-Multi-backend deployments use `cli.backends: [{id, path, model, args, effort}, ...]` so dashboard / IM / cron / reverse-node can pick backend per session. `effort` is the kiro thinking-effort tier (`low`/`medium`/`high`/`xhigh`/`max`), forwarded as `acp --effort` and overriding kiro's own configured default — see `docs/rfc/kiro-effort-control.md`. See `docs/rfc/multi-backend.md` for the full design (backend.Profile registry, kirojsonl history source, ACP `session/cancel` notification, reverse-node capability routing). Implementation gotchas confirmed in `docs/rfc/multi-backend-validation.md`:
+Multi-backend deployments use `cli.backends: [{id, path, model, args, effort}, ...]` so dashboard / IM / cron / reverse-node can pick backend per session (`docs/rfc/multi-backend.md`). `effort` is the kiro thinking-effort tier, forwarded as `acp --effort`. ACP gotchas (`docs/rfc/multi-backend-validation.md`):
 - ACP `session/cancel` is a **notification** (no id), not a request
 - ACP RPC ID can be **string UUID** (kiro `permission_request`), not always int — use `json.RawMessage`
 - ACP permission `optionId` is `allow_once / allow_always / reject_once` (underscore, not hyphen) — read from request `options[].optionId`, do not hardcode
@@ -144,6 +60,8 @@ Process states: `Spawning -> Ready <-> Running -> Dead`. Dead processes with a S
 - `no_output_timeout` (default 15min): Reset on any event; if triggered, kill process. A running tool keeps it fed through the Claude CLI's `tool_progress` heartbeat (every 30s), so it only catches silent model generation or a hung CLI
 - `total_timeout` (default 2h): Single shot; if triggered, kill process
 - Both defaults live in `cliinfo` (`DefaultNoOutputTimeout` / `DefaultTotalTimeout`); `cli` and `config` alias them
+
+The shim argv is compared on restart; a field missing from that comparison reads as argv drift and kills live shims (`spawn_argv_ast_test.go` guards it).
 
 ### Protocol Interface
 
@@ -163,34 +81,13 @@ type Protocol interface {
 }
 ```
 
-> Notes:
-> - The interface is a strict partition of two facets (compile-time pinned):
->   `ProtocolCore` (Name/Clone/BuildArgs/Init/WriteMessage/ReadEvent/HandleEvent
->   -- what every backend implements meaningfully) and
->   `ProtocolPassthroughExt` (WriteUserMessageLocked/WriteInterrupt/
->   SupportsPriority/SupportsReplay -- stream-json-only surface; ACP degrades).
-> - `Init` takes the workspace `cwd` so ACP can pass it in `session/new`;
->   `ClaudeProtocol` ignores the argument because stream-json inherits the
->   shim's `os.Chdir`.
-> - `WriteInterrupt` emits a mid-turn interrupt; ACP returns
->   `ErrInterruptUnsupported` so callers fall back to SIGINT.
-> - `ReadEvent` returns a **slice** (one wire frame can surface multiple
->   semantic events, e.g. ACP turn-end = assistant text + result). The `done`
->   flag is advisory and discarded by all production callers -- turn-end is
->   detected from a `result`/turn-end Event, never from `done`.
-> - Hot-path allocation is handled by the optional `eventReaderInto` facet
->   (`ReadEventInto(line, buf)`), surfaced via type assertion, not by changing
->   `ReadEvent` itself.
-> - This signature is shared by DESIGN.md, this file, and
->   `internal/cli/protocol.go`; any change must update all three in lockstep.
+Turn-end is detected from a `result`/turn-end Event, never from `done`. ACP returns `ErrInterruptUnsupported` from `WriteInterrupt`, so callers fall back to SIGINT.
 
 ### Platform Adapter Pattern
 
 Platforms implement `Platform` interface and register their own webhook routes via `RegisterRoutes(mux, handler)`. The platform calls `handler(ctx, msg)` when a message arrives -- the server never parses platform-specific formats.
 
-Platforms needing background goroutines implement `RunnablePlatform` with `Start()/Stop()`. Platforms that cannot send interim messages (e.g. WeChat iLink's single-use reply tokens) implement `SupportsInterimMessages() bool` returning false.
-
-Platforms that can observe their own connection implement `ConnStateReporter` (`internal/platform/connstate.go`), fed from SDK lifecycle hooks through a `ConnTracker`; `/health` serves the live state in `platforms` / `platform_conn`, and adapters without it read as `registered`.
+Platforms needing background goroutines implement `RunnablePlatform` with `Start()/Stop()`. Platforms that cannot send interim messages (e.g. WeChat iLink's single-use reply tokens) implement `SupportsInterimMessages() bool` returning false. Platforms that observe their own connection implement `ConnStateReporter` (`internal/platform/connstate.go`); `/health` serves it in `platforms` / `platform_conn`.
 
 | Platform | Transport | Interface |
 |----------|-----------|-----------|
@@ -201,104 +98,47 @@ Platforms that can observe their own connection implement `ConnStateReporter` (`
 
 ### Session Management & Agent Routing
 
-Session key format: `{platform}:{chatType}:{chatID}:{agentId}` (e.g., `feishu:direct:alice:code-reviewer`). In a group chat `session.group_scope` (default `thread`) can narrow `chatID` to `{chatID}#t{threadID}` for a Slack thread / Feishu topic, or `{chatID}#u{userID}` per member (`user`); a message outside any thread keeps the plain key. With `session.thread_auto_open` a top-level group @mention is treated as posted in the thread its answer opens (`IncomingMessage.SelfThread`: Slack ts, Feishu message id); slash commands are not. The chat itself still owns the `/cd` workspace, project binding, cron jobs and its `cost.budget` per-chat cap; only the session (and `/new`, `/stop`, `/urgent`) is per thread or member. Auto-takeover of a terminal CLI only lands on a session the whole chat shares; a thread's or member's session starts fresh. Under `user` scope a question card can only be answered by its asker; a card is marked answered only after dispatch accepts the click (`OnAccepted`).
+Session key format: `{platform}:{chatType}:{chatID}:{agentId}` (e.g., `feishu:direct:alice:code-reviewer`). In a group chat `session.group_scope` (default `thread`) can narrow `chatID` to `{chatID}#t{threadID}` (Slack thread / Feishu topic) or `{chatID}#u{userID}` (`user`). The chat itself still owns the `/cd` workspace, project binding and cron jobs; only the session (and `/new`, `/stop`, `/urgent`) is per thread or member.
 Other key namespaces (canonical home: `internal/sessionkey`, wire-stable constants):
 - `project:{name}:planner` -- project planner sessions (exempt from TTL and max_procs)
 - `cron:<jobID>` / `sys:<daemonID>` / `scratch:<sessionID>` -- cron jobs, sysession daemons, scratch sessions
-- `dashboard:pj:<workspace-hash>:<agent>` -- project-stable dashboard keys (chatType `pj`, deliberately not `project`, to stay unambiguous vs the planner namespace)
+- `dashboard:pj:<workspace-hash>:<agent>` -- project-stable dashboard keys (chatType `pj`, deliberately not `project`)
 
-Each session is independent: owns one long-lived CLI process, maintains separate context and session ID, uses per-session model/args from agent config.
+Each session owns one long-lived CLI process with its own context, session ID and per-agent model/args.
 
 Command routing: `/review xxx` -> `code-reviewer` agent, `/research xxx` -> `researcher` agent, plain messages -> `general` agent (or planner if chat is project-bound). `/new` resets general; `/new review` resets code-reviewer. `/cd <path>` changes working directory for all sessions in a chat. `/project <name>` binds a chat to a project.
 
-**One turn per session**: `turn.Orchestrator` runs one owner loop per session key; a message for a busy key is queued (and merged into the next turn) rather than rejected, and the IM "message received" notice is rate-limited to once per 3s (`ShouldNotify`). Duplicate deliveries are dropped by `platform.Dedup`.
+**One turn per session**: `turn.Orchestrator` runs one owner loop per session key; a message for a busy key is queued (and merged into the next turn) rather than rejected. Duplicate deliveries are dropped by `platform.Dedup`.
 
-### Multi-Node Architecture
+### Multi-Node
 
-Naozhi supports aggregating sessions from multiple machines into a single dashboard:
-
-- **Primary node** (`nodes` config): Polls remote nodes via HTTP REST every 10s, caches results in `node.CacheManager` (`internal/node/cache.go`). The `/api/sessions` poll sends `If-None-Match` and reuses the last body on a 304. Never blocks dashboard API on unreachable nodes.
-- **Reverse-connect** (`upstream` config): Nodes behind NAT dial into the primary via WebSocket (`/ws-node`). The `internal/upstream` Connector handles reconnection with jittered exponential backoff (1s -> 30s, plus a circuit breaker). Its `send` RPC validates at the trust boundary and then hands the message to `server.Server.SubmitRelayed`, so a relayed send runs on the node's `turn.Orchestrator` like an IM or dashboard one (`/new` resets, sends coalesce, agent options apply; a failed turn is a `发送失败：` system event in the session's EventLog). The `node.ReverseServer` validates tokens with constant-time comparison. A dropped node stays registered for a 60s grace window: browser subscriptions are parked and handed to the node's next registration, which resubscribes each key from its newest seen event; only a node that stays away longer is deregistered (dashboard gets `node disconnected`).
-- **Protocol** (`node.ReverseMsg`, `internal/node/protocol.go`): JSON over WebSocket -- `register/registered`, `request/response` (fetch_sessions, fetch_projects, send), `subscribe/event` (real-time streaming), `ping/pong`. A node advertising the `subscribe-history` capability answers `subscribe{after, limit, want_history}` with its own opening page (`events{initial, has_more}`: the catch-up after `after`, else the visible-aware newest page); against older nodes the primary still fetches that page with `fetch_events`. `fetch_events{before, limit}` returns one page as `{events, has_more}` (the dashboard's opening or "load earlier" page); without them, or with `after`, it is the legacy bare array, which is all an older node ever returns. A history fetch that fails reaches the sink as `error{key, node, "history unavailable"}`, which the dashboard offers as a retry. The primary advertises `send-status` on `registered` (it reads the `send` result's `{status}`); without it a node answers a send it could not buffer with an RPC error instead of `{"status":"busy"}`.
+The primary polls `workspaces` nodes over HTTP (`node.CacheManager`, never blocking the dashboard on an unreachable node); nodes behind NAT dial in via `upstream` to `/ws-node` (`node.ReverseServer`, protocol in `internal/node/protocol.go`). Design: `docs/design/multi-node-design.md`, `docs/rfc/reverse-protocol.md`.
 
 ### Project Management
 
-When `projects.root` is configured, the `project.Manager` scans **every non-hidden subdirectory** (`os.ReadDir` + skip names starting with `.` or matching a `projects.exclude` basename glob). There is NO marker-file requirement — a bare directory is a valid project, pinned by `TestScan_PicksUpDirsWithoutCLAUDEMd`. Each project stores config in `.naozhi/project.yaml` (planner model, prompt, chat bindings); a project with no `.naozhi/project.yaml` simply uses defaults. Scan never writes into a project directory: `project.yaml` is created only by an explicit bind, favorite or config edit, and the sidebar order (`CreatedAt`) of projects whose yaml carries none lives in `<session state root>/projects-index.json` (`internal/project/index.go`), keyed by absolute path. Once per root, Scan removes the created_at-only stubs earlier versions wrote (`stub_cleanup.go`: byte-exact, sole file in `.naozhi/`, not tracked by git, only after the index holding that order is on disk) and records the root in the index's `stub_cleanup_done`, so a stub restored later is kept.
-
-Chat binding (`/project <name>`) routes plain messages to a planner session (`project:{name}:planner`) with the project directory as workspace. Agent commands still create per-chat sessions but use the project path. Planner sessions are exempt from TTL eviction and max_procs capacity.
-
-The project list is rescanned every 60s. Scan reads disk without the manager lock (IM routing and the dashboard never wait on it) and re-reads under the lock only when a bind/favorite/config write landed meanwhile. Orphaned planner sessions for removed projects are cleaned up automatically.
+When `projects.root` is configured, `project.Manager` scans every non-hidden subdirectory (no marker file needed; `projects.exclude` globs skip names) every 60s. Per-project config lives in `.naozhi/project.yaml`, created only by an explicit bind/favorite/config edit; Scan never writes into a project. `/project <name>` routes plain messages to the `project:{name}:planner` session with the project directory as workspace.
 
 ### Dashboard & WebSocket
 
-The dashboard is an embedded PWA served at `/dashboard`: `internal/server/static/` holds `dashboard.html` plus JS modules (`dashboard.js`, `agent_view.js`, `cron_view.js`, `cron_live.js`, `asset_browser.js`, `files_view.js`, `nz_util.js`, and the leaves `ws_manager.js` / `session_stream.js` / `platform.js` / `features.js` / `session_ident.js` (session keys and labels, node connection status) / `icons.js` / `file_ref_parse.js` (the path-shape tests file refs and markdown share) / `shell.js` (the upcall table the root modules fill with `registerShell`) / `backend_catalog.js` (the CLI backends and access profiles a new session can pick, and their pickers) / `cron_state.js` (the cron view's jobs cache, drawer gate, trigger cooldown and the fetches that fill them) / `cron_format.js` (the cron view's text formatters) / `workflow_state.js` (the Workflow runs' store and the client half of their `workflow_set` / `workflow_state` frames and HTTP fetches) / `lightbox.js` (the image gallery overlay dashboard builds with `initLightbox`), `mem_popover.js` for the memory `[[slug]]` hover/click preview (dashboard starts it with `initMemPopover`), `aside_drawer.js` for the 追问 scratch drawer (`initAsideDrawer`; ask_card reads its session key from `selection.scratchKey`), `workflow_view.js` for the workflow panel above the transcript, the workflow frames' handlers and the fetches the store asks for, `event_render.js` / `ask_card.js` for transcript bubbles, `event_stream.js` for the transcript's fetch, paging and append and its history / event / send-ack frames, and `session_list.js` for the sidebar's session poll, cards and status bar and the subscription, error and session-state frames), `sw.js`, `manifest.json`, and `vendor/` (the release files of KaTeX 0.16.21 and mermaid 11.14.0, embedded and served at `/static/vendor/` as immutable, so the dashboard CSP names no outside origin; a bundle over 1 MiB is embedded as `<name>.gz` from `gzip -9n` and served as `<name>`; `render_md.js` pins their SRI, and changed bytes need a new versioned directory). Real-time updates use a WebSocket hub (`/ws`) with:
-
-- **Client messages** (dispatch switch: `internal/server/wsclient.go`): `auth`, `subscribe` (with optional `after` timestamp), `unsubscribe`, `send`, `interrupt`, `ping`, `agent_subscribe`, `agent_unsubscribe`
-- **Server messages**: `auth_ok`, `auth_fail`, `subscribed`, `unsubscribed`, `history`, `event`, `send_ack`, `pong`, `error`, `workflow_set` / `workflow_state` (a subscribed session's workflow board, pushed by `wshub_workflow.go`'s `workflowPushLoop`), plus agent/team streaming types -- see `internal/wsproto` (type constants, per-type frames, `wsproto.schema.json`). The dashboard receives each through a module-scope `wsm.on(NZ_CONTRACT.WS.<type>, handler[, when])` registration (a `when` makes it a claim, tried before the type's one unconditional handler); `wsm` (`ws_manager.js`) owns the connection, the dispatch table and `onReady`/`onStateChange`/`onAuthFail`; frames are not dispatched by hand-rolled `.type` switches
-- Remote node events are relayed transparently -- subscribe with `node` field to stream from a remote session.
-
-Dashboard modules layer base -> leaf -> view -> root: the base (`contract.js`, `state.js`, `nz_util.js`) and the leaves import only each other, views import downward, and the roots (`cron_view.js`, `dashboard.js`, `event_stream.js`, `session_list.js`) compose. A view that needs a root's function calls it as `shell.X`, which the root fills with one top-level `registerShell({ … })`; no module exports a `configureX` injection hook.
-
-Type checking is per file: a dashboard file whose first line is `// @ts-check` is checked by `tsc -p internal/server/static` (lint-js; `tsconfig.json` keeps `checkJs` off for the rest) against `wire.d.ts`, the generated global types (`EventEntry`, `SessionSnapshot`, `WsFrames`, `RestResponses`, ...), and must have zero errors. `wsm.on` types each handler's `msg` by its frame, and tsc is the only check on the fields a frame handler reads: `scripts/ts-check.test.mjs` lists the opted-in files (that list only grows) and fails when a wire type reaches a file without the pragma or a frame reaches an untyped parameter. Neither `wire.d.ts` nor `tsconfig.json` is served.
-
-REST API: ~80 method-prefixed routes registered in `internal/server/routes.go` (the authoritative list -- grep `HandleFunc` there rather than trusting any doc enumeration). Families: `/api/sessions/*` (list/send/events/runs/workflow/interrupt/resume/bind/label/upload/attachment/git...), `/api/cron/*` (CRUD + pause/resume/trigger/preview + runs history/replay), `/api/projects/*` (config/files/favorite/planner), `/api/discovered/*` (preview/takeover/close), `/api/scratch/*`, `/api/settings`, `/api/auth/*`, `/api/access-profiles`, `/api/cc/assets`, `/api/cli/backends`, `/api/system/*`, `/api/transcribe`, `/api/memory/{slug}`. WebSocket: `/ws` (dashboard), `/ws-node` (reverse-connect nodes). Health: `/health`, `/livez`, `/readyz`.
+Embedded PWA at `/dashboard`: `internal/server/static/` (`dashboard.html`, ES modules, `vendor/` KaTeX + mermaid served from `/static/vendor/`). Every module must be listed in the embed inventory (`static_module_inventory_test.go`) or the dashboard loads blank; no inline `onclick` handlers (CSP).
+`/ws` frame types live in `internal/wsproto` and `contract.js`; the dashboard registers handlers via `wsm.on(NZ_CONTRACT.WS.<type>, ...)` (`ws_manager.js`). Remote node events are relayed with a `node` field.
+REST routes: `internal/server/routes.go` is the authoritative list (grep `HandleFunc`). Health: `/health`, `/livez`, `/readyz`.
 
 ### Session Discovery & Takeover
 
-The `discovery` package scans `~/.claude/projects/<slug>/<sessionId>.jsonl` (Claude CLI's on-disk artifacts, which naozhi reads but does NOT own) to find external (non-naozhi-managed) CLI processes. It cross-references PIDs, upgrades stale session IDs from JSONL mtimes, and extracts summaries from each project dir's `sessions-index.json`. The dashboard can "takeover" a discovered process: kill the original PID (verified via `/proc/PID/stat` start time to prevent PID reuse attacks), then `--resume` under naozhi management.
+The `discovery` package scans `~/.claude/projects/<slug>/<sessionId>.jsonl` (Claude CLI's artifacts, read but not owned by naozhi) to find external CLI processes. Takeover kills the original PID (start time verified to prevent PID reuse), then `--resume`s it under naozhi.
 
 ### Session Persistence
 
 Sessions are persisted to `~/.naozhi/sessions.json` at shutdown:
-- Each entry stores `key`, `session_id`, `workspace`, `total_cost`
-- A sibling `sessions.meta.json` sidecar records `{version, written_at, generator}`; the main file stays as a plain JSON array so older naozhi builds read it unchanged. `loadStore` treats a missing sidecar as legacy v1 and only `slog.Warn`s if the sidecar reports a version higher than the one this build understands
+- Each entry stores `key`, `session_id`, `workspace`, `total_cost`; a sibling `sessions.meta.json` sidecar records `{version, written_at, generator}`
 - On restart, dead sessions are loaded and history is async-loaded (naozhi event log first, Claude JSONL fallback)
 - Next message to a dead session resumes via `--resume`
 - Captures session_id under sendMu to avoid Send() data races
 
-### Event Log Persistence (`docs/rfc/event-log-persistence.md`)
+**Event log** (`docs/rfc/event-log-persistence.md`): every `cli.EventEntry` is appended to `~/.naozhi/events/<keyhash>.log` + `.idx` (`keyhash = sha256(key)[:16]`), keeping fields Claude's JSONL cannot recover (images, attachment paths, AskQuestion cards). Write order `log.Write → log.Sync → idx.Write → idx.Sync`; `Recover()` truncates to the idx-backed edge. `SetPersistSink` must be called after any `InjectHistory` replay. Reads go through `merged.Source` (naozhilog primary, claudejsonl fallback, UUID dedup).
 
-A second persistence tier lives at `~/.naozhi/events/<keyhash>.log` / `.idx`. Unlike `sessions.json` which only records session metadata, the event log captures every `cli.EventEntry` — including fields that Claude's own JSONL cannot recover such as `Images` (thumbnail data URIs), `ImagePaths` (workspace-relative attachment paths), `AskQuestion` card payloads, and agent-team linkage IDs.
-
-Layout:
-
-```
-~/.naozhi/
-  sessions.json                    # session catalog
-  events/
-    <keyhash>.log                  # append-only length-prefixed records
-    <keyhash>.idx                  # sparse seq → byteOffset index
-```
-
-Key invariants:
-- `<keyhash>` is `sha256(session_key)[:16]` — file names never leak the raw session key; the in-file header records the plaintext key so operators can `less`/`jq` to audit
-- Write order is strict: `log.Write → log.Sync → idx.Write → idx.Sync`. A crash between any two steps is recovered by `Recover()` on next startup by truncating the log to the idx-backed safe edge
-- `cli.EventLog.SetPersistSink` MUST be called AFTER any `InjectHistory` (replay) completes. A runtime `replayPhase` guard in `EventLog` tags pre-sink entries so a broken caller gets surfaced as `naozhi_eventlog_persist_replay_leak_total > 0` (or panic in DevMode)
-- Read path is `merged.Source` = `naozhilog.Source` (primary) + `claudejsonl.Source` (fallback). UUID dedup keeps the local richer entry when both tiers see the same turn; fallback turns behind a `persist_gap` record in the startup tail are spliced into memory pages (`merged.GapFill` → `ManagedSession.withGapFill`), memory itself unchanged
-- Rotate threshold 100 MiB; rotate keeps the newest `DefaultKeepRecords` (1000) records, splices via offset-index so it's O(1) in practice
-- Orphan `<keyhash>.log` files whose stem doesn't match any known session AND whose mtime is > 30 days get swept on NewRouter startup
-- FS detection (Linux `statfs`) runs once and surfaces via `/health.eventlog.{fs_type, fs_supported}`; NFS/overlayfs report `supported=false` so operators see a warning
-
-`/health.eventlog` fields: `writer_alive` (= `last_drain_ms_ago < 5s AND channel_depth < 0.8*cap`), `channel_depth`, `channel_cap`, `last_drain_ms_ago`, `written_total`, `dropped_total`, `fsync_total`, `malformed_total`, `replay_leak_total`, `fs_type`, `fs_supported`.
-
-### Attachment Refcount (`docs/rfc/attachment-refcount.md`)
-
-A companion tier on top of event log persistence. Each image attachment's `.meta` sidecar (`<workspace>/.naozhi/attachments/<date>/<uuid>.meta`) now records `ReferencingKeyHashes []string` (sorted SHA-256 session hashes that have persisted an entry referencing the attachment) and `LastReferencedAt int64` (latest unix ms bump).
-
-The `internal/attachment/tracker` package runs a single-goroutine worker that observes non-replay `EventEntry.ImagePaths` via the event-log sink bridge and coalesces bumps within a 1s window before rewriting `.meta`. On `Router.Remove` the tracker walks the workspace and removes the keyhash from every `.meta`. `OnPersistedEntry` is non-blocking (drops + counter on full channel); `OnSessionRemoved` is synchronous (serialized in the worker) with 5s timeout.
-
-`attachment.GCWithRefs(workspace, uploadTTL, refTTL, now)` replaces the legacy day-directory reaper with per-file double-TTL eligibility:
-
-```
-keep iff ( uploaded_at + uploadTTL > now )
-    OR  ( len(ReferencingKeyHashes) > 0 AND last_referenced_at + refTTL > now )
-```
-
-Defaults: `uploadTTL=7d` (operator-tunable), `refTTL=30d` (via `DefaultRefTTL`). Files predating the refcount RFC (Meta without the new fields) fall back to the legacy single-TTL path so an upgrade doesn't delete lot-sized history on day 0.
-
-`/health.attachment_tracker` exposes `writer_alive` (same formula as eventlog's), `channel_depth`, `channel_cap`, `last_drain_ms`, `pending`, `written_total`, `cleared_total`, `dropped_total`, `meta_error_total`. `/debug/vars` adds `naozhi_attachment_ref_{bump,clear,meta_error,drop}_total` counters.
-
-GC is wired as the sysession `attachment-gc` daemon (`internal/sysession/attachment_gc.go`, design: `docs/rfc/attachment-gc-daemon.md`), which sweeps the union of the router default workspace, every per-chat workspace override, and every bound project path. It ships default `enabled: false` + `dry_run` — reclamation starts only after an operator enables it in config; until then tracker data accumulates without driving deletion.
+**Attachments** (`docs/rfc/attachment-refcount.md`, `docs/rfc/attachment-gc-daemon.md`): each `.meta` sidecar records which session hashes reference it; `attachment.GCWithRefs` keeps a file while either the upload TTL or the reference TTL holds. GC runs as the sysession `attachment-gc` daemon, default off + dry-run.
 
 ### Graceful Shutdown
 
@@ -309,72 +149,43 @@ On SIGTERM/SIGINT: `sd_notify STOPPING=1`, cancel the root context (stops connec
 3. **HTTP drain barrier** -- no handler may observe a half-cleaned session map
 4. **router.Shutdown** last -- waits for running sessions (30s via shutdownCond), saves the session store, closes all processes concurrently (via stdin close)
 
-Each phase emits a `phase=` timing log line so a hung subsystem is attributable from journalctl alone. A new subsystem MUST be inserted at the correct slot -- the order test breaks otherwise.
+Each phase emits a `phase=` timing log line. A new subsystem MUST be inserted at the correct slot.
 
 ## Config
 
-`config.yaml` supports `${ENV_VAR}` expansion. Key sections:
+`config.yaml` supports `${ENV_VAR}` expansion; `config.example.yaml` is the commented reference. Key sections:
 
-- **server.addr**: Listen address (default `:8080`)
-- **cli**: `backend` (`claude`|`kiro`|`codex`), `path`, `model`, `args`, `effort`, `mcp_config` (absolute path to an MCP server definition file → `--mcp-config`; required to get MCP servers into a spawn when `naozhi_settings.enabled` is on, since that path's `--setting-sources ""` suppresses `~/.claude.json`'s `mcpServers` — see `docs/rfc/cli-mcp-config.md`), `permission_mode` (Claude only: `bypass` (default) → `--dangerously-skip-permissions`, `auto` → `--permission-mode auto`; any other value fails validation). Multi-backend deployments use `cli.backends: [{id, path, model, args, effort}, ...]` so the dashboard picker can choose per-session — see `config.example.yaml` for the commented-out canonical example. `effort` (kiro only) also accepts a per-agent override via `agents[].effort`; precedence is `cli.effort < cli.backends[].effort < agents[].effort`
-- **session**: `max_procs`, `ttl`, `cwd` (working directory), `store_path`, `watchdog.no_output_timeout`, `watchdog.total_timeout`
-- **agents**: Map of agent_id -> {model, args, backend, access_profile, effort, system_prompt}. `system_prompt` is passed as `--append-system-prompt` (Claude backend only); the flag itself is denylisted in `args`
-- **agent_commands**: Map of command -> agent_id for routing (e.g., `review: code-reviewer`)
-- **platforms**: `feishu` (app credentials, connection_mode), `slack` (bot_token, app_token), `discord` (bot_token), `weixin` (token, base_url)
-- **cron**: `store_path`, `max_jobs`, `execution_timeout`
-- **projects**: `root` (scan directory), `planner_defaults.model`, `planner_defaults.prompt`
-- **workspace**: `id`, `name` (local node identity, defaults to hostname)
-- **nodes**: Map of node_id -> {url, token, display_name} (poll remote nodes via HTTP)
-- **reverse_nodes**: Map of node_id -> {token, display_name} (accept incoming reverse connections)
-- **upstream**: `url` (ws://), `node_id`, `token`, `display_name` (connect to primary as reverse node)
-- **transcribe**: `enabled`, `region`, `language` (voice message STT). There is no `provider` key — the AWS Transcribe backend is the only implementation and is selected implicitly
-- **log**: `level` (debug/info/warn/error)
+- **server.addr**: Listen address (default `:8080`); `server.dashboard_token` guards the dashboard
+- **cli**: `backend` (`claude`|`kiro`|`codex`), `path`, `model`, `args`, `effort`, `mcp_config` (→ `--mcp-config`; needed for MCP servers when `naozhi_settings.enabled` is on, see `docs/rfc/cli-mcp-config.md`), `permission_mode` (Claude only: `bypass` (default) or `auto`), `backends` for multi-backend. Effort precedence: `cli.effort < cli.backends[].effort < agents[].effort`
+- **session**: `max_procs`, `ttl`, `cwd`, `store_path`, `watchdog.no_output_timeout`, `watchdog.total_timeout`
+- **agents**: Map of agent_id -> {model, args, backend, access_profile, effort, system_prompt}. `system_prompt` is passed as `--append-system-prompt` (Claude only); the flag itself is denylisted in `args`
+- **agent_commands**: Map of command -> agent_id (e.g., `review: code-reviewer`)
+- **platforms**: `feishu`, `slack`, `discord`, `weixin`
+- **cron**, **projects**, **sysession**, **transcribe**, **update**, **im_access**, **log**
+- **workspace** / **workspaces** / **reverse_nodes** / **upstream**: local node identity, polled nodes, accepted reverse nodes, dial-out to a primary
 
-Config describes schema v2 only. The v1 keys (`nodes`, `session.workspace`, `session.auto_chain`, `--append-system-prompt` in `agents[].args`) are understood solely by the migration chain (`internal/config/migrations.go`), which `Load` runs in memory from the file's own `schema_version` (absent = v1) and `naozhi config migrate -write` applies to the file, after keeping the original as `<config>.pre-migrate-v<N>` (0600, never overwritten); each rewrite is a `config-deprecated` diag. When both `nodes` and `workspaces` are present, `workspaces` wins. `cfg.Nodes` is the Go-side view `Config.Normalize` mirrors from `Workspaces`.
+Config describes schema v2 only; there is no migration chain. v1 keys (`nodes`, `session.workspace`, `session.auto_chain`) are not read and are reported as `config-deprecated` diags (`internal/config/unknown_keys.go`); so is the removed `cron.sandbox` block. A `schema_version` newer than the binary is rejected.
 
 ## Concurrency Patterns
 
-- **The session table** (`internal/session/sessiontable`: sessions + chat / key-hash / session-ID indices) owns its lock, which also guards the router state that changes atomically with it (spawn bookkeeping, workspace overrides, picks). The only way in is a transaction — `r.ss.View` / `r.ss.Update`, plus `Load` / `Count` and the lock-free `Active` / `Gen` — and a `Tx` used after its callback panics. Slow work inside a transaction runs in `tx.Unlocked` (closing a process, waiting for a socket); a spawn reserves in the caller's transaction (`reserveSpawn`) and finishes outside it (`completeSpawn`, one commit transaction). Shutdown waits with `tx.Wait`.
+- **The session table** (`internal/session/sessiontable`) owns its lock; the only way in is a transaction (`r.ss.View` / `r.ss.Update`). Slow work inside a transaction runs in `tx.Unlocked`; a spawn reserves in the caller's transaction (`reserveSpawn`) and finishes outside it (`completeSpawn`).
 - **ManagedSession.sendMu** serializes Send() calls and protects session_id capture.
-- **turn's queue** (`internal/turn`, one `sync.RWMutex`) gives each session key one owner loop; everything else for the key queues behind it, so goroutines do not pile up per session.
-- **Hub.mu** protects WebSocket client set and subscriptions. `nodesMu` (shared with Server) protects the nodes map.
-- Node cache is a separate `nodeCacheMu` to avoid blocking dashboard API.
+- **turn's queue** gives each session key one owner loop, so goroutines do not pile up per session.
+- **Hub.mu** protects WebSocket client set and subscriptions; node cache uses a separate `nodeCacheMu` to avoid blocking dashboard API.
 - Process Close() is always called outside router lock to prevent deadlock.
 
 ## Logging
 
-- On a turn's path (dispatch, turn, session, cli) log with `slog.*Context(ctx, …)` / `lg.*Context(ctx, …)`: `ctxutil.Handler` adds the ctx's `trace_id` / `run_id` / `session_key`, and the package-level `slog.Info` family carries none of them. Startup, cron and config paths have no turn ctx and stay as they are. `docs/ops/log-correlation.md` has the field table and jq recipes.
+On a turn's path (dispatch, turn, session, cli) log with `slog.*Context(ctx, …)`: `ctxutil.Handler` adds the ctx's `trace_id` / `run_id` / `session_key`. See `docs/ops/log-correlation.md`.
 
 ## Code Comments
 
-Comments describe the *current* code: the invariant that holds, why a non-obvious choice was made, what a caller must not do. Everything else belongs in git history, PR descriptions and GitHub issues. (#2497)
-
-- **No history in comments.** No "previously / used to / was removed / historical note", no review-round narrative, no rejected-alternative essays. If the story matters, link it once: `// see #800`.
-- **No review anchors in code.** Never paste cron-cr finding IDs (`R<nnn>-<AREA>-<n>`) or issue titles into comments. Reference the issue/PR number once, at the end of the rationale. The commit message and PR body carry `(#N)`.
-- **Length limits.** In-function comment block ≤ 5 lines. Godoc on one identifier ≤ 10 lines. Package doc (`doc.go`) ≤ 60 lines. Longer means the function should be split or the design belongs in `docs/rfc/`.
-- **No comment-backed invariants.** If an invariant needs a CI lint to keep a comment honest, express it as a type or package boundary instead (#2495 / #2499 is the pattern). No lint or test checks that a comment's *content* matches the code. The one `// 读写:` note, on `cron.Scheduler`, states a lock discipline rather than a file list, which is an invariant worth writing down.
-- **Keep:** the godoc first sentence on exported identifiers, `//go:` directives, `//nolint`, build tags, `TODO` with an issue link, and security rationale that cannot be derived from the code.
-- **Automated fixers** (cron code-review / issue-fix agents) follow the same rules; a PR that adds anchors or history comments is a review BLOCK.
+Comments say *why* (the invariant, the non-obvious choice, what a caller must not do); history belongs in git and issues.
 
 ## Deployment
 
-Production: CloudFront -> ALB (SG: CloudFront-only) -> EC2 t4g.small :8180 -> systemd. Bedrock auth via IAM role (no AKSK). The EC2 needs access to the `bedrock-runtime` VPC endpoint (check SG on the endpoint).
+macOS: a launchd job (label read from `XPC_SERVICE_NAME`); `naozhi upgrade` keeps the self-signed codesign identity (`docs/ops/macos-codesign.md`). Linux: `sudo naozhi install` writes the systemd unit (`cmd/naozhi/service_systemd.go::generateSystemdUnit`; `deploy/naozhi.service` is a manual reference kept in sync by `TestGenerateSystemdUnit_MatchesDeployTemplate`).
 
 ## Documentation
 
-```
-docs/
-├── design/                       # 架构与已实现功能设计
-│   ├── DESIGN.md                 # 主设计文档 —— 架构层面事实以此为准
-│   ├── architecture.html         # 架构可视化
-│   └── ...                       # 各子系统设计（multi-node / shim / server-split / i18n / ...）
-├── adr/                          # Architecture Decision Records
-├── rfc/                          # RFC 工作文档（proposal / 验证报告 / phase 报告）
-│   └── README.md                 # 索引 + 状态表（Draft / 已实装 / 已废弃）——先看这里
-├── ops/                          # 部署与运维 playbook（deployment / release-gate / pprof / ...）
-├── review/                       # 代码评审批次原始记录（batch*-raw.md / cosmetic-backlog.md）
-└── guides/                       # 操作手册（weixin-test / shim-testing）
-```
-
-待办事项不再放 `docs/TODO.md`，已迁移 GitHub Issues（见 `docs/rfc/todo-to-issues-migration.md`）。
-RFC 不是最终规范——其中很多已实装或已废弃，状态以 `docs/rfc/README.md` 的表格为准。
+`docs/design/` (`DESIGN.md` is the architecture source of truth), `docs/rfc/` (working RFCs; status table in `docs/rfc/README.md`), `docs/ops/` (deployment / release / pprof playbooks), `docs/guides/`. TODOs go to GitHub Issues.

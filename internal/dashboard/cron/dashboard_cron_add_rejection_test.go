@@ -10,12 +10,16 @@ import (
 )
 
 // A create the scheduler refuses for a full job table is a 409 that says so,
-// and a too-frequent schedule (on create or edit) names the interval floor;
-// only the remaining rejections keep the generic 400.
+// and a too-frequent schedule (on create or edit) names the interval floor; a
+// bad prompt / schedule gets its own 400; only the remaining rejections keep
+// the generic 400.
 func TestHandleCreateUpdate_RejectionStatusByClass(t *testing.T) {
 	t.Parallel()
 	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{MaxJobs: 1, AllowNilRouter: true}, cronpkg.SchedulerDeps{})
-	h := &Handlers{deps: Deps{Scheduler: sched}}
+	h := &Handlers{deps: Deps{
+		Scheduler:  sched,
+		ValidateWS: func(ws, _ string) (string, error) { return ws, nil },
+	}}
 	send := func(method, target, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, target, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -33,7 +37,9 @@ func TestHandleCreateUpdate_RejectionStatusByClass(t *testing.T) {
 		body, wantErr string
 	}{
 		{`{"schedule":"@every 1m","prompt":"hi"}`, "schedule interval below the 5m minimum"},
-		{`{"schedule":"not a cron","prompt":"hi"}`, "invalid schedule or job fields"},
+		{`{"schedule":"not a cron","prompt":"hi"}`, "invalid schedule expression"},
+		{`{"schedule":"@every 1h","prompt":"` + strings.Repeat("x", cronpkg.MaxPromptBytes+1) + `"}`, "invalid prompt"},
+		{`{"schedule":"@every 1h","prompt":"hi","title":"a\u202eb"}`, "invalid schedule or job fields"},
 	} {
 		w := send(http.MethodPost, "/api/cron", c.body)
 		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), c.wantErr) {
@@ -55,7 +61,11 @@ func TestHandleCreateUpdate_RejectionStatusByClass(t *testing.T) {
 		t.Errorf("update to 1m: got %d %q, want 400 interval", w.Code, w.Body.String())
 	}
 	w = send(http.MethodPatch, "/api/cron?id="+job.ID, `{"schedule":"not a cron"}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid schedule expression") {
+		t.Errorf("update to garbage: got %d %q, want 400 invalid schedule", w.Code, w.Body.String())
+	}
+	w = send(http.MethodPatch, "/api/cron?id="+job.ID, `{"title":"a\u0001b"}`)
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid update payload") {
-		t.Errorf("update to garbage: got %d %q, want 400 generic", w.Code, w.Body.String())
+		t.Errorf("update to control-char title: got %d %q, want 400 generic", w.Code, w.Body.String())
 	}
 }

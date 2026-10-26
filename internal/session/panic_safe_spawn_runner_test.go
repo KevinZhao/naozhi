@@ -1,7 +1,7 @@
 package session
 
-// Pins the Runner-seam migration of panicSafeSpawn (agentcore-cloud-sandbox
-// RFC §4.2): the helper now takes cli.Runner instead of *cli.Wrapper. Two
+// Pins the Runner-seam migration of panicSafeSpawn (placement axis; only
+// "local" exists): the helper takes cli.Runner instead of *cli.Wrapper. Two
 // contracts matter at this seam:
 //
 //  1. nil runner → descriptive error, no panic. (*cli.Wrapper)(nil).Runner()

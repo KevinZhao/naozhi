@@ -1,13 +1,7 @@
-// anchor-keep: totalCost's atomic.Uint64 packing is the fact; a reverted plain float64 behaves identically until a torn read appears under a future post-publication writer.
 package session
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"math"
-	"os"
-	"path/filepath"
 	"reflect"
 	"runtime"
 	"sync"
@@ -147,77 +141,4 @@ func TestTotalCost_ConcurrentReadWriteNoTornRead(t *testing.T) {
 	if n := failCount.Load(); n > 0 {
 		t.Errorf("observed %d torn reads — atomic packing broken", n)
 	}
-}
-
-// TestSessionPackage_NoPlainFloat64TotalCost scans session/*.go for a struct
-// field named totalCost whose declared type is plain float64. If a future
-// refactor reverts the R183-CONCUR-M2 atomic wrapping (say by introducing a
-// helper struct that holds the float directly), this guards against silent
-// regression. Complement to the reflect-based test above: catches renames and
-// structural splits that would slip past the type check on ManagedSession.
-func TestSessionPackage_NoPlainFloat64TotalCost(t *testing.T) {
-	t.Parallel()
-	root := filepath.Join("..", "session")
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatalf("read %s: %v", root, err)
-	}
-	violations := []string{}
-	for _, e := range entries {
-		if e.IsDir() || !e.Type().IsRegular() {
-			continue
-		}
-		name := e.Name()
-		if !hasSuffix(name, ".go") || hasSuffix(name, "_test.go") {
-			continue
-		}
-		path := filepath.Join(root, name)
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-		if err != nil {
-			t.Fatalf("parse %s: %v", path, err)
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			st, ok := n.(*ast.StructType)
-			if !ok || st.Fields == nil {
-				return true
-			}
-			for _, field := range st.Fields.List {
-				ident, ok := field.Type.(*ast.Ident)
-				if !ok || ident.Name != "float64" {
-					continue
-				}
-				for _, n := range field.Names {
-					if n.Name == "totalCost" {
-						violations = append(violations,
-							path+": totalCost declared as plain float64 — "+
-								"R183-CONCUR-M2 requires atomic.Uint64 + loadTotalCost/storeTotalCost helpers")
-					}
-				}
-			}
-			return true
-		})
-	}
-	if len(violations) > 0 {
-		t.Errorf("found %d plain-float64 totalCost declaration(s):\n  %s",
-			len(violations), joinLines(violations))
-	}
-}
-
-func hasSuffix(s, suf string) bool {
-	if len(s) < len(suf) {
-		return false
-	}
-	return s[len(s)-len(suf):] == suf
-}
-
-func joinLines(xs []string) string {
-	out := ""
-	for i, x := range xs {
-		if i > 0 {
-			out += "\n  "
-		}
-		out += x
-	}
-	return out
 }

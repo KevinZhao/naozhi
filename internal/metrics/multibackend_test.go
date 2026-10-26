@@ -415,19 +415,3 @@ func TestByBackendNamingConvention(t *testing.T) {
 		})
 	}
 }
-
-func TestNewLabeled_RequiresLabelNames(t *testing.T) {
-	for name, fn := range map[string]func(){
-		"counter": func() { NewLabeledCounter("test_nolabels_counter_" + t.Name()) },
-		"gauge":   func() { NewLabeledGauge("test_nolabels_gauge_" + t.Name()) },
-	} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Errorf("%s without label names should panic", name)
-				}
-			}()
-			fn()
-		}()
-	}
-}

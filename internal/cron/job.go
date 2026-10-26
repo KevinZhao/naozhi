@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	robfigcron "github.com/robfig/cron/v3"
 
@@ -41,11 +42,9 @@ type JobInit struct {
 	Title          string
 	WorkDir        string
 	Backend        string
-	Placement      string
 	NotifyPlatform string
 	NotifyChatID   string
 	Notify         *bool
-	SideEffects    *bool
 	FreshContext   bool
 	Paused         bool
 }
@@ -76,11 +75,9 @@ func NewJobFull(in JobInit) *Job {
 		Title:          in.Title,
 		WorkDir:        in.WorkDir,
 		Backend:        in.Backend,
-		Placement:      in.Placement,
 		NotifyPlatform: in.NotifyPlatform,
 		NotifyChatID:   in.NotifyChatID,
 		Notify:         in.Notify,
-		SideEffects:    in.SideEffects,
 		FreshContext:   in.FreshContext,
 		Paused:         in.Paused,
 	}
@@ -116,18 +113,6 @@ type Job struct {
 	// to AgentOpts.Backend at execute time; validateBackend still gates
 	// shape-invalid input and wrapperFor falls back for unknown IDs.
 	Backend string `json:"backend,omitempty"`
-
-	// Placement selects WHERE the job runs: "" / "local" = this host via the
-	// session router; "sandbox" = run-once AgentCore microVM. validatePlacement
-	// gates every write path; executeOpt branches on it before touching the
-	// router. Sandbox guardrails are enforced by the sandbox executor, not here.
-	Placement string `json:"placement,omitempty"`
-
-	// SideEffects declares that this job mutates external state (pushes a
-	// branch, opens a PR…). Tri-state like Notify: nil = legacy default (false).
-	// A sandbox run ending failed-transport (microVM fate unknown) goes to the
-	// human confirmation queue instead of auto-replay when this is true.
-	SideEffects *bool `json:"side_effects,omitempty"`
 
 	// Optional notification target for dashboard-created jobs.
 	// When set, execution results are also sent to this IM channel.
@@ -250,10 +235,8 @@ var transientTurnCauses = map[TurnCause]bool{
 const transientAutoPauseWindow = 6 * time.Hour
 
 // streakEffect is how the run moves the failure streak. A success resets it.
-// Failures the job did not cause leave it alone: a run the restart reconciler
-// closed as an orphan, and a transient backend failure. So do skipped and
-// canceled runs. A live lost sandbox connection counts whichever end dropped
-// it: a microVM that crashes on every run is the job's problem.
+// Failures the job did not cause leave it alone: a transient backend failure.
+// So do skipped and canceled runs.
 func (o runOutcome) streakEffect() streakEffect {
 	switch o.state {
 	case RunStateSucceeded:
@@ -261,7 +244,7 @@ func (o runOutcome) streakEffect() streakEffect {
 	case RunStateTimedOut:
 		return streakExtend
 	case RunStateFailed:
-		if o.restartOrphan || o.transientBackendFailure() {
+		if o.transientBackendFailure() {
 			return streakKeep
 		}
 		return streakExtend
@@ -272,12 +255,11 @@ func (o runOutcome) streakEffect() streakEffect {
 // transientBackendFailure reports a turn failed by a transient backend cause,
 // which Job.TransientFailures counts instead of ConsecutiveFailures.
 func (o runOutcome) transientBackendFailure() bool {
-	return !o.restartOrphan && transientTurnFailure(o.state, o.errClass, o.turnCause)
+	return transientTurnFailure(o.state, o.errClass, o.turnCause)
 }
 
 // transientTurnFailure is transientBackendFailure from the fields a failure
-// notice carries. A restart orphan never auto-pauses, so for a run that did
-// the two agree.
+// notice carries.
 func transientTurnFailure(state RunState, errClass ErrorClass, cause TurnCause) bool {
 	return state == RunStateFailed && errClass == ErrClassTurnFailed && transientTurnCauses[cause]
 }
@@ -411,11 +393,6 @@ const (
 	// ErrClassPanic marks a run whose body panicked after it started; the run
 	// scaffold closes it through finishRun (runStarted).
 	ErrClassPanic = runtelemetry.ErrClassPanic
-	// Sandbox placement classes. Transport is the double-run-risk state
-	// (microVM fate unknown).
-	ErrClassSandboxFailed      = runtelemetry.ErrClassCronSandboxFailed
-	ErrClassSandboxTransport   = runtelemetry.ErrClassCronSandboxTransport
-	ErrClassSandboxUnavailable = runtelemetry.ErrClassCronSandboxUnavailable
 	// ErrClassInterrupted marks a run still executing when the process went away
 	// — a graceful shutdown that outran the drain budget, or a hard kill. The
 	// RunState stays canceled; this class is what distinguishes it from an
@@ -561,7 +538,7 @@ const (
 
 // schedulePeriod 估算给定 cron 表达式在 now 附近的周期（sched.Next 两次外推）。
 // 无法解析 / 不等间隔（DST 切换窗口）时返回 0。now 必须由调用方显式提供，
-// 与 HasMissedSchedule / previousTickBefore 读取的"现在"完全同步，避免跨
+// 与 HasMissedSchedule / previousTickBeforeFromSched 读取的"现在"完全同步，避免跨
 // 越 DST/NTP 校正瞬间把 period 估成 23h/25h 而误判 missed。
 func schedulePeriod(schedule string, now time.Time) time.Duration {
 	sched, err := cronParser.Parse(schedule)
@@ -569,23 +546,6 @@ func schedulePeriod(schedule string, now time.Time) time.Duration {
 		return 0
 	}
 	return schedulePeriodFromSched(sched, now)
-}
-
-// previousTickBefore 算给定 schedule 在 now 之前最近一次应该触发的时刻。
-// robfig/cron 只有 Next()：从 now - 3×period 起反复 Next 直到超过 now，
-// 上一个值即为答案。窗口乘 3 是给 DST / 月份 / 闰年这类非等间隔形态留裕量。
-// 无法解析的 schedule 返回零值 time。生产路径走 previousTickBeforeFromSched
-// 复用已 Parse 的 sched；本字符串入口仅供包内测试直测回推逻辑。
-func previousTickBefore(schedule string, now time.Time) time.Time {
-	sched, err := cronParser.Parse(schedule)
-	if err != nil {
-		return time.Time{}
-	}
-	period := schedulePeriodFromSched(sched, now)
-	if period <= 0 {
-		return time.Time{}
-	}
-	return previousTickBeforeFromSched(sched, period, now)
 }
 
 // schedulePeriodFromSched 同 schedulePeriod，但接受已解析的 robfigcron.Schedule，
@@ -596,8 +556,10 @@ func schedulePeriodFromSched(sched robfigcron.Schedule, now time.Time) time.Dura
 	return second.Sub(first)
 }
 
-// previousTickBeforeFromSched 同 previousTickBefore，但接受已解析的 sched +
-// 已知 period。previousTickMaxIter 足以覆盖任何合法 schedule 在 3×period
+// previousTickBeforeFromSched 算 sched 在 now 之前最近一次应该触发的时刻。
+// robfig/cron 只有 Next()：从 now - 3×period 起反复 Next 直到超过 now，
+// 上一个值即为答案。窗口乘 3 是给 DST / 月份 / 闰年这类非等间隔形态留裕量。
+// 调用方传入已 Parse 的 sched + 已知 period。previousTickMaxIter 足以覆盖任何合法 schedule 在 3×period
 // 窗口内的迭代次数。
 func previousTickBeforeFromSched(sched robfigcron.Schedule, period time.Duration, now time.Time) time.Time {
 	if period <= 0 {
@@ -693,8 +655,14 @@ func hasMissedScheduleImpl(j *Job, cached robfigcron.Schedule, cachedPeriod time
 // minimum interval. loc is the timezone the scheduler will evaluate the
 // schedule in (WithLocation); seeding the probe in the same frame keeps DST /
 // month-end forms from passing here but firing faster at runtime (#1321).
-// nil falls back to time.Local for callers without a location yet.
+// nil falls back to time.Local for callers without a location yet. The byte
+// gate matches loadJobs's read path so the parser never sees an oversized or
+// control-character expression.
 func validateSchedule(schedule string, loc *time.Location) error {
+	if schedule == "" || len(schedule) > MaxScheduleBytes || !utf8.ValidString(schedule) ||
+		strings.ContainsAny(schedule, "\t\n\r") || containsCronUnsafe(schedule) {
+		return fmt.Errorf("empty, oversized or contains invalid characters")
+	}
 	sched, err := cronParser.Parse(schedule)
 	if err != nil {
 		return err

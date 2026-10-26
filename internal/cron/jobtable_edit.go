@@ -129,9 +129,8 @@ type updateResult struct {
 }
 
 // update applies upd to job id, or with upd.InChat to the job findByPrefixLocked
-// resolves id to in that chat. Every failure — the sandbox+work_dir guard on
-// the effective post-patch job (agentcore §4.4) or the persist — restores the
-// pre-update job by value under the same hold, including the Notify pointer
+// resolves id to in that chat. A failed persist restores the pre-update job
+// by value under the same hold, including the Notify pointer
 // applyTo replaces. The schedule is not applyTo's: it is written here, and on
 // an active job its entry and cache are zeroed so readers see entryID=0 at
 // once; the swap itself is the caller's, off the lock.
@@ -152,10 +151,6 @@ func (t *jobTable) update(id string, upd JobUpdate) (updateResult, error) {
 	upd.applyTo(j)
 	// An edit is the user's attempt at a fix: the failure streaks start over.
 	j.setStreaks(failureStreaks{})
-	if placementIsSandbox(j.Placement) && j.WorkDir != "" {
-		*j = preUpdate
-		return updateResult{}, ErrSandboxWorkDir
-	}
 	var r updateResult
 	if upd.Schedule != nil && *upd.Schedule != j.Schedule {
 		j.Schedule = *upd.Schedule

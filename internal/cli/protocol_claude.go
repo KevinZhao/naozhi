@@ -205,9 +205,6 @@ func invalidAppendSystemPrompt(p string) string {
 // cannot be safely cut.
 const maxExtraArgsBytes = 128 * 1024
 
-// IsDeniedExtraFlag is cliinfo.IsDeniedExtraFlag (see there).
-func IsDeniedExtraFlag(arg string) bool { return cliinfo.IsDeniedExtraFlag(arg) }
-
 // capExtraArgsBytes guards against a runaway caller (or stacked scratch
 // contexts) producing an argv that exceeds ARG_MAX, then strips CLI-behaviour-
 // altering flags (#653) that must never be smuggled in via ExtraArgs — an
@@ -496,7 +493,7 @@ func (p *ClaudeProtocol) ReadEventInto(line string, buf []clievent.Event) ([]cli
 	}
 	// AskUserQuestion surfacing: in `claude -p` the CLI auto-injects an
 	// is_error tool_result ~3ms after the tool_use and the model falls back to
-	// text in the same turn (test/e2e/askuser/). We observe the tool_use so
+	// text in the same turn. We observe the tool_use so
 	// dispatch can render an interactive card. The raw-line substring check
 	// keeps the per-block walk off the common path (#1008).
 	if ev.Type == "assistant" && ev.Message != nil &&
@@ -598,7 +595,7 @@ func parseWorkflowLaunch(line string) *clievent.WorkflowLaunch {
 }
 
 // askUserQuestionInput matches the `input` of an AskUserQuestion tool_use
-// block (keys as observed in test/e2e/askuser logs).
+// block.
 type askUserQuestionInput struct {
 	Questions []struct {
 		Question    string `json:"question"`

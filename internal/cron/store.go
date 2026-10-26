@@ -15,6 +15,19 @@ import (
 // an empty state over the operator's real jobs.
 const maxCronStoreBytes = 16 * 1024 * 1024
 
+// storedJob is one cron_jobs.json entry as read: the Job plus the keys of
+// removed features that the load still acts on. Job itself carries none of
+// them, so the next persist drops them from the file.
+type storedJob struct {
+	Job
+	// LegacyPlacement is the removed "placement" key; "sandbox" named the
+	// AgentCore cloud sandbox.
+	LegacyPlacement string `json:"placement,omitempty"`
+}
+
+// legacyPlacementSandbox is the removed sandbox placement's on-disk value.
+const legacyPlacementSandbox = "sandbox"
+
 // loadJobs reads and parses the on-disk cron job store. Outcomes:
 //
 //   - (map, nil): normal read; a missing file yields a nil map (= empty).
@@ -35,7 +48,7 @@ const maxCronStoreBytes = 16 * 1024 * 1024
 //     symlink, or the corrupt-rename failed). Callers MUST abort: continuing
 //     with empty state would make the next persist clobber the real jobs (#469).
 func loadJobs(path string) (map[string]*Job, error) {
-	entries, out, err := jsonfile.Load[[]*Job](path, jsonfile.Options{
+	entries, out, err := jsonfile.Load[[]*storedJob](path, jsonfile.Options{
 		MaxBytes: maxCronStoreBytes,
 		Label:    "cron store",
 	})
@@ -56,12 +69,13 @@ func loadJobs(path string) (map[string]*Job, error) {
 	}
 
 	m := make(map[string]*Job, len(entries))
-	for _, j := range entries {
-		// json.Unmarshal of `[null, {...}]` yields nil *Job entries; drop them
+	for _, e := range entries {
+		// json.Unmarshal of `[null, {...}]` yields nil entries; drop them
 		// instead of panicking.
-		if j == nil {
+		if e == nil {
 			continue
 		}
+		j := &e.Job
 		if j.ID == "" {
 			continue
 		}
@@ -74,7 +88,7 @@ func loadJobs(path string) (map[string]*Job, error) {
 			continue
 		}
 		// Defensive prompt validation (the write paths already enforce
-		// validateCronPrompt, but cron_jobs.json can be edited offline): invalid UTF-8
+		// ValidatePromptStrict, but cron_jobs.json can be edited offline): invalid UTF-8
 		// corrupts every later json.Marshal and control bytes smuggle ANSI / log
 		// injection into every CronRun.Result. Drop the job rather than abort the load.
 		if !utf8.ValidString(j.Prompt) || containsCronUnsafe(j.Prompt) {
@@ -112,18 +126,13 @@ func loadJobs(path string) (map[string]*Job, error) {
 				"path", path, "cron_id", j.ID, "backend_bytes", len(j.Backend))
 			continue
 		}
-		// Placement: tampered/unknown values are normalised to local rather than
-		// dropping the job — a bad placement is a routing choice, not an injection
-		// vector. The sandbox×work_dir combination degrades the same way.
-		if err := validatePlacement(j.Placement); err != nil {
-			slog.Warn("cron store: normalising job with invalid placement to local",
-				"path", path, "cron_id", j.ID, "err", err)
-			j.Placement = ""
-		}
-		if placementIsSandbox(j.Placement) && j.WorkDir != "" {
-			slog.Warn("cron store: sandbox job carries work_dir (Phase 1 unsupported); normalising placement to local",
+		// The AgentCore cloud-sandbox placement was removed. A job written for
+		// it is paused rather than silently run on this host, which its author
+		// never chose; resuming it is the operator's explicit opt-in to local.
+		if e.LegacyPlacement == legacyPlacementSandbox && !j.Paused {
+			slog.Warn("cron store: pausing job written for the removed sandbox placement; resume it to run locally",
 				"path", path, "cron_id", j.ID)
-			j.Placement = ""
+			j.Paused = true
 		}
 		// Defensive Schedule / WorkDir validation for offline edits: control bytes
 		// would smuggle log injection into "could not chdir" lines and an over-long
@@ -167,13 +176,14 @@ func loadJobs(path string) (map[string]*Job, error) {
 }
 
 // containsCronUnsafe reports whether s contains any byte the cron field-safety
-// policy rejects: C0 controls other than \t \n \r, DEL, Unicode bidi overrides
+// policy rejects: C0 controls other than \t \n \r, DEL, C1 controls
+// (U+0080..U+009F; U+009B is CSI on some terminals), Unicode bidi overrides
 // (U+202A..U+202E, U+2066..U+2069) or LS/PS (U+2028/U+2029). Bidi codepoints
 // can visually reorder glyphs in IM / browser renderers so a tampered prompt
 // swaps "rm -rf /tmp/safe" for "rm -rf /etc/passwd" at display time; LS/PS
-// introduce hard line breaks. Matches what validateCronPrompt blocks on the
-// write paths. Inlined byte scan (no textutil regex) because loadJobs runs once
-// at startup and the ASCII path stays branchless.
+// introduce hard line breaks. This is the one character policy for
+// cron_jobs.json fields, on both the read and write paths; an inlined byte
+// scan so the ASCII path stays branchless.
 func containsCronUnsafe(s string) bool {
 	for i := 0; i < len(s); i++ {
 		b := s[i]
@@ -183,7 +193,11 @@ func containsCronUnsafe(s string) bool {
 		if b < 0x20 || b == 0x7F {
 			return true
 		}
-		// All guarded codepoints are 3-byte sequences with an E2 80 / E2 81 prefix
+		// C1 controls encode as C2 80..C2 9F.
+		if b == 0xC2 && i+1 < len(s) && s[i+1] >= 0x80 && s[i+1] <= 0x9F {
+			return true
+		}
+		// The remaining guarded codepoints are 3-byte sequences with an E2 80 / E2 81 prefix
 		// (U+2028..U+202E → E2 80 A8..AE, U+2066..U+2069 → E2 81 A6..A9).
 		if b == 0xE2 && i+2 < len(s) {
 			b1 := s[i+1]

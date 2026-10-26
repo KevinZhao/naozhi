@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/naozhi/naozhi/internal/cron/sandboxstore"
 	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
@@ -64,7 +63,7 @@ func (ms Markers) Write(m InflightMarker, lg *slog.Logger) string {
 	// Symlink-guarded create, the one guard every cron state subtree shares
 	// (#2166): a planted `<root>/runinflight → /elsewhere` must not redirect
 	// where the next boot looks, nor where this write lands.
-	if err := (sandboxstore.Store{Root: ms.Root}).MkdirSubtree(dir); err != nil {
+	if err := mkdirSubtree(ms.Root, dir); err != nil {
 		lg.Warn("cron: run-inflight dir create failed; an interrupted run will not appear in history", "err", err)
 		return ""
 	}

@@ -23,7 +23,7 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// Handlers provides authentication middleware and login/logout endpoints.
+// Handlers provides authentication middleware and the login endpoints.
 type Handlers struct {
 	DashboardToken string
 	cookieSecret   []byte
@@ -449,35 +449,6 @@ func (a *Handlers) writeAuthCookie(w http.ResponseWriter, r *http.Request) {
 		Secure:   a.IsSecure(r),
 		MaxAge:   authCookieMaxAgeSeconds,
 	})
-}
-
-func (a *Handlers) HandleLogout(w http.ResponseWriter, r *http.Request) {
-	// Logout MUST NOT call RotateCookieGen(): every browser holds the *same*
-	// CookieMAC, so a global seq bump would let any cookie holder — including a
-	// thief — log out every operator (#1913). Per-cookie revocation needs
-	// per-session identity (#389).
-	http.SetCookie(w, &http.Cookie{
-		Name:     AuthCookieName,
-		Value:    "",
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-		Secure:   a.IsSecure(r),
-		MaxAge:   -1,
-	})
-	// Also clear the nz_anon per-browser owner label (#2157). Field set mirrors
-	// mintAnonCookie in internal/server/send_anon_cookie.go; the name is a
-	// literal because this package cannot import internal/server.
-	http.SetCookie(w, &http.Cookie{
-		Name:     "nz_anon",
-		Value:    "",
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-		Secure:   a.IsSecure(r),
-		MaxAge:   -1,
-	})
-	httputil.WriteOK(w)
 }
 
 const loginPageHTML = `<!DOCTYPE html>

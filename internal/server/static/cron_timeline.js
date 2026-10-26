@@ -1,16 +1,15 @@
 // cron_timeline.js — the per-job run timeline: rows, inline expand, detail /
-// transcript / snapshot fetches, load-more and head-refresh reconcilers
+// transcript fetches, load-more and head-refresh reconcilers
 // (#2715 D4 follow-up: cron_view.js four-region split, region 2).
 //
 // Owns cronTimelineState (per-job window/cache) and cronExpandedRunId (the
 // single inline-expanded row). Which job the drawer shows and the jobs array
-// come from cron_state.js; the timeline repaints after the attention queue
-// and the job cost are fetched.
+// come from cron_state.js; the timeline repaints after the job cost is
+// fetched.
 
 import { NZ_CONTRACT } from './contract.js';
 import { cronDrawerState, cronJobCostCache, cronStore, fetchCronJobs } from './cron_state.js';
 import { cronErrorClassLabel, cronJobLedgerCostHtml } from './cron_format.js';
-import { cronAttentionQueueHtml } from './cron_attention.js';
 import { authHeaders } from './platform.js';
 import { renderMd, runPendingAsync } from './render_md.js';
 import { costBudgetChipHtml, fetchCostBudget, fetchCostSummary, formatAbsTime, showAPIError, showAuthModal, showNetworkError } from './utilities.js';
@@ -18,7 +17,6 @@ import {
   esc,
   escAttr,
   fetchJSON,
-  formatBytes,
   formatCostUSD,
   formatRunDuration,
   runStateDot,
@@ -103,7 +101,7 @@ function cronTimelineHtml(jobId, job, st) {
   const headTitle = total > 0
     ? '最近运行 · ' + total + ' 次'
     : '最近运行';
-  // §7.5 cost小字：纯前端聚合已加载 run 的 cost_usd（只有云沙箱 run 带）。
+  // §7.5 cost小字：纯前端聚合已加载 run 的 cost_usd。
   // 标注"已加载 N 条"避免误读为全量账单——这是轻量可见性，非账单系统。
   const costSummary = cronTimelineCostSummaryHtml(st.runs);
   const ledgerCost = cronJobLedgerCostHtml(jobId) + costBudgetChipHtml((cronJobCostCache[jobId] || {}).budget, 'ct-cost-ledger');
@@ -138,13 +136,7 @@ function cronTimelineHtml(jobId, job, st) {
       '</button>';
     }
   }
-  // §7.4 confirmation queue banner (PR-6) — prepended above the timeline so a
-  // failed-transport / orphaned side-effecting run is visible the moment the
-  // operator opens any cron panel. Global (cross-job); '' when the queue is
-  // empty. Fetched independently by cronAttentionRefresh().
-  const queueBanner = cronAttentionQueueHtml();
-  return queueBanner +
-    '<div class="ct-head">' +
+  return '<div class="ct-head">' +
       '<h3>' + esc(headTitle) + '</h3>' +
       ledgerCost +
       costSummary +
@@ -155,7 +147,7 @@ function cronTimelineHtml(jobId, job, st) {
 
 
 // cronTimelineCostSummaryHtml sums cost_usd over the loaded runs for the
-// §7.5 cost小字. Returns '' when no loaded run carries cost (all-local job).
+// §7.5 cost小字. Returns '' when no loaded run carries cost.
 // "已加载 N 条" is explicit so the figure is never misread as a full bill —
 // per RFC §7.5 this is lightweight visibility, not a billing system.
 function cronTimelineCostSummaryHtml(runs) {
@@ -169,8 +161,8 @@ function cronTimelineCostSummaryHtml(runs) {
     }
   }
   if (n === 0) return '';
-  return '<span class="ct-cost-sum" title="已加载 ' + n + ' 条云沙箱 run 的成本之和（非全量账单）">' +
-      '☁️ ' + esc(formatCostUSD(sum)) + ' · ' + n + ' 条' +
+  return '<span class="ct-cost-sum" title="已加载 ' + n + ' 条 run 的成本之和（非全量账单）">' +
+      esc(formatCostUSD(sum)) + ' · ' + n + ' 条' +
     '</span>';
 }
 
@@ -231,7 +223,7 @@ function cronTimelineRowHtml(jobId, r, st) {
   if (errCls) {
     subParts.push('<span class="ctr-errcls">' + esc(cronErrorClassLabel(errCls)) + '</span>');
   }
-  // §7.5 per-run cost小字 — only sandbox runs carry cost_usd in the summary.
+  // §7.5 per-run cost小字.
   if (r.cost_usd) {
     subParts.push('<span class="ctr-cost" title="本次成本估算">' + esc(formatCostUSD(r.cost_usd)) + '</span>');
   }
@@ -252,7 +244,7 @@ function cronTimelineRowHtml(jobId, r, st) {
 
   // 行 click/keydown 走 cron-tl-select（同 run 二次点击 = collapse）。
   // .ctr-detail 嵌在行内，handler 里有 closest('.ctr-detail') 守卫——否则点
-  // <details> 输入快照 / ↩ 重放自 / ↻ 重放 / 拖选文字都会把行折起来。
+  // 按钮 / 拖选文字都会把行折起来。
   return '<div class="ctr' + (isExpanded ? ' is-selected is-expanded' : '') + '" data-run-id="' + escAttr(runId) + '"' +
       ' data-action="cron-tl-select" data-action-keydown="cron-tl-select" data-job="' + escAttr(jobId) + '"' +
       ' role="button" tabindex="0" aria-pressed="' + (isExpanded ? 'true' : 'false') + '" aria-expanded="' + (isExpanded ? 'true' : 'false') + '">' +
@@ -294,10 +286,6 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
     return '<div class="ctr-err-load">加载失败：' + esc(detail.__error) + '</div>';
   }
 
-  // §7.3 元信息条：云沙箱 run 顶部展示 镜像 · 时长 · 内存峰值 · 成本。
-  // 本机 run 的 detail.sandbox 为空 → 整条不渲染（零增量）。
-  const metaBar = cronSandboxMetaBarHtml(detail.sandbox);
-
   const transcript = detail.__transcript || null;
   const hasTurns = transcript && Array.isArray(transcript.turns) && transcript.turns.length > 0;
   let lastAssistant = null;
@@ -308,16 +296,6 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
       if (t && t.kind === 'assistant' && t.text) { lastAssistant = t; break; }
     }
   }
-
-  // §7.3 input-snapshot collapsible (PR-4), appended below the output;
-  // metaBar (above) is prepended. Both empty for local / pre-snapshot runs.
-  const snapshotPanel = cronSnapshotPanelHtml(detail.__snapshot);
-
-  // §7.3 replay chain + action row (PR-6). The replay-of badge links this run
-  // to the original it re-executed; the replay button re-injects the input
-  // snapshot. failed-transport runs DISABLE the button (§6.2: fate unknown —
-  // route through the §7.4 queue), success/failed-clean ENABLE it.
-  const replayBar = cronReplayBarHtml(jobId, runId, detail);
 
   let body;
   if (detail.error_msg) {
@@ -348,7 +326,7 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
     body = '<div class="ctr-empty-detail">正在加载最终输出…</div>';
   }
   const sid = detail.session_id || (summary && summary.session_id) || '';
-  return metaBar + replayBar + body + snapshotPanel + cronRunSessionRowHtml(sid);
+  return body + cronRunSessionRowHtml(sid);
 }
 
 // cronRunSessionRowHtml — 详情底部的 session_id 行。给全长值（终端
@@ -356,66 +334,6 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
 function cronRunSessionRowHtml(sid) {
   if (!sid) return '';
   return '<div class="ctr-meta-row ctr-session-row">会话 ID <code>' + esc(sid) + '</code></div>';
-}
-
-// cronReplayBarHtml renders the §7.3 replay action row for a sandbox run.
-// Returns '' for non-sandbox runs (detail.sandbox absent) so local runs carry
-// no replay UI. Three states drive the button (§6.2 safety on the UI face):
-//
-//   - failed-transport (error_class === 'sandbox_transport'): button DISABLED,
-//     tooltip routes the operator to the §7.4 confirmation queue (replaying a
-//     run whose microVM fate is unknown could double-run; the queue does the
-//     Stop-confirm first).
-//   - success / failed-clean: button ENABLED — safe to re-inject the snapshot.
-//
-// The replay-of badge (when detail.replay_of is set) shows this run was itself
-// a replay, linking back to the original (click jumps to it).
-function cronReplayBarHtml(jobId, runId, detail) {
-  if (!detail || !detail.sandbox) return '';
-  const parts = [];
-  if (detail.replay_of) {
-    parts.push('<button type="button" class="ctr-replay-of"' +
-      ' data-action="cron-tl-jump" data-job="' + escAttr(jobId) + '" data-run="' + escAttr(detail.replay_of) + '"' +
-      ' title="' + escAttr('这是一次重放，点击查看原始 run') + '">↩ 重放自 ' + esc(String(detail.replay_of).slice(0, 8)) + '</button>');
-  }
-  const isTransport = detail.error_class === 'sandbox_transport';
-  if (isTransport) {
-    parts.push('<button type="button" class="ctr-replay-btn" disabled' +
-      ' title="' + escAttr('断流，云端状态未知——请到「待确认」队列先确认终止再重放') + '">↻ 重放（已禁用）</button>');
-    parts.push('<span class="ctr-replay-hint">⚠ 状态未知，走待确认队列</span>');
-  } else {
-    parts.push('<button type="button" class="ctr-replay-btn"' +
-      ' data-action="cron-replay" data-job="' + escAttr(jobId) + '" data-run="' + escAttr(runId) + '"' +
-      ' title="' + escAttr('用同一份输入快照重新跑一遍（进全新微VM）') + '">↻ 重放</button>');
-  }
-  return '<div class="ctr-replay-bar">' + parts.join('') + '</div>';
-}
-
-// cronSandboxMetaBarHtml renders the §7.3 run-detail meta bar from the
-// detail endpoint's `sandbox` receipt: 镜像 · 时长 · 内存峰值 · 成本.
-// Returns '' for local runs (no receipt) so nothing renders. exit_status is
-// shown only when non-zero (a failed exit is the operator's signal; exit 0
-// is implied by a success render).
-function cronSandboxMetaBarHtml(sb) {
-  if (!sb) return '';
-  const parts = [];
-  parts.push('<span class="ctr-meta-item">☁️ 云沙箱</span>');
-  if (sb.image_version) {
-    parts.push('<span class="ctr-meta-item" title="镜像版本">' + esc(sb.image_version) + '</span>');
-  }
-  if (sb.duration_ms) {
-    parts.push('<span class="ctr-meta-item" title="时长">' + esc(formatRunDuration(sb.duration_ms)) + '</span>');
-  }
-  if (sb.memory_peak_bytes) {
-    parts.push('<span class="ctr-meta-item" title="内存峰值">' + esc(formatBytes(sb.memory_peak_bytes)) + '</span>');
-  }
-  if (sb.cost_usd) {
-    parts.push('<span class="ctr-meta-item ctr-meta-cost" title="成本估算">' + esc(formatCostUSD(sb.cost_usd)) + '</span>');
-  }
-  if (sb.exit_status) {
-    parts.push('<span class="ctr-meta-item ctr-meta-exit" title="退出码">exit ' + esc(String(sb.exit_status)) + '</span>');
-  }
-  return '<div class="ctr-meta-bar">' + parts.join('') + '</div>';
 }
 
 // cronTimelineSelectRun — 点击 timeline 行（§16 inline-expand 回归）。
@@ -540,22 +458,17 @@ async function cronTimelineFetchDetail(jobId, runId) {
     const headers = authHeaders();
     const url = NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '?job_id=' + encodeURIComponent(jobId);
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
-    // Preserve sticky annotations (__transcript / __snapshot) across a
-    // collapse→re-expand re-fetch: wholesale replacement would drop them
-    // and make the snapshot panel flicker/disappear if its re-fetch fails
-    // (review PR-4 F5). The annotation fetchers below re-stash fresh data.
+    // Preserve the sticky __transcript annotation across a collapse→re-expand
+    // re-fetch: wholesale replacement would drop it (review PR-4 F5). The
+    // annotation fetcher below re-stashes fresh data.
     const prevDetail = st.details[runId];
     st.details[runId] = data || { __error: 'empty response' };
     if (prevDetail && st.details[runId] && !st.details[runId].__error) {
       if (prevDetail.__transcript) st.details[runId].__transcript = prevDetail.__transcript;
-      if (prevDetail.__snapshot) st.details[runId].__snapshot = prevDetail.__snapshot;
     }
     // Fire-and-forget transcript fetch. Silent on failure; the 4-tab
     // renderer falls back to the raw view automatically.
     cronTimelineFetchTranscript(jobId, runId).catch(() => {});
-    // §7.3 input-snapshot fetch (sandbox runs only; local runs get
-    // available:false). Independent fire-and-forget like the transcript.
-    cronTimelineFetchSnapshot(jobId, runId).catch(() => {});
   } catch (err) {
     // R220-FE-5: 401/403 走 authModal，与 fetchSessions 等其它路径保持一致；
     // 单 cron 详情失败不应让用户看到 "HTTP 401" 字样而不知所措。
@@ -599,64 +512,6 @@ async function cronTimelineFetchTranscript(jobId, runId) {
     }
   }
   if (cronDrawerState.jobId === jobId) renderCronTimelinePanel(jobId);
-}
-
-// cronTimelineFetchSnapshot fetches the §7.3 input snapshot (content-
-// addressed prompt + model + secret ref names) for one run and stashes it
-// on detail.__snapshot. Independent of the detail/transcript fetches so a
-// snapshot miss never cascades. available:false for local / pre-snapshot
-// runs — the renderer then omits the panel.
-async function cronTimelineFetchSnapshot(jobId, runId) {
-  const st = getCronTimelineState(jobId);
-  try {
-    const headers = authHeaders();
-    const url = NZ_CONTRACT.API.cron_runs + '/' + encodeURIComponent(runId) + '/snapshot?job_id=' + encodeURIComponent(jobId);
-    const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
-    if (st.details && st.details[runId]) {
-      st.details[runId].__snapshot = data || { available: false };
-    }
-  } catch (_err) {
-    if (st.details && st.details[runId]) {
-      st.details[runId].__snapshot = { available: false };
-    }
-  }
-  if (cronDrawerState.jobId === jobId) renderCronTimelinePanel(jobId);
-}
-
-// cronSnapshotPanelHtml renders the §7.3 input-snapshot collapsible from a
-// run's __snapshot. Returns '' when the run has no snapshot (local run /
-// pre-snapshot / fetch in flight) so nothing renders for those.
-//
-// SECURITY: secret_refs are NAMES only (server never sends values, §5.1);
-// the panel renders them as plain labels — there is no value to leak.
-function cronSnapshotPanelHtml(snap) {
-  if (!snap || !snap.available) return '';
-  const rows = [];
-  if (snap.model) {
-    rows.push('<div class="ctr-snap-row"><span class="ctr-snap-k">模型</span>' +
-      '<span class="ctr-snap-v">' + esc(snap.model) + '</span></div>');
-  }
-  if (snap.image_version) {
-    rows.push('<div class="ctr-snap-row"><span class="ctr-snap-k">镜像</span>' +
-      '<span class="ctr-snap-v">' + esc(snap.image_version) + '</span></div>');
-  }
-  if (snap.prompt_hash) {
-    rows.push('<div class="ctr-snap-row"><span class="ctr-snap-k">提示词哈希</span>' +
-      '<span class="ctr-snap-v mono">' + esc(snap.prompt_hash.slice(0, 16)) + '…</span></div>');
-  }
-  if (Array.isArray(snap.secret_refs) && snap.secret_refs.length > 0) {
-    const names = snap.secret_refs.map(n => '<code>' + esc(n) + '</code>').join(' ');
-    rows.push('<div class="ctr-snap-row"><span class="ctr-snap-k">密钥引用</span>' +
-      '<span class="ctr-snap-v">' + names + '</span></div>');
-  }
-  const promptBlock = snap.prompt
-    ? '<div class="ctr-snap-prompt"><div class="ctr-snap-k">输入提示词</div>' +
-        '<pre class="ctr-snap-pre">' + esc(snap.prompt) + '</pre></div>'
-    : '';
-  return '<details class="ctr-snapshot">' +
-      '<summary>输入快照（可重放）</summary>' +
-      '<div class="ctr-snap-body">' + rows.join('') + promptBlock + '</div>' +
-    '</details>';
 }
 
 // renderCronTimelinePanel — 重绘当前 timeline 面板（不重新 mount shell）。
@@ -894,12 +749,6 @@ export async function cronJobCostRefresh(jobId) {
     cronJobCostCache[jobId] = { usd: usd, entries: entries, dropped: (data && data.dropped) | 0, budget: budget };
     if (cronDrawerState.jobId === jobId) renderCronTimelinePanel(jobId);
   } catch (_) {}
-}
-
-// renderOpenCronTimeline repaints the timeline of the job the drawer shows,
-// if any: what a caller does once cron_attention has re-fetched the queue.
-export function renderOpenCronTimeline() {
-  if (cronDrawerState.jobId !== null) renderCronTimelinePanel(cronDrawerState.jobId);
 }
 
 export {

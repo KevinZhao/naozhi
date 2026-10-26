@@ -169,10 +169,10 @@ func keyPathsByLine(expanded []byte) map[leafKey]string {
 // no bespoke warning would: `naozhi config check` sees them via its observer
 // and exits 1, naozhi_spawn_diag_total{layer="config-unknown"} makes a typo
 // countable instead of log-greppable, and the wording lands beside the other
-// "you configured this and it did nothing" findings. A path in migrated was
-// already reported as deprecated by the migration chain and is skipped.
-func reportUnknownKeys(expanded []byte, migrated map[string]bool) {
-	unknown := slices.DeleteFunc(findUnknownKeys(expanded), func(u unknownKey) bool { return migrated[u.Path] })
+// "you configured this and it did nothing" findings. A path in deprecated was
+// already reported by reportDeprecatedKeys and is skipped.
+func reportUnknownKeys(expanded []byte, deprecated map[string]bool) {
+	unknown := slices.DeleteFunc(findUnknownKeys(expanded), func(u unknownKey) bool { return deprecated[u.Path] })
 	if len(unknown) == 0 {
 		return
 	}
@@ -199,3 +199,70 @@ func reportUnknownKeys(expanded []byte, migrated map[string]bool) {
 	}
 	spawndiag.Emit("config", diags)
 }
+
+// findDeprecatedKeys lists the schema v1 key spellings (nodes,
+// session.workspace, session.auto_chain) as config-deprecated diags naming the
+// v2 replacement, plus the keys of removed features (server.metrics_enabled,
+// cron.sandbox). None of them has any effect any more: Load no longer rewrites
+// them. The v1 `--append-system-prompt` inside agents[].args is not
+// listed here: validateArgvStrings already warns about it (argv-denylist) and
+// names agents[<id>].system_prompt.
+func findDeprecatedKeys(doc *yaml.Node) []spawndiag.Diag {
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+		return nil
+	}
+	root := doc.Content[0]
+	var diags []spawndiag.Diag
+	add := func(key, reason string) {
+		diags = append(diags, spawndiag.Diag{Layer: "config-deprecated", Key: key, Action: "ignored", Reason: reason})
+	}
+	if hasYAMLKey(root, "nodes") {
+		add("nodes", "'nodes' is no longer read and its remote workspaces are NOT configured; rename it to 'workspaces'")
+	}
+	if server := yamlChildMap(root, "server"); server != nil && hasYAMLKey(server, "metrics_enabled") {
+		add("server.metrics_enabled", "'server.metrics_enabled' has no effect: GET /metrics (Prometheus export) was removed; counters stay at /api/debug/vars (server.debug_mode); remove this key")
+	}
+	if session := yamlChildMap(root, "session"); session != nil {
+		if hasYAMLKey(session, "workspace") {
+			add("session.workspace", "'session.workspace' is no longer read; rename it to 'session.cwd'")
+		}
+		if hasYAMLKey(session, "auto_chain") {
+			add("session.auto_chain", "'session.auto_chain' has no effect; remove this block")
+		}
+	}
+	if cron := yamlChildMap(root, "cron"); cron != nil && hasYAMLKey(cron, "sandbox") {
+		add("cron.sandbox", "the AgentCore cloud sandbox placement was removed and 'cron.sandbox' has no effect; remove this block (jobs saved with placement=sandbox load paused)")
+	}
+	return diags
+}
+
+// reportDeprecatedKeys emits findDeprecatedKeys and returns the reported key
+// paths, which reportUnknownKeys then skips. Warn only, like an unknown key: a
+// failing Load would leave a service down after `naozhi upgrade`.
+func reportDeprecatedKeys(doc *yaml.Node) map[string]bool {
+	diags := findDeprecatedKeys(doc)
+	if len(diags) == 0 {
+		return nil
+	}
+	reported := make(map[string]bool, len(diags))
+	for _, d := range diags {
+		reported[d.Key] = true
+	}
+	spawndiag.Emit("config", diags)
+	return reported
+}
+
+// yamlChild returns key's value node under mapping m, or nil.
+func yamlChild(m *yaml.Node, key string) *yaml.Node {
+	if m.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			return m.Content[i+1]
+		}
+	}
+	return nil
+}
+
+func hasYAMLKey(m *yaml.Node, key string) bool { return yamlChild(m, key) != nil }

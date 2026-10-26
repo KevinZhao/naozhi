@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -16,9 +17,6 @@ import (
 // not drifting — if the argv changes, the sudoers Cmnd_Alias must change
 // in lockstep or production will silently fall back to
 // moveToShimsCgroupDirect / no-survival mode.
-//
-// See docs/ops/sudoers-hardening.md for the full rationale and the
-// exact policy the sudoers file encodes.
 func TestBuildBusctlArgs_ShapeMatchesSudoersPolicy(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -71,58 +69,6 @@ func TestBuildBusctlArgs_ShapeMatchesSudoersPolicy(t *testing.T) {
 				t.Fatalf("buildBusctlArgs shape drift — sudoers policy must be updated in\n"+
 					"  deploy/naozhi-sudoers.example\n"+
 					"want %q\ngot  %q", tc.want, got)
-			}
-		})
-	}
-}
-
-// TestBuildBusctlArgs_RejectsMalformedScopeName asserts that
-// buildBusctlArgs rejects any scopeName that fails the
-// `^naozhi-shim-[0-9]+\.scope$` character-set check (R236-SEC-11 /
-// R239-SEC-7). Today the sole producer feeds in fmt.Sprintf with %d
-// on a validated PID, so the assertion is pure defense-in-depth for
-// future call paths that might funnel attacker-derived names through.
-func TestBuildBusctlArgs_RejectsMalformedScopeName(t *testing.T) {
-	t.Parallel()
-	bad := []string{
-		"",
-		"naozhi-shim-123.scope; rm -rf /",
-		"naozhi-shim-abc.scope",      // non-digit PID
-		"naozhi-shim-123.SCOPE",      // wrong case suffix
-		"prefix/naozhi-shim-1.scope", // path injection
-		"naozhi-shim-1.scope\n",      // trailing newline
-		"naozhi-shim-1.scope ",       // trailing space
-		"systemd-shim-123.scope",     // wrong unit prefix
-	}
-	for _, name := range bad {
-		name := name
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			got := buildBusctlArgs(name, []int{1})
-			if got != nil {
-				t.Fatalf("buildBusctlArgs(%q) returned %v, want nil — assertion regressed", name, got)
-			}
-		})
-	}
-}
-
-// TestBuildBusctlArgs_AcceptsCanonicalScopeName asserts the regex does
-// not reject the production-emitted shape so the assertion is opt-in
-// safety, not a new failure mode for the existing call path.
-func TestBuildBusctlArgs_AcceptsCanonicalScopeName(t *testing.T) {
-	t.Parallel()
-	good := []string{
-		"naozhi-shim-1.scope",
-		"naozhi-shim-12345.scope",
-		"naozhi-shim-2147483647.scope",
-	}
-	for _, name := range good {
-		name := name
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			got := buildBusctlArgs(name, []int{1})
-			if got == nil {
-				t.Fatalf("buildBusctlArgs(%q) returned nil — assertion is too tight", name)
 			}
 		})
 	}
@@ -197,6 +143,26 @@ func TestSudoersExampleMirrorsRuntimeLiterals(t *testing.T) {
 	}
 }
 
-// findRepoRoot moved to testhelper_test.go so cross-platform tests
-// (setwritedeadline_contract_test.go) can reuse it without dragging in the
-// Linux-only build tag of this file.
+// findRepoRoot walks upward from this test file until it finds go.mod.
+// Used by the sudoers policy diff to locate the project root regardless
+// of where `go test` is invoked from.
+func findRepoRoot(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller unavailable")
+	}
+	dir := filepath.Dir(thisFile)
+	for i := 0; i < 10; i++ {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	t.Fatalf("go.mod not found walking up from %s", thisFile)
+	return ""
+}

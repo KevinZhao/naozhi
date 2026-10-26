@@ -131,12 +131,6 @@ func (c *workDirResolveCache) store(key, resolved string, now time.Time) {
 	})
 }
 
-// workDirResolveCacheKey joins the three inputs with `\x00` (invalid in paths)
-// so distinct triples cannot collide.
-func workDirResolveCacheKey(workDir, allowedRoot, allowedRootResolved string) string {
-	return workDir + "\x00" + allowedRoot + "\x00" + allowedRootResolved
-}
-
 // workDirResolveUnderRootCached is the Scheduler-scoped variant that memoises
 // positive results in s.workDirCache. The pure workDirResolveUnderRoot stays
 // the canonical correctness path: cold callers (loadJobs / UpdateJob) run once

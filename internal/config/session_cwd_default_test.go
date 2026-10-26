@@ -4,10 +4,10 @@ import (
 	"testing"
 )
 
-// TestLoad_SessionCWDWorkspaceReconcile pins #1782 through the migration
-// chain: session.cwd and the deprecated session.workspace are reconciled on
-// the operator's RAW input, so a pure-default deployment reports nothing, and
-// the default lands in cwd only when neither key is set.
+// TestLoad_SessionCWDWorkspaceReconcile pins #1782: a pure-default deployment
+// reports nothing and gets the default cwd; the v1 session.workspace is not
+// read any more and draws one config-deprecated diag (not a second
+// config-unknown one for the same key).
 func TestLoad_SessionCWDWorkspaceReconcile(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -17,7 +17,7 @@ func TestLoad_SessionCWDWorkspaceReconcile(t *testing.T) {
 	}{
 		{name: "pure_default_no_diag", wantCWD: defaultSessionCWD},
 		{name: "only_cwd_no_diag", session: "  cwd: /srv/work\n", wantCWD: "/srv/work"},
-		{name: "only_workspace_rewritten", session: "  workspace: /srv/legacy\n", wantAction: "rewritten", wantCWD: "/srv/legacy"},
+		{name: "only_workspace_not_read", session: "  workspace: /srv/legacy\n", wantAction: "ignored", wantCWD: defaultSessionCWD},
 		{name: "both_set_cwd_wins", session: "  cwd: /srv/work\n  workspace: /srv/legacy\n", wantAction: "ignored", wantCWD: "/srv/work"},
 	}
 	for _, tt := range tests {
@@ -32,7 +32,7 @@ func TestLoad_SessionCWDWorkspaceReconcile(t *testing.T) {
 			}
 			var actions []string
 			for _, d := range diags {
-				if d.Key == "session.workspace" {
+				if d.Key == "session.workspace" && d.Layer == "config-deprecated" {
 					actions = append(actions, d.Action)
 				}
 				if d.Layer == "config-unknown" {

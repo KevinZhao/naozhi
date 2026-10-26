@@ -421,10 +421,8 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 
 	// Move shim + CLI to an independent systemd scope so they survive service
 	// restarts. Must run after connect (CLI PID comes from hello). ctx lets
-	// SIGTERM during a spawn storm cancel the busctl subprocess. cliPath lets
-	// the linux helper verify /proc/<cliPID>/exe before adopting the CLI into
-	// the privileged cgroup — PPid alone does not prove it is the CLI (#546).
-	moveToShimsCgroup(ctx, cmd.Process.Pid, handle.Hello.CLIPID, cliPath)
+	// SIGTERM during a spawn storm cancel the busctl subprocess.
+	moveToShimsCgroup(ctx, cmd.Process.Pid, handle.Hello.CLIPID)
 
 	m.mu.Lock()
 	// A concurrent StartShim/Reconnect may already have installed a handle for

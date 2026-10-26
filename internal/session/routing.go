@@ -16,12 +16,6 @@ import (
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
-// SanitisePlannerPromptForSpawn re-validates a planner prompt at the spawn
-// boundary; see sessionview.SanitisePlannerPromptForSpawn.
-func SanitisePlannerPromptForSpawn(prompt, projectName string) string {
-	return sessionview.SanitisePlannerPromptForSpawn(prompt, projectName)
-}
-
 // PlannerDataSource abstracts the project-layer data KeyResolver needs. All
 // methods return fully-snapshot'd values so callers can treat them as pure
 // reads. Aliased from internal/projectapi (#1373).
@@ -183,7 +177,7 @@ func (r *KeyResolver) AccessProfileForKey(key string) string {
 		_, opts, _ := r.ResolveForPlannerKey(plannerNameFromKey(key))
 		return opts.AccessProfile
 	}
-	if IsCronKey(key) {
+	if sessionkey.IsCronKey(key) {
 		if r.cronProfile == nil {
 			return ""
 		}

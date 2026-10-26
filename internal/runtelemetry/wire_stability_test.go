@@ -7,8 +7,6 @@ import (
 )
 
 // The frozen wire string of every enum constant, one map per type.
-// TestEnumWireFreezeComplete pins that each map covers exactly the constants
-// state.go declares.
 var (
 	wireRunStates = map[RunState]string{
 		RunStateSucceeded: "succeeded",
@@ -36,9 +34,6 @@ var (
 		ErrClassCronRouterMissing:      "router_missing",
 		ErrClassCronPausedConcurrent:   "paused_concurrent",
 		ErrClassCronDeletedConcurrent:  "deleted_concurrent",
-		ErrClassCronSandboxFailed:      "sandbox_failed",
-		ErrClassCronSandboxTransport:   "sandbox_transport",
-		ErrClassCronSandboxUnavailable: "sandbox_unavailable",
 
 		ErrClassSysessionUpstream:   "upstream",
 		ErrClassSysessionValidation: "validation",

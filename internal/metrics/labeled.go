@@ -15,8 +15,6 @@ import (
 	"expvar"
 	"strings"
 	"sync"
-
-	"github.com/naozhi/naozhi/internal/promexport"
 )
 
 // LabelOverflow is the sentinel key for a label tuple exceeding
@@ -42,13 +40,10 @@ type LabeledCounter struct {
 }
 
 // NewLabeledCounter registers a labeled counter under name. labelNames name
-// the label positions Add receives and become the Prometheus label names on
-// /metrics, where the map is typed counter whatever its suffix. Panics on
-// duplicate registration (as expvar.NewMap) or no names.
+// the label positions Add receives; they document the call site only and are
+// not stored. Panics on duplicate registration (as expvar.NewMap).
 func NewLabeledCounter(name string, labelNames ...string) *LabeledCounter {
-	m := expvar.NewMap(name)
-	promexport.RegisterCounter(name, labelNames...)
-	return &LabeledCounter{m: m}
+	return &LabeledCounter{m: expvar.NewMap(name)}
 }
 
 // Add increments the counter for the label tuple by delta. Empty labels
@@ -63,12 +58,10 @@ type LabeledGauge struct {
 	m *expvar.Map
 }
 
-// NewLabeledGauge registers a labeled gauge under name with the given label
-// names (see NewLabeledCounter); panics on duplicate.
+// NewLabeledGauge registers a labeled gauge under name; labelNames are
+// documentation only (see NewLabeledCounter). Panics on duplicate.
 func NewLabeledGauge(name string, labelNames ...string) *LabeledGauge {
-	m := expvar.NewMap(name)
-	promexport.RegisterLabels(name, labelNames...)
-	return &LabeledGauge{m: m}
+	return &LabeledGauge{m: expvar.NewMap(name)}
 }
 
 // Inc bumps the gauge for the label tuple by 1.

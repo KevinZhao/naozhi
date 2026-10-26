@@ -83,30 +83,21 @@ func (s *Scheduler) emitRunEnded(ev RunEndedEvent) {
 }
 
 // bumpRunStateMetrics increments the per-state counter for the terminal
-// transition. It is the SINGLE owner of every per-state counter — the generic
-// CronRun<State>Total family AND the sandbox-specific CronSandboxRun*Total
-// pair (gated by sandbox, i.e. runOutcome.sandbox). Callers must never bump
+// transition. It is the SINGLE owner of every per-state counter — the
+// CronRun<State>Total family. Callers must never bump
 // these counters directly; run_metrics_owner_contract_test.go pins that.
 // Owning the whole state→counter mapping here makes double-count / missing-
 // counter drift structurally impossible (#2173).
-func (s *Scheduler) bumpRunStateMetrics(state RunState, sandbox bool) {
+func (s *Scheduler) bumpRunStateMetrics(state RunState) {
 	switch state {
 	case RunStateSucceeded:
 		metrics.CronRunSucceededTotal.Add(1)
 	case RunStateFailed:
 		metrics.CronRunFailedTotal.Add(1)
-		if sandbox {
-			metrics.CronSandboxRunFailedTotal.Add(1)
-		}
 	case RunStateSkipped:
 		metrics.CronRunSkippedTotal.Add(1)
 	case RunStateTimedOut:
 		metrics.CronRunTimedOutTotal.Add(1)
-		if sandbox {
-			// Dedicated bucket so failure-only alerts still see sandbox
-			// deadlines without double-counting into CronSandboxRunFailedTotal (#2091).
-			metrics.CronSandboxRunTimedOutTotal.Add(1)
-		}
 	case RunStateCanceled:
 		metrics.CronRunCanceledTotal.Add(1)
 	}

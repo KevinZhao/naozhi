@@ -187,11 +187,6 @@ func decodeRune(s string) (rune, int) {
 // classes sanitizeKeySlug actually strips, the other runs the real JS under node
 // and feeds its output to session.ValidateSessionKey.
 //
-// The other half of the retired static_palette_2429_test.go was two substring
-// checks on auth_modal.js (path-highlight ranges, hover wiring). Both are
-// observable, so they moved to test/e2e/project_palette.test.js; the probes
-// recorded there show one of them the anchor could not see at all.
-//
 // TestDashboardJS_SanitizeKeySlug_CoversServerDenySet is the cross-layer
 // contract: every codepoint session.ValidateSessionKey rejects must appear
 // in one of sanitizeKeySlug's strip classes. Static parse, always runs.
