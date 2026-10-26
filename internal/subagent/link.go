@@ -147,10 +147,6 @@ type Linker struct {
 
 	// scanHook fires after every rawScan (test-only cache hit/miss counting).
 	scanHook func()
-
-	// readMetaHook fires on every readFirstLineMeta cache miss in the retry
-	// loop (test-only); nil in production.
-	readMetaHook func()
 }
 
 // LinkInfo is the resolved mapping for a single agent task. Zero value is the

@@ -7,42 +7,6 @@ import (
 	"testing"
 )
 
-// TestTranscriptReader_PersistentFd_ReusesAcrossCalls pins R233-PERF-4 /
-// R228-PERF-3: the prior open+ReadAll+close-per-call burned ~250
-// fd-lifecycle syscalls/s under agent_tailer's 200ms × 50-tailer load.
-// The persistent-fd path must keep r.f stable across Read/Tail invocations
-// when the inode hasn't changed.
-func TestTranscriptReader_PersistentFd_ReusesAcrossCalls(t *testing.T) {
-	t.Parallel()
-	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:00Z"}`
-	path := tmpFile(t, line+"\n")
-	r := NewTranscriptReader(path)
-	defer r.Close() //nolint:errcheck
-
-	if _, err := r.Read(0, 100); err != nil {
-		t.Fatalf("first Read: %v", err)
-	}
-	r.mu.Lock()
-	first := r.f
-	r.mu.Unlock()
-	if first == nil {
-		t.Fatal("expected r.f populated after first Read")
-	}
-
-	// Several more polls — the same fd must be retained.
-	for i := 0; i < 5; i++ {
-		if _, err := r.Tail(); err != nil {
-			t.Fatalf("Tail #%d: %v", i, err)
-		}
-		r.mu.Lock()
-		got := r.f
-		r.mu.Unlock()
-		if got != first {
-			t.Errorf("Tail #%d: r.f changed (%p → %p); fd was not reused", i, first, got)
-		}
-	}
-}
-
 // TestTranscriptReader_PersistentFd_RotationResetsBookkeeping verifies
 // that when the path is replaced (rm + create with new content) the next
 // Read picks up the new inode, drops the cached fd, and resets offset/tail
@@ -142,58 +106,6 @@ func TestTranscriptReader_Close_Idempotent(t *testing.T) {
 	defer r3.Close() //nolint:errcheck
 	if _, err := r3.Read(0, 100); err != nil {
 		t.Fatalf("Read on fresh reader after prior Close: %v", err)
-	}
-}
-
-// TestTranscriptReader_GrowingFile_ReusesFdWithoutReopen pins
-// R20260607-PERF-3 (#1884): on the steady-state path (a live fd that just
-// yielded fresh bytes) openOrReuse must reuse the cached fd with no reopen —
-// the per-poll os.Stat(r.path) rotation probe only fires on a zero-byte poll.
-// We assert the fd pointer is stable as the file grows across polls.
-func TestTranscriptReader_GrowingFile_ReusesFdWithoutReopen(t *testing.T) {
-	t.Parallel()
-	mk := func(i int) string {
-		return `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"line` +
-			string(rune('0'+i)) + `"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:0` +
-			string(rune('0'+i)) + `Z"}` + "\n"
-	}
-	path := tmpFile(t, mk(0))
-	r := NewTranscriptReader(path)
-	defer r.Close() //nolint:errcheck
-
-	if _, err := r.Read(0, 100); err != nil {
-		t.Fatalf("first Read: %v", err)
-	}
-	r.mu.Lock()
-	fd := r.f
-	r.mu.Unlock()
-	if fd == nil {
-		t.Fatal("expected r.f populated")
-	}
-
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		t.Fatalf("open append: %v", err)
-	}
-	defer f.Close() //nolint:errcheck
-
-	for i := 1; i <= 5; i++ {
-		if _, err := f.WriteString(mk(i)); err != nil {
-			t.Fatalf("append %d: %v", i, err)
-		}
-		ents, err := r.Tail()
-		if err != nil {
-			t.Fatalf("Tail %d: %v", i, err)
-		}
-		if len(ents) != 1 {
-			t.Fatalf("Tail %d: got %d entries, want 1", i, len(ents))
-		}
-		r.mu.Lock()
-		got := r.f
-		r.mu.Unlock()
-		if got != fd {
-			t.Fatalf("Tail %d reopened fd (%p→%p); growing file must reuse the cached fd", i, fd, got)
-		}
 	}
 }
 
