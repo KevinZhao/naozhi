@@ -152,6 +152,8 @@ server:
 session:
   auto_chain:
     enabled: true
+  project_stable_key:
+    enabled: false
 cron:
   sandbox:
     runtime_arn: "arn:aws:bedrock-agentcore:us-east-1:1:runtime/x"
@@ -181,7 +183,8 @@ agents:
 		"platforms.feishu.connection_mode":        "long connection",
 		"platforms.feishu.allow_insecure_webhook": "remove",
 
-		"projects.public_tmp": "__public_tmp__",
+		"projects.public_tmp":        "__public_tmp__",
+		"session.project_stable_key": "always on",
 	}
 	flagDiags := 0
 	for _, d := range diags {

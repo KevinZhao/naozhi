@@ -293,8 +293,6 @@ func buildSessionHandlers(opts ServerOptions, s *Server, w *wiring, retiredStore
 		RetiredStore:     retiredReader,
 		ValidateWS:       validateWorkspace,
 		SystemInfoFn:     systemInfo,
-
-		ProjectStableKeyEnabled: opts.Features.ProjectStableKey,
 	})
 	sessionH.InitStaticStats()
 	sessionH.WarmHistoryCache()

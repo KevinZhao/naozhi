@@ -75,9 +75,6 @@ type ServerOptions struct {
 	// Lifecycle groups the startup hooks (S8, #2987).
 	Lifecycle LifecycleOptions
 
-	// Features groups the opt-in feature switches (S8, #2987).
-	Features FeatureOptions
-
 	// === Core dependencies ===
 	//
 	// The legacy New(addr, router, ..., opts) wrapper *overrides* matching
@@ -122,14 +119,6 @@ type IdentityOptions struct {
 type WatchdogOptions struct {
 	NoOutput time.Duration
 	Total    time.Duration
-}
-
-// FeatureOptions are the opt-in feature switches.
-type FeatureOptions struct {
-	// ProjectStableKey toggles the per-project StableKey field in the
-	// /api/projects list response (docs/rfc/project-stable-session-key.md §4.2).
-	// When false the dashboard falls back to the timestamp-key "continue" path.
-	ProjectStableKey bool
 }
 
 // LifecycleOptions are the startup hooks.

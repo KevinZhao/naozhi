@@ -6,15 +6,14 @@ import (
 )
 
 type SessionConfig struct {
-	MaxProcs         int                        `yaml:"max_procs"`
-	TTL              string                     `yaml:"ttl"`
-	PruneTTL         string                     `yaml:"prune_ttl"` // how long dead/suspended sessions stay in the list before removal
-	Watchdog         WatchdogConfig             `yaml:"watchdog"`
-	Queue            QueueConfig                `yaml:"queue"`
-	StorePath        string                     `yaml:"store_path"`
-	CWD              string                     `yaml:"cwd"` // default working directory for CLI processes
-	Shim             ShimConfig                 `yaml:"shim"`
-	ProjectStableKey ProjectStableKeyYAMLConfig `yaml:"project_stable_key,omitempty"`
+	MaxProcs  int            `yaml:"max_procs"`
+	TTL       string         `yaml:"ttl"`
+	PruneTTL  string         `yaml:"prune_ttl"` // how long dead/suspended sessions stay in the list before removal
+	Watchdog  WatchdogConfig `yaml:"watchdog"`
+	Queue     QueueConfig    `yaml:"queue"`
+	StorePath string         `yaml:"store_path"`
+	CWD       string         `yaml:"cwd"` // default working directory for CLI processes
+	Shim      ShimConfig     `yaml:"shim"`
 	// GroupScope is what one session of an IM group chat covers: a "thread"
 	// (default; a message outside any thread uses the chat's), the whole
 	// "chat", or one "user".
@@ -40,22 +39,6 @@ func validateGroupScope(cfg *Config) error {
 	}
 	return fmt.Errorf("session.group_scope must be %q, %q or %q, got %q",
 		GroupScopeThread, GroupScopeChat, GroupScopeUser, cfg.Session.GroupScope)
-}
-
-// ProjectStableKeyYAMLConfig controls the project-level stable session key
-// (docs/rfc/project-stable-session-key.md). Default-on; when disabled the
-// dashboard falls back to the timestamp-key path for "continue". Enabled is
-// *bool so an absent key defaults true while `enabled: false` stays expressible.
-type ProjectStableKeyYAMLConfig struct {
-	Enabled *bool `yaml:"enabled,omitempty"`
-}
-
-// ResolvedEnabled returns the effective on/off flag.
-func (c ProjectStableKeyYAMLConfig) ResolvedEnabled(def bool) bool {
-	if c.Enabled == nil {
-		return def
-	}
-	return *c.Enabled
 }
 
 // QueueConfig controls IM message queuing when a session is busy.

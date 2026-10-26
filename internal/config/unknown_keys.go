@@ -283,6 +283,7 @@ var removedKeys = []struct {
 	reason string
 }{
 	{[]string{"projects"}, "public_tmp", "the __public_tmp__ pseudo-project was removed"},
+	{[]string{"session"}, "project_stable_key", "project-level stable session keys are always on"},
 }
 
 // reportDeprecatedKeys emits findDeprecatedKeys and returns the reported key

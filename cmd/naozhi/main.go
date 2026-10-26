@@ -445,10 +445,6 @@ func main() {
 			NoOutput: noOutputTimeout,
 			Total:    totalTimeout,
 		},
-		Features: server.FeatureOptions{
-			// Default-on; opt-out via session.project_stable_key.enabled: false.
-			ProjectStableKey: cfg.Session.ProjectStableKey.ResolvedEnabled(true),
-		},
 		Lifecycle: server.LifecycleOptions{
 			StartupCtx: ctx,
 			OnReady: func() {

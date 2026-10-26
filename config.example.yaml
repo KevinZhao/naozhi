@@ -147,10 +147,6 @@ session:
   # thread (Feishu topic) under it. If Feishu refuses to open the topic, the
   # answer is posted in the group instead.
   thread_auto_open: false
-  # project_stable_key is default-on; enabled: false falls back to
-  # timestamp keys for dashboard "continue".
-  # project_stable_key:
-  #   enabled: true
   shim:
     idle_timeout: "8h"
   queue:
