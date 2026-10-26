@@ -87,10 +87,6 @@ type Scheduler struct {
 	// The per-call resolve stays primary so TOCTOU protection against
 	// root-side symlink swaps is preserved. Empty = fall back to raw allowedRoot.
 	allowedRootResolved string
-	// workDirCacheKeySuffix is "\x00" + allowedRoot + "\x00" +
-	// allowedRootResolved, precomputed because both parts are immutable, so
-	// workDirResolveUnderRootCached does one concat per tick, not three (#1225).
-	workDirCacheKeySuffix string
 	// jitterMax is the scheduling jitter cap. See SchedulerConfig.JitterMax.
 	// Immutable after NewScheduler returns, so no lock needed.
 	jitterMax time.Duration
@@ -164,24 +160,6 @@ type Scheduler struct {
 	ledger CostLedger
 	// budget is checked before each run spawns; nil runs every job.
 	budget BudgetGate
-
-	// workDirCache memoises positive workDirResolveUnderRoot results so
-	// fast-firing jobs do not repeat the EvalSymlinks chain every tick.
-	// TTL-bounded (workDirResolveCacheTTL) so symlink retargets surface soon.
-	workDirCache workDirResolveCache
-
-	// workDirReachableCache memoises positive workDirReachable() results so
-	// fresh-mode jobs with allowedRoot=="" (which never touch workDirCache)
-	// do not os.Stat every tick. Same TTL and positive-only semantics: an
-	// unreachable result bypasses the cache so a restored workspace surfaces
-	// on the next tick. Keyed by raw workDir (#1731).
-	workDirReachableCache workDirResolveCache
-
-	// knownSessionsCache memoises KnownSessionIDs() for knownSessionsCacheTTL:
-	// the dashboard polls it at 1Hz per tab and a rebuild walks every job's
-	// run history. Invalidated explicitly on writes that can change the
-	// set (LastSessionID assignment, a run-record append).
-	knownSessionsCache knownSessionsCache
 
 	// marshalJobs is the JSON serializer used by marshalLocked, behind
 	// atomic.Pointer so tests (withFailingMarshal) can swap a failing stub
@@ -267,15 +245,12 @@ func NewScheduler(cfg SchedulerConfig, deps SchedulerDeps) *Scheduler {
 		notifyDefault:       cfg.NotifyDefault,
 		allowedRoot:         cfg.AllowedRoot,
 		allowedRootResolved: allowedRootResolved,
-		// Cache key = workDir + this suffix; `\x00` (invalid in paths) keeps
-		// distinct (workDir, root, resolved) triples from colliding (#1225).
-		workDirCacheKeySuffix: "\x00" + cfg.AllowedRoot + "\x00" + allowedRootResolved,
-		jitterMax:             cfg.JitterMax,
-		stopCtx:               stopCtx,
-		stopCancel:            stopCancel,
-		runs:                  runstore.New(runstore.Options{StorePath: cfg.StorePath}),
-		ledger:                deps.Ledger,
-		budget:                deps.Budget,
+		jitterMax:           cfg.JitterMax,
+		stopCtx:             stopCtx,
+		stopCancel:          stopCancel,
+		runs:                runstore.New(runstore.Options{StorePath: cfg.StorePath}),
+		ledger:              deps.Ledger,
+		budget:              deps.Budget,
 		// Tests swap a fake via the withClock seam.
 		clock: defaultClock,
 	}
