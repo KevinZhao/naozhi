@@ -23,8 +23,10 @@ import (
 // per frame type the shim emits, encoded through the shim's real marshal
 // paths, decoded through both decoders and compared field-by-field. Every
 // shimMsg key must exist on ServerMsg with a compatible type, and any
-// ServerMsg field the shim populates that shimMsg cannot see must be listed
-// in liveDecoderIgnoredFields.
+// ServerMsg field populated in shimFrameSamples that shimMsg cannot see must
+// be listed in liveDecoderIgnoredFields. The reverse check only covers fields
+// the samples populate: when adding a ServerMsg field, add it to
+// shimFrameSamples too.
 //
 // Production code is intentionally untouched: shimMsg stays a separate
 // struct (perf) and is pinned to ServerMsg by this test instead.
