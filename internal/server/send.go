@@ -89,7 +89,7 @@ func (e *sendEngine) prepareSend(p sendParams) (cmd turn.Cmd, reset bool, err er
 	key := p.Key
 	// ValidateSessionKey rejects C0/C1 controls, bidi overrides, non-UTF-8 and
 	// over-long keys: no log-injection primitive via slog / sessions.json.
-	if err := session.ValidateSessionKey(key); err != nil {
+	if err := sessionkey.ValidateSessionKey(key); err != nil {
 		return cmd, false, fmt.Errorf("invalid key")
 	}
 

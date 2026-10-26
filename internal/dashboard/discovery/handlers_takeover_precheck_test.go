@@ -17,6 +17,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // precheckRouter refuses every takeover with err and records what reached it.
@@ -117,7 +118,7 @@ func TestHandleTakeover_PrecheckRefusalKeepsCLIAlive(t *testing.T) {
 			if n := atomic.LoadInt32(&fc.evicted); n != 0 {
 				t.Fatalf("EvictPID called %d times; the card must stay", n)
 			}
-			wantKey := session.TakeoverKey(session.SanitizeCWDKey(cwd))
+			wantKey := sessionkey.TakeoverKey(sessionkey.SanitizeCWDKey(cwd))
 			router.mu.Lock()
 			defer router.mu.Unlock()
 			if len(router.checked) != 1 || router.checked[0] != wantKey {

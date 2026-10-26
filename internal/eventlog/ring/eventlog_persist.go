@@ -6,10 +6,10 @@ package ring
 import "github.com/naozhi/naozhi/internal/cli/clievent"
 
 // PersistSinkOne is the single-entry counterpart to PersistSink, installed via
-// SetPersistSinkPair and preferred by Append so the per-call `[]EventEntry{e}`
-// literal disappears (#410). Semantics match PersistSink: same value that
-// would be at index 0, same replayPhase derivation. AppendBatch always uses
-// the slice path so the persister keeps per-batch write order.
+// SetPersistSinkPair and preferred by Append (#410). Semantics match
+// PersistSink: same value that would be at index 0, same replayPhase
+// derivation. AppendBatch always uses the slice path so the persister keeps
+// per-batch write order.
 //
 // Implementations MUST be non-blocking. The entry is passed by value but its
 // slice/pointer fields (Images / ImagePaths / AskQuestion / ToolCall) share

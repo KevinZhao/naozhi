@@ -220,7 +220,7 @@ func adoptableShimKey(key string) bool {
 	if sessionkey.IsSysKey(key) || sessionkey.IsScratchKey(key) {
 		return false
 	}
-	return ValidateSessionKey(key) == nil
+	return sessionkey.ValidateSessionKey(key) == nil
 }
 
 // adoptLiveShim rebuilds a ManagedSession for a live shim missing from
@@ -598,8 +598,8 @@ func (r *Router) commitShimReattach(state shim.State, sess *ManagedSession, proc
 			outcome = reattachReplaced
 			return
 		}
-		// ReattachProcess would call onSessionID, which runs its own
-		// transaction (not reentrant), so track directly; onTurnDone was
+		// onSessionID runs its own transaction (not reentrant), so the
+		// no-callback variant is used and the ID tracked directly; onTurnDone was
 		// bound earlier. The TryLock-guarded variant keeps a Send() still
 		// unwinding on the dead process (holding sendMu) from racing the
 		// storeProcess swap; non-blocking, so the sendMu→table lock ordering

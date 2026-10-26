@@ -11,6 +11,7 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // TestSessionsStatsProjects_CarriesPaletteFields: dashboard.js populates
@@ -64,8 +65,8 @@ func TestSessionsStatsProjects_CarriesPaletteFields(t *testing.T) {
 		t.Fatalf("projects = %d, want 1 (%s)", len(resp.Stats.Projects), w.Body.String())
 	}
 	p := resp.Stats.Projects[0]
-	if sk, _ := p["stableKey"].(string); sk != session.ProjectStableKey(projDir, "general") {
-		t.Errorf("stableKey = %v, want %s", p["stableKey"], session.ProjectStableKey(projDir, "general"))
+	if sk, _ := p["stableKey"].(string); sk != sessionkey.ProjectStableKey(projDir, "general") {
+		t.Errorf("stableKey = %v, want %s", p["stableKey"], sessionkey.ProjectStableKey(projDir, "general"))
 	}
 	if mt, _ := p["dir_mtime"].(float64); mt <= 0 {
 		t.Errorf("dir_mtime = %v, want > 0", p["dir_mtime"])

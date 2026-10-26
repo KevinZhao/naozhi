@@ -25,7 +25,7 @@ const DashboardPlatform = "dashboard"
 
 // DashboardProjectChatType is the chatType segment (parts[1]) of a
 // project-level stable dashboard session key, shaped
-// `dashboard:pj:<workspace-hash>:<agent>` (see internal/session.ProjectStableKey).
+// `dashboard:pj:<workspace-hash>:<agent>` (see ProjectStableKey).
 // "pj" rather than "project" so no segment collides with the planner
 // namespace (`project:...`), keeping the two unambiguous.
 const DashboardProjectChatType = "pj"
@@ -46,18 +46,6 @@ func IsSysKey(s string) bool { return strings.HasPrefix(s, SysKeyPrefix) }
 
 // IsScratchKey reports whether s belongs to the dashboard scratch namespace.
 func IsScratchKey(s string) bool { return strings.HasPrefix(s, ScratchKeyPrefix) }
-
-// IsDashboardProjectKey reports whether key is a project-level stable
-// dashboard session key (`dashboard:pj:<id>...`). Pure prefix scan, no
-// allocation; false for planner (`project:...`), scratch, cron and sys keys.
-func IsDashboardProjectKey(key string) bool {
-	const prefix = DashboardPlatform + ":" + DashboardProjectChatType + ":"
-	if !strings.HasPrefix(key, prefix) {
-		return false
-	}
-	// A bare "dashboard:pj:" (missing workspace hash) is not accepted.
-	return len(key) > len(prefix)
-}
 
 // CronJobIDFromKey returns the trailing job ID of a cron key, or the empty
 // string when s is not a cron key.

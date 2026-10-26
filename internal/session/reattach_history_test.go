@@ -45,7 +45,7 @@ func TestReattachProcess_SeedsPersistedHistoryIntoFreshProc(t *testing.T) {
 
 // TestInjectHistory_AfterReattach_DoesNotDoubleInject checks the symmetric
 // race: tier1 fires AFTER ReconnectShims attached a fresh proc. The catch-up
-// inside ReattachProcess must not collide with InjectHistory's own
+// inside ReattachProcessNoCallback must not collide with InjectHistory's own
 // "forward to proc" step and result in 2× the entries appearing in the ring.
 func TestInjectHistory_AfterReattach_DoesNotDoubleInject(t *testing.T) {
 	t.Parallel()
@@ -68,7 +68,7 @@ func TestInjectHistory_AfterReattach_DoesNotDoubleInject(t *testing.T) {
 }
 
 // TestReattachProcess_AfterInjectHistory_DoesNotDoubleInject covers the
-// reverse race: tier1 wins the lock first, then ReattachProcess runs.
+// reverse race: tier1 wins the lock first, then ReattachProcessNoCallback runs.
 // persistedSeededLen must be set so the catch-up snapshot covers the
 // already-injected entries exactly once, while the InjectHistory caller
 // (which observed proc=nil under the lock) didn't forward anything.
@@ -179,7 +179,7 @@ func TestReattachProcess_ConcurrentInjectHistory(t *testing.T) {
 //
 // Pre-fix: the empty new proc.EventLog gives 0 entries, history vanishes
 // from the dashboard until the operator triggers a disk-fallback path.
-// Post-fix: ReattachProcess seeds proc.EventLog from persistedHistory, so
+// Post-fix: ReattachProcessNoCallback seeds proc.EventLog from persistedHistory, so
 // EventEntries() returns the full conversation.
 func TestEventEntries_DefaultEndpoint_ReturnsFullHistoryAfterReattach(t *testing.T) {
 	t.Parallel()

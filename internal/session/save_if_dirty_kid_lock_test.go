@@ -29,7 +29,7 @@ func TestSaveIfDirty_KnownIDsConcurrentTrackAndSnapshot(t *testing.T) {
 	stop := make(chan struct{})
 
 	// Saver: reopen the throttle and run saveIfDirty so ClaimSave and the
-	// memoised marshal execute every iteration.
+	// marshal execute every iteration.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

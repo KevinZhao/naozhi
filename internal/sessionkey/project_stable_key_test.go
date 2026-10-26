@@ -78,9 +78,6 @@ func TestProjectStableKey_4SegmentShape(t *testing.T) {
 	if parts[3] != "sonnet" {
 		t.Errorf("agent = %q, want sonnet", parts[3])
 	}
-	if !IsDashboardProjectKey(key) {
-		t.Errorf("IsDashboardProjectKey(%q) = false, want true", key)
-	}
 	if err := ValidateSessionKey(key); err != nil {
 		t.Errorf("ValidateSessionKey(%q) = %v, want nil", key, err)
 	}

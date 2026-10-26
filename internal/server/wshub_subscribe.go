@@ -8,6 +8,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/wsproto"
 )
 
@@ -54,7 +55,7 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	// multi-KB key with C1 controls / bidi chars that reach slog attrs, persist
 	// in the subscriber registry and land in sessions.json. ValidateSessionKey also
 	// caps length at MaxSessionKeyBytes.
-	if err := session.ValidateSessionKey(key); err != nil {
+	if err := sessionkey.ValidateSessionKey(key); err != nil {
 		c.SendJSON(wsproto.NewError(wsproto.Error{Error: "invalid key"}))
 		return
 	}
@@ -226,7 +227,7 @@ func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 	// Same gate as handleSubscribe: a crafted key with C1 / bidi / non-UTF-8
 	// bytes would land in the echoed "unsubscribed" reply and log attrs. Gate
 	// BEFORE remote delegation since handleRemoteUnsubscribe reads msg.Key too.
-	if err := session.ValidateSessionKey(key); err != nil {
+	if err := sessionkey.ValidateSessionKey(key); err != nil {
 		c.SendJSON(wsproto.NewError(wsproto.Error{Error: "invalid key"}))
 		return
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/workflow"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // GET /api/sessions/workflow?key=&node=&task_id=[&rows=none | &since=&epoch=]
@@ -131,7 +132,7 @@ func parseRows(r *http.Request) (rowQuery, bool) {
 func (h *Handler) HandleWorkflow(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	key := q.Get("key")
-	if err := session.ValidateSessionKey(key); err != nil {
+	if err := sessionkey.ValidateSessionKey(key); err != nil {
 		http.Error(w, "invalid key parameter", http.StatusBadRequest)
 		return
 	}

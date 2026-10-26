@@ -12,6 +12,7 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // newProjectsListForStableKeyTest materialises a one-project workspace and
@@ -60,14 +61,14 @@ func newProjectsListForStableKeyTest(t *testing.T) (rows []map[string]any, projP
 
 // TestProjectsList_StableKeyEmitted: each
 // project row carries a well-formed dashboard:pj:<hash>:general stable key
-// matching session.ProjectStableKey for that path.
+// matching sessionkey.ProjectStableKey for that path.
 func TestProjectsList_StableKeyEmitted(t *testing.T) {
 	rows, projPath := newProjectsListForStableKeyTest(t)
 	got, _ := rows[0]["stableKey"].(string)
 	if got == "" {
 		t.Fatal("stableKey missing")
 	}
-	want := session.ProjectStableKey(projPath, "general")
+	want := sessionkey.ProjectStableKey(projPath, "general")
 	if got != want {
 		t.Errorf("stableKey = %q, want %q", got, want)
 	}

@@ -10,7 +10,7 @@ import (
 	"net/http"
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
-	sessionpkg "github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 )
@@ -40,7 +40,7 @@ func (h *Handlers) HandleOverride(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Gate req.Key before it reaches slog attrs or router lookups.
-	if err := sessionpkg.ValidateSessionKey(req.Key); err != nil {
+	if err := sessionkey.ValidateSessionKey(req.Key); err != nil {
 		http.Error(w, "invalid key parameter", http.StatusBadRequest)
 		return
 	}
@@ -62,13 +62,13 @@ func (h *Handlers) HandleOverride(w http.ResponseWriter, r *http.Request) {
 		default:
 			// Validation family: the message may echo arbitrary operator input,
 			// so sanitize it before returning.
-			http.Error(w, sessionpkg.SanitizeLogAttr(err.Error()), http.StatusBadRequest)
+			http.Error(w, sessionkey.SanitizeLogAttr(err.Error()), http.StatusBadRequest)
 		}
 		return
 	}
 
 	slog.Info("session tuning override",
-		"key", sessionpkg.SanitizeLogAttr(req.Key),
+		"key", sessionkey.SanitizeLogAttr(req.Key),
 		"applied_via", appliedVia,
 		"model_set", req.Model != nil,
 		"effort_set", req.Effort != nil)

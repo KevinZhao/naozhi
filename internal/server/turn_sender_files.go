@@ -14,7 +14,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/attachment"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // isPendingFileRef reports a file ref whose bytes are not on disk yet.
@@ -63,7 +63,7 @@ func persistPendingFileRefs(workspace string, atts []clievent.Attachment, key st
 			}
 		}
 		if err != nil {
-			slog.Warn("send: file attachment not saved", "key", session.SanitizeLogAttr(key), "err", err)
+			slog.Warn("send: file attachment not saved", "key", sessionkey.SanitizeLogAttr(key), "err", err)
 			name := a.OrigName
 			if name == "" {
 				name = "a file"

@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	sessionpkg "github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
@@ -69,7 +70,7 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	// Same gate as the reverse-RPC fetch_events handler: rejects multi-KB or
 	// control-byte keys before they reach slog attrs; also caps length at
 	// MaxSessionKeyBytes.
-	if err := sessionpkg.ValidateSessionKey(key); err != nil {
+	if err := sessionkey.ValidateSessionKey(key); err != nil {
 		http.Error(w, "invalid key parameter", http.StatusBadRequest)
 		return
 	}

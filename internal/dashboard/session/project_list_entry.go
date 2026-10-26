@@ -12,7 +12,7 @@ import (
 
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/project"
-	sessionpkg "github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // projectListEntry is the per-project element in /api/sessions
@@ -74,7 +74,7 @@ func (h *Handlers) projectListLocalAt(now time.Time) []projectListEntry {
 			CreatedAt:  p.Config.CreatedAt,
 			Config:     p.Config,
 			DirModTime: p.DirModTime,
-			StableKey:  sessionpkg.ProjectStableKey(p.Path, "general"),
+			StableKey:  sessionkey.ProjectStableKey(p.Path, "general"),
 			// Strip embedded userinfo (PAT) before the URL reaches any dashboard
 			// client; /api/sessions is polled constantly so a leak here is worse
 			// than on /api/projects.

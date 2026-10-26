@@ -42,7 +42,7 @@ func newRemoveTeardownFixture(t *testing.T) *removeTeardownFixture {
 func newRemoveTeardownFixtureWith(t *testing.T, wrap func(*blockingCloseProc) processIface) *removeTeardownFixture {
 	t.Helper()
 	f := &removeTeardownFixture{ws: t.TempDir(), key: "dashboard:direct:alice:recreate"}
-	f.r, f.dir = newEventLogRouter(t, false)
+	f.r, f.dir = newEventLogRouter(t)
 	now := time.Now().UTC()
 	f.rel, f.metaPath = writeAttachmentPair(t, f.ws, now.Format("2006-01-02"), "img", now)
 	f.proc = newBlockingCloseProc()

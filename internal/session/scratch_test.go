@@ -257,8 +257,8 @@ func TestScratchPool_AgentIDWithColonSanitized(t *testing.T) {
 		t.Errorf("agent segment leaked a colon: %q", parts[3])
 	}
 	// Validate the shape so downstream ValidateSessionKey would accept it.
-	if err := ValidateSessionKey(sc.Key); err != nil {
-		t.Errorf("promoted key failed ValidateSessionKey: %v", err)
+	if err := sessionkey.ValidateSessionKey(sc.Key); err != nil {
+		t.Errorf("promoted key failed sessionkey.ValidateSessionKey: %v", err)
 	}
 }
 

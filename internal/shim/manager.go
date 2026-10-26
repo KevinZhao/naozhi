@@ -33,15 +33,15 @@ type shimReadyMsg struct {
 }
 
 // validateKeyForShim rejects keys that would leak control bytes into the
-// shim argv / socket path. Mirrors session.ValidateSessionKey (session →
+// shim argv / socket path. Mirrors sessionkey.ValidateSessionKey (session →
 // shim is a one-way import) via the shared internal/sessionkey rune deny-set
-// (#2301); the byte cap below is a local copy of session.MaxSessionKeyBytes,
+// (#2301); the byte cap below is a local copy of sessionkey.MaxSessionKeyBytes,
 // and TestValidateKeyForShim_Contract pins both against one table (#719).
 func validateKeyForShim(k string) error {
 	if k == "" {
 		return errors.New("empty key")
 	}
-	// Mirrors session.MaxSessionKeyBytes (4*128+3).
+	// Mirrors sessionkey.MaxSessionKeyBytes (4*128+3).
 	const maxKeyBytes = 515
 	if len(k) > maxKeyBytes {
 		return fmt.Errorf("key exceeds %d-byte limit", maxKeyBytes)
@@ -287,7 +287,7 @@ func awaitReady(ctx context.Context, stdout io.ReadCloser, timeout time.Duration
 // re-merge it against current config on the next restart; nil records nothing.
 func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backend string, cliArgs []string, cwd string, envOverlay map[string]string, spawnOverlay *SpawnOverlay) (*ShimHandle, error) {
 	// Defence-in-depth: key flows into exec argv as `--key <key>`; do not
-	// trust that upstream callers already ran session.ValidateSessionKey.
+	// trust that upstream callers already ran sessionkey.ValidateSessionKey.
 	if err := validateKeyForShim(key); err != nil {
 		return nil, fmt.Errorf("shim key rejected: %w", err)
 	}

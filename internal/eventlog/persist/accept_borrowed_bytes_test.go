@@ -22,7 +22,7 @@ func TestAccept_CopiesBorrowedBytes(t *testing.T) {
 	p, dir := newTestPersister(t)
 	sink := p.SinkFor("dashboard:direct:alice:general")
 
-	// One reusable backing array, mirroring bridgeEncPool's buffer reuse.
+	// One reusable backing array, mirroring a producer's pooled-buffer reuse.
 	scratch := make([]byte, 0, 256)
 	first := []byte(`{"time":1700000001000,"uuid":"first","type":"user","summary":"FIRST"}`)
 	scratch = append(scratch[:0], first...)

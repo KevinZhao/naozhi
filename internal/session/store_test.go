@@ -190,8 +190,8 @@ func TestSaveAndLoadPrevSessionIDs(t *testing.T) {
 	}
 }
 
-// TestSaveLoadKnownIDs_RoundTripSorted verifies saveKnownIDs (taking the
-// pre-sorted SortedSnapshot) round-trips through loadKnownIDs unchanged.
+// TestSaveLoadKnownIDs_RoundTripSorted verifies saveKnownIDsBytes (taking the
+// sorted MarshalSnapshot) round-trips through loadKnownIDs unchanged.
 func TestSaveLoadKnownIDs_RoundTripSorted(t *testing.T) {
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "sessions.json")
@@ -200,10 +200,12 @@ func TestSaveLoadKnownIDs_RoundTripSorted(t *testing.T) {
 	for _, id := range []string{"zeta", "alpha", "mike"} {
 		kid.Track(id)
 	}
-	sorted := kid.SortedSnapshot()
-
-	if err := saveKnownIDs(storePath, sorted); err != nil {
-		t.Fatalf("saveKnownIDs: %v", err)
+	data, err := kid.MarshalSnapshot()
+	if err != nil {
+		t.Fatalf("MarshalSnapshot: %v", err)
+	}
+	if err := saveKnownIDsBytes(storePath, data); err != nil {
+		t.Fatalf("saveKnownIDsBytes: %v", err)
 	}
 	loaded := loadKnownIDs(storePath)
 	if loaded == nil {

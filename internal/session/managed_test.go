@@ -3,6 +3,8 @@ package session
 import (
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // TestSanitizeKeyComponent_StripsTab asserts that tab (U+0009) is stripped in
@@ -33,10 +35,10 @@ func TestSanitizeKeyComponent_StripsTab(t *testing.T) {
 func TestSanitizeLogAttr_NoLogFragmentation(t *testing.T) {
 	t.Parallel()
 	bad := "user\nadmin=1\tpassword\x1b[31mevil\u202ereverse\u200bhidden"
-	got := SanitizeLogAttr(bad)
+	got := sessionkey.SanitizeLogAttr(bad)
 	for _, r := range []rune{'\n', '\t', 0x1b, 0x202E, 0x200B} {
 		if strings.ContainsRune(got, r) {
-			t.Errorf("SanitizeLogAttr(%q) = %q, still contains U+%04X", bad, got, r)
+			t.Errorf("sessionkey.SanitizeLogAttr(%q) = %q, still contains U+%04X", bad, got, r)
 		}
 	}
 }
@@ -50,15 +52,15 @@ func TestSanitizeLogAttr_StripsC1Controls(t *testing.T) {
 	t.Parallel()
 	// U+0085 NEL (Next Line) and U+0088 HTS are terminal control functions.
 	in := "user\u0085id\u0088ok"
-	got := SanitizeLogAttr(in)
+	got := sessionkey.SanitizeLogAttr(in)
 	for _, r := range []rune{0x85, 0x88} {
 		if strings.ContainsRune(got, r) {
-			t.Errorf("SanitizeLogAttr(%q) = %q, still contains C1 U+%04X", in, got, r)
+			t.Errorf("sessionkey.SanitizeLogAttr(%q) = %q, still contains C1 U+%04X", in, got, r)
 		}
 	}
 	// U+007F DEL is equally dangerous in some terminals.
-	if strings.ContainsRune(SanitizeLogAttr("a\x7fb"), 0x7f) {
-		t.Error("SanitizeLogAttr must strip DEL (U+007F)")
+	if strings.ContainsRune(sessionkey.SanitizeLogAttr("a\x7fb"), 0x7f) {
+		t.Error("sessionkey.SanitizeLogAttr must strip DEL (U+007F)")
 	}
 }
 

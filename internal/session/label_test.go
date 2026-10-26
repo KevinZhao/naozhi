@@ -3,6 +3,8 @@ package session
 import (
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
 func TestValidateUserLabel(t *testing.T) {
@@ -18,8 +20,8 @@ func TestValidateUserLabel(t *testing.T) {
 		{"ASCII label", "hello", "hello", false},
 		{"Chinese label", "重构会话", "重构会话", false},
 		{"trims surrounding space", "  hi  ", "hi", false},
-		{"128 bytes exact", strings.Repeat("a", MaxUserLabelBytes), strings.Repeat("a", MaxUserLabelBytes), false},
-		{"129 bytes rejected", strings.Repeat("a", MaxUserLabelBytes+1), "", true},
+		{"128 bytes exact", strings.Repeat("a", sessionview.MaxUserLabelBytes), strings.Repeat("a", sessionview.MaxUserLabelBytes), false},
+		{"129 bytes rejected", strings.Repeat("a", sessionview.MaxUserLabelBytes+1), "", true},
 		{"tab rejected (slog separator)", "a\tb", "", true},
 		{"newline rejected", "a\nb", "", true},
 		{"CR rejected", "a\rb", "", true},
@@ -32,7 +34,7 @@ func TestValidateUserLabel(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := ValidateUserLabel(c.in)
+			got, err := sessionview.ValidateUserLabel(c.in)
 			if (err != nil) != c.wantErr {
 				t.Fatalf("err = %v, wantErr = %v", err, c.wantErr)
 			}

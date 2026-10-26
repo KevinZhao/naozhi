@@ -3,6 +3,8 @@ package session
 import (
 	"log/slog"
 	"slices"
+
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // RenameSession moves a session entry from oldKey to newKey, preserving the
@@ -19,7 +21,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	if oldKey == newKey {
 		return false
 	}
-	if err := ValidateSessionKey(newKey); err != nil {
+	if err := sessionkey.ValidateSessionKey(newKey); err != nil {
 		slog.Warn("rename session: invalid new key", "err", err)
 		return false
 	}

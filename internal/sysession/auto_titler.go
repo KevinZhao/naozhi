@@ -15,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/session/sessionview"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -65,7 +66,7 @@ const (
 	// autoTitlerMaxTitleRunes mirrors the prompt's "at most 24 characters"
 	// so a non-compliant model still gets clipped. 24 leaves room for
 	// verbatim ASCII identifiers (#2115); worst case 24 CJK × 3 bytes = 72,
-	// always under session.MaxUserLabelBytes.
+	// always under sessionview.MaxUserLabelBytes.
 	autoTitlerMaxTitleRunes = 24
 
 	// autoTitlerHighwaterMaxEntries hard-caps the highwater map (#808).
@@ -517,7 +518,7 @@ func (a *autoTitler) renameOne(ctx context.Context, key, seed string, turnCount 
 	if err != nil {
 		return autoTitlerHighwater{}, err // Runner already wraps; classifyError handles ctx errors.
 	}
-	title, err := session.ValidateUserLabel(strings.TrimSpace(out))
+	title, err := sessionview.ValidateUserLabel(strings.TrimSpace(out))
 	if err != nil {
 		return autoTitlerHighwater{}, fmt.Errorf("%w: validate output: %v", ErrValidation, err)
 	}

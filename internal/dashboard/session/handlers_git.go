@@ -9,7 +9,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/gitinfo"
 	"github.com/naozhi/naozhi/internal/osutil"
-	sessionpkg "github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // gitStateView is the wire shape for GET /api/sessions/git. IsRepo is the
@@ -46,7 +46,7 @@ func (h *Handlers) HandleGit(w http.ResponseWriter, r *http.Request) {
 	}
 	// Same key hygiene as the events / runs endpoints: caps length and rejects
 	// control bytes before the key reaches slog.
-	if err := sessionpkg.ValidateSessionKey(key); err != nil {
+	if err := sessionkey.ValidateSessionKey(key); err != nil {
 		http.Error(w, "invalid key parameter", http.StatusBadRequest)
 		return
 	}

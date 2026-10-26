@@ -10,7 +10,7 @@
 // Router or any caller code, so the reverse edge cannot form.
 //
 // Save protocol (Cleanup / saveIfDirty): ClaimSave atomically checks dirty +
-// throttle, stamps savedAt and returns gen-memoised JSON; the caller writes
+// throttle, stamps savedAt and returns the sorted JSON plus its gen; the caller writes
 // the file outside every lock, then calls MarkSavedIfUnchanged(gen) on
 // success or ResetSaveThrottle on failure. MarshalSnapshot is the
 // unthrottled variant for Shutdown.
@@ -45,15 +45,8 @@ type Store struct {
 	orderHead int
 	// dirty is true when ids changed since the last successful save.
 	dirty bool
-	// gen increments on every ids mutation and gates both memo caches.
+	// gen increments on every ids mutation.
 	gen uint64
-	// sortedCache / marshaledCache memoise the sorted IDs and their JSON at
-	// sortedGen / marshaledGen (0 = unbuilt), so an unchanged set costs one
-	// sort and one marshal per mutation generation, not per save tick.
-	sortedCache    []string
-	sortedGen      uint64
-	marshaledCache []byte
-	marshaledGen   uint64
 	// savedAt is the last ClaimSave stamp; zero means the throttle is open.
 	savedAt time.Time
 }
@@ -96,26 +89,12 @@ func (s *Store) Track(id string) bool {
 	return true
 }
 
-// Has reports whether id has been tracked.
-func (s *Store) Has(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.ids[id]
-}
-
-// Len returns the number of tracked IDs.
-func (s *Store) Len() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.ids)
-}
-
 // SortedSnapshot returns the IDs sorted ascending as a fresh copy the caller
-// may keep after the lock is released. The sort is memoised by gen.
+// may keep after the lock is released.
 func (s *Store) SortedSnapshot() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return slices.Clone(s.sortedLocked())
+	return s.sortedLocked()
 }
 
 // MarshalSnapshot returns the sorted set as JSON regardless of dirty or
@@ -128,7 +107,7 @@ func (s *Store) MarshalSnapshot() ([]byte, error) {
 
 // ClaimSave claims the periodic save window: when the set is dirty and at
 // least interval has elapsed since the previous claim it stamps savedAt=now
-// and returns the memoised JSON plus the gen it reflects, with due=true.
+// and returns the sorted JSON plus the gen it reflects, with due=true.
 // The caller writes the bytes outside every lock, then calls
 // MarkSavedIfUnchanged(gen) on success or ResetSaveThrottle on failure. A
 // marshal error releases the claim so the next tick retries.
@@ -208,33 +187,23 @@ func (s *Store) evictOldestLocked() {
 	}
 }
 
-// sortedLocked returns the sorted cache, rebuilding it when gen moved on.
-// Callers must clone before releasing the lock.
+// sortedLocked returns the IDs sorted ascending as a fresh slice.
 func (s *Store) sortedLocked() []string {
-	if s.sortedCache == nil || s.sortedGen != s.gen {
-		sorted := make([]string, 0, len(s.ids))
-		for id := range s.ids {
-			sorted = append(sorted, id)
-		}
-		slices.Sort(sorted)
-		s.sortedCache = sorted
-		s.sortedGen = s.gen
+	sorted := make([]string, 0, len(s.ids))
+	for id := range s.ids {
+		sorted = append(sorted, id)
 	}
-	return s.sortedCache
+	slices.Sort(sorted)
+	return sorted
 }
 
-// marshaledLocked returns a copy of the JSON cache, rebuilding it (and the
-// sorted cache it derives from) when gen moved on.
+// marshaledLocked returns the sorted set as freshly allocated JSON.
 func (s *Store) marshaledLocked() ([]byte, error) {
-	if s.marshaledCache == nil || s.marshaledGen != s.gen {
-		data, err := marshalJSON(s.sortedLocked())
-		if err != nil {
-			return nil, fmt.Errorf("marshal known IDs: %w", err)
-		}
-		s.marshaledCache = data
-		s.marshaledGen = s.gen
+	data, err := marshalJSON(s.sortedLocked())
+	if err != nil {
+		return nil, fmt.Errorf("marshal known IDs: %w", err)
 	}
-	return slices.Clone(s.marshaledCache), nil
+	return data, nil
 }
 
 func (s *Store) ensureIDs() {

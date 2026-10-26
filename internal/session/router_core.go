@@ -197,7 +197,7 @@ type Router struct {
 	runs RunLedger
 
 	// kid is the known-session-IDs facet: IDs set, FIFO order, dirty flag,
-	// gen and the gen-memoised save snapshot, in internal/session/knownids.
+	// gen and the save-claim bookkeeping, in internal/session/knownids.
 	// Owns its own mutex and is never guarded by the table lock; Track runs with the table lock
 	// held at the publish sites, fixing the lock order the table lock → kid.mu (the
 	// store never calls back into Router). Zero value is usable.
@@ -240,15 +240,14 @@ type Router struct {
 // pendingSpawnSlot is a one-shot RAII token returned by
 // (*Router).acquirePendingSpawnSlot. It guards the pending-spawn count against
 // a stranded ++ on any panic / error path between increment and decrement.
-// release() is idempotent: happy-path callers decrement explicitly at the
-// original site and a `defer token.release()` absorbs any unexpected exit.
+// releaseIn is idempotent, so a deferred releaseIn after an explicit
+// happy-path decrement is a no-op.
 type pendingSpawnSlot struct {
 	r        *Router
 	released bool
 }
 
-// acquirePendingSpawnSlot takes a pending-spawn slot and returns a token
-// whose release method can be called from any lock state.
+// acquirePendingSpawnSlot takes a pending-spawn slot and returns its token.
 func (r *Router) acquirePendingSpawnSlot(tx sessTx) pendingSpawnSlot {
 	tx.Ext().spawns.AcquireSpawnSlot()
 	return pendingSpawnSlot{r: r}
@@ -262,22 +261,6 @@ func (s *pendingSpawnSlot) releaseIn(tx sessTx) {
 	}
 	tx.Ext().spawns.ReleaseSpawnSlot()
 	s.released = true
-}
-
-// release is the counterpart used from defer, outside any transaction. It
-// takes the lock only when the slot has not yet been released, so the happy
-// path (which calls releaseIn inline) pays no extra lock acquisition.
-// Idempotent.
-func (s *pendingSpawnSlot) release() {
-	if s == nil || s.released {
-		return
-	}
-	s.r.ss.Update(func(tx sessTx) {
-		if !s.released {
-			tx.Ext().spawns.ReleaseSpawnSlot()
-			s.released = true
-		}
-	})
 }
 
 // newSessionTable returns an empty session table indexed the way the router
@@ -514,17 +497,6 @@ type RouterConfig struct {
 	// EventLogGenerator tags every new <keyhash>.log header with the naozhi
 	// build identifier. Optional.
 	EventLogGenerator string
-	// EventLogDevMode enables Persister's panic-on-replay-phase guard (RFC
-	// §3.2.3): test / CI builds set it so a SetPersistSink ordering regression
-	// panics immediately; production drops + counts instead.
-	EventLogDevMode bool
-
-	// EventLogPersister, when non-nil, is used as the event-log sink instead of
-	// constructing one from EventLogDir/EventLogGenerator/EventLogDevMode, so
-	// callers owning the Persister lifecycle can share one instance across
-	// routers or pre-configure observers/codecs. nil + non-empty EventLogDir ⇒
-	// the router constructs the Persister itself.
-	EventLogPersister *persist.Persister
 
 	// HistoryLoader loads a session's persisted JSONL history tail across a
 	// prev_session_ids chain. nil ⇒ claudeTranscriptLoader (history.PickFactory
@@ -615,16 +587,11 @@ func NewRouter(cfg RouterConfig) *Router {
 		r.hist.loader = claudeTranscriptLoader{pick: history.PickFactory}
 	}
 	// Spin up the event-log persister BEFORE touching the session store; the
-	// startup load path needs a live sink for restored ManagedSessions. A
-	// caller-owned Persister wins; otherwise EventLogDir triggers in-router construction.
-	switch {
-	case cfg.EventLogPersister != nil:
-		r.hist.persister = cfg.EventLogPersister
-	case cfg.EventLogDir != "":
+	// startup load path needs a live sink for restored ManagedSessions.
+	if cfg.EventLogDir != "" {
 		p, err := persist.NewPersister(persist.Options{
 			Dir:       cfg.EventLogDir,
 			Generator: cfg.EventLogGenerator,
-			DevMode:   cfg.EventLogDevMode,
 		})
 		if err != nil {
 			slog.Error("event log persister init failed; disabling event log persistence",

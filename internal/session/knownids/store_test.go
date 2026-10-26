@@ -14,7 +14,7 @@ const interval = 5 * time.Minute
 
 func TestZeroValue_Usable(t *testing.T) {
 	var s Store
-	if s.Has("x") || s.Len() != 0 || s.Dirty() || s.Gen() != 0 || !s.SavedAt().IsZero() {
+	if s.ids["x"] || len(s.ids) != 0 || s.Dirty() || s.Gen() != 0 || !s.SavedAt().IsZero() {
 		t.Fatal("zero-value store must read as empty/clean")
 	}
 	if got := s.SortedSnapshot(); len(got) != 0 {
@@ -34,7 +34,7 @@ func TestZeroValue_Usable(t *testing.T) {
 	if !s.Track("a") {
 		t.Fatal("first Track on zero value must add")
 	}
-	if !s.Has("a") || s.Len() != 1 || !s.Dirty() || s.Gen() != 1 {
+	if !s.ids["a"] || len(s.ids) != 1 || !s.Dirty() || s.Gen() != 1 {
 		t.Error("state after first Track wrong")
 	}
 }
@@ -44,14 +44,14 @@ func TestTrack_DedupesAndIgnoresEmpty(t *testing.T) {
 	if s.Track("") {
 		t.Error("empty id must not be tracked")
 	}
-	if s.Len() != 0 || s.Dirty() {
+	if len(s.ids) != 0 || s.Dirty() {
 		t.Error("empty id must not touch state")
 	}
 	if !s.Track("dup") || s.Track("dup") || s.Track("dup") {
 		t.Error("only the first Track of an id may report added")
 	}
-	if s.Len() != 1 || s.Gen() != 1 {
-		t.Errorf("Len=%d Gen=%d, want 1/1 after duplicates", s.Len(), s.Gen())
+	if len(s.ids) != 1 || s.Gen() != 1 {
+		t.Errorf("Len=%d Gen=%d, want 1/1 after duplicates", len(s.ids), s.Gen())
 	}
 	if got := len(s.order) - s.orderHead; got != 1 {
 		t.Errorf("live window = %d, want 1", got)
@@ -64,18 +64,18 @@ func TestTrack_CapsAtMaxKnownIDs_FIFO(t *testing.T) {
 	for i := 0; i < total; i++ {
 		s.Track(fmt.Sprintf("sess-%07d", i))
 	}
-	if got := s.Len(); got != MaxKnownIDs {
+	if got := len(s.ids); got != MaxKnownIDs {
 		t.Errorf("Len = %d, want capped at %d", got, MaxKnownIDs)
 	}
 	if got := len(s.order) - s.orderHead; got != MaxKnownIDs {
 		t.Errorf("live window = %d, want %d", got, MaxKnownIDs)
 	}
 	for i := 0; i < 5; i++ {
-		if id := fmt.Sprintf("sess-%07d", i); s.Has(id) {
+		if id := fmt.Sprintf("sess-%07d", i); s.ids[id] {
 			t.Errorf("oldest ID %q was not evicted", id)
 		}
 	}
-	if !s.Has(fmt.Sprintf("sess-%07d", 5)) {
+	if !s.ids[fmt.Sprintf("sess-%07d", 5)] {
 		t.Error("first surviving ID missing")
 	}
 	want := fmt.Sprintf("sess-%07d", total-1)
@@ -93,7 +93,7 @@ func TestTrack_HeadCompactionBoundsMemory(t *testing.T) {
 	for i := 0; i < total; i++ {
 		s.Track(fmt.Sprintf("sess-%07d", i))
 	}
-	if got := s.Len(); got != MaxKnownIDs {
+	if got := len(s.ids); got != MaxKnownIDs {
 		t.Errorf("Len = %d, want %d", got, MaxKnownIDs)
 	}
 	if got := len(s.order) - s.orderHead; got != MaxKnownIDs {
@@ -117,15 +117,15 @@ func TestTrack_HeadCompactionBoundsMemory(t *testing.T) {
 func TestSeed_NoDirtyNoGen_SkipsDuplicates(t *testing.T) {
 	var s Store
 	s.Seed(nil)
-	if s.Len() != 0 || s.Dirty() {
+	if len(s.ids) != 0 || s.Dirty() {
 		t.Error("Seed(nil) must be a no-op")
 	}
 	s.Track("live")
 	gen := s.Gen()
 	s.MarkSavedIfUnchanged(gen)
 	s.Seed(map[string]bool{"a": true, "b": true, "live": true})
-	if s.Len() != 3 || !s.Has("a") || !s.Has("b") {
-		t.Errorf("Seed did not install entries: Len=%d", s.Len())
+	if len(s.ids) != 3 || !s.ids["a"] || !s.ids["b"] {
+		t.Errorf("Seed did not install entries: Len=%d", len(s.ids))
 	}
 	if s.Dirty() || s.Gen() != gen {
 		t.Errorf("Seed must not dirty or bump gen (dirty=%v gen=%d want %d)", s.Dirty(), s.Gen(), gen)
@@ -134,11 +134,11 @@ func TestSeed_NoDirtyNoGen_SkipsDuplicates(t *testing.T) {
 		t.Errorf("order must hold each id once, live window = %d", got)
 	}
 	// Seeded entries participate in FIFO eviction.
-	for i := 0; s.Len() < MaxKnownIDs; i++ {
+	for i := 0; len(s.ids) < MaxKnownIDs; i++ {
 		s.Track(fmt.Sprintf("fill-%d", i))
 	}
 	s.Track("overflow")
-	if s.Has("live") {
+	if s.ids["live"] {
 		t.Error("oldest (first-tracked) entry must be evicted first")
 	}
 }
@@ -222,9 +222,6 @@ func TestClaimSave_MarshalErrorReleasesClaim(t *testing.T) {
 	if _, err := s.MarshalSnapshot(); !errors.Is(err, boom) {
 		t.Errorf("MarshalSnapshot err = %v, want boom", err)
 	}
-	if s.marshaledCache != nil {
-		t.Error("failed marshal must not populate the cache")
-	}
 
 	marshalJSON = orig
 	if _, _, due, err := s.ClaimSave(now, interval); !due || err != nil {
@@ -250,86 +247,6 @@ func TestMarkSavedIfUnchanged_ConcurrentTrackKeepsDirty(t *testing.T) {
 	}
 	if !s.MarkSavedIfUnchanged(s.Gen()) || s.Dirty() {
 		t.Error("current gen must clear dirty")
-	}
-}
-
-func TestSnapshots_MemoisedByGen_NoAliasing(t *testing.T) {
-	var s Store
-	for _, id := range []string{"ccc", "aaa", "bbb"} {
-		s.Track(id)
-	}
-	want := []string{"aaa", "bbb", "ccc"}
-
-	got1 := s.SortedSnapshot()
-	if !slices.Equal(got1, want) {
-		t.Fatalf("SortedSnapshot = %v, want %v", got1, want)
-	}
-	if s.sortedGen != s.gen {
-		t.Fatalf("sortedGen %d != gen %d", s.sortedGen, s.gen)
-	}
-	sortedPtr := &s.sortedCache[0]
-	if &got1[0] == sortedPtr {
-		t.Error("SortedSnapshot aliases the cache")
-	}
-
-	m1, err := s.MarshalSnapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var decoded []string
-	if err := json.Unmarshal(m1, &decoded); err != nil || !slices.Equal(decoded, want) {
-		t.Fatalf("MarshalSnapshot = %q (%v), want %v", m1, err, want)
-	}
-	if s.marshaledGen != s.gen || s.marshaledCache == nil {
-		t.Fatal("marshaled cache not tagged with current gen")
-	}
-	marshaledPtr := &s.marshaledCache[0]
-	if &m1[0] == marshaledPtr {
-		t.Error("MarshalSnapshot aliases the cache")
-	}
-
-	// No mutation: both caches must be reused (same backing arrays).
-	got2 := s.SortedSnapshot()
-	m2, _ := s.MarshalSnapshot()
-	if &s.sortedCache[0] != sortedPtr {
-		t.Error("sorted cache rebuilt despite no mutation")
-	}
-	if &s.marshaledCache[0] != marshaledPtr {
-		t.Error("marshaled cache rebuilt despite no mutation")
-	}
-	if !slices.Equal(got2, want) || string(m2) != string(m1) {
-		t.Error("memoised snapshots differ from first")
-	}
-	// Mutating a returned snapshot must not leak into the cache.
-	got2[0] = "zzz"
-	m2[1] = 'x'
-	if s.sortedCache[0] != "aaa" || s.marshaledCache[1] != m1[1] {
-		t.Error("caller mutation of a snapshot reached the cache")
-	}
-
-	// A new ID bumps gen: both caches rebuild in sorted order.
-	s.Track("aab")
-	want3 := []string{"aaa", "aab", "bbb", "ccc"}
-	got3 := s.SortedSnapshot()
-	m3, _ := s.MarshalSnapshot()
-	if !slices.Equal(got3, want3) {
-		t.Errorf("post-mutation SortedSnapshot = %v, want %v", got3, want3)
-	}
-	var decoded3 []string
-	if err := json.Unmarshal(m3, &decoded3); err != nil || !slices.Equal(decoded3, want3) {
-		t.Errorf("post-mutation MarshalSnapshot = %q, want %v", m3, want3)
-	}
-	if s.sortedGen != s.gen || s.marshaledGen != s.gen {
-		t.Error("caches not re-tagged after mutation")
-	}
-	// ClaimSave shares the same memo: identical bytes, no rebuild.
-	marshaledPtr3 := &s.marshaledCache[0]
-	data, _, due, _ := s.ClaimSave(time.Now(), interval)
-	if !due || string(data) != string(m3) {
-		t.Errorf("ClaimSave bytes = %q, want memoised %q", data, m3)
-	}
-	if &s.marshaledCache[0] != marshaledPtr3 {
-		t.Error("ClaimSave rebuilt the marshaled cache despite no mutation")
 	}
 }
 
@@ -411,8 +328,6 @@ func TestConcurrent_TrackClaimSnapshot_RaceFree(t *testing.T) {
 				t.Errorf("MarshalSnapshot: %v", err)
 				return
 			}
-			_ = s.Has("sess-0")
-			_ = s.Len()
 			_ = s.Dirty()
 			_ = s.Gen()
 			_ = s.SavedAt()
@@ -423,7 +338,7 @@ func TestConcurrent_TrackClaimSnapshot_RaceFree(t *testing.T) {
 	close(stop)
 	wg.Wait()
 
-	if got := len(s.order) - s.orderHead; got != s.Len() {
-		t.Errorf("live window %d != Len %d after churn", got, s.Len())
+	if got := len(s.order) - s.orderHead; got != len(s.ids) {
+		t.Errorf("live window %d != Len %d after churn", got, len(s.ids))
 	}
 }

@@ -32,7 +32,7 @@ func TestValidateRemoteWorkspacePath(t *testing.T) {
 		// UTF-8-encoded control / bidi / invalid runes: byte-only scan
 		// misses these entirely, so the pre-fix validator would accept
 		// them. With IsLogInjectionRune + utf8.ValidString the boundary
-		// is aligned with session.ValidateUserLabel (label.go:47) so a
+		// is aligned with sessionview.ValidateUserLabel so a
 		// workspace path cannot smuggle characters that corrupt slog
 		// attrs / dashboard display / journalctl rendering.
 		{"C1 NEL U+0085", "/home/\xc2\x85user/proj", true},
