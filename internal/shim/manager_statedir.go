@@ -1,13 +1,11 @@
 package shim
 
-// State-directory concerns: the quota gate every spawn passes and the discovery
-// scan that reads the state files back after a restart. Split out of manager.go
-// (#2713 B6).
+// State-directory concerns: the discovery scan that reads the state files back
+// after a restart. Split out of manager.go (#2713 B6).
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -27,11 +25,6 @@ import (
 // this one the moment either changes.
 func (m *Manager) StateDir() string { return m.stateDir }
 
-// ErrStateDirQuotaExceeded is returned by StartShim when spawning another shim
-// would exceed the state-dir quota. Operator-actionable (clean ~/.naozhi/shims
-// or raise the quota), unlike the transient ErrMaxShims (#456).
-var ErrStateDirQuotaExceeded = errors.New("shim state dir quota exceeded")
-
 // Manager manages shim process lifecycle: starting, discovering, and reconnecting.
 type Manager struct {
 	stateDir        string
@@ -46,9 +39,6 @@ type Manager struct {
 	// once at construction: variables injected later (systemctl
 	// set-environment, os.Setenv) do not reach new shims until naozhi restarts.
 	shimEnv []string
-
-	// stateDirQuotaBytes mirrors ManagerConfig.StateDirQuotaBytes; 0 disables the gate.
-	stateDirQuotaBytes int64
 
 	mu           sync.Mutex
 	shims        map[string]*ShimHandle // key → active shim handle
@@ -70,26 +60,6 @@ type Manager struct {
 	// (nil before the first), which keeps a steady reconcile tick quiet.
 	liveMu sync.Mutex
 	live   map[string]int
-}
-
-// checkStateDirQuota returns ErrStateDirQuotaExceeded when StateDirSize(stateDir)
-// already exceeds the quota; 0 disables the gate. Scan errors fail open (first
-// run, transient I/O). A truncated scan returns a lower bound — if even that
-// exceeds the quota it is still a violation, so the size is used regardless.
-func (m *Manager) checkStateDirQuota() error {
-	if m.stateDirQuotaBytes <= 0 {
-		return nil
-	}
-	size, err := osutil.StateDirSize(m.stateDir)
-	if err != nil && !errors.Is(err, osutil.ErrStateDirScanTruncated) {
-		// Missing (first run) or unreadable dir: never block spawn on a diagnostic walk.
-		return nil
-	}
-	if size >= m.stateDirQuotaBytes {
-		return fmt.Errorf("%w: %d ≥ %d bytes in %s",
-			ErrStateDirQuotaExceeded, size, m.stateDirQuotaBytes, m.stateDir)
-	}
-	return nil
 }
 
 // strandedTempAge separates a temp file stranded by a crash from one a live

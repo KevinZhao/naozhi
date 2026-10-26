@@ -40,7 +40,7 @@ func (s *shimServer) performHandshake(conn net.Conn) (ClientMsg, bool) {
 	}
 
 	// Use LimitedReader to prevent pre-auth memory exhaustion
-	lr := &io.LimitedReader{R: conn, N: int64(maxClientLineBytes()) + 1}
+	lr := &io.LimitedReader{R: conn, N: int64(maxClientLineBytes) + 1}
 	reader := bufio.NewReaderSize(lr, 4096)
 
 	attachLine, err := reader.ReadBytes('\n')
@@ -82,7 +82,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 
 	// Switch to bounded reader for the authenticated command loop.
 	// LimitedReader prevents a single oversized line from exhausting memory.
-	postAuthLR := &io.LimitedReader{R: conn, N: int64(maxClientLineBytes()) + 1}
+	postAuthLR := &io.LimitedReader{R: conn, N: int64(maxClientLineBytes) + 1}
 	reader := bufio.NewReaderSize(postAuthLR, 64*1024)
 
 	// Send hello directly (before becoming the active client, so no live
@@ -258,32 +258,22 @@ func (s *shimServer) runCommandLoop(
 	lineCh := make(chan []byte, 1)
 	go func() {
 		defer close(lineCh)
-		// Cumulative byte tally: the per-line LimitedReader alone would let an
-		// authenticated client churn near-max lines indefinitely (#541).
-		var sessionBytes int64
 		for {
-			postAuthLR.N = int64(maxClientLineBytes()) + 1 // reset per-line limit
+			postAuthLR.N = int64(maxClientLineBytes) + 1 // reset per-line limit
 			line, err := reader.ReadBytes('\n')
 			if err != nil {
 				// postAuthLR.N reaching 0 surfaces as an error, not a clean close:
 				// distinguish oversize from EOF/disconnect.
 				if postAuthLR.N <= 0 {
 					slog.Warn("client line exceeded per-line byte limit, disconnecting",
-						"limit", maxClientLineBytes())
+						"limit", maxClientLineBytes)
 				}
 				return
 			}
 			// bufio.NewReaderSize sets buffer, not max line. Disconnect rather
 			// than spin: a flooding client would burn CPU while holding a slot.
-			if len(line) > maxClientLineBytes() {
+			if len(line) > maxClientLineBytes {
 				slog.Warn("client line too large, disconnecting", "size", len(line))
-				return
-			}
-			// Cumulative cap (#541).
-			sessionBytes += int64(len(line))
-			if cap := maxClientSessionBytesValue(); sessionBytes > cap {
-				slog.Warn("client session byte cap exceeded, disconnecting",
-					"session_bytes", sessionBytes, "cap", cap)
 				return
 			}
 			select {
@@ -337,7 +327,7 @@ func (s *shimServer) handleClientCommand(msg ClientMsg) (disconnect bool) {
 	case "write":
 		// Reject payloads that would overflow Claude's 10 MB bufio.Scanner and
 		// deadlock stdout; treated as a protocol violation → disconnect.
-		if limit := maxWriteLineBytesValue(); int64(len(msg.Line)) > limit {
+		if limit := maxWriteLineBytes; int64(len(msg.Line)) > limit {
 			slog.Warn("client write too large, disconnecting",
 				"size", len(msg.Line), "limit", limit)
 			return true
