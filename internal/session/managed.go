@@ -437,13 +437,6 @@ type ManagedSession struct {
 	// Capped at maxPrevSessionIDs; overflow drops the oldest entries.
 	prevSessionIDs []string
 
-	// prevSessionOrigins is parallel to prevSessionIDs ("manual" default,
-	// "auto-spawn", "auto-backfill", "resume"); read/written under historyMu
-	// in lockstep. Contract: len(origins) <= len(ids), missing tail reads as
-	// "manual" (relies on ids being append-only, RFC §4.6); a length drift is
-	// detected, metric'd and rebuilt to all-"manual", never left misaligned.
-	prevSessionOrigins []string
-
 	// exempt marks this session as exempt from TTL cleanup, eviction, and activeCount.
 	// Used for planner sessions that should persist indefinitely.
 	exempt bool
