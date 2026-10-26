@@ -920,6 +920,10 @@ limits: { max_workers: 4, max_dispatches_per_day: 40 }
 
 ⑪ **计算机使用的位置**：截图进事件流、截屏发送、实时画面属于工作台面的预览增强，独立 RFC 见 `docs/rfc/computer-use.md`（PR #3733，其 §10 有自己的待定问题）。（建议截图进事件流与工作台首批一起排期）
 
+**同类产品调研（2026-10-26）**
+
+⑫ 两代产品（会话编排 / 主动型个人 agent）与本 RFC 的逐项对照见 `planner-landscape.md`。其中需要拍板的三条：A1 一个 Planner 关系、工作区作为 channel（改 D4 / D19）；A2 早报 + 外部来源巡检 + 预判提前到 P3，首个主动场景扩到"你的一天"（改 D8）；A3 Planner 先回执再干活、effort 自适应。另有 13 条小改（B1–B13）与 6 条有意不做（C1–C6）。
+
 **已有的其他待定项**
 
 - 可选的仓库侧缓解（immutable releases、push protection、CODEOWNERS）是否做。
