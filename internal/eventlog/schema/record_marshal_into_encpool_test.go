@@ -74,30 +74,6 @@ func TestMarshalRecordInto_StableOutput(t *testing.T) {
 	}
 }
 
-// TestMarshalRecordInto_PooledEncoderReuse drives many calls through the
-// shared recordEncPool to prove the pooled encoder's scratch buffer is
-// reset between records — a missed Reset would prepend a prior record's
-// bytes to the next one.
-func TestMarshalRecordInto_PooledEncoderReuse(t *testing.T) {
-	const payload = `{"time":1700000000000,"uuid":"cc00","type":"user","summary":"reuse"}`
-	for i := 0; i < 64; i++ {
-		var buf bytes.Buffer
-		got, err := MarshalRecordInto(&buf, NewEntry(uint64(i+1), []byte(payload)))
-		if err != nil {
-			t.Fatalf("iter %d MarshalRecordInto: %v", i, err)
-		}
-		rec, err := UnmarshalRecord(got)
-		if err != nil {
-			t.Fatalf("iter %d UnmarshalRecord: %v", i, err)
-		}
-		// payload has no HTML-escapable chars, so raw bytes match verbatim.
-		if rec.Seq != uint64(i+1) || string(rec.Entry) != payload {
-			t.Fatalf("iter %d pooled-encoder reuse corrupted output: seq=%d entry=%q",
-				i, rec.Seq, rec.Entry)
-		}
-	}
-}
-
 // TestMarshalRecordInto_AppendsToCallerBuf verifies the body is appended
 // after any pre-existing content (startLen semantics) and the returned
 // slice is exactly the appended region.

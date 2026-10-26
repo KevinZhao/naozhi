@@ -108,22 +108,20 @@ type Persister struct {
 }
 
 // batchJob is the internal queue element. Key is the original (un-hashed)
-// session key; Entries are schema-marshalled bodies. arena owns the backing
-// bytes of every Entry.JSON when accept() copied borrowed bytes (#1524);
-// nil when the producer supplied owned bytes (putEntryArena tolerates nil).
+// session key; Entries are schema-marshalled bodies whose JSON accept()
+// already copied out of the producer's borrowed bytes (#1524).
 // gapN is the sink's channel-full drop count handed over with this batch.
 type batchJob struct {
 	Key     string
 	Stem    string
 	Entries []Entry
-	arena   *batchArena
 	gapN    int64
 }
 
 // dropState is the per-stem bookkeeping for an in-flight async unlink:
 // the completion channel (closed by the removeKeyFiles goroutine) plus a
-// FIFO of batchJobs that arrived mid-drop, each still holding its pooled
-// arena until replayed. gap tallies the batches dropped past the FIFO cap;
+// FIFO of batchJobs that arrived mid-drop, each still holding its payloads
+// until replayed. gap tallies the batches dropped past the FIFO cap;
 // it joins gapKey's gap after the replay. Mutated only on the run goroutine
 // (#1774, #1848).
 type dropState struct {
@@ -134,7 +132,7 @@ type dropState struct {
 }
 
 // droppingPendingMaxBatches caps how many batches one dropping stem may
-// defer (each pins an arena + payloads); overflow takes the same drop
+// defer (each pins its payloads); overflow takes the same drop
 // telemetry path as a full channel. A healthy unlink never approaches it.
 const droppingPendingMaxBatches = 256
 

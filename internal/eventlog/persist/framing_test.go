@@ -258,133 +258,6 @@ func TestReadRecord_NonJSONBody(t *testing.T) {
 	}
 }
 
-// TestReleaseFramedBody_NilSafe verifies the R242-PERF-1 contract:
-// callers handing back a nil slice (e.g. early-error path) must not
-// panic. The pool's New() returns *[]byte so a nil slice would only
-// arrive via deliberate caller misuse, but the guard hardens the API
-// against that without forcing every caller to nil-check.
-func TestReleaseFramedBody_NilSafe(t *testing.T) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.Errorf("ReleaseFramedBody(nil) panicked: %v", r)
-		}
-	}()
-	ReleaseFramedBody(nil)
-}
-
-// TestReleaseFramedBody_OversizeNotPooled confirms the 1 MiB cap on
-// the pool's reuse: handing back an outlier-sized buffer (e.g. a
-// max-image record) must not stash that much heap into the pool
-// indefinitely. We can't directly observe the pool internals, but we
-// can at least exercise the path and confirm no panic.
-func TestReleaseFramedBody_OversizeNotPooled(t *testing.T) {
-	// Build a >1 MiB buffer. The release path branches on cap, so a
-	// length-only buffer would also work but cap is the explicit gate.
-	huge := make([]byte, 0, (1<<20)+1)
-	huge = huge[:cap(huge)]
-	defer func() {
-		if r := recover(); r != nil {
-			t.Errorf("ReleaseFramedBody(>1MiB) panicked: %v", r)
-		}
-	}()
-	ReleaseFramedBody(huge)
-}
-
-// TestReadFramedBody_PoolReuse exercises the happy-path round-trip
-// twice over the same bufio.Reader to confirm a Released buffer is
-// safe to re-acquire on the next Read. The pool's behaviour is
-// stochastic (sync.Pool may evict between Put and Get) but a fresh
-// Get always returns a usable buffer regardless of pool state.
-func TestReadFramedBody_PoolReuse(t *testing.T) {
-	var buf bytes.Buffer
-	for i := 0; i < 3; i++ {
-		body := []byte(`{"v":1,"seq":42,"type":"entry","entry":{}}`)
-		if _, err := WriteRecordRaw(&buf, body); err != nil {
-			t.Fatalf("write %d: %v", i, err)
-		}
-	}
-	br := bufio.NewReader(&buf)
-	for i := 0; i < 3; i++ {
-		got, _, err := ReadFramedBody(br)
-		if err != nil {
-			t.Fatalf("read %d: %v", i, err)
-		}
-		// Capture summary data BEFORE Release — the backing array may
-		// be reused by a subsequent Read.
-		gotLen := len(got)
-		ReleaseFramedBody(got)
-		if gotLen == 0 {
-			t.Errorf("read %d: empty body", i)
-		}
-	}
-}
-
-// TestReadFramedBody_PoolReusesBackingArray locks in the R242-PERF-1
-// (#663) goal: after ReleaseFramedBody hands a buffer back, a
-// subsequent ReadFramedBody for a frame that fits within the released
-// capacity must reuse the SAME backing array rather than allocate a
-// fresh one. The previous implementation called `make([]byte, n+1)` per
-// frame which during recovery startup walked every persisted record and
-// allocated each.
-//
-// sync.Pool's behaviour is stochastic (the pool may evict an entry
-// between Put and Get), so this test stages a tight Put→Get round-trip
-// in a fresh-Pool window where eviction is overwhelmingly unlikely on a
-// single goroutine. We assert the underlying array pointer matches
-// across the two Reads — if a future refactor drops the pool path, the
-// pointer will diverge and this test catches the regression at CI time.
-//
-// Skip in -short mode because pool reuse is a probabilistic property
-// that can flake under heavy GC pressure; -short suites prefer
-// deterministic checks.
-func TestReadFramedBody_PoolReusesBackingArray(t *testing.T) {
-	if testing.Short() {
-		t.Skip("pool-reuse stochastic check skipped in -short mode")
-	}
-	body := []byte(`{"v":1,"seq":1,"type":"entry","entry":{"key":"x"}}`)
-	// Frame 1: read, capture cap(), release.
-	var buf1 bytes.Buffer
-	if _, err := WriteRecordRaw(&buf1, body); err != nil {
-		t.Fatalf("write 1: %v", err)
-	}
-	first, _, err := ReadFramedBody(bufio.NewReader(&buf1))
-	if err != nil {
-		t.Fatalf("read 1: %v", err)
-	}
-	firstCap := cap(first)
-	// underlyingArrayPtr captures the address of the first element so a
-	// pool hit can be detected even though `second` is a different slice
-	// header.
-	firstPtr := &first[:1][0]
-	ReleaseFramedBody(first)
-
-	// Frame 2: read same-sized body. Pool path should hand back the
-	// just-released buffer.
-	var buf2 bytes.Buffer
-	if _, err := WriteRecordRaw(&buf2, body); err != nil {
-		t.Fatalf("write 2: %v", err)
-	}
-	second, _, err := ReadFramedBody(bufio.NewReader(&buf2))
-	if err != nil {
-		t.Fatalf("read 2: %v", err)
-	}
-	defer ReleaseFramedBody(second)
-	if cap(second) < firstCap {
-		// Pool returned a smaller buffer — possible if the pool was
-		// evicted between Put and Get, but more likely a bug.
-		t.Fatalf("second cap=%d < first cap=%d — pool path may have regressed", cap(second), firstCap)
-	}
-	secondPtr := &second[:1][0]
-	if firstPtr != secondPtr {
-		// sync.Pool eviction is permitted by the API contract (GC can
-		// drain the pool at any time), so this is reported as a soft
-		// signal via t.Logf rather than t.Errorf. CI tracks this log
-		// and a steady-state miss rate would point at a regression in
-		// the framing.go acquireFramedBuf path.
-		t.Logf("pool did not return same backing array (likely sync.Pool eviction by GC); first=%p second=%p — informational only", firstPtr, secondPtr)
-	}
-}
-
 // TestWriteFramedBody_BodyLengthRoundTrip verifies that writeFramedBody (the
 // hot path changed in R20260604-PERF-18) encodes the length prefix correctly
 // for a range of body sizes: 1 byte, a moderate body (boundary around the
@@ -419,18 +292,14 @@ func TestWriteFramedBody_BodyLengthRoundTrip(t *testing.T) {
 
 			got, gotFrameN, err := ReadFramedBody(bufio.NewReader(&buf))
 			if err != nil {
-				ReleaseFramedBody(got)
 				t.Fatalf("ReadFramedBody: %v", err)
 			}
 			if !bytes.Equal(got, tc.body) {
-				ReleaseFramedBody(got)
 				t.Errorf("body mismatch: got len=%d want len=%d", len(got), len(tc.body))
 			}
 			if int64(gotFrameN) != wn {
-				ReleaseFramedBody(got)
 				t.Errorf("frame size: got %d want %d", gotFrameN, wn)
 			}
-			ReleaseFramedBody(got)
 		})
 	}
 }

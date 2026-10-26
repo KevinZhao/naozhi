@@ -270,9 +270,6 @@ func (w *perKeyWriter) close() error {
 		if err := w.logBuf.Flush(); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		// releaseLogBuf rebinds the pooled writer to io.Discard so the nilled
-		// w.logBuf cannot route writes through it later (#995).
-		releaseLogBuf(w.logBuf)
 		w.logBuf = nil
 	}
 	if w.logFile != nil {
