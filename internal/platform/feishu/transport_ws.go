@@ -472,3 +472,19 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 		return parsedEvent{Msg: result, Unsupported: msgType}, true
 	}
 }
+
+// isValidFeishuResourceKey accepts only printable non-whitespace ASCII (≤256
+// bytes) for image_key / file_key so a sender-crafted key cannot smuggle
+// log-splitting bytes or oversized payloads into the API URL builder.
+func isValidFeishuResourceKey(k string) bool {
+	if k == "" || len(k) > 256 {
+		return false
+	}
+	for i := 0; i < len(k); i++ {
+		c := k[i]
+		if c < 0x21 || c > 0x7e {
+			return false
+		}
+	}
+	return true
+}

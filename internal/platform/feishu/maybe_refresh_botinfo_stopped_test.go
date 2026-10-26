@@ -13,7 +13,7 @@ import (
 // cancelled (Feishu.Stop has called stopCancel and is about to block on
 // wg.Wait), maybeRefreshBotInfo MUST NOT launch the self-heal goroutine.
 //
-// Original bug: a webhook goroutine could win the CAS and call wg.Add(1) after
+// Original bug: a message goroutine could win the CAS and call wg.Add(1) after
 // Stop's wg.Wait had already drained the counter to 0; the goroutine's
 // deferred wg.Done then drives the counter negative and panics. The fix
 // re-checks stopCtx.Err() after the CAS and before wg.Add, returning early.

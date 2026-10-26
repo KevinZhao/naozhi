@@ -288,6 +288,12 @@ cron:
   sandbox:
     runtime_arn: "arn:aws:bedrock-agentcore:us-east-1:1:runtime/x"
     region: us-east-1
+platforms:
+  feishu:
+    app_id: cli_x
+    app_secret: s
+    connection_mode: webhook
+    allow_insecure_webhook: true
 agents:
   reviewer:
     args: ["--append-system-prompt=Be terse.", "--keep"]
@@ -300,6 +306,9 @@ agents:
 		"session.auto_chain":     "remove",
 		"server.metrics_enabled": "remove",
 		"cron.sandbox":           "remove",
+
+		"platforms.feishu.connection_mode":        "long connection",
+		"platforms.feishu.allow_insecure_webhook": "remove",
 	}
 	flagDiags := 0
 	for _, d := range diags {

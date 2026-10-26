@@ -18,20 +18,9 @@ import (
 
 const connStateTestTimeout = 5 * time.Second
 
-func TestConnState_WebhookModeIsNotObservable(t *testing.T) {
-	t.Parallel()
-	f := &Feishu{mode: "webhook"}
-	// Even a tracker that somehow holds a state must not be served for a
-	// transport that has no connection.
-	f.connState.Set(platform.ConnConnected)
-	if s, ok := f.ConnState(); ok {
-		t.Fatalf("webhook mode reported %+v, want not observable", s)
-	}
-}
-
 func TestConnState_WebsocketBeforeStartIsNotObservable(t *testing.T) {
 	t.Parallel()
-	f := &Feishu{mode: "websocket"}
+	f := &Feishu{}
 	if s, ok := f.ConnState(); ok {
 		t.Fatalf("unstarted websocket reported %+v, want not observable", s)
 	}
@@ -156,7 +145,6 @@ func TestWebSocket_ConnStateFollowsLarkwsLifecycle(t *testing.T) {
 	t.Parallel()
 	g := newWSGateway(t)
 	f := &Feishu{
-		mode:     "websocket",
 		baseURL:  g.srv.URL,
 		cfg:      Config{AppID: "cli_test", AppSecret: "secret"},
 		dispatch: platform.BoundedDispatch{Name: "feishu"},
@@ -225,7 +213,6 @@ func TestWebSocket_StopIsNotAFailure(t *testing.T) {
 	t.Parallel()
 	g := newWSGateway(t)
 	f := &Feishu{
-		mode:     "websocket",
 		baseURL:  g.srv.URL,
 		cfg:      Config{AppID: "cli_test", AppSecret: "secret"},
 		dispatch: platform.BoundedDispatch{Name: "feishu"},
