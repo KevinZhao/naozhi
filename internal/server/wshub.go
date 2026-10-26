@@ -25,7 +25,7 @@ type Hub struct {
 	// droppedTotal is the Hub-wide count of SendRaw drops (send channel
 	// full). Deliberately aggregated, not per-client: it is exported only
 	// via the auth-gated /health, and all authenticated users share one trust
-	// boundary. Multi-tenant auth would require moving it behind debug_mode (#1100).
+	// boundary. Multi-tenant auth would require moving it out of /health (#1100).
 	droppedTotal atomic.Int64
 	// router is the HubRouter consumer subset (consumer.go) so tests can
 	// inject a fake.

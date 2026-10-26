@@ -9,40 +9,11 @@ package dispatch
 import (
 	"context"
 	"encoding/json"
-	"net/http"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/platform"
 )
-
-// fakeSingleUsePlatform implements platform.Platform with
-// UsesSingleUseReplyToken() == true and SupportsInterimMessages() == false
-// (Weixin-like).
-type fakeSingleUsePlatform struct {
-	mu      sync.Mutex
-	replies []platform.OutgoingMessage
-}
-
-func (f *fakeSingleUsePlatform) Name() string                                               { return "fake-singleuse" }
-func (f *fakeSingleUsePlatform) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
-func (f *fakeSingleUsePlatform) Reply(_ context.Context, msg platform.OutgoingMessage) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.replies = append(f.replies, msg)
-	return "msg-1", nil
-}
-func (f *fakeSingleUsePlatform) EditMessage(_ context.Context, _ string, _ string) error { return nil }
-func (f *fakeSingleUsePlatform) MaxReplyLength() int                                     { return 4000 }
-func (f *fakeSingleUsePlatform) SupportsInterimMessages() bool                           { return false }
-func (f *fakeSingleUsePlatform) UsesSingleUseReplyToken() bool                           { return true }
-func (f *fakeSingleUsePlatform) replyCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.replies)
-}
 
 func todoWriteEvent(t *testing.T) clievent.Event {
 	t.Helper()
@@ -67,7 +38,7 @@ func todoWriteEvent(t *testing.T) clievent.Event {
 func TestReplyTracker_TodoWrite_SuppressedOnSingleUseToken(t *testing.T) {
 	t.Parallel()
 
-	fp := &fakeSingleUsePlatform{}
+	fp := &fakeSingleUseReactorless{}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

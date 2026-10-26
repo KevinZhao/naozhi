@@ -83,3 +83,20 @@ func TestUrgent_UnboundFallsBackToDefaults(t *testing.T) {
 		t.Errorf("opts mismatch:\n got:  %#v\nwant: %#v", opts, want)
 	}
 }
+
+// parityDataSource serves a single fixed ProjectBinding for
+// ResolveForChat. Doesn't implement ProjectByName (not exercised here).
+type parityDataSource struct {
+	binding session.ProjectBinding
+}
+
+func (d *parityDataSource) ProjectBinding(platform, chatType, chatID string) session.ProjectBinding {
+	return d.binding
+}
+
+func (d *parityDataSource) ProjectByName(name string) (session.ProjectBinding, bool) {
+	if d.binding.Bound && d.binding.Name == name {
+		return d.binding, true
+	}
+	return session.ProjectBinding{}, false
+}

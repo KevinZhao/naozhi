@@ -26,6 +26,9 @@ func TestValidateConfig(t *testing.T) {
 		{"prompt with CR rejected", ProjectConfig{PlannerPrompt: "foo\rbar"}, false},
 		{"prompt with DEL rejected", ProjectConfig{PlannerPrompt: "foo\x7fbar"}, false},
 		{"prompt with ESC rejected", ProjectConfig{PlannerPrompt: "foo\x1bbar"}, false},
+		{"prompt with NEL rejected", ProjectConfig{PlannerPrompt: "foo\u0085bar"}, false},
+		{"prompt with LS rejected", ProjectConfig{PlannerPrompt: "foo\u2028bar"}, false},
+		{"prompt with PS rejected", ProjectConfig{PlannerPrompt: "foo\u2029bar"}, false},
 
 		{"model over cap rejected", ProjectConfig{PlannerModel: strings.Repeat("a", 257)}, false},
 		{"model with space rejected", ProjectConfig{PlannerModel: "claude --dangerously"}, false},

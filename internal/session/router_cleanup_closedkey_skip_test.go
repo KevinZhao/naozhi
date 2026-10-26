@@ -15,7 +15,7 @@ import (
 // This replaced the earlier #1628 "closed-key fast path" tests: that
 // optimization tried to prune an alive-then-closed session within the same
 // tick, which contradicts the snapshot-and-reverify contract the PERF-5
-// rewrite locked in (see TestCleanup_PruneSnapshot_ReVerifiesUnderLock).
+// rewrite locked in (see TestCleanup_PruneRechecksEachCandidate).
 func TestCleanup_IdleClosedSession_StaysOneTick(t *testing.T) {
 	r := &Router{
 		ss:       newSessionTable(),

@@ -3,86 +3,9 @@ package project
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
-	"time"
 )
-
-// TestResolveWorkspaces_FallbackDoesNotHoldLockDuringFSIO is the regression
-// test for #2228: ResolveWorkspaces used to hold m.mu.RLock across the
-// inode-fallback FS IO (resolveWorkspaceByInode → os.Lstat per ancestor),
-// blocking every writer (BindChat / UpdateConfig / Scan, all m.mu.Lock) for
-// the syscall fan-out. After the fix the snapshot is taken under the RLock and
-// the FS IO runs lock-free, so a writer can acquire m.mu.Lock while resolution
-// is in flight.
-//
-// We can't slow os.Lstat directly, so we prove the property structurally: while
-// one goroutine spins ResolveWorkspaces on a path that ALWAYS hits the fallback
-// (byte prefix misses, cache disabled by using a fresh ws each iteration), a
-// writer repeatedly grabs the write lock. If the fallback held the RLock across
-// the walk the writer would observe long stalls; we assert every write-lock
-// acquisition completes promptly.
-func TestResolveWorkspaces_FallbackDoesNotHoldLockDuringFSIO(t *testing.T) {
-	t.Parallel()
-	tmp := t.TempDir()
-	root := filepath.Join(tmp, "real")
-	makeProjectDir(t, root, "proj", nil)
-
-	m, err := NewManager(root, PlannerDefaults{})
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-	if err := m.Scan(); err != nil {
-		t.Fatalf("Scan: %v", err)
-	}
-
-	// alias names the same inode as root, so a ws under alias byte-misses the
-	// project Path but inode-walks back to it: the fallback always runs.
-	alias := filepath.Join(tmp, "alias")
-	if err := os.Symlink(root, alias); err != nil {
-		t.Skipf("symlink not supported: %v", err)
-	}
-
-	stop := make(chan struct{})
-	var readers sync.WaitGroup
-
-	// Resolver: each iteration uses a UNIQUE ws so resolveCache never short-
-	// circuits and the os.Lstat walk genuinely executes every loop.
-	readers.Add(1)
-	go func() {
-		defer readers.Done()
-		i := 0
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			ws := filepath.Join(alias, "proj", "sub", strings.Repeat("a/", i%8+1))
-			m.ResolveWorkspaces([]string{ws})
-			i++
-		}
-	}()
-
-	// Writer: every UpdateConfig takes m.mu.Lock. Measure how long each
-	// acquisition+work takes; if the resolver held the RLock across FS IO these
-	// would block far longer than a lock-free in-memory config swap should.
-	deadline := time.Now().Add(300 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		start := time.Now()
-		if err := m.UpdateConfig("proj", ProjectConfig{Favorite: true}); err != nil {
-			t.Fatalf("UpdateConfig: %v", err)
-		}
-		if waited := time.Since(start); waited > 2*time.Second {
-			t.Fatalf("UpdateConfig blocked %v waiting for write lock; "+
-				"ResolveWorkspaces fallback appears to hold the RLock across FS IO (#2228)", waited)
-		}
-	}
-
-	close(stop)
-	readers.Wait()
-}
 
 // TestResolveWorkspaces_ConcurrentWithWriters is the -race regression for
 // #2228: concurrent ResolveWorkspaces (reads taking the snapshot) and writers

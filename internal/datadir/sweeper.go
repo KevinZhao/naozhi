@@ -31,9 +31,7 @@ import (
 //
 // Measured on a live instance before this existed: cli-debug/ at 78 MB across
 // 265 files with the oldest six weeks old, and shims/ at 909 files with the
-// oldest five months old. The shim case is not merely disk: StartShim returns
-// ErrStateDirQuotaExceeded when the state dir is over quota, so a big enough
-// backlog of dead shims' logs makes new sessions fail to start (#456).
+// oldest five months old.
 //
 // sys-sessions had a sweep already, but it ran exactly once per process at
 // startup (cmd/naozhi/main_helpers.go), so an instance up for weeks never swept.

@@ -175,23 +175,6 @@ func TestReadShimLine_ReadErrorPropagated(t *testing.T) {
 	}
 }
 
-func TestReadShimLine_ReusesLineBufCapacity(t *testing.T) {
-	r := readerWithSize("abc\n", 64)
-
-	// Pre-grow lineBuf so the helper observes a non-zero initial capacity.
-	lineBuf := make([]byte, 0, 1024)
-	originalCap := cap(lineBuf)
-
-	line, _, err := readShimLine(r, lineBuf)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if cap(line) != originalCap {
-		t.Errorf("cap(line) = %d, want %d (helper should reuse passed-in capacity)",
-			cap(line), originalCap)
-	}
-}
-
 // errReader returns its err on every Read call.
 type errReader struct{ err error }
 

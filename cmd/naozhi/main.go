@@ -446,7 +446,6 @@ func main() {
 			Total:    totalTimeout,
 		},
 		Features: server.FeatureOptions{
-			Debug:     cfg.Server.DebugMode,
 			PublicTmp: cfg.Projects.PublicTmp,
 			// Default-on; opt-out via session.project_stable_key.enabled: false.
 			ProjectStableKey: cfg.Session.ProjectStableKey.ResolvedEnabled(true),
@@ -578,16 +577,10 @@ func main() {
 	// configured handler, so it went to stderr rather than the service log.
 	config.WarnDashboardToken(cfg.Server.DashboardToken)
 
-	// Both of these widen what an authenticated dashboard user can read, and
-	// both were unreachable until their config keys were wired, so an operator
-	// turning one on for the first time should see it in the log rather than
-	// discover it from an audit trail later. Logged next to the token warnings
-	// because the token IS the barrier for both.
-	if cfg.Server.DebugMode {
-		slog.Warn("server.debug_mode is ON — /api/debug/pprof is registered; goroutine stacks carry file paths and queue contents",
-			"gates", "requireAuth + loopback-only + refused entirely when dashboard_token is empty",
-			"hint", "turn it off once the profile is captured")
-	}
+	// public_tmp widens what an authenticated dashboard user can read, so an
+	// operator turning it on should see it in the log rather than discover it
+	// from an audit trail later. Logged next to the token warnings because the
+	// token IS the barrier.
 	if cfg.Projects.PublicTmp {
 		slog.Warn("projects.public_tmp is ON — every authenticated dashboard user can read non-credential files anywhere under /tmp via the __public_tmp__ pseudo-project",
 			"gates", "credential-name allowlist + foreign-private-UID + irregular-type + audit log",

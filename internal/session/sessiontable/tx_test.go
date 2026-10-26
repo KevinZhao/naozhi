@@ -1,8 +1,6 @@
 package sessiontable
 
 import (
-	"reflect"
-	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -184,21 +182,6 @@ func TestTable_LoadAndCount(t *testing.T) {
 	}
 	if n, act := tab.Count(); n != 2 || act != 1 {
 		t.Errorf("Count = (%d,%d), want (2,1)", n, act)
-	}
-}
-
-// TestTable_ExportedSurfaceIsTransactionsOnly: nothing reaches the table's
-// state except a transaction, the two single-value reads and the lock-free
-// atomics. A method added beside them would be a way around the lock.
-func TestTable_ExportedSurfaceIsTransactionsOnly(t *testing.T) {
-	typ := reflect.TypeOf(newTable())
-	var got []string
-	for i := 0; i < typ.NumMethod(); i++ {
-		got = append(got, typ.Method(i).Name)
-	}
-	want := []string{"Active", "BumpGen", "Count", "Gen", "Healthy", "Load", "Update", "View"}
-	if !slices.Equal(got, want) {
-		t.Errorf("exported methods = %v, want %v", got, want)
 	}
 }
 

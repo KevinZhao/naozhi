@@ -40,8 +40,8 @@ func clientIPInternal(r *http.Request, trustedProxy bool) (string, bool) {
 	}
 	// No usable XFF in trustedProxy mode normally means the request bypassed
 	// the proxy → unresolvable (shared-bucket DoS guard). A loopback RemoteAddr
-	// is kernel-guaranteed on-host (SSH tunnel / local curl), the same path
-	// isLoopbackClient allows, so it resolves to a real per-IP key.
+	// is kernel-guaranteed on-host (SSH tunnel / local curl), so it resolves to
+	// a real per-IP key.
 	if isLoopbackIPString(ip) {
 		return ip, true
 	}

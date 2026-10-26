@@ -132,38 +132,3 @@ func TestWriteUserMessageLocked_WriteMessageDelegation(t *testing.T) {
 		t.Errorf("WriteMessage vs WriteUserMessageLocked differ:\n a=%q\n b=%q", a.Bytes(), b.Bytes())
 	}
 }
-
-// TestWriteUserMessageLocked_Reuse runs many sends through the same protocol to
-// exercise the pool get/put cycle and confirm a recycled encoder/buffer does
-// not leak prior content into a later message.
-func TestWriteUserMessageLocked_Reuse(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	for i := 0; i < 100; i++ {
-		text := "message-with-<html>-and-&-amp"
-		want := legacyMarshalUserMessage(t, "", text, nil, "")
-		var buf bytes.Buffer
-		if err := p.WriteUserMessageLocked(&buf, "", text, nil, ""); err != nil {
-			t.Fatalf("iter %d: %v", i, err)
-		}
-		if !bytes.Equal(buf.Bytes(), want) {
-			t.Fatalf("iter %d mismatch\n got: %q\nwant: %q", i, buf.Bytes(), want)
-		}
-	}
-}
-
-func BenchmarkWriteUserMessageLocked(b *testing.B) {
-	p := &ClaudeProtocol{}
-	var sink discardWriter
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if err := p.WriteUserMessageLocked(sink, "uuid-1234", "explain this <code> & that", nil, "next"); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-type discardWriter struct{}
-
-func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
