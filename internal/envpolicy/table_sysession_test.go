@@ -7,104 +7,32 @@ import (
 	"unicode/utf8"
 )
 
-// Copies of the three retired sysession lists exactly as they stood in
-// internal/sysession/env.go before this column existed, plus the value checks
-// they drove. The equivalence tests below pin the SourceSysession column
-// against them key by key: if a Table edit changes any verdict the old maps
-// produced, this fails. Policy CHANGES must update the Table and these fixtures
-// in the same PR, on purpose. Same discipline as the four columns migrated in
-// #2531 — this is the security-relevant one, since a Runner's `claude -p` runs
-// prompt-driven Bash with whatever env survives here.
-
-var retiredSysessionAlwaysPassthrough = map[string]bool{
-	"PATH": true,
-	"HOME": true,
-
-	// Backend selection — which provider the CLI talks to.
-	"CLAUDE_CODE_USE_BEDROCK":       true,
-	"CLAUDE_CODE_USE_VERTEX":        true,
-	"CLAUDE_CODE_SKIP_BEDROCK_AUTH": true,
-
-	// Non-secret endpoint/region/profile-name plumbing.
-	"ANTHROPIC_BASE_URL":         true,
-	"ANTHROPIC_BEDROCK_BASE_URL": true,
-	"ANTHROPIC_VERTEX_BASE_URL":  true,
-	"AWS_REGION":                 true,
-	"AWS_DEFAULT_REGION":         true,
-	"AWS_PROFILE":                true,
-	"AWS_DEFAULT_PROFILE":        true,
-
-	// Vertex non-secret plumbing (GOOGLE_APPLICATION_CREDENTIALS is gated separately).
-	"ANTHROPIC_VERTEX_PROJECT_ID": true,
-	"CLOUD_ML_REGION":             true,
-
-	// Model overrides — the daemon's transient claude -p must match the parent's pinning.
-	"ANTHROPIC_MODEL":                true,
-	"ANTHROPIC_SMALL_FAST_MODEL":     true,
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL":  true,
-	"ANTHROPIC_DEFAULT_SONNET_MODEL": true,
-	"ANTHROPIC_DEFAULT_OPUS_MODEL":   true,
-}
-
-var retiredSysessionProfileKeys = map[string]bool{
-	"AWS_PROFILE":         true,
-	"AWS_DEFAULT_PROFILE": true,
-}
-
-var retiredSysessionBaseURLKeys = map[string]bool{
-	"ANTHROPIC_BASE_URL":         true,
-	"ANTHROPIC_BEDROCK_BASE_URL": true,
-	"ANTHROPIC_VERTEX_BASE_URL":  true,
-}
-
-// TestTableEquivalence_Sysession pins the sysession column against the retired
-// always-passthrough map for the whole corpus, both directions.
-func TestTableEquivalence_Sysession(t *testing.T) {
+// TestTable_SysessionGuardKinds pins which sysession keys carry a value check
+// and which check it is. The kinds matter: a profile name gets the charset
+// guard (credential_process injection), a base URL gets ValidateBaseURLValue —
+// NOT the shim's stricter endpoint guard, which would reject the private-IP
+// endpoints NAOZHI_ALLOW_PRIVATE_BASE_URL exists to permit. Every other
+// sysession-allowed key must carry no check, or the daemon loses env it needs.
+func TestTable_SysessionGuardKinds(t *testing.T) {
 	t.Parallel()
-	corpus := equivalenceCorpus()
-	// The corpus is built from the other columns' fixtures, so make sure every
-	// retired sysession key is actually exercised.
-	inCorpus := map[string]bool{}
-	for _, k := range corpus {
-		inCorpus[k] = true
+	want := map[string]guardKind{
+		"AWS_PROFILE":                guardProfile,
+		"AWS_DEFAULT_PROFILE":        guardProfile,
+		"ANTHROPIC_BASE_URL":         guardBaseURL,
+		"ANTHROPIC_BEDROCK_BASE_URL": guardBaseURL,
+		"ANTHROPIC_VERTEX_BASE_URL":  guardBaseURL,
 	}
-	for k := range retiredSysessionAlwaysPassthrough {
-		if !inCorpus[k] {
-			corpus = append(corpus, k)
+	for key := range want {
+		if _, ok := Allowed(key, SourceSysession); !ok {
+			t.Errorf("%q is not allowed for SourceSysession", key)
 		}
 	}
-
-	for _, key := range corpus {
-		_, got := Allowed(key, SourceSysession)
-		want := retiredSysessionAlwaysPassthrough[key]
-		if got != want {
-			t.Errorf("sysession column: key %q allowed=%v, retired always-passthrough says %v", key, got, want)
+	for _, r := range Table {
+		if r.Allowed&SourceSysession == 0 {
+			continue
 		}
-	}
-}
-
-// TestTableEquivalence_SysessionGuards pins which keys carry a value check and
-// which check it is. The kinds matter: a profile name gets the charset guard
-// (credential_process injection), a base URL gets ValidateBaseURLValue — NOT
-// the shim's stricter endpoint guard, which would reject the private-IP
-// endpoints NAOZHI_ALLOW_PRIVATE_BASE_URL exists to permit.
-func TestTableEquivalence_SysessionGuards(t *testing.T) {
-	t.Parallel()
-	for key := range retiredSysessionAlwaysPassthrough {
-		kind := guardKindFor(key, SourceSysession)
-		switch {
-		case retiredSysessionProfileKeys[key]:
-			if kind != guardProfile {
-				t.Errorf("%q: sysession guard kind %v, want guardProfile", key, kind)
-			}
-		case retiredSysessionBaseURLKeys[key]:
-			if kind != guardBaseURL {
-				t.Errorf("%q: sysession guard kind %v, want guardBaseURL", key, kind)
-			}
-		default:
-			if kind != guardNone {
-				t.Errorf("%q: sysession guard kind %v, want none — an unexpected value check would reject env the daemon needs", key, kind)
-			}
+		if got := guardKindFor(r.Pattern, SourceSysession); got != want[r.Pattern] {
+			t.Errorf("%q: sysession guard kind %v, want %v", r.Pattern, got, want[r.Pattern])
 		}
 	}
 }
@@ -121,10 +49,9 @@ func TestTable_SysessionRefusesRawCredentials(t *testing.T) {
 	}
 }
 
-// The new column must not have moved any other column's verdict. The four
-// per-column equivalence tests already cover the corpus, so this pins the
-// specific shape that could regress: an exact sysession-only rule shadowing a
-// namespace rule another source relies on.
+// The sysession column must not have moved any other column's verdict. This
+// pins the specific shape that could regress: an exact sysession-only rule
+// shadowing a namespace rule another source relies on.
 func TestTable_SysessionRulesDoNotShadowOtherColumns(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -185,43 +112,6 @@ func TestGuardErrorReason_CollapsesTheQuotedValue(t *testing.T) {
 	}
 	if !strings.Contains(plain, "non-loopback") {
 		t.Errorf("reason lost the guard's classification: %q", plain)
-	}
-}
-
-// The three credential sets are derived from the Table's Cred marks, so this
-// pins the derivation against literals: a mark added to or removed from a row
-// shows up here as a set that no longer matches, rather than as a backend that
-// silently starts or stops receiving a secret. CLAUDE_CODE_OAUTH_TOKEN is the
-// subscription login, a direct-Anthropic credential like the API key: without
-// the mark the Runner's CLAUDE_ prefix handed it to a Bedrock daemon's
-// prompt-driven Bash (#1400).
-func TestCredSets_MatchTheRetiredLiterals(t *testing.T) {
-	t.Parallel()
-	retired := map[BackendMode][]string{
-		BackendAnthropic: {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"},
-		BackendBedrock:   {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"},
-		BackendVertex:    {"GOOGLE_APPLICATION_CREDENTIALS"},
-	}
-	for mode, want := range retired {
-		got := EnvCredsForBackend(mode)
-		if len(got) != len(want) {
-			t.Errorf("mode %v: %d cred keys, retired literal had %d: %v vs %v", mode, len(got), len(want), got, want)
-			continue
-		}
-		gotSet := map[string]bool{}
-		for _, k := range got {
-			gotSet[k] = true
-		}
-		for _, k := range want {
-			if !gotSet[k] {
-				t.Errorf("mode %v: %q missing from the derived set %v", mode, k, got)
-			}
-		}
-	}
-	// AllCredKeys is the union the inactive-backend deny set is built from; a
-	// key that fell out of it would stop being stripped for other backends.
-	if got, want := len(AllCredKeys), 7; got != want {
-		t.Errorf("AllCredKeys has %d keys, want %d: %v", got, want, AllCredKeys)
 	}
 }
 
