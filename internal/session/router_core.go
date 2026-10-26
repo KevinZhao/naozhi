@@ -664,12 +664,6 @@ func NewRouter(cfg RouterConfig) *Router {
 	// discovered sessions go to the separate "history" panel so Remove is a
 	// durable delete until the user explicitly resumes an entry.
 
-	// Strip auto-spawn / auto-backfill segments from persisted prev_session_ids
-	// chains (RFC project-stable-session-key §9.2), keeping only the real
-	// sessionID-rotation chain. Must run BEFORE the Tier 1 / Tier 2 history
-	// loaders so they observe the cleaned chain.
-	r.retireAutoChainOnce()
-
 	// Async-load history for all restored sessions so the dashboard shows
 	// conversation history without waiting for the next message.
 	r.startBackgroundHistoryLoaders(shimReconnectGraceDelay)
@@ -686,10 +680,6 @@ func NewRouter(cfg RouterConfig) *Router {
 // live entry, RFC event-log-persistence §4.4) and startAttachmentTracker
 // (refcount worker driven by OnPersistedEntry events). startOnce-guarded;
 // both also guard-check r.hist.eventLogDir.
-//
-// retireAutoChainOnce is intentionally NOT here: it must run synchronously
-// BEFORE the Tier 1 / Tier 2 history goroutines spawn so they observe the
-// cleaned prev_session_ids chain. Treat it as construction, not a side effect.
 func (r *Router) startBackgroundLifecycle() {
 	r.startOnce.Do(func() {
 		r.runOrphanSweep()

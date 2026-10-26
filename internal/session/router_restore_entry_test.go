@@ -26,10 +26,6 @@ func TestRestoreSessionFromEntry_AllFields(t *testing.T) {
 	src.createdAt.Store(1_600_000_000_000_000_000)
 	src.historyMu.Lock()
 	src.prevSessionIDs = []string{"old-1", "old-2"}
-	// Both origins are real-rotation labels (manual/resume): the startup
-	// auto-chain retire (retireAutoChainOnce) strips only auto-spawn /
-	// auto-backfill, so this round-trip must preserve the full 2-entry chain.
-	src.prevSessionOrigins = []string{"manual", "resume"}
 	src.historyMu.Unlock()
 
 	if err := saveStore(storePath, []*ManagedSession{src}); err != nil {
