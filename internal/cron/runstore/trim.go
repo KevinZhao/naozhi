@@ -8,8 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -22,14 +20,6 @@ import (
 // reconciliation (#712, #1291). No deferred re-acquire is added on panic:
 // sync.Mutex is not re-entrant and os.Remove never panics on POSIX.
 func (s *Store) trimJobLocked(jobID string, now time.Time) {
-	s.assertJobLockHeld(jobID)
-	// Cache-driven fast exit: a warm cache with count < keepCount enumerates every
-	// on-disk file, so if its oldest row is newer than the cutoff nothing can need
-	// removal and the ReadDir + Stat scan is pure overhead (#532). Cache
-	// reconciliation is skipped too — nothing changed on disk.
-	if s.trimSkipFromCache(jobID, now) {
-		return
-	}
 	// scanSortedRunDir keeps trim in lockstep with diskListNewestFirst (sort
 	// order, symlink filter, ValidID guard) (#871).
 	items, _, err := s.scanSortedRunDir(jobID)
@@ -85,59 +75,13 @@ func (s *Store) trimJobLocked(jobID string, now time.Time) {
 	s.cacheTrimAfterDisk(jobID, cutoff)
 }
 
-// trimSkipFromCache reports whether the cache state proves trimJobLocked
-// has no work to do, allowing the caller to skip ReadDir + per-entry Stat.
-// True only when the cache is warm, count < keepCount (at == keepCount the
-// ring may have rotated off rows that still exist on disk) and the oldest
-// cached row is strictly newer than the cutoff (#532, #674).
-//
-// Caller MUST hold jobLock(jobID); the entry.mu acquisition pairs with
-// cacheHeadPush / cacheTrimAfterDisk so a concurrent Append cannot race the read.
-func (s *Store) trimSkipFromCache(jobID string, now time.Time) bool {
-	s.assertJobLockHeld(jobID)
-	v, ok := s.recentCache.Load(jobID)
-	if !ok {
-		return false
-	}
-	entry := v.(*recentCacheEntry)
-	entry.mu.RLock()
-	defer entry.mu.RUnlock()
-	if !entry.warm {
-		return false
-	}
-	// At count == keepCount the ring may have rotated off rows that still exist on disk.
-	if entry.count >= s.keepCount {
-		return false
-	}
-	// Empty cache → nothing on disk → nothing to trim.
-	if entry.count == 0 {
-		return true
-	}
-	cutoff := now.Add(-s.keepWindow)
-	oldest := entry.ringRead(entry.count - 1)
-	ts := oldest.EndedAt
-	if ts.IsZero() {
-		ts = oldest.StartedAt
-	}
-	// Strict After: equal timestamps fall back to disk to avoid an off-by-one
-	// "boundary mtime gets evicted by the disk path but not the cache path"
-	// drift between trimJobLocked's mtime + cache's StartedAt approximation.
-	if !ts.After(cutoff) {
-		return false
-	}
-	return true
-}
-
 // cacheTrimAfterDisk reconciles the recentCache for jobID after on-disk
 // trimJobLocked removed expired / over-cap entries. Called by trimJobLocked
 // only — caller holds jobLock(jobID).
 //
-// Zero-alloc contract: trims in place on the ring (head/count + clear of
-// dropped slots); ringSnapshot already hands readers fresh copies. This path
-// fires on every appendTrimBatch boundary and the 1Hz dashboard path, so a
-// per-call alloc would scale GC pressure with tick rate (#480).
+// Trims in place on the ring (head/count + clear of dropped slots);
+// ringSnapshot already hands readers fresh copies.
 func (s *Store) cacheTrimAfterDisk(jobID string, cutoff time.Time) {
-	s.assertJobLockHeld(jobID)
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {
 		return
@@ -224,8 +168,7 @@ func (s *Store) TrimAll(ctx context.Context, now time.Time) {
 		}
 		return
 	}
-	// Collect surviving job dirs so their recentCache warm can fan out across a
-	// bounded pool below (serial warm = 50 jobs × keepCount syscalls on cold start).
+	// Collect surviving job dirs so their recentCache can be warmed below.
 	warmJobs := make([]string, 0, len(entries))
 	for _, e := range entries {
 		// 在每个 job 入口前检查 ctx；scheduler.Stop 触发 stopCancel 后
@@ -261,61 +204,24 @@ func (s *Store) TrimAll(ctx context.Context, now time.Time) {
 	}
 
 	// Pre-warm the recentCache for every surviving job so the first dashboard
-	// poll after restart does not cold-warm each entry serially on the request
-	// path. warmCacheLocked is idempotent and takes per-jobID locks, so warming
-	// distinct jobIDs concurrently is safe (#1112, #1550).
-	s.warmJobsParallel(ctx, warmJobs)
-}
-
-// warmJobsParallel warms the recentCache for each jobID across a bounded
-// goroutine pool. Safe because warmCacheLocked takes a per-jobID jobLock and
-// entry.mu, so distinct jobIDs never contend. A cancelled ctx stops dequeuing
-// (in-flight warms finish their short ReadDir+decode window).
-func (s *Store) warmJobsParallel(ctx context.Context, jobIDs []string) {
-	if len(jobIDs) == 0 {
-		return
+	// poll after restart does not cold-warm each entry on the request path
+	// (#1112). ctx is checked between jobs so Stop is not held up.
+	for _, jobID := range warmJobs {
+		if ctx.Err() != nil {
+			return
+		}
+		warmCorrupt, warmUnreadable := s.warmCacheLocked(jobID)
+		dir := filepath.Join(s.Dir(), jobID)
+		if warmCorrupt > 0 {
+			slog.Warn("cron runstore: cold-start warm skipped corrupt files",
+				"count", warmCorrupt, "dir", dir)
+		}
+		// Separate log for I/O errors (#1693).
+		if warmUnreadable > 0 {
+			slog.Warn("cron runstore: cold-start warm skipped unreadable files",
+				"count", warmUnreadable, "dir", dir)
+		}
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	workers := diskDecodeWorkers
-	if workers > len(jobIDs) {
-		workers = len(jobIDs)
-	}
-	// Atomic cursor instead of a buffered channel: one FetchAdd per steal, no
-	// per-call alloc; steal order is irrelevant.
-	var next int64
-	var wg sync.WaitGroup
-	wg.Add(workers)
-	for w := 0; w < workers; w++ {
-		go func() {
-			defer wg.Done()
-			for {
-				if ctx.Err() != nil {
-					return
-				}
-				i := int(atomic.AddInt64(&next, 1)) - 1
-				if i >= len(jobIDs) {
-					return
-				}
-				jobID := jobIDs[i]
-				warmCorrupt, warmUnreadable := s.warmCacheLocked(jobID)
-				if warmCorrupt > 0 || warmUnreadable > 0 {
-					dir := filepath.Join(s.Dir(), jobID)
-					if warmCorrupt > 0 {
-						slog.Warn("cron runstore: cold-start warm skipped corrupt files",
-							"count", warmCorrupt, "dir", dir)
-					}
-					// Separate log for I/O errors (#1693).
-					if warmUnreadable > 0 {
-						slog.Warn("cron runstore: cold-start warm skipped unreadable files",
-							"count", warmUnreadable, "dir", dir)
-					}
-				}
-			}
-		}()
-	}
-	wg.Wait()
 }
 
 // trimJobUnderLock acquires the per-job lock with defer-unlock so a

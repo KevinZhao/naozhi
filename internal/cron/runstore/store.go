@@ -1,6 +1,7 @@
 package runstore
 
 import (
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"log/slog"
@@ -35,15 +36,9 @@ type Store struct {
 	// layout is how StorePath="" spells "no persistence".
 	layout *runlog.Layout
 	// keepCount / keepWindow / maxRunBytes 在 New 之后不可变，读取无需锁。
-	keepCount   int
-	keepWindow  time.Duration
-	maxRunBytes int64
-	// clock is the time source Append reads. nil = time.Now(), so production and
-	// every existing construction path are unchanged. It exists so a test can
-	// prove Append reads the clock ONCE and shares that instant between
-	// skipAppendTrim and trimJobLocked — with a stepping clock, two reads
-	// produce two different cutoffs and the trim decision diverges observably.
-	clock        timeSource
+	keepCount    int
+	keepWindow   time.Duration
+	maxRunBytes  int64
 	enableTrimGC bool // true in production; tests can disable for determinism
 
 	// recentCache memoises the newest-N summaries per job so the dashboard list
@@ -207,16 +202,6 @@ func (s *Store) jobLock(jobID string) *sync.Mutex {
 	return s.layout.Lock(jobID)
 }
 
-// assertJobLockHeld logs a warning when jobLock(jobID) is currently free —
-// the signature of a caller that violated the *Locked-suffix contract.
-// Best-effort: it warns rather than panics because cron history must never
-// take the scheduler down (#696, #694), false negatives under contention are
-// accepted, and the TryLock probe only runs under `go test` since it sits on
-// the Append hot path (#961).
-func (s *Store) assertJobLockHeld(jobID string) {
-	s.layout.AssertLockHeld(jobID)
-}
-
 // Append writes one run record to disk and trims the per-job ring.
 // Errors are logged, never returned: cron must not block history failure.
 func (s *Store) Append(run *CronRun) {
@@ -284,7 +269,7 @@ func (s *Store) Append(run *CronRun) {
 			return
 		}
 	} else {
-		rec.payload, err = marshalRunPooled(run)
+		rec.payload, err = json.Marshal(run)
 		if err != nil {
 			slog.Warn("cron run: marshal failed", "job_id", run.JobID, "run_id", run.RunID, "err", err)
 			return
@@ -328,11 +313,7 @@ func (s *Store) Append(run *CronRun) {
 	defer lock.Unlock()
 	s.cacheHeadPush(run.JobID, rec.summary)
 	if s.enableTrimGC {
-		// One clock read shared by skipAppendTrim and trimJobLocked.
-		now := s.now()
-		if !s.skipAppendTrim(run.JobID, now) {
-			s.trimJobLocked(run.JobID, now)
-		}
+		s.trimJobLocked(run.JobID, time.Now())
 	}
 }
 
@@ -598,7 +579,7 @@ func (s *Store) shrinkAndMarshal(run *CronRun) (rec runRecord, fits bool, err er
 	shrunk.ErrorMsg = TruncateWithSuffix(shrunk.ErrorMsg, maxRetryFieldRunes)
 	// ResultBytes is the STORED byte count and must match the truncated Result on disk (#2016).
 	shrunk.ResultBytes = len(shrunk.Result)
-	data, err := marshalRunPooled(&shrunk)
+	data, err := json.Marshal(&shrunk)
 	if err != nil {
 		return runRecord{}, false, err
 	}
@@ -612,18 +593,4 @@ func (s *Store) shrinkAndMarshal(run *CronRun) (rec runRecord, fits bool, err er
 // failure (ENOTEMPTY on Linux/macOS; some platforms report EEXIST).
 func isDirNotEmpty(err error) bool {
 	return errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, syscall.EEXIST)
-}
-
-// timeSource is the clock Append reads; cron's clock satisfies it.
-type timeSource interface {
-	Now() time.Time
-}
-
-// now is the Store's time source: the injected clock, or wall-clock time when
-// none was wired (every production construction path).
-func (s *Store) now() time.Time {
-	if s == nil || s.clock == nil {
-		return time.Now()
-	}
-	return s.clock.Now()
 }

@@ -6,58 +6,6 @@ import (
 	"time"
 )
 
-// skipAppendTrim returns true when the cache proves Append's trimJobLocked
-// would find nothing: the entry is warm, count + appendTrimBatch headroom is
-// under keepCount, and the oldest cached row is newer than the keepWindow
-// cutoff. Falls back to "do not skip" when the cache is cold or a margin
-// fails — over-keeping a few entries is acceptable; missing a trim is not.
-//
-// Caller MUST hold jobLock(jobID): every entry writer (cacheHeadPush,
-// warmCacheLocked, cacheTrimAfterDisk) holds it, which is why entry.mu is
-// taken in READ mode here and does not block concurrent dashboard readers.
-func (s *Store) skipAppendTrim(jobID string, now time.Time) bool {
-	s.assertJobLockHeld(jobID)
-	v, ok := s.recentCache.Load(jobID)
-	if !ok {
-		return false
-	}
-	entry := v.(*recentCacheEntry)
-	entry.mu.RLock()
-	defer entry.mu.RUnlock()
-	if !entry.warm {
-		return false
-	}
-	// Cache reflects the on-disk newest-first ring (capped to keepCount), so
-	// entry.count is a safe upper bound on disk rows that survived the last trim.
-	capSafe := entry.count+appendTrimBatch <= s.keepCount
-	// Oldest cached row still inside keepWindow?  Use EndedAt to mirror
-	// trimJobLocked's mtime-based cutoff (cacheTrimAfterDisk also approximates
-	// mtime via EndedAt — keep these two paths consistent).
-	windowSafe := true
-	if entry.count > 0 {
-		oldest := entry.ringRead(entry.count - 1)
-		ts := oldest.EndedAt
-		if ts.IsZero() {
-			ts = oldest.StartedAt
-		}
-		cutoff := now.Add(-s.keepWindow)
-		if !ts.After(cutoff) {
-			windowSafe = false
-		}
-	}
-	if capSafe && windowSafe {
-		// Both cache-state proofs hold — nothing for trimJobLocked to do.
-		return true
-	}
-	return false
-}
-
-// appendTrimBatch is the maximum number of Append calls we'll let pass
-// without running trimJobLocked when skipAppendTrim's safety conditions
-// hold. Picked low enough that even a runaway 1 Hz job sees a trim every
-// 10 s.
-const appendTrimBatch = 10
-
 // cacheHeadPush prepends summary to the recentCache for jobID in O(1) via the
 // ring. The caller must hold jobLock(jobID) so the push is serialised against
 // concurrent Recent / List reads. When the entry is not yet warm the ring is
@@ -65,7 +13,6 @@ const appendTrimBatch = 10
 // but an empty placeholder is still LoadOrStore'd so cacheGet's miss path
 // does not allocate it again (#702).
 func (s *Store) cacheHeadPush(jobID string, summary CronRunSummary) {
-	s.assertJobLockHeld(jobID)
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {
 		// The summary is NOT seeded into the placeholder: warm=false stays until

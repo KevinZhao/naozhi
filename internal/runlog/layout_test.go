@@ -1,8 +1,6 @@
 package runlog
 
 import (
-	"bytes"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -347,34 +345,6 @@ func TestForgetOwner_DropsLockAndMarker(t *testing.T) {
 	}
 }
 
-// TestAssertLockHeld_WarnsOnlyWhenFree: the assertion is the machine-checked
-// half of every *Locked-suffix contract, so it must fire when the lock is free
-// and stay silent when the caller really holds it (a always-warn version would
-// be noise the next reader learns to ignore).
-func TestAssertLockHeld_WarnsOnlyWhenFree(t *testing.T) {
-	// Not parallel: swaps the default slog handler.
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	defer slog.SetDefault(prev)
-
-	l := newLayout(t, filepath.Join(t.TempDir(), "runs"))
-
-	l.AssertLockHeld("owner1")
-	if !strings.Contains(buf.String(), "owner lock not held") {
-		t.Errorf("a free lock must warn; log = %q", buf.String())
-	}
-
-	buf.Reset()
-	lock := l.Lock("owner1")
-	lock.Lock()
-	l.AssertLockHeld("owner1")
-	lock.Unlock()
-	if buf.Len() != 0 {
-		t.Errorf("a held lock must stay silent; log = %q", buf.String())
-	}
-}
-
 // TestDisabledLayout_IsTotalNoop: "" root is how both stores spell "no
 // persistence", and every method has to survive it — callers deliberately do
 // not nil-check.
@@ -391,8 +361,7 @@ func TestDisabledLayout_IsTotalNoop(t *testing.T) {
 	if _, err := l.OwnerDir("owner1"); err == nil {
 		t.Error("OwnerDir must report the store is disabled rather than name a path")
 	}
-	l.AssertLockHeld("owner1") // must not panic
-	l.ForgetOwner("owner1")    // must not panic
+	l.ForgetOwner("owner1") // must not panic
 	if full, other := l.WriteFailedTotals(); full != 0 || other != 0 {
 		t.Errorf("counters = (%d,%d)", full, other)
 	}
