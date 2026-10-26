@@ -194,11 +194,6 @@ type Handlers struct {
 	// test_setters.go and are the only writers.
 	deps Deps
 
-	// uptimeCache memoises the formatted uptime string per 1-second bucket so
-	// N tabs polling at 1 Hz share one alloc. Races are benign: concurrent
-	// misses re-format the same value.
-	uptimeCache atomic.Pointer[uptimeSnapshot]
-
 	// projectListCache memoises the projectList slice per 1-second bucket so N
 	// tabs share one rebuild. The cached slice is READ-ONLY (HandleList copies
 	// the header, never mutates); misses rebuild identically and last-writer
@@ -244,18 +239,6 @@ type Handlers struct {
 	// summaryFlight collapses concurrent misses at the TTL boundary into one
 	// LookupSummaries (N×os.Stat) invocation; mirrors historyFlight.
 	summaryFlight singleflight.Group
-}
-
-// workspacesPool recycles the []string scratch that fillProjectAndSummary and
-// loadHistorySessions hand to ProjectManager.ResolveWorkspaces on every poll
-// (#616). ResolveWorkspaces never retains the backing array, so recycling is
-// safe. Entries are *[]string so Put doesn't re-alloc a header; slices grown
-// past 4096 are dropped on Put to bound the steady-state footprint.
-var workspacesPool = sync.Pool{
-	New: func() any {
-		s := make([]string, 0, 32) // typical sidebar fits in this prefix
-		return &s
-	},
 }
 
 // maxEventsPageLimit caps the per-request history slice so a malicious or

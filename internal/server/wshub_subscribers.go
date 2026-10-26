@@ -484,9 +484,3 @@ func (r *subscriberRegistry) count(key string) int32 {
 	}
 	return v.(*atomic.Int32).Load()
 }
-
-// singleSubscriber reports whether key has exactly one subscriber; 0 is
-// false, so only the strict single-tab case takes the fast path.
-func (r *subscriberRegistry) singleSubscriber(key string) bool {
-	return r.count(key) == 1
-}

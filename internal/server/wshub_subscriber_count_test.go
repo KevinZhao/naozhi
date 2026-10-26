@@ -2,6 +2,7 @@ package server
 
 import (
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,7 +12,7 @@ import (
 // TestSubscriberCount_KeyAbsentIffNoSubscriber: a key is tracked exactly while
 // it has a subscriber, so the per-key cap check stays O(1) and the index is
 // bounded by keys currently watched. Only the last subscriber leaving reports
-// the key emptied — the signal that drops its marshal cache slot.
+// the key emptied.
 func TestSubscriberCount_KeyAbsentIffNoSubscriber(t *testing.T) {
 	h := &Hub{subs: newSubscriberRegistry()}
 	a := &wsClient{done: make(chan struct{})}
@@ -272,27 +273,6 @@ func TestShutdown_ReleasesConnectionSlots(t *testing.T) {
 	}
 }
 
-// TestHandleUnsubscribe_LastSubscriberDropsTheMarshalCache: the cached
-// history frame goes with the key's last subscriber, not before.
-func TestHandleUnsubscribe_LastSubscriberDropsTheMarshalCache(t *testing.T) {
-	hub, _ := newTestHub(t, "")
-	defer hub.Shutdown()
-	const key = "test:d:u:general"
-	a, b := newTestWSClient(), newTestWSClient()
-	registerSub(hub, a, key)
-	registerSub(hub, b, key)
-	hub.historyMarshalCache.slot(key)
-
-	hub.handleUnsubscribe(a, node.ClientMsg{Type: "unsubscribe", Key: key})
-	if _, ok := hub.historyMarshalCache.entries.Load(key); !ok {
-		t.Fatal("cache slot dropped while another subscriber remains")
-	}
-	hub.handleUnsubscribe(b, node.ClientMsg{Type: "unsubscribe", Key: key})
-	if _, ok := hub.historyMarshalCache.entries.Load(key); ok {
-		t.Error("cache slot kept after the last subscriber left")
-	}
-}
-
 // TestHandleAuth_TokenJoinsTheAuthenticatedSet: a client that authenticates
 // with the token receives the "all authenticated" broadcasts from then on.
 func TestHandleAuth_TokenJoinsTheAuthenticatedSet(t *testing.T) {
@@ -304,8 +284,7 @@ func TestHandleAuth_TokenJoinsTheAuthenticatedSet(t *testing.T) {
 		t.Fatal("client authenticated before auth")
 	}
 	hub.handleAuth(c, node.ClientMsg{Type: "auth", Token: "secret"})
-	ptr, snap := hub.bcast.snapshotAuthenticated()
-	defer releaseBroadcastSnap(ptr, snap)
+	snap := hub.bcast.snapshotAuthenticated()
 	if len(snap) != 1 || snap[0] != c {
 		t.Errorf("authenticated set after token auth = %d clients, want exactly c", len(snap))
 	}
@@ -340,8 +319,7 @@ func TestResubscribe_StaleLoopLeavesTheNewerSubscription(t *testing.T) {
 }
 
 // TestResubscribe_TimeoutExpiresTheSubscription: with no process coming back
-// the loop gives up, frees the slot (and the marshal cache with the last
-// subscriber) and tells the client.
+// the loop gives up, frees the slot and tells the client.
 func TestResubscribe_TimeoutExpiresTheSubscription(t *testing.T) {
 	hub, _ := newTestHub(t, "")
 	defer hub.Shutdown()
@@ -350,7 +328,6 @@ func TestResubscribe_TimeoutExpiresTheSubscription(t *testing.T) {
 	c := newTestWSClient()
 	hub.register(c)
 	gen := subscribeTest(hub, c, key, func() {})
-	hub.historyMarshalCache.slot(key)
 
 	var notify <-chan struct{}
 	if ok, _ := hub.resubscribeEvents(c, key, gen, &notify); ok {
@@ -358,9 +335,6 @@ func TestResubscribe_TimeoutExpiresTheSubscription(t *testing.T) {
 	}
 	if isSubscribed(hub, c, key) || subscriberCountOf(hub, key) != 0 {
 		t.Error("the timed-out subscription still holds its slot")
-	}
-	if _, ok := hub.historyMarshalCache.entries.Load(key); ok {
-		t.Error("the marshal cache slot survived its last subscriber timing out")
 	}
 	msg := readClientMsg(t, c, time.Second)
 	if msg.Type != "session_state" || msg.Reason != "subscription_timeout" {
@@ -388,5 +362,43 @@ func TestRegistry_RecycledSetsStartEmpty(t *testing.T) {
 	registerSub(h, a, "third") // would panic on a recycled nil set
 	if subscriberCountOf(h, "third") != 1 {
 		t.Error("joining after a stray leave did not count")
+	}
+}
+
+// TestSubscriberCountFast_FollowsSubscribeAndUnsubscribe: the lock-free
+// count fanOutToSubscribers reads tracks the registry across subscribe,
+// unsubscribe and unregister, and goes away with the last subscriber.
+func TestSubscriberCountFast_FollowsSubscribeAndUnsubscribe(t *testing.T) {
+	h := &Hub{subs: newSubscriberRegistry()}
+	fast := func(key string) (int32, bool) {
+		v, ok := h.subs.countFast.Load(key)
+		if !ok {
+			return 0, false
+		}
+		return v.(*atomic.Int32).Load(), true
+	}
+	a := &wsClient{done: make(chan struct{})}
+	b := &wsClient{done: make(chan struct{})}
+	registerSub(h, a, "k")
+	registerSub(h, b, "k")
+	if n, ok := fast("k"); !ok || n != 2 {
+		t.Fatalf("two subscribers: fast count = (%d,%v); want (2,true)", n, ok)
+	}
+
+	h.subs.unsubscribe(a, "k", 0)
+	if n, ok := fast("k"); !ok || n != 1 {
+		t.Fatalf("after one unsubscribe: fast count = (%d,%v); want (1,true)", n, ok)
+	}
+	if got := h.subs.count("k"); got != 1 {
+		t.Fatalf("count at one subscriber = %d; want 1", got)
+	}
+
+	h.subs.remove(b)
+	if _, ok := fast("k"); ok {
+		t.Fatal("fast count must be deleted with the last subscriber — a " +
+			"leaked counter would let count read a stale value")
+	}
+	if subscriberCountOf(h, "k") != 0 || h.subs.count("k") != 0 {
+		t.Fatal("key still has subscribers after the last one left")
 	}
 }

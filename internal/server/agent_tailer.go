@@ -124,14 +124,13 @@ func (t *agentTailer) pollOnce() bool {
 	// Second short lock window: subs/meta snapshot + idle/refCount read.
 	// idle and refCount MUST be read in the same critical section as the
 	// subs snapshot, or an attach between the two locks could make us close a
-	// tailer that just gained a subscriber. subs is only snapshotted (from a
-	// sync.Pool, #865) when there are events and someone is subscribed.
+	// tailer that just gained a subscriber. subs is only snapshotted when
+	// there are events and someone is subscribed.
 	var subs []*wsClient
-	var subsHandle tailerSubsHandle
 	var meta node.AgentMetaPatch
 	t.mu.Lock()
 	if len(events) > 0 && len(t.subs) > 0 {
-		subs, subsHandle = acquireTailerSubsSlice(len(t.subs))
+		subs = make([]*wsClient, 0, len(t.subs))
 		for c := range t.subs {
 			subs = append(subs, c)
 		}
@@ -140,7 +139,6 @@ func (t *agentTailer) pollOnce() bool {
 	idle := now.Sub(t.lastActive) > agentTailerIdleGrace
 	refCount := t.refCount.Load()
 	t.mu.Unlock()
-	defer releaseTailerSubsSlice(subs, subsHandle)
 
 	// Broadcast: with >1 subscriber marshal each frame once and SendRaw;
 	// the single-subscriber path keeps the SendJSON shortcut.

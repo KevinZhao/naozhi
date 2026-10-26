@@ -33,34 +33,12 @@ const defaultHistoryRetryInterval = 250 * time.Millisecond
 const maxHistoryPushEntries = 50
 
 // marshalHistoryFrame produces the WS "history" frame bytes for key + one
-// chunk of entries, coalescing the marshal across all eventPushLoop goroutines in
-// lock-step on the same session. The per-key fingerprint (lastTime, latest
-// Time, count, first/last UUID) forces a fresh marshal for out-of-lockstep
-// subscribers. The returned []byte may be handed to wsClient.SendRaw from
-// multiple goroutines: SendRaw enqueues the slice and writePump never mutates it.
-func (h *Hub) marshalHistoryFrame(key string, lastTime int64, entries []clievent.EventEntry) ([]byte, error) {
-	// Redact credential token shapes from Summary/Detail before the bytes reach
-	// the browser: this is the single serialization choke point for backfill and
-	// live push, and the dashboard persists frames to IndexedDB. Redaction runs
-	// inside the marshal closures so a cache HIT does not re-scan already-redacted
-	// entries (#1888); it never touches Time, so the fingerprint is unaffected.
-	// Single-subscriber fast path (#944): with one tab every notify advances
-	// lastTime so the cache always misses; skip the sync.Map + mutex round-trip.
-	// count != 1 falls through to the cached path.
-	if h.singleSubscriber(key) {
-		return marshalPooled(wsproto.NewHistory(wsproto.History{Key: key, Events: entries}))
-	}
-	data, _, err := h.historyMarshalCache.getOrMarshal(key, lastTime, entries, func() ([]byte, error) {
-		return marshalPooled(wsproto.NewHistory(wsproto.History{Key: key, Events: entries}))
-	})
-	return data, err
-}
-
-// singleSubscriber reports whether key has exactly one subscriber, so only
-// the strict single-tab case skips the shared marshal cache. A stale verdict
-// only changes which path marshals this push, never the bytes.
-func (h *Hub) singleSubscriber(key string) bool {
-	return h.subs.singleSubscriber(key)
+// chunk of entries. wsproto.NewHistory redacts credential token shapes from
+// Summary/Detail: this is the single serialization choke point for backfill
+// and live push, and the dashboard persists frames to IndexedDB. Each
+// subscriber marshals its own frame.
+func marshalHistoryFrame(key string, entries []clievent.EventEntry) ([]byte, error) {
+	return marshalPooled(wsproto.NewHistory(wsproto.History{Key: key, Events: entries}))
 }
 
 // eventPushLoop is the per-subscription pump that reads EventLog notifications
@@ -177,9 +155,7 @@ func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.Ma
 		default:
 		}
 		chunk := entries[:min(len(entries), maxHistoryPushEntries)]
-		// The marshal-cache fingerprint keys on the pre-advance watermark, so
-		// lock-step tabs still coalesce onto one marshal per chunk.
-		data, err := h.marshalHistoryFrame(key, csr.Watermark(), chunk)
+		data, err := marshalHistoryFrame(key, chunk)
 		if err != nil {
 			// Deterministic for these entries: the next notify retries, a
 			// timer would only repeat the failure.
@@ -270,14 +246,10 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 	// Timed out: tell the client so the dashboard can surface "subscription
 	// expired" instead of stale state, and free the dead subscription slot so
 	// it stops counting toward the per-connection cap. The stale unsub runs
-	// after the registry's lock is released; the last subscriber leaving
-	// drops the marshal cache slot, as handleUnsubscribe does.
-	staleUnsub, dropCache := h.subs.expire(c, key, time.Now().UnixNano())
+	// after the registry's lock is released.
+	staleUnsub, _ := h.subs.expire(c, key, time.Now().UnixNano())
 	if staleUnsub != nil {
 		staleUnsub()
-	}
-	if dropCache {
-		h.historyMarshalCache.drop(key)
 	}
 	c.SendJSON(wsproto.NewSessionState(wsproto.SessionState{Key: key, State: "ready", Reason: "subscription_timeout"}))
 	return false, nil
