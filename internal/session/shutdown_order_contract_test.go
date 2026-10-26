@@ -6,83 +6,10 @@ import (
 	"time"
 )
 
-// TestShutdown_HistoryCtxCancelledFirst pins the R172-ARCH-D11 contract:
-// Shutdown must cancel historyCtx as its first observable action so that
-// in-flight LoadHistory*Ctx calls abort before the bounded historyWg.Wait
-// even has a chance to start. The godoc for Router.shutdown() asserts this
-// as the first step ("Cancel the history ctx ... BEFORE the bounded wait"),
-// but that claim was only enforced by a comment. A future refactor could
-// silently reorder the cancel below the Wait, re-introducing the exact hang
-// the ctx was designed to short-circuit.
-//
-// Behaviour test: start a Router, park a goroutine on historyCtx.Done, call
-// Shutdown, and assert the goroutine unblocks promptly — specifically before
-// Shutdown returns. If Shutdown swapped the order (Wait first, cancel later),
-// historyCtx would only be cancelled at the end and this test would either
-// hang past its deadline or observe Shutdown completing before the ctx fires.
-func TestShutdown_HistoryCtxCancelledFirst(t *testing.T) {
-	t.Parallel()
-	r := newTestRouter(3)
-	// Sanity: the router was constructed without NewRouter, so historyCtx
-	// was never wired. Supply one so the test exercises the real cancel path
-	// rather than the nil-guard short-circuit.
-	r.hist.ctx, r.hist.cancel = context.WithCancel(context.Background())
-
-	// Observe historyCtx from a witness goroutine. It must fire before
-	// Shutdown returns. We synchronise via a channel so the test does not
-	// depend on Go's scheduler fairness.
-	ctxDone := make(chan struct{})
-	go func() {
-		<-r.hist.ctx.Done()
-		close(ctxDone)
-	}()
-
-	// Sanity: before Shutdown, the ctx is live.
-	select {
-	case <-r.hist.ctx.Done():
-		t.Fatal("historyCtx fired before Shutdown was called")
-	case <-time.After(20 * time.Millisecond):
-	}
-
-	// Trigger Shutdown and capture when it returns. The ctx must fire
-	// strictly before Shutdown exits because the bounded wait sits after
-	// the cancel.
-	shutdownReturned := make(chan struct{})
-	go func() {
-		r.Shutdown()
-		close(shutdownReturned)
-	}()
-
-	// historyCtx must fire within a generous budget — cancel is an
-	// atomic store + goroutine wakeup, so 5s is practically "immediate"
-	// while staying far from the 30s ShutdownTimeout.
-	select {
-	case <-ctxDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("historyCtx was NOT cancelled within 5s of Shutdown starting — " +
-			"the R172-ARCH-D11 ordering contract was broken. shutdown() must " +
-			"call r.hist.cancel() BEFORE blocking on historyWg.Wait().")
-	}
-
-	// Let Shutdown finish (it will; no running sessions) with a hard cap.
-	select {
-	case <-shutdownReturned:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Shutdown did not return within 3s after historyCtx fired — " +
-			"unexpected second source of hangs.")
-	}
-}
-
-// TestShutdown_CancelBeforeWait_KeepsShutdownFast is the behavioural replacement
-// for TestShutdown_HistoryCtxCancelPreceedsHistoryWgWait, whose regexp asserted
-// that r.hist.cancel() appears before r.hist.wg.Wait() in shutdown()'s source
-// (Epic I #2547).
-//
-// That anchor's own comment said the sibling test above "catches a regression that
-// actually hangs" while it caught "the more subtle case where a reorder happens to
-// still work because there are no in-flight history loads to observe". Correct —
-// and the fix is to give it one to observe: a task that HOLDS historyWg and only
-// releases when historyCtx fires.
+// TestShutdown_CancelBeforeWait_KeepsShutdownFast pins shutdown()'s order:
+// r.hist.cancel() must run before r.hist.wg.Wait(). It gives the order an
+// in-flight load to observe: a task that HOLDS historyWg and only releases when
+// historyCtx fires.
 //
 // With the documented order, cancel releases the task and the bounded Wait returns
 // at once. Reversed, Wait blocks on a task that nothing has told to stop, so
