@@ -361,8 +361,7 @@ const (
 )
 
 // plaintextDashboardTokenWarning is logged when a token-protected dashboard
-// is served over plaintext HTTP with no trusted proxy. Named so tests can
-// pin the exact text.
+// is served over plaintext HTTP with no trusted proxy.
 const plaintextDashboardTokenWarning = "dashboard token served over plaintext HTTP with no trusted proxy: " +
 	"bearer tokens and session cookies may be sniffed; authenticated /health responses " +
 	"also leak workspace_id, node status, version, and watchdog counters in the clear. " +
@@ -370,7 +369,7 @@ const plaintextDashboardTokenWarning = "dashboard token served over plaintext HT
 	"or bind to 127.0.0.1 for local-only access."
 
 // noTokenOpenWarning is logged when dashboard_token is unset on a publicly
-// reachable bind. Named so tests can pin the exact text.
+// reachable bind.
 const noTokenOpenWarning = "no dashboard_token configured on a non-loopback bind: " +
 	"the ENTIRE dashboard API is open to any caller. " +
 	"Anyone reaching this port can send messages to sessions, read workspace files under allowed_root, " +

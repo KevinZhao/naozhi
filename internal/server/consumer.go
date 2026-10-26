@@ -1,7 +1,7 @@
 // consumer.go: per-consumer interface subsets of *session.Router (HubRouter /
 // ScratchRouter / serverRouter / healthRouter) and *wsBroadcaster (HubBroadcaster). Declared here (not in
 // session) so tests can inject fakes; the concrete types satisfy them
-// structurally, guarded by consumer_contract_test.go. See
+// structurally; the wiring-site assignments check that at compile time. See
 // docs/rfc/consumer-interfaces.md §3.2.2.
 
 package server
@@ -17,8 +17,7 @@ import (
 // WebSocket subscribe / send / interrupt paths, plus the h.hub.router.*
 // transits *ScratchHandler / *SendHandler borrow. Rethink the shape if it
 // grows past 15 methods (docs/rfc/consumer-interfaces.md §7.2).
-// *session.Router satisfies it structurally; consumer_contract_test.go
-// guards the binding.
+// *session.Router satisfies it structurally.
 type HubRouter interface {
 	GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
 	SessionFor(key string) *session.ManagedSession
@@ -44,8 +43,7 @@ type HubRouter interface {
 // one is at 14 methods (near the consumer-interfaces.md §7.2 rethink threshold) and
 // its godoc admits it carries the transits *SendHandler borrows, so handing it
 // to the engine would just move the borrowing debt to a new holder.
-// *session.Router satisfies it structurally; consumer_contract_test.go guards
-// the binding. It is also the ONLY router handle on the HTTP send path (#2632).
+// *session.Router satisfies it structurally. It is also the ONLY router handle on the HTTP send path (#2632).
 type sendEngineRouter interface {
 	SessionFor(key string) *session.ManagedSession
 	Workspace(chatKey string) string
@@ -62,7 +60,7 @@ type sendEngineRouter interface {
 // *wsBroadcaster, so the engine depends on it and not on the Hub.
 // Deliberately not HubBroadcaster — 4 of its 6 methods are cron / daemon
 // run-lifecycle, and it lacks the two unexported methods needed here.
-// *wsBroadcaster satisfies it; consumer_contract_test.go guards the binding.
+// *wsBroadcaster satisfies it.
 type sendNotifier interface {
 	BroadcastSessionReady(key string)
 	BroadcastSessionsUpdate()
@@ -82,7 +80,7 @@ type ScratchRouter interface {
 // serverRouter is the subset of *session.Router *Server's runtime methods
 // use: IM auto-takeover (takeover.go), the project-scan loop and the reply
 // footer default. The build steps take the concrete pointer from
-// wiring.router instead. consumer_contract_test.go guards the binding.
+// wiring.router instead.
 type serverRouter interface {
 	Backends() *session.BackendRegistry
 	SessionFor(key string) *session.ManagedSession
@@ -95,7 +93,7 @@ type serverRouter interface {
 }
 
 // healthRouter is the subset of *session.Router *HealthHandler and its
-// probes (health_probe.go) read. consumer_contract_test.go guards the binding.
+// probes (health_probe.go) read.
 type healthRouter interface {
 	Stats() (active, total int)
 	Backends() *session.BackendRegistry
@@ -107,8 +105,7 @@ type healthRouter interface {
 // HubBroadcaster names the broadcast / fan-out facet, *wsBroadcaster — the "push a
 // frame to authenticated WS clients" surface producers (the router observer's SessionsChanged,
 // send paths, cron / sysession run-lifecycle hooks, node register/deregister)
-// reach for. *wsBroadcaster satisfies it structurally; consumer_contract_test.go guards
-// the binding. Prefer the narrower subsets (scratch.Broadcaster)
+// reach for. *wsBroadcaster satisfies it structurally. Prefer the narrower subsets (scratch.Broadcaster)
 // when only part of this surface is needed.
 type HubBroadcaster interface {
 	BroadcastSessionReady(key string)

@@ -260,3 +260,16 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "..."
 }
+
+// lockedWriter serialises slog writes so concurrent records don't race the
+// test's read of the buffer.
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  *bytes.Buffer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
