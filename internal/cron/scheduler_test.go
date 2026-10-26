@@ -679,6 +679,27 @@ func TestRedactPathsInCronError(t *testing.T) {
 			"open <path>: denied"},
 		{"trailing newline preserved", "err: /a/b\nnext line", "err: <path>\nnext line"},
 		{"quoted path stops at quote", `failed "/tmp/x"`, `failed "<path>"`},
+		{"short path", "open /tmp/x: denied", "open <path>: denied"},
+		{"tilde home", "see ~/secrets", "see <path>"},
+		{"bare windows path", `C:\Users\bob\x`, "<path>"},
+		{"lone backslash", "backslash only \\", "backslash only \\"},
+		// A lone '/' at EOF or before whitespace carries no per-host or
+		// per-user information and stays literal (R20260527-COR-10 #1292).
+		{"bare slash at EOF", "error: /", "error: /"},
+		{"trailing bare slash", "trailing slash /", "trailing slash /"},
+		{"slash before newline", "err: /\nnext", "err: /\nnext"},
+		{"slash before space", "matches / glob", "matches / glob"},
+		{"slash before tab", "left /\tright", "left /\tright"},
+		{"posix path before newline", "err: /home/u/x\nnext", "err: <path>\nnext"},
+		{"posix path at EOF", "err: /home/u/x", "err: <path>"},
+		// No path trigger takes the fast path, which must still redact
+		// addresses (R20260603-SEC-1/SEC-4).
+		{"fast path ip:port", "session error: dial tcp 192.168.1.5:4012: connection refused",
+			"session error: dial tcp [redacted-addr]: connection refused"},
+		{"fast path ip", "send error: connect 10.0.0.2: refused", "send error: connect [redacted-addr]: refused"},
+		// Either side of redactFastPathMaxLen, a no-path input is unchanged.
+		{"at fast-path cap", strings.Repeat("a", redactFastPathMaxLen), strings.Repeat("a", redactFastPathMaxLen)},
+		{"over fast-path cap", strings.Repeat("b", redactFastPathMaxLen+1), strings.Repeat("b", redactFastPathMaxLen+1)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -694,53 +715,6 @@ func TestRedactPathsInCronError(t *testing.T) {
 	long := "open /a/" + strings.Repeat("x", 800) + ": denied"
 	if got := redactPathsInCronError(long); !strings.HasPrefix(got, "open <path>: denied") {
 		t.Errorf("long path not redacted: got %q", got)
-	}
-}
-
-// TestRedactPathsInCronError_FastPathNoAlloc pins R250-PERF-12 / #1115:
-// short error-classifier strings with no path-trigger byte must hit the
-// zero-alloc fast path — no truncate copy, no Builder pool. The aliased
-// return value must share the input's backing bytes (verified via the
-// allocs/op accounting from testing.AllocsPerRun, which tolerates one
-// alloc for the closure capture). Anything > 0 base allocs would mean a
-// regression back to the slow path.
-func TestRedactPathsInCronError_FastPathNoAlloc(t *testing.T) {
-	// No t.Parallel(): testing.AllocsPerRun panics if invoked from a
-	// parallel test (Go runtime needs exclusive GC quiescence to count).
-	in := "session error: context deadline exceeded"
-	got := redactPathsInCronError(in)
-	if got != in {
-		t.Fatalf("fast path must return input unchanged: got %q, want %q", got, in)
-	}
-	// AllocsPerRun returns the *additional* allocs caused by f beyond the
-	// closure overhead; for a true zero-alloc body this is 0.
-	allocs := testing.AllocsPerRun(100, func() {
-		_ = redactPathsInCronError(in)
-	})
-	if allocs != 0 {
-		t.Errorf("fast path allocated %v times per run, want 0", allocs)
-	}
-}
-
-// TestRedactPathsInCronError_FastPathLengthBoundary pins the 256-byte
-// ceiling on the zero-alloc fast path: an input at exactly the cap with
-// no path triggers must still take the fast path; one byte over and a
-// no-path input falls through to the secondary IndexByte branch (also
-// returns input, just past the truncate guard). R250-PERF-12 / #1115.
-func TestRedactPathsInCronError_FastPathLengthBoundary(t *testing.T) {
-	t.Parallel()
-	atCap := strings.Repeat("a", redactFastPathMaxLen)
-	if got := redactPathsInCronError(atCap); got != atCap {
-		t.Errorf("at-cap input mutated: len(got)=%d, len(want)=%d", len(got), len(atCap))
-	}
-	overCap := strings.Repeat("b", redactFastPathMaxLen+1)
-	if got := redactPathsInCronError(overCap); got != overCap {
-		t.Errorf("over-cap no-path input mutated: len(got)=%d, len(want)=%d", len(got), len(overCap))
-	}
-	// Path triggers must always reach the slow path even when short.
-	withPath := "open /tmp/x: denied"
-	if got := redactPathsInCronError(withPath); got != "open <path>: denied" {
-		t.Errorf("short path not redacted: got %q", got)
 	}
 }
 

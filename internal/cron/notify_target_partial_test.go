@@ -148,7 +148,7 @@ func TestNotifyTargetPartialMetric(t *testing.T) {
 // R236-SEC-15 (#568) introduced cronNotifyMaxChunks; this test uses an
 // input that produces fewer chunks than the cap so the assertion still
 // reads as "every chunk SplitText emits is delivered". The dedicated
-// cap-truncation regression lives in notify_target_chunk_cap_test.go.
+// cap-truncation regression is TestNotifyTarget_CapDroppedTailKeepsOriginalTotal.
 func TestNotifyTargetAllSucceedSendsAll(t *testing.T) {
 	t.Parallel()
 	// failAt larger than chunk count -> never fails.
