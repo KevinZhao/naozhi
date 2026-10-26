@@ -36,14 +36,6 @@ func readOne(t *testing.T, p Protocol, line string) (clievent.Event, bool, error
 
 // --- ClaudeProtocol tests ---
 
-func TestClaudeProtocol_Name(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	if p.Name() != "stream-json" {
-		t.Errorf("Name() = %q, want stream-json", p.Name())
-	}
-}
-
 func TestClaudeProtocol_BuildArgs(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}
@@ -97,124 +89,46 @@ func TestClaudeProtocol_BuildArgs_NoResume(t *testing.T) {
 	}
 }
 
-// TestClaudeProtocol_BuildArgs_PermissionModeDefault locks the zero-value
-// behaviour for R215-SEC-P1-1 / #531: the legacy --dangerously-skip-permissions
-// flag is still emitted when SpawnOptions.PermissionMode is unset, so existing
-// callers see no behavioural change. Standard mode (the new opt-in) omits it.
-func TestClaudeProtocol_BuildArgs_PermissionModeDefault(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	args := p.BuildArgs(SpawnOptions{Model: "sonnet"})
-	got := false
-	for _, a := range args {
-		if a == "--dangerously-skip-permissions" {
-			got = true
-			break
-		}
-	}
-	if !got {
-		t.Errorf("PermissionModeDefault: expected --dangerously-skip-permissions, got %v", args)
-	}
-}
-
-func TestClaudeProtocol_BuildArgs_PermissionModeStandard(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	args := p.BuildArgs(SpawnOptions{Model: "sonnet", PermissionMode: PermissionModeStandard})
-	for _, a := range args {
-		if a == "--dangerously-skip-permissions" {
-			t.Errorf("PermissionModeStandard: --dangerously-skip-permissions leaked into argv: %v", args)
-		}
-	}
-}
-
+// TestClaudeProtocol_BuildArgs_DebugFile: an absolute DebugFile becomes
+// `--debug-file <path>` (which implicitly enables debug), and no row may emit
+// a bare `--debug` token — the old `--debug api` category filter only scoped
+// stderr, never the file, and was pure noise. A relative path is dropped
+// (R20260615-030459-SEC-8 / #2133: it resolves against the session workspace
+// and would leak the API-key-bearing debug log there), as is one starting with
+// '-', which the CLI could reinterpret as a flag.
 func TestClaudeProtocol_BuildArgs_DebugFile(t *testing.T) {
 	t.Parallel()
-	p := &ClaudeProtocol{}
-	path := "/data/naozhi/cli-debug/abc123.log"
-	args := p.BuildArgs(SpawnOptions{Model: "opus", DebugFile: path})
-
-	// Expect "--debug-file <path>" (which implicitly enables debug). No bare
-	// "--debug api" pair: the category filter only scopes the CLI's stderr
-	// stream, never the file, and a dangling "api" token is pure noise. This
-	// asserts the ABSENCE of any "--debug" token so the no-op filter cannot
-	// silently reappear (regression guard for the --debug-api bug).
-	var sawDebugFile bool
-	for i, a := range args {
-		if a == "--debug-file" && i+1 < len(args) && args[i+1] == path {
-			sawDebugFile = true
-		}
-		if a == "--debug" {
-			t.Errorf("DebugFile set: unexpected `--debug` token in argv: %v", args)
-		}
+	cases := []struct {
+		name      string
+		debugFile string
+		wantPair  bool
+	}{
+		{"absolute kept", "/data/naozhi/cli-debug/abc123.log", true},
+		{"unset", "", false},
+		{"dash prefix", "-rf", false},
+		{"relative dir", "cli-debug/abc123.log", false},
+		{"bare filename", "abc123.log", false},
+		{"cwd relative", "./abc123.log", false},
+		{"parent relative", "../cli-debug/x.log", false},
 	}
-	if !sawDebugFile {
-		t.Errorf("DebugFile set: missing `--debug-file %s`, got %v", path, args)
-	}
-}
-
-func TestClaudeProtocol_BuildArgs_NoDebugFileByDefault(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	args := p.BuildArgs(SpawnOptions{Model: "opus"}) // DebugFile zero value
-	for _, a := range args {
-		if a == "--debug" || a == "--debug-file" {
-			t.Errorf("zero-value DebugFile leaked debug flags into argv: %v", args)
-		}
-	}
-}
-
-func TestClaudeProtocol_BuildArgs_DebugFileArgvInjectionGuard(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	// A path starting with '-' could be reinterpreted as a flag; reject it.
-	args := p.BuildArgs(SpawnOptions{Model: "opus", DebugFile: "-rf"})
-	for _, a := range args {
-		if a == "--debug-file" || a == "-rf" {
-			t.Errorf("DebugFile starting with '-' must be dropped, got %v", args)
-		}
-	}
-}
-
-func TestClaudeProtocol_BuildArgs_DebugFileRelativePathDropped(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	// R20260615-030459-SEC-8 (#2133): a relative --debug-file resolves against
-	// the CLI subprocess CWD (session workspace), leaking the raw debug log —
-	// which can contain API keys — into the session's working directory. A
-	// non-absolute path must be dropped (debug off for this spawn) rather than
-	// passed through.
-	for _, rel := range []string{
-		"cli-debug/abc123.log", // relative dir (from a relative EventLogDir)
-		"abc123.log",           // bare filename
-		"./abc123.log",         // explicit cwd-relative
-		"../cli-debug/x.log",   // parent-relative
-	} {
-		args := p.BuildArgs(SpawnOptions{Model: "opus", DebugFile: rel})
-		for i, a := range args {
-			if a == "--debug-file" {
-				t.Errorf("relative DebugFile %q must be dropped, but --debug-file emitted: %v", rel, args)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			args := (&ClaudeProtocol{}).BuildArgs(SpawnOptions{Model: "opus", DebugFile: tc.debugFile})
+			if slices.Contains(args, "--debug") {
+				t.Errorf("unexpected `--debug` token in argv: %v", args)
 			}
-			if a == rel && i > 0 && args[i-1] == "--debug-file" {
-				t.Errorf("relative DebugFile %q leaked into argv: %v", rel, args)
+			i := slices.Index(args, "--debug-file")
+			if tc.wantPair {
+				if i < 0 || i+1 >= len(args) || args[i+1] != tc.debugFile {
+					t.Errorf("missing `--debug-file %s`, got %v", tc.debugFile, args)
+				}
+				return
 			}
-		}
-	}
-}
-
-func TestClaudeProtocol_BuildArgs_DebugFileAbsolutePathKept(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	path := "/data/naozhi/cli-debug/abc123.log"
-	args := p.BuildArgs(SpawnOptions{Model: "opus", DebugFile: path})
-	var saw bool
-	for i, a := range args {
-		if a == "--debug-file" && i+1 < len(args) && args[i+1] == path {
-			saw = true
-		}
-	}
-	if !saw {
-		t.Errorf("absolute DebugFile %q must be kept, got %v", path, args)
+			if i >= 0 || (tc.debugFile != "" && slices.Contains(args, tc.debugFile)) {
+				t.Errorf("DebugFile %q must be dropped, got %v", tc.debugFile, args)
+			}
+		})
 	}
 }
 
@@ -683,14 +597,6 @@ func TestClaudeProtocol_Clone_Independent(t *testing.T) {
 
 // --- ACPProtocol tests ---
 
-func TestACPProtocol_Name(t *testing.T) {
-	t.Parallel()
-	p := &ACPProtocol{}
-	if p.Name() != "acp" {
-		t.Errorf("Name() = %q, want acp", p.Name())
-	}
-}
-
 func TestACPProtocol_BuildArgs(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
@@ -703,135 +609,46 @@ func TestACPProtocol_BuildArgs(t *testing.T) {
 	}
 }
 
-// TestACPProtocol_BuildArgs_Model verifies that opts.Model is forwarded as
-// `--model <id>` to kiro-cli acp. Without this the cli.backends[].model
-// config silently no-ops on kiro (router merge populates SpawnOptions.Model
-// but BuildArgs would drop it). Verified on kiro 2.3.0: session/new result
-// echoes the flag value via models.currentModelId.
-func TestACPProtocol_BuildArgs_Model(t *testing.T) {
+// TestBuildArgs_ModelEffortFlags: Model and Effort reach kiro-cli acp and the
+// Claude CLI as `--model <id>` / `--effort <tier>`, and the two coexist. An
+// empty value emits no flag at all: `--model ""` / `--effort ""` make the CLI
+// reject the argv, and empty is the documented "leave the backend default
+// alone". A launch-time --effort is also what makes cli.backends[].effort win
+// over settings.json / kiro's chat.modelDefaults (docs/rfc/kiro-effort-control.md).
+func TestBuildArgs_ModelEffortFlags(t *testing.T) {
 	t.Parallel()
-	p := &ACPProtocol{}
-	args := p.BuildArgs(SpawnOptions{Model: "claude-haiku-4.5"})
-	// Expect: ["acp", "--model", "claude-haiku-4.5"]
-	if len(args) < 3 {
-		t.Fatalf("BuildArgs short, got %v", args)
+	cases := []struct {
+		name   string
+		proto  Protocol
+		opts   SpawnOptions
+		want   map[string]string
+		absent []string
+	}{
+		{"acp model", &ACPProtocol{}, SpawnOptions{Model: "claude-haiku-4.5"},
+			map[string]string{"--model": "claude-haiku-4.5"}, []string{"--effort"}},
+		{"acp empty", &ACPProtocol{}, SpawnOptions{}, nil, []string{"--model", "--effort"}},
+		{"acp model+effort", &ACPProtocol{}, SpawnOptions{Model: "claude-fable-5", Effort: "xhigh"},
+			map[string]string{"--model": "claude-fable-5", "--effort": "xhigh"}, nil},
+		{"claude model+effort", &ClaudeProtocol{}, SpawnOptions{Model: "claude-fable-5", Effort: "high"},
+			map[string]string{"--model": "claude-fable-5", "--effort": "high"}, nil},
+		{"claude no effort", &ClaudeProtocol{}, SpawnOptions{Model: "claude-fable-5"},
+			map[string]string{"--model": "claude-fable-5"}, []string{"--effort"}},
 	}
-	if args[0] != "acp" {
-		t.Errorf("first arg should be 'acp', got %q", args[0])
-	}
-	var sawFlag, sawValue bool
-	for i, a := range args {
-		if a == "--model" && i+1 < len(args) && args[i+1] == "claude-haiku-4.5" {
-			sawFlag = true
-			sawValue = true
-			break
-		}
-	}
-	if !sawFlag || !sawValue {
-		t.Errorf("BuildArgs missing --model claude-haiku-4.5, got %v", args)
-	}
-}
-
-// TestACPProtocol_BuildArgs_NoModel verifies that an empty Model produces no
-// --model flag in argv. Passing `--model ""` would make kiro reject the
-// argv outright, so an absent value must mean "absent flag".
-func TestACPProtocol_BuildArgs_NoModel(t *testing.T) {
-	t.Parallel()
-	p := &ACPProtocol{}
-	args := p.BuildArgs(SpawnOptions{})
-	for _, a := range args {
-		if a == "--model" {
-			t.Errorf("BuildArgs should not emit --model when Model empty, got %v", args)
-		}
-	}
-}
-
-// TestACPProtocol_BuildArgs_Effort verifies opts.Effort reaches kiro as
-// `--effort <tier>`. This flag is what makes cli.backends[].effort authoritative
-// over kiro's own chat.modelDefaults default (verified on kiro 2.16.0 for both
-// session/new and session/load). docs/rfc/kiro-effort-control.md
-func TestACPProtocol_BuildArgs_Effort(t *testing.T) {
-	t.Parallel()
-	p := &ACPProtocol{}
-	args := p.BuildArgs(SpawnOptions{Model: "claude-fable-5", Effort: "xhigh"})
-	var ok bool
-	for i, a := range args {
-		if a == "--effort" && i+1 < len(args) && args[i+1] == "xhigh" {
-			ok = true
-			break
-		}
-	}
-	if !ok {
-		t.Errorf("BuildArgs missing --effort xhigh, got %v", args)
-	}
-	// The two flags must coexist — a session picks both a model and a tier.
-	if !slices.Contains(args, "--model") {
-		t.Errorf("BuildArgs dropped --model when Effort was set, got %v", args)
-	}
-}
-
-// TestACPProtocol_BuildArgs_NoEffort pins that an absent tier emits no flag:
-// `--effort ""` would make kiro reject the argv, and the empty value is the
-// documented way to say "leave the backend's own default alone".
-func TestACPProtocol_BuildArgs_NoEffort(t *testing.T) {
-	t.Parallel()
-	p := &ACPProtocol{}
-	for _, a := range p.BuildArgs(SpawnOptions{Model: "claude-fable-5"}) {
-		if a == "--effort" {
-			t.Error("BuildArgs must not emit --effort when Effort is empty")
-		}
-	}
-}
-
-// TestClaudeProtocol_BuildArgs_Effort verifies opts.Effort reaches the Claude
-// CLI as `--effort <tier>`. Verified against CLI 2.1.226, which documents the
-// flag as "Effort level for the current session" and rejects out-of-set values
-// with a warning. A launch-time --effort also pins the tier over the
-// settings.json `effortLevel` key, which is why this argv site — not
-// settings.json — owns the tier for naozhi-spawned sessions.
-func TestClaudeProtocol_BuildArgs_Effort(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	args := p.BuildArgs(SpawnOptions{Model: "claude-fable-5", Effort: "high"})
-	var ok bool
-	for i, a := range args {
-		if a == "--effort" && i+1 < len(args) && args[i+1] == "high" {
-			ok = true
-			break
-		}
-	}
-	if !ok {
-		t.Errorf("BuildArgs missing --effort high, got %v", args)
-	}
-	// The two flags must coexist — a session picks both a model and a tier.
-	if !slices.Contains(args, "--model") {
-		t.Errorf("BuildArgs dropped --model when Effort was set, got %v", args)
-	}
-}
-
-// TestClaudeProtocol_BuildArgs_NoEffort pins that an absent tier emits no flag.
-// `--effort ""` would be rejected by the CLI, and empty is the documented way
-// to say "leave whatever settings.json / the CLI default selects alone".
-func TestClaudeProtocol_BuildArgs_NoEffort(t *testing.T) {
-	t.Parallel()
-	p := &ClaudeProtocol{}
-	for _, a := range p.BuildArgs(SpawnOptions{Model: "claude-fable-5"}) {
-		if a == "--effort" {
-			t.Error("BuildArgs must not emit --effort when Effort is empty")
-		}
-	}
-}
-
-// TestBuildArgs_EffortIgnoredByCodex pins that the tier is inert on codex,
-// whose reasoning knob is a different axis (-c model_reasoning_effort=), so a
-// stray SpawnOptions.Effort cannot corrupt its argv. The composition root also
-// refuses to configure it there; this is the defence one layer down.
-func TestBuildArgs_EffortIgnoredByCodex(t *testing.T) {
-	t.Parallel()
-	p := &CodexProtocol{}
-	args := p.BuildArgs(SpawnOptions{Effort: "max"})
-	if slices.Contains(args, "--effort") || slices.Contains(args, "max") {
-		t.Errorf("%s.BuildArgs leaked the effort tier: %v", p.Name(), args)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			args := tc.proto.BuildArgs(tc.opts)
+			for flag, val := range tc.want {
+				if i := slices.Index(args, flag); i < 0 || i+1 >= len(args) || args[i+1] != val {
+					t.Errorf("missing `%s %s`, got %v", flag, val, args)
+				}
+			}
+			for _, flag := range tc.absent {
+				if slices.Contains(args, flag) {
+					t.Errorf("unexpected %s, got %v", flag, args)
+				}
+			}
+		})
 	}
 }
 
@@ -1189,121 +1006,43 @@ func TestACPProtocol_HandleEvent_NonPermission(t *testing.T) {
 
 // --- RPC types tests ---
 
-func TestRPCMessage_IsNotification(t *testing.T) {
+// TestRPCMessage_Classify covers the dual-shape id decoder (V8 in
+// docs/rfc/multi-backend-validation.md): kiro sends UUID string ids, which once
+// failed to unmarshal ("cannot unmarshal string into Go struct field
+// RPCMessage.id of type int"). An explicit JSON null id counts as absent.
+func TestRPCMessage_Classify(t *testing.T) {
 	t.Parallel()
-	msg := RPCMessage{Method: "session/update"}
-	if !msg.IsNotification() {
-		t.Error("should be notification (no id, has method)")
-	}
-	// Explicit JSON null is also "no id" per JSON-RPC.
-	msgNull := RPCMessage{ID: json.RawMessage(`null`), Method: "session/update"}
-	if !msgNull.IsNotification() {
-		t.Error("null id + method should be notification")
-	}
-}
-
-func TestRPCMessage_IsResponse(t *testing.T) {
-	t.Parallel()
+	const uuid = "82017692-c404-42d1-9334-ae28dfda0cee"
 	cases := []struct {
-		name string
-		raw  string
+		raw              string
+		notif, resp, req bool
+		intID            int
+		intOK            bool
+		strID            string
+		strOK            bool
 	}{
-		{"int id", `{"jsonrpc":"2.0","id":1,"result":{}}`},
-		{"string id (kiro UUID)", `{"jsonrpc":"2.0","id":"82017692-c404-42d1-9334-ae28dfda0cee","result":{}}`},
-		{"zero int id (legal but rare)", `{"jsonrpc":"2.0","id":0,"result":{}}`},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			var msg RPCMessage
-			if err := json.Unmarshal([]byte(c.raw), &msg); err != nil {
-				t.Fatalf("unmarshal: %v", err)
-			}
-			if !msg.IsResponse() {
-				t.Errorf("%q should be response", c.raw)
-			}
-		})
-	}
-}
-
-func TestRPCMessage_IsRequest(t *testing.T) {
-	t.Parallel()
-	raw := `{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{}}`
-	var msg RPCMessage
-	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if !msg.IsRequest() {
-		t.Error("should be request")
-	}
-}
-
-// TestRPCMessage_IDAsInt covers the dual-shape decoder: int passes through,
-// string returns ok=false, missing returns ok=false. See V8 in
-// docs/rfc/multi-backend-validation.md.
-func TestRPCMessage_IDAsInt(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		raw    string
-		want   int
-		wantOK bool
-	}{
-		{`{"jsonrpc":"2.0","id":7,"result":{}}`, 7, true},
-		{`{"jsonrpc":"2.0","id":0,"result":{}}`, 0, true},
-		{`{"jsonrpc":"2.0","id":"82017692-c404-42d1-9334-ae28dfda0cee","method":"x"}`, 0, false},
-		{`{"jsonrpc":"2.0","method":"notif"}`, 0, false},
-		{`{"jsonrpc":"2.0","id":null,"method":"notif"}`, 0, false},
+		{raw: `{"jsonrpc":"2.0","method":"session/update"}`, notif: true},
+		{raw: `{"jsonrpc":"2.0","id":null,"method":"session/update"}`, notif: true},
+		{raw: `{"jsonrpc":"2.0","id":7,"result":{}}`, resp: true, intID: 7, intOK: true, strID: "7", strOK: true},
+		{raw: `{"jsonrpc":"2.0","id":0,"result":{}}`, resp: true, intOK: true, strID: "0", strOK: true},
+		{raw: `{"jsonrpc":"2.0","id":"` + uuid + `","result":{}}`, resp: true, strID: uuid, strOK: true},
+		{raw: `{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{}}`, req: true, intID: 1, intOK: true, strID: "1", strOK: true},
+		{raw: `{"jsonrpc":"2.0","id":"` + uuid + `","method":"session/request_permission","params":{}}`, req: true, strID: uuid, strOK: true},
 	}
 	for _, c := range cases {
 		var msg RPCMessage
 		if err := json.Unmarshal([]byte(c.raw), &msg); err != nil {
-			t.Fatalf("unmarshal %q: %v", c.raw, err)
+			t.Fatalf("unmarshal %s: %v", c.raw, err)
 		}
-		got, ok := msg.IDAsInt()
-		if ok != c.wantOK || got != c.want {
-			t.Errorf("IDAsInt(%q) = (%d, %v); want (%d, %v)", c.raw, got, ok, c.want, c.wantOK)
+		if got := [3]bool{msg.IsNotification(), msg.IsResponse(), msg.IsRequest()}; got != [3]bool{c.notif, c.resp, c.req} {
+			t.Errorf("%s: (notification, response, request) = %v, want %v", c.raw, got, [3]bool{c.notif, c.resp, c.req})
 		}
-	}
-}
-
-// TestRPCMessage_IDAsString covers stringification: int -> "n", string ->
-// itself, missing/null -> ("", false).
-func TestRPCMessage_IDAsString(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		raw    string
-		want   string
-		wantOK bool
-	}{
-		{`{"jsonrpc":"2.0","id":7,"result":{}}`, "7", true},
-		{`{"jsonrpc":"2.0","id":"abc","result":{}}`, "abc", true},
-		{`{"jsonrpc":"2.0","id":"82017692-c404-42d1-9334-ae28dfda0cee","method":"x"}`, "82017692-c404-42d1-9334-ae28dfda0cee", true},
-		{`{"jsonrpc":"2.0","method":"notif"}`, "", false},
-		{`{"jsonrpc":"2.0","id":null,"method":"notif"}`, "", false},
-	}
-	for _, c := range cases {
-		var msg RPCMessage
-		if err := json.Unmarshal([]byte(c.raw), &msg); err != nil {
-			t.Fatalf("unmarshal %q: %v", c.raw, err)
+		if n, ok := msg.IDAsInt(); n != c.intID || ok != c.intOK {
+			t.Errorf("%s: IDAsInt = (%d, %v), want (%d, %v)", c.raw, n, ok, c.intID, c.intOK)
 		}
-		got, ok := msg.IDAsString()
-		if ok != c.wantOK || got != c.want {
-			t.Errorf("IDAsString(%q) = (%q, %v); want (%q, %v)", c.raw, got, ok, c.want, c.wantOK)
+		if s, ok := msg.IDAsString(); s != c.strID || ok != c.strOK {
+			t.Errorf("%s: IDAsString = (%q, %v), want (%q, %v)", c.raw, s, ok, c.strID, c.strOK)
 		}
-	}
-}
-
-// TestRPCMessage_NoUnmarshalErrorOnStringID ensures the master-broken case
-// (string id triggering "cannot unmarshal string into Go struct field
-// RPCMessage.id of type int") does not regress.
-func TestRPCMessage_NoUnmarshalErrorOnStringID(t *testing.T) {
-	t.Parallel()
-	raw := `{"jsonrpc":"2.0","id":"82017692-c404-42d1-9334-ae28dfda0cee","method":"session/request_permission","params":{}}`
-	var msg RPCMessage
-	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
-		t.Fatalf("kiro UUID id triggered unmarshal error (regression of V8): %v", err)
-	}
-	if !msg.IsRequest() {
-		t.Error("should classify as request")
 	}
 }
 

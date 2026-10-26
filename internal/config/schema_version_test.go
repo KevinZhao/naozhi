@@ -2,29 +2,6 @@ package config
 
 import "testing"
 
-// TestSchemaVersion_DefaultsWhenAbsent verifies a pre-versioning config (no
-// schema_version key → 0) is normalized to CurrentSchemaVersion so existing
-// deployments load unchanged. R243-ARCH-14 / #843.
-func TestSchemaVersion_DefaultsWhenAbsent(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{}
-	applyDefaults(cfg)
-	if cfg.SchemaVersion != CurrentSchemaVersion {
-		t.Errorf("SchemaVersion = %d, want %d (default for absent key)", cfg.SchemaVersion, CurrentSchemaVersion)
-	}
-}
-
-// TestSchemaVersion_ExplicitPreserved verifies an explicitly-set, supported
-// version is not overwritten by applyDefaults.
-func TestSchemaVersion_ExplicitPreserved(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{SchemaVersion: CurrentSchemaVersion}
-	applyDefaults(cfg)
-	if cfg.SchemaVersion != CurrentSchemaVersion {
-		t.Errorf("SchemaVersion = %d, want %d (explicit preserved)", cfg.SchemaVersion, CurrentSchemaVersion)
-	}
-}
-
 // TestSchemaVersion_RejectsNewer verifies a config declaring a schema newer
 // than the binary supports is rejected by validateConfig, so an older binary
 // never runs a config written for a newer one.

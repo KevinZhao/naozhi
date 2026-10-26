@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // spawnConfig is the spawn facet: the timeouts every CLI process gets, the
@@ -94,9 +93,6 @@ func panicSafeSpawnFn(
 ) (proc *cli.Process, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			// Counter and slog record are paired inside the recover arm so
-			// naozhi_spawn_panic_recovered_total counts exactly one per absorbed panic.
-			metrics.SpawnPanicRecoveredTotal.Add(1)
 			slog.Error("spawnSession: wrapper.Spawn panicked",
 				"key", key, "backend", backendID, "panic", r,
 				"stack", string(debug.Stack()))

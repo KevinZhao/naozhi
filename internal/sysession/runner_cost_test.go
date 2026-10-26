@@ -2,10 +2,8 @@ package sysession
 
 import (
 	"context"
-	"expvar"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -49,19 +47,6 @@ func ledgerEntries(t *testing.T, l *costledger.Store) []costledger.Entry {
 		t.Fatal(err)
 	}
 	return ents
-}
-
-func metricValue(t *testing.T, name string) int64 {
-	t.Helper()
-	v := expvar.Get(name)
-	if v == nil {
-		t.Fatalf("metric %s not registered", name)
-	}
-	n, err := strconv.ParseInt(v.String(), 10, 64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return n
 }
 
 func TestRunner_Run_DecodesResultAndBooksCostToRun(t *testing.T) {
@@ -129,16 +114,12 @@ func TestRunner_Run_ErrorEnvelopeWithSpendStillBooks(t *testing.T) {
 }
 
 func TestRunner_Run_NonJSONIsErrorNotGarbageReply(t *testing.T) {
-	before := metricValue(t, "naozhi_sysession_runner_parse_fail_total")
 	for _, out := range []string{"plain text title", `{"type":"result","result":"trunc`, `{"type":"assistant"}`} {
 		r, _ := fakeJSONRunner(t, out)
 		reply, err := r.Run(context.Background(), "prompt")
 		if err == nil || reply != "" {
 			t.Fatalf("stdout %q: reply=%q err=%v, want error and empty reply", out, reply, err)
 		}
-	}
-	if got := metricValue(t, "naozhi_sysession_runner_parse_fail_total"); got != before+3 {
-		t.Fatalf("parse-fail counter = %d, want %d", got, before+3)
 	}
 }
 

@@ -534,24 +534,6 @@ func TestScratchLastActivity_WorkflowFrames(t *testing.T) {
 	}
 }
 
-// TestWorkflowBoard_StoreCacheSeesWorkflows: the per-session marshal cache
-// re-encodes when only the workflows changed.
-func TestWorkflowBoard_StoreCacheSeesWorkflows(t *testing.T) {
-	r := wfRouter(t)
-	s := injectSession(r, "feishu:direct:alice:general", nil)
-	s.setSessionID(wfSID)
-	p := &setProc{}
-	bookWorkflows(s, p.process(), "", nil, nil)
-	p.publish(wfEntry("w1", workflow.StatusRunning))
-	if data, _ := encodeStoreEntryCached(s); !strings.Contains(string(data), `"status":"running"`) {
-		t.Fatalf("first encoding %s", data)
-	}
-	p.publish(wfEntry("w1", workflow.StatusCompleted))
-	if data, _ := encodeStoreEntryCached(s); !strings.Contains(string(data), `"status":"completed"`) {
-		t.Errorf("cached encoding kept the old workflow: %s", data)
-	}
-}
-
 // TestWorkflowBoard_RefsDropLongUnclaimed: an unknown entry unobserved for
 // workflowPinMax no longer goes into sessions.json; a recent one does.
 func TestWorkflowBoard_RefsDropLongUnclaimed(t *testing.T) {

@@ -3,13 +3,11 @@ package costledger
 import (
 	"errors"
 	"sort"
-	"sync"
 	"time"
 )
 
-// GroupBy names a summary dimension. Low-cardinality dimensions are served
-// from the in-memory rollup when the window is covered; the others (and any
-// filtered query) stream the day files in the window.
+// GroupBy names a summary dimension. Every summary streams the day files
+// overlapping its window.
 type GroupBy string
 
 const (
@@ -72,10 +70,6 @@ func (g GroupBy) valid() bool {
 	return false
 }
 
-func (q Query) filtered() bool {
-	return q.SessionKey != "" || q.JobID != "" || q.RunID != "" || q.Workspace != ""
-}
-
 func (q Query) match(e Entry) bool {
 	if e.TS.Before(q.From) || !e.TS.Before(q.To) {
 		return false
@@ -131,13 +125,7 @@ func (s *Store) Summarize(q Query) (Summary, error) {
 		return Summary{}, err
 	}
 	agg := newAggregator(q.GroupBy)
-	// The rollup holds every day from warmedFrom onward; a To in the future
-	// matches no extra days, so only From needs the coverage check.
-	if !q.filtered() && s.rollup.covers(q.From) && rollupServes(q.GroupBy) {
-		s.rollup.fold(q, agg)
-	} else {
-		s.scanRange(q, func(e Entry) bool { agg.add(e); return true })
-	}
+	s.scanRange(q, func(e Entry) bool { agg.add(e); return true })
 	out := agg.summary()
 	out.From, out.To, out.Dropped = q.From, q.To, s.dropped.Load()
 	return out, nil
@@ -170,8 +158,8 @@ func (s *Store) Entries(q Query, limit int) ([]Entry, error) {
 }
 
 // Scan streams every entry matching q (filters + window) through fn in day
-// order, stopping when fn returns false. Backfill and audits use it; the
-// same validation and caps as Summarize apply.
+// order, stopping when fn returns false. The same validation and caps as
+// Summarize apply.
 func (s *Store) Scan(q Query, fn func(Entry) bool) error {
 	if s == nil || s.disabled {
 		return nil
@@ -208,138 +196,26 @@ func (s *Store) scanRange(q Query, fn func(Entry) bool) {
 	}
 }
 
-// rollupServes reports whether the dimension is pre-aggregated.
-func rollupServes(g GroupBy) bool {
-	switch g {
-	case GroupBySource, GroupByBackend, GroupByDay, GroupByBasis, GroupByKind, GroupByUnit, GroupByModel:
-		return true
-	}
-	return false
+// rowKey identifies one Summary row: the same key appears once per unit.
+type rowKey struct {
+	Unit Unit
+	Key  string
 }
 
-// rollup keeps per-day pre-aggregates over the low-cardinality dimensions.
-// Model rows use ModelDelta.CostUSD (drill-down figures), every other
-// dimension uses Entry.Amount (authoritative).
-type rollup struct {
-	mu         sync.RWMutex
-	days       map[string]*dayAgg
-	warmedFrom string // first day guaranteed loaded (dayLayout)
-}
-
-type lowKey struct {
-	Unit    Unit
-	Source  Source
-	Backend string
-	Basis   Basis
-	Kind    Kind
-}
-
-type modelKey struct {
-	Unit  Unit
-	Model string
-}
-
-type dayAgg struct {
-	low    map[lowKey]*Bucket
-	models map[modelKey]*Bucket
-}
-
-func newRollup() *rollup { return &rollup{days: make(map[string]*dayAgg)} }
-
-func (r *rollup) covers(from time.Time) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.warmedFrom != "" && from.Format(dayLayout) >= r.warmedFrom
-}
-
-func (r *rollup) add(e Entry) {
-	day := e.TS.Format(dayLayout)
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	d := r.days[day]
-	if d == nil {
-		d = &dayAgg{low: make(map[lowKey]*Bucket), models: make(map[modelKey]*Bucket)}
-		r.days[day] = d
-	}
-	lk := lowKey{e.Unit, e.Source, e.Backend, e.Basis, e.Kind}
-	b := d.low[lk]
-	if b == nil {
-		b = &Bucket{Unit: e.Unit}
-		d.low[lk] = b
-	}
-	b.Amount += e.Amount
-	b.Entries++
-	for _, m := range e.Models {
-		b.Tokens = b.Tokens.add(m.Tokens)
-		mk := modelKey{UnitUSD, m.Model}
-		mb := d.models[mk]
-		if mb == nil {
-			mb = &Bucket{Unit: UnitUSD}
-			d.models[mk] = mb
-		}
-		mb.Amount += m.CostUSD
-		mb.Entries++
-		mb.Tokens = mb.Tokens.add(m.Tokens)
-	}
-}
-
-// fold replays the rollup for q's window into agg. Day granularity: a window
-// starting mid-day includes that whole day (callers pass day-aligned windows
-// for exact figures; the dashboard does).
-func (r *rollup) fold(q Query, agg *aggregator) {
-	from, to := q.From.Format(dayLayout), q.To.Format(dayLayout)
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for day, d := range r.days {
-		if day < from || day > to {
-			continue
-		}
-		for lk, b := range d.low {
-			agg.basis[string(lk.Basis)] += b.Entries
-			agg.kinds[string(lk.Kind)] += b.Entries
-			if q.GroupBy != GroupByModel {
-				agg.merge(lowKeyLabel(q.GroupBy, day, lk), *b)
-			}
-		}
-		if q.GroupBy == GroupByModel {
-			for mk, b := range d.models {
-				agg.merge(mk.Model, *b)
-			}
-		}
-	}
-}
-
-func lowKeyLabel(g GroupBy, day string, k lowKey) string {
-	switch g {
-	case GroupBySource:
-		return string(k.Source)
-	case GroupByBackend:
-		return k.Backend
-	case GroupByDay:
-		return day
-	case GroupByBasis:
-		return string(k.Basis)
-	case GroupByKind:
-		return string(k.Kind)
-	default:
-		return string(k.Unit)
-	}
-}
-
-// aggregator merges entries or pre-aggregated buckets into (key, unit) rows.
+// aggregator merges entries into (key, unit) rows.
 type aggregator struct {
 	groupBy GroupBy
-	rows    map[modelKey]*Bucket
+	rows    map[rowKey]*Bucket
 	basis   map[string]int
 	kinds   map[string]int
 }
 
 func newAggregator(g GroupBy) *aggregator {
-	return &aggregator{groupBy: g, rows: make(map[modelKey]*Bucket), basis: make(map[string]int), kinds: make(map[string]int)}
+	return &aggregator{groupBy: g, rows: make(map[rowKey]*Bucket), basis: make(map[string]int), kinds: make(map[string]int)}
 }
 
 func (a *aggregator) merge(key string, b Bucket) {
-	k := modelKey{b.Unit, key}
+	k := rowKey{b.Unit, key}
 	row := a.rows[k]
 	if row == nil {
 		row = &Bucket{Key: key, Unit: b.Unit}

@@ -126,13 +126,6 @@ type WatchdogOptions struct {
 
 // FeatureOptions are the opt-in feature switches.
 type FeatureOptions struct {
-	// Debug gates registration of /api/debug/pprof and /api/debug/vars.
-	// Default false: both are 404 even for loopback+auth callers, so a leaked
-	// dashboard token cannot enumerate goroutine stacks (file paths, queue
-	// contents) or expvar counters. Set `server.debug_mode: true` only while
-	// capturing a profile.
-	Debug bool
-
 	// PublicTmp opts the __public_tmp__ pseudo-project in (#646). When
 	// false (default) that pseudo-project is a regular "project not found".
 	//

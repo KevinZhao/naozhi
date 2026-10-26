@@ -218,7 +218,7 @@ func isSensitiveDownloadName(base string) bool {
 	// One rule for every dotenv variant (.env, .env.local, .env.example, …);
 	// templates routinely carry secrets that became real. `.env` must be
 	// followed by end-of-string or `.` so `.envoy.yaml` keeps previewing
-	// (pinned in TestIsSensitiveDownloadName_OpsConventional).
+	// (pinned in TestIsSensitiveDownloadName).
 	if low == ".env" || strings.HasPrefix(low, ".env.") {
 		return true
 	}

@@ -207,45 +207,8 @@ func escapeMarkdown(s string) string {
 	return markdownEscaper.Replace(s)
 }
 
-// handleCardActionWebhook parses an im.card.action.v1_trigger envelope (token
-// + signature + replay already validated by the caller) and re-enters the
-// MessageHandler path with a synthesised text message. Both the v1 shape
-// (ids at top level) and the v2 shape (ids nested under `context`) are
-// accepted; without the fallback v2 ids decode to "" (#2006).
-func (f *Feishu) handleCardActionWebhook(ctx context.Context, raw json.RawMessage, handler platform.MessageHandler) {
-	var outer struct {
-		Action struct {
-			Value platform.AskAnswerPayload `json:"value"`
-		} `json:"action"`
-		OpenChatID    string `json:"open_chat_id"`
-		OpenMessageID string `json:"open_message_id"`
-		ChatType      string `json:"chat_type"`
-		Context       struct {
-			OpenChatID    string `json:"open_chat_id"`
-			OpenMessageID string `json:"open_message_id"`
-		} `json:"context"`
-		Operator struct {
-			OpenID string `json:"open_id"`
-		} `json:"operator"`
-	}
-	if err := json.Unmarshal(raw, &outer); err != nil {
-		slog.Warn("feishu card_action: parse failed", "err", err)
-		return
-	}
-	chatID := outer.OpenChatID
-	if chatID == "" {
-		chatID = outer.Context.OpenChatID
-	}
-	messageID := outer.OpenMessageID
-	if messageID == "" {
-		messageID = outer.Context.OpenMessageID
-	}
-	f.dispatchCardAction(ctx, outer.Action.Value, chatID, messageID,
-		outer.ChatType, outer.Operator.OpenID, handler)
-}
-
 // dispatchCardAction turns a validated card click into a synthesised
-// MessageHandler call; shared by the webhook and WebSocket paths.
+// MessageHandler call; called from the WebSocket card-action callback.
 func (f *Feishu) dispatchCardAction(
 	ctx context.Context,
 	val platform.AskAnswerPayload,

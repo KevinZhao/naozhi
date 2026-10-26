@@ -10,7 +10,6 @@ import (
 	"github.com/naozhi/naozhi/internal/claudefs"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/clievent"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -100,7 +99,6 @@ func (c *costAccounting) onProcessEnd(s *ManagedSession, end cli.ProcessEnd, cla
 		defer c.ends.done()
 		defer func() {
 			if r := recover(); r != nil {
-				metrics.PanicRecoveredTotal.Add(1)
 				slog.Error("cost: process-end booking panicked", "panic", r, "stack", string(debug.Stack()))
 			}
 		}()

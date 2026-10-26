@@ -8,17 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // A local run that panics after its started event is still closed: one
-// run_ended (failed, panic), the inflight marker removed so the next boot does
-// not read it as an interrupted run, the gauge back at its base and the ended
-// counter moved once (#2897 C1). Not parallel: the counters are process-wide.
+// run_ended (failed, panic) and the inflight marker removed so the next boot
+// does not read it as an interrupted run (#2897 C1).
 func TestLocalRunPanic_ClosesTheRun(t *testing.T) {
-	endedBase := metrics.CronRunEndedTotal.Value()
-	inflightBase := metrics.CronRunInflight.Value()
 	rec := &recordingBroadcaster{}
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, StorePath: filepath.Join(dir, "cron_jobs.json")},
@@ -41,12 +37,6 @@ func TestLocalRunPanic_ClosesTheRun(t *testing.T) {
 	if ev.State != RunStateFailed || ev.ErrorClass != ErrClassPanic {
 		t.Errorf("ended = %s/%s, want failed/panic", ev.State, ev.ErrorClass)
 	}
-	if d := metrics.CronRunEndedTotal.Value() - endedBase; d != 1 {
-		t.Errorf("CronRunEndedTotal moved %d, want 1", d)
-	}
-	if metrics.CronRunInflight.Value() != inflightBase {
-		t.Errorf("inflight gauge = %d, want %d", metrics.CronRunInflight.Value(), inflightBase)
-	}
 	entries, _ := os.ReadDir(s.runMarkers().Dir())
 	if len(entries) != 0 {
 		t.Errorf("%d inflight marker(s) left; the next boot would mark the run interrupted", len(entries))
@@ -62,7 +52,6 @@ func TestLocalRunPanic_ClosesTheRun(t *testing.T) {
 // no path can double-count or double-broadcast a run that another path already
 // closed.
 func TestFinishRun_OncePerRun(t *testing.T) {
-	endedBase := metrics.CronRunEndedTotal.Value()
 	rec := &recordingBroadcaster{}
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5}, SchedulerDeps{Router: &fakeRouter{}, Telemetry: rec})
 	job := &Job{ID: mustGenerateID(), Schedule: "@hourly", Prompt: "p"}
@@ -72,16 +61,12 @@ func TestFinishRun_OncePerRun(t *testing.T) {
 	if rec.endedCount() != 1 || rec.endedAtCron(0).State != RunStateSucceeded {
 		t.Errorf("ended events = %d (first %v), want the first finish only", rec.endedCount(), rec.endedAtCron(0).State)
 	}
-	if d := metrics.CronRunEndedTotal.Value() - endedBase; d != 1 {
-		t.Errorf("CronRunEndedTotal moved %d, want 1", d)
-	}
 }
 
 // A panic inside finishRun's persistence half still ends the run for
 // subscribers (the broadcast half is deferred), and the scaffold's recover
 // does not end it a second time.
 func TestLocalRunPanicInsideFinish_EndsOnce(t *testing.T) {
-	endedBase := metrics.CronRunEndedTotal.Value()
 	rec := &recordingBroadcaster{}
 	dir := t.TempDir()
 	// The session lookup fails, so the run ends through finishRun normally and
@@ -105,9 +90,6 @@ func TestLocalRunPanicInsideFinish_EndsOnce(t *testing.T) {
 	}
 	if ev := rec.endedAtCron(0); ev.ErrorClass != ErrClassSessionError {
 		t.Errorf("ended error class = %q, want the run's own %q (the recover must not re-close it)", ev.ErrorClass, ErrClassSessionError)
-	}
-	if d := metrics.CronRunEndedTotal.Value() - endedBase; d != 1 {
-		t.Errorf("CronRunEndedTotal moved %d, want 1", d)
 	}
 	if _, running := s.CurrentRun(job.ID); running {
 		t.Error("the job still shows a run in flight")

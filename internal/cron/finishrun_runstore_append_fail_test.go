@@ -5,8 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // TestFinishRunRunStoreAppendFail pins the TOLERATED half of the R249-ARCH-28
@@ -88,10 +86,7 @@ func TestFinishRunRunStoreAppendFail(t *testing.T) {
 	}
 	defer os.Chmod(jobDir, 0o700) //nolint:errcheck // best-effort so t.TempDir RemoveAll works.
 
-	// Baselines: the package-global metric counter and the run store's
-	// write-failed totals. Assert deltas, not absolutes — other tests in the
-	// package may have bumped the global expvar.
-	succ0 := metrics.CronRunSucceededTotal.Value()
+	// Baseline: the run store's write-failed totals.
 	df0, ot0 := s.runs.WriteFailedTotals()
 
 	inflight := s.gateForTest().jobInflight(j.ID)
@@ -139,12 +134,6 @@ func TestFinishRunRunStoreAppendFail(t *testing.T) {
 	}
 	if dj.RunCounters.Succeeded != 1 {
 		t.Errorf("persisted Job.RunCounters.Succeeded: want 1, got %d", dj.RunCounters.Succeeded)
-	}
-
-	// (b) Metric bumped: the per-state counter fires because jobPersistOK==true,
-	// independent of the Append outcome (bump precedes append in finishRun).
-	if delta := metrics.CronRunSucceededTotal.Value() - succ0; delta != 1 {
-		t.Errorf("CronRunSucceededTotal delta: want 1, got %d", delta)
 	}
 
 	// (c) Append failure is observable: the "other" (non-ENOSPC, here EACCES)

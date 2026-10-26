@@ -6,19 +6,13 @@ package cli
 
 import (
 	"bytes"
-	"expvar"
 	"runtime/debug"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/cli/workflow"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/shim"
 )
-
-// workflowLinesOversize counts shim lines over maxScannerBufBytes that held a
-// task_progress frame, i.e. a workflow snapshot too large to read.
-var workflowLinesOversize = expvar.NewInt("naozhi_cli_workflow_lines_oversize_total")
 
 // noWorkflows is what a Process without a Tracker (a test fixture) reports.
 var noWorkflows = &workflow.Set{}
@@ -85,7 +79,6 @@ func (p *Process) seedWorkflows(replays []shim.ServerMsg, lastSeq int64, dec wor
 		if r := recover(); r != nil {
 			p.slogger().Error("workflow seed panic recovered; tracker starts unseeded",
 				"panic", r, "stack", string(debug.Stack()))
-			metrics.PanicRecoveredTotal.Add(1)
 			p.workflows = workflow.New(p.workflowChanged)
 			p.workflows.SeedFromReplay(workflow.Replay{Wrapped: true}, dec, known)
 		}
@@ -112,14 +105,13 @@ const (
 )
 
 // noteOversizeLine looks at the head of a shim line too long to read. A
-// task_progress frame is counted, and when its task is a tracked workflow
-// that entry keeps its rows and shows snapshot_dropped.
+// task_progress frame whose task is a tracked workflow keeps its rows and
+// shows snapshot_dropped.
 func (p *Process) noteOversizeLine(line []byte, now time.Time) {
 	id, progress := oversizeProgressTaskID(line[:min(len(line), oversizePeekBytes)])
 	if !progress {
 		return
 	}
-	workflowLinesOversize.Add(1)
 	if id != "" && p.workflows != nil {
 		p.workflows.NoteDropped(id, now)
 	}

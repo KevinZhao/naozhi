@@ -19,7 +19,7 @@ import (
 // disconnect) run beside the readers.
 //
 // The measured calls (fanOutToSubscribers, snapshotAuthenticated,
-// singleSubscriber, BroadcastSessionsUpdate) keep their signatures across a
+// BroadcastSessionsUpdate) keep their signatures across a
 // restructure; only the bench* setup helpers below reach into the Hub's
 // internals, so they are the one place to update.
 //
@@ -156,25 +156,8 @@ func BenchmarkHubSnapshotAuthenticated(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			ptr, snap := h.bcast.snapshotAuthenticated()
-			releaseBroadcastSnap(ptr, snap)
+			_ = h.bcast.snapshotAuthenticated()
 		}
-	})
-}
-
-func BenchmarkHubSingleSubscriber(b *testing.B) {
-	benchModes(b, func(b *testing.B, churn bool) {
-		h := benchHub(b, 1)
-		if churn {
-			startChurn(b, h)
-		}
-		b.ReportAllocs()
-		b.ResetTimer()
-		b.RunParallel(func(pb *testing.PB) {
-			for pb.Next() {
-				_ = h.singleSubscriber(benchKey)
-			}
-		})
 	})
 }
 

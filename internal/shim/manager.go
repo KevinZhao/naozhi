@@ -20,7 +20,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/envpolicy"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/spawndiag"
@@ -104,11 +103,6 @@ type ManagerConfig struct {
 	// StartShim returns ErrMaxShims when at the cap; Reconnect bypasses
 	// this gate (it only attaches to already-running processes).
 	MaxShims int
-
-	// StateDirQuotaBytes caps the on-disk size of StateDir before StartShim
-	// refuses to spawn. Zero (default) disables the gate. Reconnect bypasses
-	// it — the quota brakes new growth, not already-running shims (#456).
-	StateDirQuotaBytes int64
 }
 
 // NewManager creates a shim manager. Fails if the running binary path cannot
@@ -148,18 +142,17 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	}
 
 	return &Manager{
-		stateDir:           cfg.StateDir,
-		cliPath:            cfg.CLIPath,
-		idleTimeout:        cfg.IdleTimeout,
-		watchdogTimeout:    cfg.WatchdogTimeout,
-		bufferSize:         cfg.BufferSize,
-		maxBufBytes:        cfg.MaxBufBytes,
-		maxShims:           cfg.MaxShims,
-		stateDirQuotaBytes: cfg.StateDirQuotaBytes,
-		naozhiBin:          naozhiBin,
-		shimEnv:            baselineShimEnv(),
-		shims:              make(map[string]*ShimHandle),
-		reconnectKM:        make(map[string]*sync.Mutex),
+		stateDir:        cfg.StateDir,
+		cliPath:         cfg.CLIPath,
+		idleTimeout:     cfg.IdleTimeout,
+		watchdogTimeout: cfg.WatchdogTimeout,
+		bufferSize:      cfg.BufferSize,
+		maxBufBytes:     cfg.MaxBufBytes,
+		maxShims:        cfg.MaxShims,
+		naozhiBin:       naozhiBin,
+		shimEnv:         baselineShimEnv(),
+		shims:           make(map[string]*ShimHandle),
+		reconnectKM:     make(map[string]*sync.Mutex),
 	}, nil
 }
 
@@ -301,11 +294,6 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	if cliPath == "" {
 		cliPath = m.cliPath
 	}
-	// Quota gate runs BEFORE the slot reservation so a quota failure never
-	// contends for a pendingShims slot it would only release (#456).
-	if err := m.checkStateDirQuota(); err != nil {
-		return nil, err
-	}
 	// Reserve a slot atomically to prevent TOCTOU race with concurrent callers
 	m.mu.Lock()
 	if len(m.shims)+m.pendingShims >= m.maxShims {
@@ -442,10 +430,6 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	if oldHandle != nil {
 		oldHandle.Close()
 	}
-
-	// Counts fresh shim births only; Reconnect reattaches to an existing
-	// process and is not counted.
-	metrics.ShimRestartTotal.Add(1)
 	return handle, nil
 }
 

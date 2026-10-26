@@ -8,8 +8,6 @@ package session
 // through the I/O dispatch, rooted at the projects root.
 
 import (
-	"errors"
-	"expvar"
 	"os"
 	"time"
 
@@ -37,10 +35,6 @@ const (
 	workflowUnclaimedAfter        = 90 * time.Second
 	workflowUnclaimedAfterWrapped = 10 * time.Minute
 )
-
-// workflowRunScanCapped counts run directory scans given up on a session
-// with too many runs.
-var workflowRunScanCapped = expvar.NewInt("naozhi_session_workflow_run_scan_capped_total")
 
 // workflowDisk is how a board reaches the disk; tests swap it.
 type workflowDisk struct {
@@ -261,10 +255,7 @@ func (b *WorkflowBoard) enqueueLocateLocked(id, sessionID string, agents []strin
 		return
 	}
 	b.enqueueLocked(ioJob{task: id, kind: ioLocate, work: func() ioApply {
-		runID, err := locate(root, ws, sessionID, agents)
-		if errors.Is(err, claudefs.ErrTooManyWorkflowRuns) {
-			workflowRunScanCapped.Add(1)
-		}
+		runID, _ := locate(root, ws, sessionID, agents)
 		return func() func() {
 			if st := b.last[id]; runID != "" && st != nil && st.pub.RunID == "" {
 				b.located[id] = runID

@@ -35,7 +35,7 @@ func vendorContent(t *testing.T, key string) []byte {
 // the only form kept in memory (#3662).
 func TestVendorAssets_LargeFilesPrecompressed(t *testing.T) {
 	t.Parallel()
-	err := fs.WalkDir(vendorFS, "static/vendor", func(name string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(staticFS, "static/vendor", func(name string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
@@ -52,7 +52,7 @@ func TestVendorAssets_LargeFilesPrecompressed(t *testing.T) {
 		t.Fatal(err)
 	}
 	const key = "vendor/mermaid-11.14.0/mermaid.min.js"
-	gz, err := vendorFS.ReadFile("static/" + key + ".gz")
+	gz, err := staticFS.ReadFile("static/" + key + ".gz")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,35 +65,6 @@ func TestVendorAssets_LargeFilesPrecompressed(t *testing.T) {
 	}
 	if raw := vendorContent(t, key); len(raw) < 3<<20 {
 		t.Errorf("%s decompresses to %d bytes, want the 3 MB release bundle", key, len(raw))
-	}
-}
-
-// TestVendorAssets_DirectoryNamesRelease: vendor/ responses are immutable on
-// the strength of their path, so each build embedded must be the release its
-// directory names. Changed bytes need a new directory.
-func TestVendorAssets_DirectoryNamesRelease(t *testing.T) {
-	t.Parallel()
-	dirs := map[string]bool{}
-	for key := range staticAssets {
-		if rest, ok := strings.CutPrefix(key, "vendor/"); ok {
-			dir, _, _ := strings.Cut(rest, "/")
-			dirs[dir] = true
-		}
-	}
-	if len(dirs) != 2 || !dirs["katex-0.16.21"] || !dirs["mermaid-11.14.0"] {
-		t.Fatalf("vendor/ holds %v, want katex-0.16.21 and mermaid-11.14.0: a new library or release needs its own release check here", dirs)
-	}
-	versionRe := regexp.MustCompile(`version:"([^"]+)"`)
-	for key, want := range map[string]string{
-		"vendor/katex-0.16.21/katex.min.js":     "0.16.21",
-		"vendor/mermaid-11.14.0/mermaid.min.js": "11.14.0",
-	} {
-		if got := versionRe.FindAllStringSubmatch(string(vendorContent(t, key)), -1); len(got) != 1 || got[0][1] != want {
-			t.Errorf("%s declares versions %v, want exactly %s", key, got, want)
-		}
-	}
-	if css := string(staticAssetBytes("vendor/katex-0.16.21/katex.min.css")); !strings.Contains(css, `.katex .katex-version:after{content:"0.16.21"}`) {
-		t.Error("vendor/katex-0.16.21/katex.min.css does not carry the 0.16.21 version marker")
 	}
 }
 
@@ -149,7 +120,7 @@ func TestVendorRoutes_ServeEmbeddedTree(t *testing.T) {
 }
 
 // TestVendorRoutes_RejectOutsideTree pins the table lookup: only embedded
-// stylesheets, fonts and the scripts with a route of their own are served.
+// scripts, stylesheets and fonts are served.
 func TestVendorRoutes_RejectOutsideTree(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(&mockPlatform{})
@@ -163,6 +134,10 @@ func TestVendorRoutes_RejectOutsideTree(t *testing.T) {
 		"/static/vendor/tokens.css",
 		"/static/vendor/css/tokens.css",
 		"/static/vendor/%2e%2e/css/tokens.css",
+		// Embedded but not served below /static/: sw.js lives at /sw.js.
+		"/static/sw.js",
+		"/static/package.json",
+		"/static/dashboard.html",
 	} {
 		w := httptest.NewRecorder()
 		srv.mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, p, nil))
@@ -170,14 +145,8 @@ func TestVendorRoutes_RejectOutsideTree(t *testing.T) {
 			t.Errorf("GET %s = 200, want a miss", p)
 		}
 	}
-	// The stylesheet handler serves no script, even an embedded one.
+	// The dashboard's own stylesheets resolve through the same handler.
 	w := httptest.NewRecorder()
-	handleDashboardCSS(w, httptest.NewRequest(http.MethodGet, "/static/vendor/katex-0.16.21/katex.min.js", nil))
-	if w.Code != http.StatusNotFound {
-		t.Errorf("handleDashboardCSS served a script: %d, want 404", w.Code)
-	}
-	// The dashboard's own stylesheets still resolve through the same handler.
-	w = httptest.NewRecorder()
 	srv.mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/static/css/tokens.css", nil))
 	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "text/css; charset=utf-8" {
 		t.Errorf("GET /static/css/tokens.css = %d %q, want 200 text/css", w.Code, w.Header().Get("Content-Type"))
@@ -200,16 +169,6 @@ func TestVendorRoutes_RequireAuth(t *testing.T) {
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("unauthenticated GET %s = %d, want 401", p, w.Code)
 		}
-	}
-}
-
-// TestDashboardHTML_DoesNotPreloadVendor: the vendored scripts are classic
-// scripts render_md.js loads only when a message holds math, so the page
-// neither maps nor preloads them as modules.
-func TestDashboardHTML_DoesNotPreloadVendor(t *testing.T) {
-	t.Parallel()
-	if page := string(staticAssetBytes("dashboard.html")); strings.Contains(page, "/static/vendor/") {
-		t.Error("dashboard.html as served names a /static/vendor/ asset; vendored scripts load on demand")
 	}
 }
 

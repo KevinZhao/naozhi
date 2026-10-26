@@ -3,11 +3,14 @@ package cli
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
+	"github.com/naozhi/naozhi/internal/ctxutil"
+	"github.com/naozhi/naozhi/internal/eventlog/ring"
 )
 
 // The transcript's user and result entries carry the run they belong to
@@ -120,7 +123,7 @@ func TestEventLogRunID_AbandonedSend(t *testing.T) {
 // The aborted result of an abandoned Send, read after the next Send claimed
 // the process, names the abandoned run, not the live one.
 func TestEventLogRunID_OrphanedAbortResult(t *testing.T) {
-	_, lg := captureRunLogs(t)
+	lg := slog.New(slog.DiscardHandler)
 	p := bareTurnProcess(t, make(chan clievent.Event, 4), "run-a")
 	p.SetOnUnownedResult(func(clievent.SendResult) {})
 	p.turn.abortRequested.arm()
@@ -134,4 +137,20 @@ func TestEventLogRunID_OrphanedAbortResult(t *testing.T) {
 
 	p.dispatchProtocolEvent(clievent.Event{Type: "result", SubType: "error_during_execution", SessionID: "s1"}, lg)
 	wantRunIDs(t, p, clievent.KindResult, "run-a")
+}
+
+func runCtx(id string) context.Context {
+	return ctxutil.WithRunID(context.Background(), id)
+}
+
+// bareTurnProcess is a non-replay Process whose turn is claimed by run, with
+// no readLoop behind it.
+func bareTurnProcess(t *testing.T, eventCh chan clievent.Event, run string) *Process {
+	t.Helper()
+	p := &Process{eventLog: ring.NewEventLog(8), eventCh: eventCh, killCh: make(chan struct{})}
+	p.transition(evReadLoopStart)
+	if _, ok := p.turn.claimSend(run); !ok {
+		t.Fatal("claimSend did not claim a Ready process")
+	}
+	return p
 }

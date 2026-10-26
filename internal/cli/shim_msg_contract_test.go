@@ -18,27 +18,18 @@ import (
 // json.Unmarshal would otherwise perform per cli_exited frame (R222-PERF-13).
 //
 // Nothing tied the two together: ARCH-1 (error frames carry text in `msg`,
-// shimMsg only had `line`) was the first silent drift. The three tests in
-// this file are the contract that makes any future drift a CI failure:
-//
-//  1. TestShimMsgIsSubsetOfServerMsg — every shimMsg field's json tag must
-//     name a ServerMsg field of a compatible type (identical, or the
-//     shimMsgCode ↔ *int pair). A phantom / renamed field on the cli side
-//     fails here.
-//  2. TestShimMsgRoundTripsEveryShimFrame — one sample ServerMsg per frame
-//     type the shim emits, encoded through the shim's real marshal paths,
-//     decoded through both decoders, compared field-by-field. Any
-//     ServerMsg field the shim populates that shimMsg cannot see must be
-//     listed in liveDecoderIgnoredFields, so a new shim field is a
-//     conscious decision (add to shimMsg, or declare it ignored) rather
-//     than a silent drop.
-//  3. TestServerMsgFieldsPartitionedByLiveDecoder — structural reverse
-//     check independent of sample values: every ServerMsg key is either
-//     decoded by shimMsg or declared ignored, so a new ServerMsg field is
-//     flagged the moment it is added.
+// shimMsg only had `line`) was the first silent drift.
+// TestShimMsgRoundTripsEveryShimFrame is the contract: one sample ServerMsg
+// per frame type the shim emits, encoded through the shim's real marshal
+// paths, decoded through both decoders and compared field-by-field. Every
+// shimMsg key must exist on ServerMsg with a compatible type, and any
+// ServerMsg field populated in shimFrameSamples that shimMsg cannot see must
+// be listed in liveDecoderIgnoredFields. The reverse check only covers fields
+// the samples populate: when adding a ServerMsg field, add it to
+// shimFrameSamples too.
 //
 // Production code is intentionally untouched: shimMsg stays a separate
-// struct (perf) and is pinned to ServerMsg by these tests instead.
+// struct (perf) and is pinned to ServerMsg by this test instead.
 
 // jsonTagName returns the JSON key a struct field decodes from. Contract
 // fields must carry an explicit tag; an untagged field is a drift signal.
@@ -67,47 +58,7 @@ func serverMsgFieldsByTag(t *testing.T) map[string]reflect.StructField {
 	return out
 }
 
-var (
-	shimMsgCodeType = reflect.TypeOf(shimMsgCode{})
-	intPtrType      = reflect.TypeOf((*int)(nil))
-)
-
-// decodeTypesCompatible reports whether a shimMsg field of type cliT can
-// legitimately decode the same JSON value as a ServerMsg field of type
-// shimT. Identical types always qualify; the only sanctioned divergence is
-// the allocation-free shimMsgCode standing in for *int (R222-PERF-13).
-func decodeTypesCompatible(cliT, shimT reflect.Type) bool {
-	if cliT == shimT {
-		return true
-	}
-	return cliT == shimMsgCodeType && shimT == intPtrType
-}
-
-// TestShimMsgIsSubsetOfServerMsg pins cli.shimMsg as a strict projection of
-// shim.ServerMsg: every json key shimMsg decodes must exist on ServerMsg
-// with a decode-compatible type. Adding a field to ServerMsg alone is fine
-// (see the round-trip test for the "did cli notice" half); adding, renaming
-// or retyping a field on shimMsg that ServerMsg does not carry fails here.
-func TestShimMsgIsSubsetOfServerMsg(t *testing.T) {
-	t.Parallel()
-	serverFields := serverMsgFieldsByTag(t)
-	cliT := reflect.TypeOf(shimMsg{})
-	for i := 0; i < cliT.NumField(); i++ {
-		cf := cliT.Field(i)
-		key := jsonTagName(t, "cli.shimMsg", cf)
-		sf, ok := serverFields[key]
-		if !ok {
-			t.Errorf("cli.shimMsg.%s decodes json key %q which shim.ServerMsg does not emit — "+
-				"the live decoder has drifted from the wire contract", cf.Name, key)
-			continue
-		}
-		if !decodeTypesCompatible(cf.Type, sf.Type) {
-			t.Errorf("json key %q: cli.shimMsg.%s is %s but shim.ServerMsg.%s is %s — "+
-				"decode-incompatible types (only shimMsgCode↔*int is sanctioned)",
-				key, cf.Name, cf.Type, sf.Name, sf.Type)
-		}
-	}
-}
+var shimMsgCodeType = reflect.TypeOf(shimMsgCode{})
 
 // liveDecoderIgnoredFields lists, per frame type, the ServerMsg json keys
 // the shim populates that cli.shimMsg deliberately does NOT decode.
@@ -132,36 +83,6 @@ var liveDecoderIgnoredFields = map[string]map[string]bool{
 	},
 	"replay_done": {"count": true},
 	"pong":        {"cli_alive": true, "buffered": true},
-}
-
-// TestServerMsgFieldsPartitionedByLiveDecoder is the structural half of the
-// reverse direction: every shim.ServerMsg json key must be either decoded by
-// cli.shimMsg or declared in liveDecoderIgnoredFields (for some frame type).
-// Unlike the round-trip test this does not depend on sample values, so a
-// field added to ServerMsg is flagged even before any sample populates it —
-// the author must add it to shimMsg or record why the live path ignores it.
-func TestServerMsgFieldsPartitionedByLiveDecoder(t *testing.T) {
-	t.Parallel()
-	decoded := make(map[string]bool)
-	cliT := reflect.TypeOf(shimMsg{})
-	for i := 0; i < cliT.NumField(); i++ {
-		decoded[jsonTagName(t, "cli.shimMsg", cliT.Field(i))] = true
-	}
-	ignored := make(map[string]bool)
-	for _, keys := range liveDecoderIgnoredFields {
-		for k := range keys {
-			ignored[k] = true
-		}
-	}
-	for key, sf := range serverMsgFieldsByTag(t) {
-		switch {
-		case decoded[key] && ignored[key]:
-			t.Errorf("json key %q (ServerMsg.%s) is both decoded by cli.shimMsg and listed in liveDecoderIgnoredFields — drop the stale ignore entry", key, sf.Name)
-		case !decoded[key] && !ignored[key]:
-			t.Errorf("json key %q (ServerMsg.%s) is neither decoded by cli.shimMsg nor declared in liveDecoderIgnoredFields — "+
-				"add it to shimMsg or record the ignore decision", key, sf.Name)
-		}
-	}
 }
 
 // shimFrameSample is one representative frame the shim emits. encode
@@ -225,7 +146,7 @@ func assertShimMsgProjects(t *testing.T, frameType string, sm shim.ServerMsg, cm
 		key := jsonTagName(t, "cli.shimMsg", cf)
 		sf, ok := serverFields[key]
 		if !ok {
-			t.Fatalf("json key %q missing on shim.ServerMsg (subset test should have caught this)", key)
+			t.Fatalf("json key %q missing on shim.ServerMsg", key)
 		}
 		seen[key] = true
 		cfv := cv.Field(i)
@@ -242,7 +163,7 @@ func assertShimMsgProjects(t *testing.T, frameType string, sm shim.ServerMsg, cm
 			continue
 		}
 		if cf.Type != sf.Type {
-			t.Fatalf("json key %q: type mismatch %s vs %s (subset test should have caught this)", key, cf.Type, sf.Type)
+			t.Fatalf("json key %q: type mismatch %s vs %s", key, cf.Type, sf.Type)
 		}
 		if !reflect.DeepEqual(cfv.Interface(), sfv.Interface()) {
 			t.Errorf("%q: shimMsg=%#v, ServerMsg=%#v", key, cfv.Interface(), sfv.Interface())

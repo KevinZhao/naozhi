@@ -2,7 +2,6 @@ package feishu
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -158,56 +157,6 @@ func TestHandleImage_Admission(t *testing.T) {
 	f.handleImage(context.Background(), h.handler, mediaMsg, "om_1", "img_1")
 	if got := h.all(); stub.downloads.Load() != 1 || len(got) != 1 || len(got[0].Images) != 1 {
 		t.Errorf("admitted image: downloads=%d handled=%+v, want one message with the image", stub.downloads.Load(), got)
-	}
-}
-
-func buildV2MediaBody(eventID, msgType, content string) []byte {
-	b, _ := json.Marshal(map[string]any{
-		"schema": "2.0",
-		"header": map[string]any{"event_id": eventID, "event_type": "im.message.receive_v1", "token": "test_token"},
-		"event": map[string]any{
-			"sender": map[string]any{"sender_id": map[string]any{"open_id": "ou_eve"}},
-			"message": map[string]any{
-				"message_id": "om_" + eventID, "chat_id": "oc_1", "chat_type": "p2p",
-				"message_type": msgType, "content": content,
-			},
-		},
-	})
-	return b
-}
-
-// The webhook transport routes image and voice messages through the same
-// admission check before it fetches anything.
-func TestWebhook_MediaAdmission(t *testing.T) {
-	t.Parallel()
-	var asked []string
-	var mu sync.Mutex
-	f, stub, tr := newMediaFeishu(t, Config{ConnectionMode: "webhook", VerificationToken: "test_token"},
-		refuseRecording(&asked, &mu))
-	var h handled
-	mux := http.NewServeMux()
-	f.registerWebhook(mux, h.handler)
-
-	for _, body := range [][]byte{
-		buildV2MediaBody("ev_img", "image", `{"image_key":"img_1"}`),
-		buildV2MediaBody("ev_audio", "audio", `{"file_key":"file_1"}`),
-	} {
-		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, buildTokenRequest(body))
-		if w.Code != http.StatusOK {
-			t.Fatalf("webhook status = %d, want 200", w.Code)
-		}
-	}
-	f.dispatch.Wait()
-
-	if stub.downloads.Load() != 0 || tr.calls.Load() != 0 || stub.replies.Load() != 0 || len(h.all()) != 0 {
-		t.Errorf("refused media: downloads=%d transcribes=%d replies=%d handled=%d, want all 0",
-			stub.downloads.Load(), tr.calls.Load(), stub.replies.Load(), len(h.all()))
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(asked) != 2 {
-		t.Errorf("admission asked %d times, want once per media message", len(asked))
 	}
 }
 

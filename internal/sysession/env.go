@@ -18,8 +18,7 @@ const (
 // envAllowed reports whether the sysession column of the envpolicy Table passes
 // key through to a Runner's `claude -p`. The three lists this used to keep —
 // always-passthrough, profile-name keys, base-URL keys — are Table rows with the
-// SourceSysession bit; table_sysession_test.go pins every one of them against a
-// copy of the retired maps.
+// SourceSysession bit.
 func envAllowed(key string) bool {
 	_, ok := envpolicy.Allowed(key, envpolicy.SourceSysession)
 	return ok

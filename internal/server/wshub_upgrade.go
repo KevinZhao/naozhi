@@ -128,11 +128,6 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 			Error:      "too many attempts",
 			RetryAfter: wsAuthRetryAfterSeconds,
 		}))
-		// Rate-limited auth_fail counts toward the blended auth_fail metric plus
-		// the dedicated rate-limited split so operators can tell a looping client
-		// from a credential spray pacing under the limiter.
-		serverMetrics.WSAuthFail()
-		serverMetrics.WSAuthFailRateLimited()
 		return
 	}
 	// Short-circuit when the connection is already authenticated via cookie —
@@ -165,7 +160,6 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 				// slot on oldOwner. Refuse: owner stays oldOwner, closing the
 				// conn unwinds the pumps which unregister against oldOwner.
 				c.SendRaw([]byte(wsproto.RawAuthFailInvalid))
-				serverMetrics.WSAuthFail()
 				if c.conn != nil {
 					_ = c.conn.Close()
 				}
@@ -179,9 +173,5 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 		c.SendRaw([]byte(rawAuthOK))
 	} else {
 		c.SendRaw([]byte(wsproto.RawAuthFailInvalid))
-		// The dedicated invalid-token split distinguishes credential spray from
-		// throttling storms.
-		serverMetrics.WSAuthFail()
-		serverMetrics.WSAuthFailInvalidToken()
 	}
 }

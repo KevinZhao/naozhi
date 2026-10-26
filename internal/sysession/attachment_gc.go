@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/attachment"
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // WorkspaceRootLister enumerates the distinct workspace roots whose
@@ -107,8 +106,6 @@ func (a *attachmentGC) now() time.Time {
 // cursor bound per-tick deletion work and prevent root starvation (RFC §4.3);
 // ctx is honoured between roots and, via GCWithRefs, inside a root's walk.
 func (a *attachmentGC) Tick(ctx context.Context) (TickReport, error) {
-	metrics.AttachmentGCSweepTotal.Add(1)
-
 	if a.roots == nil {
 		slog.Warn("attachment-gc: no WorkspaceRootLister wired; skipping")
 		return TickReport{}, nil
@@ -153,7 +150,6 @@ func (a *attachmentGC) Tick(ctx context.Context) (TickReport, error) {
 				firstErr = err
 				break
 			}
-			metrics.AttachmentGCErrorTotal.Add(1)
 			slog.Warn("attachment-gc: sweep failed", "root", root, "err", err)
 			if firstErr == nil {
 				firstErr = err
@@ -166,7 +162,6 @@ func (a *attachmentGC) Tick(ctx context.Context) (TickReport, error) {
 		report.Examined++
 		a.recordWouldReap(&report, root, res)
 		if !a.dryRun {
-			metrics.AttachmentGCReapedTotal.Add(int64(res.Removed))
 			report.Acted += res.Removed
 		}
 		if res.Stopped {
@@ -187,8 +182,8 @@ const (
 	gcCountRefsExpired  = "would_reap_refs_expired"
 )
 
-// recordWouldReap adds one root's would-remove buckets and bytes to the
-// expvar counters (RFC §6 E4) and to report.Counts, in both dry-run and live
+// recordWouldReap adds one root's would-remove buckets and bytes to
+// report.Counts (RFC §6 E4), in both dry-run and live
 // mode, and logs a per-root summary when the root had anything to reap.
 func (a *attachmentGC) recordWouldReap(report *TickReport, root string, res attachment.GCResult) {
 	var files int
@@ -196,13 +191,10 @@ func (a *attachmentGC) recordWouldReap(report *TickReport, root string, res atta
 		files += n
 		switch reason {
 		case attachment.ReasonLegacyNoMeta:
-			metrics.AttachmentGCWouldReapLegacyTotal.Add(int64(n))
 			report.Counts[gcCountLegacyNoMeta] += int64(n)
 		case attachment.ReasonMetaNoRefs:
-			metrics.AttachmentGCWouldReapNoRefsTotal.Add(int64(n))
 			report.Counts[gcCountMetaNoRefs] += int64(n)
 		case attachment.ReasonRefsExpired:
-			metrics.AttachmentGCWouldReapExpiredTotal.Add(int64(n))
 			report.Counts[gcCountRefsExpired] += int64(n)
 		}
 	}

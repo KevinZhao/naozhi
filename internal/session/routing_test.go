@@ -140,7 +140,7 @@ func TestResolveForChat(t *testing.T) {
 			defaults: map[string]AgentOpts{
 				"code-reviewer": {Model: "opus", Exempt: true}, // Exempt must be reset
 			},
-			binding:  ProjectBinding{Bound: true, Name: "myproj", WorkspaceDir: "/w/myproj"},
+			binding:  ProjectBinding{Bound: true, Name: "myproj", WorkspaceDir: "/w/myproj", PlannerModel: "IGNORED", PlannerPrompt: "IGNORED"},
 			wantKey:  "feishu:direct:alice:code-reviewer",
 			wantOpts: AgentOpts{Model: "opus", Workspace: "/w/myproj", Exempt: false},
 		},

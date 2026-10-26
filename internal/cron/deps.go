@@ -4,7 +4,7 @@ package cron
 // (docs/rfc/cron-sysession-merge.md §3.5.1, #746): interface / func / map
 // fields live here; scalar config stays on SchedulerConfig. context.Context
 // counts as a lifecycle scalar, so ParentCtx (and the AllowNilRouter bool)
-// stay on SchedulerConfig. Pinned by deps_boundary_test.go.
+// stay on SchedulerConfig.
 
 import (
 	"github.com/naozhi/naozhi/internal/costledger"

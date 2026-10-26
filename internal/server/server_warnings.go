@@ -7,7 +7,6 @@ import (
 
 // reverseNodePlaintextWarning is the message logged when /ws-node is exposed
 // on a non-loopback plaintext HTTP bind with no trusted proxy in front.
-// Named so tests can assert the exact journal text.
 const reverseNodePlaintextWarning = "reverse-node /ws-node endpoint served over plaintext HTTP with no trusted proxy: " +
 	"remote-node tokens and cross-node session payloads may be sniffed by any " +
 	"passive listener on the wire. A leaked token lets an attacker impersonate " +

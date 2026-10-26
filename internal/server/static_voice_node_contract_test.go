@@ -100,7 +100,7 @@ func discoveredKeyWant(pid int, node string) string {
 func TestDashboardJS_VoiceCap_StateMachine(t *testing.T) {
 	t.Parallel()
 	// #2558 D4-2: the voice module moved to voice.js.
-	data, err := voiceJS.ReadFile("static/voice.js")
+	data, err := staticFS.ReadFile("static/voice.js")
 	if err != nil {
 		t.Fatalf("read voice.js: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestDashboardJS_VoiceCap_StateMachine(t *testing.T) {
 func TestDashboardJS_VoiceFinalizing_HasEscapeHatches(t *testing.T) {
 	t.Parallel()
 	// #2558 D4-2: the voice module moved to voice.js.
-	data, err := voiceJS.ReadFile("static/voice.js")
+	data, err := staticFS.ReadFile("static/voice.js")
 	if err != nil {
 		t.Fatalf("read voice.js: %v", err)
 	}

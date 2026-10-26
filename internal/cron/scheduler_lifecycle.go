@@ -4,8 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // Stop halts the scheduler and saves state: it drains the cold-start GC
@@ -90,14 +88,9 @@ func (s *Scheduler) waitGCDrain(ctx context.Context) {
 	select {
 	case <-gcDone:
 	case <-ctxDone(ctx):
-		// The caller's shutdown ctx pre-empts the internal budget; account it
-		// as a budget breach so dashboards alert identically (#1168).
-		metrics.CronStopBudgetExceededGCTotal.Add(1)
+		// The caller's shutdown ctx pre-empts the internal budget (#1168).
 		slog.Warn("cron: gc goroutine wait cancelled by stop ctx", "budget", budget)
 	case <-gcTimer.C:
-		// Counter pairs the Warn so dashboards can alert on shutdown-budget
-		// breaches without grepping journalctl (#1083).
-		metrics.CronStopBudgetExceededGCTotal.Add(1)
 		slog.Warn("cron: gc goroutine wait timeout", "budget", budget)
 	}
 }
@@ -131,13 +124,10 @@ func (s *Scheduler) drainCronStop(ctx context.Context) (deadlineHit bool, stopSt
 		// Shutdown ctx pre-empts the drain budget; deadlineHit makes the
 		// caller skip drainTriggerWG so the single-ceiling contract holds (#1168).
 		deadlineHit = true
-		metrics.CronStopBudgetExceededDrainTotal.Add(1)
 		slog.Warn("cron scheduler: stop cancelled by ctx before cron.Stop drained, proceeding",
 			"budget", budget)
 	case <-deadline.C:
 		deadlineHit = true
-		// see #1083 (counter pairs the Warn)
-		metrics.CronStopBudgetExceededDrainTotal.Add(1)
 		slog.Warn("cron scheduler: stop deadline exceeded before cron.Stop drained, proceeding",
 			"budget", budget)
 	}
@@ -179,12 +169,9 @@ func (s *Scheduler) drainTriggerWG(ctx context.Context, stopStart time.Time) {
 	case <-triggerDone:
 	case <-ctxDone(ctx):
 		// Shutdown ctx pre-empts the remaining budget (#1168).
-		metrics.CronStopBudgetExceededTriggerTotal.Add(1)
 		slog.Warn("cron scheduler: stop cancelled by ctx during triggerWG wait, proceeding",
 			"budget", budget, "remaining_ms", remaining.Milliseconds())
 	case <-triggerTimer.C:
-		// see #1083 (counter pairs the Warn)
-		metrics.CronStopBudgetExceededTriggerTotal.Add(1)
 		slog.Warn("cron scheduler: stop deadline exceeded during triggerWG wait, proceeding",
 			"budget", budget, "remaining_ms", remaining.Milliseconds())
 	}

@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING：删除 `GET /api/debug/pprof` 与配置键 `server.debug_mode`**（#3780）。在线 profile 端点不再注册，请求会收到 404；配置里还留着 `server.debug_mode` 时启动报 `config-deprecated`（服务照常启动），删掉这一键即可。`docs/ops/pprof.md` 一并删除。`naozhi doctor` 去掉了 `pprof` 检查和末尾的 `=== CLI Backends === / === Reverse Nodes ===` 段；各 backend 的 `cli backend <id>` 检查保留，协议与能力改看 `GET /api/cli/backends`。
+- **BREAKING：删除 `GET /api/debug/vars` 与全部 expvar 计数器**（#3770）。`internal/metrics` 包和各包自带的 `naozhi_*` 计数器 / gauge（session、cron、dispatch、webhook、upstream、node、workflow、eventlog、attachment 等）一并移除，`naozhi doctor` 的 `expvar` 检查也去掉了。`/health` 里的统计（eventlog、attachment_tracker、dispatch、active 等）不受影响，数值不变。抓取 `/api/debug/vars` 的脚本升级后会收到 404。
+- **BREAKING：删除飞书 webhook 接入模式，只保留 WebSocket 长连接**（#3767）。`POST /webhook/feishu` 不再注册；配置键 `platforms.feishu.connection_mode` 与 `platforms.feishu.allow_insecure_webhook` 不再读取，启动时报 `config-deprecated`（服务照常启动，飞书始终走长连接），环境变量 `NAOZHI_ALLOW_INSECURE_WEBHOOK` 也不再生效。原先用 `connection_mode: webhook` 的部署，请在飞书开发者后台把事件订阅和卡片回调都改成「使用长连接接收」，否则收不到消息；然后删掉这两个键。`verification_token` / `encrypt_key` 保留。
+- **BREAKING：删除 `naozhi cost backfill` 与 `naozhi cost reconcile` 子命令**（#3765）。这两个是一次性修账工具（导入历史 run 为 `Kind=backfill`、追加 `Kind=adjust` 冲回 #3097 之前 `--resume` 恢复额），账本已修过一次，之后的记账不会再产生这类偏差。`naozhi cost ...` 现在是未知子命令。账本读写、已写入的 backfill / adjust 行、`/api/cost/*` 与 `cost.budget` 不变；配置键无变化。
+
+### Changed
+
+- **`config.example.yaml` 注释精简**（#3776）：从 634 行压到 415 行，删掉了已移除拼写、`auto_chain` 沿革之类的考古注释；所有键、取值和注释掉的示例都没变。`im_access` 段原先被出站 webhook 的注释从中间截断，现在拆成两段，并删掉了「改动需要重启」这句错误说明（`im_access` 支持 `naozhi config reload` 热加载）。
+
 ## [0.1.48] - 2026-10-26
 
 这一版有两部分：一是对 10 月重构的 review 修复，二是一轮「做减法」。从 0.1.47 起 +7.8k / −120k 行，删掉的主要是自建治理工具、读源码的元测试、历史文档，以及几项没人用的功能。基本功能保持不变：dashboard、claude / kiro / codex 会话经 shim 跑且重启后存活、cron、agents、projects / planner、IM 收发（含图片与语音）、远程多节点、自升级。升级前请先看下面的 **Removed**。

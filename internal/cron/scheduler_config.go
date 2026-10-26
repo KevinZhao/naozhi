@@ -158,8 +158,7 @@ type ProcessReleaser interface {
 // SchedulerConfig holds the value/scalar configuration for the cron
 // scheduler; injected components live in SchedulerDeps (deps.go, #746). The
 // scheduler stays struct-config rather than functional-options (#776), and
-// the REQUIRED/OPTIONAL split below is API contract pinned by
-// scheduler_config_construction_test.go.
+// the REQUIRED/OPTIONAL split below is API contract.
 //
 // REQUIRED: SchedulerDeps.Router (no default; nil without AllowNilRouter →
 // boot-time slog.Error). StorePath "" = in-memory only (valid for tests).
@@ -209,10 +208,9 @@ type SchedulerConfig struct {
 	// values fall back to the default.
 	RunsKeepWindow time.Duration
 	// SlowThreshold overrides defaultCronSlowThreshold (30s) when > 0: a
-	// successful execution exceeding it is counted as "slow"
-	// (metrics.CronExecutionSlowTotal + warn). Raise it toward ExecTimeout
-	// on deployments running 300s+ batch jobs so the daily false alarm stops
-	// without losing the metric. Zero/negative fall back to the default (#519).
+	// successful execution exceeding it logs a "cron execution slow" warning.
+	// Raise it toward ExecTimeout on deployments running 300s+ batch jobs so
+	// the daily false alarm stops. Zero/negative fall back to the default (#519).
 	SlowThreshold time.Duration
 	// AutoPauseAfterFailures pauses a job after this many consecutive failed
 	// or timed-out runs, so a broken job stops notifying every tick; a
@@ -300,8 +298,8 @@ func (cfg *SchedulerConfig) applyDefaults() {
 // resolveAllowedRoot sanitises cfg.AllowedRoot (clearing NUL-bearing values
 // loudly) and returns its EvalSymlinks-resolved form; empty on either side
 // means "no root constraint". Kept off applyDefaults because EvalSymlinks is
-// a syscall. A NUL byte would tokenise workDirCacheKeySuffix incorrectly and
-// alias unrelated workDirs onto one cache slot, so it is cleared (#1297).
+// a syscall. A NUL byte is never valid in a path, so a NUL-bearing root is
+// cleared (#1297).
 func (cfg *SchedulerConfig) resolveAllowedRoot() string {
 	if strings.ContainsRune(cfg.AllowedRoot, 0) {
 		slog.Error("cron.NewScheduler: cfg.AllowedRoot contains NUL byte; clearing to disable root constraint",
