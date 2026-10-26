@@ -32,3 +32,5 @@ RFC 是落地前的设计取舍与实测记录，**不是最终规范**——架
 | [system-session.md](system-session.md) | Draft v2.1 | System Session 统一抽象 |
 | [workflow-dashboard.md](workflow-dashboard.md) | 已实现 v5 | Workflow 运行进度看板 |
 | [wsproto.md](wsproto.md) | — | WS type 常量与 per-type frame |
+
+> 已删除的历史 RFC（代码注释里仍有路径引用）：`consumer-interfaces`, `cron-panel-consolidation`, `cron-panel-consolidation-ui`, `cron-run-history`, `cron-v2-polish`, `csp-data-action`, `dashboard-cron-view-extraction`, `dashboard-es-modules`, `dashboard-event-uuid-idempotent-render`, `direct-user-settings`, `evententry-versioning`, `key-resolver`, `kiro-effort-control`, `kiro-effort-visibility`, `lightbox-gallery-nav`, `multi-backend-validation`, `pdf-attachment`, `send-engine-extraction`, `session-run-metrics`, `shim-golden-compat-drift`。原文可用 `git show 1793eda8:docs/rfc/<name>.md` 找回。
