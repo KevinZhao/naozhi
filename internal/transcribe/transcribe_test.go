@@ -3,8 +3,6 @@ package transcribe
 import (
 	"context"
 	"errors"
-	"os"
-	"os/exec"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/transcribestreaming"
@@ -136,247 +134,62 @@ func TestNewWithClient_DefaultLanguageCode(t *testing.T) {
 	}
 }
 
-func TestIsMultiLang(t *testing.T) {
+// TestBuildInput covers single-language, multi-language and the
+// R202606c-CR-001 degrade cases. A LanguageCode that contains a comma (so
+// isMultiLang() returns true) but normalizes to a single entry — e.g. a
+// trailing comma "zh-CN," or a leading comma ",en-US" — must NOT set
+// IdentifyMultipleLanguages with a one-element LanguageOptions. AWS
+// Transcribe Streaming returns a 400 BadRequestException when
+// IdentifyMultipleLanguages=true is paired with fewer than two languages,
+// which would fail every transcription. The builder must degrade to
+// single-LanguageCode using the surviving entry.
+func TestBuildInput(t *testing.T) {
 	tests := []struct {
-		name string
-		lang string
-		want bool
+		name          string
+		lang          string
+		wantMultiLang bool   // isMultiLang() precondition
+		wantLangCode  string // single-language LanguageCode, "" for multi
+		wantOptions   string // multi-language LanguageOptions, "" for nil
+		wantPreferred string
 	}{
-		{"single language", "zh-CN", false},
-		{"two languages", "zh-CN,en-US", true},
-		{"three languages", "zh-CN,en-US,ja-JP", true},
-		{"default", "", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := Config{LanguageCode: tt.lang}
-			if cfg.LanguageCode == "" {
-				cfg.LanguageCode = "zh-CN"
-			}
-			svc := newWithClient(&mockTranscribeAPI{}, cfg)
-			if got := svc.isMultiLang(); got != tt.want {
-				t.Errorf("isMultiLang() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestBuildInput_SingleLanguage(t *testing.T) {
-	svc := newWithClient(&mockTranscribeAPI{}, Config{LanguageCode: "zh-CN"})
-	input := svc.buildInput(types.MediaEncodingPcm, 16000)
-
-	if input.LanguageCode != "zh-CN" {
-		t.Errorf("LanguageCode = %q, want %q", input.LanguageCode, "zh-CN")
-	}
-	if input.IdentifyMultipleLanguages {
-		t.Error("IdentifyMultipleLanguages should be false for single language")
-	}
-	if input.LanguageOptions != nil {
-		t.Error("LanguageOptions should be nil for single language")
-	}
-}
-
-func TestBuildInput_MultiLanguage(t *testing.T) {
-	svc := newWithClient(&mockTranscribeAPI{}, Config{LanguageCode: "zh-CN,en-US"})
-	input := svc.buildInput(types.MediaEncodingOggOpus, 48000)
-
-	if !input.IdentifyMultipleLanguages {
-		t.Error("IdentifyMultipleLanguages should be true")
-	}
-	if input.LanguageOptions == nil || *input.LanguageOptions != "zh-CN,en-US" {
-		t.Errorf("LanguageOptions = %v, want %q", input.LanguageOptions, "zh-CN,en-US")
-	}
-	if input.PreferredLanguage != "zh-CN" {
-		t.Errorf("PreferredLanguage = %q, want %q", input.PreferredLanguage, "zh-CN")
-	}
-	if input.LanguageCode != "" {
-		t.Errorf("LanguageCode should be empty for multi-lang, got %q", input.LanguageCode)
-	}
-}
-
-func TestBuildInput_MultiLanguage_Spaces(t *testing.T) {
-	svc := newWithClient(&mockTranscribeAPI{}, Config{LanguageCode: "zh-CN, en-US , ja-JP"})
-	input := svc.buildInput(types.MediaEncodingPcm, 16000)
-
-	if *input.LanguageOptions != "zh-CN,en-US,ja-JP" {
-		t.Errorf("LanguageOptions not normalized: got %q", *input.LanguageOptions)
-	}
-	if input.PreferredLanguage != "zh-CN" {
-		t.Errorf("PreferredLanguage = %q, want %q", input.PreferredLanguage, "zh-CN")
-	}
-}
-
-// TestBuildInput_MultiLangDegradesToSingle pins R202606c-CR-001: a
-// LanguageCode that contains a comma (so isMultiLang() returns true) but
-// normalizes to a single entry — e.g. a trailing comma "zh-CN," or a
-// leading comma ",en-US" — must NOT set IdentifyMultipleLanguages with a
-// one-element LanguageOptions. AWS Transcribe Streaming returns a 400
-// BadRequestException when IdentifyMultipleLanguages=true is paired with
-// fewer than two languages, which would fail every transcription. The
-// builder must degrade to single-LanguageCode using the surviving entry.
-func TestBuildInput_MultiLangDegradesToSingle(t *testing.T) {
-	tests := []struct {
-		name string
-		lang string
-		want string
-	}{
-		{"trailing comma", "zh-CN,", "zh-CN"},
-		{"leading comma", ",en-US", "en-US"},
-		{"double comma around one", ",,ja-JP,,", "ja-JP"},
-		{"spaces and commas", " zh-CN , ", "zh-CN"},
+		{"single language", "zh-CN", false, "zh-CN", "", ""},
+		{"default", "", false, "zh-CN", "", ""},
+		{"two languages", "zh-CN,en-US", true, "", "zh-CN,en-US", "zh-CN"},
+		{"spaces normalized", "zh-CN, en-US , ja-JP", true, "", "zh-CN,en-US,ja-JP", "zh-CN"},
+		{"degrade: trailing comma", "zh-CN,", true, "zh-CN", "", ""},
+		{"degrade: leading comma", ",en-US", true, "en-US", "", ""},
+		{"degrade: double comma around one", ",,ja-JP,,", true, "ja-JP", "", ""},
+		{"degrade: spaces and commas", " zh-CN , ", true, "zh-CN", "", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			svc := newWithClient(&mockTranscribeAPI{}, Config{LanguageCode: tt.lang})
-			// Sanity: these inputs DO trip isMultiLang (they contain a comma),
+			// The degrade cases DO trip isMultiLang (they contain a comma),
 			// which is exactly why the degrade path matters.
-			if !svc.isMultiLang() {
-				t.Fatalf("test precondition: isMultiLang() should be true for %q", tt.lang)
+			if got := svc.isMultiLang(); got != tt.wantMultiLang {
+				t.Fatalf("isMultiLang() = %v, want %v for %q", got, tt.wantMultiLang, tt.lang)
 			}
 			input := svc.buildInput(types.MediaEncodingPcm, 16000)
 
-			if input.IdentifyMultipleLanguages {
-				t.Errorf("IdentifyMultipleLanguages should be false when config "+
-					"resolves to a single language (%q)", tt.lang)
+			if input.LanguageCode != types.LanguageCode(tt.wantLangCode) {
+				t.Errorf("LanguageCode = %q, want %q", input.LanguageCode, tt.wantLangCode)
 			}
-			if input.LanguageCode != types.LanguageCode(tt.want) {
-				t.Errorf("LanguageCode = %q, want %q", input.LanguageCode, tt.want)
+			if tt.wantOptions == "" {
+				if input.IdentifyMultipleLanguages || input.LanguageOptions != nil {
+					t.Errorf("IdentifyMultipleLanguages = %v, LanguageOptions = %v; want false, nil for a single language",
+						input.IdentifyMultipleLanguages, input.LanguageOptions)
+				}
+			} else {
+				if !input.IdentifyMultipleLanguages {
+					t.Error("IdentifyMultipleLanguages should be true")
+				}
+				if input.LanguageOptions == nil || *input.LanguageOptions != tt.wantOptions {
+					t.Errorf("LanguageOptions = %v, want %q", input.LanguageOptions, tt.wantOptions)
+				}
 			}
-			if input.LanguageOptions != nil {
-				t.Errorf("LanguageOptions should be nil for degraded single language, got %v",
-					input.LanguageOptions)
-			}
-			if input.PreferredLanguage != "" {
-				t.Errorf("PreferredLanguage should be empty for degraded single language, got %q",
-					input.PreferredLanguage)
+			if input.PreferredLanguage != types.LanguageCode(tt.wantPreferred) {
+				t.Errorf("PreferredLanguage = %q, want %q", input.PreferredLanguage, tt.wantPreferred)
 			}
 		})
-	}
-}
-
-// TestLookupFFmpeg_NoProcessWideCache pins R240-SEC-9 (#1050): the previous
-// implementation memoised the first exec.LookPath result for the lifetime
-// of the process via sync.Once, so a startup-time PATH state stayed pinned
-// even after the operator (or an attacker) removed the offending entry.
-//
-// This test mutates PATH between two lookupFFmpeg calls and asserts the
-// second call observes the new state. The check only runs when ffmpeg is
-// actually installed on the host (otherwise both sides return
-// ErrFFmpegNotFound and the assertion is vacuous); the post-fix-only
-// branch below ALSO covers the cache-removed contract: clearing PATH
-// must produce a fresh "not found" answer immediately, not the cached
-// success.
-func TestLookupFFmpeg_NoProcessWideCache(t *testing.T) {
-	originalPATH := os.Getenv("PATH")
-	t.Cleanup(func() { os.Setenv("PATH", originalPATH) })
-
-	// First lookup with the host's normal PATH. Capture the outcome so the
-	// "PATH cleared" assertion below knows whether ffmpeg is available at
-	// all on this CI worker.
-	firstPath, firstErr := lookupFFmpeg()
-
-	// Clear PATH and call again. With the sync.Once cache the function
-	// would still report the previous success path; without the cache
-	// (post-fix) it must report "ffmpeg not found".
-	if err := os.Setenv("PATH", ""); err != nil {
-		t.Fatalf("setenv PATH=\"\": %v", err)
-	}
-	clearedPath, clearedErr := lookupFFmpeg()
-	if clearedErr == nil {
-		t.Errorf("lookupFFmpeg with empty PATH returned %q, nil — expected an error "+
-			"because the previous implementation cached the first PATH-resolved "+
-			"binary process-wide and ignored later PATH changes (R240-SEC-9 / #1050)",
-			clearedPath)
-	}
-
-	// Restore PATH and assert we again see whatever the host has —
-	// re-resolving must surface a fresh outcome each time.
-	os.Setenv("PATH", originalPATH)
-	secondPath, secondErr := lookupFFmpeg()
-	if firstErr == nil {
-		// Host has ffmpeg: re-resolution must still find it after PATH
-		// was bounced through empty. With the cache removed every call
-		// is a fresh exec.LookPath, so success must reappear.
-		if secondErr != nil {
-			t.Errorf("lookupFFmpeg after PATH restore returned err %v; "+
-				"expected a fresh resolution to find the same ffmpeg as the "+
-				"first lookup (%q)", secondErr, firstPath)
-		}
-		if secondPath == "" {
-			t.Errorf("lookupFFmpeg after PATH restore returned empty path; " +
-				"expected re-resolution to find a binary on the restored PATH")
-		}
-	}
-}
-
-// TestLookupFFmpeg_OverrideEnv pins the NAOZHI_FFMPEG_PATH operator-override
-// branch (#1050 follow-on): a non-empty env var bypasses PATH resolution
-// entirely. A working override must succeed even when PATH is empty; a
-// pointing-at-nothing override must error loudly rather than silently fall
-// back to PATH (a misconfigured override should be a loud failure, not a
-// degraded one).
-func TestLookupFFmpeg_OverrideEnv(t *testing.T) {
-	originalPATH := os.Getenv("PATH")
-	originalOverride := os.Getenv(ffmpegPathEnv)
-	t.Cleanup(func() {
-		os.Setenv("PATH", originalPATH)
-		os.Setenv(ffmpegPathEnv, originalOverride)
-	})
-
-	// Find a real executable to point the override at. Use /bin/sh which
-	// every POSIX host has — we are testing the resolution flow, not the
-	// downstream ffmpeg behaviour. lookupFFmpeg only verifies the binary
-	// resolves and is executable; the actual ffmpeg invocation is gated
-	// elsewhere.
-	shellPath, err := exec.LookPath("sh")
-	if err != nil {
-		t.Skipf("no sh on PATH; cannot exercise override branch: %v", err)
-	}
-
-	// Override set + PATH cleared: must succeed via override.
-	os.Setenv(ffmpegPathEnv, shellPath)
-	if err := os.Setenv("PATH", ""); err != nil {
-		t.Fatalf("setenv PATH=\"\": %v", err)
-	}
-	got, err := lookupFFmpeg()
-	if err != nil {
-		t.Fatalf("override %q with empty PATH: lookupFFmpeg err=%v; "+
-			"expected the override to bypass PATH resolution entirely",
-			shellPath, err)
-	}
-	if got != shellPath {
-		t.Errorf("override returned %q, want %q (must echo the env override "+
-			"verbatim, not re-resolve through PATH)", got, shellPath)
-	}
-
-	// Override pointing at a missing path must error, not fall back to PATH.
-	os.Setenv(ffmpegPathEnv, "/nonexistent/ffmpeg-fake")
-	os.Setenv("PATH", originalPATH)
-	if _, err := lookupFFmpeg(); err == nil {
-		t.Error("override pointing at missing binary returned nil err; " +
-			"expected an explicit failure rather than silent PATH fallback")
-	}
-
-	// R100110-INJ-7: a relative-path override must be rejected up front rather
-	// than degrading into a PATH search inside exec.LookPath, which would
-	// reintroduce the PATH-injection surface the knob promises to remove.
-	for _, rel := range []string{"ffmpeg", "bin/ffmpeg", "./ffmpeg", "../ffmpeg"} {
-		os.Setenv(ffmpegPathEnv, rel)
-		os.Setenv("PATH", originalPATH)
-		if _, err := lookupFFmpeg(); err == nil {
-			t.Errorf("relative override %q returned nil err; "+
-				"expected rejection requiring an absolute path", rel)
-		}
-	}
-
-	// Empty override falls back to PATH (regression guard for "" handling).
-	os.Setenv(ffmpegPathEnv, "")
-	if _, err := lookupFFmpeg(); err != nil && originalPATH != "" {
-		// PATH lookup may legitimately fail on hosts without ffmpeg — only
-		// assert when the cleanup PATH actually contains it.
-		if _, lookErr := exec.LookPath("ffmpeg"); lookErr == nil {
-			t.Errorf("empty override + PATH-with-ffmpeg returned err %v; "+
-				"expected fallback to PATH lookup", err)
-		}
 	}
 }

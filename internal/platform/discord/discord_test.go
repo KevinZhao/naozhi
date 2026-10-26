@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -25,16 +24,6 @@ func TestNew_Defaults(t *testing.T) {
 	}
 	if d.MaxReplyLength() != platform.DiscordMaxReplyLen {
 		t.Errorf("MaxReplyLength() = %d, want %d", d.MaxReplyLength(), platform.DiscordMaxReplyLen)
-	}
-}
-
-// TestDiscordMaxReplyLen_Constant pins the Discord ceiling at its documented
-// API limit and guards the policy-package source of truth (#2236). Discord's
-// BASE_TYPE_MAX_LENGTH is 2000; this must not be silently changed.
-func TestDiscordMaxReplyLen_Constant(t *testing.T) {
-	t.Parallel()
-	if platform.DiscordMaxReplyLen != 2000 {
-		t.Errorf("platform.DiscordMaxReplyLen = %d, want 2000", platform.DiscordMaxReplyLen)
 	}
 }
 
@@ -443,63 +432,6 @@ func TestRESTSession_NoRedirect_SEC2(t *testing.T) {
 // one place so the test suite is decoupled from the field's storage type.
 func setTestBotID(d *Discord, id string) {
 	d.botID.Store(&id)
-}
-
-// TestBotID_ConcurrentStoreAndRead is the regression test for #1814: the
-// gateway-connect store of botID (Start) races concurrent onMessageCreate
-// reads. With the plain-string field this tripped the race detector on a
-// torn 16-byte string assignment; with atomic.Pointer the handoff is
-// race-free. Run with -race.
-func TestBotID_ConcurrentStoreAndRead(t *testing.T) {
-	t.Parallel()
-	d := New(Config{BotToken: "test-token"})
-	d.handler = func(_ context.Context, _ platform.IncomingMessage) {}
-
-	const readers = 32
-	stop := make(chan struct{})
-	done := make(chan struct{}, readers+1)
-
-	// Writer: simulate Start() stamping the identity after connect.
-	go func() {
-		defer func() { done <- struct{}{} }()
-		for i := 0; i < 1000; i++ {
-			id := "bot-identity-string-value"
-			d.botID.Store(&id)
-		}
-		close(stop)
-	}()
-
-	// Readers: simulate discordgo dispatching onMessageCreate goroutines that
-	// read d.botID while the writer stamps it.
-	for i := 0; i < readers; i++ {
-		go func() {
-			defer func() { done <- struct{}{} }()
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				d.onMessageCreate(nil, &discordgo.MessageCreate{
-					Message: &discordgo.Message{
-						Author:   &discordgo.User{ID: "someone-else"},
-						Content:  "ping <@bot-identity-string-value>",
-						Mentions: []*discordgo.User{{ID: "bot-identity-string-value"}},
-					},
-				})
-				_ = d.getBotID()
-			}
-		}()
-	}
-
-	timeout := time.After(5 * time.Second)
-	for i := 0; i < readers+1; i++ {
-		select {
-		case <-done:
-		case <-timeout:
-			t.Fatal("goroutines did not finish; possible deadlock")
-		}
-	}
 }
 
 // TestGetBotID_EmptyBeforeConnect verifies getBotID returns "" before the

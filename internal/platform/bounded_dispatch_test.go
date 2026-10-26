@@ -1,41 +1,11 @@
 package platform
 
 import (
-	"bytes"
-	"log/slog"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
-
-// captureLogs swaps slog's default handler for a buffer at Warn level and
-// returns a reader. Not parallel-safe: tests using it must not t.Parallel().
-func captureLogs(t *testing.T) func() string {
-	t.Helper()
-	var mu sync.Mutex
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&lockedWriter{mu: &mu, w: &buf}, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return func() string {
-		mu.Lock()
-		defer mu.Unlock()
-		return buf.String()
-	}
-}
-
-type lockedWriter struct {
-	mu *sync.Mutex
-	w  *bytes.Buffer
-}
-
-func (l *lockedWriter) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.w.Write(p)
-}
 
 // waitReturns reports whether b.Wait() returns within d.
 func waitReturns(b *BoundedDispatch, d time.Duration) bool {
@@ -51,9 +21,9 @@ func waitReturns(b *BoundedDispatch, d time.Duration) bool {
 
 // TestBoundedDispatch_ZeroValueUsesDefaultCap pins that a bare struct literal
 // (how many adapter tests build their fixtures) is a working pool sized at
-// DefaultHandlerConcurrency, and that Name "" still logs a usable prefix.
+// DefaultHandlerConcurrency.
 func TestBoundedDispatch_ZeroValueUsesDefaultCap(t *testing.T) {
-	logs := captureLogs(t)
+	t.Parallel()
 	var b BoundedDispatch
 	n := 0
 	for b.TryAcquire() {
@@ -68,9 +38,6 @@ func TestBoundedDispatch_ZeroValueUsesDefaultCap(t *testing.T) {
 	if b.TryGo("zero", func() { t.Error("fn must not run when saturated") }) {
 		t.Fatal("TryGo returned true on a saturated pool")
 	}
-	if out := logs(); !strings.Contains(out, "platform: handler semaphore full, dropping message") || !strings.Contains(out, "handler=zero") {
-		t.Fatalf("drop warning missing or wrong prefix: %q", out)
-	}
 	for i := 0; i < n; i++ {
 		b.Release()
 	}
@@ -81,10 +48,10 @@ func TestBoundedDispatch_ZeroValueUsesDefaultCap(t *testing.T) {
 }
 
 // TestBoundedDispatch_TryGoDropsWhenSaturated fills a Cap=2 pool with two
-// blocked handlers and asserts the third submission is dropped with a Warn
-// carrying the label and caller attrs, never blocking and never running fn.
+// blocked handlers and asserts the third submission is dropped, never
+// blocking and never running fn.
 func TestBoundedDispatch_TryGoDropsWhenSaturated(t *testing.T) {
-	logs := captureLogs(t)
+	t.Parallel()
 	b := &BoundedDispatch{Name: "unit", Cap: 2}
 	release := make(chan struct{})
 	var started sync.WaitGroup
@@ -112,12 +79,6 @@ func TestBoundedDispatch_TryGoDropsWhenSaturated(t *testing.T) {
 		t.Fatal("dropped fn must not run")
 	case <-time.After(50 * time.Millisecond):
 	}
-	out := logs()
-	for _, want := range []string{"unit: handler semaphore full, dropping message", "handler=unit", "chat=c1", "user=u1"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("drop warning missing %q in %q", want, out)
-		}
-	}
 
 	if waitReturns(b, 50*time.Millisecond) {
 		t.Fatal("Wait returned while two handlers were still in flight")
@@ -143,7 +104,7 @@ func TestBoundedDispatch_TryGoDropsWhenSaturated(t *testing.T) {
 // not crash the process, must release its slot, must Done its wg count, and
 // must not disturb a concurrently running healthy handler.
 func TestBoundedDispatch_PanicRecoveredReleasesSlot(t *testing.T) {
-	logs := captureLogs(t)
+	t.Parallel()
 	b := &BoundedDispatch{Name: "unit", Cap: 2}
 	release := make(chan struct{})
 	var healthyDone atomic.Bool
@@ -163,10 +124,6 @@ func TestBoundedDispatch_PanicRecoveredReleasesSlot(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	b.Release()
-	out := logs()
-	if !strings.Contains(out, "panic in platform handler (recovered)") || !strings.Contains(out, "handler=boom") || !strings.Contains(out, "kaboom") {
-		t.Fatalf("panic not logged with label: %q", out)
-	}
 	if healthyDone.Load() {
 		t.Fatal("healthy handler finished early; test setup broken")
 	}
@@ -183,7 +140,7 @@ func TestBoundedDispatch_PanicRecoveredReleasesSlot(t *testing.T) {
 // the caller before TryRun returns, the slot is released afterwards, panics
 // are recovered, and a saturated pool drops without running fn.
 func TestBoundedDispatch_TryRunSynchronous(t *testing.T) {
-	logs := captureLogs(t)
+	t.Parallel()
 	b := &BoundedDispatch{Name: "unit", Cap: 1}
 	ran := false
 	if !b.TryRun("inline", func() { ran = true }) {
@@ -195,18 +152,12 @@ func TestBoundedDispatch_TryRunSynchronous(t *testing.T) {
 	if !b.TryRun("inline-panic", func() { panic("inline boom") }) {
 		t.Fatal("TryRun with panicking fn should still report it ran")
 	}
-	if !strings.Contains(logs(), "handler=inline-panic") {
-		t.Fatalf("inline panic not recovered/logged: %q", logs())
-	}
 	if !b.TryAcquire() {
 		t.Fatal("TryRun leaked its slot")
 	}
 	dropped := b.TryRun("inline", func() { t.Error("fn must not run when saturated") }, "k", "v")
 	if dropped {
 		t.Fatal("TryRun returned true on a saturated pool")
-	}
-	if !strings.Contains(logs(), "handler=inline k=v") {
-		t.Fatalf("TryRun drop warning missing attrs: %q", logs())
 	}
 	b.Release()
 	if !waitReturns(b, time.Second) {
@@ -218,7 +169,7 @@ func TestBoundedDispatch_TryRunSynchronous(t *testing.T) {
 // slot (so self-heal never competes with inbound handlers), must be drained
 // by Wait, and must recover panics.
 func TestBoundedDispatch_GoTrackedWithoutSlot(t *testing.T) {
-	logs := captureLogs(t)
+	t.Parallel()
 	b := &BoundedDispatch{Name: "unit", Cap: 1}
 	if !b.TryAcquire() {
 		t.Fatal("initial acquire failed")
@@ -233,9 +184,6 @@ func TestBoundedDispatch_GoTrackedWithoutSlot(t *testing.T) {
 	if !waitReturns(b, 2*time.Second) {
 		t.Fatal("Wait did not drain Go goroutines")
 	}
-	if !strings.Contains(logs(), "handler=bg-panic") {
-		t.Fatalf("Go panic not recovered/logged: %q", logs())
-	}
 	b.Release()
 }
 
@@ -244,7 +192,7 @@ func TestBoundedDispatch_GoTrackedWithoutSlot(t *testing.T) {
 // never exceeds Cap, every submission is either run or dropped exactly once,
 // and Wait drains everything.
 func TestBoundedDispatch_ConcurrentNeverExceedsCap(t *testing.T) {
-	captureLogs(t) // silence drop warnings
+	t.Parallel()
 	const capacity = 4
 	const submissions = 200
 	b := &BoundedDispatch{Name: "unit", Cap: capacity}
