@@ -315,7 +315,7 @@ function sanitizeKeySlug(s) {
   // project folder containing e.g. 'foo：bar' cannot survive as a
   // colon-like byte into the 4-segment key that strings.SplitN(":",4)
   // relies on server-side. Also strips every non-ASCII codepoint the
-  // server-side session.ValidateSessionKey rejects (#2429): C1 controls
+  // server-side sessionkey.ValidateSessionKey rejects (#2429): C1 controls
   // (U+0080-U+009F), zero-width / LTR-RTL marks (U+200B-U+200F), bidi
   // override / embedding (U+202A-U+202E), Unicode line separators
   // (U+2028/U+2029) and the BOM (U+FEFF), plus the directional isolates
@@ -324,7 +324,7 @@ function sanitizeKeySlug(s) {
   // the server 400s on first send, leaving a pending card that can never
   // send. The class is written with \uXXXX escapes ONLY - the Go contract
   // test TestDashboardJS_SanitizeKeySlug_CoversServerDenySet parses it
-  // and asserts it is a superset of session.DeniedKeyRuneRanges. Then
+  // and asserts it is a superset of sessionkey.DeniedKeyRuneRanges. Then
   // collapse runs of filesystem-hostile chars into single dashes so the
   // key stays short and readable. Cap at 64 bytes to leave plenty of
   // headroom under the 128-byte sanitizeKeyComponent cap.

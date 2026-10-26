@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -63,8 +64,12 @@ func TestEventLogIntegration_DirectSinkWorks(t *testing.T) {
 	// Replay path: sinkReady=true as we pass replayPhase=true.
 	sink([]clievent.EventEntry{{UUID: "aa", Time: 100, Type: "user", Summary: "replay"}}, true)
 
-	// Live path.
-	sink([]clievent.EventEntry{{UUID: "bb", Time: 200, Type: "user", Summary: "live"}}, false)
+	// Live path: a multi-entry batch must land in order with Time paired.
+	sink([]clievent.EventEntry{
+		{UUID: "bb", Time: 200, Type: "user", Summary: "live-0"},
+		{UUID: "cc", Time: 201, Type: "text", Summary: "live-1"},
+		{UUID: "dd", Time: 202, Type: "result", Summary: "live-2"},
+	}, false)
 
 	// Wait for the persister to drain + fsync.
 	testhelper.Eventually(t, func() bool {
@@ -80,11 +85,13 @@ func TestEventLogIntegration_DirectSinkWorks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadLatest: %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("got %d entries (want 1 live; replay must have been dropped)", len(got))
+	if len(got) != 3 {
+		t.Fatalf("got %d entries (want 3 live; replay must have been dropped)", len(got))
 	}
-	if got[0].Summary != "live" {
-		t.Errorf("entry is %q, want 'live'", got[0].Summary)
+	for i, e := range got {
+		if want := fmt.Sprintf("live-%d", i); e.Summary != want || e.Time != int64(200+i) {
+			t.Errorf("entry[%d] = (%q, %d), want (%q, %d)", i, e.Summary, e.Time, want, 200+i)
+		}
 	}
 	if r.hist.persister.Stats().ReplayLeak != 1 {
 		t.Errorf("ReplayLeak=%d, want 1", r.hist.persister.Stats().ReplayLeak)
