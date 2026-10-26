@@ -91,7 +91,7 @@
 
 ```
 iPhone app（SwiftUI）
-  ├─ 主 app：五个标签、会话详情、内置浏览器打开网页专家视图
+  ├─ 主 app：五个标签、会话详情、内置浏览器打开网页 dashboard
   ├─ Notification Service Extension：收到推送后经 Tailscale 拉取详情并渲染（推送载荷只带最少信息）
   ├─ Widget / Live Activity 扩展
   └─ App Intents（三级停止、发消息、语音倒脑子）
