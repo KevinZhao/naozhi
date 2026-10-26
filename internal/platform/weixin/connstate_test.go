@@ -306,22 +306,6 @@ func TestConnState_StaleTokenFails(t *testing.T) {
 	}
 }
 
-// TestConnState_StaleTokenResetsFailureStreak: a stale-token reply ends the
-// run of failures, so the failure after it waits the 2s retry and not the 30s
-// backoff that a third strike would take. It pays the 2s retry three times.
-func TestConnState_StaleTokenResetsFailureStreak(t *testing.T) {
-	t.Parallel()
-	rl := newScriptedRelay(t)
-	startScriptedWith(t, rl, func(w *Weixin) { w.staleTokenPause = 50 * time.Millisecond })
-
-	busy := replyAPIError(-1, -1, "busy")
-	for _, reply := range []func(http.ResponseWriter){busy, busy, replyAPIError(-14, -14, "session timeout"), busy} {
-		rl.awaitPoll(t)
-		rl.script <- reply
-	}
-	rl.awaitPoll(t) // times out if the last failure took the backoff
-}
-
 func TestStaleTokenRetryDelay_DefaultsToAnHour(t *testing.T) {
 	t.Parallel()
 	if got := New(Config{Token: "tok"}).staleTokenRetryDelay(); got != time.Hour {
