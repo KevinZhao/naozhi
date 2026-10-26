@@ -97,14 +97,6 @@ func (f *Feishu) cleanupNoncesTick() {
 	})
 }
 
-// evictNonces dispatches to the test hook when set, else evictOldestNonces.
-func (f *Feishu) evictNonces() int {
-	if f.evictNoncesFn != nil {
-		return f.evictNoncesFn()
-	}
-	return f.evictOldestNonces()
-}
-
 // evictOldestNonces removes up to nonceEvictionBatch entries closest to
 // natural expiry so fresh traffic keeps flowing when a leaked-token flood
 // hits the cap (#1332). The replay regression is bounded: only nonces inside

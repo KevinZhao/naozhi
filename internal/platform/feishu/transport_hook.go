@@ -196,7 +196,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 						// evictOldestNonces resyncs the counter to the live size,
 						// discarding this speculative +1; re-apply it AFTER eviction
 						// so the LoadOrStore slot stays reserved (#1534).
-						evicted := f.evictNonces()
+						evicted := f.evictOldestNonces()
 						if evicted == 0 {
 							// No resync happened, so the speculative +1 is still
 							// live: roll it back (a second Add(1) would leak).

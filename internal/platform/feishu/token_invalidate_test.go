@@ -1,12 +1,9 @@
 package feishu
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/platform"
 )
 
 // TestAPIError_IsTokenExpired locks the catalogue of Feishu error codes that
@@ -80,80 +77,36 @@ func TestFeishu_InvalidateAccessToken(t *testing.T) {
 	}
 }
 
-// TestFeishu_MaybeInvalidateOnTokenError_TokenExpired verifies the helper
-// calls invalidateAccessToken when the error chain carries an APIError
-// with a token-expired code.
-func TestFeishu_MaybeInvalidateOnTokenError_TokenExpired(t *testing.T) {
+// TestFeishu_MaybeInvalidateOnTokenError: the helper passes the error through
+// unchanged and clears the token cache only when the error chain carries an
+// APIError with a token-expired code. Permanent errors (config problems) and
+// generic errors (network) must not churn refreshes. R83 / RETRY1.
+func TestFeishu_MaybeInvalidateOnTokenError(t *testing.T) {
 	t.Parallel()
-	f := &Feishu{
-		accessToken: "cached_token",
-		tokenExpiry: time.Now().Add(time.Hour),
+	tests := []struct {
+		name        string
+		err         error
+		wantCleared bool
+	}{
+		// Wrapped in fmt.Errorf("%w") to prove errors.As walks the chain.
+		{"token expired", fmt.Errorf("reply: %w", &APIError{Code: 99991671, Op: "send"}), true},
+		{"permanent (app disabled)", &APIError{Code: 99991664, Op: "send"}, false},
+		{"nil", nil, false},
+		{"non-API error", fmt.Errorf("network: connection refused"), false},
 	}
-	// Wrap the APIError in fmt.Errorf("%w") to prove errors.As walks the chain.
-	wrapped := fmt.Errorf("reply: %w", &APIError{Code: 99991671, Op: "send"})
-	got := f.maybeInvalidateOnTokenError(wrapped)
-	if got != wrapped {
-		t.Errorf("returned err = %v, want %v (passthrough contract broken)", got, wrapped)
-	}
-	if f.accessToken != "" {
-		t.Errorf("accessToken = %q, want empty (invalidation did not fire)", f.accessToken)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &Feishu{
+				accessToken: "cached_token",
+				tokenExpiry: time.Now().Add(time.Hour),
+			}
+			if got := f.maybeInvalidateOnTokenError(tt.err); got != tt.err {
+				t.Errorf("returned err = %v, want %v (passthrough contract broken)", got, tt.err)
+			}
+			if cleared := f.accessToken == ""; cleared != tt.wantCleared {
+				t.Errorf("token cleared = %v, want %v", cleared, tt.wantCleared)
+			}
+		})
 	}
 }
-
-// TestFeishu_MaybeInvalidateOnTokenError_PermanentError verifies the helper
-// does NOT invalidate on permanent errors (e.g. invalid app_secret) — those
-// are signalling config problems, not token staleness, so refreshing would
-// just waste an HTTP round-trip.
-func TestFeishu_MaybeInvalidateOnTokenError_PermanentError(t *testing.T) {
-	t.Parallel()
-	f := &Feishu{
-		accessToken: "cached_token",
-		tokenExpiry: time.Now().Add(time.Hour),
-	}
-	got := f.maybeInvalidateOnTokenError(&APIError{Code: 99991664, Op: "send"}) // app disabled
-	if got == nil || !platform.IsPermanent(got) {
-		t.Errorf("returned err = %v, want permanent APIError passthrough", got)
-	}
-	if f.accessToken != "cached_token" {
-		t.Errorf("accessToken was cleared on non-token error — would churn refreshes for config problems")
-	}
-}
-
-// TestFeishu_MaybeInvalidateOnTokenError_Nil verifies the no-op path — a
-// nil error must not touch the token cache.
-func TestFeishu_MaybeInvalidateOnTokenError_Nil(t *testing.T) {
-	t.Parallel()
-	f := &Feishu{
-		accessToken: "cached_token",
-		tokenExpiry: time.Now().Add(time.Hour),
-	}
-	if got := f.maybeInvalidateOnTokenError(nil); got != nil {
-		t.Errorf("nil in, got %v out", got)
-	}
-	if f.accessToken != "cached_token" {
-		t.Error("cached token was disturbed by nil error")
-	}
-}
-
-// TestFeishu_MaybeInvalidateOnTokenError_NonAPIError verifies that generic
-// errors (network timeouts, wrapped io errors) do not invalidate the cache.
-// Only the structured APIError with a token code should trigger invalidation.
-func TestFeishu_MaybeInvalidateOnTokenError_NonAPIError(t *testing.T) {
-	t.Parallel()
-	f := &Feishu{
-		accessToken: "cached_token",
-		tokenExpiry: time.Now().Add(time.Hour),
-	}
-	got := f.maybeInvalidateOnTokenError(fmt.Errorf("network: connection refused"))
-	if got == nil {
-		t.Error("non-nil error should pass through unchanged")
-	}
-	if f.accessToken != "cached_token" {
-		t.Error("generic error invalidated token cache — over-eager invalidation")
-	}
-}
-
-// Reference to silence unused imports if tests get restructured; also
-// documents that context is a legitimate dependency for later Reply-level
-// integration tests in this suite.
-var _ = context.Background

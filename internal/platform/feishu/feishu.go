@@ -219,10 +219,6 @@ type Feishu struct {
 	// bypassing the cap gate. Eviction-and-recount is one critical section (#1534).
 	nonceEvictMu sync.Mutex
 
-	// evictNoncesFn lets tests inject the eviction step (incl. the evicted==0
-	// fallback) without seeding a 50k-entry map; nil = evictOldestNonces.
-	evictNoncesFn func() int
-
 	// reactionIDs caches (messageID + emoji_type) -> reactionCacheEntry because
 	// Feishu's delete endpoint needs the reaction_id. Entries go on successful
 	// removal or when cleanupNoncesTick sees the expiry, so unpaired Adds
