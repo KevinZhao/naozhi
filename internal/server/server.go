@@ -251,11 +251,9 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	// Middleware order: withTraceID outermost so every request (auth or not)
-	// carries X-Request-ID before gzip mutates the writer; withAPIVersionAlias
-	// innermost so /api/v1/<rest> is rewritten just before mux matching while
-	// trace-id + gzip observe the original path (#677, #425).
+	// carries X-Request-ID before gzip mutates the writer (#677).
 	srv := &http.Server{
-		Handler:           withTraceID(gzipMiddleware(withAPIVersionAlias(s.mux))),
+		Handler:           withTraceID(gzipMiddleware(s.mux)),
 		ReadHeaderTimeout: 5 * time.Second, // Slowloris defense
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      60 * time.Second,

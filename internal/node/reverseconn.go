@@ -331,11 +331,6 @@ func (c *ReverseConn) ProxyCloseDiscovered(ctx context.Context, pid int, session
 	return err
 }
 
-func (c *ReverseConn) ProxyRestartPlanner(ctx context.Context, projectName string) error {
-	_, err := c.rpc(ctx, "restart_planner", map[string]string{"project_name": projectName})
-	return err
-}
-
 func (c *ReverseConn) ProxyUpdateConfig(ctx context.Context, projectName string, cfg json.RawMessage) error {
 	_, err := c.rpc(ctx, "update_config", map[string]any{"project_name": projectName, "config": cfg})
 	return err

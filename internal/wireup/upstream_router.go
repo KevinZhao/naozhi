@@ -14,15 +14,14 @@ import (
 
 // Compile-time guards so method-set drift lands here, next to the adapter.
 var (
-	_ upstream.SessionRouter   = upstreamRouter{}
-	_ upstream.Session         = (*session.ManagedSession)(nil)
-	_ upstream.PlannerResolver = (*session.KeyResolver)(nil)
+	_ upstream.SessionRouter = upstreamRouter{}
+	_ upstream.Session       = (*session.ManagedSession)(nil)
 )
 
 // UpstreamRouter wraps a live *session.Router as an upstream.SessionRouter.
 func UpstreamRouter(r *session.Router) upstream.SessionRouter { return upstreamRouter{r} }
 
-// upstreamRouter forwards every method; the three that hand back a session
+// upstreamRouter forwards every method; the two that hand back a session
 // convert it with asUpstreamSession, and ReserveTakeover wraps the router's
 // lease in upstreamLease. The rest are promoted from the embedded router
 // unchanged, since their signatures speak sessionview's types already.
@@ -30,11 +29,6 @@ type upstreamRouter struct{ *session.Router }
 
 func (u upstreamRouter) SessionFor(key string) upstream.Session {
 	return asUpstreamSession(u.Router.SessionFor(key))
-}
-
-func (u upstreamRouter) ResetAndRecreate(ctx context.Context, key string, opts sessionview.AgentOpts) (upstream.Session, error) {
-	s, err := u.Router.ResetAndRecreate(ctx, key, opts)
-	return asUpstreamSession(s), err
 }
 
 func (u upstreamRouter) ReserveTakeover(key string, opts sessionview.AgentOpts) (upstream.TakeoverLease, error) {

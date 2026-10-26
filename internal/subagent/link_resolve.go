@@ -275,9 +275,6 @@ func (l *Linker) Resolve(ctx context.Context, taskID, toolUseID, name, descripti
 			}
 			ce, cached := metaCache[cand.jsonlPath]
 			if !cached || !ce.modTime.Equal(st.ModTime()) || ce.size != st.Size() {
-				if l.readMetaHook != nil {
-					l.readMetaHook()
-				}
 				meta, perr := readFirstLineMeta(cand.jsonlPath)
 				ce = metaCacheEntry{modTime: st.ModTime(), size: st.Size(), meta: meta, err: perr}
 				metaCache[cand.jsonlPath] = ce
