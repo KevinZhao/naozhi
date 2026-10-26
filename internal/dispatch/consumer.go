@@ -4,8 +4,8 @@
 // router operations. Declared here (not in session) so session.Router can
 // evolve without cascading breakage across consumer packages and Dispatcher
 // tests can inject a fake without a full router graph. *session.Router
-// satisfies it implicitly; internal/session/contract_test.go pins the
-// contract at compile time. One interface per consumer by design — see
+// satisfies it implicitly; internal/server/dispatch_router_adapter.go pins
+// the contract at compile time. One interface per consumer by design — see
 // docs/rfc/consumer-interfaces.md §3.4.
 package dispatch
 
@@ -57,7 +57,7 @@ type Turns interface {
 // ProjectStore is the subset of *project.Manager that Dispatcher's slash-
 // command handlers use (/project, /cd, /new project-echo), so tests can
 // inject a fake binding store (#457). *project.Manager satisfies it
-// implicitly; internal/session/contract_test.go pins the contract. Return
+// implicitly; consumer_fake_test.go pins the contract. Return
 // types stay *project.Project — the decoupling that matters is the manager
 // method set, not the leaf value.
 type ProjectStore interface {
