@@ -10,11 +10,6 @@ type ServerConfig struct {
 	Addr           string `yaml:"addr"`
 	DashboardToken string `yaml:"dashboard_token,omitempty"`
 	TrustedProxy   bool   `yaml:"trusted_proxy,omitempty"` // trust X-Forwarded-For for client IP (enable behind ALB/CloudFront)
-	// DebugMode registers /api/debug/pprof. Default false: it is 404 even for
-	// loopback+auth callers, so a leaked dashboard token cannot enumerate
-	// goroutine stacks (which carry file paths and queue contents). Turn it on
-	// only while capturing a profile.
-	DebugMode bool `yaml:"debug_mode,omitempty"`
 }
 
 // UpdateConfig configures the in-process auto-update checker (GitHub

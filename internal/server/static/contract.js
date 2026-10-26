@@ -48,8 +48,6 @@ export const NZ_CONTRACT = Object.freeze({
     cron_runs_run_id: '/api/cron/runs/{run_id}',
     cron_runs_run_id_transcript: '/api/cron/runs/{run_id}/transcript',
     cron_trigger: '/api/cron/trigger',
-    debug_pprof: '/api/debug/pprof',
-    debug_pprof_: '/api/debug/pprof/',
     discovered: '/api/discovered',
     discovered_close: '/api/discovered/close',
     discovered_preview: '/api/discovered/preview',

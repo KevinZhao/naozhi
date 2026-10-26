@@ -188,4 +188,4 @@ macOS: a launchd job (label read from `XPC_SERVICE_NAME`); `naozhi upgrade` keep
 
 ## Documentation
 
-`docs/design/` (`DESIGN.md` is the architecture source of truth), `docs/rfc/` (working RFCs; status table in `docs/rfc/README.md`), `docs/ops/` (deployment / release / pprof playbooks), `docs/guides/`. TODOs go to GitHub Issues.
+`docs/design/` (`DESIGN.md` is the architecture source of truth), `docs/rfc/` (working RFCs; status table in `docs/rfc/README.md`), `docs/ops/` (deployment / release / doctor playbooks), `docs/guides/`. TODOs go to GitHub Issues.

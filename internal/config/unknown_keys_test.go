@@ -148,6 +148,7 @@ nodes:
     url: "https://mac.example.com"
 server:
   metrics_enabled: true
+  debug_mode: true
 session:
   auto_chain:
     enabled: true
@@ -172,6 +173,7 @@ agents:
 		"nodes":                  "workspaces",
 		"session.auto_chain":     "remove",
 		"server.metrics_enabled": "remove",
+		"server.debug_mode":      "remove",
 		"cron.sandbox":           "remove",
 
 		"platforms.feishu.connection_mode":        "long connection",
