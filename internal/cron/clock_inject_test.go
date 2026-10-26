@@ -10,15 +10,19 @@ import (
 
 // fakeClock is a deterministic cronClock for tests: Now() returns a fixed
 // instant so lifecycle timestamps (finishRun endedAt, synthetic-skipped
-// startedAt) are pinned without sleeping. R247-ARCH-11 (#643).
+// startedAt) are pinned without sleeping. R247-ARCH-11 (#643). A non-zero
+// step advances the clock by step before every Now(), so a full executeOpt
+// run's DurationMS (startedAt to endedAt) is a deterministic multiple of it.
 type fakeClock struct {
-	mu  sync.Mutex
-	now time.Time
+	mu   sync.Mutex
+	now  time.Time
+	step time.Duration
 }
 
 func (c *fakeClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.now = c.now.Add(c.step)
 	return c.now
 }
 
