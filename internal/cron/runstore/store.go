@@ -137,22 +137,6 @@ func (s *Store) KeepWindow() time.Duration {
 	return s.keepWindow
 }
 
-// Health snapshots the loss counters. A nil or disabled store reports
-// Enabled=false with zero counters.
-func (s *Store) Health() Health {
-	if !s.Enabled() {
-		return Health{}
-	}
-	full, other := s.WriteFailedTotals()
-	return Health{
-		Enabled:             true,
-		WriteFailedDiskFull: full,
-		WriteFailedOther:    other,
-		HistoryDropped:      s.HistoryDropTotal(),
-		CacheStaleEvictions: s.CacheStaleEvictionTotal(),
-	}
-}
-
 // ErrCorruptRun is returned when a run JSON file fails to parse or
 // exceeds the size cap. Treated identically to "missing": list APIs
 // skip the entry, GC removes it.

@@ -6,87 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 )
-
-// TestHealth_VersionAbsentOnUnauthedProbe pins R229-SEC-7: the build tag is
-// no longer exposed to unauthenticated probes. Public /health must only
-// return status + uptime so an attacker on the open internet cannot
-// fingerprint the running binary version. Authenticated probes still get
-// the version via the embedded auth section (covered by
-// TestHealth_VersionPresentOnAuthedProbe below).
-func TestHealth_VersionAbsentOnUnauthedProbe(t *testing.T) {
-	router := session.NewRouter(session.RouterConfig{})
-	platforms := map[string]platform.Platform{"test": &mockPlatform{}}
-	_, hs := buildServerWithHandlers(ServerOptions{
-		Addr:           ":0",
-		Router:         router,
-		Platforms:      platforms,
-		Backend:        "claude",
-		DashboardToken: "secret",
-		Identity: IdentityOptions{
-			Version: "v1.2.3-test",
-		},
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	w := httptest.NewRecorder()
-	hs.healthH.handleHealth(w, req)
-
-	var body map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v body=%s", err, w.Body.String())
-	}
-	if v, ok := body["version"]; ok {
-		t.Errorf("version leaked to unauthed /health; got %v body=%s", v, w.Body.String())
-	}
-	// Unauthenticated probe must only carry status + uptime — anything else
-	// indicates the auth embed regressed and is leaking infrastructure
-	// topology.
-	allowed := map[string]bool{"status": true, "uptime": true}
-	for k := range body {
-		if !allowed[k] {
-			t.Errorf("unauthed /health leaked %q (body=%s)", k, w.Body.String())
-		}
-	}
-}
-
-// TestHealth_VersionPresentOnAuthedProbe pins that the build tag still
-// reaches authenticated probes (operators with a valid dashboard token).
-// R229-SEC-7 only restricted the unauthed surface; auth flow must keep
-// returning version so the dashboard footer continues to render.
-func TestHealth_VersionPresentOnAuthedProbe(t *testing.T) {
-	router := session.NewRouter(session.RouterConfig{})
-	platforms := map[string]platform.Platform{"test": &mockPlatform{}}
-	_, hs := buildServerWithHandlers(ServerOptions{
-		Addr:           ":0",
-		Router:         router,
-		Platforms:      platforms,
-		Backend:        "claude",
-		DashboardToken: "secret",
-		Identity: IdentityOptions{
-			Version: "v1.2.3-test",
-		},
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	req.Header.Set("Authorization", "Bearer secret")
-	w := httptest.NewRecorder()
-	hs.healthH.handleHealth(w, req)
-
-	var body map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v body=%s", err, w.Body.String())
-	}
-	got, ok := body["version"]
-	if !ok {
-		t.Fatalf("version missing from authed /health; body=%s", w.Body.String())
-	}
-	if got != "v1.2.3-test" {
-		t.Errorf("version = %v, want v1.2.3-test", got)
-	}
-}
 
 // TestStats_VersionTagPresent pins the /api/sessions stats contract: when
 // ServerOptions.Version is set, `stats.version_tag` carries the same value

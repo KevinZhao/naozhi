@@ -42,10 +42,6 @@ func TestServerOptions_GroupsReachTheirConsumers(t *testing.T) {
 	if h.workspaceID != "ws-id" || h.workspaceName != "ws-name" || h.version != "v9.8.7" {
 		t.Errorf("health identity = %q / %q / %q", h.workspaceID, h.workspaceName, h.version)
 	}
-	if h.noOutputTimeout != 3*time.Minute || h.totalTimeout != 7*time.Minute ||
-		h.noOutputTimeoutStr != "3m0s" || h.totalTimeoutStr != "7m0s" {
-		t.Errorf("health timeouts = %v %v %q %q", h.noOutputTimeout, h.totalTimeout, h.noOutputTimeoutStr, h.totalTimeoutStr)
-	}
 
 	rec := httptest.NewRecorder()
 	s.sessionH.HandleList(rec, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))

@@ -44,8 +44,5 @@ func TestScheduler_RunHistoryNilSafe(t *testing.T) {
 		if run, err := s.Run("abc", "def"); run != nil || !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("%s: Run = (%v, %v), want (nil, fs.ErrNotExist)", name, run, err)
 		}
-		if h := s.RunStoreHealth(); h.Enabled {
-			t.Errorf("%s: RunStoreHealth = %+v, want disabled", name, h)
-		}
 	}
 }

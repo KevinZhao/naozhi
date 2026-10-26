@@ -90,17 +90,8 @@ func (h *Handlers) InitStaticStats() {
 	h.staticStatsOnce.Do(h.doInitStaticStats)
 }
 func (h *Handlers) doInitStaticStats() {
-	// Deep-copy the callSystemInfo() singleton: staticStats is copied by value
-	// per poll but the System map is a reference, so without this every
-	// response would alias the process-wide map and any future mutable field
-	// would be a data race.
-	sysSrc := h.callSystemInfo()
-	sysCopy := make(map[string]any, len(sysSrc))
-	for k, v := range sysSrc {
-		sysCopy[k] = v
-	}
-	// Copy agentIDs for the same read-only contract; guards against a future
-	// mutable element type introducing a cross-goroutine race.
+	// Copy agentIDs: staticStats is copied by value per poll, so the slice must
+	// not alias the caller's.
 	agentsCopy := make([]string, len(h.deps.AgentIDs))
 	copy(agentsCopy, h.deps.AgentIDs)
 	h.staticStats = sessionStatsStatic{
@@ -111,7 +102,6 @@ func (h *Handlers) doInitStaticStats() {
 		DefaultWorkspace: h.deps.Router.DefaultWorkspace(),
 		WorkspaceID:      h.deps.WorkspaceID,
 		WorkspaceName:    h.deps.WorkspaceName,
-		System:           sysCopy,
 		Agents:           agentsCopy,
 	}
 }
@@ -285,15 +275,6 @@ func (h *Handlers) loadHistorySessionsCtx(ctx context.Context) []discovery.Recen
 	h.historyCacheMu.Unlock()
 
 	return all
-}
-
-// callSystemInfo invokes the injected deps.SystemInfoFn. nil falls through to
-// an empty map (test paths without system-probe wiring).
-func (h *Handlers) callSystemInfo() map[string]any {
-	if h.deps.SystemInfoFn == nil {
-		return map[string]any{}
-	}
-	return h.deps.SystemInfoFn()
 }
 
 // mergePartialHistory folds a scan the deadline cut short into the previous

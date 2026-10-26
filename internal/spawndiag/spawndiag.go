@@ -55,7 +55,7 @@ func Observe(fn func(scope string, d Diag)) (restore func()) {
 	return func() { observer.Store(nil) }
 }
 
-// Emit logs and counts diags. scope groups the dedup — the session key on
+// Emit logs diags. scope groups the dedup — the session key on
 // spawn paths, "config" for load-time diags. The "config" scope skips dedup
 // entirely: config loading is one-shot per process, and every finding there
 // deserves its Warn (repeats only happen when a test re-runs the loader).
@@ -70,7 +70,6 @@ func Emit(scope string, diags []Diag) {
 			_, repeat = seen.LoadOrStore(dedupKey, struct{}{})
 		}
 		if !repeat {
-			record(d)
 			slog.Warn("spawn gate: configured input had no effect",
 				"layer", d.Layer, "key", d.Key, "action", d.Action, "reason", d.Reason, "scope", scope)
 			continue

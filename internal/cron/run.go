@@ -12,9 +12,6 @@ type CronRun = runstore.CronRun
 // view's recent_runs field return.
 type CronRunSummary = runstore.CronRunSummary
 
-// RunStoreHealth is the run store's loss counters, for /health.
-type RunStoreHealth = runstore.Health
-
 // ErrCorruptRun is returned when a run record fails to parse or exceeds the
 // size cap; list APIs skip it and GC removes it.
 var ErrCorruptRun = runstore.ErrCorruptRun

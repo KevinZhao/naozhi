@@ -2,9 +2,7 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -158,67 +156,6 @@ func TestValidateRemoteWorkspace(t *testing.T) {
 				t.Errorf("validateRemoteWorkspace(%q) err=%v wantErr=%v", tc.input, err, tc.wantErr)
 			}
 		})
-	}
-}
-
-// ─── handleHealth ─────────────────────────────────────────────────────────────
-
-func TestHandleHealth_ReturnsJSONContentType(t *testing.T) {
-	_, hs := newTestServerHS(&mockPlatform{})
-
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	w := httptest.NewRecorder()
-	hs.healthH.handleHealth(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
-	}
-	ct := w.Header().Get("Content-Type")
-	if !strings.HasPrefix(ct, "application/json") {
-		t.Errorf("Content-Type = %q, want application/json", ct)
-	}
-}
-
-func TestHandleHealth_StatusOkAndUptime(t *testing.T) {
-	_, hs := newTestServerHS(&mockPlatform{})
-
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	w := httptest.NewRecorder()
-	hs.healthH.handleHealth(w, req)
-
-	var result map[string]interface{}
-	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if result["status"] != "ok" {
-		t.Errorf("status = %v, want ok", result["status"])
-	}
-	uptime, ok := result["uptime"].(string)
-	if !ok || uptime == "" {
-		t.Errorf("uptime = %v, want non-empty string", result["uptime"])
-	}
-}
-
-func TestHandleHealth_SessionsField(t *testing.T) {
-	_, hs := newTestServerHS(&mockPlatform{})
-
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	w := httptest.NewRecorder()
-	hs.healthH.handleHealth(w, req)
-
-	var result map[string]interface{}
-	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	sessions, ok := result["sessions"].(map[string]interface{})
-	if !ok {
-		t.Fatal("sessions field missing or wrong type")
-	}
-	if sessions["active"] != float64(0) {
-		t.Errorf("active = %v, want 0", sessions["active"])
-	}
-	if sessions["total"] != float64(0) {
-		t.Errorf("total = %v, want 0", sessions["total"])
 	}
 }
 

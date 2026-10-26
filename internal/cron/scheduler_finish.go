@@ -90,15 +90,6 @@ func (s *Scheduler) jobStillExists(jobID string) bool {
 	return s.tbl.exists(jobID)
 }
 
-// RunStoreHealth snapshots the run store's loss counters. Safe on a nil or
-// persistence-disabled Scheduler.
-func (s *Scheduler) RunStoreHealth() RunStoreHealth {
-	if s == nil {
-		return RunStoreHealth{}
-	}
-	return s.runs.Health()
-}
-
 // deleteJobRuns removes jobID's entire runs/ subtree and reclaims its jobLock.
 // No-op when persistence is disabled. Called from deleteJobPostCleanup outside
 // s.tbl.mu; Store.DeleteJob acquires the per-job jobLock internally.
