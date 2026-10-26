@@ -186,28 +186,23 @@ func TestShouldNotify_RateLimits(t *testing.T) {
 	}
 }
 
-// TestShouldNotify_ConcurrentRLockFastPath exercises the R20260528-PERF-19
-// (#1358) fast-path: many goroutines hammering ShouldNotify on the same
-// already-cooled-down key. -race covers the RLock→RUnlock→Lock window
-// against concurrent slow-path mutations; the test then verifies that
-// after the storm exactly one notify can have fired (the cooldown is
-// active for everyone after the first observer).
-func TestShouldNotify_ConcurrentRLockFastPath(t *testing.T) {
+// TestShouldNotify_ConcurrentCooldown: many goroutines hammering ShouldNotify
+// on the same already-notified key all observe the cooldown (-race checks the
+// locking).
+func TestShouldNotify_ConcurrentCooldown(t *testing.T) {
 	t.Parallel()
 	q := newTestQueue(10, 0)
 
 	// Prime the queue branch: Enqueue makes a sessionQueue in q.queues,
-	// then ShouldNotify publishes lastNotifyNs so subsequent calls take
-	// the cooldown-active fast path.
+	// then ShouldNotify publishes lastNotifyNs so subsequent calls are
+	// inside the cooldown.
 	q.Enqueue("k", Msg{Text: "owner"})
 	if !q.ShouldNotify("k") {
 		t.Fatal("first ShouldNotify should fire (cooldown empty)")
 	}
 
 	// Storm: 64 goroutines × 100 calls — every call should see the
-	// cooldown active and return false via the RLock fast path. The race
-	// detector catches any read-write order violation if an internal
-	// mutation slips out from under the read lock.
+	// cooldown active and return false.
 	const goroutines = 64
 	const perGo = 100
 	var fired atomic.Int32
@@ -274,60 +269,6 @@ func TestLastNotify_CleanedOnDiscard(t *testing.T) {
 
 	if !q.ShouldNotify("k1") {
 		t.Fatal("lastNotify should be cleaned after Discard")
-	}
-}
-
-// TestShouldNotify_PoolRecyclesEvictedEntry verifies that the dropNotifyEntry
-// pool (#1694) preserves correctness across LRU saturation: once the LRU is
-// full, inserting new cold keys must evict the oldest, recycle its struct, and
-// still maintain per-key cooldown for the surviving keys. A recycled entry
-// must not carry over a stale key/ts.
-func TestShouldNotify_PoolRecyclesEvictedEntry(t *testing.T) {
-	t.Parallel()
-	q := newTestQueue(0, 0) // maxDepth<=0 forces the drop/LRU path
-
-	// Saturate the LRU with dropNotifyMaxKeys distinct cold keys. Each first
-	// call fires; immediate second call on the same key is cooled down.
-	for i := 0; i < dropNotifyMaxKeys; i++ {
-		k := fmt.Sprintf("k%d", i)
-		if !q.ShouldNotify(k) {
-			t.Fatalf("first ShouldNotify(%q) should fire", k)
-		}
-		if q.ShouldNotify(k) {
-			t.Fatalf("second ShouldNotify(%q) should be cooled down", k)
-		}
-	}
-
-	// LRU is now full. Insert one more cold key; this evicts the oldest (k0)
-	// and must reuse its struct.
-	overflow := fmt.Sprintf("k%d", dropNotifyMaxKeys)
-	if !q.ShouldNotify(overflow) {
-		t.Fatalf("overflow key %q should fire", overflow)
-	}
-	if q.ShouldNotify(overflow) {
-		t.Fatalf("overflow key %q should be cooled down after first fire", overflow)
-	}
-
-	// The evicted key (k0) has no remaining entry, so it should fire again as
-	// a fresh cold key — proving the recycled struct did not retain k0's ts.
-	if !q.ShouldNotify("k0") {
-		t.Fatal("evicted key k0 should fire again (entry was recycled, not stale)")
-	}
-}
-
-// BenchmarkShouldNotify_ColdKeyChurn measures the steady-state cold-key insert
-// path that #1694 optimizes. After the LRU saturates, each iteration evicts a
-// tail entry and inserts a new one; with the pool this should allocate nothing.
-func BenchmarkShouldNotify_ColdKeyChurn(b *testing.B) {
-	q := newTestQueue(0, 0)
-	// Pre-saturate so every benchmarked call hits the evict+recycle path.
-	for i := 0; i < dropNotifyMaxKeys; i++ {
-		q.ShouldNotify(fmt.Sprintf("warm%d", i))
-	}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		q.ShouldNotify(fmt.Sprintf("cold%d", i))
 	}
 }
 
@@ -666,13 +607,13 @@ func TestConcurrent_EnqueueDrain(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < msgsPerGoroutine; j++ {
-				q.mu.RLock()
+				q.mu.Lock()
 				_, present := q.queues["shared"]
-				q.mu.RUnlock()
+				q.mu.Unlock()
 				q.DoneOrDrain("shared", ownerGen.Load())
-				q.mu.RLock()
+				q.mu.Lock()
 				_, after := q.queues["shared"]
-				q.mu.RUnlock()
+				q.mu.Unlock()
 				if present && !after {
 					drains.Add(1)
 				}
@@ -686,19 +627,19 @@ func TestConcurrent_EnqueueDrain(t *testing.T) {
 		t.Fatal("no drainer ever released the key: the drain side never ran")
 	}
 	// Whichever entry is left, the owner holding its gen drains and releases it.
-	q.mu.RLock()
+	q.mu.Lock()
 	sq := q.queues["shared"]
 	var gen uint64
 	if sq != nil {
 		gen = sq.gen
 	}
-	q.mu.RUnlock()
+	q.mu.Unlock()
 	if sq != nil {
 		for q.DoneOrDrain("shared", gen) != nil {
 		}
-		q.mu.RLock()
+		q.mu.Lock()
 		_, present := q.queues["shared"]
-		q.mu.RUnlock()
+		q.mu.Unlock()
 		if present {
 			t.Fatal("entry still present after its owner released it")
 		}
@@ -729,58 +670,40 @@ func TestShouldNotify_DropPath_Eviction(t *testing.T) {
 	if !q.ShouldNotify("overflow-key") {
 		t.Fatal("should notify after eviction at capacity")
 	}
+	if q.ShouldNotify("overflow-key") {
+		t.Fatal("overflow key should be cooled down after it fired")
+	}
 	q.mu.Lock()
-	size := q.dropNotifyLRU.Len()
-	idxSize := len(q.dropNotifyIndex)
+	size := len(q.dropNotify)
 	q.mu.Unlock()
 	if size > dropNotifyMaxKeys {
-		t.Errorf("dropNotifyLRU size = %d > cap %d", size, dropNotifyMaxKeys)
-	}
-	if idxSize != size {
-		t.Errorf("dropNotifyIndex size %d != LRU size %d", idxSize, size)
+		t.Errorf("dropNotify size = %d > cap %d", size, dropNotifyMaxKeys)
 	}
 }
 
-// TestShouldNotify_DropPath_BackPointerConsistent pins the R249-PERF-12 (#932)
-// refactor invariant: dropNotifyIndex maps directly to *dropNotifyEntry and each
-// entry's elem back-pointer must always reference the live list element, so the
-// LRU stays in lock-step with the map across refresh and eviction.
-func TestShouldNotify_DropPath_BackPointerConsistent(t *testing.T) {
-	q := newTestQueue(0, 0)
-	q.ShouldNotify("a")
-	q.ShouldNotify("b")
+// TestQueue_Enqueue_FullEvictsAndDrains pushes far past max_depth so the
+// queue evicts many times; the drain keeps the newest max_depth in FIFO order.
+func TestQueue_Enqueue_FullEvictsAndDrains(t *testing.T) {
+	t.Parallel()
+	q := newTestQueue(3, 0)
+	_, _, _, gen := q.enqueueTuple("k", Msg{Text: "owner"}) // owner
 
-	q.mu.Lock()
-	for key, entry := range q.dropNotifyIndex {
-		if entry.elem == nil {
-			t.Fatalf("entry %q has nil elem back-pointer", key)
-		}
-		if got := entry.elem.Value.(*dropNotifyEntry); got != entry {
-			t.Fatalf("entry %q elem points at a different entry", key)
-		}
-		if entry.key != key {
-			t.Fatalf("index key %q != entry.key %q", key, entry.key)
-		}
+	for i := 0; i < 10; i++ {
+		q.Enqueue("k", Msg{Text: string(rune('0' + i)), EnqueueAt: time.Now()})
 	}
-	q.mu.Unlock()
 
-	// Fill to capacity then overflow; the eviction must drop exactly one key
-	// and keep the map and list the same size (no dangling back-pointers).
-	for i := 0; i < dropNotifyMaxKeys; i++ {
-		q.ShouldNotify(fmt.Sprintf("fill-%d", i))
+	msgs := q.DoneOrDrain("k", gen)
+	if len(msgs) != 3 {
+		t.Fatalf("len = %d, want 3 (max_depth)", len(msgs))
 	}
-	q.mu.Lock()
-	if q.dropNotifyLRU.Len() != len(q.dropNotifyIndex) {
-		t.Fatalf("LRU/index size mismatch after overflow: %d vs %d",
-			q.dropNotifyLRU.Len(), len(q.dropNotifyIndex))
+	// Last 3 pushed (7, 8, 9) survive.
+	if msgs[0].Text != "7" || msgs[1].Text != "8" || msgs[2].Text != "9" {
+		t.Fatalf("drain order = [%s %s %s], want [7 8 9]",
+			msgs[0].Text, msgs[1].Text, msgs[2].Text)
 	}
-	for e := q.dropNotifyLRU.Front(); e != nil; e = e.Next() {
-		entry := e.Value.(*dropNotifyEntry)
-		if q.dropNotifyIndex[entry.key] != entry {
-			t.Fatalf("list entry %q missing/stale in index", entry.key)
-		}
+	if got := q.DoneOrDrain("k", gen); got != nil {
+		t.Fatalf("empty drain = %#v, want nil", got)
 	}
-	q.mu.Unlock()
 }
 
 // TestQueue_DiscardOwnedLeavesALaterOwnersQueue: a stale owner's discard (its
