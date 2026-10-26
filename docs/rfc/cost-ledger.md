@@ -255,7 +255,7 @@ func Delta(raw, prev Cumulative) (d Increment, next Cumulative)
     retention_days: 400  # [1, 3650]
     rollup_days: 400     # [1, retention_days]，默认 = retention_days；启动同步加载，慢于 1s 会打 Info 日志
   ```
-- 一次性修账子命令 `naozhi cost backfill`（导入 `Kind=backfill`）与 `naozhi cost reconcile`（#3210，追加 `Kind=adjust` 冲回 #3097 之前 `--resume` 恢复额并补按天残差）已删除（PR #PRNUM）：账本已修过一次，之后的记账不再产生这两类偏差。两种 kind 保留，用于解析已写入的旧行。
+- 一次性修账子命令 `naozhi cost backfill`（导入 `Kind=backfill`）与 `naozhi cost reconcile`（#3210，追加 `Kind=adjust` 冲回 #3097 之前 `--resume` 恢复额并补按天残差）已删除（PR #3765）：账本已修过一次，之后的记账不再产生这两类偏差。两种 kind 保留，用于解析已写入的旧行。
 
 ## 10. 可观测性
 

@@ -7,7 +7,7 @@
 
 ### Removed
 
-- **BREAKING：删除 `naozhi cost backfill` 与 `naozhi cost reconcile` 子命令**（#PRNUM）。这两个是一次性修账工具（导入历史 run 为 `Kind=backfill`、追加 `Kind=adjust` 冲回 #3097 之前 `--resume` 恢复额），账本已修过一次，之后的记账不会再产生这类偏差。`naozhi cost ...` 现在是未知子命令。账本读写、已写入的 backfill / adjust 行、`/api/cost/*` 与 `cost.budget` 不变；配置键无变化。
+- **BREAKING：删除 `naozhi cost backfill` 与 `naozhi cost reconcile` 子命令**（#3765）。这两个是一次性修账工具（导入历史 run 为 `Kind=backfill`、追加 `Kind=adjust` 冲回 #3097 之前 `--resume` 恢复额），账本已修过一次，之后的记账不会再产生这类偏差。`naozhi cost ...` 现在是未知子命令。账本读写、已写入的 backfill / adjust 行、`/api/cost/*` 与 `cost.budget` 不变；配置键无变化。
 
 ## [0.1.48] - 2026-10-26
 
