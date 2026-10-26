@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>naozhi dashboard 新原型 —— 布局草图（对应 docs/rfc/planner.md v5）</title>
+<title>naozhi dashboard 新原型 —— 布局草图（对应 docs/rfc/planner.md v7）</title>
 <style>
   :root {
     --bg0:#ffffff; --bg1:#f6f8fa; --bg2:#eaeef2; --line:#d0d7de; --text:#1f2328; --muted:#656d76;
@@ -78,281 +78,281 @@
   .oldside { width:300px; flex:none; border-right:1px solid var(--line); background:var(--bg1); padding:10px; }
   .oldrow { padding:7px 8px; border-radius:6px; font-size:13px; display:flex; justify-content:space-between; }
   .oldrow.on { background:var(--bg0); border:1px solid var(--line); }
+
+  .rcpt { font-size:12.5px; color:#6639ba; background:#fbf7ff; border:1px solid #e5d4ff; border-radius:8px; padding:6px 10px; display:inline-block; }
+  .undo { font-size:11.5px; color:var(--amber); background:#fff8c5; border-radius:6px; padding:2px 8px; display:inline-block; margin-top:6px; }
+  .stl { font-weight:600; font-size:13.5px; }
+  .lvl { display:flex; gap:6px; } .lvl span { flex:1; text-align:center; font-size:12.5px; padding:7px 0; border-radius:6px; background:var(--bg2); }
+  .lvl span.on { background:#fbefff; color:var(--purple); font-weight:700; outline:1px solid #d8b9ff; }
+  .echo { font-size:12.5px; background:#fbf7ff; border-left:3px solid var(--purple); border-radius:6px; padding:7px 10px; margin-top:6px; }
+  .tree { font-size:13px; } .tree div { padding:3px 6px; border-radius:4px; white-space:nowrap; } .tree .on { background:var(--chip-info-bg); color:var(--chip-info-fg); font-weight:600; }
+  .tree .r { font-size:11px; color:var(--muted); margin-top:10px; padding-left:0; }
+  .diff { font:12px/1.55 ui-monospace,Menlo,monospace; border:1px solid var(--line); border-radius:8px; overflow:hidden; background:#fff; }
+  .diff div { padding:0 10px; white-space:pre; } .diff .h { background:var(--bg1); color:var(--muted); padding:5px 10px; font-family:-apple-system,"PingFang SC",sans-serif; font-weight:600; border-bottom:1px solid var(--line); }
+  .diff .a { background:#e6ffec; } .diff .d { background:#ffebe9; } .diff .n { color:var(--muted); }
+  .term { font:12px/1.5 ui-monospace,Menlo,monospace; background:#0d1117; color:#c9d1d9; border-radius:8px; padding:8px 10px; white-space:pre; overflow:hidden; }
+  .term .ok { color:#3fb950; }
+  .prev { border:1px solid var(--line); border-radius:8px; background:#fff; overflow:hidden; }
+  .prev .bar2 { background:var(--bg1); border-bottom:1px solid var(--line); padding:5px 10px; font-size:12px; color:var(--muted); display:flex; justify-content:space-between; }
+  .archbox { display:inline-block; border:2px solid; border-radius:6px; padding:6px 10px; font-size:12px; margin:4px; background:#fff; }
 </style>
 </head>
 <body>
 <h1>naozhi dashboard 新原型 —— 布局草图</h1>
-<p class="sub">对应 <code>docs/rfc/planner.md</code> v5：三个角色（你 / Planner / 执行会话）、两份知识（懂你 / 懂系统）。桌面网页沿用现有 dashboard 的浅色令牌；手机端见 <code>ios-app-mockup.html</code>。所有内容均为示意数据。</p>
+<p class="sub">对应 <code>docs/rfc/planner.md</code> v7：三个面（对话面 / 监督面 / 工作台面）、全局唯一 Planner、信任阶梯、承诺与早报。桌面网页沿用现有 dashboard 的浅色令牌；手机端见 <code>ios-app-mockup.html</code>。所有内容均为示意数据。</p>
 
-<!-- ============ 1. 对话（主视图） ============ -->
 <div class="shot">
-<h2>① 对话（主视图）：左栏导航 · 中间对话 · 右栏上下文</h2>
-<div class="win">
-  <div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard</span></div>
-  <div class="top">
-    <span class="logo">naozhi</span>
-    <span class="chip blue">● 3 在跑</span><span class="chip red">● 1 等你</span><span class="chip">2 待审</span>
-    <span class="chip amber">Midway 2 小时后过期</span><span class="chip green">Bedrock 正常</span>
-    <span class="sp"></span>
-    <span class="muted">Planner：opus 5.5 · xhigh · 空闲</span>
-    <span class="btn">专家视图</span><span class="btn solid-red">急停</span>
+<h2>① 对话面：和焦点会话结对，Planner 在旁边，右栏是预览</h2>
+<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#s=jd-arch</span></div><div class="top"><span class="logo">naozhi</span><span class="chip blue">● 3 在跑</span><span class="chip red">● 1 等你</span><span class="chip">2 待审</span><span class="chip amber">Midway 2 小时后过期</span><span class="sp"></span><span class="muted">Planner：opus 5.5 · effort 自适应 · 只出意见 · 空闲</span><span class="btn">专家视图</span><span class="btn">停止 ▾</span></div><div class="body"><div class="rail"><div class="lbl">视图</div><div class="nav on">💬 对话</div><div class="nav">🧭 Planner</div><div class="nav">📥 收件箱<span class="count">3</span></div><div class="nav">🗂 工作台</div><div class="nav">🛰 系统</div><div class="nav">👤 我</div><div class="lbl">工作区（筛选）</div><div class="ws"><span>全部</span></div><div class="ws"><span>naozhi</span><span class="count g">3</span></div><div class="ws on"><span>JD 客户</span><span class="count g">1</span></div><div class="ws"><span>你的一天</span></div><div class="lbl">正在替你盯着</div><div class="card" style="padding:8px 10px;font-size:12.5px">处理 review issues<div class="bar"><i style="width:72%"></i></div><div class="muted">正在跑测试 · 第 3/5 项验收</div></div><div class="card" style="padding:8px 10px;font-size:12.5px">ClickHouse 压测<div class="muted" style="color:var(--red)">等你回复 · 40 分钟</div></div><div class="bottom"><span class="muted">Mac 节点在线 · 磁盘 78%</span></div></div>
+<div class="main">
+  <div class="mhead">JD 网络架构图 <span class="chip green">空闲</span><span class="chip">JD 客户</span><span class="sp"></span><span class="muted">opus 5.5 · high · passthrough</span></div>
+  <div class="stream">
+    <div class="msg"><span class="av me">我</span><div class="mbody"><div class="h">你 · 10:02</div>TGW 方案图里，把共享 VPC 去掉，换成网络账号集中出口</div></div>
+    <div class="msg"><span class="av gw">S</span><div class="mbody"><div class="h">执行会话 · 10:04</div>已改 <u>arch.html</u>：移除共享 VPC，新增 Network 账号与 TGW 集中出口，出口路由表改为按 BU 隔离。右侧预览已刷新。</div></div>
+    <div class="msg"><span class="av pl">P</span><div class="mbody"><div class="h">Planner · 旁注（只给你看，不插进会话）</div>
+      <div class="card advice" style="margin:0">上周三你和客户确认过"出口按 BU 分账"。集中出口后 NAT 费用会落在网络账号，要不要在图上标出分摊方式？<div class="muted" style="margin-top:4px">依据：10/21 会议纪要 · 懂你 / 先例 · <u>转达给会话</u> · <u>忽略</u></div></div></div></div>
+    <div class="msg"><span class="av me">我</span><div class="mbody"><div class="h">你 · 10:06</div>要，加一行注释，费用按 BU 用量分摊</div></div>
+    <div class="msg"><span class="av gw">S</span><div class="mbody"><div class="h">执行会话 · 10:06 · 进行中</div><span class="muted">正在改 arch.html · 第 1/2 步</span></div></div>
   </div>
-  <div class="body">
-    <div class="rail">
-      <div class="lbl">工作区 · Planner</div>
-      <div class="ws on"><span>🧭 naozhi</span><span class="count">1</span></div>
-      <div class="ws"><span>JD</span><span class="count g">2</span></div>
-      <div class="ws"><span>家庭网络</span><span></span></div>
-      <div class="ws"><span>个人杂事</span><span></span></div>
-      <div class="lbl">视图</div>
-      <div class="nav on">💬 对话</div>
-      <div class="nav">📥 收件箱<span class="count">3</span></div>
-      <div class="nav">🛰 系统</div>
-      <div class="nav">👤 我</div>
-      <div class="lbl">正在替你盯着</div>
-      <div class="card" style="padding:8px 10px;font-size:12.5px">处理 review issues<div class="bar"><i style="width:72%"></i></div><div class="muted">4/5 · 自动继续 2/8</div></div>
-      <div class="card" style="padding:8px 10px;font-size:12.5px">ClickHouse 压测<div class="muted" style="color:var(--red)">等你回复 · 40 分钟</div></div>
-      <div class="bottom"><span class="muted">Mac 节点在线 · 磁盘 78%</span></div>
-    </div>
-    <div class="main">
-      <div class="mhead">对话 <span class="chip">naozhi</span><span class="sp"></span><span class="muted">今天 · 6 个会话</span></div>
-      <div class="stream">
-        <div class="msg"><span class="av gw">⚙</span><div class="mbody"><div class="h">离开期间（7 小时）</div><div class="card" style="margin:0">合并 9 个 PR · 自动继续 4 次 · 地区 400 打断 3 个会话，已合并处理并恢复 · 1 件事等你 <span class="btn" style="margin-left:6px">展开</span></div></div></div>
-        <div class="msg"><span class="av me">我</span><div class="mbody"><div class="h">你 · 09:12</div>把剩下的 review issue 都处理完，用 ultracode，每个 issue 一个 PR，我出去一趟</div></div>
-        <div class="msg"><span class="av pl">P</span><div class="mbody"><div class="h">Planner · 09:12</div>
-          <div class="card sess" style="margin:0">
-            <div class="t">处理 review issues <span class="chip blue">托管中</span><span class="chip purple">Planner 派出</span><span class="sp"></span><span class="muted">opus 5.5 · high</span></div>
-            <div class="bar"><i style="width:72%"></i></div>
-            <div class="muted">阶段 4/5 · 18/24 PR · 最近：⚙ 自动继续（E · 第 2/8 次）· 依据：你的原话"处理完、每个 issue 一个 PR"</div>
-          </div></div></div>
-        <div class="msg"><span class="av pl">P</span><div class="mbody"><div class="h">Planner · 顾问意见 · 08:05</div>
-          <div class="card advice" style="margin:0">#3664 的修法在改症状：根因是 queue 的 FIFO 假设，加 sleep 只是让测试变绿。我已建议该会话改出队顺序，它接受了。<div class="muted" style="margin-top:4px">依据：懂系统/项目长期知识"反模式：靠 sleep 修 flaky" · <u>查看 diff</u></div></div></div></div>
-        <div class="msg"><span class="av pl">P</span><div class="mbody"><div class="h">Planner · 预判 · 09:40</div>
-          <div class="card" style="margin:0">CI 已绿、12 个 PR 已合并。你过去 9 次合并后都发版，我把 v0.1.46 的 changelog 草稿和发版检查项准备好了。<div class="btns"><span class="btn pri">发版</span><span class="btn">看 changelog</span><span class="btn">今天不发</span></div></div></div></div>
-      </div>
-      <div class="composer">
-        <div class="target"><span>→ 发往：Planner（naozhi）▾</span><span>＋ 新话题</span><span class="muted">焦点会话在跑时，新话题会先确认</span></div>
-        <div class="input"><span>说点什么… 也可以拖入文件、按住说话</span><span>🎙 ↑</span></div>
-      </div>
-    </div>
-    <div class="side">
-      <div class="shead">等你的事 <span class="count">2</span><span class="sp"></span><span class="muted">全部 ›</span></div>
-      <div class="sbody">
-        <div class="card"><span class="chip red">决定</span> <span class="muted">naozhi · 12 分钟</span><div style="font-weight:600;margin-top:6px">发版 v0.1.46？</div><div class="btns"><span class="btn pri">发版</span><span class="btn">稍后</span></div></div>
-        <div class="card"><span class="chip amber">提问</span> <span class="muted">ClickHouse 压测 · 40 分钟</span><div style="font-weight:600;margin-top:6px">第 3 轮副本数 2 → 3？</div><div class="muted">不可逆：会重建集群，Planner 拿不准</div><div class="btns"><span class="btn">保持 2</span><span class="btn">提到 3</span></div></div>
-        <div class="sect"><span>正在替你盯着</span><span class="muted">3</span></div>
-        <div class="card"><div class="kv"><span>处理 review issues</span><span class="chip blue">4/5</span></div><div class="kv"><span>ClickHouse 压测</span><span class="chip red">等你</span></div><div class="kv"><span>flaky 清扫（例行任务）</span><span class="chip">提议 2</span></div></div>
-        <div class="sect"><span>环境</span></div>
-        <div class="card"><div class="kv"><span>Midway</span><span class="v" style="color:var(--amber)">2 小时后过期 · <u>我去处理</u></span></div><div class="kv"><span>master CI</span><span class="v" style="color:var(--green)">绿</span></div><div class="kv"><span>冲突</span><span class="v">1 处（已排后）</span></div></div>
-      </div>
-    </div>
+  <div class="composer">
+    <div class="target"><span>→ 发往：JD 网络架构图 ▾</span><span>交给 Planner</span><span>＋ 新话题</span><span class="muted">你的消息直通 CC 队列，运行中也能插话</span></div>
+    <div class="input"><span>说点什么… 也可以拖入文件、截屏发送、按住说话</span><span>📷 🎙 ↑</span></div>
   </div>
 </div>
-<p class="note">默认对象是当前工作区的 Planner；点中任何会话卡片，右栏切换为该会话的详情（见 ②），输入框目标随之变为"→ 发往 该会话"。离开摘要、Planner 的预判与顾问意见都在对话流里，带依据；右栏常驻"等你的事 / 正在替你盯着 / 环境"。</p>
+<div class="side" style="width:420px">
+  <div class="shead"><span class="tabs"><span class="on">预览</span><span>改动 3</span><span>等你的事 2</span></span></div>
+  <div class="sbody">
+    <div class="prev"><div class="bar2"><span>arch.html（目录级预览，跟随刷新）</span><span>↗ 新窗口</span></div>
+      <div style="padding:14px;text-align:center">
+        <div class="archbox" style="border-color:#0969da">Network 账号<br><b>TGW · 集中出口</b></div><br>
+        <div class="archbox" style="border-color:#1a7f37">BU-A VPC</div><div class="archbox" style="border-color:#1a7f37">BU-B VPC</div><div class="archbox" style="border-color:#1a7f37">BU-C VPC</div><br>
+        <div class="archbox" style="border-color:#9a6700">NAT 费用按 BU 用量分摊 ← 正在添加</div>
+        <div class="muted" style="margin-top:10px">CSS / 图片等相对路径资源可加载，可交互</div>
+      </div></div>
+    <div class="sect"><span>本会话改了</span><span class="muted">在工作台打开 ›</span></div>
+    <div class="card"><div class="kv"><span>arch.html</span><span class="v"><span style="color:var(--green)">+34</span> <span style="color:var(--red)">−12</span></span></div><div class="kv"><span>styles/arch.css</span><span class="v"><span style="color:var(--green)">+6</span></span></div><div class="kv"><span>notes.md</span><span class="v"><span style="color:var(--green)">+3</span></span></div></div>
+  </div>
+</div></div></div>
+<p class="note">默认对象是焦点会话：你和它同步结对，消息直通 CC 队列。Planner 在旁边，旁注只给你看、附依据，由你决定是否转达。右栏默认是预览：会话改的 HTML 按目录级预览、跟随刷新，旁边一页列出改了哪些文件。</p>
 </div>
 
-<!-- ============ 2. 选中会话 ============ -->
 <div class="shot">
-<h2>② 选中一个执行会话：右栏变为详情，可直接对它说话</h2>
-<div class="win">
-  <div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#s=review-issues</span></div>
-  <div class="top"><span class="logo">naozhi</span><span class="chip blue">● 3 在跑</span><span class="chip red">● 1 等你</span><span class="chip">2 待审</span><span class="sp"></span><span class="btn">专家视图</span><span class="btn solid-red">急停</span></div>
-  <div class="body">
-    <div class="rail">
-      <div class="lbl">工作区 · Planner</div>
-      <div class="ws on"><span>🧭 naozhi</span><span class="count">1</span></div><div class="ws"><span>JD</span><span class="count g">2</span></div><div class="ws"><span>家庭网络</span></div><div class="ws"><span>个人杂事</span></div>
-      <div class="lbl">视图</div><div class="nav on">💬 对话</div><div class="nav">📥 收件箱<span class="count">3</span></div><div class="nav">🛰 系统</div><div class="nav">👤 我</div>
-    </div>
-    <div class="main">
-      <div class="mhead">处理 review issues <span class="chip blue">托管中</span><span class="chip purple">Planner 派出</span><span class="sp"></span><span class="tabs"><span class="on">里程碑</span><span>完整记录</span><span>工作流</span><span>产物</span></span></div>
-      <div class="stream">
-        <div class="tl">
-          <div class="ev ok">阶段 3 完成 · 14 个 PR 已合并 <span class="muted">07:12</span></div>
-          <div class="ev auto">⚙ 自动继续 · 原因 E（做了一部分就停，没提问）· 第 2/8 次 · 剩余验收项 10 条 <span class="muted">07:40</span></div>
-          <div class="ev adv">🧭 顾问：#3664 的修法在改症状，根因在 queue 的 FIFO 假设，建议改出队顺序而不是加 sleep <span class="muted">08:05</span></div>
-          <div class="ev">会话：接受建议，已改为调整出队顺序；补了一条并发测试 <span class="muted">08:09</span></div>
-          <div class="ev auto">⚙ 地区 400 · 退避 2 分钟后恢复（同一根因影响 3 个会话，已合并成一条提醒）<span class="muted">08:31</span></div>
-          <div class="ev ok">验证通过：#3688–#3705 全部 CI 绿，diff 闸门无告警 <span class="muted">09:02</span></div>
-          <div class="ev">阶段 4 进行中 · 18/24 <span class="muted">09:38</span></div>
-        </div>
-        <div class="card" style="margin-top:14px"><div class="muted">工作流 · 阶段</div>
-          <div class="row" style="margin-top:8px;font-size:12.5px"><span class="chip green">1 分诊 ✓</span><span class="chip green">2 修复 ✓</span><span class="chip green">3 验证 ✓</span><span class="chip blue">4 开 PR · 18/24</span><span class="chip">5 汇总</span></div></div>
-      </div>
-      <div class="composer">
-        <div class="target"><span>→ 直接对"处理 review issues"说（进入它的队列，不打断当前工具调用）</span><span class="muted">停下 ⏸</span></div>
-        <div class="input"><span>追问或调整方向…</span><span>↑</span></div>
-      </div>
-    </div>
-    <div class="side">
-      <div class="shead">会话详情<span class="sp"></span><span class="muted">✕</span></div>
-      <div class="sbody">
-        <div class="card"><div class="kv"><span>托管</span><span class="toggle"></span></div><div class="kv"><span>模型</span><span class="v">opus 5.5 · high</span></div><div class="kv"><span>节点 / 工作区</span><span class="v">Mac · naozhi（worktree）</span></div></div>
-        <div class="sect"><span>契约</span><span class="muted">来源：你 09:12 的原话</span></div>
-        <div class="card"><div class="kv"><span>目标</span><span class="v">处理 #3650–#3672 共 24 个 issue</span></div><div class="kv"><span>验收</span><span class="v">每个 issue 一个 PR · CI 绿 · 不弱化测试</span></div><div class="kv"><span>自主度</span><span class="v">委托范围（推进到完成）</span></div></div>
-        <div class="sect"><span>血缘与产物</span></div>
-        <div class="card"><div class="kv"><span>派出者</span><span class="v">Planner（naozhi）</span></div><div class="kv"><span>接续自</span><span class="v">#a41f（上下文超过 100k 后另开）</span></div><div class="kv"><span>产物</span><span class="v">PR #3688 … #3705（18）</span></div></div>
-        <div class="sect"><span>本链计数</span></div>
-        <div class="card"><div class="kv"><span>自动继续</span><span class="v">2 / 8</span></div><div class="kv"><span>无进展连续</span><span class="v">0 / 3</span></div><div class="kv"><span>同类错误</span><span class="v">地区 400 · 1 / 5</span></div></div>
-        <div class="btns"><span class="btn">交回给我</span><span class="btn">暂停</span><span class="btn danger">取消</span></div>
-      </div>
-    </div>
+<h2>② Planner 主线程：说"交给你"之后，它接手、汇报、提议</h2>
+<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#planner</span></div><div class="top"><span class="logo">naozhi</span><span class="chip blue">● 3 在跑</span><span class="chip red">● 1 等你</span><span class="chip">2 待审</span><span class="chip amber">Midway 2 小时后过期</span><span class="sp"></span><span class="muted">Planner：opus 5.5 · effort 自适应 · 只出意见 · 空闲</span><span class="btn">专家视图</span><span class="btn">停止 ▾</span></div><div class="body"><div class="rail"><div class="lbl">视图</div><div class="nav">💬 对话</div><div class="nav on">🧭 Planner</div><div class="nav">📥 收件箱<span class="count">3</span></div><div class="nav">🗂 工作台</div><div class="nav">🛰 系统</div><div class="nav">👤 我</div><div class="lbl">工作区（筛选）</div><div class="ws on"><span>全部</span></div><div class="ws"><span>naozhi</span><span class="count g">3</span></div><div class="ws"><span>JD 客户</span><span class="count g">1</span></div><div class="ws"><span>你的一天</span></div><div class="lbl">正在替你盯着</div><div class="card" style="padding:8px 10px;font-size:12.5px">处理 review issues<div class="bar"><i style="width:72%"></i></div><div class="muted">正在跑测试 · 第 3/5 项验收</div></div><div class="card" style="padding:8px 10px;font-size:12.5px">ClickHouse 压测<div class="muted" style="color:var(--red)">等你回复 · 40 分钟</div></div><div class="bottom"><span class="muted">Mac 节点在线 · 磁盘 78%</span></div></div>
+<div class="main">
+  <div class="mhead">🧭 Planner <span class="chip purple">信任级别 1 · 只出意见</span><span class="sp"></span><span class="muted">全局唯一 · 按工作区加载</span></div>
+  <div class="stream">
+    <div class="msg"><span class="av gw">⚙</span><div class="mbody"><div class="h">早报 · 08:30（网关确定性生成）</div><div class="card" style="margin:0">昨晚合并 9 个 PR · <b>1 件事等你</b> · <b>1 个承诺今天到期</b>（JD 会前材料） <u>展开</u></div></div></div>
+    <div class="msg"><span class="av me">我</span><div class="mbody"><div class="h">你 · 09:12</div>交给你：剩下的 review issue 都处理完，每个 issue 一个 PR，我出去一趟</div></div>
+    <div class="msg"><span class="av pl">P</span><div class="mbody"><div class="h">回执 · 09:12（1 秒内）</div><span class="rcpt">收到 · 交给 naozhi 工作区 · 已登记承诺"全部合并后告诉你"</span></div></div>
+    <div class="msg"><span class="av pl">P</span><div class="mbody"><div class="h">Planner · 09:13</div>
+      <div class="card sess" style="margin:0"><div class="t">处理 review issues <span class="chip blue">托管中</span><span class="chip purple">Planner 派出</span><span class="sp"></span><span class="muted">opus 5.5 · high</span></div>
+        <div class="stl" style="margin-top:6px">正在跑测试 · 第 3/5 项验收 · 18/24 PR</div>
+        <div class="undo">⚙ 已按建议执行：方案 A（2 分钟无回应）· 撤回</div></div></div></div>
+    <div class="msg"><span class="av pl">P</span><div class="mbody"><div class="h">Planner · 意见 · 08:05</div>
+      <div class="card advice" style="margin:0">#3664 在改症状，根因在出队顺序（工作区幕僚评审）。已发给会话，它接受了。<span class="muted">依据：<u>queue.go:88@a41f</u> · <u>CI #9123</u></span></div></div></div>
+    <div class="msg"><span class="av pl">P</span><div class="mbody"><div class="h">Planner · 提议 · 09:40</div>
+      <div class="card" style="margin:0">CI 已绿、12 个 PR 已合并。你过去 9 次合并后都发版，v0.1.46 的 changelog 草稿与检查项已备好。<span class="chip red">每次确认</span><div class="btns"><span class="btn pri">发版</span><span class="btn">看 changelog</span><span class="btn">今天不发</span><span class="muted" style="align-self:center">卡片 18 分钟后过期</span></div></div></div></div>
+  </div>
+  <div class="composer">
+    <div class="target"><span>→ 发往：Planner ▾</span><span>@naozhi 限定工作区</span><span class="muted">一句话就能改设置："晚上别推""可以替我继续"</span></div>
+    <div class="input"><span>交代、追问、改设置…</span><span>🎙 ↑</span></div>
   </div>
 </div>
-<p class="note">时间线默认只显示里程碑：每条自动动作带原因码与计数，顾问意见与会话的回应成对出现；"完整记录"是现有事件流视图（与专家视图同源）。右栏把契约、血缘、产物、防循环计数一屏展示。</p>
+<div class="side">
+  <div class="shead">等你的事 <span class="count">2</span><span class="sp"></span><span class="muted">全部 ›</span></div>
+  <div class="sbody">
+    <div class="card"><span class="chip red">决定 · 每次确认</span> <span class="muted">naozhi · 12 分钟</span><div style="font-weight:600;margin-top:6px">发版 v0.1.46？</div><div class="btns"><span class="btn pri">发版</span><span class="btn">稍后</span></div></div>
+    <div class="card"><span class="chip amber">提问</span> <span class="muted">ClickHouse 压测 · 40 分钟</span><div style="font-weight:600;margin-top:6px">副本数 2 → 3？</div><div class="muted">不可逆：所以没有按建议执行</div></div>
+    <div class="sect"><span>答应你的</span><span class="muted">2</span></div>
+    <div class="card"><div class="kv"><span>全部合并后告诉你</span><span class="v">18/24</span></div><div class="kv"><span>周五前整理 JD 会前材料</span><span class="v" style="color:var(--amber)">今天到期</span></div></div>
+    <div class="sect"><span>正在替你盯着</span><span class="muted">3</span></div>
+    <div class="card"><div class="kv"><span>处理 review issues</span><span class="chip blue">托管</span></div><div class="kv"><span>ClickHouse 压测</span><span class="chip red">等你</span></div><div class="kv"><span>flaky 清扫（例行任务）</span><span class="chip">提议 2</span></div></div>
+  </div>
+</div></div></div>
+<p class="note">只有一个 Planner。早报、回执、派出的会话卡片、意见、提议都在它的主线程里。说"交给你"之后 Planner 站到中间：一秒回执、登记承诺、派出会话；可逆的推荐项无人回应时按建议继续，并留撤回入口。上线时信任级别是"只出意见"。</p>
 </div>
 
-<!-- ============ 3. 收件箱 ============ -->
 <div class="shot">
-<h2>③ 收件箱：等你的事按优先级排好，卡片里直接处理</h2>
-<div class="win">
-  <div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#inbox</span></div>
-  <div class="top"><span class="logo">naozhi</span><span class="chip blue">● 3 在跑</span><span class="chip red">● 1 等你</span><span class="sp"></span><span class="btn">专家视图</span><span class="btn solid-red">急停</span></div>
-  <div class="body">
-    <div class="rail">
-      <div class="lbl">工作区 · Planner</div>
-      <div class="ws"><span>全部</span><span class="count">3</span></div><div class="ws on"><span>🧭 naozhi</span><span class="count">1</span></div><div class="ws"><span>JD</span><span class="count g">2</span></div>
-      <div class="lbl">视图</div><div class="nav">💬 对话</div><div class="nav on">📥 收件箱<span class="count">3</span></div><div class="nav">🛰 系统</div><div class="nav">👤 我</div>
-    </div>
-    <div class="main">
-      <div class="mhead">收件箱<span class="sp"></span><span class="tabs"><span class="on">等你的</span><span>待审</span><span>进行中</span><span>已解决</span><span>早报</span></span></div>
-      <div class="page">
-        <div class="card" style="background:#fbf7ff;border-color:#e5d4ff"><b>你不在的 7 小时里</b>：合并 9 个 PR · 自动继续 4 次 · 地区 400 打断 3 个会话，已合并处理并恢复 · 预判 1 件（发版准备）</div>
-        <div class="group"><div class="gh"><span>等你处理 · 2</span><span class="muted">按紧急程度 · 只有你能关闭</span></div>
-          <div class="card sel"><div class="row"><span class="chip red">决定</span><span class="muted">naozhi · Planner 预判 · 等了 12 分钟</span></div><div style="font-weight:600;margin-top:6px">发版 v0.1.46？</div><div class="muted">CI 绿 · 12 个 PR · changelog 草稿已备好 · 需人决定清单：发版</div><div class="btns"><span class="btn pri">发版</span><span class="btn">看 changelog</span><span class="btn">今天不发</span></div></div>
-          <div class="card"><div class="row"><span class="chip amber">提问</span><span class="muted">JD · ClickHouse 压测 · 等了 40 分钟 · 已合并 2 个问题</span></div><div style="font-weight:600;margin-top:6px">① 第 3 轮副本数 2 → 3？ ② 压测数据保留几天？</div><div class="btns"><span class="btn">保持 2</span><span class="btn">提到 3</span><span class="btn">回复…</span></div></div>
-        </div>
-        <div class="group"><div class="gh"><span>待审 · 2</span><span class="muted">验证已通过</span></div>
-          <div class="card"><div class="row"><span class="chip blue">PR #3701</span><span class="muted">flaky 清扫（例行任务）· 自主度：提议</span></div><div style="margin-top:4px">修 TestShimWriteDeadline 的竞态（根因：等中间状态而非真实输出）</div><div class="btns"><span class="btn pri">合并</span><span class="btn">要求修改</span><span class="btn">以后这类直接合（授权）</span></div></div>
-        </div>
-        <div class="group"><div class="gh"><span>提议 · 1</span></div>
-          <div class="card"><div class="row"><span class="chip purple">提议</span><span class="muted">issue 分诊 · 挂在 Next："多节点 dispatch-v1"</span></div><div style="margin-top:4px">#3712（外部用户提的）建议先补 send 的 backend 字段 · 污染标记：外部来源，只能提议</div><div class="btns"><span class="btn">批准计划</span><span class="btn">不做</span></div></div>
-        </div>
-      </div>
-    </div>
-    <div class="side">
-      <div class="shead">发版 v0.1.46 · 上下文</div>
-      <div class="sbody">
-        <div class="card"><div class="kv"><span>为什么现在问</span><span class="v">CI 已绿；你过去 9 次合并后都发版</span></div><div class="kv"><span>为什么要你决定</span><span class="v">需人决定清单：发版</span></div><div class="kv"><span>已准备</span><span class="v">changelog 草稿、发版检查项</span></div></div>
-        <div class="sect"><span>changelog 草稿</span></div>
-        <div class="card" style="font-size:12.5px">feat(cli): cli.permission_mode<br>fix(turn): 出队顺序（#3664）<br>fix(shim): SetWriteDeadline 竞态（#3701）<br>… 共 12 项</div>
-        <div class="sect"><span>依据</span></div>
-        <div class="card muted">懂你/决定与先例：9/12、9/20、10/03… 合并后发版 · 懂系统/外部：master CI #8812 绿</div>
-      </div>
+<h2>③ 会话详情：状态三层、按建议执行可撤回、依据可点开</h2>
+<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#s=review-issues</span></div><div class="top"><span class="logo">naozhi</span><span class="chip blue">● 3 在跑</span><span class="chip red">● 1 等你</span><span class="chip">2 待审</span><span class="chip amber">Midway 2 小时后过期</span><span class="sp"></span><span class="muted">Planner：opus 5.5 · effort 自适应 · 只出意见 · 空闲</span><span class="btn">专家视图</span><span class="btn">停止 ▾</span></div><div class="body"><div class="rail"><div class="lbl">视图</div><div class="nav">💬 对话</div><div class="nav on">🧭 Planner</div><div class="nav">📥 收件箱<span class="count">3</span></div><div class="nav">🗂 工作台</div><div class="nav">🛰 系统</div><div class="nav">👤 我</div><div class="lbl">工作区（筛选）</div><div class="ws"><span>全部</span></div><div class="ws on"><span>naozhi</span><span class="count g">3</span></div><div class="ws"><span>JD 客户</span><span class="count g">1</span></div><div class="ws"><span>你的一天</span></div><div class="bottom"><span class="muted">Mac 节点在线 · 磁盘 78%</span></div></div>
+<div class="main">
+  <div class="mhead">处理 review issues <span class="chip blue">托管中</span><span class="chip purple">Planner 派出</span><span class="sp"></span><span class="tabs"><span class="on">里程碑</span><span>原始记录</span><span>工作流</span><span>改动</span><span>产物</span></span></div>
+  <div class="stream">
+    <div class="card" style="background:#f3f8ff;border-color:#b6d7ff"><div class="stl">正在跑测试 · 第 3/5 项验收</div><div class="bar"><i style="width:72%"></i></div><div class="muted">18/24 PR · 最近一次检查 08:05 · 污染：无 · 健康：活跃</div></div>
+    <div class="tl">
+      <div class="ev ok">阶段 3 完成 · 14 个 PR 已合并 <span class="muted">07:12</span></div>
+      <div class="ev auto">⚙ 已按建议执行：方案 A（会话推荐，可逆，2 分钟无回应）<span class="muted">07:40</span><br><span class="undo">撤回并改用方案 B</span></div>
+      <div class="ev adv">🧭 意见（工作区幕僚评审）：#3664 在改症状，根因在出队顺序，建议改 Orchestrator 而不是加 sleep <span class="muted">08:05</span><div class="muted">依据：queue.go:88@a41f · CI #9123 · 反模式"靠 sleep 修 flaky"</div></div>
+      <div class="ev">会话回应：接受，已改为调整出队顺序；补了一条并发测试 <span class="muted">08:09</span></div>
+      <div class="ev auto">⚙ 地区 400 · 退避 2 分钟后恢复（同一根因影响 3 个会话，已合并成一条提醒）<span class="muted">08:31</span></div>
+      <div class="ev ok">验证通过：#3688–#3705 全部 CI 绿 <span class="muted">09:02</span></div>
+      <div class="ev">阶段 4 进行中 · 18/24 <span class="muted">09:38</span></div>
     </div>
   </div>
+  <div class="composer">
+    <div class="target"><span>→ 直接对"处理 review issues"说（直通 CC 队列，不打断当前工具调用）</span><span class="muted">停下 ⏸</span></div>
+    <div class="input"><span>追问或调整方向…</span><span>↑</span></div>
+  </div>
 </div>
-<p class="note">顶部是离开摘要；同一会话的多个问题合并成一张卡；外部来源的提议标出污染标记。右栏回答"为什么现在问我、为什么要我决定、已经帮我准备了什么"。"以后这类直接合"会生成一条结构化授权，可在"我"里撤销。</p>
+<div class="side">
+  <div class="shead">会话详情<span class="sp"></span><span class="muted">✕</span></div>
+  <div class="sbody">
+    <div class="card"><div class="kv"><span>托管</span><span class="toggle"></span></div><div class="kv"><span>按建议执行</span><span class="toggle"></span></div><div class="kv"><span>key</span><span class="v">task:7f3c…</span></div><div class="kv"><span>工作区 / 节点</span><span class="v">naozhi · Mac（worktree）</span></div></div>
+    <div class="sect"><span>契约</span><span class="muted">来源：你 09:12 的原话</span></div>
+    <div class="card"><div class="kv"><span>目标</span><span class="v">处理 #3650–#3672 共 24 个 issue</span></div><div class="kv"><span>验收</span><span class="v">每个 issue 一个 PR · CI 绿 · 不弱化测试</span></div></div>
+    <div class="sect"><span>血缘与产物</span></div>
+    <div class="card"><div class="kv"><span>派出者</span><span class="v">Planner</span></div><div class="kv"><span>改动</span><span class="v">6 个文件 · <u>在工作台看 diff</u></span></div><div class="kv"><span>产物</span><span class="v">PR #3688 … #3705（18）</span></div></div>
+    <div class="sect"><span>本链计数</span></div>
+    <div class="card"><div class="kv"><span>自动继续</span><span class="v">2 / 8</span></div><div class="kv"><span>无进展连续</span><span class="v">0 / 3</span></div><div class="kv"><span>同类错误</span><span class="v">地区 400 · 1 / 5</span></div></div>
+    <div class="btns"><span class="btn">交回给我</span><span class="btn">暂停</span><span class="btn danger">取消</span></div>
+  </div>
+</div></div></div>
+<p class="note">状态三层：顶部一行状态 → 里程碑（进行中的事）→ 原始记录（与专家视图同源）。按建议执行的条目带撤回入口，Planner 的意见附可点开的依据。右栏展示契约、血缘、产物和防循环计数；key 是不透明的永久身份。</p>
 </div>
 
-<!-- ============ 4. 系统 ============ -->
 <div class="shot">
-<h2>④ 系统（懂系统）：环境、在途会话、关系、Planner 的决定</h2>
-<div class="win">
-  <div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#system</span></div>
-  <div class="top"><span class="logo">naozhi</span><span class="chip blue">● 3 在跑</span><span class="chip red">● 1 等你</span><span class="sp"></span><span class="btn">专家视图</span><span class="btn solid-red">急停</span></div>
-  <div class="body">
-    <div class="rail">
-      <div class="lbl">工作区 · Planner</div><div class="ws"><span>全部</span></div><div class="ws on"><span>🧭 naozhi</span><span class="count">1</span></div><div class="ws"><span>JD</span><span class="count g">2</span></div>
-      <div class="lbl">视图</div><div class="nav">💬 对话</div><div class="nav">📥 收件箱<span class="count">3</span></div><div class="nav on">🛰 系统</div><div class="nav">👤 我</div>
-    </div>
-    <div class="main">
-      <div class="mhead">系统 · 懂系统<span class="sp"></span><span class="muted">由事件流派生 · Planner 只加批注</span></div>
-      <div class="page">
-        <div class="grid4" style="margin-bottom:14px">
-          <div class="tile warn"><div class="k">Midway</div><div class="v">2 小时后过期</div><div class="muted">今晚 2 个托管任务要用 · <u>我去处理</u></div></div>
-          <div class="tile good"><div class="k">Bedrock / 网络</div><div class="v">正常</div><div class="muted">us-east-1 · 今天地区 400 ×3（已恢复）</div></div>
-          <div class="tile good"><div class="k">master CI</div><div class="v">绿 · #8812</div><div class="muted">12 分钟前</div></div>
-          <div class="tile"><div class="k">Mac 节点</div><div class="v">在线</div><div class="muted">4/6 进程</div><div class="muted">磁盘 78% · 内存 21G</div></div>
-        </div>
-        <div class="sect"><span>在途会话</span><span class="muted">按状态 · 共 9</span></div>
-        <table>
-          <tr><th>会话</th><th>状态</th><th>目标 / 最近</th><th>谁在说话</th><th>产物</th><th>托管</th></tr>
-          <tr><td>处理 review issues</td><td><span class="chip blue">运行中 · 4/5</span></td><td>24 个 issue · 自动继续 2/8</td><td>Planner</td><td>PR ×18</td><td>开</td></tr>
-          <tr><td>ClickHouse 压测</td><td><span class="chip red">等你 40 分</span></td><td>第 3 轮副本数</td><td>你</td><td>报告草稿</td><td>开</td></tr>
-          <tr><td>flaky 清扫</td><td><span class="chip">等待审阅</span></td><td>提议 2 条</td><td>例行任务</td><td>PR #3701</td><td>开</td></tr>
-          <tr><td>JD 网络架构图</td><td><span class="chip green">完成</span></td><td>移除共享 VPC</td><td>你</td><td>arch.html</td><td>关</td></tr>
-          <tr><td>升级 cc 并验证模型</td><td><span class="chip">休眠</span></td><td>等下次 toolbox 发布</td><td>你</td><td>—</td><td>关</td></tr>
-        </table>
-        <div class="grid2" style="margin-top:14px">
-          <div><div class="sect"><span>冲突与关系</span></div>
-            <div class="card"><span class="chip red">冲突</span> "review issues"与"flaky 清扫"都改了 <code>internal/turn/queue.go</code> → Planner 让后者排后</div>
-            <div class="card"><span class="chip purple">批注</span> "JD 网络架构"与上周"出口按 BU 分账"的结论有张力 → 已作为顾问意见给你</div></div>
-          <div><div class="sect"><span>Planner 最近的决定</span><span class="muted">可改判</span></div>
-            <div class="card" style="font-size:13px"><b>通知已有</b>：#3666 交给"review issues"——同一模块、上下文 62k、无污染<div class="muted">09:21 · 依据：在途会话 / 复活条件</div></div>
-            <div class="card" style="font-size:13px"><b>另开</b>：#3712 新开会话——外部来源（污染），能力封顶为只改分支<div class="muted">09:30 · 依据：污染标记</div></div></div>
-        </div>
-      </div>
-    </div>
-    <div class="side">
-      <div class="shead">项目长期知识 · naozhi</div>
-      <div class="sbody">
-        <div class="sect"><span>决策与理由</span><span class="muted">12</span></div>
-        <div class="card" style="font-size:12.5px">naozhi 侧只留 opus 5.5 / sonnet 5.5 两个模型（10/03）<div class="muted">锚点：naozhi-settings · 已复核</div></div>
-        <div class="sect"><span>技术债与坑</span><span class="muted">31</span></div>
-        <div class="card" style="font-size:12.5px">shim 的 SetWriteDeadline 测试会扫描别的包，推送前跑全量 go test<div class="muted">锚点：internal/shim · <span style="color:var(--amber)">未复核（锚点已改）</span></div></div>
-        <div class="sect"><span>反模式</span><span class="muted">7</span></div>
-        <div class="card" style="font-size:12.5px">靠 sleep / skip 修 flaky · 抬 ratchet 基线</div>
-        <div class="btns"><span class="btn">纠正一条</span><span class="btn">查看全部</span></div>
-      </div>
-    </div>
+<h2>④ 工作台面（新增）：文件 · 改了什么 · 预览 · 直接运行 · 交给会话</h2>
+<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#workbench</span></div><div class="top"><span class="logo">naozhi</span><span class="chip blue">● 3 在跑</span><span class="chip red">● 1 等你</span><span class="chip">2 待审</span><span class="chip amber">Midway 2 小时后过期</span><span class="sp"></span><span class="muted">Planner：opus 5.5 · effort 自适应 · 只出意见 · 空闲</span><span class="btn">专家视图</span><span class="btn">停止 ▾</span></div><div class="body"><div class="rail"><div class="lbl">视图</div><div class="nav">💬 对话</div><div class="nav">🧭 Planner</div><div class="nav">📥 收件箱<span class="count">3</span></div><div class="nav on">🗂 工作台</div><div class="nav">🛰 系统</div><div class="nav">👤 我</div><div class="lbl">工作区（筛选）</div><div class="ws"><span>全部</span></div><div class="ws on"><span>naozhi</span><span class="count g">3</span></div><div class="ws"><span>JD 客户</span><span class="count g">1</span></div><div class="ws"><span>你的一天</span></div><div class="bottom"><span class="muted">Mac 节点在线 · 磁盘 78%</span></div></div>
+<div style="width:250px;flex:none;border-right:1px solid var(--line);background:var(--bg1);padding:10px">
+  <div class="tree">
+    <div class="r">会话 · 处理 review issues（worktree）</div>
+    <div>▾ internal/turn</div>
+    <div class="on">　queue.go <span style="color:var(--green)">+18</span> <span style="color:var(--red)">−7</span></div>
+    <div>　queue_test.go <span style="color:var(--green)">+42</span></div>
+    <div>▸ internal/server <span class="muted">1 处改动</span></div>
+    <div class="r">工作区 · naozhi</div>
+    <div>▸ cmd/　▸ docs/　▸ internal/</div>
+    <div>　Makefile</div>
+    <div class="r">工作区 · JD 客户</div>
+    <div>　arch.html　notes.md</div>
+    <div class="r">允许的 /tmp</div>
+    <div>　bench-2026-10-26.log <span class="chip blue">写入中</span></div>
+    <div class="r">成品库</div>
+    <div>📐 arch.html　📄 PR #3701</div><div>🖼 dashboard 截图 ×3</div>
   </div>
 </div>
-<p class="note">所有状态都来自事件流，可点开看来源；"谁在说话"一列体现会话中立、按消息身份判定权限。右栏是项目长期知识，过期条目自动标"未复核"。</p>
+<div class="main">
+  <div class="mhead">internal/turn/queue.go <span class="chip">会话 worktree</span><span class="sp"></span><span class="tabs"><span class="on">改动</span><span>对比</span><span>文件</span></span></div>
+  <div class="page" style="padding:14px 18px">
+    <div class="diff">
+      <div class="h">@@ func (q *Queue) Pop() *Req @@ · 来自 3 个提交 · 最新 a41f</div>
+      <div class="n">  85  // Pop returns the oldest request (FIFO).</div>
+      <div class="n">  86  func (q *Queue) Pop() *Req {</div>
+      <div class="d">- 87      return q.items[len(q.items)-1]</div>
+      <div class="a">+ 87      r := q.items[0]</div>
+      <div class="a">+ 88      q.items = q.items[1:]</div>
+      <div class="a">+ 89      return r</div>
+      <div class="n">  90  }</div>
+    </div>
+    <div class="sect" style="margin-top:14px"><span>直接运行</span><span class="muted">识别自 Makefile · 记为"代表你本人"</span></div>
+    <div class="row" style="margin-bottom:8px"><span class="btn pri">▶ make test</span><span class="btn">make lint</span><span class="btn">go test ./internal/turn/...</span><span class="btn">中止</span></div>
+    <div class="term">$ go test ./internal/turn/...
+=== RUN   TestQueuePopFIFO
+--- PASS: TestQueuePopFIFO (0.00s)
+=== RUN   TestQueueConcurrentSubmit
+--- PASS: TestQueueConcurrentSubmit (0.41s)
+<span class="ok">ok  	github.com/naozhi/naozhi/internal/turn	1.203s</span></div>
+    <div class="btns"><span class="btn">交给会话："帮我看看这个改动还有没有边界情况"</span><span class="btn">轻量编辑</span></div>
+  </div>
+</div>
+<div class="side" style="width:330px">
+  <div class="shead">预览<span class="sp"></span><span class="muted">跟随刷新</span></div>
+  <div class="sbody">
+    <div class="prev"><div class="bar2"><span>docs/rfc/planner.md（Markdown 渲染）</span><span>↗</span></div>
+      <div style="padding:10px 12px;font-size:12.5px"><b style="font-size:14px">2.1 设计原则（D61）</b><div style="margin-top:6px">① 确定性放在网关，判断交给模型，中间层要薄。</div><div style="margin-top:4px">② 先信任，后惊喜。</div><div class="card" style="margin:8px 0 0;font-size:12px">mermaid / 公式在此渲染</div></div></div>
+    <div class="sect"><span>你在工作台上的操作</span></div>
+    <div class="card" style="font-size:12.5px"><div class="kv"><span>运行 go test ./internal/turn/...</span><span class="v">10:21</span></div><div class="kv"><span>改 config.yaml</span><span class="v">09:58</span></div><div class="muted" style="margin-top:4px">都进事件流，Planner 也看得到</div></div>
+  </div>
+</div></div></div>
+<p class="note">工作台面是第三个面：你自己直接看、直接动这台机器。左侧文件树按"节点 + 根目录 + 路径"组织，根目录包括会话 worktree、工作区、允许的 /tmp 和成品库。中间是改动（diff）与直接运行，右侧是预览（目录级 HTML、Markdown、跟随刷新）。"交给会话"是它和对话面之间的桥。远程节点与沙箱随多节点阶段加入。</p>
 </div>
 
-<!-- ============ 5. 我 ============ -->
 <div class="shot">
-<h2>⑤ 我（懂你）：关注点、注意力、授权、边界——只有你能改</h2>
-<div class="win">
-  <div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#me</span></div>
-  <div class="top"><span class="logo">naozhi</span><span class="chip blue">● 3 在跑</span><span class="chip red">● 1 等你</span><span class="sp"></span><span class="btn">专家视图</span><span class="btn solid-red">急停</span></div>
-  <div class="body">
-    <div class="rail">
-      <div class="lbl">工作区 · Planner</div><div class="ws on"><span>🧭 naozhi</span><span class="count">1</span></div><div class="ws"><span>JD</span><span class="count g">2</span></div>
-      <div class="lbl">视图</div><div class="nav">💬 对话</div><div class="nav">📥 收件箱<span class="count">3</span></div><div class="nav">🛰 系统</div><div class="nav on">👤 我</div>
+<h2>⑤ 收件箱：早报置顶，"答应你的"单独一组，卡片会过期</h2>
+<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#inbox</span></div><div class="top"><span class="logo">naozhi</span><span class="chip blue">● 3 在跑</span><span class="chip red">● 1 等你</span><span class="chip">2 待审</span><span class="chip amber">Midway 2 小时后过期</span><span class="sp"></span><span class="muted">Planner：opus 5.5 · effort 自适应 · 只出意见 · 空闲</span><span class="btn">专家视图</span><span class="btn">停止 ▾</span></div><div class="body"><div class="rail"><div class="lbl">视图</div><div class="nav">💬 对话</div><div class="nav">🧭 Planner</div><div class="nav on">📥 收件箱<span class="count">3</span></div><div class="nav">🗂 工作台</div><div class="nav">🛰 系统</div><div class="nav">👤 我</div><div class="lbl">工作区（筛选）</div><div class="ws on"><span>全部</span></div><div class="ws"><span>naozhi</span><span class="count g">3</span></div><div class="ws"><span>JD 客户</span><span class="count g">1</span></div><div class="ws"><span>你的一天</span></div><div class="bottom"><span class="muted">Mac 节点在线 · 磁盘 78%</span></div></div>
+<div class="main">
+  <div class="mhead">收件箱<span class="sp"></span><span class="tabs"><span class="on">等你处理 2</span><span>待审 2</span><span>答应你的 2</span><span>已解决</span></span></div>
+  <div class="page">
+    <div class="card" style="background:#fbf7ff;border-color:#e5d4ff"><b>早报 · 08:30</b>：昨晚合并 9 个 PR · 地区 400 打断 3 个会话，已合并处理并恢复 · 1 件事等你 · 1 个承诺今天到期 · Midway 2 小时后过期，今晚 2 个托管任务要用</div>
+    <div class="group"><div class="gh"><span>等你处理 · 2</span><span class="muted">按紧急程度 · 只有你能关闭</span></div>
+      <div class="card sel"><div class="row"><span class="chip red">决定 · 每次确认</span><span class="muted">naozhi · Planner 提议 · 等了 12 分钟 · 18 分钟后过期</span></div><div style="font-weight:600;margin-top:6px">发版 v0.1.46？</div><div class="muted">CI 绿 · 12 个 PR · changelog 草稿已备好 · 发版不能长期授权</div><div class="btns"><span class="btn pri">发版（Touch ID）</span><span class="btn">看 changelog</span><span class="btn">今天不发</span><span class="btn">延长有效期</span></div></div>
+      <div class="card"><div class="row"><span class="chip amber">提问</span><span class="muted">JD · ClickHouse 压测 · 等了 40 分钟</span></div><div style="font-weight:600;margin-top:6px">第 3 轮副本数要不要从 2 提到 3？</div><div class="muted">会话给了两个方案并推荐"保持 2"；但提到 3 会重建集群（不可逆），所以没有按建议执行</div><div class="btns"><span class="btn">保持 2</span><span class="btn">提到 3</span><span class="btn">回复…</span></div></div>
     </div>
-    <div class="main">
-      <div class="mhead">我 · 懂你<span class="sp"></span><span class="tabs"><span class="on">关注点</span><span>注意力</span><span>授权</span><span>边界</span><span>偏好与先例</span></span></div>
-      <div class="page">
-        <div class="grid3">
-          <div class="col"><h4><span><span class="chip green">Now</span></span><span class="muted">＋</span></h4><div class="item">Planner 托管 MVP</div><div class="item">推送管线（三级）</div></div>
-          <div class="col"><h4><span><span class="chip blue">Next</span></span><span class="muted">＋</span></h4><div class="item">iOS app</div><div class="item">多节点 dispatch-v1</div></div>
-          <div class="col"><h4><span><span class="chip">Not-now</span></span><span class="muted">＋</span></h4><div class="item">多 Planner 协作</div><div class="item">邮箱接入</div></div>
-        </div>
-        <div class="muted" style="margin:6px 2px 14px">9 天前确认 · Planner 自发的工作必须挂到 Now / Next，落在 Not-now 的一律拒绝 · 14 天未确认会在早报里问你</div>
-        <div class="grid2">
-          <div><div class="sect"><span>注意力</span></div>
-            <div class="card"><div class="kv"><span>想听</span><span class="v">需要我决定的、CI 变红、凭证将过期</span></div><div class="kv"><span>永远别提</span><span class="v">依赖小版本、外观类 issue</span></div><div class="kv"><span>什么时候</span><span class="v">22:30–08:00 只推紧急 · 早报 08:30</span></div><div class="kv"><span>每天立即推送上限</span><span class="v">6 次（今天已用 2）</span></div><div class="kv"><span>介入配置</span><span class="v">单人开发（默认）</span></div></div></div>
-          <div><div class="sect"><span>授权 · Planner 可代你做的</span></div>
-            <table><tr><th>能力</th><th>范围</th><th>剩余</th><th></th></tr>
-              <tr><td>修 flaky 并开 PR</td><td>naozhi · flaky 清扫</td><td>17 次 · 12/31</td><td style="white-space:nowrap"><u>撤销</u></td></tr>
-              <tr><td>依赖安全补丁</td><td>naozhi · dep-audit</td><td>永久</td><td style="white-space:nowrap"><u>撤销</u></td></tr>
-              <tr><td>合并验证通过的 flaky PR</td><td>naozhi</td><td>今天刚授予</td><td style="white-space:nowrap"><u>撤销</u></td></tr></table></div>
-        </div>
-        <div class="grid2" style="margin-top:12px">
-          <div><div class="sect"><span>需人决定清单（动作级拦截）</span></div><div class="card" style="font-size:13px">发版 / 打 tag · 改分支保护 · 改 epic 验收标准与 docs/ 设计 · 合并来源不明的 PR · 动 Now / Next · 重启或升级 naozhi</div></div>
-          <div><div class="sect"><span>最近学到的（待你确认 · 3）</span></div><div class="card" style="font-size:13px">flaky PR 标题用"fix(包名): 现象 —— 根因"<div class="muted">来源：你改了 2 次标题 · 范围：flaky 清扫</div><div class="btns"><span class="btn pri">确认</span><span class="btn">改范围</span><span class="btn">不要</span></div></div></div>
-        </div>
+    <div class="group"><div class="gh"><span>答应你的 · 2</span><span class="muted">Planner 登记，不受打扰预算挤压</span></div>
+      <div class="card"><div class="kv"><span>全部合并后告诉你（review issues）</span><span class="v">进行中 18/24</span></div><div class="kv"><span>周五前整理 JD 会前材料</span><span class="v" style="color:var(--amber)">今天到期 · 草稿已备好</span></div></div>
+    </div>
+    <div class="group"><div class="gh"><span>已过期 · 1</span><span class="muted">从不因无人响应而放行</span></div>
+      <div class="card muted">昨天 23:10 · 合并 #3699（需你放行）· 30 分钟无人响应已作废，会话跳过该动作继续 · <u>重新发起</u></div>
+    </div>
+  </div>
+</div></div></div>
+<p class="note">收件箱只放需要你的事：等你处理 / 待审 / 答应你的 / 已解决；早报和离开摘要是顶部分组。每张卡片有有效期，过期作废并留记录，可以重新发起；"每次确认"类动作（发版、对外发信、删除远程资源）不能落成长期授权。</p>
+</div>
+
+<div class="shot">
+<h2>⑥ 系统（监督面）：全会话健康总览、Planner 状态与检查记录</h2>
+<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#system</span></div><div class="top"><span class="logo">naozhi</span><span class="chip blue">● 3 在跑</span><span class="chip red">● 1 等你</span><span class="chip">2 待审</span><span class="chip amber">Midway 2 小时后过期</span><span class="sp"></span><span class="muted">Planner：opus 5.5 · effort 自适应 · 只出意见 · 空闲</span><span class="btn">专家视图</span><span class="btn">停止 ▾</span></div><div class="body"><div class="rail"><div class="lbl">视图</div><div class="nav">💬 对话</div><div class="nav">🧭 Planner</div><div class="nav">📥 收件箱<span class="count">3</span></div><div class="nav">🗂 工作台</div><div class="nav on">🛰 系统</div><div class="nav">👤 我</div><div class="lbl">工作区（筛选）</div><div class="ws on"><span>全部</span></div><div class="ws"><span>naozhi</span><span class="count g">3</span></div><div class="ws"><span>JD 客户</span><span class="count g">1</span></div><div class="ws"><span>你的一天</span></div><div class="bottom"><span class="muted">Mac 节点在线 · 磁盘 78%</span></div></div>
+<div class="main">
+  <div class="mhead">系统<span class="sp"></span><span class="muted">无人负责 0 · 心跳正常 · /health ok</span></div>
+  <div class="page">
+    <div class="grid4"><div class="tile warn"><div class="k">Midway</div><div class="v">2 小时后过期</div></div><div class="tile good"><div class="k">Bedrock / 网络</div><div class="v">正常 · us-east-1</div></div><div class="tile good"><div class="k">master CI</div><div class="v">绿</div></div><div class="tile"><div class="k">Planner</div><div class="v">空闲 · 只出意见</div></div></div>
+    <div class="sect" style="margin-top:16px"><span>全会话健康总览（含未托管、终端外部、cron、远程节点）</span><span class="muted">按工作区</span></div>
+    <table><tr><th>会话</th><th>工作区</th><th>健康</th><th>最后活动</th><th>托管</th><th>上次检查</th></tr>
+      <tr><td>处理 review issues</td><td>naozhi</td><td><span class="chip blue">活跃</span></td><td>刚刚</td><td>托管</td><td>08:05 · 意见 1 条</td></tr>
+      <tr><td>flaky 清扫（例行任务）</td><td>naozhi</td><td><span class="chip">等你审阅</span></td><td>3 小时前</td><td>—</td><td>06:00 · 提议 2</td></tr>
+      <tr><td>ClickHouse 压测</td><td>JD 客户</td><td><span class="chip red">等你</span></td><td>40 分钟前</td><td>—</td><td>—</td></tr>
+      <tr><td>JD 网络架构图</td><td>JD 客户</td><td><span class="chip green">正常空闲</span></td><td>15 分钟前</td><td>—</td><td>—</td></tr>
+      <tr><td>收件箱巡检（例行任务）</td><td>你的一天</td><td><span class="chip green">正常</span></td><td>09:00</td><td>—</td><td>下次 12:00</td></tr>
+      <tr><td>claude · ~/Workspace/tmp（终端）</td><td>—</td><td><span class="chip amber">安静 12 分钟</span></td><td>12 分钟前</td><td>—</td><td>只有快照</td></tr>
+    </table>
+    <div class="grid2" style="margin-top:14px">
+      <div class="card"><b>冲突与关系</b><div style="font-size:13px;margin-top:6px"><span class="chip red">冲突</span> "review issues"与"flaky 清扫"都改了 internal/turn/queue.go · Planner 已让后者排后</div></div>
+      <div class="card"><b>Planner 检查记录</b><div style="font-size:13px;margin-top:6px">08:05 被"第一份 diff"唤醒 → 派工作区幕僚评审 → 给会话一条意见</div><div class="muted">依据 2 条 · <u>这不对</u> · <u>全部记录</u></div></div>
+    </div>
+  </div>
+</div></div></div>
+<p class="note">监督面：环境健康是全局的，全会话总览按工作区列出健康状态、最后活动、托管与上次检查（终端里的外部会话只有快照）。Planner 的状态与信任级别常显，每次行动都有人能读的检查记录，点"这不对"即生成先例或约束。</p>
+</div>
+
+<div class="shot">
+<h2>⑦ 我（懂你，全局一份）：一句话设置、写作风格、信任阶梯、授权、三级停止</h2>
+<div class="win"><div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#me</span></div><div class="top"><span class="logo">naozhi</span><span class="chip blue">● 3 在跑</span><span class="chip red">● 1 等你</span><span class="chip">2 待审</span><span class="chip amber">Midway 2 小时后过期</span><span class="sp"></span><span class="muted">Planner：opus 5.5 · effort 自适应 · 只出意见 · 空闲</span><span class="btn">专家视图</span><span class="btn">停止 ▾</span></div><div class="body"><div class="rail"><div class="lbl">视图</div><div class="nav">💬 对话</div><div class="nav">🧭 Planner</div><div class="nav">📥 收件箱<span class="count">3</span></div><div class="nav">🗂 工作台</div><div class="nav">🛰 系统</div><div class="nav on">👤 我</div><div class="lbl">工作区（筛选）</div><div class="ws on"><span>全部</span></div><div class="ws"><span>naozhi</span><span class="count g">3</span></div><div class="ws"><span>JD 客户</span><span class="count g">1</span></div><div class="ws"><span>你的一天</span></div><div class="bottom"><span class="muted">Mac 节点在线 · 磁盘 78%</span></div></div>
+<div class="main">
+  <div class="mhead">我<span class="sp"></span><span class="muted">授权、边界、关注点修改需卡片确认</span></div>
+  <div class="page">
+    <div class="grid2">
+      <div>
+        <div class="sect"><span>关注点</span><span class="muted">编辑 ›</span></div>
+        <div class="card" style="font-size:13px"><div><span class="chip green">Now</span> Planner 托管 MVP；监控底座</div><div style="margin-top:6px"><span class="chip blue">Next</span> iOS app；工作台面</div><div style="margin-top:6px"><span class="chip">Not-now</span> 多节点；邮箱接入</div></div>
+        <div class="sect"><span>注意力</span><span class="muted">一句话就能改</span></div>
+        <div class="card"><div class="kv"><span>想听</span><span class="v">需要我决定的、CI 变红、凭证将过期</span></div><div class="kv"><span>永远别提</span><span class="v">依赖小版本、外观类 issue</span></div><div class="kv"><span>什么时候</span><span class="v">22:30–08:00 只推紧急</span></div>
+          <div class="echo">你昨晚说"晚上别推了" → 已改为 22:30–08:00 只推紧急 · <u>撤销</u></div><div class="echo">你说"收件箱每 3 小时看一次就行" → 巡检改为 10:00–19:00 每 3 小时 · <u>撤销</u></div></div>
+        <div class="sect"><span>写作风格</span><span class="muted">从 33 封已发邮件提炼</span></div>
+        <div class="card" style="font-size:13px">中文为主、先结论后细节、不用客套开头；英文邮件用短句。<span class="muted">· 查看全文 · 修改</span></div>
       </div>
-    </div>
-    <div class="side">
-      <div class="shead">急停与安全</div>
-      <div class="sbody">
-        <div class="card"><b>急停</b><div class="muted" style="margin:4px 0 8px">冻结派活、cron、闹钟；暂停所有托管；拦截所有非你本人发起的动作</div><span class="btn solid-red">立即急停</span></div>
-        <div class="card"><div class="kv"><span>权限模式</span><span class="v">auto（试用中）· 可切回 bypass</span></div><div class="kv"><span>凭证清单</span><span class="v">7 类 · <u>查看</u></span></div><div class="kv"><span>已配对设备</span><span class="v">iPhone · <u>撤销</u></span></div></div>
+      <div>
+        <div class="sect"><span>信任阶梯</span><span class="muted">说"可以替我继续"即升一级</span></div>
+        <div class="card"><div class="lvl"><span class="on">1 只出意见</span><span>2 代办</span><span>3 指令</span><span>4 执行型主动</span></div><div class="muted" style="margin-top:8px">当前：意见、标注、提议、叫停；自动继续由托管规则与"按建议执行"负责</div></div>
+        <div class="sect"><span>授权（Planner 可代你做的）</span><span class="muted">全部 ›</span></div>
+        <div class="card"><div class="kv"><span>修 flaky 并开 PR</span><span class="v">剩 17 次 · 12/31 到期 · 撤销</span></div><div class="kv"><span>依赖安全补丁</span><span class="v">永久 · 撤销</span></div><div class="kv"><span>发版 / 对外发信 / 删除远程资源</span><span class="v"><span class="chip red">每次确认</span></span></div></div>
+        <div class="sect"><span>Planner 对你的推断</span><span class="muted">没有隐形画像</span></div>
+        <div class="card" style="font-size:13px"><div class="kv"><span>回复间隔中位 3.9 分钟（对话类）</span><span class="v">来源：事件流 · 删除</span></div><div class="kv"><span>合并后通常发版（9/9）</span><span class="v">来源：先例 · 删除</span></div></div>
+        <div class="sect"><span>停止</span></div>
+        <div class="btns" style="margin-top:0"><span class="btn">暂停推送</span><span class="btn">暂停托管</span><span class="btn solid-red">急停</span></div>
       </div>
     </div>
   </div>
-</div>
-<p class="note">"懂你"的五块内容一屏可见：关注点三列看板、注意力偏好（想听 / 永远别提 / 什么时候 / 上限）、结构化授权与撤销、需人决定清单、待确认的学到的偏好。修改都需要你本人确认。</p>
+</div></div></div>
+<p class="note">懂你只有一份，所有工作区共用。频率、偏好、例行任务都用一句话设置，Planner 回显改了什么并给撤销入口。Planner 对你的所有推断都列在这里、可删。信任阶梯由你逐级放开；底部是三级停止。</p>
 </div>
 
 <!-- ============ 6. 专家视图 ============ -->
 <div class="shot">
-<h2>⑥ 专家视图：保留现有会话侧边栏与全部高级操作</h2>
+<h2>⑧ 专家视图：保留现有会话侧边栏与全部高级操作</h2>
 <div class="win">
   <div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">naozhi.local/dashboard#expert</span></div>
-  <div class="top"><span class="logo">naozhi</span><span class="chip">专家视图</span><span class="sp"></span><span class="btn pri">回到对话</span><span class="btn solid-red">急停</span></div>
+  <div class="top"><span class="logo">naozhi</span><span class="chip">专家视图</span><span class="sp"></span><span class="btn pri">回到对话</span><span class="btn">停止 ▾</span></div>
   <div class="body">
     <div class="oldside">
       <div class="row" style="justify-content:space-between;margin-bottom:8px"><b style="font-size:13px;white-space:nowrap">会话</b><span class="btn">＋ 新建会话</span></div>
@@ -375,6 +375,7 @@
 </div>
 <p class="note">专家视图是一个视图，不是另一类会话：操作对象仍是同一批执行会话。已有安装默认可一键切换，长期保留。</p>
 </div>
+
 
 </body>
 </html>
