@@ -4,58 +4,21 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // countActive recounts alive processes (corrects drift from undetected exits).
-// Exempt sessions are not counted toward max_procs capacity. Reuses the single
-// walk done by reconcileActiveByBackend so the active count and the
-// per-backend gauges update in one pass.
+// Exempt sessions are not counted toward max_procs capacity.
 func (r *Router) countActive(tx sessTx) {
-	tx.SetActive(r.reconcileActiveByBackend(tx.View))
+	tx.SetActive(countAlive(tx.View))
 }
 
-// reconcileActiveByBackend rebuilds the metrics.SessionActive
-// pair (unlabeled mirror + per-backend labeled gauge) from the session table and
-// returns the alive non-exempt total so callers can refresh the active count
-// from the same O(N) walk (#1607). Used by bulk teardown paths; single-session
-// sites (Reset / Remove) call metrics.RecordSessionActive(backend, -1) directly.
-// evictOldest must NOT add a manual -1 on top of this absolute reconcile —
-// that drifts the gauge (#1645). Backends with no remaining sessions are
-// driven to zero via ForEachKey, otherwise their bucket sticks at its last value.
-func (r *Router) reconcileActiveByBackend(v sessView) int64 {
+// countAlive returns the alive non-exempt session count.
+func countAlive(v sessView) int64 {
 	var total int64
-	perBackend := make(map[string]int64, 4)
 	for _, s := range v.All() {
-		if s.exempt {
-			continue
-		}
-		if s.isAlive() {
+		if !s.exempt && s.isAlive() {
 			total++
-			perBackend[s.Backend()]++
 		}
-	}
-	// expvar.Int has no Set, so drive the unlabeled mirror via Add(want-current).
-	currentTotal := metrics.SessionActive.Value()
-	if delta := total - currentTotal; delta != 0 {
-		metrics.SessionActive.Add(delta)
-	}
-	// Reconcile the labeled gauge per backend.
-	allBackends := map[string]struct{}{}
-	for k := range perBackend {
-		allBackends[k] = struct{}{}
-	}
-	metrics.SessionActiveByBackend.ForEachKey(func(k string) {
-		allBackends[k] = struct{}{}
-	})
-	// One atomic Add per key: the table lock does not guard the expvar map, so a
-	// /debug/vars scraper racing a loop of N Inc/Dec would observe partial
-	// intermediate values. A single jump per backend avoids that.
-	for backend := range allBackends {
-		current := metrics.SessionActiveByBackend.Get(backend)
-		want := perBackend[backend]
-		metrics.SessionActiveByBackend.Add(want-current, backend)
 	}
 	return total
 }
@@ -172,12 +135,9 @@ func (r *Router) evictOldest(tx sessTx) bool {
 		return false
 	}
 	slog.Info("evicting oldest session", "key", oldest.key, "idle", time.Since(oldest.LastActive()))
-	// Bump at the "decision to evict" point: proc.Close() may fail, but the
-	// eviction is already committed (deathReason set, store dirtied below).
-	metrics.SessionEvictTotal.Add(1)
-	// Do NOT decrement the labeled gauge here: countActive() below reconciles
-	// each bucket to an absolute recount, and a manual -1 on top of that
-	// drifts the gauge when Close() flips Alive() asynchronously (#1645).
+	// Do NOT decrement activeCount here: countActive() below recounts, and a
+	// manual -1 on top of that drifts when Close() flips Alive() asynchronously
+	// (#1645).
 	storeAtomicString(&oldest.deathReason, DeathReasonEvicted)
 	// Keep oldest.process non-nil so concurrent holders don't nil-panic; after
 	// Close(), Alive() is false and countActive() recounts. Eviction never

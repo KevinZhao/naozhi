@@ -7,7 +7,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clierr"
 	"github.com/naozhi/naozhi/internal/ctxutil"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
 )
 
@@ -167,7 +166,6 @@ func dropped(ctx context.Context, key string, m Msg, why DropReason) {
 func guarded(key, hook string, fn func()) {
 	defer func() {
 		if r := recover(); r != nil {
-			metrics.PanicRecoveredTotal.Add(1)
 			slog.Error("turn: panic in "+hook, "key", key, "panic", r)
 		}
 	}()

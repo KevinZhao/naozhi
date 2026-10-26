@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/costledger"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 
@@ -615,13 +613,10 @@ func (s *Scheduler) execSend(a execSendArgs) (result SendResult, costInc costled
 	defer win.close()
 	// Structured signal when spawn already consumed >spawnElapsedWarnRatio of
 	// jobTimeout: the wall-clock doubling is intentional but operators of 300s+
-	// jobs need an event to alert on (counter + slog pair).
+	// jobs need an event to alert on.
 	spawnWarnBudget := time.Duration(float64(a.jobTimeout) * spawnElapsedWarnRatio)
 	// spawnElapsed excludes jitter (captured right after executeGetSession).
 	if a.spawnElapsed > spawnWarnBudget {
-		metrics.CronSendBudgetDoubledTotal.Add(1)
-		// Message string preserved for runbook grep — see docs/ops/pprof.md
-		// + internal/metrics/metrics.go CronSendBudgetDoubledTotal godoc.
 		a.lg.Warn("cron send budget exceeds job/2",
 			"job_id", a.snap.jobID,
 			"spawn_elapsed_ms", a.spawnElapsed.Milliseconds(),
@@ -873,15 +868,11 @@ func (s *Scheduler) observeSuccessLatency(elapsed time.Duration, result SendResu
 	lg.Info("cron job completed",
 		"result_len", len(result.Text),
 		"elapsed_ms", elapsed.Milliseconds())
-	// Histogram buckets straddle slowThreshold so the histogram and the slow
-	// counter below stay consistent (#392).
-	metrics.ObserveCronExecutionDuration(elapsed.Milliseconds())
 	slowThreshold := s.slowThreshold
 	if slowThreshold <= 0 {
 		slowThreshold = defaultCronSlowThreshold
 	}
 	if elapsed > slowThreshold {
-		metrics.CronExecutionSlowTotal.Add(1)
 		lg.Warn("cron execution slow",
 			"job_id", snap.jobID,
 			"elapsed_ms", elapsed.Milliseconds(),

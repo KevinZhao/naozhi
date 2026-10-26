@@ -72,20 +72,12 @@ func authzMsg(user, chatType, text string) platform.IncomingMessage {
 	}
 }
 
-func deniedCount(key string) int64 {
-	if v, ok := dispatchDeniedTotal.Get(key).(interface{ Value() int64 }); ok {
-		return v.Value()
-	}
-	return 0
-}
-
 // A refused direct message reaches neither a command arm nor a turn, and the
 // sender is told once, with the ID to hand an operator; a second message
 // inside the window gets no reply.
 func TestAuthz_DeniedDirectMessage(t *testing.T) {
 	d, fp, ct, _ := newAuthzDispatcher(t, aliceAndRoot())
 	ctx := context.Background()
-	before := deniedCount("fake:not_allowed")
 
 	for _, text := range []string{"hello", "/urgent rm -rf ~", "/new"} {
 		if _, ok := d.prepareInbound(ctx, authzMsg("eve", "direct", text)); ok {
@@ -104,9 +96,6 @@ func TestAuthz_DeniedDirectMessage(t *testing.T) {
 	}
 	if got := fp.allReplies(); len(got) != 2 || !strings.Contains(got[1], "ID: mallory") {
 		t.Errorf("replies = %q, want a second refusal naming mallory", got)
-	}
-	if got := deniedCount("fake:not_allowed") - before; got != 4 {
-		t.Errorf("naozhi_dispatch_denied_total[fake:not_allowed] moved by %d, want 4", got)
 	}
 
 	if _, ok := d.prepareInbound(ctx, authzMsg("alice", "direct", "hello")); !ok {
@@ -141,7 +130,6 @@ func TestAuthz_GroupDenials(t *testing.T) {
 func TestAuthz_AdminCommands(t *testing.T) {
 	d, fp, ct, cron := newAuthzDispatcher(t, aliceAndRoot())
 	ctx := context.Background()
-	before := deniedCount("fake:not_admin")
 
 	// Only the first refusal is answered: these spend no rate token, so the
 	// deny throttle is what keeps a non-admin from farming replies (#3652).
@@ -163,9 +151,6 @@ func TestAuthz_AdminCommands(t *testing.T) {
 	}
 	if ws := d.router.Workspace(sessionkey.ChatKey("fake", "direct", "chat-alice")); ws != "" {
 		t.Errorf("non-admin /cd moved the workspace to %q", ws)
-	}
-	if got := deniedCount("fake:not_admin") - before; got != 4 {
-		t.Errorf("naozhi_dispatch_denied_total[fake:not_admin] moved by %d, want 4", got)
 	}
 
 	d.prepareInbound(ctx, authzMsg("alice", "direct", "/new"))
@@ -257,15 +242,11 @@ func TestAuthz_SetAccessPolicyTakesEffect(t *testing.T) {
 func TestAdmit_RefusesLikeText(t *testing.T) {
 	d, fp, ct, _ := newAuthzDispatcher(t, aliceAndRoot())
 	ctx := context.Background()
-	before := deniedCount("fake:not_allowed")
 
 	for range 2 {
 		if d.Admit(ctx, authzMsg("eve", "direct", "")) {
 			t.Fatal("Admit let a sender outside allowed_users through")
 		}
-	}
-	if got := deniedCount("fake:not_allowed") - before; got != 2 {
-		t.Errorf("naozhi_dispatch_denied_total[fake:not_allowed] moved by %d, want 2", got)
 	}
 	if got := fp.allReplies(); len(got) != 1 || !strings.Contains(got[0], "ID: eve") {
 		t.Errorf("replies = %q, want one throttled refusal naming the sender ID", got)
@@ -284,7 +265,6 @@ func TestAdmit_RefusesLikeText(t *testing.T) {
 func TestAdmit_GroupMentionGate(t *testing.T) {
 	d, fp, _, _ := newAuthzDispatcher(t, aliceAndRoot())
 	ctx := context.Background()
-	before := deniedCount("fake:not_allowed")
 
 	for _, user := range []string{"alice", "eve"} {
 		msg := authzMsg(user, "group", "")
@@ -292,9 +272,6 @@ func TestAdmit_GroupMentionGate(t *testing.T) {
 		if d.Admit(ctx, msg) {
 			t.Errorf("Admit let %s's un-mentioned group message through", user)
 		}
-	}
-	if got := deniedCount("fake:not_allowed") - before; got != 0 {
-		t.Errorf("un-mentioned group message counted %d refusals, want 0", got)
 	}
 	if fp.replyCount() != 0 {
 		t.Error("un-mentioned group message was answered")

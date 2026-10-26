@@ -3,8 +3,6 @@ package session
 import (
 	"log/slog"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // autoChainRetiredOrigins is the set of prev_session_origins labels that mark
@@ -64,7 +62,6 @@ func (r *Router) retireAutoChainOnce() {
 			continue
 		}
 		retired++
-		metrics.AutoChainRetiredOnStartup.Add(1)
 		slog.Info("auto-chain retired",
 			"key", s.key,
 			"workspace", s.Workspace(),

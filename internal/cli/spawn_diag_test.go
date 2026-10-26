@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"expvar"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -88,47 +87,27 @@ func (h *levelCountingHandler) Handle(_ context.Context, r slog.Record) error {
 func (h *levelCountingHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
 func (h *levelCountingHandler) WithGroup(_ string) slog.Handler      { return h }
 
-// TestEmitSpawnDiags_MetricsAndDedup asserts the acceptance contract of
-// #2532: a denied-flag emission bumps naozhi_spawn_diag_total for its
-// (layer, action) tuple by exactly 1, the first emission logs at Warn, and a
-// repeat for the same scope+layer+key (the 30s reconcile heartbeat) logs at
-// Debug without moving the counter.
-func TestEmitSpawnDiags_MetricsAndDedup(t *testing.T) {
+// TestEmitSpawnDiags_Dedup asserts the acceptance contract of #2532: the
+// first emission logs at Warn, and a repeat for the same scope+layer+key (the
+// 30s reconcile heartbeat) logs at Debug.
+func TestEmitSpawnDiags_Dedup(t *testing.T) {
 	h := &levelCountingHandler{counts: map[slog.Level]int{}}
 	prev := slog.Default()
 	slog.SetDefault(slog.New(h))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	counter, ok := expvar.Get("naozhi_spawn_diag_total").(*expvar.Map)
-	if !ok {
-		t.Fatal("naozhi_spawn_diag_total not registered as a labeled map")
-	}
-	read := func() int64 {
-		if v, ok := counter.Get("argv-denylist|dropped").(*expvar.Int); ok {
-			return v.Value()
-		}
-		return 0
-	}
-
 	diags := []SpawnDiag{{Layer: "argv-denylist", Key: "--effort", Action: "dropped", Reason: "test"}}
-	before := read()
 	// Scopes unique per run: the dedup state is package-level, so a repeat
 	// run under -count would otherwise find them already emitted.
 	run := testRun.Add(1)
 	scope, otherScope := fmt.Sprintf("test-scope-2532-%d", run), fmt.Sprintf("test-scope-2532-b-%d", run)
 
 	EmitSpawnDiags(scope, diags)
-	if got := read() - before; got != 1 {
-		t.Fatalf("first emission moved counter by %d, want 1", got)
-	}
 	if h.counts[slog.LevelWarn] != 1 || h.counts[slog.LevelDebug] != 0 {
 		t.Fatalf("first emission logged warn=%d debug=%d, want 1/0", h.counts[slog.LevelWarn], h.counts[slog.LevelDebug])
 	}
 
 	EmitSpawnDiags(scope, diags) // heartbeat repeat
-	if got := read() - before; got != 1 {
-		t.Fatalf("repeat emission moved counter to +%d, want still +1", got)
-	}
 	if h.counts[slog.LevelWarn] != 1 || h.counts[slog.LevelDebug] != 1 {
 		t.Fatalf("repeat logged warn=%d debug=%d, want 1/1", h.counts[slog.LevelWarn], h.counts[slog.LevelDebug])
 	}

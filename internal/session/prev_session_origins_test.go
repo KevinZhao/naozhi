@@ -2,8 +2,6 @@ package session
 
 import (
 	"testing"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // TestSetPrevSessionOrigins_FreshAttach pins the simplest happy path:
@@ -69,11 +67,8 @@ func TestSetPrevSessionOrigins_PreservesPriorPrefix(t *testing.T) {
 // TestSetPrevSessionOrigins_LengthDriftRecovery is the v3 Arch-MINOR-1
 // invariant test: if the parallel slices fall out of sync (origins
 // longer than ids), SetPrevSessionOrigins MUST rebuild origins to
-// all-"manual" rather than persisting misaligned labels. The metric
-// counter must tick so a future regression is observable.
+// all-"manual" rather than persisting misaligned labels.
 func TestSetPrevSessionOrigins_LengthDriftRecovery(t *testing.T) {
-	before := metrics.AutoChainOriginsLengthMismatch.Value()
-
 	s := &ManagedSession{key: "test:d:u:general"}
 	s.historyMu.Lock()
 	s.prevSessionIDs = []string{"00000000-0000-4000-8000-000000000001"}
@@ -90,9 +85,6 @@ func TestSetPrevSessionOrigins_LengthDriftRecovery(t *testing.T) {
 
 	s.SetPrevSessionOrigins(newIDs, "auto-spawn")
 
-	if got := metrics.AutoChainOriginsLengthMismatch.Value(); got != before+1 {
-		t.Errorf("AutoChainOriginsLengthMismatch = %d, want %d", got, before+1)
-	}
 	got := s.SnapshotPrevSessionOrigins()
 	if len(got) != 2 {
 		t.Fatalf("len(origins) = %d, want 2", len(got))

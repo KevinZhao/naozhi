@@ -200,7 +200,6 @@ func (w *perKeyWriter) flush(p *Persister) error {
 		return fmt.Errorf("sync log: %w", err)
 	}
 	p.fsyncCnt.Add(1)
-	p.opts.Observer.OnFsync()
 
 	// Phase 2: append pending idx entries, then fsync idx.
 	idxAppended := false
@@ -238,7 +237,6 @@ func (w *perKeyWriter) flush(p *Persister) error {
 			return fmt.Errorf("sync idx: %w", err)
 		}
 		p.fsyncCnt.Add(1)
-		p.opts.Observer.OnFsync()
 
 		// Durability confirmed — safe to discard the retry buffer and advance
 		// the stride cursor (mod stride keeps successive batches aligned).

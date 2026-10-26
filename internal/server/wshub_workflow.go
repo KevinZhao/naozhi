@@ -86,7 +86,6 @@ type workflowPush struct {
 func (h *Hub) workflowPushLoop(c *wsClient, key string, gen uint64, sess *session.ManagedSession) {
 	defer func() {
 		if r := recover(); r != nil {
-			serverMetrics.PanicRecovered()
 			slog.Error("panic in ws workflowPushLoop (recovered)", "key", key, "panic", fmt.Sprintf("%v", r))
 			slog.Debug("panic in ws workflowPushLoop: stack", "key", key, "stack", string(debug.Stack()))
 			c.closeDone()

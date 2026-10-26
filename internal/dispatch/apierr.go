@@ -37,6 +37,5 @@ func turnReplyText(ctx context.Context, r *clievent.SendResult) (text string, an
 		attrs = append(attrs, "backend", be.Backend, "rpc_code", be.Code)
 	}
 	slog.WarnContext(ctx, "turn ended in failure", attrs...)
-	dispatchTurnErrorResultTotal.Add(class, 1)
 	return text, false
 }

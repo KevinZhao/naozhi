@@ -8,12 +8,8 @@ package cron
 import (
 	"context"
 	"errors"
-	"expvar"
 	"log/slog"
-	"sync/atomic"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // abortResult bundles the watchdog's exit signal: fired reports whether the
@@ -46,16 +42,6 @@ type deadlineInterrupter interface {
 // teardown, bounded per-run and drained on session.Reset. The effective value
 // is per-Scheduler (watchdogInterruptTimeoutNanos, #1904).
 const watchdogInterruptTimeoutDefault = 3 * time.Second
-
-// watchdogParkedInterruptGoroutines is a LIVE gauge of inner
-// InterruptViaControl goroutines that outlived their watchdog after the
-// interrupt-call timeout and are still parked on a wedged stdin write
-// (#1632). Unlike the cumulative metrics.CronWatchdogInterruptTimeoutTotal it
-// distinguishes "fired N times, all drained" from "N still leaked now": a
-// persistent (non-fresh) job that never reaches session.Reset accumulates
-// parked goroutines permanently. Incremented when the timeout branch parks
-// the goroutine, decremented when it eventually returns.
-var watchdogParkedInterruptGoroutines = expvar.NewInt("naozhi_cron_watchdog_parked_interrupt_goroutines")
 
 // watchdogInterruptTimeout reads this Scheduler's active interrupt-call
 // timeout. Production callers see watchdogInterruptTimeoutDefault unless a test
@@ -117,20 +103,8 @@ func fireBoundedInterrupt(sess deadlineInterrupter, timeout time.Duration) abort
 		timeout = watchdogInterruptTimeoutDefault
 	}
 	done := make(chan InterruptOutcome, 1)
-	// state resolves the leak-gauge race between the inner goroutine and the
-	// timeout branch (#1632): 0 = neither acted, 1 = inner returned first
-	// (must NOT be counted as parked), 2 = watchdog fired first and parked it
-	// (gauge +1; inner decrements on exit). Exactly one CAS(0→1)/CAS(0→2)
-	// wins, so the gauge moves at most once per direction per park.
-	var state atomic.Int32
 	go func() {
-		outcome := sess.InterruptViaControl()
-		if !state.CompareAndSwap(0, 1) {
-			// Watchdog already parked us (state==2) and bumped the gauge;
-			// the wedged write finally unblocked — undo the increment.
-			watchdogParkedInterruptGoroutines.Add(-1)
-		}
-		done <- outcome
+		done <- sess.InterruptViaControl()
 	}()
 	// NewTimer + defer Stop: time.After would leak the timer slot until
 	// expiry on the fast path.
@@ -142,13 +116,7 @@ func fireBoundedInterrupt(sess deadlineInterrupter, timeout time.Duration) abort
 	case <-t.C:
 		// The inner goroutine stays parked on InterruptViaControl until the
 		// wedged stdin write unblocks (typically the next session.Reset; for
-		// non-fresh jobs maybe never). Surface via counter + Warn (#1327).
-		metrics.CronWatchdogInterruptTimeoutTotal.Add(1)
-		// CAS(0→2) only wins if the inner goroutine has not yet returned;
-		// the matching Add(-1) is in its lost-race branch (#1632).
-		if state.CompareAndSwap(0, 2) {
-			watchdogParkedInterruptGoroutines.Add(1)
-		}
+		// non-fresh jobs maybe never) (#1327).
 		slog.Warn("cron watchdog: InterruptViaControl timeout exceeded; inner goroutine parked until session reset",
 			"timeout", timeout)
 		return abortResult{outcome: InterruptError, fired: true}

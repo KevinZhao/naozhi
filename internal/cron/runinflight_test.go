@@ -1,7 +1,6 @@
 package cron
 
 import (
-	"expvar"
 	"sync"
 	"testing"
 	"time"
@@ -211,36 +210,19 @@ func TestRunInflight_FinalizeReleaseContract(t *testing.T) {
 		Trigger:   TriggerScheduled,
 	})
 
-	// Get-or-New: expvar.NewInt panics on re-registration, and `go test
-	// -count>1` (the RFC §3.4 Phase C race gate runs -count=10) re-enters
-	// this test in the same process — the expvar registry is global and
-	// survives iterations. Reuse is sound: each iteration nets the gauge
-	// back to 0 via the paired Add(1)/Add(-1) below.
-	gaugeName := "test_finalize_release_gauge_" + t.Name()
-	gauge, _ := expvar.Get(gaugeName).(*expvar.Int)
-	if gauge == nil {
-		gauge = expvar.NewInt(gaugeName)
-	}
-	gauge.Add(1) // mirror executeOpt's CAS-true Add(+1).
-
 	if v, ok := inf.snapshot(); !ok || v.RunID == "" {
 		t.Fatalf("precondition: snapshot before release must be live: ok=%v v=%+v", ok, v)
 	}
 
-	// Live path: per-run finalizer does reset + CAS-release; the gauge
-	// Add(-1) is paired at the scheduler_run.go defer site.
+	// Live path: per-run finalizer does reset + CAS-release.
 	finalizer := &runFinalizer{inflight: inf}
 	finalizer.finalize()
-	gauge.Add(-1)
 
 	if inf.running.Load() {
 		t.Errorf("finalize must Store(false) on running CAS gate")
 	}
 	if v, ok := inf.snapshot(); ok || v.RunID != "" {
 		t.Errorf("finalize must reset view (no stale metadata): ok=%v v=%+v", ok, v)
-	}
-	if got := gauge.Value(); got != 0 {
-		t.Errorf("gauge must decrement to 0: got=%d", got)
 	}
 }
 

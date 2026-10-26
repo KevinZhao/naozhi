@@ -14,7 +14,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/dispatch"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/sessionview"
@@ -292,18 +291,6 @@ func TestTurnParity10_IM_NotifyIdleAfterPanicHandling(t *testing.T) {
 	want := []string{"reply " + parityPanicReply, "idle"}
 	if got := log.snapshot(); strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("IM owner-loop panic order = %q, want %q (NotifyIdle runs after the recover)", got, want)
-	}
-}
-
-func TestTurnParity11_IM_PanicIsCounted(t *testing.T) {
-	h := newParityHarness(t, parityOpts{})
-	turns := h.session(parityKey, false)
-	before := metrics.PanicRecoveredTotal.Value()
-	owner := h.imAsync("m1", "first")
-	turns.turn(t, "owner turn", parityOutcome{Panic: "parity: owner turn panic"})
-	h.waitDone(owner, "owner loop")
-	if got := metrics.PanicRecoveredTotal.Value() - before; got != 1 {
-		t.Fatalf("PanicRecoveredTotal moved by %d on an IM owner-loop panic, want 1", got)
 	}
 }
 

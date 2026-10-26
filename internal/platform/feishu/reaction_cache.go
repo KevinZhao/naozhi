@@ -8,7 +8,6 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
@@ -61,7 +60,6 @@ func (f *Feishu) cleanupReactions(ctx context.Context) {
 func (f *Feishu) cleanupReactionsTick() {
 	defer func() {
 		if r := recover(); r != nil {
-			metrics.PanicRecoveredTotal.Add(1)
 			slog.Error("feishu: cleanupReactions tick panic recovered; retrying on next tick",
 				"panic", r, "stack", string(debug.Stack()))
 		}

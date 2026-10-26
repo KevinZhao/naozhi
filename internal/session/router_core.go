@@ -626,7 +626,6 @@ func NewRouter(cfg RouterConfig) *Router {
 			Dir:       cfg.EventLogDir,
 			Generator: cfg.EventLogGenerator,
 			DevMode:   cfg.EventLogDevMode,
-			Observer:  eventLogMetricsObserver{},
 		})
 		if err != nil {
 			slog.Error("event log persister init failed; disabling event log persistence",
