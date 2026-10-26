@@ -1856,7 +1856,6 @@ type nodeCache struct {
 | 查看 sessions/events | ✅ 已有 | ✅ 已有 |
 | 发送消息 | ✅ 已有 | ✅ 已有 |
 | takeover discovered | ✅ 已有 | 新增 proxy |
-| planner restart | ✅ 已有 | 新增 proxy |
 | project config CRUD | ✅ 已有 | 新增 proxy |
 | /project bind (IM) | ✅ | ❌ 只影响本机路由 |
 
@@ -1864,7 +1863,6 @@ type nodeCache struct {
 
 ```go
 func (n *NodeClient) Takeover(ctx, pid, sessionID, cwd string) error
-func (n *NodeClient) RestartPlanner(ctx, projectName string) error
 func (n *NodeClient) UpdateProjectConfig(ctx, name string, cfg ProjectConfig) error
 ```
 

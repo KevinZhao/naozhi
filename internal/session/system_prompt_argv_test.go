@@ -134,8 +134,8 @@ func TestSystemPrompt_PlannerPath_ReachesArgv(t *testing.T) {
 	}
 }
 
-// TestSystemPrompt_PlannerRestartPath_ReachesArgv covers the administrative
-// planner-restart route (ResolveForPlannerKey), which starts from blank opts
+// TestSystemPrompt_PlannerRestartPath_ReachesArgv covers the planner-key
+// path (ResolveForPlannerKey), which starts from blank opts
 // so the planner prompt is the sole layer.
 func TestSystemPrompt_PlannerRestartPath_ReachesArgv(t *testing.T) {
 	t.Parallel()
@@ -152,7 +152,7 @@ func TestSystemPrompt_PlannerRestartPath_ReachesArgv(t *testing.T) {
 	}
 	args := spawnArgvFor(r, key, opts)
 	if got := appendSystemPromptValues(args); !slices.Equal(got, []string{"PLAN"}) {
-		t.Fatalf("planner-restart path: argv values = %q, want [\"PLAN\"] (no defaults inheritance)\nargv=%v", got, args)
+		t.Fatalf("planner-key path: argv values = %q, want [\"PLAN\"] (no defaults inheritance)\nargv=%v", got, args)
 	}
 }
 
