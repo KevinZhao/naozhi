@@ -106,3 +106,12 @@ func TestNewScheduler_AllowedRootNonExistent_UsesRawFallback(t *testing.T) {
 		t.Errorf("s.allowedRoot = %q; want %q", s.allowedRoot, nonExistentPath)
 	}
 }
+
+// TestResolveAllowedRoot_NULCleared: a NUL-bearing AllowedRoot is cleared so
+// it cannot alias entries in workDirCacheKeySuffix (#1297).
+func TestResolveAllowedRoot_NULCleared(t *testing.T) {
+	cfg := &SchedulerConfig{AllowedRoot: "/tmp/safe\x00/etc"}
+	if got := cfg.resolveAllowedRoot(); got != "" || cfg.AllowedRoot != "" {
+		t.Errorf("resolveAllowedRoot = %q, AllowedRoot = %q; want both cleared", got, cfg.AllowedRoot)
+	}
+}
