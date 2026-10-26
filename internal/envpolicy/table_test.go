@@ -89,12 +89,16 @@ func TestTable_KeyDecisions(t *testing.T) {
 		{"CLAUDE_CODE_USE_MOCK_RESPONSES", SourceSettings, false},
 		{"CLAUDE_CONFIG_DIR", SourceSettings, true},
 		// Resolution edges: *_FILE indirection, prefix extension, a shim
-		// code-loading key, allow-prefix beating deny-suffix, lowercase.
+		// code-loading key, allow-prefix beating deny-suffix, lowercase, exact
+		// proxy match, a deny prefix.
 		{"ANTHROPIC_API_KEY_FILE", SourceOverlay, true},
 		{"LC_ALL", SourceShim, true},
 		{"NODE_OPTIONS", SourceShim, false},
 		{"NAOZHI_DASHBOARD_TOKEN", SourceExpansion, true},
 		{"github_token", SourceExpansion, false},
+		{"http_proxy", SourceSettings, true},
+		{"HTTP_PROXY_X", SourceSettings, false},
+		{"AZURE_CLIENT_SECRET", SourceExpansion, false},
 		// Sysession column: plumbing passes, raw credentials never do.
 		{"PATH", SourceSysession, true},
 		{"AWS_PROFILE", SourceSysession, true},

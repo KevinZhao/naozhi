@@ -13,6 +13,8 @@ import (
 // NOT the shim's stricter endpoint guard, which would reject the private-IP
 // endpoints NAOZHI_ALLOW_PRIVATE_BASE_URL exists to permit. Every other
 // sysession-allowed key must carry no check, or the daemon loses env it needs.
+// The map is also the complete allow set: this column is what a Runner's
+// prompt-driven Bash inherits, so widening it must be a visible test edit.
 func TestTable_SysessionGuardKinds(t *testing.T) {
 	t.Parallel()
 	want := map[string]guardKind{
@@ -21,6 +23,21 @@ func TestTable_SysessionGuardKinds(t *testing.T) {
 		"ANTHROPIC_BASE_URL":         guardBaseURL,
 		"ANTHROPIC_BEDROCK_BASE_URL": guardBaseURL,
 		"ANTHROPIC_VERTEX_BASE_URL":  guardBaseURL,
+
+		"HOME":                           guardNone,
+		"PATH":                           guardNone,
+		"ANTHROPIC_MODEL":                guardNone,
+		"CLAUDE_CODE_USE_BEDROCK":        guardNone,
+		"CLAUDE_CODE_SKIP_BEDROCK_AUTH":  guardNone,
+		"CLAUDE_CODE_USE_VERTEX":         guardNone,
+		"ANTHROPIC_VERTEX_PROJECT_ID":    guardNone,
+		"CLOUD_ML_REGION":                guardNone,
+		"ANTHROPIC_SMALL_FAST_MODEL":     guardNone,
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL":  guardNone,
+		"ANTHROPIC_DEFAULT_SONNET_MODEL": guardNone,
+		"ANTHROPIC_DEFAULT_OPUS_MODEL":   guardNone,
+		"AWS_REGION":                     guardNone,
+		"AWS_DEFAULT_REGION":             guardNone,
 	}
 	for key := range want {
 		if _, ok := Allowed(key, SourceSysession); !ok {
@@ -29,6 +46,10 @@ func TestTable_SysessionGuardKinds(t *testing.T) {
 	}
 	for _, r := range Table {
 		if r.Allowed&SourceSysession == 0 {
+			continue
+		}
+		if _, ok := want[r.Pattern]; !ok {
+			t.Errorf("%q is allowed for SourceSysession but not in the pinned allow set", r.Pattern)
 			continue
 		}
 		if got := guardKindFor(r.Pattern, SourceSysession); got != want[r.Pattern] {
