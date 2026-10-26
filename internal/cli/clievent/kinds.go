@@ -97,12 +97,6 @@ func MarkdownIgnoreKinds() []string {
 	return kindNames(func(k KindInfo) bool { return k.MarkdownIgnore })
 }
 
-// IsKnownKind reports whether t is a registered kind.
-func IsKnownKind(t string) bool {
-	_, ok := kindByName[t]
-	return ok
-}
-
 // IsActivityType reports whether an entry of type t updates the lastActivity
 // summary (KindInfo.Activity). Distinct from KindInfo.Internal: thinking and
 // todo are activity yet not internal, result and task_done are internal yet not

@@ -404,8 +404,8 @@ func TestTakeover_RetriesARejectedResumeFresh(t *testing.T) {
 	t.Run("one-shot picks survive the retry", func(t *testing.T) {
 		r, _, _ := newStartupFailRouter(t, newDeadProc())
 		r.setWrappersForTest(map[string]*cli.Wrapper{
-			"claude": cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude"),
-			"codex":  cli.NewWrapper("/nonexistent/codex", &cli.ClaudeProtocol{}, "codex"),
+			"claude": cli.NewWrapperLazy("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude"),
+			"codex":  cli.NewWrapperLazy("/nonexistent/codex", &cli.ClaudeProtocol{}, "codex"),
 		})
 		setAccessProfiles(r, map[string]AccessProfile{"work": {Env: map[string]string{"PROFILE": "work"}}})
 		stateOf(r).picks.backend[takeoverKey] = "codex"

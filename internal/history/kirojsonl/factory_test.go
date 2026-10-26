@@ -53,14 +53,14 @@ func TestFactory_KiroReturnsKirojsonlSource(t *testing.T) {
 
 // TestInit_RegistersKiroBackend confirms the package-level init()
 // registered "kiro" with history.RegisterFactory. Without this
-// registration, NewWrapper(... "kiro" ...) would never wire a
+// registration, NewWrapperLazy(... "kiro" ...) would never wire a
 // history.Source and the dashboard would silently lose kiro JSONL
 // fallback after upgrade. Same role as
 // claudejsonl/factory_test.go::TestInit_RegistersClaudeBackend; pinned
 // here so the kiro side cannot regress independently.
 func TestInit_RegistersKiroBackend(t *testing.T) {
 	t.Parallel()
-	w := cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro")
+	w := cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "kiro")
 	src := w.NewHistorySource(
 		&stubKiroSession{sid: "x"},
 		history.Wiring{BackendDirs: map[string]string{"kiro": "/kiro/dir"}},

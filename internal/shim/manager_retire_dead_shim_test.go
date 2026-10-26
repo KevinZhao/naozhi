@@ -442,11 +442,11 @@ func TestStartShimWithBackend_RetiresDeadCLIShimBeforeSpawn(t *testing.T) {
 	const key = "feishu:direct:startshim-retire:general"
 	f := newRetireFake(t, key, boolPtr(false))
 	f.serve()
-	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir(), CLIPath: "/bin/true"})
+	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
 	m.naozhiBin = bin
 	writeRetireState(t, m, key, f, f.token, holder.Process.Pid)
 
-	_, err = m.StartShimWithBackend(context.Background(), key, "", "", nil, t.TempDir(), nil, nil)
+	_, err = m.StartShimWithBackend(context.Background(), key, "/bin/true", "", nil, t.TempDir(), nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "start shim") {
 		t.Fatalf("StartShimWithBackend err = %v, want the cmd.Start failure past the pre-bind check", err)
 	}

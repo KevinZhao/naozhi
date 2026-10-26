@@ -105,7 +105,7 @@ func reconnectReplaying(t *testing.T, transcript string, firstSeq int64, backlog
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
+	w := cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
 	w.ShimManager = mgr
 	claudeDir, ws := filepath.Join(dir, "claude"), filepath.Join(dir, "ws")
 	r := NewRouter(RouterConfig{Wrapper: w, ClaudeDir: claudeDir, HistoryLoader: &racingHistoryLoader{}})

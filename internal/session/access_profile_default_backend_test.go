@@ -77,8 +77,8 @@ func TestAccessProfileDefaultBackend_SpawnPaths(t *testing.T) {
 	r := NewRouter(RouterConfig{
 		MaxProcs: 4,
 		BackendRuntimes: map[string]BackendRuntime{
-			"claude": {Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")},
-			"kiro":   {Wrapper: cli.NewWrapper("/nonexistent/kiro", &cli.ClaudeProtocol{}, "kiro")},
+			"claude": {Wrapper: cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")},
+			"kiro":   {Wrapper: cli.NewWrapperLazy("/nonexistent/kiro", &cli.ClaudeProtocol{}, "kiro")},
 		},
 		DefaultBackend:       "claude",
 		AccessProfiles:       map[string]AccessProfile{"viakiro": {DefaultBackend: "kiro"}},

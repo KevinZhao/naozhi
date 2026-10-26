@@ -45,8 +45,6 @@ func TestParseVersionOutput(t *testing.T) {
 // TestDetectVersionCtx_CancelledCtxAbortsPromptly locks R55-QUAL-004's
 // ctx plumbing: when the caller's ctx is already cancelled, the probe
 // must return immediately instead of waiting out the inner 5s timeout.
-// detectVersion (the Background-derived legacy helper) would block here
-// regardless of caller shutdown signals; the Ctx variant must not.
 //
 // We simulate a slow --version binary with a shell script that sleeps
 // 10s. Without ctx wiring, the probe would need ≥5s (inner timeout) or

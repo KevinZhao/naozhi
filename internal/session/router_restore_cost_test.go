@@ -228,7 +228,7 @@ func TestRestore_LedgerDisabledKeepsTheStoreBaseline(t *testing.T) {
 		proc.fn(clievent.SendResult{CostUSD: 3})
 	})
 	r := NewRouter(RouterConfig{StorePath: storePath, CostLedger: CostLedgerConfig{Disabled: true},
-		Wrapper: cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
+		Wrapper: cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")})
 	t.Cleanup(r.Shutdown)
 	s, ok := lookupT(r, shutdownCostKey)
 	if !ok {

@@ -33,7 +33,7 @@ func TestShutdownShimViaReconnect_FallbackSkipsBinaryMismatch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			w := cli.NewWrapper("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
+			w := cli.NewWrapperLazy("/nonexistent/cli", &cli.ClaudeProtocol{}, "claude")
 			w.ShimManager = mgr
 
 			cmd := exec.Command("sleep", "30")

@@ -29,7 +29,7 @@ func TestShutdown_SetsStoppedBeforeSnapshot(t *testing.T) {
 
 	r := NewRouter(RouterConfig{
 		MaxProcs: 64,
-		Wrapper:  cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude"),
+		Wrapper:  cli.NewWrapperLazy("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude"),
 	})
 
 	const n = 64

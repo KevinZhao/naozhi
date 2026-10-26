@@ -40,9 +40,9 @@ func mkTuningTestRouter(t *testing.T) *Router {
 		defaultCWD: "/default/ws",
 	}
 	r.setWrappersForTest(map[string]*cli.Wrapper{
-		"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
-		"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
-		"codex":  cli.NewWrapper("/bin/false", &cli.CodexProtocol{}, "codex"),
+		"kiro":   cli.NewWrapperLazy("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
+		"claude": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+		"codex":  cli.NewWrapperLazy("/bin/false", &cli.CodexProtocol{}, "codex"),
 	})
 	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
 	stateOf(r).picks.backend = make(map[string]string)
@@ -409,7 +409,7 @@ func TestSetSessionTuning_ClearModelNeverTakesRPC(t *testing.T) {
 // is operator-owned state of the same shape and rides along.
 func TestInstallFreshSessionLocked_InheritsTuning(t *testing.T) {
 	r := NewRouter(RouterConfig{})
-	wrapper := cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro")
+	wrapper := cli.NewWrapperLazy("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro")
 	const key = "dash:direct:inherit:general"
 
 	old := newSessionWithID(key, "sess-old")

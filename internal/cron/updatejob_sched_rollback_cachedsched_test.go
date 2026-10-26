@@ -10,10 +10,8 @@ import (
 // to its pre-update value rather than setting it to nil.
 //
 // Before the fix the rollback block unconditionally set j.cachedSched = nil,
-// discarding the pre-update parsed schedule. HasMissedScheduleCached and
-// applyJitterSched both use j.cachedSched for their 1 Hz fanout; a nil
-// cachedSched on a still-registered job caused silent fallbacks (period=0,
-// missed-schedule always false).
+// discarding the pre-update parsed schedule. A nil cachedSched on a
+// still-registered job left the runtime cache inconsistent with entryID.
 //
 // Anchor: R20260602-CR-1.
 func TestUpdateJob_ScheduleChangeRollback_RestoresCachedSched(t *testing.T) {

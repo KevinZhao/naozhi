@@ -16,7 +16,7 @@ import (
 // the default backend's, and the version follows a live observation the way
 // the dashboard banner needs (R20260612-global-version).
 func TestSessionRouterView_CLIFactsFromBackends(t *testing.T) {
-	w := cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
+	w := cli.NewWrapperLazy("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
 	w.CLIName = "claude-code"
 	w.CLIVersion = "2.1.100"
 	r := session.NewRouter(session.RouterConfig{Wrapper: w, MaxProcs: 1})
@@ -54,7 +54,7 @@ func TestSessionRouterView_RunsFromRunLedger(t *testing.T) {
 	}
 	seed.Close()
 
-	w := cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
+	w := cli.NewWrapperLazy("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
 	r := session.NewRouter(session.RouterConfig{Wrapper: w, MaxProcs: 1, StorePath: storePath})
 	t.Cleanup(r.Shutdown)
 	v := sessionRouterView{r}

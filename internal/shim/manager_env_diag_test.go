@@ -91,11 +91,10 @@ func TestStartShimWithBackend_ReportsOverlayGateDrops(t *testing.T) {
 			maxShims:  1,
 			stateDir:  t.TempDir(),
 			naozhiBin: filepath.Join(t.TempDir(), "missing-naozhi"),
-			cliPath:   "/bin/true",
 			shims:     map[string]*ShimHandle{},
 		}
 		overlay := map[string]string{"AWS_PROFILE": profile}
-		_, err := m.StartShimWithBackend(context.Background(), key, "", "", nil, t.TempDir(), overlay, nil)
+		_, err := m.StartShimWithBackend(context.Background(), key, "/bin/true", "", nil, t.TempDir(), overlay, nil)
 		// Only a cmd.Start failure proves the spawn got past the env merge and
 		// the emit; an earlier rejection would let "no diag" pass vacuously.
 		if err == nil || !strings.Contains(err.Error(), "start shim") || !errors.Is(err, fs.ErrNotExist) {

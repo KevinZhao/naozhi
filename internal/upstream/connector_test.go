@@ -314,7 +314,7 @@ func TestHandleRequest_FetchDiscoveredPreview_InvalidSessionID(t *testing.T) {
 // manifest carries a real backend + default to assert on.
 func TestHandleRequest_FetchBackends(t *testing.T) {
 	cfg := &Config{URL: "wss://x", NodeID: "n", Token: "t"}
-	w := cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
+	w := cli.NewWrapperLazy("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
 	w.CLIVersion = "2.1.100"
 	router := session.NewRouter(session.RouterConfig{Wrapper: w})
 	c := New(cfg, testRouter(router), nil, Discovery{}, nil)

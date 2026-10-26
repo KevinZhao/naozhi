@@ -43,7 +43,7 @@ func mkOverlayRouter(t *testing.T) *Router {
 	}
 	r.setWrappersForTest(map[string]*cli.Wrapper{
 		"claude": cli.NewWrapperLazy("/bin/false", &cli.ClaudeProtocol{}, "claude"),
-		"kiro":   cli.NewWrapper("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
+		"kiro":   cli.NewWrapperLazy("/bin/false", &cli.ACPProtocol{BackendID: "kiro"}, "kiro"),
 	})
 	r.editBackendsForTest(func(c *backendstore.Config) { c.DefaultBackend = "claude" })
 	stateOf(r).picks.backend = make(map[string]string)
