@@ -81,7 +81,6 @@ override 仍生成,但 env 默认全复制,只拦 AWS 认证源 + 密钥。
 
 ### 4.2 死循环防御回归(关键,见 §5)
 - **入口鉴权验证测试**:构造一个"hook 回调"形态的请求打 naozhi 端点,断言:
-  - `POST /webhook/feishu` 无有效签名 → 401(已有 `transport_hook.go` 测试覆盖,复用/补强)。
   - `POST /api/sessions/send` 无 auth token → 401(dashboard auth 中间件,已有覆盖)。
 - 这些测试证明:即使 cc 加载了一个回调 naozhi 的 hook,也无法驱动新对话 → 死循环不可达。
 
@@ -104,8 +103,7 @@ override 仍生成,但 env 默认全复制,只拦 AWS 认证源 + 密钥。
 
 | 入口 | 鉴权 | 裸 hook 回调能否触发新对话 |
 |---|---|---|
-| Feishu webhook `POST /webhook/feishu` | 验签 + 时间戳新鲜度 + nonce 防重放 + 零凭证拒绝(`transport_hook.go`),且仅 `connection_mode: webhook` 才注册 | 否(无 EncryptKey 签名 → 401) |
-| Feishu 默认 websocket 模式(`feishu.go:283`) | 出站长连,不监听入站 HTTP | 否(无入站端点) |
+| Feishu websocket 长连接(webhook 模式已移除) | 出站长连,不监听入站 HTTP | 否(无入站端点) |
 | Dashboard API `/api/sessions/send` 等 | 全部 `auth(...)` 包裹(`dashboard.go:209`) | 否(配了 `dashboard_token` 时无 token → 401);**⚠️ no-token 模式例外见下** |
 | 未鉴权端点 | 仅 `/health` `/livez` `/readyz`(`server.go:604`) | 否(不 spawn cc) |
 

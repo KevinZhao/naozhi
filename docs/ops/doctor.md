@@ -35,7 +35,7 @@ naozhi doctor --timeout 2s
 | `http /health` | 返回 200（有 token 时摘要 status/uptime/version） | - | 不可达 / 非 200 |
 | `auth` | token 通过 `/api/sessions` 200 | 无 token / 响应码意外 | token 被 401/403；请求构造或发送失败 |
 | `cli runtime` | 服务端找得到默认 CLI 二进制（`cli_available=true`，仅 stat） | - | `cli_available=false`，新会话起不来 |
-| `platforms` | 每个能上报连接状态的平台都是 `connected`；不能上报的（如 feishu webhook 模式）列为 `registered`，只是注册，不代表已连上 | 没有任何平台（dashboard-only）；某平台 `connecting` / `disconnected` 不足 5 分钟（重连中，或服务端没给出持续时长）；未知状态 | 某平台 `connecting` / `disconnected` 已满 5 分钟；或 `failed`（需要运维处理：修复原因；适配器可能低频重试并自行恢复，否则需重启） |
+| `platforms` | 每个能上报连接状态的平台都是 `connected`；不能上报的列为 `registered`，只是注册，不代表已连上 | 没有任何平台（dashboard-only）；某平台 `connecting` / `disconnected` 不足 5 分钟（重连中，或服务端没给出持续时长）；未知状态 | 某平台 `connecting` / `disconnected` 已满 5 分钟；或 `failed`（需要运维处理：修复原因；适配器可能低频重试并自行恢复，否则需重启） |
 | `eventlog writer` | `writer_alive=true`；或该子系统未启用（skipped） | - | `writer_alive=false`，事件没落盘 |
 | `attachment tracker` | 同上 | - | `writer_alive=false`，附件元数据没记录 |
 | `dispatch` | 有成功回复（显示多久前）/ 还没消息或刚启动 | 自启动起只有失败没有成功；或有只报 `registered` 的平台、启动超 10 分钟仍零条 IM 入站（这些平台可能没连上） | - |

@@ -356,7 +356,7 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 	if event.EventV2Base != nil && event.EventV2Base.Header != nil {
 		eventID = event.EventV2Base.Header.EventID
 	}
-	// Symmetric with transport_hook's cap: bound the dedup map key size.
+	// Bound the dedup map key size.
 	if len(eventID) > maxEventIDLen {
 		slog.Warn("feishu ws: event_id too long, skipping dedup for this delivery",
 			"len", len(eventID))
@@ -398,8 +398,7 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 			return parsedEvent{}, false
 		}
 		text := content.Text
-		// Same ingress cap as transport_hook.go so neither transport silently
-		// accepts what the other rejects.
+		// Ingress cap: drop oversized text before it reaches the router.
 		if len(text) > maxIncomingTextBytes {
 			slog.Warn("feishu ws: text exceeds limit, dropping",
 				"size", len(text))
@@ -440,7 +439,7 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 		if key == "" {
 			return parsedEvent{}, false
 		}
-		// Same check as transport_hook.go: the key goes into the API URL.
+		// The key goes into the API URL, so reject malformed values.
 		if !isValidFeishuResourceKey(key) {
 			slog.Warn("feishu ws: rejecting malformed resource key", "type", msgType,
 				"key", osutil.SanitizeForLog(key, 64), "msg_id", osutil.SanitizeForLog(messageID, 64))
@@ -471,4 +470,20 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 	default:
 		return parsedEvent{Msg: result, Unsupported: msgType}, true
 	}
+}
+
+// isValidFeishuResourceKey accepts only printable non-whitespace ASCII (≤256
+// bytes) for image_key / file_key so a sender-crafted key cannot smuggle
+// log-splitting bytes or oversized payloads into the API URL builder.
+func isValidFeishuResourceKey(k string) bool {
+	if k == "" || len(k) > 256 {
+		return false
+	}
+	for i := 0; i < len(k); i++ {
+		c := k[i]
+		if c < 0x21 || c > 0x7e {
+			return false
+		}
+	}
+	return true
 }

@@ -1,9 +1,23 @@
 package config
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 )
+
+// captureSlog redirects the default slog logger to an in-memory buffer for
+// the duration of fn and returns the captured WARN+ text output.
+func captureSlog(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+	fn()
+	return buf.String()
+}
 
 // A dashboard_token under minDashboardTokenLen is refused by Load, so the
 // refusal reaches `config check` and every subcommand before the server has

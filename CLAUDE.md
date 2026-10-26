@@ -26,7 +26,7 @@ Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI, Kiro, or Codex) as
 
 **Request flow**: IM platform -> message handler -> async goroutine -> session router -> CLI stdin -> read stdout until turn complete -> platform reply API.
 
-**Key constraint**: Feishu requires 200 response within 3s. The webhook handler returns 200 immediately and processes asynchronously via `go handler(context.Background(), msg)`.
+**Key constraint**: IM webhooks (Slack HTTP mode, WeChat) must answer fast, so handlers return 200 immediately and process asynchronously via `go handler(context.Background(), msg)`.
 
 ### Module Layers
 
@@ -91,7 +91,7 @@ Platforms needing background goroutines implement `RunnablePlatform` with `Start
 
 | Platform | Transport | Interface |
 |----------|-----------|-----------|
-| Feishu   | WebSocket (default) or HTTP webhook | `RunnablePlatform` |
+| Feishu   | WebSocket long connection | `RunnablePlatform` |
 | Slack    | Socket Mode (WebSocket) | `RunnablePlatform` |
 | Discord  | WebSocket gateway | `RunnablePlatform` |
 | WeChat   | iLink Bot HTTP long-poll | `RunnablePlatform` |
