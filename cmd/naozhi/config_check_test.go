@@ -99,14 +99,13 @@ cli:
 // TestConfigCheck_UnknownKeyExit1: a misspelled key exits 1 and names the
 // dotted path and line (#2639). This is the case the command could not see
 // before — yaml.Unmarshal dropped unknown keys silently, so `config check`
-// reported OK on a config whose keys did nothing. The two spellings here are
-// the keys from #2553, the bug that made the gap visible.
+// reported OK on a config whose keys did nothing.
 func TestConfigCheck_UnknownKeyExit1(t *testing.T) {
 	cfg := cleanCheckConfig + `
 server:
   debug_moed: true
 projects:
-  publc_tmp: true
+  includ_root: true
 `
 	var out bytes.Buffer
 	code := configCheck([]string{"-config", writeCheckConfig(t, cfg)}, &out)
@@ -114,13 +113,13 @@ projects:
 		t.Fatalf("exit = %d, want 1; output:\n%s", code, out.String())
 	}
 	s := out.String()
-	for _, want := range []string{"config-unknown", "server.debug_moed", "projects.publc_tmp", "ignored"} {
+	for _, want := range []string{"config-unknown", "server.debug_moed", "projects.includ_root", "ignored"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("output must contain %q:\n%s", want, s)
 		}
 	}
 	// The correctly spelled keys must NOT be reported, or the report is noise.
-	for _, unwanted := range []string{"projects.public_tmp "} {
+	for _, unwanted := range []string{"projects.include_root "} {
 		if strings.Contains(s, unwanted) {
 			t.Errorf("real key %q reported as unknown:\n%s", unwanted, s)
 		}

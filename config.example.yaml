@@ -369,15 +369,11 @@ projects:
   # Every non-hidden subdirectory of root is a project. exclude drops more by
   # basename glob (filepath.Match, case-sensitive, no "/").
   # exclude: ["tmp-*", "archive"]
-  # Two SINGLE-OPERATOR opt-ins, both default false. Leave them off wherever
-  # the dashboard token is shared: both widen what an authenticated dashboard
-  # user can read.
-  #   include_root — register projects.root itself as a project (spans the
-  #                  whole tree, sibling projects included).
-  #   public_tmp   — the __public_tmp__ pseudo-project: read non-credential
-  #                  files anywhere under /tmp.
+  # include_root registers projects.root itself as a project (spans the whole
+  # tree, sibling projects included). SINGLE-OPERATOR opt-in, default false:
+  # leave it off wherever the dashboard token is shared, since it widens what
+  # an authenticated dashboard user can read.
   # include_root: false
-  # public_tmp: false
 
 # Auto-update: polls GitHub Releases and reuses the verified `naozhi upgrade`
 # flow (download → SHA-256 → atomic swap). Enabled by default in "download"

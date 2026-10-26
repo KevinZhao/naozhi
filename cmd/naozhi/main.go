@@ -446,7 +446,6 @@ func main() {
 			Total:    totalTimeout,
 		},
 		Features: server.FeatureOptions{
-			PublicTmp: cfg.Projects.PublicTmp,
 			// Default-on; opt-out via session.project_stable_key.enabled: false.
 			ProjectStableKey: cfg.Session.ProjectStableKey.ResolvedEnabled(true),
 		},
@@ -576,16 +575,6 @@ func main() {
 	// config.Load already logged this, but before setupLogging installed the
 	// configured handler, so it went to stderr rather than the service log.
 	config.WarnDashboardToken(cfg.Server.DashboardToken)
-
-	// public_tmp widens what an authenticated dashboard user can read, so an
-	// operator turning it on should see it in the log rather than discover it
-	// from an audit trail later. Logged next to the token warnings because the
-	// token IS the barrier.
-	if cfg.Projects.PublicTmp {
-		slog.Warn("projects.public_tmp is ON — every authenticated dashboard user can read non-credential files anywhere under /tmp via the __public_tmp__ pseudo-project",
-			"gates", "credential-name allowlist + foreign-private-UID + irregular-type + audit log",
-			"hint", "single-operator deployments only; leave it off wherever the dashboard token is shared")
-	}
 
 	serverErr := make(chan error, 1)
 	go func() {

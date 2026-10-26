@@ -162,6 +162,8 @@ platforms:
     app_secret: s
     connection_mode: webhook
     allow_insecure_webhook: true
+projects:
+  public_tmp: true
 agents:
   reviewer:
     args: ["--append-system-prompt=Be terse.", "--keep"]
@@ -178,6 +180,8 @@ agents:
 
 		"platforms.feishu.connection_mode":        "long connection",
 		"platforms.feishu.allow_insecure_webhook": "remove",
+
+		"projects.public_tmp": "__public_tmp__",
 	}
 	flagDiags := 0
 	for _, d := range diags {

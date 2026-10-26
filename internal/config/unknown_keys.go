@@ -4,9 +4,9 @@
 // Load decodes with yaml.Unmarshal, which SILENTLY IGNORES an unknown key. So
 // an operator who misspells one, or who follows documentation for a key that
 // was never wired, gets no error, no effect and no way to tell why. #2553 is
-// the worked example: `server.debug_mode` (since removed) and
-// `projects.public_tmp` were both recorded as shipped and neither key existed, so configuring them did nothing
-// for months.
+// the worked example: `server.debug_mode` and `projects.public_tmp` (both
+// since removed) were recorded as shipped and neither key existed, so
+// configuring them did nothing for months.
 //
 // That is precisely the failure mode SpawnDiag was built to end ("a flag being
 // stripped for months with only a log line as evidence", internal/cli/
@@ -36,6 +36,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/naozhi/naozhi/internal/spawndiag"
 	"gopkg.in/yaml.v3"
@@ -254,7 +255,34 @@ func findDeprecatedKeys(doc *yaml.Node) []spawndiag.Diag {
 			add("platforms.feishu.allow_insecure_webhook", "'platforms.feishu.allow_insecure_webhook' has no effect: the feishu webhook mode was removed; remove this key")
 		}
 	}
+	for _, k := range removedKeys {
+		parent := root
+		for _, seg := range k.parent {
+			if parent = yamlChildMap(parent, seg); parent == nil {
+				break
+			}
+		}
+		if parent == nil || !hasYAMLKey(parent, k.key) {
+			continue
+		}
+		path := strings.Join(append(slices.Clone(k.parent), k.key), ".")
+		reason := k.reason
+		if reason == "" {
+			reason = "the built-in default now always applies"
+		}
+		add(path, fmt.Sprintf("'%s' was removed and has no effect: %s; remove this key", path, reason))
+	}
 	return diags
+}
+
+// removedKeys are leaf keys whose setting was dropped and hard-wired to its
+// default. An empty reason means "the built-in default now always applies".
+var removedKeys = []struct {
+	parent []string
+	key    string
+	reason string
+}{
+	{[]string{"projects"}, "public_tmp", "the __public_tmp__ pseudo-project was removed"},
 }
 
 // reportDeprecatedKeys emits findDeprecatedKeys and returns the reported key

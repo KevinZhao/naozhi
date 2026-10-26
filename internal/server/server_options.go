@@ -126,17 +126,6 @@ type WatchdogOptions struct {
 
 // FeatureOptions are the opt-in feature switches.
 type FeatureOptions struct {
-	// PublicTmp opts the __public_tmp__ pseudo-project in (#646). When
-	// false (default) that pseudo-project is a regular "project not found".
-	//
-	// SECURITY: MUST stay false on any shared / multi-operator deployment or
-	// where the dashboard token is shared. When enabled every authenticated
-	// dashboard user can read non-credential files anywhere under /tmp (the
-	// credential allowlist and foreign-private-UID gate block secrets and
-	// sockets, not general content). Accesses are audit-logged at Info
-	// ("public_tmp file access") (#1678).
-	PublicTmp bool
-
 	// ProjectStableKey toggles the per-project StableKey field in the
 	// /api/projects list response (docs/rfc/project-stable-session-key.md §4.2).
 	// When false the dashboard falls back to the timestamp-key "continue" path.
