@@ -97,6 +97,37 @@ func TestEventLog_SetPersistSinkPair_AppendBatchUsesSlice(t *testing.T) {
 	}
 }
 
+// TestAppendBatch_Len1_SinkPair_UsesSingleSink verifies that a single-entry
+// AppendBatch with SetPersistSinkPair reaches the single sink. This is the
+// production live-persist path: the CLI stream calls AppendBatch with one
+// entry per event and session wires sinks via SetPersistSinkPair.
+func TestAppendBatch_Len1_SinkPair_UsesSingleSink(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(16)
+	batch := &captureSink{}
+	one := &captureSinkOne{}
+	l.SetPersistSinkPair(batch.asSink(), one.asSink())
+
+	l.AppendBatch([]clievent.EventEntry{{Type: "user", Summary: "hello"}})
+
+	if one.count() != 1 {
+		t.Errorf("single sink call count = %d, want 1", one.count())
+	}
+	if batch.batchCount() != 0 {
+		t.Errorf("batch sink call count = %d, want 0 (single sink should be used for len==1)", batch.batchCount())
+	}
+	got, replay, ok := one.last()
+	if !ok {
+		t.Fatal("single sink received no entries")
+	}
+	if got.Summary != "hello" {
+		t.Errorf("single sink entry Summary = %q, want %q", got.Summary, "hello")
+	}
+	if replay {
+		t.Errorf("single sink replayPhase = true, want false for live AppendBatch")
+	}
+}
+
 // TestEventLog_SetPersistSinkPair_FallbackWhenSingleNil verifies that
 // passing a nil PersistSinkOne to SetPersistSinkPair degrades gracefully
 // to slice-only behaviour — Append falls back to the legacy slice sink

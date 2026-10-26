@@ -6,7 +6,6 @@ package ring
 
 import (
 	"log/slog"
-	"sync"
 
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
@@ -346,34 +345,13 @@ func (l *EventLog) applyEntryStateLocked(e clievent.EventEntry) (fire bool, pend
 // SetOnAgentTaskDone installs a callback that fires when a "task_done"
 // EventEntry is appended. Single subscriber: setting again replaces the
 // previous callback; nil clears. Used by the server-side tailer registry to
-// stop tailers once the parent stream marks a task finished. Prefer
-// OnAgentTaskDone for new code (cancel-func idiom matching Subscribe).
+// stop tailers once the parent stream marks a task finished.
 func (l *EventLog) SetOnAgentTaskDone(fn func(taskID, status string)) {
 	if fn == nil {
 		l.onAgentTaskDoneFn.Store(nil)
 		return
 	}
 	l.onAgentTaskDoneFn.Store(&fn)
-}
-
-// OnAgentTaskDone is the cancel-func form of SetOnAgentTaskDone, matching
-// Subscribe's registration idiom (#802). Storage is still a single pointer,
-// so semantics remain last-writer-wins. The returned cancel is idempotent;
-// a nil fn is a no-op with a no-op cancel so callers can defer it blindly.
-func (l *EventLog) OnAgentTaskDone(fn func(taskID, status string)) func() {
-	if fn == nil {
-		return func() {}
-	}
-	stored := &fn
-	l.onAgentTaskDoneFn.Store(stored)
-	var cancelOnce sync.Once
-	return func() {
-		cancelOnce.Do(func() {
-			// CompareAndSwap so a stale cancel cannot clear a callback that a
-			// later registration installed.
-			l.onAgentTaskDoneFn.CompareAndSwap(stored, nil)
-		})
-	}
 }
 
 // loadAgentTaskDoneFn returns the current on-task-done callback (nil when

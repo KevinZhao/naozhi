@@ -120,7 +120,6 @@ func (l *EventLog) Append(e clievent.EventEntry) {
 	// Summary Stores happen inside l.mu so a concurrent AppendBatch (which
 	// holds l.mu for its whole run) cannot invert last-writer order.
 	if e.Type == clievent.KindUser {
-		storeAtomicString(&l.lastPromptSummary, e.Summary)
 		l.userTurnCount.Add(1)
 	} else if e.Type == clievent.KindText {
 		// Stored even when Summary is empty so a fresh empty text block
@@ -177,10 +176,10 @@ func (l *EventLog) appendBatch(entries []clievent.EventEntry, isReplay bool) {
 		return
 	}
 	var (
-		lastPrompt, lastActivity, lastResponse string
-		sawPrompt, sawActivity, sawResponse    bool
-		userDelta                              int64
-		pendingDone                            []pendingTaskDone
+		lastActivity, lastResponse string
+		sawActivity, sawResponse   bool
+		userDelta                  int64
+		pendingDone                []pendingTaskDone
 	)
 	// One wall-clock read for every zero-Time entry keeps vDSO calls out of
 	// the write lock on 500-entry replays.
@@ -283,8 +282,6 @@ func (l *EventLog) appendBatch(entries []clievent.EventEntry, isReplay bool) {
 		// The "saw" flag is separate from the value so an empty final Summary
 		// still overwrites, matching Append's unconditional store.
 		if ePtr.Type == clievent.KindUser {
-			lastPrompt = ePtr.Summary
-			sawPrompt = true
 			userDelta++
 		} else if ePtr.Type == clievent.KindText {
 			lastResponse = ePtr.Summary
@@ -295,9 +292,6 @@ func (l *EventLog) appendBatch(entries []clievent.EventEntry, isReplay bool) {
 		}
 	}
 
-	if sawPrompt {
-		storeAtomicString(&l.lastPromptSummary, lastPrompt)
-	}
 	if sawResponse {
 		storeAtomicString(&l.lastResponseSummary, textutil.StripMarkdown(lastResponse))
 	}
