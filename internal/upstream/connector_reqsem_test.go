@@ -66,7 +66,7 @@ func TestReqSem_CapsAndReleasesSlots(t *testing.T) {
 	})
 
 	cfg := &Config{URL: wsURL(srv), NodeID: "node1", Token: "tok"}
-	c := New(cfg, testRouter(makeRouter()), nil, nil, Discovery{}, nil)
+	c := New(cfg, testRouter(makeRouter()), nil, Discovery{}, nil)
 	var calls atomic.Int32
 	gate := make(chan struct{})
 	c.discovery.Preview = func(string) (json.RawMessage, error) {

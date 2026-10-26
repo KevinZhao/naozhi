@@ -9,7 +9,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"sync"
 	"time"
 )
 
@@ -44,33 +43,9 @@ type deadlineInterrupter interface {
 // is per-Scheduler (watchdogInterruptTimeoutNanos, #1904).
 const watchdogInterruptTimeoutDefault = 3 * time.Second
 
-// abortChanPool recycles the buffer=1 abortResult channels runDeadlineWatchdog
-// hands to sendWithWatchdog (otherwise one alloc per tick, #1921). Reuse is
-// safe: the channel receives EXACTLY ONE send per run (the AfterFunc callback
-// or the nil-guard pre-fill) and sendWithWatchdog either observes stop()==true
-// (callback deregistered, channel stays empty) or drains that value before
-// returning; the parked InterruptViaControl goroutine writes only to its own
-// `done` channel. putAbortChan also drains non-blockingly as a safety net.
-var abortChanPool = sync.Pool{New: func() any { return make(chan abortResult, 1) }}
-
-// getAbortChan returns a clean buffer=1 abortResult channel from the pool.
-func getAbortChan() chan abortResult { return abortChanPool.Get().(chan abortResult) }
-
-// putAbortChan recycles ch after a non-blocking drain that guarantees it is
-// empty for the next user. Only sendWithWatchdog calls this — tests that
-// invoke runDeadlineWatchdog directly simply skip the Put (a missed reuse,
-// never a correctness bug).
-func putAbortChan(ch chan abortResult) {
-	select {
-	case <-ch:
-	default:
-	}
-	abortChanPool.Put(ch)
-}
-
 // watchdogInterruptTimeout reads this Scheduler's active interrupt-call
 // timeout. Production callers see watchdogInterruptTimeoutDefault unless a test
-// has overridden it on this instance via setWatchdogInterruptTimeoutForScheduler.
+// has overridden it on this instance.
 func (s *Scheduler) watchdogInterruptTimeout() time.Duration {
 	return time.Duration(s.watchdogInterruptTimeoutNanos.Load())
 }
@@ -82,7 +57,7 @@ func (s *Scheduler) watchdogInterruptTimeout() time.Duration {
 // context.AfterFunc keeps steady-state watchdog goroutines at ~0 (#492).
 //
 // The channel is buffer=1, never closed, gets exactly one send, and must be
-// treated as receive-only (bidirectional only for pooling, #1921). stop is
+// treated as receive-only. stop is
 // AfterFunc's: true = callback will NOT run, so do not block on the channel;
 // false = a value is or will be there (#1705). timeout <= 0 → default (#1904).
 func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter, timeout time.Duration) (chan abortResult, func() bool) {
@@ -95,13 +70,13 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter, timeout 
 	// pre-filled buffer=1 channel so the caller's drain sees a zero
 	// abortResult and proceeds with normal finishRun bookkeeping.
 	if ctx == nil || sess == nil {
-		ch := getAbortChan()
+		ch := make(chan abortResult, 1)
 		ch <- abortResult{}
 		// No callback registered: a no-op stop reporting false tells the
 		// caller "already satisfied, read the channel".
 		return ch, func() bool { return false }
 	}
-	ch := getAbortChan()
+	ch := make(chan abortResult, 1)
 	stop := context.AfterFunc(ctx, func() {
 		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			ch <- abortResult{}
@@ -174,8 +149,6 @@ func (s *Scheduler) sendWithWatchdog(sendCtx context.Context, sendCancel context
 	// it) and a value is or will be on abortCh, so cancel + block on it.
 	if stopWatchdog() {
 		sendCancel()
-		// Callback will NOT run, so abortCh is clean — recycle it.
-		putAbortChan(abortCh)
 		// stop()==true means "callback deregistered", NOT "deadline never
 		// fired": if Send returned on the deadline but stop() beat the
 		// callback goroutine's start, no interrupt was sent. Fire it
@@ -194,9 +167,6 @@ func (s *Scheduler) sendWithWatchdog(sendCtx context.Context, sendCancel context
 	// with the in-flight interrupt write.
 	sendCancel()
 	abort := <-abortCh
-	// Drained exactly once; the inner goroutine writes only to its own
-	// `done` channel, so no late send can reach the recycled channel.
-	putAbortChan(abortCh)
 	return result, abort, err
 }
 

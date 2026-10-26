@@ -1,14 +1,12 @@
 package project
 
 import (
-	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/project"
@@ -67,16 +65,8 @@ type Handlers struct {
 // Deps bundles all wiring for New so internal/server can construct Handlers
 // without access to unexported fields.
 type Deps struct {
-	// BaseCtx is the long-lived parent for the planner-restart timeout. Wired
-	// at construction (#2552); nil falls back to context.Background().
-	BaseCtx context.Context
-
 	ProjectMgr ProjectStore
 	Router     RouterView
-	// Resolver centralises planner-view opts (docs/rfc/key-resolver.md §3.1
-	// ResolveForPlannerKey) so planner restart keeps the "no defaults
-	// inheritance" contract. Nil makes planner restart answer 400.
-	Resolver   PlannerKeyResolver
 	NodeAccess NodeAccessor
 	NodeCache  NodeCacheReader
 	// PublicTmpEnabled gates the __public_tmp__ pseudo-project (#646). When
@@ -95,15 +85,6 @@ type Deps struct {
 // New constructs a Handlers from injected deps.
 func New(d Deps) *Handlers {
 	return &Handlers{deps: d, uploadQuota: newUploadQuota(d.UploadQuotaBytes)}
-}
-
-// restartCtx returns the parent context for handleRestartPlanner's 30s
-// timeout, falling back to context.Background() when BaseCtx is unwired.
-func (h *Handlers) restartCtx() context.Context {
-	if h.deps.BaseCtx != nil {
-		return h.deps.BaseCtx
-	}
-	return context.Background()
 }
 
 // projectsListEntry is the per-project element in GET /api/projects. The
@@ -340,54 +321,6 @@ func (h *Handlers) HandleFavoriteToggle(w http.ResponseWriter, r *http.Request) 
 		h.deps.Router.BumpVersion()
 	}
 	httputil.WriteJSON(w, map[string]any{"status": "ok", "favorite": favorite})
-}
-
-// HandlePlannerRestart serves POST /api/projects/planner/restart?name=...
-func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("name")
-	if err := validateProjectName(name); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// Remote node proxy
-	nodeID := r.URL.Query().Get("node")
-	if nodeID != "" && nodeID != "local" {
-		nc, ok := h.deps.NodeAccess.LookupNode(w, nodeID)
-		if !ok {
-			return
-		}
-		if err := nc.ProxyRestartPlanner(r.Context(), name); err != nil {
-			slog.Warn("proxy restart planner failed", "node", nodeID, "err", err)
-			http.Error(w, "upstream error", http.StatusBadGateway)
-			return
-		}
-		httputil.WriteJSON(w, map[string]string{"status": "restarting"})
-		return
-	}
-
-	// The resolver is the only source of planner opts
-	// (docs/rfc/key-resolver.md §2.2 #6); production always wires one.
-	if h.deps.ProjectMgr == nil || h.deps.Resolver == nil {
-		http.Error(w, "projects not configured", http.StatusBadRequest)
-		return
-	}
-	plannerKey, opts, ok := h.deps.Resolver.ResolveForPlannerKey(name)
-	if !ok {
-		http.Error(w, "project not found", http.StatusNotFound)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(h.restartCtx(), 30*time.Second)
-	defer cancel()
-	if err := h.deps.Router.ResetAndRecreate(ctx, plannerKey, opts); err != nil {
-		slog.Error("planner restart failed", "project", name, "err", err)
-		http.Error(w, "restart failed", http.StatusInternalServerError)
-		return
-	}
-	slog.Info("planner restarted", "project", name)
-
-	httputil.WriteJSON(w, map[string]string{"status": "restarted"})
 }
 
 // ContractProjectsEntry exposes the /api/projects entry wire struct for

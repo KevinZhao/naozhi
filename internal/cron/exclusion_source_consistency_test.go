@@ -49,10 +49,6 @@ func TestExclusionSourceConsistency(t *testing.T) {
 		EndedAt:   time.Unix(2001, 0),
 		State:     RunStateSucceeded,
 	})
-	// Append invalidates the TTL cache; force a fully cold start so each probe
-	// below independently re-derives from sources rather than a warm snapshot.
-	s.invalidateKnownSessionsCache()
-
 	const neverSeen = "absent-9999-9999-9999-000000000099"
 
 	cases := []struct {
@@ -69,8 +65,6 @@ func TestExclusionSourceConsistency(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			// Re-cold the cache so each probe exercises the full build.
-			s.invalidateKnownSessionsCache()
 			if _, got := s.KnownSessionIDs()[tc.sessionID]; got != tc.want {
 				t.Fatalf("KnownSessionIDs()[%q] = %v, want %v (#1051)", tc.sessionID, got, tc.want)
 			}

@@ -190,7 +190,7 @@ func buildServerWithHandlers(opts ServerOptions) (*Server, *handlerSet) {
 	s.discoveryCache = newDiscoveryCache(claudeDir, router.ManagedExcludeSets, opts.ProjectManager)
 
 	hs.discoveryH = buildDiscoveryHandlers(opts, claudeDir, s.discoveryCache, s.nodes, s.nodeCache, w.bcast.BroadcastSessionsUpdate, s.appCtx)
-	hs.projectH = buildProjectHandlers(opts, resolver, s.nodes, s.nodeCache, s.hub.ctx)
+	hs.projectH = buildProjectHandlers(opts, s.nodes, s.nodeCache)
 	agentIDs := agentIDList(agents)
 	hs.costH = buildCostHandlers(opts, router)
 	hs.sessionH = buildSessionHandlers(opts, s, w, retiredStore, agentIDs, tag)

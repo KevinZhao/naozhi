@@ -167,7 +167,7 @@ Remote → Primary: {"type":"response","req_id":"r1","error":"..."}
 ```
 
 Methods: `fetch_sessions`, `fetch_projects`, `fetch_discovered`, `fetch_discovered_preview`,
-`fetch_events`, `send`, `takeover`, `restart_planner`, `update_config`.
+`fetch_events`, `send`, `takeover`, `update_config`.
 
 **Event push (subscribe -> stream):**
 
@@ -238,7 +238,6 @@ type NodeConn interface {
     FetchEvents(ctx context.Context, key string, after int64) ([]cli.EventEntry, error)
     Send(ctx context.Context, key, text string) error
     ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStart uint64) error
-    ProxyRestartPlanner(ctx context.Context, projectName string) error
     ProxyUpdateConfig(ctx context.Context, projectName string, cfg json.RawMessage) error
     Subscribe(c wsEventSink, key string, after int64)
     Unsubscribe(c wsEventSink, key string)
@@ -390,7 +389,7 @@ upstream:
 ### Unit Tests
 
 **Direct Mode:**
-- `nodeclient_test.go`: FetchSessions, FetchEvents, Send, Health, FetchProjects, FetchDiscovered, ProxyTakeover, ProxyRestartPlanner, ProxyUpdateConfig.
+- `nodeclient_test.go`: FetchSessions, FetchEvents, Send, Health, FetchProjects, FetchDiscovered, ProxyTakeover, ProxyUpdateConfig.
 - `wsrelay_test.go`: ConnectAndSubscribe, EventForwarding, MultipleClients, Unsubscribe, Close, Reconnect, AuthFailed, RemoveClient, Hub_RemoteSubscribe.
 
 **Reverse Mode:**

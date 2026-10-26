@@ -20,7 +20,7 @@ func (q *queue) depth(key string) int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if sq := q.queues[key]; sq != nil {
-		return sq.ring.len()
+		return len(sq.msgs)
 	}
 	return 0
 }

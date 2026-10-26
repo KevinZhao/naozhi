@@ -472,10 +472,8 @@ func main() {
 
 	// Upstream connector: this node connects to a primary.
 	if cfg.Upstream != nil {
-		// The server's resolver, so reverse-RPC planner restart takes the same
-		// ResolveForPlannerKey path as the dashboard handler. srv runs relayed
-		// sends on the Orchestrator IM and the dashboard use.
-		conn := upstream.New(buildUpstreamConfig(cfg), wireup.UpstreamRouter(router), projectMgr, routing.Resolver,
+		// srv runs relayed sends on the Orchestrator IM and the dashboard use.
+		conn := upstream.New(buildUpstreamConfig(cfg), wireup.UpstreamRouter(router), projectMgr,
 			upstreamDiscovery(claudeDir, router, projectMgr), srv)
 		go conn.Run(ctx)
 		slog.Info("upstream connector starting", "url", cfg.Upstream.URL, "node_id", cfg.Upstream.NodeID)
