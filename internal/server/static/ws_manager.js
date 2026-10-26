@@ -102,12 +102,6 @@ export const wsm = {
   // No match, or an unregistered type, drops the frame.
   _frames: new Map(),
 
-  /**
-   * @template {keyof WsFrames} K
-   * @param {K} type
-   * @param {(msg: WsFrames[K]) => void} fn
-   * @param {(msg: WsFrames[K]) => boolean} [when]
-   */
   on(type, fn, when) {
     if (!Object.hasOwn(NZ_CONTRACT.WS, type)) throw new Error('wsm.on: unknown frame type ' + type);
     const t = this._frames.get(type) || { claims: [], fallback: null };
@@ -117,11 +111,11 @@ export const wsm = {
     this._frames.set(type, t);
   },
 
-  onReady(/** @type {(msg: WsFrames['auth_ok']) => void} */ fn) { this._ready.push(fn); },
+  onReady(fn) { this._ready.push(fn); },
   onStateChange(fn) { this._stateChange.push(fn); },
-  onAuthFail(/** @type {(msg: WsFrames['auth_fail']) => void} */ fn) { this._authFail.push(fn); },
+  onAuthFail(fn) { this._authFail.push(fn); },
 
-  onMessage(/** @type {WsFrames[keyof WsFrames]} */ msg) {
+  onMessage(msg) {
     const t = this._frames.get(msg.type);
     if (!t) return;
     const c = t.claims.find((x) => x.when(msg));

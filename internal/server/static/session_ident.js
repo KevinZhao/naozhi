@@ -130,7 +130,7 @@ export function statusLabelForNode(status) {
 }
 
 // Kinds kept out of the transcript (clievent kindTable's Internal column says why).
-const INTERNAL_EVENT_TYPES = new Set(/** @type {readonly string[]} */ (NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL));
+const INTERNAL_EVENT_TYPES = new Set(NZ_CONTRACT.ENUMS.EVENT_TYPE_INTERNAL);
 // Unified backend behaviour (supersedes Multi-Backend RFC §8.3 D17): both
 // Claude (stream-json) and Kiro (ACP) tool_use events are filtered out of
 // the main transcript so the chat reads cleanly. Transient tool activity
@@ -138,6 +138,6 @@ const INTERNAL_EVENT_TYPES = new Set(/** @type {readonly string[]} */ (NZ_CONTRA
 // while the turn is in flight, and the subagent panel still renders the
 // rich tool_call progress row via eventHtml(includeInternal=true) so
 // operators can drill into per-agent tool runs when needed.
-export function isInternalEvent(/** @type {EventEntry} */ e) {
+export function isInternalEvent(e) {
   return !!e && INTERNAL_EVENT_TYPES.has(e.type);
 }

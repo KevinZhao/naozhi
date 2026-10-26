@@ -1,4 +1,3 @@
-// @ts-check
 // E2E: hold-to-talk after the 30s cap (#2435 item 5).
 //
 // updateVoiceTimer stops the recorder at MAX_REC_SECS while the finger is
@@ -43,7 +42,6 @@ const stubMedia = () => {
       }, 30);
     }
   }
-  // @ts-ignore
   window.MediaRecorder = FakeRecorder;
   // Count toasts by message so the test can assert the cap toast fired once.
   // Observed at the #toast DOM sink rather than by stubbing window.showToast:
@@ -67,7 +65,7 @@ const stubMedia = () => {
 async function touch(page, type, y) {
   await installTouch(page);
   return page.evaluate(({ type, y }) => {
-    const nz = /** @type {any} */ (window).__nzTouch;
+    const nz = window.__nzTouch;
     const btn = document.getElementById('btn-hold-talk');
     const t = nz.touch(btn, 1, 100, y);
     const live = type === 'touchend' ? [] : [t];

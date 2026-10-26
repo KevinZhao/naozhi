@@ -227,9 +227,8 @@ function createNewCronJob() {
   }).catch(() => openCronCreateModal(''));
 }
 
-/** @typedef {HTMLElement & {_cronSchedule?: string, _cronWorkDir?: string, _cronScheduleTouched?: boolean}} CronOverlay */
 function openCronCreateModal(backendHtml) {
-  const overlay = /** @type {CronOverlay} */ (document.createElement('div'));
+  const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   // Default "每小时" matches the most common ask and gives users an
   // immediate, meaningful preview on open.
@@ -284,7 +283,7 @@ function openCronCreateModal(backendHtml) {
 // for the rationale). Called only by editCronJob — the create flow starts
 // with an empty textarea and doesn't need this.
 function fillCronPrompt(id, value) {
-  const el = /** @type {HTMLTextAreaElement} */ (document.getElementById(id));
+  const el = document.getElementById(id);
   if (el) el.value = value || '';
 }
 
@@ -357,7 +356,7 @@ function buildCronContextToggleHtml(initialFresh) {
 // collectCronContextValue returns the fresh_context flag, or null when the
 // toggle is absent (section not rendered).
 function collectCronContextValue() {
-  const cb = /** @type {HTMLInputElement} */ (document.getElementById('cron-context-fresh'));
+  const cb = document.getElementById('cron-context-fresh');
   if (!cb) return null;
   return !!cb.checked;
 }
@@ -411,7 +410,7 @@ function cronNotifyOnChange(cb) {
   // When notify is off, disable the override checkbox + hide its form so
   // the user can't silently leave stale target fields behind.
   const overrideForm = document.getElementById('cron-notify-override-form');
-  const overrideToggle = /** @type {HTMLInputElement} */ (document.getElementById('cron-notify-override'));
+  const overrideToggle = document.getElementById('cron-notify-override');
   if (!overrideForm || !overrideToggle) return;
   if (!cb.checked) {
     overrideForm.classList.remove('show');
@@ -437,14 +436,14 @@ function cronNotifyOverrideToggle(cb) {
 // "don't send the field".
 function collectCronNotifyValues() {
   const out = { notify: null, notify_platform: null, notify_chat_id: null };
-  const onCb = /** @type {HTMLInputElement} */ (document.getElementById('cron-notify-on'));
+  const onCb = document.getElementById('cron-notify-on');
   if (onCb && onCb.dataset.touched === '1') {
     out.notify = !!onCb.checked;
   }
-  const override = /** @type {HTMLInputElement} */ (document.getElementById('cron-notify-override'));
+  const override = document.getElementById('cron-notify-override');
   if (override && override.checked) {
-    const platInput = /** @type {HTMLInputElement} */ (document.getElementById('cron-notify-platform'));
-    const chatInput = /** @type {HTMLInputElement} */ (document.getElementById('cron-notify-chat-id'));
+    const platInput = document.getElementById('cron-notify-platform');
+    const chatInput = document.getElementById('cron-notify-chat-id');
     out.notify_platform = platInput ? platInput.value.trim() : '';
     out.notify_chat_id = chatInput ? chatInput.value.trim() : '';
   }
@@ -540,7 +539,7 @@ function toggleCronWsCustom() {
     form.classList.remove('nz-hidden');
     if (toggle) toggle.classList.add('nz-hidden');
     // Clear project selection
-    const overlay = /** @type {CronOverlay} */ (form.closest('.modal-overlay'));
+    const overlay = form.closest('.modal-overlay');
     if (overlay) overlay._cronWorkDir = '';
     document.querySelectorAll('#cron-ws-list li').forEach(li => {
       li.classList.remove('selected');
@@ -555,23 +554,23 @@ function toggleCronWsCustom() {
 }
 
 async function doCreateCronJob() {
-  const overlay = /** @type {CronOverlay} */ (document.querySelector('.modal-overlay'));
+  const overlay = document.querySelector('.modal-overlay');
   if (!overlay) return;
   // Resolve schedule: picker descriptor or raw advanced input. overlay
   // ._cronSchedule is kept in sync by freqUpdate(), but we re-collect here
   // so the submit path always sees the latest input.
-  const advanced = /** @type {HTMLInputElement} */ (document.getElementById('freq-advanced-input'));
+  const advanced = document.getElementById('freq-advanced-input');
   let schedule = (advanced && advanced.value.trim()) || overlay._cronSchedule || '';
   if (!schedule) { showToast('请设置频率', 'warning'); return; }
   // Resolve prompt
-  const promptInput = /** @type {HTMLTextAreaElement} */ (document.getElementById('cron-prompt'));
+  const promptInput = document.getElementById('cron-prompt');
   const prompt = promptInput ? promptInput.value.trim() : '';
   // Resolve title（可选）
-  const titleInput = /** @type {HTMLInputElement} */ (document.getElementById('cron-title'));
+  const titleInput = document.getElementById('cron-title');
   const title = titleInput ? titleInput.value.trim() : '';
   // Resolve work_dir: project selection or custom input
   let workDir = overlay._cronWorkDir || '';
-  const wdInput = /** @type {HTMLInputElement} */ (document.getElementById('cron-workdir'));
+  const wdInput = document.getElementById('cron-workdir');
   if (wdInput && wdInput.value.trim()) workDir = wdInput.value.trim();
   try {
     const headers = {'Content-Type': 'application/json'};
@@ -589,7 +588,7 @@ async function doCreateCronJob() {
     // collapses entirely in single-backend deploys, so the element may be
     // absent — treat that as "router default" and omit the field, matching
     // the server's omitempty contract.
-    const backendEl = /** @type {HTMLSelectElement} */ (document.getElementById('cron-backend'));
+    const backendEl = document.getElementById('cron-backend');
     const backendVal = backendEl && backendEl.value ? backendEl.value : '';
     if (backendVal) body.backend = backendVal;
     let data;
@@ -803,7 +802,7 @@ function toggleCronMenu(id) {
 // refetch a few seconds later. Tolerates an unknown job_id (we may receive
 // a started event for a freshly created job before the local list pulls
 // it; in that case the next fetchCronJobs reconciles).
-function cronApplyRunStarted(/** @type {WsFrames['run_started'] & {job_id: string}} */ msg) {
+function cronApplyRunStarted(msg) {
   if (!msg || !msg.job_id) return;
   const list = Array.isArray(cronStore.jobs) ? cronStore.jobs : [];
   const j = list.find(x => x && x.id === msg.job_id);
@@ -857,7 +856,7 @@ function cronApplyRunStarted(/** @type {WsFrames['run_started'] & {job_id: strin
 // fetchCronJobs lands. We clear current_run so the running-badge stops
 // flashing immediately; the subsequent refetch fills in last_error_class
 // / counters / last_run_at.
-function cronApplyRunEnded(/** @type {WsFrames['run_ended'] & {job_id: string}} */ msg) {
+function cronApplyRunEnded(msg) {
   if (!msg || !msg.job_id) return;
   const list = Array.isArray(cronStore.jobs) ? cronStore.jobs : [];
   const j = list.find(x => x && x.id === msg.job_id);
@@ -1223,7 +1222,7 @@ function renderCronList() {
 // and local: typing 50 chars triggers 50 O(N) filter passes on the in-memory
 // cronStore.jobs array, no server round-trips.
 function onCronSearchInput() {
-  const input = /** @type {HTMLInputElement} */ (document.getElementById('cron-search-input'));
+  const input = document.getElementById('cron-search-input');
   cronFilterQuery = input ? (input.value || '').trim() : '';
   renderCronList();
 }
@@ -1246,7 +1245,7 @@ function setCronStatusFilter(status) {
 // so "view attention" + "clear the search" is one click, not a two-step
 // reset. Called by the x button inside the search input row.
 function clearCronSearch() {
-  const input = /** @type {HTMLInputElement} */ (document.getElementById('cron-search-input'));
+  const input = document.getElementById('cron-search-input');
   if (input) input.value = '';
   cronFilterQuery = '';
   renderCronList();
@@ -1394,7 +1393,7 @@ function renderCronPanel() {
 // observers. Falls back to a one-shot resize listener in browsers without
 // ResizeObserver (none we ship today, but cheap insurance).
 function setupCronLayoutObserver() {
-  const body = /** @type {HTMLElement & {_cronLayoutObs?: ResizeObserver}} */ (document.querySelector('.cron-detail-body'));
+  const body = document.querySelector('.cron-detail-body');
   if (!body) return;
   const apply = (w) => {
     // The tier is gauged off the body, which is what the observer watches
@@ -1419,7 +1418,7 @@ function setupCronLayoutObserver() {
     // sidebar drags) but better than a static breakpoint.
     if (!cronLayoutWindowListener) {
       cronLayoutWindowListener = () => {
-        const el = /** @type {HTMLElement} */ (document.querySelector('.cron-detail-body'));
+        const el = document.querySelector('.cron-detail-body');
         if (el) apply(el.offsetWidth);
       };
       window.addEventListener('resize', cronLayoutWindowListener);
@@ -1578,7 +1577,7 @@ function editCronJob(id) {
 }
 
 function openCronEditModal(id, job, backendHtml) {
-  const overlay = /** @type {CronOverlay} */ (document.createElement('div'));
+  const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   const notifyInitial = job.notify === true ? 'on' : (job.notify === false ? 'off' : '');
   const hasOverride = !!(job.notify_platform && job.notify_chat_id);
@@ -1629,7 +1628,7 @@ function openCronEditModal(id, job, backendHtml) {
   fillCronPrompt('edit-cron-prompt', job.prompt);
   // 回填 title。用 value 属性赋值避开 HTML 特殊字符在模板插值中的风险，
   // 与 fillCronPrompt 的 rationale 一致（参见 renderCronModalBody 注释）。
-  const titleEl = /** @type {HTMLInputElement} */ (document.getElementById('edit-cron-title'));
+  const titleEl = document.getElementById('edit-cron-title');
   if (titleEl) titleEl.value = job.title || '';
 
   overlay.addEventListener('keydown', function(e) {
@@ -1676,22 +1675,22 @@ function buildEditCronWorkspaceBody(currentDir) {
 }
 
 async function doEditCronJob(id) {
-  const overlay = /** @type {CronOverlay} */ (document.querySelector('.modal-overlay'));
+  const overlay = document.querySelector('.modal-overlay');
   if (!overlay) return;
   const job = cronStore.jobs.find(j => j.id === id);
   if (!job) { showToast('未找到该任务', 'warning'); return; }
 
-  const newPrompt = /** @type {HTMLTextAreaElement} */ (document.getElementById('edit-cron-prompt'))?.value || '';
-  const newTitle = (/** @type {HTMLInputElement} */ (document.getElementById('edit-cron-title'))?.value || '').trim();
+  const newPrompt = document.getElementById('edit-cron-prompt')?.value || '';
+  const newTitle = (document.getElementById('edit-cron-title')?.value || '').trim();
   // Advanced raw input wins over picker; if both empty use overlay cache
   // (seeded to job.schedule on modal open, kept fresh by freqUpdate()).
-  const advanced = /** @type {HTMLInputElement} */ (document.getElementById('freq-advanced-input'));
+  const advanced = document.getElementById('freq-advanced-input');
   const newSchedule = ((advanced && advanced.value.trim()) || overlay._cronSchedule || '').trim();
   // Workdir resolution: project picker (overlay._cronWorkDir set by
   // cronSelectWorkspace) wins; otherwise fall back to the custom input.
   // Tracks the same contract as doCreateCronJob so either flow works
   // whether the user clicked a project or typed a custom path.
-  const wdInput = /** @type {HTMLInputElement} */ (document.getElementById('edit-cron-workdir'));
+  const wdInput = document.getElementById('edit-cron-workdir');
   let newWorkDir = overlay._cronWorkDir || '';
   if (wdInput && wdInput.value.trim()) newWorkDir = wdInput.value.trim();
 
@@ -1720,7 +1719,7 @@ async function doEditCronJob(id) {
   }
   // If user unchecked the override, explicitly clear both fields (server
   // accepts "" to mean "clear").
-  const overrideCheckbox = /** @type {HTMLInputElement} */ (document.getElementById('cron-notify-override'));
+  const overrideCheckbox = document.getElementById('cron-notify-override');
   if (overrideCheckbox && !overrideCheckbox.checked && (origPlat || origChat)) {
     body.notify_platform = '';
     body.notify_chat_id = '';
@@ -1736,7 +1735,7 @@ async function doEditCronJob(id) {
   // a different backend than the one stored on the job. Element absent =
   // single-backend deploy (or fetch failed); skip the field entirely so
   // the legacy unset path on the server stays unchanged.
-  const backendEl = /** @type {HTMLSelectElement} */ (document.getElementById('edit-cron-backend'));
+  const backendEl = document.getElementById('edit-cron-backend');
   if (backendEl) {
     const newBackend = backendEl.value || '';
     const origBackend = job.backend || '';
@@ -1779,7 +1778,7 @@ nzViews.cron = { escClose: cronEscClose };
 // the handler runs — and the shortcut simply never registers if cron_view.js
 // is absent, rather than crashing dashboard.js.
 // 与 Cmd/Ctrl+Up/Down 的会话切换错开（那个在 dashboard.js，有 metaKey 守卫）。
-document.addEventListener('keydown', function(/** @type {KeyboardEvent & {target: HTMLElement}} */ e) {
+document.addEventListener('keydown', function(e) {
   if (!cronExpandedRunId || !cronExpandedRunId.runId) return;
   if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
   if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -1870,7 +1869,7 @@ registerActions({
 // ─── WS run frames and nz.bus subscriptions ────────────────────────────────
 // Run frames (#2540) from subsystem cron: the handlers key on job_id, so
 // owner_id is projected onto it here, once, at the wire boundary.
-const cronRun = (/** @type {WsFrames['run_started' | 'run_ended']} */ msg) => msg.subsystem === 'cron';
+const cronRun = (msg) => msg.subsystem === 'cron';
 wsm.on(NZ_CONTRACT.WS.run_started, (msg) => cronApplyRunStarted(Object.assign({}, msg, { job_id: msg.owner_id })), cronRun);
 wsm.on(NZ_CONTRACT.WS.run_ended, (msg) => {
   // Every terminal state lands here; only succeeded celebrates.

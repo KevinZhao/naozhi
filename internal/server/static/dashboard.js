@@ -337,7 +337,7 @@ onSessionsApplied(onSessionsRefreshed);
 
 
 document.addEventListener('click', function(e) {
-  if (ui.activePopover && !ui.activePopover.contains(/** @type {Node} */ (e.target)) && !/** @type {Element} */ (e.target).closest('#btn-history')) {
+  if (ui.activePopover && !ui.activePopover.contains(e.target) && !e.target.closest('#btn-history')) {
     closeHistoryPopover();
   }
 });
@@ -411,7 +411,7 @@ function toggleHistory() {
   // might disable inline event handlers on the items HTML.
   const searchInput = document.getElementById('hp-search');
   if (searchInput) {
-    searchInput.addEventListener('input', e => applyHistoryFilter(merged, /** @type {HTMLInputElement} */ (e.target).value));
+    searchInput.addEventListener('input', e => applyHistoryFilter(merged, e.target.value));
     // Auto-focus on desktop only; mobile focus pops the keyboard and
     // pushes the sheet up, which is annoying if the user just wanted to
     // eyeball the list.
@@ -656,7 +656,7 @@ function dismissCheatsheet() {
 // Global "?" shortcut: open the cheatsheet when not typing in an input
 // and no other modal is already open. The same Shift+/ also fires "?"
 // on US layouts, so the `key === '?'` check covers both.
-document.addEventListener('keydown', function(/** @type {KeyboardEvent & {target: HTMLElement}} */ e) {
+document.addEventListener('keydown', function(e) {
   if (e.key !== '?') return;
   const tag = (e.target.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
@@ -686,7 +686,7 @@ document.addEventListener('keydown', function(e) {
 // that is open. cron goes through nzViews.cron, absent when cron_view.js is not
 // loaded (dashboard-cron-view-extraction §2.6 B1); its own priority (expanded
 // row before drawer) lives in cron_view.js's cronEscClose.
-document.addEventListener('keydown', function(/** @type {KeyboardEvent & {target: HTMLElement}} */ e) {
+document.addEventListener('keydown', function(e) {
   if (e.key !== 'Escape') return;
   // Overlays with their own Esc trapFocus handling take precedence.
   if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
@@ -1009,7 +1009,7 @@ async function downloadSessionMarkdown() {
 // detail line with the empty #header-git / #header-effort / #header-runstats
 // mounts) for session snapshot `s`. Shared by renderMainShell (full shell) and
 // renderMainHeader (header-only repaint) so the two can never drift.
-function mainHeaderHtml(/** @type {SessionSnapshot} */ s) {
+function mainHeaderHtml(s) {
   const keyParts = (selection.key || '').split(':');
   const agentIsGeneric = !s.agent || s.agent === 'general';
   // Primary title: user_label (operator-set rename) > summary > latest prompt
@@ -1198,7 +1198,7 @@ function renderMainShell() {
   renderWorkflowPanel();
   // Double-tap events feed → focus input (mobile)
   let lastTapMs = 0;
-  document.getElementById('events-scroll').addEventListener('touchend', (/** @type {TouchEvent & {target: Element}} */ e) => {
+  document.getElementById('events-scroll').addEventListener('touchend', (e) => {
     if (!isMobile() || e.target.closest('a,button,code,pre')) return;
     const now = Date.now();
     if (now - lastTapMs < 300) { document.getElementById('msg-input')?.focus(); lastTapMs = 0; }
@@ -1277,8 +1277,8 @@ function renderSettingsView() {
       sysLinkHtml +
     '</div>';
   const grp = document.getElementById('settings-theme-group');
-  if (grp) grp.addEventListener('click', function (/** @type {MouseEvent & {target: Element}} */ e) {
-    const b = /** @type {HTMLElement} */ (e.target.closest('.settings-theme-opt'));
+  if (grp) grp.addEventListener('click', function (e) {
+    const b = e.target.closest('.settings-theme-opt');
     if (!b) return;
     applyTheme(b.dataset.theme, true); // persist=true: user-initiated → save to server
     renderSettingsView(); // refresh active state
@@ -1319,7 +1319,7 @@ const daemonRun = () => {
     if (ui.activeView === 'system') renderSystemView();
   }).catch(() => {});
 };
-const sysRun = (/** @type {WsFrames['run_started' | 'run_ended']} */ msg) => msg.subsystem === 'sysession';
+const sysRun = (msg) => msg.subsystem === 'sysession';
 wsm.on(NZ_CONTRACT.WS.run_started, daemonRun, sysRun);
 wsm.on(NZ_CONTRACT.WS.run_ended, daemonRun, sysRun);
 
@@ -1354,7 +1354,7 @@ function updateHeaderCLI() {
 /* ===== Sidebar resizer (desktop only) ===== */
 (function(){
   const resizer = document.getElementById('resizer');
-  const sidebar = /** @type {HTMLElement} */ (document.querySelector('.sidebar'));
+  const sidebar = document.querySelector('.sidebar');
   // RNEW-UX-004 demo: migrated 'naozhi_sidebar_w' -> 'nz:sidebar_w' via
   // unified helper. One-time loss of saved width acceptable (defaults to
   // CSS width).
@@ -1363,7 +1363,7 @@ function updateHeaderCLI() {
   if (saved >= 200) sidebar.style.width = saved + 'px';
 
   let startX, startW;
-  resizer.addEventListener('mousedown', function(/** @type {MouseEvent & {target: Element}} */ e) {
+  resizer.addEventListener('mousedown', function(e) {
     // Mid-line collapse handle lives inside the resizer; let its click run
     // without starting a drag. Also skip when collapsed (nothing to resize).
     if (e.target && e.target.closest && e.target.closest('.resizer-handle')) return;
@@ -1389,7 +1389,7 @@ function updateHeaderCLI() {
     document.removeEventListener('mouseup', onUp);
     lsSet(LS_SIDEBAR_W, Math.round(sidebar.getBoundingClientRect().width));
   }
-  resizer.addEventListener('dblclick', function(/** @type {MouseEvent & {target: Element}} */ e) {
+  resizer.addEventListener('dblclick', function(e) {
     if (e.target && e.target.closest && e.target.closest('.resizer-handle')) return;
     if (document.body.classList.contains('sidebar-collapsed')) return;
     sidebar.style.width = '360px';

@@ -292,7 +292,7 @@ function eventActionsHtml(e, cleanRaw) {
 // opts.includeInternal=true keeps tool_use/task_*/agent/result events the
 // parent view hides — agent_view.js's sub-agent panel needs them, since a
 // team member's work is almost entirely tool_use.
-export function eventHtml(/** @type {EventEntry} */ e, opts) {
+export function eventHtml(e, opts) {
   const includeInternal = !!(opts && opts.includeInternal);
   if (shouldHideEvent(e, includeInternal)) return '';
   if (EVENT_WHOLE.has(e.type)) return EVENT_WHOLE.get(e.type)(e);

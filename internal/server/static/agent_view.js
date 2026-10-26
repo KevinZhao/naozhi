@@ -482,7 +482,7 @@ import { sid } from './session_ident.js';
   // A tailer replays its buffer from the transcript's start, so events the
   // HTTP page already showed are dropped against the same watermark the
   // HTTP poll keeps.
-  function onAgentEvent(/** @type {WsFrames['agent_event']} */ msg) {
+  function onAgentEvent(msg) {
     if (!msg || !msg.event) return;
     if (msg.task_id !== state.activeTaskID) return;
     var batch = dedupAgentPollBatch([msg.event], state.pollCursor);
@@ -490,7 +490,7 @@ import { sid } from './session_ident.js';
     if (batch.events.length) appendAgentEvent(batch.events[0]);
   }
 
-  function onAgentMeta(/** @type {WsFrames['agent_meta']} */ msg) {
+  function onAgentMeta(msg) {
     if (!msg || !msg.task_id) return;
     // Apply meta to the banner row so stat line stays fresh.
     var row = findAgentByTaskId(msg.task_id);
@@ -505,7 +505,7 @@ import { sid } from './session_ident.js';
     }
   }
 
-  function onAgentDone(/** @type {WsFrames['agent_done']} */ msg) {
+  function onAgentDone(msg) {
     if (!msg || !msg.task_id) return;
     var row = findAgentByTaskId(msg.task_id);
     if (row) {
@@ -523,7 +523,7 @@ import { sid } from './session_ident.js';
     }
   }
 
-  function onAgentSubscribeRejected(/** @type {WsFrames['agent_subscribe_rejected']} */ msg) {
+  function onAgentSubscribeRejected(msg) {
     if (!msg) return;
     if (msg.task_id !== state.activeTaskID) return;
     switch (msg.reason) {
@@ -658,9 +658,9 @@ import { sid } from './session_ident.js';
   // decoded the HTML-attr escape, so the value is a plain JS string and
   // never crosses a JS-parse boundary.
   document.addEventListener('click', function (e) {
-    var t = /** @type {Element} */ (e.target);
+    var t = e.target;
     if (!t || typeof t.closest !== 'function') return;
-    var row = /** @type {HTMLElement} */ (t.closest('.rb-agent-row[data-task]'));
+    var row = t.closest('.rb-agent-row[data-task]');
     if (!row) return;
     var taskID = row.dataset ? row.dataset.task : row.getAttribute('data-task');
     if (!taskID) return; // pre-task_start agents (no taskId yet) — dead tap.
@@ -675,7 +675,7 @@ import { sid } from './session_ident.js';
     if (!state.activeTaskID) return;
     // Don't hijack Esc if the user is focused in a text input (the
     // dashboard's interrupt shortcut owns Esc there).
-    var t = /** @type {HTMLElement} */ (e.target);
+    var t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
       t.isContentEditable)) {
       return;

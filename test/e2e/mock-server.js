@@ -1,4 +1,3 @@
-// @ts-check
 // Shared mock server for naozhi dashboard E2E tests.
 // Serves dashboard.html and stubs all API endpoints with configurable responses.
 const http = require('http');

@@ -16,14 +16,6 @@ import {
   needsFetch, reconcileSummaries, releaseRows, rowsOf, startFetch, visibleWorkflows,
 } from './workflow_state.js';
 
-/** @typedef {import('./workflow_state.js').WorkflowEntry} WorkflowEntry */
-/**
- * @typedef {object} RowView
- * @property {HTMLElement} el
- * @property {string} state
- * @property {string} agentId
- * @property {number} rev
- */
 /**
  * @typedef {object} WorkflowView a workflow's <details> and what it renders
  * @property {HTMLDetailsElement} el
@@ -51,7 +43,7 @@ const clock = { offset: null };
 // pump.timer wakes the fetch pump for a fetch that had to wait.
 const pump = { timer: 0, at: 0 };
 // view is what the panel shows: its element, the session and a view per task.
-const view = { panel: null, sid: '', wfs: /** @type {Map<string, WorkflowView>} */ (new Map()), selected: '', following: false };
+const view = { panel: null, sid: '', wfs: new Map(), selected: '', following: false };
 const paint = { pending: false, last: 0 };
 const tick = { timer: 0 };
 // announced holds the (task, settled status) pairs this page has passed.
@@ -71,7 +63,6 @@ const DEGRADED_TEXT = {
   phases_capped: 'phase 过多，部分未显示',
 };
 
-/** @param {number} serverNow */
 function noteServerNow(serverNow) {
   if (serverNow) clock.offset = serverNow - Date.now();
 }
@@ -107,17 +98,11 @@ function pumpFetches() {
   pump.timer = setTimeout(() => { pump.timer = 0; pumpFetches(); }, Math.max(0, next - now));
 }
 
-/**
- * @param {string} s
- * @param {WorkflowEntry} e
- * @param {import('./workflow_state.js').FetchMode} mode
- * @param {number} now
- */
 async function fetchEntry(s, e, mode, now) {
   const qs = startFetch(e, mode, now);
   let retryAfter = 0;
   try {
-    const resp = /** @type {RestResponses['sessions_workflow']} */ (await fetchJSON(NZ_CONTRACT.API.sessions_workflow + '?' + qs, {
+    const resp = (await fetchJSON(NZ_CONTRACT.API.sessions_workflow + '?' + qs, {
       onResponse: (r) => { retryAfter = Number(r.headers.get('Retry-After')) || 0; },
     }));
     noteServerNow(resp.server_now);
@@ -131,7 +116,6 @@ async function fetchEntry(s, e, mode, now) {
 
 // landed follows a change to session s's entries: due fetches go out, ended
 // workflows are announced and the panel repaints if s is on screen.
-/** @param {string} s */
 function landed(s) {
   pumpFetches();
   const selected = selection.key ? sid(selection.key, selection.node) : '';
@@ -160,29 +144,24 @@ function schedulePaint() {
   setTimeout(() => requestAnimationFrame(renderWorkflowPanel), wait);
 }
 
-/** @param {WireView} w */
 function nameOf(w) {
   return w.name || w.description || w.task_id;
 }
 
-/** @param {WireView} w */
 function isRunning(w) {
   return WORKFLOW_STATUS_DISPLAY[w.status] === WORKFLOW_STATUS_DISPLAY.running;
 }
 
-/** @param {WireView} w */
 function statusText(w) {
   const d = WORKFLOW_STATUS_DISPLAY[w.status] || WORKFLOW_STATUS_DISPLAY.unknown;
   return d === WORKFLOW_STATUS_DISPLAY.unknown && w.raw_status === UNCLAIMED ? d.text + '（进程未认领）' : d.text;
 }
 
-/** @param {number} n */
 function fmtTokens(n) {
   if (n < 1000) return String(n);
   return n < 1e6 ? (n / 1000).toFixed(1) + 'k' : (n / 1e6).toFixed(1) + 'M';
 }
 
-/** @param {number} ms */
 function fmtElapsed(ms) {
   const s = ms / 1000;
   if (s < 60) return s.toFixed(1) + 's';
@@ -193,7 +172,6 @@ function fmtElapsed(ms) {
 
 // elapsedOf is the workflow's run time on the server's clock: its duration
 // once ended, '' while the clock or the start is unknown.
-/** @param {WireView} w */
 function elapsedOf(w) {
   if (isSettled(w.status)) return w.duration_ms ? fmtElapsed(w.duration_ms) : '';
   const now = serverNow();
@@ -203,9 +181,6 @@ function elapsedOf(w) {
 
 /**
  * el builds an element with a class and text.
- * @param {string} tag
- * @param {string} cls
- * @param {string} [text]
  */
 function el(tag, cls, text) {
   const n = document.createElement(tag);
@@ -216,7 +191,6 @@ function el(tag, cls, text) {
 
 // glyph is a state's glyph, hidden from screen readers, and its text, hidden
 // from view.
-/** @param {{glyph: string, text: string, tone: string}} d @param {string} text */
 function glyph(d, text) {
   const f = document.createDocumentFragment();
   const g = el('span', 'wf-glyph wf-t-' + d.tone, d.glyph);
@@ -225,7 +199,6 @@ function glyph(d, text) {
   return f;
 }
 
-/** @param {string} cls @param {string} text */
 function quiet(cls, text) {
   const n = el('span', cls, text);
   n.setAttribute('aria-hidden', 'true');
@@ -237,7 +210,6 @@ function openPrefs() {
   try { return JSON.parse(sessionStorage.getItem(OPEN_KEY) || '{}') || {}; } catch (_) { return {}; }
 }
 
-/** @param {string} taskId @param {boolean} open */
 function saveOpenPref(taskId, open) {
   const prefs = openPrefs();
   delete prefs[taskId];
@@ -250,9 +222,6 @@ function saveOpenPref(taskId, open) {
 /**
  * ensureRows follows a workflow's <details> opening or closing: an open one
  * gets its rows, and an ended one its result, in one fetch.
- * @param {string} s
- * @param {string} taskId
- * @param {boolean} open
  */
 function ensureRows(s, taskId, open) {
   const e = store.get(s)?.tasks.get(taskId);
@@ -267,13 +236,9 @@ function ensureRows(s, taskId, open) {
  * when the user left it open, or, on a desktop without a choice, when it is
  * the newest running workflow; either way through the toggle listener, which
  * persists only the user's own toggles.
- * @param {string} s
- * @param {WorkflowEntry} e
- * @param {boolean} newest
- * @returns {WorkflowView}
  */
 function newWorkflowView(s, e, newest) {
-  const d = /** @type {HTMLDetailsElement} */ (el('details', 'wf'));
+  const d = el('details', 'wf');
   d.dataset.taskId = e.taskId;
   const sum = el('summary', 'wf-sum');
   const body = el('div', 'wf-body');
@@ -338,7 +303,6 @@ export function renderWorkflowPanel() {
   syncTicker(list);
 }
 
-/** @param {WorkflowView} v @param {WorkflowEntry} e */
 function paintWorkflow(v, e) {
   rebind(v, e);
   paintSummary(v, e.workflow);
@@ -356,8 +320,6 @@ function paintWorkflow(v, e) {
  * builds a new board, whose revs start over) empties the row, phase and
  * result caches; a <details> left open makes an entry that is not (a
  * replaced or released one) ask for its rows.
- * @param {WorkflowView} v
- * @param {WorkflowEntry} e
  */
 function rebind(v, e) {
   if (v.entry !== e || v.epoch !== e.epoch) {
@@ -375,7 +337,6 @@ function rebind(v, e) {
   }
 }
 
-/** @param {WorkflowView} v @param {WireView} w */
 function paintSummary(v, w) {
   const d = WORKFLOW_STATUS_DISPLAY[w.status] || WORKFLOW_STATUS_DISPLAY.unknown;
   const c = w.counts;
@@ -402,20 +363,18 @@ function paintSummary(v, w) {
 
 // currentPhase is the first phase with agents still to finish (else the
 // last), as "<title> done/total".
-/** @param {WireView} w */
 function currentPhase(w) {
   const ps = w.phases || [];
   const p = ps.find((x) => x.counts.queued + x.counts.running > 0) || ps[ps.length - 1];
   return p ? (p.title || '#' + p.index) + ' ' + p.counts.done + '/' + p.counts.total : '';
 }
 
-/** @param {WorkflowView} v @param {WorkflowEntry} e */
 function paintBody(v, e) {
   const w = e.workflow;
-  const groups = new Map((w.phases || []).map((p) => [p.index, /** @type {Agent[]} */ ([])]));
+  const groups = new Map((w.phases || []).map((p) => [p.index, []]));
   const loose = [];
   for (const a of rowsOf(e)) (groups.get(a.phase_index || 0) || loose).push(a);
-  const want = /** @type {Node[]} */ ([]);
+  const want = [];
   const seen = new Set();
   for (const p of w.phases || []) want.push(paintPhase(v, e.taskId, p, groups.get(p.index), seen));
   if (loose.length) want.push(paintPhase(v, e.taskId, null, loose, seen));
@@ -434,20 +393,15 @@ function paintBody(v, e) {
  * paintPhase renders one phase: a <details>, open unless every agent is
  * done or the user closed it, whose rows (at most limit) render only while
  * it is open. phase null groups the rows of no listed phase.
- * @param {WorkflowView} v
- * @param {string} taskId
- * @param {Phase | null} p
- * @param {Agent[]} rows
- * @param {Set<number>} seen
  */
 function paintPhase(v, taskId, p, rows, seen) {
   const key = p ? p.index : -1;
   let pd = v.phases.get(key);
   if (!pd) {
-    pd = /** @type {HTMLDetailsElement} */ (el('details', 'wf-phase'));
+    pd = el('details', 'wf-phase');
     const done = !!p && p.counts.total > 0 && p.counts.done === p.counts.total;
     pd.open = v.phaseOpen.get(key) ?? !done;
-    const bar = /** @type {HTMLProgressElement} */ (el('progress', 'wf-bar'));
+    const bar = el('progress', 'wf-bar');
     pd.append(el('summary', 'wf-phase-sum'), el('div', 'wf-rows'));
     pd.firstElementChild.append(el('span', 'wf-phase-title'), bar, quiet('wf-phase-n', ''));
     pd.addEventListener('toggle', () => { v.phaseOpen.set(key, pd.open); schedulePaint(); });
@@ -457,7 +411,7 @@ function paintPhase(v, taskId, p, rows, seen) {
   const done = p ? p.counts.done : rows.filter((a) => WORKFLOW_AGENT_DISPLAY[a.state] === WORKFLOW_AGENT_DISPLAY.done).length;
   const total = p ? p.counts.total : rows.length;
   pd.querySelector('.wf-phase-title').textContent = title;
-  const bar = /** @type {HTMLProgressElement} */ (pd.querySelector('progress'));
+  const bar = pd.querySelector('progress');
   bar.max = Math.max(1, total);
   bar.value = done;
   bar.setAttribute('aria-label', title + ' ' + done + '/' + total);
@@ -483,21 +437,16 @@ function paintPhase(v, taskId, p, rows, seen) {
   return pd;
 }
 
-/** @param {Agent} a */
 function agentIdOf(a) {
   return a.agent_id || (a.prev_agent_ids || []).slice(-1)[0] || '';
 }
 
-/** @param {Agent} a */
 function earlierIdsOf(a) {
   return (a.prev_agent_ids || []).filter((id) => id !== a.agent_id);
 }
 
 /**
  * openButton is a button drilling into agentId's transcript.
- * @param {string} cls
- * @param {string} taskId
- * @param {string} agentId
  */
 function openButton(cls, taskId, agentId) {
   const b = el('button', cls);
@@ -513,9 +462,6 @@ function openButton(cls, taskId, agentId) {
  * changed (a started agent's row becomes a button), refilled when only its
  * content did. A row with earlier attempts gets their badge, which lists
  * them, each a button too.
- * @param {WorkflowView} v
- * @param {string} taskId
- * @param {Agent} a
  */
 function rowEl(v, taskId, a) {
   const r = v.rows.get(a.index);
@@ -544,10 +490,6 @@ function rowEl(v, taskId, a) {
 
 /**
  * attemptList is a's badge of earlier attempts and the list it unfolds.
- * @param {WorkflowView} v
- * @param {string} taskId
- * @param {Agent} a
- * @param {string[]} earlier
  */
 function attemptList(v, taskId, a, earlier) {
   const open = v.attempts.has(a.index);
@@ -567,9 +509,8 @@ function attemptList(v, taskId, a, earlier) {
   return [badge, list];
 }
 
-/** @param {HTMLElement} row @param {Agent} a */
 function fillRow(row, a) {
-  const q = (/** @type {string} */ c) => row.querySelector(c);
+  const q = (c) => row.querySelector(c);
   q('.wf-name').textContent = a.label || '#' + a.index;
   q('.wf-model').textContent = a.model || '';
   const stat = [];
@@ -585,11 +526,10 @@ function fillRow(row, a) {
 }
 
 // markSelected marks the row, and its button, of the agent drilled into.
-/** @param {HTMLElement} row */
 function markSelected(row) {
   let on = false;
   for (const btn of row.querySelectorAll('[data-agent-id]')) {
-    const hit = !!view.selected && /** @type {HTMLElement} */ (btn).dataset.agentId === view.selected;
+    const hit = !!view.selected && btn.dataset.agentId === view.selected;
     on = on || hit;
     if (hit) btn.setAttribute('aria-current', 'true');
     else btn.removeAttribute('aria-current');
@@ -599,13 +539,11 @@ function markSelected(row) {
 
 // onAgentView follows the agent view from the panel's first drill-in on:
 // a row click, Esc or a session switch moves the mark.
-/** @param {Event} ev */
 function onAgentView(ev) {
-  view.selected = /** @type {CustomEvent} */ (ev).detail?.taskID || '';
+  view.selected = ev.detail?.taskID || '';
   for (const v of view.wfs.values()) for (const r of v.rows.values()) markSelected(r.el);
 }
 
-/** @param {WorkflowEntry} e */
 function resultBlock(e) {
   const box = el('div', 'wf-result');
   if (e.result) {
@@ -621,7 +559,6 @@ function resultBlock(e) {
 
 // placeChildren makes parent's children exactly kids, in order, moving
 // nodes it already has rather than rebuilding them.
-/** @param {Element} parent @param {Node[]} kids */
 function placeChildren(parent, kids) {
   kids.forEach((k, i) => {
     if (parent.childNodes[i] !== k) parent.insertBefore(k, parent.childNodes[i] || null);
@@ -631,7 +568,6 @@ function placeChildren(parent, kids) {
 
 // syncTicker runs one 1s timer, while a running workflow is on screen, to
 // move the elapsed times on.
-/** @param {WorkflowEntry[]} list */
 function syncTicker(list) {
   const want = list.some((e) => isRunning(e.workflow) && e.workflow.started_at);
   if (want && !tick.timer) {
@@ -655,7 +591,7 @@ function syncTicker(list) {
  * (workflow_state.js reconcileSummaries).
  */
 export function onSessionsRefreshed() {
-  const sessions = /** @type {SessionSnapshot[]} */ (sessionList.lastSidebarData?.sessions || []);
+  const sessions = (sessionList.lastSidebarData?.sessions || []);
   const listed = new Set(sessions.map((x) => sid(x.key, x.node)));
   for (const s of [...store.keys()]) if (!listed.has(s)) store.delete(s);
   letGoOfHidden();
@@ -669,7 +605,6 @@ export function onSessionsRefreshed() {
 /**
  * onWorkflowSessionSwitched lets go of the rows and results of the session
  * switched away from.
- * @param {string} prevSid
  */
 export function onWorkflowSessionSwitched(prevSid) {
   if (prevSid) releaseRows(store, prevSid);
@@ -680,14 +615,14 @@ export function onWorkflowSessionSwitched(prevSid) {
 // dashboard.js's registerActions table. wf-open-agent drills into a row's
 // agent (or an earlier attempt), wf-attempts unfolds a row's attempts.
 export const workflowActions = {
-  'wf-more': (/** @type {HTMLElement} */ btn) => {
+  'wf-more': (btn) => {
     const v = view.wfs.get(btn.dataset.taskId);
     if (!v) return;
     const key = Number(btn.dataset.phase);
     v.limit.set(key, (v.limit.get(key) || PHASE_PAGE) + PHASE_PAGE);
     renderWorkflowPanel();
   },
-  'wf-open-agent': (/** @type {HTMLElement} */ btn) => {
+  'wf-open-agent': (btn) => {
     const id = btn.dataset.agentId;
     const v = view.wfs.get(btn.dataset.taskId);
     const row = btn.closest('.wf-row');
@@ -698,15 +633,15 @@ export const workflowActions = {
     if (!view.following) { view.following = true; nzBus.addEventListener('agent:view', onAgentView); }
     const opts = { label, crumb: nameOf(v.entry.workflow) + (phase ? ' · ' + phase : '') };
     // A settled row's duration_ms is the agent's run time, formatted as the row shows it; an earlier attempt's is not on the row.
-    const a = v.entry.rows.get(Number(/** @type {HTMLElement} */ (row).dataset.index));
+    const a = v.entry.rows.get(Number(row.dataset.index));
     if (!btn.dataset.attempt && a?.duration_ms && WORKFLOW_AGENT_DISPLAY[a.state]?.settled) opts.duration = fmtElapsed(a.duration_ms);
     nzViews.agent?.switchTo(id, opts);
   },
-  'wf-attempts': (/** @type {HTMLElement} */ btn) => {
+  'wf-attempts': (btn) => {
     const v = view.wfs.get(btn.dataset.taskId);
     const row = btn.closest('.wf-row');
     if (!v || !row) return;
-    const index = Number(/** @type {HTMLElement} */ (row).dataset.index);
+    const index = Number(row.dataset.index);
     const open = !v.attempts.has(index);
     if (open) v.attempts.add(index);
     else v.attempts.delete(index);

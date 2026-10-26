@@ -340,7 +340,7 @@ const EARLIER_BUTTON_STATES = {
 };
 
 function updateEarlierButton(state) {
-  const btn = /** @type {HTMLButtonElement | null} */ (document.getElementById('earlier-events-btn'));
+  const btn = document.getElementById('earlier-events-btn');
   if (!btn) return;
   btn.dataset.state = state;
   [btn.textContent, btn.disabled] = EARLIER_BUTTON_STATES[state] || ['加载更早的事件', false];
@@ -523,7 +523,7 @@ export function appendEvents(events) {
 /* ===== Session-stream frames: history, event and the send / interrupt acks ===== */
 
 // renderInitialHistory paints a subscribe's opening frame over the whole pane.
-function renderInitialHistory(el, /** @type {WsFrames['history']} */ msg, events, display) {
+function renderInitialHistory(el, msg, events, display) {
   paintWholePane(el, events, display, typeof msg.has_more === 'boolean' ? msg.has_more : null);
 }
 
@@ -705,7 +705,7 @@ function appendLiveEvent(ev) {
 
 // Session-stream frame handlers; the subscription bookkeeping is sessionStream.
 const sessionFrames = {
-  onHistory(/** @type {WsFrames['history']} */ msg) {
+  onHistory(msg) {
     if (msg.key !== selection.key || (msg.node || 'local') !== selection.node) return;
     const el = document.getElementById('events-scroll');
     if (!el) return;
@@ -742,7 +742,7 @@ const sessionFrames = {
     refreshBanner();
   },
 
-  onEvent(/** @type {WsFrames['event']} */ msg) {
+  onEvent(msg) {
     if (msg.key !== selection.key || (msg.node || 'local') !== selection.node) return;
     // Cron timed_out / failed 终态后丢弃后续 ghost 事件（CLI 子进程
     // 在 deadline 命中后还会再吐 result，但 cron run 已记录为终态，
@@ -772,7 +772,7 @@ const sessionFrames = {
     appendLiveEvent(ev);
   },
 
-  onSendAck(/** @type {Omit<WsFrames['send_ack'], 'type'>} */ msg) {
+  onSendAck(msg) {
     // "reset" = /clear or /new — the send was consumed by the router to reset
     // the session, not handed to the CLI, so roll back the optimistic running
     // flip. No banner, no turn.
@@ -834,7 +834,7 @@ const sessionFrames = {
   // so a status:"error" ack (unknown node / server shutting down / remote RPC
   // failure / internal error) or "not_running" (no live process to interrupt)
   // must be reported or the operator believes the interrupt landed.
-  onInterruptAck(/** @type {WsFrames['interrupt_ack']} */ msg) {
+  onInterruptAck(msg) {
     if (!msg || msg.status === 'ok') return;
     if (msg.status === 'not_running') {
       showToast('会话未在运行，无需中断', 'warning');
@@ -861,7 +861,7 @@ const sessionFrames = {
   // (toast, drop the optimistic bubble if any, roll back running) for the
   // on-screen key, or just undo the running flip for a key we sent to and
   // then navigated away from.
-  onSendError(/** @type {WsFrames['send_error']} */ msg) {
+  onSendError(msg) {
     if (!msg || !msg.key) return;
     const node = msg.node || 'local';
     const sKey = sid(msg.key, node);
